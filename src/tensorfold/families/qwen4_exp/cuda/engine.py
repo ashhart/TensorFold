@@ -195,15 +195,21 @@ class FlashNextEngine:
                             kv_dtype=self.kv_dtype, prefill_rows=self.prefill_rows)
         started = time.perf_counter()
         locked = False
+        pinned, locks = 0, {}
         if prefetch and not ple_on_ssd:               # the n-gram tables' pages, read now rather than by requests
+            from tensorfold.cuda.ngram_pages import lock_bytes
+
             tables = {id(layer.ple.table): layer.ple.table for layer in w.layers if layer.ple is not None}
-            size = sum(t.nbytes for t in tables.values())
+            size = sum(lock_bytes(t) for t in tables.values())
             # pinned pages are no longer reclaimable: lock only what the startup budget leaves room for
             room = self.capacity_plan["budget_bytes"] - self.capacity_plan["total_bytes_estimate"]
             for table in tables.values():
                 if not tables_read:
                     table.prefetch()                  # eight readers first: mlock alone faults the pages in one by one
-                locked = room >= size and table.lock()
+                got = room >= size and table.lock()
+                locks[id(table)] = got
+                pinned += getattr(table, "pinned_bytes", lock_bytes(table) if got else 0)
+            locked = all(locks.values())
         read_s = time.perf_counter() - started
         captured = self.e.graphs.warm(self.depth + 1) if self.e is not None and self.e.graphs is not None else 0
         started = time.perf_counter()
@@ -217,6 +223,16 @@ class FlashNextEngine:
             self.vision.warm()
             torch.cuda.empty_cache()
         warm_s = time.perf_counter() - started
+        reread_s = 0.0
+        if prefetch and not ple_on_ssd and not locked:
+            started = time.perf_counter()
+            for table in tables.values():
+                if locks[id(table)]:
+                    continue
+                table.prefetch()
+                if hasattr(table, "lock_runs"):
+                    pinned += table.lock_runs(max(0, room - pinned))
+            reread_s = time.perf_counter() - started
         self.eos = tuple(w.cfg.eos)
         self.model_dir = Path(model_dir)
         self.served = 0
@@ -235,6 +251,8 @@ class FlashNextEngine:
                 f", locked in memory in {read_s:.1f}s" if locked else "")
         else:
             how = f"{'locked in memory' if locked else 'read'} in {read_s:.1f}s"
+        if reread_s:
+            how += f", read again after warm-up in {reread_s:.1f}s ({pinned / 2**30:.2f} GiB of pages locked)"
         kv = "" if self.kv_dtype == "bf16" else f"; {self.kv_dtype} KV cache (fp16 scale per 32 values)"
         print(f"[tensorfold] Flash Next on CUDA: {rule}; {where}{kv}; n-gram tables {how}; {captured} "
               f"decode graphs captured; idle prompt pieces {self.prefill_rows} rows; "

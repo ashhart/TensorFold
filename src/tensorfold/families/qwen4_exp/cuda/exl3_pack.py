@@ -152,6 +152,9 @@ class NgramTable:
         self.head_offsets = pk.get(base + "head_offsets").cpu().numpy()
         self.head_sizes = pk.get(base + "head_vocab_sizes").cpu().numpy()
         self.multipliers = pk.get(base + "layer_multipliers").cpu().numpy()
+        from tensorfold.cuda.ngram_pages import Pins
+
+        self._pins = Pins()
 
     def gather(self, ids: np.ndarray) -> np.ndarray:
         """Rows ``ids`` (global) -> int16 [n, words]."""
@@ -170,9 +173,26 @@ class NgramTable:
         return out.view(np.int16)
 
     def lock(self) -> bool:
-        from ..host_table import HostTable
+        if os.name == "nt":
+            from ..host_table import HostTable
+            from tensorfold.cuda.ngram_pages import merge, span
 
-        return HostTable.lock(self)
+            got = HostTable.lock(self)
+            if got:
+                self._pins.ranges = merge(span(int(a.ctypes.data), int(a.nbytes)) for a in self.words)
+            return got
+        return self._pins.all(self.words)
+
+    RUN_BYTES = 1 << 30
+
+    def lock_runs(self, budget: int) -> int:
+        """Pin whole contiguous row runs, charging only new OS pages and never exceeding the remaining budget."""
+
+        return self._pins.runs(self.words, max(0, int(budget)), self.RUN_BYTES)
+
+    @property
+    def pinned_bytes(self) -> int:
+        return self._pins.nbytes
 
     def prefetch(self, workers: int = 8) -> float:
         from ..host_table import HostTable
