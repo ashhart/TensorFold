@@ -5,10 +5,11 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-import torch
+torch = pytest.importorskip("torch")
+pytest.importorskip("triton")
 
-from tensorfold.families.qwen3_5.cuda.weights import QLinear
-from tensorfold.families.qwen3_5_moe.cuda import mtp, weights
+from tensorfold.families.qwen3_5.cuda.weights import QLinear  # noqa: E402
+from tensorfold.families.qwen3_5_moe.cuda import mtp, weights  # noqa: E402
 
 
 def _affine(n: int, k: int, bits: int, gs: int = 64) -> QLinear:
