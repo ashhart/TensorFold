@@ -29,6 +29,21 @@ def vision_workspace() -> int:
     return int(value) * 2**20
 
 
+class StopVote:
+    """A reply's callback on both ranks: True once rank 0's caller asked to stop, after the same round on both.
+
+    Only rank 0 sees the client, so without the vote a two-rank reply whose client left (or whose stop string matched)
+    went on to max_tokens on both ranks. One int crosses the link a round. GLM's stop vote in #194 (pulseandthread)."""
+
+    def __init__(self, on_tokens: Callable[[list[int]], Any], gather: Callable[[list[int]], list[list[int]]]) -> None:
+        self.on_tokens, self.gather, self.asked = on_tokens, gather, False
+
+    def __call__(self, tokens: list[int]) -> bool:
+        self.asked = bool(self.on_tokens(tokens)) or self.asked       # rank 1's callback never asks
+        return any(votes[0] for votes in self.gather([int(self.asked)]))
+
+
+
 class FlashNextEngine:
     """``eos``, ``generate`` (rank 0 or one GPU) and ``follow`` (rank 1), as ``tensorfold.cuda.server`` expects."""
 
@@ -86,6 +101,7 @@ class FlashNextEngine:
             self.comm = NCCL(rank, 2, master, port)
             self.comm.barrier()
         gather = (lambda values: gather_ints(torch, self.comm.all_gather, values)) if tp == 2 else None
+        self._gather = gather
         each, mtp, bits = self.depth + 1, self.depth > 0, BITS_OF[self.kv_dtype]
         # one admission for one stream or many (every slot, the shared rows and kept snapshots), before any load
         rows0 = chunk or PREFILL_ROWS
@@ -412,8 +428,7 @@ class FlashNextEngine:
             prompt, max_tokens, sampling, draft, _, _, stop_eos, points = self._share(
                 prompt, max_tokens, sampling, draft, len(hit[0]) if hit else 0, constraint, stop_eos)
             self.served += 1
-            emit = on_tokens
-            on_tokens = lambda new: (emit(new), False)[1]       # noqa: E731  both ranks decode to the end
+            on_tokens = StopVote(on_tokens, self._gather)       # both ranks stop where rank 0's caller asks
         if not draft:
             return self._serial(prompt, max_tokens, sampling, on_tokens, constraint, stop_eos, probabilities=probabilities)
         return self._decode(prompt, max_tokens, sampling, on_tokens, hit, constraint, stop_eos,
@@ -491,9 +506,10 @@ class FlashNextEngine:
                 if hit is None:
                     raise RuntimeError(f"rank 1 has no kept state for the {cached} tokens rank 0 resumes from")
             try:
+                vote = StopVote(lambda new: None, self._gather)  # rank 1 never asks; it stops where rank 0 does
                 if draft:
-                    self._decode(prompt, max_tokens, sampling, None, hit, constraint, stop_eos, points=points)
+                    self._decode(prompt, max_tokens, sampling, vote, hit, constraint, stop_eos, points=points)
                 else:
-                    self._serial(prompt, max_tokens, sampling, None, constraint, stop_eos)
+                    self._serial(prompt, max_tokens, sampling, vote, constraint, stop_eos)
             except ValueError as exc:                       # rank 0 raised at the same point on the same input
                 print(f"[tensorfold] request {self.served} failed on both ranks: {exc}", flush=True)
