@@ -477,6 +477,8 @@ class GlmEngine:
                      sha256=hashlib.sha256(json.dumps(res.tokens).encode()).hexdigest()[:16])
         if res.arms:
             stats.update(drafters=res.arms, keeps=res.keeps)
+        if policy is not None:                   # the drafts' counts, which /health, /metrics and the reply report
+            stats.update(drafted=res.drafted, accepted=res.accepted)
         if res.stages:
             stats["stages_ms"] = {k: round(v * 1e3, 1) for k, v in res.stages.items()}
         return stats
