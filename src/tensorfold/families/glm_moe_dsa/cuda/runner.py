@@ -112,13 +112,15 @@ class GraphSet:
 
 
 class Runner:
-    def __init__(self, w: fused.Weights, capacity: int, k: int, graphs: bool = True) -> None:
+    def __init__(self, w: fused.Weights, capacity: int, k: int, graphs: bool = True, slots: int = 1) -> None:
+        """``slots`` > 1: caches for that many concurrent streams (multi.GlmMultiDecoder drives them)."""
         self.w, self.k = w, k
         self.capacity = capacity
         c = w.cfg
         self.topk = c.index_topk
         cols = fused.bucket(capacity, self.topk) or 0
-        self.st = fused.State(w, capacity)
+        self.cols = max(cols, 1)
+        self.st = fused.State(w, capacity, slots)
         self.drafter = None                              # DFlash2 (engine attaches; set_drafter)
         self.cap = None                                  # DFlash2 training capture (rank 0, TF_GLM53_CAPTURE_DIR)
         if os.environ.get("TF_GLM53_CAPTURE_DIR") and w.rank == 0 and w.tap_slot:
@@ -147,18 +149,26 @@ class Runner:
         """Keys the indexer scores for a window ending at position end - 1 (graphs: a bucket; eager: exact)."""
         return fused.bucket(end, self.topk)
 
-    @torch.no_grad()
-    def prewarm(self) -> None:
-        """Capture every decode graph up front (each index-key bucket up to the capacity, windows of 1..k+1 rows, the
-        default MTP inputs), so no request waits for a capture. Caches get scratch values; every request starts at 0."""
-        t0 = time.perf_counter()
+    def buckets(self) -> list[int | None]:
+        """The index-key buckets a decode window can take up to the capacity (None: below index_topk)."""
         buckets = [None]
         t = 2 * self.topk
         while self.topk < self.capacity and t <= max(fused.bucket(self.capacity, self.topk) or 0, 2 * self.topk):
             buckets.append(t)
             t *= 2
+        return buckets
+
+    @torch.no_grad()
+    def prewarm(self, capture: bool = True) -> None:
+        """Capture every decode graph up front (each index-key bucket up to the capacity, windows of 1..k+1 rows, the
+        default MTP inputs), so no request waits for a capture. Caches get scratch values; every request starts at 0.
+        ``capture`` False: only compile the prompt path (concurrent engines capture their own windows)."""
+        t0 = time.perf_counter()
+        buckets = self.buckets()
         n = min(self.capacity - 1, self.prompt_rows + self.topk + 301)   # a full chunk, a remainder, rows past topk
         self.prefill([1000 + (i * 7919) % 150000 for i in range(n)])  # compiles the prompt path's kernels
+        if not capture:
+            return
         cn, full = self.chain_normed, self.draft_full
         self.st.pos.fill_(0)
         for T in buckets:
@@ -220,9 +230,17 @@ class Runner:
             pass
         return out
 
+    def chunks(self, L0: int) -> list[tuple[int, int]]:
+        """A prompt's chunks (a, e): equal ones - a short remainder would read every weight again for a few rows
+        (4102 = 2 x 2051, not 4096 + 6). Concurrent fills take the same chunks, so a prompt's bits never depend on
+        what else runs."""
+        n = -(-L0 // self.prompt_rows)
+        step = -(-L0 // n)
+        return [(a, min(a + step, L0)) for a in range(0, L0, step)]
+
     def _prefill(self, prompt: list[int]) -> torch.Tensor:
         """Every prompt row through the target (and the MTP layer); returns the last row's logits [1, vocab]."""
-        w, st, b = self.w, self.st, self.pb
+        w = self.w
         L0 = len(prompt)
         toks = torch.tensor(prompt, dtype=torch.long, device=w.device)
         logits = None
@@ -230,33 +248,39 @@ class Runner:
             self.drafter.reset()
         if self.cap is not None:
             self.cap.reset()
-        n = -(-L0 // self.prompt_rows)                   # equal chunks: a short remainder would read every
-        step = -(-L0 // n)                               # weight again for a few rows (4102 = 2 x 2051, not 4096 + 6)
-        for a in range(0, L0, step):
-            e = min(a + step, L0)
-            R = e - a
-            T = e if e > self.topk else None
-            b.ids[:R].copy_(toks[a:e])
-            st.pos.fill_(a)
-            if self.overlap and R >= 2 * fused.MAX_ROWS + 2:
-                self.pos1.fill_(a + R // 2)
-                fused.compute_prompt(w, st, b, self.pb1, R, T, self.pos1, self.comm_stream,
-                                     logits="last" if e == L0 else "none")
-            else:
-                fused.compute(w, st, b, R, T, logits="last" if e == L0 else "none")
-            if self.drafter is not None:                 # the drafter's context: this chunk's committed taps
-                self.drafter.add_taps(b.taps[:R])
-            if self.cap is not None:
-                self.cap.add_taps(b.taps[:R])
-            if e == L0:
-                logits = b.logits[:1].clone()
-            if self.k:
-                self._mtp_prompt(b, toks, a, e, T)
+        for a, e in self.chunks(L0):
+            lg = self.prefill_chunk(self.st, toks, a, e, L0, taps=True)
+            if lg is not None:
+                logits = lg
         return logits
 
-    def _mtp_prompt(self, b: fused.Buffers, toks: torch.Tensor, a: int, e: int, T: int | None) -> None:
+    def prefill_chunk(self, st, toks: torch.Tensor, a: int, e: int, L0: int, taps: bool = False):
+        """Prompt rows a..e-1 into ``st`` (the Runner's State, or a stream's slot view), then the MTP layer's rows;
+        the last chunk (e == L0) returns its logits [1, vocab], leaving the MTP carry in ``self.carry``."""
+        w, b = self.w, self.pb
+        R = e - a
+        T = e if e > self.topk else None
+        b.ids[:R].copy_(toks[a:e])
+        st.pos.fill_(a)
+        if self.overlap and R >= 2 * fused.MAX_ROWS + 2:
+            self.pos1.fill_(a + R // 2)
+            fused.compute_prompt(w, st, b, self.pb1, R, T, self.pos1, self.comm_stream,
+                                 logits="last" if e == L0 else "none")
+        else:
+            fused.compute(w, st, b, R, T, logits="last" if e == L0 else "none")
+        if taps and self.drafter is not None:            # the drafter's context: this chunk's committed taps
+            self.drafter.add_taps(b.taps[:R])
+        if taps and self.cap is not None:
+            self.cap.add_taps(b.taps[:R])
+        logits = b.logits[:1].clone() if e == L0 else None
+        if self.k:
+            self._mtp_prompt(b, toks, a, e, T, st)
+        return logits
+
+    def _mtp_prompt(self, b: fused.Buffers, toks: torch.Tensor, a: int, e: int, T: int | None, st=None) -> None:
         """MTP rows for positions a - 1 .. e - 2: (hidden q, token q + 1); row e - 1 waits for token e (carry)."""
-        w, st = self.w, self.st
+        w = self.w
+        st = self.st if st is None else st
         R = e - a
         h = torch.empty((R, w.cfg.hidden_size), dtype=torch.bfloat16, device=w.device)
         fused.target_hidden_for_mtp(w, b, slice(0, R), h, self.hid_normed)
