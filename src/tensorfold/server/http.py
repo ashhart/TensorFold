@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from tensorfold.engine import grammar
-from tensorfold.server import responses
+from tensorfold.server import anthropic, responses
 from tensorfold.server.tools import (active_tool_specs, parse_tool_calls_from_content, stream_tool_call_deltas,
                                      tool_choice_requires_call)
 from tensorfold.server.decisions import DecisionError
@@ -188,6 +188,8 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 return self._post_decisions(app)
             if responses.route(route) == "":         # a Response: this handler's chat completion, translated
                 return responses.post(self, app)
+            if anthropic.route(route):               # an Anthropic Messages request: the same translation
+                return anthropic.post(self, app)
 
             is_chat_completion = route.endswith("/chat/completions")
             is_text_completion = route.endswith("/completions") and not is_chat_completion

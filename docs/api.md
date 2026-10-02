@@ -11,6 +11,7 @@ The base URL is `http://127.0.0.1:8080/v1` with the default server settings.
 | `POST /v1/completions` | Raw text without a chat template; MLX also accepts token IDs |
 | `POST /v1/responses` | OpenAI's Responses API, run as the equivalent chat completion; streamed or non-streamed |
 | `GET /v1/responses/{id}`, `DELETE /v1/responses/{id}` | A stored response, or remove it |
+| `POST /v1/messages` | Anthropic's Messages API, run as the equivalent chat completion; streamed or non-streamed |
 | `POST /v1/decisions` | Choice, score, and yes/no probabilities from the next-token logits; no text is generated |
 
 On MLX, a completions body containing a nonempty `messages` list uses chat handling. CUDA completions
@@ -298,3 +299,29 @@ HTTP 400 refuses what this server does not run: built-in tools (web search, file
 others), `background`, `include` (encrypted reasoning among them), `conversation`, `prompt` templates,
 `truncation: "auto"`, `top_logprobs`, `input_file` parts and file IDs, `item_reference` items, encrypted reasoning
 items, and a `previous_response_id` that is not stored.
+
+## The Messages API
+
+`POST /v1/messages` (also `/messages`) takes Anthropic's Messages request and runs it as the equivalent chat
+completion, through the same handler and engine path as `POST /v1/responses`: the reply has that chat
+completion's prompt and tokens, drafts, and equals its `"draft": false` run.
+
+- `messages` takes `user` and `assistant` turns with `text` blocks, `image` blocks (base64 sources become
+  data URLs, with `--vision`) and `thinking` blocks replayed as the assistant message's `reasoning_content`.
+  `system` (a string or blocks) becomes the system message.
+- `tool_use` blocks join their assistant message as chat tool calls; a `tool_result` turn becomes its chat
+  tool message followed by a user turn (text blocks beside the results, else a placeholder), because the
+  chat templates need a user query after tool results.
+- `tools` takes custom function tools (`name`, `description`, `input_schema`); `tool_choice` takes `auto`,
+  `any` (required), `none` or a named tool. `max_tokens` is required, as in Anthropic's API.
+- `thinking` enabled maps to `thinking_budget` with thinking on; disabled turns thinking off. `temperature`,
+  `top_p`, `top_k` and `stop_sequences` sample as in chat.
+
+`content` holds `thinking` blocks first, then a `text` block, then `tool_use` blocks with parsed JSON `input`.
+`stop_reason` is `end_turn`, `tool_use` or `max_tokens`; `usage` has `input_tokens` and `output_tokens`.
+A stream sends `message_start`, each block's `content_block_start`, its deltas (`text_delta`,
+`thinking_delta` or `input_json_delta`) and `content_block_stop`, then `message_delta` and `message_stop`.
+
+HTTP 400 refuses what this server does not run: `mcp_servers`, `context_management`, server tools
+(`web_search_*` and the other built-ins), `thinking.type` values other than enabled/disabled, and a
+`thinking.budget_tokens` under 1024. Errors come in Anthropic's shape: `{"type": "error", "error": {...}}`.
