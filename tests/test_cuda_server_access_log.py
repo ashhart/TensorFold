@@ -46,10 +46,11 @@ def test_a_finished_reply_prints_the_mac_server_s_done_line(tmp_path, capfd):
     app = app_for(tmp_path, StatsEngine())
     with serving(app) as port:
         assert post(port, {"messages": MESSAGES, "max_tokens": 4})[0] == 200
-    done = [line for line in capfd.readouterr().out.splitlines() if line.startswith("[tensorfold] done req-")]
+    done = [line for line in capfd.readouterr().out.splitlines() if line.startswith("[tensorfold] done chatcmpl-")]
     assert len(done) == 1, done
-    assert re.search(r" prompt=\d+ cached=2 thinking=False tokens=4 sha=[0-9a-f]{12} finish=length tok/s=[\d.]+ "
-                     r"ttft=[\d.]+s prefill=0\.25s rounds=4 accepted=4/12$", done[0]), done[0]
+    assert re.search(r" prompt=\d+ cached=2 thinking=False effort=none tokens=4 sha=[0-9a-f]{12} finish=length "
+                     r"tok/s=[\d.]+ queued=[\d.]+s ttft=[\d.]+s prefill=0\.25s rounds=4 accepted=4/12$",
+                     done[0]), done[0]
 
 
 def test_a_poll_that_does_not_answer_200_still_prints(tmp_path, capfd):

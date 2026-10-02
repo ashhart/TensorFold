@@ -41,6 +41,7 @@ def _engine(monkeypatch, cells, logits):
     monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=SimpleNamespace(empty_cache=lambda: None)))
     engine = GlmEngine.__new__(GlmEngine)
     engine.cache, engine.live, engine.cache_entries = [], [], 8
+    engine.kept_counts = dict.fromkeys(("hits", "misses", "evictions"), 0)
     engine.e = engine
     engine.comm = None
     engine.rank = 0

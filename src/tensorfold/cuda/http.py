@@ -38,6 +38,12 @@ def _log_error(exc: BaseException) -> None:
     traceback.print_exception(exc)
 
 
+def _log_refused(rid: str, exc: BaseException) -> None:
+    """Why a request was refused; the client gets the message, and until now the log only had the status."""
+
+    print(f"[tensorfold] refused {rid}: {type(exc).__name__}: {_error_message(exc)[:300]}", flush=True)
+
+
 POLLED = ("/metrics", "/v1/metrics", "/health", "/v1/health")
 
 
@@ -131,15 +137,17 @@ def make_handler(app: App):
                     return self._json(400, {"error": {"message": _error_message(exc)}})
                 return self._json(200, reply)
             field = "messages" if chat else "prompt"            # the field an error's code names (OpenAI's param)
+            rid = f"chatcmpl-{uuid.uuid4().hex[:24]}" if chat else f"cmpl-{uuid.uuid4().hex[:24]}"
             try:
                 prepared = app.prepare(body, chat)
             except RequestError as exc:
+                _log_refused(rid, exc)
                 return self._json(503 if isinstance(exc, CapacityError) else 400,
                                   {"error": error_body(exc, field)})
             except Exception as exc:        # any other failure to read the request is refused too, as on MLX
                 _log_error(exc)
                 return self._json(400, {"error": {"message": _error_message(exc)}})
-            rid = f"chatcmpl-{uuid.uuid4().hex[:24]}" if chat else f"cmpl-{uuid.uuid4().hex[:24]}"
+            prepared.request_id = rid       # the server's lines for this request carry the id the client gets
             created = int(time.time())
             model = app.reply_model(body)
             stream = bool(body.get("stream"))
@@ -178,6 +186,7 @@ def make_handler(app: App):
                     self.close_connection = True
                     return
                 except RequestError as exc:
+                    _log_refused(rid, exc)
                     return self._stream_error(error_body(exc, field))
                 except Exception as exc:
                     _log_error(exc)
@@ -215,6 +224,7 @@ def make_handler(app: App):
                 self.close_connection = True
                 return
             except RequestError as exc:
+                _log_refused(rid, exc)
                 return self._json(503 if isinstance(exc, CapacityError) else 400,
                                   {"error": error_body(exc, field)})
             except Exception as exc:

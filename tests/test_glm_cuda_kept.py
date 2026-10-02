@@ -1,5 +1,5 @@
 """GLM's kept conversations on CUDA, without a GPU: saved rows never exceed the budget at any moment, a dropped
-snapshot frees its rows at once, and the resume point is never dropped to make room."""
+snapshot frees its rows at once, the resume point is never dropped to make room, and rank 0 says why it dropped one."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tensorfold.families.glm5_next.cuda.engine import GlmEngine
+from tensorfold.families.glm5_next.cuda.engine import GlmEngine, encode_policy
 
 pytestmark = pytest.mark.torch
 
@@ -16,6 +16,7 @@ pytestmark = pytest.mark.torch
 class Snap:
     def __init__(self, ids, need, states=5):
         self.ids, self.need, self.states, self.rows, self.nbytes = list(ids), need, states, None, 0
+        self.mtp_len = 0
 
 
 @pytest.fixture
@@ -32,7 +33,8 @@ def kept(monkeypatch):
     monkeypatch.setitem(sys.modules, "tensorfold.families.glm5_next.cuda.decode", decode)
     engine = GlmEngine.__new__(GlmEngine)
     engine.cache, engine.live, engine.cache_bytes, engine.cache_entries = [], [], 100, 8
-    engine.e = engine
+    engine.e, engine.rank, engine.drafter = engine, 0, None
+    engine.kept_counts = dict.fromkeys(("hits", "misses", "evictions"), 0)
 
     def snap(ids, need, states=5):
         s = Snap(ids, need, states)
@@ -73,3 +75,48 @@ def test_remember_keeps_the_newest_and_frees_what_it_drops(kept):
     again = snap(range(20, 30), 0)
     engine._remember(again)                           # the same prompt again replaces its entry
     assert engine.cache == [again] and new.rows is None
+
+
+def drops(capfd) -> list[str]:
+    return [line for line in capfd.readouterr().out.splitlines() if line.startswith("[tensorfold] dropped ")]
+
+
+def test_a_prompt_dropped_for_room_says_which_limit(kept, capfd):
+    engine, snap, _ = kept
+    engine.cache_entries = 1
+    engine.cache = [snap(range(10), 0)]
+    engine._remember(snap(range(20, 32), 0))
+    assert drops(capfd) == ["[tensorfold] dropped a kept prompt of 10 tokens (TF_GLM_CACHE_ENTRIES=1): "
+                            "a turn reusing it re-prefills it"]
+    engine.cache_entries = 8
+    engine._remember(snap(range(40, 45), 0, states=120))
+    assert drops(capfd) == ["[tensorfold] dropped a kept prompt of 12 tokens (the 0.0 GiB TF_GLM_CACHE_GIB budget): "
+                            "a turn reusing it re-prefills it"]
+    again = snap(range(40, 45), 0)
+    engine._remember(again)                           # replacing the same prompt's entry is not a drop
+    assert drops(capfd) == [] and engine.kept_counts["evictions"] == 2
+
+
+def test_a_prompt_whose_rows_were_overwritten_says_so(kept, capfd):
+    engine, snap, _ = kept
+    engine.cache, engine.live = [snap(range(50), 60)], list(range(100, 150))
+    engine._take_over([])
+    assert drops(capfd) == ["[tensorfold] dropped a kept prompt of 50 tokens (its rows were overwritten): "
+                            "a turn reusing it re-prefills it"]
+
+
+def test_rank_one_drops_alike_but_prints_nothing(kept, capfd):
+    engine, snap, _ = kept
+    engine.rank, engine.cache_entries = 1, 1
+    engine.cache = [snap(range(10), 0)]
+    engine._remember(snap(range(20, 32), 0))
+    assert len(engine.cache) == 1 and drops(capfd) == []
+
+
+def test_lookups_and_drops_are_counted_for_the_done_line(kept):
+    engine, snap, _ = kept
+    hit = snap(range(10), 0)
+    engine.cache, code = [hit], encode_policy("3")
+    assert engine._resume(list(range(12)), code) is hit
+    assert engine._resume(list(range(50, 60)), code) is None
+    assert engine._kept() == {"entries": 1, "bytes": 5, "hits": 1, "misses": 1, "evictions": 0}

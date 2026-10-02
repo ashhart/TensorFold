@@ -208,6 +208,7 @@ class GlmEngine:
         self.cache: list = []
         self.live: list[int] = []
         self.cache_entries = int(os.environ.get("TF_GLM_CACHE_ENTRIES", "8"))
+        self.kept_counts = dict.fromkeys(("hits", "misses", "evictions"), 0)   # for the done line's checkpoints=
 
     def _calibrate(self) -> dict:
         """Per-piece ms for ``drafter_choice.DrafterChoice``: fastest of interleaved passes, equal on both ranks."""
@@ -359,12 +360,26 @@ class GlmEngine:
             if fits and len(snap.ids) < len(prompt) and prompt[:len(snap.ids)] == snap.ids and (
                     best is None or len(snap.ids) > len(best.ids)):
                 best = snap
+        self.kept_counts["hits" if best is not None else "misses"] += 1
         return best
 
-    def _drop(self, snap) -> None:
+    def _drop(self, snap, why: str | None = None) -> None:
         """Forget a kept snapshot and free its saved rows now, even while a caller still holds the object."""
         snap.rows, snap.nbytes, snap.drafter_rows = None, 0, None
         self.cache.remove(snap)
+        if why is not None:                         # an eviction, not the same prompt kept again
+            self.kept_counts["evictions"] += 1
+            if self.rank == 0:                      # rank 1 drops alike; one line is enough
+                print(f"[tensorfold] dropped a kept prompt of {len(snap.ids)} tokens ({why}): a turn reusing it "
+                      "re-prefills it", flush=True)
+
+    def _over_budget(self) -> str:
+        return f"the {self.cache_bytes / 2 ** 30:.1f} GiB TF_GLM_CACHE_GIB budget"
+
+    def _kept(self) -> dict[str, int]:
+        """The kept prompts now, for the done line's checkpoints= (the Mac server's names)."""
+
+        return {"entries": len(self.cache), "bytes": self._held_bytes(), **self.kept_counts}
 
     def _remember(self, snap) -> None:
         for c in [c for c in self.cache if c.ids == snap.ids and c is not snap]:
@@ -372,7 +387,8 @@ class GlmEngine:
         self.cache[:] = [c for c in self.cache if c is not snap] + [snap]   # a resumed prompt kept again moves last
         dropped = False
         while len(self.cache) > 1 and (len(self.cache) > self.cache_entries or self._held_bytes() > self.cache_bytes):
-            self._drop(self.cache[0])
+            full = len(self.cache) > self.cache_entries
+            self._drop(self.cache[0], f"TF_GLM_CACHE_ENTRIES={self.cache_entries}" if full else self._over_budget())
             dropped = True
         if dropped:
             import torch
@@ -394,17 +410,17 @@ class GlmEngine:
             if snap not in self.cache or snap.rows is not None or resumes(snap):
                 continue
             if live[:n] != snap.ids:                  # its rows are already gone: nothing to resume from
-                self._drop(snap)
+                self._drop(snap, "its rows were overwritten")
                 continue
             need = row_bytes(self.e, snap)
             while self._held_bytes() + need > self.cache_bytes:
                 old = next((c for c in self.cache if c is not snap and not resumes(c)), None)
                 if old is None:
                     break
-                self._drop(old)
+                self._drop(old, self._over_budget())
                 dropped = True
             if self._held_bytes() + need > self.cache_bytes:
-                self._drop(snap)
+                self._drop(snap, self._over_budget())
                 dropped = True
                 continue
             save_rows(self.e, snap)
@@ -511,7 +527,7 @@ class GlmEngine:
         if constraint is not None:                     # the request's grammar: rank 1 compiles the same
             self._share(pack(constraint))
         stats = self._run(list(prompt), max_tokens, sampling, stop_eos, on_tokens, code, hit, draft, constraint)
-        stats.update(policy=spec, drafts=draft)
+        stats.update(policy=spec, drafts=draft, kept=self._kept())
         return stats
 
     def score_labels(self, prompt_ids: list[int], label_ids: list[int]) -> tuple[list[float], float]:

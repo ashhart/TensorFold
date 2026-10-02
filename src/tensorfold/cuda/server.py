@@ -52,6 +52,8 @@ class PreparedRequest:
     vision: Any = None
     grammar: Any = None     # (spec, compiled grammar) of the request's response_format, or None
     think_budget: int = 0   # reply tokens before the server closes a think block the reply leaves open (0: no limit)
+    effort: str = "none"    # the reasoning effort the template hears ("none": not thinking, or none named)
+    request_id: str = ""    # the reply's id, set by the HTTP handler, so the server's lines match what the client got
 
 
 def _native_context(model_dir: Path) -> int:
@@ -244,6 +246,7 @@ class App:
         effort = heard_effort(fields.get("reasoning_effort"), getattr(self, "reasoning_effort", None), levels)
         if thinking and effort:
             kwargs["reasoning_effort"] = effort
+        heard = effort if thinking and effort else "none"
         budget = parse_numbers({"thinking_budget": body.get("thinking_budget")})["thinking_budget"]
         budget = int(budget or getattr(self, "thinking_budget", 0)) if chat and thinking else 0     # 0: the default
         spec = grammar.request_spec(body)
@@ -274,7 +277,7 @@ class App:
                                           limits=getattr(self, "image_limits", DEFAULT_LIMITS))
                 return PreparedRequest(rendered.tokens, max_tokens, tools, thinking,
                                        self.sampling_for(body, rendered.tokens), ignore_eos=ignore_eos, stop=stop,
-                                       vision=rendered.vision, grammar=compiled, think_budget=budget)
+                                       vision=rendered.vision, grammar=compiled, think_budget=budget, effort=heard)
             text = render(body["messages"])
             prompt = self.tok.encode(text, add_special_tokens=False).ids
         elif isinstance(body.get("prompt"), list):       # token ids (vLLM's and OpenAI's form): served as given
@@ -288,7 +291,7 @@ class App:
             raise RequestError("rendered prompt is empty")
         # sampling is resolved here, so a malformed control is refused before a stream opens
         return PreparedRequest(prompt, max_tokens, tools, thinking, self.sampling_for(body, prompt),
-                               ignore_eos=ignore_eos, stop=stop, grammar=compiled, think_budget=budget)
+                               ignore_eos=ignore_eos, stop=stop, grammar=compiled, think_budget=budget, effort=heard)
 
     def token_ids(self, value: Any, field: str = "prompt") -> list[int]:
         """Token ids as a request gives them (a list, or a list holding one list); RequestError outside the
@@ -396,6 +399,7 @@ class App:
 
         arrived = time.perf_counter()
         prepared = prepared if prepared is not None else self.prepare(body, chat)
+        rid = prepared.request_id or f"req-{uuid.uuid4().hex[:12]}"
         prompt, max_tokens = prepared.prompt, prepared.max_tokens
         tools, thinking = prepared.tools, prepared.thinking
         policy = ToolCallPolicy(body)
@@ -519,24 +523,31 @@ class App:
             return stats
 
         # an engine that decodes concurrent requests together (``concurrent``) takes them as they come
-        if turns is not None:
-            turns.take(background, cancelled)
         try:
-            if cancelled is not None and cancelled():                # the client left while this request waited
-                raise RequestCancelled("the client left before the request started")
-            with health.of(self).running(len(prompt), out, arrived) as request:  # /health reads ``out``; rounds never call in
-                serving[0] = request
-                try:
-                    stats = request.stats = generate_gated(generate, prompt, max_tokens, gates, on_tokens)
-                finally:
-                    serving[0] = None
-        finally:
             if turns is not None:
-                turns.give()
-        if failed:
-            raise failed[0]
-        if stopped["client"]:                                        # as the Mac server: nothing more is written
-            raise RequestCancelled("the client left during the reply")
+                turns.take(background, cancelled)
+            queued = time.perf_counter() - arrived if turns is not None else None    # waiting for the engine's turn
+            try:
+                if cancelled is not None and cancelled():                # the client left while this request waited
+                    raise RequestCancelled("the client left before the request started")
+                with health.of(self).running(len(prompt), out, arrived) as request:  # /health reads ``out``; rounds never call in
+                    serving[0] = request
+                    try:
+                        stats = request.stats = generate_gated(generate, prompt, max_tokens, gates, on_tokens)
+                    finally:
+                        serving[0] = None
+            finally:
+                if turns is not None:
+                    turns.give()
+            if failed:
+                raise failed[0]
+            if stopped["client"]:                                        # as the Mac server: nothing more is written
+                raise RequestCancelled("the client left during the reply")
+        except RequestError:
+            raise                                   # a refusal: the handler prints why
+        except Exception as exc:
+            print_ended(rid, exc, len(prompt), out, arrived)
+            raise
         stats = {**(stats or {}), "token_sha": token_sha(out)}
         reasoning, answer = visible(True)
         final: dict[str, Any] = {}
@@ -554,7 +565,7 @@ class App:
         warning = unanswered(finish, chat and thinking, content, calls)
         if warning:
             print(warning, flush=True)
-        print_done(len(prompt), (cached or [0])[0], thinking, out, finish, stats, request)
+        print_done(rid, len(prompt), (cached or [0])[0], thinking, prepared.effort, out, finish, stats, request, queued)
         if body.get("return_token_ids"):              # the reply's ids in the "tensorfold" block, for exactness checks
             stats = {**(stats or {}), "token_ids": [int(t) for t in out]}
         logprobs = (self._probability_decoder.format(probabilities.emitted(out), ends)
@@ -621,19 +632,31 @@ def token_sha(tokens: list[int]) -> str:
     return hashlib.sha256(",".join(str(int(t)) for t in tokens).encode()).hexdigest()[:12]
 
 
-def print_done(prompt: int, cached: int, thinking: bool, out: list[int], finish: str, stats: dict[str, Any],
-               request: Any) -> None:
+def print_done(rid: str, prompt: int, cached: int, thinking: bool, effort: str, out: list[int], finish: str,
+               stats: dict[str, Any], request: Any, queued: float | None) -> None:
     """The Mac server's ``done`` line for a finished reply; tok/s runs from the first token to the last."""
 
     ended = time.perf_counter()
     first, started = getattr(request, "first", None), getattr(request, "started", ended)
     decode = ended - first if first is not None else 0.0
     rate = (len(out) - 1) / decode if decode > 0 and len(out) > 1 else 0.0
-    print(f"[tensorfold] done req-{uuid.uuid4().hex[:12]} prompt={prompt} cached={cached} thinking={thinking} "
+    kept = stats.get("kept")                  # an engine's kept prompts, in the Mac server's checkpoints= terms
+    print(f"[tensorfold] done {rid} prompt={prompt} cached={cached} thinking={thinking} effort={effort} "
           f"tokens={len(out)} sha={token_sha(out)} finish={finish} tok/s={rate:.1f} "
-          f"ttft={(first - started) if first is not None else -1:.2f}s prefill={stats.get('prefill_s', -1):.2f}s "
-          f"rounds={stats.get('rounds', 0)} accepted={stats.get('accepted', 0)}/{stats.get('drafted', 0)}",
+          + (f"queued={queued:.2f}s " if queued is not None else "")
+          + f"ttft={(first - started) if first is not None else -1:.2f}s prefill={stats.get('prefill_s', -1):.2f}s "
+          f"rounds={stats.get('rounds', 0)} accepted={stats.get('accepted', 0)}/{stats.get('drafted', 0)}"
+          + (f" checkpoints={kept['entries']} ({kept['bytes'] / 1024**3:.2f} GiB, hits={kept['hits']} "
+             f"misses={kept['misses']} evictions={kept['evictions']})" if kept else ""),
           flush=True)
+
+
+def print_ended(rid: str, exc: BaseException, prompt: int, out: list[int], arrived: float) -> None:
+    """A request that ends without a reply: its client left, or it failed (the handler prints the error)."""
+
+    reason = "client-left" if isinstance(exc, RequestCancelled) else f"error ({type(exc).__name__})"
+    print(f"[tensorfold] ended {rid} reason={reason} prompt={prompt} tokens={len(out)} "
+          f"after={time.perf_counter() - arrived:.2f}s", flush=True)
 
 
 from tensorfold.cuda.http import Server, make_handler, serve, usage_of  # noqa: E402,F401  (the HTTP side)
