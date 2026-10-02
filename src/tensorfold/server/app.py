@@ -23,6 +23,7 @@ from tensorfold.server.http import served_model_ids
 from tensorfold.server import metrics
 from tensorfold.server.scheduler import ChatJob, Scheduler
 from tensorfold.server.stopping import StopPolicy
+from tensorfold.server.loop_guard import LoopGuard
 from tensorfold.vision.images import DEFAULT_LIMITS, ImageLimits
 from tensorfold.server.text import (
     IncrementalText,
@@ -95,6 +96,7 @@ class ChatApp(RequestOptions, PromptBlocks, DecisionRequests):
         decode_share: float = 0.25,
         grow_checkpoints: bool = False,
         vision_max_images: int | None = None,
+        loop_guard: bool = False,
     ) -> None:
         # three candidate entries per conversation (history boundary, stable prefix, reply end)
         if checkpoint_slots is None:
@@ -115,6 +117,8 @@ class ChatApp(RequestOptions, PromptBlocks, DecisionRequests):
         # the default thinking budget (0: none; a request's "thinking_budget" overrides it)
         self.thinking_budget = int(thinking_budget)
         self._think_tokens: tuple[tuple[int, ...], int] | None = None
+        # --loop-guard: per-request cycle detector over committed reply tokens (None: off)
+        self.loop_guard = LoopGuard(tokenizer, self.tokenizer_lock) if loop_guard else None
         self.think_markers = think_markers(tokenizer)
         # ``exact_sampling.Sampling`` fields used when a request names none (None: greedy)
         self.default_sampling = dict(default_sampling) if default_sampling else None
@@ -333,6 +337,7 @@ class ChatApp(RequestOptions, PromptBlocks, DecisionRequests):
                 background=background,
                 drafts=drafts,
                 ignore_eos=stops.ignore_eos, stop_check=stops if stops.strings else None,
+                loop_guard=self.loop_guard,
                 cancellation=cancellation, call_gate=self._call_gate(fields, prompt_ids, tools),
                 constraint=grammar.request_constraint(self, fields, think_end if think_end >= 0 else None),
                 vision=rendered.vision,
@@ -341,6 +346,11 @@ class ChatApp(RequestOptions, PromptBlocks, DecisionRequests):
             if budget > 0:
                 job.think_close, job.think_end = self._think_close()
                 job.think_budget = budget if job.think_end >= 0 else 0
+            elif thinking and self.loop_guard is not None:
+                # --loop-guard arms the think markers (no budget) so the guard can fire and
+                # then close the block; thinking-off requests never arm, so the guard never
+                # watches visible content
+                job.think_close, job.think_end = self._think_close()
             if drafts:
                 base: Any = SuffixLookupProposer(min_match=self.min_match)
                 if tools:
@@ -455,7 +465,8 @@ class ChatApp(RequestOptions, PromptBlocks, DecisionRequests):
             "content": content,
             "reasoning": reasoning,
             "tool_calls_streamed": bool(calls_stream is not None and calls_stream.streamed),
-            "finish_reason": stream.finish_reason if stream is not None else "length",
+            "finish_reason": "stop" if stream is not None and stream.finish_reason == "loop" else
+                             (stream.finish_reason if stream is not None else "length"),
             "prompt_tokens": len(prompt_ids),
             "cached_tokens": int(job.cached_tokens),
             "completion_tokens": len(collected),
@@ -492,13 +503,17 @@ class ChatApp(RequestOptions, PromptBlocks, DecisionRequests):
             if stream.proposer is not None and hasattr(stream.proposer, "telemetry"):
                 speculative["proposer"] = stream.proposer.telemetry()
             reply["speculative"] = speculative
+        if stream is not None and stream.loop:
+            reply["runtime"]["loop"] = stream.loop     # --loop-guard fired: the cycle that ended the reply
         self.requests_completed += 1
         store = self.checkpoints
         print(
             f"[tensorfold] done {job.job_id} prompt={len(prompt_ids)} cached={job.cached_tokens} "
             f"thinking={thinking} effort={reply['runtime']['reasoning_effort']} "
             f"tokens={len(collected)} sha={_token_sha(collected)} finish={reply['finish_reason']} "
-            f"tok/s={reply['runtime']['tokens_per_second']:.1f} "
+            + (f"loop=period:{stream.loop['period']} "
+               if stream is not None and stream.loop else "")
+            + f"tok/s={reply['runtime']['tokens_per_second']:.1f} "
             f"ttft={(first_token_at - received_at) if first_token_at else -1:.2f}s "
             f"prefill={max(0.0, job.prefilled_at - job.started_at) if job.started_at and job.prefilled_at else -1:.2f}s "
             + (f"background preemptions={preemptions} " if background else "")

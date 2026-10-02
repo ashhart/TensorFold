@@ -131,6 +131,7 @@ class FamilyRounds(FamilyPrefill, SharedRounds, DraftDepth):
     def _forced_next(stream: Any, drawn: Any) -> int | None:
         """The token the thinking budget or a required call's fix writes at the next position instead of ``drawn``."""
 
+        stream.convert_loop_fire()      # a latched loop guard joins its think close to force
         if stream.force:
             return int(stream.force.pop(0))
         if stream.think_cut([-1]) == 0:
@@ -301,10 +302,13 @@ class FamilyRounds(FamilyPrefill, SharedRounds, DraftDepth):
             cut, fix = hit
             path = path[:cut + 1]
             committed = [*committed[:cut], fix[0]]
-            stream.force = list(fix[1:])        # the fix's rest, forced like the thinking budget's close
+            # the fix's rest, forced like the thinking budget's close; a loop latch waits
+            # for the fix to drain (convert_loop_fire defers), so append instead of overwrite
+            stream.force = [*stream.force, *fix[1:]]
         stream.rounds += 1
         got = stream.commit(committed)
-        if stream.finished and len(got) < len(path):
+        stream.convert_loop_fire()      # a latched loop guard closes think through force (rows stay 1:1)
+        if (stream.finished or stream.loop_stop is not None) and len(got) < len(path):
             # Keep only rows whose tokens landed, including budget cuts, so retained caches match committed tokens.
             path = path[:len(got) + 1]
         keep = len(path)

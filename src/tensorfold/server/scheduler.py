@@ -54,6 +54,8 @@ class ChatJob:
     cancellation: Cancellation = field(default_factory=Cancellation)
     ignore_eos: bool = False
     stop_check: Callable[[list[int]], bool] | None = None
+    # --loop-guard: the app's LoopGuard policy (None when the flag is off)
+    loop_guard: Any = None
     call_gate: Any = None                   # tool_choice "required": the answer opens a tool call (LaneStream)
     constraint: Any = None                  # response_format's grammar (engine.grammar.Constraint), or None
     vision: Any = None
