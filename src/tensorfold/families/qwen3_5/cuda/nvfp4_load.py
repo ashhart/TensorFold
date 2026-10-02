@@ -70,7 +70,9 @@ def admission(geometry):
     from tensorfold.cuda.geometry import with_fixed
 
     def with_staging(text):
-        d, i = int(text["hidden_size"]), int(text["intermediate_size"])
+        d = int(text["hidden_size"])
+        i = int(text.get("intermediate_size") or text.get("shared_expert_intermediate_size")
+                or text["moe_intermediate_size"])         # MoE layers: the widest NVFP4 projection is an expert
         return with_fixed(geometry(text), d * i + d * i // 32 + (4 << 20)) if prompt_precision.fp8() else geometry(text)
 
     return with_staging, weight_bytes
@@ -98,8 +100,8 @@ def maths() -> tuple[dict[str, bool], str]:
     return own, f"full ({gpu} has neither the block-scaled FP4 nor the FP8 mma): bf16 activations, the stored weights"
 
 
-def load_nvfp4(model_dir: str | Path, device: str = "cuda"):
-    """NVFP4 and FP8 projections at full precision or in the checkpoint's own math, bf16 ones as stored."""
+def load_nvfp4(model_dir: str | Path, device: str = "cuda", *, mlp=None):
+    """NVFP4 and FP8 projections at full precision or in the checkpoint's own math, bf16 ones as stored; ``mlp(prefix, tensors, cfg)``: a layer's MLP fields."""
 
     from tensorfold.cuda.capacity import headers
     from tensorfold.cuda.nvfp4 import format as fmt
@@ -111,6 +113,7 @@ def load_nvfp4(model_dir: str | Path, device: str = "cuda"):
     cfg = Config.read(model_dir)
     block = fmt.config_block(json.loads((model_dir / "config.json").read_text())) or {}
     reciprocal = str(block.get("quant_method", "")).lower() == "compressed-tensors"
+    declared = block.get("quantized_layers") or {}        # ModelOpt MIXED_PRECISION: each layer's own algorithm
     info = {n: (i["dtype"], i["shape"]) for n, i in headers(model_dir).items() if not skipped(n)}
     root = "model.language_model." if any(n.startswith("model.language_model.") for n in info) else "model."
     t = _Tensors(model_dir, device, skip=skipped)
@@ -122,6 +125,8 @@ def load_nvfp4(model_dir: str | Path, device: str = "cuda"):
 
         if not own[kind]:
             return None
+        if "W4A16" in str((declared.get(name) or {}).get("quant_algo", "")).upper():
+            return None                                   # weight-only NVFP4: its activations stay bf16
         if "input_scale" in got:
             return float(got["input_scale"].float().reshape(-1)[0])
         if "input_global_scale" in got:
@@ -180,10 +185,11 @@ def load_nvfp4(model_dir: str | Path, device: str = "cuda"):
             attn = Attention(q=linear(q + "self_attn.q_proj"), k=linear(q + "self_attn.k_proj"),
                              v=linear(q + "self_attn.v_proj"), o=linear(q + "self_attn.o_proj"),
                              q_norm=norm(p + "self_attn.q_norm.weight"), k_norm=norm(p + "self_attn.k_norm.weight"))
+        fields = mlp(q + "mlp.", t, cfg) if mlp is not None else \
+            {"gate": linear(q + "mlp.gate_proj"), "up": linear(q + "mlp.up_proj"), "down": linear(q + "mlp.down_proj")}
         layers.append(Layer(linear=cfg.is_linear(i), input_norm=norm(p + "input_layernorm.weight"),
                             post_norm=norm(p + "post_attention_layernorm.weight"), gdn=gdn, attn=attn,
-                            gate=linear(q + "mlp.gate_proj"), up=linear(q + "mlp.up_proj"),
-                            down=linear(q + "mlp.down_proj")))
+                            **{"gate": None, "up": None, "down": None, **fields}))
     if not any(n.startswith("lm_head.") for n in info):
         raise ValueError("this checkpoint ties its head to the embedding; the CUDA engine reads a separate lm_head")
     w = Weights(config=cfg, embed=Plain(get("embed_tokens.weight").to(torch.bfloat16)), layers=layers,
