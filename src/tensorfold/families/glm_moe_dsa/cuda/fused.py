@@ -41,7 +41,7 @@ PREFILL_REDUCE = os.environ.get("TF_GLM53_PREFILL_REDUCE", "ring")   # ring | rs
 PROMPT_OVERLAP = os.environ.get("TF_GLM53_PROMPT_OVERLAP", "1") != "0"   # two micro-batches, comm under compute
 # sequence-parallel prompt chunks: reduce-scatter rows, replicated work on a rank's own rows, all-gather (see
 # compute_prompt_sp); SP_SELECT=1: the indexer's top-k too (own rows, then the picks are gathered)
-PROMPT_SP = os.environ.get("TF_GLM53_PROMPT_SP", "0") == "1"
+PROMPT_SP = os.environ.get("TF_GLM53_PROMPT_SP", "1") == "1"   # sequence-parallel prompt chunks (TP; off under DCP)
 SP_SELECT = os.environ.get("TF_GLM53_SP_SELECT", "1") != "0"
 SEL_ROWS = 128           # indexer top-k in blocks of rows (bounded score buffer at long contexts)
 _UNPACK_MB = int(os.environ.get("TF_GLM53_UNPACK_CACHE_MB", "384"))   # decoded dense weights shared by a chunk's halves (0: off)
@@ -465,9 +465,10 @@ class Weights:
         self.dcp = 1                     # decode context parallelism: KV positions interleaved over the ranks
         self.vocab_off = rank * self.lm_head.shape[0]
         self.draft_head = self.draft_ids = None
+        every = layers + ([mtp.layer] if mtp is not None else [])
+        self.tunable = [lin for L in every for lin in linears(L)]   # the same order on every rank
         if TUNE:
-            every = layers + ([mtp.layer] if mtp is not None else [])
-            self.tuned = tune_linears([lin for L in every for lin in linears(L)])
+            self.tuned = tune_linears(self.tunable)
             self.tuned_groups = tune_groups([g for L in every for g in groups(L)])
 
     def set_draft_head(self, rows: torch.Tensor, ids: torch.Tensor) -> None:
@@ -515,6 +516,23 @@ def _graph_us(fn, iters: int = 20) -> float:
         best = t if best is None else min(best, t)
     del g
     return best
+
+
+def share_tiles(w: "Weights", comm) -> int:
+    """Every rank takes rank 0's tiles (each linear's split, which also decides its group's one launch): TP ranks run
+    the same shapes, and tiles picked per rank from noisy timings let the slowest pick pace every layer (measured:
+    four ranks, four different picks for the same shapes, +7-12 ms a decode round). Returns how many differed here."""
+    mine = torch.tensor([v for lin in w.tunable for v in (lin.split or x3linear.plan(lin.k, lin.n))], dtype=torch.int32,
+                        device="cuda")
+    every = torch.empty((comm.world, mine.numel()), dtype=torch.int32, device="cuda")
+    comm.all_gather(mine, every)
+    ref = every[0].view(-1, 2).tolist()
+    differ = 0
+    for lin, t in zip(w.tunable, ref):
+        if tuple(lin.split or ()) != tuple(t):
+            differ += 1
+            lin.split = tuple(t)
+    return differ
 
 
 def tune_groups(gs: list, rows: int = 3) -> dict:
