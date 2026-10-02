@@ -34,3 +34,27 @@ Deferred: step 3 (> 16 rows), step 5 (DFlash2 per stream; not loaded with --para
 paged / shared-prefix caches, admission by measured memory (slots are allocated up front).
 Tests: tests/cuda/test_glm_moe_dsa_multi.py (2, 3, 4 streams, staggered, greedy + seeded sampled, one prompt past
 index_topk: each reply equals its lone reply; graphs replay; engine + Scheduler; memory flat over admit/finish).
+
+## Phase B status (branch conc-phase-b, 2026-10-02)
+
+Built: steps 3 (decode windows up to 32 rows) and 5 (DFlash2 per stream).
+- Windows > 16 rows: `fused.Buffers(decode=True)` (the Runner's and GlmMultiDecoder's verify / MTP buffers) treats every
+  window it serves as a decode window up to `DECODE_ROWS` = 32: RoCE one-shot (or all-gather + rank-order sum) reductions,
+  ATTN_DECODE tiling, head / argmax buffers of the full width. Prompt buffers keep the old rule (<= FAST_ROWS 16), so
+  prompt bits and `--parallel 1` are unchanged. Measured row-invariant at 32 rows (a row's hidden / logits / argmax in a
+  32-row window == in 8-row and 1-row windows, below and past index_topk; MTP layer too) - no sub-window split needed.
+  32 x 6144 fp32 = 768 KB fits RoCE MAX_BYTES (1 MiB); the RoCE startup check now also compares a 32-row reduce to the
+  NCCL rank-order sum.
+- `dflash.MultiDrafter` (port of MiaAI 0027): one GlmDrafter's weights, a 4096-slot ring per stream in one pool
+  [kv, N * RING + trash, hd], every DFlash2 stream's block in one pass (per-segment attention and dynamic convolution),
+  every stream's kept taps in one context update; graphs per stream count and per tap-row bucket. Drafts equal the solo
+  drafter's (1 and 3 streams, tested).
+- `GlmMultiDecoder`: per-request mode (serial / MTP / "dflash" / "auto", via `mtp_mode`), per-stream depth = min(block - 1,
+  DECODE_ROWS / N - 1, DFLASH_CFG depth, room) and the chain's confidence cut per stream; auto keeps a per-stream EMA arm
+  choice (one-stream rule) and its MTP backlog of up to 8 rows (written every round, drafting or not); prompt chunks feed
+  the stream's drafter ring. Drafts are computed on every rank (identical gathered candidates), so ROUND stays one message.
+  A lone DFlash2 stream takes exactly the one-stream path's rounds (tested).
+- Prewarm adds verify windows of every width 1..32 (argmax, every key bucket); other shapes capture on first use.
+Tests: tests/cuda/test_glm_moe_dsa_multi_dflash.py (drafter == solo; 2/3/4 streams DFlash2 + auto + MTP mixed,
+greedy + seeded sampled, staggered, one prompt past index_topk, windows of 32 rows; graphs; engine parallel=3).
+Deferred: DCP with several streams, paged caches, measuring the 32-row RoCE cost on the cluster.

@@ -127,10 +127,6 @@ class Glm53Engine:
             del r                                        # host memory is device memory; a 1M cache needs it all)
             _trim_host()
             dpath = os.environ.get("TF_GLM53_DFLASH", "")
-            if dpath and self.parallel > 1:              # DFlash2 per stream is Phase B: MTP drafts only
-                print(f"[tensorfold] rank {rank}: --parallel {self.parallel}: DFlash2 not loaded (MTP drafts for "
-                      "concurrent streams)", flush=True)
-                dpath = ""
             if dpath:                                    # DFlash2: the target taps its layers before buffers exist
                 dcfg = json.loads((Path(dpath) / "config.json").read_text())
                 fw.tap_slot = {int(i): s for s, i in enumerate(dcfg["dflash_config"]["target_layer_ids"])}
@@ -139,7 +135,7 @@ class Glm53Engine:
                 from .dflash import GlmDrafter
 
                 dr = GlmDrafter(dpath, fw, capacity=self.limit + 16)
-                if GRAPHS:
+                if GRAPHS and self.parallel == 1:        # concurrent: multi.MultiDrafter captures its own passes
                     dr.capture()
                 self.runner.drafter = dr
                 print(f"[tensorfold] rank {rank}: DFlash2 drafter {Path(dpath).name} (block {dr.block}, taps "
@@ -171,8 +167,12 @@ class Glm53Engine:
             self.multi = GlmMultiDecoder(self.runner, rank=rank, world=WORLD, comm=self.comm, limit=self.limit,
                                          eos=self.eos, sample=lambda lg, pos, s: self._sample(lg, pos, s))
             per = self.multi.nbytes_per_stream()
-            print(f"[tensorfold] rank {rank}: {self.parallel} concurrent streams (MTP drafts {self.k}, windows up to "
-                  f"{self.multi.rows} rows), {per / 2**30:.2f} GiB of caches each ({self.limit} tokens)", flush=True)
+            dr = self.multi.dr
+            print(f"[tensorfold] rank {rank}: {self.parallel} concurrent streams (MTP drafts {self.k}"
+                  f"{f', DFlash2 up to {self.multi.frows - 1} drafts' if dr is not None else ''}, windows up to "
+                  f"{self.multi.rows} rows), {per / 2**30:.2f} GiB of caches each ({self.limit} tokens"
+                  f"{f'; drafter ring {dr.nbytes() / self.parallel / 2**20:.0f} MiB' if dr is not None else ''})",
+                  flush=True)
             if rank == 0:
                 from tensorfold.cuda.scheduler import Scheduler
 
@@ -314,9 +314,13 @@ class Glm53Engine:
                 got.extend(new)
                 return on_tokens(new)
             s = sampling if sampling is not None and sampling.temperature > 0 else None
-            stats = self.scheduler.submit(list(prompt), int(max_tokens), s, bool(draft and self.k), emit,
-                                          stop_eos=stop_eos)
-            stats.update(tokens=len(got), mtp_drafts=self.k if draft else 0, mtp_mode=fused.MTP_MODE,
+            mode = mtp_mode if mtp_mode in fused.MTP_MODES else fused.MTP_MODE
+            if mode in ("dflash", "auto") and self.multi.dr is None:
+                raise ValueError(f"mtp mode {mode!r}: no DFlash2 drafter loaded (TF_GLM53_DFLASH)")
+            want = (mode if mode in ("dflash", "auto") else bool(self.k)) if draft else False   # multi._mode
+            stats = self.scheduler.submit(list(prompt), int(max_tokens), s, want, emit, stop_eos=stop_eos)
+            stats.update(tokens=len(got), mtp_drafts=self.k if draft else 0,
+                         mtp_mode=mode if draft else None,
                          sha256=hashlib.sha256(json.dumps(got).encode()).hexdigest()[:16])
             dec = stats.get("decode_s") or 0.0
             stats["tok_s"] = round((len(got) - 1) / dec, 2) if dec > 0 and len(got) > 1 else 0.0
