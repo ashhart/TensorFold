@@ -23,3 +23,8 @@ N/A to us: 0009a/c, 0024, 0017/0022, 0006 (decode only), HC/KDA parts.
 - Multi-row indexer scoring (RB rows/program) REJECTED: not faster (0.8-1.2x) and not bit-exact. The scorer is
   tensor-core compute-bound (128 rows x 128K keys x 32 heads x 128 = 137 GFLOP in ~3 ms ~ 45 TFLOP/s). Lever = FP8
   indexer (q/k e4m3, ~2x MMA rate) behind a switch + quality check (DSA/vLLM run the indexer in FP8).
+- Dense prompt GEMM: FP8 path REJECTED (Triton fp8 tl.dot on GB10 peaks ~80-84 TFLOP/s = well-tiled fp16; +3.8e-2 err).
+  Per-shape fp16 tiles instead (bit-identical): 2048x4096 3.0x, 6144x3072 2.54x, 3072x6144 1.45x, 6144x512 1.39x
+  (commit 545e3e3, branch fp8-dense, which also has the UnpackCache). One-pass attention: 32K slower, 128K 1.17x (opt-in).
+- 1M/256K profile (10-01 21:00) lost: ppbench client timed out under the profiler (prefill 14 min); rerun with longer
+  timeout later (not the current bottleneck).
