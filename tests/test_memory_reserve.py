@@ -1,4 +1,4 @@
-"""TENSORFOLD_MEMORY_RESERVE_GIB: the host loading room the CUDA startup keeps free (default max(4 GiB, a tenth))."""
+"""TENSORFOLD_MEMORY_RESERVE_GIB: the host RAM the CUDA startup keeps free (default max(4 GiB, a tenth))."""
 
 from types import SimpleNamespace
 
@@ -9,13 +9,11 @@ from tensorfold.cuda import capacity
 GIB = capacity.GIB
 
 
-def test_default_reserve_is_unchanged(monkeypatch):
+def test_default_reserve_is_a_tenth_of_the_pool(monkeypatch):
     monkeypatch.delenv("TENSORFOLD_MEMORY_RESERVE_GIB", raising=False)
-    odd = 121 * GIB + 7                                  # the GPU path rounds a tenth up, the host path down
-    assert capacity.reserve_bytes(odd) == -(-odd // 10)
-    assert capacity.reserve_bytes(odd, host=True) == odd // 10
-    assert capacity.reserve_bytes(20 * GIB) == 4 * GIB
-    assert capacity.reserve_bytes(20 * GIB, host=True) == 4 * GIB
+    odd = 121 * GIB + 7                                  # a tenth of the pool, counted down
+    assert capacity.reserve_bytes(odd) == odd // 10
+    assert capacity.reserve_bytes(20 * GIB) == 4 * GIB    # and never less than four GiB
 
 
 def test_override(monkeypatch):

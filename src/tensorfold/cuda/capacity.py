@@ -157,12 +157,12 @@ def unified(torch) -> bool:
         return False
 
 
-def reserve_bytes(total: int, *, host: bool = False) -> int:
-    """Host RAM weight staging leaves free: max(4 GiB, a tenth of total), or TENSORFOLD_MEMORY_RESERVE_GIB (>= 2)."""
+def reserve_bytes(total: int) -> int:
+    """Host RAM the startup keeps free: max(4 GiB, a tenth of the pool), or TENSORFOLD_MEMORY_RESERVE_GIB (>= 2)."""
 
     value = os.environ.get("TENSORFOLD_MEMORY_RESERVE_GIB", "").strip()
     if not value:
-        return max(4 * GIB, total // 10 if host else math.ceil(total / 10))
+        return max(4 * GIB, total // 10)
     try:
         gib = float(value)
     except ValueError:
@@ -178,13 +178,13 @@ def host_stream_bytes() -> int | None:
     memory = _meminfo()
     if memory is None:
         return None
-    reserve = (reserve_bytes(memory["MemTotal"], host=True)
+    reserve = (reserve_bytes(memory["MemTotal"])
                if os.environ.get("TENSORFOLD_MEMORY_RESERVE_GIB", "").strip() else 2 * GIB)
     return max(0, memory["MemAvailable"] - reserve)
 
 
-def memory_limit_bytes(environ: Mapping[str, str] | None = None) -> int | None:
-    """The admission budget's explicit GiB cap in bytes, or None when unset.
+def cuda_limit_bytes(environ: Mapping[str, str] | None = None) -> int | None:
+    """The CUDA admission budget's explicit GiB cap in bytes, or None when unset.
 
     ``TENSORFOLD_CUDA_MEMORY_LIMIT_GB`` caps the grant the same absolute way ``TENSORFOLD_MEMORY_LIMIT_GB``
     caps the MLX budget. ValueError, naming the variable, for a nonpositive, non-finite, or non-numeric value.
@@ -219,8 +219,8 @@ def available_bytes(torch) -> int:
         # No /proc/meminfo means the card's memory is the pool, so the floor comes out of it
         memory = _meminfo()
         granted = (memory["MemAvailable"] if memory is not None else free) - reserve_bytes(
-            memory["MemTotal"] if memory is not None else total, host=True)
-    limit = memory_limit_bytes()
+            memory["MemTotal"] if memory is not None else total)
+    limit = cuda_limit_bytes()
     return max(0, min(granted, limit)) if limit is not None else max(0, granted)
 
 
