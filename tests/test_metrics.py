@@ -329,3 +329,15 @@ def test_both_http_layers_serve_the_mirrored_and_event_families(tmp_path):
         first.join(WAIT)
         second.join(WAIT)
         assert box["first"][0] == 200 and box["second"][0] == 200, box
+
+
+def test_admission_refusals_are_counted_and_an_admissionless_server_publishes_none():
+    refused_app = SimpleNamespace(scheduler=SimpleNamespace(admission=SimpleNamespace(refused=7)))
+    body = metrics.render(refused_app)
+    assert sample(body, f"{metrics.PREFIX}admission_refused_total") == "7"
+
+    plain_app = SimpleNamespace(scheduler=SimpleNamespace(admission=None))
+    assert "admission_refused_total" not in metrics.render(plain_app)
+
+    assert "admission_refused_total" not in metrics.render(SimpleNamespace(scheduler=SimpleNamespace()))
+    assert "admission_refused_total" not in metrics.render(SimpleNamespace())

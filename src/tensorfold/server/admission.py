@@ -22,6 +22,7 @@ def concurrency(engine: Any, prompt_memory: Any, fraction: float, lanes: int, re
     admission = memory.Admission(min(allowance - elsewhere, share), stream,
                                  used=None if prompt_memory is None else prompt_memory.held, lanes=lanes)
     tokens = reply_tokens + 4096
+    print(f"[tensorfold] prefill workspace: {stream.prefill_bytes(tokens) / 1024**3:.1f} GiB at a {tokens:,}-token prompt", flush=True)
     gib, mib = 1024**3, 1024**2
     print(f"[tensorfold] concurrency: up to {lanes} requests share each round; memory budget "
           f"{admission.budget / gib:.1f} GB (MLX's share {share / gib:.1f} GB, or {allowance / ram:.0%} of "

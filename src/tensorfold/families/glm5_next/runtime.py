@@ -36,6 +36,9 @@ class GLMFlash:
     # False when a forward over several streams' rows misses a stream's own bits: the engine then shares no round
     streams_exact = True
     tag = "glm5"                 # log prefix
+    # sparse MLA picks a query's keys once a position passes index_topk; the transient
+    # gather workspaces are pooled by size, so prefill's memory steps there and stops growing
+    prefill_regime_switch = "args.index_topk"
 
     def __init__(self, model: GLM5, head: Any | None = None, *, drafts: int = 1, check: bool = True) -> None:
         self.model = model

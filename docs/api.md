@@ -252,9 +252,10 @@ drafts share it), `request_latency_seconds` and `time_to_first_token_seconds`, a
 prefix. Every reading is repeated under a vLLM-compatible name (`num_requests_running`, `num_requests_waiting`,
 `kv_cache_usage_perc`, `spec_decode_num_draft_tokens_total`, `spec_decode_num_accepted_tokens_total`,
 `e2e_request_latency_seconds`) with identical values, so a dashboard copied from vLLM fills by swapping the
-`tensorfold:` prefix for the metric name. `client_disconnections_total` (requests the client walked away from)
-and `preemptions_total` (background work that gave up a lane to a later request) are published where the
-server counts those events, and never at a fabricated zero.
+`tensorfold:` prefix for the metric name. `client_disconnections_total` (requests the client walked away from),
+`preemptions_total` (background work that gave up a lane to a later request) and
+`admission_refused_total` (admission decisions that projected past the memory budget; a held request can
+count each pass) are published where the server counts those events, and never at a fabricated zero.
 
 ## The Responses API
 

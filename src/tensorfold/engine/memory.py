@@ -123,6 +123,46 @@ def _kv_bytes(cache: list[Any]) -> tuple[float, float]:
     return kv, spare
 
 
+def probe_premise(model: Any, probes: tuple[int, int, int]) -> tuple[int, int, int]:
+    """Long prompts run one attention regime; the fit probes must both sit in it.
+
+    A model whose prefill switches regime mid-prompt (GLM-5.3's sparse MLA picks its keys
+    once a position passes ``index_topk``, and the switch's transient workspaces are pooled
+    by size) makes a fit across the switch read the switch's one-time step as growth per
+    token of context: GLM-5.3's long prompts priced at up to 30x their measured prefill
+    peak, so nothing long is admitted beside a live stream (#228). The two fit probes move
+    past the switch a whole width apart, where long prompts actually run; the short probe
+    stays, so the stream fit keeps its low anchor. Models that declare no switch are
+    probed exactly as before.
+    """
+
+    switch = getattr(model, "prefill_regime_switch", None)
+    if not switch:
+        return probes
+    # both probes past the switch cost more to run (GLM-5.3: 10,368 probe tokens against 6,400); startup only,
+    # and a family whose switch sat far out would pay for the cold prefill at that length — declared switches
+    # are expected to sit near the chunk boundary, where the regime long prompts run in begins.
+    value: Any = model
+    for part in str(switch).split("."):              # a spec: "args.index_topk" walks the model's config
+        value = getattr(value, part, None)
+        if value is None:
+            print(f"[tensorfold] {getattr(model, 'tag', '') or 'engine'}: prefill_regime_switch "
+                  f"{switch!r} does not resolve on this model; fitting on the default probes", flush=True)
+            return probes
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        print(f"[tensorfold] {getattr(model, 'tag', '') or 'engine'}: prefill_regime_switch "
+              f"{switch!r} resolves to {type(getattr(model, str(switch).split('.')[-1], None)).__name__}, "
+              "not a token count; fitting on the default probes", flush=True)
+        return probes
+    if value <= 0:
+        return probes
+    width = probes[2] - probes[1]
+    n2 = max(probes[1], value + width)
+    return probes[0], n2, n2 + width
+
+
 def measure(engine: Any, probe: tuple[int, int, int] | None = None) -> StreamMemory:
     """Probe cache growth beyond bounded draft context and peak prefill memory on the engine's chunks, then account for the shared-round working set."""
 
@@ -132,7 +172,8 @@ def measure(engine: Any, probe: tuple[int, int, int] | None = None) -> StreamMem
     from tensorfold.server.memory_budget import cache_nbytes
 
     chunk = int(getattr(getattr(engine, "prefill_plan", None), "step", 0) or _CHUNK)
-    probe = probe or (64, chunk + 64, 2 * chunk + 64)
+    if probe is None:                                   # the caller's probes are the caller's choice
+        probe = probe_premise(getattr(engine, "model", None), (64, chunk + 64, 2 * chunk + 64))
     sizes, peaks, held = [], [], []
     # Replace retained forward state before probing so measured growth belongs only to the probe caches.
     mx.eval(*cache_arrays(engine.prefill_prefix([1000 + i for i in range(probe[0])], cache=None, cached_tokens=0)))

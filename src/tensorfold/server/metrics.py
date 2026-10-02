@@ -187,6 +187,11 @@ def render(app: Any) -> str:
     if preempted is not None:
         _family(lines, "preemptions_total", "counter", "Requests that had to give a lane up to a later one.",
                 [f"{PREFIX}preemptions_total {preempted}"])
+    refused = _count(getattr(getattr(app, "scheduler", None), "admission", None), "refused")
+    if refused is not None:
+        _family(lines, "admission_refused_total", "counter",
+                "Admission decisions that projected past the memory budget; a held request can count each pass.",
+                [f"{PREFIX}admission_refused_total {refused}"])
     return "\n".join(lines) + "\n"
 
 
