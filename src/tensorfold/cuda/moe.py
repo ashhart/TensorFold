@@ -116,12 +116,19 @@ def select(logits: torch.Tensor, buf: MoEBuffers, top_k: int, experts: int,
     grouped.route(buf.pick[:logits.shape[0]], buf.plan, tile)
 
 
-def moe(x: torch.Tensor, router_rows: torch.Tensor, ex: grouped.Experts, buf: MoEBuffers, top_k: int,
+def moe(x: torch.Tensor, router_rows: torch.Tensor, ex, buf: MoEBuffers, top_k: int,
         experts: int) -> MoEBuffers:
     """Route x [R, D] and run its experts into buf.y [R, k + 1, D] (bf16 in prefill); slot k is the shared expert."""
 
+    from .nvfp4 import experts as nvx
+
     rows = x.shape[0]
     router(x, router_rows, buf.logits[:rows])
+    if isinstance(ex, nvx.Experts4):             # NVFP4 experts (W4A16), the shared one last like the MLX table's
+        select(buf.logits[:rows], buf, top_k, experts, nvx.PREFILL_TILE)
+        nvx.gate_up(x, ex, buf.plan, buf.act.view(-1, ex.width), rows)
+        nvx.down(buf.act.view(-1, ex.width), ex, buf.plan, buf.y.view(-1, ex.dims), rows)
+        return buf
     select(buf.logits[:rows], buf, top_k, experts)
     grouped.gate_up(x, ex, buf.plan, buf.act.view(-1, ex.width), rows)
     grouped.down(buf.act.view(-1, ex.width), ex, buf.plan, buf.y.view(-1, ex.dims), rows)

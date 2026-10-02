@@ -65,21 +65,27 @@ class Qwen36Engine:
         # one admission for one stream or many (every stream's states and caches, kept prompt ends), before any load
         geometry = ((lambda text: stream_geometry(text, streams, KEEP_MANY, self.depth)) if many else
                     (lambda text: gdn_geometry(text, 1, self.depth + 1, mtp=self.depth > 0)))
+        tensor_bytes = linear_weights
+        from tensorfold.families.qwen3_5.cuda.nvfp4_load import admission, quantized
+
+        if quantized(model_dir):             # a ModelOpt checkpoint: its own tensor sizes; its bf16 MTP layer as stored
+            geometry, tensor_bytes = admission(geometry)
         self.capacity_plan = admit(model_dir, context, context_explicit, torch, geometry,
-                                   lambda name, info: (mtp_weights(name, info) if ".mtp." in name
-                                                       else linear_weights(name, info)),
+                                   lambda name, info: (mtp_weights(name, info) if ".mtp." in name or name.startswith("mtp.")
+                                                       else tensor_bytes(name, info)),
                                    extra_files=extra)
         self.context_window = self.capacity_plan["context_window"]
         self.w = load(model_dir)
         self.head = self.graphs = None
         if self.depth:
-            m = load_mtp(model_dir, self.w)
+            from tensorfold.families.qwen4_exp.cuda.weights import draft_token_ids
+
+            ids = draft_token_ids("default")                            # the same tokenizer's ids
+            m = load_mtp(model_dir, self.w, ids=ids)
             if m is None:
                 raise ValueError("this checkpoint has no MTP layer (mtp-4bit.safetensors), which the CUDA engine "
                                  "drafts with; add it, or pass --no-drafts for the serial reference")
-            from tensorfold.families.qwen4_exp.cuda.weights import draft_token_ids
-
-            self.head = Head(self.w, m, draft_token_ids("default"))    # the same tokenizer's ids
+            self.head = Head(self.w, m, ids)
             from .graphs import Graphs
 
             # decoding buffers that outlive requests (with --parallel, the one stream decoding alone's)
