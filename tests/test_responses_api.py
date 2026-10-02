@@ -216,6 +216,7 @@ def test_a_response_is_stored_before_the_client_hears_it_ended():
     reply = responses.Reply({"id": "r", "output": []}, lambda e: heard.append((e["type"], len(kept))), kept.append)
     reply.start()
     reply.chunk({"choices": [{"delta": {"content": "Hi"}, "finish_reason": "stop"}]})
+    reply.chunk(None)                                              # the [DONE]: a finish is held until it (#216)
     assert heard[-1] == ("response.completed", 1) and kept[0]["status"] == "completed"
     reply = responses.Reply({"id": "r", "output": []}, None, kept.append)
     reply.chunk({"error": {"message": "boom"}})
@@ -228,6 +229,7 @@ def test_a_length_stop_is_incomplete_and_an_error_fails():
     reply.start()
     reply.chunk({"choices": [{"delta": {"content": "Hel"}}]})
     reply.chunk({"choices": [{"delta": {}, "finish_reason": "length"}]})
+    reply.chunk(None)                                              # the [DONE]: a finish is held until it (#216)
     final = valid(events)
     assert final["status"] == "incomplete" and final["incomplete_details"] == {"reason": "max_output_tokens"}
     assert final["output"][0]["status"] == "incomplete"
@@ -237,6 +239,44 @@ def test_a_length_stop_is_incomplete_and_an_error_fails():
     reply.chunk({"error": {"message": "boom", "type": "server_error"}})
     failed = valid(events)
     assert failed["status"] == "failed" and failed["error"] == {"code": "server_error", "message": "boom"}
+
+
+# -- a streamed chat's usage reaches the Response in both wire shapes (#216) -------------------------
+
+
+def test_a_streamed_response_carries_the_trailing_usage_chunks_usage():
+    events = []
+    reply = responses.Reply({"id": "r", "output": []}, events.append)
+    reply.start()
+    reply.chunk({"choices": [{"delta": {"content": "Hi"}}]})
+    reply.chunk({"choices": [{"delta": {}, "finish_reason": "stop"}], "tensorfold": {"rounds": 2}})
+    reply.chunk({"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 7,
+                                          "prompt_tokens_details": {"cached_tokens": 2}}})
+    final = valid(events)
+    assert final["status"] == "completed"
+    assert final["usage"] == {"input_tokens": 5, "input_tokens_details": {"cached_tokens": 2},
+                              "output_tokens": 7, "output_tokens_details": {"reasoning_tokens": 0},
+                              "total_tokens": 12}
+
+
+def test_a_streamed_response_still_reads_usage_riding_the_finish_chunk():
+    events = []
+    reply = responses.Reply({"id": "r", "output": []}, events.append)
+    reply.start()
+    reply.chunk({"choices": [{"delta": {}, "finish_reason": "stop"}],
+                 "usage": {"prompt_tokens": 5, "completion_tokens": 7}})
+    reply.chunk(None)                                              # the [DONE]
+    final = valid(events)
+    assert final["status"] == "completed" and final["usage"]["total_tokens"] == 12
+
+
+def test_a_stream_that_ends_without_a_finish_still_fails():
+    events = []
+    reply = responses.Reply({"id": "r", "output": []}, events.append)
+    reply.start()
+    reply.chunk({"choices": [{"delta": {"content": "Hi"}}]})
+    reply.chunk(None)                                              # the [DONE] with no finish before it
+    assert valid(events)["status"] == "failed"
 
 
 # -- the CUDA server --------------------------------------------------------------------------------

@@ -244,6 +244,7 @@ class Reply:
         self.calls: dict[int, dict[str, Any]] = {}     # chat tool-call index -> its function_call item
         self.seq = 0
         self.final: dict[str, Any] | None = None
+        self.ended: tuple[str, Any, Any] | None = None  # a seen finish_reason, held until its usage event (#216)
 
     def _event(self, kind: str, **fields: Any) -> None:
         if self.emit is not None:
@@ -349,14 +350,23 @@ class Reply:
         if self.final is not None:
             return
         if payload is None:
-            self.fail("the reply ended early")
+            if self.ended is None:
+                self.fail("the reply ended early")
+            else:                              # a chat stream whose usage rides the finish chunk
+                reason, chat_usage, stats = self.ended
+                self.finish(reason, chat_usage, stats)
         elif "error" in payload:
             self.fail(payload["error"])
+        elif not payload.get("choices"):
+            if self.ended is not None:         # the trailing usage event of a streamed chat (#216)
+                reason, _, stats = self.ended
+                self.ended = None
+                self.finish(reason, payload.get("usage"), stats)
         else:
-            choice = (payload.get("choices") or [{}])[0]
+            choice = payload["choices"][0]
             self.delta(choice.get("delta") or {})
             if choice.get("finish_reason"):
-                self.finish(choice["finish_reason"], payload.get("usage"), payload.get("tensorfold"))
+                self.ended = (choice["finish_reason"], payload.get("usage"), payload.get("tensorfold"))
 
     def completion(self, data: dict[str, Any]) -> dict[str, Any]:
         """A whole chat completion (not streamed)."""
