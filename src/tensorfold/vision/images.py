@@ -121,9 +121,10 @@ def _check_source(source: ImageSource, limits: ImageLimits, allow_urls: bool = F
         raise ImageInputError("image URL is too long")
 
 
-def split_images(messages: list[dict[str, Any]], *, limits: ImageLimits = DEFAULT_LIMITS, allow_urls: bool = False
-                 ) -> tuple[list[dict[str, Any]], list[ImageSource]]:
-    """Preserve ordered parts, replacing user and tool-result image URLs with processor image markers."""
+def split_images(messages: list[dict[str, Any]], *, limits: ImageLimits = DEFAULT_LIMITS, allow_urls: bool = False,
+                 allow_videos: bool = False) -> tuple[list[dict[str, Any]], list[ImageSource]]:
+    """Preserve ordered parts, replacing user and tool-result image URLs with processor image markers; ``allow_videos``:
+    also ``video_url`` parts (``VideoSource`` among the sources, a video marker in the template)."""
     if not isinstance(messages, list) or not messages:
         raise ImageInputError("messages must be a non-empty list")
     output, sources = [], []
@@ -150,18 +151,32 @@ def split_images(messages: list[dict[str, Any]], *, limits: ImageLimits = DEFAUL
                 if not isinstance(part.get("text"), str) or any(part.get(key) for key in _MEDIA):
                     raise ImageInputError("text parts must contain a text string without media")
                 parts.append(dict(part))
+            elif kind == "video_url" and allow_videos:
+                from .videos import DEFAULT_VIDEO_LIMITS, video_source
+
+                if role != "user":
+                    raise ImageInputError("video_url parts are supported only in user messages")
+                if any(part.get(key) for key in _MEDIA - {"video_url"}):
+                    raise ImageInputError("video_url parts cannot contain other media")
+                videos = sum(type(s).__name__ == "VideoSource" for s in sources)
+                if videos >= DEFAULT_VIDEO_LIMITS.max_videos:
+                    raise ImageInputError(f"a request supports at most {DEFAULT_VIDEO_LIMITS.max_videos} videos")
+                sources.append(video_source(part.get("video_url"), DEFAULT_VIDEO_LIMITS, allow_urls))
+                parts.append({"type": "video"})
             elif kind == "image_url":
                 if role not in ("user", "tool"):
                     raise ImageInputError("image_url parts are supported only in user and tool messages")
                 if any(part.get(key) for key in _MEDIA - {"image_url"}):
                     raise ImageInputError("image_url parts cannot contain other media")
-                if len(sources) >= limits.max_images:
+                if sum(isinstance(s, ImageSource) for s in sources) >= limits.max_images:
                     raise _count_error(limits)
                 source = _source(part.get("image_url"), limits, allow_urls)
                 sources.append(source)
                 parts.append({"type": "image", "detail": source.detail})
             else:
-                raise ImageInputError("content parts must be text or image_url; audio and video are unsupported")
+                raise ImageInputError("content parts must be text, image_url or video_url; audio is unsupported"
+                                      if allow_videos else
+                                      "content parts must be text or image_url; audio and video are unsupported")
         output.append({**message, "content": parts})
     return output, sources
 
