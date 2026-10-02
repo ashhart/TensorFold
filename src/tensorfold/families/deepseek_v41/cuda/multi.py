@@ -101,23 +101,25 @@ class MultiDecoder:
 
         e = self.e
         rng = random.Random(0)
+        widths = [*e.widths, e.cap]                          # a cost curve for each key width the graphs have
         ms = []
-        for R in range(1, ROWS + 1):
-            if R not in e.graphs:
-                ms.append(ms[-1] if ms else 30.0)
-                continue
-            g = e.graphs[R]
-            g["tok"].copy_(torch.tensor([rng.randrange(1000, 100000) for _ in range(R)]))
-            g["pos"].copy_(torch.arange(R) + 200)
-            g["sid"].copy_(torch.arange(R) % e.slots)
-            best = float("inf")
-            for _ in range(4):
-                torch.cuda.synchronize()
-                t = time.perf_counter()
-                e._replay_free(g)
-                torch.cuda.synchronize()
-                best = min(best, time.perf_counter() - t)
-            ms.append(1e3 * best)
+        for w in widths:
+            for R in range(1, ROWS + 1):
+                if R not in e.graphs:
+                    ms.append(ms[-1] if ms else 30.0)
+                    continue
+                g = e.graph_for(R, w)
+                g["tok"].copy_(torch.tensor([rng.randrange(1000, 100000) for _ in range(R)]))
+                g["pos"].copy_(torch.arange(R) + 200)
+                g["sid"].copy_(torch.arange(R) % e.slots)
+                best = float("inf")
+                for _ in range(4):
+                    torch.cuda.synchronize()
+                    t = time.perf_counter()
+                    e._replay_free(g)
+                    torch.cuda.synchronize()
+                    best = min(best, time.perf_counter() - t)
+                ms.append(1e3 * best)
         drafts = []                                          # ms of one drafting pass for 1.. streams at once
         if self.drafts:
             batched = getattr(e.drafter, "multi_graphs", None) or {}
@@ -135,8 +137,10 @@ class MultiDecoder:
                 drafts.append(1e3 * best)
         both = gather([int(1e3 * v) for v in ms + drafts])
         worst = [max(a, b) / 1e3 for a, b in zip(*both)]
-        self.costs = worst[:ROWS]
-        self.draft_curve = worst[ROWS:]
+        n = ROWS * len(widths)
+        self.curves = [(w, worst[i * ROWS:(i + 1) * ROWS]) for i, w in enumerate(widths)]
+        self.costs = self.curves[-1][1]
+        self.draft_curve = worst[n:]
         self.draft_ms = self.draft_curve[0] if self.draft_curve else 0.0
         for slot in range(e.slots):                          # the timing rows wrote every slot's caches
             e.select_slot(slot)
@@ -162,6 +166,8 @@ class MultiDecoder:
             caps.append(max(0, min(self.drafts, room, s.count - len(s.out) - 1)) if ok else 0)
         if not any(caps) or self.costs is None:
             return ks
+        need = max(len(self.e.views[s.slot].ids) for s in live) + ROWS   # the round's graph width (at most)
+        self.costs = next((c for w, c in self.curves if need <= w), self.curves[-1][1])
         rows, drafting = len(live), 0
         tokens = float(len(live))
         rate = tokens / (self.costs[rows - 1] + self.overhead)

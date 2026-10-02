@@ -153,6 +153,11 @@ _ZB = None
 PROMPT_CFG = [1, 1]          # prompt expert kernel config for gate/up and down (experts_prompt.cu)
 # decode/verify rows at most (row-invariant kernels; a round of streams up to it); above: prompt chunks
 PROMPT_ROWS = int(os.environ.get("TF_DSV41_DECODE_ROWS") or 32)
+# decode graphs are captured at these key widths (tokens) besides the full limit; a step replays the narrowest that
+# covers its rows' positions, so indexer scores, block choice and top-k run over [R, width // ratio] instead of the
+# limit's (the same entries are chosen: past a row's position every score is -inf). TF_DSV41_WIDTHS=0: full only
+WIDTHS = [int(v) for v in (os.environ.get("TF_DSV41_WIDTHS") or "16384,65536,262144").split(",") if int(v) > 0]
+SHARED_GRAPH_POOL = os.environ.get("TF_DSV41_SHARED_GRAPHS", "1") != "0"   # all decode graphs on one memory pool
 
 
 class RoundProfile:
@@ -404,7 +409,13 @@ class SerialEngine:
         self.limit = cap
         self.candidates: torch.Tensor | None = None
         self.graph = None
-        self.graphs: dict[int, dict] = {}
+        self.graphs: dict[int, dict] = {}                 # full-width decode graphs by rows
+        self.narrow: dict[tuple[int, int], dict] = {}     # (rows, width) -> the graph at a narrower key width
+        self.widths = sorted({w for w in WIDTHS if w < cap})
+        self._width = cap                                 # the key width a graph being captured selects over
+        # one memory pool for every decode graph (only one replays at a time): their scratch is the largest graph's,
+        # not the sum over row counts and widths. A graph's outputs hold until the next decode replay.
+        self._gpool = torch.cuda.graph_pool_handle() if SHARED_GRAPH_POOL else None
         self.drafter = None
         self.debug: list | None = None
         self._pinned: list = []
@@ -557,7 +568,7 @@ class SerialEngine:
             raise ValueError(f"context {p0 + R} beyond {self.limit} tokens")
         if R in self.graphs:
             self.step_rows(tokens)
-            return self.graphs[R]["logits"]
+            return self.graph_for(R, p0 + R)["logits"]
         rows = self.engram_rows(tokens, raw)
         self._to_stage(p0)
         out = self.core(torch.tensor(tokens, device=self.dev), torch.arange(p0, p0 + R, device=self.dev), rows,
@@ -719,20 +730,61 @@ class SerialEngine:
 
     # -- decode graphs ----------------------------------------------------------------------------------------
     def capture(self, rows: int = 1) -> None:
-        """Capture an R-row decode step as three graphs (embedding + layer 0 / layers 1-13 / the rest), so the Engram
-        rows of each table are read while the graph before it runs. Both ranks must capture together."""
+        """Capture the R-row decode step at the full key width and each narrower one in ``widths`` (sharing their
+        input buffers). Both ranks must capture together."""
+
+        c = self.c
+        row_bytes = c.engram_head_dim + c.engram_head_dim // 32
+        W, cols = self.read_split
+        io = {"tok": torch.zeros((rows,), dtype=torch.long, device=self.dev),
+              "pos": torch.zeros((rows,), dtype=torch.long, device=self.dev),
+              "sid": torch.zeros((rows,), dtype=torch.long, device=self.dev),
+              # this rank's share of each row's table entries (all of them unless the reads are split)
+              "raw": [torch.zeros((rows * cols, row_bytes), dtype=torch.uint8, device=self.dev) for _ in range(2)],
+              "h_raw": torch.zeros((2, rows * cols, row_bytes), dtype=torch.uint8).pin_memory(),
+              "h_next": torch.zeros((rows,), dtype=torch.long).pin_memory()}
+        try:
+            for width in [self.cap, *self.widths]:
+                self._width = width
+                g = self._capture(rows, dict(io))
+                g["width"] = width
+                if width == self.cap:
+                    self.graphs[rows] = g
+                else:
+                    self.narrow[(rows, width)] = g
+        finally:
+            self._width = self.cap
+        self.graph = True
+
+    def _graph_out(self, logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """The decode graphs' shared outputs for ``logits``' rows: fp32 [R, vocab] and their argmax (valid until the
+        next decode replay), allocated outside every graph on the first (warm-up) call."""
+
+        R, V = logits.shape
+        if getattr(self, "_out", None) is None or self._out[0].shape[0] < R:
+            if getattr(self, "_out", None) is not None:              # graphs captured on the old one still write it
+                self._old_out = [*getattr(self, "_old_out", []), self._out]
+            n = max(R, PROMPT_ROWS)
+            self._out = (torch.empty((n, V), dtype=torch.float32, device=self.dev),
+                         torch.empty((n,), dtype=torch.long, device=self.dev))
+        return self._out[0][:R], self._out[1][:R]
+
+    def graph_for(self, rows: int, need: int) -> dict:
+        """The R-row decode graph to replay for rows reaching position ``need - 1``: the narrowest covering it."""
+
+        for w in self.widths:
+            if need <= w:
+                return self.narrow.get((rows, w)) or self.graphs[rows]
+        return self.graphs[rows]
+
+    def _capture(self, rows: int, g: dict) -> dict:
+        """One R-row decode step graph at the key width ``self._width``: one launch (ONE_GRAPH, waiting on pinned
+        flags for each table's Engram rows) or three (embedding + layer 0 / layers 1-13 / the rest)."""
 
         c = self.c
         n_rows = 3 * c.engram_n_heads
         row_bytes = c.engram_head_dim + c.engram_head_dim // 32
         W, cols = self.read_split
-        g = {"tok": torch.zeros((rows,), dtype=torch.long, device=self.dev),
-             "pos": torch.zeros((rows,), dtype=torch.long, device=self.dev),
-             "sid": torch.zeros((rows,), dtype=torch.long, device=self.dev),
-             # this rank's share of each row's table entries (all of them unless the reads are split)
-             "raw": [torch.zeros((rows * cols, row_bytes), dtype=torch.uint8, device=self.dev) for _ in range(2)],
-             "h_raw": torch.zeros((2, rows * cols, row_bytes), dtype=torch.uint8).pin_memory(),
-             "h_next": torch.zeros((rows,), dtype=torch.long).pin_memory()}
         saved = self._save_rows(0, g["pos"])                            # capture replays write slot 0, position 0
         hd = c.engram_head_dim
         self._sid = g["sid"]                                           # the graphs read each row's slot from it
@@ -754,7 +806,10 @@ class SerialEngine:
 
         def run_b(carry):
             logits = self.part_b(carry, g["pos"], table(1), static=True)
-            return logits, logits.argmax(-1)
+            out = self._graph_out(logits)
+            out[0].copy_(logits)                                      # every decode graph's outputs in one place:
+            out[1].copy_(logits.argmax(-1))                           # not 128 graphs' own [R, vocab] logits
+            return out
 
         side = torch.cuda.Stream()
         side.wait_stream(torch.cuda.current_stream())
@@ -773,20 +828,20 @@ class SerialEngine:
                 return run_b(carry)
 
             g["one"] = torch.cuda.CUDAGraph()                         # (no three-graph copy: its buffers cost ~1.4 GiB
-            with torch.cuda.graph(g["one"]):                           # over 32 row counts)
+            with torch.cuda.graph(g["one"], pool=self._gpool):         # over 32 row counts)
                 g["logits"], g["next"] = run_one()
         else:                                                           # three graphs, the host reads between them
             g["a0"], g["a1"], g["b"] = torch.cuda.CUDAGraph(), torch.cuda.CUDAGraph(), torch.cuda.CUDAGraph()
-            with torch.cuda.graph(g["a0"]):
+            with torch.cuda.graph(g["a0"], pool=self._gpool):
                 g["carry0"] = run_a0()
-            with torch.cuda.graph(g["a1"], pool=g["a0"].pool()):
+            pool = self._gpool if self._gpool is not None else g["a0"].pool()
+            with torch.cuda.graph(g["a1"], pool=pool):
                 g["carry"] = run_a1(g["carry0"])
-            with torch.cuda.graph(g["b"], pool=g["a0"].pool()):
+            with torch.cuda.graph(g["b"], pool=pool):
                 g["logits"], g["next"] = run_b(g["carry"])
         torch.cuda.synchronize()
         self._restore_rows(saved)
-        self.graphs[rows] = g
-        self.graph = True
+        return g
 
     def _prime_flags(self) -> None:
         """The one-graph step's host flag and device counter (shared by every graph), and its kernels compiled: one
@@ -864,7 +919,7 @@ class SerialEngine:
         P = len(ids)
 
         def verify(R):
-            g = self.graphs[R]
+            g = self.graph_for(R, max(P, R))
             # distinct real tokens (the request's latest), not the capture's zeros: identical rows route to the same
             # experts and would make an R-row verify look nearly as cheap as one row
             tail = (list(ids[-R:]) if len(ids) >= R else list(ids) + list(range(1000, 1000 + R - len(ids))))
@@ -946,7 +1001,6 @@ class SerialEngine:
         R = len(rows)
         mp = getattr(self, "_mprof", None)
         t0 = time.perf_counter()
-        g = self.graphs[R]
         n = c.engram_max_ngram_size
         by_slot: dict[int, list[int]] = {}
         for slot, tok in rows:
@@ -971,6 +1025,7 @@ class SerialEngine:
             sid.append(slot)
             h.append(hashes[slot][j])
         h = np.stack(h)                                                 # [R, 2, 24]
+        g = self.graph_for(R, max(pos) + 1)
         threads = min(64, max(STEP_READ_THREADS, 4 * R))               # many streams' rows: more reads in flight
         t1 = time.perf_counter()
         g["tok"].copy_(torch.tensor([t for _, t in rows]), non_blocking=True)
@@ -1011,10 +1066,10 @@ class SerialEngine:
 
         c, st = self.c, self.state
         R = len(tokens)
-        g = self.graphs[R]
         p0 = len(st.ids)
         if p0 + R > self.limit:
             raise ValueError(f"context {p0 + R} beyond {self.limit} tokens")
+        g = self.graph_for(R, p0 + R)
         st.ids.extend(tokens)
         start = max(0, p0 - (c.engram_max_ngram_size - 1))
         rp = self._rp
@@ -1145,7 +1200,7 @@ class SerialEngine:
         keys = self.state.ik[src]
         if static:                                                      # each row scores its own stream's keys
             scores = K.index_scores(iq, wts, self.big.ik[src], pos, a.ratio, kbase=self._ebase(src),
-                                    n_keys=self.entries[src])
+                                    n_keys=min(self.entries[src], self._width // a.ratio + 1))
             if L == c.candidate_source_layer_id:
                 self.candidates = K.candidate_blocks(scores, pos, a.ratio, c.candidate_block_size,
                                                      c.candidate_topk_blocks)

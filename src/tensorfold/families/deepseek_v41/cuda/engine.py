@@ -84,9 +84,19 @@ SHARED_POOL = os.environ.get("TF_DSV41_SHARED_POOL", "1") != "0"
 KEPT_GIB = float(os.environ.get("TF_DSV41_KEPT_GIB") or "1")    # kept out of the shared pool for kept prompt states
 
 
-# the decode graphs' buffers that scale with a stream's limit: each row-count graph R = 1..32 holds [R, limit + 1]
-# fp32 indexer scores and top-k scratch (R * 8 bytes a limit token, 528 * 8 over the 32 graphs)
-GRAPH_BYTES_PER_LIMIT_TOKEN = 8 * sum(range(1, 33))
+# the decode graphs' buffers that scale with a stream's limit ([R, limit // ratio] indexer scores and top-k scratch):
+# on one shared graph pool the largest graph's, measured 0.27 GiB for 128 graphs (32 row counts x 4 key widths) at a
+# 614400 limit; with a pool per graph (TF_DSV41_SHARED_GRAPHS=0) the sum, 4.05 GiB for the 32 full-width graphs
+GRAPH_BYTES_PER_LIMIT_TOKEN = 512 if os.environ.get("TF_DSV41_SHARED_GRAPHS", "1") != "0" else 7168
+
+
+def _widths_words() -> list[int]:
+    """The decode graphs' key widths and graph-pool flag as ints (both ranks must capture the same graphs)."""
+
+    from .serial import SHARED_GRAPH_POOL, WIDTHS
+
+    ws = sorted(WIDTHS)[:4]
+    return [int(SHARED_GRAPH_POOL), len(WIDTHS), *ws, *[0] * (4 - len(ws))]
 
 
 def carved_bytes(pool: int, carve: int, ratios: tuple[int, ...] = (2, 2, 2, 1)) -> int:
@@ -182,7 +192,7 @@ class Dsv41Engine:
                                     "there (or point TF_DSV41_ENGRAM_DIR at them)")
         self.streams = max(1, int(parallel))
         mine = [cap, int(bool(drafts)), int(explicit), self.streams, int(SHARED_POOL and self.streams > 1),
-                int(KEPT_GIB * 1024)]
+                int(KEPT_GIB * 1024), *_widths_words()]
         both = self._gather_ints(mine)
         if both[0] != both[1]:
             raise RuntimeError(f"the two ranks were started with different settings (context, drafts, parallel): "
@@ -232,6 +242,8 @@ class Dsv41Engine:
         with torch.no_grad():
             if drafts:
                 self.e.enable_dspark(DRAFTS)
+            torch.cuda.synchronize()
+            before = torch.cuda.memory_reserved()
             self.e.capture(1)
             # verify windows of one stream (1 + drafts rows); with --parallel, any round of up to 16 rows
             from .serial import PROMPT_ROWS
@@ -241,6 +253,11 @@ class Dsv41Engine:
                 top = max(top, min(PROMPT_ROWS, int(os.environ.get("TF_COPY_MAX") or 15) + 1))
             for rows in range(2, top + 1):
                 self.e.capture(rows)
+            torch.cuda.synchronize()
+            if rank == 0:
+                print(f"[tensorfold] decode graphs: {(torch.cuda.memory_reserved() - before) / 2 ** 30:.2f} GiB for "
+                      f"{len(self.e.graphs) + len(self.e.narrow)} graphs (key widths {[*self.e.widths, cap]})",
+                      flush=True)
             if drafts:
                 self.e.drafter.capture()
                 if self.streams > 1:                      # one drafting pass for several streams
