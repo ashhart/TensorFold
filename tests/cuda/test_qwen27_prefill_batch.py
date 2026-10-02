@@ -14,10 +14,13 @@ from tensorfold.families.qwen3_5.cuda.qmm_fast import prepare  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.weights import Attention, Config, GDN, Layer, QLinear, Weights  # noqa: E402
 
 V = 256
+VOLTA = torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 7   # no FP8 prompts, no sm_80 kernels
 
 
 @pytest.fixture(params=[False, True], ids=["bf16", "fp8"])
 def fp8(request):
+    if request.param and VOLTA:
+        pytest.skip("FP8 prompts need sm_89")
     with prompt_precision.using(request.param):
         yield request.param
 

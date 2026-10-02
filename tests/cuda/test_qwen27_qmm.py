@@ -6,6 +6,8 @@ import torch
 cuda = pytest.importorskip("torch").cuda
 if not cuda.is_available():
     pytest.skip("CUDA only", allow_module_level=True)
+if cuda.get_device_capability()[0] == 7:
+    pytest.skip("the sm_80 lane matmul; test_qmm_volta covers the Volta one", allow_module_level=True)
 
 from tensorfold.families.qwen3_5.cuda import qmm  # noqa: E402
 

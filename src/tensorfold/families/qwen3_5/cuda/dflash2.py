@@ -250,7 +250,7 @@ class DFlash2:
             self.sub_head = QLinear(*[None if t is None else t[lo:hi].contiguous()
                                       for t in (sub.weight, sub.scales, sub.biases)],
                                     layout=sub.layout, gs=sub.gs, bits=sub.bits)
-        if isinstance(target.head, QLinear) and target.head.layout == "tiled" and self.sub_rows is None:
+        if isinstance(target.head, QLinear) and target.head.layout in ("tiled", "volta") and self.sub_rows is None:
             self.sub_head = tile(self.sub_head)
         # Quantized draft projections can change acceptance but never target output.
         self.q4: dict[str, QLinear] = {}

@@ -17,6 +17,8 @@ import torch
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA only", allow_module_level=True)
+if torch.cuda.get_device_capability()[0] == 7:
+    pytest.skip("NVFP4 checkpoints need sm_80 kernels; the Volta engine serves the MLX checkpoint", allow_module_level=True)
 
 from tensorfold.cuda.nvfp4.linear import Fp4Linear, Fp8Linear
 from tensorfold.families.qwen3_5.cuda.dflash2 import _sub_parts
