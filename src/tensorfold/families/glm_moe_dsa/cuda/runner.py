@@ -242,7 +242,10 @@ class Runner:
         """A prompt's chunks (a, e): equal ones - a short remainder would read every weight again for a few rows
         (4102 = 2 x 2051, not 4096 + 6). Concurrent fills take the same chunks, so a prompt's bits never depend on
         what else runs."""
-        n = -(-L0 // self.prompt_rows)
+        rows = self.prompt_rows
+        if L0 < 3 * rows:                                # big chunks pay only over several of them (fused.PROMPT_ROWS_SHORT)
+            rows = min(rows, fused.PROMPT_ROWS_SHORT)
+        n = -(-L0 // rows)
         step = -(-L0 // n)
         return [(a, min(a + step, L0)) for a in range(0, L0, step)]
 
