@@ -36,7 +36,7 @@ GID_SCRIPT    = for i in 0 1 2 3 4 5 6 7 8 9; do g=$$(cat /sys/class/infiniband/
                 t=$$(cat /sys/class/infiniband/$(1)/ports/1/gid_attrs/types/$$i 2>/dev/null); \
                 case "$$g:$$t" in *0000:ffff:*"RoCE v2") echo $$i; break;; esac; done
 
-.PHONY: help env stage image sync guard memwait up down restart wait status logs logs-worker smoke \
+.PHONY: help env stage image prebuild sync guard memwait up down restart wait status logs logs-worker smoke \
         vllm-down vllm-up swap-in swap-out
 
 help:
@@ -65,7 +65,20 @@ image: stage sync
 	( ssh $(WORKER) "cd $(DIR) && $$build" > build/worker.log 2>&1 ) & w=$$!; \
 	rc=0; wait $$h || { rc=1; echo "❌ head build:"; tail -20 build/head.log; }; \
 	wait $$w || { rc=1; echo "❌ worker build:"; tail -20 build/worker.log; }; \
-	[ $$rc = 0 ] && echo "✅ $(IMAGE_NAME):$$rev (also :latest) on both nodes"; exit $$rc
+	[ $$rc = 0 ] && echo "✅ $(IMAGE_NAME):$$rev (also :latest) on both nodes"; [ $$rc = 0 ] || exit $$rc
+	@$(MAKE) --no-print-directory prebuild
+
+# compile the CUDA extensions into CACHE_DIR before any model is loaded: compiling beside a loaded model (a few GiB
+# free) can push a GB10 into the OOM killer. Refuses while a server holds the GPU; a no-op when the cache is warm.
+prebuild:
+	@test -n "$(CACHE_DIR)" || { echo "❌ CACHE_DIR is not set in .env"; exit 1; }
+	@run="docker run --rm --gpus all -v $(CACHE_DIR):/root/.cache -v $(DIR)/prebuild.py:/prebuild.py:ro $(IMAGE_NAME):latest python /prebuild.py"; \
+	if docker ps --format '{{.Names}}' | grep -qE '^tensorfold-dsv41-serve|$(VLLM_NAMES)'; then \
+	  echo "prebuild: a server holds the GPU here, skipped (run make prebuild after make down)"; exit 0; fi; \
+	echo "compiling CUDA extensions on the head and $(WORKER) (minutes on a new image)"; \
+	( $$run 2>&1 | grep -E "extensions ready|Error|error" | tail -3 ) & h=$$!; \
+	( ssh $(WORKER) "$$run" 2>&1 | grep -E "extensions ready|Error|error" | tail -3 ) & w=$$!; \
+	wait $$h; wait $$w
 
 sync:
 	@test -f .env || { echo "❌ no .env: 'make env' first"; exit 1; }
