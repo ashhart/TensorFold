@@ -310,6 +310,9 @@ requires a vision-capable model served with `--vision`. Thinking is off unless e
 `display` does not suppress it. Claude Code's `context_management` keep-all thinking directive is accepted. Mid-conversation system text stays
 in place with its system role; the model's chat template must support later system messages. Turn-scoped
 system messages, per-message output configuration and inline tool changes are unsupported.
+Claude Code 2.1.280 cannot use `local-inference-lab/Qwen3.8-Flash-Next-NVFP4` through these routes:
+its template permits system messages only at the beginning, while the client sends them later.
+Use a model template with native late-system support; the endpoint does not demote system instructions.
 JSON schema output, including Claude Code title requests, requires `pip install 'tensorfold[grammar]'`.
 
 Usage separates uncached `input_tokens` from `cache_read_input_tokens` and reports `output_tokens_details.thinking_tokens`
