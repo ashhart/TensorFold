@@ -80,6 +80,18 @@ reach the limit. Once that history exceeds it, even a text-only follow-up is ref
 the images. Remove older image content from the submitted history, start a new conversation, or restart
 the server with a larger count limit. The server does not discard images automatically.
 
+A request's images share 4,096 visual tokens, so a higher count makes each image smaller: eight images get about
+512 tokens each. On CUDA Qwen checkpoints (Qwen3.5/3.8 dense and Flash Next), `--vision-image-tokens N` raises
+that shared budget, up to 65,536, while each image keeps at most 4,096, so one image is sized as before. The tower
+encodes runs of whole images of at most 16,384 patches, the scratch one full-size image already needs; a request
+that fits one run is encoded in one call, as before. The byte and pixel limits still apply, and the longer prompt
+counts against the context window.
+
+```bash
+tensorfold serve Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP --parallel 2 --vision \
+  --vision-max-images 50 --vision-image-tokens 16384
+```
+
 Changing the count does not change the other limits: 10 MiB encoded per image and 20 MiB total, within a 32 MiB HTTP body.
 Decoded images are bounded to 8,192 pixels per dimension, 16 million pixels per image and 32 million total.
 EXIF orientation is applied and transparency is composited onto white; animated and multipage inputs are refused.

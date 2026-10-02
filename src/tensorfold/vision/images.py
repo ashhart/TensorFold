@@ -33,6 +33,7 @@ class ImageLimits:
     total_timeout_seconds: float = 30.0
     max_redirects: int = 3
     max_url_chars: int = 4096
+    max_visual_tokens: int = 4096        # the tokens a request's images share (CUDA Qwen: --vision-image-tokens)
 
     def __post_init__(self) -> None:
         for name in self.__dataclass_fields__:

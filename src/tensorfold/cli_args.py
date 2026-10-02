@@ -35,6 +35,9 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
     endpoint.add_argument("--vision-max-images", type=int, default=None,
                           help="with --vision, maximum images across the full request history (default: 4); "
                                "byte, pixel and visual-token limits still apply")
+    endpoint.add_argument("--vision-image-tokens", type=int, default=None,
+                          help="with --vision on CUDA Qwen checkpoints, the visual tokens a request's images share "
+                               "(default: 4096, at most 65536); each image keeps at most 4096")
 
     generation = serve.add_argument_group("generation (requests can override each of these)")
     generation.add_argument("--context", type=int, default=None,
