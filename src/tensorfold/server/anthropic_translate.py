@@ -181,6 +181,8 @@ def translate(body: Any, *, count: bool = False) -> dict[str, Any]:
         chat["response_format"] = {"type": "json_schema", "json_schema": {"name": "response", "schema": fmt["schema"],
                                                                        "strict": True}}
     thinking = body.get("thinking")
+    if thinking is None:
+        thinking = {"type": "disabled"}
     if thinking is not None:
         if not isinstance(thinking, dict) or thinking.get("type") not in ("disabled", "enabled", "adaptive"):
             raise RequestError("thinking.type must be disabled, enabled or adaptive")
@@ -196,11 +198,15 @@ def translate(body: Any, *, count: bool = False) -> dict[str, Any]:
     return chat
 
 
-def usage(value: dict[str, Any]) -> dict[str, int]:
+def usage(value: dict[str, Any]) -> dict[str, Any]:
     prompt = value.get("prompt_tokens", 0)
     cached = min(prompt, max(0, (value.get("prompt_tokens_details") or {}).get("cached_tokens", 0)))
-    return {"input_tokens": prompt - cached, "output_tokens": value.get("completion_tokens", 0),
-            "cache_creation_input_tokens": 0, "cache_read_input_tokens": cached}
+    result = {"input_tokens": prompt - cached, "output_tokens": value.get("completion_tokens", 0),
+              "cache_creation_input_tokens": 0, "cache_read_input_tokens": cached}
+    details = value.get("completion_tokens_details") or {}
+    if "reasoning_tokens" in details:
+        result["output_tokens_details"] = {"thinking_tokens": details["reasoning_tokens"]}
+    return result
 
 
 def error(message: str, status: int = 400) -> dict[str, Any]:

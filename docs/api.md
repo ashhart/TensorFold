@@ -307,10 +307,11 @@ items, and a `previous_response_id` that is not stored.
 The Messages routes reuse the same chat handler and engine on MLX and CUDA. They accept `system`, text/image
 blocks, `tool_use`/`tool_result`, custom tools and `tool_choice`, sampling, `stop_sequences`, `thinking`
 (disabled, enabled with `budget_tokens`, or adaptive), and `output_config` effort/JSON schema. Image support
-requires a vision-capable model served with `--vision`. Thinking round-trips as plaintext with an empty signature;
+requires a vision-capable model served with `--vision`. Thinking is off unless enabled or adaptive. It round-trips as plaintext with an empty signature;
 `display` does not suppress it. Claude Code's `context_management` keep-all thinking directive is accepted.
 
-Usage separates uncached `input_tokens` from `cache_read_input_tokens`; prefix caching remains automatic,
+Usage separates uncached `input_tokens` from `cache_read_input_tokens` and reports `output_tokens_details.thinking_tokens`
+when the backend counts them. Prefix caching remains automatic,
 so `cache_control` hints do not allocate an Anthropic cache or report cache-creation tokens. Errors use the
 Anthropic error envelope, including after an SSE stream opens. Server-side tools, documents/file IDs,
 redacted thinking and other context edits return HTTP 400.
