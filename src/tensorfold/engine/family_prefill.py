@@ -141,12 +141,12 @@ class FamilyPrefill:
         return (adopt(cache) if adopt is not None else cache), int(cached_tokens)
 
     def _family_prefill(self, stream: Any, *, cache: list[Any] | None, cached_tokens: int,
-                        checkpoints_at: Sequence[int]) -> list[Any]:
+                        checkpoints_at: Sequence[int], any_position: bool = False) -> list[Any]:
         return drain(self._family_prefill_steps(stream, cache=cache, cached_tokens=cached_tokens,
-                                                checkpoints_at=checkpoints_at))
+                                                checkpoints_at=checkpoints_at, any_position=any_position))
 
     def _family_prefill_steps(self, stream: Any, *, cache: list[Any] | None, cached_tokens: int,
-                              checkpoints_at: Sequence[int]) -> Iterator[None]:
+                              checkpoints_at: Sequence[int], any_position: bool = False) -> Iterator[None]:
         """The prompt's prefill, yielding only between its chunks; the last chunk and the first token go together."""
 
         prompt = stream.prompt_ids
@@ -156,6 +156,11 @@ class FamilyPrefill:
         # an image prompt never resumes, so it needs no cut at message starts: its chunks are the step grid alone
         chunks = self.prompt_chunks(prompt) if prepared is None else PromptChunks(
             None, len(prompt), step=getattr(self.prefill_plan, "step", None) or self.prefill_step)
+        if any_position and cache is not None and int(cached_tokens) and int(cached_tokens) not in chunks:
+            # a finished reply's cache resumes at its own length, not a chunk start: give the prefill a start there
+            starts = sorted({*chunks.starts, int(cached_tokens)}) if chunks.starts is not None else None
+            if starts is not None:
+                chunks = PromptChunks(starts, len(prompt), step=chunks.step)
         work, start = self._family_start(cache, cached_tokens, chunks)
         if prepared is not None:
             if start or cache is not None:
@@ -305,11 +310,11 @@ class FamilyPrefill:
             del work
 
     def _family_add_stream(self, stream: Any, *, cache: list[Any] | None, cached_tokens: int,
-                           checkpoints_at: Sequence[int]) -> Iterator[None]:
+                           checkpoints_at: Sequence[int], any_position: bool = False) -> Iterator[None]:
         """Prefill a stream a chunk a step; after the last chunk it takes part in the rounds."""
 
         work = yield from self._family_prefill_steps(stream, cache=cache, cached_tokens=cached_tokens,
-                                                     checkpoints_at=checkpoints_at)
+                                                     checkpoints_at=checkpoints_at, any_position=any_position)
         self.streams.append(stream)
         if stream.finished:
             stream.finished_at = time.perf_counter()

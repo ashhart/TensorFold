@@ -46,6 +46,9 @@ class CheckpointEntry:
     # A system block (loaded from disk, or saved to it): outside the slot count.
     pinned: bool = False
     born: int = 0              # the length of the prompt that stored it: a later turn's is longer
+    # A finished reply's cache: it sits at a message boundary the plan does not mark, so it matches by
+    # strict prefix alone (the state after these tokens is exact regardless of where chunks start).
+    any_position: bool = False
 
 
 def save_conversations(store: "CheckpointStore", directory: Path, model_id: str, *, keep: int = 2,
@@ -176,7 +179,7 @@ class CheckpointStore:
         best: CheckpointEntry | None = None
         for entry in self._entries:
             tokens = entry.tokens
-            if usable is not None and not usable(len(tokens)):
+            if usable is not None and not (entry.any_position or usable(len(tokens))):
                 continue
             if 0 < len(tokens) < len(prompt) and prompt[: len(tokens)] == tokens:
                 if best is None or len(tokens) > len(best.tokens):
@@ -230,7 +233,7 @@ class CheckpointStore:
               "re-prefills it", flush=True)
 
     def insert(self, tokens: list[int], cache: list[Any], *, last_prompt: list[int],
-               pinned: bool = False) -> None:
+               pinned: bool = False, any_position: bool = False) -> None:
         if not tokens:
             return
         nbytes = int(self.sizer(cache)) if self.sizer is not None else 0
@@ -242,7 +245,8 @@ class CheckpointStore:
             replaced = [entry for entry in self._entries if entry.tokens == list(tokens)]
             kept = [entry for entry in self._entries if entry.tokens != list(tokens)]
             pinned = pinned or any(entry.pinned for entry in replaced)
-            entry = CheckpointEntry(list(tokens), cache, list(last_prompt), nbytes, pinned, len(last_prompt))
+            entry = CheckpointEntry(list(tokens), cache, list(last_prompt), nbytes, pinned, len(last_prompt),
+                                    any_position)
             entries = [entry, *kept]
             for extra in [e for e in entries if e.pinned][self.pinned_slots:]:
                 extra.pinned = False

@@ -355,7 +355,8 @@ class LaneEngine(FamilyRounds):
     prefill_chunks = 0
 
     def __init__(self, model: Any, *, max_rows: int = 128, max_draft: int = 32,
-                 retain_finished_caches: bool = False, prefill_plan: Any = None,
+                 retain_finished_caches: bool = False, finished_prefix_tokens: int = 4096,
+                 prefill_plan: Any = None,
                  prefill_pass: int | None = None, pass_cache: int | None = None) -> None:
         if not getattr(model, "lane_family", False):
             raise TypeError(f"{type(model).__name__} is not a lane-engine family (engine.lane_family)")
@@ -366,6 +367,9 @@ class LaneEngine(FamilyRounds):
         self.max_draft = int(max_draft)
         # a finished stream's cache is handed to the caller for the next turn (never under a prefill plan)
         self.retain_finished_caches = bool(retain_finished_caches)
+        # a finished reply's state is kept only when its prefix is long enough that a re-prefill would cost
+        # more than the copy and the slot: short conversations' finished caches are never the better resume
+        self.finished_prefix_tokens = int(finished_prefix_tokens)
         if prefill_plan is not None:
             self.prefill_plan = prefill_plan
         if prefill_pass is not None:
@@ -393,9 +397,11 @@ class LaneEngine(FamilyRounds):
         return self.prefill_plan.chunks(prompt_ids)
 
     def _keeps_decoded(self, stream: LaneStream) -> bool:
-        """Whether a finished stream's decoded state is kept for the next turn (never under a plan: decoded rows)."""
+        """Whether a finished stream's decoded state is kept for the next turn: the next prompt resumes from
+        its length (a message boundary even when it is not a plan point — see ``CheckpointEntry.any_position``)."""
 
-        return self.retain_finished_caches and stream.retain and self.prefill_plan is None
+        return (self.retain_finished_caches and stream.retain
+                and stream.cache_len >= self.finished_prefix_tokens)
 
     @property
     def active_count(self) -> int:
@@ -427,16 +433,18 @@ class LaneEngine(FamilyRounds):
             self.streams.remove(stream)
 
     def add_stream(self, stream: LaneStream, *, cache: list[Any] | None = None, cached_tokens: int = 0,
-                   checkpoints_at: Sequence[int] = ()) -> None:
+                   checkpoints_at: Sequence[int] = (), any_position: bool = False) -> None:
         """Prefill a stream (from ``cache`` at ``cached_tokens`` when given); it takes part from the next round."""
 
-        drain(self.begin_stream(stream, cache=cache, cached_tokens=cached_tokens, checkpoints_at=checkpoints_at))
+        drain(self.begin_stream(stream, cache=cache, cached_tokens=cached_tokens,
+                                checkpoints_at=checkpoints_at, any_position=any_position))
 
     def begin_stream(self, stream: LaneStream, *, cache: list[Any] | None = None, cached_tokens: int = 0,
-                     checkpoints_at: Sequence[int] = ()) -> Iterator[None]:
+                     checkpoints_at: Sequence[int] = (), any_position: bool = False) -> Iterator[None]:
         """``add_stream`` a prompt chunk a step (each ``next`` feeds one); rounds may run between the steps."""
 
-        return self._family_add_stream(stream, cache=cache, cached_tokens=cached_tokens, checkpoints_at=checkpoints_at)
+        return self._family_add_stream(stream, cache=cache, cached_tokens=cached_tokens,
+                                       checkpoints_at=checkpoints_at, any_position=any_position)
 
     @staticmethod
     def cache_nbytes(cache: list[Any]) -> int:

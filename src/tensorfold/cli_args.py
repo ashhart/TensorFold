@@ -87,6 +87,9 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
     speed.add_argument("--prompt-cache-gib", type=float, default=None,
                        help="memory for cached conversation prefixes (0: off; default on a Mac: what the weights, a "
                             "whole-window request and a shared round leave idle, at least an eighth of RAM up to 16)")
+    speed.add_argument("--finished-prefix-tokens", type=int, default=4096,
+                       help="keep a finished reply's prompt state as a resume point when its conversation is at "
+                            "least this many tokens (default 4096; 0: any length)")
     speed.add_argument("--checkpoint-slots", type=int, default=None,
                        help="cached conversation prefixes kept in memory (default: 3 per parallel lane, at least 8); "
                             "with long conversations this, not --prompt-cache-gib, is usually the limit. Qwen3.8-27B "
