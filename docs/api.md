@@ -45,6 +45,7 @@ For decisions, `chat_template_kwargs` may be omitted, null, or an object contain
 | `temperature`, `top_p`, `top_k`, `min_p` | Sampling overrides; zero temperature is greedy | Both |
 | `seed` | Sampling key; otherwise derived from the prompt (and `TENSORFOLD_SEED_SALT`) | Both |
 | `stream` | Server-sent events; the last event carries usage | Both |
+| `stream_options.include_usage` | Usage in its own final event with `"choices": []`, not on the finish event | Both |
 | `chat_template_kwargs.enable_thinking` | Template thinking toggle | Both |
 | `draft` | False selects the serial reference; CUDA rejects it if the engine has no serial switch | Both |
 | `response_format`, `guided_json`, `guided_regex`, `guided_choice`, `guided_grammar`, `structured_outputs` | A JSON schema, any JSON object, a regex, a choice or an EBNF grammar the reply must match | Both |
