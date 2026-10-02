@@ -58,11 +58,13 @@ No field is evaluated as a shell command.
 
 ```bash
 tensorfold service install "/cached/model with spaces" --name code \
-  --port 8081 --python "$HOME/.venvs/tensorfold-control/bin/python" \
+  --port 8081 --parallel auto --python "$HOME/.venvs/tensorfold-control/bin/python" \
   --env TENSORFOLD_MEMORY_LIMIT_GB=48 \
   --arg=--vision --arg=--spill-gib --arg=20
 ```
 
+`--port` and `--parallel` are written on the serve command. A non-secret `--env` value such as
+`TENSORFOLD_MEMORY_LIMIT_GB` is stored on the profile and passed to that process.
 Repeat `--arg` for extra literal `serve` arguments. Managed endpoint flags stay on their own options.
 The bind address defaults to `127.0.0.1`. A non-loopback address needs `--allow-network`.
 That acknowledgement leaves authentication to a proxy you configure separately.

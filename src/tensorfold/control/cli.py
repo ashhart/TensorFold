@@ -30,7 +30,8 @@ def register(commands) -> None:
     install.add_argument("--port", type=int, default=8080)
     install.add_argument("--backend", choices=("mlx", "auto"), default="mlx")
     install.add_argument("--context", type=int)
-    install.add_argument("--parallel", default="auto")
+    install.add_argument("--parallel", default="auto",
+                         help="serve --parallel value written on the service command (default auto)")
     install.add_argument("--drafter")
     install.add_argument("--arg", action="append", default=[], help="extra literal serve argument, e.g. --arg=--vision")
     install.add_argument("--env", action="append", default=[], metavar="KEY=VALUE", help="non-secret override only")

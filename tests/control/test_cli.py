@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from tensorfold.control.cli import main, parser
+from tensorfold.control.cli import _profile, main, parser
 from tensorfold.control.config import Profile
 
 
@@ -59,3 +59,39 @@ def test_missing_token_does_not_launch(capsys, monkeypatch):
     monkeypatch.delenv("TF_TEST_NO_TOKEN", raising=False)
     assert main(["tui", "--token-env", "TF_TEST_NO_TOKEN"]) == 1
     assert "unset or empty" in capsys.readouterr().err
+
+
+def test_service_definition_carries_limit_port_and_parallel(manager, monkeypatch):
+    from tensorfold.control import runner
+    from tensorfold.control.config import read_environment
+
+    service, _transport = manager
+    args = parser().parse_args([
+        "service", "install", "Org/Nemotron", "--name", "nemotron",
+        "--port", "8081", "--parallel", "1", "--env", "TENSORFOLD_MEMORY_LIMIT_GB=48",
+    ])
+    service.install(_profile(args))
+    stored = service.store.get("nemotron")
+    assert stored.port == 8081
+    assert stored.environment == {"TENSORFOLD_MEMORY_LIMIT_GB": "48"}
+    command = stored.command()
+    assert command[command.index("--port") + 1] == "8081"
+    assert command[command.index("--parallel") + 1] == "1"
+    assert read_environment(stored)["TENSORFOLD_MEMORY_LIMIT_GB"] == "48"
+    text = service.paths.profile("nemotron").read_text()
+    assert '"TENSORFOLD_MEMORY_LIMIT_GB": "48"' in text
+    captured = {}
+
+    def fake_supervise(argv, environment, log, stop, *, grace=15):
+        captured["argv"] = list(argv)
+        captured["environment"] = dict(environment)
+        return 0
+
+    monkeypatch.setattr(runner, "supervise", fake_supervise)
+    assert runner.main(["--profile", str(service.paths.profile("nemotron")),
+                        "--log", str(service.paths.log("nemotron"))]) == 0
+    argv = captured["argv"]
+    assert argv[argv.index("--port") + 1] == "8081"
+    assert argv[argv.index("--parallel") + 1] == "1"
+    assert "serve" in argv
+    assert captured["environment"]["TENSORFOLD_MEMORY_LIMIT_GB"] == "48"
