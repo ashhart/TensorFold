@@ -30,6 +30,23 @@ def test_the_setting(monkeypatch):
     assert mtp_head(True, False, 1) is False
 
 
+def test_parallel_leaves_the_head_out_beside_dflash2_unless_asked(monkeypatch):
+    """--parallel: unset, TF_GLM_MTP is auto (concurrent streams draft with DFlash2, the head's ~2 GiB a rank stays
+    out); with no DFlash2 the head still loads; an explicit TF_GLM_MTP keeps its meaning."""
+
+    monkeypatch.delenv("TF_GLM_MTP", raising=False)
+    for parallel in (2, 4):
+        assert mtp_head(True, False, 1, parallel=parallel) is False         # beside DFlash2: out
+        assert mtp_head(False, False, 1, parallel=parallel) is True         # MTP is the only drafter: in
+        assert mtp_head(False, True, 1, parallel=parallel) is False         # --no-drafts: out
+        assert mtp_head(True, False, 1, "", parallel=parallel) is False
+        assert mtp_head(True, False, 1, "1", parallel=parallel) is True     # asked for: in
+        assert mtp_head(False, False, 1, "0", parallel=parallel) is False
+    assert mtp_head(True, False, 1, parallel=1) is True                     # one stream: MTP_DEFAULT, as before
+    monkeypatch.setenv("TF_GLM_MTP", "1")
+    assert mtp_head(True, False, 1, parallel=4) is True
+
+
 def test_the_weight_estimate_leaves_out_only_the_head():
     base = lambda name, info: (7, 1)                                         # noqa: E731
     t = without_mtp(base, 45)

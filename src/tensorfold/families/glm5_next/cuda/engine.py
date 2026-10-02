@@ -86,11 +86,13 @@ def _ints_f64(lo: int, hi: int) -> float:
 MTP_DEFAULT = "1"                     # TF_GLM_MTP when unset: the MTP head stays beside DFlash2 (auto, 0: left out)
 
 
-def mtp_head(drafter: bool, serial_only: bool, layers: int, value: str | None = None) -> bool:
-    """TF_GLM_MTP: load the MTP head? auto: not beside DFlash2 or with --no-drafts; 1: whenever it exists; 0: never."""
+def mtp_head(drafter: bool, serial_only: bool, layers: int, value: str | None = None, parallel: int = 1) -> bool:
+    """TF_GLM_MTP: load the MTP head? auto: not beside DFlash2 or with --no-drafts; 1: whenever it exists; 0: never.
+    Unset, it is MTP_DEFAULT with one stream and auto under --parallel (``parallel`` > 1): concurrent streams draft
+    with DFlash2 when it is loaded, so the head (about 2 GiB a rank) stays out unless TF_GLM_MTP=1 asks for it."""
 
     value = os.environ.get("TF_GLM_MTP", "") if value is None else value
-    value = value.strip().lower() or MTP_DEFAULT
+    value = value.strip().lower() or (MTP_DEFAULT if parallel <= 1 else "auto")
     if value not in ("0", "1", "auto"):
         raise ValueError(f"TF_GLM_MTP: 0, 1 or auto, not {value!r}")
     if value == "auto":
@@ -105,13 +107,58 @@ def without_mtp(transform, layers: int):
     return lambda name, info: (0, 0) if name.startswith(prefix) else transform(name, info)
 
 
+PARALLEL_MOST = 4                     # --parallel: concurrent requests at most (the segmented kernels' streams)
+MULTI_WINDOW = 32                     # --parallel: rows of every stream's verify windows together (multi.MAX_WINDOW)
+
+
+def slot_bytes(t: dict, world: int = 2, rows: int = MAX_ROWS) -> int:
+    """What one more stream slot (``forward.Slots``) takes on each rank, from the text config: every KDA layer's
+    recurrent states (two parities), conv window, a decode window's projections and replay scratch."""
+
+    from tensorfold.cuda.geometry import layer_counts
+
+    linear, _ = layer_counts(t)
+    lin = t.get("linear_attn_config") or {}
+    lh = int(lin.get("num_heads", t.get("linear_num_heads", 64))) // world
+    ld = int(lin.get("head_dim", t.get("linear_head_dim", 128)))
+    conv = int(lin.get("short_conv_kernel_size", t.get("linear_conv_kernel_dim", 4)))
+    width = 3 * lh * ld + 2 * ld + lh                  # the KDA input projection's rows (q, k, v, f_a, g_a, beta)
+    scratch = rows * lh * (ld * 2 + ld * 4 + ld * 2 + ld * 4 + 4)
+    return linear * (2 * lh * ld * ld * 4 + (conv - 1) * 3 * lh * ld * 2 + rows * width * 2 + scratch)
+
+
+def multi_draft_bytes(t: dict, streams: int, world: int = 2, *, ring: bool, capacity: int,
+                      tap_rows: int = MAX_ROWS) -> int:
+    """``dflash2_multi.MultiDrafter``'s context pool on each rank: ``streams`` rings (or flat contexts of capacity +
+    block rows) and the padded context updates' trash rows, keys and values per draft layer."""
+
+    from tensorfold.cuda.geometry import draft_ring_rows
+
+    layers = int(t["num_hidden_layers"])
+    heads = int(t["num_key_value_heads"]) // world
+    hd = int(t["head_dim"])
+    block = int((t.get("dflash_config") or {}).get("block_size", 16))
+    window = int(t.get("sliding_window", 0))
+    ring_rows = draft_ring_rows(window - 1, block) if ring and window > 0 else 0
+    cap = ring_rows if 0 < ring_rows < capacity + block else capacity + block
+    trash = -(-max(64, streams * tap_rows) // block) * block
+    return 2 * layers * heads * hd * (streams * cap + trash) * 2
+
+
 class GlmEngine:
     """GLM-5.3-Flash on two ranks (this one ``rank``): weights, MTP and DFlash2 drafting, per-request policies."""
 
+    parallel = 1                # --parallel N: requests decoded together (``multi``); 1 serves one at a time
+    concurrent = False          # the server hands every request straight to ``generate`` (the scheduler orders them)
+    multi = None                # --parallel > 1: the ``multi.MultiDecoder`` (both ranks)
+    scheduler = None            # ... and rank 0's ``multi.GlmScheduler``
+
     def __init__(self, model_dir: Path, *, rank: int, master: str, port: int, policy: str = DEFAULT_POLICY,
                  drafter: Path | None = None, context: int | None = None, context_explicit: bool | None = None, serial_only: bool = False, comm=None,
-                 prefill_rows: int | None = None) -> None:
-        """``comm``: a communicator with ``all_gather`` and ``barrier`` instead of NCCL between two machines (tests)."""
+                 prefill_rows: int | None = None, parallel: int = 1) -> None:
+        """``comm``: a communicator with ``all_gather`` and ``barrier`` instead of NCCL between two machines (tests);
+        ``parallel``: requests decoded together (``multi``: their caches share one pool, each stream up to the context
+        window; each reply is the one its request gets alone)."""
 
         import torch
 
@@ -124,9 +171,13 @@ class GlmEngine:
                                               split_weights)
 
         encode_policy(policy)                           # a bad default fails here, not in the first request
+        parallel = int(parallel)
+        if not 1 <= parallel <= PARALLEL_MOST:
+            raise ValueError(f"--parallel: 1 to {PARALLEL_MOST} requests at once for GLM-5.3-Flash, not {parallel}")
         torch.cuda.set_device(0)
         self.torch = torch
         self.rank = rank
+        self.parallel = parallel
         self.policy = "0" if serial_only else policy
         self.serial_only = serial_only
         self.comm = comm if comm is not None else NCCL(rank, 2, master, port)
@@ -137,23 +188,48 @@ class GlmEngine:
         from . import LATENT
 
         # TF_GLM_MTP off: the MTP layer's tensors, caches and buffers are neither loaded nor estimated
-        self.mtp_on = mtp_head(drafter is not None, serial_only, cfg.mtp_layers)
+        self.mtp_on = mtp_head(drafter is not None, serial_only, cfg.mtp_layers, parallel=parallel)
         weights_estimate = split_weights(rule)
         if not self.mtp_on:
             weights_estimate = without_mtp(weights_estimate, cfg.layers)
+        from tensorfold.cuda.capacity import Geometry
+
+        def geometry(text):
+            g = mla_geometry(text, 2, MAX_ROWS, minimum_slots=DENSE_CAPACITY, latent=LATENT, mtp=self.mtp_on)
+            if parallel == 1:
+                return g
+            # --parallel: every stream slot past the first (KDA states, conv windows, window scratch); the batched
+            # verify window's buffers fit the decode rows the estimate sizes, its token selection's fp32 scores
+            # (MULTI_WINDOW rows x a pool of 4 tokens) grow with the pool
+            extra = (parallel - 1) * slot_bytes(text)
+            per = 4 * MULTI_WINDOW // 4
+            return Geometry(lambda slots: g.bytes_at(slots) + extra + per * slots, g.reserve, g.minimum_slots)
+
+        def draft_geometry(text):
+            g = dflash2_geometry(text, 2, MAX_ROWS, ring=DRAFT_RING)
+            if parallel == 1:
+                return g
+            # --parallel: the multi-stream drafter's own pool of contexts beside the solo drafter's
+            return Geometry(lambda slots: g.bytes_at(slots) + multi_draft_bytes(text, parallel, ring=DRAFT_RING,
+                                                                                 capacity=slots), g.reserve)
+
         self.capacity_plan = admit(model_dir, context if explicit else cfg.dense_limit, explicit, torch,
-                                   lambda text: mla_geometry(text, 2, MAX_ROWS, minimum_slots=DENSE_CAPACITY,
-                                                             latent=LATENT, mtp=self.mtp_on),
-                                   weights_estimate, rank=rank, world=2, gather=self._gather_ints,
+                                   geometry, weights_estimate, rank=rank, world=2, gather=self._gather_ints,
                                    draft_dir=drafter, draft_weights=lambda d: dflash2_weights(d, 2),
-                                   draft_geometry=lambda text: dflash2_geometry(text, 2, MAX_ROWS, ring=DRAFT_RING))
+                                   draft_geometry=draft_geometry)
         self.limit = self.capacity_plan["context_window"]
         capacity = self.capacity_plan["cache_slots"]
         long_context = self.limit > cfg.dense_limit
         # both ranks must run the same calls: refuse to start when they were given different settings
         prefill_rows = PREFILL_ROWS if prefill_rows is None else int(prefill_rows)
+        multi_code = [0]
+        if parallel > 1:                      # serial and batched verify windows make different collectives
+            from .multi import verify_kind
+            from .multi_tune import MultiSettings
+
+            multi_code = [1 + ("batched", "serial").index(verify_kind())] + MultiSettings.from_env().code()
         mine = [int(drafter is not None), capacity, int(long_context), int(serial_only), int(LATENT),
-                prefill_rows, int(self.mtp_on), int(DRAFT_RING)]
+                prefill_rows, int(self.mtp_on), int(DRAFT_RING), parallel, *multi_code]
         # other conversations' kept prompts get what the window leaves, at most TF_GLM_CACHE_GIB, the same on both ranks
         plan = self.capacity_plan
         wanted = int(float(os.environ.get("TF_GLM_CACHE_GIB", "3")) * 2 ** 30)
@@ -161,14 +237,35 @@ class GlmEngine:
         both = self._gather_ints(mine + [spare >> 20])
         if both[0][:-1] != both[1][:-1]:
             raise RuntimeError("the two ranks were started with different settings (draft model, context, drafts, "
-                               "TF_GLM_LATENT, TF_GLM_MTP, TF_GLM_DRAFT_RING): "
+                               "TF_GLM_LATENT, TF_GLM_MTP, TF_GLM_DRAFT_RING, --parallel, TF_GLM_MULTI_VERIFY, "
+                               "TF_GLM_MULTI_SAMPLER / _DEPTH / _OVERHEAD_MS / _ASYNC / _LONE / _PROFILE): "
                                f"rank 0 {both[0][:-1]}, rank 1 {both[1][:-1]}; pull the draft model on both machines "
                                "(or pass --drafter none to both) and give both the same flags")
         self.cache_bytes = min(both[0][-1], both[1][-1]) << 20
         plan["kept_bytes"] = self.cache_bytes
         for key in ("serving_peak_bytes_estimate", "total_bytes_estimate"):
             plan[key] = plan[key] + self.cache_bytes
-        if rank == 0 and self.cache_bytes < wanted:
+        # --parallel: one pool of per-token caches for every stream and kept prompt: the window's slots, plus what
+        # TF_GLM_CACHE_GIB gives kept prompts (their rows in the pool, their KDA states and DFlash2 windows beside it),
+        # whole 2,048-token extents; each stream holds up to the window (pool.py, multi.py)
+        pool_rows = None
+        if parallel > 1:
+            from tensorfold.cuda.capacity import config as read_config
+
+            from .pool import ALIGN
+
+            text = read_config(model_dir)
+            g = geometry(text)
+            per_token = max(1, -(-(g.bytes_at(capacity + 65536) - g.bytes_at(capacity)) // 65536))
+            states = self._cache_entries() * (slot_bytes(text, rows=0) // 2 + (22 << 20))
+            pool_rows = (capacity + max(0, self.cache_bytes - states) // per_token) // ALIGN * ALIGN
+            if pool_rows < ALIGN:
+                raise ValueError(f"--parallel {parallel}: a pool of {pool_rows} tokens is less than one {ALIGN}-token "
+                                 f"extent; free memory or lower --context")
+            self.limit = min(self.limit, pool_rows - MAX_ROWS)
+            self.cache_bytes = 0                 # kept prompts live in the pool
+            plan["pool_tokens"] = pool_rows
+        if rank == 0 and self.cache_bytes < wanted and parallel == 1:
             print(f"[tensorfold] other conversations' prompts are kept in {self.cache_bytes / 2 ** 30:.1f} GiB, what "
                   f"the {self.limit}-token window leaves (TF_GLM_CACHE_GIB asks {wanted / 2 ** 30:.1f})", flush=True)
         if not self.mtp_on and drafter is None and not serial_only:
@@ -181,16 +278,20 @@ class GlmEngine:
         self.comm.barrier()
         self.w = w
         if rank == 0 and cfg.mtp_layers and not self.mtp_on:
-            print("[tensorfold] the checkpoint's MTP head is not loaded (TF_GLM_MTP=" +
-                  (os.environ.get("TF_GLM_MTP", "").strip() or MTP_DEFAULT) + "): " +
-                  ("DFlash2 drafts every request" if drafter is not None else "--no-drafts"), flush=True)
+            setting = os.environ.get("TF_GLM_MTP", "").strip() or (MTP_DEFAULT if parallel == 1 else
+                                                                    "auto, the --parallel default")
+            print(f"[tensorfold] the checkpoint's MTP head is not loaded (TF_GLM_MTP={setting}): " +
+                  ("DFlash2 drafts every request" if drafter is not None else "--no-drafts") +
+                  ("; TF_GLM_MTP=1 loads it" if parallel > 1 and drafter is not None else ""), flush=True)
         self.drafter = None
         if drafter is not None:
             from .dflash2 import Drafter
 
-            self.drafter = Drafter(drafter, w, capacity=capacity, ring=DRAFT_RING)
-        self.e = Engine(w, capacity=capacity, max_rows=MAX_ROWS, prefill_rows=prefill_rows, graphs=True, graph_rows=GRAPH_ROWS,
-                        long_context=long_context, taps=self.drafter.tap_layers if self.drafter is not None else ())
+            self.drafter = Drafter(drafter, w, capacity=pool_rows or capacity, ring=DRAFT_RING)
+        self.e = Engine(w, capacity=pool_rows or capacity, max_rows=MAX_ROWS, prefill_rows=prefill_rows, graphs=True,
+                        graph_rows=GRAPH_ROWS, long_context=long_context,
+                        taps=self.drafter.tap_layers if self.drafter is not None else (), streams=parallel,
+                        pool_rows=pool_rows)
         if self.drafter is not None:
             self.drafter.capture()
         self.costs = self._calibrate()
@@ -207,7 +308,29 @@ class GlmEngine:
         # kept conversations (decode.Snapshot, least recently used first) and the live caches' ids; states and saved rows stay within cache_bytes
         self.cache: list = []
         self.live: list[int] = []
-        self.cache_entries = int(os.environ.get("TF_GLM_CACHE_ENTRIES", "8"))
+        self.cache_entries = self._cache_entries()
+        if parallel > 1:
+            from .multi import GlmScheduler, MultiDecoder
+
+            self.multi = MultiDecoder(self, parallel)
+            if rank == 0:
+                self.scheduler = GlmScheduler(self.multi, max_streams=parallel)
+                self.concurrent = True
+                drafts = ("DFlash2" if self.drafter is not None else "") + (
+                    (" or " if self.drafter is not None else "") + "MTP" if self.mtp_on else "")
+                print(f"[tensorfold] --parallel {parallel}: up to {parallel} requests decode together, their caches "
+                      f"in one pool of {pool_rows} tokens (each up to {self.limit}); {drafts or 'no'} drafts, prompt "
+                      f"chunks of {self.multi.fill_rows} rows while others decode (TF_GLM_FILL_ROWS, "
+                      f"TF_GLM_FILL_SHARE {self.multi.share:g}); {self.multi.tune.describe()}", flush=True)
+                if self.multi.row_ms is not None:
+                    print("[tensorfold] --parallel batched window ms by rows: " +
+                          " ".join(f"{i + 1}:{ms:.1f}" for i, ms in enumerate(self.multi.row_ms)), flush=True)
+
+    @staticmethod
+    def _cache_entries() -> int:
+        """TF_GLM_CACHE_ENTRIES: kept prompt states at most (default 8)."""
+
+        return int(os.environ.get("TF_GLM_CACHE_ENTRIES", "8"))
 
     def _calibrate(self) -> dict:
         """Per-piece ms for ``drafter_choice.DrafterChoice``: fastest of interleaved passes, equal on both ranks."""
@@ -484,8 +607,8 @@ class GlmEngine:
         return stats
 
     def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens, draft: bool = True,
-                 constraint=None) -> dict[str, Any]:
-        """Mirror one rank-0 request on rank 1; draft=False uses serial decoding and fresh prefill as the reference drafted replies must equal."""
+                 constraint=None, *, background: bool = False) -> dict[str, Any]:
+        """Mirror one rank-0 request on rank 1; draft=False uses serial decoding and fresh prefill as the reference drafted replies must equal; ``background``: under --parallel, after the other requests and yielding to them."""
 
         if len(prompt) >= self.limit:
             raise ValueError(f"prompt of {len(prompt)} tokens: this engine serves contexts up to {self.limit}")
@@ -496,6 +619,12 @@ class GlmEngine:
             spec = getattr(self.request, "policy", None) or self.policy
         code = self._effective(encode_policy(spec))
         stop_eos = bool(getattr(self.request, "stop_eos", True))
+        if self.scheduler is not None:          # --parallel: the scheduler's worker runs it with the others
+            stats = self.scheduler.submit(list(prompt), max_tokens, sampling, bool(draft) and not self.serial_only,
+                                          on_tokens, stop_eos=stop_eos, constraint=constraint, background=background,
+                                          glm={"code": code, "spec": spec})
+            stats.update(policy=spec, drafts=draft)
+            return stats
         hit = self._resume(list(prompt), code) if draft else None
         seed = (sampling.seed if sampling else 0) & 0xFFFFFFFFFFFFFFFF
         header = [max_tokens, int(stop_eos), int(draft), len(hit.ids) if hit is not None else 0,
@@ -523,6 +652,8 @@ class GlmEngine:
             raise ValueError("empty prompt")
         if not labels:
             raise ValueError("empty labels")
+        if self.multi is not None:
+            raise ValueError("label scores (/v1/decisions) are served by GLM-5.3-Flash with --parallel 1")
         if len(prompt) >= self.limit:
             raise ValueError(f"prompt of {len(prompt)} tokens: this engine serves contexts up to {self.limit}")
         self._ring()                    # rank 1 waits on the store before this header, as a chat request does
@@ -558,6 +689,9 @@ class GlmEngine:
     def follow(self) -> None:
         """Rank 1: mirror every request rank 0 serves, forever."""
 
+        if self.multi is not None:
+            self.multi.follow()
+            return
         from tensorfold.engine.exact_sampling import Sampling
 
         while True:

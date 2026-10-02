@@ -117,3 +117,11 @@ The multimodal rotary and image-feature integration is adapted from MiaAI-Lab's
 [Flash Next vision patch 0008](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/blob/a3aa89835022c55ca8e55008c37785954834e04f/patches/0008-flash-next-vision.patch),
 MIT License, Copyright (c) 2026 MiaAI-Lab. The license is included in `LICENSES/MiaAI-Lab-MIT.txt`.
 The port preserves the v0.5 CUDA execution APIs and adds an offline EXL3 vision adapter.
+
+## GLM-5.3-Flash CUDA concurrent streams
+
+The GLM-5.3-Flash `--parallel` engine (`families/glm5_next/cuda/multi.py`, `multi_tune.py`, `pool.py`,
+`verify.py`, `segments.py`, `dflash2_multi.py` and the segmented kernels in `kda.cu`, `latent.py`, `sparse.py` and
+`forward.py`) comes from MiaAI-Lab's
+[GLM-5.3-Flash EXL3 2x DGX Sparks recipe](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold)
+(patches 0026-0048), Apache License 2.0, Copyright (c) 2026 MiaAI-Lab, contributed to TensorFold by its author.

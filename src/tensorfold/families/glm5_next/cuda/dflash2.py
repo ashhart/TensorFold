@@ -25,14 +25,19 @@ NO_LIMIT = 1e30
 
 @triton.jit
 def _dconv_kernel(X, DYN, BASE, RES, OUT, D: tl.constexpr, G: tl.constexpr, GS: tl.constexpr,
-                  BRANCH: tl.constexpr, HAS_RES: tl.constexpr, BLOCK: tl.constexpr):
-    """Two-tap grouped dynamic convolution over the block (row r mixes rows r and r - 1), plus the residual."""
+                  BRANCH: tl.constexpr, HAS_RES: tl.constexpr, BLOCK: tl.constexpr, SEG: tl.constexpr = 0):
+    """Two-tap grouped dynamic convolution over the block (row r mixes rows r and r - 1), plus the residual; SEG > 0:
+    the rows are blocks of SEG rows side by side (``dflash2_multi``), each block's first row mixing no row before."""
 
     row = tl.program_id(0)
     c = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     ok = c < D
     x = tl.load(X + row * D + c, mask=ok, other=0.0).to(tl.float32)
-    prev = tl.load(X + (row - 1) * D + c, mask=ok & (row > 0), other=0.0).to(tl.float32)
+    if SEG > 0:
+        has_prev = row % SEG != 0
+    else:
+        has_prev = row > 0
+    prev = tl.load(X + (row - 1) * D + c, mask=ok & has_prev, other=0.0).to(tl.float32)
     grp = c // GS
     d0 = tl.load(DYN + ((row * 2 + BRANCH) * 2) * G + grp, mask=ok, other=0.0).to(tl.float32)
     d1 = tl.load(DYN + ((row * 2 + BRANCH) * 2 + 1) * G + grp, mask=ok, other=0.0).to(tl.float32)
@@ -132,14 +137,14 @@ def _dattn_kernel(Q, K, V, OUT, POS, window, scale, N: tl.constexpr, G: tl.const
 
 
 def _dconv(x: torch.Tensor, dyn: torch.Tensor, base: torch.Tensor, branch: int, group_size: int,
-           residual: torch.Tensor | None = None) -> torch.Tensor:
+           residual: torch.Tensor | None = None, seg: int = 0) -> torch.Tensor:
     rows, d = x.shape
     x = x.contiguous()
     out = torch.empty_like(x)
     block = 1024
     _dconv_kernel[(rows, triton.cdiv(d, block))](x, dyn.contiguous(), base, residual if residual is not None else x,
                                                  out, D=d, G=d // group_size, GS=group_size, BRANCH=branch,
-                                                 HAS_RES=residual is not None, BLOCK=block, num_warps=4)
+                                                 HAS_RES=residual is not None, BLOCK=block, SEG=seg, num_warps=4)
     return out
 
 
@@ -151,6 +156,20 @@ def _quantize4(w: torch.Tensor) -> qmm.Q4:
 
 def _mm(x: torch.Tensor, w: qmm.Q4, xs: torch.Tensor | None = None, *, f32: bool = False) -> torch.Tensor:
     return qmm.matmul(x, w, xs, f32=f32)
+
+
+def merge_candidates(g: torch.Tensor, proj: torch.Tensor, k: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """A block pass's host rows -> (ids [depth, k], logits, projected rows): ``g`` [ranks, depth, 2 * k] (each rank's
+    top-k values, then ids as fp32 bits), merged by value then id over the ranks; ``proj`` [depth, selector rank]."""
+
+    values = torch.cat([g[r, :, :k] for r in range(g.shape[0])], dim=1).numpy().astype(np.float64)
+    tokens = torch.cat([g[r, :, k:].contiguous().view(torch.int32) for r in range(g.shape[0])],
+                       dim=1).numpy().astype(np.int64)
+    if g.shape[0] > 1:
+        order = np.lexsort((tokens, -values), axis=-1)[:, :k]
+        values = np.take_along_axis(values, order, axis=1)
+        tokens = np.take_along_axis(tokens, order, axis=1)
+    return tokens, values, proj.numpy().astype(np.float64)          # astype copies: nothing keeps the host buffer
 
 
 @dataclass
@@ -434,20 +453,15 @@ class Drafter:
             self.block_graph.replay()
         else:
             self._block_compute()
-        g = self.packed[:, :depth].cpu()
-        k = self.top_k
-        values = torch.cat([g[r, :, :k] for r in range(g.shape[0])], dim=1).numpy().astype(np.float64)
-        tokens = torch.cat([g[r, :, k:].contiguous().view(torch.int32) for r in range(g.shape[0])],
-                           dim=1).numpy().astype(np.int64)
-        if g.shape[0] > 1:
-            order = np.lexsort((tokens, -values), axis=-1)[:, :k]
-            values = np.take_along_axis(values, order, axis=1)
-            tokens = np.take_along_axis(tokens, order, axis=1)
-        return tokens, values, self.proj[:depth].cpu().numpy().astype(np.float64)
+        return merge_candidates(self.packed[:, :depth].cpu(), self.proj[:depth].cpu(), self.top_k)
 
     def chain(self, tokens: np.ndarray, values: np.ndarray, proj: np.ndarray, anchor: int, first: int,
-              sampling: Sampling | None, confidence: float = 0.0) -> list[int]:
-        """Choose candidates with selector edges and target keyed noise; stop below cumulative confidence, always keeping the first draft."""
+              sampling: Sampling | None, confidence: float = 0.0, *, confs: list | None = None) -> list[int]:
+        """Choose candidates with selector edges and target keyed noise; stop below cumulative confidence, always keeping the first draft.
+
+        ``confs`` (a list): the chain is walked whole and each pick's confidence (the softmax share of its score)
+        appended to it, for a caller that cuts the chains itself (``multi``'s joint allocation). Only where the chain
+        stops changes: the picks are the same."""
 
         depth = tokens.shape[0]
         sampled = sampling is not None and sampling.temperature > 0
@@ -462,7 +476,10 @@ class Drafter:
             score = (values[d] + EDGE * edge) / temp
             pick = score + NOISE * noise[d] if noise is not None else score
             j = int(np.argmax(pick))
-            if confidence > 0:
+            if confs is not None:
+                p = np.exp(score - score.max())
+                confs.append(float(p[j] / p.sum()))
+            elif confidence > 0:
                 p = np.exp(score - score.max())
                 chain *= float(p[j] / p.sum())
                 if d > 0 and chain < confidence:

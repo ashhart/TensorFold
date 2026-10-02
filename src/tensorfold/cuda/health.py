@@ -83,6 +83,14 @@ class Health:
         if decoder is not None:                         # read, never locked: sizes of the decoder's own tables
             body["streams"] = {"decoding": len(getattr(decoder, "streams", ())),
                                "prefilling": len(getattr(decoder, "filling", ())), "max": scheduler.max_streams}
+            more = getattr(decoder, "health", None)       # a decoder's own counts (GLM: paused streams, its pool)
+            if callable(more):
+                try:
+                    extra = dict(more())
+                except Exception:                         # noqa: BLE001  (a table changing under the read)
+                    extra = {}
+                body["streams"].update(extra.pop("streams", {}))
+                body.update(extra)
         window = getattr(app, "effective_context_window", None)
         if window:
             body["context_length"] = int(window)

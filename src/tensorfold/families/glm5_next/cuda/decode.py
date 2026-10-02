@@ -84,7 +84,14 @@ class Engine:
 
     def __init__(self, w: Weights, *, capacity: int = 2560, max_rows: int = 8, prefill_rows: int = PREFILL_ROWS,
                  graphs: bool = False, graph_rows: tuple[int, ...] = (1, 2, 3, 4), long_context: bool = False,
-                 taps: tuple[int, ...] = ()) -> None:
+                 taps: tuple[int, ...] = (), streams: int = 1, pool_rows: int | None = None) -> None:
+        """``streams``: stream slots (``forward.Slots``) and ``pool_rows``: tokens of the shared cache pool
+        (``forward.Caches``, default ``capacity``) for concurrent streams (``multi``). ``st`` is the state the
+        single-stream paths run on: ``home`` (slot 0, the pool's first ``capacity`` tokens), the one the CUDA graphs
+        were captured on, unless ``use`` points it at another."""
+
+        from .forward import Caches, Slots
+
         self.w = w
         w.meta["long_context"] = long_context
         self.rows, self.prefill_rows = max_rows, prefill_rows
@@ -94,7 +101,9 @@ class Engine:
             self.buf.set_taps(tuple(taps), w.cfg.hidden)         # before any graph capture
             self.pbuf.set_taps(tuple(taps), w.cfg.hidden)
         self.mbuf = Buffers(w, max_rows, capacity) if w.mtp is not None else None
-        self.st = State(w, capacity, max_rows)
+        self.caches = Caches(w, pool_rows or capacity)
+        self.slots = Slots(w, streams, max_rows)
+        self.home = self.st = State(w, capacity, max_rows, caches=self.caches, slots=self.slots)
         self.last_hidden: torch.Tensor | None = None
         self.constraint = self.window = None            # a request's grammar, and the next sample's rows under it
         self.draft_n = w.head.n
@@ -109,17 +118,34 @@ class Engine:
     def reset(self) -> None:
         self.st.reset()
 
+    def use(self, st: State) -> State:
+        """Run the single-stream paths (prefill, forward, commit, snapshots) on ``st``; returns the previous state."""
+
+        prev, self.st = self.st, st
+        return prev
+
+    def graphed(self, st: State | None = None) -> bool:
+        """Whether the captured graphs run ``st`` (default the current state): the same slot and extent base as the
+        state they were captured on (and the pool's views, not a clone's)."""
+
+        st = self.st if st is None else st
+        return (self.graphs is not None and st.caches is self.caches and st.slots is self.slots
+                and st.graph_key == self.home.graph_key)
+
     def forward(self, tokens: Sequence[int]) -> torch.Tensor:
-        """A step's forward (a CUDA graph when one was captured for its shape): logits [R, V/world]."""
+        """A step's forward (a CUDA graph when one was captured for its shape and state): logits [R, V/world]."""
 
         R = stage(self.w, self.st, self.buf, tokens)
         dense = self.st.pos + R <= self.w.cfg.dense_limit
         g, kind = None, "main"
-        if self.graphs is not None and dense:
+        if not self.graphed():
+            pass
+        elif dense:
             g = self.graphs.main.get((R, self.st.parity))
-        elif self.graphs is not None and self.st.pos >= self.w.cfg.dense_limit and self.st.index is not None:
-            # every row past the dense limit: the sparse graph for this pool bucket (same kernels as eager)
-            bucket = pool_bucket(self.st.pos, R, self.st.index[0][2].shape[0] - 2)
+        elif self.st.pos >= self.w.cfg.dense_limit and self.st.index is not None:
+            # every row past the dense limit: the sparse graph for this pool bucket (same kernels as eager); the
+            # buckets the graphs were captured for are the home view's
+            bucket = pool_bucket(self.st.pos, R, self.home.index[0][2].shape[0] - 2)
             g, kind = self.graphs.sparse.get((R, self.st.parity, bucket)), "sparse"
         if g is not None:
             self.replays[kind] += 1
@@ -134,11 +160,12 @@ class Engine:
         n = mtp_stage(self.w, self.st, self.mbuf, next_tokens, hidden)
         dense = self.st.mtp_len + n <= self.w.cfg.dense_limit
         g, kind = None, "mtp"
-        if self.graphs is not None and not self.mbuf.zero_first and dense:
+        if not self.graphed():
+            pass
+        elif not self.mbuf.zero_first and dense:
             g = self.graphs.mtp.get(n)
-        elif (self.graphs is not None and not self.mbuf.zero_first and self.st.index is not None
-              and self.st.mtp_len >= self.w.cfg.dense_limit):
-            bucket = pool_bucket(self.st.mtp_len, n, self.st.index[-1][2].shape[0] - 2)
+        elif not self.mbuf.zero_first and self.st.index is not None and self.st.mtp_len >= self.w.cfg.dense_limit:
+            bucket = pool_bucket(self.st.mtp_len, n, self.home.index[-1][2].shape[0] - 2)
             g, kind = self.graphs.sparse_mtp.get((n, bucket)), "sparse_mtp"
         if g is not None:
             self.replays[kind] += 1
@@ -407,6 +434,33 @@ def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp:
     first = e.sample(last, [len(prompt)], sampling)[0]
     e.follow([first])
     return first
+
+
+@torch.no_grad()
+def prefill_chunk(e: Engine, prompt: Sequence[int], start: int, R: int, *, drafter=None, mtp: bool = False,
+                  head: bool = True) -> torch.Tensor | None:
+    """Commit prompt rows start .. start + R (at e.st.pos == start) as one chunk of ``prefill``: the chunk's
+    forward, DFlash2's taps, the MTP head's rows (``mtp``: the next tokens are the prompt's), the commit; a copy of
+    the head's logits of its last row with ``head``, else None. Concurrent streams' prompt steps (``multi``) run
+    their prompts as these, one chunk at a time."""
+
+    w, st, b = e.w, e.st, e.pbuf
+    if st.pos != start or not 0 < R <= e.prefill_rows or start + R > len(prompt):
+        raise ValueError(f"a prompt chunk {start} .. {start + R} of {len(prompt)} at position {st.pos}")
+    chunk = list(prompt[start:start + R])
+    out = compute(w, st, b, stage(w, st, b, chunk), nch=chunks_for(st, R), host_pos=st.pos)
+    out = out.clone() if head else None
+    e.last_hidden = b.fnormed[R - 1:R].clone()
+    if drafter is not None:
+        drafter.add_taps(e.tap_rows(R, b))
+    if mtp and w.mtp is not None:
+        nxt = list(prompt[start + 1:start + R + 1])
+        if nxt:
+            with prof.timed("mtp absorb"):
+                _absorb_rows(e, b.fnormed[:len(nxt)], nxt)
+    with prof.timed("commit"):
+        commit(w, st, b, R, R)
+    return out
 
 
 def _absorb_rows(e: Engine, hidden: torch.Tensor, next_tokens: Sequence[int]) -> None:

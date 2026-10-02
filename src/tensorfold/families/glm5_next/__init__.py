@@ -222,7 +222,7 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
     return GlmEngine(Path(model_dir), rank=int(rank), master=master, port=int(master_port), policy=policy,
                      drafter=Path(drafter) if drafter and not no_drafts else None,
                      context=options.get("context"), context_explicit=options.get("context_explicit"),
-                     serial_only=bool(no_drafts))
+                     serial_only=bool(no_drafts), parallel=int(options.get("parallel", 1)))
 
 
 def __getattr__(name: str) -> Any:

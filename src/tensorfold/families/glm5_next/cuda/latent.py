@@ -350,3 +350,114 @@ def sparse_attention(qa: torch.Tensor, cache: torch.Tensor, tokens: torch.Tensor
 
 def chunks_for(length: int) -> int:
     return triton.cdiv(length, CHUNK)
+
+
+# ------------------------------------------------------------------------------------- multi-stream windows ---
+# A window of several streams' rows back to back ([s1: rows][s2: rows]...), each stream's latents in its own extent
+# of a shared arena [P, LW]: per-row device tables (``segments.SegRows``: position, extent base, dense or sparse)
+# drive the kernels below. Every row keeps the arithmetic, tiles and head blocks of today's single-stream kernels,
+# so a segment's rows get the bits of that segment run alone on its extent (tests/cuda/test_glm_attn_segments.py).
+# Cache reads and writes go through _lat_get / _lat_put (the one place a quantized cache plugs in).
+
+@triton.jit
+def _lat_get(LC, rows, ok, k, RS: tl.constexpr):
+    """Cache rows ``rows`` (int64 [n]) as a bf16 tile [n, LW]; rows with ok false are not read (zeros)."""
+    return tl.load(LC + rows[:, None] * RS + k[None, :], mask=ok[:, None], other=0).to(tl.bfloat16)
+
+
+@triton.jit
+def _lat_put(LC, row, k, x, RS: tl.constexpr):
+    """Cache row ``row`` (int64) <- x [LW] (bf16)."""
+    tl.store(LC + row * RS + k, x)
+
+
+@triton.jit
+def _seg_lat_write(LAT, lat_stride, LC, POS, BASE, LW: tl.constexpr):
+    """Row r -> arena row base[r] + pos[r]."""
+    r = tl.program_id(0)
+    row = tl.load(BASE + r).to(tl.int64) + tl.load(POS + r).to(tl.int64)
+    k = tl.arange(0, LW)
+    _lat_put(LC, row, k, tl.load(LAT + r * lat_stride + k), LW)
+
+
+def seg_latent_write(lat: torch.Tensor, cache: torch.Tensor, rows) -> None:
+    """lat [R, latent] bf16 rows into the arena at each row's base + pos (``rows``: segments.SegRows)."""
+    _seg_lat_write[(lat.shape[0],)](lat, lat.stride(0), cache, rows.pos, rows.base, LW=cache.shape[1], num_warps=4)
+
+
+@triton.jit
+def _seg_chunks(QA, LC, POS, BASE, SPR, TOK, CNT, PO, PM, PL, R, W: tl.constexpr, H: tl.constexpr,
+                LW: tl.constexpr, CH: tl.constexpr, SCALE: tl.constexpr, HBT: tl.constexpr, KTT: tl.constexpr):
+    """Program (row, head block, chunk): _dense_chunks for a dense row (keys base + 0 .. base + pos[r], its own
+    limit), _sparse_chunks for a sparse one (keys base + its selected tokens, list order): the same tiles, masks and
+    _tile math either way, so a row's partials are those of its single-stream kernel."""
+    r = tl.program_id(0)
+    hb = tl.program_id(1)
+    c = tl.program_id(2)
+    B = tl.load(BASE + r).to(tl.int64)
+    sp = tl.load(SPR + r) != 0
+    n = tl.where(sp, tl.load(CNT + r, mask=sp, other=0), tl.load(POS + r) + 1)   # selected tokens, or keys 0 .. pos
+    hh = hb * HBT + tl.arange(0, HBT)
+    hok = hh < H
+    k = tl.arange(0, LW)
+    m = tl.full((HBT,), float("-inf"), tl.float32)
+    l = tl.zeros((HBT,), tl.float32)
+    o = tl.zeros((HBT, LW), tl.float32)
+    if c * CH < n:
+        q = tl.load(QA + (r * H + hh[:, None]) * LW + k[None, :], mask=hok[:, None], other=0).to(tl.bfloat16)
+        for t in range(CH // KTT):
+            idx = c * CH + t * KTT + tl.arange(0, KTT)
+            ok = idx < n
+            tok = tl.load(TOK + r * W + idx, mask=ok & sp, other=0).to(tl.int64)
+            tok = tl.where(sp, tok, idx.to(tl.int64))
+            kv = _lat_get(LC, B + tok, ok, k, LW)
+            m, l, o = _tile(q, kv, m, l, o, ok, SCALE)
+    base = (c * R + r) * H + hh
+    tl.store(PO + base[:, None] * LW + k[None, :], o, mask=hok[:, None])
+    tl.store(PM + base, m, mask=hok)
+    tl.store(PL + base, l, mask=hok)
+
+
+def seg_chunks() -> int:
+    """Chunks a segmented window's rows take: a sparse row's 2,051 selected tokens, a dense row's keys up to
+    SPARSE_FROM - 1 (both 5 of 512); chunks past a row's keys are empty (merged as nothing, the same bits)."""
+    from .sparse import SPARSE_FROM, TOKENS
+
+    return triton.cdiv(max(SPARSE_FROM, TOKENS), CHUNK)
+
+
+SEG_WIDE_ROWS = 8        # segmented windows from this many rows take 32-head tiles (keys read once; fewer programs)
+
+
+def seg_head_block(R: int) -> int:
+    """Heads per program of a segmented window: 16 for a few rows (more programs in flight), a rank's 32 from
+    SEG_WIDE_ROWS (each key tile read once for them). 16- and 32-row tiles give a row the same bits (head_block),
+    so either matches the single-stream kernels' 16 (tests/cuda/test_glm_attn_segments.py checks both)."""
+    return HB_WIDE if R >= SEG_WIDE_ROWS else HB
+
+
+def seg_attention(qa: torch.Tensor, cache: torch.Tensor, rows, tokens: torch.Tensor | None,
+                  counts: torch.Tensor | None, s: LatentScratch, *, scale: float, out: torch.Tensor,
+                  hb: int | None = None) -> torch.Tensor:
+    """Attention of a segmented window's rows qa [R, H, 512] -> out [R, H, 512]: dense rows over their stream's
+    keys 0 .. pos, sparse rows over their selected tokens (``segments.seg_select``: tokens relative to the stream,
+    counts), each in its own extent of the arena. One chunk pass and one merge for both kinds; a row gets the bits
+    of ``attention`` (dense) or ``sparse_attention`` (sparse) run on its segment alone."""
+    R, H, LW = qa.shape
+    nch = seg_chunks()
+    if nch > s.nch or R > s.rows or LW != s.lw:
+        raise ValueError(f"segmented attention: {R} rows, {nch} chunks, width {LW} past the scratch's "
+                         f"{s.rows}, {s.nch}, {s.lw}")
+    if tokens is None:                   # a window without sparse rows (no index): nothing reads the lists
+        tokens, counts, W = s.dummy, s.dummy, 1
+    else:
+        W = tokens.shape[1]
+    n = nch * R * H
+    hb = seg_head_block(R) if hb is None else hb
+    if hb not in (HB, HB_WIDE):
+        raise ValueError(f"segmented attention: {hb} heads a tile, not {HB} or {HB_WIDE}")
+    _seg_chunks[(R, triton.cdiv(H, hb), nch)](qa, cache, rows.pos, rows.base, rows.sparse, tokens, counts,
+                                              s.po[:n * LW], s.pm[:n], s.pl[:n], R, W=W, H=H, LW=LW, CH=CHUNK,
+                                              SCALE=scale, HBT=hb, KTT=KT, num_warps=8, num_stages=1)
+    _merge[(R, H)](s.po, s.pm, s.pl, out, s.dummy, R, H=H, LW=LW, NCH=nch, SPARSE=False, num_warps=4)
+    return out

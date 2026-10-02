@@ -27,7 +27,8 @@ when those terms fit the intended use. The CLI uses it automatically once it has
 Without it, the engine uses MTP drafts; `--drafter none` explicitly selects MTP-only drafting.
 Give both ranks the same drafter setting. `--no-drafts` disables all drafting for the serial reference.
 A checkpoint with neither an MTP head nor a supplied DFlash2 model is refused unless drafts are disabled.
-`TF_GLM_MTP` decides whether the CUDA engine loads the MTP head: `1` (the default) keeps it beside DFlash2, so MTP
+`TF_GLM_MTP` decides whether the CUDA engine loads the MTP head: `1` (the default with one stream; `--parallel`
+leaves it out beside DFlash2 unless set, see below) keeps it beside DFlash2, so MTP
 policies and `auto`'s per-round choice stay available; `auto` leaves it out when DFlash2 is loaded or drafts are
 disabled; `0` leaves it out. Left out, it saves each rank the head's weights (about 2 GiB for this checkpoint), its
 cache rows and decode buffers, and prompts skip its absorb; MTP policies (and `--mtp-drafts N`) then draft with
@@ -77,8 +78,8 @@ Prompt prefill uses the shared CUDA prefill kernels. Decode uses CUDA graphs, pa
 pool bucket. The engine keeps up to 8 conversations' prompts (`TF_GLM_CACHE_ENTRIES`): when another
 conversation takes the attention caches, a kept prompt's rows are saved. Kept states and saved rows together get
 `TF_GLM_CACHE_GIB` (default 3), or less when the window leaves less memory on either Spark; the startup log says
-when it is less, and the memory estimate includes it. It serves one request at a time. Both ranks finish a started
-reply after a client disconnects.
+when it is less, and the memory estimate includes it. Without `--parallel` it serves one request at a time, and both
+ranks finish a started reply after a client disconnects.
 
 DFlash2 attends only its 2,048-row sliding window: a block pass reads only the window's tiles, and the drafter keeps
 its context in a ring of that window, its block and a tile (2,176 rows, 21 MiB a rank whatever the window, instead
@@ -86,6 +87,47 @@ of 10 KiB a rank for every token of the window). A kept prompt DFlash2 can resum
 (20 MiB a rank, within `TF_GLM_CACHE_GIB`). The drafts are the same bits. `TF_GLM_DRAFT_RING=0` keeps the
 whole-window buffer instead (give both ranks the same value). The memory estimate counts the draft model as it is
 held (4-bit copies and its selector's codebooks, 0.63 GiB a rank), not at 4 bytes a checkpoint value.
+
+### Concurrent requests (`--parallel`)
+
+`--parallel N` (2 to 4, the same on both ranks) decodes up to N requests together. Each reply is the one its request
+gets served alone with `"draft": false`, as with one request at a time.
+
+- **One cache pool.** Every per-token cache (DSA latents, the indexer's keys, gates and pooled keys, the MTP layer's)
+  is one pool of rows: the window's slots plus what `TF_GLM_CACHE_GIB` gives kept prompts, in whole 2,048-token
+  extents. A stream, or a kept prompt, owns an extent and may grow up to the window; the startup log gives the pool's
+  size. KDA states, conv windows and a decode window's scratch live in one slot a stream. A request the pool cannot
+  place waits; when every decoding stream waits for room, the youngest goes back to the queue and replays later
+  (its sent tokens are not sent again).
+- **Batched verify rounds.** A round verifies every decoding stream's window (its pending token and drafts, at most
+  32 rows in all) in one forward: embeddings, hyper-connections, projections and MoE run on all rows at once (their
+  kernels keep rows apart), the KDA layers run each stream's rows from its own slot (segmented chain, replay and
+  conv shift kernels) and the DSA layers each stream's rows over its own extent (segmented latent write, indexer
+  update, token selection and attention), each with the arithmetic of the single-stream kernels. One CUDA graph a
+  window size serves every mix of positions. `TF_GLM_MULTI_VERIFY=serial` verifies each window as its own forward
+  instead (the reference; the same replies).
+- **Drafts.** DFlash2 streams draft in one batched block pass and one batched context update a round, each stream
+  from its own context ring. MTP streams draft on the MTP head from their own cache rows. With `--parallel`, an
+  unset `TF_GLM_MTP` means `auto`: beside DFlash2 the head is not loaded (about 2 GiB a rank saved) and every
+  drafting request uses DFlash2; without DFlash2 the head loads; `TF_GLM_MTP=1` loads it beside DFlash2 too.
+  `auto` drafts with DFlash2 when it is loaded, else with the MTP head (the single-stream `auto`'s MTP rule); an MTP
+  policy uses the head when it is loaded, else its DFlash2 twin (the same reply either way).
+- **Prompts.** A prompt fills in chunks between decode rounds: chunks of `TF_GLM_FILL_ROWS` rows (default 1,024)
+  while other streams decode, the engine's prompt chunk otherwise; `TF_GLM_FILL_SHARE` (default 0.5) is the share
+  of iterations prompt chunks take while others decode. A chunk never shares a forward with decode rows.
+- **Kept prompts.** A drafted prompt's state is kept in its extent before its last token, as the single-stream
+  engine keeps it, so the same prompt again or its conversation's next turn resumes there (`TF_GLM_CACHE_ENTRIES`
+  states at most); a kept prompt resumes a DFlash2 stream with its DFlash2 window, an MTP stream with its MTP rows.
+- **Two ranks.** Rank 0 decides admissions, placement and rounds and sends rank 1 one message an iteration; rank 1
+  derives the drafts itself and checks the depths. A client that leaves ends its stream at the next round boundary
+  on both ranks. Label scores (`/v1/decisions`) need `--parallel 1`.
+
+Speed settings that never change a reply (give both ranks the same values): `TF_GLM_MULTI_SAMPLER=packed` (every
+stream's sampler rows in two all-gathers), `TF_GLM_MULTI_DEPTH=joint` or `scale:A` (draft depths chosen across the
+round's streams), `TF_GLM_MULTI_ASYNC=1` (rank 0 sends its message without waiting for the GPU),
+`TF_GLM_MULTI_LONE=1` (a stream decoding alone moves onto the one-stream CUDA graphs; kept prompts in their rows
+make way, so it is off by default) and `TF_GLM_MULTI_PROFILE=N` (a round's time breakdown every N rounds).
+`TF_GLM_MULTI_WATCHDOG_S` (default 300) dumps every thread's stack when an iteration stalls.
 
 ### Long contexts: the latent cache
 
