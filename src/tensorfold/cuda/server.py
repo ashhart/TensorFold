@@ -67,6 +67,7 @@ class App:
     """Serve one engine with sampling and reply-length defaults for requests that omit them."""
 
     reads_ignore_eos = False            # True where the engine reads ``ignore_eos`` itself; a ``stop_eos`` engine is given it
+    joint = None                        # a decision model's head (``tensorfold.server.joint_schema``)
 
     def __init__(self, engine, model_dir: Path, served: str, *, default_thinking: bool = False,
                  sampling: dict[str, Any] | None = None, max_tokens: int = 4096,
@@ -94,6 +95,11 @@ class App:
         if self.context_window < 0:
             raise ValueError("context_window must be 0 or a positive token count")
         self.turns = Turns()                # one request at a time where the engine decodes one
+        from tensorfold.server.joint_schema import JointSchema, has_head
+
+        if has_head(self.model_dir):          # it answers /v1/decisions and /v1/systemone
+            self.joint = JointSchema.load(self.model_dir, engine,
+                                          lambda text: [int(t) for t in self.tok.encode(text, add_special_tokens=False).ids])
 
     @property
     def model_ids(self) -> list[str]:
@@ -171,6 +177,8 @@ class App:
 
         from tensorfold.server.decisions import DecisionError, build_response, prompts_for
 
+        if self.joint is not None:
+            return self._joint(self.joint.decisions, body)
         if not hasattr(self.engine, "score_labels"):
             raise RequestError("this model's CUDA engine does not score decision labels")
 
@@ -204,6 +212,23 @@ class App:
                 except ValueError as exc:
                     raise RequestError(f"question {item.id!r}: {exc}") from exc
             return build_response(body, prepared, scored)
+        finally:
+            turns.give()
+
+    def systemone(self, body: dict[str, Any]) -> dict[str, Any]:
+        """A Jev/SystemOne request body, answered by a decision model's joint schema head."""
+
+        if self.joint is None:
+            raise RequestError("/v1/systemone needs a decision model with a joint schema head (Cloudflare/clef)")
+        return self._joint(self.joint.systemone, body)
+
+    def _joint(self, answer: Callable[[dict[str, Any]], dict[str, Any]], body: dict[str, Any]) -> dict[str, Any]:
+        turns = self._turns()
+        turns.take(False)
+        try:
+            return answer(body)
+        except ValueError as exc:            # DecisionError, or an engine refusal (a prompt past the capacity)
+            raise RequestError(str(exc)) from exc
         finally:
             turns.give()
 

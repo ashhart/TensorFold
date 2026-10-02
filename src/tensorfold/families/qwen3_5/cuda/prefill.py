@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 from dataclasses import dataclass
 from typing import Any, Sequence
 
@@ -21,6 +22,9 @@ from .qmm_fast import matmul, matmul_partial, tile
 from .weights import Plain, QLinear, Weights
 
 CHUNK = 4096
+# set while a decision head's prompt fills (engine.hidden_rows): its bf16 projections may take cuBLAS, whose bits
+# follow the row count, since no prompt state of it is kept or resumed
+DECISION_ROWS: contextvars.ContextVar[bool] = contextvars.ContextVar("decision_rows", default=False)
 TAP_LAYERS = (5, 19, 33, 47, 61)
 
 
@@ -31,6 +35,8 @@ def _mm(x, w: QLinear, f32: bool = False) -> torch.Tensor:
         return shared.prefill_matmul8(x, tile(w), f32=f32) if isinstance(w, QLinear) else w.prefill8(x)
     if not isinstance(w, QLinear):
         return w.prefill(x)                               # an EXL3 pack's or an NVFP4 checkpoint's projection
+    if w.layout == "dense" and DECISION_ROWS.get():      # a decision's prompt: nothing resumes it, so cuBLAS
+        return torch.nn.functional.linear(x, w.weight)
     packed = tile(w)
     if packed.fast:                                       # each weight rounded once to bf16, one fp32 chain over K
         return shared.prefill_matmul(x, packed, f32=f32, tile=shared.prompt_tile(x.shape[0], packed.n))
