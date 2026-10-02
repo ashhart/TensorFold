@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Sequence
@@ -311,6 +312,36 @@ def prefill_chunk(e: Engine, prompt: Sequence[int], start: int, *, mtp: bool = T
     return last
 
 
+NGRAM_AHEAD = os.environ.get("TF_NGRAM_AHEAD", "1") != "0"
+_AHEAD = None                     # the one read-ahead thread pool
+
+
+def ngram_ahead(e: Engine, prompt: Sequence[int], start: int) -> None:
+    """A long prompt on an EXL3 pack: ask for its later chunks' n-gram table pages now (MADV_WILLNEED, in the
+    background), so a chunk's gather finds them read while earlier chunks run. Nothing a gather returns changes."""
+
+    global _AHEAD
+    w = e.w
+    if not NGRAM_AHEAD or w.x3 is None or len(prompt) - start <= e.prefill_rows:
+        return
+    p = next((lay.ple for lay in w.layers if lay.ple is not None), None)
+    if p is None or not hasattr(p.table, "willneed"):
+        return
+    from concurrent.futures import ThreadPoolExecutor
+
+    if _AHEAD is None:
+        _AHEAD = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ngram-ahead")
+    hist, toks, rows = e.st.ple_history, list(prompt), e.prefill_rows
+    n = p.ngram.n
+
+    def run() -> None:
+        for a in range(start + rows, len(toks), rows):        # the first chunk gathers now anyway
+            h = np.asarray(toks[max(0, a - (n - 1)):a], dtype=np.int64) if a - start >= n - 1 else hist
+            p.table.willneed(p.ngram.ids(h, np.asarray(toks[a:a + rows], dtype=np.int64)))
+
+    _AHEAD.submit(run)
+
+
 @torch.no_grad()
 def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp: bool = True,
             resume: dict | None = None, constraint=None, probabilities=None, keep_at: int | None = None,
@@ -322,6 +353,7 @@ def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp:
     start, last = prefill_begin(e, prompt, mtp=mtp, resume=resume), None
     if vision is not None:
         image_rows.attach(e.st, vision, len(prompt))
+    ngram_ahead(e, prompt, start)
     if keep_at is not None and not start <= keep_at <= len(prompt):
         raise ValueError(f"keep_at {keep_at} is outside the prefilled range [{start}, {len(prompt)}]")
     saved = e.kept = resume if keep_at == start else None

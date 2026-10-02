@@ -239,3 +239,26 @@ def test_cut_model_prompts_ignore_chunking_and_resume_as_fresh(cut_model):
     snap = e.st.snapshot()
     for key in ("rec", "conv", "ple_tail"):
         assert torch.equal(snap[key], runs[0][1][key]), key
+
+
+@needs_model
+def test_cut_model_ngram_read_ahead_changes_no_bits(cut_model, monkeypatch):
+    """TF_NGRAM_AHEAD: a prompt longer than a chunk asks for its later chunks' n-gram pages ahead; its first token,
+    state and last streams are those without it."""
+
+    from tensorfold.families.qwen4_exp.cuda import decode
+    from tensorfold.families.qwen4_exp.cuda.decode import Engine, prefill
+
+    w = cut_model
+    prompt = [int(t) for t in np.random.default_rng(6).integers(0, w.cfg.vocab, size=300)]
+    p = next(lay.ple for lay in w.layers if lay.ple is not None)
+    assert p.table.willneed(p.ngram.ids(p.ngram.initial_history(), np.asarray(prompt[:64]))) > 0
+    runs = []
+    for ahead in (False, True):
+        monkeypatch.setattr(decode, "NGRAM_AHEAD", ahead)
+        e = Engine(w, capacity=512, max_rows=8, prefill_rows=64, graphs=False)
+        first = prefill(e, prompt, None)
+        runs.append((first, e.st.snapshot(), e.last_streams.clone()))
+    assert runs[0][0] == runs[1][0] and torch.equal(runs[0][2], runs[1][2])
+    for key in ("rec", "conv", "ple_tail"):
+        assert torch.equal(runs[0][1][key], runs[1][1][key]), key
