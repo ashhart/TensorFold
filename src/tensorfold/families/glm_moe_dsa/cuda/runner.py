@@ -23,6 +23,10 @@ from . import fused
 PROMPT_ROWS = fused.PROMPT_ROWS
 PROFILE_FLAG = os.environ.get("TF_GLM53_PROFILE_FLAG", "/tf/PROFILE")      # touch it: the next PROFILE_ROUNDS traced
 PROFILE_ROUNDS = 8
+# Capture replays (every rank alike): soft labels for the prompt rows after the last <|assistant|> - a replayed
+# reply's rows (the target's own samples, replayed as prompt + reply) - as decode rounds would have recorded them.
+CAPTURE_LABEL = os.environ.get("TF_GLM53_CAPTURE_LABEL", "0") == "1"
+ASSISTANT_ID = int(os.environ.get("TF_GLM53_ASSISTANT_ID", "154828"))       # GLM-5.3's <|assistant|>
 
 
 class RoundProfiler:
@@ -120,6 +124,7 @@ class Runner:
         self.topk = c.index_topk
         cols = fused.bucket(capacity, self.topk) or 0
         self.cols = max(cols, 1)
+        self._check_cache_fits(w, capacity, slots)
         self.st = fused.State(w, capacity, slots)
         self.drafter = None                              # DFlash2 (engine attaches; set_drafter)
         self.cap = None                                  # DFlash2 training capture (rank 0, TF_GLM53_CAPTURE_DIR)
@@ -257,6 +262,42 @@ class Runner:
                 logits = lg
         return logits
 
+    @staticmethod
+    def _check_cache_fits(w, capacity: int, slots: int) -> None:
+        """Refuse a context x streams whose latent caches leave under TF_GLM53_CACHE_RESERVE_GB (default 6) free: on
+        GB10's unified memory an overcommitted cache does not fail, it swaps the node until its watchdog reboots it
+        (10-02: --parallel 4 x 140K context = ~50 GB a rank on top of 65 GB of weights rebooted all four Sparks)."""
+        c = w.cfg
+        local = -(-capacity // w.dcp) + 1
+        row = len(w.layers) * (c.kv_lora_rank + c.qk_rope_head_dim) * 2         # bf16 latent rows, every layer
+        need = row * local * slots
+        free = torch.cuda.mem_get_info()[0]
+        spare = float(os.environ.get("TF_GLM53_CACHE_RESERVE_GB", "6")) * (1 << 30)
+        if need > free - spare:
+            fit = max(0, int((free - spare) // (row * slots)) * w.dcp)
+            raise RuntimeError(f"context {capacity} x {slots} streams needs {need / 2**30:.1f} GiB of caches a rank, "
+                               f"{free / 2**30:.1f} GiB is free (keeping {spare / 2**30:.0f} GiB spare): use --context "
+                               f"<= {fit} with --parallel {slots}, or fewer streams")
+
+    def _label_rows(self, toks: torch.Tensor, a: int, e: int) -> None:
+        """CAPTURE_LABEL: the full logits of chunk rows a..e-1 from the last <|assistant|> on (every rank: the head
+        all-gathers the vocabulary), recorded on rank 0 as decode would (row p's logits predict p + 1). Needs every
+        row's final hidden on every rank: sequence-parallel chunks (own rows only) are refused."""
+        if fused.PROMPT_SP:
+            raise RuntimeError("TF_GLM53_CAPTURE_LABEL needs TF_GLM53_PROMPT_SP=0 (labels read every row's hidden)")
+        ids = toks[:e].tolist()
+        start = next((i for i in range(len(ids) - 1, -1, -1) if ids[i] == ASSISTANT_ID), None)
+        if start is None or max(a, start) >= e:
+            return
+        w, b, vb = self.w, self.pb, self.vb
+        nb = vb.lpart.shape[0]
+        for r0 in range(max(a, start), e, nb):
+            r1 = min(e, r0 + nb)
+            lg = fused.head(w, vb, b.hidden[r0 - a:r1 - a], w.final_norm, r1 - r0)
+            if self.cap is not None:
+                for j in range(r1 - r0):
+                    self.cap.add_logits(r0 + j, lg[j])
+
     def prefill_chunk(self, st, toks: torch.Tensor, a: int, e: int, L0: int, taps: bool = False,
                       layers: tuple[int, int] | None = None):
         """Prompt rows a..e-1 into ``st`` (the Runner's State, or a stream's slot view), then the MTP layer's rows;
@@ -293,6 +334,8 @@ class Runner:
             self.drafter.add_taps(b.taps[:R])
         if taps and self.cap is not None:
             self.cap.add_taps(b.taps[:R])
+        if taps and CAPTURE_LABEL:
+            self._label_rows(toks, a, e)
         logits = b.logits[:1].clone() if e == L0 else None
         if self.k:
             self._mtp_prompt(b, toks, a, e, T, st)
@@ -340,7 +383,7 @@ class Runner:
 
     def _dflash_cfg(self) -> tuple[int, float]:
         cfg = {"depth": int(os.environ.get("TF_GLM53_DFLASH_DEPTH", "7")),
-               "confidence": float(os.environ.get("TF_GLM53_DFLASH_CONFIDENCE", "0.4"))}
+               "confidence": float(os.environ.get("TF_GLM53_DFLASH_CONFIDENCE", "0.3"))}
         try:
             import json as _json
 
@@ -454,7 +497,7 @@ class Runner:
         [pending, drafts] in one window (graph), the kept rows' taps extend the drafter's context."""
         vb, dr = self.vb, self.drafter
         cfg = {"depth": int(os.environ.get("TF_GLM53_DFLASH_DEPTH", "7")),
-               "confidence": float(os.environ.get("TF_GLM53_DFLASH_CONFIDENCE", "0.4"))}
+               "confidence": float(os.environ.get("TF_GLM53_DFLASH_CONFIDENCE", "0.3"))}
         try:                                             # runtime override (the same file on every node)
             import json as _json
 

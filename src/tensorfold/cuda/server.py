@@ -263,9 +263,10 @@ class App:
             text = render(body["messages"])
         else:
             text = body.get("prompt")
-            if not isinstance(text, str):
-                raise RequestError("prompt must be a string")
-        prompt = self.tok.encode(text, add_special_tokens=False).ids
+            ids = text if isinstance(text, list) and text and all(isinstance(t, int) for t in text) else None
+            if ids is None and not isinstance(text, str):
+                raise RequestError("prompt must be a string or a list of token ids")
+        prompt = ids if not chat and ids is not None else self.tok.encode(text, add_special_tokens=False).ids
         if not prompt:
             raise RequestError("rendered prompt is empty")
         # sampling is resolved here, so a malformed control is refused before a stream opens
