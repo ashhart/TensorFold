@@ -86,6 +86,9 @@ def _unpack_sampling(v: list[int]):
         return None
     return Sampling((v[2] << 62) | (v[1] << 31) | v[0], t, v[6], _ints_f64(*v[7:10]), _ints_f64(*v[10:13]))
 FILL_LAYERS = int(os.environ.get("TF_GLM53_FILL_LAYERS", "8"))   # layers a fill step while others decode (0: a chunk)
+# chunks under this many rows fill whole even while others decode: a short prompt in steps waited ~10 decode rounds
+# and queued fills stacked (4 short requests together: 4-5 s TTFT vs ~1 s whole); long chunks keep the steps
+FILL_MIN_ROWS = int(os.environ.get("TF_GLM53_FILL_MIN_ROWS", "2048"))
 
 
 class GlmMultiDecoder:
@@ -258,7 +261,7 @@ class GlmMultiDecoder:
         s = self.filling[0]
         a, e = s.chunks[s.ci]
         n, G = len(self.w.layers), self.fill_layers
-        hi = n if alone or G <= 0 else min(n, s.li + G)
+        hi = n if alone or G <= 0 or e - a < FILL_MIN_ROWS else min(n, s.li + G)
         self._send([FILL, s.sid, a, e, s.li, hi])
         t0 = time.perf_counter()
         try:
