@@ -205,6 +205,18 @@ class NgramTable:
 
         return HostTable.lock(self)
 
+    def random_access(self) -> int:
+        """An unlocked table: MADV_RANDOM on its maps, so a fault reads its own page, not a read-around window.
+
+        Lookups touch scattered rows; the default read-around pulls whole windows into the page cache that no lookup
+        reads. Ahead-of-time reads (``willneed``) are explicit and unaffected. Returns the maps advised."""
+
+        libc, n = _libc(), 0
+        for m in self.maps:
+            if m.size:
+                n += libc.madvise(m.ctypes.data, m.size, mmap.MADV_RANDOM) == 0
+        return n
+
     def prefetch(self, workers: int = 8) -> float:
         from ..host_table import HostTable
 

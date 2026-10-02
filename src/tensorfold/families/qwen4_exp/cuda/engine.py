@@ -171,6 +171,11 @@ class FlashNextEngine:
                 if not tables_read:
                     table.prefetch()                  # eight readers first: mlock alone faults the pages in one by one
                 locked = room >= size and table.lock()
+        if not locked:                                # unlocked tables fault on demand: one page a fault, no read-around
+            for layer in w.layers:
+                table = layer.ple.table if layer.ple is not None else None
+                if hasattr(table, "random_access"):
+                    table.random_access()
         read_s = time.perf_counter() - started
         captured = self.e.graphs.warm(self.depth + 1) if self.e is not None and self.e.graphs is not None else 0
         started = time.perf_counter()
