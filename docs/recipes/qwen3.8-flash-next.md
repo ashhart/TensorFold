@@ -265,13 +265,16 @@ The default CUDA cap is six MTP drafts, with chains stopping below the configure
 Single-request serving uses CUDA graphs for verify windows and draft steps. Two-rank reductions add
 gathered partials in rank order.
 
-With one GPU, `--parallel N` enables eager shared forwards for up to N requests; CUDA
-`--parallel auto` selects one request. Two ranks serve one request at a time and reject `--parallel N`
-when N exceeds one. For prefix reuse, the single-request engine and the concurrent decoder keep prompt
+On one GPU or two ranks, `--parallel N` shares forwards across up to N requests, with a lone stream on CUDA graphs
+where its weights support capture; `--parallel auto` selects one request. Pass the same N on both ranks: rank 0 sends
+admissions, prompt pieces, cache growth and rounds over one TCP connection on its `--master` address, with an
+ephemeral port published by the rendezvous store. Two-rank parallel requests take text without structured output;
+`response_format` and `guided_*` receive HTTP 400 before generation. For prefix reuse, the single-request engine
+and the concurrent decoder keep prompt
 states; a follow-up prefills the reply again. A kept state stops one token before its prompt's end, so the
 same prompt sent again resumes, and so does a next chat turn that renders the generation prompt's `<think>`
-and newline as `<think>` and two newlines. Cache capacity is allocated at startup; inspect the reported
-capacity rather than assuming an older fixed token limit.
+and newline as `<think>` and two newlines. Stream caches grow within the startup window as memory allows;
+inspect the reported capacity.
 
 With `--parallel N`, a prompt prefills inside the rounds: each round runs the live replies' windows and the next
 prompt pass (up to 2,048 rows, several prompts packed) in one forward, and each layer's experts once for both. Every

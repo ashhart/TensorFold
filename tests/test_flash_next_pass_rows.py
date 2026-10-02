@@ -15,7 +15,7 @@ def test_a_rounds_pass_keeps_decoding_its_share(allocations):  # noqa: F811
     dec.prefill_rows, dec.share, dec.round_s, dec.row_s = 2048, 0.25, None, None
     assert dec._pass_rows() == 2048                                   # nothing timed yet: whole passes
     dec._timed(0.1, 0)                                                # a round alone: 0.1 s
-    dec._timed(0.1 + 512 * 4e-4, 512)                                 # a pass row adds 0.4 ms
+    dec._timed(0.1 + 512 * 4e-4, 512)
     assert dec.round_s == pytest.approx(0.1) and dec.row_s == pytest.approx(4e-4)
     assert dec._pass_rows() == 960                                    # 0.1 s is a quarter of 960 rows' 0.38 s
     dec._timed(0.5, 0)                                                # busier rounds: whole passes again

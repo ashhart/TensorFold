@@ -617,7 +617,7 @@ def token_sha(tokens: list[int]) -> str:
 
 def print_done(prompt: int, cached: int, thinking: bool, out: list[int], finish: str, stats: dict[str, Any],
                request: Any) -> None:
-    """The Mac server's ``done`` line for a finished reply; tok/s runs from the first token to the last."""
+    """The Mac server's ``done`` line for a finished reply."""
 
     ended = time.perf_counter()
     first, started = getattr(request, "first", None), getattr(request, "started", ended)

@@ -4,7 +4,7 @@ The base URL is `http://127.0.0.1:8080/v1` with the default server settings.
 
 | Route | Behavior |
 | --- | --- |
-| `GET /v1/models` | Served model ID; MLX also lists configured aliases |
+| `GET /v1/models` | Served model ID and any configured aliases (both servers) |
 | `GET /health` | Server health and available status information |
 | `GET /metrics`, `GET /v1/metrics` | Prometheus text: requests, KV occupancy, drafts and latency (both servers) |
 | `POST /v1/chat/completions` | Text chat, optional image input, tools and reasoning; streamed or non-streamed |
