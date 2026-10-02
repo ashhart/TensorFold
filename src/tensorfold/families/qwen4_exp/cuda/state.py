@@ -358,7 +358,7 @@ class State:
         self.ple_history = None if snap["ple_history"] is None else snap["ple_history"].copy()
         self.ple_last = None
         self.set_pos(snap["pos"])
-        self.set_rope_delta(0)                       # kept prompts are text only
+        self.set_rope_delta(0)                       # an image prompt attaches its positions after (prefill_begin)
         self.image_positions, self.image_rows, self.image_features = None, (), None
         self.mtp_drafted = 0
         self.set_mtp_len(snap["mtp_len"])

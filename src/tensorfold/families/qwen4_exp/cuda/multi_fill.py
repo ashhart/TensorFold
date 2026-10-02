@@ -77,7 +77,7 @@ class PromptPasses:
 
         pieces, room = [], self._pass_rows() if rows is None else rows
         for s in self._order():
-            e, mtp, start, _ = self.fills[s.sid]
+            e, mtp, start, *_ = self.fills[s.sid]
             n = min(next((p for p in e.stops if p > start), len(s.prompt)) - start, room)
             ends = sum(1 for x, a, k in pieces if a + k == len(x.prompt))
             if n == 0 or (start + n == len(s.prompt) and ends == ENDS):
@@ -118,16 +118,15 @@ class PromptPasses:
 
         return [a1 - 1 for (s, a, n), (_, _, a1) in zip(pieces, segs) if a + n == len(s.prompt)]
 
-    @staticmethod
-    def _keep_at(s: Stream) -> int | None:
+    def _keep_at(self, s: Stream) -> int | None:
         """Where a drafting stream's prompt state is kept: one token before its end, which a next turn extends."""
 
-        return entry_end(s.prompt) if s.draft and s.st.image_positions is None else None
+        return entry_end(s.prompt) if s.draft and self.fills[s.sid][4] is not None else None
 
     def _point(self, s: Stream, start: int) -> int | None:
         """The next message-start or prompt-end snapshot this prompt piece can reach."""
 
-        if not s.draft or s.st.image_positions is not None:
+        if self._keep_at(s) is None:
             return None
         return next((p for p in self.fills[s.sid][0].stops if p > start), self._keep_at(s))
 
@@ -188,10 +187,10 @@ class PromptPasses:
         joined, head = [], 0
         for (s, a, n), last in zip(pieces, lasts):
             s.prefill_s += spent
-            e, mtp, _, kept = self.fills[s.sid]
+            e, mtp, _, kept, key = self.fills[s.sid]
             self.fills[s.sid][2] = a + n
             if kept is not None and a < kept[0]["pos"] <= a + n:
-                self._remember(list(s.prompt[:kept[0]["pos"]]), s.st, *kept)
+                self._remember(key[:kept[0]["pos"]], s.st, *kept)
             self.fills[s.sid][3] = None
             if a + n < len(s.prompt):
                 continue

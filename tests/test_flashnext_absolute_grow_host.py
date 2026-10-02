@@ -118,7 +118,7 @@ class AbsoluteGrowthTests(unittest.TestCase):
               "cuda_limit_bytes": capacity.cuda_limit_bytes, "LIMIT_ENV": capacity.LIMIT_ENV,
               "time": SimpleNamespace(perf_counter=lambda: 1.0), "MIN_GAP": 32,
               "_slot": lambda *args: SimpleNamespace(), "prefill_begin": lambda *args, **kw: 0,
-              "image_rows": SimpleNamespace(begin=lambda *args: None)}
+              "image_rows": SimpleNamespace(begin=lambda *args: None, key=lambda prompt, vision: list(prompt))}
         ns["Alone"] = source_class("src/tensorfold/families/qwen4_exp/cuda/multi_solo.py", "Alone",
                                     {"_state_changed", "_flush"}, ns)
         cls = source_class("src/tensorfold/families/qwen4_exp/cuda/multi.py", "MultiDecoder",

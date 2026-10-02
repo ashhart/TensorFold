@@ -1,5 +1,7 @@
 """Image embeddings and full prompt rotary positions owned by one Flash Next stream."""
 
+import hashlib
+
 import torch
 import triton
 import triton.language as tl
@@ -23,14 +25,36 @@ def rope_axis(pos, ROPE, DELTA, length, index, MODE: tl.constexpr, S1: tl.conste
     return axis
 
 
-def begin(engine, stream, tower) -> None:
-    """Encode an image request on its admitted slot before the normal prompt passes."""
+def key(prompt, vision) -> list[int] | None:
+    """The ids a prompt's kept states are matched on: its tokens, each image's and video frame group's placeholder rows
+    (alike whatever the media) replaced by a key of its pixels and grid that no token id equals; None for media
+    without hashes, which neither resumes nor keeps a state."""
 
-    if stream.vision is not None:
-        if tower is None:
-            raise ValueError("image inputs require starting this server with --vision")
-        attach(engine.st, tower.encode(stream.vision, stream.prompt), len(stream.prompt))
-        stream.vision = None
+    ids = [int(t) for t in prompt]
+    if vision is None:
+        return ids
+    if not hasattr(vision, "image_hashes"):
+        return None
+    media = list(zip(vision.image_spans, vision.image_hashes, vision.image_grid_thw))
+    if vision.video_hashes:                              # a video owns its grid's count of frame-group spans
+        groups = [(h, g) for h, g in zip(vision.video_hashes, vision.video_grid_thw) for _ in range(int(g[0]))]
+        media += [(span, h, g) for span, (h, g) in zip(vision.video_spans, groups)]
+    for (start, end), digest, grid in media:
+        tag = hashlib.sha256(f"{digest}/{'x'.join(str(int(v)) for v in grid)}".encode()).digest()
+        ids[start:end] = [-1 - int.from_bytes(tag[:8], "big")] * (end - start)
+    return ids
+
+
+def begin(stream, tower):
+    """Encode an image request's pictures before its prompt passes (``prefill_begin`` attaches them); None for text."""
+
+    if stream.vision is None:
+        return None
+    if tower is None:
+        raise ValueError("image inputs require starting this server with --vision")
+    encoded = tower.encode(stream.vision, stream.prompt)
+    stream.vision = None
+    return encoded
 
 
 def attach(st, encoded, length: int) -> None:

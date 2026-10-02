@@ -4,8 +4,8 @@ Run a complete local Flash Next checkpoint with `--vision --parallel 2` (or more
 This port supports images, including multiple images within the existing 4096 visual-token budget; video and
 large-image extensions are not included. Image rows replace embeddings in every hyperconnection stream.
 Multimodal RoPE follows the checkpoint's sections; text decode continues with its image-position offset.
-Image prompts always prefill from the start and are never retained in the text-prefix cache, since identical
-placeholder IDs can name different pixels. Grammar and ignore-EOS settings remain available.
+Image prompts use the prefix cache too; since identical placeholder IDs can name different pixels, cached
+prompts are matched on the images' pixels as well. Grammar and ignore-EOS settings remain available.
 
 A floating-point tower in the indexed checkpoint is discovered normally. EXL3 packs whose vision tower is a
 quantized sidecar need a one-time CPU conversion, stored outside the original model snapshot:
