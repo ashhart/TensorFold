@@ -61,8 +61,10 @@ def _trim_host() -> None:
 
 class Glm53Engine:
     def __init__(self, model_dir: Path, *, rank: int, master: str, port: int, context: int | None = None,
-                 comm=None, layers: int | None = None, mtp_drafts: int = 2) -> None:
-        """``comm``: a communicator with all_gather/barrier instead of NCCL (tests); ``layers``: first N only (tests)."""
+                 comm=None, layers: int | None = None, mtp_drafts: int = 2, parallel: int = 1) -> None:
+        """``comm``: a communicator with all_gather/barrier instead of NCCL (tests); ``layers``: first N only (tests);
+        ``parallel`` > 1: up to that many requests decoded together (multi.GlmMultiDecoder), each in its own cache slot
+        of ``context`` tokens; 1: one request at a time, as before."""
 
         self.model_dir, self.rank = Path(model_dir), rank
         self.cfg = cfg = Config.from_dict(json.loads((self.model_dir / "config.json").read_text()))
@@ -73,6 +75,9 @@ class Glm53Engine:
             comm = NCCL(rank, WORLD, master, port)
         self.comm = comm
         self.limit = int(context or DEFAULT_CONTEXT)
+        self.parallel = max(1, int(parallel or 1))
+        if self.parallel > 1 and not FUSED:
+            raise ValueError("--parallel > 1 needs the fused path (TF_GLM53_FUSED=1)")
         t0 = time.perf_counter()
         r = RankReader(self.model_dir, rank, WORLD)
         n = cfg.num_hidden_layers if layers is None else layers
@@ -88,6 +93,9 @@ class Glm53Engine:
             dcp = int(os.environ.get("TF_GLM53_DCP", "0")) or (WORLD if self.limit > DCP_AUTO else 1)
             if dcp not in (1, WORLD):
                 raise ValueError(f"TF_GLM53_DCP={dcp}: 1 or {WORLD}")
+            if self.parallel > 1 and dcp > 1:
+                raise ValueError(f"--parallel {self.parallel} needs decode context parallelism off: a context of at "
+                                 f"most {DCP_AUTO} tokens a stream (--context), TF_GLM53_DCP unset or 1")
             fw.dcp = dcp
             if self.k and fused.DRAFT_VOCAB:            # reduced draft vocabulary: a quarter of it on each rank
                 q = fused.DRAFT_VOCAB // WORLD
@@ -119,10 +127,14 @@ class Glm53Engine:
             del r                                        # host memory is device memory; a 1M cache needs it all)
             _trim_host()
             dpath = os.environ.get("TF_GLM53_DFLASH", "")
+            if dpath and self.parallel > 1:              # DFlash2 per stream is Phase B: MTP drafts only
+                print(f"[tensorfold] rank {rank}: --parallel {self.parallel}: DFlash2 not loaded (MTP drafts for "
+                      "concurrent streams)", flush=True)
+                dpath = ""
             if dpath:                                    # DFlash2: the target taps its layers before buffers exist
                 dcfg = json.loads((Path(dpath) / "config.json").read_text())
                 fw.tap_slot = {int(i): s for s, i in enumerate(dcfg["dflash_config"]["target_layer_ids"])}
-            self.runner = Runner(fw, self.limit + self.k + 1, self.k, graphs=GRAPHS)
+            self.runner = Runner(fw, self.limit + self.k + 1, self.k, graphs=GRAPHS, slots=self.parallel)
             if dpath:
                 from .dflash import GlmDrafter
 
@@ -151,6 +163,20 @@ class Glm53Engine:
               f"device free {free / 2**30:.1f} of {total / 2**30:.1f} GiB", flush=True)
         self.eos = tuple(cfg.eos_token_ids)
         self.capacity = self.limit
+        self.concurrent = self.parallel > 1
+        self.multi = self.scheduler = None
+        if self.concurrent:
+            from .multi import GlmMultiDecoder
+
+            self.multi = GlmMultiDecoder(self.runner, rank=rank, world=WORLD, comm=self.comm, limit=self.limit,
+                                         eos=self.eos, sample=lambda lg, pos, s: self._sample(lg, pos, s))
+            per = self.multi.nbytes_per_stream()
+            print(f"[tensorfold] rank {rank}: {self.parallel} concurrent streams (MTP drafts {self.k}, windows up to "
+                  f"{self.multi.rows} rows), {per / 2**30:.2f} GiB of caches each ({self.limit} tokens)", flush=True)
+            if rank == 0:
+                from tensorfold.cuda.scheduler import Scheduler
+
+                self.scheduler = Scheduler(self.multi, max_streams=self.parallel)
         self.load_s = time.perf_counter() - t0
         print(f"[tensorfold] GLM-5.3 rank {rank}/{WORLD}: {n} layers loaded in {self.load_s:.0f}s, context "
               f"{self.limit} ({'fused, ' + ('CUDA graphs' if GRAPHS else 'eager') if FUSED else 'reference path'}; "
@@ -161,7 +187,11 @@ class Glm53Engine:
         print(f"[tensorfold] rank {rank}: host anon {int(rss) / 2**20:.1f} GiB, device free "
               f"{torch.cuda.mem_get_info()[0] / 2**30:.1f} GiB before warm-up", flush=True)
         if self.runner is not None and GRAPHS and os.environ.get("TF_GLM53_PREWARM", "1") != "0":
-            self.runner.prewarm()
+            if self.multi is not None:
+                self.runner.prewarm(capture=False)
+                self.multi.prewarm()
+            else:
+                self.runner.prewarm()
         self.comm.barrier()
 
     # ---------------------------------------------------------------------------------------------- sharing ---
@@ -268,8 +298,29 @@ class Glm53Engine:
                 "tok_s": round((len(out) - 1) / dec, 2) if dec > 0 and len(out) > 1 else 0.0,
                 "sha256": hashlib.sha256(json.dumps(out).encode()).hexdigest()[:16]}
 
+    def close(self) -> None:
+        """Rank 0 of a concurrent engine: stop the scheduler's worker and release the followers."""
+        if self.scheduler is not None:
+            self.scheduler.close()
+            self.scheduler = None
+            self.multi.stop()
+
     def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens, draft: bool = True,
                  stop_eos: bool = True, mtp_mode: str | None = None, **_: Any) -> dict[str, Any]:
+        if self.scheduler is not None:                   # concurrent: the request joins the scheduler's rounds
+            got: list[int] = []
+
+            def emit(new):
+                got.extend(new)
+                return on_tokens(new)
+            s = sampling if sampling is not None and sampling.temperature > 0 else None
+            stats = self.scheduler.submit(list(prompt), int(max_tokens), s, bool(draft and self.k), emit,
+                                          stop_eos=stop_eos)
+            stats.update(tokens=len(got), mtp_drafts=self.k if draft else 0, mtp_mode=fused.MTP_MODE,
+                         sha256=hashlib.sha256(json.dumps(got).encode()).hexdigest()[:16])
+            dec = stats.get("decode_s") or 0.0
+            stats["tok_s"] = round((len(got) - 1) / dec, 2) if dec > 0 and len(got) > 1 else 0.0
+            return stats
         if len(prompt) >= self.limit:
             raise ValueError(f"prompt of {len(prompt)} tokens: this engine serves contexts up to {self.limit}")
         max_tokens = max(1, min(int(max_tokens), self.limit - len(prompt)))
@@ -289,6 +340,9 @@ class Glm53Engine:
 
     def follow(self, requests: int | None = None) -> None:
         """Ranks 1..3: mirror every request rank 0 serves, forever (``requests``: stop after that many; tests)."""
+        if self.multi is not None:                       # concurrent: until rank 0's close()
+            self.multi.follow()
+            return
         done = 0
         while requests is None or done < requests:
             done += 1
