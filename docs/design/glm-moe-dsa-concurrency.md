@@ -59,3 +59,28 @@ Built: steps 3 (decode windows up to 32 rows) and 5 (DFlash2 per stream).
 Tests: tests/cuda/test_glm_moe_dsa_multi_dflash.py (drafter == solo; 2/3/4 streams DFlash2 + auto + MTP mixed,
 greedy + seeded sampled, staggered, one prompt past index_topk, windows of 32 rows; graphs; engine parallel=3).
 Deferred: DCP with several streams, paged caches, measuring the 32-row RoCE cost on the cluster.
+
+## Fills between layers (branch conc-interleave, 2026-10-02)
+
+Head-of-line blocking: a fill ran a whole prompt chunk (up to 4096 rows, ~5 s on 78 layers) between decode rounds.
+While other streams decode, a chunk now goes TF_GLM53_FILL_LAYERS layers a step (default 8; 0: whole chunks) with a
+decode round between steps (`Runner.prefill_chunk(layers=(lo, hi))`, `fused.compute` / `compute_prompt(layers=...)`;
+FILL carries the layer range). Same chunk boundaries, rows, layers and kernels, only paused: the chunk's rows wait in
+the prompt buffers (`pb`, `pb1`, which decode rounds never use; decode has the decoder's `vb` / `mb`), the two
+micro-batches' reductions in flight are waited for by the main stream at the pause (decode collectives start after
+them), the fill writes only its slot. A prompt with no stream decoding takes whole chunks, exactly as alone.
+Tests: test_fill_between_layers_{four_ranks,graphs} (chunks of 512 rows, 1 or 2 layers a step, overlapped
+micro-batches on the 4-rank run): every reply equals its lone reply; decode rounds ran inside paused chunks.
+
+## Final merge (branch final-all, 2026-10-02)
+
+Phase B and the fills between layers on top of prefill-final + decode-linear. `Runner.prefill_chunk` dispatches like
+the one-stream prefill loop: `compute_prompt_sp` when `sp_fits` (TF_GLM53_PROMPT_SP=1), else `compute_prompt` (ring
+overlap), else `compute`; every one of the three takes `layers=(lo, hi)`. `compute_prompt_sp` pauses like
+`compute_prompt`: the halves (own rows in `b.xo`, the next layer's front already issued by the last layer's comm-stream
+chain) are returned and passed back; the main stream waits for every chain before the pause, so decode collectives
+start after them. So an interleaved fill takes the same path, kernels and bits as the same prompt alone, SP included
+(no fallback to a non-SP path). Multi-stream windows (`base` tables) and SP's own-row selection (`select(row0=...)`)
+meet in `select` without interaction: SP is one stream (no `base`), multi-stream windows select every row (`row0` 0).
+Decode `lins` grouping covers windows up to DECODE_ROWS = 32 (x3linear.group takes 1..128 rows, else one `lin` each).
+Tests: test_fill_between_layers_sp_four_ranks (as the four-rank test, TF_GLM53_PROMPT_SP on).
