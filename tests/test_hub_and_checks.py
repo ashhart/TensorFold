@@ -235,6 +235,14 @@ def test_flash_next_reads_the_nvfp4_checkpoint_and_refuses_other_fp4_blocks(tmp_
     (tmp_path / "config.json").write_text(json.dumps(main_fp8))
     with pytest.raises(ValueError, match="blocks of 16"):
         qwen4_exp.check(tmp_path)
+    # #179: an FP8 n-gram table (NVIDIA's MIXED_PRECISION export) is read by the table's FP8 lane, so it is accepted
+    for suffix in ("", ".shard_0"):
+        ple_fp8 = json.loads(json.dumps(mixed))
+        key = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding" + suffix
+        ple_fp8["quantization_config"]["quantized_layers"][key] = {"quant_algo": "FP8"}
+        ple_fp8["quantization_config"]["config_groups"]["ple"] = {"weights": {"num_bits": 8, "dynamic": False}}
+        (tmp_path / "config.json").write_text(json.dumps(ple_fp8))
+        qwen4_exp.check(tmp_path)
 
 
 def test_models_lists_the_tested_checkpoints(capsys):
