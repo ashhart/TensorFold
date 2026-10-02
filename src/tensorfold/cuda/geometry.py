@@ -149,11 +149,20 @@ def prompt_rows(total: int, row_bytes: int, most: int = 4096) -> int:
     return max(512, min(most, total // PROMPT_SHARE // row_bytes // 512 * 512))
 
 
-def live_kv(t: dict, world: int, window: int) -> int:
+def live_kv(t: dict, world: int, window: int, kv_bits: int = 16) -> int:
     """A dense stream's attention caches at ``window`` rows (1,024 at least) and one layer's buffer mid-grow."""
 
     _, attention = layer_counts(t)
-    return (attention + 1) * max(1024, window) * int(t["num_key_value_heads"]) // world * int(t["head_dim"]) * 4
+    hk, hd = int(t["num_key_value_heads"]) // world, int(t["head_dim"])
+    return (attention + 1) * max(1024, window) * hk * 2 * kv_bytes(hd, kv_bits)
+
+
+def unpacked_prompt(t: dict, world: int, capacity: int, kv_bits: int = 16) -> int:
+    """An int8 cache's prompt read: one layer's keys and values dequantized to bf16 (``kvpack.unpack``); bf16: none."""
+
+    if kv_bits == 16:
+        return 0
+    return capacity * int(t["num_key_value_heads"]) // world * int(t["head_dim"]) * 2 * 2
 
 
 def gdn_geometry(t: dict, world: int, reserve: int, *, indexed: bool = False, mtp: bool = False,
@@ -203,8 +212,8 @@ def gdn_geometry(t: dict, world: int, reserve: int, *, indexed: bool = False, mt
         else:
             # Bound two retained prefixes, current KV state and a growth copy; speculative rows use separate workspace.
             rounded = 1 << (max(1024, capacity - reserve) - 1).bit_length()
-            cache = live_kv(t, world, capacity - reserve) if evicts else 4 * attention * rounded * hk * hd * 4
-            scratch = rows * h * (hd + 2) * ((capacity + 511) // 512) * 4
+            cache = live_kv(t, world, capacity - reserve, kv_bits) if evicts else 4 * attention * rounded * hk * 2 * row
+            scratch = rows * h * (hd + 2) * ((capacity + 511) // 512) * 4 + unpacked_prompt(t, world, capacity, kv_bits)
         return fixed + cache + scratch
     return Geometry(bytes_at, reserve)
 
@@ -377,7 +386,8 @@ def _gdn_dims(t: dict, world: int) -> tuple:
             nk, nv, dk, dv, 2 * nk * dk + 2 * nv * dv + 2 * nv)
 
 
-def stream_geometry(t: dict, world: int, streams: int, keep: int, *, first: int | None = None) -> Geometry:
+def stream_geometry(t: dict, world: int, streams: int, keep: int, *, first: int | None = None,
+                    kv_bits: int = 16) -> Geometry:
     """The 27B's concurrent decoder: live streams, ``keep`` kept prompt ends, windows; ``first``: growth on one GPU."""
 
     linear, attention = layer_counts(t)
@@ -390,11 +400,12 @@ def stream_geometry(t: dict, world: int, streams: int, keep: int, *, first: int 
     intermediate = int(t.get("moe_intermediate_size", t.get("intermediate_size", d))) // world
     extent = d + int(t["vocab_size"]) // world + slots * (intermediate + d) + width + h * hd
     fixed += 16 * max(128, rows) * extent * 4 + 32 * rows * 2560 * 4
+    row = kv_bytes(hd, kv_bits)
     def bytes_at(capacity: int) -> int:
-        kv = attention * capacity * hk * hd * 2 * 2
+        kv = attention * capacity * hk * 2 * row
         caches = (streams + keep + 1) * kv if first is None else \
-            kv + (streams + keep) * attention * min(first, capacity) * hk * hd * 2 * 2
-        scratch = rows * h * (hd + 2) * ((capacity + 511) // 512) * 4
+            kv + (streams + keep) * attention * min(first, capacity) * hk * 2 * row
+        scratch = rows * h * (hd + 2) * ((capacity + 511) // 512) * 4 + unpacked_prompt(t, world, capacity, kv_bits)
         return fixed + caches + kv // max(1, attention) + scratch   # one layer's growth copy
     return Geometry(bytes_at, 1)
 

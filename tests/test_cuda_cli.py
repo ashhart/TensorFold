@@ -173,10 +173,12 @@ def test_kv_dtype_reaches_only_the_families_that_declare_it(tmp_path, monkeypatc
     import json
 
     from tensorfold.families import glm5_next, qwen3_5, qwen4_exp
+    from tensorfold.families.qwen3_5.cuda import engine as dense_engine
     from tensorfold.families.qwen4_exp.cuda import engine as fn_engine
 
     made = []
     monkeypatch.setattr(fn_engine, "FlashNextEngine", lambda *a, **k: made.append(k) or SimpleNamespace(**k))
+    monkeypatch.setattr(dense_engine, "Qwen27Engine", lambda *a, **k: made.append(k) or SimpleNamespace(**k))
     (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {"mtp.fc.weight": "x"}}))
 
     assert qwen4_exp.CUDA_KV_DTYPES == ("bf16", "int8", "int4")
@@ -184,12 +186,14 @@ def test_kv_dtype_reaches_only_the_families_that_declare_it(tmp_path, monkeypatc
     assert made[-1]["kv_dtype"] == "int8"
     with pytest.raises(ValueError, match="kv-dtype"):
         qwen4_exp.cuda_engine(tmp_path, kv_dtype="fp8")
-    for module in (qwen3_5, glm5_next):
-        args = argparse.Namespace(tp=1, rank=0, master="", master_port=29551, no_drafts=True, drafter="none",
-                                  mtp_drafts=None, name="", model=str(tmp_path), kv_dtype="int8")
-        with pytest.raises(ValueError, match="KV cache, not --kv-dtype int8"):
-            cli._check_serve_options(args, SimpleNamespace(title=module.TITLE, package=module), "cuda")
-    assert not made[1:]
+    assert qwen3_5.CUDA_KV_DTYPES == ("bf16", "int8")
+    assert qwen3_5.cuda_engine(tmp_path, no_drafts=True, kv_dtype="int8").kv_dtype == "int8"
+    assert made[-1]["kv_dtype"] == "int8"
+    args = argparse.Namespace(tp=1, rank=0, master="", master_port=29551, no_drafts=True, drafter="none",
+                              mtp_drafts=None, name="", model=str(tmp_path), kv_dtype="int8")
+    with pytest.raises(ValueError, match="KV cache, not --kv-dtype int8"):
+        cli._check_serve_options(args, SimpleNamespace(title=glm5_next.TITLE, package=glm5_next), "cuda")
+    assert len(made) == 2
 
 
 @pytest.mark.parametrize("flags,backend,family,message", [

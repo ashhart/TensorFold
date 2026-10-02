@@ -7,6 +7,7 @@ import time
 import torch
 
 from tensorfold.cuda.capacity import available_bytes
+from tensorfold.cuda.kernels import kvpack
 from tensorfold.cuda.markers import MIN_GAP
 from tensorfold.cuda.memory_gate import MemoryGate, NoRoom, torch_live
 from tensorfold.cuda.sampling import sample_streams
@@ -119,7 +120,9 @@ class MultiDecoder:
         self.block = max_rows
         # one GPU: a stream's caches hold its prompt, then grow a step at a time while the gate has room
         c, att = w.config, sum(1 for layer in getattr(w, "layers", ()) if not layer.linear)
-        self.layer_bytes = 2 * getattr(c, "kv_heads", 0) * getattr(c, "head_dim", 0) * 2     # a row of one layer
+        hd = getattr(c, "head_dim", 0)
+        row = kvpack.row_bytes(hd) if getattr(w, "kv_dtype", "bf16") == "int8" else 2 * hd   # a head's packed row
+        self.layer_bytes = 2 * getattr(c, "kv_heads", 0) * row                               # a row of one layer
         self.row_bytes = att * self.layer_bytes
         self.memory_gate = (MemoryGate(1 << 62, reserve=2 * GIB, live=torch_live(torch, available_bytes))
                      if world == 1 and cuda else None)

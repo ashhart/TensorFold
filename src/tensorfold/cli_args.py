@@ -123,7 +123,8 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
     cuda.add_argument("--master-port", type=int, default=29551, help="with --tp 2: rank 0's rendezvous port")
     cuda.add_argument("--kv-dtype", choices=("bf16", "int8", "int4"), default="bf16",
                       help="KV cache: bf16 (the default), int8, or int4. Quantized keys and values use one "
-                           "fp16 scale per 32 values (changes the output; Flash Next on CUDA only)")
+                           "fp16 scale per 32 values (changes the output; on CUDA: Flash Next int8 or int4, "
+                           "Qwen3.8-27B int8 on one GPU)")
     cuda.add_argument("--prefill-fp8", action=argparse.BooleanOptionalAction, default=argparse.SUPPRESS,
                       help="prompt matmuls take FP8 (e4m3) activations, one scale a row, where the checkpoint has an "
                            "FP8 prompt kernel (Qwen3.8 27B and Qwen3.6 MLX 4-bit, NVFP4 checkpoints' FP8 and MXFP8 "

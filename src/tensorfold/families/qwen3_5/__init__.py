@@ -288,6 +288,7 @@ CUDA_AFFINE_GROUPS = (32, 64, 128)
 # --checkpoint-slots on CUDA: the prompt states the concurrent decoder keeps (--parallel 2 or more)
 CUDA_CHECKPOINT_SLOTS = True
 CUDA_PREFILL_FP8 = True            # --prefill-fp8: MLX 4-bit g64 and NVFP4 checkpoints have FP8 prompt kernels
+CUDA_KV_DTYPES = ("bf16", "int8")  # --kv-dtype int8: packed ExLlamaV3 -cq 8 rows (one GPU)
 
 def gb10() -> bool:
     """Whether GPU 0 is a GB10 (DGX Spark: compute capability 12.1), where the lone stream's wide windows were measured."""
@@ -322,4 +323,5 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
                         split_head=tp == 2, tp_draft=tp == 2 and draft is not None, allow_copy=not no_drafts,
                         streams=streams, context=options.get("context"),
                         context_explicit=options.get("context_explicit"), vision=bool(options.get("vision", False)),
-                        vision_urls=bool(options.get("vision_urls", False)), keep=options.get("checkpoint_slots"))
+                        vision_urls=bool(options.get("vision_urls", False)), keep=options.get("checkpoint_slots"),
+                        kv_dtype=options.get("kv_dtype", "bf16"))

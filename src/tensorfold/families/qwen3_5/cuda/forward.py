@@ -11,6 +11,7 @@ import torch
 from tensorfold.cuda import moe
 from tensorfold.cuda.kernels import attention as tree_attention
 from tensorfold.cuda.kernels import gdn as deltanet
+from tensorfold.cuda.kernels import kvpack
 
 from . import glue
 from .qmm_fast import matmul, matmul_group
@@ -131,6 +132,9 @@ class State:
         self.conv: list[torch.Tensor | None] = []
         self.rec: list[torch.Tensor | None] = []
         self.kv: list[tuple[torch.Tensor, torch.Tensor] | None] = []
+        packed = w.kv_dtype == "int8"                  # rows of codes then scales: caches still grow by position
+        row = (c.kv_heads, kvpack.row_bytes(c.head_dim)) if packed else (c.kv_heads, c.head_dim)
+        dtype = torch.int8 if packed else torch.bfloat16
         for layer in w.layers:
             if layer.linear:
                 cd = 2 * c.k_heads * c.dk + c.v_heads * c.dv
@@ -140,8 +144,8 @@ class State:
             else:
                 self.conv.append(None)
                 self.rec.append(None)
-                self.kv.append((torch.empty((0, c.kv_heads, c.head_dim), device=device, dtype=torch.bfloat16),
-                                torch.empty((0, c.kv_heads, c.head_dim), device=device, dtype=torch.bfloat16)))
+                self.kv.append((torch.empty((0, *row), device=device, dtype=dtype),
+                                torch.empty((0, *row), device=device, dtype=dtype)))
 
 
 @dataclass
@@ -174,12 +178,13 @@ def stage(w: Weights, st: State, width: int, context: int) -> Staged:
 
     c, device = w.config, w.norm.device
     parents = list(range(-1, width - 1))
-    flat, items, chunks = tree_attention.padded_host(parents, context, c.heads // c.kv_heads)
+    tile = tree_attention.tile_for(w.kv_dtype)
+    flat, items, chunks = tree_attention.padded_host(parents, context, c.heads // c.kv_heads, tile)
     host = torch.tensor([0] * (2 * width) + flat, dtype=torch.int32).pin_memory()
     dev = host.to(device)
     softmax = [i for i, layer in enumerate(w.layers) if not layer.linear]
     return Staged(width, dev[:width], dev[width:2 * width], deltanet.plan([parents], device),
-                  tree_attention.from_packed(dev[2 * width:], 1, width, items, chunks),
+                  tree_attention.from_packed(dev[2 * width:], 1, width, items, chunks, tile=tile),
                   _cache_offsets([st], softmax, device), _conv_windows(parents, c.conv_kernel - 1).to(device), host, dev)
 
 
@@ -233,7 +238,8 @@ def tree_forward(w: Weights, tokens: torch.Tensor, parents: Sequence[int], st: S
                            dtype=torch.int32)
         plan = deltanet.plan([parents], tokens.device)
         softmax = [i for i, layer in enumerate(w.layers) if not layer.linear]
-        aplan = tree_attention.plan([parents], [st.pos], c.heads // c.kv_heads, tokens.device)
+        aplan = tree_attention.plan([parents], [st.pos], c.heads // c.kv_heads, tokens.device,
+                                    tile=tree_attention.tile_for(w.kv_dtype))
         aoffs = _cache_offsets([st], softmax, tokens.device)
         windows = _conv_windows(parents, c.conv_kernel - 1).to(tokens.device)
     if initial is None:
@@ -278,6 +284,8 @@ def tree_forward(w: Weights, tokens: torch.Tensor, parents: Sequence[int], st: S
             q, key = glue.attn_prep(qg, key, attn.q_norm, attn.k_norm, pos,
                                     w.inv_freq, c.eps, heads=c.heads, kv_heads=c.kv_heads,
                                     head_dim=c.head_dim)
+            if w.kv_dtype == "int8":           # the window reads its own rows as a commit stores them
+                key, value = kvpack.pack(key.view(W, c.kv_heads, c.head_dim)), kvpack.pack(value)
             out = tree_attention.attention(q, key, value, aoffs[i], aplan, scale=c.head_dim ** -0.5)
             gated, out_xs = glue.gate_mul(out, qg, heads=c.heads, head_dim=c.head_dim)
             r = _row_mm(gated, attn.o, tp, out_xs)
@@ -337,8 +345,9 @@ def multi_tree_forward(w: Weights, streams: Sequence[tuple[Sequence[int], Sequen
     tables = dict(zip(linear, deltanet.to_device(ptrs, torch.int64, device).view(len(linear), len(states))))
     aoffs = _cache_offsets(states, softmax, device)
     S = len(states)
+    tile = tree_attention.tile_for(w.kv_dtype)
     attn_flat, attn_items, attn_chunks = tree_attention.plan_host(local, [st.pos for st in states],
-                                                                  c.heads // c.kv_heads)
+                                                                  c.heads // c.kv_heads, tile)
     host = torch.tensor(positions + sids + entries + starts + ids + [i for win in windows for i in win] + attn_flat,
                         dtype=torch.int32).pin_memory()
     dev = host.to(device, non_blocking=True)            # one copy, and the host runs on
@@ -346,7 +355,8 @@ def multi_tree_forward(w: Weights, streams: Sequence[tuple[Sequence[int], Sequen
     plan = deltanet.Plan(dev[2 * W:5 * W].view(W, 3), dev[5 * W:5 * W + S + 1], slots, most)
     ids_t = dev[5 * W + S + 1:6 * W + S + 1]
     windows_t = dev[6 * W + S + 1:6 * W + S + 1 + W * (keep + 1)].view(W, keep + 1)
-    aplan = tree_attention.from_packed(dev[6 * W + S + 1 + W * (keep + 1):], S, W, attn_items, attn_chunks)
+    aplan = tree_attention.from_packed(dev[6 * W + S + 1 + W * (keep + 1):], S, W, attn_items, attn_chunks,
+                                       tile=tile)
     x = glue.embedding(ids_t, w.embed)
     pending: torch.Tensor | None = None
     record: list[Record] = []
@@ -384,6 +394,8 @@ def multi_tree_forward(w: Weights, streams: Sequence[tuple[Sequence[int], Sequen
             q, key = glue.attn_prep(qg, key, attn.q_norm, attn.k_norm, pos,
                                     w.inv_freq, c.eps, heads=c.heads, kv_heads=c.kv_heads,
                                     head_dim=c.head_dim)
+            if w.kv_dtype == "int8":           # the window reads its own rows as a commit stores them
+                key, value = kvpack.pack(key.view(W, c.kv_heads, c.head_dim)), kvpack.pack(value)
             out = tree_attention.attention(q, key, value, aoffs[i], aplan, scale=c.head_dim ** -0.5)
             gated, out_xs = glue.gate_mul(out, qg, heads=c.heads, head_dim=c.head_dim)
             r = _row_mm(gated, attn.o, tp, out_xs)

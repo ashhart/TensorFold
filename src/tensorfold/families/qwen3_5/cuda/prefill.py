@@ -10,6 +10,7 @@ import torch
 
 from tensorfold.cuda import moe, prompt_precision
 from tensorfold.cuda.kernels import gdn as deltanet
+from tensorfold.cuda.kernels import kvpack
 from tensorfold.cuda.kernels import qmm as shared
 from tensorfold.cuda.kernels.prefill_attention import attention
 
@@ -79,6 +80,19 @@ def _row_mm(x, w: QLinear, tp: bool) -> torch.Tensor:
 
 
 @torch.no_grad()
+def _stored(w: Weights, rows: torch.Tensor) -> torch.Tensor:
+    """A prompt's new key or value rows as its cache holds them (int8: packed, as decode windows pack theirs)."""
+
+    return kvpack.pack(rows) if w.kv_dtype == "int8" else rows
+
+
+def _read(w: Weights, cache: torch.Tensor, n: int) -> torch.Tensor:
+    """The first ``n`` rows a prompt's attention reads: an int8 cache's dequantized in the model's basis, so every key
+    (the chunk's own too) passes through its stored codes and any chunking keeps the same bits."""
+
+    return kvpack.unpack(cache[:n], w.config.head_dim) if w.kv_dtype == "int8" else cache
+
+
 def prefill_chunk(w: Weights, tokens: torch.Tensor, st: State, *, tp: bool = False, capture_taps: bool = False,
                   last: bool = True, every: bool = False, cut: int = 0, vision=None):
     """Commit ``tokens`` at [st.pos, st.pos + W) into ``st`` without writing through its entries (``every``: all rows' final normed states; ``cut``: also the state after the first ``cut`` rows, the GDN chains run as two launches with one launch's bits)."""
@@ -142,9 +156,9 @@ def prefill_chunk(w: Weights, tokens: torch.Tensor, st: State, *, tp: bool = Fal
             q, key = glue.attn_prep(qg, key, attn.q_norm, attn.k_norm, pos, w.inv_freq, c.eps, heads=c.heads,
                                     kv_heads=c.kv_heads, head_dim=c.head_dim, mrope_section=c.mrope_section)
             kbuf, vbuf = _grow(st, i, p0 + W)
-            kbuf[p0:p0 + W] = key.view(W, c.kv_heads, c.head_dim)
-            vbuf[p0:p0 + W] = value
-            out = attention(q.view(W, c.heads, c.head_dim), kbuf, vbuf, p0, scale=c.head_dim ** -0.5)
+            kbuf[p0:p0 + W], vbuf[p0:p0 + W] = _stored(w, key.view(W, c.kv_heads, c.head_dim)), _stored(w, value)
+            kread, vread = _read(w, kbuf, p0 + W), _read(w, vbuf, p0 + W)
+            out = attention(q.view(W, c.heads, c.head_dim), kread, vread, p0, scale=c.head_dim ** -0.5)
             r = _row_mm(pg.gate_mul(out, qg, heads=c.heads, head_dim=c.head_dim), attn.o, tp)
         if layer.moe is not None:                          # routed experts read bf16 rows (their prefill form)
             x, h, _ = glue.add_rmsnorm(x, r, layer.post_norm, c.eps)
@@ -312,9 +326,9 @@ def prefill_rows(w: Weights, items: list[tuple[Sequence[int], State, int]], *, t
             outs = []
             for st, p0, (o, n) in zip(sts, p0s, spans):
                 kbuf, vbuf = _grow(st, i, p0 + n)
-                kbuf[p0:p0 + n] = key[o:o + n]
-                vbuf[p0:p0 + n] = value[o:o + n]
-                outs.append(attention(q[o:o + n], kbuf, vbuf, p0, scale=c.head_dim ** -0.5))
+                kbuf[p0:p0 + n], vbuf[p0:p0 + n] = _stored(w, key[o:o + n]), _stored(w, value[o:o + n])
+                outs.append(attention(q[o:o + n], _read(w, kbuf, p0 + n), _read(w, vbuf, p0 + n), p0,
+                                      scale=c.head_dim ** -0.5))
             r = _row_mm(pg.gate_mul(torch.cat(outs), qg, heads=c.heads, head_dim=c.head_dim), attn.o, tp)
         x, h = pg.add_rmsnorm(x, r, layer.post_norm, c.eps)
         pending = _mlp(h, layer, pg, tp)

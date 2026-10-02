@@ -164,6 +164,56 @@ and `--max-num-seqs 16` serves 132.1 tok/s at 51.7 GiB on the same Spark. At 8 a
 serves 147.5 and 112.0 tok/s. `tools/shared_prefix_prompts.py` builds the workload and
 `tools/shared_prefix_load.py` sends it (`--concurrency`, `--mem` for the memory peak).
 
+### int8 KV cache
+
+`--kv-dtype int8` (one GPU) keeps the attention caches in ExLlamaV3's `-cq 8` codes, Flash Next's scheme: each group
+of 32 values rotated by a 32-point Hadamard, an fp16 absmax scale, the midpoint grid. A position's codes and scales
+for one KV head are one packed row (`tensorfold/cuda/kernels/kvpack.py`), so a cache still grows, slices and clones
+by position. Over the 16 attention layers a position takes 34,816 bytes against 65,536 in bf16 (1.88x smaller).
+
+A verify window packs its keys and values before attention, and the tree attention reads a row's path as a commit
+stores it, so drafted replies equal `"draft": false` ones. Prompts store packed rows and attend over the
+dequantized prefix, so any chunking gives the same bits and a resumed prompt equals a fresh one. The query enters the
+Hadamard rotation once and the merged output is rotated back. A quantized cache changes the output: bf16 stays the
+default, with 0.6.1's bits. Two ranks refuse `--kv-dtype int8`.
+
+Measured on one DGX Spark (GB10) through `tensorfold serve`, with `Vontra/Qwen3.8-27B-MLX-4bit` and with
+`armin1/Qwen3.8-27B-NVFP4-FP8-Mixed-LH`, a ModelOpt checkpoint (NVFP4 MLP, FP8 attention, DeltaNet and head;
+`--precision full`), both with
+`z-lab/Qwen3.8-27B-DFlash2`, `--parallel 3 --thinking --prefill-fp8`, and both cache dtypes in the same build. Prompts
+are seeded log lines with no repeats, followed by one code request (512 tokens, greedy, thinking off). Round time is
+decode seconds over verify rounds from `/health`, which separates the cache's cost from acceptance. Milliseconds a
+drafted round:
+
+| Prompt tokens | MLX 4-bit, bf16 | int8 | NVFP4/FP8 mixed, bf16 | int8 |
+| ---: | ---: | ---: | ---: | ---: |
+| 2,890 | 82.9 | 82.8 | 106.1 | 105.8 |
+| 45,100 | 102.2 | 96.3 | 125.4 | 120.5 |
+| 90,220 | 121.6 | 113.6 (-7%) | 144.9 | 136.0 (-6%) |
+| 180,500 | 159.9 | 144.1 (-10%) | 184.0 | 168.3 (-9%) |
+| 242,500 | 188.6 | 164.5 (-13%) | 213.1 | 186.4 (-13%) |
+
+With `"draft": false`, a token takes 86.5 ms against 96.4 at 90,220 tokens and 114.4 against 143.1 at 242,500 on the
+MLX checkpoint (108.3 against 118.4 and 136.5 against 164.3 on the NVFP4/FP8 one). Prompts fill within 2% of bf16,
+and the startup estimate at the 262,144-token window falls from 37.39 to 30.38 GiB (MLX) and from 43.60 to 36.59 GiB
+(NVFP4/FP8). The tree attention alone, 24 query heads over 4 KV heads and 16 window rows, takes 1.84 ms a layer
+against 2.34 at 90,000 keys and 3.51 against 4.54 at 180,000; one row takes 1.13 against 1.71 and 2.16 against 3.42.
+An int8 item holds 32 (row, head) pairs: 16 pairs dequantize each key tile six times for a 16-row window, and 64
+pairs spilled registers.
+
+Answers on 100 local tasks (greedy, thinking off, 1,024 tokens) and a needle at 194,893 tokens:
+
+| Checkpoint, cache | GSM8K | JSON | Code | Instructions | Greedy agreement with BF16 | Needle |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| MLX 4-bit, bf16 | 48/50 | 14/15 | 25/25 | 8/10 | 41.9% | correct |
+| MLX 4-bit, int8 | 47/50 | 14/15 | 24/25 | 9/10 | 43.0% | correct |
+| NVFP4/FP8 mixed, bf16 | 48/50 | 14/15 | 25/25 | 8/10 | 55.8% | correct |
+| NVFP4/FP8 mixed, int8 | 49/50 | 14/15 | 25/25 | 7/10 | 55.2% | correct |
+
+Items change in both directions. On the NVFP4/FP8 checkpoint, int8 answers one GSM8K question that bf16 misses and
+misses one instruction task, the unquantized model's result on both. On the MLX checkpoint, int8 runs one GSM8K answer
+to the token cap and fails one code test, and it passes an instruction task that bf16 and the unquantized model miss.
+
 ### Structured output
 
 With `pip install 'tensorfold[grammar]'` (xgrammar), serving on one or two GPUs enforces `response_format` and the
