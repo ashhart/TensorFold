@@ -57,6 +57,12 @@ __device__ __forceinline__ void ldsm_x4(uint32_t (&r)[4], const void* p) {
                  : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
                  : "r"(s));
 }
+// out as fp16 (TF_EXL3_PROMPT_F16_OUT): two f16x2 adds a call; dst indexes the fp16 buffer like the fp32 one
+__device__ __forceinline__ void red_add_f16x4(half* dst, float a, float b, float c, float d) {
+    const half2 lo = __floats2half2_rn(a, b), hi = __floats2half2_rn(c, d);
+    asm volatile("red.global.add.noftz.v2.f16x2 [%0], {%1, %2};\n" ::"l"(dst), "r"(*reinterpret_cast<const uint32_t*>(&lo)),
+                 "r"(*reinterpret_cast<const uint32_t*>(&hi)) : "memory");
+}
 __device__ __forceinline__ void prefetch_l2(const void* p) {
     asm volatile("prefetch.global.L2::evict_last [%0];\n" ::"l"(p));
 }
@@ -539,6 +545,7 @@ struct DnEpi {
     const float* wts_sh;      // the item's routing weights (shared memory)
     float* out;
     const int* pair_sh;       // the item's rows of out (row * D), shared memory
+    bool f16;                 // out is the fp16 accumulation buffer
     int e, D, slots, cnt;
 };
 
@@ -597,11 +604,15 @@ __device__ __forceinline__ void dn_epilogue(const float (&acc)[2 * NB][4], float
             const int i = hf * DN_EROWS + warp + ri * NW;
             if (i < p.cnt) {
                 const float w = p.wts_sh[i];
-                float* orow = p.out + (size_t)p.pair_sh[i] + cb * 256 + 4 * lane;
+                const size_t orow = (size_t)p.pair_sh[i] + cb * 256 + 4 * lane;
 #pragma unroll
                 for (int blk = 0; blk < 2; ++blk) {
                     const float* u = v[ri * 2 + blk];
-                    red_add_v4(orow + blk * 128, u[0] * sv[blk][0] * w, u[1] * sv[blk][1] * w,
+                    if (p.f16)
+                        red_add_f16x4(reinterpret_cast<half*>(p.out) + orow + blk * 128, u[0] * sv[blk][0] * w, u[1] * sv[blk][1] * w,
+                               u[2] * sv[blk][2] * w, u[3] * sv[blk][3] * w);
+                    else
+                        red_add_v4(p.out + orow + blk * 128, u[0] * sv[blk][0] * w, u[1] * sv[blk][1] * w,
                                u[2] * sv[blk][2] * w, u[3] * sv[blk][3] * w);
                 }
             }
@@ -702,7 +713,7 @@ __global__ void __launch_bounds__(NTHREADS, 1) prompt_down_kernel(
     const half* __restrict__ xd, const int* __restrict__ sorted, const int* __restrict__ items,
     const int* __restrict__ item_count, const int64_t* __restrict__ down_ptr, const int* __restrict__ k2s,
     const half* __restrict__ svh_d, const float* __restrict__ wts, float* __restrict__ out, int K, int D, int slots,
-    int ncb) {
+    int ncb, int f16) {
     extern __shared__ __align__(16) unsigned char smem_raw[];
     __shared__ int pair_sh[IPM];
     __shared__ float wts_sh[IPM];
@@ -715,7 +726,7 @@ __global__ void __launch_bounds__(NTHREADS, 1) prompt_down_kernel(
         wts_sh[threadIdx.x] = (int)threadIdx.x < cnt ? wts[pr] : 0.f;
     }
     const uint32_t* Td = reinterpret_cast<const uint32_t*>(down_ptr[e]);
-    const DnEpi ep{svh_d, wts_sh, out, pair_sh, e, D, slots, cnt};
+    const DnEpi ep{svh_d, wts_sh, out, pair_sh, f16 != 0, e, D, slots, cnt};
     const int nb = (cnt + 15) >> 4;
     switch (k2s[e] * 16 + nb) {
 #define TF_PE_DN(K2_, NB_) \
@@ -743,7 +754,7 @@ void launch_cb(const at::Tensor& x, const at::Tensor& sorted, const at::Tensor& 
                const at::Tensor& gu_k2, const at::Tensor& d_k2, const at::Tensor& suh_g, const at::Tensor& suh_u,
                const at::Tensor& svh_g, const at::Tensor& svh_u, const at::Tensor& suh_d, const at::Tensor& svh_d,
                const at::Tensor& wts, at::Tensor& xd, at::Tensor& out, int D, int I, int NS, int slots, int max_items,
-               float limit, int act_mode, int ncb, int which, cudaStream_t stream) {
+               float limit, int act_mode, int ncb, int which, int f16, cudaStream_t stream) {
     static bool once = [] {
         C10_CUDA_CHECK(cudaFuncSetAttribute(prompt_gateup_kernel<CB>, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                             (int)GU_SMEM));
@@ -758,14 +769,14 @@ void launch_cb(const at::Tensor& x, const at::Tensor& sorted, const at::Tensor& 
         reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), (int)x.stride(0), sorted.data_ptr<int>(),
         items.data_ptr<int>(), item_count.data_ptr<int>(), gate_ptr.data_ptr<int64_t>(), up_ptr.data_ptr<int64_t>(),
         gu_k2.data_ptr<int>(), h(suh_g), h(suh_u), h(svh_g), h(svh_u), h(suh_d), reinterpret_cast<half*>(xd.data_ptr()),
-        D, I, NS, slots, limit, act_mode, reinterpret_cast<float4*>(out.data_ptr<float>()),
-        (long long)(out.numel() / 4));
+        D, I, NS, slots, limit, act_mode, reinterpret_cast<float4*>(out.data_ptr()),
+        (long long)(out.numel() * out.element_size() / 16));
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     if (which & 2)
     prompt_down_kernel<CB><<<dim3((unsigned)max_items, (unsigned)(D / 256 / ncb)), NTHREADS, DN_SMEM, stream>>>(
         reinterpret_cast<const half*>(xd.data_ptr()), sorted.data_ptr<int>(), items.data_ptr<int>(),
         item_count.data_ptr<int>(), down_ptr.data_ptr<int64_t>(), d_k2.data_ptr<int>(), h(svh_d),
-        wts.data_ptr<float>(), out.data_ptr<float>(), I, D, slots, ncb);
+        wts.data_ptr<float>(), reinterpret_cast<float*>(out.data_ptr()), I, D, slots, ncb, f16);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -789,13 +800,13 @@ void exl3p_experts_cuda(const at::Tensor& x, const at::Tensor& sorted, const at:
                         const at::Tensor& svh_u, const at::Tensor& suh_d, const at::Tensor& svh_d,
                         const at::Tensor& wts, at::Tensor& xd, at::Tensor& out, int64_t D, int64_t I, int64_t NS,
                         int64_t slots, int64_t max_items, double limit, int64_t act_mode, int64_t cb, int64_t ncb,
-                        int64_t which) {
+                        int64_t which, int64_t f16) {
     TORCH_CHECK(D % 256 == 0 && I % 128 == 0, "prompt experts: D % 256, I % 128");
     TORCH_CHECK((D / 256) % ncb == 0, "prompt experts: ncb must divide D / 256");
     auto stream = at::cuda::getCurrentCUDAStream();
 #define TF_PE_ARGS x, sorted, items, item_count, gate_ptr, up_ptr, down_ptr, gu_k2, d_k2, suh_g, suh_u, svh_g, svh_u, \
                    suh_d, svh_d, wts, xd, out, (int)D, (int)I, (int)NS, (int)slots, (int)max_items, (float)limit,   \
-                   (int)act_mode, (int)ncb, (int)which, stream
+                   (int)act_mode, (int)ncb, (int)which, (int)f16, stream
     if (cb == 0) launch_cb<0>(TF_PE_ARGS);
     else if (cb == 1) launch_cb<1>(TF_PE_ARGS);
     else if (cb == 2) launch_cb<2>(TF_PE_ARGS);
