@@ -111,9 +111,14 @@ tensorfold serve qwen27b-exl3-3.00bpw --host 0.0.0.0 --port 8080
 ```
 
 Verify windows use the row-invariant EXL3 linear, so drafted replies equal `"draft": false` ones; prompts use the
-EXL3 prompt path (W_q decoded once a chunk, a fixed-tile GEMM), whose bits do not depend on chunking, so the
-engine keeps prompt ends as it does for the MLX checkpoint. The drafter reads the target's 6-bit head over its
-draft vocabulary by slicing the head's 128-column strips as stored: its logits are the target's, bit for bit.
+EXL3 prompt path (the weights decoded once a call with both rotations folded in, a fixed-tile bf16 GEMM), whose
+bits do not depend on chunking, so the engine keeps prompt ends as it does for the MLX checkpoint. On one GPU a
+prompt of several chunks runs layer by layer (every chunk through layer l before layer l + 1), so each layer's
+weights are decoded once a prompt and one layer's are held at a time, with the same bits as chunk by chunk
+(`TENSORFOLD_PREFILL_LAYER_MAJOR=0` runs chunk by chunk). A prompt whose last message start is fewer than `MIN_GAP`
+rows from its end fills in one call that keeps the message start's state from inside it, rather than two
+(`TENSORFOLD_PREFILL_TAIL_MERGE=0` makes two). The drafter reads the target's 6-bit head over its draft vocabulary by
+slicing the head's 128-column strips as stored: its logits are the target's, bit for bit.
 
 Measured on one DGX Spark (GB10) through `tensorfold serve`, the 3.00bpw pack against the MLX 4-bit checkpoint on
 the same engine and box, the [public benchmark command](README.md#measurements), medians of 15 runs a cell:

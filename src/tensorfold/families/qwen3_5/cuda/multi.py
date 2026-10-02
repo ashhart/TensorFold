@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 
 import torch
@@ -24,6 +25,7 @@ from .weights import Weights
 ADMIT, ROUND, DONE, FILL, FILLS = 1, 2, 3, 4, 5   # rank 0's messages
 COPY, TREE, ONE = 0, 1, 2               # a stream's window this round
 STEP = 1024                             # prompt rows a prefill step takes while other streams decode
+TAIL_MERGE = os.environ.get("TENSORFOLD_PREFILL_TAIL_MERGE", "1") != "0"   # a short tail after the last stop: one call
 GROW = 8192                             # rows a stream's attention caches grow by at a time (one GPU)
 GIB = 1024**3
 TIMED = 16                              # the last rounds whose time beside the forward sets a stream count's overhead
@@ -84,6 +86,15 @@ def _unflatten(flat: list[int], pairs: bool) -> list:
             out.append(flat[i + 1:i + 1 + n])
             i += 1 + n
     return out
+
+
+def _tail(s: Stream, stop: int) -> bool:
+    """A step to the prompt's last stop with fewer than MIN_GAP rows after it: the tail fills in the same call, and the
+    stop's entry is the state kept there (one prefill call a prompt, so an EXL3 pack decodes its weights once)."""
+
+    n = len(s.prompt)
+    return (TAIL_MERGE and stop < n and s.vision is None and bool(s.stops) and stop == s.stops[-1]
+            and n - stop < MIN_GAP)
 
 
 class MultiDecoder:
@@ -314,20 +325,24 @@ class MultiDecoder:
 
         t0 = time.perf_counter()
         drafter = self.draft if self.drafts else None
-        ends, pieces = [], []
+        ends, pieces, steps = [], [], []
         for s, stop in batch:
             n = len(s.prompt)
             end = entry_end(s.prompt) if (stop == n and s.draft and s.vision is None
                                           and not (s.stops and n - s.stops[-1] < MIN_GAP)) else None
+            merge = _tail(s, stop)               # as _step
+            if merge:
+                stop, end = n, stop
             ends.append(end)
+            steps.append((s, stop, merge))
             pieces.append(Piece(s.prompt[:stop], s.st, end, s.snap if s.draft and drafter is not None else None))
         firsts = []
         try:
             outs = prefill_batch(self.w, pieces, tp=self.world == 2, draft=drafter)
-            for (s, stop), end, (normed, at, snap) in zip(batch, ends, outs):
+            for (s, stop, merge), end, (normed, at, snap) in zip(steps, ends, outs):
                 if snap is not None:
                     s.snap = snap
-                if stop in s.stops:
+                if stop in s.stops and not merge:
                     self.cache.add(list(s.prompt[:stop]), kept(s.st), own(s.snap))
                 n = len(s.prompt)
                 firsts.append(None if stop < n else first_token(self.w, normed, n, s.sampling, self.rank, self.world,
@@ -362,13 +377,16 @@ class MultiDecoder:
             n = len(s.prompt)             # the prompt end is kept one token early, unless a message start covers it
             end = entry_end(s.prompt) if (stop == n and s.draft and s.vision is None
                                           and not (s.stops and n - s.stops[-1] < MIN_GAP)) else None
+            merge = _tail(s, stop)
+            if merge:
+                stop, end = n, stop
             out = prefill_state(self.w, s.prompt[:stop], s.st, tp=self.world == 2, draft=drafter, keep_at=end,
                                 vision=s.vision)
             normed = out if end is None else out[0]
             if drafter is not None:
                 s.snap = drafter.snapshot()
                 drafter.skip(0)                  # no reference of its own: rounds read and replace s.snap's context
-            if stop in s.stops:
+            if stop in s.stops and not merge:
                 self.cache.add(list(s.prompt[:stop]), kept(s.st), own(s.snap))
             first = None if stop < n else first_token(self.w, normed, n, s.sampling, self.rank, self.world,
                                                      s.constraint)

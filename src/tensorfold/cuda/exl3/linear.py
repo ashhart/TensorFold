@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -11,6 +12,11 @@ import torch
 from . import format as fmt
 
 CODEBOOK_IDS = {"3inst": 0, "mcg": 1, "mul1": 2}
+# The kernel for 17-128 rows, all with linear_kernel's bits: 7 linear_wc (linear_wc.cuh) for 4- and 6-bit mul1 layers,
+# else 6 the mid-M kernels (each k step's tiles decoded once for 16 or 32 rows). TENSORFOLD_EXL3_WC=0 stops at 6,
+# TENSORFOLD_EXL3_MIDM=0 keeps linear_kernel at every row count.
+MODE = (0 if os.environ.get("TENSORFOLD_EXL3_MIDM", "1") == "0"
+        else 6 if os.environ.get("TENSORFOLD_EXL3_WC", "1") == "0" else 7)
 
 
 @lru_cache(maxsize=1)
@@ -181,7 +187,7 @@ class Exl3Linear:
         ext = _ext()
         ext.rot_in(x, self.suh, xh)
         ext.linear(xh, self.words, sk_stride, nb_stride, self.svh, self.bias, out, z if sk > 1 else None,
-                   self.counters, self.k2, CODEBOOK_IDS[self.codebook], sk, wk)
+                   self.counters, self.k2, CODEBOOK_IDS[self.codebook], sk, wk, MODE)
         return out
 
     def unpack(self, out: torch.Tensor | None = None) -> torch.Tensor:

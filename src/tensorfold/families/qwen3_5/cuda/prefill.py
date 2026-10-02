@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any, Sequence
 
@@ -21,6 +22,10 @@ from .qmm_fast import matmul, matmul_partial, tile
 from .weights import Plain, QLinear, Weights
 
 CHUNK = 4096
+# An EXL3 pack's prompt of several chunks runs layer by layer (every chunk through layer l, then layer l + 1), so each
+# layer's weights are decoded once a prompt instead of once a chunk, one layer's held at a time. Same calls per chunk
+# (prefill_rows' rows of one chunk), the same bits as chunk by chunk. TENSORFOLD_PREFILL_LAYER_MAJOR=0: chunk by chunk.
+LAYER_MAJOR = os.environ.get("TENSORFOLD_PREFILL_LAYER_MAJOR", "1") != "0"
 TAP_LAYERS = (5, 19, 33, 47, 61)
 
 
@@ -195,6 +200,33 @@ def prefill_state(w: Weights, prompt: Sequence[int], st: State, *, tp: bool = Fa
         tap_from = end - draft.window
         draft.skip(tap_from - base)
     spans = chunks(base, n, size or getattr(w, "prompt_rows", CHUNK))       # stand-in weights take 4096
+    if (LAYER_MAJOR and getattr(w, "quant", None) == "exl3" and len(spans) > 1 and not tp and vision is None
+            and all(layer.moe is None for layer in w.layers)):
+        if keep_at is not None and base < keep_at < n:          # a kept chunk start: a cut one row on (any bounds,
+            spans = [(a + (a == keep_at), b + (b == keep_at)) for a, b in spans]   # the same bits)
+        if keep_at == base:
+            kept = (clone_state(st), draft.snapshot() if draft is not None else None)
+        wants = [draft is not None and b > tap_from for _, b in spans]
+        cuts = [keep_at - a if keep_at is not None and a < keep_at < b else 0 for a, b in spans]
+        groups = [_Rows(w, [(prompt[a:b], st, a, cut)], tp=tp, capture_taps=want)
+                  for (a, b), cut, want in zip(spans, cuts, wants)]
+        for (a, b), cut, want, [(normed, taps, part)] in zip(spans, cuts, wants, _layer_major(w, groups)):
+            snap = None
+            if want:                               # the drafter takes the taps in chunk order, as chunk by chunk
+                rows = taps[max(0, tap_from - a):]
+                if cut:
+                    split = keep_at - max(a, tap_from)
+                    if split:
+                        draft.add_taps(rows[:split])
+                    snap, rows = draft.snapshot(), rows[split:]
+                draft.add_taps(rows)
+            if part is not None:
+                kept = (part, snap)
+        if keep_at is None:
+            return normed
+        if keep_at == n:
+            kept = (clone_state(st), draft.snapshot() if draft is not None else None)
+        return normed, kept
     for j, (a, b) in enumerate(spans):
         if keep_at == a:
             kept = (clone_state(st), draft.snapshot() if draft is not None else None)
@@ -237,36 +269,45 @@ def _pinned(values: np.ndarray, device) -> torch.Tensor:
     return torch.from_numpy(np.ascontiguousarray(values, dtype=np.int32)).pin_memory().to(device, non_blocking=True)
 
 
-@torch.no_grad()
-def prefill_rows(w: Weights, items: list[tuple[Sequence[int], State, int]], *, tp: bool = False,
-                 capture_taps: bool = False) -> list[tuple[torch.Tensor, torch.Tensor | None, State | None]]:
-    """``prefill_chunk`` for several streams in one forward (dense text layers): ``items`` are (ids, state, cut).
-    Projections, norms and MLPs run over every row at once, each row's bits its own; each stream's convolution
-    windows, DeltaNet chains and attention read its own state. Per item: (last row normed, taps, the state at cut)."""
+class _Rows:
+    """One forward over several streams' rows (``prefill_rows``), set up once and run a layer at a time: ``items`` are
+    (ids, state, first position, cut). Layer-major prefill keeps several of these (a prompt's chunks) and runs layer l
+    of each in turn before layer l + 1; a chunk's state is its stream's, advanced by the chunks before it."""
 
-    c = w.config
-    if any(layer.moe is not None for layer in w.layers):
-        raise ValueError("a batched prefill takes dense layers only")
-    pg = prefill_glue if w.fast_prefill and prompt_precision.fp8() else prefill_bf16
-    sts = [st for _, st, _ in items]
-    sizes = [len(ids) for ids, _, _ in items]
-    starts = np.concatenate([[0], np.cumsum(sizes)]).tolist()
-    W, keep, dev = starts[-1], c.conv_kernel - 1, w.norm.device
-    p0s = [st.pos for st in sts]
-    for (_, _, cut), n in zip(items, sizes):
-        if not 0 <= cut < n:
-            raise ValueError(f"cut {cut} is not inside a piece of {n} rows")
-    local = [np.arange(n)[:, None] + np.arange(keep + 1)[None, :] for n in sizes]
-    windows = _pinned(np.concatenate([np.where(t < keep, t, t + o) for t, o in zip(local, starts)]), dev)
-    sids = _pinned(np.repeat(np.arange(len(items)), sizes), dev)
-    pos = _pinned(np.concatenate([np.arange(p, p + n) for p, n in zip(p0s, sizes)]), dev)
-    ids = _pinned(np.concatenate([np.asarray(ids, dtype=np.int64) for ids, _, _ in items]), dev)
-    x = glue.embedding(ids, w.embed)
-    pending: torch.Tensor | None = None
-    taps: list[torch.Tensor] = []
-    parts = [clone_state(st) if cut else None for _, st, cut in items]
-    spans = list(zip(starts, sizes))
-    for i, layer in enumerate(w.layers):
+    def __init__(self, w: Weights, items, *, tp: bool = False, capture_taps: bool = False) -> None:
+        c = w.config
+        if any(layer.moe is not None for layer in w.layers):
+            raise ValueError("a batched prefill takes dense layers only")
+        self.w, self.tp, self.capture_taps = w, tp, capture_taps
+        self.pg = prefill_glue if w.fast_prefill and prompt_precision.fp8() else prefill_bf16
+        self.items = items
+        self.sts = [st for _, st, _, _ in items]
+        sizes = [len(ids) for ids, _, _, _ in items]
+        starts = np.concatenate([[0], np.cumsum(sizes)]).tolist()
+        self.W, self.keep, dev = starts[-1], c.conv_kernel - 1, w.norm.device
+        self.p0s = [p0 for _, _, p0, _ in items]
+        keep = self.keep
+        for (_, _, _, cut), n in zip(items, sizes):
+            if not 0 <= cut < n:
+                raise ValueError(f"cut {cut} is not inside a piece of {n} rows")
+        local = [np.arange(n)[:, None] + np.arange(keep + 1)[None, :] for n in sizes]
+        self.windows = _pinned(np.concatenate([np.where(t < keep, t, t + o) for t, o in zip(local, starts)]), dev)
+        self.sids = _pinned(np.repeat(np.arange(len(items)), sizes), dev)
+        self.pos = _pinned(np.concatenate([np.arange(p, p + n) for p, n in zip(self.p0s, sizes)]), dev)
+        ids = _pinned(np.concatenate([np.asarray(ids, dtype=np.int64) for ids, _, _, _ in items]), dev)
+        self.x = glue.embedding(ids, w.embed)
+        self.pending: torch.Tensor | None = None
+        self.taps: list[torch.Tensor] = []
+        self.parts = [clone_state(st) if cut else None for _, st, _, cut in items]
+        self.spans = list(zip(starts, sizes))
+
+    def layer(self, i: int, layer) -> None:
+        w, tp, pg, c = self.w, self.tp, self.pg, self.w.config
+        sts, parts, spans, p0s = self.sts, self.parts, self.spans, self.p0s
+        W, keep, windows, sids, pos = self.W, self.keep, self.windows, self.sids, self.pos
+        items = [(ids, st, cut) for ids, st, _, cut in self.items]
+        capture_taps, taps = self.capture_taps, self.taps
+        x, pending = self.x, self.pending
         x, h = pg.add_rmsnorm(x, pending, layer.input_norm, c.eps)
         if layer.linear:
             gdn = layer.gdn
@@ -320,16 +361,49 @@ def prefill_rows(w: Weights, items: list[tuple[Sequence[int], State, int]], *, t
         pending = _mlp(h, layer, pg, tp)
         if capture_taps and i in TAP_LAYERS:
             taps.append((x.float() + pending.float()).to(torch.bfloat16))
-    every = torch.cat(taps, dim=-1) if capture_taps else None
-    out = []
-    for st, part, p0, (_, _, cut), (o, n) in zip(sts, parts, p0s, items, spans):
-        st.pos = p0 + n
-        _, normed, _ = glue.add_rmsnorm(x[o + n - 1:o + n].contiguous(), pending[o + n - 1:o + n].contiguous(),
-                                        w.norm, c.eps)
-        if part is not None:
-            part.pos = p0 + cut                     # the piece's buffers: their rows below part.pos stay as committed
-        out.append((normed, None if every is None else every[o:o + n], part))
-    return out
+        self.x, self.pending = x, pending
+
+    def finish(self) -> list[tuple[torch.Tensor, torch.Tensor | None, State | None]]:
+        c, x, pending = self.w.config, self.x, self.pending
+        every = torch.cat(self.taps, dim=-1) if self.capture_taps else None
+        out = []
+        for st, part, p0, (_, _, _, cut), (o, n) in zip(self.sts, self.parts, self.p0s, self.items, self.spans):
+            st.pos = p0 + n
+            _, normed, _ = glue.add_rmsnorm(x[o + n - 1:o + n].contiguous(), pending[o + n - 1:o + n].contiguous(),
+                                            self.w.norm, c.eps)
+            if part is not None:
+                part.pos = p0 + cut                 # the piece's buffers: their rows below part.pos stay as committed
+            out.append((normed, None if every is None else every[o:o + n], part))
+        return out
+
+
+@torch.no_grad()
+def prefill_rows(w: Weights, items: list[tuple[Sequence[int], State, int]], *, tp: bool = False,
+                 capture_taps: bool = False) -> list[tuple[torch.Tensor, torch.Tensor | None, State | None]]:
+    """``prefill_chunk`` for several streams in one forward (dense text layers): ``items`` are (ids, state, cut).
+    Projections, norms and MLPs run over every row at once, each row's bits its own; each stream's convolution
+    windows, DeltaNet chains and attention read its own state. Per item: (last row normed, taps, the state at cut)."""
+
+    rows = _Rows(w, [(ids, st, st.pos, cut) for ids, st, cut in items], tp=tp, capture_taps=capture_taps)
+    for i, layer in enumerate(w.layers):
+        rows.layer(i, layer)
+    return rows.finish()
+
+
+def _layer_major(w: Weights, groups: list[_Rows]) -> list[list[tuple]]:
+    """Layer l of every group, then layer l + 1; an EXL3 pack's decoded prompt weights live for one layer."""
+
+    from tensorfold.cuda.exl3 import prefill as exl3_prefill
+
+    exl3_prefill.scope_begin()
+    try:
+        for i, layer in enumerate(w.layers):
+            for g in groups:
+                g.layer(i, layer)
+            exl3_prefill.scope_release()             # this layer's decoded prompt weights
+    finally:
+        exl3_prefill.scope_end()
+    return [g.finish() for g in groups]
 
 
 @torch.no_grad()

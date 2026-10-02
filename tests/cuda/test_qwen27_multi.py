@@ -327,6 +327,54 @@ def test_prompts_resume_a_shared_start_and_equal_fresh(monkeypatch, step):
         assert s.cached == (len(shared) if s.prompt[:len(shared)] == shared else 0), (s.prompt, s.cached)
 
 
+
+@pytest.mark.parametrize("merge", [True, False])
+def test_a_short_tail_fills_with_its_stop_in_one_call(monkeypatch, merge):
+    """A prompt whose last stop is fewer than MIN_GAP rows from its end fills to the end in one call, its stop kept
+    from inside it: the same tokens, the same kept prefix and the same resumed replies as with two calls."""
+
+    from tensorfold.cuda import markers
+    from tensorfold.families.qwen3_5.cuda import multi
+
+    monkeypatch.setattr(multi, "TAIL_MERGE", merge)
+    monkeypatch.setattr(multi, "MIN_GAP", 4)
+    monkeypatch.setattr(markers, "MIN_GAP", 4)
+    calls = []
+    alone, together = multi.prefill_state, multi.prefill_batch
+
+    def prefill_state(w, prompt, st, **kw):
+        calls.append((st.pos, len(prompt)))
+        return alone(w, prompt, st, **kw)
+
+    def prefill_batch(w, pieces, **kw):
+        calls.extend((p.st.pos, len(p.prompt)) for p in pieces)
+        return together(w, pieces, **kw)
+
+    monkeypatch.setattr(multi, "prefill_state", prefill_state)
+    monkeypatch.setattr(multi, "prefill_batch", prefill_batch)
+    w = _model()
+    shared = [11, 12, 13, 14, 15, 16]
+    prompts = [shared + [21, 22, 23], shared + [31, 32], shared + [41, 42, 43, 44, 45]]
+    refs = {tuple(p): _serial(w, p, smp, 16) for p, smp in zip(prompts, SAMPLINGS)}
+    dec = _Oracle(w, refs, seed=7, points=_points_after(len(shared)))
+    first = Stream(prompts[0], 16, SAMPLINGS[0])
+    dec.admit(first)
+    while dec.live():
+        dec.finish(dec.round())
+    assert first.out == refs[tuple(prompts[0])] and first.cached == 0
+    assert any(e[0] == shared for e in dec.cache.entries)
+    assert calls == ([(0, 9)] if merge else [(0, 6), (6, 9)])            # one call to the end, or two
+    rest = []
+    for prompt, sampling in zip(prompts[1:], SAMPLINGS[1:]):
+        s = Stream(prompt, 16, sampling)
+        dec.admit(s)
+        rest.append(s)
+    while dec.live():
+        dec.finish(dec.round())
+    for s in rest:
+        assert s.out == refs[tuple(s.prompt)], s.prompt
+        assert s.cached == len(shared), (s.prompt, s.cached)
+
 def test_streams_keep_decoding_while_a_prompt_prefills(monkeypatch):
     """With streams decoding, a queued prompt prefills STEP rows a round and the others keep taking tokens."""
 

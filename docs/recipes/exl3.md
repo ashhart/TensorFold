@@ -103,14 +103,36 @@ into tensor-core fragments and multiplies in fp32. Rows are independent by const
 and of K splits depend only on (K, N) (`plan(k, n)`), every sum runs in a fixed order, and `mma.m16n8k16` keeps
 its rows independent — which is the verify path's contract (`docs/recipes/cuda.md`).
 
+`linear_kernel` runs 16 rows a pass and decodes every tile again each pass, so from 17 rows (verify windows of several
+streams) the mid-M kernels take the call: each CTA holds 16 rows (17-48) or 32 (49-128) of one column block, and the
+CTAs of a block sit side by side in the grid so they read its words from L2 together. They keep `linear_kernel`'s K
+ranges, mma chain and fixed-order sums, so every output bit is the same at any row count. For 4- and 6-bit `mul1`
+layers `linear_wc.cuh` takes 17-128 rows first: a CTA holds 32 or 64 rows of one column block and one K split, each
+warp decodes its column tile once a CTA straight into mma fragments, and words and rows stream through a 4-stage
+`cp.async` ring; layers split over K with 32+ column blocks run every split in one CTA and add the split sums in
+registers in split order, with no Z buffer. The same chain and order again give `linear_kernel`'s bits.
+`TENSORFOLD_EXL3_WC=0` leaves 17-128 rows to the mid-M kernels, and `TENSORFOLD_EXL3_MIDM=0` keeps `linear_kernel`
+throughout.
+
 ## Prompts
 
-Prompt chunks take their own arithmetic, as the MLX 4-bit path's prompt matmul does (`cuda/exl3/prefill.py`): the
-input rotation is decode's, W_q is decoded once a chunk into fp16, a fixed-tile fp16 GEMM with fp32 accumulation
-multiplies it, and its epilogue rotates each 128-column block (the accumulator's bf16 high and low halves times
-H) before `svh` and the bias. Tiles depend on the shape alone, so a row's bits never depend on its chunk and a
-resumed prompt equals a fresh one; they differ from decode's, so the engines keep prompt ends and prefill a reply
-again, as for the MLX checkpoints. A family's head, read one row a prompt, keeps the decode linear.
+Prompt chunks take their own arithmetic, as the MLX 4-bit path's prompt matmul does (`cuda/exl3/prefill.py`). A
+family whose prompt rows are bf16 can opt in to the folded path with `Workspace(fold=True)`, as the 27B does: each
+call decodes W'' = diag(suh) H W_q H / 128, both rotations folded into the weights and rounded once to bf16
+(`unpack_fold2`), and a fixed-tile bf16 GEMM with fp32 accumulation multiplies the raw rows by it before `svh` and
+the bias, so no `rot_in` pass runs. A 4-bit call of up to 48 rows with no W'' held (a short prompt, a short follow-up)
+runs `fdirect` instead, which rebuilds each W'' block exactly as `unpack_fold2` does and feeds it straight into the
+same mma chain: the same bits without writing W''. Otherwise the input rotation is decode's, W_q is decoded once a call into fp16, a
+fixed-tile fp16 GEMM with fp32 accumulation multiplies it, and its epilogue rotates each 128-column block (the
+accumulator's bf16 high and low halves times H) before `svh` and the bias. Either way tiles depend on the shape
+alone, so a row's bits never depend on its chunk and a resumed prompt equals a fresh one; they differ from decode's,
+so the engines keep prompt ends and prefill a reply again, as for the MLX checkpoints. A family's head, read one row
+a prompt, keeps the decode linear.
+
+Switches, read at import: `TENSORFOLD_EXL3_FOLD=0` puts every family on the W_q path; `TENSORFOLD_EXL3_FOLD_BF16=0`
+keeps W'' in fp16 and rounds the rows to fp16 in the GEMM; `TENSORFOLD_EXL3_FOLD2=0` decodes W'' with `unpack_fold`,
+the plain kernel `unpack_fold2` reproduces bit for bit; `TENSORFOLD_EXL3_FDIRECT_ROWS` sets the rows `fdirect` takes
+(0, off, by default; 48 turns it on for layers without a bias).
 
 ## Numbers
 

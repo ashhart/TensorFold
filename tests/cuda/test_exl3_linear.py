@@ -128,3 +128,28 @@ def test_the_plan_depends_on_the_shape_only():
         per_warp = (k // 16) // (sk * wk)
         assert (k // 16) % (sk * wk) == 0 and per_warp >= 1
         assert per_warp >= 8 or (k // 16) < 8 * 8              # only a tiny layer may go below eight tiles
+
+
+MODES = (0, 6, 7)               # linear.MODE: linear_kernel at every row count; the mid-M kernels; linear_wc
+# (bits, K, N, split): the 27B's projections with the loader's splits, a split layer of 32+ column blocks, others
+MODE_SHAPES = [(4, 17408, 5120, (1, 8)), (4, 5120, 10240, (5, 4)), (4, 5120, 6144, (5, 2)), (4, 6144, 5120, (16, 2)),
+               (3, 17408, 5120, (4, 2)), (6, 5120, 4096, (5, 2)), (6, 1024, 2048, (1, 8)), (2, 2048, 1024, (2, 4))]
+
+
+@pytest.mark.parametrize("bits,k,n,split", MODE_SHAPES, ids=lambda v: str(v))
+@pytest.mark.parametrize("codebook", ["mul1", "3inst"])
+def test_every_kernel_mode_gives_linear_kernels_bits(monkeypatch, codebook, bits, k, n, split):
+    """Rows 1..128: each mode's output equals linear_kernel's bit for bit, and a row alone equals it inside 128."""
+
+    trellis, suh, svh = _tensors(codebook, bits, kt=k // 16, nt=n // 16, seed=k + n)
+    layer = linear.Exl3Linear.from_tensors(trellis, suh, svh, codebook)
+    layer.split = split
+    x = torch.randn((128, k), device="cuda").half()
+    monkeypatch.setattr(linear, "MODE", 0)
+    ref = layer(x)
+    for mode in MODES[1:]:
+        monkeypatch.setattr(linear, "MODE", mode)
+        for m in range(1, 129):
+            assert torch.equal(layer(x[:m]), ref[:m]), f"mode {mode}, {m} rows"
+        for r in (0, 17, 127):
+            assert torch.equal(layer(x[r:r + 1]), ref[r:r + 1]), f"mode {mode}, row {r} alone"
