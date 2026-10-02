@@ -256,7 +256,8 @@ class FusedDecode:
         self.layers = model.backbone.layers
         # lane attention needs the M5's tensor units (its fragment layout is theirs; an M3 gets wrong values)
         self.lane_attention = tensor_units()
-        self.lane_attention_from = 10_000
+        # every row on lane attention: a window attends in one call, with each row's bits as its one-row step's
+        self.lane_attention_from = 0
         self.eps_value = float(args.layer_norm_epsilon)
         self.eps = mx.array([self.eps_value], dtype=mx.float32)
         self.limits = mx.array([float(args.time_step_limit[0]), float(args.time_step_limit[1])], dtype=mx.float32)
