@@ -9,12 +9,16 @@ graph replay, so a row computes exactly what it computes alone. The MTP chain ru
 every drafting stream's backlog rows (target hiddens of the rows its last round kept), steps 2..k one row a stream.
 Prompts fill one chunk per round between decode rounds, with the chunking a lone request uses (prompt chunks are not
 row-invariant, so the chunk boundaries must match) and the one-stream kernels on the stream's slot (``State.view``).
+While other streams decode, a chunk goes TF_GLM53_FILL_LAYERS layers a step (default 8; 0: whole chunks) with a
+decode round between steps, so a long fill stalls the others for a few layers' time, not a chunk's: the same rows
+through the same layers and kernels, only paused between layers (the chunk's rows wait in the Runner's prompt
+buffers, which decode rounds never touch). A prompt filling while no stream decodes takes whole chunks, as alone.
 
 Graphs: keyed by the window's shape (rows, streams, MTP step, key bucket, pick), captured on first use; the position
 and base tables are static buffers, so one graph serves every position mix of that shape.
 
 TP: rank 0 decides (admission, fills, rounds) and samples; ranks 1..3 follow its messages - ADMIT (+ prompt), FILL
-(+ the first token), ROUND (+ each stream's kept tokens), DONE - one fixed-size all-gather each, and run the same GPU
+(chunk, layer range; + the first token), ROUND (+ each stream's kept tokens), DONE - one fixed-size all-gather each, and run the same GPU
 work. Follower ranks never sample, so their host work is small and they cannot disagree with rank 0.
 
 Credits: the follower protocol and round structure follow TensorFold's families/qwen3_5/cuda/multi.py; per-row
@@ -24,6 +28,7 @@ glm-multi-dsa, 0030 glm-multi-stream-engine, 0035 glm-multi-rounds, 0049 glm-mul
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Callable
 
@@ -35,6 +40,7 @@ from . import fused
 
 ADMIT, ROUND, DONE, FILL = 1, 2, 3, 4      # rank 0's messages (an empty message: stop following)
 MSG = 128                                  # ints a one-shot message carries (longer ones take a second all-gather)
+FILL_LAYERS = int(os.environ.get("TF_GLM53_FILL_LAYERS", "8"))   # layers a fill step while others decode (0: a chunk)
 
 
 class GlmMultiDecoder:
@@ -85,6 +91,8 @@ class GlmMultiDecoder:
         self.next_id = 0
         self.broken: Exception | None = None
         self.rounds = 0
+        self.fill_layers = FILL_LAYERS
+        self.mid_rounds = 0                       # decode rounds run while a prompt chunk was paused between layers
 
     # -------------------------------------------------------------------------------------------- messages ---
     def _share(self, values: list[int] | None) -> list[int]:
@@ -155,6 +163,7 @@ class GlmMultiDecoder:
         s.slot = slot
         s.chunks = self.runner.chunks(len(s.prompt))
         s.ci = 0
+        s.li = 0                                  # the current chunk's next layer
         s.toks = torch.tensor(s.prompt, dtype=torch.long, device=self.w.device)
         self.filling.append(s)
 
@@ -162,14 +171,17 @@ class GlmMultiDecoder:
         return self.k if s.draft and self.k else 0
 
     # ------------------------------------------------------------------------------------------------ fill ---
-    def _fill(self) -> list[Stream]:
-        """The oldest queued prompt's next chunk (the chunking it has alone); at its end, its first token."""
+    def _fill(self, alone: bool) -> list[Stream]:
+        """The oldest queued prompt's next step: the rest of its current chunk (the chunking it has alone) when no
+        stream decodes (``alone``), else the chunk's next fill_layers layers; at the prompt's end, its first token."""
         s = self.filling[0]
         a, e = s.chunks[s.ci]
-        self._send([FILL, s.sid, a, e])
+        n, G = len(self.w.layers), self.fill_layers
+        hi = n if alone or G <= 0 else min(n, s.li + G)
+        self._send([FILL, s.sid, a, e, s.li, hi])
         t0 = time.perf_counter()
         try:
-            first = self._chunk(s, a, e)
+            first = self._chunk(s, a, e, s.li, hi)
             if first is not None:
                 tok = int(self.sample(first, len(s.prompt), s.sampling))
                 self._send([tok])
@@ -185,9 +197,19 @@ class GlmMultiDecoder:
         s.take([tok], self._ends(s))
         return [s] if s.done else []
 
-    def _chunk(self, s: Stream, a: int, e: int):
+    def _chunk(self, s: Stream, a: int, e: int, lo: int, hi: int):
+        """Layers [lo, hi) of chunk a..e (all of them: the chunk in one go, as alone)."""
+        n = len(self.w.layers)
+        if lo != s.li:
+            raise RuntimeError(f"fill step at layer {lo}, the chunk is at layer {s.li}")
+        layers = None if (lo, hi) == (0, n) else (lo, hi)
+        out = self.runner.prefill_chunk(self.views[s.slot], s.toks, a, e, len(s.prompt), layers=layers)
+        if hi < n:
+            s.li = hi
+            return None
+        s.li = 0
         s.ci += 1
-        return self.runner.prefill_chunk(self.views[s.slot], s.toks, a, e, len(s.prompt))
+        return out
 
     def _start(self, s: Stream, tok: int) -> None:
         """Prompt done: the pending token at P = len(prompt); the MTP backlog (carry = hidden P - 1, token)."""
@@ -208,10 +230,13 @@ class GlmMultiDecoder:
         """A prompt chunk for the oldest queued prompt, then one decode round over the decoding streams; returns the
         streams that finished."""
         self._check()
-        done = self._fill() if self.filling else []
+        decoding = any(not s.done for s in self.streams.values())
+        done = self._fill(not decoding) if self.filling else []
         live = [s for s in self.streams.values() if not s.done]
         if not live:
             return done
+        if self.filling and self.filling[0].li:
+            self.mid_rounds += 1
         plan = [(s.sid, s.slot, s.P, s.tok, s.m, self._d(s), int(s.sampling is not None)) for s in live]
         self._send([ROUND, len(plan), *[x for item in plan for x in item]])
         try:
@@ -421,9 +446,9 @@ class GlmMultiDecoder:
                 self.free = [x for x in self.free if x != slot]
                 self._queue(s, slot)
             elif kind == FILL:
-                sid, a, e = msg[1:4]
+                sid, a, e, lo, hi = msg[1:6]
                 s = next(x for x in self.filling if x.sid == sid)
-                if self._chunk(s, a, e) is not None:
+                if self._chunk(s, a, e, lo, hi) is not None:
                     self._start(s, self._recv()[0])
             elif kind == ROUND:
                 n = msg[1]

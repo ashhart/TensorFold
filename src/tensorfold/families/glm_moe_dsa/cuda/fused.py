@@ -951,19 +951,25 @@ def head(w: Weights, b: Buffers, x: torch.Tensor, norm: torch.Tensor, R: int, ro
 
 
 def compute(w: Weights, st: State, b: Buffers, R: int, T: int | None, *, logits: str = "all",
-            pick: str = "full") -> None:
+            pick: str = "full", layers: tuple[int, int] | None = None) -> None:
     """The target's GPU work for rows b.ids[:R] at st.pos .. st.pos + R - 1 (capturable): caches written, final
     hidden in b.hidden[:R]; logits of all rows, the last row ("last") or none. A ``Rows`` state (several streams):
-    row r at st.pos[r] in the cache rows from st.base[r]."""
+    row r at st.pos[r] in the cache rows from st.base[r]. ``layers`` (lo, hi): only those layers (a prompt chunk
+    paused between layers: the rows' activations wait in b.x; lo == 0 embeds, hi == every layer finishes)."""
+    lo, hi = layers or (0, len(w.layers))
     x = b.x[:R]
-    torch.index_select(w.embed, 0, b.ids[:R], out=x)
+    if lo == 0:
+        torch.index_select(w.embed, 0, b.ids[:R], out=x)
     D = x.shape[1]
     base = getattr(st, "base", None)
-    for i, L in enumerate(w.layers):
+    for i in range(lo, hi):
+        L = w.layers[i]
         layer(w, L, b, x, R, st.kc[i], st.ic.get(L.index), st.pos, T, base)
         s = w.tap_slot.get(i)
         if s is not None:                                # DFlash2: this layer's output rows
             b.taps[:R, s * D:(s + 1) * D].copy_(x)
+    if hi < len(w.layers):
+        return
     b.hidden[:R].copy_(x)
     if logits == "all":
         head(w, b, x, w.final_norm, R, mode=pick)
@@ -998,15 +1004,21 @@ def _residual(w: Weights, h: _Half) -> None:
 
 
 def compute_prompt(w: Weights, st: State, b0: Buffers, b1: Buffers, R: int, T: int | None, pos1: torch.Tensor,
-                   comm_stream, *, logits: str = "none") -> None:
+                   comm_stream, *, logits: str = "none", layers: tuple[int, int] | None = None,
+                   halves: list | None = None) -> list:
     """A prompt chunk as two micro-batches whose all-reduces overlap each other's compute (rows [0, h) in b0 at
-    st.pos, rows [h, R) in b1 at pos1 = st.pos + h). Ids in b0.ids[:R]; final hidden rows in b0.hidden[:R]."""
+    st.pos, rows [h, R) in b1 at pos1 = st.pos + h). Ids in b0.ids[:R]; final hidden rows in b0.hidden[:R].
+    ``layers`` (lo, hi): only those layers; the halves (returned, passed back for the next range) hold the paused
+    chunk's state: rows in b0.x / b1.x, the last reductions in flight - the current stream waits for those before
+    returning, so work issued in the pause (decode rounds, their collectives) starts after them."""
     c = w.cfg
     hR = R // 2
-    halves = [_Half(b0, hR, st.pos), _Half(b1, R - hR, pos1)]
-    b1.ids[:R - hR].copy_(b0.ids[hR:R])
-    for h in halves:
-        torch.index_select(w.embed, 0, h.b.ids[:h.R], out=h.b.x[:h.R])
+    lo, hi = layers or (0, len(w.layers))
+    if lo == 0:
+        halves = [_Half(b0, hR, st.pos), _Half(b1, R - hR, pos1)]
+        b1.ids[:R - hR].copy_(b0.ids[hR:R])
+        for h in halves:
+            torch.index_select(w.embed, 0, h.b.ids[:h.R], out=h.b.x[:h.R])
     D = c.hidden_size
 
     def tap(h: _Half, i: int) -> None:                    # layer i's output rows (complete after its residual)
@@ -1014,23 +1026,26 @@ def compute_prompt(w: Weights, st: State, b0: Buffers, b1: Buffers, R: int, T: i
         if s is not None:
             h.b.taps[:h.R, s * D:(s + 1) * D].copy_(h.b.x[:h.R])
 
-    first = True
-    for i, L in enumerate(w.layers):
+    for i in range(lo, hi):
+        L = w.layers[i]
         for h in halves:                                  # attention: A writes its keys before B attends
-            if not first:
+            if i:
                 _residual(w, h)
                 tap(h, i - 1)
             x = h.b.x[:h.R]
             glue.rmsnorm(x, L.input_norm, c.rms_norm_eps, h.b.normed[:h.R])
             attention_part(w, L, h.b, h.R, st.kc[i], st.ic.get(L.index), h.pos, T)
             _reduce_async(w, h, comm_stream)
-        first = False
         for h in halves:
             _residual(w, h)
             x = h.b.x[:h.R]
             glue.rmsnorm(x, L.post_attn_norm, c.rms_norm_eps, h.b.normed[:h.R])
             ffn_part(w, L, h.b, h.R)
             _reduce_async(w, h, comm_stream)
+    if hi < len(w.layers):                                # paused: drain the reductions in flight
+        for h in halves:
+            torch.cuda.current_stream().wait_event(h.done)
+        return halves
     for h in halves:
         _residual(w, h)
         tap(h, len(w.layers) - 1)
@@ -1041,6 +1056,7 @@ def compute_prompt(w: Weights, st: State, b0: Buffers, b1: Buffers, R: int, T: i
     if logits == "last":
         head(w, b1, b1.x[:R - hR], w.final_norm, R - hR, slice(R - hR - 1, R - hR))
         b0.logits[:1].copy_(b1.logits[:1])
+    return halves
 
 
 def mtp_compute(w: Weights, st: State, b: Buffers, n: int, T: int | None, *, logits: str = "last",
