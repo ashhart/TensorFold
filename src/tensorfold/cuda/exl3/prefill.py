@@ -126,7 +126,7 @@ def matmul(layer: Exl3Linear, x: torch.Tensor, out: torch.Tensor, ws: Workspace)
         raise ValueError(f"prefill matmul: x {tuple(x.shape)} and out {tuple(out.shape)} do not match K={k}, N={n}")
     ext = _ext()
     xh = ws._grow("xh", m * k, x.device)[:m * k].view(m, k)
-    ext.rot_in(x.contiguous(), layer.suh, xh)
+    ext.rot_in(x.contiguous(), layer.suh, xh, 0)
     if ws.cache is not None:
         wq = ws.cache.get(layer, x.device)
     else:

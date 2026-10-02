@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+import os
 from pathlib import Path
 
 import torch
@@ -11,6 +12,11 @@ import torch
 from . import format as fmt
 
 CODEBOOK_IDS = {"3inst": 0, "mcg": 1, "mul1": 2}
+# the kernel's walk and launch (TF_EXL3_LINEAR_LOADS overrides); none changes a bit of any output. 0: the original walk.
+# Bit 0: the transposed walk (the decoded tile as the mma's A, 8 rows a mma: half the mma and accumulators up to 8 rows,
+# x a step ahead); bit 1 (with bit 0): the weights as 16-byte loads a step ahead, staged in shared memory (3 to 6
+# bits); bit 5: programmatic dependent launch of rot_in and the linear (their weight loads overlap the previous kernel)
+LOADS = int(os.environ.get("TF_EXL3_LINEAR_LOADS", "35"))
 
 
 @lru_cache(maxsize=1)
@@ -18,7 +24,7 @@ def _ext():
     from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
-    return load(name="tensorfold_exl3_linear_v3", sources=[str(here / "linear.cpp"), str(here / "linear.cu")],
+    return load(name="tensorfold_exl3_linear_v4", sources=[str(here / "linear.cpp"), str(here / "linear.cu")],
                 extra_include_paths=[str(here)], extra_cuda_cflags=["-O3", "--expt-relaxed-constexpr"],
                 verbose=False)
 
@@ -66,6 +72,7 @@ class Exl3Linear:
     n: int
     layout: str = "strips"
     split: tuple[int, int] | None = None     # (K splits, warps a program); plan(k, n) when None, fixed thereafter
+    loads: int | None = None                 # the kernel's load path (LOADS when None); never changes a bit
 
     @classmethod
     def from_tensors(cls, trellis: torch.Tensor, suh: torch.Tensor, svh: torch.Tensor, codebook: str,
@@ -179,9 +186,11 @@ class Exl3Linear:
             z = torch.empty((sk * m * self.n,), dtype=torch.float32, device=x.device)
         sk_stride, nb_stride = self.strides
         ext = _ext()
-        ext.rot_in(x, self.suh, xh)
+        loads = LOADS if self.loads is None else self.loads
+        ext.rot_in(x, self.suh, xh, (loads >> 5) & 1)
         ext.linear(xh, self.words, sk_stride, nb_stride, self.svh, self.bias, out, z if sk > 1 else None,
-                   self.counters, self.k2, CODEBOOK_IDS[self.codebook], sk, wk)
+                   self.counters, self.k2, CODEBOOK_IDS[self.codebook], sk, wk,
+                   loads)
         return out
 
     def unpack(self, out: torch.Tensor | None = None) -> torch.Tensor:
