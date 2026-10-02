@@ -63,6 +63,53 @@ def test_slices_meet_in_part_with_the_clusters_bits(kind):
     assert torch.equal(y, clusters)
 
 
+def _lane(kind, n, k):
+    """A linear of ``kind`` and its qmmf operands (mode, words, block scales)."""
+
+    from tensorfold.cuda.nvfp4 import linear
+
+    if kind == "fp4":
+        packed, scale, g = _fp4(n, k, 7)
+        lin = Fp4Linear.from_checkpoint(torch.from_numpy(packed).cuda(), torch.from_numpy(scale).cuda(), g)
+        return lin, linear.FP4, lin.words, lin.bs
+    w8, s = _fp8(n, k, 7)
+    w = torch.from_numpy(w8).cuda().view(torch.float8_e4m3fn)
+    if kind == "fp8":
+        lin = Fp8Linear.from_checkpoint(w, s)
+        return lin, linear.FP8, lin.w8, None
+    if kind == "fp8g":
+        scale_inv = torch.rand((-(-n // 128), k // 128), generator=torch.Generator().manual_seed(3)) * 0.02 + 0.004
+        lin = Fp8BlockLinear.from_checkpoint(w, scale_inv.cuda())
+        return lin, linear.FP8G, lin.w8, lin.bs
+    e8 = torch.randint(118, 130, (n, k // 32), generator=torch.Generator().manual_seed(4), dtype=torch.uint8)
+    lin = Mx8Linear.from_checkpoint(w, e8.cuda())
+    return lin, linear.MXFP8, lin.w8, lin.bs
+
+
+@pytest.mark.parametrize("kind", ["fp4", "fp8", "fp8g", "mxfp8"])
+@pytest.mark.parametrize("n,k", [(2560, 6144), (512, 2560)])
+def test_prompt_rows_add_their_slices_in_one_block_with_the_clusters_bits(kind, n, k):
+    """Prompt rows (FUSED_ROWS on) run a tile's K slices in one block, each from zero, added in slice order: the
+    clusters' bits, row for row, and each row's bits as a decode window computes them."""
+
+    from tensorfold.cuda.kernels import qmm
+    from tensorfold.cuda.nvfp4 import linear
+
+    lin, mode, w, bs = _lane(kind, n, k)
+    sk = qmm.split_k(n, k)
+    assert sk > 1                                                               # 8 and 4 slices
+    m = 300
+    assert m >= linear.FUSED_ROWS
+    x = (torch.randn((m, k), generator=torch.Generator().manual_seed(5)) * 0.6).to(torch.bfloat16).cuda()
+    fused = lin(x)                                                              # bm 0: one block a tile
+    clusters = torch.empty_like(fused)
+    scale = getattr(lin, "scale", 1.0) if mode in (linear.FP4, linear.FP8) else 1.0
+    linear._ext().qmmf(x, w, bs, scale, clusters, None, mode, n, sk, lin.npad, qmm.bucket(m), False)
+    assert torch.equal(fused, clusters)
+    for r0 in (0, 16, 283):                                                     # decode windows: 16 rows, clusters
+        assert torch.equal(lin(x[r0:r0 + 16].contiguous()), fused[r0:r0 + 16]), r0
+
+
 @pytest.mark.parametrize("n,k", [(128, 256), (320, 1024), (1000, 5120)])
 def test_fp4_decode_is_the_dequantized_product_and_rows_are_independent(n, k):
     packed, scale, g = _fp4(n, k, n)
