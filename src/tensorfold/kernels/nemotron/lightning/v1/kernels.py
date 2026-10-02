@@ -192,47 +192,91 @@ def _segments(lengths: tuple[int, ...]) -> tuple[mx.array, mx.array, mx.array]:
     return _table("segments", lengths, build)
 
 
+# a lone stream's window of this many rows stores its Mamba states every STATE_STRIDE rows and at its last row
+SPARSE_FROM = 17
+STATE_STRIDE = 8
+
+
+def sparse_store(rows: int) -> tuple[int, ...] | None:
+    """Each row's state slot (-1: not stored) for a lone window: every row below SPARSE_FROM, else every STATE_STRIDE-th and the last."""
+
+    if rows < SPARSE_FROM:
+        return None
+    store, slot = [], 0
+    for r in range(rows):
+        if (r + 1) % STATE_STRIDE == 0 or r == rows - 1:
+            store.append(slot)
+            slot += 1
+        else:
+            store.append(-1)
+    return tuple(store)
+
+
 def mamba_scan(proj: mx.array, conv_states: mx.array, ssm_states: mx.array, lengths: tuple[int, ...],
                conv_w: mx.array, conv_b: mx.array, a_log: mx.array, d_skip: mx.array, dt_bias: mx.array,
                limits: mx.array, *, heads: int, head_dim: int, groups: int, state_dim: int,
-               slots: tuple[int, ...] | None = None) -> tuple[mx.array, mx.array, mx.array]:
-    """Scan ``lengths[i]`` tokens from state slot ``slots[i]`` or i, returning gated y and every row's conv/SSM states with bits independent of other segments."""
+               slots: tuple[int, ...] | None = None, store: tuple[int, ...] | None = None
+               ) -> tuple[mx.array, mx.array, mx.array]:
+    """Scan ``lengths[i]`` tokens from state slot ``slots[i]`` or i, returning gated y and the conv/SSM states after each row (or after the rows ``store`` keeps, in its slots) with bits independent of other segments."""
 
     rows, width = proj.shape
     slots = tuple(range(len(lengths))) if slots is None else tuple(int(s) for s in slots)
     held = min(int(conv_states.shape[0]), int(ssm_states.shape[0]))
     if sum(lengths) != rows or len(slots) != len(lengths) or not all(0 <= s < held for s in slots):
         raise ValueError("mamba_scan: lengths must cover the rows, a state slot per segment")
+    store = tuple(range(rows)) if store is None else tuple(int(s) for s in store)
+    kept = max(store) + 1
+    if len(store) != rows or kept < 1 or sorted(s for s in store if s >= 0) != list(range(kept)):
+        raise ValueError("mamba_scan: store names each row's state slot (-1 for none), the slots 0 .. kept - 1 once")
     slot = _table("slots", slots, lambda: ints(slots))
+    where = _table("store", store, lambda: ints(store))
     xd = heads * head_dim
     conv_dim = xd + 2 * groups * state_dim
     kc = conv_w.shape[0]
     dims, seg, starts = _segments(tuple(int(n) for n in lengths))
-    conv = _kernel("nemotron_mamba_conv", _MAMBA_CONV, ["P", "CS_IN", "CW", "CB", "SEG", "START", "SLOT"],
+    conv = _kernel("nemotron_mamba_conv", _MAMBA_CONV, ["P", "CS_IN", "CW", "CB", "SEG", "START", "SLOT", "STORE"],
                    ["XBC", "CS_OUT"])
     xbc, conv_rows = conv(
-        inputs=[proj, conv_states, conv_w, conv_b, seg, starts, slot],
+        inputs=[proj, conv_states, conv_w, conv_b, seg, starts, slot, where],
         template=[("XD", xd), ("NG", groups), ("DS", state_dim), ("KC", kc), ("PROJ", width), ("XOFF", xd)],
         grid=(conv_dim, rows, 1), threadgroup=(min(256, conv_dim), 1, 1),
-        output_shapes=[(rows, conv_dim), (rows, kc - 1, conv_dim)], output_dtypes=[mx.bfloat16, conv_states.dtype])
+        output_shapes=[(rows, conv_dim), (kept, kc - 1, conv_dim)], output_dtypes=[mx.bfloat16, conv_states.dtype])
     scan = _kernel("nemotron_mamba_scan", _MAMBA_SCAN,
-                   ["P", "XBC", "S_IN", "A_LOG", "DSKIP", "DT_BIAS", "limits", "dims", "SEG", "SLOT"], ["Y", "S_OUT"])
+                   ["P", "XBC", "S_IN", "A_LOG", "DSKIP", "DT_BIAS", "limits", "dims", "SEG", "SLOT", "STORE"],
+                   ["Y", "S_OUT"])
     y, ssm_rows = scan(
-        inputs=[proj, xbc, ssm_states, a_log, d_skip, dt_bias, limits, dims, seg, slot],
+        inputs=[proj, xbc, ssm_states, a_log, d_skip, dt_bias, limits, dims, seg, slot, where],
         template=[("H", heads), ("DH", head_dim), ("NG", groups), ("DS", state_dim), ("XD", xd), ("PROJ", width),
                   ("DTOFF", xd + conv_dim), ("SSZ", heads * head_dim * state_dim)],
         grid=(32, head_dim, heads), threadgroup=(32, 8, 1),
-        output_shapes=[(rows, xd), (rows, heads, head_dim, state_dim)], output_dtypes=[mx.bfloat16, ssm_states.dtype])
+        output_shapes=[(rows, xd), (kept, heads, head_dim, state_dim)], output_dtypes=[mx.bfloat16, ssm_states.dtype])
     return y, conv_rows, ssm_rows
 
 
 def mamba_step(proj: mx.array, conv_state: mx.array, ssm_state: mx.array, conv_w: mx.array, conv_b: mx.array,
                a_log: mx.array, d_skip: mx.array, dt_bias: mx.array, limits: mx.array, *, heads: int,
-               head_dim: int, groups: int, state_dim: int) -> tuple[mx.array, mx.array, mx.array]:
-    """Scan one stream, returning gated y [R, XD] and conv/SSM states after each row as [R, KC-1, CD] and [R, H, DH, DS]."""
+               head_dim: int, groups: int, state_dim: int, store: tuple[int, ...] | None = None
+               ) -> tuple[mx.array, mx.array, mx.array]:
+    """Scan one stream, returning gated y [R, XD] and conv/SSM states after each row (or the rows ``store`` keeps) as [R, KC-1, CD] and [R, H, DH, DS]."""
 
     return mamba_scan(proj, conv_state, ssm_state, (int(proj.shape[0]),), conv_w, conv_b, a_log, d_skip, dt_bias,
-                      limits, heads=heads, head_dim=head_dim, groups=groups, state_dim=state_dim)
+                      limits, heads=heads, head_dim=head_dim, groups=groups, state_dim=state_dim, store=store)
+
+
+def kept_state(proj: mx.array, conv_rows: mx.array, ssm_rows: mx.array, store: tuple[int, ...] | None,
+               conv_in: mx.array, ssm_in: mx.array, row: int, params: tuple[mx.array, ...], limits: mx.array, *,
+               heads: int, head_dim: int, groups: int, state_dim: int) -> tuple[mx.array, mx.array, int]:
+    """(conv rows, SSM rows, slot) holding the state after ``row`` of a lone window scanned with ``store``: stored, or re-scanned from the nearest stored state (or the window's input state) over the rows between, the same arithmetic row by row."""
+
+    if store is None or store[row] >= 0:
+        return conv_rows, ssm_rows, row if store is None else store[row]
+    nearest = max((r for r in range(row) if store[r] >= 0), default=-1)
+    conv_src, ssm_src, slot = (conv_rows, ssm_rows, store[nearest]) if nearest >= 0 else (conv_in, ssm_in, 0)
+    count = row - nearest
+    _, conv_again, ssm_again = mamba_scan(proj[nearest + 1:row + 1], conv_src, ssm_src, (count,), *params, limits,
+                                          heads=heads, head_dim=head_dim, groups=groups, state_dim=state_dim,
+                                          slots=(slot,), store=(*([-1] * (count - 1)), 0))
+    return conv_again, ssm_again, 0
 
 
 def group_norm(x: mx.array, weight: mx.array, eps: mx.array, group: int) -> mx.array:
@@ -306,9 +350,10 @@ class FusedDecode:
                 cache_at += 1
                 conv_state, ssm_state = self._mamba_states(c, normed.dtype)
                 block = self._block(i, "M", nxt)
-                h, normed, xs, conv_rows, ssm_rows = block(normed, xs, h, conv_state, ssm_state)
-                self._hold(c, conv_rows, ssm_rows, rows - 1)
-                self.row_states[i] = (conv_rows, ssm_rows)
+                h, normed, xs, conv_rows, ssm_rows, proj = block(normed, xs, h, conv_state, ssm_state)
+                store = sparse_store(rows)
+                self._hold(c, conv_rows, ssm_rows, rows - 1 if store is None else store[rows - 1])
+                self.row_states[i] = (conv_rows, ssm_rows, store, proj, conv_state, ssm_state)
                 c.advance(rows)
             elif kind == "*":
                 c = cache[cache_at]
@@ -355,7 +400,7 @@ class FusedDecode:
                 for c, at, n in zip(layer_caches, offsets, lengths):
                     self._hold(c, conv_rows, ssm_rows, at + n - 1)
                     c.advance(n)
-                self.row_states[i] = (conv_rows, ssm_rows)
+                self.row_states[i] = (conv_rows, ssm_rows, None, None, None, None)
             elif kind == "*":
                 layer_caches = [c[cache_at] for c in caches]
                 cache_at += 1
@@ -382,7 +427,7 @@ class FusedDecode:
                     continue
                 c = cache[cache_at]
                 if layer.block_type == "M":
-                    conv_rows, ssm_rows = self.row_states[i]
+                    conv_rows, ssm_rows = self.row_states[i][:2]
                     self._hold(c, conv_rows, ssm_rows, at + keep - 1)
                 else:
                     c.trim(n - keep)
@@ -448,12 +493,14 @@ class FusedDecode:
         def block(x: mx.array, xs: mx.array, h: mx.array, conv_state: mx.array, ssm_state: mx.array
                   ) -> tuple[mx.array, ...]:
             proj = mixer.in_proj(self._use_sums(x, xs))
+            # a wide lone window keeps states every STATE_STRIDE rows (keep_rows re-scans to a row between)
             y, conv_rows, ssm_rows = mamba_step(proj, conv_state, ssm_state, conv_w, conv_b, a_log, d_skip,
                                                 dt_bias, self.limits, heads=self.heads, head_dim=self.head_dim,
-                                                groups=self.groups, state_dim=self.state_dim)
+                                                groups=self.groups, state_dim=self.state_dim,
+                                                store=sparse_store(int(x.shape[0])))
             y = group_norm(y, mixer.norm.weight, self.eps, mixer.norm.group_size)
             hn, xn, xsn = self._add_norm(h, mixer.out_proj(y), nxt, xs)
-            return hn, xn, xsn, conv_rows, ssm_rows
+            return hn, xn, xsn, conv_rows, ssm_rows, proj
 
         return block
 
@@ -481,8 +528,10 @@ class FusedDecode:
             c = cache[cache_at]
             cache_at += 1
             if layer.block_type == "M":
-                conv_rows, ssm_rows = self.row_states[i]
-                self._hold(c, conv_rows, ssm_rows, keep - 1)
+                conv_rows, ssm_rows, store, proj, conv_in, ssm_in = self.row_states[i]
+                self._hold(c, *kept_state(proj, conv_rows, ssm_rows, store, conv_in, ssm_in, keep - 1, self.mamba[i],
+                                          self.limits, heads=self.heads, head_dim=self.head_dim, groups=self.groups,
+                                          state_dim=self.state_dim))
             else:
                 c.trim(drop)
 
