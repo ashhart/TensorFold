@@ -173,7 +173,7 @@ def chart(node: Node | None, width: int):
     rows.append(Text(f"0  {'─' * max(1, columns - 19)}  peak {number(top if values else None)}", style=MUTED))
     return panel(
         Group(*rows), "OUTPUT HISTORY",
-        subtitle="aggregate tokens/s · 10s rolling counter rate · gaps = unknown")
+        subtitle="decode tokens/s · the server live rate when reported · gaps = unknown")
 
 
 def sidebar(view: View, width: int, *, truecolor: bool):
@@ -331,13 +331,20 @@ def render(view: View, width: int, height: int, *, truecolor: bool = False) -> L
         usable = sample is not None and sample.online
         rates = node.rates if node else {}
         cards = Layout(size=5)
-        generation = rates.get("generation") if usable else None
-        prompt = rates.get("prompt") if usable else None
-        rate_source = sample.sources.get("generation", "no counter") if usable else "waiting for telemetry"
-        queue = f"{number(sample.running, places=0)} / {number(sample.waiting, places=0)}" if usable else "— / —"
-        cards.split_row(Layout(card("OUTPUT TOK/S", number(generation), rate_source, CYAN)),
-                        Layout(card("PROMPT TOK/S", number(prompt), "completed prompt tokens", VIOLET)),
-                        Layout(card("ACTIVE / WAIT", queue, "requests, not GPU lanes", PINK)))
+        live = sample.live if usable else {}
+        decode, prefill = live.get("decode_tokens_per_second"), live.get("prefill_tokens_per_second")
+        generation = decode if decode is not None else (rates.get("generation") if usable else None)
+        prompt = prefill if prefill is not None else (rates.get("prompt") if usable else None)
+        rate_source = ("server, live" if decode is not None else sample.sources.get("generation", "no counter")) \
+            if usable else "waiting for telemetry"
+        if "connections" in live:
+            queue = f"{number(live['connections'], places=0)} / {number(live.get('waiting'), places=0)}"
+        else:
+            queue = f"{number(sample.running, places=0)} / {number(sample.waiting, places=0)}" if usable else "— / —"
+        cards.split_row(Layout(card("DECODE TOK/S", number(generation), rate_source, CYAN)),
+                        Layout(card("PREFILL TOK/S", number(prompt),
+                                    "server, live" if prefill is not None else "completed prompt tokens", VIOLET)),
+                        Layout(card("CONNECTIONS / WAIT", queue, "open requests", PINK)))
         if width >= 126:
             memory = sample.memory / 1024**3 if usable and sample.memory is not None else None
             cards.add_split(Layout(card("MLX ACTIVE", number(memory, " GiB"), "GPU buffers only", GREEN)))

@@ -64,7 +64,7 @@ def register(commands) -> None:
     tui.add_argument("--profile", help="initial local profile")
     tui.add_argument("--url", action="append", default=[], help="read-only HTTP(S) endpoint; repeat for more")
     tui.add_argument("--token-env", help="environment variable with API token, never saved or put in URLs")
-    tui.add_argument("--interval", type=float, default=2, help="poll interval in seconds, 0.5–30")
+    tui.add_argument("--interval", type=float, default=1, help="poll interval in seconds, 0.5–30")
     tui.add_argument("--color", choices=("auto", "truecolor", "256", "mono"), default="auto")
     tui.add_argument("--demo", action="store_true", help="simulated preview; no network or service operations")
     tui.add_argument("--snapshot", type=Path, help="write one .svg/.html/.txt frame instead of opening a terminal")

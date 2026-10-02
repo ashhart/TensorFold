@@ -28,7 +28,7 @@ from .view import ACTIONS, View, Node, console_frame, use_truecolor
 
 class ControlApp:
     def __init__(self, *, manager: Manager | None = None, urls: list[str] | None = None,
-                 profile: str | None = None, demo: bool = False, interval: float = 2,
+                 profile: str | None = None, demo: bool = False, interval: float = 1,
                  token: str | None = None, color: str = "auto", input=None, output=None):
         if not 0.5 <= interval <= 30:
             raise ControlError("poll interval must be 0.5 through 30 seconds")
@@ -112,7 +112,8 @@ class ControlApp:
         node.sample = sample
         tracker = self.rates.setdefault(node.name, Rates(max_gap=max(8, self.interval * 4)))
         node.rates = tracker.update(sample)
-        node.series = (node.series + [node.rates.get("generation")])[-120:]
+        live = sample.live.get("decode_tokens_per_second") if sample.online else None
+        node.series = (node.series + [live if live is not None else node.rates.get("generation")])[-120:]
         if node.managed:
             try:
                 # Only the selected job is inspected each poll: no O(N) subprocess storm.

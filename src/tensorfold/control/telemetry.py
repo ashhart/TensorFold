@@ -164,6 +164,7 @@ class Sample:
     context: float | None = None
     kv_ratio: float | None = None
     acceptance: float | None = None
+    live: dict[str, float] = field(default_factory=dict)     # the server's own live line, when /health has it
     ttft_mean: float | None = None
     error: str = ""
     warning: str = ""
@@ -172,6 +173,12 @@ class Sample:
 def normalize(now: float, health: dict, values: dict[str, list[float]]) -> Sample:
     sample = Sample(now, True, "warming" if health.get("warming") else "ready",
                     clean(health.get("model", ""), 160))
+    live = health.get("live")
+    if isinstance(live, dict):
+        for key in ("connections", "waiting", "decode_tokens_per_second", "prefill_tokens_per_second"):
+            value = numeric(live.get(key))
+            if value is not None and value >= 0:
+                sample.live[key] = value
     sample.running = metric(values, "tensorfold:requests_running", "tensorfold:num_requests_running",
                             "vllm:num_requests_running")
     if sample.running is None:
