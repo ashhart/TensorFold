@@ -15,6 +15,10 @@ python -m tensorfold.vision.exl3_convert /models/vision_k6.safetensors /cache/vi
 TENSORFOLD_VISION_WEIGHTS=/cache/vision-f16-v3.safetensors tensorfold serve /models --vision --parallel 2
 ```
 
+A pack that keeps its quantized tower inside the indexed shards, beside the language weights, converts from its
+directory in the same way: `python -m tensorfold.vision.exl3_convert /models /cache/vision-f16-v3.safetensors`.
+Only the tower's byte ranges are read, and the recorded hash covers only the tower's tensors.
+
 The converter decodes represented EXL3 weights, transposes matrices and combines split Q/K/V. It records the
 source SHA256 and converter/dtype version; repeat conversions reuse a matching artifact and refuse to
 replace a mismatched one. Conversion never runs in the serving loader. The FP16 artifact loads into the

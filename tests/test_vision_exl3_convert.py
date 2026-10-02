@@ -110,3 +110,85 @@ def test_conversion_hashes_config_beside_snapshot_symlink(tmp_path):
     convert(source, output)
     with safe_open(str(output), framework="np") as artifact:
         assert artifact.metadata()["config_sha256"] == hashlib.sha256(config).hexdigest()
+
+
+def _bf16(values):
+    """Float32 values truncated to bfloat16 bits (exact for these test values)."""
+    return (np.asarray(values, dtype=np.float32).view(np.uint32) >> 16).astype(np.uint16)
+
+
+def _write(path, tensors):
+    """A safetensors file from {name: array}, with uint16 arrays stored as BF16 (safetensors.numpy can't)."""
+    import struct
+
+    header, blobs, offset = {}, [], 0
+    for name, value in tensors.items():
+        data = np.ascontiguousarray(value).tobytes()
+        dtype = {"uint16": "BF16", "float16": "F16", "float32": "F32", "int16": "I16", "int32": "I32"}[value.dtype.name]
+        header[name] = {"dtype": dtype, "shape": list(value.shape), "data_offsets": [offset, offset + len(data)]}
+        blobs.append(data)
+        offset += len(data)
+    raw = json.dumps(header).encode()
+    path.write_bytes(struct.pack("<Q", len(raw)) + raw + b"".join(blobs))
+
+
+def _pack(tmp_path, language):
+    """A two-shard pack whose second shard holds language weights beside a quantized and a BF16 vision tensor."""
+    rng = np.random.default_rng(5)
+    vision = _group(rng, "model.visual.blocks.0.attn.proj")
+    vision["model.visual.pos_embed.weight"] = _bf16([[0.5, -2.0], [3.0, 0.25]])
+    _write(tmp_path / "model-00001-of-00002.safetensors", {"model.embed_tokens.weight": language})
+    _write(tmp_path / "model-00002-of-00002.safetensors", {"model.norm.weight": language, **vision})
+    shard = {name: "model-00002-of-00002.safetensors" for name in ("model.norm.weight", *vision)}
+    index = {"weight_map": {"model.embed_tokens.weight": "model-00001-of-00002.safetensors", **shard}}
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps(index))
+    return vision
+
+
+def test_converter_reads_the_tower_from_a_packs_shared_shards(tmp_path):
+    from safetensors.numpy import load_file
+
+    pack, output = tmp_path / "pack", tmp_path / "vision-f16.safetensors"
+    pack.mkdir()
+    vision = _pack(pack, np.ones(4, np.float16))
+    convert(pack, output)
+    result = load_file(str(output))
+    assert set(result) == {"vision_tower.pos_embed.weight", "vision_tower.blocks.0.attn.proj.weight",
+                           "vision_tower.blocks.0.attn.proj.bias"}
+    np.testing.assert_array_equal(result["vision_tower.pos_embed.weight"],
+                                  np.array([[0.5, -2.0], [3.0, 0.25]], np.float16))
+    expected = convert_tensors({k: v for k, v in vision.items() if "pos_embed" not in k})
+    np.testing.assert_array_equal(result["vision_tower.blocks.0.attn.proj.weight"],
+                                  expected["vision_tower.blocks.0.attn.proj.weight"])
+
+
+def test_pack_hash_covers_the_tower_and_ignores_language_weights(tmp_path):
+    pack, output = tmp_path / "pack", tmp_path / "vision-f16.safetensors"
+    pack.mkdir()
+    _pack(pack, np.ones(4, np.float16))
+    convert(pack, output)
+    _pack(pack, np.zeros(4, np.float16))                    # language weights changed: the artifact still fits
+    assert convert(pack, output) == output
+    shard = pack / "model-00002-of-00002.safetensors"
+    tensors = {k: v for k, v in _read_raw(shard).items()}
+    tensors["model.visual.pos_embed.weight"] = _bf16([[1.0, 1.0], [1.0, 1.0]])
+    _write(shard, tensors)
+    with pytest.raises(ValueError, match="different source"):
+        convert(pack, output)
+
+
+def _read_raw(path):
+    from tensorfold.vision.qwen_checkpoint import _header, read_vision_tensor
+
+    header, begin = _header(path)
+    return {name: read_vision_tensor(name, path, item, begin) for name, item in header.items()}
+
+
+def test_converter_reads_bf16_sidecars(tmp_path):
+    from safetensors.numpy import load_file
+
+    source, output = tmp_path / "vision.safetensors", tmp_path / "vision-f16.safetensors"
+    _write(source, {"model.visual.merger.norm.bias": _bf16([1.5, -0.125])})
+    convert(source, output)
+    np.testing.assert_array_equal(load_file(str(output))["vision_tower.merger.norm.bias"],
+                                  np.array([1.5, -0.125], np.float16))
