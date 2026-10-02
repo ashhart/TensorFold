@@ -10,6 +10,7 @@
 namespace tf_exl3x {
 
 constexpr int PROMPT_WARPS = 4;                        // member tiles an item holds (16 pairs a warp): 64-pair items
+constexpr int PREFETCH = 2;   // chunks of trellis words in flight a warp: one chunk ahead left 46 % of stalls on loads
 constexpr float HAD_SCALE_P = 0.08838834764831845f;   // 1 / sqrt(128), as experts.cu's HAD_SCALE
 
 struct PromptArgs {
@@ -80,12 +81,16 @@ __device__ __forceinline__ void prompt_body(const uint32_t* __restrict__ T, cons
 #pragma unroll
             for (int c = 0; c < 4; ++c) acc[i][h][c] = ts[i][h][c] = res[i][h][c] = 0.f;
 
-    uint32_t wn[CH][DPW][LW];
+    // the words of PREFETCH chunks in flight: wn[0] is the chunk decoded next, wn[d] the one d chunks later
+    uint32_t wn[PREFETCH][CH][DPW][LW];
 #pragma unroll
-    for (int kc = 0; kc < CH; ++kc)
-        if (kc < KT)
+    for (int d = 0; d < PREFETCH; ++d)
 #pragma unroll
-            for (int j = 0; j < DPW; ++j) load_words<K2>(wn[kc][j], tp + (size_t)kc * kstride + j * TW, lane);
+        for (int kc = 0; kc < CH; ++kc)
+            if (d * CH + kc < KT)
+#pragma unroll
+                for (int j = 0; j < DPW; ++j)
+                    load_words<K2>(wn[d][kc][j], tp + (size_t)(d * CH + kc) * kstride + j * TW, lane);
     if (active) stage_a<CH>(abuf0, X, rows16, K, 0, KT, lane);
     cp_async_commit();
 
@@ -100,16 +105,25 @@ __device__ __forceinline__ void prompt_body(const uint32_t* __restrict__ T, cons
 #pragma unroll
                 for (int j = 0; j < DPW; ++j) {
                     uint32_t b0[2], b1[2];
-                    decode_tile<CB, K2>(wn[kc][j], map, lane, b0, b1);
+                    decode_tile<CB, K2>(wn[0][kc][j], map, lane, b0, b1);
                     buf[(kc * NT + warp * DPW + j) * 32 + lane] = make_uint4(b0[0], b0[1], b1[0], b1[1]);
                 }
-        // the next chunk's words and A rows in flight while this one runs
+        // shift the ring and put chunk c + PREFETCH's words in flight (the next chunk's A rows below)
+#pragma unroll
+        for (int d = 0; d + 1 < PREFETCH; ++d)
+#pragma unroll
+            for (int kc = 0; kc < CH; ++kc)
+#pragma unroll
+                for (int j = 0; j < DPW; ++j)
+#pragma unroll
+                    for (int l = 0; l < LW; ++l) wn[d][kc][j][l] = wn[d + 1][kc][j][l];
 #pragma unroll
         for (int kc = 0; kc < CH; ++kc) {
-            const int kt = (c + 1) * CH + kc;
+            const int kt = (c + PREFETCH) * CH + kc;
             if (kt < KT)
 #pragma unroll
-                for (int j = 0; j < DPW; ++j) load_words<K2>(wn[kc][j], tp + (size_t)kt * kstride + j * TW, lane);
+                for (int j = 0; j < DPW; ++j)
+                    load_words<K2>(wn[PREFETCH - 1][kc][j], tp + (size_t)kt * kstride + j * TW, lane);
         }
         __syncwarp();                                    // every lane is done reading the stage it overwrites
         if (active && c + 1 < chunks)
