@@ -2,7 +2,7 @@
 #include <c10/cuda/CUDAGuard.h>
 
 int64_t exl3p_item_rows();
-void exl3p_route_cuda(const at::Tensor&, int64_t, int64_t, at::Tensor&, at::Tensor&, at::Tensor&, int64_t);
+void exl3p_route_cuda(const at::Tensor&, int64_t, int64_t, at::Tensor&, at::Tensor&, at::Tensor&, int64_t, int64_t);
 void exl3p_experts_cuda(const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
                         const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
                         const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
@@ -15,14 +15,14 @@ static void check(const at::Tensor& x, at::ScalarType t, const char* name) {
 }
 
 void route(const at::Tensor& pick, int64_t E, at::Tensor sorted, at::Tensor items, at::Tensor item_count,
-           int64_t max_items) {
+           int64_t max_items, int64_t by_count) {
     check(pick, at::kInt, "pick");
     check(sorted, at::kInt, "sorted");
     check(items, at::kInt, "items");
     check(item_count, at::kInt, "item_count");
     TORCH_CHECK(sorted.numel() >= pick.numel() && items.numel() >= 3 * max_items, "route: buffers too small");
     c10::cuda::CUDAGuard guard(pick.device());
-    exl3p_route_cuda(pick, pick.numel(), E, sorted, items, item_count, max_items);
+    exl3p_route_cuda(pick, pick.numel(), E, sorted, items, item_count, max_items, by_count);
 }
 
 void experts(const at::Tensor& x, const at::Tensor& sorted, const at::Tensor& items, const at::Tensor& item_count,

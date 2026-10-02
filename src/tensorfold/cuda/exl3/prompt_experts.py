@@ -52,6 +52,7 @@ class PromptScratch:
         self.xd = torch.empty((n, ex.width), dtype=torch.float16, device=device)
 
 
+ORDER_BY_COUNT = int(__import__("os").environ.get("TF_EXL3_PROMPT_ORDER", "0"))   # 1: busiest experts first (measured neutral)
 CHUNK_ROWS = 4096              # longer calls run in row chunks: the down kernel re-reads xd once a column slab
 SLAB_BYTES = 9 << 20           # out columns a down pass keeps in L2 for its red.add (rows x columns x 4 bytes)
 
@@ -108,7 +109,7 @@ def _prompt_chunk(x, pick, wts, ex, out, scratch, limit, act_mode, ncb, f16, whi
         acc = out                         # zeroed by the gate|up kernel, then summed into by the down kernel
     else:
         acc = torch.empty((R, ex.dims), dtype=adt, device=x.device)
-    ext.route(pick, ex.count, scratch.sorted, scratch.items, scratch.count, items)
+    ext.route(pick, ex.count, scratch.sorted, scratch.items, scratch.count, items, ORDER_BY_COUNT)
     ext.experts(x, scratch.sorted[:R * S], scratch.items, scratch.count, ex.gate_ptr, ex.up_ptr, ex.down_ptr,
                 ex.gate_k2, ex.down_k2, ex.suh_g, ex.suh_u, ex.svh_g, ex.svh_u, ex.suh_d, ex.svh_d, wts,
                 scratch.xd, acc, ex.dims, ex.width, ex.gu_stride or ex.width // 16, S, items, float(limit),
