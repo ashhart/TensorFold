@@ -81,6 +81,13 @@ def served_model_ids(served_name: str, aliases: list[str] | None = None) -> list
     return ids
 
 
+def wants_usage_chunk(body: Any) -> bool:
+    """Whether the request asked for the spec's usage-only chunk before [DONE] (stream_options.include_usage)."""
+
+    options = body.get("stream_options") if isinstance(body, dict) else None
+    return bool(isinstance(options, dict) and options.get("include_usage"))
+
+
 def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
     class Handler(Rearming):              # USR1's stack dump armed again after each request
         protocol_version = "HTTP/1.1"
@@ -239,6 +246,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 if getattr(app, "accepts_cancellation", False):
                     sampling_kw["cancellation"] = socket_cancellation(self.connection)
                 stream = bool(body.get("stream", False))
+                separate_usage = wants_usage_chunk(body)      # usage then rides its own chunk before [DONE]
                 tool_policy = ToolCallPolicy(body)
             except RequestError as exc:
                 self._send_json({"error": error_body(exc)},
@@ -334,6 +342,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                         *,
                         error: BaseException | None = None,
                         extras: dict[str, Any] | None = None,
+                        usage: dict[str, Any] | None = None,
                     ) -> None:
                         if error is not None:
                             payload = {"error": {"message": str(error), "type": "server_error"}}
@@ -342,6 +351,8 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                             if extras:
                                 payload.update(extras)
                         emit(payload)
+                        if usage is not None:
+                            emit({**stream_chunk(), "choices": [], "usage": usage})   # the spec's own usage chunk
                         self.wfile.write(b"data: [DONE]\n\n")
                         self.wfile.flush()
 
@@ -425,11 +436,13 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                             pass
                         return
                     extras = response_extras(reply)
-                    if "prompt_tokens" in reply and "completion_tokens" in reply:
+                    counted = "prompt_tokens" in reply and "completion_tokens" in reply
+                    usage = usage_from_reply({"cached_tokens": 0, **reply}) if counted else None
+                    if usage is not None and not separate_usage:
                         # Clients that time the stream count tokens from here.
-                        extras["usage"] = usage_from_reply(
-                            {"cached_tokens": 0, **reply})
-                    finish_stream(reply.get("finish_reason") or "length", extras=extras)
+                        extras["usage"] = usage
+                    finish_stream(reply.get("finish_reason") or "length", extras=extras,
+                                  usage=usage if separate_usage else None)
                     return
 
                 reply = attach_tool_calls(

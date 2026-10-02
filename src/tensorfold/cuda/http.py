@@ -12,7 +12,7 @@ from tensorfold.server import metrics, responses
 from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
 from tensorfold.server.decisions import DecisionError
 from tensorfold.server.errors import CapacityError, RequestError, error_body
-from tensorfold.server.http import Server
+from tensorfold.server.http import Server, wants_usage_chunk
 from tensorfold.server.stacks import Rearming
 
 if TYPE_CHECKING:
@@ -135,6 +135,7 @@ def make_handler(app: App):
             created = int(time.time())
             model = app.reply_model(body)
             stream = bool(body.get("stream"))
+            separate_usage = wants_usage_chunk(body)          # usage then rides its own chunk before [DONE]
             kind = "chat.completion.chunk" if chat else "text_completion"
             gone = socket_cancellation(self.connection)          # the Mac server's check: the client has closed
             cancelled = lambda: gone.cancelled                  # noqa: E731
@@ -184,9 +185,15 @@ def make_handler(app: App):
                                                            "arguments": call["function"]["arguments"]}}]})
                 end = chunk({}, result["finish"])
                 end["tensorfold"] = result["stats"]
-                end["usage"] = usage_of(result)          # every stream, as the Mac server's: clients count from it
+                frames = [end]
+                if separate_usage:                              # the spec: usage rides its own chunk before [DONE]
+                    frames.append({"id": rid, "object": kind, "created": created, "model": model,
+                                   "choices": [], "usage": usage_of(result)})
+                else:
+                    end["usage"] = usage_of(result)      # every stream, as the Mac server's: clients count from it
                 try:
-                    self.wfile.write(f"data: {json.dumps(end)}\n\ndata: [DONE]\n\n".encode())
+                    self.wfile.write("".join(f"data: {json.dumps(frame)}\n\n" for frame in frames).encode()
+                                     + b"data: [DONE]\n\n")
                     self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
                     pass
