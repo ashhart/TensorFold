@@ -204,3 +204,23 @@ def test_f16_accumulation_mode(layer):
     print(f"f16_acc: vs routed {rel:.3e}; vs float64 fp32-acc {e32:.3e}, f16-acc {e16:.3e}")
     assert rel <= 2e-3 and e16 <= 2e-3
 
+
+def test_item_order_by_count(layer):
+    """Items ordered by expert size (route's by_count) give the same sums as expert-id order."""
+
+    from tensorfold.cuda.exl3 import prompt_experts as pe
+
+    g = torch.Generator().manual_seed(77)
+    R = 1024
+    x = torch.randn((R, D), generator=g).to(torch.bfloat16).cuda()
+    sel, w = picks(R, layer.count, g, skew=1.0)
+    old = pe.ORDER_BY_COUNT
+    try:
+        pe.ORDER_BY_COUNT = 0
+        a = pe.prompt_routed(x, sel, w, layer)
+        pe.ORDER_BY_COUNT = 1
+        b = pe.prompt_routed(x, sel, w, layer)
+    finally:
+        pe.ORDER_BY_COUNT = old
+    assert ((a - b).norm() / a.norm()).item() < 1e-6
+

@@ -123,10 +123,13 @@ constexpr int ROUTE_THREADS = 1024;
 
 __global__ void __launch_bounds__(ROUTE_THREADS) route_kernel(const int* __restrict__ pick, int n, int E,
                                                              int* __restrict__ sorted, int* __restrict__ items,
-                                                             int* __restrict__ item_count, int max_items) {
+                                                             int* __restrict__ item_count, int max_items,
+                                                             int by_count) {
     extern __shared__ int sh[];
     int* cnt = sh;              // [E]
     int* cur = sh + E;          // [E]
+    int* ord = sh + 2 * E;      // [E]: experts in item order (by_count: most pairs first, so the longest blocks
+                                // start first and the last wave is short; an expert's items stay adjacent)
     __shared__ int wsum[ROUTE_THREADS / 32][2];
     for (int e = threadIdx.x; e < E; e += ROUTE_THREADS) cnt[e] = 0;
     __syncthreads();
@@ -135,13 +138,23 @@ __global__ void __launch_bounds__(ROUTE_THREADS) route_kernel(const int* __restr
         if (e >= 0 && e < E) atomicAdd(&cnt[e], 1);
     }
     __syncthreads();
+    for (int e = threadIdx.x; e < E; e += ROUTE_THREADS) {
+        int r = e;
+        if (by_count) {
+            const int c = cnt[e];
+            r = 0;
+            for (int f = 0; f < E; ++f) r += cnt[f] > c || (cnt[f] == c && f < e);
+        }
+        ord[r] = e;
+    }
+    __syncthreads();
     // exclusive scans of counts and of items over experts; each thread owns a contiguous run of experts
     const int per = (E + ROUTE_THREADS - 1) / ROUTE_THREADS;
     const int e0 = threadIdx.x * per;
     int c_sum = 0, i_sum = 0;
     for (int q = 0; q < per; ++q) {
         const int e = e0 + q;
-        if (e < E) { c_sum += cnt[e]; i_sum += (cnt[e] + IPM - 1) / IPM; }
+        if (e < E) { c_sum += cnt[ord[e]]; i_sum += (cnt[ord[e]] + IPM - 1) / IPM; }
     }
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
     int ci = c_sum, ii = i_sum;
@@ -167,8 +180,8 @@ __global__ void __launch_bounds__(ROUTE_THREADS) route_kernel(const int* __restr
     __syncthreads();
     int off = wsum[warp][0] + ci - c_sum, it = wsum[warp][1] + ii - i_sum;
     for (int q = 0; q < per; ++q) {
-        const int e = e0 + q;
-        if (e >= E) break;
+        if (e0 + q >= E) break;
+        const int e = ord[e0 + q];
         const int c = cnt[e];
         cur[e] = off;
         for (int f = 0; f < c; f += IPM, ++it)
@@ -785,11 +798,12 @@ void launch_cb(const at::Tensor& x, const at::Tensor& sorted, const at::Tensor& 
 int64_t exl3p_item_rows() { return IPM; }
 
 void exl3p_route_cuda(const at::Tensor& pick, int64_t n, int64_t E, at::Tensor& sorted, at::Tensor& items,
-                      at::Tensor& item_count, int64_t max_items) {
-    const size_t smem = (size_t)2 * E * sizeof(int);
+                      at::Tensor& item_count, int64_t max_items, int64_t by_count) {
+    TORCH_CHECK(E <= 4096, "route: at most 4096 experts");
+    const size_t smem = (size_t)3 * E * sizeof(int);
     route_kernel<<<1, ROUTE_THREADS, smem, at::cuda::getCurrentCUDAStream()>>>(
         pick.data_ptr<int>(), (int)n, (int)E, sorted.data_ptr<int>(), items.data_ptr<int>(),
-        item_count.data_ptr<int>(), (int)max_items);
+        item_count.data_ptr<int>(), (int)max_items, (int)by_count);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
