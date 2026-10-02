@@ -231,7 +231,8 @@ def test_unified_available_memory_uses_reclaimable_host_pages(monkeypatch):
     fake = SimpleNamespace(cuda=SimpleNamespace(mem_get_info=lambda: (100 * capacity.GIB, 128 * capacity.GIB)))
     monkeypatch.setattr(Path, "read_text", lambda *a: "MemTotal: 134217728 kB\nMemAvailable: 62914560 kB\n")
     monkeypatch.setattr(capacity, "unified", lambda torch: True)
-    assert capacity.available_bytes(fake) == 60 * capacity.GIB
+    # the grant is the reclaimable pool less the floor the host keeps free: a tenth of its 128 GiB of RAM
+    assert capacity.available_bytes(fake) == 60 * capacity.GIB - 128 * capacity.GIB // 10
 
 
 @pytest.mark.torch

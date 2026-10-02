@@ -21,7 +21,6 @@ def test_default_reserve_is_unchanged(monkeypatch):
 def test_override(monkeypatch):
     monkeypatch.setenv("TENSORFOLD_MEMORY_RESERVE_GIB", "6")
     assert capacity.reserve_bytes(121 * GIB) == 6 * GIB
-    assert capacity.reserve_bytes(121 * GIB, host=True) == 6 * GIB
     monkeypatch.setenv("TENSORFOLD_MEMORY_RESERVE_GIB", " 2.5 ")
     assert capacity.reserve_bytes(121 * GIB) == int(2.5 * GIB)
 
@@ -37,14 +36,18 @@ def _cuda(free, total):
     return SimpleNamespace(cuda=SimpleNamespace(mem_get_info=lambda: (free, total)))
 
 
-def test_the_reserve_leaves_the_grant_alone(monkeypatch):
+def test_the_reserve_floors_a_unified_grant_and_ignores_a_discrete_one(monkeypatch):
     monkeypatch.setattr(capacity, "_meminfo", lambda: {"MemTotal": 121 * GIB, "MemAvailable": 110 * GIB})
     monkeypatch.setattr(capacity, "unified", lambda torch: True)
-    assert capacity.available_bytes(_cuda(100 * GIB, 121 * GIB)) == 110 * GIB    # a unified GPU's grant is the host's
-    monkeypatch.setattr(capacity, "unified", lambda torch: False)
+    # a unified GPU's grant is the host's available RAM less the floor: a tenth of its total, never less than 4 GiB
+    assert capacity.available_bytes(_cuda(100 * GIB, 121 * GIB)) == 110 * GIB - 12 * GIB - GIB // 10
+    monkeypatch.setenv("TENSORFOLD_MEMORY_RESERVE_GIB", "6")
+    assert capacity.available_bytes(_cuda(100 * GIB, 121 * GIB)) == 104 * GIB    # the override moves the floor
+    monkeypatch.delenv("TENSORFOLD_MEMORY_RESERVE_GIB")
     torch = _cuda(100 * GIB, 121 * GIB)
-    assert capacity.available_bytes(torch) == 100 * GIB                          # a discrete card's own free memory
-    monkeypatch.setenv("TENSORFOLD_MEMORY_RESERVE_GIB", "6")                     # the reserve sizes host loading room
-    assert capacity.available_bytes(torch) == 100 * GIB
+    monkeypatch.setattr(capacity, "unified", lambda torch: False)
+    assert capacity.available_bytes(torch) == 100 * GIB                           # a discrete card's own free memory
+    monkeypatch.setenv("TENSORFOLD_MEMORY_RESERVE_GIB", "6")
+    assert capacity.available_bytes(torch) == 100 * GIB                           # which no reserve override changes
     monkeypatch.setattr(capacity, "_meminfo", lambda: None)
-    assert capacity.available_bytes(torch) == 100 * GIB
+    assert capacity.available_bytes(torch) == 100 * GIB                           # with no host memory to read either

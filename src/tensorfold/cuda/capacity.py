@@ -203,17 +203,23 @@ def memory_limit_bytes(environ: Mapping[str, str] | None = None) -> int | None:
 
 
 def available_bytes(torch) -> int:
-    """What admission grants and the runtime gate reads as live: the GPU's free memory, or the host's on a unified GPU.
+    """What admission and the runtime gate read as live: a discrete card's free memory, host RAM less a floor on a unified GPU.
 
-    One pool on a unified GPU: reclaimable page cache is available. ``TENSORFOLD_CUDA_MEMORY_LIMIT_GB``
-    caps the grant from above in GiB, an absolute budget like the MLX one; free memory still caps it.
-    There is no reserve: a budget close to the card's total can end requests with CUDA errors mid-reply.
-    A discrete card's host need is its loading buffers, which ``host_stream_bytes`` checks on its own.
+    One pool on a unified GPU: reclaimable page cache counts as available, and the host keeps a floor of that
+    pool free, because CUDA context, NCCL and workspace memory sit outside the estimate and an exhausted GB10
+    freezes the host. A discrete card's host need is its loading buffers, which ``host_stream_bytes`` weighs on
+    its own. ``TENSORFOLD_MEMORY_RESERVE_GIB`` moves the floor; ``TENSORFOLD_CUDA_MEMORY_LIMIT_GB`` caps the
+    grant from above in GiB, an absolute budget like the MLX one.
     """
 
-    free, _total = map(int, torch.cuda.mem_get_info())
-    memory = _meminfo()
-    granted = memory["MemAvailable"] if memory is not None and unified(torch) else free
+    free, total = map(int, torch.cuda.mem_get_info())
+    if not unified(torch):
+        granted = free                                   # a discrete card's memory is its own pool
+    else:
+        # No /proc/meminfo means the card's memory is the pool, so the floor comes out of it
+        memory = _meminfo()
+        granted = (memory["MemAvailable"] if memory is not None else free) - reserve_bytes(
+            memory["MemTotal"] if memory is not None else total, host=True)
     limit = memory_limit_bytes()
     return max(0, min(granted, limit)) if limit is not None else max(0, granted)
 

@@ -197,13 +197,14 @@ extend a conversation resume there with a fresh prefill's bits.
 
 Cache capacity is fixed at startup and bounds prompt plus reply.
 A positive context that exceeds the startup budget is refused; automatic capacity is an estimate.
-The budget grants the GPU's free memory, bounded by available host RAM. `TENSORFOLD_CUDA_MEMORY_LIMIT_GB` caps
-that grant from above in GiB, an absolute budget like the MLX one; free memory still caps it. There is no
-reserve: a budget close to the card's total can end requests with CUDA errors mid-reply (`PYTORCH_CUDA_ALLOC_CONF`
-`=` `expandable_segments:True` reduces fragmentation near the cap).
-Unified-memory GPUs share physical RAM with host buffers and file-backed model data. Admission uses
-available host memory, including reclaimable page cache, and considers mapped-table residency when sizing
-an automatic window. It accounts for stream count and retained caches where concurrency is enabled.
+The budget grants a discrete card its own free memory: nothing else shares that memory, so no reserve comes off
+it. `TENSORFOLD_CUDA_MEMORY_LIMIT_GB` caps that grant from above in GiB, an absolute budget like the MLX one;
+free memory still caps it, and a budget close to the card's total can end requests with CUDA errors mid-reply
+(`PYTORCH_CUDA_ALLOC_CONF` `=` `expandable_segments:True` reduces fragmentation near the cap).
+Unified-memory GPUs share physical RAM with host buffers and file-backed model data. Admission uses the
+host's available memory, reclaimable page cache included, less a floor of a tenth of RAM (at least 4 GiB) that
+`TENSORFOLD_MEMORY_RESERVE_GIB` can move, and considers mapped-table residency when sizing an automatic
+window. It accounts for stream count and retained caches where concurrency is enabled.
 
 Two-rank Flash Next, Nemotron and GLM requests finish on both ranks after a client disconnects, keeping the
 collective sequence aligned. MLX disk snapshots and cache-budget flags do not configure these CUDA
