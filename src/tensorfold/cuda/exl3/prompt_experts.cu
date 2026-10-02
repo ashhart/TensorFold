@@ -33,7 +33,6 @@ namespace {
 using tf_exl3x::Fmt;
 using tf_exl3x::LaneMap;
 using tf_exl3x::decode_tile;
-using tf_exl3x::mma16816;
 
 constexpr float HAD_SCALE = 0.08838834764831845f;   // 1 / sqrt(128)
 #ifndef TF_PE_GPM
@@ -43,6 +42,13 @@ constexpr int IPM = TF_PE_GPM;                      // routed pairs an item (rou
 constexpr int NW = 16;                              // warps a block
 constexpr int NTHREADS = NW * 32;
 constexpr int CK = 128;                             // k values a chunk (one Hadamard block)
+
+// mma.m16n8k16 fp16 -> fp32, d += a b; not volatile (registers only), so the compiler may interleave the chains
+__device__ __forceinline__ void mma16816(float (&d)[4], const uint32_t (&a)[4], const uint32_t (&b)[2]) {
+    asm("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+        : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
+}
 
 __device__ __forceinline__ void cp_async16(void* smem, const void* gmem, bool ok) {
     const unsigned s = (unsigned)__cvta_generic_to_shared(smem);
@@ -210,6 +216,13 @@ __global__ void __launch_bounds__(ROUTE_THREADS) route_kernel(const int* __restr
 // stages deep; a stage is converted to fp16 in place the chunk before it is used; one barrier a chunk.
 // Rows of 128 halves are XOR-swizzled in 16-byte pieces (piece ^ (row & 7)) so ldmatrix hits distinct banks.
 constexpr int GPM = TF_PE_GPM;
+#ifndef TF_PE_GU_MT
+#define TF_PE_GU_MT 1
+#endif
+constexpr int GU_MT = TF_PE_GU_MT;                            // m tiles a warp (independent mma / decode chains)
+constexpr int GU_NW = 16 / GU_MT;                             // warps a block (16 m tiles: 8 gate, 8 up)
+constexpr int GU_THREADS = GU_NW * 32;
+constexpr int GU_WPM = GU_NW / 2;                             // warps a matrix
 constexpr int GU_STAGES = 3;
 constexpr int GU_ES = 128 + 4;                                // epilogue row stride (fp32)
 constexpr int GU_EROWS = 64;                                  // epilogue rows a pass
@@ -264,32 +277,47 @@ __device__ __forceinline__ void tiles_h8(half2 (&W)[8][4]) {
 // (times suh) over the staged members (2 NB mma), then decodes tile kk of the next chunk into W[kk] (its words in
 // wbuf since a chunk ago) and fetches the chunk after's word in its place. The next chunk's H8 closes the chunk.
 template <int CB, int K2, int NB>
-__device__ __forceinline__ void gu_chunk(const half* xs, const half* su, int moff, half2 (&W)[8][4],
-                                         uint32_t (&wbuf)[8], bool has_next, const uint32_t* __restrict__ wnext2,
-                                         size_t kstride, bool wl, const LaneMap<K2>& map, const uint32_t (&hB)[2][2],
-                                         int lane, float (&acc)[2 * NB][4]) {
+__device__ __forceinline__ void gu_chunk(const half* xs, const half* su, int moff, half2 (&W)[GU_MT][8][4],
+                                         uint32_t (&wbuf)[GU_MT][8], bool has_next,
+                                         const uint32_t* __restrict__ wnext2, size_t kstride, size_t tstride, bool wl,
+                                         const LaneMap<K2>& map, const uint32_t (&hB)[2][2], int lane,
+                                         float (&acc)[GU_MT][2 * NB][4]) {
     const int t = lane & 3;
 #pragma unroll
     for (int kk = 0; kk < 8; ++kk) {
         const half2 s0 = *reinterpret_cast<const half2*>(su + kk * 16 + 2 * t);
         const half2 s1 = *reinterpret_cast<const half2*>(su + kk * 16 + 8 + 2 * t);
-        const uint32_t A[4] = {h2u(__hmul2(W[kk][0], s0)), h2u(__hmul2(W[kk][1], s0)), h2u(__hmul2(W[kk][2], s1)),
-                               h2u(__hmul2(W[kk][3], s1))};
+        uint32_t A[GU_MT][4];
+#pragma unroll
+        for (int i = 0; i < GU_MT; ++i) {
+            A[i][0] = h2u(__hmul2(W[i][kk][0], s0));
+            A[i][1] = h2u(__hmul2(W[i][kk][1], s0));
+            A[i][2] = h2u(__hmul2(W[i][kk][2], s1));
+            A[i][3] = h2u(__hmul2(W[i][kk][3], s1));
+        }
         const half* xk = xs + (moff ^ ((2 * (kk & 3)) << 3)) + (kk >= 4 ? 64 : 0);
 #pragma unroll
         for (int jb = 0; jb < NB; ++jb) {
             uint32_t r[4];
             ldsm_x4(r, xk + jb * 16 * CK);
             const uint32_t bl[2] = {r[0], r[1]}, bh[2] = {r[2], r[3]};
-            mma16816(acc[2 * jb], A, bl);
-            mma16816(acc[2 * jb + 1], A, bh);
+#pragma unroll
+            for (int i = 0; i < GU_MT; ++i) {
+                mma16816(acc[i][2 * jb], A[i], bl);
+                mma16816(acc[i][2 * jb + 1], A[i], bh);
+            }
         }
         if (has_next) {
-            tile_h16<CB, K2>(wbuf[kk], map, hB, lane, W[kk]);
-            if (wnext2) wbuf[kk] = wl ? __ldg(wnext2 + (size_t)kk * kstride) : 0u;
+#pragma unroll
+            for (int i = 0; i < GU_MT; ++i) {
+                tile_h16<CB, K2>(wbuf[i][kk], map, hB, lane, W[i][kk]);
+                if (wnext2) wbuf[i][kk] = wl ? __ldg(wnext2 + (size_t)kk * kstride + i * tstride) : 0u;
+            }
         }
     }
-    if (has_next) tiles_h8(W);
+    if (has_next)
+#pragma unroll
+        for (int i = 0; i < GU_MT; ++i) tiles_h8(W[i]);
 }
 
 template <int CB, int K2, int NB>
@@ -297,7 +325,7 @@ __device__ __forceinline__ void gu_mainloop(const __nv_bfloat16* __restrict__ x,
                                             const uint32_t* __restrict__ Tm, const uint32_t* __restrict__ Tother,
                                             int NS, const half* __restrict__ suh_g,
                                             const half* __restrict__ suh_u, const int* rows_sh, int cnt, int cb,
-                                            int K, unsigned char* smem, float (&acc)[2 * NB][4]) {
+                                            int K, unsigned char* smem, float (&acc)[GU_MT][2 * NB][4]) {
     constexpr int TW = Fmt<K2>::TW;
     static_assert(Fmt<K2>::LW == 1, "prompt experts: up to 4 bits a value");
     auto xs_of = [&](int b) { return reinterpret_cast<half*>(smem + b * GU_STAGE); };
@@ -306,7 +334,7 @@ __device__ __forceinline__ void gu_mainloop(const __nv_bfloat16* __restrict__ x,
     const int g = lane >> 2, t = lane & 3;
     const int chunks = K / CK;
     const LaneMap<K2> map(lane);
-    const int mat = warp >> 3, nt = cb * 8 + (warp & 7);
+    const int mat = warp / GU_WPM, nt = cb * 8 + (warp % GU_WPM) * GU_MT;
     const int l7 = lane & 7;
     // the lane's ldmatrix row and piece for k tile 0 (k tile q: piece ^ 2q; + 64 halves from tile 4 on)
     const int moff = (l7 + ((lane >> 4) & 1) * 8) * CK + ((((lane >> 3) & 1) ^ l7) & 7) * 8;
@@ -320,18 +348,20 @@ __device__ __forceinline__ void gu_mainloop(const __nv_bfloat16* __restrict__ x,
     }
 
 #pragma unroll
-    for (int j = 0; j < 2 * NB; ++j)
+    for (int i = 0; i < GU_MT; ++i)
 #pragma unroll
-        for (int c = 0; c < 4; ++c) acc[j][c] = 0.f;
+        for (int j = 0; j < 2 * NB; ++j)
+#pragma unroll
+            for (int c = 0; c < 4; ++c) acc[i][j][c] = 0.f;
 
     auto load = [&](int chunk) {
         if (chunk >= chunks) return;
         half* dst = xs_of(chunk % GU_STAGES);
         const int k0 = chunk * CK;
 #pragma unroll
-        for (int q = 0; q < (GPM * (CK / 8) + NTHREADS - 1) / NTHREADS; ++q) {
-            const int idx = threadIdx.x + q * NTHREADS;
-            if (GPM * (CK / 8) % NTHREADS && idx >= GPM * (CK / 8)) break;
+        for (int q = 0; q < (GPM * (CK / 8) + GU_THREADS - 1) / GU_THREADS; ++q) {
+            const int idx = threadIdx.x + q * GU_THREADS;
+            if (GPM * (CK / 8) % GU_THREADS && idx >= GPM * (CK / 8)) break;
             const int i = idx >> 4, j = idx & 15;
             const int r = reinterpret_cast<const volatile int*>(rows_sh)[i];   // re-read: no live row pointers
             const __nv_bfloat16* src = x + (size_t)(r < 0 ? 0 : r) * xstride + k0 + j * 8;
@@ -347,16 +377,16 @@ __device__ __forceinline__ void gu_mainloop(const __nv_bfloat16* __restrict__ x,
         if (chunk >= chunks) return;
         uint4* p = reinterpret_cast<uint4*>(xs_of(chunk % GU_STAGES));
 #pragma unroll
-        for (int q = 0; q < (GPM * CK / 8 + NTHREADS - 1) / NTHREADS; ++q) {
-            if (GPM * CK / 8 % NTHREADS && threadIdx.x + q * NTHREADS >= GPM * CK / 8) break;
-            uint4 v = p[threadIdx.x + q * NTHREADS];
+        for (int q = 0; q < (GPM * CK / 8 + GU_THREADS - 1) / GU_THREADS; ++q) {
+            if (GPM * CK / 8 % GU_THREADS && threadIdx.x + q * GU_THREADS >= GPM * CK / 8) break;
+            uint4 v = p[threadIdx.x + q * GU_THREADS];
             uint32_t* w = reinterpret_cast<uint32_t*>(&v);
 #pragma unroll
             for (int j = 0; j < 4; ++j) {
                 const __nv_bfloat162 b = *reinterpret_cast<const __nv_bfloat162*>(&w[j]);
                 w[j] = h2u(__float22half2_rn(__bfloat1622float2(b)));
             }
-            p[threadIdx.x + q * NTHREADS] = v;
+            p[threadIdx.x + q * GU_THREADS] = v;
         }
     };
     const uint32_t* tbase = Tm + (size_t)nt * TW + lane;
@@ -382,16 +412,21 @@ __device__ __forceinline__ void gu_mainloop(const __nv_bfloat16* __restrict__ x,
     load(1);
     cp_async_commit();
     // chunk 0's tiles decoded and rotated up front; wbuf: chunk 1's words
-    half2 W[8][4];
-    uint32_t wbuf[8];
+    half2 W[GU_MT][8][4];
+    uint32_t wbuf[GU_MT][8];
 #pragma unroll
-    for (int kk = 0; kk < 8; ++kk) wbuf[kk] = wl ? __ldg(tbase + (size_t)kk * kstride) : 0u;
+    for (int i = 0; i < GU_MT; ++i)
 #pragma unroll
-    for (int kk = 0; kk < 8; ++kk) {
-        tile_h16<CB, K2>(wbuf[kk], map, hB, lane, W[kk]);
-        wbuf[kk] = (wl && chunks > 1) ? __ldg(tbase + (size_t)(8 + kk) * kstride) : 0u;
+        for (int kk = 0; kk < 8; ++kk) wbuf[i][kk] = wl ? __ldg(tbase + (size_t)kk * kstride + i * TW) : 0u;
+#pragma unroll
+    for (int i = 0; i < GU_MT; ++i) {
+#pragma unroll
+        for (int kk = 0; kk < 8; ++kk) {
+            tile_h16<CB, K2>(wbuf[i][kk], map, hB, lane, W[i][kk]);
+            wbuf[i][kk] = (wl && chunks > 1) ? __ldg(tbase + (size_t)(8 + kk) * kstride + i * TW) : 0u;
+        }
+        tiles_h8(W[i]);
     }
-    tiles_h8(W);
     cp_async_wait<1>();
     __syncthreads();
     convert(0);
@@ -406,7 +441,8 @@ __device__ __forceinline__ void gu_mainloop(const __nv_bfloat16* __restrict__ x,
         const half* xs = xs_of(c % GU_STAGES);
         const half* su = su_of(c % GU_STAGES) + mat * CK;
         const uint32_t* wnext2 = c + 2 < chunks ? tbase + (size_t)(c + 2) * 8 * kstride : nullptr;
-        gu_chunk<CB, K2, NB>(xs, su, moff, W, wbuf, c + 1 < chunks, wnext2, kstride, wl, map, hB, lane, acc);
+        gu_chunk<CB, K2, NB>(xs, su, moff, W, wbuf, c + 1 < chunks, wnext2, kstride, (size_t)TW, wl, map, hB, lane,
+                             acc);
     }
     __syncthreads();
 }
@@ -423,12 +459,13 @@ struct GuEpi {
 
 // acc -> E[mat][member][col] (fp32), 64 members a pass, then a warp a member: FWHT, svh, SwiGLU, suh_d, FWHT -> xd
 template <int NB>
-__device__ __forceinline__ void gu_epilogue(const float (&acc)[2 * NB][4], unsigned char* smem, const GuEpi& p) {
+__device__ __forceinline__ void gu_epilogue(const float (&acc)[GU_MT][2 * NB][4], unsigned char* smem,
+                                            const GuEpi& p) {
     float* Eg = reinterpret_cast<float*>(smem);
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int g = lane >> 2, t = lane & 3;
-    const int mat = warp >> 3;
-    const int col = (warp & 7) * 16 + g;
+    const int mat = warp / GU_WPM;
+    const int col = (warp % GU_WPM) * GU_MT * 16 + g;
     const int n = p.cb * 128 + 4 * lane;
     const size_t eo = (size_t)p.e * p.N + n;
     float svg[4], svu[4], sud[4];
@@ -448,15 +485,18 @@ __device__ __forceinline__ void gu_epilogue(const float (&acc)[2 * NB][4], unsig
             const int jn = hf * (GU_EROWS / 8) + q;
             if (jn < 2 * NB) {
                 const int r = q * 8 + 2 * t;
-                float* E0 = Eg + ((size_t)mat * GU_EROWS + r) * GU_ES + col;
-                E0[0] = acc[jn][0];
-                E0[GU_ES] = acc[jn][1];
-                E0[8] = acc[jn][2];
-                E0[GU_ES + 8] = acc[jn][3];
+#pragma unroll
+                for (int i = 0; i < GU_MT; ++i) {
+                    float* E0 = Eg + ((size_t)mat * GU_EROWS + r) * GU_ES + col + 16 * i;
+                    E0[0] = acc[i][jn][0];
+                    E0[GU_ES] = acc[i][jn][1];
+                    E0[8] = acc[i][jn][2];
+                    E0[GU_ES + 8] = acc[i][jn][3];
+                }
             }
         }
         __syncthreads();
-        for (int i = warp; i < GU_EROWS && hf * GU_EROWS + i < p.cnt; i += NW) {
+        for (int i = warp; i < GU_EROWS && hf * GU_EROWS + i < p.cnt; i += GU_NW) {
             float gv[4], uv[4];
             const float4 g4 = *reinterpret_cast<const float4*>(Eg + (size_t)i * GU_ES + 4 * lane);
             const float4 u4 = *reinterpret_cast<const float4*>(Eg + (size_t)(GU_EROWS + i) * GU_ES + 4 * lane);
@@ -488,7 +528,7 @@ __device__ __forceinline__ void gu_epilogue(const float (&acc)[2 * NB][4], unsig
 }
 
 template <int CB>
-__global__ void __launch_bounds__(NTHREADS, 1) prompt_gateup_kernel(
+__global__ void __launch_bounds__(GU_THREADS, 1) prompt_gateup_kernel(
     const __nv_bfloat16* __restrict__ x, int xstride, const int* __restrict__ sorted, const int* __restrict__ items,
     const int* __restrict__ item_count, const int64_t* __restrict__ gate_ptr, const int64_t* __restrict__ up_ptr,
     const int* __restrict__ k2s, const half* __restrict__ suh_g, const half* __restrict__ suh_u,
@@ -502,14 +542,14 @@ __global__ void __launch_bounds__(NTHREADS, 1) prompt_gateup_kernel(
         // a slice of out to zero for the down kernel's red.add (instead of a memset launch)
         const long long blocks = (long long)gridDim.x * gridDim.y, b = (long long)blockIdx.y * gridDim.x + blockIdx.x;
         const long long per = (zero_n + blocks - 1) / blocks, z0 = b * per, z1 = min(zero_n, z0 + per);
-        for (long long i = z0 + threadIdx.x; i < z1; i += NTHREADS) zero[i] = make_float4(0.f, 0.f, 0.f, 0.f);
+        for (long long i = z0 + threadIdx.x; i < z1; i += GU_THREADS) zero[i] = make_float4(0.f, 0.f, 0.f, 0.f);
     }
     if (item >= item_count[0]) return;
     const int e = items[3 * item], first = items[3 * item + 1], cnt = items[3 * item + 2];
     if (threadIdx.x < GPM) rows_sh[threadIdx.x] = (int)threadIdx.x < cnt ? sorted[first + threadIdx.x] / slots : -1;
     __syncthreads();
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-    const int mat = warp >> 3;
+    const int mat = warp / GU_WPM;
     const uint32_t* Tm = reinterpret_cast<const uint32_t*>(mat ? up_ptr[e] : gate_ptr[e]);
     const uint32_t* To = reinterpret_cast<const uint32_t*>(mat ? gate_ptr[e] : up_ptr[e]);
     const half* sg = suh_g + (size_t)e * K;
@@ -519,7 +559,7 @@ __global__ void __launch_bounds__(NTHREADS, 1) prompt_gateup_kernel(
     switch (k2s[e] * 16 + nb) {
 #define TF_PE_GU(K2_, NB_)                                                                                         \
     case K2_ * 16 + NB_: {                                                                                        \
-        float acc[2 * NB_][4];                                                                                    \
+        float acc[GU_MT][2 * NB_][4];                                                                             \
         gu_mainloop<CB, K2_, NB_>(x, xstride, Tm, To, NS, sg, su, rows_sh, cnt, cb, K, smem_raw, acc);            \
         gu_epilogue<NB_>(acc, smem_raw, ep);                                                                      \
         break;                                                                                                    \
@@ -778,7 +818,7 @@ void launch_cb(const at::Tensor& x, const at::Tensor& sorted, const at::Tensor& 
     (void)once;
     auto h = [](const at::Tensor& t) { return reinterpret_cast<const half*>(t.data_ptr()); };
     if (which & 1)
-    prompt_gateup_kernel<CB><<<dim3((unsigned)(I / 128), (unsigned)max_items), NTHREADS, GU_SMEM, stream>>>(
+    prompt_gateup_kernel<CB><<<dim3((unsigned)(I / 128), (unsigned)max_items), GU_THREADS, GU_SMEM, stream>>>(
         reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), (int)x.stride(0), sorted.data_ptr<int>(),
         items.data_ptr<int>(), item_count.data_ptr<int>(), gate_ptr.data_ptr<int64_t>(), up_ptr.data_ptr<int64_t>(),
         gu_k2.data_ptr<int>(), h(suh_g), h(suh_u), h(svh_g), h(svh_u), h(suh_d), reinterpret_cast<half*>(xd.data_ptr()),
