@@ -7,6 +7,19 @@ GitHub has the full notes and the measurements behind them.
 
 - Anthropic Messages and token-count routes on MLX and CUDA, including streaming, tools, thinking and cache usage.
 
+## 0.6.2 (2 Oct 2026)
+
+- **Flash Next on Macs at 64k-128k.** On an M3 Ultra, one stream runs 1.2-3.4% faster at 64k and 3.9-5.5% at 128k,
+  with the same tokens: a window's n-gram ids are hashed on the GPU, and the chain's first step is built while the
+  GPU verifies.
+- **27B with several streams on CUDA.** The GDN tree kernel takes 8-35% less time with the same bits. On an RTX PRO
+  6000 at its 250 W limit, 4 and 8 streams of the NVFP4 27B decode 1.1-4.2% faster.
+- **Fixes:** the config check accepts the FP8 n-gram table in NVIDIA's MIXED_PRECISION Flash Next export; GLM-5.3
+  on CUDA counts its drafts in `/health`, `/metrics` and replies, and names a mixed-bit EXL3 checkpoint when it
+  refuses one; a client that leaves is noticed past file descriptor 1023; the CUDA server prints a line a request, as
+  the Mac server does; a failed snapshot write no longer leaves its partial file; Gemma 4's QKV kernel reserves its
+  1024 threads for M1, M2 and macOS VMs, and a VM's GPU is no longer taken for an M5.
+
 ## 0.6.1 (1 Oct 2026)
 
 - **NVFP4 checkpoints in their own math.** `nvidia/Qwen3.8-27B-NVFP4` runs the 4-bit activations its checkpoint
@@ -324,7 +337,7 @@ GitHub has the full notes and the measurements behind them.
 ## 0.3.2 (26 Sep 2026)
 
 - `tensorfold update` installs the newest release.
-- GLM-5.3-Flash reads Mia-AiLab's EXL3 weights on two DGX Sparks (experimental).
+- GLM-5.3-Flash reads Brandon M. Music's EXL3/TR3 weights (re-hosted by Mia-AiLab) on two DGX Sparks (experimental).
 
 ## 0.3.1 (26 Sep 2026)
 

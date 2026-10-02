@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import re
 from typing import Any
 
 MODEL_TYPES = ("qwen3_5",)
@@ -38,11 +37,9 @@ def copy_rows(first: int, default: int) -> int:
 def tensor_units() -> bool:
     """Whether this GPU has Metal 4 tensor units (``applegpu_g17`` and later), which the lane kernels need."""
 
-    import mlx.core as mx
+    from tensorfold.kernels import device
 
-    info = mx.device_info() if hasattr(mx, "device_info") else mx.metal.device_info()
-    found = re.match(r"applegpu_g(\d+)", str(info.get("architecture", "")))
-    return bool(found) and int(found.group(1)) >= 17
+    return device.tensor_units()
 
 
 def load_lane_model(model_dir: Path) -> tuple[Any, Any]:

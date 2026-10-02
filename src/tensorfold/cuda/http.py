@@ -37,12 +37,20 @@ def _log_error(exc: BaseException) -> None:
     traceback.print_exception(exc)
 
 
+POLLED = ("/metrics", "/v1/metrics", "/health", "/v1/health")
+
+
 def make_handler(app: App):
     class Handler(Rearming):              # USR1's stack dump armed again after each request
         protocol_version = "HTTP/1.1"
 
-        def log_message(self, fmt, *args):  # quiet
-            pass
+        def log_message(self, fmt, *args):    # one line a request, as the Mac server prints
+            print(f"[tensorfold] {self.address_string()} {fmt % args}", flush=True)
+
+        def log_request(self, code="-", size="-"):
+            # a scraper polls these every few seconds and would bury the requests; a failed poll still prints
+            if not (self.command == "GET" and self.path.split("?", 1)[0].rstrip("/") in POLLED and code == 200):
+                super().log_request(code, size)
 
         def _json(self, code: int, payload: dict[str, Any]) -> None:
             data = json.dumps(payload).encode()

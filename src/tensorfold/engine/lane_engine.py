@@ -39,18 +39,58 @@ class SuffixLookupProposer:
         self._silent_for = 0
         self._index: dict[tuple[int, ...], list[int]] = {}
         self._indexed = 0
+        self._sorted: Any = None          # (packed keys sorted, their end positions, bits a token) of a bulk index
         self.proposals = 0
         self.proposed_tokens = 0
         self.accepted_tokens = 0
         self.silenced_rounds = 0
 
+    bulk = 4096                           # new positions from which an empty index is built by sorting
+
     def _extend_index(self, context: Sequence[int]) -> None:
         n = self.ngram
         start = max(self._indexed, n - 1)
+        if not self._index and self._sorted is None and len(context) - start >= self.bulk and self._bulk(context):
+            return
         for position in range(start, len(context)):
             key = tuple(int(t) for t in context[position - n + 1 : position + 1])
             self._index.setdefault(key, []).append(position)
         self._indexed = len(context)
+
+    def _bulk(self, context: Sequence[int]) -> bool:
+        """Index a whole context as sorted packed n-grams (a prompt's first proposal); False if ids do not pack."""
+
+        import numpy as np
+
+        ids = np.asarray(context, dtype=np.int64)
+        n = self.ngram
+        bits = max(1, int(ids.max()).bit_length())
+        if int(ids.min()) < 0 or n * bits > 63:
+            return False
+        keys = np.zeros(len(ids) - n + 1, dtype=np.int64)
+        for j in range(n):
+            keys = (keys << bits) | ids[j:len(ids) - n + 1 + j]      # keys[i]: the n-gram ending at i + n - 1
+        order = np.argsort(keys, kind="stable")
+        self._sorted = (keys[order], order + (n - 1), bits)
+        self._indexed = len(context)
+        return True
+
+    def _positions(self, key: tuple[int, ...]) -> list[int]:
+        """End positions of ``key``, oldest first: the bulk index's, then those indexed one by one."""
+
+        found = self._index.get(key, [])
+        if self._sorted is None:
+            return found
+        import numpy as np
+
+        keys, ends, bits = self._sorted
+        if any(t < 0 or t >> bits for t in key):
+            return found
+        packed = 0
+        for t in key:
+            packed = (packed << bits) | t
+        lo, hi = np.searchsorted(keys, packed, "left"), np.searchsorted(keys, packed, "right")
+        return ends[lo:hi].tolist() + found if hi > lo else found
 
     def _match_length(self, context: Sequence[int], end: int) -> int:
         """Tokens matching backwards from ``end`` (exclusive) vs the context tail."""
@@ -77,10 +117,11 @@ class SuffixLookupProposer:
             # Context changed underneath the index (new request): rebuild.
             self._index = {}
             self._indexed = 0
+            self._sorted = None
         self._extend_index(context)
         self._last_key = tuple(int(t) for t in context[self._indexed - self.ngram : self._indexed])
         key = tuple(int(t) for t in context[-self.ngram :])
-        positions = self._index.get(key)
+        positions = self._positions(key)
         if not positions:
             return []
         best_end = -1

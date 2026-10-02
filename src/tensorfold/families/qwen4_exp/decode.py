@@ -11,7 +11,7 @@ import numpy as np
 
 from tensorfold.families.qwen3_5 import tensor_units
 from tensorfold.kernels.qwen.dense.v1 import lane_qmm, simd_qmm
-from tensorfold.kernels.qwen.flash_next.v1 import attention, base, embed, experts, gdn, hc, rows
+from tensorfold.kernels.qwen.flash_next.v1 import attention, base, embed, experts, gdn, hc, ngram, rows
 
 
 class _Split:
@@ -218,6 +218,7 @@ class FusedDecode:
             if "ple" in layer:
                 ple = layer.ple
                 self.ple_tables = embed.PleTables(ple.ple_embedding)
+                self.ple_hash = ngram.NgramHash(ple.ple_embedding)
                 # prefill chunks look their rows up through the same tables (NGramEmbedding.__call__)
                 ple.ple_embedding.__dict__["fused_tables"] = self.ple_tables
                 if isinstance(ple.key_proj, nn.QuantizedLinear) and isinstance(ple.value_proj, nn.QuantizedLinear):
@@ -230,8 +231,10 @@ class FusedDecode:
         self.row_states: dict[int, list[tuple[mx.array, mx.array, int]]] = {}
         self._last_heads: list[Any] = []
         self._pos: tuple[Any, Any] = (None, None)
-        # Queue each layer as soon as Python finishes building it.
+        # Queue each layer as soon as Python finishes building it (several streams; 0: build without queueing).
         self.eval_every = 1
+        # One stream: the first layers queue alone, then every third (fewer buffer switches, same bits).
+        self.lead_layers, self.cadence = 2, 3
 
     # -- blocks ------------------------------------------------------------------
     def _gdn(self, index: int, x: mx.array, cache: Any) -> mx.array:
@@ -354,34 +357,40 @@ class FusedDecode:
             if "ple" in layer:
                 h = self._write_back(h, pending)
                 pending = _NONE
-                host = np.asarray(tokens, dtype=np.int64).reshape(1, -1)      # a GPU window's ids, read after layer 0
-                h = self._ple(layer.ple, h, host, c)
+                h = self._ple(layer.ple, h, tokens, c)
             entry = self.layers[i]
             h, mixed, inj = self._hc(h, pending, entry["attn_hc"])
             out = self._gdn(i, mixed, c) if layer.is_linear else self._attention(i, mixed, c)
             h, mixed, inj = self._hc(h, ("plain", (out,), inj), entry["mlp_hc"])
             h, pending = self._moe(i, mixed, h, inj)
-            if self.eval_every and (i + 1) % self.eval_every == 0:
+            if self.eval_every and ((i + 1) % self.cadence == 0 or i < self.lead_layers):
                 mx.async_eval(h, *pending[1])
         h, mixed, _ = self._hc(h, pending, self.mixer)
         self.last_streams = h                                     # [R, S*D] before the final mixer (the MTP reads it)
         return mixed[None]
 
-    def _ple(self, ple: Any, h: mx.array, tokens: np.ndarray, cache: Any) -> mx.array:
+    def _ple(self, ple: Any, h: mx.array, tokens: Any, cache: Any) -> mx.array:
         """model.PLELayer on rows h [R, S*D], its projections through ``project`` (row-invariant): the new streams."""
 
         emb_mod = ple.ple_embedding
         history = cache.history
         if history is None:
             history = np.full((1, emb_mod.context), emb_mod.eos, dtype=np.int64)
-        ids = emb_mod.ids(history, tokens)
-        cache.history = np.concatenate([history, tokens.astype(np.int64)], axis=1)[:, -emb_mod.context:]
-        emb = embed.ple_lookup(ids[0], self.ple_tables)                           # [R, E]
+        if isinstance(tokens, mx.array) and self.ple_tables.host is None:     # a GPU window: hashed on the GPU
+            tokens = tokens.reshape(1, -1).astype(mx.uint32)
+            history = ngram.gpu_ids(history)
+            ids = self.ple_hash(history, tokens)
+        else:
+            tokens = np.asarray(tokens, dtype=np.int64).reshape(1, -1)
+            history = ngram.host_ids(history)
+            ids = emb_mod.ids(history, tokens)[0]
+        cache.history = ngram.join_history(history, tokens, emb_mod.context)
+        emb = embed.ple_lookup(ids, self.ple_tables)                              # [R, E]
         gated, normed = self._ple_gate(ple, emb, h)
         tail = cache.ple_conv if cache.ple_conv is not None else mx.zeros((1, ple.tail, h.shape[-1]), h.dtype)
         conv_in = mx.concatenate([tail, normed[None]], axis=1)
         cache.ple_conv = conv_in[:, -ple.tail:]
-        cache.ple_rollback = (history, tokens.astype(np.int64), conv_in)
+        cache.ple_rollback = (history, tokens, conv_in)
         return self._ple_conv(ple, conv_in, gated, h)
 
     def _ple_gate(self, ple: Any, emb: mx.array, h: mx.array) -> tuple[mx.array, mx.array]:
@@ -534,7 +543,7 @@ class FusedDecode:
         emb_mod = ple.ple_embedding
         histories, ids = [], []
         for c, t in zip(caches, tokens):
-            history = c.history
+            history = ngram.host_ids(c.history)
             if history is None:
                 history = np.full((1, emb_mod.context), emb_mod.eos, dtype=np.int64)
             histories.append(history)
@@ -570,7 +579,7 @@ class FusedDecode:
                 if "ple" in layer:
                     history, tokens, conv_in = c.ple_rollback
                     ple = layer.ple
-                    c.history = np.concatenate([history, tokens[:, :keep]], axis=1)[:, -ple.ple_embedding.context:]
+                    c.history = ngram.join_history(history, tokens[:, :keep], ple.ple_embedding.context)
                     c.ple_conv = conv_in[:, keep:keep + ple.tail]
             else:
                 c.trim(drop, ratio)

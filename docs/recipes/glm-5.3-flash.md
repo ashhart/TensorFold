@@ -7,8 +7,9 @@ Kimi delta attention, sparse MLA and MoE blocks mix four residual streams.
 
 ## CUDA
 
-On CUDA GLM-5.3-Flash runs on two ranks from Mia-AiLab's EXL3 checkpoint (`Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw`,
-experimental; [EXL3](#exl3)) or from the MLX 4-bit checkpoint, the portable option that a 256 GB Mac serves too.
+On CUDA GLM-5.3-Flash runs on two ranks from Brandon M. Music's EXL3/TR3 checkpoint
+(`brandonmusic/GLM-5.3-Flash-tr3-4bpw`, re-hosted as `Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw`; experimental;
+[EXL3](#exl3)) or from the MLX 4-bit checkpoint, the portable option that a 256 GB Mac serves too.
 No NVFP4 checkpoint of it is read. `tensorfold serve` loads the checkpoint you name; it picks none by itself. Prompt
 precision does not change here: neither checkpoint has an FP8 prompt kernel, so `--prefill-fp8` is refused.
 
@@ -35,7 +36,9 @@ sampled code faster, but greedy chat about 4% slower, so the head stays by defau
 
 ### EXL3
 
-`Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw` is an experimental CUDA checkpoint. The reader supports 4-bit
+Brandon M. Music created this EXL3/TR3 checkpoint (`brandonmusic/GLM-5.3-Flash-tr3-4bpw`, ShapleyMCG License 1.0,
+which asks for attribution); `Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw` is a byte-identical re-host of it. Either ID
+serves. It is an experimental CUDA checkpoint. The reader supports 4-bit
 mcg-codebook routed experts with BF16 weights elsewhere, not arbitrary EXL3 layouts. Start it with the
 two-rank command above, substituting its checkpoint ID on both ranks. With DFlash2 available, the EXL3
 `auto` policy uses DFlash2; without it, MTP remains available.
