@@ -119,6 +119,13 @@ class Dsv41Engine:
         self.model_dir = Path(model_dir)
         self.nccl = NCCL(rank, 2, master, port)
         self.nccl.barrier()
+        if os.environ.get("TF_COMM", "nccl") == "rdma":            # small all-gathers over our RoCE transport
+            from tensorfold.cuda.rdma import RdmaComm
+
+            self.nccl = RdmaComm(self.nccl, rank)
+            if rank == 0:
+                print(f"[tensorfold] all-gathers up to {self.nccl.rdma.slot_bytes >> 10} KiB over RoCE "
+                      f"({self.nccl.rdma.device}), larger ones over NCCL", flush=True)
         explicit = context is not None if context_explicit is None else bool(context_explicit)
         cap = int(context) if context and explicit else DEFAULT_CONTEXT   # the CLI hands the native window otherwise
         if not (Path(engram) / "config.json").exists() and not any(Path(engram).glob("*.safetensors")):
@@ -174,6 +181,8 @@ class Dsv41Engine:
                     from .serial import PROMPT_ROWS
 
                     self.e.drafter.capture_multi(min(self.streams, PROMPT_ROWS // DRAFTS))
+        if hasattr(self.nccl, "settle"):                  # graphs captured: RoCE gathers go without a barrier first
+            self.nccl.settle()
         self.limit = cap
         self.eos = (int(w.cfg.eos_token_id),)
         self.drafts = bool(drafts)
@@ -304,9 +313,11 @@ class Dsv41Engine:
                  "prefill_tps": round(res["prefill_tps"], 1), "decode_tps": round(res["decode_tps"], 1),
                  "drafts": bool(draft and self.drafts), "cached": int(res.get("cached", 0)),
                  "kept_states": len(self.e.pool.entries) if self.e.pool is not None else 0}
-        for key in ("rounds", "accepted_per_round", "tokens_per_round", "k_histogram"):
+        for key in ("rounds", "accepted_per_round", "tokens_per_round", "k_histogram", "copy_rounds", "copy_accepted"):
             if key in res:
                 stats[key] = res[key]
+        if hasattr(self.nccl, "check"):                  # a RoCE wait that gave up inside a graph surfaces here
+            self.nccl.check()
         return stats
 
     def follow(self) -> None:

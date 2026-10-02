@@ -325,3 +325,15 @@ Follow-up (same day): sublayer timing (graph of one sublayer over layers 4-39, 1
   graphs to 16 rows). Edit-style requests, identical replies: rename a class in a 60-line file 79.9 -> 117.3 tok/s,
   add docstrings 76.5 -> 95.2. Standard cases: rarely fire, no change; copy == serial.
 - Concurrent (`--parallel`) rounds do not use copy drafts yet.
+
+## 2026-10-02 — own RoCE all-gather, read-pool race fix
+
+- `tensorfold/cuda/rdma` (`TF_COMM=rdma`, off by default): two-rank all-gather through pinned host memory (no
+  GPUDirect on GB10): the GPU stages its shard and rings a sequence number, a C proxy thread RDMA-writes the payload
+  and then a flag on one RC QP, the peer GPU polls the flag; double-buffered slots, a device epoch for CUDA graphs.
+  Bit-identical to NCCL. Standalone: 1 row 16.8 vs 17.4 us, 2-4 rows 19-25 vs 45-101 us, 32 rows 80 vs 197 us.
+  In the engine: serial 36.1 -> 36.7 tok/s; DSpark and concurrent rounds unchanged (32 clients 156.9 vs 155.9).
+- Fixed a use-after-scope race in the persistent Engram read pool (a helper could take a job its caller had already
+  finished): under concurrent load it hung the server or ran it out of GPU memory. With it fixed, 32 clients
+  155.9 tok/s (was 143.3 this morning), 16 clients 123.2.
+- With the single-graph step, only that graph is captured per row count (not the three-graph copy).

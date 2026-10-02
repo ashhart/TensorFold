@@ -716,14 +716,7 @@ class SerialEngine:
             for _ in range(2):
                 run_b(run_a1(run_a0()))
         torch.cuda.current_stream().wait_stream(side)
-        g["a0"], g["a1"], g["b"] = torch.cuda.CUDAGraph(), torch.cuda.CUDAGraph(), torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g["a0"]):
-            g["carry0"] = run_a0()
-        with torch.cuda.graph(g["a1"], pool=g["a0"].pool()):
-            g["carry"] = run_a1(g["carry0"])
-        with torch.cuda.graph(g["b"], pool=g["a0"].pool()):
-            g["logits"], g["next"] = run_b(g["carry"])
-        if ONE_GRAPH:                                                   # the step in one launch (step_rows / multi)
+        if ONE_GRAPH:                                                   # the step in one launch (all paths use it)
             self._prime_flags()
 
             def run_one():
@@ -733,9 +726,17 @@ class SerialEngine:
                 K.await_rows(self._flag, self._seen, g["h_raw"][1], g["raw"][1], self._flag_err)
                 return run_b(carry)
 
-            g["one"] = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(g["one"], pool=g["a0"].pool()):
-                g["logits"], g["next"] = run_one()              # the steps read these (the timing replays don't)
+            g["one"] = torch.cuda.CUDAGraph()                         # (no three-graph copy: its buffers cost ~1.4 GiB
+            with torch.cuda.graph(g["one"]):                           # over 32 row counts)
+                g["logits"], g["next"] = run_one()
+        else:                                                           # three graphs, the host reads between them
+            g["a0"], g["a1"], g["b"] = torch.cuda.CUDAGraph(), torch.cuda.CUDAGraph(), torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g["a0"]):
+                g["carry0"] = run_a0()
+            with torch.cuda.graph(g["a1"], pool=g["a0"].pool()):
+                g["carry"] = run_a1(g["carry0"])
+            with torch.cuda.graph(g["b"], pool=g["a0"].pool()):
+                g["logits"], g["next"] = run_b(g["carry"])
         torch.cuda.synchronize()
         self._restore_rows(saved)
         self.graphs[rows] = g

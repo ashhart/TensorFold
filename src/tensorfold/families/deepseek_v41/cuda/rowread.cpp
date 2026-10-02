@@ -59,10 +59,13 @@ class Pool {
         cv_.notify_all();
         run(job);
         while (job.done.load(std::memory_order_acquire) < job.n) std::this_thread::yield();
-        // helpers still inside run() hold no work (next >= n); wait until they leave before the job goes away
+        // withdraw the job first (helpers take it, and count themselves busy, under mu_), then wait for the helpers
+        // that took it to leave run() before it goes out of scope: they hold no work left (next >= n)
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            job_ = nullptr;
+        }
         while (busy_.load(std::memory_order_acquire) > 0) std::this_thread::yield();
-        std::lock_guard<std::mutex> lk(mu_);
-        job_ = nullptr;
     }
 
    private:

@@ -64,6 +64,12 @@ def main() -> None:
     torch.cuda.set_device(0)
     nccl = NCCL(args.rank, 2, args.master, args.port)
     nccl.barrier()
+    if os.environ.get("TF_COMM", "nccl") == "rdma":                # small all-gathers over our RoCE transport
+        from tensorfold.cuda.rdma import RdmaComm
+
+        nccl = RdmaComm(nccl, args.rank)
+        if args.rank == 0:
+            print(f"[rank 0] all-gathers up to {nccl.rdma.slot_bytes >> 10} KiB over RoCE ({nccl.rdma.device})", flush=True)
     t0 = time.time()
     w = W.load(args.model, rank=args.rank, log=lambda *a, **k: None, draft=args.dspark > 0)
     torch.cuda.empty_cache()
@@ -88,6 +94,8 @@ def main() -> None:
                 eng.drafter.capture()
                 eng.adaptive = not args.fixed_k
         print(f"[rank {args.rank}] decode graphs captured in {time.time() - t0:.1f} s", flush=True)
+    if hasattr(nccl, "settle"):
+        nccl.settle()
 
     from tensorfold.engine.exact_sampling import Sampling
 
@@ -351,7 +359,7 @@ def main() -> None:
                 torch.cuda.synchronize()
                 t = time.perf_counter()
                 for _ in range(5):
-                    g["a0"].replay(), g["a1"].replay(), g["b"].replay()
+                    eng._replay_free(g)
                 torch.cuda.synchronize()
                 if args.rank == 0:
                     print(f"live-context replay {R} rows: {(time.perf_counter() - t) / 5 * 1e3:.1f} ms "
@@ -410,12 +418,12 @@ def main() -> None:
 
             g = eng.graphs[1]
             for _ in range(3):
-                g["a0"].replay(), g["a1"].replay(), g["b"].replay()
+                eng._replay_free(g)
             nccl.barrier()
             torch.cuda.synchronize()
             n = args.profile_step
             if "one" in g:                                    # the whole step as one graph vs three launches
-                for label, fn in (("three launches", lambda: (g["a0"].replay(), g["a1"].replay(), g["b"].replay())),
+                for label, fn in (("three launches", lambda: (eng._replay_free(g))),
                                   ("one launch", lambda: eng._replay_free(g))) * 2:
                     nccl.barrier()
                     torch.cuda.synchronize()
@@ -434,7 +442,7 @@ def main() -> None:
             with profile(activities=[ProfilerActivity.CUDA]) as prof:
                 t = time.perf_counter()
                 for _ in range(n):
-                    g["a0"].replay(), g["a1"].replay(), g["b"].replay()
+                    eng._replay_free(g)
                 torch.cuda.synchronize()
                 wall = (time.perf_counter() - t) / n * 1e3
             if args.rank == 0:
