@@ -131,8 +131,10 @@ class Runner:
                    if k else None)                                                # rows DFlash2 rounds kept)
         self.prompt_rows = PROMPT_ROWS if w.dcp == 1 else min(PROMPT_ROWS, 1024)      # DCP: room for the long cache
         self.pb = fused.Buffers(w, self.prompt_rows, max(capacity, 1))            # prompt chunks (exact key range)
-        self.overlap = (fused.PROMPT_OVERLAP and w.world > 1 and hasattr(w.comm, "all_reduce")
-                        and fused.PREFILL_REDUCE == "ring" and w.dcp == 1)    # DCP: its collectives stay in order
+        ring = fused.PREFILL_REDUCE == "ring" and hasattr(w.comm, "all_reduce")
+        sp = fused.PROMPT_SP and hasattr(w.comm, "all_to_all")      # sequence parallel: ring or exact reduce
+        self.overlap = (fused.PROMPT_OVERLAP and w.world > 1 and (ring or sp)
+                        and w.dcp == 1)                               # DCP: its collectives stay in order
         if self.overlap:                                 # the second micro-batch of a prompt chunk
             self.pb1 = fused.Buffers(w, self.prompt_rows - self.prompt_rows // 2, max(capacity, 1))
             self.pos1 = torch.zeros((1,), dtype=torch.int32, device=w.device)
@@ -240,8 +242,14 @@ class Runner:
             st.pos.fill_(a)
             if self.overlap and R >= 2 * fused.MAX_ROWS + 2:
                 self.pos1.fill_(a + R // 2)
-                fused.compute_prompt(w, st, b, self.pb1, R, T, self.pos1, self.comm_stream,
-                                     logits="last" if e == L0 else "none")
+                if fused.sp_fits(w, b, self.pb1, R):
+                    fused.compute_prompt_sp(w, st, b, self.pb1, R, T, self.pos1, self.comm_stream,
+                                            logits="last" if e == L0 else "none")
+                elif fused.PREFILL_REDUCE == "ring":
+                    fused.compute_prompt(w, st, b, self.pb1, R, T, self.pos1, self.comm_stream,
+                                         logits="last" if e == L0 else "none")
+                else:
+                    fused.compute(w, st, b, R, T, logits="last" if e == L0 else "none")
             else:
                 fused.compute(w, st, b, R, T, logits="last" if e == L0 else "none")
             if self.drafter is not None:                 # the drafter's context: this chunk's committed taps
