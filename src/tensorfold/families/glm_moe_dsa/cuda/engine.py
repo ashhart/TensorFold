@@ -33,6 +33,7 @@ CHUNK = 1024                 # prompt rows per forward (the eager reference path
 FUSED = os.environ.get("TF_GLM53_FUSED", "1") != "0"          # 0: the M2 reference path (torch ops, no graphs)
 GRAPHS = os.environ.get("TF_GLM53_GRAPHS", "1") != "0"
 ROCE = os.environ.get("TF_GLM53_ROCE", "1") != "0"
+CONC_MODE = os.environ.get("TF_GLM53_CONC_MODE", "")   # --parallel: drafts of requests without "tf_mtp" (dflash, auto, ...)
 DCP_AUTO = 200_000           # contexts past this interleave the KV cache over the ranks (decode context parallelism)
 
 
@@ -314,7 +315,7 @@ class Glm53Engine:
                 got.extend(new)
                 return on_tokens(new)
             s = sampling if sampling is not None and sampling.temperature > 0 else None
-            mode = mtp_mode if mtp_mode in fused.MTP_MODES else fused.MTP_MODE
+            mode = mtp_mode if mtp_mode in fused.MTP_MODES else CONC_MODE or fused.MTP_MODE
             if mode in ("dflash", "auto") and self.multi.dr is None:
                 raise ValueError(f"mtp mode {mode!r}: no DFlash2 drafter loaded (TF_GLM53_DFLASH)")
             want = (mode if mode in ("dflash", "auto") else bool(self.k)) if draft else False   # multi._mode

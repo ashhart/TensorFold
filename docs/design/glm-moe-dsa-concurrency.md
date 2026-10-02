@@ -54,6 +54,7 @@ Built: steps 3 (decode windows up to 32 rows) and 5 (DFlash2 per stream).
   choice (one-stream rule) and its MTP backlog of up to 8 rows (written every round, drafting or not); prompt chunks feed
   the stream's drafter ring. Drafts are computed on every rank (identical gathered candidates), so ROUND stays one message.
   A lone DFlash2 stream takes exactly the one-stream path's rounds (tested).
+- `TF_GLM53_CONC_MODE=dflash|auto`: the default drafts of concurrent requests without "tf_mtp".
 - Prewarm adds verify windows of every width 1..32 (argmax, every key bucket); other shapes capture on first use.
 Tests: tests/cuda/test_glm_moe_dsa_multi_dflash.py (drafter == solo; 2/3/4 streams DFlash2 + auto + MTP mixed,
 greedy + seeded sampled, staggered, one prompt past index_topk, windows of 32 rows; graphs; engine parallel=3).
