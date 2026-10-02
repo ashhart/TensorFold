@@ -187,3 +187,22 @@ def test_unquantized_weights_need_a_decision_head(tmp_path):
     (tmp_path / "config.json").write_text(json.dumps({"model_type": "qwen3_5", "text_config": {}}))
     with pytest.raises(ValueError, match="only for a decision model"):
         cuda_engine(tmp_path, no_drafts=True)
+
+
+def test_a_quantized_head_gives_its_rows_from_its_own_matmul():
+    from types import SimpleNamespace
+
+    from tensorfold.families.qwen3_5.cuda.engine import Qwen27Engine
+
+    weight = torch.randn(300, 2048).to(torch.bfloat16)
+
+    class Head:                                         # an EXL3 or NVFP4 head: a matmul, no rows to index
+        def prefill(self, x):
+            return x @ weight.T
+
+    engine = object.__new__(Qwen27Engine)
+    engine.torch = torch
+    engine.w = SimpleNamespace(head=Head(), norm=torch.zeros(1), config=SimpleNamespace(vocab=300, hidden=2048))
+    ids = torch.tensor([0, 7, 299])
+    assert torch.equal(engine.head_rows(ids), weight[ids])
+    assert engine.head_table is not None and torch.equal(engine.head_rows(ids), weight[ids])   # built once

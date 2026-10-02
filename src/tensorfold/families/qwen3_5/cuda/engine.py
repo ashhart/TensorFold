@@ -23,6 +23,7 @@ class Qwen27Engine:
 
     tree_rows: int | None = None       # a lone stream's tree rows on one GPU (None: max_rows, as in 0.5.0)
     room = None                        # one GPU's attention-cache budget (streams.KVRoom), None on two
+    head_table = None                  # a quantized head's rows as bf16, built by the first head_rows (decision models)
 
     def __init__(self, model_dir: Path, draft_dir: Path | None, *, max_rows: int = 12, tp: int = 1,
                  rank: int = 0, master: str = "", port: int = 29551, split_head: bool = False,
@@ -230,9 +231,27 @@ class Qwen27Engine:
     def head_rows(self, ids):
         """The LM head's rows for token ids (a joint schema head's lexical option vectors)."""
 
-        if getattr(self.w.head, "layout", None) != "dense":
-            raise ValueError("decision heads read the LM head's rows from a bf16 checkpoint only")
-        return self.w.head.weight[ids]
+        if getattr(self.w.head, "layout", None) == "dense":
+            return self.w.head.weight[ids]
+        if self.head_table is None:                     # a quantized head: its rows once, as bf16 (vocab x hidden)
+            self.head_table = self._dequantized_head()
+        return self.head_table[ids]
+
+    def _dequantized_head(self):
+        """The head's weights from its own prompt matmul on identity rows: column j of ``eye @ W.T`` is row j of W."""
+
+        from .prefill import _mm
+
+        torch, c = self.torch, self.w.config
+        dev = self.w.norm.device
+        table = torch.empty((c.vocab, c.hidden), dtype=torch.bfloat16, device=dev)
+        with torch.no_grad():
+            for a in range(0, c.hidden, 1024):
+                b = min(a + 1024, c.hidden)
+                eye = torch.zeros((b - a, c.hidden), dtype=torch.bfloat16, device=dev)
+                eye[:, a:b] = torch.eye(b - a, dtype=torch.bfloat16, device=dev)
+                table[:, a:b] = _mm(eye, self.w.head).T
+        return table
 
     def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens: Callable[[list[int]], bool | None],
                  draft: bool = True, stop_eos: bool = True, *, vision=None, constraint=None, background=False):
