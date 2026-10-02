@@ -10,6 +10,7 @@ from tensorfold.cuda import prompt_precision
 
 KEEP = 3             # prompt states a concurrent decoder keeps to resume from (each holds a DeltaNet copy)
 KEEP_ONE = 4         # prompt states one stream keeps (they share its attention buffers)
+COPY_ROWS = 128      # a copy's widest window, as a lone stream's; --parallel takes it too on one GPU
 
 
 def entry_end(prompt: Sequence[int]) -> int:
@@ -86,7 +87,9 @@ class Qwen27Engine:
         many = streams > 1
         # prompt chunks sized to the card (4096 rows from 80 GB), the verify scratch to the rows a round takes
         chunk = prompt_rows(total_bytes(torch), prompt_row_bytes(config(model_dir), tp))
-        geometry = ((lambda text: stream_geometry(text, tp, streams, keep, first=256 if tp == 1 else None)) if many
+        wide = tp == 1 and allow_copy             # one GPU: a round's copies may take COPY_ROWS rows
+        geometry = ((lambda text: stream_geometry(text, tp, streams, keep, first=256 if tp == 1 else None,
+                                                  rows=max(16 * streams, COPY_ROWS) if wide else None)) if many
                     else (lambda text: gdn_geometry(text, tp, max_rows, rows=max_rows, prompt=chunk, evicts=tp == 1)))
         # an affine checkpoint's packed words at their stored precision; an EXL3 pack's by its own format
         tensor_bytes = weight_transform(model_dir, one_gpu=tp == 1)
@@ -150,6 +153,7 @@ class Qwen27Engine:
             from .multi import MultiDecoder
 
             self.multi = MultiDecoder(self.w, self.draft, allow_copy=allow_copy, rank=rank, world=tp,
+                                      copy_rows=COPY_ROWS if wide else 0,
                                       context=self.capacity_plan["cache_slots"], keep=keep, points=self.points,
                                       vision=self.vision)
             self.multi.model_dir = self.model_dir             # rank 1 compiles a request's grammar from it

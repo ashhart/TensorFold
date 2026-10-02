@@ -166,3 +166,10 @@ def test_the_curve_times_both_sides_of_each_row_step(allocations):  # noqa: F811
     assert multi.calibration_rows(1) == [1, 2, 4, 8, 12, 16]
     rows = multi.calibration_rows(8)
     assert {16, 17, 32, 33, 64, 65, 128} <= set(rows) and rows[-1] == 128 and 129 not in rows
+
+
+def test_calibration_reaches_a_rounds_widest_copy():
+    multi = importlib.import_module("tensorfold.families.qwen3_5.cuda.multi")
+    assert multi.calibration_rows(3)[-1] == 48
+    rows = multi.calibration_rows(3, most=multi.COPY_ROWS)
+    assert rows[-1] == 128 and {48, 64, 96} <= set(rows) and 129 not in rows

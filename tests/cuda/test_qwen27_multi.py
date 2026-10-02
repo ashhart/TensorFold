@@ -16,6 +16,7 @@ from tensorfold.families.qwen3_5.cuda.decode import prefill, serial_decode  # no
 from tensorfold.families.qwen3_5.cuda.forward import (State, commit, commit_streams, multi_tree_forward,  # noqa: E402
                                                         tree_forward)
 from tensorfold.families.qwen3_5.cuda.draft_tree import allocate  # noqa: E402
+from tensorfold.families.qwen3_5.cuda import multi  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.multi import TREE, MultiDecoder, private, viewed  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.weights import Attention, Config, GDN, Layer, QLinear, Weights  # noqa: E402
 
@@ -369,3 +370,108 @@ def test_prefill_keeps_states_at_stops_that_resume_exactly():
     fresh_b, ref_b = prefill(w, b, SAMPLINGS[1])
     _same_state(st_b, fresh_b)
     assert first_b == ref_b
+
+
+@pytest.mark.parametrize("widths", [(128, 16, 1), (100, 128), (128,), (64, 3, 128, 17)])
+def test_wide_copy_chains_beside_trees_equal_each_window_alone(widths):
+    """Copy chains of up to 128 rows beside 16-row trees in one forward: each stream equals its window alone."""
+
+    rng = random.Random(sum(widths))
+    w = _model()
+    windows, paths = [], []
+    for n in widths:
+        if n == 16:                                      # a branching tree, as DFlash2's
+            parents = [-1] + [rng.randint(max(0, i - 3), i - 1) for i in range(1, 16)]
+            windows.append(([rng.randrange(1, V) for _ in range(16)], parents))
+            node, path = 15, []
+            while node >= 0:
+                path.append(node)
+                node = parents[node]
+            paths.append(path[::-1])
+        else:                                            # a copy: a chain, kept whole or cut part way
+            windows.append(([rng.randrange(1, V) for _ in range(n)], list(range(-1, n - 1))))
+            paths.append(list(range(n if n % 2 == 0 else max(1, n // 2))))
+    states = [_prefilled(w, [rng.randrange(1, V) for _ in range(rng.randint(3, 40))]) for _ in widths]
+    logits, record, _, starts = multi_tree_forward(w, [(t, p, st) for (t, p), st in zip(windows, states)])
+    for s, ((tokens, parents), st) in enumerate(zip(windows, states)):
+        ref = private(st, st.pos + 160)
+        single, rec = tree_forward(w, _tok(tokens), parents, ref)
+        assert torch.equal(logits[starts[s]:starts[s + 1]], single), f"stream {s} ({widths[s]} rows)"
+        commit(ref, rec, paths[s])
+        mine = private(st, st.pos + 160)
+        commit(mine, record, [starts[s] + r for r in paths[s]])
+        _same_state(mine, ref)
+
+
+class _Copies:
+    """A stream's copy proposals from its true continuation, so copies land whole; now and then one token is wrong."""
+
+    def __init__(self, s, ref, rng, wrong=0.15):
+        self.s, self.ref, self.rng, self.wrong = s, ref, rng, wrong
+
+    def propose(self, context, n):
+        done = len(self.s.out)
+        guesses = list(self.ref[done:done + n])
+        if guesses and self.rng.random() < self.wrong:  # a broken copy: its window halves next time
+            guesses[self.rng.randrange(len(guesses))] = self.rng.randrange(1, V)
+        return guesses
+
+
+@pytest.mark.parametrize("streams", [1, 3])
+def test_wide_copies_equal_serial_within_a_rounds_rows(streams, monkeypatch):
+    """Copies grow past 16 rows and halve after a break, within a round's rows; every stream equals serial."""
+
+    w = _model()
+    prompts = [[5, 6, 7], [9, 10, 11, 12, 13], [3, 4]][:streams]
+    count = 300
+    refs = {tuple(p): _serial(w, p, None, count) for p in prompts}
+    seen = []
+    forward = multi.multi_tree_forward
+
+    def recorded(w_, windows, **kw):
+        seen.append([len(t) for t, _, _ in windows])
+        return forward(w_, windows, **kw)
+
+    monkeypatch.setattr(multi, "multi_tree_forward", recorded)
+    dec = MultiDecoder(w, None, max_rows=16, copy_rows=128)
+    rng = random.Random(streams)
+    got = []
+    for prompt in prompts:
+        out: list[int] = []
+        s = Stream(prompt, count, None, draft=True, emit=lambda new, out=out: out.extend(new))
+        dec.admit(s)
+        s.copies = _Copies(s, refs[tuple(prompt)], rng)
+        got.append((s, out))
+    while dec.live():
+        dec.finish(dec.round())
+    for s, out in got:
+        assert out == refs[tuple(s.prompt)], s.prompt
+    assert max(max(r) for r in seen) > 16                  # copies grew past a tree's width
+    assert all(sum(r) <= max(128, 16 * len(r)) for r in seen)   # within a round's rows
+    assert not dec.copy_window                             # finished streams leave no window behind
+
+
+def test_copy_windows_stay_at_the_tree_width_without_copy_rows_or_with_a_grammar():
+    w = _model()
+    dec = MultiDecoder(w, None, max_rows=12)               # two ranks, or --no-drafts: the old fixed width
+    s = Stream([5, 6, 7], 40, None, draft=True)
+    dec.admit(s)
+    s.copies = _Copies(s, list(range(1, 200)), random.Random(0), wrong=0.0)
+    copied = {}
+    dec.spare = 500
+    dec._mode(s, copied)
+    assert len(copied[s.sid]) == 11
+    wide = MultiDecoder(w, None, max_rows=16, copy_rows=128)
+    t = Stream([5, 6, 7], 40, None, draft=True)
+    wide.admit(t)
+    t.copies = _Copies(t, list(range(1, 200)), random.Random(0), wrong=0.0)
+    wide.copy_window[t.sid], wide.spare = 128, 112
+    t.constraint = object()                                # a grammar keeps a copy at the tree width
+    wide._mode(t, copied)
+    assert len(copied[t.sid]) == 15
+    t.constraint = None
+    wide.spare = 112
+    wide._mode(t, copied)
+    assert len(copied[t.sid]) == 127 and wide.spare == 0
+    with pytest.raises(ValueError, match="copy windows"):
+        MultiDecoder(w, None, max_rows=16, copy_rows=256)

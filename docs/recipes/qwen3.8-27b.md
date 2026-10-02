@@ -164,6 +164,23 @@ and `--max-num-seqs 16` serves 132.1 tok/s at 51.7 GiB on the same Spark. At 8 a
 serves 147.5 and 112.0 tok/s. `tools/shared_prefix_prompts.py` builds the workload and
 `tools/shared_prefix_load.py` sends it (`--concurrency`, `--mem` for the memory peak).
 
+On one GPU a stream's copies from its context grow as a lone stream's do: a copy window starts at the tree's 16
+rows, doubles while copies land whole up to 128 and halves after a break, and the streams of a round share
+max(128, 16 a stream) rows, 16 kept for every other live stream. Trees, grammar-constrained streams and two ranks
+keep 16 rows. Admission counts the wider round (43.60 to 44.81 GiB for `--parallel 3` at the 262,144-token window).
+On one DGX Spark with `armin1/Qwen3.8-27B-NVFP4-FP8-Mixed-LH` (`--precision full`), `--parallel 3`, greedy, thinking
+off, replies that copy a 187-line Python file from the prompt:
+
+| Request | 16-row windows | grown copies | `--parallel 1` |
+| --- | ---: | ---: | ---: |
+| The file again with a class renamed (2,274 tokens) | 153.3 tok/s | 518.3 tok/s | 510.7 tok/s |
+| An edit quoting a class verbatim, then changed (1,296 tokens) | 133.2 tok/s | 291.9 tok/s | 291.2 tok/s |
+| A new class, nothing to copy (512 tokens) | 76.5 tok/s | 76.8 tok/s | 76.8 tok/s |
+
+Each reply is the same text in all three. Sent at once, the three finish in 10.5 s against 17.2 s (388.6 against
+237.7 tok/s together); the reply with nothing to copy, sharing rounds with the wide copies, takes 10.5 s against
+8.4 s.
+
 ### Structured output
 
 With `pip install 'tensorfold[grammar]'` (xgrammar), serving on one or two GPUs enforces `response_format` and the
