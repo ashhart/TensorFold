@@ -106,6 +106,24 @@ def test_the_effort_reaches_the_template_as_on_the_mac(tmp_path, fields, names, 
     assert status == 200 and rendered(engine) == want
 
 
+@pytest.mark.parametrize("default", [False, True])
+@pytest.mark.parametrize("kwargs, want", [
+    ({"thinking": True}, True), ({"thinking": False}, False),                 # DeepSeek-V4 clients (pi) send this
+    ({"thinking": {"type": "enabled"}}, True), ({"thinking": {"type": "disabled"}}, False),
+    ({"thinking": None}, None),                                               # null: the server's default
+    ({"thinking": "yes"}, None), ({"thinking": 1}, None),                     # anything else is ignored, as unset
+    ({"thinking": {"type": "adaptive"}}, None), ({"thinking": {}}, None),
+    ({"thinking": "yes", "enable_thinking": False}, False),
+    ({"thinking": True, "enable_thinking": False}, False),                    # an explicit enable_thinking wins
+    ({"thinking": False, "enable_thinking": True}, True),
+])
+def test_chat_template_kwargs_thinking_is_heard_as_enable_thinking(tmp_path, default, kwargs, want):
+    engine = ChainEngine()
+    status, _ = ask(app_for(tmp_path, engine, thinking=default), max_tokens=2, chat_template_kwargs=kwargs)
+    thinking = default if want is None else want
+    assert status == 200 and rendered(engine) == ("assistant:<think>" if thinking else "assistant:")
+
+
 def test_no_server_default_leaves_the_template_its_own(tmp_path):
     engine = ChainEngine()
     assert ask(app_for(tmp_path, engine), max_tokens=2)[0] == 200

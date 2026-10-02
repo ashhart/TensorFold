@@ -82,10 +82,27 @@ def heard_effort(explicit: str | None, default: str | None, levels: frozenset[st
     return coerce_effort(default if explicit is None else explicit, levels)
 
 
+def thinking_switch(value: Any) -> bool | None:
+    """``chat_template_kwargs.thinking`` as a switch: a bool, or DeepSeek's ``{"type": "enabled" | "disabled"}``;
+    None (the server's default) for anything else, which clients may send for their own templates."""
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, dict) and value.get("type") in ("enabled", "disabled"):
+        return value["type"] == "enabled"
+    return None
+
+
 def thinking_fields(body: dict[str, Any], levels: frozenset[str] = frozenset()) -> dict[str, Any]:
-    """A request's ``reasoning_effort`` and ``enable_thinking`` where it sets them; unset is the server's default."""
+    """A request's ``reasoning_effort`` and ``enable_thinking`` where it sets them; unset is the server's default.
+
+    ``chat_template_kwargs.thinking`` (the switch DeepSeek-V4 clients such as pi send) is heard as ``enable_thinking``
+    when that is absent."""
 
     kwargs = body.get("chat_template_kwargs") or {}
+    switch = thinking_switch(kwargs.get("thinking")) if isinstance(kwargs, dict) else None
+    if switch is not None and "enable_thinking" not in kwargs:
+        kwargs = {**kwargs, "enable_thinking": switch}
     fields: dict[str, Any] = {}
     effort = body.get("reasoning_effort")
     if effort is None and isinstance(kwargs, dict):
