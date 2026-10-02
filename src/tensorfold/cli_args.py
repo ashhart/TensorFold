@@ -76,9 +76,12 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
                             "pulled; none: no draft model")
     speed.add_argument("--drafter-bits", type=int, default=4, help="quantize the draft model's linears (0: bf16)")
     speed.add_argument("--mtp-drafts", type=int, default=None,
-                       help="most MTP drafts a round (Qwen3.8 Flash Next: 3 on Mac; on CUDA 6, stopping under 70%% "
+                       help="most MTP drafts a round (Qwen3.8 Flash Next: 3 on Mac; on CUDA 6, stopping under 70% "
                             "confidence; Nemotron on CUDA: 15, stopping where a row stops paying; Qwen3.6 MoE on Mac: "
                             "4, each round's depth, plain included, from measured costs); 0: no MTP drafts")
+    speed.add_argument("--mtp-head", default="",
+                       help="the checkpoint's own MTP head as the drafter (Qwen3.8 dense; a file or directory of "
+                            "mtp.* tensors — see tools/qwen27_mtp_head.py)")
     speed.add_argument("--mtp-confidence", type=float, default=None,
                        help="on CUDA, stop an MTP chain before a later draft under this probability "
                             "(Flash Next default 0.70; Nemotron: by the row costs it measures at start)")

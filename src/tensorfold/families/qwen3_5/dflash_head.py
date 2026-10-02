@@ -114,7 +114,7 @@ class DFlashHead:
     def slot(self) -> DraftSlot:
         return DraftSlot(self.drafter, self.chains)
 
-    def absorb(self, cache: list[Any], first: int, rows: int, row: int = 0) -> None:
+    def absorb(self, cache: list[Any], first: int, rows: int, row: int = 0, next_tokens: Any = None) -> None:
         """Absorb forward rows [row, row + rows), starting at position first, into the stream's drafter context."""
 
         taps = self.drafter.taps()

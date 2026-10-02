@@ -249,7 +249,7 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
     started = time.perf_counter()
     drafter = "" if args.no_drafts else _drafter(family, args.drafter, "cuda")
     options: dict[str, Any] = {"drafter": drafter, "tp": int(args.tp), "rank": int(args.rank), "master": args.master,
-                               "master_port": int(args.master_port), "no_drafts": bool(args.no_drafts)}
+                               "master_port": int(args.master_port), "no_drafts": bool(args.no_drafts), "mtp_head": args.mtp_head}
     if getattr(args, "kv_dtype", "bf16") != "bf16":
         options["kv_dtype"] = args.kv_dtype
     options.update(_vision_options(args))
@@ -425,7 +425,7 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
     drafter = "" if args.no_drafts else _drafter(family, args.drafter)
     parallel = _parallel(args.parallel)
     options: dict[str, Any] = {"lane_kernels": args.lane_kernels, "drafter": drafter,
-                               "drafter_bits": args.drafter_bits, "parallel": parallel}
+                               "drafter_bits": args.drafter_bits, "parallel": parallel, "mtp_head": args.mtp_head}
     options.update(_vision_options(args))
     if args.mtp_drafts is not None:
         options["mtp_drafts"] = int(args.mtp_drafts)
