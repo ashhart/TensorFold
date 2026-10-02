@@ -19,10 +19,16 @@ def test_the_family_is_found_by_model_type(tmp_path):
     assert families.detect(_config(tmp_path)).module == "tensorfold.families.qwen3_5_moe"
 
 
-def test_only_4_bit_groups_of_64_are_read(tmp_path):
+def test_cuda_reads_only_4_bit_groups_of_64(tmp_path, monkeypatch):
+    monkeypatch.setattr("sys.platform", "linux")
     qwen3_5_moe.check(_config(tmp_path))
     with pytest.raises(ValueError, match="groups of 64"):
         qwen3_5_moe.check(_config(tmp_path, bits=8))
+
+
+def test_a_mac_reads_other_affine_widths(tmp_path, monkeypatch):
+    monkeypatch.setattr("sys.platform", "darwin")      # the row decoder reads every MLX affine width
+    qwen3_5_moe.check(_config(tmp_path, bits=8))
 
 
 @pytest.mark.parametrize("options, message", [({"tp": 2}, "one GPU"), ({"parallel": 4, "mtp_drafts": 16}, "0 to 15"),

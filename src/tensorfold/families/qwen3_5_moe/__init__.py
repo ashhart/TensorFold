@@ -22,13 +22,25 @@ CUDA_PREFILL_FP8 = True            # --prefill-fp8: the attention and DeltaNet p
 
 
 def check(model_dir: str | Path) -> None:
-    """One GPU, MLX 4-bit weights in groups of 64."""
+    """CUDA: one GPU, MLX 4-bit weights in groups of 64. Macs: the row decoder's rule, any MLX affine width and group."""
+
+    import sys
 
     from tensorfold.families import OWN_MODEL_HELP, describe_quantization, quantization, read_config
 
-    if quantization(read_config(model_dir)) != CUDA_QUANTIZATION:
+    config = read_config(model_dir)
+    if sys.platform == "darwin":
+        # a Mac decodes through the dense family's row decoder, so its refusal is the one that applies
+
+        from tensorfold.families.qwen3_5 import refusal
+
+        why = refusal(config, False)
+        if why:
+            raise ValueError(f"{TITLE} cannot run this checkpoint on a Mac: {why}. {OWN_MODEL_HELP}")
+        return
+    if quantization(config) != CUDA_QUANTIZATION:
         raise ValueError(f"{TITLE}'s CUDA engine reads MLX 4-bit weights in groups of 64 ({MODELS[0]}); this "
-                         f"checkpoint has {describe_quantization(read_config(model_dir))}. {OWN_MODEL_HELP}")
+                         f"checkpoint has {describe_quantization(config)}. {OWN_MODEL_HELP}")
 
 
 def mtp_file(model_dir: Path) -> Path | None:
