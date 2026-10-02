@@ -39,10 +39,10 @@ class Qwen27Engine:
         nvfp4 = not exl3 and is_quantized(Path(model_dir))
         if (exl3 or nvfp4) and tp != 1:
             raise ValueError(f"{'EXL3 packs' if exl3 else 'NVFP4 checkpoints'} of Qwen3.8-27B run on one GPU: drop "
-                             "--tp 2, or serve the MLX checkpoint (Vontra/Qwen3.8-27B-MLX-4bit) on two")
+                             "--tp 2, or serve the MLX checkpoint (TensorFold/Qwen3.8-27B-MLX-4bit) on two")
         if nvfp4 and vision:
             raise ValueError("image input on CUDA is tested on the MLX checkpoint only: drop --vision for an NVFP4 "
-                             "checkpoint, or serve Vontra/Qwen3.8-27B-MLX-4bit")
+                             "checkpoint, or serve TensorFold/Qwen3.8-27B-MLX-4bit")
         from .weights import load
         from tensorfold.cuda.capacity import admit, config, gather_ints, total_bytes
         from tensorfold.cuda.geometry import (draft_geometry, gdn_geometry, live_kv, prompt_row_bytes, prompt_rows,

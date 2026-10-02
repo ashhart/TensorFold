@@ -12,8 +12,8 @@ Install the optional image dependencies (from a checkout, `python -m pip install
 
 ```bash
 python -m pip install 'tensorfold[vision] @ git+https://github.com/ashhart/TensorFold.git'
-tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --vision
-tensorfold serve Vontra/GLM-5.3-Flash-MLX-4bit-MTP --vision
+tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --vision
+tensorfold serve TensorFold/GLM-5.3-Flash-MLX-4bit-MTP --vision
 ```
 
 GLM-5.3-Flash image input is currently MLX-only. CUDA uses the same flag with `--backend cuda` for supported Qwen checkpoints; their vision tower must use floating-point weights.
@@ -69,7 +69,7 @@ Requests accept up to four JPEG, PNG or WebP images by default. `--vision-max-im
 image-count limit when serving with `--vision`, on both backends:
 
 ```bash
-tensorfold serve Vontra/GLM-5.3-Flash-MLX-4bit-MTP --vision --vision-max-images 8
+tensorfold serve TensorFold/GLM-5.3-Flash-MLX-4bit-MTP --vision --vision-max-images 8
 ```
 
 The count includes **all images in the submitted message history**, including images from earlier turns

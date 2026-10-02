@@ -6,8 +6,8 @@ The `qwen3_5` family combines Gated DeltaNet and full attention. The standard re
 4-bit/group-64 checkpoint; the quantization guide lists the other affine formats it reads.
 
 ```bash
-tensorfold pull Vontra/Qwen3.8-27B-MLX-4bit z-lab/Qwen3.8-27B-DFlash2
-tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --name bench
+tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit z-lab/Qwen3.8-27B-DFlash2
+tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --name bench
 ```
 
 DFlash2 is used automatically once pulled. On MLX, `--drafter none` disables that draft model;
@@ -33,7 +33,7 @@ reply. The plan comes from rendered tokens; a template without detected markers 
 The M5 lane kernels accept MLX affine 2-, 3-, 4-, 5-, 6- and 8-bit projections in groups of 64.
 They widen packed values for the tensor operations without changing those values. Mixed-width stacks
 keep separate calls where a fused projection needs one width. Examples include
-`Vontra/Qwen3.8-27B-oQ2` and `Vontra/Qwen3.8-27B-oQ4`.
+`TensorFold/Qwen3.8-27B-oQ2` and `TensorFold/Qwen3.8-27B-oQ4`.
 
 The packed row readers on Apple Silicon and the CUDA readers cover MLX affine 2/3/4/5/6/8-bit projections
 with groups of 32/64/128, including mixed layers. CUDA also reads [EXL3 packs](#exl3-checkpoints-experimental).
@@ -56,7 +56,7 @@ activations by default; what that costs against the FP8 prompt path (`--prefill-
 | --- | --- | --- | --- |
 | `nvidia/Qwen3.8-27B-NVFP4` | NVFP4 MLP and head, FP8 attention and DeltaNet | one | not measured yet |
 | `turboderp/Qwen3.8-27B-exl3` (3.00bpw) | EXL3 | one | unchanged: EXL3 prompts never took FP8 activations |
-| `Vontra/Qwen3.8-27B-MLX-4bit` | MLX affine 4-bit, groups of 64 | one or two | 0.73-0.82x from 2k to 128k |
+| `TensorFold/Qwen3.8-27B-MLX-4bit` | MLX affine 4-bit, groups of 64 | one or two | 0.73-0.82x from 2k to 128k |
 
 Mia-AiLab publishes EXL3 packs of the model (`Mia-AiLab/Qwen3.8-27B-EXL3`, `Mia-AiLab/Qwen3.8-27B-EXL3-2.0bpw`,
 `Mia-AiLab/Qwen3.8-27B-EXL3-3.5bpw`) and an EXL3 DFlash2 drafter (`Mia-AiLab/Qwen3.8-27B-DFlash2-EXL3-5.0bpw`); none
@@ -137,8 +137,8 @@ measured here.
 One or two ranks are supported. Pull the model and drafter on every rank, then start rank 1 before rank 0:
 
 ```bash
-tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --tp 2 --rank 1 --master 192.0.2.1
-tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --tp 2 --rank 0 --master 192.0.2.1 --name bench --host 0.0.0.0
+tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --tp 2 --rank 1 --master 192.0.2.1
+tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --tp 2 --rank 0 --master 192.0.2.1 --name bench --host 0.0.0.0
 ```
 
 The verify matmul fixes reduction order by weight shape. Tree attention reads only committed keys and the
@@ -149,7 +149,7 @@ rank order. Each rank count has its own serial reference. See the
 ### Concurrent requests
 
 ```bash
-tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --parallel 16 --context 8192 --name bench
+tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --parallel 16 --context 8192 --name bench
 ```
 
 `--parallel N` decodes up to N requests in shared rounds: each stream verifies its own DFlash2 tree in one
@@ -195,7 +195,7 @@ release; the issue's first comment has the archive of logs, request bodies and t
 | Machine | MacBook Pro Mac17,9, Apple M5 Pro, 20-core GPU, 64 GB, macOS 26.5.2 (25F84), on AC power |
 | Budget | 44.8 GiB: 70% of 64 GB, under the 55 GiB Metal working set (`iogpu.wired_limit_mb=56320`) |
 | Runtime | TensorFold 0.3.5.1 (`beddbb7`, from the tag), Python 3.12.13, mlx and mlx-metal 0.31.2, mlx-lm 0.31.3 |
-| Checkpoints | `Vontra/Qwen3.8-27B-MLX-4bit@70ae7fac`, `z-lab/Qwen3.8-27B-DFlash2@50307d4c`, `Vontra/Qwen3.8-27B-oQ2@8cf0a7da` |
+| Checkpoints | `TensorFold/Qwen3.8-27B-MLX-4bit@70ae7fac`, `z-lab/Qwen3.8-27B-DFlash2@50307d4c`, `TensorFold/Qwen3.8-27B-oQ2@8cf0a7da` |
 | Launch | `tensorfold serve <model> --name bench`, plus `--drafter none` or `--no-drafts` where named |
 | Peak memory | `ri_lifetime_max_phys_footprint` from `proc_pid_rusage` |
 

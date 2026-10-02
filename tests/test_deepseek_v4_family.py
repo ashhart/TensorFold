@@ -394,11 +394,11 @@ def test_the_published_dspark_head_is_the_default_drafter(tmp_path, monkeypatch,
     from tensorfold.families.deepseek_v4.runtime import drafter_config
 
     family = families.families()["deepseek_v4"]
-    assert family.package.DRAFTER == "Vontra/DeepSeek-V4-Flash-DSpark-MLX"
+    assert family.package.DRAFTER == "TensorFold/DeepSeek-V4-Flash-DSpark-MLX"
     snapshot = write_dspark(tmp_path / "snapshot")
     monkeypatch.setattr(hub, "cached", lambda repo, **kw: snapshot if repo == family.package.DRAFTER else None)
     assert cli._drafter(family, "auto") == str(snapshot)
     assert drafter_config(snapshot)["model_type"] == "deepseek_v4_dspark"
     monkeypatch.setattr(hub, "cached", lambda repo, **kw: None)
     assert cli._drafter(family, "auto") == ""
-    assert "tensorfold pull Vontra/DeepSeek-V4-Flash-DSpark-MLX" in capsys.readouterr().out
+    assert "tensorfold pull TensorFold/DeepSeek-V4-Flash-DSpark-MLX" in capsys.readouterr().out

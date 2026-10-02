@@ -20,10 +20,10 @@ from tensorfold.server.request_options import RequestOptions, thinking_fields
 from tensorfold.server.text import render_prompt_ids, template_late_system
 
 CHECKPOINTS = {                       # name: (environment variable, Hugging Face repo)
-    "qwen27": ("TENSORFOLD_MLX_MODEL", "Vontra/Qwen3.8-27B-MLX-4bit"),
-    "flashnext": ("TF_FLASHNEXT_MODEL", "Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP"),
-    "glm": ("TF_GLM5_MODEL", "Vontra/GLM-5.3-Flash-MLX-4bit-MTP"),
-    "nemotron": ("TF_NEMOTRON_MODEL", "Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit"),
+    "qwen27": ("TENSORFOLD_MLX_MODEL", "TensorFold/Qwen3.8-27B-MLX-4bit"),
+    "flashnext": ("TF_FLASHNEXT_MODEL", "TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP"),
+    "glm": ("TF_GLM5_MODEL", "TensorFold/GLM-5.3-Flash-MLX-4bit-MTP"),
+    "nemotron": ("TF_NEMOTRON_MODEL", "TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit"),
 }
 WEATHER = [{"type": "function", "function": {"name": "get_weather", "description": "Current weather",
                                              "parameters": {"type": "object", "required": ["city"],
