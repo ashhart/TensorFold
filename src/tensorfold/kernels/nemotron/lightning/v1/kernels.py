@@ -395,7 +395,7 @@ class FusedDecode:
                     d_skip, dt_bias,
                     self.limits, heads=self.heads, head_dim=self.head_dim, groups=self.groups,
                     state_dim=self.state_dim, slots=slots)
-                y = group_norm(y, mixer.norm.weight, self.eps, mixer.norm.group_size)
+                y = self._group_norm(y, mixer)
                 h, normed, xs = self._add_norm(h, mixer.out_proj(y), nxt, xs)
                 for c, at, n in zip(layer_caches, offsets, lengths):
                     self._hold(c, conv_rows, ssm_rows, at + n - 1)
@@ -460,6 +460,30 @@ class FusedDecode:
             return (*add_norm(h, delta, weight, self.eps), xs)
         return add_norm(h, delta, weight, self.eps, group_sums=True)
 
+    fused_launches = True            # lane GPUs: group norm and the shared expert also write the next input sums
+
+    def _group_norm(self, y: mx.array, mixer: Any) -> mx.array:
+        """The Mamba gate's group norm; on lane GPUs it also writes out_proj's input sums (one launch, not two)."""
+
+        if not (self.lane_xs and self.fused_launches):
+            return group_norm(y, mixer.norm.weight, self.eps, mixer.norm.group_size)
+        from tensorfold.kernels.nemotron.lightning.v1 import lane_fused
+
+        y, ys = lane_fused.group_norm_sums(y, mixer.norm.weight, self.eps, mixer.norm.group_size)
+        return self._use_sums(y, ys)
+
+    def _shared(self, mlp: Any, x: mx.array, xs: Any) -> mx.array:
+        """The shared expert; on lane GPUs its up projection applies relu2 and writes the down projection's input sums."""
+
+        if not (self.lane_xs and self.fused_launches and xs is not None and xs.ndim == 2):
+            return mlp(x)
+        from tensorfold.kernels.nemotron.lightning.v1 import lane_fused
+
+        if not lane_fused.takes_relu2(mlp.up_proj):
+            return mlp(x)
+        act, sums = lane_fused.up_relu2(x, xs, mlp.up_proj)
+        return mlp.down_proj(self._use_sums(act, sums))
+
     def _use_sums(self, x: mx.array, xs: mx.array) -> mx.array:
         """Hand ``x`` and its group sums to the next lane matmul when ``xs`` is not ``_no_xs``, with compiled blocks deciding per trace."""
 
@@ -498,7 +522,7 @@ class FusedDecode:
                                                 dt_bias, self.limits, heads=self.heads, head_dim=self.head_dim,
                                                 groups=self.groups, state_dim=self.state_dim,
                                                 store=sparse_store(int(x.shape[0])))
-            y = group_norm(y, mixer.norm.weight, self.eps, mixer.norm.group_size)
+            y = self._group_norm(y, mixer)
             hn, xn, xsn = self._add_norm(h, mixer.out_proj(y), nxt, xs)
             return hn, xn, xsn, conv_rows, ssm_rows, proj
 
@@ -508,7 +532,7 @@ class FusedDecode:
         mixer = self.layers[index].mixer
 
         def block(x: mx.array, xs: mx.array, h: mx.array) -> tuple[mx.array, mx.array, mx.array]:
-            routed, weights, shared = self._moe(index, mixer, self._use_sums(x, xs))
+            routed, weights, shared = self._moe(index, mixer, self._use_sums(x, xs), xs)
             if not self.lane_xs:
                 return (*add_norm_moe(h, routed, weights, shared, nxt, self.eps), xs)
             return add_norm_moe(h, routed, weights, shared, nxt, self.eps, group_sums=True)
@@ -583,7 +607,7 @@ class FusedDecode:
             return lane_sdpa(q, keys, values, scale)
         return mx.fast.scaled_dot_product_attention(q, keys, values, scale=scale, mask="causal" if rows > 1 else None)
 
-    def _moe(self, index: int, mixer: Any, x: mx.array) -> tuple[mx.array, mx.array, mx.array]:
+    def _moe(self, index: int, mixer: Any, x: mx.array, xs: Any = None) -> tuple[mx.array, mx.array, mx.array]:
         # The router and expert kernels preserve each row's bits; MLX bf16 matmul changes summation order with row count.
         logits = router_logits(x, mixer.gate.weight)
         rows, experts_count = int(logits.shape[0]), int(logits.shape[1])
@@ -594,4 +618,4 @@ class FusedDecode:
             experts, weights, tables = row_kernels.route_group(logits, self.gate_bias[index], self.top_k, self.scaling)
         else:
             experts, weights = route(logits, self.gate_bias[index], self.top_k, self.scaling)
-        return row_kernels.experts(mixer.switch_mlp, x, experts, tables=tables), weights, mixer.shared_experts(x)
+        return row_kernels.experts(mixer.switch_mlp, x, experts, tables=tables), weights, self._shared(mixer.shared_experts, x, xs)
