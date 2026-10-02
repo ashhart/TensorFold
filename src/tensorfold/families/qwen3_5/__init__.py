@@ -315,7 +315,7 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
               "checkpoint and prompts about half as fast (docs/recipes/qwen3.8-27b.md#exl3-checkpoints-experimental)", flush=True)
     if has_head(Path(model_dir)):          # a decision model answers from one prefill and never decodes a reply
         drafter, no_drafts = "", True
-    elif quant_method(read_config(Path(model_dir))) is None:
+    elif (Path(model_dir) / "config.json").exists() and quant_method(read_config(Path(model_dir))) is None:
         raise ValueError(f"{TITLE}'s CUDA engine serves unquantized weights only for a decision model with a joint "
                          f"schema head (Cloudflare/clef); for chat, serve one of {', '.join(MODELS)}")
     if not drafter and not no_drafts:
