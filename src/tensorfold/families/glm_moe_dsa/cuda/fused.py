@@ -24,6 +24,7 @@ import triton.language as tl
 from tensorfold.cuda.exl3 import experts as x3experts
 from tensorfold.cuda.exl3 import prefill as x3prefill
 from tensorfold.families.glm5_next.cuda import glue, latent
+from tensorfold.families.glm_moe_dsa.cuda import topk
 
 from ..config import Config
 from .weights import Layer, MtpHead
@@ -38,6 +39,7 @@ PROMPT_ROWS = int(os.environ.get("TF_GLM53_PROMPT_ROWS", "4096"))   # prompt chu
 PREFILL_REDUCE = os.environ.get("TF_GLM53_PREFILL_REDUCE", "ring")   # ring | rs (exact reduce-scatter)
 PROMPT_OVERLAP = os.environ.get("TF_GLM53_PROMPT_OVERLAP", "1") != "0"   # two micro-batches, comm under compute
 SEL_ROWS = 128           # indexer top-k in blocks of rows (bounded score buffer at long contexts)
+RADIX = os.environ.get("TF_GLM53_RADIX", "1") == "1"   # indexer top-k: one radix-select kernel (same picks as torch.topk + sort)
 RB = 16                  # rows a program in the absorb / expand kernels (wide windows)
 
 # MTP inputs (alignment A/B), "<hidden>/<chain>": the target hidden it reads (raw last-layer rows or final-normed)
@@ -337,7 +339,8 @@ def _iq_rope(Q, INV, POS, NH: tl.constexpr, D: tl.constexpr, RD: tl.constexpr):
 
 @triton.jit
 def _index_scores(Q, W, IC, POS, OUT, T, R0, NH: tl.constexpr, D: tl.constexpr, BTT: tl.constexpr,
-                  WSCALE: tl.constexpr, QSCALE: tl.constexpr, DCP: tl.constexpr = 1, RANK: tl.constexpr = 0):
+                  WSCALE: tl.constexpr, QSCALE: tl.constexpr, DCP: tl.constexpr = 1, RANK: tl.constexpr = 0,
+                  PACK: tl.constexpr = True):
     """Program (row, key block): score[t] = sum_h w[h] relu(q[h] . k[t] QSCALE) for keys t <= POS + r, packed with
     the key into one int64 that orders by score, then lower position first (so top-k is tie-free); later keys -> min."""
     r = tl.program_id(0)                     # row r of this block: window row R0 + r
@@ -356,11 +359,14 @@ def _index_scores(Q, W, IC, POS, OUT, T, R0, NH: tl.constexpr, D: tl.constexpr, 
         w = tl.load(W + r * NH + hh) * WSCALE
         sc = tl.sum(w[:, None] * s, axis=0)
         bits = sc.to(tl.int32, bitcast=True)
-        key = tl.where(bits >= 0, bits, bits ^ 0x7FFFFFFF).to(tl.int64)             # monotone int of the fp32
-        packed = (key << 32) | lo
-        packed = tl.where(ok, packed, -9223372036854775807)
+        key = tl.where(bits >= 0, bits, bits ^ 0x7FFFFFFF)                           # monotone int of the fp32
+        if PACK:
+            packed = (key.to(tl.int64) << 32) | lo
+            packed = tl.where(ok, packed, -9223372036854775807)
+        else:                       # PACK=False: the score's unsigned-order word only (int32 storage), later keys 0
+            packed = tl.where(ok, key ^ -2147483648, 0)
     else:
-        packed = tl.full((BTT,), -9223372036854775807, tl.int64)
+        packed = tl.full((BTT,), -9223372036854775807 if PACK else 0, tl.int64 if PACK else tl.int32)
     tl.store(OUT + r * T + t, packed, mask=t < T)
 
 
@@ -643,21 +649,27 @@ def select(w: Weights, b: Buffers, icache: torch.Tensor, pos: torch.Tensor, R: i
     Tl = -(-T // dcp)
     for r0 in range(0, R, SEL_ROWS):
         n = min(SEL_ROWS, R - r0)
-        sc = b.sc[:n * Tl].view(n, Tl)
+        radix = RADIX and (dcp > 1 or Tl >= K)
+        # radix, one rank: 4-byte order words (ties to the lower position in the select itself), else packed keys
+        sc = b.sc.view(torch.int32)[:n * Tl].view(n, Tl) if radix and dcp == 1 else b.sc[:n * Tl].view(n, Tl)
         _index_scores[(n, triton.cdiv(Tl, BT))](b.iq[r0:], b.iw[r0:], icache, pos, sc, Tl, R0=r0, NH=nh, D=D,
                                                 BTT=BT, WSCALE=nh ** -0.5, QSCALE=D ** -0.5, DCP=dcp, RANK=rank,
-                                                num_warps=4)
+                                                PACK=not (radix and dcp == 1), num_warps=4)
         if dcp == 1:
+            if radix:
+                topk.top_columns(sc, K, b.tok[r0:r0 + n])
+                continue
             top = torch.topk(sc, K, dim=-1, sorted=False).values
             keys = (0x7FFFFFFF - (top & 0xFFFFFFFF)).to(torch.int32)
             b.tok[r0:r0 + n].copy_(torch.sort(keys, dim=-1).values)
             continue
         kk = min(K, Tl)
         mine = torch.full((n, K), -9223372036854775807, dtype=torch.int64, device=sc.device)
-        mine[:, :kk] = torch.topk(sc, kk, dim=-1, sorted=False).values
+        mine[:, :kk] = topk.top_keys(sc, kk) if RADIX else torch.topk(sc, kk, dim=-1, sorted=False).values
         allc = b.cand[:dcp * n * K].view(dcp, n, K)
         dcp_gather(w, mine, allc, n <= FAST_ROWS)
-        top = torch.topk(allc.permute(1, 0, 2).reshape(n, dcp * K), K, dim=-1, sorted=False).values
+        cand = allc.permute(1, 0, 2).reshape(n, dcp * K)
+        top = topk.top_keys(cand, K) if RADIX else torch.topk(cand, K, dim=-1, sorted=False).values
         gpos = 0x7FFFFFFF - (top & 0xFFFFFFFF)                                  # global positions, int64
         own = (gpos % dcp) == rank
         key = torch.where(own, gpos // dcp, torch.full_like(gpos, 1 << 40))
