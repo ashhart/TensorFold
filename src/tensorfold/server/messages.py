@@ -84,7 +84,11 @@ def normalize_messages(messages: list[dict[str, Any]], *, late_system: str = "sy
 
 
 def _normalize_tool_call_arguments(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Copy assistant argument strings into mappings for templates, preserving caller messages."""
+    """Copy tool arguments into mappings for templates, preserving caller messages.
+
+    Failed calls can be replayed with their tool errors. Keep invalid arguments under
+    ``_invalid_arguments`` for rendering instead of letting a template's ``items`` crash.
+    """
 
     if not messages:
         return messages
@@ -100,14 +104,17 @@ def _normalize_tool_call_arguments(messages: list[dict[str, Any]]) -> list[dict[
         for call in calls:
             fn = call.get("function") if isinstance(call, dict) else None
             args = fn.get("arguments") if isinstance(fn, dict) else None
-            if isinstance(args, str):
-                try:
-                    parsed = json.loads(args)
-                except (ValueError, TypeError):
-                    parsed = None
-                if isinstance(parsed, dict):
-                    call = {**call, "function": {**fn, "arguments": parsed}}
-                    touched = True
+            if isinstance(fn, dict) and "arguments" in fn and not isinstance(args, dict):
+                parsed = args
+                if isinstance(args, str):
+                    try:
+                        parsed = json.loads(args)
+                    except (ValueError, TypeError):
+                        parsed = None
+                if not isinstance(parsed, dict):
+                    parsed = {"_invalid_arguments": args}
+                call = {**call, "function": {**fn, "arguments": parsed}}
+                touched = True
             new_calls.append(call)
         if touched:
             out.append({**message, "tool_calls": new_calls})
