@@ -188,6 +188,13 @@ class App:
         turns = self._turns()
         turns.take(False)
         try:
+            many = getattr(self.engine, "score_labels_many", None)
+            if many is not None and len(prepared) > 1:   # the questions' prompts fill together
+                try:
+                    scored = many([(item.prompt_ids, item.label_ids) for item in prepared])
+                except ValueError as exc:
+                    raise RequestError(f"questions: {exc}") from exc
+                return build_response(body, prepared, scored)
             scored = []
             for item in prepared:
                 try:

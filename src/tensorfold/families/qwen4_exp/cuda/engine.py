@@ -419,6 +419,57 @@ class FlashNextEngine:
         return self._decode(prompt, max_tokens, sampling, on_tokens, hit, constraint, stop_eos,
                             probabilities=probabilities, points=points)
 
+    def score_labels(self, prompt_ids, label_ids) -> tuple[list[float], float]:
+        """Score the prompt's final row in a fresh state without adding a kept decision prefix."""
+
+        return self.score_labels_many([(prompt_ids, label_ids)])[0]
+
+    def score_labels_many(self, items) -> list[tuple[list[float], float]]:
+        """``score_labels`` for several prompts at once: under ``--parallel`` they fill together."""
+
+        import math
+
+        from tensorfold.engine.exact_sampling import Sampling
+        from tensorfold.engine.probabilities import LabelProbabilities
+
+        if not self.supports_logprobs:
+            raise ValueError("decision labels are scored on one GPU only")
+        work = []
+        for prompt_ids, label_ids in items:
+            prompt, labels = [int(t) for t in prompt_ids], [int(t) for t in label_ids]
+            if not prompt:
+                raise ValueError("empty prompt")
+            if not labels:
+                raise ValueError("empty labels")
+            if any(token < 0 or token >= self.w.cfg.vocab for token in labels):
+                raise ValueError("decision label is outside the vocabulary")
+            self._limit(prompt, 1)
+            work.append((prompt, LabelProbabilities(labels, start=len(prompt))))
+
+        def one(job):
+            prompt, probe = job
+            self.generate(prompt, 1, Sampling(seed=0, temperature=0.0), lambda new: None, draft=False,
+                          probabilities=probe)
+            if probe.label_logits is None or probe.logsumexp is None:
+                raise ValueError("the prompt's last position was not scored")
+            if not math.isfinite(probe.logsumexp) or not all(math.isfinite(v) for v in probe.label_logits):
+                raise ValueError("label scoring produced a non-finite logit")
+            return probe.label_logits, probe.logsumexp
+
+        if self.scheduler is None or len(work) == 1:
+            return [one(job) for job in work]
+        greedy = Sampling(seed=0, temperature=0.0)
+        self.scheduler.submit_many([{"prompt": prompt, "count": 1, "sampling": greedy, "draft": False,
+                                     "probabilities": probe} for prompt, probe in work])
+        out = []
+        for _, probe in work:
+            if probe.label_logits is None or probe.logsumexp is None:
+                raise ValueError("the prompt's last position was not scored")
+            if not math.isfinite(probe.logsumexp) or not all(math.isfinite(v) for v in probe.label_logits):
+                raise ValueError("label scoring produced a non-finite logit")
+            out.append((probe.label_logits, probe.logsumexp))
+        return out
+
     def follow(self) -> None:
         """Rank 1: decode every request rank 0 serves, until rank 0 stops."""
 
