@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from tensorfold.engine import grammar
-from tensorfold.server import responses
+from tensorfold.server import live, responses
 from tensorfold.server.tools import (active_tool_specs, parse_tool_calls_from_content, stream_tool_call_deltas,
                                      tool_choice_requires_call)
 from tensorfold.server.decisions import DecisionError
@@ -136,6 +136,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                         "max_batch_size": app.max_batch_size,
                         "warming": bool(getattr(app, "warming", False)),
                         "memory": _memory("reset_peak=1" in self.path, admission=getattr(app, "prompt_memory", None)),
+                        **({"live": live.snapshot(app.scheduler)} if getattr(app, "scheduler", None) is not None else {}),
                     }
                 )
                 return

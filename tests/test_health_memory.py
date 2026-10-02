@@ -33,10 +33,12 @@ def measured_runtime(monkeypatch):
 
 
 @contextmanager
-def serving(guard=None):
+def serving(guard=None, scheduler=None):
     app = SimpleNamespace(served_name="test", model_ids=["test"], max_batch_size=1)
     if guard is not None:
         app.prompt_memory = guard
+    if scheduler is not None:
+        app.scheduler = scheduler
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(app))
     worker = threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     worker.start()
@@ -129,3 +131,26 @@ def test_health_reports_the_budget_and_the_process_footprint(measured_runtime):
         metrics = health(port, reset=False)
     assert metrics["budget"] == 5300 and metrics["mlx_budget"] == 5300
     assert metrics["footprint"] > 1024**2            # this test process, Metal buffers included
+
+
+def test_health_carries_the_live_lines_numbers_when_a_scheduler_serves(measured_runtime):
+    from tensorfold.server.live import ChunkRate, Meter
+
+    decoded, prefilled = Meter(), ChunkRate()
+    prefilled.add(2048, 0.5)
+    scheduler = SimpleNamespace(active=1, filling=[object()], waiting=2, decoded=decoded, prefilled=prefilled)
+
+    def body(port):
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        try:
+            connection.request("GET", "/health")
+            return json.loads(connection.getresponse().read())
+        finally:
+            connection.close()
+
+    with serving(scheduler=scheduler) as port:
+        live = body(port)["live"]
+    assert live == {"connections": 4, "waiting": 2, "decode_tokens_per_second": 0.0, "prefill_tokens_per_second": 4096.0}
+    with serving() as port:
+        assert "live" not in body(port)
+

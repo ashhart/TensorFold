@@ -52,15 +52,25 @@ class ChunkRate:
         return last[1] if last is not None and self.clock() - last[0] <= self.window else 0.0
 
 
+def snapshot(scheduler: Any) -> dict[str, float]:
+    """The live line's numbers, for /health: open connections, how many wait, decode and prefill tokens a second."""
+
+    waiting = scheduler.waiting
+    return {"connections": scheduler.active + len(scheduler.filling) + waiting, "waiting": waiting,
+            "decode_tokens_per_second": round(scheduler.decoded.rate(), 1),
+            "prefill_tokens_per_second": round(scheduler.prefilled.rate(), 1)}
+
+
 def status(scheduler: Any) -> str:
     """``[tensorfold] 3 connections (1 waiting) · decode 142 tok/s · prefill 1,210 tok/s``."""
 
-    waiting = scheduler.waiting
-    open_ = scheduler.active + len(scheduler.filling) + waiting
+    now = snapshot(scheduler)
+    open_, waiting = now["connections"], now["waiting"]
     line = f"[tensorfold] {open_} connection{'' if open_ == 1 else 's'}"
     if waiting:
         line += f" ({waiting} waiting)"
-    return line + f" · decode {scheduler.decoded.rate():,.0f} tok/s · prefill {scheduler.prefilled.rate():,.0f} tok/s"
+    return line + (f" · decode {now['decode_tokens_per_second']:,.0f} tok/s"
+                   f" · prefill {now['prefill_tokens_per_second']:,.0f} tok/s")
 
 
 class LiveLine:
