@@ -15,7 +15,7 @@ from tensorfold.vision.qwen_cuda import (EncodedVision, broadcast_encoded, capac
 
 
 def _checkpoint(path):
-    vision = {"model_type": "qwen3_5", "hidden_size": 8, "out_hidden_size": 8, "depth": 1,
+    vision = {"model_type": "qwen3_5_vision", "hidden_size": 8, "out_hidden_size": 8, "depth": 1,
               "patch_size": 2, "temporal_patch_size": 2, "spatial_merge_size": 2, "in_channels": 3,
               "intermediate_size": 12, "num_heads": 2, "num_position_embeddings": 4}
     config = {"model_type": "qwen3_5", "vision_config": vision, "text_config": {
@@ -42,6 +42,58 @@ def _checkpoint(path):
 def _write_tensors(path, entries, size):
     raw = json.dumps(entries).encode()
     (path / "model.safetensors").write_bytes(struct.pack("<Q", len(raw)) + raw + bytes(size))
+
+
+def _quantized_checkpoint(path):
+    vision = {"model_type": "qwen3_5_vision", "hidden_size": 32, "out_hidden_size": 32, "depth": 1,
+              "patch_size": 2, "temporal_patch_size": 2, "spatial_merge_size": 2, "in_channels": 3,
+              "intermediate_size": 64, "num_heads": 4, "num_position_embeddings": 4}
+    mxfp8 = {"blocks.0.attn.qkv", "blocks.0.attn.proj", "blocks.0.mlp.linear_fc1",
+             "merger.linear_fc1", "merger.linear_fc2"}
+    nvfp4 = {"blocks.0.mlp.linear_fc2"}
+    qconfig = {"quant_method": "modelopt", "quant_algo": "MIXED_PRECISION", "config_groups": {
+        "group_mxfp8_vision": {"weights": {"num_bits": 8, "type": "float", "group_size": 32},
+                               "targets": ["model.visual." + name for name in sorted(mxfp8)]},
+        "group_w4a16_nvfp4_vision_fc2": {"weights": {"num_bits": 4, "type": "float", "group_size": 16},
+                                         "targets": ["model.visual." + name for name in sorted(nvfp4)]}}}
+    config = {"model_type": "qwen3_8_flash_next", "vision_config": vision,
+              "quantization_config": qconfig, "text_config": {"hidden_size": 32, "head_dim": 8,
+              "rope_parameters": {"mrope_interleaved": True, "mrope_section": [2, 1, 1],
+                                  "partial_rotary_factor": 1.0}}}
+    (path / "config.json").write_text(json.dumps(config))
+    h, mid, merged, out = 32, 64, 128, 32
+    shapes = {"patch_embed.proj.weight": [h, 2, 2, 2, 3], "patch_embed.proj.bias": [h],
+              "pos_embed.weight": [4, h], "merger.norm.weight": [h], "merger.norm.bias": [h],
+              "merger.linear_fc1.weight": [merged, merged], "merger.linear_fc1.bias": [merged],
+              "merger.linear_fc2.weight": [out, merged], "merger.linear_fc2.bias": [out]}
+    for part, shape in {"norm1": [h], "norm2": [h], "attn.qkv": [3 * h, h], "attn.proj": [h, h],
+                        "mlp.linear_fc1": [mid, h], "mlp.linear_fc2": [h, mid]}.items():
+        shapes[f"blocks.0.{part}.weight"] = shape
+        shapes[f"blocks.0.{part}.bias"] = [shape[0]]
+    entries, size = {}, 0
+    type_size = {"BF16": 2, "F32": 4, "F8_E4M3": 1, "U8": 1}
+
+    def add(name, dtype, shape):
+        nonlocal size
+        count = int(np.prod(shape)) if shape else 1
+        entries[name] = {"dtype": dtype, "shape": shape, "data_offsets": [size, size + count * type_size[dtype]]}
+        size += count * type_size[dtype]
+
+    for name, shape in shapes.items():
+        prefix, part = name.rsplit(".", 1)
+        if part == "weight" and prefix in mxfp8:
+            rows, columns = shape
+            add("model.visual." + name, "F8_E4M3", shape)
+            add("model.visual." + prefix + ".weight_scale", "U8", [rows, columns // 32])
+        elif part == "weight" and prefix in nvfp4:
+            rows, columns = shape
+            add("model.visual." + name, "U8", [rows, columns // 2])
+            add("model.visual." + prefix + ".weight_scale", "F8_E4M3", [rows, columns // 16])
+            add("model.visual." + prefix + ".weight_scale_2", "F32", [])
+        else:
+            add("model.visual." + name, "BF16", shape)
+    _write_tensors(path, entries, size)
+    return sum(int(np.prod(shape)) * 2 for shape in shapes.values())
 
 
 def test_vision_headers_do_not_load_tensor_payloads(tmp_path):
@@ -93,6 +145,35 @@ def test_vision_memory_is_reserved_only_on_the_tower_rank(tmp_path):
     info = {"shape": [8, 8], "dtype": "BF16"}
     assert weight_transform(original, True, 0)("vision_tower.x", info) == (128, 0)
     assert weight_transform(original, True, 1)("vision_tower.x", info) == (0, 0)
+
+
+def test_mixed_modelopt_vision_checkpoint_is_validated_and_sized_as_bf16(tmp_path):
+    dense_size = _quantized_checkpoint(tmp_path)
+
+    _, resident = checkpoint_vision(tmp_path)
+
+    assert resident == dense_size
+
+
+def test_mixed_modelopt_vision_checkpoint_refuses_unexpected_quantization_targets(tmp_path):
+    _quantized_checkpoint(tmp_path)
+    config_path = tmp_path / "config.json"
+    config = json.loads(config_path.read_text())
+    config["quantization_config"]["config_groups"]["group_mxfp8_vision"]["targets"].pop()
+    config_path.write_text(json.dumps(config))
+
+    with pytest.raises(ValueError, match="targets or parameters"):
+        checkpoint_vision(tmp_path)
+
+
+def test_mixed_modelopt_vision_weights_count_expanded_bytes_not_sidecars():
+    transform = weight_transform(lambda *args: (0, 0), True, 0)
+    assert transform("model.visual.blocks.0.mlp.linear_fc2.weight", {"shape": [32, 32], "dtype": "U8"}) == (4096, 0)
+    assert transform("model.visual.blocks.0.attn.qkv.weight", {"shape": [96, 32], "dtype": "F8_E4M3"}) == (6144, 0)
+    assert transform("model.visual.blocks.0.mlp.linear_fc2.weight_scale",
+                     {"shape": [32, 4], "dtype": "F8_E4M3"}) == (0, 0)
+    assert transform("model.visual.blocks.0.mlp.linear_fc2.weight_scale_2",
+                     {"shape": [], "dtype": "F32"}) == (0, 0)
 
 
 def test_tp_transports_features_and_negative_offset_bit_for_bit(monkeypatch):
