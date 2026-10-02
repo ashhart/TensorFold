@@ -114,6 +114,10 @@ class Glm53Engine:
                 changed = {k: v for k, v in fw.tuned.items() if v[0] != v[1]}
                 print(f"[tensorfold] rank {rank}: tuned {len(fw.tuned)} linear shapes, {len(changed)} retiled: "
                       + ", ".join(f"{k[0]}x{k[1]} {v[0]}->{v[1]}" for k, v in changed.items()), flush=True)
+                grouped = {k: v[1] for k, v in getattr(fw, "tuned_groups", {}).items() if v[1] is not None}
+                print(f"[tensorfold] rank {rank}: one launch for {len(grouped)} linear groups: "
+                      + ", ".join(" + ".join(f"{a}x{b}" for a, b in k) + f" {v}" for k, v in grouped.items()),
+                      flush=True)
             sl = None                                    # the checkpoint reader's handles and heap: gone before
             r._open.clear()                              # the caches and buffers allocate (GB10 unified memory:
             del r                                        # host memory is device memory; a 1M cache needs it all)

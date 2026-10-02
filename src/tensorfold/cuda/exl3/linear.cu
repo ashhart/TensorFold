@@ -112,12 +112,23 @@ __device__ __forceinline__ void step_lane_words(const uint32_t (&raw)[step_regs<
 __device__ __forceinline__ void griddep_wait() { asm volatile("griddepcontrol.wait;" ::: "memory"); }
 __device__ __forceinline__ void griddep_launch() { asm volatile("griddepcontrol.launch_dependents;" ::: "memory"); }
 
-__global__ void __launch_bounds__(128) rot_in_kernel(const void* __restrict__ x, int x_dtype,
-                                                     const half* __restrict__ suh, half* __restrict__ xh, int K) {
+constexpr int MAX_JOBS = 3;    // layers of one input in one launch (rot_in_group / linear_group)
+
+struct RotJobs {
+    const half* suh[MAX_JOBS];
+    half* xh[MAX_JOBS];
+};
+
+// xh_j = fp16(((x * suh_j) @ H) / sqrt(128)) for job j = blockIdx.z (the layers of one input share x).
+__global__ void __launch_bounds__(128) rot_in_kernel(const void* __restrict__ x, int x_dtype, RotJobs jobs, int K) {
     griddep_wait();                                  // x is the previous kernel's, and xh may be read by one still
     griddep_launch();
     const int blk = blockIdx.x * 4 + (threadIdx.x >> 5), row = blockIdx.y, lane = threadIdx.x & 31;
     if (blk * 128 >= K) return;
+    const half* suh = jobs.suh[0];
+    half* xh = jobs.xh[0];
+    if (blockIdx.z == 1) suh = jobs.suh[1], xh = jobs.xh[1];
+    if (blockIdx.z == 2) suh = jobs.suh[2], xh = jobs.xh[2];
     const int k = blk * 128 + 4 * lane;
     float v[4], s[4];
     load4(x, x_dtype, (size_t)row * K + k, v);
@@ -129,6 +140,25 @@ __global__ void __launch_bounds__(128) rot_in_kernel(const void* __restrict__ x,
     for (int j = 0; j < 4; ++j) v[j] *= HAD_SCALE;
     store4(xh, F16, (size_t)row * K + k, v);
 }
+
+// One layer of a launch: its blocks are [start, start + (N / 128) * SK) of the grid, split-major like a (N / 128, SK)
+// grid. All layers of a launch share M, K, the width, codebook and warps a block; each keeps its own K splits.
+struct Job {
+    const half* xh;
+    const uint32_t* T;
+    long long stride_k, stride_nb;
+    const half* svh;
+    const half* bias;
+    void* y;
+    float* Z;
+    int* counters;
+    int y_dtype, N, SK, start;
+};
+
+struct Jobs {
+    Job j[MAX_JOBS];
+    int n;
+};
 
 // G = 0: the original walk, the window's rows as the mma's A (m16: rows g and g + 8 of 16, so 2 mma a tile and 64
 // accumulators whatever the rows) and the decoded tile as B. G = 1, 2 ("transposed"): the decoded tile as A (its 16
@@ -159,9 +189,7 @@ __device__ __forceinline__ uint4 ldg_nc_v4(const uint32_t* p) {
 
 template <int K2, int CB, int WK, int G, int V>
 __global__ void __launch_bounds__(WK * 32) linear_kernel(
-    const half* __restrict__ xh, const uint32_t* __restrict__ T, long long stride_k, long long stride_nb,
-    const half* __restrict__ svh, const half* __restrict__ bias, void* __restrict__ y, int y_dtype,
-    float* __restrict__ Z, int* __restrict__ counters, int M, int K, int N, int SK) {
+    const __grid_constant__ Jobs jobs, int M, int K) {
     constexpr int TW = tile_words<K2>();
     constexpr int LW = lane_words<K2>();
     constexpr int NH = G == 0 ? 2 : G;                        // mma a tile
@@ -170,7 +198,21 @@ __global__ void __launch_bounds__(WK * 32) linear_kernel(
     const int RH = min(M, 8);                                 // rows of red a warp
     griddep_launch();                                         // a PDL successor may launch (it waits for all of this)
 
-    const int nb = blockIdx.x, split = blockIdx.y, NB = gridDim.x;
+    int ji = 0;
+#pragma unroll
+    for (int q = 1; q < MAX_JOBS; ++q)
+        if (q < jobs.n && (int)blockIdx.x >= jobs.j[q].start) ji = q;
+    const Job& J = jobs.j[ji];
+    const half* __restrict__ xh = J.xh;
+    const uint32_t* __restrict__ T = J.T;
+    const long long stride_k = J.stride_k, stride_nb = J.stride_nb;
+    const half* __restrict__ svh = J.svh;
+    const half* __restrict__ bias = J.bias;
+    void* __restrict__ y = J.y;
+    float* __restrict__ Z = J.Z;
+    int* __restrict__ counters = J.counters;
+    const int y_dtype = J.y_dtype, N = J.N, SK = J.SK, NB = N >> 7;
+    const int local = (int)blockIdx.x - J.start, nb = local % NB, split = local / NB;
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int g = lane >> 2, t = lane & 3;
     const int per_warp = (K >> 4) / SK / WK;
@@ -401,101 +443,112 @@ int dtype_of(const at::Tensor& t) {
 #define TF_EXL3_WIDTHS(X, CB) X(2, CB) X(4, CB) X(6, CB) X(8, CB) X(10, CB) X(12, CB) X(14, CB) X(16, CB)
 #define TF_EXL3_ALL(X) TF_EXL3_WIDTHS(X, 0) TF_EXL3_WIDTHS(X, 1) TF_EXL3_WIDTHS(X, 2) X(3, 2) X(5, 2) X(7, 2)
 
-void exl3_rot_in_cuda(const at::Tensor& x, const at::Tensor& suh, at::Tensor& xh, int64_t pdl) {
-    const int M = (int)x.size(0), K = (int)x.size(1);
-    cudaLaunchConfig_t config = {};
-    config.gridDim = dim3((unsigned)((K / 128 + 3) / 4), (unsigned)M);
-    config.blockDim = dim3(128);
-    config.stream = at::cuda::getCurrentCUDAStream();
-    cudaLaunchAttribute attr[1];
+static void launch_pdl(cudaLaunchConfig_t& config, bool pdl, cudaLaunchAttribute (&attr)[1]) {
     attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
     attr[0].val.programmaticStreamSerializationAllowed = pdl ? 1 : 0;
     config.attrs = attr;
     config.numAttrs = 1;
-    C10_CUDA_CHECK(cudaLaunchKernelEx(&config, rot_in_kernel, x.data_ptr(), (int)dtype_of(x),
-                                      reinterpret_cast<const half*>(suh.data_ptr()),
-                                      reinterpret_cast<half*>(xh.data_ptr()), K));
+}
+
+void exl3_rot_in_cuda(const at::Tensor& x, const std::vector<at::Tensor>& suh, std::vector<at::Tensor>& xh,
+                      int64_t pdl) {
+    const int M = (int)x.size(0), K = (int)x.size(1), n = (int)suh.size();
+    TORCH_CHECK(n >= 1 && n <= MAX_JOBS && (int)xh.size() == n, "rot_in: 1 to 3 (suh, xh) pairs");
+    RotJobs jobs = {};
+    for (int i = 0; i < n; ++i) {
+        jobs.suh[i] = reinterpret_cast<const half*>(suh[i].data_ptr());
+        jobs.xh[i] = reinterpret_cast<half*>(xh[i].data_ptr());
+    }
+    cudaLaunchConfig_t config = {};
+    config.gridDim = dim3((unsigned)((K / 128 + 3) / 4), (unsigned)M, (unsigned)n);
+    config.blockDim = dim3(128);
+    config.stream = at::cuda::getCurrentCUDAStream();
+    cudaLaunchAttribute attr[1];
+    launch_pdl(config, pdl, attr);
+    C10_CUDA_CHECK(cudaLaunchKernelEx(&config, rot_in_kernel, x.data_ptr(), (int)dtype_of(x), jobs, K));
 }
 
 namespace {
 
 template <int K2, int CB, int WK, int G, int V>
-void launch_wk(dim3 grid, cudaStream_t stream, bool pdl, const at::Tensor& xh, const at::Tensor& T, int64_t stride_k,
-               int64_t stride_nb, const at::Tensor& svh, const half* bptr, at::Tensor& y, float* zptr,
-               at::Tensor& counters, int M, int K, int N, int SK) {
+void launch_wk(const Jobs& jobs, int blocks, cudaStream_t stream, bool pdl, int M, int K) {
     auto kernel = linear_kernel<K2, CB, WK, G, V>;
     const int smem = (int)std::max(WK * std::min(M, 8) * 128 * sizeof(float),
                                    V > 0 ? WK * step_words<K2>() * sizeof(uint32_t) : (size_t)0);
     if (smem > 48 * 1024) cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
     cudaLaunchConfig_t config = {};
-    config.gridDim = grid;
+    config.gridDim = dim3((unsigned)blocks);
     config.blockDim = dim3((unsigned)(WK * 32));
     config.dynamicSmemBytes = smem;
     config.stream = stream;
     cudaLaunchAttribute attr[1];
-    attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-    attr[0].val.programmaticStreamSerializationAllowed = pdl ? 1 : 0;
-    config.attrs = attr;
-    config.numAttrs = 1;
-    C10_CUDA_CHECK(cudaLaunchKernelEx(&config, kernel, reinterpret_cast<const half*>(xh.data_ptr()),
-                                      reinterpret_cast<const uint32_t*>(T.data_ptr()), (long long)stride_k,
-                                      (long long)stride_nb, reinterpret_cast<const half*>(svh.data_ptr()), bptr,
-                                      y.data_ptr(), dtype_of(y), zptr, counters.data_ptr<int>(), M, K, N, SK));
+    launch_pdl(config, pdl, attr);
+    C10_CUDA_CHECK(cudaLaunchKernelEx(&config, kernel, jobs, M, K));
 }
 
 template <int K2, int CB, int G, int V = 0>
-void launch_g(dim3 grid, cudaStream_t stream, bool pdl, const at::Tensor& xh, const at::Tensor& T, int64_t stride_k,
-              int64_t stride_nb, const at::Tensor& svh, const half* bptr, at::Tensor& y, float* zptr,
-              at::Tensor& counters, int M, int K, int N, int SK, int WK) {
-#define TF_WK(WK_)                                                                                               \
-    if (WK == WK_)                                                                                               \
-        return launch_wk<K2, CB, WK_, G, V>(grid, stream, pdl, xh, T, stride_k, stride_nb, svh, bptr, y, zptr, counters, \
-                                         M, K, N, SK);
-    TF_WK(2) TF_WK(4) TF_WK(8)
-#undef TF_WK
+void launch_g(const Jobs& jobs, int blocks, cudaStream_t stream, bool pdl, int M, int K, int WK) {
+    if (WK == 2) launch_wk<K2, CB, 2, G, V>(jobs, blocks, stream, pdl, M, K);
+    else if (WK == 4) launch_wk<K2, CB, 4, G, V>(jobs, blocks, stream, pdl, M, K);
+    else launch_wk<K2, CB, 8, G, V>(jobs, blocks, stream, pdl, M, K);
 }
 
 // loads & 1: the transposed walk (G = 1 up to 8 rows, else 2), else the original (G = 0); loads & 2 (with 1): 16-byte
 // weight loads a step ahead (V = 1, 3 to 6 bits); loads & 32: PDL launch. No choice changes a bit of any output.
 template <int K2, int CB>
-void launch(dim3 grid, cudaStream_t stream, const at::Tensor& xh, const at::Tensor& T, int64_t stride_k,
-            int64_t stride_nb, const at::Tensor& svh, const half* bptr, at::Tensor& y, float* zptr,
-            at::Tensor& counters, int M, int K, int N, int SK, int WK, int loads) {
+void launch(const Jobs& jobs, int blocks, cudaStream_t stream, int M, int K, int WK, int loads) {
     const bool pdl = loads & 32;
     if (!(loads & 1))
-        launch_g<K2, CB, 0>(grid, stream, pdl, xh, T, stride_k, stride_nb, svh, bptr, y, zptr, counters, M, K, N, SK, WK);
+        launch_g<K2, CB, 0>(jobs, blocks, stream, pdl, M, K, WK);
     else if (vec_ok<K2>() && (loads & 2)) {
         if (M <= 8)
-            launch_g<K2, CB, 1, vec_ok<K2>()>(grid, stream, pdl, xh, T, stride_k, stride_nb, svh, bptr, y, zptr,
-                                              counters, M, K, N, SK, WK);
+            launch_g<K2, CB, 1, vec_ok<K2>()>(jobs, blocks, stream, pdl, M, K, WK);
         else
-            launch_g<K2, CB, 2, vec_ok<K2>()>(grid, stream, pdl, xh, T, stride_k, stride_nb, svh, bptr, y, zptr,
-                                              counters, M, K, N, SK, WK);
+            launch_g<K2, CB, 2, vec_ok<K2>()>(jobs, blocks, stream, pdl, M, K, WK);
     } else if (M <= 8)
-        launch_g<K2, CB, 1>(grid, stream, pdl, xh, T, stride_k, stride_nb, svh, bptr, y, zptr, counters, M, K, N, SK, WK);
+        launch_g<K2, CB, 1>(jobs, blocks, stream, pdl, M, K, WK);
     else
-        launch_g<K2, CB, 2>(grid, stream, pdl, xh, T, stride_k, stride_nb, svh, bptr, y, zptr, counters, M, K, N, SK, WK);
+        launch_g<K2, CB, 2>(jobs, blocks, stream, pdl, M, K, WK);
 }
 
 }  // namespace
 
-void exl3_linear_cuda(const at::Tensor& xh, const at::Tensor& T, int64_t stride_k, int64_t stride_nb,
-                      const at::Tensor& svh, const c10::optional<at::Tensor>& bias, at::Tensor& y,
-                      const c10::optional<at::Tensor>& Z, at::Tensor& counters, int64_t K2, int64_t cb, int64_t SK,
-                      int64_t WK, int64_t loads) {
-    const int M = (int)xh.size(0), K = (int)xh.size(1), N = (int)y.size(1);
+void exl3_linear_cuda(const std::vector<at::Tensor>& xh, const std::vector<at::Tensor>& T,
+                      const std::vector<int64_t>& stride_k, const std::vector<int64_t>& stride_nb,
+                      const std::vector<at::Tensor>& svh, const std::vector<at::Tensor>& bias,
+                      std::vector<at::Tensor>& y, const std::vector<at::Tensor>& Z, std::vector<at::Tensor>& counters,
+                      int64_t K2, int64_t cb, const std::vector<int64_t>& SK, int64_t WK, int64_t loads) {
+    const int n = (int)xh.size();
+    const int M = (int)xh[0].size(0), K = (int)xh[0].size(1);
     TORCH_CHECK(WK == 2 || WK == 4 || WK == 8, "WK must be 2, 4 or 8");
-    TORCH_CHECK((K / 16) % (SK * WK) == 0, "K / 16 must split evenly over SK * WK warps");
-    dim3 grid((unsigned)(N / 128), (unsigned)SK);
+    Jobs jobs = {};
+    jobs.n = n;
+    int blocks = 0;
+    for (int i = 0; i < n; ++i) {
+        const int N = (int)y[i].size(1);
+        TORCH_CHECK((K / 16) % (SK[i] * WK) == 0, "K / 16 must split evenly over SK * WK warps");
+        TORCH_CHECK(SK[i] == 1 || Z[i].numel() > 0, "Z is needed with more than one split");
+        Job& J = jobs.j[i];
+        J.xh = reinterpret_cast<const half*>(xh[i].data_ptr());
+        J.T = reinterpret_cast<const uint32_t*>(T[i].data_ptr());
+        J.stride_k = stride_k[i];
+        J.stride_nb = stride_nb[i];
+        J.svh = reinterpret_cast<const half*>(svh[i].data_ptr());
+        J.bias = bias[i].numel() ? reinterpret_cast<const half*>(bias[i].data_ptr()) : nullptr;
+        J.y = y[i].data_ptr();
+        J.y_dtype = dtype_of(y[i]);
+        J.Z = Z[i].numel() ? Z[i].data_ptr<float>() : nullptr;
+        J.counters = counters[i].data_ptr<int>();
+        J.N = N;
+        J.SK = (int)SK[i];
+        J.start = blocks;
+        blocks += (N / 128) * (int)SK[i];
+    }
     auto stream = at::cuda::getCurrentCUDAStream();
-    const half* bptr = bias ? reinterpret_cast<const half*>(bias->data_ptr()) : nullptr;
-    float* zptr = Z ? Z->data_ptr<float>() : nullptr;
-    TORCH_CHECK(SK == 1 || zptr, "Z is needed with more than one split");
-#define TF_LAUNCH(K2_, CB_)                                                                                        \
-    if (K2 == K2_ && cb == CB_) {                                                                               \
-        launch<K2_, CB_>(grid, stream, xh, T, stride_k, stride_nb, svh, bptr, y, zptr, counters, M, K, N, (int)SK,  \
-                         (int)WK, (int)loads);                                                                  \
-        return;                                                                                                 \
+#define TF_LAUNCH(K2_, CB_)                                                     \
+    if (K2 == K2_ && cb == CB_) {                                            \
+        launch<K2_, CB_>(jobs, blocks, stream, M, K, (int)WK, (int)loads);   \
+        return;                                                              \
     }
     TF_EXL3_ALL(TF_LAUNCH)
 #undef TF_LAUNCH

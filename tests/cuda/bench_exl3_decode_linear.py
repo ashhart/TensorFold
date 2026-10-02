@@ -39,14 +39,13 @@ ROT = False          # --rot: each call also rotates its bf16 input (rot_in), as
 
 
 def call(lin, xh, out, z, loads: int, x=None) -> None:
-    sk, wk = lin.split
     loads = linear.LOADS if loads is None else loads
     if x is not None:
-        linear._ext().rot_in(x, lin.suh, xh, (loads >> 5) & 1)
-    a, b = lin.strides
-    args = [xh, lin.words, a, b, lin.svh, lin.bias, out, z if sk > 1 else None, lin.counters, lin.k2,
-            linear.CODEBOOK_IDS[lin.codebook], sk, wk]
-    linear._ext().linear(*args, loads)
+        linear._ext().rot_in(x, [lin.suh], [xh], (loads >> 5) & 1)
+    none = linear._none(xh.device)
+    linear._ext().linear([xh], [lin.words], [lin.strides[0]], [lin.strides[1]], [lin.svh], [none], [out],
+                         [z if lin.split[0] > 1 else none], [lin.counters], lin.k2, linear.CODEBOOK_IDS[lin.codebook],
+                         [lin.split[0]], lin.split[1], loads)
 
 
 def build(lins, rows: int, loads):
@@ -106,6 +105,153 @@ def candidates(k: int):
                 yield sk, wk
 
 
+GROUPS = [((6144, 2048), (6144, 640)), ((6144, 512), (6144, 512)), ((2048, 4096), (2048, 4096))]
+
+
+def group_bench(rows: list[int], loads, reps: int) -> None:
+    """Layers of one input (q_a + kv_a, gate + up, q_b + indexer wq_b): one call each vs one launch (linear.group),
+    rot_in included; each layer's tiles the best for it alone at each warps-a-block, the best warps for each way."""
+
+    for shapes in GROUPS:
+        sets = [make(k, n, max(2, -(-POOL_BYTES // (k * n * BITS // 8 * len(shapes))))) for k, n in shapes]
+        copies = min(len(s_) for s_ in sets)
+        sets = [s_[:copies] for s_ in sets]
+        nbytes = sum(k * n * BITS // 8 for k, n in shapes)
+        best_seq, best_grp = {}, {}
+        for wk in (2, 4, 8):
+            tiles = []
+            for s_ in sets:
+                k = s_[0].k
+                cand = [(sk, w) for sk, w in candidates(k) if w == wk]
+                if not cand:
+                    break
+                bt, bu = None, None
+                for t in cand:
+                    for lin in s_:
+                        lin.split = t
+                    us = time_graph(s_, 3, loads, reps=1, replays=5)
+                    if bu is None or us < bu:
+                        bt, bu = t, us
+                tiles.append(bt)
+            if len(tiles) != len(sets):
+                continue
+            for s_, t in zip(sets, tiles):
+                for lin in s_:
+                    lin.split = t
+            for r in rows:
+                seq, grp = time_pair(sets, r, loads, reps)
+                if r not in best_seq or seq < best_seq[r][0]:
+                    best_seq[r] = (seq, tuple(tiles))
+                if r not in best_grp or grp < best_grp[r][0]:
+                    best_grp[r] = (grp, tuple(tiles))
+        name = " + ".join(f"{k}x{n}" for k, n in shapes)
+        for r in rows:
+            (sq, st), (gp, gt) = best_seq[r], best_grp[r]
+            print(f"{name:>22} R={r:<2} {nbytes / 2**20:5.2f} MB  one by one {sq:6.1f}us ({nbytes / sq / 1e3:3.0f} GB/s) "
+                  f"{st}   one launch {gp:6.1f}us ({nbytes / gp / 1e3:3.0f} GB/s) {gt}", flush=True)
+
+
+def time_pair(sets, rows: int, loads, reps: int) -> tuple[float, float]:
+    """Microseconds a group: its layers one call each, and as one launch (graphs over the copies, interleaved)."""
+
+    k = sets[0][0].k
+    x = (torch.randn(rows, k, device="cuda") * 0.1).bfloat16()
+    outs = [[torch.empty(rows, lin.n, device="cuda", dtype=torch.bfloat16) for lin in s_] for s_ in sets]
+    graphs = []
+    for grouped in (False, True):
+        st = torch.cuda.Stream()
+        with torch.cuda.stream(st):
+            def run():
+                for c in range(len(sets[0])):
+                    layers = [s_[c] for s_ in sets]
+                    for lin in layers:
+                        lin.loads = loads
+                    if grouped:
+                        linear.group(layers, x, [o[c] for o in outs])
+                    else:
+                        for lin, o in zip(layers, outs):
+                            lin(x, out=o[c])
+            run()
+            torch.cuda.synchronize()
+            g = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g, stream=st):
+                run()
+        g.replay()
+        torch.cuda.synchronize()
+        graphs.append(g)
+    ts = [[], []]
+    for _ in range(reps):
+        for i, g in enumerate(graphs):
+            ts[i].append(time_one(g, len(sets[0]), 20))
+    return statistics.median(ts[0]), statistics.median(ts[1])
+
+
+# a MoE layer's EXL3 linears at TP=4 (rank 0) in decode order: (input group) -> outputs
+LAYER = [("q_a", 6144, 2048), ("kv_a", 6144, 640), ("wq_b", 2048, 4096), ("q_b", 2048, 4096), ("o_proj", 4096, 6144),
+         ("gate", 6144, 512), ("up", 6144, 512), ("down", 512, 6144)]
+LAYER_GROUPS = [("q_a", "kv_a"), ("wq_b", "q_b"), ("o_proj",), ("gate", "up"), ("down",)]
+
+
+def layer_bench(rows: list[int], reps: int, copies: int = 8) -> None:
+    """A MoE layer's linears (rot_in included) over ``copies`` layers as one graph: the original kernel (loads 0)
+    one call each, tiles from the engine's tuner, vs the default path with the engine's group tuner and ``lins``.
+    A small elementwise kernel stands for the glue between the groups (it breaks the PDL chain, as in the model)."""
+
+    from tensorfold.families.glm_moe_dsa.cuda import fused
+
+    layers = []
+    for c in range(copies):
+        L = {}
+        for name, k, n in LAYER:
+            L[name] = make(k, n, 1)[0]
+        layers.append(L)
+    xs = {k: (torch.randn(max(rows), k, device="cuda") * 0.1).bfloat16() for _, k, _ in LAYER}
+    outs = [{name: torch.empty(max(rows), n, device="cuda", dtype=torch.bfloat16) for name, _, n in LAYER}
+            for _ in layers]
+    every = [lin for L in layers for lin in L.values()]
+    glue = torch.zeros(4096, device="cuda")
+    res = {}
+    for mode in ("before", "after"):
+        for lin in every:
+            lin.loads = 0 if mode == "before" else None
+            lin.split = None
+            lin.__post_init__()
+        fused.tune_linears(every)
+        if mode == "after":
+            print("groups:", fused.tune_groups([[L[n] for n in grp] for L in layers for grp in LAYER_GROUPS
+                                                if len(grp) > 1]), flush=True)
+        for r in rows:
+            def run():
+                for L, o in zip(layers, outs):
+                    for grp in LAYER_GROUPS:
+                        x = xs[L[grp[0]].k][:r]
+                        if mode == "after":
+                            fused.lins([L[n] for n in grp], None, x, [o[n][:r] for n in grp])
+                        else:
+                            for n in grp:
+                                L[n](x, out=o[n][:r])
+                        glue.add_(1.0)                  # the norms, attention, ... between them (no PDL)
+            st = torch.cuda.Stream()
+            with torch.cuda.stream(st):
+                run()
+                torch.cuda.synchronize()
+                g = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(g, stream=st):
+                    run()
+            g.replay()
+            torch.cuda.synchronize()
+            res[mode, r] = g
+    nbytes = sum(k * n * BITS // 8 for _, k, n in LAYER)
+    for r in rows:
+        ts = {"before": [], "after": []}
+        for _ in range(reps):
+            for mode in ts:
+                ts[mode].append(time_one(res[mode, r], copies, 20))
+        b, a = statistics.median(ts["before"]), statistics.median(ts["after"])
+        print(f"MoE layer linears R={r}: {nbytes / 2**20:.1f} MB  before {b:6.1f}us ({nbytes / b / 1e3:3.0f} GB/s)  "
+              f"after {a:6.1f}us ({nbytes / a / 1e3:3.0f} GB/s)  saving {b - a:5.1f}us a layer", flush=True)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--tiles", default="tuned", choices=["plan", "tuned", "sweep"])
@@ -114,9 +260,18 @@ def main() -> None:
     ap.add_argument("--shapes", nargs="*", default=None, help="KxN, e.g. 6144x2048")
     ap.add_argument("--reps", type=int, default=5)
     ap.add_argument("--rot", action="store_true", help="time rot_in + linear, the production pair")
+    ap.add_argument("--layer", action="store_true", help="a MoE layer's linears, before vs after")
+    ap.add_argument("--groups", action="store_true", help="layers of one input: one by one vs one launch")
     a = ap.parse_args()
     global ROT
     ROT = a.rot
+    if a.layer:
+        layer_bench(a.rows, a.reps)
+        return
+    if a.groups:
+        for ld in (a.loads or [None]):
+            group_bench(a.rows, ld, a.reps)
+        return
     shapes = [tuple(map(int, s.split("x"))) for s in a.shapes] if a.shapes else SHAPES
     loads_list = a.loads if a.loads else [None]
     print(f"{'shape':>11} {'MB':>6} {'tiles':>8} {'ld':>2} " + " ".join(f"{'R=' + str(r):>15}" for r in a.rows))
