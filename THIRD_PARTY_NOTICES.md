@@ -59,7 +59,11 @@ the MIT License, Copyright © 2026 Z Lab.
 
 Flash Next implements transformers' model math under the attribution above. Its new DeltaNet kernel
 follows flash-linear-attention's numerics, MIT; its NCCL wrapper follows vLLM's stream convention,
-Apache-2.0, without copying either implementation.
+Apache-2.0, without copying either implementation. Its reduced-vocabulary MTP drafting
+(`families/qwen4_exp/cuda/draft_vocab.txt`, built from MiaAI-Lab's `files/build_draft_vocab.py` and
+`files/build_draft_vocab_extend.py`) follows [MiaAI-Lab's recipe](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark),
+AGPL-3.0-or-later, Copyright (C) 2026 MiaAI Lab: only the technique is re-expressed for this engine, and no
+file from that repository is copied.
 
 GLM's CUDA engine implements transformers' `models/glm5_next/modular_glm5_next.py` math, Apache-2.0,
 without including that source. Its draft inputs and thinking-off rendering follow the public GLM recipe
