@@ -14,7 +14,7 @@ from tensorfold.server.http import make_handler
 
 NAMES = ("requests_running", "requests_waiting", "prompt_tokens_total", "generation_tokens_total",
          "kv_cache_usage_ratio", "mtp_drafted_total", "mtp_accepted_total",
-         "request_latency_seconds", "time_to_first_token_seconds")
+         "request_latency_seconds", "time_to_first_token_seconds", "request_decode_seconds")
 
 
 def sample(body: str, name: str) -> str:
@@ -140,6 +140,33 @@ def test_cuda_health_folds_drafts_and_drops_running_when_the_request_ends():
     assert sample(body, f"{metrics.PREFIX}time_to_first_token_seconds_count") == "1"
     assert health.of(app).snapshot(app)["requests_running"] == 0
     assert health.of(app).snapshot(app)["drafted_total"] == 4
+
+
+def test_decode_seconds_come_from_the_engine_on_cuda_and_from_the_first_token_on_the_mac():
+    app = SimpleNamespace()
+    out: list[int] = []
+    with health.of(app).running(5, out) as request:
+        out.extend([7, 8, 9])
+        request.saw()
+        request.stats = {"decode_s": 1.5}
+    body = metrics.render(app)
+    assert sample(body, f"{metrics.PREFIX}request_decode_seconds_sum") == "1.5"
+    assert sample(body, f"{metrics.PREFIX}request_decode_seconds_count") == "1"
+    assert sample(body, f"{metrics.PREFIX}request_decode_time_seconds_sum") == "1.5"
+    assert bucket(body, "request_decode_seconds", "2.5") == "1"
+    with health.of(app).running(5, []) as request:
+        request.stats = {}
+    assert sample(metrics.render(app), f"{metrics.PREFIX}request_decode_seconds_count") == "1", "no token, no decode"
+
+    mac = SimpleNamespace()
+    started = time.perf_counter()
+    metrics.begin(mac, 6, started)
+    metrics.tokens(3, started)
+    metrics.finish_request()
+    body = metrics.render(mac)
+    assert sample(body, f"{metrics.PREFIX}request_decode_seconds_count") == "1"
+    assert 0 <= float(sample(body, f"{metrics.PREFIX}request_decode_seconds_sum")) <= float(
+        sample(body, f"{metrics.PREFIX}request_latency_seconds_sum"))
 
 
 def test_mac_finish_request_counts_once():

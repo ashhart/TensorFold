@@ -55,9 +55,10 @@ class Metrics:
         self.accepted = 0
         self.latency = Histogram()
         self.ttft = Histogram()
+        self.decode = Histogram()
 
     def add(self, *, prompt: int, generation: int, drafted: int, accepted: int,
-            latency: float | None, ttft: float | None) -> None:
+            latency: float | None, ttft: float | None, decode: float | None = None) -> None:
         with self.lock:
             self.prompt += int(prompt)
             self.generation += int(generation)
@@ -67,6 +68,8 @@ class Metrics:
                 self.latency.observe(latency)
             if ttft is not None:
                 self.ttft.observe(ttft)
+            if decode is not None:
+                self.decode.observe(decode)
 
 
 def of(app: Any) -> Metrics:
@@ -80,13 +83,13 @@ def of(app: Any) -> Metrics:
 
 
 def note(app: Any, *, prompt: int = 0, generation: int = 0, drafted: int = 0, accepted: int = 0,
-         latency: float | None = None, ttft: float | None = None) -> None:
+         latency: float | None = None, ttft: float | None = None, decode: float | None = None) -> None:
     """Fold one finished request. A missing app is a no-op."""
 
     if app is None:
         return
     of(app).add(prompt=prompt, generation=generation, drafted=drafted, accepted=accepted,
-                latency=latency, ttft=ttft)
+                latency=latency, ttft=ttft, decode=decode)
 
 
 def begin(app: Any, prompt: int, started: float) -> None:
@@ -126,11 +129,14 @@ def finish_request() -> None:
     _local.armed = False
     job = _local.job
     stream = getattr(job, "stream", None) if job is not None else None
+    ended = time.perf_counter()
     ttft = (_local.first - _local.started) if _local.first else None
+    # Decode runs from the first generated token to the end; a request that generated nothing has none.
+    decode = max(0.0, ended - _local.first) if _local.first else None
     note(_local.app, prompt=_local.prompt, generation=_local.generation,
          drafted=int(getattr(stream, "drafted", 0) or 0),
          accepted=int(getattr(stream, "accepted", 0) or 0),
-         latency=max(0.0, time.perf_counter() - _local.started), ttft=ttft)
+         latency=max(0.0, ended - _local.started), ttft=ttft, decode=decode)
 
 
 def render(app: Any) -> str:
@@ -140,7 +146,7 @@ def render(app: Any) -> str:
     with metrics.lock:
         prompt, generation = metrics.prompt, metrics.generation
         drafted, accepted = metrics.drafted, metrics.accepted
-        latency, ttft = metrics.latency.copy(), metrics.ttft.copy()
+        latency, ttft, decode = metrics.latency.copy(), metrics.ttft.copy(), metrics.decode.copy()
     running, waiting = _requests(app)
     pools = _pools(app)
     lines: list[str] = []
@@ -161,6 +167,9 @@ def render(app: Any) -> str:
             [f"{PREFIX}mtp_accepted_total {accepted}"])
     _histogram(lines, "request_latency_seconds", "Seconds from arrival to the reply leaving.", latency)
     _histogram(lines, "time_to_first_token_seconds", "Seconds from arrival to the first generated token.", ttft)
+    _histogram(lines, "request_decode_seconds",
+               "Seconds a finished request spent decoding. Its sum over generation_tokens_total is the decode rate.",
+               decode)
     # vLLM names, identical values: a vLLM dashboard needs only the "tensorfold:" prefix swapped.
     _family(lines, "num_requests_running", "gauge",
             "Requests in prefill or decode. A mirror of tensorfold:requests_running.",
@@ -178,6 +187,8 @@ def render(app: Any) -> str:
             [f"{PREFIX}spec_decode_num_accepted_tokens_total {accepted}"])
     _histogram(lines, "e2e_request_latency_seconds",
                "Seconds from arrival to the reply leaving, under vLLM's name.", latency)
+    _histogram(lines, "request_decode_time_seconds",
+               "Seconds a finished request spent decoding, under vLLM's name.", decode)
     # per-request event counts; a family is left out where this server doesn't count the event, never a fake zero
     disconnects, preempted = _endings(app)
     if disconnects is not None:
