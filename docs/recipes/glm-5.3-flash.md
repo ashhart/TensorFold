@@ -77,8 +77,11 @@ Prompt prefill uses the shared CUDA prefill kernels. Decode uses CUDA graphs, pa
 pool bucket. The engine keeps up to 8 conversations' prompts (`TF_GLM_CACHE_ENTRIES`): when another
 conversation takes the attention caches, a kept prompt's rows are saved. Kept states and saved rows together get
 `TF_GLM_CACHE_GIB` (default 3), or less when the window leaves less memory on either Spark; the startup log says
-when it is less, and the memory estimate includes it. It serves one request at a time. Both ranks finish a started
-reply after a client disconnects.
+when it is less, and the memory estimate includes it. Earlier turns keep their reasoning in the prompt
+(`clear_thinking` false, zai-org's default), so an agent's next user message resumes from its previous tool loop
+instead of filling it again; `TF_GLM_CLEAR_THINKING=1` drops it, as the TR3 checkpoint's template does by default,
+and a request's `chat_template_kwargs.clear_thinking` wins over either. It serves one request at a time. Both ranks
+finish a started reply after a client disconnects.
 
 DFlash2 attends only its 2,048-row sliding window: a block pass reads only the window's tiles, and the drafter keeps
 its context in a ring of that window, its block and a tile (2,176 rows, 21 MiB a rank whatever the window, instead

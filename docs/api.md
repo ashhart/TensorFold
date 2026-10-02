@@ -46,7 +46,7 @@ For decisions, `chat_template_kwargs` may be omitted, null, or an object contain
 | `seed` | Sampling key; otherwise derived from the prompt (and `TENSORFOLD_SEED_SALT`) | Both |
 | `stream` | Server-sent events; the last event carries usage | Both |
 | `stream_options.include_usage` | Usage in its own final event with `"choices": []`, not on the finish event | Both |
-| `chat_template_kwargs.enable_thinking` | Template thinking toggle | Both |
+| `chat_template_kwargs.enable_thinking` | Template thinking toggle; `chat_template_kwargs.thinking` (`true`/`false` or `{"type": "enabled"}`/`{"type": "disabled"}`, as DeepSeek-V4 clients send it) is read the same way when `enable_thinking` is absent; other values are ignored | Both |
 | `draft` | False selects the serial reference; CUDA rejects it if the engine has no serial switch | Both |
 | `response_format`, `guided_json`, `guided_regex`, `guided_choice`, `guided_grammar`, `structured_outputs` | A JSON schema, any JSON object, a regex, a choice or an EBNF grammar the reply must match | Both |
 | `ignore_eos` | Disable model end-of-sequence stopping; the reply limit still applies | Both |
@@ -174,7 +174,11 @@ the template renders its own default, as vLLM and mlx-lm render it (Qwen3.8's is
 to the system prompt; `medium` adds none). The template hears an effort only while thinking, and both backends render
 the same prompt for the same request. Effort support depends on the checkpoint's template, and effort does not set a
 token budget. With thinking off, GLM-5.3's prompt is its thinking-off template's: no reasoning-effort line and an
-empty think block.
+empty think block. GLM-5.3 keeps every earlier assistant turn's reasoning in the prompt, as zai-org's template does by
+default (`clear_thinking` false), also on checkpoints whose template still clears it before the last user message, so
+a new user message leaves the earlier turns' tokens, and their kept prompt states, as they were. A request's
+`chat_template_kwargs.clear_thinking: true` drops it, as the model card advises for plain chat (on CUDA; on a Mac,
+`TF_GLM_CLEAR_THINKING=1` sets it for the server).
 
 A tool call written before the think block closes is the reply's tool call when the reply ends inside the block,
 on both backends; the reasoning stops where the call starts, and streamed reasoning never carries the call's markup.

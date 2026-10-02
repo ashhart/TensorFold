@@ -5,17 +5,21 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from tensorfold.cuda.server import App, PreparedRequest, RequestError
-from tensorfold.families.glm5_next.prompts import thinking_off
+from tensorfold.families.glm5_next.prompts import clear_thinking, thinking_off
 
 
 class ThinkingOffTemplate:
-    """The checkpoint template as GLM-5.3's thinking-off template renders it (``prompts.thinking_off``)."""
+    """The checkpoint template as GLM-5.3's thinking-off template renders it (``prompts.thinking_off``), with earlier
+    turns' reasoning kept unless the request's ``chat_template_kwargs.clear_thinking`` says otherwise
+    (``prompts.clear_thinking``)."""
 
-    def __init__(self, inner) -> None:
+    def __init__(self, inner, clear: bool | None = None) -> None:
         self.inner = inner
         self.efforts = getattr(inner, "efforts", frozenset())
+        self.clear = clear_thinking() if clear is None else clear
 
     def render(self, messages, *, tools, enable_thinking, extra=None) -> str:
+        extra = {"clear_thinking": self.clear, **(extra or {})}       # a request's own value wins
         text = self.inner.render(messages, tools=tools, enable_thinking=enable_thinking, extra=extra)
         return text if enable_thinking else thinking_off(text)
 
