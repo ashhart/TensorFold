@@ -25,7 +25,7 @@ from tensorfold.server.tools import active_tool_specs, tool_choice_requires_call
 
 from tensorfold.cuda import health
 from tensorfold.cuda.chat_template import ChatTemplate
-from tensorfold.cuda.reply_text import StopStrings, StreamDecoder, hide_tool_calls, parse_tool_calls
+from tensorfold.cuda.reply_text import StopStrings, StreamDecoder, close_glm_call, hide_tool_calls, parse_tool_calls
 from tensorfold.cuda.turns import Turns, Yield
 from tensorfold.server.text import is_title_request, reasoning_count, split_thinking
 from tensorfold.vision.images import DEFAULT_LIMITS, ImageLimits
@@ -352,11 +352,13 @@ class App:
         # calls stream as argument deltas while written (as on the Mac); one-call requests keep the end parser
         calls_stream = ToolCallStreamer(tools) if tools and not policy.single else None
         answer_raw = [""]
+        closing = [""]                      # what closes a GLM call the model's end token left open (``run``'s end)
 
         def visible(finished: bool) -> tuple[str, str]:
             raw = stream.final() if finished else stream.text
             # stop strings match the generated text, reasoning included, before it is split (as on the Mac)
             raw = stops.visible(raw, partial=not finished) if stops.strings else raw
+            raw = raw + closing[0] if finished else raw
             if chat and thinking:
                 reasoning, answer = split_thinking(raw, finished=finished)
             else:
@@ -478,11 +480,15 @@ class App:
         if stopped["client"]:                                        # as the Mac server: nothing more is written
             raise RequestCancelled("the client left during the reply")
         stats = {**(stats or {}), "token_sha": token_sha(out)}
+        # GLM: the model's end token (not a stop string or the token limit) ended the reply inside a call, before its
+        # </tool_call>: the call is closed and sent when it then parses whole; otherwise its markup stays the text
+        if tools and out and out[-1] in ends and not stopped["stop"] and self._glm_calls():
+            closing[0] = close_glm_call(stops.visible(stream.final()) if stops.strings else stream.final(), tools)
         reasoning, answer = visible(True)
         final: dict[str, Any] = {}
         if len(reasoning) > sent["reasoning"]:
             final["reasoning_content"] = reasoning[sent["reasoning"]:]
-        text = stops.visible(self.tok.decode([t for t in out if t not in ends], skip_special_tokens=False))
+        text = stops.visible(self.tok.decode([t for t in out if t not in ends], skip_special_tokens=False)) + closing[0]
         raw_answer = split_thinking(text, finished=True)[1] if chat and thinking else text
         content, calls = parse_tool_calls(raw_answer, tools, max_calls=policy.max_calls) if tools else (answer, None)
         content = policy.content(content) if tools else content
@@ -502,6 +508,14 @@ class App:
                 "prompt_tokens": len(prompt), "completion_tokens": len(out), "cached_tokens": (cached or [0])[0],
                 "reasoning_tokens": reasoning_count(out, self.tok.token_to_id("</think>") if chat and thinking else None),
                 "stats": stats, "calls_streamed": streamed}
+
+    def _glm_calls(self) -> bool:
+        """Whether this model writes GLM's ``<arg_key>``/``<arg_value>`` calls: its tokenizer has those marks as
+        tokens."""
+
+        lookup = getattr(self.tok, "token_to_id", None)
+        return lookup is not None and all(lookup(mark) is not None
+                                          for mark in ("<tool_call>", "<arg_key>", "</arg_value>"))
 
     def _turns(self) -> Turns:
         """The engine's turns (one request at a time, background ones last), made on first use."""

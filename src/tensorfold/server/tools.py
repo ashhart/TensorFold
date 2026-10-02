@@ -145,6 +145,29 @@ def _loose_tool_arguments(payload: dict[str, Any], explicit: Any) -> Any:
 # GLM-4.5 and later (GLM-5.3-Flash): <tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value>...</tool_call>
 _GLM_ARG_RE = re.compile(r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.DOTALL)
 _GLM_NAME_RE = re.compile(r"[\w.:-]+")
+_GLM_TAG_RE = re.compile(r"</?arg_(?:key|value)>")
+_GLM_LAST_WORD_RE = re.compile(r"(\S+)\s*$")
+
+
+def repair_glm_keys(block: str) -> str:
+    """A GLM call whose ``<arg_key>`` the model left out, writing whitespace where that token belongs
+    (``read path</arg_key><arg_value>..``, or ``</arg_value>\npath</arg_key>``), with it put back: the word before an
+    unopened ``</arg_key>`` is its key. A block where nothing is missing comes back as it is."""
+
+    if block.count("</arg_key>") <= block.count("<arg_key>"):
+        return block
+    out, at, prev, prev_end = [], 0, None, 0     # prev: the last tag seen (ending at prev_end); at: text copied
+    for tag in _GLM_TAG_RE.finditer(block):
+        if tag.group(0) == "</arg_key>" and prev in (None, "</arg_value>"):
+            seg_start = 0 if prev is None else prev_end
+            word = _GLM_LAST_WORD_RE.search(block, seg_start, tag.start())
+            # the name's segment keeps a name before the key (``read path``): no word, or no name, is not repaired
+            if word is None or (prev is None and not block[seg_start:word.start()].strip()):
+                return block
+            out += [block[at:word.start()], "<arg_key>"]
+            at = word.start()
+        prev, prev_end = tag.group(0), tag.end()
+    return "".join(out) + block[at:]
 
 
 def parse_glm_tool_call_block(block: str, tools: Any, *, complete: bool = False) -> tuple[str, dict[str, Any]] | None:
@@ -157,7 +180,7 @@ def _parse_glm_payload(block: str, schemas: dict[str, dict[str, Any]] | None, *,
                        complete: bool = False) -> tuple[str, dict[str, Any]] | None:
     """A GLM call (the bare name without arguments), values decoded as Qwen's so a history renders as written."""
 
-    name, found, rest = block.partition("<arg_key>")
+    name, found, rest = repair_glm_keys(block).partition("<arg_key>")
     name = name.strip()
     if _GLM_NAME_RE.fullmatch(name) is None:
         return None

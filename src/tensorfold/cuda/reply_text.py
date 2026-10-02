@@ -92,6 +92,22 @@ def hide_tool_calls(text: str, *, finished: bool) -> str:
         pos = end + len(_CALL_CLOSE)
 
 
+def close_glm_call(text: str, tools: list[dict[str, Any]]) -> str:
+    """What closes the GLM call a reply ended inside when it parses as a whole call to an offered tool (the model
+    wrote its end token before ``</tool_call>``): ``</tool_call>``, after ``</arg_value>`` when a value is open; ""
+    when the reply is not inside a call, or the closed call would not parse (its markup then stays the reply's text)."""
+
+    at = text.rfind(_CALL_OPEN)
+    if at < 0:
+        return ""
+    block = text[at + len(_CALL_OPEN):]
+    if _CALL_CLOSE in block or "</think>" in block:
+        return ""
+    suffix = ("</arg_value>" if block.rfind("<arg_value>") > block.rfind("</arg_value>") else "") + _CALL_CLOSE
+    # the strict reading (one whole call, nothing but its markup, arguments a JSON object)
+    return suffix if parse_tool_calls(_CALL_OPEN + block + suffix, tools, max_calls=1)[1] else ""
+
+
 def _tool_name(tool: dict[str, Any]) -> str:
     fn = tool.get("function") if isinstance(tool, dict) else None
     return str((fn or tool).get("name") or "").strip() if isinstance(tool, dict) else ""
