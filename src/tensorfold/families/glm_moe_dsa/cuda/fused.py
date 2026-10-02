@@ -39,6 +39,8 @@ PROMPT_ROWS = int(os.environ.get("TF_GLM53_PROMPT_ROWS", "4096"))   # prompt chu
 PREFILL_REDUCE = os.environ.get("TF_GLM53_PREFILL_REDUCE", "ring")   # ring | rs (exact reduce-scatter)
 PROMPT_OVERLAP = os.environ.get("TF_GLM53_PROMPT_OVERLAP", "1") != "0"   # two micro-batches, comm under compute
 SEL_ROWS = 128           # indexer top-k in blocks of rows (bounded score buffer at long contexts)
+_UNPACK_MB = int(os.environ.get("TF_GLM53_UNPACK_CACHE_MB", "384"))   # decoded dense weights shared by a chunk's halves (0: off)
+_UNPACK_CACHE = x3prefill.UnpackCache(_UNPACK_MB << 20) if _UNPACK_MB > 0 else None
 RADIX = os.environ.get("TF_GLM53_RADIX", "1") == "1"   # indexer top-k: one radix-select kernel (same picks as torch.topk + sort)
 RB = 16                  # rows a program in the absorb / expand kernels (wide windows)
 
@@ -513,7 +515,7 @@ class Buffers:
         D, H = c.hidden_size, w.heads
         lw, rd, qd = c.kv_lora_rank, c.qk_rope_head_dim, c.qk_nope_head_dim + c.qk_rope_head_dim
         self.rows, self.score_cols = rows, score_cols
-        self.ws = x3prefill.Workspace()
+        self.ws = x3prefill.Workspace(_UNPACK_CACHE)
         self.ids = torch.zeros((rows,), dtype=torch.long, device=dev)
         self.hin = torch.zeros((rows, D), dtype=bf, device=dev)          # MTP: the hidden rows it reads
         self.x = torch.empty((rows, D), dtype=bf, device=dev)
