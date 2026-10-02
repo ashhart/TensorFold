@@ -413,9 +413,7 @@ class FlashNextEngine:
                             probabilities=probabilities, points=points)
 
     def score_labels(self, prompt_ids, label_ids) -> tuple[list[float], float]:
-        """Last-position logits of ``label_ids`` and the full-vocabulary logsumexp (``/v1/decisions``); one token is
-        sampled and dropped. ``draft=False``: the prompt neither resumes from nor leaves a kept prompt state, so a
-        decision never evicts a conversation's."""
+        """Score the prompt's final row in a fresh state without adding a kept decision prefix."""
 
         return self.score_labels_many([(prompt_ids, label_ids)])[0]
 
@@ -436,6 +434,9 @@ class FlashNextEngine:
                 raise ValueError("empty prompt")
             if not labels:
                 raise ValueError("empty labels")
+            if any(token < 0 or token >= self.w.cfg.vocab for token in labels):
+                raise ValueError("decision label is outside the vocabulary")
+            self._limit(prompt, 1)
             work.append((prompt, LabelProbabilities(labels, start=len(prompt))))
 
         def one(job):

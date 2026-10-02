@@ -28,8 +28,7 @@ class Probabilities:
 
 
 class LabelProbabilities(Probabilities):
-    """A decision's collector: at the prompt's last position, the logits of ``labels`` and the full-vocabulary
-    logsumexp, besides the sampled token's row. ``capture`` fills ``label_logits`` and ``logsumexp``."""
+    """Collect label logits and full-vocabulary logsumexp only at the prompt's final position."""
 
     def __init__(self, labels, start: int):
         super().__init__(0, start, 1)

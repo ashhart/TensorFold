@@ -25,6 +25,15 @@ class Waiting(queue.PriorityQueue):
     def get(self, block: bool = True, timeout: float | None = None):
         return super().get(block, timeout)[2]
 
+    def put_many(self, items) -> None:
+        """Publish a group before waking the worker, preserving arrival and background priority."""
+
+        with self.not_empty:
+            for item in items:
+                self._put((1 if item[0].background else 0, next(self._order), item))
+                self.unfinished_tasks += 1
+            self.not_empty.notify()
+
     def stop(self) -> None:
         """Wake an idle worker to stop: None comes after every waiting request."""
 
@@ -79,9 +88,7 @@ class Scheduler:
                 return value
 
     def submit_many(self, requests: list[dict]) -> list[dict]:
-        """Queue several one-shot requests in one go, so the decoder admits them together and their prompts fill in
-        the same pass; each dict holds ``submit``'s arguments. Returns their stats, in order (raises the first error).
-        Queued from one thread: submitted one by one, the first woke the worker, which filled it alone."""
+        """Queue isolated one-shot requests atomically and return ordered stats, draining errors too."""
 
         boxes = []
         for r in requests:
@@ -90,8 +97,7 @@ class Scheduler:
                             stop_eos=r.get("stop_eos", True), probabilities=r.get("probabilities"))
             stream.emit = lambda new: False
             boxes.append((stream, box))
-        for pair in boxes:
-            self.waiting.put(pair)
+        self.waiting.put_many(boxes)
         results, error = [], None
         for _, box in boxes:
             while True:
