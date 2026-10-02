@@ -28,3 +28,8 @@ N/A to us: 0009a/c, 0024, 0017/0022, 0006 (decode only), HC/KDA parts.
   (commit 545e3e3, branch fp8-dense, which also has the UnpackCache). One-pass attention: 32K slower, 128K 1.17x (opt-in).
 - 1M/256K profile (10-01 21:00) lost: ppbench client timed out under the profiler (prefill 14 min); rerun with longer
   timeout later (not the current bottleneck).
+- 10-01 SHA isolation: 32K sampled replies are NOT reproducible run-to-run with the default prefill reduce (NCCL bf16
+  ring in the 2-micro-batch overlap; RADIX=0 run matched neither the radix run nor pre-rebase). Bit-identity tests must
+  use TF_GLM53_PREFILL_REDUCE=rs + TF_GLM53_PROMPT_OVERLAP=0 (the exact rank-order reduce; upstream's planned default).
+  Radix top-k / UnpackCache / tuned tiles are bit-exact at kernel level; the any-K MoE prompt kernel (e36a1ea) is not
+  (rel 8e-4 vs routed) - prompt-path bits per configuration.
