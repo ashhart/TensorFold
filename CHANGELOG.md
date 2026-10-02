@@ -3,10 +3,40 @@
 `tensorfold update` prints the sections below that are newer than the version you had. Each release's page on
 GitHub has the full notes and the measurements behind them.
 
-## Unreleased
-## Unreleased
+## 0.6.3 (2 Oct 2026)
 
-- Anthropic Messages and token-count routes on MLX and CUDA, including streaming, tools, thinking and cache usage.
+- **Nemotron on M5 Macs: copied text verifies up to 64 tokens a round.** A lone stream's copy window grows from 16 to
+  64 rows while each lands whole, a window attends in one call, and wide windows keep their Mamba states every 8th
+  row. On an M5 Max, one stream editing code decodes about 1.4x faster (550 to 760 tok/s, and up to 1,000 on a cool
+  machine), prose and code writing gain 1.6-3.3%, and drafted replies still equal one-token decoding.
+- **Anthropic Messages API.** `/v1/messages` and `count_tokens` on the Mac and CUDA servers, with streaming, tools,
+  thinking and cache usage (#223, closes #168). Thanks to @kky42.
+- **Control Room.** `tensorfold service` runs a model as a launchd service, and `tensorfold tui` shows its decode and
+  prefill speed and its connections live.
+- **Flash Next on Macs before M5:** `TF_FLASH_DENSE=matrix` runs every dense projection on the matrix units, and the
+  fused DeltaNet stack uses the matrix kernel by default (#149). Thanks to @gilby.
+- **Vision:** `--vision-offload` keeps the CUDA image tower in host RAM between images (#187, closes #185); image
+  parts are accepted inside tool results (#235); `--vision-image-tokens` lets many images share a larger budget
+  (#239); Flash Next on CUDA takes video (#240). Thanks to @barelyworkingcode and @MiaAI-Lab.
+- **CUDA:** `/v1/decisions` on Flash Next scores labels from the prompt's last logits, the questions filling in one
+  pass (#232); `TENSORFOLD_PREFILL_ROWS` sets the prompt piece rows (#238); NVFP4 and FP8 prompt rows add a tile's K
+  slices in one block, with the same bits (#242); `TENSORFOLD_MEMORY_RESERVE_GIB` moves the memory floor the startup
+  keeps free, by default a tenth of the pool and at least 4 GiB as before (#165); Flash Next's chain kernel takes
+  5-17% less time at 2 to 8 rows, with the same bits. Thanks to @Mirrdhyn, @MiaAI-Lab, @jschmied and @eleqtrizit.
+- **Server:** chunked request bodies are decoded before JSON parsing (#244); `/tokenize` and `/detokenize` carry
+  vLLM's fields (#237); `chat_template_kwargs.thinking` is heard as `enable_thinking`, and GLM-5.3 keeps earlier
+  turns' reasoning (#236); streaming usage gets its own chunk when `stream_options.include_usage` asks for it (#216);
+  malformed tool-call history renders safely (#233); `/metrics` times each request's decode (#269); `/health` carries
+  the live decode and prefill speed. Thanks to @JordiPosthumus, @MiaAI-Lab, @salmanarshad321 and @sxuff.
+- **Fixes:** an EXL3 layer with no bias no longer faults in the split-K reduction (#186); an 8-bit `lm_head` keeps its
+  format in Qwen3.6's MTP draft head on CUDA (#270); a lone Flash Next stream's cache growth on CUDA stays inside the
+  explicit memory budget; two ranks refuse to start with different prompt rows. Thanks to @barelyworkingcode and
+  @BHCC2025.
+- **Models moved to the TensorFold Hugging Face org.** `Vontra/<name>` ids redirect, and the tree now names
+  `TensorFold/<name>`.
+- **Contributing.** `CONTRIBUTING.md` says what a pull request needs to land and how it lands, and new pull requests
+  open with a receipt template.
+
 ## 0.6.2 (2 Oct 2026)
 
 - **Flash Next on Macs at 64k-128k.** On an M3 Ultra, one stream runs 1.2-3.4% faster at 64k and 3.9-5.5% at 128k,
