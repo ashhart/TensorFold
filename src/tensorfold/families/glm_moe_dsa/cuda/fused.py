@@ -51,6 +51,7 @@ MTP_MODES = ("raw/raw", "raw/normed", "normed/raw", "normed/normed",
              "raw/raw:full", "raw/normed:full", "normed/raw:full", "normed/normed:full",   # ":full": full-vocab drafts
              "dflash", "auto")                    # DFlash2 drafter (dflash.py); auto: MTP or DFlash2 each round
 FAST_ROWS = 16           # windows up to this many rows reduce over RoCE (when available); prompt chunks use NCCL
+DECODE_ROWS = 32         # widest decode window (Buffers(decode=True)): concurrent DFlash2 rounds, 4 streams x 8 rows
 DRAFT_VOCAB = int(os.environ.get("TF_GLM53_DRAFT_VOCAB", "32768"))  # draft head: the lowest ids (BPE: most frequent)
 SPECIALS = 128           # ... plus the vocabulary's last ids (GLM's special tokens)
 TUNE = os.environ.get("TF_GLM53_TUNE", "1") != "0"
@@ -574,14 +575,21 @@ class Rows:
 
 
 class Buffers:
-    """Scratch for windows of up to ``rows`` rows (sliced [:R]); ``score_cols``: the indexer's widest key range."""
+    """Scratch for windows of up to ``rows`` rows (sliced [:R]); ``score_cols``: the indexer's widest key range.
+    ``decode``: every window these buffers serve is a decode / verify window, whatever its width (up to DECODE_ROWS):
+    the RoCE one-shot (or all-gather + rank-order sum) reductions, the decode attention tiling and the head buffers
+    of a lone request's windows, so a row keeps its bits however many rows share the window. Otherwise (prompt
+    chunks) only windows up to FAST_ROWS rows are decode windows."""
 
-    def __init__(self, w: Weights, rows: int, score_cols: int) -> None:
+    def __init__(self, w: Weights, rows: int, score_cols: int, decode: bool = False) -> None:
         c, dev = w.cfg, w.device
         bf, f32 = torch.bfloat16, torch.float32
         D, H = c.hidden_size, w.heads
         lw, rd, qd = c.kv_lora_rank, c.qk_rope_head_dim, c.qk_nope_head_dim + c.qk_rope_head_dim
         self.rows, self.score_cols = rows, score_cols
+        if decode and rows > DECODE_ROWS:
+            raise ValueError(f"decode windows of {rows} rows: at most {DECODE_ROWS}")
+        self.small = max(rows, FAST_ROWS) if decode else FAST_ROWS     # windows up to this many rows: decode class
         self.ws = x3prefill.Workspace(_UNPACK_CACHE)
         self.ids = torch.zeros((rows,), dtype=torch.long, device=dev)
         self.hin = torch.zeros((rows, D), dtype=bf, device=dev)          # MTP: the hidden rows it reads
@@ -593,7 +601,7 @@ class Buffers:
         self.q = torch.empty((rows, H * qd), dtype=bf, device=dev)
         self.qlat = torch.empty((rows, H, lw), dtype=bf, device=dev)
         self.qrot = torch.empty((rows, H, rd), dtype=bf, device=dev)
-        slots = max(c.index_topk // ATTN_DECODE[0] * min(rows, FAST_ROWS), c.index_topk // ATTN_PROMPT[0] * rows)
+        slots = max(c.index_topk // ATTN_DECODE[0] * min(rows, self.small), c.index_topk // ATTN_PROMPT[0] * rows)
         slots *= w.dcp                                   # DCP: partials for every rank's heads
         if w.dcp > 1:
             G = w.dcp
@@ -601,7 +609,7 @@ class Buffers:
             self.qall = torch.empty((G, rows, H, lw + rd), dtype=bf, device=dev)
             self.osend = torch.empty((G * rows * H * lw,), dtype=bf, device=dev)
             self.lsend = torch.empty((G * rows * H,), dtype=f32, device=dev)
-            fan = G if rows <= FAST_ROWS else 1          # decode windows exchange by all-gather (G x the bytes)
+            fan = G if rows <= self.small else 1          # decode windows exchange by all-gather (G x the bytes)
             self.orecv = torch.empty((fan * G * rows * H * lw,), dtype=bf, device=dev)
             self.lrecv = torch.empty((fan * G * rows * H,), dtype=f32, device=dev)
             self.cnt = torch.zeros((rows,), dtype=torch.int32, device=dev)
@@ -638,17 +646,17 @@ class Buffers:
         # partials
         self.part = torch.empty((rows, D), dtype=f32, device=dev)
         self.red = torch.empty((rows, D), dtype=f32, device=dev)
-        self.hpart = torch.empty((rows, D), dtype=bf, device=dev) if rows > FAST_ROWS else None   # prompt halves
-        self.hred = torch.empty((rows, D), dtype=bf, device=dev) if rows > FAST_ROWS else None
-        self.amax = torch.zeros((min(rows, FAST_ROWS), 4), dtype=f32, device=dev)
-        self.amax_all = torch.zeros((w.world * min(rows, FAST_ROWS) * 4,), dtype=f32, device=dev)
+        self.hpart = torch.empty((rows, D), dtype=bf, device=dev) if rows > self.small else None   # prompt halves
+        self.hred = torch.empty((rows, D), dtype=bf, device=dev) if rows > self.small else None
+        self.amax = torch.zeros((min(rows, self.small), 4), dtype=f32, device=dev)
+        self.amax_all = torch.zeros((w.world * min(rows, self.small) * 4,), dtype=f32, device=dev)
         self.gath = torch.empty((w.world * rows * D,), dtype=f32, device=dev)
         # heads
         self.hidden = torch.empty((rows, D), dtype=bf, device=dev)
         self.taps = (torch.zeros((rows, len(w.tap_slot) * D), dtype=bf, device=dev) if w.tap_slot else None)
         self.fnormed = torch.empty((rows, D), dtype=bf, device=dev)
         V = w.lm_head.shape[0]
-        hr = min(rows, FAST_ROWS)            # head rows: a window's, or a prompt chunk's last one
+        hr = min(rows, self.small)           # head rows: a window's, or a prompt chunk's last one
         self.lpart = torch.empty((hr, V), dtype=f32, device=dev)
         self.lgath = torch.empty((w.world * hr * V,), dtype=f32, device=dev)
         self.logits = torch.empty((hr, V * w.world), dtype=f32, device=dev)
@@ -674,10 +682,10 @@ def gather(w: Weights, b: Buffers, R: int) -> torch.Tensor:
     d = b.part.shape[1]
     if w.world == 1:
         return b.part[:R].view(1, R, d)
-    if w.fast is not None and R <= FAST_ROWS:
+    if w.fast is not None and R <= b.small:
         w.fast.all_reduce(b.part[:R], b.red[:R])
         return b.red[:R].view(1, R, d)
-    if R > FAST_ROWS and PREFILL_REDUCE == "ring" and hasattr(w.comm, "all_reduce"):
+    if R > b.small and PREFILL_REDUCE == "ring" and hasattr(w.comm, "all_reduce"):
         # prompt chunks: NCCL's ring all-reduce of bf16 partials (ranks alike; not row-invariant, prompts need not be)
         h = b.part[:R].to(torch.bfloat16)
         hs = torch.empty_like(h)
@@ -743,7 +751,7 @@ def select(w: Weights, b: Buffers, icache: torch.Tensor, pos: torch.Tensor, R: i
         mine = torch.full((n, K), -9223372036854775807, dtype=torch.int64, device=sc.device)
         mine[:, :kk] = topk.top_keys(sc, kk) if RADIX else torch.topk(sc, kk, dim=-1, sorted=False).values
         allc = b.cand[:dcp * n * K].view(dcp, n, K)
-        dcp_gather(w, mine, allc, n <= FAST_ROWS)
+        dcp_gather(w, mine, allc, n <= b.small)
         cand = allc.permute(1, 0, 2).reshape(n, dcp * K)
         top = topk.top_keys(cand, K) if RADIX else torch.topk(cand, K, dim=-1, sorted=False).values
         gpos = 0x7FFFFFFF - (top & 0xFFFFFFFF)                                  # global positions, int64
@@ -774,7 +782,7 @@ def _attention_dcp(w: Weights, b: Buffers, R: int, cache, pos, nch, chk, kt, nw,
     send each head's normalized partial and log-sum-exp to the rank that owns the head, merge in rank order -> b.ol."""
     c, H, G, rank = w.cfg, w.heads, w.dcp, w.rank
     lw, rd, nope = c.kv_lora_rank, c.qk_rope_head_dim, c.qk_nope_head_dim
-    small = R <= FAST_ROWS
+    small = R <= b.small
     qp = b.qpack[:R]
     qp[:, :, :lw].copy_(b.qlat[:R])
     qp[:, :, lw:].copy_(b.qrot[:R])
@@ -848,7 +856,7 @@ def attention_part(w: Weights, L: Layer, b: Buffers, R: int, cache: torch.Tensor
         _absorb[(H, lw // 32, triton.cdiv(R, rbk))](b.q, L.extra["wk"], w.inv, b.qlat, b.qrot, pos, R, H=H,
                                                     QD=nope + rd, NOPE=nope, NOPE_P=triton.next_power_of_2(nope),
                                                     RD=rd, LW=lw, BN=32, RBK=rbk, ROWS=rows, num_warps=4)
-    chk, kt, nw, ns = ATTN_DECODE if R <= FAST_ROWS else ATTN_PROMPT
+    chk, kt, nw, ns = ATTN_DECODE if R <= b.small else ATTN_PROMPT
     nch = max(1, c.index_topk // chk)
     if dcp > 1:
         _attention_dcp(w, b, R, cache, pos, nch, chk, kt, nw, ns)

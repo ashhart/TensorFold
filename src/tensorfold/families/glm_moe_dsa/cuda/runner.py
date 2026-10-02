@@ -128,9 +128,9 @@ class Runner:
 
             self.cap = Capture(os.environ["TF_GLM53_CAPTURE_DIR"], len(w.tap_slot), w.cfg.hidden_size)
         self.vrows = max(k + 1, int(os.environ.get("TF_GLM53_VERIFY_ROWS", "8")) if w.tap_slot else 1)
-        self.vb = fused.Buffers(w, self.vrows, max(cols, 1))                    # verify windows
-        self.mb = (fused.Buffers(w, max(k + 1, self.vrows), max(cols, 1))          # MTP windows (+ a backlog of
-                   if k else None)                                                # rows DFlash2 rounds kept)
+        self.vb = fused.Buffers(w, self.vrows, max(cols, 1), decode=True)       # verify windows
+        self.mb = (fused.Buffers(w, max(k + 1, self.vrows), max(cols, 1), decode=True)   # MTP windows (+ a backlog
+                   if k else None)                                                # of rows DFlash2 rounds kept)
         self.prompt_rows = PROMPT_ROWS if w.dcp == 1 else min(PROMPT_ROWS, 1024)      # DCP: room for the long cache
         self.pb = fused.Buffers(w, self.prompt_rows, max(capacity, 1))            # prompt chunks (exact key range)
         self.overlap = (fused.PROMPT_OVERLAP and w.world > 1 and hasattr(w.comm, "all_reduce")

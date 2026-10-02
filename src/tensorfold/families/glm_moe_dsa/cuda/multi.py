@@ -1,29 +1,43 @@
-"""Full GLM-5.3's concurrent streams (Phase A of docs/design/glm-moe-dsa-concurrency.md): up to N requests decoded
-together, MTP drafts, every stream's reply token-identical to the same request alone.
+"""Full GLM-5.3's concurrent streams (docs/design/glm-moe-dsa-concurrency.md): up to N requests decoded together, each
+with MTP drafts, DFlash2 drafts or both (auto), every stream's reply token-identical to the same request alone.
 
 Each stream owns a slot of the Runner's caches (``fused.State(slots=N)``: N streams' rows back to back). A decode round
-packs every live stream's [pending token, k MTP drafts] into one verify window (4 streams x 3 rows = 12 <= FAST_ROWS,
-so the RoCE one-shot reductions, decode tilings and rank-order sums of a lone request apply unchanged); the fused
-kernels read each row's position and cache base from int32 device tables (``fused.Rows``) copied in before the call or
-graph replay, so a row computes exactly what it computes alone. The MTP chain runs batched too: the first step takes
-every drafting stream's backlog rows (target hiddens of the rows its last round kept), steps 2..k one row a stream.
-Prompts fill one chunk per round between decode rounds, with the chunking a lone request uses (prompt chunks are not
-row-invariant, so the chunk boundaries must match) and the one-stream kernels on the stream's slot (``State.view``).
+packs every live stream's [pending token, drafts] into one verify window - up to 4 MTP streams x 3 rows, or 4 DFlash2
+streams x 8 rows = 32 rows. Every window of these buffers is a decode window whatever its width
+(``fused.Buffers(decode=True)``: the RoCE one-shot or all-gather + rank-order reductions, the decode attention tiling
+and head buffers of a lone request's windows), and the fused kernels read each row's position and cache base from
+int32 device tables (``fused.Rows``) copied in before the call or graph replay, so a row computes exactly what it
+computes alone. The MTP chain runs batched: the first step takes every MTP-keeping stream's backlog rows (target
+hiddens of the rows its last round kept: up to 8 for an auto stream after a DFlash2 round), steps 2..k one row a
+drafting stream. DFlash2 runs batched too (``dflash.MultiDrafter``: one block pass for every DFlash2 stream, a ring a
+stream, one context update for every stream's kept taps). Prompts fill one chunk per round between decode rounds, with
+the chunking a lone request uses (prompt chunks are not row-invariant, so the chunk boundaries must match) and the
+one-stream kernels on the stream's slot (``State.view``); a DFlash2 stream's chunks also feed its drafter context.
+
+Modes per request: serial (no drafts), MTP (``k`` drafts a round), DFlash2 (up to the block - 1 drafts, cut by the
+chain's confidence; DFLASH_CFG / TF_GLM53_DFLASH_DEPTH / _CONFIDENCE as the one-stream path reads them), auto (each
+round MTP or DFlash2 per stream, whichever has been emitting more tokens a second; both stay current).
 
 Graphs: keyed by the window's shape (rows, streams, MTP step, key bucket, pick), captured on first use; the position
 and base tables are static buffers, so one graph serves every position mix of that shape.
 
-TP: rank 0 decides (admission, fills, rounds) and samples; ranks 1..3 follow its messages - ADMIT (+ prompt), FILL
-(+ the first token), ROUND (+ each stream's kept tokens), DONE - one fixed-size all-gather each, and run the same GPU
-work. Follower ranks never sample, so their host work is small and they cannot disagree with rank 0.
+TP: rank 0 decides (admission, fills, rounds, arms) and samples; ranks 1..3 follow its messages - ADMIT (+ prompt),
+FILL (+ the first token), ROUND (+ each stream's kept tokens), DONE - one fixed-size all-gather each, and run the same
+GPU work. DFlash2 drafts are computed on every rank from identical gathered candidates (as the one-stream path does),
+so the window layout agrees without another message. Follower ranks never sample the target, so their host work is
+small and they cannot disagree with rank 0.
 
 Credits: the follower protocol and round structure follow TensorFold's families/qwen3_5/cuda/multi.py; per-row
-positions and per-stream cache bases follow MiaAI-Lab's GLM-5.3-Flash multi-stream patches (Apache-2.0: 0029
-glm-multi-dsa, 0030 glm-multi-stream-engine, 0035 glm-multi-rounds, 0049 glm-multi-prefill).
+positions, per-stream cache bases and the multi-stream DFlash2 drafter follow MiaAI-Lab's GLM-5.3-Flash multi-stream
+patches (Apache-2.0: 0027 glm-multi-dflash2, 0029 glm-multi-dsa, 0030 glm-multi-stream-engine, 0035 glm-multi-rounds,
+0049 glm-multi-prefill).
 """
 
 from __future__ import annotations
 
+import json
+import os
+import struct
 import time
 from typing import Callable
 
@@ -35,6 +49,36 @@ from . import fused
 
 ADMIT, ROUND, DONE, FILL = 1, 2, 3, 4      # rank 0's messages (an empty message: stop following)
 MSG = 128                                  # ints a one-shot message carries (longer ones take a second all-gather)
+SERIAL, MTP, DFLASH, AUTO = 0, 1, 2, 3     # a stream's mode
+NONE, ARM_M, ARM_F = 0, 1, 2               # a stream's drafts this round
+ITEM = 9                                   # ints a round's plan carries a stream
+PROBE = int(os.environ.get("TF_GLM53_AUTO_PROBE", "16"))
+
+
+def _f64_ints(x: float) -> list[int]:
+    bits = int.from_bytes(struct.pack("<d", float(x)), "little")
+    return [bits & 0x7FFFFFFF, (bits >> 31) & 0x7FFFFFFF, bits >> 62]
+
+
+def _ints_f64(a: int, b: int, c: int) -> float:
+    return struct.unpack("<d", (a | (b << 31) | (c << 62)).to_bytes(8, "little"))[0]
+
+
+def _pack_sampling(s) -> list[int]:
+    if s is None:
+        return [0] * 13
+    seed = int(s.seed) & 0xFFFFFFFFFFFFFFFF
+    return [seed & 0x7FFFFFFF, (seed >> 31) & 0x7FFFFFFF, seed >> 62, *_f64_ints(s.temperature), int(s.top_k),
+            *_f64_ints(s.top_p), *_f64_ints(s.min_p)]
+
+
+def _unpack_sampling(v: list[int]):
+    from tensorfold.engine.exact_sampling import Sampling
+
+    t = _ints_f64(*v[3:6])
+    if t <= 0:
+        return None
+    return Sampling((v[2] << 62) | (v[1] << 31) | v[0], t, v[6], _ints_f64(*v[7:10]), _ints_f64(*v[10:13]))
 
 
 class GlmMultiDecoder:
@@ -42,49 +86,67 @@ class GlmMultiDecoder:
 
     def __init__(self, runner, *, rank: int, world: int, comm, limit: int, eos: tuple[int, ...],
                  sample: Callable | None = None) -> None:
-        """``sample(logits [1, V], position, sampling) -> token`` (rank 0; sampling None: greedy)."""
+        """``sample(logits [1, V], position, sampling) -> token`` (rank 0; sampling None: greedy). A DFlash2 drafter
+        on the runner (``runner.drafter``) enables DFlash2 and auto requests."""
         w = runner.w
         self.runner, self.w, self.st = runner, w, runner.st
         self.N, self.k = runner.st.slots, runner.k
         self.rank, self.world, self.comm = rank, world, comm
         self.limit, self.eos, self.sample = limit, tuple(eos), sample
         self.local = runner.st.local
-        rows = self.N * (self.k + 1)
-        if rows > fused.FAST_ROWS:
-            raise ValueError(f"{self.N} streams x {self.k + 1} rows = {rows} > {fused.FAST_ROWS}: a window that wide "
-                             "would leave the decode reductions and tilings a lone request uses (lower --parallel or "
-                             "--mtp-drafts)")
+        N, k = self.N, self.k
+        self.dr = None
+        self.frows = 0                             # rows a DFlash2 stream's window may take (pending + drafts)
+        if runner.drafter is not None:
+            from .dflash import MultiDrafter
+
+            self.frows = min(runner.drafter.block, fused.DECODE_ROWS // N)
+            if self.frows >= 2:
+                self.dr = MultiDrafter(runner.drafter, N)
+            else:
+                self.frows = 0
+        rows = N * max(k + 1, self.frows)
+        if rows > fused.DECODE_ROWS:
+            raise ValueError(f"{N} streams x {max(k + 1, self.frows)} rows = {rows} > {fused.DECODE_ROWS}: a "
+                             "window that wide is not a decode window (lower --parallel or --mtp-drafts)")
+        self.BL = max(k + 1, self.frows if k else 0)     # MTP backlog rows a stream (auto: a DFlash2 round's kept rows)
+        self.MR = N * self.BL                            # widest first MTP step
         dev = w.device
         self.rows = rows
-        self.vb = fused.Buffers(w, rows, runner.cols)
-        self.mb = fused.Buffers(w, rows, runner.cols) if self.k else None
+        self.vb = fused.Buffers(w, rows, runner.cols, decode=True)
+        self.mb = fused.Buffers(w, max(self.MR, rows), runner.cols, decode=True) if k else None
         D = w.cfg.hidden_size
-        self.bh = torch.zeros((self.N * (self.k + 1), D), dtype=torch.bfloat16, device=dev)   # MTP backlog hiddens
-        self.bt = torch.zeros((self.N * (self.k + 1),), dtype=torch.long, device=dev)        # ... and tokens
+        self.bh = torch.zeros((max(self.MR, 1), D), dtype=torch.bfloat16, device=dev)   # MTP backlog hiddens
+        self.bt = torch.zeros((max(self.MR, 1),), dtype=torch.long, device=dev)         # ... and tokens
         # the round's tables: target (pos, base, ids) then per MTP step j (pos, base, last rows, verify slots), then
         # the backlog rows step 1 gathers
-        R, N = rows, self.N
+        R, M = rows, max(self.MR, 1)
         o = {"vpos": 0, "vbase": R, "vids": 2 * R}
         at = 3 * R
-        for j in range(1, self.k + 1):
-            o[f"mpos{j}"], o[f"mbase{j}"], o[f"last{j}"], o[f"vdst{j}"] = at, at + R, at + 2 * R, at + 2 * R + N
-            at += 2 * R + 2 * N
+        for j in range(1, k + 1):
+            o[f"mpos{j}"], o[f"mbase{j}"], o[f"last{j}"], o[f"vdst{j}"] = at, at + M, at + 2 * M, at + 2 * M + N
+            at += 2 * M + 2 * N
         o["src"] = at
-        at += R
+        at += M
         self.off, self.tab_n = o, at
         self.t64 = torch.zeros((at,), dtype=torch.long, device=dev)
         self.t32 = torch.zeros((at,), dtype=torch.int32, device=dev)
         t32 = lambda name, n: self.t32[o[name]:o[name] + n]          # noqa: E731
         self.vrows = fused.Rows(self.st, t32("vpos", R), t32("vbase", R), None, None)
-        self.mrows = {j: fused.Rows(self.st, None, None, t32(f"mpos{j}", R), t32(f"mbase{j}", R))
-                      for j in range(1, self.k + 1)}
-        self.views = [self.st.view(s) for s in range(self.N)]
-        self.free = list(range(self.N))
+        self.mrows = {j: fused.Rows(self.st, None, None, t32(f"mpos{j}", M), t32(f"mbase{j}", M))
+                      for j in range(1, k + 1)}
+        self.views = [self.st.view(s) for s in range(N)]
+        self.samp: list = [None] * N               # each slot's sampling (every rank: DFlash2 chains use the seed)
+        self.free = list(range(N))
         self.streams: dict[int, Stream] = {}      # decoding
         self.filling: list[Stream] = []           # admitted, prompt chunks left (oldest first)
         self.next_id = 0
         self.broken: Exception | None = None
         self.rounds = 0
+        self.widest = 0                           # the widest verify window so far (rows)
+        self._cfg, self._cfg_t = (7, 0.4), -1.0
+        if self.dr is not None and runner.G.enabled:
+            self.dr.capture()                     # every rank together (its passes gather over the ranks)
 
     # -------------------------------------------------------------------------------------------- messages ---
     def _share(self, values: list[int] | None) -> list[int]:
@@ -130,7 +192,17 @@ class GlmMultiDecoder:
         return len(self.streams) + len(self.filling)
 
     def nbytes_per_stream(self) -> int:
-        return self.st.nbytes() // self.N
+        return self.st.nbytes() // self.N + (self.dr.nbytes() // self.N if self.dr is not None else 0)
+
+    def _mode(self, draft) -> int:
+        """A request's ``draft``: False (serial), True or an MTP mode (MTP drafts), "dflash" or "auto"."""
+        if not draft:
+            return SERIAL
+        if draft in ("dflash", "auto"):
+            if self.dr is None:
+                raise ValueError(f"mtp mode {draft!r}: no DFlash2 drafter loaded (TF_GLM53_DFLASH)")
+            return AUTO if draft == "auto" and self.k else DFLASH
+        return MTP if self.k else SERIAL
 
     @torch.no_grad()
     def admit(self, s: Stream) -> None:
@@ -140,6 +212,7 @@ class GlmMultiDecoder:
             raise ValueError(f"prompt of {len(s.prompt)} tokens: this engine serves contexts up to {self.limit}")
         if not self.free:
             raise RuntimeError("no free stream slot (the scheduler admits at most --parallel streams)")
+        mode = self._mode(s.draft)
         s.count = max(1, min(int(s.count), self.limit - len(s.prompt)))
         s.sid = self.next_id
         self.next_id += 1
@@ -147,19 +220,26 @@ class GlmMultiDecoder:
         if temp <= 0:
             s.sampling = None
         slot = self.free.pop(0)
-        self._send([ADMIT, s.sid, slot, int(s.draft and self.k > 0), int(s.sampling is not None)])
+        self._send([ADMIT, s.sid, slot, mode, int(s.sampling is not None), *_pack_sampling(s.sampling)])
         self._send(list(s.prompt))
-        self._queue(s, slot)
+        self._queue(s, slot, mode)
 
-    def _queue(self, s: Stream, slot: int) -> None:
-        s.slot = slot
+    def _queue(self, s: Stream, slot: int, mode: int) -> None:
+        s.slot, s.mode = slot, mode
         s.chunks = self.runner.chunks(len(s.prompt))
         s.ci = 0
         s.toks = torch.tensor(s.prompt, dtype=torch.long, device=self.w.device)
+        s.ema, s.since = {"m": None, "f": None}, {"m": 0, "f": 0}
+        self.samp[slot] = s.sampling
+        if self.dr is not None:
+            self.dr.reset(slot)
         self.filling.append(s)
 
-    def _d(self, s: Stream) -> int:
-        return self.k if s.draft and self.k else 0
+    def _keeps_mtp(self, mode: int) -> bool:
+        return mode in (MTP, AUTO) and self.k > 0
+
+    def _taps(self, mode: int) -> bool:
+        return mode in (DFLASH, AUTO) and self.dr is not None
 
     # ------------------------------------------------------------------------------------------------ fill ---
     def _fill(self) -> list[Stream]:
@@ -187,14 +267,17 @@ class GlmMultiDecoder:
 
     def _chunk(self, s: Stream, a: int, e: int):
         s.ci += 1
-        return self.runner.prefill_chunk(self.views[s.slot], s.toks, a, e, len(s.prompt))
+        lg = self.runner.prefill_chunk(self.views[s.slot], s.toks, a, e, len(s.prompt))
+        if self._taps(s.mode):                    # the drafter's context: this chunk's committed taps
+            self.dr.commit([(s.slot, self.runner.pb.taps[:e - a])])
+        return lg
 
     def _start(self, s: Stream, tok: int) -> None:
         """Prompt done: the pending token at P = len(prompt); the MTP backlog (carry = hidden P - 1, token)."""
         L0 = len(s.prompt)
         s.P, s.tok, s.m = L0, tok, 1
         if self.k:
-            i = s.slot * (self.k + 1)
+            i = s.slot * self.BL
             self.bh[i].copy_(self.runner.carry)
             self.bt[i:i + 1].fill_(tok)
         s.toks = None
@@ -203,6 +286,46 @@ class GlmMultiDecoder:
         self.streams[s.sid] = s
 
     # ----------------------------------------------------------------------------------------------- rounds ---
+    def _dflash_cfg(self) -> tuple[int, float]:
+        """Rank 0: (depth, confidence) as the one-stream path reads them (env, then the DFLASH_CFG file; re-read at
+        most once a second), the depth capped by the rows a stream's window may take."""
+        now = time.perf_counter()
+        if now - self._cfg_t >= 1.0:
+            self._cfg_t = now
+            from .runner import PROFILE_FLAG
+
+            cfg = {"depth": int(os.environ.get("TF_GLM53_DFLASH_DEPTH", "7")),
+                   "confidence": float(os.environ.get("TF_GLM53_DFLASH_CONFIDENCE", "0.4"))}
+            try:
+                cfg.update(json.loads(open(os.path.dirname(PROFILE_FLAG) + "/DFLASH_CFG").read()))
+            except (OSError, ValueError):
+                pass
+            self._cfg = (int(cfg["depth"]), float(cfg["confidence"]))
+        depth, conf = self._cfg
+        return min(self.runner.drafter.block - 1, self.frows - 1, depth), conf
+
+    def _arm(self, s: Stream) -> int:
+        """Rank 0: this round's drafts for a decoding stream (auto: the arm emitting more tokens a second, with a
+        probe of the other every PROBE rounds - the one-stream auto rule, per stream)."""
+        if s.mode == MTP:
+            return ARM_M
+        if s.mode == DFLASH:
+            return ARM_F
+        if s.mode != AUTO:
+            return NONE
+        ema, since = s.ema, s.since
+        if ema["m"] is None or ema["f"] is None:
+            arm = "m" if ema["m"] is None else "f"
+        else:
+            arm = "m" if ema["m"] >= ema["f"] else "f"
+            other = "f" if arm == "m" else "m"
+            if since[other] >= PROBE:
+                arm = other
+        since[arm] = 0
+        since["f" if arm == "m" else "m"] += 1
+        s.last_arm = arm
+        return ARM_M if arm == "m" else ARM_F
+
     @torch.no_grad()
     def round(self) -> list[Stream]:
         """A prompt chunk for the oldest queued prompt, then one decode round over the decoding streams; returns the
@@ -212,11 +335,19 @@ class GlmMultiDecoder:
         live = [s for s in self.streams.values() if not s.done]
         if not live:
             return done
-        plan = [(s.sid, s.slot, s.P, s.tok, s.m, self._d(s), int(s.sampling is not None)) for s in live]
-        self._send([ROUND, len(plan), *[x for item in plan for x in item]])
+        t0 = time.perf_counter()
+        depth, conf = self._dflash_cfg() if self.dr is not None else (0, 0.0)
+        cap = self.runner.capacity
+        plan = []
+        for s in live:
+            arm = self._arm(s)
+            room = (self.k if arm == ARM_M else
+                    max(0, min(depth, s.count - len(s.out) - 1, cap - s.P - 1)) if arm == ARM_F else 0)
+            plan.append((s.sid, s.slot, s.P, s.tok, s.m, s.mode, arm, room, int(s.sampling is not None)))
+        self._send([ROUND, len(plan), *_f64_ints(conf), *[x for item in plan for x in item]])
         try:
-            offs, R = self._gpu(plan)
-            results = self._picks(plan, live, offs, R)
+            offs, R, ds = self._gpu(plan, conf)
+            results = self._picks(plan, live, offs, ds)
             self._send([x for n, emit in results for x in (n, len(emit), *emit)])
             self._commit(plan, offs, results)
         except Exception as exc:
@@ -224,8 +355,9 @@ class GlmMultiDecoder:
                 self.broken = exc
             raise
         self.rounds += 1
-        for s, item, (n, emit) in zip(live, plan, results):
-            s.counted(1 + item[5])
+        dt = time.perf_counter() - t0
+        for s, item, d, (n, emit) in zip(live, plan, ds, results):
+            s.counted(1 + d)
             new = []
             for t in emit:                                   # a lone request's room: its count, its end tokens
                 if len(s.out) + len(new) >= s.count:
@@ -234,58 +366,85 @@ class GlmMultiDecoder:
                 if t in self._ends(s):
                     break
             s.P, s.tok, s.m = s.P + n + 1, emit[-1], n + 1
+            if s.mode == AUTO:
+                arm = s.last_arm
+                rate = (n + 1) / max(dt, 1e-6)
+                s.ema[arm] = rate if s.ema[arm] is None else 0.8 * s.ema[arm] + 0.2 * rate
+                s.arms = getattr(s, "arms", "") + arm
             s.take(new, self._ends(s))
         return done + [s for s in live if s.done]
 
     def _ends(self, s: Stream) -> tuple[int, ...]:
         return self.eos if s.stop_eos else ()
 
-    def _gpu(self, plan) -> tuple[list[int], int]:
-        """Every rank: the round's tables, the batched MTP chain, the verify window. Returns row offsets and R."""
+    def _gpu(self, plan, conf: float) -> tuple[list[int], int, list[int]]:
+        """Every rank: the DFlash2 drafts, the round's tables, the batched MTP chain, the verify window. Returns row
+        offsets, R and each stream's drafted rows."""
         w, rn, k, o = self.w, self.runner, self.k, self.off
-        vb, mb = self.vb, self.mb
+        vb = self.vb
+        drafts: dict[int, list[int]] = {}
+        reqs = [(i, (slot, tok, room, self.samp[slot], conf))
+                for i, (sid, slot, P, tok, m, mode, arm, room, _) in enumerate(plan) if arm == ARM_F and room]
+        if reqs:
+            got = self.dr.propose([r for _, r in reqs])
+            drafts = {i: d for (i, _), d in zip(reqs, got)}
         tab = [0] * self.tab_n
-        offs, r = [], 0
-        for sid, slot, P, tok, m, d, _ in plan:
+        offs, ds, r = [], [], 0
+        for i, (sid, slot, P, tok, m, mode, arm, room, _) in enumerate(plan):
+            d = room if arm == ARM_M else len(drafts.get(i, ()))
             offs.append(r)
-            for i in range(1 + d):
-                tab[o["vpos"] + r + i] = P + i
-                tab[o["vbase"] + r + i] = slot * self.local
+            ds.append(d)
+            for j in range(1 + d):
+                tab[o["vpos"] + r + j] = P + j
+                tab[o["vbase"] + r + j] = slot * self.local
             tab[o["vids"] + r] = tok
+            for j, t in enumerate(drafts.get(i, ())):
+                tab[o["vids"] + r + 1 + j] = t
             r += 1 + d
         R = r
-        drafting = [(item, off) for item, off in zip(plan, offs) if item[5]]
-        S = len(drafting)
-        M = 0
-        if S:
-            for si, ((sid, slot, P, tok, m, d, _), off) in enumerate(drafting):
+        self.widest = max(self.widest, R)
+        keep = [(item, off) for item, off in zip(plan, offs) if self._keeps_mtp(item[5])]
+        S = M = 0
+        Tm = None
+        if keep:
+            for (sid, slot, P, tok, m, mode, arm, room, _), off in keep:
                 for i in range(m):
                     tab[o["mpos1"] + M] = P - m + i
                     tab[o["mbase1"] + M] = slot * self.local
-                    tab[o["src"] + M] = slot * (k + 1) + i
+                    tab[o["src"] + M] = slot * self.BL + i
                     M += 1
-                tab[o["last1"] + si] = M - 1
-                tab[o["vdst1"] + si] = off + 1
+                if arm != ARM_M or not room:
+                    continue
+                tab[o["last1"] + S] = M - 1
+                tab[o["vdst1"] + S] = off + 1
                 for j in range(2, k + 1):
-                    tab[o[f"mpos{j}"] + si] = P + j - 2
-                    tab[o[f"mbase{j}"] + si] = slot * self.local
-                    tab[o[f"last{j}"] + si] = si
-                    tab[o[f"vdst{j}"] + si] = off + j
+                    tab[o[f"mpos{j}"] + S] = P + j - 2
+                    tab[o[f"mbase{j}"] + S] = slot * self.local
+                    tab[o[f"last{j}"] + S] = S
+                    tab[o[f"vdst{j}"] + S] = off + j
+                S += 1
+            Tm = rn._T(max(item[2] for item, _ in keep) + k)
         self.t64.copy_(torch.tensor(tab, dtype=torch.long))
         self.t32.copy_(self.t64)
         vb.ids[:R].copy_(self.t64[o["vids"]:o["vids"] + R])
-        if S:
+        if M:
+            mb = self.mb
             src = self.t64[o["src"]:o["src"] + M]
             torch.index_select(self.bh, 0, src, out=mb.hin[:M])
             torch.index_select(self.bt, 0, src, out=mb.ids[:M])
-            Tm = rn._T(max(item[2] for item, _ in drafting) + k)
-            for j in range(1, k + 1):
-                self._mtp_step(j, M if j == 1 else S, S, Tm)
-        T = rn._T(max(P + 1 + d for _, _, P, _, _, d, _ in plan))
-        pick = "full" if any(item[6] for item in plan) else "argmax"
-        rows = self.vrows
-        rn.G.run(("mt", R, T, pick), lambda: fused.compute(w, rows, vb, R, T, logits="all", pick=pick))
-        return offs, R
+            if S:
+                for j in range(1, k + 1):
+                    self._mtp_step(j, M if j == 1 else S, S, Tm)
+            else:                                        # auto streams on DFlash2 rounds: their backlog only
+                self._mtp_write(M, Tm)
+        T = rn._T(max(P + 1 + d for (_, _, P, *_), d in zip(plan, ds)))
+        pick = "full" if any(item[8] for item in plan) else "argmax"
+        self._verify(R, T, pick)
+        return offs, R, ds
+
+    def _verify(self, R: int, T: int | None, pick: str) -> None:
+        w, vb, rows = self.w, self.vb, self.vrows
+        self.runner.G.run(("mt", R, T, pick), lambda: fused.compute(w, rows, vb, R, T, logits="all", pick=pick))
 
     def _mtp_step(self, j: int, n: int, S: int, Tm: int | None) -> None:
         w, rn, mb, vb, o = self.w, self.runner, self.mb, self.vb, self.off
@@ -301,13 +460,21 @@ class GlmMultiDecoder:
             torch.index_select(mb.hidden, 0, last, out=mb.hin[:S])
         rn.G.run(("mm", n, S, j, Tm, cn, full), fn)
 
-    def _picks(self, plan, live, offs, R) -> list[tuple[int, list[int]]]:
+    def _mtp_write(self, n: int, Tm: int | None) -> None:
+        """The MTP layer's cache at backlog rows only (no drafts this round)."""
+        w, rn, mb = self.w, self.runner, self.mb
+        cn, rows = rn.chain_normed, self.mrows[1]
+        rn.G.run(("mw", n, Tm, cn), lambda: fused.mtp_compute(w, rows, mb, n, Tm, logits="none", chain_normed=cn))
+
+    def _picks(self, plan, live, offs, ds) -> list[tuple[int, list[int]]]:
         """Rank 0: each stream's target picks along its drafts -> (drafts kept, tokens emitted)."""
         vb = self.vb
+        R = offs[-1] + 1 + ds[-1]
         both = torch.cat([vb.argmax[:R], vb.ids[:R]]).tolist()
         amax, ids = both[:R], both[R:]
         out = []
-        for s, (sid, slot, P, tok, m, d, sampled), off in zip(live, plan, offs):
+        for s, item, off, d in zip(live, plan, offs, ds):
+            P, sampled = item[2], item[8]
             drafts = ids[off + 1:off + 1 + d]
             if not sampled:
                 picks = amax[off:off + 1 + d]
@@ -324,16 +491,22 @@ class GlmMultiDecoder:
         return out
 
     def _commit(self, plan, offs, results) -> None:
-        """Every rank: each drafting stream's next MTP backlog - the kept rows' target hiddens and tokens."""
+        """Every rank: each MTP-keeping stream's next backlog (the kept rows' target hiddens and tokens), each
+        DFlash2 stream's kept taps into its drafter context."""
+        if self.dr is not None:
+            items = [(item[1], self.vb.taps[off:off + n + 1])
+                     for item, off, (n, _) in zip(plan, offs, results) if self._taps(item[5])]
+            if items:
+                self.dr.commit(items)
         if not self.k:
             return
         idx, dst, toks = [], [], []
-        for (sid, slot, P, tok, m, d, _), off, (n, emit) in zip(plan, offs, results):
-            if not d:
+        for (sid, slot, P, tok, m, mode, arm, room, _), off, (n, emit) in zip(plan, offs, results):
+            if not self._keeps_mtp(mode):
                 continue
             for i in range(n + 1):
                 idx.append(off + i)
-                dst.append(slot * (self.k + 1) + i)
+                dst.append(slot * self.BL + i)
                 toks.append(emit[i])
         if not idx:
             return
@@ -352,22 +525,30 @@ class GlmMultiDecoder:
 
     @torch.no_grad()
     def prewarm(self) -> None:
-        """Every rank (no messages): capture the windows of 1..N drafting streams with every backlog total (S..S(k+1)
-        MTP rows), in every key bucket, both picks; other mixes (streams without drafts) capture on first use. Caches
-        get scratch values at the positions used; every request writes a position before reading it."""
+        """Every rank (no messages): capture the windows of 1..N MTP-drafting streams with every backlog total
+        (S..S(k+1) MTP rows), and (DFlash2 loaded) verify windows of every width up to the widest, in every key
+        bucket; sampled MTP mixes capture with pick "full", other mixes on first use. Caches get scratch values at
+        the positions used; every request writes a position before reading it."""
         t0 = time.perf_counter()
         rn, k = self.runner, self.k
-        cap = rn.capacity - k - 2
+        cap = rn.capacity - max(k, self.frows) - 2
         before = len(rn.G.graphs)
         for T in rn.buckets():
             P = 10 if T is None else min(T // 2 + 100, cap)
-            if rn._T(P + k + 1) != T:
-                continue
-            for S in range(1, self.N + 1):
-                for M in (range(S, S * (k + 1) + 1) if k else (S,)):
-                    ms = [M // S + (i < M % S) for i in range(S)]
-                    for sampled in ((0, 1) if M == S else (0,)):
-                        self._gpu([(i, i, P, 1000, ms[i], k, sampled) for i in range(S)])
+            if k and rn._T(P + k + 1) == T:
+                for S in range(1, self.N + 1):
+                    for M in range(S, S * (k + 1) + 1):
+                        ms = [M // S + (i < M % S) for i in range(S)]
+                        for sampled in ((0, 1) if M == S else (0,)):
+                            self._gpu([(i, i, P, 1000, ms[i], MTP, ARM_M, k, sampled) for i in range(S)], 0.0)
+            if self.dr is not None and rn._T(P + self.rows) == T:
+                tab = torch.zeros((self.tab_n,), dtype=torch.long)
+                tab[self.off["vpos"]:self.off["vpos"] + self.rows] = torch.arange(P, P + self.rows)
+                self.t64.copy_(tab)
+                self.t32.copy_(self.t64)
+                self.vb.ids.fill_(1000)
+                for R in range(1, self.rows + 1):
+                    self._verify(R, T, "argmax")
         torch.cuda.synchronize()
         print(f"[tensorfold] rank {self.w.rank}: {len(rn.G.graphs) - before} concurrent decode graphs captured in "
               f"{time.perf_counter() - t0:.1f}s", flush=True)
@@ -387,6 +568,7 @@ class GlmMultiDecoder:
                 self.filling = [x for x in self.filling if x is not s]
         if s is not None:
             s.toks = None
+            self.samp[s.slot] = None
             if s.slot not in self.free:
                 self.free.append(s.slot)
                 self.free.sort()
@@ -415,11 +597,11 @@ class GlmMultiDecoder:
                 return
             kind = msg[0]
             if kind == ADMIT:
-                sid, slot, draft, sampled = msg[1:5]
-                s = Stream(self._recv(), 1, None, draft=bool(draft), sid=sid)
+                sid, slot, mode, sampled = msg[1:5]
+                s = Stream(self._recv(), 1, _unpack_sampling(msg[5:18]), sid=sid)
                 s.sampled = bool(sampled)
                 self.free = [x for x in self.free if x != slot]
-                self._queue(s, slot)
+                self._queue(s, slot, mode)
             elif kind == FILL:
                 sid, a, e = msg[1:4]
                 s = next(x for x in self.filling if x.sid == sid)
@@ -427,8 +609,9 @@ class GlmMultiDecoder:
                     self._start(s, self._recv()[0])
             elif kind == ROUND:
                 n = msg[1]
-                plan = [tuple(msg[2 + 7 * i:9 + 7 * i]) for i in range(n)]
-                offs, R = self._gpu(plan)
+                conf = _ints_f64(*msg[2:5])
+                plan = [tuple(msg[5 + ITEM * i:5 + ITEM * (i + 1)]) for i in range(n)]
+                offs, R, ds = self._gpu(plan, conf)
                 flat = self._recv()
                 results, i = [], 0
                 for _ in plan:
