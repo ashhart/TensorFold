@@ -33,3 +33,8 @@ N/A to us: 0009a/c, 0024, 0017/0022, 0006 (decode only), HC/KDA parts.
   use TF_GLM53_PREFILL_REDUCE=rs + TF_GLM53_PROMPT_OVERLAP=0 (the exact rank-order reduce; upstream's planned default).
   Radix top-k / UnpackCache / tuned tiles are bit-exact at kernel level; the any-K MoE prompt kernel (e36a1ea) is not
   (rel 8e-4 vs routed) - prompt-path bits per configuration.
+- 10-01 22:20 prefill-all (radix + UnpackCache + tuned tiles + any-K MoE prompt kernel ON) on 4 Sparks, DCP1, ft7:
+  prefill 4K 840 / 8K 870 / 32K 892 / 128K 675 tok/s (TTFT 4.9 / 9.4 / 36.5 / 193 s) vs baseline 726 / ~773 / 717 / 497.
+  Needles 32K + 128K PASS (needle.py --max-tokens 512; the 32-token default truncates the model's in-content reasoning).
+  Decode @32K unchanged (prose 25.9-27.3, code 30.7-34.4). Down-projection tuning: register epilogue rejected (slower),
+  fp16 accumulation + item ordering added as opt-in (~0.3-0.8 ms / ~1%).
