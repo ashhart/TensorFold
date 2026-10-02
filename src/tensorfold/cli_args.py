@@ -57,6 +57,10 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
                                  "rule. xhigh stays xhigh, so GLM-5.3 renders it as Max")
     generation.add_argument("--thinking-budget", type=int, default=0,
                             help="most thinking tokens before the server closes the think block (0: no limit)")
+    generation.add_argument("--loop-guard", action="store_true",
+                            help="close a think block stuck repeating one short token cycle and let the "
+                                 "reply continue as a thinking-budget close does (runtime.loop and the server "
+                                 "log report the fire; off by default)")
 
     speed = serve.add_argument_group("drafting and caches")
     speed.add_argument("--no-drafts", action="store_true",

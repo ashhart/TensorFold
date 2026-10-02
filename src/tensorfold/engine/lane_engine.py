@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import time
-from typing import Any, Callable, Iterator, Sequence
+from typing import Any, Callable, Iterator, Literal, Sequence
 
 from tensorfold.engine.family_prefill import drain
 from tensorfold.engine.lane_family import FamilyRounds
 from tensorfold.engine.prefill_plan import PrefillPlan, PromptChunks
+
+# the loop guard's latch after its forced close has drained: the fire happened, the
+# reply continued with the model's answer, and no second fire may land in this reply
+FIRED = "fired"
 
 
 class SuffixLookupProposer:
@@ -216,6 +220,12 @@ class LaneStream:
     think_open: bool = False
     force: list[int] = field(default_factory=list)
     stop_check: Callable[[list[int]], bool] | None = None
+    # --loop-guard: fires while think is open (server.loop_guard.LoopGuard); commit() latches the
+    # fire's period here, the family layer converts it to a forced think close, and the finish
+    # lands "loop" when the close drains
+    loop_guard: Any = None
+    loop_stop: int | Literal["fired"] | None = None   # the period, then the FIRED sentinel once the close drains
+    loop: dict[str, int] | None = None
     # a request that must call a tool: its answer opens a call to an offered tool (call_gate.CallGate)
     call_gate: Any = None
     # response_format's grammar (engine.grammar.Constraint): follows every committed token, masks each drawn row
@@ -250,8 +260,10 @@ class LaneStream:
     def think_cut(self, tokens: Sequence[int]) -> int | None:
         """Return the index the thinking budget replaces with ``think_close[0]``, or None if the model already closed the think block."""
 
-        if not self._budget_active():
-            return None
+        if not self._budget_active() or isinstance(self.loop_stop, int):
+            return None    # the guard's close is pending (latched, not yet drained): it owns
+                           # the block. Once the close has drained (FIRED) the user's budget
+                           # re-arms: it bounds any think block the answer re-opens
         for i, token in enumerate(tokens):
             if len(self.emitted) + i + 1 >= self.think_budget:
                 return i
@@ -283,6 +295,28 @@ class LaneStream:
 
         self.finished, self.finish_reason, self.error = True, "error", error
 
+    def convert_loop_fire(self) -> None:
+        """The loop guard latched: close the think block through the forced windows the thinking
+        budget uses; with no close tokens armed the reply ends directly, still labelled."""
+
+        if not isinstance(self.loop_stop, int) or not self.think_open or self.finished:
+            return                  # FIRED (the close already drained): one shot per reply —
+                                    # a re-opened block in the answer never re-closes.
+                                    # The isinstance-before-force order is load-bearing:
+                                    # loop_stop stays int while a required call's fix
+                                    # drains (FIRED lands no earlier than the close
+                                    # draining through commit), so the deferral below
+                                    # still reaches a latched guard
+        if self.force:
+            return          # a required call's fix is still draining; convert once it has landed
+        self.think_open = False
+        if self.think_close:
+            self.force = list(self.think_close)
+        else:
+            self.finished, self.finish_reason = True, "loop"
+            self.loop_stop = FIRED   # no close armed: nothing to continue from; the latch
+                                     # settles so no finish path leaves the transient period
+
     def commit(self, tokens: Sequence[int]) -> list[int]:
         """Append committed tokens until the stream finishes; return what landed."""
 
@@ -306,9 +340,33 @@ class LaneStream:
             if value in self.eos_ids or (self.stop_check is not None and self.stop_check(self.emitted)):
                 self.finished = True
                 self.finish_reason = "stop"
+            elif (self.loop_guard is not None and self.think_open and self.loop_stop is None
+                  and (period := self.loop_guard.check(self.emitted)) is not None):
+                # land the fire token, latch its period, and let the family layer close the
+                # think block through its forced windows (rows stay 1:1); the finish lands
+                # when the close drains
+                self.loop_stop = period
+                self.loop = {"period": period}
+                break
             elif len(self.emitted) >= int(self.max_new_tokens):
+                # the cap is the cap: a cap reached mid-drain cuts the close itself, so
+                # the latch settles to FIRED here (the fire happened; the answer never
+                # started) — no finish path leaves the transient period set
                 self.finished = True
                 self.finish_reason = "length"
+                if self.loop_stop is not None:
+                    self.loop_stop = FIRED
+            elif (self.loop_stop is not None and not self.think_open and not self.force):
+                # the forced think close has drained (this beat may be its last token):
+                # the reply continues as the thinking budget's does — the model answers
+                # from the closed block, and the finish is the answer's own (stop/length;
+                # the cap above is the cap). The latch survives as loop_stop == FIRED (the
+                # fire is one-per-reply: the budget's stand-down reads it, and the guard
+                # only checks while think is open — a re-opened block never fires again).
+                # The event stays reported on stream.loop / the log line. A required
+                # call's fix drains first: conversion waits for it (think still open
+                # here), so this arm must not run until the close itself has landed
+                self.loop_stop = FIRED
         return landed
 
 

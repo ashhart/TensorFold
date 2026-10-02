@@ -256,6 +256,47 @@ def _long_choice(question: str) -> dict:
     }
 
 
+def test_an_armed_loop_guard_cannot_hijack_a_decision_finish():
+    # the C3 invariant, executed: even a decision stream that CARRIES the guard and
+    # armed think markers finishes "decision" in prefill — no decode ladder runs,
+    # so the guard's drain arm (finish "loop") is unreachable on this path
+    pytest.importorskip("mlx.core")
+    import mlx.core as mx
+
+    from tensorfold.engine.family_prefill import FamilyPrefill, drain
+    from tensorfold.engine.lane_engine import LaneStream
+    from tensorfold.engine.prefill_plan import PromptChunks
+    from tensorfold.server.loop_guard import LoopGuard
+
+    class Engine(FamilyPrefill):
+        def prompt_chunks(self, ids):
+            return PromptChunks(None, len(ids), step=max(len(ids), 1))
+
+        def _family_start(self, cache, cached_tokens, chunks):
+            return [], 0
+
+        def _family_feed_steps(self, tokens, cache, chunks, *args, **kwargs):
+            yield from ()
+            return mx.array([[1.0, 3.0, 0.0]])
+
+        def _family_first(self, *args, **kwargs):
+            raise AssertionError("a decision draws no token")
+
+        def copy_single_cache(self, cache):
+            return cache
+
+    engine = Engine()
+    engine.model = type("Model", (), {"head": staticmethod(lambda hidden: hidden)})()
+    stream = LaneStream(stream_id="d", prompt_ids=[7, 8], max_new_tokens=1,
+                        loop_guard=LoopGuard(), think_open=True, think_end=8)
+    stream.label_ids = (0, 1)
+    drain(engine._family_prefill_steps(stream, cache=None, cached_tokens=0, checkpoints_at=()))
+    assert stream.finished
+    assert stream.finish_reason == "decision"          # never "loop"
+    assert stream.loop_stop is None and "loop" not in (stream.loop or {})
+    assert stream.emitted == []
+
+
 def test_a_decision_keeps_a_shared_input_and_a_later_chat_resumes_it():
     pytest.importorskip("mlx.core")
     from tensorfold.engine.prefill_plan import PrefillPlan

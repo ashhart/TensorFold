@@ -112,7 +112,11 @@ class PromptFill:
             think_budget=int(job.think_budget),
             think_close=tuple(job.think_close),
             think_end=int(job.think_end),
-            think_open=bool(job.think_budget),
+            # --loop-guard arms the think markers so the guard can fire and then close the
+            # block; only when a think block was actually opened (think_end >= 0), so the
+            # guard never watches visible content
+            think_open=(bool(job.think_budget) or job.loop_guard is not None) and job.think_end >= 0,
+            loop_guard=job.loop_guard,
             call_gate=job.call_gate,
             constraint=job.constraint,
             prompt_data=job.vision,
