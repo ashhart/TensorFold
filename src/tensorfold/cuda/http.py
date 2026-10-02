@@ -176,9 +176,18 @@ def make_handler(app: App):
                                                            "arguments": call["function"]["arguments"]}}]})
                 end = chunk({}, result["finish"])
                 end["tensorfold"] = result["stats"]
-                end["usage"] = usage_of(result)          # every stream, as the Mac server's: clients count from it
+                events = [end]
+                if chat:
+                    # OpenAI's streaming contract (#216): the usage trails in its own ``choices: []``
+                    # event, before [DONE]; spec-following gateways (litellm and the like) count from
+                    # that one and drop a usage riding the finish chunk, losing cached_tokens.
+                    events.append({"id": rid, "object": kind, "created": created, "model": model,
+                                   "choices": [], "usage": usage_of(result)})
+                else:
+                    end["usage"] = usage_of(result)      # a completion's usage stays on its end chunk
                 try:
-                    self.wfile.write(f"data: {json.dumps(end)}\n\ndata: [DONE]\n\n".encode())
+                    self.wfile.write("".join(f"data: {json.dumps(event)}\n\n" for event in events).encode()
+                                     + b"data: [DONE]\n\n")
                     self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
                     pass

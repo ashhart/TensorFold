@@ -44,7 +44,9 @@ def response(app, route, stream, **fields):
         content = "".join(event["choices"][0].get("text", event["choices"][0].get("delta", {}).get("content", ""))
                           for event in events)
         assert body.count("data: [DONE]") == 1
-        return content, events[-1]["choices"][0]["finish_reason"], events[-1]["usage"]["completion_tokens"]
+        end = [e for e in events if e.get("choices")][-1]       # the finish chunk; chat's usage trails it (#216)
+        return (content, end["choices"][0]["finish_reason"],
+                [e for e in events if e.get("usage")][-1]["usage"]["completion_tokens"])
     payload = json.loads(body)
     choice = payload["choices"][0]
     return choice.get("text", choice.get("message", {}).get("content")), choice["finish_reason"], payload["usage"]["completion_tokens"]

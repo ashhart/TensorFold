@@ -118,7 +118,7 @@ def test_a_streamed_required_call_arrives_as_tool_call_deltas(tmp_path):
     chunks = events(body)
     deltas = [c["choices"][0]["delta"]["tool_calls"][0] for c in chunks
               if c.get("choices") and "tool_calls" in c["choices"][0]["delta"]]
-    assert status == 200 and chunks[-1]["choices"][0]["finish_reason"] == "tool_calls"
+    assert status == 200 and [c for c in chunks if c.get("choices")][-1]["choices"][0]["finish_reason"] == "tool_calls"
     # the arguments stream as they are written, after one header that names the call
     assert [d["function"]["name"] for d in deltas if "name" in d["function"]] == ["get_weather"]
     assert len(deltas) > 2 and {d["index"] for d in deltas} == {0}

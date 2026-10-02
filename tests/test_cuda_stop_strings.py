@@ -132,8 +132,9 @@ def reply(port, chat, stream, **fields):
         reasoning += c["choices"][0].get("delta", {}).get("reasoning_content") or "" if chat else ""
         for t in c["choices"][0].get("delta", {}).get("tool_calls", []):     # arguments stream as deltas per index
             calls[t["index"]] = calls.get(t["index"], "") + t["function"]["arguments"]
-    end = chunks[-1]
-    return (shown, reasoning, end["choices"][0]["finish_reason"], end["usage"]["completion_tokens"],
+    end = [c for c in chunks if c.get("choices")][-1]        # the finish chunk; chat's usage trails it (#216)
+    usage = [c for c in chunks if c.get("usage")][-1]["usage"]
+    return (shown, reasoning, end["choices"][0]["finish_reason"], usage["completion_tokens"],
             end["tensorfold"]["token_sha"], [calls[i] for i in sorted(calls)])
 
 
@@ -240,7 +241,7 @@ def test_return_token_ids_ends_at_the_token_that_completes_the_stop(tmp_path, st
         for draft in (True, False):
             status, text = post(port, body(True, stream, stop="STOP", draft=draft, return_token_ids=True), True)
             assert status == 200, text
-            block = events(text)[-1]["tensorfold"] if stream else json.loads(text)["tensorfold"]
+            block = [c for c in events(text) if "tensorfold" in c][-1]["tensorfold"] if stream else json.loads(text)["tensorfold"]
             got.append((block["token_ids"], block["token_sha"]))
     assert got == [(reply_ids[:through], server.token_sha(reply_ids[:through]))] * 2
 

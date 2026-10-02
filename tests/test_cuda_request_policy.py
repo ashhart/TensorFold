@@ -163,7 +163,8 @@ def test_cuda_single_call_hides_incomplete_namespaced_envelopes(tmp_path, stream
     if stream:
         assert stream_calls(body) == {}
         content = "".join(json.loads(line[5:])["choices"][0]["delta"].get("content", "")
-                          for line in body.splitlines() if line.startswith("data:") and line != "data: [DONE]")
+                          for line in body.splitlines() if line.startswith("data:") and line != "data: [DONE]"
+                          and '"usage"' not in line)          # the trailing usage chunk carries no deltas (#216)
     else:
         message = json.loads(body)["choices"][0]["message"]
         assert not message.get("tool_calls")

@@ -26,7 +26,7 @@ def test_usage_counts_the_reply_and_the_first_runs_cache(tmp_path, stream, budge
     with http_server(app_for(tmp_path, engine)) as port:
         status, text = post(port, body, True)
     assert status == 200 and len(engine.prompts) == (2 if budget else 1)
-    usage = [c for c in events(text) if c.get("choices")][-1]["usage"] if stream else json.loads(text)["usage"]
+    usage = [c for c in events(text) if c.get("usage")][-1]["usage"] if stream else json.loads(text)["usage"]
     prompt = len(engine.prompts[0])
     assert usage == {"prompt_tokens": prompt, "completion_tokens": 24, "total_tokens": prompt + 24,
                      "prompt_tokens_details": {"cached_tokens": 7},

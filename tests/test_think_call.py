@@ -192,7 +192,8 @@ def test_the_cuda_server_returns_the_call(tmp_path):
             deltas = [c["choices"][0]["delta"] for c in chunks if c.get("choices")]
             assert "".join(d.get("reasoning_content", "") for d in deltas) == REASONING
             assert [d["tool_calls"][0]["function"]["name"] for d in deltas if "tool_calls" in d] == ["terminal"]
-            assert chunks[-1]["choices"][0]["finish_reason"] == "tool_calls" and "<tool_call>" not in body
+            assert chunks[-2]["choices"][0]["finish_reason"] == "tool_calls" and "<tool_call>" not in body
+            assert chunks[-1]["choices"] == [] and "usage" in chunks[-1]     # usage trails per OpenAI (#216)
         else:
             choice = json.loads(body)["choices"][0]
             assert choice["finish_reason"] == "tool_calls" and choice["message"]["reasoning_content"] == REASONING
