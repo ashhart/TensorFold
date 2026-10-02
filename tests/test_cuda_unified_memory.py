@@ -36,7 +36,7 @@ def test_a_discrete_grant_ignores_host_memory(monkeypatch):
     # only the loading buffers need host RAM, and host_stream_bytes weighs those on its own
     monkeypatch.setattr(Path, "read_text", lambda *a: "MemTotal: 16777216 kB\nMemAvailable: 8388608 kB\n")
     monkeypatch.delenv("TENSORFOLD_CUDA_MEMORY_LIMIT_GB", raising=False)
-    assert capacity.available_bytes(device(False, 20 * GB, 80 * GB)) == 20 * GB    # the card's own free memory
+    assert capacity.available_bytes(device(False, 20 * GB, 80 * GB)) == 12 * GB    # the card's free memory less a tenth of it
 
 
 def test_the_reserve_override_moves_the_unified_floor(meminfo, monkeypatch):
@@ -59,18 +59,21 @@ def test_the_limit_env_caps_the_grant_on_both_bounds(meminfo, monkeypatch):
     assert capacity.available_bytes(device(False, 50 * GB, 128 * GB)) == 20 * capacity.GIB
 
 
-def test_a_discrete_grant_under_a_limit_is_the_limit(monkeypatch):
+def test_a_discrete_grant_under_a_limit_keeps_the_cards_floor(monkeypatch):
     monkeypatch.setattr(capacity, "_meminfo", lambda: None)
     monkeypatch.setenv("TENSORFOLD_CUDA_MEMORY_LIMIT_GB", "31")
-    # a discrete card shares its memory with nothing here, so 31 of its 32 GiB are granted
-    assert capacity.available_bytes(device(False, 32 * capacity.GIB, 32 * capacity.GIB)) == 31 * capacity.GIB
+    monkeypatch.delenv("TENSORFOLD_MEMORY_RESERVE_GIB", raising=False)
+    # the card keeps its floor under a limit too: four GiB by default, two at the smallest reserve
+    assert capacity.available_bytes(device(False, 32 * capacity.GIB, 32 * capacity.GIB)) == 28 * capacity.GIB
+    monkeypatch.setenv("TENSORFOLD_MEMORY_RESERVE_GIB", "2")
+    assert capacity.available_bytes(device(False, 32 * capacity.GIB, 32 * capacity.GIB)) == 30 * capacity.GIB
 
 
 def test_the_limit_env_leaves_the_floored_grant_the_ceiling(meminfo, monkeypatch):
     total, available = meminfo
     monkeypatch.setenv("TENSORFOLD_CUDA_MEMORY_LIMIT_GB", "1000")
     assert capacity.available_bytes(device(True)) == available - total // 10
-    assert capacity.available_bytes(device(False, 20 * GB, 80 * GB)) == 20 * GB
+    assert capacity.available_bytes(device(False, 20 * GB, 80 * GB)) == 12 * GB
 
 
 def test_the_limit_env_applies_without_host_memory(monkeypatch):

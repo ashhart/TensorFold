@@ -1,4 +1,4 @@
-"""TENSORFOLD_MEMORY_RESERVE_GIB: the host RAM the CUDA startup keeps free (default max(4 GiB, a tenth))."""
+"""TENSORFOLD_MEMORY_RESERVE_GIB: the memory the CUDA startup keeps free in its pool (default max(4 GiB, a tenth))."""
 
 from types import SimpleNamespace
 
@@ -34,7 +34,7 @@ def _cuda(free, total):
     return SimpleNamespace(cuda=SimpleNamespace(mem_get_info=lambda: (free, total)))
 
 
-def test_the_reserve_floors_a_unified_grant_and_ignores_a_discrete_one(monkeypatch):
+def test_the_reserve_floors_a_unified_grant_and_a_discrete_one(monkeypatch):
     monkeypatch.setattr(capacity, "_meminfo", lambda: {"MemTotal": 121 * GIB, "MemAvailable": 110 * GIB})
     monkeypatch.setattr(capacity, "unified", lambda torch: True)
     # a unified GPU's grant is the host's available RAM less the floor: a tenth of its total, never less than 4 GiB
@@ -44,8 +44,8 @@ def test_the_reserve_floors_a_unified_grant_and_ignores_a_discrete_one(monkeypat
     monkeypatch.delenv("TENSORFOLD_MEMORY_RESERVE_GIB")
     torch = _cuda(100 * GIB, 121 * GIB)
     monkeypatch.setattr(capacity, "unified", lambda torch: False)
-    assert capacity.available_bytes(torch) == 100 * GIB                           # a discrete card's own free memory
+    assert capacity.available_bytes(torch) == 100 * GIB - 12 * GIB - GIB // 10    # a discrete card keeps a tenth of itself
     monkeypatch.setenv("TENSORFOLD_MEMORY_RESERVE_GIB", "6")
-    assert capacity.available_bytes(torch) == 100 * GIB                           # which no reserve override changes
+    assert capacity.available_bytes(torch) == 94 * GIB                            # and the override moves its floor too
     monkeypatch.setattr(capacity, "_meminfo", lambda: None)
-    assert capacity.available_bytes(torch) == 100 * GIB                           # with no host memory to read either
+    assert capacity.available_bytes(torch) == 94 * GIB                            # with no host memory to read either

@@ -158,7 +158,7 @@ def unified(torch) -> bool:
 
 
 def reserve_bytes(total: int) -> int:
-    """Host RAM the startup keeps free: max(4 GiB, a tenth of the pool), or TENSORFOLD_MEMORY_RESERVE_GIB (>= 2)."""
+    """Memory the startup keeps free in a pool: max(4 GiB, a tenth of it), or TENSORFOLD_MEMORY_RESERVE_GIB (>= 2)."""
 
     value = os.environ.get("TENSORFOLD_MEMORY_RESERVE_GIB", "").strip()
     if not value:
@@ -203,23 +203,14 @@ def cuda_limit_bytes(environ: Mapping[str, str] | None = None) -> int | None:
 
 
 def available_bytes(torch) -> int:
-    """What admission and the runtime gate read as live: a discrete card's free memory, host RAM less a floor on a unified GPU.
-
-    One pool on a unified GPU: reclaimable page cache counts as available, and the host keeps a floor of that
-    pool free, because CUDA context, NCCL and workspace memory sit outside the estimate and an exhausted GB10
-    freezes the host. A discrete card's host need is its loading buffers, which ``host_stream_bytes`` weighs on
-    its own. ``TENSORFOLD_MEMORY_RESERVE_GIB`` moves the floor; ``TENSORFOLD_CUDA_MEMORY_LIMIT_GB`` caps the
-    grant from above in GiB, an absolute budget like the MLX one.
-    """
+    """What admission and the runtime gate read as live: the pool's free memory less its floor, under the explicit cap."""
 
     free, total = map(int, torch.cuda.mem_get_info())
-    if not unified(torch):
-        granted = free                                   # a discrete card's memory is its own pool
+    memory = _meminfo() if unified(torch) else None
+    if memory is not None:
+        granted = memory["MemAvailable"] - reserve_bytes(memory["MemTotal"])     # one pool: page cache counts as free
     else:
-        # No /proc/meminfo means the card's memory is the pool, so the floor comes out of it
-        memory = _meminfo()
-        granted = (memory["MemAvailable"] if memory is not None else free) - reserve_bytes(
-            memory["MemTotal"] if memory is not None else total)
+        granted = free - reserve_bytes(total)        # a discrete card (or no /proc/meminfo): the floor comes off the card
     limit = cuda_limit_bytes()
     return max(0, min(granted, limit)) if limit is not None else max(0, granted)
 
