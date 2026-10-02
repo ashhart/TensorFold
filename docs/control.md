@@ -147,7 +147,7 @@ The sidebar shows TensorFold when `COLORTERM` is not `truecolor` or `24bit`.
 It also shows TensorFold when the header is under 24 columns.
 `--color 256`, `--color mono`, and `NO_COLOR` use that wordmark.
 The smallest usable size is 72 by 23. At 126 by 32 or larger the overview is complete.
-The UI redraws on input, telemetry, and resize.
+The UI redraws on input, telemetry, and resize. The poll default is one second.
 
 ## Metrics
 
@@ -158,8 +158,12 @@ Monitoring never sends a generation request.
 
 CUDA `/health` reports generated tokens as they arrive, and `/metrics` counts completed requests.
 The dashboard prefers the live counter when that counter is present, and it names the source.
-On MLX a rate can jump when a long request finishes. Prompt totals can include cached work, so
-`PROMPT TOK/S` includes that cached work. TTFT and draft acceptance count completed requests.
+When `/health` carries a `live` object, DECODE TOK/S, PREFILL TOK/S, and CONNECTIONS / WAIT use
+`decode_tokens_per_second`, `prefill_tokens_per_second`, `connections`, and `waiting`.
+A missing live field, or a value that is not a finite number at least zero, leaves that cell on the rolling counter
+or the request gauges. A zero from the server stays a zero.
+On MLX a rate can jump when a long request finishes. Prompt totals can include cached work, so a fallback
+PREFILL TOK/S includes that cached work. TTFT and draft acceptance count completed requests.
 KV is the highest reported pool ratio. Memory is MLX active buffers.
 A healthy HTTP response and a loaded launchd job are separate rows.
 

@@ -89,7 +89,21 @@ def test_cuda_live_counter_wins_over_finished_metrics():
 def test_missing_stats_not_zero():
     sample = normalize(1, {"status": "ok"}, {})
     assert sample.counters == {}
+    assert sample.live == {}
     assert all(v is None for v in [sample.running, sample.waiting, sample.memory, sample.acceptance])
+
+
+def test_health_live_block_keeps_finite_rates_and_drops_the_rest():
+    sample = normalize(1, {"status": "ok", "live": {
+        "connections": 3, "waiting": 0, "decode_tokens_per_second": 0,
+        "prefill_tokens_per_second": 80.5, "nope": -1, "text": "x", "flag": True,
+    }}, {})
+    assert sample.live == {
+        "connections": 3.0, "waiting": 0.0, "decode_tokens_per_second": 0.0,
+        "prefill_tokens_per_second": 80.5,
+    }
+    assert normalize(1, {"live": "no"}, {}).live == {}
+    assert normalize(1, {}, {}).live == {}
 
 
 def test_bad_metrics_and_escaped_labels():
