@@ -8,6 +8,7 @@ if not torch.cuda.is_available():
     pytest.skip("CUDA only", allow_module_level=True)
 
 from tensorfold.cuda import prompt_precision  # noqa: E402
+from tensorfold.cuda.kernels import attention as tree_attention  # noqa: E402
 from tensorfold.cuda.kernels import qmm as shared  # noqa: E402
 from tensorfold.cuda.kernels.prefill_attention import attention  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.decode import clone_state, draft_decode, prefill, serial_decode  # noqa: E402
@@ -145,6 +146,33 @@ def test_a_cache_limit_changes_no_bits(length, limit, fp8):
         replied.append(st)
     _same_state(*replied)
     assert max(kv[0].shape[0] for kv in replied[1].kv if kv is not None) <= limit
+
+
+@pytest.mark.parametrize("policy", [0, None], ids=["fold-in-kernel", "default"])
+def test_a_long_prompt_tree_window_equals_serial_on_every_path(policy, monkeypatch):
+    """9,000 committed keys, four whole key groups of the tree attention: each row of a 16-row draft tree equals
+    serial decoding along its path, the tree folding the groups in their programs and a lone row in the merge (or
+    both in their programs)."""
+
+    if policy is not None:
+        monkeypatch.setattr(tree_attention, "MIN_GROUPED", policy)
+    w = _model()
+    prompt = _prompt(9000, seed=11)
+    st, first = prefill(w, prompt, None)
+    assert tree_attention.groups(st.pos, 16) == 4 and (policy == 0) == (tree_attention.groups(st.pos, 1) == 4)
+    parents = [-1, 0, 0, 1, 1, 2, 3, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    tokens = torch.randint(1, V, (16,), generator=torch.Generator().manual_seed(3)).to(torch.int32).cuda()
+    tokens[0] = first
+    logits, _ = tree_forward(w, tokens, parents, clone_state(st))
+    for leaf in (11, 12, 13, 14, 15):
+        path = [leaf]
+        while parents[path[-1]] >= 0:
+            path.append(parents[path[-1]])
+        serial = clone_state(st)
+        for row in reversed(path):
+            out, record = tree_forward(w, tokens[row:row + 1], [-1], serial)
+            assert torch.equal(out[0], logits[row]), f"row {row} on the path to {leaf}"
+            commit(serial, record, [0])
 
 
 def test_bf16_prompts_track_decode_closer_than_fp8():
