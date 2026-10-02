@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Sequence
 
 import torch
+
+from tensorfold.cuda.build import volta
 import triton
 import triton.language as tl
 
@@ -67,6 +70,18 @@ def _block_attention(Q, KB, VB, TABLE, LENS, O, scale, window, R,
     tl.store(O + qrow[:, None] * (G * HKV * D) + head[:, None] * D + d[None, :], out, mask=live[:, None])
 
 
+@lru_cache(maxsize=1)
+def _volta_ext():
+    """The sm_70 block attention (draft_attention_volta.cu): tl.dot has no tensor-core path on Volta."""
+
+    from pathlib import Path
+
+    from tensorfold.cuda.build import VOLTA, load
+
+    return load(name="tensorfold_draft_attention_volta_v1", need=VOLTA,
+                sources=[str(Path(__file__).parent / "draft_attention_volta.cu")], extra_cuda_cflags=["-O3"], verbose=False)
+
+
 def block_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, keys: Sequence[torch.Tensor],
                     values: Sequence[torch.Tensor], length: int, window: int, scale: float,
                     causal: bool = False) -> torch.Tensor:
@@ -85,6 +100,10 @@ def block_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, keys: Seq
                         [kc.shape[1] for kc in keys], dtype=torch.int64).pin_memory()
     dev = host.to(q.device, non_blocking=True)
     table, lens = dev[:2 * streams], dev[2 * streams:].to(torch.int32)
+    if volta(q.device):
+        lens64 = dev[2 * streams:]
+        return _volta_ext().block_attention(q.contiguous(), k.contiguous(), v.contiguous(), table, lens64, length,
+                                            window, scale, causal, max(kc.shape[1] for kc in keys))
     out = torch.empty((rows, heads * dim), dtype=torch.bfloat16, device=q.device)
     group = heads // kv_heads
     _block_attention[(streams, kv_heads)](q, k, v, table, lens, out, scale, window, rows, G=group, HKV=kv_heads,

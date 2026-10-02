@@ -16,7 +16,7 @@ def _policy(minimum):
     body = [node for node in source.body if isinstance(node, ast.Assign) and any(
         isinstance(target, ast.Name) and target.id in constants for target in node.targets)]
     body.extend(node for node in source.body if isinstance(node, ast.FunctionDef) and node.name in methods)
-    namespace = {"Sequence": Sequence}
+    namespace = {"Sequence": Sequence, "_ungrouped": lambda: False}   # no GPU: the grouped plans of the Triton path
     exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])), str(path), "exec"), namespace)
     namespace["MIN_GROUPED"] = minimum
     return SimpleNamespace(**namespace)

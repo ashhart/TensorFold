@@ -11,6 +11,8 @@ if not torch.cuda.is_available():
 
 from tensorfold.cuda.kernels import attention as shared  # noqa: E402
 
+VOLTA = torch.cuda.get_device_capability()[0] == 7   # sm_70 plans fold no groups
+
 
 def _inputs(w: int, p: int, *, h: int = 24, hk: int = 4, d: int = 256, seed: int = 0):
     gen = torch.Generator(device="cuda").manual_seed(910 + w + p + seed)
@@ -167,6 +169,7 @@ def test_grouped_attention_matches_torch_reference_past_several_groups():
         assert (out[node].float() - ref.float()).abs().max() < 0.035
 
 
+@pytest.mark.skipif(VOLTA, reason="sm_70 plans fold no groups")
 def test_folded_groups_and_scalar_merge_are_bit_equal(monkeypatch):
     w, p = 16, 5 * shared.SPAN + 700
     inputs = _inputs(w, p)
@@ -180,6 +183,7 @@ def test_folded_groups_and_scalar_merge_are_bit_equal(monkeypatch):
     assert torch.equal(folded, scalar)
 
 
+@pytest.mark.skipif(VOLTA, reason="sm_70 plans fold no groups")
 def test_slots_count_folded_groups_then_chunks(monkeypatch):
     span, group = shared.SPAN, shared.GROUP
     assert shared.slots(0, 1) == 1

@@ -151,6 +151,7 @@ def test_a_cache_limit_changes_no_bits(length, limit, fp8):
     assert max(kv[0].shape[0] for kv in replied[1].kv if kv is not None) <= limit
 
 
+@pytest.mark.skipif(VOLTA, reason="sm_70 plans fold no groups")
 @pytest.mark.parametrize("policy", [0, None], ids=["fold-in-kernel", "default"])
 def test_a_long_prompt_tree_window_equals_serial_on_every_path(policy, monkeypatch):
     """9,000 committed keys, four whole key groups of the tree attention: each row of a 16-row draft tree equals
