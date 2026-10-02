@@ -498,7 +498,8 @@ def _graph_us(fn, iters: int = 20) -> float:
         fn()
         torch.cuda.synchronize()
         g = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g, stream=s):
+        # thread_local: ranks loading as threads of one process (tests) may allocate while this one captures
+        with torch.cuda.graph(g, stream=s, capture_error_mode="thread_local"):
             fn()
     g.replay()
     torch.cuda.synchronize()
