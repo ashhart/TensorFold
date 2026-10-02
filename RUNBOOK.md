@@ -143,6 +143,17 @@ TENSORFOLD_MEMORY_LIMIT_GB=110 tensorfold serve Vontra/Qwen3.8-Flash-Next-MLX-4b
 On a 128 GiB M4 Max this gives 110 GiB to the process and 107 GiB to MLX after the 3 GiB reserve.
 The same budget reaches concurrent admission; context and request memory checks still apply.
 
+On CUDA, a discrete card's admission budget is its own free memory; on a unified GPU it is the host's
+available memory less a floor of a tenth of RAM, at least 4 GiB. `TENSORFOLD_CUDA_MEMORY_LIMIT_GB` caps that
+grant from above in GiB, an absolute budget like the MLX one; free memory still caps it:
+
+```bash
+TENSORFOLD_CUDA_MEMORY_LIMIT_GB=31 tensorfold serve nvidia/Qwen3.8-27B-NVFP4
+```
+
+A budget close to a shared pool can end requests with CUDA errors mid-reply, which is why a unified GPU keeps
+its floor; `TENSORFOLD_MEMORY_RESERVE_GIB` moves that floor. A discrete card's host need is its loading
+buffers, which startup checks on its own.
 Requested replies need cache space too. Reduce context, reply length, retained prefixes on MLX, or
 checkpoint size after a memory refusal. The MLX process budget reserves 3 GiB outside the allocator.
 Release-qualified memory and speed results are TBD [release-0.3.5]; see the

@@ -161,6 +161,12 @@ its smaller cache, so the same memory admits a longer window. Explicit `--contex
 A positive CUDA value must fit both the native window and the capacity estimate on every rank;
 otherwise startup refuses it with fitting guidance. Increasing GLM beyond its dense window enables
 its sparse-attention path. The startup report distinguishes native and allocated capacity.
+The CUDA budget grants a discrete card its own free memory; on a unified GPU it grants the host's available
+memory less a floor of a tenth of RAM, at least 4 GiB. `TENSORFOLD_CUDA_MEMORY_LIMIT_GB` caps that grant from
+above in GiB, an absolute budget like `TENSORFOLD_MEMORY_LIMIT_GB` on the MLX side; free memory still caps it.
+A budget close to a shared pool can end requests with CUDA errors mid-reply, and a limit you choose takes that
+risk knowingly. `TENSORFOLD_MEMORY_RESERVE_GIB` moves the unified floor; a discrete card's host need is its
+loading buffers, which startup weighs on its own.
 
 MLX defaults to a process budget of 70% of RAM. A family can state a larger share: GLM-5.3-Flash takes 85%
 on a Mac with 256 GB or less, with nothing else loaded. `TENSORFOLD_MEMORY_LIMIT_GB` replaces that default in
