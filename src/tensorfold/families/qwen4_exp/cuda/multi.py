@@ -233,6 +233,10 @@ class MultiDecoder:
         """A round's prompt rows: its decode (a round alone) takes ``share`` of the pass's time, by the last rounds."""
 
         live = any(not s.done for s in self.streams.values())
+        if live and any(getattr(s.probabilities, "labels", None) for s in self.filling):
+            # a decision (/v1/decisions) waits on its whole prompt and nothing after it: one pass, as when idle,
+            # rather than share-sized pieces between the rounds (3 short prompts took ~0.9 s beside 3 decoding chats)
+            return pass_limit(self.prefill_rows, False, self.share, self.round_s, self.row_s, PASS_MIN)
         return pass_limit(self.prefill_rows, live, self.share, self.round_s, self.row_s, PASS_MIN)
 
     def _timed(self, seconds: float, rows: int) -> None:
