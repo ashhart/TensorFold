@@ -75,17 +75,22 @@ class UnpackCache:
         self.limit, self.used, self.kept = nbytes, 0, OrderedDict()
 
     def get(self, layer, device) -> torch.Tensor:
-        key = id(layer)
-        t = self.kept.get(key)
-        if t is not None:
+        import weakref
+
+        key = id(layer)                  # ids come back once a layer is freed: an entry counts only for its own layer
+        hit = self.kept.get(key)
+        if hit is not None and hit[0]() is layer:
             self.kept.move_to_end(key)
-            return t
+            return hit[1]
+        if hit is not None:                                    # a freed layer's entry under a reused id
+            del self.kept[key]
+            self.used -= hit[1].numel() * 2
         t = torch.empty((layer.k, layer.n), dtype=torch.float16, device=device)
         _ext().unpack(layer.words, t, *layer.strides, layer.k2, CODEBOOK_IDS[layer.codebook])
-        self.kept[key] = t
+        self.kept[key] = (weakref.ref(layer), t)
         self.used += t.numel() * 2
         while self.used > self.limit and len(self.kept) > 1:
-            _, old = self.kept.popitem(last=False)
+            _, (_, old) = self.kept.popitem(last=False)
             self.used -= old.numel() * 2
         return t
 
