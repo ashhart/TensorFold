@@ -57,7 +57,11 @@ class FlashNextEngine:
         from .kvcache import BITS_OF, check as check_kv
         from .weights import draft_token_ids, load
         from tensorfold.cuda.capacity import admit, config, gather_ints
-        from tensorfold.cuda.geometry import PREFILL_ROWS, gdn_geometry, indexed_stream_geometry, indexed_weights
+        from tensorfold.cuda.geometry import (PREFILL_ROWS, gdn_geometry, indexed_prefill_rows,
+                                              indexed_stream_geometry, indexed_weights)
+
+        # TENSORFOLD_PREFILL_ROWS: prompt pieces of that many rows, admitted with the window (not the idle plan)
+        chunk = None if is_exl3(model_dir) else indexed_prefill_rows()
 
         if tp not in (1, 2) or rank not in range(tp):
             raise ValueError(f"rank {rank} of {tp}: Flash Next runs on one GPU or two")
@@ -84,10 +88,12 @@ class FlashNextEngine:
         gather = (lambda values: gather_ints(torch, self.comm.all_gather, values)) if tp == 2 else None
         each, mtp, bits = self.depth + 1, self.depth > 0, BITS_OF[self.kv_dtype]
         # one admission for one stream or many (every slot, the shared rows and kept snapshots), before any load
-        geometry = ((lambda text: indexed_stream_geometry(text, streams, each, KEEP, mtp=mtp, kv_bits=bits))
+        rows0 = chunk or PREFILL_ROWS
+        geometry = ((lambda text: indexed_stream_geometry(text, streams, each, KEEP, mtp=mtp, kv_bits=bits,
+                                                          prefill_rows=rows0))
                     if streams > 1 else
                     (lambda text: gdn_geometry(text, tp, each, indexed=True, mtp=mtp, kv_bits=bits,
-                                               kept=KEEP_SERIAL + 1)))
+                                               kept=KEEP_SERIAL + 1, prefill_rows=rows0)))
         if exl3:
             geometry = admission(geometry)
         from tensorfold.vision.qwen_cuda import capacity_geometry, weight_transform as vision_weights
@@ -98,7 +104,7 @@ class FlashNextEngine:
                                    vision_weights(indexed_weights(tp, mtp, mapped_tables=not ple_on_ssd), vision, rank),
                                    rank=rank, world=tp,
                                    gather=gather, extra_files=extra_files(model_dir) if exl3 else ())
-        self.prefill_rows, prompt_workspace = (PREFILL_ROWS, 0) if exl3 else prompt_plan(
+        self.prefill_rows, prompt_workspace = (PREFILL_ROWS, 0) if exl3 else (chunk, 0) if chunk else prompt_plan(
             self.capacity_plan, config(model_dir), torch.cuda.get_device_capability(), world=tp, vision=vision,
             fp8=prompt_precision.fp8())
         if prompt_workspace:

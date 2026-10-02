@@ -14,6 +14,19 @@ MLA_PROMPT_ATT_ROWS = 512   # GLM's prompt-chunk rows one dense latent attention
 MLA_SELECT_ROWS = 512       # GLM's prompt-chunk rows whose pool scores are held at once (sparse.SELECT_ROWS)
 
 
+def indexed_prefill_rows() -> int | None:
+    """Flash Next prompt-piece rows from TENSORFOLD_PREFILL_ROWS (256 to 16,384), or None: the engine's own plan."""
+
+    import os
+
+    value = os.environ.get("TENSORFOLD_PREFILL_ROWS", "").strip()
+    if not value:
+        return None
+    if not value.isdecimal() or not 256 <= int(value) <= 16384:
+        raise ValueError(f"TENSORFOLD_PREFILL_ROWS: 256 to 16,384 rows, not {value!r}")
+    return int(value)
+
+
 def size(info: dict, name: str = "tensor") -> int:
     return math.prod(info["shape"]) * itemsize(info, name)
 
