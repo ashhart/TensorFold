@@ -335,6 +335,14 @@ families refuse `--kv-dtype` before any download.
 `--mtp-confidence P`, from 0 to 1, sets the probability under which a chain stops before a later draft; the CUDA
 default is 0.70, for one stream and for concurrent rounds. Only Flash Next's CUDA engine has this rule, so the MLX path and the other families refuse it.
 
+`--mtp-cost C` (tokens per ms, off by default) adds an expected-time stop on one stream. A chain verifies a later
+draft j only while the product of the head's probabilities of drafts 1..j, the chance the draft is reached and kept,
+is at least C times the ms it adds to the round: its verify row plus its MTP step. At startup the engine measures
+its own verify windows of 1 to `--mtp-drafts` + 1 rows and one draft step (the startup line prints them), so the
+prices follow the checkpoint, its kernels and the GPU. The first draft is always verified, and `--mtp-confidence`
+still applies. Drafts change speed only: replies equal `"draft": false` output at any cost. `--parallel` and
+`--tp 2` refuse it for now.
+
 ## Draft vocabulary provenance
 
 Both backends read the public list in `src/tensorfold/families/qwen4_exp/cuda/draft_vocab.txt`.

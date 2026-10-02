@@ -161,6 +161,8 @@ def test_serve_parses_the_kv_cache_flag():
     assert cli.build_parser().parse_args(["serve", "owner/model", "--kv-dtype", "int8"]).kv_dtype == "int8"
     assert cli.build_parser().parse_args(["serve", "owner/model", "--kv-dtype", "int4"]).kv_dtype == "int4"
     assert cli.build_parser().parse_args(["serve", "owner/model", "--mtp-confidence", "0.6"]).mtp_confidence == 0.6
+    assert cli.build_parser().parse_args(["serve", "owner/model", "--mtp-cost", "0.06"]).mtp_cost == 0.06
+    assert cli.build_parser().parse_args(["serve", "owner/model"]).mtp_cost is None          # off unless asked
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args(["serve", "owner/model", "--kv-dtype", "fp8"])
 
@@ -201,6 +203,10 @@ def test_kv_dtype_reaches_only_the_families_that_declare_it(tmp_path, monkeypatc
     (["--mtp-confidence", "0.6"], "cuda", "nemotron_h", "on CUDA has no such rule"),
     (["--mtp-confidence", "1.5"], "cuda", "qwen4_exp", "probability from 0 to 1"),
     (["--mtp-confidence", "-0.1"], "cuda", "qwen4_exp", "probability from 0 to 1"),
+    (["--mtp-cost", "0.06"], "mlx", "qwen4_exp", "on MLX has no such rule"),
+    (["--mtp-cost", "0.06"], "cuda", "glm5_next", "on CUDA has no such rule"),
+    (["--mtp-cost", "-0.01"], "cuda", "qwen4_exp", "tokens per ms"),
+    (["--mtp-cost", "0.06", "--parallel", "2"], "cuda", "qwen4_exp", "one stream's rounds"),
     (["--prefill-fp8"], "mlx", "qwen3_5", "Qwen3.8 dense on MLX has none"),
     (["--prefill-fp8"], "cuda", "nemotron_h", "on CUDA has none"),
     (["--prefill-fp8"], "cuda", "glm5_next", "on CUDA has none"),
@@ -227,7 +233,8 @@ def test_cache_and_confidence_options_are_refused_before_any_download(tmp_path, 
 
 
 @pytest.mark.parametrize("flags", [["--kv-dtype", "int8"], ["--kv-dtype", "int4", "--mtp-confidence", "0.6"],
-                                   ["--mtp-confidence", "0"], ["--mtp-confidence", "1"]])
+                                   ["--mtp-confidence", "0"], ["--mtp-confidence", "1"], ["--mtp-cost", "0.06"],
+                                   ["--mtp-cost", "0", "--parallel", "2"]])
 def test_flash_next_on_cuda_takes_both_options(tmp_path, flags):
     from tensorfold.families import qwen4_exp
 
@@ -281,6 +288,9 @@ def test_no_cuda_engine_serves_one_token_a_round_by_default(tmp_path, monkeypatc
     assert qwen4_exp.cuda_engine(tmp_path).depth == 6
     assert made[-1]["confidence"] == 0.7                                   # one stream or many
     assert qwen4_exp.cuda_engine(tmp_path, mtp_confidence=0.6).confidence == 0.6
+    assert made[-1]["cost"] == 0.0                                         # the expected-time stop: off by default
+    qwen4_exp.cuda_engine(tmp_path, mtp_cost=0.06)
+    assert made[-1]["cost"] == 0.06
     assert made[-1]["share"] == 0.0                                        # whole prompt passes unless asked
     assert qwen4_exp.cuda_engine(tmp_path, decode_share=0.25).share == 0.25
 

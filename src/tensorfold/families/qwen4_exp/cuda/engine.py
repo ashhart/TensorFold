@@ -36,7 +36,8 @@ class FlashNextEngine:
                  draft_vocab: str | int | None = "default", max_len: int | None = None,
                  context_explicit: bool | None = None, tp: int = 1, rank: int = 0, master: str = "", port: int = 29551,
                  prefetch: bool = True, graphs: bool = True, streams: int = 1, ple_on_ssd: bool = False,
-                 kv_dtype: str = "bf16", share: float = 0.0, vision: bool = False, vision_urls: bool = False) -> None:
+                 kv_dtype: str = "bf16", share: float = 0.0, vision: bool = False, vision_urls: bool = False,
+                 cost: float = 0.0) -> None:
         import torch
 
         from .exl3_pack import admission, extra_files, is_exl3
@@ -72,8 +73,14 @@ class FlashNextEngine:
             raise ValueError(f"MTP drafts a round: 0 to {MAX_DEPTH}, not {depth}")
         if not 0.0 <= float(confidence) <= 1.0:
             raise ValueError(f"MTP draft confidence: a probability from 0 to 1, not {confidence}")
+        if float(cost) < 0:
+            raise ValueError(f"MTP draft cost: tokens per ms, 0 (off) or more, not {cost}")
+        if float(cost) > 0 and (streams > 1 or tp > 1):
+            raise ValueError("the expected-time draft stop prices one stream's rounds on one GPU: drop --mtp-cost, "
+                             "or --parallel / --tp 2")
         torch.cuda.set_device(0)
         self.tp, self.rank, self.depth, self.confidence = tp, rank, int(depth), float(confidence)
+        self.cost = float(cost) if self.depth else 0.0
         self.kv_dtype = check_kv(kv_dtype)
         self.comm = None
         self.vision = None                   # the image tower (``QwenCudaVision``) with --vision
@@ -183,9 +190,11 @@ class FlashNextEngine:
         if self.concurrent:
             self.multi.warm()
         else:
-            from .decode import warm
+            from .decode import measure_round_costs, warm
 
             warm(self.e)
+            if self.cost > 0:                         # the stop prices drafts with this engine's own round costs
+                self.e.round_costs = measure_round_costs(self.e, self.depth + 1)
         if self.vision is not None:
             self.vision.warm()
             torch.cuda.empty_cache()
@@ -197,6 +206,11 @@ class FlashNextEngine:
         self.serial = None                                # the serial requests' engine, made on first use
         rule = (f"1 to {self.depth} MTP drafts a round, a chain stops before a later draft under "
                 f"{self.confidence:.0%}" if self.depth else "no drafts: the serial reference, one token a round")
+        if self.cost > 0:
+            verify, step = self.e.round_costs
+            rule += (f" or once its chance of being kept no longer repays the ms it adds at {self.cost:g} tokens/ms "
+                     f"(measured: verify {verify[0]:.1f}-{verify[-1]:.1f} ms for 1-{len(verify)} rows, "
+                     f"a draft step {step:.2f} ms)")
         where = (f"up to {streams} streams, each growing to {self.context_window} prompt/reply tokens while memory "
                  f"lasts ({self.multi.memory_gate.room / 2**30:.1f} GiB free for their caches, "
                  f"{self.multi.window_bytes / 2**30:.2f} GiB for one at the full window), eager" if self.concurrent else
@@ -371,7 +385,8 @@ class FlashNextEngine:
             return stats
         if self.depth > 0:
             res = mtp_decode(self.e, first, max_tokens, sampling, depth=self.depth, confidence=self.confidence,
-                             stop_eos=stop_eos, on_tokens=on_tokens, constraint=constraint, probabilities=probabilities)
+                             stop_eos=stop_eos, on_tokens=on_tokens, constraint=constraint, probabilities=probabilities,
+                             cost=self.cost)
             stats.update(drafted=res.drafted, accepted=res.accepted, min_rows=min(res.widths, default=0))
         else:
             res = serial_decode(self.e, first, max_tokens, sampling, stop_eos=stop_eos, on_tokens=on_tokens,
