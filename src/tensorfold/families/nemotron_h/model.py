@@ -16,7 +16,9 @@ _CHECK_TEXT = ("def merge(intervals):\n    \"\"\"Merge overlapping intervals and
 class NemotronH:
     """Separate backbone and head, using fused kernels for short windows and mlx_lm for longer inputs with the same cache layout."""
 
-    fused_rows = 16
+    fused_rows = 16              # prompt chunks this short take the decode kernels, longer ones mlx_lm's
+    window_rows = 16             # a verify window up to this many rows takes the decode kernels (64 on M5)
+    first_copy_rows = 16         # a lone stream's copy starts at 16 rows and doubles while it lands whole
     lane_family = True
     gpu_sampling = True
     # a shared forward's rows and streams (``hidden_rows``): the lane matmul (M5) and ``rows.qmv`` keep a row's bits
@@ -97,6 +99,7 @@ class NemotronH:
         lane_qmm.warm(holder, rows=(1,))
         self.lane_matmul = True
         self.fused.lane_xs = True           # the norm kernels hand the projections their input sums
+        self.window_rows = 64               # lane matmuls and attention keep wide windows' rows cheap
 
     lane_matmul = False
 
@@ -130,7 +133,7 @@ class NemotronH:
         from tensorfold.engine.family_common import cache_arrays
 
         copy = LaneEngine.copy_single_cache
-        widest = int(widest or self.fused_rows)
+        widest = int(widest or self.window_rows)
         ids = self._check_tokens(tokenizer, 48 + widest)
         prompt, window = ids[:48], ids[48:48 + widest]
         base = self.model.make_cache()                    # the model's own caches (no MTP entry)
@@ -149,7 +152,9 @@ class NemotronH:
                 break
             exact = width
         costs: dict[int, float] = {}
-        for width in range(1, exact + 1):
+        # every width to 16 is timed, wider ones every 8 rows and the widest, with the widths between interpolated
+        timed = [w for w in range(1, exact + 1) if w <= 16 or w % 8 == 0 or w == exact]
+        for width in timed:
             best = float("inf")
             for _ in range(3):
                 cache = copy(base)
@@ -158,7 +163,10 @@ class NemotronH:
                 mx.eval(self.head(self.hidden(mx.array([window[:width]], dtype=mx.uint32), cache)))
                 best = min(best, (time.perf_counter() - started) * 1e3)
             costs[width] = round(best, 3)
-        return exact, costs
+        for a, b in zip(timed, timed[1:]):
+            for w in range(a + 1, b):
+                costs[w] = round(costs[a] + (costs[b] - costs[a]) * (w - a) / (b - a), 3)
+        return exact, dict(sorted(costs.items()))
 
     def time_shared_rows(self, tokenizer: Any = None, totals: tuple[int, ...] = (17, 32, 48, 64, 96, 128)
                          ) -> dict[int, float]:
@@ -291,10 +299,19 @@ class NemotronH:
 
     def hidden(self, inputs: Any, cache: list[Any] | None = None, parents: Any = None) -> Any:
         self._chain_only(parents)
-        if self.fused is not None and cache is not None and inputs.shape[-1] <= self.fused_rows:
+        if self.fused is not None and cache is not None and inputs.shape[-1] <= self.window_rows:
             out = self.fused(inputs, cache)
         else:
             out = self.model.backbone(inputs, cache=cache)
+        self._last_hidden = out
+        return out
+
+    def prefill(self, inputs: Any, cache: list[Any]) -> Any:
+        """A prompt chunk: the decode kernels up to ``fused_rows`` tokens, mlx_lm's above (a prompt's bits do not follow ``window_rows``)."""
+
+        if self.fused is None or inputs.shape[-1] <= self.fused_rows:
+            return self.hidden(inputs, cache)
+        out = self.model.backbone(inputs, cache=cache)
         self._last_hidden = out
         return out
 
