@@ -34,6 +34,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+tui = ["rich>=14,<16", "prompt-toolkit>=3.0.51,<4"]
 test = ["pytest>=8"]
 # --ssd-experts builds a small MLX extension on first use with MLX's own nanobind (MLX 0.32.2 takes 2.15.0)
 ssd = ["cmake>=3.27; sys_platform == 'darwin'", "nanobind==3.0.1; sys_platform == 'darwin'"]
@@ -52,6 +53,7 @@ license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md", "LICENSES/*"]
 where = ["src"]
 
 [tool.setuptools.package-data]
+"tensorfold.control.assets" = ["*.json"]
 "tensorfold.drafters.vendor.z_lab_dflash" = ["README.md"]
 "tensorfold.cuda" = ["*.cu", "*.cuh", "*.cpp"]
 "tensorfold.cuda.kernels" = ["*.cu", "*.cuh", "*.cpp"]
