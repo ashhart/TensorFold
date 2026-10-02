@@ -29,6 +29,15 @@ class Scratch:
         self.moe: x3experts.Scratch | None = None
         self.ple_host = self.ple_dev = self.ple_emb = None
         self.prefill = x3prefill.Workspace()
+        self._window_y: torch.Tensor | None = None
+
+    def window_y(self, rows: int, device) -> torch.Tensor:
+        """fp32 slots [rows, slots, D] for a decode window that shares a prompt pass's expert launch, grown on use."""
+
+        if self._window_y is None or self._window_y.shape[0] < rows:
+            d = self.moe.y.shape[1]
+            self._window_y = torch.empty((max(rows, 64), self.slots, d), dtype=torch.float32, device=device)
+        return self._window_y
 
     def allocate(self, device, *, experts: x3experts.Exl3RoutedExperts, rows: int, ple_words: int, ple_heads: int,
                  ple_dim: int) -> None:
