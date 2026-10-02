@@ -212,10 +212,12 @@ def test_requests_past_the_context_get_a_400_before_streaming(tmp_path):
     """Past the limit a request gets a 400 before streaming, naming a --context only when startup would admit it."""
 
     import threading
+    import http.client
 
     from tokenizers import Tokenizer, models, pre_tokenizers
 
     from tensorfold.families.glm5_next.cuda.app import GlmApp
+    from tests.test_cuda_admission import http_server
 
     words = ["[UNK]", "<|user|>", "<|assistant|>", "<think>", "</think>"] + [f"w{i}" for i in range(50)]
     tok = Tokenizer(models.WordLevel({w: i for i, w in enumerate(words)}, unk_token="[UNK]"))
@@ -229,20 +231,42 @@ def test_requests_past_the_context_get_a_400_before_streaming(tmp_path):
         eos = (0,)
         request = threading.local()
         capacity_plan = {"largest_window": 64}
+        calls = 0
 
         def generate(self, prompt, max_tokens, sampling, on_tokens, draft=True):
+            self.calls += 1
             raise AssertionError("not reached")
 
     app = GlmApp(Engine(), tmp_path, "glm")
     eight = " ".join(f"w{i}" for i in range(8))
     assert app.check({"prompt": eight, "max_tokens": 4}) is None                   # 8 + 4 = 12
     problem = app.check({"prompt": eight, "max_tokens": 5})
-    assert "13-token context" in problem and "--context 13" in problem and "started for 12" in problem
+    assert "13-token context" in problem and "--context 13" in problem and "maximum context length is 12 tokens" in problem
     assert app.check({"prompt": eight}) is None                                    # the reply stops at the limit
     assert "--context 13" in app.check({"prompt": " ".join(f"w{i}" for i in range(12))})
     chat = {"messages": [{"role": "user", "content": eight}], "max_tokens": 2}     # <|user|>, 8 words, the tail
     assert app.check(chat) is None
     assert "--context 13" in app.check({**chat, "max_tokens": 3})
+    assert app.prepare({"prompt": eight, "max_tokens": 4}, False).max_tokens == 4
+    with http_server(app) as port:
+        for is_chat, body, prompt_tokens, reply_tokens in ((False, {"prompt": eight, "max_tokens": 5}, 8, 5),
+                                                          (True, {**chat, "max_tokens": 3}, 10, 3)):
+            for streamed in (False, True):
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+                try:
+                    route = "/v1/chat/completions" if is_chat else "/v1/completions"
+                    conn.request("POST", route, json.dumps({**body, "stream": streamed}),
+                                 {"Content-Type": "application/json"})
+                    response = conn.getresponse()
+                    assert response.status == 400 and response.getheader("Content-Type") == "application/json"
+                    error = json.loads(response.read())["error"]
+                    assert error["type"] == "invalid_request_error" and error["code"] == "context_length_exceeded"
+                    assert error["param"] == ("messages" if is_chat else "prompt")
+                    assert "maximum context length is 12 tokens" in error["message"] and "13-token context" in error["message"]
+                    assert f"{prompt_tokens} prompt tokens plus max_tokens {reply_tokens}" in error["message"]
+                    assert app.engine.calls == 0
+                finally:
+                    conn.close()
 
 
 def test_check_accepts_mlx_4bit_and_mias_exl3_only(tmp_path):
