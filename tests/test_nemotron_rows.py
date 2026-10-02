@@ -219,3 +219,26 @@ def test_experts_agree_with_mlx_lm_switch_mlp():
     exact, bound = _switch_mlp_exact_and_bound(mlp, x, ids)
     _check(rows.experts(mlp, x, ids), exact, bound, "rows.experts")
     _check(mlp(x, ids), exact, bound, "mlx_lm's SwitchMLP")          # the bound holds for mlx_lm's own path
+
+
+@pytest.mark.parametrize(("experts", "count"), [(128, 1), (128, 5), (64, 16), (128, 40), (128, 170)])
+def test_route_group_equals_route_then_group(experts, count):
+    """One launch gives the route kernel's picks and weights bit for bit and the group kernel's tables."""
+
+    import numpy as np
+
+    from tensorfold.kernels.nemotron.lightning.v1 import kernels as K
+
+    logits = (mx.random.normal((count, experts), key=mx.random.key(70 + count)) * 2).astype(mx.bfloat16)
+    bias = (mx.random.normal((experts,), key=mx.random.key(71)) * 0.1).astype(mx.float32)
+    scaling = mx.array([2.5], dtype=mx.float32)
+    idx, wt = K.route(logits, bias, 6, scaling)
+    idx2, wt2, tables = rows.route_group(logits, bias, 6, scaling)
+    assert _same(idx, idx2) and _same(wt, wt2)
+    uids, start, counts, members, used = rows.group(idx.reshape(-1), experts)
+    mx.eval(uids, start, counts, members, used, *tables)
+    n = int(used.item())
+    assert int(tables[4].item()) == n
+    for ours, theirs in zip(tables[:3], (uids, start, counts)):
+        assert np.array(ours)[:n].tolist() == np.array(theirs)[:n].tolist()
+    assert np.array(tables[3])[:count * 6].tolist() == np.array(members)[:count * 6].tolist()

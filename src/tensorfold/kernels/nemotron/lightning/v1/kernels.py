@@ -537,5 +537,12 @@ class FusedDecode:
     def _moe(self, index: int, mixer: Any, x: mx.array) -> tuple[mx.array, mx.array, mx.array]:
         # The router and expert kernels preserve each row's bits; MLX bf16 matmul changes summation order with row count.
         logits = router_logits(x, mixer.gate.weight)
-        experts, weights = route(logits, self.gate_bias[index], self.top_k, self.scaling)
-        return row_kernels.experts(mixer.switch_mlp, x, experts), weights, mixer.shared_experts(x)
+        rows, experts_count = int(logits.shape[0]), int(logits.shape[1])
+        tables = None
+        if (row_kernels.ROUTE_GROUP and rows >= row_kernels.GROUP_ROWS and rows * self.top_k <= row_kernels.MAX_GROUP_PAIRS
+                and experts_count % 32 == 0 and experts_count <= row_kernels.ROUTE_THREADS):
+            # a grouped window: the route kernel's picks and the group kernel's tables from one launch
+            experts, weights, tables = row_kernels.route_group(logits, self.gate_bias[index], self.top_k, self.scaling)
+        else:
+            experts, weights = route(logits, self.gate_bias[index], self.top_k, self.scaling)
+        return row_kernels.experts(mixer.switch_mlp, x, experts, tables=tables), weights, mixer.shared_experts(x)
