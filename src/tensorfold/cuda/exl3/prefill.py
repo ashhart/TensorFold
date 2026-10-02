@@ -44,10 +44,24 @@ def _gemm(X, W, H, SVH, BIAS, OUT, M, o_stride, K: tl.constexpr, N: tl.constexpr
     tl.store(OUT + rm[:, None] * o_stride + rn[None, :], y.to(OUT.dtype.element_ty), mask=ok[:, None])
 
 
+# Measured on GB10 (sm_121) at 2048 rows, each bit-identical to the default (the K loop accumulates in the same order):
+# full GLM-5.3's dense prompt shapes per rank at TP=4 (tests/cuda/tune_exl3_prefill_tiles.py).
+_TUNED = {
+    (2048, 4096): (128, 64, 8, 4, 8),     # 3.00x
+    (6144, 3072): (64, 64, 8, 4, 8),      # 2.54x
+    (3072, 6144): (128, 64, 8, 3, 8),     # 1.45x
+    (6144, 512): (64, 64, 4, 4, 8),       # 1.39x
+    (6144, 640): (128, 64, 8, 4, 8),      # 1.10x
+    (6144, 2048): (128, 64, 8, 4, 8),     # 1.08x
+    (512, 6144): (128, 64, 8, 4, 8),      # 1.04x
+    (4096, 6144): (128, 64, 8, 3, 8),     # 1.02x
+}
+
+
 def tiles(k: int, n: int) -> tuple[int, int, int, int, int]:
     """(rows a program, K step, warps, stages, row blocks a raster group): the shape's alone, so a row never depends on its chunk."""
 
-    return 128, 32, 8, 4, 8
+    return _TUNED.get((k, n), (128, 32, 8, 4, 8))
 
 
 class UnpackCache:
