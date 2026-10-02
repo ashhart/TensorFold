@@ -42,6 +42,18 @@ class ThreadComm:
             flat[r * n:(r + 1) * n].copy_(slots[r].reshape(-1))
         self._done()
 
+    def reduce_scatter(self, send: torch.Tensor, recv: torch.Tensor) -> None:
+        """recv <- block self.rank of the rank-order (fp32) sum of every rank's send [world * n]."""
+        if send.numel() != recv.numel() * self.world or send.dtype != recv.dtype:
+            raise ValueError("reduce_scatter: send must hold world x recv of the same dtype")
+        slots = self._exchange(send)
+        n = recv.numel()
+        acc = slots[0].reshape(-1)[self.rank * n:(self.rank + 1) * n].float().clone()
+        for r in range(1, self.world):
+            acc += slots[r].reshape(-1)[self.rank * n:(self.rank + 1) * n].float()
+        recv.view(-1).copy_(acc)
+        self._done()
+
     def all_to_all(self, send: torch.Tensor, recv: torch.Tensor) -> None:
         if send.shape != recv.shape or send.dim() != 2 or send.shape[0] != self.world or send.dtype != recv.dtype:
             raise ValueError("all_to_all: send and recv must be [world, n] tensors of the same dtype")
@@ -52,6 +64,20 @@ class ThreadComm:
 
     def barrier(self) -> None:
         self.hub.barrier.wait()
+
+
+class RingThreadComm(ThreadComm):
+    """ThreadComm plus an all-reduce (deterministic, rank-order fp32 sum), so the prompt path takes its NCCL-ring
+    branches (two-micro-batch overlap); opt-in because it changes which branch older tests exercise."""
+
+    def all_reduce(self, send: torch.Tensor, recv: torch.Tensor) -> None:
+        """Sum in rank order (fp32), every rank alike."""
+        slots = self._exchange(send)
+        acc = slots[0].float().clone()
+        for r in range(1, self.world):
+            acc += slots[r].float()
+        recv.copy_(acc.view(recv.shape))
+        self._done()
 
 
 def _load_extensions() -> None:
@@ -65,7 +91,7 @@ def _load_extensions() -> None:
         pass
 
 
-def run_ranks(fn, world: int) -> list:
+def run_ranks(fn, world: int, comm_cls=ThreadComm) -> list:
     """fn(rank, comm) on every rank at once (threads); results in rank order."""
 
     _load_extensions()
@@ -76,7 +102,7 @@ def run_ranks(fn, world: int) -> list:
     def body(r: int) -> None:
         try:
             with torch.no_grad():
-                results[r] = fn(r, ThreadComm(hub, r))
+                results[r] = fn(r, comm_cls(hub, r))
         except BaseException as exc:        # noqa: BLE001  (reported below; unblock the other ranks)
             errors.append(exc)
             hub.barrier.abort()
