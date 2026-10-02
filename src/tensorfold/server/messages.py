@@ -6,6 +6,7 @@ from typing import Any, Callable
 from tensorfold.server.errors import RequestError
 
 _MEDIA = ("image", "images", "image_url", "input_image", "audio", "input_audio", "video", "video_url")
+_IMAGE_ROLES = ("user", "tool")    # a tool result may carry images (an agent's screenshots): templates render them
 
 
 def validate_modalities(body: dict[str, Any]) -> None:
@@ -46,8 +47,8 @@ def normalize_messages(messages: list[dict[str, Any]], *, late_system: str = "sy
         content = message.get("content")
         if isinstance(content, list) and allow_images and any(
                 isinstance(p, dict) and p.get("type") in ("image_url", "image") for p in content):
-            if role != "user":
-                raise RequestError("images are supported only in user messages")
+            if role not in _IMAGE_ROLES:
+                raise RequestError("images are supported only in user and tool messages")
             for part in content:
                 if not isinstance(part, dict) or part.get("type") not in ("text", "image_url", "image"):
                     raise RequestError("image messages may contain text and image_url parts only")

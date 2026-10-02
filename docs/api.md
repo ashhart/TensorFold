@@ -15,7 +15,8 @@ The base URL is `http://127.0.0.1:8080/v1` with the default server settings.
 
 On MLX, a completions body containing a nonempty `messages` list uses chat handling. CUDA completions
 require a string `prompt`.
-With `--vision`, supported Qwen3.5/3.8 dense checkpoints accept user `image_url` content parts alongside text.
+With `--vision`, supported checkpoints accept `image_url` content parts alongside text in user messages and in
+tool results (`role: "tool"`), such as an agent's screenshots.
 See [image input](vision.md) for data URLs, public image URLs, limits and cache behavior.
 Unsupported image input, audio, video and non-text output requests receive HTTP 400.
 
@@ -264,7 +265,8 @@ same handler and engine path. A response has that chat completion's prompt and t
 `token_sha` matches), drafts, and equals its `"draft": false` run and its solo run.
 
 - `input` is a string or a list of items: messages (`input_text`, and `input_image` with `--vision`),
-  `function_call`, `function_call_output`, and `reasoning` items with their `content` text, which the template gets
+  `function_call`, `function_call_output` (its `output` text, or `input_text` and `input_image` parts with
+  `--vision`), and `reasoning` items with their `content` text, which the template gets
   back as the next assistant message's `reasoning_content`. `instructions` becomes the system message and is not
   carried to a later turn.
 - `tools` takes function tools; `tool_choice` takes `none`, `auto`, `required`, a function or `allowed_tools`;
