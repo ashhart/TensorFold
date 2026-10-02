@@ -9,7 +9,7 @@ import torch
 
 from tensorfold.cuda.logprobs import capture
 
-from tensorfold.cuda.capacity import available_bytes
+from tensorfold.cuda.capacity import LIMIT_ENV, available_bytes, cuda_limit_bytes
 from tensorfold.cuda.markers import MIN_GAP
 from tensorfold.cuda.memory_gate import MemoryGate, NoRoom, torch_live
 from tensorfold.cuda.sampling import sample_streams
@@ -90,7 +90,7 @@ class MultiDecoder:
         self.kept = [k for k in self.kept if k[1] is not st]
 
     def _grow(self, st: State, rows: int, *, alone: bool = False, protect: State | None = None) -> bool:
-        """Grow caches to hold ``rows`` while the gate has room, kept ends first; ``alone`` grows anyway."""
+        """Grow caches while the gate has room; one stream may use its startup allowance within an explicit cap."""
 
         if rows <= st.capacity or st.capacity >= st.limit:       # admission's count keeps a stream within its window
             return True
@@ -100,6 +100,19 @@ class MultiDecoder:
         while not self.memory_gate.fits(grow + st.layer_bytes(size)):     # a layer's old buffers stay until its copy
             if not self._evict_kept(st, protect=protect):
                 if alone:
+                    limit = cuda_limit_bytes() if torch.cuda.is_available() else None
+                    if limit is not None:
+                        # The gate's workspace reserve can be conservative for one stream. The absolute cap
+                        # still counts existing allocations and the old layer retained by the growth copy.
+                        peak = int(torch.cuda.memory_allocated()) + grow + st.layer_bytes(st.capacity)
+                        if peak > limit:
+                            if self.filling:
+                                return False             # a filling request can finish and release its slot
+                            raise NoRoom(
+                                f"Growing this request's attention caches to {size} tokens would exceed "
+                                f"{LIMIT_ENV}={limit / GIB:g}: the estimated copy peak is {peak / GIB:.2f} GiB. "
+                                "Shorten the prompt or max_tokens, reduce --context or --parallel, or raise "
+                                f"{LIMIT_ENV} if more GPU memory is available.")
                     break
                 return False
         try:
@@ -136,10 +149,18 @@ class MultiDecoder:
         """Before a round: grow each live window oldest-first; a stream that can't grow makes the newest end."""
 
         live = sorted((s for s in self.streams.values() if not s.done), key=lambda s: s.sid)
-        blocked = False
+        blocked, ended = False, []
         for s in live:
             rows = max(s.st.pos, s.st.mtp_len) + len(s.drafts) + self.depth + 2
-            s.waiting = rows > s.st.capacity if blocked else not self._grow(s.st, rows, alone=len(live) == 1)
+            try:
+                s.waiting = rows > s.st.capacity if blocked else not self._grow(s.st, rows, alone=len(live) == 1)
+            except NoRoom as exc:
+                s.error, s.done, s.waiting = exc, True, False
+                self.held.pop(s.sid, None)
+                self._drop_kept(s.st)
+                self.memory_gate.ends += 1
+                ended.append(s)                          # finish() releases only this request's slot
+                continue
             blocked = blocked or s.waiting
         if live and live[0].waiting and len(live) > 1:        # even the oldest can't grow: the newest ends
             newest = live[-1]
@@ -154,9 +175,9 @@ class MultiDecoder:
             self._drop_kept(newest.st)
             self._shrink(newest.st)
             self.free.append(newest.st)
-            return [newest, *self._make_room()]
+            return [*ended, newest, *self._make_room()]
         self.memory_gate.waits += any(s.waiting for s in live)
-        return []
+        return ended
 
     def _slot_for(self, prompt: list[int], reuse: bool):
         """Reuse the longest kept point, copying a fork into a free slot when the memory gate permits it."""
@@ -195,12 +216,15 @@ class MultiDecoder:
             raise NoRoom("streams already wait for memory; a new request waits until one finishes")
         t0 = time.perf_counter()
         st, resume, s.cached = self._slot_for(list(s.prompt), s.draft and s.vision is None)
-        if not self._grow(st, len(s.prompt) + self.depth + 2, alone=not self.streams and not self.filling):
+        try:
+            if not self._grow(st, len(s.prompt) + self.depth + 2, alone=not self.streams and not self.filling):
+                raise NoRoom(f"a {len(s.prompt)}-token prompt waits for memory until a live stream finishes")
+        except NoRoom:
             if resume is None:
                 self.free.append(st)
             else:                                        # the kept prompt end stays kept
                 self._remember(list(s.prompt[:s.cached]), st, resume["state"], resume["tail"])
-            raise NoRoom(f"a {len(s.prompt)}-token prompt waits for memory until a live stream finishes")
+            raise
         e = _slot(self.w, st, self.buf, self.mbuf, self.pbuf, self.capacity, self.prefill_rows)
         mtp = s.draft and self.depth > 0 and self.mbuf is not None
         try:
