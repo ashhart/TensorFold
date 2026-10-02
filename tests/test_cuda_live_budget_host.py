@@ -50,11 +50,12 @@ class CudaLiveBudgetTests(unittest.TestCase):
     def test_low_physical_room_is_not_charged_for_existing_weights_again(self):
         os.environ[capacity.LIMIT_ENV] = "100"
         torch, _ = device(free=3, allocated=40, reserved=45)
-        self.assertEqual(torch_live(torch, capacity.available_bytes)(), 8 * GIB)
+        self.assertEqual(capacity.available_bytes(torch), 0)
+        self.assertEqual(torch_live(torch, capacity.available_bytes)(), 5 * GIB)
 
     def test_without_a_limit_the_allocator_cache_remains_reusable(self):
         torch, _ = device(free=30, allocated=12, reserved=18)
-        self.assertEqual(torch_live(torch, capacity.available_bytes)(), 36 * GIB)
+        self.assertEqual(torch_live(torch, capacity.available_bytes)(), 36 * GIB - 128 * GIB // 10)
 
     def test_the_unified_floor_still_caps_physical_room(self):
         os.environ[capacity.LIMIT_ENV] = "100"

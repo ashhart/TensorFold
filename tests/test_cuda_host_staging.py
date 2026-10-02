@@ -36,7 +36,7 @@ def test_discrete_weights_do_not_have_to_fit_host(startup):
     _, _, _, admit = startup
     receipt = admit()
     assert receipt["context_window"] == 4096
-    assert receipt["budget_bytes"] == 80 * GIB
+    assert receipt["budget_bytes"] == 72 * GIB
     assert receipt["weight_bytes_estimate"] == 40 * GIB
 
 
@@ -114,7 +114,7 @@ def test_missing_meminfo_keeps_gpu_only_fallback(startup, monkeypatch):
     _, _, _, admit = startup
     monkeypatch.setattr(capacity, "_meminfo", lambda: None)
     assert capacity.host_stream_bytes() is None
-    assert admit()["budget_bytes"] == 80 * GIB
+    assert admit()["budget_bytes"] == 72 * GIB
 
 
 def test_host_staging_failure_is_agreed_by_both_ranks(startup):

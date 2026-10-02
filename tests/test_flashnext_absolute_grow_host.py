@@ -107,7 +107,8 @@ class AbsoluteGrowthTests(unittest.TestCase):
             is_available=lambda: True,
             memory_allocated=lambda: self.alloc.allocated,
             memory_reserved=lambda: self.alloc.allocated + self.alloc.cached,
-            mem_get_info=lambda: (128 * GIB - self.alloc.allocated - self.alloc.cached, 128 * GIB),
+            # a 160-GiB card: 128 GiB stay grantable under its 16-GiB floor
+            mem_get_info=lambda: (144 * GIB - self.alloc.allocated - self.alloc.cached, 160 * GIB),
             get_device_properties=lambda index: SimpleNamespace(is_integrated=False),
             empty_cache=lambda: None,
         ))
