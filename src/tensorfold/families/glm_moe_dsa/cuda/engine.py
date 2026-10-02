@@ -119,6 +119,10 @@ class Glm53Engine:
                 fw.fast = fast if bool(every.all()) else None
                 if rank == 0:
                     print(f"[tensorfold] decode-window reductions: {'RoCE one-shot' if fw.fast else 'NCCL'}", flush=True)
+            if WORLD > 1 and os.environ.get("TF_GLM53_TUNE_SHARED", "1") != "0":
+                n = fused.share_tiles(fw, comm)             # rank 0's tiles everywhere: one pick paces every layer
+                print(f"[tensorfold] rank {rank}: took rank 0's tiles ({n} of {len(fw.tunable)} linears differed)",
+                      flush=True)
             if getattr(fw, "tuned", None):
                 changed = {k: v for k, v in fw.tuned.items() if v[0] != v[1]}
                 print(f"[tensorfold] rank {rank}: tuned {len(fw.tuned)} linear shapes, {len(changed)} retiled: "

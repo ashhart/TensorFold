@@ -169,5 +169,5 @@ _PROMPT_SCRATCH: dict = {}             # one scratch a (device, slots): layers r
 def _prompt_kernel_on() -> bool:
     import os
 
-    return os.environ.get("TF_EXL3_PROMPT_EXPERTS", "0") == "1"
+    return os.environ.get("TF_EXL3_PROMPT_EXPERTS", "1") == "1"
 
