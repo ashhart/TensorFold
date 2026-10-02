@@ -317,7 +317,7 @@ class GlmMultiDecoder:
             from .runner import PROFILE_FLAG
 
             cfg = {"depth": int(os.environ.get("TF_GLM53_DFLASH_DEPTH", "7")),
-                   "confidence": float(os.environ.get("TF_GLM53_DFLASH_CONFIDENCE", "0.4"))}
+                   "confidence": float(os.environ.get("TF_GLM53_DFLASH_CONFIDENCE", "0.3"))}
             try:
                 cfg.update(json.loads(open(os.path.dirname(PROFILE_FLAG) + "/DFLASH_CFG").read()))
             except (OSError, ValueError):
