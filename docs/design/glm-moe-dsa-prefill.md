@@ -38,3 +38,24 @@ N/A to us: 0009a/c, 0024, 0017/0022, 0006 (decode only), HC/KDA parts.
   Needles 32K + 128K PASS (needle.py --max-tokens 512; the 32-token default truncates the model's in-content reasoning).
   Decode @32K unchanged (prose 25.9-27.3, code 30.7-34.4). Down-projection tuning: register epilogue rejected (slower),
   fp16 accumulation + item ordering added as opt-in (~0.3-0.8 ms / ~1%).
+
+## 10-02 sequence-parallel prompt glue (item 5; branch seqpar-glue, opt-in TF_GLM53_PROMPT_SP=1)
+- fused.compute_prompt_sp: each half's rows split in `world` contiguous blocks (padded, zero rows). Every all-reduce ->
+  reduce-scatter over rows (PREFILL_REDUCE=ring: NCCL bf16 ncclReduceScatter; rs: all-to-all of fp32 row blocks +
+  rank-order sum = the exact reduce, now half the bytes of the non-SP exact path). On own rows only: residual add,
+  both RMSNorms, q_a, kv_a, q_a norm, indexer wk / weights_proj / wq_b + rope, the indexer top-k
+  (TF_GLM53_SP_SELECT=1, default; 0 = gather iw and select every row), router + expert top-k. All-gathers (in place,
+  one NCCL group): qn|kva|ik(|iw) -> every rank writes every row's latent / index key; tok (full-indexer layers);
+  post-attention normed x|pick|wts for the experts / dense MLP. Final hidden (and DFlash taps) gathered once.
+- Streams: main runs only every-row work (q_b..o_proj, experts / MLP); a half's RS -> own-row glue -> AG chain runs on
+  the comm stream under the other half's every-row work (chains in issue order: half A's keys land before B selects).
+- Accuracy (4-layer subset, threadcomm, 2048-row chunks, prompts 1000/3000/4500, vs fused.compute exact): hidden rel
+  1.3e-3..5.6e-3 (ar-ring today 5.2e-3..5.6e-3), first-token logits rel 4.2e-3..9.7e-3 (today 4.7e-3..9.6e-3), greedy
+  first tokens identical; SP exact bit-identical run to run and on all 4 ranks.
+- One rank's GPU time (solo rank 0 of 4, collectives = local copies), 32K prompt: MoE layers (6,3,4,5 = 1 full
+  indexer in 4, like the body) 2048-row chunks 3450 -> 3028 ms ring / 2944 exact (-12 / -15%); 4096-row chunks 3347 ->
+  2981 / 2902 (-11 / -13%); last chunk (30K keys) 434 -> 379 / 372 ms. Layers 0-3 (3 full indexers): -23%. Replicated
+  selection (SP_SELECT=0) gives back most of the long-context win.
+- Bytes on the wire a row and layer (per rank): AR ring bf16 36.9 KB; SP ring 33.6 KB (RS 2 x 9.2, AG qn/kva/ik 4.3,
+  tok 6.1 on 1 layer in 4, normed+picks 9.3); SP exact 52 KB (fp32 RS) vs non-SP exact 73.7 KB. NCCL launches a layer
+  and half: 2 -> 4-5 (grouped AGs).
