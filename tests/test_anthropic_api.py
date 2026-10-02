@@ -274,3 +274,42 @@ def test_thinking_is_opt_in(thinking):
     chat = translate({**BASE, "thinking": thinking, "output_config": {"effort": "high"}})
     assert chat["chat_template_kwargs"]["enable_thinking"] is False
     assert chat["reasoning_effort"] == "none"
+
+
+@pytest.mark.parametrize("tool_result", [False, True])
+@pytest.mark.parametrize("backend", ["mlx", "cuda"])
+def test_mid_conversation_system_after_user_or_tool_result(backend, tool_result, tmp_path):
+    history = [{"role": "user", "content": "Read the file"}]
+    if tool_result:
+        history.extend([{"role": "assistant", "content": [{"type": "tool_use", "id": "a", "name": "read", "input": {}}]},
+                        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "a", "content": "data"}]}])
+    before = translate({**BASE, "system": "Top-level rules", "messages": history})["messages"]
+    history.extend([{"role": "system", "content": [{"type": "text", "text": "New instructions"}]},
+                    {"role": "system", "content": "More instructions"}])
+    translated = translate({**BASE, "system": "Top-level rules", "messages": history})["messages"]
+    assert translated[:len(before)] == before
+    assert [m["role"] for m in translated[-2:]] == ["system", "system"]
+    with serving(backend, tmp_path) as (_, port):
+        status, raw = call(port, "POST", "/v1/messages", {**BASE, "messages": history})
+        assert status == 200 and json.loads(raw)["stop_reason"] == "end_turn"
+
+
+@pytest.mark.parametrize("history", [
+    [{"role": "system", "content": "rules"}, {"role": "user", "content": "hello"}],
+    [{"role": "assistant", "content": "hello"}, {"role": "system", "content": "rules"}],
+    [{"role": "user", "content": "hello"}, {"role": "system", "content": "rules"}, {"role": "user", "content": "again"}],
+    [{"role": "user", "content": "hello"}, {"role": "system", "content": [{"type": "image", "source": {}}]}],
+    [{"role": "user", "content": "hello"}, {"role": "system", "content": "rules", "clear_at": "next_user_message"}],
+])
+def test_invalid_mid_conversation_system_is_rejected(history):
+    with pytest.raises(RequestError):
+        translate({**BASE, "messages": history})
+
+
+@pytest.mark.parametrize("path", ["/v1/messages", "/v1/messages/count_tokens"])
+def test_mid_conversation_system_does_not_fall_back_to_user(path, tmp_path):
+    with serving("mlx", tmp_path) as (app, port):
+        app.late_system = "user"
+        status, raw = call(port, "POST", path, {**BASE, "messages": [*BASE["messages"],
+                            {"role": "system", "content": "rules"}]})
+        assert status == 400 and "chat template" in json.loads(raw)["error"]["message"]
