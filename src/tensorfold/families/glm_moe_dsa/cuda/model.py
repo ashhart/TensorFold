@@ -117,6 +117,8 @@ class RankModel:
                 icache: torch.Tensor) -> torch.Tensor | None:
         """DSA (V3.2 style, interleaved RoPE on the first 64 dims): write this layer's index keys, and when the context
         is longer than index_topk return each row's top index_topk key positions [R, K] (None: every key is selected)."""
+        if icache is None:                   # within index_topk (forward checks it): every key is selected
+            return None
         c, ix = self.cfg, L.indexer
         R, D, nh, rd = h.shape[0], c.index_head_dim, c.index_n_heads, c.qk_rope_head_dim
         k = self.rows(R, lambda i: F.layer_norm((h[i].float() @ ix["wk"].float().t()), (D,), ix["k_norm"][0].float(),
