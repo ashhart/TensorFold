@@ -78,6 +78,36 @@ class Scheduler:
             else:
                 return value
 
+    def submit_many(self, requests: list[dict]) -> list[dict]:
+        """Queue several one-shot requests in one go, so the decoder admits them together and their prompts fill in
+        the same pass; each dict holds ``submit``'s arguments. Returns their stats, in order (raises the first error).
+        Queued from one thread: submitted one by one, the first woke the worker, which filled it alone."""
+
+        boxes = []
+        for r in requests:
+            box: queue.Queue = queue.Queue()
+            stream = Stream(list(r["prompt"]), max(1, r["count"]), r["sampling"], draft=r.get("draft", True),
+                            stop_eos=r.get("stop_eos", True), probabilities=r.get("probabilities"))
+            stream.emit = lambda new: False
+            boxes.append((stream, box))
+        for pair in boxes:
+            self.waiting.put(pair)
+        results, error = [], None
+        for _, box in boxes:
+            while True:
+                kind, value = box.get()
+                if kind == "tokens":
+                    continue
+                if kind == "error":
+                    error = error or value
+                    results.append(None)
+                else:
+                    results.append(value)
+                break
+        if error is not None:
+            raise error
+        return results
+
     def _admit(self, first=None) -> list[Stream]:
         done = []
         while self.decoder.live() < self.max_streams:

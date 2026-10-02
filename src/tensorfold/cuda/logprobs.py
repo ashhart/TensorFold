@@ -53,6 +53,11 @@ def capture(logits, tokens, positions, probabilities, rows=None):
     _finish[(n,)](parts, lse, tiles, tr.next_power_of_2(tiles), num_warps=4)
     ids = torch.tensor(tokens, dtype=torch.long, device=logits.device)[:, None]
     chosen = (logits.gather(1, ids).float()[:, 0] - lse).cpu().tolist()
+    labels = getattr(probabilities, "labels", None)
+    if labels:                                   # a decision: the label logits at the prompt's last position
+        picked = logits.index_select(1, torch.tensor(labels, dtype=torch.long, device=logits.device)).float()
+        for row, pos in enumerate(positions):
+            probabilities.add_labels(pos, picked[row].cpu().tolist(), float(lse[row].item()))
     count = min(probabilities.top, vocab)
     if count:
         values = logits.float()
