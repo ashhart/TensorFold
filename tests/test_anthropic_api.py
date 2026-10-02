@@ -190,7 +190,74 @@ def test_image_sources_and_tool_result_images():
     assert result["messages"][0]["content"] == [{"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}}]
     result = translate({**BASE, "messages": [{"role": "user", "content": [
         {"type": "tool_result", "tool_use_id": "a", "content": [{"type": "text", "text": "screenshot"}, image]}]}]})
-    assert [m["role"] for m in result["messages"]] == ["tool", "user"]
+    assert [m["role"] for m in result["messages"]] == ["tool"]
+    assert result["messages"][0]["tool_call_id"] == "a"
+    assert result["messages"][0]["content"] == [
+        {"type": "text", "text": "screenshot"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}},
+    ]
+
+
+def test_parallel_tool_images_keep_their_tool_id_and_content_order():
+    image = lambda data: {"type": "image", "source": {
+        "type": "base64", "media_type": "image/png", "data": data}}
+    body = {**BASE, "messages": [{"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "a", "is_error": True, "content": [
+            image("AA"), {"type": "text", "text": "first"}]},
+        {"type": "tool_result", "tool_use_id": "b", "content": [
+            {"type": "text", "text": "second"}, image("BB")]},
+        {"type": "text", "text": "Compare them"},
+    ]}]}
+    original = json.loads(json.dumps(body))
+    messages = translate(body)["messages"]
+    assert [m["role"] for m in messages] == ["tool", "tool", "user"]
+    assert [m["tool_call_id"] for m in messages[:2]] == ["a", "b"]
+    assert messages[0]["content"] == [
+        {"type": "text", "text": "Tool error: "},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}},
+        {"type": "text", "text": "first"},
+    ]
+    assert messages[1]["content"] == [
+        {"type": "text", "text": "second"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,BB"}},
+    ]
+    assert messages[2]["content"] == [{"type": "text", "text": "Compare them"}]
+    assert body == original
+
+
+@pytest.mark.parametrize("backend", ["mlx", "cuda"])
+def test_tool_image_reaches_the_vision_renderer_as_its_tool_result(backend, tmp_path):
+    from types import SimpleNamespace
+
+    from tensorfold.server.messages import normalize_messages
+    from tests.test_vision_server import Frontend, Tokenizer, image_messages
+
+    url = image_messages()[0]["content"][1]["image_url"]["url"]
+    body = {**BASE, "messages": [{"role": "user", "content": [{
+        "type": "tool_result", "tool_use_id": "shot", "content": [
+            {"type": "text", "text": "PAGE"},
+            {"type": "image", "source": {"type": "url", "url": url}},
+        ],
+    }]}]}
+    rendered = []
+    with serving(backend, tmp_path) as (app, port):
+        app.vision = Frontend()
+        if backend == "cuda":
+            def render(messages, **kwargs):
+                rendered.append(normalize_messages(messages, allow_images=kwargs.get("allow_images", False)))
+                return "rendered image prompt"
+            app.template = SimpleNamespace(render=render)
+        else:
+            app.tokenizer = Tokenizer()
+            app.effort_levels, app.enable_thinking, app.reasoning_effort = frozenset(), False, None
+            app.late_system, app.context_window = "system", 32
+        status, raw = call(port, "POST", "/v1/messages/count_tokens", body)
+        assert status == 200 and json.loads(raw)["input_tokens"] == 4
+        template = rendered[0] if backend == "cuda" else app.tokenizer.calls[0][0]
+        assert template == [{"role": "tool", "tool_call_id": "shot", "content": [
+            {"type": "text", "text": "PAGE"}, {"type": "image", "detail": "auto"},
+        ]}]
+        assert len(app.vision.calls[0][1]) == 1
 
 
 def test_thinking_controls_and_output_schema():

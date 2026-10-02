@@ -517,11 +517,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
 
         def _post_tokenizer(self, detokenize: bool) -> None:
             try:
-                length = int(self.headers.get("Content-Length", "0"))
-                if not 0 <= length <= 32 * 1024**2:
-                    self.close_connection = True         # the unread body must not reach the next request
-                    raise RequestError("request body exceeds the 32 MiB limit")
-                body = json.loads(self.rfile.read(length) or b"{}")
+                body = json.loads(read_body(self) or b"{}")
                 reply = token_routes.detokenize(app, body) if detokenize else token_routes.tokenize(app, body)
             except RequestError as exc:
                 self._send_json({"error": error_body(exc)}, status=503 if isinstance(exc, CapacityError) else 400)

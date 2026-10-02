@@ -20,8 +20,9 @@ class VideoTokenizer(Tokenizer):
         return {"<video>": 11}.get(token) or super().convert_tokens_to_ids(token)
 
     def __call__(self, text, **kwargs):
-        return {"input_ids": [t for chunk in text.split("<video>") for t in (super().__call__(chunk, **kwargs)
-                                                                               ["input_ids"] + [11])][:-1]}
+        encode = super().__call__
+        return {"input_ids": [t for chunk in text.split("<video>")
+                             for t in encode(chunk, **kwargs)["input_ids"] + [11]][:-1]}
 
 
 def video(frames=4, side=32):

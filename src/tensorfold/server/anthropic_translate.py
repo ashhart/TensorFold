@@ -81,20 +81,23 @@ def messages(value: Any, system: Any = None) -> list[dict[str, Any]]:
                                            "arguments": json.dumps(arguments, ensure_ascii=False)}})
             elif kind == "tool_result" and role == "user":
                 # Tool results precede the following user text, including a batch of parallel results.
-                texts, images = [], []
+                texts, parts, has_image = [], [], False
                 for part in _parts(block.get("content", "")):
                     if part.get("type") == "text":
-                        texts.append(_string(part.get("text"), "tool_result.text"))
+                        text = _string(part.get("text"), "tool_result.text")
+                        texts.append(text)
+                        parts.append({"type": "text", "text": text})
                     elif part.get("type") == "image":
-                        images.append(_image(part))
+                        parts.append(_image(part))
+                        has_image = True
                     else:
                         raise RequestError(f"unsupported tool_result content type {part.get('type')!r}")
                 text = "\n".join(texts)
                 if block.get("is_error"):
                     text = "Tool error: " + text
+                    parts.insert(0, {"type": "text", "text": "Tool error: "})
                 out.append({"role": "tool", "tool_call_id": _string(block.get("tool_use_id"), "tool_use_id", empty=False),
-                            "content": text})
-                content.extend(images)
+                            "content": parts if has_image else text})
             else:
                 raise RequestError(f"unsupported {role} content block type {kind!r}")
         if content or calls or thoughts:

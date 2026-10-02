@@ -6,6 +6,7 @@ from typing import Any
 
 from tensorfold.server.anthropic_translate import Reply, error, translate
 from tensorfold.server.errors import CapacityError, RequestError
+from tensorfold.server.request_body import read_body
 from tensorfold.server.responses import LIMIT, Wire, _run_chat, _send
 
 
@@ -53,15 +54,7 @@ def post(handler: Any, app: Any) -> None:
 
     count = handler.path.split("?", 1)[0].rstrip("/").endswith("/count_tokens")
     try:
-        try:
-            length = int(handler.headers.get("Content-Length") or 0)
-        except ValueError:
-            handler.close_connection = True
-            raise RequestError("Content-Length must be an integer") from None
-        if not 0 <= length <= LIMIT:
-            handler.close_connection = True
-            raise RequestError("request body exceeds the 32 MiB limit")
-        raw = handler.rfile.read(length)
+        raw = read_body(handler, limit=LIMIT)
         body = json.loads(raw or b"{}")
         chat = translate(body, count=count)
         late_system = getattr(app, "late_system", getattr(getattr(app, "template", None), "late_system", "system"))
