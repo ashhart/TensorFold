@@ -107,7 +107,7 @@ def make_handler(app: App):
             route = self.path.split("?", 1)[0].rstrip("/")
             if route in ("/metrics", "/v1/metrics"):                  # open, like /health: scrapers and pollers
                 return metrics.send(self, app)
-            if route in ("/health", "/v1/health"):
+            if self.path.rstrip("/") in ("/health", "/v1/health"):      # (no query string, as before)
                 return self._json(200, health.of(app).snapshot(app))
             if not self._authorized():
                 return

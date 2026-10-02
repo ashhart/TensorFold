@@ -25,7 +25,7 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
   - [x] Verify on GB10 with vLLM stopped: 1792 MiB, 0 MiB host RAM, round trip ok, 59 vs 122 GB/s (`notes/dsv41/BENCH.md`)
   - [x] Carveout holds the V4.1 compressed-KV pools (`TF_CARVEOUT=1`, largest source first; indexer keys stay in
         ordinary memory): prefill speed and long parity unchanged, admission credits the 1.75 GiB
-- [x] Capacity: host reserve configurable (`TF_HOST_RESERVE_GIB`; default stays max(4 GiB, 10 %)),
+- [x] Capacity: host reserve configurable (upstream 0.6.2: `TENSORFOLD_MEMORY_RESERVE_GIB`, >= 2 GiB; default max(4 GiB, 10 %)),
       carveout bytes counted as room outside MemAvailable
 - [ ] Container flags doc: `--device /dev/dri/card0`, `nvidia_drm modeset=1 fbdev=0`, no display in use
 

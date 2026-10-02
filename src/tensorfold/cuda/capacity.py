@@ -321,7 +321,8 @@ def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, t
                                  "free host memory or use a checkpoint with smaller loading buffers")
         plan = make_plan(int(text.get("max_position_embeddings") or 0), requested,
                          requested is not None if explicit is None else explicit,
-                         (available_bytes(torch, carveout=carveout) if carveout else available_bytes(torch)), weights, geometry, room=page_room(torch))
+                         available_bytes(torch, carveout=carveout) if carveout else available_bytes(torch),
+                         weights, geometry, room=page_room(torch))
     except (OSError, ValueError, KeyError, TypeError, struct.error) as exc:
         error = f"{type(exc).__name__}: {exc}"     # name the cause: its text alone has hidden a dtype's KeyError
     status = [1 if error else 0, *(plan.settings + [plan.fitting, plan.largest] if plan else [0, -1, 0, 0, 0])]
