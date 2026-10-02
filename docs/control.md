@@ -98,7 +98,13 @@ process-group cleanup to launchd.
 
 ## Terminal dashboard
 
-Service commands use the standard library. The dashboard needs the `tui` extra, `rich` and `prompt-toolkit`.
+Service commands use the standard library. The dashboard needs `prompt_toolkit` in the same venv.
+
+```bash
+python -m pip install 'prompt-toolkit>=3.0.51,<4'
+```
+
+The error from `tensorfold tui` prints that command with the venv's Python. `rich` uses the same form.
 
 ```bash
 tensorfold tui
@@ -134,8 +140,12 @@ Selecting another row while that panel is open does not retarget the operation.
 The process id on screen is the launchd supervisor. The server child pid is in the log.
 Demo mode and a remote endpoint cannot mutate a local service.
 
-The logo is the precomputed half-block table in `logo-pixels.json`.
-There is no runtime image decode. `--color 256`, `--color mono`, and `NO_COLOR` are the fallbacks.
+The sidebar logo is resampled from the source mark into `logo-pixels.json` at the header width.
+Each cell is the upper half block, foreground for the top pixel and background for the bottom pixel, in 24-bit colour.
+There is no runtime image decode, and the pixels are not stretched to another size.
+The sidebar shows TensorFold when `COLORTERM` is not `truecolor` or `24bit`.
+It also shows TensorFold when the header is under 24 columns.
+`--color 256`, `--color mono`, and `NO_COLOR` use that wordmark.
 The smallest usable size is 72 by 23. At 126 by 32 or larger the overview is complete.
 The UI redraws on input, telemetry, and resize.
 

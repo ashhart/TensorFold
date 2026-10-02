@@ -37,10 +37,44 @@ def test_snapshot_uses_actual_logo_resource():
     import json
     pixels = json.loads(
         files("tensorfold.control.assets").joinpath("logo-pixels.json").read_text())
-    assert pixels["versions"]["30"]["width"] == 30
-    assert pixels["versions"]["30"]["pixels"]
-    text, _ = console_frame(demo_view(), 144, 42)
+    image = pixels["versions"]["30"]
+    crop = pixels["crop"]
+    aspect = (crop[2] - crop[0]) / (crop[3] - crop[1])
+    assert image["width"] == 30 and image["height"] % 2 == 0
+    assert abs(image["width"] / image["height"] - aspect) / aspect < 0.03
+    assert all(len(row) == 30 for row in image["pixels"])
+    text, _ = console_frame(demo_view(), 144, 42, truecolor=True)
     assert "▀" in text and "DEMO / SIMULATED" in text
+    assert "TensorFold" not in text
+
+
+def test_logo_falls_back_to_the_wordmark(monkeypatch):
+    from tensorfold.control.view import logo
+    monkeypatch.delenv("COLORTERM", raising=False)
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    plain, _ = console_frame(demo_view(), 144, 42)
+    assert "TensorFold" in plain and "▀" not in plain
+    assert logo(16, truecolor=True).plain == "TensorFold"
+    assert "▀" not in logo(23, truecolor=True).plain
+    assert "▀" in logo(30, truecolor=True).plain
+
+
+def test_small_logo_escape_snapshot():
+    import io
+    from rich.console import Console
+    from tensorfold.control.view import _logo_table, logo_image
+    image = _logo_table()["versions"]["8"]
+    text = logo_image(8)
+    assert text.plain.count("▀") == image["width"] * (image["height"] // 2)
+    buf = io.StringIO()
+    Console(file=buf, width=image["width"], force_terminal=True, color_system="truecolor",
+            legacy_windows=False).print(text, end="")
+    escapes = buf.getvalue()
+    snapshot = Path(__file__).with_name("logo-8.escapes")
+    assert escapes == snapshot.read_text()
+    # Foreground is the top pixel and background is the bottom pixel.
+    top, bottom = image["pixels"][0][0], image["pixels"][1][0]
+    assert f"38;2;{top[0]};{top[1]};{top[2]};48;2;{bottom[0]};{bottom[1]};{bottom[2]}m▀" in escapes
 
 
 def test_unsafe_remote_text_is_literal():

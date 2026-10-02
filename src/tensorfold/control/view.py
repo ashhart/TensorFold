@@ -7,6 +7,7 @@ from importlib.resources import files
 import io
 import json
 import math
+import os
 from typing import Any
 
 from rich import box
@@ -31,6 +32,9 @@ VIOLET = "#ac9aff"
 GREEN = "#78e6b0"
 AMBER = "#f1c784"
 RED = "#ff8495"
+# A narrower header turns the ribbon into blocks, so the wordmark replaces it.
+MIN_LOGO_COLUMNS = 24
+WORDMARK = "TensorFold"
 
 
 @dataclass
@@ -73,19 +77,50 @@ class View:
         return self.nodes[self.selected % len(self.nodes)] if self.nodes else None
 
 
-@lru_cache(maxsize=4)
-def logo(width: int = 30) -> Text:
-    data = json.loads(files("tensorfold.control.assets").joinpath("logo-pixels.json").read_text("utf-8"))
-    image = data["versions"][str(width)]
-    text = Text(no_wrap=True)
+def use_truecolor(mode: str = "auto") -> bool:
+    """24-bit logo only when the terminal says it can show it, or the flag asks for it."""
+    if "NO_COLOR" in os.environ or mode in {"mono", "256"}:
+        return False
+    if mode == "truecolor":
+        return True
+    return os.environ.get("COLORTERM", "") in {"truecolor", "24bit"}
+
+
+def _wordmark() -> Text:
+    return Text(WORDMARK, style=f"bold {FG}", no_wrap=True, justify="center")
+
+
+@lru_cache(maxsize=1)
+def _logo_table() -> dict:
+    return json.loads(files("tensorfold.control.assets").joinpath("logo-pixels.json").read_text("utf-8"))
+
+
+def _half_blocks(image: dict) -> Text:
+    """One cell, two pixel rows: upper half block, foreground on top, background underneath."""
+    text = Text(no_wrap=True, overflow="crop")
+    rows = image["pixels"]
+
     def color(pixel: list[int]) -> str:
-        return "#" + "".join(f"{v:02x}" for v in pixel)
+        return "#" + "".join(f"{int(v):02x}" for v in pixel)
+
     for row in range(0, image["height"], 2):
-        for a, b in zip(image["pixels"][row], image["pixels"][row + 1]):
-            text.append("▀", f"{color(a)} on {color(b)}")
-        if row < image["height"] - 2:
+        if row:
             text.append("\n")
+        below = rows[row + 1]
+        for top, bottom in zip(rows[row], below):
+            text.append("▀", f"{color(top)} on {color(bottom)}")
     return text
+
+
+def logo_image(columns: int) -> Text:
+    return _half_blocks(_logo_table()["versions"][str(columns)])
+
+
+def logo(columns: int, *, truecolor: bool) -> Text:
+    table = _logo_table()["versions"]
+    if not truecolor or columns < MIN_LOGO_COLUMNS or str(columns) not in table:
+        return _wordmark()
+    return _half_blocks(table[str(columns)])
 
 
 def literal(value: Any, style: str = FG) -> Text:
@@ -141,11 +176,16 @@ def chart(node: Node | None, width: int):
         subtitle="aggregate tokens/s · 10s rolling counter rate · gaps = unknown")
 
 
-def sidebar(view: View, width: int):
-    mark = 30 if width >= 34 else 24
+def sidebar(view: View, width: int, *, truecolor: bool):
+    # Rounded border plus one column of padding on each side.
+    columns = width - 4
+    mark = logo(columns, truecolor=truecolor)
     brand = Text("T E N S O R F O L D", style=f"bold {FG}", justify="center")
     label = Text("CONTROL ROOM", style=f"bold {PINK}", justify="center")
-    elements: list[Any] = [Align.center(logo(mark)), brand, label, Text(""), Text(" MODEL SERVICES", style=MUTED)]
+    elements: list[Any] = [Align.center(mark)]
+    if "▀" in mark.plain:
+        elements.append(brand)
+    elements += [label, Text(""), Text(" MODEL SERVICES", style=MUTED)]
     if not view.nodes:
         elements += [Text(" No profiles yet", style=MUTED), Text(" n  create a local service", style=CYAN)]
     else:
@@ -265,7 +305,7 @@ def overlay(view: View):
                             style=MUTED)), "CONTROL ROOM", border=PINK)
 
 
-def render(view: View, width: int, height: int) -> Layout | Panel:
+def render(view: View, width: int, height: int, *, truecolor: bool = False) -> Layout | Panel:
     if width < 72 or height < 23:
         return panel(Group(Text("TENSORFOLD", style=f"bold {CYAN}"),
                            Text("This dashboard needs at least 72 × 23 terminal cells."),
@@ -282,7 +322,7 @@ def render(view: View, width: int, height: int) -> Layout | Panel:
     header.add_row(title, Text(mode + "  ", style=AMBER if view.demo or view.paused else CYAN))
     root["header"].update(Panel(header, box=box.HORIZONTALS, border_style=EDGE, style=f"on {BG}"))
     side = 34 if width >= 112 else 28
-    root["body"].split_row(Layout(sidebar(view, side), size=side), Layout(name="main"))
+    root["body"].split_row(Layout(sidebar(view, side, truecolor=truecolor), size=side), Layout(name="main"))
     if view.confirm or view.editor is not None or view.palette or view.help:
         root["main"].update(Align.center(overlay(view), vertical="middle"))
     else:
@@ -330,10 +370,12 @@ def render(view: View, width: int, height: int) -> Layout | Panel:
 
 
 def console_frame(view: View, width: int, height: int, *, color: bool = True,
-                  record: bool = False) -> tuple[str, Console]:
+                  truecolor: bool | None = None, record: bool = False) -> tuple[str, Console]:
+    if truecolor is None:
+        truecolor = bool(color) and use_truecolor("auto")
     output = io.StringIO()
     console = Console(file=output, width=width, height=height, force_terminal=True,
                       color_system="truecolor" if color else None, record=record,
                       style=f"{FG} on {BG}", markup=False, highlight=False, legacy_windows=False)
-    console.print(render(view, width, height), end="")
+    console.print(render(view, width, height, truecolor=bool(truecolor)), end="")
     return output.getvalue(), console

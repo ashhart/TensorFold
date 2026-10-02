@@ -23,7 +23,7 @@ from .launchd import Manager
 from .logs import Tail
 from .safety import ControlError, redact
 from .telemetry import Client, Rates
-from .view import ACTIONS, View, Node, console_frame
+from .view import ACTIONS, View, Node, console_frame, use_truecolor
 
 
 class ControlApp:
@@ -53,8 +53,8 @@ class ControlApp:
             self.view.selected = found
         self.bindings = self._bindings()
         control = FormattedTextControl(self._text, focusable=True, show_cursor=False)
-        depth = {"truecolor": ColorDepth.DEPTH_24_BIT, "256": ColorDepth.DEPTH_8_BIT,
-                 "mono": ColorDepth.DEPTH_1_BIT}.get(color)
+        depth = ColorDepth.DEPTH_24_BIT if use_truecolor(color) else {
+            "256": ColorDepth.DEPTH_8_BIT, "mono": ColorDepth.DEPTH_1_BIT}.get(color)
         self.application: Application = Application(
             layout=TerminalLayout(Window(control, wrap_lines=False, always_hide_cursor=True)),
             full_screen=True, key_bindings=self.bindings, color_depth=depth,
@@ -65,7 +65,8 @@ class ControlApp:
     def _text(self):
         size = self.application.output.get_size()
         frame, _ = console_frame(self.view, size.columns, size.rows,
-                                 color=self.color != "mono" and "NO_COLOR" not in os.environ)
+                                 color=self.color != "mono" and "NO_COLOR" not in os.environ,
+                                 truecolor=use_truecolor(self.color))
         return ANSI(frame)
 
     def reload_profiles(self, result=None) -> None:

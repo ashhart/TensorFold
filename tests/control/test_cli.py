@@ -55,6 +55,25 @@ def test_service_import_does_not_import_tui_or_gpu():
     subprocess.run([sys.executable, "-c", code], check=True, timeout=10)
 
 
+def test_tui_names_the_venv_install_for_prompt_toolkit(capsys, monkeypatch):
+    import builtins
+    import tensorfold.control.cli as cli
+    real = builtins.__import__
+
+    def guarded(name, globals=None, locals=None, fromlist=(), level=0):
+        # from .app import ControlApp arrives as name "app" at level 1.
+        relative_app = name == "app" and level and fromlist and "ControlApp" in fromlist
+        if relative_app or name == "tensorfold.control.app":
+            raise ImportError("No module named prompt_toolkit", name="prompt_toolkit")
+        return real(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", guarded)
+    assert cli.main(["tui", "--demo"]) == 1
+    err = capsys.readouterr().err
+    assert "prompt_toolkit" in err
+    assert f"{sys.executable} -m pip install 'prompt-toolkit>=3.0.51,<4'" in err
+
+
 def test_missing_token_does_not_launch(capsys, monkeypatch):
     monkeypatch.delenv("TF_TEST_NO_TOKEN", raising=False)
     assert main(["tui", "--token-env", "TF_TEST_NO_TOKEN"]) == 1

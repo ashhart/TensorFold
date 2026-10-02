@@ -218,13 +218,20 @@ def cmd_service(args) -> int:
         return 130
 
 
+def _tui_install(missing: str) -> str:
+    spec = {"prompt_toolkit": "prompt-toolkit>=3.0.51,<4", "rich": "rich>=14,<16"}.get(
+        missing, "prompt-toolkit>=3.0.51,<4")
+    return f"{sys.executable} -m pip install '{spec}'"
+
+
 def cmd_tui(args) -> int:
     try:
         from .app import ControlApp
-        from .view import console_frame
+        from .view import console_frame, use_truecolor
     except ImportError as exc:
-        print("Install the UI dependencies: python -m pip install 'tensorfold[tui]' "
-              "(standalone: 'tensorfold-control[tui]'). Missing: " + str(exc.name), file=sys.stderr)
+        missing = (exc.name or "prompt_toolkit").split(".", 1)[0]
+        print(f"tensorfold tui needs {missing}.", file=sys.stderr)
+        print(_tui_install(missing), file=sys.stderr)
         return 1
     try:
         token = None
@@ -247,7 +254,8 @@ def cmd_tui(args) -> int:
             if not args.demo:
                 import asyncio
                 asyncio.run(app.refresh())
-            _, console = console_frame(app.view, args.width, args.height, record=True, color=args.color != "mono")
+            _, console = console_frame(app.view, args.width, args.height, record=True,
+                                       color=args.color != "mono", truecolor=use_truecolor(args.color))
             suffix = args.snapshot.suffix.lower()
             if suffix == ".svg":
                 from rich.terminal_theme import TerminalTheme
