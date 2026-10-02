@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from tensorfold.engine import grammar
-from tensorfold.server import responses
+from tensorfold.server import anthropic, responses
 from tensorfold.server.tools import (active_tool_specs, parse_tool_calls_from_content, stream_tool_call_deltas,
                                      tool_choice_requires_call)
 from tensorfold.server.decisions import DecisionError
@@ -193,6 +193,8 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
             route = self._route()
             if route.endswith("/decisions"):
                 return self._post_decisions(app)
+            if anthropic.route(self.path):
+                return anthropic.post(self, app)
             if responses.route(route) == "":         # a Response: this handler's chat completion, translated
                 return responses.post(self, app)
 
@@ -276,6 +278,8 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 extras: dict[str, Any] = {
                     "exact_mode": app.exact_mode.get("mode", "target-verified")
                 }
+                if reply.get("stop_sequence") is not None:
+                    extras["stop_sequence"] = reply["stop_sequence"]
                 if reply.get("batch_size"):
                     extras["tensorfold"] = {
                         "batch_size": reply["batch_size"],

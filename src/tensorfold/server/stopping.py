@@ -53,3 +53,9 @@ class StopPolicy:
         shown = hide_tool_calls(content, finished=True) if tools else content
         if shown.startswith(sent) and len(shown) > len(sent):
             callback(shown[len(sent):])
+
+
+def matched_stop(text: str, strings: tuple[str, ...]) -> str | None:
+    """The first matched stop, ties in request order, before visible() strips it."""
+    matches = [(text.find(stop), at, stop) for at, stop in enumerate(strings) if stop in text]
+    return min(matches)[2] if matches else None

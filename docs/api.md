@@ -1,4 +1,4 @@
-# OpenAI-compatible API
+# Compatible APIs
 
 The base URL is `http://127.0.0.1:8080/v1` with the default server settings.
 
@@ -9,6 +9,8 @@ The base URL is `http://127.0.0.1:8080/v1` with the default server settings.
 | `GET /metrics`, `GET /v1/metrics` | Prometheus text: requests, KV occupancy, drafts and latency (both servers) |
 | `POST /v1/chat/completions` | Text chat, optional image input, tools and reasoning; streamed or non-streamed |
 | `POST /v1/completions` | Raw text without a chat template; MLX also accepts token IDs |
+| `POST /v1/messages` | Anthropic Messages: text, supported images, function tools and thinking; JSON or SSE |
+| `POST /v1/messages/count_tokens` | Render the same model prompt without generating |
 | `POST /v1/responses` | OpenAI's Responses API, run as the equivalent chat completion; streamed or non-streamed |
 | `GET /v1/responses/{id}`, `DELETE /v1/responses/{id}` | A stored response, or remove it |
 | `POST /v1/decisions` | Choice, score, and yes/no probabilities from the next-token logits; no text is generated |
@@ -299,3 +301,22 @@ HTTP 400 refuses what this server does not run: built-in tools (web search, file
 others), `background`, `include` (encrypted reasoning among them), `conversation`, `prompt` templates,
 `truncation: "auto"`, `top_logprobs`, `input_file` parts and file IDs, `item_reference` items, encrypted reasoning
 items, and a `previous_response_id` that is not stored.
+
+## Anthropic Messages
+
+The Messages routes reuse the same chat handler and engine on MLX and CUDA. They accept `system`, text/image
+blocks, `tool_use`/`tool_result`, custom tools and `tool_choice`, sampling, `stop_sequences`, `thinking`
+(disabled, enabled with `budget_tokens`, or adaptive), and `output_config` effort/JSON schema. Image support
+requires a vision-capable model served with `--vision`. Thinking round-trips as plaintext with an empty signature;
+`display` does not suppress it. Claude Code's `context_management` keep-all thinking directive is accepted.
+
+Usage separates uncached `input_tokens` from `cache_read_input_tokens`; prefix caching remains automatic,
+so `cache_control` hints do not allocate an Anthropic cache or report cache-creation tokens. Errors use the
+Anthropic error envelope, including after an SSE stream opens. Server-side tools, documents/file IDs,
+redacted thinking and other context edits return HTTP 400.
+
+Connect Claude Code using the ID from `/v1/models`:
+
+```bash
+ANTHROPIC_BASE_URL=http://127.0.0.1:8080 ANTHROPIC_API_KEY=local claude --model local-model
+```

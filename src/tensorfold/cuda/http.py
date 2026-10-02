@@ -8,7 +8,7 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from tensorfold.cuda import health
-from tensorfold.server import metrics, responses
+from tensorfold.server import anthropic, metrics, responses
 from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
 from tensorfold.server.decisions import DecisionError
 from tensorfold.server.errors import CapacityError, RequestError, error_body
@@ -108,6 +108,8 @@ def make_handler(app: App):
             path = self.path.split("?", 1)[0].rstrip("/")
             if path.endswith("/decisions"):
                 return self._post_decisions()
+            if anthropic.route(self.path):
+                return anthropic.post(self, app)
             if responses.route(self.path) == "":         # a Response: this handler's chat completion, translated
                 return responses.post(self, app)
             chat = self.path.rstrip("/").endswith("/chat/completions")
@@ -184,6 +186,8 @@ def make_handler(app: App):
                                               "function": {"name": call["function"]["name"],
                                                            "arguments": call["function"]["arguments"]}}]})
                 end = chunk({}, result["finish"])
+                if result.get("stop_sequence") is not None:
+                    end["stop_sequence"] = result["stop_sequence"]
                 end["tensorfold"] = result["stats"]
                 frames = [end]
                 if separate_usage:                              # the spec: usage rides its own chunk before [DONE]
@@ -230,6 +234,8 @@ def make_handler(app: App):
                 payload = {"id": rid, "object": "text_completion", "created": created, "model": model,
                            "choices": [{"index": 0, "text": result["content"], "finish_reason": result["finish"]}],
                            "usage": usage, "tensorfold": result["stats"]}
+            if result.get("stop_sequence") is not None:
+                payload["stop_sequence"] = result["stop_sequence"]
             self._json(200, payload)
 
         def _post_decisions(self) -> None:

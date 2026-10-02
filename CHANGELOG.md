@@ -3,6 +3,10 @@
 `tensorfold update` prints the sections below that are newer than the version you had. Each release's page on
 GitHub has the full notes and the measurements behind them.
 
+## Unreleased
+## Unreleased
+
+- Anthropic Messages and token-count routes on MLX and CUDA, including streaming, tools, thinking and cache usage.
 ## 0.6.2 (2 Oct 2026)
 
 - **Flash Next on Macs at 64k-128k.** On an M3 Ultra, one stream runs 1.2-3.4% faster at 64k and 3.9-5.5% at 128k,
