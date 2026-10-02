@@ -28,7 +28,8 @@ class Qwen27Engine:
                  rank: int = 0, master: str = "", port: int = 29551, split_head: bool = False,
                  tp_draft: bool = False, allow_copy: bool = True, streams: int = 1,
                  context: int | None = None, context_explicit: bool | None = None, vision: bool = False,
-                 vision_urls: bool = False, tree_rows: int | None = None, keep: int | None = None):
+                 vision_urls: bool = False, vision_offload: bool = False, tree_rows: int | None = None,
+                 keep: int | None = None):
         import torch
 
         from tensorfold.cuda.nvfp4.format import is_quantized
@@ -97,8 +98,8 @@ class Qwen27Engine:
             geometry, tensor_bytes = nvfp4_admission(geometry)
         # one admission for one stream or many, on every rank, before any weight loads
         self.capacity_plan = admit(model_dir, context, context_explicit, torch,
-                                   capacity_geometry(geometry, model_dir, vision, rank),
-                                   vision_weights(tensor_bytes, vision, rank),
+                                   capacity_geometry(geometry, model_dir, vision, rank, offload=vision_offload),
+                                   vision_weights(tensor_bytes, vision, rank, vision_offload),
                                    rank=rank, world=tp, gather=gather,
                                    draft_dir=draft_dir if rank == 0 or tp_draft else None,
                                    draft_weights=draft_weights,
@@ -124,7 +125,8 @@ class Qwen27Engine:
         if vision and rank == 0:
             from tensorfold.vision.qwen_cuda import QwenCudaVision
 
-            self.vision = QwenCudaVision(model_dir, self.w.norm.device, allow_urls=vision_urls)
+            self.vision = QwenCudaVision(model_dir, self.w.norm.device, allow_urls=vision_urls,
+                                     offload=vision_offload)
         torch.cuda.empty_cache()
         from tensorfold.cuda.markers import resume_points
         from tensorfold.cuda.streams import PrefixCache

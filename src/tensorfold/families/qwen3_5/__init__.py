@@ -322,4 +322,5 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
                         split_head=tp == 2, tp_draft=tp == 2 and draft is not None, allow_copy=not no_drafts,
                         streams=streams, context=options.get("context"),
                         context_explicit=options.get("context_explicit"), vision=bool(options.get("vision", False)),
-                        vision_urls=bool(options.get("vision_urls", False)), keep=options.get("checkpoint_slots"))
+                        vision_urls=bool(options.get("vision_urls", False)),
+                        vision_offload=bool(options.get("vision_offload", False)), keep=options.get("checkpoint_slots"))

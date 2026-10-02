@@ -388,3 +388,16 @@ def test_27b_cuda_engine_takes_the_checkpoint_slots_as_its_kept_states(tmp_path,
     options = {"parallel": 2} | ({"checkpoint_slots": slots} if slots is not None else {})
     qwen3_5.cuda_engine(tmp_path, drafter=str(tmp_path), **options)
     assert made[-1]["keep"] == keep and made[-1]["streams"] == 2
+
+
+@pytest.mark.parametrize("flags,backend,message", [
+    (["--vision-offload"], "cuda", "--vision-offload needs --vision"),
+    (["--vision", "--vision-offload"], "mlx", "--vision-offload is for the CUDA backend"),
+])
+def test_vision_offload_is_a_cuda_option_that_needs_vision(tmp_path, flags, backend, message):
+    from tensorfold.families import qwen3_5
+
+    args = cli.build_parser().parse_args(["serve", str(tmp_path)] + flags)
+    family = SimpleNamespace(title=qwen3_5.TITLE, package=qwen3_5, model_type="qwen3_5")
+    with pytest.raises(ValueError, match=message):
+        cli._check_serve_options(args, family, backend)

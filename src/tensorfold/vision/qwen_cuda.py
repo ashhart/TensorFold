@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import json
+import threading
 import math
 import os
 from pathlib import Path
@@ -14,6 +16,9 @@ MAX_REQUEST_PATCHES = 16 * MAX_PATCHES   # a request's (--vision-image-tokens 65
 MAX_VIDEO_PATCHES = 16 * MAX_PATCHES     # a request's video patches (~65k tokens), encoded MAX_PATCHES at a time
 TOKENS_PER_IMAGE = 4096              # one image's visual tokens, whatever budget the request's images share
 WORKSPACE_BYTES = 4 * 1024**3
+# --vision-offload: the tower (about 0.9 GiB) visits the GPU per image, so the budget keeps room for it plus the
+# activations of the largest accepted image (measured peak about 1.2 GiB over idle on a 4,096-token image)
+OFFLOAD_WORKSPACE_BYTES = int(2.25 * 1024**3)
 
 
 def rotary_frequencies(rotary: Any, config: dict, device: Any) -> None:
@@ -109,13 +114,13 @@ def checkpoint_vision(model_dir: str | Path) -> tuple[dict, int]:
     return config, sum(math.prod(v["shape"]) * max(2, SIZES[v["dtype"]]) for v in tensors.values())
 
 
-def weight_transform(base, enabled: bool, rank: int):
+def weight_transform(base, enabled: bool, rank: int, offload: bool = False):
     def transform(name, info):
         from .qwen_checkpoint import vision_key
 
         if enabled and vision_key(name) is not None:
-            if rank != 0 or os.environ.get("TENSORFOLD_VISION_WEIGHTS"):
-                return 0, 0
+            if rank != 0 or offload or os.environ.get("TENSORFOLD_VISION_WEIGHTS"):
+                return 0, 0                     # offloaded: resident in host RAM between images
             from tensorfold.cuda.capacity import SIZES
 
             return math.prod(info["shape"]) * max(2, SIZES[info["dtype"]]), 0
@@ -123,7 +128,8 @@ def weight_transform(base, enabled: bool, rank: int):
     return transform
 
 
-def capacity_geometry(base, model_dir, enabled: bool, rank: int, workspace: int = WORKSPACE_BYTES):
+def capacity_geometry(base, model_dir, enabled: bool, rank: int, workspace: int = WORKSPACE_BYTES,
+                      offload: bool = False):
     def geometry(text):
         from tensorfold.cuda.capacity import Geometry
 
@@ -133,9 +139,9 @@ def capacity_geometry(base, model_dir, enabled: bool, rank: int, workspace: int 
         external_weights = 0
         if rank == 0:
             _, tower_bytes = checkpoint_vision(model_dir)
-            if os.environ.get("TENSORFOLD_VISION_WEIGHTS"):
+            if os.environ.get("TENSORFOLD_VISION_WEIGHTS") and not offload:
                 external_weights = tower_bytes
-        reserve = workspace if rank == 0 else 128 * 1024**2
+        reserve = (OFFLOAD_WORKSPACE_BYTES if offload else workspace) if rank == 0 else 128 * 1024**2
         return Geometry(lambda slots: result.bytes_at(slots) + reserve + external_weights,
                         result.reserve, result.minimum_slots)
     return geometry
@@ -144,8 +150,11 @@ def capacity_geometry(base, model_dir, enabled: bool, rank: int, workspace: int 
 class QwenCudaVision:
     """Only the image tower is loaded; the CUDA family retains all language computation."""
 
-    def __init__(self, model_dir, device, allow_urls: bool = False):
+    def __init__(self, model_dir, device, allow_urls: bool = False, offload: bool = False):
         self.allow_urls = allow_urls
+        self.offload = offload
+        self._lock = threading.Lock()   # one image on the GPU at a time when the tower is offloaded
+        resident = "cpu" if offload else device
         import torch
         from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5VisionConfig
         from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5VisionModel
@@ -177,9 +186,9 @@ class QwenCudaVision:
                     value = source.get_tensor(names[key])
                     if key == "patch_embed.proj.weight" and value.shape[-1] == self.config["in_channels"]:
                         value = value.permute(0, 4, 1, 2, 3).contiguous()
-                    tensors[key] = value.to(device=device, dtype=torch.bfloat16)
+                    tensors[key] = value.to(device=resident, dtype=torch.bfloat16)
         tower.load_state_dict(tensors, strict=True, assign=True)
-        rotary_frequencies(tower.rotary_pos_emb, self.config, device)
+        rotary_frequencies(tower.rotary_pos_emb, self.config, resident)
         self.tower = tower.eval()
 
     def warm(self):
@@ -189,10 +198,10 @@ class QwenCudaVision:
         merge = self.config["spatial_merge_size"]
         patches = merge * merge
         width = self.config["in_channels"] * self.config["temporal_patch_size"] * self.config["patch_size"]**2
-        with torch.inference_mode():
+        with self._on_gpu(), torch.inference_mode():
             self.tower(torch.zeros((patches, width), dtype=torch.bfloat16, device=self.device),
                        grid_thw=torch.tensor([[1, merge, merge]], device=self.device), return_dict=True)
-        torch.cuda.synchronize()
+            torch.cuda.synchronize()
 
     def prepare(self, *args, **kwargs):
         kwargs.setdefault("max_image_tokens", TOKENS_PER_IMAGE)
@@ -200,8 +209,27 @@ class QwenCudaVision:
 
     def video_size(self, frames: int, height: int, width: int) -> tuple[int, int]:
         return self.frontend.video_size(frames, height, width)
+    @contextmanager
+    def _on_gpu(self):
+        """The tower on the GPU for the block; when offloaded, one caller at a time, and back to host RAM after."""
+        if not self.offload:
+            yield
+            return
+        import torch
+
+        with self._lock:
+            try:
+                self.tower.to(self.device)
+                yield
+            finally:
+                self.tower.to("cpu")
+                torch.cuda.empty_cache()
 
     def encode(self, prepared, prompt) -> EncodedVision:
+        with self._on_gpu():
+            return self._encode(prepared, prompt)
+
+    def _encode(self, prepared, prompt) -> EncodedVision:
         import torch
         from torch.nn.attention import SDPBackend, sdpa_kernel
 
