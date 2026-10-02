@@ -256,7 +256,10 @@ class MultiDecoder:
         """A round's prompt rows: its decode (a round alone) takes ``share`` of the pass's time, by the last rounds."""
 
         live = any(not s.done for s in self.streams.values())
-        return pass_limit(self.prefill_rows, live, self.share, self.round_s, self.row_s, PASS_MIN)
+        limit = pass_limit(self.prefill_rows, live, self.share, self.round_s, self.row_s, PASS_MIN)
+        if live and self.share > 0 and limit > 512:      # tiny passes starve big prompts' prefill:
+            limit = 512                                  # keep each pass wide enough to stay efficient
+        return limit
 
     def _timed(self, seconds: float, rows: int) -> None:
         """A round's wall time: a round alone updates its estimate, a round with a pass the seconds a row adds."""
@@ -303,8 +306,12 @@ class MultiDecoder:
             logits = compute(self.w, segs, self.pbuf, logits=bool(ends), ends=ends, cuts=cuts)
             heads = logits[:len(ends)].clone() if ends else None
             lasts = self._absorb(pieces, segs, cuts)
-        except Exception as exc:                         # noqa: BLE001  (these requests fail, the others go on)
+        except Exception as exc:                         # noqa: BLEUSE  (these requests fail, the others go on)
             return self._failed(pieces, exc)
+        if not self.converged and pieces:                # a stand-alone pass feeds row_s the way a mixed
+            rows = sum(n for _, _, n in pieces)          # round would, so pass_limit can size the next one
+            extra = max(0.0, time.perf_counter() - t0) / max(1, rows)
+            self.row_s = extra if self.row_s is None else 0.7 * self.row_s + 0.3 * extra
         return self._joined(pieces, heads, lasts, (time.perf_counter() - t0) / len(pieces))
 
     def _note_passed(self, pieces) -> None:
