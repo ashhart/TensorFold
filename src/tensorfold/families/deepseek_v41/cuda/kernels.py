@@ -400,13 +400,15 @@ def _index_scores(IQ, WTS, KEYS, POS, OUT, n_keys, ratio, KBASE, KS, HI: tl.cons
     sidx = sb * BS + tl.arange(0, BS)
     kbase = tl.load(KBASE + r) if HAS_BASE else 0          # the row's stream: its first key
     q = tl.load(IQ + (r * HI + h[:, None]) * DI + d[None, :])
-    k = tl.load(KEYS + (kbase + sidx)[:, None].to(tl.int64) * DI + d[None, :], mask=(sidx < n_keys)[:, None],
-                other=0.0)
+    # only visible keys are read: a slot sized for a long window (600K) holds ~150K entries of which a decode row
+    # sees (p + 1) // ratio; reading the rest cost ~20 MB a layer a step (their scores are -inf either way)
+    live = (sidx < n_keys) & (sidx < n_vis)
+    k = tl.load(KEYS + (kbase + sidx)[:, None].to(tl.int64) * DI + d[None, :], mask=live[:, None], other=0.0)
     if FP8:                                                    # e4m3 -> bf16 is exact; the key's scale after the dot
         k = k.to(tl.bfloat16)
     dots = tl.dot(q, tl.trans(k)).to(tl.float32)                     # [HI, BS]
     if FP8:
-        dots = dots * tl.load(KS + kbase + sidx, mask=sidx < n_keys, other=0.0)[None, :]
+        dots = dots * tl.load(KS + kbase + sidx, mask=live, other=0.0)[None, :]
     w = tl.load(WTS + r * HI + h)
     score = tl.sum(w[:, None] * tl.maximum(dots, 0.0), axis=0)
     score = tl.where(sidx < n_vis, score, float("-inf"))

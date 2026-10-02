@@ -5,6 +5,7 @@
 // works itself, and returns once every read is done. Idle helpers spin briefly (a decode step's next call comes
 // within milliseconds), then sleep.
 #include <torch/extension.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -24,20 +25,33 @@ struct Job {
     const int64_t* dst;
     uint8_t* base;
     int64_t n;
+    const int64_t* which = nullptr;     // the reads to do (indices), or all of 0 .. n - 1
     std::atomic<int64_t> next{0}, done{0}, failed{0};
 };
 
+void read_one(Job& j, int64_t i) {
+    int64_t got_all = 0;
+    while (got_all < j.sz[i]) {
+        ssize_t got = pread(j.fd[i], j.base + j.dst[i] + got_all, j.sz[i] - got_all, j.off[i] + got_all);
+        if (got <= 0) { j.failed++; break; }
+        got_all += got;
+    }
+}
+
 void run(Job& j) {
-    for (int64_t i = j.next++; i < j.n; i = j.next++) {
-        int64_t got_all = 0;
-        while (got_all < j.sz[i]) {
-            ssize_t got = pread(j.fd[i], j.base + j.dst[i] + got_all, j.sz[i] - got_all, j.off[i] + got_all);
-            if (got <= 0) { j.failed++; break; }
-            got_all += got;
-        }
+    for (int64_t t = j.next++; t < j.n; t = j.next++) {
+        read_one(j, j.which ? j.which[t] : t);
         j.done++;
     }
 }
+
+// a read only when its bytes are in the page cache (preadv2 RWF_NOWAIT): true when it completed
+bool read_cached(const Job& j, int64_t i) {
+    struct iovec v = {j.base + j.dst[i], (size_t)j.sz[i]};
+    return preadv2(j.fd[i], &v, 1, j.off[i], RWF_NOWAIT) == j.sz[i];
+}
+
+constexpr int kHot = 6;                 // helpers kept spinning between decode steps
 
 class Pool {
    public:
@@ -80,8 +94,10 @@ class Pool {
     void loop(int id) {
         uint64_t seen = gen_.load(std::memory_order_acquire);
         for (;;) {
-            // spin ~200 us for the next call, then sleep until notified
-            const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(200);
+            // the first few helpers spin through a decode step's gap (~30 ms) so its missed rows start at once; the
+            // rest spin ~200 us, then sleep until notified
+            const auto until = std::chrono::steady_clock::now() +
+                               std::chrono::microseconds(id < kHot ? 40000 : 200);
             while (gen_.load(std::memory_order_acquire) == seen && std::chrono::steady_clock::now() < until)
                 std::this_thread::yield();
             if (gen_.load(std::memory_order_acquire) == seen) {
@@ -125,11 +141,19 @@ static int64_t read_many(torch::Tensor fds, torch::Tensor offsets, torch::Tensor
     job.sz = sizes.data_ptr<int32_t>();
     job.dst = dest.data_ptr<int64_t>();
     job.base = out.data_ptr<uint8_t>();
-    job.n = offsets.numel();
+    const int64_t n = offsets.numel();
     {
         pybind11::gil_scoped_release release;
+        // the cached rows on this thread first (a decode step's rows mostly are: ~2 us each); only the misses wake
+        // the pool, whose threads sleep between steps (waking them cost ~1 ms a step)
+        std::vector<int64_t> missed;
+        for (int64_t i = 0; i < n; ++i)
+            if (!read_cached(job, i)) missed.push_back(i);
+        job.which = missed.data();
+        job.n = (int64_t)missed.size();
         const int64_t t = std::max<int64_t>(1, std::min<int64_t>(threads, job.n));
-        if (t == 1) {
+        if (job.n == 0) {
+        } else if (t == 1) {
             run(job);
         } else {
             Pool::get().execute(job, (int)(t - 1));

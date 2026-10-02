@@ -145,6 +145,9 @@ class Tables:
             scale = np.memmap(path, dtype=np.uint8, mode="r", offset=base + s0, shape=(rows, width // 32))
             self.maps.append((weight, scale))
             fd = os.open(path, os.O_RDONLY)
+            # rows are read at random (one 264-byte row a hashed n-gram): no readahead around a missed page
+            if hasattr(os, "posix_fadvise"):
+                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_RANDOM)
             self.spans.append((fd, base + w0, base + s0, width, width // 32))
 
     def gather(self, idx: np.ndarray, out=None, threads: int = 64, layers: list[int] | None = None):
