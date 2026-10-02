@@ -41,7 +41,8 @@ PROMPT_OVERLAP = os.environ.get("TF_GLM53_PROMPT_OVERLAP", "1") != "0"   # two m
 SEL_ROWS = 128           # indexer top-k in blocks of rows (bounded score buffer at long contexts)
 _UNPACK_MB = int(os.environ.get("TF_GLM53_UNPACK_CACHE_MB", "384"))   # decoded dense weights shared by a chunk's halves (0: off)
 _UNPACK_CACHE = x3prefill.UnpackCache(_UNPACK_MB << 20) if _UNPACK_MB > 0 else None
-RADIX = os.environ.get("TF_GLM53_RADIX", "1") == "1"   # indexer top-k: one radix-select kernel (same picks as torch.topk + sort)
+RADIX = os.environ.get("TF_GLM53_RADIX", "1") == "1"
+RADIX_FEW_ROWS_MAX_KEYS = 65536    # windows of <= FAST_ROWS rows over more keys than this use torch.topk   # indexer top-k: one radix-select kernel (same picks as torch.topk + sort)
 RB = 16                  # rows a program in the absorb / expand kernels (wide windows)
 
 # MTP inputs (alignment A/B), "<hidden>/<chain>": the target hidden it reads (raw last-layer rows or final-normed)
@@ -655,7 +656,9 @@ def select(w: Weights, b: Buffers, icache: torch.Tensor, pos: torch.Tensor, R: i
     Tl = -(-T // dcp)
     for r0 in range(0, R, SEL_ROWS):
         n = min(SEL_ROWS, R - r0)
-        radix = RADIX and (dcp > 1 or Tl >= K)
+        # radix: one program a row - beats torch.topk except few rows over many keys (decode windows at long contexts:
+        # 1-16 rows x 128K keys: 0.64-0.77 vs 0.17-0.24 ms on GB10); both pick the same keys
+        radix = RADIX and (dcp > 1 or Tl >= K) and not (n <= FAST_ROWS and Tl > RADIX_FEW_ROWS_MAX_KEYS)
         # radix, one rank: 4-byte order words (ties to the lower position in the select itself), else packed keys
         sc = b.sc.view(torch.int32)[:n * Tl].view(n, Tl) if radix and dcp == 1 else b.sc[:n * Tl].view(n, Tl)
         _index_scores[(n, triton.cdiv(Tl, BT))](b.iq[r0:], b.iw[r0:], icache, pos, sc, Tl, R0=r0, NH=nh, D=D,
@@ -671,11 +674,11 @@ def select(w: Weights, b: Buffers, icache: torch.Tensor, pos: torch.Tensor, R: i
             continue
         kk = min(K, Tl)
         mine = torch.full((n, K), -9223372036854775807, dtype=torch.int64, device=sc.device)
-        mine[:, :kk] = topk.top_keys(sc, kk) if RADIX else torch.topk(sc, kk, dim=-1, sorted=False).values
+        mine[:, :kk] = topk.top_keys(sc, kk) if radix else torch.topk(sc, kk, dim=-1, sorted=False).values
         allc = b.cand[:dcp * n * K].view(dcp, n, K)
         dcp_gather(w, mine, allc, n <= FAST_ROWS)
         cand = allc.permute(1, 0, 2).reshape(n, dcp * K)
-        top = topk.top_keys(cand, K) if RADIX else torch.topk(cand, K, dim=-1, sorted=False).values
+        top = topk.top_keys(cand, K) if radix else torch.topk(cand, K, dim=-1, sorted=False).values
         gpos = 0x7FFFFFFF - (top & 0xFFFFFFFF)                                  # global positions, int64
         own = (gpos % dcp) == rank
         key = torch.where(own, gpos // dcp, torch.full_like(gpos, 1 << 40))
