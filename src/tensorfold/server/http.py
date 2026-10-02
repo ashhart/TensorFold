@@ -23,6 +23,7 @@ from tensorfold.server.tool_policy import ToolCallPolicy
 from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
 from tensorfold.server import metrics
 from tensorfold.server.stacks import Rearming
+from tensorfold.server.request_body import read_body
 
 # TENSORFOLD_REQUEST_LOG=path appends every request body (one JSON a line), for exact replays of real traffic
 _REQUEST_LOG = os.environ.get("TENSORFOLD_REQUEST_LOG", "")
@@ -109,13 +110,9 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
             """Read a refused request's body, so it cannot reach the next request on this connection."""
 
             try:
-                length = int(self.headers.get("Content-Length", "0"))
-            except ValueError:
-                length = -1
-            if 0 <= length <= 32 * 1024**2:
-                self.rfile.read(length)
-            else:
-                self.close_connection = True
+                read_body(self)
+            except RequestError:
+                pass  # the reader closes the connection when framing cannot be drained
 
         def _route(self) -> str:
             # Tolerate query strings, trailing slashes and client URLs with or without the /v1 prefix.
@@ -205,11 +202,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 return
 
             try:
-                length = int(self.headers.get("Content-Length", "0"))
-                if not 0 <= length <= 32 * 1024**2:
-                    self.close_connection = True         # the unread body must not reach the next request
-                    raise RequestError("request body exceeds the 32 MiB limit")
-                body = parse_numbers(json.loads(self.rfile.read(length) or b"{}"))
+                body = parse_numbers(json.loads(read_body(self) or b"{}"))
                 validate_modalities(body)
                 probability_options(body)
                 named = reply_model(app, body)          # the id the request asked for, as vLLM names it
@@ -518,13 +511,11 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
         def _post_decisions(self, app: Any) -> None:
             decide = getattr(app, "decisions", None)
             if decide is None:
+                self._discard_body()
                 self._send_json({"error": {"message": f"unknown path {self.path}"}}, status=404)
                 return
             try:
-                length = int(self.headers.get("Content-Length", "0"))
-                if not 0 <= length <= 32 * 1024**2:
-                    raise RequestError("request body exceeds the 32 MiB limit")
-                body = parse_numbers(json.loads(self.rfile.read(length) or b"{}"))
+                body = parse_numbers(json.loads(read_body(self) or b"{}"))
                 if not isinstance(body, dict):
                     raise RequestError("request body must be an object")
             except RequestError as exc:
