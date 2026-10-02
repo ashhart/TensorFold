@@ -122,7 +122,7 @@ def _check_source(source: ImageSource, limits: ImageLimits, allow_urls: bool = F
 
 def split_images(messages: list[dict[str, Any]], *, limits: ImageLimits = DEFAULT_LIMITS, allow_urls: bool = False
                  ) -> tuple[list[dict[str, Any]], list[ImageSource]]:
-    """Preserve ordered parts, replacing user image URLs with processor image markers."""
+    """Preserve ordered parts, replacing user and tool-result image URLs with processor image markers."""
     if not isinstance(messages, list) or not messages:
         raise ImageInputError("messages must be a non-empty list")
     output, sources = [], []
@@ -133,7 +133,7 @@ def split_images(messages: list[dict[str, Any]], *, limits: ImageLimits = DEFAUL
         if not isinstance(role, str) or role not in {"system", "developer", "user", "assistant", "tool"}:
             raise ImageInputError("invalid message role")
         if any(message.get(key) for key in _MEDIA):
-            raise ImageInputError("images must be image_url parts in user message content")
+            raise ImageInputError("images must be image_url parts in user or tool message content")
         content = message.get("content")
         if content is None or isinstance(content, str):
             output.append(dict(message))
@@ -150,8 +150,8 @@ def split_images(messages: list[dict[str, Any]], *, limits: ImageLimits = DEFAUL
                     raise ImageInputError("text parts must contain a text string without media")
                 parts.append(dict(part))
             elif kind == "image_url":
-                if role != "user":
-                    raise ImageInputError("image_url parts are supported only in user messages")
+                if role not in ("user", "tool"):
+                    raise ImageInputError("image_url parts are supported only in user and tool messages")
                 if any(part.get(key) for key in _MEDIA - {"image_url"}):
                     raise ImageInputError("image_url parts cannot contain other media")
                 if len(sources) >= limits.max_images:

@@ -60,10 +60,31 @@ def test_split_preserves_order_detail_metadata_and_caller():
     assert messages[1]["content"][1]["type"] == "image_url"
 
 
-@pytest.mark.parametrize("role", ["system", "developer", "assistant", "tool"])
-def test_images_require_user_role(role):
-    with pytest.raises(ImageInputError, match="only in user"):
+@pytest.mark.parametrize("role", ["system", "developer", "assistant"])
+def test_images_require_user_or_tool_role(role):
+    with pytest.raises(ImageInputError, match="only in user and tool"):
         split_images([{"role": role, "content": [{"type": "image_url", "image_url": {"url": data_url()}}]}])
+
+
+def test_a_tool_result_keeps_its_images_in_prompt_order():
+    # an agent's screenshot comes back as a tool result; every later turn sends it again
+    shot, photo = data_url(), data_url(encoded(color=(30, 20, 10)))
+    call = {"id": "call", "type": "function", "function": {"name": "screenshot", "arguments": "{}"}}
+    messages = [
+        {"role": "user", "content": [{"type": "text", "text": "compare"},
+                                     {"type": "image_url", "image_url": {"url": photo}}]},
+        {"role": "assistant", "content": None, "tool_calls": [call]},
+        {"role": "tool", "tool_call_id": "call", "content": [
+            {"type": "text", "text": "screenshot"},
+            {"type": "image_url", "image_url": {"url": shot, "detail": "low"}}]},
+        {"role": "user", "content": "and now?"},
+    ]
+    template, sources = split_images(messages)
+    assert sources == [ImageSource(photo), ImageSource(shot, "low")]          # in prompt order
+    assert template[2] == {"role": "tool", "tool_call_id": "call", "content": [
+        {"type": "text", "text": "screenshot"}, {"type": "image", "detail": "low"}]}
+    assert template[1] == messages[1] and template[3] == messages[3]
+    assert messages[2]["content"][1]["type"] == "image_url"                    # the caller's messages are untouched
 
 
 @pytest.mark.parametrize("part", [

@@ -57,6 +57,8 @@ with urlopen(request) as response:
 ```
 
 `GET /v1/models` gives the exact model ID for the running server.
+Tool results (`role: "tool"`) take `image_url` parts the same way, as agents send screenshots; the model's chat
+template renders them inside the tool response.
 Remote image URLs are off by default, so a server other machines can reach never fetches URLs on a client's behalf.
 Start the server with `--vision-urls` to accept public HTTPS URLs on port 443 that serve `image/jpeg`, `image/png` or `image/webp`; plain HTTP, other ports, private, loopback, link-local and metadata addresses, file URLs and redirects to any of them are still refused.
 For a local image, send a data URL as above.
@@ -73,7 +75,7 @@ tensorfold serve Vontra/GLM-5.3-Flash-MLX-4bit-MTP --vision --vision-max-images 
 ```
 
 The count includes **all images in the submitted message history**, including images from earlier turns
-and tool results that a client sends as user image parts. Reading images one at a time can therefore
+and tool results, in tool messages or sent as user image parts. Reading images one at a time can therefore
 reach the limit. Once that history exceeds it, even a text-only follow-up is refused if the client resends
 the images. Remove older image content from the submitted history, start a new conversation, or restart
 the server with a larger count limit. The server does not discard images automatically.

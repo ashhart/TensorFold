@@ -130,6 +130,19 @@ def test_items_become_the_messages_a_chat_client_sends():
         {"role": "tool", "tool_call_id": "c2", "content": "none"}]
 
 
+def test_a_function_call_output_s_image_is_a_tool_message_image_part():
+    shot = "data:image/png;base64,AA"
+    items = [{"type": "function_call", "call_id": "c1", "name": "screenshot", "arguments": "{}"},
+             {"type": "function_call_output", "call_id": "c1",
+              "output": [{"type": "input_text", "text": "page"}, {"type": "input_image", "image_url": shot}]}]
+    assert responses.messages(items)[1] == {
+        "role": "tool", "tool_call_id": "c1",
+        "content": [{"type": "text", "text": "page"}, {"type": "image_url", "image_url": {"url": shot}}]}
+    with pytest.raises(RequestError, match="input_text and input_image"):
+        responses.messages([{"type": "function_call_output", "call_id": "c1",
+                             "output": [{"type": "input_file", "file_id": "f"}]}])
+
+
 def test_tools_choices_and_formats_as_chat_completion_fields():
     store = responses.Store()
     request = responses.translate({"input": "x", "tools": FN_TOOLS, "tool_choice": {"type": "function",

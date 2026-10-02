@@ -23,7 +23,8 @@ chat fields that shape the prompt (`tools`, `reasoning_effort`, `chat_template_k
 (default true). It returns `count`, `max_model_len` (the context window; null when none is set on MLX) and
 `tokens`, and `token_strs` with `return_token_strs: true`. The IDs are the ones the chat route runs for the same
 request, images expanded. `/detokenize` takes `tokens` and returns `prompt`.
-With `--vision`, supported Qwen3.5/3.8 dense checkpoints accept user `image_url` content parts alongside text.
+With `--vision`, supported Qwen3.5/3.8 dense checkpoints accept `image_url` content parts alongside text in user
+messages and in tool results (`role: "tool"`), such as an agent's screenshots.
 See [image input](vision.md) for data URLs, public image URLs, limits and cache behavior.
 Unsupported image input, audio, video and non-text output requests receive HTTP 400.
 
@@ -278,7 +279,8 @@ same handler and engine path. A response has that chat completion's prompt and t
 `token_sha` matches), drafts, and equals its `"draft": false` run and its solo run.
 
 - `input` is a string or a list of items: messages (`input_text`, and `input_image` with `--vision`),
-  `function_call`, `function_call_output`, and `reasoning` items with their `content` text, which the template gets
+  `function_call`, `function_call_output` (its `output` text, or `input_text` and `input_image` parts with
+  `--vision`), and `reasoning` items with their `content` text, which the template gets
   back as the next assistant message's `reasoning_content`. `instructions` becomes the system message and is not
   carried to a later turn.
 - `tools` takes function tools; `tool_choice` takes `none`, `auto`, `required`, a function or `allowed_tools`;
