@@ -50,13 +50,41 @@ def tiles(k: int, n: int) -> tuple[int, int, int, int, int]:
     return 128, 32, 8, 4, 8
 
 
-class Workspace:
-    """One decoded W_q and one rotated input, grown to the largest call and reused (calls run in order on one stream)."""
+class UnpackCache:
+    """Decoded W_q kept per layer for the next calls (e.g. the second micro-batch of a prompt chunk), least recently
+    used out first past ``nbytes``. The weights never change, so a kept copy is the unpack's own bits; workspaces that
+    share one must run on one stream (stream order keeps an evicted buffer's readers before its reuse)."""
 
-    def __init__(self) -> None:
+    def __init__(self, nbytes: int) -> None:
+        from collections import OrderedDict
+
+        self.limit, self.used, self.kept = nbytes, 0, OrderedDict()
+
+    def get(self, layer, device) -> torch.Tensor:
+        key = id(layer)
+        t = self.kept.get(key)
+        if t is not None:
+            self.kept.move_to_end(key)
+            return t
+        t = torch.empty((layer.k, layer.n), dtype=torch.float16, device=device)
+        _ext().unpack(layer.words, t, *layer.strides, layer.k2, CODEBOOK_IDS[layer.codebook])
+        self.kept[key] = t
+        self.used += t.numel() * 2
+        while self.used > self.limit and len(self.kept) > 1:
+            _, old = self.kept.popitem(last=False)
+            self.used -= old.numel() * 2
+        return t
+
+
+class Workspace:
+    """One decoded W_q and one rotated input, grown to the largest call and reused (calls run in order on one stream).
+    ``cache``: an UnpackCache shared with other workspaces on the same stream (decoded weights reused across calls)."""
+
+    def __init__(self, cache: "UnpackCache | None" = None) -> None:
         self.w: torch.Tensor | None = None
         self.xh: torch.Tensor | None = None
         self.h: torch.Tensor | None = None
+        self.cache = cache
 
     def _grow(self, name: str, numel: int, device) -> torch.Tensor:
         t = getattr(self, name)
@@ -85,8 +113,11 @@ def matmul(layer: Exl3Linear, x: torch.Tensor, out: torch.Tensor, ws: Workspace)
     ext = _ext()
     xh = ws._grow("xh", m * k, x.device)[:m * k].view(m, k)
     ext.rot_in(x.contiguous(), layer.suh, xh)
-    wq = ws._grow("w", k * n, x.device)[:k * n].view(k, n)
-    ext.unpack(layer.words, wq, *layer.strides, layer.k2, CODEBOOK_IDS[layer.codebook])
+    if ws.cache is not None:
+        wq = ws.cache.get(layer, x.device)
+    else:
+        wq = ws._grow("w", k * n, x.device)[:k * n].view(k, n)
+        ext.unpack(layer.words, wq, *layer.strides, layer.k2, CODEBOOK_IDS[layer.codebook])
     bm, bk, warps, stages, group = tiles(k, n)
     bias = layer.bias if layer.bias is not None else layer.svh
     _gemm[(triton.cdiv(m, bm) * (n // BN),)](xh, wq, ws.hadamard(x.device), layer.svh, bias, out, m, out.stride(0),
