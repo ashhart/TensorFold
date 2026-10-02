@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import threading
 from typing import Any
 
-from tensorfold.server.errors import CapacityError, RequestError
+from tensorfold.server.errors import CapacityError, RequestError, refusal
 from tensorfold.server.messages import _normalize_tool_call_arguments, normalize_messages
 from tensorfold.vision.images import DEFAULT_LIMITS, ImageLimits
 
@@ -55,7 +55,7 @@ def prepare_images(frontend, messages, render, *, context_limit=None, limits: Im
         images = load_images(sources, limits=limits, allow_urls=allow_urls)
         prepared = frontend.prepare(render(template), images, max_prompt_tokens=context_limit)
     except (ImageInputError, ValueError, ImportError) as exc:
-        raise RequestError(str(exc)) from exc
+        raise refusal(str(exc)) from exc                # an image prompt past the window: context_length_exceeded
     finally:
         slot.release()
     return RenderedPrompt(list(prepared.token_ids), vision=prepared)

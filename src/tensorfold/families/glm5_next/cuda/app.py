@@ -6,6 +6,7 @@ from typing import Any, Callable
 
 from tensorfold.cuda.server import App, PreparedRequest, RequestError
 from tensorfold.families.glm5_next.prompts import clear_thinking, thinking_off
+from tensorfold.server.errors import CONTEXT_LIMIT
 
 
 class ThinkingOffTemplate:
@@ -49,8 +50,10 @@ class GlmApp(App):
         if need <= limit:
             return super().check(body, prepared=prepared)
         detail = f"{prompt} prompt tokens plus max_tokens {int(asked)}" if asked else f"a {prompt}-token prompt"
-        return (f"this request needs a {need}-token context ({detail}), and this server was started for {limit}: "
-                f"shorten the prompt or reply{self._restart(need, ' both ranks')}")
+        # OpenAI's wording, so prepare refuses it as context_length_exceeded (clients compact on it)
+        return (f"{CONTEXT_LIMIT} {limit} tokens: this request needs a {need}-token context ({detail}), which exceeds "
+                f"the context window this server was started for; shorten the prompt or reply"
+                f"{self._restart(need, ' both ranks')}")
 
     def run(self, body: dict[str, Any], chat: bool, emit: Callable[[dict[str, Any]], bool], *,
             prepared: PreparedRequest | None = None, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:

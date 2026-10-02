@@ -8,7 +8,7 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from tensorfold.cuda import health
-from tensorfold.server import metrics, responses
+from tensorfold.server import metrics, responses, token_routes
 from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
 from tensorfold.server.decisions import DecisionError
 from tensorfold.server.errors import CapacityError, RequestError, error_body
@@ -111,7 +111,8 @@ def make_handler(app: App):
             if responses.route(self.path) == "":         # a Response: this handler's chat completion, translated
                 return responses.post(self, app)
             chat = self.path.rstrip("/").endswith("/chat/completions")
-            if not chat and not self.path.rstrip("/").endswith("/completions"):
+            tokenizer = path in token_routes.ROUTES
+            if not chat and not tokenizer and not self.path.rstrip("/").endswith("/completions"):
                 self._discard_body()
                 return self._json(404, {"error": "not found"})
             try:
@@ -123,11 +124,21 @@ def make_handler(app: App):
                 body = json.loads(self.rfile.read(length) or b"{}")
             except (json.JSONDecodeError, UnicodeDecodeError):
                 return self._json(400, {"error": {"message": "the request body is not JSON", "type": "invalid_request_error"}})
+            if tokenizer:                                   # vLLM's /tokenize and /detokenize
+                try:
+                    reply = app.detokenize(body) if path.endswith("/detokenize") else app.tokenize(body)
+                except RequestError as exc:
+                    return self._json(503 if isinstance(exc, CapacityError) else 400, {"error": error_body(exc)})
+                except Exception as exc:
+                    _log_error(exc)
+                    return self._json(400, {"error": {"message": _error_message(exc)}})
+                return self._json(200, reply)
+            field = "messages" if chat else "prompt"            # the field an error's code names (OpenAI's param)
             try:
                 prepared = app.prepare(body, chat)
             except RequestError as exc:
                 return self._json(503 if isinstance(exc, CapacityError) else 400,
-                                  {"error": error_body(exc)})
+                                  {"error": error_body(exc, field)})
             except Exception as exc:        # any other failure to read the request is refused too, as on MLX
                 _log_error(exc)
                 return self._json(400, {"error": {"message": _error_message(exc)}})
@@ -170,7 +181,7 @@ def make_handler(app: App):
                     self.close_connection = True
                     return
                 except RequestError as exc:
-                    return self._stream_error(error_body(exc))
+                    return self._stream_error(error_body(exc, field))
                 except Exception as exc:
                     _log_error(exc)
                     return self._stream_error({"message": _error_message(exc), "type": "server_error"})
@@ -206,7 +217,7 @@ def make_handler(app: App):
                 return
             except RequestError as exc:
                 return self._json(503 if isinstance(exc, CapacityError) else 400,
-                                  {"error": error_body(exc)})
+                                  {"error": error_body(exc, field)})
             except Exception as exc:
                 _log_error(exc)
                 try:

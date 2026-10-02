@@ -18,6 +18,7 @@ from tensorfold.server.messages import validate_modalities
 from tensorfold.server.probabilities import TokenBytes, probability_options
 from tensorfold.server.request_options import heard_effort, parse_numbers, thinking_fields
 from tensorfold.server.stopping import stop_options
+from tensorfold.server.token_routes import flag, token_ids
 from tensorfold.server.tool_policy import ToolCallPolicy
 from tensorfold.engine.call_gate import CallGate, ThinkBudget, call_format, generate_gated
 from tensorfold.engine.tool_draft import ToolCallStreamer
@@ -262,16 +263,62 @@ class App:
                                        self.sampling_for(body, rendered.tokens), ignore_eos=ignore_eos, stop=stop,
                                        vision=rendered.vision, grammar=compiled, think_budget=budget)
             text = render(body["messages"])
+            prompt = self.tok.encode(text, add_special_tokens=False).ids
+        elif isinstance(body.get("prompt"), list):       # token ids (vLLM's and OpenAI's form): served as given
+            prompt = self.token_ids(body["prompt"])
         else:
             text = body.get("prompt")
             if not isinstance(text, str):
-                raise RequestError("prompt must be a string")
-        prompt = self.tok.encode(text, add_special_tokens=False).ids
+                raise RequestError("prompt must be a string or a list of token ids")
+            prompt = self.tok.encode(text, add_special_tokens=flag(body, "add_special_tokens", False)).ids
         if not prompt:
             raise RequestError("rendered prompt is empty")
         # sampling is resolved here, so a malformed control is refused before a stream opens
         return PreparedRequest(prompt, max_tokens, tools, thinking, self.sampling_for(body, prompt),
                                ignore_eos=ignore_eos, stop=stop, grammar=compiled, think_budget=budget)
+
+    def token_ids(self, value: Any, field: str = "prompt") -> list[int]:
+        """Token ids as a request gives them (a list, or a list holding one list); RequestError outside the
+        vocabulary."""
+
+        size = getattr(self.tok, "get_vocab_size", None)
+        return token_ids(value, size(with_added_tokens=True) if size is not None else None, field)
+
+    def tokenize(self, body: dict[str, Any]) -> dict[str, Any]:
+        """vLLM's ``/tokenize`` (``server.token_routes``): a prompt's ids (``add_special_tokens``, default true, as
+        vLLM's), or ``messages``' as the chat route renders them (``add_generation_prompt``, default true)."""
+
+        if not isinstance(body, dict):
+            raise RequestError("the request body must be a JSON object")
+        strings = flag(body, "return_token_strs", False)
+        if "messages" in body:
+            fields = dict(body)
+            if "add_generation_prompt" in body:
+                kwargs = body.get("chat_template_kwargs")
+                kwargs = {} if kwargs is None else kwargs
+                if not isinstance(kwargs, dict):
+                    raise RequestError("chat_template_kwargs must be a JSON object or null")
+                fields["chat_template_kwargs"] = {**kwargs,
+                                                  "add_generation_prompt": flag(body, "add_generation_prompt", True)}
+            ids = self._prepare(fields, True).prompt
+        else:
+            text = body.get("prompt")
+            if not isinstance(text, str):
+                raise RequestError("prompt must be a string (or send messages)")
+            ids = self.tok.encode(text, add_special_tokens=flag(body, "add_special_tokens", True)).ids
+        limit = self._context_limit()
+        reply: dict[str, Any] = {"count": len(ids), "tokens": [int(t) for t in ids],
+                                 "max_model_len": limit if limit is not None else self.native_context_window}
+        if strings:
+            reply["token_strs"] = [self.tok.id_to_token(t) for t in reply["tokens"]]
+        return reply
+
+    def detokenize(self, body: dict[str, Any]) -> dict[str, Any]:
+        """vLLM's ``/detokenize``: the text of ``tokens``, special tokens included."""
+
+        if not isinstance(body, dict):
+            raise RequestError("the request body must be a JSON object")
+        return {"prompt": self.tok.decode(self.token_ids(body.get("tokens"), "tokens"), skip_special_tokens=False)}
 
     def check(self, body: dict[str, Any], *, prepared: PreparedRequest | None = None) -> str | None:
         """Why the request cannot run, or None; rendered before a stream's headers are sent."""

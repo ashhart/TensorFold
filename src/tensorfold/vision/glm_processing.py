@@ -9,6 +9,8 @@ from typing import Any, Sequence
 
 import numpy as np
 
+from tensorfold.server.errors import CONTEXT_LIMIT
+
 
 @dataclass(frozen=True)
 class PreparedGLMVisionPrompt:
@@ -99,8 +101,10 @@ class GLMImageProcessor:
         expanded = parts[0] + "".join(self.image_marker * n + suffix for n, suffix in zip(counts, parts[1:]))
         encoded = self.tokenizer(expanded, add_special_tokens=False, return_attention_mask=False)
         token_ids = tuple(int(t) for t in encoded["input_ids"])
-        if max_prompt_tokens is not None and len(token_ids) > max_prompt_tokens:
-            raise ValueError("The expanded image prompt exceeds the token budget; reduce image resolution or prompt length")
+        if max_prompt_tokens is not None and len(token_ids) > max_prompt_tokens:   # OpenAI's context_length_exceeded
+            raise ValueError(f"{CONTEXT_LIMIT} {max_prompt_tokens} tokens: the expanded image prompt has "
+                             f"{len(token_ids)} tokens, which exceeds the context window; reduce image resolution or "
+                             "prompt length")
         spans, cursor = [], 0
         for count in counts:
             try:

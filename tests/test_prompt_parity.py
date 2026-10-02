@@ -161,3 +161,30 @@ def test_the_effort_each_template_writes(name, request_fields, words):
     body = {"messages": messages, **request_fields}
     ids = mac.prompt(body, messages, None)
     assert ids == cuda._prepare(body, True).prompt and words in mac.tokenizer.decode(ids)
+
+
+@pytest.mark.parametrize("name", sorted(CHECKPOINTS))
+def test_tokenize_gives_the_chat_route_s_prompt_on_both_servers(name):
+    """vLLM's /tokenize: the ids each server's chat route runs, and the same on both; detokenize gives the text back."""
+
+    from tensorfold.server import token_routes
+
+    folder = _folder(name)
+    mac, cuda = Mac(name, folder, True, None), cuda_app(name, folder, True, None)
+    mac.tokenizer_lock, mac.context_window = threading.Lock(), 0
+    for label, (messages, tools) in CONVERSATIONS.items():
+        for request in REQUESTS:
+            body = {"messages": messages, **({"tools": tools} if tools else {}), **request}
+            want = cuda._prepare(body, True).prompt
+            assert cuda.tokenize(body)["tokens"] == want == token_routes.tokenize(mac, body)["tokens"], (label, request)
+            history = {**body, "add_generation_prompt": False}
+            cut = cuda.tokenize(history)["tokens"]
+            assert cut == token_routes.tokenize(mac, history)["tokens"] and len(cut) < len(want), (label, request)
+    text = "Grüße, 世界! <think>"
+    for special in (False, True):
+        body = {"prompt": text, "add_special_tokens": special, "return_token_strs": True}
+        mine, theirs = cuda.tokenize(body), token_routes.tokenize(mac, body)
+        assert mine["tokens"] == theirs["tokens"] and mine["token_strs"] == theirs["token_strs"]
+        assert cuda.detokenize({"tokens": mine["tokens"]}) == token_routes.detokenize(mac, {"tokens": mine["tokens"]})
+    assert cuda.detokenize({"tokens": cuda.tokenize({"prompt": text, "add_special_tokens": False})["tokens"]}) == {
+        "prompt": text}
