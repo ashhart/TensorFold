@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_CONTEXT = 40960          # long-context parity is verified to 40K; --context takes more where memory allows
-DRAFTS = 3                       # the checkpoint's DSpark block drafts up to 3 tokens a round
+DRAFTS = 5                       # the checkpoint's DSpark block (dspark_block_size) drafts up to 5 tokens a round
 # memory a context token costs: compressed + indexer-key caches (3.2 KB), RoPE tables (0.8 KB), and the prompt
 # selection's per-block maxima and flags (512 rows / 8-entry blocks: ~0.3 KB; scores stream in fixed segments)
 def _cache_bytes() -> int:
@@ -164,6 +164,8 @@ class Dsv41Engine:
             from .serial import PROMPT_ROWS
 
             top = PROMPT_ROWS if self.streams > 1 else (DRAFTS + 1 if drafts else 1)
+            if drafts and self.streams == 1 and os.environ.get("TF_COPY_DRAFTS", "1") != "0":   # longer copy windows
+                top = max(top, min(PROMPT_ROWS, int(os.environ.get("TF_COPY_MAX") or 15) + 1))
             for rows in range(2, top + 1):
                 self.e.capture(rows)
             if drafts:

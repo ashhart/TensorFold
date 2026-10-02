@@ -315,3 +315,13 @@ Follow-up (same day): sublayer timing (graph of one sublayer over layers 4-39, 1
 | input rotation fused into the EXL3 linear kernel (`TF_EXL3_ROT_FUSE=1`) | bit-identical in unit tests; standalone +-1-2.6 us; no serial gain; a multi-row case fails ("invalid argument"), so off |
 | L2 warming, corrected (GB10 ignores `prefetch.global.L2`: a 13 MB GEMV cold 129 us, after prefetch hints 110-124, after evict-last loads of every 32-byte sector 46-51, hot 44) | real warming but slower in decode: MoE weights during the attention all-gather 34.9, wo_a during the attention core 34.7, both 34.0, vs 36.1 tok/s; off |
 | GPU-initiated RDMA (NVSHMEM 3.8 IBGDA) in place of NCCL's ~19 us proxied all-gathers | not possible on GB10: no DMA-BUF export, no nvidia_peermem, so IBGDA (and GPUDirect RDMA) cannot initialise |
+
+## 2026-10-02 — DSpark 5 drafts, copy drafts
+
+- DSpark up to 5 drafts a round (the checkpoint's `dspark_block_size`; was capped at 3): reasoning 65.5 -> 71.6 tok/s,
+  code ~50 -> 57.6, story ~flat (35.1); DSpark == serial. Engine default now 5.
+- Copy (prompt-lookup) drafts (`tensorfold/cuda/copy_drafts.py`, on by default, `TF_COPY_DRAFTS=0` off): when the last
+  8 tokens occurred before, the tokens that followed are verified instead of DSpark's (up to 15, single stream; verify
+  graphs to 16 rows). Edit-style requests, identical replies: rename a class in a 60-line file 79.9 -> 117.3 tok/s,
+  add docstrings 76.5 -> 95.2. Standard cases: rarely fire, no change; copy == serial.
+- Concurrent (`--parallel`) rounds do not use copy drafts yet.

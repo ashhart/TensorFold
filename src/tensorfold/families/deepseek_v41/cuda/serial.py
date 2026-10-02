@@ -1366,6 +1366,13 @@ class SerialEngine:
             n = min(max(self.graphs), dsp.N + 1) - 1                    # verify windows: 1 .. n + 1 rows
             policy = DraftPolicy(n, self.round_costs()) if self.adaptive else _Fixed(n)
             ks = [0] * (n + 1)
+            # copy drafts (TF_COPY_DRAFTS=1): a reply repeating its context drafts the continuation instead of DSpark;
+            # windows up to the longest captured verify graph (both ranks compute the same proposal)
+            from tensorfold.cuda.copy_drafts import CopyDrafts, CopySettings
+
+            settings = CopySettings.from_env(max(self.graphs) - 1) if constraint is None else None
+            copy = CopyDrafts(self.state.ids, settings) if settings is not None else None
+            copy_rounds = copy_accepted = 0
 
         def emit(tokens: list[int]) -> bool:
             """Append a round's tokens (cut at EOS / max_tokens); True when the reply is complete."""
@@ -1410,9 +1417,18 @@ class SerialEngine:
             P = len(self.state.ids)
             rp = self._rp
             rp and rp.start()
-            k = self.agree(-1 if stop else min(policy.choose(), rows_left - 1))
+            proposal: list[int] = []
+            if copy is not None:
+                copy.truncate(P)
+                copy.extend([nxt])
+                proposal = copy.propose(rows_left - 1)
+            code = 100 + len(proposal) if proposal else min(policy.choose(), rows_left - 1)
+            k = self.agree(-1 if stop else code)
             if k < 0:
                 break
+            copied = k >= 100                                       # rank 0's choice: a copy round of k - 100 rows
+            if copied:
+                k -= 100
             rp and rp.mark("agree")
             ta = time.perf_counter()
             window = None
@@ -1431,7 +1447,7 @@ class SerialEngine:
                 tb = ta
             else:
                 rp and rp.event("d.gpu0")
-                drafts = dsp.propose(nxt, P)[:k]
+                drafts = proposal[:k] if copied else dsp.propose(nxt, P)[:k]
                 rp and rp.event("d.gpu1")
                 rp and rp.mark("propose")
                 if constraint is not None:                         # only the drafts the grammar can take
@@ -1442,12 +1458,18 @@ class SerialEngine:
                 rp and rp.mark("verify.done")
             t_draft += tb - ta
             t_verify += time.perf_counter() - tb
-            ks[k] += 1
             m = 0
             while m < len(drafts) and drafts[m] == target[m]:
                 m += 1
             del self.state.ids[P + 1 + m:]                         # rejected rows: overwritten by later positions
-            policy.update(k, m, 1e3 * (time.perf_counter() - ta))
+            if copied:                                             # the DSpark policy learns from its own rounds
+                copy_rounds += 1
+                copy_accepted += m
+            else:
+                ks[k] += 1
+                policy.update(k, m, 1e3 * (time.perf_counter() - ta))
+            if copy is not None:
+                copy.extend(drafts[:m])
             rp and rp.mark("tail")
             rp and rp.end(k)
             rounds += 1
@@ -1467,4 +1489,6 @@ class SerialEngine:
             res.update(rounds=rounds, accepted_per_round=accepted / max(rounds, 1),
                        tokens_per_round=len(out) / max(rounds, 1), draft_ms=1e3 * t_draft / max(rounds, 1),
                        verify_ms=1e3 * t_verify / max(rounds, 1), k_histogram=ks)
+            if copy is not None:
+                res.update(copy_rounds=copy_rounds, copy_accepted=copy_accepted)
         return res

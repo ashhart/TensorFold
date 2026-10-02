@@ -80,7 +80,10 @@ def main() -> None:
         with torch.no_grad():
             eng.capture(1)
             if args.dspark:
-                for rows in range(2, args.dspark + 2):
+                top = args.dspark + 1
+                if os.environ.get("TF_COPY_DRAFTS", "1") != "0":         # copy drafts verify longer windows
+                    top = max(top, int(os.environ.get("TF_COPY_MAX") or 15) + 1)
+                for rows in range(2, top + 1):
                     eng.capture(rows)
                 eng.drafter.capture()
                 eng.adaptive = not args.fixed_k
@@ -335,7 +338,8 @@ def main() -> None:
             if args.rank == 0:
                 same = case.get("out_ids") is not None and r["tokens"][:len(case["out_ids"])] == case["out_ids"][:len(
                     r["tokens"])]
-                extra = (f", {r['accepted_per_round']:.2f} accepted a round (vLLM {case['accepted_per_round']:.2f}), "
+                copies = (f", copy rounds {r['copy_rounds']} ({r['copy_accepted']} accepted)" if "copy_rounds" in r else "")
+                extra = (f"{copies}, {r['accepted_per_round']:.2f} accepted a round (vLLM {case['accepted_per_round']:.2f}), "
                          f"draft {r['draft_ms']:.1f} ms + verify {r['verify_ms']:.1f} ms a round, k used {r['k_histogram']}"
                          if "rounds" in r else "")
                 print(f"{case['name']}: {len(r['tokens'])} tokens {r['decode_tps']:.1f} tok/s{extra}; "

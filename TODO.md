@@ -124,6 +124,8 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
       sequential
 - [x] Up to 32 rows a round + 15 MB decode rings a slot: 32 clients 143.3 tok/s aggregate
 - [x] Batched DSpark drafting across streams (8 clients 82.5 -> 88.9 tok/s)
+- [x] DSpark up to 5 drafts (reasoning 71.6, code 57.6 tok/s single stream)
+- [x] Copy drafts, single stream (edit requests 80 -> 117 tok/s); [ ] in concurrent rounds
 - [x] `--context` admission before any cache exists (both ranks' free memory; refuses with the largest that fits;
       default 40,960 shrinks to fit); expandable-segments allocator (prompt transients 3.6 -> 1.6 GiB at 38K)
 - [x] Structured output: `response_format` json_schema / json_object, guided_choice / regex / grammar (xgrammar),
