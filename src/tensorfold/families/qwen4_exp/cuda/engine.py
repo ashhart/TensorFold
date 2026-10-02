@@ -221,14 +221,15 @@ class FlashNextEngine:
         total = int(ids.sum()) if ids is not None else -1
         mine = torch.tensor([self.depth, round(self.confidence * 1e6), self.max_len,
                              len(ids) if ids is not None else -1, total, BITS_OF[self.kv_dtype],
-                             int(prompt_precision.fp8())], dtype=torch.int64, device="cuda")
+                             self.prefill_rows, int(prompt_precision.fp8())], dtype=torch.int64, device="cuda")
         both = torch.empty((2 * mine.numel(),), dtype=torch.int64, device="cuda")
         self.comm.all_gather(mine, both)
         both = both.view(2, -1).cpu()
         prompt_precision.same_on_ranks(int(both[0, -1]), int(both[1, -1]))
         if not torch.equal(both[0], both[1]):
             raise RuntimeError(f"the two ranks were started with different settings (drafts, confidence, context, "
-                               f"draft vocabulary, KV cache): rank 0 {both[0].tolist()}, rank 1 {both[1].tolist()}")
+                               f"draft vocabulary, KV cache, prompt rows): rank 0 {both[0].tolist()}, "
+                               f"rank 1 {both[1].tolist()}")
 
     def _key(self, n: int) -> str:
         return f"tensorfold/flashnext/request/{n}"
