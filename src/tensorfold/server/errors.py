@@ -29,10 +29,12 @@ def refusal(problem: str) -> RequestError:
     return (ContextLengthError if problem.startswith(CONTEXT_LIMIT) else RequestError)(problem)
 
 
-def error_body(exc: Exception) -> dict:
-    """OpenAI's error object: the message, its type, and the code clients key on where there is one."""
+def error_body(exc: Exception, param: str | None = None) -> dict:
+    """OpenAI's error object: the message, its type, and where there is a code clients key on, the field and code
+    (``param``: ``messages`` for a chat completion, ``prompt`` for a completion, as OpenAI names them)."""
 
     body = {"message": str(exc), "type": "invalid_request_error"}
     if getattr(exc, "code", None):
+        body["param"] = param
         body["code"] = exc.code
     return body

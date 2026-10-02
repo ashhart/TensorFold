@@ -154,6 +154,21 @@ def test_prepare_images_errors_are_request_refusals():
         prepare_images(Frontend(), image_messages(), str, context_limit=3)
 
 
+def test_an_image_prompt_past_the_window_is_context_length_exceeded():
+    from tensorfold.server.errors import CONTEXT_LIMIT, ContextLengthError
+
+    class Long(Frontend):
+        def prepare(self, rendered, images, *, max_prompt_tokens):
+            raise ValueError(f"{CONTEXT_LIMIT} {max_prompt_tokens} tokens: the expanded image prompt has 40 tokens")
+
+    with pytest.raises(ContextLengthError, match="maximum context length is 8 tokens") as caught:
+        prepare_images(Long(), image_messages(), str, context_limit=8)
+    assert caught.value.code == "context_length_exceeded"
+    with pytest.raises(RequestError) as other:                        # other image refusals carry no code
+        prepare_images(Frontend(), image_messages(), str, context_limit=3)
+    assert not isinstance(other.value, ContextLengthError)
+
+
 def test_prepare_prompt_preserves_text_render_and_direct_prompt_paths():
     app = prompt_app(None)
     prepared = prepare_prompt(app, [{"role": "user", "content": "text"}], [], False, None, {})

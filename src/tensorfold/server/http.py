@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from tensorfold.engine import grammar
-from tensorfold.server import live, responses
+from tensorfold.server import live, responses, token_routes
 from tensorfold.server.tools import (active_tool_specs, parse_tool_calls_from_content, stream_tool_call_deltas,
                                      tool_choice_requires_call)
 from tensorfold.server.decisions import DecisionError
@@ -196,6 +196,8 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 return self._post_decisions(app)
             if responses.route(route) == "":         # a Response: this handler's chat completion, translated
                 return responses.post(self, app)
+            if route in token_routes.ROUTES:         # vLLM's /tokenize and /detokenize
+                return self._post_tokenizer(route.endswith("/detokenize"))
 
             is_chat_completion = route.endswith("/chat/completions")
             is_text_completion = route.endswith("/completions") and not is_chat_completion
@@ -203,6 +205,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 self._discard_body()
                 self._send_json({"error": {"message": f"unknown path {self.path}"}}, status=404)
                 return
+            field = "messages" if is_chat_completion else "prompt"   # the field an error's code names (OpenAI's param)
 
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -250,7 +253,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 separate_usage = wants_usage_chunk(body)      # usage then rides its own chunk before [DONE]
                 tool_policy = ToolCallPolicy(body)
             except RequestError as exc:
-                self._send_json({"error": error_body(exc)},
+                self._send_json({"error": error_body(exc, field)},
                                 status=503 if isinstance(exc, CapacityError) else 400)
                 return
             except Exception as exc:
@@ -421,7 +424,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                     except RequestCancelled:
                         return
                     except RequestError as exc:
-                        emit({"error": error_body(exc)})
+                        emit({"error": error_body(exc, field)})
                         self.wfile.write(b"data: [DONE]\n\n")
                         self.wfile.flush()
                         return
@@ -505,7 +508,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
             except (BrokenPipeError, ConnectionResetError, RequestCancelled):
                 pass
             except RequestError as exc:
-                self._send_json({"error": error_body(exc)}, status=400)
+                self._send_json({"error": error_body(exc, field)}, status=400)
             except Exception as exc:  # surface runner errors to the client
                 print(f"[tensorfold] request error: {type(exc).__name__}: {exc}", flush=True)
                 traceback.print_exc()
@@ -514,6 +517,22 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 except Exception:
                     pass
 
+
+        def _post_tokenizer(self, detokenize: bool) -> None:
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 <= length <= 32 * 1024**2:
+                    self.close_connection = True         # the unread body must not reach the next request
+                    raise RequestError("request body exceeds the 32 MiB limit")
+                body = json.loads(self.rfile.read(length) or b"{}")
+                reply = token_routes.detokenize(app, body) if detokenize else token_routes.tokenize(app, body)
+            except RequestError as exc:
+                self._send_json({"error": error_body(exc)}, status=503 if isinstance(exc, CapacityError) else 400)
+                return
+            except Exception as exc:  # noqa: BLE001 - a body the tokenizer cannot read is a client error
+                self._send_json({"error": {"message": str(exc), "type": "invalid_request_error"}}, status=400)
+                return
+            self._send_json(reply)
 
         def _post_decisions(self, app: Any) -> None:
             decide = getattr(app, "decisions", None)

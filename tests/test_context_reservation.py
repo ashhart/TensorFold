@@ -103,6 +103,7 @@ def test_http_requested_reserve_refuses_with_counts_and_next_request_recovers(fi
         assert status == 400 and "9 tokens" in body and "2 reply tokens" in body
         error = json.loads(body)["error"]           # OpenAI's code and wording, which clients match to compact
         assert error["code"] == "context_length_exceeded" and "exceeds the context window" in error["message"]
+        assert error["param"] == "messages"
         assert re.search(r"maximum context length is \d+ tokens", error["message"])
         assert not app.engine.prefill_calls
         payload["messages"][0]["content"] = "abcde"

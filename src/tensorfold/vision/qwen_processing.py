@@ -9,6 +9,8 @@ from typing import Any, Sequence
 
 import numpy as np
 
+from tensorfold.server.errors import CONTEXT_LIMIT
+
 
 @dataclass(frozen=True)
 class PreparedVisionPrompt:
@@ -171,8 +173,9 @@ class QwenImageProcessor:
         expanded = text[0] + "".join(self.image_token * n + rest for n, rest in zip(counts, text[1:]))
         encoded = self.tokenizer(expanded, add_special_tokens=False, return_attention_mask=False)
         tokens = tuple(int(t) for t in encoded["input_ids"])
-        if max_prompt_tokens is not None and len(tokens) > max_prompt_tokens:
-            raise ValueError("The expanded image prompt exceeds the token budget; reduce image resolution or prompt length")
+        if max_prompt_tokens is not None and len(tokens) > max_prompt_tokens:   # OpenAI's context_length_exceeded
+            raise ValueError(f"{CONTEXT_LIMIT} {max_prompt_tokens} tokens: the expanded image prompt has {len(tokens)} "
+                             "tokens, which exceeds the context window; reduce image resolution or prompt length")
         positions, delta, spans = image_positions(tokens, grid, self.config)
         pixels = np.concatenate(parts, axis=0)
         for array in (pixels, grid, positions):

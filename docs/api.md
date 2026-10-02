@@ -8,13 +8,21 @@ The base URL is `http://127.0.0.1:8080/v1` with the default server settings.
 | `GET /health` | Server health and available status information |
 | `GET /metrics`, `GET /v1/metrics` | Prometheus text: requests, KV occupancy, drafts and latency (both servers) |
 | `POST /v1/chat/completions` | Text chat, optional image input, tools and reasoning; streamed or non-streamed |
-| `POST /v1/completions` | Raw text without a chat template; MLX also accepts token IDs |
+| `POST /v1/completions` | Raw text without a chat template, or token IDs |
+| `POST /tokenize`, `POST /v1/tokenize` | vLLM's: a `prompt`'s token IDs, or the IDs a chat request's `messages` render to |
+| `POST /detokenize`, `POST /v1/detokenize` | vLLM's: the text of `tokens`, special tokens included |
 | `POST /v1/responses` | OpenAI's Responses API, run as the equivalent chat completion; streamed or non-streamed |
 | `GET /v1/responses/{id}`, `DELETE /v1/responses/{id}` | A stored response, or remove it |
 | `POST /v1/decisions` | Choice, score, and yes/no probabilities from the next-token logits; no text is generated |
 
 On MLX, a completions body containing a nonempty `messages` list uses chat handling. CUDA completions
-require a string `prompt`.
+take a string `prompt` (`add_special_tokens`, default false) or a list of token IDs, run as given.
+
+`/tokenize` takes vLLM's fields: a `prompt` string (`add_special_tokens`, default true), or `messages` with the
+chat fields that shape the prompt (`tools`, `reasoning_effort`, `chat_template_kwargs`) and `add_generation_prompt`
+(default true). It returns `count`, `max_model_len` (the context window; null when none is set on MLX) and
+`tokens`, and `token_strs` with `return_token_strs: true`. The IDs are the ones the chat route runs for the same
+request, images expanded. `/detokenize` takes `tokens` and returns `prompt`.
 With `--vision`, supported Qwen3.5/3.8 dense checkpoints accept user `image_url` content parts alongside text.
 See [image input](vision.md) for data URLs, public image URLs, limits and cache behavior.
 Unsupported image input, audio, video and non-text output requests receive HTTP 400.
@@ -194,8 +202,10 @@ and fitting guidance before generation. MLX returns HTTP 400 for non-streamed re
 `invalid_request_error` event after opening a stream. CUDA returns HTTP 400 before opening a stream.
 The 0.3.4.1 MLX server capped that explicit limit to the remaining context.
 A prompt that leaves no room for a reply is refused the same way, and on both backends every such refusal
-carries OpenAI's `context_length_exceeded` code and a message that starts "This server's maximum context length
-is N tokens", so clients that compact a conversation on that error do so.
+carries OpenAI's `context_length_exceeded` code, the field it is about in `param` (`messages` for a chat completion,
+`prompt` for a completion), and a message that starts "This server's maximum context length is N tokens", so clients
+that compact a conversation on that error do so. An image prompt that expands past the window is refused the same
+way, and so are GLM-5.3's own context refusals on CUDA.
 When the request omits the reply limit, the server still caps its configured default to the remaining context.
 CUDA returns HTTP 400 before generation when the chat template rejects the request or
 `chat_template_kwargs` is neither an object nor null. A generation error returns HTTP 500 for a
