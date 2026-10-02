@@ -164,8 +164,8 @@ class Staged:
         w, h = self.width, self.host.numpy()
         h[:w] = tokens
         h[w:2 * w] = np.arange(p, p + w)
-        h[2 * w + w + 2] = p                                 # the attention stream's committed keys and chunks
-        h[2 * w + w + 3] = -(-(p + w) // tree_attention.CHUNK)
+        h[2 * w + w + 2] = p                                 # the attention stream's committed keys and slots
+        h[2 * w + w + 3] = tree_attention.slots(p, w)
         self.dev.copy_(self.host, non_blocking=True)
 
 
