@@ -37,6 +37,7 @@ GLM-5.3-Flash images run on MLX; dense Qwen's run on MLX and CUDA. See
 | GLM-5.3-Flash | `Vontra/GLM-5.3-Flash-MLX-4bit-MTP` | MLX on a 256 GB Mac, CUDA with two ranks | MTP; optional DFlash2 on CUDA |
 | Gemma 4 26B-A4B | `mlx-community/gemma-4-26b-a4b-it-4bit` | MLX | Context copies; `z-lab/gemma-4-26B-A4B-it-DFlash` is optional |
 | DeepSeek-V4-Flash | `mlx-community/DeepSeek-V4-Flash-4bit` | MLX on a 256 GB Mac | `Vontra/DeepSeek-V4-Flash-DSpark-MLX` or `Vontra/DeepSeek-V4-Flash-MTP-MLX` |
+| DeepSeek-V4-Flash (GGUF) | Local compatible 0731 GGUF; [build recipe](docs/recipes/deepseek-v4-flash.md#cuda-gguf-on-one-dgx-spark) | CUDA, one DGX Spark | Serial or opt-in local DSpark GGUF; pinned native dependency |
 | Qwen3.8-27B (NVFP4) | `nvidia/Qwen3.8-27B-NVFP4` (ModelOpt: NVFP4 MLP, FP8 attention) | CUDA, one GPU | `z-lab/Qwen3.8-27B-DFlash2` and context copies |
 | Qwen3.8-27B (EXL3, experimental) | `turboderp/Qwen3.8-27B-exl3` (branches `3.00bpw`, `4.00bpw`; any codebook, 1 to 8 bits per weight) | CUDA | `z-lab/Qwen3.8-27B-DFlash2` and context copies |
 | Qwen3.8 Flash Next (EXL3, experimental) | `turboderp/Qwen3.8-Flash-Next-exl3` (branch `3.05bpw_h5_ng5`; any codebook, a width per tensor) | CUDA | Included MTP head and context copies |
@@ -89,6 +90,10 @@ A draft is accepted only when it equals the token the same engine would produce 
 Sampling depends on the prompt or explicit seed, absolute position and token ID. Verify kernels keep each
 row's arithmetic independent of the other rows in the call. Compare a request with the same request using
 `"draft": false` to check drafted versus serial output.
+
+DeepSeek CUDA GGUF DSpark uses the same continuous target bank with drafts on or
+off. Its worker disables width-dependent HC fusion and Q8 pairing so verification
+uses the one-row target arithmetic; see [its recipe](docs/recipes/deepseek-v4-flash.md#optional-dspark-gguf-on-spark).
 
 The MLX engine can share a round across requests. Each stream keeps its own state and sampling key, with
 concurrent output required to match its solo output. Load-time checks restrict window width and shared

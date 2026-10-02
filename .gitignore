@@ -5,9 +5,18 @@ build/
 dist/
 .venv/
 venv/
+.audit-venv/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
 .DS_Store
 *.swp
 *.log
+
+# Native build outputs and local GGUF checkpoints
+*.o
+*.a
+*.so
+*.whl
+*.gguf
+native-build.json

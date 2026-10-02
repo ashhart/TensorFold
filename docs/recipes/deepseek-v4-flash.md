@@ -107,3 +107,152 @@ rings. `TENSORFOLD_MEMORY_LIMIT_GB` raises the budget on a machine with nothing 
 ## Not yet
 
 CUDA on two DGX Sparks and DeepSeek-V4-flash-vision-exp are not in this family yet.
+
+## CUDA GGUF on one DGX Spark
+
+The CUDA adapter runs DeepSeek-V4-Flash-0731 from an existing GGUF through the
+[MIT-licensed ds4 engine](https://github.com/Entrpi/ds4), behind TensorFold's HTTP
+server, native tokenizer, DeepSeek prompt encoder and DSML tool parser.
+It supports one GB10 and one request at a time, with an optional local DSpark
+GGUF. MTP, vision, tensor parallelism and concurrent streams are unsupported.
+
+The qualified base is
+`DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf`:
+80.76 GiB, 1,328 tensors and 129,280 vocabulary entries, using IQ2_XXS routed
+gate/up, Q2_K routed down and Q8_0 dense/shared/output weights. `--gguf` selects
+the user's quant; it is independent of the native source pin. Other files must
+pass schema, tokenizer and memory admission. Routed IQ2_XXS, Q2_K and Q4_K are
+recognized; only the named mixed quant has been qualified end to end.
+
+### Build and serve
+
+Use Linux aarch64, CUDA 13 and Python 3.11+ in a dedicated venv with TensorFold's
+declared dependencies plus setuptools/wheel. The native build targets GB10
+(`sm_121a`); other GPUs are unqualified. Two compiler jobs are the default.
+
+```bash
+TENSORFOLD_DEEPSEEK_FLOOR_GIB=4 python tools/build_deepseek_v4_cuda.py \
+    --gguf /models/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf \
+    --model-dir /models/tensorfold-deepseek \
+    --companion-reserve-gib 3 --context 163840 --jobs 2
+
+TENSORFOLD_DEEPSEEK_FLOOR_GIB=4 tensorfold serve /models/tensorfold-deepseek \
+    --backend cuda --tp 1 --parallel 1 --context 163840 \
+    --drafter /models/DSpark-drafter-Q2K-Q8-0731.gguf \
+    --name deepseek-v4-flash --host 127.0.0.1 --port 8000
+```
+
+After installation the helper is also `tensorfold-deepseek-build`. It validates
+headers and embedded tokenizer metadata, builds a platform wheel in an isolated
+copy, installs only into its invoking venv, and prepares the model's sidecars.
+The base GGUF remains read-only. No model or tokenizer is downloaded; an external
+tokenizer is optional and must match vocabulary and EOS. Add `--preflight-only`
+for validation without compilation, installation, directory creation or GPU/model
+allocation. Header provenance records its SHA-256 and the source's size, mtime,
+device and inode; tensor payloads are not hashed in full.
+
+Omit `--drafter` and select `--no-drafts` for the original serial path. With DSpark
+attached, request `"draft": false` disables drafting within the same continuous
+bank. CUDA's `--drafter auto` leaves drafting disabled until a local GGUF is
+selected explicitly; MLX retains its automatic checkpoint selection.
+
+### Native source reuse
+
+The build pins ds4 at `d183482b413ecd2e3b540b290e6497437e9fbb73`.
+`cuda/ds4-source.json` records hashes for the 42 required source files, with
+attribution retained in `LICENSES/ds4.txt` and the packaged wheel.
+
+A matching library/build receipt is reused first. Otherwise sources are reused
+from `~/.cache/tensorfold/ds4/<revision>`. Select an existing tree or checkout with
+`--ds4-source /path/to/ds4` or `TENSORFOLD_DS4_SOURCE`. Modified working trees are
+left intact: the builder reads the pinned local Git objects. If neither local
+sources nor cache exists, Git fetches the pinned revision once. `--offline`
+refuses that fetch. Corrupt cached inputs are rejected. Sources remain outside
+the checkout and wheel; the wheel contains the manifest, shim, license and library.
+
+The versioned C shim uses the donor's forward, quantization and packed-cache
+operations. An isolated child owns native state; fatal exits become parent-side
+errors. Logits travel as float32 binary RPC, with eval and its logits transfer
+combined during serial decode. Tokenization accepts embedded NUL bytes without
+truncating text. Shutdown and bind failure release the worker.
+
+### Sampling and prefix reuse
+
+TensorFold owns target sampling, keyed by seed, absolute position and token ID,
+including temperature, top-k, top-p and min-p. A verified build-copy hook exposes
+all target verification rows to this sampler. Only committed tokens reach
+callbacks. EOS, stops, cancellation and required/named tools use those callbacks.
+The native tokenizer joins token bytes before UTF8 decoding.
+
+DSpark uses 1,024-token prefill chunks and retains one canonical prefill checkpoint,
+capped at 131,072 tokens independently of request capacity. The snapshot contains
+target raw/packed caches, compressor state and all three injected DSpark KV rings.
+Injection is maintained when drafting is disabled, permitting mode switches.
+Requests restore the common boundary and replay a nonempty suffix with the same
+chunk boundaries as a fresh run. Decode-built frontiers and partial fork rewinds
+are not reused. Changed prefixes go cold; reset and shutdown release the cache.
+The original serial path retains its 2,048-token prefill boundaries.
+
+Two native width-dependent optimizations are disabled in the DSpark worker so
+plain and wider verification rows use the same arithmetic. CUDA graph capture
+remains enabled; the final capture scan band is bounded by allocated cache
+capacity for contexts between powers of two. The build receipt checks the shim
+and hook hashes as well as the pinned source and library hashes.
+
+### Memory admission
+
+Admission precedes model loading and preserves an explicit context without
+silently shrinking it. It budgets mapped model and drafter weights, additional
+aligned Q8 artifacts, active packed cache/workspace, a fixed checkpoint buffer,
+1 GiB runtime reserve, additional companion growth and the host memory floor.
+`MemAvailable` already reflects resident companions; their growth is added once.
+Inactive F32 cache shells are excluded, while packed rows and scratch are counted.
+Native allocator fit checks and bounded boot prewarm remain enabled.
+
+`TENSORFOLD_DEEPSEEK_FLOOR_GIB` defaults to 8 and accepts finite values of at least
+4. The qualified shared Spark profile uses a 4 GiB floor, 3 GiB companion growth
+reserve, 163,840-token context and 131,072-token retained prefix. The companion
+allowance was rounded from a measured 2.91 GiB growth peak; measure it again for
+other workloads. Build and serve must use the same selected context.
+
+### Verification and measurements
+
+Focused CPU checks cover malformed GGUF and wire layout, schema/tokenizer
+provenance, atomic preparation, verified source reuse, isolated build and native
+ownership, early memory/option refusal, seeded callbacks, HTTP streaming and tools.
+The real native IQ2 primitive is optional on hosts with a built CPU library.
+
+Real-GGUF CUDA regressions are opt-in:
+
+```bash
+TENSORFOLD_DEEPSEEK_FLOOR_GIB=4 \
+TENSORFOLD_TEST_GPU_MODEL_DIR=/models/tensorfold-deepseek \
+TENSORFOLD_TEST_GPU_DRAFTER=/models/DSpark-drafter-Q2K-Q8-0731.gguf \
+TENSORFOLD_TEST_GPU_CONTEXT=163840 \
+python -m pytest tests/test_deepseek_v4_cuda_resume.py -k dspark -q
+```
+
+Set `TENSORFOLD_TEST_GPU_LONG_PREFIX=1` to exercise the full 128 Ki retained
+boundary. The tests compare cold and cached seeded output, drafted and plain
+requests, mode switches, aligned lengths, changed history and raw-ring wrap.
+At 131,093 initial prompt tokens, both warm modes reused 131,072 tokens and
+matched the fresh reply. Follow-up prefill measured 0.80 s cached versus 147.76 s
+fresh. These are cache-hit/cold timings, not a cold-prefill throughput comparison.
+
+On one GB10 with the qualified base and Q2K/Q8 DSpark, 256-token replies measured:
+
+| Prompt and sampling | Plain | DSpark | Ratio |
+| --- | ---: | ---: | ---: |
+| Short vector-module prompt, greedy | 19.45 tok/s | 30.86 tok/s | 1.59× |
+| Same prompt, temperature 0.8, seed 123 | 19.24 tok/s | 33.45 tok/s | 1.74× |
+| 2,428-token prompt, temperature 0.8, seed 456 | 18.00 tok/s | 33.65 tok/s | 1.87× |
+
+These measurements used 262,144-token capacity before workspace tuning. The
+1,024-token workspace at 196,608-token capacity subsequently measured 16.63 s
+median cold prefill for 15,613 tokens versus 18.32 s with the prior 512-token
+workspace at 262,144 capacity: 10.2% higher throughput, from two runs per case.
+A 2,048-token workspace failed memory admission. The deployed 163,840-token
+profile fits the doubled prefix buffer; the 0.6.1 update preserved recorded
+seeded output and measured 16.82 s cold and 0.45 s cached prefill on the HTTP
+follow-up fixture. Historical ds4 workloads were unmatched; a vLLM comparison
+and full-capacity/long-duration soak are not claimed.

@@ -108,3 +108,21 @@ def test_nucleus_without_top_k_matches_the_whole_vocabulary_draw():
     assert drawn > 40
     flat = mx.zeros((1, 50_000), dtype=mx.bfloat16)          # every token tied: the nucleus needs them all
     assert es._nucleus_rows(flat, [0], es.Sampling(seed=1, top_k=0, top_p=0.95)) is None
+
+
+def test_top_k_partitions_vocab_without_changing_seeded_draws(monkeypatch):
+    rng = np.random.default_rng(7)
+    values = rng.normal(size=129280).astype(np.float32)
+    ids = np.arange(len(values))
+    s = Sampling(seed=123, temperature=1., top_k=20, top_p=.95)
+    original = np.lexsort
+    sizes = []
+    def observe(keys):
+        sizes.append(len(keys[0]))
+        return original(keys)
+    monkeypatch.setattr(np, 'lexsort', observe)
+    expected = [71479, 100234, 90325, 96859, 96859, 102565, 90325, 48159,
+                100929, 4657, 4657, 9893, 6694, 100929, 90325, 99350, 96859,
+                102565, 90325, 4657]
+    assert [choose(values, ids, i, s) for i in range(20)] == expected
+    assert max(sizes) == 20
