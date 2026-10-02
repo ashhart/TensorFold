@@ -9,7 +9,7 @@ extends all of turn 1's prompt and the entry at ``entry_end`` resumes one token 
 The prompts are rendered and encoded as the CUDA server does (``ChatTemplate``, then ``Tokenizer.encode``). The test
 needs the checkpoint's tokenizer files in the Hugging Face cache; the weights are not read:
 
-    hf download Vontra/Qwen3.8-27B-MLX-4bit config.json tokenizer.json tokenizer_config.json chat_template.jinja
+    hf download TensorFold/Qwen3.8-27B-MLX-4bit config.json tokenizer.json tokenizer_config.json chat_template.jinja
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ pytest.importorskip("jinja2")
 from tensorfold.cuda.streams import PrefixCache
 from tensorfold.families.qwen3_5.cuda.engine import KEEP_ONE, Qwen27Engine, entry_end
 
-REPO = "Vontra/Qwen3.8-27B-MLX-4bit"
+REPO = "TensorFold/Qwen3.8-27B-MLX-4bit"
 FILES = ("tokenizer.json", "tokenizer_config.json", "chat_template.jinja")
 NL, NL2 = 198, 271          # "\n" and "\n\n"
 

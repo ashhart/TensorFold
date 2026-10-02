@@ -9,7 +9,7 @@ MODEL_TYPES = ("glm5_next",)
 TITLE = "GLM-5.3-Flash"
 LANES = True
 # 4-bit weights in groups of 64 with the MTP layer kept; the EXL3 checkpoint is the CUDA engine's alone
-MODELS = ("Vontra/GLM-5.3-Flash-MLX-4bit-MTP", "Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw")
+MODELS = ("TensorFold/GLM-5.3-Flash-MLX-4bit-MTP", "Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw")
 DRAFTER = "incoai/GLM-5.3-Flash-DFlash2"   # the CUDA engine's optional draft model; the Mac engine drafts with MTP
 KERNEL_PACKAGE = "tensorfold.kernels.glm.flash.v1"
 # the prompt experts' sorted gather (Flash Next's prompt matmuls), hashed into snapshot keys

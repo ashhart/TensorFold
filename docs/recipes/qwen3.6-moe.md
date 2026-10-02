@@ -7,8 +7,8 @@ drafts with the checkpoint's own MTP layer.
 ## Checkpoint
 
 ```bash
-tensorfold pull Vontra/Qwen3.6-35B-A3B-MLX-4bit-MTP
-tensorfold serve Vontra/Qwen3.6-35B-A3B-MLX-4bit-MTP --name bench
+tensorfold pull TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP
+tensorfold serve TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP --name bench
 ```
 
 Tested revision: `81169a9bc511a27c1b4eedb77a2cd98ced431847` (20.9 GB). Its weights are
@@ -45,7 +45,7 @@ extending a conversation resumes there with a fresh prefill's bits.
 ### Concurrent requests
 
 ```bash
-tensorfold serve Vontra/Qwen3.6-35B-A3B-MLX-4bit-MTP --parallel 8 --name bench
+tensorfold serve TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP --parallel 8 --name bench
 ```
 
 `--parallel N` decodes up to N requests in shared rounds, and every reply equals the same request served alone

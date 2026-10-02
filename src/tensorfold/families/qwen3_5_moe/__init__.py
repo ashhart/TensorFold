@@ -10,7 +10,7 @@ MODEL_TYPES = ("qwen3_5_moe",)
 TITLE = "Qwen3.6 MoE"
 LANES = True
 # MLX 4-bit, groups of 64, routers 8-bit, MTP layer in mtp-4bit.safetensors (mlx-community's files take it too)
-MODELS = ("Vontra/Qwen3.6-35B-A3B-MLX-4bit-MTP", "mlx-community/Qwen3.6-35B-A3B-4bit")
+MODELS = ("TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP", "mlx-community/Qwen3.6-35B-A3B-4bit")
 REQUIRED_FILES = {MODELS[0]: ("mtp-4bit.safetensors",)}
 DRAFTER = "z-lab/Qwen3.6-35B-A3B-DFlash"      # Macs: DFlash (v1), chains of each position's own argmax
 CUDA_DRAFTER = ""                             # CUDA: the checkpoint's own MTP layer

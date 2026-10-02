@@ -4,8 +4,8 @@ The `qwen4_exp` family has Gated DeltaNet, sparse attention, MoE, hyper-connecti
 embeddings. The supported checkpoint uses MLX affine 4-bit weights in groups of 32 and includes an MTP head.
 
 ```bash
-tensorfold pull Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP
-tensorfold serve Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP --name bench
+tensorfold pull TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP
+tensorfold serve TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP --name bench
 ```
 
 On MLX, a supported conversion without the head runs without MTP drafting. On CUDA, pass `--no-drafts`
@@ -68,7 +68,7 @@ format ([prompt precision](cuda.md#prompt-precision)):
 | `local-inference-lab/Qwen3.8-Flash-Next-NVFP4` (`7c4f1bc1`) | NVFP4 routed experts, MXFP8 elsewhere | 0.94-1.03x from 2k to 64k |
 | `RadixArk/Qwen3.8-Flash-Next-NVFP4` (`7b719225`) | NVFP4 routed experts, bf16 elsewhere | unchanged: no FP8 prompt kernel |
 | `turboderp/Qwen3.8-Flash-Next-exl3` (`3.05bpw_h5_ng5`) | EXL3 | unchanged: EXL3 prompts never took FP8 activations |
-| `Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP` | MLX affine 4-bit | unchanged: its prompts were already bf16 |
+| `TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP` | MLX affine 4-bit | unchanged: its prompts were already bf16 |
 
 TensorFold finds Mia-AiLab's export by its `model_type` (`qwen3_8_flash_next`) and serves it like
 local-inference-lab's.
@@ -254,8 +254,8 @@ With drafts on the current engine (the table above), the 3.05 bpw pack decodes 1
 For two ranks, pull the checkpoint on both and start rank 1 first:
 
 ```bash
-tensorfold serve Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP --tp 2 --rank 1 --master 192.0.2.1
-tensorfold serve Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP --tp 2 --rank 0 --master 192.0.2.1 --name bench --host 0.0.0.0
+tensorfold serve TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP --tp 2 --rank 1 --master 192.0.2.1
+tensorfold serve TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP --tp 2 --rank 0 --master 192.0.2.1 --name bench --host 0.0.0.0
 ```
 
 ### Serving

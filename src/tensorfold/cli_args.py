@@ -148,7 +148,7 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
     serve.set_defaults(func=handlers["serve"])
 
     pull = commands.add_parser("pull", help="download models (or draft models) from Hugging Face")
-    pull.add_argument("repos", nargs="+", help="repo ids, e.g. Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP")
+    pull.add_argument("repos", nargs="+", help="repo ids, e.g. TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP")
     pull.set_defaults(func=handlers["pull"])
 
     models = commands.add_parser("models", help="list the model families and the checkpoints they are tested with")

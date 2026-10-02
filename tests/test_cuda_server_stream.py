@@ -12,14 +12,14 @@ from tensorfold.cuda.server import StreamDecoder
 def _tokenizer() -> Path:
     from tensorfold import hub
 
-    found = hub.cached("Vontra/Qwen3.8-27B-MLX-4bit")
+    found = hub.cached("TensorFold/Qwen3.8-27B-MLX-4bit")
     return found / "tokenizer.json" if found is not None else Path("/nonexistent")
 
 
 TOKENIZER = _tokenizer()
 
 
-@pytest.mark.skipif(not TOKENIZER.exists(), reason="needs the Qwen3.8-27B tokenizer (tensorfold pull Vontra/Qwen3.8-27B-MLX-4bit)")
+@pytest.mark.skipif(not TOKENIZER.exists(), reason="needs the Qwen3.8-27B tokenizer (tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit)")
 def test_stream_text_matches_full_decode():
     tok = tokenizers.Tokenizer.from_file(str(TOKENIZER))
     text = ("def fib(n):\n    return n if n < 2 else fib(n - 1) + fib(n - 2)\n"

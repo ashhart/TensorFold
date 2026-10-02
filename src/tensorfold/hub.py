@@ -8,6 +8,7 @@ import re
 from typing import Any
 
 _REPO_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
+MOVED_ORG = "Vontra"           # the Hugging Face org TensorFold moved its models out of on 2 Oct 2026
 
 
 def is_repo_id(name: str) -> bool:
@@ -16,22 +17,37 @@ def is_repo_id(name: str) -> bool:
     return bool(_REPO_ID.match(str(name))) and not Path(str(name)).expanduser().exists()
 
 
+def cache_names(repo_id: str) -> list[str]:
+    """Where ``repo_id`` can be cached: under its own org, then under the org it moved out of."""
+
+    if not repo_id.startswith("TensorFold/"):
+        return [repo_id]
+    return [repo_id, f"{MOVED_ORG}/{repo_id.split('/', 1)[1]}"]
+
+
 def cached(repo_id: str, *, cache_dir: Any = None) -> Path | None:
-    """Use the cached snapshot, falling back to the newest config-bearing snapshot when refs/main is absent."""
+    """Use the cached snapshot, falling back to the newest config-bearing snapshot when refs/main is absent.
+
+    A ``TensorFold/<name>`` id also reads an older ``models--Vontra--<name>`` cache: the org moved, the old
+    names redirect on Hugging Face, and caches downloaded before the move kept their old folder names.
+    """
 
     from huggingface_hub import snapshot_download
 
-    try:
-        return Path(snapshot_download(repo_id, local_files_only=True, cache_dir=cache_dir))
-    except Exception:  # noqa: BLE001 - not cached, or cached without a ref: look at the snapshots themselves
-        pass
     if cache_dir is None:
         from huggingface_hub import constants
 
         cache_dir = constants.HF_HUB_CACHE
-    snapshots = Path(cache_dir) / f"models--{repo_id.replace('/', '--')}" / "snapshots"
-    found = [s for s in snapshots.glob("*") if (s / "config.json").is_file()] if snapshots.is_dir() else []
-    return max(found, key=lambda s: s.stat().st_mtime) if found else None
+    for name in cache_names(repo_id):
+        try:
+            return Path(snapshot_download(name, local_files_only=True, cache_dir=cache_dir))
+        except Exception:  # noqa: BLE001 - not cached, or cached without a ref: look at the snapshots themselves
+            pass
+        snapshots = Path(cache_dir) / f"models--{name.replace('/', '--')}" / "snapshots"
+        found = [s for s in snapshots.glob("*") if (s / "config.json").is_file()] if snapshots.is_dir() else []
+        if found:
+            return max(found, key=lambda s: s.stat().st_mtime)
+    return None
 
 
 def pull(repo_id: str, *, cache_dir: Any = None) -> Path:

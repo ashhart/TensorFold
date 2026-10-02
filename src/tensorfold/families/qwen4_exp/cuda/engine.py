@@ -46,7 +46,7 @@ class FlashNextEngine:
         exl3 = is_exl3(model_dir)
         if (exl3 or quant_method(read_config(model_dir)) == "modelopt") and tp != 1:
             raise ValueError(f"{'EXL3 packs' if exl3 else 'NVFP4 checkpoints'} of Flash Next run on one GPU: drop --tp "
-                             "2, or serve the MLX checkpoint (Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP) on two")
+                             "2, or serve the MLX checkpoint (TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP) on two")
         if vision and (streams < 2 or tp != 1):
             raise ValueError("image input on Flash Next runs on one GPU with --parallel 2 or more")
         if exl3 and ple_on_ssd:

@@ -516,7 +516,7 @@ def test_real_weights_first_layers_rows_are_exact():
 
 
 def test_bf16_abliterated_output_projections_keep_prefill_and_mtp_working(tmp_path):
-    """A Vontra derivative keeps quantized inputs/experts but stores attention outputs, including MTP, in BF16."""
+    """A TensorFold derivative keeps quantized inputs/experts but stores attention outputs, including MTP, in BF16."""
     import json
     from tensorfold.families import glm5_next
 
