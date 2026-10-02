@@ -281,6 +281,12 @@ of 32-41 tok/s on one Spark) instead of stopping. `--decode-share S` sizes the p
 that share of the pass's time: 0.25 about doubles decode during a prefill and roughly halves prompt speed. The
 default, 0, keeps whole passes.
 
+Prompt pieces are 2,048 rows, or 4,096 while nothing decodes on a DGX Spark serving the MLX checkpoint without
+`--vision`, when the admitted window leaves room (the startup log names the choice). `TENSORFOLD_PREFILL_ROWS=N` (256 to 16,384) sets the rows instead, for one GPU
+or two: the prompt buffers are sized for N rows in the startup estimate, so the window shrinks or grows to match,
+and the plan above no longer applies. A round that runs beside live replies still takes at most 2,048 of them.
+Replies are the same tokens at any setting; the best value depends on the machine, so measure it there.
+
 N-gram tables are file-backed host data. On unified-memory GPUs they compete with weights and cache
 allocations for RAM, so a checkpoint's GPU allocation alone does not describe its memory requirement. An explicit
 `--context` that leaves them no room is reported at startup; their lookups then page from disk, a cost of about 1.3x
