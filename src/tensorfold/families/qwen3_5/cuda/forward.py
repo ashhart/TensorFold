@@ -213,7 +213,7 @@ def tree_forward(w: Weights, tokens: torch.Tensor, parents: Sequence[int], st: S
                  *, full_logits: bool = True, tp: bool = False,
                  initial: tuple[torch.Tensor, torch.Tensor] | None = None,
                  finish: bool = True, capture_taps: bool = False, hidden: bool = False,
-                 staged: Staged | None = None):
+                 staged: Staged | None = None, first_layer: int = 0):
     """Return uncommitted node logits and layer data for topologically sorted parents, with each node seeing only its ancestors and committed prefix."""
 
     c = w.config
@@ -284,7 +284,7 @@ def tree_forward(w: Weights, tokens: torch.Tensor, parents: Sequence[int], st: S
             record.append(AttentionRecord(key, value))
         x, h, xs = glue.add_rmsnorm(x, r, layer.post_norm, c.eps)
         pending = _mlp(layer, h, xs, tp)
-        if capture_taps and i in (5, 19, 33, 47, 61):
+        if capture_taps and i + first_layer in (5, 19, 33, 47, 61):    # a later pipeline stage: its own taps
             taps.append((x.float() + pending.float()).to(torch.bfloat16))
     if not finish:
         if pending is None:
@@ -293,7 +293,7 @@ def tree_forward(w: Weights, tokens: torch.Tensor, parents: Sequence[int], st: S
     _, h, xs = glue.add_rmsnorm(x, pending, w.norm, c.eps)
     logits = _mm(h, w.head, xs) if full_logits else h
     if capture_taps:
-        if len(taps) != 5:
+        if first_layer == 0 and len(taps) != 5:
             raise ValueError("DFlash2 taps require the complete 64-layer target")
         return logits, record, torch.cat(taps, dim=-1)
     if hidden:                                     # the rows' final normed states (what an MTP head reads)
@@ -390,12 +390,12 @@ def multi_tree_forward(w: Weights, streams: Sequence[tuple[Sequence[int], Sequen
             record.append(AttentionRecord(key, value))
         x, h, xs = glue.add_rmsnorm(x, r, layer.post_norm, c.eps)
         pending = _mlp(layer, h, xs, tp)
-        if capture_taps and i in (5, 19, 33, 47, 61):
+        if capture_taps and i + first_layer in (5, 19, 33, 47, 61):    # a later pipeline stage: its own taps
             taps.append((x.float() + pending.float()).to(torch.bfloat16))
     _, h, xs = glue.add_rmsnorm(x, pending, w.norm, c.eps)
     logits = _mm(h, w.head, xs) if full_logits else h
     if capture_taps:
-        if len(taps) != 5:
+        if first_layer == 0 and len(taps) != 5:
             raise ValueError("DFlash2 taps require the complete 64-layer target")
         return logits, record, torch.cat(taps, dim=-1), starts
     return logits, record, h if hidden else None, starts

@@ -283,23 +283,11 @@ def moe(mlp: Any, x: mx.array) -> mx.array:
     return y + gate * project(shared.down_proj, mlp_act(_gate_up(shared, x)))
 
 
-def _rows_forward(core: Any, windows: Sequence[Any], parents: Sequence[Sequence[int]], caches: Sequence[list[Any]],
-                  starts: Sequence[int], *, pipeline_layers: int = 4, first_alone: bool = True
-                  ) -> tuple[mx.array, _Rows]:
-    """Return final-normed rows [1, R, D] and stream records, sharing row-wise work while keeping attention and recurrent caches per stream."""
+def run_layers(layers: Sequence[Any], caches: Sequence[list[Any]], hidden: mx.array, rows: _Rows, *,
+               pipeline_layers: int = 4, first_alone: bool = True) -> tuple[mx.array, mx.array, Any]:
+    """Run ``layers`` over the rows: the residual and the last output projection (not yet added), and the drafter tap
+    the next norm would fill (its storage and slot, or None). A split's Mac half stops here and sends both on."""
 
-    widths = [len(p) for p in parents]
-    if len(windows) != len(parents) or len(caches) != len(parents) or len(starts) != len(parents):
-        raise ValueError(f"row_forward: {len(windows)} windows, {len(parents)} parent lists, {len(caches)} caches, "
-                         f"{len(starts)} starts")
-    for window, width in zip(windows, widths):
-        if (int(window.size) if isinstance(window, mx.array) else len(window)) != width:
-            raise ValueError("row_forward: a window's tokens and parents differ in length")
-    if sum(widths) > row_matmul.BACKEND.max_rows:
-        raise ValueError(f"row_forward: {sum(widths)} rows, the {row_matmul.BACKEND.name} matmul takes up to {row_matmul.BACKEND.max_rows}")
-    rows = _Rows(parents, starts)
-    hidden = core.embed_tokens(_token_ids(windows))
-    layers = list(core.layers)
     pending: mx.array | None = None                   # the last output projection's rows, added in the next norm
     tapped: Any = None
     for index, (layer, *items) in enumerate(zip(layers, *caches)):
@@ -323,6 +311,27 @@ def _rows_forward(core: Any, windows: Sequence[Any], parents: Sequence[Sequence[
         if pipeline_layers and ((index + 1) % pipeline_layers == 0 or (index == 0 and first_alone)) \
                 and index + 1 < len(layers):
             mx.async_eval(hidden, pending)
+    return hidden, pending, tapped
+
+
+def _rows_forward(core: Any, windows: Sequence[Any], parents: Sequence[Sequence[int]], caches: Sequence[list[Any]],
+                  starts: Sequence[int], *, pipeline_layers: int = 4, first_alone: bool = True
+                  ) -> tuple[mx.array, _Rows]:
+    """Return final-normed rows [1, R, D] and stream records, sharing row-wise work while keeping attention and recurrent caches per stream."""
+
+    widths = [len(p) for p in parents]
+    if len(windows) != len(parents) or len(caches) != len(parents) or len(starts) != len(parents):
+        raise ValueError(f"row_forward: {len(windows)} windows, {len(parents)} parent lists, {len(caches)} caches, "
+                         f"{len(starts)} starts")
+    for window, width in zip(windows, widths):
+        if (int(window.size) if isinstance(window, mx.array) else len(window)) != width:
+            raise ValueError("row_forward: a window's tokens and parents differ in length")
+    if sum(widths) > row_matmul.BACKEND.max_rows:
+        raise ValueError(f"row_forward: {sum(widths)} rows, the {row_matmul.BACKEND.name} matmul takes up to {row_matmul.BACKEND.max_rows}")
+    rows = _Rows(parents, starts)
+    hidden = core.embed_tokens(_token_ids(windows))
+    hidden, pending, tapped = run_layers(list(core.layers), caches, hidden, rows, pipeline_layers=pipeline_layers,
+                                         first_alone=first_alone)
     hidden, x = add_norm(hidden, pending, core.norm.weight, core.norm.eps)
     if tapped is not None:
         tapped[0][tapped[1]] = hidden

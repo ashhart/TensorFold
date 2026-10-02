@@ -231,6 +231,8 @@ def fits(model: Any, backend: Backend) -> bool:
     if not isinstance(head, nn.QuantizedLinear) or not backend.fits(head):
         return False
     for layer in language_model.model.layers:
+        if not hasattr(layer, "mlp"):                # a split's layer that runs on the stage holds no weights here
+            continue
         inner = layer.linear_attn if getattr(layer, "is_linear", False) else layer.self_attn
         # MoE: router and experts run MLX's kernels (row_forward.moe); only the shared expert uses the backend
         mlp = layer.mlp.shared_expert if hasattr(layer.mlp, "switch_mlp") else layer.mlp

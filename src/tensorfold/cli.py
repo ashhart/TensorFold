@@ -18,7 +18,7 @@ from tensorfold.server import stacks
 from tensorfold.server.memory_budget import MEMORY_FRACTION
 from tensorfold.serve_options import check as _check_serve_options, vision_options as _vision_options
 
-COMMANDS = ("serve", "pull", "models", "info", "update")
+COMMANDS = ("serve", "stage", "pull", "models", "info", "update")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -384,6 +384,13 @@ def cmd_serve(args: argparse.Namespace) -> int:
     weights = checkpoint if estimate is None else estimate(model_dir, ple_on_ssd=args.ple_on_ssd)
     if args.ssd_experts is not None:
         weights += int(args.ssd_experts * gib) - family.package.expert_bytes(model_dir)   # the pool, not the stacks
+    if args.split:
+        from tensorfold.split import checkpoint as split_checkpoint
+
+        keep = _split_layers(args, model_dir)
+        weights -= split_checkpoint.layer_bytes(model_dir, keep)
+        print(f"[tensorfold] split: this machine keeps layers 0..{keep - 1}, {weights / gib:.1f} GiB of weights",
+              flush=True)
     if weights < checkpoint:
         print(f"[tensorfold] weights: {weights / gib:.1f} GiB resident, "
               f"{(checkpoint - weights) / gib:.1f} GiB file-backed", flush=True)
@@ -397,6 +404,58 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return _serve_mlx(args, family, model_dir, context, required_files, memory_limit, fraction)
 
 
+def _split_layers(args: argparse.Namespace, model_dir: Path) -> int:
+    from tensorfold import families
+
+    text = families.read_config(model_dir)
+    layers = int(text.get("text_config", text)["num_hidden_layers"])
+    return int(args.split_layers) if args.split_layers is not None else (layers * 3) // 4
+
+
+class _Split:
+    """A split's stage session, opened on a thread while this machine loads its own layers."""
+
+    def __init__(self, args: argparse.Namespace, family: Any, model_dir: Path) -> None:
+        import threading
+
+        from tensorfold.split import client
+
+        if family.model_type != "qwen3_5":
+            raise ValueError(f"--split runs Qwen3.8 dense for now, not {family.title}")
+        self.keep = _split_layers(args, model_dir)
+        self.result: Any = None
+        self.error: BaseException | None = None
+
+        def run() -> None:
+            try:
+                self.result = client.open_session(args.split, model_dir, self.keep, transport=args.split_transport,
+                                                  mailbox=args.split_mailbox, log=lambda s: print(s, flush=True))
+            except BaseException as exc:   # noqa: BLE001 - raised on the main thread by attach()
+                self.error = exc
+
+        self.thread = threading.Thread(target=run, name="split-session", daemon=True)
+        self.thread.start()
+
+    def attach(self, model: Any) -> None:
+        from tensorfold.split import client, qwen
+
+        self.thread.join()
+        if self.error is not None:
+            raise RuntimeError(f"--split {self.error}") from self.error
+        self.link = client.Link(self.result)
+        qwen.attach(model, self.link, self.keep)
+
+
+def _open_split(args: argparse.Namespace, family: Any, model_dir: Path) -> _Split:
+    if str(args.parallel).strip().lower() != "auto" and _parallel(args.parallel) != 1:
+        raise ValueError("--split serves one stream at a time: use --parallel 1")
+    args.parallel = "1"
+    if args.prompt_cache_gib not in (None, 0):
+        raise ValueError("--split keeps no stored prompt prefixes yet: use --prompt-cache-gib 0")
+    args.prompt_cache_gib = 0
+    return _Split(args, family, model_dir)
+
+
 def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: int,
                required_files: Any, memory_limit: int, fraction: float = MEMORY_FRACTION) -> int:
     import mlx.core as mx
@@ -406,6 +465,7 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
 
     started = time.perf_counter()
     drafter = "" if args.no_drafts else _drafter(family, args.drafter)
+    split = _open_split(args, family, model_dir) if args.split else None
     parallel = _parallel(args.parallel)
     options: dict[str, Any] = {"lane_kernels": args.lane_kernels, "drafter": drafter,
                                "drafter_bits": args.drafter_bits, "parallel": parallel}
@@ -418,7 +478,11 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
         options["ssd_experts"] = float(args.ssd_experts)
     served = args.name or (args.model.rstrip("/").split("/")[-1] if hub.is_repo_id(args.model) else model_dir.name)
     print(f"[tensorfold] loading {served}: {family.title} ({family.model_type})", flush=True)
+    if split is not None:
+        options["split_layers"] = split.keep
     model, tokenizer = family.package.load(model_dir, **options)
+    if split is not None:
+        split.attach(model)
     engine_kwargs = dict(getattr(family.package, "engine_settings", lambda m: {})(model))
     if required_files:
         print(f"[tensorfold] Nemotron MTP head: "

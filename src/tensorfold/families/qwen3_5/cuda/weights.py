@@ -234,7 +234,7 @@ class Weights:
         return True
 
     def nbytes(self) -> int:
-        total = self.embed.nbytes() + self.head.nbytes()
+        total = sum(m.nbytes() for m in (self.embed, self.head) if m is not None)    # a split stage has neither
         for layer in self.layers:
             mods = [m for m in (layer.gate, layer.up, layer.down) if m is not None]
             mods += [layer.gdn.qkv, layer.gdn.z, layer.gdn.b, layer.gdn.a, layer.gdn.out] if layer.gdn else []
@@ -267,8 +267,13 @@ class _Tensors:
         self.files.close()                    # the reader's pinned staging goes back to the system
 
 
-def load(model_dir: str | Path, device: str = "cuda", *, tiled: bool = False, mlp=None) -> Weights:
-    """MLX affine 4-bit (``tiled``: projections packed as read; ``mlp(prefix, get, qlinear, cfg)``: a layer's MLP fields), an EXL3 pack, or NVFP4."""
+def load(model_dir: str | Path, device: str = "cuda", *, tiled: bool = False, mlp=None,
+         layers: tuple[int, int] | None = None) -> Weights:
+    """MLX affine 4-bit (``tiled``: projections packed as read; ``mlp(prefix, get, qlinear, cfg)``: a layer's MLP fields), an EXL3 pack, or NVFP4.
+
+    ``layers=(first, last)``: a split stage's checkpoint, holding only those layers (and the final norm when ``last``
+    is the model's last layer); the weights then have no embedding or head.
+    """
 
     from .exl3_load import load_exl3, quant_config
     from .nvfp4_load import load_nvfp4, quantized
@@ -311,8 +316,9 @@ def load(model_dir: str | Path, device: str = "cuda", *, tiled: bool = False, ml
             return tile(q)                                 # tile() leaves any format but 4-bit g64 as stored
         return q
 
+    first, last = layers if layers is not None else (0, cfg.layers)
     layers = []
-    for i in range(cfg.layers):
+    for i in range(first, last):
         p = f"model.layers.{i}."
         gdn = attn = None
         if cfg.is_linear(i):
@@ -333,8 +339,10 @@ def load(model_dir: str | Path, device: str = "cuda", *, tiled: bool = False, ml
         layers.append(Layer(linear=cfg.is_linear(i), input_norm=get(p + "input_layernorm.weight").contiguous(),
                             post_norm=get(p + "post_attention_layernorm.weight").contiguous(), gdn=gdn, attn=attn,
                             **{"gate": None, "up": None, "down": None, **fields}))
-    w = Weights(config=cfg, embed=qlinear("model.embed_tokens", pack=False), layers=layers,
-                norm=get("model.norm.weight"), head=qlinear("lm_head"))
+    whole = (first, last) == (0, cfg.layers)
+    w = Weights(config=cfg, embed=qlinear("model.embed_tokens", pack=False) if whole else None, layers=layers,
+                norm=get("model.norm.weight") if last == cfg.layers else None,
+                head=qlinear("lm_head") if whole else None)
     half = cfg.rope_dims // 2
     inv = cfg.rope_theta ** (-torch.arange(0, half, dtype=torch.float64) / half)
     w.inv_freq = inv.to(torch.float32).to(device)

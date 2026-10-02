@@ -138,7 +138,20 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
                            "layers a GPU has no mma for run W4A16, and the startup line says which); full runs bf16 "
                            "activations against the stored weights exactly. The weights never change, only the math; "
                            "MLX checkpoints have one math. Replies equal this server's own serial decoding either way")
+    split = serve.add_argument_group("split (one model over two machines)")
+    split.add_argument("--split", default="", metavar="HOST[:PORT]",
+                       help="run the model's later layers on `tensorfold stage` at HOST; this machine keeps the "
+                            "embedding, the first --split-layers layers, the head and the drafter")
+    split.add_argument("--split-layers", type=int, default=None, metavar="K",
+                       help="with --split: layers this machine keeps (default: three quarters)")
+    split.add_argument("--split-transport", choices=("tcp", "mailbox"), default="tcp",
+                       help="with --split: the rows path, the stage's TCP connection or a `v41rpcd` RDMA mailbox")
+    split.add_argument("--split-mailbox", default="tfsplit", help="with --split-transport mailbox: its name")
     serve.set_defaults(func=handlers["serve"])
+
+    from tensorfold.split import stage as split_stage
+
+    split_stage.add_parser(commands)
 
     pull = commands.add_parser("pull", help="download models (or draft models) from Hugging Face")
     pull.add_argument("repos", nargs="+", help="repo ids, e.g. Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP")

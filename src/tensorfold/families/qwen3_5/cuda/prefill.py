@@ -80,8 +80,9 @@ def _row_mm(x, w: QLinear, tp: bool) -> torch.Tensor:
 
 @torch.no_grad()
 def prefill_chunk(w: Weights, tokens: torch.Tensor, st: State, *, tp: bool = False, capture_taps: bool = False,
-                  last: bool = True, every: bool = False, cut: int = 0, vision=None):
-    """Commit ``tokens`` at [st.pos, st.pos + W) into ``st`` without writing through its entries (``every``: all rows' final normed states; ``cut``: also the state after the first ``cut`` rows, the GDN chains run as two launches with one launch's bits)."""
+                  last: bool = True, every: bool = False, cut: int = 0, vision=None,
+                  initial: tuple[torch.Tensor, torch.Tensor] | None = None, first_layer: int = 0):
+    """Commit ``tokens`` at [st.pos, st.pos + W) into ``st`` without writing through its entries (``every``: all rows' final normed states; ``cut``: also the state after the first ``cut`` rows, the GDN chains run as two launches with one launch's bits; ``initial``: a later pipeline stage's (residual, pending) rows in place of the embedding, ``tokens`` then giving only the row count)."""
 
     c = w.config
     pg = prefill_glue if w.fast_prefill and prompt_precision.fp8() else prefill_bf16   # e4m3 rows when prompts take FP8
@@ -95,12 +96,17 @@ def prefill_chunk(w: Weights, tokens: torch.Tensor, st: State, *, tp: bool = Fal
            else vision.positions[:, p0:p0 + W].contiguous())
     windows = (torch.arange(W, device=dev, dtype=torch.int32)[:, None]
                + torch.arange(keep + 1, device=dev, dtype=torch.int32)[None, :])
-    x = glue.embedding(tokens.to(torch.int32), w.embed)
+    pending: torch.Tensor | None = None
+    if initial is None:
+        x = glue.embedding(tokens.to(torch.int32), w.embed)
+    else:
+        x, pending = initial
+        if x.shape != (W, c.hidden) or pending.shape != x.shape:
+            raise ValueError("pipeline activation shape must match the chunk and hidden width")
     if vision is not None:
         from tensorfold.vision.qwen_cuda import replace_rows
 
         x = replace_rows(x, vision, p0, p0 + W)
-    pending: torch.Tensor | None = None
     taps: list[torch.Tensor] = []
     part = clone_state(st) if cut else None     # its attention buffers are the chunk's, through the shared list
     for i, layer in enumerate(w.layers):
@@ -152,7 +158,7 @@ def prefill_chunk(w: Weights, tokens: torch.Tensor, st: State, *, tp: bool = Fal
         else:
             x, h = pg.add_rmsnorm(x, r, layer.post_norm, c.eps)
             pending = _mlp(h, layer, pg, tp)
-        if capture_taps and i in TAP_LAYERS:
+        if capture_taps and i + first_layer in TAP_LAYERS:     # a later pipeline stage numbers layers from first_layer
             taps.append((x.float() + pending.float()).to(torch.bfloat16))
     st.pos = p0 + W
     normed = None

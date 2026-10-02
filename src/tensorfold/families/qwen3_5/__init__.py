@@ -45,10 +45,25 @@ def tensor_units() -> bool:
     return bool(found) and int(found.group(1)) >= 17
 
 
-def load_lane_model(model_dir: Path) -> tuple[Any, Any]:
-    """Load through mlx_lm; checkpoints that keep MTP tensors drop them before mlx_lm's sanitize."""
+def load_lane_model(model_dir: Path, keep_layers: int | None = None) -> tuple[Any, Any]:
+    """Load through mlx_lm; checkpoints that keep MTP tensors drop them before mlx_lm's sanitize.
 
-    from mlx_lm import load
+    ``keep_layers``: a split's Mac half; layers past it are dropped before their weights are read.
+    """
+
+    if keep_layers is not None:
+        import mlx.core as mx
+        from mlx_lm import load as mlx_load
+
+        from tensorfold.split.qwen import keep_layers as keep
+
+        def load(path: str) -> Any:
+            loaded = mlx_load(path, lazy=True)
+            keep(loaded[0], keep_layers)
+            mx.eval(loaded[0].parameters())
+            return loaded
+    else:
+        from mlx_lm import load
 
     index_path = Path(model_dir) / "model.safetensors.index.json"
     names: list[str] = []
@@ -142,8 +157,11 @@ def check(model_dir: str | Path) -> None:
 
 
 def load(model_dir: Path, *, lane_kernels: str = "auto", drafter: str = "", drafter_bits: int = 4,
-         vision: bool = False, vision_urls: bool = False, **_: Any) -> tuple[Any, Any]:
-    """Load a supported checkpoint with tensor-unit lane kernels when enabled, otherwise the row-exact decoder."""
+         vision: bool = False, vision_urls: bool = False, split_layers: int | None = None, **_: Any) -> tuple[Any, Any]:
+    """Load a supported checkpoint with tensor-unit lane kernels when enabled, otherwise the row-exact decoder.
+
+    ``split_layers``: the Mac keeps layers [0, split_layers) and a split stage runs the rest (``tensorfold.split``).
+    """
 
     from tensorfold.families import read_config
 
@@ -158,8 +176,15 @@ def load(model_dir: Path, *, lane_kernels: str = "auto", drafter: str = "", draf
         if lane_kernels == "on":
             raise ValueError("this format uses the packed affine row kernels; use --lane-kernels auto or off")
         lanes = False
-    model, tokenizer = load_lane_model(Path(model_dir))
-    family = lane_family(model, lanes=lanes, drafter=drafter, drafter_bits=drafter_bits, title=TITLE, use=MODELS[0])
+    if split_layers is not None:
+        if lanes:
+            raise SystemExit(f"[tensorfold] {TITLE}: --split runs on the row decoder; start it with --lane-kernels off")
+        if vision:
+            raise SystemExit(f"[tensorfold] {TITLE}: --split does not take images yet")
+    split = {} if split_layers is None else {"split": True}
+    model, tokenizer = load_lane_model(Path(model_dir), *([] if split_layers is None else [split_layers]))
+    family = lane_family(model, lanes=lanes, drafter=drafter, drafter_bits=drafter_bits, title=TITLE, use=MODELS[0],
+                         **split)
     if vision:
         from tensorfold.vision.qwen_mlx import QwenVisionFrontend
         from tensorfold.vision.rotary import install_rotary
@@ -173,10 +198,14 @@ def load(model_dir: Path, *, lane_kernels: str = "auto", drafter: str = "", draf
     return family, tokenizer
 
 
-def lane_family(model: Any, *, lanes: bool, drafter: str, drafter_bits: int, title: str, use: str) -> Any:
+def lane_family(model: Any, *, lanes: bool, drafter: str, drafter_bits: int, title: str, use: str,
+                split: bool = False) -> Any:
     """Install the lane kernels (M5) or the row decoder (M1-M4) on ``model`` and wrap it, drafter included."""
 
     from tensorfold.families.qwen3_5.family import Qwen35Family
+
+    if split:
+        from tensorfold.split.qwen import SplitFamily as Qwen35Family    # noqa: F811 - its windows are the split's
     from tensorfold.kernels.qwen.dense.v1 import lane_qmm
 
     model._tensorfold_lanes = bool(lanes)
