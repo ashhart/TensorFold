@@ -61,9 +61,13 @@ def check(model_dir: Path) -> None:
         # NVFP4 experts and n-gram tables; other linears are bf16, MXFP8 or block FP8
         found = config.get("quantization") or config.get("quantization_config") or {}
         algo = str(found.get("quant_algo") or "NVFP4").upper()
-        # FP8 is read in the MTP drafter's experts only (dequantized and re-quantized at load: they only draft)
+        # FP8 is read in the MTP drafter's experts (dequantized and re-quantized at load: they only draft) and in the
+        # n-gram tables (their own FP8 reader, host_table.FP8Table); FP8 elsewhere stays refused
+        def fp8_read(name: str) -> bool:
+            return {"mtp", "experts"} <= set(name.split(".")) or ".ple.ple_embedding.ngram_embedding." in name + "."
+
         layers = {str(v.get("quant_algo", "")).upper() for k, v in (found.get("quantized_layers") or {}).items()
-                  if not (str(v.get("quant_algo", "")).upper() == "FP8" and {"mtp", "experts"} <= set(k.split(".")))}
+                  if not (str(v.get("quant_algo", "")).upper() == "FP8" and fp8_read(k))}
         algos = layers if algo == "MIXED_PRECISION" else {algo}
         weights = [g.get("weights") or {} for g in (found.get("config_groups") or {}).values()]
         fp4 = {int(w.get("group_size", 16)) for w in weights if int(w.get("num_bits", 4)) == 4}
