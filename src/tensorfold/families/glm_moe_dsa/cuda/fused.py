@@ -38,6 +38,10 @@ MAX_ROWS = 128           # widest call of the row-invariant EXL3 linear; wider w
 PROMPT_ROWS = int(os.environ.get("TF_GLM53_PROMPT_ROWS", "4096"))   # prompt chunk: experts read once per chunk
 PREFILL_REDUCE = os.environ.get("TF_GLM53_PREFILL_REDUCE", "ring")   # ring | rs (exact reduce-scatter)
 PROMPT_OVERLAP = os.environ.get("TF_GLM53_PROMPT_OVERLAP", "1") != "0"   # two micro-batches, comm under compute
+# sequence-parallel prompt chunks: reduce-scatter rows, replicated work on a rank's own rows, all-gather (see
+# compute_prompt_sp); SP_SELECT=1: the indexer's top-k too (own rows, then the picks are gathered)
+PROMPT_SP = os.environ.get("TF_GLM53_PROMPT_SP", "0") == "1"
+SP_SELECT = os.environ.get("TF_GLM53_SP_SELECT", "1") != "0"
 SEL_ROWS = 128           # indexer top-k in blocks of rows (bounded score buffer at long contexts)
 _UNPACK_MB = int(os.environ.get("TF_GLM53_UNPACK_CACHE_MB", "384"))   # decoded dense weights shared by a chunk's halves (0: off)
 _UNPACK_CACHE = x3prefill.UnpackCache(_UNPACK_MB << 20) if _UNPACK_MB > 0 else None
@@ -573,6 +577,8 @@ class Buffers:
         self.red = torch.empty((rows, D), dtype=f32, device=dev)
         self.hpart = torch.empty((rows, D), dtype=bf, device=dev) if rows > FAST_ROWS else None   # prompt halves
         self.hred = torch.empty((rows, D), dtype=bf, device=dev) if rows > FAST_ROWS else None
+        self.xo = None                                   # sequence-parallel prompt chunks: own rows (on first use)
+        self.spos = torch.zeros((1,), dtype=torch.int32, device=dev)
         self.amax = torch.zeros((min(rows, FAST_ROWS), 4), dtype=f32, device=dev)
         self.amax_all = torch.zeros((w.world * min(rows, FAST_ROWS) * 4,), dtype=f32, device=dev)
         self.gath = torch.empty((w.world * rows * D,), dtype=f32, device=dev)
@@ -644,17 +650,18 @@ def dcp_gather(w: Weights, x: torch.Tensor, out: torch.Tensor, small: bool) -> N
         w.comm.all_gather(x.reshape(-1), out.reshape(-1))
 
 
-def select(w: Weights, b: Buffers, icache: torch.Tensor, pos: torch.Tensor, R: int, T: int) -> None:
+def select(w: Weights, b: Buffers, icache: torch.Tensor, pos: torch.Tensor, R: int, T: int, row0: int = 0) -> None:
     """The indexer's choice for the window's rows past index_topk: b.tok[:R] (ascending). ``T``: keys scored (the
     host's bound on the window's last position + 1; a captured graph uses its bucket). DCP: each rank scores its own
     slots, keeps its top index_topk, the candidates are gathered and every rank takes the same global top index_topk
-    (keys are tie-free); b.tok then holds this rank's share as local slots (ascending), b.cnt how many."""
+    (keys are tie-free); b.tok then holds this rank's share as local slots (ascending), b.cnt how many. ``row0``:
+    select window rows row0 .. row0 + R - 1 only (sequence-parallel prompt chunks: a rank's own rows)."""
     c = w.cfg
     nh, D, K = c.index_n_heads, c.index_head_dim, c.index_topk
     dcp, rank = w.dcp, w.rank if w.dcp > 1 else 0
     Tl = -(-T // dcp)
-    for r0 in range(0, R, SEL_ROWS):
-        n = min(SEL_ROWS, R - r0)
+    for r0 in range(row0, row0 + R, SEL_ROWS):
+        n = min(SEL_ROWS, row0 + R - r0)
         radix = RADIX and (dcp > 1 or Tl >= K)
         # radix, one rank: 4-byte order words (ties to the lower position in the select itself), else packed keys
         sc = b.sc.view(torch.int32)[:n * Tl].view(n, Tl) if radix and dcp == 1 else b.sc[:n * Tl].view(n, Tl)
@@ -740,11 +747,10 @@ def attention(w: Weights, L: Layer, b: Buffers, R: int, cache: torch.Tensor, ica
 
 def attention_part(w: Weights, L: Layer, b: Buffers, R: int, cache: torch.Tensor, icache: torch.Tensor | None,
                    pos: torch.Tensor, T: int | None) -> None:
-    """Attention of the window's rows (b.normed): writes this layer's latent (and index key), returns the gathered
-    fp32 partials [world, R, hidden]. ``T``: None while every row is below index_topk (no selection)."""
+    """Attention of the window's rows (b.normed): writes this layer's latent (and index key), leaves this rank's
+    fp32 partial in b.part[:R]. ``T``: None while every row is below index_topk (no selection)."""
     c = w.cfg
-    H = w.heads
-    lw, rd, nope = c.kv_lora_rank, c.qk_rope_head_dim, c.qk_nope_head_dim
+    lw, rd = c.kv_lora_rank, c.qk_rope_head_dim
     lin(L.q_a, b, b.normed[:R], b.qa[:R])
     lin(L.kv_a, b, b.normed[:R], b.kva[:R])
     glue.rmsnorm(b.qa[:R], L.q_a_norm, c.rms_norm_eps, b.qn[:R])
@@ -762,6 +768,16 @@ def attention_part(w: Weights, L: Layer, b: Buffers, R: int, cache: torch.Tensor
             _iq_rope[(R, c.index_n_heads)](b.iq, w.inv, pos, NH=c.index_n_heads, D=c.index_head_dim, RD=rd,
                                            num_warps=1)
             select(w, b, icache, pos, R, T)
+    attention_core(w, L, b, R, cache, pos)
+
+
+def attention_core(w: Weights, L: Layer, b: Buffers, R: int, cache: torch.Tensor, pos: torch.Tensor) -> None:
+    """The head-sharded rest of attention for rows b.qn[:R] (selection in b.tok): q_b, absorb, attention over the
+    cache, expand, o_proj -> this rank's fp32 partial b.part[:R]."""
+    c = w.cfg
+    H = w.heads
+    lw, rd, nope = c.kv_lora_rank, c.qk_rope_head_dim, c.qk_nope_head_dim
+    dcp = w.dcp
     lin(L.q_b, b, b.qn[:R], b.q[:R])
     rbk = RB if R > RB else R
     wide = R > MAX_ROWS                                  # prompt chunks: tensor-core batched GEMMs (not row-exact)
@@ -810,11 +826,22 @@ def ffn_part(w: Weights, L: Layer, b: Buffers, R: int) -> None:
     if L.experts is None:
         mlp(w, L, b, R, b.part[:R])
         return
-    glue.router(b.normed[:R], L.router[0], b.mlog[:R])
+    route(w, L, b, 0, R)
+    experts_part(w, L, b, R)
+
+
+def route(w: Weights, L: Layer, b: Buffers, r0: int, n: int) -> None:
+    """Router logits and top-k of rows b.normed[r0:r0 + n] -> b.pick / b.wts rows r0 .."""
+    c = w.cfg
+    glue.router(b.normed[r0:r0 + n], L.router[0], b.mlog[r0:r0 + n])
     K = c.num_experts_per_tok
-    glue._topk[(R,)](b.mlog, L.extra["bias"], b.pick, b.wts, float(c.routed_scaling_factor), NE=c.n_routed_experts,
-                     TOPK=K, SLOTS=K, BLOCK=triton.next_power_of_2(c.n_routed_experts + 1),
+    glue._topk[(n,)](b.mlog[r0:], L.extra["bias"], b.pick[r0:], b.wts[r0:], float(c.routed_scaling_factor),
+                     NE=c.n_routed_experts, TOPK=K, SLOTS=K, BLOCK=triton.next_power_of_2(c.n_routed_experts + 1),
                      SLOTP=triton.next_power_of_2(K + 1), NORM=c.norm_topk_prob, num_warps=4)
+
+
+def experts_part(w: Weights, L: Layer, b: Buffers, R: int) -> None:
+    """Routed experts (picks in b.pick) + the shared expert of rows b.normed[:R] -> fp32 partial b.part[:R]."""
     if not hasattr(L.experts, "prefill"):
         x3experts.routed(b.normed[:R], b.pick[:R], b.wts[:R], L.experts, b.xs, b.part[:R], R)
     elif R <= b.xs.rows:
@@ -964,6 +991,207 @@ def compute_prompt(w: Weights, st: State, b0: Buffers, b1: Buffers, R: int, T: i
     if logits == "last":
         head(w, b1, b1.x[:R - hR], w.final_norm, R - hR, slice(R - hR - 1, R - hR))
         b0.logits[:1].copy_(b1.logits[:1])
+
+
+# ------------------------------------------------------------------------------- sequence-parallel prompt ---
+class _SpHalf(_Half):
+    """A micro-batch under sequence parallelism: rows split into ``world`` contiguous blocks of n (padded to Rp =
+    world n; padding rows are kept at zero); this rank owns rows [o, o + n), its residual stream rows in b.xo[:n].
+    ``done``: the end of its latest side chain (comm stream)."""
+
+    def __init__(self, w: Weights, b: Buffers, R: int, pos: torch.Tensor) -> None:
+        super().__init__(b, R, pos)
+        self.n = -(-R // w.world)
+        self.Rp = self.n * w.world
+        self.o = w.rank * self.n
+        self.nv = max(0, min(self.n, R - self.o))        # own rows that are real (the rest: padding)
+        if b.xo is None or b.xo.shape[0] < self.n:
+            b.xo = torch.empty((-(-b.rows // w.world), b.x.shape[1]), dtype=torch.bfloat16, device=b.x.device)
+        b.spos.copy_(pos)
+        b.spos.add_(self.o)                              # device position of the first own row
+
+
+def _side(h: _SpHalf, comm_stream, fn) -> None:
+    """fn() on the comm stream after the main stream's work so far (and h's previous chain); h.done marks its end."""
+    ready = torch.cuda.Event()
+    ready.record()
+    with torch.cuda.stream(comm_stream):
+        comm_stream.wait_event(ready)
+        fn()
+        h.done = torch.cuda.Event()
+        h.done.record(comm_stream)
+
+
+def _ag_rows(w: Weights, h: _SpHalf, *bufs: torch.Tensor) -> None:
+    """Every rank's own rows of each buffer (in place: rank r's rows at [r n, (r + 1) n)) -> rows [0, Rp)."""
+    pairs = [(t[:h.Rp][h.o:h.o + h.n].reshape(-1), t[:h.Rp].reshape(-1)) for t in bufs]
+    if hasattr(w.comm, "all_gather_group"):
+        w.comm.all_gather_group(pairs)
+    else:
+        for send, recv in pairs:
+            w.comm.all_gather(send, recv)
+
+
+def _rs_residual(w: Weights, h: _SpHalf) -> None:
+    """(comm stream) b.part[:R] (fp32 partial, every row) -> own rows of the sum, added to the residual b.xo:
+    exact (all-to-all of fp32 row blocks, summed in rank order by the residual add) or NCCL's ring reduce-scatter
+    of bf16 (PREFILL_REDUCE)."""
+    b, R, Rp, n = h.b, h.R, h.Rp, h.n
+    D = b.part.shape[1]
+    if Rp > R:
+        b.part[R:Rp].zero_()
+    if PREFILL_REDUCE == "ring" and hasattr(w.comm, "reduce_scatter"):
+        b.hpart[:Rp].copy_(b.part[:Rp])
+        w.comm.reduce_scatter(b.hpart[:Rp].view(-1), b.hred[:n].view(-1))
+        red = b.hred[:n].view(1, n, D)
+    else:
+        recv = b.gath[:Rp * D].view(w.world, n * D)
+        w.comm.all_to_all(b.part[:Rp].view(w.world, n * D), recv)
+        red = recv.view(w.world, n, D)
+    x = b.xo[:n]
+    glue.residual_add(x, x, red)
+
+
+def _gather_x(w: Weights, h: _SpHalf, out: torch.Tensor) -> None:
+    """(comm stream) every row's residual stream gathered from the ranks' own rows -> out [R, D]."""
+    b = h.b
+    D = b.x.shape[1]
+    full = b.gath.view(torch.bfloat16)[:h.Rp * D]        # gath is fp32: room for 2 x the bf16 rows
+    w.comm.all_gather(b.xo[:h.n].reshape(-1), full)
+    out.copy_(full.view(h.Rp, D)[:h.R])
+
+
+def _front_attn(w: Weights, L: Layer, h: _SpHalf, cache, icache, T: int | None) -> None:
+    """(comm stream) own rows: input norm, q_a / kv_a / the indexer's projections; gather them; every row's latent
+    and index key into the caches; the selection (own rows, gathered: SP_SELECT; else every row)."""
+    c = w.cfg
+    b, o, n, Rr = h.b, h.o, h.n, h.R
+    rd, lw = c.qk_rope_head_dim, c.kv_lora_rank
+    ix = L.indexer
+    own_sel = SP_SELECT and ix is not None and T is not None
+    nx = b.normed[o:o + n]
+    glue.rmsnorm(b.xo[:n], L.input_norm, c.rms_norm_eps, nx)
+    lin(L.q_a, b, nx, b.qa[o:o + n])
+    lin(L.kv_a, b, nx, b.kva[o:o + n])
+    glue.rmsnorm(b.qa[o:o + n], L.q_a_norm, c.rms_norm_eps, b.qn[o:o + n])
+    bufs = [b.qn, b.kva]
+    if ix is not None:
+        glue.router(nx, ix["wk"], b.ik[o:o + n])
+        bufs.append(b.ik)
+        if T is not None:
+            glue.router(nx, ix["weights_proj"], b.iw[o:o + n])
+            if own_sel:
+                lin(ix["wq_b"], b, b.qn[o:o + n], b.iq[o:o + n])
+                _iq_rope[(n, c.index_n_heads)](b.iq[o:], w.inv, b.spos, NH=c.index_n_heads, D=c.index_head_dim,
+                                               RD=rd, num_warps=1)
+            else:
+                bufs.append(b.iw)
+    _ag_rows(w, h, *bufs)
+    _kv_write[(Rr,)](b.kva, b.kva.stride(0), L.kv_a_norm, cache, h.pos, w.inv, c.rms_norm_eps, LW=lw, RD=rd,
+                     num_warps=4)
+    if ix is None:
+        return
+    _ik_write[(Rr,)](b.ik, L.extra["ik_w"], L.extra["ik_b"], w.inv, icache, h.pos, 1e-6, D=c.index_head_dim, RD=rd,
+                     num_warps=4)
+    if T is None:
+        return
+    if own_sel:                                          # every row's index keys are in: own rows choose
+        select(w, b, icache, h.pos, n, T, row0=o)
+        _ag_rows(w, h, b.tok)
+    else:
+        lin(ix["wq_b"], b, b.qn[:Rr], b.iq[:Rr])
+        _iq_rope[(Rr, c.index_n_heads)](b.iq, w.inv, h.pos, NH=c.index_n_heads, D=c.index_head_dim, RD=rd,
+                                        num_warps=1)
+        select(w, b, icache, h.pos, Rr, T)
+
+
+def _front_ffn(w: Weights, L: Layer, h: _SpHalf) -> None:
+    """(comm stream) own rows: post-attention norm and routing; gather the normed rows (and picks)."""
+    c = w.cfg
+    b, o, n = h.b, h.o, h.n
+    glue.rmsnorm(b.xo[:n], L.post_attn_norm, c.rms_norm_eps, b.normed[o:o + n])
+    bufs = [b.normed]
+    if L.experts is not None:
+        route(w, L, b, o, n)
+        bufs += [b.pick, b.wts]
+    _ag_rows(w, h, *bufs)
+
+
+def compute_prompt_sp(w: Weights, st: State, b0: Buffers, b1: Buffers, R: int, T: int | None, pos1: torch.Tensor,
+                      comm_stream, *, logits: str = "none") -> None:
+    """compute_prompt, sequence parallel. Each all-reduce becomes a reduce-scatter over rows; the residual add, the
+    RMSNorms and the replicated projections (q_a, kv_a, the indexer's wk / weights_proj / wq_b and, with SP_SELECT,
+    its top-k; the router) run on a rank's own 1/world of the rows; all-gathers hand the head- and width-sharded
+    consumers what they read for every row (q_a's normed output, the kv latent and index keys - the caches take
+    every row - the selections, the post-attention normed x and the expert picks).
+
+    The main stream runs only the every-row work (attention over this rank's heads, the MLP / experts over its
+    share of the width); a half's reduce-scatter -> own-row glue -> all-gather chain runs on the comm stream under
+    the other half's every-row work. Chains run in issue order, so half A's keys reach the caches before B selects."""
+    c = w.cfg
+    D = c.hidden_size
+    hR = R // 2
+    b1.ids[:R - hR].copy_(b0.ids[hR:R])
+    halves = [_SpHalf(w, b0, hR, st.pos), _SpHalf(w, b1, R - hR, pos1)]
+    n_layers = len(w.layers)
+
+    def tap(h: _SpHalf, i: int) -> None:
+        s = w.tap_slot.get(i)
+        if s is not None:
+            _gather_x(w, h, h.b.taps[:h.R, s * D:(s + 1) * D])
+
+    def start(h: _SpHalf) -> None:
+        b, o, nv = h.b, h.o, h.nv
+        if nv:
+            torch.index_select(w.embed, 0, b.ids[o:o + nv], out=b.xo[:nv])
+        b.xo[nv:h.n].zero_()
+        _front_attn(w, w.layers[0], h, st.kc[0], st.ic.get(w.layers[0].index), T)
+
+    def after_attn(h: _SpHalf, L: Layer) -> None:
+        _rs_residual(w, h)
+        _front_ffn(w, L, h)
+
+    def after_ffn(h: _SpHalf, i: int) -> None:
+        _rs_residual(w, h)
+        tap(h, i)
+        if i + 1 < n_layers:
+            L = w.layers[i + 1]
+            _front_attn(w, L, h, st.kc[i + 1], st.ic.get(L.index), T)
+        else:
+            _gather_x(w, h, h.b.x[:h.R])
+
+    for h in halves:
+        _side(h, comm_stream, lambda h=h: start(h))
+    main = torch.cuda.current_stream()
+    for i, L in enumerate(w.layers):
+        for h in halves:
+            main.wait_event(h.done)
+            attention_core(w, L, h.b, h.R, st.kc[i], h.pos)
+            _side(h, comm_stream, lambda h=h, L=L: after_attn(h, L))
+        for h in halves:
+            main.wait_event(h.done)
+            if L.experts is None:
+                mlp(w, L, h.b, h.R, h.b.part[:h.R])
+            else:
+                experts_part(w, L, h.b, h.R)
+            _side(h, comm_stream, lambda h=h, i=i: after_ffn(h, i))
+    for h in halves:
+        main.wait_event(h.done)
+    if b0.taps is not None:
+        b0.taps[hR:R].copy_(b1.taps[:R - hR])
+    b0.hidden[:hR].copy_(b0.x[:hR])
+    b0.hidden[hR:R].copy_(b1.x[:R - hR])
+    if logits == "last":
+        head(w, b1, b1.x[:R - hR], w.final_norm, R - hR, slice(R - hR - 1, R - hR))
+        b0.logits[:1].copy_(b1.logits[:1])
+
+
+def sp_fits(w: Weights, b0: Buffers, b1: Buffers, R: int) -> bool:
+    """Whether compute_prompt_sp can take this chunk (padded halves fit the buffers; no DCP)."""
+    if not PROMPT_SP or w.world == 1 or w.dcp != 1 or b0.hpart is None or b1.hpart is None:
+        return False
+    hR = R // 2
+    return all(-(-r // w.world) * w.world <= b.rows for r, b in ((hR, b0), (R - hR, b1)))
 
 
 def mtp_compute(w: Weights, st: State, b: Buffers, n: int, T: int | None, *, logits: str = "last",
