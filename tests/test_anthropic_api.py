@@ -261,3 +261,16 @@ def test_mlx_token_count_renders_without_generation(thinking):
         server.shutdown()
         server.server_close()
         app.close()
+
+
+def test_thinking_token_usage_is_preserved():
+    result = usage({"prompt_tokens": 90, "completion_tokens": 20,
+                    "completion_tokens_details": {"reasoning_tokens": 12}})
+    assert result["output_tokens"] == 20 and result["output_tokens_details"] == {"thinking_tokens": 12}
+
+
+@pytest.mark.parametrize("thinking", [None, {"type": "disabled"}])
+def test_thinking_is_opt_in(thinking):
+    chat = translate({**BASE, "thinking": thinking, "output_config": {"effort": "high"}})
+    assert chat["chat_template_kwargs"]["enable_thinking"] is False
+    assert chat["reasoning_effort"] == "none"
