@@ -158,7 +158,7 @@ def unified(torch) -> bool:
 
 
 def reserve_bytes(total: int, *, host: bool = False) -> int:
-    """What the startup budget leaves free: max(4 GiB, a tenth of ``total``), or TENSORFOLD_MEMORY_RESERVE_GIB (>= 2)."""
+    """Host RAM weight staging leaves free: max(4 GiB, a tenth of total), or TENSORFOLD_MEMORY_RESERVE_GIB (>= 2)."""
 
     value = os.environ.get("TENSORFOLD_MEMORY_RESERVE_GIB", "").strip()
     if not value:
@@ -203,19 +203,17 @@ def memory_limit_bytes(environ: Mapping[str, str] | None = None) -> int | None:
 
 
 def available_bytes(torch) -> int:
-    """Free memory admission grants: GPU free memory, bounded by host memory on a discrete GPU.
+    """What admission grants and the runtime gate reads as live: the GPU's free memory, or the host's on a unified GPU.
 
     One pool on a unified GPU: reclaimable page cache is available. ``TENSORFOLD_CUDA_MEMORY_LIMIT_GB``
     caps the grant from above in GiB, an absolute budget like the MLX one; free memory still caps it.
     There is no reserve: a budget close to the card's total can end requests with CUDA errors mid-reply.
+    A discrete card's host need is its loading buffers, which ``host_stream_bytes`` checks on its own.
     """
 
     free, _total = map(int, torch.cuda.mem_get_info())
     memory = _meminfo()
-    if memory is None:
-        granted = free
-    else:
-        granted = memory["MemAvailable"] if unified(torch) else min(free, memory["MemAvailable"])
+    granted = memory["MemAvailable"] if memory is not None and unified(torch) else free
     limit = memory_limit_bytes()
     return max(0, min(granted, limit)) if limit is not None else max(0, granted)
 

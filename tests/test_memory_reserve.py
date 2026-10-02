@@ -1,4 +1,4 @@
-"""TENSORFOLD_MEMORY_RESERVE_GIB: what the CUDA startup budget leaves free (default max(4 GiB, a tenth of memory))."""
+"""TENSORFOLD_MEMORY_RESERVE_GIB: the host loading room the CUDA startup keeps free (default max(4 GiB, a tenth))."""
 
 from types import SimpleNamespace
 
@@ -37,16 +37,14 @@ def _cuda(free, total):
     return SimpleNamespace(cuda=SimpleNamespace(mem_get_info=lambda: (free, total)))
 
 
-def test_available_bytes_uses_the_reserve(monkeypatch):
-    meminfo = {"MemTotal": 121 * GIB, "MemAvailable": 110 * GIB}
-    monkeypatch.setattr(capacity, "_meminfo", lambda: meminfo)
+def test_the_reserve_leaves_the_grant_alone(monkeypatch):
+    monkeypatch.setattr(capacity, "_meminfo", lambda: {"MemTotal": 121 * GIB, "MemAvailable": 110 * GIB})
     monkeypatch.setattr(capacity, "unified", lambda torch: True)
+    assert capacity.available_bytes(_cuda(100 * GIB, 121 * GIB)) == 110 * GIB    # a unified GPU's grant is the host's
+    monkeypatch.setattr(capacity, "unified", lambda torch: False)
     torch = _cuda(100 * GIB, 121 * GIB)
-    monkeypatch.delenv("TENSORFOLD_MEMORY_RESERVE_GIB", raising=False)
-    assert capacity.available_bytes(torch) == 110 * GIB - 121 * GIB // 10
-    monkeypatch.setenv("TENSORFOLD_MEMORY_RESERVE_GIB", "6")
-    assert capacity.available_bytes(torch) == 104 * GIB
-    monkeypatch.setattr(capacity, "unified", lambda torch: False)      # a discrete GPU: its own budget
-    assert capacity.available_bytes(torch) == 94 * GIB
+    assert capacity.available_bytes(torch) == 100 * GIB                          # a discrete card's own free memory
+    monkeypatch.setenv("TENSORFOLD_MEMORY_RESERVE_GIB", "6")                     # the reserve sizes host loading room
+    assert capacity.available_bytes(torch) == 100 * GIB
     monkeypatch.setattr(capacity, "_meminfo", lambda: None)
-    assert capacity.available_bytes(torch) == 94 * GIB
+    assert capacity.available_bytes(torch) == 100 * GIB

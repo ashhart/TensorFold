@@ -32,11 +32,11 @@ def test_unified_budget_counts_the_page_cache_as_available(meminfo, monkeypatch)
     assert capacity.available_bytes(device(True)) == available
 
 
-def test_discrete_budget_is_framed_by_free_and_host_memory(meminfo, monkeypatch):
+def test_a_discrete_grant_ignores_host_memory(monkeypatch):
+    # only the loading buffers need host RAM, and host_stream_bytes weighs those on its own
+    monkeypatch.setattr(Path, "read_text", lambda *a, **k: "MemTotal: 16777216 kB\nMemAvailable: 8388608 kB\n")
     monkeypatch.delenv("TENSORFOLD_CUDA_MEMORY_LIMIT_GB", raising=False)
-    _total, available = meminfo
-    free, gpu = 20 * GB, 80 * GB
-    assert capacity.available_bytes(device(False, free, gpu)) == min(free, available)
+    assert capacity.available_bytes(device(False, 20 * GB, 80 * GB)) == 20 * GB
 
 
 def test_the_limit_env_caps_the_grant_on_both_bounds(meminfo, monkeypatch):
@@ -50,11 +50,8 @@ def test_the_limit_env_caps_the_grant_on_both_bounds(meminfo, monkeypatch):
 @pytest.mark.parametrize("integrated", [False, True])
 def test_31_gib_limit_grants_the_full_budget_without_a_reserve(monkeypatch: pytest.MonkeyPatch,
                                                             integrated: bool) -> None:
-    """Grant the requested 31 GiB when GPU and host memory can supply it.
+    """31 GiB granted when the card and the host can both supply it."""
 
-    :param monkeypatch: Fixture for setting the limit and available host memory.
-    :param integrated: Whether the device shares host memory.
-    """
     monkeypatch.setenv("TENSORFOLD_CUDA_MEMORY_LIMIT_GB", "31")
     monkeypatch.setattr(capacity, "_meminfo", lambda: {"MemTotal": 64 * capacity.GIB,
                                                      "MemAvailable": 32 * capacity.GIB})
