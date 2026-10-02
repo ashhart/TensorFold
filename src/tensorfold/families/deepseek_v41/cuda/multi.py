@@ -8,19 +8,50 @@ acting on it; both ranks then compute the same tokens (argmax or position-keyed 
 
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 import torch
 
 from tensorfold.cuda.sampling import sample_rows
 from tensorfold.cuda.streams import Stream, next_fill
 
-from .serial import MAX_ROWS, SerialEngine
+from .serial import DRING, MAX_ROWS, SerialEngine
 
-ADMIT, FILL, ROUND, DONE = 1, 2, 3, 4      # rank 0's messages
+ADMIT, FILL, ROUND, DONE, EVICT = 1, 2, 3, 4, 5      # rank 0's messages
+FRESH, TAKEOVER, COPY = 0, 1, 2            # how an admitted stream gets its extent (a kept prompt's, or new rows)
 from .serial import PROMPT_ROWS as ROWS
+
+KEEP_MIN = int(os.environ.get("TF_DSV41_KEEP_MIN") or 256)    # shorter states are not kept
+
+
+@dataclass(eq=False)
+class Kept:
+    """A kept prompt inside the shared pool: the per-token caches of ``ids`` in extent ``x``'s first rows and the
+    window rings after them in bank entry ``bank``; a prompt starting with ``ids`` resumes after them.
+
+    States are kept, and resumed, only at multiples of MAX_ROWS (the prompt chunk): a fresh prompt's chunks start
+    at those positions too, so the resumed rows and the ones prefilled after them are exactly a fresh prefill's (a
+    prompt chunk's rows and a decode graph's, or chunks of other lengths, can differ in the last bits)."""
+
+    kid: int
+    x: Any
+    ids: np.ndarray
+    bank: int
+
+    @property
+    def n(self) -> int:
+        return len(self.ids)
+
+
+def common_prefix(a: np.ndarray, b: np.ndarray) -> int:
+    n = min(len(a), len(b))
+    diff = np.flatnonzero(a[:n] != b[:n])
+    return int(diff[0]) if len(diff) else n
 
 SAMPLING_WORDS = 10
 
@@ -60,8 +91,18 @@ class MultiDecoder:
         # the shared cache pool (``pool.Pool``): each admitted stream gets an extent of it, or (None) its slot's
         # fixed extent; a request whose extent does not fit waits (NoRoom) until a stream finishes
         self.pool = pool
+        # kept prompts inside the pool (``Kept``): a stream's extent outlives it while it holds kept states, which
+        # are evicted (least recently used first) when an admission needs the rows
+        banks = len(e.bank[0]) // DRING if pool is not None and getattr(e, "bank", None) else 0
+        self.kept_on = banks > 0 and os.environ.get("TF_DSV41_POOL_KEEP", "1") != "0"
+        if self.kept_on and step % MAX_ROWS:
+            raise ValueError(f"kept prompts resume at multiples of the {MAX_ROWS}-row chunk: fill steps of {step}")
+        self.kept: list[Kept] = []                 # least recently used first
+        self.banks = list(range(banks))            # free bank entries, ascending
+        self.next_kid = 0
+        self.ext: dict[int, Any] = {}              # sid -> its extent
+        self.kstats = {"kept": 0, "hits": 0, "cached": 0, "takeovers": 0, "copies": 0, "evictions": 0}
         self.drafts = drafts if e.drafter is not None else 0
-        import os
 
         self.check = os.environ.get("TF_MULTI_CHECK") == "1"
         if os.environ.get("TF_MULTI_PROF"):
@@ -233,42 +274,163 @@ class MultiDecoder:
         if room < 1:
             raise ValueError(f"a prompt of {len(s.prompt)} tokens leaves no room in the {self.e.limit}-token context")
         s.count = min(s.count, room)
-        base = size = -1
-        if self.pool is not None:                  # the prompt, the reply and a verify window's rows past it
-            from tensorfold.cuda.memory_gate import NoRoom
+        from tensorfold.engine.grammar import pack
 
+        packed = pack(s.constraint)                # before any pool decision (an eviction is sent at once)
+        base = size = eid = -1
+        k, m, mode = None, 0, FRESH
+        if self.pool is not None:                  # the prompt, the reply and a verify window's rows past it
             from .pool import align_up
 
             size = min(align_up(len(s.prompt) + s.count + ROWS + 1), self.e.span)
-            x = self.pool.place(size, self.next_id)
-            if x is None:
-                raise NoRoom(f"the shared cache pool has no {size}-token extent free "
-                             f"({self.pool.free_rows()} of {self.pool.rows} tokens free, largest run "
-                             f"{self.pool.largest_gap()})")
-            base = x.base
-        from tensorfold.engine.grammar import pack
-
-        try:
-            packed = pack(s.constraint)
-        except Exception:                          # nothing sent yet: the extent goes back
-            if self.pool is not None:
-                self.pool.release(self.next_id)
-            raise
+            if self.kept_on and s.draft:
+                k, m = self._match(s.prompt)
+            if k is not None and k.x.owner is None and size - k.x.size <= self.pool.room_after(k.x):
+                mode, base, size = TAKEOVER, k.x.base, max(size, k.x.size)
+            else:
+                try:
+                    base = self._room(size, [k.x] if k is not None else [])
+                    mode = COPY if k is not None else FRESH
+                except Exception:
+                    if k is None:
+                        raise
+                    k, m, mode = None, 0, FRESH    # no room beside the kept rows: without them
+                    base = self._room(size, [])
+                eid = self.pool.next_eid
         s.sid = self.next_id
         self.next_id += 1
         self._send([ADMIT, s.sid, s.count, int(s.draft), int(s.stop_eos), *pack_sampling(s.sampling), len(packed),
-                    base, size])
+                    base, size, eid, k.kid if k is not None else -1, m, mode])
         self._send(list(s.prompt))
         if packed:
             self._send(packed)
-        self._queue(s, base, size)
+        self._queue(s, base, size, eid, mode, k, m)
 
-    def _queue(self, s: Stream, base: int = -1, size: int = -1) -> None:
+    # -- kept prompts in the shared pool (both ranks make the same calls in the same order) ------------------------
+    def _match(self, prompt: list[int]) -> tuple[Kept | None, int]:
+        """The kept state to resume ``prompt`` from and the tokens it covers: the longest whose tokens all start the
+        prompt (and leave one to prefill), then one whose extent is free (taken over without copying), then the most
+        recent."""
+
+        p = np.asarray(prompt, dtype=np.int64)
+        best, key = None, None
+        for i, k in enumerate(self.kept):
+            m = k.n
+            if m > len(p) - 1 or k.ids[0] != p[0] or common_prefix(k.ids, p) < m:
+                continue
+            kk = (m, k.x.owner is None, i)
+            if key is None or kk > key:
+                best, key = k, kk
+        return (best, key[0]) if best is not None else (None, 0)
+
+    def _room(self, size: int, protect: list) -> int:
+        """Rank 0: a base for a new ``size``-row extent, evicting kept states (least recently used first, none in a
+        ``protect`` extent or a live stream's) until one fits; NoRoom when even all of them would not do."""
+
+        from tensorfold.cuda.memory_gate import NoRoom
+
+        base = self.pool.place(size)
+        if base is not None:
+            return base
+        # whole extents of kept states only (dropping a shorter state beside a longer one frees nothing), least
+        # recently used first; the fewest that open a run of ``size`` rows, found before anything is evicted
+        order = {id(k): i for i, k in enumerate(self.kept)}
+        loose = [x for x in self.pool.extents if x.owner is None and x.kept and all(x is not y for y in protect)]
+        loose.sort(key=lambda x: max(order[id(k)] for k in x.kept))
+        for j in range(1, len(loose) + 1):
+            if self.pool.place(size, ignore=loose[:j]) is not None:
+                for x in loose[:j]:
+                    for k in sorted(x.kept, key=lambda k: order[id(k)]):
+                        self._send([EVICT, k.kid])
+                        self._drop(k)
+                        self.kstats["evictions"] += 1
+                base = self.pool.place(size)
+                if base is not None:
+                    return base
+                break
+        raise NoRoom(f"the shared cache pool has no {size}-token extent free ({self.pool.free_rows()} of "
+                     f"{self.pool.rows} tokens free, largest run {self.pool.largest_gap()})")
+
+    def _keep(self, s: Stream, x, ids: list[int]) -> None:
+        """Keep stream ``s``'s state of ``ids`` (extent ``x``'s first rows, its slot's rings) as a kept prompt."""
+
+        if not self.kept_on or len(ids) < KEEP_MIN:
+            return
+        a = np.asarray(ids, dtype=np.int64)
+        for k in [k for k in self.kept if k.n == len(a) and np.array_equal(k.ids, a)]:
+            self._drop(k)                          # the same tokens again: the newer state
+        if not self.banks:
+            self._drop(self.kept[0])
+        bank = self.banks.pop(0)
+        self.e.save_window(s.slot, bank)
+        k = Kept(self.next_kid, x, a, bank)
+        self.next_kid += 1
+        x.kept.append(k)
+        self.kept.append(k)
+        self.kstats["kept"] += 1
+
+    def _drop(self, k: Kept) -> None:
+        self.kept.remove(k)
+        k.x.kept.remove(k)
+        self.banks.append(k.bank)
+        self.banks.sort()
+        self._settle(k.x)
+
+    def _settle(self, x) -> None:
+        """An extent no stream writes: gone when it keeps nothing, else cut to its longest kept state's rows."""
+
+        from .pool import align_up
+
+        if x.owner is not None:
+            return
+        if not x.kept:
+            self.pool.remove(x)
+            return
+        need = align_up(max(k.n for k in x.kept))
+        if need < x.size:
+            self.pool.resize(x, need)
+
+    def _kid(self, kid: int) -> Kept:
+        k = next((k for k in self.kept if k.kid == kid), None)
+        if k is None:
+            raise RuntimeError(f"the ranks disagree on the kept prompts (no kept state {kid})")
+        return k
+
+    def _queue(self, s: Stream, base: int = -1, size: int = -1, eid: int = -1, mode: int = FRESH,
+               k: Kept | None = None, m: int = 0) -> None:
         s.acc = list(self.prior)
         s.slot = self.free.pop(0)
-        if base >= 0:                              # the stream's extent of the shared pool (rank 1: rank 0's place)
-            self.e.bind(s.slot, base, size)
         s.pos = -1                                 # prompt tokens prefilled so far (-1: not started)
+        if base >= 0:                              # the stream's extent of the shared pool (rank 1: rank 0's place)
+            e = self.e
+            if mode == TAKEOVER:                   # a kept state's free extent: its rows are the stream's prefix
+                x = k.x
+                if x.owner is not None or x.base != base:
+                    raise RuntimeError("the ranks disagree on a kept prompt's extent")
+                if size > x.size:
+                    self.pool.resize(x, size)
+                x.owner = s.sid
+            else:
+                x = self.pool.add(base, size, owner=s.sid, eid=eid)
+            self.ext[s.sid] = x
+            if k is not None:
+                if mode == COPY:
+                    e.copy_rows(k.x.base, x.base, m)
+                    self.kstats["copies"] += 1
+                else:
+                    self.kstats["takeovers"] += 1
+                e.bind(s.slot, x.base, x.size, ids=list(s.prompt[:m]))
+                e.select_slot(s.slot)
+                e.load_window(k.bank, s.slot)
+                self.kept.remove(k)                # most recently used
+                self.kept.append(k)
+                for c in [c for c in x.kept if c.n > m]:
+                    self._drop(c)                  # rows the stream overwrites (the hit too, its window loaded)
+                s.pos = s.cached = m
+                self.kstats["hits"] += 1
+                self.kstats["cached"] += m
+            else:
+                e.bind(s.slot, x.base, x.size)
         self.filling.append(s)
 
     def _fill(self) -> list[Stream]:
@@ -291,6 +453,9 @@ class MultiDecoder:
         try:
             e.select_slot(s.slot)
             n = len(s.prompt)
+            if s.pos < 0 and self.pool is not None:   # (a shared pool resumes kept states at admission)
+                e.reset()
+                s.pos = s.cached = 0
             if s.pos < 0:                          # the first step: resume what the slot or the pool holds
                 cached = e.reusable(s.prompt) if s.draft else 0
                 kept = e.pool.match(s.prompt) if s.draft and e.pool is not None else None
@@ -303,11 +468,17 @@ class MultiDecoder:
                     e.reset()
                 s.pos, s.cached = cached, cached
             stop = min(n, s.pos + rows)
+            point = (n - 1) // MAX_ROWS * MAX_ROWS             # where a kept state of this prompt resumes
+            keep = self.kept_on and s.draft and point >= KEEP_MIN and s.cached < point
+            if keep and s.pos < point < stop:
+                stop = point                       # (the next step starts the chunk a fresh prefill starts there)
             logits = e.prefill(s.prompt[s.pos:stop])
             s.pos = stop
+            if keep and stop == point:
+                self._keep(s, self.ext[s.sid], e.state.ids)
             if stop < n:
                 return None
-            if s.draft:
+            if s.draft and self.pool is None:
                 e.keep_prompt(s.prompt)
             last = logits[-1:]
             if s.constraint is not None:
@@ -424,8 +595,8 @@ class MultiDecoder:
                                                                  ("hash", "gather0", "gather1", "wait")), flush=True)
                     print(f"[multi] {n} rounds: draft {1e3 * p['draft'] / n:.1f} ms, verify {1e3 * p['verify'] / n:.1f} ms, "
                           f"post {1e3 * p['post'] / n:.1f} ms, fill {1e3 * p['fill'] / n:.1f} ms, round "
-                          f"{1e3 * p['round'] / n:.1f} ms, {p['rows'] / n:.1f} rows, {p['streams'] / n:.1f} streams",
-                          flush=True)
+                          f"{1e3 * p['round'] / n:.1f} ms, {p['rows'] / n:.1f} rows, {p['streams'] / n:.1f} streams"
+                          + (f"; kept {len(self.kept)} {self.kstats}" if self.kept_on else ""), flush=True)
             t2 = time.perf_counter()
             news = []
             for (sid, k), (r0, nrows, p0) in zip(plan, spans):
@@ -471,16 +642,21 @@ class MultiDecoder:
             s = next((x for x in self.filling if x.sid == sid), None)
             if s is not None:
                 self.filling.remove(s)
+        x = self.ext.pop(sid, None)
+        if x is not None:                          # (a reply's decoded rows are not kept: a decode graph's rows
+            x.owner = None                         # can differ from the prompt chunk's that would recompute them)
+            self._settle(x)
         if s is not None and s.slot not in self.free:
             self.free.append(s.slot)
             self.free.sort()
-        if self.pool is not None:
-            self.pool.release(sid)
 
     def drop(self) -> list[Stream]:
         live = list(self.streams.values()) + self.filling     # done ones too: their slots and extents go back
+        self.kept_on = False                                  # (and nothing kept from a failed round)
         for s in live:
             self._finish(s.sid)
+        for k in list(self.kept):
+            self._drop(k)
         if self.broken is None:
             self.broken = RuntimeError("a round failed")
         return live
@@ -496,18 +672,19 @@ class MultiDecoder:
             if msg[0] == ADMIT:
                 sid, count, draft, stop_eos = msg[1:5]
                 words, npacked = msg[5:5 + SAMPLING_WORDS], msg[5 + SAMPLING_WORDS]
-                base, size = msg[6 + SAMPLING_WORDS:8 + SAMPLING_WORDS]
+                base, size, eid, kid, m, mode = msg[6 + SAMPLING_WORDS:12 + SAMPLING_WORDS]
                 if (base >= 0) != (self.pool is not None):
                     raise RuntimeError("the ranks disagree on the shared cache pool")
-                if base >= 0:                          # rank 0's placement, replayed (the same pool by construction)
-                    self.pool.add(base, size, sid)
+                k = self._kid(kid) if kid >= 0 else None
                 s = Stream(self.share(None), count, unpack_sampling(words), draft=bool(draft),
                            stop_eos=bool(stop_eos), sid=sid)
                 if npacked:
                     from tensorfold.engine import grammar
 
                     s.constraint = grammar.compiler(self, self.model_dir, self.eos).follow(self.share(None))
-                self._queue(s, base, size)
+                self._queue(s, base, size, eid, mode, k, m)    # rank 0's placement, replayed
+            elif msg[0] == EVICT:
+                self._drop(self._kid(msg[1]))
             elif msg[0] == FILL:
                 s = next(x for x in self.filling if x.sid == msg[1])
                 first = self._step(s, msg[2])

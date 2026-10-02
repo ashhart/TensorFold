@@ -481,20 +481,18 @@ class SerialEngine:
             self.bind(i, i * self.span if fixed else 0, self.span)   # until a stream is admitted (captures, timing)
         self.state = self.views[self.slot]
 
-    def bind(self, slot: int, base: int, size: int, keep: bool = False) -> None:
+    def bind(self, slot: int, base: int, size: int, ids: list[int] | None = None) -> None:
         """Give ``slot`` the extent [base, base + size) of the arena: its views (prompt chunks, kept states) and the
-        decode graphs' base table. Not during a capture; the slot's next request starts from these rows. Its
-        committed ids carry over only with ``keep`` on the same rows (a shared pool hands rows from stream to stream:
-        another may have written them since, so reuse goes through kept prompt states instead)."""
+        decode graphs' base table. Not during a capture. ``ids``: the tokens whose per-token caches those rows already
+        hold (a resumed kept prompt), else none."""
 
         c = self.c
         if base % ALIGN or size % ALIGN or size <= 0 or base + size > self.pool_tokens:
             raise ValueError(f"extent [{base}, {base + size}) is not aligned inside the {self.pool_tokens}-token pool")
-        size = min(size, self.span)                      # never more than a stream's limit needs
-        same = keep and self.extents[slot][0] == base     # the slot's committed tokens stay only on the same rows
+        if size > self.span:
+            raise ValueError(f"an extent of {size} tokens: a stream needs at most {self.span}")
         self.extents[slot] = (base, size)
         self.ebase[slot] = base
-        old = self.views[slot] if same else None
 
         def cut(t, r):
             return t[base // r:(base + size) // r]
@@ -502,9 +500,47 @@ class SerialEngine:
         self.views[slot] = Caches(self.cap, self.stage_swa,
                                   {k: cut(t, c.layer_ratios[k]) for k, t in self.big.comp.items()}, self.stage_raw,
                                   {k: cut(t, c.layer_ratios[k]) for k, t in self.big.ik.items()},
-                                  list(old.ids) if old is not None else [])
+                                  list(ids or []))
         if slot == self.slot and getattr(self, "state", None) is not None:
             self.state = self.views[slot]
+
+    # -- kept prompts inside the shared pool: their window rings in a bank, their rows copied between extents ----
+    def _rings(self) -> list[torch.Tensor]:
+        """Every decode ring indexed by slot * DRING + position % DRING (attention windows, compressor pairs, the
+        drafter's windows)."""
+
+        return [*self.big.swa, *self.big.raw.values(), *(self.drafter.swa_big if self.drafter is not None else [])]
+
+    def make_bank(self, n: int) -> None:
+        """Room for ``n`` kept window rings (a slot's whole DRING block of every ring each): after the drafter."""
+
+        self.bank = [torch.empty((n * DRING, *t.shape[1:]), dtype=t.dtype, device=self.dev) for t in self._rings()]
+
+    def bank_bytes(self, n: int) -> int:
+        return n * DRING * sum(t[0].numel() * t.element_size() for t in self._rings())
+
+    def save_window(self, slot: int, k: int) -> None:
+        """Slot ``slot``'s rings into bank entry ``k``."""
+
+        for t, b in zip(self._rings(), self.bank):
+            b[k * DRING:(k + 1) * DRING].copy_(t[slot * DRING:(slot + 1) * DRING])
+
+    def load_window(self, k: int, slot: int) -> None:
+        """Bank entry ``k`` into slot ``slot``'s rings (the addresses the graphs read stay put)."""
+
+        for t, b in zip(self._rings(), self.bank):
+            t[slot * DRING:(slot + 1) * DRING].copy_(b[k * DRING:(k + 1) * DRING])
+
+    def copy_rows(self, src: int, dst: int, n: int) -> None:
+        """The per-token caches of tokens [src, src + n) of the arena to [dst, dst + n) (entries closed before
+        token n, of every kv source; the ranges may overlap)."""
+
+        from .pool import move_rows
+
+        for s_ in self.c.kv_source_layer_ids:
+            r = self.c.layer_ratios[s_]
+            for t in (self.big.comp[s_], self.big.ik[s_]):
+                move_rows(t, src // r, dst // r, -(-n // r))
 
     def _ebase(self, src: int) -> torch.Tensor:
         """Each decode row's stream's first entry of source ``src`` (in a graph: read from the base table)."""
@@ -566,6 +602,8 @@ class SerialEngine:
             raise ValueError(f"1..{MAX_ROWS} rows a call, got {R}")
         if p0 + R > self.limit:
             raise ValueError(f"context {p0 + R} beyond {self.limit} tokens")
+        if p0 + R > self.extents[self.slot][1]:
+            raise ValueError(f"position {p0 + R} beyond the slot's extent of {self.extents[self.slot][1]} tokens")
         if R in self.graphs:
             self.step_rows(tokens)
             return self.graph_for(R, p0 + R)["logits"]
@@ -1013,6 +1051,9 @@ class SerialEngine:
             if p0 + len(toks) > self.limit:
                 raise ValueError(f"stream in slot {slot}: context {p0 + len(toks)} beyond {self.limit} tokens")
             first[slot] = p0
+            if p0 + len(toks) > self.extents[slot][1]:
+                raise ValueError(f"stream in slot {slot}: position {p0 + len(toks)} beyond its extent's "
+                                 f"{self.extents[slot][1]} tokens")
             ids.extend(toks)
             start = max(0, p0 - (n - 1))
             hashes[slot] = E.hashes(np.array(ids[start:]), self.tmap, self.layout, c.engram_pad_token_id)[-len(toks):]
@@ -1069,6 +1110,8 @@ class SerialEngine:
         p0 = len(st.ids)
         if p0 + R > self.limit:
             raise ValueError(f"context {p0 + R} beyond {self.limit} tokens")
+        if p0 + R > self.extents[self.slot][1]:
+            raise ValueError(f"position {p0 + R} beyond the slot's extent of {self.extents[self.slot][1]} tokens")
         g = self.graph_for(R, p0 + R)
         st.ids.extend(tokens)
         start = max(0, p0 - (c.engram_max_ngram_size - 1))

@@ -81,7 +81,9 @@ def largest_context(free: int, streams: int = 1, carve: int = 0) -> int:
 # --parallel above 1: the streams draw their per-token caches from one shared pool (``pool.py``) instead of each
 # holding a fixed --context's worth; TF_DSV41_SHARED_POOL=0 keeps the fixed layout
 SHARED_POOL = os.environ.get("TF_DSV41_SHARED_POOL", "1") != "0"
-KEPT_GIB = float(os.environ.get("TF_DSV41_KEPT_GIB") or "1")    # kept out of the shared pool for kept prompt states
+# kept prompts inside the shared pool: their per-token caches stay in the pool's free rows, their window rings (a
+# slot's DRING rows of every ring, SLOT_BYTES) in a bank of this many entries
+KEPT_ENTRIES = int(os.environ.get("TF_DSV41_KEPT_ENTRIES") or "16")
 
 
 # the decode graphs' buffers that scale with a stream's limit ([R, limit // ratio] indexer scores and top-k scratch):
@@ -97,6 +99,14 @@ def _widths_words() -> list[int]:
 
     ws = sorted(WIDTHS)[:4]
     return [int(SHARED_GRAPH_POOL), len(WIDTHS), *ws, *[0] * (4 - len(ws))]
+
+
+def _keep_words() -> list[int]:
+    """The kept-prompt policy (each rank decides keeps from it on its own: the ranks must agree)."""
+
+    from .multi import KEEP_MIN
+
+    return [KEEP_MIN, int(os.environ.get("TF_DSV41_POOL_KEEP", "1") != "0")]
 
 
 def carved_bytes(pool: int, carve: int, ratios: tuple[int, ...] = (2, 2, 2, 1)) -> int:
@@ -122,7 +132,7 @@ def pool_tokens(free: int, streams: int, limit: int, carve: int = 0) -> int:
 
     from .pool import ALIGN, align_up
 
-    room = (free - int((FIXED_GIB + RESERVE_GIB + KEPT_GIB) * 2 ** 30) - (streams - 1) * SLOT_BYTES
+    room = (free - int((FIXED_GIB + RESERVE_GIB) * 2 ** 30) - (streams - 1 + KEPT_ENTRIES) * SLOT_BYTES
             - (TOKEN_BYTES - CACHE_BYTES + GRAPH_BYTES_PER_LIMIT_TOKEN) * limit)
     cap = streams * align_up(limit)
     best = max(0, min(room // CACHE_BYTES, cap)) // ALIGN * ALIGN
@@ -192,7 +202,7 @@ class Dsv41Engine:
                                     "there (or point TF_DSV41_ENGRAM_DIR at them)")
         self.streams = max(1, int(parallel))
         mine = [cap, int(bool(drafts)), int(explicit), self.streams, int(SHARED_POOL and self.streams > 1),
-                int(KEPT_GIB * 1024), *_widths_words()]
+                KEPT_ENTRIES, *_widths_words(), *_keep_words()]
         both = self._gather_ints(mine)
         if both[0] != both[1]:
             raise RuntimeError(f"the two ranks were started with different settings (context, drafts, parallel): "
@@ -235,13 +245,15 @@ class Dsv41Engine:
             self.capacity_plan["pool_tokens"] = pool
             if rank == 0:
                 print(f"[tensorfold] shared cache pool: {pool:,} tokens for {self.streams} streams of up to {cap:,} "
-                      f"each ({KEPT_GIB:g} GiB kept for prompt states)", flush=True)
+                      f"each; its free rows keep up to {KEPT_ENTRIES} prompt states", flush=True)
         self.e = SerialEngine(w, Comm(self.nccl), str(engram), str(self.model_dir / "tokenizer.json"), cap=cap,
                               slots=self.streams, pool_tokens=pool)
         self.nccl.barrier()
         with torch.no_grad():
             if drafts:
                 self.e.enable_dspark(DRAFTS)
+            if self.shared:
+                self.e.make_bank(KEPT_ENTRIES)
             torch.cuda.synchronize()
             before = torch.cuda.memory_reserved()
             self.e.capture(1)
@@ -280,7 +292,10 @@ class Dsv41Engine:
                   f"{torch.cuda.memory_allocated() / 2 ** 30:.1f} GiB a rank", flush=True)
         if warm and os.environ.get("TF_DSV41_WARM", "1") != "0":
             self._warm()
-        self._make_pool(cap)
+        if self.shared:                                 # kept prompts live in the shared pool (multi.Kept)
+            self.e.pool = None
+        else:
+            self._make_pool(cap)
         self.concurrent = self.streams > 1
         self.multi = self.scheduler = None
         if self.concurrent:
