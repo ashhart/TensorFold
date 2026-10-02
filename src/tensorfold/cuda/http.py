@@ -13,6 +13,7 @@ from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
 from tensorfold.server.decisions import DecisionError
 from tensorfold.server.errors import CapacityError, RequestError, error_body
 from tensorfold.server.http import Server, wants_usage_chunk
+from tensorfold.server.request_body import read_body
 from tensorfold.server.stacks import Rearming
 
 if TYPE_CHECKING:
@@ -69,13 +70,9 @@ def make_handler(app: App):
             """Read a refused request's body, so it cannot reach the next request on this connection."""
 
             try:
-                length = int(self.headers.get("Content-Length", 0))
-            except ValueError:
-                length = -1
-            if 0 <= length <= 32 * 1024**2:
-                self.rfile.read(length)
-            else:
-                self.close_connection = True
+                read_body(self)
+            except RequestError:
+                pass  # the reader closes the connection when framing cannot be drained
 
         def _stream_error(self, error: dict[str, Any]) -> None:
             """End an open stream with an error event and ``[DONE]``, as the MLX server does."""
@@ -116,12 +113,9 @@ def make_handler(app: App):
                 self._discard_body()
                 return self._json(404, {"error": "not found"})
             try:
-                length = int(self.headers.get("Content-Length", 0))
-                if not 0 <= length <= 32 * 1024**2:
-                    self.close_connection = True             # the unread body must not reach the next request
-                    return self._json(400, {"error": {"message": "request body exceeds the 32 MiB limit",
-                                                      "type": "invalid_request_error"}})
-                body = json.loads(self.rfile.read(length) or b"{}")
+                body = json.loads(read_body(self) or b"{}")
+            except RequestError as exc:
+                return self._json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
             except (json.JSONDecodeError, UnicodeDecodeError):
                 return self._json(400, {"error": {"message": "the request body is not JSON", "type": "invalid_request_error"}})
             if tokenizer:                                   # vLLM's /tokenize and /detokenize
@@ -246,14 +240,11 @@ def make_handler(app: App):
         def _post_decisions(self) -> None:
             decide = getattr(app, "decisions", None)
             if decide is None:
+                self._discard_body()
                 return self._json(404, {"error": {"message": f"unknown path {self.path}",
                                                   "type": "invalid_request_error"}})
             try:
-                length = int(self.headers.get("Content-Length", "0"))
-                if not 0 <= length <= 32 * 1024**2:
-                    return self._json(400, {"error": {"message": "request body exceeds the 32 MiB limit",
-                                                      "type": "invalid_request_error"}})
-                body = json.loads(self.rfile.read(length) or b"{}")
+                body = json.loads(read_body(self) or b"{}")
                 if not isinstance(body, dict):
                     raise RequestError("request body must be an object")
             except RequestError as exc:

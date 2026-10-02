@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from tensorfold.server.errors import RequestError
+from tensorfold.server.request_body import read_body
 from tensorfold.server.responses_translate import Reply, _id, messages, translate
 
 LIMIT = 32 * 1024**2
@@ -182,12 +183,9 @@ def post(handler: Any, app: Any) -> None:
 
     store = store_for(app)
     try:
-        length = int(handler.headers.get("Content-Length") or 0)
-        if not 0 <= length <= LIMIT:
-            handler.close_connection = True           # the unread body must not reach the next request
-            raise RequestError("request body exceeds the 32 MiB limit")
+        data = read_body(handler, limit=LIMIT)
         try:
-            body = json.loads(handler.rfile.read(length) or b"{}")
+            body = json.loads(data or b"{}")
         except (ValueError, UnicodeDecodeError):
             raise RequestError("the request body is not JSON") from None
         request = translate(body, store)
