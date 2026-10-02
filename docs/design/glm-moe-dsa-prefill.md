@@ -16,3 +16,10 @@ Ranked:
    +8-12%. After 2. Then try PROMPT_ROWS 8192.
 1M: indexer + DCP 1024-row cap; levers = lift cap (needs 3's memory) + FP8 indexer scores.
 N/A to us: 0009a/c, 0024, 0017/0022, 0006 (decode only), HC/KDA parts.
+
+## 10-01 results
+- Radix top-k (commit ac40307): exact vs torch.topk+sort, 3.6-7x per 128-row block (1.5 vs 5.4 ms @128K keys);
+  4-byte scores on one rank. Expected 128K prefill: top-k ~65 s -> ~15-20 s of 286 s.
+- Multi-row indexer scoring (RB rows/program) REJECTED: not faster (0.8-1.2x) and not bit-exact. The scorer is
+  tensor-core compute-bound (128 rows x 128K keys x 32 heads x 128 = 137 GFLOP in ~3 ms ~ 45 TFLOP/s). Lever = FP8
+  indexer (q/k e4m3, ~2x MMA rate) behind a switch + quality check (DSA/vLLM run the indexer in FP8).
