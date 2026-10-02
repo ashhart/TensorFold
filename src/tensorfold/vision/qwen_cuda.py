@@ -9,7 +9,9 @@ import os
 from pathlib import Path
 from typing import Any
 
-MAX_PATCHES = 16384
+MAX_PATCHES = 16384                  # one tower call's patches: a 4,096-token image's, the scratch reserved
+MAX_REQUEST_PATCHES = 16 * MAX_PATCHES   # a request's (--vision-image-tokens 65536), encoded MAX_PATCHES at a time
+TOKENS_PER_IMAGE = 4096              # one image's visual tokens, whatever budget the request's images share
 WORKSPACE_BYTES = 4 * 1024**3
 
 
@@ -189,6 +191,7 @@ class QwenCudaVision:
         torch.cuda.synchronize()
 
     def prepare(self, *args, **kwargs):
+        kwargs.setdefault("max_image_tokens", TOKENS_PER_IMAGE)
         return self.frontend.prepare(*args, **kwargs)
 
     def encode(self, prepared, prompt) -> EncodedVision:
@@ -204,9 +207,11 @@ class QwenCudaVision:
         if any(int(value) != value or value <= 0 for row in grid for value in row) or any(
                 int(h) % merge or int(w) % merge for _, h, w in grid):
             raise ValueError("image grids must contain positive merge-aligned dimensions")
-        patches = sum(int(t) * int(h) * int(w) for t, h, w in grid)
-        if patches <= 0 or patches > MAX_PATCHES:
-            raise ValueError(f"image request exceeds the CUDA vision budget of {MAX_PATCHES} patches")
+        sizes = [int(t) * int(h) * int(w) for t, h, w in grid]
+        patches = sum(sizes)
+        if patches <= 0 or patches > MAX_REQUEST_PATCHES or max(sizes) > MAX_PATCHES:
+            raise ValueError(f"image request exceeds the CUDA vision budget of {MAX_PATCHES} patches an image and "
+                             f"{MAX_REQUEST_PATCHES} a request")
         patch_width = (self.config["in_channels"] * self.config["temporal_patch_size"] * self.config["patch_size"]**2)
         if tuple(prepared.pixel_values.shape) != (patches, patch_width):
             raise ValueError("image patch tensor has an invalid shape")
@@ -218,15 +223,34 @@ class QwenCudaVision:
                          (patches // self.config["spatial_merge_size"]**2, self.config["out_hidden_size"]),
                          self.config["out_hidden_size"])
         with torch.inference_mode(), sdpa_kernel([SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION]):
-            # a copy: the prepared arrays are read-only, and a tensor may not share them
-            pixels = torch.tensor(prepared.pixel_values, dtype=torch.bfloat16, device=self.device)
-            grids = torch.tensor(grid, dtype=torch.int64, device=self.device)
-            features = self.tower(pixels, grid_thw=grids, return_dict=True).pooler_output
-            features = features.to(dtype=torch.bfloat16).contiguous()
+            parts = []
+            # images never attend to one another: runs of whole images, at most MAX_PATCHES a tower call (one call,
+            # as before, whenever the request fits it), so the scratch stays what one full-size image needs
+            for begin, end in image_runs(sizes, MAX_PATCHES):
+                done = sum(sizes[:begin])
+                # a copy: the prepared arrays are read-only, and a tensor may not share them
+                pixels = torch.tensor(prepared.pixel_values[done:done + sum(sizes[begin:end])],
+                                      dtype=torch.bfloat16, device=self.device)
+                grids = torch.tensor(grid[begin:end], dtype=torch.int64, device=self.device)
+                parts.append(self.tower(pixels, grid_thw=grids, return_dict=True).pooler_output)
+            features = torch.cat(parts).to(dtype=torch.bfloat16).contiguous()
         if tuple(features.shape) != (len(rows), self.config["out_hidden_size"]):
             raise ValueError("vision tower returned a different number of image features")
         return EncodedVision(rows, features, torch.tensor(positions, dtype=torch.int32, device=self.device),
                              prepared.rope_delta)
+
+
+def image_runs(sizes, limit: int) -> list[tuple[int, int]]:
+    """Consecutive [begin, end) runs of images whose patches fit ``limit`` together (an image alone always fits)."""
+    runs, begin, total = [], 0, 0
+    for i, size in enumerate(sizes):
+        if i > begin and total + size > limit:
+            runs.append((begin, i))
+            begin, total = i, 0
+        total += size
+    if sizes:
+        runs.append((begin, len(sizes)))
+    return runs
 
 
 def validate_encoded(rows, positions, delta: int, prompt, image_token: int, feature_shape, hidden: int) -> None:

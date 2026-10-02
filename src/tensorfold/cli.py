@@ -295,6 +295,8 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
                     max_tokens=int(args.max_tokens), context_window=context if context is not None else args.context,
                     reasoning_effort=args.reasoning_effort, thinking_budget=int(args.thinking_budget),
                     vision_max_images=getattr(args, "vision_max_images", None),
+                    **({"vision_image_tokens": args.vision_image_tokens}
+                       if getattr(args, "vision_image_tokens", None) is not None else {}),
                     aliases=list(args.alias))
     shown = "greedy" if float(sampling.get("temperature", 1.0)) <= 0 else ", ".join(
         f"{k} {v}" for k, v in sampling.items())

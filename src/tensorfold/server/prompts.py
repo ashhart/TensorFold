@@ -53,7 +53,9 @@ def prepare_images(frontend, messages, render, *, context_limit=None, limits: Im
     slot = image_slot()
     try:
         images = load_images(sources, limits=limits, allow_urls=allow_urls)
-        prepared = frontend.prepare(render(template), images, max_prompt_tokens=context_limit)
+        budget = {} if limits.max_visual_tokens == DEFAULT_LIMITS.max_visual_tokens else \
+            {"max_visual_tokens": limits.max_visual_tokens}
+        prepared = frontend.prepare(render(template), images, max_prompt_tokens=context_limit, **budget)
     except (ImageInputError, ValueError, ImportError) as exc:
         raise RequestError(str(exc)) from exc
     finally:

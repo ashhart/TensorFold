@@ -136,7 +136,7 @@ class QwenImageProcessor:
         return cls(config, processor, tokenizer)
 
     def prepare(self, rendered_prompt: str, images: Sequence[Any], *, max_visual_tokens: int = 4096,
-                max_prompt_tokens: int | None = None) -> PreparedVisionPrompt:
+                max_prompt_tokens: int | None = None, max_image_tokens: int | None = None) -> PreparedVisionPrompt:
         """Expand image markers and calculate request-local rotary metadata without touching the GPU."""
         if not images or max_visual_tokens < 1:
             raise ValueError("Image preprocessing needs images and a positive visual-token budget")
@@ -147,6 +147,8 @@ class QwenImageProcessor:
         vision = self.config["vision_config"]
         factor = int(vision["patch_size"]) * int(vision["spatial_merge_size"])
         limit = max_visual_tokens // len(images)
+        if max_image_tokens:                 # each image at most this many, however few share the budget
+            limit = min(limit, max_image_tokens)
         per_image = min(int(getattr(self.processor, "max_pixels", limit * factor**2)), limit * factor**2)
         parts, grids = [], []
         for image in images:

@@ -18,6 +18,15 @@ def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any =
             raise ValueError("--vision-max-images must be a positive integer")
         if not getattr(args, "vision", False):
             raise ValueError("--vision-max-images needs --vision")
+    tokens = getattr(args, "vision_image_tokens", None)
+    if tokens is not None:
+        if not isinstance(tokens, int) or isinstance(tokens, bool) or not 1 <= tokens <= 65536:
+            raise ValueError("--vision-image-tokens is a number of tokens from 1 to 65,536")
+        if not getattr(args, "vision", False):
+            raise ValueError("--vision-image-tokens needs --vision")
+        if backend != "cuda":
+            raise ValueError("--vision-image-tokens sets the CUDA Qwen image budget; the MLX towers size their "
+                             "workspace for 4,096 visual tokens")
     if getattr(args, "vision", False):             # only --vision reads the config here
         if family.model_type == "glm5_next" and backend != "mlx":
             raise ValueError("GLM-5.3-Flash image input is currently MLX-only")

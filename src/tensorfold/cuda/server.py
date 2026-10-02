@@ -70,12 +70,15 @@ class App:
     def __init__(self, engine, model_dir: Path, served: str, *, default_thinking: bool = False,
                  sampling: dict[str, Any] | None = None, max_tokens: int = 4096,
                  context_window: int | None = None, reasoning_effort: str | None = None, thinking_budget: int = 0,
-                 aliases: tuple[str, ...] | list[str] = (), vision_max_images: int | None = None):
+                 aliases: tuple[str, ...] | list[str] = (), vision_max_images: int | None = None,
+                 vision_image_tokens: int | None = None):
         from tokenizers import Tokenizer
 
         self.engine = engine
         self.vision = getattr(engine, "vision", None)
-        self.image_limits = DEFAULT_LIMITS if vision_max_images is None else ImageLimits(max_images=vision_max_images)
+        self.image_limits = DEFAULT_LIMITS if vision_max_images is None and vision_image_tokens is None else \
+            ImageLimits(**({} if vision_max_images is None else {"max_images": vision_max_images}),
+                        **({} if vision_image_tokens is None else {"max_visual_tokens": vision_image_tokens}))
         self.served = served
         self.aliases = tuple(str(alias).strip() for alias in aliases if str(alias).strip())
         self.model_dir = Path(model_dir)

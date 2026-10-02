@@ -109,6 +109,7 @@ between MLX and CUDA, different quantizations, or different tensor-parallel rank
 | `--name` | Model ID advertised to clients | Both |
 | `--vision` | Opt-in GLM-5.3-Flash, Qwen3.5/3.8 dense and Flash Next image input | MLX; dense Qwen also CUDA; Flash Next CUDA with `--parallel >=2` |
 | `--vision-max-images N` | With `--vision`, images across the full request history (default 4); other image limits still apply | Both |
+| `--vision-image-tokens N` | With `--vision`, the visual tokens a request's images share (default 4,096, up to 65,536); each image keeps at most 4,096 | CUDA Qwen |
 | `--alias` | Additional model IDs | MLX |
 | `--context N` | Prompt plus reply capacity | Both |
 | `--max-tokens N` | Default reply limit, 4096 | Both |
