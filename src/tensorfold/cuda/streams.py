@@ -141,8 +141,7 @@ class PrefixCache:
         return entry
 
     def add(self, ids: list[int], state: Any, snap: Any) -> None:
-        """Newest last; past ``keep``, an entry its conversation has moved past goes first, then the oldest entry never
-        resumed from, else the oldest."""
+        """Newest last; past ``keep``, the oldest entry never resumed from goes first, else the oldest."""
 
         self.entries = [e for e in self.entries if e[0] != ids] + [(ids, state, snap)]
         while len(self.entries) > self.keep:
@@ -158,24 +157,10 @@ class PrefixCache:
         return True
 
     def _drop(self, among: list) -> None:
-        past = [e for e in among if self._moved_past(e)]
         cold = [e for e in among if tuple(e[0]) not in self.hit]
-        gone = past[0] if past else cold[0] if cold else among[0]
+        gone = cold[0] if cold else among[0]
         self.entries = [e for e in self.entries if e is not gone]
         self.hit &= {tuple(e[0]) for e in self.entries}
-
-    def _moved_past(self, entry) -> bool:
-        """Every longer entry that extends this one lies on one line and is newer (``entries`` is in order of last use):
-        its conversation went on since this state was last used, and resumes from the longest. An entry that diverging
-        prompts extend (a system block two conversations share), or one resumed from after its extension was kept (a
-        fork back to it), is not moved past."""
-
-        n, at = len(entry[0]), self.entries.index(entry)
-        longer = [(i, e[0]) for i, e in enumerate(self.entries) if len(e[0]) > n and e[0][:n] == entry[0]]
-        if not longer or any(i < at for i, _ in longer):
-            return False
-        ids = sorted((x for _, x in longer), key=len)
-        return all(b[:len(a)] == a for a, b in zip(ids, ids[1:]))
 
 
 class KVRoom:
