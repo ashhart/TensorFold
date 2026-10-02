@@ -36,7 +36,10 @@ ATTN_DECODE = (256, 32, 4, 2)
 ATTN_PROMPT = tuple(int(v) for v in os.environ.get("TF_GLM53_ATTN_PROMPT", "2048,64,8,2").split(","))  # chunk, keys/tile, warps, stages; chunk >= index_topk: one pass
 BT = 128                 # indexer: keys per scoring program (128 / 2 warps / 2 stages: same bits as 64/4/3, ~1.14x on GB10)
 MAX_ROWS = 128           # widest call of the row-invariant EXL3 linear; wider windows use the prompt GEMM
-PROMPT_ROWS = int(os.environ.get("TF_GLM53_PROMPT_ROWS", "4096"))   # prompt chunk: experts read once per chunk
+PROMPT_ROWS = int(os.environ.get("TF_GLM53_PROMPT_ROWS", "8192"))   # prompt chunk rows (buffers), long prompts
+# chunks for prompts under 3 x PROMPT_ROWS: one or two big chunks lose the cross-chunk overlap (4 Sparks, 10-02:
+# 8K 1087 tok/s at 4096 vs 1003 at 8192; 32K 1036 vs 1124; 128K 946 vs 972; 16384 worse everywhere)
+PROMPT_ROWS_SHORT = int(os.environ.get("TF_GLM53_PROMPT_ROWS_SHORT", "4096"))
 PREFILL_REDUCE = os.environ.get("TF_GLM53_PREFILL_REDUCE", "ring")   # ring | rs (exact reduce-scatter)
 PROMPT_OVERLAP = os.environ.get("TF_GLM53_PROMPT_OVERLAP", "1") != "0"   # two micro-batches, comm under compute
 # sequence-parallel prompt chunks: reduce-scatter rows, replicated work on a rank's own rows, all-gather (see
