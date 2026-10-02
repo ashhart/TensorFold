@@ -22,3 +22,15 @@ families/qwen3_5/cuda/multi.py (TP follower ADMIT/FILL/ROUND/DONE protocol over 
 Memory: BF16 latent ~97 KB/token/rank (DCP1) -> ~35 GB of cache ~= 360K tokens TOTAL across streams (e.g. 8 x 32K OK);
 NVFP4 KV (vLLM keys36 writer + b12x reader, ~30 KB/token) is the later lever for many long streams.
 Source map with file:line refs: subagent report 10-01 (summarized in ~/.claude memory project_tensorfold_glm53_native).
+
+## Phase A status (branch conc-phase-a, 2026-10-01)
+
+Built: steps 1 (per-row tables, DCP 1 only), 2 (N fixed cache slots of `--context` tokens), 4 (MTP windows of up to
+16 rows: N x (k + 1) <= FAST_ROWS, refused otherwise), 6 (`multi.GlmMultiDecoder`, one-shot messages ADMIT / FILL /
+ROUND / DONE) and 7 (`--parallel N` -> Scheduler; followers run `multi.follow`). The fused kernels take a `ROWS`
+constexpr (off: the old code exactly) with int32 position and cache-base tables; prompt fills run the one-stream
+kernels on the stream's slot views with the chunking a lone request uses (prompt chunks are not row-invariant).
+Deferred: step 3 (> 16 rows), step 5 (DFlash2 per stream; not loaded with --parallel > 1), DCP with several streams,
+paged / shared-prefix caches, admission by measured memory (slots are allocated up front).
+Tests: tests/cuda/test_glm_moe_dsa_multi.py (2, 3, 4 streams, staggered, greedy + seeded sampled, one prompt past
+index_topk: each reply equals its lone reply; graphs replay; engine + Scheduler; memory flat over admit/finish).
