@@ -28,6 +28,9 @@ def late_system_role(render: Callable[[list[dict[str, Any]]], Any]) -> str:
         return "user"
 
 
+_VISUAL = ("image_url", "image", "video_url", "video")      # a video part reaches here only where videos are on
+
+
 def normalize_messages(messages: list[dict[str, Any]], *, late_system: str = "system",
                        allow_images: bool = False) -> list[dict[str, Any]]:
     """Merge leading instructions as system text and retain later instructions as ``late_system`` so earlier conversation tokens stay unchanged."""
@@ -45,12 +48,12 @@ def normalize_messages(messages: list[dict[str, Any]], *, late_system: str = "sy
             raise RequestError("this server accepts text only; image, audio and video inputs are unsupported")
         content = message.get("content")
         if isinstance(content, list) and allow_images and any(
-                isinstance(p, dict) and p.get("type") in ("image_url", "image") for p in content):
+                isinstance(p, dict) and p.get("type") in _VISUAL for p in content):
             if role != "user":
-                raise RequestError("images are supported only in user messages")
+                raise RequestError("images and videos are supported only in user messages")
             for part in content:
-                if not isinstance(part, dict) or part.get("type") not in ("text", "image_url", "image"):
-                    raise RequestError("image messages may contain text and image_url parts only")
+                if not isinstance(part, dict) or part.get("type") not in ("text", *_VISUAL):
+                    raise RequestError("image messages may contain text and image_url (or video_url) parts only")
                 if part["type"] == "text" and not isinstance(part.get("text"), str):
                     raise RequestError("a text content part must contain a text string")
             out.append({**message, "content": list(content)})

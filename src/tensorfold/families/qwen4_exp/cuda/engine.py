@@ -140,7 +140,7 @@ class FlashNextEngine:
             self.vision = QwenCudaVision(model_dir, torch.device("cuda", 0),
                                          allow_urls=vision_urls)
             torch.cuda.empty_cache()
-            print(f"[tensorfold] vision: image input, a "
+            print(f"[tensorfold] vision: image{' and video' if self.vision.videos else ''} input, a "
                   f"{self.vision.weight_bytes / 2**30:.2f} GiB tower with {vision_workspace() / 2**30:.2f} GiB of "
                   f"workspace reserved{'; https URLs allowed' if vision_urls else ''}", flush=True)
         # ``streams`` > 1: up to that many requests decoded together, every stream's chain in one forward

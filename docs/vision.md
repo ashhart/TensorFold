@@ -63,6 +63,26 @@ For a local image, send a data URL as above.
 `stream: true` uses the usual text completion stream.
 Image output is not generated.
 
+## Send a video
+
+Flash Next on CUDA (`--vision`, `--parallel` of at least two) also takes `video_url` parts in user messages, as
+MP4, WebM, MOV or MKV data URLs (or public HTTPS URLs with `--vision-urls`); decoding needs PyAV (`pip install av`,
+part of the `vision` extra on Linux):
+
+```json
+{"role": "user", "content": [
+  {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,..."}},
+  {"type": "text", "text": "What happens in this clip?"}]}
+```
+
+Frames are sampled as Qwen3-VL's processor does: two a second spread over the whole video, at least 4 and at most
+256, each pair of frames one block that the prompt prefixes with its time (`<1.5 seconds>`). Frames are sized so a
+video takes at most 768 tokens a block and 16,384 in all (`TENSORFOLD_VIDEO_TOKENS`). The tower encodes a run of
+blocks of at most 16,384 patches at a time, the scratch one full-size image needs, and blocks never attend to one
+another. A request takes up to two videos of 16 MiB each, 20 MiB in all, so the base64 still fits the 32 MiB
+request body, and up to an hour of footage. Videos and images can share a message; the image limits count images
+only.
+
 ## Limits and state
 
 Requests accept up to four JPEG, PNG or WebP images by default. `--vision-max-images N` sets a positive
