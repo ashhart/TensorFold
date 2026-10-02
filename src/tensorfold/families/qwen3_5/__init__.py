@@ -72,12 +72,13 @@ def load_lane_model(model_dir: Path) -> tuple[Any, Any]:
 
 
 def install_row_decoder(model: Any) -> bool:
-    """Install row-exact simd_qmm decoding without tensor units, returning False for unsupported weights."""
+    """Install row-exact decoding without tensor units (simd_qmm, or plain matmul on unquantized weights)."""
 
     from tensorfold.kernels.qwen.dense.v1 import exact_attention, row_forward, row_matmul
 
-    backend = row_matmul.simd_qmm_backend()
-    if not row_matmul.fits(model, backend):
+    plain = row_matmul.plain_fits(model)
+    backend = row_matmul.plain_backend() if plain else row_matmul.simd_qmm_backend()
+    if not plain and not row_matmul.fits(model, backend):
         return False
     exact_attention.install()
     # prompt chains of up to PROMPT_ROWS attend query by query too, so a prompt gets the bits decoding gives it
