@@ -426,6 +426,7 @@ class Runner:
         while not done:
             tr = time.perf_counter()
             rounds += 1
+            self.profiler.begin()
             room = max(0, min(depth_max, max_tokens - len(out) - 1, self.capacity - P - 1))
             drafts = dr.propose(tok, room, sampling, conf) if room else []
             ta = time.perf_counter()
@@ -466,6 +467,7 @@ class Runner:
                     done = True
                     break
             P, tok = P + n + 1, emit[-1]
+            self.profiler.end()
             round_ms.append(1e3 * (time.perf_counter() - tr))
         torch.cuda.synchronize()
         dec = time.perf_counter() - t1
