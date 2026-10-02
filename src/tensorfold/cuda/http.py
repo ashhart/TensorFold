@@ -125,12 +125,34 @@ def make_handler(app: App):
             if self._authorized():
                 responses.delete(self, app, responses.route(self.path))
 
+        def _tokenize(self) -> None:
+            """vLLM's /tokenize: ``messages`` (rendered as the chat route renders them) or ``prompt`` -> token ids,
+            their ``count`` and ``max_model_len``."""
+
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}") if 0 <= length <= 32 * 1024**2 else None
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+                body = None
+            if not isinstance(body, dict) or ("messages" not in body and "prompt" not in body):
+                self.close_connection = True
+                return self._json(400, {"error": {"message": "/tokenize takes a JSON body with messages or prompt",
+                                                  "type": "invalid_request_error"}})
+            try:
+                prepared = app._prepare(dict(body), "messages" in body)
+            except RequestError as exc:
+                return self._json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
+            self._json(200, {"count": len(prepared.prompt), "tokens": list(prepared.prompt),
+                             "max_model_len": app.effective_context_window})
+
         def do_POST(self):
             if not self._authorized():
                 return
             path = self.path.split("?", 1)[0].rstrip("/")
             if path.endswith("/decisions"):
                 return self._post_decisions()
+            if path in ("/tokenize", "/v1/tokenize"):
+                return self._tokenize()
             if responses.route(self.path) == "":         # a Response: this handler's chat completion, translated
                 return responses.post(self, app)
             chat = self.path.rstrip("/").endswith("/chat/completions")

@@ -43,3 +43,12 @@ def test_no_server_key_means_open_routes(tmp_path):
     app = app_for(tmp_path, PacedEngine())
     with serving(app) as port:
         assert call(port, "GET", "/v1/models")[0] == 200
+
+
+def test_tokenize_counts_the_rendered_prompt(tmp_path):
+    app = app_for(tmp_path, PacedEngine())
+    with serving(app) as port:
+        status, body = call(port, "POST", "/tokenize", {"messages": MESSAGES, "add_generation_prompt": True})
+        assert status == 200 and body["count"] == len(body["tokens"]) > 0
+        assert call(port, "POST", "/v1/tokenize", {"prompt": "hello"})[0] == 200
+        assert call(port, "POST", "/tokenize", {})[0] == 400
