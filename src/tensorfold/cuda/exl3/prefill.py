@@ -44,19 +44,66 @@ def _gemm(X, W, H, SVH, BIAS, OUT, M, o_stride, K: tl.constexpr, N: tl.constexpr
     tl.store(OUT + rm[:, None] * o_stride + rn[None, :], y.to(OUT.dtype.element_ty), mask=ok[:, None])
 
 
+# Measured on GB10 (sm_121) at 2048 rows, each bit-identical to the default (the K loop accumulates in the same order):
+# full GLM-5.3's dense prompt shapes per rank at TP=4 (tests/cuda/tune_exl3_prefill_tiles.py).
+_TUNED = {
+    (2048, 4096): (128, 64, 8, 4, 8),     # 3.00x
+    (6144, 3072): (64, 64, 8, 4, 8),      # 2.54x
+    (3072, 6144): (128, 64, 8, 3, 8),     # 1.45x
+    (6144, 512): (64, 64, 4, 4, 8),       # 1.39x
+    (6144, 640): (128, 64, 8, 4, 8),      # 1.10x
+    (6144, 2048): (128, 64, 8, 4, 8),     # 1.08x
+    (512, 6144): (128, 64, 8, 4, 8),      # 1.04x
+    (4096, 6144): (128, 64, 8, 3, 8),     # 1.02x
+}
+
+
 def tiles(k: int, n: int) -> tuple[int, int, int, int, int]:
     """(rows a program, K step, warps, stages, row blocks a raster group): the shape's alone, so a row never depends on its chunk."""
 
-    return 128, 32, 8, 4, 8
+    return _TUNED.get((k, n), (128, 32, 8, 4, 8))
+
+
+class UnpackCache:
+    """Decoded W_q kept per layer for the next calls (e.g. the second micro-batch of a prompt chunk), least recently
+    used out first past ``nbytes``. The weights never change, so a kept copy is the unpack's own bits; workspaces that
+    share one must run on one stream (stream order keeps an evicted buffer's readers before its reuse)."""
+
+    def __init__(self, nbytes: int) -> None:
+        from collections import OrderedDict
+
+        self.limit, self.used, self.kept = nbytes, 0, OrderedDict()
+
+    def get(self, layer, device) -> torch.Tensor:
+        import weakref
+
+        key = id(layer)                  # ids come back once a layer is freed: an entry counts only for its own layer
+        hit = self.kept.get(key)
+        if hit is not None and hit[0]() is layer:
+            self.kept.move_to_end(key)
+            return hit[1]
+        if hit is not None:                                    # a freed layer's entry under a reused id
+            del self.kept[key]
+            self.used -= hit[1].numel() * 2
+        t = torch.empty((layer.k, layer.n), dtype=torch.float16, device=device)
+        _ext().unpack(layer.words, t, *layer.strides, layer.k2, CODEBOOK_IDS[layer.codebook])
+        self.kept[key] = (weakref.ref(layer), t)
+        self.used += t.numel() * 2
+        while self.used > self.limit and len(self.kept) > 1:
+            _, (_, old) = self.kept.popitem(last=False)
+            self.used -= old.numel() * 2
+        return t
 
 
 class Workspace:
-    """One decoded W_q and one rotated input, grown to the largest call and reused (calls run in order on one stream)."""
+    """One decoded W_q and one rotated input, grown to the largest call and reused (calls run in order on one stream).
+    ``cache``: an UnpackCache shared with other workspaces on the same stream (decoded weights reused across calls)."""
 
-    def __init__(self) -> None:
+    def __init__(self, cache: "UnpackCache | None" = None) -> None:
         self.w: torch.Tensor | None = None
         self.xh: torch.Tensor | None = None
         self.h: torch.Tensor | None = None
+        self.cache = cache
 
     def _grow(self, name: str, numel: int, device) -> torch.Tensor:
         t = getattr(self, name)
@@ -84,9 +131,12 @@ def matmul(layer: Exl3Linear, x: torch.Tensor, out: torch.Tensor, ws: Workspace)
         raise ValueError(f"prefill matmul: x {tuple(x.shape)} and out {tuple(out.shape)} do not match K={k}, N={n}")
     ext = _ext()
     xh = ws._grow("xh", m * k, x.device)[:m * k].view(m, k)
-    ext.rot_in(x.contiguous(), layer.suh, xh)
-    wq = ws._grow("w", k * n, x.device)[:k * n].view(k, n)
-    ext.unpack(layer.words, wq, *layer.strides, layer.k2, CODEBOOK_IDS[layer.codebook])
+    ext.rot_in(x.contiguous(), [layer.suh], [xh], 0)
+    if ws.cache is not None:
+        wq = ws.cache.get(layer, x.device)
+    else:
+        wq = ws._grow("w", k * n, x.device)[:k * n].view(k, n)
+        ext.unpack(layer.words, wq, *layer.strides, layer.k2, CODEBOOK_IDS[layer.codebook])
     bm, bk, warps, stages, group = tiles(k, n)
     bias = layer.bias if layer.bias is not None else layer.svh
     _gemm[(triton.cdiv(m, bm) * (n // BN),)](xh, wq, ws.hadamard(x.device), layer.svh, bias, out, m, out.stride(0),

@@ -107,10 +107,28 @@ __device__ __forceinline__ void step_lane_words(const uint32_t (&raw)[step_regs<
     }
 }
 
-__global__ void __launch_bounds__(128) rot_in_kernel(const void* __restrict__ x, int x_dtype,
-                                                     const half* __restrict__ suh, half* __restrict__ xh, int K) {
+// Programmatic dependent launch (a no-op when the launch did not ask for it): wait for the previous kernel's writes;
+// let the next PDL kernel launch (it still waits for all of this one before it reads anything this one writes).
+__device__ __forceinline__ void griddep_wait() { asm volatile("griddepcontrol.wait;" ::: "memory"); }
+__device__ __forceinline__ void griddep_launch() { asm volatile("griddepcontrol.launch_dependents;" ::: "memory"); }
+
+constexpr int MAX_JOBS = 3;    // layers of one input in one launch (rot_in_group / linear_group)
+
+struct RotJobs {
+    const half* suh[MAX_JOBS];
+    half* xh[MAX_JOBS];
+};
+
+// xh_j = fp16(((x * suh_j) @ H) / sqrt(128)) for job j = blockIdx.z (the layers of one input share x).
+__global__ void __launch_bounds__(128) rot_in_kernel(const void* __restrict__ x, int x_dtype, RotJobs jobs, int K) {
+    griddep_wait();                                  // x is the previous kernel's, and xh may be read by one still
+    griddep_launch();
     const int blk = blockIdx.x * 4 + (threadIdx.x >> 5), row = blockIdx.y, lane = threadIdx.x & 31;
     if (blk * 128 >= K) return;
+    const half* suh = jobs.suh[0];
+    half* xh = jobs.xh[0];
+    if (blockIdx.z == 1) suh = jobs.suh[1], xh = jobs.xh[1];
+    if (blockIdx.z == 2) suh = jobs.suh[2], xh = jobs.xh[2];
     const int k = blk * 128 + 4 * lane;
     float v[4], s[4];
     load4(x, x_dtype, (size_t)row * K + k, v);
@@ -123,18 +141,78 @@ __global__ void __launch_bounds__(128) rot_in_kernel(const void* __restrict__ x,
     store4(xh, F16, (size_t)row * K + k, v);
 }
 
-template <int K2, int CB, int WK>
+// One layer of a launch: its blocks are [start, start + (N / 128) * SK) of the grid, split-major like a (N / 128, SK)
+// grid. All layers of a launch share M, K, the width, codebook and warps a block; each keeps its own K splits.
+struct Job {
+    const half* xh;
+    const uint32_t* T;
+    long long stride_k, stride_nb;
+    const half* svh;
+    const half* bias;
+    void* y;
+    float* Z;
+    int* counters;
+    int y_dtype, N, SK, start;
+};
+
+struct Jobs {
+    Job j[MAX_JOBS];
+    int n;
+};
+
+// G = 0: the original walk, the window's rows as the mma's A (m16: rows g and g + 8 of 16, so 2 mma a tile and 64
+// accumulators whatever the rows) and the decoded tile as B. G = 1, 2 ("transposed"): the decoded tile as A (its 16
+// columns as m16; the B fragments decode_lane makes are the A fragment of W^T as they stand) and G groups of 8 rows as
+// B (n8): one mma a tile and 32 accumulators for up to 8 rows. Every output is the same dot product over the same k
+// steps; mma.m16n8k16 gives D[i][j] of A @ B and (B^T @ A^T)[j][i] the same bits (checked on sm_121 by
+// tests/cuda/test_exl3_linear_loads.py against G = 0), and the sums after it are unchanged, so G only moves work.
+// G > 0 also loads the next k step's rows of x a step ahead.
+// V (G > 0, 3 to 6 bits): a k step's words (contiguous in both layouts) come as 16-byte non-coherent loads (whole
+// 128-byte lines a warp instruction, instead of a lane's 32-bit words), V steps ahead, through a per-warp staging area in
+// shared memory the lanes read their words of each tile back from (only V = 1 is launched: deeper measured no faster).
+template <int K2>
+__host__ __device__ constexpr bool vec_ok() {
+    return !step_shuffled<K2>() && K2 <= 12;
+}
+template <int K2>
+__host__ __device__ constexpr int step_words() {
+    return 8 * tile_words<K2>();
+}
+
+__device__ __forceinline__ uint4 ldg_nc_v4(const uint32_t* p) {
+    uint4 v;
+    asm volatile("ld.global.nc.L1::no_allocate.v4.u32 {%0,%1,%2,%3}, [%4];"
+                 : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w)
+                 : "l"(p));
+    return v;
+}
+
+template <int K2, int CB, int WK, int G, int V>
 __global__ void __launch_bounds__(WK * 32) linear_kernel(
-    const half* __restrict__ xh, const uint32_t* __restrict__ T, long long stride_k, long long stride_nb,
-    const half* __restrict__ svh, const half* __restrict__ bias, void* __restrict__ y, int y_dtype,
-    float* __restrict__ Z, int* __restrict__ counters, int M, int K, int N, int SK) {
+    const __grid_constant__ Jobs jobs, int M, int K) {
     constexpr int TW = tile_words<K2>();
     constexpr int LW = lane_words<K2>();
+    constexpr int NH = G == 0 ? 2 : G;                        // mma a tile
     extern __shared__ __align__(16) float red[];              // WK * RH * 128 floats
     __shared__ int last;
     const int RH = min(M, 8);                                 // rows of red a warp
+    griddep_launch();                                         // a PDL successor may launch (it waits for all of this)
 
-    const int nb = blockIdx.x, split = blockIdx.y, NB = gridDim.x;
+    int ji = 0;
+#pragma unroll
+    for (int q = 1; q < MAX_JOBS; ++q)
+        if (q < jobs.n && (int)blockIdx.x >= jobs.j[q].start) ji = q;
+    const Job& J = jobs.j[ji];
+    const half* __restrict__ xh = J.xh;
+    const uint32_t* __restrict__ T = J.T;
+    const long long stride_k = J.stride_k, stride_nb = J.stride_nb;
+    const half* __restrict__ svh = J.svh;
+    const half* __restrict__ bias = J.bias;
+    void* __restrict__ y = J.y;
+    float* __restrict__ Z = J.Z;
+    int* __restrict__ counters = J.counters;
+    const int y_dtype = J.y_dtype, N = J.N, SK = J.SK, NB = N >> 7;
+    const int local = (int)blockIdx.x - J.start, nb = local % NB, split = local / NB;
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int g = lane >> 2, t = lane & 3;
     const int per_warp = (K >> 4) / SK / WK;
@@ -151,11 +229,11 @@ __global__ void __launch_bounds__(WK * 32) linear_kernel(
     for (int m0 = 0, pass = 0; m0 < M; m0 += 16, ++pass) {
         const int R = min(16, M - m0);
 
-        float acc[8][2][4];
+        float acc[8][NH][4];
 #pragma unroll
         for (int i = 0; i < 8; ++i)
 #pragma unroll
-            for (int h = 0; h < 2; ++h)
+            for (int h = 0; h < NH; ++h)
 #pragma unroll
                 for (int c = 0; c < 4; ++c) acc[i][h][c] = 0.f;
 
@@ -165,34 +243,90 @@ __global__ void __launch_bounds__(WK * 32) linear_kernel(
         const half* x1 = xh + (size_t)r1 * K;
         const uint32_t* tile = tiles + (size_t)kt0 * stride_k;
         // up to 6 bits the next k step's words are loaded while this one is decoded; 7 and 8 bits load per tile
-        constexpr bool PF = K2 <= 12;
+        constexpr bool PF = K2 <= 12 && V == 0;
         constexpr int SR = step_regs<K2>();
         uint32_t cur[PF ? SR : 1], nxt[PF ? SR : 1];
-        if constexpr (PF) load_step<K2>(tile, lane, cur);
+        if constexpr (PF) load_step<K2>(tile, lane, cur);   // the weights do not wait for the previous kernel
+        constexpr int SW = step_words<K2>(), CH = SW / 4, NV = V ? (CH + 31) / 32 : 1;   // 16-byte pieces of a step
+        uint4 vq[V + 1][NV];                         // V > 0: steps i .. i + V, step i in vq[0]
+        uint32_t* stage = reinterpret_cast<uint32_t*>(red) + warp * SW;
+        auto load_vec = [&](const uint32_t* step, uint4 (&v)[NV]) {
+#pragma unroll
+            for (int c = 0; c < NV; ++c)
+                if (CH % 32 == 0 || c * 32 + lane < CH) v[c] = ldg_nc_v4(step + 4 * (c * 32 + lane));
+        };
+        if constexpr (V > 0) {
+#pragma unroll
+            for (int d = 0; d < V; ++d)
+                if (d < per_warp) load_vec(tile + (size_t)d * stride_k, vq[d]);
+        }
+        if (pass == 0) griddep_wait();                       // x (and Z, y, counters) may be the previous kernel's
+
+        // x's fragments of k step kt: rows g (and g + 8): [0] [2] k 2t.., 2t + 8..; [1] [3] the same of row g + 8
+        auto load_x = [&](int kt, uint32_t (&a)[4]) {
+            a[0] = __ldg(reinterpret_cast<const uint32_t*>(x0 + kt * 16 + 2 * t));
+            a[2] = __ldg(reinterpret_cast<const uint32_t*>(x0 + kt * 16 + 2 * t + 8));
+            if (G != 1) {
+                a[1] = __ldg(reinterpret_cast<const uint32_t*>(x1 + kt * 16 + 2 * t));
+                a[3] = __ldg(reinterpret_cast<const uint32_t*>(x1 + kt * 16 + 2 * t + 8));
+            } else {
+                a[1] = a[3] = 0u;
+            }
+        };
+        uint32_t an[4];
+        if constexpr (G > 0) load_x(kt0, an);
 #pragma unroll 1
         for (int i = 0; i < per_warp; ++i) {
             const int kt = kt0 + i;
             uint32_t a[4];
-            a[0] = __ldg(reinterpret_cast<const uint32_t*>(x0 + kt * 16 + 2 * t));
-            a[1] = __ldg(reinterpret_cast<const uint32_t*>(x1 + kt * 16 + 2 * t));
-            a[2] = __ldg(reinterpret_cast<const uint32_t*>(x0 + kt * 16 + 2 * t + 8));
-            a[3] = __ldg(reinterpret_cast<const uint32_t*>(x1 + kt * 16 + 2 * t + 8));
+            if constexpr (G > 0) {
+#pragma unroll
+                for (int c = 0; c < 4; ++c) a[c] = an[c];
+                load_x(i + 1 < per_warp ? kt + 1 : kt, an);
+            } else {
+                load_x(kt, a);
+            }
             if constexpr (PF) {
                 if (i + 1 < per_warp) load_step<K2>(tile + (size_t)(i + 1) * stride_k, lane, nxt);
+            }
+            if constexpr (V > 0) {
+                __syncwarp();                        // every lane has read the previous step back
+#pragma unroll
+                for (int c = 0; c < NV; ++c)
+                    if (CH % 32 == 0 || c * 32 + lane < CH)
+                        *reinterpret_cast<uint4*>(stage + 4 * (c * 32 + lane)) = vq[0][c];
+                if (i + V < per_warp) load_vec(tile + (size_t)(i + V) * stride_k, vq[V]);
+                __syncwarp();
             }
 #pragma unroll
             for (int j = 0; j < 8; ++j) {
                 uint32_t w[LW];
-                if constexpr (PF) step_lane_words<K2>(cur, j, lane, prev, w);
+                if constexpr (V > 0) load_lane_words<K2>(stage + j * TW, lane, w);
+                else if constexpr (PF) step_lane_words<K2>(cur, j, lane, prev, w);
                 else ldg_lane_words<K2>(tile + (size_t)i * stride_k + j * TW, lane, w);
                 uint32_t b0[2], b1[2];
                 decode_lane<K2, CB>(w, lane, b0, b1);
-                mma16816(acc[j][0], a, b0);
-                mma16816(acc[j][1], a, b1);
+                if constexpr (G == 0) {
+                    mma16816(acc[j][0], a, b0);
+                    mma16816(acc[j][1], a, b1);
+                } else {
+                    const uint32_t wa[4] = {b0[0], b1[0], b0[1], b1[1]};   // W^T: columns g, g + 8; k 2t.., 2t + 8..
+#pragma unroll
+                    for (int q = 0; q < G; ++q) {
+                        const uint32_t xb[2] = {a[q], a[q + 2]};             // rows 8q + g; k 2t.., 2t + 8..
+                        mma16816(acc[j][q], wa, xb);
+                    }
+                }
             }
             if constexpr (PF) {
 #pragma unroll
                 for (int q = 0; q < SR; ++q) cur[q] = nxt[q];
+            }
+            if constexpr (V > 0) {
+#pragma unroll
+                for (int d = 0; d < V; ++d)
+#pragma unroll
+                    for (int c = 0; c < NV; ++c) vq[d][c] = vq[d + 1][c];
             }
         }
 
@@ -200,15 +334,35 @@ __global__ void __launch_bounds__(WK * 32) linear_kernel(
         for (int rlo = 0; rlo < R; rlo += 8) {
             const int rn = min(R - rlo, 8);
             __syncthreads();                         // red is reused by every half and pass
-            if (g < RH) {
+            if constexpr (G == 0) {
+                if (g < RH) {
 #pragma unroll
-                for (int i = 0; i < 8; ++i)
+                    for (int i = 0; i < 8; ++i)
 #pragma unroll
-                    for (int h = 0; h < 2; ++h) {
-                        const int col = i * 16 + h * 8 + 2 * t;
-                        *reinterpret_cast<float2*>(red + (warp * RH + g) * 128 + col) =
-                            rlo ? make_float2(acc[i][h][2], acc[i][h][3]) : make_float2(acc[i][h][0], acc[i][h][1]);
+                        for (int h = 0; h < 2; ++h) {
+                            const int col = i * 16 + h * 8 + 2 * t;
+                            *reinterpret_cast<float2*>(red + (warp * RH + g) * 128 + col) =
+                                rlo ? make_float2(acc[i][h][2], acc[i][h][3])
+                                    : make_float2(acc[i][h][0], acc[i][h][1]);
+                        }
+                }
+            } else {
+                // acc[i][q]: column 16 i + g (+ 8 in [2] [3]), rows 8q + 2t ([0] [2]) and 8q + 2t + 1 ([1] [3])
+#pragma unroll
+                for (int q = 0; q < G; ++q) {
+                    if (q * 8 != rlo) continue;
+#pragma unroll
+                    for (int e = 0; e < 2; ++e) {
+                        const int r = 2 * t + e;
+                        if (r < RH) {
+#pragma unroll
+                            for (int i = 0; i < 8; ++i) {
+                                red[(warp * RH + r) * 128 + i * 16 + g] = acc[i][q][e];
+                                red[(warp * RH + r) * 128 + i * 16 + g + 8] = acc[i][q][2 + e];
+                            }
+                        }
                     }
+                }
             }
             __syncthreads();
 
@@ -289,39 +443,112 @@ int dtype_of(const at::Tensor& t) {
 #define TF_EXL3_WIDTHS(X, CB) X(2, CB) X(4, CB) X(6, CB) X(8, CB) X(10, CB) X(12, CB) X(14, CB) X(16, CB)
 #define TF_EXL3_ALL(X) TF_EXL3_WIDTHS(X, 0) TF_EXL3_WIDTHS(X, 1) TF_EXL3_WIDTHS(X, 2) X(3, 2) X(5, 2) X(7, 2)
 
-void exl3_rot_in_cuda(const at::Tensor& x, const at::Tensor& suh, at::Tensor& xh) {
-    const int M = (int)x.size(0), K = (int)x.size(1);
-    dim3 grid((unsigned)((K / 128 + 3) / 4), (unsigned)M);
-    rot_in_kernel<<<grid, 128, 0, at::cuda::getCurrentCUDAStream()>>>(
-        x.data_ptr(), dtype_of(x), reinterpret_cast<const half*>(suh.data_ptr()),
-        reinterpret_cast<half*>(xh.data_ptr()), K);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+static void launch_pdl(cudaLaunchConfig_t& config, bool pdl, cudaLaunchAttribute (&attr)[1]) {
+    attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    attr[0].val.programmaticStreamSerializationAllowed = pdl ? 1 : 0;
+    config.attrs = attr;
+    config.numAttrs = 1;
 }
 
-void exl3_linear_cuda(const at::Tensor& xh, const at::Tensor& T, int64_t stride_k, int64_t stride_nb,
-                      const at::Tensor& svh, const c10::optional<at::Tensor>& bias, at::Tensor& y,
-                      const c10::optional<at::Tensor>& Z, at::Tensor& counters, int64_t K2, int64_t cb, int64_t SK,
-                      int64_t WK) {
-    const int M = (int)xh.size(0), K = (int)xh.size(1), N = (int)y.size(1);
+void exl3_rot_in_cuda(const at::Tensor& x, const std::vector<at::Tensor>& suh, std::vector<at::Tensor>& xh,
+                      int64_t pdl) {
+    const int M = (int)x.size(0), K = (int)x.size(1), n = (int)suh.size();
+    TORCH_CHECK(n >= 1 && n <= MAX_JOBS && (int)xh.size() == n, "rot_in: 1 to 3 (suh, xh) pairs");
+    RotJobs jobs = {};
+    for (int i = 0; i < n; ++i) {
+        jobs.suh[i] = reinterpret_cast<const half*>(suh[i].data_ptr());
+        jobs.xh[i] = reinterpret_cast<half*>(xh[i].data_ptr());
+    }
+    cudaLaunchConfig_t config = {};
+    config.gridDim = dim3((unsigned)((K / 128 + 3) / 4), (unsigned)M, (unsigned)n);
+    config.blockDim = dim3(128);
+    config.stream = at::cuda::getCurrentCUDAStream();
+    cudaLaunchAttribute attr[1];
+    launch_pdl(config, pdl, attr);
+    C10_CUDA_CHECK(cudaLaunchKernelEx(&config, rot_in_kernel, x.data_ptr(), (int)dtype_of(x), jobs, K));
+}
+
+namespace {
+
+template <int K2, int CB, int WK, int G, int V>
+void launch_wk(const Jobs& jobs, int blocks, cudaStream_t stream, bool pdl, int M, int K) {
+    auto kernel = linear_kernel<K2, CB, WK, G, V>;
+    const int smem = (int)std::max(WK * std::min(M, 8) * 128 * sizeof(float),
+                                   V > 0 ? WK * step_words<K2>() * sizeof(uint32_t) : (size_t)0);
+    if (smem > 48 * 1024) cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+    cudaLaunchConfig_t config = {};
+    config.gridDim = dim3((unsigned)blocks);
+    config.blockDim = dim3((unsigned)(WK * 32));
+    config.dynamicSmemBytes = smem;
+    config.stream = stream;
+    cudaLaunchAttribute attr[1];
+    launch_pdl(config, pdl, attr);
+    C10_CUDA_CHECK(cudaLaunchKernelEx(&config, kernel, jobs, M, K));
+}
+
+template <int K2, int CB, int G, int V = 0>
+void launch_g(const Jobs& jobs, int blocks, cudaStream_t stream, bool pdl, int M, int K, int WK) {
+    if (WK == 2) launch_wk<K2, CB, 2, G, V>(jobs, blocks, stream, pdl, M, K);
+    else if (WK == 4) launch_wk<K2, CB, 4, G, V>(jobs, blocks, stream, pdl, M, K);
+    else launch_wk<K2, CB, 8, G, V>(jobs, blocks, stream, pdl, M, K);
+}
+
+// loads & 1: the transposed walk (G = 1 up to 8 rows, else 2), else the original (G = 0); loads & 2 (with 1): 16-byte
+// weight loads a step ahead (V = 1, 3 to 6 bits); loads & 32: PDL launch. No choice changes a bit of any output.
+template <int K2, int CB>
+void launch(const Jobs& jobs, int blocks, cudaStream_t stream, int M, int K, int WK, int loads) {
+    const bool pdl = loads & 32;
+    if (!(loads & 1))
+        launch_g<K2, CB, 0>(jobs, blocks, stream, pdl, M, K, WK);
+    else if (vec_ok<K2>() && (loads & 2)) {
+        if (M <= 8)
+            launch_g<K2, CB, 1, vec_ok<K2>()>(jobs, blocks, stream, pdl, M, K, WK);
+        else
+            launch_g<K2, CB, 2, vec_ok<K2>()>(jobs, blocks, stream, pdl, M, K, WK);
+    } else if (M <= 8)
+        launch_g<K2, CB, 1>(jobs, blocks, stream, pdl, M, K, WK);
+    else
+        launch_g<K2, CB, 2>(jobs, blocks, stream, pdl, M, K, WK);
+}
+
+}  // namespace
+
+void exl3_linear_cuda(const std::vector<at::Tensor>& xh, const std::vector<at::Tensor>& T,
+                      const std::vector<int64_t>& stride_k, const std::vector<int64_t>& stride_nb,
+                      const std::vector<at::Tensor>& svh, const std::vector<at::Tensor>& bias,
+                      std::vector<at::Tensor>& y, const std::vector<at::Tensor>& Z, std::vector<at::Tensor>& counters,
+                      int64_t K2, int64_t cb, const std::vector<int64_t>& SK, int64_t WK, int64_t loads) {
+    const int n = (int)xh.size();
+    const int M = (int)xh[0].size(0), K = (int)xh[0].size(1);
     TORCH_CHECK(WK == 2 || WK == 4 || WK == 8, "WK must be 2, 4 or 8");
-    TORCH_CHECK((K / 16) % (SK * WK) == 0, "K / 16 must split evenly over SK * WK warps");
-    dim3 grid((unsigned)(N / 128), (unsigned)SK);
+    Jobs jobs = {};
+    jobs.n = n;
+    int blocks = 0;
+    for (int i = 0; i < n; ++i) {
+        const int N = (int)y[i].size(1);
+        TORCH_CHECK((K / 16) % (SK[i] * WK) == 0, "K / 16 must split evenly over SK * WK warps");
+        TORCH_CHECK(SK[i] == 1 || Z[i].numel() > 0, "Z is needed with more than one split");
+        Job& J = jobs.j[i];
+        J.xh = reinterpret_cast<const half*>(xh[i].data_ptr());
+        J.T = reinterpret_cast<const uint32_t*>(T[i].data_ptr());
+        J.stride_k = stride_k[i];
+        J.stride_nb = stride_nb[i];
+        J.svh = reinterpret_cast<const half*>(svh[i].data_ptr());
+        J.bias = bias[i].numel() ? reinterpret_cast<const half*>(bias[i].data_ptr()) : nullptr;
+        J.y = y[i].data_ptr();
+        J.y_dtype = dtype_of(y[i]);
+        J.Z = Z[i].numel() ? Z[i].data_ptr<float>() : nullptr;
+        J.counters = counters[i].data_ptr<int>();
+        J.N = N;
+        J.SK = (int)SK[i];
+        J.start = blocks;
+        blocks += (N / 128) * (int)SK[i];
+    }
     auto stream = at::cuda::getCurrentCUDAStream();
-    const half* bptr = bias ? reinterpret_cast<const half*>(bias->data_ptr()) : nullptr;
-    float* zptr = Z ? Z->data_ptr<float>() : nullptr;
-    TORCH_CHECK(SK == 1 || zptr, "Z is needed with more than one split");
-#define TF_LAUNCH(K2_, CB_)                                                                                        \
-    if (K2 == K2_ && cb == CB_) {                                                                               \
-        auto kernel = WK == 2 ? linear_kernel<K2_, CB_, 2>                                                      \
-                              : WK == 4 ? linear_kernel<K2_, CB_, 4> : linear_kernel<K2_, CB_, 8>;              \
-        const int smem = (int)(WK * std::min(M, 8) * 128 * sizeof(float));                                \
-        if (smem > 48 * 1024) cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); \
-        kernel<<<grid, (unsigned)(WK * 32), smem, stream>>>(                                              \
-            reinterpret_cast<const half*>(xh.data_ptr()), reinterpret_cast<const uint32_t*>(T.data_ptr()),      \
-            stride_k, stride_nb, reinterpret_cast<const half*>(svh.data_ptr()), bptr, y.data_ptr(), dtype_of(y),\
-            zptr, counters.data_ptr<int>(), M, K, N, (int)SK);                                                  \
-        C10_CUDA_KERNEL_LAUNCH_CHECK();                                                                         \
-        return;                                                                                                 \
+#define TF_LAUNCH(K2_, CB_)                                                     \
+    if (K2 == K2_ && cb == CB_) {                                            \
+        launch<K2_, CB_>(jobs, blocks, stream, M, K, (int)WK, (int)loads);   \
+        return;                                                              \
     }
     TF_EXL3_ALL(TF_LAUNCH)
 #undef TF_LAUNCH
