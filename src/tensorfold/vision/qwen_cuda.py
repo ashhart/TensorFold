@@ -36,7 +36,7 @@ class EncodedVision:
 def vision_config(model_dir: str | Path) -> dict:
     raw = json.loads((Path(model_dir) / "config.json").read_text())
     config = raw.get("vision_config")
-    if not isinstance(config, dict) or config.get("model_type") not in ("qwen3_5", "qwen4_exp"):
+    if not isinstance(config, dict) or config.get("model_type") not in ("qwen3_5", "qwen3_5_vision", "qwen4_exp"):
         raise ValueError("CUDA vision requires a Qwen3.5-compatible vision checkpoint")
     if config.get("deepstack_visual_indexes"):
         raise ValueError("CUDA Qwen vision does not support deepstack image features")
@@ -68,18 +68,60 @@ def _vision_sources(model_dir):
     return vision_tensors(Path(model_dir), weights_path=Path(override) if override else None)
 
 
+def _quantized_vision_modules(raw: dict, config: dict) -> dict[str, tuple[str, int]]:
+    """Restituisce solo le proiezioni miste MIA Qwen3.8 esplicitamente descritte nel config."""
+    block = raw.get("quantization_config") or (raw.get("text_config") or {}).get("quantization_config") or {}
+    groups = block.get("config_groups") or {}
+    visual_groups = {
+        name: (group, {target.removeprefix("model.visual.") for target in group.get("targets", [])
+                       if isinstance(target, str) and target.startswith("model.visual.")})
+        for name, group in groups.items() if isinstance(group, dict)
+    }
+    visual_groups = {name: (group, targets) for name, (group, targets) in visual_groups.items() if targets}
+    if not visual_groups:
+        return {}
+    if block.get("quant_method") != "modelopt" or block.get("quant_algo") != "MIXED_PRECISION":
+        raise ValueError("CUDA vision supports only the validated MIA ModelOpt mixed-precision layout")
+
+    depth = config["depth"]
+    expected_mxfp8 = {f"blocks.{i}.{part}" for i in range(depth)
+                      for part in ("attn.qkv", "attn.proj", "mlp.linear_fc1")}
+    expected_mxfp8.update(("merger.linear_fc1", "merger.linear_fc2"))
+    expected_nvfp4 = {f"blocks.{i}.mlp.linear_fc2" for i in range(depth)}
+    expected = {"group_mxfp8_vision": (expected_mxfp8, "mxfp8", 32, 8),
+                "group_w4a16_nvfp4_vision_fc2": (expected_nvfp4, "nvfp4", 16, 4)}
+    if set(visual_groups) != set(expected):
+        raise ValueError("ModelOpt vision quantization groups differ from the validated MIA MXFP8/NVFP4 layout")
+
+    result = {}
+    for name, (targets, scheme, group_size, bits) in expected.items():
+        group, actual_targets = visual_groups[name]
+        weights = group.get("weights") or {}
+        if (actual_targets != targets or weights.get("num_bits") != bits
+                or weights.get("group_size") != group_size or weights.get("type") != "float"):
+            raise ValueError(f"ModelOpt vision group {name} has unexpected targets or parameters")
+        for module in targets:
+            result[module] = (scheme, group_size)
+    return result
+
+
 def checkpoint_vision(model_dir: str | Path) -> tuple[dict, int]:
     """Validate vision tensor headers before any model or accelerator allocation."""
     from tensorfold.cuda.capacity import SIZES
+    model_dir = Path(model_dir)
+    raw = json.loads((model_dir / "config.json").read_text())
     config = vision_config(model_dir)
+    quantized = _quantized_vision_modules(raw, config)
     sources = _vision_sources(model_dir)
     tensors = {k: value[1] for k, value in sources.items()}
     for name, (path, info, begin) in sources.items():
         shape, offsets = info.get("shape", ()), info.get("data_offsets", ())
-        if (info.get("dtype") not in {"BF16", "F16", "F32"} or not shape
+        dtype, itemsize = info.get("dtype"), SIZES.get(info.get("dtype"))
+        scalar_scale = name.endswith(".weight_scale_2")
+        if (itemsize is None or (not shape and not scalar_scale)
                 or any(type(d) is not int or d <= 0 for d in shape) or len(offsets) != 2
                 or any(type(d) is not int for d in offsets) or offsets[0] < 0
-                or offsets[1] - offsets[0] != math.prod(shape) * SIZES[info["dtype"]]
+                or offsets[1] < offsets[0] or offsets[1] - offsets[0] != math.prod(shape) * itemsize
                 or begin + offsets[1] > path.stat().st_size):
             raise ValueError(f"invalid or unsupported vision tensor range: {name}")
     h, mid, merged, out = (config["hidden_size"], config["intermediate_size"],
@@ -93,17 +135,44 @@ def checkpoint_vision(model_dir: str | Path) -> tuple[dict, int]:
                                     ("attn.proj", h, h), ("mlp.linear_fc1", mid, h), ("mlp.linear_fc2", h, mid)):
             shapes[f"blocks.{layer}.{part}.weight"] = [width] if inputs is None else [width, inputs]
             shapes[f"blocks.{layer}.{part}.bias"] = [width]
-    if set(tensors) != set(shapes) | {"patch_embed.proj.weight"}:
-        raise ValueError("checkpoint needs the complete unquantized Qwen vision tower; use its original MLX checkpoint")
-    if any(tensors[key]["shape"] != expected for key, expected in shapes.items()):
+    header_shapes = dict(shapes)
+    quantized_keys = set()
+    for module, (scheme, group_size) in quantized.items():
+        weight_key = f"{module}.weight"
+        rows, columns = shapes[weight_key]
+        if columns % group_size:
+            raise ValueError(f"vision projection {module} is not divisible by its quantization group")
+        if scheme == "nvfp4":
+            if columns % 2:
+                raise ValueError(f"NVFP4 projection {module} has an odd input width")
+            header_shapes[weight_key] = [rows, columns // 2]
+            header_shapes[f"{module}.weight_scale"] = [rows, columns // group_size]
+            header_shapes[f"{module}.weight_scale_2"] = []
+            quantized_keys.update((weight_key, f"{module}.weight_scale", f"{module}.weight_scale_2"))
+        else:
+            header_shapes[f"{module}.weight_scale"] = [rows, columns // group_size]
+            quantized_keys.update((weight_key, f"{module}.weight_scale"))
+    if set(tensors) != set(header_shapes) | {"patch_embed.proj.weight"}:
+        raise ValueError("checkpoint vision tensors differ from the configured Qwen tower")
+    if any(tensors[key]["shape"] != expected for key, expected in header_shapes.items()):
         raise ValueError("vision tensor shapes differ from the checkpoint configuration")
-    if any(v["dtype"] not in {"BF16", "F16", "F32"} for v in tensors.values()):
-        raise ValueError("CUDA vision requires floating-point vision weights")
+    for module, (scheme, _) in quantized.items():
+        if scheme == "nvfp4":
+            expected_types = {f"{module}.weight": "U8", f"{module}.weight_scale": "F8_E4M3",
+                              f"{module}.weight_scale_2": "F32"}
+        else:
+            expected_types = {f"{module}.weight": "F8_E4M3", f"{module}.weight_scale": "U8"}
+        if any(tensors[name]["dtype"] != dtype for name, dtype in expected_types.items()):
+            raise ValueError(f"vision projection {module} has an unsupported quantized storage layout")
+    float_keys = set(tensors) - quantized_keys
+    if any(tensors[key]["dtype"] not in {"BF16", "F16", "F32"} for key in float_keys):
+        raise ValueError("unquantized CUDA vision tensors must use floating-point weights")
     h, p, t, channels = (config[k] for k in ("hidden_size", "patch_size", "temporal_patch_size", "in_channels"))
     shape = tensors["patch_embed.proj.weight"]["shape"]
     if shape not in ([h, t, p, p, channels], [h, channels, t, p, p]):
         raise ValueError("unsupported vision patch convolution layout")
-    return config, sum(math.prod(v["shape"]) * max(2, SIZES[v["dtype"]]) for v in tensors.values())
+    shapes["patch_embed.proj.weight"] = shape
+    return config, sum(math.prod(shape) * 2 for shape in shapes.values())
 
 
 def weight_transform(base, enabled: bool, rank: int):
@@ -113,9 +182,10 @@ def weight_transform(base, enabled: bool, rank: int):
         if enabled and vision_key(name) is not None:
             if rank != 0 or os.environ.get("TENSORFOLD_VISION_WEIGHTS"):
                 return 0, 0
-            from tensorfold.cuda.capacity import SIZES
-
-            return math.prod(info["shape"]) * max(2, SIZES[info["dtype"]]), 0
+            if name.endswith((".weight_scale", ".weight_scale_2")):
+                return 0, 0
+            multiplier = 4 if name.endswith(".weight") and info.get("dtype") == "U8" else 2
+            return math.prod(info["shape"]) * multiplier, 0
         return base(name, info)
     return transform
 
@@ -155,6 +225,7 @@ class QwenCudaVision:
         raw = json.loads((Path(model_dir) / "config.json").read_text())
         self.image_token = int(raw["image_token_id"])
         self.device = device
+        quantized = _quantized_vision_modules(raw, self.config)
         config = Qwen3_5VisionConfig(**{k: v for k, v in self.config.items()
                                       if k not in ("model_type", "deepstack_visual_indexes")})
         config._attn_implementation = "sdpa"
@@ -162,12 +233,39 @@ class QwenCudaVision:
             tower = Qwen3_5VisionModel(config)
         tensors = {}
         by_file = {}
-        for key, (path, info, begin) in _vision_sources(model_dir).items():
+        sources = _vision_sources(model_dir)
+        for key, (path, info, begin) in sources.items():
             by_file.setdefault(path, {})[key] = info
+        quantized_by_file = {}
+        for module, metadata in quantized.items():
+            keys = [f"{module}.weight", f"{module}.weight_scale"]
+            if metadata[0] == "nvfp4":
+                keys.append(f"{module}.weight_scale_2")
+            files = {sources[name][0] for name in keys}
+            if len(files) != 1:
+                raise ValueError(f"quantized vision projection {module} is split across safetensors files")
+            quantized_by_file.setdefault(files.pop(), []).append((module, *metadata))
         for path, selected in by_file.items():
             with safe_open(str(path), framework="pt", device="cpu") as source:
-                names = {vision_key(name): name for name in source.keys()}
+                names = {vision_key(name): name for name in source.keys() if vision_key(name) is not None}
+                handled = set()
+                for module, scheme, group_size in quantized_by_file.get(path, ()):
+                    weight_key, scale_key = f"{module}.weight", f"{module}.weight_scale"
+                    weight = source.get_tensor(names[weight_key])
+                    scale = source.get_tensor(names[scale_key])
+                    scale_2 = source.get_tensor(names[f"{module}.weight_scale_2"]).item() if scheme == "nvfp4" else None
+                    raw_weight = weight.numpy() if weight.dtype == torch.uint8 else weight.view(torch.uint8).numpy()
+                    raw_scale = scale.numpy() if scale.dtype == torch.uint8 else scale.view(torch.uint8).numpy()
+                    from .qwen_quantized import dequantize_linear
+
+                    decoded = dequantize_linear(raw_weight, raw_scale, scale_2, scheme=scheme, group_size=group_size)
+                    tensors[weight_key] = torch.from_numpy(decoded).to(device=device, dtype=torch.bfloat16).contiguous()
+                    handled.update((weight_key, scale_key))
+                    if scheme == "nvfp4":
+                        handled.add(f"{module}.weight_scale_2")
                 for key in selected:
+                    if key in handled or key.endswith((".weight_scale", ".weight_scale_2")):
+                        continue
                     value = source.get_tensor(names[key])
                     if key == "patch_embed.proj.weight" and value.shape[-1] == self.config["in_channels"]:
                         value = value.permute(0, 4, 1, 2, 3).contiguous()
