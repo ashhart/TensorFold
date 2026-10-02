@@ -84,11 +84,7 @@ def normalize_messages(messages: list[dict[str, Any]], *, late_system: str = "sy
 
 
 def _normalize_tool_call_arguments(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Copy tool arguments into mappings for templates, preserving caller messages.
-
-    Failed calls can be replayed with their tool errors. Keep invalid arguments under
-    ``_invalid_arguments`` for rendering instead of letting a template's ``items`` crash.
-    """
+    """Copy tool arguments into mappings for templates; invalid ones go under ``_invalid_arguments``, not a crash."""
 
     if not messages:
         return messages
