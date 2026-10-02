@@ -17,7 +17,7 @@ from tensorfold.server.errors import CONTEXT_LIMIT, RequestError, refusal
 from tensorfold.server.messages import validate_modalities
 from tensorfold.server.probabilities import TokenBytes, probability_options
 from tensorfold.server.request_options import heard_effort, parse_numbers, thinking_fields
-from tensorfold.server.stopping import stop_options
+from tensorfold.server.stopping import matched_stop, stop_options
 from tensorfold.server.token_routes import flag, token_ids
 from tensorfold.server.tool_policy import ToolCallPolicy
 from tensorfold.engine.call_gate import CallGate, ThinkBudget, call_format, generate_gated
@@ -529,7 +529,8 @@ class App:
         final: dict[str, Any] = {}
         if len(reasoning) > sent["reasoning"]:
             final["reasoning_content"] = reasoning[sent["reasoning"]:]
-        text = stops.visible(self.tok.decode([t for t in out if t not in ends], skip_special_tokens=False))
+        raw_text = self.tok.decode([t for t in out if t not in ends], skip_special_tokens=False)
+        text = stops.visible(raw_text)
         raw_answer = split_thinking(text, finished=True)[1] if chat and thinking else text
         content, calls = parse_tool_calls(raw_answer, tools, max_calls=policy.max_calls) if tools else (answer, None)
         content = policy.content(content) if tools else content
@@ -545,6 +546,7 @@ class App:
         # the calls already sent as deltas; the handler sends the rest (a call the streamer could not follow)
         streamed = calls_stream.index + 1 if calls_stream is not None and calls_stream.streamed else 0
         return {"final": final, "calls": calls, "finish": finish, "content": content, "reasoning": reasoning,
+                "stop_sequence": matched_stop(raw_text, stops.strings),
                 **({"logprobs": logprobs} if logprobs is not None else {}),
                 "prompt_tokens": len(prompt), "completion_tokens": len(out), "cached_tokens": (cached or [0])[0],
                 "reasoning_tokens": reasoning_count(out, self.tok.token_to_id("</think>") if chat and thinking else None),
