@@ -55,8 +55,11 @@ class MultiDecoder:
     """The ``tensorfold.cuda.scheduler.Scheduler``'s decoder over ``SerialEngine`` slots (rank 0 or 1 of two)."""
 
     def __init__(self, e: SerialEngine, share: Callable[[list[int] | None], list[int]], *, rank: int,
-                 drafts: int = 3, step: int = MAX_ROWS) -> None:
+                 drafts: int = 3, step: int = MAX_ROWS, pool=None) -> None:
         self.e, self.share, self.rank = e, share, rank
+        # the shared cache pool (``pool.Pool``): each admitted stream gets an extent of it, or (None) its slot's
+        # fixed extent; a request whose extent does not fit waits (NoRoom) until a stream finishes
+        self.pool = pool
         self.drafts = drafts if e.drafter is not None else 0
         import os
 
@@ -224,20 +227,41 @@ class MultiDecoder:
         if room < 1:
             raise ValueError(f"a prompt of {len(s.prompt)} tokens leaves no room in the {self.e.limit}-token context")
         s.count = min(s.count, room)
-        s.sid = self.next_id
-        self.next_id += 1
+        base = size = -1
+        if self.pool is not None:                  # the prompt, the reply and a verify window's rows past it
+            from tensorfold.cuda.memory_gate import NoRoom
+
+            from .pool import align_up
+
+            size = min(align_up(len(s.prompt) + s.count + ROWS + 1), self.e.span)
+            x = self.pool.place(size, self.next_id)
+            if x is None:
+                raise NoRoom(f"the shared cache pool has no {size}-token extent free "
+                             f"({self.pool.free_rows()} of {self.pool.rows} tokens free, largest run "
+                             f"{self.pool.largest_gap()})")
+            base = x.base
         from tensorfold.engine.grammar import pack
 
-        packed = pack(s.constraint)
-        self._send([ADMIT, s.sid, s.count, int(s.draft), int(s.stop_eos), *pack_sampling(s.sampling), len(packed)])
+        try:
+            packed = pack(s.constraint)
+        except Exception:                          # nothing sent yet: the extent goes back
+            if self.pool is not None:
+                self.pool.release(self.next_id)
+            raise
+        s.sid = self.next_id
+        self.next_id += 1
+        self._send([ADMIT, s.sid, s.count, int(s.draft), int(s.stop_eos), *pack_sampling(s.sampling), len(packed),
+                    base, size])
         self._send(list(s.prompt))
         if packed:
             self._send(packed)
-        self._queue(s)
+        self._queue(s, base, size)
 
-    def _queue(self, s: Stream) -> None:
+    def _queue(self, s: Stream, base: int = -1, size: int = -1) -> None:
         s.acc = list(self.prior)
         s.slot = self.free.pop(0)
+        if base >= 0:                              # the stream's extent of the shared pool (rank 1: rank 0's place)
+            self.e.bind(s.slot, base, size)
         s.pos = -1                                 # prompt tokens prefilled so far (-1: not started)
         self.filling.append(s)
 
@@ -444,9 +468,11 @@ class MultiDecoder:
         if s is not None and s.slot not in self.free:
             self.free.append(s.slot)
             self.free.sort()
+        if self.pool is not None:
+            self.pool.release(sid)
 
     def drop(self) -> list[Stream]:
-        live = [s for s in self.streams.values() if not s.done] + self.filling
+        live = list(self.streams.values()) + self.filling     # done ones too: their slots and extents go back
         for s in live:
             self._finish(s.sid)
         if self.broken is None:
@@ -464,13 +490,18 @@ class MultiDecoder:
             if msg[0] == ADMIT:
                 sid, count, draft, stop_eos = msg[1:5]
                 words, npacked = msg[5:5 + SAMPLING_WORDS], msg[5 + SAMPLING_WORDS]
+                base, size = msg[6 + SAMPLING_WORDS:8 + SAMPLING_WORDS]
+                if (base >= 0) != (self.pool is not None):
+                    raise RuntimeError("the ranks disagree on the shared cache pool")
+                if base >= 0:                          # rank 0's placement, replayed (the same pool by construction)
+                    self.pool.add(base, size, sid)
                 s = Stream(self.share(None), count, unpack_sampling(words), draft=bool(draft),
                            stop_eos=bool(stop_eos), sid=sid)
                 if npacked:
                     from tensorfold.engine import grammar
 
                     s.constraint = grammar.compiler(self, self.model_dir, self.eos).follow(self.share(None))
-                self._queue(s)
+                self._queue(s, base, size)
             elif msg[0] == FILL:
                 s = next(x for x in self.filling if x.sid == msg[1])
                 first = self._step(s, msg[2])

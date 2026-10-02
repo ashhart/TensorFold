@@ -78,6 +78,55 @@ def largest_context(free: int, streams: int = 1, carve: int = 0) -> int:
     return min(NATIVE_CONTEXT, max(0, best // 1024 * 1024))
 
 
+# --parallel above 1: the streams draw their per-token caches from one shared pool (``pool.py``) instead of each
+# holding a fixed --context's worth; TF_DSV41_SHARED_POOL=0 keeps the fixed layout
+SHARED_POOL = os.environ.get("TF_DSV41_SHARED_POOL", "1") != "0"
+KEPT_GIB = float(os.environ.get("TF_DSV41_KEPT_GIB") or "1")    # kept out of the shared pool for kept prompt states
+
+
+# the decode graphs' buffers that scale with a stream's limit: each row-count graph R = 1..32 holds [R, limit + 1]
+# fp32 indexer scores and top-k scratch (R * 8 bytes a limit token, 528 * 8 over the 32 graphs)
+GRAPH_BYTES_PER_LIMIT_TOKEN = 8 * sum(range(1, 33))
+
+
+def carved_bytes(pool: int, carve: int, ratios: tuple[int, ...] = (2, 2, 2, 1)) -> int:
+    """Bytes of compressed-entry planes ``_comp_pools`` places in a ``carve``-byte display carveout for a ``pool``-
+    token arena: whole planes (one per kv source, ``pool // ratio + 1`` rows), largest first, while each fits."""
+
+    from .serial import KV_FP8
+
+    row = (448 + 64 * 2 + 7 * 4) if KV_FP8 else 1024
+    placed, left = 0, carve
+    for r in sorted(ratios):                             # smallest ratio = largest plane first
+        need = (pool // r + 1) * row
+        if need + 4096 <= left:
+            placed, left = placed + need, left - need
+    return placed
+
+
+def pool_tokens(free: int, streams: int, limit: int, carve: int = 0) -> int:
+    """Shared-pool rows (a multiple of ``pool.ALIGN``) that fit ``free`` bytes beside ``streams`` slots' rings, a
+    ``limit``-token window's buffers (RoPE tables, selection, the decode graphs' score buffers) and the kept-prompt
+    reserve; whole compressed-entry planes go to a ``carve``-byte display carveout first. At most every stream at
+    the full limit."""
+
+    from .pool import ALIGN, align_up
+
+    room = (free - int((FIXED_GIB + RESERVE_GIB + KEPT_GIB) * 2 ** 30) - (streams - 1) * SLOT_BYTES
+            - (TOKEN_BYTES - CACHE_BYTES + GRAPH_BYTES_PER_LIMIT_TOKEN) * limit)
+    cap = streams * align_up(limit)
+    best = max(0, min(room // CACHE_BYTES, cap)) // ALIGN * ALIGN
+    if carve:                                            # grow while the carved planes pay for the extra rows
+        step = best
+        while step >= ALIGN:
+            trial = min(cap, best + step) // ALIGN * ALIGN
+            if trial > best and trial * CACHE_BYTES - carved_bytes(trial, carve) <= room:
+                best = trial
+            else:
+                step //= 2
+    return best
+
+
 def _f64_ints(value: float) -> list[int]:
     lo, hi = struct.unpack("<ii", struct.pack("<d", float(value)))
     return [lo, hi]
@@ -132,7 +181,8 @@ class Dsv41Engine:
             raise FileNotFoundError(f"no Engram tables in {engram}: put shards 47-48 of deepseek-ai/DeepSeek-V4.1-Flash "
                                     "there (or point TF_DSV41_ENGRAM_DIR at them)")
         self.streams = max(1, int(parallel))
-        mine = [cap, int(bool(drafts)), int(explicit), self.streams]
+        mine = [cap, int(bool(drafts)), int(explicit), self.streams, int(SHARED_POOL and self.streams > 1),
+                int(KEPT_GIB * 1024)]
         both = self._gather_ints(mine)
         if both[0] != both[1]:
             raise RuntimeError(f"the two ranks were started with different settings (context, drafts, parallel): "
@@ -148,7 +198,18 @@ class Dsv41Engine:
         from tensorfold.cuda import carveout
 
         carve = carveout.requested_bytes() if carveout.enabled() else 0
-        largest = min(row[0] for row in self._gather_ints([largest_context(free, self.streams, carve)]))
+        self.shared = SHARED_POOL and self.streams > 1
+        if self.shared:                              # one stream may reach the whole pool, less a reply's room
+            limit_asked = min(cap, NATIVE_CONTEXT)
+            pool = min(row[0] for row in self._gather_ints([pool_tokens(free, self.streams, limit_asked, carve)]))
+            if os.environ.get("TF_DSV41_POOL_TOKENS"):         # (tests: a pool smaller than memory allows)
+                from .pool import ALIGN
+
+                pool = min(pool, int(os.environ["TF_DSV41_POOL_TOKENS"]) // ALIGN * ALIGN)
+            largest = max(0, min(NATIVE_CONTEXT, pool - 4096) // 1024 * 1024)
+        else:
+            pool = None
+            largest = min(row[0] for row in self._gather_ints([largest_context(free, self.streams, carve)]))
         self.capacity_plan = {"largest_window": largest, "context_window": cap}
         if cap > largest:
             if explicit:
@@ -160,8 +221,13 @@ class Dsv41Engine:
         if cap < 4096:
             raise ValueError(f"only {largest} tokens of context fit after the weights: free memory first")
         self.capacity_plan["context_window"] = cap
+        if self.shared:
+            self.capacity_plan["pool_tokens"] = pool
+            if rank == 0:
+                print(f"[tensorfold] shared cache pool: {pool:,} tokens for {self.streams} streams of up to {cap:,} "
+                      f"each ({KEPT_GIB:g} GiB kept for prompt states)", flush=True)
         self.e = SerialEngine(w, Comm(self.nccl), str(engram), str(self.model_dir / "tokenizer.json"), cap=cap,
-                              slots=self.streams)
+                              slots=self.streams, pool_tokens=pool)
         self.nccl.barrier()
         with torch.no_grad():
             if drafts:
@@ -204,8 +270,10 @@ class Dsv41Engine:
             from tensorfold.cuda.scheduler import Scheduler
 
             from .multi import MultiDecoder
+            from .pool import Pool
 
-            self.multi = MultiDecoder(self.e, self._share, rank=rank, drafts=DRAFTS if drafts else 0)
+            self.multi = MultiDecoder(self.e, self._share, rank=rank, drafts=DRAFTS if drafts else 0,
+                                      pool=Pool(self.e.pool_tokens) if self.shared else None)
             self.multi.model_dir = self.model_dir
             self.multi.calibrate(self._gather_ints)
             if rank == 0:
@@ -222,7 +290,7 @@ class Dsv41Engine:
 
         from tensorfold.cuda.kv_pool import PrefixPool
 
-        transient = int(PROMPT_TRANSIENT_GIB * 2 ** 30) + (TOKEN_BYTES - 3200 - 768) * cap
+        transient = int(PROMPT_TRANSIENT_GIB * 2 ** 30) + (TOKEN_BYTES - CACHE_BYTES - 768) * cap   # selection rows
         mine = max(0, available_bytes() - int(RESERVE_GIB * 2 ** 30) - transient)
         asked = os.environ.get("TF_DSV41_POOL_GIB")
         if asked:

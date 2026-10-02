@@ -23,6 +23,7 @@ from .. import engram as E
 from ..reference import inv_freq
 from . import hc as hcf
 from . import kernels as K
+from .pool import ALIGN, align_up
 from .weights import HCW, LayerW, Weights
 
 BF, F32 = torch.bfloat16, torch.float32
@@ -352,7 +353,7 @@ class _Fixed:
 
 class SerialEngine:
     def __init__(self, w: Weights, comm: Comm, engram_dir: str, tokenizer_json: str, *, cap: int = 4096,
-                 device: str = "cuda", slots: int = 1) -> None:
+                 device: str = "cuda", slots: int = 1, pool_tokens: int | None = None) -> None:
         self.w, self.c, self.comm, self.dev = w, w.cfg, comm, torch.device(device)
         # ``slots`` streams' caches side by side: prompt chunks run in one slot (``state``, views), decode graphs take
         # rows of any slots (``_sid``: each row's slot, so a row reads and writes only its own stream's caches)
@@ -411,6 +412,14 @@ class SerialEngine:
         self.adaptive = True
         self.taps: list[torch.Tensor] = []
         self.cap = cap
+        # the per-token caches (compressed entries, indexer keys) of every slot in one arena of ``pool_tokens`` rows
+        # (``pool.py``): a slot holds an extent [base, base + size) of it, ``bind`` places it; by default each slot
+        # gets its own fixed extent of the per-stream limit (the layout before the shared pool)
+        self.span = align_up(cap)
+        self.pool_tokens = int(pool_tokens) if pool_tokens else self.slots * self.span
+        if self.pool_tokens % ALIGN or self.pool_tokens < self.span:
+            raise ValueError(f"a pool of {self.pool_tokens} tokens: a multiple of {ALIGN}, at least one {cap}-token "
+                             "stream")
         self.reset()
 
     def enable_dspark(self, tokens: int = 3) -> None:
@@ -422,9 +431,10 @@ class SerialEngine:
         """Forget the current slot's request; caches are zeroed in place (a captured graph holds their addresses)."""
 
         if getattr(self, "state", None) is not None:
+            # the compressed entries and indexer keys are left as they are: every reader masks the rows a stream
+            # has not written (attention gathers selected visible entries, indexer scoring reads visible keys
+            # only), and zeroing a long extent would write gigabytes a request; the rings are small and read whole
             st = self.state
-            for t in [*st.comp.values(), *st.ik.values()]:
-                t.zero_()
             a, b = self.slot * DRING, (self.slot + 1) * DRING
             for t in [*self.big.swa, *self.big.raw.values()]:
                 t[a:b].zero_()
@@ -433,28 +443,64 @@ class SerialEngine:
                 self.drafter.reset()
             return
         c, cap, S = self.c, self.cap, self.slots
-        self.entries = {s_: cap // c.layer_ratios[s_] + 1 for s_ in c.kv_source_layer_ids}
-        E = self.entries
+        self.entries = {s_: cap // c.layer_ratios[s_] + 1 for s_ in c.kv_source_layer_ids}   # a stream's most
+        P = self.pool_tokens
+        # arena rows per source: the pool's entries, then one trash row that rows closing no compressor group write
+        # (a decode graph writes every row; in a packed pool the extent's own last entry is the next one's first)
+        E = {s_: P // c.layer_ratios[s_] + 1 for s_ in c.kv_source_layer_ids}
+        self.trash = {s_: E[s_] - 1 for s_ in E}
+        self.ebase = torch.zeros((S,), dtype=torch.long, device=self.dev)   # each slot's extent base (token rows)
+        self.extents: list[tuple[int, int]] = [(0, 0)] * S
         # decode rings (DRING rows a slot) live per slot; prompt chunks run in one shared set of RING-row staging
         # rings, the slot's window copied in before and out after (``_to_stage`` / ``_from_stage``)
         self.big = Caches(
             cap,
             [torch.zeros((S * DRING, c.head_dim), dtype=BF, device=self.dev) for _ in self.w.layers],
-            self._comp_pools(S, E),
+            self._comp_pools(E),
             {s_: torch.zeros((S * DRING, 2 * c.head_dim), dtype=F32, device=self.dev)
              for s_ in c.kv_source_layer_ids if c.layer_ratios[s_] == 2},
-            {s_: self._entries(S * E[s_], c.index_head_dim, KV_FP8, keys=True) for s_ in c.kv_source_layer_ids},
+            {s_: self._entries(E[s_], c.index_head_dim, KV_FP8, keys=True) for s_ in c.kv_source_layer_ids},
         )
         big = self.big
         self.stage_swa = [torch.zeros((RING, c.head_dim), dtype=BF, device=self.dev) for _ in self.w.layers]
         self.stage_raw = {s_: torch.zeros((RING, 2 * c.head_dim), dtype=F32, device=self.dev) for s_ in big.raw}
-        self.views = [Caches(cap, self.stage_swa,
-                             {k: t[i * E[k]:(i + 1) * E[k]] for k, t in big.comp.items()},
-                             self.stage_raw,
-                             {k: t[i * E[k]:(i + 1) * E[k]] for k, t in big.ik.items()}) for i in range(S)]
+        self.views: list[Caches] = [None] * S        # type: ignore[list-item]
+        fixed = P >= S * self.span
+        for i in range(S):                               # fixed extents, or (a shared pool) all on the first rows
+            self.bind(i, i * self.span if fixed else 0, self.span)   # until a stream is admitted (captures, timing)
         self.state = self.views[self.slot]
 
-    def _comp_pools(self, S: int, E: dict) -> dict:
+    def bind(self, slot: int, base: int, size: int, keep: bool = False) -> None:
+        """Give ``slot`` the extent [base, base + size) of the arena: its views (prompt chunks, kept states) and the
+        decode graphs' base table. Not during a capture; the slot's next request starts from these rows. Its
+        committed ids carry over only with ``keep`` on the same rows (a shared pool hands rows from stream to stream:
+        another may have written them since, so reuse goes through kept prompt states instead)."""
+
+        c = self.c
+        if base % ALIGN or size % ALIGN or size <= 0 or base + size > self.pool_tokens:
+            raise ValueError(f"extent [{base}, {base + size}) is not aligned inside the {self.pool_tokens}-token pool")
+        size = min(size, self.span)                      # never more than a stream's limit needs
+        same = keep and self.extents[slot][0] == base     # the slot's committed tokens stay only on the same rows
+        self.extents[slot] = (base, size)
+        self.ebase[slot] = base
+        old = self.views[slot] if same else None
+
+        def cut(t, r):
+            return t[base // r:(base + size) // r]
+
+        self.views[slot] = Caches(self.cap, self.stage_swa,
+                                  {k: cut(t, c.layer_ratios[k]) for k, t in self.big.comp.items()}, self.stage_raw,
+                                  {k: cut(t, c.layer_ratios[k]) for k, t in self.big.ik.items()},
+                                  list(old.ids) if old is not None else [])
+        if slot == self.slot and getattr(self, "state", None) is not None:
+            self.state = self.views[slot]
+
+    def _ebase(self, src: int) -> torch.Tensor:
+        """Each decode row's stream's first entry of source ``src`` (in a graph: read from the base table)."""
+
+        return self.ebase[self._sid] // self.c.layer_ratios[src]
+
+    def _comp_pools(self, E: dict) -> dict:
         """The compressed-entry pools of every source, largest first into the display carveout when it is on
         (``TF_CARVEOUT=1``: attention gathers 512 entries a row, sparse reads that its half bandwidth suits), the
         rest (and the indexer keys, scanned whole every step) in ordinary memory."""
@@ -468,11 +514,11 @@ class SerialEngine:
         for s_ in sorted(c.kv_source_layer_ids, key=lambda k: -E[k]):
             alloc = None
             if owner is not None:
-                need = self._pool_bytes(S * E[s_], c.head_dim, KV_FP8)
+                need = self._pool_bytes(E[s_], c.head_dim, KV_FP8)
                 if need + 4096 <= owner.free:
                     alloc = owner.take
                     self.carved += need
-            pools[s_] = self._entries(S * E[s_], c.head_dim, KV_FP8, alloc=alloc)
+            pools[s_] = self._entries(E[s_], c.head_dim, KV_FP8, alloc=alloc)
         return {s_: pools[s_] for s_ in c.kv_source_layer_ids}
 
     @staticmethod
@@ -851,10 +897,10 @@ class SerialEngine:
         ring = torch.unique(slot * DRING + pos % DRING)
         out = [(t, ring, t[ring].clone()) for t in self.big.swa]
         out += [(t, ring, t[ring].clone()) for t in self.big.raw.values()]
+        base = self.extents[slot][0]
         for s_ in c.kv_source_layer_ids:
-            r, E = c.layer_ratios[s_], self.entries[s_]
-            ent = torch.unique(torch.cat([pos // r, torch.tensor([E - 1], device=self.dev)]).clamp(max=E - 1)
-                               + slot * E)
+            r = c.layer_ratios[s_]
+            ent = torch.unique(torch.cat([pos // r + base // r, torch.tensor([self.trash[s_]], device=self.dev)]))
             for t in (self.big.comp[s_], self.big.ik[s_]):
                 out.append((t, ent, t.take(ent) if isinstance(t, K.Fp8Rows) else t[ent].clone()))
         if self.drafter is not None:
@@ -1063,7 +1109,7 @@ class SerialEngine:
             idx = self.topk[max(s for s in c.index_source_layer_ids if s <= L)]
             if static:                                                  # entries of the row's stream
                 comp = self.big.comp[src]
-                idx = torch.where(idx >= 0, idx + (self._sid * self.entries[src]).int()[:, None], idx)
+                idx = torch.where(idx >= 0, idx + self._ebase(src).int()[:, None], idx)
         if R <= PROMPT_ROWS and L in self._pf_woa:
             self._prefetch(self._pf_woa[L], programs=PF_PROGRAMS)  # wo_a streams in while the attention core runs
         if static:
@@ -1098,7 +1144,7 @@ class SerialEngine:
         src = max(s for s in c.kv_source_layer_ids if s <= L)
         keys = self.state.ik[src]
         if static:                                                      # each row scores its own stream's keys
-            scores = K.index_scores(iq, wts, self.big.ik[src], pos, a.ratio, kbase=self._sid * self.entries[src],
+            scores = K.index_scores(iq, wts, self.big.ik[src], pos, a.ratio, kbase=self._ebase(src),
                                     n_keys=self.entries[src])
             if L == c.candidate_source_layer_id:
                 self.candidates = K.candidate_blocks(scores, pos, a.ratio, c.candidate_block_size,
@@ -1151,11 +1197,11 @@ class SerialEngine:
             wts = torch.softmax(pair[..., c.head_dim:], dim=1)
             latent = K.rmsnorm((wts * pair[..., :c.head_dim]).sum(1), cw.norm, c.rms_norm_eps)
             start, slot = (ends // 2) * 2, ends // 2
-            if static:                                                  # rows that close no group write the spare slot
-                slot = torch.where((ends + 1) % 2 == 0, slot, st.comp[L].shape[0] - 1)
         comp_t, ik_t = st.comp[L], st.ik[L]
         if static:                                                      # the row's stream's entries
-            slot = slot + self._sid * self.entries[L]
+            slot = slot + self._ebase(L)
+            if a.ratio == 2:                                            # rows that close no group: the trash row
+                slot = torch.where((ends + 1) % 2 == 0, slot, torch.full_like(slot, self.trash[L]))
             comp_t, ik_t = self.big.comp[L], self.big.ik[L]
         comp_t.index_copy_(0, slot, K.rope(latent, start, cos, sin))
         ix = a.indexer
