@@ -49,10 +49,18 @@ def messages(value: Any, system: Any = None) -> list[dict[str, Any]]:
         if any(p.get("type") != "text" for p in parts):
             raise RequestError("system accepts text blocks only")
         out.append({"role": "system", "content": "\n\n".join(_string(p.get("text"), "system.text") for p in parts)})
-    for message in value:
-        if not isinstance(message, dict) or message.get("role") not in ("user", "assistant"):
-            raise RequestError("message role must be user or assistant")
+    for index, message in enumerate(value):
+        if not isinstance(message, dict) or message.get("role") not in ("user", "assistant", "system"):
+            raise RequestError("message role must be user, assistant or system")
         role = message["role"]
+        if role == "system":
+            previous = value[index - 1] if index else {}
+            following = value[index + 1] if index + 1 < len(value) else {"role": "assistant"}
+            if (not isinstance(previous, dict) or previous.get("role") not in ("user", "system")
+                    or not isinstance(following, dict) or following.get("role") not in ("assistant", "system")):
+                raise RequestError("mid-conversation system messages must follow a user turn and precede an assistant or end")
+            if message.get("clear_at") not in (None, "never") or message.get("output_config"):
+                raise RequestError("turn-scoped system messages and per-message output_config are unsupported")
         content, calls, thoughts = [], [], []
         for block in _parts(message.get("content")):
             kind = block.get("type")

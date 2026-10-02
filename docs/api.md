@@ -305,10 +305,13 @@ items, and a `previous_response_id` that is not stored.
 ## Anthropic Messages
 
 The Messages routes reuse the same chat handler and engine on MLX and CUDA. They accept `system`, text/image
-blocks, `tool_use`/`tool_result`, custom tools and `tool_choice`, sampling, `stop_sequences`, `thinking`
+blocks (including mid-conversation system text), `tool_use`/`tool_result`, custom tools and `tool_choice`, sampling, `stop_sequences`, `thinking`
 (disabled, enabled with `budget_tokens`, or adaptive), and `output_config` effort/JSON schema. Image support
 requires a vision-capable model served with `--vision`. Thinking is off unless enabled or adaptive. It round-trips as plaintext with an empty signature;
-`display` does not suppress it. Claude Code's `context_management` keep-all thinking directive is accepted.
+`display` does not suppress it. Claude Code's `context_management` keep-all thinking directive is accepted. Mid-conversation system text stays
+in place with its system role; the model's chat template must support later system messages. Turn-scoped
+system messages, per-message output configuration and inline tool changes are unsupported.
+JSON schema output, including Claude Code title requests, requires `pip install 'tensorfold[grammar]'`.
 
 Usage separates uncached `input_tokens` from `cache_read_input_tokens` and reports `output_tokens_details.thinking_tokens`
 when the backend counts them. Prefix caching remains automatic,

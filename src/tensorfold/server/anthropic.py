@@ -64,6 +64,9 @@ def post(handler: Any, app: Any) -> None:
         raw = handler.rfile.read(length)
         body = json.loads(raw or b"{}")
         chat = translate(body, count=count)
+        late_system = getattr(app, "late_system", getattr(getattr(app, "template", None), "late_system", "system"))
+        if late_system != "system" and any(m.get("role") == "system" for m in body["messages"]):
+            raise RequestError("the model's chat template does not support mid-conversation system messages")
         if count:
             return _send(handler, 200, {"input_tokens": count_tokens(app, chat)})
     except (RequestError, ValueError, UnicodeDecodeError) as exc:
