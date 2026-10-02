@@ -253,3 +253,136 @@ def test_engine_parallel_scheduler():
         assert got == alone[nm][0], nm
         assert len(got) == reqs[nm][1]
         assert st["sha256"] == alone[nm][1]["sha256"]
+
+
+# ----------------------------------------------------------------------------------- fills between layers ---
+FILL_ROWS = 512                      # prompt chunks here: the 2100-token prompt in 5 chunks, the 1200 one in 3
+ILV = [("p", 0), ("q", 0), ("long", 2), ("mid", 3)]   # two prompts arrive while two streams decode
+
+
+def _ilv_requests():
+    from tensorfold.engine.exact_sampling import Sampling
+
+    return {
+        "long": (_tokens(2100, 21), 10, None),
+        "mid": (_tokens(1200, 22), 8, Sampling(5, 0.8, 20, 0.95, 0.0)),
+        "p": (_tokens(30, 23), 60, None),
+        "q": (_tokens(64, 24), 60, Sampling(11, 0.9, 20, 0.95, 0.0)),
+    }
+
+
+def _ilv(rank, world, comm, w, reqs, graphs, fill_layers):
+    """Lone replies (chunks of FILL_ROWS), then the ILV scenario with fills fill_layers layers a step."""
+    from tensorfold.families.glm_moe_dsa.cuda.multi import GlmMultiDecoder
+    from tensorfold.families.glm_moe_dsa.cuda.runner import Runner
+
+    sample = _sample_fn()
+    solo = {}
+    if rank == 0 or not graphs:
+        run = Runner(w, CAPACITY + K + 1, K, graphs=graphs)
+        run.prompt_rows = FILL_ROWS
+        for name, (prompt, n, s) in reqs.items():
+            fn = None if s is None else (lambda lg, pos, s=s: sample(lg, pos, s))
+            solo[name] = run.generate(prompt, n, fn, lambda t: False, lambda new: None, K, None, sampling=s)["out"]
+        del run
+        torch.cuda.empty_cache()
+    run = Runner(w, CAPACITY + K + 1, K, graphs=graphs, slots=4)
+    run.prompt_rows = FILL_ROWS
+    dec = GlmMultiDecoder(run, rank=rank, world=world, comm=comm, limit=CAPACITY, eos=tuple(w.cfg.eos_token_ids),
+                          sample=sample)
+    dec.fill_layers = fill_layers
+    got = None
+    if rank:
+        dec.follow()
+    else:
+        got = _drive(dec, reqs, ILV)
+        dec.stop()
+    torch.cuda.synchronize()
+    comm.barrier()
+    return solo, got, dec.mid_rounds, run.overlap
+
+
+def _ilv_check(solo, got, mid, overlap, want_overlap, least):
+    assert overlap == want_overlap, "the fill path under test did not run"
+    for name, _ in ILV:
+        assert got[name] == solo[name], f"request {name} filled between decode rounds: {got[name]} != {solo[name]}"
+    assert mid >= least, f"only {mid} decode rounds ran while a prompt chunk was paused between layers"
+
+
+class _Reduce:
+    """A thread communicator with an all-reduce (rank-order bf16 sum), so prompt chunks take the two-micro-batch path
+    whose reductions overlap compute on a comm stream (and are in flight when a fill pauses)."""
+
+    def __init__(self, comm):
+        self.c, self.rank, self.world = comm, comm.rank, comm.world
+
+    def all_gather(self, send, recv):
+        self.c.all_gather(send, recv)
+
+    def all_to_all(self, send, recv):
+        self.c.all_to_all(send, recv)
+
+    def barrier(self):
+        self.c.barrier()
+
+    def all_reduce(self, send, recv):
+        slots = self.c._exchange(send)
+        recv.copy_(slots[0])
+        for r in range(1, self.world):
+            recv.add_(slots[r])
+        self.c._done()
+
+
+def test_fill_between_layers_four_ranks():
+    """Four ranks, followers mirroring FILL layer ranges, chunks as two overlapped micro-batches paused one layer at
+    a time while two streams decode: every reply equals its lone reply."""
+    reqs = _ilv_requests()
+
+    def run(rank, comm):
+        c = _Reduce(comm)
+        return _ilv(rank, 4, c, _weights(rank, 4, c), reqs, graphs=False, fill_layers=1)
+
+    results = run_ranks(run, 4)
+    solo, got, mid, overlap = results[0]
+    for r in range(1, 4):
+        assert results[r][0] == solo, "ranks disagree on the lone replies"
+    _ilv_check(solo, got, mid, overlap, True, 10)
+
+
+def test_fill_between_layers_graphs():
+    """One thread (rank 0's quarter), decode rounds replayed as CUDA graphs between fill steps of two layers."""
+    reqs = _ilv_requests()
+    with torch.no_grad():
+        comm = _Alone()
+        solo, got, mid, overlap = _ilv(0, 1, comm, _weights(0, 4, comm), reqs, graphs=True, fill_layers=2)
+    assert len(set(map(tuple, solo.values()))) == len(solo), "degenerate replies: the check would be weak"
+    _ilv_check(solo, got, mid, overlap, False, 5)
+
+
+def test_fill_between_layers_sp_four_ranks(monkeypatch):
+    """As test_fill_between_layers_four_ranks with sequence-parallel prompt chunks (TF_GLM53_PROMPT_SP=1): the
+    paused chunks run compute_prompt_sp one layer a step, lone replies use it whole; every reply equals its lone
+    reply."""
+    from tensorfold.families.glm_moe_dsa.cuda import fused
+
+    monkeypatch.setattr(fused, "PROMPT_SP", True)
+    real = fused.compute_prompt_sp
+    calls = {"whole": 0, "paused": 0}
+
+    def spy(*a, **k):
+        calls["whole" if k.get("layers") is None else "paused"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(fused, "compute_prompt_sp", spy)
+    reqs = _ilv_requests()
+
+    def run(rank, comm):
+        c = _Reduce(comm)
+        return _ilv(rank, 4, c, _weights(rank, 4, c), reqs, graphs=False, fill_layers=1)
+
+    results = run_ranks(run, 4)
+    solo, got, mid, overlap = results[0]
+    for r in range(1, 4):
+        assert results[r][0] == solo, "ranks disagree on the lone replies"
+    assert calls["whole"] and calls["paused"], f"sequence-parallel chunks did not run whole and paused: {calls}"
+    _ilv_check(solo, got, mid, overlap, True, 10)
