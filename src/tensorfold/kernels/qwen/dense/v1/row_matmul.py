@@ -64,6 +64,25 @@ def simd_qmm_backend() -> Backend:
     return Backend("simd_qmm", qmm, int(simd_qmm.MAX_ROWS), affine_rows.fits, prepare=prepare)
 
 
+def plain_rows(x: mx.array, weight: mx.array) -> mx.array:
+    """bf16 matmul whose rows are one-row matmuls, so a window's row keeps its one-row bits."""
+
+    transposed = weight.transpose()
+    rows = int(x.shape[-2])
+    if rows == 1:
+        return mx.matmul(x, transposed)
+    return mx.concatenate([mx.matmul(x[..., r:r + 1, :], transposed) for r in range(rows)], axis=-2)
+
+
+def plain_backend() -> Backend:
+    """Per-row ``mx.matmul`` for wholly unquantized weights: no scales to prepare, every row count taken."""
+
+    def qmm(x: mx.array, weight: mx.array, *_: Any, **__: Any) -> mx.array:
+        return plain_rows(x, weight)
+
+    return Backend("plain", qmm, 1 << 16, lambda module: False, prepare=None)
+
+
 BACKEND: Backend | None = None
 
 
@@ -149,7 +168,10 @@ def project(module: Any, x: mx.array) -> mx.array:
     own = getattr(module, "project_rows", None)
     if own is not None:
         return own(x)
-    y = BACKEND(x, module["weight"], module["scales"], module["biases"], module.group_size, module.bits)
+    if not hasattr(module, "scales"):
+        y = plain_rows(x, module["weight"])
+    else:
+        y = BACKEND(x, module["weight"], module["scales"], module["biases"], module.group_size, module.bits)
     if "bias" in module:
         y = y + module["bias"]
     return y
@@ -165,6 +187,8 @@ def logits(head: Any, x: mx.array) -> mx.array:
     own = getattr(head, "project_rows", None)
     if own is not None:
         return own(x)
+    if not hasattr(head, "scales"):
+        return plain_rows(x, head["weight"])
     return BACKEND(x, head["weight"], head["scales"], head["biases"], head.group_size, head.bits)
 
 
@@ -220,6 +244,24 @@ def route_drafter(model: Any) -> int:
     return count
 
 
+def plain_fits(model: Any) -> bool:
+    """Whether every projection and the head are unquantized linears, which the plain backend reads."""
+
+    import mlx.nn as nn
+
+    language_model = getattr(model, "language_model", model)
+    head = getattr(language_model, "lm_head", None)
+    if not isinstance(head, nn.Linear) or isinstance(head, nn.QuantizedLinear):
+        return False
+    for layer in language_model.model.layers:
+        inner = layer.linear_attn if getattr(layer, "is_linear", False) else layer.self_attn
+        mlp = layer.mlp.shared_expert if hasattr(layer.mlp, "switch_mlp") else layer.mlp
+        for _, module in list(inner.named_modules()) + list(mlp.named_modules()):
+            if isinstance(module, nn.QuantizedLinear):
+                return False
+    return True
+
+
 def fits(model: Any, backend: Backend) -> bool:
     """Whether every projection and the head take the backend's layout."""
 
@@ -259,4 +301,5 @@ def install(model: Any, backend: Backend | None = None) -> dict[str, int]:
 
 
 __all__ = ["BACKEND", "Backend", "GROUPS", "Stack", "WINDOW_ROWS", "build", "draft_matmul", "fits", "install", "logits",
-           "project", "project_stack", "route_drafter", "simd_qmm_backend", "stack_of"]
+           "plain_backend", "plain_fits", "project", "project_stack", "route_drafter", "simd_qmm_backend",
+           "stack_of"]

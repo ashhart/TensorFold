@@ -30,7 +30,9 @@ changing the serial reference; keep MLX within the package requirements.
 
 For Qwen3.8-27B, optionally pull `z-lab/Qwen3.8-27B-DFlash2` too. M1 through M4 use the 4-bit row-exact
 simdgroup decoder; the M5 tensor-unit path also reads the documented lower and higher affine widths.
-Model-specific requirements are in the [recipes](docs/recipes/README.md).
+Qwen3.6-35B-A3B serves on a Mac from an unquantized bf16 checkpoint (a 128 GB Mac holds its 67 GB of
+weights; see the [recipe](docs/recipes/qwen3.6-moe.md)). Model-specific requirements are in the
+[recipes](docs/recipes/README.md).
 
 ## Check the endpoint
 

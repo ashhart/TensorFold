@@ -9,8 +9,10 @@ from typing import Any
 MODEL_TYPES = ("qwen3_5_moe",)
 TITLE = "Qwen3.6 MoE"
 LANES = True
-# MLX 4-bit, groups of 64, routers 8-bit, MTP layer in mtp-4bit.safetensors (mlx-community's files take it too)
-MODELS = ("Vontra/Qwen3.6-35B-A3B-MLX-4bit-MTP", "mlx-community/Qwen3.6-35B-A3B-4bit")
+# MLX 4-bit, groups of 64, routers 8-bit, MTP layer in mtp-4bit.safetensors (mlx-community's files take it too);
+# Macs also read an unquantized bf16 checkpoint (Ornith keeps its MTP layer, which the loader drops)
+MODELS = ("Vontra/Qwen3.6-35B-A3B-MLX-4bit-MTP", "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "junafinity/Ornith-1.5-35B-A3B-uncensored")
 REQUIRED_FILES = {MODELS[0]: ("mtp-4bit.safetensors",)}
 DRAFTER = "z-lab/Qwen3.6-35B-A3B-DFlash"      # Macs: DFlash (v1), chains of each position's own argmax
 CUDA_DRAFTER = ""                             # CUDA: the checkpoint's own MTP layer
@@ -22,13 +24,18 @@ CUDA_PREFILL_FP8 = True            # --prefill-fp8: the attention and DeltaNet p
 
 
 def check(model_dir: str | Path) -> None:
-    """One GPU, MLX 4-bit weights in groups of 64."""
+    """One GPU: MLX 4-bit in groups of 64. A Mac: that, or wholly unquantized bf16 weights."""
 
-    from tensorfold.families import OWN_MODEL_HELP, describe_quantization, quantization, read_config
+    import sys
 
-    if quantization(read_config(model_dir)) != CUDA_QUANTIZATION:
+    from tensorfold.families import OWN_MODEL_HELP, describe_quantization, quant_method, quantization, read_config
+
+    config = read_config(model_dir)
+    if sys.platform == "darwin" and quant_method(config) is None:
+        return                        # the Mac lane reads bf16 weights through mlx_lm, which checks their shapes
+    if quantization(config) != CUDA_QUANTIZATION:
         raise ValueError(f"{TITLE}'s CUDA engine reads MLX 4-bit weights in groups of 64 ({MODELS[0]}); this "
-                         f"checkpoint has {describe_quantization(read_config(model_dir))}. {OWN_MODEL_HELP}")
+                         f"checkpoint has {describe_quantization(config)}. {OWN_MODEL_HELP}")
 
 
 def load(model_dir: Path, *, drafter: str = "", drafter_bits: int = 4, **_: Any) -> tuple[Any, Any]:

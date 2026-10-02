@@ -1,8 +1,8 @@
 # Qwen3.6-35B-A3B
 
-The `qwen3_5_moe` family serves Qwen3.6-35B-A3B on one NVIDIA GPU. Its layers are the 27B's (Gated DeltaNet
-and gated full attention, every fourth layer attention) with routed experts in place of the dense MLP, and it
-drafts with the checkpoint's own MTP layer.
+The `qwen3_5_moe` family serves Qwen3.6-35B-A3B on one NVIDIA GPU and, unquantized (bf16), on Apple Silicon.
+Its layers are the 27B's (Gated DeltaNet and gated full attention, every fourth layer attention) with routed
+experts in place of the dense MLP, and it drafts with the checkpoint's own MTP layer on CUDA.
 
 ## Checkpoint
 
@@ -20,6 +20,24 @@ is placed in it. After the weights, one Spark keeps about 75 GB for caches: atte
 DeltaNet 63 MB a stream.
 
 `--no-drafts` or request field `"draft": false` selects serial decoding, the reference drafted output equals.
+
+## Mac execution (bf16)
+
+The same family reads a wholly unquantized bf16 checkpoint of this architecture on Apple Silicon:
+
+```bash
+tensorfold serve junafinity/Ornith-1.5-35B-A3B-uncensored --name local-model
+```
+
+Tested checkpoint: `junafinity/Ornith-1.5-35B-A3B-uncensored` (67 GB bf16, 17 shards, `config.json`
+architectures `Qwen3_5MoeForConditionalGeneration`). The row decoder runs every projection as its own one-row
+`mx.matmul`, so a drafted or shared window's rows keep exactly the bits of their serial steps; the load-time
+check reports the widest window it verified on that Mac. A checkpoint with no `quantization` block is read as
+stored — one with affine quantization still follows the 4-bit/groups-of-64 rule above, which the Mac lane
+reads the same way. Loading goes through `mlx_lm`'s `qwen3_5_moe` reader, which drops the vision tower and
+the MTP layer's tensors: the MTP weights a checkpoint carries are the CUDA engine's drafter, and a Mac
+decodes with the DFlash (v1) head when its draft model is pulled, as the 4-bit Mac lane does. 67 GB of
+weights need a 128 GB Mac and a small `--context`.
 
 ## CUDA execution
 
