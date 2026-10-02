@@ -45,3 +45,27 @@ def test_ngram_table_rejects_invalid_packed_segments(tmp_path, shape, dtype, end
     pk = SimpleNamespace(dir=tmp_path, entry={"t.trellis": ("rows", 0, end, dtype, shape)}.__getitem__)
     with pytest.raises(ValueError):
         exl3_pack.NgramTable(pk, "t.", 128, "cpu")
+
+
+@pytest.mark.skipif(__import__("os").name == "nt", reason="mlock")
+def test_a_consolidated_table_pins_whole_row_runs_within_a_budget(tmp_path):
+    """A table stored as one tensor still pins in runs of rows, never past the budget, and keeps its bytes."""
+
+    import torch
+
+    from tensorfold.families.qwen4_exp.cuda import exl3_pack
+
+    words, n = 61, 4096                                          # 6-bit rows, 122 bytes
+    data = np.arange(n * words, dtype=np.int16).reshape(n, words)
+    (tmp_path / "ngram.safetensors").write_bytes(data.tobytes())
+    entries = {"t.trellis": ("ngram.safetensors", 0, data.nbytes, "I16", [n, words])}
+    tensors = {"t.head_bias": torch.zeros(4), "t.head_offsets": torch.zeros(2, dtype=torch.int64),
+               "t.head_vocab_sizes": torch.ones(2, dtype=torch.int64), "t.layer_multipliers": torch.ones(2)}
+    pk = SimpleNamespace(dir=tmp_path, entry=entries.__getitem__, get=tensors.__getitem__)
+    table = exl3_pack.NgramTable(pk, "t.", 0, "cpu")
+    table.RUN_BYTES = 1000 * 2 * words                          # 1,000-row runs: five of them
+    assert table.lock_runs(0) == 0
+    got = table.lock_runs(2 * 1000 * 2 * words + 100)           # room for two runs, not three
+    assert got == 2 * 1000 * 2 * words
+    assert table.lock_runs(10 * data.nbytes) == data.nbytes     # the whole table when the budget holds it
+    assert table.gather(np.array([0, 4095, 2000])).tobytes() == data[[0, 4095, 2000]].tobytes()

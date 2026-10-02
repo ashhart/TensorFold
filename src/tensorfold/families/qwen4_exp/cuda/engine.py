@@ -184,6 +184,18 @@ class FlashNextEngine:
             self.vision.warm()
             torch.cuda.empty_cache()
         warm_s = time.perf_counter() - started
+        reread_s, pinned = 0.0, 0
+        if prefetch and not ple_on_ssd and not locked:
+            # The weights' reads and the warm-up's allocations push much of a table read alongside them back out of
+            # the page cache (Flash Next EXL3 4.05: 0-90% of its 39 GB still resident after a load), and each new
+            # reply's first lookups then fault those pages from disk one at a time. Read the table back now (the same
+            # bytes), and pin what the startup budget leaves room for where a table pins in runs.
+            started = time.perf_counter()
+            for table in tables.values():
+                table.prefetch()
+                if hasattr(table, "lock_runs"):
+                    pinned += table.lock_runs(room - pinned)
+            reread_s = time.perf_counter() - started
         self.eos = tuple(w.cfg.eos)
         self.model_dir = Path(model_dir)
         self.served = 0
@@ -195,6 +207,8 @@ class FlashNextEngine:
                  f"lasts ({self.multi.memory_gate.room / 2**30:.1f} GiB free for their caches, "
                  f"{self.multi.window_bytes / 2**30:.2f} GiB for one at the full window), eager" if self.concurrent else
                  f"{self.context_window}-token prompt/reply window; {self.max_len}-token cache")
+        again = (f", read again after warm-up in {reread_s:.1f}s" + (f" ({pinned / 2**30:.1f} GiB of it locked)"
+                                                                     if pinned else "")) if reread_s else ""
         if ple_on_ssd:
             how = "read from SSD at each lookup"
         elif tables_read:                             # read during the load: the wait after it, then any lock
@@ -202,6 +216,7 @@ class FlashNextEngine:
                 f", locked in memory in {read_s:.1f}s" if locked else "")
         else:
             how = f"{'locked in memory' if locked else 'read'} in {read_s:.1f}s"
+        how += again
         kv = "" if self.kv_dtype == "bf16" else f"; {self.kv_dtype} KV cache (fp16 scale per 32 values)"
         print(f"[tensorfold] Flash Next on CUDA: {rule}; {where}{kv}; n-gram tables {how}; {captured} "
               f"decode graphs captured; idle prompt pieces {self.prefill_rows} rows; "

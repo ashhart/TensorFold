@@ -174,6 +174,28 @@ class NgramTable:
 
         return HostTable.lock(self)
 
+    RUN_BYTES = 1 << 30       # the rows a partial pin takes at once: a pack may hold its table as one 39 GB tensor
+
+    def lock_runs(self, budget: int) -> int:
+        """Pin whole runs of about RUN_BYTES of rows (mlock) while ``budget`` bytes last; bytes pinned. Where the
+        startup budget cannot hold the whole table (``lock``), most of it can still stay resident."""
+
+        import ctypes
+
+        if os.name == "nt" or budget <= 0:
+            return 0
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.mlock.argtypes = (ctypes.c_void_p, ctypes.c_size_t)
+        pinned = 0
+        for arr in self.words:
+            step = max(1, self.RUN_BYTES // arr.strides[0])
+            for r in range(0, arr.shape[0], step):
+                run = arr[r:r + step]
+                if pinned + run.nbytes > budget or libc.mlock(run.ctypes.data, run.nbytes) != 0:
+                    return pinned
+                pinned += run.nbytes
+        return pinned
+
     def prefetch(self, workers: int = 8) -> float:
         from ..host_table import HostTable
 
