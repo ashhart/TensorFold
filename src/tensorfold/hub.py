@@ -104,3 +104,15 @@ def size_of(directory: Path) -> int:
     """Bytes of the files under ``directory`` (following the cache's symlinks)."""
 
     return sum(p.stat().st_size for p in Path(directory).rglob("*") if p.is_file())
+
+
+def repo_size(repo_id: str) -> int:
+    """Bytes of a repo's files from the Hub, without downloading them; 0 where the Hub does not answer."""
+
+    try:
+        from huggingface_hub import HfApi
+
+        info = HfApi().model_info(repo_id, files_metadata=True)
+        return sum(int(file.size or 0) for file in (info.siblings or []))
+    except Exception:
+        return 0          # offline or rate-limited: plan says the local bytes it has, not a guess
