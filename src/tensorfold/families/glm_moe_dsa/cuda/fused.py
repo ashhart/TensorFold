@@ -33,7 +33,7 @@ from .weights import Layer, MtpHead
 # decode window (serial or verify) shares one arithmetic: (keys a chunk program, keys a tile, warps, stages)
 ATTN_DECODE = (256, 32, 4, 2)
 ATTN_PROMPT = tuple(int(v) for v in os.environ.get("TF_GLM53_ATTN_PROMPT", "1024,64,8,2").split(","))  # chunk, keys/tile, warps, stages; chunk >= index_topk: one pass
-BT = 64                  # indexer: keys per scoring program
+BT = 128                 # indexer: keys per scoring program (128 / 2 warps / 2 stages: same bits as 64/4/3, ~1.14x on GB10)
 MAX_ROWS = 128           # widest call of the row-invariant EXL3 linear; wider windows use the prompt GEMM
 PROMPT_ROWS = int(os.environ.get("TF_GLM53_PROMPT_ROWS", "4096"))   # prompt chunk: experts read once per chunk
 PREFILL_REDUCE = os.environ.get("TF_GLM53_PREFILL_REDUCE", "ring")   # ring | rs (exact reduce-scatter)
@@ -660,7 +660,7 @@ def select(w: Weights, b: Buffers, icache: torch.Tensor, pos: torch.Tensor, R: i
         sc = b.sc.view(torch.int32)[:n * Tl].view(n, Tl) if radix and dcp == 1 else b.sc[:n * Tl].view(n, Tl)
         _index_scores[(n, triton.cdiv(Tl, BT))](b.iq[r0:], b.iw[r0:], icache, pos, sc, Tl, R0=r0, NH=nh, D=D,
                                                 BTT=BT, WSCALE=nh ** -0.5, QSCALE=D ** -0.5, DCP=dcp, RANK=rank,
-                                                PACK=not (radix and dcp == 1), num_warps=4)
+                                                PACK=not (radix and dcp == 1), num_warps=2, num_stages=2)
         if dcp == 1:
             if radix:
                 topk.top_columns(sc, K, b.tok[r0:r0 + n])
