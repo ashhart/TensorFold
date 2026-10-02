@@ -28,7 +28,7 @@ def port(request, tmp_path):
 def test_a_post_to_an_unknown_route_leaves_the_connection_usable(port):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
     try:
-        connection.request("POST", "/v1/messages", json.dumps({"max_tokens": 16}),
+        connection.request("POST", "/v1/not-a-route", json.dumps({"max_tokens": 16}),
                            {"Content-Type": "application/json"})
         refused = connection.getresponse()
         refused.read()

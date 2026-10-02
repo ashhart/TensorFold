@@ -3,6 +3,10 @@
 `tensorfold update` prints the sections below that are newer than the version you had. Each release's page on
 GitHub has the full notes and the measurements behind them.
 
+## Unreleased
+
+- Anthropic Messages and token-count routes on MLX and CUDA, including streaming, tools, thinking and cache usage.
+
 ## 0.6.1 (1 Oct 2026)
 
 - **NVFP4 checkpoints in their own math.** `nvidia/Qwen3.8-27B-NVFP4` runs the 4-bit activations its checkpoint
