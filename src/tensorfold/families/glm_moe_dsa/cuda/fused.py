@@ -32,7 +32,7 @@ from .weights import Layer, MtpHead
 # attention tilings (tools/bench_attn_prefill.py on GB10), by window class - a function of the class alone, so every
 # decode window (serial or verify) shares one arithmetic: (keys a chunk program, keys a tile, warps, stages)
 ATTN_DECODE = (256, 32, 4, 2)
-ATTN_PROMPT = tuple(int(v) for v in os.environ.get("TF_GLM53_ATTN_PROMPT", "1024,64,8,2").split(","))  # chunk, keys/tile, warps, stages; chunk >= index_topk: one pass
+ATTN_PROMPT = tuple(int(v) for v in os.environ.get("TF_GLM53_ATTN_PROMPT", "2048,64,8,2").split(","))  # chunk, keys/tile, warps, stages; chunk >= index_topk: one pass
 BT = 128                 # indexer: keys per scoring program (128 / 2 warps / 2 stages: same bits as 64/4/3, ~1.14x on GB10)
 MAX_ROWS = 128           # widest call of the row-invariant EXL3 linear; wider windows use the prompt GEMM
 PROMPT_ROWS = int(os.environ.get("TF_GLM53_PROMPT_ROWS", "4096"))   # prompt chunk: experts read once per chunk
