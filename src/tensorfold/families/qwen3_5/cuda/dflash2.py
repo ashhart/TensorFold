@@ -20,7 +20,7 @@ from .draft_tree import best_first
 from .glue import embedding, swiglu
 from .draft_attention import append, block_attention
 from .qmm import group_sums
-from .qmm_fast import matmul, matmul_rows, rows, tile, untile
+from .qmm_fast import matmul, matmul_group, matmul_rows, rows, tile, untile
 from .weights import Exl3, Plain, QLinear, Weights
 
 
@@ -464,8 +464,8 @@ class DFlash2:
         conv = w[base + "mlp_conv.base_kernel"]
         h = _dconv(normed, dyn, conv, 0, self.group_size, seg=length)
         xs = group_sums(h)
-        act, act_xs = swiglu(matmul(h, self.q4[base + "mlp.gate_proj.weight"], xs),
-                             matmul(h, self.q4[base + "mlp.up_proj.weight"], xs))
+        act, act_xs = swiglu(*matmul_group(h, [self.q4[base + "mlp.gate_proj.weight"],
+                                               self.q4[base + "mlp.up_proj.weight"]], xs))   # one launch, each its bits
         mlp = self._row(act, base + "mlp.down_proj.weight", act_xs)
         return _dconv(mlp, dyn, conv, 1, self.group_size, x, seg=length)
 

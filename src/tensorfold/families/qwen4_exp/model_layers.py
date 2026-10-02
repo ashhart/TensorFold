@@ -211,7 +211,7 @@ class LinearCache:
         self.conv: mx.array | None = None
         self.ssm: mx.array | None = None
         self.ple_conv: mx.array | None = None
-        self.history: np.ndarray | None = None   # reassigned, never written in place (copies share it)
+        self.history: Any = None   # host int64, or uint32 on the GPU after a GPU window; never written in place
         self.offset = 0
 
     @property

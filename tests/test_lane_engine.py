@@ -66,6 +66,28 @@ def test_suffix_lookup_survives_context_replacement() -> None:
     assert proposer.propose([7, 8, 9, 7, 8], 1) == [9]
 
 
+@pytest.mark.parametrize("ngram", [2, 3])
+def test_suffix_lookup_bulk_index_proposes_as_the_dict_index(ngram: int) -> None:
+    import random
+
+    rng = random.Random(ngram)
+    for _ in range(4):
+        # a long prompt with repeats, then a reply that copies from it and wanders off
+        prompt = [rng.choice(range(50)) if rng.random() < 0.8 else rng.randrange(248320) for _ in range(6000)]
+        bulk, plain = SuffixLookupProposer(ngram=ngram, min_match=ngram), SuffixLookupProposer(ngram=ngram,
+                                                                                               min_match=ngram)
+        plain.bulk = 1 << 30
+        context = list(prompt)
+        for _ in range(60):
+            assert bulk.propose(context, 8) == plain.propose(context, 8)
+            assert bulk.last_match == plain.last_match
+            at = rng.randrange(len(prompt) - 8)
+            context += prompt[at:at + rng.randint(1, 4)] if rng.random() < 0.7 else [rng.randrange(1 << 22)]
+        assert bulk._sorted is not None and plain._sorted is None
+        replaced = context[:5000]                  # a new request: both rebuild
+        assert bulk.propose(replaced, 8) == plain.propose(replaced, 8)
+
+
 # --------------------------------------------------------------------------
 # the real mlx_lm cache protocol, no model
 # --------------------------------------------------------------------------

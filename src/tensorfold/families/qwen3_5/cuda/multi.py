@@ -104,7 +104,8 @@ class MultiDecoder:
         self.context = context                                # prompt plus reply tokens a stream holds (0: no bound)
         self.eos = tuple(w.config.eos) if stop_eos else ()
         self.rank, self.world, self.device = rank, world, w.norm.device
-        self.depth = torch.cuda.is_available() and tuple(torch.cuda.get_device_capability(self.device)) in DEPTH_CHIPS
+        cuda = torch.device(self.device).type == "cuda"     # a CPU stand-in on a GPU machine runs as on a host box
+        self.depth = cuda and tuple(torch.cuda.get_device_capability(self.device)) in DEPTH_CHIPS
         self.split = world == 2 and 2 * w.head.n == w.config.vocab       # each rank holds half the head
         self.drafts = draft is not None and (rank == 0 or getattr(draft, "world", 1) == 2)
         self.streams: dict[int, Stream] = {}                  # decoding
@@ -121,7 +122,7 @@ class MultiDecoder:
         self.layer_bytes = 2 * getattr(c, "kv_heads", 0) * getattr(c, "head_dim", 0) * 2     # a row of one layer
         self.row_bytes = att * self.layer_bytes
         self.memory_gate = (MemoryGate(1 << 62, reserve=2 * GIB, live=torch_live(torch, available_bytes))
-                     if world == 1 and torch.cuda.is_available() else None)
+                     if world == 1 and cuda else None)
 
     def live(self) -> int:
         return len(self.streams) + len(self.filling)

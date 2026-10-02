@@ -380,7 +380,11 @@ class FamilyRounds(FamilyPrefill, SharedRounds, DraftDepth):
         parts = [tokens]
         if speculate:
             # the head's first draft for every row, queued behind the verify before anything is read
-            parts.append(model.speculate(cache, tokens, position, stream.sampling).astype(tokens.dtype))
+            firsts = model.speculate(cache, tokens, position, stream.sampling)
+            parts.append(firsts.astype(tokens.dtype))
+            prepare = getattr(model, "prepare_settle", None)
+            if prepare is not None:                  # the chain's first step built while the GPU verifies
+                prepare(cache, firsts, position, stream.sampling)
         if isinstance(drafts, mx.array):
             parts.append(drafts.astype(tokens.dtype))
         built = time.perf_counter()

@@ -30,12 +30,13 @@ the checkpoint you name; it picks none by itself.
 | --- | --- | --- | --- |
 | Qwen3.8-27B | `nvidia/Qwen3.8-27B-NVFP4`, one rank | `turboderp/Qwen3.8-27B-exl3`, one rank | one or two ranks |
 | Flash Next | `Mia-AiLab/Qwen3.8-Flash-Next-NVFP4` (a mirror of local-inference-lab's), `local-inference-lab/Qwen3.8-Flash-Next-NVFP4`, `RadixArk/Qwen3.8-Flash-Next-NVFP4`, one rank | `turboderp/Qwen3.8-Flash-Next-exl3`, one rank | one or two ranks |
-| GLM-5.3-Flash | not read | `Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw`, two ranks (experimental) | two ranks |
+| GLM-5.3-Flash | not read | `brandonmusic/GLM-5.3-Flash-tr3-4bpw` (Brandon M. Music's; re-hosted as `Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw`), two ranks (experimental) | two ranks |
 | Qwen3.6-35B-A3B | not read yet | not read yet | one rank |
 | Nemotron 3.5 Lightning | not read yet | not read yet | one or two ranks |
 
 Mia-AiLab's checkpoints on Hugging Face (30 Sep 2026):
-- Loaded and served here: `Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw` (two Sparks) and
+- Loaded and served here: `Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw` (two Sparks; a byte-identical re-host of Brandon M.
+  Music's `brandonmusic/GLM-5.3-Flash-tr3-4bpw`, under his ShapleyMCG License 1.0) and
   `Mia-AiLab/Qwen3.8-Flash-Next-NVFP4` (found by its `model_type`, `qwen3_8_flash_next`).
 - Not tried yet: `Mia-AiLab/Qwen3.8-27B-EXL3`, `Mia-AiLab/Qwen3.8-27B-EXL3-2.0bpw`,
   `Mia-AiLab/Qwen3.8-27B-EXL3-3.5bpw`, `Mia-AiLab/Qwen3.8-27B-DFlash2-EXL3-5.0bpw` (a drafter),
