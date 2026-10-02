@@ -52,6 +52,8 @@ class NCCL:
                                       ctypes.c_void_p]
         lib.ncclAllReduce.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int,
                                       ctypes.c_void_p, ctypes.c_void_p]
+        lib.ncclReduceScatter.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int,
+                                          ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
         # point-to-point, for the all-to-all an exact reduce-scatter needs at world > 2
         lib.ncclSend.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_void_p,
                                  ctypes.c_void_p]
@@ -117,6 +119,31 @@ class NCCL:
         stream = torch.cuda.current_stream().cuda_stream
         self._check(self.lib.ncclAllReduce(send.data_ptr(), recv.data_ptr(), send.numel(), _DTYPES[send.dtype], 0,
                                            self.comm, stream))
+
+    def all_gather_group(self, pairs: list) -> None:
+        """Several all-gathers [(send, recv), ...] as one NCCL group (one launch; in place allowed)."""
+
+        stream = torch.cuda.current_stream().cuda_stream
+        lib = self.lib
+        self._check(lib.ncclGroupStart())
+        try:
+            for send, recv in pairs:
+                if recv.numel() != send.numel() * self.world or send.dtype != recv.dtype:
+                    raise ValueError("all_gather: recv must hold world x send of the same dtype")
+                self._check(lib.ncclAllGather(send.data_ptr(), recv.data_ptr(), send.numel(), _DTYPES[send.dtype],
+                                              self.comm, stream))
+        finally:
+            self._check(lib.ncclGroupEnd())
+
+    def reduce_scatter(self, send: torch.Tensor, recv: torch.Tensor) -> None:
+        """recv [n] <- block self.rank of the sum of every rank's send [world * n] (NCCL's ring: summation order
+        depends on the message size; exact callers use all_to_all + a rank-order sum)."""
+
+        if send.numel() != recv.numel() * self.world or send.dtype != recv.dtype:
+            raise ValueError("reduce_scatter: send must hold world x recv of the same dtype")
+        stream = torch.cuda.current_stream().cuda_stream
+        self._check(self.lib.ncclReduceScatter(send.data_ptr(), recv.data_ptr(), recv.numel(), _DTYPES[send.dtype],
+                                               0, self.comm, stream))
 
     def all_to_all(self, send: torch.Tensor, recv: torch.Tensor) -> None:
         """recv[j] <- rank j's send[self.rank], for send and recv both [world, n].
