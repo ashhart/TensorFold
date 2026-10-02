@@ -163,22 +163,25 @@ class MultiDecoder:
         tokens = float(len(live))
         rate = tokens / (self.costs[rows - 1] + self.overhead)
         while rows < ROWS:
+            # a stream's next j drafts at once (j = 1 .. its cap): the cost curve is not convex (some row counts
+            # cost much more than the next) and a stream's first draft also pays a drafting pass, so one draft at
+            # a time stops early where several would pay (3 streams: almost no drafting)
             best = None
             for i, s in enumerate(live):
-                if ks[i] >= caps[i]:
-                    continue
-                gain = self._expected(s.acc, ks[i] + 1) - self._expected(s.acc, ks[i])
-                cost = self.costs[rows] + self.overhead + self._draft_cost(drafting + (ks[i] == 0))
-                r = (tokens + gain) / cost
-                if r > rate and (best is None or r > best[0]):
-                    best = (r, i, gain)
+                base = self._expected(s.acc, ks[i])
+                for j in range(1, min(caps[i] - ks[i], ROWS - rows) + 1):
+                    gain = self._expected(s.acc, ks[i] + j) - base
+                    cost = self.costs[rows + j - 1] + self.overhead + self._draft_cost(drafting + (ks[i] == 0))
+                    r = (tokens + gain) / cost
+                    if r > rate and (best is None or r > best[0]):
+                        best = (r, i, j, gain)
             if best is None:
                 break
-            rate, i, gain = best
+            rate, i, j, gain = best
             drafting += ks[i] == 0
-            ks[i] += 1
+            ks[i] += j
             tokens += gain
-            rows += 1
+            rows += j
         return ks
 
     def _draft_cost(self, streams: int) -> float:
