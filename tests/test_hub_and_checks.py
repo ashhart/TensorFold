@@ -30,7 +30,7 @@ def fake_repo(cache: Path, repo_id: str, files: dict[str, str]) -> Path:
 
 def test_repo_ids_and_local_directories(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    assert hub.is_repo_id("Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP")
+    assert hub.is_repo_id("TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP")
     assert not hub.is_repo_id("just-a-name") and not hub.is_repo_id("a/b/c")
     (tmp_path / "local" / "model").mkdir(parents=True)
     assert not hub.is_repo_id("local/model")                 # an existing directory is a directory
@@ -49,6 +49,13 @@ def test_a_cache_without_refs_still_resolves(tmp_path):
     snapshot = fake_repo(tmp_path, "owner/model", {"config.json": "{}"})
     (tmp_path / "models--owner--model" / "refs" / "main").unlink()
     assert hub.cached("owner/model", cache_dir=tmp_path) == snapshot
+
+
+def test_a_moved_org_id_finds_the_old_cache_name(tmp_path):
+    # the org moved to TensorFold on 2 Oct 2026; a cache pulled before the move kept its Vontra folder name
+    snapshot = fake_repo(tmp_path, "Vontra/Qwen3.8-27B-MLX-4bit", {"config.json": "{}"})
+    assert hub.cached("TensorFold/Qwen3.8-27B-MLX-4bit", cache_dir=tmp_path) == snapshot
+    assert hub.resolve("TensorFold/Qwen3.8-27B-MLX-4bit", download=False, cache_dir=tmp_path) == snapshot
 
 
 def test_resolve_finishes_a_config_only_cached_model(tmp_path, monkeypatch):
@@ -114,7 +121,7 @@ def test_resolve_refuses_a_download_that_still_lacks_required_mtp(tmp_path, monk
 
 
 def test_nemotron_pull_checks_its_mtp_head(tmp_path, monkeypatch, capsys):
-    repo = "Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit"
+    repo = "TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit"
     snapshot = fake_repo(tmp_path, repo, {
         "config.json": '{"model_type": "nemotron_h", "quantization": {"bits": 4, "group_size": 64}}',
         "model.safetensors": "weights",
@@ -248,9 +255,9 @@ def test_flash_next_reads_the_nvfp4_checkpoint_and_refuses_other_fp4_blocks(tmp_
 def test_models_lists_the_tested_checkpoints(capsys):
     assert main(["models"]) == 0
     out = capsys.readouterr().out
-    for repo in ("Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP", "local-inference-lab/Qwen3.8-Flash-Next-NVFP4",
+    for repo in ("TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP", "local-inference-lab/Qwen3.8-Flash-Next-NVFP4",
                  "RadixArk/Qwen3.8-Flash-Next-NVFP4",
-                 "Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", "Vontra/Qwen3.8-27B-MLX-4bit",
+                 "TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", "TensorFold/Qwen3.8-27B-MLX-4bit",
                  "z-lab/Qwen3.8-27B-DFlash2", "mlx-community/gemma-4-26b-a4b-it-4bit"):
         assert repo in out
     for folder in ("qwen/dense/v1", "qwen/flash_next/v1", "nemotron/lightning/v1", "gemma/v1"):
