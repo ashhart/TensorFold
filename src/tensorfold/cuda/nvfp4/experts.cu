@@ -153,6 +153,8 @@ constexpr int PR = 4;                     // row tiles of 16 a warp
 constexpr int PROWS = 16 * PR;            // pairs an item holds at most (the plan's prompt tile)
 constexpr int XROW = 40;                  // bf16 a staged row of x: 32 inputs and 8 of padding (80 bytes)
 constexpr int PS = 4;                     // cp.async stages
+constexpr int NJ_GU = 2;                  // n8 tiles a warp: gate|up splits a column block over two warps
+constexpr int NJ_DN = 4;
 
 template <int M>
 struct PromptSmem {
@@ -165,26 +167,58 @@ __device__ __forceinline__ void cp16z(void* dst, const void* src, bool ok) {
   asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(d), "l"(src), "r"(ok ? 16 : 0));
 }
 
-template <int M, int EPI>
-__global__ void __launch_bounds__(PW * 32, 2)
+template <int EPI, int M, int RT, int NJ>
+__device__ __forceinline__ void epilogue_nj(const float (&acc)[M][RT][NJ][4], int r, void* out, int N, int col0,
+                                            int pr0, int pr1, bool v0, bool v1, float limit) {
+#pragma unroll
+  for (int h = 0; h < 2; ++h) {
+    if (!(h ? v1 : v0)) continue;
+    const size_t row = (size_t)(h ? pr1 : pr0) * N;
+#pragma unroll
+    for (int j = 0; j < NJ; ++j) {
+      const int col = col0 + 8 * j;
+      const float a0 = acc[0][r][j][2 * h], a1 = acc[0][r][j][2 * h + 1];
+      if constexpr (EPI == 0) {
+        *reinterpret_cast<float2*>(reinterpret_cast<float*>(out) + row + col) = make_float2(a0, a1);
+      } else {
+        float o0, o1;
+        if constexpr (EPI == 2) {
+          o0 = swiglu(a0, acc[M - 1][r][j][2 * h], limit);
+          o1 = swiglu(a1, acc[M - 1][r][j][2 * h + 1], limit);
+        } else {
+          o0 = a0;
+          o1 = a1;
+        }
+        *reinterpret_cast<__nv_bfloat162*>(reinterpret_cast<__nv_bfloat16*>(out) + row + col) =
+            __floats2bfloat162_rn(o0, o1);
+      }
+    }
+  }
+}
+
+template <int M, int EPI, int NJ>
+__global__ void __launch_bounds__(PW * (NTW / NJ) * 32, 2)
     nvfp4_expert_prompt_kernel(const __nv_bfloat16* __restrict__ X, int x_stride, int slots,
                                const uint4* __restrict__ W, const float* __restrict__ scale, int KG, int NB,
                                const int* __restrict__ items, const int* __restrict__ counts,
                                const int* __restrict__ members, void* __restrict__ out, int N, float limit, int skip) {
   __shared__ __align__(16) PromptSmem<M> sm;
-  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, gq = lane >> 2, t = lane & 3;
+  constexpr int HALVES = NTW / NJ, THREADS = PW * HALVES * 32, XPIECES = PROWS * 4 / THREADS;
+  static_assert(XPIECES >= 1 && PROWS * 4 % THREADS == 0, "every thread stages whole pieces of x");
+  const int tid = threadIdx.x, lane = tid & 31, gq = lane >> 2, t = lane & 3;
+  const int warp = (tid >> 5) / HALVES, j0 = ((tid >> 5) % HALVES) * NJ;   // column block, its first n8 tile
   const int groups = NB / PW;
   const int units = __ldg(counts) * groups;
   for (int unit = blockIdx.x; unit < units; unit += gridDim.x) {
     const int it = unit / groups, cg = unit - it * groups;
     const int e = __ldg(items + 3 * it), first = __ldg(items + 3 * it + 1), cnt = __ldg(items + 3 * it + 2);
     if (e == skip) continue;                                   // the same for the whole CTA
-    int xr[2], xp[2];
-    bool xok[2];
-    const __nv_bfloat16* xs[2];
+    int xr[XPIECES], xp[XPIECES];
+    bool xok[XPIECES];
+    const __nv_bfloat16* xs[XPIECES];
 #pragma unroll
-    for (int i = 0; i < 2; ++i) {
-      const int c = tid + PW * 32 * i;
+    for (int i = 0; i < XPIECES; ++i) {
+      const int c = tid + THREADS * i;
       xr[i] = c >> 2;
       xp[i] = c & 3;
       xok[i] = xr[i] < cnt;
@@ -194,8 +228,8 @@ __global__ void __launch_bounds__(PW * 32, 2)
     const uint4* wb = W + ((size_t)e * NB + (size_t)cg * PW) * (size_t)KG * (M * BLOCK4);
     auto stage = [&](int s, int g) {
 #pragma unroll
-      for (int i = 0; i < 2; ++i) cp16z(&sm.x[s][xr[i]][8 * xp[i]], xs[i] + 32 * g, xok[i]);
-      for (int c = tid; c < PW * M * BLOCK4; c += PW * 32) {
+      for (int i = 0; i < XPIECES; ++i) cp16z(&sm.x[s][xr[i]][8 * xp[i]], xs[i] + 32 * g, xok[i]);
+      for (int c = tid; c < PW * M * BLOCK4; c += THREADS) {
         const int w = c / (M * BLOCK4), rem = c - w * (M * BLOCK4), m = rem / BLOCK4, q = rem - m * BLOCK4;
         cp16(&sm.w[s][w][m][q], wb + ((size_t)w * KG + g) * (M * BLOCK4) + m * BLOCK4 + q);
       }
@@ -210,13 +244,13 @@ __global__ void __launch_bounds__(PW * 32, 2)
       pr1[r] = v1[r] ? __ldg(members + first + 16 * r + gq + 8) : 0;
     }
     const int live = (cnt + 15) / 16;
-    float acc[M][PR][NTW][4];
+    float acc[M][PR][NJ][4];
 #pragma unroll
     for (int m = 0; m < M; ++m)
 #pragma unroll
       for (int r = 0; r < PR; ++r)
 #pragma unroll
-        for (int j = 0; j < NTW; ++j) acc[m][r][j][0] = acc[m][r][j][1] = acc[m][r][j][2] = acc[m][r][j][3] = 0.f;
+        for (int j = 0; j < NJ; ++j) acc[m][r][j][0] = acc[m][r][j][1] = acc[m][r][j][2] = acc[m][r][j][3] = 0.f;
 #pragma unroll
     for (int s = 0; s < PS - 1; ++s) {
       if (s < KG) stage(s, s);
@@ -252,7 +286,8 @@ __global__ void __launch_bounds__(PW * 32, 2)
 #pragma unroll
         for (int m = 0; m < M; ++m) {
 #pragma unroll
-          for (int j = 0; j < NTW; ++j) {
+          for (int jj = 0; jj < NJ; ++jj) {
+            const int j = j0 + jj;
             const uint32_t word = comp(wv[m], j);
             const uint32_t b0 = fp4pair(word, 8 * h), b1 = fp4pair(word, 8 * h + 4);
             const uint32_t sw = comp(sv[m], 2 * h + (j >> 1));
@@ -263,7 +298,7 @@ __global__ void __launch_bounds__(PW * 32, 2)
               if (r >= live) break;                            // the same for the whole CTA
               float p[4] = {0.f, 0.f, 0.f, 0.f};
               mma(p, xa[r].x, xb[r].x, xa[r].y, xb[r].y, b0, b1);
-              float(&a)[4] = acc[m][r][j];
+              float(&a)[4] = acc[m][r][jj];
               a[0] = fmaf(p[0], s0, a[0]);
               a[1] = fmaf(p[1], s1, a[1]);
               if (v1[r]) {
@@ -283,18 +318,19 @@ __global__ void __launch_bounds__(PW * 32, 2)
 #pragma unroll
       for (int r = 0; r < PR; ++r)
 #pragma unroll
-        for (int j = 0; j < NTW; ++j)
+        for (int j = 0; j < NJ; ++j)
 #pragma unroll
           for (int q = 0; q < 4; ++q) acc[m][r][j][q] *= g;
     }
     const int cb = cg * PW + warp;
 #pragma unroll
     for (int r = 0; r < PR; ++r)
-      if (r < live) epilogue<EPI, M, PR>(acc, r, out, N, cb * COLS + 2 * t, pr0[r], pr1[r], v0[r], v1[r], limit);
+      if (r < live)
+        epilogue_nj<EPI, M, PR, NJ>(acc, r, out, N, cb * COLS + 8 * j0 + 2 * t, pr0[r], pr1[r], v0[r], v1[r], limit);
   }
 }
 
-template <int M, int EPI>
+template <int M, int EPI, int NJ>
 void launch_prompt(const at::Tensor& x, int x_stride, int slots, const at::Tensor& w, const at::Tensor& scale, int kg,
                    int nb, const at::Tensor& items, const at::Tensor& counts, const at::Tensor& members,
                    at::Tensor& out, int n, float limit, int skip, int64_t max_units) {
@@ -302,14 +338,15 @@ void launch_prompt(const at::Tensor& x, int x_stride, int slots, const at::Tenso
   static int per_sm = 0;
   static int sms = 0;
   if (per_sm == 0) {
-    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, nvfp4_expert_prompt_kernel<M, EPI>, PW * 32, 0);
+    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, nvfp4_expert_prompt_kernel<M, EPI, NJ>,
+                                                  PW * (NTW / NJ) * 32, 0);
     sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
     per_sm = per_sm < 1 ? 1 : per_sm;
   }
   const int64_t need = max_units / PW;                      // max_units counts (item, column block) units
   const int grid = static_cast<int>(need < (int64_t)per_sm * sms ? need : (int64_t)per_sm * sms);
   if (grid < 1) return;
-  nvfp4_expert_prompt_kernel<M, EPI><<<grid, PW * 32, 0, at::cuda::getCurrentCUDAStream()>>>(
+  nvfp4_expert_prompt_kernel<M, EPI, NJ><<<grid, PW * (NTW / NJ) * 32, 0, at::cuda::getCurrentCUDAStream()>>>(
       reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), x_stride, slots,
       reinterpret_cast<const uint4*>(w.data_ptr()), scale.data_ptr<float>(), kg, nb, items.data_ptr<int>(),
       counts.data_ptr<int>(), members.data_ptr<int>(), out.data_ptr(), n, limit, skip);
@@ -350,9 +387,9 @@ void nvfp4_experts_cuda(int64_t epi, const at::Tensor& x, int64_t x_stride, int6
   const float lim = static_cast<float>(limit);
   if (rt == 4) {                                              // prompt items of up to 64 pairs
     const int64_t mu = max_units;
-    if (epi == 2) launch_prompt<2, 2>(x, xs, sl, w, scale, k, b, items, counts, members, out, nn, lim, sk, mu);
-    else if (epi == 0) launch_prompt<1, 0>(x, xs, sl, w, scale, k, b, items, counts, members, out, nn, lim, sk, mu);
-    else if (epi == 3) launch_prompt<1, 3>(x, xs, sl, w, scale, k, b, items, counts, members, out, nn, lim, sk, mu);
+    if (epi == 2) launch_prompt<2, 2, NJ_GU>(x, xs, sl, w, scale, k, b, items, counts, members, out, nn, lim, sk, mu);
+    else if (epi == 0) launch_prompt<1, 0, NJ_DN>(x, xs, sl, w, scale, k, b, items, counts, members, out, nn, lim, sk, mu);
+    else if (epi == 3) launch_prompt<1, 3, NJ_DN>(x, xs, sl, w, scale, k, b, items, counts, members, out, nn, lim, sk, mu);
     else TORCH_CHECK(false, "nvfp4 experts: epilogue 0 (fp32 down), 2 (SwiGLU) or 3 (bf16 down), not ", epi);
     return;
   }
