@@ -11,6 +11,7 @@ if not torch.cuda.is_available():
     pytest.skip("CUDA only", allow_module_level=True)
 
 from tensorfold.cuda.kernels import affine, qmm  # noqa: E402
+from tensorfold.families.qwen3_5.cuda import qmm_fast  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.weights import QLinear  # noqa: E402
 
 ROWS = [1, 2, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 100, 127, 128, 129, 200, 256]
@@ -153,6 +154,42 @@ def test_sums_match_the_fp64_reference_as_closely_as_the_generic_kernel(kernel, 
     generic = affine.matmul(x, QLinear(*w, bits=8), f32=True).double()
     assert ((lane.double() - ref).abs() <= bound).all() and ((generic - ref).abs() <= bound).all()
     assert torch.equal(qmm.matmul(x, q), lane.to(torch.bfloat16))
+
+
+def test_tiled_qlinear_keeps_its_width_in_every_helper():
+    """tile/untile, rows() views and copies, and a group of mixed widths: each projection keeps its own bits."""
+
+    eight = QLinear(*_weights(1024, 2048, 41), bits=8)
+    four = QLinear(*[t.contiguous() for t in _four(1024, 2048)])
+    t8, t4 = qmm_fast.tile(eight), qmm_fast.tile(four)
+    assert (t8.layout, t8.bits, t8.n, t8.k) == ("tiled", 8, 1024, 2048) and t4.bits == 4
+    back = qmm_fast.untile(t8)
+    assert back.bits == 8 and all(torch.equal(a, b) for a, b in zip((back.weight, back.scales, back.biases),
+                                                                      (eight.weight, eight.scales, eight.biases)))
+    x = torch.randn((9, 2048), device="cuda").bfloat16()
+    full = qmm_fast.matmul(x, t8)
+    assert torch.equal(full, qmm.matmul(x, qmm.Q4(t8.weight, t8.scales, t8.biases, 1024, 2048, 64, 8)))
+    partial = qmm.matmul(x, qmm.pack(*_weights(1024, 2048, 41), 64, bits=8), f32=True)
+    assert torch.equal(qmm_fast.matmul_partial(x, t8), partial)
+    from tensorfold.families.qwen3_5.cuda.distributed import row_partial
+
+    assert torch.equal(row_partial(x, t8), partial)                     # a row-parallel rank's share
+    got8, got4 = qmm_fast.matmul_group(x, [t8, t4])
+    assert torch.equal(got8, full) and torch.equal(got4, qmm_fast.matmul(x, t4))
+    assert torch.equal(qmm_fast.matmul_group(x, [t8, t8])[1], full)
+    for a, b in ((0, 512), (64, 320), (100, 900)):                       # a view, then copies off the tile edges
+        part = qmm_fast.rows(t8, a, b)
+        assert part.bits == 8 and part.n == b - a
+        sub = QLinear(eight.weight[a:b].contiguous(), eight.scales[a:b].contiguous(), eight.biases[a:b].contiguous(),
+                      bits=8)
+        assert torch.equal(qmm_fast.matmul(x, part), qmm_fast.matmul(x, qmm_fast.tile(sub)))
+
+
+def _four(n: int, k: int):
+    g = torch.Generator(device="cuda").manual_seed(n + k)
+    words = torch.randint(-(2 ** 31), 2 ** 31 - 1, (n, k // 8), generator=g, device="cuda", dtype=torch.int64)
+    scales = (torch.rand((n, k // 64), generator=g, device="cuda") * 0.02 + 0.001).to(torch.bfloat16)
+    return words.to(torch.int32), scales, (torch.randn((n, k // 64), generator=g, device="cuda") * 0.05).bfloat16()
 
 
 @pytest.mark.skipif(not MODEL.exists(), reason=f"needs an 8-bit g64 MLX checkpoint at {MODEL} (set TF_AFFINE8_MODEL)")

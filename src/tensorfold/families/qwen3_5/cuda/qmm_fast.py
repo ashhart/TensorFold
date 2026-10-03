@@ -1,4 +1,4 @@
-"""Keep the optimized four-bit path and dispatch other affine formats without converting their weights."""
+"""Tile 4- and 8-bit projections for the lane matmul and dispatch other affine formats without converting them."""
 
 from __future__ import annotations
 
@@ -11,10 +11,10 @@ from .weights import QLinear, Weights
 
 
 def tile(q: QLinear) -> QLinear:
-    if q.layout == "tiled" or not q.fast:
+    if q.layout == "tiled" or not q.lane:
         return q
-    p = shared.pack(q.weight, q.scales, q.biases, 64)
-    return QLinear(p.weight, p.scales, p.biases, layout="tiled", rows=q.n)
+    p = shared.pack(q.weight, q.scales, q.biases, 64, bits=q.bits)
+    return QLinear(p.weight, p.scales, p.biases, layout="tiled", rows=q.n, bits=q.bits)
 
 
 def untile(q: QLinear) -> QLinear:
@@ -22,20 +22,21 @@ def untile(q: QLinear) -> QLinear:
 
     if q.layout != "tiled":
         return q
-    return QLinear(*shared.unpack(shared.Q4(q.weight, q.scales, q.biases, q.n, q.k, 64)))
+    return QLinear(*shared.unpack(shared.Q4(q.weight, q.scales, q.biases, q.n, q.k, 64, q.bits)), bits=q.bits)
 
 
 def rows(q: QLinear, a: int, b: int) -> QLinear:
     """Rows [a, b) of a tiled weight: a view when they are whole 128-row blocks from a tile edge, else a small copy."""
 
     if a % 64 == 0 and (b - a) % 128 == 0:
-        return QLinear(q.weight[a // 64:b // 64], q.scales[:, a:b], q.biases[:, a:b], layout="tiled", rows=b - a)
+        return QLinear(q.weight[a // 64:b // 64], q.scales[:, a:b], q.biases[:, a:b], layout="tiled", rows=b - a,
+                       bits=q.bits)
     t0, t1 = a // 64, -(-b // 64)
     part = shared.Q4(q.weight[t0:t1], q.scales[:, t0 * 64:t1 * 64].contiguous(),
-                     q.biases[:, t0 * 64:t1 * 64].contiguous(), (t1 - t0) * 64, q.k, q.gs)
+                     q.biases[:, t0 * 64:t1 * 64].contiguous(), (t1 - t0) * 64, q.k, q.gs, q.bits)
     w, s, bias = shared.unpack(part)
     lo, hi = a - t0 * 64, b - t0 * 64
-    return tile(QLinear(w[lo:hi].contiguous(), s[lo:hi].contiguous(), bias[lo:hi].contiguous()))
+    return tile(QLinear(w[lo:hi].contiguous(), s[lo:hi].contiguous(), bias[lo:hi].contiguous(), bits=q.bits))
 
 
 def matmul_rows(x: torch.Tensor, parts: list[QLinear]) -> torch.Tensor:
@@ -47,21 +48,21 @@ def matmul_rows(x: torch.Tensor, parts: list[QLinear]) -> torch.Tensor:
 
 
 def matmul(x: torch.Tensor, q: QLinear, xs: torch.Tensor | None = None) -> torch.Tensor:
-    """The lane matmul for either layout; both give the same bits."""
+    """The lane matmul for either layout (4-bit: both give the same bits); other formats on the generic kernel."""
 
+    if q.layout == "tiled":
+        return shared.matmul(x, q, xs)
     if not q.fast:
         from tensorfold.cuda.kernels.affine import matmul as affine_matmul
 
         return affine_matmul(x, q)
-    if q.layout == "tiled":
-        return shared.matmul(x, q, xs)
     return lane_matmul(x, q.weight, q.scales, q.biases, xs=xs)
 
 
 def matmul_group(x: torch.Tensor, qs: list[QLinear], xs: torch.Tensor | None = None) -> list[torch.Tensor]:
-    """``[matmul(x, q, xs) for q in qs]`` with the same bits: one launch on sm_12x when all are tiled 4-bit."""
+    """``[matmul(x, q, xs) for q in qs]`` with the same bits: one launch on sm_12x when all are tiled at one width."""
 
-    if all(q.layout == "tiled" and q.fast for q in qs):
+    if all(q.layout == "tiled" for q in qs) and len({q.bits for q in qs}) == 1:
         return shared.matmul_group(x, qs, xs)
     return [matmul(x, q, xs) for q in qs]
 
@@ -69,13 +70,13 @@ def matmul_group(x: torch.Tensor, qs: list[QLinear], xs: torch.Tensor | None = N
 def matmul_partial(x: torch.Tensor, q: QLinear, xs: torch.Tensor | None = None) -> torch.Tensor:
     """fp32 sums for a tiled weight, unrounded: a row-parallel rank's share of a projection."""
 
+    if q.layout == "tiled":
+        return shared.matmul(x, q, xs, f32=True)
     if not q.fast:
         from tensorfold.cuda.kernels.affine import matmul as affine_matmul
 
         return affine_matmul(x, q, f32=True)
-    if q.layout != "tiled":
-        raise ValueError("matmul_partial takes tiled weights")
-    return shared.matmul(x, q, xs, f32=True)
+    raise ValueError("matmul_partial takes tiled weights")
 
 
 def stack(parts: list[QLinear]) -> QLinear:

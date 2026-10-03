@@ -26,6 +26,21 @@ def test_one_gpu_counts_the_tiled_head_once(model):
     assert once.staging == 3 * 248320 * 640 * 4                     # the largest tensor as loaded: the head's words
 
 
+def test_one_gpu_counts_an_8bit_head_once(tmp_path):
+    """An 8-bit head in groups of 64 is tiled too, so the drafter's rows are views of it as well."""
+
+    from cuda_27b_headers import _write
+
+    n, k = 248320, TEXT["hidden_size"]
+    head = [("lm_head.weight", "U32", [n, k // 4]), ("lm_head.scales", "BF16", [n, k // 64]),
+            ("lm_head.biases", "BF16", [n, k // 64])]
+    folder = _write(tmp_path / "head8", {"model_type": "qwen3_5", "text_config": TEXT,
+                                         "quantization": {"group_size": 64, "bits": 8}}, head)
+    twice = capacity.estimate_weights(folder, weight_transform(folder))
+    once = capacity.estimate_weights(folder, weight_transform(folder, one_gpu=True))
+    assert twice.resident - once.resident == n * k + 2 * n * (k // 64) * 2
+
+
 def test_the_drafter_load_peak_is_its_largest_quantize(model):
     _, folder = model
     held = capacity.estimate_weights(folder, draft_bytes)
