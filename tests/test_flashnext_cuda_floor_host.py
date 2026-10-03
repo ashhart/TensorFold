@@ -48,3 +48,15 @@ def test_a_machine_without_cuda_changes_nothing(monkeypatch):
                                 get_device_name=lambda *a: "Fake GPU")
     monkeypatch.setitem(sys.modules, "torch", torch)
     build.refuse_small_gpu()
+
+
+def test_a_volta_serves_an_nvfp4_checkpoint_and_refuses_the_rest(tmp_path, monkeypatch):
+    import json
+
+    _fake_torch(monkeypatch, (7, 0), "Tesla V100")
+    (tmp_path / "config.json").write_text(json.dumps({"quantization_config": {"quant_method": "modelopt"}}))
+    assert qwen4_exp._volta_nvfp4(tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps({"quantization": {"bits": 4, "group_size": 64}}))
+    assert not qwen4_exp._volta_nvfp4(tmp_path)
+    with pytest.raises(ValueError, match=r"sm_120 and sm_121.*Tesla V100"):
+        qwen4_exp.cuda_engine(tmp_path, no_drafts=True)

@@ -24,6 +24,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 from nvfp4_tiny import write  # noqa: E402
 
 
+SM70 = torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 7
+sm80_faces = pytest.mark.skipif(SM70, reason="the sm_80+ faces; sm_70 builds Volta ones (test_flashnext_nvfp4_volta)")
+
+
 @pytest.fixture(scope="module")
 def tiny(tmp_path_factory) -> Path:
     return write(tmp_path_factory.mktemp("nvfp4-tiny"))
@@ -54,6 +58,7 @@ def test_the_header_names_every_tensor(tiny: Path) -> None:
     assert hdr["mtp.layers.0.mlp.experts.gate_up_proj"]["dtype"] == "BF16"
 
 
+@sm80_faces
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="the loader builds CUDA tensors")
 def test_the_loader_builds_the_nvfp4_faces(tiny: Path) -> None:
     from tensorfold.families.qwen4_exp.cuda.weights import load
@@ -96,6 +101,7 @@ def test_the_loader_builds_the_nvfp4_faces(tiny: Path) -> None:
     assert float((fd - ref).norm() / ref.norm()) < 0.12
 
 
+@sm80_faces
 def test_the_reader_finds_the_published_naming(tmp_path: Path) -> None:
     """The published NVFP4 checkpoint spells its language-model tensors ``model.language_model.*`` while its
     lm_head and mtp stay top level; the loader reads the same faces as from the plain ``model.*`` layout."""
@@ -191,6 +197,7 @@ def test_the_bf16_rows_reach_the_engine_buffers(tmp_path: Path) -> None:
 
 
 
+@sm80_faces
 def test_the_loader_reads_mxfp8_linears_and_an_nvfp4_table(tmp_path: Path) -> None:
     """local-inference-lab's layout: DeltaNet, attention and shared-expert linears in MXFP8 go to the lane matmul as
     stored, the n-gram table's NVFP4 rows come back as bf16(code x scale x table scale), and the engine decodes."""
@@ -235,6 +242,7 @@ def test_the_loader_reads_mxfp8_linears_and_an_nvfp4_table(tmp_path: Path) -> No
     assert len(serial_decode(e, first, 8, None).tokens) == 8
 
 
+@sm80_faces
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="the loader builds CUDA tensors")
 def test_stage_reads_the_ngram_rows_ahead_with_the_same_bits(tmp_path: Path, monkeypatch) -> None:
     """``stage`` gathering the n-gram rows before its wait (the default) or after it (TF_FLASH_STAGE_AHEAD=0) stages
@@ -258,6 +266,7 @@ def test_stage_reads_the_ngram_rows_ahead_with_the_same_bits(tmp_path: Path, mon
     assert torch.equal(got["1"][1], got["0"][1]) and torch.equal(got["1"][2], got["0"][2])
 
 
+@sm80_faces
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="the loader builds CUDA tensors")
 def test_the_loader_reads_block_fp8_linears(tmp_path: Path) -> None:
     """``FP8_PB_WO`` linears, the head's too, reach the lane matmul as stored beside their bf16 neighbours."""
@@ -293,7 +302,8 @@ def test_the_loader_reads_block_fp8_linears(tmp_path: Path) -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="the loader builds CUDA tensors")
 @pytest.mark.parametrize("fp8", [False, True], ids=["bf16-prompts", "fp8-prompts"])
-@pytest.mark.parametrize("layout", [{}, {"mxfp8": True, "ple_nvfp4": True}, {"fp8block": True}],
+@pytest.mark.parametrize("layout", [{}, pytest.param({"mxfp8": True, "ple_nvfp4": True}, marks=sm80_faces),
+                                    pytest.param({"fp8block": True}, marks=sm80_faces)],
                          ids=["bf16", "mxfp8", "fp8block"])
 @pytest.mark.parametrize("seed", [None, 7])
 def test_drafts_over_a_draft_vocabulary_keep_the_serial_tokens(tmp_path: Path, layout: dict, seed, fp8) -> None:
@@ -376,7 +386,7 @@ def test_graph_replay_follows_each_steps_experts(tmp_path: Path, monkeypatch) ->
             for e in (eager, graphed):
                 assert prefill(e, prompt, sampling) == first
                 assert mtp_decode(e, first, 16, sampling, depth=3, confidence=0.0).tokens == ref, (prompt, e.graphs)
-    assert len(set(picks)) >= 8, "the routing never changed, so replay was not tested"
+    assert SM70 or len(set(picks)) >= 8, "the routing never changed, so replay was not tested"
     assert 0 < graphed.graphs.captures < 16 * len(prompts), "the graphed engine replayed no captured step"
 
 
@@ -390,6 +400,7 @@ def test_an_nvfp4_checkpoint_refuses_ple_on_ssd(tmp_path: Path) -> None:
         load(write(tmp_path / "ssd", ple_nvfp4=True), mtp=True, draft_vocab=None, ple_on_ssd=True)
 
 
+@sm80_faces
 def test_an_nvfp4_checkpoint_refuses_two_ranks(tiny: Path, monkeypatch) -> None:
     """Two ranks read the MLX checkpoint: an NVFP4 one on --tp 2 stops by name before any rank starts."""
 
@@ -400,6 +411,7 @@ def test_an_nvfp4_checkpoint_refuses_two_ranks(tiny: Path, monkeypatch) -> None:
         FlashNextEngine(tiny, tp=2, rank=0, master="127.0.0.1")
 
 
+@sm80_faces
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="the loader builds CUDA tensors")
 @pytest.mark.parametrize("scale", ["tensor", "row", "block"])
 @pytest.mark.parametrize("sampled", [False, True])
@@ -479,6 +491,7 @@ def test_fp8_expert_refusals(tmp_path: Path, monkeypatch, case: str) -> None:
         load(path, mtp=True, draft_vocab=128)
 
 
+@sm80_faces
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="the loader builds CUDA tensors")
 @pytest.mark.parametrize("scale", ["tensor", "row", "block"])
 def test_fp8_mtp_real_projection_shapes_dequantize_byte_exactly(tmp_path: Path, monkeypatch, scale: str) -> None:

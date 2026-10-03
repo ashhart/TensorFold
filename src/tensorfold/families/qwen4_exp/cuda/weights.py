@@ -43,13 +43,17 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         return exl3.load(model_dir, device, mtp=mtp, tp=tp, draft_vocab=draft_vocab, table_reads=table_reads)
     full = Config.read(model_dir)
     rank, world = tp if tp is not None else (0, 1)
+    from tensorfold.cuda.build import volta as on_volta
+
+    from . import volta as vk
     from .ranks import UNIT, share
 
+    sm70 = full.quant == "modelopt" and on_volta()
     if world > 1 and (full.heads % world or full.nk % world or full.nv % world
                       or (full.kv_heads % world and world % full.kv_heads)):
         raise ValueError(f"Flash Next's heads ({full.heads} query, {full.kv_heads} key/value, {full.nk}/{full.nv} "
                          f"DeltaNet) do not split over {world} ranks")
-    unit = UNIT if full.quant == "modelopt" else 32               # whole NVFP4 groups of 64, MLX groups of 32
+    unit = UNIT if full.quant == "modelopt" else 32            # whole NVFP4 groups of 64, MLX groups of 32
     lo, hi = share(full.moe_width, rank, world, unit) if world > 1 else (0, full.moe_width)   # shared expert too
     # key/value heads past the rank count are shared: each rank keeps the one its query heads read
     kv_local = max(1, full.kv_heads // world)
@@ -124,6 +128,15 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         """Linears of one input as one face by their storage: bf16 rows on ``bf16.matmul``, MXFP8 on the lane matmul."""
 
         got = [dense(*p) for p in parts]
+        if sm70:                                          # sm_70: 16-bit Volta linears of the stored bf16 values
+            if any(s is not None for _, s in got):
+                raise ValueError(f"{parts[0][0]}: FP8 non-expert linears are not read on sm_70; serve the bf16 ones")
+            cols = [p[2] if len(p) > 2 else None for p in parts]
+            if any(c is not None for c in cols):
+                if len(parts) != 1:
+                    raise ValueError(f"{parts[0][0]}: a row-parallel shard of a stacked projection")
+                return vk.linear(_plain(parts[0][0], raw(parts[0][0] + ".weight")), cols[0])
+            return vk.linear(torch.cat([w for w, _ in got]))
         if any(isinstance(s, tuple) for _, s in got):     # block FP8: its own lane-matmul face; bf16 parts beside it
             from tensorfold.cuda.nvfp4.linear import Concat, Fp8BlockLinear
 
@@ -150,6 +163,12 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         raise ValueError(f"{parts[0][0]}: a projection stack mixes MXFP8 and bf16 weights")
 
     def hc_nvfp4(name: str, inject: bool) -> HC:
+        if sm70:
+            down = [raw(name + ".input_mix_weight_down.weight")]
+            if inject:
+                down.append(raw(name + ".block_inject_weight.weight"))
+            return HC(vk.linear(torch.cat(down)), b16(name + ".input_mix_weight_up"), cscale(name + ".hc_norm.weight"),
+                      inject)
         parts = [b16(name + ".input_mix_weight_down")]
         if inject:
             parts.append(b16(name + ".block_inject_weight"))
@@ -231,6 +250,8 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         return out
 
     def b16_rows(t: torch.Tensor):
+        if sm70:
+            return vk.linear(t)
         return b16_from_rows(t.to(torch.bfloat16).contiguous())
 
     def moe(name: str) -> MoEW:
@@ -266,7 +287,13 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         gs = full.nvfp4_group
         dlo, dhi = lo // gs, hi // gs
         se = f"{name}.shared_expert."
-        if raw(se + "gate_proj.weight").dtype == torch.float8_e4m3fn:     # MXFP8: its own lane-matmul faces
+        if sm70:                                         # the bf16 shared expert, at the routed width: gate/up rows, down whole
+            if raw(se + "gate_proj.weight").dtype == torch.float8_e4m3fn:
+                raise ValueError(f"{se}: an MXFP8 shared expert is not read on sm_70")
+            shared = (raw(se + "gate_proj.weight").to(torch.bfloat16)[lo:hi].contiguous(),
+                      raw(se + "up_proj.weight").to(torch.bfloat16)[lo:hi].contiguous(),
+                      raw(se + "down_proj.weight").to(torch.bfloat16))
+        elif raw(se + "gate_proj.weight").dtype == torch.float8_e4m3fn:     # MXFP8: its own lane-matmul faces
             shared = nvfp4_moe.Expert4(face((se + "gate_proj", slice(lo, hi)), (se + "up_proj", slice(lo, hi))),
                                        face((se + "down_proj", None, slice(dlo * gs, dhi * gs))))
         else:
@@ -299,17 +326,33 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
             gate, up, dn = stacked("gate_proj"), stacked("up_proj"), stacked("down_proj")
             if world > 1:
                 gate, up, dn = gate[:, lo:hi], up[:, lo:hi], dn[:, :, dlo * gs:dhi * gs]
+            if sm70:
+                return MoEW(router, vk.make(vk.experts_from_bf16(torch.cat([gate, up], dim=1), dn), router, shared,
+                                            slice(lo, hi) if world > 1 else None))
             moe4 = nvfp4_moe.moe4_from_bf16(torch.cat([gate, up], dim=1), dn, shared)
         elif rd.has(prefix + f"{name}.experts.0.gate_proj.weight"):    # the main layers: per-expert FP4
-            def stack(proj: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-                weights = [raw(f"{name}.experts.{i}.{proj}.weight") for i in range(e)]
-                if any(w.dtype != torch.uint8 for w in weights):
-                    raise ValueError(f"{name}.{proj}: expected packed NVFP4 experts; FP8 is read only in MTP")
-                w = torch.stack(weights)
-                s = torch.stack([raw(f"{name}.experts.{i}.{proj}.weight_scale") for i in range(e)])
+            def stack(proj: str, cut=None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                """Every expert's arrays stacked; ``cut(codes, scales)``: each expert's share, taken as it is read."""
+                weights, scales = [], []
+                for i in range(e):
+                    w, sc = raw(f"{name}.experts.{i}.{proj}.weight"), raw(f"{name}.experts.{i}.{proj}.weight_scale")
+                    if w.dtype != torch.uint8:
+                        raise ValueError(f"{name}.{proj}: expected packed NVFP4 experts; FP8 is read only in MTP")
+                    if cut is not None:
+                        w, sc = cut(w, sc)
+                    weights.append(w)
+                    scales.append(sc)
+                w, s = torch.stack(weights), torch.stack(scales)
+                del weights, scales
                 s2 = torch.stack([raw(f"{name}.experts.{i}.{proj}.weight_scale_2") for i in range(e)])
                 return w, s, s2
 
+            if sm70 and world > 1:                       # a rank's share as each expert is read: no full stack
+                rows = lambda w, sc: (w[lo:hi].contiguous(), sc[lo:hi].contiguous())          # noqa: E731
+                cols = lambda w, sc: (w[:, dlo * gs // 2:dhi * gs // 2].contiguous(),          # noqa: E731
+                                      sc[:, dlo:dhi].contiguous())
+                routed = vk.experts(stack("gate_proj", rows), stack("up_proj", rows), stack("down_proj", cols))
+                return MoEW(router, vk.make(routed, router, shared, slice(lo, hi)))
             gate = stack("gate_proj")
             up = stack("up_proj")
             down = stack("down_proj")
@@ -317,14 +360,25 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
                 gate = (gate[0][:, lo:hi], gate[1][:, lo:hi], gate[2])
                 up = (up[0][:, lo:hi], up[1][:, lo:hi], up[2])
                 down = (down[0][:, :, dlo * gs // 2:dhi * gs // 2], down[1][:, :, dlo:dhi], down[2])   # 8 bytes a block
+            if sm70:
+                routed = vk.experts(tuple(t.contiguous() for t in gate), tuple(t.contiguous() for t in up),
+                                    tuple(t.contiguous() for t in down))
+                del gate, up, down
+                return MoEW(router, vk.make(routed, router, shared, slice(lo, hi) if world > 1 else None))
             moe4 = nvfp4_moe.moe4_from_checkpoint(gate, up, down, shared)
             del gate, up, down                           # the stacks are dead once the grids are tiled
         else:                                            # the MTP layer: BF16 stacked experts (excluded)
-            gu = raw(name + ".experts.gate_up_proj").to(torch.bfloat16)          # [E, 2*NI, D]
-            dn = raw(name + ".experts.down_proj").to(torch.bfloat16)             # [E, D, NI]
+            read = (lambda n: rd.host(prefix + n).to(torch.bfloat16)) if sm70 else (      # noqa: E731
+                lambda n: raw(n).to(torch.bfloat16))      # sm_70: sliced on the host, only the share uploads
+            gu = read(name + ".experts.gate_up_proj")                            # [E, 2*NI, D]
+            dn = read(name + ".experts.down_proj")                               # [E, D, NI]
             if world > 1:                                # this rank's gate rows and its up rows
                 gu = torch.cat([gu[:, lo:hi], gu[:, w_ + lo:w_ + hi]], dim=1)
                 dn = dn[:, :, dlo * gs:dhi * gs]
+            gu, dn = gu.to(device), dn.to(device)
+            if sm70:
+                return MoEW(router, vk.make(vk.experts_from_bf16(gu, dn), router, shared,
+                                            slice(lo, hi) if world > 1 else None))
             moe4 = nvfp4_moe.moe4_from_bf16(gu, dn, shared)
         return MoEW(router, moe4)
 
@@ -395,15 +449,24 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         raise ValueError(f"Flash Next's CUDA engine reads MLX 4-bit (groups of 32) or NVFP4 (experts-only) "
                          f"checkpoints, not {cfg.quant}")
     try:                                              # a failed load cancels the reads queued ahead
-        embed = ((raw(mbase + "embed_tokens.weight").to(torch.bfloat16).contiguous(),) if cfg.quant == "modelopt"
-                 else triple("model.embed_tokens"))
+        if sm70:                                      # the bf16 table in page-locked host memory, gathered by the GPU
+            from tensorfold.cuda.kernels.qmmf_volta import HostRows
+
+            embed = (HostRows(raw(mbase + "embed_tokens.weight").to(torch.bfloat16)),)
+        else:
+            embed = ((raw(mbase + "embed_tokens.weight").to(torch.bfloat16).contiguous(),) if cfg.quant == "modelopt"
+                     else triple("model.embed_tokens"))
         loaded = []
         ahead = rd.layer_names(prefix, mbase, chosen, mtp)   # read ahead of the layer that takes them
+        if sm70:                                          # the MTP experts' stacks are sliced on the host
+            ahead = [[n for n in names if not n.endswith((".experts.gate_up_proj", ".experts.down_proj"))]
+                     for names in ahead]
+        depth = 1 if sm70 else 2                          # layers read ahead (32 GB cards: one)
         layer_events: list = []                           # each layer's event, recorded once its work is queued
         for k, i in enumerate(chosen):
-            if len(layer_events) >= 2:                    # at most two layers queued ahead of the GPU
+            if len(layer_events) >= depth:                # at most two layers queued ahead of the GPU
                 layer_events.pop(0).synchronize()
-            for names in ahead[k:k + 2]:                  # two layers in flight: reads overlap this one's packing
+            for names in ahead[k:k + depth]:              # two layers in flight: reads overlap this one's packing
                 rd.queue(names)
             loaded.append(layer(i, f"{mbase}layers.{i}", cfg.layer_types[i], True))
             layer_events.append(torch.cuda.current_stream().record_event())
@@ -433,7 +496,9 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
             ids = np.array_split(ids[ids < full.vocab], world)[rank]
             ids = torch.from_numpy(ids).to(device)
             draft_ids = ids
-            if cfg.quant == "modelopt":
+            if sm70:                                  # draft-only rows as NVFP4 on the Volta kernel
+                draft_head = vk.nvfp4_rows(weight_bf16("lm_head", ids))
+            elif cfg.quant == "modelopt":
                 draft_head = quantize4(weight_bf16("lm_head", ids))
             else:
                 draft_head = make_q4(*_rows_at(triple("lm_head"), ids))

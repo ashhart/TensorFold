@@ -56,13 +56,25 @@ def _ranks(w: Weights, b: Buffers, part: torch.Tensor, flat: torch.Tensor, R: in
     return 3, _gather(w, b, part, flat, R)
 
 
+def _volta(q) -> bool:
+    """Whether ``q`` is an sm_70 linear (``qmmf_volta.VoltaLinear``)."""
+
+    return str(getattr(q, "layout", "")).startswith("volta-")
+
+
 def _f32(x: torch.Tensor, q, b: Buffers) -> torch.Tensor:
     """An NVFP4 checkpoint's linear as unrounded fp32 [R, N]: a rank's partial, or a down projection's sums."""
 
+    if _volta(q):
+        return q.prefill(x, f32=True) if b.prefill else q.matmul(x, f32=True)
     return bf16.matmul(x, q.b, out=torch.empty((x.shape[0], q.n), dtype=torch.float32, device=x.device), f32=True)
 
 
 def _mm(x: torch.Tensor, q: qmm.Q4, xs: torch.Tensor, out: torch.Tensor, b: Buffers, **kw) -> torch.Tensor:
+    if _volta(q):                                 # sm_70: the decode kernel for windows, the prompt GEMM for chunks
+        y = q.prefill(x, f32=kw.get("f32", False)) if b.prefill else q.matmul(x, f32=kw.get("f32", False))
+        out.copy_(y)
+        return out
     if getattr(q, "kernel", "qmm") == "b16":      # an NVFP4 checkpoint's BF16 linear (non-experts)
         return bf16.matmul(x, q, out=out)
     if not isinstance(q, qmm.Q4):                 # an EXL3 pack's matrix (``exl3_mm``): prompts on its prompt path
@@ -72,6 +84,10 @@ def _mm(x: torch.Tensor, q: qmm.Q4, xs: torch.Tensor, out: torch.Tensor, b: Buff
 
 
 def _embed(w: Weights, ids: torch.Tensor, copies: int, out: torch.Tensor) -> torch.Tensor:
+    if getattr(w.embed[0], "layout", "") == "host-b16":      # sm_70: the bf16 table in page-locked host memory
+        rows = w.embed[0].rows(ids).to(torch.bfloat16)
+        out.view(rows.shape[0], copies, rows.shape[1]).copy_(rows[:, None, :])
+        return out
     if len(w.embed) == 1:     # an unquantized embedding: an EXL3 pack's, or an NVFP4 checkpoint's BF16 table
         from .exl3_mm import embed
 
@@ -100,7 +116,7 @@ FUSED_ROWS = 16      # decode windows: the read-out in 3 kernels; wider windows 
 def _readout(hc: HC, b: Buffers, h: torch.Tensor, R: int, eps: float, streams: int, low: int, inject) -> None:
     """normed streams -> down -> SiLU / inject -> up -> mix: b.mixed [R, D] and its group sums."""
 
-    if getattr(hc.down, "kernel", "qmm") == "b16":     # an NVFP4 checkpoint: the same steps, bf16 kernels
+    if getattr(hc.down, "kernel", "qmm") == "b16" or _volta(hc.down):     # an NVFP4 checkpoint: bf16 (sm_70: fp16)
         _readout_b16(hc, b, h, R, eps, streams, low, inject)
     elif R <= FUSED_ROWS and not b.prefill and isinstance(hc.down, qmm.Q4):
         _readout_fused(hc, b, h, R, eps, streams, low, inject)
@@ -353,7 +369,12 @@ def moe_block(layer: LayerW, w: Weights, b: Buffers, R: int) -> tuple:
     """Routed experts + the shared expert. Returns the pending write-back: (2, slots y, weights) on one GPU, (3, gathered fp32 partials, None) across ranks."""
 
     m = layer.moe
-    if getattr(m.experts, "kernel", "qmm") == "nvfp4":      # an NVFP4 checkpoint: the FP4 experts
+    if getattr(m.experts, "kernel", "qmm") == "volta":      # sm_70: the NVFP4 experts on the Volta kernel
+        from . import volta
+
+        buf = b.moe
+        volta.moe(b.mixed[:R], m.experts, buf, w.cfg.top_k, b.prefill)
+    elif getattr(m.experts, "kernel", "qmm") == "nvfp4":    # an NVFP4 checkpoint: the FP4 experts
         buf = b.moe
         nvfp4_moe.moe(b.mixed[:R], b.xs_mixed[:R], m.router, m.experts, buf, _MoECfg(w.cfg))
     elif w.x3 is not None:                              # an EXL3 pack: each expert at its own width, one GPU

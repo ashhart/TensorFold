@@ -167,6 +167,20 @@ CUDA_KV_DTYPES = ("bf16", "int8", "int4")
 CUDA_DECODE_SHARE = True           # --parallel rounds size their prompt pass by --decode-share (0: whole passes)
 CUDA_PREFILL_FP8 = True            # --prefill-fp8: an NVFP4 checkpoint's MXFP8 linears have an FP8 prompt kernel
 
+def _volta_nvfp4(model_dir: Path) -> bool:
+    """An NVFP4 checkpoint on a Volta (sm_70) GPU, which its own kernels serve below the sm_120 floor."""
+
+    try:
+        import torch
+    except ImportError:
+        return False
+    if not torch.cuda.is_available() or tuple(torch.cuda.get_device_capability()) != (7, 0):
+        return False
+    from tensorfold.families import quant_method, read_config
+
+    return quant_method(read_config(model_dir)) == "modelopt"
+
+
 def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",
                 master_port: int = 29551, no_drafts: bool = False, mtp_drafts: int | None = None,
                 mtp_confidence: float | None = None, context: int | None = None, ple_on_ssd: bool = False,
@@ -176,7 +190,8 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
     from tensorfold.cuda import build
     from tensorfold.cuda.exl3.format import is_exl3
 
-    build.refuse_small_gpu()               # a card under sm_120 refuses this family by name, before anything is read
+    if not _volta_nvfp4(Path(model_dir)):
+        build.refuse_small_gpu()           # a card under sm_120 refuses this family by name, before anything is read
 
     if is_exl3(Path(model_dir)):
         print("[tensorfold] EXL3 packs are experimental: replies are exact; see "

@@ -81,8 +81,9 @@ def with_fixed(geometry: Geometry, extra: int) -> Geometry:
     return Geometry(lambda slots: geometry.bytes_at(slots) + extra, geometry.reserve, geometry.minimum_slots)
 
 
-def indexed_weights(world: int, mtp: bool, mapped_tables: bool = True, *, text: dict | None = None, rank: int = 0):
-    """Flash Next's resident bytes on one rank (``text``: its expert share and shared key/value heads)."""
+def indexed_weights(world: int, mtp: bool, mapped_tables: bool = True, *, host_embedding: bool = False,
+                    text: dict | None = None, rank: int = 0):
+    """Flash Next's resident bytes on one rank (its expert share, shared key/value heads; ``host_embedding``: sm_70)."""
 
     share = kv = None
     if text is not None and world > 1:
@@ -100,6 +101,8 @@ def indexed_weights(world: int, mtp: bool, mapped_tables: bool = True, *, text: 
             return 0, 0
         if ".ngram_embedding.shard_" in name or name.endswith(".ngram_embedding.trellis"):     # host pages if mapped
             return 0, size(info, name) if mapped_tables else 0
+        if host_embedding and name.endswith("embed_tokens.weight"):
+            return 0, 0
         shape = list(info["shape"])
         nvfp4_experts = ".mlp.experts." in name and share is not None
         if world > 1 and not info.get("split"):

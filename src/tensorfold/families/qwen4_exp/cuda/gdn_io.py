@@ -12,11 +12,11 @@ from .gdn import DK, DV
 
 @lru_cache(maxsize=1)
 def _ext():
-    from tensorfold.cuda.build import load
+    from tensorfold.cuda.build import VOLTA, load
 
     here = Path(__file__).parent
     return load(name="tensorfold_qwen4_exp_gdn_io_v2", sources=[str(here / "gdn_io.cpp"), str(here / "gdn_io.cu")],
-                extra_cuda_cflags=["-O3", "--fmad=false"], verbose=False)
+                need=VOLTA, extra_cuda_cflags=["-O3", "--fmad=false"], verbose=False)
 
 
 def front(p: torch.Tensor, conv_ptrs: torch.Tensor, sid: torch.Tensor, windows: torch.Tensor, conv_w: torch.Tensor,

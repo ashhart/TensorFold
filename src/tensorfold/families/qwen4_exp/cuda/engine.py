@@ -45,7 +45,7 @@ def vision_workspace() -> int:
     return int(value) * 2**20
 
 
-def build_kernels(*, exl3: bool = False, nvfp4: bool = False, solo: bool = True) -> None:
+def build_kernels(*, exl3: bool = False, nvfp4: bool = False, solo: bool = True, sm70: bool = False) -> None:
     """Load each applicable extension after admission and before resident weights consume the pool."""
 
     from tensorfold.cuda import experts
@@ -54,10 +54,17 @@ def build_kernels(*, exl3: bool = False, nvfp4: bool = False, solo: bool = True)
 
     from . import gdn, gdn_io
 
-    loaders = [experts._ext, shared_gdn._ext, qmm._ext, gdn_io._ext]
+    if sm70:                                     # the sm_70 kernels; the shared experts, lane and NVFP4 ones need sm_80+
+        from tensorfold.cuda.kernels import qmmf_volta
+
+        from .attention import _volta_ext
+
+        loaders = [shared_gdn._ext, gdn_io._ext, qmmf_volta._ext, _volta_ext]
+    else:
+        loaders = [experts._ext, shared_gdn._ext, qmm._ext, gdn_io._ext]
     if solo:                                     # serial windows, including a concurrent decoder's lone graph slot
         loaders.append(gdn._ext)
-    if nvfp4:
+    if nvfp4 and not sm70:
         from tensorfold.cuda.nvfp4 import checkpoint, linear
 
         loaders += [linear._ext, linear._prompt_ext, checkpoint._ext]
@@ -84,11 +91,13 @@ class FlashNextEngine:
 
         from .exl3_pack import admission, extra_files, is_exl3
 
+        from tensorfold.cuda.build import VOLTA, volta
         from tensorfold.families import quant_method, read_config
 
         exl3 = is_exl3(model_dir)
         nvfp4 = quant_method(read_config(model_dir)) == "modelopt"
-        if (exl3 or nvfp4) and tp != 1:
+        sm70 = nvfp4 and volta()
+        if (exl3 or (nvfp4 and not sm70)) and tp != 1:
             raise ValueError(f"{'EXL3 packs' if exl3 else 'NVFP4 checkpoints'} of Flash Next run on one GPU here: drop "
                              "--tp, or serve the MLX checkpoint (TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP) on two")
         if vision and (streams < 2 or tp != 1):
@@ -117,6 +126,8 @@ class FlashNextEngine:
         if not 0.0 <= float(confidence) <= 1.0:
             raise ValueError(f"MTP draft confidence: a probability from 0 to 1, not {confidence}")
         __import__("tensorfold.cuda.device", fromlist=["select"]).select(torch)
+        if sm70:                             # 32 GB cards: expert stacks of many sizes load and go, growable segments
+            torch.cuda.memory._set_allocator_settings("expandable_segments:True")
         self.tp, self.rank, self.depth, self.confidence = tp, rank, int(depth), float(confidence)
         self.streams, self.master, self.graphs_enabled = int(streams), master, bool(graphs)
         self.kv_dtype = check_kv(kv_dtype)
@@ -146,11 +157,13 @@ class FlashNextEngine:
         workspace = vision_workspace() if vision else 0
         self.capacity_plan = admit(model_dir, max_len, context_explicit, torch,
                                    capacity_geometry(geometry, model_dir, vision, rank, workspace),
-                                   vision_weights(indexed_weights(tp, mtp, mapped_tables=not ple_on_ssd, rank=rank,
+                                   vision_weights(indexed_weights(tp, mtp, mapped_tables=not ple_on_ssd,
+                                                                  host_embedding=sm70, rank=rank,
                                                                   text=config(model_dir) if tp > 1 else None),
                                                   vision, rank),
                                    rank=rank, world=tp,
-                                   gather=gather, extra_files=extra_files(model_dir) if exl3 else ())
+                                   gather=gather, extra_files=extra_files(model_dir) if exl3 else (),
+                                   **({"need": VOLTA, "staging_copies": 2} if sm70 else {}))
         self.prefill_rows, prompt_workspace = (PREFILL_ROWS, 0) if exl3 else (chunk, 0) if chunk else prompt_plan(
             self.capacity_plan, config(model_dir), torch.cuda.get_device_capability(), world=tp, vision=vision,
             fp8=prompt_precision.fp8())
@@ -162,7 +175,7 @@ class FlashNextEngine:
         if tp > 1:
             self._same_settings(torch, ids)
         build_kernels(exl3=exl3, nvfp4=not exl3 and quant_method(read_config(model_dir)) == "modelopt",
-                      solo=streams == 1 or (graphs and mtp))
+                      solo=streams == 1 or (graphs and mtp), sm70=sm70)
         from concurrent.futures import wait
 
         from tensorfold.cuda.direct_read import wait_all

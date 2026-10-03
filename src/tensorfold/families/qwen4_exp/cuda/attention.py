@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import functools
+
 import torch
 import triton
 import triton.language as tl
@@ -137,6 +139,22 @@ def _merge_row(PO, PM, PL, OUT, n, r, hk, H: tl.constexpr, HK: tl.constexpr, D: 
     tl.store(OUT + (r * H + head[:, None]) * D + d[None, :], result.to(tl.bfloat16), mask=gg[:, None] < G)
 
 
+@functools.lru_cache(maxsize=1)
+def _volta_ext():
+    from pathlib import Path
+
+    from tensorfold.cuda.build import VOLTA, load
+
+    here = Path(__file__).parent
+    return load(name="tensorfold_qwen4_exp_attn_volta", sources=[str(here / "attn_volta.cu")], need=VOLTA,
+                extra_cuda_cflags=["-O3"], verbose=False)
+
+
+@functools.lru_cache(maxsize=None)
+def _on_volta(index: int) -> bool:
+    return tuple(torch.cuda.get_device_capability(index)) == (7, 0)
+
+
 class AttnScratch:
     def __init__(self, rows: int, heads: int, head_dim: int, capacity: int, device, *, budget: int = 2048,
                  ratio: int = 4) -> None:
@@ -180,9 +198,14 @@ def attention(q: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor, pos0: torch.T
         keys = min(keys, (scratch.budget // scratch.ratio + 1) * scratch.ratio - 1)
     chunks = min(nch, triton.cdiv(keys, CHUNK))
     out = scratch.out if out is None else out
-    _chunks[(rows, hk, chunks)](q, kc, vc, ks, vs, pos0, scratch.po, scratch.pm, scratch.pl, scratch.ids, scratch.nk,
-                             scratch.sparse, H=h, HK=hk, D=d, G=g, CH=CHUNK, NCH=nch, SCALE=scale,
-                             IDW=scratch.idw, QSA=scratch.qsa, BITS=bits, num_warps=4, num_stages=1)
+    if not bits and _on_volta(q.device.index if q.device.index is not None else torch.cuda.current_device()):
+        # sm_70 has no bf16 tensor cores: the partials from a block a (row, key head, chunk) in fp32
+        _volta_ext().chunks(q, kc, vc, pos0, scratch.po, scratch.pm, scratch.pl, scratch.ids, scratch.nk,
+                            scratch.sparse, rows, chunks, CHUNK, nch, scale, scratch.idw, scratch.qsa)
+    else:
+        _chunks[(rows, hk, chunks)](q, kc, vc, ks, vs, pos0, scratch.po, scratch.pm, scratch.pl, scratch.ids,
+                                    scratch.nk, scratch.sparse, H=h, HK=hk, D=d, G=g, CH=CHUNK, NCH=nch, SCALE=scale,
+                                    IDW=scratch.idw, QSA=scratch.qsa, BITS=bits, num_warps=4, num_stages=1)
     _merge[(rows, hk)](scratch.po, scratch.pm, scratch.pl, pos0, out, scratch.nk, scratch.sparse, H=h,
                        HK=hk, D=d, G=g, CH=CHUNK, NCH=nch, QSA=scratch.qsa, BITS=bits, num_warps=4)
     return out

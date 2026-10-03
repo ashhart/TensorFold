@@ -83,6 +83,17 @@ class _Reader:
         self.touched.add(shard)
         return raw.view(_DT[entry["dtype"]]).reshape(entry["shape"])
 
+    def host(self, name: str) -> torch.Tensor:
+        """``name`` read into host memory (not read ahead to the device): a tensor a rank slices before it uploads."""
+
+        self.reads.drop([name])
+        shard = self.where[name]
+        base, header = self._header(shard)
+        entry = header[name]
+        begin, end = entry["data_offsets"]
+        self.touched.add(shard)
+        return self.io.read(self.dir / shard, base + begin, end - begin).view(_DT[entry["dtype"]]).reshape(entry["shape"])
+
     def has(self, name: str) -> bool:
         return name in self.where
 

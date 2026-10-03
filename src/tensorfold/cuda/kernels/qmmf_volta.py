@@ -18,7 +18,7 @@ DENSE_PROMPT_LIMIT = 1 << 28                   # weights of more inputs x output
 @lru_cache(maxsize=1)
 def _ext():
     here = Path(__file__).parent
-    return load(name="tensorfold_qmmf_volta_v2", sources=[str(here / "qmmf_volta.cu")], need=VOLTA,
+    return load(name="tensorfold_qmmf_volta_v3", sources=[str(here / "qmmf_volta.cu")], need=VOLTA,
                 extra_cuda_cflags=["-O3"], verbose=False)
 
 

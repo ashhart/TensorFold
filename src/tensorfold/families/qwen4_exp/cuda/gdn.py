@@ -21,11 +21,11 @@ def widths(nk: int, nv: int) -> tuple[int, int]:
 
 @lru_cache(maxsize=1)
 def _ext():
-    from tensorfold.cuda.build import load
+    from tensorfold.cuda.build import VOLTA, load
 
     here = Path(__file__).parent
     return load(name="tensorfold_qwen4_exp_gdn_v2", sources=[str(here / "gdn.cpp"), str(here / "gdn.cu")],
-                extra_cuda_cflags=["-O3", "--fmad=false"], verbose=False)
+                need=VOLTA, extra_cuda_cflags=["-O3", "--fmad=false"], verbose=False)
 
 
 class GDNScratch:
