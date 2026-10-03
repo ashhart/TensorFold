@@ -43,7 +43,8 @@ __device__ __forceinline__ void ld8(const T* __restrict__ p, float (&v)[8]) {
 // Grid (ceil(N / WARPS), ceil(M / R)): a warp one output column for R rows, each weight load serving the R rows (the
 // block's warps share the rows' loads in L1); a row's sum keeps the one-row order (lanes in fixed k order, the same xor
 // butterfly). K % 8 == 0, 16-byte rows.
-template <typename T, int R, int WARPS>
+// C > 1: a warp C adjacent columns, each row load serving C weight loads (a column's sum order is unchanged).
+template <typename T, int R, int WARPS, int C = 1>
 __global__ void __launch_bounds__(WARPS * 32) b16_kernel(const T* __restrict__ x, const T* __restrict__ w0,
                                                          const T* __restrict__ bias, T* __restrict__ y0, int M, int K,
                                                          int N0, const T* __restrict__ w1, T* __restrict__ y1, int N1) {
@@ -52,44 +53,145 @@ __global__ void __launch_bounds__(WARPS * 32) b16_kernel(const T* __restrict__ x
     const int N = blockIdx.z ? N1 : N0;
     const int lane = threadIdx.x & 31;
     const int row0 = blockIdx.y * R;
-    const int col = blockIdx.x * WARPS + (threadIdx.x >> 5);
-    if (col >= N) return;
-    const T* wr = w + (size_t)col * K;
-    float acc[R];
+    const int col0 = (blockIdx.x * WARPS + (threadIdx.x >> 5)) * C;
+    if (col0 >= N) return;
+    const T* wr[C];
 #pragma unroll
-    for (int r = 0; r < R; ++r) acc[r] = 0.f;
+    for (int c = 0; c < C; ++c) wr[c] = w + (size_t)(col0 + c < N ? col0 + c : col0) * K;
+    float acc[R][C];
+#pragma unroll
+    for (int r = 0; r < R; ++r)
+#pragma unroll
+        for (int c = 0; c < C; ++c) acc[r][c] = 0.f;
     for (int k = 8 * lane; k + 8 <= K; k += 256) {
-        float b[8];
-        ld8(wr + k, b);
+        float b[C][8];
+#pragma unroll
+        for (int c = 0; c < C; ++c) ld8(wr[c] + k, b[c]);
 #pragma unroll
         for (int r = 0; r < R; ++r) {
             if (row0 + r >= M) break;
             float a[8];
             ld8(x + (size_t)(row0 + r) * K + k, a);
 #pragma unroll
-            for (int i = 0; i < 8; ++i) acc[r] = fmaf(a[i], b[i], acc[r]);
+            for (int c = 0; c < C; ++c)
+#pragma unroll
+                for (int i = 0; i < 8; ++i) acc[r][c] = fmaf(a[i], b[c][i], acc[r][c]);
         }
     }
 #pragma unroll
     for (int r = 0; r < R; ++r) {
         if (row0 + r >= M) break;
-        float v = acc[r];
 #pragma unroll
-        for (int m = 16; m >= 1; m >>= 1) v += __shfl_xor_sync(0xffffffffu, v, m);
-        if (lane == 0) {
-            if (bias != nullptr) v += f2f(__ldg(bias + col));
-            y[(size_t)(row0 + r) * N + col] = f_from<T>(v);
+        for (int c = 0; c < C; ++c) {
+            const int col = col0 + c;
+            float v = acc[r][c];
+#pragma unroll
+            for (int m = 16; m >= 1; m >>= 1) v += __shfl_xor_sync(0xffffffffu, v, m);
+            if (lane == 0 && col < N) {
+                if (bias != nullptr) v += f2f(__ldg(bias + col));
+                y[(size_t)(row0 + r) * N + col] = f_from<T>(v);
+            }
         }
     }
 }
 
-template <typename T, int R, int WARPS>
+template <typename T, int R, int WARPS, int C = 1>
 void launch(const at::Tensor& x, const at::Tensor& w, const void* bp, at::Tensor& y, int M, int K, int N,
             const at::Tensor* w1, at::Tensor* y1) {
     const int N1 = w1 ? (int)w1->size(0) : 0, wide = N1 > N ? N1 : N;
-    const dim3 block(WARPS * 32), grid((unsigned)((wide + WARPS - 1) / WARPS), (unsigned)((M + R - 1) / R),
+    const dim3 block(WARPS * 32), grid((unsigned)((wide + WARPS * C - 1) / (WARPS * C)), (unsigned)((M + R - 1) / R),
                                        w1 ? 2u : 1u);
-    b16_kernel<T, R, WARPS><<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
+    b16_kernel<T, R, WARPS, C><<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
+        reinterpret_cast<const T*>(x.data_ptr()), reinterpret_cast<const T*>(w.data_ptr()),
+        reinterpret_cast<const T*>(bp), reinterpret_cast<T*>(y.data_ptr()), M, K, N,
+        w1 ? reinterpret_cast<const T*>(w1->data_ptr()) : nullptr, y1 ? reinterpret_cast<T*>(y1->data_ptr()) : nullptr,
+        N1);
+}
+
+// A verify window (2-63 rows) staged 256 inputs at a time in shared memory for WARPS x C columns; b16_kernel's bits.
+template <typename T, int R, int WARPS, int C>
+__global__ void __launch_bounds__(WARPS * 32) b16_window_kernel(const T* __restrict__ x, const T* __restrict__ w0,
+                                                                const T* __restrict__ bias, T* __restrict__ y0, int M,
+                                                                int K, int N0, const T* __restrict__ w1,
+                                                                T* __restrict__ y1, int N1) {
+    const T* w = blockIdx.z ? w1 : w0;
+    T* y = blockIdx.z ? y1 : y0;
+    const int N = blockIdx.z ? N1 : N0;
+    __shared__ __align__(16) T xs[R][256];
+    const int lane = threadIdx.x & 31;
+    const int row0 = blockIdx.y * R;
+    const int col0 = (blockIdx.x * WARPS + (threadIdx.x >> 5)) * C;
+    const bool live = col0 < N;                            // no early return: the block syncs on every chunk
+    const T* wr[C];
+#pragma unroll
+    for (int c = 0; c < C; ++c) wr[c] = w + (size_t)(col0 + c < N ? col0 + c : 0) * K;
+    float acc[R][C];
+#pragma unroll
+    for (int r = 0; r < R; ++r)
+#pragma unroll
+        for (int c = 0; c < C; ++c) acc[r][c] = 0.f;
+    for (int kb = 0; kb < K; kb += 256) {
+        for (int i = threadIdx.x; i < R * 32; i += WARPS * 32) {
+            const int r = i >> 5, k = kb + 8 * (i & 31);
+            uint4 v = make_uint4(0, 0, 0, 0);
+            if (row0 + r < M && k + 8 <= K) v = __ldg(reinterpret_cast<const uint4*>(x + (size_t)(row0 + r) * K + k));
+            *reinterpret_cast<uint4*>(&xs[r][8 * (i & 31)]) = v;
+        }
+        __syncthreads();
+        const int k = kb + 8 * lane;
+        if (live && k + 8 <= K) {
+            float b[C][8];
+#pragma unroll
+            for (int c = 0; c < C; ++c) ld8(wr[c] + k, b[c]);
+#pragma unroll
+            for (int r = 0; r < R; ++r) {
+                if (row0 + r >= M) break;
+                float a[8];
+                const uint4 u = *reinterpret_cast<const uint4*>(&xs[r][8 * lane]);
+                const uint32_t q[4] = {u.x, u.y, u.z, u.w};
+#pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    if constexpr (std::is_same_v<T, half>) {
+                        const float2 f = __half22float2(*reinterpret_cast<const __half2*>(&q[i]));
+                        a[2 * i] = f.x; a[2 * i + 1] = f.y;
+                    } else {
+                        const float2 f = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&q[i]));
+                        a[2 * i] = f.x; a[2 * i + 1] = f.y;
+                    }
+                }
+#pragma unroll
+                for (int c = 0; c < C; ++c)
+#pragma unroll
+                    for (int i = 0; i < 8; ++i) acc[r][c] = fmaf(a[i], b[c][i], acc[r][c]);
+            }
+        }
+        __syncthreads();
+    }
+    if (!live) return;
+#pragma unroll
+    for (int r = 0; r < R; ++r) {
+        if (row0 + r >= M) break;
+#pragma unroll
+        for (int c = 0; c < C; ++c) {
+            const int col = col0 + c;
+            float v = acc[r][c];
+#pragma unroll
+            for (int m = 16; m >= 1; m >>= 1) v += __shfl_xor_sync(0xffffffffu, v, m);
+            if (lane == 0 && col < N) {
+                if (bias != nullptr) v += f2f(__ldg(bias + col));
+                y[(size_t)(row0 + r) * N + col] = f_from<T>(v);
+            }
+        }
+    }
+}
+
+template <typename T, int R, int WARPS, int C>
+void launch_window(const at::Tensor& x, const at::Tensor& w, const void* bp, at::Tensor& y, int M, int K, int N,
+                   const at::Tensor* w1, at::Tensor* y1) {
+    const int N1 = w1 ? (int)w1->size(0) : 0, wide = N1 > N ? N1 : N;
+    const dim3 block(WARPS * 32), grid((unsigned)((wide + WARPS * C - 1) / (WARPS * C)), (unsigned)((M + R - 1) / R),
+                                       w1 ? 2u : 1u);
+    b16_window_kernel<T, R, WARPS, C><<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
         reinterpret_cast<const T*>(x.data_ptr()), reinterpret_cast<const T*>(w.data_ptr()),
         reinterpret_cast<const T*>(bp), reinterpret_cast<T*>(y.data_ptr()), M, K, N,
         w1 ? reinterpret_cast<const T*>(w1->data_ptr()) : nullptr, y1 ? reinterpret_cast<T*>(y1->data_ptr()) : nullptr,
@@ -101,6 +203,9 @@ void by_rows(const at::Tensor& x, const at::Tensor& w, const void* bp, at::Tenso
              const at::Tensor* w1 = nullptr, at::Tensor* y1 = nullptr) {
     if (M >= 512) launch<T, 16, 16>(x, w, bp, y, M, K, N, w1, y1);    // rows a warp, warps a block: never a row's bits
     else if (M >= 64) launch<T, 4, 8>(x, w, bp, y, M, K, N, w1, y1);
+    // a verify window (2-63 rows) shares each weight load across its rows; a row's sum keeps the one-row order
+    else if (M >= 9) launch_window<T, 16, 4, 4>(x, w, bp, y, M, K, N, w1, y1);
+    else if (M >= 2) launch_window<T, 8, 4, 4>(x, w, bp, y, M, K, N, w1, y1);
     else launch<T, 1, 4>(x, w, bp, y, M, K, N, w1, y1);
 }
 

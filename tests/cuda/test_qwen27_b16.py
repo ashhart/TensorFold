@@ -21,6 +21,19 @@ def test_rows_do_not_depend_on_the_row_count(n, k):
     assert (alone.float() - want.float()).abs().max().item() < 2e-2
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_window_rows_equal_one_row_launches(dtype):
+    """Every verify-window row count (2-63), with a bias and a ragged column count: each row's one-row bits."""
+
+    g = torch.Generator(device="cuda").manual_seed(7)
+    w = (torch.randn((203, 1024), generator=g, device="cuda") * 0.02).to(dtype)
+    bias = (torch.randn(203, generator=g, device="cuda") * 0.1).to(dtype)
+    x = (torch.randn((63, 1024), generator=g, device="cuda") * 0.5).to(dtype)
+    alone = torch.cat([matmul(x[r:r + 1], w, bias) for r in range(63)])
+    for m in range(2, 64):
+        assert torch.equal(matmul(x[:m], w, bias), alone[:m]), m
+
+
 @pytest.mark.parametrize("n,k", [(48, 5120), (96, 6144), (130, 256)])
 def test_prompt_rows_are_chunk_invariant(n, k):
     """The prompt kernel: one K chain a row, so any chunking and every tile height give a row the same bits."""

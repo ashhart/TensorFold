@@ -13,7 +13,7 @@ def _ext():
     from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
-    return load(name="tensorfold_qwen_b16_v4", sources=[str(here / "b16.cpp"), str(here / "b16.cu")],
+    return load(name="tensorfold_qwen_b16_v5", sources=[str(here / "b16.cpp"), str(here / "b16.cu")],
                 extra_cuda_cflags=["-O3"], verbose=False)
 
 
