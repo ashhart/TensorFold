@@ -132,6 +132,22 @@ MLX checkpoint's bf16 prompts and half its `--prefill-fp8` ones. The engine and 
 a 64k prompt peaks at 28 GiB allocated. Other branches of the pack load through the same path; only 3.00bpw is
 measured here.
 
+On a 16 GB card, startup's loading estimate, three times the largest layer or tensor (here the 2.4 GiB embedding),
+refuses the 2.00bpw pack with its drafter although the load fits. `TENSORFOLD_TIGHT_STAGING=1` bills the GPU for one
+layer's or the head's EXL3 group parts instead, which the loader holds beside their resident copy. The host check
+stays as it is: the drafter's tensors wait on the host until they pack. It applies on a discrete GPU only; unset,
+the estimate is unchanged.
+The default floor leaves no window on 16 GB, so this start also sets it to 2 GiB, with the risk
+[Context and memory](../../README.md#context-and-memory) names:
+
+```bash
+python -c "from huggingface_hub import snapshot_download as d; d('turboderp/Qwen3.8-27B-exl3', revision='2.00bpw', local_dir='qwen27b-exl3-2.00bpw')"
+tensorfold pull z-lab/Qwen3.8-27B-DFlash2
+TENSORFOLD_MEMORY_RESERVE_GIB=2 TENSORFOLD_TIGHT_STAGING=1 tensorfold serve qwen27b-exl3-2.00bpw
+```
+
+On an RTX 5060 Ti 16 GB this admits a 24,737-token window with the drafter, one request at a time.
+
 ### MLX 4-bit, one or two ranks
 
 One or two ranks are supported. Pull the model and drafter on every rank, then start rank 1 before rank 0:

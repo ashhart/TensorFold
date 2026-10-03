@@ -153,7 +153,9 @@ TENSORFOLD_CUDA_MEMORY_LIMIT_GB=31 tensorfold serve nvidia/Qwen3.8-27B-NVFP4
 
 A budget close to a shared pool can end requests with CUDA errors mid-reply, which is why a unified GPU keeps
 its floor; `TENSORFOLD_MEMORY_RESERVE_GIB` moves that floor. A discrete card's host need is its loading
-buffers, which startup checks on its own.
+buffers, which startup checks on its own. On a 16 GB card, `TENSORFOLD_TIGHT_STAGING=1` bills the GPU for a
+Qwen3.8-27B EXL3 pack's loading as the loader holds it; the host check stays. See
+[Qwen3.8-27B](docs/recipes/qwen3.8-27b.md#exl3-checkpoints-experimental).
 Requested replies need cache space too. Reduce context, reply length, retained prefixes on MLX, or
 checkpoint size after a memory refusal. The MLX process budget reserves 3 GiB outside the allocator.
 Release-qualified memory and speed results are TBD [release-0.3.5]; see the
