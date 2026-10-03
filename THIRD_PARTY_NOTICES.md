@@ -87,6 +87,12 @@ Flash Next's optional int8 and int4 KV caches (`families/qwen4_exp/cuda/kvcache.
 The MTP layer TensorFold drafts with comes from that checkpoint's last shard (MIT), converted by
 `families/deepseek_v4/convert.py`.
 
+`src/tensorfold/families/deepseek_v41/` ports the DeepSeek-V4.1-Flash model of
+[oMLX](https://github.com/jundot/omlx) (`omlx/patches/deepseek_v41/`, files marked MIT), itself a port of DeepSeek's
+reference inference code: the single-pass mHC, CSA2 attention, FP8/FP4 round trips, Engram hashing and row reader,
+and the Metal kernels for the head, hc_post, hc_pre_norm, fused attention and index scores. MIT License; see
+[the license text](LICENSES/MIT.txt).
+
 TensorFold ships no model weights. The `z-lab/Qwen3.8-27B-DFlash2` model card states Apache-2.0.
 The optional `incoai/GLM-5.3-Flash-DFlash2` model card states CC BY-NC-ND 4.0, for non-commercial use
 without derivatives. Each checkpoint keeps its own license.
