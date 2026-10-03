@@ -165,9 +165,13 @@ def test_a_serial_request_never_resumes():
     p = prompts(1)[0]
     pair = Pair(lanes=1, drafter=Pattern)
     pair.run([stream(p, 5)])
-    s = stream(p, 5, draft=False)
+    for cache in (pair.decoder.cache, pair.follower.cache):
+        cache.entries[0][1].snap["ring"] ^= 1  # a damaged kept state
+    d, s = stream(p, 20), stream(p, 20, draft=False)
+    pair.run([d])
     pair.run([s])
-    assert s.cached == 0
+    assert d.cached == len(p) - 1 and d.out != serial(p, 20)
+    assert s.cached == 0 and s.out == serial(p, 20)
 
 
 def disk_tiers(tmp_path, limit=1 << 30):

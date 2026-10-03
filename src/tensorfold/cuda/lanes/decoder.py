@@ -116,6 +116,7 @@ class LaneDecoder:
         s.count = min(s.count, room)
         if not self.free:
             raise NoRoom("every lane is busy")
+        # "draft": false never resumes: the serial reference is computed from the prompt alone, not from kept state
         hit = self.cache.find(s.prompt) if self.cache is not None and s.draft else None
         cached, tier = hit if hit is not None else (0, -1)
         quota = self._quota(n + s.count + self.slack)
