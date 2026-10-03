@@ -1,4 +1,4 @@
-"""4- and 8-bit lane matmul: rows run the same groups and K slices at any row count, so no row affects another."""
+"""4- to 8-bit lane matmul: rows run the same groups and K slices at any row count, so no row affects another."""
 
 from __future__ import annotations
 
@@ -40,7 +40,8 @@ def grouped(device: int) -> bool:
 
 @dataclass
 class Q4:
-    """Packed (n, k): int32 words [n/64][k/gs][8][32][gs*bits/128], bf16 scales, biases (k/gs, n); n padded to 128."""
+    """Packed (n, k): int32 words [n/64][k/gs][8][32][gs*bits/128] (5 and 6 bits: [n/64][k/gs][2*gs*bits], see
+    ``_tile``), bf16 scales, biases (k/gs, n); n padded to 128."""
 
     weight: torch.Tensor
     scales: torch.Tensor
@@ -55,15 +56,9 @@ class Q4:
 
 
 # slot p of a lane's word v holds input SPAN v + 2 (lane % 4) + OFFSETS[p] of the group (see ``frag`` in qmm_frag.cuh):
-# a 4-bit word serves two k16 steps, an 8-bit word one
+# a 4-bit word serves two k16 steps, an 8-bit word one, and a 5- or 6-bit lane's high word all four (slot 2 kt + h)
 OFFSETS = {4: (0, 8, 16, 24, 1, 9, 17, 25), 8: (0, 8, 1, 9)}
-
-
-def _offsets(gs: int, device, bits: int = 4) -> torch.Tensor:
-    span = 128 // bits
-    v = torch.arange(gs // span, device=device)[:, None, None]
-    c = torch.arange(4, device=device)[None, :, None]
-    return span * v + 2 * c + torch.tensor(OFFSETS[bits], device=device)[None, None, :]    # (V, 4, 32 / bits)
+HIGH = (0, 8, 16, 24, 32, 40, 48, 56, 1, 9, 17, 25, 33, 41, 49, 57)
 
 
 def _to_int32(v: torch.Tensor) -> torch.Tensor:
@@ -72,29 +67,101 @@ def _to_int32(v: torch.Tensor) -> torch.Tensor:
     return torch.where(v >= 2 ** 31, v - 2 ** 32, v).to(torch.int32)
 
 
+def _slots(gs: int, device, offsets: tuple) -> torch.Tensor:
+    span = 4 * len(offsets)
+    v = torch.arange(gs // span, device=device)[:, None, None]
+    c = torch.arange(4, device=device)[None, :, None]
+    return span * v + 2 * c + torch.tensor(offsets, device=device)[None, None, :]          # (V, 4, slots)
+
+
+def _lanes(q: torch.Tensor, width: int, offsets: tuple) -> torch.Tensor:
+    """Codes (cols, kg, gs) -> (cols / 64, kg, 8, 32, V) words, slot p ``width`` bits at ``width * p``."""
+
+    cols, kg, gs = q.shape
+    shifts = torch.arange(len(offsets), device=q.device, dtype=torch.int64) * width
+    picked = q.reshape(cols // 64, 8, 8, kg, gs)[..., _slots(gs, q.device, offsets)]   # (T, j, r, kg, V, 4, slots)
+    packed = _to_int32((picked.to(torch.int64) << shifts).sum(-1))                       # (T, j, r, kg, V, 4)
+    return packed.permute(0, 3, 1, 2, 5, 4).reshape(cols // 64, kg, 8, 32, -1)
+
+
+def _unlanes(w: torch.Tensor, width: int, offsets: tuple, gs: int) -> torch.Tensor:
+    """``_lanes`` undone: (T, kg, 8, 32, V) words -> codes (T * 64, kg, gs)."""
+
+    t, kg = w.shape[:2]
+    shifts = torch.arange(len(offsets), device=w.device, dtype=torch.int32) * width
+    w = w.reshape(t, kg, 8, 8, 4, -1).permute(0, 2, 3, 1, 5, 4)                           # (T, j, r, kg, V, 4)
+    q = torch.zeros((t, 8, 8, kg, gs), dtype=torch.int32, device=w.device)
+    q[..., _slots(gs, w.device, offsets)] = (w[..., None] >> shifts) & ((1 << width) - 1)
+    return q.reshape(t * 64, kg, gs)
+
+
+def _codes(words: torch.Tensor, bits: int) -> torch.Tensor:
+    """MLX (n, k*bits/32) words -> (n, k) codes: a little-endian bit stream, eight codes in ``bits`` bytes."""
+
+    n = words.shape[0]
+    if bits in OFFSETS:                 # codes never straddle a word
+        shifts = torch.arange(32 // bits, device=words.device, dtype=torch.int32) * bits
+        return ((words[:, :, None] >> shifts) & ((1 << bits) - 1)).reshape(n, -1)
+    b = words.contiguous().view(torch.uint8).reshape(n, -1, bits).to(torch.int64)
+    v = (b << (8 * torch.arange(bits, device=b.device))).sum(-1)
+    return ((v[..., None] >> (bits * torch.arange(8, device=b.device))) & ((1 << bits) - 1)).reshape(n, -1)
+
+
+def _words(q: torch.Tensor, bits: int) -> torch.Tensor:
+    """``_codes`` undone: (n, k) codes -> MLX (n, k*bits/32) int32 words."""
+
+    n = q.shape[0]
+    v = (q.reshape(n, -1, 8).to(torch.int64) << (bits * torch.arange(8, device=q.device))).sum(-1)
+    b = (v[..., None] >> (8 * torch.arange(bits, device=q.device))) & 0xFF
+    return b.to(torch.uint8).reshape(n, -1).view(torch.int32)
+
+
+def _tile(q: torch.Tensor, bits: int) -> torch.Tensor:
+    """Codes (cols, kg, gs) -> stored tiles: 4 and 8 bits in lane order; 5 and 6 bits per (64-column tile, group)
+    the nibbles in the 4-bit order, then the high bits, a word a lane and n8 tile (6) or pair of n8 tiles (5)."""
+
+    if bits in OFFSETS:
+        return _lanes(q, bits, OFFSETS[bits])
+    low = _lanes(q & 15, 4, OFFSETS[4]).flatten(2)
+    high = _lanes(q >> 4, bits - 4, HIGH)[..., 0].to(torch.int64)                          # (T, kg, 8, 32)
+    if bits == 5:                       # even n8 tile in bytes 0 and 2, odd tile in bytes 1 and 3
+        even, odd = high[:, :, 0::2], high[:, :, 1::2]
+        high = (even & 0xFF) | (odd & 0xFF) << 8 | (even >> 8) << 16 | (odd >> 8) << 24
+    return torch.cat([low, _to_int32(high).flatten(2)], dim=2)
+
+
+def _untile(w: torch.Tensor, bits: int, gs: int) -> torch.Tensor:
+    """``_tile`` undone: stored tiles -> codes (T * 64, kg, gs)."""
+
+    if bits in OFFSETS:
+        return _unlanes(w, bits, OFFSETS[bits], gs)
+    t, kg = w.shape[:2]
+    low = _unlanes(w[..., :512].reshape(t, kg, 8, 32, 2), 4, OFFSETS[4], gs)
+    high = w[..., 512:].reshape(t, kg, -1, 32)
+    if bits == 5:
+        even = (high & 0xFF) | ((high >> 16) & 0xFF) << 8
+        odd = ((high >> 8) & 0xFF) | ((high >> 24) & 0xFF) << 8
+        high = torch.stack([even, odd], dim=3).reshape(t, kg, 8, 32)
+    return low | _unlanes(high[..., None], bits - 4, HIGH, gs) << 4
+
+
 def pack(weight: torch.Tensor, scales: torch.Tensor, biases: torch.Tensor, gs: int, chunk: int = 4096, *,
          bits: int = 4) -> Q4:
     """MLX (n, k*bits/32) words, (n, k/gs) scales and biases -> ``Q4``; n padded to 128 with zeros (tiles stay in)."""
 
     words = weight.view(torch.int32) if weight.dtype != torch.int32 else weight
-    per = 32 // bits
     n, kw = words.shape
-    k, kg, npad = kw * per, kw * per // gs, -(-n // 128) * 128
+    k = kw * 32 // bits
+    kg, npad = k // gs, -(-n // 128) * 128
     dev = words.device
-    out = torch.empty((npad // 64, kg, 8, 32, gs * bits // 128), dtype=torch.int32, device=dev)
-    offs = _offsets(gs, dev, bits)
-    shifts = torch.arange(per, device=dev, dtype=torch.int32) * bits
-    wide = shifts.to(torch.int64)
+    shape = (8, 32, gs * bits // 128) if bits in OFFSETS else (2 * gs * bits,)
+    out = torch.empty((npad // 64, kg, *shape), dtype=torch.int32, device=dev)
     for start in range(0, npad, chunk):
         stop = min(start + chunk, npad)
         block = torch.zeros((stop - start, kw), dtype=torch.int32, device=dev)
         if start < n:
             block[:min(stop, n) - start] = words[start:min(stop, n)]
-        q = ((block[:, :, None] >> shifts) & ((1 << bits) - 1)).reshape(stop - start, kg, gs)  # (cols, kg, gs)
-        q = q.reshape((stop - start) // 64, 8, 8, kg, gs)                                   # (T, j, r, kg, gs)
-        picked = q[..., offs]                                                                # (T, j, r, kg, V, 4, per)
-        packed = _to_int32((picked.to(torch.int64) << wide).sum(-1))                        # (T, j, r, kg, V, 4)
-        out[start // 64:stop // 64] = packed.permute(0, 3, 1, 2, 5, 4).reshape(-1, kg, 8, 32, out.shape[-1])
+        out[start // 64:stop // 64] = _tile(_codes(block, bits).reshape(stop - start, kg, gs), bits)
     pad = npad - n
 
     def major(t: torch.Tensor) -> torch.Tensor:
@@ -107,30 +174,22 @@ def pack(weight: torch.Tensor, scales: torch.Tensor, biases: torch.Tensor, gs: i
 def unpack(q: Q4, chunk: int = 64) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """The stored MLX layout again: (n, k*bits/32) int32 words, (n, k/gs) scales and biases, ``chunk`` tiles a step."""
 
-    t, kg, _, _, v = q.weight.shape
-    dev = q.weight.device
+    t = q.weight.shape[0]
     bits = getattr(q, "bits", 4)
-    per = 32 // bits
-    shifts = torch.arange(per, device=dev, dtype=torch.int32) * bits
-    wide = shifts.to(torch.int64)
-    offs = _offsets(q.gs, dev, bits)
-    words = torch.empty((t * 64, q.k // per), dtype=torch.int32, device=dev)
+    words = torch.empty((t * 64, q.k * bits // 32), dtype=torch.int32, device=q.weight.device)
     for a in range(0, t, chunk):
         b = min(a + chunk, t)
-        w = q.weight[a:b].reshape(b - a, kg, 8, 8, 4, v).permute(0, 2, 3, 1, 5, 4)          # (T, j, r, kg, V, 4)
-        codes = (w[..., None] >> shifts) & ((1 << bits) - 1)                                  # (T, j, r, kg, V, 4, per)
-        qv = torch.zeros((b - a, 8, 8, kg, q.gs), dtype=torch.int32, device=dev)
-        qv[..., offs] = codes
-        qv = qv.reshape((b - a) * 64, q.k // per, per)
-        words[a * 64:b * 64] = _to_int32((qv.to(torch.int64) << wide).sum(-1))
+        words[a * 64:b * 64] = _words(_untile(q.weight[a:b], bits, q.gs).reshape((b - a) * 64, q.k), bits)
     return words[:q.n].contiguous(), q.scales[:, :q.n].t().contiguous(), q.biases[:, :q.n].t().contiguous()
 
 
 def split_k(n: int, k: int, gs: int = 64, target: int = 192, bits: int = 4) -> int:
     """K slices for an (n, k) weight: a function of the shape only (never of the row count); a slice takes at least
-    2 * bits groups (8-bit weights stream better in fewer, longer slices)."""
+    2 * bits groups (8-bit weights stream better in fewer, longer slices), and 5- and 6-bit weights, at least 8, stop
+    at a third of the blocks."""
 
-    tiles, groups, sk, least = -(-n // 64), k // gs, 1, 2 * bits
+    tiles, groups, sk = -(-n // 64), k // gs, 1
+    least, target = (8, target // 3) if bits in (5, 6) else (2 * bits, target)
     while sk < 8 and tiles * sk < target and groups % (sk * 2) == 0 and groups // (sk * 2) >= least:
         sk *= 2
     return sk

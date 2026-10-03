@@ -1,5 +1,5 @@
-// sm_12x lane matmul: up to four projections of one input and bit width (4 or 8) a launch, each column with qmm.cu's
-// order and so its bits.
+// sm_12x lane matmul: up to four projections of one input and bit width (4, 5, 6 or 8) a launch, each column with
+// qmm.cu's order and so its bits.
 
 #include <ATen/ATen.h>
 #include <algorithm>
@@ -58,6 +58,7 @@ __global__ void __launch_bounds__(WM * WN * 32) group_kernel(
         int M, int K, int ldx, int rows_t, int C) {
     using T = LaneTile<GS, BM, BN, WM, WN, STAGES, BITS>;
     static_assert(!SWAP || (BM == 8 && WM == 1 && T::NT % 2 == 0), "swapped tiles: 8 rows, column pairs a warp");
+    static_assert(BITS != 5 || T::NT % 2 == 0, "5 bits: a warp holds both n8 tiles of each shared high word");
     constexpr int I = SWAP ? T::NT / 2 : T::MT;     // MMA m16 tiles a warp: column pairs (swapped) or row tiles
     constexpr int J = SWAP ? 1 : T::NT;             // MMA n8 tiles a warp: the 8 rows (swapped) or column tiles
     extern __shared__ __align__(128) unsigned char buf[];
@@ -176,10 +177,15 @@ __global__ void __launch_bounds__(WM * WN * 32) group_kernel(
                 const float* px = reinterpret_cast<const float*>(p + T::X + T::W + 2 * T::S);
                 uint32_t words[T::NT][T::WORDS];
 #pragma unroll
-                for (int j = 0; j < T::NT; ++j)
+                for (int j = 0; j < T::NT; ++j) {
+                    if constexpr (BITS == 5 || BITS == 6) {
+                        high_words<GS, BITS>(words[j], pw, wn * T::NT + j, lane);
+                    } else {
 #pragma unroll
-                    for (int v = 0; v < T::WORDS; ++v)
-                        words[j][v] = pw[((wn * T::NT + j) * 32 + lane) * T::WORDS + v];
+                        for (int v = 0; v < T::WORDS; ++v)
+                            words[j][v] = pw[((wn * T::NT + j) * 32 + lane) * T::WORDS + v];
+                    }
+                }
                 float d[I][J][4];
                 if constexpr (SWAP) {
 #pragma unroll
@@ -447,6 +453,12 @@ void qmm_group_cuda(const at::Tensor& x, const at::Tensor& xs, const std::vector
     if (bits == 8) {
         if (f32) dispatch<true, 8>(tile, x.size(0), gb10, x, xs, parts, C, early);
         else dispatch<false, 8>(tile, x.size(0), gb10, x, xs, parts, C, early);
+    } else if (bits == 6) {
+        if (f32) dispatch<true, 6>(tile, x.size(0), gb10, x, xs, parts, C, early);
+        else dispatch<false, 6>(tile, x.size(0), gb10, x, xs, parts, C, early);
+    } else if (bits == 5) {
+        if (f32) dispatch<true, 5>(tile, x.size(0), gb10, x, xs, parts, C, early);
+        else dispatch<false, 5>(tile, x.size(0), gb10, x, xs, parts, C, early);
     } else {
         if (f32) dispatch<true, 4>(tile, x.size(0), gb10, x, xs, parts, C, early);
         else dispatch<false, 4>(tile, x.size(0), gb10, x, xs, parts, C, early);

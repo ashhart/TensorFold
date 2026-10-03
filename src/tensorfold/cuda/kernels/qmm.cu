@@ -1,5 +1,5 @@
-// Lane matmul (4- or 8-bit): acc = fma(xs, b, fma(P, s, acc)) per group in order, K slices set by shape, so no row
-// affects another.
+// Lane matmul (4, 5, 6 or 8 bits): acc = fma(xs, b, fma(P, s, acc)) per group in order, K slices set by shape, so no
+// row affects another.
 
 #include <ATen/ATen.h>
 #include <algorithm>
@@ -95,10 +95,15 @@ __global__ void __launch_bounds__(WM * WN * 32) qmm_kernel(
             const float* px = reinterpret_cast<const float*>(p + T::X + T::W + 2 * T::S);
             uint32_t words[T::NT][T::WORDS];
 #pragma unroll
-            for (int j = 0; j < T::NT; ++j)
+            for (int j = 0; j < T::NT; ++j) {
+                if constexpr (BITS == 5 || BITS == 6) {
+                    high_words<GS, BITS>(words[j], pw, wn * T::NT + j, lane);
+                } else {
 #pragma unroll
-                for (int v = 0; v < T::WORDS; ++v)
-                    words[j][v] = pw[((wn * T::NT + j) * 32 + lane) * T::WORDS + v];
+                    for (int v = 0; v < T::WORDS; ++v)
+                        words[j][v] = pw[((wn * T::NT + j) * 32 + lane) * T::WORDS + v];
+                }
+            }
             float d[T::MT][T::NT][4];
 #pragma unroll
             for (int kt = 0; kt < GS / 16; ++kt) {
@@ -295,6 +300,12 @@ void qmm_cuda(const at::Tensor& x, const at::Tensor& xs, const at::Tensor& w, co
     if (bits == 8) {                                      // groups of 64 only
         if (f32) { if (cluster) GO(64, true, true, 8); else GO(64, true, false, 8); }
         else { if (cluster) GO(64, false, true, 8); else GO(64, false, false, 8); }
+    } else if (bits == 6) {
+        if (f32) { if (cluster) GO(64, true, true, 6); else GO(64, true, false, 6); }
+        else { if (cluster) GO(64, false, true, 6); else GO(64, false, false, 6); }
+    } else if (bits == 5) {
+        if (f32) { if (cluster) GO(64, true, true, 5); else GO(64, true, false, 5); }
+        else { if (cluster) GO(64, false, true, 5); else GO(64, false, false, 5); }
     } else if (gs == 64) {
         if (f32) { if (cluster) GO(64, true, true, 4); else GO(64, true, false, 4); }
         else { if (cluster) GO(64, false, true, 4); else GO(64, false, false, 4); }

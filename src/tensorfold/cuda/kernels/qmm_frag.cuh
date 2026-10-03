@@ -1,4 +1,4 @@
-// Shared by the 4- and 8-bit matmuls: cp.async staging, ldmatrix, the bf16 mma, decoding from B-fragment order.
+// Shared by the 4- to 8-bit matmuls: cp.async staging, ldmatrix, the bf16 mma, decoding from B-fragment order.
 #pragma once
 
 #include <cuda_bf16.h>
@@ -13,7 +13,7 @@ struct LaneTile {
     static constexpr int THREADS = WM * WN * 32;
     static constexpr int MT = BM / WM / 16;               // m16 tiles a warp
     static constexpr int NT = BN / WN / 8;                // n8 tiles a warp
-    static constexpr int WORDS = GS * BITS / 128;         // a lane's words of one n8 tile a group
+    static constexpr int WORDS = BITS == 5 ? 3 : GS * BITS / 128;   // a lane's words of one n8 tile a group
     static constexpr int ROW = GS * 2;                    // bytes of one input row a group
     static constexpr int CHUNKS = ROW / 16;
     static constexpr int X = BM * ROW;                    // stage bytes: inputs,
@@ -78,9 +78,8 @@ __device__ __forceinline__ void mma0(float (&d)[4], const uint32_t (&a)[4], uint
         : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1), "f"(z));
 }
 
-// Nibbles at bits [s, s + 4) and [16 + s, 20 + s) as a bf16 pair: exponent bits make 128 + q, then minus 128.
-__device__ __forceinline__ uint32_t pair(uint32_t w, int s) {
-    const uint32_t t = ((w >> s) & 0x000F000Fu) | 0x43004300u;
+// 128 + q in each half (exponent bits over a mantissa q < 128) minus 128: the bf16 pair q, exactly.
+__device__ __forceinline__ uint32_t minus128(uint32_t t) {
     uint32_t r;
 #if __CUDA_ARCH__ >= 900
     asm("sub.rn.bf16x2 %0, %1, %2;\n" : "=r"(r) : "r"(t), "r"(0x43004300u));
@@ -89,6 +88,20 @@ __device__ __forceinline__ uint32_t pair(uint32_t w, int s) {
     asm("fma.rn.bf16x2 %0, %1, %2, %3;\n" : "=r"(r) : "r"(t), "r"(0x3F803F80u), "r"(0xC300C300u));
 #endif
     return r;
+}
+
+// Nibbles at bits [s, s + 4) and [16 + s, 20 + s) as a bf16 pair.
+__device__ __forceinline__ uint32_t pair(uint32_t w, int s) {
+    return minus128(((w >> s) & 0x000F000Fu) | 0x43004300u);
+}
+
+// 5 or 6 bits: the nibbles as ``pair`` reads them from ``lo``, with the high bits at [at, at + BITS - 4) and
+// [16 + at, ..) of ``hi`` set above them in the mantissa (q < 64), so one subtraction gives q exactly.
+template <int BITS>
+__device__ __forceinline__ uint32_t pair_high(uint32_t lo, int s, uint32_t hi, int at) {
+    constexpr uint32_t HIGH = ((1u << (BITS - 4)) - 1) * 0x00100010u;
+    const uint32_t h = at <= 4 ? hi << (4 - at) : hi >> (at - 4);
+    return minus128(((lo >> s) & 0x000F000Fu) | (h & HIGH) | 0x43004300u);
 }
 
 // 16 * hi + lo for exact bf16 pairs of nibbles: bytes 0-255 rebuilt exactly (bf16 holds every integer to 256).
@@ -100,11 +113,27 @@ __device__ __forceinline__ uint32_t join(uint32_t lo, uint32_t hi) {
 
 // B-fragment register h (k rows 2t, 2t + 1, then 2t + 8, 2t + 9) of k16 step kt from a lane's words of an n8 tile.
 // 4 bits: a word holds two steps, nibble slots as ``pair`` reads them; 8 bits: a word a step, bytes at bits 8h and
-// 16 + 8h. ``unpack(w, s)`` is ``pair`` (or ``pairm`` with its mask): every value is exact, so the mma sees q.
+// 16 + 8h; 5 and 6 bits: the low nibbles as at 4 bits, and word 2 the high bits, slot 2 kt + h. ``unpack(w, s)`` is
+// ``pair`` (or ``pairm`` with its mask): every value is exact, so the mma sees q.
 template <int BITS, typename Unpack>
 __device__ __forceinline__ uint32_t frag(const uint32_t* words, int kt, int h, Unpack unpack) {
     if constexpr (BITS == 8) return join(unpack(words[kt], h * 8), unpack(words[kt], h * 8 + 4));
+    else if constexpr (BITS == 5 || BITS == 6)
+        return pair_high<BITS>(words[kt / 2], (kt & 1) * 8 + h * 4, words[2], (BITS - 4) * (kt * 2 + h));
     else return unpack(words[kt / 2], (kt & 1) * 8 + h * 4);
+}
+
+// A lane's words of n8 tile j of a stage at 5 or 6 bits. Each stored 64-column tile keeps its nibbles in the 4-bit
+// order ([8][32][2] words), then its high bits: [8][32] words at 6 bits; [4][32] at 5, where tiles 2p and 2p + 1 share
+// a word (bytes 0 and 2 the even tile's, 1 and 3 the odd one's), shifted here so slot 2 kt + h sits at bit 2 kt + h.
+template <int GS, int BITS>
+__device__ __forceinline__ void high_words(uint32_t (&words)[3], const uint32_t* pw, int j, int lane) {
+    static_assert(GS == 64 && (BITS == 5 || BITS == 6), "5 and 6 bits in groups of 64");
+    const uint32_t* t = pw + (j >> 3) * (2 * GS * BITS);
+    words[0] = t[((j & 7) * 32 + lane) * 2];
+    words[1] = t[((j & 7) * 32 + lane) * 2 + 1];
+    if constexpr (BITS == 6) words[2] = t[512 + (j & 7) * 32 + lane];
+    else words[2] = t[512 + (j & 7) / 2 * 32 + lane] >> ((j & 1) * 8);
 }
 
 // Programmatic dependent launch (sm_90+; no-ops before, and when the launch did not ask for it): wait for the

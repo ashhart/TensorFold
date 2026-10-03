@@ -14,12 +14,14 @@ void qmm_prefill8w_cuda(const at::Tensor&, const at::Tensor&, const at::Tensor&,
 void qmm_prefill8_cuda(const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
                        const at::Tensor&, at::Tensor&, int, int, bool, int);
 
-// x (M, K) bf16 times a packed 4- or 8-bit weight; ``reduce`` false leaves the K slices unadded in ``part`` (SK, M, n).
+// x (M, K) bf16 times a packed 4-, 5-, 6- or 8-bit weight; ``reduce`` false leaves the K slices unadded in ``part``
+// (SK, M, n).
 void qmm(const at::Tensor& x, const at::Tensor& xs, const at::Tensor& w, const at::Tensor& scales,
          const at::Tensor& biases, at::Tensor& out, const c10::optional<at::Tensor>& part, int64_t n, int64_t sk,
          int64_t gs, int64_t bm, bool f32, bool reduce, int64_t bits) {
     TORCH_CHECK(gs == 32 || gs == 64, "groups of 32 or 64");
-    TORCH_CHECK(bits == 4 || (bits == 8 && gs == 64), "4 bits, or 8 bits in groups of 64");
+    TORCH_CHECK(bits == 4 || ((bits == 5 || bits == 6 || bits == 8) && gs == 64),
+                "4 bits, or 5, 6 or 8 bits in groups of 64");
     TORCH_CHECK(bm == 16 || bm == 32 || bm == 64, "row tile 16, 32 or 64");
     TORCH_CHECK(x.is_cuda() && x.scalar_type() == at::kBFloat16 && x.dim() == 2 && x.size(0) >= 1 &&
                 x.stride(1) == 1 && x.stride(0) >= x.size(1), "x: (M, K) bf16 with contiguous rows");
@@ -48,12 +50,13 @@ void qmm(const at::Tensor& x, const at::Tensor& xs, const at::Tensor& w, const a
              static_cast<int>(bm), f32, reduce, static_cast<int>(bits));
 }
 
-// Up to four packed weights of one width (4 or 8 bits) against one x in one sm_12x launch, each with its own K split.
+// Up to four packed weights of one width (4, 5, 6 or 8 bits) against one x in one sm_12x launch, each with its own
+// K split.
 void qmm_group(const at::Tensor& x, const at::Tensor& xs, const std::vector<at::Tensor>& ws,
                const std::vector<at::Tensor>& scales, const std::vector<at::Tensor>& biases,
                std::vector<at::Tensor> outs, const std::vector<int64_t>& ns, const std::vector<int64_t>& sks, bool f32,
                int64_t tile, int64_t pdl, int64_t bits) {
-    TORCH_CHECK(bits == 4 || bits == 8, "4 or 8 bits");
+    TORCH_CHECK(bits == 4 || bits == 5 || bits == 6 || bits == 8, "4, 5, 6 or 8 bits");
     const size_t parts = ws.size();
     TORCH_CHECK(parts >= 1 && parts <= 4 && scales.size() == parts && biases.size() == parts && outs.size() == parts &&
                 ns.size() == parts && sks.size() == parts, "one to four parts, each with weights, scales, biases, out");
