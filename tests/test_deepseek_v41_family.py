@@ -431,3 +431,54 @@ def test_dspark_concurrent_streams_emit_what_they_emit_alone(model, drafter):
         assert engine.drafted > 0
     finally:
         model.tap_layers = ()
+
+
+# -- the same contract on Metal (the row kernels) ------------------------------------------------------
+@pytest.fixture(scope="module")
+def gpu_model(checkpoint):
+    if not mx.metal.is_available():
+        pytest.skip("needs Metal")
+    previous = mx.default_device()
+    mx.set_default_device(mx.gpu)
+    try:
+        return weights.load_backbone(checkpoint, token_map=TOKEN_MAP)
+    finally:
+        mx.set_default_device(previous)
+
+
+@pytest.mark.parametrize("prompt", [0, 6, 40])
+def test_metal_windows_give_one_row_bits(gpu_model, prompt):
+    from tensorfold.engine.lane_engine import LaneEngine
+
+    mx.set_default_device(mx.gpu)
+    model = gpu_model
+    base = model.make_cache()
+    if prompt:
+        mx.eval(model.hidden(mx.array([tokens(prompt, seed=5)], dtype=mx.uint32), base))
+    window = tokens(16, seed=6)
+    serial, _ = serial_logits(model, base, window)
+    joint = logits_of(model, window, LaneEngine.copy_single_cache(base))
+    for i in range(16):
+        assert mx.array_equal(joint[i], serial[i]).item(), f"row {i}"
+
+
+def test_metal_keep_rows_and_streams(gpu_model):
+    from tensorfold.engine.lane_engine import LaneEngine
+
+    mx.set_default_device(mx.gpu)
+    model = gpu_model
+    base = model.make_cache()
+    mx.eval(model.hidden(mx.array([tokens(29, seed=7)], dtype=mx.uint32), base))
+    window, after = tokens(16, seed=8), tokens(16, seed=9)
+    drafted = LaneEngine.copy_single_cache(base)
+    mx.eval(logits_of(model, window, drafted))
+    model.keep_rows(drafted, 16, 3)
+    joint = logits_of(model, after, drafted)
+    serial, _ = serial_logits(model, base, window[:3] + after)
+    for i in range(16):
+        assert mx.array_equal(joint[i], serial[3 + i]).item(), f"row {i}"
+    runtime = DeepSeekV41Flash(model, None, drafts=0, check=False)
+    width, _ = runtime.check_windows(widest=16)
+    assert width == 16
+    runtime.exact_width = width
+    assert runtime.check_streams()

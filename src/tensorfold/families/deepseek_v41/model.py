@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import math
+from typing import Any
 
 import mlx.core as mx
 import numpy as np
@@ -13,6 +12,7 @@ from tensorfold.families.deepseek_v41.caches import LayerCache, make_caches
 from tensorfold.families.deepseek_v41.config import DECODE_ROWS, INDEX_QUERIES, PREFILL_QUERIES, Config
 from tensorfold.families.deepseek_v41.engram import Engram, NgramHash
 from tensorfold.families.deepseek_v41.quant import Experts, Linear, fp8, quantize_activation, swiglu_fp8
+from tensorfold.kernels.deepseek.v41 import rows as KV
 
 
 @mx.compile
@@ -62,7 +62,7 @@ def rope(x: mx.array, positions: mx.array, params: tuple, inverse: bool = False)
 @mx.compile
 def _hc_mix_weights(mixes: mx.array, scale: mx.array, base: mx.array, n: int, hc_eps: float,
                     iters: int) -> tuple[mx.array, mx.array, mx.array]:
-    from tensorfold.families.deepseek_v41.kernels import sinkhorn
+    from tensorfold.kernels.deepseek.v41.rows import sinkhorn
 
     pre = mx.sigmoid(mixes[..., :n] * scale[0] + base[:n]) + hc_eps
     post = 2 * mx.sigmoid(mixes[..., n:2 * n] * scale[1] + base[n:2 * n])
@@ -79,6 +79,13 @@ def _hc_mixes(x: mx.array, fn: mx.array, scale: mx.array, base: mx.array, n: int
     return _hc_mix_weights(mixes, scale, base, n, hc_eps, iters)
 
 
+@mx.compile
+def _hc_scaled(flat: mx.array, raw: mx.array, scale: mx.array, base: mx.array, n: int, eps: float, hc_eps: float,
+               iters: int) -> tuple[mx.array, mx.array, mx.array]:
+    mixes = raw * mx.rsqrt(mx.mean(flat * flat, -1, keepdims=True) + eps)
+    return _hc_mix_weights(mixes, scale, base, n, hc_eps, iters)
+
+
 class HC:
     """One mHC projection: a sublayer's post and comb mixes and the next pre-mix."""
 
@@ -91,7 +98,11 @@ class HC:
         return [self.fn, self.base, self.scale]
 
     def __call__(self, x: mx.array) -> tuple[mx.array, mx.array, mx.array]:
-        return _hc_mixes(x, self.fn, self.scale, self.base, self.n, self.eps, self.hc_eps, self.iters)
+        if not KV.rows_mode():
+            return _hc_mixes(x, self.fn, self.scale, self.base, self.n, self.eps, self.hc_eps, self.iters)
+        flat = x.reshape(x.shape[0], -1).astype(mx.float32)
+        return _hc_scaled(flat, KV.matmul(flat, self.fn, mx.float32), self.scale, self.base, self.n, self.eps,
+                          self.hc_eps, self.iters)
 
 
 @mx.compile
@@ -129,8 +140,8 @@ class Compressor:
         r, rows = self.ratio, int(x.shape[0])
         first, last = start // r, (start + rows) // r
         if r == 1:
-            return rms(mx.matmul(x, self.wkv.T), self.norm, self.eps), first
-        proj = mx.matmul(x.astype(mx.float32), self.proj32.T)                    # [rows, 2 * dim] fp32
+            return rms(KV.matmul(x, self.wkv, x.dtype), self.norm, self.eps), first
+        proj = KV.matmul(x.astype(mx.float32), self.proj32, mx.float32)         # [rows, 2 * dim] fp32
         lo = first * r
         data = mx.concatenate([cache.proj_rows(lo, start), proj]) if start > lo else proj
         cache.write_proj(proj, start)
@@ -157,7 +168,7 @@ class Indexer:
         return out + [a for a in (self.wk, self.k_norm) if a is not None]
 
     def keys(self, latent: mx.array, positions: mx.array, inv_freq: tuple) -> mx.array:
-        k = rms(mx.matmul(latent, self.wk.T), self.k_norm, self.eps)
+        k = rms(KV.matmul(latent, self.wk, latent.dtype), self.k_norm, self.eps)
         return quantize_activation(rope(k, positions, inv_freq), 4, 32)
 
     def queries(self, qr: mx.array, x: mx.array, positions: mx.array, inv_freq: tuple) -> tuple[mx.array, ...]:
@@ -175,16 +186,19 @@ class Indexer:
         return mx.sum(s * w[..., None], axis=1)
 
 
-def top_ids(scores: mx.array, count: int) -> mx.array:
+def top_ids(scores: mx.array, count: int, fixed: bool = False) -> mx.array:
     """Each row's ``count`` best ids ascending, ties to the lower id; ``fixed``: always ``count`` columns."""
 
-    width = int(scores.shape[-1])
-    count = min(count, width)
-    if count <= 0:
-        return mx.zeros((int(scores.shape[0]), 0), dtype=mx.int32)
-    ids = mx.argsort(-scores, axis=-1)[:, :count].astype(mx.int32)
-    valid = mx.take_along_axis(scores, ids, -1) > -mx.inf
-    return mx.sort(mx.where(valid, ids, -1), axis=-1)
+    rows, width = int(scores.shape[0]), int(scores.shape[-1])
+    k = min(count, width)
+    if k > 0:
+        ids = mx.argsort(-scores, axis=-1)[:, :k].astype(mx.int32)
+        ids = mx.where(mx.take_along_axis(scores, ids, -1) > -mx.inf, ids, -1)
+    else:
+        ids = mx.zeros((rows, 0), dtype=mx.int32)
+    if fixed and k < count:
+        ids = mx.concatenate([mx.full((rows, count - k), -1, dtype=mx.int32), ids], axis=-1)
+    return mx.sort(ids, axis=-1)
 
 
 def candidate_blocks(scores: mx.array, visible: mx.array, count: int, block: int) -> mx.array:
@@ -211,7 +225,8 @@ class Attention:
         self.inv_freq = cfg.rope_params(layer)          # RoPE's settings (a tuple: constants of the compiled RoPE)
         self.wq_a, self.wkv, self.wq_b, self.wo_b = w["wq_a"], w["wkv"], w["wq_b"], w["wo_b"]
         wo_a = w["wo_a"]
-        self.wo_a = wo_a.reshape(self.groups, self.rank, -1)                      # bf16 [g, rank, H * D / g]
+        self.wo_a_flat = wo_a                                                    # bf16 [g * rank, H * D / g]
+        self.wo_a = wo_a.reshape(self.groups, self.rank, -1)
         self.q_norm, self.kv_norm = w["q_norm"], w["kv_norm"]
         self.sink = w["attn_sink"].astype(mx.float32)
         self.compressor: Compressor | None = w.get("compressor")
@@ -222,7 +237,7 @@ class Attention:
 
     def arrays(self) -> list[mx.array]:
         out = [*self.wq_a.arrays(), *self.wkv.arrays(), *self.wq_b.arrays(), *self.wo_b.arrays(), self.wo_a,
-               self.q_norm, self.kv_norm, self.sink]
+               self.wo_a_flat, self.q_norm, self.kv_norm, self.sink]
         if self.compressor is not None:
             out += self.compressor.arrays()
         if self.indexer is not None:
@@ -260,7 +275,7 @@ class Attention:
             chosen = shared["idx"]
         out = self._attend(q, keys, lo, start, chosen, caches[self.kv_src] if self.ratio else None)
         out = rope(out, positions, self.inv_freq, inverse=True)
-        u = mx.einsum("lgd,grd->lgr", out.reshape(L, self.groups, -1), self.wo_a).reshape(L, -1)
+        u = KV.matmul(out.reshape(L, -1), self.wo_a_flat, out.dtype, groups=self.groups)
         return self.wo_b(u)
 
     def _choose(self, qr: mx.array, x: mx.array, positions: mx.array, start: int, L: int, src: LayerCache,
@@ -282,14 +297,12 @@ class Attention:
 
     def _choose_rows(self, iq: mx.array, iw: mx.array, visible: mx.array, n: int, src: LayerCache,
                      shared: dict[str, Any], q0: int, q1: int, blocks_out: list[mx.array], first: int) -> mx.array:
-        from tensorfold.families.deepseek_v41 import kernels as KV
-
         cfg, L = self.cfg, q1 - q0
         fast = KV.index_fits(self.indexer.dim)
         if self.candidates:
             blocks = shared["candidates"][q0:q1]                                  # [L, blocks]
             if not int(blocks.shape[-1]):
-                return mx.zeros((L, 0), dtype=mx.int32)
+                return mx.full((L, cfg.index_topk if KV.rows_mode() else 0), -1, dtype=mx.int32)
             size = cfg.candidate_block_size
             cand = blocks[..., None] * size + mx.arange(size)
             cand = mx.where(blocks[..., None] >= 0, cand, -1).reshape(L, -1)
@@ -300,7 +313,7 @@ class Attention:
                 s = mx.maximum(mx.einsum("lhd,lkd->lhk", iq.astype(mx.float32), keys.astype(mx.float32)), 0)
                 s = mx.sum(s * iw[..., None], axis=1)
                 s = mx.where((cand >= 0) & (cand < visible[:, None]), s, -mx.inf)
-            order = top_ids(s, cfg.index_topk)
+            order = top_ids(s, cfg.index_topk, KV.rows_mode())
             ids = mx.take_along_axis(cand, mx.maximum(order, 0), -1)
             return mx.sort(mx.where(order >= 0, ids, -1), axis=-1)
         if fast and n:
@@ -311,37 +324,38 @@ class Attention:
         if self.layer == cfg.candidate_source_layer_id:
             blocks_out.append(candidate_blocks(s, visible, cfg.candidate_topk_blocks, cfg.candidate_block_size)
                               if n else mx.zeros((L, 0), dtype=mx.int32))
-        return top_ids(s, cfg.index_topk)
+        return top_ids(s, cfg.index_topk, KV.rows_mode())
 
     def _attend(self, q: mx.array, keys: mx.array, lo: int, start: int, chosen: mx.array | None,
                 src: LayerCache | None) -> mx.array:
         """q [L, H, D] over each query's window slots and chosen pool rows with the sinks, in DeepSeek's order."""
 
         L = int(q.shape[0])
-        window = min(L, self.window) if start == 0 else self.window
+        first = start == 0 and not KV.rows_mode()     # oMLX's first-chunk layout (decode rows: the later one)
+        window = min(L, self.window) if first else self.window
         outs = []
         for q0 in range(0, L, PREFILL_QUERIES):
             q1 = min(L, q0 + PREFILL_QUERIES)
             n = q1 - q0
             pos = mx.arange(start + q0, start + q1)[:, None]
-            if start == 0:
+            if first:
                 slot = mx.maximum(pos - self.window + 1, 0) + mx.arange(window)[None, :]
             else:
                 slot = pos - self.window + 1 + mx.arange(window)[None, :]
             ok = (slot >= lo) & (slot <= pos)
             comp = chosen[q0:q1] if chosen is not None and int(chosen.shape[-1]) else None
-            from tensorfold.families.deepseek_v41 import kernels as KV
-
             if KV.attention_fits(window + (0 if comp is None else int(comp.shape[-1])), self.dim):
                 wi = mx.where(ok, slot - lo, -1)
                 ci = comp if comp is not None else mx.zeros((n, 0), dtype=mx.int32)
-                outs.append(KV.attention(q[q0:q1], keys, src.pool if comp is not None else None, wi, ci, self.sink,
+                outs.append(KV.attention(q[q0:q1], keys, src.pool if comp is not None and src is not None else None,
+                                         wi, ci, self.sink,
                                          self.scale))
                 continue
             values = keys[mx.clip(slot - lo, 0, int(keys.shape[0]) - 1).reshape(-1)].reshape(n, window, self.dim)
             if chosen is not None and int(chosen.shape[-1]):
                 ids = chosen[q0:q1]
-                sel = src.pool[mx.maximum(ids, 0).reshape(-1)].reshape(n, -1, self.dim).astype(mx.float32)
+                pool = src.pool if src.pool is not None else mx.zeros((1, self.dim), dtype=mx.bfloat16)
+                sel = pool[mx.maximum(ids, 0).reshape(-1)].reshape(n, -1, self.dim).astype(mx.float32)
                 values = mx.concatenate([values, sel], axis=1)
                 ok = mx.concatenate([ok, ids >= 0], axis=1)
             outs.append(self._grouped_softmax(q[q0:q1], values, ok).astype(q.dtype))
@@ -360,18 +374,16 @@ class Attention:
         G = (S + pad) // 64
         s = s.reshape(n, self.heads, G, 64)
         m = mx.maximum(mx.cummax(mx.max(s, axis=-1), axis=-1), -1e30)          # running maxima [n, H, G]
-        from tensorfold.families.deepseek_v41.kernels import fexp
-
-        p = fexp(s - m[..., None])
+        p = KV.fexp(s - m[..., None])
         denom = mx.sum(p, axis=-1)                                                # [n, H, G] fp32
         pv = mx.einsum("nhgk,ngkd->nhgd", p.astype(mx.bfloat16).astype(mx.float32), values.reshape(n, G, 64, -1))
         acc, total, mprev = pv[:, :, 0], denom[:, :, 0], m[:, :, 0]
         for g in range(1, G):
-            c = fexp(mprev - m[:, :, g])
+            c = KV.fexp(mprev - m[:, :, g])
             total = total * c + denom[:, :, g]
             acc = acc * c[..., None] + pv[:, :, g]
             mprev = m[:, :, g]
-        total = total + fexp(self.sink[None, :] - mprev)
+        total = total + KV.fexp(self.sink[None, :] - mprev)
         return acc / total[..., None]
 
 
@@ -394,7 +406,7 @@ class MoE:
         return out
 
     def route(self, x: mx.array) -> tuple[mx.array, mx.array]:
-        raw = x.astype(mx.float32) @ self.router.T
+        raw = KV.matmul(x.astype(mx.float32), self.router, mx.float32)
         scores = mx.sqrt(mx.logaddexp(raw, mx.array(0.0)))
         idx = mx.argsort(-(scores + self.bias), axis=-1)[:, :self.top]
         w = mx.take_along_axis(scores, idx, -1)
@@ -406,7 +418,7 @@ class MoE:
         idx, w = self.route(x)
         xq = fp8(x)
         rows, k = int(x.shape[0]), self.top
-        sort = idx.size >= 64
+        sort = idx.size >= 64 and not KV.rows_mode()          # unsorted gathers keep each row's own bits
         if sort:
             flat = idx.reshape(-1)
             order = mx.argsort(flat)
@@ -447,14 +459,20 @@ class Block:
                  shared: dict[str, Any]) -> tuple[mx.array, mx.array]:
         """One stream's rows: streams h [L, 4, D] and the pre-mix carried in [L, 4]; the new streams and pre-mix."""
 
-        from tensorfold.families.deepseek_v41 import kernels as KV
-
         ap, ao, ac = self.attn_hc(h)
         a = self.attn(KV.hc_pre_norm(h, pre, self.attn_norm, self.eps), caches, start, shared)
         h = KV.hc_post(a, h, ao, ac)
         fp, fo, fc = self.ffn_hc(h)
         m = self.moe(KV.hc_pre_norm(h, ap, self.ffn_norm, self.eps))
         return KV.hc_post(m, h, fo, fc), fp
+
+
+class _nothing:
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
 
 
 class DeepSeekV41:
@@ -518,19 +536,32 @@ class DeepSeekV41:
         h = self.embed_tokens(ids)
         x = mx.contiguous(mx.broadcast_to(h[:, None, :], (rows, cfg.hc_mult, h.shape[-1])))
         pre = mx.broadcast_to((mx.arange(cfg.hc_mult) == 0).astype(mx.float32), (rows, cfg.hc_mult))
-        # the work units: a decode row alone (its stream, row in it), or a whole prompt chunk
+        # the work units: each stream's rows (decode rows take the row kernels: each row its one-row bits)
         units = []
         at = 0
         for s, n in enumerate(lengths):
-            if decode:
-                units += [(s, at + j, j, 1) for j in range(n)]
-            else:
-                units.append((s, at, 0, n))
+            units.append((s, at, 0, n))
             at += n
         shared: list[dict[str, Any]] = [{} for _ in units]
         hs = [x[a:a + n] for _, a, _, n in units]
         pres = [pre[a:a + n] for _, a, _, n in units]
         taps: list[list[mx.array]] = [[] for _ in units]
+        with KV.decode_rows() if decode else _nothing():
+            x, pre = self._layers(lookups, hs, pres, taps, units, shared, caches, lengths, starts)
+            self.last_streams = x
+            self.last_taps = (mx.concatenate([mx.concatenate(t, axis=-1) for t in taps]) if self.tap_layers
+                              else None)
+            if decode and not KV.metal():
+                normed = [rms(hc_pre(x[r:r + 1], pre[r:r + 1]), self.norm, cfg.rms_norm_eps) for r in range(rows)]
+                self.last_normed = mx.concatenate(normed) if rows > 1 else normed[0]
+            else:
+                self.last_normed = rms(hc_pre(x, pre), self.norm, cfg.rms_norm_eps)
+        return self.last_normed[None]
+
+    def _layers(self, lookups: list[Any], hs: list[mx.array], pres: list[mx.array], taps: list[list[mx.array]],
+                units: list[tuple[int, int, int, int]], shared: list[dict[str, Any]], caches: list[list[Any]],
+                lengths: tuple[int, ...], starts: list[int]) -> tuple[mx.array, mx.array]:
+        cfg = self.args
         for i, layer in enumerate(self.layers):
             for u, (s, a, j, n) in enumerate(units):
                 if layer.engram is not None:
@@ -545,19 +576,10 @@ class DeepSeekV41:
                 mx.async_eval(*hs, *pres)
         x = mx.concatenate(hs) if len(hs) > 1 else hs[0]
         pre = mx.concatenate(pres) if len(pres) > 1 else pres[0]
-        self.last_streams = x
-        self.last_taps = (mx.concatenate([mx.concatenate(t, axis=-1) for t in taps]) if self.tap_layers else None)
-        if decode:
-            normed = [rms(hc_pre(x[r:r + 1], pre[r:r + 1]), self.norm, cfg.rms_norm_eps) for r in range(rows)]
-            self.last_normed = mx.concatenate(normed) if rows > 1 else normed[0]
-        else:
-            self.last_normed = rms(hc_pre(x, pre), self.norm, cfg.rms_norm_eps)
-        return self.last_normed[None]
+        return x, pre
 
     def head(self, hidden: mx.array) -> mx.array:
         """Logits in fp32 (bf16 head, fp32 accumulation), each decode row on its own."""
-
-        from tensorfold.families.deepseek_v41 import kernels as KV
 
         shape = hidden.shape
         flat = hidden.reshape(-1, shape[-1])

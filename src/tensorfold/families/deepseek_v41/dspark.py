@@ -6,7 +6,7 @@ from typing import Any
 
 import mlx.core as mx
 
-from tensorfold.families.deepseek_v41 import kernels as KV
+from tensorfold.kernels.deepseek.v41 import rows as KV
 from tensorfold.families.deepseek_v41.caches import LayerCache
 from tensorfold.families.deepseek_v41.model import Attention, Block, DeepSeekV41, hc_pre, rms, rope
 from tensorfold.families.deepseek_v41.quant import Linear, fp8

@@ -6,6 +6,8 @@ from typing import Any
 
 import mlx.core as mx
 
+from tensorfold.kernels.deepseek.v41 import rows as KV
+
 FP8_MAX = 448.0
 FP4_MAX = 6.0
 
@@ -74,8 +76,6 @@ def quantize_activation(x: mx.array, bits: int = 8, group: int = 32, e4m3_scale:
 def fp8(x: mx.array) -> mx.array:
     """The official FP8 activation of a quantized projection's input (E4M3, a UE8M0 scale per 32)."""
 
-    from tensorfold.families.deepseek_v41 import kernels as KV
-
     if KV.fp8_fits(x):
         return KV.fp8(x)
     return quantize_activation(x, 8, 32)
@@ -84,17 +84,13 @@ def fp8(x: mx.array) -> mx.array:
 def swiglu_fp8(gate: mx.array, up: mx.array, weights: mx.array | None, limit: float, dtype: Any) -> mx.array:
     """oMLX's fused SwiGLU tail: clamp, g * sigmoid(g) * u in fp32 (times the route weight), to ``dtype``, then FP8."""
 
-    from tensorfold.families.deepseek_v41 import kernels as KV
-
     if KV.fp8_fits(gate) and gate.shape == up.shape:
         return KV.swiglu_fp8(gate, up, weights, limit, dtype)
     g, u = gate.astype(mx.float32), up.astype(mx.float32)
     if limit:
         g = mx.minimum(g, limit)
         u = mx.clip(u, -limit, limit)
-    from tensorfold.families.deepseek_v41.kernels import fexp
-
-    neg = 1.0 / (1.0 + fexp(mx.abs(g)))
+    neg = 1.0 / (1.0 + KV.fexp(mx.abs(g)))
     sig = mx.where(g < 0, neg, 1.0 - neg)
     value = (g * sig) * u
     if weights is not None:
@@ -140,9 +136,17 @@ class Linear:
 
     def __call__(self, x: mx.array, *, prequantized: bool = False) -> mx.array:
         if not self.quantized:
-            return mx.matmul(x, self.weight.T)
+            return KV.matmul(x, self.weight, x.dtype)
         if self.fp8_input and not prequantized:
             x = fp8(x)
+        if KV.rows_mode() and int(x.shape[0]) > 1:
+            if self.mode in ("mxfp8", "mxfp4") and self.group == 32 and \
+                    KV.fpqmv_rows_fits(x, int(self.bits), self.ins, self.outs):
+                return KV.fpqmv_rows(x, self.weight, self.scales, int(self.bits), self.ins, self.outs)
+            return mx.concatenate([self._qmm(x[r:r + 1]) for r in range(int(x.shape[0]))])
+        return self._qmm(x)
+
+    def _qmm(self, x: mx.array) -> mx.array:
         return mx.quantized_matmul(x, self.weight, self.scales, self.biases, transpose=True, group_size=self.group,
                                    bits=self.bits, mode=self.mode)
 

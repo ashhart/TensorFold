@@ -10,9 +10,8 @@ TITLE = "DeepSeek-V4.1-Flash"
 LANES = True
 # oMLX's oQ4e conversion: DeepSeek's FP8 projections as mxfp8, its FP4 experts as mxfp4, Engram tables affine 4-bit
 MODELS = ("Jundot/DeepSeek-V4.1-Flash-oQ4e-mtp",)
-KERNEL_PACKAGE = "tensorfold.families.deepseek_v41"
+KERNEL_PACKAGE = "tensorfold.kernels.deepseek.v41"
 KERNEL_VERSION = "v1"
-VERSION = KERNEL_VERSION           # this package holds the family's kernels
 KERNEL_DEPENDENCIES = ("tensorfold.families.deepseek_v4.runtime", "tensorfold.families.glm5_next.runtime")
 # the converted checkpoint declares its formats in its own block, so the generic reader sees no quantization block
 QUANT_METHODS = {"mlx": (None, "mlx")}
@@ -71,7 +70,7 @@ def kernel_version(model: Any) -> str:
     import mlx.core as mx
 
     digest = hashlib.sha256()
-    for module in (__name__, *KERNEL_DEPENDENCIES):
+    for module in (__name__, KERNEL_PACKAGE, *KERNEL_DEPENDENCIES):
         source = Path(str(importlib.import_module(module).__file__))
         paths = sorted(source.parent.glob("*.py")) if source.name == "__init__.py" else [source]
         for path in paths:

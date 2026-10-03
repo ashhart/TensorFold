@@ -1,4 +1,4 @@
-"""Row kernels whose rows each run in their own threadgroup; ``head_logits`` is oMLX's ``head.py`` kernel (MIT)."""
+"""DeepSeek-V4.1-Flash's row kernels; ``head_logits`` is oMLX's ``head.py`` kernel (MIT)."""
 
 from __future__ import annotations
 
@@ -465,3 +465,127 @@ def sinkhorn(comb: mx.array, eps: float, iters: int) -> mx.array:
         comb = comb / (mx.sum(comb, -1, keepdims=True) + eps)
         comb = comb / (mx.sum(comb, -2, keepdims=True) + eps)
     return comb
+
+
+# -- decode rows' projections: MLX's one-row fp_qmv_fast (Apple, MIT), simdgroup r on row r, sharing weight reads
+_FPQMV_HEADER = r"""
+inline float tf_e4m3(uint8_t b) {
+  uint16_t v = b & 127;
+  uint16_t sign_bit = ((uint16_t)((b >> 7) & 1)) << 15;
+  uint16_t u = (v << 7) | (((v + 1) >> 7) << 14) | sign_bit;
+  return float(as_type<half>(u) * half(256.0));
+}
+inline float tf_e2m1(uint8_t b) {
+  half c = as_type<half>(ushort((b & 7) << 9));
+  c *= half(16384.0);
+  return float(b & 8 ? -c : c);
+}
+inline float tf_e8m0(uint8_t b) {
+  uint32_t out = (b == 0 ? 0x400000 : (uint32_t(b) << 23));
+  return as_type<float>(out);
+}
+"""
+
+_FPQMV_ROWS = r"""
+  const uint lane = thread_index_in_simdgroup;
+  const int r = int(simdgroup_index_in_threadgroup);
+  const int row0 = int(threadgroup_position_in_grid.y) * RPS;
+  constexpr int PF = 32 / BITS;
+  constexpr int VPT = PF * 2;
+  constexpr int BLOCK = VPT * 32;
+  constexpr int SSTEP = 32 / VPT;
+  constexpr int KW = K * BITS / 8;
+  constexpr int KG = K / 32;
+  const device uint8_t* ws = (const device uint8_t*)W + size_t(row0) * KW + lane * 8;
+  const device uint8_t* sc = S + size_t(row0) * KG + lane / SSTEP;
+  const device T* x = X + size_t(r) * K + lane * VPT;
+  float xt[VPT];
+  float result[RPS];
+  for (int j = 0; j < RPS; ++j) result[j] = 0.0f;
+  for (int k = 0; k < K; k += BLOCK) {
+    for (int i = 0; i < VPT; ++i) xt[i] = float(x[i]);
+    for (int j = 0; j < RPS; ++j) {
+      const device uint8_t* wl = ws + j * KW;
+      const float s = tf_e8m0(sc[j * KG]);
+      float accum = 0.0f;
+      if (BITS == 4) {
+        const device uint16_t* w16 = (const device uint16_t*)wl;
+        for (int i = 0; i < VPT / 4; ++i)
+          accum += (xt[4 * i] * tf_e2m1(uint8_t(w16[i] & 15)) + xt[4 * i + 1] * tf_e2m1(uint8_t((w16[i] >> 4) & 15)) +
+                    xt[4 * i + 2] * tf_e2m1(uint8_t((w16[i] >> 8) & 15)) +
+                    xt[4 * i + 3] * tf_e2m1(uint8_t((w16[i] >> 12) & 15)));
+      } else {
+        for (int i = 0; i < VPT; ++i) accum += xt[i] * tf_e4m3(wl[i]);
+      }
+      result[j] += s * accum;
+    }
+    ws += BLOCK * BITS / 8;
+    sc += BLOCK / 32;
+    x += BLOCK;
+  }
+  for (int j = 0; j < RPS; ++j) {
+    const float v = simd_sum(result[j]);
+    if (lane == 0) OUT[size_t(r) * N + row0 + j] = T(v);
+  }
+"""
+
+ROWS_MAX = 16
+_ROWS_MODE = [False]
+
+
+def rows_mode() -> bool:
+    """True while a decode forward runs: every projection gives each row its one-row call's bits."""
+
+    return _ROWS_MODE[0]
+
+
+class decode_rows:
+    """``with decode_rows(): ...`` runs a decode forward's projections row-exact."""
+
+    def __enter__(self) -> None:
+        self.previous = _ROWS_MODE[0]
+        _ROWS_MODE[0] = True
+
+    def __exit__(self, *exc: Any) -> None:
+        _ROWS_MODE[0] = self.previous
+
+
+@cache
+def _fpqmv_kernel() -> Any:
+    return mx.fast.metal_kernel(name="tf_dsv41_fpqmv_rows", input_names=["X", "W", "S"], output_names=["OUT"],
+                                source=_FPQMV_ROWS, header=_FPQMV_HEADER)
+
+
+def fpqmv_rows_fits(x: mx.array, bits: int, k: int, n: int) -> bool:
+    rows = int(x.shape[0])
+    block = 2 * 32 * 32 // bits
+    return (metal() and x.ndim == 2 and 1 < rows <= ROWS_MAX and bits in (4, 8) and k % block == 0 and n % 4 == 0
+            and x.dtype in (mx.bfloat16, mx.float16, mx.float32))
+
+
+def fpqmv_rows(x: mx.array, weight: mx.array, scales: mx.array, bits: int, k: int, n: int) -> mx.array:
+    """x [R, k] through mxfp8 / mxfp4 weights [n, ...] in groups of 32: each row with MLX's one-row bits."""
+
+    rows = int(x.shape[0])
+    return _fpqmv_kernel()(inputs=[mx.contiguous(x), weight, scales],
+                           template=[("BITS", bits), ("K", k), ("N", n), ("RPS", 4), ("T", x.dtype)],
+                           grid=(32 * rows, n // 4, 1), threadgroup=(32 * rows, 1, 1), output_shapes=[(rows, n)],
+                           output_dtypes=[x.dtype])[0]
+
+
+def matmul(x: mx.array, w: mx.array, out_dtype: Any = None, groups: int = 1) -> mx.array:
+    """x @ w.T for unquantized (optionally grouped) w [N, K] as MLX computes it, decode rows one MLX call each."""
+
+    out_dtype = out_dtype or mx.promote_types(x.dtype, w.dtype)
+
+    def plain(a: mx.array) -> mx.array:
+        if groups == 1:
+            return mx.matmul(a, w.T).astype(out_dtype)
+        rows = int(a.shape[0])
+        g = a.reshape(rows, groups, -1)
+        return mx.einsum("lgd,grd->lgr", g, w.reshape(groups, int(w.shape[0]) // groups, -1)).reshape(rows, -1) \
+            .astype(out_dtype)
+
+    if rows_mode() and int(x.shape[0]) > 1:
+        return mx.concatenate([plain(x[r:r + 1]) for r in range(int(x.shape[0]))])
+    return plain(x)
