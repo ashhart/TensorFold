@@ -646,12 +646,14 @@ def test_an_admission_failing_anywhere_on_either_rank_leaves_both_as_they_were(w
         raise RuntimeError(f"{where} fails on rank {rank}")
 
     monkeypatch.setattr(owner, name, fail)
-    before = [(lanes.lanes, [t.quota for t in lanes.tables], [list(t.pages) for t in lanes.tables], dict(lanes.pool.refs),
-               lanes.pool.free) for lanes in (pair.decoder.local, pair.follower)]
+    def snap(lanes):
+        tables, pool = lanes.tables, lanes.pool
+        return lanes.lanes, [t.quota for t in tables], [list(t.pages) for t in tables], dict(pool.refs), pool.free
+
+    before = [snap(lanes) for lanes in (pair.decoder.local, pair.follower)]
     with pytest.raises(RuntimeError):
         pair.decoder.admit(stream(p + [1], 4))
-    after = [(lanes.lanes, [t.quota for t in lanes.tables], [list(t.pages) for t in lanes.tables], dict(lanes.pool.refs),
-              lanes.pool.free) for lanes in (pair.decoder.local, pair.follower)]
+    after = [snap(lanes) for lanes in (pair.decoder.local, pair.follower)]
     assert after == before and pair.decoder.free == [0]
     a, b = pair.decoder.local, pair.follower
     assert a.state() == b.state()  # the device cache's order too: EVICT names entries by index
