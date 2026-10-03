@@ -49,7 +49,7 @@ class Kolibri1Engine:
         self.decoder = Decoder(self.model, self.eos)
         self.scheduler = Scheduler(self.decoder, max_streams=streams)
         self.concurrent = streams > 1
-        self.drafts = False
+        self.drafts = True                     # copies from the context (Kolibri 1 ships no draft head)
         print(f"[tensorfold] kolibri1: {streams} stream(s) of {window} tokens "
               f"({streams * Model.slot_bytes(cfg, window) / 2**30:.1f} GiB of caches; sliding layers keep a "
               f"{self.model.ring}-key ring), ready in {time.perf_counter() - started:.0f}s", flush=True)

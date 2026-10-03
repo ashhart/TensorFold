@@ -96,3 +96,37 @@ def test_a_prompt_longer_than_the_ring_matches_the_reference(tiny, weights, monk
     got = m.prefill(ids)
     want, _ = Kolibri(tiny).forward(ids, 0)
     assert cosines(got[0], want[-1]) > 0.99
+
+
+def test_a_verify_windows_rows_equal_serial_decode_rows(weights):
+    from tensorfold.families.kolibri1.cuda.forward import Chain, Model
+
+    prompt, win = tokens(70, seed=7), tokens(12, seed=8)
+    a, b = Model(weights, 256, 2), Model(weights, 256, 1)
+    a.prefill(prompt, slot=1)
+    b.prefill(prompt)
+    rows = a.forward([Chain(1, 70, win)], prompt=False, rows=range(len(win)))
+    for i, t in enumerate(win):
+        assert torch.equal(rows[i], b.step([t], [70 + i], [0])[0])
+
+
+def test_copy_drafts_equal_the_serial_reply(weights, monkeypatch):
+    from tensorfold.cuda.streams import Stream
+    from tensorfold.engine.exact_sampling import Sampling
+    from tensorfold.families.kolibri1.cuda import decoder
+    from tensorfold.families.kolibri1.cuda.forward import Model
+
+    guesses = tokens(40, seed=9)
+    monkeypatch.setattr(decoder.CopyIndex, "propose", lambda self, context, most: guesses[:most])  # mostly wrong
+
+    def reply(sampling, draft):
+        d = decoder.Decoder(Model(weights, 512, 1), (511,))
+        s = Stream(tokens(50, seed=3), 40, sampling, draft=draft)
+        d.admit(s)
+        while not s.done:
+            d.round()
+        return list(s.out), s.drafted
+
+    for sampling in (None, Sampling(seed=5, temperature=0.8, top_k=20, top_p=0.95)):
+        (drafted, rows), (serial, none) = reply(sampling, True), reply(sampling, False)
+        assert drafted == serial and rows > 0 and none == 0
