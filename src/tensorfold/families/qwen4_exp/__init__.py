@@ -165,6 +165,7 @@ CUDA_QUANTIZATION = (4, 32)
 # the KV cache dtypes the CUDA engine can allocate (``--kv-dtype``)
 CUDA_KV_DTYPES = ("bf16", "int8", "int4")
 CUDA_DECODE_SHARE = True           # --parallel rounds size their prompt pass by --decode-share (0: whole passes)
+CUDA_CHECKPOINT_SLOTS = True       # --checkpoint-slots: the concurrent decoder's kept prompt states (--parallel 2+)
 CUDA_PREFILL_FP8 = True            # --prefill-fp8: an NVFP4 checkpoint's MXFP8 linears have an FP8 prompt kernel
 
 def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",
@@ -200,4 +201,5 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
                            ple_on_ssd=ple_on_ssd, kv_dtype=kv_dtype,
                            share=0.0 if decode_share is None else float(decode_share),
                            vision=bool(options.get("vision", False)),
-                           vision_urls=bool(options.get("vision_urls", False)))
+                           vision_urls=bool(options.get("vision_urls", False)),
+                           keep=options.get("checkpoint_slots"))

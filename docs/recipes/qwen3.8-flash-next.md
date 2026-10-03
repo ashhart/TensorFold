@@ -274,7 +274,11 @@ and the concurrent decoder keep prompt
 states; a follow-up prefills the reply again. A kept state stops one token before its prompt's end, so the
 same prompt sent again resumes, and so does a next chat turn that renders the generation prompt's `<think>`
 and newline as `<think>` and two newlines. Stream caches grow within the startup window as memory allows;
-inspect the reported capacity.
+inspect the reported capacity. `--checkpoint-slots N` sets how many prompt states the concurrent decoder keeps
+(default 8): when more conversations take turns than there are slots, they evict each other's states and every turn
+prefills again, so raise N to match the conversations in flight. Each kept state is part of the startup memory estimate,
+so a larger N admits a smaller context window; the startup line reports the count. Pass the same N on both ranks of
+`--tp 2`.
 
 With `--parallel N`, a prompt prefills inside the rounds: each round runs the live replies' windows and the next
 prompt pass (up to 2,048 rows, several prompts packed) in one forward, and each layer's experts once for both. Every

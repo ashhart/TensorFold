@@ -132,7 +132,7 @@ between MLX and CUDA, different quantizations, or different tensor-parallel rank
 | `--prompt-cache-gib N` | Retained conversation-prefix budget; zero disables retention. Default: the memory the weights, a whole-window request and a shared round leave idle, at least an eighth of RAM up to 16 GiB, given back on demand | MLX |
 | `--prefill-pass N` | Plan chunks one forward takes while a prompt fills alone, for families with a prompt pass (default 8; 1 as 0.5.0) | MLX |
 | `--pass-cache-gib N` | Freed-buffer cache during such a pass where the memory budget has room, default 16 GiB | MLX |
-| `--checkpoint-slots N` | Retained conversation prefixes (default 3 per lane, at least 8); long conversations hit this before the byte budget. On CUDA, the prompt states Qwen3.8-27B keeps under `--parallel` 2 or more (default 3) | Both |
+| `--checkpoint-slots N` | Retained conversation prefixes (default 3 per lane, at least 8); long conversations hit this before the byte budget. On CUDA, the prompt states Qwen3.8-27B (default 3) and Flash Next (default 8) keep under `--parallel` 2 or more; each kept state is counted in the startup memory estimate, so more slots admit a smaller window, and both `--tp 2` ranks need the same N | Both |
 | `--spill-gib N` | Write evicted conversation prefixes to disk (up to N GiB) and read them back instead of prefilling again; zero disables | MLX |
 | `--mlx-cache-gib N` | Reusable freed-buffer cache, default 8 GiB | MLX |
 | `--snapshot-dir DIR` | Persistent prefix snapshots; `none` disables them | MLX |
