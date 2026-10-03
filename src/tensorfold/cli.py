@@ -166,81 +166,11 @@ def cmd_info(args: argparse.Namespace) -> int:
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
-    """The serve-time budget arithmetic without loading weights: will it fit, at which budgets.
+    """Estimate local checkpoint weights without loading a model."""
 
-    ``serve`` prints its memory budget, its resident-weight bytes and its refusal guidance only after
-    weights load (or after a startup refusal). This answers the same questions from ``config.json``
-    plus the local index sizes, before any download: the budgets a checkpoint fits on this machine,
-    and what it needs at minimum. Emulated RAM classes (--ram) plan a machine you do not have.
-    """
+    from tensorfold.cli_plan import cmd_plan as plan
 
-    from tensorfold import families
-
-    directory = _config_dir(args.model)
-    family = families.detect(directory)
-    families.require_readable(family, families.read_config(directory), "mlx")
-    _note_untested(family, args.model)
-
-    if sys.platform != "darwin":
-        raise ValueError("plan answers the Mac (MLX) path; a CUDA host's capacity is its own startup report")
-
-    import mlx.core as mx
-
-    from tensorfold.server import memory_budget as _budget
-    from tensorfold.server.memory_budget import PROCESS_BYTES
-
-    ram = _budget.physical_memory_bytes()
-    fraction = _budget.model_fraction(family.package)
-    ceiling = _budget.budget_ceiling(mx)
-    gib = 1024**3
-
-    # weights: the family's own estimate where it has one (n-gram tables on the host, SSD experts),
-    # else the index as it sits or the size the Hub reports for a repo that is not pulled yet
-    checkpoint = sum(path.stat().st_size for path in Path(directory).glob("*.safetensors"))
-    if not checkpoint:
-        from tensorfold import hub
-
-        if hub.is_repo_id(args.model):
-            checkpoint = hub.repo_size(args.model) or 0
-    estimate = getattr(family.package, "weight_bytes", None)
-    if estimate is None:
-        weights = checkpoint
-    else:
-        # the serve flags a family's weight estimate reads; plan takes their defaults
-        defaults = {"ple_on_ssd": False, "ssd_experts": None}
-        kwargs = {key: value for key, value in defaults.items()
-                  if key in estimate.__code__.co_varnames[:estimate.__code__.co_argcount]}
-        weights = estimate(directory, **kwargs)
-
-    budgets = []
-    limit = min(int(fraction * ram), ceiling)
-    budgets.append(("this Mac's default", limit))
-    if args.memory_gb is not None:
-        budgets.append(("--memory-gb", min(int(float(args.memory_gb) * gib), ceiling)))
-    for ram_class in (int(v) for v in (args.ram or ())):
-        budgets.append((f"--ram {ram_class} GB class", min(int(fraction * ram_class * gib), ceiling)))
-
-    print(f"[tensorfold] plan for {family.title} ({args.model}) on this machine")
-    print(f"[tensorfold] RAM {ram / gib:.0f} GiB, model allowance {fraction:.0%}, budget ceiling "
-          f"{ceiling / gib:.1f} GiB, {PROCESS_BYTES / gib:.0f} GiB reserved for the process")
-    print(f"[tensorfold] weights {(weights or checkpoint) / gib:.1f} GiB"
-          + (f" ({checkpoint / gib:.1f} GiB on disk, some file-backed)" if weights < checkpoint else ""))
-    verdict = 0
-    for name, budget in budgets:
-        room = budget - PROCESS_BYTES
-        if weights >= room:
-            needed = weights + PROCESS_BYTES
-            print(f"[tensorfold] {name}: {budget / gib:.1f} GiB budget — does not fit; the model and one prompt "
-                  f"chunk need about {needed / gib:.1f} GiB")
-            verdict = 1
-        else:
-            head = room - weights
-            print(f"[tensorfold] {name}: {budget / gib:.1f} GiB budget — fits; about {head / gib:.1f} GiB for "
-                  f"prompts, streams and caches beside the weights")
-    if verdict and ceiling >= weights + PROCESS_BYTES:
-        print(f"[tensorfold] hint: TENSORFOLD_MEMORY_LIMIT_GB={(weights + 2 * PROCESS_BYTES) / gib:.0f} "
-              f"would fit the weights (this Mac takes up to {ceiling / gib:.1f})")
-    return verdict
+    return plan(args)
 
 
 def _generation_config(model_dir: Path) -> dict[str, Any]:
@@ -597,7 +527,7 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
     signal.signal(signal.SIGTERM, _terminate)
     from tensorfold.server import live
 
-    line = live.start(app)
+    line = live.start(app)      # connections and decode/prefill tok/s on one line, in a terminal only
     try:
         server.serve_forever()
     except KeyboardInterrupt:
