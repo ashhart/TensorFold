@@ -303,7 +303,7 @@ class Scheduler(PromptFill):
         rounds, so a second stale is the page's own sample rate, never a torn read.
         """
 
-        jobs = list(self._jobs.values()) + ([] if self._filling is None else [self._filling.job])
+        jobs = list(self._jobs.values()) + self.filling
         used = cached = 0
         for job in jobs:
             stream = job.stream
@@ -322,7 +322,7 @@ class Scheduler(PromptFill):
         """
 
         rounds = drafted = accepted = 0
-        for job in list(self._jobs.values()) + ([] if self._filling is None else [self._filling.job]):
+        for job in list(self._jobs.values()) + self.filling:
             stream = job.stream
             if stream is None:
                 continue
