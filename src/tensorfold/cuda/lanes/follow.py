@@ -7,6 +7,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
+
 from ..drafting import Proposals
 from ..sessions import TieredCache
 from .forward import Candidates, Piece, Rows, chain, check
@@ -39,11 +41,12 @@ class HeldCodec:
         self.codec, self.pool = codec, pool
 
     def to_host(self, held: Held) -> dict:
-        out = {f"state/{k}": v for k, v in self.codec.to_host(held.snap).items()}
+        """Fresh host arrays: the family's state copied, each plane's rows in the one copy ``read_pages`` makes."""
+
+        out = {f"state/{k}": np.array(v, copy=True) for k, v in self.codec.to_host(held.snap).items()}
         if self.pool is not None:
             for name, rows in self.pool.read_pages(held.pages).items():
                 keep = held.tokens // self.pool.planes[name].per_tokens if held.tokens else len(rows)
-                rows = rows.copy()
                 rows[keep:] = 0  # stale rows past the kept positions never leave the device
                 out[f"page/{name}"] = rows
         return out
@@ -143,7 +146,7 @@ class Lanes:
             self._undo(int(ints[0]), self._kept)
 
     def _undo(self, lane: int, kept: tuple | None = None) -> None:
-        """An admission taken back: the pages only it held cleared, the cache's order restored, the lane's parts reset."""
+        """An admission taken back: its own pages cleared, the cache's order restored, the lane's parts reset."""
 
         if self.tables is not None:
             table = self.tables[lane]

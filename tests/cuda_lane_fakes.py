@@ -192,6 +192,24 @@ class Pattern:
         return Proposals(tokens, conf)
 
 
+class FailingTier:
+    """A tier whose every write fails, as a full disk's would."""
+
+    used, limit = 0, 1 << 20
+
+    def find(self, prompt):
+        return None
+
+    def put(self, key, ids, arrays, *, owned=False):
+        raise OSError("no space left on device")
+
+    def get(self, key):
+        raise KeyError(key)
+
+    def drop(self, key):
+        return None
+
+
 class Mirror:
     """Rank 0's link to a second rank in the same thread: each message runs there as it is sent, and votes."""
 

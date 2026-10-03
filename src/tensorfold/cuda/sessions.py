@@ -16,7 +16,7 @@ from .streams import PrefixCache
 
 
 class StateCodec(Protocol):
-    """A family's kept state as host arrays and back; the arrays alone must rebuild it."""
+    """A family's kept state as host arrays (fresh, the caller keeps them) and back; the arrays alone rebuild it."""
 
     def to_host(self, state: Any) -> dict[str, np.ndarray]: ...
 
@@ -38,7 +38,7 @@ class Tier(Protocol):
     def drop(self, key: str) -> None: ...
 
     # Optional: ``lengths()`` and ``has(key)`` let a lookup hash the prompt's prefixes instead of scanning entries;
-    # ``take_displaced()`` hands back the entries a ``put`` pushed out, for the next tier down.
+    # ``put_displacing()`` is ``put`` that also returns the entries it pushed out, for the next tier down.
 
 
 def compat_hash(compat: dict) -> str:
@@ -68,7 +68,7 @@ class HostTier:
     def __init__(self, limit: int, *, min_tokens: int = 1) -> None:
         self.limit, self.min_tokens, self.used = int(limit), int(min_tokens), 0
         self.entries: OrderedDict[str, tuple[list[int], dict]] = OrderedDict()
-        self.displaced: list[tuple[str, list[int], dict]] = []
+        self.by_len: dict[int, set[str]] = {}
 
     def find(self, prompt: Sequence[int]) -> tuple[str, int] | None:
         best = None
@@ -77,25 +77,30 @@ class HostTier:
                 best = (key, len(ids))
         return best
 
-    def put(self, key: str, ids: Sequence[int], arrays: dict[str, np.ndarray]) -> bool:
+    def put(self, key: str, ids: Sequence[int], arrays: dict[str, np.ndarray], *, owned: bool = False) -> bool:
+        return self.put_displacing(key, ids, arrays, owned=owned)[0]
+
+    def put_displacing(self, key: str, ids: Sequence[int], arrays: dict[str, np.ndarray], *,
+                       owned: bool = False) -> tuple[bool, list[tuple[str, list[int], dict]]]:
+        """Whether it took the entry, and the entries its limit pushed out (the tier keeps no reference to them)."""
+
         size = nbytes(arrays)
         if len(ids) < self.min_tokens or size > self.limit:
-            return False
+            return False, []
         self.drop(key)
-        self.entries[key] = ([int(t) for t in ids], {k: np.array(v, copy=True) for k, v in arrays.items()})
+        kept = arrays if owned else {k: np.array(v, copy=True) for k, v in arrays.items()}
+        self.entries[key] = ([int(t) for t in ids], kept)
+        self.by_len.setdefault(len(ids), set()).add(key)
         self.used += size
+        out = []
         while self.used > self.limit:
             old = next(iter(self.entries))
-            self.displaced.append((old, *self.entries[old]))
+            out.append((old, *self.entries[old]))
             self.drop(old)
-        return True
-
-    def take_displaced(self) -> list[tuple[str, list[int], dict]]:
-        out, self.displaced = self.displaced, []
-        return out
+        return True, out
 
     def lengths(self) -> set[int]:
-        return {len(ids) for ids, _ in self.entries.values()}
+        return set(self.by_len)
 
     def has(self, key: str) -> bool:
         return key in self.entries
@@ -109,6 +114,11 @@ class HostTier:
         gone = self.entries.pop(key, None)
         if gone is not None:
             self.used -= nbytes(gone[1])
+            keys = self.by_len.get(len(gone[0]))
+            if keys is not None:
+                keys.discard(key)
+                if not keys:
+                    del self.by_len[len(gone[0])]
 
     def keys(self) -> list[str]:
         return list(self.entries)
@@ -132,6 +142,7 @@ class TieredCache(PrefixCache):
         self.codec, self.tiers, self.release = codec, list(tiers), release
         self.compat = compat_hash(compat or {})
         self.spilled = self.dropped = 0
+        self.error: Exception | None = None  # the last spill failure (the entry was dropped)
 
     def key(self, ids: Sequence[int]) -> str:
         return entry_key(self.compat, ids)
@@ -155,22 +166,30 @@ class TieredCache(PrefixCache):
         for ids, _, _ in self.entries:
             if strict_prefix(ids, prompt) and (best is None or len(ids) > best[0]):
                 best = (len(ids), -1)
+        indexed = [t for t in self.tiers if callable(getattr(t, "lengths", None)) and callable(getattr(t, "has", None))]
+        lengths = {n for t in indexed for n in t.lengths() if 0 < n < len(prompt)}
+        keys = self._prefix_keys(prompt, lengths)
         for i, tier in enumerate(self.tiers):
-            hit = self._tier_find(tier, prompt)
+            if tier in indexed:  # by key at each length it holds, longest first
+                held = [n for n in sorted(tier.lengths(), reverse=True) if n in keys and tier.has(keys[n])]
+                hit = (keys[held[0]], held[0]) if held else None
+            else:
+                hit = tier.find(prompt)
             if hit is not None and (best is None or hit[1] > best[0]):
                 best = (hit[1], i)
         return best
 
-    def _tier_find(self, tier: Tier, prompt: Sequence[int]) -> tuple[str, int] | None:
-        """A tier's longest entry the prompt strictly extends: by key per stored length where the tier can say."""
+    def _prefix_keys(self, prompt: Sequence[int], lengths: set[int]) -> dict[int, str]:
+        """``key(prompt[:n])`` for every ``n``, in one hashing pass over the prompt."""
 
-        if not (callable(getattr(tier, "lengths", None)) and callable(getattr(tier, "has", None))):
-            return tier.find(prompt)
-        for n in sorted((n for n in tier.lengths() if 0 < n < len(prompt)), reverse=True):
-            key = self.key(prompt[:n])
-            if tier.has(key):
-                return key, n
-        return None
+        h = hashlib.blake2b(digest_size=16)
+        h.update(self.compat.encode())
+        out, at = {}, 0
+        for n in sorted(lengths):
+            h.update(array("i", [int(t) for t in prompt[at:n]]).tobytes())
+            at = n
+            out[n] = h.copy().hexdigest()
+        return out
 
     def load(self, prompt: Sequence[int], length: int, tier: int) -> Any:
         """The state a tier keeps for the prompt's first ``length`` ids (ValueError when it is gone or damaged)."""
@@ -204,24 +223,39 @@ class TieredCache(PrefixCache):
         self._evict(self._pick(among))
 
     def _evict(self, gone) -> None:
+        """Out of the device; its host copy goes down the tiers after its device state is released, whatever they do."""
+
         self.entries = [e for e in self.entries if e is not gone]
         self.hit &= {tuple(e[0]) for e in self.entries}
         ids, state, _ = gone
+        arrays = None
+        try:
+            if self.tiers:
+                arrays = self.codec.to_host(state)
+        except Exception as exc:  # noqa: BLE001  (a kept state is a cache: losing it never stops serving)
+            self.error = exc
+        finally:
+            self._free(state)
         if self.tiers:
-            if self._spill(0, self.key(ids), ids, self.codec.to_host(state)):
+            if arrays is not None and self._spill(0, self.key(ids), ids, arrays):
                 self.spilled += 1
             else:
                 self.dropped += 1
-        self._free(state)
 
     def _spill(self, start: int, key: str, ids: Sequence[int], arrays: dict) -> bool:
         """The first tier from ``start`` that takes the entry; what that tier pushed out moves on to the tiers below."""
 
         for i in range(start, len(self.tiers)):
             tier = self.tiers[i]
-            if tier.put(key, ids, arrays):
-                take = getattr(tier, "take_displaced", None)
-                for old_key, old_ids, old_arrays in (take() if callable(take) else []):
+            try:
+                if callable(getattr(tier, "put_displacing", None)):
+                    took, out = tier.put_displacing(key, ids, arrays, owned=True)
+                else:
+                    took, out = tier.put(key, ids, arrays), []
+            except (OSError, ValueError) as exc:  # a full or failing disk: the entry tries the next tier
+                self.error, took, out = exc, False, []
+            if took:
+                for old_key, old_ids, old_arrays in out:
                     if not self._spill(i + 1, old_key, old_ids, old_arrays):
                         self.dropped += 1
                 return True

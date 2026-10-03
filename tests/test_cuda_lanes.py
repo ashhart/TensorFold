@@ -682,3 +682,16 @@ def test_columns_past_a_windows_need_cannot_change_its_tokens():
     poison(pair.follower)
     streams = [stream(p[i], 6, sampled[i]) for i in range(3)]
     assert pair.run(streams) == [serial(p[i], 6, sampled[i]) for i in range(3)]
+
+
+def test_a_failing_disk_never_stops_serving_and_every_page_comes_back(tmp_path):
+    from cuda_lane_fakes import FailingTier
+
+    p = prompts(4)
+    pair = Pair(lanes=1, keep=1, tiers=[[FailingTier()], [FailingTier()]])
+    outs = pair.run([stream(q, 5) for q in p])  # each new state pushes the last one down, into a failing tier
+    assert outs == [serial(q, 5) for q in p]
+    cache = pair.decoder.cache
+    assert cache.dropped == len(p) - 1 and len(cache.entries) == 1
+    pages = pair.decoder.pool.pages - pair.decoder.pool.free
+    assert pages == len(cache.entries[0][1].pages)  # only the one kept state holds pages

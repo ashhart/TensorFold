@@ -10,6 +10,8 @@ import pytest
 from tensorfold.cuda.session_disk import DiskTier
 from tensorfold.cuda.sessions import HostTier, TieredCache, compat_hash, entry_key, strict_prefix
 
+from cuda_lane_fakes import FailingTier
+
 
 class Codec:
     def to_host(self, state):
@@ -166,3 +168,46 @@ def test_ranks_retain_the_entries_they_all_hold(tmp_path):
     both = sorted(set(a.keys()) & set(b.keys()))
     a.retain(both)
     assert a.keys() == ["y"] and not a.path("x").exists()
+
+
+def test_a_host_tier_used_alone_keeps_nothing_past_its_limit():
+    import gc
+    import weakref
+
+    import numpy as np
+
+    tier = HostTier(3 * 8 * 4)  # three entries of one int64 array of four values
+    refs = []
+    for i in range(10):
+        a = np.full(4, i, dtype=np.int64)
+        refs.append(weakref.ref(a))
+        tier.put(f"k{i}", [i, i], {"x": a}, owned=True)
+        del a
+    gc.collect()
+    assert tier.used <= tier.limit and tier.keys() == ["k7", "k8", "k9"]
+    assert sum(r() is not None for r in refs) == 3  # the seven pushed out are gone, not queued
+
+
+def test_a_failing_tier_drops_the_entry_and_still_frees_its_state(tmp_path):
+    freed = []
+    c = TieredCache(0, codec=Codec(), tiers=[FailingTier()], release=freed.append)
+    c.add([1, 2], [5], None)  # keep 0: straight to the tier, which fails
+    assert freed == [[5]] and c.entries == [] and c.dropped == 1 and isinstance(c.error, OSError)
+
+
+def test_a_state_that_cannot_reach_the_host_is_still_freed():
+    class Broken(Codec):
+        def to_host(self, state):
+            raise RuntimeError("device copy failed")
+
+    freed = []
+    c = TieredCache(0, codec=Broken(), tiers=[HostTier(1 << 20)], release=freed.append)
+    c.add([1, 2], [5], None)
+    assert freed == [[5]] and c.dropped == 1 and isinstance(c.error, RuntimeError)
+
+
+def test_one_hashing_pass_gives_each_prefix_its_entry_key():
+    c = TieredCache(1, codec=Codec(), compat={"engine": "x"})
+    prompt = list(range(3, 300))
+    keys = c._prefix_keys(prompt, {1, 7, 64, 200, 296})
+    assert keys == {n: c.key(prompt[:n]) for n in (1, 7, 64, 200, 296)}

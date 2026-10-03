@@ -65,6 +65,7 @@ class DiskTier:
         (self.dir / "compat.json").write_text(json.dumps(compat, sort_keys=True, default=str))
         self.limit, self.min_tokens, self.direct = int(limit), int(min_tokens), bool(direct)
         self.index: dict[str, tuple[list[int], int, int]] = {}  # key -> (ids, file bytes, last use)
+        self.by_len: dict[int, set[str]] = {}
         self.clock = 0
         self.lock = threading.Lock()
         self.reconcile()
@@ -88,7 +89,11 @@ class DiskTier:
 
     def lengths(self) -> set[int]:
         with self.lock:
-            return {len(ids) for ids, _, _ in self.index.values()}
+            return set(self.by_len)
+
+    def _indexed(self, key: str, ids: list[int], size: int) -> None:
+        self.index[key] = (ids, size, self.clock)
+        self.by_len.setdefault(len(ids), set()).add(key)
 
     def has(self, key: str) -> bool:
         with self.lock:
@@ -101,7 +106,7 @@ class DiskTier:
                 best = (key, len(ids))
         return best
 
-    def put(self, key: str, ids: Sequence[int], arrays: dict[str, np.ndarray]) -> bool:
+    def put(self, key: str, ids: Sequence[int], arrays: dict[str, np.ndarray], *, owned: bool = False) -> bool:
         segments = [("ids", np.asarray(ids, dtype=np.int32))] + sorted(arrays.items())
         table, at = [], 0
         for name, a in segments:
@@ -140,7 +145,7 @@ class DiskTier:
         os.replace(tmp, self.path(key))
         with self.lock:
             self.clock += 1
-            self.index[key] = ([int(t) for t in ids], total, self.clock)
+            self._indexed(key, [int(t) for t in ids], total)
         self._trim(key)
         return True
 
@@ -223,7 +228,13 @@ class DiskTier:
 
     def drop(self, key: str) -> None:
         with self.lock:
-            self.index.pop(key, None)
+            gone = self.index.pop(key, None)
+            if gone is not None:
+                keys = self.by_len.get(len(gone[0]))
+                if keys is not None:
+                    keys.discard(key)
+                    if not keys:
+                        del self.by_len[len(gone[0])]
         try:
             self.path(key).unlink()
         except FileNotFoundError:
@@ -239,6 +250,7 @@ class DiskTier:
         """Index the directory's whole entries, oldest first, and delete temporary or unreadable files."""
 
         self.index.clear()
+        self.by_len.clear()
         found = []
         for p in self.dir.iterdir():
             if p.suffix == ".tmp":
@@ -264,7 +276,7 @@ class DiskTier:
                 p.unlink()
         for _, key, ids, size in sorted(found):
             self.clock += 1
-            self.index[key] = (ids, size, self.clock)
+            self._indexed(key, ids, size)
         while self.used > self.limit and self.index:
             self.drop(min(self.index, key=lambda k: self.index[k][2]))
         return len(self.index)
