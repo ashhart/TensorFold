@@ -159,7 +159,7 @@ def test_moe4_step_runs_each_row_through_its_expert_and_the_shared_one():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
 def test_each_kernel_groups_a_prompt_in_its_own_item():
-    """A prompt plan's items hold its kernel's pairs (MLX grouped 64, NVFP4 16), inside ``max_items`` for that item."""
+    """A prompt plan's items hold its kernel's pairs (64, or 16 for the decode kernel), inside ``max_items``."""
 
     from tensorfold.cuda import experts as grouped
     from tensorfold.cuda.nvfp4 import experts as nvx
@@ -168,8 +168,8 @@ def test_each_kernel_groups_a_prompt_in_its_own_item():
     g = torch.Generator().manual_seed(3)
     picks = torch.stack([torch.randperm(experts, generator=g)[:top_k] for _ in range(rows)]).to(torch.int32)
     picks = torch.cat([picks, torch.full((rows, 1), experts, dtype=torch.int32)], dim=1).cuda()   # the shared one
-    assert (grouped.PREFILL_TILE, nvx.PREFILL_TILE) == (64, 16), "measured on Flash Next's routed prompts"
-    for tile in (grouped.PREFILL_TILE, nvx.PREFILL_TILE):
+    assert (grouped.PREFILL_TILE, nvx.PREFILL_TILE) == (64, 64), "measured on Flash Next's routed prompts"
+    for tile in (grouped.PREFILL_TILE, 16):
         plan = grouped.Plan(rows, top_k + 1, experts + 1, "cuda", prefill=True)
         grouped.route(picks, plan, tile)
         items, distinct = int(plan.counts[0].item()), int(plan.counts[1].item())
@@ -179,7 +179,7 @@ def test_each_kernel_groups_a_prompt_in_its_own_item():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
 def test_moe4_prompt_rows_take_the_nvfp4_item_and_keep_their_bits(monkeypatch):
-    """A prompt's NVFP4 experts run in 16-pair items, and every pair's bits equal those of 64-pair items."""
+    """Prompt NVFP4 experts in 64-pair items (staged kernel) give every pair the bits of 16-pair items."""
 
     from types import SimpleNamespace
 
@@ -201,7 +201,8 @@ def test_moe4_prompt_rows_take_the_nvfp4_item_and_keep_their_bits(monkeypatch):
     router = (torch.randn(e + 1, d, device=dev) * 0.1).to(torch.bfloat16)
     x = (torch.randn(rows, d, device=dev) * 0.5).to(torch.bfloat16)
     got = {}
-    for tile in (nvx.PREFILL_TILE, 64):
+    assert nvx.PREFILL_TILE == 64
+    for tile in (16, nvx.PREFILL_TILE):
         monkeypatch.setattr(nvx, "PREFILL_TILE", tile)
         buf = moe_mod.MoEBuffers(rows, cfg, dev, prefill=True)
         nvfp4_moe.moe(x, None, router, ex, buf, cfg)
