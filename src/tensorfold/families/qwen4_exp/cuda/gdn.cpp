@@ -25,7 +25,7 @@ void chain(const at::Tensor& P, const at::Tensor& cs, const at::Tensor& cw, cons
     check(out, at::kBFloat16, "out");
     check(xs, at::kFloat, "group sums");
     const int64_t nv = a_log.numel(), nk = nv / 3;
-    TORCH_CHECK(nv == 48 || nv == 24, "48 or 24 value heads");
+    TORCH_CHECK(nv == 48 || nv == 24 || nv == 12, "48, 24 or 12 value heads");
     TORCH_CHECK(P.size(0) >= rows && P.size(1) == 2 * nk * 128 + 2 * nv * 128 + 2 * nv, "P width");
     TORCH_CHECK(state_in.numel() == nv * 128 * 128, "state must be [nv, 128, 128]");
     c10::cuda::CUDAGuard guard(P.device());

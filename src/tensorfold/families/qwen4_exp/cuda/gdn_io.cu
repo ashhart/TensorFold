@@ -117,7 +117,8 @@ void gdn_front_cuda(const at::Tensor& P, const at::Tensor& conv_ptrs, const at::
     };
     if (nv == 48) launch(front_kernel<16, 48>, 16);
     else if (nv == 24) launch(front_kernel<8, 24>, 8);
-    else TORCH_CHECK(false, "gdn front: 48 or 24 value heads");
+    else if (nv == 12) launch(front_kernel<4, 12>, 4);
+    else TORCH_CHECK(false, "gdn front: 48, 24 or 12 value heads");
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -132,6 +133,7 @@ void gdn_back_cuda(const at::Tensor& y, const at::Tensor& P, const at::Tensor& n
     };
     if (nv == 48) launch(back_kernel<16, 48>);
     else if (nv == 24) launch(back_kernel<8, 24>);
-    else TORCH_CHECK(false, "gdn back: 48 or 24 value heads");
+    else if (nv == 12) launch(back_kernel<4, 12>);
+    else TORCH_CHECK(false, "gdn back: 48, 24 or 12 value heads");
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

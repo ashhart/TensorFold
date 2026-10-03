@@ -15,7 +15,7 @@
 namespace {
 
 constexpr int DK = 128, DV = 128, TAPS = 4;
-// NK key heads and NV value heads: the whole layer (16, 48) or one tensor-parallel rank's share (8, 24)
+// NK key heads and NV value heads: the whole layer (16, 48) or one rank's share of two (8, 24) or four (4, 12)
 
 __device__ __forceinline__ float bf(float x) { return __bfloat162float(__float2bfloat16_rn(x)); }
 
@@ -231,7 +231,8 @@ void gdn_chain_cuda(const at::Tensor& P, const at::Tensor& cs, const at::Tensor&
     };
     if (nv == 48) launch(rows > 1 ? chain_kernel<16, 48, true> : chain_kernel<16, 48, false>, 48);
     else if (nv == 24) launch(rows > 1 ? chain_kernel<8, 24, true> : chain_kernel<8, 24, false>, 24);
-    else TORCH_CHECK(false, "gdn chain: 48 or 24 value heads");
+    else if (nv == 12) launch(rows > 1 ? chain_kernel<4, 12, true> : chain_kernel<4, 12, false>, 12);
+    else TORCH_CHECK(false, "gdn chain: 48, 24 or 12 value heads");
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -247,6 +248,10 @@ void gdn_replay_cuda(const at::Tensor& state_in, const at::Tensor& k_save, const
         replay_kernel<8, 24><<<24, 1024, 0, stream>>>(
             ptr<float>(state_in), ptr<float>(k_save), ptr<__nv_bfloat16>(v_save), ptr<float>(g_save),
             ptr<float>(b_save), (int)rows, ptr<float>(state_out));
-    else TORCH_CHECK(false, "gdn replay: 48 or 24 value heads");
+    else if (nv == 12)
+        replay_kernel<4, 12><<<12, 1024, 0, stream>>>(
+            ptr<float>(state_in), ptr<float>(k_save), ptr<__nv_bfloat16>(v_save), ptr<float>(g_save),
+            ptr<float>(b_save), (int)rows, ptr<float>(state_out));
+    else TORCH_CHECK(false, "gdn replay: 48, 24 or 12 value heads");
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

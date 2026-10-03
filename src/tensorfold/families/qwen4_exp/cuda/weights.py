@@ -43,9 +43,20 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         return exl3.load(model_dir, device, mtp=mtp, tp=tp, draft_vocab=draft_vocab, table_reads=table_reads)
     full = Config.read(model_dir)
     rank, world = tp if tp is not None else (0, 1)
-    cfg = full if world == 1 else replace(full, heads=full.heads // world, kv_heads=full.kv_heads // world,
+    from .ranks import UNIT, share
+
+    if world > 1 and (full.heads % world or full.nk % world or full.nv % world
+                      or (full.kv_heads % world and world % full.kv_heads)):
+        raise ValueError(f"Flash Next's heads ({full.heads} query, {full.kv_heads} key/value, {full.nk}/{full.nv} "
+                         f"DeltaNet) do not split over {world} ranks")
+    unit = UNIT if full.quant == "modelopt" else 32               # whole NVFP4 groups of 64, MLX groups of 32
+    lo, hi = share(full.moe_width, rank, world, unit) if world > 1 else (0, full.moe_width)   # shared expert too
+    # key/value heads past the rank count are shared: each rank keeps the one its query heads read
+    kv_local = max(1, full.kv_heads // world)
+    kv_first = rank * full.kv_heads // world
+    cfg = full if world == 1 else replace(full, heads=full.heads // world, kv_heads=kv_local,
                                           nk=full.nk // world, nv=full.nv // world,
-                                          moe_width=full.moe_width // world, shared_width=full.shared_width // world)
+                                          moe_width=hi - lo, shared_width=hi - lo)
     rd = _Reader(model_dir, device)
     prefix = "language_model." if rd.has("language_model.model.embed_tokens.weight") else ""
     # NVFP4 names the language model ``model.language_model.*``; its lm_head and mtp sit at the top level
@@ -86,7 +97,7 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
 
     def b16(name: str):
         """One linear as the NVFP4 checkpoint stores it (BF16, torch layout [out, in]), on the qmm matmul face."""
-        return b16_from_rows(raw(name + ".weight"))
+        return b16_rows(raw(name + ".weight"))
 
     def dense(name: str, rows=None, cols: slice | None = None):
         """A linear's weight and its scales: e8m0 (MXFP8), ("block", fp32 per row and 64 inputs) or None (bf16)."""
@@ -168,11 +179,11 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         """An attention block from the NVFP4 checkpoint (bf16 or MXFP8 linears)."""
 
         hd = full.head_dim
-        hl, kl = full.heads // world, full.kv_heads // world
+        hl, kl, k0 = full.heads // world, kv_local, kv_first
         one = world == 1
         proj = face((name + ".q_proj", None if one else slice(rank * hl * 2 * hd, (rank + 1) * hl * 2 * hd)),
-                    (name + ".k_proj", None if one else slice(rank * kl * hd, (rank + 1) * kl * hd)),
-                    (name + ".v_proj", None if one else slice(rank * kl * hd, (rank + 1) * kl * hd)),
+                    (name + ".k_proj", None if one else slice(k0 * hd, (k0 + kl) * hd)),
+                    (name + ".v_proj", None if one else slice(k0 * hd, (k0 + kl) * hd)),
                     (name + ".indexer.index_qk_proj", None))
         o = face((name + ".o_proj", None, None if one else slice(rank * hl * hd, (rank + 1) * hl * hd)))
         return AttnW(proj, cscale(name + ".q_norm.weight"), cscale(name + ".k_norm.weight"),
@@ -253,8 +264,7 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         e = full.experts
         w_ = full.moe_width
         gs = full.nvfp4_group
-        lo, hi = rank * w_ // world, (rank + 1) * w_ // world
-        dlo, dhi = rank * w_ // world // gs, (rank + 1) * w_ // world // gs
+        dlo, dhi = lo // gs, hi // gs
         se = f"{name}.shared_expert."
         if raw(se + "gate_proj.weight").dtype == torch.float8_e4m3fn:     # MXFP8: its own lane-matmul faces
             shared = nvfp4_moe.Expert4(face((se + "gate_proj", slice(lo, hi)), (se + "up_proj", slice(lo, hi))),
@@ -312,8 +322,9 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         else:                                            # the MTP layer: BF16 stacked experts (excluded)
             gu = raw(name + ".experts.gate_up_proj").to(torch.bfloat16)          # [E, 2*NI, D]
             dn = raw(name + ".experts.down_proj").to(torch.bfloat16)             # [E, D, NI]
-            if world > 1:
-                gu, dn = gu[:, lo:hi], dn[:, :, dlo * gs:dhi * gs]
+            if world > 1:                                # this rank's gate rows and its up rows
+                gu = torch.cat([gu[:, lo:hi], gu[:, w_ + lo:w_ + hi]], dim=1)
+                dn = dn[:, :, dlo * gs:dhi * gs]
             moe4 = nvfp4_moe.moe4_from_bf16(gu, dn, shared)
         return MoEW(router, moe4)
 

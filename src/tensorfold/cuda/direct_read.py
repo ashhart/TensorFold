@@ -202,6 +202,8 @@ class ReadAhead:
         cut = cut or (lambda raw, meta: raw.clone())
         if device is not None and torch.device(device).type != "cuda":
             device = None
+        if device is not None and torch.device(device).index is None:     # this thread's device, not the workers'
+            device = torch.device("cuda", torch.cuda.current_device())
         if self.pool is None:
             self.pool = ThreadPoolExecutor(self.threads, thread_name_prefix="read-ahead")
         if device is not None and self.stream is None:
@@ -262,7 +264,8 @@ class ReadAhead:
         if device is None:
             raw = self.reader.read(path, lo, hi - lo)
             return None, {key: cut(raw[b - lo:e - lo], meta) for key, _, b, e, meta in run}
-        host = self.reader.read(path, lo, hi - lo, pinned=True)
+        with torch.cuda.device(torch.device(device)):     # pinned pages and the upload on the caller's device
+            host = self.reader.read(path, lo, hi - lo, pinned=True)
         with torch.cuda.device(torch.device(device)), torch.cuda.stream(self.stream):
             raw = host.to(device, non_blocking=True)
             out = {key: cut(raw[b - lo:e - lo], meta) for key, _, b, e, meta in run}

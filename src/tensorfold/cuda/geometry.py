@@ -81,20 +81,40 @@ def with_fixed(geometry: Geometry, extra: int) -> Geometry:
     return Geometry(lambda slots: geometry.bytes_at(slots) + extra, geometry.reserve, geometry.minimum_slots)
 
 
-def indexed_weights(world: int, mtp: bool, mapped_tables: bool = True):
+def indexed_weights(world: int, mtp: bool, mapped_tables: bool = True, *, text: dict | None = None, rank: int = 0):
+    """Flash Next's resident bytes on one rank (``text``: its expert share and shared key/value heads)."""
+
+    share = kv = None
+    if text is not None and world > 1:
+        from tensorfold.families.qwen4_exp.cuda.ranks import share as width_share
+
+        t = text.get("text_config", text)
+        width = int(t["moe_intermediate_size"])
+        lo, hi = width_share(width, rank, world)
+        share = (hi - lo, width)
+        heads = int(t["num_key_value_heads"])
+        kv = (max(1, heads // world), heads)
+
     def transform(name: str, info: dict) -> tuple[int, int]:
         if "vision" in name or ".visual." in name or (not mtp and (name.startswith("mtp.") or ".mtp." in name)):
             return 0, 0
         if ".ngram_embedding.shard_" in name or name.endswith(".ngram_embedding.trellis"):     # host pages if mapped
             return 0, size(info, name) if mapped_tables else 0
         shape = list(info["shape"])
+        nvfp4_experts = ".mlp.experts." in name and share is not None
         if world > 1 and not info.get("split"):
-            if ".switch_mlp." in name or ".shared_expert." in name:
+            if nvfp4_experts or (share is not None and ".shared_expert." in name and ".shared_expert_gate" not in name):
+                axis = -1 if ".down_proj" in name else -2
+                if shape and len(shape) >= 2:
+                    shape[axis] = -(-shape[axis] * share[0] // share[1])
+            elif ".switch_mlp." in name or ".shared_expert." in name:
                 axis = -1 if ".down_proj." in name else -2
                 shape[axis] //= world
             elif ".indexer." not in name and (".self_attn." in name or ".linear_attn." in name):
-                if any(f".{part}." in name for part in ("q_proj", "k_proj", "v_proj", "in_proj_qkv", "in_proj_z",
-                                                        "in_proj_a", "in_proj_b", "conv1d")):
+                if kv is not None and any(f".{part}." in name for part in ("k_proj", "v_proj")):
+                    shape[0] = shape[0] * kv[0] // kv[1]
+                elif any(f".{part}." in name for part in ("q_proj", "k_proj", "v_proj", "in_proj_qkv", "in_proj_z",
+                                                          "in_proj_a", "in_proj_b", "conv1d")):
                     shape[0] //= world
                 elif any(f".{part}." in name for part in ("o_proj", "out_proj")):
                     shape[-1] //= world
@@ -104,6 +124,8 @@ def indexed_weights(world: int, mtp: bool, mapped_tables: bool = True):
                 shape[0] //= world
         cast = name.endswith((".A_log", ".dt_bias", ".q_norm.weight", ".k_norm.weight", ".hc_norm.weight"))
         amount = padded(info, shape, float32=cast, name=name)
+        if ".mlp.experts." in name and info["dtype"] == "BF16" and (name.startswith("mtp.") or ".mtp." in name):
+            amount = amount * 9 // 32           # bf16 MTP experts load as NVFP4 (4.5 bits a value)
         if mtp and "lm_head." in name:
             amount *= 2  # the additional vocabulary-subset draft head
         return amount, 0
@@ -166,18 +188,17 @@ def live_kv(t: dict, world: int, window: int) -> int:
     """A dense stream's attention caches at ``window`` rows (1,024 at least) and one layer's buffer mid-grow."""
 
     _, attention = layer_counts(t)
-    return (attention + 1) * max(1024, window) * int(t["num_key_value_heads"]) // world * int(t["head_dim"]) * 4
+    return (attention + 1) * max(1024, window) * max(1, int(t["num_key_value_heads"]) // world) * int(t["head_dim"]) * 4
 
 
 def gdn_geometry(t: dict, world: int, reserve: int, *, indexed: bool = False, mtp: bool = False,
                  kv_bits: int = 16, rows: int | None = None, prompt: int = 0, evicts: bool = False,
                  kept: int = 2, prefill_rows: int = PREFILL_ROWS, prompt_staging: bool = False) -> Geometry:
-    """``rows``: widest verify; ``prompt``: chunk rows sharing its scratch; ``evicts``: only the live window counts;
-    ``prompt_staging``: sm_70 prompt attention stages one key head's keys and values in fp16."""
+    """``rows``: widest verify; ``prompt``: chunk rows sharing its scratch; ``evicts``: only the live window counts."""
 
     linear, attention = layer_counts(t)
     d, h = int(t["hidden_size"]), int(t["num_attention_heads"]) // world
-    hk = int(t["num_key_value_heads"]) // world
+    hk = max(1, int(t["num_key_value_heads"]) // world)
     hd = int(t.get("head_dim") or d // int(t["num_attention_heads"]))
     nk, nv = int(t["linear_num_key_heads"]) // world, int(t["linear_num_value_heads"]) // world
     dk, dv = int(t["linear_key_head_dim"]), int(t["linear_value_head_dim"])
@@ -321,7 +342,7 @@ def draft_ring_rows(window: int, block: int, tile: int = 64) -> int:
 def draft_geometry(t: dict, world: int, reserve: int, *, bounded: bool = False, streams: int = 1,
                    kept: int = 0) -> Geometry:
     layers = int(t["num_hidden_layers"])
-    heads = int(t["num_key_value_heads"]) // world
+    heads = max(1, int(t["num_key_value_heads"]) // world)
     hd = int(t["head_dim"])
     block = int((t.get("dflash_config") or {}).get("block_size", 16))
     window = int(t.get("sliding_window", 0))
@@ -338,7 +359,7 @@ def dflash2_geometry(t: dict, world: int, reserve: int, *, ring: bool) -> Geomet
     """GLM's DFlash2 drafter on each rank: one context (a ring, or capacity + block rows) and a block pass."""
 
     layers = int(t["num_hidden_layers"])
-    heads = int(t["num_key_value_heads"]) // world
+    heads = max(1, int(t["num_key_value_heads"]) // world)
     hd = int(t["head_dim"])
     block = int((t.get("dflash_config") or {}).get("block_size", 16))
     window = int(t.get("sliding_window", 0))
@@ -389,14 +410,13 @@ def _gdn_dims(t: dict, world: int) -> tuple:
     d, heads = int(t["hidden_size"]), int(t["num_attention_heads"])
     nk, nv = int(t["linear_num_key_heads"]) // world, int(t["linear_num_value_heads"]) // world
     dk, dv = int(t["linear_key_head_dim"]), int(t["linear_value_head_dim"])
-    return (d, heads // world, int(t["num_key_value_heads"]) // world, int(t.get("head_dim") or d // heads),
+    return (d, heads // world, max(1, int(t["num_key_value_heads"]) // world), int(t.get("head_dim") or d // heads),
             nk, nv, dk, dv, 2 * nk * dk + 2 * nv * dv + 2 * nv)
 
 
 def stream_geometry(t: dict, world: int, streams: int, keep: int, *, first: int | None = None,
                     prompt_staging: bool = False) -> Geometry:
-    """The 27B's concurrent decoder: live streams, ``keep`` kept prompt ends, windows; ``first``: growth on one GPU;
-    ``prompt_staging`` as in ``gdn_geometry``."""
+    """The 27B's concurrent decoder: live streams, ``keep`` kept prompt ends, windows; ``first``: growth on one GPU."""
 
     linear, attention = layer_counts(t)
     d, h, hk, hd, nk, nv, dk, dv, width = _gdn_dims(t, world)
@@ -464,7 +484,7 @@ def hybrid_geometry(t: dict, world: int, reserve: int, *, rows: int, chunk: int,
     pattern = _pattern(t)
     nm, na = pattern.count("M"), pattern.count("*")
     d, vocab, hd = int(t["hidden_size"]), int(t["vocab_size"]), int(t.get("head_dim") or 128)
-    heads, kv = int(t["num_attention_heads"]) // world, int(t["num_key_value_heads"]) // world
+    heads, kv = int(t["num_attention_heads"]) // world, max(1, int(t["num_key_value_heads"]) // world)
     mh, mhd, ms = int(t["mamba_num_heads"]) // world, int(t["mamba_head_dim"]), int(t["ssm_state_size"])
     cd = mh * mhd + 2 * (int(t["n_groups"]) // world) * ms
     proj, qkv, experts = mh * mhd + cd + mh, (heads + 2 * kv) * hd, int(t["n_routed_experts"]) + 2

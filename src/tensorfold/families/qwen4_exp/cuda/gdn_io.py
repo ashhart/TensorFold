@@ -15,7 +15,7 @@ def _ext():
     from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
-    return load(name="tensorfold_qwen4_exp_gdn_io", sources=[str(here / "gdn_io.cpp"), str(here / "gdn_io.cu")],
+    return load(name="tensorfold_qwen4_exp_gdn_io_v2", sources=[str(here / "gdn_io.cpp"), str(here / "gdn_io.cu")],
                 extra_cuda_cflags=["-O3", "--fmad=false"], verbose=False)
 
 

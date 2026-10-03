@@ -32,6 +32,36 @@ def _gather(w: Weights, b: Buffers, part: torch.Tensor, flat: torch.Tensor, R: i
     return out.view(b.world, R, d)
 
 
+def _ranks(w: Weights, b: Buffers, part: torch.Tensor, flat: torch.Tensor, R: int) -> tuple:
+    """A row-parallel branch: (1, the bf16 rank-ordered sum) where ranks share a stage, else (3, the fp32 partials)."""
+
+    from tensorfold.cuda import p2p
+
+    peer = p2p.peer()
+    if b.prefill and w.cfg.quant == "modelopt":      # prompt rows: bf16 partials (half the bytes), summed in fp32
+        mine = part[:R].to(torch.bfloat16)
+        if peer is not None and peer.fits(mine):
+            parts = peer.gather(mine)
+        else:
+            parts = torch.empty((b.world, *mine.shape), dtype=torch.bfloat16, device=mine.device)
+            w.comm.all_gather(mine, parts.view(-1))
+        acc = parts[0].float()
+        for r in range(1, b.world):
+            acc = acc + parts[r].float()
+        return 1, acc.to(torch.bfloat16)
+    if peer is not None and peer.fits(part[:R]):
+        if peer.small(part[:R]):
+            return 1, peer(part[:R])
+        return 3, peer.gather(part[:R])
+    return 3, _gather(w, b, part, flat, R)
+
+
+def _f32(x: torch.Tensor, q, b: Buffers) -> torch.Tensor:
+    """An NVFP4 checkpoint's linear as unrounded fp32 [R, N]: a rank's partial, or a down projection's sums."""
+
+    return bf16.matmul(x, q.b, out=torch.empty((x.shape[0], q.n), dtype=torch.float32, device=x.device), f32=True)
+
+
 def _mm(x: torch.Tensor, q: qmm.Q4, xs: torch.Tensor, out: torch.Tensor, b: Buffers, **kw) -> torch.Tensor:
     if getattr(q, "kernel", "qmm") == "b16":      # an NVFP4 checkpoint's BF16 linear (non-experts)
         return bf16.matmul(x, q, out=out)
@@ -82,8 +112,7 @@ def _readout_b16(hc: HC, b: Buffers, h: torch.Tensor, R: int, eps: float, stream
     """The read-out on the bf16 kernels: norm, down, activation and inject gates, up, the mix; same bits per row."""
 
     glue.hc_normed(h[:R], b.pss[:R], hc.scale, b.normed[:R], b.xs_normed[:R], streams, eps)
-    got = bf16.matmul(b.normed[:R], hc.down.b, out=torch.empty((R, hc.down.n), dtype=torch.float32,
-                                                               device=h.device), f32=True)
+    got = _f32(b.normed[:R], hc.down, b)
     glue.hc_act(got, b.act[:R], b.xs_act[:R], inject, streams, low)
     _mm(b.act[:R], hc.up, b.xs_act[:R], b.up[:R], b)
     glue.hc_mix(b.up[:R], b.normed[:R], b.mixed[:R], b.xs_mixed[:R], streams)
@@ -197,6 +226,9 @@ def _out_proj(w: Weights, b: Buffers, x: torch.Tensor, q: qmm.Q4, xs: torch.Tens
     """A block's output projection: (1, bf16 branch) on one GPU; (3, gathered fp32 partials) across ranks."""
 
     if not isinstance(q, qmm.Q4):      # an NVFP4 checkpoint's BF16 face, or an EXL3 pack (one GPU): the bf16 branch
+        if w.comm is not None:           # several ranks: this rank's fp32 partial, summed in rank order
+            b.part_branch[:R].copy_(_f32(x, q, b))
+            return _ranks(w, b, b.part_branch, b.g_branch, R)
         return 1, _mm(x, q, xs, b.branch[:R], b)
     if w.comm is None:
         got = _mm(x, q, xs, b.branch[:R], b, reduce=False)
@@ -204,7 +236,7 @@ def _out_proj(w: Weights, b: Buffers, x: torch.Tensor, q: qmm.Q4, xs: torch.Tens
             return 4, got            # K slices: the write-back sums them in order (the bits of reduce, then round)
         return 1, got
     _mm(x, q, xs, b.part_branch[:R], b, f32=True)
-    return 3, _gather(w, b, b.part_branch, b.g_branch, R)
+    return _ranks(w, b, b.part_branch, b.g_branch, R)
 
 
 def _caches(layer: LayerW, st: State, mtp: bool) -> tuple:
@@ -331,7 +363,7 @@ def moe_block(layer: LayerW, w: Weights, b: Buffers, R: int) -> tuple:
     if w.comm is None:
         return 2, buf.y[:R], buf.wts[:R]
     glue.moe_partial(buf.y[:R], buf.wts[:R], b.part_moe, R)
-    return 3, _gather(w, b, b.part_moe, b.g_moe, R), None
+    return (*_ranks(w, b, b.part_moe, b.g_moe, R), None)
 
 
 def _exl3_moe(m, w: Weights, b: Buffers, R: int) -> tuple:
