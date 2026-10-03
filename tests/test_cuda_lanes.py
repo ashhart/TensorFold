@@ -572,3 +572,27 @@ def test_a_spilled_state_carries_no_rows_past_its_positions():
     assert (kv[:21] == 7).all() and (kv[21:] == 0).all() and kv.shape == (32, 2)
     assert (c[:5] == 9).all() and (c[5:] == 0).all() and c.shape == (8, 2)  # row 5 (20-23) is incomplete
     assert (pool.buffers["kv"] == 7).all()  # the device rows are left alone
+
+
+def test_each_window_names_the_candidates_its_own_sampling_needs():
+    from tensorfold.engine.exact_sampling import MARGIN, Sampling
+
+    pair = Pair(lanes=3, prefill_rows=512)
+    seen = []
+    for fwd in (pair.decoder.forward, pair.follower.forward):
+        real = fwd.window
+
+        def window(rows, count, masks=None, counts=None, real=real, fwd=fwd):
+            if fwd is pair.decoder.forward:
+                seen.append((count, list(counts)))
+            return real(rows, count, masks)
+
+        fwd.window = window
+    for lanes in (pair.decoder.local, pair.follower):
+        lanes._counts = True
+    p = prompts(3)
+    pair.run([stream(p[0], 3), stream(p[1], 3, Sampling(seed=1, temperature=0.8, top_k=0, top_p=0.9)),
+              stream(p[2], 3, Sampling(seed=2, temperature=0.8, top_k=5))])
+    vocab = pair.decoder.forward.vocab
+    assert seen and all(count == max(counts) for count, counts in seen)
+    assert any(sorted(counts) == [1, 5 + MARGIN, vocab] for _, counts in seen)

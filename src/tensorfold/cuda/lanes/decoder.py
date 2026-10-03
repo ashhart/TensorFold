@@ -278,10 +278,12 @@ class LaneDecoder:
                 continue
             p = self.plans[s.sid]
             most = min(int(self.drafter.block), s.count - len(s.out) - 1) if s.draft and self.drafter else 0
-            windows.append((p.lane, p.pos, p.pending, max(0, most)))
             smp = s.sampling
+            need = 1
             if smp is not None and smp.temperature > 0:
-                count = max(count, min(vocab, int(smp.top_k) + MARGIN) if smp.top_k else vocab)
+                need = min(vocab, int(smp.top_k) + MARGIN) if smp.top_k else vocab
+            windows.append((p.lane, p.pos, p.pending, max(0, most), need))
+            count = max(count, need)
         return windows, count
 
     def _sample(self, p: Plan, rows, cand: Candidates) -> Stream:

@@ -13,6 +13,15 @@ from .forward import Candidates, Piece, Rows, chain, check
 from .link import ADMIT, AGREED, DONE, EVICT, ROUND, SAMPLING_WORDS, STOP, Link, unpack_sampling
 
 
+def _takes(fn: Any, name: str) -> bool:
+    import inspect
+
+    try:
+        return name in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
 @dataclass
 class Held:
     """A cache entry's state: the forward's snapshot and the pool pages holding its rows (None without a pool)."""
@@ -78,6 +87,7 @@ class Lanes:
     ) -> None:
         check(forward)
         self.forward, self.capacity = forward, int(capacity)
+        self._counts = _takes(forward.window, "counts")
         self.pool, self.cache, self.drafter, self.depth, self.grammars = pool, cache, drafter, depth, grammars
         self.lanes: list[Lane | None] = [None] * int(lanes)
         self.tables = [pool.table(capacity) for _ in range(lanes)] if pool is not None else None
@@ -206,7 +216,7 @@ class Lanes:
 
         commits, pieces, saves, finals = group(3), group(3), group(1), group(1)
         count = next(it)
-        windows = group(4)
+        windows = group(5)
         res = Result()
         for lane, kept, bonus in commits:
             self._commit(lane, kept, bonus, res)
@@ -267,13 +277,13 @@ class Lanes:
                 [w[3] for w in deep],
                 [self.lanes[w[0]].sampling for w in deep],
             )
-            for i, (lane, _, _, most) in enumerate(deep):
+            for i, (lane, _, _, most, _) in enumerate(deep):
                 tokens = [int(t) for t in got.tokens[i]][:most]
                 conf = got.confidence[i] if got.confidence is not None else None
                 k = self.depth.depth(lane, conf, len(tokens)) if self.depth is not None else len(tokens)
                 drafts[lane] = tokens[:k]
-        rows, masks = [], []
-        for lane, start, pending, _ in specs:
+        rows, masks, needs = [], [], []
+        for lane, start, pending, _, need in specs:
             if lane in res.errors:
                 continue
             s = self.lanes[lane]
@@ -291,9 +301,14 @@ class Lanes:
             s.last = r
             rows.append(r)
             masks.append(mask)
+            needs.append(need)
         res.rows = rows
         if rows:
-            res.cand = self.forward.window(rows, count, masks if any(m is not None for m in masks) else None)
+            masks = masks if any(m is not None for m in masks) else None
+            if self._counts:  # each window's own need: one nucleus request does not widen every lane's rows
+                res.cand = self.forward.window(rows, count, masks, counts=needs)
+            else:
+                res.cand = self.forward.window(rows, count, masks)
 
     # -- views ---------------------------------------------------------------------------------------------------
     def state(self) -> tuple:
