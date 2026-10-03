@@ -7,6 +7,9 @@ import mlx.core as mx
 ROWS = 128
 FROM_KEYS = 4096
 KEY_BLOCK = 16          # MLX 0.32.2's key block before M5: a part ending inside one rounds unlike one whole call
+# MLX 0.32.2-0.32.3 on M5 run head size 256 in its fused kernel from this many queries: it keeps no scores, so one call
+# is the stock bits in bounded memory (128-row parts would take the score-matrix path and round differently)
+FUSED_ROWS = 1024
 
 
 def attend(queries: mx.array, keys: mx.array, values: mx.array, scale: float) -> mx.array:
@@ -17,6 +20,8 @@ def attend(queries: mx.array, keys: mx.array, values: mx.array, scale: float) ->
         return mx.fast.scaled_dot_product_attention(queries, keys, values, scale=scale, mask="causal")
     from tensorfold.families.qwen3_5 import tensor_units
 
+    if rows >= FUSED_ROWS and tensor_units():
+        return mx.fast.scaled_dot_product_attention(queries, keys, values, scale=scale, mask="causal")
     block = 1 if tensor_units() else KEY_BLOCK
     outs: list[mx.array] = []
     begin = 0
@@ -38,4 +43,4 @@ def attend(queries: mx.array, keys: mx.array, values: mx.array, scale: float) ->
     return mx.concatenate(outs, axis=2)
 
 
-__all__ = ["FROM_KEYS", "KEY_BLOCK", "ROWS", "attend"]
+__all__ = ["FROM_KEYS", "FUSED_ROWS", "KEY_BLOCK", "ROWS", "attend"]

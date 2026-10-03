@@ -20,7 +20,8 @@ def test_fused_prompt_heads_keep_stock_dispatch(monkeypatch):
 
 
 @pytest.mark.parametrize("rows,total", [(129, 4097), (256, 8192), (257, 8192), (272, 8192), (273, 8192), (300, 5000),
-                                        (400, 8192), (385, 6001)])
+                                        (400, 8192), (385, 6001), (1023, 8192), (1024, 4097), (2048, 8192),
+                                        (1500, 20001)])
 @pytest.mark.parametrize("dtype", [mx.bfloat16, mx.float16])
 def test_bounded_prompt_matches_stock_causal_bits(rows, total, dtype):
     q = mx.random.normal((1, 24, rows, 256), key=mx.random.key(41)).astype(dtype)
