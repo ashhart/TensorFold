@@ -312,7 +312,8 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
     own = getattr(weights, "precision", "") == precision.CHECKPOINT
     prompts = "FP8 activations" if fp8 else "the checkpoint math" if own else "bf16 activations"
     print(f"[tensorfold] serving {served} at http://{args.host}:{args.port}/v1 on CUDA{where} "
-          f"(sampling: {shown}; drafts: {'off' if args.no_drafts else 'on'}; prompts: {prompts}; "
+          f"(sampling: {shown}; drafts: {'on' if getattr(engine, 'drafts', not args.no_drafts) else 'off'}; "
+          f"prompts: {prompts}; "
           f"context: {'unlimited' if effective_context is None else effective_context}; "
           f"loaded in {time.perf_counter() - started:.1f}s)", flush=True)
     app.auth = getattr(args, "auth", None)
