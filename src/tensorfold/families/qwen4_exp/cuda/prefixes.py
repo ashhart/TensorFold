@@ -10,15 +10,33 @@ def _longer(kept, entry):
     return any(k[1] is entry[1] and len(k[0]) > len(entry[0]) for k in kept)
 
 
+def _victim(owner, best, busy):
+    """The idle slot whose kept chains are shortest, when losing them costs less than resuming in place would."""
+
+    longest, slots = {}, {}
+    for ids, st, _, _ in owner.kept:
+        longest[id(st)] = max(longest.get(id(st), 0), len(ids))
+        slots[id(st)] = st
+    cut = None if id(best[1]) in busy else longest[id(best[1])] - len(best[0])
+    idle = [(n, key) for key, n in longest.items() if key not in busy and key != id(best[1])]
+    if not idle:
+        return None
+    n, key = min(idle, key=lambda item: item[0])
+    return slots[key] if cut is None or n < cut else None
+
+
 def slot_for(owner, prompt: list[int], reuse: bool):
-    """Copy a fork into spare capacity; otherwise retain the released idle-slot and memory-pressure behavior."""
+    """Copy a fork into spare capacity, or into the idle slot that loses the least; otherwise keep the old behavior."""
 
     busy = owner._busy()
     best = _best(owner.kept, prompt) if reuse else None
     fork = best is not None and (id(best[1]) in busy or _longer(owner.kept, best))
     if fork:
-        if owner.free:
-            spare = owner.free.pop()
+        spare, taken = (owner.free.pop(), None) if owner.free else (None, None)
+        if spare is None and (victim := _victim(owner, best, busy)) is not None:
+            spare, taken = victim, [k for k in owner.kept if k[1] is victim]
+            owner._drop_kept(victim)
+        if spare is not None:
             try:
                 if owner._grow(spare, len(prompt) + owner.depth + 2, protect=best[1]):
                     spare.copy_prefix(best[1], len(best[0]), best[2]["mtp_len"])
@@ -27,7 +45,10 @@ def slot_for(owner, prompt: list[int], reuse: bool):
                 owner.free.append(spare)
                 owner._shrink(spare, force=True)
                 raise
-            owner.free.append(spare)
+            if taken is None:
+                owner.free.append(spare)
+            else:
+                owner.kept = taken + owner.kept
         best = _best(owner.kept, prompt, busy) if reuse else None
         if best is not None and owner.free and _longer(owner.kept, best):
             best = None
