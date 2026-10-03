@@ -1,4 +1,4 @@
-"""A plain fp16/bf16 linear (``b16.cu``) for what an EXL3 pack leaves unquantized: one warp an output, row-invariant."""
+"""A plain fp16/bf16 linear (``b16.cu``) for what an EXL3 pack leaves unquantized: row-invariant at every row count."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ def _ext():
     from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
-    return load(name="tensorfold_qwen_b16_v5", sources=[str(here / "b16.cpp"), str(here / "b16.cu")],
+    return load(name="tensorfold_qwen_b16_v7", sources=[str(here / "b16.cpp"), str(here / "b16.cu")],
                 extra_cuda_cflags=["-O3"], verbose=False)
 
 
