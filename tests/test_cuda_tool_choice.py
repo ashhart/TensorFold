@@ -150,9 +150,21 @@ def test_tool_choice_shapes_the_tools_offered(tmp_path):
         return app.tok.decode(app._prepare(body, True).prompt)
 
     assert "tools:get_weather,search;" in render("required")
-    assert "tools:search;" in render(named) and "tools:" not in render("none")
+    assert "tools:search;" in render(named) and "tools:get_weather,search;" in render("none")
     status, body = ask(app, tools=[])
     assert status == 400 and "offers no tools" in json.loads(body)["error"]["message"]
+
+
+def test_none_keeps_the_prompt_auto_renders_and_the_reply_stays_prose(tmp_path):
+    app = app_for(tmp_path, Engine())
+    prompt = {choice: app._prepare({"messages": [{"role": "user", "content": "x"}], "tools": TOOLS,
+                                    "tool_choice": choice}, True).prompt for choice in ("auto", "none")}
+    assert prompt["none"] == prompt["auto"]            # an answer-only turn resumes from the tool turns' prompt
+    engine = Engine()
+    status, body = ask(app_for(tmp_path, engine), tool_choice="none")
+    choice = json.loads(body)["choices"][0]
+    assert status == 200 and len(engine.calls) == 1 and choice["finish_reason"] == "stop"
+    assert choice["message"]["content"] == "Hello! How can I help?" and not choice["message"].get("tool_calls")
 
 
 def test_a_tool_the_request_did_not_offer_becomes_the_offered_one(tmp_path):

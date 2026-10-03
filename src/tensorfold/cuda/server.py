@@ -22,7 +22,8 @@ from tensorfold.server.token_routes import flag, token_ids
 from tensorfold.server.tool_policy import ToolCallPolicy
 from tensorfold.engine.call_gate import CallGate, ThinkBudget, call_format, generate_gated
 from tensorfold.engine.tool_draft import ToolCallStreamer
-from tensorfold.server.tools import active_tool_specs, tool_choice_requires_call
+from tensorfold.server.tools import (active_tool_specs, normalize_tool_specs, tool_choice_disables_tools,
+                                     tool_choice_requires_call)
 
 from tensorfold.cuda import health
 from tensorfold.cuda.chat_template import ChatTemplate
@@ -226,6 +227,9 @@ class App:
         max_tokens = self._requested_tokens(body)
         try:
             tools = active_tool_specs(body.get("tools"), body.get("tool_choice"))
+            # "none" forbids a call, not the list: the tools open the prompt, so dropping them breaks its resume point
+            listed = normalize_tool_specs(body.get("tools")) if tool_choice_disables_tools(body.get("tool_choice")) \
+                else tools
         except ValueError as exc:
             raise RequestError(str(exc)) from None
         kwargs = body.get("chat_template_kwargs")
@@ -261,7 +265,7 @@ class App:
 
             def render(messages: list[dict[str, Any]], **images: bool) -> str:   # text renders as it always has
                 try:
-                    return self.template.render(messages, tools=tools, enable_thinking=thinking, extra=kwargs,
+                    return self.template.render(messages, tools=listed, enable_thinking=thinking, extra=kwargs,
                                                 **images)
                 except TemplateError as exc:     # the checkpoint's template refuses the request (``raise_exception``)
                     raise RequestError(f"the chat template rejected the request: {exc}") from exc
