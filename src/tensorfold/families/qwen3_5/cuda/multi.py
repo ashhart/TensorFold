@@ -17,7 +17,7 @@ from .decode import CopyIndex, clone_state
 from .decode_tp import SAMPLING_WORDS as W, _sample_split, _share, first_token, pack_sampling, unpack_sampling
 from .draft_tree import allocate
 from .engine import entry_end
-from .forward import State, _paths, commit_streams, multi_tree_forward, path_indices, reserve
+from .forward import State, _paths, commit, commit_streams, multi_tree_forward, path_indices, reserve
 from .prefill import CHUNK, Piece, prefill_batch, prefill_state
 from .weights import Weights
 
@@ -94,6 +94,9 @@ class MultiDecoder:
     depth: bool = True                        # whether the block follows the trees here (DEPTH_CHIPS)
     spent: dict | None = None                 # streams -> the last rounds' ms beside the forward
     last: tuple | None = None                 # (start, streams, rows) of the round before
+    chain = None                              # ChainGraphs: a lone DSpark stream's verify replays a CUDA graph
+    resident = None                           # the stream whose state lives in ``chain``'s buffers
+    held: tuple = ()                          # those buffers' addresses when it moved in (a regrowth drops graphs)
 
     def __init__(self, w: Weights, draft=None, *, max_rows: int = 16, allow_copy: bool = True, stop_eos: bool = True,
                  keep: int = 8, rank: int = 0, world: int = 1, context: int = 0, points=None, vision=None) -> None:
@@ -407,6 +410,11 @@ class MultiDecoder:
         if not live:
             self.last = None
             return done
+        if len(live) == 1 and self.chain is not None:
+            alone = self._alone(live[0])
+            if alone is not None:
+                self.last = None
+                return done + alone
         copied: dict[int, list[int]] = {}
         plan = [(s.sid, self._mode(s, copied), s.out[-1], len(s.context)) for s in live]
         self._send([ROUND, len(plan), *[x for item in plan for x in item]])
@@ -433,6 +441,47 @@ class MultiDecoder:
         if all(s.done for s in live):
             self.last = None                          # the next round waits for requests: not this round's time
         return done + [s for s in live if s.done]
+
+    def _addresses(self, st: State) -> tuple:
+        return tuple(t.data_ptr() for t in st.rec + st.conv if t is not None) + tuple(
+            x.data_ptr() for kv in st.kv if kv is not None for x in kv)
+
+    def _alone(self, s: Stream) -> list[Stream] | None:
+        """A lone drafting stream's round on the chain graphs (same kernels, same bits); None: run it eagerly."""
+
+        g = self.chain
+        if (not s.draft or not self.drafts or s.constraint is not None or s.error is not None
+                or s.vision is not None or s.st.pos + self.max_rows + 1 > g.capacity):
+            return None
+        need = min(g.capacity, s.st.pos + (s.count - len(s.out)) + self.max_rows)
+        if self.resident is not s or s.st is not g.st or self._addresses(s.st) != self.held or need > g.rows:
+            if s.st is g.st and self._addresses(s.st) != self.held:
+                g.rows = 0                            # its buffers were regrown: the graphs read the old ones
+            s.st = g.load(s.st, need)
+            self.resident, self.held = s, self._addresses(s.st)
+        pending = s.out[-1]
+        guesses = s.copies.propose(s.context, self.max_rows - 1) if s.copies is not None else []
+        mode = COPY if guesses else TREE
+        block = self.block if self.depth else self.max_rows
+        if not guesses:
+            launched = self.draft.launch_blocks([s.snap], [pending], self.max_rows - 1, block)
+            guesses, parents, _ = self.draft.finish_tree(launched[0], len(s.context), self.max_rows - 1, s.sampling)
+            if parents != list(range(-1, len(guesses) - 1)):
+                raise RuntimeError("the chain graphs need a chain drafter")
+        tokens = [pending] + list(guesses)
+        parents = [-1] + list(range(len(tokens) - 1))
+        if mode == TREE:
+            self.block = self._deepest([(s.sid, mode, pending, len(s.context))], [(tokens, parents)], block)
+        logits, record, taps = g.verify(tokens)
+        positions = [s.st.pos + 1 + i for i in range(len(tokens))]
+        rows = sample_streams(logits, [0, len(tokens)], [positions], [s.sampling])[0]
+        path, end = accept(tokens, list(range(-1, len(tokens) - 1)), rows, s.count - len(s.out), self._ends(s))
+        commit(s.st, record, path, in_place=True)
+        s.committed.extend(tokens[r] for r in path)
+        s.snap = self.draft.add_taps_streams([s.snap], [taps[path]])[0]
+        s.counted(len(tokens))
+        s.take([tokens[r] for r in path[1:]] + [end], self._ends(s))
+        return [s] if s.done else []
 
     def _timed(self, now: float) -> None:
         """The round before: its time beside the forward (its start to this round's, less the curve's forward)."""

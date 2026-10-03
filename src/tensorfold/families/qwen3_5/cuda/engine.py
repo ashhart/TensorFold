@@ -167,6 +167,11 @@ class Qwen27Engine:
                                       context=self.capacity_plan["cache_slots"], keep=keep, points=self.points,
                                       vision=self.vision)
             self.multi.model_dir = self.model_dir             # rank 1 compiles a request's grammar from it
+            if (self.draft is not None and hasattr(self.draft, "graph_chain") and tp == 1
+                    and os.environ.get("TF_DRAFT_GRAPHS", "1") != "0"):
+                from .chain_graphs import ChainGraphs
+
+                self.multi.chain = ChainGraphs(self.w, self.context_window + 32)     # a lone stream's rounds
             self.multi.calibrate(streams)
             if rank == 0:
                 print(f"[tensorfold] {streams} streams of {self.context_window} prompt/reply tokens, {keep} prompt "
