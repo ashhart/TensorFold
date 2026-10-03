@@ -132,10 +132,56 @@ class VoltaLinear:
         return VoltaLinear(self.fmt, self.words[a:b], scales, self.alpha[32 * a:32 * b], min(self.n, 64 * t1) - 64 * t0,
                            self.k)
 
+    def copy(self) -> "VoltaLinear":
+        """Its own tensors (``tiles`` gives views that keep the whole weight alive)."""
+
+        return VoltaLinear(self.fmt, self.words.clone(), self.scales.clone() if self.fmt == FP4 else None,
+                           self.alpha.clone(), self.n, self.k)
+
     def dense(self) -> torch.Tensor:
         """The weight as dense fp16 (N, K): the decode kernel's values, before the column factors."""
 
         return _ext().dequantf(self.words, self.scales, self.fmt, self.n, self.k)
+
+    # ---- two ranks: shards of the stored words, never re-encoded ---------------------------------------------------
+
+    def outputs(self, rows: torch.Tensor, chunk: int = 8192) -> "VoltaLinear":
+        """Column-parallel shard: output columns ``rows`` with every stored word, re-tiled ``chunk`` outputs at a time."""
+
+        rows = rows.to(self.words.device, torch.int64)
+        n = int(rows.numel())
+        if n == 0 or int(rows.min()) < 0 or int(rows.max()) >= self.n:
+            raise ValueError(f"{self.layout}: output rows outside [0, {self.n})")
+        kg, wpg = self.k // 64, WORDS[self.fmt]
+        words = torch.empty((-(-n // 32), kg, 32, wpg), dtype=torch.int32, device=self.words.device)
+        scales = (torch.empty((-(-n // 32), kg, 32), dtype=torch.int32, device=self.words.device)
+                  if self.fmt == FP4 else None)
+        for a in range(0, n, chunk):
+            part = rows[a:a + chunk]
+            tiles, where = torch.unique(part // 32, return_inverse=True)
+            local = where * 32 + part % 32                    # the row inside the touched tiles, untiled
+            got = self.words.index_select(0, tiles).permute(0, 2, 1, 3).reshape(-1, kg * wpg).index_select(0, local)
+            words[a // 32:a // 32 + -(-got.shape[0] // 32)] = _tile(got, wpg)
+            if scales is not None:
+                got = self.scales.index_select(0, tiles).permute(0, 2, 1).reshape(-1, kg).index_select(0, local)
+                scales[a // 32:a // 32 + -(-got.shape[0] // 32)] = _tile(got, 1).view(-1, kg, 32)
+        return VoltaLinear(self.fmt, words, scales, _alpha(self.alpha.index_select(0, rows), n, rows.device), n, self.k)
+
+    def inputs(self, rank: int, world: int = 2) -> "VoltaLinear":
+        """Row-parallel shard: whole 64-input groups with their block scales; the column factors kept."""
+
+        if world != 2 or rank not in (0, 1) or self.k % (64 * world):
+            raise ValueError(f"{self.layout}: K {self.k} does not split into two halves of whole 64-input groups")
+        half = self.k // 64 // world
+        g0, g1 = rank * half, (rank + 1) * half
+        return VoltaLinear(self.fmt, self.words[:, g0:g1].contiguous(),
+                           self.scales[:, g0:g1].contiguous() if self.fmt == FP4 else None, self.alpha.clone(),
+                           self.n, 64 * half)
+
+    def partial(self, x: torch.Tensor) -> torch.Tensor:
+        """A row-parallel rank's fp32 (M, n) product, unrounded, for the rank-ordered sum."""
+
+        return self.matmul(x, f32=True)
 
     # ---- matmuls -----------------------------------------------------------------------------------------------
 

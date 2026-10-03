@@ -13,10 +13,11 @@ STAGE_BYTES = 8 << 20       # a rank's staging buffer: 409 fp32 rows of 5120 (de
 
 @lru_cache(maxsize=1)
 def _ext():
-    from tensorfold.cuda.build import load
+    from tensorfold.cuda.build import VOLTA, load
 
     here = Path(__file__).parent
-    return load(name="tensorfold_p2p_v2", sources=[str(here / "p2p.cu")], extra_cuda_cflags=["-O3"], verbose=False)
+    return load(name="tensorfold_p2p_v2", sources=[str(here / "p2p.cu")], need=VOLTA, extra_cuda_cflags=["-O3"],
+                verbose=False)
 
 
 class PeerSum:

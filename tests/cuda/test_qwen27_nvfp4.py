@@ -215,7 +215,7 @@ def test_an_nvfp4_checkpoint_starts_two_ranks_and_refuses_vision(tmp_path, monke
 
     (tmp_path / "config.json").write_text(json.dumps({"model_type": "qwen3_5", "quantization_config": {
         "quant_method": "modelopt", "quant_algo": "NVFP4"}}))
-    with pytest.raises(Started):
+    with pytest.raises(Started):                  # sm_70 too: its linears shard (``test_qwen27_nvfp4_tp_volta``)
         Qwen27Engine(tmp_path, None, tp=2, master="127.0.0.1")
     with pytest.raises(ValueError, match="vision"):
         Qwen27Engine(tmp_path, None, vision=True)

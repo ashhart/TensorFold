@@ -246,8 +246,9 @@ class DFlash2:
                 self.head_ids = torch.cat([torch.arange(a, b, device=self.device) for a, b in spans])
             self.sub_parts = _sub_parts(target.head, spans)
             if world == 2:                               # own copies of bf16 rows: the unsplit head is freed after load
-                self.sub_parts = [(Plain(p.weight.clone()) if isinstance(p, Plain) else p, lo, hi)
-                                  for p, lo, hi in self.sub_parts]
+                # (an sm_70 head's tile views too: ``VoltaLinear.copy``)
+                self.sub_parts = [(Plain(p.weight.clone()) if isinstance(p, Plain) else
+                                   p.copy() if hasattr(p, "copy") else p, lo, hi) for p, lo, hi in self.sub_parts]
         elif isinstance(target.head, Exl3):
             if world != 1:
                 raise ValueError("a two-rank drafter needs the MLX checkpoint's 4-bit head")
