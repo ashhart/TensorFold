@@ -37,6 +37,9 @@ class Tier(Protocol):
 
     def drop(self, key: str) -> None: ...
 
+    # Optional: ``lengths()`` and ``has(key)`` let a lookup hash the prompt's prefixes instead of scanning entries;
+    # ``take_displaced()`` hands back the entries a ``put`` pushed out, for the next tier down.
+
 
 def compat_hash(compat: dict) -> str:
     return hashlib.sha256(json.dumps(compat, sort_keys=True, default=str).encode()).hexdigest()
@@ -60,11 +63,12 @@ def nbytes(arrays: dict[str, np.ndarray]) -> int:
 
 
 class HostTier:
-    """Entries' arrays in host memory, least recently used first out past ``limit`` bytes."""
+    """Entries' arrays in host memory, least recently used first out past ``limit`` bytes (handed back for disk)."""
 
     def __init__(self, limit: int, *, min_tokens: int = 1) -> None:
         self.limit, self.min_tokens, self.used = int(limit), int(min_tokens), 0
         self.entries: OrderedDict[str, tuple[list[int], dict]] = OrderedDict()
+        self.displaced: list[tuple[str, list[int], dict]] = []
 
     def find(self, prompt: Sequence[int]) -> tuple[str, int] | None:
         best = None
@@ -81,8 +85,20 @@ class HostTier:
         self.entries[key] = ([int(t) for t in ids], {k: np.array(v, copy=True) for k, v in arrays.items()})
         self.used += size
         while self.used > self.limit:
-            self.drop(next(iter(self.entries)))
+            old = next(iter(self.entries))
+            self.displaced.append((old, *self.entries[old]))
+            self.drop(old)
         return True
+
+    def take_displaced(self) -> list[tuple[str, list[int], dict]]:
+        out, self.displaced = self.displaced, []
+        return out
+
+    def lengths(self) -> set[int]:
+        return {len(ids) for ids, _ in self.entries.values()}
+
+    def has(self, key: str) -> bool:
+        return key in self.entries
 
     def get(self, key: str) -> tuple[list[int], dict[str, np.ndarray]]:
         self.entries.move_to_end(key)
@@ -140,10 +156,21 @@ class TieredCache(PrefixCache):
             if strict_prefix(ids, prompt) and (best is None or len(ids) > best[0]):
                 best = (len(ids), -1)
         for i, tier in enumerate(self.tiers):
-            hit = tier.find(prompt)
+            hit = self._tier_find(tier, prompt)
             if hit is not None and (best is None or hit[1] > best[0]):
                 best = (hit[1], i)
         return best
+
+    def _tier_find(self, tier: Tier, prompt: Sequence[int]) -> tuple[str, int] | None:
+        """A tier's longest entry the prompt strictly extends: by key per stored length where the tier can say."""
+
+        if not (callable(getattr(tier, "lengths", None)) and callable(getattr(tier, "has", None))):
+            return tier.find(prompt)
+        for n in sorted((n for n in tier.lengths() if 0 < n < len(prompt)), reverse=True):
+            key = self.key(prompt[:n])
+            if tier.has(key):
+                return key, n
+        return None
 
     def load(self, prompt: Sequence[int], length: int, tier: int) -> Any:
         """The state a tier keeps for the prompt's first ``length`` ids (ValueError when it is gone or damaged)."""
@@ -155,10 +182,11 @@ class TieredCache(PrefixCache):
             raise ValueError(f"tier entry {key} holds other ids")
         return self.codec.from_host(arrays)
 
-    def victim(self, keep: Sequence[int] = ()) -> int | None:
-        """The index ``evict`` would drop next, never an entry whose length is in ``keep``; None when none is left."""
+    def victim(self, keep: Sequence[Sequence[int]] = ()) -> int | None:
+        """The index ``evict`` would drop next, never an entry holding exactly ids in ``keep``; None when none is left."""
 
-        among = [e for e in self.entries if len(e[0]) not in keep]
+        pinned = [list(k) for k in keep]
+        among = [e for e in self.entries if e[0] not in pinned]
         if not among:
             return None
         return self.entries.index(self._pick(among))
@@ -180,12 +208,24 @@ class TieredCache(PrefixCache):
         self.hit &= {tuple(e[0]) for e in self.entries}
         ids, state, _ = gone
         if self.tiers:
-            arrays = self.codec.to_host(state)
-            if any(t.put(self.key(ids), ids, arrays) for t in self.tiers):
+            if self._spill(0, self.key(ids), ids, self.codec.to_host(state)):
                 self.spilled += 1
             else:
                 self.dropped += 1
         self._free(state)
+
+    def _spill(self, start: int, key: str, ids: Sequence[int], arrays: dict) -> bool:
+        """The first tier from ``start`` that takes the entry; what that tier pushed out moves on to the tiers below."""
+
+        for i in range(start, len(self.tiers)):
+            tier = self.tiers[i]
+            if tier.put(key, ids, arrays):
+                take = getattr(tier, "take_displaced", None)
+                for old_key, old_ids, old_arrays in (take() if callable(take) else []):
+                    if not self._spill(i + 1, old_key, old_ids, old_arrays):
+                        self.dropped += 1
+                return True
+        return False
 
     def _free(self, state: Any) -> None:
         if self.release is not None:

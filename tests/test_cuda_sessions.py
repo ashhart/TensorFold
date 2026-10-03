@@ -61,7 +61,26 @@ def test_victim_spares_the_entry_a_request_resumes():
     c = TieredCache(4)
     for ids in ([1], [1, 2], [3]):
         c.add(ids, None, None)
-    assert c.victim() == 0 and c.victim(keep=(1,)) == 1 and c.victim(keep=(1, 2)) is None
+    assert c.victim() == 0 and c.victim(keep=([1],)) == 1 and c.victim(keep=([1], [1, 2])) == 2
+    assert c.victim(keep=([1], [1, 2], [3])) is None
+
+
+def test_victim_pins_the_resumed_entry_not_its_length():
+    c = TieredCache(4)
+    c.add([1, 2, 3], "a", None)
+    c.add([4, 5, 6], "b", None)  # unrelated, the same length
+    assert c.victim(keep=([1, 2, 3],)) == 1
+
+
+def test_an_entry_the_host_tier_pushes_out_moves_to_disk(tmp_path):
+    entry = 8 * 4  # one int64 array of four values
+    tiers = [HostTier(2 * entry), DiskTier(tmp_path, {"engine": "x"}, limit=1 << 20)]
+    c = TieredCache(0, codec=Codec(), tiers=tiers)
+    for i, ids in enumerate(([1, 1], [2, 2], [3, 3])):
+        c.add(ids, [i, i, i, i], None)
+    assert tiers[0].keys() == [c.key([2, 2]), c.key([3, 3])] and tiers[1].keys() == [c.key([1, 1])]
+    assert c.find([1, 1, 9]) == (2, 1) and c.load([1, 1, 9], 2, 1) == [0, 0, 0, 0]
+    assert c.spilled == 3 and c.dropped == 0
 
 
 def test_keep_zero_sends_every_entry_down():

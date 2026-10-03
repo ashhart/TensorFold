@@ -86,6 +86,14 @@ class DiskTier:
         for key in [k for k in self.index if k not in keep]:
             self.drop(key)
 
+    def lengths(self) -> set[int]:
+        with self.lock:
+            return {len(ids) for ids, _, _ in self.index.values()}
+
+    def has(self, key: str) -> bool:
+        with self.lock:
+            return key in self.index
+
     def find(self, prompt: Sequence[int]) -> tuple[str, int] | None:
         best = None
         for key, (ids, _, _) in self.index.items():

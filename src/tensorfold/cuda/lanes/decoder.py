@@ -130,7 +130,7 @@ class LaneDecoder:
                 held = self.cache.load(s.prompt, cached, tier)
             except ValueError:
                 cached, tier = 0, -1
-        self._room(quota, cached if tier < 0 else 0)
+        self._room(quota, s.prompt[:cached] if tier < 0 else [])
         lane = self.free.pop(0)
         s.sid, s.cached = self.next_id, cached
         self.next_id += 1
@@ -161,14 +161,14 @@ class LaneDecoder:
         fn = getattr(self.forward, "request_bytes", None)
         return int(fn(prompt_len, max_new)) if callable(fn) else 0
 
-    def _room(self, quota: int, shared: int) -> None:
+    def _room(self, quota: int, shared: Sequence[int]) -> None:
         """Kept entries are evicted until the pool can promise the quota (never the one the lane resumes)."""
 
         if self.pool is None:
             return
-        own = shared // self.pool.page_tokens
+        own = len(shared) // self.pool.page_tokens
         while self.pool.available() < quota - own:
-            index = self.cache.victim(keep=(shared,)) if self.cache is not None else None
+            index = self.cache.victim(keep=(shared,) if shared else ()) if self.cache is not None else None
             if index is None:
                 raise NoRoom("the page pool is held by live streams; the request waits for one to finish")
             self._send(EVICT, [index])
