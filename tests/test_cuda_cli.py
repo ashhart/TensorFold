@@ -40,9 +40,13 @@ def test_two_gpus_need_a_master_before_anything_loads(tmp_path):
     assert not called
 
 
-def test_serve_parses_the_cuda_flags():
+def test_serve_parses_the_cuda_flags(tmp_path, monkeypatch):
     args = cli.build_parser().parse_args(["serve", "owner/model", "--tp", "2", "--rank", "1", "--master", "192.0.2.11"])
     assert (args.backend, args.tp, args.rank, args.master, args.master_port) == ("auto", 2, 1, "192.0.2.11", 29551)
+    draft = tmp_path / "draft.GGUF"
+    draft.write_bytes(b"GGUF")
+    monkeypatch.chdir(tmp_path)
+    assert cli._drafter(_family(), draft.name, "cuda") == str(draft)
 
 
 @pytest.mark.parametrize("override, expected", [(None, 128), (0, 0), (64, 64)])

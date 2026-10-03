@@ -201,6 +201,9 @@ def _drafter(family: Any, choice: str, backend: str = "mlx") -> str:
     if choice in ("", "none"):
         return ""
     if choice != "auto":
+        local = Path(choice).expanduser()
+        if backend == "cuda" and local.suffix.lower() == ".gguf" and local.is_file():
+            return str(local.resolve())
         return str(hub.resolve(choice))
     # a family that drafts otherwise on CUDA (Qwen3.6 MoE: its MTP layer) declares CUDA_DRAFTER = ""
     repo = getattr(family.package, "CUDA_DRAFTER" if backend == "cuda" else "DRAFTER",

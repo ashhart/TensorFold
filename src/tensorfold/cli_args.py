@@ -69,7 +69,7 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
     speed.add_argument("--no-drafts", action="store_true",
                        help="one token a round: the serial reference (same output, slower)")
     speed.add_argument("--drafter", default="auto",
-                       help="a draft model (repo id or directory); auto: the family's draft model when it has been "
+                       help="a draft model (repo id, directory or CUDA GGUF); auto: the family's draft model when it has been "
                             "pulled; none: no draft model")
     speed.add_argument("--drafter-bits", type=int, default=4, help="quantize the draft model's linears (0: bf16)")
     speed.add_argument("--mtp-drafts", type=int, default=None,
