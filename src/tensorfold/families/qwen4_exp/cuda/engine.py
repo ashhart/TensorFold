@@ -96,7 +96,7 @@ class FlashNextEngine:
             raise ValueError(f"MTP draft confidence: a probability from 0 to 1, not {confidence}")
         torch.cuda.set_device(0)
         self.tp, self.rank, self.depth, self.confidence = tp, rank, int(depth), float(confidence)
-        self.streams, self.master = int(streams), master
+        self.streams, self.master, self.graphs_enabled = int(streams), master, bool(graphs)
         self.kv_dtype = check_kv(kv_dtype)
         self.comm = None
         self.vision = None                   # the image tower (``QwenCudaVision``) with --vision
@@ -176,10 +176,9 @@ class FlashNextEngine:
                   f"workspace reserved{'; https URLs allowed' if vision_urls else ''}", flush=True)
         # ``streams`` > 1: up to that many requests decoded together, every stream's chain in one forward
         self.concurrent = streams > 1
-        # a grammar is not in two-rank rounds yet: the server refuses it before a reply starts (HTTP 400), with this
         self.refuses_structured_output = (
-            "structured output (response_format, guided_json and the like) is not served by Flash Next on two ranks "
-            "with --parallel yet: send the request without it, or start the server without --parallel"
+            "structured output is not served by Flash Next on two ranks with --parallel yet: "
+            "send text without response_format or guided output, or start without --parallel"
             if self.concurrent and tp == 2 else None)
         self.multi = self.scheduler = None
         if self.concurrent:
@@ -236,7 +235,7 @@ class FlashNextEngine:
                 if hasattr(table, "lock_runs"):
                     pinned += table.lock_runs(max(0, room - pinned))
             reread_s = time.perf_counter() - started
-        if self.concurrent and tp == 2 and rank == 0:     # from now on every decoder step is told to rank 1
+        if self.concurrent and tp == 2 and rank == 0:
             from .multi import Link
 
             self.multi.link = Link(self.comm.store, rank=0, host=master)
@@ -247,10 +246,9 @@ class FlashNextEngine:
         self.serial = None                                # the serial requests' engine, made on first use
         rule = (f"1 to {self.depth} MTP drafts a round, a chain stops before a later draft under "
                 f"{self.confidence:.0%}" if self.depth else "no drafts: the serial reference, one token a round")
-        where = (f"{streams} streams of {self.context_window} prompt/reply tokens "
-                 f"({self.multi.slot_bytes / 2**20:.0f} MiB a stream), eager"
-                 f"{'; structured output refused on two ranks' if self.refuses_structured_output else ''}"
-                 if self.concurrent else
+        where = (f"up to {streams} streams, each growing to {self.context_window} prompt/reply tokens while memory "
+                 f"lasts ({self.multi.memory_gate.room / 2**30:.1f} GiB free for their caches, "
+                 f"{self.multi.window_bytes / 2**30:.2f} GiB for one at the full window), eager" if self.concurrent else
                  f"{self.context_window}-token prompt/reply window; {self.max_len}-token cache")
         if ple_on_ssd:
             how = "read from SSD at each lookup"
@@ -273,6 +271,7 @@ class FlashNextEngine:
 
         total = int(ids.sum()) if ids is not None else -1
         mine = torch.tensor([self.depth, round(self.confidence * 1e6), self.max_len, self.streams,
+                             int(self.graphs_enabled),
                              len(ids) if ids is not None else -1, total, BITS_OF[self.kv_dtype],
                              self.prefill_rows, int(prompt_precision.fp8())], dtype=torch.int64, device="cuda")
         both = torch.empty((2 * mine.numel(),), dtype=torch.int64, device="cuda")
@@ -281,8 +280,8 @@ class FlashNextEngine:
         prompt_precision.same_on_ranks(int(both[0, -1]), int(both[1, -1]))
         if not torch.equal(both[0], both[1]):
             raise RuntimeError(f"the two ranks were started with different settings (drafts, confidence, context, "
-                               f"--parallel, draft vocabulary, KV cache, prompt rows): rank 0 {both[0].tolist()}, "
-                               f"rank 1 {both[1].tolist()}")
+                               f"parallel streams, graphs, draft vocabulary, KV cache, prompt rows): "
+                               f"rank 0 {both[0].tolist()}, rank 1 {both[1].tolist()}")
 
     def _key(self, n: int) -> str:
         return f"tensorfold/flashnext/request/{n}"

@@ -21,7 +21,7 @@ def test_leader_shares_exact_message_points(draft):
 
 def test_follower_decodes_the_shared_points_without_its_own_tokenizer():
     follower = object.__new__(FlashNextEngine)
-    follower.served, follower.cache = 0, []
+    follower.served, follower.cache, follower.multi = 0, [], None
     follower.points = lambda prompt: pytest.fail("follower replanned prompt boundaries")
     requests = iter([([1] * 800, 12, None, True, 0, [], True, [300, 700]), None])
     follower._receive = lambda: next(requests)

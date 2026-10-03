@@ -7,7 +7,9 @@ gathered candidates and the wider rules' collective path), a client leaving on r
 kept slots; and on one GPU, a stream decoding alone replays the one-stream graphs with serial decoding's tokens.
 """
 
+import gc
 import threading
+from contextlib import contextmanager
 
 import pytest
 import torch
@@ -26,6 +28,36 @@ from tensorfold.families.qwen4_exp.cuda.weights import load
 PROMPTS = [[5, 17, 99, 250], [1023, 7, 64, 300, 11, 12], [13], [8, 8, 9, 2000, 31], [400, 401, 402]]
 SAMPLINGS = [None, Sampling(seed=1234, top_k=20, top_p=0.95), Sampling(seed=7, top_k=0, top_p=0.9),
              Sampling(seed=9, top_k=50, top_p=0.95), Sampling(seed=11, temperature=0.7, top_k=20, min_p=0.1)]
+
+
+@contextmanager
+def _scheduler(dec):
+    """Stop the test's idle worker so it releases its decoder before the next case."""
+
+    from tensorfold.cuda.scheduler import Scheduler
+
+    class StopWorker(Exception):
+        pass
+
+    class TestScheduler(Scheduler):
+        def _admit(self, first=None):
+            if first is not None and first[1] is None:
+                raise StopWorker
+            return super()._admit(first)
+
+        def _loop(self):
+            try:
+                super()._loop()
+            except StopWorker:
+                pass
+
+    sch = TestScheduler(dec, max_streams=4)
+    try:
+        yield sch
+    finally:
+        sch.waiting.put((Stream([], 1, None), None))
+        sch.thread.join(timeout=10)
+        assert not sch.thread.is_alive(), "the scheduler worker did not stop"
 
 
 class _Store:
@@ -53,6 +85,15 @@ class _Store:
             self.data.pop(key, None)
 
 
+@pytest.fixture(autouse=True)
+def release_decoder_cycles():
+    """Tamper closures and captured graph slots can hold decoders until cyclic collection."""
+
+    gc.collect()
+    yield
+    gc.collect()
+
+
 @pytest.fixture(scope="module")
 def ranks(tmp_path_factory):
     root = tmp_path_factory.mktemp("flashnext_tp_multi")
@@ -69,11 +110,12 @@ def _serial(ranks, prompt, sampling, count, kv_dtype):
     return got[0]
 
 
-def _two_rank_run(ranks, kv_dtype, drive, slots=4, tamper=None):
+def _two_rank_run(ranks, kv_dtype, drive, slots=4, tamper=None, **options):
     """rank 0: ``drive(decoder)`` with its link to rank 1, then stop; rank 1: follow (``tamper(decoder)`` first, to
     put it out of step on purpose). Returns drive's result."""
 
-    decs = [MultiDecoder(w, slots=slots, capacity=1024, depth=3, confidence=0.3, kv_dtype=kv_dtype, graphs=False)
+    decs = [MultiDecoder(w, slots=slots, capacity=1024, depth=3, confidence=0.3,
+                         kv_dtype=kv_dtype, graphs=False, **options)
             for w in ranks]
     if tamper is not None:
         tamper(decs[1])
@@ -91,7 +133,8 @@ def _two_rank_run(ranks, kv_dtype, drive, slots=4, tamper=None):
 
     out = _run_ranks(body, decs)
     follower = out[1]
-    assert not follower.streams and len(follower.free) + len({id(k[1]) for k in follower.kept}) == slots
+    assert not follower.streams and not follower.filling
+    assert len(follower.free) + len({id(k[1]) for k in follower.kept}) == slots
     return out[0]
 
 
@@ -162,22 +205,24 @@ def test_tp_prompts_resume_from_kept_slots_on_both_ranks(ranks):
         return longer, run(longer, 10)
 
     longer, warm = _two_rank_run(ranks, "int8", drive)
-    assert warm.cached == len(PROMPTS[1]) and warm.out == _serial(ranks, longer, sampling, 10, "int8")
+    assert warm.cached == len(PROMPTS[1]) - 1 and warm.out == _serial(ranks, longer, sampling, 10, "int8")
 
 
 @pytest.mark.parametrize("sampling", [None, Sampling(seed=5, top_k=20, top_p=0.95)])
-def test_a_lone_stream_replays_the_one_stream_graphs_with_serial_tokens(sampling, monkeypatch):
+@pytest.mark.parametrize("join", [False, True])
+@pytest.mark.parametrize("kv_dtype", ["bf16", "int8", "int4"])
+def test_a_lone_stream_replays_the_one_stream_graphs_with_serial_tokens(sampling, join, kv_dtype, monkeypatch):
     from test_flashnext_forward import _model
 
     w = _model()
-    dec = MultiDecoder(w, slots=3, capacity=1024, depth=3, confidence=0.3, kv_dtype="int8")
+    dec = MultiDecoder(w, slots=3, capacity=1024, depth=3, confidence=0.3, kv_dtype=kv_dtype)
     assert dec.solo is not None and dec.free[0] is dec.solo.st
     calls = {"solo": 0}
     real = dec._solo_round
     monkeypatch.setattr(dec, "_solo_round", lambda s: (calls.__setitem__("solo", calls["solo"] + 1), real(s))[1])
 
     def fresh(prompt, count):
-        e = Engine(w, capacity=1024, max_rows=8, prefill_rows=16, kv_dtype="int8")
+        e = Engine(w, capacity=1024, max_rows=8, prefill_rows=16, kv_dtype=kv_dtype)
         return serial_decode(e, prefill(e, prompt, sampling), count, sampling).tokens
 
     alone = Stream(PROMPTS[0], 24, sampling)
@@ -188,17 +233,17 @@ def test_a_lone_stream_replays_the_one_stream_graphs_with_serial_tokens(sampling
     while dec.live():
         dec.finish(dec.round())
         rounds += 1
-        if rounds == 3:                                       # a second stream joins, decodes beside it, leaves
+        if join and rounds == 3:                         # a second stream joins, decodes beside it, then leaves
             other = Stream(PROMPTS[1], 6, sampling)
             dec.admit(other)
     assert calls["solo"] >= 3 and dec.solo.graphs.captures > 0
-    assert alone.out == fresh(PROMPTS[0], 24) and other.out == fresh(PROMPTS[1], 6)
+    assert alone.out == fresh(PROMPTS[0], 24)
+    assert other is None or other.out == fresh(PROMPTS[1], 6)
 
 
 @pytest.mark.parametrize("kv_dtype", ["bf16", "int8"])
-def test_a_lone_stream_in_another_slot_moves_into_the_graphs_with_serial_tokens(kv_dtype):
-    """The graphs' slot holds a kept prompt end (a busy server's usual case): the next lone request starts in
-    another slot and moves in at its first round, its state copied bit for bit; the kept prompt it displaced goes."""
+def test_a_lone_stream_retargets_the_graphs_without_discarding_kept_prefixes(kv_dtype):
+    """A lone stream rebinds its graphs to preserve both slots' prefix chains, with unchanged reply bits."""
 
     from test_flashnext_forward import _model
 
@@ -220,12 +265,14 @@ def test_a_lone_stream_in_another_slot_moves_into_the_graphs_with_serial_tokens(
 
     first, start = run(PROMPTS[0], 12)
     assert start is dec.solo.st and any(k[1] is dec.solo.st for k in dec.kept)     # its prompt end kept there
+    first_slot = start
     second, start = run(PROMPTS[1], 16)
-    assert start is not dec.solo.st and second.st is dec.solo.st                  # started elsewhere, moved in
+    assert start is dec.solo.st and second.st is dec.solo.st and start is not first_slot
+    assert any(k[1] is first_slot and k[0] == PROMPTS[0][:-1] for k in dec.kept)
     assert first.out == fresh(PROMPTS[0], 12) and second.out == fresh(PROMPTS[1], 16)
     assert not any(k[1] is dec.solo.st and k[0] == PROMPTS[0] for k in dec.kept)
     again, _ = run(PROMPTS[1] + second.out[:-1] + [42], 8)                       # resumes from the old slot's kept end
-    assert again.cached == len(PROMPTS[1]) and again.out == fresh(PROMPTS[1] + second.out[:-1] + [42], 8)
+    assert again.cached == len(PROMPTS[1]) - 1 and again.out == fresh(PROMPTS[1] + second.out[:-1] + [42], 8)
 
 
 PROMPTS8 = PROMPTS + [[77, 78], [2, 3, 5, 7, 11, 13], [600, 9]]
@@ -274,33 +321,31 @@ def test_tp_a_client_leaving_in_prefill_or_decode_leaves_neither_rank_hanging(ra
     token (a disconnect while its prompt prefills) or mid-reply ends on rank 0 alone; rank 1 hears of it before the
     next round, both ranks end with every slot free, the others' replies and a later request stay exact."""
 
-    from tensorfold.cuda.scheduler import Scheduler
-
     leave = {"in prefill": {1: 1}, "in decode": {1: 5}, "in both": {1: 1, 2: 5}}[leaves]
 
     def drive(dec):
-        sch = Scheduler(dec, max_streams=4)
-        got: dict[int, list[int]] = {i: [] for i in range(4)}
-        errors: list = []
+        with _scheduler(dec) as sch:
+            got: dict[int, list[int]] = {i: [] for i in range(4)}
+            errors: list = []
 
-        def client(i):
-            def emit(new):
-                got[i].extend(new)
-                return i in leave and len(got[i]) >= leave[i]
-            try:
-                sch.submit(list(PROMPTS8[i]), 20, SAMPLINGS8[i], True, emit)
-            except Exception as exc:                          # noqa: BLE001
-                errors.append(exc)
+            def client(i):
+                def emit(new):
+                    got[i].extend(new)
+                    return i in leave and len(got[i]) >= leave[i]
+                try:
+                    sch.submit(list(PROMPTS8[i]), 20, SAMPLINGS8[i], True, emit)
+                except Exception as exc:                          # noqa: BLE001
+                    errors.append(exc)
 
-        threads = [threading.Thread(target=client, args=(i,)) for i in range(4)]
-        for th in threads:
-            th.start()
-        for th in threads:
-            th.join(timeout=120)
-        assert not any(th.is_alive() for th in threads), "a request never finished"
-        after: list[int] = []                                 # the ranks still agree: a new request decodes exactly
-        sch.submit(list(PROMPTS8[5]), 20, SAMPLINGS8[5], True, lambda new: after.extend(new))
-        return got, after, errors
+            threads = [threading.Thread(target=client, args=(i,)) for i in range(4)]
+            for th in threads:
+                th.start()
+            for th in threads:
+                th.join(timeout=120)
+            assert not any(th.is_alive() for th in threads), "a request never finished"
+            after: list[int] = []                                 # the ranks still agree: a new request decodes exactly
+            sch.submit(list(PROMPTS8[5]), 20, SAMPLINGS8[5], True, lambda new: after.extend(new))
+            return got, after, errors
 
     got, after, errors = _two_rank_run(ranks, "int8", drive, slots=4)
     assert not errors, errors
@@ -333,7 +378,7 @@ def test_tp_a_resumed_prompt_equals_the_same_prompt_fresh(ranks):
 
     longer, warm = _two_rank_run(ranks, "int8", resumed)
     fresh = _two_rank_run(ranks, "int8", lambda dec: run(dec, longer, 10))
-    assert warm.cached == len(PROMPTS[1]) and fresh.cached == 0
+    assert warm.cached == len(PROMPTS[1]) - 1 and fresh.cached == 0
     assert warm.out == fresh.out == _serial(ranks, longer, sampling, 10, "int8")
 
 
@@ -349,8 +394,9 @@ def test_tp_a_stream_rank_0_ends_at_its_first_token_is_ended_on_rank_1_before_th
         gone = Stream(list(PROMPTS8[1]), 20, SAMPLINGS8[1], emit=lambda new: True)
         dec.admit(a)
         dec.admit(gone)
+        first = dec.round()                                  # admission now queues prefill inside a round
         assert gone.done and len(gone.out) == 1
-        done = [gone] + dec.round()                           # the round before the admission's finish, as served
+        done = first + dec.round()                           # the round before the admission's finish, as served
         dec.finish(done)
         while dec.live():
             dec.finish(dec.round())
@@ -362,16 +408,15 @@ def test_tp_a_stream_rank_0_ends_at_its_first_token_is_ended_on_rank_1_before_th
 def _served(dec, requests):
     """Requests through the server's Scheduler one after another: each reply's tokens, or the error it failed with."""
 
-    from tensorfold.cuda.scheduler import Scheduler
-
-    sch, out = Scheduler(dec, max_streams=4), []
-    for prompt, count, sampling in requests:
-        got: list[int] = []
-        try:
-            sch.submit(list(prompt), count, sampling, True, lambda new, got=got: got.extend(new))
-            out.append(got)
-        except Exception as exc:                              # noqa: BLE001
-            out.append(exc)
+    out = []
+    with _scheduler(dec) as sch:
+        for prompt, count, sampling in requests:
+            got: list[int] = []
+            try:
+                sch.submit(list(prompt), count, sampling, True, lambda new, got=got: got.extend(new))
+                out.append(got)
+            except Exception as exc:                              # noqa: BLE001
+                out.append(exc)
     return out
 
 
@@ -417,3 +462,119 @@ def test_tp_rank_1_takes_rank_0s_slot_and_resume_point_or_both_refuse_the_admiss
     assert after == _serial(ranks, PROMPTS8[5], SAMPLINGS8[5], 20, "int8")
     _, longer2, (resumed2, _) = _two_rank_run(ranks, "int8", drive)      # untouched: the resume goes through
     assert resumed2 == _serial(ranks, longer2, sampling, 10, "int8")
+
+
+def test_tp_mixed_prompt_pieces_and_cache_growth_follow_the_leaders_width(ranks):
+    prompts = [PROMPTS[0], (PROMPTS[1] * 53)[:310], (PROMPTS[3] * 87)[:430]]
+    samplings = [SAMPLINGS[0], SAMPLINGS[1], SAMPLINGS[4]]
+    refs = [_serial(ranks, p, smp, 20, "bf16") for p, smp in zip(prompts, samplings)]
+
+    def drive(dec):
+        dec.round_s, dec.row_s = 1.0, 1.0
+        streams = [Stream(p, 20, smp) for p, smp in zip(prompts, samplings)]
+        dec.admit(streams[0])
+        dec.finish(dec.round())
+        for s in streams[1:]:
+            dec.admit(s)
+            assert s.st.capacity > 256
+        while dec.live():
+            dec.finish(dec.round())
+        return [s.out for s in streams]
+
+    def tamper(dec):
+        dec.round_s, dec.row_s = 1000.0, 1.0                  # follower timing must not choose prompt pieces
+
+    assert _two_rank_run(ranks, "bf16", drive, tamper=tamper, prefill_rows=256, share=0.5) == refs
+
+
+def test_tp_growth_that_does_not_fit_one_rank_refuses_before_model_collectives(ranks):
+    long = (PROMPTS[1] * 53)[:310]
+
+    def tamper(dec):
+        real = dec.admit
+        first = True
+        def admit(s, told=None):
+            nonlocal first
+            saved = dec.memory_gate.live
+            if first:
+                dec.memory_gate.live = lambda: 0
+                first = False
+            try:
+                real(s, told=told)
+            finally:
+                dec.memory_gate.live = saved
+        dec.admit = admit
+
+    result = _two_rank_run(ranks, "bf16", lambda dec: _served(dec, [(long, 8, None), (PROMPTS[0], 12, None)]),
+                           tamper=tamper)
+    assert isinstance(result[0], OutOfStep)
+    assert result[1] == _serial(ranks, PROMPTS[0], None, 12, "bf16")
+
+
+def test_lone_graph_slot_rebinds_after_growth_and_a_smaller_stream_moves_in():
+    from test_flashnext_forward import _model
+
+    w = _model()
+    dec = MultiDecoder(w, slots=3, capacity=1024, depth=3, prefill_rows=64)
+    sampling = Sampling(seed=29, top_k=20, top_p=0.95)
+    for prompt in [(PROMPTS[1] * 47)[:270], PROMPTS[0], (PROMPTS[3] * 103)[:510]]:
+        s = Stream(prompt, 20, sampling)
+        dec.admit(s)
+        while dec.live():
+            dec.finish(dec.round())
+        e = Engine(w, capacity=1024, max_rows=8, prefill_rows=64)
+        assert s.out == serial_decode(e, prefill(e, prompt, sampling), 20, sampling).tokens
+        assert dec.solo.graphs.captures > 0
+
+
+def test_waiting_stream_keeps_its_recurrence_when_other_rounds_reuse_shared_scratch(monkeypatch):
+    from test_flashnext_forward import _model
+    from tensorfold.families.qwen4_exp.cuda import multi
+
+    monkeypatch.setattr(multi, "FIRST", 8)
+    monkeypatch.setattr(multi, "STEP", 16)
+    real = MultiDecoder._grow
+    def grow(dec, st, rows, *, alone=False):
+        blocked = dec.streams.get(1)
+        if (getattr(dec, "test_wait", False) and blocked is not None and st is blocked.st
+                and rows > st.capacity and not alone):
+            return False
+        return real(dec, st, rows, alone=alone)
+    monkeypatch.setattr(MultiDecoder, "_grow", grow)
+    w = _model()
+    dec = MultiDecoder(w, slots=3, capacity=1024, depth=3, prefill_rows=64)
+    dec.test_wait = True
+    streams = [Stream(PROMPTS[0], 60, stop_eos=False), Stream(PROMPTS[1], 20, stop_eos=False)]
+    for s in streams:
+        dec.admit(s)
+    waits = 0
+    while dec.live():
+        dec.finish(dec.round())
+        if streams[1].waiting:
+            waits += 1
+        if waits >= 4:
+            dec.test_wait = False
+    assert waits >= 4
+    for s in streams:
+        e = Engine(w, capacity=1024, max_rows=8, prefill_rows=64)
+        assert s.out == serial_decode(e, prefill(e, s.prompt, None), s.count, None).tokens
+
+
+def test_tp_prompt_markers_follow_the_leader_with_different_local_markers(ranks):
+    prompt = PROMPTS[0] * 80
+    sampling = Sampling(seed=61, top_k=20, top_p=0.95)
+    expected = _serial(ranks, prompt, sampling, 8, "int8")
+
+    def drive(dec):
+        stream = Stream(prompt, 8, sampling)
+        dec.admit(stream)
+        while dec.live():
+            dec.finish(dec.round())
+        assert stream.out == expected
+        return [len(ids) for ids, _, _, _ in dec.kept]
+
+    def different(dec):
+        dec.points = lambda ids: []
+
+    kept = _two_rank_run(ranks, "int8", drive, tamper=different, points=lambda ids: [256])
+    assert 256 in kept and len(prompt) - 1 in kept

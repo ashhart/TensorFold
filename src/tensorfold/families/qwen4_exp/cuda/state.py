@@ -295,7 +295,7 @@ class State:
                 self.cur = list(value)
             elif name == "ple_history":
                 self.ple_history = None if value is None else value.copy()
-            elif name in ("lin_index", "att_index", "capacity", "kv_dtype"):
+            elif name in ("lin_index", "att_index", "capacity", "kv_dtype", "limit", "version"):
                 continue                                   # the same geometry
             else:
                 setattr(self, name, value)                 # pos, mtp_len, mtp_drafted, ple_last
