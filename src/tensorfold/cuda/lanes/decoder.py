@@ -18,7 +18,7 @@ from ..sessions import TieredCache
 from ..streams import Stream, accept
 from .follow import Lanes
 from .forward import Candidates, chain, split
-from .link import ADMIT, DONE, EVICT, ROUND, STOP, Link, LocalLink, pack_sampling
+from .link import ADMIT, AGREED, DONE, EVICT, ROUND, STOP, Link, LocalLink, pack_sampling
 
 
 @dataclass
@@ -31,6 +31,10 @@ class Plan:
     save_at: int | None  # the prompt position whose state the cache keeps, until it is reached
     pos: int = 0  # decoding: the pending token's position
     pending: int = 0
+
+
+class Disagreed(RuntimeError):
+    """Another rank failed a message this rank applied (every rank undid an admission)."""
 
 
 def piece_end(done: int, target: int, budget: int, grid: int) -> int:
@@ -87,8 +91,22 @@ class LaneDecoder:
         self.broken: Exception | None = None
 
     def _send(self, kind: int, ints: list[int], **kw):
+        """Send, apply here, and for ADMIT, EVICT and ROUND learn whether every rank applied it."""
+
         self.link.send(kind, ints)
-        return self.local.apply(kind, ints, **kw)
+        err, res = None, None
+        try:
+            res = self.local.apply(kind, ints, **kw)
+        except Exception as exc:  # noqa: BLE001  (the other ranks still wait for this rank's vote)
+            err = exc
+        if kind in AGREED and not self.link.agree(err is None):
+            self.local.disagreed(kind, ints, err is None)
+            if kind == EVICT and not isinstance(self.link, LocalLink):
+                self.broken = err or RuntimeError("another rank failed to evict a kept state")
+            raise err if err is not None else Disagreed(f"another rank failed message {kind}")
+        if err is not None:
+            raise err
+        return res
 
     def live(self) -> int:
         return len(self.streams) + len(self.filling)
@@ -138,8 +156,17 @@ class LaneDecoder:
         try:
             self._send(ADMIT, msg, constraint=s.constraint, held=held)
         except Exception:
-            self.free.insert(0, lane)
-            raise
+            if tier < 0:
+                self.free.insert(0, lane)
+                raise
+            # a lower tier's state another rank lacks (or could not read): every rank starts the prompt fresh
+            cached, tier, s.cached = 0, -1, 0
+            msg = [lane, quota, 0, -1, *pack_sampling(s.sampling), n, *s.prompt, *pack(s.constraint)]
+            try:
+                self._send(ADMIT, msg, constraint=s.constraint)
+            except Exception:
+                self.free.insert(0, lane)
+                raise
         point = save_point(n, self.grid)
         save = point if self.cache is not None and point > cached else None
         self.plans[s.sid] = Plan(s, lane, cached, save)

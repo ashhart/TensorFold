@@ -119,6 +119,12 @@ class PagePool:
             n = self.rows_per_page(name)
             buf[dst * n : (dst + 1) * n] = buf[src * n : (src + 1) * n]
 
+    def zero_pages(self, pages: Sequence[int]) -> None:
+        for name, buf in self.buffers.items():
+            n = self.rows_per_page(name)
+            for p in pages:
+                buf[int(p) * n : (int(p) + 1) * n] = 0
+
     def read_pages(self, pages: Sequence[int]) -> dict[str, np.ndarray]:
         """Each plane's rows of ``pages`` in order, on the host."""
 

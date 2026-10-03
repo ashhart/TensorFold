@@ -10,7 +10,7 @@ from typing import Any
 from ..drafting import Proposals
 from ..sessions import TieredCache
 from .forward import Candidates, Piece, Rows, chain, check
-from .link import ADMIT, DONE, EVICT, ROUND, SAMPLING_WORDS, STOP, Link, unpack_sampling
+from .link import ADMIT, AGREED, DONE, EVICT, ROUND, SAMPLING_WORDS, STOP, Link, unpack_sampling
 
 
 @dataclass
@@ -109,7 +109,30 @@ class Lanes:
             kind, ints = link.recv()
             if kind == STOP:
                 return
-            self.apply(kind, ints)
+            if kind not in AGREED:
+                self.apply(kind, ints)
+                continue
+            try:
+                self.apply(kind, ints)
+                ok = True
+            except Exception:  # noqa: BLE001  (rank 0 learns it from the vote and decides for every rank)
+                ok = False
+            if not link.agree(ok):
+                self.disagreed(kind, ints, ok)
+
+    def disagreed(self, kind: int, ints: Sequence[int], ok: bool) -> None:
+        """Another rank failed a message this rank applied: an admission is undone; anything else ends the engine."""
+
+        if kind == ADMIT and ok:
+            self._undo(int(ints[0]))
+
+    def _undo(self, lane: int) -> None:
+        """An admission taken back: the pages only this lane held are cleared, so every rank's pool stays alike."""
+
+        if self.tables is not None:
+            table = self.tables[lane]
+            self.pool.zero_pages([p for p in table.pages if self.pool.holders(p) == 1])
+        self._done(lane)
 
     def _release(self, held: Held) -> None:
         if held.pages:
@@ -139,7 +162,7 @@ class Lanes:
             try:
                 self._resume(lane, prompt, cached, tier, table, held)
             except Exception:
-                self._done(lane)
+                self._undo(lane)
                 raise
             state.history = prompt[:cached]
         if self.drafter is not None:

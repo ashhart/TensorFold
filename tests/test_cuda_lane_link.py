@@ -132,3 +132,16 @@ def test_two_ranks_on_threads_decode_as_one():
     assert not t.is_alive()
     assert [s.out for s in got] == [s.out for s in want]
     assert lead.local.state() == follower.state() and lead.forward.state() == follower.forward.state()
+
+
+def test_ranks_agree_only_when_every_rank_applied_the_message():
+    a, b = links()
+    out = [None, None]
+
+    def rank(i, link, ok):
+        out[i] = [link.agree(ok), link.agree(True)]
+
+    threads = [threading.Thread(target=rank, args=(0, a, True)), threading.Thread(target=rank, args=(1, b, False))]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert out == [[False, True], [False, True]]

@@ -468,9 +468,59 @@ def test_a_failed_resume_frees_the_lane_on_that_rank(tmp_path):
     pair = Pair(lanes=1, keep=1)
     pair.run([stream(p, 4)])
     pair.follower.cache.entries.clear()  # rank 1 lost the entry rank 0 resumes from
-    with pytest.raises(RuntimeError, match="no kept state"):
+    with pytest.raises(RuntimeError, match="another rank failed"):  # rank 0 learns it from rank 1's vote
         pair.decoder.admit(stream(p + [1], 4))
     assert pair.decoder.free == [0] and pair.follower.lanes == [None] and pair.follower.tables[0].pages == []
+    assert pair.decoder.local.lanes == [None] and pair.decoder.local.tables[0].pages == []
+
+
+def test_a_lower_tier_state_one_rank_lacks_starts_the_prompt_fresh(tmp_path):
+    p = prompts(1)[0]
+    Pair(lanes=1, keep=1, tiers=disk_tiers(tmp_path)).run([stream(p, 6), stream(prompts(2)[1], 6)])
+    for f in (tmp_path / "states").rglob("rank1/*.tfs"):  # one rank's disk lost its entries
+        f.unlink()
+    pair = Pair(lanes=1, keep=1, tiers=disk_tiers(tmp_path))
+    longer = p + [8, 8, 8]
+    s = stream(longer, 15)
+    assert pair.run([s]) == [serial(longer, 15)] and s.cached == 0
+
+
+def test_a_failed_admission_on_rank_0_is_undone_on_every_rank(monkeypatch):
+    pair = Pair(lanes=1, keep=0)
+    real, calls = pair.decoder.local._admit, []
+
+    def flaky(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("rank 0 fails after the broadcast")
+        return real(*a, **k)
+
+    monkeypatch.setattr(pair.decoder.local, "_admit", flaky)
+    with pytest.raises(RuntimeError, match="after the broadcast"):
+        pair.decoder.admit(stream(prompts(1)[0], 4))
+    assert pair.follower.lanes == [None] and pair.follower.tables[0].pages == [] and pair.decoder.free == [0]
+    assert pair.run([stream(prompts(1)[0], 4)]) == [serial(prompts(1)[0], 4)]
+
+
+def test_a_follower_votes_instead_of_leaving_on_a_failed_round():
+    from tensorfold.cuda.lanes.link import ROUND, STOP
+
+    pair = Pair(lanes=1)
+    votes = []
+
+    class Script:
+        def __init__(self):
+            self.msgs = [(ROUND, [7]), (STOP, [])]  # a malformed round: the follower's apply raises
+
+        def recv(self):
+            return self.msgs.pop(0)
+
+        def agree(self, ok):
+            votes.append(ok)
+            return False
+
+    pair.follower.follow(Script())  # returns at STOP instead of raising out of the loop
+    assert votes == [False]
 
 
 def test_a_failed_round_fails_every_admitted_request_and_one_rank_goes_on():

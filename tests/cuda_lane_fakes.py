@@ -9,6 +9,7 @@ import numpy as np
 from tensorfold.cuda.drafting import Proposals
 from tensorfold.cuda.kvpool import PagePool, Plane
 from tensorfold.cuda.lanes.follow import Lanes
+from tensorfold.cuda.lanes.link import AGREED
 from tensorfold.cuda.lanes.forward import Candidates
 from tensorfold.cuda.memory_gate import NoRoom
 from tensorfold.cuda.streams import Stream
@@ -192,14 +193,28 @@ class Pattern:
 
 
 class Mirror:
-    """Rank 0's link to a second rank in the same thread: each message runs there as it is sent."""
+    """Rank 0's link to a second rank in the same thread: each message runs there as it is sent, and votes."""
 
     def __init__(self, follower: Lanes) -> None:
-        self.follower, self.sent = follower, []
+        self.follower, self.sent, self.last = follower, [], None
 
     def send(self, kind, ints) -> None:
         self.sent.append((kind, list(ints)))
-        self.follower.apply(kind, list(ints))
+        if kind not in AGREED:
+            self.follower.apply(kind, list(ints))
+            return
+        try:
+            self.follower.apply(kind, list(ints))
+            self.last = (kind, list(ints), True)
+        except Exception:  # noqa: BLE001  (its vote says so)
+            self.last = (kind, list(ints), False)
+
+    def agree(self, ok: bool) -> bool:
+        kind, ints, theirs = self.last
+        both = bool(ok) and theirs
+        if not both:
+            self.follower.disagreed(kind, ints, theirs)
+        return both
 
     def recv(self):
         raise RuntimeError("rank 0 does not receive")

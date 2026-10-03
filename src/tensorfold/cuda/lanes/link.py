@@ -10,6 +10,7 @@ from typing import Any, Protocol
 from tensorfold.engine.exact_sampling import Sampling
 
 ADMIT, ROUND, DONE, EVICT, STOP, IDLE = 1, 2, 3, 4, 5, 6
+AGREED = (ADMIT, EVICT, ROUND)  # every rank reports whether it applied these, and all learn whether all did
 SAMPLING_WORDS = 18  # pack_sampling's length
 
 
@@ -21,6 +22,10 @@ class Link(Protocol):
     def recv(self) -> tuple[int, list[int]]: ...
 
     def idle(self) -> None: ...
+
+    def agree(self, ok: bool) -> bool:
+        """Every rank's ``ok`` for the message just applied: True only when all applied it."""
+        ...
 
 
 class LocalLink:
@@ -35,6 +40,9 @@ class LocalLink:
     def idle(self) -> None:
         return None
 
+    def agree(self, ok: bool) -> bool:
+        return bool(ok)
+
 
 class RoundLink:
     """A message is [kind, length, values] in one gather of ``words`` ints, and a second gather when it is longer."""
@@ -48,13 +56,33 @@ class RoundLink:
         self.torch = torch
         self.head = torch.zeros((self.words,), dtype=torch.int32, device=device)
         self.heads = torch.zeros((comm.world * self.words,), dtype=torch.int32, device=device)
+        pin = torch.device(device).type == "cuda"
+        self.stage = torch.zeros((self.words,), dtype=torch.int32, pin_memory=pin)  # host copy of the head
+        self.vote = torch.zeros((1,), dtype=torch.int32, device=device)
+        self.votes = torch.zeros((comm.world,), dtype=torch.int32, device=device)
+        self.tail = torch.zeros((0,), dtype=torch.int32, device=device)  # long messages' send and receive buffers
+        self.tails = torch.zeros((0,), dtype=torch.int32, device=device)
         self.bells = 0
         self.sleeping = False
 
-    def _gather(self, send) -> list[int]:
-        out = self.torch.empty((self.comm.world * send.numel(),), dtype=self.torch.int32, device=self.device)
+    def _gather(self, values: Sequence[int] | None, n: int) -> list[int]:
+        """Rank 0's ``n`` words past the head (``values`` on rank 0), in buffers kept across messages."""
+
+        if self.tail.numel() < n:
+            self.tail = self.torch.zeros((n,), dtype=self.torch.int32, device=self.device)
+            self.tails = self.torch.zeros((self.comm.world * n,), dtype=self.torch.int32, device=self.device)
+        send, out = self.tail[:n], self.tails[: self.comm.world * n]
+        if values is None:
+            send.zero_()
+        else:
+            send.copy_(self.torch.as_tensor(list(values), dtype=self.torch.int32))
         self.comm.all_gather(send, out)
-        return out[: send.numel()].tolist()  # rank 0's part
+        return out[:n].tolist()  # rank 0's part
+
+    def agree(self, ok: bool) -> bool:
+        self.vote.fill_(1 if ok else 0)
+        self.comm.all_gather(self.vote, self.votes)
+        return bool(int(self.votes.min().item()) == 1)
 
     def send(self, kind: int, ints: Sequence[int]) -> None:
         if self.sleeping:
@@ -62,11 +90,12 @@ class RoundLink:
         values = [int(v) for v in ints]
         room = self.words - 2
         first = [int(kind), len(values), *values[:room]]
-        self.head.zero_()
-        self.head[: len(first)] = self.torch.tensor(first, dtype=self.torch.int32)
+        self.stage.zero_()
+        self.stage[: len(first)] = self.torch.as_tensor(first, dtype=self.torch.int32)
+        self.head.copy_(self.stage)
         self.comm.all_gather(self.head, self.heads)
         if len(values) > room:
-            self._gather(self.torch.tensor(values[room:], dtype=self.torch.int32, device=self.device))
+            self._gather(values[room:], len(values) - room)
 
     def recv(self) -> tuple[int, list[int]]:
         while True:
@@ -77,7 +106,7 @@ class RoundLink:
             room = self.words - 2
             values = got[2 : 2 + min(n, room)]
             if n > room:
-                values += self._gather(self.torch.zeros((n - room,), dtype=self.torch.int32, device=self.device))
+                values += self._gather(None, n - room)
             if kind != IDLE:
                 return kind, values
             self._wait()
@@ -144,6 +173,7 @@ def unpack_sampling(w: Sequence[int]) -> Sampling | None:
 
 __all__ = [
     "ADMIT",
+    "AGREED",
     "DONE",
     "EVICT",
     "IDLE",
