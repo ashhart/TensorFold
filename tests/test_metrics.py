@@ -60,9 +60,34 @@ def test_mac_metrics_is_prometheus_and_health_stays_json():
         assert sample(body, f'{metrics.PREFIX}kv_cache_usage_ratio{{pool="0"}}') == "0"
         assert bucket(body, "request_latency_seconds", "+Inf") == "0"
         other, _, again = get(httpd.server_port, "/v1/metrics")
-        assert other == 200 and again == body
+        # the footprint gauge is read live, so it alone may differ between scrapes
+        strip = lambda text: [line for line in text.splitlines()
+                              if not line.startswith(f"{metrics.PREFIX}process_footprint_bytes")]
+        assert other == 200 and strip(again) == strip(body)
         health_status, health_type, health_body = get(httpd.server_port, "/health")
         assert health_status == 200 and "application/json" in health_type and '"status": "ok"' in health_body
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(5)
+
+
+def test_the_footprint_gauge_is_served_where_the_platform_counts_it():
+    """A live process reading, so two scrapes can differ; each route must carry the family once."""
+
+    app = SimpleNamespace(served_name="test", model_ids=["test"], max_batch_size=1)
+    httpd, thread = serve(app)
+    try:
+        for path in ("/metrics", "/v1/metrics"):
+            body = get(httpd.server_port, path)[2]
+            lines = [line for line in body.splitlines()
+                     if line.startswith(f"{metrics.PREFIX}process_footprint_bytes")]
+            if metrics.process_footprint() is None:      # a platform that counts no footprint emits none
+                assert not lines and f"# TYPE {metrics.PREFIX}process_footprint_bytes" not in body
+            else:
+                assert len(lines) == 1
+                assert int(lines[0].split()[-1]) > 0
+                assert f"# TYPE {metrics.PREFIX}process_footprint_bytes gauge" in body
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -320,7 +345,10 @@ def test_both_http_layers_serve_the_mirrored_and_event_families(tmp_path):
         assert sample(body, f"{metrics.PREFIX}client_disconnections_total") == "1"
         assert sample(body, f"{metrics.PREFIX}preemptions_total") == "2"
         alias = get(httpd.server_port, "/v1/metrics")
-        assert alias[0] == 200 and alias[2] == body
+        # the footprint gauge is read live, so it alone may differ between scrapes
+        strip = lambda text: [line for line in text.splitlines()
+                              if not line.startswith(f"{metrics.PREFIX}process_footprint_bytes")]
+        assert alias[0] == 200 and strip(alias[2]) == strip(body)
     finally:
         httpd.shutdown()
         httpd.server_close()

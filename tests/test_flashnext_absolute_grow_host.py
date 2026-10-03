@@ -21,6 +21,7 @@ def source_class(path, name, methods, globals):
     parsed = ast.parse((ROOT / path).read_text())
     cls = next(node for node in parsed.body if isinstance(node, ast.ClassDef) and node.name == name)
     cls.body = [node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name in methods]
+    cls.bases = [ast.Name(id="Alone", ctx=ast.Load())] if name == "MultiDecoder" else []
     for node in cls.body:
         node.decorator_list = []
     module = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0),
@@ -118,15 +119,19 @@ class AbsoluteGrowthTests(unittest.TestCase):
               "time": SimpleNamespace(perf_counter=lambda: 1.0), "MIN_GAP": 32,
               "_slot": lambda *args: SimpleNamespace(), "prefill_begin": lambda *args, **kw: 0,
               "image_rows": SimpleNamespace(begin=lambda *args: None)}
+        ns["Alone"] = source_class("src/tensorfold/families/qwen4_exp/cuda/multi_solo.py", "Alone",
+                                    {"_state_changed", "_flush"}, ns)
         cls = source_class("src/tensorfold/families/qwen4_exp/cuda/multi.py", "MultiDecoder",
-                           {"_grow", "_busy", "_evict_kept", "_drop_kept", "_make_room", "_slot_for",
+                           {"_grow", "_is_solo", "_busy", "_evict_kept", "_drop_kept", "_make_room", "_slot_for",
                             "_remember", "admit", "live", "finish"}, ns)
         self.dec = cls()
         self.dec.capacity, self.dec.depth = 81920, 0
         self.dec.free, self.dec.kept, self.dec.streams, self.dec.filling = [first, second], [], {}, []
         self.dec.fills, self.dec.held = {}, {}
         self.dec.next_id, self.dec.keep = 0, 8
-        self.dec.w, self.dec.buf, self.dec.mbuf, self.dec.pbuf = None, None, None, None
+        self.dec.w, self.dec.buf, self.dec.mbuf, self.dec.pbuf = SimpleNamespace(comm=None), None, None, None
+        self.dec.solo, self.dec.solo_on, self.dec.planning = None, False, False
+        self.dec.link, self.dec.follower = None, None
         self.dec.prefill_rows, self.dec.points, self.dec.vision = 4096, None, None
         live = torch_live(self.torch, capacity.available_bytes)
         self.dec.memory_gate = MemoryGate(live(), reserve=2 * GIB, live=live)

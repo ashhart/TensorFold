@@ -413,11 +413,11 @@ def stream_geometry(t: dict, world: int, streams: int, keep: int, *, first: int 
 
 
 def indexed_stream_geometry(t: dict, streams: int, each: int, keep: int, *, mtp: bool, kv_bits: int = 16,
-                            first: int = 256, prefill_rows: int = PREFILL_ROWS) -> Geometry:
+                            first: int = 256, prefill_rows: int = PREFILL_ROWS, world: int = 1) -> Geometry:
     """Flash Next's concurrent decoder on one GPU: per-row windows and kept snapshots sized to share one GPU."""
 
     linear, attention = layer_counts(t)
-    d, h, hk, hd, nk, nv, dk, dv, width = _gdn_dims(t, 1)
+    d, h, hk, hd, nk, nv, dk, dv, width = _gdn_dims(t, world)
     hc = int(t.get("hc_count", 1))
     index_dim, ratio = int(t.get("indexer_head_dim", 128)), int(t.get("indexer_compress_ratio", 4))
     budget, rows = int(t.get("indexer_budget", 2048)), streams * each
@@ -427,10 +427,10 @@ def indexed_stream_geometry(t: dict, streams: int, each: int, keep: int, *, mtp:
     fixed = streams * (2 * rec + conv + tail + linear * each * (nk * dk * 4 + nv * dv * 4 + nv * 8))
     fixed += (keep + streams) * (rec + conv + tail + int(mtp) * hc * d * 2)  # retained plus this pass's cuts
     slots = int(t.get("num_experts_per_tok", 1)) + 1
-    moe = int(t.get("moe_intermediate_size", t.get("intermediate_size", d)))
-    extent = d * hc + int(t["vocab_size"]) + slots * (moe + d) + width + h * hd
+    moe = int(t.get("moe_intermediate_size", t.get("intermediate_size", d))) // world
+    extent = d * hc + int(t["vocab_size"]) // world + slots * (moe + d) + width + h * hd
     fixed += (1 + mtp) * (linear * rows * width * 2 + 32 * max(rows, 4) * 2560 * 4) + 16 * max(64, rows) * extent * 4
-    fixed += prefill_rows * _indexed_prefill_row(t, 1, h, hk, hd, nv, dv, width, slots, moe)
+    fixed += prefill_rows * _indexed_prefill_row(t, world, h, hk, hd, nv, dv, width, slots, moe)
     count, row = attention + int(mtp), kv_bytes(hd, kv_bits)
     def caches(rows: int) -> int:
         return count * (2 * rows * hk * row + (rows + (rows + ratio - 1) // ratio) * index_dim * 2)

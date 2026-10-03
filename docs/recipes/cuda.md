@@ -61,6 +61,13 @@ Each engine defines its own serial reference. A verify row uses the same group o
 rounding as that row alone. Attention partitions depend on absolute key position; router ties use a
 stable ID order. Recurrent commits replay the accepted path with the same update routine.
 
+A two-rank engine opens its communicator with `tensorfold.cuda.comm.open_comm`: NCCL, wrapped by a registered
+transport (a `Transport` subclass) when `TF_COMM_BACKEND` names one; NCCL stays the control channel, and the ranks
+refuse to start with different transports. A model exchange calls `fast_gather`, which takes the transport's
+`all_gather_fast` where there is one; `exchange` trades tensors with a peer (an NCCL send / receive group), and
+`check` raises a transport's recorded failure after a synchronizing exchange. A transport moves bytes, so a reply
+never depends on it.
+
 The default two-rank decode paths gather fp32 partials and add them in rank order. The dense Qwen
 prefill path gathers bf16 partials and adds them in fp32. Rank 0 chooses the window and both ranks
 execute the same forwards. Prefix token IDs must describe the state actually cached on each rank.
@@ -188,12 +195,11 @@ whose rows never depend on their chunk; an EXL3 27B's prompt bits change with it
 ## Requests and memory
 
 CUDA `--parallel auto` serves one request at a time. Set an explicit `--parallel N` above one for shared
-Qwen3.8-27B rounds on one or two ranks, or Flash Next on one rank. Flash Next rejects this setting with
-`--tp 2`; Nemotron, GLM and Qwen3.6 remain serialized. The shared scheduler admits requests between decode
-rounds, then verifies each active stream's drafts together and commits each stream independently. On the 27B,
-a new prompt prefills 1,024 tokens a round while the other streams keep decoding, and its state is kept at
-message starts (the second message and the last assistant turn), so prompts that share a system prompt or
-extend a conversation resume there with a fresh prefill's bits.
+Qwen3.8-27B or Flash Next rounds on one or two ranks; Nemotron, GLM and Qwen3.6 remain serialized. The shared
+scheduler admits requests between decode rounds, then verifies each active stream's drafts together and commits
+each stream independently. On the 27B, a new prompt prefills 1,024 tokens a round while the other streams keep
+decoding, and its state is kept at message starts (the second message and the last assistant turn), so prompts that
+share a system prompt or extend a conversation resume there with a fresh prefill's bits.
 
 Cache capacity is fixed at startup and bounds prompt plus reply.
 A positive context that exceeds the startup budget is refused; automatic capacity is an estimate.

@@ -18,14 +18,14 @@ from tensorfold.server import stacks
 from tensorfold.server.memory_budget import MEMORY_FRACTION
 from tensorfold.serve_options import check as _check_serve_options, vision_options as _vision_options
 
-COMMANDS = ("serve", "pull", "models", "info", "update", "service", "tui")
+COMMANDS = ("serve", "pull", "models", "info", "update", "service", "tui", "plan")
 
 
 def build_parser() -> argparse.ArgumentParser:
     """The ``tensorfold`` parser with this module's subcommand handlers."""
 
     return cli_args.build_parser({"serve": cmd_serve, "pull": cmd_pull, "models": cmd_models,
-                                  "update": cmd_update, "info": cmd_info})
+                                  "update": cmd_update, "info": cmd_info, "plan": cmd_plan})
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -163,6 +163,14 @@ def cmd_info(args: argparse.Namespace) -> int:
     if check is not None:
         check(directory)
     return 0
+
+
+def cmd_plan(args: argparse.Namespace) -> int:
+    """Estimate local checkpoint weights without loading a model."""
+
+    from tensorfold.cli_plan import cmd_plan as plan
+
+    return plan(args)
 
 
 def _generation_config(model_dir: Path) -> dict[str, Any]:

@@ -46,11 +46,11 @@ class NemotronEngine:
         self.draft_ids = tuple(draft_ids) if draft_ids is not None else None
         self.comm = None
         if tp == 2:
-            from tensorfold.cuda.comm import NCCL
+            from tensorfold.cuda.comm import open_comm
 
             if not master:
                 raise ValueError("two ranks need rank 0's address (master)")
-            self.comm = NCCL(rank, 2, master, port)
+            self.comm = open_comm(rank, 2, master, port)
             self.comm.barrier()
         gather = (lambda values: gather_ints(torch, self.comm.all_gather, values)) if tp == 2 else None
         head = Path(model_dir) / MTP_FILE

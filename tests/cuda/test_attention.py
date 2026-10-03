@@ -88,6 +88,26 @@ def test_streams_in_one_launch_equal_each_alone():
         base += w
 
 
+@pytest.mark.parametrize("policy", [0, None], ids=["fold-in-kernel", "default"])
+def test_streams_with_folded_groups_in_one_launch_equal_each_alone(policy, monkeypatch):
+    """Streams of one launch fold their own groups (each by its keys and rows, read back from its slot count): a long
+    stream folding groups beside short ones that don't gives each the bits it gets alone."""
+
+    if policy is not None:
+        monkeypatch.setattr(shared, "MIN_GROUPED", policy)
+    rng = random.Random(7)
+    shapes = [(16, 20000), (1, 9000), (16, 300), (5, 8192), (16, 6100), (3, 0), (12, 14335)]
+    parts = [_inputs(w, p, seed=i) for i, (w, p) in enumerate(shapes)]
+    trees = [[-1] + [rng.randint(max(0, i - 4), i - 1) for i in range(1, w)] for w, _ in shapes]
+    q, kn, vn = (torch.cat([x[j] for x in parts]) for j in range(3))
+    together = _attend(q, kn, vn, [x[3:] for x in parts], trees, [p for _, p in shapes], 1 / 16)
+    base = 0
+    for i, ((w, p), part) in enumerate(zip(shapes, parts)):
+        alone = _attend(*part[:3], [part[3:]], [trees[i]], [p], 1 / 16)
+        assert torch.equal(together[base:base + w], alone), f"stream {i}"
+        base += w
+
+
 def test_attention_matches_torch_reference():
     w, p = 7, 73
     q, kn, vn, kc, vc = _inputs(w, p)
@@ -102,7 +122,8 @@ def test_attention_matches_torch_reference():
         assert (out[node].float() - ref.float()).abs().max() < 0.035
 
 
-@pytest.mark.parametrize("w,p,context", [(1, 0, 4096), (4, 1300, 4096), (3, 2047, 2048), (4, 4000, 8192)])
+@pytest.mark.parametrize("w,p,context", [(1, 0, 4096), (4, 1300, 4096), (3, 2047, 2048), (4, 4000, 8192),
+                                         (16, 6100, 8192), (128, 8100, 16384), (2, 10240, 12288)])
 def test_a_padded_plan_gives_the_exact_plans_bits(w, p, context):
     """A graph's plan (items for every chunk below ``context``, the stream's keys set later) equals the exact plan."""
 
@@ -111,7 +132,77 @@ def test_a_padded_plan_gives_the_exact_plans_bits(w, p, context):
     parents = list(range(-1, w - 1))
     want = _attend(q, kn, vn, [(kc, vc)], [parents], [p], 1 / 16)
     flat, items, chunks = shared.padded_host(parents, context, q.shape[1] // kn.shape[1])
-    flat[w + 2], flat[w + 3] = p, -(-(p + w) // shared.CHUNK)
+    flat[w + 2], flat[w + 3] = p, shared.slots(p, w)
+    plan = shared.from_packed(torch.tensor(flat, dtype=torch.int32, device="cuda"), 1, w, items, chunks)
+    offs = torch.tensor(shared.offsets([(kc, vc)], "cuda"), dtype=torch.int64, device="cuda").view(-1, 2)
+    assert torch.equal(shared.attention(q, kn, vn, offs, plan, scale=1 / 16), want)
+
+
+@pytest.mark.parametrize("policy", [0, None, 10**9], ids=["fold-in-kernel", "default", "fold-in-merge"])
+@pytest.mark.parametrize("w,p", [(16, 2040), (16, 2047), (16, 2048), (128, 1990), (128, 4095), (40, 6130), (1, 2047),
+                                 (1, 2048), (9, 8191)])
+def test_rows_crossing_a_group_edge_match_serial_bits(w, p, policy, monkeypatch):
+    """A row crossing a group edge keeps its bits whether its group folds in the kernel or merge."""
+
+    if policy is not None:
+        monkeypatch.setattr(shared, "MIN_GROUPED", policy)
+    inputs = _inputs(w, p)
+    parents = list(range(-1, w - 1))
+    out = _attend(*inputs[:3], [inputs[3:]], [parents], [p], 1 / 16)
+    for node in sorted({0, 1, w // 2, w - 1} & set(range(w))):
+        assert torch.equal(out[node], _serial(inputs, parents, p, node, 1 / 16)), f"node {node} differs"
+
+
+def test_grouped_attention_matches_torch_reference_past_several_groups():
+    w, p = 5, 3 * 2048 + 700
+    q, kn, vn, kc, vc = _inputs(w, p)
+    parents = [-1, 0, 0, 1, 2]
+    out = _attend(q, kn, vn, [(kc, vc)], [parents], [p], 1 / 16)
+    for node in range(w):
+        rows = _path(parents, node)
+        keys = torch.cat((kc[:p], kn[rows]), 0).float().repeat_interleave(6, 1)
+        values = torch.cat((vc[:p], vn[rows]), 0).float().repeat_interleave(6, 1)
+        scores = torch.einsum("hd,thd->ht", q[node].float(), keys) / 16
+        ref = torch.einsum("ht,thd->hd", scores.softmax(-1), values).bfloat16()
+        assert (out[node].float() - ref.float()).abs().max() < 0.035
+
+
+def test_folded_groups_and_scalar_merge_are_bit_equal(monkeypatch):
+    w, p = 16, 5 * shared.SPAN + 700
+    inputs = _inputs(w, p)
+    parents = [-1] + [(i - 1) // 2 for i in range(1, w)]
+    monkeypatch.setattr(shared, "MIN_GROUPED", 0)
+    assert shared.groups(p, w) > 0
+    folded = _attend(*inputs[:3], [inputs[3:]], [parents], [p], 1 / 16)
+    monkeypatch.setattr(shared, "MIN_GROUPED", 10**9)
+    assert shared.groups(p, w) == 0
+    scalar = _attend(*inputs[:3], [inputs[3:]], [parents], [p], 1 / 16)
+    assert torch.equal(folded, scalar)
+
+
+def test_slots_count_folded_groups_then_chunks(monkeypatch):
+    span, group = shared.SPAN, shared.GROUP
+    assert shared.slots(0, 1) == 1
+    assert shared.slots(span - 1, 2) == group + 1                 # no whole group; its path opens group 1's chunk
+    assert shared.groups(5 * span + 700, 16) == 5                 # 5 groups x 16 rows: enough work to fold
+    assert shared.slots(5 * span + 700, 16) == 5 + 2
+    assert shared.groups(3 * span + 700, 16) == 0                 # 3 x 16 is under MIN_GROUPED: chunks
+    assert shared.groups(5 * span + 700, 1) == 0                  # one row: chunks, as before groups
+    assert shared.slots(5 * span + 700, 1) == -(-(5 * span + 701) // shared.CHUNK)
+    monkeypatch.setattr(shared, "MIN_GROUPED", 0)
+    assert shared.slots(span, 1) == 2                             # one group, then the chunk the window's key opens
+
+
+def test_a_padded_plan_folds_groups_as_the_exact_plan_does(monkeypatch):
+    """A padded graph keeps the exact plan's bits when whole groups fold in their programs."""
+
+    monkeypatch.setattr(shared, "MIN_GROUPED", 0)
+    w, p, context = 16, 3 * shared.SPAN + 1100, 16384
+    q, kn, vn, kc, vc = _inputs(w, p)
+    parents = list(range(-1, w - 1))
+    want = _attend(q, kn, vn, [(kc, vc)], [parents], [p], 1 / 16)
+    flat, items, chunks = shared.padded_host(parents, context, q.shape[1] // kn.shape[1])
+    flat[w + 2], flat[w + 3] = p, shared.slots(p, w)
     plan = shared.from_packed(torch.tensor(flat, dtype=torch.int32, device="cuda"), 1, w, items, chunks)
     offs = torch.tensor(shared.offsets([(kc, vc)], "cuda"), dtype=torch.int64, device="cuda").view(-1, 2)
     assert torch.equal(shared.attention(q, kn, vn, offs, plan, scale=1 / 16), want)

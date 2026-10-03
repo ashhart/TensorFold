@@ -115,7 +115,7 @@ class GlmEngine:
 
         import torch
 
-        from tensorfold.cuda.comm import NCCL
+        from tensorfold.cuda.comm import open_comm
         from .decode import Engine
         from .weights import Config, load
         from .split import rule
@@ -129,7 +129,7 @@ class GlmEngine:
         self.rank = rank
         self.policy = "0" if serial_only else policy
         self.serial_only = serial_only
-        self.comm = comm if comm is not None else NCCL(rank, 2, master, port)
+        self.comm = comm if comm is not None else open_comm(rank, 2, master, port)
         self.comm.barrier()
         cfg = Config.read(model_dir)
         # Without --context the window stays dense, attending every key without indexer work.

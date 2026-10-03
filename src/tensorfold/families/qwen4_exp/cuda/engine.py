@@ -29,6 +29,31 @@ def vision_workspace() -> int:
     return int(value) * 2**20
 
 
+def build_kernels(*, exl3: bool = False, nvfp4: bool = False, solo: bool = True) -> None:
+    """Load each applicable extension after admission and before resident weights consume the pool."""
+
+    from tensorfold.cuda import experts
+    from tensorfold.cuda.kernels import gdn as shared_gdn
+    from tensorfold.cuda.kernels import qmm
+
+    from . import gdn, gdn_io
+
+    loaders = [experts._ext, shared_gdn._ext, qmm._ext, gdn_io._ext]
+    if solo:                                     # serial windows, including a concurrent decoder's lone graph slot
+        loaders.append(gdn._ext)
+    if nvfp4:
+        from tensorfold.cuda.nvfp4 import checkpoint, linear
+
+        loaders += [linear._ext, linear._prompt_ext, checkpoint._ext]
+    if exl3:
+        from tensorfold.cuda.exl3 import experts as x3experts
+        from tensorfold.cuda.exl3 import linear as x3linear
+
+        loaders += [x3experts._ext, x3linear._ext]
+    for load in loaders:
+        load()
+
+
 class FlashNextEngine:
     """``eos``, ``generate`` (rank 0 or one GPU) and ``follow`` (rank 1), as ``tensorfold.cuda.server`` expects."""
 
@@ -65,32 +90,30 @@ class FlashNextEngine:
 
         if tp not in (1, 2) or rank not in range(tp):
             raise ValueError(f"rank {rank} of {tp}: Flash Next runs on one GPU or two")
-        if streams > 1 and tp > 1:
-            raise ValueError("--parallel decodes several Flash Next requests together on one GPU; with --tp 2 it "
-                             "serves one request at a time for now, so drop --parallel")
         if not 0 <= int(depth) <= MAX_DEPTH:
             raise ValueError(f"MTP drafts a round: 0 to {MAX_DEPTH}, not {depth}")
         if not 0.0 <= float(confidence) <= 1.0:
             raise ValueError(f"MTP draft confidence: a probability from 0 to 1, not {confidence}")
         torch.cuda.set_device(0)
         self.tp, self.rank, self.depth, self.confidence = tp, rank, int(depth), float(confidence)
+        self.streams, self.master, self.graphs_enabled = int(streams), master, bool(graphs)
         self.kv_dtype = check_kv(kv_dtype)
         self.comm = None
         self.vision = None                   # the image tower (``QwenCudaVision``) with --vision
         ids = draft_token_ids(draft_vocab) if self.depth > 0 else None
         if tp == 2:
-            from tensorfold.cuda.comm import NCCL
+            from tensorfold.cuda.comm import open_comm
 
             if not master:
                 raise ValueError("two ranks need rank 0's address (master)")
-            self.comm = NCCL(rank, 2, master, port)
+            self.comm = open_comm(rank, 2, master, port)
             self.comm.barrier()
         gather = (lambda values: gather_ints(torch, self.comm.all_gather, values)) if tp == 2 else None
         each, mtp, bits = self.depth + 1, self.depth > 0, BITS_OF[self.kv_dtype]
         # one admission for one stream or many (every slot, the shared rows and kept snapshots), before any load
         rows0 = chunk or PREFILL_ROWS
-        geometry = ((lambda text: indexed_stream_geometry(text, streams, each, KEEP, mtp=mtp, kv_bits=bits,
-                                                          prefill_rows=rows0))
+        geometry = ((lambda text: indexed_stream_geometry(text, streams + int(graphs and mtp), each, KEEP, mtp=mtp,
+                                                          kv_bits=bits, world=tp, prefill_rows=rows0))
                     if streams > 1 else
                     (lambda text: gdn_geometry(text, tp, each, indexed=True, mtp=mtp, kv_bits=bits,
                                                kept=KEEP_SERIAL + 1, prefill_rows=rows0)))
@@ -114,6 +137,8 @@ class FlashNextEngine:
         self.max_len = self.capacity_plan["cache_slots"]
         if tp == 2:
             self._same_settings(torch, ids)
+        build_kernels(exl3=exl3, nvfp4=not exl3 and quant_method(read_config(model_dir)) == "modelopt",
+                      solo=streams == 1 or (graphs and mtp))
         from concurrent.futures import wait
 
         from tensorfold.cuda.direct_read import wait_all
@@ -151,6 +176,10 @@ class FlashNextEngine:
                   f"workspace reserved{'; https URLs allowed' if vision_urls else ''}", flush=True)
         # ``streams`` > 1: up to that many requests decoded together, every stream's chain in one forward
         self.concurrent = streams > 1
+        self.refuses_structured_output = (
+            "structured output is not served by Flash Next on two ranks with --parallel yet: "
+            "send text without response_format or guided output, or start without --parallel"
+            if self.concurrent and tp == 2 else None)
         self.multi = self.scheduler = None
         if self.concurrent:
             from tensorfold.cuda.scheduler import Scheduler
@@ -161,22 +190,28 @@ class FlashNextEngine:
             self.multi = MultiDecoder(w, slots=streams, capacity=self.max_len, depth=self.depth,
                                       confidence=self.confidence, keep=KEEP, points=self.points,
                                       kv_dtype=self.kv_dtype, share=share, vision=self.vision,
-                                      prefill_rows=self.prefill_rows, workspace_bytes=prompt_workspace)
+                                      prefill_rows=self.prefill_rows, workspace_bytes=prompt_workspace, graphs=graphs)
             self.scheduler = Scheduler(self.multi, max_streams=streams)
         else:
             self.e = Engine(w, capacity=self.max_len, max_rows=max(8, self.depth + 1), graphs=graphs,
                             kv_dtype=self.kv_dtype, prefill_rows=self.prefill_rows)
         started = time.perf_counter()
         locked = False
+        pinned, locks = 0, {}
         if prefetch and not ple_on_ssd:               # the n-gram tables' pages, read now rather than by requests
+            from tensorfold.cuda.ngram_pages import lock_bytes
+
             tables = {id(layer.ple.table): layer.ple.table for layer in w.layers if layer.ple is not None}
-            size = sum(t.nbytes for t in tables.values())
+            size = sum(lock_bytes(t) for t in tables.values())
             # pinned pages are no longer reclaimable: lock only what the startup budget leaves room for
             room = self.capacity_plan["budget_bytes"] - self.capacity_plan["total_bytes_estimate"]
             for table in tables.values():
                 if not tables_read:
                     table.prefetch()                  # eight readers first: mlock alone faults the pages in one by one
-                locked = room >= size and table.lock()
+                got = room >= size and table.lock()
+                locks[id(table)] = got
+                pinned += getattr(table, "pinned_bytes", lock_bytes(table) if got else 0)
+            locked = all(locks.values())
         read_s = time.perf_counter() - started
         captured = self.e.graphs.warm(self.depth + 1) if self.e is not None and self.e.graphs is not None else 0
         started = time.perf_counter()
@@ -190,6 +225,20 @@ class FlashNextEngine:
             self.vision.warm()
             torch.cuda.empty_cache()
         warm_s = time.perf_counter() - started
+        reread_s = 0.0
+        if prefetch and not ple_on_ssd and not locked:
+            started = time.perf_counter()
+            for table in tables.values():
+                if locks[id(table)]:
+                    continue
+                table.prefetch()
+                if hasattr(table, "lock_runs"):
+                    pinned += table.lock_runs(max(0, room - pinned))
+            reread_s = time.perf_counter() - started
+        if self.concurrent and tp == 2 and rank == 0:
+            from .multi import Link
+
+            self.multi.link = Link(self.comm.store, rank=0, host=master)
         self.eos = tuple(w.cfg.eos)
         self.model_dir = Path(model_dir)
         self.served = 0
@@ -208,6 +257,8 @@ class FlashNextEngine:
                 f", locked in memory in {read_s:.1f}s" if locked else "")
         else:
             how = f"{'locked in memory' if locked else 'read'} in {read_s:.1f}s"
+        if reread_s:
+            how += f", read again after warm-up in {reread_s:.1f}s ({pinned / 2**30:.2f} GiB of pages locked)"
         kv = "" if self.kv_dtype == "bf16" else f"; {self.kv_dtype} KV cache (fp16 scale per 32 values)"
         print(f"[tensorfold] Flash Next on CUDA: {rule}; {where}{kv}; n-gram tables {how}; {captured} "
               f"decode graphs captured; idle prompt pieces {self.prefill_rows} rows; "
@@ -219,7 +270,8 @@ class FlashNextEngine:
         from .kvcache import BITS_OF
 
         total = int(ids.sum()) if ids is not None else -1
-        mine = torch.tensor([self.depth, round(self.confidence * 1e6), self.max_len,
+        mine = torch.tensor([self.depth, round(self.confidence * 1e6), self.max_len, self.streams,
+                             int(self.graphs_enabled),
                              len(ids) if ids is not None else -1, total, BITS_OF[self.kv_dtype],
                              self.prefill_rows, int(prompt_precision.fp8())], dtype=torch.int64, device="cuda")
         both = torch.empty((2 * mine.numel(),), dtype=torch.int64, device="cuda")
@@ -228,8 +280,8 @@ class FlashNextEngine:
         prompt_precision.same_on_ranks(int(both[0, -1]), int(both[1, -1]))
         if not torch.equal(both[0], both[1]):
             raise RuntimeError(f"the two ranks were started with different settings (drafts, confidence, context, "
-                               f"draft vocabulary, KV cache, prompt rows): rank 0 {both[0].tolist()}, "
-                               f"rank 1 {both[1].tolist()}")
+                               f"parallel streams, graphs, draft vocabulary, KV cache, prompt rows): "
+                               f"rank 0 {both[0].tolist()}, rank 1 {both[1].tolist()}")
 
     def _key(self, n: int) -> str:
         return f"tensorfold/flashnext/request/{n}"
@@ -238,6 +290,9 @@ class FlashNextEngine:
         """Rank 0: tell rank 1 to leave ``follow``."""
 
         if self.tp == 2 and self.rank == 0:
+            if self.multi is not None:
+                self.multi.link.send(["stop"])
+                return
             self.comm.store.set(self._key(self.served), json.dumps({"stop": True}))
 
     def _share(self, prompt: list[int], max_tokens: int, sampling, draft: bool, cached: int, constraint=None,
@@ -473,6 +528,11 @@ class FlashNextEngine:
     def follow(self) -> None:
         """Rank 1: decode every request rank 0 serves, until rank 0 stops."""
 
+        if self.multi is not None:
+            from .multi import Link
+
+            self.multi.follow(Link(self.comm.store, rank=1, host=self.master))
+            return
         while True:
             request = self._receive()
             if request is None:

@@ -65,6 +65,7 @@ def engine(value, peers=None):
         else:
             rows = prefill_rows()
     return types.SimpleNamespace(depth=6, confidence=.7, max_len=8192, kv_dtype="bf16",
+                                 streams=1, graphs_enabled=True,
                                  prefill_rows=rows or 2048, comm=Comm(peers))
 
 

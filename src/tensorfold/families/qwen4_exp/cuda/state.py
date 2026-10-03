@@ -268,6 +268,49 @@ class State:
                 setattr(sc_new, name, value.clone())
         return other
 
+    def copy_from(self, other: State) -> None:
+        """Copy a same-format state into equal or larger caches without changing captured tensor addresses."""
+
+        def tensors(obj):
+            for name, value in vars(obj).items():
+                if isinstance(value, torch.Tensor):
+                    yield name, value
+
+        def into(mine: torch.Tensor, t: torch.Tensor) -> None:
+            if mine.shape == t.shape:
+                mine.copy_(t)
+            elif mine.dim() == t.dim() and mine.shape[1:] == t.shape[1:] and mine.shape[0] >= t.shape[0]:
+                mine[:t.shape[0]].copy_(t)
+            else:
+                raise ValueError(f"copy_from: {tuple(t.shape)} does not fit {tuple(mine.shape)}")
+
+        if self.kv_dtype != other.kv_dtype:
+            raise ValueError("copy_from: states need matching KV formats")
+        if other.capacity > self.capacity:
+            raise ValueError(f"copy_from: {other.capacity} cache rows do not fit {self.capacity}")
+        for name, value in vars(other).items():
+            mine = getattr(self, name)
+            if isinstance(value, torch.Tensor):
+                into(mine, value)
+            elif isinstance(value, list) and value and isinstance(value[0], torch.Tensor):
+                for a, b in zip(mine, value):
+                    into(a, b)
+            elif isinstance(value, kvcache.KVCache):
+                for n, t in tensors(value):
+                    into(getattr(mine, n), t)
+            elif name == "scratch" or (isinstance(value, list) and value and isinstance(value[0], kvcache.KVCache)):
+                for a, b in zip(mine, value):
+                    for n, t in tensors(b):
+                        into(getattr(a, n), t)
+            elif name == "cur":
+                self.cur = list(value)
+            elif name == "ple_history":
+                self.ple_history = None if value is None else value.copy()
+            elif name in ("lin_index", "att_index", "capacity", "kv_dtype", "limit", "version"):
+                continue                                   # the same geometry
+            else:
+                setattr(self, name, value)                 # pos, mtp_len, mtp_drafted, ple_last
+
     def set_mtp_len(self, n: int) -> None:
         self.mtp_len = n
         self.mtp_pos.fill_(n)

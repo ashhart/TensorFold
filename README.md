@@ -95,9 +95,9 @@ row's arithmetic independent of the other rows in the call. Compare a request wi
 The MLX engine can share a round across requests. Each stream keeps its own state and sampling key, with
 concurrent output required to match its solo output. Load-time checks restrict window width and shared
 forwards where a family cannot reproduce its serial arithmetic. On CUDA, `--parallel N` with N greater
-than one enables shared rounds for Qwen3.8-27B on one or two ranks and for Flash Next and Qwen3.6-35B-A3B on
-one rank. Flash Next rejects concurrent two-rank execution. GLM and Nemotron CUDA serve one request at a time;
-CUDA `--parallel auto` also means one request at a time.
+than one enables shared rounds for Qwen3.8-27B and Flash Next on one or two ranks and for Qwen3.6-35B-A3B on
+one rank. GLM and Nemotron CUDA serve one request at a time; CUDA `--parallel auto` also means one request at a
+time.
 
 Exactness is against the same engine, weights, runtime and settings. It does not imply identical output
 between MLX and CUDA, different quantizations, or different tensor-parallel rank counts.
@@ -111,7 +111,7 @@ between MLX and CUDA, different quantizations, or different tensor-parallel rank
 | `--vision` | Opt-in GLM-5.3-Flash, Qwen3.5/3.8 dense and Flash Next image input | MLX; dense Qwen also CUDA; Flash Next CUDA with `--parallel >=2` |
 | `--vision-max-images N` | With `--vision`, images across the full request history (default 4); other image limits still apply | Both |
 | `--vision-image-tokens N` | With `--vision`, the visual tokens a request's images share (default 4,096, up to 65,536); each image keeps at most 4,096 | CUDA Qwen |
-| `--alias` | Additional model IDs | MLX |
+| `--alias` | Additional model IDs | Both |
 | `--context N` | Prompt plus reply capacity | Both |
 | `--max-tokens N` | Default reply limit, 4096 | Both |
 | `--temperature`, `--top-p`, `--top-k`, `--min-p` | Sampling defaults; temperature zero is greedy | Both |

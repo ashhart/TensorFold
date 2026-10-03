@@ -135,7 +135,7 @@ def fake_runtime(monkeypatch):
     def both(send, recv):
         recv.view(-1).copy_(torch.cat([send.view(-1), send.view(-1)]))
     comm = SimpleNamespace(barrier=lambda: None, ready=lambda *a, **k: None, all_gather=both)
-    monkeypatch.setitem(sys.modules, "tensorfold.cuda.comm", SimpleNamespace(NCCL=lambda *a: comm))
+    monkeypatch.setitem(sys.modules, "tensorfold.cuda.comm", SimpleNamespace(open_comm=lambda *a, **k: comm))
     for family in ("qwen3_5", "qwen4_exp", "glm5_next"):
         prefix = f"tensorfold.families.{family}.cuda"
         weights = SimpleNamespace(load=load, draft_token_ids=lambda *a: None,
@@ -147,6 +147,8 @@ def fake_runtime(monkeypatch):
     monkeypatch.setattr(dist, "init_process_group", lambda *a, **kw: None)
     monkeypatch.setattr(dist, "all_gather_into_tensor", lambda recv, send: both(send, recv))
     monkeypatch.setitem(sys.modules, "tensorfold.families.qwen3_5.cuda.distributed", SimpleNamespace(split_weights=None))
+    from tensorfold.families.qwen4_exp.cuda import engine as flash_engine
+    monkeypatch.setattr(flash_engine, "build_kernels", lambda **kw: None)     # no CUDA extension builds here
     return calls, capacity
 
 

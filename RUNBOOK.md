@@ -71,8 +71,8 @@ the NVFP4 (ModelOpt FP4) checkpoint `ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4` 
 included, whose table ships as BF16 rows with no per-shard `scales`, a layout the reader takes as it is.
 
 CUDA `--parallel auto` serves one request at a time. To share rounds, set `--parallel N` greater than
-one for Qwen3.8-27B on one or two ranks, or Flash Next on one rank. Pass the same N on both Qwen ranks.
-Flash Next rejects parallel two-rank execution; GLM and Nemotron CUDA keep serial request scheduling.
+one for Qwen3.8-27B or Flash Next on one or two ranks. Pass the same N on both ranks.
+GLM and Nemotron CUDA keep serial request scheduling.
 
 For two ranks, start a container on each host with network devices and locked-memory support:
 
@@ -94,8 +94,10 @@ tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --tp 2 --rank 0 --master 192.0.
 
 Replace the documentation address with rank 0's reachable address. Both ranks must agree on context and
 drafting settings. The default rendezvous port is 29551. The rendezvous port and the link between the ranks
-are not authenticated: keep them on a private link, or firewall the port to the peer. GLM requires two CUDA
-ranks; Flash Next can use one or two and needs `--no-drafts` when its checkpoint lacks an MTP head.
+are not authenticated: keep them on a private link, or firewall the port to the peer. Flash Next under
+`--parallel` also opens one ephemeral TCP port on rank 0's address for rank 1's messages; the same applies to it.
+GLM requires two CUDA ranks; Flash Next can use one or two and needs `--no-drafts` when its checkpoint lacks an MTP
+head.
 
 ### RTX cards without Docker
 

@@ -128,6 +128,8 @@ class App:
         if problem is None and grammar.request_spec(body) and "constraint" not in inspect.signature(
                 self.engine.generate).parameters:
             problem = "this model's engine does not enforce structured output"
+        if problem is None and grammar.request_spec(body) and getattr(self.engine, "refuses_structured_output", None):
+            problem = self.engine.refuses_structured_output       # e.g. Flash Next on two ranks with --parallel
         return problem
 
     def _grammars(self) -> grammar.Grammars:

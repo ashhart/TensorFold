@@ -22,9 +22,14 @@ Standard library only.
 import argparse
 import json
 import statistics
+import sys
 import threading
 import time
 import urllib.request
+
+if sys.version_info < (3, 11):
+    sys.exit(f"Python 3.11+ is required (this is {sys.version.split()[0]}); "
+             "TensorFold's tools use PEP 604 unions. Try: python3.12 tools/bench_concurrent.py ...")
 
 MIN_PIECES = 4           # text pieces a reply needs before its span is timed
 

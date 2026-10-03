@@ -173,4 +173,13 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
     from tensorfold.control.cli import register
 
     register(commands)
+
+    plan = commands.add_parser("plan",
+                               help="estimate local checkpoint weights against MLX budgets without loading a model")
+    plan.add_argument("model", help="a local model directory or already cached Hugging Face repo id")
+    plan.add_argument("--memory-gb", type=float, default=None, metavar="GIB",
+                      help="also check this explicit budget, as TENSORFOLD_MEMORY_LIMIT_GB would set it")
+    plan.add_argument("--ram", type=int, action="append", default=[], metavar="GIB",
+                      help="also estimate this RAM class under the current GPU ceiling (repeatable)")
+    plan.set_defaults(func=handlers["plan"])
     return parser

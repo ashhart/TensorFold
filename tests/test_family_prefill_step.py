@@ -1,13 +1,41 @@
 """A family's engine_settings names its prompt chunk: the prefill plan and the stream memory probe take it."""
 
 from pathlib import Path
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
+
+import numpy as np
 
 import pytest
 
 from tensorfold import cli
 from tensorfold.engine import memory
 from tensorfold.engine.prefill_plan import PrefillPlan
+
+
+class CPUCache:
+    def update_and_fetch(self, keys, values):
+        self.keys, self.values, self.state = keys, values, (keys, values)
+        return keys, values
+
+    def memory_growth(self):
+        return 0, (self.keys.nbytes + self.values.nbytes) // self.keys.shape[2]
+
+
+@pytest.fixture(autouse=True)
+def cpu_memory_runtime(monkeypatch):
+    """Memory-policy probes use CPU arrays and deterministic allocator readings, with no native kernel dispatch."""
+    core, package = ModuleType("mlx.core"), ModuleType("mlx")
+    core.__version__ = "host-fixture"
+    core.zeros = lambda shape: np.zeros(shape, dtype=np.float32)
+    core.eval = lambda *arrays: None
+    core.synchronize = core.clear_cache = core.reset_peak_memory = lambda: None
+    core.get_active_memory = core.get_peak_memory = core.get_cache_memory = lambda: 0
+    core.device_info = lambda: {"max_recommended_working_set_size": 0}
+    core.set_wired_limit = lambda limit: None
+    package.core = core
+    monkeypatch.setitem(sys.modules, "mlx", package)
+    monkeypatch.setitem(sys.modules, "mlx.core", core)
 
 
 def parse(*extra):
@@ -57,7 +85,7 @@ def test_the_memory_probe_ends_on_full_chunks_of_the_plan_step(monkeypatch):
 
 def test_the_largest_step_that_leaves_the_context_floor_is_chosen(monkeypatch):
     import mlx.core as mx
-    from mlx_lm.models.cache import KVCache
+    KVCache = CPUCache
 
     from tensorfold.engine import prefill_step
 
@@ -84,8 +112,10 @@ def test_the_largest_step_that_leaves_the_context_floor_is_chosen(monkeypatch):
 
     monkeypatch.setattr(prefill_step, "CONTEXT_FLOOR", 1000)
     assert prefill_step.choose(make, (2048,), 1 << 40, []) == 2048 and made == []
-    assert prefill_step.choose(make, (8192, 4096, 2048), 1 << 40, list(range(50))) == 8192 and made == [2048]
+    assert prefill_step.choose(make, (8192, 4096, 2048), 1 << 40, list(range(50))) == 8192
+    assert made == [2048, 4096, 8192]          # one engine a probed step, smallest first
     assert prefill_step.choose(make, (8192, 4096, 2048), 0, []) == 2048 and Engine.model.tightened == 2
+    assert made[3:] == [2048]                  # nothing fits: no larger engine, the first one probes every round
 
 
 @pytest.mark.parametrize("noise", [(0, 0, 2), (2, 0, 0), (0, 2, 0)])
@@ -93,28 +123,30 @@ def test_a_probe_whose_peak_varies_run_to_run_gives_the_same_step(monkeypatch, n
     """#95: a streamed-expert probe's peak moves between runs; the worst of three decides, wherever the high one falls."""
 
     import mlx.core as mx
-    from mlx_lm.models.cache import KVCache
+    KVCache = CPUCache
 
     from tensorfold.engine import prefill_step
+
+    chunks, runs = [], []
 
     class Engine:
         model = SimpleNamespace()
 
         def prefill_prefix(self, tokens, cache=None, cached_tokens=0):
+            chunks.append(len(tokens) - 64)
             kv = KVCache()
             kv.update_and_fetch(mx.zeros((1, 1, len(tokens), 8)), mx.zeros((1, 1, len(tokens), 8)))
             return [kv]
 
-    runs = []
-    mib = 1 << 20
+    gib = 1 << 30
     monkeypatch.setattr(prefill_step, "CONTEXT_FLOOR", 1000)
-    monkeypatch.setattr(mx, "get_active_memory", lambda: 1 << 30)
+    monkeypatch.setattr(mx, "get_active_memory", lambda: gib)
     monkeypatch.setattr(mx, "reset_peak_memory", lambda: runs.append(len(runs)))
-    monkeypatch.setattr(mx, "get_peak_memory", lambda: (1 << 30) + (1 + noise[runs[-1]]) * mib)
-    # 8,192 rows take 4x the 2,048-row probe's work: 12 MiB at the high peak, 4 at the low; 4,096 take 6 or 2
-    budget = (1 << 30) + 7 * mib + 1000 * 32
-    assert prefill_step.choose(lambda grid: Engine(), (8192, 4096, 2048), budget, list(range(50))) == 4096
-    assert len(runs) == 3
+    # workspace per 2,048 rows: 1 GiB at the low peaks, 3 at the high one, on the same repeat of every step
+    monkeypatch.setattr(mx, "get_peak_memory", lambda: gib + chunks[-1] // 2048 * (1 + noise[runs[-1] % 3]) * gib)
+    # the worst 4,096 probe (6 GiB) bounds an 8,192 one at 24 GiB, past the budget; the low samples would admit it
+    assert prefill_step.choose(lambda grid: Engine(), (8192, 4096, 2048), 14 * gib, list(range(50))) == 4096
+    assert chunks == [2048] * 3 + [4096] * 3
 
 
 def test_nemotron_offers_8192_token_prompt_chunks_with_tensor_units(monkeypatch):
