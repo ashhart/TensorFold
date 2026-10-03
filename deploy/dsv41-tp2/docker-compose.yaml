@@ -36,6 +36,10 @@ services:
       TF_DSV41_FIXED_GIB: ${TF_DSV41_FIXED_GIB:-}
       TF_DSV41_ENGRAM_DIR: /models/${ENGRAM:-dsv41/DeepSeek-V4.1-Flash-engram}
       PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      # no transparent huge pages for NumPy buffers or mimalloc arenas: THP first-touch compaction under memory
+      # pressure stalls long prefills on GB10 (seen in jayleaton/deepseek-v41-tensorfold-spark, G12)
+      NUMPY_MADVISE_HUGEPAGE: "0"
+      MIMALLOC_ALLOW_THP: "0"
       NCCL_SOCKET_IFNAME: ${NCCL_SOCKET_IFNAME:?per rank, in rankN.env}
       NCCL_IB_HCA: ${NCCL_IB_HCA:?per rank, in rankN.env}
       NCCL_IB_GID_INDEX: ${NCCL_IB_GID_INDEX:-3}
