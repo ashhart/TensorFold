@@ -10,7 +10,8 @@ from tensorfold.cuda.logprobs import capture
 from tensorfold.cuda.streams import Stream
 
 from . import image_rows
-from .decode import _gathered_fits, choose_gathered, entry_end, draft, tp_sample_rows
+from .copies import Copies
+from .decode import _gathered_fits, absorb, choose_gathered, entry_end, draft, tp_sample_rows
 from .forward import Cut, commit, compute, cut_snapshot, stage
 from .mtp import mtp_compute, mtp_stage
 from .state import CAND, ENDS
@@ -216,11 +217,17 @@ class PromptPasses:
                 s.constraint.advance([first])
             head += 1
             s.context = list(s.prompt)
-            s.drafts = draft(e, last, [first], st.pos + 1, min(self.depth, s.count - 1), s.sampling,
-                             self.confidence) if mtp and s.count > 1 else []
+            s.copies = Copies(self.depth + 1, self.copy_rows) if mtp and self.copy_rows else None
             s.started = time.perf_counter()
             self.streams[s.sid] = s
             s.take([first], self._ends(s))
+            if mtp and s.count > 1:                      # the first token in the context: a copy may follow it
+                s.drafts = s.copies.propose(s.context, s.count - len(s.out)) if s.copies is not None else []
+                if s.drafts:
+                    absorb(e, last, [first])
+                else:
+                    s.drafts = draft(e, last, [first], st.pos + 1, min(self.depth, s.count - 1), s.sampling,
+                                     self.confidence)
             if s.done:
                 joined.append(s)
         self._joined_ranks()

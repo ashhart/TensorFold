@@ -46,8 +46,12 @@ def test_quantized_caches_admit_longer_windows_on_the_same_budget(tmp_path, monk
     checkpoint(tmp_path, small_config(), WEIGHTS)
     calls, capacity = fake_runtime
     text = small_config()
-    bf16 = gdn_geometry(text, 1, 4, indexed=True, mtp=True, kept=KEEP_SERIAL + 1) if streams == 1 else \
-        indexed_stream_geometry(text, streams + 1, 4, KEEP, mtp=True)
+    if streams == 1:
+        bf16 = gdn_geometry(text, 1, 4, indexed=True, mtp=True, kept=KEEP_SERIAL + 1)
+    else:                                                 # a round's and the graph slot's copy rows
+        from tensorfold.families.qwen4_exp.cuda import COPY_ROWS
+        bf16 = indexed_stream_geometry(text, streams + 1, 4, KEEP, mtp=True,
+                                       rows=max(4 * streams, COPY_ROWS) + COPY_ROWS, scratch=COPY_ROWS)
     budget = bf16.needed(12000) + 32768                      # bf16 fits about 12,000 tokens
     monkeypatch.setattr(capacity, "available_bytes", lambda t: budget)
     windows = {}

@@ -22,12 +22,13 @@ from .decode import (PREFILL_ROWS, WARM_TAIL, Engine, _gathered_fits, choose_gat
 from . import attn_multi, gdn_multi, image_rows, prefixes
 from .forward import commit, compute, compute_mixed, converges, stage
 from .mtp import mtp_compute, mtp_stage
+from .copies import fit
 from .state import Buffers, State
 from .multi_solo import Alone, solo
 from .multi_fill import FILL_GUARD, PASS_MIN, PromptPasses
 from .multi_tp import Link as Link
 from .multi_tp import OutOfStep, TwoRanks
-from ..cuda import CONFIDENCE, DEPTH
+from ..cuda import CONFIDENCE, COPY_ROWS, DEPTH
 
 FIRST, STEP = 256, 8192          # rows an idle slot keeps; rows a stream's caches grow by at a time
 GIB = 1024**3
@@ -49,15 +50,17 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
 
     def __init__(self, w, *, slots: int, capacity: int, depth: int = DEPTH, confidence: float = CONFIDENCE,
                  stop_eos: bool = True, keep: int = 8, kv_dtype: str = "bf16", prefill_rows: int = PREFILL_ROWS,
-                 share: float = SHARE, points=None, graphs: bool = True, vision=None, workspace_bytes: int = 0) -> None:
+                 share: float = SHARE, points=None, graphs: bool = True, vision=None, workspace_bytes: int = 0,
+                 copy_rows: int = COPY_ROWS) -> None:
         self.link = self.follower = None
         self.planning, self.pass_plan, self.mixed_plan = False, None, None
         self.pass_index, self.pass_width = 0, prefill_rows
         self.w, self.depth, self.confidence, self.capacity = w, depth, confidence, capacity
+        self.copy_rows = copy_rows if depth > 0 and w.comm is None else 0   # a copy's widest window (0: none)
         self.points = points                         # a prompt's message starts to keep states at, or None
         self.vision = vision
         self.eos = tuple(w.cfg.eos) if stop_eos else ()
-        rows = slots * (depth + 1)
+        rows = max(slots * (depth + 1), self.copy_rows)  # a chain's rows a stream; copies share what chains leave
         # a round's window and a prompt pass share each layer's expert launch: the pass's buffers hold both
         self.converged, self.prefill_rows = converges(w), prefill_rows
         # rounds beside a filling prompt size its pass so decoding keeps ``share`` of the pass's time (0: whole passes)
@@ -68,9 +71,11 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
         self.gdn = gdn_multi.Scratch(w, rows)            # every stream's DeltaNet rows, one launch a step
         self.held: dict[int, list[int]] = {}             # stream id -> last round's kept rows, folded in next round
         # slots start small and grow with their stream's context, up to the window, while the gate has room
-        self.free = [State(w, min(capacity, FIRST), depth + 1, kv_dtype, limit=capacity) for _ in range(slots)]
+        # every slot's replay rows hold a copy: any slot may become the graph slot, whose window takes one
+        self.free = [State(w, min(capacity, FIRST), max(depth + 1, self.copy_rows), kv_dtype, limit=capacity)
+                     for _ in range(slots)]
         self.slots = list(self.free)
-        self.solo = (solo(w, self.free[0], capacity, depth, self.pbuf)
+        self.solo = (solo(w, self.free[0], capacity, depth, self.pbuf, self.copy_rows)
                      if graphs and depth > 0 and self.mbuf is not None else None)
         self.solo_on = self.solo is not None
         self.slot_bytes = sum(t.numel() * t.element_size() for t in _tensors(self.free[0]))
@@ -237,7 +242,7 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
         finally:
             self.solo_on = self.solo is not None
         if self.solo is not None:                    # last: the graph slot's rows are the ones requests will find
-            self.solo.graphs.warm(self.depth + 1)
+            self.solo.graphs.warm(max(self.depth + 1, self.copy_rows))
             self.solo.st.reset(self.w)               # the captures wrote its state
 
     @torch.no_grad()
@@ -309,6 +314,7 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
             live = [s for s in self.streams.values() if not s.done and not s.waiting]
         if not live:
             return ended
+        fit(live, self.buf.rows, self.depth + 1)         # before a grammar's window: it masks the rows it keeps
         grammars, failed = {}, []
         for s in live:                                   # a grammar cuts the drafts no accepted path can hold
             if s.constraint is not None:
@@ -380,6 +386,9 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
                        for (_, a0, a1), pos, smp in zip(segs, positions, samplings)]
         paths = [accept(tokens, list(range(-1, len(tokens) - 1)), rows, s.count - len(s.out), self._ends(s))
                  for s, (_, tokens), rows in zip(live, windows, sampled)]
+        for s, (_, tokens), (path, _) in zip(live, windows, paths):
+            if s.copies is not None:                     # the rows verified: a grammar may have cut some
+                s.copies.landed(len(tokens), len(path))
         for s, (_, tokens), (_, a0, _), (path, end), pos in zip(live, windows, segs, paths, positions):
             if s.probabilities is not None:
                 capture(logits, [tokens[r] for r in path[1:]] + [end], [pos[r] for r in path],
@@ -399,12 +408,13 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
                     s.error = exc
             last = s.error is not None or len(s.out) + len(new) >= s.count or end in self._ends(s)
             kept.append((s, a0, rows[:len(path)], new, last))
-        self._draft_all([(s, a0, keep) for s, a0, keep, _, last in kept if s.draft and not last])
         for s, _, _, new, _ in kept:
             if s.error is not None:
                 s.done = True
                 continue
             s.take(new, self._ends(s))
+        # after the take: a copy reads this round's tokens (``last``, not a client's stop, keeps both ranks alike)
+        self._draft_all([(s, a0, keep) for s, a0, keep, _, last in kept if s.draft and not last])
         spent = time.perf_counter() - t0
         self._timed(spent, sum(n for _, _, n in pieces))
         if pieces:                                     # prompts that ended in this round's pass join the next
@@ -415,11 +425,11 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
         return failed + done + ended
 
     def _draft_all(self, streams: list) -> None:
-        """Every drafting stream absorbs its kept rows and chains drafts, all streams in one step a depth."""
+        """Every drafting stream absorbs its kept rows, then copies from its context or chains MTP drafts, the chains in one step a depth."""
 
         for s, _, _ in streams:
             s.drafts = []
-        room = {s.sid: min(self.depth, s.count - len(s.out) - len(keep)) for s, _, keep in streams}
+        room = {s.sid: min(self.depth, s.count - len(s.out)) for s, _, _ in streams}
         todo = [(s, a0, keep) for s, a0, keep in streams if room[s.sid] > 0 and self.mbuf is not None]
         if not todo:
             return
@@ -433,7 +443,13 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
         logits = self._mtp(segs)
         for (s, _, keep), (st, a0, a1) in zip(todo, segs):
             st.set_mtp_len(st.mtp_len + len(keep))
-        active = [(s, a1 - 1) for s, (_, _, a1) in zip([t[0] for t in todo], segs)]
+            s.drafts = s.copies.propose(s.context, s.count - len(s.out)) if s.copies is not None else []
+        chains = [i for i, (s, _, _) in enumerate(todo) if not s.drafts]
+        if not chains:
+            return
+        if len(chains) < len(todo):                      # the logits of the streams that chain
+            logits = logits[chains]
+        active = [(todo[i][0], segs[i][2] - 1) for i in chains]
         for j in range(self.depth):
             picks = self._picks(logits, [s.st.pos + 1 + j for s, _ in active], [s.sampling for s, _ in active])
             nxt = []

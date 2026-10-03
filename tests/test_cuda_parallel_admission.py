@@ -57,8 +57,12 @@ def test_parallel_window_that_cannot_fit_every_stream_is_refused_before_loading(
     checkpoint(tmp_path, small_config(), WEIGHTS)
     calls, capacity = fake_runtime
     # one GPU: the window is what one stream reaches beside the others' first rows; two ranks: every stream's
-    four = (stream_geometry(small_config(), world, 4, 8, first=256 if world == 1 else None) if family == "linear"
-            else indexed_stream_geometry(small_config(), 5, 4, 8, mtp=True))
+    if family == "linear":
+        four = stream_geometry(small_config(), world, 4, 8, first=256 if world == 1 else None)
+    else:                                                 # Flash Next: a round's and the graph slot's copy rows
+        from tensorfold.families.qwen4_exp.cuda import COPY_ROWS
+        four = indexed_stream_geometry(small_config(), 5, 4, 8, mtp=True, rows=max(16, COPY_ROWS) + COPY_ROWS,
+                                       scratch=COPY_ROWS)
     budget = four.needed(12000) + 32768                   # the streams fit 12,000 tokens, not 60,000
     monkeypatch.setattr(capacity, "available_bytes", lambda t: budget)
     _, go = start(family, tmp_path, 60000, True, world, 4)
@@ -130,8 +134,10 @@ def test_flash_parallel_decoder_allocations_are_budgeted(monkeypatch, allocation
     assert bytes_in(first) == streams * 3 * 2 * multi.FIRST * cfg.kv_heads * kv_bytes(cfg.head_dim, bits)
     # one stream grown to the window beside the others' first rows
     used = bytes_in(arrays) - one.cache_bytes(multi.FIRST) + one.cache_bytes(slots) + (min(keep, streams) + 1) * snapshot
+    copy = multi.COPY_ROWS                                # a round's copy rows, and the graph slot's
     estimated = indexed_stream_geometry(text, streams + int(graphs), depth + 1, keep, mtp=True, kv_bits=bits,
-                                        prefill_rows=prefill_rows).bytes_at(slots)
+                                        prefill_rows=prefill_rows, scratch=max(depth + 1, copy),
+                                        rows=max(streams * (depth + 1), copy) + int(graphs) * copy).bytes_at(slots)
     assert used <= estimated
 
 
