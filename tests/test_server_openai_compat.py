@@ -4,6 +4,8 @@ import threading
 from http.server import ThreadingHTTPServer
 from typing import Any
 
+import pytest
+
 from tensorfold.server.http import make_handler
 
 
@@ -26,10 +28,12 @@ class FakeApp:
         fail_stream: bool = False,
         content: str = "Hello",
         reasoning: str = "",
+        cached: int = 0,
     ) -> None:
         self.fail_stream = fail_stream
         self.content = content
         self.reasoning = reasoning
+        self.cached = cached
         self.tokenizer = FakeTokenizer()
         self.tokenizer_lock = threading.Lock()
         self.messages: list[dict[str, Any]] | None = None
@@ -57,7 +61,7 @@ class FakeApp:
             "content": self.content,
             "finish_reason": "stop",
             "prompt_tokens": 3,
-            "cached_tokens": 0,
+            "cached_tokens": self.cached,
             "completion_tokens": 2,
             "runtime": {"tokens_per_second": 42.0},
         }
@@ -295,3 +299,60 @@ def test_chat_completions_streams_tool_call_deltas() -> None:
     assert '"finish_reason": "tool_calls"' in body
     assert "<tool_call>" not in body
     assert "data: [DONE]" in body
+
+
+@pytest.mark.parametrize("chat", [False, True])
+def test_include_usage_moves_usage_into_its_own_chunk_before_done(chat: bool) -> None:
+    """litellm reads usage only from the spec's chunk: no choices, the reply's id and model, after the finish chunk."""
+
+    server = serve_fake(FakeApp(cached=7))
+    prompt = {"messages": [{"role": "user", "content": "Hi"}]} if chat else {"prompt": "Hi"}
+    try:
+        status, body = post_json(
+            server,
+            "/v1/chat/completions" if chat else "/v1/completions",
+            {**prompt, "model": "fake-model", "stream": True, "max_tokens": 8,
+             "stream_options": {"include_usage": True}},
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert status == 200
+    lines = [line for line in body.splitlines() if line.startswith("data:")]
+    chunks = [json.loads(line[5:]) for line in lines if line != "data: [DONE]"]
+    assert lines[-1] == "data: [DONE]" and lines.count("data: [DONE]") == 1
+    usage_chunk, end = chunks[-1], [c for c in chunks if c["choices"]][-1]
+    assert chunks.index(end) == len(chunks) - 2 and "usage" not in end
+    assert end["choices"][0]["finish_reason"] == "stop" and "exact_mode" in end
+    assert usage_chunk["choices"] == [] and usage_chunk["object"] == end["object"]
+    assert all(usage_chunk[key] == end[key] for key in ("id", "created", "model"))
+    assert usage_chunk["usage"] == {
+        "prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5,
+        "prompt_tokens_details": {"cached_tokens": 7},
+        "completion_tokens_details": {"reasoning_tokens": 0},
+    }
+
+
+@pytest.mark.parametrize("chat", [False, True])
+def test_stream_without_include_usage_keeps_usage_on_the_finish_chunk(chat: bool) -> None:
+    """The clients that never send stream_options keep counting tokens from the finish chunk, as they always did."""
+
+    server = serve_fake(FakeApp(cached=7))
+    prompt = {"messages": [{"role": "user", "content": "Hi"}]} if chat else {"prompt": "Hi"}
+    try:
+        status, body = post_json(
+            server,
+            "/v1/chat/completions" if chat else "/v1/completions",
+            {**prompt, "model": "fake-model", "stream": True, "max_tokens": 8},
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert status == 200
+    chunks = [json.loads(line[5:]) for line in body.splitlines()
+              if line.startswith("data:") and line != "data: [DONE]"]
+    assert all(c["choices"] for c in chunks)
+    assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
+    assert chunks[-1]["usage"]["prompt_tokens_details"]["cached_tokens"] == 7

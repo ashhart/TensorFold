@@ -1,5 +1,4 @@
-"""Key GPU Gumbel draws by seed, absolute position, and token id so verified drafts match serial sampling with the
-same fp32 rule (top_k, top_p, then min_p)."""
+"""Key GPU Gumbel draws by seed, position and token id so drafts match serial sampling on the same fp32 rule."""
 
 from __future__ import annotations
 

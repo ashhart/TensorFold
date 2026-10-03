@@ -2,7 +2,7 @@ name: Native macOS bootstrap
 
 on:
   push:
-    branches: [feat/zig]
+    branches: [zig/review-sync, zig/native]
   pull_request:
   workflow_dispatch:
 

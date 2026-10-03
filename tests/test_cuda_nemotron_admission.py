@@ -151,6 +151,32 @@ def test_nemotron_geometry_bounds_the_engine_twin_head_and_snapshots(monkeypatch
                                                   draft=0).bytes_at(length - 16)
 
 
+@pytest.mark.parametrize("world", [1, 2])
+@pytest.mark.parametrize("drafts", [False, True])
+def test_long_window_budgets_serial_cache_and_snapshot_state(world: int, drafts: bool) -> None:
+    """Bound persistent cache allocations, including the lazy serial engine."""
+
+    from tensorfold.cuda.geometry import hybrid_geometry
+
+    text = CONFIG | {"vocab_size": 1024}
+    length, rows = 262144, 16
+    kv = text["num_key_value_heads"] // world
+    heads = text["mamba_num_heads"] // world
+    conv_dim = heads * text["mamba_head_dim"] + 2 * (text["n_groups"] // world) * text["ssm_state_size"]
+    # Engine.STATE includes ssm, conv_base and the raw/xc/dt rollback rows; snapshot() clones all of them.
+    state = text["layers_block_type"].count("mamba") * (
+        heads * text["mamba_head_dim"] * text["ssm_state_size"] * 4
+        + (text["conv_kernel"] - 1) * conv_dim * 2
+        + 2 * rows * (2 * conv_dim * 2 + heads * 4)
+    )
+    one_kv = 2 * length * kv * text["head_dim"] * 2
+    # Live engine + serial twin + three snapshots; MTP has no serial twin.
+    persistent = 5 * (state + text["layers_block_type"].count("attention") * one_kv)
+    persistent += 4 * one_kv if drafts else 0
+    estimate = hybrid_geometry(text, world, rows, rows=rows, chunk=512, drafts=drafts, draft=0)
+    assert estimate.bytes_at(length - rows) >= persistent
+
+
 def test_nemotron_weights_split_by_rank_and_keep_the_mtp_head_whole():
     from tensorfold.cuda.geometry import hybrid_weights
     one, two = hybrid_weights(1), hybrid_weights(2)
@@ -209,3 +235,25 @@ def test_two_ranks_with_the_same_draft_ids_in_another_order_refuse_to_start(fake
     with pytest.raises(RuntimeError, match="different settings"):
         settings(first, theirs)
     settings(first, settings(first))                          # the same list in the same order starts
+
+
+@pytest.mark.torch
+def test_two_ranks_with_different_prompt_precision_refuse_to_start(fake_runtime):  # noqa: F811
+    import torch
+    from tensorfold.cuda import prompt_precision
+    from tensorfold.families.nemotron_h.cuda.app import NemotronEngine
+
+    def settings(peer=None):
+        sent = []
+
+        def gather(mine, both):
+            sent.append(mine.clone())
+            both.copy_(torch.cat([mine, peer if peer is not None else mine]))
+        obj = SimpleNamespace(drafts=3, confidence=0.2, max_len=1024, comm=SimpleNamespace(all_gather=gather))
+        NemotronEngine._same_settings(obj, torch, [1, 2, 3])
+        return sent[0]
+
+    with prompt_precision.using(True):                        # rank 1 started with --prefill-fp8
+        theirs = settings()
+    with prompt_precision.using(False), pytest.raises(RuntimeError, match="prompt precision.*--prefill-fp8"):
+        settings(theirs)

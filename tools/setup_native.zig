@@ -83,7 +83,7 @@ fn prerequisites(init: std.process.Init, options: Options) !void {
     if (!std.mem.eql(u8, expected, builtin.zig_version_string) or
         !std.mem.eql(u8, expected, try output(init, &.{ ".zig-toolchain/zig", "version" })))
     {
-        std.debug.print("Use the exact nightly in .zig-version: bash scripts/fetch-zig.sh\n", .{});
+        std.debug.print("Use the stable release in .zig-version: bash scripts/fetch-zig.sh\n", .{});
         return error.ZigVersionMismatch;
     }
     if (!atLeast(try output(init, &.{ "sw_vers", "-productVersion" }), 26, 2)) return error.MacOS26_2Required;

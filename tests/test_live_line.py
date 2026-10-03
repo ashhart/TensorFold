@@ -5,7 +5,7 @@ import sys
 from types import SimpleNamespace
 
 from tensorfold.server import live
-from tensorfold.server.live import CLEAR, ChunkRate, LiveLine, Meter, status
+from tensorfold.server.live import CLEAR, ChunkRate, LiveLine, Meter, snapshot, status
 
 from tests.test_lane_server import make_app
 
@@ -43,12 +43,14 @@ def test_status_counts_running_prefilling_and_waiting_requests():
     decoded, prefilled = Meter(clock=clock), ChunkRate(clock=clock)
     decoded.add(284)
     prefilled.add(2420, 2.0)
-    sched = SimpleNamespace(active=2, filling=object(), waiting=1, decoded=decoded,
+    sched = SimpleNamespace(active=2, filling=[object(), object()], waiting=1, decoded=decoded,
                             prefilled=prefilled)
-    assert status(sched) == "[tensorfold] 4 connections (1 waiting) · decode 142 tok/s · prefill 1,210 tok/s"
-    idle = SimpleNamespace(active=1, filling=None, waiting=0, decoded=Meter(),
+    assert status(sched) == "[tensorfold] 5 connections (1 waiting) · decode 142 tok/s · prefill 1,210 tok/s"
+    idle = SimpleNamespace(active=1, filling=[], waiting=0, decoded=Meter(),
                            prefilled=ChunkRate())
     assert status(idle) == "[tensorfold] 1 connection · decode 0 tok/s · prefill 0 tok/s"
+    assert snapshot(sched) == {"connections": 5, "waiting": 1, "decode_tokens_per_second": 142.0,
+                               "prefill_tokens_per_second": 1210.0}
 
 
 def test_a_log_line_clears_the_live_line_and_a_partial_line_is_never_split():

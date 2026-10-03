@@ -2,9 +2,9 @@
   "python": {
     "mlx": "0.32.3",
     "mlx-metal": "0.32.3",
-    "mlx-lm": "0.31.3",
+    "mlx-lm": "0.32.0",
     "mlx-vlm": "0.7.4",
-    "transformers": "5.17.0",
+    "transformers": "5.18.0",
     "Pillow": "12.3.0"
   },
   "vision_legacy_pixel_limits": false,

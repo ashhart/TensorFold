@@ -1,5 +1,4 @@
-"""A reply that must call a tool opens a call to an offered tool, and a thinking budget closes the think block; each cut
-lands the same way in every kind of round."""
+"""A forced tool call opens a call; a thinking budget closes the think block, alike in every round kind."""
 
 from __future__ import annotations
 

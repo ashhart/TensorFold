@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from tensorfold.server.errors import RequestError
+from tensorfold.server.request_body import read_body
 from tensorfold.server.responses_translate import Reply, _id, messages, translate
 
 LIMIT = 32 * 1024**2
@@ -111,6 +112,8 @@ def _send(handler: Any, status: int, payload: dict[str, Any]) -> None:
         handler.send_response(status)
         handler.send_header("Content-Type", "application/json")
         handler.send_header("Content-Length", str(len(data)))
+        if handler.close_connection:                 # so a pooling client does not reuse the socket
+            handler.send_header("Connection", "close")
         handler.end_headers()
         handler.wfile.write(data)
     except OSError:                                  # the client has gone
@@ -173,28 +176,23 @@ def _run_chat(handler: Any, body: dict[str, Any], wire: Wire) -> None:
     inner.do_POST()
 
 
-def served(app: Any) -> str:
-    return str(getattr(app, "served_name", None) or getattr(app, "served", "") or "")
-
-
 def post(handler: Any, app: Any) -> None:
     """POST /v1/responses."""
 
+    from tensorfold.server.http import reply_model     # http imports this module
+
     store = store_for(app)
     try:
-        length = int(handler.headers.get("Content-Length") or 0)
-        if not 0 <= length <= LIMIT:
-            handler.close_connection = True           # the unread body must not reach the next request
-            raise RequestError("request body exceeds the 32 MiB limit")
+        data = read_body(handler, limit=LIMIT)
         try:
-            body = json.loads(handler.rfile.read(length) or b"{}")
+            body = json.loads(data or b"{}")
         except (ValueError, UnicodeDecodeError):
             raise RequestError("the request body is not JSON") from None
         request = translate(body, store)
     except (RequestError, ValueError) as exc:
         return _refuse(handler, str(exc))
     base = {"id": _id("resp"), "object": "response", "created_at": int(time.time()), "status": "in_progress",
-            "error": None, "incomplete_details": None, "model": served(app), "output": [], "usage": None,
+            "error": None, "incomplete_details": None, "model": reply_model(app, body), "output": [], "usage": None,
             **request.echo}
 
     def send(event: dict[str, Any]) -> None:

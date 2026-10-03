@@ -7,8 +7,8 @@ drafts with the checkpoint's own MTP layer.
 ## Checkpoint
 
 ```bash
-tensorfold pull Vontra/Qwen3.6-35B-A3B-MLX-4bit-MTP
-tensorfold serve Vontra/Qwen3.6-35B-A3B-MLX-4bit-MTP --name bench
+tensorfold pull TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP
+tensorfold serve TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP --name bench
 ```
 
 Tested revision: `81169a9bc511a27c1b4eedb77a2cd98ced431847` (20.9 GB). Its weights are
@@ -22,6 +22,10 @@ DeltaNet 63 MB a stream.
 `--no-drafts` or request field `"draft": false` selects serial decoding, the reference drafted output equals.
 
 ## CUDA execution
+
+CUDA reads this model's MLX 4-bit checkpoint only; NVFP4 and EXL3 exports of it are not read yet. Prompts take bf16
+activations by default: 0.90-0.96x the FP8 prompt path from 2k to 128k, and 1.23-1.89x vLLM on NVIDIA's NVFP4 export
+from 2k to 64k. `--prefill-fp8` restores the FP8 path ([prompt precision](cuda.md#prompt-precision)).
 
 Verify windows run the 27B's shared kernels (4-bit matmul, DeltaNet tree and replay, tree attention) with
 routed experts from `tensorfold/cuda/experts.py`: the router's top 8 of 256 by fp32 logit (ties to the lower
@@ -41,7 +45,7 @@ extending a conversation resumes there with a fresh prefill's bits.
 ### Concurrent requests
 
 ```bash
-tensorfold serve Vontra/Qwen3.6-35B-A3B-MLX-4bit-MTP --parallel 8 --name bench
+tensorfold serve TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP --parallel 8 --name bench
 ```
 
 `--parallel N` decodes up to N requests in shared rounds, and every reply equals the same request served alone

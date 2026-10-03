@@ -1,7 +1,7 @@
 # Native Zig contributor instructions
 
 - Run commands from the repository root. Follow `native/README.md` for setup.
-  Use `.zig-toolchain/zig` and the exact nightly in `.zig-version`.
+  Use `.zig-toolchain/zig` and the stable release in `.zig-version`.
 - Inspect `git status` and preserve other work. Prefer the codebase graph for
   discovery when available.
 - Bootstrap with `bash scripts/fetch-zig.sh`, then
@@ -23,9 +23,21 @@
   `native/dependencies.json` and upstream requirements. Do not change one side
   to make a mismatch pass. Setup and sync share the dependency build recipe in
   `tools/sync_upstream.zig`.
-- Sync upstream only on request. It can rebase, resolve dependencies, run large
-  tests and push fork main. Do not schedule it or use it as a setup shortcut.
-  Use SSH Git remotes.
+- Sync main into Zig only on request, on a clean PR branch based on the latest
+  TensorFold `zig`. It prepares an uncommitted merge, aligns dependencies and
+  runs large tests; it never rebases or pushes. Review and submit changes through
+  a PR against `ashhart/TensorFold:zig`, using a GitHub noreply commit address.
+  Do not schedule sync or use it as a setup shortcut. Use SSH Git remotes.
+- After every upstream merge or rebase, including manual branch syncs, handle
+  native drift before committing or pushing. Verify dependency pins, regenerate
+  with `.venv/bin/python tools/export_native_kernels.py`, and review the diff.
+  Update native callers and fixtures when kernel inputs, templates or layouts
+  change; regeneration alone does not establish runtime parity. Review source
+  changes and feature bindings before `record-upstream-coverage`; never refresh
+  hashes merely to silence a failure. Run the affected Metal oracles, setup
+  checks and every verification step in `.github/workflows/native-macos.yml`
+  through Latch. Resolve failures without disabling checks, then inspect the
+  resulting GitHub CI run after the authorized push and address any failures.
 - Preserve upstream arithmetic, dtype, layout, sampling positions and cache
   commit/rollback semantics. Compare intermediate arrays when output diverges;
   do not widen tolerances to conceal numerical drift.

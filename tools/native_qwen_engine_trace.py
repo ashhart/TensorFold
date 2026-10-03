@@ -11,6 +11,7 @@ import mlx.core as mx
 import numpy as np
 
 from tensorfold.engine.exact_sampling import Sampling
+from tensorfold.engine.family_common import cache_contents
 from tensorfold.engine.lane_engine import LaneEngine, LaneStream
 from tensorfold.families import qwen3_5
 
@@ -49,13 +50,9 @@ def main():
             if hasattr(a, "keys") and a.keys is None:
                 assert b.keys is None and a.values is None and b.values is None
                 continue
-            assert len(a.state) == len(b.state)
-            for part, (x, y) in enumerate(zip(a.state, b.state)):
-                if x is None or y is None:
-                    assert x is None and y is None, (label, index, part)
-                    continue
-                if hasattr(a, "keys"):
-                    x, y = x[:, :, :a.offset], y[:, :, :b.offset]
+            left, right = cache_contents(a), cache_contents(b)
+            assert len(left) == len(right)
+            for part, (x, y) in enumerate(zip(left, right)):
                 equal(f"{label}-layer{index}-part{part}", x, y)
 
     def compare(kind, cache, reference_call, engine_call):

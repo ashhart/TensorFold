@@ -217,8 +217,7 @@ class TPEngine(Engine):
         self._sample_shards(logits, self._meta_at(self.pos - 1), self.p_sampled)
 
     def _sample_shards(self, logits, meta, out) -> None:
-        """The draw one rank makes over the whole vocabulary, from each rank's shard of ``logits``: its top_k +
-        MARGIN best (the union holds the vocabulary's), or with top_k off its whole shard for the nucleus."""
+        """The vocabulary-wide draw from a rank's shard: top_k + MARGIN best, or the whole shard."""
 
         s = self.params.sampling
         rows = logits.shape[0]

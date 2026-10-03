@@ -7,6 +7,8 @@ from pathlib import Path
 
 import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from tensorfold.engine.family_common import cache_contents
 
 
 def deepseek_fixture(directory, output, wide=False, packed=False, prefill=False):
@@ -308,7 +310,7 @@ def dflash_fixture(directory, output, case):
             h = post(h, _dflash_attend(layer.self_attn, pre(h), context, model.rope, item, {}))
         save(f"hidden-{step}", model.norm(h[:, 1:]))
         for i, item in enumerate(cache):
-            keys, values = item.state
+            keys, values = cache_contents(item)
             save(f"keys-{step}-{i}", keys)
             save(f"values-{step}-{i}", values)
     (directory / "fixtures").mkdir(exist_ok=True)
@@ -343,8 +345,9 @@ def gemma_dflash_fixture(directory, draft_dir, output):
         proposal = proposer.propose(_Context(position + 1, 42), budget)
         save(f"proposal-{step}", mx.array([42] + proposal))
         for i, item in enumerate(proposer.cache):
-            save(f"keys-{step}-{i}", item.state[0])
-            save(f"values-{step}-{i}", item.state[1])
+            keys, values = cache_contents(item)
+            save(f"keys-{step}-{i}", keys)
+            save(f"values-{step}-{i}", values)
     print("Saved full Gemma target taps and DFlash proposals", flush=True)
 
 
@@ -488,7 +491,7 @@ def nemotron_prefill_fixture(directory, output, simd=False):
         for i, layer in enumerate(model.layers):
             if layer.block_type not in "M*":
                 continue
-            state = cache[index].state
+            state = cache_contents(cache[index])
             for j, value in enumerate(state):
                 save(f"cache-{step}-{i}-{j}", value)
             index += 1
@@ -513,7 +516,7 @@ def gemma_prefill_fixture(directory, output):
         save(f"logits-{step}", model.head(hidden[:, -1:])[0])
         position += count
         for i, item in enumerate(cache):
-            keys, values = item.state
+            keys, values = cache_contents(item)
             if not item.ring:
                 keys, values = keys[:, :, :position], values[:, :, :position]
             save(f"keys-{step}-{i}", keys)
@@ -1028,7 +1031,7 @@ def flash_checkpoint_fixture(output):
                     path.unlink()
                 raw = {"language_model.model.norm.weight": mx.array([1, 2, 3, 4], mx.bfloat16),
                        root + "layer_multipliers": mx.arange(16, dtype=mx.int64) + (1 << 60),
-                       root + "ngram_embedding.weight_scale": mx.ones((2,), mx.bfloat16),
+                       root + "ngram_embedding.weight_scale": mx.ones((1,), mx.bfloat16),
                        "visual.weight": mx.array([999]),
                        "language_model.other.mtp.weight": mx.array([888]),
                        prefix + "fc_hidden.weight": mx.array([[3, 4], [5, 6]], mx.bfloat16)}
@@ -1095,7 +1098,7 @@ def flash_checkpoint_fixture(output):
             table.close()
             raise AssertionError(f"upstream accepted {case} PLE tensors")
         cases.append(dict(name=folder.name, indexed=False, ple_error=case))
-    for name, value in (("zero-scale", 0.), ("nan-scale", float("nan")), ("inf-scale", float("inf"))):
+    for name, value in (("two-identity-scales", 1.), ("zero-scale", 0.), ("nan-scale", float("nan")), ("inf-scale", float("inf"))):
         folder = output / name
         folder.mkdir(exist_ok=True)
         raw = {root + "ngram_embedding.weight_scale": mx.array([1., value], mx.float32)}
@@ -1104,7 +1107,7 @@ def flash_checkpoint_fixture(output):
         except ValueError:
             pass
         else:
-            raise AssertionError("upstream accepted a non-identity PLE scale")
+            raise AssertionError("upstream accepted a non-scalar PLE scale")
         mx.save_safetensors(str(folder / "model.safetensors"), raw)
         cases.append(dict(name=name, indexed=False, scale_error=True))
     (output / "cases.json").write_text(json.dumps(cases))

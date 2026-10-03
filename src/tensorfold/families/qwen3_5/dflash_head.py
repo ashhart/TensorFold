@@ -107,6 +107,9 @@ class DFlashHead:
         self.chains = bool(chains)
         self.calibration = dict(calibration or {})     # "greedy" / "sampled" -> drafters.calibration.Calibration
         self.log_path = os.environ.get("TF_DRAFT_LOG", "")
+        # DFlash (v1) has no candidate selector, so no lattice: chains of each position's own argmax (``block_chain``)
+        model = getattr(drafter, "model", None)
+        self.v1 = model is not None and not hasattr(model, "candidate_selector")
 
     def slot(self) -> DraftSlot:
         return DraftSlot(self.drafter, self.chains)
@@ -151,6 +154,10 @@ class DFlashHead:
 
         proposer = cache[-1].get(sampling)
         context = _Context(int(position), cache[-1].anchor)
+        if self.v1:
+            cache[-1].chances = None
+            tokens = proposer.propose(context, min(int(nodes), self.nodes))
+            return as_drafts((tokens, list(range(-1, len(tokens) - 1))), nodes)
         tree = proposer._finish_tree(context, proposer._start_tree(context, self.nodes))
         return self._drafts(cache[-1], tree, position, sampling, nodes)
 
@@ -182,6 +189,11 @@ class DFlashHead:
 
         from tensorfold.drafters.dflash_batch import start_trees
 
+        if self.v1:                                  # no lattice to share: each stream's chain on its own
+            for cache, follow, kept, sampling in zip(caches, follows, rows, samplings):
+                self.read(cache, kept, follow, sampling)
+            return [self.tree(cache, position, sampling, depth)
+                    for cache, position, sampling, depth in zip(caches, positions, samplings, depths)]
         items = []
         nodes = max(1, min(self.nodes, max(depths, default=self.nodes)))     # the widest budget sets every block
         for cache, follow, kept, position, sampling in zip(caches, follows, rows, positions, samplings):

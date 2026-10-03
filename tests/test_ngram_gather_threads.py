@@ -80,3 +80,13 @@ def test_a_dropped_tables_gather_threads_end(tmp_path):
     for t in started:
         t.join(timeout=10)
     assert not any(t.is_alive() for t in started)
+
+
+def test_every_mapping_a_gather_reads_is_advised_random(tmp_path, monkeypatch):
+    advised = []
+    monkeypatch.setattr(host_table, "_random_access", advised.append)
+    files, rows = _checkpoint(tmp_path)
+    host = HostTable(files)
+    assert host.files and all(any(view is a for a in advised) for view in host.files)
+    ids = np.arange(ROWS) % host.rows
+    _same(host.gather(ids), _want(rows, ids))

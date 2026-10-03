@@ -12,12 +12,29 @@ MEMORY_FRACTION = 0.70
 LIMIT_ENV = "TENSORFOLD_MEMORY_LIMIT_GB"
 # the process's memory outside MLX's buffers and Metal's late returns
 PROCESS_BYTES = 3 * GIB
-# a startup probe's peak moves run to run (streamed experts: how far MLX encodes ahead of each layer's SSD reads), so
-# the worst of PROBE_REPEATS sizes the prompt chunk and the window: the same flags then give the same window each start
+# probe peaks move run to run, so the worst of PROBE_REPEATS sizes the chunk and window
 PROBE_REPEATS = 3
 
 
 def physical_memory_bytes() -> int:
+    """Total physical RAM: sysconf everywhere but Windows, where GlobalMemoryStatusEx answers (it refuses to guess)."""
+
+    if os.name == "nt":
+        import ctypes
+
+        class MemoryStatusEx(ctypes.Structure):
+            _fields_ = [("dwLength", ctypes.c_uint32), ("dwMemoryLoad", ctypes.c_uint32),
+                       ("ullTotalPhys", ctypes.c_uint64), ("ullAvailPhys", ctypes.c_uint64),
+                       ("ullTotalPageFile", ctypes.c_uint64), ("ullAvailPageFile", ctypes.c_uint64),
+                       ("ullTotalVirtual", ctypes.c_uint64), ("ullAvailVirtual", ctypes.c_uint64),
+                       ("ullAvailExtendedVirtual", ctypes.c_uint64)]
+
+        api = ctypes.WinDLL("kernel32", use_last_error=True).GlobalMemoryStatusEx
+        status = MemoryStatusEx()
+        status.dwLength = ctypes.sizeof(status)
+        if not api(ctypes.byref(status)) or not status.ullTotalPhys:
+            raise RuntimeError("GlobalMemoryStatusEx refused to size RAM on this Windows host")
+        return int(status.ullTotalPhys)
     return int(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"))
 
 
@@ -163,8 +180,7 @@ class CacheMemory:
             spare = _array_bytes(getattr(item, "spare_keys", None))
             spare += _array_bytes(getattr(item, "spare_values", None))
             extra = max(0, held - main - spare)
-            valid = max(1, min(positions, int(getattr(item, "offset", positions))))
-            auxiliary = -(-extra // valid)
+            auxiliary = -(-extra // positions)    # index keys and pooled blocks fill whole capacity steps
             capacity = int(getattr(item, "max_size", 0) or 0)
             if capacity:
                 fixed += max(held, (each + auxiliary) * capacity)

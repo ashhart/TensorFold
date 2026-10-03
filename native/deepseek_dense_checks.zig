@@ -55,7 +55,7 @@ pub fn check(io: std.Io, dir: []const u8) !void {
                     defer for (members[0..initialized]) |*member| member.deinit();
                     var offset: i32 = 0;
                     for (case.members) |width| {
-                        members[initialized] = try Linear.initFormat(&s, try s.slice(p.weights[0], 0, offset, offset + width), try s.slice(p.weights[1], 0, offset, offset + width), try s.slice(p.weights[2], 0, offset, offset + width), .{ .bits = p.bits });
+                        members[initialized] = try Linear.initFormat(&s, try s.slice(p.weights[0], 0, offset, offset + width), try s.slice(p.weights[1], 0, offset, offset + width), try s.slice(p.weights[2], 0, offset, offset + width), .{ .bits = p.bits, .group_size = p.group });
                         initialized += 1;
                         offset += width;
                     }

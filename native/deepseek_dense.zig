@@ -12,7 +12,7 @@ pub const Projection = struct {
 
     pub fn validate(p: Projection) !void {
         if (p.bits != 4 and p.bits != 5 and p.bits != 6 and p.bits != 8) return error.UnsupportedQuantization;
-        if (p.group != 64 and (p.bits != 4 or p.group != 32)) return error.UnsupportedQuantization;
+        if (p.group != 64 and p.group != (if (p.bits == 4) @as(i32, 32) else 128)) return error.UnsupportedQuantization;
         if (p.reduction) |split| if (split != 8 and split != 16 and split != 32) return error.InvalidReduction;
         const g = try (@import("quantization.zig").Spec{ .bits = p.bits, .group_size = p.group }).shape(mx.shape(p.weights[0]), mx.shape(p.weights[1]), mx.shape(p.weights[2]));
         if (@mod(g.n, 8) != 0 or @mod(g.k, 64) != 0) return error.UnsupportedProjectionGeometry;
@@ -64,7 +64,7 @@ fn splits(n: i32) i32 {
 fn scalarBlock(rows: i32, split: i32, group: i32) i32 {
     if (rows < 1 or rows > 4) return 0;
     const xb = if (rows == 1) 32 else @max(split, 16);
-    return if (@mod(xb, split) == 0 and rows * xb * @as(i32, if (group == 64) 76 else 44) * 4 <= 20480) xb else 0;
+    return if (@mod(xb, split) == 0 and rows * xb * @as(i32, if (group == 32) 44 else 76) * 4 <= 20480) xb else 0;
 }
 
 pub fn launch(kernels: *mx.Kernels, s: *mx.Scope, x: A, p: Projection, scalar: bool, max_groups: i32) !A {
@@ -80,13 +80,13 @@ pub fn launch(kernels: *mx.Kernels, s: *mx.Scope, x: A, p: Projection, scalar: b
         const nr: i32 = if (bits != 8 and n > 2048) 2 else 1;
         const sgs = if (n > 2048) @max(1, @divTrunc(16, @divExact(32, split) * nr)) else 8;
         const per = sgs * @divExact(32, split) * nr;
-        return (try kernels.run(s, if (bits == 4) src.simd_qmm_scalar else src.simd_qmm_bits_scalar, &inputs, &.{ ti("K", k), ti("N", n), ti("S", split), ti("SGS", sgs), ti("NR", nr), ti("XB", xb), ti(if (bits == 4) "GS" else "B", if (bits == 4) group else bits), ti("RS", rows) }, .{ @divTrunc(n + per - 1, per) * sgs * 32, 1, 1 }, .{ sgs * 32, 1, 1 }, &.{.{ .shape = &.{ rows, n } }}))[0];
+        return (try kernels.run(s, if (bits == 4) src.simd_qmm_scalar else src.simd_qmm_bits_scalar, &inputs, &.{ ti("K", k), ti("N", n), ti("S", split), ti("SGS", sgs), ti("NR", nr), ti("XB", xb), ti("GS", group), ti("B", bits), ti("RS", rows) }, .{ @divTrunc(n + per - 1, per) * sgs * 32, 1, 1 }, .{ sgs * 32, 1, 1 }, &.{.{ .shape = &.{ rows, n } }}))[0];
     }
     const rt = @min(2, @divTrunc(rows + 7, 8));
     var nt: i32 = if (@mod(n, 32) == 0) 4 else if (@mod(n, 16) == 0) 2 else 1;
     while (nt > 1 and split * rt * nt * 64 * 4 > 16384) nt = @divExact(nt, 2);
     const sgs = @min(split, max_groups);
-    return (try kernels.run(s, if (bits == 4) src.simd_qmm_mma else src.simd_qmm_bits_mma, &inputs, &.{ ti("K", k), ti("N", n), ti("S", split), ti("SGS", sgs), ti("NT", nt), ti("RT", rt), ti(if (bits == 4) "GS" else "B", if (bits == 4) group else bits) }, .{ @divTrunc(n + 8 * nt - 1, 8 * nt) * sgs * 32, @divTrunc(rows + 8 * rt - 1, 8 * rt), 1 }, .{ sgs * 32, 1, 1 }, &.{.{ .shape = &.{ rows, n } }}))[0];
+    return (try kernels.run(s, if (bits == 4) src.simd_qmm_mma else src.simd_qmm_bits_mma, &inputs, &.{ ti("K", k), ti("N", n), ti("S", split), ti("SGS", sgs), ti("NT", nt), ti("RT", rt), ti("GS", group), ti("B", bits) }, .{ @divTrunc(n + 8 * nt - 1, 8 * nt) * sgs * 32, @divTrunc(rows + 8 * rt - 1, 8 * rt), 1 }, .{ sgs * 32, 1, 1 }, &.{.{ .shape = &.{ rows, n } }}))[0];
 }
 
 fn calibrate(kernels: *mx.Kernels, p: Projection) !bool {
@@ -122,5 +122,6 @@ test "scalar staging respects upstream shared memory limits" {
     try std.testing.expectEqual(@as(i32, 32), scalarBlock(1, 32, 64));
     try std.testing.expectEqual(@as(i32, 16), scalarBlock(4, 16, 64));
     try std.testing.expectEqual(@as(i32, 0), scalarBlock(3, 32, 64));
+    try std.testing.expectEqual(@as(i32, 0), scalarBlock(3, 32, 128));
     try std.testing.expectEqual(@as(i32, 0), scalarBlock(5, 8, 32));
 }

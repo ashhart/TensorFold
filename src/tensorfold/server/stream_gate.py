@@ -16,8 +16,7 @@ class Plan:
 
 
 class StreamGate:
-    """Reserve each live stream's next ``horizon`` tokens; short, free retained prefixes, then pause the newest, then
-    end it. ``work`` is a shared round's working memory at ``lanes`` streams; a round of fewer needs its share."""
+    """Reserve each stream's next ``horizon`` tokens, free short prefixes, then pause or end a stream."""
 
     def __init__(self, memory: Any, per_token: float, work: int, budget: int, horizon: int = HORIZON,
                  lanes: int = 1) -> None:

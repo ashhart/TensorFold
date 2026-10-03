@@ -11,11 +11,21 @@ import torch
 
 from tensorfold.cuda import experts as grouped
 
-from .exl3_mm import Exl3Experts, words as exl3_words
+from tensorfold.cuda.exl3.experts import Exl3RoutedExperts as Exl3Experts
 from . import latent
 from .qmm import B16, Q4, as_i32, make_b16, make_q4, quantize4, stack_b16, stack_q4
 
 PREFIX = "model.language_model."
+
+
+def bits_of(quant: dict) -> int:
+    """The checkpoint's one bit width; a mixed-bit encode (bits such as "mixed_k34_per_tensor") is refused by name."""
+
+    bits = quant.get("bits", 4)
+    if isinstance(bits, int) or (isinstance(bits, str) and bits.isdigit()):
+        return int(bits)
+    raise ValueError(f"this checkpoint's quantization bits are {bits!r}: GLM-5.3 on CUDA reads one bit width a "
+                     "checkpoint, so mixed-bit EXL3 encodes are not supported yet")
 
 
 @dataclass
@@ -59,6 +69,11 @@ class Config:
     @classmethod
     def read(cls, model_dir: str | Path) -> "Config":
         raw = json.loads((Path(model_dir) / "config.json").read_text())
+        want = raw.get("tensorfold_activation_dtype")
+        if want not in (None, "bfloat16", "float32"):
+            raise ValueError(f"tensorfold_activation_dtype {want!r}: bfloat16 or float32")
+        if want == "float32":
+            raise ValueError("tensorfold_activation_dtype float32 is the Mac engine; the CUDA engine stays bf16")
         t = dict(raw.get("text_config") or raw)
         lin = dict(t.get("linear_attn_config") or {})
         quant = raw.get("quantization") or raw.get("quantization_config") or {}
@@ -87,7 +102,7 @@ class Config:
             index_topk=int(t.get("index_topk", 2048)), kpool=int(t.get("index_kpool", 4)),
             limit=float(t.get("swiglu_limit", 10.0)), kinds=kinds, mlp_kinds=mlp_kinds, eos=eos,
             mtp_layers=int(t.get("num_nextn_predict_layers", 0)), group_size=int(quant.get("group_size", 64)),
-            bits=int(quant.get("bits", 4)), quant=str(quant.get("quant_method") or "mlx").lower(),
+            bits=bits_of(quant), quant=str(quant.get("quant_method") or "mlx").lower(),
         )
 
     @property
@@ -240,8 +255,8 @@ class Weights:
         return total
 
 
-def load(model_dir: str | Path, *, rank: int, device: str = "cuda") -> Weights:
-    """Read one of two ranks from a full checkpoint or rank folder, including MTP and its half of the vocabulary head."""
+def load(model_dir: str | Path, *, rank: int, device: str = "cuda", mtp: bool = True) -> Weights:
+    """One of two ranks from a checkpoint or rank folder, MTP included unless ``mtp`` is False, with its head half."""
 
     from .split import RankReader
 
@@ -319,8 +334,8 @@ def load(model_dir: str | Path, *, rank: int, device: str = "cuda") -> Weights:
     def expert_names(i: int) -> list[str]:
         """Layer ``i``'s expert tensors in the order ``moe`` reads them (none for a dense layer; ``cfg.layers``: MTP)."""
 
-        mtp = i == cfg.layers and cfg.mtp_layers
-        if not mtp and (i >= cfg.layers or cfg.mlp_kinds[i] != "moe"):
+        mtp_layer = i == cfg.layers and cfg.mtp_layers and mtp
+        if not mtp_layer and (i >= cfg.layers or cfg.mlp_kinds[i] != "moe"):
             return []
         p, parts = PREFIX + f"layers.{i}.mlp.", ("trellis", "suh", "svh") if exl3 else ("weight", "scales", "biases")
         names = []
@@ -341,18 +356,19 @@ def load(model_dir: str | Path, *, rank: int, device: str = "cuda") -> Weights:
         return out
 
     def moe_exl3(p: str) -> Exl3Experts:
-        parts = {}
-        for proj in ("gate_proj", "up_proj", "down_proj"):
-            ts, us, vs = [], [], []
-            for e in range(cfg.experts):
-                name = PREFIX + p + f"experts.{e}.{proj}."
-                ts.append(exl3_words(rd.get(name + "trellis")))
-                us.append(rd.get(name + "suh"))
-                vs.append(rd.get(name + "svh"))
-            parts[proj] = (torch.stack(ts).to(dev), torch.stack(us).to(dev), torch.stack(vs).to(dev))
-            del ts, us, vs
-        (gt, sg, vg), (ut, su, vu), (dt, sd, vd) = parts["gate_proj"], parts["up_proj"], parts["down_proj"]
-        return Exl3Experts(gt, ut, dt, sg, su, vg, vu, sd, vd, cfg.experts, int(vg.shape[1]), int(vd.shape[1]))
+        from tensorfold.cuda.exl3 import experts as generic
+        gate = generic.prepare(
+            [(rd.get(PREFIX + p + f"experts.{e}.gate_proj.trellis").to(dev),
+              rd.get(PREFIX + p + f"experts.{e}.gate_proj.suh").to(dev),
+              rd.get(PREFIX + p + f"experts.{e}.gate_proj.svh").to(dev)) for e in range(cfg.experts)],
+            [(rd.get(PREFIX + p + f"experts.{e}.up_proj.trellis").to(dev),
+              rd.get(PREFIX + p + f"experts.{e}.up_proj.suh").to(dev),
+              rd.get(PREFIX + p + f"experts.{e}.up_proj.svh").to(dev)) for e in range(cfg.experts)],
+            [(rd.get(PREFIX + p + f"experts.{e}.down_proj.trellis").to(dev),
+              rd.get(PREFIX + p + f"experts.{e}.down_proj.suh").to(dev),
+              rd.get(PREFIX + p + f"experts.{e}.down_proj.svh").to(dev)) for e in range(cfg.experts)],
+            "mcg", device=dev)
+        return gate
 
     def moe(i: int) -> MoEW:
         p = f"layers.{i}.mlp."
@@ -420,7 +436,7 @@ def load(model_dir: str | Path, *, rank: int, device: str = "cuda") -> Weights:
             head = make_q4(as_i32(hw[rank * vl:(rank + 1) * vl]).to(dev), hs[rank * vl:(rank + 1) * vl].to(dev),
                            hb[rank * vl:(rank + 1) * vl].to(dev))
         mtpw = None
-        if cfg.mtp_layers:
+        if cfg.mtp_layers and mtp:
             i = cfg.layers
             mtpw = MTPW(t(f"layers.{i}.enorm.weight"), t(f"layers.{i}.hnorm.weight"), q4(f"layers.{i}.eh_proj"),
                         t(f"layers.{i}.shared_head.norm.weight"), layer(i, plain=True))

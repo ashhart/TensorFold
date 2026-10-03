@@ -1,6 +1,6 @@
 """Qwen3.8-27B's JSON-schema replies on CUDA: drafted equals serial, concurrent equals solo, and the replies validate.
 
-Needs ``TENSORFOLD_MLX_MODEL=<Vontra/Qwen3.8-27B-MLX-4bit dir>``, ``TENSORFOLD_QWEN27_DRAFTER=<z-lab/Qwen3.8-27B-DFlash2
+Needs ``TENSORFOLD_MLX_MODEL=<TensorFold/Qwen3.8-27B-MLX-4bit dir>``, ``TENSORFOLD_QWEN27_DRAFTER=<z-lab/Qwen3.8-27B-DFlash2
 dir>`` and xgrammar (``pip install 'tensorfold[grammar]'``); skipped otherwise. About 22 GB of GPU memory.
 """
 

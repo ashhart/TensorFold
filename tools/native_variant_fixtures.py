@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from tools.native_runtime import require_mlx
 
 def gemma_quantization_variants(capture):
@@ -527,34 +528,36 @@ def simd_dense_fixtures(directory):
 def simd_bits_fixtures(directory):
     from tensorfold.kernels.qwen.dense.v1 import simd_qmm_bits as sq, affine_rows
     cases = []
-    for bits in sq.BITS:
+    for bits, group in ((bits, group) for bits in sq.BITS for group in (64, 128)):
         for n, k in ((32, 128), (72, 192), (80, 512), (6152, 128), (17408, 5120), (5120, 17408), (5120, 6144), (1024, 5120), (48, 5120)):
+            if k % group:
+                continue
             sq.fallback.clear()
             weight = (mx.random.normal((n, k), key=mx.random.key(7)) * .02).astype(mx.bfloat16)
-            weights = mx.quantize(weight, group_size=64, bits=bits)
-            scalar_ok = sq.check(*weights, bits)
+            weights = mx.quantize(weight, group_size=group, bits=bits)
+            scalar_ok = sq.check(*weights, bits, group)
             x = (mx.random.normal((129, k), key=mx.random.key(99)) * .5).astype(mx.bfloat16)
             arrays = dict(weight=weights[0], scales=weights[1], biases=weights[2], x=x)
             rows = (1, 2, 3, 4, 8, 16, 17, 33, 65, 128, 129)
             for count in rows:
-                arrays[f"out{count}"] = sq.qmm(x[:count], *weights, bits, kind="mma")
-                arrays[f"fallback{count}"] = affine_rows.qmm(x[:count], *weights, 64, bits)
+                arrays[f"out{count}"] = sq.qmm(x[:count], *weights, bits, group, kind="mma")
+                arrays[f"fallback{count}"] = affine_rows.qmm(x[:count], *weights, group, bits)
             key = f"shape{len(cases):03}"
             mx.save_safetensors(str(directory / f"{key}.safetensors"), arrays)
-            cases.append(dict(key=key, group=64, bits=bits, scalar_ok=scalar_ok, rows=rows))
+            cases.append(dict(key=key, group=group, bits=bits, scalar_ok=scalar_ok, rows=rows))
         for sizes, k in (((48, 48), 1024), ((5120, 1024, 1024), 128), ((24, 24, 24, 24), 512)):
             n = sum(sizes)
-            weights = mx.quantize(mx.random.normal((n, k), key=mx.random.key(bits)).astype(mx.bfloat16), group_size=64, bits=bits)
-            scalar_ok = sq.check(*weights, bits)
+            weights = mx.quantize(mx.random.normal((n, k), key=mx.random.key(bits)).astype(mx.bfloat16), group_size=group, bits=bits)
+            scalar_ok = sq.check(*weights, bits, group)
             x = mx.random.normal((17, k), key=mx.random.key(99)).astype(mx.bfloat16)
             arrays = dict(weight=weights[0], scales=weights[1], biases=weights[2], x=x)
             rows = (1, 3, 8, 17)
             for count in rows:
-                arrays[f"out{count}"] = sq.qmm(x[:count], *weights, bits, kind="mma")
-                arrays[f"fallback{count}"] = affine_rows.qmm(x[:count], *weights, 64, bits)
+                arrays[f"out{count}"] = sq.qmm(x[:count], *weights, bits, group, kind="mma")
+                arrays[f"fallback{count}"] = affine_rows.qmm(x[:count], *weights, group, bits)
             key = f"shape{len(cases):03}"
             mx.save_safetensors(str(directory / f"{key}.safetensors"), arrays)
-            cases.append(dict(key=key, group=64, bits=bits, scalar_ok=scalar_ok, rows=rows, members=sizes))
+            cases.append(dict(key=key, group=group, bits=bits, scalar_ok=scalar_ok, rows=rows, members=sizes))
     (directory / "cases.json").write_text(json.dumps(cases, indent=2) + "\n")
     print(f"Saved {len(cases)} calibrated 5/6/8-bit SIMD shapes and affine fallback outputs", flush=True)
 
@@ -599,6 +602,7 @@ def flash_weight_fixtures(directory):
 
 
 def flash_prefill_mm_fixtures(capture):
+    from itertools import product
     import mlx.nn as nn
     from tensorfold.kernels.qwen.flash_next.v1 import prefill_mm as mm
     mm._kernels.clear()
@@ -609,14 +613,14 @@ def flash_prefill_mm_fixtures(capture):
     def record_probe(index, x, w, s, b):
         probes.update({f"probe{index}.{key}": value for key, value in
                        dict(input=x, weight=w, scales=s, biases=b).items()})
-    def record_qmm(x, w, s, b):
+    def record_qmm(x, w, s, b, *, group=32, bits=4):
         nonlocal count
         record_probe(count, x, w, s, b)
         count += 1
-        return original_qmm(x, w, s, b)
+        return original_qmm(x, w, s, b, group=group, bits=bits)
     def record_gather(x, w, s, b, ids, tile):
-        record_probe(2, x, w, s, b)
-        probes["probe2.ids"] = ids
+        record_probe(count, x, w, s, b)
+        probes[f"probe{count}.ids"] = ids
         return original_gather(x, w, s, b, ids, tile)
     mm.qmm, mm.gather_sorted = record_qmm, record_gather
     try:
@@ -634,19 +638,20 @@ def flash_prefill_mm_fixtures(capture):
         mx.save_safetensors(str(capture.directory / f"{name}.safetensors"), tensors)
         cases.append(dict(name=name, mode=mode, bits=bits, group=x.shape[-1] // s.shape[-1],
                           tile=tile, decision=decision))
-    for m, n, k in ((1, 33, 256), (63, 129, 320), (64, 640, 256), (65, 641, 256),
-                    (511, 640, 256), (512, 640, 256), (513, 640, 256),
-                    (128, 8191, 256), (128, 8192, 256), (129, 8193, 256), (2048, 324, 320)):
-        capture.test = f"flash-prefill-qmm-{m}-{n}-{k}"
+    shapes = ((1, 33, 256), (63, 129, 320), (64, 640, 256), (65, 641, 256),
+              (511, 640, 256), (512, 640, 256), (513, 640, 256),
+              (128, 8191, 256), (128, 8192, 256), (129, 8193, 256), (2048, 324, 320))
+    for (m, n, k), (bits, group) in product(shapes, mm.QMM_FORMATS):
+        capture.test = f"flash-prefill-qmm-{bits}-{group}-{m}-{n}-{k}"
         x = mx.random.normal((m, k), key=mx.random.key(m)).astype(mx.bfloat16)
-        w, s, b = mx.quantize(mx.random.normal((n, k), key=mx.random.key(n)).astype(mx.bfloat16), group_size=32, bits=4)
-        save("qmm", x, w, s, b, mm.qmm(x, w, s, b))
+        w, s, b = mx.quantize(mx.random.normal((n, k), key=mx.random.key(n)).astype(mx.bfloat16), group_size=group, bits=bits)
+        save("qmm", x, w, s, b, mm.qmm(x, w, s, b, group=group, bits=bits), bits=bits)
         for decision in (False, True):
             mm._tiles[:] = [decision]
-            save("matmul", x, w, s, b, mm.matmul(x, w, s, b), decision=decision)
-        layer = nn.QuantizedLinear(k, n, bias=False, group_size=32, bits=4)
+            save("matmul", x, w, s, b, mm.matmul(x, w, s, b, group=group, bits=bits), decision=decision, bits=bits)
+        layer = nn.QuantizedLinear(k, n, bias=False, group_size=group, bits=bits)
         layer.update(dict(weight=w, scales=s, biases=b))
-        save("linear", x, w, s, b, mm.linear(layer, x))
+        save("linear", x, w, s, b, mm.linear(layer, x), bits=bits)
     for n in (1, 16):
         x = mx.random.normal((2048, 32), key=mx.random.key(n)).astype(mx.bfloat16)
         layer = nn.QuantizedLinear(32, n, bias=False, group_size=32, bits=4)
@@ -659,10 +664,11 @@ def flash_prefill_mm_fixtures(capture):
             x = mx.random.normal((2, 256, 256), key=mx.random.key(bits)).astype(mx.bfloat16)
             w, s, b = mx.quantize(mx.random.normal((640, 256), key=mx.random.key(group)).astype(mx.bfloat16), group_size=group, bits=bits)
             mm._tiles[:] = [True]
-            y = mm.matmul(x.reshape(-1, 256), w, s, b, group=group, bits=bits).reshape(2, 256, 640)
-            save("linear", x, w, s, b, y, bits=bits)
+            layer = nn.QuantizedLinear(256, 640, bias=False, group_size=group, bits=bits)
+            layer.update(dict(weight=w, scales=s, biases=b))
+            save("linear", x, w, s, b, mm.linear(layer, x), bits=bits)
     for group in (32, 64, 128):
-        for m, experts, n in ((63, 16, 65), (64, 16, 64), (65, 16, 33),
+        for m, experts, n in ((63, 1, 65), (65, 4, 33), (63, 16, 65), (64, 16, 64), (65, 16, 33),
                               (895, 16, 64), (896, 16, 64), (897, 16, 64), (257, 37, 65)):
             k = 256
             capture.test = f"flash-prefill-gather-{group}-{m}-{experts}-{n}"

@@ -21,6 +21,14 @@ def check(dtype: str) -> str:
     return dtype
 
 
+def row_bytes(kv_heads: int, head_dim: int, dtype: str) -> int:
+    """Bytes a position of one layer's keys and values take, their per-row scales included."""
+
+    if dtype == "bf16":
+        return 2 * kv_heads * head_dim * 2
+    return 2 * kv_heads * (head_dim if dtype == "int8" else head_dim // 2) + 2 * kv_heads * (head_dim // GROUP) * 2
+
+
 # -- storage -------------------------------------------------------------------------------------------
 class KVCache:
     """One attention layer's keys and values ``[capacity, kv_heads, head_dim]`` (int4: head_dim / 2 bytes); a bf16 cache keeps one-element scales so every kernel takes one argument list."""
@@ -59,6 +67,16 @@ class KVCache:
     @property
     def nbytes(self) -> int:
         return self.k.nbytes + self.v.nbytes + self.ks.nbytes + self.vs.nbytes
+
+    def resized(self, capacity: int, keep: int) -> "KVCache":
+        """A cache of ``capacity`` rows holding this one's first ``keep`` rows (a bf16 cache's one-element scales too)."""
+
+        other = KVCache(capacity, self.kv_heads, self.head_dim, self.k.device, self.dtype)
+        keep = min(int(keep), self.capacity, int(capacity))
+        other.k[:keep], other.v[:keep] = self.k[:keep], self.v[:keep]
+        if self.quantized:
+            other.ks[:keep], other.vs[:keep] = self.ks[:keep], self.vs[:keep]
+        return other
 
     def clone(self) -> "KVCache":
         other = object.__new__(KVCache)

@@ -16,14 +16,14 @@ from .weights import Weights
 
 
 def clone_state(st: State) -> State:
-    """The committed tensors are immutable; commits replace their list entries."""
+    """Commits replace list entries; the attention list is shared, so a grow reaches every clone and frees the old."""
 
     other = object.__new__(State)
     other.pos, other.limit = st.pos, st.limit
-    other.rope_delta = st.rope_delta
+    other.rope_delta, other.room = st.rope_delta, st.room
     other.conv = st.conv.copy()
     other.rec = st.rec.copy()
-    other.kv = st.kv.copy()
+    other.kv = st.kv
     return other
 
 
@@ -49,7 +49,7 @@ def prefill_stops(w: Weights, prompt: Sequence[int], st: State, draft=None, *, s
 @torch.no_grad()
 def prefill(w: Weights, prompt: Sequence[int], sampling: Sampling | None,
             draft=None, *, state: State | None = None, limit: int = 0, stops: Sequence[int] = (),
-            keep: Callable | None = None, keep_at: int | None = None, vision=None, constraint=None):
+            keep: Callable | None = None, keep_at: int | None = None, vision=None, constraint=None, room=None):
     """Commit the prompt and sample the first token; resuming a kept ``state`` gives a fresh prefill's bits (``keep_at`` adds a third item: the state after prompt[:keep_at] and the drafter's snapshot there)."""
 
     from .forward import _mm
@@ -59,6 +59,8 @@ def prefill(w: Weights, prompt: Sequence[int], sampling: Sampling | None,
     st = clone_state(state) if state is not None else State(w)
     if state is None:
         st.limit = limit                    # a fresh state's attention caches stop here; a resumed one keeps its own
+    if room is not None:
+        st.room = room                      # before a grow, the engine frees other conversations' kept buffers
     if st.pos >= len(prompt):
         raise ValueError("a reused state must leave at least one prompt token to process")
     out = prefill_stops(w, prompt, st, draft, stops=stops, keep=keep, keep_at=keep_at, vision=vision)
@@ -164,6 +166,13 @@ def copy_chain(context: Sequence[int], max_nodes: int = 127,
     return best if len(best) >= min_match else []
 
 
+def next_copy_rows(rows: int, landed_whole: bool, tree_rows: int, max_rows: int) -> int:
+    """A copy's next window: twice as wide after a whole copy, half after a broken one."""
+
+    first = min(max_rows, max(tree_rows, 16))       # room for a backed copy (8 matching tokens) from the start
+    return min(max_rows, max(rows, first) * 2) if landed_whole else max(first, min(rows, max_rows) // 2)
+
+
 @torch.no_grad()
 def _round_record(tokens: list[int], parents: list[int], depths: list[int], path: list[int], terminal: int,
                   stop: str, source: str, draft, spent: dict[str, float]) -> dict:
@@ -195,7 +204,7 @@ def draft_decode(w: Weights, st: State, prompt: Sequence[int], pending: int,
                  allow_copy: bool = True, stop_eos: bool = True,
                  on_tokens: Callable[[list[int]], bool | None] | None = None,
                  trace: list | None = None, inplace: bool = False, constraint=None) -> DecodeResult:
-    """Verify trees and replay matching paths (host-only traces leave tokens unchanged); ``inplace``: commit into ``st`` itself, which nothing else holds."""
+    """Verify trees and replay matching paths; copies grow from ``tree_rows``, doubling while they land whole."""
 
     if count < 1 or not 1 <= max_rows <= 128:
         raise ValueError("count >= 1 and 1 <= max_rows <= 128 required")
@@ -206,6 +215,7 @@ def draft_decode(w: Weights, st: State, prompt: Sequence[int], pending: int,
     out = [pending]
     context = list(prompt) + out
     copies = CopyIndex() if allow_copy else None
+    copy_rows = next_copy_rows(tree_rows, False, tree_rows, max_rows)
     stages = dict(draft=0.0, verify=0.0, sample=0.0, commit=0.0)
     rounds = drafted_rows = accepted_drafts = 0
     widths: list[int] = []
@@ -213,7 +223,7 @@ def draft_decode(w: Weights, st: State, prompt: Sequence[int], pending: int,
     stopped = False
     while len(out) < count and (not stop_eos or out[-1] not in w.config.eos) and not stopped:
         stage = time.perf_counter()
-        copied = copies.propose(context, max_rows - 1) if copies is not None else []
+        copied = copies.propose(context, copy_rows - 1) if copies is not None else []
         if copied:
             guesses = copied
             parents = list(range(-1, len(guesses) - 1))
@@ -277,6 +287,8 @@ def draft_decode(w: Weights, st: State, prompt: Sequence[int], pending: int,
         stages["commit"] += time.perf_counter() - stage
         if trace is not None:
             trace[-1]["commit_ms"] = round(1000 * (time.perf_counter() - stage), 3)
+        if copied:                           # the verified window's rows: a grammar may have dropped some
+            copy_rows = next_copy_rows(copy_rows, len(path) == len(tokens), tree_rows, max_rows)
         rounds += 1
         drafted_rows += len(tokens) - 1
         accepted_drafts += len(path) - 1

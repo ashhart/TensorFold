@@ -6,9 +6,8 @@ from pathlib import Path
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
-from mlx_lm.models.activations import swiglu
+from mlx_lm.models.activations import precise_swiglu, swiglu
 from mlx_lm.models.gated_delta import compute_g
-from mlx_lm.models.qwen3_next import _precise_swiglu
 from mlx_lm.models.gemma4_text import geglu, logit_softcap
 from native_runtime import require_mlx
 from tensorfold.families.deepseek_v4.moe import swiglu as clipped_swiglu
@@ -73,7 +72,7 @@ def main():
         up = mx.full(x.shape, factor, dtype=mx.bfloat16)
         save("swiglu", [x, up], swiglu(x, up))
         save("geglu", [x, up], geglu(x, up))
-        save("gated", [x, up], _precise_swiglu(up, x, up))
+        save("gated", [x, up], precise_swiglu(up, x, up))
         for limit in (3.0, 10.0):
             save("clipped_swiglu", [x, up, mx.array(limit)], mx.compile(lambda gate, value: clipped_swiglu(gate, value, limit))(x, up))
     mx.random.seed(5678)

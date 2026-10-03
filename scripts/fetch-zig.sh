@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stage the same nightly pinned by ../mlx-serve. All artifacts stay in the repo.
+# Reuse the pinned stable compiler or stage its verified release archive.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 version=$(cat .zig-version)
@@ -16,6 +16,12 @@ case "$(uname -s)/$(uname -m)" in
     Darwin/arm64) platform=aarch64-macos ;;
     *) echo "The native Metal build requires Apple Silicon macOS." >&2; exit 1 ;;
 esac
+if system_zig=$(command -v zig) && [[ "$system_zig" == /* && "$("$system_zig" version)" == "$version" ]]; then
+    mkdir -p .zig-toolchain
+    ln -s "$system_zig" .zig-toolchain/zig
+    echo "Using installed Zig $version: $system_zig"
+    exit 0
+fi
 asset="zig-$platform-$version"
 read -r expected_digest expected_path < .zig-archive.sha256
 if [[ "$expected_path" != "build/toolchains/$asset.tar.xz" || ! "$expected_digest" =~ ^[0-9a-f]{64}$ ]]; then
@@ -24,7 +30,7 @@ if [[ "$expected_path" != "build/toolchains/$asset.tar.xz" || ! "$expected_diges
 fi
 mkdir -p build/toolchains
 if [[ ! -f "build/toolchains/$asset.tar.xz" ]]; then
-    curl -fSL --retry 3 "https://ziglang.org/builds/$asset.tar.xz" -o "build/toolchains/$asset.tar.xz.part"
+    curl -fSL --retry 3 "https://ziglang.org/download/$version/$asset.tar.xz" -o "build/toolchains/$asset.tar.xz.part"
     mv "build/toolchains/$asset.tar.xz.part" "build/toolchains/$asset.tar.xz"
 fi
 shasum -a 256 --check .zig-archive.sha256

@@ -84,11 +84,12 @@ def test_admission_counts_an_exl3_pack_as_loaded():
     assert indexed_weights(1, True)("model.visual.merger.fc.weight", {"dtype": "BF16", "shape": [8, 8]}) == (0, 0)
 
 
-def test_extra_files_add_their_mapped_pages(tmp_path):
+@pytest.mark.parametrize("suffix", ["shard_0.trellis", "trellis"])
+def test_extra_files_add_their_mapped_pages(tmp_path, suffix):
     from tensorfold.cuda.capacity import estimate_weights
     from tensorfold.cuda.geometry import indexed_weights
 
-    shard = "model.language_model.layers.0.ple.ple_embedding.ngram_embedding.shard_0.trellis"
+    shard = "model.language_model.layers.0.ple.ple_embedding.ngram_embedding." + suffix
     save_file({shard: np.zeros((100, 51), dtype=np.int16),
                "model.language_model.layers.0.ple.ple_embedding.ngram_embedding.head_bias":
                    np.zeros((16, 160), dtype=np.float16)}, str(tmp_path / "ngram_embedding.safetensors"))

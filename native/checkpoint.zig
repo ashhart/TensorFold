@@ -109,6 +109,7 @@ pub const Store = struct {
             var buf: [512]u8 = undefined;
             const name = if (w.flash_drafts != null) try @import("flash_names.zig").normalize(&buf, raw) else try std.fmt.bufPrint(&buf, "{s}{s}", .{ prefix, raw[strip.len..] });
             if (w.flash_drafts != null and std.mem.endsWith(u8, name, "ngram_embedding.weight_scale")) {
+                if (mx.c.mlx_array_size(value) != 1) return error.UnsupportedPLEScale;
                 var scope = mx.Scope{};
                 defer scope.deinit();
                 const scale = try scope.cast(value, mx.f32t);

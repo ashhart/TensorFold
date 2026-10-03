@@ -1,5 +1,5 @@
 const std = @import("std");
-// Darwin sys/ttycom.h; this Zig nightly exposes only TIOCGWINSZ.
+// Darwin sys/ttycom.h; Zig exposes only TIOCGWINSZ.
 const tiocswinsz: c_int = @bitCast(@as(u32, 0x80087467));
 extern "c" fn openpty(master: *c_int, slave: *c_int, name: ?[*]u8, term: ?*const std.c.termios, size: ?*const std.c.winsize) c_int;
 

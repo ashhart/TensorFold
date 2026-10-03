@@ -126,6 +126,12 @@ def conv_rows(proj, base, xc, conv_w, conv_b, rows: int, *, xd: int) -> None:
     _conv_rows[(triton.cdiv(rows, br), triton.cdiv(cd, bc))](proj, base, xc, conv_w, conv_b, rows,
                                                              PROJ=proj.shape[1], XOFF=xd, CD=cd, BR=br, BC=bc,
                                                              num_warps=4)
+    commit_conv_rows(proj, base, rows, xd=xd)
+
+
+def commit_conv_rows(proj, base, rows: int, *, xd: int) -> None:
+    """Keep a prefix's raw convolution window without replaying its projections."""
+    cd, bc = base.shape[1], 128
     _conv_commit[(triton.cdiv(cd, bc),)](proj, base, rows, PROJ=proj.shape[1], XOFF=xd, CD=cd, BC=bc, num_warps=4)
 
 

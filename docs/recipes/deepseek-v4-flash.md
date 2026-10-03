@@ -7,7 +7,7 @@ Packages: `src/tensorfold/families/deepseek_v4/` and `src/tensorfold/kernels/dee
 hyper-connection kernels and row linears.
 
 ```bash
-tensorfold pull mlx-community/DeepSeek-V4-Flash-4bit Vontra/DeepSeek-V4-Flash-DSpark-MLX
+tensorfold pull mlx-community/DeepSeek-V4-Flash-4bit TensorFold/DeepSeek-V4-Flash-DSpark-MLX
 tensorfold serve mlx-community/DeepSeek-V4-Flash-4bit
 ```
 
@@ -28,11 +28,11 @@ tensorfold serve mlx-community/DeepSeek-V4-Flash-4bit
 The 4-bit checkpoint has no draft head. The family reads two, converted from DeepSeek's MIT-licensed releases and
 published in this layout: `model.safetensors` beside a `config.json` whose `model_type` names the head.
 
-- DSpark, `Vontra/DeepSeek-V4-Flash-DSpark-MLX` (10.7 GB, `deepseek_v4_dspark`): three MoE blocks read the target's
+- DSpark, `TensorFold/DeepSeek-V4-Flash-DSpark-MLX` (10.7 GB, `deepseek_v4_dspark`): three MoE blocks read the target's
   streams after layers 40-42 and draft a 5-token block in one pass. The serve command drafts with it by default once
   it has been pulled.
-- MTP, `Vontra/DeepSeek-V4-Flash-MTP-MLX` (3.5 GB, `deepseek_v4_mtp`): the checkpoint's own next-token layer. Serve
-  with `--drafter Vontra/DeepSeek-V4-Flash-MTP-MLX` to draft with it.
+- MTP, `TensorFold/DeepSeek-V4-Flash-MTP-MLX` (3.5 GB, `deepseek_v4_mtp`): the checkpoint's own next-token layer. Serve
+  with `--drafter TensorFold/DeepSeek-V4-Flash-MTP-MLX` to draft with it.
 
 The converter builds the same folders from DeepSeek's releases: shards 46-48 of `deepseek-ai/DeepSeek-V4-Flash-DSpark`
 with the release's `config.json` beside them, or shard 46 of `deepseek-ai/DeepSeek-V4-Flash`. Pass the folder to

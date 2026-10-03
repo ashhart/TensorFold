@@ -300,8 +300,6 @@ _kernels: dict[tuple, Any] = {}
 _plans: dict[tuple, Any] = {}
 _BF16 = [mx.bfloat16]
 _one: Any = None
-_ORIG: Any = None
-enabled = False
 # weights (n, k, group size) whose 1-4 row calls go through the MMA kernel (the scalar kernel's bits differ there)
 mma_one_row: set[tuple[int, int, int]] = set()
 
@@ -499,68 +497,4 @@ def check(weight: mx.array, scales: mx.array, biases: mx.array, *, seed: int = 0
                                    full[r:r + m]).item()) for r, m in calls)
 
 
-def _first(module: Any, x: mx.array, rows: int) -> tuple[mx.array, tuple | None]:
-    """The linear's first call at this row count, and its cached kernel call once the pipeline is fitted."""
-
-    global _one
-    if _one is None:
-        _one = mx.array([1.0], dtype=mx.float32)
-    weight, group = module["weight"], int(module.group_size)
-    n, dims = int(weight.shape[0]), int(weight.shape[1]) * 8
-    kind = "scalar" if scalar_kind(rows, n, dims, group) else "mma"
-    tail = [weight, module["scales"], module["biases"], _one]
-    y = _run(kind, rows, n, dims, group, False, _DEFAULT, [x.reshape(rows, dims), *tail])
-    plan = _plans.get((kind, rows, n, dims, group, False, _DEFAULT.name))
-    return y, None if plan is None else (_compiled(kind, plan[0]), *plan[1:], n, dims, tail)
-
-
-def _call(self: Any, x: mx.array) -> mx.array:
-    plans = self.__dict__.get("_simd_qmm") if enabled else None
-    if plans is None or x.dtype != mx.bfloat16:
-        return _ORIG(self, x)
-    dims = x.shape[-1]
-    rows = x.size // dims
-    if not 1 <= rows <= MAX_ROWS:
-        return _ORIG(self, x)
-    p = plans.get(rows)
-    if p is None:
-        y, p = _first(self, x, rows)
-        if p is not None:
-            plans[rows] = p
-        n = int(self["weight"].shape[0])
-    else:
-        kernel, grid, tg, oshape, n, _, tail = p
-        y = kernel(inputs=[x.reshape(rows, dims), *tail], grid=grid, threadgroup=tg, output_shapes=oshape,
-                   output_dtypes=_BF16)[0]
-    if x.ndim != 2:
-        y = y.reshape(*x.shape[:-1], n)
-    if "bias" in self:
-        y = y + self["bias"]
-    return y
-
-
-def install(model: Any) -> int:
-    """Idempotently route fitting linears through qmm after per-shape scalar/MMA bit checks, including serial calls, and return the count."""
-
-    global _ORIG, enabled
-    import mlx.nn as nn
-
-    if _ORIG is None:
-        _ORIG = nn.QuantizedLinear.__call__
-        nn.QuantizedLinear.__call__ = _call
-    count = 0
-    checked: set[tuple[int, int, int]] = set()
-    for _, module in model.named_modules():
-        if isinstance(module, nn.QuantizedLinear) and fits(module):
-            object.__setattr__(module, "_simd_qmm", {})
-            count += 1
-            shape = (int(module["weight"].shape[0]), int(module["weight"].shape[1]) * 8, int(module.group_size))
-            if shape not in checked:
-                checked.add(shape)
-                if not check(module["weight"], module["scales"], module["biases"], group_size=module.group_size):
-                    mma_one_row.add(shape)
-    enabled = True
-    return count
-
-
-__all__ = ["MAX_ROWS", "Prologue", "check", "fits", "fragments", "install", "qmm", "qmm_fragments", "splits"]
+__all__ = ["MAX_ROWS", "Prologue", "check", "fits", "fragments", "qmm", "qmm_fragments", "splits"]

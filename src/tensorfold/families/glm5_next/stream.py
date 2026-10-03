@@ -31,6 +31,8 @@ def expert_names(model_dir: Path, layers: int) -> dict[tuple, str]:
 def attach(model: Any, model_dir: Path, gib: float) -> Streamer:
     """Build the pool for ``gib`` GiB of experts and route every decoder MoE block through it."""
 
+    if C.act() != mx.bfloat16:
+        raise ValueError("streamed GLM experts run in the bf16 kernels; float32 activations are refused")
     from tensorfold.kernels.glm.flash.v1 import kernels as K
     from tensorfold.kernels.glm.flash.v1 import moe as MK
     from tensorfold.streaming.build import load as hostsync
@@ -60,6 +62,8 @@ def moe(block: Any, x: mx.array, rows_exact: bool) -> mx.array:
 
     streamer, layer = block.streamer, block.stream_layer
     if rows_exact:
+        if x.dtype != mx.bfloat16:
+            raise ValueError("streamed GLM experts run in the bf16 kernels; float32 activations are refused")
         return stream_moe.moe_rows(block, x, streamer, layer)
     idx, w = block.select(x)
     token = stream_moe.present(idx.reshape(-1).astype(mx.uint32), streamer.box, block.cfg.n_routed_experts)

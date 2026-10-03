@@ -90,12 +90,14 @@ def picks(logits: torch.Tensor, positions: Sequence[int], samplings: Sequence[Sa
 def prefill(w, head: Head | None, prompt: Sequence[int], sampling: Sampling | None, *,
             state: State | None = None, cache: Cache | None = None, held: torch.Tensor | None = None,
             stops: Sequence[int] = (), keep: Callable | None = None,
-            constraint=None) -> tuple[State, Cache | None, int, Carry | None]:
+            constraint=None, keep_at: int | None = None) -> tuple[State, Cache | None, int, Carry | None]:
     """Commit the prompt, sample its next token, absorb all prompt rows but the last into the head; ``keep(p, ...)`` gets each stop's state."""
 
     st = clone_state(state) if state is not None else State(w)
     if st.pos >= len(prompt):
         raise ValueError("a reused state must leave at least one prompt token to process")
+    if keep_at is not None and (keep is None or not st.pos <= keep_at <= len(prompt)):
+        raise ValueError("keep_at needs a callback and a point in the prefilled range")
     mc = None
     if head is not None:
         mc = cache.view(len(prompt)) if cache is not None else Cache(w, len(prompt))      # the prompt's rows only
@@ -103,7 +105,7 @@ def prefill(w, head: Head | None, prompt: Sequence[int], sampling: Sampling | No
     bounds = sorted({p for p in stops if st.pos < p < len(prompt)} | {len(prompt)}) if keep is not None else \
         [len(prompt)]
     for end in bounds:
-        normed, held = extend(w, head, prompt, st, mc, held, end)
+        normed, held = extend(w, head, prompt, st, mc, held, end, keep_at=keep_at, keep=keep)
         if end < len(prompt):
             keep(end, clone_state(st), mc.view() if mc is not None else None, held)
     logits = _mm(normed[-1:], w.head)
@@ -118,21 +120,35 @@ def prefill(w, head: Head | None, prompt: Sequence[int], sampling: Sampling | No
 
 @torch.no_grad()
 def extend(w, head: Head | None, prompt: Sequence[int], st: State, mc: Cache | None, held: torch.Tensor | None,
-           end: int) -> tuple[torch.Tensor, torch.Tensor | None]:
+           end: int, *, keep_at: int | None = None, keep: Callable | None = None
+           ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Commit prompt[st.pos:end] in chunks (bits independent of ``end``); the head absorbs every row but the last, returned held."""
 
     ids = torch.tensor(list(prompt[st.pos:end]), dtype=torch.int32, device=w.norm.device)
     base, normed = st.pos, None
+    saved = False
     for a, b in chunks(st.pos, end):
-        normed, _ = prefill_chunk(w, ids[a - base:b - base], st, every=head is not None)
-        if head is None:
-            continue
-        rows = normed if held is None else torch.cat([held, normed])
-        start = a - (0 if held is None else 1)
-        if rows.shape[0] > 1:
-            head.forward(mc, rows[:-1], prompt[start + 1:b], start)
-            mc.pos = b - 1
-        held = rows[-1:]
+        if keep is not None and keep_at == a and not saved:
+            keep(a, clone_state(st), mc.view() if mc is not None else None,
+                 held.clone() if held is not None else None)
+            saved = True
+        cut = keep_at - a if keep_at is not None and a < keep_at < b else 0
+        normed, _, *part = prefill_chunk(w, ids[a - base:b - base], st, every=head is not None, cut=cut)
+        if head is not None:
+            rows = normed if held is None else torch.cat([held, normed])
+            start = a - (0 if held is None else 1)
+            if rows.shape[0] > 1:
+                head.forward(mc, rows[:-1], prompt[start + 1:b], start)
+                mc.pos = b - 1
+            held = rows[-1:]
+        if keep is not None and keep_at is not None and a < keep_at <= b:
+            snapshot = part[0] if part else clone_state(st)
+            head_cache = mc.view() if mc is not None else None
+            if head_cache is not None:
+                head_cache.pos = keep_at - 1
+            tail = normed[keep_at - a - 1:keep_at - a].clone() if head is not None else None
+            keep(keep_at, snapshot, head_cache, tail)
+            saved = True
     return normed, held
 
 

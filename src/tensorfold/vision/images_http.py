@@ -109,7 +109,7 @@ def _close_socket(sock: socket.socket) -> None:
 
 
 def _request(host: str, port: int, target: str, addresses: list[tuple],
-             max_bytes: int, deadline: float) -> tuple[bytes | None, str | None, str | None]:
+             max_bytes: int, deadline: float, media_types=MEDIA_TYPES) -> tuple[bytes | None, str | None, str | None]:
     """A watchdog bounds slow headers and TLS handshakes, not just individual reads."""
     timeout = _remaining(deadline)
     family, kind, protocol, _, address = addresses[0]
@@ -128,7 +128,7 @@ def _request(host: str, port: int, target: str, addresses: list[tuple],
         sock.settimeout(_remaining(deadline))
         sock.do_handshake()
         connection.sock = sock
-        connection.request("GET", target, headers={"Accept": ", ".join(MEDIA_TYPES), "Accept-Encoding": "identity",
+        connection.request("GET", target, headers={"Accept": ", ".join(media_types), "Accept-Encoding": "identity",
                                                    "User-Agent": f"TensorFold/{__version__}"})
         response = connection.getresponse()
         _remaining(deadline)
@@ -142,8 +142,9 @@ def _request(host: str, port: int, target: str, addresses: list[tuple],
         if response.getheader("Content-Encoding", "identity").lower() != "identity":
             raise ImageInputError("compressed HTTP image responses are unsupported")
         media = response.getheader("Content-Type", "").split(";", 1)[0].strip().lower()
-        if media not in MEDIA_TYPES:
-            raise ImageInputError("image URL content type must be JPEG, PNG or WebP")
+        if media not in media_types:
+            raise ImageInputError("image URL content type must be JPEG, PNG or WebP" if media_types is MEDIA_TYPES
+                                  else f"media URL content type must be one of {', '.join(media_types)}")
         length = response.getheader("Content-Length")
         if length is not None:
             if not length.isascii() or not length.isdecimal() or int(length) > max_bytes:
@@ -166,13 +167,13 @@ def _request(host: str, port: int, target: str, addresses: list[tuple],
 
 
 def fetch_image(url: str, *, max_bytes: int, deadline: float, max_redirects: int,
-                max_url_chars: int) -> tuple[bytes, str]:
+                max_url_chars: int, media_types=MEDIA_TYPES) -> tuple[bytes, str]:
     """Resolve and validate each redirect, then connect directly to its checked address."""
     try:
         for redirect in range(max_redirects + 1):
             host, port, target = _url(url, max_url_chars)
             addresses = _resolve(host, port, deadline)
-            data, location, media = _request(host, port, target, addresses, max_bytes, deadline)
+            data, location, media = _request(host, port, target, addresses, max_bytes, deadline, media_types)
             if location is None:
                 return data, media
             if redirect == max_redirects:

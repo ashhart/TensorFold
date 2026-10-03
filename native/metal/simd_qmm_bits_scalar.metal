@@ -3,7 +3,7 @@
   // RS rows (1 to 4). Lane (chunk c = lane % S, slot j = lane / S) runs chunk c of NR outputs n0 + j + (32 / S) u,
   // a whole group (2 B words) of each in registers; the threadgroup stages XB groups of each row's inputs in chain
   // order (step s, k at 8 s + k). A row's chain is the same at any RS and the matrix kernel's.
-  constexpr int GW = 2 * B, XP = 76, G = K / 64, WPR = K * B / 32;
+  constexpr int GW = 2 * B, XP = 76, G = K / 64, SG = K / GS, WPR = K * B / 32;
   threadgroup float xs[RS * XB * XP];
   const uint lane = thread_index_in_simdgroup;
   const int tid = int(simdgroup_index_in_threadgroup) * 32 + int(lane);
@@ -20,8 +20,8 @@
   for (int u = 0; u < NR; u++) {
     const int nn = min(n0 + SLOTS * u, N - 1);
     wr[u] = W + size_t(nn) * WPR;
-    sr[u] = SC + size_t(nn) * G;
-    br[u] = BI + size_t(nn) * G;
+    sr[u] = SC + size_t(nn) * SG;
+    br[u] = BI + size_t(nn) * SG;
     PRAGMA_UNROLL
     for (int r = 0; r < RS; r++) acc[u][r] = 0.0f;
   }
@@ -81,7 +81,8 @@
       }
       PRAGMA_UNROLL
       for (int u = 0; u < NR; u++) {
-        const float sc = float(sr[u][g]), bi = float(br[u][g]);
+        const int si = GS == 128 ? (g >> 1) : g;
+        const float sc = float(sr[u][si]), bi = float(br[u][si]);
         PRAGMA_UNROLL
         for (int r = 0; r < RS; r++) {
           acc[u][r] = fma(sc, P[u][r], acc[u][r]);

@@ -8,7 +8,7 @@
   const int fm = (qid & 4) + ((int(lane) / 2) % 4);
   const int fn = (qid & 2) * 2 + (int(lane) % 2) * 2;
   const int R = X_shape[0];
-  constexpr int G = K / 64, WPR = K * B / 32, LW = B == 8 ? 4 : 3;
+  constexpr int G = K / 64, SG = K / GS, WPR = K * B / 32, LW = B == 8 ? 4 : 3;
   const float one = ONE[0];
   const int nb = int(threadgroup_position_in_grid.x) * (8 * NT);
   const int rb = int(threadgroup_position_in_grid.y) * (8 * RT);
@@ -71,8 +71,9 @@
       }
       PRAGMA_UNROLL
       for (int t = 0; t < NT; t++) {
-        const float sc = float(SC[size_t(wrow[t]) * G + g]);
-        const float bi = float(BI[size_t(wrow[t]) * G + g]);
+        const int si = GS == 128 ? (g >> 1) : g;          // one scale covers two groups of 64
+        const float sc = float(SC[size_t(wrow[t]) * SG + si]);
+        const float bi = float(BI[size_t(wrow[t]) * SG + si]);
         PRAGMA_UNROLL
         for (int rt = 0; rt < RT; rt++) {
           acc[rt][t][0] = fma(bi, xs0[rt], fma(sc, P[rt][t].thread_elements()[0], acc[rt][t][0]));

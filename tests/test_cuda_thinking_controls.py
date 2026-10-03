@@ -86,6 +86,11 @@ def rendered(engine):
      "effort=low;assistant:<think>"),
     ({"reasoning_effort": "high"}, GLM, "effort=high;assistant:<think>"),     # a template's own "high" is kept
     ({"reasoning_effort": "minimal"}, GLM, "effort=low;assistant:<think>"),
+    ({"reasoning_effort": "low"}, GLM, "effort=low;assistant:<think>"),
+    ({"reasoning_effort": "medium"}, GLM, "effort=high;assistant:<think>"),   # medium maps to the nearer named level
+    ({"reasoning_effort": "xhigh"}, GLM, "effort=xhigh;assistant:<think>"),  # GLM's template renders this as Max
+    ({"reasoning_effort": "none"}, GLM, "assistant:"),
+    ({}, GLM, "effort=high;assistant:<think>"),                                # server default medium, heard as high
     ({"reasoning_effort": "none"}, QWEN, "assistant:"),
     ({"reasoning_effort": "high", "chat_template_kwargs": {"enable_thinking": False}}, QWEN, "assistant:"),
     ({"reasoning_effort": "none", "chat_template_kwargs": {"enable_thinking": True}}, QWEN,
@@ -101,6 +106,24 @@ def test_the_effort_reaches_the_template_as_on_the_mac(tmp_path, fields, names, 
     assert status == 200 and rendered(engine) == want
 
 
+@pytest.mark.parametrize("default", [False, True])
+@pytest.mark.parametrize("kwargs, want", [
+    ({"thinking": True}, True), ({"thinking": False}, False),                 # DeepSeek-V4 clients (pi) send this
+    ({"thinking": {"type": "enabled"}}, True), ({"thinking": {"type": "disabled"}}, False),
+    ({"thinking": None}, None),                                               # null: the server's default
+    ({"thinking": "yes"}, None), ({"thinking": 1}, None),                     # anything else is ignored, as unset
+    ({"thinking": {"type": "adaptive"}}, None), ({"thinking": {}}, None),
+    ({"thinking": "yes", "enable_thinking": False}, False),
+    ({"thinking": True, "enable_thinking": False}, False),                    # an explicit enable_thinking wins
+    ({"thinking": False, "enable_thinking": True}, True),
+])
+def test_chat_template_kwargs_thinking_is_heard_as_enable_thinking(tmp_path, default, kwargs, want):
+    engine = ChainEngine()
+    status, _ = ask(app_for(tmp_path, engine, thinking=default), max_tokens=2, chat_template_kwargs=kwargs)
+    thinking = default if want is None else want
+    assert status == 200 and rendered(engine) == ("assistant:<think>" if thinking else "assistant:")
+
+
 def test_no_server_default_leaves_the_template_its_own(tmp_path):
     engine = ChainEngine()
     assert ask(app_for(tmp_path, engine), max_tokens=2)[0] == 200
@@ -109,7 +132,7 @@ def test_no_server_default_leaves_the_template_its_own(tmp_path):
 
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("fields", [{"reasoning_effort": "extreme"}, {"reasoning_effort": 3},
-                                    {"chat_template_kwargs": {"reasoning_effort": "max"}},
+                                    {"chat_template_kwargs": {"reasoning_effort": "ultra"}},
                                     {"thinking_budget": "lots"}, {"thinking_budget": 2.5}])
 def test_a_bad_effort_or_budget_is_refused_before_the_stream(tmp_path, stream, fields):
     engine = ChainEngine()

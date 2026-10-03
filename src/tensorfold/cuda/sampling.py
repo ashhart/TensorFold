@@ -112,11 +112,7 @@ def dist_gather(words: torch.Tensor) -> torch.Tensor:
 def nucleus_rows(logits: torch.Tensor, positions: Sequence[int], sampling: Sampling, *, offset: int = 0,
                  id_map: torch.Tensor | None = None, gather: Callable = one_rank,
                  probs: list[float] | None = None) -> list[int]:
-    """top_k off: the keyed draw over the top_p nucleus, then min_p, cut by fixed-point mass (``MASS``), so one
-    rank's whole rows and several ranks' vocabulary shards (``gather`` stacks every rank's words, rank 0 first;
-    ``offset`` or ``id_map`` gives a column's token id) draw the same tokens. Each rank reads its ``NUCLEUS`` top
-    candidates and its shard's total mass; a row they don't cover reads every rank's whole shard. ``probs`` takes
-    each drawn token's share of the mass."""
+    """top_k off: the keyed draw over the top_p nucleus then min_p, cut by fixed-point mass, the same on each shape."""
 
     scaled = logits.float().double() / max(float(sampling.temperature), 1e-6)
     top = _stacked(gather, scaled.max(dim=-1).values).max(dim=0).values           # every rank's maxima
@@ -131,8 +127,7 @@ def nucleus_rows(logits: torch.Tensor, positions: Sequence[int], sampling: Sampl
 
 
 def _shares(gather, scaled, mass, count, offset, id_map):
-    """Every rank's best (value, id, mass) a row, padded to ``count`` (value -inf, mass 0), its shard's mass and
-    width: numpy [world, R, count] thrice, then [world, R] twice."""
+    """Every rank's padded top (value, id, mass) per row, plus the shard's mass and width sums."""
 
     rows, width = scaled.shape
     vals, cols = torch.topk(scaled, min(count, width), dim=-1)

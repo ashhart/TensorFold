@@ -330,7 +330,8 @@ pub const Model = struct {
             }
             record.pooled = pooled;
             const ca = try s.ints(complete[0..@intCast(r)]);
-            const scores = (try m.kernels.run(s, src.q4_idx_scores, &.{ prep[2], pooled, ca }, &.{ ti("HI", 4), ti("DI", 128), ti("TOP", 512) }, .{ @divTrunc(blocks + 7, 8) * 256, r, 1 }, .{ 256, 1, 1 }, &.{.{ .shape = &.{ r, blocks }, .dtype = mx.f32t }}))[0];
+            const block_group: i32 = if (r == 1 or blocks < 4096) 1 else if (blocks < 8192) 2 else if (blocks < 16384) 4 else 8;
+            const scores = (try m.kernels.run(s, src.q4_idx_scores, &.{ prep[2], pooled, ca }, &.{ ti("HI", 4), ti("DI", 128), ti("TOP", 512), ti("BB", block_group), ti("RB", 8) }, .{ @divTrunc(blocks + 8 * block_group - 1, 8 * block_group) * 256, @divTrunc(r + 7, 8), 1 }, .{ 256, 1, 1 }, &.{.{ .shape = &.{ r, blocks }, .dtype = mx.f32t }}))[0];
             ids = (try m.kernels.run(s, src.q4_idx_select, &.{ scores, ca, try s.ints(ends[0..@intCast(r)]) }, &.{ ti("TOP", 512), ti("KW", 2051) }, .{ 1024 * r, 1, 1 }, .{ 1024, 1, 1 }, &.{.{ .shape = &.{ r, 2051 }, .dtype = mx.i32t }}))[0];
         }
         // The shader has separate physical-capacity and logical-key-count inputs.

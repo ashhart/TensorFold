@@ -8,7 +8,7 @@ import torch
 if not torch.cuda.is_available():
     pytest.skip("CUDA only", allow_module_level=True)
 
-from tensorfold.cuda import experts as grouped  # noqa: E402
+from tensorfold.cuda import experts as grouped, prompt_precision  # noqa: E402
 from tensorfold.cuda.moe import Routed  # noqa: E402
 from tensorfold.engine.exact_sampling import Sampling  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.decode import draft_decode, prefill as serial_prefill  # noqa: E402
@@ -102,10 +102,19 @@ def test_mtp_decode_equals_serial(monkeypatch, oracle):
             monkeypatch.undo()
 
 
-def test_prefill_chunks_give_the_same_state_and_head_cache(monkeypatch):
+@pytest.fixture(params=[False, True], ids=["bf16", "fp8"])
+def fp8(request):
+    """bf16 prompts (the default), then --prefill-fp8."""
+
+    with prompt_precision.using(request.param):
+        yield request.param
+
+
+def test_prefill_chunks_give_the_same_state_and_head_cache(monkeypatch, fp8):
     from tensorfold.families.qwen3_5.cuda import prefill as prefill_mod
 
     w, head = _model()
+    assert w.fast_prefill                                               # the FP8 prompt path exists for --prefill-fp8
     prompt = list(range(20, 43))
     st, mc, first, carry = decode.prefill(w, head, prompt, None)
     monkeypatch.setattr(prefill_mod, "CHUNK", 5)
@@ -116,7 +125,7 @@ def test_prefill_chunks_give_the_same_state_and_head_cache(monkeypatch):
     assert torch.equal(carry.states, carry2.states) and carry.tokens == carry2.tokens
 
 
-def test_a_prompt_resumed_at_a_kept_start_equals_fresh():
+def test_a_prompt_resumed_at_a_kept_start_equals_fresh(fp8):
     """The state, head cache and held row kept at a stop resume another prompt with that prefix to fresh bits."""
 
     w, head = _model()
@@ -463,7 +472,7 @@ def test_prompts_resume_a_kept_start_and_equal_fresh(monkeypatch, step):
     warm = Stream(longer, 12, SAMPLED[1])
     dec.admit(warm)
     _drain(dec)
-    assert warm.out == want and warm.cached == len(prompts[1])
+    assert warm.out == want and warm.cached == len(prompts[1]) - 1
     serial = Stream(longer, 12, SAMPLED[1], draft=False)
     dec.admit(serial)
     _drain(dec)
@@ -504,7 +513,7 @@ def test_a_stopped_stream_and_a_failed_prompt_end_copy_end_only_their_own(monkey
     doomed = [2, 9, 4, 4, 1, 8, 8]                    # no other prompt has its length: only its copy fails
 
     def failing(st):
-        if st.pos == len(doomed):
+        if st.pos == len(doomed) - 1:
             raise torch.OutOfMemoryError("CUDA out of memory (simulated at the prompt-end copy)")
         return kept(st)
 
@@ -539,7 +548,7 @@ def test_a_stopped_stream_and_a_failed_prompt_end_copy_end_only_their_own(monkey
         got, stats = results[i]
         assert isinstance(stats, dict) and got == refs[i], (i, stats)
     assert sched.thread.is_alive() and not sched.decoder.streams and not sched.decoder.filling
-    assert all(entry[0] != doomed for entry in sched.decoder.cache.entries)
+    assert all(entry[0] != doomed[:-1] for entry in sched.decoder.cache.entries)
 
 
 def test_context_bounds_each_stream_and_warm_leaves_nothing():

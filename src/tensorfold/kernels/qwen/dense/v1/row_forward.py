@@ -7,6 +7,7 @@ from typing import Any, Callable, Sequence
 
 import mlx.core as mx
 
+from tensorfold.engine.family_common import cache_contents
 from tensorfold.kernels.inputs import ints
 from tensorfold.kernels.qwen.dense.v1 import row_matmul
 from tensorfold.kernels.qwen.dense.v1.row_glue import _chain, add_norm, gated_delta, gdn_post, gdn_pre, mlp_act
@@ -247,6 +248,41 @@ def _token_ids(windows: Sequence[Any]) -> mx.array:
     return mx.concatenate(parts).reshape(1, -1)
 
 
+def _gate_up(mlp: Any, x: mx.array) -> mx.array:
+    stack = stack_of(mlp, "gu")
+    return project_stack(stack, x) if stack is not None else mx.concatenate(
+        [project(mlp.gate_proj, x), project(mlp.up_proj, x)], axis=-1)
+
+
+# Qwen3.6 MoE rows: "batched" (one gather_qmm for all rows) or "rows" (each alone); one-row steps take the same path
+MOE_ROWS = os.environ.get("TF_MOE_ROWS", "batched")
+
+
+def _per_row(fn: Callable[[mx.array], mx.array], x: mx.array) -> mx.array:
+    W = int(x.shape[1])
+    return fn(x) if W == 1 else mx.concatenate([fn(x[:, r:r + 1]) for r in range(W)], axis=1)
+
+
+def moe(mlp: Any, x: mx.array) -> mx.array:
+    """The MoE block's output for the normed rows ``x`` (1, W, K)."""
+
+    if MOE_ROWS != "batched":
+        return _per_row(mlp, x)
+    gates = mx.softmax(_per_row(mlp.gate, x), axis=-1, precise=True)
+    k = mlp.top_k
+    inds = mx.argpartition(gates, kth=-k, axis=-1)[..., -k:]
+    scores = mx.take_along_axis(gates, inds, axis=-1)
+    if mlp.norm_topk_prob:
+        scores = scores / scores.sum(axis=-1, keepdims=True)
+    sw = mlp.switch_mlp
+    xe = mx.expand_dims(x, (-2, -3))
+    act = sw.activation(sw.up_proj(xe, inds), sw.gate_proj(xe, inds))
+    y = (sw.down_proj(act, inds).squeeze(-2) * scores[..., None]).sum(axis=-2)
+    shared = mlp.shared_expert
+    gate = mx.sigmoid(_per_row(mlp.shared_expert_gate, x))
+    return y + gate * project(shared.down_proj, mlp_act(_gate_up(shared, x)))
+
+
 def _rows_forward(core: Any, windows: Sequence[Any], parents: Sequence[Sequence[int]], caches: Sequence[list[Any]],
                   starts: Sequence[int], *, pipeline_layers: int = 4, first_alone: bool = True
                   ) -> tuple[mx.array, _Rows]:
@@ -278,10 +314,10 @@ def _rows_forward(core: Any, windows: Sequence[Any], parents: Sequence[Sequence[
         norm = inner.post_attention_layernorm
         hidden, x = add_norm(hidden, pending, norm.weight, norm.eps)
         mlp = inner.mlp
-        stack = stack_of(mlp, "gu")
-        gu = project_stack(stack, x) if stack is not None else mx.concatenate(
-            [project(mlp.gate_proj, x), project(mlp.up_proj, x)], axis=-1)
-        pending = project(mlp.down_proj, mlp_act(gu))
+        if hasattr(mlp, "switch_mlp"):
+            pending = moe(mlp, x)
+        else:
+            pending = project(mlp.down_proj, mlp_act(_gate_up(mlp, x)))
         storage = getattr(layer, "_storage", None)
         tapped = (storage, layer._idx) if storage is not None else None
         if pipeline_layers and ((index + 1) % pipeline_layers == 0 or (index == 0 and first_alone)) \
@@ -340,11 +376,7 @@ def check_streams(core: Any, head: Any, make_cache: Callable[[], list[Any]], cop
     """Return equality and failures for batched versus standalone logits and partial-window cache commits across prompt lengths and window widths."""
 
     def arrays(cache: list[Any]) -> list[mx.array]:
-        out = []
-        for item in cache:
-            state = item.state
-            out.extend(a for a in (state if isinstance(state, (list, tuple)) else [state]) if a is not None)
-        return out
+        return [a for item in cache for a in cache_contents(item)]
 
     vocab = int(core.embed_tokens["weight"].shape[0])   # MLX's gather reads past the table for larger ids, unchecked
     bases = []

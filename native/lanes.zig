@@ -73,7 +73,7 @@ pub const Linear = struct {
             if (l.sb.ctx != null) return l.tensorRows(kernels, s, x);
             if (!mx.tensor_units and l.format != null and l.format.?.bits == 4 and (l.format.?.group_size == 32 or l.format.?.group_size == 64) and mx.dtype(l.scales) == mx.bf16 and @mod(l.n, 8) == 0 and @mod(l.k, 64) == 0) return l.simdRows(kernels, s, x.x, reduction, l.format.?.group_size);
             if (!mx.tensor_units and l.simdBitsFits()) {
-                const p = @import("deepseek_dense.zig").Projection{ .weights = .{ l.weight, l.scales, l.biases }, .bits = l.format.?.bits, .reduction = reduction };
+                const p = @import("deepseek_dense.zig").Projection{ .weights = .{ l.weight, l.scales, l.biases }, .group = l.format.?.group_size, .bits = l.format.?.bits, .reduction = reduction };
                 try kernels.affine.prepare(kernels, &.{p});
                 return l.simdBitsRows(kernels, s, x.x, reduction, kernels.affine.checked.get(p.key()).?);
             }
@@ -135,14 +135,14 @@ pub const Linear = struct {
 
     pub fn simdBitsFits(l: Linear) bool {
         const f = l.format orelse return false;
-        return (f.bits == 5 or f.bits == 6 or f.bits == 8) and f.group_size == 64 and mx.dtype(l.scales) == mx.bf16 and mx.dtype(l.biases) == mx.bf16 and @mod(l.n, 8) == 0 and @mod(l.k, 64) == 0;
+        return (f.bits == 5 or f.bits == 6 or f.bits == 8) and (f.group_size == 64 or f.group_size == 128) and mx.dtype(l.scales) == mx.bf16 and mx.dtype(l.biases) == mx.bf16 and @mod(l.n, 8) == 0 and @mod(l.k, 64) == 0;
     }
 
     pub fn simdBitsRows(l: Linear, kernels: *mx.Kernels, s: *mx.Scope, x: A, reduction: ?i32, compatible: bool) !A {
         if (!l.simdBitsFits()) return error.UnsupportedQuantization;
         if (!compatible) return l.rows(kernels, s, x);
         const m: i32 = @intCast(mx.c.mlx_array_size(x) / @as(usize, @intCast(l.k)));
-        const p = @import("deepseek_dense.zig").Projection{ .weights = .{ l.weight, l.scales, l.biases }, .bits = l.format.?.bits, .reduction = reduction };
+        const p = @import("deepseek_dense.zig").Projection{ .weights = .{ l.weight, l.scales, l.biases }, .group = l.format.?.group_size, .bits = l.format.?.bits, .reduction = reduction };
         return s.reshape(try @import("deepseek_dense.zig").launch(kernels, s, try s.reshape(x, &.{ m, l.k }), p, m == 1, mx.simd_groups), &.{ 1, m, l.n });
     }
 
@@ -162,11 +162,11 @@ pub const Linear = struct {
             scales[i] = member.scales;
             biases[i] = member.biases;
         }
-        const key = [5]i32{ width, first.k, 64, first.format.?.bits, if (width <= 64) 32 else if (width <= 6144) 16 else 8 };
+        const key = [5]i32{ width, first.k, first.format.?.group_size, first.format.?.bits, if (width <= 64) 32 else if (width <= 6144) 16 else 8 };
         if (kernels.affine.checked.get(key)) |compatible| return compatible;
         var s = mx.Scope{};
         defer s.deinit();
-        const p = @import("deepseek_dense.zig").Projection{ .weights = .{ try s.cat(weights[0..members.len], 0), try s.cat(scales[0..members.len], 0), try s.cat(biases[0..members.len], 0) }, .bits = first.format.?.bits };
+        const p = @import("deepseek_dense.zig").Projection{ .weights = .{ try s.cat(weights[0..members.len], 0), try s.cat(scales[0..members.len], 0), try s.cat(biases[0..members.len], 0) }, .group = first.format.?.group_size, .bits = first.format.?.bits };
         try kernels.affine.prepare(kernels, &.{p});
         return kernels.affine.checked.get(key).?;
     }

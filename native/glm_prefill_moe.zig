@@ -93,7 +93,7 @@ pub fn check(io: std.Io, dir: []const u8) !void {
             var s = mx.Scope{};
             defer s.deinit();
             const result = try forward(&m, &s, 0, try store.get("input"));
-            inline for (comptime std.meta.fieldNames(Result)) |key| {
+            inline for (.{ "logits", "ids", "weights", "experts", "routed", "shared", "output" }) |key| {
                 errdefer std.debug.print("Mismatch in {s}\n", .{key});
                 const a = @field(result, key);
                 try std.testing.expectEqual(store.has(key), a.ctx != null);

@@ -14,6 +14,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
 import mlx.core as mx
 from tensorfold.kernels.qwen.dense.v1 import lane_qmm, lane_glue, lane_tree, lane_attention
 from tensorfold.kernels.qwen.dense.v1 import row_attention, simd_qmm, simd_qmm_bits, affine_rows
@@ -72,7 +73,12 @@ def main():
         # Undo Python's launch-specific constexpr/thread reservation wrappers.
         spec = dict(spec)
         spec["source"] = re.sub(r"\A(?:  constexpr int \w+ = -?\d+;\n)+", "", spec["source"])
-        spec["header"] = re.sub(r"\n\[\[max_total_threads_per_threadgroup\(\d+\)\]\]\n$", "", spec.get("header", ""))
+        header = spec.get("header", "")
+        reservation = re.search(r"\n\[\[max_total_threads_per_threadgroup\((\d+)\)\]\]\n$", header)
+        if reservation:
+            spec.setdefault("reserve", int(reservation.group(1)))
+            header = header[:reservation.start()]
+        spec["header"] = header
         emit(OUT / f"{key}.metal", spec["source"])
         emit(OUT / f"{key}.h", spec.get("header", ""))
         ins = ", ".join(json.dumps(x) for x in spec["input_names"])

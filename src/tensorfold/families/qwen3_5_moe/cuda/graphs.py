@@ -36,8 +36,7 @@ class Graphs:
             self.mtp.clear()
             self.st = self.mc = None
             gc.collect()
-            # the dropped graphs' pool can stay registered with no graph left (expandable segments leave it so),
-            # and torch refuses a capture into such a pool: capture into a new one
+            # torch refuses a capture into a pool left registered without a graph: capture into a new one
             self.pool = torch.cuda.graph_pool_handle()
             self.st = State(self.w)
             reserve(self.st, self.rows)

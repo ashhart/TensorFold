@@ -87,8 +87,9 @@ def _prep_kernel(QKV, QN, KN, COS, SIN, QO, KO, VO, L, stride, eps,
 
 @triton.jit
 def _dattn_kernel(Q, K, V, OUT, POS, window, scale, N: tl.constexpr, G: tl.constexpr, NH: tl.constexpr,
-                  HD: tl.constexpr, CAP: tl.constexpr, BK: tl.constexpr, CAUSAL: tl.constexpr):
-    """Each KV head attends its query groups to sliding-window context and block keys, masking future block keys when causal, with fp32 softmax."""
+                  HD: tl.constexpr, CAP: tl.constexpr, BK: tl.constexpr, CAUSAL: tl.constexpr,
+                  RING: tl.constexpr = False, SKIP: tl.constexpr = True):
+    """Each KV head attends its queries to the window's tiles (masked tiles skipped, same bits) and the block's keys."""
 
     kvh = tl.program_id(0)
     M: tl.constexpr = G * N
@@ -103,11 +104,18 @@ def _dattn_kernel(Q, K, V, OUT, POS, window, scale, N: tl.constexpr, G: tl.const
     m_i = tl.full([M], -1e30, tl.float32)
     l_i = tl.zeros([M], tl.float32)
     acc = tl.zeros([M, HD], tl.float32)
-    for start in range(0, klen, BK):
+    lo = 0
+    if SKIP:
+        lo = tl.maximum(s - window, 0) // BK * BK
+    for start in range(lo, klen, BK):
         kk = start + tl.arange(0, BK)
         kin = kk < klen
-        k = tl.load(K + (kvh * CAP + kk[:, None]) * HD + d[None, :], mask=kin[:, None], other=0.0)
-        v = tl.load(V + (kvh * CAP + kk[:, None]) * HD + d[None, :], mask=kin[:, None], other=0.0)
+        if RING:
+            row = kk % CAP
+        else:
+            row = kk
+        k = tl.load(K + (kvh * CAP + row[:, None]) * HD + d[None, :], mask=kin[:, None], other=0.0)
+        v = tl.load(V + (kvh * CAP + row[:, None]) * HD + d[None, :], mask=kin[:, None], other=0.0)
         sc = tl.dot(q, tl.trans(k)) * scale
         ok = kin[None, :] & (((kk[None, :] < s) & (qpos[:, None] - kk[None, :] <= window)) | (kk[None, :] >= s))
         if CAUSAL:
@@ -165,7 +173,10 @@ class DraftLayer:
 class Drafter:
     """Draft one sequence from position-indexed context using device lengths and static buffers shared by eager execution and CUDA graphs."""
 
-    def __init__(self, draft_dir: str | Path, w: Weights, *, block: int | None = None, capacity: int = 2560) -> None:
+    def __init__(self, draft_dir: str | Path, w: Weights, *, block: int | None = None, capacity: int = 2560,
+                 ring: bool = False) -> None:
+        """``ring`` (TF_GLM_DRAFT_RING): the context in a ring of the window and block, the same drafts."""
+
         path = Path(draft_dir)
         cfg = json.loads((path / "config.json").read_text())
         dc = cfg["dflash_config"]
@@ -241,7 +252,12 @@ class Drafter:
         torch.cuda.empty_cache()
         self.inv_freq = 1.0 / theta ** (torch.arange(hd // 2, device=dev, dtype=torch.float32) * 2 / hd)
         # Block rows sit past committed context and the next context update overwrites them.
-        self.cap = capacity + self.block
+        from tensorfold.cuda.geometry import draft_ring_rows
+
+        self.capacity = capacity
+        rows = draft_ring_rows(self.window, self.block) if ring and self.window >= 0 else 0
+        self.ring = rows if 0 < rows < capacity + self.block else 0     # 0: a flat buffer, logical row p at p
+        self.cap = self.ring or capacity + self.block
         self.kc = [torch.zeros((KV, self.cap, hd), dtype=torch.bfloat16, device=dev) for _ in self.layers]
         self.vc = [torch.zeros((KV, self.cap, hd), dtype=torch.bfloat16, device=dev) for _ in self.layers]
         self.pos_dev = torch.zeros((1,), dtype=torch.int64, device=dev)
@@ -264,6 +280,12 @@ class Drafter:
     def reset(self) -> None:
         self.context_end = 0
         self.pos_dev.zero_()
+
+    def _slots(self, n: int) -> torch.Tensor:
+        """Where the rows at positions context_end .. context_end + n - 1 go: those positions, modulo the ring."""
+
+        idx = self.pos_dev + self.ar[:n]
+        return idx % self.ring if self.ring else idx
 
     # -- pieces -------------------------------------------------------------------------------------------------
     def _rotary(self, rows: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -313,7 +335,7 @@ class Drafter:
         out = torch.empty((rows, self.heads * self.hd), dtype=torch.bfloat16, device=self.dev)
         _dattn_kernel[(self.kvh,)](q, self.kc[i], self.vc[i], out, self.pos_dev, self.window, self.hd ** -0.5,
                                    N=rows, G=self.heads // self.kvh, NH=self.heads, HD=self.hd, CAP=self.cap, BK=64,
-                                   CAUSAL=self.causal, num_warps=4)
+                                   CAUSAL=self.causal, RING=bool(self.ring), num_warps=4)
         x = _dconv(self._row(out, L.o), dyn, L.a_base, 1, self.gs, x)
         normed, xs = self._norm(x, L.post_norm)
         dyn = _mm(normed, L.m_kp, xs)
@@ -327,7 +349,7 @@ class Drafter:
     def _taps_compute(self, n: int) -> None:
         ctx, _ = self._norm(_mm(self.tap_in[:n], self.fc), self.hidden_norm)
         cos, sin = self._rotary(n)
-        idx = self.pos_dev + self.ar[:n]
+        idx = self._slots(n)
         for i, L in enumerate(self.layers):
             _, k, v = self._prep(_mm(ctx, L.kv), L, cos, sin, 0)
             self.kc[i].index_copy_(1, idx, k)
@@ -341,7 +363,7 @@ class Drafter:
         for start in range(0, taps.shape[0], self.tap_in.shape[0]):
             part = taps[start:start + self.tap_in.shape[0]]
             n = part.shape[0]
-            if self.context_end + n > self.cap - self.block:
+            if self.context_end + n > self.capacity:
                 raise ValueError("drafter context past its capacity")
             self.tap_in[:n].copy_(part)
             g = self.tap_graphs.get(n)
@@ -359,7 +381,7 @@ class Drafter:
         x = torch.empty((n, self.D), dtype=torch.bfloat16, device=self.dev)
         glue.embed(self.ids, self.w.embed, self.D, 1, x)
         cos, sin = self._rotary(n)
-        idx = self.pos_dev + self.ar[:n]
+        idx = self._slots(n)
         for i in range(len(self.layers)):
             x = self._layer(i, x, cos, sin, idx)
         h, hs = self._norm(x[1:], self.norm)

@@ -4,6 +4,12 @@ const c = mx.c;
 const A = mx.Array;
 const Weight = @import("flash_ops.zig").Weight;
 const src = @import("kernel_sources.zig");
+const formats = [_]@import("quantization.zig").Spec{ .{ .bits = 4, .group_size = 32 }, .{ .bits = 4, .group_size = 64 }, .{ .bits = 8, .group_size = 64 } };
+
+fn supports(w: Weight) bool {
+    for (formats) |format| if (std.meta.eql(w.format, format)) return true;
+    return false;
+}
 
 pub var require_kernels = false;
 
@@ -40,15 +46,15 @@ pub fn splitsK(rows: i32, columns: i32, width: i32) bool {
 
 pub fn qmm(kernels: *mx.Kernels, s: *mx.Scope, x: A, w: Weight) !A {
     const g = try w.geometry(2);
-    if (mx.shape(x).len != 2 or mx.dim(x, 1) != g.k or mx.dtype(x) != mx.bf16 or w.format.bits != 4 or w.format.group_size != 32) return error.InvalidTensorShape;
+    if (mx.shape(x).len != 2 or mx.dim(x, 1) != g.k or mx.dtype(x) != mx.bf16 or !supports(w)) return error.InvalidTensorShape;
     const rows = mx.dim(x, 0);
     if (rows < 1) return error.InvalidTensorShape;
-    const bn: i32 = if (g.n >= 8192) 64 else 32;
-    return (try kernels.run(s, src.flash_prefill_qmm, &.{ x, w.arrays[0], w.arrays[1], w.arrays[2], try s.ints(&.{g.k}), try s.ints(&.{g.n}), try s.ints(&.{rows}) }, &.{ mx.ti("BM", 64), mx.ti("BN", bn), mx.ti("BK", 32), mx.ti("ALIGNED", @intFromBool(@mod(g.n, bn) == 0)) }, .{ @divTrunc(g.n + bn - 1, bn) * 128, @divTrunc(rows + 63, 64), 1 }, .{ 128, 1, 1 }, &.{.{ .shape = &.{ rows, g.n } }}))[0];
+    const bn: i32 = if (g.n >= 8192 and w.format.group_size == 32) 64 else 32;
+    return (try kernels.run(s, src.flash_prefill_qmm, &.{ x, w.arrays[0], w.arrays[1], w.arrays[2], try s.ints(&.{g.k}), try s.ints(&.{g.n}), try s.ints(&.{rows}) }, &.{ mx.ti("GS", w.format.group_size), mx.ti("BITS", w.format.bits), mx.ti("BM", 64), mx.ti("BN", bn), mx.ti("BK", 32), mx.ti("ALIGNED", @intFromBool(@mod(g.n, bn) == 0)) }, .{ @divTrunc(g.n + bn - 1, bn) * 128, @divTrunc(rows + 63, 64), 1 }, .{ 128, 1, 1 }, &.{.{ .shape = &.{ rows, g.n } }}))[0];
 }
 
 pub fn linear(kernels: *mx.Kernels, s: *mx.Scope, x: A, w: Weight) !A {
-    if ((try w.geometry(2)).n < 32) return @import("flash_prefill_ops.zig").matmul(s, x, w);
+    if (w.format.bits != 4 or w.format.group_size != 32 or (try w.geometry(2)).n < 32) return @import("flash_prefill_ops.zig").matmul(s, x, w);
     return matmul(kernels, s, x, w);
 }
 
@@ -56,7 +62,7 @@ pub fn matmul(kernels: *mx.Kernels, s: *mx.Scope, x: A, w: Weight) !A {
     const g = try w.geometry(2);
     if (mx.shape(x).len < 2 or mx.dim(x, -1) != g.k or mx.dtype(x) != mx.bf16) return error.InvalidTensorShape;
     const rows: i32 = @intCast(@divExact(c.mlx_array_size(x), @as(usize, @intCast(g.k))));
-    if (w.format.bits == 4 and w.format.group_size == 32 and rows >= 64 and !splitsK(rows, g.n, g.k) and try kernels.flash_prefill.tiles(kernels)) {
+    if (supports(w) and rows >= 64 and !splitsK(rows, g.n, g.k) and try kernels.flash_prefill.tiles(kernels)) {
         const out = try qmm(kernels, s, try s.reshape(x, &.{ rows, g.k }), w);
         var shape: [8]i32 = undefined;
         const dims = mx.shape(x);
@@ -82,7 +88,7 @@ pub fn gatherSorted(kernels: *mx.Kernels, s: *mx.Scope, x: A, w: Weight, ids: A,
     if (!std.mem.eql(i32, &shape, &.{ 16, 32, 1, 2 }) and !std.mem.eql(i32, &shape, &.{ 32, 32, 1, 2 }) and !std.mem.eql(i32, &shape, &.{ 64, 64, 2, 2 })) return error.InvalidTileShape;
     const count = try s.ints(&.{experts});
     const m = try s.ints(&.{rows});
-    const offsets = (try kernels.run(s, src.flash_prefill_offsets, &.{ ids, m, count }, &.{}, .{ experts + 1, 1, 1 }, .{ @min(256, experts + 1), 1, 1 }, &.{.{ .shape = &.{experts + 1}, .dtype = mx.i32t }}))[0];
+    const offsets = (try kernels.run(s, src.flash_prefill_offsets, &.{ ids, m, count }, &.{}, .{ experts + 1, 1, 1 }, .{ @min(256, experts + 1), 1, 1 }, &.{.{ .shape = &.{@max(experts + 1, 8)}, .dtype = mx.i32t }}))[0];
     const most = @min(rows, @divTrunc(rows + bm - 1, bm) + experts);
     return (try kernels.run(s, src.flash_prefill_gather, &.{ x, w.arrays[0], w.arrays[1], w.arrays[2], offsets, m, try s.ints(&.{g.n}), try s.ints(&.{g.k}), count }, &.{ mx.ti("GS", w.format.group_size), mx.ti("BM", bm), mx.ti("BN", bn), mx.ti("BK", 32), mx.ti("WM", wm), mx.ti("WN", wn) }, .{ @divTrunc(g.n + bn - 1, bn) * 32, most * wn, wm }, .{ 32, wn, wm }, &.{.{ .shape = &.{ rows, g.n } }}))[0];
 }
@@ -105,13 +111,13 @@ fn randint(s: *mx.Scope, dims: []const i32, key: A, high: i64, dtype: c.mlx_dtyp
     const rc = c.mlx_random_randint(&out, try s.ints(&.{0}), try s.data(&high, &.{}, c.MLX_INT64), dims.ptr, dims.len, dtype, key, mx.stream);
     return s.result(rc, out);
 }
-fn weights(s: *mx.Scope, key: A, experts: ?i32, n: i32, k: i32) !Weight {
-    const wd = [_]i32{ experts orelse 1, n, @divExact(k, 8) };
-    const sd = [_]i32{ experts orelse 1, n, @divExact(k, 32) };
+fn weights(s: *mx.Scope, key: A, experts: ?i32, n: i32, k: i32, format: @import("quantization.zig").Spec) !Weight {
+    const wd = [_]i32{ experts orelse 1, n, @divExact(k * format.bits, 32) };
+    const sd = [_]i32{ experts orelse 1, n, @divExact(k, format.group_size) };
     const start: usize = if (experts != null) 0 else 1;
     const keys = try split(s, key, 2);
     const scale = try s.scalar(0.02);
-    return .{ .arrays = .{ try randint(s, wd[start..], key, 2147483648, c.MLX_UINT32), try s.cast(try s.binary(c.mlx_multiply, try normal(s, sd[start..], try keyAt(s, keys, 0)), scale), mx.bf16), try s.cast(try s.binary(c.mlx_multiply, try normal(s, sd[start..], try keyAt(s, keys, 1)), scale), mx.bf16) }, .format = .{ .bits = 4, .group_size = 32 } };
+    return .{ .arrays = .{ try randint(s, wd[start..], key, 2147483648, c.MLX_UINT32), try s.cast(try s.binary(c.mlx_multiply, try normal(s, sd[start..], try keyAt(s, keys, 0)), scale), mx.bf16), try s.cast(try s.binary(c.mlx_multiply, try normal(s, sd[start..], try keyAt(s, keys, 1)), scale), mx.bf16) }, .format = format };
 }
 fn equal(s: *mx.Scope, a: A, b: A) !bool {
     var out = c.mlx_array_new();
@@ -133,7 +139,7 @@ fn probeInputs(s: *mx.Scope, reference: ?*@import("checkpoint.zig").Store, index
     for ([_][]const u8{ "input", "weight", "scales", "biases" }, [_]A{ x, w.arrays[0], w.arrays[1], w.arrays[2] }) |name, array| {
         try @import("variant_checks.zig").equalBits(s, array, try ref.get(try std.fmt.bufPrint(&path, "probe{d}.{s}", .{ index, name })));
     }
-    if (ids) |array| try @import("variant_checks.zig").equalBits(s, array, try ref.get("probe2.ids"));
+    if (ids) |array| try @import("variant_checks.zig").equalBits(s, array, try ref.get(try std.fmt.bufPrint(&path, "probe{d}.ids", .{index})));
 }
 
 fn selfCheckAgainst(kernels: *mx.Kernels, reference: ?*@import("checkpoint.zig").Store) !bool {
@@ -146,16 +152,18 @@ fn selfCheckAgainst(kernels: *mx.Kernels, reference: ?*@import("checkpoint.zig")
     var same = true;
     for ([_][2]i32{ .{ 512, 640 }, .{ 128, 8192 } }, 0..) |dims, i| {
         const x = try s.cast(try normal(&s, &.{ dims[0], 256 }, input_key), mx.bf16);
-        const w = try weights(&s, try keyAt(&s, keys, @intCast(i)), null, dims[1], 256);
-        try probeInputs(&s, reference, i, x, w, null);
-        const matches = try equal(&s, try qmm(kernels, &s, x, w), try @import("flash_prefill_ops.zig").matmul(&s, x, w));
-        same = same and matches;
+        for (formats, 0..) |format, j| {
+            const w = try weights(&s, try keyAt(&s, keys, @intCast(i)), null, dims[1], 256, format);
+            try probeInputs(&s, reference, i * formats.len + j, x, w, null);
+            const matches = try equal(&s, try qmm(kernels, &s, x, w), try @import("flash_prefill_ops.zig").matmul(&s, x, w));
+            same = same and matches;
+        }
     }
     const x = try s.cast(try normal(&s, &.{ 400, 256 }, input_key), mx.bf16);
     const key = try keyAt(&s, keys, 2);
-    const w = try weights(&s, key, 16, 64, 256);
+    const w = try weights(&s, key, 16, 64, 256, formats[0]);
     const ids = try s.cast(try s.unary(c.mlx_sort, try randint(&s, &.{400}, key, 16, mx.i32t)), c.MLX_UINT32);
-    try probeInputs(&s, reference, 2, x, w, ids);
+    try probeInputs(&s, reference, 2 * formats.len, x, w, ids);
     var ref = c.mlx_array_new();
     const rr = c.mlx_gather_qmm(&ref, try s.reshape(x, &.{ 400, 1, 256 }), w.arrays[0], w.arrays[1], w.arrays[2], mx.empty, ids, true, mx.opt(32), mx.opt(4), "affine", true, mx.stream);
     ref = try s.reshape(try s.result(rr, ref), &.{ 400, 64 });

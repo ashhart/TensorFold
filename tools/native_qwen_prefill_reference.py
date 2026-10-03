@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 from native_runtime import require_mlx
+from tensorfold.engine.family_common import cache_contents
 
 
 def main():
@@ -168,9 +169,7 @@ def main():
                       if encoded is not None else family.prefill(inputs, cache))
             save(64, "logits", family.head(hidden[:, -1:]))
             for i, item in enumerate(cache):
-                for j, value in enumerate(item.state):
-                    if hasattr(item, "keys"):
-                        value = value[:, :, :item.offset]
+                for j, value in enumerate(cache_contents(item)):
                     save(i, f"cache{j}", value)
             print(f"Traced prefill {start}..{min(start+2048, len(tokens))}", flush=True)
     finally:

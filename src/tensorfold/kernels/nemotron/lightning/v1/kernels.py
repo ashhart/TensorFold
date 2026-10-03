@@ -7,7 +7,7 @@ from typing import Any
 
 import mlx.core as mx
 
-from tensorfold.kernels import threads as tg
+from tensorfold.kernels import device, threads as tg
 from tensorfold.kernels.inputs import ints, padded
 from tensorfold.kernels.nemotron.lightning.v1 import rows as row_kernels
 from tensorfold.kernels.nemotron.lightning.v1.sources import (
@@ -53,10 +53,7 @@ _kernels: dict[str, Any] = {}
 def tensor_units() -> bool:
     """Whether this GPU has the M5 generation's tensor units (applegpu_g17 and later)."""
 
-    info = mx.device_info() if hasattr(mx, "device_info") else mx.metal.device_info()
-    arch = str(info.get("architecture", ""))
-    digits = "".join(ch for ch in arch.removeprefix("applegpu_g") if ch.isdigit())
-    return bool(digits) and int(digits) >= 17
+    return device.tensor_units()
 
 
 def _named(base: str, source: str) -> str:
@@ -195,47 +192,91 @@ def _segments(lengths: tuple[int, ...]) -> tuple[mx.array, mx.array, mx.array]:
     return _table("segments", lengths, build)
 
 
+# a lone stream's window of this many rows stores its Mamba states every STATE_STRIDE rows and at its last row
+SPARSE_FROM = 17
+STATE_STRIDE = 8
+
+
+def sparse_store(rows: int) -> tuple[int, ...] | None:
+    """Each row's state slot (-1: not stored) for a lone window: every row below SPARSE_FROM, else every STATE_STRIDE-th and the last."""
+
+    if rows < SPARSE_FROM:
+        return None
+    store, slot = [], 0
+    for r in range(rows):
+        if (r + 1) % STATE_STRIDE == 0 or r == rows - 1:
+            store.append(slot)
+            slot += 1
+        else:
+            store.append(-1)
+    return tuple(store)
+
+
 def mamba_scan(proj: mx.array, conv_states: mx.array, ssm_states: mx.array, lengths: tuple[int, ...],
                conv_w: mx.array, conv_b: mx.array, a_log: mx.array, d_skip: mx.array, dt_bias: mx.array,
                limits: mx.array, *, heads: int, head_dim: int, groups: int, state_dim: int,
-               slots: tuple[int, ...] | None = None) -> tuple[mx.array, mx.array, mx.array]:
-    """Scan ``lengths[i]`` tokens from state slot ``slots[i]`` or i, returning gated y and every row's conv/SSM states with bits independent of other segments."""
+               slots: tuple[int, ...] | None = None, store: tuple[int, ...] | None = None
+               ) -> tuple[mx.array, mx.array, mx.array]:
+    """Scan ``lengths[i]`` tokens from state slot ``slots[i]`` or i, returning gated y and the conv/SSM states after each row (or after the rows ``store`` keeps, in its slots) with bits independent of other segments."""
 
     rows, width = proj.shape
     slots = tuple(range(len(lengths))) if slots is None else tuple(int(s) for s in slots)
     held = min(int(conv_states.shape[0]), int(ssm_states.shape[0]))
     if sum(lengths) != rows or len(slots) != len(lengths) or not all(0 <= s < held for s in slots):
         raise ValueError("mamba_scan: lengths must cover the rows, a state slot per segment")
+    store = tuple(range(rows)) if store is None else tuple(int(s) for s in store)
+    kept = max(store) + 1
+    if len(store) != rows or kept < 1 or sorted(s for s in store if s >= 0) != list(range(kept)):
+        raise ValueError("mamba_scan: store names each row's state slot (-1 for none), the slots 0 .. kept - 1 once")
     slot = _table("slots", slots, lambda: ints(slots))
+    where = _table("store", store, lambda: ints(store))
     xd = heads * head_dim
     conv_dim = xd + 2 * groups * state_dim
     kc = conv_w.shape[0]
     dims, seg, starts = _segments(tuple(int(n) for n in lengths))
-    conv = _kernel("nemotron_mamba_conv", _MAMBA_CONV, ["P", "CS_IN", "CW", "CB", "SEG", "START", "SLOT"],
+    conv = _kernel("nemotron_mamba_conv", _MAMBA_CONV, ["P", "CS_IN", "CW", "CB", "SEG", "START", "SLOT", "STORE"],
                    ["XBC", "CS_OUT"])
     xbc, conv_rows = conv(
-        inputs=[proj, conv_states, conv_w, conv_b, seg, starts, slot],
+        inputs=[proj, conv_states, conv_w, conv_b, seg, starts, slot, where],
         template=[("XD", xd), ("NG", groups), ("DS", state_dim), ("KC", kc), ("PROJ", width), ("XOFF", xd)],
         grid=(conv_dim, rows, 1), threadgroup=(min(256, conv_dim), 1, 1),
-        output_shapes=[(rows, conv_dim), (rows, kc - 1, conv_dim)], output_dtypes=[mx.bfloat16, conv_states.dtype])
+        output_shapes=[(rows, conv_dim), (kept, kc - 1, conv_dim)], output_dtypes=[mx.bfloat16, conv_states.dtype])
     scan = _kernel("nemotron_mamba_scan", _MAMBA_SCAN,
-                   ["P", "XBC", "S_IN", "A_LOG", "DSKIP", "DT_BIAS", "limits", "dims", "SEG", "SLOT"], ["Y", "S_OUT"])
+                   ["P", "XBC", "S_IN", "A_LOG", "DSKIP", "DT_BIAS", "limits", "dims", "SEG", "SLOT", "STORE"],
+                   ["Y", "S_OUT"])
     y, ssm_rows = scan(
-        inputs=[proj, xbc, ssm_states, a_log, d_skip, dt_bias, limits, dims, seg, slot],
+        inputs=[proj, xbc, ssm_states, a_log, d_skip, dt_bias, limits, dims, seg, slot, where],
         template=[("H", heads), ("DH", head_dim), ("NG", groups), ("DS", state_dim), ("XD", xd), ("PROJ", width),
                   ("DTOFF", xd + conv_dim), ("SSZ", heads * head_dim * state_dim)],
         grid=(32, head_dim, heads), threadgroup=(32, 8, 1),
-        output_shapes=[(rows, xd), (rows, heads, head_dim, state_dim)], output_dtypes=[mx.bfloat16, ssm_states.dtype])
+        output_shapes=[(rows, xd), (kept, heads, head_dim, state_dim)], output_dtypes=[mx.bfloat16, ssm_states.dtype])
     return y, conv_rows, ssm_rows
 
 
 def mamba_step(proj: mx.array, conv_state: mx.array, ssm_state: mx.array, conv_w: mx.array, conv_b: mx.array,
                a_log: mx.array, d_skip: mx.array, dt_bias: mx.array, limits: mx.array, *, heads: int,
-               head_dim: int, groups: int, state_dim: int) -> tuple[mx.array, mx.array, mx.array]:
-    """Scan one stream, returning gated y [R, XD] and conv/SSM states after each row as [R, KC-1, CD] and [R, H, DH, DS]."""
+               head_dim: int, groups: int, state_dim: int, store: tuple[int, ...] | None = None
+               ) -> tuple[mx.array, mx.array, mx.array]:
+    """Scan one stream, returning gated y [R, XD] and conv/SSM states after each row (or the rows ``store`` keeps) as [R, KC-1, CD] and [R, H, DH, DS]."""
 
     return mamba_scan(proj, conv_state, ssm_state, (int(proj.shape[0]),), conv_w, conv_b, a_log, d_skip, dt_bias,
-                      limits, heads=heads, head_dim=head_dim, groups=groups, state_dim=state_dim)
+                      limits, heads=heads, head_dim=head_dim, groups=groups, state_dim=state_dim, store=store)
+
+
+def kept_state(proj: mx.array, conv_rows: mx.array, ssm_rows: mx.array, store: tuple[int, ...] | None,
+               conv_in: mx.array, ssm_in: mx.array, row: int, params: tuple[mx.array, ...], limits: mx.array, *,
+               heads: int, head_dim: int, groups: int, state_dim: int) -> tuple[mx.array, mx.array, int]:
+    """(conv rows, SSM rows, slot) holding the state after ``row`` of a lone window scanned with ``store``: stored, or re-scanned from the nearest stored state (or the window's input state) over the rows between, the same arithmetic row by row."""
+
+    if store is None or store[row] >= 0:
+        return conv_rows, ssm_rows, row if store is None else store[row]
+    nearest = max((r for r in range(row) if store[r] >= 0), default=-1)
+    conv_src, ssm_src, slot = (conv_rows, ssm_rows, store[nearest]) if nearest >= 0 else (conv_in, ssm_in, 0)
+    count = row - nearest
+    _, conv_again, ssm_again = mamba_scan(proj[nearest + 1:row + 1], conv_src, ssm_src, (count,), *params, limits,
+                                          heads=heads, head_dim=head_dim, groups=groups, state_dim=state_dim,
+                                          slots=(slot,), store=(*([-1] * (count - 1)), 0))
+    return conv_again, ssm_again, 0
 
 
 def group_norm(x: mx.array, weight: mx.array, eps: mx.array, group: int) -> mx.array:
@@ -259,7 +300,8 @@ class FusedDecode:
         self.layers = model.backbone.layers
         # lane attention needs the M5's tensor units (its fragment layout is theirs; an M3 gets wrong values)
         self.lane_attention = tensor_units()
-        self.lane_attention_from = 10_000
+        # every row on lane attention: a window attends in one call, with each row's bits as its one-row step's
+        self.lane_attention_from = 0
         self.eps_value = float(args.layer_norm_epsilon)
         self.eps = mx.array([self.eps_value], dtype=mx.float32)
         self.limits = mx.array([float(args.time_step_limit[0]), float(args.time_step_limit[1])], dtype=mx.float32)
@@ -308,9 +350,10 @@ class FusedDecode:
                 cache_at += 1
                 conv_state, ssm_state = self._mamba_states(c, normed.dtype)
                 block = self._block(i, "M", nxt)
-                h, normed, xs, conv_rows, ssm_rows = block(normed, xs, h, conv_state, ssm_state)
-                self._hold(c, conv_rows, ssm_rows, rows - 1)
-                self.row_states[i] = (conv_rows, ssm_rows)
+                h, normed, xs, conv_rows, ssm_rows, proj = block(normed, xs, h, conv_state, ssm_state)
+                store = sparse_store(rows)
+                self._hold(c, conv_rows, ssm_rows, rows - 1 if store is None else store[rows - 1])
+                self.row_states[i] = (conv_rows, ssm_rows, store, proj, conv_state, ssm_state)
                 c.advance(rows)
             elif kind == "*":
                 c = cache[cache_at]
@@ -352,12 +395,12 @@ class FusedDecode:
                     d_skip, dt_bias,
                     self.limits, heads=self.heads, head_dim=self.head_dim, groups=self.groups,
                     state_dim=self.state_dim, slots=slots)
-                y = group_norm(y, mixer.norm.weight, self.eps, mixer.norm.group_size)
+                y = self._group_norm(y, mixer)
                 h, normed, xs = self._add_norm(h, mixer.out_proj(y), nxt, xs)
                 for c, at, n in zip(layer_caches, offsets, lengths):
                     self._hold(c, conv_rows, ssm_rows, at + n - 1)
                     c.advance(n)
-                self.row_states[i] = (conv_rows, ssm_rows)
+                self.row_states[i] = (conv_rows, ssm_rows, None, None, None, None)
             elif kind == "*":
                 layer_caches = [c[cache_at] for c in caches]
                 cache_at += 1
@@ -384,7 +427,7 @@ class FusedDecode:
                     continue
                 c = cache[cache_at]
                 if layer.block_type == "M":
-                    conv_rows, ssm_rows = self.row_states[i]
+                    conv_rows, ssm_rows = self.row_states[i][:2]
                     self._hold(c, conv_rows, ssm_rows, at + keep - 1)
                 else:
                     c.trim(n - keep)
@@ -416,6 +459,30 @@ class FusedDecode:
         if not self.lane_xs:
             return (*add_norm(h, delta, weight, self.eps), xs)
         return add_norm(h, delta, weight, self.eps, group_sums=True)
+
+    fused_launches = True            # lane GPUs: group norm and the shared expert also write the next input sums
+
+    def _group_norm(self, y: mx.array, mixer: Any) -> mx.array:
+        """The Mamba gate's group norm; on lane GPUs it also writes out_proj's input sums (one launch, not two)."""
+
+        if not (self.lane_xs and self.fused_launches):
+            return group_norm(y, mixer.norm.weight, self.eps, mixer.norm.group_size)
+        from tensorfold.kernels.nemotron.lightning.v1 import lane_fused
+
+        y, ys = lane_fused.group_norm_sums(y, mixer.norm.weight, self.eps, mixer.norm.group_size)
+        return self._use_sums(y, ys)
+
+    def _shared(self, mlp: Any, x: mx.array, xs: Any) -> mx.array:
+        """The shared expert; on lane GPUs its up projection applies relu2 and writes the down projection's input sums."""
+
+        if not (self.lane_xs and self.fused_launches and xs is not None and xs.ndim == 2):
+            return mlp(x)
+        from tensorfold.kernels.nemotron.lightning.v1 import lane_fused
+
+        if not lane_fused.takes_relu2(mlp.up_proj):
+            return mlp(x)
+        act, sums = lane_fused.up_relu2(x, xs, mlp.up_proj)
+        return mlp.down_proj(self._use_sums(act, sums))
 
     def _use_sums(self, x: mx.array, xs: mx.array) -> mx.array:
         """Hand ``x`` and its group sums to the next lane matmul when ``xs`` is not ``_no_xs``, with compiled blocks deciding per trace."""
@@ -450,12 +517,14 @@ class FusedDecode:
         def block(x: mx.array, xs: mx.array, h: mx.array, conv_state: mx.array, ssm_state: mx.array
                   ) -> tuple[mx.array, ...]:
             proj = mixer.in_proj(self._use_sums(x, xs))
+            # a wide lone window keeps states every STATE_STRIDE rows (keep_rows re-scans to a row between)
             y, conv_rows, ssm_rows = mamba_step(proj, conv_state, ssm_state, conv_w, conv_b, a_log, d_skip,
                                                 dt_bias, self.limits, heads=self.heads, head_dim=self.head_dim,
-                                                groups=self.groups, state_dim=self.state_dim)
-            y = group_norm(y, mixer.norm.weight, self.eps, mixer.norm.group_size)
+                                                groups=self.groups, state_dim=self.state_dim,
+                                                store=sparse_store(int(x.shape[0])))
+            y = self._group_norm(y, mixer)
             hn, xn, xsn = self._add_norm(h, mixer.out_proj(y), nxt, xs)
-            return hn, xn, xsn, conv_rows, ssm_rows
+            return hn, xn, xsn, conv_rows, ssm_rows, proj
 
         return block
 
@@ -463,7 +532,7 @@ class FusedDecode:
         mixer = self.layers[index].mixer
 
         def block(x: mx.array, xs: mx.array, h: mx.array) -> tuple[mx.array, mx.array, mx.array]:
-            routed, weights, shared = self._moe(index, mixer, self._use_sums(x, xs))
+            routed, weights, shared = self._moe(index, mixer, self._use_sums(x, xs), xs)
             if not self.lane_xs:
                 return (*add_norm_moe(h, routed, weights, shared, nxt, self.eps), xs)
             return add_norm_moe(h, routed, weights, shared, nxt, self.eps, group_sums=True)
@@ -483,8 +552,10 @@ class FusedDecode:
             c = cache[cache_at]
             cache_at += 1
             if layer.block_type == "M":
-                conv_rows, ssm_rows = self.row_states[i]
-                self._hold(c, conv_rows, ssm_rows, keep - 1)
+                conv_rows, ssm_rows, store, proj, conv_in, ssm_in = self.row_states[i]
+                self._hold(c, *kept_state(proj, conv_rows, ssm_rows, store, conv_in, ssm_in, keep - 1, self.mamba[i],
+                                          self.limits, heads=self.heads, head_dim=self.head_dim, groups=self.groups,
+                                          state_dim=self.state_dim))
             else:
                 c.trim(drop)
 
@@ -536,8 +607,15 @@ class FusedDecode:
             return lane_sdpa(q, keys, values, scale)
         return mx.fast.scaled_dot_product_attention(q, keys, values, scale=scale, mask="causal" if rows > 1 else None)
 
-    def _moe(self, index: int, mixer: Any, x: mx.array) -> tuple[mx.array, mx.array, mx.array]:
+    def _moe(self, index: int, mixer: Any, x: mx.array, xs: Any = None) -> tuple[mx.array, mx.array, mx.array]:
         # The router and expert kernels preserve each row's bits; MLX bf16 matmul changes summation order with row count.
         logits = router_logits(x, mixer.gate.weight)
-        experts, weights = route(logits, self.gate_bias[index], self.top_k, self.scaling)
-        return row_kernels.experts(mixer.switch_mlp, x, experts), weights, mixer.shared_experts(x)
+        rows, experts_count = int(logits.shape[0]), int(logits.shape[1])
+        tables = None
+        if (row_kernels.ROUTE_GROUP and rows >= row_kernels.GROUP_ROWS and rows * self.top_k <= row_kernels.MAX_GROUP_PAIRS
+                and experts_count % 32 == 0 and experts_count <= row_kernels.ROUTE_THREADS):
+            # a grouped window: the route kernel's picks and the group kernel's tables from one launch
+            experts, weights, tables = row_kernels.route_group(logits, self.gate_bias[index], self.top_k, self.scaling)
+        else:
+            experts, weights = route(logits, self.gate_bias[index], self.top_k, self.scaling)
+        return row_kernels.experts(mixer.switch_mlp, x, experts, tables=tables), weights, self._shared(mixer.shared_experts, x, xs)

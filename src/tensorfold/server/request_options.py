@@ -38,29 +38,79 @@ def parse_numbers(fields: dict[str, Any]) -> dict[str, Any]:
     return parsed
 
 
-EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
+EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+
+
+_EFFORT_ORDER = ("max", "xhigh", "high", "medium", "low", "minimal")   # highest first
+
+
+def nearest_named_effort(effort: str, levels: frozenset[str]) -> str:
+    """The nearest named level, ties going higher; effort itself when none is named or it is off the ladder."""
+    # max sits above xhigh. A template that names it keeps max; any other template hears the nearest name
+
+    if not levels or effort not in _EFFORT_ORDER:
+        return effort
+    want = _EFFORT_ORDER.index(effort)
+    return min(levels, key=lambda name: (abs(_EFFORT_ORDER.index(name) - want), _EFFORT_ORDER.index(name)))
 
 
 def effort_levels(template: str | None) -> frozenset[str]:
-    """The efforts a chat template names: Qwen3.8's low, medium and xhigh; GLM-5.3's low and high."""
+    """The efforts a chat template names: Qwen3.8's low, medium and xhigh; GLM-5.3's low, high and max."""
 
-    return frozenset(re.findall(r"""['"](minimal|low|medium|high|xhigh)['"]""", template or ""))
+    return frozenset(re.findall(r"""['"](minimal|low|medium|high|xhigh|max)['"]""", template or ""))
+
+
+def coerce_effort(effort: str | None, levels: frozenset[str] = frozenset()) -> str | None:
+    """The nearest level the template names, ties going higher. None stays None, and xhigh stays xhigh."""
+
+    if effort is None:
+        return None
+    if not levels:
+        if effort in ("high", "max"):
+            return "xhigh"
+        if effort == "minimal":
+            return "low"
+        return effort
+    if effort in levels or effort in ("xhigh", "none"):
+        return effort
+    return nearest_named_effort(effort, levels)
+
+
+def heard_effort(explicit: str | None, default: str | None, levels: frozenset[str]) -> str | None:
+    """A request's effort when it set one, otherwise the server default, both in the template's names."""
+
+    return coerce_effort(default if explicit is None else explicit, levels)
+
+
+def thinking_switch(value: Any) -> bool | None:
+    """``chat_template_kwargs.thinking`` as a switch: a bool, or DeepSeek's ``{"type": "enabled" | "disabled"}``;
+    None (the server's default) for anything else, which clients may send for their own templates."""
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, dict) and value.get("type") in ("enabled", "disabled"):
+        return value["type"] == "enabled"
+    return None
 
 
 def thinking_fields(body: dict[str, Any], levels: frozenset[str] = frozenset()) -> dict[str, Any]:
-    """A request's ``reasoning_effort`` and ``enable_thinking`` where it sets them; unset is the server's default."""
+    """A request's ``reasoning_effort`` and ``enable_thinking`` where it sets them; unset is the server's default.
+
+    ``chat_template_kwargs.thinking`` (the switch DeepSeek-V4 clients such as pi send) is heard as ``enable_thinking``
+    when that is absent."""
 
     kwargs = body.get("chat_template_kwargs") or {}
+    switch = thinking_switch(kwargs.get("thinking")) if isinstance(kwargs, dict) else None
+    if switch is not None and "enable_thinking" not in kwargs:
+        kwargs = {**kwargs, "enable_thinking": switch}
     fields: dict[str, Any] = {}
     effort = body.get("reasoning_effort")
     if effort is None and isinstance(kwargs, dict):
         effort = kwargs.get("reasoning_effort")           # where vLLM's clients put it
     if effort is not None:
         if not isinstance(effort, str) or effort not in EFFORTS:
-            raise RequestError("reasoning_effort must be none, minimal, low, medium, high or xhigh")
-        # OpenAI's "high" and "minimal" are "xhigh" and "low" unless the template names them (GLM-5.3 names "high")
-        named = effort in levels or effort not in ("high", "minimal")
-        fields["reasoning_effort"] = effort if named else {"high": "xhigh", "minimal": "low"}[effort]
+            raise RequestError("reasoning_effort must be none, minimal, low, medium, high, xhigh or max")
+        fields["reasoning_effort"] = coerce_effort(effort, levels)
         fields["enable_thinking"] = effort != "none"
     if isinstance(kwargs, dict) and "enable_thinking" in kwargs:          # an explicit switch wins
         fields["enable_thinking"] = bool(kwargs["enable_thinking"])
@@ -83,6 +133,11 @@ class RequestOptions:
                 template = " ".join(str(t) for t in template.values())
             found = self.__dict__["_effort_levels"] = effort_levels(template if isinstance(template, str) else None)
         return found
+
+    def effort_for(self, explicit: str | None) -> str | None:
+        """The effort the template hears: the request's name, or this server's default."""
+
+        return heard_effort(explicit, getattr(self, "reasoning_effort", None), self.effort_levels)
 
     def _resolve_sampling(self, fields: dict[str, Any] | None, temperature: float,
                           prompt_ids: list[int]) -> Any:

@@ -192,8 +192,11 @@ pub const Scope = struct {
         return s.result(rc, a);
     }
     pub fn rms(s: *Scope, x: Array, w: Array) !Array {
+        return s.rmsEpsilon(x, w, 1e-6);
+    }
+    pub fn rmsEpsilon(s: *Scope, x: Array, w: Array, epsilon: f32) !Array {
         var a = c.mlx_array_new();
-        const rc = c.mlx_fast_rms_norm(&a, x, w, 1e-6, stream);
+        const rc = c.mlx_fast_rms_norm(&a, x, w, epsilon, stream);
         return s.result(rc, a);
     }
     pub fn rope(s: *Scope, x: Array, positions: Array, dims: c_int) !Array {

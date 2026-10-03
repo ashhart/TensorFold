@@ -11,15 +11,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from tensorfold.engine import grammar
-from tensorfold.server import responses
+from tensorfold.server import anthropic, live, responses, token_routes
 from tensorfold.server.tools import (active_tool_specs, parse_tool_calls_from_content, stream_tool_call_deltas,
                                      tool_choice_requires_call)
-from tensorfold.server.errors import CapacityError, RequestError
+from tensorfold.server.decisions import DecisionError
+from tensorfold.server.errors import CapacityError, RequestError, error_body
 from tensorfold.server.request_options import parse_numbers, thinking_fields
+from tensorfold.server.probabilities import probability_options
 from tensorfold.server.messages import normalize_messages, validate_modalities
 from tensorfold.server.tool_policy import ToolCallPolicy
 from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
+from tensorfold.server import metrics
 from tensorfold.server.stacks import Rearming
+from tensorfold.server.request_body import read_body
 
 # TENSORFOLD_REQUEST_LOG=path appends every request body (one JSON a line), for exact replays of real traffic
 _REQUEST_LOG = os.environ.get("TENSORFOLD_REQUEST_LOG", "")
@@ -59,6 +63,14 @@ def redact_images(value: Any) -> Any:
     return {key: redact_images(item) for key, item in value.items()}
 
 
+def reply_model(app: Any, body: Any) -> str:
+    """The id a reply names: the one the request asked for when this endpoint answers to it, else the served name."""
+
+    asked = body.get("model") if isinstance(body, dict) else None
+    name = str(getattr(app, "served_name", "") or getattr(app, "served", "") or "")
+    return asked if isinstance(asked, str) and asked in (getattr(app, "model_ids", None) or [name]) else name
+
+
 def served_model_ids(served_name: str, aliases: list[str] | None = None) -> list[str]:
     """Return the OpenAI model ids this endpoint advertises."""
 
@@ -68,6 +80,13 @@ def served_model_ids(served_name: str, aliases: list[str] | None = None) -> list
         if model_id and model_id not in ids:
             ids.append(model_id)
     return ids
+
+
+def wants_usage_chunk(body: Any) -> bool:
+    """Whether the request asked for the spec's usage-only chunk before [DONE] (stream_options.include_usage)."""
+
+    options = body.get("stream_options") if isinstance(body, dict) else None
+    return bool(isinstance(options, dict) and options.get("include_usage"))
 
 
 def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
@@ -82,8 +101,18 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
+            if self.close_connection:                    # so a pooling client does not reuse the socket
+                self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(body)
+
+        def _discard_body(self) -> None:
+            """Read a refused request's body, so it cannot reach the next request on this connection."""
+
+            try:
+                read_body(self)
+            except RequestError:
+                pass  # the reader closes the connection when framing cannot be drained
 
         def _route(self) -> str:
             # Tolerate query strings, trailing slashes and client URLs with or without the /v1 prefix.
@@ -93,6 +122,8 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
             route = self._route()
             if responses.route(route):
                 return responses.get(self, app, responses.route(route))
+            if route in {"/metrics", "/v1/metrics"}:
+                return metrics.send(self, app)
             if route in {"", "/health"}:
                 self._send_json(
                     {
@@ -102,6 +133,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                         "max_batch_size": app.max_batch_size,
                         "warming": bool(getattr(app, "warming", False)),
                         "memory": _memory("reset_peak=1" in self.path, admission=getattr(app, "prompt_memory", None)),
+                        **({"live": live.snapshot(app.scheduler)} if getattr(app, "scheduler", None) is not None else {}),
                     }
                 )
                 return
@@ -157,20 +189,28 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
 
         def do_POST(self) -> None:
             route = self._route()
+            if route.endswith("/decisions"):
+                return self._post_decisions(app)
+            if anthropic.route(self.path):
+                return anthropic.post(self, app)
             if responses.route(route) == "":         # a Response: this handler's chat completion, translated
                 return responses.post(self, app)
+            if route in token_routes.ROUTES:         # vLLM's /tokenize and /detokenize
+                return self._post_tokenizer(route.endswith("/detokenize"))
+
             is_chat_completion = route.endswith("/chat/completions")
             is_text_completion = route.endswith("/completions") and not is_chat_completion
             if not is_chat_completion and not is_text_completion:
+                self._discard_body()
                 self._send_json({"error": {"message": f"unknown path {self.path}"}}, status=404)
                 return
+            field = "messages" if is_chat_completion else "prompt"   # the field an error's code names (OpenAI's param)
 
             try:
-                length = int(self.headers.get("Content-Length", "0"))
-                if not 0 <= length <= 32 * 1024**2:
-                    raise RequestError("request body exceeds the 32 MiB limit")
-                body = parse_numbers(json.loads(self.rfile.read(length) or b"{}"))
+                body = parse_numbers(json.loads(read_body(self) or b"{}"))
                 validate_modalities(body)
+                probability_options(body)
+                named = reply_model(app, body)          # the id the request asked for, as vLLM names it
                 if _REQUEST_LOG and body.get("priority") != "background":   # batch jobs are not client traffic
                     with open(_REQUEST_LOG, "a") as handle:
                         handle.write(json.dumps(redact_images(body)) + "\n")
@@ -205,9 +245,10 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 if getattr(app, "accepts_cancellation", False):
                     sampling_kw["cancellation"] = socket_cancellation(self.connection)
                 stream = bool(body.get("stream", False))
+                separate_usage = wants_usage_chunk(body)      # usage then rides its own chunk before [DONE]
                 tool_policy = ToolCallPolicy(body)
             except RequestError as exc:
-                self._send_json({"error": {"message": str(exc), "type": "invalid_request_error"}},
+                self._send_json({"error": error_body(exc, field)},
                                 status=503 if isinstance(exc, CapacityError) else 400)
                 return
             except Exception as exc:
@@ -234,6 +275,8 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 extras: dict[str, Any] = {
                     "exact_mode": app.exact_mode.get("mode", "target-verified")
                 }
+                if reply.get("stop_sequence") is not None:
+                    extras["stop_sequence"] = reply["stop_sequence"]
                 if reply.get("batch_size"):
                     extras["tensorfold"] = {
                         "batch_size": reply["batch_size"],
@@ -259,7 +302,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                         "id": completion_id,
                         "object": "text_completion",
                         "created": created,
-                        "model": app.served_name,
+                        "model": named,
                         "choices": [
                             {
                                 "index": 0,
@@ -273,7 +316,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                     "id": completion_id,
                     "object": "chat.completion.chunk",
                     "created": created,
-                    "model": app.served_name,
+                    "model": named,
                     "choices": [
                         {
                             "index": 0,
@@ -300,6 +343,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                         *,
                         error: BaseException | None = None,
                         extras: dict[str, Any] | None = None,
+                        usage: dict[str, Any] | None = None,
                     ) -> None:
                         if error is not None:
                             payload = {"error": {"message": str(error), "type": "server_error"}}
@@ -308,6 +352,8 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                             if extras:
                                 payload.update(extras)
                         emit(payload)
+                        if usage is not None:
+                            emit({**stream_chunk(), "choices": [], "usage": usage})   # the spec's own usage chunk
                         self.wfile.write(b"data: [DONE]\n\n")
                         self.wfile.flush()
 
@@ -375,7 +421,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                     except RequestCancelled:
                         return
                     except RequestError as exc:
-                        emit({"error": {"message": str(exc), "type": "invalid_request_error"}})
+                        emit({"error": error_body(exc, field)})
                         self.wfile.write(b"data: [DONE]\n\n")
                         self.wfile.flush()
                         return
@@ -391,11 +437,13 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                             pass
                         return
                     extras = response_extras(reply)
-                    if "prompt_tokens" in reply and "completion_tokens" in reply:
+                    counted = "prompt_tokens" in reply and "completion_tokens" in reply
+                    usage = usage_from_reply({"cached_tokens": 0, **reply}) if counted else None
+                    if usage is not None and not separate_usage:
                         # Clients that time the stream count tokens from here.
-                        extras["usage"] = usage_from_reply(
-                            {"cached_tokens": 0, **reply})
-                    finish_stream(reply.get("finish_reason") or "length", extras=extras)
+                        extras["usage"] = usage
+                    finish_stream(reply.get("finish_reason") or "length", extras=extras,
+                                  usage=usage if separate_usage else None)
                     return
 
                 reply = attach_tool_calls(
@@ -414,7 +462,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                             "id": completion_id,
                             "object": "text_completion",
                             "created": created,
-                            "model": app.served_name,
+                            "model": named,
                             "choices": [
                                 {
                                     "index": 0,
@@ -442,7 +490,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                         "id": completion_id,
                         "object": "chat.completion",
                         "created": created,
-                        "model": app.served_name,
+                        "model": named,
                         "choices": [
                             {
                                 "index": 0,
@@ -457,7 +505,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
             except (BrokenPipeError, ConnectionResetError, RequestCancelled):
                 pass
             except RequestError as exc:
-                self._send_json({"error": {"message": str(exc), "type": "invalid_request_error"}}, status=400)
+                self._send_json({"error": error_body(exc, field)}, status=400)
             except Exception as exc:  # surface runner errors to the client
                 print(f"[tensorfold] request error: {type(exc).__name__}: {exc}", flush=True)
                 traceback.print_exc()
@@ -465,5 +513,49 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                     self._send_json({"error": {"message": str(exc)}}, status=500)
                 except Exception:
                     pass
+
+
+        def _post_tokenizer(self, detokenize: bool) -> None:
+            try:
+                body = json.loads(read_body(self) or b"{}")
+                reply = token_routes.detokenize(app, body) if detokenize else token_routes.tokenize(app, body)
+            except RequestError as exc:
+                self._send_json({"error": error_body(exc)}, status=503 if isinstance(exc, CapacityError) else 400)
+                return
+            except Exception as exc:  # noqa: BLE001 - a body the tokenizer cannot read is a client error
+                self._send_json({"error": {"message": str(exc), "type": "invalid_request_error"}}, status=400)
+                return
+            self._send_json(reply)
+
+        def _post_decisions(self, app: Any) -> None:
+            decide = getattr(app, "decisions", None)
+            if decide is None:
+                self._discard_body()
+                self._send_json({"error": {"message": f"unknown path {self.path}"}}, status=404)
+                return
+            try:
+                body = parse_numbers(json.loads(read_body(self) or b"{}"))
+                if not isinstance(body, dict):
+                    raise RequestError("request body must be an object")
+            except RequestError as exc:
+                self._send_json({"error": {"message": str(exc), "type": "invalid_request_error"}}, status=400)
+                return
+            except Exception as exc:  # noqa: BLE001 - a bad body is a client error
+                self._send_json({"error": {"message": str(exc), "type": "invalid_request_error"}}, status=400)
+                return
+            try:
+                payload = decide(body)
+            except (RequestError, DecisionError) as exc:
+                self._send_json({"error": {"message": str(exc), "type": "invalid_request_error"}}, status=400)
+                return
+            except Exception as exc:  # a scoring failure is the server's, not a bad body
+                print(f"[tensorfold] request error: {type(exc).__name__}: {exc}", flush=True)
+                traceback.print_exc()
+                try:
+                    self._send_json({"error": {"message": str(exc)}}, status=500)
+                except Exception:
+                    pass
+                return
+            self._send_json(payload)
 
     return Handler

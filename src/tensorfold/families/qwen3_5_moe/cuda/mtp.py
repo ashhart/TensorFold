@@ -77,7 +77,7 @@ class Head:
             full = untile(w.head)
             self.ids = torch.as_tensor(ids, dtype=torch.int64, device=w.norm.device)
             self.head = tile(QLinear(full.weight[self.ids].contiguous(), full.scales[self.ids].contiguous(),
-                                     full.biases[self.ids].contiguous()))
+                                     full.biases[self.ids].contiguous(), gs=full.gs, bits=full.bits))
             del full
 
     @torch.no_grad()

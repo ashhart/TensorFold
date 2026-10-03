@@ -113,8 +113,7 @@ inline void load16(const device bfloat* p, thread float* v) {
 }
 """
 
-# Simdgroup g of (row r, head h) runs keys [g * per, ..) of the row's pool rows then window, 8 a block (fp32 scores,
-# bf16 p in P.V); simdgroup 0 merges the S runs in order with the sink; ROT unropes the bf16 output as norm_rope does
+# simdgroups run their key ranges in fp32 (bf16 p); group 0 merges them with the sink; ROT unropes like norm_rope
 _SPLIT = r"""
   const int r = int(threadgroup_position_in_grid.y) / 64;
   const int h = int(threadgroup_position_in_grid.y) % 64;

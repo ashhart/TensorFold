@@ -76,6 +76,7 @@ def image_http_fixtures(output):
     addresses = {"invalid", "127.1", "01.2.3.4", "::ffff:8.8.8.8", "2002:0808:0808::1", "168.63.129.16"}
     for cls in (ipaddress.IPv4Address, ipaddress.IPv6Address):
         constants = cls._constants
+        bits = cls(0).max_prefixlen
         blocks = [*constants._private_networks, *constants._private_networks_exceptions]
         if hasattr(constants, "_reserved_networks"):
             blocks += constants._reserved_networks
@@ -84,11 +85,11 @@ def image_http_fixtures(output):
         for block in blocks:
             for boundary in (int(block.network_address), int(block.broadcast_address)):
                 for offset in (-1, 0, 1):
-                    if 0 <= boundary + offset < 1 << cls.max_prefixlen:
+                    if 0 <= boundary + offset < 1 << bits:
                         addresses.add(str(cls(boundary + offset)))
         rng = random.Random(271828)
         for _ in range(1024):
-            addresses.add(str(cls(rng.getrandbits(cls.max_prefixlen))))
+            addresses.add(str(cls(rng.getrandbits(bits))))
     urls = [
         "https://example.com", "https://example.com:443/a?x=1", "https://example.com/a#",
         "HTTPS://EXAMPLE.COM/a", "https://bücher.example/æ?q=ø", "https://faß.example/a",

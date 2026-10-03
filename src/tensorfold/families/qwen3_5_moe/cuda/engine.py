@@ -114,15 +114,22 @@ class Qwen36Engine:
             self.cache.entries = [c for c in self.cache.entries if len(c[0]) <= n or c[0][:n] != best[0]]
         return best
 
+    def close(self) -> None:
+        """Stop the concurrent scheduler's worker, so the engine's GPU memory can go (tests start several engines)."""
+
+        if self.scheduler is not None:
+            self.scheduler.close()
+            self.scheduler = None
+
     def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens: Callable[[list[int]], bool | None],
                  draft: bool = True, stop_eos: bool = True, constraint=None,
                  background: bool = False) -> dict[str, Any]:
-        """``draft=False``: serial decoding from a fresh prefill, no drafts or kept states; ``stop_eos=False``: past end
-        tokens; ``background``: under ``--parallel``, after the other requests and yielding a lane to one that waits."""
+        """``draft=False``: serial re-runs, no drafts; ``background``: last under ``--parallel``, yielding a lane."""
 
         from tensorfold.families.qwen3_5.cuda.decode import draft_decode, prefill as serial_prefill
 
         from tensorfold.cuda.markers import MIN_GAP
+        from tensorfold.families.qwen3_5.cuda.engine import entry_end
 
         from .decode import mtp_decode, prefill
 
@@ -148,11 +155,10 @@ class Qwen36Engine:
         stops = [p for p in (self.points(prompt) if self.points is not None else [])
                  if p >= (len(hit[0]) if hit else 0) + MIN_GAP]
         keep = lambda p, st, mc, held: self.cache.add(list(prompt[:p]), st, (mc, held))       # noqa: E731
+        end = None if stops and len(prompt) - stops[-1] < MIN_GAP else entry_end(prompt)
         st, mc, first, carry = prefill(self.w, self.head, prompt, sampling,
                                        state=hit[1] if hit else None, cache=hit[2][0] if hit else None,
-                                       held=hit[2][1] if hit else None, stops=stops, keep=keep, **grammar)
-        if not (stops and len(prompt) - stops[-1] < MIN_GAP):
-            self.cache.add(list(prompt), st, (mc.view(), carry.states))
+                                       held=hit[2][1] if hit else None, stops=stops, keep=keep, keep_at=end, **grammar)
         stats = {"prefill_s": round(time.perf_counter() - t0, 4), "cached": len(hit[0]) if hit else 0,
                  "drafts": True}
         if on_tokens([first]) or (stop_eos and first in self.eos) or max_tokens <= 1:

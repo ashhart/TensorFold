@@ -24,7 +24,7 @@ def _run(scenario: str, limit: int) -> dict:
 
 
 @pytest.mark.parametrize("scenario", ["simd_qmm", "norm", "row_forward", "sampling", "nemotron", "row_attention",
-                                      "flash_next"])
+                                      "flash_next", "gemma"])
 def test_every_launch_fits_a_lower_limit_with_the_same_bits(scenario):
     free = _run(scenario, 0)
     assert free["guessed"] == 0

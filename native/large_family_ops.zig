@@ -55,7 +55,7 @@ pub fn hcStep(k: *mx.Kernels, s: *mx.Scope, streams: A, pending: ?[3]A, mix_weig
     const post = if (pending) |p| p[1] else try s.zeros(&.{ rows, 4 }, mx.f32t);
     const comb = if (pending) |p| p[2] else try s.zeros(&.{ rows, 4, 4 }, mx.f32t);
     const epsilon = try s.scalar(eps);
-    const expanded = try k.run(s, src.glm_hc_expand, &.{ streams, branch, post, comb, epsilon }, &.{ ti("D", 4096), ti("EXPAND", @intFromBool(pending != null)), ti("SPLIT", @intFromBool(split)), ti("SQ_FMA", 0) }, .{ 1024 * rows, 1, 1 }, .{ 1024, 1, 1 }, &.{ .{ .shape = if (pending != null) mx.shape(streams) else &.{1} }, .{ .shape = &.{rows}, .dtype = mx.f32t } });
+    const expanded = try k.run(s, src.glm_hc_expand, &.{ streams, branch, post, comb, epsilon }, &.{ ti("D", 4096), ti("EXPAND", @intFromBool(pending != null)), ti("SPLIT", @intFromBool(split)), ti("SQ_FMA", 0), ti("ZOUT", 0) }, .{ 1024 * rows, 1, 1 }, .{ 1024, 1, 1 }, &.{ .{ .shape = if (pending != null) mx.shape(streams) else &.{1} }, .{ .shape = &.{rows}, .dtype = mx.f32t }, .{ .shape = &.{1}, .dtype = mx.f32t } });
     const x = if (pending != null) expanded[0] else streams;
     const fnw = mix_weight orelse return .{ x, mx.empty, mx.empty, mx.empty };
     const is_packed = mx.dtype(fnw) == mx.bf16;

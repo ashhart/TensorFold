@@ -62,8 +62,8 @@ fn gdn(m: *model.Model, s: *mx.Scope, i: usize, x: A, p: *model.Pass) !A {
     const q0 = try s.reshape(try s.slice(activated, 2, 0, 2048), &.{ 1, n, 16, 128 });
     const k0 = try s.reshape(try s.slice(activated, 2, 2048, 4096), &.{ 1, n, 16, 128 });
     const v = try s.reshape(try s.slice(activated, 2, 4096, 10240), &.{ 1, n, 48, 128 });
-    const q = try s.binary(c.mlx_multiply, try s.rms(q0, mx.empty), try s.cast(try s.scalar(1.0 / 128.0), mx.bf16));
-    const k = try s.binary(c.mlx_multiply, try s.rms(k0, mx.empty), try s.cast(try s.scalar(0.08838834764831845), mx.bf16));
+    const q = try s.binary(c.mlx_multiply, try s.rmsEpsilon(q0, mx.empty, 1e-6 / 128.0), try s.cast(try s.scalar(1.0 / 128.0), mx.bf16));
+    const k = try s.binary(c.mlx_multiply, try s.rmsEpsilon(k0, mx.empty, 1e-6 / 128.0), try s.cast(try s.scalar(0.08838834764831845), mx.bf16));
     const g = try m.prefill_ops.call(s, .decay, &.{ try m.weight(i, "linear_attn.A_log"), a, try m.weight(i, "linear_attn.dt_bias") });
     const beta = try s.unary(c.mlx_sigmoid, b);
     if (i == 16) {

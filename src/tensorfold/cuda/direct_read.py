@@ -28,6 +28,7 @@ class Reader:
 
     def __init__(self) -> None:
         self.direct = hasattr(os, "O_DIRECT")
+        self.staged = os.name == "nt"               # Windows has no O_DIRECT: reads there buffer into pinned staging
         self.staging: list[list] = []         # [pinned piece, event of its last copy]
         self.turn = 0
 
@@ -43,6 +44,10 @@ class Reader:
                 if exc.errno != errno.EINVAL:
                     raise
                 self.direct = False               # the file system refuses O_DIRECT, on the open or on a read
+        if n > 0 and self.staged and (cuda or pinned):
+            # Windows stages here: one page-locked block where that means host RAM, filled by one buffered read
+            raw = self._buffered(path, offset, n, pinned=torch.cuda.is_available())
+            return raw.to(device) if cuda else raw
         raw = self._buffered(path, offset, n)
         return raw.to(device) if cuda else raw
 
@@ -56,8 +61,10 @@ class Reader:
             self.staging.clear()
             getattr(torch._C, "_host_emptyCache", lambda: None)()
 
-    def _buffered(self, path, offset: int, n: int) -> torch.Tensor:
-        raw = torch.empty((n,), dtype=torch.uint8)
+    def _buffered(self, path, offset: int, n: int, pinned: bool = False) -> torch.Tensor:
+        """One buffered read of ``n`` bytes, page-locked when ``pinned`` (how Windows stages, having no O_DIRECT)."""
+
+        raw = torch.empty((n,), dtype=torch.uint8, pin_memory=pinned, device="cpu")
         view = memoryview(raw.numpy())
         with open(path, "rb", buffering=0) as f:
             f.seek(offset)

@@ -313,6 +313,9 @@ pub const Model = struct {
         }
         const t = try m.weights.triple(key);
         const f = try m.format(key);
+        if (transpose and ids == null and mx.shape(x).len == 2 and mx.dtype(x) == mx.bf16 and mx.dtype(t[1]) == mx.bf16 and mx.dtype(t[2]) == mx.bf16) {
+            return @import("flash_prefill_mm.zig").matmul(&m.kernels, s, x, .{ .arrays = t, .format = f });
+        }
         var out = c.mlx_array_new();
         const rc = if (ids) |ix| c.mlx_gather_qmm(&out, x, t[0], t[1], t[2], mx.empty, ix, transpose, mx.opt(f.group_size), mx.opt(f.bits), "affine", false, mx.stream) else c.mlx_quantized_matmul(&out, x, t[0], t[1], t[2], transpose, mx.opt(f.group_size), mx.opt(f.bits), "affine", mx.stream);
         return s.result(rc, out);

@@ -90,6 +90,30 @@ def test_gemma_tool_calls_are_parsed_and_kept_out_of_the_streamed_text():
     assert shown == hide_tool_calls(reply, finished=True) == "Reading it now."
 
 
+def test_gemma_bare_colon_tool_call_is_structured():
+    """Issue 121: gemma-4-26b-a4b-it writes <|tool_call>:name{args}<tool_call|> with no call prefix."""
+
+    import json
+
+    from tensorfold.server.tools import parse_tool_calls_from_content
+
+    def tool(name):
+        return {"type": "function", "function": {"name": name, "parameters": {"type": "object", "properties": {
+            "path": {"type": "string"}, "command": {"type": "string"}, "filePath": {"type": "string"},
+            "pattern": {"type": "string"}}}}}
+
+    tools = [tool(name) for name in ("bash", "read", "write", "edit", "glob", "grep", "list")]
+    leaked = '<|tool_call>:list{path:<|"|>.<|"|>}<tool_call|>'
+    content, calls = parse_tool_calls_from_content(leaked, tools)
+    assert content == "" and len(calls) == 1
+    assert calls[0]["function"]["name"] == "list"
+    assert json.loads(calls[0]["function"]["arguments"]) == {"path": "."}
+    prose, parsed = parse_tool_calls_from_content("Looking.\n" + leaked, tools)
+    assert prose == "Looking." and json.loads(parsed[0]["function"]["arguments"]) == {"path": "."}
+    stayed, missed = parse_tool_calls_from_content(leaked, [tool("bash")])
+    assert missed is None and stayed == leaked
+
+
 def test_glm_and_gemma_calls_parse_through_one_parser():
     """GLM's <arg_key> calls and Gemma 4's call:NAME{...} calls in one reply, each in the order written."""
 
@@ -109,3 +133,50 @@ def test_glm_and_gemma_calls_parse_through_one_parser():
     assert content == "Two reads."
     assert got == [("read_file", {"path": "a.py"}), ("read_file", {"limit": 5, "path": "b.py"}),
                    ("call:search", {"query": "x"})]
+
+
+def test_gemma_spontaneous_empty_thought_channel_is_stripped():
+    """An empty thought channel is stripped, and a reply with no channel stays as written."""
+    from tensorfold.server.text import CHANNEL_MARKERS
+
+    reply = "<|channel>thought\n<channel|>The files are: a.py, b.py."
+    assert split_thinking(reply, finished=True, markers=CHANNEL_MARKERS) == ("", "The files are: a.py, b.py.")
+    # a plain reply (no channel) is unchanged — the strip is a no-op
+    assert split_thinking("Just an answer.", finished=True, markers=CHANNEL_MARKERS) == ("", "Just an answer.")
+
+
+def test_gemma_thought_channel_not_at_the_start_is_stripped():
+    """A thought channel after text, a newline, or a doubled opener is stripped from the answer."""
+    from tensorfold.server.text import CHANNEL_MARKERS as C
+
+    # after visible text (block empty) -> the text stays, the block goes
+    assert split_thinking("### Read the findings first.\n\n<|channel>thought\n<channel|>", finished=True,
+                          markers=C) == ("", "### Read the findings first.\n\n")
+    # a doubled opener -> both markers and the empty channel are dropped
+    assert split_thinking("<|channel><|channel>thought\n<channel|>The findings are clear.", finished=True,
+                          markers=C) == ("", "The findings are clear.")
+    # a leading newline before the block
+    assert split_thinking("\n\n<|channel>thought\n<channel|>Answer here.", finished=True,
+                          markers=C) == ("", "\n\nAnswer here.")
+    # a real (non-empty) channel after visible text: text is the answer, the channel body is reasoning
+    assert split_thinking("Preamble. <|channel>thought\nquietly.\n<channel|>Done.", finished=True,
+                          markers=C) == ("quietly.\n", "Preamble. Done.")
+    # none of these ever leak a marker into the answer
+    for reply in ("x\n<|channel>thought\n<channel|>y", "<|channel><|channel>thought\n<channel|>z",
+                  "\n<|channel>thought\n<channel|>w"):
+        _, answer = split_thinking(reply, finished=True, markers=C)
+        assert "<|channel>" not in answer and "<channel|>" not in answer
+
+
+def test_gemma_channel_after_text_streams_monotonically():
+    """A streamed answer after a late thought channel only grows, and a partial opener stays hidden."""
+    from tensorfold.server.text import CHANNEL_MARKERS as C
+
+    reply = "Here is the plan.\n\n<|channel>thought\n<channel|>"
+    seen = ""
+    for n in range(1, len(reply) + 1):
+        _, answer = split_thinking(reply[:n], finished=False, markers=C)
+        assert answer.startswith(seen), f"answer taken back at {n}: {seen!r} -> {answer!r}"
+        assert "<|channel>" not in answer
+        seen = answer
+    assert split_thinking(reply, finished=True, markers=C) == ("", "Here is the plan.\n\n")

@@ -39,18 +39,58 @@ class SuffixLookupProposer:
         self._silent_for = 0
         self._index: dict[tuple[int, ...], list[int]] = {}
         self._indexed = 0
+        self._sorted: Any = None          # (packed keys sorted, their end positions, bits a token) of a bulk index
         self.proposals = 0
         self.proposed_tokens = 0
         self.accepted_tokens = 0
         self.silenced_rounds = 0
 
+    bulk = 4096                           # new positions from which an empty index is built by sorting
+
     def _extend_index(self, context: Sequence[int]) -> None:
         n = self.ngram
         start = max(self._indexed, n - 1)
+        if not self._index and self._sorted is None and len(context) - start >= self.bulk and self._bulk(context):
+            return
         for position in range(start, len(context)):
             key = tuple(int(t) for t in context[position - n + 1 : position + 1])
             self._index.setdefault(key, []).append(position)
         self._indexed = len(context)
+
+    def _bulk(self, context: Sequence[int]) -> bool:
+        """Index a whole context as sorted packed n-grams (a prompt's first proposal); False if ids do not pack."""
+
+        import numpy as np
+
+        ids = np.asarray(context, dtype=np.int64)
+        n = self.ngram
+        bits = max(1, int(ids.max()).bit_length())
+        if int(ids.min()) < 0 or n * bits > 63:
+            return False
+        keys = np.zeros(len(ids) - n + 1, dtype=np.int64)
+        for j in range(n):
+            keys = (keys << bits) | ids[j:len(ids) - n + 1 + j]      # keys[i]: the n-gram ending at i + n - 1
+        order = np.argsort(keys, kind="stable")
+        self._sorted = (keys[order], order + (n - 1), bits)
+        self._indexed = len(context)
+        return True
+
+    def _positions(self, key: tuple[int, ...]) -> list[int]:
+        """End positions of ``key``, oldest first: the bulk index's, then those indexed one by one."""
+
+        found = self._index.get(key, [])
+        if self._sorted is None:
+            return found
+        import numpy as np
+
+        keys, ends, bits = self._sorted
+        if any(t < 0 or t >> bits for t in key):
+            return found
+        packed = 0
+        for t in key:
+            packed = (packed << bits) | t
+        lo, hi = np.searchsorted(keys, packed, "left"), np.searchsorted(keys, packed, "right")
+        return ends[lo:hi].tolist() + found if hi > lo else found
 
     def _match_length(self, context: Sequence[int], end: int) -> int:
         """Tokens matching backwards from ``end`` (exclusive) vs the context tail."""
@@ -77,10 +117,11 @@ class SuffixLookupProposer:
             # Context changed underneath the index (new request): rebuild.
             self._index = {}
             self._indexed = 0
+            self._sorted = None
         self._extend_index(context)
         self._last_key = tuple(int(t) for t in context[self._indexed - self.ngram : self._indexed])
         key = tuple(int(t) for t in context[-self.ngram :])
-        positions = self._index.get(key)
+        positions = self._positions(key)
         if not positions:
             return []
         best_end = -1
@@ -160,6 +201,10 @@ class LaneStream:
     retain: bool = True
     # Capture (tokens, single-row cache copy) at prefill boundaries the next turn can match.
     history_checkpoints: list[tuple[list[int], list[Any]]] = field(default_factory=list)
+    # plan chunks each prefill forward took (1s: a chunk a forward; more: a prompt pass)
+    prefill_widths: list[int] = field(default_factory=list)
+    # the forwards whose freed buffers MLX kept in the raised pass cache (the budget had room for it)
+    prefill_raised: list[bool] = field(default_factory=list)
     # Key sampling by each row's logits and position so drafts verify identically; None means greedy.
     sampling: Any = None
     # False: one token a round, no drafts of any kind (the serial reference drafted output is checked against)
@@ -179,7 +224,21 @@ class LaneStream:
 
     @property
     def context(self) -> list[int]:
-        return [*self.prompt_ids, *self.emitted]
+        """prompt_ids + emitted as one list grown as tokens land, not rebuilt a round (callers only read it)."""
+
+        key = (id(self.prompt_ids), len(self.prompt_ids), id(self.emitted))
+        held = self.__dict__.get("_context")
+        size = len(self.prompt_ids) + len(self.emitted)
+        if held is None or self.__dict__.get("_context_key") != key or len(held) > size:
+            held = self.__dict__["_context"] = [*self.prompt_ids, *self.emitted]
+            self.__dict__["_context_key"] = key
+        elif len(held) < size:
+            held.extend(self.emitted[len(held) - len(self.prompt_ids):])
+        return held
+
+    @property
+    def context_len(self) -> int:
+        return len(self.prompt_ids) + len(self.emitted)
 
     @property
     def budget_left(self) -> int:
@@ -296,7 +355,8 @@ class LaneEngine(FamilyRounds):
     prefill_chunks = 0
 
     def __init__(self, model: Any, *, max_rows: int = 128, max_draft: int = 32,
-                 retain_finished_caches: bool = False, prefill_plan: Any = None) -> None:
+                 retain_finished_caches: bool = False, prefill_plan: Any = None,
+                 prefill_pass: int | None = None, pass_cache: int | None = None) -> None:
         if not getattr(model, "lane_family", False):
             raise TypeError(f"{type(model).__name__} is not a lane-engine family (engine.lane_family)")
         if max_rows < 1 or max_draft < 0:
@@ -308,6 +368,10 @@ class LaneEngine(FamilyRounds):
         self.retain_finished_caches = bool(retain_finished_caches)
         if prefill_plan is not None:
             self.prefill_plan = prefill_plan
+        if prefill_pass is not None:
+            self.prefill_pass = max(1, int(prefill_pass))
+        if pass_cache is not None:
+            self.pass_cache = max(0, int(pass_cache))
         self.finished_caches: dict[str, tuple[list[int], list[Any]]] = {}
         self.streams: list[LaneStream] = []
         self.round_stats: list[RoundStats] = []

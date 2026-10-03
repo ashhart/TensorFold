@@ -26,7 +26,7 @@ REFUSED = [   # (body, the start of the error message)
     ({"messages": [{"role": "tool", "content": "x"}]},
      "the chat template rejected the request: No user query found in messages."),
     ({"messages": HI, "reasoning_effort": "extreme"},
-     "reasoning_effort must be none, minimal, low, medium, high or xhigh"),
+     "reasoning_effort must be none, minimal, low, medium, high, xhigh or max"),
     ({"messages": HI, "chat_template_kwargs": "x"}, "chat_template_kwargs must be a JSON object or null"),
     ({"messages": HI, "temperature": "hot"}, "temperature must be a finite number or null"),
     ({"messages": HI, "temperature": 0.7, "seed": "abc"}, "seed must be an integer or null"),

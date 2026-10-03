@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
 
 from tensorfold.server.errors import RequestError
+from tensorfold.server.probabilities import probability_options
 
 if TYPE_CHECKING:
     from tensorfold.server.responses import Store
@@ -54,14 +55,17 @@ def _content(content: Any) -> str | list[dict[str, Any]]:
     return parts
 
 
-def _output(output: Any) -> str:
-    """A function_call_output's output as a tool message's text."""
+def _output(output: Any) -> str | list[dict[str, Any]]:
+    """A function_call_output's output as a tool message's content: text, or text and image_url parts."""
 
     if isinstance(output, str):
         return output
     if isinstance(output, list) and all(isinstance(p, dict) and p.get("type") == "input_text" for p in output):
         return "".join(str(p.get("text") or "") for p in output)
-    raise RequestError("a function_call_output's output must be a string or input_text parts")
+    if isinstance(output, list) and all(isinstance(p, dict) and p.get("type") in ("input_text", "input_image")
+                                        for p in output):
+        return _content(output)          # a screenshot a tool returns, as a chat client sends it
+    raise RequestError("a function_call_output's output must be a string or input_text and input_image parts")
 
 
 def messages(items: list[Any]) -> list[dict[str, Any]]:
@@ -159,6 +163,7 @@ def translate(body: Any, store: Store) -> Request:
 
     if not isinstance(body, dict):
         raise RequestError("the request body must be a JSON object")
+    probability_options(body)
     for name, reason in REFUSED.items():
         if body.get(name):
             raise RequestError(reason)

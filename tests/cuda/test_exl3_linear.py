@@ -128,3 +128,31 @@ def test_the_plan_depends_on_the_shape_only():
         per_warp = (k // 16) // (sk * wk)
         assert (k // 16) % (sk * wk) == 0 and per_warp >= 1
         assert per_warp >= 8 or (k // 16) < 8 * 8              # only a tiny layer may go below eight tiles
+
+
+@pytest.mark.parametrize("codebook,bits", [("mul1", 3), ("mcg", 4), ("3inst", 4)])
+@pytest.mark.parametrize("layout", ["strips", "stored"])
+def test_split_k_without_bias_agrees_with_zero_bias_and_preserves_rows(codebook, bits, layout):
+    """Narrow projections exercise the last split's optional bias load across ragged row windows."""
+
+    trellis, suh, svh = _tensors(codebook, bits, kt=256, nt=128, seed=23)
+    plain = linear.Exl3Linear.from_tensors(trellis, suh, svh, codebook, layout=layout)
+    zero = linear.Exl3Linear.from_tensors(trellis, suh, svh, codebook, bias=torch.zeros_like(svh), layout=layout)
+    bias = torch.linspace(-0.125, 0.125, svh.numel(), dtype=torch.float16)
+    biased = linear.Exl3Linear.from_tensors(trellis, suh, svh, codebook, bias=bias, layout=layout)
+    assert plain.split[0] > 1 and plain.split == zero.split == biased.split
+    rng = torch.Generator(device="cuda").manual_seed(186)
+    x = torch.randn((17, plain.k), device="cuda", generator=rng).half()
+    for rows in (1, 3, 17):
+        out = plain(x[:rows], out_dtype=torch.float32)
+        torch.cuda.synchronize()
+        assert torch.isfinite(out).all()
+        with_zero = zero(x[:rows], out_dtype=torch.float32)
+        assert torch.equal(out, with_zero)
+        nonzero = out != 0                 # adding +0 may turn an absent bias's -0 into +0
+        assert torch.equal(out[nonzero].view(torch.int32), with_zero[nonzero].view(torch.int32))
+        expected = bias.to(device="cuda", dtype=torch.float32).expand(rows, -1)
+        got_bias = biased(torch.zeros_like(x[:rows]), out_dtype=torch.float32)
+        assert torch.equal(expected.view(torch.int32), got_bias.view(torch.int32))
+        alone = torch.cat([plain(row[None], out_dtype=torch.float32) for row in x[:rows]])
+        assert torch.equal(out.view(torch.int32), alone.view(torch.int32))
