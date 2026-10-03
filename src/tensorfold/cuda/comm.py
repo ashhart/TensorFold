@@ -41,6 +41,12 @@ def _library() -> ctypes.CDLL:
         candidates.append(found)
     candidates += glob.glob("/usr/lib/*/libnccl.so.2") + glob.glob("/usr/local/lib/python3*/dist-packages/nvidia/nccl/lib/libnccl.so.2")
     candidates += glob.glob(os.path.join(os.path.dirname(torch.__file__), "lib", "libnccl*.so*"))
+    try:                                  # the pip wheel torch depends on (nvidia-nccl-cu*), in this environment
+        import nvidia.nccl
+
+        candidates += sorted(glob.glob(os.path.join(list(nvidia.nccl.__path__)[0], "lib", "libnccl.so*")))
+    except (ImportError, IndexError):
+        pass
     for path in candidates:
         if path:
             try:

@@ -66,28 +66,79 @@ __device__ __forceinline__ float to_float(T v) {
     else return __bfloat162float(v);
 }
 
-// rounds: one counter a block in this process's device memory, so a captured launch replays with the next round
+template <typename T>
+__device__ __forceinline__ void add_vec(float (&acc)[16 / sizeof(T)], int4 raw, bool first) {
+    constexpr int V = 16 / sizeof(T);
+    if constexpr (sizeof(T) == 4) {
+        const float* f = reinterpret_cast<const float*>(&raw);
+#pragma unroll
+        for (int i = 0; i < V; ++i) acc[i] = first ? f[i] : acc[i] + f[i];
+    } else {
+        const __nv_bfloat16* h = reinterpret_cast<const __nv_bfloat16*>(&raw);
+#pragma unroll
+        for (int i = 0; i < V; ++i) acc[i] = first ? __bfloat162float(h[i]) : acc[i] + __bfloat162float(h[i]);
+    }
+}
+
+// One device round counter a block (captured launches replay with the next round); stages alternate by round parity.
 template <typename T>
 __global__ void __launch_bounds__(THREADS) p2p_sum_kernel(const T* __restrict__ local, Ranks rk, int world,
                                                           __nv_bfloat16* __restrict__ out, long long n, int rank,
-                                                          unsigned long long* __restrict__ rounds, unsigned backoff) {
+                                                          unsigned long long* __restrict__ rounds, unsigned backoff,
+                                                          long long half) {
+    constexpr int V = 16 / sizeof(T);
     __shared__ unsigned long long round;
     if (threadIdx.x == 0) round = rounds[blockIdx.x] + 1;
     __syncthreads();
-    T* stage = reinterpret_cast<T*>(rk.stage[rank]);
-    const long long step = static_cast<long long>(BLOCKS) * THREADS;
-    for (long long i = static_cast<long long>(blockIdx.x) * THREADS + threadIdx.x; i < n; i += step) stage[i] = local[i];
-    meet(rk, world, 0, rank, round, backoff);                  // this block's slice is staged on every rank
-    for (long long i = static_cast<long long>(blockIdx.x) * THREADS + threadIdx.x; i < n; i += step) {
+    const long long off = (round & 1) ? half : 0;
+    T* stage = reinterpret_cast<T*>(rk.stage[rank] + off);
+    const long long step = static_cast<long long>(BLOCKS) * THREADS, nv = n / V;
+    const long long first = static_cast<long long>(blockIdx.x) * THREADS + threadIdx.x;
+    for (long long i = first; i < nv; i += step)
+        reinterpret_cast<int4*>(stage)[i] = reinterpret_cast<const int4*>(local)[i];
+    for (long long i = nv * V + first; i < n; i += step) stage[i] = local[i];
+    meet(rk, world, 0, rank, round, backoff);                  // this block's slices are staged on every rank
+    for (long long i = first; i < nv; i += step) {
+        float acc[V];
+        for (int q = 0; q < world; ++q) {
+            const int4 raw = q == rank ? reinterpret_cast<const int4*>(local)[i]
+                                       : __ldcv(reinterpret_cast<const int4*>(rk.stage[q] + off) + i);
+            add_vec<T>(acc, raw, q == 0);                      // rank order, the first partial as it is
+        }
+#pragma unroll
+        for (int j = 0; j < V; ++j) out[i * V + j] = __float2bfloat16_rn(acc[j]);
+    }
+    for (long long i = nv * V + first; i < n; i += step) {
         float acc = 0.f;
         for (int q = 0; q < world; ++q) {
-            const float v = q == rank ? to_float(local[i]) : load_peer(reinterpret_cast<const T*>(rk.stage[q]) + i);
-            acc = q == 0 ? v : acc + v;                        // rank order, the first partial as it is
+            const float v = q == rank ? to_float(local[i]) : load_peer(reinterpret_cast<const T*>(rk.stage[q] + off) + i);
+            acc = q == 0 ? v : acc + v;
         }
         out[i] = __float2bfloat16_rn(acc);
     }
-    meet(rk, world, 1, rank, round, backoff);                  // and read on every rank: the next round may overwrite it
     if (threadIdx.x == 0) rounds[blockIdx.x] = round;
+}
+
+// A stream barrier among the ranks; ``rounds`` (a device counter a phase) keeps a captured barrier's rounds new.
+__global__ void meet_kernel(Ranks rk, int world, int rank, int phase, unsigned long long* __restrict__ rounds,
+                            unsigned backoff) {
+    __shared__ unsigned long long round;
+    if (threadIdx.x == 0) round = rounds[phase] + 1;
+    __syncthreads();
+    const int q = threadIdx.x;
+    if (q < world && q != rank) {
+        __threadfence_system();
+        const long long slot = (2LL * BLOCKS + phase) * MAX_WORLD;           // past the sums' flags
+        release(reinterpret_cast<unsigned long long*>(rk.sig[q]) + slot + rank, round);
+        const unsigned long long* wait = reinterpret_cast<const unsigned long long*>(rk.sig[rank]) + slot + q;
+        const unsigned long long t0 = now();
+        while (acquire(wait) < round) {
+            if (backoff) __nanosleep(backoff);
+            if (now() - t0 > SPIN_LIMIT_NS) __trap();
+        }
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) rounds[phase] = round;
 }
 
 }  // namespace
@@ -127,7 +178,7 @@ int64_t host_map(int64_t ptr, int64_t bytes) {
 }
 
 void p2p_sum(const at::Tensor& local, const at::Tensor& stages, const at::Tensor& sigs, at::Tensor& out,
-             int64_t rank, const at::Tensor& rounds, int64_t backoff) {
+             int64_t rank, const at::Tensor& rounds, int64_t backoff, int64_t half) {
     TORCH_CHECK(local.is_cuda() && local.is_contiguous() && out.is_contiguous() && out.scalar_type() == at::kBFloat16 &&
                 out.numel() == local.numel(), "local (contiguous fp32/bf16), out bf16 of the same size");
     const int world = static_cast<int>(stages.numel());
@@ -136,6 +187,8 @@ void p2p_sum(const at::Tensor& local, const at::Tensor& stages, const at::Tensor
                 "stages and sigs: one int64 host address a rank, 2 to 8 ranks");
     TORCH_CHECK(rounds.is_cuda() && rounds.scalar_type() == at::kLong && rounds.numel() >= BLOCKS,
                 "rounds: int64 device counters, one a block");
+    TORCH_CHECK(half % 16 == 0 && reinterpret_cast<uintptr_t>(local.data_ptr()) % 16 == 0 &&
+                local.numel() * local.element_size() <= half, "a 16-byte aligned partial no larger than a buffer");
     Ranks rk{};
     for (int q = 0; q < world; ++q) {
         rk.stage[q] = stages.data_ptr<int64_t>()[q];
@@ -148,17 +201,32 @@ void p2p_sum(const at::Tensor& local, const at::Tensor& stages, const at::Tensor
     auto* r = reinterpret_cast<unsigned long long*>(rounds.data_ptr<int64_t>());
     if (local.scalar_type() == at::kFloat)
         p2p_sum_kernel<float><<<BLOCKS, THREADS, 0, stream>>>(local.data_ptr<float>(), rk, world, o, n,
-                                                              static_cast<int>(rank), r, static_cast<unsigned>(backoff));
+                                                              static_cast<int>(rank), r, static_cast<unsigned>(backoff),
+                                                              half);
     else {
         TORCH_CHECK(local.scalar_type() == at::kBFloat16, "fp32 or bf16 partials");
         p2p_sum_kernel<__nv_bfloat16><<<BLOCKS, THREADS, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(local.data_ptr()), rk, world, o, n, static_cast<int>(rank), r,
-            static_cast<unsigned>(backoff));
+            static_cast<unsigned>(backoff), half);
     }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-int64_t signal_bytes() { return 2LL * BLOCKS * MAX_WORLD * sizeof(unsigned long long); }
+int64_t signal_bytes() { return (2LL * BLOCKS + 2) * MAX_WORLD * sizeof(unsigned long long); }
+
+void meet_ranks(const at::Tensor& sigs, int64_t rank, int64_t phase, const at::Tensor& rounds, int64_t backoff) {
+    const int world = static_cast<int>(sigs.numel());
+    TORCH_CHECK(world >= 2 && world <= MAX_WORLD && !sigs.is_cuda() && sigs.scalar_type() == at::kLong &&
+                rounds.is_cuda() && rounds.scalar_type() == at::kLong && rounds.numel() >= 2 && phase >= 0 &&
+                phase < 2, "sigs: one int64 host address a rank; rounds: two int64 device counters");
+    Ranks rk{};
+    for (int q = 0; q < world; ++q) rk.sig[q] = sigs.data_ptr<int64_t>()[q];
+    c10::cuda::CUDAGuard guard(rounds.device());
+    meet_kernel<<<1, 32, 0, at::cuda::getCurrentCUDAStream()>>>(rk, world, static_cast<int>(rank),
+        static_cast<int>(phase), reinterpret_cast<unsigned long long*>(rounds.data_ptr<int64_t>()),
+        static_cast<unsigned>(backoff));
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
 
 int64_t blocks() { return BLOCKS; }
 
@@ -170,4 +238,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("host_map", &host_map, "page-lock shared host bytes for the GPU (mapped): their device address");
     m.def("signal_bytes", &signal_bytes, "bytes of a rank's signal flags");
     m.def("blocks", &blocks, "blocks a sum launches (one round counter each)");
+    m.def("meet", &meet_ranks, "every rank reaches this point on its stream (phase 0 or 1), for copies around it");
 }

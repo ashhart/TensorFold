@@ -93,8 +93,10 @@ class Qwen27Engine:
                                                 tp)
             from tensorfold.cuda import p2p
 
-            if p2p.install(rank) and rank == 0:     # row-parallel sums in one launch: P2P, or shared host memory
-                print(f"[tensorfold] rank sums: {p2p.peer().kind}, NCCL for prompt-sized sums", flush=True)
+            # row-parallel sums in one launch (P2P, or shared host memory); prompt chunks' bf16 partials by copies
+            stage = max(p2p.STAGE_BYTES, 4096 * int(config(model_dir)["hidden_size"]) * 2)
+            if p2p.install(rank, stage_bytes=stage) and rank == 0:
+                print(f"[tensorfold] rank sums: {p2p.peer().kind}", flush=True)
             elif rank == 0:
                 print("[tensorfold] rank sums: NCCL", flush=True)
         else:

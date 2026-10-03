@@ -212,8 +212,15 @@ def _p2p_worker(rank: int, port: int, host: bool = False, world: int = 2):
     dist.init_process_group("nccl", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=world)
     try:
         if host:                                  # the GPUs cannot map each other: shared page-locked host memory
-            assert p2p.install(rank), "both ranks are on this machine, yet the host-memory sum was not installed"
+            assert p2p.install(rank, stage_bytes=24 << 20), "all ranks are on this machine, yet no host-memory sum"
             assert isinstance(p2p.peer(), p2p.HostSum)
+            peer = p2p.peer()
+            gen = torch.Generator(device="cuda").manual_seed(7 + rank)
+            for rows in (2048, 300, 2048, 1):     # prompt-sized partials go by copies: the gathered bytes exactly
+                local = torch.randn((rows, 2560), generator=gen, device="cuda")
+                want = torch.empty((world * rows, 2560), device="cuda")
+                dist.all_gather_into_tensor(want, local)
+                assert torch.equal(peer.gather(local).view(-1, 2560), want), f"gather of {rows} rows"
         else:
             assert p2p.install(rank), "both GPUs can map each other, yet the P2P sum was not installed"
         peer = p2p.peer()
@@ -228,7 +235,7 @@ def _p2p_worker(rank: int, port: int, host: bool = False, world: int = 2):
             for r in range(1, world):
                 acc = acc + every[r].float()
             want = acc.to(torch.bfloat16)
-            got = peer(local)
+            got = gather_rank_partials(local)     # the kernel for decode rows, copies through host memory above
             assert torch.equal(got, want), f"round {round_}: P2P sum differs from the rank-ordered sum"
         torch.cuda.synchronize()
     finally:

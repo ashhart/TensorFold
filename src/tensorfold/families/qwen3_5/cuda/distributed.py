@@ -323,7 +323,13 @@ def gather_rank_partials(local: torch.Tensor, group=None,
 
     peer = p2p.peer()
     if peer is not None and group is None and local.is_cuda and peer.fits(local):
-        return peer(local, dtype)               # one launch over the peer mapping: the same bits as below
+        if peer.small(local):
+            return peer(local, dtype)           # one launch over the peer mapping: the same bits as below
+        parts = peer.gather(local)              # copies through shared host memory, then the rank-ordered sum
+        acc = parts[0].float()
+        for r in range(1, world):
+            acc = acc + parts[r].float()
+        return acc.to(dtype)
     if os.environ.get("TF_TP_REDUCE") == "allreduce":
         dist.all_reduce(local, op=dist.ReduceOp.SUM, group=group)
         return local.to(dtype)
