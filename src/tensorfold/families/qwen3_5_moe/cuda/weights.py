@@ -15,6 +15,7 @@ from tensorfold.cuda.nvfp4 import experts as nvx
 from tensorfold.families.qwen3_5.cuda.weights import Attention, QLinear, Weights, load as load_dense
 
 MTP_FILE = "mtp-4bit.safetensors"      # the MTP layer beside a checkpoint whose conversion dropped it
+MTP_BF16_FILE = "mtp.safetensors"      # the base model's bf16 MTP layer beside an EXL3 pack (EXL3 conversions drop it)
 GS = 64
 
 
@@ -75,12 +76,33 @@ def routed4(prefix: str, t, cfg) -> dict[str, Routed]:
     return {"moe": Routed(router.to(torch.bfloat16).contiguous(), nvx.make(gate, up, down), int(cfg.top_k))}
 
 
+def routed_exl3(pk, prefix: str, cfg, device) -> dict[str, Routed]:
+    """An EXL3 layer's router (fp16 rows to bf16, the shared expert's gate last) and experts, the shared one last."""
+
+    from tensorfold.families.qwen4_exp.cuda.exl3 import expert_table
+
+    router = torch.cat([pk.get(prefix + "gate.weight").to(torch.bfloat16),
+                        pk.get(prefix + "shared_expert_gate.weight").to(torch.bfloat16)]).to(device).contiguous()
+    experts = expert_table(pk, prefix + "experts", cfg.experts, prefix + "shared_expert", device)
+    pk.release()
+    return {"moe": Routed(router, experts, int(cfg.top_k))}
+
+
 def load(model_dir: str | Path) -> Weights:
     """The checkpoint on the GPU, projections packed for the shared matmul and experts for the grouped kernels."""
 
+    packs: list = []
+
+    def exl3(prefix, cfg, device):                    # one reader of the pack's experts for every layer
+        if not packs:
+            from tensorfold.families.qwen4_exp.cuda.exl3_pack import Pack
+
+            packs.append(Pack(model_dir))
+        return routed_exl3(packs[0], prefix, cfg, device)
+
     return load_dense(model_dir, tiled=True,
                       mlp=lambda prefix, get, qlinear, cfg: {"moe": routed(prefix, get, cfg.top_k)},
-                      nvfp4_mlp=routed4)
+                      nvfp4_mlp=routed4, exl3_mlp=exl3)
 
 
 @dataclass
@@ -105,7 +127,7 @@ def mtp_tensors(model_dir: str | Path) -> dict[str, torch.Tensor] | None:
     from tensorfold.cuda.direct_read import SafeTensors
 
     model_dir = Path(model_dir)
-    files = [model_dir / MTP_FILE] if (model_dir / MTP_FILE).is_file() else []
+    files = [model_dir / f for f in (MTP_FILE, MTP_BF16_FILE) if (model_dir / f).is_file()][:1]
     index = model_dir / "model.safetensors.index.json"
     if not files and index.is_file():
         names = json.loads(index.read_text())["weight_map"]
@@ -128,8 +150,24 @@ def fp4(w: torch.Tensor):
     return Fp4Linear.from_checkpoint(words[0], scales[0], float(g[0]))
 
 
-def load_mtp_nvfp4(model_dir: Path, w: Weights, raw: dict[str, torch.Tensor], ids, device: str) -> MTP:
-    """A ModelOpt checkpoint's bf16 MTP layer (ModelOpt leaves ``mtp*`` unquantized) in W4A16 NVFP4, its norms recentred."""
+def decoded_rows(head, ids, device: str, step: int = 128) -> torch.Tensor:
+    """Rows ``ids`` of any head linear [N, K] in bf16, decoded by the linear on identity inputs (drafts only)."""
+
+    from tensorfold.families.qwen3_5.cuda.forward import _mm
+
+    k = int(head.k)
+    sel = torch.as_tensor(ids, dtype=torch.int64, device=device)
+    rows = torch.empty((len(sel), k), dtype=torch.bfloat16, device=device)
+    eye = torch.eye(step, dtype=torch.bfloat16, device=device)
+    for k0 in range(0, k, step):
+        x = torch.zeros((step, k), dtype=torch.bfloat16, device=device)
+        x[:, k0:k0 + step] = eye
+        rows[:, k0:k0 + step] = _mm(x, head)[:, sel].t()
+    return rows
+
+
+def load_mtp_bf16(model_dir: Path, w: Weights, raw: dict[str, torch.Tensor], ids, device: str) -> MTP:
+    """A bf16 HF-layout MTP layer (ModelOpt's, or ``mtp.safetensors`` by an EXL3 pack) in W4A16 NVFP4."""
 
     from tensorfold.cuda.direct_read import SafeTensors
     from tensorfold.cuda.nvfp4.linear import Fp4Linear
@@ -148,7 +186,13 @@ def load_mtp_nvfp4(model_dir: Path, w: Weights, raw: dict[str, torch.Tensor], id
                      v=fp4(get(p + "self_attn.v_proj.weight")), o=fp4(get(p + "self_attn.o_proj.weight")),
                      q_norm=norm(p + "self_attn.q_norm.weight"), k_norm=norm(p + "self_attn.k_norm.weight"))
     m = p + "mlp."
-    gate_up, down = get(m + "experts.gate_up_proj"), get(m + "experts.down_proj")      # [E, 2NI, D], [E, D, NI]
+    if "mtp." + m + "experts.gate_up_proj" in raw:           # fused (nvidia's): [E, 2NI, D], [E, D, NI]
+        gate_up, down = get(m + "experts.gate_up_proj"), get(m + "experts.down_proj")
+    else:                                                    # one tensor an expert (Ornith's NVFP4 export)
+        count = w.config.experts
+        gate_up = torch.stack([torch.cat([get(m + f"experts.{e}.{x}_proj.weight") for x in ("gate", "up")])
+                               for e in range(count)])
+        down = torch.stack([get(m + f"experts.{e}.down_proj.weight") for e in range(count)])
     ni = gate_up.shape[1] // 2
     shared = [get(m + f"shared_expert.{x}_proj.weight")[None] for x in ("gate", "up", "down")]
     gate = nvx.quantize(torch.cat([gate_up[:, :ni], shared[0]]))
@@ -157,7 +201,9 @@ def load_mtp_nvfp4(model_dir: Path, w: Weights, raw: dict[str, torch.Tensor], id
     del gate_up, down, shared
     router = torch.cat([get(m + "gate.weight"), get(m + "shared_expert_gate.weight")]).to(torch.bfloat16)
     head = None
-    if ids is not None:                                  # lm_head's draft rows, read again as stored
+    if ids is not None and w.quant != "nvfp4":           # any other head: its draft rows decoded, then NVFP4
+        head = fp4(decoded_rows(w.head, ids, device))
+    elif ids is not None:                                # lm_head's draft rows, read again as stored
         index = json.loads((model_dir / "model.safetensors.index.json").read_text())["weight_map"]
         f = SafeTensors(sorted({model_dir / index[n] for n in ("lm_head.weight", "lm_head.weight_scale",
                                                                    "lm_head.weight_scale_2")}))
@@ -185,8 +231,8 @@ def load_mtp(model_dir: str | Path, w: Weights, device: str = "cuda", ids=None) 
     raw = mtp_tensors(model_dir)
     if raw is None:
         return None
-    if w.quant == "nvfp4":
-        return load_mtp_nvfp4(Path(model_dir), w, raw, ids, device)
+    if w.quant in ("nvfp4", "exl3") or raw.get("mtp.fc.weight", torch.empty(0, dtype=torch.int32)).is_floating_point():
+        return load_mtp_bf16(Path(model_dir), w, raw, ids, device)
 
     def get(name: str) -> torch.Tensor:
         return raw.pop("mtp." + name).to(device)

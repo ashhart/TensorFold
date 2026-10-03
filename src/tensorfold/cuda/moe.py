@@ -100,6 +100,21 @@ class MoEBuffers:
                              device=device)
 
 
+X3_WINDOW = 1024          # most rows an EXL3 routed-expert call takes (its grouping fits in shared memory)
+_x3: dict[tuple, object] = {}
+
+
+def _x3_scratch(ex, slots: int, device):
+    """One EXL3 expert scratch per layer shape, shared by every layer (their calls never overlap)."""
+
+    from .exl3 import experts as x3
+
+    key = (ex.dims, ex.width, ex.count, slots, str(device))
+    if key not in _x3:
+        _x3[key] = x3.Scratch(ex, X3_WINDOW, slots, device=device)
+    return _x3[key]
+
+
 def select_rows(logits: torch.Tensor, buf: MoEBuffers, top_k: int, experts: int) -> None:
     """Each row's experts and weights, rows in parallel (buf.pick, buf.wts); EXL3 experts group themselves in their kernel."""
 
@@ -120,10 +135,19 @@ def moe(x: torch.Tensor, router_rows: torch.Tensor, ex, buf: MoEBuffers, top_k: 
         experts: int) -> MoEBuffers:
     """Route x [R, D] and run its experts into buf.y [R, k + 1, D] (bf16 in prefill); slot k is the shared expert."""
 
+    from .exl3 import experts as x3
     from .nvfp4 import experts as nvx
 
     rows = x.shape[0]
     router(x, router_rows, buf.logits[:rows])
+    if isinstance(ex, x3.Exl3RoutedExperts):     # EXL3 experts (the shared one last), in windows of independent rows
+        select_rows(buf.logits[:rows], buf, top_k, experts)
+        s = _x3_scratch(ex, buf.slots, x.device)
+        for r0 in range(0, rows, X3_WINDOW):
+            n = min(X3_WINDOW, rows - r0)
+            y = x3.routed(x[r0:r0 + n], buf.pick[r0:r0 + n], None, ex, s, None, n)
+            buf.y[r0:r0 + n].copy_(y.view(n, buf.slots, -1))
+        return buf
     if isinstance(ex, nvx.Experts4):             # NVFP4 experts (W4A16), the shared one last like the MLX table's
         select(buf.logits[:rows], buf, top_k, experts, nvx.PREFILL_TILE)
         nvx.gate_up(x, ex, buf.plan, buf.act.view(-1, ex.width), rows)
