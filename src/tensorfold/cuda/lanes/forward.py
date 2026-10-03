@@ -64,8 +64,8 @@ class LaneForward(Protocol):
     def window(self, rows: Sequence[Rows], count: int, masks: Sequence[Any] | None = None) -> Candidates:
         """Every window in one forward, rows in order; ``masks[i]`` (a ``grammar.Window``) masks window i's rows."""
 
-    # Optional ``counts=``: when ``window`` takes it, window i's rows need only their top ``counts[i]`` candidates
-    # (sorted; the columns past them may hold -inf), so a nucleus-sampled lane does not widen the others' rows.
+    # Optional ``counts=``: when ``window`` takes it, only the first ``counts[i]`` columns of window i's rows must be
+    # its sorted top candidates; the decoder reads no further, so the rest may stay unset.
 
     def commit(self, lane: int, kept: int) -> None:
         """Keep the lane's last window's pending row and ``kept`` drafts; the rows past them are dead."""

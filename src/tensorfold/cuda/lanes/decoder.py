@@ -46,6 +46,14 @@ def piece_end(done: int, target: int, budget: int, grid: int) -> int:
     return end if end > done else min(target, (done // grid + 1) * grid)
 
 
+def candidate_need(sampling: Any, vocab: int) -> int:
+    """The candidates a row's sampling reads: 1 greedy, top_k and the tie margin, else the vocabulary."""
+
+    if sampling is None or sampling.temperature <= 0:
+        return 1
+    return min(vocab, int(sampling.top_k) + MARGIN) if sampling.top_k else vocab
+
+
 def save_point(n: int, grid: int) -> int:
     """The last grid point before a prompt's last token: an identical prompt resumes there."""
 
@@ -290,10 +298,7 @@ class LaneDecoder:
                 continue
             p = self.plans[s.sid]
             most = min(int(self.drafter.block), s.count - len(s.out) - 1) if s.draft and self.drafter else 0
-            smp = s.sampling
-            need = 1
-            if smp is not None and smp.temperature > 0:
-                need = min(vocab, int(smp.top_k) + MARGIN) if smp.top_k else vocab
+            need = candidate_need(s.sampling, vocab)
             windows.append((p.lane, p.pos, p.pending, max(0, most), need))
             count = max(count, need)
         return windows, count
@@ -303,6 +308,9 @@ class LaneDecoder:
 
         s = p.stream
         positions = [rows.start + 1 + i for i in range(len(rows.tokens))]
+        need = candidate_need(s.sampling, int(self.forward.vocab))
+        if cand.ids.shape[1] > need:  # only the columns its window asked for: a forward may leave the rest unset
+            cand = Candidates(cand.ids[:, :need], cand.values[:, :need])
         chosen = choose(cand, positions, s.sampling)
         ends = self.eos if s.stop_eos else ()
         path, terminal = accept(rows.tokens, chain(len(rows.tokens)), chosen, s.count - len(s.out), ends)

@@ -654,3 +654,31 @@ def test_an_admission_failing_anywhere_on_either_rank_leaves_both_as_they_were(w
     monkeypatch.setattr(owner, name, real)
     s = stream(p + [1], 4)
     assert pair.run([s]) == [serial(p + [1], 4)]
+
+
+def test_columns_past_a_windows_need_cannot_change_its_tokens():
+    from tensorfold.engine.exact_sampling import Sampling
+
+    def poison(lanes):
+        real = lanes.forward.window
+
+        def window(rows, count, masks=None, counts=None):
+            cand = real(rows, count, masks)
+            at = 0
+            for r, need in zip(rows, counts):
+                n = len(r.tokens)
+                cand.values[at:at + n, need:] = 1e30  # stale columns a forward never filled
+                cand.ids[at:at + n, need:] = 7
+                at += n
+            return cand
+
+        lanes.forward.window = window
+        lanes._counts = True
+
+    p = prompts(3)
+    sampled = [None, Sampling(seed=1, temperature=0.8, top_k=0, top_p=0.9), Sampling(seed=2, temperature=0.8, top_k=5)]
+    pair = Pair(lanes=3, prefill_rows=512)
+    poison(pair.decoder.local)
+    poison(pair.follower)
+    streams = [stream(p[i], 6, sampled[i]) for i in range(3)]
+    assert pair.run(streams) == [serial(p[i], 6, sampled[i]) for i in range(3)]
