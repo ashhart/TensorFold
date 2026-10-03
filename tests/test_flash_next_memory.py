@@ -143,6 +143,17 @@ def test_only_mapped_table_tensors_are_subtracted(tmp_path, monkeypatch, runtime
     assert qwen4_exp.weight_bytes(tmp_path) == total
 
 
+def test_tables_named_shards_dot_n_are_subtracted(tmp_path, monkeypatch, runtime):
+    total = _file(tmp_path / "model-0.safetensors", {
+        f"{NGRAM}.shards.0.weight": 640, f"{NGRAM}.shards.0.scales": 80, f"{NGRAM}.shards.0.biases": 80,
+        f"{NGRAM}.shards.1.weight": 640, f"{NGRAM}.shards.1.scales": 80, f"{NGRAM}.shards.1.biases": 80,
+        "language_model.model.layers.0.ple.key_proj.weight": 2048,
+    })
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "qwen4_exp"}))
+    assert qwen4_exp.ple_bytes(tmp_path) == 1600
+    assert qwen4_exp.weight_bytes(tmp_path, ple_on_ssd=True) == total - 1600
+
+
 @pytest.mark.parametrize("flag, expected", [(None, True), ("1", True), ("0", False)])
 @pytest.mark.parametrize("legacy", [False, True])
 def test_host_selection_uses_the_loaders_threshold_and_overrides(tmp_path, monkeypatch, runtime, flag, expected, legacy):
