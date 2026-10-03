@@ -19,6 +19,7 @@ EXL3_VARIANT = "any"                           # tensorfold.families.EXL3_VARIAN
 REQUIRED_FILES = {MODELS[0]: ("mtp-4bit.safetensors",)}
 DRAFTER = ""                  # Macs and CUDA draft with the checkpoint's MTP layer; --drafter takes a DFlash v1 model
 DFLASH = "z-lab/Qwen3.6-35B-A3B-DFlash"       # Macs, --drafter: chains of each position's own argmax
+DFLASH_ROWS = 16                              # CUDA verify rows a round with a DFlash drafter (TF_DFLASH_ROWS)
 KERNEL_PACKAGE = "tensorfold.kernels.qwen.dense.v1"
 KERNEL_VERSION = "v1"
 # the CUDA engine's kernels read MLX affine weights of this (bits, group size)
@@ -118,8 +119,24 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
     """One GPU: MTP chains verified exactly, or the serial reference when no_drafts is set."""
     # parallel above 1 decodes that many requests together.
 
-    if drafter:
-        raise ValueError(f"{TITLE} drafts with its own MTP layer on CUDA: a separate draft model does not apply")
+    if drafter and not no_drafts:
+        # a DFlash drafter (v1, e.g. ornith-ai/Ornith-1.5-35B-A3B-DFlash): the dense family's engine, these weights
+        if int(tp) != 1:
+            raise ValueError(f"{TITLE} runs on one GPU: drop --tp")
+        import os
+
+        from tensorfold.families.qwen3_5.cuda.engine import Qwen27Engine
+
+        def load(path):                       # this family's weights: routed experts, NVFP4 or EXL3 included
+            from .cuda.weights import load as moe_weights
+
+            return moe_weights(path)
+
+        streams = max(1, int(options.get("parallel") or 1))
+        rows = int(os.environ.get("TF_DFLASH_ROWS") or DFLASH_ROWS)
+        return Qwen27Engine(Path(model_dir), Path(drafter), max_rows=rows, tree_rows=None, tp=1, allow_copy=True,
+                            streams=streams, context=context, context_explicit=options.get("context_explicit"),
+                            keep=options.get("checkpoint_slots"), loader=load)
     if int(tp) != 1:
         raise ValueError(f"{TITLE} runs on one GPU: drop --tp")
     from .cuda import DEPTH

@@ -215,6 +215,7 @@ class Weights:
     inv_freq: torch.Tensor | None = None             # (rope_dims/2,) fp32
     quant: str = "mlx"                               # "exl3": an EXL3 pack (prompt glue then stays in bf16); "nvfp4"
     prompt_rows: int = 4096                          # a prompt chunk's rows, sized to the GPU: any count, the same bits
+    tap_layers: tuple = (5, 19, 33, 47, 61)          # the layers a DFlash drafter reads (its target_layer_ids)
 
     @cached_property
     def fast_prefill(self) -> bool:

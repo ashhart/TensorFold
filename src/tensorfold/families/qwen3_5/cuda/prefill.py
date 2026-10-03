@@ -21,7 +21,7 @@ from .qmm_fast import matmul, matmul_partial, tile
 from .weights import Plain, QLinear, Weights
 
 CHUNK = 4096
-TAP_LAYERS = (5, 19, 33, 47, 61)
+TAP_LAYERS = (5, 19, 33, 47, 61)          # Qwen3.8-27B's (Weights.tap_layers)
 
 
 def _mm(x, w: QLinear, f32: bool = False) -> torch.Tensor:
@@ -152,7 +152,7 @@ def prefill_chunk(w: Weights, tokens: torch.Tensor, st: State, *, tp: bool = Fal
         else:
             x, h = pg.add_rmsnorm(x, r, layer.post_norm, c.eps)
             pending = _mlp(h, layer, pg, tp)
-        if capture_taps and i in TAP_LAYERS:
+        if capture_taps and i in w.tap_layers:
             taps.append((x.float() + pending.float()).to(torch.bfloat16))
     st.pos = p0 + W
     normed = None
@@ -318,7 +318,7 @@ def prefill_rows(w: Weights, items: list[tuple[Sequence[int], State, int]], *, t
             r = _row_mm(pg.gate_mul(torch.cat(outs), qg, heads=c.heads, head_dim=c.head_dim), attn.o, tp)
         x, h = pg.add_rmsnorm(x, r, layer.post_norm, c.eps)
         pending = _mlp(h, layer, pg, tp)
-        if capture_taps and i in TAP_LAYERS:
+        if capture_taps and i in w.tap_layers:
             taps.append((x.float() + pending.float()).to(torch.bfloat16))
     every = torch.cat(taps, dim=-1) if capture_taps else None
     out = []

@@ -29,7 +29,7 @@ class Qwen27Engine:
                  tp_draft: bool = False, allow_copy: bool = True, streams: int = 1,
                  context: int | None = None, context_explicit: bool | None = None, vision: bool = False,
                  vision_urls: bool = False, vision_offload: bool = False, tree_rows: int | None = None,
-                 keep: int | None = None):
+                 keep: int | None = None, loader=None):
         import torch
 
         from tensorfold.cuda.nvfp4.format import is_quantized
@@ -112,15 +112,20 @@ class Qwen27Engine:
             full = load(model_dir)
             self.w = split_weights(full, rank, tiled=True, split_head=split_head)
         else:
-            full = load(model_dir, tiled=True)
+            full = loader(model_dir) if loader is not None else load(model_dir, tiled=True)
             self.w = full
         self.w.prompt_rows = chunk
         self.draft = None
         if draft_dir is not None and (rank == 0 or (tp == 2 and tp_draft)):
-            from .dflash2 import DFlash2
+            from .dflash1 import drafter_class
 
             # tp_draft: both ranks hold half the drafter and draft together (rank 1 needs --draft too)
-            self.draft = DFlash2(draft_dir, full, rank=rank, world=2) if tp == 2 and tp_draft else DFlash2(draft_dir, full)
+            kind = drafter_class(draft_dir)
+            self.draft = kind(draft_dir, full, rank=rank, world=2) if tp == 2 and tp_draft else kind(draft_dir, full)
+            if len(self.draft.taps) and max(self.draft.taps) >= full.config.layers:
+                raise ValueError(f"the drafter reads target layers {self.draft.taps}; "
+                                 f"this model has {full.config.layers}")
+            self.w.tap_layers = full.tap_layers = self.draft.taps
         del full
         if vision and rank == 0:
             from tensorfold.vision.qwen_cuda import QwenCudaVision
