@@ -6,7 +6,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 
-#include "experts_grouped.cuh"
+#include "experts_prompt.cuh"
 
 namespace {
 
@@ -244,6 +244,12 @@ namespace tf_exl3x {
 extern template void grouped_launch<0>(const GroupedArgs&, cudaStream_t);
 extern template void grouped_launch<1>(const GroupedArgs&, cudaStream_t);
 extern template void grouped_launch<2>(const GroupedArgs&, cudaStream_t);
+extern template void prompt_launch<0>(const PromptArgs&, int, cudaStream_t);
+extern template void prompt_down_launch<0>(const DownArgs&, int, cudaStream_t);
+extern template void prompt_launch<1>(const PromptArgs&, int, cudaStream_t);
+extern template void prompt_down_launch<1>(const DownArgs&, int, cudaStream_t);
+extern template void prompt_launch<2>(const PromptArgs&, int, cudaStream_t);
+extern template void prompt_down_launch<2>(const DownArgs&, int, cudaStream_t);
 extern template void dequant_launch<0>(const uint32_t*, half*, int, int, int, cudaStream_t);
 extern template void dequant_launch<1>(const uint32_t*, half*, int, int, int, cudaStream_t);
 extern template void dequant_launch<2>(const uint32_t*, half*, int, int, int, cudaStream_t);
@@ -273,6 +279,58 @@ void exl3x_grouped_cuda(const at::Tensor& X0, const at::Tensor& X1, const at::Te
     if (cb == 0) tf_exl3x::grouped_launch<0>(a, stream);
     else if (cb == 1) tf_exl3x::grouped_launch<1>(a, stream);
     else if (cb == 2) tf_exl3x::grouped_launch<2>(a, stream);
+    else TORCH_CHECK(false, "codebook must be 0 (3inst), 1 (mcg) or 2 (mul1)");
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+void exl3x_prompt_cuda(const at::Tensor& X0, const at::Tensor& X1, const at::Tensor& TP0, const at::Tensor& TP1,
+                       const at::Tensor& B0, const at::Tensor& B1, const at::Tensor& items, const at::Tensor& counts,
+                       const at::Tensor& members, at::Tensor& Z, int64_t mats, int64_t K, int64_t N, int64_t P,
+                       int64_t E, int64_t seg, int64_t wps, int64_t items_max, int64_t cb, int64_t nt,
+                       int64_t widths) {
+    TORCH_CHECK(K % 16 == 0 && (K / 16) % (seg * wps) == 0 && N % (16 * nt) == 0,
+                "prompt experts: K and N must split evenly");
+    tf_exl3x::PromptArgs a;
+    a.x0 = reinterpret_cast<const half*>(X0.data_ptr());
+    a.x1 = reinterpret_cast<const half*>(X1.data_ptr());
+    a.tp0 = TP0.data_ptr<int64_t>();
+    a.tp1 = TP1.data_ptr<int64_t>();
+    a.k2_0 = B0.data_ptr<int>();
+    a.k2_1 = B1.data_ptr<int>();
+    a.items = items.data_ptr<int>();
+    a.counts = counts.data_ptr<int>();
+    a.members = members.data_ptr<int>();
+    a.z = Z.data_ptr<float>();
+    a.K = (int)K; a.N = (int)N; a.P = (int)P; a.E = (int)E; a.seg = (int)seg; a.wps = (int)wps;
+    a.items_max = (int)items_max; a.mats = (int)mats; a.nt = (int)nt;
+    auto stream = at::cuda::getCurrentCUDAStream();
+    if (cb == 0) tf_exl3x::prompt_launch<0>(a, (int)widths, stream);
+    else if (cb == 1) tf_exl3x::prompt_launch<1>(a, (int)widths, stream);
+    else if (cb == 2) tf_exl3x::prompt_launch<2>(a, (int)widths, stream);
+    else TORCH_CHECK(false, "codebook must be 0 (3inst), 1 (mcg) or 2 (mul1)");
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+void exl3x_prompt_down_cuda(const at::Tensor& X, const at::Tensor& TP, const at::Tensor& B, const at::Tensor& svh,
+                            const at::Tensor& items, const at::Tensor& counts, const at::Tensor& members, at::Tensor& Y,
+                            int64_t K, int64_t N, int64_t P, int64_t E, int64_t seg, int64_t wps, int64_t items_max,
+                            int64_t cb, int64_t widths) {
+    TORCH_CHECK(K % 16 == 0 && (K / 16) % (seg * wps) == 0 && N % 128 == 0, "prompt down: K and N must split evenly");
+    tf_exl3x::DownArgs a;
+    a.x = reinterpret_cast<const half*>(X.data_ptr());
+    a.tp = TP.data_ptr<int64_t>();
+    a.k2 = B.data_ptr<int>();
+    a.svh = reinterpret_cast<const half*>(svh.data_ptr());
+    a.items = items.data_ptr<int>();
+    a.counts = counts.data_ptr<int>();
+    a.members = members.data_ptr<int>();
+    a.y = Y.data_ptr();
+    a.K = (int)K; a.N = (int)N; a.P = (int)P; a.E = (int)E; a.seg = (int)seg; a.wps = (int)wps;
+    a.items_max = (int)items_max; a.bf16 = Y.scalar_type() == at::kBFloat16 ? 1 : 0;
+    auto stream = at::cuda::getCurrentCUDAStream();
+    if (cb == 0) tf_exl3x::prompt_down_launch<0>(a, (int)widths, stream);
+    else if (cb == 1) tf_exl3x::prompt_down_launch<1>(a, (int)widths, stream);
+    else if (cb == 2) tf_exl3x::prompt_down_launch<2>(a, (int)widths, stream);
     else TORCH_CHECK(false, "codebook must be 0 (3inst), 1 (mcg) or 2 (mul1)");
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

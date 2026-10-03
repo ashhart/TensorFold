@@ -89,6 +89,38 @@ def _f16_mm(X, W, OUT, M, N, x_stride, o_stride, K: tl.constexpr, KS: tl.constex
 
 
 @triton.jit(do_not_specialize=["M"])
+def _f16_fused(X, W, OUT, M, N, x_stride, o_stride, K: tl.constexpr, KS: tl.constexpr, SK: tl.constexpr,
+               BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+    """_f16_mm's SK slices and _reduce's in-order sum in one program: slice s from zero over its K in BK steps, then
+    0 + slice 0 + slice 1 ... (the bits of the two kernels, without the fp32 slices in memory)."""
+
+    pm = tl.program_id(0)
+    pn = tl.program_id(1)
+    rm = pm * BM + tl.arange(0, BM)
+    rn = pn * BN + tl.arange(0, BN)
+    rk = tl.arange(0, BK)
+    m_ok = rm < M
+    n_ok = rn < N
+    total = tl.zeros((BM, BN), dtype=tl.float32)
+    for ps in range(SK):
+        acc = tl.zeros((BM, BN), dtype=tl.float32)
+        k0 = ps * KS
+        for kk in range(0, KS, BK):
+            x = tl.load(X + rm[:, None] * x_stride + (k0 + kk + rk)[None, :], mask=m_ok[:, None], other=0.0)
+            w = tl.load(W + rn[:, None] * K + (k0 + kk + rk)[None, :], mask=n_ok[:, None], other=0.0)
+            acc = tl.dot(x.to(tl.float16), tl.trans(w), acc)
+        total += acc
+    tl.store(OUT + rm[:, None] * o_stride + rn[None, :], total.to(OUT.dtype.element_ty),
+             mask=m_ok[:, None] & n_ok[None, :])
+
+
+# Prompt row counts (more than FUSED_MIN rows) take larger row tiles and, with K slices, _f16_fused: the same bits
+# per row (tests/cuda/test_flashnext_P.py); decode windows keep the 16-row tiles and the slices.
+FUSED_MIN = 64
+PROMPT_TILE = (64, 128, 64, 4)           # BM, BN, BK, warps
+
+
+@triton.jit(do_not_specialize=["M"])
 def _reduce(P, OUT, M, N, o_stride, SK: tl.constexpr, BLOCK: tl.constexpr):
     r = tl.program_id(0)
     c = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
@@ -143,6 +175,20 @@ class F16:
     def __call__(self, x: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
         if out.stride(-1) != 1:
             raise ValueError("F16: output rows must be contiguous")
+        m = x.shape[0]
+        if m > FUSED_MIN and FUSED_MIN > 0:
+            if x.stride(1) != 1 or x.shape[1] != self.k:
+                raise ValueError(f"F16: x {tuple(x.shape)} does not match K={self.k}")
+            bm, bn, bk, warps = PROMPT_TILE
+            if self.sk == 1:
+                _f16_mm[(triton.cdiv(m, bm), triton.cdiv(self.n, bn), 1)](
+                    x, self.w, out, m, self.n, x.stride(0), out.stride(0), K=self.k, KS=self.k, BM=bm, BN=bn, BK=64,
+                    F32=False, num_warps=warps, num_stages=3)
+            else:
+                _f16_fused[(triton.cdiv(m, bm), triton.cdiv(self.n, bn))](
+                    x, self.w, out, m, self.n, x.stride(0), out.stride(0), K=self.k, KS=self.k // self.sk, SK=self.sk,
+                    BM=bm, BN=bn, BK=64, num_warps=warps, num_stages=3)
+            return out
         if self.sk == 1:
             self._launch(x, out, False)
             return out
