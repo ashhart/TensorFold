@@ -226,10 +226,11 @@ def test_item_order_by_count(layer):
 
 
 
+@pytest.mark.parametrize("mode", [3, 2])
 @pytest.mark.parametrize("R", [1024, 4096])
-def test_deterministic_slot_sums(layer, R, monkeypatch):
-    """Mode 2 (default): the same call twice gives the same bits (red.add sums a row's slots in arrival order); it
-    matches the atomic sums up to summation order and the float64 reference as closely."""
+def test_deterministic_slot_sums(layer, R, mode, monkeypatch):
+    """Modes 3 (fixed point, default) and 2 (slot rows): the same call twice gives the same bits (fp32 red.add sums a
+    row's slots in arrival order); each matches the fp32 atomic sums and the float64 reference as closely."""
     from tensorfold.cuda.exl3 import prompt_experts as pe
 
     g = torch.Generator().manual_seed(7 + R)
@@ -237,6 +238,7 @@ def test_deterministic_slot_sums(layer, R, monkeypatch):
     sel, w = picks(R, layer.count, g, skew=0.5)
     sel[::5, 3] = -1                                      # unrouted slots are skipped by the sum
     monkeypatch.setattr(pe, "DETERMINISTIC", True)
+    monkeypatch.setattr(pe, "DET_MODE", mode)
     a = pe.prompt_routed(x, sel, w, layer)
     b = pe.prompt_routed(x, sel, w, layer)
     monkeypatch.setattr(pe, "DETERMINISTIC", False)
@@ -244,7 +246,7 @@ def test_deterministic_slot_sums(layer, R, monkeypatch):
     torch.cuda.synchronize()
     assert torch.equal(a, b), "deterministic mode differs between two identical calls"
     rel = ((a - atom).norm() / atom.norm()).item()
-    print(f"R={R}: deterministic vs atomic rel {rel:.3e}")
+    print(f"R={R} mode {mode}: deterministic vs atomic rel {rel:.3e}")
     assert rel <= 1e-5
     rows = list(range(0, R, max(1, R // 16)))
     r64 = reference64(x, sel, w, layer, rows)

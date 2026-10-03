@@ -5,9 +5,9 @@ bits), trellis decoded on the fly, each expert's input Hadamard rotation moved o
 Three launches a chunk of <= CHUNK_ROWS rows: ``route`` (one block: pairs grouped by expert into items of <= 112),
 ``gate|up`` (+ SwiGLU and the down input's rotation, xd [pairs, I] fp16; also zeroes out), ``down`` (+ svh, routing
 weight, red.add into an fp32 out). A slot's output does not depend on the other rows. By default (TF_EXL3_PROMPT_DET)
-down stores each slot's row into a [pairs, D] buffer and ``slot_sum`` adds a row's slots in slot order, so a prompt
-gets the same bits every run; TF_EXL3_PROMPT_DET=0 adds them with atomics in arrival order (bits may differ run to
-run). Decode windows keep the row-invariant ``experts.routed``.
+down adds a row's slots with 64-bit fixed-point red.add (integer adds: the same sums in any arrival order), so a
+prompt gets the same bits every run; TF_EXL3_PROMPT_DET=slots stores each slot's row and sums them in slot order;
+TF_EXL3_PROMPT_DET=0 adds fp32 with atomics in arrival order (bits may differ run to run). Decode windows keep the row-invariant ``experts.routed``.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ def _ext():
     from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
-    return load(name="tensorfold_exl3_prompt_experts_v2",
+    return load(name="tensorfold_exl3_prompt_experts_v3",
                 sources=[str(here / "prompt_experts.cpp"), str(here / "prompt_experts.cu")],
                 extra_cuda_cflags=["-O3", "-lineinfo"], extra_include_paths=[str(here)], verbose=False)
 
@@ -52,13 +52,18 @@ class PromptScratch:
         self.items = torch.empty((3 * self.max_items,), dtype=torch.int32, device=device)
         self.count = torch.zeros((1,), dtype=torch.int32, device=device)
         self.xd = torch.empty((n, ex.width), dtype=torch.float16, device=device)
-        self.pairs = None            # [n, D] fp32 pair rows of the deterministic mode (on first use)
+        self.pairs = None            # [n, D] fp32 pair rows of the "slots" mode (on first use)
+        self.fix = None              # [rows, D] int64 fixed-point sums of the "fixed" mode (on first use)
 
 
 ORDER_BY_COUNT = int(__import__("os").environ.get("TF_EXL3_PROMPT_ORDER", "0"))   # 1: busiest experts first (measured neutral)
-# deterministic slot sums (default): red.add sums a row's slots in arrival order - different bits run to run, so a
-# multi-chunk prompt's KV (and every later token) was not reproducible; 0: the atomic sums (A/B)
-DETERMINISTIC = __import__("os").environ.get("TF_EXL3_PROMPT_DET", "1") == "1"
+# How a row's slot outputs are added. fp32 red.add sums them in arrival order - different bits run to run, so a
+# multi-chunk prompt's KV (and every later token) was not reproducible. "fixed" (default): red.add of 64-bit fixed
+# point (integer adds are associative: same bits in any order, ~2x the atomic bytes); "slots": each slot into its own
+# row, summed in slot order (an extra pass over 8 rows a row); "0": fp32 red.add (fastest by a few %, not reproducible)
+_DET = __import__("os").environ.get("TF_EXL3_PROMPT_DET", "fixed").lower()
+DETERMINISTIC = _DET in ("1", "fixed", "slots")
+DET_MODE = 2 if _DET == "slots" else 3
 CHUNK_ROWS = 4096              # longer calls run in row chunks: the down kernel re-reads xd once a column slab
 SLAB_BYTES = 9 << 20           # out columns a down pass keeps in L2 for its red.add (rows x columns x 4 bytes)
 
@@ -86,7 +91,7 @@ def prompt_routed(x: torch.Tensor, pick: torch.Tensor, wts: torch.Tensor, ex: Ex
     """
 
     R, S = pick.shape
-    det = DETERMINISTIC and not f16_acc
+    det = (DET_MODE if DETERMINISTIC else 0) if not f16_acc else 0
     if out is None:
         out = torch.empty((R, ex.dims), dtype=torch.float32, device=x.device)
     if scratch is None:
@@ -111,7 +116,23 @@ def _prompt_chunk(x, pick, wts, ex, out, scratch, limit, act_mode, ncb, f16, whi
     pick = pick.contiguous()
     wts = wts.float().contiguous()
     items = min(scratch.max_items, R * S // ext.item_rows() + min(R * S, ex.count))
-    if det:                               # each pair into its own row, then the slots summed in slot order
+    if det == 3:                          # red.add of 64-bit fixed point: the same sums in any order
+        if scratch.fix is None or scratch.fix.shape[0] < R:
+            scratch.fix = torch.empty((scratch.rows, ex.dims), dtype=torch.int64, device=x.device)
+        acc = scratch.fix[:R]             # zeroed by the gate|up kernel, then summed into by the down kernel
+        ext.route(pick, ex.count, scratch.sorted, scratch.items, scratch.count, items, ORDER_BY_COUNT)
+        ext.experts(x, scratch.sorted[:R * S], scratch.items, scratch.count, ex.gate_ptr, ex.up_ptr, ex.down_ptr,
+                    ex.gate_k2, ex.down_k2, ex.suh_g, ex.suh_u, ex.svh_g, ex.svh_u, ex.suh_d, ex.svh_d, wts,
+                    scratch.xd, acc, ex.dims, ex.width, ex.gu_stride or ex.width // 16, S, items, float(limit),
+                    act_mode, ex.cb, ncb or auto_ncb(R, ex.dims, 8), which, 3)
+        if which & 2:
+            dst = out if out.dtype == torch.float32 and out.is_contiguous() else \
+                torch.empty((R, ex.dims), dtype=torch.float32, device=x.device)
+            ext.fix_to_float(acc, dst)
+            if dst is not out:
+                out.copy_(dst)
+        return
+    if det == 2:                          # each pair into its own row, then the slots summed in slot order
         if scratch.pairs is None:
             scratch.pairs = torch.empty((scratch.rows * scratch.slots, ex.dims), dtype=torch.float32, device=x.device)
         pairs = scratch.pairs[:R * S]

@@ -10,6 +10,7 @@ void exl3p_experts_cuda(const at::Tensor&, const at::Tensor&, const at::Tensor&,
                         double, int64_t, int64_t, int64_t, int64_t, int64_t);
 
 void exl3p_slot_sum_cuda(const at::Tensor&, const at::Tensor&, at::Tensor&, int64_t);
+void exl3p_fix_to_float_cuda(const at::Tensor&, at::Tensor&);
 
 static void check(const at::Tensor& x, at::ScalarType t, const char* name) {
     TORCH_CHECK(x.is_cuda() && x.scalar_type() == t && x.is_contiguous(), name,
@@ -47,8 +48,9 @@ void experts(const at::Tensor& x, const at::Tensor& sorted, const at::Tensor& it
     for (auto* t : {&suh_g, &suh_u, &svh_g, &svh_u, &suh_d, &svh_d}) check(*t, at::kHalf, "suh/svh");
     check(wts, at::kFloat, "wts");
     check(xd, at::kHalf, "xd");
-    TORCH_CHECK(out.is_cuda() && out.is_contiguous() && out.scalar_type() == (f16 == 1 ? at::kHalf : at::kFloat),
-                "out: contiguous fp32 (fp16 with f16 = 1)");
+    TORCH_CHECK(out.is_cuda() && out.is_contiguous() &&
+                    out.scalar_type() == (f16 == 1 ? at::kHalf : f16 == 3 ? at::kLong : at::kFloat),
+                "out: contiguous fp32 (fp16 with f16 = 1, int64 fixed point with f16 = 3)");
     TORCH_CHECK(xd.numel() >= sorted.numel() * I, "xd too small");
     TORCH_CHECK(out.size(0) == (f16 == 2 ? sorted.numel() : x.size(0)) && out.size(1) == D,
                 "out: [R, D] ([R * slots, D] pair rows with f16 = 2)");
@@ -69,7 +71,16 @@ void slot_sum(const at::Tensor& pairs, const at::Tensor& pick, at::Tensor out, i
     exl3p_slot_sum_cuda(pairs, pick, out, E);
 }
 
+void fix_to_float(const at::Tensor& in, at::Tensor out) {
+    check(in, at::kLong, "in");
+    check(out, at::kFloat, "out");
+    TORCH_CHECK(in.numel() == out.numel(), "fix_to_float: same sizes");
+    c10::cuda::CUDAGuard guard(in.device());
+    exl3p_fix_to_float_cuda(in, out);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("fix_to_float", &fix_to_float);
     m.def("slot_sum", &slot_sum);
     m.def("item_rows", &exl3p_item_rows);
     m.def("route", &route);
