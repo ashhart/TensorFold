@@ -108,6 +108,47 @@ def _mv(
 
 
 @triton.jit
+def _mv_rows(
+    X,
+    W,
+    G,
+    Y,
+    R: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    F: tl.constexpr,
+    BM: tl.constexpr,
+    BN: tl.constexpr,
+    BK: tl.constexpr,
+):
+    r = tl.program_id(0) * BM
+    n = tl.program_id(1) * BN + tl.arange(0, BN)
+    kk = tl.arange(0, BK)
+    a0 = tl.zeros((BN, BK), tl.float32)
+    a1 = tl.zeros((BN, BK), tl.float32)
+    if BM == 4:
+        a2 = tl.zeros((BN, BK), tl.float32)
+        a3 = tl.zeros((BN, BK), tl.float32)
+    for start in range(tl.cdiv(K, BK)):
+        k = start * BK + kk
+        w = _values(W, G, n[:, None], k[None, :], (n[:, None] < N) & (k[None, :] < K), K, F)
+        x0 = tl.load(X + r * K + k, (r < R) & (k < K), 0).to(tl.float32)
+        x1 = tl.load(X + (r + 1) * K + k, (r + 1 < R) & (k < K), 0).to(tl.float32)
+        a0 += w * x0[None, :]
+        a1 += w * x1[None, :]
+        if BM == 4:
+            x2 = tl.load(X + (r + 2) * K + k, (r + 2 < R) & (k < K), 0).to(tl.float32)
+            x3 = tl.load(X + (r + 3) * K + k, (r + 3 < R) & (k < K), 0).to(tl.float32)
+            a2 += w * x2[None, :]
+            a3 += w * x3[None, :]
+    tl.store(Y + r * N + n, tl.sum(a0, 1), (r < R) & (n < N))
+    tl.store(Y + (r + 1) * N + n, tl.sum(a1, 1), (r + 1 < R) & (n < N))
+    if BM == 4:
+        tl.store(Y + (r + 2) * N + n, tl.sum(a2, 1), (r + 2 < R) & (n < N))
+        tl.store(Y + (r + 3) * N + n, tl.sum(a3, 1), (r + 3 < R) & (n < N))
+
+
+@triton.jit
 def _mm(
     X,
     W,
@@ -269,6 +310,14 @@ class Packed:
                 num_warps=8 if q8 else 4,
                 num_stages=1 if q8 else 3,
                 enable_fp_fusion=False,
+            )
+        elif picks is None and rows > 1:
+            # Share packed weight reads; each row retains the serial accumulator
+            # shape, block order and reduction (tensor-core dots would change it).
+            bm = 2 if rows == 2 else 4
+            _mv_rows[(triton.cdiv(rows, bm), triton.cdiv(n, 4))](
+                x, self.data, codebook(x.device), out, rows, n, k, self.format,
+                bm, 4, 256, num_warps=4, enable_fp_fusion=False,
             )
         else:
             if picks is None:

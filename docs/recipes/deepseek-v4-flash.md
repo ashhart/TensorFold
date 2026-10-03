@@ -168,6 +168,31 @@ engine: an identical 8,213-token cold prompt took 20.61 s before the GGUF tile c
 after it, and 8.88 s in that engine after kernel warmup. Cold prefill remains the main performance gap.
 The Mac measurements above use different weights and hardware and are not a CUDA comparison.
 
+Native DSpark verification also shares packed weight reads between two or four dense rows,
+while retaining each serial row's accumulator and reduction order. Target decisions use one
+candidate transfer per verification window. Candidate margins that cut a tie fall back to the
+full reference draw; keyed RNG and probability arithmetic are unchanged. Full DSpark KV windows
+reuse buffers and replay a TensorFold CUDA graph with fresh keys and absolute RoPE positions.
+Short windows retain their actual attention span.
+
+On a separate fixed 2,256-token code prompt, three runs per mode (first discarded for warmup)
+produced identical 128-token replies:
+
+| Native configuration | Warm drafted decode |
+| --- | --- |
+| Before these decode changes | 13.74 tok/s |
+| Shared weight reads | 14.58 tok/s |
+| Also DSpark graph and reusable buffers | 14.62 tok/s |
+| Also batched candidate selection | 15.07 tok/s |
+
+This is a 9.7% decode throughput gain on that fixture. At the required retained 128Ki prefix,
+steady drafted decode measured 15.60-15.64 tok/s, versus 14.24 before these changes. All nine
+qualification cases and both steady repeats kept the previous token IDs. Cold prefill stayed
+at 237.11 s for 131,093 tokens and 13.57-13.65 s for the matching 8,213-token comparison.
+These are CUDA decode gains, not the Mac headline speedup or a cold-prefill improvement.
+GGUF remains the packed weight file format; execution uses only TensorFold's native engine
+and CUDA kernels.
+
 ## Not yet
 
 CUDA tensor parallelism on two DGX Sparks and DeepSeek-V4-flash-vision-exp are not in this family yet.

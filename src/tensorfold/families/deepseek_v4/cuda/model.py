@@ -212,7 +212,9 @@ class Layer:
         w = self.w
         rows = x.shape[0]
         start = state.offset
-        pos = self.weights._positions[start : start + rows]
+        pos = getattr(state, "_positions", None) if draft else None
+        if pos is None:
+            pos = self.weights._positions[start : start + rows]
         qr = norm(linear(x, w["attn_q_a.weight"]), w["attn_q_a_norm.weight"], self.eps)
         kv = norm_rope(linear(x, w["attn_kv.weight"]), pos, self.tables, w["attn_kv_a_norm.weight"], self.eps)
         q = linear(qr, w["attn_q_b.weight"]).reshape(rows, self.heads, self.hdim)

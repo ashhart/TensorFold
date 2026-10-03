@@ -42,3 +42,21 @@ def test_streams_match_their_own_calls():
     for s, smp in enumerate(samplings):
         want = sample_rows(logits[starts[s]:starts[s + 1]], positions[s], smp)
         assert got[s] == want, s
+
+
+def test_deepseek_candidates_keep_reference_boundary_ties():
+    import numpy as np
+
+    from tensorfold.engine.exact_sampling import choose
+    from tensorfold.families.deepseek_v4.cuda.engine import DeepSeekEngine
+
+    engine = DeepSeekEngine.__new__(DeepSeekEngine)
+    engine._ids = np.arange(4096, dtype=np.int64)
+    logits = torch.randn((5, 4096), device="cuda")
+    logits[:, :1000] = 12.0           # more boundary ties than any candidate margin
+    values = logits.cpu().numpy()
+    for k in (0, 1, 20, 4096):
+        sampling = Sampling(43, 0.6, k, 0.95, 0.01)
+        expected = [choose(row, engine._ids, 100 + i, sampling) for i, row in enumerate(values)]
+        assert engine._draw_rows(logits, 100, sampling) == expected
+        assert [engine._draw(row, 100 + i, sampling) for i, row in enumerate(logits)] == expected

@@ -35,6 +35,11 @@ class DSpark:
             if n.startswith("dspark.") and n.split(".")[1] not in [str(i) for i in range(count)]
         }
         self.model = model
+        self.ids = torch.full((self.size,), self.noise, device=model.embed.device, dtype=torch.long)
+        self.graph = None
+        self.graph_state = None
+        for name in ("hc_head_fn.weight", "hc_head_base.weight", "hc_head_scale.weight"):
+            self.w[name] = self.w[name].float()
 
     def state(self):
         return [layer.state() for layer in self.layers]
@@ -46,22 +51,56 @@ class DSpark:
             kv = rope(
                 norm(linear(x, layer.w["attn_kv.weight"]), layer.w["attn_kv_a_norm.weight"], layer.eps), pos, layer.freq
             )
-            raw = torch.cat((cache.keys, kv))
-            cache.keys = raw[-128:].clone()
+            # Ping-pong fixed windows: no concatenation or new allocation during decode.
+            spare = getattr(cache, "_spare", None)
+            if spare is None:
+                spare = torch.empty((128, kv.shape[1]), device=kv.device, dtype=kv.dtype)
+            count = min(128, kv.shape[0])
+            keep = min(cache.keys.shape[0], 128 - count)
+            if keep:
+                spare[:keep].copy_(cache.keys[-keep:])
+            spare[keep:keep + count].copy_(kv[-count:])
+            old = cache.keys
+            cache.keys = spare[:keep + count]
+            cache._spare = old if old.shape[0] == 128 else None
             cache.offset += x.shape[0]
 
-    def logits(self, token, state):
-        ids = torch.tensor([token] + [self.noise] * (self.size - 1), device=self.model.embed.device, dtype=torch.long)
-        x = self.model.embed[ids].to(torch.bfloat16)[:, None].expand(-1, 4, -1).reshape(self.size, -1).contiguous()
+    def _logits(self, state):
+        x = self.model.embed[self.ids].to(torch.bfloat16)[:, None].expand(-1, 4, -1).reshape(self.size, -1).contiguous()
         for layer, cache in zip(self.layers, state):
-            x = layer(x, ids, cache, draft=True)
+            x = layer(x, self.ids, cache, draft=True)
         return self.model.head(
             x,
-            fn=self.w["hc_head_fn.weight"].float(),
-            base=self.w["hc_head_base.weight"].float(),
-            scale=self.w["hc_head_scale.weight"].float(),
+            fn=self.w["hc_head_fn.weight"],
+            base=self.w["hc_head_base.weight"],
+            scale=self.w["hc_head_scale.weight"],
             weight=self.w["norm.weight"],
         )
+
+    def logits(self, token, state):
+        self.ids[:1].fill_(token)
+        # Short prompts keep their true attention span. A full window has fixed
+        # geometry; keys and absolute RoPE positions remain live graph inputs.
+        if not all(cache.keys.shape[0] == 128 for cache in state):
+            return self._logits(state)
+        if self.graph_state is None:
+            self.graph_state = [layer.state() for layer in self.layers]
+            for live, cache in zip(self.graph_state, state):
+                live.keys = torch.empty_like(cache.keys)
+                live.offset = cache.offset
+                live._positions = torch.empty((self.size,), device=self.ids.device, dtype=torch.long)
+        for layer, live, cache in zip(self.layers, self.graph_state, state):
+            live.keys.copy_(cache.keys)
+            live._positions.copy_(layer.weights._positions[cache.offset:cache.offset + self.size])
+        if self.graph is None:
+            for _ in range(2):
+                self._logits(self.graph_state)
+            torch.cuda.synchronize()
+            self.graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(self.graph):
+                self.graph_logits = self._logits(self.graph_state)
+        self.graph.replay()
+        return self.graph_logits
 
     def markov(self, previous):
         return linear(

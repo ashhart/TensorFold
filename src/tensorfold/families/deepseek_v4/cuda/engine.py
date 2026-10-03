@@ -11,7 +11,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from tensorfold.engine.exact_sampling import choose
+from tensorfold.cuda.sampling import sample_rows
+from tensorfold.engine.exact_sampling import MARGIN, choose, choose_rows
 from tensorfold.gguf import parse_gguf_tensors
 
 from .dspark import DSpark
@@ -205,9 +206,30 @@ class DeepSeekEngine:
         return logits[-1], cached
 
     def _draw(self, logits, position, sampling):
+        return self._draw_rows(logits[None], position, sampling)[0]
+
+    def _draw_rows(self, logits, position, sampling):
+        positions = range(position, position + logits.shape[0])
         if sampling is None or sampling.temperature <= 0:
-            return int(logits.argmax().item())
-        return choose(logits.float().cpu().numpy(), self._ids, position, sampling)
+            return sample_rows(logits, positions, sampling)
+        if sampling.top_k and sampling.top_k < logits.shape[1]:
+            k = sampling.top_k
+            count = min(logits.shape[1], k + MARGIN)
+            values, ids = torch.topk(logits.float(), count, dim=-1, sorted=True)
+            packed = torch.cat((values, ids.to(torch.int32).view(torch.float32)), dim=1).cpu().numpy()
+            values, ids = packed[:, :count], packed[:, count:].view(np.int32)
+            drawn = choose_rows(values, ids, positions, sampling)
+            if count < logits.shape[1]:
+                # A tie reaching the margin may contain unseen lower token ids.
+                # Only those rows need the full reference draw.
+                for row in np.flatnonzero(values[:, k - 1] == values[:, -1]):
+                    drawn[row] = choose(logits[row].float().cpu().numpy(), self._ids, position + int(row), sampling)
+            return drawn
+        # Keep the reference full-vocabulary nucleus. One transfer handles the
+        # entire verification window; no per-row synchronization is needed.
+        values = logits.float().cpu().numpy()
+        ids = np.broadcast_to(self._ids, values.shape)
+        return choose_rows(values, ids, positions, sampling)
 
     def generate(self, prompt, max_tokens, sampling, on_tokens, draft=True, constraint=None, stop_eos=None):
         if constraint is not None:
@@ -259,10 +281,11 @@ class DeepSeekEngine:
                 # Target rows share the serial math at every width. Absorb only after verification.
                 logits = self.model.forward([pending] + proposals, self.state)
                 taps = self.model.last_taps
+                sampled = self._draw_rows(logits, len(prompt) + len(tokens), sampling)
                 matched = 0
                 next_token = None
                 for j, proposed in enumerate(proposals):
-                    target = self._draw(logits[j], len(prompt) + len(tokens), sampling)
+                    target = sampled[j]
                     if target != proposed or (stop_eos and target in self.eos):
                         next_token = target
                         break
@@ -282,7 +305,7 @@ class DeepSeekEngine:
                 if cancelled or len(tokens) >= max_tokens:
                     break
                 if next_token is None:
-                    next_token = self._draw(logits[matched], len(prompt) + len(tokens), sampling)
+                    next_token = sampled[matched]
                 pending = next_token
             torch.cuda.synchronize()
             decode = time.perf_counter() - start

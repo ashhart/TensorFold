@@ -58,8 +58,8 @@ def test_decode_reference_and_row_independence(fmt):
     packed = Packed(torch.from_numpy(raw.copy()).cuda().flatten(), (256, 7), fmt)
     np.testing.assert_array_equal(packed.unpack().cpu().numpy(), expected)
     x = torch.randn(5, 256, device="cuda", dtype=torch.bfloat16) * 0.01
-    y = packed.linear(x)
-    assert torch.equal(y, torch.cat([packed.linear(row[None]) for row in x]))
+    y = packed.linear(x, dtype=torch.float32)
+    assert torch.equal(y, torch.cat([packed.linear(row[None], dtype=torch.float32) for row in x]))
     torch.testing.assert_close(y.float(), x.float() @ torch.tensor(expected, device="cuda").T, rtol=0.01, atol=0.002)
     # Exercise grouped prefill, including a partial row tile and output tile.
     data = torch.cat((packed.data, packed.data.reshape(7, -1).flip(0).flatten()))
