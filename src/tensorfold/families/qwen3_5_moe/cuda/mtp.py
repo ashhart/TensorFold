@@ -148,7 +148,7 @@ class Head:
 
         w, m, c = self.w, self.m, self.w.config
         n = states.shape[0]
-        e = glue.embed(ids, w.embed.weight, w.embed.scales, w.embed.biases, c.hidden)
+        e = glue.embedding(ids, w.embed)                   # the table at its own width, as the target embeds
         _, en, exs = glue.add_rmsnorm(e, None, m.norm_e, c.eps)
         _, hn, hxs = glue.add_rmsnorm(states.contiguous(), None, m.norm_h, c.eps)
         x = (matmul(en, m.fc_e, exs).float() + matmul(hn, m.fc_h, hxs).float()).to(torch.bfloat16)

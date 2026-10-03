@@ -679,3 +679,31 @@ def test_constrained_streams_together_equal_solo_and_serial():
     dec.admit(alone)
     _drain(dec)
     assert alone.out == refs[0] and dec.graphs.target
+
+
+def _as_eight(words4: torch.Tensor) -> torch.Tensor:
+    """4-bit MLX words as 8-bit MLX words holding the same codes."""
+
+    w = words4.to(torch.int64) & 0xFFFFFFFF
+    q = ((w[:, :, None] >> (torch.arange(8, device=w.device) * 4)) & 0xF).reshape(w.shape[0], -1, 4)
+    packed = (q << (torch.arange(4, device=w.device) * 8)).sum(-1)
+    return torch.where(packed >= 2 ** 31, packed - 2 ** 32, packed).to(torch.int32)
+
+
+def test_the_head_embeds_draft_tokens_at_the_tables_width():
+    """An 8-bit embedding holding the 4-bit table's values: the target and the head see the same rows."""
+
+    from dataclasses import replace
+
+    w, head = _model()
+    q = w.embed
+    w8 = replace(w, embed=QLinear(_as_eight(q.weight), q.scales, q.biases, bits=8))
+    head8 = Head(w8, head.m)
+    rows = torch.randn((5, D), generator=torch.Generator(device="cuda").manual_seed(8), device="cuda").bfloat16()
+    tokens = [3, 50, 200, 7, 255]
+    got = []
+    for model, h in ((w, head), (w8, head8)):
+        _, mc, _, _ = decode.prefill(model, h, PROMPTS[0], None)
+        c = mc.view(64)
+        got.append(h.forward(c, rows, tokens, c.pos))
+    assert torch.equal(got[0], got[1])
