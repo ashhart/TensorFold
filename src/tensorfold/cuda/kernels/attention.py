@@ -235,6 +235,12 @@ def _base(index: int) -> torch.Tensor:
     return torch.zeros(64, dtype=torch.bfloat16, device=torch.device("cuda", index))
 
 
+def clear_tensor_cache() -> None:
+    """Forget device-pointer origins after the runtime's workers have stopped."""
+
+    _base.cache_clear()
+
+
 def offsets(caches: Sequence[tuple[torch.Tensor, torch.Tensor]], device) -> list[int]:
     """Each stream's key and value cache as bf16 element offsets from ``base(device)``, in stream order."""
 

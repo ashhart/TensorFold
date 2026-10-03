@@ -77,6 +77,12 @@ def _fragment_order(codes: torch.Tensor, npad: int) -> torch.Tensor:
 _ONES: dict[str, torch.Tensor] = {}
 
 
+def clear_tensor_cache() -> None:
+    """Release shared device scales after every runtime projection has gone."""
+
+    _ONES.clear()
+
+
 def _ones(kg: int, npad: int, device) -> torch.Tensor:
     """Unit bf16 scales [kg, npad] for weights with one tensor scale: views of one buffer per device."""
 

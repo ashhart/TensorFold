@@ -4,12 +4,24 @@ from __future__ import annotations
 
 import argparse
 import inspect
+import math
+import os
 from typing import Any
 
 
 def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any = None) -> None:
     """Refuse KV cache, draft rule, image, share, slot and precision options the backend or family can't serve."""
 
+    if getattr(args, "enable_sleep_mode", False):
+        if (backend != "cuda" or getattr(family.package, "CUDA_SLEEP_LEVELS", ()) != (2,)
+                or getattr(args, "tp", 1) != 1):
+            raise ValueError("--enable-sleep-mode supports single-device CUDA dense Qwen (qwen3_5) only")
+        timeout = getattr(args, "sleep_timeout", 120.0)
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("--sleep-timeout must be finite and positive")
+        name = getattr(args, "sleep_token_env", "TENSORFOLD_SLEEP_TOKEN")
+        if not name or not os.environ.get(name, "").strip():
+            raise ValueError("--enable-sleep-mode requires a nonblank secret in --sleep-token-env's environment variable")
     if getattr(args, "vision_urls", False) and not getattr(args, "vision", False):
         raise ValueError("--vision-urls needs --vision")
     images = getattr(args, "vision_max_images", None)

@@ -28,6 +28,12 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
     endpoint.add_argument("--port", type=int, default=8080)
     endpoint.add_argument("--name", default="", help="model id clients ask for (default: the model's name)")
     endpoint.add_argument("--alias", action="append", default=[], help="another model id to answer to")
+    endpoint.add_argument("--enable-sleep-mode", action="store_true",
+                          help="enable authenticated Level 2 sleep/wake for single-device CUDA dense Qwen")
+    endpoint.add_argument("--sleep-token-env", default="TENSORFOLD_SLEEP_TOKEN",
+                          help="environment variable containing the sleep/wake bearer secret")
+    endpoint.add_argument("--sleep-timeout", type=float, default=120.0,
+                          help="seconds to drain accepted requests before sleep is refused")
     endpoint.add_argument("--vision", action="store_true",
                           help="enable image input for supported GLM and Qwen vision checkpoints")
     endpoint.add_argument("--vision-urls", action="store_true",

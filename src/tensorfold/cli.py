@@ -238,8 +238,18 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
         raise ValueError("--tp 2 needs --master: rank 0's address on the link between the two machines")
     if args.tp == 1 and args.rank != 0:
         raise ValueError("--rank 1 needs --tp 2")
+    sleeping = bool(getattr(args, "enable_sleep_mode", False))
+    if sleeping:
+        _check_serve_options(args, family, "cuda", model_dir)
     started = time.perf_counter()
     drafter = "" if args.no_drafts else _drafter(family, args.drafter, "cuda")
+    identity = None
+    if sleeping:
+        from tensorfold.cuda.sleep import CheckpointIdentity
+
+        model_dir = Path(model_dir).resolve()
+        drafter = str(Path(drafter).resolve()) if drafter else ""
+        identity = CheckpointIdentity(model_dir, drafter)
     options: dict[str, Any] = {"drafter": drafter, "tp": int(args.tp), "rank": int(args.rank), "master": args.master,
                                "master_port": int(args.master_port), "no_drafts": bool(args.no_drafts)}
     if getattr(args, "kv_dtype", "bf16") != "bf16":
@@ -307,6 +317,16 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
           f"(sampling: {shown}; drafts: {'off' if args.no_drafts else 'on'}; prompts: {prompts}; "
           f"context: {'unlimited' if effective_context is None else effective_context}; "
           f"loaded in {time.perf_counter() - started:.1f}s)", flush=True)
+    if sleeping:
+        from tensorfold.cuda.sleep import CudaSleep
+        from tensorfold.server.lifecycle import Lifecycle
+
+        adapter = CudaSleep(app, family.package.cuda_engine, model_dir, options, identity=identity)
+        app.lifecycle = Lifecycle(release=adapter.release, restore=adapter.restore, cleanup=adapter.cleanup,
+                                  preflight=adapter.verify_identity, drain_timeout=args.sleep_timeout)
+        app.sleep_token = os.environ[args.sleep_token_env]
+        app.sleep_memory = adapter.memory_snapshot
+    del weights, engine
     serve(app, args.host, int(args.port))
     return 0
 

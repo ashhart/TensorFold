@@ -114,88 +114,90 @@ def load_nvfp4(model_dir: str | Path, device: str = "cuda"):
     info = {n: (i["dtype"], i["shape"]) for n, i in headers(model_dir).items() if not skipped(n)}
     root = "model.language_model." if any(n.startswith("model.language_model.") for n in info) else "model."
     t = _Tensors(model_dir, device, skip=skipped)
-    staging = Staging()                                   # one e4m3 copy at a time, shared by every NVFP4 projection
-    own, line = maths()
+    try:
+        staging = Staging()                                   # one e4m3 copy at a time, shared by every NVFP4 projection
+        own, line = maths()
 
-    def act_scale(name: str, got: dict, kind: str) -> float | None:
-        """The checkpoint's static input scale (x = codes * scale), where ``kind`` runs its own math; else None."""
+        def act_scale(name: str, got: dict, kind: str) -> float | None:
+            """The checkpoint's static input scale (x = codes * scale), where ``kind`` runs its own math; else None."""
 
-        if not own[kind]:
-            return None
-        if "input_scale" in got:
-            return float(got["input_scale"].float().reshape(-1)[0])
-        if "input_global_scale" in got:
-            return 1.0 / float(got["input_global_scale"].float().reshape(-1)[0])
-        raise ValueError(f"{name}: no static input scale, so its own math is unknown; serve it with --precision full")
+            if not own[kind]:
+                return None
+            if "input_scale" in got:
+                return float(got["input_scale"].float().reshape(-1)[0])
+            if "input_global_scale" in got:
+                return 1.0 / float(got["input_global_scale"].float().reshape(-1)[0])
+            raise ValueError(f"{name}: no static input scale, so its own math is unknown; serve it with --precision full")
 
-    def linear(name: str, prompt: bool = True):
-        parts = {s: info[f"{name}.{s}"] for s in SUFFIXES if f"{name}.{s}" in info}
-        if not parts:
-            raise ValueError(f"the checkpoint has no projection {name}")
-        kind = fmt.scheme(parts)
-        got = {s: t.pop(f"{name}.{s}") for s in parts}
-        weight = got["weight"] if "weight" in got else got.get("weight_packed")
-        if kind == "nvfp4":
-            g = got.get("weight_global_scale" if reciprocal else "weight_scale_2")
-            if g is None:
-                raise ValueError(f"{name}: an NVFP4 weight without its global scale")
-            g = float(g.float().reshape(-1)[0])
-            lin = Fp4Linear.from_checkpoint(weight, got["weight_scale"], 1.0 / g if reciprocal else g,
-                                            act=act_scale(name, got, "nvfp4"))
-            lin.staging = staging
-            return lin
-        if kind == "fp8":
-            s = got["weight_scale"].float().reshape(-1)
-            if s.numel() != 1:
-                raise ValueError(f"{name}: FP8 with {s.numel()} scales; the CUDA engine reads one scale a tensor")
-            return Fp8Linear.from_checkpoint(weight, float(s[0]), act=act_scale(name, got, "fp8"))
-        if kind == "bf16":
-            w = weight.to(torch.bfloat16).contiguous()
-            return Plain8(w, rows8=Fp8Linear.from_bf16(w)) if prompt and prompt_precision.fp8() else Plain(w)
-        raise ValueError(f"{name}: {kind} projections are not read on Qwen3.8-27B yet")
+        def linear(name: str, prompt: bool = True):
+            parts = {s: info[f"{name}.{s}"] for s in SUFFIXES if f"{name}.{s}" in info}
+            if not parts:
+                raise ValueError(f"the checkpoint has no projection {name}")
+            kind = fmt.scheme(parts)
+            got = {s: t.pop(f"{name}.{s}") for s in parts}
+            weight = got["weight"] if "weight" in got else got.get("weight_packed")
+            if kind == "nvfp4":
+                g = got.get("weight_global_scale" if reciprocal else "weight_scale_2")
+                if g is None:
+                    raise ValueError(f"{name}: an NVFP4 weight without its global scale")
+                g = float(g.float().reshape(-1)[0])
+                lin = Fp4Linear.from_checkpoint(weight, got["weight_scale"], 1.0 / g if reciprocal else g,
+                                                act=act_scale(name, got, "nvfp4"))
+                lin.staging = staging
+                return lin
+            if kind == "fp8":
+                s = got["weight_scale"].float().reshape(-1)
+                if s.numel() != 1:
+                    raise ValueError(f"{name}: FP8 with {s.numel()} scales; the CUDA engine reads one scale a tensor")
+                return Fp8Linear.from_checkpoint(weight, float(s[0]), act=act_scale(name, got, "fp8"))
+            if kind == "bf16":
+                w = weight.to(torch.bfloat16).contiguous()
+                return Plain8(w, rows8=Fp8Linear.from_bf16(w)) if prompt and prompt_precision.fp8() else Plain(w)
+            raise ValueError(f"{name}: {kind} projections are not read on Qwen3.8-27B yet")
 
-    def get(name: str) -> torch.Tensor:
-        return t.pop(root + name).contiguous()
+        def get(name: str) -> torch.Tensor:
+            return t.pop(root + name).contiguous()
 
-    def norm(name: str) -> torch.Tensor:
-        """A centred RMSNorm weight (stored as gamma - 1) with its 1 back, as the MLX converter wrote it."""
+        def norm(name: str) -> torch.Tensor:
+            """A centred RMSNorm weight (stored as gamma - 1) with its 1 back, as the MLX converter wrote it."""
 
-        w = get(name)
-        return (w.float() + 1.0).to(w.dtype)
+            w = get(name)
+            return (w.float() + 1.0).to(w.dtype)
 
-    layers = []
-    for i in range(cfg.layers):
-        p = f"layers.{i}."
-        q = root + p
-        gdn = attn = None
-        if cfg.is_linear(i):
-            gdn = GDN(qkv=linear(q + "linear_attn.in_proj_qkv"), z=linear(q + "linear_attn.in_proj_z"),
-                      b=linear(q + "linear_attn.in_proj_b"), a=linear(q + "linear_attn.in_proj_a"),
-                      out=linear(q + "linear_attn.out_proj"),
-                      conv=get(p + "linear_attn.conv1d.weight").reshape(-1, cfg.conv_kernel).contiguous(),
-                      A_log=get(p + "linear_attn.A_log").float().contiguous(),
-                      dt_bias=get(p + "linear_attn.dt_bias").float().contiguous(),
-                      norm=get(p + "linear_attn.norm.weight"))
-        else:
-            attn = Attention(q=linear(q + "self_attn.q_proj"), k=linear(q + "self_attn.k_proj"),
-                             v=linear(q + "self_attn.v_proj"), o=linear(q + "self_attn.o_proj"),
-                             q_norm=norm(p + "self_attn.q_norm.weight"), k_norm=norm(p + "self_attn.k_norm.weight"))
-        layers.append(Layer(linear=cfg.is_linear(i), input_norm=norm(p + "input_layernorm.weight"),
-                            post_norm=norm(p + "post_attention_layernorm.weight"), gdn=gdn, attn=attn,
-                            gate=linear(q + "mlp.gate_proj"), up=linear(q + "mlp.up_proj"),
-                            down=linear(q + "mlp.down_proj")))
-    if not any(n.startswith("lm_head.") for n in info):
-        raise ValueError("this checkpoint ties its head to the embedding; the CUDA engine reads a separate lm_head")
-    w = Weights(config=cfg, embed=Plain(get("embed_tokens.weight").to(torch.bfloat16)), layers=layers,
-                norm=norm("norm.weight"), head=linear("lm_head", prompt=False), quant="nvfp4")
-    w.precision = "checkpoint" if any(own.values()) else "full"
-    w.own = own
-    print(f"[tensorfold] precision: {line}", flush=True)
-    half = cfg.rope_dims // 2
-    inv = cfg.rope_theta ** (-torch.arange(0, half, dtype=torch.float64) / half)
-    w.inv_freq = inv.to(torch.float32).to(device)
-    left = list(t)
-    t.close()
+        layers = []
+        for i in range(cfg.layers):
+            p = f"layers.{i}."
+            q = root + p
+            gdn = attn = None
+            if cfg.is_linear(i):
+                gdn = GDN(qkv=linear(q + "linear_attn.in_proj_qkv"), z=linear(q + "linear_attn.in_proj_z"),
+                          b=linear(q + "linear_attn.in_proj_b"), a=linear(q + "linear_attn.in_proj_a"),
+                          out=linear(q + "linear_attn.out_proj"),
+                          conv=get(p + "linear_attn.conv1d.weight").reshape(-1, cfg.conv_kernel).contiguous(),
+                          A_log=get(p + "linear_attn.A_log").float().contiguous(),
+                          dt_bias=get(p + "linear_attn.dt_bias").float().contiguous(),
+                          norm=get(p + "linear_attn.norm.weight"))
+            else:
+                attn = Attention(q=linear(q + "self_attn.q_proj"), k=linear(q + "self_attn.k_proj"),
+                                 v=linear(q + "self_attn.v_proj"), o=linear(q + "self_attn.o_proj"),
+                                 q_norm=norm(p + "self_attn.q_norm.weight"), k_norm=norm(p + "self_attn.k_norm.weight"))
+            layers.append(Layer(linear=cfg.is_linear(i), input_norm=norm(p + "input_layernorm.weight"),
+                                post_norm=norm(p + "post_attention_layernorm.weight"), gdn=gdn, attn=attn,
+                                gate=linear(q + "mlp.gate_proj"), up=linear(q + "mlp.up_proj"),
+                                down=linear(q + "mlp.down_proj")))
+        if not any(n.startswith("lm_head.") for n in info):
+            raise ValueError("this checkpoint ties its head to the embedding; the CUDA engine reads a separate lm_head")
+        w = Weights(config=cfg, embed=Plain(get("embed_tokens.weight").to(torch.bfloat16)), layers=layers,
+                    norm=norm("norm.weight"), head=linear("lm_head", prompt=False), quant="nvfp4")
+        w.precision = "checkpoint" if any(own.values()) else "full"
+        w.own = own
+        print(f"[tensorfold] precision: {line}", flush=True)
+        half = cfg.rope_dims // 2
+        inv = cfg.rope_theta ** (-torch.arange(0, half, dtype=torch.float64) / half)
+        w.inv_freq = inv.to(torch.float32).to(device)
+        left = list(t)
+    finally:
+        t.close()
     if left:
         raise ValueError(f"unused checkpoint tensors: {left[:5]} ...")
     torch.cuda.empty_cache()

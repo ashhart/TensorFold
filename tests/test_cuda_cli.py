@@ -45,6 +45,119 @@ def test_serve_parses_the_cuda_flags():
     assert (args.backend, args.tp, args.rank, args.master, args.master_port) == ("auto", 2, 1, "192.0.2.11", 29551)
 
 
+def test_sleep_flags_require_environment_secret_without_command_line_token(monkeypatch):
+    from tensorfold.families import qwen3_5
+
+    args = cli.build_parser().parse_args(["serve", "owner/model", "--enable-sleep-mode"])
+    assert args.enable_sleep_mode and args.sleep_token_env == "TENSORFOLD_SLEEP_TOKEN" and args.sleep_timeout == 120
+    args = cli.build_parser().parse_args(["serve", "owner/model", "--sleep-token-env", "MODEL_SECRET",
+                                          "--sleep-timeout", "3.5"])
+    assert args.sleep_token_env == "MODEL_SECRET" and args.sleep_timeout == 3.5
+    candidate = "not-a-command-line-secret"
+    monkeypatch.delenv(candidate, raising=False)
+    args = cli.build_parser().parse_args(["serve", "owner/model", "--enable-sleep-mode",
+                                          "--sleep-token", candidate])
+    family = SimpleNamespace(title=qwen3_5.TITLE, package=qwen3_5, model_type="qwen3_5")
+    with pytest.raises(ValueError, match="nonblank secret") as refused:
+        cli._check_serve_options(args, family, "cuda")
+    assert candidate not in str(refused.value)
+
+
+@pytest.mark.parametrize("backend,kind,flags,secret,message", [
+    ("mlx", "qwen3_5", [], "present", "single-device CUDA dense Qwen"),
+    ("cuda", "qwen4_exp", [], "present", "single-device CUDA dense Qwen"),
+    ("cuda", "qwen3_5", ["--tp", "2"], "present", "single-device CUDA dense Qwen"),
+    ("cuda", "qwen3_5", [], None, "nonblank secret"),
+    ("cuda", "qwen3_5", [], "   ", "nonblank secret"),
+    ("cuda", "qwen3_5", ["--sleep-timeout", "nan"], "present", "finite and positive"),
+    ("cuda", "qwen3_5", ["--sleep-timeout", "inf"], "present", "finite and positive"),
+    ("cuda", "qwen3_5", ["--sleep-timeout", "0"], "present", "finite and positive"),
+])
+def test_sleep_refusals_precede_model_download(tmp_path, monkeypatch, backend, kind, flags, secret, message):
+    import importlib
+    from tensorfold import families, hub
+
+    module = importlib.import_module(f"tensorfold.families.{kind}")
+    found = SimpleNamespace(title=module.TITLE, package=module, model_type=kind)
+    monkeypatch.setattr(families, "detect", lambda path: found)
+    monkeypatch.setattr(cli, "_backend", lambda *a: backend)
+    monkeypatch.setattr(hub, "resolve", lambda *a, **k: pytest.fail("download before refusal"))
+    monkeypatch.setattr(families, "require_readable", lambda *a: pytest.fail("weights checked before refusal"))
+    monkeypatch.delenv("TENSORFOLD_SLEEP_TOKEN", raising=False)
+    if secret is not None:
+        monkeypatch.setenv("TENSORFOLD_SLEEP_TOKEN", secret)
+    args = cli.build_parser().parse_args(["serve", str(tmp_path), "--no-update-check", "--enable-sleep-mode"] + flags)
+    with pytest.raises(ValueError, match=message):
+        cli.cmd_serve(args)
+
+
+@pytest.mark.parametrize("flags", [[], ["--no-drafts"], ["--parallel", "4", "--checkpoint-slots", "6"]])
+def test_sleep_accepts_existing_dense_cuda_draft_and_parallel_options(tmp_path, monkeypatch, flags):
+    from tensorfold.families import qwen3_5
+
+    monkeypatch.setenv("TENSORFOLD_SLEEP_TOKEN", "secret")
+    args = cli.build_parser().parse_args(["serve", str(tmp_path), "--enable-sleep-mode"] + flags)
+    family = SimpleNamespace(title=qwen3_5.TITLE, package=qwen3_5, model_type="qwen3_5")
+    assert cli._check_serve_options(args, family, "cuda") is None
+
+
+def test_sleep_cli_releases_initial_locals_and_pins_reload_paths_and_context(tmp_path, monkeypatch, capsys):
+    import json
+    import sys
+    import weakref
+    from tensorfold.cuda import server, sleep
+
+    for name in ("config.json", "tokenizer.json", "model.safetensors"):
+        (tmp_path / name).write_text(json.dumps({"max_position_embeddings": 8192}))
+    draft_alias = tmp_path / "draft-alias"
+    draft_alias.symlink_to(tmp_path, target_is_directory=True)
+    made, refs = [], []
+
+    class Runtime:
+        def __init__(self):
+            self.context_window = 4096
+            self.w = RuntimeWeights()
+            self.vision = None
+
+        def close(self):
+            pass
+
+    class RuntimeWeights:
+        pass
+
+    def factory(path, **options):
+        made.append((path, options))
+        engine = Runtime()
+        refs.extend((weakref.ref(engine), weakref.ref(engine.w)))
+        return engine
+
+    family = _family(cuda_engine=factory, CUDA_SLEEP_LEVELS=(2,))
+    family.model_type = "qwen3_5"
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=SimpleNamespace(synchronize=lambda: None,
+                                                                                   empty_cache=lambda: None)))
+    monkeypatch.setattr(sleep, "clear_tensor_caches", lambda: None)
+    monkeypatch.setenv("MY_SLEEP_SECRET", "do-not-log-this-value")
+    monkeypatch.setattr(cli, "_drafter", lambda *a: str(draft_alias))
+    monkeypatch.setattr(server, "App", lambda engine, *a, **k: SimpleNamespace(
+        engine=engine, vision=None, context_window=k["context_window"], effective_context_window=4096))
+
+    def serve(app, *args):
+        assert app.context_window == 4096 and app.sleep_token == "do-not-log-this-value"
+        app.lifecycle.sleep()
+        assert refs[0]() is refs[1]() is None
+        app.lifecycle.wake_up()
+        assert app.engine.context_window == 4096
+
+    monkeypatch.setattr(server, "serve", serve)
+    args = cli.build_parser().parse_args(["serve", str(tmp_path), "--enable-sleep-mode", "--parallel", "2",
+                                          "--sleep-token-env", "MY_SLEEP_SECRET"])
+    assert cli._serve_cuda(args, family, tmp_path, 8192) == 0
+    assert made[0][1]["context"] == 8192 and made[0][1]["context_explicit"] is False
+    assert made[1][1]["context"] == 4096 and made[1][1]["context_explicit"] is True
+    assert made[1][1]["parallel"] == 2 and made[1][1]["drafter"] == str(tmp_path.resolve())
+    assert "do-not-log-this-value" not in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("override, expected", [(None, 128), (0, 0), (64, 64)])
 def test_cuda_dispatch_keeps_the_resolved_context(tmp_path, monkeypatch, override, expected):
     import json
