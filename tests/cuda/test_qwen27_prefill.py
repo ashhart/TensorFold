@@ -17,6 +17,11 @@ from tensorfold.families.qwen3_5.cuda.prefill import prefill_chunk, prefill_stat
 from tensorfold.families.qwen3_5.cuda.qmm_fast import prepare  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.weights import Attention, Config, GDN, Layer, QLinear, Weights  # noqa: E402
 
+# FP8 prompts need FP8 MMA: these checks run from compute capability 8.9
+FP8_PROMPTS = pytest.mark.skipif(not __import__("tensorfold.cuda.build", fromlist=["has"]).has((8, 9)),
+                                 reason="FP8 prompts need compute capability 8.9")
+
+
 V = 256
 
 
@@ -175,6 +180,7 @@ def test_a_long_prompt_tree_window_equals_serial_on_every_path(policy, monkeypat
             commit(serial, record, [0])
 
 
+@FP8_PROMPTS
 def test_bf16_prompts_track_decode_closer_than_fp8():
     """bf16 prompt rows sit nearer decode's arithmetic than FP8 rows do (this model, 300 rows: 0.26% against 0.57%)."""
 
@@ -240,6 +246,7 @@ def test_prefill_attention_rows_do_not_depend_on_chunking(heads, kv_heads, dim):
     assert ((whole.float() - ref).norm() / ref.norm()).item() < 1e-2
 
 
+@FP8_PROMPTS
 @pytest.mark.parametrize("gs", [64, 32])
 def test_fp8_prefill_matmul_rows_do_not_depend_on_chunking(gs):
     gen = torch.Generator(device="cuda").manual_seed(8)

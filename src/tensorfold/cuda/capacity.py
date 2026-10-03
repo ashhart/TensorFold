@@ -286,11 +286,11 @@ def choose(plan: Plan, peers: list[list[int]] | None = None) -> int:
 
 
 def floor(model_dir: str | Path) -> tuple[int, int]:
-    """The compute capability a checkpoint's kernels need: 8.9 for every format (clusters are taken where present)."""
+    """The compute capability a checkpoint's kernels need: 8.0 for bf16 prompts in every format, 8.9 for FP8 prompts."""
 
-    from tensorfold.cuda import build
+    from tensorfold.cuda import build, prompt_precision
 
-    return build.MIN_CAPABILITY
+    return build.FP8 if prompt_precision.fp8() else build.MIN_CAPABILITY
 
 
 def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, torch,

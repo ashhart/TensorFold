@@ -37,10 +37,31 @@ def test_the_flags_name_only_this_gpu(monkeypatch):
 
 
 @pytest.mark.torch
+def test_ampere_builds_the_bf16_kernels_and_refuses_fp8(monkeypatch):
+    _gpu(monkeypatch, (8, 6), "NVIDIA A40")
+    assert build.arch_flags() == ["-gencode=arch=compute_86,code=sm_86"]
+    with pytest.raises(RuntimeError, match=r"capability 8\.9 or newer \(FP8 MMA for these weights\).*A40.*is 8\.6"):
+        build.arch_flags(build.FP8)
+
+
+@pytest.mark.torch
 def test_an_older_gpu_is_refused_by_name(monkeypatch):
-    _gpu(monkeypatch, (8, 6), "NVIDIA GeForce RTX 3090")
-    with pytest.raises(RuntimeError, match=r"capability 8\.9 or newer \(FP8 MMA\).*RTX 3090.*is 8\.6"):
+    _gpu(monkeypatch, (7, 0), "Tesla V100-PCIE-32GB")
+    with pytest.raises(RuntimeError, match=r"capability 8\.0 or newer \(bf16 tensor cores\).*V100.*is 7\.0"):
         build.arch_flags()
+
+
+def test_the_floor_follows_the_format(tmp_path, monkeypatch):
+    import json
+
+    from tensorfold.cuda import capacity, prompt_precision
+
+    (tmp_path / "config.json").write_text(json.dumps({"quantization": {"bits": 4, "group_size": 64}}))
+    assert capacity.floor(tmp_path) == build.MIN_CAPABILITY == (8, 0)
+    with prompt_precision.using(True):
+        assert capacity.floor(tmp_path) == build.FP8
+    (tmp_path / "config.json").write_text(json.dumps({"quantization_config": {"quant_method": "modelopt"}}))
+    assert capacity.floor(tmp_path) == build.MIN_CAPABILITY      # NVFP4 runs W4A16 below 8.9
 
 
 @pytest.mark.torch
@@ -152,8 +173,8 @@ def test_a_build_directory_argument_is_the_one_checked(ext, tmp_path):
 
 @pytest.mark.torch
 def test_an_older_gpu_is_refused_before_any_line(ext, monkeypatch):
-    _gpu(monkeypatch, (8, 6), "NVIDIA GeForce RTX 3090")
-    with pytest.raises(RuntimeError, match="RTX 3090"):
+    _gpu(monkeypatch, (7, 0), "Tesla V100-PCIE-32GB")
+    with pytest.raises(RuntimeError, match="V100"):
         ext.build.load(name="tf_test", sources=ext.sources, verbose=False)
     assert ext.said == [] and ext.calls == []
 

@@ -15,6 +15,10 @@ from tensorfold.cuda.kernels.qmm import quantize_rows
 from tensorfold.cuda.nvfp4 import format as fmt
 from tensorfold.cuda.nvfp4.linear import Concat, Fp4Linear, Fp8BlockLinear, Fp8Linear, Mx8Linear
 
+# FP8 prompts need FP8 MMA: these checks run from compute capability 8.9
+FP8_PROMPTS = pytest.mark.skipif(not __import__("tensorfold.cuda.build", fromlist=["has"]).has((8, 9)),
+                                 reason="FP8 prompts need compute capability 8.9")
+
 
 def _fp4(n, k, seed):
     rng = np.random.default_rng(seed)
@@ -153,6 +157,7 @@ def _bf16_prompts(lin, x, ref):
     return got
 
 
+@FP8_PROMPTS
 def test_prompt_gemms_track_decode_and_keep_rows_in_any_chunk():
     n, k, m = 320, 1024, 300
     packed, scale, g = _fp4(n, k, 7)
@@ -178,6 +183,7 @@ def _mx8(n, k, seed):
     return w, rng.integers(118, 132, size=(n, k // 32), dtype=np.uint8)            # e8m0 2^-9 .. 2^4
 
 
+@FP8_PROMPTS
 @pytest.mark.parametrize("n,k", [(128, 256), (320, 2560)])
 def test_mxfp8_decode_is_exact_and_prompts_track_it_in_any_chunk(n, k):
     w, s = _mx8(n, k, n)
@@ -225,6 +231,7 @@ def _fp8b(n, k, seed):
     return w, s
 
 
+@FP8_PROMPTS
 @pytest.mark.parametrize("n,k", [(128, 256), (200, 512), (320, 2560)])
 def test_block_fp8_decode_is_exact_prompts_take_its_bits_and_fp8_prompts_track_it(n, k):
     w, s = _fp8b(n, k, n)

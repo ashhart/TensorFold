@@ -18,9 +18,13 @@ def _ext():
     from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
-    return load(name="tensorfold_qmm_v5", sources=[str(here / "qmm.cpp"), str(here / "qmm.cu"),
-                                                   str(here / "qmm_group.cu"), str(here / "qmm_prefill.cu"),
-                                                   str(here / "qmm_prefill8.cu")],
+    from tensorfold.cuda.build import FP8, has
+
+    fp8 = has(FP8)                  # FP8 prompt kernels from 8.9; below, a stub refuses them (bf16 prompts work)
+    prompt8 = "qmm_prefill8.cu" if fp8 else "qmm_prefill8_none.cu"
+    return load(name="tensorfold_qmm_v5" if fp8 else "tensorfold_qmm_v5_bf16",
+                sources=[str(here / "qmm.cpp"), str(here / "qmm.cu"), str(here / "qmm_group.cu"),
+                         str(here / "qmm_prefill.cu"), str(here / prompt8)],
                 extra_cuda_cflags=["-O3"], verbose=False)
 
 

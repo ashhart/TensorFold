@@ -24,6 +24,11 @@ from tensorfold.families.qwen3_5.cuda.forward import State, commit, tree_forward
 from tensorfold.families.qwen3_5.cuda.nvfp4_load import Plain8
 from tensorfold.families.qwen3_5.cuda.weights import GDN, Config, Layer, Plain, Weights
 
+# FP8 prompts need FP8 MMA: these checks run from compute capability 8.9
+FP8_PROMPTS = pytest.mark.skipif(not __import__("tensorfold.cuda.build", fromlist=["has"]).has((8, 9)),
+                                 reason="FP8 prompts need compute capability 8.9")
+
+
 MODEL = os.environ.get("TENSORFOLD_QWEN27_NVFP4", "")
 DRAFTER = os.environ.get("TENSORFOLD_QWEN27_DRAFTER", "")
 
@@ -114,6 +119,7 @@ def test_drafter_head_parts_are_the_head_columns():
     assert torch.equal(full(x), head(x))
 
 
+@FP8_PROMPTS
 def test_gate_copy_tracks_the_bf16_product():
     """A bf16 gate's e4m3 prompt copy: within e4m3's rounding of the bf16 product on FP8 rows."""
 

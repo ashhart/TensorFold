@@ -33,3 +33,19 @@ def _give_back_gpu_memory():
     if torch.cuda.is_initialized():
         gc.collect()
         torch.cuda.empty_cache()
+
+
+def pytest_collection_modifyitems(config, items):
+    """Below compute capability 8.9 (no FP8 MMA) the FP8-prompt cases (a parameter ``fp8`` set True) skip."""
+
+    if not _cuda():
+        return
+    from tensorfold.cuda import build
+
+    if build.has(build.FP8):
+        return
+    skip = pytest.mark.skip(reason="FP8 prompts need compute capability 8.9")
+    for item in items:
+        spec = getattr(item, "callspec", None)
+        if spec is not None and spec.params.get("fp8") is True:
+            item.add_marker(skip)
