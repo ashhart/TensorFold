@@ -233,6 +233,10 @@ class DeepSeekEngine:
             active = bool(draft and self.drafter)
             while len(tokens) < max_tokens:
                 if stop_eos and pending in self.eos:
+                    # Shared serving hides EOS from text and uses this callback
+                    # to mark the reply's finish reason (and count its tokens).
+                    tokens.append(pending)
+                    on_tokens([pending])
                     break
                 tokens.append(pending)
                 if on_tokens([pending]) or len(tokens) >= max_tokens:

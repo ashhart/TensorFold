@@ -44,6 +44,12 @@ def test_health_counts_live_tokens_and_folds_the_engine_s_stats_when_a_request_e
         assert before["ok"] is True and before["backend"] == "tensorfold" and "streams" not in before
         assert before["busy"] is False and before["requests_running"] == 0 and before["requests_total"] == 0
         assert before["context_length"] == 262144
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=WAIT)
+        try:
+            connection.request("GET", "/v1/models")
+            assert json.loads(connection.getresponse().read())["data"][0]["max_model_len"] == 262144
+        finally:
+            connection.close()
         reply = {}
 
         def run():

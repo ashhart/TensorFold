@@ -68,7 +68,7 @@ class DeepSeekApp(App):
         rendered = self.template.render(probe, tools=None, enable_thinking=False)
         form = call_format(rendered, "tfprobe_fn", [opener])
         ids = self.tok.encode(opener).ids
-        first = self.tok.decode(ids[:1])
+        first = self.tok.decode(ids[:1], skip_special_tokens=False)
         if form is None or not ids or not first or not opener.startswith(first):
             raise RequestError("native tokenizer cannot represent the DeepSeek DSML tool-call prefix")
         _, lead, tail = form
@@ -77,10 +77,10 @@ class DeepSeekApp(App):
         return CallGate.after_prompt(
             prompt,
             ids[0],
-            lambda t: t not in eos and not self.tok.decode([t]).strip(),
+            lambda t: t not in eos and not self.tok.decode([t], skip_special_tokens=False).strip(),
             think_open=self.tok.token_to_id("<think>"),
             think_end=self.tok.token_to_id("</think>"),
-            text=lambda t: self.tok.decode([t]),
+            text=lambda t: self.tok.decode([t], skip_special_tokens=False),
             lead=opener[len(first) :] + lead,
             names=names,
             tail=tail,

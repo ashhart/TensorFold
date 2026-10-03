@@ -89,7 +89,9 @@ def make_handler(app: App):
             if route in ("/metrics", "/v1/metrics"):
                 return metrics.send(self, app)
             if self.path.rstrip("/") in ("/v1/models", "/models"):
-                self._json(200, {"object": "list", "data": [{"id": model_id, "object": "model", "owned_by": "tensorfold"}
+                self._json(200, {"object": "list", "data": [{"id": model_id, "object": "model", "owned_by": "tensorfold",
+                                                             **({"max_model_len": app.effective_context_window}
+                                                                if app.effective_context_window is not None else {})}
                                                             for model_id in app.model_ids]})
             elif self.path.rstrip("/") in ("/health", "/v1/health"):
                 self._json(200, health.of(app).snapshot(app))
