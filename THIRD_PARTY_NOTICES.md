@@ -117,3 +117,12 @@ The multimodal rotary and image-feature integration is adapted from MiaAI-Lab's
 [Flash Next vision patch 0008](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/blob/a3aa89835022c55ca8e55008c37785954834e04f/patches/0008-flash-next-vision.patch),
 MIT License, Copyright (c) 2026 MiaAI-Lab. The license is included in `LICENSES/MiaAI-Lab-MIT.txt`.
 The port preserves the v0.5 CUDA execution APIs and adds an offline EXL3 vision adapter.
+
+## DeepSeek-V4.1-Flash serving (deepseek-v41-tensorfold-spark)
+
+Parts of the DeepSeek-V4.1 serving path are adapted from Jay Leaton's
+[deepseek-v41-tensorfold-spark](https://github.com/jayleaton/deepseek-v41-tensorfold-spark):
+
+- `src/tensorfold/families/deepseek_v41/cuda/dsml.py` and `tests/test_dsv41_dsml.py` adapt its DeepSeek-V4.1 family's
+  DSML reply parser (`engine/serving/dsml.py`) and its tests, MIT License, Copyright (c) 2026 Jay Leaton. The
+  license is included in `LICENSES/JayLeaton-MIT.txt`. Each file keeps its SPDX line and states what was changed.

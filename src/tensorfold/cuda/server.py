@@ -27,6 +27,7 @@ from tensorfold.cuda import health
 from tensorfold.cuda.chat_template import ChatTemplate
 from tensorfold.cuda.reply_text import StopStrings, StreamDecoder, hide_tool_calls, parse_tool_calls
 from tensorfold.cuda.turns import Turns, Yield
+from tensorfold.families.deepseek_v41.cuda import dsml
 from tensorfold.server.text import is_title_request, reasoning_count, split_thinking
 from tensorfold.vision.images import DEFAULT_LIMITS, ImageLimits
 
@@ -125,6 +126,16 @@ class App:
                 self.engine.generate).parameters:
             problem = "this model's engine does not enforce structured output"
         return problem
+
+    @property
+    def _dsml(self) -> bool:
+        """Whether this tokenizer writes DeepSeek-V4.1's DSML calls (its family parser reads them, streamed)."""
+
+        found = self.__dict__.get("dsml")
+        if found is None:
+            lookup = getattr(self.tok, "token_to_id", None)
+            found = self.__dict__["dsml"] = lookup is not None and lookup("｜DSML｜") is not None
+        return found
 
     def _grammars(self) -> grammar.Grammars:
         return grammar.compiler(self, getattr(self, "model_dir", None), self.engine.eos)
@@ -349,8 +360,23 @@ class App:
         stopped = {"client": False, "stop": False}
         failed: list[Exception] = []
         stream = StreamDecoder(self.tok, ends)
+        # DSML replies: one parser for reasoning, content and calls, so streamed and whole replies are the same text
+        ds = dsml.Stream(thinking=thinking, tools=tools, max_calls=policy.max_calls) if tools and chat and \
+            self._dsml else None
+        said: dict[str, list[str]] = {"reasoning_content": [], "content": []}
+
+        def say(deltas: list[dict[str, Any]]) -> bool:
+            for d in deltas:
+                d = {("reasoning_content" if k == "reasoning" else k): v for k, v in d.items()}
+                for k in said:
+                    if k in d:
+                        said[k].append(d[k])
+                if not emit(d):
+                    return False
+            return True
+
         # calls stream as argument deltas while written (as on the Mac); one-call requests keep the end parser
-        calls_stream = ToolCallStreamer(tools) if tools and not policy.single else None
+        calls_stream = ToolCallStreamer(tools) if tools and not policy.single and ds is None else None
         answer_raw = [""]
 
         def visible(finished: bool) -> tuple[str, str]:
@@ -386,6 +412,15 @@ class App:
                 else:
                     out.extend(new)
                 stream.add(new)
+                if ds is not None:
+                    raw = stops.visible(stream.text, partial=True) if stops.strings else stream.text
+                    if not say(ds.feed(raw)):
+                        stopped["client"] = True
+                    if not stopped["client"] and cancelled is not None and cancelled():
+                        stopped["client"] = True
+                    if serving[0] is not None:
+                        serving[0].saw()
+                    return stopped["client"] or stopped["stop"]
                 reasoning, answer = visible(False)
                 delta: dict[str, Any] = {}
                 if len(reasoning) > sent["reasoning"]:
@@ -478,18 +513,27 @@ class App:
         if stopped["client"]:                                        # as the Mac server: nothing more is written
             raise RequestCancelled("the client left during the reply")
         stats = {**(stats or {}), "token_sha": token_sha(out)}
-        reasoning, answer = visible(True)
         final: dict[str, Any] = {}
-        if len(reasoning) > sent["reasoning"]:
-            final["reasoning_content"] = reasoning[sent["reasoning"]:]
         text = stops.visible(self.tok.decode([t for t in out if t not in ends], skip_special_tokens=False))
-        raw_answer = split_thinking(text, finished=True)[1] if chat and thinking else text
-        content, calls = parse_tool_calls(raw_answer, tools, max_calls=policy.max_calls) if tools else (answer, None)
-        content = policy.content(content) if tools else content
-        tail = content[sent["content"]:] if content.startswith(answer[:sent["content"]]) else ""
-        if tail:
-            final["content"] = tail
-        finish = "tool_calls" if calls else ("stop" if stopped["stop"] or (out and out[-1] in ends) else "length")
+        ended = "stop" if stopped["stop"] or (out and out[-1] in ends) else "length"
+        if ds is not None:
+            say(ds.finish(text))                    # the client may have gone; the reply is still whole
+            reasoning, content = "".join(said["reasoning_content"]), "".join(said["content"])
+            calls = [c.openai() for c in ds.calls] or None
+            # a call cut before its </invoke> is reported as cut, as OpenAI reports a call cut by max_tokens
+            finish = "length" if any(not c.closed for c in ds.calls) else ("tool_calls" if calls else ended)
+        else:
+            reasoning, answer = visible(True)
+            if len(reasoning) > sent["reasoning"]:
+                final["reasoning_content"] = reasoning[sent["reasoning"]:]
+            raw_answer = split_thinking(text, finished=True)[1] if chat and thinking else text
+            content, calls = (parse_tool_calls(raw_answer, tools, max_calls=policy.max_calls) if tools
+                              else (answer, None))
+            content = policy.content(content) if tools else content
+            tail = content[sent["content"]:] if content.startswith(answer[:sent["content"]]) else ""
+            if tail:
+                final["content"] = tail
+            finish = "tool_calls" if calls else ended
         print_done(len(prompt), (cached or [0])[0], thinking, out, finish, stats, request)
         if body.get("return_token_ids"):              # the reply's ids in the "tensorfold" block, for exactness checks
             stats = {**(stats or {}), "token_ids": [int(t) for t in out]}
@@ -497,6 +541,8 @@ class App:
                     if probabilities is not None else None)
         # the calls already sent as deltas; the handler sends the rest (a call the streamer could not follow)
         streamed = calls_stream.index + 1 if calls_stream is not None and calls_stream.streamed else 0
+        if ds is not None:
+            streamed = len(ds.calls)
         return {"final": final, "calls": calls, "finish": finish, "content": content, "reasoning": reasoning,
                 **({"logprobs": logprobs} if logprobs is not None else {}),
                 "prompt_tokens": len(prompt), "completion_tokens": len(out), "cached_tokens": (cached or [0])[0],
