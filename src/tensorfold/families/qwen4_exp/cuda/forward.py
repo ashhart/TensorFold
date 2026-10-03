@@ -52,12 +52,14 @@ def hc_block(hc: HC, b: Buffers, R: int, eps: float, streams: int, low: int, mod
              inject_out, h: torch.Tensor, branch=None, y=None, wts=None) -> None:
     """Write the pending branch back into the streams h (in place), then the hyper-connection's read-out: b.mixed [R, D] (+ group sums), and its inject gates into ``inject_out``."""
 
-    if b.prefill and R > FUSED_ROWS and isinstance(hc.down, qmm.Q4):
+    b16 = getattr(hc.down, "kernel", "qmm") == "b16"
+    if b.prefill and R > FUSED_ROWS and (isinstance(hc.down, qmm.Q4) or b16):
         fused = _hc_fuser(h.device)
         if fused is not None:
             fused(h[:R], b.pss[:R], hc.scale, b.normed[:R], b.xs_normed[:R], streams, eps, mode,
                   branch=branch, inject=inject_prev, y=y, wts=wts)
-            _readout_plain(hc, b, h, R, eps, streams, low, inject_out[:R] if hc.inject else None, normed=True)
+            readout = _readout_b16 if b16 else _readout_plain
+            readout(hc, b, h, R, eps, streams, low, inject_out[:R] if hc.inject else None, normed=True)
             return
     glue.hc_writeback(h[:R], h[:R], b.pss[:R], streams, mode, branch=branch, inject=inject_prev, y=y, wts=wts)
     _readout(hc, b, h, R, eps, streams, low, inject_out[:R] if hc.inject else None)
@@ -77,10 +79,12 @@ def _readout(hc: HC, b: Buffers, h: torch.Tensor, R: int, eps: float, streams: i
         _readout_plain(hc, b, h, R, eps, streams, low, inject)
 
 
-def _readout_b16(hc: HC, b: Buffers, h: torch.Tensor, R: int, eps: float, streams: int, low: int, inject) -> None:
+def _readout_b16(hc: HC, b: Buffers, h: torch.Tensor, R: int, eps: float, streams: int, low: int, inject,
+                 normed: bool = False) -> None:
     """The read-out on the bf16 kernels: norm, down, activation and inject gates, up, the mix; same bits per row."""
 
-    glue.hc_normed(h[:R], b.pss[:R], hc.scale, b.normed[:R], b.xs_normed[:R], streams, eps)
+    if not normed:
+        glue.hc_normed(h[:R], b.pss[:R], hc.scale, b.normed[:R], b.xs_normed[:R], streams, eps)
     got = bf16.matmul(b.normed[:R], hc.down.b, out=torch.empty((R, hc.down.n), dtype=torch.float32,
                                                                device=h.device), f32=True)
     glue.hc_act(got, b.act[:R], b.xs_act[:R], inject, streams, low)
