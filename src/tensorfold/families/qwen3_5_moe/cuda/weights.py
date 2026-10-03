@@ -72,7 +72,21 @@ def routed4(prefix: str, t, cfg) -> dict[str, Routed]:
     experts = [f"{prefix}experts.{e}." for e in range(cfg.experts)] + [prefix + "shared_expert."]
     gate, up, down = (proj([e + f"{p}_proj" for e in experts]) for p in ("gate", "up", "down"))
     router = torch.cat([take(prefix + "gate.weight"), take(prefix + "shared_expert_gate.weight")])
-    return {"moe": Routed(router.to(torch.bfloat16).contiguous(), nvx.make(gate, up, down), int(cfg.top_k))}
+    return {"moe": Routed(router.to(torch.bfloat16).contiguous(), make_experts(gate, up, down, router), int(cfg.top_k))}
+
+
+def make_experts(gate: tuple, up: tuple, down: tuple, router: torch.Tensor):
+    """NVFP4 experts for this GPU: the grouped bf16-mma kernel, or on sm_70 the Volta one with a Volta router."""
+
+    from tensorfold.cuda.build import volta
+
+    if not volta():
+        return nvx.make(gate, up, down)
+    from tensorfold.cuda.kernels.qmmf_volta import VoltaExperts, VoltaLinear
+
+    ex = VoltaExperts.make(gate, up, down)
+    ex.router = VoltaLinear.from_bf16(router.to(torch.bfloat16))
+    return ex
 
 
 def load(model_dir: str | Path) -> Weights:
@@ -122,9 +136,14 @@ def mtp_tensors(model_dir: str | Path) -> dict[str, torch.Tensor] | None:
 def fp4(w: torch.Tensor):
     """A bf16 [N, K] weight as a W4A16 NVFP4 linear (ModelOpt's recipe): the MTP layer only drafts."""
 
+    from tensorfold.cuda.build import volta
     from tensorfold.cuda.nvfp4.linear import Fp4Linear
 
     words, scales, g = nvx.quantize(w[None].contiguous())
+    if volta():
+        from tensorfold.cuda.kernels.qmmf_volta import VoltaLinear
+
+        return VoltaLinear.from_nvfp4(words[0], scales[0].view(torch.float8_e4m3fn), float(g[0]))
     return Fp4Linear.from_checkpoint(words[0], scales[0], float(g[0]))
 
 
@@ -164,12 +183,18 @@ def load_mtp_nvfp4(model_dir: Path, w: Weights, raw: dict[str, torch.Tensor], id
         rows = torch.as_tensor(ids, dtype=torch.int64)
         hw = f.get("lm_head.weight")[rows].to(device)
         hs = f.get("lm_head.weight_scale").view(torch.uint8)[rows].to(device)
-        head = Fp4Linear.from_checkpoint(hw, hs, float(f.get("lm_head.weight_scale_2").float().reshape(-1)[0]))
+        hg = float(f.get("lm_head.weight_scale_2").float().reshape(-1)[0])
+        if __import__("tensorfold.cuda.build", fromlist=["volta"]).volta():
+            from tensorfold.cuda.kernels.qmmf_volta import VoltaLinear
+
+            head = VoltaLinear.from_nvfp4(hw, hs.view(torch.float8_e4m3fn), hg)
+        else:
+            head = Fp4Linear.from_checkpoint(hw, hs, hg)
         f.close()
     out = MTP(norm_e=norm("pre_fc_norm_embedding.weight"), norm_h=norm("pre_fc_norm_hidden.weight"),
               fc_e=fp4(fc[:, :d]), fc_h=fp4(fc[:, d:]), input_norm=norm(p + "input_layernorm.weight"),
               post_norm=norm(p + "post_attention_layernorm.weight"), attn=attn,
-              moe=Routed(router.contiguous(), nvx.make(gate, up, dn), w.config.top_k), norm=norm("norm.weight"),
+              moe=Routed(router.contiguous(), make_experts(gate, up, dn, router), w.config.top_k), norm=norm("norm.weight"),
               head=head)
     if raw:
         raise ValueError(f"unused MTP tensors: {sorted(raw)[:5]}")

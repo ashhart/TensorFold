@@ -251,6 +251,191 @@ __global__ void gather_rows_kernel(const long* __restrict__ ids, const uint4* __
     for (int c = threadIdx.x; c < row16; c += blockDim.x) out[(long)blockIdx.x * row16 + c] = table[id * row16 + c];
 }
 
+// Routed NVFP4 experts: items of up to eight (row, slot) pairs of one expert on the decode mma chain.
+
+constexpr int EX_ROWS = 8;           // pairs an item
+
+// Pairs grouped by expert in one block: members[] pair ids expert by expert, items (expert, first, count).
+__global__ void plan_kernel(const int* __restrict__ picks, int pairs, int experts, int* __restrict__ members,
+                            int* __restrict__ items, int* __restrict__ counts) {
+    extern __shared__ int sh[];
+    int* hist = sh;
+    int* offs = sh + experts;
+    int* ioffs = sh + 2 * experts;
+    int* fill = sh + 3 * experts;
+    for (int e = threadIdx.x; e < experts; e += blockDim.x) { hist[e] = 0; fill[e] = 0; }
+    __syncthreads();
+    for (int p = threadIdx.x; p < pairs; p += blockDim.x) atomicAdd(hist + picks[p], 1);
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        int o = 0, io = 0;
+        for (int e = 0; e < experts; ++e) {
+            offs[e] = o; ioffs[e] = io;
+            o += hist[e]; io += (hist[e] + EX_ROWS - 1) / EX_ROWS;
+        }
+        counts[0] = io;
+        counts[1] = o;
+    }
+    __syncthreads();
+    for (int p = threadIdx.x; p < pairs; p += blockDim.x) {
+        const int e = picks[p];
+        members[offs[e] + atomicAdd(fill + e, 1)] = p;
+    }
+    for (int e = threadIdx.x; e < experts; e += blockDim.x)
+        for (int j = 0; j * EX_ROWS < hist[e]; ++j) {
+            int* it = items + 3 * (ioffs[e] + j);
+            it[0] = e; it[1] = offs[e] + j * EX_ROWS; it[2] = min(EX_ROWS, hist[e] - j * EX_ROWS);
+        }
+}
+
+// EPI 2: SwiGLU (MM = 2) -> bf16 act [pairs, N]; 0: fp32 [pairs, N]; 3: bf16 [pairs, N].
+template <int EPI>
+__global__ void __launch_bounds__(THREADS) experts884_kernel(
+        const __half* __restrict__ X, const float* __restrict__ RS, const int* __restrict__ W,
+        const unsigned* __restrict__ S, const float* __restrict__ ALPHA, const int* __restrict__ members,
+        const int* __restrict__ items, const int* __restrict__ counts, int slots, void* __restrict__ OUT,
+        float* __restrict__ PART, int* __restrict__ CNT, int pairs_cap, int N, int K, int gper, int sk, float limit) {
+    constexpr int MM = EPI == 2 ? 2 : 1;
+    const int item = blockIdx.x;
+    if (item >= counts[0]) return;
+    __shared__ __align__(16) __half sa[STAGES][512];
+    __shared__ int src[EX_ROWS], pid[EX_ROWS];
+    __shared__ float rsr[EX_ROWS];
+    __shared__ int last;
+    const int e = items[3 * item], first = items[3 * item + 1], cnt = items[3 * item + 2];
+    if (threadIdx.x < EX_ROWS) {
+        const int p = threadIdx.x < cnt ? members[first + threadIdx.x] : -1;
+        pid[threadIdx.x] = p;
+        src[threadIdx.x] = p < 0 ? -1 : (slots > 0 ? p / slots : p);
+        rsr[threadIdx.x] = p < 0 ? 0.f : RS[slots > 0 ? p / slots : p];
+    }
+    __syncthreads();
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    const int q = (lane >> 2) & 3, idx = (lane & 3) + 4 * (lane >= 16);
+    const int s = blockIdx.z;
+    const int g0 = s * gper, g1 = g0 + gper;
+    const int KG = K / 64, N32 = N / 32;
+    const int cbase = blockIdx.y * COLS + warp * 32 + q * 8;
+    const int col = cbase + idx;
+    const bool nok = col < N;
+    const int c32 = nok ? col : 0;
+    const long cell0 = (((long)e * N32 + (c32 >> 5)) * KG) * 32 + (c32 & 31);       // (expert, tile, group 0, column)
+    const int4* wp = reinterpret_cast<const int4*>(W + cell0 * MM * 8);
+    const unsigned* sp = S + cell0 * MM;
+    constexpr long WSTEP = 32 * MM * 8 / 4;                                         // int4s between groups
+    constexpr long SSTEP = 32 * MM;
+
+    // staging: thread c < 64 copies k-step c / 8 of pair row c % 8 (eight inputs) into fragment order
+    auto fetch = [&](int g, int4& r) {
+        const int c = threadIdx.x, row = c & 7, ks = c >> 3;
+        r = (c < 64 && g < g1 && src[row] >= 0)
+            ? __ldg(reinterpret_cast<const int4*>(X + (long)src[row] * K + g * 64 + ks * 8))
+            : make_int4(0, 0, 0, 0);
+    };
+    auto store = [&](int i, const int4& r) {
+        const int c = threadIdx.x;
+        if (c < 64) reinterpret_cast<int4*>(sa[i % STAGES])[(c >> 3) * 8 + (c & 7)] = r;
+    };
+    {
+        int4 r;
+#pragma unroll
+        for (int d = 0; d < AHEAD; ++d) { fetch(g0 + d, r); store(d, r); }
+    }
+    __syncthreads();
+
+    float acc[MM][2][8];
+#pragma unroll
+    for (int m = 0; m < MM; ++m)
+#pragma unroll
+        for (int a = 0; a < 2; ++a)
+#pragma unroll
+            for (int i = 0; i < 8; ++i) acc[m][a][i] = 0.f;
+    Group<FP4> cur[MM], nxt[MM];
+#pragma unroll
+    for (int m = 0; m < MM; ++m) load_group<FP4>(cur[m], wp + g0 * WSTEP + m * 2, sp + (long)g0 * SSTEP + m, nok);
+    for (int g = g0; g < g1; ++g) {
+        const int i = g - g0;
+#pragma unroll
+        for (int m = 0; m < MM; ++m)
+            load_group<FP4>(nxt[m], wp + (g + 1) * WSTEP + m * 2, sp + (long)(g + 1) * SSTEP + m, nok && g + 1 < g1);
+        int4 ahead;
+        fetch(g + AHEAD, ahead);
+        const __half* stage = sa[i % STAGES];
+#pragma unroll
+        for (int m = 0; m < MM; ++m) {
+            __half2 s2[4];
+#pragma unroll
+            for (int j = 0; j < 4; ++j) s2[j] = e4m3_h2((cur[m].s >> (8 * j)) & 0xFFu);
+#pragma unroll
+            for (int wi = 0; wi < 8; ++wi) {
+                const int4 o = expand<FP4>(cur[m], wi, s2);
+                const uint4 a = *reinterpret_cast<const uint4*>(stage + wi * 64 + idx * 8);
+                mma884(acc[m][0], a.x, a.y, (unsigned)o.x, (unsigned)o.y);
+                mma884(acc[m][1], a.z, a.w, (unsigned)o.z, (unsigned)o.w);
+            }
+        }
+#pragma unroll
+        for (int m = 0; m < MM; ++m) cur[m] = nxt[m];
+        store(i + AHEAD, ahead);
+        __syncthreads();
+    }
+    // per element: (row, column) of the mma fragment, both matrices' sums in the same thread
+    auto finish = [&](int row, int n, const float (&v)[MM]) {
+        const int p = pid[row];
+        if (EPI == 2) {
+            float gte = v[0], up = v[1];
+            if (limit > 0.f) { gte = fminf(gte, limit); up = fminf(fmaxf(up, -limit), limit); }
+            const float a = gte / (1.f + expf(-gte)) * up;
+            static_cast<__nv_bfloat16*>(OUT)[(long)p * N + n] = __float2bfloat16_rn(a);
+        } else if (EPI == 0) {
+            static_cast<float*>(OUT)[(long)p * N + n] = v[0];
+        } else {
+            static_cast<__nv_bfloat16*>(OUT)[(long)p * N + n] = __float2bfloat16_rn(v[0]);
+        }
+    };
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        const int row = (lane & 1) + 2 * ((i >> 1) & 1) + 4 * (lane >= 16);
+        const int n = cbase + (i & 1) + 2 * ((lane >> 1) & 1) + 4 * (i >> 2);
+        if (row >= cnt || n >= N) continue;
+        float v[MM];
+#pragma unroll
+        for (int m = 0; m < MM; ++m) v[m] = (acc[m][0][i] + acc[m][1][i]) * rsr[row] * ALPHA[e * MM + m];
+        if (sk > 1) {
+#pragma unroll
+            for (int m = 0; m < MM; ++m) PART[(((long)s * pairs_cap + pid[row]) * MM + m) * N + n] = v[m];
+        } else {
+            finish(row, n, v);
+        }
+    }
+    if (sk == 1) return;
+    __threadfence();
+    __syncthreads();
+    const int tile_id = item * gridDim.y + blockIdx.y;
+    if (threadIdx.x == 0) last = atomicAdd(CNT + tile_id, 1) == sk - 1;
+    __syncthreads();
+    if (!last) return;
+    __threadfence();
+    for (int t = threadIdx.x; t < EX_ROWS * COLS; t += THREADS) {
+        const int row = t / COLS, n = blockIdx.y * COLS + t % COLS;
+        if (row >= cnt || n >= N) continue;
+        float v[MM];
+#pragma unroll
+        for (int m = 0; m < MM; ++m) {
+            float parts[4];
+#pragma unroll
+            for (int z = 0; z < 4; ++z)
+                parts[z] = z < sk ? __ldcg(PART + (((long)z * pairs_cap + pid[row]) * MM + m) * N + n) : 0.f;
+            float a = parts[0];
+#pragma unroll
+            for (int z = 1; z < 4; ++z) if (z < sk) a += parts[z];
+            v[m] = a;
+        }
+        finish(row, n, v);
+    }
+    if (threadIdx.x == 0) CNT[tile_id] = 0;
+}
+
 }  // namespace
 
 // ``x16`` from ``prep884`` (any row count); ``cnt`` int32 zeros a (column block, row block), or empty to reduce apart.
@@ -314,6 +499,38 @@ torch::Tensor gather_host_rows(torch::Tensor table, torch::Tensor ids) {
     return out;
 }
 
+void plan_experts(torch::Tensor picks, int64_t experts, torch::Tensor members, torch::Tensor items, torch::Tensor counts) {
+    TORCH_CHECK(picks.is_cuda() && picks.scalar_type() == at::kInt && picks.is_contiguous(), "plan_experts: int32 picks");
+    TORCH_CHECK(experts <= 2048, "plan_experts: at most 2048 experts");
+    const int pairs = picks.numel();
+    const size_t smem = 4 * experts * sizeof(int);
+    plan_kernel<<<1, 1024, smem, at::cuda::getCurrentCUDAStream()>>>(picks.data_ptr<int>(), pairs, (int)experts,
+        members.data_ptr<int>(), items.data_ptr<int>(), counts.data_ptr<int>());
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// ``x16``, ``rs`` from ``qmm_volta.prep``; ``max_items`` the grid's items, ``counts[0]`` of them real.
+void experts884(int64_t epi, torch::Tensor x16, torch::Tensor rs, torch::Tensor w, torch::Tensor s, torch::Tensor alpha,
+                torch::Tensor members, torch::Tensor items, torch::Tensor counts, int64_t slots, torch::Tensor out,
+                torch::Tensor part, torch::Tensor cnt, int64_t n, int64_t sk, int64_t max_items, double limit) {
+    TORCH_CHECK(x16.dim() == 2 && x16.is_contiguous() && x16.scalar_type() == at::kHalf, "experts884: fp16 rows");
+    const int K = x16.size(1);
+    TORCH_CHECK(K % 64 == 0 && (K / 64) % sk == 0 && sk <= 4 && n % 32 == 0, "experts884: shape or K split");
+    if (max_items == 0) return;
+    const dim3 grid((unsigned)max_items, (unsigned)((n + COLS - 1) / COLS), (unsigned)sk);
+    TORCH_CHECK(sk == 1 || cnt.numel() >= (long)grid.x * grid.y, "experts884: too few counters");
+    const int pairs_cap = sk > 1 ? (int)(part.numel() / (sk * (epi == 2 ? 2 : 1) * n)) : 0;
+    const auto st = at::cuda::getCurrentCUDAStream();
+#define EX(E) experts884_kernel<E><<<grid, THREADS, 0, st>>>(reinterpret_cast<const __half*>(x16.data_ptr<at::Half>()), \
+        rs.data_ptr<float>(), w.data_ptr<int>(), reinterpret_cast<const unsigned*>(s.data_ptr<int>()), alpha.data_ptr<float>(), \
+        members.data_ptr<int>(), items.data_ptr<int>(), counts.data_ptr<int>(), (int)slots, out.data_ptr(), \
+        sk > 1 ? part.data_ptr<float>() : nullptr, sk > 1 ? cnt.data_ptr<int>() : nullptr, pairs_cap, (int)n, K, \
+        K / 64 / (int)sk, (int)sk, (float)limit)
+    if (epi == 2) EX(2); else if (epi == 0) EX(0); else EX(3);
+#undef EX
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 torch::Tensor dequantf(torch::Tensor w, torch::Tensor s, int64_t fmt, int64_t n, int64_t k) {
     TORCH_CHECK(w.is_contiguous() && s.is_contiguous(), "dequantf: a Tiled weight");
     auto out = torch::empty({n, k}, w.options().dtype(at::kHalf));
@@ -344,6 +561,8 @@ torch::Tensor unscale2(torch::Tensor y, torch::Tensor rs, torch::Tensor alpha, b
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("qmmf884s", &qmmf884s, "the staged decode matmul: rows through shared memory, split K added in-kernel");
     m.def("gather_host_rows", &gather_host_rows, "rows of a page-locked host table, read over PCIe from the GPU");
+    m.def("plan_experts", &plan_experts, "(row, slot) pairs grouped by expert into items of up to eight");
+    m.def("experts884", &experts884, "routed NVFP4 experts on mma.m8n8k4: gate|up with SwiGLU, or down");
     m.def("dequantf", &dequantf, "a Tiled NVFP4 / FP8 / 16-bit weight -> dense fp16 (N, K), the decode kernel's values");
     m.def("unscale2", &unscale2, "fp32 sums -> sums * row scale * column factor, bf16 or fp32 in place");
 }
