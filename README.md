@@ -125,7 +125,7 @@ between MLX and CUDA, different quantizations, or different tensor-parallel rank
 | `--mtp-drafts N` | Family-specific cap on MTP drafts | Both |
 | `--kv-dtype bf16`, `int8`, `int4` | Flash Next: `int8` or `int4` stores keys and values with one fp16 scale per 32 values. Other families and the MLX path refuse it | CUDA |
 | `--mtp-confidence P` | Flash Next: stop a draft chain before a later draft under this probability, 0 to 1 (default 0.70) | CUDA |
-| `--mtp-cost C` | Flash Next, one stream: also stop a chain once a later draft's chance of being kept no longer repays the ms it adds to the round, at C tokens per ms, priced on round costs the engine measures at startup (default off) | CUDA |
+| `--mtp-cost C` | Flash Next, one stream: also stop a chain once a later draft's chance of being kept, the head's chain product calibrated by the drafts live rounds kept, no longer repays the ms it adds to the round at C tokens per ms, priced on round costs the engine measures at startup (default off) | CUDA |
 | `--prefill-fp8` | Prompt matmuls take FP8 (e4m3) activations, one scale a row, where the checkpoint has an FP8 prompt kernel (Qwen3.8 27B and Qwen3.6 MLX 4-bit, FP8 and MXFP8 layers of NVFP4 checkpoints): faster prompts at lower precision ([measured](docs/recipes/cuda.md#prompt-precision)). Default: bf16 activations, as decode | CUDA |
 | `--precision checkpoint`, `full` | NVFP4 checkpoints: `checkpoint` (default) runs their own math, FP4 x FP4 on SM 12.x and FP8 x FP8 from 8.9, W4A16 elsewhere; `full` runs bf16 activations against the stored weights ([measured](docs/recipes/cuda.md#nvfp4-precision)) | CUDA |
 | `--tp 2 --rank R --master HOST` | Two-rank CUDA execution; `--master-port P` sets rank 0's rendezvous port (default 29551) | CUDA |

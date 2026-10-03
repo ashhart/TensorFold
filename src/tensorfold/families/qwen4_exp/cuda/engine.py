@@ -32,6 +32,7 @@ def vision_workspace() -> int:
 class FlashNextEngine:
     """``eos``, ``generate`` (rank 0 or one GPU) and ``follow`` (rank 1), as ``tensorfold.cuda.server`` expects."""
 
+    price = None                             # --mtp-cost's DraftPrice, made after warm-up
     def __init__(self, model_dir: Path, *, depth: int = DEPTH, confidence: float = CONFIDENCE,
                  draft_vocab: str | int | None = "default", max_len: int | None = None,
                  context_explicit: bool | None = None, tp: int = 1, rank: int = 0, master: str = "", port: int = 29551,
@@ -190,11 +191,12 @@ class FlashNextEngine:
         if self.concurrent:
             self.multi.warm()
         else:
-            from .decode import measure_round_costs, warm
+            from .decode import warm
+            from .draft_price import DraftPrice, measure_round_costs
 
             warm(self.e)
             if self.cost > 0:                         # the stop prices drafts with this engine's own round costs
-                self.e.round_costs = measure_round_costs(self.e, self.depth + 1)
+                self.price = DraftPrice(self.cost, *measure_round_costs(self.e, self.depth + 1), self.depth)
         if self.vision is not None:
             self.vision.warm()
             torch.cuda.empty_cache()
@@ -207,10 +209,8 @@ class FlashNextEngine:
         rule = (f"1 to {self.depth} MTP drafts a round, a chain stops before a later draft under "
                 f"{self.confidence:.0%}" if self.depth else "no drafts: the serial reference, one token a round")
         if self.cost > 0:
-            verify, step = self.e.round_costs
-            rule += (f" or once its chance of being kept no longer repays the ms it adds at {self.cost:g} tokens/ms "
-                     f"(measured: verify {verify[0]:.1f}-{verify[-1]:.1f} ms for 1-{len(verify)} rows, "
-                     f"a draft step {step:.2f} ms)")
+            rule += (f" or once its calibrated chance of being kept no longer repays the ms it adds at {self.cost:g} "
+                     f"tokens/ms (measured: {self.price.describe()})")
         where = (f"up to {streams} streams, each growing to {self.context_window} prompt/reply tokens while memory "
                  f"lasts ({self.multi.memory_gate.room / 2**30:.1f} GiB free for their caches, "
                  f"{self.multi.window_bytes / 2**30:.2f} GiB for one at the full window), eager" if self.concurrent else
@@ -386,7 +386,7 @@ class FlashNextEngine:
         if self.depth > 0:
             res = mtp_decode(self.e, first, max_tokens, sampling, depth=self.depth, confidence=self.confidence,
                              stop_eos=stop_eos, on_tokens=on_tokens, constraint=constraint, probabilities=probabilities,
-                             cost=self.cost)
+                             price=self.price)
             stats.update(drafted=res.drafted, accepted=res.accepted, min_rows=min(res.widths, default=0))
         else:
             res = serial_decode(self.e, first, max_tokens, sampling, stop_eos=stop_eos, on_tokens=on_tokens,

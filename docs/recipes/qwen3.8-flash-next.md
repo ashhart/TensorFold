@@ -336,12 +336,13 @@ families refuse `--kv-dtype` before any download.
 default is 0.70, for one stream and for concurrent rounds. Only Flash Next's CUDA engine has this rule, so the MLX path and the other families refuse it.
 
 `--mtp-cost C` (tokens per ms, off by default) adds an expected-time stop on one stream. A chain verifies a later
-draft j only while the product of the head's probabilities of drafts 1..j, the chance the draft is reached and kept,
-is at least C times the ms it adds to the round: its verify row plus its MTP step. At startup the engine measures
-its own verify windows of 1 to `--mtp-drafts` + 1 rows and one draft step (the startup line prints them), so the
-prices follow the checkpoint, its kernels and the GPU. The first draft is always verified, and `--mtp-confidence`
-still applies. Drafts change speed only: replies equal `"draft": false` output at any cost. `--parallel` and
-`--tp 2` refuse it for now.
+draft only while its chance of being kept is at least C times the ms it adds to the round: its verify row plus its MTP
+step. The chance is the product of the head's probabilities of drafts 1..j, scaled per depth by how often live rounds
+kept such drafts against what the head said (greedy and sampled requests apart; the head's product until rounds say
+more). At startup the engine measures its verify windows of 1 to `--mtp-drafts` + 1 rows and one draft step (the
+startup line prints them), so the prices follow the checkpoint, its kernels and the GPU. The first draft is always
+verified, and `--mtp-confidence` still applies. Drafts change speed only: replies equal `"draft": false` output at any
+cost. `--parallel` and `--tp 2` refuse it for now.
 
 ## Draft vocabulary provenance
 

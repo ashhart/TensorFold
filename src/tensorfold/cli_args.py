@@ -79,9 +79,9 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
                        help="on CUDA, stop an MTP chain before a later draft under this probability "
                             "(Flash Next default 0.70)")
     speed.add_argument("--mtp-cost", type=float, default=None,
-                       help="on CUDA, also stop an MTP chain once a later draft's chance of being kept no longer repays "
-                            "the ms it adds to the round, at this many tokens per ms, priced on the engine's own "
-                            "measured round costs (Flash Next, one stream; default off; 0.06 measured on a Spark)")
+                       help="on CUDA, also stop an MTP chain once a later draft's calibrated chance of being kept no "
+                            "longer repays the ms it adds to the round, at this many tokens per ms, priced on the engine's "
+                            "measured round costs (Flash Next, one stream; default off)")
     speed.add_argument("--lane-kernels", choices=("auto", "on", "off"), default="auto",
                        help="lane kernels for Qwen3.8 dense (auto: on GPUs with tensor units)")
     speed.add_argument("--prompt-cache-gib", type=float, default=None,

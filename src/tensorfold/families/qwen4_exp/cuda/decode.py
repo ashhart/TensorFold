@@ -229,44 +229,36 @@ def absorb(e: Engine, streams: torch.Tensor, next_tokens: Sequence[int]) -> torc
     return logits
 
 
-def cost_bars(cost: float, count: int, verify_ms: Sequence[float], draft_ms: float) -> list[float]:
-    """The bar the running product of the head's probabilities must reach before drafts 1 .. count + 1: ``cost``
-    (tokens per ms) times what verifying the draft adds to the round, its verify row plus its MTP step. Windows past
-    the measured table repeat its last step."""
-
-    ms = list(verify_ms)
-    while len(ms) < count + 3:
-        ms.append(ms[-1] + (ms[-1] - ms[-2]))
-    return [cost * (ms[j + 1] - ms[j] + draft_ms) for j in range(count + 1)]
-
-
 def draft(e: Engine, streams: torch.Tensor, next_tokens: Sequence[int], position: int, count: int,
-          sampling: Sampling | None, confidence: float = 0.0, cost: float = 0.0) -> list[int]:
+          sampling: Sampling | None, confidence: float = 0.0, price=None) -> list[int]:
     """Absorb kept rows and chain drafts, always retaining the first even below ``confidence``, then stopping before later drafts below it or after a low-confidence first draft.
 
-    ``cost`` > 0 (tokens per ms, with ``e.round_costs`` measured by ``measure_round_costs``) also stops before a
-    later draft whose chance of being reached and kept, the product of the head's probabilities of drafts 1..j, is
-    under the ms it adds to the round times ``cost``: the expected tokens per ms of the round decides, not one
-    draft's confidence. A draft the product already fails costs no MTP step (products only fall). Drafts change
-    speed only, never the output."""
+    With ``price`` (a ``DraftPrice``, --mtp-cost) a chain also stops before a later draft whose calibrated chance of
+    being reached and kept no longer repays the ms it adds to the round; a draft that cannot pass costs no MTP step.
+    Drafts change speed only, never the output."""
 
     st = e.st
+    if price is not None:
+        price.begin(sampling is not None and sampling.temperature > 0)
     logits = absorb(e, streams, next_tokens)
     drafts: list[int] = []
-    bars = cost_bars(cost, count, *e.round_costs) if cost > 0 else None
     chain = 1.0
     for j in range(count):
         low = False
-        if confidence > 0 or bars is not None:
+        if confidence > 0 or price is not None:
             d, p = e.sample_draft(logits, position + j, sampling)
             chain *= p
-            low = p < confidence or (bars is not None and chain < bars[j])
+            low = p < confidence or (price is not None and not price.pays(j, chain))
             if low and j > 0:
                 break
         else:
             d = e.sample(logits[:1], [position + j], sampling, draft=True)[0]
         drafts.append(d)
-        if low or (bars is not None and chain < bars[j + 1]):
+        if price is not None:
+            price.products.append(chain)
+            if j + 1 < count and not price.pays(j + 1, chain):
+                break                                    # products only fall: the next draft cannot pay either
+        if low:
             break
         if j + 1 < count:
             prev = e.mbuf.streams[len(next_tokens) - 1:len(next_tokens)] if j == 0 else e.mbuf.streams[:1]
@@ -385,38 +377,6 @@ def warm(e: Engine) -> None:
     e.reset()
 
 
-@torch.no_grad()
-def measure_round_costs(e: Engine, rows: int, reps: int = 5) -> tuple[tuple[float, ...], float]:
-    """This engine's verify windows of 1 .. ``rows`` rows and one MTP draft step, ms (medians, after a short prompt):
-    the expected-time stop prices drafts with them. Distinct tokens, as replies have: a window's cost grows mostly
-    with the distinct experts its rows route to, and one repeated token routes every row alike. Leaves the state
-    empty, as ``warm`` does."""
-
-    gen = torch.Generator().manual_seed(0)
-    lo = min(1000, e.w.cfg.vocab // 4)
-    ids = torch.randint(lo, max(lo + 1, e.w.cfg.vocab // 2), (64 + rows,), generator=gen).tolist()
-    prefill(e, ids[:64], None)
-    tokens = ids[64:]
-
-    def timed(fn) -> float:
-        times = []
-        for _ in range(reps + 1):
-            torch.cuda.synchronize()
-            t0 = time.perf_counter()
-            fn()
-            torch.cuda.synchronize()
-            times.append((time.perf_counter() - t0) * 1000)
-        return float(np.median(times[1:]))
-
-    verify = [timed(lambda r=r: e.forward(tokens[:r])) for r in range(1, rows + 1)]
-    for r in range(1, rows):                       # a wider window never costs less: noise must not reorder bars
-        verify[r] = max(verify[r], verify[r - 1])
-    step = timed(lambda: e.mtp_forward(tokens[:1], e.last_streams)) if e.mbuf is not None else 0.0
-    e.kept = None
-    e.reset()
-    return tuple(round(v, 3) for v in verify), round(step, 3)
-
-
 @dataclass
 class DecodeResult:
     tokens: list[int]
@@ -462,8 +422,8 @@ def serial_decode(e: Engine, pending: int, count: int, sampling: Sampling | None
 @torch.no_grad()
 def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *, depth: int = DEPTH,
                confidence: float = CONFIDENCE, stop_eos: bool = False, on_tokens=None, constraint=None,
-               probabilities=None, cost: float = 0.0) -> DecodeResult:
-    """Verify pending and drafted tokens from the prefill state, commit rows before the first mismatched draft, and call ``on_tokens(new)`` with kept tokens after pending, stopping on True; ``cost`` > 0: ``draft``'s expected-time stop."""
+               probabilities=None, price=None) -> DecodeResult:
+    """Verify pending and drafted tokens from the prefill state, commit rows before the first mismatched draft, and call ``on_tokens(new)`` with kept tokens after pending, stopping on True; ``price``: ``draft``'s expected-time stop."""
 
     w, st, b = e.w, e.st, e.buf
     out = [pending]
@@ -474,7 +434,7 @@ def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *
     unabsorbed = None                                  # the last round's kept rows, not yet in the MTP cache
     torch.cuda.synchronize()
     start = time.perf_counter()
-    more = {"cost": cost} if cost > 0 else {}          # a keyword only when on: tools may stand in a plain ``draft``
+    more = {"price": price} if price is not None else {}   # a keyword only when on: tools may stand in a plain ``draft``
     drafts = draft(e, e.last_streams, [pending], st.pos + 1, min(depth, count - len(out)), sampling, confidence,
                    **more)
     while len(out) < count and not (stop_eos and out[-1] in w.cfg.eos):
@@ -496,6 +456,8 @@ def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *
             n = min(keep, count - len(out))
             capture(logits[:n], sampled[:n], list(range(st.pos + 1, st.pos + 1 + n)), probabilities)
         commit(w, st, b, R, keep)
+        if price is not None:
+            price.observe(len(drafts), keep - 1)
         unabsorbed = (keep, sampled[:keep])
         rounds += 1
         drafted += len(drafts)
