@@ -246,6 +246,8 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
         raise ValueError("--tp 2 needs --master: rank 0's address on the link between the two machines")
     if args.tp == 1 and args.rank != 0:
         raise ValueError("--rank 1 needs --tp 2")
+    if getattr(args, "device", None) is not None:
+        os.environ["TF_CUDA_DEVICE"] = str(int(args.device))      # before any engine picks its GPU
     started = time.perf_counter()
     drafter = "" if args.no_drafts else _drafter(family, args.drafter, "cuda")
     options: dict[str, Any] = {"drafter": drafter, "tp": int(args.tp), "rank": int(args.rank), "master": args.master,

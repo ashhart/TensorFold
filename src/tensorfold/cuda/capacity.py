@@ -152,7 +152,7 @@ def unified(torch) -> bool:
     """A GPU on the host's memory (GB10): its free figure is MemFree, which counts the page cache as used."""
 
     try:
-        return bool(torch.cuda.get_device_properties(0).is_integrated)
+        return bool(torch.cuda.get_device_properties(getattr(torch.cuda, "current_device", lambda: 0)()).is_integrated)
     except (AttributeError, AssertionError, RuntimeError):
         return False
 

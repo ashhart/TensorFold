@@ -56,7 +56,7 @@ class Qwen36Engine:
         from .mtp import Head
         from .weights import MTP_FILE, load, load_mtp
 
-        torch.cuda.set_device(0)
+        __import__("tensorfold.cuda.device", fromlist=["select"]).select(torch)
         self.depth, self.confidence = int(depth), float(confidence)
         many = streams > 1
         if many:             # streams' caches of many sizes come and go: growable segments, less slack
