@@ -40,7 +40,13 @@ __device__ __forceinline__ uint32_t fp8pair(uint32_t w) {
 __device__ __forceinline__ uint32_t comp(const uint4& v, int c) { return c == 0 ? v.x : c == 1 ? v.y : c == 2 ? v.z : v.w; }
 
 __device__ __forceinline__ float e4m3f(uint8_t b) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 890
+    // no e4m3 instruction below sm_89: the code in fp32 bits [30:20] is the value times 2^-120, one exact multiply
+    const uint32_t u = (static_cast<uint32_t>(b & 0x80u) << 24) | (static_cast<uint32_t>(b & 0x7Fu) << 20);
+    return __fmul_rn(__uint_as_float(u), 0x1p120f);
+#else
     return __half2float(__half(__nv_cvt_fp8_to_halfraw(b, __NV_E4M3)));
+#endif
 }
 
 template <int MODE, int BM, int BN, int WM, int WN, int STAGES>

@@ -32,7 +32,13 @@ __device__ __forceinline__ uint32_t fp4pair(uint32_t w, int s) {
 }
 
 __device__ __forceinline__ float e4m3f(uint32_t b) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 890
+  // no e4m3 instruction below sm_89: the code in fp32 bits [30:20] is the value times 2^-120, exact (see qmmf.cu)
+  const uint32_t u = ((b & 0x80u) << 24) | ((b & 0x7Fu) << 20);
+  return __fmul_rn(__uint_as_float(u), 0x1p120f);
+#else
   return __half2float(__half(__nv_cvt_fp8_to_halfraw(static_cast<__nv_fp8_storage_t>(b), __NV_E4M3)));
+#endif
 }
 
 template <int M>
