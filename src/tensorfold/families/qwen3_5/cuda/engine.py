@@ -86,6 +86,10 @@ class Qwen27Engine:
                                    "machines, and pass the same --no-drafts, --parallel, --context and "
                                    "--checkpoint-slots to both")
             gather = lambda values: gather_ints(torch, lambda send, recv: dist.all_gather_into_tensor(recv, send), values)
+            from tensorfold.cuda import p2p
+
+            if p2p.install(rank) and rank == 0:     # row-parallel sums in one launch over NVLink / PCIe P2P
+                print("[tensorfold] rank sums: P2P (the peer GPU mapped), NCCL for prompt-sized sums", flush=True)
         else:
             gather = None
         many = streams > 1
@@ -102,6 +106,10 @@ class Qwen27Engine:
             from .nvfp4_load import admission as nvfp4_admission
 
             geometry, tensor_bytes = nvfp4_admission(geometry)
+            if tp == 2:                     # each rank keeps its shard of every layer as it loads (no startup copy)
+                from .distributed import half_layers
+
+                tensor_bytes = half_layers(tensor_bytes)
         # one admission for one stream or many, on every rank, before any weight loads
         self.capacity_plan = admit(model_dir, context, context_explicit, torch,
                                    capacity_geometry(geometry, model_dir, vision, rank, offload=vision_offload),
@@ -114,13 +122,19 @@ class Qwen27Engine:
                                                                               kept=keep + 1 if many else 0),
                                    # sm_70 (32 GB V100s): the full checkpoint (already the resident term) is split and freed
                                    # before caches exist; a second full copy is not part of that peak
-                                   startup_copies=int(tp == 2 and not volta()),
+                                   # NVFP4 layers shard as they load on two ranks: no second full copy at startup
+                                   startup_copies=int(tp == 2 and not nvfp4 and not volta()),
                                    # MLX and NVFP4 checkpoints run on the sm_70 kernels; EXL3 needs the shared ones
                                    need=None if exl3 or (nvfp4 and not volta()) else VOLTA,
                                    # sm_70 NVFP4 repacks each upload in place: one extra copy of the largest tensor
                                    staging_copies=2 if nvfp4 and volta() else 3)
         self.context_window = self.capacity_plan["context_window"]
-        if tp == 2:
+        if tp == 2 and nvfp4:               # layers shard as they load; the embedding and head stay whole for the drafter
+            from .distributed import shard_layer
+
+            full = load(model_dir, nvfp4_layer=shard_layer(rank))
+            self.w = split_weights(full, rank, tiled=True, split_head=split_head, layers_split=True)
+        elif tp == 2:
             full = load(model_dir)
             self.w = split_weights(full, rank, tiled=True, split_head=split_head)
         else:
