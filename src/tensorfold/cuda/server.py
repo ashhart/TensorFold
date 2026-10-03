@@ -67,6 +67,8 @@ class App:
     """Serve one engine with sampling and reply-length defaults for requests that omit them."""
 
     reads_ignore_eos = False            # True where the engine reads ``ignore_eos`` itself; a ``stop_eos`` engine is given it
+    template_class = ChatTemplate       # a family without a Jinja template brings its own renderer
+    parse_calls = staticmethod(parse_tool_calls)    # the reply's tool calls, by this model's call markup
 
     def __init__(self, engine, model_dir: Path, served: str, *, default_thinking: bool = False,
                  sampling: dict[str, Any] | None = None, max_tokens: int = 4096,
@@ -84,7 +86,7 @@ class App:
         self.aliases = tuple(str(alias).strip() for alias in aliases if str(alias).strip())
         self.model_dir = Path(model_dir)
         self.tok = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
-        self.template = ChatTemplate(model_dir)
+        self.template = self.template_class(model_dir)
         self.default_thinking = default_thinking
         self.reasoning_effort, self.thinking_budget = reasoning_effort, int(thinking_budget)   # the Mac's defaults
         self.sampling = {"temperature": 1.0, "top_k": 20, "top_p": 0.95, **(sampling or {})}
@@ -389,6 +391,12 @@ class App:
         return Sampling(int(seed) if seed is not None else seed_for(prompt), temp, int(top_k), float(top_p),
                         float(min_p))
 
+    def _visible_answer(self, answer: str, policy: ToolCallPolicy, finished: bool) -> str:
+        """The streamed answer with tool-call markup held back."""
+
+        return (policy.content(answer, finished=finished) if policy.single
+                else hide_tool_calls(answer, finished=finished))
+
     def run(self, body: dict[str, Any], chat: bool, emit: Callable[[dict[str, Any]], bool], *,
             prepared: PreparedRequest | None = None, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
         """One reply; once ``cancelled()`` holds, a waiting request raises ``RequestCancelled`` unstarted, a running one stops at its next round and raises it after ``generate``."""
@@ -422,8 +430,7 @@ class App:
                 reasoning, answer = "", raw
             answer_raw[0] = answer
             if tools:
-                answer = (policy.content(answer, finished=finished) if policy.single
-                          else hide_tool_calls(answer, finished=finished))
+                answer = self._visible_answer(answer, policy, finished)
             return reasoning, answer
 
         serving: list[Any] = [None]
@@ -544,7 +551,7 @@ class App:
         raw_text = self.tok.decode([t for t in out if t not in ends], skip_special_tokens=False)
         text = stops.visible(raw_text)
         raw_answer = split_thinking(text, finished=True)[1] if chat and thinking else text
-        content, calls = parse_tool_calls(raw_answer, tools, max_calls=policy.max_calls) if tools else (answer, None)
+        content, calls = self.parse_calls(raw_answer, tools, max_calls=policy.max_calls) if tools else (answer, None)
         content = policy.content(content) if tools else content
         tail = content[sent["content"]:] if content.startswith(answer[:sent["content"]]) else ""
         if tail:

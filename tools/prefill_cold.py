@@ -30,10 +30,17 @@ def build(model_dir: str, out: str) -> None:
 
     from tokenizers import Tokenizer
 
-    from tensorfold.cuda.server import ChatTemplate
+    from tensorfold import families
+    from tensorfold.cuda.server import App, ChatTemplate
 
     tok = Tokenizer.from_file(str(Path(model_dir) / "tokenizer.json"))
-    template = ChatTemplate(Path(model_dir))
+    try:
+        family = families.detect(model_dir)
+    except ValueError:                                   # a checkpoint TF has no family for, served elsewhere
+        template = ChatTemplate(Path(model_dir))
+    else:
+        app = getattr(family.package, "CUDA_APP", None) or App
+        template = app.template_class(Path(model_dir))
     text = corpus()
 
     def messages(nonce: str, start: int, chars: int):

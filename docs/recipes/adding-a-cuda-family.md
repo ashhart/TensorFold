@@ -19,6 +19,11 @@ def cuda_engine(model_dir, *, drafter="", tp=1, rank=0, master="", master_port=2
 Validate supported weights, context and rank settings before allocating model state.
 An optional `CUDA_APP` subclasses `tensorfold.cuda.server.App` for family-specific request handling.
 
+A checkpoint without a Jinja chat template, or one that writes tool calls in other markup, overrides three `App`
+hooks: `template_class` builds the prompt renderer from the model directory, with `ChatTemplate`'s `render`
+(`tools/prefill_cold.py` uses it too); `parse_calls` splits a finished reply into content and OpenAI tool calls;
+`_visible_answer` holds the call markup back from streamed content.
+
 The engine exposes `eos`, `generate(prompt, max_tokens, sampling, on_tokens)` and, for a follower rank,
 `follow()`. `generate` receives token IDs and keyed sampling settings, reports newly committed tokens
 through the callback, honors its stop result where supported, and returns statistics. A `generate` that also
