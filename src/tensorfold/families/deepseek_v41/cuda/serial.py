@@ -158,11 +158,14 @@ PROMPT_ROWS = int(os.environ.get("TF_DSV41_DECODE_ROWS") or 32)
 # limit's (the same entries are chosen: past a row's position every score is -inf). Each width's 32 graphs cost
 # ~1.2 GB of driver memory (the pool's rows), so one by default. TF_DSV41_WIDTHS=0: full only
 WIDTHS = [int(v) for v in (os.environ.get("TF_DSV41_WIDTHS") or "65536").split(",") if int(v) > 0]
-SHARED_GRAPH_POOL = os.environ.get("TF_DSV41_SHARED_GRAPHS", "1") != "0"
+SHARED_GRAPH_POOL = os.environ.get("TF_DSV41_SHARED_GRAPHS", "1") != "0"   # all decode graphs on one memory pool
 # prefill: the layers after the last kv source (21-39) keep no per-token state but their 128-row windows, so a
 # long prompt's early chunks run layers 0-20 only and its last tail_min rows all layers (exact: an early row reaches
 # the end only through those windows, 127 rows a layer); TF_DSV41_BOUNDED_TAIL=0 runs every layer everywhere
-BOUNDED_TAIL = os.environ.get("TF_DSV41_BOUNDED_TAIL", "1") != "0"   # all decode graphs on one memory pool
+BOUNDED_TAIL = os.environ.get("TF_DSV41_BOUNDED_TAIL", "1") != "0"
+# decode / verify selection: the bounded radix-select top-k (topk.py) over each row's visible entries instead of
+# full-width torch topk / sort / mask chains (the same entries; ties of equal non-zero scores go to the lower index)
+FAST_TOPK = os.environ.get("TF_DSV41_FAST_TOPK", "1") != "0"
 
 
 class RoundProfile:
@@ -1319,6 +1322,16 @@ class SerialEngine:
         if static:                                                      # each row scores its own stream's keys
             scores = K.index_scores(iq, wts, self.big.ik[src], pos, a.ratio, kbase=self._ebase(src),
                                     n_keys=min(self.entries[src], self._width // a.ratio + 1))
+            if FAST_TOPK:                                               # bounded radix select (topk.py)
+                from . import topk as TK
+
+                if L == c.candidate_source_layer_id:
+                    self.cand_flags = TK.candidate_flags(scores, pos, a.ratio, c.candidate_block_size,
+                                                         c.candidate_topk_blocks)
+                elif L > c.candidate_source_layer_id:
+                    return TK.top_entries(scores, pos, a.ratio, c.index_topk, flags=self.cand_flags,
+                                          block=c.candidate_block_size)
+                return TK.top_entries(scores, pos, a.ratio, c.index_topk)
             if L == c.candidate_source_layer_id:
                 self.candidates = K.candidate_blocks(scores, pos, a.ratio, c.candidate_block_size,
                                                      c.candidate_topk_blocks)
