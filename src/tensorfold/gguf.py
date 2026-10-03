@@ -1,32 +1,7 @@
-"""Bounded GGUF container header, typed metadata, and tensor-span reader.
+"""Bounded GGUF metadata and tensor-span reader.
 
-This module reads the GGUF magic/version header and the typed key-value
-metadata section (the ``n_kv`` pairs that follow the header). :func:`parse_gguf`
-stops at the end of the metadata section and never touches tensor blocks, so a
-caller interested only in architecture/parameter metadata can open a model
-without loading its weights.
-
-:func:`parse_gguf_tensors` additionally reads the ``n_tensors`` tensor
-descriptors (name, dims, type, offset) that follow the metadata section and
-returns an exact span/type/shape inventory. Weight data itself is still never
-read: only the descriptor table is parsed, and every span is validated against
-the actual buffer length.
-
-Safety contract:
-  * every length/count/value read is bounds-checked against the remaining
-    buffer BEFORE the read happens; a malformed or truncated file raises a
-    descriptive :class:`GGUFError` instead of overreading past the buffer.
-  * duplicate metadata keys are rejected (GGUF requires unique keys).
-  * unknown value types and nested arrays are rejected.
-  * tensor validation covers duplicate names, offset alignment, overlapping
-    spans, file-bounds, shape-product overflow, and quantized block
-    divisibility.
-
-Value types are little-endian uint32 GGUF enum values. Arrays carry a separate
-uint32 element type followed by a uint64 count. Strings are uint64 length plus
-exactly that many bytes, without a terminator.
-Tensor types follow the ggml ``enum ggml_type`` values; block sizes and bytes
-per block are pinned from the ggml quant tables.
+Parses descriptors without reading weights. Rejects malformed lengths, types,
+alignment, overlapping spans, and incomplete quantization blocks.
 """
 
 from __future__ import annotations
@@ -93,7 +68,7 @@ class GGUFInfo:
     metadata: dict[str, Any]
 
 
-# GGUF tensor data is required to be 32-byte aligned (gguf.h GGUF_ALIGNMENT).
+# Default tensor alignment; general.alignment may override it.
 GGUF_ALIGNMENT = 32
 
 # ggml tensor type -> (type name, elements per block, bytes per block).
@@ -249,12 +224,7 @@ def _read_value(c: _Cursor, type_: int) -> Any:
 
 
 def _parse_metadata(data: bytes) -> tuple[GGUFInfo, int]:
-    """Parse the GGUF header and typed metadata section.
-
-    Returns ``(info, metadata_end)`` where ``metadata_end`` is the absolute
-    file offset just past the last key-value pair (where tensor descriptors
-    begin, if any).
-    """
+    """Return metadata and the offset where tensor descriptors begin."""
     if len(data) < _HEADER_SIZE:
         raise GGUFError(f"GGUF header truncated: need {_HEADER_SIZE} bytes but file has {len(data)}")
 
@@ -281,32 +251,13 @@ def _parse_metadata(data: bytes) -> tuple[GGUFInfo, int]:
 
 
 def parse_gguf(data: bytes) -> GGUFInfo:
-    """Parse a GGUF header and typed metadata section from ``data``.
-
-    Raises :class:`GGUFError` for bad magic, unsupported versions, truncated
-    headers, malformed lengths, unknown value types, nested arrays, and
-    duplicate metadata keys. Tensor descriptors and weight data are never read.
-    """
+    """Read header and metadata, raising GGUFError for malformed containers."""
     info, _ = _parse_metadata(data)
     return info
 
 
 def parse_gguf_tensors(data: bytes) -> GGUFTensorInventory:
-    """Parse the GGUF header, metadata, and tensor descriptor inventory.
-
-    Reads the ``n_tensors`` descriptors (name, dims, type id, offset) that
-    follow the metadata section and returns each tensor's exact byte span and
-    shape. Validation performed:
-
-      * unique tensor names
-      * offset aligned to :data:`GGUF_ALIGNMENT` (32)
-      * shape product does not overflow 2^64
-      * quantized element counts divisible by their block size
-      * each span fits within the actual file bounds
-      * no two spans overlap
-
-    Weight data itself is never read.
-    """
+    """Read descriptors and validate tensor geometry and spans without reading weights."""
     info, metadata_end = _parse_metadata(data)
     alignment = info.metadata.get("general.alignment", GGUF_ALIGNMENT)
     if type(alignment) is not int or alignment <= 0 or alignment & (alignment - 1):
@@ -373,7 +324,7 @@ def parse_gguf_tensors(data: bytes) -> GGUFTensorInventory:
             )
         )
 
-    # tensor weight data begins after the descriptor table, 32-byte aligned
+    # Tensor data begins after the descriptor table at the declared alignment.
     data_offset = _align_up(cursor.pos, alignment)
     if data_offset > len(data):
         raise GGUFError(f"GGUF tensor data offset {data_offset} exceeds file size {len(data)}")

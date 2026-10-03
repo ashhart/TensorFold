@@ -10,6 +10,8 @@ from tensorfold.cuda.gguf.linear import linear
 from .attention import rope
 from .model import Layer, norm
 
+WINDOW = 128
+
 
 class DSpark:
     def __init__(self, path, model):
@@ -29,10 +31,11 @@ class DSpark:
         model.tap_layers = self.taps
         count = int(meta["deepseek4.dspark.layer_count"])
         self.layers = [Layer(self.weights, f"dspark.{i}", model.meta, 0, model.limit) for i in range(count)]
+        blocks = {str(i) for i in range(count)}
         self.w = {
             n[len("dspark.") :]: self.weights.tensor(n)
             for n in self.weights.inventory
-            if n.startswith("dspark.") and n.split(".")[1] not in [str(i) for i in range(count)]
+            if n.startswith("dspark.") and n.split(".")[1] not in blocks
         }
         self.model = model
         self.ids = torch.full((self.size,), self.noise, device=model.embed.device, dtype=torch.long)
@@ -47,22 +50,22 @@ class DSpark:
     def absorb(self, taps, state):
         x = norm(linear(taps, self.w["main_proj.weight"]), self.w["main_norm.weight"], self.layers[0].eps)
         for layer, cache in zip(self.layers, state):
-            pos = torch.arange(cache.offset, cache.offset + x.shape[0], device=x.device)
+            pos = layer.weights._positions[cache.offset : cache.offset + x.shape[0]]
             kv = rope(
                 norm(linear(x, layer.w["attn_kv.weight"]), layer.w["attn_kv_a_norm.weight"], layer.eps), pos, layer.freq
             )
             # Ping-pong fixed windows: no concatenation or new allocation during decode.
             spare = getattr(cache, "_spare", None)
             if spare is None:
-                spare = torch.empty((128, kv.shape[1]), device=kv.device, dtype=kv.dtype)
-            count = min(128, kv.shape[0])
-            keep = min(cache.keys.shape[0], 128 - count)
+                spare = torch.empty((WINDOW, kv.shape[1]), device=kv.device, dtype=kv.dtype)
+            count = min(WINDOW, kv.shape[0])
+            keep = min(cache.keys.shape[0], WINDOW - count)
             if keep:
                 spare[:keep].copy_(cache.keys[-keep:])
             spare[keep:keep + count].copy_(kv[-count:])
             old = cache.keys
             cache.keys = spare[:keep + count]
-            cache._spare = old if old.shape[0] == 128 else None
+            cache._spare = old if old.shape[0] == WINDOW else None
             cache.offset += x.shape[0]
 
     def _logits(self, state):
@@ -81,17 +84,19 @@ class DSpark:
         self.ids[:1].fill_(token)
         # Short prompts keep their true attention span. A full window has fixed
         # geometry; keys and absolute RoPE positions remain live graph inputs.
-        if not all(cache.keys.shape[0] == 128 for cache in state):
+        if not all(cache.keys.shape[0] == WINDOW for cache in state):
             return self._logits(state)
         if self.graph_state is None:
+            self.positions = torch.empty_like(self.ids)
             self.graph_state = [layer.state() for layer in self.layers]
             for live, cache in zip(self.graph_state, state):
                 live.keys = torch.empty_like(cache.keys)
                 live.offset = cache.offset
-                live._positions = torch.empty((self.size,), device=self.ids.device, dtype=torch.long)
-        for layer, live, cache in zip(self.layers, self.graph_state, state):
+                live._positions = self.positions
+        start = state[0].offset
+        self.positions.copy_(self.weights._positions[start : start + self.size])
+        for live, cache in zip(self.graph_state, state):
             live.keys.copy_(cache.keys)
-            live._positions.copy_(layer.weights._positions[cache.offset:cache.offset + self.size])
         if self.graph is None:
             for _ in range(2):
                 self._logits(self.graph_state)

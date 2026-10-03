@@ -58,6 +58,3 @@ class StopStrings:
         """The text before the first match; ``partial`` also holds back an end that may begin one (the Mac's rule)."""
 
         return StopPolicy.visible(self, text, partial=partial)
-
-
-# -- chat template -------------------------------------------------------------------------

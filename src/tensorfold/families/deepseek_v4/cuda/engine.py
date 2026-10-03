@@ -77,64 +77,61 @@ class DeepSeekEngine:
         self.capacity_plan["retained_prefix"] = self.retained_prefix
 
     def _admit(self, target, drafter):
+        inventories = []
         total = 0
         for path in [target] + ([drafter] if drafter else []):
             with open(path, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
-                inv = parse_gguf_tensors(m)
-                total += sum(t.size for t in inv.tensors)
-                if path == target:
-                    ratios = inv.info.metadata["deepseek4.attention.compress_ratios"][
-                        : int(inv.info.metadata["deepseek4.block_count"])
-                    ]
-                    dim = int(inv.info.metadata["deepseek4.attention.key_length"])
+                inventory = parse_gguf_tensors(m)
+                inventories.append(inventory)
+                total += sum(t.size for t in inventory.tensors)
         from tensorfold.cuda.capacity import Geometry, Weights, available_bytes, choose, make_plan
         from tensorfold.families.deepseek_v4.gguf import validate_cuda_shapes
 
         # Check architecture and every kernel input shape before the first upload.
-        with open(target, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
-            target_inventory = parse_gguf_tensors(m)
-            meta = target_inventory.info.metadata
-            validate_cuda_shapes(target_inventory, meta)
+        target_inventory = inventories[0]
+        meta = target_inventory.info.metadata
+        validate_cuda_shapes(target_inventory, meta)
+        ratios = meta["deepseek4.attention.compress_ratios"][: int(meta["deepseek4.block_count"])]
+        dim = int(meta["deepseek4.attention.key_length"])
         if drafter:
-            with open(drafter, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
-                draft_inventory = parse_gguf_tensors(m)
-                dm = draft_inventory.info.metadata
-                if dm.get("general.architecture") != "deepseek4-dspark":
-                    raise ValueError("drafter must be a deepseek4-dspark GGUF")
-                count = int(dm["deepseek4.dspark.layer_count"])
-                taps = list(dm["deepseek4.dspark.target_layers"])
-                if (
-                    int(dm["deepseek4.dspark.block_size"]) != 5
-                    or len(taps) != 3
-                    or taps != sorted(set(taps))
-                    or any(t < 0 or t >= len(ratios) for t in taps)
-                ):
-                    raise ValueError("DSpark requires a five-token block and three valid target taps")
-                if not 0 <= int(dm["deepseek4.dspark.noise_token_id"]) < int(meta["deepseek4.vocab_size"]):
-                    raise ValueError("DSpark noise token is outside the vocabulary")
-                dt = {t.name: t for t in draft_inventory.tensors}
-                d = int(meta["deepseek4.embedding_length"])
-                vocab = int(meta["deepseek4.vocab_size"])
-                markov = int(dm["deepseek4.dspark.markov_rank"])
-                if markov < 1:
-                    raise ValueError("DSpark Markov rank must be positive")
-                for name, shape in {
-                    "main_proj.weight": (d * len(taps), d),
-                    "main_norm.weight": (d,),
-                    "hc_head_fn.weight": (d * 4, 4),
-                    "hc_head_base.weight": (4,),
-                    "hc_head_scale.weight": (1,),
-                    "norm.weight": (d,),
-                    "markov_w1.weight": (markov, vocab),
-                    "markov_w2.weight": (markov, vocab),
-                }.items():
-                    tensor = dt.get("dspark." + name)
-                    if tensor is None or tuple(tensor.shape) != shape:
-                        raise ValueError(f"DSpark {name}: expected shape {shape}")
-                    allowed = {"F16", "F32", "Q8_0"} if name == "main_proj.weight" else {"F16", "F32"}
-                    if tensor.type_name not in allowed:
-                        raise ValueError(f"DSpark {name}: unsupported format {tensor.type_name}")
-                validate_cuda_shapes(draft_inventory, meta, prefix="dspark", layers=count, ratios=[0] * count)
+            draft_inventory = inventories[1]
+            dm = draft_inventory.info.metadata
+            if dm.get("general.architecture") != "deepseek4-dspark":
+                raise ValueError("drafter must be a deepseek4-dspark GGUF")
+            count = int(dm["deepseek4.dspark.layer_count"])
+            taps = list(dm["deepseek4.dspark.target_layers"])
+            if (
+                int(dm["deepseek4.dspark.block_size"]) != 5
+                or len(taps) != 3
+                or taps != sorted(set(taps))
+                or any(t < 0 or t >= len(ratios) for t in taps)
+            ):
+                raise ValueError("DSpark requires a five-token block and three valid target taps")
+            if not 0 <= int(dm["deepseek4.dspark.noise_token_id"]) < int(meta["deepseek4.vocab_size"]):
+                raise ValueError("DSpark noise token is outside the vocabulary")
+            dt = {t.name: t for t in draft_inventory.tensors}
+            d = int(meta["deepseek4.embedding_length"])
+            vocab = int(meta["deepseek4.vocab_size"])
+            markov = int(dm["deepseek4.dspark.markov_rank"])
+            if markov < 1:
+                raise ValueError("DSpark Markov rank must be positive")
+            for name, shape in {
+                "main_proj.weight": (d * len(taps), d),
+                "main_norm.weight": (d,),
+                "hc_head_fn.weight": (d * 4, 4),
+                "hc_head_base.weight": (4,),
+                "hc_head_scale.weight": (1,),
+                "norm.weight": (d,),
+                "markov_w1.weight": (markov, vocab),
+                "markov_w2.weight": (markov, vocab),
+            }.items():
+                tensor = dt.get("dspark." + name)
+                if tensor is None or tuple(tensor.shape) != shape:
+                    raise ValueError(f"DSpark {name}: expected shape {shape}")
+                allowed = {"F16", "F32", "Q8_0"} if name == "main_proj.weight" else {"F16", "F32"}
+                if tensor.type_name not in allowed:
+                    raise ValueError(f"DSpark {name}: unsupported format {tensor.type_name}")
+            validate_cuda_shapes(draft_inventory, meta, prefix="dspark", layers=count, ratios=[0] * count)
 
         def bytes_at(slots):
             pools = sum((slots // r + 1) * (dim + (128 if r == 4 else 0)) * 2 for r in ratios if r)

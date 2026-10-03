@@ -14,11 +14,7 @@ from .linear import FORMATS, Packed
 
 
 class Weights:
-    """One GGUF mapping. Loading is explicit, cached, and independent of model architecture.
-
-    Chunked copies bound host staging. Closing the mapping leaves uploaded tensors valid.
-    No checkpoint payload is downloaded, rewritten, or expanded by this reader.
-    """
+    """Cached uploads with bounded host staging; tensors outlive the GGUF mapping."""
 
     def __init__(self, path: str | Path, device: str | torch.device = "cuda", chunk_bytes: int = 32 << 20):
         if chunk_bytes <= 0:
@@ -73,7 +69,3 @@ class Weights:
             value = Packed(raw, info.shape, info.type_name)
         self._loaded[name] = value
         return value
-
-    def clear(self):
-        """Drop the loader's references; callers retain their tensors."""
-        self._loaded.clear()

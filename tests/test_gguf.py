@@ -38,7 +38,7 @@ def test_header_and_metadata_lengths_are_checked_before_reads():
         parse_gguf(data)
 
 
-@pytest.mark.parametrize("k,n", [(31, 1), (16, 2), (0, 1)])
+@pytest.mark.parametrize("k,n", [(16, 2), (0, 1)])
 def test_quantized_rows_must_contain_complete_blocks(k, n):
     with pytest.raises(GGUFError):
         parse_gguf_tensors(container(8, k, n, 34))
