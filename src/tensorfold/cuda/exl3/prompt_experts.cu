@@ -611,7 +611,7 @@ struct DnEpi {
     const float* wts_sh;      // the item's routing weights (shared memory)
     float* out;
     const int* pair_sh;       // the item's rows of out (row * D), shared memory
-    int mode;                 // 0: red.add fp32, 1: fp16, 2: store into the pair's own row, 3: red.add 64-bit fixed point
+    int mode;                 // 0: red.add fp32, 1: fp16, 2/4: store into the pair's own row (fp32 / fp16), 3: red.add int64 fixed
     int e, D, slots, cnt;
 };
 
@@ -678,7 +678,13 @@ __device__ __forceinline__ void dn_epilogue(const float (&acc)[2 * NB][4], float
                         red_add_fix4(reinterpret_cast<unsigned long long*>(p.out) + orow + blk * 128,
                                      u[0] * sv[blk][0] * w, u[1] * sv[blk][1] * w, u[2] * sv[blk][2] * w,
                                      u[3] * sv[blk][3] * w);
-                    else if (p.mode == 2)
+                    else if (p.mode == 4) {
+                        const half2 lo = __floats2half2_rn(u[0] * sv[blk][0] * w, u[1] * sv[blk][1] * w),
+                                    hi = __floats2half2_rn(u[2] * sv[blk][2] * w, u[3] * sv[blk][3] * w);
+                        uint2 pk;
+                        pk.x = *reinterpret_cast<const uint32_t*>(&lo); pk.y = *reinterpret_cast<const uint32_t*>(&hi);
+                        *reinterpret_cast<uint2*>(reinterpret_cast<half*>(p.out) + orow + blk * 128) = pk;
+                    } else if (p.mode == 2)
                         *reinterpret_cast<float4*>(p.out + orow + blk * 128) = make_float4(
                             u[0] * sv[blk][0] * w, u[1] * sv[blk][1] * w, u[2] * sv[blk][2] * w, u[3] * sv[blk][3] * w);
                     else if (p.mode == 1)
@@ -795,7 +801,7 @@ __global__ void __launch_bounds__(NTHREADS, 1) prompt_down_kernel(
     const int e = items[3 * item], first = items[3 * item + 1], cnt = items[3 * item + 2];
     if (threadIdx.x < IPM) {
         const int pr = (int)threadIdx.x < cnt ? sorted[first + threadIdx.x] : 0;
-        pair_sh[threadIdx.x] = (f16 == 2 ? pr : pr / slots) * D;     // mode 2: the pair's own row
+        pair_sh[threadIdx.x] = (f16 == 2 || f16 == 4 ? pr : pr / slots) * D;     // modes 2 / 4: the pair's own row
         wts_sh[threadIdx.x] = (int)threadIdx.x < cnt ? wts[pr] : 0.f;
     }
     const uint32_t* Td = reinterpret_cast<const uint32_t*>(down_ptr[e]);
@@ -843,7 +849,7 @@ void launch_cb(const at::Tensor& x, const at::Tensor& sorted, const at::Tensor& 
         items.data_ptr<int>(), item_count.data_ptr<int>(), gate_ptr.data_ptr<int64_t>(), up_ptr.data_ptr<int64_t>(),
         gu_k2.data_ptr<int>(), h(suh_g), h(suh_u), h(svh_g), h(svh_u), h(suh_d), reinterpret_cast<half*>(xd.data_ptr()),
         D, I, NS, slots, limit, act_mode, reinterpret_cast<float4*>(out.data_ptr()),
-        f16 == 2 ? 0LL : (long long)(out.numel() * out.element_size() / 16));          // mode 2: nothing to zero
+        f16 == 2 || f16 == 4 ? 0LL : (long long)(out.numel() * out.element_size() / 16));   // modes 2 / 4: nothing to zero
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     if (which & 2)
     prompt_down_kernel<CB><<<dim3((unsigned)max_items, (unsigned)(D / 256 / ncb)), NTHREADS, DN_SMEM, stream>>>(
@@ -885,6 +891,33 @@ __global__ void slot_sum_kernel(const float4* __restrict__ pairs, const int* __r
         acc.x += v.x; acc.y += v.y; acc.z += v.z; acc.w += v.w;
     }
     out[i] = acc;
+}
+
+// mode 4's sum: fp16 pair rows added in fp32 in slot order
+__global__ void slot_sum16_kernel(const uint2* __restrict__ pairs, const int* __restrict__ pick, float4* __restrict__ out,
+                                  long long n4, int S, int D4, int E) {
+    const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n4) return;
+    const long long r = i / D4, c = i % D4;
+    float4 acc = make_float4(0.f, 0.f, 0.f, 0.f);
+    for (int s = 0; s < S; ++s) {
+        const int e = pick[r * S + s];
+        if (e < 0 || e >= E) continue;
+        const uint2 v = pairs[(r * S + s) * D4 + c];
+        const float2 a = __half22float2(*reinterpret_cast<const half2*>(&v.x)), b = __half22float2(*reinterpret_cast<const half2*>(&v.y));
+        acc.x += a.x; acc.y += a.y; acc.z += b.x; acc.w += b.y;
+    }
+    out[i] = acc;
+}
+
+void exl3p_slot_sum16_cuda(const at::Tensor& pairs, const at::Tensor& pick, at::Tensor& out, int64_t E) {
+    const int64_t R = pick.size(0), S = pick.size(1), D = out.size(1);
+    const long long n4 = (long long)R * D / 4;
+    if (n4 == 0) return;
+    slot_sum16_kernel<<<(unsigned)((n4 + 255) / 256), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+        reinterpret_cast<const uint2*>(pairs.data_ptr()), pick.data_ptr<int>(), reinterpret_cast<float4*>(out.data_ptr<float>()),
+        n4, (int)S, (int)(D / 4), (int)E);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 void exl3p_slot_sum_cuda(const at::Tensor& pairs, const at::Tensor& pick, at::Tensor& out, int64_t E) {

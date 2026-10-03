@@ -11,6 +11,7 @@ void exl3p_experts_cuda(const at::Tensor&, const at::Tensor&, const at::Tensor&,
 
 void exl3p_slot_sum_cuda(const at::Tensor&, const at::Tensor&, at::Tensor&, int64_t);
 void exl3p_fix_to_float_cuda(const at::Tensor&, at::Tensor&);
+void exl3p_slot_sum16_cuda(const at::Tensor&, const at::Tensor&, at::Tensor&, int64_t);
 
 static void check(const at::Tensor& x, at::ScalarType t, const char* name) {
     TORCH_CHECK(x.is_cuda() && x.scalar_type() == t && x.is_contiguous(), name,
@@ -49,10 +50,10 @@ void experts(const at::Tensor& x, const at::Tensor& sorted, const at::Tensor& it
     check(wts, at::kFloat, "wts");
     check(xd, at::kHalf, "xd");
     TORCH_CHECK(out.is_cuda() && out.is_contiguous() &&
-                    out.scalar_type() == (f16 == 1 ? at::kHalf : f16 == 3 ? at::kLong : at::kFloat),
+                    out.scalar_type() == (f16 == 1 || f16 == 4 ? at::kHalf : f16 == 3 ? at::kLong : at::kFloat),
                 "out: contiguous fp32 (fp16 with f16 = 1, int64 fixed point with f16 = 3)");
     TORCH_CHECK(xd.numel() >= sorted.numel() * I, "xd too small");
-    TORCH_CHECK(out.size(0) == (f16 == 2 ? sorted.numel() : x.size(0)) && out.size(1) == D,
+    TORCH_CHECK(out.size(0) == (f16 == 2 || f16 == 4 ? sorted.numel() : x.size(0)) && out.size(1) == D,
                 "out: [R, D] ([R * slots, D] pair rows with f16 = 2)");
     c10::cuda::CUDAGuard guard(x.device());
     exl3p_experts_cuda(x, sorted, items, item_count, gate_ptr, up_ptr, down_ptr, gu_k2, d_k2, suh_g, suh_u, svh_g,
@@ -79,7 +80,19 @@ void fix_to_float(const at::Tensor& in, at::Tensor out) {
     exl3p_fix_to_float_cuda(in, out);
 }
 
+void slot_sum16(const at::Tensor& pairs, const at::Tensor& pick, at::Tensor out, int64_t E) {
+    check(pairs, at::kHalf, "pairs");
+    check(pick, at::kInt, "pick");
+    check(out, at::kFloat, "out");
+    TORCH_CHECK(pick.dim() == 2 && pairs.size(0) == pick.numel() && pairs.size(1) == out.size(1) &&
+                    out.size(0) == pick.size(0) && out.size(1) % 4 == 0,
+                "slot_sum16: pairs [R * S, D] fp16, pick [R, S], out [R, D] fp32");
+    c10::cuda::CUDAGuard guard(pairs.device());
+    exl3p_slot_sum16_cuda(pairs, pick, out, E);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("slot_sum16", &slot_sum16);
     m.def("fix_to_float", &fix_to_float);
     m.def("slot_sum", &slot_sum);
     m.def("item_rows", &exl3p_item_rows);
