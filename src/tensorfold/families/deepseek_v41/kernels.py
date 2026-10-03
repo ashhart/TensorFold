@@ -346,3 +346,122 @@ def index_scores(q: mx.array, w: mx.array, keys: mx.array, rows: int, start: int
         template=[("D", dim), ("CANDIDATES", candidates is not None), ("HEADS", heads), ("RATIO", ratio)],
         grid=((width + 3) // 4 * 128, length, 1), threadgroup=(128, 1, 1), output_shapes=[(length, width)],
         output_dtypes=[mx.float32])[0]
+
+
+# -- FP8 activations: oMLX's ``activation.py`` kernels (MIT): one SIMD group a 32-value scale group
+_ROUND = r"""
+    // Clamp to 448 * 2^-126 so the power-of-two scale stays normal.
+    const float amax = max(simd_max(abs(v)), 0x1.cp-118f);
+    const int scale_exponent = max(int(ceil(log2(amax / 448.0f))), -126);
+    const float scale = as_type<float>(uint(scale_exponent + 127) << 23);
+    const float scaled = clamp(v / scale, -448.0f, 448.0f);
+    const float a = abs(scaled);
+    const int step_exponent = max(int(floor(log2(max(a, 0x1p-9f)))) - 3, -9);
+    const float step = as_type<float>(uint(step_exponent + 127) << 23);
+    const float q = sign(scaled) * min(rint(a / step) * step, 448.0f);
+    if (i < n) y[i] = T(q * scale);
+"""
+
+_FP8 = r"""
+    const uint i = thread_position_in_grid.x;
+    const uint n = N;
+    const float v = i < n ? float(x[i]) : 0.0f;
+""" + _ROUND
+
+_SWIGLU_FP8 = r"""
+    const uint i = thread_position_in_grid.x;
+    const uint n = N;
+    float v = 0.0f;
+    if (i < n) {
+        float g = gate[i], u = up[i];
+        if (limit[0] != 0.0f) {
+            g = min(g, limit[0]);
+            u = clamp(u, -limit[0], limit[0]);
+        }
+        const float neg_sigmoid = 1.0f / (1.0f + exp(abs(g)));
+        const float sigmoid = g < 0 ? neg_sigmoid : 1.0f - neg_sigmoid;
+        float value = (g * sigmoid) * u;
+        if (WEIGHTED) value *= weights[i / D];
+        v = float(T(value));
+    }
+""" + _ROUND
+
+
+@cache
+def _act_kernel(tail: bool) -> Any:
+    if tail:
+        return mx.fast.metal_kernel(name="tf_dsv41_swiglu_fp8", input_names=["gate", "up", "weights", "limit"],
+                                    output_names=["y"], source=_SWIGLU_FP8)
+    return mx.fast.metal_kernel(name="tf_dsv41_fp8", input_names=["x"], output_names=["y"], source=_FP8)
+
+
+def fp8_fits(x: mx.array) -> bool:
+    return metal() and x.size > 0 and int(x.shape[-1]) % 32 == 0 and x.dtype in (mx.float32, mx.float16,
+                                                                                  mx.bfloat16)
+
+
+def fp8(x: mx.array) -> mx.array:
+    """The FP8 round trip (E4M3, a UE8M0 scale per 32) in one kernel."""
+
+    return _act_kernel(False)(inputs=[mx.contiguous(x)], template=[("T", x.dtype), ("N", x.size)],
+                              grid=(x.size, 1, 1), threadgroup=(256, 1, 1), output_shapes=[x.shape],
+                              output_dtypes=[x.dtype])[0]
+
+
+def swiglu_fp8(gate: mx.array, up: mx.array, weights: mx.array | None, limit: float, dtype: Any) -> mx.array:
+    """oMLX's SwiGLU tail: clamp, g * sigmoid(g) * u (times each pick's weight), to ``dtype``, then FP8."""
+
+    return _act_kernel(True)(
+        inputs=[mx.contiguous(gate), mx.contiguous(up),
+                mx.contiguous(weights.reshape(-1).astype(mx.float32)) if weights is not None else mx.ones((1,)),
+                mx.array([float(limit or 0)], dtype=mx.float32)],
+        template=[("T", dtype), ("N", gate.size), ("D", int(gate.shape[-1])), ("WEIGHTED", weights is not None)],
+        grid=(gate.size, 1, 1), threadgroup=(256, 1, 1), output_shapes=[gate.shape], output_dtypes=[dtype])[0]
+
+
+# -- Sinkhorn: oMLX's ``hyper_connection.py`` kernel (MIT): a row's 4 x 4 mix normalised in a fixed order
+_SINKHORN = r"""
+    const uint row = thread_position_in_grid.x;
+    if (row >= ROWS) return;
+    float values[16];
+    for (int i = 0; i < 16; ++i) values[i] = x[row * 16 + i];
+    for (int iteration = 0; iteration < ITERS; ++iteration) {
+        if (iteration > 0) {
+            for (int r = 0; r < 4; ++r) {
+                float total = 0.0f;
+                for (int c = 0; c < 4; ++c) total = values[r * 4 + c] + total;
+                total = total + eps[0];
+                for (int c = 0; c < 4; ++c) values[r * 4 + c] /= total;
+            }
+        }
+        for (int c = 0; c < 4; ++c) {
+            float total = 0.0f;
+            for (int r = 0; r < 4; ++r) total = values[r * 4 + c] + total;
+            total = total + eps[0];
+            for (int r = 0; r < 4; ++r) values[r * 4 + c] /= total;
+        }
+    }
+    for (int i = 0; i < 16; ++i) y[row * 16 + i] = values[i];
+"""
+
+
+@cache
+def _sinkhorn_kernel() -> Any:
+    return mx.fast.metal_kernel(name="tf_dsv41_sinkhorn", input_names=["x", "eps"], output_names=["y"],
+                                source=_SINKHORN,
+                                header="#pragma clang fp reassociate(off)\n#pragma clang fp contract(off)\n")
+
+
+def sinkhorn(comb: mx.array, eps: float, iters: int) -> mx.array:
+    """comb [..., 4, 4] fp32: a column normalisation, then ``iters - 1`` row-then-column ones."""
+
+    if metal() and comb.size and comb.dtype == mx.float32 and tuple(comb.shape[-2:]) == (4, 4):
+        rows = comb.size // 16
+        return _sinkhorn_kernel()(inputs=[comb, mx.array([eps], dtype=mx.float32)],
+                                  template=[("ROWS", rows), ("ITERS", max(1, iters))], grid=(rows, 1, 1),
+                                  threadgroup=(32, 1, 1), output_shapes=[comb.shape], output_dtypes=[mx.float32])[0]
+    comb = comb / (mx.sum(comb, -2, keepdims=True) + eps)
+    for _ in range(iters - 1):
+        comb = comb / (mx.sum(comb, -1, keepdims=True) + eps)
+        comb = comb / (mx.sum(comb, -2, keepdims=True) + eps)
+    return comb

@@ -15,14 +15,16 @@ from tensorfold.families.deepseek_v41.engram import Engram, NgramHash
 from tensorfold.families.deepseek_v41.quant import Experts, Linear, fp8, quantize_activation, swiglu_fp8
 
 
-def rms(x: mx.array, weight: mx.array | None, eps: float) -> mx.array:
-    """oMLX's RMSNorm: fp32 statistics, times the weight in fp32, back to x's dtype."""
-
+@mx.compile
+def _norm(x: mx.array, weight: mx.array, eps: float) -> mx.array:
     f = x.astype(mx.float32)
-    f = f * mx.rsqrt(mx.mean(f * f, -1, keepdims=True) + eps)
-    if weight is not None:
-        f = f * weight
-    return f.astype(x.dtype)
+    return (f * mx.rsqrt(mx.mean(f * f, -1, keepdims=True) + eps) * weight).astype(x.dtype)
+
+
+def rms(x: mx.array, weight: mx.array, eps: float) -> mx.array:
+    """oMLX's (compiled) RMSNorm: fp32 statistics, times the weight in fp32, back to x's dtype."""
+
+    return _norm(x, weight, eps)
 
 
 @mx.compile
@@ -57,6 +59,26 @@ def rope(x: mx.array, positions: mx.array, params: tuple, inverse: bool = False)
 
 
 # -- hyper-connections ---------------------------------------------------------------------------
+@mx.compile
+def _hc_mix_weights(mixes: mx.array, scale: mx.array, base: mx.array, n: int, hc_eps: float,
+                    iters: int) -> tuple[mx.array, mx.array, mx.array]:
+    from tensorfold.families.deepseek_v41.kernels import sinkhorn
+
+    pre = mx.sigmoid(mixes[..., :n] * scale[0] + base[:n]) + hc_eps
+    post = 2 * mx.sigmoid(mixes[..., n:2 * n] * scale[1] + base[n:2 * n])
+    comb = (mixes[..., 2 * n:] * scale[2] + base[2 * n:]).reshape(*mixes.shape[:-1], n, n)
+    comb = mx.softmax(comb, -1) + hc_eps
+    return pre, post, sinkhorn(comb, hc_eps, iters)
+
+
+@mx.compile
+def _hc_mixes(x: mx.array, fn: mx.array, scale: mx.array, base: mx.array, n: int, eps: float, hc_eps: float,
+              iters: int) -> tuple[mx.array, mx.array, mx.array]:
+    flat = x.reshape(x.shape[0], -1).astype(mx.float32)
+    mixes = (flat @ fn.T) * mx.rsqrt(mx.mean(flat * flat, -1, keepdims=True) + eps)
+    return _hc_mix_weights(mixes, scale, base, n, hc_eps, iters)
+
+
 class HC:
     """One mHC projection: a sublayer's post and comb mixes and the next pre-mix."""
 
@@ -69,22 +91,12 @@ class HC:
         return [self.fn, self.base, self.scale]
 
     def __call__(self, x: mx.array) -> tuple[mx.array, mx.array, mx.array]:
-        n, R = self.n, int(x.shape[0])
-        flat = x.reshape(R, -1).astype(mx.float32)
-        mixes = (flat @ self.fn.T) * mx.rsqrt(mx.mean(flat * flat, -1, keepdims=True) + self.eps)
-        pre = mx.sigmoid(mixes[:, :n] * self.scale[0] + self.base[:n]) + self.hc_eps
-        post = 2 * mx.sigmoid(mixes[:, n:2 * n] * self.scale[1] + self.base[n:2 * n])
-        comb = (mixes[:, 2 * n:] * self.scale[2] + self.base[2 * n:]).reshape(R, n, n)
-        comb = mx.softmax(comb, -1) + self.hc_eps
-        comb = comb / (mx.sum(comb, -2, keepdims=True) + self.hc_eps)
-        for _ in range(self.iters - 1):
-            comb = comb / (mx.sum(comb, -1, keepdims=True) + self.hc_eps)
-            comb = comb / (mx.sum(comb, -2, keepdims=True) + self.hc_eps)
-        return pre, post, comb
+        return _hc_mixes(x, self.fn, self.scale, self.base, self.n, self.eps, self.hc_eps, self.iters)
 
 
+@mx.compile
 def hc_pre(x: mx.array, pre: mx.array) -> mx.array:
-    """The streams [R, 4, D] weighted by pre [R, 4] and summed in fp32: [R, D] in x's dtype."""
+    """The streams [R, 4, D] weighted by pre [R, 4] and summed in fp32: [R, D] in x's dtype (oMLX's, compiled)."""
 
     return mx.sum(x.astype(mx.float32) * pre[..., None], axis=-2).astype(x.dtype)
 
@@ -228,8 +240,7 @@ class Attention:
         kv_in = self.wkv(xq, prequantized=True)
         qr = rms(query, self.q_norm, self.eps)
         q = rope(self.wq_b(qr).reshape(L, self.heads, self.dim), positions, self.inv_freq)
-        kv = quantize_activation(rope(rms(kv_in, self.kv_norm, self.eps), positions, self.inv_freq)
-                                 .astype(mx.float32), 8, 32)
+        kv = fp8(rope(rms(kv_in, self.kv_norm, self.eps), positions, self.inv_freq).astype(mx.float32))
         lo = max(0, start - (self.window - 1))
         keys = mx.concatenate([cache.key_rows(lo, start), kv]) if start > lo else kv
         cache.write_keys(kv, start)

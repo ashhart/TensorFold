@@ -52,11 +52,6 @@ def logits_of(model, ids, cache):
     return model.head(model.hidden(mx.array([ids], dtype=mx.uint32), cache))[0]
 
 
-def close(a, b, tol=0.05):
-    a, b = np.array(a.astype(mx.float32)), np.array(b.astype(mx.float32))
-    return int(a.argmax()) == int(b.argmax()) and float(np.abs(a - b).max()) <= tol * float(np.abs(b).max()) + tol
-
-
 # -- the package and the layout ---------------------------------------------------------------
 def test_family_is_detected_and_checked(checkpoint):
     from tensorfold import families
@@ -136,24 +131,31 @@ def test_engram_hashes_continue_across_calls(model):
 
 
 # -- forward paths -----------------------------------------------------------------------------
+def agree(a, b):
+    """Two paths' logits [L, V] over a prompt are the same function to rounding on most rows."""
+
+    a, b = np.array(a.astype(mx.float32)), np.array(b.astype(mx.float32))
+    top = (a.argmax(-1) == b.argmax(-1)).mean()
+    rel = np.median(np.abs(a - b).max(-1) / np.abs(b).max(-1))
+    return top >= 0.8 and rel < 0.05
+
+
 @pytest.mark.parametrize("length", [5, 23, 70])     # inside the window; past top-k; past the candidate blocks
 def test_prefill_path_agrees_with_decode_path(model, length):
     ids = tokens(length)
-    a = logits_of(model, ids, model.make_cache())[-1]
+    a = logits_of(model, ids, model.make_cache())
     step = model.make_cache()
-    for t in ids:
-        b = logits_of(model, [t], step)[-1]
-    assert close(a, b)
+    b = mx.stack([logits_of(model, [t], step)[-1] for t in ids])
+    assert agree(a, b)
     assert all(c.offset == length for c in step)
 
 
 def test_chunked_prefill_agrees_with_one_chunk(model):
     ids = tokens(61, seed=3)
-    a = logits_of(model, ids, model.make_cache())[-1]
+    a = logits_of(model, ids, model.make_cache())
     parts = model.make_cache()
-    for lo, hi in ((0, 17), (17, 32), (32, 61)):
-        b = logits_of(model, ids[lo:hi], parts)[-1]
-    assert close(a, b)
+    b = mx.concatenate([logits_of(model, ids[lo:hi], parts) for lo, hi in ((0, 17), (17, 32), (32, 61))])
+    assert agree(a, b)
 
 
 def serial_logits(model, base, window):
@@ -336,3 +338,96 @@ def test_config_reads_the_released_text_config():
     cfg = Config.from_dict({"model_type": "deepseek_v41", "text_config": {**TEXT}})
     assert cfg.num_hidden_layers == 6 and cfg.compress_ratios[:6] == [0, 0, 2, 2, 1, 1]
     assert cfg.rms_norm_eps == 1e-20 and cfg.dspark_n_routed_experts == 4
+
+
+# -- the checkpoint's DSpark drafter ---------------------------------------------------------------
+@pytest.fixture(scope="module")
+def drafter(model):
+    from tensorfold.families.deepseek_v41 import dspark
+
+    previous = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        return dspark.load(model, model.weights)
+    finally:
+        mx.set_default_device(previous)
+
+
+def dspark_runtime(model, drafter):
+    from tensorfold.families.deepseek_v41.runtime import DSparkV41Flash
+
+    runtime = DSparkV41Flash(model, drafter, check=False)
+    runtime.exact_width = runtime.batch_rows = ROWS
+    runtime.multi_row_exact = True
+    runtime.max_streams = ROWS
+    runtime.dspark = runtime.mtp = drafter
+    return runtime
+
+
+def test_dspark_drafts_a_block(model, drafter):
+    rings = drafter.make_cache()
+    drafter.absorb(mx.zeros((3, len(drafter.taps) * TEXT["hidden_size"]), dtype=mx.bfloat16), rings)
+    token = mx.array([7], dtype=mx.uint32)
+    drafts = drafter.draw(drafter.logits(model, token, rings), token, drafter.size, lambda row, j: mx.argmax(row, -1))
+    assert drafts.shape == (TEXT["dspark_block_size"],) and rings[0].offset == 3
+    assert drafter.taps == tuple(TEXT["dspark_target_layer_ids"])
+    assert [b.block.moe.top for b in drafter.blocks] == [TEXT["dspark_num_experts_per_tok"]] * 3
+
+
+def test_dspark_drafts_change_speed_only(model, drafter):
+    """Drafted replies equal the serial run's, greedy and sampled."""
+
+    from tensorfold.engine.exact_sampling import Sampling
+    from tensorfold.engine.lane_engine import LaneEngine, LaneStream
+    from tensorfold.families.deepseek_v41 import engine_settings
+
+    runtime, serial = dspark_runtime(model, drafter), cpu_runtime(model)
+    try:
+        for sampling in (None, Sampling(seed=5, temperature=0.9)):
+            got = []
+            for rt, drafts in ((runtime, True), (serial, False)):
+                engine = LaneEngine(rt, **engine_settings(rt))
+                stream = LaneStream(stream_id="s", prompt_ids=tokens(37, seed=11), max_new_tokens=24,
+                                    sampling=sampling, drafts=drafts)
+                engine.add_stream(stream)
+                while engine.active_count:
+                    engine.step()
+                got.append(stream.emitted)
+                if drafts:
+                    assert engine.family_mtp and engine.drafted > 0
+            assert got[0] == got[1]
+    finally:
+        model.tap_layers = ()
+
+
+def test_dspark_concurrent_streams_emit_what_they_emit_alone(model, drafter):
+    from tensorfold.engine.exact_sampling import Sampling
+    from tensorfold.engine.lane_engine import LaneEngine, LaneStream
+    from tensorfold.families.deepseek_v41 import engine_settings
+
+    runtime = dspark_runtime(model, drafter)
+    specs = [(tokens(21, seed=4), 14, None, True), (tokens(9, seed=5), 12, Sampling(seed=3, temperature=0.8), True),
+             (tokens(33, seed=6), 10, None, False)]
+
+    def streams():
+        return [LaneStream(stream_id=f"s{i}", prompt_ids=list(p), max_new_tokens=n, sampling=smp, drafts=d)
+                for i, (p, n, smp, d) in enumerate(specs)]
+
+    try:
+        alone = []
+        for s in streams():
+            engine = LaneEngine(runtime, **engine_settings(runtime))
+            engine.add_stream(s)
+            while engine.active_count:
+                engine.step()
+            alone.append(s.emitted)
+        engine = LaneEngine(runtime, **engine_settings(runtime))
+        together = streams()
+        for s in together:
+            engine.add_stream(s)
+        while engine.active_count:
+            engine.step()
+        assert [s.emitted for s in together] == alone
+        assert engine.drafted > 0
+    finally:
+        model.tap_layers = ()

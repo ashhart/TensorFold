@@ -74,12 +74,20 @@ def quantize_activation(x: mx.array, bits: int = 8, group: int = 32, e4m3_scale:
 def fp8(x: mx.array) -> mx.array:
     """The official FP8 activation of a quantized projection's input (E4M3, a UE8M0 scale per 32)."""
 
+    from tensorfold.families.deepseek_v41 import kernels as KV
+
+    if KV.fp8_fits(x):
+        return KV.fp8(x)
     return quantize_activation(x, 8, 32)
 
 
 def swiglu_fp8(gate: mx.array, up: mx.array, weights: mx.array | None, limit: float, dtype: Any) -> mx.array:
     """oMLX's fused SwiGLU tail: clamp, g * sigmoid(g) * u in fp32 (times the route weight), to ``dtype``, then FP8."""
 
+    from tensorfold.families.deepseek_v41 import kernels as KV
+
+    if KV.fp8_fits(gate) and gate.shape == up.shape:
+        return KV.swiglu_fp8(gate, up, weights, limit, dtype)
     g, u = gate.astype(mx.float32), up.astype(mx.float32)
     if limit:
         g = mx.minimum(g, limit)

@@ -58,7 +58,8 @@ TEXT = {
 
 
 class Writer:
-    def __init__(self) -> None:
+    def __init__(self, c: dict) -> None:
+        self.c, self.D = c, int(c["hidden_size"])
         self.t: dict[str, mx.array] = {}
         self.quant: dict[str, dict] = {}
 
@@ -79,13 +80,14 @@ class Writer:
         self.t[name] = (1.0 + 0.1 * mx.random.normal((n,))).astype(mx.bfloat16)
 
     def hc(self, p: str) -> None:
+        D = self.D
         for kind in ("attn", "ffn"):
             self.t[f"{p}.hc_{kind}_fn"] = 0.02 * mx.random.normal((24, 4 * D))
             self.t[f"{p}.hc_{kind}_base"] = 0.1 * mx.random.normal((24,))
             self.t[f"{p}.hc_{kind}_scale"] = 1.0 + 0.1 * mx.random.normal((3,))
 
     def block(self, p: str, layer: int, experts: int) -> None:
-        c = TEXT
+        c, D = self.c, self.D
         h, hd, g = c["num_attention_heads"], c["head_dim"], c["o_groups"]
         ratio = c["compress_ratios"][layer]
         self.hc(p)
@@ -123,17 +125,19 @@ class Writer:
         self.fp4(f"{f}.experts.w2", experts, D, inter)
 
 
-def write_checkpoint(folder: Path, seed: int = 0, mtp: bool = True) -> Path:
+def write_checkpoint(folder: Path, seed: int = 0, mtp: bool = True, text: dict | None = None) -> Path:
     mx.random.seed(seed)
     folder.mkdir(parents=True, exist_ok=True)
-    w = Writer()
-    c = TEXT
+    c = dict(TEXT if text is None else text)
+    w = Writer(c)
+    D, VOCAB, LAYERS, MTP = w.D, int(c["vocab_size"]), int(c["num_hidden_layers"]), int(c["num_nextn_predict_layers"])
     L = "language_model"
     w.bf(f"{L}.embed.weight", VOCAB, D, 1.0)
     w.bf(f"{L}.head.weight", VOCAB, D)
     w.norm(f"{L}.norm.weight", D)
     for i in range(LAYERS):
         w.block(f"{L}.layers.{i}", i, c["n_routed_experts"])
+        mx.eval(list(w.t.values()))
     if mtp:
         for s in range(MTP):
             p = f"{L}.mtp.{s}"
@@ -148,7 +152,7 @@ def write_checkpoint(folder: Path, seed: int = 0, mtp: bool = True) -> Path:
                 w.bf(f"{p}.markov_head.head.weight", VOCAB, rank, 0.5)
                 w.bf(f"{p}.confidence_head.proj.weight", 1, D + rank, 0.1)
     tables = {}
-    e = ENGRAM
+    e = c
     width = (e["engram_max_ngram_size"] - 1) * e["engram_n_heads"] * e["engram_head_dim"]
     engram_shard = "model-00001-of-00003.safetensors"
     engram_t: dict[str, mx.array] = {}
@@ -174,8 +178,26 @@ def write_checkpoint(folder: Path, seed: int = 0, mtp: bool = True) -> Path:
         weight_map.update({k: shard for k in keys})
     (folder / "model.safetensors.index.json").write_text(json.dumps({"metadata": {}, "weight_map": weight_map}))
     config = {"architectures": ["DeepseekV41ForCausalLM"], "model_type": "deepseek_v41", "dtype": "bfloat16",
-              "bos_token_id": 0, "eos_token_id": 1, "pad_token_id": 2, "image_token_id": 129264, "text_config": TEXT,
+              "bos_token_id": 0, "eos_token_id": 1, "pad_token_id": 2, "image_token_id": 129264, "text_config": c,
               "omlx_deepseek_v41": {"version": 1, "quantized_modules": w.quant, "engram_tables": tables,
                                     "preserve_mtp": bool(mtp), "engram_in_index": True}}
     (folder / "config.json").write_text(json.dumps(config))
     return folder
+
+
+def real_dims(layers: int = 4, experts: int = 32) -> dict:
+    """The released shapes on a few layers and fewer routed experts, for timing a layer without the real weights."""
+
+    e = {"engram_layer_ids": [1], "engram_max_ngram_size": 4, "engram_vocab_size": 5000, "engram_n_heads": 8,
+         "engram_head_dim": 256, "engram_pad_token_id": 2, "engram_compressed_vocab_size": 200}
+    e["engram_num_embeddings"] = engram_rows(e["engram_layer_ids"], 4, 8, 5000)
+    ratios = ([0, 0, 2, 1] + [1] * max(0, layers - 4))[:layers] + [0, 0, 0]
+    return {**TEXT, **e, "vocab_size": 129280, "hidden_size": 5120, "moe_intermediate_size": 2304,
+            "num_hidden_layers": layers, "num_attention_heads": 64, "head_dim": 512, "qk_rope_head_dim": 64,
+            "q_lora_rank": 1280, "o_lora_rank": 1024, "o_groups": 8, "n_routed_experts": experts,
+            "num_experts_per_tok": 6, "sliding_window": 128, "compress_ratios": ratios,
+            "kv_source_layer_ids": [2, 3], "index_source_layer_ids": [2, 3], "index_n_heads": 32,
+            "index_head_dim": 128, "index_topk": 512, "candidate_source_layer_id": 3,
+            "candidate_topk_blocks": 2048, "candidate_block_size": 8, "dspark_target_layer_ids": [1, 2, 3],
+            "dspark_markov_rank": 256, "dspark_n_routed_experts": experts, "dspark_num_experts_per_tok": 3,
+            "dspark_block_size": 5, "dspark_noise_token_id": 128799}
