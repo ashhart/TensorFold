@@ -3,6 +3,10 @@ import math
 from pathlib import Path
 
 import pytest
+
+pytest.importorskip("prompt_toolkit")                                # the [tui] extra
+pytest.importorskip("rich")
+
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 from rich.cells import cell_len
