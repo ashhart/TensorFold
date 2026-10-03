@@ -644,18 +644,22 @@ class MultiDecoder:
 
         log = os.environ.get("TF_DSV41_MEMLOG") == "1"
         before = torch.cuda.memory_reserved() if log else 0
+        t0 = time.perf_counter()
         torch.cuda.empty_cache()
+        t1 = time.perf_counter()
         try:
             import ctypes
 
             ctypes.CDLL("libc.so.6").malloc_trim(0)
         except (OSError, AttributeError):
             pass
+        t2 = time.perf_counter()
         if log:
             from .engine import available_bytes
 
             print(f"[memlog r{self.rank}] prompt released {(before - torch.cuda.memory_reserved()) / 2 ** 30:.2f} GiB; "
-                  f"available {available_bytes() / 2 ** 30:.2f} GiB", flush=True)
+                  f"available {available_bytes() / 2 ** 30:.2f} GiB; empty_cache {1e3 * (t1 - t0):.0f} ms, "
+                  f"malloc_trim {1e3 * (t2 - t1):.0f} ms", flush=True)
 
     # -- rounds ---------------------------------------------------------------------------------------------------
     def _plan(self, live: list[Stream]) -> list[tuple[int, int]]:
