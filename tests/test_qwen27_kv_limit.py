@@ -117,6 +117,7 @@ def _engine(tp, rank):
     from tensorfold.families.qwen3_5.cuda.engine import Qwen27Engine
 
     engine = object.__new__(Qwen27Engine)
+    engine.idle = SimpleNamespace(ring=lambda: None, wait=lambda: None)   # communication is stubbed below
     engine.tp, engine.rank, engine.max_rows, engine.allow_copy = tp, rank, 12, True
     engine.w = SimpleNamespace(norm=SimpleNamespace(device="cpu"))
     engine.draft, engine.cache, engine.multi, engine.scheduler = None, PrefixCache(4), None, None

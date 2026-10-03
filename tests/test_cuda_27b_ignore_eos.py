@@ -146,6 +146,7 @@ def test_the_scheduler_hands_stop_eos_to_its_stream(allocations):  # noqa: F811
 
 def bare_engine(engine_mod, **attrs):
     eng = engine_mod.Qwen27Engine.__new__(engine_mod.Qwen27Engine)
+    eng.idle = SimpleNamespace(ring=lambda: None, wait=lambda: None)     # communication is stubbed below
     eng.context_window, eng.scheduler, eng.tp, eng.draft, eng.cache = 1000, None, 1, None, PrefixCache(4)
     eng.points = None
     eng.max_rows, eng.allow_copy, eng.eos = 12, True, (0,)

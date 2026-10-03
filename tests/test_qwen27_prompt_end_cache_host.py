@@ -111,6 +111,7 @@ class Recorder:
 
 def _bare_engine(tp=1, rank=0, drafter=None):
     engine = object.__new__(Qwen27Engine)
+    engine.idle = SimpleNamespace(ring=lambda: None, wait=lambda: None)   # communication is recorded below
     engine.tp, engine.rank, engine.max_rows, engine.allow_copy = tp, rank, 12, True
     engine.w = SimpleNamespace(norm=SimpleNamespace(device="cpu"))
     engine.draft, engine.eos, engine.cache, engine.points = drafter, (0,), PrefixCache(KEEP_ONE), None
