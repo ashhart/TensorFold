@@ -122,10 +122,26 @@ class App:
         if not isinstance(body.get("messages", []), list):
             return "messages must be a list"
         problem = grammar.refusal(body)                 # a malformed grammar field, or one beside a required call
-        if problem is None and grammar.request_spec(body) and "constraint" not in inspect.signature(
-                self.engine.generate).parameters:
-            problem = "this model's engine does not enforce structured output"
+        if problem is None and "constraint" not in inspect.signature(self.engine.generate).parameters:
+            if grammar.request_spec(body):
+                problem = "this model's engine does not enforce structured output"
+            elif self._dsml and "messages" in body:
+                try:
+                    shaped = self._tool_grammar(body, active_tool_specs(body.get("tools"), body.get("tool_choice")),
+                                                True)
+                except (RequestError, ValueError):
+                    shaped = None                       # refused with its own reason when prepared
+                if shaped is not None:
+                    problem = "this model's engine does not enforce tool-call grammars (TF_DSV41_TOOL_GRAMMAR)"
         return problem
+
+    def _tool_grammar(self, body: dict[str, Any], tools: list[dict[str, Any]], chat: bool) -> grammar.Spec | None:
+        """DSML calls held to the tools' schemas (``TF_DSV41_TOOL_GRAMMAR``, off by default), or None."""
+
+        if not (tools and chat and self._dsml):
+            return None
+        mode = grammar.tool_grammar_mode()
+        return None if mode == "off" else grammar.tool_spec(body, tools, auto=mode == "all")
 
     @property
     def _dsml(self) -> bool:
@@ -244,6 +260,8 @@ class App:
         budget = parse_numbers({"thinking_budget": body.get("thinking_budget")})["thinking_budget"]
         budget = int(budget or getattr(self, "thinking_budget", 0)) if chat and thinking else 0     # 0: the default
         spec = grammar.request_spec(body)
+        if spec is None:                     # an output format wins over strict tools (the reply is then JSON)
+            spec = self._tool_grammar(body, tools, chat)
         top = probability_options(body, supported=bool(getattr(self.engine, "supports_logprobs", False)))
         if top is not None:
             if not chat or body.get("stream") or thinking or tools or stop or spec is not None or budget:
@@ -446,7 +464,9 @@ class App:
             return stopped["client"] or stopped["stop"]
 
         draft = body.get("draft", True) is not False
-        gate = self._call_gate(prompt, tools) if tools and tool_choice_requires_call(body.get("tool_choice")) else None
+        held = prepared.grammar is not None and prepared.grammar[0].kind == "tools"     # the grammar writes the call
+        forced = tools and not held and tool_choice_requires_call(body.get("tool_choice"))
+        gate = self._call_gate(prompt, tools) if forced else None
 
         options: dict[str, Any] = {} if draft else {"draft": False}
         probabilities = None

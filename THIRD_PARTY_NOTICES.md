@@ -126,3 +126,8 @@ Parts of the DeepSeek-V4.1 serving path are adapted from Jay Leaton's
 - `src/tensorfold/families/deepseek_v41/cuda/dsml.py` and `tests/test_dsv41_dsml.py` adapt its DeepSeek-V4.1 family's
   DSML reply parser (`engine/serving/dsml.py`) and its tests, MIT License, Copyright (c) 2026 Jay Leaton. The
   license is included in `LICENSES/JayLeaton-MIT.txt`. Each file keeps its SPDX line and states what was changed.
+- The DSML tool-call grammar in `src/tensorfold/engine/grammar.py` (`tool_spec`, `_vocab`, the `tools` compile)
+  ports `_tool_spec` and `_vocab` of its GLM Spark grammar module (`glm5_next/spark/grammar.py` in
+  `patches/0001-spark-stack-060.patch`; MIT License, Copyright (c) 2026 TensorFold contributors and Copyright (c) 2026
+  Jay Leaton, glm53-tensorfold-spark) and the tool compile of its `engine/serving/structured.py` (MIT License,
+  Copyright (c) 2026 Jay Leaton).

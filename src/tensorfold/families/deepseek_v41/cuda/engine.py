@@ -316,6 +316,7 @@ class Dsv41Engine:
             self.e.pool = None
         else:
             self._make_pool(cap)
+        self._warm_tool_grammar()
         self.concurrent = self.streams > 1
         self.multi = self.scheduler = None
         if self.concurrent:
@@ -348,6 +349,25 @@ class Dsv41Engine:
         print(f"[memlog r{self.rank}] {stage}: available {available_bytes() / 2 ** 30:.2f} GiB, allocated "
               f"{torch.cuda.memory_allocated() / 2 ** 30:.2f}, reserved {torch.cuda.memory_reserved() / 2 ** 30:.2f}",
               flush=True)
+
+    def _warm_tool_grammar(self) -> None:
+        """TF_DSV41_TOOL_GRAMMAR on: both ranks build the tool-call compiler now. Built on rank 1's first such request
+        instead, it would parse tokenizer.json inside ``follow`` while rank 0 waits in NCCL, stalling every stream."""
+
+        from tensorfold.engine import grammar
+        from tensorfold.server.errors import RequestError
+
+        if grammar.tool_grammar_mode() == "off":
+            return
+        started = time.perf_counter()
+        try:
+            grammar.compiler(self, self.model_dir, self.eos).tools_compiler()
+        except (ImportError, RequestError, ValueError) as exc:     # served without it: such requests are refused
+            print(f"[tensorfold] rank {self.rank}: tool-call grammars unavailable: {exc}", flush=True)
+            return
+        if self.rank == 0:
+            print(f"[tensorfold] tool-call grammars ({grammar.tool_grammar_mode()}): DSML compiler built in "
+                  f"{time.perf_counter() - started:.1f}s", flush=True)
 
     def _make_pool(self, cap: int) -> None:
         """Kept prompt states (``tensorfold.cuda.kv_pool``) in what the context's prompt buffers and the reserve

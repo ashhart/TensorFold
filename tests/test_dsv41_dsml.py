@@ -342,3 +342,93 @@ def test_server_without_dsml_token_keeps_the_shared_parser(tmp_path):
     app = dsml_app(tmp_path, "hi")
     app.tok = Plain()
     assert app._dsml is False and dsml_app(tmp_path, "hi")._dsml is True
+
+
+# -- TF_DSV41_TOOL_GRAMMAR: required / named / strict tools as a grammar (xgrammar itself: test_grammar_tools.py) ----
+
+class GrammarEngine(Engine):
+    def __init__(self, reply):
+        super().__init__(reply)
+        self.constraints = []
+
+    def generate(self, prompt, max_tokens, sampling, on_tokens, draft=True, constraint=None):
+        self.constraints.append(constraint)
+        return super().generate(prompt, max_tokens, sampling, on_tokens, draft)
+
+
+class FakeGrammars:
+    """Records what is compiled; a constraint is (spec, think_end)."""
+
+    def __init__(self):
+        self.specs = []
+
+    def compile(self, spec):
+        self.specs.append(spec)
+        return spec
+
+    def constraint(self, compiled, *, think_end=None, spec=None):
+        return (spec, think_end)
+
+
+def grammar_app(tmp_path, reply):
+    app = dsml_app(tmp_path, reply)
+    app.engine = GrammarEngine(reply)
+    app.grammars = FakeGrammars()
+    app._call_gate = lambda *a: pytest.fail("the grammar writes the call: no call gate")
+    return app
+
+
+@pytest.mark.parametrize("thinking", [False, True])
+@pytest.mark.parametrize("choice", ["required", {"type": "function", "function": {"name": "search"}}])
+def test_a_required_call_is_a_tools_grammar(tmp_path, monkeypatch, thinking, choice):
+    from tests.test_cuda_admission import http_server, post
+
+    monkeypatch.setenv("TF_DSV41_TOOL_GRAMMAR", "required")
+    app = grammar_app(tmp_path, render_calls(CALLS[1:]))
+    body = {"messages": [{"role": "user", "content": "Find it."}], "tools": TOOLS, "tool_choice": choice,
+            "chat_template_kwargs": {"enable_thinking": thinking}}
+    with http_server(app) as port:
+        status, raw = post(port, body, True)
+    assert status == 200, raw
+    reply = json.loads(raw)["choices"][0]
+    assert reply["finish_reason"] == "tool_calls" and reply["message"]["tool_calls"][0]["function"]["name"] == "search"
+    (spec, think_end), = app.engine.constraints
+    assert spec.kind == "tools" and think_end == (END if thinking else None)        # after </think> when thinking
+    wanted = ["search"] if isinstance(choice, dict) else ["get_weather", "search"]
+    assert [t["function"]["name"] for t in json.loads(spec.text)["tools"]] == wanted
+
+
+def test_tool_grammars_are_off_by_default(tmp_path, monkeypatch):
+    from tests.test_cuda_admission import http_server, post
+
+    monkeypatch.delenv("TF_DSV41_TOOL_GRAMMAR", raising=False)
+    app = grammar_app(tmp_path, render_calls(CALLS[1:]))
+    app._call_gate = lambda *a: (_ for _ in ()).throw(server_request_error())
+    strict = [dict(TOOLS[0], function=dict(TOOLS[0]["function"], strict=True))]
+    with http_server(app) as port:
+        status, _ = post(port, {"messages": [{"role": "user", "content": "x"}], "tools": strict}, True)
+        assert status == 200 and app.engine.constraints == [None] and app.grammars.specs == []
+        status, raw = post(port, {"messages": [{"role": "user", "content": "x"}], "tools": TOOLS,
+                                  "tool_choice": "required"}, True)
+    assert status == 400 and "gate refused" in raw                               # today's answer, unchanged
+
+
+def test_all_holds_every_tools_request_and_engines_without_grammars_refuse(tmp_path, monkeypatch):
+    from tests.test_cuda_admission import http_server, post
+
+    monkeypatch.setenv("TF_DSV41_TOOL_GRAMMAR", "all")
+    app = grammar_app(tmp_path, "Hi.")
+    with http_server(app) as port:
+        status, _ = post(port, {"messages": [{"role": "user", "content": "x"}], "tools": TOOLS}, True)
+    assert status == 200 and app.engine.constraints[0][0].kind == "tools"
+    assert all(t["function"]["strict"] for t in json.loads(app.engine.constraints[0][0].text)["tools"])
+    plain = dsml_app(tmp_path, "Hi.")                                           # generate() takes no constraint
+    with http_server(plain) as port:
+        status, raw = post(port, {"messages": [{"role": "user", "content": "x"}], "tools": TOOLS}, True)
+    assert status == 400 and "tool-call grammars" in raw
+
+
+def server_request_error():
+    from tensorfold.server.errors import RequestError
+
+    return RequestError("gate refused")

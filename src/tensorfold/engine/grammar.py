@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 from dataclasses import dataclass, field
@@ -12,7 +13,7 @@ from typing import Any, Sequence
 from tensorfold.server.errors import RequestError
 
 EXTRA = "tensorfold[grammar]"             # the optional dependency that brings xgrammar
-KINDS = ("json", "json_schema", "regex", "choice", "grammar")
+KINDS = ("json", "json_schema", "regex", "choice", "grammar", "tools")    # indices are ``pack``'s wire format
 CACHE_BYTES = 256 << 20                   # compiled grammars kept for repeated schemas
 OBJECT = '{"type": "object"}'             # json_object: any JSON object (OpenAI's contract), not an array
 BLANKS = 32                               # the most blank characters between JSON tokens: pretty-printing, not endless
@@ -20,7 +21,8 @@ BLANKS = 32                               # the most blank characters between JS
 
 @dataclass(frozen=True)
 class Spec:
-    """A request's structured output: ``kind`` json, json_schema, regex, choice or grammar (EBNF), and its text."""
+    """A request's structured output: ``kind`` json, json_schema, regex, choice, grammar (EBNF) or tools (DeepSeek-V4.1
+    DSML calls, ``tool_spec``), and its text."""
 
     kind: str
     text: str = ""
@@ -98,6 +100,81 @@ def request_spec(body: dict[str, Any]) -> Spec | None:
     return None
 
 
+# -- tool calls held to their schemas (DeepSeek-V4.1's DSML) ----------------------------------------------------------
+# tool_spec and _vocab are ported from deepseek-v41-tensorfold-spark's GLM grammar module
+# (patches/0001-spark-stack-060.patch, glm5_next/spark/grammar.py: MIT, Copyright (c) 2026 TensorFold contributors,
+# Copyright (c) 2026 Jay Leaton, glm53-tensorfold-spark) and the tool compile from its engine/serving/structured.py
+# (MIT, Copyright (c) 2026 Jay Leaton). Adapted for tensorfold dsv41-cuda: the active tools, our Spec and compiler.
+TOOL_TAG = "deepseek_v4_1"                # xgrammar's built-in structural tag for V4.1's DSML calls
+TOOL_TOKENS = ("｜DSML｜",)               # added tokens the tools vocabulary keeps (every other added one is never allowed)
+
+
+def tool_grammar_mode() -> str:
+    """``TF_DSV41_TOOL_GRAMMAR``: off (default), required (required / named / strict tools) or all (every tools
+    request, as if each function were strict)."""
+
+    mode = (os.environ.get("TF_DSV41_TOOL_GRAMMAR") or "off").strip().lower()
+    mode = {"0": "off", "": "off", "1": "required"}.get(mode, mode)
+    if mode not in ("off", "required", "all"):
+        raise ValueError(f"TF_DSV41_TOOL_GRAMMAR={mode!r}: expected off, required or all")
+    return mode
+
+
+def tool_spec(body: dict[str, Any], tools: Sequence[dict[str, Any]], *, auto: bool = False) -> Spec | None:
+    """The DSML calls ``tools`` (the request's active tools, as the template renders them) must take: tool_choice
+    "required" or a named function, or "auto" when a function is ``strict`` (``auto``: every function); else None."""
+
+    from tensorfold.server.tools import tool_choice_requires_call
+
+    if not tools:
+        return None
+    fns = [t["function"] if isinstance(t.get("function"), dict) else t for t in tools if isinstance(t, dict)]
+    choice = body.get("tool_choice")
+    if isinstance(choice, dict) and str(choice.get("type") or "").lower() == "function" \
+            and isinstance(choice.get("function"), dict):
+        choice = {"type": "function", "function": {"name": str(choice["function"].get("name") or "").strip()}}
+    elif tool_choice_requires_call(choice):
+        choice = "required"
+    elif auto or any(fn.get("strict") is True for fn in fns):
+        choice = "auto"
+    else:
+        return None
+    kept = []
+    for fn in fns:
+        if not isinstance(fn.get("name"), str) or not fn["name"]:
+            raise RequestError("every function tool needs a name")
+        entry: dict[str, Any] = {"name": fn["name"]}
+        if fn.get("parameters") is not None:
+            if not isinstance(fn["parameters"], dict):
+                raise RequestError(f"tool {fn['name']}: parameters must be a JSON schema object")
+            entry["parameters"] = fn["parameters"]
+        entry["strict"] = True if auto else bool(fn.get("strict", False))
+        kept.append({"type": "function", "function": entry})
+    parallel = body.get("parallel_tool_calls", True) is not False
+    return Spec("tools", json.dumps({"tools": kept, "tool_choice": choice, "parallel_tool_calls": parallel},
+                                    ensure_ascii=False), "tools")
+
+
+def _vocab(tokenizer_json: Path, vocab_size: int, keep: Sequence[str]) -> tuple[list[str], str]:
+    """(encoded vocabulary of ``vocab_size`` entries, the tokenizer's JSON for xgrammar's metadata): every added token
+    empty (never allowed but as a stop token) except ``keep``; padded rows empty."""
+
+    from tokenizers import Tokenizer
+
+    tok = Tokenizer.from_file(str(tokenizer_json))
+    vocab = tok.get_vocab(with_added_tokens=True)
+    if max(vocab.values()) >= vocab_size:
+        raise ValueError(f"tokenizer ids reach {max(vocab.values())}, the logits have {vocab_size} columns")
+    enc = [""] * vocab_size
+    for s, i in vocab.items():
+        enc[i] = s
+    added = json.loads(Path(tokenizer_json).read_text()).get("added_tokens") or []
+    for a in added:
+        if a.get("content") not in keep and 0 <= int(a["id"]) < vocab_size:
+            enc[int(a["id"])] = ""
+    return enc, tok.to_str()
+
+
 def _message(exc: Exception) -> str:
     """xgrammar's error without its timestamp and source location."""
 
@@ -116,6 +193,9 @@ class Grammars:
         self.vocab_size = int(info.vocab_size)
         self.compiler = xgr.GrammarCompiler(info, max_threads=8, cache_limit_bytes=CACHE_BYTES)
         self.lock = threading.Lock()              # requests compile on their own HTTP threads
+        self.source: tuple[Path, tuple[int, ...]] | None = None     # (model dir, stop ids): what tools build from
+        self._tools = None
+        self._tools_lock = threading.Lock()
 
     @classmethod
     def for_model(cls, model_dir: str | Path, vocab_size: int, stop_ids: Sequence[int]) -> "Grammars":
@@ -127,13 +207,39 @@ class Grammars:
         except ImportError:
             raise RequestError(f"structured output needs xgrammar on the server: pip install '{EXTRA}'") from None
         tok = PreTrainedTokenizerFast(tokenizer_file=str(Path(model_dir) / "tokenizer.json"))
-        return cls(xgr.TokenizerInfo.from_huggingface(tok, vocab_size=int(vocab_size), stop_token_ids=list(stop_ids)))
+        found = cls(xgr.TokenizerInfo.from_huggingface(tok, vocab_size=int(vocab_size), stop_token_ids=list(stop_ids)))
+        found.source = (Path(model_dir), tuple(int(t) for t in stop_ids))
+        return found
+
+    def tools_compiler(self):
+        """The compiler of DSML tool calls: the vocabulary with ``TOOL_TOKENS`` kept, built once (parsing a large
+        tokenizer.json takes seconds: engines build it at load, so rank 1 never stalls a round on it)."""
+
+        with self._tools_lock:
+            if self._tools is None:
+                if self.source is None:
+                    raise RequestError("tool-call grammars need the checkpoint's tokenizer.json")
+                model_dir, stop = self.source
+                enc, backend = _vocab(model_dir / "tokenizer.json", self.vocab_size, TOOL_TOKENS)
+                meta = self.xgr.TokenizerInfo._detect_metadata_from_hf(backend)
+                info = self.xgr.TokenizerInfo(enc, meta["vocab_type"], vocab_size=self.vocab_size,
+                                              stop_token_ids=list(stop), add_prefix_space=meta["add_prefix_space"])
+                self._tools = self.xgr.GrammarCompiler(info, max_threads=8, cache_limit_bytes=CACHE_BYTES)
+            return self._tools
 
     def compile(self, spec: Spec):
         """The compiled grammar, or RequestError naming what the request's grammar gets wrong."""
 
         c = self.compiler
         try:
+            if spec.kind == "tools":
+                d = json.loads(spec.text)              # a named function: xgrammar forces that tool
+                tag = self.xgr.get_model_structural_tag(TOOL_TAG, tools=d["tools"], tool_choice=d["tool_choice"],
+                                                         reasoning="disabled", max_whitespace_cnt=BLANKS,
+                                                         parallel_tool_calls=bool(d["parallel_tool_calls"]))
+                tools = self.tools_compiler()
+                with self.lock:
+                    return tools.compile_structural_tag(tag)
             with self.lock:
                 if spec.kind in ("json", "json_schema"):
                     schema = OBJECT if spec.kind == "json" else spec.text
@@ -144,7 +250,9 @@ class Grammars:
                     options = " | ".join(json.dumps(v, ensure_ascii=False) for v in json.loads(spec.text))
                     return c.compile_grammar("root ::= " + options)
                 return c.compile_grammar(spec.text)
-        except (RuntimeError, ValueError, TypeError) as exc:
+        except RequestError:
+            raise
+        except (RuntimeError, ValueError, TypeError, KeyError) as exc:
             raise RequestError(f"{spec.field}: the grammar cannot be enforced: {_message(exc)}") from None
 
     def constraint(self, compiled, *, think_end: int | None = None, spec: Spec | None = None) -> "Constraint":
@@ -397,5 +505,6 @@ def _mask_mlx(logits, window: Window, offset: int = 0):
     return rows.reshape(shape)
 
 
-__all__ = ["Constraint", "EXTRA", "FIELDS", "GrammarError", "Grammars", "KINDS", "Spec", "Window", "compiler",
-           "for_model", "pack", "refusal", "request_constraint", "request_spec", "vocab_size"]
+__all__ = ["Constraint", "EXTRA", "FIELDS", "GrammarError", "Grammars", "KINDS", "Spec", "TOOL_TAG", "Window",
+           "compiler", "for_model", "pack", "refusal", "request_constraint", "request_spec", "tool_grammar_mode",
+           "tool_spec", "vocab_size"]
