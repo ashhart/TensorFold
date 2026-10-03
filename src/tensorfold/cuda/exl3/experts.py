@@ -10,6 +10,8 @@ from typing import Sequence
 
 import torch
 
+from . import x3ld
+
 CB_3INST, CB_MCG, CB_MUL1 = 0, 1, 2
 ACT_BF16, ACT_F32 = 0, 1          # SwiGLU with the GLM family's bf16 roundings / in fp32
 # Half-bits a value: 1..8 bits (2, 4, .. 16) and every half-integer rate 1.5..7.5 (3, 5, .. 15).
@@ -75,6 +77,15 @@ class Exl3RoutedExperts:
     k2_d: tuple[int, int]
     trellis_bytes: torch.Tensor   # int64 [E], gate + up + down trellis bytes of each expert (for GB/s)
     keep: list = field(default_factory=list, repr=False)
+
+    def rebind(self) -> None:
+        """The trellis pointer tables from ``keep`` (gate e0..E-1, then up, then down: ``prepare``'s order), after
+        the trellises moved (a prepared folder read back): the same table ``prepare`` builds."""
+
+        E, dev = self.count, self.gate_ptr.device
+        for name, part in (("gate_ptr", self.keep[:E]), ("up_ptr", self.keep[E:2 * E]),
+                           ("down_ptr", self.keep[2 * E:3 * E])):
+            setattr(self, name, torch.tensor([t.data_ptr() for t in part], dtype=torch.int64, device=dev))
 
     def nbytes_read(self, ids: Sequence[int]) -> int:
         return int(self.trellis_bytes[list(ids)].sum())
@@ -186,12 +197,16 @@ def routed(x: torch.Tensor, pick: torch.Tensor, wts: torch.Tensor | None, ex: Ex
         ext.group(pick, ids, s.count, members, R, slots, E)
     ext.rot_in(x, x.stride(0), pick, ex.suh_g, ex.suh_u, s.xg, s.xu, R, D, slots, E)
     nt, w, sk, pf = s.cfg_gu
-    ext.grouped(s.xg, s.xu, ex.gate_ptr, ex.up_ptr, ex.gate_k2, ex.up_k2, ids, s.count, members, s.z, 2, D, I,
-                P, sk, slots, ex.cb, nt, w, pf, ex.k2_gu[0], ex.k2_gu[1])
+    if not x3ld.grouped(s.xg, s.xu, ex.gate_ptr, ex.up_ptr, ex.gate_k2, ex.up_k2, ids, s.count, members, s.z, 2, D,
+                        I, P, sk, slots, ex.cb, w, ex.k2_gu[0], ex.k2_gu[1]):     # (TF_EXPERT_LOADS: the same Z)
+        ext.grouped(s.xg, s.xu, ex.gate_ptr, ex.up_ptr, ex.gate_k2, ex.up_k2, ids, s.count, members, s.z, 2, D, I,
+                    P, sk, slots, ex.cb, nt, w, pf, ex.k2_gu[0], ex.k2_gu[1])
     ext.gateup_epilogue(s.z, pick, ex.svh_g, ex.svh_u, ex.suh_d, s.xd, R, P, I, sk, slots, E, float(limit), act_mode)
     nt, w, sk, pf = s.cfg_d
-    ext.grouped(s.xd, s.xd, ex.down_ptr, ex.down_ptr, ex.down_k2, ex.down_k2, ids, s.count, members, s.z, 1, I,
-                D, P, sk, slots, ex.cb, nt, w, pf, ex.k2_d[0], ex.k2_d[1])
+    if not x3ld.grouped(s.xd, s.xd, ex.down_ptr, ex.down_ptr, ex.down_k2, ex.down_k2, ids, s.count, members, s.z, 1,
+                        I, D, P, sk, slots, ex.cb, w, ex.k2_d[0], ex.k2_d[1]):
+        ext.grouped(s.xd, s.xd, ex.down_ptr, ex.down_ptr, ex.down_k2, ex.down_k2, ids, s.count, members, s.z, 1, I,
+                    D, P, sk, slots, ex.cb, nt, w, pf, ex.k2_d[0], ex.k2_d[1])
     if wts is None:
         ext.down_epilogue(s.z, pick, ex.svh_d, s.y, R, P, D, sk, slots, E)
         return s.y[:P]
