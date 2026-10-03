@@ -95,8 +95,14 @@ class PromptFill:
                     self.disk_blocks.touch(job.prompt_ids[:cached])
             filling.left = len(job.prompt_ids) - cached
             chosen = choose_checkpoints(job.history_len, cached, last_prompt, job.prompt_ids)
-            checkpoints_at = sorted(at for at in {*(starts.floor(n) for n in chosen), *shared_at}
-                                    if cached < at < len(job.prompt_ids))
+            kept_at = {starts.floor(n) for n in chosen}
+            tail = getattr(self, "tail_checkpoint_tokens", 0)
+            if tail and job.history_len >= tail:
+                # the chunk start before the history boundary's: a next turn that edits the end of the last message
+                # (an appended line, a re-rendered user message) resumes a chunk back instead of from the start
+                boundary = starts.floor(job.history_len)
+                kept_at.add(starts.floor(boundary - 1))
+            checkpoints_at = sorted(at for at in {*kept_at, *shared_at} if cached < at < len(job.prompt_ids))
         proposer = job.proposer
         if proposer is None and job.drafts and self.proposer_factory is not None:
             proposer = self.proposer_factory()

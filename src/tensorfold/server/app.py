@@ -94,6 +94,7 @@ class ChatApp(RequestOptions, PromptBlocks, DecisionRequests):
         memory_overhead_bytes: int | None = None,
         fit_context: bool = False,
         decode_share: float = 0.25,
+        tail_checkpoint_tokens: int = 8192,
         grow_checkpoints: bool = False,
         vision_max_images: int | None = None,
     ) -> None:
@@ -181,6 +182,7 @@ class ChatApp(RequestOptions, PromptBlocks, DecisionRequests):
             model_id=model_id,
             prompt_memory=self.prompt_memory,
             decode_share=decode_share,
+            tail_checkpoint_tokens=tail_checkpoint_tokens,
         )
         # evicted conversations go to disk (``spill_bytes`` of this model's files at most) and come back on demand
         self.spill_bytes = int(spill_bytes) if self.checkpoints is not None and self.scheduler.session_dir else 0

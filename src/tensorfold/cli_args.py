@@ -92,6 +92,11 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
                             "with long conversations this, not --prompt-cache-gib, is usually the limit. Qwen3.8-27B "
                             "on CUDA with --parallel 2 or more: the prompt states its concurrent decoder keeps "
                             "(default 3; one GPU keeps them while memory lasts, two ranks reserve a window each)")
+    speed.add_argument("--tail-checkpoint-tokens", type=int, default=8192,
+                       help="Mac: a conversation history this long also keeps the prompt chunk start before its end, "
+                            "so a next turn that edits the end of the last message resumes one chunk back instead "
+                            "of prefilling the whole prompt again; costs one more cached prefix per such turn "
+                            "(0: off)")
     speed.add_argument("--spill-gib", type=float, default=0.0,
                        help="write evicted conversation prefixes to disk, up to this many GiB, and read them back on "
                             "demand instead of prefilling again (0: off; needs --snapshot-dir)")

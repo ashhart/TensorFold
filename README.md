@@ -134,6 +134,7 @@ between MLX and CUDA, different quantizations, or different tensor-parallel rank
 | `--pass-cache-gib N` | Freed-buffer cache during such a pass where the memory budget has room, default 16 GiB | MLX |
 | `--checkpoint-slots N` | Retained conversation prefixes (default 3 per lane, at least 8); long conversations hit this before the byte budget. On CUDA, the prompt states Qwen3.8-27B keeps under `--parallel` 2 or more (default 3) | Both |
 | `--spill-gib N` | Write evicted conversation prefixes to disk (up to N GiB) and read them back instead of prefilling again; zero disables | MLX |
+| `--tail-checkpoint-tokens N` | A conversation history of N or more tokens (default 8192) also keeps the prompt chunk start before its end, so a next turn that edits the end of the last message resumes one chunk back instead of prefilling the whole prompt; one more cached prefix per such turn; zero disables | MLX |
 | `--mlx-cache-gib N` | Reusable freed-buffer cache, default 8 GiB | MLX |
 | `--snapshot-dir DIR` | Persistent prefix snapshots; `none` disables them | MLX |
 | `--max-snapshots N` | System-block snapshots loaded at start, default 3 | MLX |

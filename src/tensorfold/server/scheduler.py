@@ -108,11 +108,16 @@ class Scheduler(PromptFill):
         admission: Any = None,
         prompt_memory: Any = None,
         decode_share: float = 0.25,
+        tail_checkpoint_tokens: int = 8192,
     ) -> None:
         if lanes < 1:
             raise ValueError("lanes must be positive")
         if decode_share < 0:
             raise ValueError("decode_share must be 0 or more")
+        if tail_checkpoint_tokens < 0:
+            raise ValueError("tail_checkpoint_tokens must be 0 or more")
+        # a history this long also keeps the chunk start before its boundary (0: off; ``PromptFill._start_fill``)
+        self.tail_checkpoint_tokens = int(tail_checkpoint_tokens)
         # ``engine.memory.Admission``: a job starts beside live streams only while the projected memory fits
         self.admission = admission
         self.snapshot_dir = snapshot_dir
