@@ -7,9 +7,10 @@ write another copy of the weights to disk.
 
 The first adapter supports single-device CUDA dense Qwen (`qwen3_5`), including its
 existing serial and concurrent engines. It is opt-in. Level 1 (GPU to CPU), other
-families, Metal and tensor parallelism are not implemented. Full-model and DGX Spark
-qualification is pending; [local evidence](research/model-sleep-validation.md) uses a
-small synthetic checkpoint.
+families, Metal and tensor parallelism are not implemented. Qualification includes
+[synthetic runtime checks](research/model-sleep-validation.md) and
+[full-checkpoint NVFP4 checks](research/model-sleep-cuda-validation.md) with a drafter
+and unified-memory reclamation. Other checkpoint formats still need hardware qualification.
 
 ## Start and control
 
@@ -93,6 +94,13 @@ hashes and timing in JSON. Synthetic mode exercises a random two-layer affine mo
 `--synthetic-draft` uses 64 layers of width 2048 and a matching random DFlash2 model.
 Neither establishes pretrained-model quality or Spark behavior.
 CUDA allocator counters exclude the driver context and some library allocations.
+
+With a sleep-enabled server running and its bearer secret in the client's environment,
+exercise HTTP stream draining and stored conversation continuation with:
+
+```bash
+python tools/qualify_sleep_http.py http://127.0.0.1:8080 MODEL --output sleep-http.json
+```
 
 For release qualification also run the HTTP exactness, cold-prefill and decode
 benchmarks from [Contributing](../CONTRIBUTING.md#the-receipt) against the last release

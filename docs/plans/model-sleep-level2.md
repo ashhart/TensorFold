@@ -6,11 +6,10 @@ metrics and Responses store alive while releasing and reconstructing the runtime
 The first adapter is single-device CUDA dense Qwen (`qwen3_5`), with existing serial,
 drafted and concurrent paths. Other families, MLX, Level 1, TP and strict conversation
 cache preservation remain subsequent adapters/milestones; refuse unsupported opt-ins.
-Do not run Spark workloads until the user confirms their current tests have finished.
 
 Local implementation and focused verification are complete. See the
 [validation receipt](../research/model-sleep-validation.md) for actual CUDA results,
-host-suite limitations and the pending pretrained-model/Spark checks, and the
+host-suite limitations and links to full-checkpoint qualification, and the
 [usage guide](../model-sleep.md) for the prototype API.
 
 ## Lifecycle and HTTP contract

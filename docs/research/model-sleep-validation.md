@@ -65,7 +65,7 @@ passed after implementing those behaviors. The integration review checked CLI
 runtime owners, app vision ownership, scheduler joining, callback exception frames,
 global device caches and GET telemetry references.
 
-The parent's combined integration run passed **290 tests, four skipped**:
+The combined integration run passed **290 tests, four skipped**:
 
 ```bash
 python -m pytest -q -p no:cacheprovider tests/test_model_lifecycle.py tests/test_cuda_sleep.py \
@@ -89,21 +89,25 @@ the absent Metal backend were rerun from an isolated, unmodified `9356df5` check
 all ten reproduce there (seven other tests passed in that baseline run). The broad
 suite is not claimed green or complete; the focused affected suites above are green.
 
-The HTTP worker's broader regression run passed 265 tests with one existing Linux
+The broader HTTP regression run passed 265 tests with one existing Linux
 failure: the health-memory test expects a macOS process-footprint field. Loading the
-baseline HTTP implementation reproduces that failure. The adapter worker's broader
+baseline HTTP implementation reproduces that failure. The broader adapter regression
 run passed 167 tests with 16 dependency skips; its final CLI compatibility correction
 passed 68 tests with four skips. These runs overlap and should not be summed.
 
-## Still required
+## Full-checkpoint follow-up
 
-- DGX Spark unified-memory release and reload measurements using a real dense Qwen
-  checkpoint and DFlash2, for both single-stream and concurrent serving.
-- HTTP token hashes and cold-prefill/decode comparisons against unmodified 0.6.3 on
-  the same hardware, including longer contexts and checkpoint read/hash latency.
-- NVFP4, EXL3 and image-input hardware qualification. Their reload settings and host
-cleanup paths are covered; their full runtime reclamation is not established here.
+The subsequent [full-checkpoint validation](model-sleep-cuda-validation.md) covers
+NVFP4 plus DFlash2, single-stream and concurrent sleep/wake, and unified-memory
+reclamation, plus HTTP stream draining and stored conversation continuation. The
+results above remain the original synthetic and host-test evidence.
+
+## Additional qualification
+
+- Detailed cold-prefill/decode comparison receipts against unmodified 0.6.3,
+  including longer contexts and cold-storage reload latency.
+- EXL3, full-size affine checkpoints and image-input hardware qualification. Their
+  reload settings and host cleanup paths are covered; their full runtime reclamation
+  is not established here.
 - Metal, other families, Level 1, tensor parallelism and cache snapshots belong to
   later milestones; this adapter refuses unsupported opt-ins.
-
-No Spark connection or workload was started during this local qualification.

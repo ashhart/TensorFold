@@ -343,6 +343,6 @@ host checks also passed:
 204 passed, 2 subtests passed in 27.98s
 ```
 
-These validate existing checkpoint behavior, not offloading. The local environment is
-Linux with MLX available and no PyTorch installation. No CUDA/Metal model sleep/wake,
-memory-release or latency qualification was performed.
+These research-stage checks validate existing checkpoint behavior, not offloading.
+Subsequent implementation and hardware evidence are recorded in the
+[prototype validation](model-sleep-validation.md).

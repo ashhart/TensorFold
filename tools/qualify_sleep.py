@@ -43,6 +43,13 @@ def qualify(args, model_dir):
         if status.exists():
             result["rss_bytes"] = next(int(line.split()[1]) * 1024 for line in status.read_text().splitlines()
                                        if line.startswith("VmRSS:"))
+        meminfo = Path("/proc/meminfo")
+        if meminfo.exists():
+            fields = dict(line.split(":", 1) for line in meminfo.read_text().splitlines())
+            for key in ("MemAvailable", "MemFree", "Cached", "AnonPages"):
+                result[key + "_bytes"] = int(fields[key].split()[0]) * 1024
+        free, total = torch.cuda.mem_get_info()
+        result.update(cuda_free_bytes=free, cuda_total_bytes=total)
         return result
 
     def generate(draft, offset=0):
