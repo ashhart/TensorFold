@@ -3,6 +3,11 @@
 `tensorfold update` prints the sections below that are newer than the version you had. Each release's page on
 GitHub has the full notes and the measurements behind them.
 
+## Unreleased
+
+- **CUDA tree attention:** folding partials improves long-context verification at the same precision (#268).
+  Its fp32 summation order can change the last bits of logits and long-context replies compared with 0.6.3.
+
 ## 0.6.3 (2 Oct 2026)
 
 - **Nemotron on M5 Macs: copied text verifies up to 64 tokens a round.** A lone stream's copy window grows from 16 to
