@@ -131,3 +131,9 @@ Parts of the DeepSeek-V4.1 serving path are adapted from Jay Leaton's
   `patches/0001-spark-stack-060.patch`; MIT License, Copyright (c) 2026 TensorFold contributors and Copyright (c) 2026
   Jay Leaton, glm53-tensorfold-spark) and the tool compile of its `engine/serving/structured.py` (MIT License,
   Copyright (c) 2026 Jay Leaton).
+- `deploy/dsv41-tp2/watchdog.sh` and `deploy/dsv41-tp2/systemd/` adapt the watchdog of its `scripts/serve.sh` and
+  `scripts/systemd/`, and `tools/serving/` adapts its `bench/soak.py`, `bench/stress.py` and `bench/structured.py`:
+  Apache License 2.0, Copyright 2026 Jay Leaton (https://x.com/jayleaton); its NOTICE line is in our `NOTICE`, and
+  each file states what was changed. See [the license text](LICENSES/Apache-2.0.txt).
+- The fatal / forward-progress fields of `/health` (`src/tensorfold/cuda/health.py`) follow the idea of its GLM Spark
+  engine's `health.py`; no code is copied.
