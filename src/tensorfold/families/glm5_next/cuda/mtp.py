@@ -27,13 +27,16 @@ def mtp_stage(w: Weights, st: State, b: Buffers, next_tokens: Sequence[int], hid
 
 
 def mtp_compute(w: Weights, st: State, b: Buffers, n: int, *, last_only: bool = True,
-                nch: int | None = None, host_pos: int | None = None, sparse_np: int | None = None) -> torch.Tensor:
+                nch: int | None = None, host_pos: int | None = None, sparse_np: int | None = None,
+                images=None) -> torch.Tensor:
     """The MTP head's GPU work on staged rows (capturable)."""
 
     c = w.cfg
     m = w.mtp
     D = c.hidden
     glue.embed(b.ids[:n], w.embed, D, 1, b.me[:n])
+    if images is not None:              # the next tokens of an image prompt: features, as the main model read them
+        images(b.me[:n], 1)
     if b.zero_first:
         b.me[0].zero_()
     glue.rmsnorm(b.me[:n], m.enorm, c.eps, b.mcat[:n, :D])
@@ -56,10 +59,11 @@ def mtp_compute(w: Weights, st: State, b: Buffers, n: int, *, last_only: bool = 
 
 @torch.no_grad()
 def mtp_forward(w: Weights, st: State, b: Buffers, next_tokens: Sequence[int], hidden: torch.Tensor,
-                *, last_only: bool = True) -> torch.Tensor:
+                *, last_only: bool = True, images=None) -> torch.Tensor:
     """Write hidden/token rows into cache slots mtp_len onward and expose logits and b.mx; the caller advances st.mtp_len."""
 
     n = mtp_stage(w, st, b, next_tokens, hidden)
     from .attention import CHUNK
 
-    return mtp_compute(w, st, b, n, last_only=last_only, nch=-(-(st.mtp_len + n) // CHUNK), host_pos=st.mtp_len)
+    return mtp_compute(w, st, b, n, last_only=last_only, nch=-(-(st.mtp_len + n) // CHUNK), host_pos=st.mtp_len,
+                       images=images)

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from types import SimpleNamespace
 import json
 from pathlib import Path
 from typing import Any, Sequence
@@ -55,13 +56,13 @@ class GLMImageProcessor:
             raise ValueError("Image preprocessing requires a complete GLM-5.3-Flash vision checkpoint")
         try:
             from mlx_vlm.models.glm5_next.processing import Glm5NextProcessor
-        except ImportError as error:
-            raise ValueError("GLM image input requires the optional MLX-VLM vision dependencies") from error
+        except ImportError:
+            return cls(config, _transformers_processor(path))       # CUDA: no MLX, the same image geometry
         processor = Glm5NextProcessor.from_pretrained(str(path), local_files_only=True, trust_remote_code=False)
         return cls(config, processor)
 
     def prepare(self, rendered_prompt: str, images: Sequence[Any], *, max_visual_tokens: int = 4096,
-                max_prompt_tokens: int | None = None) -> PreparedGLMVisionPrompt:
+                max_prompt_tokens: int | None = None, max_image_tokens: int | None = None) -> PreparedGLMVisionPrompt:
         if not images or max_visual_tokens < 1:
             raise ValueError("GLM image preprocessing needs images and a positive visual-token budget")
         if rendered_prompt.count(self.image_marker) != len(images):
@@ -71,6 +72,8 @@ class GLMImageProcessor:
 
         all_pixels, grids, counts = [], [], []
         budget = max_visual_tokens // len(images)
+        if max_image_tokens:                 # each image at most this many, however few share the budget
+            budget = min(budget, max_image_tokens)
         for image in images:
             cap = min(budget, 256) if getattr(image, "detail", "auto") == "low" else budget
             processed = self.processor.image_processor([image.to_pil()], return_tensors="np",
@@ -125,6 +128,16 @@ class GLMImageProcessor:
         return PreparedGLMVisionPrompt(token_ids, pixels, grid, tuple(spans),
                                        tuple(image.content_hash for image in images))
 
+    def continued(self, prepared: PreparedGLMVisionPrompt, tokens: Sequence[int]) -> PreparedGLMVisionPrompt:
+        """The same images for a prompt that goes on past ``prepared``'s tokens (text only): GLM has no positions."""
+
+        tokens = tuple(int(t) for t in tokens)
+        if tokens[:len(prepared.token_ids)] != prepared.token_ids:
+            raise ValueError("a continued image prompt must start with the prepared prompt's tokens")
+        if tokens.count(self.image_token_id) != prepared.visual_tokens:
+            raise ValueError("a continued image prompt may add text only")
+        return replace(prepared, token_ids=tokens)
+
     def estimate_workspace_bytes(self, prepared: PreparedGLMVisionPrompt) -> int:
         vision = self.config["vision_config"]
         patches = int(prepared.pixel_values.shape[0])
@@ -133,3 +146,23 @@ class GLMImageProcessor:
         activation = measured or patches * (12 * hidden + 4 * intermediate) * 4 * int(vision["depth"])
         embeddings = len(prepared.token_ids) * int(vision["out_hidden_size"]) * 8
         return int(2 * prepared.pixel_values.nbytes + activation + embeddings)
+
+
+def _transformers_processor(path: Path) -> Any:
+    """The checkpoint's tokenizer and transformers' PIL image processor: the torch-free backend MLX-VLM matches."""
+
+    try:
+        from transformers import AutoTokenizer
+        from transformers.models.glm5_next.image_processing_pil_glm5_next import Glm5NextImageProcessorPil
+    except ImportError as error:
+        raise ValueError("GLM image input off MLX needs transformers 5.17 or newer and Pillow: "
+                         "pip install 'tensorfold[vision]'") from error
+    settings: dict = {}
+    for name in ("preprocessor_config.json", "processor_config.json"):
+        if (path / name).exists():
+            value = json.loads((path / name).read_text())
+            settings.update(value.get("image_processor", {}) if name == "processor_config.json" else value)
+    settings = {k: v for k, v in settings.items() if k not in ("image_processor_type", "processor_class")}
+    tokenizer = AutoTokenizer.from_pretrained(str(path), local_files_only=True, trust_remote_code=False)
+    return SimpleNamespace(tokenizer=tokenizer, image_processor=Glm5NextImageProcessorPil(**settings),
+                           image_token=getattr(tokenizer, "image_token", None) or GLMImageProcessor.image_marker)
