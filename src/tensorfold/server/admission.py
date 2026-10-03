@@ -2,7 +2,69 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
+
+
+def _envelope_enabled() -> bool:
+    return os.environ.get("TF_ADMISSION_ENVELOPE") == "1"
+
+
+class EnvelopeStreamMemory:
+    """The measured StreamMemory with the prefill workspace priced by a monotonic
+    envelope over observed peaks instead of the two-point linear fit.
+
+    Everything but ``prefill_bytes`` is the base memory verbatim (attribute
+    delegation): stream cache growth, per-token growth and the shared-round
+    working set are measured models with honest receipts and stay untouched.
+    Within the envelope's observed range, workspace prices at margin * hull(L).
+    Beyond it, a family that declared its regime switch extends the last hull
+    segment; an undeclared family keeps the shipped fit — extension from
+    possibly wrong-regime seeds under-prices silently (mission P1, Q3/D8).
+    """
+
+    def __init__(self, base: Any, envelope: Any, extend_beyond: bool) -> None:
+        self._base = base
+        self._envelope = envelope
+        self._extend = extend_beyond
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._base, name)
+
+    def prefill_bytes(self, tokens: int) -> int:
+        L = int(tokens)
+        hull = self._envelope.snapshot()
+        if hull and (L <= hull[-1][0] or self._extend):
+            return int(self._envelope.price(L))
+        return int(self._base.prefill_bytes(L))
+
+
+def _build_envelope_stream(engine: Any, base: Any, seeds: list) -> Any:
+    """Wrap the measured StreamMemory with the admission envelope (flag ON only)."""
+
+    from tensorfold.engine.envelope import PrefillEnvelope
+
+    model = getattr(engine, "model", None)
+    # the DECLARATION is the #245 attribute (family asserts its prefill steps there),
+    # not the mere existence of index_topk: every sparse model carries the config
+    # field; only a family that measured its switch may extend past the last point
+    switch = getattr(model, "prefill_regime_switch", None)
+    if switch is None and getattr(model, "declares_prefill_regime_switch", False):
+        switch = getattr(getattr(model, "args", None), "index_topk", None)
+    switch_val: int | None = None
+    if isinstance(switch, int) and switch > 0:
+        switch_val = switch
+    elif isinstance(switch, str) and switch.startswith("args."):
+        switch_val = getattr(getattr(model, "args", None), switch[5:], None)
+        switch_val = int(switch_val) if isinstance(switch_val, int) and switch_val > 0 else None
+    envelope = PrefillEnvelope([(float(n), float(t)) for n, t in seeds],
+                               switch=switch_val)
+    seeds_out = ", ".join(f"{n:,}" for n, _ in sorted(seeds))
+    print(f"[tensorfold] admission envelope: seed points at {seeds_out} tokens "
+          f"(raw prefill peaks), margin x{envelope.margin():.2f}, "
+          f"beyond-range pricing: {'hull extension (declared switch)' if switch else 'shipped fit'}",
+          flush=True)
+    return EnvelopeStreamMemory(base, envelope, extend_beyond=bool(switch))
 
 
 def concurrency(engine: Any, prompt_memory: Any, fraction: float, lanes: int, reply_tokens: int) -> Any:
@@ -10,7 +72,13 @@ def concurrency(engine: Any, prompt_memory: Any, fraction: float, lanes: int, re
 
     from tensorfold.engine import memory
 
-    stream = memory.measure(engine)
+    if _envelope_enabled():
+        envelope_seeds: list | None = []
+        stream = memory.measure(engine, envelope_seeds=envelope_seeds)
+        if envelope_seeds:
+            stream = _build_envelope_stream(engine, stream, envelope_seeds)
+    else:
+        stream = memory.measure(engine)          # the shipped call, unchanged
     getattr(engine, "release_rounds", lambda: None)()     # the probe round's rollback rows: no stream's
     used = memory._mlx_used()
     ram = memory.ram_bytes()

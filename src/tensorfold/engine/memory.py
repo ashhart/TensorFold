@@ -123,7 +123,8 @@ def _kv_bytes(cache: list[Any]) -> tuple[float, float]:
     return kv, spare
 
 
-def measure(engine: Any, probe: tuple[int, int, int] | None = None) -> StreamMemory:
+def measure(engine: Any, probe: tuple[int, int, int] | None = None,
+            envelope_seeds: list | None = None) -> StreamMemory:
     """Probe cache growth beyond bounded draft context and peak prefill memory on the engine's chunks, then account for the shared-round working set."""
 
     import mlx.core as mx
@@ -155,6 +156,10 @@ def measure(engine: Any, probe: tuple[int, int, int] | None = None) -> StreamMem
     # Fit t = a c + b c L for c-row chunks at context length L; both probes finish with full chunks.
     b = max(0.0, (t3 - t2) / (chunk * (n3 - n2)))
     a = max(0.0, t2 / chunk - b * (n2 - 64))
+    if envelope_seeds is not None:
+        # RAW probe peaks (t1 included, unadjusted): the envelope's seed points.
+        # StreamMemory.short/long are spare-adjusted cache bytes and must never seed it.
+        envelope_seeds.extend((int(n), int(t)) for n, t in zip(probe, peaks))
     del held
     mx.clear_cache()
     round_bytes = int(getattr(engine, "round_working_set", lambda: 0)())
