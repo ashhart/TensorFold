@@ -44,6 +44,30 @@ def test_matmul_rows_invariant_and_close():
 
 
 @cuda
+@pytest.mark.parametrize("n,k", [(12576, 4096), (4096, 4096), (2048, 4096), (4096, 1024), (8192, 1536), (160, 4096)])
+def test_bf16_prompt_matmul_keeps_the_split_k_bits(n, k):
+    """Prompt-sized BF16 matmuls sum their K slices in registers (``_bmm_rows``): the bits of the slices written to
+    memory and reduced (``_bmm`` + ``_reduce``), for every slice count, row count and output dtype, signed zeros too."""
+    from tensorfold.families.glm5_next.cuda import qmm
+
+    gen = torch.Generator().manual_seed(n + k)
+    x = torch.randn((300, k), generator=gen)
+    x[torch.rand((300, k), generator=gen) < 0.3] = 0.0
+    x[torch.rand((300, k), generator=gen) < 0.05] = -0.0
+    x[:10] = -0.0                                                   # rows that sum signed zeros only
+    x = x.to(torch.bfloat16).cuda()
+    w = torch.randn((n, k), generator=gen) * 0.02
+    w[torch.rand((n, k), generator=gen) < 0.2] = -0.0
+    q = qmm.make_b16(w.cuda())
+    for m in (qmm.B16_ROWS_FROM, 129, 300):
+        for f32 in (True, False):
+            rows = qmm.matmul(x[:m], q, f32=f32)
+            split = torch.cat([qmm.matmul(x[r:min(m, r + 100)], q, f32=f32) for r in range(0, m, 100)])   # < 128 rows
+            assert torch.equal(rows.view(torch.int32 if f32 else torch.int16),
+                               split.view(torch.int32 if f32 else torch.int16)), (n, k, qmm.b16_split_k(n, k), m, f32)
+
+
+@cuda
 def test_moe_kernels_rows_invariant():
     from tensorfold.cuda import experts as grouped
     from tensorfold.families.glm5_next.cuda import glue

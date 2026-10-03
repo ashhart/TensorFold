@@ -8,6 +8,7 @@ import torch
 import triton
 import triton.language as tl
 
+from tensorfold.cuda.geometry import MLA_B16_ROWS_FROM
 from tensorfold.cuda.kernels import qmm as shared
 
 BN = 64                   # columns per stored tile
@@ -214,8 +215,60 @@ def _bmm(X, W, OUT, PART, M, x_stride, N: tl.constexpr, K: tl.constexpr, SK: tl.
         tl.store(PART + (pid_s * M + rm[:, None]) * N + rn[None, :], acc, mask=out_mask)
 
 
+@triton.jit
+def _bmm_slice(X, W, rm, rn, m_ok, n_ok, x_stride, K: tl.constexpr, START: tl.constexpr, PER: tl.constexpr,
+               BM: tl.constexpr, BLOCK_N: tl.constexpr, BK: tl.constexpr):
+    """One K slice's fp32 sum from zero: _bmm's loop, statement for statement."""
+
+    rk = tl.arange(0, BK)
+    acc = tl.zeros((BM, BLOCK_N), dtype=tl.float32)
+    for k0 in range(START, START + PER, BK):
+        x = tl.load(X + rm[:, None] * x_stride + (k0 + rk)[None, :], mask=m_ok[:, None], other=0.0)
+        w = tl.load(W + rn[:, None].to(tl.int64) * K + (k0 + rk)[None, :], mask=n_ok[:, None], other=0.0)
+        acc = acc + tl.dot(x, tl.trans(w))
+    return acc
+
+
+@triton.jit
+def _bmm_rows(X, W, OUT, M, x_stride, N: tl.constexpr, K: tl.constexpr, SK: tl.constexpr, BM: tl.constexpr,
+              BLOCK_N: tl.constexpr, BK: tl.constexpr, F32: tl.constexpr, GROUP: tl.constexpr):
+    """_bmm and _reduce in one program: the SK slices one after another, each from zero, added in slice order in
+    registers ((p0 + p1) + p2 ..., the first assigned, not added to zero), so _bmm + _reduce's bits without the fp32
+    partials' trip through memory. Programs walk GROUP row blocks per column tile (L2 reuse; tiles, not sums)."""
+
+    PER: tl.constexpr = K // SK
+    pid = tl.program_id(0)
+    blocks_m = tl.cdiv(M, BM)
+    per_group = GROUP * tl.cdiv(N, BLOCK_N)
+    first_m = (pid // per_group) * GROUP
+    size_m = tl.minimum(blocks_m - first_m, GROUP)
+    rm = (first_m + (pid % per_group) % size_m) * BM + tl.arange(0, BM)
+    rn = ((pid % per_group) // size_m) * BLOCK_N + tl.arange(0, BLOCK_N)
+    m_ok = rm < M
+    n_ok = rn < N
+    total = _bmm_slice(X, W, rm, rn, m_ok, n_ok, x_stride, K, 0, PER, BM, BLOCK_N, BK)
+    for s in tl.static_range(1, SK):
+        total = total + _bmm_slice(X, W, rm, rn, m_ok, n_ok, x_stride, K, s * PER, PER, BM, BLOCK_N, BK)
+    out_mask = m_ok[:, None] & n_ok[None, :]
+    if F32:
+        tl.store(OUT + rm[:, None] * N + rn[None, :], total, mask=out_mask)
+    else:
+        tl.store(OUT + rm[:, None] * N + rn[None, :], total.to(tl.bfloat16), mask=out_mask)
+
+
 # (warps, stages) for the BF16 matmul by row bucket: no choice changes bits
 B16_CONFIG = {16: (4, 3), 32: (4, 3), 64: (4, 2), 128: (8, 2)}
+# windows of this many rows or more (prompt chunks) take _bmm_rows: no partials, the same bits
+B16_ROWS_FROM = MLA_B16_ROWS_FROM
+# rows, columns, warps, stages, row-block group of a _bmm_rows program: speed only (every one gives the same bits);
+# the fastest of 18 on GB10 for 2,048 rows of GLM-5.3-Flash's per-rank shapes, else the default
+B16_ROWS_CONFIG = (128, 64, 8, 4, 8)
+B16_ROWS_SHAPES: dict[str, tuple[int, int, int, int, int]] = {
+    "12576x4096": (128, 128, 4, 2, 8),       # KDA in-projections
+    "2048x4096": (64, 128, 8, 4, 1),         # the shared expert's gate/up, DSA's q_a / kv_a projection
+    "4096x1024": (64, 64, 4, 3, 1),          # the shared expert's down
+    "8192x1536": (128, 64, 4, 3, 8),         # DSA's q_b
+}
 
 
 def matmul(x: torch.Tensor, q: Q4 | B16, xs: torch.Tensor | None = None, *, out: torch.Tensor | None = None,
@@ -254,6 +307,12 @@ def _matmul_b16(x: torch.Tensor, q: B16, *, out: torch.Tensor | None, f32: bool,
         out = torch.empty((m, q.n), dtype=torch.float32 if f32 else torch.bfloat16, device=x.device)
     elif out.shape != (m, q.n) or not out.is_contiguous():
         raise ValueError(f"matmul: out {tuple(out.shape)} must be a contiguous ({m}, {q.n})")
+    if m >= B16_ROWS_FROM:
+        bm, bn, warps, stages, group = B16_ROWS_SHAPES.get(f"{q.n}x{k}", B16_ROWS_CONFIG)
+        _bmm_rows[(triton.cdiv(m, bm) * triton.cdiv(q.n, bn),)](x, q.weight, out, m, x.stride(0), N=q.n, K=k, SK=sk,
+                                                               BM=bm, BLOCK_N=bn, BK=B16_BK, F32=f32, GROUP=group,
+                                                               num_warps=warps, num_stages=stages)
+        return out
     if sk > 1:
         need = sk * m * q.n
         if part is None or part.numel() < need:

@@ -272,7 +272,8 @@ def test_mla_exl3_scratch_and_buffers_are_budgeted(monkeypatch, allocations, mtp
     if mtp:
         mod.Buffers(weights, 64, cap)
     pbuf = mod.Buffers(weights, geometry.PREFILL_ROWS, cap, prefill=True)
-    assert pbuf.sk.numel() == 8 * geometry.PREFILL_ROWS * 16384          # BF16 prompt projections' partials
+    # BF16 prompt projections' partials: windows under MLA_B16_ROWS_FROM rows only
+    assert pbuf.sk.numel() == 8 * (geometry.MLA_B16_ROWS_FROM - 1) * 16384
     mod.State(weights, cap, 64)
     estimated = geometry.mla_geometry(text, 2, 16, latent=True).bytes_at(cap)
     assert bytes_in(arrays) <= estimated - geometry.mla_chunk_scratch(text, 2, cap, latent=True)

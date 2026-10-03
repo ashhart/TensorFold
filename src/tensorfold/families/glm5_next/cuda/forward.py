@@ -114,7 +114,9 @@ class Buffers:
         # rank partials
         self.part = torch.empty((rows, D), dtype=f32, device=dev)
         self.gath = torch.empty((w.world * rows * D,), dtype=f32, device=dev)
-        self.sk = torch.empty((1 if prefill and not exl3 else 8 * rows * 16384,), dtype=f32, device=dev)
+        # BF16 split-K partials: a prompt buffer's windows of qmm.B16_ROWS_FROM rows or more keep none
+        sk_rows = min(rows, qmm.B16_ROWS_FROM - 1) if prefill else rows
+        self.sk = torch.empty((1 if prefill and not exl3 else 8 * sk_rows * 16384,), dtype=f32, device=dev)
         # final
         self.hidden = torch.empty((rows, D), dtype=bf, device=dev)
         self.fnormed = torch.empty((rows, D), dtype=bf, device=dev)
