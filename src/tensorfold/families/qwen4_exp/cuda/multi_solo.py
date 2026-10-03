@@ -78,6 +78,19 @@ class Alone:
             self.actions.append(["kept", self._index(target), self._index(spare)])
         return True
 
+    def _hand_over(self, st) -> bool:
+        """A fresh prompt takes the idle graph slot when its kept ends can move to a spare (``st`` at the latest)."""
+
+        slot = None if self.solo is None else self.solo.st
+        if (slot is None or st is slot or self.w.comm is not None or id(slot) in self._busy()
+                or not any(k[1] is slot for k in self.kept)):
+            return False
+        self.free.append(st)
+        if self._relocate_kept(slot, None):
+            return True
+        self.free = [f for f in self.free if f is not st]
+        return False
+
     def _move_to_solo(self, s) -> None:
         """Copy a lone stream into the graph slot after committing its pending rows and matching cache sizes."""
 
