@@ -177,16 +177,23 @@ class DFlash1(DFlash2):
         return [(kc, vc, min(self.window, snap[2] + n), snap[3] + n) for kc, vc, snap, n in zip(kcs, vcs, snaps, sizes)]
 
     def _layer_v1(self, i: int, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, ctx: list,
-                  length: int) -> torch.Tensor:
-        """One Qwen3 layer over several streams' blocks; each block attends its own context in this layer's window."""
+                  length: int, static=None) -> torch.Tensor:
+        """One Qwen3 layer over several streams' blocks in its window (``static``: fixed buffers, for a graph)."""
 
         w = self.weights
         base = f"layers.{i}."
         normed = F.rms_norm(x, (self.hidden,), w[base + "input_layernorm.weight"], self.eps)
         q, k, v = self._prep(self._lin(normed, base + "self_attn.qkv.weight"), i, cos, sin, self.heads)
-        out = block_attention(q, k, v, [snap[0][i] for snap in ctx], [snap[1][i] for snap in ctx], length,
-                              WIDE if self.windows[i] >= FULL_CONTEXT else self.windows[i], self.head_dim ** -0.5,
-                              self.causal[i])
+        window = WIDE if self.windows[i] >= FULL_CONTEXT else self.windows[i]
+        if static is not None:
+            from .draft_attention import block_attention_static
+
+            table, lens, capacity = static[i]
+            out = block_attention_static(q, k, v, table, lens, length, window, self.head_dim ** -0.5,
+                                         self.causal[i], capacity)
+        else:
+            out = block_attention(q, k, v, [snap[0][i] for snap in ctx], [snap[1][i] for snap in ctx], length,
+                                  window, self.head_dim ** -0.5, self.causal[i])
         x = (x.float() + self._row(out, base + "self_attn.o_proj.weight").float()).to(torch.bfloat16)
         normed = F.rms_norm(x, (self.hidden,), w[base + "post_attention_layernorm.weight"], self.eps)
         if base + "mlp.gate_proj.weight" in self.q4:

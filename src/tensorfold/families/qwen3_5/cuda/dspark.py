@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -28,8 +29,6 @@ class DSpark(DFlash1):
 
     def __init__(self, draft_dir: str | Path, target: Weights, bits: int | None = None, block: int | None = None,
                  fast: bool = True, rank: int = 0, world: int = 1):
-        import os
-
         bits = int(os.environ.get("TF_DFLASH_BITS", "4")) if bits is None else int(bits)
         if world != 1:
             raise ValueError("a DSpark drafter runs on one GPU")
@@ -76,8 +75,15 @@ class DSpark(DFlash1):
         self.target_embed = Plain(self.weights.pop("embed_tokens.weight").to(self.device, torch.bfloat16).contiguous())
         self.d2t = self.weights.pop("d2t").to(self.device, torch.int64)
         self.weights.pop("t2d", None)
-        for name in [n for n in self.weights if n.startswith("confidence_head.")]:
-            del self.weights[name]
+        # vLLM's DSparkConfidenceHead (fp32): a chain ends where the running product falls below TF_DSPARK_CONFIDENCE
+        self.conf_w = self.conf_b = None
+        if "confidence_head.proj.weight" in self.weights:
+            self.conf_w = self.weights.pop("confidence_head.proj.weight").to(self.device, torch.float32)
+            bias = self.weights.pop("confidence_head.proj.bias", None)
+            self.conf_b = bias.to(self.device, torch.float32) if bias is not None else None
+            self.conf_markov = bool(cfg.get("confidence_head_with_markov", True))
+        self.cut = float(os.environ.get("TF_DSPARK_CONFIDENCE", "0.15"))
+        self.graph = None
         self.markov_w1 = self.weights.pop("markov_head.markov_w1.weight").to(self.device, torch.bfloat16).contiguous()
         self.markov_w2 = self.weights.pop("markov_head.markov_w2.weight").to(self.device, torch.bfloat16).contiguous()
         self.heads_local, self.kv_local = self.heads, self.kv_heads
@@ -106,20 +112,113 @@ class DSpark(DFlash1):
         for layer in range(self.layers):
             x = self._layer_v1(layer, x, cos, sin, ctx, length)
         h = F.rms_norm(x, (self.hidden,), self.weights["norm.weight"], self.eps).contiguous()
-        base = self._lin(h, "lm_head.weight").float().view(len(live), length, -1)   # draft-vocabulary logits
         prev = torch.tensor([pendings[i] for i in live], dtype=torch.int64, device=self.device)
-        ids = torch.empty((len(live), length), dtype=torch.int64, device=self.device)
-        logp = torch.empty((len(live), length), dtype=torch.float32, device=self.device)
-        for i in range(length):              # the sequential stage: each position biased by the token before it
-            logits = base[:, i] + F.linear(self.markov_w1[prev], self.markov_w2).float()
-            pick = logits.argmax(dim=-1)
-            logp[:, i] = torch.log_softmax(logits, dim=-1).gather(1, pick[:, None])[:, 0]
-            prev = pick + self.d2t[pick]
-            ids[:, i] = prev
-        shared = [ids, logp, None]
+        ids, logp = self._chain(h, prev, len(live), length)
+        shared = [ids, logp, None]  # logp: -log p a position
         for j, i in enumerate(live):
             out[i] = (shared, j, length, int(pendings[i]))
         return out
+
+    def _chain(self, h: torch.Tensor, prev: torch.Tensor, streams: int, length: int):
+        """The Markov stage: each position's draft logits plus the previous token's bias, argmax, its -log p."""
+
+        base = self._lin(h, "lm_head.weight").float().view(streams, length, -1)     # draft-vocabulary logits
+        hs = h.view(streams, length, -1)
+        ids = torch.empty((streams, length), dtype=torch.int64, device=self.device)
+        nlp = torch.empty((streams, length), dtype=torch.float32, device=self.device)
+        for i in range(length):              # the sequential stage: each position biased by the token before it
+            embed = self.markov_w1[prev]
+            logits = base[:, i] + F.linear(embed, self.markov_w2).float()
+            pick = logits.argmax(dim=-1)
+            if self.conf_w is not None:
+                x = torch.cat([hs[:, i], embed], dim=-1) if self.conf_markov else hs[:, i]
+                z = F.linear(x.float(), self.conf_w, self.conf_b)[:, 0]
+                nlp[:, i] = F.softplus(-z)   # -log sigmoid(z)
+            else:
+                nlp[:, i] = -torch.log_softmax(logits, dim=-1).gather(1, pick[:, None])[:, 0]
+            prev = pick + self.d2t[pick]
+            ids[:, i] = prev
+        return ids, nlp
+
+    def _cut(self, nlp: np.ndarray, n: int) -> int:
+        """Positions kept while the running acceptance product stays at or above TF_DSPARK_CONFIDENCE."""
+
+        if self.conf_w is None or self.cut <= 0:
+            return n
+        total = np.cumsum(nlp[:n])
+        return max(1, int(np.sum(total <= -np.log(self.cut))))
+
+    @torch.no_grad()
+    def graph_chain(self, pending: int, max_nodes: int) -> list[int]:
+        """One stream's chain from a CUDA graph of the whole draft step, the contexts copied in before each replay."""
+
+        if self.context_len <= 0 or max_nodes < 1:
+            return []
+        length = self.block
+        if self.graph is None:
+            self._capture(length)
+        g = self.graph
+        for layer in range(self.layers):
+            kc, vc = self.kc[layer], self.vc[layer]
+            n = kc.shape[1]
+            g["k"][layer][:, :n].copy_(kc)
+            g["v"][layer][:, :n].copy_(vc)
+            g["host"][layer] = n
+        g["host"][self.layers] = self.context_end
+        g["host"][self.layers + 1] = pending
+        g["dev"].copy_(g["hostt"], non_blocking=True)
+        g["graph"].replay()
+        ids, nlp = g["ids"][0].cpu().numpy(), g["nlp"][0].cpu().numpy().astype(np.float64)
+        n = self._cut(nlp, min(length, max_nodes))
+        self.last_candidates = ids[:n, None]
+        return [int(t) for t in ids[:n]]
+
+    def _capture(self, length: int) -> None:
+        """Fixed buffers (a context a layer at its window, lengths, position, anchor) and the captured draft step."""
+
+        import gc
+
+        d, hk = self.head_dim, self.kv_heads
+        keys = [torch.zeros((hk, self.windows[i], d), dtype=torch.bfloat16, device=self.device)
+                for i in range(self.layers)]
+        vals = [torch.zeros_like(k) for k in keys]
+        hostt = torch.zeros(self.layers + 2, dtype=torch.int32).pin_memory()
+        dev = hostt.to(self.device)
+        lens = [dev[i:i + 1] for i in range(self.layers)]
+        tables = [torch.tensor([k.data_ptr(), v.data_ptr()], dtype=torch.int64, device=self.device)
+                  for k, v in zip(keys, vals)]
+        static = [(tables[i], lens[i], self.windows[i]) for i in range(self.layers)]
+        masks = torch.full((length,), self.mask_id, dtype=torch.int32, device=self.device)
+        steps = torch.arange(length, device=self.device, dtype=torch.float32)
+
+        def step():
+            tokens = torch.cat([dev[self.layers + 1:self.layers + 2], masks[1:]])
+            phase = (dev[self.layers].float() + steps)[:, None] * self.inv_freq[None, :]
+            cos, sin = phase.cos().contiguous(), phase.sin().contiguous()
+            x = embedding(tokens, self.target_embed)
+            for layer in range(self.layers):
+                x = self._layer_v1(layer, x, cos, sin, None, length, static=static)
+            h = F.rms_norm(x, (self.hidden,), self.weights["norm.weight"], self.eps).contiguous()
+            return self._chain(h, dev[self.layers + 1:self.layers + 2].to(torch.int64), 1, length)
+
+        for layer in range(self.layers):
+            hostt[layer] = 1
+        hostt[self.layers + 1] = self.mask_id
+        dev.copy_(hostt)
+        step()                               # compiles every kernel outside the capture
+        torch.cuda.synchronize()
+        pool = torch.cuda.graph_pool_handle()
+        graph = torch.cuda.CUDAGraph()
+        enabled = gc.isenabled()
+        gc.disable()
+        try:
+            with torch.cuda.graph(graph, pool=pool):
+                ids, nlp = step()
+        finally:
+            if enabled:
+                gc.enable()
+        self.graph = {"graph": graph, "pool": pool, "k": keys, "v": vals, "tables": tables, "hostt": hostt,
+                      "host": hostt.numpy(), "dev": dev, "ids": ids, "nlp": nlp, "masks": masks, "steps": steps}
 
     def finish_tree(self, launched, context_length: int, max_nodes: int,
                     sampling: Sampling | None = None) -> tuple[list[int], list[int], list[float]]:
@@ -130,8 +229,8 @@ class DSpark(DFlash1):
         shared, row, length, _ = launched
         if shared[2] is None:
             shared[2] = (shared[0].cpu().numpy(), shared[1].cpu().numpy().astype(np.float64))
-        ids, logp = shared[2][0][row], shared[2][1][row]
-        n = min(length, max_nodes)
+        ids, nlp = shared[2][0][row], shared[2][1][row]
+        n = self._cut(nlp, min(length, max_nodes))
         self.last_candidates = ids[:n, None]
-        scores = list(np.cumsum(-logp[:n]))
+        scores = list(np.cumsum(nlp[:n]))
         return [int(t) for t in ids[:n]], list(range(-1, n - 1)), [float(s) for s in scores]

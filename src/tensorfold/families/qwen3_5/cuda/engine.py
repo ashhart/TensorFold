@@ -126,6 +126,15 @@ class Qwen27Engine:
                 raise ValueError(f"the drafter reads target layers {self.draft.taps}; "
                                  f"this model has {full.config.layers}")
             self.w.tap_layers = full.tap_layers = self.draft.taps
+        # one stream with a chain drafter (DSpark): the draft step and the target's chain verify replay CUDA graphs
+        self.chain = None
+        import os
+
+        if (self.draft is not None and hasattr(self.draft, "graph_chain") and tp == 1 and streams == 1
+                and os.environ.get("TF_DRAFT_GRAPHS", "1") != "0"):
+            from .chain_graphs import ChainGraphs
+
+            self.chain = ChainGraphs(self.w, self.context_window + 32)
         del full
         if vision and rank == 0:
             from tensorfold.vision.qwen_cuda import QwenCudaVision
@@ -250,10 +259,17 @@ class Qwen27Engine:
         if on_tokens([pending]):
             return {"prefill_s": prefill_s, "cached": hit[1].pos if hit else 0}
         # the cache holds the state before the last prompt token, not ``st``: the decode may commit into it
-        result = draft_decode(self.w, st, prompt, pending, max_tokens, sampling, drafter,
-                              max_rows=self.max_rows, tree_rows=self.tree_rows,
-                              allow_copy=self.allow_copy and draft, stop_eos=stop_eos,
-                              on_tokens=on_tokens, inplace=True, **grammar)
+        chain = getattr(self, "chain", None)
+        if chain is not None and drafter is not None and constraint is None and vision is None:
+            from .chain_graphs import chain_decode
+
+            result = chain_decode(self.w, st, prompt, pending, max_tokens, sampling, drafter, chain,
+                                  allow_copy=self.allow_copy, stop_eos=stop_eos, on_tokens=on_tokens)
+        else:
+            result = draft_decode(self.w, st, prompt, pending, max_tokens, sampling, drafter,
+                                  max_rows=self.max_rows, tree_rows=self.tree_rows,
+                                  allow_copy=self.allow_copy and draft, stop_eos=stop_eos,
+                                  on_tokens=on_tokens, inplace=True, **grammar)
         return {"prefill_s": prefill_s, "decode_s": result.seconds, "rounds": result.rounds,
                 "cached": hit[1].pos if hit else 0, "drafts": draft, "min_rows": min(result.widths, default=0),
                 "drafted": result.drafted_rows, "accepted": result.accepted_drafts}
