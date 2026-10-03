@@ -295,18 +295,24 @@ def _absorbs(e: Engine, mtp: bool) -> bool:
 
 
 @torch.no_grad()
-def prefill_begin(e: Engine, prompt: Sequence[int], *, mtp: bool = True, resume: dict | None = None) -> int:
-    """Empty the state, or restore a kept prompt end and absorb its tail; returns the first prompt row to commit."""
+def prefill_begin(e: Engine, prompt: Sequence[int], *, mtp: bool = True, resume: dict | None = None,
+                  vision=None) -> int:
+    """Empty the state, or restore a kept prompt end and absorb its tail; returns the first prompt row to commit.
+    ``vision``: the prompt's encoded images, attached before the tail rotates at the prompt's image positions."""
 
     if not prompt:
         raise ValueError("prefill requires at least one token")
     if resume is None:
         e.reset()
+        if vision is not None:
+            image_rows.attach(e.st, vision, len(prompt))
         return 0
     st = e.st
     st.restore(resume["state"])
     if not 0 < st.pos < len(prompt):
         raise ValueError("a resumed prompt must extend the cached tokens")
+    if vision is not None:
+        image_rows.attach(st, vision, len(prompt))
     if _absorbs(e, mtp) and resume.get("tail") is not None:
         mtp_forward(e.w, st, e.pbuf, [prompt[st.pos]], resume["tail"])
         st.set_mtp_len(st.mtp_len + 1)
@@ -352,9 +358,7 @@ def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp:
 
     if vision is not None and (resume is not None or keep_at is not None or stops or keep is not None):
         raise ValueError("an image prompt prefills from its start and keeps no token-only snapshot")
-    start, last = prefill_begin(e, prompt, mtp=mtp, resume=resume), None
-    if vision is not None:
-        image_rows.attach(e.st, vision, len(prompt))
+    start, last = prefill_begin(e, prompt, mtp=mtp, resume=resume, vision=vision), None
     if keep_at is not None and not start <= keep_at <= len(prompt):
         raise ValueError(f"keep_at {keep_at} is outside the prefilled range [{start}, {len(prompt)}]")
     saved = e.kept = resume if keep_at == start else None

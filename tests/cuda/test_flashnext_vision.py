@@ -203,3 +203,144 @@ def test_image_message_markers_never_seed_a_text_prefix_cache():
     ref = Engine(w, capacity=1024, max_rows=8, prefill_rows=16)
     first = prefill(ref, prompt, None, mtp=False)
     assert text.out == serial_decode(ref, first, 8, None, stop_eos=False).tokens
+
+
+def _picture(w, prompt, start, seed):
+    """A 2x2-merged picture's four rows from ``start``, at Qwen's positions; the text after it rotates at delta -2."""
+
+    generator = torch.Generator(device="cuda").manual_seed(seed)
+    features = torch.randn((4, w.cfg.hidden), device="cuda", generator=generator, dtype=torch.bfloat16)
+    positions = torch.arange(len(prompt), device="cuda", dtype=torch.int32).repeat(3, 1)
+    positions[:, start + 4:] -= 2
+    positions[:, start:start + 4] = start + torch.tensor([[0, 0, 0, 0], [0, 0, 1, 1], [0, 1, 0, 1]], device="cuda")
+    return EncodedVision(tuple(range(start, start + 4)), features, positions, -2)
+
+
+def _prepared(w, prompt, start, seed, digest):
+    """What a request carries into the decoder: the picture's span, hash and grid (the fake tower encodes it)."""
+
+    return SimpleNamespace(encoded=_picture(w, prompt, start, seed), image_spans=((start, start + 4),),
+                           image_hashes=(digest,), image_grid_thw=((1, 4, 4),), video_hashes=())
+
+
+KEYED_TOWER = SimpleNamespace(encode=lambda prepared, ids: prepared.encoded)
+
+
+def _drain(dec, *streams):
+    for _ in range(400):
+        if not dec.live():
+            break
+        done = dec.round()
+        assert all(s.error is None for s in streams), [s.error for s in streams]
+        dec.finish(done)
+    assert not dec.live()
+
+
+def _reference(w, prompt, count, sampling, image):
+    ref = Engine(w, capacity=1024, max_rows=8, prefill_rows=16)
+    first = prefill(ref, prompt, sampling, mtp=False, vision=image)
+    return serial_decode(ref, first, count, sampling, stop_eos=False).tokens
+
+
+@pytest.mark.parametrize("kv_dtype", ["bf16", "int8", "int4"])
+@pytest.mark.parametrize("start", [1, 9, 30])
+def test_a_follow_up_with_the_same_picture_resumes_like_a_fresh_prefill(kv_dtype, start):
+    from tensorfold.engine.exact_sampling import Sampling
+
+    w = _model()
+    sampling = Sampling(seed=67, top_k=20, top_p=0.95)
+    first = list(range(20, 60))
+    first[start:start + 4] = [17] * 4
+    second = first + list(range(70, 93))
+    stats = []
+    for warm in (True, False):                          # the follow-up after its first turn, and on its own
+        dec = MultiDecoder(w, slots=2, capacity=1024, depth=3, confidence=0.3, kv_dtype=kv_dtype, prefill_rows=16,
+                           vision=KEYED_TOWER, stop_eos=False)
+        if warm:
+            turn = Stream(first, 8, sampling, vision=_prepared(w, first, start, 9, "a"), stop_eos=False)
+            dec.admit(turn)
+            _drain(dec, turn)
+            assert turn.out == _reference(w, first, 8, sampling, _picture(w, first, start, 9))
+            assert dec.kept and all(t < 0 for t in dec.kept[-1][0][start:start + 4])
+        follow = Stream(second, 12, sampling, vision=_prepared(w, second, start, 9, "a"), stop_eos=False)
+        dec.admit(follow)
+        assert follow.cached == (len(first) - 1 if warm else 0)
+        _drain(dec, follow)
+        assert follow.out == _reference(w, second, 12, sampling, _picture(w, second, start, 9))
+        stats.append({k: follow.stats()[k] for k in ("rounds", "drafted", "accepted")})
+    assert stats[0] == stats[1]                         # the resumed MTP head drafts as a fresh one does
+
+
+@pytest.mark.parametrize("kv_dtype", ["bf16", "int8"])
+def test_a_resumed_picture_prompt_leaves_a_fresh_prefills_caches(kv_dtype):
+    """Past a picture, the resumed MTP tail rotates at the prompt's image positions, as a fresh prefill's does."""
+    from test_flashnext_forward import _rows
+
+    w = _model()
+    start = 9
+    first = list(range(20, 60))
+    first[start:start + 4] = [17] * 4
+    second = first + list(range(70, 93))
+    states = []
+    for warm in (True, False):
+        dec = MultiDecoder(w, slots=2, capacity=1024, depth=3, confidence=0.3, kv_dtype=kv_dtype, prefill_rows=16,
+                           vision=KEYED_TOWER, stop_eos=False)
+        if warm:
+            turn = Stream(first, 4, vision=_prepared(w, first, start, 9, "a"), stop_eos=False)
+            dec.admit(turn)
+            _drain(dec, turn)
+        follow = Stream(second, 1, vision=_prepared(w, second, start, 9, "a"), stop_eos=False)   # no drafts after
+        dec.admit(follow)
+        assert follow.cached == (len(first) - 1 if warm else 0)
+        _drain(dec, follow)
+        states.append(follow.st)
+    a, b = states
+    assert a.pos == b.pos == len(second) and a.mtp_len == b.mtp_len
+    pairs = [(x, y, a.pos) for x, y in zip(a.kc, b.kc)] + [(a.mtp_kc, b.mtp_kc, a.mtp_len)]
+    for x, y, n in pairs:
+        for t, u in zip(_rows(x, n), _rows(y, n)):
+            assert torch.equal(t.contiguous().view(torch.uint8), u.contiguous().view(torch.uint8))
+
+
+@pytest.mark.parametrize("change", ["picture", "grid", "text"])
+def test_a_different_picture_or_text_resumes_only_the_text_before_it(change):
+    w = _model()
+    start, point = 280, 256
+    first = list(range(1, 320))
+    first[start:start + 4] = [17] * 4
+    second = first + list(range(400, 420))
+    dec = MultiDecoder(w, slots=2, capacity=1024, depth=1, prefill_rows=128, points=lambda ids: [point],
+                       vision=KEYED_TOWER, stop_eos=False)
+    turn = Stream(first, 8, vision=_prepared(w, first, start, 9, "a"), stop_eos=False)
+    dec.admit(turn)
+    _drain(dec, turn)
+    assert sorted(len(k[0]) for k in dec.kept) == [point, len(first) - 1]
+    if change == "text":                                 # the same ids, no picture: placeholder rows are no match
+        follow, image = Stream(second, 8, stop_eos=False), None
+    else:
+        prepared = _prepared(w, second, start, 11, "b") if change == "picture" else _prepared(w, second, start, 9, "a")
+        if change == "grid":                             # the same pixels resized to another grid
+            prepared.image_grid_thw = ((1, 2, 8),)
+        follow, image = Stream(second, 8, vision=prepared, stop_eos=False), prepared.encoded
+    dec.admit(follow)
+    assert follow.cached == point
+    _drain(dec, follow)
+    assert follow.out == _reference(w, second, 8, None, image)
+
+
+def test_a_picture_follows_a_text_prompts_kept_message_start():
+    w = _model()
+    start, point = 280, 256
+    text = list(range(1, 300))
+    pictured = list(range(1, 330))
+    pictured[start:start + 4] = [17] * 4
+    dec = MultiDecoder(w, slots=2, capacity=1024, depth=1, prefill_rows=128, points=lambda ids: [point],
+                       vision=KEYED_TOWER, stop_eos=False)
+    first = Stream(text, 8, stop_eos=False)
+    dec.admit(first)
+    _drain(dec, first)
+    follow = Stream(pictured, 8, vision=_prepared(w, pictured, start, 5, "c"), stop_eos=False)
+    dec.admit(follow)
+    assert follow.cached == point
+    _drain(dec, follow)
+    assert follow.out == _reference(w, pictured, 8, None, _picture(w, pictured, start, 5))

@@ -253,10 +253,11 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
         if self.w.comm is not None and any(x is not None for x in (s.constraint, s.vision, s.probabilities)):
             raise ValueError("concurrent Flash Next on two ranks serves text without grammars or logprobs")
         t0 = time.perf_counter()
+        key = image_rows.key(s.prompt, s.vision)        # a media prompt resumes and keeps by its pictures too
         if self.w.comm is not None:
             st, resume, s.cached = self._prepare_admission(s, told)
         else:
-            st, resume, s.cached = self._slot_for(list(s.prompt), s.draft and s.vision is None)
+            st, resume, s.cached = self._slot_for(list(s.prompt) if key is None else key, s.draft and key is not None)
         if self.w.comm is None:
             try:
                 if not self._grow(st, len(s.prompt) + self.depth + 2,
@@ -265,14 +266,13 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
             except NoRoom:
                 if resume is None:
                     self.free.append(st)
-                else:
-                    self._remember(list(s.prompt[:s.cached]), st, resume["state"], resume["tail"])
+                else:                                    # the kept prompt end stays kept
+                    self._remember(key[:s.cached], st, resume["state"], resume["tail"])
                 raise
         e = _slot(self.w, st, self.buf, self.mbuf, self.pbuf, self.capacity, self.prefill_rows)
         mtp = s.draft and self.depth > 0 and self.mbuf is not None
         try:
-            begin = prefill_begin(e, s.prompt, mtp=mtp, resume=resume)
-            image_rows.begin(e, s, self.vision)
+            begin = prefill_begin(e, s.prompt, mtp=mtp, resume=resume, vision=image_rows.begin(s, self.vision))
         except Exception:
             self._drop_kept(st)
             self.free.append(st)
@@ -281,12 +281,13 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
             e.stops = list(s.stops)
         else:
             e.stops = sorted({p for p in self.points(s.prompt) if begin + MIN_GAP <= p < entry_end(s.prompt)}) \
-                if s.draft and st.image_positions is None and self.points is not None else []
+                if s.draft and key is not None and self.points is not None else []
         s.sid, s.st = self.next_id, st
         self.next_id += 1
         s.prefill_s = time.perf_counter() - t0
-        same = resume is not None and self._keep_at(s) == begin         # the same prompt again: its own point
-        self.fills[s.sid] = [e, mtp, begin, (resume["state"], resume["tail"]) if same else None]
+        self.fills[s.sid] = [e, mtp, begin, None, key]
+        if resume is not None and self._keep_at(s) == begin:            # the same prompt again: its own point
+            self.fills[s.sid][3] = (resume["state"], resume["tail"])
         self.filling.append(s)
 
     def _ends(self, s: Stream) -> tuple[int, ...]:

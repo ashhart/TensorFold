@@ -124,9 +124,9 @@ That budget is shared across the images; a higher count can reduce the detail av
 Those expanded tokens count toward prompt usage and the context window before model execution.
 The available memory budget may impose a smaller practical image or context limit.
 
-Image requests currently start with a fresh KV cache and do not write reusable prompt checkpoints.
+Except on Flash Next CUDA, which matches cached prompts on their images' pixels, image requests start with a fresh KV cache and do not write reusable prompt checkpoints.
 This prevents identical image-placeholder token IDs from reusing another image's state; ordinary text requests retain their prefix caching.
-Multi-turn image conversations work when the request includes the original image content parts, but image-prefix reuse and persisted image KV are not implemented.
+Multi-turn image conversations work when the request includes the original image content parts, but persisted image KV is not implemented.
 For Qwen, each image request carries its own multimodal rotary positions and continuation offset, including during concurrent lane rounds. GLM uses its native KDA/NoPE attention state.
 
 ## Verification
