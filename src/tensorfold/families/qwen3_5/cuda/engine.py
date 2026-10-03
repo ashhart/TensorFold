@@ -40,9 +40,9 @@ class Qwen27Engine:
 
         exl3 = quant_config(Path(model_dir)) is not None
         nvfp4 = not exl3 and is_quantized(Path(model_dir))
-        if (exl3 or nvfp4) and tp != 1:
-            raise ValueError(f"{'EXL3 packs' if exl3 else 'NVFP4 checkpoints'} of Qwen3.8-27B run on one GPU: drop "
-                             "--tp 2, or serve the MLX checkpoint (TensorFold/Qwen3.8-27B-MLX-4bit) on two")
+        if exl3 and tp != 1:
+            raise ValueError("EXL3 packs of Qwen3.8-27B run on one GPU: drop --tp 2, or serve the MLX checkpoint "
+                             "(TensorFold/Qwen3.8-27B-MLX-4bit) or an NVFP4 one on two")
         if exl3 and volta():
             raise ValueError("EXL3 packs of Qwen3.8-27B need sm_80 or newer kernels: on a Volta GPU serve an NVFP4 "
                              "checkpoint or the MLX one (TensorFold/Qwen3.8-27B-MLX-4bit)")
