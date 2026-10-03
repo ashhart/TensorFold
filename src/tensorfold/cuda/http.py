@@ -106,6 +106,8 @@ def make_handler(app: App):
             path = self.path.split("?", 1)[0].rstrip("/")
             if path.endswith("/decisions"):
                 return self._post_decisions()
+            if path.endswith("/systemone"):
+                return self._post_decisions("systemone")
             if anthropic.route(self.path):
                 return anthropic.post(self, app)
             if responses.route(self.path) == "":         # a Response: this handler's chat completion, translated
@@ -244,8 +246,8 @@ def make_handler(app: App):
                 payload["stop_sequence"] = result["stop_sequence"]
             self._json(200, payload)
 
-        def _post_decisions(self) -> None:
-            decide = getattr(app, "decisions", None)
+        def _post_decisions(self, name: str = "decisions") -> None:
+            decide = getattr(app, name, None)
             if decide is None:
                 self._discard_body()
                 return self._json(404, {"error": {"message": f"unknown path {self.path}",

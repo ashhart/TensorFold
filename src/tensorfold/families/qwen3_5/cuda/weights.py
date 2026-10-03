@@ -249,8 +249,10 @@ class _Tensors:
     def __init__(self, model_dir: Path, device: str, skip=None) -> None:
         from tensorfold.cuda.direct_read import SafeTensors
 
-        skip = skip or (lambda name: name.startswith("vision_tower") or ".mtp." in name or name.startswith("mtp."))
-        self.device, self.files = device, SafeTensors(sorted(model_dir.glob("*.safetensors")))
+        skip = skip or (lambda name: name.startswith(("vision_tower", "model.visual.", "mtp.")) or ".mtp." in name)
+        # a decision model's head (``tensorfold.server.joint_schema``) sits beside the backbone in its own file
+        files = [p for p in sorted(model_dir.glob("*.safetensors")) if p.name != "joint_head.safetensors"]
+        self.device, self.files = device, SafeTensors(files)
         self.where = {name: None for name in self.files.keys() if not skip(name)}
 
     def __contains__(self, name: str) -> bool:
@@ -282,9 +284,19 @@ def load(model_dir: str | Path, device: str = "cuda", *, tiled: bool = False, ml
     raw = json.loads((model_dir / "config.json").read_text())
     t = _Tensors(model_dir, device)
     prefix = "language_model." if any(k.startswith("language_model.") for k in t) else ""
+    # transformers' own layout (a bf16 release such as Cloudflare/clef): model.language_model.*, lm_head at the top
+    hf = not prefix and "model.language_model.norm.weight" in t
 
     def get(name: str) -> torch.Tensor:
+        if hf and name.startswith("model."):
+            name = "model.language_model." + name.removeprefix("model.")
         return t.pop(prefix + name)
+
+    def norm(name: str) -> torch.Tensor:
+        """An RMSNorm weight as the MLX converter writes it: transformers' layout stores the centred gamma - 1."""
+
+        w = get(name)
+        return (w.float() + 1.0).to(w.dtype).contiguous() if hf else w.contiguous()
 
     def qlinear(name: str, pack: bool = True) -> QLinear:
         from tensorfold.quantization import resolve_affine, validate_shapes
@@ -326,15 +338,15 @@ def load(model_dir: str | Path, device: str = "cuda", *, tiled: bool = False, ml
         else:
             attn = Attention(q=qlinear(p + "self_attn.q_proj"), k=qlinear(p + "self_attn.k_proj"),
                              v=qlinear(p + "self_attn.v_proj"), o=qlinear(p + "self_attn.o_proj"),
-                             q_norm=get(p + "self_attn.q_norm.weight").contiguous(),
-                             k_norm=get(p + "self_attn.k_norm.weight").contiguous())
+                             q_norm=norm(p + "self_attn.q_norm.weight"),
+                             k_norm=norm(p + "self_attn.k_norm.weight"))
         fields = mlp(p + "mlp.", get, qlinear, cfg) if mlp is not None else \
             {"gate": qlinear(p + "mlp.gate_proj"), "up": qlinear(p + "mlp.up_proj"), "down": qlinear(p + "mlp.down_proj")}
-        layers.append(Layer(linear=cfg.is_linear(i), input_norm=get(p + "input_layernorm.weight").contiguous(),
-                            post_norm=get(p + "post_attention_layernorm.weight").contiguous(), gdn=gdn, attn=attn,
+        layers.append(Layer(linear=cfg.is_linear(i), input_norm=norm(p + "input_layernorm.weight"),
+                            post_norm=norm(p + "post_attention_layernorm.weight"), gdn=gdn, attn=attn,
                             **{"gate": None, "up": None, "down": None, **fields}))
     w = Weights(config=cfg, embed=qlinear("model.embed_tokens", pack=False), layers=layers,
-                norm=get("model.norm.weight"), head=qlinear("lm_head"))
+                norm=norm("model.norm.weight"), head=qlinear("lm_head"))
     half = cfg.rope_dims // 2
     inv = cfg.rope_theta ** (-torch.arange(0, half, dtype=torch.float64) / half)
     w.inv_freq = inv.to(torch.float32).to(device)

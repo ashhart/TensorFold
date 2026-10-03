@@ -203,6 +203,37 @@ class Qwen27Engine:
             self.scheduler.close()
             self.scheduler = None
 
+    def hidden_rows(self, prompt: list[int]):
+        """Every prompt row's final normed state (a joint schema head reads them), from a fresh state nothing keeps."""
+
+        from .forward import State
+        from .prefill import DECISION_ROWS, chunks, prefill_chunk
+
+        if self.tp != 1 or self.concurrent:
+            raise ValueError("decision heads run on one GPU without --parallel")
+        if not prompt or len(prompt) >= self.context_window:
+            raise ValueError(f"a decision prompt of {len(prompt)} tokens does not fit the {self.context_window}-token "
+                             "safe capacity")
+        torch = self.torch
+        st = State(self.w)
+        st.limit, st.room = len(prompt), self.room
+        ids = torch.tensor(prompt, dtype=torch.int32, device=self.w.norm.device)
+        token = DECISION_ROWS.set(True)
+        try:
+            with torch.no_grad():
+                rows = [prefill_chunk(self.w, ids[a:b], st, every=True)[0]
+                        for a, b in chunks(0, len(prompt), self.w.prompt_rows)]
+        finally:
+            DECISION_ROWS.reset(token)
+        return torch.cat(rows)
+
+    def head_rows(self, ids):
+        """The LM head's rows for token ids (a joint schema head's lexical option vectors)."""
+
+        if getattr(self.w.head, "layout", None) != "dense":
+            raise ValueError("decision heads read the LM head's rows from a bf16 checkpoint only")
+        return self.w.head.weight[ids]
+
     def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens: Callable[[list[int]], bool | None],
                  draft: bool = True, stop_eos: bool = True, *, vision=None, constraint=None, background=False):
         """``draft=False``: serial re-runs, no drafts; ``background``: last under ``--parallel``, yielding lanes."""
