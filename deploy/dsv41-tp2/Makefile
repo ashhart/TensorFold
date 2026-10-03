@@ -52,7 +52,7 @@ LOCK = $(if $(TF_DSV41_LOCKED),,flock -n -E 75 $(STATE)/lock env TF_DSV41_LOCKED
 
 .PHONY: help env stage image prebuild sync guard memwait up down restart _up _down _restart wait status logs \
         logs-worker smoke vllm-down vllm-up swap-in swap-out lease watch-install watch-uninstall watch-once \
-        watch-status
+        watch-status soak stress structured
 
 help:
 	@sed -n '1,14p' Makefile | sed 's/^# \{0,1\}//'
@@ -231,3 +231,25 @@ watch-status:
 	@[ -f $(STATE)/lease ] && [ $$(stat -c %Y $(STATE)/lease) -gt $$(date +%s) ] && \
 	  echo "lease until $$(date -d "@$$(stat -c %Y $(STATE)/lease)" '+%F %T')" || true
 	@tail -n 8 $(STATE)/watch.log 2>/dev/null || echo "no watchdog log yet ($(STATE)/watch.log)"
+
+# -- bench (tools/dsv41_{soak,stress,structured}.py from SRC): a lease first, so the watchdog leaves the run alone ----
+TOOLS_DIR ?= $(SRC)/tools
+MINUTES   ?= 30
+STAMP      = $$(date +%F-%H%M)
+# the key reaches the clients in their environment, never on a command line (visible to every user in ps)
+soak stress structured: export TF_API_KEY := $(API_KEY)
+
+soak:
+	@mkdir -p results && $(MAKE) --no-print-directory lease LEASE_MIN=$$(( $(MINUTES) + 15 ))
+	python3 $(TOOLS_DIR)/dsv41_soak.py --base $(BASE_URL) --model $(SERVED_NAME) --minutes $(MINUTES) \
+	  --out results/soak-$(STAMP).json
+
+stress:
+	@mkdir -p results && $(MAKE) --no-print-directory lease LEASE_MIN=90
+	python3 $(TOOLS_DIR)/dsv41_stress.py stress --base $(BASE_URL) --model $(SERVED_NAME) \
+	  --out results/stress-$(STAMP).json
+
+structured:
+	@mkdir -p results && $(MAKE) --no-print-directory lease LEASE_MIN=60
+	python3 $(TOOLS_DIR)/dsv41_structured.py --base $(BASE_URL) --model $(SERVED_NAME) \
+	  --out results/structured-$(STAMP).json

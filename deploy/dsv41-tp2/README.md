@@ -52,6 +52,14 @@ and `ssh -o BatchMode=yes aiai2-ib true` must work), then on the pair: `docker k
 reboot (stands down); `make lease && make soak` (no heal); two failures within 30 minutes (the second only alerts);
 the house mem-watchdog armed during a heal (the `guard` failure lands in `heal.log` and alerts).
 
+## Bench
+
+`make soak [MINUTES=30]`, `make stress` and `make structured` run `tools/dsv41_soak.py`, `dsv41_stress.py` and
+`dsv41_structured.py` from `SRC` against the endpoint, with the API key in their environment (never on a command
+line), after a watchdog lease covering the run; reports go to `results/`. The soak passes with no errors, the server
+drained at the end, the 17×23 sanity answer (391), no fatal `/health`, and one `token_sha` for every repeated greedy
+request. `structured --suites schemas,tools` needs `TF_DSV41_TOOL_GRAMMAR=required` on the server.
+
 ## Timings (2026-10-02)
 
 - first start after an image build with an empty cache: 5m39s (CUDA extensions build into `CACHE_DIR`)

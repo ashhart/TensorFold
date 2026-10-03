@@ -106,7 +106,7 @@ def request_spec(body: dict[str, Any]) -> Spec | None:
 # Copyright (c) 2026 Jay Leaton, glm53-tensorfold-spark) and the tool compile from its engine/serving/structured.py
 # (MIT, Copyright (c) 2026 Jay Leaton). Adapted for tensorfold dsv41-cuda: the active tools, our Spec and compiler.
 TOOL_TAG = "deepseek_v4_1"                # xgrammar's built-in structural tag for V4.1's DSML calls
-TOOL_TOKENS = ("｜DSML｜",)               # added tokens the tools vocabulary keeps (every other added one is never allowed)
+TOOL_TOKENS = ("｜DSML｜",)               # the added tokens the tools vocabulary keeps (no other is ever allowed)
 
 
 def tool_grammar_mode() -> str:

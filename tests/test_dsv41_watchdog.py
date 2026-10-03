@@ -225,3 +225,20 @@ def test_a_heal_holding_the_lock_restarts_without_waiting_for_itself(tmp_path):
     assert refused.returncode != 0 and "holds" in refused.stdout and "Error 75" in refused.stderr
     assert healed.returncode == 0, healed.stdout + healed.stderr
     assert f"{state}/stopped" in healed.stdout and f"rm -f {state}/stopped" in healed.stdout     # down, then up
+
+
+@pytest.mark.skipif(not shutil.which("make"), reason="needs make")
+def test_bench_targets_take_a_lease_and_pass_the_key_in_the_environment(tmp_path):
+    shutil.copy(DEPLOY / "Makefile", tmp_path / "Makefile")
+    (tmp_path / ".env").write_text("TF_API_KEY=sk-make-secret\nPORT=8999\nSERVED_NAME=DS\n")
+    stub = tmp_path / "stub"
+    stub.mkdir()
+    (stub / "dsv41_structured.py").write_text(
+        "import os, sys\nprint('KEY', os.environ.get('TF_API_KEY') == 'sk-make-secret', ' '.join(sys.argv[1:]))\n")
+    done = subprocess.run(["make", "structured", f"TOOLS_DIR={stub}"], cwd=tmp_path, capture_output=True, text=True,
+                          env={**os.environ, "XDG_STATE_HOME": str(tmp_path / "state")}, timeout=60)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "KEY True --base http://localhost:8999 --model DS --out results/structured-" in done.stdout
+    assert "sk-make-secret" not in done.stdout.replace("KEY True", "")         # make echoes no key
+    lease = tmp_path / "state" / "tensorfold-dsv41" / "lease"
+    assert lease.stat().st_mtime > time.time() + 50 * 60                         # LEASE_MIN=60 for structured

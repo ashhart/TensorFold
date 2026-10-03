@@ -293,14 +293,27 @@ class App:
             text = render(body["messages"])
         else:
             text = body.get("prompt")
-            if not isinstance(text, str):
-                raise RequestError("prompt must be a string")
-        prompt = self.tok.encode(text, add_special_tokens=False).ids
+            if not isinstance(text, (str, list)):
+                raise RequestError("prompt must be a string or a list of token ids")
+        if isinstance(text, list):
+            prompt = self._token_ids(text)
+        else:
+            prompt = self.tok.encode(text, add_special_tokens=False).ids
         if not prompt:
             raise RequestError("rendered prompt is empty")
         # sampling is resolved here, so a malformed control is refused before a stream opens
         return PreparedRequest(prompt, max_tokens, tools, thinking, self.sampling_for(body, prompt),
                                ignore_eos=ignore_eos, stop=stop, grammar=compiled, think_budget=budget)
+
+    def _token_ids(self, ids: list[Any]) -> list[int]:
+        """A completions ``prompt`` given as token ids (OpenAI's list form, as stress clients send exact lengths)."""
+
+        size = getattr(self.tok, "get_vocab_size", None)
+        vocab = size(with_added_tokens=True) if size is not None else None
+        if not ids or not all(type(t) is int and t >= 0 and (vocab is None or t < vocab) for t in ids):
+            limit = f" below {vocab}" if vocab is not None else ""
+            raise RequestError(f"a prompt list must be a non-empty list of token ids (integers from 0{limit})")
+        return list(ids)
 
     def check(self, body: dict[str, Any], *, prepared: PreparedRequest | None = None) -> str | None:
         """Why the request cannot run, or None; rendered before a stream's headers are sent."""
