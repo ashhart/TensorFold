@@ -10,7 +10,9 @@ from tensorfold.cuda import experts as grouped
 
 COLS = 32                 # output columns a block
 WORDS = 144               # int32 a (32 columns, 32 inputs) block: 128 code words, then 16 of e4m3 scales
-PREFILL_TILE = 16         # this kernel's prompt item: 64 ran 1.53x slower on Flash Next's routed prompts
+# pairs of one expert a prompt item: the staged kernel takes 64, the decode kernel 16; a pair's bits do not change
+PREFILL_TILE = int(__import__("os").environ.get("TF_NVFP4_PROMPT_TILE", "64"))
+STAGED_ROWS = int(__import__("os").environ.get("TF_NVFP4_STAGED_ROWS", "64"))   # fewer rows stay on the decode kernel
 
 
 def _i32(v: torch.Tensor) -> torch.Tensor:
@@ -82,8 +84,9 @@ def _run(epi: int, x: torch.Tensor, slots: int, w: torch.Tensor, scale: torch.Te
     from .linear import _ext
 
     units = grouped.max_items(rows * plan.slots, plan.experts, plan.tile) * nb
+    rt = 4 if plan.tile >= 64 and nb % 4 == 0 and rows >= STAGED_ROWS else 1   # 4 column blocks a CTA
     _ext().experts(epi, x, x.stride(0), slots, w, scale, kg, nb, plan.items, plan.counts, plan.members, out, n,
-                   limit, skip, units)
+                   limit, skip, units, rt)
 
 
 def gate_up(x: torch.Tensor, ex: Experts4, plan: grouped.Plan, out: torch.Tensor, rows: int, skip: int = -1) -> None:
