@@ -123,6 +123,12 @@ def moe(x: torch.Tensor, router_rows: torch.Tensor, ex, buf: MoEBuffers, top_k: 
     from .nvfp4 import experts as nvx
 
     rows = x.shape[0]
+    if getattr(ex, "router", None) is not None and type(ex).__name__ == "VoltaExperts":   # sm_70 NVFP4 experts
+        buf.logits[:rows].copy_(ex.router.matmul(x, f32=True))
+        select_rows(buf.logits[:rows], buf, top_k, experts)
+        pairs = rows * buf.slots
+        ex.run(x, buf.pick[:rows], buf.act.view(-1, ex.width), buf.y.view(-1, ex.dims)[:pairs])
+        return buf
     router(x, router_rows, buf.logits[:rows])
     if isinstance(ex, nvx.Experts4):             # NVFP4 experts (W4A16), the shared one last like the MLX table's
         select(buf.logits[:rows], buf, top_k, experts, nvx.PREFILL_TILE)

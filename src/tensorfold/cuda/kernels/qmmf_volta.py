@@ -252,3 +252,107 @@ class HostRows:
 
     def rows(self, ids: torch.Tensor) -> torch.Tensor:
         return _ext().gather_host_rows(self.weight, ids.to(torch.int64).contiguous())
+
+
+EX_ROWS = 8               # pairs an expert item takes (``qmmf_volta.cu``)
+
+
+def _tile_experts(words: torch.Tensor, scales: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """NVFP4 [E, N, K/2] codes and e4m3 [E, N, K/16] scales -> [E, N/32, K/64, 32, 8] words, [E, N/32, K/64, 32]."""
+
+    e, n, k2 = words.shape
+    kg = k2 * 2 // 64
+    w = words.contiguous().view(torch.int32).view(e, n // 32, 32, kg, 8).permute(0, 1, 3, 2, 4).contiguous()
+    s = scales.contiguous().view(torch.uint8).view(torch.int32).view(e, n // 32, 32, kg).permute(0, 1, 3, 2).contiguous()
+    return w, s
+
+
+class VoltaExperts:
+    """A layer's routed NVFP4 experts (shared last) for the sm_70 grouped kernel, gate and up side by side a column."""
+
+    def __init__(self, up, up_s, up_a, down, down_s, down_a, width: int, dims: int, limit: float = 0.0):
+        self.up, self.up_s, self.up_a = up, up_s, up_a
+        self.down, self.down_s, self.down_a = down, down_s, down_a
+        self.width, self.dims, self.limit = width, dims, float(limit)
+        self.router: VoltaLinear | None = None
+
+    @property
+    def count(self) -> int:
+        return int(self.up.shape[0])
+
+    def nbytes(self) -> int:
+        return sum(t.numel() * t.element_size() for t in (self.up, self.up_s, self.up_a, self.down, self.down_s,
+                                                          self.down_a))
+
+    @classmethod
+    def make(cls, gate: tuple, up: tuple, down: tuple, *, limit: float = 0.0, chunk: int = 32) -> "VoltaExperts":
+        """Each of gate, up, down: (words [E, N, K/2] uint8, e4m3 scales [E, N, K/16], per-expert scales [E])."""
+
+        e, width, dims = int(gate[0].shape[0]), int(gate[0].shape[1]), int(gate[0].shape[2]) * 2
+        if width % 32 or dims % 64 or width % 64:
+            raise ValueError(f"experts [{e}, {width}, {dims}]: widths must be multiples of 64")
+        dev = gate[0].device
+        uw = torch.empty((e, width // 32, dims // 64, 32, 2, 8), dtype=torch.int32, device=dev)
+        us = torch.empty((e, width // 32, dims // 64, 32, 2), dtype=torch.int32, device=dev)
+        for e0 in range(0, e, chunk):                          # one copy of a chunk of experts at a time
+            for m, (wds, scs, _) in enumerate((gate, up)):
+                w, s = _tile_experts(wds[e0:e0 + chunk], scs[e0:e0 + chunk])
+                uw[e0:e0 + chunk, :, :, :, m] = w
+                us[e0:e0 + chunk, :, :, :, m] = s
+        dw = torch.empty((e, dims // 32, width // 64, 32, 8), dtype=torch.int32, device=dev)
+        ds = torch.empty((e, dims // 32, width // 64, 32), dtype=torch.int32, device=dev)
+        for e0 in range(0, e, chunk):
+            dw[e0:e0 + chunk], ds[e0:e0 + chunk] = _tile_experts(down[0][e0:e0 + chunk], down[1][e0:e0 + chunk])
+        ua = torch.stack([gate[2], up[2]], dim=1).to(torch.float32).mul(16384.0).contiguous().to(dev)
+        da = down[2].to(torch.float32).reshape(-1, 1).mul(16384.0).contiguous().to(dev)
+        return cls(uw, us, ua, dw, ds, da, width, dims, limit)
+
+    def run(self, x: torch.Tensor, picks: torch.Tensor, act: torch.Tensor, y: torch.Tensor) -> None:
+        """x [R, D] bf16, picks [R, slots] -> act [R * slots, NI] (SwiGLU), y [R * slots, D]; a pair.s bits are its own."""
+
+        from tensorfold.cuda.kernels import qmm_volta
+
+        rows, slots = picks.shape
+        pairs = rows * slots
+        experts = self.count
+        top = min(pairs, experts) + pairs // EX_ROWS
+        sc = _expert_scratch(pairs, x.device)
+        _ext().plan_experts(picks.contiguous(), experts, sc["members"], sc["items"], sc["counts"])
+        x16, rs = qmm_volta.prep(x if x.stride(1) == 1 else x.contiguous())
+        cnt = _counters(x.device)
+        sk = 4 if self.dims // 64 >= 32 else 1
+        part = sc["part"] if sk > 1 else sc["none"]
+        need = sk * pairs * 2 * self.width
+        if sk > 1 and part.numel() < need:
+            if torch.cuda.is_current_stream_capturing():
+                _RETIRED.append(part)
+            part = sc["part"] = torch.empty((need,), dtype=torch.float32, device=x.device)
+        _ext().experts884(2, x16, rs, self.up, self.up_s, self.up_a, sc["members"], sc["items"], sc["counts"], slots,
+                          act, part[:need] if sk > 1 else part, cnt, self.width, sk, top, self.limit)
+        a16, ars = qmm_volta.prep(act[:pairs])
+        sk = 4 if self.width // 64 >= 32 else 1
+        _ext().experts884(0 if y.dtype == torch.float32 else 3, a16, ars, self.down, self.down_s, self.down_a,
+                          sc["members"], sc["items"], sc["counts"], 0, y, sc["none"], cnt, self.dims, sk, top, 0.0)
+
+
+_EXPERT_SCRATCH: dict = {}
+# Scratch a larger capture replaced: a graph captured with it still writes there, so it is never freed.
+_RETIRED: list = []
+
+
+def _expert_scratch(pairs: int, device) -> dict:
+    """Plan buffers for up to ``pairs`` pairs, grown by powers of two (CUDA-graph safe once grown)."""
+
+    key = (str(device), torch.cuda.current_stream(device).cuda_stream)
+    sc = _EXPERT_SCRATCH.get(key)
+    if sc is None or sc["pairs"] < pairs:
+        if sc is not None and torch.cuda.is_current_stream_capturing():
+            _RETIRED.append(sc)
+        cap = 1 << max(8, (pairs - 1).bit_length())
+        sc = _EXPERT_SCRATCH[key] = {
+            "pairs": cap, "members": torch.zeros(cap, dtype=torch.int32, device=device),
+            "items": torch.zeros((cap + cap // EX_ROWS + 1) * 3, dtype=torch.int32, device=device),
+            "counts": torch.zeros(2, dtype=torch.int32, device=device),
+            "part": torch.empty(0, dtype=torch.float32, device=device),
+            "none": torch.empty(0, dtype=torch.float32, device=device)}
+    return sc

@@ -7,6 +7,8 @@ import torch
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA only", allow_module_level=True)
+if torch.cuda.get_device_capability()[0] == 7:
+    pytest.skip("MLX-affine experts need sm_80 kernels; Volta serves NVFP4 MoE (test_experts_volta)", allow_module_level=True)
 
 from tensorfold.cuda import experts as grouped, prompt_precision  # noqa: E402
 from tensorfold.cuda.moe import Routed  # noqa: E402

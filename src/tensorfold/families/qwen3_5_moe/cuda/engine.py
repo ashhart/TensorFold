@@ -41,6 +41,15 @@ def stream_geometry(text: dict, streams: int, keep: int, depth: int):
                     + state + slots * (attention + 1) * layer, depth + 1)
 
 
+def _volta_need(model_dir) -> dict:
+    """On sm_70 an NVFP4 checkpoint runs on the Volta kernels (``qmmf_volta``): admit it there."""
+
+    from tensorfold.cuda.build import VOLTA, volta
+    from tensorfold.families.qwen3_5.cuda.nvfp4_load import quantized
+
+    return {"need": VOLTA, "staging_copies": 2} if volta() and quantized(model_dir) else {}
+
+
 class Qwen36Engine:
     """``eos``, ``generate`` and ``context_window`` for ``tensorfold.cuda.server``; ``streams`` > 1 decodes that many requests together."""
 
@@ -73,7 +82,7 @@ class Qwen36Engine:
         self.capacity_plan = admit(model_dir, context, context_explicit, torch, geometry,
                                    lambda name, info: (mtp_weights(name, info) if ".mtp." in name or name.startswith("mtp.")
                                                        else tensor_bytes(name, info)),
-                                   extra_files=extra)
+                                   extra_files=extra, **_volta_need(model_dir))
         self.context_window = self.capacity_plan["context_window"]
         self.w = load(model_dir)
         self.head = self.graphs = None
