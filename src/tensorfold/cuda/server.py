@@ -422,8 +422,9 @@ class App:
                 reasoning, answer = "", raw
             answer_raw[0] = answer
             if tools:
-                answer = (policy.content(answer, finished=finished) if policy.single
-                          else hide_tool_calls(answer, finished=finished))
+                answer = hide_tool_calls(answer, finished=finished)
+                if policy.single:
+                    answer = policy.content(answer, finished=finished)
             return reasoning, answer
 
         serving: list[Any] = [None]

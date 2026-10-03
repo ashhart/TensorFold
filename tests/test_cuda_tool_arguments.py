@@ -90,3 +90,27 @@ def test_one_call_when_parallel_calls_are_off_keeps_its_types(tmp_path, stream):
         status, reply = post(port, body, True)
     assert status == 200, reply
     assert calls_of(reply, stream) == [("plan_trip", ARGS)]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("parallel", [False, True])
+def test_dsml_calls_are_tools_and_never_visible_markup(tmp_path, stream, parallel):
+    class DSML(Engine):
+        def generate(self, prompt, max_tokens, sampling, on_tokens, draft=True):
+            text = '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="plan_trip">\n'
+            text += '<｜DSML｜parameter name="note" string="true">42</｜DSML｜parameter>\n'
+            text += '</｜DSML｜invoke>\n</｜DSML｜tool_calls>'
+            reply = Tokens().encode(text).ids + [EOS]
+            for token in reply:
+                if on_tokens([token]):
+                    break
+            return {"rounds": len(reply)}
+
+    body = {"messages": [{"role": "user", "content": "Plan it."}], "tools": TOOLS,
+            "stream": stream, "parallel_tool_calls": parallel, "max_tokens": 2048}
+    with http_server(app_for(tmp_path, DSML([]))) as port:
+        status, reply = post(port, body, True)
+    assert status == 200, reply
+    assert calls_of(reply, stream) == [("plan_trip", {"note": "42"})]
+    if stream:
+        assert not any(c["choices"][0]["delta"].get("content") for c in events(reply) if c.get("choices"))
