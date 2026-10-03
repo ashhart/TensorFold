@@ -124,7 +124,7 @@ class GlmEngine:
                                               split_weights)
 
         encode_policy(policy)                           # a bad default fails here, not in the first request
-        torch.cuda.set_device(0)
+        __import__("tensorfold.cuda.device", fromlist=["select"]).select(torch)
         self.torch = torch
         self.rank = rank
         self.policy = "0" if serial_only else policy

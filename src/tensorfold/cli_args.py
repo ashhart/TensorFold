@@ -132,6 +132,9 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
                       help="with --tp 2: this machine's rank; rank 0 serves HTTP, rank 1 follows it")
     cuda.add_argument("--master", default="", help="with --tp 2: rank 0's address on the link between the machines")
     cuda.add_argument("--master-port", type=int, default=29551, help="with --tp 2: rank 0's rendezvous port")
+    cuda.add_argument("--device", type=int, default=None,
+                      help="CUDA device index this rank runs on (default 0); two ranks on one machine: --device 0 and "
+                           "--device 1 with both GPUs visible, so NCCL maps the peer over NVLink")
     cuda.add_argument("--kv-dtype", choices=("bf16", "int8", "int4"), default="bf16",
                       help="KV cache: bf16 (the default), int8, or int4. Quantized keys and values use one "
                            "fp16 scale per 32 values (changes the output; Flash Next on CUDA only)")

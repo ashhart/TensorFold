@@ -37,7 +37,7 @@ class NemotronEngine:
             raise ValueError(f"MTP drafts a round: 0 to {MAX_CHAIN}, not {drafts}")
         if confidence is not None and not 0.0 <= float(confidence) <= 1.0:
             raise ValueError(f"MTP draft confidence: a probability from 0 to 1, not {confidence}")
-        torch.cuda.set_device(0)
+        __import__("tensorfold.cuda.device", fromlist=["select"]).select(torch)
         if draft_ids == "default":
             draft_ids = [int(v) for v in (Path(__file__).parent.parent / "draft_ids.txt").read_text().split()]
         vocab = int(json.loads((Path(model_dir) / "config.json").read_text())["vocab_size"])
