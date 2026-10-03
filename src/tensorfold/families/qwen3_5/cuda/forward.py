@@ -301,17 +301,11 @@ def tree_forward(w: Weights, tokens: torch.Tensor, parents: Sequence[int], st: S
     return logits, record
 
 
-@torch.no_grad()
-def multi_tree_forward(w: Weights, streams: Sequence[tuple[Sequence[int], Sequence[int], State]], *,
-                       full_logits: bool = True, tp: bool = False, capture_taps: bool = False,
-                       hidden: bool = False):
-    """Several streams' windows in one forward, each row with the bits of its stream's own ``tree_forward`` (``hidden``: the rows' final normed states third)."""
+def _multi_host(streams: Sequence[tuple[Sequence[int], Sequence[int], "State"]], keep: int, group: int):
+    """Host half of ``multi_tree_forward``: its packed int32 inputs in one list, and the plans' launch sizes."""
 
-    c = w.config
-    device = w.norm.device
-    keep = c.conv_kernel - 1
     starts = [0]
-    ids, positions, windows, sids, local, states = [], [], [], [], [], []
+    ids, positions, windows, sids, local = [], [], [], [], []
     for s, (tokens, parents, st) in enumerate(streams):
         parents = [int(p) for p in parents]
         depths, _ = _paths(parents)
@@ -327,26 +321,62 @@ def multi_tree_forward(w: Weights, streams: Sequence[tuple[Sequence[int], Sequen
         positions.extend(st.pos + st.rope_delta + d for d in depths)
         sids.extend([s] * len(parents))
         local.append(parents)
-        states.append(st)
         starts.append(base + len(parents))
-    W = starts[-1]
     entries, _, slots, most = deltanet.plan_host(local)
+    attn_flat, attn_items, attn_chunks = tree_attention.plan_host(local, [st.pos for _, _, st in streams], group)
+    flat = positions + sids + entries + starts + ids + [i for win in windows for i in win]
+    return flat, attn_flat, starts, (slots, most, attn_items, attn_chunks)
+
+
+def _multi_unpack(dev: torch.Tensor, W: int, S: int, keep: int, slots: int, most: int, n_items: int, chunks: int):
+    """``_multi_host``'s list on the device as the forward's inputs (the attention paths computed here)."""
+
+    pos, sid_t = dev[:W], dev[W:2 * W]
+    plan = deltanet.Plan(dev[2 * W:5 * W].view(W, 3), dev[5 * W:5 * W + S + 1], slots, most)
+    ids_t = dev[5 * W + S + 1:6 * W + S + 1]
+    windows_t = dev[6 * W + S + 1:6 * W + S + 1 + W * (keep + 1)].view(W, keep + 1)
+    aplan = tree_attention.from_packed(dev[6 * W + S + 1 + W * (keep + 1):], S, W, n_items, chunks)
+    return pos, sid_t, plan, ids_t, windows_t, aplan
+
+
+@torch.no_grad()
+def multi_tree_forward(w: Weights, streams: Sequence[tuple[Sequence[int], Sequence[int], State]], *,
+                       full_logits: bool = True, tp: bool = False, capture_taps: bool = False,
+                       hidden: bool = False):
+    """Several streams' windows in one forward, each row with the bits of its stream's own ``tree_forward`` (``hidden``: the rows' final normed states third)."""
+
+    c = w.config
+    device = w.norm.device
+    keep = c.conv_kernel - 1
+    flat, attn_flat, starts, (slots, most, attn_items, attn_chunks) = _multi_host(streams, keep,
+                                                                                  c.heads // c.kv_heads)
+    states = [st for _, _, st in streams]
+    W, S = starts[-1], len(states)
     linear = [i for i, layer in enumerate(w.layers) if layer.linear]
     softmax = [i for i, layer in enumerate(w.layers) if not layer.linear]
     ptrs = [p for i in linear for p in deltanet.pointers([st.rec[i] for st in states])]
     tables = dict(zip(linear, deltanet.to_device(ptrs, torch.int64, device).view(len(linear), len(states))))
     aoffs = _cache_offsets(states, softmax, device)
-    S = len(states)
-    attn_flat, attn_items, attn_chunks = tree_attention.plan_host(local, [st.pos for st in states],
-                                                                  c.heads // c.kv_heads)
-    host = torch.tensor(positions + sids + entries + starts + ids + [i for win in windows for i in win] + attn_flat,
-                        dtype=torch.int32).pin_memory()
+    host = torch.tensor(flat + attn_flat, dtype=torch.int32).pin_memory()
     dev = host.to(device, non_blocking=True)            # one copy, and the host runs on
-    pos, sid_t = dev[:W], dev[W:2 * W]
-    plan = deltanet.Plan(dev[2 * W:5 * W].view(W, 3), dev[5 * W:5 * W + S + 1], slots, most)
-    ids_t = dev[5 * W + S + 1:6 * W + S + 1]
-    windows_t = dev[6 * W + S + 1:6 * W + S + 1 + W * (keep + 1)].view(W, keep + 1)
-    aplan = tree_attention.from_packed(dev[6 * W + S + 1 + W * (keep + 1):], S, W, attn_items, attn_chunks)
+    pos, sid_t, plan, ids_t, windows_t, aplan = _multi_unpack(dev, W, S, keep, slots, most, attn_items, attn_chunks)
+
+    def conv_of(i: int) -> torch.Tensor:
+        return states[0].conv[i] if S == 1 else torch.cat([st.conv[i] for st in states])
+
+    logits, record, taps, h = _multi_layers(w, W, ids_t, pos, sid_t, plan, windows_t, aplan, aoffs, tables, conv_of,
+                                            full_logits=full_logits, tp=tp, capture_taps=capture_taps)
+    if capture_taps:
+        return logits, record, taps, starts
+    return logits, record, h if hidden else None, starts
+
+
+def _multi_layers(w: Weights, W: int, ids_t, pos, sid_t, plan, windows_t, aplan, aoffs, tables, conv_of, *,
+                  full_logits: bool = True, tp: bool = False, capture_taps: bool = False):
+    """``multi_tree_forward``'s layers on its device inputs (eager, or a graph's static ones): (logits, record, taps, h)."""
+
+    c = w.config
+    keep = c.conv_kernel - 1
     x = glue.embedding(ids_t, w.embed)
     pending: torch.Tensor | None = None
     record: list[Record] = []
@@ -364,8 +394,7 @@ def multi_tree_forward(w: Weights, streams: Sequence[tuple[Sequence[int], Sequen
             else:
                 qkv, z, b, a = _mm_group(h, [gdn.qkv, gdn.z, gdn.b, gdn.a], xs)
                 z = z.reshape(W, c.v_heads, c.dv)
-            conv = states[0].conv[i] if S == 1 else torch.cat([st.conv[i] for st in states])
-            q, k, v, g, beta = glue.gdn_pre(qkv, conv, gdn.conv, windows_t, a, b, gdn.A_log, gdn.dt_bias,
+            q, k, v, g, beta = glue.gdn_pre(qkv, conv_of(i), gdn.conv, windows_t, a, b, gdn.A_log, gdn.dt_bias,
                                             kh=c.k_heads, vh=c.v_heads, dk=c.dk, stream_ids=sid_t, nkeep=keep)
             yr = deltanet.tree(q, k, v, g, beta, plan, table=tables[i])
             out, out_xs = glue.gated_norm(yr, z, gdn.norm, c.eps)
@@ -397,8 +426,123 @@ def multi_tree_forward(w: Weights, streams: Sequence[tuple[Sequence[int], Sequen
     if capture_taps:
         if len(taps) != 5:
             raise ValueError("DFlash2 taps require the complete 64-layer target")
-        return logits, record, torch.cat(taps, dim=-1), starts
-    return logits, record, h if hidden else None, starts
+        return logits, record, torch.cat(taps, dim=-1), h
+    return logits, record, None, h
+
+
+SKIPPED_ITEM = (0, 0, 1 << 20)          # a staged attention item past any stream's keys: its program does nothing
+
+
+def staged_attention(h: np.ndarray, at: int, flat: Sequence[int], width: int, used: int, slots: int, n_items: int,
+                     before: int) -> int:
+    """Write ``tree_attention.plan_host``'s list into a staged plan at ``h[at:]``, resetting only the items ``before`` wrote."""
+
+    W, items = width, len(flat) - 2 * width - 4 * used
+    if n_items and items > 3 * n_items:
+        raise ValueError("attention items past the staged count")
+    head = W + 4 * used
+    h[at:at + head] = flat[:head]
+    h[at + head:at + W + 4 * slots] = np.tile(np.array([W, 0, 0, 0], dtype=np.int32), slots - used)
+    a = at + W + 4 * slots
+    if n_items:
+        h[a:a + items] = flat[head:head + items]
+        if before > items:
+            h[a + items:a + before] = np.tile(np.array(SKIPPED_ITEM, dtype=np.int32), (before - items) // 3)
+    h[a + 3 * n_items:a + 3 * n_items + W] = flat[len(flat) - W:]
+    return items if n_items else 0
+
+
+def staged_fits(streams: Sequence[tuple[Sequence[int], Sequence[int], "State"]], lanes: int, width: int,
+                context: int) -> bool:
+    """Whether a round's chain windows fit a ``MultiStaged`` of ``width`` rows, ``lanes`` streams and ``context`` keys."""
+
+    return (1 <= len(streams) <= lanes and sum(len(t) for t, _, _ in streams) <= width
+            and all(st.pos + len(t) <= context and all(int(p) == r - 1 for r, p in enumerate(parents))
+                    for t, parents, st in streams))
+
+
+class MultiStaged:
+    """A multi-stream window's static inputs for graph replays; padding rows never reach a real row's bits."""
+
+    def __init__(self, w: Weights, width: int, lanes: int, context: int, pad_rec: torch.Tensor) -> None:
+        c, device = w.config, w.norm.device
+        self.w, self.width, self.lanes, self.context = w, width, lanes, context
+        self.keep, self.group = c.conv_kernel - 1, c.heads // c.kv_heads
+        self.linear = [i for i, layer in enumerate(w.layers) if layer.linear]
+        self.softmax = [i for i, layer in enumerate(w.layers) if not layer.linear]
+        S = self.slots = lanes + 1
+        W, keep = width, self.keep
+        self.chunks = -(-(context + width) // tree_attention.CHUNK)
+        self.n_items = self.chunks * (-(-width * self.group // tree_attention.QUERY_TILE) + S)
+        self.n_flat = 6 * W + S + 1 + W * (keep + 1)
+        n32 = self.n_flat + W + 4 * S + 3 * self.n_items + W
+        self.host = torch.zeros(n32, dtype=torch.int32).pin_memory()
+        self.dev = self.host.to(device)
+        self.host64 = torch.zeros(len(self.linear) * S + 2 * len(self.softmax) * S, dtype=torch.int64).pin_memory()
+        self.dev64 = self.host64.to(device)
+        nl = len(self.linear) * S
+        self.tables = {i: self.dev64[j * S:(j + 1) * S] for j, i in enumerate(self.linear)}
+        self.aoffs = {i: self.dev64[nl + 2 * j * S:nl + 2 * (j + 1) * S].view(S, 2) for j, i in enumerate(self.softmax)}
+        cd = 2 * c.k_heads * c.dk + c.v_heads * c.dv
+        self.conv = {i: torch.zeros((S * keep, cd), dtype=torch.bfloat16, device=device) for i in self.linear}
+        self.conv_slots = [[self.conv[i][k * keep:(k + 1) * keep] for i in self.linear] for k in range(S)]
+        self.pad_rec = pad_rec                       # the padding and empty slots' DeltaNet state: zeros, only read
+        self._pad = _Pad()
+        self.items = 0                               # item words the last refresh wrote (the rest are skipped)
+        at = self.n_flat + W + 4 * S
+        self.host.numpy()[at:at + 3 * self.n_items] = np.tile(np.array(SKIPPED_ITEM, dtype=np.int32), self.n_items)
+
+    def fits(self, streams: Sequence[tuple[Sequence[int], Sequence[int], "State"]]) -> bool:
+        return staged_fits(streams, self.lanes, self.width, self.context)
+
+    def refresh(self, streams: Sequence[tuple[Sequence[int], Sequence[int], "State"]]) -> list[int]:
+        """This round's streams into the static inputs (two copies and one multi-tensor conv copy); their row starts."""
+
+        W, S, keep = self.width, self.slots, self.keep
+        rows = sum(len(t) for t, _, _ in streams)
+        pad = W - rows
+        laid = list(streams) + ([([0] * pad, list(range(-1, pad - 1)), self._pad)] if pad else [])
+        flat, attn_flat, starts, (_, _, _, _) = _multi_host(laid, keep, self.group)
+        used = len(laid)
+        h = self.host.numpy()
+        cut = 5 * W + used + 1                       # GDN starts: the empty slots begin and end at W
+        h[:cut] = flat[:cut]
+        h[cut:cut + S - used] = W
+        h[cut + S - used:self.n_flat] = flat[cut:]
+        self.items = staged_attention(h, self.n_flat, attn_flat, W, used, S, self.n_items, self.items)
+        real = [st for _, _, st in streams]
+        ptrs = []
+        for i in self.linear:
+            ptrs += [st.rec[i].data_ptr() for st in real] + [self.pad_rec.data_ptr()] * (S - len(real))
+        offs = []
+        for i in self.softmax:
+            offs += tree_attention.offsets([st.kv[i] for st in real], self.w.norm.device) + [0, 0] * (S - len(real))
+        self.host64.numpy()[:] = ptrs + offs
+        self.dev.copy_(self.host, non_blocking=True)
+        self.dev64.copy_(self.host64, non_blocking=True)
+        dst, src = [], []
+        for k, st in enumerate(real):
+            dst += self.conv_slots[k]
+            src += [st.conv[i] for i in self.linear]
+        torch._foreach_copy_(dst, src)
+        return starts[:len(real) + 1]
+
+    def forward(self, *, full_logits: bool = True):
+        """The staged forward (what a graph captures): (logits, record, h) for all ``width`` rows."""
+
+        W, S = self.width, self.slots
+        pos, sid_t, plan, ids_t, windows_t, aplan = _multi_unpack(self.dev, W, S, self.keep, 0, W, self.n_items,
+                                                                  self.chunks)
+        logits, record, _, h = _multi_layers(self.w, W, ids_t, pos, sid_t, plan, windows_t, aplan, self.aoffs,
+                                             self.tables, self.conv.__getitem__, full_logits=full_logits)
+        return logits, record, h
+
+
+class _Pad:
+    """The padding stream's position: no committed rows, no rotary shift."""
+
+    pos = 0
+    rope_delta = 0
 
 
 @torch.no_grad()

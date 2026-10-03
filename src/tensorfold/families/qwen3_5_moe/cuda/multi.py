@@ -11,12 +11,14 @@ from tensorfold.cuda.markers import MIN_GAP
 from tensorfold.cuda.sampling import sample_rows, sample_streams
 from tensorfold.cuda.streams import PrefixCache, Stream, accept, next_fill
 from tensorfold.engine.grammar import GrammarError
+from tensorfold.families.qwen3_5.cuda import multi_graphs
 from tensorfold.families.qwen3_5.cuda.decode import CopyIndex
 from tensorfold.families.qwen3_5.cuda.engine import entry_end
 from tensorfold.families.qwen3_5.cuda.forward import State, _mm, commit_streams, multi_tree_forward
 from tensorfold.families.qwen3_5.cuda.multi import kept, private
 
 from .decode import COPY_ROWS, Carry, extend, mtp_round, picks
+from .heads import HeadGraphs
 from .mtp import Cache, Head
 
 STEP = 1024          # prompt rows a prefill step takes while other streams decode
@@ -44,7 +46,7 @@ class MultiDecoder:
     """The ``Scheduler``'s decoder: a prefill step, then every stream's window (16 rows at most) in one forward; a lone stream replays ``graphs``."""
 
     def __init__(self, w, head: Head | None, *, depth: int, confidence: float, context: int = 0, keep: int = 3,
-                 points=None, graphs=None) -> None:
+                 points=None, graphs=None, lanes: int = 0) -> None:
         if head is not None and depth > 0 and not 1 <= depth <= 15:
             raise ValueError(f"MTP drafts a round with --parallel: 1 to 15 (a window holds 16 rows), not {depth}")
         self.w, self.head = w, head if depth > 0 else None
@@ -59,6 +61,9 @@ class MultiDecoder:
         self.next_id = 0
         self.graphs = graphs if self.head is not None else None
         self.resident: Stream | None = None          # the stream whose state is in the graphs' buffers
+        self.lanes = lanes                           # streams decoded together at most (``warm`` sets it)
+        self.together = None                         # MultiGraphs: rounds of several streams replay a verify graph
+        self.heads = None                            # HeadGraphs: and their head calls replay head graphs
 
     def live(self) -> int:
         return len(self.streams) + len(self.filling)
@@ -168,8 +173,9 @@ class MultiDecoder:
             return done
         wins = [[s.out[-1]] + s.drafts for s in live]
         chains = [list(range(-1, len(t) - 1)) for t in wins]
-        logits, record, hidden, starts = multi_tree_forward(
-            self.w, [(t, p, s.st) for t, p, s in zip(wins, chains, live)], hidden=True)
+        windows = [(t, p, s.st) for t, p, s in zip(wins, chains, live)]
+        out = self.together.forward(windows) if self.together is not None else None
+        logits, record, hidden, starts = out if out is not None else multi_tree_forward(self.w, windows, hidden=True)
         for k, s in enumerate(live):                  # a constrained stream's rows, each masked by its path
             if s.sid in grammars:
                 s.constraint.mask(logits[starts[k]:starts[k + 1]], grammars[s.sid])
@@ -257,23 +263,21 @@ class MultiDecoder:
         if not todo:
             return
         heads = [s.snap for s in todo]
-        normed = self.head.forward_streams([d.cache for d in heads], [d.carry.states for d in heads],
-                                           [d.carry.tokens for d in heads], [d.cache.pos for d in heads])
         last, row = [], 0
         for d in heads:
             row += len(d.carry.tokens)
             last.append(row - 1)
-            d.cache.pos += len(d.carry.tokens)
         active = []
         for s, r in zip(todo, last):                  # an exact repeat of the context first: a long, likely window
             s.drafts = s.copies.propose(s.context, COPY_ROWS - 1)
             if not s.drafts:
                 active.append((s, r))
-        if not active:
-            return
-        rows = normed.index_select(0, torch.tensor([r for _, r in active], device=normed.device))
+        rows, logits = self._heads([d.cache for d in heads], [d.carry.states for d in heads],
+                                   [d.carry.tokens for d in heads], [d.cache.pos for d in heads],
+                                   [r for _, r in active])
+        for d in heads:
+            d.cache.pos += len(d.carry.tokens)
         while active:
-            logits = self.head.logits(rows)
             chosen = picks(logits, [s.st.pos + 1 + len(s.drafts) for s, _ in active],
                            [s.sampling for s, _ in active], self.ids)
             going = []
@@ -283,10 +287,23 @@ class MultiDecoder:
                     going.append((s, k))
             if not going:
                 return
-            rows = self.head.forward_streams(
-                [s.snap.cache for s, _ in going], [rows[k:k + 1] for _, k in going], [[s.drafts[-1]] for s, _ in going],
-                [s.snap.cache.pos + len(s.drafts) - 1 for s, _ in going])
+            rows, logits = self._heads([s.snap.cache for s, _ in going], [rows[k:k + 1] for _, k in going],
+                                       [[s.drafts[-1]] for s, _ in going],
+                                       [s.snap.cache.pos + len(s.drafts) - 1 for s, _ in going],
+                                       list(range(len(going))))
             active = [(s, k) for k, (s, _) in enumerate(going)]
+
+    def _heads(self, caches, states, tokens, starts, pick):
+        """``head.forward_streams`` then rows ``pick``'s draft logits, by a graph replay when one fits: (rows, logits)."""
+
+        out = self.heads.call(caches, states, tokens, starts, pick) if self.heads is not None else None
+        if out is not None:
+            return out
+        normed = self.head.forward_streams(caches, states, tokens, starts)
+        if not pick:
+            return None, None
+        rows = normed.index_select(0, torch.tensor(pick, device=normed.device))
+        return rows, self.head.logits(rows)
 
     @torch.no_grad()
     def warm(self, streams: int) -> None:
@@ -310,8 +327,39 @@ class MultiDecoder:
                 picks(self.head.logits(self.head.forward_streams([cache] * n, [torch.zeros(
                     (k, self.w.config.hidden), dtype=torch.bfloat16, device=self.w.norm.device) for k in sizes],
                     [[0] * k for k in sizes], [0] * n)), [1] * rows, [None] * rows, self.ids)
+        self.lanes = self.lanes or streams
+        if multi_graphs.enabled() and self.context and self.lanes > 1:
+            self.capture(self.lanes)
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
+
+    @torch.no_grad()
+    def capture(self, lanes: int, widths=multi_graphs.WIDTHS, calibrate: bool | None = None) -> None:
+        """Capture verify and head graphs for rounds of 2 to ``lanes`` streams, then keep the widths that time faster."""
+
+        if not self.context:
+            raise ValueError("graphs cover a bounded context: the decoder needs one")
+        self.lanes = lanes
+        span = self.context + COPY_ROWS               # a stream's keys and its last window
+        self.together = multi_graphs.MultiGraphs(self.w, lanes, span, widths)
+        self.heads = HeadGraphs(self.head, lanes, span, widths) if self.head is not None else None
+        st = State(self.w)
+        hidden = torch.zeros((16, self.w.config.hidden), dtype=torch.bfloat16, device=self.w.norm.device)
+        for width in reversed(self.together.widths):
+            n = -(-width // 16)
+            sizes = [width // n + (i < width % n) for i in range(n)]
+            self.together.capture(width, [([0] * k, list(range(-1, k - 1)), st) for k in sizes])
+            if self.heads is not None:
+                self.heads.capture(width, [Cache(self.w, 16) for _ in sizes], [hidden[:k] for k in sizes],
+                                   [[0] * k for k in sizes], [0] * n, list(range(n)))
+        if calibrate if calibrate is not None else multi_graphs.mode() != "force":   # GPU-bound: padding only costs
+            self.together.calibrate(st)
+            if self.heads is not None:
+                self.heads.calibrate()
+            if not self.together.used():             # none faster: rounds stay eager, the graphs memory goes back
+                self.together = None
+            if self.heads is not None and not self.heads.used():
+                self.heads = None
 
     def finish(self, done: list[Stream]) -> None:
         """Drop finished streams (their prompt-end states joined the prefix cache at the end of their prefill)."""

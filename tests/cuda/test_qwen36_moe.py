@@ -252,6 +252,27 @@ def _segments(expandable: bool):
         torch.cuda.memory._set_allocator_settings(f"expandable_segments:{default}")
 
 
+GRAPH_WIDTHS = (8, 16, 32, 64)       # rows a test's concurrent-round graphs cover (fewer captures than WIDTHS)
+
+
+def _decoder(w, head, together: bool, lanes: int = 6, **kw) -> MultiDecoder:
+    """A decoder; ``together``: its rounds of several streams replay CUDA graphs (``MultiDecoder.capture``)."""
+
+    dec = MultiDecoder(w, head, depth=3, context=2048 if together else 0, **kw)
+    if together:
+        dec.capture(lanes, GRAPH_WIDTHS, calibrate=False)      # every width replays (no startup timing)
+    return dec
+
+
+def _replayed(dec, together: bool) -> None:
+    """Graph rounds ran when they should: verify and head replays (head calls only with drafting streams)."""
+
+    if together:
+        assert dec.together.replays > 0 and (dec.heads is None or dec.heads.replays > 0)
+    else:
+        assert dec.together is None and dec.heads is None
+
+
 def _solo(w, head, prompt, sampling, count, confidence=0.3):
     st, mc, first, carry = decode.prefill(w, head, prompt, sampling)
     return decode.mtp_decode(w, head, st, mc, carry, first, count, sampling, depth=3, confidence=confidence,
@@ -303,9 +324,10 @@ def test_verify_rows_of_many_streams_equal_each_alone():
         assert torch.equal(logits[starts[k]:starts[k + 1]], ref) and torch.equal(hidden[starts[k]:starts[k + 1]], rows)
 
 
+@pytest.mark.parametrize("together", [False, True], ids=["eager", "graphs"])
 @pytest.mark.parametrize("expandable", [False, True])
 @pytest.mark.parametrize("confidence", [0.0, 0.3])
-def test_streams_decoded_together_equal_solo_and_serial(expandable, confidence):
+def test_streams_decoded_together_equal_solo_and_serial(expandable, confidence, together):
     """Mixed lengths, greedy and keyed sampling, drafted and serial streams: each emits its serial tokens, and each
     drafted one takes the rounds the solo engine takes (the head's rows keep their bits too)."""
 
@@ -313,7 +335,7 @@ def test_streams_decoded_together_equal_solo_and_serial(expandable, confidence):
     with _segments(expandable):
         refs = [_serial(w, p, smp, 24) for p, smp in zip(MIXED, SAMPLED)]
         solo = [_solo(w, head, p, smp, 24, confidence) for p, smp in zip(MIXED, SAMPLED)]
-        dec = MultiDecoder(w, head, depth=3, confidence=confidence)
+        dec = _decoder(w, head, together, confidence=confidence)
         streams = []
         for i, (prompt, sampling) in enumerate(zip(MIXED, SAMPLED)):
             got: list[int] = []
@@ -328,6 +350,7 @@ def test_streams_decoded_together_equal_solo_and_serial(expandable, confidence):
         else:
             assert s.min_rows == 1 and s.rounds == len(got) - 1
     assert not dec.streams and not dec.filling
+    _replayed(dec, together)
 
 
 def test_a_stream_that_ignores_end_tokens_decodes_past_them_beside_one_that_stops():
@@ -353,8 +376,9 @@ def test_a_stream_that_ignores_end_tokens_decodes_past_them_beside_one_that_stop
     assert alone.out == free
 
 
+@pytest.mark.parametrize("together", [False, True], ids=["eager", "graphs"])
 @pytest.mark.parametrize("sampling", [None, Sampling(1234, 1.0, 20, 0.95)])
-def test_streams_join_and_leave_mid_round(monkeypatch, sampling):
+def test_streams_join_and_leave_mid_round(monkeypatch, sampling, together):
     """Requests arrive while others decode (their prompts prefilled a few rows a round) and finish at different
     rounds; every stream still emits its serial tokens."""
 
@@ -364,7 +388,7 @@ def test_streams_join_and_leave_mid_round(monkeypatch, sampling):
     counts = [40, 12, 30, 5, 20, 16]
     arrive = {0: [0], 2: [1, 2], 5: [3], 9: [4], 12: [5]}          # round -> requests admitted before it
     refs = [_serial(w, p, sampling, n) for p, n in zip(prompts, counts)]
-    dec = MultiDecoder(w, head, depth=3, confidence=0.3)
+    dec = _decoder(w, head, together, confidence=0.3)
     streams: dict[int, Stream] = {}
     joined = left = 0                                  # prompts prefilling beside decoding streams; streams leaving
     first_left = None                                  # others still live, and the round the first one left
@@ -383,6 +407,7 @@ def test_streams_join_and_leave_mid_round(monkeypatch, sampling):
     assert joined and left >= 2 and first_left < max(arrive)       # requests joined after others had left
     for i, s in streams.items():
         assert s.out == refs[i], (i, s.out, refs[i])
+    _replayed(dec, together)
 
 
 @pytest.mark.parametrize("expandable", [False, True])
@@ -413,7 +438,8 @@ def test_a_stream_past_8192_rows_beside_others(expandable):
     assert all(s.out == refs[tuple(s.prompt)] for s in short)
 
 
-def test_copied_windows_of_16_rows_keep_serial_tokens(monkeypatch):
+@pytest.mark.parametrize("together", [False, True], ids=["eager", "graphs"])
+def test_copied_windows_of_16_rows_keep_serial_tokens(monkeypatch, together):
     """Copied continuations (here mostly right, sometimes wrong) fill 16-row windows for several streams at once."""
 
     w, head = _model()
@@ -428,7 +454,7 @@ def test_copied_windows_of_16_rows_keep_serial_tokens(monkeypatch):
             return [t if rng.random() < 0.9 else rng.randrange(1, V) for t in truth]
 
     monkeypatch.setattr(multi, "CopyIndex", Oracle)
-    dec = MultiDecoder(w, head, depth=3, confidence=0.3)
+    dec = _decoder(w, head, together, confidence=0.3)
     streams = [Stream(p, n, smp) for p, smp, n in zip(prompts, SAMPLED, counts)]
     for s in streams:
         dec.admit(s)
@@ -436,6 +462,7 @@ def test_copied_windows_of_16_rows_keep_serial_tokens(monkeypatch):
     for s in streams:
         assert s.out == refs[tuple(s.prompt)], s.prompt
     assert sum(s.rounds for s in streams) < sum(counts) // 2           # long runs of copied rows were kept
+    _replayed(dec, together)
 
 
 def _points_after(k):
@@ -570,8 +597,9 @@ def test_context_bounds_each_stream_and_warm_leaves_nothing():
         MultiDecoder(w, head, depth=16, confidence=0.3)
 
 
+@pytest.mark.parametrize("together", [False, True], ids=["eager", "graphs"])
 @pytest.mark.parametrize("sampling", [None, Sampling(1234, 1.0, 20, 0.95)])
-def test_a_stream_alone_replays_the_one_stream_graphs(sampling):
+def test_a_stream_alone_replays_the_one_stream_graphs(sampling, together):
     """A stream decoding alone takes the solo engine's rounds in its graphs; another joins (both decode eagerly, the
     first still in the graphs' buffers) and leaves; the first goes on in the graphs. All emit serial tokens."""
 
@@ -579,7 +607,7 @@ def test_a_stream_alone_replays_the_one_stream_graphs(sampling):
 
     w, head = _model()
     runner = Graphs(w, head, 1024)
-    dec = MultiDecoder(w, head, depth=3, confidence=0.3, graphs=runner)
+    dec = _decoder(w, head, together, confidence=0.3, graphs=runner)
     a = Stream(PROMPTS[1], 24, sampling)
     dec.admit(a)
     _drain(dec)
@@ -600,6 +628,7 @@ def test_a_stream_alone_replays_the_one_stream_graphs(sampling):
     _drain(dec)
     assert first.out == _serial(w, first.prompt, sampling, 64)
     assert second.out == _serial(w, PROMPTS[0], SAMPLED[1], 12)
+    _replayed(dec, together)
 
 
 @pytest.mark.parametrize("expandable", [False, True])
@@ -640,7 +669,8 @@ def test_a_stream_alone_grows_the_graph_buffers_while_others_run(expandable, sam
         assert s.out == refs[tuple(s.prompt)], s.prompt
 
 
-def test_constrained_streams_together_equal_solo_and_serial():
+@pytest.mark.parametrize("together", [False, True], ids=["eager", "graphs"])
+def test_constrained_streams_together_equal_solo_and_serial(together):
     """A grammar per stream cuts the drafts it rejects and masks each row by its path: beside plain streams, and alone
     in the one-stream graphs, a constrained stream emits its serial constrained tokens, which the grammar takes."""
 
@@ -669,13 +699,173 @@ def test_constrained_streams_together_equal_solo_and_serial():
     for i in shaped:
         m = grammars.xgr.GrammarMatcher(compiled)
         assert all(m.accept_token(t) for t in refs[i]), i
-    dec = MultiDecoder(w, head, depth=3, confidence=0.3, graphs=Graphs(w, head, 1024))
+    dec = _decoder(w, head, together, confidence=0.3, graphs=Graphs(w, head, 1024))
     streams = [Stream(p, 24, smp, draft=i != 3, **fresh(i)) for i, (p, smp) in enumerate(zip(MIXED, SAMPLED))]
     for s in streams:
         dec.admit(s)
     _drain(dec)
     assert [s.out for s in streams] == refs
+    _replayed(dec, together)
     alone = Stream(MIXED[0], 24, SAMPLED[0], **fresh(0))
     dec.admit(alone)
     _drain(dec)
     assert alone.out == refs[0] and dec.graphs.target
+
+
+# --parallel rounds in CUDA graphs: the replays' rows against the eager calls'
+
+LONGER = [5 + (i * 13) % 230 for i in range(700)]    # past one 512-key attention chunk
+
+
+def _equal_rows(got, want, rows: int) -> None:
+    """A graph forward's first ``rows`` rows (logits, record, hidden) bit-equal the eager forward's."""
+
+    assert torch.equal(got[0][:rows], want[0]) and torch.equal(got[2][:rows], want[2])
+    for g, e in zip(got[1], want[1]):
+        assert type(g) is type(e)
+        for name in g.__dataclass_fields__:
+            assert torch.equal(getattr(g, name)[:rows], getattr(e, name)), name
+
+
+def test_verify_graphs_equal_the_eager_forward():
+    """Verify graph replays give every row the eager ``multi_tree_forward``'s bits; rounds that fit no graph return None."""
+
+    from tensorfold.families.qwen3_5.cuda.multi_graphs import MultiGraphs
+
+    w, _ = _model()
+    rng = random.Random(7)
+    prompts = [PROMPTS[0], PROMPTS[1], LONG[:40], LONG, list(range(20, 60)), LONGER, PROMPTS[2]]
+    states = [serial_prefill(w, p, None)[0] for p in prompts]
+    graphs = MultiGraphs(w, 6, 1024, GRAPH_WIDTHS)
+    rounds = [[8], [16, 16], [1, 1], [16] * 4, [3, 16, 1, 7, 2, 4]]          # exact fits, then the rest random
+    rounds += [[rng.randint(1, 16) for _ in range(rng.randint(1, 6))] for _ in range(24)]
+    replayed = 0
+    for sizes in rounds:
+        picked = rng.sample(range(len(states)), len(sizes))
+        windows = [([rng.randrange(1, V) for _ in range(n)], list(range(-1, n - 1)), states[k])
+                   for n, k in zip(sizes, picked)]
+        want = multi_tree_forward(w, windows, hidden=True)
+        got = graphs.forward(windows)
+        if sum(sizes) > GRAPH_WIDTHS[-1]:
+            assert got is None
+            continue
+        assert got[3] == want[3]
+        _equal_rows(got, want, want[3][-1])
+        replayed += 1
+    assert replayed >= 20 and set(graphs.entries) == set(GRAPH_WIDTHS)
+    chain = ([1, 2, 3], [-1, 0, 1], states[0])
+    assert graphs.forward([chain] * 7) is None                               # more streams than lanes
+    assert graphs.forward([([1, 2, 3], [-1, 0, 0], states[0])]) is None      # a tree, not a chain
+    far = serial_prefill(w, LONGER + LONGER[:400], None)[0]
+    assert graphs.forward([chain, ([1, 2], [-1, 0], far)]) is None           # keys past the graphs' context
+
+
+def test_head_graphs_equal_the_eager_head_calls():
+    """Head graph replays give the picked rows, their draft logits and every cache write the eager call's bits."""
+
+    from tensorfold.families.qwen3_5_moe.cuda.heads import HeadGraphs
+
+    w, head = _model()
+    rng = random.Random(8)
+    gen = torch.Generator(device="cuda").manual_seed(8)
+    caches = []
+    for p in (PROMPTS[1], PROMPTS[0], LONG, LONGER):
+        _, mc, _, _ = decode.prefill(w, head, p, None)
+        mc = mc.view(len(p) + 64)
+        mc.k[mc.pos:], mc.v[mc.pos:] = 0, 0          # scratch slots a start past ``pos`` reads: finite, the same
+        caches.append(mc)
+    graphs = HeadGraphs(head, 4, 1024, GRAPH_WIDTHS)
+
+    def copy(c):
+        o = object.__new__(type(c))
+        o.k, o.v, o.pos = c.k.clone(), c.v.clone(), c.pos
+        return o
+
+    for trial in range(16):
+        picked = rng.sample(range(len(caches)), rng.randint(1, 4))
+        sizes = [rng.randint(1, 16) for _ in picked]
+        mine = [copy(caches[k]) for k in picked]
+        theirs = [copy(caches[k]) for k in picked]
+        states = [torch.randn((n, D), generator=gen, device="cuda").bfloat16() for n in sizes]
+        tokens = [[rng.randrange(1, V) for _ in range(n)] for n in sizes]
+        starts = [c.pos + rng.randint(0, 3) for c in mine]
+        rows = list(range(sum(sizes)))
+        pick = sorted(rng.sample(rows, rng.randint(0, min(4, len(rows)))))
+        normed = head.forward_streams(theirs, states, tokens, starts)
+        got = graphs.call(mine, states, tokens, starts, pick)
+        if pick:
+            want = normed.index_select(0, torch.tensor(pick, device="cuda"))
+            assert torch.equal(got[0], want) and torch.equal(got[1], head.logits(want))
+        for a, b in zip(mine, theirs):
+            assert torch.equal(a.k.view(torch.int16), b.k.view(torch.int16))
+            assert torch.equal(a.v.view(torch.int16), b.v.view(torch.int16))
+    assert graphs.replays == 16
+    assert graphs.call([caches[0]] * 5, [states[0][:1]] * 5, [[1]] * 5, [0] * 5, [0]) is None   # more than lanes
+
+
+@pytest.mark.parametrize("sampling", [None, Sampling(1234, 1.0, 20, 0.95)])
+def test_warm_captures_the_concurrent_graphs_and_rounds_stay_serial(sampling):
+    """``warm`` captures every width up front; streams decode in the graphs with serial tokens, and eagerly with them off."""
+
+    import os
+
+    w, head = _model()
+    refs = [_serial(w, p, sampling, 24) for p in MIXED[:4]]
+    outs = {}
+    for flag in ("force", "0"):
+        os.environ["TF_MULTI_GRAPHS"] = flag
+        try:
+            dec = MultiDecoder(w, head, depth=3, confidence=0.3, context=1024)
+            dec.warm(4)
+        finally:
+            os.environ.pop("TF_MULTI_GRAPHS")
+        if flag == "force":
+            captured = set(dec.together.entries)
+            assert captured == {x for x in dec.together.widths} and set(dec.heads.entries) == captured
+            assert not dec.together.slower and not dec.together.timings          # forced: no startup timing
+        else:
+            assert dec.together is None and dec.heads is None
+        streams = [Stream(p, 24, sampling) for p in MIXED[:4]]
+        for s in streams:
+            dec.admit(s)
+        _drain(dec)
+        outs[flag] = [s.out for s in streams]
+        if flag == "force":
+            assert set(dec.together.entries) == captured and dec.together.replays > 0
+    assert outs["force"] == outs["0"] == refs
+
+
+def test_startup_timing_keeps_only_the_faster_widths(monkeypatch):
+    """A width the startup timing rejects runs eagerly, the rest replay, and every stream still emits its serial tokens."""
+
+    from tensorfold.families.qwen3_5.cuda import multi_graphs
+
+    w, head = _model()
+    refs = [_serial(w, p, None, 32) for p in MIXED[:4]]
+    timed = iter(range(10 ** 6))
+
+    def best_ms(fn, reps=3):                     # each width times its eager call, then its replay: the replay wins
+        fn()
+        return 10.0 if next(timed) % 2 == 0 else 5.0
+
+    monkeypatch.setattr(multi_graphs, "best_ms", best_ms)
+    dec = MultiDecoder(w, head, depth=3, confidence=0.3, context=1024)
+    dec.capture(4, GRAPH_WIDTHS)
+    assert set(dec.together.timings) == set(GRAPH_WIDTHS) and not dec.together.slower
+    dec.together.slower = {16}
+    assert dec.together.used() == (8, 32, 64)
+    streams = [Stream(p, 32, None) for p in MIXED[:4]]
+    for s in streams:
+        dec.admit(s)
+    rounds = []
+    real = multi_graphs.multi_tree_forward
+
+    def eager(*args, **kw):
+        rounds.append(sum(len(t) for t, _, _ in args[1]))
+        return real(*args, **kw)
+
+    monkeypatch.setattr(multi, "multi_tree_forward", eager)
+    _drain(dec)
+    assert [s.out for s in streams] == refs
+    assert rounds and all(8 < r <= 16 for r in rounds)             # only the slower width's rounds ran eagerly
+    assert dec.together.replays > 0

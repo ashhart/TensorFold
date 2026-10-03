@@ -22,10 +22,11 @@ def mtp_weights(name: str, info: dict) -> tuple[int, int]:
 
 
 def stream_geometry(text: dict, streams: int, keep: int, depth: int):
-    """The 27B's concurrent geometry plus the MTP head's keys and values for each stream and kept end, and the lone stream's graph buffers."""
+    """The 27B's concurrent geometry plus the MTP head's keys and values for each stream and kept end, the lone stream's graph buffers, and the concurrent rounds' graphs."""
 
     from tensorfold.cuda.capacity import Geometry
     from tensorfold.cuda.geometry import layer_counts, stream_geometry as dense
+    from tensorfold.families.qwen3_5.cuda.multi_graphs import graph_bytes
 
     base = dense(text, 1, streams, keep)
     linear, attention = layer_counts(text)
@@ -36,9 +37,9 @@ def stream_geometry(text: dict, streams: int, keep: int, depth: int):
     dk, dv = int(text["linear_key_head_dim"]), int(text["linear_value_head_dim"])
     state = linear * (nv * dk * dv * 4 + (int(text["linear_conv_kernel_dim"]) - 1) * (2 * nk * dk + nv * dv) * 2)
     if not depth:
-        return Geometry(base.bytes_at, 1)
+        return Geometry(lambda slots: base.bytes_at(slots) + graph_bytes(text, streams, slots), 1)
     return Geometry(lambda slots: base.bytes_at(slots) + (streams + keep + 1) * slots * layer
-                    + state + slots * (attention + 1) * layer, depth + 1)
+                    + state + slots * (attention + 1) * layer + graph_bytes(text, streams, slots), depth + 1)
 
 
 class Qwen36Engine:
@@ -101,8 +102,13 @@ class Qwen36Engine:
                                       graphs=self.graphs)
             started = time.perf_counter()
             self.multi.warm(streams)
+            m = self.multi
+            graphs = [f"{name} {', '.join(map(str, g.used()))} rows" for name, g in (("verify", m.together),
+                                                                                ("head", m.heads)) if g is not None]
+            together = (f"in CUDA graphs where startup timing found them faster ({'; '.join(graphs)}), else eagerly"
+                        if graphs else "eagerly")
             print(f"[tensorfold] {streams} streams of {self.context_window} prompt/reply tokens: together, rounds run "
-                  f"eagerly; alone, in CUDA graphs; kernels warmed in {time.perf_counter() - started:.1f}s", flush=True)
+                  f"{together}; alone, in CUDA graphs; kernels warmed in {time.perf_counter() - started:.1f}s", flush=True)
             self.scheduler = Scheduler(self.multi, max_streams=streams)
 
     def _resume(self, prompt: list[int]):
