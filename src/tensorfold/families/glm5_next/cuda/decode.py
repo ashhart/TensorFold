@@ -16,18 +16,21 @@ from . import glue, prof, qmm
 from .forward import Buffers, State, chunks_for, commit, compute, stage
 from .mtp import mtp_compute, mtp_forward, mtp_stage
 from .sparse import pool_bucket
+from .stop import StopVote, stopped
 from .weights import Weights
 
 
 def sample_rows(w: Weights, logits: torch.Tensor, positions: Sequence[int], sampling: Sampling | None,
-                offset: int | None = None, probs: list[float] | None = None) -> list[int]:
+                offset: int | None = None, probs: list[float] | None = None,
+                vote: StopVote | None = None) -> list[int]:
     """Rows of (this rank's vocabulary slice of) logits at their absolute positions -> tokens, same on all ranks."""
 
     R = logits.shape[0]
     greedy = sampling is None or sampling.temperature <= 0
     if not greedy and not sampling.top_k:           # top_k off: the shared nucleus rule over every rank's shard
+        gather = one_rank if w.comm is None else comm_gather(w.comm)
         return nucleus_rows(logits, positions, sampling, offset=w.vocab_offset if offset is None else offset,
-                            gather=one_rank if w.comm is None else comm_gather(w.comm), probs=probs)
+                            gather=gather if vote is None else vote.gather(gather), probs=probs)
     k = 1 if greedy else min(logits.shape[1], int(sampling.top_k) + MARGIN)
     if probs is not None and greedy:
         k = min(logits.shape[1], 20 + MARGIN)       # the draft's confidence needs its competitors too
@@ -36,11 +39,16 @@ def sample_rows(w: Weights, logits: torch.Tensor, positions: Sequence[int], samp
     if w.comm is None:
         values = vals.cpu().numpy().astype(np.float32)
         tokens = ids.cpu().numpy().astype(np.int64)
+        if vote is not None:
+            vote.gather(one_rank)(vals.new_zeros((0,)))
     else:
         packed = torch.cat([vals, ids.view(torch.float32)], dim=1).contiguous()
-        got = torch.empty((w.world * packed.numel(),), dtype=torch.float32, device=logits.device)
-        w.comm.all_gather(packed.view(-1), got)
-        g = got.view(w.world, R, 2 * k).cpu()
+        if vote is None:
+            got = torch.empty((w.world * packed.numel(),), dtype=torch.float32, device=logits.device)
+            w.comm.all_gather(packed.view(-1), got)
+        else:
+            got = vote.gather(comm_gather(w.comm))(packed.view(-1))
+        g = got.reshape(w.world, R, 2 * k).cpu()
         values = torch.cat([g[r, :, :k] for r in range(w.world)], dim=1).numpy().astype(np.float32)
         tokens = torch.cat([g[r, :, k:].contiguous().view(torch.int32) for r in range(w.world)], dim=1).numpy()
         tokens = tokens.astype(np.int64)
@@ -97,6 +105,7 @@ class Engine:
         self.st = State(w, capacity, max_rows)
         self.last_hidden: torch.Tensor | None = None
         self.constraint = self.window = None            # a request's grammar, and the next sample's rows under it
+        self.vote: StopVote | None = None               # rides on every verify sample's all-gather
         self.draft_n = w.head.n
         self.graphs = None
         self.replays = {"main": 0, "sparse": 0, "mtp": 0, "sparse_mtp": 0, "eager": 0}   # steps by path
@@ -154,7 +163,8 @@ class Engine:
         if not draft and self.constraint is not None and self.window is not None:
             self.constraint.mask(logits, self.window, self.w.vocab_offset)   # this rank's vocabulary columns
             self.window = None
-        return sample_rows(self.w, logits, positions, sampling, None, probs)
+        vote = None if draft else getattr(self, "vote", None)
+        return sample_rows(self.w, logits, positions, sampling, None, probs, vote)
 
     def verify_window(self, tokens: list[int]) -> list[int]:
         """The window a reply's grammar keeps (a chain cut at its first rejected draft), masked at the next sample."""
@@ -450,7 +460,7 @@ def serial_decode(e: Engine, pending: int, count: int, sampling: Sampling | None
     stages = dict(forward=0.0, sample=0.0, commit=0.0)
     _sync(w)
     start = time.perf_counter()
-    while len(out) < count and not (stop_eos and out[-1] in w.cfg.eos):
+    while len(out) < count and not (stop_eos and out[-1] in w.cfg.eos) and not stopped(e):
         t0 = time.perf_counter()
         logits = e.forward(e.verify_window([out[-1]]))
         torch.cuda.synchronize()
@@ -505,7 +515,7 @@ def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *
     depth = min(policy.next(0, 0), count - len(out))
     drafts = draft(e, e.last_hidden, [pending], st.pos + 1, depth, sampling, policy.confidence) if depth > 0 else []
     stages["draft"] += time.perf_counter() - t0
-    while len(out) < count and not (stop_eos and out[-1] in w.cfg.eos):
+    while len(out) < count and not (stop_eos and out[-1] in w.cfg.eos) and not stopped(e):
         t0 = time.perf_counter()
         tokens = e.verify_window([out[-1]] + drafts)
         drafts = tokens[1:]
@@ -534,7 +544,7 @@ def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *
         stages["forward"] += t1 - t0
         stages["sample"] += t2 - t1
         stages["commit"] += t3 - t2
-        if len(out) >= count or (stop_eos and out[-1] in w.cfg.eos):
+        if len(out) >= count or (stop_eos and out[-1] in w.cfg.eos) or stopped(e):
             break
         t4 = time.perf_counter()
         depth = min(policy.next(len(drafts), keep - 1), count - len(out))
@@ -560,7 +570,7 @@ def dflash_decode(e: Engine, drafter, pending: int, count: int, sampling: Sampli
     _sync(w)
     start = time.perf_counter()
     depth = min(policy.next(0, 0), count - len(out))
-    while len(out) < count and not (stop_eos and out[-1] in w.cfg.eos):
+    while len(out) < count and not (stop_eos and out[-1] in w.cfg.eos) and not stopped(e):
         t0 = time.perf_counter()
         drafts = drafter.propose(out[-1], depth, sampling, policy.confidence) if depth > 0 else []
         t1 = time.perf_counter()

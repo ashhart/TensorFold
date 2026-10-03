@@ -424,12 +424,13 @@ class GlmEngine:
         try:
             return self._run_once(prompt, max_tokens, sampling, stop_eos, on_tokens, code, hit, draft)
         finally:
-            self.e.constraint = self.e.window = None
+            self.e.constraint = self.e.window = self.e.vote = None
 
     def _run_once(self, prompt: list[int], max_tokens: int, sampling, stop_eos: bool,
                   on_tokens: Callable[[list[int]], Any], code: list[int], hit, draft: bool) -> dict[str, Any]:
         from .decode import DepthPolicy, dflash_decode, mtp_decode, prefill, serial_decode
         from .drafter_choice import DrafterChoice, auto_decode
+        from .stop import StopVote
 
         auto, use_mtp, use_dflash = self._drafters(code)
         drafter = self.drafter if use_dflash else None
@@ -447,9 +448,11 @@ class GlmEngine:
                         keep_at=max(1, len(prompt) - 1) if draft else None, keep=self._remember)
         prefill_s = time.perf_counter() - t0
         stats: dict[str, Any] = {"prefill_s": prefill_s, "cached": cut}
+        on_tokens = StopVote(on_tokens)             # rank 0's stop reaches every rank on the next verify sample
         on_tokens([first])
         if max_tokens <= 1 or (stop_eos and first in self.eos):
             return stats
+        self.e.vote = on_tokens                     # on every rank, so every rank's gathers keep the same size
         policy = decode_policy(code)
         if policy is None:
             res = serial_decode(self.e, first, max_tokens, sampling, stop_eos=stop_eos, on_tokens=on_tokens)
@@ -475,6 +478,8 @@ class GlmEngine:
         stats.update(decode_s=res.seconds, rounds=res.rounds, min_rows=1 + min(res.depths, default=0),
                      tokens_per_round=round((len(res.tokens) - 1) / max(res.rounds, 1), 3),
                      sha256=hashlib.sha256(json.dumps(res.tokens).encode()).hexdigest()[:16])
+        if on_tokens.stop:
+            stats["stopped"] = True
         if res.arms:
             stats.update(drafters=res.arms, keeps=res.keeps)
         if policy is not None:                   # the drafts' counts, which /health, /metrics and the reply report

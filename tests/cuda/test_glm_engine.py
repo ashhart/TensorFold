@@ -317,6 +317,30 @@ def test_drafted_replies_equal_serial(engine, sampling):
         assert len(drafted) - 1 <= stats["rounds"] + stats["accepted"], (policy, stats)
 
 
+@pytest.mark.parametrize("sampling", [Sampling(1234, 1.0, 20, 0.95), Sampling(1234, 1.0, 0, 0.9, 0.02), None],
+                         ids=["sampled", "nucleus", "greedy"])
+@pytest.mark.parametrize("policy", ["0", "3", "auto"])
+def test_a_stop_ends_the_run_after_the_next_round(engine, sampling, policy):
+    """A stop ends the run one round later, its tokens the unstopped reply's, and the next request is exact."""
+
+    prompt = list(np.random.default_rng(11).integers(0, 1000, size=41))
+    full, _ = _generate(engine, prompt, sampling, policy=policy, tokens=160)
+    heard: list[list[int]] = []
+
+    def on_tokens(new):
+        heard.append(list(new))
+        return len(heard) >= 3                      # the first token, then rounds 1 and 2
+
+    engine.request.policy, engine.request.stop_eos = policy, False
+    stats = engine.generate(list(prompt), 160, sampling, on_tokens)
+    assert stats["stopped"] and stats["rounds"] == 3, stats
+    sent = [t for call in heard[:3] for t in call]
+    assert sent == full[:len(sent)]
+    assert engine.e.vote is None
+    again, _ = _generate(engine, prompt, sampling, draft=False, tokens=160)
+    assert again == full
+
+
 @pytest.mark.parametrize("sampling", [Sampling(1234, 1.0, 20, 0.95), None], ids=["sampled", "greedy"])
 def test_drafter_choice_equals_serial(engine_f, sampling):
     """Every policy with both drafters loaded, and the per-round choice made to switch often."""

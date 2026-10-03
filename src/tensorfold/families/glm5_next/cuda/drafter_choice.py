@@ -10,6 +10,7 @@ from tensorfold.engine.exact_sampling import Sampling
 
 from .decode import DecodeResult, DepthPolicy, Engine, _sync, absorb, draft
 from .forward import commit
+from .stop import stopped
 
 
 def _other(arm: str) -> str:
@@ -89,7 +90,7 @@ def auto_decode(e: Engine, drafter, pending: int, count: int, sampling: Sampling
     last = {"m": (0, 0), "f": (0, 0)}
     _sync(w)
     start = time.perf_counter()
-    while len(out) < count and not (stop_eos and out[-1] in w.cfg.eos):
+    while len(out) < count and not (stop_eos and out[-1] in w.cfg.eos) and not stopped(e):
         arm = choice.pick() if choice is not None else "m"
         room = count - len(out)
         t0 = time.perf_counter()

@@ -429,7 +429,7 @@ class App:
         serving: list[Any] = [None]
 
         def on_tokens(new: list[int]) -> bool:
-            # True stops the engine after this round; engines that finish on both ranks keep calling and get True
+            # True stops the engine after this round (two-rank GLM: the next one); a running engine keeps getting True
             if stopped["client"] or stopped["stop"] or failed:
                 return True
             try:
