@@ -13,7 +13,7 @@ from typing import Any, Callable
 
 from tensorfold.engine import grammar
 from tensorfold.server.cancellation import RequestCancelled
-from tensorfold.server.errors import CONTEXT_LIMIT, RequestError, refusal
+from tensorfold.server.errors import CONTEXT_LIMIT, CapacityError, RequestError, refusal
 from tensorfold.server.messages import validate_modalities
 from tensorfold.server.probabilities import TokenBytes, probability_options
 from tensorfold.server.request_options import heard_effort, parse_numbers, thinking_fields
@@ -331,6 +331,9 @@ class App:
         return None
 
     def prepare(self, body: dict[str, Any], chat: bool) -> PreparedRequest:
+        if getattr(getattr(getattr(self.engine, "scheduler", None), "decoder", None), "broken", None) is not None:
+            # every admission would fail the same way: a 503 a client retries elsewhere, not a 500 per request
+            raise CapacityError("the engine failed earlier and its ranks are out of step: restart both ranks")
         problem = self._check_fields(body)
         if problem:
             raise refusal(problem)

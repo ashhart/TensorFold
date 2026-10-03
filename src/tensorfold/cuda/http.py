@@ -108,14 +108,14 @@ def make_handler(app: App):
             if route in ("/metrics", "/v1/metrics"):                  # open, like /health: scrapers and pollers
                 return metrics.send(self, app)
             if self.path.rstrip("/") in ("/health", "/v1/health"):      # (no query string, as before)
-                return self._json(200, health.of(app).snapshot(app))
+                return self._json(*health.status(app))
             if not self._authorized():
                 return
             if self.path.rstrip("/") in ("/v1/models", "/models"):
                 self._json(200, {"object": "list", "data": [{"id": model_id, "object": "model", "owned_by": "tensorfold"}
                                                             for model_id in app.model_ids]})
             elif self.path.rstrip("/") in ("/health", "/v1/health"):
-                self._json(200, health.of(app).snapshot(app))
+                self._json(*health.status(app))
             elif responses.route(self.path):
                 responses.get(self, app, responses.route(self.path))
             else:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from contextlib import contextmanager
@@ -83,10 +84,49 @@ class Health:
         if decoder is not None:                         # read, never locked: sizes of the decoder's own tables
             body["streams"] = {"decoding": len(getattr(decoder, "streams", ())),
                                "prefilling": len(getattr(decoder, "filling", ())), "max": scheduler.max_streams}
+        body.update(progress(scheduler, decoder))
+        body["ok"] = body["fatal"] is None and not body["stalled"]
         window = getattr(app, "effective_context_window", None)
         if window:
             body["context_length"] = int(window)
         return body
+
+
+def stall_seconds() -> float:
+    """``TF_STALL_S``: how long one engine call (an admission, a round, a finish) may run before /health calls the
+    engine stalled; 0 (the default) never does."""
+
+    try:
+        return max(0.0, float(os.environ.get("TF_STALL_S") or 0))
+    except ValueError:
+        return 0.0
+
+
+def progress(scheduler, decoder) -> dict[str, Any]:
+    """Whether the engine can still serve: ``fatal`` (a decoder whose ranks fell out of step: every later request
+    fails until both restart) and ``stalled`` (one engine call running past ``TF_STALL_S``: a hung collective or
+    rank). The idea of a fatal field and forward-progress checks follows the GLM Spark engine's health.py of
+    deepseek-v41-tensorfold-spark (Jay Leaton); no code is copied. Only engine calls are timed, never a request's
+    wait in the queue, so a full queue behind long replies is not a stall."""
+
+    broken = getattr(decoder, "broken", None)
+    now = time.monotonic()
+    since = getattr(scheduler, "call_since", None)
+    age = now - since if isinstance(since, (int, float)) else None
+    limit = stall_seconds()
+    last = getattr(scheduler, "last_round", None)
+    return {"fatal": repr(broken) if broken else None, "stalled": bool(limit and age is not None and age > limit),
+            "call_age_s": round(age, 3) if age is not None else None,
+            "last_round_age_s": round(now - last, 3) if isinstance(last, (int, float)) else None}
+
+
+def status(app) -> tuple[int, dict[str, Any]]:
+    """/health's (code, body): ``TF_HEALTH=strict`` answers 503 when the engine is not ok (for a watchdog or a load
+    balancer); otherwise always 200, the body saying what it found."""
+
+    body = of(app).snapshot(app)
+    strict = (os.environ.get("TF_HEALTH") or "").strip().lower() == "strict"
+    return (503 if strict and not body["ok"] else 200), body
 
 
 def of(app) -> Health:
@@ -105,4 +145,4 @@ def _stat(stats: dict[str, Any], key: str) -> int:
     return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
 
 
-__all__ = ["Health", "Request", "of"]
+__all__ = ["Health", "Request", "of", "progress", "stall_seconds", "status"]
