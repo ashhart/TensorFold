@@ -90,6 +90,7 @@ class Lanes:
         self._counts = _takes(forward.window, "counts")
         self.pool, self.cache, self.drafter, self.depth, self.grammars = pool, cache, drafter, depth, grammars
         self.lanes: list[Lane | None] = [None] * int(lanes)
+        self._kept: tuple | None = None
         self.tables = [pool.table(capacity) for _ in range(lanes)] if pool is not None else None
         if self.tables is not None and callable(getattr(forward, "bind", None)):
             forward.bind(self.tables)
@@ -139,15 +140,23 @@ class Lanes:
         """Another rank failed a message this rank applied: an admission is undone; anything else ends the engine."""
 
         if kind == ADMIT and ok:
-            self._undo(int(ints[0]))
+            self._undo(int(ints[0]), self._kept)
 
-    def _undo(self, lane: int) -> None:
-        """An admission taken back: the pages only this lane held are cleared, so every rank's pool stays alike."""
+    def _undo(self, lane: int, kept: tuple | None = None) -> None:
+        """An admission taken back: the pages only it held cleared, the cache's order restored, the lane's parts reset."""
 
         if self.tables is not None:
             table = self.tables[lane]
             self.pool.zero_pages([p for p in table.pages if self.pool.holders(p) == 1])
         self._done(lane)
+        if kept is not None:
+            self.cache.entries, self.cache.hit = kept
+        for reset in (lambda: self.forward.reset(lane), lambda: self.drafter and self.drafter.reset(lane, []),
+                      lambda: self.depth and self.depth.reset(lane)):
+            try:  # best effort: a part that cannot reset leaves only a free lane's scratch behind
+                reset()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _release(self, held: Held) -> None:
         if held.pages:
@@ -170,20 +179,23 @@ class Lanes:
         state = Lane(prompt, sampling, constraint)
         self.lanes[lane] = state
         table = self.tables[lane] if self.tables is not None else None
-        if table is not None:
-            table.reserve(quota)
-        self.forward.reset(lane)
-        if cached:
-            try:
+        # a resume touches the device cache (its order addresses EVICT): an undone admission puts it back
+        kept = (list(self.cache.entries), set(self.cache.hit)) if self.cache is not None else None
+        self._kept = kept  # for ``disagreed``, when another rank fails this admission
+        try:  # a failure anywhere past here leaves the lane as it was: free, no quota, no pages
+            if table is not None:
+                table.reserve(quota)
+            self.forward.reset(lane)
+            if cached:
                 self._resume(lane, prompt, cached, tier, table, held)
-            except Exception:
-                self._undo(lane)
-                raise
-            state.history = prompt[:cached]
-        if self.drafter is not None:
-            self.drafter.reset(lane, prompt)
-        if self.depth is not None:
-            self.depth.reset(lane)
+                state.history = prompt[:cached]
+            if self.drafter is not None:
+                self.drafter.reset(lane, prompt)
+            if self.depth is not None:
+                self.depth.reset(lane)
+        except Exception:
+            self._undo(lane, kept)
+            raise
 
     def _resume(self, lane: int, prompt: list[int], cached: int, tier: int, table: Any, held: Held | None) -> None:
         if tier < 0:

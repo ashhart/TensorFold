@@ -620,3 +620,37 @@ def test_each_window_names_the_candidates_its_own_sampling_needs():
     vocab = pair.decoder.forward.vocab
     assert seen and all(count == max(counts) for count, counts in seen)
     assert any(sorted(counts) == [1, 5 + MARGIN, vocab] for _, counts in seen)
+
+
+@pytest.mark.parametrize("where", ["forward.reset", "_resume", "drafter.reset", "depth.reset"])
+@pytest.mark.parametrize("rank", [0, 1])
+def test_an_admission_failing_anywhere_on_either_rank_leaves_both_as_they_were(where, rank, monkeypatch):
+    from tensorfold.cuda.drafting import StaticDepth
+
+    p = prompts(1)[0]
+    pair = Pair(lanes=1, keep=1, drafter=Pattern, depth=lambda: StaticDepth(2))
+    pair.run([stream(p, 4)])  # a kept state, so a resume runs
+    side = pair.decoder.local if rank == 0 else pair.follower
+    owner, name = (side, "_resume") if where == "_resume" else (getattr(side, where.split(".")[0]), where.split(".")[1])
+    real = getattr(owner, name)
+
+    def fail(*a, **k):
+        if where == "_resume":
+            real(*a, **k)  # its pages are mapped and written first
+        raise RuntimeError(f"{where} fails on rank {rank}")
+
+    monkeypatch.setattr(owner, name, fail)
+    before = [(lanes.lanes, [t.quota for t in lanes.tables], [list(t.pages) for t in lanes.tables], dict(lanes.pool.refs),
+               lanes.pool.free) for lanes in (pair.decoder.local, pair.follower)]
+    with pytest.raises(RuntimeError):
+        pair.decoder.admit(stream(p + [1], 4))
+    after = [(lanes.lanes, [t.quota for t in lanes.tables], [list(t.pages) for t in lanes.tables], dict(lanes.pool.refs),
+              lanes.pool.free) for lanes in (pair.decoder.local, pair.follower)]
+    assert after == before and pair.decoder.free == [0]
+    a, b = pair.decoder.local, pair.follower
+    assert a.state() == b.state()  # the device cache's order too: EVICT names entries by index
+    for plane in a.pool.buffers:
+        assert (a.pool.buffers[plane] == b.pool.buffers[plane]).all()
+    monkeypatch.setattr(owner, name, real)
+    s = stream(p + [1], 4)
+    assert pair.run([s]) == [serial(p + [1], 4)]
