@@ -5,9 +5,9 @@ bits), trellis decoded on the fly, each expert's input Hadamard rotation moved o
 Three launches a chunk of <= CHUNK_ROWS rows: ``route`` (one block: pairs grouped by expert into items of <= 112),
 ``gate|up`` (+ SwiGLU and the down input's rotation, xd [pairs, I] fp16; also zeroes out), ``down`` (+ svh, routing
 weight, red.add into an fp32 out). A slot's output does not depend on the other rows. By default (TF_EXL3_PROMPT_DET)
-down stores each slot's row (fp16) and ``slot_sum16`` adds a row's slots in fp32 in slot order, so a prompt gets the
-same bits every run (TF_EXL3_PROMPT_DET: slots16 default, slots = fp32 rows, fixed = int64 red.add, 0 = fp32 red.add in
-arrival order - bits may differ run to run). Decode windows keep the row-invariant ``experts.routed``.
+down adds a row's slots into fp32 out with red.add in arrival order (fastest; a prompt's bits may differ run to run).
+TF_EXL3_PROMPT_DET=slots16 makes prompts reproducible: each slot's row stored as fp16 and ``slot_sum16`` adds them in
+fp32 in slot order (~4-6% slower prefill); slots = fp32 rows, fixed = int64 fixed-point red.add. Decode windows keep the row-invariant ``experts.routed``.
 """
 
 from __future__ import annotations
@@ -58,11 +58,12 @@ class PromptScratch:
 
 ORDER_BY_COUNT = int(__import__("os").environ.get("TF_EXL3_PROMPT_ORDER", "0"))   # 1: busiest experts first (measured neutral)
 # How a row's slot outputs are added. fp32 red.add sums them in arrival order - different bits run to run, so a
-# multi-chunk prompt's KV (and every later token) was not reproducible. "slots16" (default): each slot's row stored
+# multi-chunk prompt's KV (and every later token) was not reproducible. "0" (default, fastest prefill): fp32 red.add -
+# a prompt longer than one chunk can differ run to run. "slots16" (reproducible, ~4-6% slower): each slot's row stored
 # as fp16, summed in fp32 in slot order (rel 2e-4 vs fp32 sums; 4 Sparks prefill 8K/32K/128K 1000/969/952 tok/s);
 # "slots": fp32 rows (944/976/899); "fixed": red.add of 64-bit fixed point (917/944/867, u64 atomics are L2-bound);
 # "0": fp32 red.add (1044-1087/1035-1124/996, NOT reproducible run to run)
-_DET = __import__("os").environ.get("TF_EXL3_PROMPT_DET", "slots16").lower()
+_DET = __import__("os").environ.get("TF_EXL3_PROMPT_DET", "0").lower()
 DETERMINISTIC = _DET in ("1", "fixed", "slots", "slots16")
 DET_MODE = {"slots": 2, "slots16": 4}.get(_DET, 3)
 NCB_ELEM_FIX = int(__import__("os").environ.get("TF_EXL3_PROMPT_FIX_SLAB_ELEM", "8"))   # slab sizing (8: true int64 width)
