@@ -3,6 +3,14 @@
 `tensorfold update` prints the sections below that are newer than the version you had. Each release's page on
 GitHub has the full notes and the measurements behind them.
 
+## Unreleased
+
+- **GLM-5.3-Flash on two GPUs stops a reply when its client leaves.** Only rank 0 sees the client, so until now
+  both ranks decoded on to `max_tokens` after a client left, a stop string matched or a thinking budget cut the
+  reply, with nothing sent: on two DGX Sparks a left 8,192-token reply held the pair for 343 s, and every request
+  behind it waited. Both ranks now stop after the same round (one int crosses the link each round; decode speed
+  unchanged within noise), and the pair was free within a second of the client leaving.
+
 ## 0.6.4 (3 Oct 2026)
 
 - **Flash Next on two DGX Sparks serves concurrent requests.** `--parallel N` with two CUDA ranks runs every stream

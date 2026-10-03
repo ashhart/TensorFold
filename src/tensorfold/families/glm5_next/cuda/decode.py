@@ -464,8 +464,8 @@ def serial_decode(e: Engine, pending: int, count: int, sampling: Sampling | None
         stages["sample"] += t2 - t1
         stages["commit"] += t3 - t2
         out.append(tok)
-        if on_tokens is not None:
-            on_tokens([tok])
+        if on_tokens is not None and on_tokens([tok]):          # True: the caller stops the reply here
+            break
     _sync(w)
     return DecodeResult(out, time.perf_counter() - start, len(out) - 1, stages=stages)
 
@@ -529,12 +529,11 @@ def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *
         keeps.append(keep)
         e.follow(sampled[:keep])
         out.extend(sampled[:keep])
-        if on_tokens is not None:
-            on_tokens(sampled[:keep][:max(0, count - (len(out) - keep))])
+        halt = on_tokens is not None and on_tokens(sampled[:keep][:max(0, count - (len(out) - keep))])
         stages["forward"] += t1 - t0
         stages["sample"] += t2 - t1
         stages["commit"] += t3 - t2
-        if len(out) >= count or (stop_eos and out[-1] in w.cfg.eos):
+        if halt or len(out) >= count or (stop_eos and out[-1] in w.cfg.eos):
             break
         t4 = time.perf_counter()
         depth = min(policy.next(len(drafts), keep - 1), count - len(out))
@@ -588,12 +587,13 @@ def dflash_decode(e: Engine, drafter, pending: int, count: int, sampling: Sampli
         keeps.append(keep)
         e.follow(sampled[:keep])
         out.extend(sampled[:keep])
-        if on_tokens is not None:
-            on_tokens(sampled[:keep][:max(0, count - (len(out) - keep))])
+        halt = on_tokens is not None and on_tokens(sampled[:keep][:max(0, count - (len(out) - keep))])
         stages["draft"] += (t1 - t0) + (t5 - t4)
         stages["forward"] += t2 - t1
         stages["sample"] += t3 - t2
         stages["commit"] += t4 - t3
+        if halt:
+            break
         depth = min(policy.next(len(drafts), keep - 1), count - len(out))
     _sync(w)
     return DecodeResult(out[:count], time.perf_counter() - start, rounds, drafted, accepted, stages, depths, keeps)
