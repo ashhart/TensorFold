@@ -90,6 +90,9 @@ KEPT_ENTRIES = int(os.environ.get("TF_DSV41_KEPT_ENTRIES") or "16")
 # on one shared graph pool the largest graph's, measured 0.27 GiB for 128 graphs (32 row counts x 4 key widths) at a
 # 614400 limit; with a pool per graph (TF_DSV41_SHARED_GRAPHS=0) the sum, 4.05 GiB for the 32 full-width graphs
 GRAPH_BYTES_PER_LIMIT_TOKEN = 512 if os.environ.get("TF_DSV41_SHARED_GRAPHS", "1") != "0" else 7168
+# what an instantiated decode graph costs the driver (outside the CUDA allocator: ~5.1 GB of MemAvailable went for
+# 128 graphs while the allocator grew 0.26 GB); FIXED_GIB covers the 32 full-width ones, this each narrower one
+GRAPH_EXEC_BYTES = 40 * 2 ** 20
 
 
 def _widths_words() -> list[int]:
@@ -124,6 +127,14 @@ def carved_bytes(pool: int, carve: int, ratios: tuple[int, ...] = (2, 2, 2, 1)) 
     return placed
 
 
+def narrow_graphs(streams: int, limit: int) -> int:
+    """Decode graphs captured at narrower key widths than ``limit`` (32 row counts each with --parallel)."""
+
+    from .serial import PROMPT_ROWS, WIDTHS
+
+    return PROMPT_ROWS * len([w for w in WIDTHS if w < limit]) if streams > 1 else 0
+
+
 def pool_tokens(free: int, streams: int, limit: int, carve: int = 0) -> int:
     """Shared-pool rows (a multiple of ``pool.ALIGN``) that fit ``free`` bytes beside ``streams`` slots' rings, a
     ``limit``-token window's buffers (RoPE tables, selection, the decode graphs' score buffers) and the kept-prompt
@@ -133,6 +144,7 @@ def pool_tokens(free: int, streams: int, limit: int, carve: int = 0) -> int:
     from .pool import ALIGN, align_up
 
     room = (free - int((FIXED_GIB + RESERVE_GIB) * 2 ** 30) - (streams - 1 + KEPT_ENTRIES) * SLOT_BYTES
+            - narrow_graphs(streams, limit) * GRAPH_EXEC_BYTES
             - (TOKEN_BYTES - CACHE_BYTES + GRAPH_BYTES_PER_LIMIT_TOKEN) * limit)
     cap = streams * align_up(limit)
     best = max(0, min(room // CACHE_BYTES, cap)) // ALIGN * ALIGN
@@ -246,16 +258,19 @@ class Dsv41Engine:
             if rank == 0:
                 print(f"[tensorfold] shared cache pool: {pool:,} tokens for {self.streams} streams of up to {cap:,} "
                       f"each; its free rows keep up to {KEPT_ENTRIES} prompt states", flush=True)
+        self._memlog("before the caches")
         self.e = SerialEngine(w, Comm(self.nccl), str(engram), str(self.model_dir / "tokenizer.json"), cap=cap,
                               slots=self.streams, pool_tokens=pool)
         self.nccl.barrier()
+        self._memlog("after the caches")
         with torch.no_grad():
             if drafts:
                 self.e.enable_dspark(DRAFTS)
             if self.shared:
                 self.e.make_bank(KEPT_ENTRIES)
             torch.cuda.synchronize()
-            before = torch.cuda.memory_reserved()
+            self._memlog("after drafter and bank")
+            before, avail = torch.cuda.memory_reserved(), available_bytes()
             self.e.capture(1)
             # verify windows of one stream (1 + drafts rows); with --parallel, any round of up to 16 rows
             from .serial import PROMPT_ROWS
@@ -266,8 +281,11 @@ class Dsv41Engine:
             for rows in range(2, top + 1):
                 self.e.capture(rows)
             torch.cuda.synchronize()
+            self._memlog("after the decode graphs")
             if rank == 0:
-                print(f"[tensorfold] decode graphs: {(torch.cuda.memory_reserved() - before) / 2 ** 30:.2f} GiB for "
+                held = (torch.cuda.memory_reserved() - before) / 2 ** 30
+                print(f"[tensorfold] decode graphs: {held:.2f} GiB of buffers + "
+                      f"{max(0.0, (avail - available_bytes()) / 2 ** 30 - held):.1f} GiB of the driver's for "
                       f"{len(self.e.graphs) + len(self.e.narrow)} graphs (key widths {[*self.e.widths, cap]})",
                       flush=True)
             if drafts:
@@ -291,7 +309,9 @@ class Dsv41Engine:
                   f"{'DSpark drafts up to ' + str(DRAFTS) if drafts else 'serial decoding'}, "
                   f"{torch.cuda.memory_allocated() / 2 ** 30:.1f} GiB a rank", flush=True)
         if warm and os.environ.get("TF_DSV41_WARM", "1") != "0":
+            self._memlog("before warm-up")
             self._warm()
+            self._memlog("after warm-up")
         if self.shared:                                 # kept prompts live in the shared pool (multi.Kept)
             self.e.pool = None
         else:
@@ -308,6 +328,7 @@ class Dsv41Engine:
                                       pool=Pool(self.e.pool_tokens) if self.shared else None)
             self.multi.model_dir = self.model_dir
             self.multi.calibrate(self._gather_ints)
+            self._memlog("after calibration")
             if rank == 0:
                 curve = " ".join(f"{v:.0f}" for v in self.multi.costs)
                 print(f"[tensorfold] verify ms by rows 1..{len(self.multi.costs)}: {curve}; a draft "
@@ -315,6 +336,18 @@ class Dsv41Engine:
             if rank == 0:
                 self.scheduler = Scheduler(self.multi, max_streams=self.streams)
                 print(f"[tensorfold] {self.streams} concurrent streams of up to {cap} tokens each", flush=True)
+
+    def _memlog(self, stage: str) -> None:
+        """TF_DSV41_MEMLOG=1: what the system and the CUDA allocator hold at a startup stage (both ranks)."""
+
+        if os.environ.get("TF_DSV41_MEMLOG") != "1":
+            return
+        import torch
+
+        torch.cuda.synchronize()
+        print(f"[memlog r{self.rank}] {stage}: available {available_bytes() / 2 ** 30:.2f} GiB, allocated "
+              f"{torch.cuda.memory_allocated() / 2 ** 30:.2f}, reserved {torch.cuda.memory_reserved() / 2 ** 30:.2f}",
+              flush=True)
 
     def _make_pool(self, cap: int) -> None:
         """Kept prompt states (``tensorfold.cuda.kv_pool``) in what the context's prompt buffers and the reserve

@@ -155,8 +155,9 @@ PROMPT_CFG = [1, 1]          # prompt expert kernel config for gate/up and down 
 PROMPT_ROWS = int(os.environ.get("TF_DSV41_DECODE_ROWS") or 32)
 # decode graphs are captured at these key widths (tokens) besides the full limit; a step replays the narrowest that
 # covers its rows' positions, so indexer scores, block choice and top-k run over [R, width // ratio] instead of the
-# limit's (the same entries are chosen: past a row's position every score is -inf). TF_DSV41_WIDTHS=0: full only
-WIDTHS = [int(v) for v in (os.environ.get("TF_DSV41_WIDTHS") or "16384,65536,262144").split(",") if int(v) > 0]
+# limit's (the same entries are chosen: past a row's position every score is -inf). Each width's 32 graphs cost
+# ~1.2 GB of driver memory (the pool's rows), so one by default. TF_DSV41_WIDTHS=0: full only
+WIDTHS = [int(v) for v in (os.environ.get("TF_DSV41_WIDTHS") or "65536").split(",") if int(v) > 0]
 SHARED_GRAPH_POOL = os.environ.get("TF_DSV41_SHARED_GRAPHS", "1") != "0"   # all decode graphs on one memory pool
 
 
