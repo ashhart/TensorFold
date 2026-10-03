@@ -19,6 +19,8 @@
 // Launches: route (one block: histogram, scan, items of <= IPM pairs an expert, scatter), gate|up (+ SwiGLU and the
 // down input's rotation: xd [pairs, I] fp16 in routed order; also zeroes out), down (+ svh, routing weight, red.add
 // into an fp32 out; items fastest in the grid so a column slab of out stays in L2).
+// Mode 2 (deterministic): down stores each pair's row into its own row of a [pairs, D] buffer instead (no atomics, no
+// zeroing), and slot_sum adds a row's slots in slot order - the same bits every run (red.add sums in arrival order).
 
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
@@ -598,7 +600,7 @@ struct DnEpi {
     const float* wts_sh;      // the item's routing weights (shared memory)
     float* out;
     const int* pair_sh;       // the item's rows of out (row * D), shared memory
-    bool f16;                 // out is the fp16 accumulation buffer
+    int mode;                 // 0: red.add into fp32 out, 1: fp16 out, 2: store into the pair's own row (deterministic)
     int e, D, slots, cnt;
 };
 
@@ -661,7 +663,10 @@ __device__ __forceinline__ void dn_epilogue(const float (&acc)[2 * NB][4], float
 #pragma unroll
                 for (int blk = 0; blk < 2; ++blk) {
                     const float* u = v[ri * 2 + blk];
-                    if (p.f16)
+                    if (p.mode == 2)
+                        *reinterpret_cast<float4*>(p.out + orow + blk * 128) = make_float4(
+                            u[0] * sv[blk][0] * w, u[1] * sv[blk][1] * w, u[2] * sv[blk][2] * w, u[3] * sv[blk][3] * w);
+                    else if (p.mode == 1)
                         red_add_f16x4(reinterpret_cast<half*>(p.out) + orow + blk * 128, u[0] * sv[blk][0] * w, u[1] * sv[blk][1] * w,
                                u[2] * sv[blk][2] * w, u[3] * sv[blk][3] * w);
                     else
@@ -775,11 +780,11 @@ __global__ void __launch_bounds__(NTHREADS, 1) prompt_down_kernel(
     const int e = items[3 * item], first = items[3 * item + 1], cnt = items[3 * item + 2];
     if (threadIdx.x < IPM) {
         const int pr = (int)threadIdx.x < cnt ? sorted[first + threadIdx.x] : 0;
-        pair_sh[threadIdx.x] = (pr / slots) * D;
+        pair_sh[threadIdx.x] = (f16 == 2 ? pr : pr / slots) * D;     // mode 2: the pair's own row
         wts_sh[threadIdx.x] = (int)threadIdx.x < cnt ? wts[pr] : 0.f;
     }
     const uint32_t* Td = reinterpret_cast<const uint32_t*>(down_ptr[e]);
-    const DnEpi ep{svh_d, wts_sh, out, pair_sh, f16 != 0, e, D, slots, cnt};
+    const DnEpi ep{svh_d, wts_sh, out, pair_sh, (int)f16, e, D, slots, cnt};
     const int nb = (cnt + 15) >> 4;
     switch (k2s[e] * 16 + nb) {
 #define TF_PE_DN(K2_, NB_) \
@@ -823,7 +828,7 @@ void launch_cb(const at::Tensor& x, const at::Tensor& sorted, const at::Tensor& 
         items.data_ptr<int>(), item_count.data_ptr<int>(), gate_ptr.data_ptr<int64_t>(), up_ptr.data_ptr<int64_t>(),
         gu_k2.data_ptr<int>(), h(suh_g), h(suh_u), h(svh_g), h(svh_u), h(suh_d), reinterpret_cast<half*>(xd.data_ptr()),
         D, I, NS, slots, limit, act_mode, reinterpret_cast<float4*>(out.data_ptr()),
-        (long long)(out.numel() * out.element_size() / 16));
+        f16 == 2 ? 0LL : (long long)(out.numel() * out.element_size() / 16));          // mode 2: nothing to zero
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     if (which & 2)
     prompt_down_kernel<CB><<<dim3((unsigned)max_items, (unsigned)(D / 256 / ncb)), NTHREADS, DN_SMEM, stream>>>(
@@ -836,6 +841,32 @@ void launch_cb(const at::Tensor& x, const at::Tensor& sorted, const at::Tensor& 
 }  // namespace
 
 int64_t exl3p_item_rows() { return IPM; }
+
+// mode 2's sum: out[r] = the pairs of row r added in slot order (picks outside [0, E) skipped), one float4 a thread
+__global__ void slot_sum_kernel(const float4* __restrict__ pairs, const int* __restrict__ pick, float4* __restrict__ out,
+                                long long n4, int S, int D4, int E) {
+    const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n4) return;
+    const long long r = i / D4, c = i % D4;
+    float4 acc = make_float4(0.f, 0.f, 0.f, 0.f);
+    for (int s = 0; s < S; ++s) {
+        const int e = pick[r * S + s];
+        if (e < 0 || e >= E) continue;
+        const float4 v = pairs[(r * S + s) * D4 + c];
+        acc.x += v.x; acc.y += v.y; acc.z += v.z; acc.w += v.w;
+    }
+    out[i] = acc;
+}
+
+void exl3p_slot_sum_cuda(const at::Tensor& pairs, const at::Tensor& pick, at::Tensor& out, int64_t E) {
+    const int64_t R = pick.size(0), S = pick.size(1), D = out.size(1);
+    const long long n4 = (long long)R * D / 4;
+    if (n4 == 0) return;
+    slot_sum_kernel<<<(unsigned)((n4 + 255) / 256), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+        reinterpret_cast<const float4*>(pairs.data_ptr<float>()), pick.data_ptr<int>(),
+        reinterpret_cast<float4*>(out.data_ptr<float>()), n4, (int)S, (int)(D / 4), (int)E);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
 
 void exl3p_route_cuda(const at::Tensor& pick, int64_t n, int64_t E, at::Tensor& sorted, at::Tensor& items,
                       at::Tensor& item_count, int64_t max_items, int64_t by_count) {
