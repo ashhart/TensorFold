@@ -29,9 +29,13 @@ CANDIDATES = 16                      # top ids a depth the tree policy weighs, a
 
 
 def drafter_class(draft_dir: str | Path):
-    """DFlash2 or DFlash1, by the drafter checkpoint's architecture."""
+    """DFlash2, DFlash1 or DSpark, by the drafter checkpoint's architecture."""
 
     cfg = json.loads((Path(draft_dir) / "config.json").read_text())
+    from .dspark import DSpark, is_dspark
+
+    if is_dspark(cfg):
+        return DSpark
     return DFlash1 if "DFlashDraftModel" in (cfg.get("architectures") or []) else DFlash2
 
 

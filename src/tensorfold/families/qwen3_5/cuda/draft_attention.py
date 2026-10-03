@@ -87,9 +87,11 @@ def block_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, keys: Seq
     table, lens = dev[:2 * streams], dev[2 * streams:].to(torch.int32)
     out = torch.empty((rows, heads * dim), dtype=torch.bfloat16, device=q.device)
     group = heads // kv_heads
+    wide = dim > 128                         # 256-wide heads (a DSpark drafter): smaller key tiles fit shared memory
     _block_attention[(streams, kv_heads)](q, k, v, table, lens, out, scale, window, rows, G=group, HKV=kv_heads,
                                           L=length, LP=max(16, triton.next_power_of_2(length)), D=dim,
-                                          BN=64, CAUSAL=causal, num_warps=4, num_stages=2)
+                                          BN=32 if wide else 64, CAUSAL=causal, num_warps=8 if wide else 4,
+                                          num_stages=1 if wide else 2)
     return out
 
 

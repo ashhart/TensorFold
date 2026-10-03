@@ -319,6 +319,8 @@ def draft_ring_rows(window: int, block: int, tile: int = 64) -> int:
 
 def draft_geometry(t: dict, world: int, reserve: int, *, bounded: bool = False, streams: int = 1,
                    kept: int = 0) -> Geometry:
+    if "transformer_layer_config" in t:      # a speculators drafter (DSpark): its layers' fields nest one level down
+        t = {**t["transformer_layer_config"], **{k: v for k, v in t.items() if k != "transformer_layer_config"}}
     layers = int(t["num_hidden_layers"])
     heads = int(t["num_key_value_heads"]) // world
     hd = int(t["head_dim"])

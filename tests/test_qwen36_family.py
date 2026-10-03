@@ -72,3 +72,8 @@ def test_dflash1_is_chosen_by_architecture(tmp_path):
     assert drafter_class(tmp_path) is DFlash1
     (tmp_path / "config.json").write_text(json.dumps({"architectures": ["DFlash2DraftModel"]}))
     assert drafter_class(tmp_path) is DFlash2
+    from tensorfold.families.qwen3_5.cuda.dspark import DSpark
+
+    (tmp_path / "config.json").write_text(json.dumps({"architectures": ["Qwen3DSparkModel"],
+                                                      "speculators_model_type": "dspark"}))
+    assert drafter_class(tmp_path) is DSpark
