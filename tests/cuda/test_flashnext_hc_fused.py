@@ -81,3 +81,20 @@ def test_first_use_checks_real_bytes_and_falls_back_on_a_forced_difference(monke
             assert not capsys.readouterr().out
     finally:
         hc_check._checked.clear()
+
+
+def test_bf16_hyper_connections_take_the_fused_prompt_write_back(monkeypatch):
+    """An NVFP4 checkpoint's bf16 HC matrices take the checked write-back and norm, then skip the norm in the read-out."""
+
+    from types import SimpleNamespace
+    from tensorfold.families.qwen4_exp.cuda import forward
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    fused, readouts = [], []
+    monkeypatch.setattr(forward, "_hc_fuser", lambda dev, **kw: (lambda *a, **k: fused.append(True)))
+    monkeypatch.setattr(forward, "_readout_b16", lambda *a, normed=False, **k: readouts.append(normed))
+    h = torch.ones((17, 4 * 2560), dtype=torch.bfloat16, device=device)
+    b = SimpleNamespace(prefill=True, pss=torch.empty((17, 10, 4), device=device), normed=h, xs_normed=h)
+    hc = SimpleNamespace(down=SimpleNamespace(kernel="b16"), inject=False, scale=None)
+    forward.hc_block(hc, b, 17, 1e-6, 4, 320, 0, None, torch.empty(17, 4, device=device), h)
+    assert fused == [True] and readouts == [True]
