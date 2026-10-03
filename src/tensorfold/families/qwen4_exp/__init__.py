@@ -97,7 +97,8 @@ def check(model_dir: Path) -> None:
 
 
 # a table's tensors in the checkpoint: weights, scales and biases of each shard, the only bytes read on the host
-_TABLE = r"language_model\.model\.layers\.\d+\.ple\.ple_embedding\.ngram_embedding\.shard_\d+\.(weight|scales|biases)"
+# shard_N and shards.N, the two names the loader and host_table.shard_keys read
+_TABLE = r"language_model\.model\.layers\.\d+\.ple\.ple_embedding\.ngram_embedding\.(?:shard_|shards\.)\d+\.(weight|scales|biases)"
 
 
 def ple_bytes(model_dir: Path) -> int:
