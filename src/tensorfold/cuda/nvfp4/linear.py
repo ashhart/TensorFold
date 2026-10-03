@@ -112,6 +112,36 @@ class Staging:
         return sum(t.numel() * t.element_size() for t in (self.w8, self.s8) if t is not None)
 
 
+def _tiles_of(rows: torch.Tensor, n: int, what: str) -> torch.Tensor:
+    """The 64-output tiles that hold exactly ``rows`` (whole tiles, in order, none past ``n``): a two-rank shard."""
+
+    rows = rows.to(torch.int64)
+    if rows.numel() == 0 or rows.numel() % 64 or int(rows.max()) >= n:
+        raise ValueError(f"{what}: a shard's outputs must be whole 64-output tiles inside the {n} outputs")
+    first = rows.view(-1, 64)[:, 0]
+    want = first[:, None] + torch.arange(64, device=rows.device)[None, :]
+    if bool((first % 64).any()) or not torch.equal(want.reshape(-1), rows):
+        raise ValueError(f"{what}: a shard's outputs must be whole 64-output tiles inside the {n} outputs")
+    return first // 64
+
+
+def _even(t: torch.Tensor, count: int) -> torch.Tensor:
+    """Tiles along dim 0 padded with one zero tile to an even count (outputs in 128s, as loading pads them)."""
+
+    if count % 2 == 0:
+        return t.contiguous()
+    return torch.cat([t, t.new_zeros((1, *t.shape[1:]))]).contiguous()
+
+
+def _input_groups(k: int, rank: int, world: int, what: str) -> tuple[int, int]:
+    """A rank's 64-input groups [g0, g1): whole groups (each holds four whole 16-input NVFP4 blocks)."""
+
+    if world != 2 or rank not in (0, 1) or k % (64 * world):
+        raise ValueError(f"{what}: K {k} does not split into two halves of whole 64-input groups")
+    half = k // 64 // world
+    return rank * half, (rank + 1) * half
+
+
 @dataclass
 class Fp4Linear:
     """An NVFP4 projection: e2m1 codes tiled for the lane matmul, e4m3 scales per 16 inputs, one fp32 global scale."""
@@ -162,6 +192,31 @@ class Fp4Linear:
 
         return Fp4Linear(self.words[t0:t1], self.bs[t0:t1], self.scale, min(self.n, 64 * t1) - 64 * t0, self.k,
                          act=self.act)
+
+    def outputs(self, rows: torch.Tensor) -> "Fp4Linear":
+        """Column-parallel shard: the stored tiles of ``rows`` (whole 64-output tiles), every code and scale as stored."""
+
+        if self.act is not None:
+            raise ValueError("two-rank shards read the W4A16 tiling; serve NVFP4 on two ranks with --precision full")
+        t = _tiles_of(rows, self.n, "NVFP4")
+        return Fp4Linear(_even(self.words.index_select(0, t), t.numel()), _even(self.bs.index_select(0, t), t.numel()),
+                         self.scale, int(rows.numel()), self.k, staging=self.staging)
+
+    def inputs(self, rank: int, world: int = 2) -> "Fp4Linear":
+        """Row-parallel shard: whole 64-input groups (four e4m3-scaled 16-input blocks each); the global scale kept."""
+
+        if self.act is not None:
+            raise ValueError("two-rank shards read the W4A16 tiling; serve NVFP4 on two ranks with --precision full")
+        g0, g1 = _input_groups(self.k, rank, world, "NVFP4")
+        return Fp4Linear(self.words[:, g0:g1].contiguous(), self.bs[:, g0:g1].contiguous(), self.scale, self.n,
+                         64 * (g1 - g0), staging=self.staging)
+
+    def partial(self, x: torch.Tensor) -> torch.Tensor:
+        """A row-parallel rank's fp32 (M, n) product, unrounded, for the rank-ordered sum."""
+
+        if self.act is not None:
+            raise ValueError("row partials run the W4A16 lane matmul")
+        return _matmul(FP4, self.words, self.bs, self.scale, self.n, self.k, self.npad, x, None, f32=True)
 
     def __call__(self, x: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
         if self.act is not None:
@@ -242,6 +297,41 @@ class Fp8Linear:
         per = 64 * self.k
         return Fp8Linear(self.w8[t0 * per:t1 * per], self.scale, min(self.n, 64 * t1) - 64 * t0, self.k,
                          64 * (t1 - t0), act=self.act)
+
+    def _blocks(self) -> torch.Tensor:
+        return self.w8.view(self.npad // 64, self.k // 64, 4096)
+
+    def outputs(self, rows: torch.Tensor) -> "Fp8Linear":
+        """Column-parallel shard: the stored fragment tiles of ``rows`` (whole 64-output tiles), bytes as stored."""
+
+        if self.act is not None:
+            raise ValueError("two-rank shards read the W8A16 fragments; serve FP8 on two ranks with --precision full")
+        t = _tiles_of(rows, self.n, "FP8")
+        npad = 64 * (t.numel() + t.numel() % 2)
+        groups = None
+        if self.groups is not None:
+            cols = (t[:, None] * 64 + torch.arange(64, device=t.device)[None, :]).reshape(-1)
+            groups = torch.ones((self.k // 64, npad), dtype=self.groups.dtype, device=self.groups.device)
+            groups[:, :cols.numel()] = self.groups.index_select(1, cols)
+        return Fp8Linear(_even(self._blocks().index_select(0, t), t.numel()).view(-1), self.scale, int(rows.numel()),
+                         self.k, npad, groups=groups)
+
+    def inputs(self, rank: int, world: int = 2) -> "Fp8Linear":
+        """Row-parallel shard: whole 64-input groups of every fragment tile; the tensor scale kept."""
+
+        if self.act is not None:
+            raise ValueError("two-rank shards read the W8A16 fragments; serve FP8 on two ranks with --precision full")
+        g0, g1 = _input_groups(self.k, rank, world, "FP8")
+        groups = None if self.groups is None else self.groups[g0:g1].contiguous()
+        return Fp8Linear(self._blocks()[:, g0:g1].contiguous().view(-1), self.scale, self.n, 64 * (g1 - g0),
+                         self.npad, groups=groups)
+
+    def partial(self, x: torch.Tensor) -> torch.Tensor:
+        """A row-parallel rank's fp32 (M, n) product, unrounded, for the rank-ordered sum."""
+
+        if self.act is not None:
+            raise ValueError("row partials run the W8A16 lane matmul")
+        return _matmul(FP8, self.w8, None, self.scale, self.n, self.k, self.npad, x, None, f32=True)
 
     def __call__(self, x: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
         if self.act is not None:
@@ -464,21 +554,22 @@ FUSED_ROWS = int(__import__("os").environ.get("TF_QMMF_FUSED_ROWS", "256"))   # 
 
 
 def _matmul(mode: int, w: torch.Tensor, bs: torch.Tensor | None, scale: float, n: int, k: int, npad: int,
-            x: torch.Tensor, out: torch.Tensor | None) -> torch.Tensor:
-    """x (M, K) bf16 -> (M, n) bf16; K slices from the shape alone, so a row's bits never depend on M."""
+            x: torch.Tensor, out: torch.Tensor | None, f32: bool = False) -> torch.Tensor:
+    """x (M, K) bf16 -> (M, n) bf16 (``f32``: fp32, unrounded); K slices from the shape alone, so a row's bits never depend on M."""
 
     from tensorfold.cuda.kernels import qmm
 
     if x.dtype != torch.bfloat16 or x.stride(-1) != 1:
         x = x.to(torch.bfloat16).contiguous()
     m = x.shape[0]
-    y = out if out is not None and out.is_contiguous() and out.dtype == torch.bfloat16 else \
-        torch.empty((m, n), dtype=torch.bfloat16, device=x.device)
+    dtype = torch.float32 if f32 else torch.bfloat16
+    y = out if out is not None and out.is_contiguous() and out.dtype == dtype else \
+        torch.empty((m, n), dtype=dtype, device=x.device)
     sk = qmm.split_k(n, k)
     part = torch.empty((sk, m, n), dtype=torch.float32, device=x.device) if sk > 8 else None
     # prompt rows: each block sums its tile's slices itself (bm 0), the cluster's order without the cluster
     bm = 0 if sk > 1 and m >= FUSED_ROWS else qmm.bucket(m)
-    _ext().qmmf(x, w, bs, scale, y, part if bm else None, mode, n, sk, npad, bm, False)
+    _ext().qmmf(x, w, bs, scale, y, part if bm else None, mode, n, sk, npad, bm, f32)
     if out is not None and y is not out:
         out.copy_(y)
     return y

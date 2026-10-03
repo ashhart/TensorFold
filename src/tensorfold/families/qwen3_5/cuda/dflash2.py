@@ -158,6 +158,21 @@ def _sub_parts(head, spans: tuple[tuple[int, int], ...]) -> list[tuple[object, i
     return parts
 
 
+def _rank_spans(spans: tuple[tuple[int, int], ...], rank: int) -> tuple[tuple[int, int], ...]:
+    """Rank ``rank``'s half of the draft vocabulary (rank 0 the first ceil(n/2) ids), as head row spans."""
+
+    total = sum(b - a for a, b in spans)
+    half = -(-total // 2)
+    lo, hi = rank * half, min((rank + 1) * half, total)
+    out, at = [], 0
+    for a, b in spans:
+        s0, s1 = max(lo, at), min(hi, at + b - a)
+        if s0 < s1:
+            out.append((a + s0 - at, a + s1 - at))
+        at += b - a
+    return tuple(out)
+
+
 def _exl3_sub_head(layer, spans: tuple[tuple[int, int], ...]):
     """The EXL3 head's strips holding ``spans`` as stored (the target's own logits, bit for bit), and the span columns."""
 
@@ -226,9 +241,13 @@ class DFlash2:
         self.sub_rows: list[QLinear] | None = None           # one GPU, tiled head: its rows as views, no copy
         self.sub_parts: list | None = None                   # an NVFP4 checkpoint's head: tile views and span columns
         if target.quant == "nvfp4":
-            if world != 1:
-                raise ValueError("a two-rank drafter needs the MLX checkpoint's 4-bit head")
+            if world == 2:                               # this rank's half of the draft vocabulary, still as views
+                spans = _rank_spans(spans, rank)
+                self.head_ids = torch.cat([torch.arange(a, b, device=self.device) for a, b in spans])
             self.sub_parts = _sub_parts(target.head, spans)
+            if world == 2:                               # own copies of bf16 rows: the unsplit head is freed after load
+                self.sub_parts = [(Plain(p.weight.clone()) if isinstance(p, Plain) else p, lo, hi)
+                                  for p, lo, hi in self.sub_parts]
         elif isinstance(target.head, Exl3):
             if world != 1:
                 raise ValueError("a two-rank drafter needs the MLX checkpoint's 4-bit head")
@@ -242,7 +261,7 @@ class DFlash2:
                      for t in (head.weight, head.scales, head.biases)]
             self.sub_head = QLinear(*parts, layout=head.layout, gs=head.gs, bits=head.bits)
             del head
-        if world == 2:
+        if world == 2 and target.quant != "nvfp4":
             half = -(-len(self.head_ids) // 2)
             lo, hi = rank * half, min((rank + 1) * half, len(self.head_ids))
             self.head_ids = self.head_ids[lo:hi].contiguous()

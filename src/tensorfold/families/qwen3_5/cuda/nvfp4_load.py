@@ -44,6 +44,12 @@ class Plain8(Plain):
     def nbytes(self) -> int:
         return super().nbytes() + self.rows8.nbytes()
 
+    def outputs(self, rows: torch.Tensor) -> "Plain8":
+        return Plain8(super().outputs(rows).weight, rows8=self.rows8.outputs(rows))
+
+    def inputs(self, rank: int, world: int = 2) -> "Plain8":
+        return Plain8(super().inputs(rank, world).weight, rows8=self.rows8.inputs(rank, world))
+
 
 def weight_bytes(name: str, info: dict) -> tuple[int, int]:
     """A tensor as loaded: stored bytes with outputs padded to 128, gates' e4m3 copies, A_log and dt_bias in fp32."""
