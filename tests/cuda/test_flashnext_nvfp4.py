@@ -166,7 +166,7 @@ def test_matmul_splitk_sum_order_is_the_reduces_one():
     assert sk > 1, "this test pins the reduce's order: it needs a split shape"
     part = torch.empty((sk, 4, n), dtype=torch.float32, device="cuda")
     out = torch.empty((4, n), dtype=torch.bfloat16, device="cuda")
-    nvfp4._fp4mm[(1, n // nvfp4.BN, sk)](x, fp.weight, fp.scale, fp.scale2, out, part, 4, x.stride(0),
+    nvfp4._fp4mm[(n // nvfp4.BN, 1, sk)](x, fp.weight, fp.scale, fp.scale2, out, part, 4, x.stride(0),
                                          N=n, K=k, SK=sk, BM=16, SBN=nvfp4.BN, BLOCK_N=nvfp4.BN,
                                          GPI=nvfp4.gpi_for((k // nvfp4.GS) // sk, 2), F32=False,
                                          PACKED=fp.packed, num_warps=4, num_stages=3)

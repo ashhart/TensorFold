@@ -208,3 +208,34 @@ def test_moe4_prompt_rows_take_the_nvfp4_item_and_keep_their_bits(monkeypatch):
         got[tile] = (buf.plan.tile, int(buf.plan.counts[0]), buf.y.clone())
     assert got[16][0] == 16 and got[64][0] == 64 and got[64][1] < got[16][1]
     assert torch.equal(got[16][2], got[64][2])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+@pytest.mark.parametrize("kind,n,k,f32", [("b16", 324, 10240, True), ("b16", 640, 2560, False),
+                                          ("b16", 96, 2560, False), ("fp4", 2560, 640, False),
+                                          ("fp4", 2560, 640, True)])
+def test_prompt_rows_add_their_k_slices_in_one_program_with_the_split_bits(kind, n, k, f32, monkeypatch):
+    """Prompt rows that add their K slices in one program keep the split launch's bits, alone or among 300."""
+
+    torch.manual_seed(6)
+    dev = "cuda"
+    mod = bf16 if kind == "b16" else nvfp4
+    if kind == "b16":
+        w = bf16.make_b16((torch.randn(n, k, device=dev) * 0.05).to(torch.bfloat16))
+    else:
+        words = torch.randint(0, 256, (n, k // 2), dtype=torch.uint8, device=dev)
+        scale = torch.randint(40, 60, (n, k // 16), dtype=torch.uint8, device=dev).view(torch.float8_e4m3fn)
+        w = nvfp4.make_fp4(words, scale, 0.01)
+    sk = bf16.split_k(n, k) if kind == "b16" else nvfp4.split_for(n, k)
+    assert sk > 1                                         # the shapes the fused path is for
+    x = torch.randn(300, k, device=dev).to(torch.bfloat16)
+    x[:, ::97] *= 8
+    bits = (lambda t: t.view(torch.int32)) if f32 else (lambda t: t.view(torch.int16))
+    monkeypatch.setattr(mod, "FUSED_ROWS", 1 << 30)
+    split = mod.matmul(x, w, f32=f32)
+    solo = [mod.matmul(x[r:r + 1].contiguous(), w, f32=f32)[0] for r in (0, 151, 299)]
+    monkeypatch.setattr(mod, "FUSED_ROWS", 256)
+    fused = mod.matmul(x, w, f32=f32)
+    assert torch.equal(bits(fused), bits(split))
+    for r, row in zip((0, 151, 299), solo):
+        assert torch.equal(bits(fused[r]), bits(row))
