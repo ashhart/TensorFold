@@ -507,6 +507,12 @@ def test_a_lower_tier_state_one_rank_lacks_starts_the_prompt_fresh(tmp_path):
     longer = p + [8, 8, 8]
     s = stream(longer, 15)
     assert pair.run([s]) == [serial(longer, 15)] and s.cached == 0
+    again = stream(p + [9, 9], 6)  # the same prefix: rank 0 no longer offers the state rank 1 lacks
+    assert pair.run([again]) == [serial(p + [9, 9], 6)]
+    from tensorfold.cuda.lanes.link import ADMIT
+
+    tried = [m for kind, m in pair.link.sent if kind == ADMIT and m[3] >= 0]
+    assert len(tried) == 1
 
 
 def test_a_failed_admission_on_rank_0_is_undone_on_every_rank(monkeypatch):

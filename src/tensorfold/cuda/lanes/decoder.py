@@ -170,7 +170,9 @@ class LaneDecoder:
             if tier < 0:
                 self.free.insert(0, lane)
                 raise
-            # a lower tier's state another rank lacks (or could not read): every rank starts the prompt fresh
+            # a lower tier's state another rank lacks (or could not read): every rank starts the prompt fresh, and
+            # rank 0 forgets it, so later prompts with this prefix do not try it again
+            self.cache.tiers[tier].drop(self.cache.key(s.prompt[:cached]))
             cached, tier, s.cached = 0, -1, 0
             msg = [lane, quota, 0, -1, *pack_sampling(s.sampling), n, *s.prompt, *pack(s.constraint)]
             try:
