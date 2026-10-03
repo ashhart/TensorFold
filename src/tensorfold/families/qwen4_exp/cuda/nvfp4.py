@@ -283,30 +283,16 @@ try:
         return tl.where((byte & 0x80) != 0, -value, value)
 
     @triton.jit
-    def _fp4mm(X, W, S, S2, OUT, PART, M, x_stride,
-               N: tl.constexpr, K: tl.constexpr, SK: tl.constexpr, BM: tl.constexpr,
-               SBN: tl.constexpr, BLOCK_N: tl.constexpr, GPI: tl.constexpr, F32: tl.constexpr,
-               PACKED: tl.constexpr):
-        """x @ FP4.T, one program a (row, column, K slice) tile: a dot per 16-input block times its scale, in order."""
+    def _fp4_slice(X, tile, S, rm, rn, local, m_ok, n_ok, s2, x_stride, s, N: tl.constexpr, PER: tl.constexpr,
+                   BM: tl.constexpr, SBN: tl.constexpr, BLOCK_N: tl.constexpr, GPI: tl.constexpr,
+                   PACKED: tl.constexpr):
+        """Slice s's fp32 sums: its PER blocks of 16 inputs in order from zero, a dot per block times its scale."""
 
-        PER: tl.constexpr = (K // 16) // SK             # quantization blocks per slice
-        SUB: tl.constexpr = SBN // BLOCK_N              # programs per stored N tile
-        pid_n = tl.program_id(1)
-        pid_s = tl.program_id(2)
-        rm = tl.program_id(0) * BM + tl.arange(0, BM)
-        rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
         r16 = tl.arange(0, 16)
-        m_ok = rm < M
-        n_ok = rn < N
-        # block b sits in K block b // 4, rows (b % 4) * 16 on (packed: 32 bytes a K block, 8 rows a block)
-        tile = W + (pid_n // SUB) * ((K // 64) * (32 if PACKED else 64) * SBN)
-        local = (pid_n % SUB) * BLOCK_N + tl.arange(0, BLOCK_N)
         acc = tl.zeros((BM, BLOCK_N), dtype=tl.float32)
-        s2 = tl.load(S2 + rn, mask=n_ok, other=1.0)     # the per-tensor factor, one a row (a stacked table)
-        KT: tl.constexpr = K // 64
         for i in range(PER // GPI):
             for j in tl.static_range(GPI):
-                b = pid_s * PER + i * GPI + j
+                b = s * PER + i * GPI + j
                 x = tl.load(X + rm[:, None] * x_stride + (b * 16 + r16)[None, :], mask=m_ok[:, None], other=0.0)
                 if PACKED:
                     # 8 bytes a block (low nibble: even input), 8 * SBN apart: an address the pipeliner follows
@@ -320,15 +306,46 @@ try:
                     wv = wbits.to(tl.bfloat16, bitcast=True)
                 p = tl.dot(x, wv)
                 if PACKED:
-                    s = _e4m3_value(tl.load(S + b * N + rn, mask=n_ok, other=0).to(tl.int32)) * s2
+                    sc = _e4m3_value(tl.load(S + b * N + rn, mask=n_ok, other=0).to(tl.int32)) * s2
                 else:
-                    s = tl.load(S + b * N + rn, mask=n_ok, other=0.0)
-                acc += p * s[None, :]
+                    sc = tl.load(S + b * N + rn, mask=n_ok, other=0.0)
+                acc += p * sc[None, :]
+        return acc
+
+    @triton.jit
+    def _fp4mm(X, W, S, S2, OUT, PART, M, x_stride,
+               N: tl.constexpr, K: tl.constexpr, SK: tl.constexpr, BM: tl.constexpr,
+               SBN: tl.constexpr, BLOCK_N: tl.constexpr, GPI: tl.constexpr, F32: tl.constexpr,
+               PACKED: tl.constexpr, FUSE: tl.constexpr = False):
+        """x @ FP4.T, a dot per 16-input block times its scale, in order: one K slice a program, or with FUSE all."""
+
+        PER: tl.constexpr = (K // 16) // SK             # quantization blocks per slice
+        SUB: tl.constexpr = SBN // BLOCK_N              # programs per stored N tile
+        pid_n = tl.program_id(0)
+        rm = tl.program_id(1) * BM + tl.arange(0, BM)
+        rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        m_ok = rm < M
+        n_ok = rn < N
+        # block b sits in K block b // 4, rows (b % 4) * 16 on (packed: 32 bytes a K block, 8 rows a block)
+        tile = W + (pid_n // SUB) * ((K // 64) * (32 if PACKED else 64) * SBN)
+        local = (pid_n % SUB) * BLOCK_N + tl.arange(0, BLOCK_N)
+        s2 = tl.load(S2 + rn, mask=n_ok, other=1.0)     # the per-tensor factor, one a row (a stacked table)
         out_mask = m_ok[:, None] & n_ok[None, :]
-        if SK == 1:
+        if FUSE:
+            acc = _fp4_slice(X, tile, S, rm, rn, local, m_ok, n_ok, s2, x_stride, 0, N, PER, BM, SBN, BLOCK_N, GPI,
+                             PACKED)
+            for s in range(1, SK):
+                acc = acc + _fp4_slice(X, tile, S, rm, rn, local, m_ok, n_ok, s2, x_stride, s, N, PER, BM, SBN,
+                                       BLOCK_N, GPI, PACKED)
             tl.store(OUT + rm[:, None] * N + rn[None, :], acc if F32 else acc.to(tl.bfloat16), mask=out_mask)
         else:
-            tl.store(PART + (pid_s * M + rm[:, None]) * N + rn[None, :], acc, mask=out_mask)
+            pid_s = tl.program_id(2)
+            acc = _fp4_slice(X, tile, S, rm, rn, local, m_ok, n_ok, s2, x_stride, pid_s, N, PER, BM, SBN, BLOCK_N,
+                             GPI, PACKED)
+            if SK == 1:
+                tl.store(OUT + rm[:, None] * N + rn[None, :], acc if F32 else acc.to(tl.bfloat16), mask=out_mask)
+            else:
+                tl.store(PART + (pid_s * M + rm[:, None]) * N + rn[None, :], acc, mask=out_mask)
 
     @triton.jit
     def _reduce(PART, OUT, total, SK: tl.constexpr, BLOCK: tl.constexpr, F32: tl.constexpr):
@@ -343,6 +360,9 @@ try:
 except ModuleNotFoundError:                   # the CPU tests of the format import this module without Triton
     HAS_TRITON = False
 
+
+# rows from which a program adds its tile's K slices itself, in ``_reduce``'s order
+FUSED_ROWS = int(__import__("os").environ.get("TF_FUSED_SLICE_ROWS", "256"))
 
 # (blocks per unrolled step, warps, stages) by row bucket: every choice gives the same bits
 CONFIG = {16: (4, 4, 3), 32: (2, 4, 3), 64: (2, 4, 2), 128: (1, 8, 2)}
@@ -388,16 +408,18 @@ def matmul(x: torch.Tensor, fp: FP4, *, out: torch.Tensor | None = None, f32: bo
         raise ValueError(f"fp4 matmul: out {tuple(out.shape)} must be a contiguous ({m}, {fp.n})")
     elif (out.dtype == torch.float32) != f32:
         raise ValueError(f"fp4 matmul: out dtype {out.dtype} does not match f32={f32}")
-    if sk > 1 and part is None:
+    fuse = sk > 1 and m >= FUSED_ROWS
+    if sk > 1 and part is None and not fuse:
         part = torch.empty((sk, m, fp.n), dtype=torch.float32, device=x.device)
     bn = block_n or BN
     if fp.scale2 is None:                        # the pattern form: its fp32 scales already carry the factor
         fp.scale2 = torch.ones(fp.n, dtype=torch.float32, device=x.device)
-    grid = (triton.cdiv(m, bm), fp.n // bn, sk)
-    _fp4mm[grid](x, fp.weight, fp.scale, fp.scale2, out, part if sk > 1 else out, m, x.stride(0),
-                 N=fp.n, K=k, SK=sk, BM=bm, SBN=BN, BLOCK_N=bn, GPI=g, F32=f32, PACKED=fp.packed,
+    # column tiles first, so a row tile's programs share its rows of x in L2
+    grid = (fp.n // bn, triton.cdiv(m, bm), 1 if fuse else sk)
+    _fp4mm[grid](x, fp.weight, fp.scale, fp.scale2, out, part if sk > 1 and not fuse else out, m, x.stride(0),
+                 N=fp.n, K=k, SK=sk, BM=bm, SBN=BN, BLOCK_N=bn, GPI=g, F32=f32, PACKED=fp.packed, FUSE=fuse,
                  num_warps=num_warps or c_warps, num_stages=num_stages)
-    if sk > 1:
+    if sk > 1 and not fuse:
         total = m * fp.n
         # fp32 outputs keep the loop's own sums: one fp32 add a slice, in slice order, no bf16 rounding
         _reduce[(triton.cdiv(total, 1024),)](part, out, total, SK=sk, BLOCK=1024, F32=f32, num_warps=4)

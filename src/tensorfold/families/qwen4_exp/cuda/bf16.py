@@ -15,6 +15,7 @@ except ModuleNotFoundError:
 
 BN = 64
 BK = 64                     # the K block a program reads a step (the split keeps slices whole blocks)
+FUSED_ROWS = int(__import__("os").environ.get("TF_FUSED_SLICE_ROWS", "256"))   # rows from which slices meet
 GS = 32                     # the MLX group size this module's quantize4 emits
 
 
@@ -48,31 +49,45 @@ def split_k(n: int, k: int, target: int = 160, bk: int = BK) -> int:
 
 if HAS_TRITON:
     @triton.jit
+    def _b16_slice(X, W, rm, rn, m_ok, n_ok, x_stride, s, K: tl.constexpr, NB: tl.constexpr, BM: tl.constexpr,
+                   BLOCK_N: tl.constexpr, BK: tl.constexpr):
+        """Slice s's fp32 sums: its NB K blocks in order from zero, a tensor-core dot each."""
+
+        rk = tl.arange(0, BK)
+        acc = tl.zeros((BM, BLOCK_N), dtype=tl.float32)
+        for i in range(NB):
+            k0 = (s * NB + i) * BK
+            x = tl.load(X + rm[:, None] * x_stride + (k0 + rk)[None, :], mask=m_ok[:, None], other=0.0)
+            w = tl.load(W + rn[:, None] * K + (k0 + rk)[None, :], mask=n_ok[:, None], other=0.0)
+            acc = tl.dot(x, tl.trans(w), acc)
+        return acc
+
+    @triton.jit
     def _b16mm(X, W, OUT, PART, M, x_stride,
                N: tl.constexpr, K: tl.constexpr, SK: tl.constexpr, BM: tl.constexpr,
-               BLOCK_N: tl.constexpr, BK: tl.constexpr, F32: tl.constexpr):
-        """x [M, K] @ W.T -> [M, N]: K in BK steps in order, a tensor-core dot each, fp32 accumulators."""
+               BLOCK_N: tl.constexpr, BK: tl.constexpr, F32: tl.constexpr, FUSE: tl.constexpr = False):
+        """x [M, K] @ W.T -> [M, N], fp32 sums: a K slice a program, or with FUSE all in ``_reduce``'s order."""
 
-        pid_n = tl.program_id(1)
-        pid_s = tl.program_id(2)
-        rm = tl.program_id(0) * BM + tl.arange(0, BM)
+        pid_n = tl.program_id(0)
+        rm = tl.program_id(1) * BM + tl.arange(0, BM)
         rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-        rk = tl.arange(0, BK)
         m_ok = rm < M
         n_ok = rn < N
         KS: tl.constexpr = K // SK
         NB: tl.constexpr = KS // BK               # whole BK blocks a slice (split_k picks SK for that)
-        acc = tl.zeros((BM, BLOCK_N), dtype=tl.float32)
-        for i in range(NB):
-            k0 = (pid_s * NB + i) * BK
-            x = tl.load(X + rm[:, None] * x_stride + (k0 + rk)[None, :], mask=m_ok[:, None], other=0.0)
-            w = tl.load(W + rn[:, None] * K + (k0 + rk)[None, :], mask=n_ok[:, None], other=0.0)
-            acc = tl.dot(x, tl.trans(w), acc)
         out_mask = m_ok[:, None] & n_ok[None, :]
-        if SK == 1:
+        if FUSE:
+            acc = _b16_slice(X, W, rm, rn, m_ok, n_ok, x_stride, 0, K, NB, BM, BLOCK_N, BK)
+            for s in range(1, SK):
+                acc = acc + _b16_slice(X, W, rm, rn, m_ok, n_ok, x_stride, s, K, NB, BM, BLOCK_N, BK)
             tl.store(OUT + rm[:, None] * N + rn[None, :], acc if F32 else acc.to(tl.bfloat16), mask=out_mask)
         else:
-            tl.store(PART + (pid_s * M + rm[:, None]) * N + rn[None, :], acc, mask=out_mask)
+            pid_s = tl.program_id(2)
+            acc = _b16_slice(X, W, rm, rn, m_ok, n_ok, x_stride, pid_s, K, NB, BM, BLOCK_N, BK)
+            if SK == 1:
+                tl.store(OUT + rm[:, None] * N + rn[None, :], acc if F32 else acc.to(tl.bfloat16), mask=out_mask)
+            else:
+                tl.store(PART + (pid_s * M + rm[:, None]) * N + rn[None, :], acc, mask=out_mask)
 
     @triton.jit
     def _reduce(PART, OUT, total, SK: tl.constexpr, BLOCK: tl.constexpr, F32: tl.constexpr):
@@ -104,12 +119,14 @@ def matmul(x: torch.Tensor, b: B16, *, out: torch.Tensor | None = None, f32: boo
     elif out.shape != (m, b.n) or not out.is_contiguous() or (out.dtype == torch.float32) != f32:
         raise ValueError(f"b16 matmul: out {tuple(out.shape)} {out.dtype} must be a contiguous ({m}, {b.n}), "
                          f"dtype matching f32={f32}")
-    part = torch.empty((sk, m, b.n), dtype=torch.float32, device=x.device) if sk > 1 else out
+    fuse = sk > 1 and m >= FUSED_ROWS
+    part = torch.empty((sk, m, b.n), dtype=torch.float32, device=x.device) if sk > 1 and not fuse else out
     bm = 128 if m > 128 else 16
-    grid = (triton.cdiv(m, bm), -(-b.n // block_n), sk)
+    # column tiles first, so a row tile's programs share its rows of x in L2
+    grid = (-(-b.n // block_n), triton.cdiv(m, bm), 1 if fuse else sk)
     _b16mm[grid](x, b.weight, out, part, m, x.stride(0), N=b.n, K=k, SK=sk, BM=bm,
-                 BLOCK_N=block_n, BK=bk, F32=f32, num_warps=num_warps, num_stages=num_stages)
-    if sk > 1:
+                 BLOCK_N=block_n, BK=bk, F32=f32, FUSE=fuse, num_warps=num_warps, num_stages=num_stages)
+    if sk > 1 and not fuse:
         total = m * b.n
         _reduce[(triton.cdiv(total, 1024),)](part, out, total, SK=sk, BLOCK=1024, F32=f32, num_warps=4)
     return out
