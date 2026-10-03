@@ -37,9 +37,10 @@ def _ext():
     from tensorfold.cuda.build import MIN_CAPABILITY, load
 
     here = Path(__file__).parent
-    return load(name="tensorfold_nvfp4_ck_v6",
+    return load(name="tensorfold_nvfp4_ck_v7",
                 sources=[str(here / "checkpoint.cpp"), str(here / "act.cu"), str(here / "lane4.cu"),
-                         str(here / "gemm_ck.cu"), str(here / "gemm_ws.cu")],
+                         str(here / "gemm_ck.cu"), str(here / "gemm_ws.cu"),
+                         str(here / "experts_ck.cu")],
                 need=MIN_CAPABILITY, arch_specific=precision.own_math(_capability())["nvfp4"],
                 extra_include_paths=[str(here)], extra_cuda_cflags=["-O3"], verbose=False)
 

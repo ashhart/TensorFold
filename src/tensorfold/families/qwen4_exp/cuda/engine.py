@@ -260,6 +260,7 @@ class FlashNextEngine:
         if reread_s:
             how += f", read again after warm-up in {reread_s:.1f}s ({pinned / 2**30:.2f} GiB of pages locked)"
         kv = "" if self.kv_dtype == "bf16" else f"; {self.kv_dtype} KV cache (fp16 scale per 32 values)"
+        kv += _experts_math(self.w)
         print(f"[tensorfold] Flash Next on CUDA: {rule}; {where}{kv}; n-gram tables {how}; {captured} "
               f"decode graphs captured; idle prompt pieces {self.prefill_rows} rows; "
               f"prompt kernels warmed in {warm_s:.1f}s", flush=True)
@@ -557,3 +558,15 @@ class FlashNextEngine:
                     self._serial(prompt, max_tokens, sampling, None, constraint, stop_eos)
             except ValueError as exc:                       # rank 0 raised at the same point on the same input
                 print(f"[tensorfold] request {self.served} failed on both ranks: {exc}", flush=True)
+
+
+def _experts_math(w) -> str:
+    """The startup line's word on an NVFP4 checkpoint's routed experts: the checkpoint's math or bf16 rows."""
+
+    moe = next((layer.moe.experts for layer in getattr(w, "layers", ()) if getattr(layer, "moe", None) is not None),
+               None)
+    if moe is None or getattr(moe, "kernel", "") != "nvfp4":
+        return ""
+    if moe.own_math:
+        return "; routed NVFP4 experts in the checkpoint's math (FP4 x FP4 under its static input scales)"
+    return "; routed NVFP4 experts on bf16 rows (W4A16)"

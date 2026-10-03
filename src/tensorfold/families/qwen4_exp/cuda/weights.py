@@ -290,7 +290,7 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
             if world > 1:
                 gate, up, dn = gate[:, lo:hi], up[:, lo:hi], dn[:, :, dlo * gs:dhi * gs]
             moe4 = nvfp4_moe.moe4_from_bf16(torch.cat([gate, up], dim=1), dn, shared)
-        elif rd.has(prefix + f"{name}.experts.0.gate_proj.weight"):    # the main layers: per-expert FP4
+        elif rd.has(prefix + f"{name}.experts.0.gate_proj.weight"):    # per-expert FP4 (some exports' MTP too)
             def stack(proj: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
                 weights = [raw(f"{name}.experts.{i}.{proj}.weight") for i in range(e)]
                 if any(w.dtype != torch.uint8 for w in weights):
@@ -303,6 +303,18 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
             gate = stack("gate_proj")
             up = stack("up_proj")
             down = stack("down_proj")
+            if nvfp4_moe.own_math(world) and not name.startswith("mtp."):   # MTP's draft-only experts keep theirs
+                def acts(proj: str) -> torch.Tensor:
+                    names = [f"{name}.experts.{i}.{proj}.input_scale" for i in range(e)]
+                    if not all(rd.has(prefix + n) for n in names):
+                        raise ValueError(f"{name}.{proj}: no static input scales, so the experts' own math is "
+                                         "unknown; serve it with --precision full")
+                    return torch.stack([raw(n).float().reshape(()) for n in names])
+
+                moe4 = nvfp4_moe.moe4_own_math(gate, up, down, (acts("gate_proj"), acts("up_proj"),
+                                                                acts("down_proj")), shared)
+                del gate, up, down
+                return MoEW(router, moe4)
             if world > 1:
                 gate = (gate[0][:, lo:hi], gate[1][:, lo:hi], gate[2])
                 up = (up[0][:, lo:hi], up[1][:, lo:hi], up[2])
