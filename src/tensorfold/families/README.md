@@ -5,7 +5,7 @@ All MLX families use the lane engine; CUDA families provide their own engine.
 
 | Package | Model | MLX drafting | CUDA |
 | --- | --- | --- | --- |
-| `nemotron_h/` | Nemotron 3.5 Lightning | MTP and context copies | Not supported |
+| `nemotron_h/` | Nemotron 3.5 Lightning | MTP and context copies | One or two ranks; MLX 4-bit weights |
 | `qwen3_5/` | Qwen3.8-27B | DFlash2 and context copies | One or two ranks; EXL3 or MLX 4-bit weights |
 | `qwen4_exp/` | Qwen3.8 Flash Next | MTP and context copies | One or two ranks; EXL3 or MLX 4-bit weights |
 | `glm5_next/` | GLM-5.3-Flash | MTP | Two ranks, MTP and optional DFlash2 |
@@ -20,3 +20,6 @@ See [the recipe book](../../../docs/recipes/README.md) for checkpoints and limit
 [the MLX interface](../../../docs/recipes/adding-a-family.md),
 [the CUDA interface](../../../docs/recipes/adding-a-cuda-family.md) and
 [the kernel map](../kernels/README.md).
+
+Dense Qwen and Nemotron-H are the [CUDA sleep/wake reference implementations](../../../docs/recipes/adding-a-cuda-family.md#sleepwake-reference-implementations).
+Both support Level 2 on one device, with optional disk preservation of retained prefixes.

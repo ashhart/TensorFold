@@ -84,8 +84,8 @@ class MTPHead:
         return {"k": self.k_cache.clone(), "v": self.v_cache.clone(), "pos": self.pos}
 
     def restore(self, snap: dict) -> None:
-        self.k_cache.copy_(snap["k"])
-        self.v_cache.copy_(snap["v"])
+        self.k_cache[:snap["k"].shape[0]].copy_(snap["k"])
+        self.v_cache[:snap["v"].shape[0]].copy_(snap["v"])
         self.pos = snap["pos"]
 
     # -- the head's forward ---------------------------------------------------------------------

@@ -1,4 +1,4 @@
-"""Rebuild dense Qwen from pinned local checkpoints without retaining its device objects."""
+"""Rebuild a supported CUDA family from pinned checkpoints without retaining device objects."""
 
 from __future__ import annotations
 
@@ -59,26 +59,12 @@ def clear_tensor_caches() -> None:
             module.clear_tensor_cache()
 
 
-def _settings(engine: Any) -> dict[str, Any]:
-    """Only scalar settings survive the old runtime; no bound method or device array does."""
-
-    weights = getattr(engine, "w", None)
-    settings = {name: getattr(engine, name, None) for name in (
-        "context_window", "tp", "rank", "max_rows", "tree_rows", "allow_copy", "concurrent", "vision_enabled")}
-    settings.update({name: getattr(weights, name, None) for name in ("precision", "quant", "fast_prefill")})
-    settings["own"] = tuple(sorted((getattr(weights, "own", None) or {}).items()))
-    settings["draft"] = getattr(engine, "draft", None) is not None
-    settings["vision"] = getattr(engine, "vision", None) is not None
-    settings["streams"] = getattr(getattr(engine, "scheduler", None), "max_streams", 1)
-    return settings
-
-
 class CudaSleep:
     """The stable app owns the live runtime; this adapter holds only its reload recipe."""
 
-    def __init__(self, app: Any, factory: Callable, model_dir: Path, options: dict[str, Any], *,
+    def __init__(self, app: Any, factory: Callable, model_dir: Path, options: dict[str, Any], *, runtime,
                  identity: CheckpointIdentity | None = None, cache_dir: Path | str | None = None) -> None:
-        self.app, self.factory = app, factory
+        self.app, self.factory, self.runtime = app, factory, runtime
         self.model_dir = Path(model_dir).resolve()
         self.options = dict(options)
         if any(not isinstance(value, (str, int, float, bool, type(None))) for value in self.options.values()):
@@ -90,10 +76,12 @@ class CudaSleep:
         context = app.effective_context_window
         if not isinstance(context, int) or context <= 0:
             raise ValueError("sleep requires a positive served context window")
-        self.options.update(context=context, context_explicit=True)
+        # Fixed-capacity families can round buffers beyond the checkpoint's native
+        # limit. Reload the admitted context, keeping the HTTP limit separately.
+        plan = getattr(app.engine, "capacity_plan", None) or {}
+        self.options.update(context=plan.get("context_window", context), context_explicit=True)
         app.context_window = context
-        self.settings = _settings(app.engine)
-        self.settings["context_window"] = context
+        self.settings = runtime.settings(app.engine)
         self.math = (precision.mode(), precision.asked(), prompt_precision.fp8())
         self._pending = None
         self.prefixes = None
@@ -102,15 +90,14 @@ class CudaSleep:
 
             import tensorfold
             from tensorfold.cuda.prefix_store import PrefixStore
-            from tensorfold.families.qwen3_5.cuda import prefix_snapshot
 
             # Files belong to this loaded runtime and recipe, never another process or model revision.
-            signature = {"session": uuid.uuid4().hex, "family": "qwen3_5", "backend": "cuda",
+            signature = {"session": uuid.uuid4().hex, "family": runtime.FAMILY, "backend": "cuda",
                          "runtime": tensorfold.__version__, "torch": torch.__version__, "cuda": torch.version.cuda,
                          "capability": torch.cuda.get_device_capability(), "settings": self.settings,
                          "math": self.math, "checkpoints": sorted(self.identity.manifest.items())}
             key = hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()
-            self.prefixes = PrefixStore(Path(cache_dir), key, prefix_snapshot)
+            self.prefixes = PrefixStore(Path(cache_dir), key, runtime.prefix_codec())
 
     def verify_identity(self) -> None:
         self.identity.verify()
@@ -123,8 +110,7 @@ class CudaSleep:
             import torch
 
             torch.cuda.synchronize()
-            engine = self.app.engine
-            self.prefixes.save(engine.multi.cache if engine.concurrent else engine.cache)
+            self.prefixes.save(self.runtime.cache(self.app.engine))
 
     def cache_snapshot(self) -> dict:
         return self.prefixes.snapshot() if self.prefixes is not None else {"mode": "discard"}
@@ -132,35 +118,6 @@ class CudaSleep:
     def close(self) -> None:
         if self.prefixes is not None:
             self.prefixes.close()
-
-    def _attach_prefixes(self, engine) -> None:
-        if self.prefixes is None:
-            return
-        owner = engine.multi if engine.concurrent else engine
-        room = None if engine.concurrent else engine.room
-        owner.cache = self.prefixes.attach(owner.cache, device=engine.w.norm.device, room=room,
-                                           admit=lambda size, prompt: self._prefix_room(engine, size, prompt))
-        if room is not None:
-            room.cache = owner.cache
-
-    @staticmethod
-    def _prefix_room(engine, size: int, prompt: list[int]) -> bool:
-        """A lazy load must fit beside the new request's caches, or it is a cache miss."""
-
-        if engine.concurrent:
-            decoder = engine.multi
-            if decoder.memory_gate is None:
-                return True
-            from tensorfold.cuda.streams import Stream
-
-            rows = decoder._first(Stream(prompt, engine.context_window - len(prompt)))
-            return decoder.memory_gate.fits(size + rows * decoder.row_bytes)
-        import torch
-
-        from tensorfold.cuda.capacity import GIB, available_bytes
-        from tensorfold.cuda.memory_gate import torch_live
-
-        return torch_live(torch, available_bytes)() >= size + 2 * GIB
 
     @staticmethod
     def memory_snapshot() -> dict[str, int]:
@@ -174,7 +131,7 @@ class CudaSleep:
 
         import torch
 
-        self.app.engine.close()
+        self.runtime.close(self.app.engine)
         torch.cuda.synchronize()
         self.app.engine, self.app.vision = None, None
         self._free_allocations()
@@ -198,9 +155,10 @@ class CudaSleep:
         prompt_precision.set_fp8(fp8)
         self._pending = self.factory(self.model_dir, **self.options)
         self.verify_identity()
-        if _settings(self._pending) != self.settings:
+        if self.runtime.settings(self._pending) != self.settings:
             raise ValueError("restored runtime settings differ from the served context, precision or drafting settings")
-        self._attach_prefixes(self._pending)
+        if self.prefixes is not None:
+            self.runtime.attach(self._pending, self.prefixes)
         self.app.engine, self.app.vision = self._pending, getattr(self._pending, "vision", None)
         self._pending = None
 
@@ -210,7 +168,7 @@ class CudaSleep:
         import torch
 
         if self._pending is not None:
-            self._pending.close()
+            self.runtime.close(self._pending)
         torch.cuda.synchronize()
         self._pending = None
         self.app.engine, self.app.vision = None, None

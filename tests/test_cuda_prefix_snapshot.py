@@ -140,7 +140,9 @@ def test_bad_snapshot_rejected_before_allocating(codec, tmp_path, monkeypatch, b
 def test_staging_pieces_are_bounded(codec, tmp_path, monkeypatch):
     ids, state, snap = prefix()
     state.rec[0] = state.rec[0].transpose(0, 1)
-    monkeypatch.setattr(codec, "PIECE", 16)
+    from tensorfold.cuda import prefix_snapshot as transport
+
+    monkeypatch.setattr(transport, "PIECE", 16)
     sizes = []
     original = torch.Tensor.to
     frombuffer = torch.frombuffer

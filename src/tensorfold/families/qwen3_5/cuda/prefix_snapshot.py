@@ -1,45 +1,16 @@
-"""Committed text prefixes as safetensors, streamed through bounded CPU staging."""
+"""Committed Qwen text prefix state stored through the shared snapshot transport."""
 
 from __future__ import annotations
 
-import hashlib
-import json
 import math
-import os
-import struct
 from pathlib import Path
 
-import torch
+from tensorfold.cuda import prefix_snapshot as transport
+from tensorfold.cuda.prefix_snapshot import SIZES as _SIZES
+from tensorfold.cuda.prefix_snapshot import check as _check
+from tensorfold.cuda.prefix_snapshot import integer as _integer
 
-PIECE = 8 << 20
-_HEADER_LIMIT = 64 << 20
-_DTYPES = {"BF16": torch.bfloat16, "F32": torch.float32}
-_SIZES = {"BF16": 2, "F32": 4}
 _SCHEMA = 1
-
-
-def _check(ok, message):
-    if not ok:
-        raise ValueError("invalid prefix snapshot: " + message)
-
-
-def _integer(value):
-    return type(value) is int and value >= 0
-
-
-def _object(pairs):
-    result = {}
-    for key, value in pairs:
-        _check(key not in result, "duplicate JSON key")
-        result[key] = value
-    return result
-
-
-def _json(raw):
-    try:
-        return json.loads(raw, object_pairs_hook=_object)
-    except (TypeError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError("invalid prefix snapshot: JSON") from exc
 
 
 def _validate(meta, tensors, identity):
@@ -121,113 +92,28 @@ def _collect(ids, state, snap, identity):
             meta["draft"]["layers"].append(k is not None)
             if k is not None:
                 tensors[f"draft_k.{i}"], tensors[f"draft_v.{i}"] = k, v
-    header, at = {}, 0
-    for name, tensor in tensors.items():
-        _check(isinstance(tensor, torch.Tensor) and tensor.layout == torch.strided, "tensor layout")
-        dtype = next((k for k, v in _DTYPES.items() if tensor.dtype == v), None)
-        _check(dtype is not None, "tensor dtype")
-        size = tensor.numel() * tensor.element_size()
-        header[name] = {"dtype": dtype, "shape": list(tensor.shape), "data_offsets": [at, at + size]}
-        at += size
-    _validate(meta, header, identity)
-    return meta, tensors, header, at
-
-
-def _pieces(tensor):
-    """Contiguous logical order; even a strided source needs at most one small copy."""
-
-    if not tensor.is_contiguous() and tensor.numel() * tensor.element_size() > PIECE:
-        for row in tensor:
-            yield from _pieces(row)
-        return
-    flat = tensor.detach().contiguous().view(-1)
-    count = max(1, PIECE // tensor.element_size())
-    for at in range(0, flat.numel(), count):
-        yield flat[at:at + count].to("cpu")
+    return meta, tensors
 
 
 def save_prefix(path: Path, ids: list[int], state, snap, *, identity: str) -> dict:
-    """Write one new file; its caller owns publication and removal of failed files."""
+    """Write one committed prefix with no reference to its model weights."""
 
-    meta, tensors, header, tensor_bytes = _collect(ids, state, snap, identity)
-    header["__metadata__"] = {"tensorfold_prefix": json.dumps(meta, separators=(",", ":"))}
-    text = json.dumps(header, separators=(",", ":")).encode()
-    text += b" " * (-len(text) % 8)
-    _check(len(text) <= _HEADER_LIMIT, "header too large")
-    digest = hashlib.sha256()
-    with Path(path).open("xb") as output:
-        for block in (struct.pack("<Q", len(text)), text):
-            output.write(block)
-            digest.update(block)
-        for tensor in tensors.values():
-            for piece in _pieces(tensor):
-                view = memoryview(piece.view(torch.uint8).numpy()).cast("B")
-                output.write(view)
-                digest.update(view)
-                del view, piece
-        output.flush()
-        os.fsync(output.fileno())
-    return {"schema": _SCHEMA, "identity": identity, "sha256": digest.hexdigest(),
-                "file_bytes": 8 + len(text) + tensor_bytes, "tensor_bytes": tensor_bytes, "tokens": list(ids)}
-
-
-def _verified(source, receipt, identity):
-    _check(isinstance(receipt, dict), "receipt")
-    _check(type(receipt.get("schema")) is int and receipt["schema"] == _SCHEMA
-           and receipt.get("identity") == identity, "receipt identity or schema")
-    file_bytes = receipt.get("file_bytes")
-    _check(_integer(file_bytes) and os.fstat(source.fileno()).st_size == file_bytes, "file size")
-    digest = hashlib.sha256()
-    block = bytearray(min(PIECE, file_bytes))
-    while count := source.readinto(block):
-        digest.update(memoryview(block)[:count])
-    del block
-    _check(digest.hexdigest() == receipt.get("sha256"), "checksum")
-    source.seek(0)
-    prefix = source.read(8)
-    _check(len(prefix) == 8, "missing header")
-    size = struct.unpack("<Q", prefix)[0]
-    _check(0 < size <= _HEADER_LIMIT and size <= file_bytes - 8, "header size")
-    header = _json(source.read(size))
-    _check(isinstance(header, dict), "header")
-    metadata = header.pop("__metadata__", None)
-    _check(isinstance(metadata, dict) and set(metadata) == {"tensorfold_prefix"}, "metadata")
-    meta = _json(metadata["tensorfold_prefix"])
-    tensor_bytes = _validate(meta, header, identity)
-    _check(type(receipt.get("tensor_bytes")) is int and tensor_bytes == receipt["tensor_bytes"], "receipt tensor bytes")
-    tokens = receipt.get("tokens")
-    _check(isinstance(tokens, list) and all(_integer(i) for i in tokens) and tokens == meta["ids"], "receipt token ids")
-    _check(8 + size + tensor_bytes == file_bytes, "data length")
-    return meta, header, 8 + size
+    meta, tensors = _collect(ids, state, snap, identity)
+    return transport.save(path, meta, tensors, identity=identity, validate=_validate)
 
 
 def verify_prefix(path: Path, receipt, *, identity: str) -> None:
     """Check the complete file and its schema without creating runtime tensors."""
 
-    with Path(path).open("rb") as source:
-        _verified(source, receipt, identity)
+    transport.verify(path, receipt, identity=identity, validate=_validate)
 
 
 def load_prefix(path: Path, receipt, *, identity: str, device, room=None):
     """Load independent tensors and reconnect only the new runtime's cache budget."""
 
-    with Path(path).open("rb") as source:
-        meta, header, start = _verified(source, receipt, identity)
-        from .forward import State
+    meta, tensors = transport.load(path, receipt, identity=identity, device=device, validate=_validate)
+    from .forward import State
 
-        tensors = {}
-        staging = bytearray(min(PIECE, receipt["tensor_bytes"]))
-        for name, descriptor in header.items():
-            tensor = torch.empty(descriptor["shape"], dtype=_DTYPES[descriptor["dtype"]], device=device)
-            flat = tensor.view(torch.uint8).view(-1)
-            begin, end = descriptor["data_offsets"]
-            source.seek(start + begin)
-            for at in range(0, end - begin, PIECE):
-                count = min(PIECE, end - begin - at)
-                view = memoryview(staging)[:count]
-                _check(source.readinto(view) == count, "short tensor read")
-                flat[at:at + count].copy_(torch.frombuffer(staging, dtype=torch.uint8, count=count))
-            tensors[name] = tensor
     state = State.__new__(State)
     state.pos, state.limit, state.rope_delta, state.room = meta["pos"], meta["limit"], meta["rope_delta"], room
     state.conv, state.rec, state.kv = [], [], []

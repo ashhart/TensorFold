@@ -5,9 +5,10 @@ and its conversation history alive. Wake reloads the existing local checkpoint w
 the original served context, precision, drafter and concurrency settings. It does not
 write another copy of the weights to disk.
 
-The first adapter supports single-device CUDA dense Qwen (`qwen3_5`), including its
-existing serial and concurrent engines. It is opt-in. Level 1 (GPU to CPU), other
-families, Metal and tensor parallelism are not implemented. Qualification includes
+The reference adapters support single-device CUDA dense Qwen (`qwen3_5`), including
+its serial and concurrent engines, and Nemotron-H (`nemotron_h`), with its serial
+request execution and optional integrated MTP head. Sleep is opt-in. Level 1 (GPU to
+CPU), other families, Metal and tensor parallelism are not implemented. Qualification includes
 [synthetic runtime checks](research/model-sleep-validation.md) and
 [full-checkpoint NVFP4 checks](research/model-sleep-cuda-validation.md) with a drafter
 and unified-memory reclamation. Other checkpoint formats still need hardware qualification.
@@ -27,7 +28,14 @@ tensorfold serve /path/to/qwen-checkpoint --backend cuda \
   --drafter /path/to/dflash2-checkpoint --enable-sleep-mode
 ```
 
-Use `--no-drafts` when serving without a drafter. The checkpoint files must remain
+For Nemotron-H, the checkpoint includes its MTP head; no separate `--drafter` is needed:
+
+```bash
+tensorfold serve /path/to/nemotron-checkpoint --backend cuda \
+  --enable-sleep-mode --sleep-cache-dir /path/to/cache-storage
+```
+
+Use `--no-drafts` to disable drafting for either family. The checkpoint files must remain
 available and unchanged throughout the server's lifetime. The prototype verifies
 their full SHA-256 content before releasing the runtime and when reloading it;
 verification reads the entire checkpoint and contributes to transition latency.
@@ -78,7 +86,9 @@ tensorfold serve /path/to/qwen-checkpoint --backend cuda \
 
 Each snapshot includes attention K/V, convolution history, recurrent state, positions,
 and compatible drafter context. Only committed rows are saved, with their original
-bits. Sleep writes and validates the complete selected set before releasing any
+bits. Qwen preserves its gated-delta state and optional DFlash context; Nemotron-H
+preserves Mamba state, its retained hidden row, and optional MTP attention state.
+Sleep writes and validates the complete selected set before releasing any
 runtime state. A failed write, including a full disk, refuses sleep and keeps the
 original runtime awake. Snapshot identity binds the files to the current process,
 checkpoint content, runtime, device capability and precision/context settings.
@@ -126,6 +136,8 @@ PYTHONPATH=src python tools/qualify_sleep.py --model /path/to/qwen-checkpoint \
 PYTHONPATH=src python tools/qualify_sleep.py --model /path/to/qwen-checkpoint \
   --draft /path/to/dflash2-checkpoint --parallel 2 --preserve-cache --seed 1234 \
   --cycles 3 --output sleep-cache.json
+PYTHONPATH=src python tools/qualify_sleep.py --model /path/to/nemotron-checkpoint \
+  --preserve-cache --seed 1234 --cycles 3 --output sleep-nemotron.json
 ```
 
 The tool constructs a real CUDA engine, compares serial and concurrent/drafted token
@@ -135,6 +147,12 @@ hashes and timing in JSON. Synthetic mode exercises a random two-layer affine mo
 `--synthetic-draft` uses 64 layers of width 2048 and a matching random DFlash2 model.
 Neither establishes pretrained-model quality or Spark behavior.
 CUDA allocator counters exclude the driver context and some library allocations.
+The tool detects the family from the checkpoint configuration. Nemotron-H uses its
+integrated MTP by default; add `--no-drafts` to qualify it without MTP. Its CUDA
+engine serializes requests, so the direct qualification tool requires `--parallel 1`.
+
+The [CUDA family guide](recipes/adding-a-cuda-family.md#sleepwake-reference-implementations)
+describes the shared lifecycle and each reference adapter's extension points.
 
 With a sleep-enabled server running and its bearer secret in the client's environment,
 exercise HTTP stream draining and stored conversation continuation with:

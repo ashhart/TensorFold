@@ -43,6 +43,7 @@ class NemotronEngine:
                                       not all(0 <= int(t) < vocab for t in draft_ids)):
             raise ValueError(f"draft ids must be distinct token ids below the vocabulary's {vocab}")
         self.tp, self.rank, self.drafts, self.confidence = tp, rank, int(drafts), float(confidence)
+        self.draft_ids = tuple(draft_ids) if draft_ids is not None else None
         self.comm = None
         if tp == 2:
             from tensorfold.cuda.comm import NCCL
@@ -88,6 +89,7 @@ class NemotronEngine:
         self.model_dir = Path(model_dir)
         self.served = 0
         self.cache: list[tuple[list[int], dict]] = []       # (committed ids, what resuming from them needs)
+        self.sleep_cache = None
         self.serial = None                                    # the serial requests' engine, made on first use
         rule = (f"up to {self.drafts} MTP drafts a round, verified while their running confidence stays at or above "
                 f"{self.confidence:.0%}" if self.drafts else "no drafts: the serial reference, one token a round")
@@ -166,6 +168,10 @@ class NemotronEngine:
         for ids, snap in self.cache:
             if len(ids) < len(prompt) and prompt[:len(ids)] == ids and (best is None or len(ids) > len(best[0])):
                 best = (ids, snap)
+        if getattr(self, "sleep_cache", None) is not None:
+            from .sleep import restore_prefix
+
+            return restore_prefix(self, prompt, best)
         return best
 
     def _remember(self, ids: list[int], snap: dict) -> None:

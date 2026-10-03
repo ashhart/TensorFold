@@ -93,7 +93,10 @@ class Engine:
 
     def restore(self, snap: dict) -> None:
         for name in self.STATE:
-            getattr(self, name).copy_(snap[name])
+            target = getattr(self, name)
+            if name in ("k_cache", "v_cache"):
+                target = target[:, :snap[name].shape[1]]
+            target.copy_(snap[name])
         self.pos, self.parity, self.prev_keep = snap["host"]
 
     # -- the forward ------------------------------------------------------------------------------

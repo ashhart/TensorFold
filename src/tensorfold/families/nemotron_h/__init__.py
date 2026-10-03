@@ -97,6 +97,13 @@ def engine_settings(model: Any) -> dict[str, Any]:
 
 # the CUDA engine's kernels read MLX affine weights of this (bits, group size)
 CUDA_QUANTIZATION = (4, 64)
+CUDA_SLEEP_LEVELS = (2,)
+
+
+def cuda_sleep():
+    from .cuda import sleep
+
+    return sleep
 
 
 def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",

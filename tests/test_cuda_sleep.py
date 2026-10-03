@@ -57,6 +57,7 @@ def cuda(monkeypatch):
 
 def setup(checkpoint, cuda, monkeypatch, factory=None, drafter=None, cache_dir=None):
     from tensorfold.cuda import sleep
+    from tensorfold.families.qwen3_5 import cuda_sleep
 
     monkeypatch.setattr(sleep, "clear_tensor_caches", lambda: cuda.append("globals"))
     engine = Engine(cuda)
@@ -72,7 +73,7 @@ def setup(checkpoint, cuda, monkeypatch, factory=None, drafter=None, cache_dir=N
         return factory() if factory else Engine(cuda)
 
     adapter = sleep.CudaSleep(app, load, checkpoint, {"drafter": str(drafter or checkpoint), "parallel": 2,
-                                                   "vision": True, "no_drafts": False}, cache_dir=cache_dir)
+                                                   "vision": True, "no_drafts": False}, runtime=cuda_sleep(), cache_dir=cache_dir)
     app.lifecycle = Lifecycle(release=adapter.release, restore=adapter.restore, cleanup=adapter.cleanup,
                               preflight=adapter.prepare)
     return app, adapter, refs, calls

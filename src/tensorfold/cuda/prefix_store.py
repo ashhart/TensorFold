@@ -12,6 +12,17 @@ from pathlib import Path
 from .streams import PrefixCache
 
 
+def prefix_room(size: int, prompt: list[int]) -> bool:
+    """Keep the normal single-request reserve beside a lazy snapshot allocation."""
+
+    import torch
+
+    from .capacity import GIB, available_bytes
+    from .memory_gate import torch_live
+
+    return torch_live(torch, available_bytes)() >= size + 2 * GIB
+
+
 class PrefixStore:
     """One process owns its private files. Checkpoint weights are never stored here."""
 
@@ -108,6 +119,29 @@ class PrefixStore:
     def attach(self, cache: PrefixCache, *, device, room=None, admit=None) -> PrefixCache:
         return SavedPrefixCache(self, cache, device=device, room=room, admit=admit)
 
+    def restore(self, prompt, *, length=0, device, room=None, admit=None):
+        """Load only a strict prefix longer than the caller's resident match."""
+
+        saved = max((r for r in self.records if length < len(r["tokens"]) < len(prompt)
+                     and tuple(r["tokens"]) not in self.unusable
+                     and list(prompt[:len(r["tokens"])]) == r["tokens"]),
+                    key=lambda r: len(r["tokens"]), default=None)
+        if saved is None:
+            return None
+        if admit is not None and not admit(saved["tensor_bytes"], prompt):
+            self.memory_misses += 1
+            return None
+        try:
+            entry = self.codec.load_prefix(self.directory / saved["file"], saved,
+                                          identity=self.identity, device=device, room=room)
+        except (OSError, ValueError, RuntimeError, MemoryError):
+            # A removed/corrupted file or allocation failure leaves the resident cache intact.
+            self.failures += 1
+            self.unusable.add(tuple(saved["tokens"]))
+            return None
+        self.loads += 1
+        return entry
+
 
 class SavedPrefixCache(PrefixCache):
     """Resident entries retain the normal eviction policy; disk copies are immutable."""
@@ -121,31 +155,11 @@ class SavedPrefixCache(PrefixCache):
         best = max((e for e in self.entries if len(e[0]) < len(prompt)
                     and list(prompt[:len(e[0])]) == e[0]), key=lambda e: len(e[0]), default=None)
         length = len(best[0]) if best else 0
-        saved = max((r for r in self.store.records if length < len(r["tokens"]) < len(prompt)
-                     and tuple(r["tokens"]) not in self.store.unusable
-                     and list(prompt[:len(r["tokens"])]) == r["tokens"]),
-                    key=lambda r: len(r["tokens"]), default=None)
-        if saved is not None:
-            if self.admit is not None and not self.admit(saved["tensor_bytes"], prompt):
-                self.store.memory_misses += 1
-            else:
-                loaded = self._load(saved)
-                if loaded is not None:
-                    self.add(*loaded)
-                    best = self.entries[-1]
+        loaded = self.store.restore(prompt, length=length, device=self.device, room=self.room, admit=self.admit)
+        if loaded is not None:
+            self.add(*loaded)
+            best = self.entries[-1]
         return self._touch(best)
-
-    def _load(self, receipt):
-        try:
-            entry = self.store.codec.load_prefix(self.store.directory / receipt["file"], receipt,
-                                                 identity=self.store.identity, device=self.device, room=self.room)
-        except (OSError, ValueError, RuntimeError, MemoryError):
-            # A removed/corrupted file or allocation failure is a cold prefill, never partial state.
-            self.store.failures += 1
-            self.store.unusable.add(tuple(receipt["tokens"]))
-            return None
-        self.store.loads += 1
-        return entry
 
 
 __all__ = ["PrefixStore"]

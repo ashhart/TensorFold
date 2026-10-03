@@ -323,6 +323,7 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
         from tensorfold.server.lifecycle import Lifecycle
 
         adapter = CudaSleep(app, family.package.cuda_engine, model_dir, options, identity=identity,
+                            runtime=family.package.cuda_sleep(),
                             cache_dir=getattr(args, "sleep_cache_dir", None))
         app.lifecycle = Lifecycle(release=adapter.release, restore=adapter.restore, cleanup=adapter.cleanup,
                                   preflight=adapter.prepare, drain_timeout=args.sleep_timeout)

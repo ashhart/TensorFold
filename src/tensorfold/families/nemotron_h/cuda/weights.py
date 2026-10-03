@@ -221,12 +221,14 @@ def _mamba(r: _Reader, p: str) -> Mamba:
 
 def load_mtp(path: Path, c: Config, device: str = "cuda") -> MTP:
     r = _Reader([path], device)
-    mtp = MTP(enorm=r.get("layers.0.enorm.weight").contiguous(), hnorm=r.get("layers.0.hnorm.weight").contiguous(),
-              eh_proj=tile(_qlinear(r, "layers.0.eh_proj")), attn_norm=r.get("layers.0.norm.weight").contiguous(),
-              attn=_attention(r, "layers.0.mixer."), moe_norm=r.get("layers.1.norm.weight").contiguous(),
-              moe=_moe(r, "layers.1.mixer.", c), final_norm=r.get("layers.1.final_layernorm.weight").contiguous())
-    left = r.unused()
-    r.close()
+    try:
+        mtp = MTP(enorm=r.get("layers.0.enorm.weight").contiguous(), hnorm=r.get("layers.0.hnorm.weight").contiguous(),
+                  eh_proj=tile(_qlinear(r, "layers.0.eh_proj")), attn_norm=r.get("layers.0.norm.weight").contiguous(),
+                  attn=_attention(r, "layers.0.mixer."), moe_norm=r.get("layers.1.norm.weight").contiguous(),
+                  moe=_moe(r, "layers.1.mixer.", c), final_norm=r.get("layers.1.final_layernorm.weight").contiguous())
+        left = r.unused()
+    finally:
+        r.close()
     if left:
         raise ValueError(f"unused MTP tensors: {left[:5]}")
     return mtp
@@ -238,22 +240,24 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True) -> We
     model_dir = Path(model_dir)
     c = Config.read(model_dir)
     r = _Reader(sorted(model_dir.glob("model*.safetensors")), device)
-    blocks: list[Block] = []
-    for i, kind in enumerate(c.pattern):
-        p = f"backbone.layers.{i}."
-        norm = r.get(p + "norm.weight").contiguous()
-        if kind == "M":
-            blocks.append(Block("M", norm, mamba=_mamba(r, p + "mixer.")))
-        elif kind == "*":
-            blocks.append(Block("*", norm, attn=_attention(r, p + "mixer.")))
-        else:
-            blocks.append(Block("E", norm, moe=_moe(r, p + "mixer.", c)))
-        if i % 8 == 7:                            # each release waits for the device; a block leaves few temporaries
-            torch.cuda.empty_cache()
-    w = Weights(config=c, embed=_qlinear(r, "backbone.embeddings"), blocks=blocks,
-                norm_f=r.get("backbone.norm_f.weight").contiguous(), head=tile(_qlinear(r, "lm_head")))
-    left = r.unused()
-    r.close()
+    try:
+        blocks: list[Block] = []
+        for i, kind in enumerate(c.pattern):
+            p = f"backbone.layers.{i}."
+            norm = r.get(p + "norm.weight").contiguous()
+            if kind == "M":
+                blocks.append(Block("M", norm, mamba=_mamba(r, p + "mixer.")))
+            elif kind == "*":
+                blocks.append(Block("*", norm, attn=_attention(r, p + "mixer.")))
+            else:
+                blocks.append(Block("E", norm, moe=_moe(r, p + "mixer.", c)))
+            if i % 8 == 7:                            # each release waits for the device; a block leaves few temporaries
+                torch.cuda.empty_cache()
+        w = Weights(config=c, embed=_qlinear(r, "backbone.embeddings"), blocks=blocks,
+                    norm_f=r.get("backbone.norm_f.weight").contiguous(), head=tile(_qlinear(r, "lm_head")))
+        left = r.unused()
+    finally:
+        r.close()
     if left:
         raise ValueError(f"unused checkpoint tensors: {left[:5]}")
     if mtp and (model_dir / MTP_FILE).is_file():

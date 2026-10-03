@@ -118,6 +118,17 @@ def test_sleep_accepts_existing_dense_cuda_draft_and_parallel_options(tmp_path, 
     assert cli._check_serve_options(args, family, "cuda") is None
 
 
+@pytest.mark.parametrize("flags", [[], ["--no-drafts"], ["--mtp-drafts", "2"],
+                                   ["--sleep-cache-dir", "sleep-cache"]])
+def test_sleep_accepts_nemotron_cuda_options(tmp_path, monkeypatch, flags):
+    from tensorfold.families import nemotron_h
+
+    monkeypatch.setenv("TENSORFOLD_SLEEP_TOKEN", "secret")
+    args = cli.build_parser().parse_args(["serve", str(tmp_path), "--enable-sleep-mode"] + flags)
+    family = SimpleNamespace(title=nemotron_h.TITLE, package=nemotron_h, model_type="nemotron_h")
+    assert cli._check_serve_options(args, family, "cuda") is None
+
+
 def test_sleep_cli_releases_initial_locals_and_pins_reload_paths_and_context(tmp_path, monkeypatch, capsys):
     import json
     import sys
@@ -148,7 +159,9 @@ def test_sleep_cli_releases_initial_locals_and_pins_reload_paths_and_context(tmp
         refs.extend((weakref.ref(engine), weakref.ref(engine.w)))
         return engine
 
-    family = _family(cuda_engine=factory, CUDA_SLEEP_LEVELS=(2,))
+    from tensorfold.families.qwen3_5 import cuda_sleep
+
+    family = _family(cuda_engine=factory, CUDA_SLEEP_LEVELS=(2,), cuda_sleep=cuda_sleep)
     family.model_type = "qwen3_5"
     monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=SimpleNamespace(synchronize=lambda: None,
                                                                                    empty_cache=lambda: None)))
@@ -183,7 +196,7 @@ def test_sleep_cli_prepares_cache_and_closes_snapshot_storage(tmp_path, monkeypa
     cache_dir = str(tmp_path / "sleep-cache")
 
     class Adapter:
-        def __init__(self, app, factory, model_dir, options, *, identity, cache_dir):
+        def __init__(self, app, factory, model_dir, options, *, identity, cache_dir, runtime):
             events.append(("create", cache_dir))
 
         def prepare(self):
@@ -212,7 +225,8 @@ def test_sleep_cli_prepares_cache_and_closes_snapshot_storage(tmp_path, monkeypa
     monkeypatch.setenv("TENSORFOLD_SLEEP_TOKEN", "secret")
     monkeypatch.setattr(server, "App", lambda engine, *a, **k: SimpleNamespace(
         engine=engine, effective_context_window=4096))
-    family = _family(cuda_engine=lambda *a, **k: SimpleNamespace(), CUDA_SLEEP_LEVELS=(2,))
+    family = _family(cuda_engine=lambda *a, **k: SimpleNamespace(), CUDA_SLEEP_LEVELS=(2,),
+                     cuda_sleep=lambda: object())
     family.model_type = "qwen3_5"
 
     def serve(app, *args):

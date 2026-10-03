@@ -17,7 +17,8 @@ def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any =
     if getattr(args, "enable_sleep_mode", False):
         if (backend != "cuda" or getattr(family.package, "CUDA_SLEEP_LEVELS", ()) != (2,)
                 or getattr(args, "tp", 1) != 1):
-            raise ValueError("--enable-sleep-mode supports single-device CUDA dense Qwen (qwen3_5) only")
+            raise ValueError("--enable-sleep-mode supports single-device CUDA dense Qwen (qwen3_5) "
+                             "and Nemotron-H (nemotron_h) only")
         timeout = getattr(args, "sleep_timeout", 120.0)
         if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("--sleep-timeout must be finite and positive")

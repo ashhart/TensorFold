@@ -1,7 +1,7 @@
 """Measure real single-device CUDA sleep/wake; use --synthetic for a tiny local plumbing check.
 
-Run with PYTHONPATH=src and a CUDA-enabled TensorFold Python. Real checkpoints are local
-paths only. The report distinguishes random fixtures from pretrained checkpoints.
+Run with PYTHONPATH=src and a CUDA-enabled TensorFold Python. Real dense Qwen and Nemotron-H
+checkpoints are local paths only. The report distinguishes random fixtures from pretrained checkpoints.
 HTTP authorization, stream draining and Responses continuation have separate host tests.
 """
 
@@ -16,25 +16,44 @@ import time
 import weakref
 
 
+def engine_options(args, family):
+    """Validate the two reference families before importing CUDA or loading weights."""
+
+    if family.model_type not in ("qwen3_5", "nemotron_h"):
+        raise ValueError("sleep qualification supports dense Qwen and Nemotron-H")
+    if args.parallel > 1 and family.model_type != "qwen3_5":
+        raise ValueError("--parallel greater than one requires dense Qwen's concurrent decoder")
+    if args.draft and family.model_type == "nemotron_h":
+        raise ValueError("Nemotron-H uses integrated MTP; --draft does not apply")
+    no_drafts = args.no_drafts or (family.model_type == "qwen3_5" and not args.draft)
+    options = dict(drafter=str(args.draft.resolve()) if args.draft else "", no_drafts=no_drafts,
+                   parallel=args.parallel, context=args.context, context_explicit=True)
+    if args.preserve_cache and args.parallel > 1:
+        options["checkpoint_slots"] = max(3, args.parallel)
+    return options
+
+
 def qualify(args, model_dir, cache_dir=None):
+    from tensorfold.families import detect
+
+    family = detect(model_dir)
+    options = engine_options(args, family)
+
     import torch
     import tensorfold
     from tensorfold.cuda import precision, prompt_precision
     from tensorfold.cuda.server import App
     from tensorfold.cuda.sleep import CudaSleep
     from tensorfold.engine.exact_sampling import Sampling
-    from tensorfold.families.qwen3_5 import cuda_engine
     from tensorfold.server.lifecycle import Lifecycle
 
     precision.set_mode(args.precision, asked=True)
     prompt_precision.set_fp8(args.prefill_fp8)
-    options = dict(drafter=str(args.draft.resolve()) if args.draft else "", no_drafts=not args.draft,
-                   parallel=args.parallel, context=args.context, context_explicit=True)
-    if args.preserve_cache and args.parallel > 1:
-        options["checkpoint_slots"] = max(3, args.parallel)
-    app = App(cuda_engine(model_dir, **options), model_dir, "sleep-qualification")
+    cuda_engine = family.package.cuda_engine
+    runtime = family.package.cuda_sleep()
+    app = App(cuda_engine(model_dir, **options), model_dir, "sleep-qualification", context_window=args.context)
     frontend = (id(app), id(app.tok), id(app.template))
-    adapter = CudaSleep(app, cuda_engine, model_dir, options, cache_dir=cache_dir)
+    adapter = CudaSleep(app, cuda_engine, model_dir, options, runtime=runtime, cache_dir=cache_dir)
     lifecycle = Lifecycle(release=adapter.release, restore=adapter.restore, cleanup=adapter.cleanup,
                           preflight=adapter.prepare)
 
@@ -77,12 +96,13 @@ def qualify(args, model_dir, cache_dir=None):
     def runs():
         serial = [generate(False, offset) for offset in range(args.parallel)]
         with ThreadPoolExecutor(max_workers=args.parallel) as pool:
-            concurrent = list(pool.map(lambda offset: generate(bool(args.draft) or args.preserve_cache, offset),
+            concurrent = list(pool.map(lambda offset: generate(not options["no_drafts"] or args.preserve_cache, offset),
                                        range(args.parallel)))
         assert [r["tokens"] for r in serial] == [r["tokens"] for r in concurrent], "serial/concurrent tokens differ"
         return dict(serial=serial, concurrent=concurrent)
 
-    report = dict(synthetic=args.synthetic, gpu=torch.cuda.get_device_name(), torch=torch.__version__,
+    report = dict(synthetic=args.synthetic, model_type=family.model_type,
+                  gpu=torch.cuda.get_device_name(), torch=torch.__version__,
                   cuda=torch.version.cuda, tensorfold=tensorfold.__version__,
                   precision=args.precision, prefill_fp8=args.prefill_fp8,
                   seed=args.seed, preserve_cache=args.preserve_cache,
@@ -111,9 +131,7 @@ def qualify(args, model_dir, cache_dir=None):
             lifecycle.wake_up()
             wake_s = time.perf_counter() - start
             if args.preserve_cache:
-                engine = app.engine
-                assert not (engine.multi.cache if engine.concurrent else engine.cache).entries, "eager cache load"
-                del engine
+                assert not runtime.cache(app.engine).entries, "eager cache load"
             after = runs()
             assert [r["tokens"] for r in after["serial"]] == [r["tokens"] for r in before["serial"]], \
                 "tokens changed across wake"
@@ -145,7 +163,9 @@ def main():
     source.add_argument("--model", type=Path)
     source.add_argument("--synthetic", action="store_true")
     parser.add_argument("--synthetic-draft", action="store_true", help="use 64 tiny target layers and a random drafter")
-    parser.add_argument("--draft", type=Path)
+    drafting = parser.add_mutually_exclusive_group()
+    drafting.add_argument("--draft", type=Path)
+    drafting.add_argument("--no-drafts", action="store_true", help="disable external or integrated drafting")
     parser.add_argument("--parallel", type=int, default=1)
     parser.add_argument("--context", type=int, default=1024)
     parser.add_argument("--prompt-tokens", type=int, default=32)
@@ -165,6 +185,8 @@ def main():
         parser.error("use --synthetic-draft for the synthetic model's matching drafter")
     if args.synthetic_draft and not args.synthetic:
         parser.error("--synthetic-draft requires --synthetic")
+    if args.synthetic_draft and args.no_drafts:
+        parser.error("--synthetic-draft cannot be used with --no-drafts")
     with tempfile.TemporaryDirectory(prefix="tensorfold-sleep-") as directory:
         if args.synthetic:
             from sleep_fixture import create, create_draft

@@ -63,3 +63,52 @@ rank synchronization. Add concurrent versus solo checks before exposing concurre
 Use the [public fixture command](README.md#measurements) for server measurements. Keep model/runtime pins,
 launch commands and output hashes with results. Time dependent chains and full requests; do not select a
 kernel solely from independent microbenchmarks.
+
+## Sleep/wake reference implementations
+
+Dense Qwen and Nemotron-H provide two single-device CUDA Level 2 reference adapters.
+Both use the same HTTP lifecycle, checkpoint identity, transactional prefix store,
+bounded safetensors transport and lazy disk restore. Their runtime ownership and
+state layouts remain in the family package.
+
+| Reference | Runtime hooks | Prefix codec | State preserved |
+| --- | --- | --- | --- |
+| Dense Qwen | [`qwen3_5/cuda/sleep.py`](../../src/tensorfold/families/qwen3_5/cuda/sleep.py) | [`prefix_snapshot.py`](../../src/tensorfold/families/qwen3_5/cuda/prefix_snapshot.py) | Attention, gated-delta/convolution state, optional DFlash context |
+| Nemotron-H | [`nemotron_h/cuda/sleep.py`](../../src/tensorfold/families/nemotron_h/cuda/sleep.py) | [`prefix_snapshot.py`](../../src/tensorfold/families/nemotron_h/cuda/prefix_snapshot.py) | Attention, Mamba state and pending window buffers, retained hidden row, optional MTP context |
+
+Export `CUDA_SLEEP_LEVELS = (2,)` and a lazy `cuda_sleep()` function returning the
+family's hooks module. The shared adapter consumes this contract:
+
+| Hook | Responsibility |
+| --- | --- |
+| `FAMILY` | Stable family identifier included in snapshot identity |
+| `settings(engine)` | Tensor-free values describing the served context, math and drafting settings; compare them after reload |
+| `cache(engine)` | A `PrefixCache` view with retained `(token_ids, state, draft_state)` entries and the existing capacity |
+| `prefix_codec()` | Return the family's explicit snapshot codec |
+| `attach(engine, store)` | Connect lazy disk lookup to the new runtime, including memory admission |
+| `close(engine)` | Stop any runtime workers before the shared adapter drops the engine and reclaims allocations |
+
+Hooks must not retain the previous engine, weights, callbacks bound to them, or any
+device tensors. The reload factory receives pinned local paths and scalar options;
+it must recreate the same effective context and settings. On failed reload, all
+temporary allocations and file-reader staging must be releasable before retry.
+Include serial twins, captured graphs, draft heads and closures when checking ownership.
+The shared adapter pins `capacity_plan["context_window"]` when available, separately
+from the served HTTP limit: rounded cache capacity can exceed the checkpoint's
+native context and must not become the explicit context passed to the loader.
+
+The codec exposes `save_prefix`, `verify_prefix` and `load_prefix`; the two reference
+modules show their signatures. Delegate file I/O and integrity checks to
+[`cuda/prefix_snapshot.py`](../../src/tensorfold/cuda/prefix_snapshot.py), then validate
+the family's complete state layout before allocating restored tensors. Store only
+committed KV rows. Qwen creates independent growing `State` objects; Nemotron restores
+compact saved rows into a fresh engine's fixed-capacity buffers. Neither serializes
+weight objects, graphs or arbitrary Python objects.
+
+Qualify repeated cycles with exact serial/drafted output, cached-token reuse, zero
+allocated and reserved bytes while asleep, failed-save rollback, failed-load retry,
+memory-denied cache misses and HTTP conversation continuation. Use
+`tools/qualify_sleep.py` and `tools/qualify_sleep_http.py --require-cache` as the
+reference checks. See [model sleep/wake](../model-sleep.md) for supported operation
+and snapshot lifetime. Adding a family is separate from adding Level 1, multi-rank
+coordination, or restart persistence.
