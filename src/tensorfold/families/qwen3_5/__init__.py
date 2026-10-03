@@ -54,21 +54,39 @@ def load_lane_model(model_dir: Path) -> tuple[Any, Any]:
         names = [n for n in weight_map if n.startswith("mtp.") or ".mtp." in n]
     if not names:
         loaded = load(str(model_dir))
-        return loaded[0], loaded[1]
-    from mlx_lm.models.qwen3_5 import TextModel
+    else:
+        from mlx_lm.models.qwen3_5 import TextModel
 
-    original = TextModel.sanitize
+        original = TextModel.sanitize
 
-    def sanitize_without_mtp(self: Any, weights: dict[str, Any]) -> Any:
-        kept = {k: v for k, v in weights.items() if not (k.startswith("mtp.") or ".mtp." in k)}
-        return original(self, kept)
+        def sanitize_without_mtp(self: Any, weights: dict[str, Any]) -> Any:
+            kept = {k: v for k, v in weights.items() if not (k.startswith("mtp.") or ".mtp." in k)}
+            return original(self, kept)
 
-    TextModel.sanitize = sanitize_without_mtp  # type: ignore[method-assign]
-    try:
-        loaded = load(str(model_dir))
-        return loaded[0], loaded[1]
-    finally:
-        TextModel.sanitize = original  # type: ignore[method-assign]
+        TextModel.sanitize = sanitize_without_mtp  # type: ignore[method-assign]
+        try:
+            loaded = load(str(model_dir))
+        finally:
+            TextModel.sanitize = original  # type: ignore[method-assign]
+    converted = bf16_floats(loaded[0])
+    if converted:
+        print(f"[tensorfold] {converted} float16 tensors of this checkpoint run as bfloat16, the decode kernels' "
+              "type", flush=True)
+    return loaded[0], loaded[1]
+
+
+def bf16_floats(model: Any) -> int:
+    """Cast a float16 checkpoint's float16 arrays to bfloat16, the decode kernels' type; return how many."""
+
+    import mlx.core as mx
+    from mlx.utils import tree_flatten, tree_unflatten
+
+    flat = tree_flatten(model.parameters())
+    count = sum(1 for _, v in flat if v.dtype == mx.float16)
+    if count:
+        model.update(tree_unflatten([(k, v.astype(mx.bfloat16) if v.dtype == mx.float16 else v) for k, v in flat]))
+        mx.eval(model.parameters())
+    return count
 
 
 def install_row_decoder(model: Any) -> bool:
