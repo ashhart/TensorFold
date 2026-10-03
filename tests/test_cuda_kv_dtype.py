@@ -109,13 +109,37 @@ def test_two_ranks_with_different_caches_refuse_to_start(fake_runtime, peer):  #
         obj = FlashNextEngine.__new__(FlashNextEngine)
         obj.depth, obj.confidence, obj.max_len, obj.kv_dtype, obj.comm = 6, 0.3, 8192, kv_dtype, comm
         obj.prefill_rows = 2048                            # constructor-resolved prompt rows must agree too
-        obj.streams, obj.graphs_enabled = 1, True
+        obj.streams, obj.graphs_enabled, obj.keep = 1, True, 8
         return obj
 
     theirs = Comm()
     rank(peer, theirs)._same_settings(torch, None)            # a rank agrees with itself
     with pytest.raises(RuntimeError, match="different settings"):
         rank("int8", Comm(theirs.sent))._same_settings(torch, None)
+
+
+def test_two_ranks_with_different_checkpoint_slots_refuse_to_start(fake_runtime):  # noqa: F811
+    from tensorfold.families.qwen4_exp.cuda.engine import FlashNextEngine
+
+    class Comm:
+        def __init__(self, other=None):
+            self.other, self.sent = other, None
+
+        def all_gather(self, send, recv):
+            self.sent = send.clone()
+            recv.copy_(torch.cat([send, send if self.other is None else self.other]))
+
+    def rank(keep, comm):
+        obj = FlashNextEngine.__new__(FlashNextEngine)
+        obj.depth, obj.confidence, obj.max_len, obj.kv_dtype, obj.comm = 6, 0.3, 8192, "bf16", comm
+        obj.prefill_rows = 2048
+        obj.streams, obj.graphs_enabled, obj.keep = 4, True, keep
+        return obj
+
+    theirs = Comm()
+    rank(8, theirs)._same_settings(torch, None)
+    with pytest.raises(RuntimeError, match="different settings.*--checkpoint-slots"):
+        rank(16, Comm(theirs.sent))._same_settings(torch, None)
 
 
 def test_two_ranks_with_different_prompt_precision_refuse_to_start(fake_runtime):  # noqa: F811
@@ -134,7 +158,7 @@ def test_two_ranks_with_different_prompt_precision_refuse_to_start(fake_runtime)
         obj = FlashNextEngine.__new__(FlashNextEngine)
         obj.depth, obj.confidence, obj.max_len, obj.kv_dtype, obj.comm = 6, 0.3, 8192, "bf16", comm
         obj.prefill_rows = 2048                            # isolate the precision mismatch, not a missing setting
-        obj.streams, obj.graphs_enabled = 1, True
+        obj.streams, obj.graphs_enabled, obj.keep = 1, True, 8
         return obj
 
     theirs = Comm()
@@ -150,5 +174,33 @@ def test_a_draft_confidence_outside_0_to_1_is_refused_before_loading(tmp_path, f
     calls, _ = fake_runtime
     _, go = build(tmp_path, "bf16", confidence=confidence)
     with pytest.raises(ValueError, match="probability from 0 to 1"):
+        go()
+    assert not calls
+
+
+def test_kept_prompt_states_are_admitted_with_the_window(tmp_path, monkeypatch, fake_runtime):  # noqa: F811
+    from tensorfold.cuda.geometry import indexed_stream_geometry
+    from tensorfold.families.qwen4_exp.cuda.engine import KEEP
+
+    checkpoint(tmp_path, small_config(), WEIGHTS)
+    calls, capacity = fake_runtime
+    budget = indexed_stream_geometry(small_config(), 5, 4, KEEP, mtp=True).needed(12000) + 32768
+    monkeypatch.setattr(capacity, "available_bytes", lambda t: budget)
+    windows = {}
+    for keep in (1, None, KEEP, 2 * KEEP):                   # None is the shipped default, KEEP
+        obj, go = build(tmp_path, "bf16", streams=4, keep=keep)
+        with pytest.raises(Loaded):
+            go()
+        windows[keep] = obj.capacity_plan["context_window"]
+        assert obj.keep == (KEEP if keep is None else keep)
+    assert windows[1] > windows[None] == windows[KEEP] > windows[2 * KEEP], windows
+
+
+@pytest.mark.parametrize("keep", [0, -3])
+def test_a_kept_state_count_under_one_is_refused_before_anything_is_read(tmp_path, fake_runtime, keep):  # noqa: F811
+    checkpoint(tmp_path, small_config(), WEIGHTS)
+    calls, _ = fake_runtime
+    _, go = build(tmp_path, "bf16", streams=4, keep=keep)
+    with pytest.raises(ValueError, match="--checkpoint-slots is 1 or more"):
         go()
     assert not calls

@@ -61,7 +61,8 @@ class FlashNextEngine:
                  draft_vocab: str | int | None = "default", max_len: int | None = None,
                  context_explicit: bool | None = None, tp: int = 1, rank: int = 0, master: str = "", port: int = 29551,
                  prefetch: bool = True, graphs: bool = True, streams: int = 1, ple_on_ssd: bool = False,
-                 kv_dtype: str = "bf16", share: float = 0.0, vision: bool = False, vision_urls: bool = False) -> None:
+                 kv_dtype: str = "bf16", share: float = 0.0, vision: bool = False, vision_urls: bool = False,
+                 keep: int | None = None) -> None:
         import torch
 
         from .exl3_pack import admission, extra_files, is_exl3
@@ -94,8 +95,12 @@ class FlashNextEngine:
             raise ValueError(f"MTP drafts a round: 0 to {MAX_DEPTH}, not {depth}")
         if not 0.0 <= float(confidence) <= 1.0:
             raise ValueError(f"MTP draft confidence: a probability from 0 to 1, not {confidence}")
+        keep = KEEP if keep is None else int(keep)        # --checkpoint-slots: each kept state is in the estimate
+        if keep < 1:
+            raise ValueError(f"--checkpoint-slots is 1 or more, not {keep}")
         torch.cuda.set_device(0)
         self.tp, self.rank, self.depth, self.confidence = tp, rank, int(depth), float(confidence)
+        self.keep = keep
         self.streams, self.master, self.graphs_enabled = int(streams), master, bool(graphs)
         self.kv_dtype = check_kv(kv_dtype)
         self.comm = None
@@ -112,7 +117,7 @@ class FlashNextEngine:
         each, mtp, bits = self.depth + 1, self.depth > 0, BITS_OF[self.kv_dtype]
         # one admission for one stream or many (every slot, the shared rows and kept snapshots), before any load
         rows0 = chunk or PREFILL_ROWS
-        geometry = ((lambda text: indexed_stream_geometry(text, streams + int(graphs and mtp), each, KEEP, mtp=mtp,
+        geometry = ((lambda text: indexed_stream_geometry(text, streams + int(graphs and mtp), each, keep, mtp=mtp,
                                                           kv_bits=bits, world=tp, prefill_rows=rows0))
                     if streams > 1 else
                     (lambda text: gdn_geometry(text, tp, each, indexed=True, mtp=mtp, kv_bits=bits,
@@ -188,7 +193,7 @@ class FlashNextEngine:
 
             self.e = None
             self.multi = MultiDecoder(w, slots=streams, capacity=self.max_len, depth=self.depth,
-                                      confidence=self.confidence, keep=KEEP, points=self.points,
+                                      confidence=self.confidence, keep=keep, points=self.points,
                                       kv_dtype=self.kv_dtype, share=share, vision=self.vision,
                                       prefill_rows=self.prefill_rows, workspace_bytes=prompt_workspace, graphs=graphs)
             self.scheduler = Scheduler(self.multi, max_streams=streams)
@@ -246,8 +251,9 @@ class FlashNextEngine:
         self.serial = None                                # the serial requests' engine, made on first use
         rule = (f"1 to {self.depth} MTP drafts a round, a chain stops before a later draft under "
                 f"{self.confidence:.0%}" if self.depth else "no drafts: the serial reference, one token a round")
-        where = (f"up to {streams} streams, each growing to {self.context_window} prompt/reply tokens while memory "
-                 f"lasts ({self.multi.memory_gate.room / 2**30:.1f} GiB free for their caches, "
+        where = (f"up to {streams} streams, {keep} kept prompt states, each growing to {self.context_window} "
+                 f"prompt/reply tokens while memory lasts "
+                 f"({self.multi.memory_gate.room / 2**30:.1f} GiB free for their caches, "
                  f"{self.multi.window_bytes / 2**30:.2f} GiB for one at the full window), eager" if self.concurrent else
                  f"{self.context_window}-token prompt/reply window; {self.max_len}-token cache")
         if ple_on_ssd:
@@ -273,14 +279,16 @@ class FlashNextEngine:
         mine = torch.tensor([self.depth, round(self.confidence * 1e6), self.max_len, self.streams,
                              int(self.graphs_enabled),
                              len(ids) if ids is not None else -1, total, BITS_OF[self.kv_dtype],
-                             self.prefill_rows, int(prompt_precision.fp8())], dtype=torch.int64, device="cuda")
+                             self.prefill_rows, self.keep, int(prompt_precision.fp8())],      # precision last
+                            dtype=torch.int64, device="cuda")
         both = torch.empty((2 * mine.numel(),), dtype=torch.int64, device="cuda")
         self.comm.all_gather(mine, both)
         both = both.view(2, -1).cpu()
         prompt_precision.same_on_ranks(int(both[0, -1]), int(both[1, -1]))
         if not torch.equal(both[0], both[1]):
             raise RuntimeError(f"the two ranks were started with different settings (drafts, confidence, context, "
-                               f"parallel streams, graphs, draft vocabulary, KV cache, prompt rows): "
+                               f"parallel streams, graphs, draft vocabulary, KV cache, prompt rows, "
+                               f"--checkpoint-slots): "
                                f"rank 0 {both[0].tolist()}, rank 1 {both[1].tolist()}")
 
     def _key(self, n: int) -> str:

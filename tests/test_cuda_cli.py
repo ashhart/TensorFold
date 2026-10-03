@@ -390,6 +390,42 @@ def test_27b_cuda_engine_takes_the_checkpoint_slots_as_its_kept_states(tmp_path,
     assert made[-1]["keep"] == keep and made[-1]["streams"] == 2
 
 
+@pytest.mark.torch
+@pytest.mark.parametrize("slots, keep", [(None, None), (16, 16)])
+def test_flash_next_cuda_engine_takes_the_checkpoint_slots_as_its_kept_states(tmp_path, monkeypatch, slots, keep):
+    from tensorfold.families import qwen4_exp
+    from tensorfold.families.qwen4_exp.cuda import engine as flash
+
+    made = []
+    monkeypatch.setattr(qwen4_exp, "has_mtp", lambda path: True)
+    monkeypatch.setattr(flash, "FlashNextEngine", lambda *a, **k: made.append(k) or SimpleNamespace(**k))
+    monkeypatch.setattr("tensorfold.cuda.build.refuse_small_gpu", lambda: None)
+    options = {"parallel": 16} | ({"checkpoint_slots": slots} if slots is not None else {})
+    qwen4_exp.cuda_engine(tmp_path, **options)
+    assert made[-1]["keep"] == keep and made[-1]["streams"] == 16
+
+
+@pytest.mark.parametrize("flags, message", [
+    (["--checkpoint-slots", "16"], "one stream keeps 4"),
+    (["--checkpoint-slots", "0", "--parallel", "16"], "1 or more, not 0"),
+])
+def test_flash_next_checkpoint_slots_are_refused_where_they_would_not_act(tmp_path, flags, message):
+    from tensorfold.families import qwen4_exp
+
+    args = cli.build_parser().parse_args(["serve", str(tmp_path)] + flags)
+    family = SimpleNamespace(title=qwen4_exp.TITLE, package=qwen4_exp, model_type="qwen4_exp")
+    with pytest.raises(ValueError, match=message):
+        cli._check_serve_options(args, family, "cuda")
+
+
+def test_flash_next_checkpoint_slots_pass_with_parallel_streams(tmp_path):
+    from tensorfold.families import qwen4_exp
+
+    args = cli.build_parser().parse_args(["serve", str(tmp_path), "--parallel", "16", "--checkpoint-slots", "16"])
+    family = SimpleNamespace(title=qwen4_exp.TITLE, package=qwen4_exp, model_type="qwen4_exp")
+    assert cli._check_serve_options(args, family, "cuda") is None
+
+
 @pytest.mark.parametrize("flags,backend,message", [
     (["--vision-offload"], "cuda", "--vision-offload needs --vision"),
     (["--vision", "--vision-offload"], "mlx", "--vision-offload is for the CUDA backend"),
