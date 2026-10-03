@@ -6,6 +6,7 @@ import torch
 
 from tensorfold.cuda.kernels import gdn
 from tensorfold.cuda.logprobs import capture
+from tensorfold.cuda.memory_gate import NoRoom
 from tensorfold.cuda.streams import Stream, accept
 
 from .decode import Engine, draft
@@ -121,8 +122,19 @@ class Alone:
         self._drop_kept(target)
         self.free = [f for f in self.free if f is not target]
         self._shrink(target)
-        if not self._grow(target, old.capacity, alone=True):
-            raise RuntimeError("the lone stream's graph slot cannot hold its existing cache")
+        try:
+            grown = self._grow(target, old.capacity, alone=True)
+        except NoRoom:
+            if self.planning or self.w.comm is not None:
+                raise
+            grown = False
+        if not grown:
+            if self.planning or self.w.comm is not None:
+                raise RuntimeError("the lone stream's graph slot cannot hold its existing cache")
+            self._graphs_to(old)                 # no room for the copy's peak: the graphs go to the stream instead
+            self._shrink(target)
+            self.free.append(target)
+            return
         target.copy_from(old)
         s.st = target
         if not any(k[1] is old for k in self.kept) and all(f is not old for f in self.free):

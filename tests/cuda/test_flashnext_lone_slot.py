@@ -15,7 +15,7 @@ from tensorfold.cuda.streams import Stream  # noqa: E402
 from tensorfold.engine.exact_sampling import Sampling  # noqa: E402
 from tensorfold.families.qwen4_exp.cuda.decode import Engine, prefill, serial_decode  # noqa: E402
 from tensorfold.families.qwen4_exp.cuda.graphs import Graphs  # noqa: E402
-from tensorfold.families.qwen4_exp.cuda.multi import MultiDecoder  # noqa: E402
+from tensorfold.families.qwen4_exp.cuda.multi import FIRST, MultiDecoder  # noqa: E402
 
 
 @pytest.fixture
@@ -106,3 +106,27 @@ def test_two_conversations_taking_turns_on_a_full_pool_capture_once_per_slot(cou
             assert s.out == _ref(w, p, 10, smp) and s.cached == kept[i]    # resumed from its own kept end
             talks[i], kept[i] = p + s.out[:-1] + [40 + turn], len(p) - 1
     assert counted["sets"] == sets
+
+
+def test_a_graph_slot_without_room_for_the_copy_gives_its_graphs_to_the_stream():
+    """When the graph slot cannot grow to hold a lone stream's caches, the stream decodes through graphs in its own
+    slot instead of failing the round, with its serial tokens."""
+
+    w = _model()
+    dec = MultiDecoder(w, slots=3, capacity=1024, depth=3, confidence=0.3)
+    grow = dec._grow
+    dec._grow = lambda st, rows, **kw: False if dec._is_solo(st) and rows > st.capacity else grow(st, rows, **kw)
+    alone = dec._solo_round
+    rounds = []
+    dec._solo_round = lambda s: rounds.append(s.st) or alone(s)
+    smp = Sampling(seed=1234, top_k=20, top_p=0.95)
+    a, b = Stream([5, 17, 99, 250], 40, None), Stream([1023, 7, 64, 300, 11, 12], 6, smp)
+    dec.admit(b)                                              # b takes the graph slot
+    dec.admit(a)
+    b.st.resize(FIRST)                                        # the graph slot is smaller than a's caches
+    a.st.resize(512)
+    slot = dec.solo.st
+    while dec.live():
+        dec.finish(dec.round())
+    assert a.error is None and [a.out, b.out] == [_ref(w, a.prompt, 40, None), _ref(w, b.prompt, 6, smp)]
+    assert dec.solo.st is a.st is not slot and a.st in rounds
