@@ -29,6 +29,9 @@ def block_chain(drafter: Any, inputs: mx.array, context: mx.array, cache: list[A
     """The block after ``inputs``' anchor: each position's most likely token [1, block - 1], unread."""
 
     model = drafter.model
+    own = getattr(model, "block_chain", None)
+    if own is not None:                              # a draft model with its own layers (poolside's Laguna drafter)
+        return own(drafter, inputs, context, cache)
     h = model.embed_tokens(inputs) * model.embed_scale
     h_ctx = model.hidden_norm(model.fc(context))
     masks: dict = {}                                 # one mask a layer kind (``_dflash_attend``)

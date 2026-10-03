@@ -8,6 +8,9 @@ They are installed as dependencies.
 
 The DeltaNet implementations in `src/tensorfold/kernels/qwen/dense/v1/lane_gdn.py` and
 `lane_tree.py` adapt mlx-lm's `qwen3_5` and `gated_delta` model math and kernels under its MIT License.
+`src/tensorfold/families/laguna/mlx_model.py` is mlx-lm's `models/laguna.py` (Copyright © 2026 Apple Inc.,
+MIT License), vendored with small changes because mlx-lm 0.31 does not include it. The Laguna DFlash drafter in
+`families/laguna/drafter.py` follows vLLM's `laguna_dflash` model (Apache-2.0); no code is copied from it.
 
 ## Qwen Flash Next
 
