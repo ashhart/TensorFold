@@ -31,10 +31,12 @@ class Lifecycle:
     """One replaceable runtime; callbacks never retain its weights outside the live app."""
 
     def __init__(self, *, release: Callable[[], None], restore: Callable[[], None],
-                 cleanup: Callable[[], None], drain_timeout: float = 120.0) -> None:
+                 cleanup: Callable[[], None], drain_timeout: float = 120.0,
+                 preflight: Callable[[], None] | None = None) -> None:
         if not math.isfinite(drain_timeout) or drain_timeout <= 0:
             raise ValueError("sleep drain timeout must be finite and greater than zero")
         self._release, self._restore, self._cleanup = release, restore, cleanup
+        self._preflight = preflight
         self._timeout = float(drain_timeout)
         self._condition = threading.Condition()
         self._local = threading.local()
@@ -99,6 +101,12 @@ class Lifecycle:
                     self._set("awake", "request drain timed out; runtime remains awake")
                     raise LifecycleError(self._last_error, code="sleep_drain_timeout")
                 self._condition.wait(remaining)
+        if self._preflight is not None:
+            error = _attempt(self._preflight)
+            if error is not None:
+                self._set("awake", error)
+                raise LifecycleError(f"sleep refused; runtime remains awake: {error}",
+                                     code="model_sleep_preflight_failed")
         error = _attempt(self._release)
         if error is not None:
             self._set("error", error)

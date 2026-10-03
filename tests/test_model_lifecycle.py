@@ -157,3 +157,17 @@ def test_unsupported_levels_never_release(level):
 def test_invalid_drain_timeout_is_refused(timeout):
     with pytest.raises(ValueError, match="timeout"):
         lifecycle(drain_timeout=timeout)
+
+
+def test_failed_preflight_keeps_the_original_runtime_and_allows_requests():
+    def changed_checkpoint():
+        raise ValueError("checkpoint changed")
+
+    state, calls = lifecycle(preflight=changed_checkpoint)
+    with pytest.raises(LifecycleError, match="checkpoint changed") as error:
+        state.sleep()
+    assert error.value.status == 409
+    assert state.snapshot()["state"] == "awake"
+    assert not calls
+    with state.admit():
+        pass
