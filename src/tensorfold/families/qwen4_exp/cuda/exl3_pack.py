@@ -13,7 +13,22 @@ import torch
 from tensorfold.cuda.exl3.format import is_exl3  # noqa: F401  (exl3.py and engine.py import it from here)
 
 EXTRA_FILES = ("ngram_embedding.safetensors", "mtp_hyper_connection_mixer_patch.safetensors")
-MOE_WINDOW = 1024        # most rows a routed-expert call takes (its grouping keeps every pick in 48 KB of shared memory)
+
+
+def _moe_window() -> int:
+    """Most rows a routed-expert call takes: a 2048-row prompt chunk on the prompt kernel, 1024 on the grouping kernel."""
+
+    from tensorfold.cuda.exl3 import experts as x3experts
+
+    raw = os.environ.get("TF_EXL3_MOE_WINDOW", "")
+    rows = int(raw) if raw else (2048 if x3experts.PROMPT == "prompt" else 1024)
+    if not 16 <= rows <= 4096:
+        raise ValueError(f"TF_EXL3_MOE_WINDOW: 16 to 4096 rows, not {rows}")
+    return rows
+
+
+MOE_WINDOW = _moe_window()   # rows never change a pair's bits; each window reads every routed expert once
+
 _DT = {"BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32, "I64": torch.int64, "I32": torch.int32,
        "I16": torch.int16, "U8": torch.uint8, "I8": torch.int8, "U16": torch.int16, "U32": torch.int32}
 

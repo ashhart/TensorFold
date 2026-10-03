@@ -26,7 +26,7 @@ def _ext():
 
     here = Path(__file__).parent
     srcs = [str(here / f) for f in ("experts.cpp", "experts.cu", "experts_cb0.cu", "experts_cb1.cu", "experts_cb2.cu")]
-    return load(name="tensorfold_exl3_experts_v1", sources=srcs, extra_cuda_cflags=["-O3", "-lineinfo"],
+    return load(name="tensorfold_exl3_experts_v2", sources=srcs, extra_cuda_cflags=["-O3", "-lineinfo"],
                 verbose=False)
 
 
@@ -75,6 +75,8 @@ class Exl3RoutedExperts:
     k2_d: tuple[int, int]
     trellis_bytes: torch.Tensor   # int64 [E], gate + up + down trellis bytes of each expert (for GB/s)
     keep: list = field(default_factory=list, repr=False)
+    widths_gu: int = 0        # a bit per K2 that gate and up hold (bit k2): the prompt kernel's instances to launch
+    widths_d: int = 0
 
     def nbytes_read(self, ids: Sequence[int]) -> int:
         return int(self.trellis_bytes[list(ids)].sum())
@@ -115,9 +117,11 @@ def prepare(gate: Sequence[tuple], up: Sequence[tuple], down: Sequence[tuple], c
         return out
 
     tb = torch.tensor([(D * I // 256) * (gks[e] + uks[e] + dks[e]) * 16 for e in range(E)], dtype=torch.int64)
+    bits = lambda ks: sum(1 << k for k in set(ks))          # noqa: E731
     return Exl3RoutedExperts(gp, upp, dp, gk, uk, dk, stack(gate, 1, D), stack(up, 1, D), stack(gate, 2, I),
                              stack(up, 2, I), stack(down, 1, I), stack(down, 2, D), E, D, I, cb,
-                             (min(gks + uks), max(gks + uks)), (min(dks), max(dks)), tb, keep)
+                             (min(gks + uks), max(gks + uks)), (min(dks), max(dks)), tb, keep, bits(gks + uks),
+                             bits(dks))
 
 
 def prepare_stacked(gt: torch.Tensor, ut: torch.Tensor, dt: torch.Tensor, suh_g, suh_u, svh_g, svh_u, suh_d, svh_d,
@@ -162,6 +166,18 @@ class Scratch:
         self.count = torch.zeros((1,), dtype=torch.int32, device=device)
         self.members_buf = torch.full((maxu * rows,), -1, dtype=torch.int32, device=device)
         self.rows, self.slots, self.count_experts = rows, slots, ex.count
+        self.device = device
+        self._plan = self._pick = None      # prompt windows: pairs grouped by expert (``plan``), made on first use
+
+    def plan(self):
+        """tensorfold.cuda.experts' grouping of this scratch's rows with one expert more: skipped picks group apart."""
+
+        if self._plan is None:
+            from tensorfold.cuda import experts as grouped
+
+            self._plan = grouped.Plan(self.rows, self.slots, self.count_experts + 1, self.device, prefill=True)
+            self._pick = torch.empty((self.rows * self.slots,), dtype=torch.int32, device=self.device)
+        return self._plan
 
     def window(self, R: int):
         """(ids, members) sized for R rows: the grids only span what R rows can use."""
@@ -170,10 +186,22 @@ class Scratch:
         return self.ids[:maxu], self.members_buf[:maxu * R].view(maxu, R)
 
 
+# Prompt windows (more than PROMPT_ROWS rows) run on a plan's items: a program a (n block, <= 64 pairs of one expert),
+# each weight tile decoded once for its pairs and the splits added in the kernel (experts_prompt.cuh); the grouping
+# kernel's grid spans every (expert slot, 16-pair tile) of the window and decodes each tile again for every 16 pairs.
+# Every pair keeps its bits. TF_EXL3_PROMPT=group keeps the grouping kernel at every size; decode windows always do.
+PROMPT = __import__("os").environ.get("TF_EXL3_PROMPT", "prompt")
+PROMPT_ROWS = 64
+PROMPT_TILE = 64         # pairs an item holds: 4 warps of 16
+PROMPT_NT = 4            # n tiles a gate/up program (64 columns)
+
+
 def routed(x: torch.Tensor, pick: torch.Tensor, wts: torch.Tensor | None, ex: Exl3RoutedExperts, s: Scratch,
            out: torch.Tensor | None, R: int, limit: float = math.inf, act_mode: int = ACT_F32,
-           group: bool = True) -> torch.Tensor:
-    """Routed experts of R rows (picks >= E skipped): Y per slot, or ``out`` = the wts-weighted sum when ``wts``; no host sync."""
+           group: bool = True, y_out: torch.Tensor | None = None) -> torch.Tensor:
+    """Routed experts of R rows (picks >= E skipped): Y per slot, or ``out`` = the wts-weighted sum when ``wts``; no host sync.
+
+    ``y_out`` ([R * slots, D], contiguous; no ``wts``): Y lands there (prompt windows round it once, as copy_ does)."""
 
     ext = _ext()
     D, I, E = ex.dims, ex.width, ex.count
@@ -181,6 +209,8 @@ def routed(x: torch.Tensor, pick: torch.Tensor, wts: torch.Tensor | None, ex: Ex
     P = R * slots
     if R > s.rows:
         raise ValueError(f"{R} rows but the scratch holds {s.rows}")
+    if group and PROMPT == "prompt" and R > PROMPT_ROWS:
+        return _prompt(ext, x, pick, wts, ex, s, out, R, limit, act_mode, y_out)
     ids, members = s.window(R)
     if group:
         ext.group(pick, ids, s.count, members, R, slots, E)
@@ -194,11 +224,44 @@ def routed(x: torch.Tensor, pick: torch.Tensor, wts: torch.Tensor | None, ex: Ex
                 D, P, sk, slots, ex.cb, nt, w, pf, ex.k2_d[0], ex.k2_d[1])
     if wts is None:
         ext.down_epilogue(s.z, pick, ex.svh_d, s.y, R, P, D, sk, slots, E)
+        if y_out is not None:
+            y_out[:P].copy_(s.y[:P])
+            return y_out[:P]
         return s.y[:P]
     if out is None:
         out = torch.empty((R, D), dtype=torch.float32, device=x.device)
     # the down epilogue and the combine in one launch (the same arithmetic in the same order as the two)
     ext.down_combine(s.z, pick, ex.svh_d, s.y, wts, out, R, P, D, sk, slots, E)
+    return out
+
+
+def _prompt(ext, x, pick, wts, ex: Exl3RoutedExperts, s: Scratch, out, R: int, limit: float, act_mode: int, y_out):
+    """``routed`` for a prompt window: the plan's items, gate|up summed in the kernel, down with its epilogue."""
+
+    from tensorfold.cuda import experts as grouped
+
+    D, I, E, slots = ex.dims, ex.width, ex.count, s.slots
+    P = R * slots
+    plan = s.plan()
+    picks = torch.clamp(pick[:R].reshape(P), max=E, out=s._pick[:P])     # every skipped pick as E
+    grouped.route(picks.view(R, slots), plan, PROMPT_TILE)
+    bound = grouped.max_items(P, E + 1, PROMPT_TILE)
+    ext.rot_in(x, x.stride(0), pick, ex.suh_g, ex.suh_u, s.xg, s.xu, R, D, slots, E)
+    _, w, sk, _ = s.cfg_gu
+    ext.prompt(s.xg, s.xu, ex.gate_ptr, ex.up_ptr, ex.gate_k2, ex.up_k2, plan.items, plan.counts, plan.members, s.z,
+               2, D, I, P, E, (D // 16) // (sk * w), w, bound, ex.cb, PROMPT_NT, ex.widths_gu)
+    ext.gateup_epilogue(s.z, pick, ex.svh_g, ex.svh_u, ex.suh_d, s.xd, R, P, I, 1, slots, E, float(limit), act_mode)
+    _, w, sk, _ = s.cfg_d
+    if sk != 1:
+        raise ValueError(f"the prompt down kernel takes one K split, not {sk}")
+    y = y_out if y_out is not None and wts is None else s.y
+    ext.prompt_down(s.xd, ex.down_ptr, ex.down_k2, ex.svh_d, plan.items, plan.counts, plan.members, y.view(-1, D), I,
+                    D, P, E, (I // 16) // w, w, bound, ex.cb, ex.widths_d)
+    if wts is None:
+        return y[:P]
+    if out is None:
+        out = torch.empty((R, D), dtype=torch.float32, device=x.device)
+    ext.combine(s.y, wts, out, R, D, slots)       # down_combine's combine: the same fma chain
     return out
 
 

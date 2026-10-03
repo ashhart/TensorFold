@@ -274,7 +274,7 @@ def ple_block(layer: LayerW, w: Weights, segs: Sequence[Seg], b: Buffers, R: int
     if w.x3 is not None:                              # an EXL3 pack: the rows' codec, fp16 key/value weights
         from .exl3_mm import ple_rows
 
-        emb = ple_rows(R, w.x3.ple_dev, p.table.head_bias, p.ngram.heads, p.ngram.dims, p.table.bits,
+        emb = ple_rows(R, _x3_ple(w, b).ple_dev, p.table.head_bias, p.ngram.heads, p.ngram.dims, p.table.bits,
                        w.x3.ple_emb[:R])
         _mm(emb, p.key, None, b.ple_keys[:R], b)
         _mm(emb, p.value, None, b.ple_vals[:R], b)
@@ -293,6 +293,24 @@ def ple_block(layer: LayerW, w: Weights, segs: Sequence[Seg], b: Buffers, R: int
     for st, a0, a1 in segs:
         glue.ple_conv(b.ple_gated[a0:a1], b.ple_pss[a0:a1], p.norm_conv, st.ple_tail, p.conv, b.h[a0:a1],
                       b.h[a0:a1], b.ple_nrow[a0:a1], c.eps, c.streams, c.ngram_size)
+
+
+class _X3Ple:
+    """A buffer set's own staging for an EXL3 pack's packed n-gram rows (pinned host and device), so a decode window
+    and a prompt pass staged for one forward (compute_mixed) keep their own rows."""
+
+    def __init__(self, rows: int, words: int, device) -> None:
+        pin = torch.cuda.is_available()
+        self.ple_host = torch.zeros((rows, words), dtype=torch.int16, pin_memory=pin)
+        self.ple_dev = torch.zeros((rows, words), dtype=torch.int16, device=device)
+
+
+def _x3_ple(w: Weights, b: Buffers) -> _X3Ple:
+    got = getattr(b, "x3_ple", None)
+    if got is None:
+        heads = w.x3.ple_dev.shape[0] // max(1, w.x3.ple_emb.shape[0])
+        got = b.x3_ple = _X3Ple(b.rows * heads, w.x3.ple_dev.shape[1], w.x3.ple_dev.device)
+    return got
 
 
 def stage_ple_rows(p, b: Buffers, ids: np.ndarray, at: int = 0) -> None:
@@ -347,9 +365,41 @@ def _exl3_moe(m, w: Weights, b: Buffers, R: int) -> tuple:
         return 2, y.view(R, buf.slots, -1), buf.wts[:R]
     for r0 in range(0, R, MOE_WINDOW):
         n = min(MOE_WINDOW, R - r0)
-        y = routed(b.mixed[r0:r0 + n], buf.pick[r0:r0 + n], None, m.experts, w.x3.moe, None, n)
-        buf.y[r0:r0 + n].copy_(y.view(n, buf.slots, -1))
+        dst = buf.y[r0:r0 + n]
+        y = routed(b.mixed[r0:r0 + n], buf.pick[r0:r0 + n], None, m.experts, w.x3.moe, None, n,
+                   y_out=dst.view(n * buf.slots, -1))
+        if y.data_ptr() != dst.data_ptr():
+            dst.copy_(y.view(n, buf.slots, -1))
     return 2, buf.y[:R], buf.wts[:R]
+
+
+def _exl3_moe_mixed(m, w: Weights, b: Buffers, Rp: int, Rd: int) -> tuple:
+    """A prompt pass's rows [0, Rp) and a decode window's [Rp, Rp + Rd) of ``b`` in one routing and one expert launch a
+    window: the pass's slots in bf16 (b.moe.y), the window's in fp32, each as its own call gives them."""
+
+    from tensorfold.cuda.exl3.experts import routed
+
+    from .exl3_pack import MOE_WINDOW
+
+    buf, R, slots = b.moe, Rp + Rd, b.moe.slots
+    moe_mod.router(b.mixed[:R], m.router, buf.logits[:R])
+    moe_mod.select_rows(buf.logits[:R], buf, w.cfg.top_k, w.cfg.experts)
+    dy = w.x3.window_y(Rd, b.mixed.device)
+    for r0 in range(0, R, MOE_WINDOW):
+        n = min(MOE_WINDOW, R - r0)
+        if r0 + n <= Rp:                                 # prompt rows only: bf16 slots in place
+            dst = buf.y[r0:r0 + n]
+            y = routed(b.mixed[r0:r0 + n], buf.pick[r0:r0 + n], None, m.experts, w.x3.moe, None, n,
+                       y_out=dst.view(n * slots, -1))
+            if y.data_ptr() != dst.data_ptr():
+                dst.copy_(y.view(n, slots, -1))
+            continue
+        y = routed(b.mixed[r0:r0 + n], buf.pick[r0:r0 + n], None, m.experts, w.x3.moe, None, n).view(n, slots, -1)
+        k = max(0, Rp - r0)                              # the window's first k rows are the pass's
+        if k:
+            buf.y[r0:r0 + k].copy_(y[:k])
+        dy[r0 + k - Rp:r0 + n - Rp].copy_(y[k:])
+    return (2, buf.y[:Rp], buf.wts[:Rp]), (2, dy[:Rd], buf.wts[Rp:R])
 
 
 def _writeback(h: torch.Tensor, b: Buffers, R: int, c, pending) -> None:
@@ -464,7 +514,7 @@ def stage(w: Weights, b: Buffers, windows: Sequence[tuple[State, Sequence[int]]]
                 if w.x3 is not None:
                     from .exl3_pack import stage_ple
 
-                    stage_ple(p.table, w.x3, ids, at=a0 * (ids.size // len(toks)))
+                    stage_ple(p.table, _x3_ple(w, b), ids, at=a0 * (ids.size // len(toks)))
                 else:
                     stage_ple_rows(p, b, ids, at=a0 * (ids.size // len(toks)))       # ids [rows, heads]
     b.staged.record()
@@ -490,9 +540,9 @@ def compute(w: Weights, segs: Sequence[Seg], b: Buffers, *, logits: bool = True,
 
 
 def converges(w: Weights) -> bool:
-    """Whether a decode window and a prompt pass can share each layer's expert launch (grouped 4-bit experts, one GPU)."""
+    """Whether a decode window and a prompt pass can share each layer's expert launch (4-bit or EXL3 experts)."""
 
-    return w.comm is None and getattr(w, "x3", None) is None and all(
+    return w.comm is None and all(
         getattr(getattr(getattr(layer, "moe", None), "experts", None), "kernel", "qmm") == "qmm" for layer in w.layers)
 
 
@@ -512,6 +562,10 @@ def compute_mixed(w: Weights, dsegs: Sequence[Seg], db: Buffers, psegs: Sequence
         _pre_moe(layer, w, dsegs, db, Rd, dp)
         _pre_moe(layer, w, psegs, pb, Rp, pp, cuts=cuts)
         pb.mixed[Rp:Rp + Rd].copy_(db.mixed[:Rd])
+        if getattr(w, "x3", None) is not None:          # EXL3: the window's slots stay fp32, as its own call has them
+            pm, dm = _exl3_moe_mixed(layer.moe, w, pb, Rp, Rd)
+            dp, pp = (*dm, db.inj_m), (*pm, pb.inj_m)
+            continue
         mode, y, wts = moe_block(layer, w, pb, Rp + Rd)
         dp, pp = (mode, y[Rp:], wts[Rp:], db.inj_m), (mode, y[:Rp], wts[:Rp], pb.inj_m)
     return finish(w, w.mixer, db, Rd, dp), finish(w, w.mixer, pb, Rp, pp, logits=bool(ends), ends=ends)
