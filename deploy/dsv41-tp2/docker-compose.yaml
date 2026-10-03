@@ -27,6 +27,7 @@ services:
     volumes:
       - ${MODELS_DIR:?MODELS_DIR must be set in .env}:/models:ro
       - ${CACHE_DIR:?CACHE_DIR must be set in .env}:/root/.cache  # built CUDA extensions, Triton kernels
+      - ${PREPARED_DIR:?PREPARED_DIR must be set in .env}:/prepared  # this rank's built weights (make prepare)
     environment:
       TF_RANK: ${TF_RANK:?TF_RANK comes from rank0.env / rank1.env}
       TF_PORT: ${PORT:-8888}
@@ -36,6 +37,7 @@ services:
       TF_DSV41_FIXED_GIB: ${TF_DSV41_FIXED_GIB:-}
       TF_DSV41_ENGRAM_DIR: /models/${ENGRAM:-dsv41/DeepSeek-V4.1-Flash-engram}
       PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      TF_DSV41_PREPARED: /prepared                       # read the prepared folder when current (fastboot)
       # no transparent huge pages for NumPy buffers or mimalloc arenas: THP first-touch compaction under memory
       # pressure stalls long prefills on GB10 (seen in jayleaton/deepseek-v41-tensorfold-spark, G12)
       NUMPY_MADVISE_HUGEPAGE: "0"

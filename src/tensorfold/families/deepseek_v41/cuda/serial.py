@@ -168,6 +168,33 @@ BOUNDED_TAIL = os.environ.get("TF_DSV41_BOUNDED_TAIL", "1") != "0"
 FAST_TOPK = os.environ.get("TF_DSV41_FAST_TOPK", "1") != "0"
 
 
+def cached_token_map(tokenizer_json, expected: int) -> np.ndarray:
+    """``engram.token_map`` (a GIL-bound pass over the 129K-entry vocabulary, seconds a start), cached on disk under
+    the tokenizer's bytes and the function's source: the same array."""
+
+    import hashlib
+    import inspect
+    from pathlib import Path
+
+    h = hashlib.sha256(Path(tokenizer_json).read_bytes())
+    h.update(inspect.getsource(E.token_map).encode() + str(expected).encode())
+    d = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "tensorfold" / "dsv41"
+    f = d / f"tokmap-{h.hexdigest()[:24]}.npy"
+    try:
+        return np.load(f)
+    except (OSError, ValueError):
+        pass
+    tmap = E.token_map(tokenizer_json, expected)
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        tmp = f.with_suffix(f".{os.getpid()}.npy")
+        np.save(tmp, tmap)
+        os.replace(tmp, f)
+    except OSError:
+        pass
+    return tmap
+
+
 class RoundProfile:
     """TF_ROUND_PROF=1: host time between marks of a DSpark round and the GPU time of the draft and verify graphs."""
 
@@ -374,7 +401,7 @@ class SerialEngine:
         c = self.c
         self.freqs = {r: inv_freq(c, r, self.dev) for r in set(c.layer_ratios)}
         self.layout = E.Layout.from_config(c)
-        self.tmap = E.token_map(tokenizer_json, c.engram_compressed_vocab_size)
+        self.tmap = cached_token_map(tokenizer_json, c.engram_compressed_vocab_size)
         self.tables = E.Tables(engram_dir, c.engram_layer_ids)
         # every layer has the same shapes: one small scratch for decode / verify rows, one for prompt chunks whose
         # gate/up inputs and fp32 partials the prompt kernel no longer reads (rotated while staged, its own fp16 Z)

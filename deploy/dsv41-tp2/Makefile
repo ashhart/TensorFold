@@ -28,6 +28,9 @@ PORT         := $(or $(call env_of,PORT),8888)
 API_KEY      := $(call env_of,TF_API_KEY)
 SERVED_NAME  := $(or $(call env_of,SERVED_NAME),DeepSeek-v4.1-Flash-EXL3)
 CACHE_DIR    := $(call env_of,CACHE_DIR)
+PREPARED_DIR := $(call env_of,PREPARED_DIR)
+MODEL        := $(or $(call env_of,MODEL),dsv41/DeepSeek-V4.1-Flash-EXL3-2.9bpw)
+FASTBOOT     := python -m tensorfold.families.deepseek_v41.cuda.fastboot
 BASE_URL     := http://localhost:$(PORT)
 COMPOSE0     := docker compose --env-file .env --env-file rank0.env
 COMPOSE1     := docker compose --env-file .env --env-file rank1.env
@@ -67,6 +70,7 @@ image: stage sync
 	wait $$w || { rc=1; echo "❌ worker build:"; tail -20 build/worker.log; }; \
 	[ $$rc = 0 ] && echo "✅ $(IMAGE_NAME):$$rev (also :latest) on both nodes"; [ $$rc = 0 ] || exit $$rc
 	@$(MAKE) --no-print-directory prebuild
+	@$(MAKE) --no-print-directory prepare
 
 # compile the CUDA extensions into CACHE_DIR before any model is loaded: compiling beside a loaded model (a few GiB
 # free) can push a GB10 into the OOM killer. Refuses while a server holds the GPU; a no-op when the cache is warm.
@@ -78,6 +82,21 @@ prebuild:
 	echo "compiling CUDA extensions on the head and $(WORKER) (minutes on a new image)"; \
 	( $$run 2>&1 | grep -E "extensions ready|Error|error" | tail -3 ) & h=$$!; \
 	( ssh $(WORKER) "$$run" 2>&1 | grep -E "extensions ready|Error|error" | tail -3 ) & w=$$!; \
+	wait $$h; wait $$w
+
+# each rank's built weights into PREPARED_DIR on its node (fastboot): a start then reads them in ~15 s instead of
+# building them from the checkpoint. Run through the compose service, so the image, env and mounts are the serving
+# ones; refuses while a server holds the GPU (the build takes a rank's full memory); a no-op when current.
+prepare:
+	@test -n "$(PREPARED_DIR)" || { echo "❌ PREPARED_DIR is not set in .env"; exit 1; }
+	@if docker ps --format '{{.Names}}' | grep -qE '^tensorfold-dsv41-serve|$(VLLM_NAMES)'; then \
+	  echo "prepare: a server holds the GPU here, skipped (run make prepare after make down)"; exit 0; fi; \
+	mkdir -p $(PREPARED_DIR); ssh $(WORKER) "mkdir -p $(PREPARED_DIR)"; \
+	echo "preparing each rank's weights on its node (minutes when the folder is stale)"; \
+	( $(COMPOSE0) run --rm --no-deps serve $(FASTBOOT) prepare /models/$(MODEL) --rank 0 --root /prepared 2>&1 \
+	  | grep -E "prepared folder|built in|removed|Error|error" ) & h=$$!; \
+	( ssh $(WORKER) "cd $(DIR) && $(COMPOSE1) run --rm --no-deps serve $(FASTBOOT) prepare /models/$(MODEL) --rank 1 --root /prepared" 2>&1 \
+	  | grep -E "prepared folder|built in|removed|Error|error" ) & w=$$!; \
 	wait $$h; wait $$w
 
 sync:

@@ -20,3 +20,5 @@ WORKDIR /opt/tensorfold
 
 ARG TF_REVISION=unknown
 LABEL org.opencontainers.image.title="tensorfold-dsv41" org.opencontainers.image.revision="${TF_REVISION}"
+# the source snapshot's hash: keys per-image caches (the decode cost curves of multi.calibrate)
+ENV TF_REVISION=${TF_REVISION}

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import json
 import time
 from dataclasses import dataclass, field
@@ -157,7 +159,44 @@ class Weights:
 
 def load(model_dir: str | Path, *, rank: int, layers: list[int] | None = None, device: str = "cuda",
          log=print, draft: bool = True) -> Weights:
-    """Rank ``rank``'s weights (every layer, or ``layers`` for tests and benchmarks), with the DSpark blocks."""
+    """Rank ``rank``'s weights (every layer, or ``layers`` for tests and benchmarks), with the DSpark blocks: from the
+    rank's prepared folder when ``TF_DSV41_PREPARED`` names a root holding a current one (``fastboot``), else built
+    from the checkpoint."""
+
+    from . import fastboot
+
+    if fastboot.prepared_root() is None or layers is not None:
+        return build(model_dir, rank=rank, layers=layers, device=device, log=log, draft=draft)
+    key = fastboot.weights_key(model_dir, rank, WORLD, draft=draft, device=device)
+    tree = fastboot.cached_tree("weights", key,
+                                lambda: storable(build(model_dir, rank=rank, device=device, log=log, draft=draft)),
+                                device)
+    return restore(tree, model_dir)
+
+
+def storable(w: Weights) -> Weights:
+    """The tree a prepared folder holds: the config is read from the checkpoint again (``restore``)."""
+
+    return dataclasses.replace(w, cfg=None)
+
+
+def restore(w: Weights, model_dir: str | Path) -> Weights:
+    """A tree read back: its config, the routed experts' device-pointer tables (addresses of this process's
+    trellises) and the grouped linears' split-K semaphores (zero), as ``build`` leaves them."""
+
+    w.cfg = Config.from_dict(json.loads((Path(model_dir) / "config.json").read_text()))
+    blocks = list(w.layers) + (list(w.draft.layers) if w.draft is not None else [])
+    for layer in blocks:
+        layer.moe.experts.rebind()
+        g = getattr(layer.attn, "wo_a_grouped", None)
+        if g is not None:
+            g.counters.zero_()
+    return w
+
+
+def build(model_dir: str | Path, *, rank: int, layers: list[int] | None = None, device: str = "cuda",
+          log=print, draft: bool = True) -> Weights:
+    """Rank ``rank``'s weights read from the checkpoint and built (every layer, or ``layers``)."""
 
     root = Path(model_dir)
     cfg = Config.from_dict(json.loads((root / "config.json").read_text()))

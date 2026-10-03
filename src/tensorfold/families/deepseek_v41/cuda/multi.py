@@ -8,6 +8,7 @@ acting on it; both ranks then compute the same tokens (argmax or position-keyed 
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from collections.abc import Callable
@@ -150,6 +151,16 @@ class MultiDecoder:
         e = self.e
         rng = random.Random(0)
         widths = [*e.widths, e.cap]                          # a cost curve for each key width the graphs have
+        path = self._calib_path(widths)
+        cached = None
+        if path is not None:
+            try:
+                cached = [int(v) for v in json.loads(path.read_text())]
+            except (OSError, ValueError):
+                cached = None
+        if all(f[0] for f in gather([int(cached is not None)])):
+            self._curves(gather(cached), widths)             # both ranks timed this image and setting before
+            return
         ms = []
         for w in widths:
             for R in range(1, ROWS + 1):
@@ -183,17 +194,48 @@ class MultiDecoder:
                         e.drafter.propose(items[0][1], 300)
                     best = min(best, time.perf_counter() - t)
                 drafts.append(1e3 * best)
-        both = gather([int(1e3 * v) for v in ms + drafts])
+        raw = [int(1e3 * v) for v in ms + drafts]
+        if path is not None:
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_suffix(f".{os.getpid()}")
+                tmp.write_text(json.dumps(raw))
+                os.replace(tmp, path)
+            except OSError:
+                pass
+        self._curves(gather(raw), widths)
+        for slot in range(e.slots):                          # the timing rows wrote every slot's caches
+            e.select_slot(slot)
+            e.reset()
+        e.select_slot(0)
+
+    def _calib_path(self, widths: list[int]):
+        """Where this rank keeps its timings for this image and setting (TF_REVISION, set in the deploy image: the
+        source snapshot's hash), or None (outside an image: always measure). The curves only steer draft counts,
+        which never change a token."""
+
+        import hashlib
+        from pathlib import Path
+
+        rev = os.environ.get("TF_REVISION", "")
+        if rev in ("", "unknown") or os.environ.get("TF_DSV41_CALIB", "cached") != "cached":
+            return None
+        e = self.e
+        knobs = sorted((k, v) for k, v in os.environ.items() if k.startswith("TF_") and k not in
+                       ("TF_API_KEY", "TF_PORT", "TF_RANK", "TF_DSV41_LAUNCH_T0"))
+        key = [rev, torch.cuda.get_device_name(), torch.__version__, e.cap, e.slots, ROWS, widths, self.drafts,
+               sorted(getattr(e.drafter, "multi_graphs", None) or {}), knobs]
+        h = hashlib.sha256(json.dumps(key, default=str).encode()).hexdigest()[:16]
+        d = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "tensorfold" / "dsv41-calib"
+        return d / f"r{self.rank}-{h}.json"
+
+    def _curves(self, both: list[list[int]], widths: list[int]) -> None:
         worst = [max(a, b) / 1e3 for a, b in zip(*both)]
         n = ROWS * len(widths)
         self.curves = [(w, worst[i * ROWS:(i + 1) * ROWS]) for i, w in enumerate(widths)]
         self.costs = self.curves[-1][1]
         self.draft_curve = worst[n:]
         self.draft_ms = self.draft_curve[0] if self.draft_curve else 0.0
-        for slot in range(e.slots):                          # the timing rows wrote every slot's caches
-            e.select_slot(slot)
-            e.reset()
-        e.select_slot(0)
 
     def _expected(self, acc: list[float], k: int) -> float:
         total, run = 1.0, 1.0

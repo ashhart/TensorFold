@@ -417,7 +417,8 @@ class Dsv41Engine:
         rng = random.Random(0)
         prompt = [rng.randrange(1000, 100000) for _ in range(2100)]
         t = time.perf_counter()
-        for draft in ((True, False) if self.drafts else (False,)):
+        # (with --parallel every request runs the multi path: the serial drafts-off pass would warm nothing it uses)
+        for draft in ((True, False) if self.drafts and self.streams == 1 else (bool(self.drafts),)):
             self._run(prompt, 8, None, draft, True, None)
         torch = self.torch
         reserved = torch.cuda.memory_reserved()
