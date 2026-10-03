@@ -64,7 +64,7 @@ def test_every_byte_decodes_exactly(kernel, f32):
     ones = torch.ones((n, k // 64), device="cuda").bfloat16()
     q = qmm.pack(words, ones, torch.zeros_like(ones), 64, bits=8)
     want = _dequant(words, ones, torch.zeros_like(ones)).T.float()
-    assert qmm.split_k(n, k) > 1 and set(want.unique().tolist()) == set(range(256))
+    assert qmm.split_k(n, k, bits=8) > 1 and set(want.unique().tolist()) == set(range(256))
     assert torch.equal(qmm.matmul(torch.eye(k, device="cuda").bfloat16(), q, f32=f32).float(), want)
 
 
@@ -111,8 +111,8 @@ def _as_eight(words4: torch.Tensor, shift: int) -> torch.Tensor:
 
 @pytest.mark.parametrize("shift", [0, 4])
 def test_8bit_words_holding_4bit_codes_give_the_4bit_bits(kernel, shift):
-    """q8 = q4 (or 16 q4 with scales / 16, exact): the same products in the same order as the 4-bit kernel, so the
-    same bits, which test_qmm_group ties to the 27B's Triton reference."""
+    """q8 = q4 (or 16 q4 with scales / 16, exact) at the same K split: the same products in the same order as the
+    4-bit kernel, so the same bits, which test_qmm_group ties to the 27B's Triton reference."""
 
     n, k = 2048, 4096
     g = torch.Generator(device="cuda").manual_seed(13)
@@ -122,9 +122,11 @@ def test_8bit_words_holding_4bit_codes_give_the_4bit_bits(kernel, shift):
     four = qmm.pack(words.to(torch.int32), scales, biases, 64)
     eight = qmm.pack(_as_eight(words.to(torch.int32), shift), scales / 2 ** shift, biases, 64, bits=8)
     x = torch.randn((129, k), generator=torch.Generator(device="cuda").manual_seed(5), device="cuda").bfloat16()
-    for m in (1, 2, 8, 9, 16, 17, 33, 64, 65, 129):
-        for f32 in (False, True):
-            assert torch.equal(qmm.matmul(x[:m], eight, f32=f32), qmm.matmul(x[:m], four, f32=f32)), (m, f32)
+    for sk in (1, 2, 4, 8):
+        for m in (1, 2, 8, 9, 16, 17, 33, 64, 65, 129):
+            for f32 in (False, True):
+                assert torch.equal(qmm.matmul(x[:m], eight, sk=sk, f32=f32),
+                                   qmm.matmul(x[:m], four, sk=sk, f32=f32)), (sk, m, f32)
 
 
 def test_strided_rows_and_unreduced_slices(kernel):
@@ -137,7 +139,7 @@ def test_strided_rows_and_unreduced_slices(kernel):
     total = slices[0]
     for s in range(1, slices.shape[0]):
         total = total + slices[s]
-    assert slices.shape[0] == qmm.split_k(n, k) > 1 and torch.equal(total, want)
+    assert slices.shape[0] == qmm.split_k(n, k, bits=8) > 1 and torch.equal(total, want)
 
 
 @pytest.mark.parametrize("n,k", [(8192, 2048), (2048, 4096), (5120, 17408)])

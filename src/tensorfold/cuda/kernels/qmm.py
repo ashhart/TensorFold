@@ -126,11 +126,12 @@ def unpack(q: Q4, chunk: int = 64) -> tuple[torch.Tensor, torch.Tensor, torch.Te
     return words[:q.n].contiguous(), q.scales[:, :q.n].t().contiguous(), q.biases[:, :q.n].t().contiguous()
 
 
-def split_k(n: int, k: int, gs: int = 64, target: int = 192) -> int:
-    """K slices for an (n, k) weight: a function of the shape only (never of the row count)."""
+def split_k(n: int, k: int, gs: int = 64, target: int = 192, bits: int = 4) -> int:
+    """K slices for an (n, k) weight: a function of the shape only (never of the row count); a slice takes at least
+    2 * bits groups (8-bit weights stream better in fewer, longer slices)."""
 
-    tiles, groups, sk = -(-n // 64), k // gs, 1
-    while sk < 8 and tiles * sk < target and groups % (sk * 2) == 0 and groups // (sk * 2) >= 8:
+    tiles, groups, sk, least = -(-n // 64), k // gs, 1, 2 * bits
+    while sk < 8 and tiles * sk < target and groups % (sk * 2) == 0 and groups // (sk * 2) >= least:
         sk *= 2
     return sk
 
@@ -174,7 +175,7 @@ def matmul(x: torch.Tensor, q: Q4, xs: torch.Tensor | None = None, *, sk: int | 
     m = x.shape[0]
     if xs is None:
         xs = group_sums(x, q.gs)
-    sk = sk or split_k(q.n, q.k, q.gs)
+    sk = sk or split_k(q.n, q.k, q.gs, bits=bits)
     if out is None:
         out = torch.empty((m, q.n), dtype=torch.float32 if f32 else torch.bfloat16, device=x.device)
     if q.gs == 64 and reduce and grouped(x.device.index):
@@ -193,7 +194,7 @@ def matmul_group(x: torch.Tensor, qs: list[Q4], xs: torch.Tensor | None = None, 
 
     if x.dtype != torch.bfloat16 or x.dim() != 2 or any(x.shape[1] != q.k for q in qs):
         raise ValueError("matmul_group: x must be (M, K) bf16 with every weight's K")
-    sks = sks or [split_k(q.n, q.k, q.gs) for q in qs]
+    sks = sks or [split_k(q.n, q.k, q.gs, bits=getattr(q, "bits", 4)) for q in qs]
     widths = {getattr(q, "bits", 4) for q in qs}
     if not (1 <= len(qs) <= 4 and all(q.gs == 64 for q in qs) and len(widths) == 1 and grouped(x.device.index)):
         return [matmul(x, q, xs, sk=s, f32=f32) for q, s in zip(qs, sks)]

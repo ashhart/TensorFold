@@ -42,7 +42,7 @@ def rows(q: QLinear, a: int, b: int) -> QLinear:
 def matmul_rows(x: torch.Tensor, parts: list[QLinear]) -> torch.Tensor:
     """``x`` against row blocks of one weight, with the bits of the stacked weight's matmul."""
 
-    sk = shared.split_k(sum(p.n for p in parts), parts[0].k, parts[0].gs)
+    sk = shared.split_k(sum(p.n for p in parts), parts[0].k, parts[0].gs, bits=parts[0].bits)
     xs = shared.group_sums(x, parts[0].gs)
     return torch.cat([shared.matmul(x, p, xs, sk=sk) for p in parts], dim=1)
 
