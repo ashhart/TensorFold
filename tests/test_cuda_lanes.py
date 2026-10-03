@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from cuda_lane_fakes import PLANES, Codec, FakeForward, Mirror, Pattern, drive, same_state
 
+from tensorfold.cuda.admission import GIB, Admission
 from tensorfold.cuda.drafting import ExpectedRate, Lookup, StaticDepth, WindowCosts
 from tensorfold.cuda.kvpool import PagePool
 from tensorfold.cuda.lanes import LaneDecoder, Lanes
@@ -318,6 +319,40 @@ def test_admission_waits_while_memory_is_short():
     pair.decoder.admit(a)  # alone: admitted (nothing would free memory)
     with pytest.raises(NoRoom, match="memory is short"):
         pair.decoder.admit(b)
+
+
+def test_a_request_waits_until_memory_covers_its_pages():
+    free = [0]
+    admission = Admission(unified=True, meminfo=lambda: {"MemFree": free[0]}, floor=GIB, hard_floor=GIB)
+    pair = Pair(lanes=2, keep=0, admission=admission)
+    a, b = stream(prompts(1)[0], 5), stream(prompts(2)[1], 5)
+    pair.decoder.admit(a)  # alone: admitted under the floor
+    pool = pair.decoder.pool
+    free[0] = GIB + pool.need(len(b.prompt) + 5 + 1) * pool.page_bytes() - 1  # above the floor, one byte short
+    with pytest.raises(NoRoom, match="under the 1.00 GiB floor"):
+        pair.decoder.admit(b)
+    free[0] += 1
+    pair.decoder.admit(b)
+    assert pair.run([]) == [] and [a.out, b.out] == [serial(a.prompt, 5), serial(b.prompt, 5)]
+
+
+def test_a_resumed_request_counts_only_the_pages_it_does_not_share():
+    needs = []
+
+    class Record:
+        def fits(self, need):
+            needs.append(need)
+            return True
+
+    p = prompts(1, 64)[0]
+    pair = Pair(lanes=2, admission=Record())
+    pair.run([stream(p, 5)])
+    pair.decoder.admit(stream(prompts(2)[1], 5))
+    s = stream(p + [5] * 10, 5)
+    pair.decoder.admit(s)
+    pool = pair.decoder.pool
+    shared = s.cached // pool.page_tokens
+    assert shared == 3 and needs[-1] == (pool.need(len(s.prompt) + 5 + 1) - shared) * pool.page_bytes()
 
 
 def test_admit_message_carries_the_sampling_and_the_prompt():

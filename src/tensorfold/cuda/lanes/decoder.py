@@ -116,17 +116,20 @@ class LaneDecoder:
         s.count = min(s.count, room)
         if not self.free:
             raise NoRoom("every lane is busy")
-        if self.admission is not None and self.live() and not self.admission.fits(0):
-            raise NoRoom(self.admission.why(0))
         hit = self.cache.find(s.prompt) if self.cache is not None and s.draft else None
         cached, tier = hit if hit is not None else (0, -1)
+        quota = self._quota(n + s.count + self.slack)
+        need = self._bytes(quota, cached if tier < 0 else 0)
+        # with nothing live it starts: no stream would finish to free memory, so waiting could only fail it
+        if self.admission is not None and self.live() and not self.admission.fits(need):
+            raise NoRoom(self.admission.why(need))
         held = None
         if tier >= 0:  # read and checked here, before any rank is told to resume
             try:
                 held = self.cache.load(s.prompt, cached, tier)
             except ValueError:
                 cached, tier = 0, -1
-        quota = self._room(n + s.count + self.slack, cached if tier < 0 else 0)
+        self._room(quota, cached if tier < 0 else 0)
         lane = self.free.pop(0)
         s.sid, s.cached = self.next_id, cached
         self.next_id += 1
@@ -141,21 +144,34 @@ class LaneDecoder:
         self.plans[s.sid] = Plan(s, lane, cached, save)
         self.filling.append(s)
 
-    def _room(self, tokens: int, shared: int) -> int:
-        """The lane's page quota; kept entries are evicted until the pool can promise it (never the one it resumes)."""
+    def _quota(self, tokens: int) -> int:
+        """The pages a lane of ``tokens`` positions reserves; 0 without a pool."""
 
         if self.pool is None:
             return 0
         quota = self.pool.need(tokens)
         if quota > self.pool.pages:
             raise ValueError(f"a request needs {quota} pages; the page pool has {self.pool.pages}")
+        return quota
+
+    def _bytes(self, quota: int, shared: int) -> int:
+        """Bytes of every plane in the quota's pages, less the full pages it shares with the entry it resumes."""
+
+        if self.pool is None:
+            return 0
+        return (quota - shared // self.pool.page_tokens) * self.pool.page_bytes()
+
+    def _room(self, quota: int, shared: int) -> None:
+        """Kept entries are evicted until the pool can promise the quota (never the one the lane resumes)."""
+
+        if self.pool is None:
+            return
         own = shared // self.pool.page_tokens
         while self.pool.available() < quota - own:
             index = self.cache.victim(keep=(shared,)) if self.cache is not None else None
             if index is None:
                 raise NoRoom("the page pool is held by live streams; the request waits for one to finish")
             self._send(EVICT, [index])
-        return quota
 
     # -- rounds --------------------------------------------------------------------------------------------------
     def round(self) -> list[Stream]:
