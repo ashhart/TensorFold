@@ -43,7 +43,8 @@ def two_conversations(other_len=200, busy_source=False, room=True, free=()):
 
     a, c = Slot("a"), Slot("c")
     chain = SYSTEM + list(range(1000, 1500))
-    kept = [entry(SYSTEM, a, "system"), entry(chain, a, "a-chain"), entry(list(range(5000, 5000 + other_len)), c, "other")]
+    unrelated = list(range(5000, 5000 + other_len))
+    kept = [entry(SYSTEM, a, "system"), entry(chain, a, "a-chain"), entry(unrelated, c, "other")]
     return Owner(kept, free=free, busy=[a] if busy_source else [], room=room), a, c, chain
 
 
