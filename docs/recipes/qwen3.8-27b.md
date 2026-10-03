@@ -74,8 +74,10 @@ alone. `--vision` stops at startup until image input is qualified on this checkp
 
 `--tp 2` shards it as the MLX checkpoint shards: NVFP4 and FP8 projections split on whole 64-output tiles (column
 parallel) or whole 64-input groups (row parallel, four e4m3-scaled 16-input blocks each), every stored byte and the
-per-tensor scales unchanged; bf16 gates and the head split by rows. Row-parallel partials stay fp32 and add in rank
-order. Two ranks have their own serial reference: drafted equals `"draft": false` and concurrent
+per-tensor scales unchanged; bf16 gates and the head split by rows. Layers shard as they load, so a rank holds one
+full layer at most. Row-parallel partials stay fp32 and add in rank order; when the two GPUs map each other (NVLink
+or PCIe P2P, two ranks on one machine with `--device 0` and `--device 1`) that sum is one kernel over the peer
+mapping instead of an NCCL call, with the same bits (`TF_TP_P2P=0` keeps NCCL). Two ranks have their own serial reference: drafted equals `"draft": false` and concurrent
 equals serial on two ranks, while their bits may differ from one GPU's. Checkpoint math (`--precision checkpoint`,
 FP4/FP8 activations) still runs on one GPU.
 

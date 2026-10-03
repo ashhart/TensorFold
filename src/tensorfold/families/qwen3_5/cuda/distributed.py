@@ -79,6 +79,21 @@ def split_input(q: QLinear, rank: int, world_size: int = 2) -> QLinear:
                    q.biases[:, g0:g1].contiguous(), gs=q.gs, bits=q.bits)
 
 
+def shard_layer(rank: int, world_size: int = 2):
+    """``load_nvfp4``'s per-layer hook: each layer's shard as it loads, so a rank holds one full layer at most."""
+
+    return lambda layer, cfg: split_layer(layer, cfg, rank, world_size).layer
+
+
+def half_layers(transform):
+    """Admission bytes for a rank of two that loads layers as shards: layer tensors halved, embedding and head whole."""
+
+    def bytes_on_rank(name, info):
+        amount, host = transform(name, info)
+        return (amount // 2 if ".layers." in name else amount), host
+    return bytes_on_rank
+
+
 def _device(q) -> torch.device:
     """Where a checkpoint-format projection's stored bytes are."""
 
@@ -148,8 +163,8 @@ def split_layer(layer: Layer, cfg: Config, rank: int, world_size: int = 2) -> La
 
 
 def split_weights(w: Weights, rank: int, world_size: int = 2, *, tiled: bool = False,
-                  fuse: bool = False, split_head: bool = False) -> Weights:
-    """Shard stored MLX words before optional bit-preserving tiling (an NVFP4 checkpoint's tiles as loaded), optionally splitting head rows whose full dot products preserve logits and merged-candidate sampling."""
+                  fuse: bool = False, split_head: bool = False, layers_split: bool = False) -> Weights:
+    """Shard stored MLX words before optional bit-preserving tiling (an NVFP4 checkpoint's tiles as loaded; ``layers_split``: its layers are shards already), optionally splitting head rows whose full dot products preserve logits and merged-candidate sampling."""
 
     _rank(rank, world_size)
     c = w.config
@@ -158,7 +173,7 @@ def split_weights(w: Weights, rank: int, world_size: int = 2, *, tiled: bool = F
                         intermediate=c.intermediate // world_size)
     layers = []
     for layer in w.layers:
-        local = split_layer(layer, c, rank, world_size).layer
+        local = layer if layers_split else split_layer(layer, c, rank, world_size).layer   # loaded as shards
         if tiled and w.quant == "mlx":          # an NVFP4 checkpoint's projections are tiled as loaded
             from .qmm_fast import stack_small, tile
 
@@ -297,6 +312,11 @@ def gather_rank_partials(local: torch.Tensor, group=None,
     if dist.get_backend(group) == "nccl" and not local.is_cuda:
         raise ValueError("NCCL partial must be on CUDA")
     local = local.contiguous()
+    from tensorfold.cuda import p2p
+
+    peer = p2p.peer()
+    if peer is not None and group is None and local.is_cuda and peer.fits(local):
+        return peer(local, dtype)               # one launch over the peer mapping: the same bits as below
     if os.environ.get("TF_TP_REDUCE") == "allreduce":
         dist.all_reduce(local, op=dist.ReduceOp.SUM, group=group)
         return local.to(dtype)

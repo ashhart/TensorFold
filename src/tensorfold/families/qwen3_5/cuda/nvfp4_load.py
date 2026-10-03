@@ -104,8 +104,8 @@ def maths() -> tuple[dict[str, bool], str]:
     return own, f"full ({gpu} has neither the block-scaled FP4 nor the FP8 mma): bf16 activations, the stored weights"
 
 
-def load_nvfp4(model_dir: str | Path, device: str = "cuda"):
-    """NVFP4 and FP8 projections at full precision or in the checkpoint's own math, bf16 ones as stored."""
+def load_nvfp4(model_dir: str | Path, device: str = "cuda", *, layer=None):
+    """NVFP4 and FP8 projections at full precision or in the checkpoint's own math, bf16 ones as stored; ``layer``: each layer as it loads."""
 
     from tensorfold.cuda.capacity import headers
     from tensorfold.cuda.nvfp4 import format as fmt
@@ -186,10 +186,12 @@ def load_nvfp4(model_dir: str | Path, device: str = "cuda"):
             attn = Attention(q=linear(q + "self_attn.q_proj"), k=linear(q + "self_attn.k_proj"),
                              v=linear(q + "self_attn.v_proj"), o=linear(q + "self_attn.o_proj"),
                              q_norm=norm(p + "self_attn.q_norm.weight"), k_norm=norm(p + "self_attn.k_norm.weight"))
-        layers.append(Layer(linear=cfg.is_linear(i), input_norm=norm(p + "input_layernorm.weight"),
-                            post_norm=norm(p + "post_attention_layernorm.weight"), gdn=gdn, attn=attn,
-                            gate=linear(q + "mlp.gate_proj"), up=linear(q + "mlp.up_proj"),
-                            down=linear(q + "mlp.down_proj")))
+        made = Layer(linear=cfg.is_linear(i), input_norm=norm(p + "input_layernorm.weight"),
+                     post_norm=norm(p + "post_attention_layernorm.weight"), gdn=gdn, attn=attn,
+                     gate=linear(q + "mlp.gate_proj"), up=linear(q + "mlp.up_proj"), down=linear(q + "mlp.down_proj"))
+        gdn = attn = None
+        layers.append(made if layer is None else layer(made, cfg))
+        del made
     if not any(n.startswith("lm_head.") for n in info):
         raise ValueError("this checkpoint ties its head to the embedding; the CUDA engine reads a separate lm_head")
     w = Weights(config=cfg, embed=Plain(get("embed_tokens.weight").to(torch.bfloat16)), layers=layers,

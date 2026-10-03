@@ -81,6 +81,10 @@ class Qwen27Engine:
                                    "machines, and pass the same --no-drafts, --parallel, --context and "
                                    "--checkpoint-slots to both")
             gather = lambda values: gather_ints(torch, lambda send, recv: dist.all_gather_into_tensor(recv, send), values)
+            from tensorfold.cuda import p2p
+
+            if p2p.install(rank) and rank == 0:     # row-parallel sums in one launch over NVLink / PCIe P2P
+                print("[tensorfold] rank sums: P2P (the peer GPU mapped), NCCL for prompt-sized sums", flush=True)
         else:
             gather = None
         many = streams > 1
@@ -96,6 +100,10 @@ class Qwen27Engine:
             from .nvfp4_load import admission as nvfp4_admission
 
             geometry, tensor_bytes = nvfp4_admission(geometry)
+            if tp == 2:                     # each rank keeps its shard of every layer as it loads (no startup copy)
+                from .distributed import half_layers
+
+                tensor_bytes = half_layers(tensor_bytes)
         # one admission for one stream or many, on every rank, before any weight loads
         self.capacity_plan = admit(model_dir, context, context_explicit, torch,
                                    capacity_geometry(geometry, model_dir, vision, rank, offload=vision_offload),
@@ -106,9 +114,15 @@ class Qwen27Engine:
                                    draft_geometry=lambda text: draft_geometry(text, tp if tp_draft else 1, max_rows,
                                                                               bounded=True, streams=streams,
                                                                               kept=keep + 1 if many else 0),
-                                   startup_copies=int(tp == 2))
+                                   # NVFP4 layers shard as they load on two ranks: no second full copy at startup
+                                   startup_copies=int(tp == 2 and not nvfp4))
         self.context_window = self.capacity_plan["context_window"]
-        if tp == 2:
+        if tp == 2 and nvfp4:               # layers shard as they load; the embedding and head stay whole for the drafter
+            from .distributed import shard_layer
+
+            full = load(model_dir, nvfp4_layer=shard_layer(rank))
+            self.w = split_weights(full, rank, tiled=True, split_head=split_head, layers_split=True)
+        elif tp == 2:
             full = load(model_dir)
             self.w = split_weights(full, rank, tiled=True, split_head=split_head)
         else:
