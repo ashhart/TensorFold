@@ -43,9 +43,9 @@ class Qwen27Engine:
         if (exl3 or nvfp4) and tp != 1:
             raise ValueError(f"{'EXL3 packs' if exl3 else 'NVFP4 checkpoints'} of Qwen3.8-27B run on one GPU: drop "
                              "--tp 2, or serve the MLX checkpoint (TensorFold/Qwen3.8-27B-MLX-4bit) on two")
-        if (exl3 or nvfp4) and volta():
-            raise ValueError(f"{'EXL3 packs' if exl3 else 'NVFP4 checkpoints'} of Qwen3.8-27B need sm_80 or newer "
-                             "kernels: on a Volta GPU serve the MLX checkpoint (TensorFold/Qwen3.8-27B-MLX-4bit)")
+        if exl3 and volta():
+            raise ValueError("EXL3 packs of Qwen3.8-27B need sm_80 or newer kernels: on a Volta GPU serve an NVFP4 "
+                             "checkpoint or the MLX one (TensorFold/Qwen3.8-27B-MLX-4bit)")
         if nvfp4 and vision:
             raise ValueError("image input on CUDA is tested on the MLX checkpoint only: drop --vision for an NVFP4 "
                              "checkpoint, or serve TensorFold/Qwen3.8-27B-MLX-4bit")
@@ -115,8 +115,10 @@ class Qwen27Engine:
                                    # sm_70 (32 GB V100s): the full checkpoint (already the resident term) is split and freed
                                    # before caches exist; a second full copy is not part of that peak
                                    startup_copies=int(tp == 2 and not volta()),
-                                   # the MLX checkpoint runs on the sm_70 kernels; EXL3 and NVFP4 need the shared ones
-                                   need=None if exl3 or nvfp4 else VOLTA)
+                                   # MLX and NVFP4 checkpoints run on the sm_70 kernels; EXL3 needs the shared ones
+                                   need=None if exl3 or (nvfp4 and not volta()) else VOLTA,
+                                   # sm_70 NVFP4 repacks each upload in place: one extra copy of the largest tensor
+                                   staging_copies=2 if nvfp4 and volta() else 3)
         self.context_window = self.capacity_plan["context_window"]
         if tp == 2:
             full = load(model_dir)

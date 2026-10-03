@@ -45,11 +45,19 @@ class Plain8(Plain):
         return super().nbytes() + self.rows8.nbytes()
 
 
+def _volta() -> bool:
+    from tensorfold.cuda.build import volta
+
+    return volta()
+
+
 def weight_bytes(name: str, info: dict) -> tuple[int, int]:
     """A tensor as loaded: stored bytes with outputs padded to 128, gates' e4m3 copies, A_log and dt_bias in fp32."""
 
     if skipped(name):
         return 0, 0
+    if name.endswith("embed_tokens.weight") and _volta():
+        return 0, 0                                       # sm_70: page-locked host memory (``HostRows``)
     shape, dtype = list(info["shape"]), info["dtype"]
     if name.endswith((".A_log", ".dt_bias")):
         return math.prod(shape) * 4, 0
@@ -98,6 +106,27 @@ def maths() -> tuple[dict[str, bool], str]:
     return own, f"full ({gpu} has neither the block-scaled FP4 nor the FP8 mma): bf16 activations, the stored weights"
 
 
+def _volta_linear(name: str, kind: str, got: dict, weight: torch.Tensor, reciprocal: bool):
+    """A projection for the sm_70 kernels (``tensorfold.cuda.kernels.qmmf_volta``): the stored codes exactly."""
+
+    from tensorfold.cuda.kernels.qmmf_volta import VoltaLinear
+
+    if kind == "nvfp4":
+        g = got.get("weight_global_scale" if reciprocal else "weight_scale_2")
+        if g is None:
+            raise ValueError(f"{name}: an NVFP4 weight without its global scale")
+        g = float(g.float().reshape(-1)[0])
+        return VoltaLinear.from_nvfp4(weight, got["weight_scale"], 1.0 / g if reciprocal else g)
+    if kind == "fp8":
+        s = got["weight_scale"].float().reshape(-1)
+        if s.numel() != 1:
+            raise ValueError(f"{name}: FP8 with {s.numel()} scales; the CUDA engine reads one scale a tensor")
+        return VoltaLinear.from_fp8(weight, float(s[0]))
+    if kind == "bf16":
+        return VoltaLinear.from_bf16(weight)
+    raise ValueError(f"{name}: {kind} projections are not read on Qwen3.8-27B on sm_70")
+
+
 def load_nvfp4(model_dir: str | Path, device: str = "cuda"):
     """NVFP4 and FP8 projections at full precision or in the checkpoint's own math, bf16 ones as stored."""
 
@@ -116,6 +145,13 @@ def load_nvfp4(model_dir: str | Path, device: str = "cuda"):
     t = _Tensors(model_dir, device, skip=skipped)
     staging = Staging()                                   # one e4m3 copy at a time, shared by every NVFP4 projection
     own, line = maths()
+    from tensorfold.cuda.build import volta
+
+    on_volta = volta()
+    if on_volta:
+        own = {"nvfp4": False, "fp8": False}
+        line = ("full on sm_70 (W4A16 / W8A16: fp16 activations, the stored NVFP4 and FP8 weights exactly, "
+                "bf16 projections as fp16 a power of two per output)")
 
     def act_scale(name: str, got: dict, kind: str) -> float | None:
         """The checkpoint's static input scale (x = codes * scale), where ``kind`` runs its own math; else None."""
@@ -135,6 +171,8 @@ def load_nvfp4(model_dir: str | Path, device: str = "cuda"):
         kind = fmt.scheme(parts)
         got = {s: t.pop(f"{name}.{s}") for s in parts}
         weight = got["weight"] if "weight" in got else got.get("weight_packed")
+        if on_volta:
+            return _volta_linear(name, kind, got, weight, reciprocal)
         if kind == "nvfp4":
             g = got.get("weight_global_scale" if reciprocal else "weight_scale_2")
             if g is None:
@@ -186,7 +224,15 @@ def load_nvfp4(model_dir: str | Path, device: str = "cuda"):
                             down=linear(q + "mlp.down_proj")))
     if not any(n.startswith("lm_head.") for n in info):
         raise ValueError("this checkpoint ties its head to the embedding; the CUDA engine reads a separate lm_head")
-    w = Weights(config=cfg, embed=Plain(get("embed_tokens.weight").to(torch.bfloat16)), layers=layers,
+    if on_volta:                                          # the embedding stays in page-locked host memory
+        from tensorfold.cuda.kernels.qmmf_volta import HostRows
+
+        name = root + "embed_tokens.weight"
+        t.where.pop(name)
+        embed = HostRows(t.files.get(name, "cpu").to(torch.bfloat16))
+    else:
+        embed = Plain(get("embed_tokens.weight").to(torch.bfloat16))
+    w = Weights(config=cfg, embed=embed, layers=layers,
                 norm=norm("norm.weight"), head=linear("lm_head", prompt=False), quant="nvfp4")
     w.precision = "checkpoint" if any(own.values()) else "full"
     w.own = own

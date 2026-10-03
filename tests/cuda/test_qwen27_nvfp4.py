@@ -17,8 +17,7 @@ import torch
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA only", allow_module_level=True)
-if torch.cuda.get_device_capability()[0] == 7:
-    pytest.skip("NVFP4 checkpoints need sm_80 kernels; the Volta engine serves the MLX checkpoint", allow_module_level=True)
+VOLTA = torch.cuda.get_device_capability()[0] == 7      # the sm_70 linears (qmmf_volta): same tests, same rules
 
 from tensorfold.cuda.nvfp4.linear import Fp4Linear, Fp8Linear
 from tensorfold.families.qwen3_5.cuda.dflash2 import _sub_parts
@@ -33,12 +32,20 @@ DRAFTER = os.environ.get("TENSORFOLD_QWEN27_DRAFTER", "")
 def _fp4(n: int, k: int, gen: torch.Generator) -> Fp4Linear:
     packed = torch.randint(0, 256, (n, k // 2), generator=gen, dtype=torch.uint8)
     scale = torch.randint(0x20, 0x40, (n, k // 16), generator=gen, dtype=torch.uint8)
+    if VOLTA:
+        from tensorfold.cuda.kernels.qmmf_volta import VoltaLinear
+
+        return VoltaLinear.from_nvfp4(packed.cuda(), scale.cuda().view(torch.float8_e4m3fn), 0.05)
     return Fp4Linear.from_checkpoint(packed.cuda(), scale.cuda(), 0.05)
 
 
 def _fp8(n: int, k: int, gen: torch.Generator) -> Fp8Linear:
     w = torch.randint(0, 256, (n, k), generator=gen, dtype=torch.uint8)
     w[(w & 0x7F) >= 0x60] = 0x30                            # finite, magnitudes below 2^5
+    if VOLTA:
+        from tensorfold.cuda.kernels.qmmf_volta import VoltaLinear
+
+        return VoltaLinear.from_fp8(w.cuda().view(torch.float8_e4m3fn), 0.004)
     return Fp8Linear.from_checkpoint(w.cuda().view(torch.float8_e4m3fn), 0.004)
 
 
@@ -47,6 +54,10 @@ def _model() -> Weights:
 
     def gate(n, k):
         w = (torch.randn(n, k, generator=gen) * 0.05).to(torch.bfloat16).cuda()
+        if VOLTA:
+            from tensorfold.cuda.kernels.qmmf_volta import VoltaLinear
+
+            return VoltaLinear.from_bf16(w)
         return Plain8(w, rows8=Fp8Linear.from_bf16(w))
 
     norm = torch.ones(128, device="cuda", dtype=torch.bfloat16)
@@ -116,6 +127,7 @@ def test_drafter_head_parts_are_the_head_columns():
     assert torch.equal(full(x), head(x))
 
 
+@pytest.mark.skipif(VOLTA, reason="FP8 prompts need sm_89")
 def test_gate_copy_tracks_the_bf16_product():
     """A bf16 gate's e4m3 prompt copy: within e4m3's rounding of the bf16 product on FP8 rows."""
 

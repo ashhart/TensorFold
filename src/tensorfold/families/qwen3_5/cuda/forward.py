@@ -28,6 +28,11 @@ def _mm_group(x: torch.Tensor, ws: list, xs: torch.Tensor | None = None) -> list
 
     if all(isinstance(w, QLinear) for w in ws):
         return matmul_group(x, ws, xs)
+    if all(str(getattr(w, "layout", "")).startswith("volta-") for w in ws):
+        from tensorfold.cuda.kernels import qmmf_volta        # sm_70 NVFP4 checkpoint: one fp16 copy of the rows
+
+        rows = qmmf_volta.prep(x)
+        return [w.matmul(x, xs=rows) for w in ws]
     shared = [i for i, w in enumerate(ws) if getattr(w, "act", None) is not None]   # checkpoint math: quantize once
     got = {}
     if len(shared) > 1:

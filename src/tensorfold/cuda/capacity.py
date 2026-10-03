@@ -120,7 +120,7 @@ def headers(model_dir: str | Path, *, rank: int | None = None, files: list[Path]
 
 
 def estimate_weights(model_dir: str | Path, transform: Callable, *, rank: int | None = None,
-                     files: list[Path] | None = None) -> Weights:
+                     files: list[Path] | None = None, staging_copies: int = 3) -> Weights:
     layers: dict[str, int] = {}
     resident = mapped = largest = 0
     for name, info in headers(model_dir, rank=rank, files=files).items():
@@ -135,7 +135,7 @@ def estimate_weights(model_dir: str | Path, transform: Callable, *, rank: int | 
         group = match.group(1) if match else name
         layers[group] = layers.get(group, 0) + size
     # CPU expert lists/stack, GPU uploads and tiled outputs can coexist during one layer load.
-    staging = 3 * max([largest, *layers.values()], default=0)
+    staging = staging_copies * max([largest, *layers.values()], default=0)
     return Weights(resident, staging, mapped)
 
 
@@ -299,7 +299,8 @@ def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, t
           draft_geometry: Geometry | Callable | None = None, startup_copies: int = 0,
           extra_files: tuple[Path, ...] = (), files: list[Path] | None = None,
           draft_transform: Callable | None = None,
-          draft_weights: Callable[[Path], Weights] | None = None, need: tuple[int, int] | None = None) -> dict:
+          draft_weights: Callable[[Path], Weights] | None = None, need: tuple[int, int] | None = None,
+          staging_copies: int = 3) -> dict:
     """One refusal or capacity on both ranks before allocating; the draft model by ``draft_weights`` or a transform;
     ``need``: the capability the engine's kernels need for this checkpoint, when lower than every format's floor."""
 
@@ -311,7 +312,7 @@ def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, t
     try:
         text = config(model_dir)
         geometry = geometry(text) if callable(geometry) else geometry
-        weights = estimate_weights(model_dir, transform, rank=rank, files=files)
+        weights = estimate_weights(model_dir, transform, rank=rank, files=files, staging_copies=staging_copies)
         host_staging = weights.staging
         if extra_files:                      # files outside the index, same layout (Nemotron's MTP head, EXL3 tables)
             more = estimate_weights(model_dir, transform, files=list(extra_files))
