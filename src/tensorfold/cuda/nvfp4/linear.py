@@ -298,6 +298,27 @@ class Mx8Linear:
         return cls(_fragment_order(weight.contiguous().view(torch.uint8), npad), bs, n, k, npad)
 
     @classmethod
+    def from_bf16(cls, weight: torch.Tensor) -> "Mx8Linear":
+        """A bf16 [N, K] weight as MXFP8: e4m3 codes with a power-of-two scale per 32 inputs, rounded up.
+
+        The storage a checkpoint that keeps a projection in bf16 does not have. ``from_checkpoint`` reads a
+        pack's own codes and e8m0 exponents; this makes them, so a face can be served at half the bytes
+        (``Fp8Linear.from_bf16`` is the same idea one scale a 64 inputs, and only its prompt GEMM reads it -
+        its decode passes no scales at all, which is why this face exists rather than that one).
+        """
+
+        n, k = weight.shape
+        if k % 64:
+            raise ValueError(f"bf16 weight [{n}, {k}]: K must be a multiple of 64")
+        w = weight.float().view(n, k // 32, 32)
+        top = w.abs().amax(-1)
+        e = torch.ceil(torch.log2(torch.where(top > 0, top / 448.0, torch.ones_like(top))))
+        e = e.clamp(-127.0, 127.0)
+        scale = torch.ldexp(torch.ones_like(e), e.to(torch.int32))
+        codes = (w / scale[..., None]).reshape(n, k).to(torch.float8_e4m3fn)
+        return cls.from_checkpoint(codes, (e.to(torch.int32) + 127).to(torch.uint8))
+
+    @classmethod
     def stack(cls, parts: list["Mx8Linear"]) -> "Mx8Linear":
         """Projections of one input as one: outputs in order (each part's padding dropped, the stack's own added)."""
 
