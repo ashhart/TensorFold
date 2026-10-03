@@ -203,7 +203,7 @@ def test_two_process_nccl_rank_order():
     spawn(_nccl_worker, args=(port,), nprocs=2)
 
 
-def _p2p_worker(rank: int, port: int):
+def _p2p_worker(rank: int, port: int, host: bool = False):
     import torch.distributed as dist
 
     from tensorfold.cuda import p2p
@@ -211,7 +211,11 @@ def _p2p_worker(rank: int, port: int):
     torch.cuda.set_device(rank)
     dist.init_process_group("nccl", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=2)
     try:
-        assert p2p.install(rank), "both GPUs can map each other, yet the P2P sum was not installed"
+        if host:                                  # the GPUs cannot map each other: shared page-locked host memory
+            assert p2p.install(rank), "both ranks are on this machine, yet the host-memory sum was not installed"
+            assert isinstance(p2p.peer(), p2p.HostSum)
+        else:
+            assert p2p.install(rank), "both GPUs can map each other, yet the P2P sum was not installed"
         peer = p2p.peer()
         gen = torch.Generator(device="cuda").manual_seed(100 + rank)
         for round_ in range(300):
@@ -241,3 +245,18 @@ def test_two_process_p2p_sum_is_the_rank_ordered_sum():
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
     spawn(_p2p_worker, args=(port,), nprocs=2)
+
+
+def test_two_process_host_memory_sum_is_the_rank_ordered_sum():
+    """Without a peer mapping the sum runs through shared page-locked host memory, with the rank-ordered sum's bits."""
+
+    if os.environ.get("TENSORFOLD_TEST_NCCL") != "1":
+        pytest.skip("set TENSORFOLD_TEST_NCCL=1 to run the two-GPU process tests")
+    if torch.cuda.device_count() < 2 or torch.cuda.can_device_access_peer(0, 1):
+        pytest.skip("requires two visible CUDA devices that cannot map each other")
+    from torch.multiprocessing import spawn
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    spawn(_p2p_worker, args=(port, True), nprocs=2)

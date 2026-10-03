@@ -1,4 +1,4 @@
-// Two ranks' row-parallel sum over a peer mapping: rank 0's partial plus rank 1's in fp32, rounded once.
+// Two ranks' row-parallel sum over a peer mapping or shared host memory: rank 0 + rank 1 in fp32, rounded once.
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -28,7 +28,7 @@ __device__ __forceinline__ unsigned long long now() {
 
 // signals: [2 phases][BLOCKS][2 ranks] u64 in each rank's memory; a rank writes its arrival into the peer's copy
 __device__ __forceinline__ void meet(unsigned long long* mine, unsigned long long* peer, int phase, int rank,
-                                     unsigned long long round) {
+                                     unsigned long long round, unsigned backoff) {
     __syncthreads();
     if (threadIdx.x == 0) {
         __threadfence_system();
@@ -36,6 +36,7 @@ __device__ __forceinline__ void meet(unsigned long long* mine, unsigned long lon
         const unsigned long long* wait = mine + (phase * BLOCKS + blockIdx.x) * 2 + (1 - rank);
         const unsigned long long t0 = now();
         while (acquire(wait) < round) {
+            if (backoff) __nanosleep(backoff);        // host flags: poll PCIe gently, the peer's partial shares the link
             if (now() - t0 > SPIN_LIMIT_NS) __trap();
         }
     }
@@ -61,15 +62,15 @@ template <typename T>
 __global__ void __launch_bounds__(THREADS) p2p_sum_kernel(const T* __restrict__ local, T* stage, const T* peer_stage,
                                                           unsigned long long* sig, unsigned long long* peer_sig,
                                                           __nv_bfloat16* __restrict__ out, long long n, int rank,
-                                                          unsigned long long round) {
+                                                          unsigned long long round, unsigned backoff) {
     const long long step = static_cast<long long>(BLOCKS) * THREADS;
     for (long long i = static_cast<long long>(blockIdx.x) * THREADS + threadIdx.x; i < n; i += step) stage[i] = local[i];
-    meet(sig, peer_sig, 0, rank, round);              // this block's slice is staged on both ranks
+    meet(sig, peer_sig, 0, rank, round, backoff);              // this block's slice is staged on both ranks
     for (long long i = static_cast<long long>(blockIdx.x) * THREADS + threadIdx.x; i < n; i += step) {
         const float mine = to_float(local[i]), other = load_peer(peer_stage + i);
         out[i] = __float2bfloat16_rn(rank == 0 ? mine + other : other + mine);
     }
-    meet(sig, peer_sig, 1, rank, round);              // and read on both: the next round may overwrite it
+    meet(sig, peer_sig, 1, rank, round, backoff);              // and read on both: the next round may overwrite it
 }
 
 }  // namespace
@@ -99,8 +100,17 @@ int64_t open(const at::Tensor& bytes) {
     return reinterpret_cast<int64_t>(p);
 }
 
+// Page-lock a shared host buffer both ranks map, for GPUs without a peer mapping: its device address.
+int64_t host_map(int64_t ptr, int64_t bytes) {
+    void* host = reinterpret_cast<void*>(ptr);
+    C10_CUDA_CHECK(cudaHostRegister(host, bytes, cudaHostRegisterMapped | cudaHostRegisterPortable));
+    void* dev = nullptr;
+    C10_CUDA_CHECK(cudaHostGetDevicePointer(&dev, host, 0));
+    return reinterpret_cast<int64_t>(dev);
+}
+
 void p2p_sum(const at::Tensor& local, int64_t stage, int64_t peer_stage, int64_t sig, int64_t peer_sig,
-             at::Tensor& out, int64_t rank, int64_t round) {
+             at::Tensor& out, int64_t rank, int64_t round, int64_t backoff) {
     TORCH_CHECK(local.is_cuda() && local.is_contiguous() && out.is_contiguous() && out.scalar_type() == at::kBFloat16 &&
                 out.numel() == local.numel(), "local (contiguous fp32/bf16), out bf16 of the same size");
     c10::cuda::CUDAGuard guard(local.device());
@@ -111,12 +121,14 @@ void p2p_sum(const at::Tensor& local, int64_t stage, int64_t peer_stage, int64_t
     auto* ps = reinterpret_cast<unsigned long long*>(peer_sig);
     if (local.scalar_type() == at::kFloat)
         p2p_sum_kernel<float><<<BLOCKS, THREADS, 0, stream>>>(local.data_ptr<float>(), reinterpret_cast<float*>(stage),
-            reinterpret_cast<const float*>(peer_stage), s, ps, o, n, static_cast<int>(rank), round);
+            reinterpret_cast<const float*>(peer_stage), s, ps, o, n, static_cast<int>(rank), round,
+            static_cast<unsigned>(backoff));
     else {
         TORCH_CHECK(local.scalar_type() == at::kBFloat16, "fp32 or bf16 partials");
         p2p_sum_kernel<__nv_bfloat16><<<BLOCKS, THREADS, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(local.data_ptr()), reinterpret_cast<__nv_bfloat16*>(stage),
-            reinterpret_cast<const __nv_bfloat16*>(peer_stage), s, ps, o, n, static_cast<int>(rank), round);
+            reinterpret_cast<const __nv_bfloat16*>(peer_stage), s, ps, o, n, static_cast<int>(rank), round,
+            static_cast<unsigned>(backoff));
     }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -128,5 +140,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("handle", &handle, "the 64-byte cudaIpcMemHandle of a base pointer");
     m.def("open", &open, "a peer's pointer from its handle (peer access enabled)");
     m.def("p2p_sum", &p2p_sum, "out (bf16) = rank 0's partial + rank 1's partial (fp32), staged and read over P2P");
+    m.def("host_map", &host_map, "page-lock shared host bytes for the GPU (mapped): their device address");
     m.def("signal_bytes", &signal_bytes, "bytes of a rank's signal flags");
 }
