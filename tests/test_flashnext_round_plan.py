@@ -8,8 +8,14 @@ pytest.importorskip("torch")
 
 from tensorfold.cuda.memory_gate import MemoryGate
 from tensorfold.cuda.streams import Stream
-from tensorfold.families.qwen4_exp.cuda.multi import MultiDecoder
-from tensorfold.families.qwen4_exp.cuda.multi_plan import admission, apply, ready, round_plan
+from tests.test_cuda_geometry import allocations  # noqa: F401
+
+
+@pytest.fixture(autouse=True)
+def planning_dependencies(allocations):  # noqa: F811
+    global MultiDecoder, admission, apply, ready, round_plan
+    from tensorfold.families.qwen4_exp.cuda.multi import MultiDecoder
+    from tensorfold.families.qwen4_exp.cuda.multi_plan import admission, apply, ready, round_plan
 
 
 class Slot:
@@ -81,9 +87,8 @@ def test_round_plan_carries_pure_passes_and_mixed_pieces_at_each_boundary():
         d.filling.append(s)
         d.fills[sid] = [SimpleNamespace(stops=[]), True, 0, None]
     plan = round_plan(d)
-    assert plan["pass_width"] == 128
-    assert plan["passes"] == [[[1, 0, 128]], [[1, 128, 128]], [[1, 256, 44], [2, 0, 84]],
-                              [[2, 84, 128]], [[2, 212, 98]]]
+    assert plan["pass_width"] == 256
+    assert plan["passes"] == [[[1, 0, 256]], [[1, 256, 44], [2, 0, 212]], [[2, 212, 98]]]
     assert plan["mixed"] == [*plan["passes"], []]
     assert [d.fills[sid][2] for sid in (1, 2)] == [0, 0]
     assert len(d.filling) == 2 and not any(st.operations for st in d.slots)

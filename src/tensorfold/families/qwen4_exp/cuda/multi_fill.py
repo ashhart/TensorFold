@@ -17,7 +17,7 @@ from .state import CAND, ENDS
 from .multi_tp import OutOfStep
 from .prompt_plan import pass_limit
 
-PASS_MIN = 128
+PASS_MIN = 512
 FILL_GUARD = 8
 
 
@@ -106,6 +106,10 @@ class PromptPasses:
             lasts = self._absorb(pieces, segs, cuts)
         except Exception as exc:                         # noqa: BLE001  (these requests fail, the others go on)
             return self._failed(pieces, exc)
+        if not self.converged and pieces:
+            rows = sum(n for _, _, n in pieces)
+            extra = max(0.0, time.perf_counter() - t0) / max(1, rows)
+            self.row_s = extra if self.row_s is None else 0.7 * self.row_s + 0.3 * extra
         return self._joined(pieces, heads, lasts, (time.perf_counter() - t0) / len(pieces), candidates)
 
     @staticmethod

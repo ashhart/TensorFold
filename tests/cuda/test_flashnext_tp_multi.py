@@ -517,7 +517,8 @@ def test_tp_growth_that_does_not_fit_one_rank_refuses_before_model_collectives(r
 
     result = _two_rank_run(ranks, "bf16", lambda dec: _served(dec, [(long, 8, None), (PROMPTS[0], 12, None)]),
                            tamper=tamper)
-    assert isinstance(result[0], OutOfStep)
+    assert isinstance(result[0], ValueError)
+    assert "prompt cannot fit available memory" in str(result[0])
     assert result[1] == _serial(ranks, PROMPTS[0], None, 12, "bf16")
 
 

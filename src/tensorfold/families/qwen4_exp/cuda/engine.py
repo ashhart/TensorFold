@@ -39,7 +39,7 @@ def build_kernels(*, exl3: bool = False, nvfp4: bool = False, solo: bool = True)
     from . import gdn, gdn_io
 
     loaders = [experts._ext, shared_gdn._ext, qmm._ext, gdn_io._ext]
-    if solo:                                     # one stream's decode windows: gdn.chain; concurrent rounds don't
+    if solo:                                     # serial windows, including a concurrent decoder's lone graph slot
         loaders.append(gdn._ext)
     if nvfp4:
         from tensorfold.cuda.nvfp4 import checkpoint, linear
@@ -138,7 +138,7 @@ class FlashNextEngine:
         if tp == 2:
             self._same_settings(torch, ids)
         build_kernels(exl3=exl3, nvfp4=not exl3 and quant_method(read_config(model_dir)) == "modelopt",
-                      solo=streams == 1)
+                      solo=streams == 1 or (graphs and mtp))
         from concurrent.futures import wait
 
         from tensorfold.cuda.direct_read import wait_all

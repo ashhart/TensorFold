@@ -10,17 +10,17 @@ import pytest
 def _decoder():
     root = Path(__file__).resolve().parents[1] / "src/tensorfold/families/qwen4_exp/cuda"
     plan = ast.parse((root / "prompt_plan.py").read_text())
-    source = ast.parse((root / "multi.py").read_text())
+    source = ast.parse((root / "multi_fill.py").read_text())
     methods = {"_pass_rows", "_pieces", "_timed", "_pass"}
     nodes = [ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)]
     nodes.extend(node for node in plan.body if isinstance(node, ast.FunctionDef) and node.name == "pass_limit")
     nodes.extend(node for node in source.body if isinstance(node, ast.Assign) and any(
         isinstance(target, ast.Name) and target.id == "PASS_MIN" for target in node.targets))
-    owner = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == "MultiDecoder")
+    owner = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == "PromptPasses")
     body = [node for node in owner.body if isinstance(node, ast.FunctionDef) and node.name in methods]
     nodes.append(ast.ClassDef(name="Decoder", bases=[], keywords=[], body=body, decorator_list=[], type_params=[]))
     namespace = {"PREFILL_ROWS": 2048, "ENDS": 16}
-    exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])), str(root / "multi.py"), "exec"), namespace)
+    exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])), str(root / "multi_fill.py"), "exec"), namespace)
     dec = namespace["Decoder"]()
     dec.streams = {0: SimpleNamespace(done=False)}
     dec.prefill_rows, dec.share, dec.round_s, dec.row_s = 2048, 0.25, None, None
@@ -74,9 +74,11 @@ def test_standalone_calibration_uses_completed_nonconvergent_work(converged, fai
     stream = SimpleNamespace(st=object(), prompt=list(range(512)))
     pieces = [(stream, 0, 128), (stream, 128, 384)]
     dec.converged, dec.row_s, dec.w, dec.pbuf = converged, prior, object(), object()
-    dec._pieces, dec._note_passed = lambda: pieces, lambda _: None
+    dec.pass_plan, dec.pass_index = None, 0
+    dec._pieces, dec._note_passed = lambda *_: pieces, lambda _: None
+    dec._prompt_candidates = lambda *_: None
     dec._end_rows, dec._cuts, dec._absorb = lambda *_: [], lambda *_: [], lambda *_: []
-    dec._joined, dec._failed = lambda *args: ("joined", args[-1]), lambda *_: ("failed", None)
+    dec._joined, dec._failed = lambda *args: ("joined", args[-2]), lambda *_: ("failed", None)
     namespace["stage"] = lambda *_: []
     def compute(*args, **kwargs):
         if failed:

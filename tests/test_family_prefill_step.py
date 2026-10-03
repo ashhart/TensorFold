@@ -1,13 +1,41 @@
 """A family's engine_settings names its prompt chunk: the prefill plan and the stream memory probe take it."""
 
 from pathlib import Path
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
+
+import numpy as np
 
 import pytest
 
 from tensorfold import cli
 from tensorfold.engine import memory
 from tensorfold.engine.prefill_plan import PrefillPlan
+
+
+class CPUCache:
+    def update_and_fetch(self, keys, values):
+        self.keys, self.values, self.state = keys, values, (keys, values)
+        return keys, values
+
+    def memory_growth(self):
+        return 0, (self.keys.nbytes + self.values.nbytes) // self.keys.shape[2]
+
+
+@pytest.fixture(autouse=True)
+def cpu_memory_runtime(monkeypatch):
+    """Memory-policy probes use CPU arrays and deterministic allocator readings, with no native kernel dispatch."""
+    core, package = ModuleType("mlx.core"), ModuleType("mlx")
+    core.__version__ = "host-fixture"
+    core.zeros = lambda shape: np.zeros(shape, dtype=np.float32)
+    core.eval = lambda *arrays: None
+    core.synchronize = core.clear_cache = core.reset_peak_memory = lambda: None
+    core.get_active_memory = core.get_peak_memory = core.get_cache_memory = lambda: 0
+    core.device_info = lambda: {"max_recommended_working_set_size": 0}
+    core.set_wired_limit = lambda limit: None
+    package.core = core
+    monkeypatch.setitem(sys.modules, "mlx", package)
+    monkeypatch.setitem(sys.modules, "mlx.core", core)
 
 
 def parse(*extra):
@@ -57,7 +85,7 @@ def test_the_memory_probe_ends_on_full_chunks_of_the_plan_step(monkeypatch):
 
 def test_the_largest_step_that_leaves_the_context_floor_is_chosen(monkeypatch):
     import mlx.core as mx
-    from mlx_lm.models.cache import KVCache
+    KVCache = CPUCache
 
     from tensorfold.engine import prefill_step
 
@@ -95,7 +123,7 @@ def test_a_probe_whose_peak_varies_run_to_run_gives_the_same_step(monkeypatch, n
     """#95: a streamed-expert probe's peak moves between runs; the worst of three decides, wherever the high one falls."""
 
     import mlx.core as mx
-    from mlx_lm.models.cache import KVCache
+    KVCache = CPUCache
 
     from tensorfold.engine import prefill_step
 

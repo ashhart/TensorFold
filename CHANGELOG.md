@@ -3,10 +3,31 @@
 `tensorfold update` prints the sections below that are newer than the version you had. Each release's page on
 GitHub has the full notes and the measurements behind them.
 
-## Unreleased
+## 0.6.4 (3 Oct 2026)
 
-- **CUDA tree attention:** folding partials improves long-context verification at the same precision (#268).
-  Its fp32 summation order can change the last bits of logits and long-context replies compared with 0.6.3.
+- **Flash Next on two DGX Sparks serves concurrent requests.** `--parallel N` with two CUDA ranks runs every stream
+  in shared lane rounds, and drafted replies still equal one-token decoding (#141, #180, #219, closes #123). The two
+  ranks now share one communicator interface, so a faster transport can plug in without touching the engines.
+  Thanks to @BHCC2025, @jschmied, @plotarmordev and @jayleaton.
+- **Startup memory on Macs:** prompt chunks are probed smallest first, and a larger probe runs only when its worst
+  case fits the memory budget (#271). Thanks to @boxabirds for the report.
+- **`tensorfold plan`** prints the model and context budget before any weights load (#281), and both `/metrics`
+  routes report the process memory footprint (#277). Thanks to @akol1.
+- Flash Next on CUDA builds its extensions before loading weights (#202) and gathers prompt n-gram rows before
+  waiting on earlier copies (#201). Thanks to @mcclanahanaman.
+- Flash Next on CUDA rereads EXL3 n-gram tables after warm-up and pins their page runs (#254). Thanks to
+  @grearjake-star.
+- `--decode-share` takes effect on Flash Next CUDA: shared prompt rows are sized from completed stand-alone passes
+  (#248, closes #230). Thanks to @simon-lin88.
+- CUDA tree attention folds its partial sums in fp32 groups. Precision is unchanged, but long replies can differ
+  from 0.6.3 in the last bits (#268). Thanks to @Arminova.
+- Flash Next on CUDA refuses cards below sm_120 at startup, before loading weights, and its CUDA tests skip there
+  (#261). Thanks to @mcclanahanaman for the report.
+- `docs/recipes/README.md` lists the minimum card and Mac memory for each family (#139). Thanks to @tomByrer for
+  asking.
+- Benchmark helpers fail early on Python below 3.11 (#276). Thanks to @akol1.
+- Tests collect without the optional MLX or terminal-interface dependencies (#288), and the docs say `--alias`
+  works on the CUDA server too (#289). Thanks to @plotarmordev.
 
 ## 0.6.3 (2 Oct 2026)
 

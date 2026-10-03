@@ -34,6 +34,22 @@ def test_parallel_startup_is_admitted_before_any_load(tmp_path, fake_runtime, fa
 
 
 @pytest.mark.torch
+@pytest.mark.parametrize("streams,depth,graphs,solo", [(1, 0, False, True), (2, 0, True, False),
+                                                     (2, 3, False, False), (2, 3, True, True)])
+def test_flash_startup_prebuilds_the_lone_graph_extensions(tmp_path, monkeypatch, fake_runtime,
+                                                          streams, depth, graphs, solo):  # noqa: F811
+    from tensorfold.families.qwen4_exp.cuda import engine
+
+    checkpoint(tmp_path, small_config(), WEIGHTS)
+    calls, _ = fake_runtime
+    built = []
+    monkeypatch.setattr(engine, "build_kernels", lambda **kw: built.append((kw, len(calls))))
+    with pytest.raises(Loaded):
+        engine.FlashNextEngine(tmp_path, streams=streams, depth=depth, graphs=graphs)
+    assert len(built) == 1 and built[0][0]["solo"] is solo and built[0][1] == 0
+
+
+@pytest.mark.torch
 @pytest.mark.parametrize("family,world", [("linear", 1), ("linear", 2), ("indexed", 1)])
 def test_parallel_window_that_cannot_fit_every_stream_is_refused_before_loading(tmp_path, monkeypatch, fake_runtime,
                                                                                 family, world):  # noqa: F811
@@ -42,7 +58,7 @@ def test_parallel_window_that_cannot_fit_every_stream_is_refused_before_loading(
     calls, capacity = fake_runtime
     # one GPU: the window is what one stream reaches beside the others' first rows; two ranks: every stream's
     four = (stream_geometry(small_config(), world, 4, 8, first=256 if world == 1 else None) if family == "linear"
-            else indexed_stream_geometry(small_config(), 4, 4, 8, mtp=True))
+            else indexed_stream_geometry(small_config(), 5, 4, 8, mtp=True))
     budget = four.needed(12000) + 32768                   # the streams fit 12,000 tokens, not 60,000
     monkeypatch.setattr(capacity, "available_bytes", lambda t: budget)
     _, go = start(family, tmp_path, 60000, True, world, 4)
@@ -77,13 +93,16 @@ def test_stream_geometry_counts_every_stream_and_kept_prompt_end():
 @pytest.mark.parametrize("streams", [2, 5])
 @pytest.mark.parametrize("prefill_rows", [2048, 4096])
 @pytest.mark.parametrize("kv_dtype,bits", [("bf16", 16), ("int8", 8), ("int4", 4)])
+@pytest.mark.parametrize("graphs", [False, True])
 def test_flash_parallel_decoder_allocations_are_budgeted(monkeypatch, allocations, streams, kv_dtype,
-                                                         bits, prefill_rows):  # noqa: F811
+                                                         bits, prefill_rows, graphs):  # noqa: F811
     arrays, fake = allocations
     state = importlib.import_module("tensorfold.families.qwen4_exp.cuda.state")
     for mod in (state, state.gdn_mod, state.attn_mod, state.moe_mod, state.kvcache):
         monkeypatch.setattr(mod, "torch", fake)
     multi = importlib.import_module("tensorfold.families.qwen4_exp.cuda.multi")
+    graph_module = importlib.import_module("tensorfold.families.qwen4_exp.cuda.graphs")
+    monkeypatch.setattr(graph_module, "Graphs", lambda e, **kw: SimpleNamespace(e=e, max_rows=kw["max_rows"]))
     text = {"hidden_size": 512, "num_attention_heads": 8, "num_key_value_heads": 2, "head_dim": 64,
             "num_hidden_layers": 4, "layer_types": ["linear_attention", "full_attention"] * 2,
             "linear_num_key_heads": 2, "linear_num_value_heads": 4, "linear_key_head_dim": 128,
@@ -92,7 +111,8 @@ def test_flash_parallel_decoder_allocations_are_budgeted(monkeypatch, allocation
                           kv_heads=2, head_dim=64, index_dim=128, index_ratio=4, ple_kernel=4, ngram_size=3,
                           ple_layers=[], heads=8, index_heads=4, index_budget=2048, low=320, experts=8, top_k=2,
                           moe_width=512, shared_width=512, heads_per_ngram=8, ple_dim=512, eos=(0,))
-    weights = SimpleNamespace(cfg=cfg, device="cpu", layers=[SimpleNamespace(index=i, linear=i % 2 == 0)
+    weights = SimpleNamespace(cfg=cfg, device="cpu", layers=[SimpleNamespace(index=i, linear=i % 2 == 0,
+                                                             moe=SimpleNamespace(experts=SimpleNamespace(capturable=True)))
                                                              for i in range(4)],
                               mtp=SimpleNamespace(), meta={"world": 1}, head=SimpleNamespace(n=1024), comm=None,
                               draft_ids=None)
@@ -100,8 +120,9 @@ def test_flash_parallel_decoder_allocations_are_budgeted(monkeypatch, allocation
     from tensorfold.cuda.geometry import indexed_prompt_bytes, indexed_stream_geometry, kv_bytes
     workspace = indexed_prompt_bytes(text, prefill_rows)
     dec = multi.MultiDecoder(weights, slots=streams, capacity=slots, depth=depth, keep=keep,
-                             kv_dtype=kv_dtype, prefill_rows=prefill_rows, workspace_bytes=workspace)
+                             kv_dtype=kv_dtype, prefill_rows=prefill_rows, workspace_bytes=workspace, graphs=graphs)
     assert dec.memory_gate.reserve >= workspace
+    assert (dec.solo is not None) is graphs
     one = dec.free[0]
     snapshot = bytes_in([one.rec]) // 2 + bytes_in([one.conv, one.ple_tail])
     first = [t for t in arrays if t.shape[:2] == (multi.FIRST, cfg.kv_heads)]     # K and V: two layers and the MTP's
@@ -109,7 +130,7 @@ def test_flash_parallel_decoder_allocations_are_budgeted(monkeypatch, allocation
     assert bytes_in(first) == streams * 3 * 2 * multi.FIRST * cfg.kv_heads * kv_bytes(cfg.head_dim, bits)
     # one stream grown to the window beside the others' first rows
     used = bytes_in(arrays) - one.cache_bytes(multi.FIRST) + one.cache_bytes(slots) + (min(keep, streams) + 1) * snapshot
-    estimated = indexed_stream_geometry(text, streams, depth + 1, keep, mtp=True, kv_bits=bits,
+    estimated = indexed_stream_geometry(text, streams + int(graphs), depth + 1, keep, mtp=True, kv_bits=bits,
                                         prefill_rows=prefill_rows).bytes_at(slots)
     assert used <= estimated
 

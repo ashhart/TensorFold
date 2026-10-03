@@ -47,7 +47,7 @@ def test_quantized_caches_admit_longer_windows_on_the_same_budget(tmp_path, monk
     calls, capacity = fake_runtime
     text = small_config()
     bf16 = gdn_geometry(text, 1, 4, indexed=True, mtp=True, kept=KEEP_SERIAL + 1) if streams == 1 else \
-        indexed_stream_geometry(text, streams, 4, KEEP, mtp=True)
+        indexed_stream_geometry(text, streams + 1, 4, KEEP, mtp=True)
     budget = bf16.needed(12000) + 32768                      # bf16 fits about 12,000 tokens
     monkeypatch.setattr(capacity, "available_bytes", lambda t: budget)
     windows = {}
@@ -109,6 +109,7 @@ def test_two_ranks_with_different_caches_refuse_to_start(fake_runtime, peer):  #
         obj = FlashNextEngine.__new__(FlashNextEngine)
         obj.depth, obj.confidence, obj.max_len, obj.kv_dtype, obj.comm = 6, 0.3, 8192, kv_dtype, comm
         obj.prefill_rows = 2048                            # constructor-resolved prompt rows must agree too
+        obj.streams, obj.graphs_enabled = 1, True
         return obj
 
     theirs = Comm()
@@ -133,6 +134,7 @@ def test_two_ranks_with_different_prompt_precision_refuse_to_start(fake_runtime)
         obj = FlashNextEngine.__new__(FlashNextEngine)
         obj.depth, obj.confidence, obj.max_len, obj.kv_dtype, obj.comm = 6, 0.3, 8192, "bf16", comm
         obj.prefill_rows = 2048                            # isolate the precision mismatch, not a missing setting
+        obj.streams, obj.graphs_enabled = 1, True
         return obj
 
     theirs = Comm()
