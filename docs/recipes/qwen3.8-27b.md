@@ -229,6 +229,47 @@ serial, resumed against fresh, by `token_sha`) matched on 8 of 8 short-prompt ce
 tokens with a real resume, and replays after a restart matched too. A conversation grown by 6,144 tokens a turn
 to the 140,288 window kept swap at 653 to 656 MB, with a 43.57 GiB peak footprint.
 
+### A 48 GB M4 Pro on 0.6.2 (emulated memory classes and the tuned default)
+
+Measured on a 48 GB Apple M4 Pro (10P/4E cores, no tensor units, macOS 27.0, AC power) to fill the 32, 36 and
+48 GB rows of the README's memory-class table. The 32 and 36 GB cells are emulated budgets on this host
+(`TENSORFOLD_MEMORY_LIMIT_GB` at the class ceiling); the 48 GB cell is the machine's own default budget, plus
+its raised-budget variant. Weights were 16.3 GiB resident (11.8 GiB for oQ2, 15.1 GiB with `--drafter none`);
+startup reported a stream at 166 MB for 64 tokens, 391 MB at 2,112, then 64.0 KB a token, and a shared round up
+to 2.75 GiB at 8 streams.
+
+| | |
+| --- | --- |
+| Machine | Apple M4 Pro, 48 GB, macOS 27.0, on AC power; no thermal limit recorded during any run |
+| Runtime | TensorFold 0.6.2 (`56e2e3e`, from the tag), Python 3.12.13, mlx and mlx-metal 0.32.3 |
+| Checkpoints | `Vontra/Qwen3.8-27B-MLX-4bit@22d8d538`, `z-lab/Qwen3.8-27B-DFlash2@50307d4c`, `Vontra/Qwen3.8-27B-oQ2@086dcb02` |
+| Launch | `tensorfold serve <model> --name bench --context 0`, `TENSORFOLD_MEMORY_LIMIT_GB` where named |
+| Peak memory | `phys_footprint_peak` from `footprint(1)` sampled at 2 s with `vm_stat` and `pmset -g therm` |
+
+| Budget | Configuration | Fitted capacity | Peak footprint |
+| --- | --- | --- | --- |
+| 22.4 GiB (32 GB class) | Qwen3.8-27B + DFlash2 | Refused at startup: model and one prompt chunk need about 21.0 GiB against 19.4 GiB for MLX; 0 streams of 8,192 fit | not reached |
+| 25.2 GiB (36 GB class) | Qwen3.8-27B + DFlash2 | 6,912 tokens retained; 1 stream of 8,192 fits | 26 GiB (host has more RAM than the class) |
+| 25.2 GiB (36 GB class) | Qwen3.8-27B, `--drafter none` | 17,920 tokens retained; 3 streams of 8,192 fit | not measured separately |
+| 33.6 GiB (48 GB default) | Qwen3.8-27B + DFlash2 | 11 streams of 8,192 fit | 26 GiB |
+| 37.4 GiB (48 GB raised) | Qwen3.8-27B + DFlash2 | 92,672 tokens retained; 15 streams of 8,192 fit | 26 GiB |
+
+Decode medians from the [public benchmark command](README.md#measurements) at the 48 GB default budget, in
+tok/s for code sampled, chat sampled, code greedy and chat greedy: 43.5, 31.5, 43.4 and 33.2 with DFlash2;
+at 256-token replies the code cells rise to 53.0 sampled and 47.8 greedy. Per-round telemetry: 4.0 tokens a
+round at 91 ms, 47 of 109 drafts accepted, 7.8 rows a forward. `tools/bench_concurrent.py --alone --serial`
+at 1, 2, 4 and 8 streams (128-token replies) found every concurrent reply equal to its solo run and every
+solo run equal to serial; aggregate code-sampled throughput was 42.0, 53.2, 60.4 and 61.5 tok/s
+(steady-state 62.8, 69.4 and 72.0 at 2, 4 and 8). No swap activity fell inside any benchmark window and
+`pmset -g therm` reported no CPU or IO speed limit.
+
+oQ2 (2-bit) on this host decoded at 16.4-19.7 tok/s with 2.9 rows a round and 31 of 60 drafts accepted:
+without tensor units the 2-bit pack runs the general packed row decoder and drafting acceptance collapses,
+a 2.4x regression against the 4-bit checkpoint that inverts the oQ2 speedups the 64 GB M5 Pro row records.
+A 3-bit mixed-width oQ checkpoint (`Toomanydatsuns/Qwen3.8-27B-oQ3.5e-fp16-mtp@75c55831`) failed at startup
+with an MLX kernel-build error (`thread bfloat` from `const device float16_t` in the row decoder's JIT), so
+no 3-bit cell is reported.
+
 ## Calibration and checks
 
 The draft calibration metadata names public prompts. When regenerating it, start its server with

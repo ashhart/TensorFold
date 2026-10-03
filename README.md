@@ -205,9 +205,9 @@ prompt fixture, checkpoint revision, runtime, command and measurement output acc
 
 | Nominal RAM class | Budget ceiling | Qwen3.8-27B + DFlash2 | Qwen3.8-27B, `--drafter none` | Nemotron 3.5 Lightning | Qwen3.8 Flash Next |
 | --- | --- | --- | --- | --- | --- |
-| 32 GB | 22.4 GiB | TBD | TBD | TBD | TBD |
-| 36 GB | 25.2 GiB | TBD | TBD | TBD | TBD |
-| 48 GB | 33.6 GiB | TBD | TBD | TBD | TBD |
+| 32 GB | 22.4 GiB | Refused at startup: weights plus one prompt chunk need about 21.0 GiB against 19.4 GiB for MLX (0.6.2) | Refused at startup, same estimate (0.6.2) | TBD | TBD |
+| 36 GB | 25.2 GiB | 6,912 tokens, 1 stream of 8,192 (0.6.2) | 17,920 tokens, 3 streams of 8,192 (0.6.2) | TBD | TBD |
+| 48 GB | 33.6 GiB | 33.6 GiB default: 11 streams of 8,192; 37.4 GiB raised: 92,672 tokens retained, 15 streams of 8,192, 26 GiB peak (0.6.2) | TBD | TBD | Not run: weights (75.6 GiB resident) exceed the budget; `--ssd-experts 40` still needs 45.3 GiB (0.6.2) |
 | 64 GB | 44.8 GiB | 140,288 tokens, 43.7 GiB (0.3.5.1) | 152,576 tokens, 39.9 GiB (0.3.5.1) | 262,144 tokens, 42.2 GiB (0.3.5.1) | Not run: 4-bit weights exceed the budget |
 | 96 GB | 67.2 GiB | TBD | TBD | TBD | TBD |
 | 128 GB | 89.6 GiB | TBD | TBD | TBD | TBD |
