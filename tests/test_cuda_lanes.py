@@ -319,10 +319,31 @@ def test_admission_waits_while_memory_is_short():
             return "memory is short"
 
     pair = Pair(lanes=2, admission=Short())
-    a, b = stream(prompts(1)[0], 5), stream(prompts(2)[1], 5)
-    pair.decoder.admit(a)  # alone: admitted (nothing would free memory)
-    with pytest.raises(NoRoom, match="memory is short"):
-        pair.decoder.admit(b)
+    with pytest.raises(ValueError, match="cannot fit even alone: memory is short"):  # nothing would free memory
+        pair.decoder.admit(stream(prompts(1)[0], 5))
+    assert pair.decoder.free == [0, 1] and pair.follower.lanes == [None, None]
+
+
+def test_with_nothing_live_host_kept_states_go_before_a_request_is_refused():
+    from tensorfold.cuda.sessions import HostTier
+
+    host = [HostTier(1 << 20), HostTier(1 << 20)]
+
+    class HostBound:
+        def fits(self, need):
+            return host[0].used == 0
+
+        def why(self, need):
+            return "host states hold the memory"
+
+    pair = Pair(lanes=1, keep=0, tiers=[[host[0]], [host[1]]])
+    pair.run([stream(prompts(1)[0], 4)])  # keep 0: its prompt state goes to the host tier
+    before = host[0].keys()
+    assert before
+    pair.decoder.admission = HostBound()
+    s = stream(prompts(2)[1], 4)
+    assert pair.run([s]) == [serial(s.prompt, 4)]
+    assert not set(before) & set(host[0].keys())  # the old states went so the request could start
 
 
 def unified(free):
@@ -334,7 +355,10 @@ def test_a_request_waits_until_memory_covers_what_it_allocates():
     pair = Pair(lanes=2, keep=0, admission=unified(free))
     pair.decoder.forward.request_bytes = lambda prompt_len, max_new: asked.append((prompt_len, max_new)) or 4096
     a, b = stream(prompts(1)[0], 5), stream(prompts(2)[1], 5)
-    pair.decoder.admit(a)  # alone: admitted under the floor
+    with pytest.raises(ValueError, match="cannot fit even alone"):
+        pair.decoder.admit(a)  # alone and under the floor: refused, not started
+    free[0] = 2 * GIB
+    pair.decoder.admit(a)
     free[0] = GIB + 4096 - 1  # above the floor, one byte short
     with pytest.raises(NoRoom, match="under the 1.00 GiB floor"):
         pair.decoder.admit(b)

@@ -139,9 +139,12 @@ class LaneDecoder:
         cached, tier = hit if hit is not None else (0, -1)
         quota = self._quota(n + s.count + self.slack)
         need = self._need(n, s.count)
-        # with nothing live it starts: no stream would finish to free memory, so waiting could only fail it
-        if self.admission is not None and self.live() and not self.admission.fits(need):
-            raise NoRoom(self.admission.why(need))
+        if self.admission is not None and not self.admission.fits(need):
+            if self.live():
+                raise NoRoom(self.admission.why(need))
+            # nothing live would free memory: drop host-kept states (the same memory on a unified GPU), then refuse
+            if not self._trim_host(need):
+                raise ValueError(f"the request cannot fit even alone: {self.admission.why(need)}")
         held = None
         if tier >= 0:  # read and checked here, before any rank is told to resume
             try:
@@ -171,6 +174,15 @@ class LaneDecoder:
         save = point if self.cache is not None and point > cached else None
         self.plans[s.sid] = Plan(s, lane, cached, save)
         self.filling.append(s)
+
+    def _trim_host(self, need: int) -> bool:
+        """Host-tier entries out, least recently used first, until the request fits; whether it does."""
+
+        for tier in self.cache.tiers if self.cache is not None else ():
+            entries = getattr(tier, "entries", None)
+            while entries and not self.admission.fits(need):
+                tier.drop(next(iter(entries)))
+        return self.admission.fits(need)
 
     def _quota(self, tokens: int) -> int:
         """The pages a lane of ``tokens`` positions reserves; 0 without a pool."""
