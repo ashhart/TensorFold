@@ -122,6 +122,26 @@ def test_attention_matches_torch_reference():
         assert (out[node].float() - ref.float()).abs().max() < 0.035
 
 
+@pytest.mark.parametrize("p,w", [(p, 3) for p in (0, 1, 62, 63, 64, 65, 447, 448, 509, 510, 511, 512, 513)]
+                         + [(p, 128) for p in (384, 447, 511, 512, 513)])
+def test_each_row_reaches_its_own_key_at_tile_edges(p, w):
+    """``_tail`` stops at the tile holding a row's last key (its own, at p + depth - 1). With each row's own key set to
+    dominate its scores, rows of a chain ending just before, at and after a 64-key tile's edge, and paths of up to 128
+    keys crossing into the next chunk, match the torch reference."""
+
+    q, kn, vn, kc, vc = _inputs(w, p)
+    kn = (4 * q.view(w, 4, 6, 256).float().mean(2)).bfloat16().contiguous()
+    parents = list(range(-1, w - 1))
+    out = _attend(q, kn, vn, [(kc, vc)], [parents], [p], 1 / 16)
+    for node in range(w):
+        rows = _path(parents, node)
+        keys = torch.cat((kc[:p], kn[rows]), 0).float().repeat_interleave(6, 1)
+        values = torch.cat((vc[:p], vn[rows]), 0).float().repeat_interleave(6, 1)
+        scores = torch.einsum("hd,thd->ht", q[node].float(), keys) / 16
+        ref = torch.einsum("ht,thd->hd", scores.softmax(-1), values).bfloat16()
+        assert (out[node].float() - ref.float()).abs().max() < 0.035, f"node {node}"
+
+
 @pytest.mark.parametrize("w,p,context", [(1, 0, 4096), (4, 1300, 4096), (3, 2047, 2048), (4, 4000, 8192),
                                          (16, 6100, 8192), (128, 8100, 16384), (2, 10240, 12288)])
 def test_a_padded_plan_gives_the_exact_plans_bits(w, p, context):

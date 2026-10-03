@@ -140,7 +140,10 @@ def _tail(Q, KN, VN, KC, VC, OFF, STREAM, ROWS, PATHS, DEPTHS, PO, PM, PL, W, H:
         l = tl.zeros((16,), tl.float32)
         o = tl.zeros((16, D), tl.float32)
         key = chunk * CH + tl.arange(0, 64)
-        for t in range(CH // 64):
+        # a tile past the one holding the row's last key (p + depth - 1) has none of the row's keys: it would leave m and
+        # l as they are and add zero to o, so the loop stops there (at once in a chunk the row's path does not reach)
+        tiles = tl.minimum(tl.maximum((p + depth - chunk * CH + 63) // 64, 0), CH // 64)
+        for t in range(tiles):
             logical = key + t * 64
             committed = logical < p
             path_slot = logical - p
