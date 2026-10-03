@@ -11,7 +11,7 @@ pytest.importorskip("mlx_lm.models.gemma4_text")
 if not mx.metal.is_available():
     pytest.skip("the Gemma decode kernels are Metal kernels", allow_module_level=True)
 
-from gemma4_tiny import TINY, KnownReply, tiny_text, tokens  # noqa: E402
+from gemma4_tiny import KINDS, TINY, KnownReply, tiny_text, tokens  # noqa: E402
 from tensorfold.engine.exact_sampling import Sampling  # noqa: E402
 from tensorfold.engine.lane_engine import LaneEngine, LaneStream  # noqa: E402
 from tensorfold.families.gemma4.model import Gemma4  # noqa: E402
@@ -21,9 +21,11 @@ BACKENDS = ["rows", pytest.param("lane", marks=pytest.mark.skipif(not tensor_uni
 copy = LaneEngine.copy_single_cache
 
 
-@pytest.fixture(scope="module")
-def text():
-    return tiny_text()
+@pytest.fixture(scope="module", params=KINDS)
+def text(request):
+    """Every layout and quantization the family serves: each test runs on the MoE and dense models, uniform and oQ."""
+
+    return tiny_text(kind=request.param)
 
 
 def family(text, backend: str, width: int = 16) -> Gemma4:
@@ -225,17 +227,61 @@ def test_check_refuses_the_layouts_the_kernels_do_not_cover(tmp_path):
     from tensorfold import families
     from tensorfold.families import gemma4
 
+    def write(config):
+        (tmp_path / "config.json").write_text(json.dumps(config))
+
     config = {"model_type": "gemma4", "text_config": dict(TINY, model_type="gemma4_text"),
               "quantization": {"group_size": 64, "bits": 4, "mode": "affine",
                                "language_model.model.layers.0.router.proj": {"group_size": 64, "bits": 8}}}
-    (tmp_path / "config.json").write_text(json.dumps(config))
+    write(config)
     assert families.detect(tmp_path).module == "tensorfold.families.gemma4"
     gemma4.check(tmp_path)
-    for change in ({"enable_moe_block": False}, {"hidden_size_per_layer_input": 256}, {"num_kv_shared_layers": 2}):
-        (tmp_path / "config.json").write_text(json.dumps(dict(config, text_config={**config["text_config"],
-                                                                                    **change})))
-        with pytest.raises(ValueError, match="MoE checkpoints"):
+    for change in ({"hidden_size_per_layer_input": 256}, {"num_kv_shared_layers": 2}, {"head_dim": 96},
+                   {"use_double_wide_mlp": True}):
+        write(dict(config, text_config={**config["text_config"], **change}))
+        with pytest.raises(ValueError, match="lacks"):
             gemma4.check(tmp_path)
-    (tmp_path / "config.json").write_text(json.dumps(dict(config, quantization={"group_size": 64, "bits": 8})))
-    with pytest.raises(ValueError, match="4-bit"):
+    # the dense layout (31B), uniform 8-bit as oQ8 writes it
+    dense = dict(config, text_config={**config["text_config"], "enable_moe_block": False},
+                 quantization={"group_size": 64, "bits": 8, "mode": "affine"})
+    write(dense)
+    gemma4.check(tmp_path)
+    # oQ's per-layer overrides: any affine width the projections read, experts left at 4 bits
+    oq = {"group_size": 64, "bits": 4, "mode": "affine",
+          "language_model.model.embed_tokens": {"group_size": 64, "bits": 8, "mode": "affine"},
+          "language_model.model.layers.3.mlp.down_proj": {"group_size": 64, "bits": 5, "mode": "affine"},
+          "language_model.model.layers.1.self_attn.k_proj": {"group_size": 128, "bits": 6, "mode": "affine"},
+          "language_model.model.layers.2.router.proj": {"group_size": 32, "bits": 3, "mode": "affine"},
+          "vision_tower.encoder.layers.0.mlp.down_proj": {"group_size": 16, "bits": 4, "mode": "nvfp4"}}
+    write(dict(config, quantization=oq))
+    gemma4.check(tmp_path)
+    refused = [
+        ({"group_size": 64, "bits": 8}, "experts are 8-bit"),                         # MoE at uniform 8 bits
+        ({**oq, "language_model.model.layers.0.experts.switch_glu.up_proj": {"group_size": 64, "bits": 6}},
+         "expert kernels read 4-bit"),
+        ({**oq, "language_model.model.layers.0.mlp.up_proj": {"group_size": 64, "bits": 7}}, "7-bit"),
+        ({**oq, "language_model.model.layers.0.mlp.up_proj": {"group_size": 16, "bits": 4}}, "groups of 16"),
+        ({**oq, "language_model.model.layers.0.mlp.up_proj": {"group_size": 32, "bits": 4, "mode": "mxfp4"}},
+         "mxfp4"),
+        ({"group_size": 32, "bits": 4, "mode": "mxfp4"}, "MLX affine"),
+    ]
+    for quant, why in refused:
+        write(dict(config, quantization=quant))
+        with pytest.raises(ValueError, match=why):
+            gemma4.check(tmp_path)
+    write({k: v for k, v in config.items() if k != "quantization"})
+    with pytest.raises(ValueError, match="unquantized"):
         gemma4.check(tmp_path)
+
+
+def test_load_drops_the_mtp_assistant_some_oq_packs_bundle():
+    from mlx.utils import tree_flatten
+
+    from tensorfold.families.gemma4.model import without_mtp
+
+    text = tiny_text()
+    weights = dict(tree_flatten(text.parameters()))
+    bundled = {"mtp.model.norm.weight": mx.ones((4,)), "language_model.mtp.pre_projection.weight": mx.ones((4, 4))}
+    kept = without_mtp(lambda self, w: w)(text, {**weights, **bundled})
+    assert kept.keys() == weights.keys()
+    text.load_weights(list(kept.items()), strict=True)

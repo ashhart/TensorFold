@@ -309,11 +309,26 @@ def realize(model: Any) -> None:
     mx.eval([v for _, module in model.named_modules() for v in module.values() if isinstance(v, mx.array)])
 
 
+def without_mtp(sanitize: Any) -> Any:
+    """``sanitize`` minus the MTP assistant tensors some oQ packs bundle (this family drafts with ``--drafter``)."""
+
+    def run(self: Any, weights: dict[str, Any]) -> Any:
+        return sanitize(self, {k: v for k, v in weights.items() if "mtp" not in k.split(".")[:2]})
+
+    return run
+
+
 def load(model_dir: Path, *, backend: str | None = None, check: bool = True, drafter: str = "",
          drafter_bits: int = 8) -> tuple[Gemma4, Any]:
     from mlx_lm import load as mlx_load
+    from mlx_lm.models.gemma4 import Model as Wrapper
 
-    model, tokenizer = mlx_load(str(model_dir))
+    original = Wrapper.sanitize
+    Wrapper.sanitize = without_mtp(original)  # type: ignore[method-assign]
+    try:
+        model, tokenizer = mlx_load(str(model_dir))
+    finally:
+        Wrapper.sanitize = original  # type: ignore[method-assign]
     realize(model)                     # before a draft model wraps the tapped layers
     draft = None
     if drafter:

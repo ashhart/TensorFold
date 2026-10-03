@@ -195,6 +195,44 @@ _MOE_TAIL = r"""
 """.replace("REDUCE1", _reduce("ss1", "p1", "total1")).replace("REDUCE2", _reduce("ss2", "p2", "total2")) \
    .replace("REDUCE3", _reduce("ss3", "p3", "total3")).replace("REDUCE4", _reduce("ss4", "p4", "total4"))
 
+# a dense layer's tail: moe_tail's arithmetic with the MLP output in place of the joined branches
+_DENSE_TAIL = r"""
+  const uint t = thread_position_in_threadgroup.x;
+  const uint r = threadgroup_position_in_grid.x;
+  constexpr int PER = D / T;
+  threadgroup float p1[T / 32], p2[T / 32];
+  float yv[PER], hin[PER], wp[PER], wn[PER];
+  for (int i = 0; i < PER; i++) {
+    const int c = int(t) + i * T;
+    yv[i] = float(Y[int(r) * D + c]); hin[i] = float(H[int(r) * D + c]);
+    wp[i] = float(WP[c]); wn[i] = float(WN[c]);
+  }
+  const float sc = float(SC[0]);
+  float ss1 = 0.0f;
+  for (int i = 0; i < PER; i++) ss1 = fma(yv[i], yv[i], ss1);
+  float total1;
+  REDUCE1
+  const float inv1 = metal::precise::rsqrt(total1 / float(D) + eps[0]);
+  float hv[PER];
+  float ss2 = 0.0f;
+  for (int i = 0; i < PER; i++) {
+    const int c = int(t) + i * T;
+    const float b = float(bfloat(wp[i] * float(bfloat(yv[i] * inv1))));
+    const bfloat hs = bfloat(hin[i] + b);
+    const bfloat hn = bfloat(float(hs) * sc);
+    HN[int(r) * D + c] = hn;
+    hv[i] = float(hn);
+    ss2 = fma(hv[i], hv[i], ss2);
+  }
+  float total2;
+  REDUCE2
+  const float inv2 = metal::precise::rsqrt(total2 / float(D) + eps[0]);
+  for (int i = 0; i < PER; i++) {
+    const int c = int(t) + i * T;
+    NEXT[int(r) * D + c] = bfloat(wn[i] * float(bfloat(hv[i] * inv2)));
+  }
+""".replace("REDUCE1", _reduce("ss1", "p1", "total1")).replace("REDUCE2", _reduce("ss2", "p2", "total2"))
+
 _prep = Kernel("gemma_qkv_prep", _QKV_PREP, ["QKV", "QW", "KW", "INVF", "POS", "eps"], ["Q", "K", "V"])
 # up to 32 simdgroups a threadgroup: the pipeline reserves them on every GPU (M1/M2 and VMs take fewer otherwise)
 _rows = Kernel("gemma_qkv_rows", _QKV_ROWS, ["X", "W", "S", "B", "QW", "KW", "INVF", "POS", "eps"], ["Q", "K", "V"],
@@ -202,6 +240,7 @@ _rows = Kernel("gemma_qkv_rows", _QKV_ROWS, ["X", "W", "S", "B", "QW", "KW", "IN
 _attn_tail = Kernel("gemma_attn_tail", _ATTN_TAIL, ["H", "O", "WA", "W1", "W2", "W3", "eps"], ["HN", "N1", "N2", "N3"])
 _moe_tail = Kernel("gemma_moe_tail", _MOE_TAIL, ["H", "Y1", "Y2", "W1", "W2", "WP", "SC", "WN", "eps"],
                    ["HN", "NEXT"])
+_dense_tail = Kernel("gemma_dense_tail", _DENSE_TAIL, ["H", "Y", "WP", "SC", "WN", "eps"], ["HN", "NEXT"])
 
 
 def threads(dims: int) -> int:
@@ -264,4 +303,15 @@ def moe_tail(h: mx.array, y1: mx.array, y2: mx.array, w1: mx.array, w2: mx.array
                      output_shapes=[(rows, dims), (rows, dims)], output_dtypes=[mx.bfloat16, mx.bfloat16])
 
 
-__all__ = ["attn_tail", "moe_tail", "qkv_prep", "qkv_rows", "threads"]
+def dense_tail(h: mx.array, y: mx.array, w_post: mx.array, scalar: mx.array, w_next: mx.array,
+               eps: mx.array) -> tuple[mx.array, mx.array]:
+    """hn = (h + RMSNorm(y) w_post) * scalar and RMSNorm(hn) * w_next: [R, D] bf16 (a dense layer's end)."""
+
+    rows, dims = h.shape
+    count = threads(dims)
+    return _dense_tail((("D", dims), ("T", count)), inputs=[h, y, w_post, scalar, w_next, eps],
+                       grid=(count * rows, 1, 1), threadgroup=(count, 1, 1),
+                       output_shapes=[(rows, dims), (rows, dims)], output_dtypes=[mx.bfloat16, mx.bfloat16])
+
+
+__all__ = ["attn_tail", "dense_tail", "moe_tail", "qkv_prep", "qkv_rows", "threads"]

@@ -1,4 +1,4 @@
-"""A tiny random Gemma 4 MoE model in the checkpoint's layout, and a proposer that drafts a known reply."""
+"""Tiny random Gemma 4 models (MoE and dense, uniform and oQ-mixed widths) and a proposer that drafts a known reply."""
 
 from __future__ import annotations
 
@@ -17,19 +17,46 @@ TINY = {
 }
 
 
-def tiny_text(seed: int = 0) -> Any:
-    """mlx_lm's gemma4_text on random weights, quantized as mlx_lm quantizes Gemma 4 (router at 8 bits)."""
+# the dense layout (31B): no router or experts, one GeGLU MLP a layer
+TINY_DENSE = {k: v for k, v in TINY.items() if k not in ("num_experts", "top_k_experts", "moe_intermediate_size")}
+TINY_DENSE.update(enable_moe_block=False, intermediate_size=512)
+
+# the kinds of checkpoint the family serves: a layout and a quantization (oQ's per-layer mixed widths or uniform)
+KINDS = ("moe", "dense", "moe-oq", "dense-oq")
+
+
+def oq_widths(path: str, _: Any = None) -> dict[str, int] | bool:
+    """An oQ-like layout on the tiny model: projections at 2..8 bits in groups of 32, 64 or 128, experts 4-bit."""
+
+    if ".experts." in path or "switch_glu" in path:
+        return True
+    layer = int(path.split("layers.")[1].split(".")[0]) if "layers." in path else -1
+    table = {"embed_tokens": (8, 64), "q_proj": (5, 64), "k_proj": (6, 32), "v_proj": (4, 128), "o_proj": (8, 64),
+             "gate_proj": (3, 64), "up_proj": (4, 32), "down_proj": (6, 128), "router.proj": (6, 64)}
+    for name, (bits, group) in table.items():
+        if path.endswith(name):
+            if layer % 2 and name in ("q_proj", "gate_proj", "router.proj"):      # mixed between layers too
+                bits, group = {"q_proj": (4, 64), "gate_proj": (2, 64), "router.proj": (8, 64)}[name]
+            return {"bits": bits, "group_size": group}
+    return True
+
+
+def tiny_text(seed: int = 0, kind: str = "moe") -> Any:
+    """mlx_lm's gemma4_text on random weights: "moe" as mlx_lm quantizes it, "dense" uniform 8-bit, "-oq" mixed."""
 
     import mlx.core as mx
     import mlx.nn as nn
     from mlx_lm.models import gemma4_text
 
     mx.random.seed(seed)
-    text = gemma4_text.Model(gemma4_text.ModelArgs.from_dict(TINY))
-    nn.quantize(text, group_size=64, bits=4,
-                class_predicate=lambda path, m: hasattr(m, "to_quantized") and text.quant_predicate(path, m))
+    dense = kind.startswith("dense")
+    text = gemma4_text.Model(gemma4_text.ModelArgs.from_dict(TINY_DENSE if dense else TINY))
+    predicate = oq_widths if kind.endswith("-oq") else text.quant_predicate
+    nn.quantize(text, group_size=64, bits=8 if kind == "dense" else 4,
+                class_predicate=lambda path, m: hasattr(m, "to_quantized") and predicate(path, m))
     for layer in text.model.layers:
-        layer.router.per_expert_scale = (mx.random.uniform(shape=(TINY["num_experts"],)) + 0.5).astype(mx.bfloat16)
+        if not dense:
+            layer.router.per_expert_scale = (mx.random.uniform(shape=(TINY["num_experts"],)) + 0.5).astype(mx.bfloat16)
         layer.layer_scalar = mx.array([0.8], dtype=mx.bfloat16)
     text.set_dtype(mx.bfloat16)
     mx.eval(text.parameters())

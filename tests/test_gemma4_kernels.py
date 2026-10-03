@@ -12,10 +12,11 @@ gemma4_text = pytest.importorskip("mlx_lm.models.gemma4_text")
 if not mx.metal.is_available():
     pytest.skip("the Gemma decode kernels are Metal kernels", allow_module_level=True)
 
-from gemma4_tiny import TINY, tiny_text  # noqa: E402
+from gemma4_tiny import TINY, TINY_DENSE, tiny_text  # noqa: E402
 from kernel_signatures import changed, recording  # noqa: E402
 from tensorfold.kernels.gemma.v1 import attention, glue, moe  # noqa: E402
 from tensorfold.kernels.gemma.v1.decode import RowDecode, inverse_frequencies  # noqa: E402
+from tensorfold.kernels.gemma.v1.matmul import Projection, tensor_units  # noqa: E402
 from tensorfold.kernels.inputs import ints  # noqa: E402
 
 EPS = mx.array([1e-6], dtype=mx.float32)
@@ -182,19 +183,22 @@ def test_attention_is_softmax_over_each_rows_keys_and_rows_are_independent(dims,
         assert bool(mx.array_equal(alone[0], out[r]).item()), r
 
 
-def test_each_kernel_keeps_one_metal_signature_at_every_row_count(monkeypatch):
+@pytest.mark.parametrize("kind", ["moe", "dense-oq"])
+def test_each_kernel_keeps_one_metal_signature_at_every_row_count(monkeypatch, kind):
     """MLX 0.31 recompiles a kernel whose input crosses 8 elements, which can drop a queued dispatch (mlx#3662)."""
 
     from tensorfold.families.gemma4.cache import make_cache
     from tensorfold.kernels.gemma.v1.base import Kernel
     from tensorfold.kernels.nemotron.lightning.v1 import rows
+    from tensorfold.kernels.qwen.dense.v1 import affine_rows
 
+    monkeypatch.setattr(affine_rows, "_kernels", {})
     for module in (attention, glue, moe):             # kernels built earlier would not pass the recorder
         for value in vars(module).values():
             if isinstance(value, Kernel):
                 monkeypatch.setattr(value, "compiled", {})
     monkeypatch.setattr(rows, "_kernels", {})
-    text = tiny_text()
+    text = tiny_text(kind=kind)
     decode = RowDecode(text, "rows")
     with recording() as seen:
         for rows in (1, 2, 3, 5, 8, 9, 13):
@@ -230,3 +234,70 @@ def test_each_fused_layer_is_mlx_lm_s_layer(seed):
                                                                   ids[:top][None], weights[:top][None]))
         want = (ha + layer.post_feedforward_layernorm(dense + routed)) * layer.layer_scalar
         assert close(got, want, rel=0.02), i
+
+
+BACKENDS = ["rows", pytest.param("lane", marks=pytest.mark.skipif(not tensor_units(), reason="needs tensor units"))]
+
+
+def _linear(n_in, n_out, bits, group, seed):
+    lin = nn.QuantizedLinear(n_in, n_out, bias=False, group_size=group, bits=bits)
+    w = bf((n_out, n_in), seed, scale=0.05)
+    lin.weight, s, b = mx.quantize(w, group_size=group, bits=bits)
+    lin.scales, lin.biases = s.astype(mx.bfloat16), b.astype(mx.bfloat16)
+    return lin
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_a_stack_of_mixed_widths_is_each_linear_and_every_row_is_its_own(backend):
+    """oQ's overrides give q, k and v different widths and groups: one matmul a run, joined, each row's bits fixed."""
+
+    specs = [(5, 64), (5, 64), (6, 32), (4, 128), (8, 64), (3, 64), (2, 64), (4, 64), (4, 32)]
+    linears = [_linear(512, 64 * (i % 3 + 1), bits, group, seed=i) for i, (bits, group) in enumerate(specs)]
+    proj = Projection(linears, backend)
+    assert len(proj.runs) == 8 and proj.n == sum(int(l.weight.shape[0]) for l in linears)
+    x = bf((13, 512), 50)
+    y = proj(x)
+    want = mx.concatenate([l(x) for l in linears], axis=-1)
+    assert close(y, want, rel=0.02)
+    for at in (0, 5, 12):
+        one = proj(x[at:at + 1])
+        assert bool(mx.array_equal(one[0], y[at]).item()), at
+    parts = proj.split(y)
+    assert [int(p.shape[-1]) for p in parts] == [int(l.weight.shape[0]) for l in linears]
+
+
+def test_a_width_no_kernel_reads_is_refused():
+    for bits, group, mode in ((7, 64, "affine"), (4, 16, "affine"), (4, 32, "mxfp4")):
+        lin = _linear(512, 64, 4, 64, seed=1)
+        lin.bits, lin.group_size, lin.mode = bits, group, mode
+        with pytest.raises(ValueError, match="groups of"):
+            Projection([lin], "rows")
+
+
+@pytest.mark.parametrize("kind", ["dense", "dense-oq"])
+def test_each_fused_dense_layer_is_mlx_lm_s_layer(kind):
+    """The 31B layout: attention tail, GeGLU MLP and dense tail are mlx_lm's dense layer to bf16 rounding."""
+
+    text = tiny_text(kind=kind)
+    decode = RowDecode(text, "rows")
+    mx.random.seed(7)
+    for i, layer in enumerate(text.model.layers):
+        attn = layer.self_attn
+        h = (mx.random.normal((3, TINY_DENSE["hidden_size"])) * 2).astype(mx.bfloat16)
+        out = mx.random.normal((3, attn.n_heads * attn.head_dim)).astype(mx.bfloat16)
+        got, normed = decode._back(i)(out, h)
+        ha = h + layer.post_attention_layernorm(attn.o_proj(out))
+        want = (ha + layer.post_feedforward_layernorm(layer.mlp(layer.pre_feedforward_layernorm(ha)))) \
+            * layer.layer_scalar
+        assert close(got, want, rel=0.02), i
+        nxt = (text.model.layers[i + 1].input_layernorm if i + 1 < len(text.model.layers) else text.model.norm)
+        assert close(normed, nxt(got), rel=0.02), i
+
+
+def test_dense_tail_is_the_post_norm_residual_scalar_and_next_norm():
+    d = 512
+    h, y, wp, wn = bf((3, d), 1), bf((3, d), 2, scale=3), bf((d,), 3, shift=1), bf((d,), 4, shift=1)
+    scalar = mx.array([0.7], dtype=mx.bfloat16)
+    hn, nxt = glue.dense_tail(h, y, wp, scalar, wn, EPS)
+    want = (h + rms(y, wp)) * scalar
+    assert close(hn, want) and close(nxt, rms(hn, wn))

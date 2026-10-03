@@ -1,4 +1,4 @@
-"""Gemma 4 (model_type ``gemma4`` or text-only ``gemma4_text``): the MoE checkpoints, on the lane engine."""
+"""Gemma 4 (``gemma4`` or text-only ``gemma4_text``): MoE and dense checkpoints, uniform or oQ widths, on lanes."""
 
 from __future__ import annotations
 
@@ -8,38 +8,76 @@ from typing import Any
 MODEL_TYPES = ("gemma4", "gemma4_text")
 TITLE = "Gemma 4"
 LANES = True
-MODELS = ("mlx-community/gemma-4-26b-a4b-it-4bit",)
+MODELS = ("mlx-community/gemma-4-26b-a4b-it-4bit", "unigilby/gemma-4-26B-A4B-it-qat-oQ4e",
+          "unigilby/gemma-4-31B-it-qat-oQ8e")
 KERNEL_PACKAGE = "tensorfold.kernels.gemma.v1"
 KERNEL_VERSION = "v1"
 # the decode projections run another family's matmul kernels
-KERNEL_DEPENDENCIES = ("tensorfold.kernels.qwen.dense.v1.lane_qmm", "tensorfold.kernels.nemotron.lightning.v1.rows")
+KERNEL_DEPENDENCIES = ("tensorfold.kernels.qwen.dense.v1.lane_qmm", "tensorfold.kernels.qwen.dense.v1.affine_rows",
+                       "tensorfold.kernels.nemotron.lightning.v1.rows")
+
+
+# the widths and groups the decode projections read (kernels.gemma.v1.matmul; listed here so a check needs no MLX)
+PROJECTION_BITS = (2, 3, 4, 5, 6, 8)
+PROJECTION_GROUPS = (32, 64, 128)
+EXPERT_GROUPS = (32, 64, 128)            # the expert kernels read 4-bit weights only
 
 
 def check(model_dir: str | Path) -> None:
-    """Refuse, from config.json alone, a checkpoint the kernels do not read (MoE layout, 4-bit, 8-bit router)."""
+    """Refuse, from config.json alone, a checkpoint the kernels do not read (layout, MLX affine widths and groups)."""
 
-    from tensorfold.families import OWN_MODEL_HELP, describe_quantization, quantization, read_config
+    from tensorfold.families import OWN_MODEL_HELP, read_config
 
     config = read_config(model_dir)
     text = config.get("text_config") or config
     missing = [what for what, ok in (
-        ("a MoE block in every layer", bool(text.get("enable_moe_block"))),
         ("no per-layer inputs", not int(text.get("hidden_size_per_layer_input") or 0)),
         ("no shared-KV layers", not int(text.get("num_kv_shared_layers") or 0)),
         ("head dims a multiple of 64", all(int(text.get(k) or 64) % 64 == 0 for k in ("head_dim", "global_head_dim"))),
+        ("no double-wide MLP", not text.get("use_double_wide_mlp")),
     ) if not ok]
     if missing:
-        raise ValueError(f"TensorFold's Gemma 4 kernels cover the MoE checkpoints ({MODELS[0]}); this one lacks "
-                         + ", ".join(missing) + f". {OWN_MODEL_HELP}")
+        raise ValueError(f"TensorFold's Gemma 4 kernels cover the 26B-A4B MoE and 31B dense layouts ({MODELS[0]}); "
+                         "this one lacks " + ", ".join(missing) + f". {OWN_MODEL_HELP}")
+    why = quantization_refusal(config)
+    if why:
+        raise ValueError(f"Gemma 4's kernels cannot read this checkpoint's weights: {why}. {OWN_MODEL_HELP}")
+
+
+def quantization_refusal(config: dict[str, Any]) -> str:
+    """Why the decode kernels cannot read this config's MLX quantization (oQ's per-layer overrides included), or ''."""
+
+    from tensorfold.families import describe_quantization, layer_quantization, quant_method, quantization
+
+    if quant_method(config) != "mlx":
+        return f"they read MLX affine-quantized weights, this checkpoint has {describe_quantization(config)}"
     bits, group = quantization(config)
-    if bits != 4 or group not in (32, 64):
-        raise ValueError(f"Gemma 4's kernels read MLX 4-bit weights in groups of 32 or 64 ({MODELS[0]}); this "
-                         f"checkpoint has {describe_quantization(config)}. {OWN_MODEL_HELP}")
-    found = config.get("quantization") or config.get("quantization_config") or {}
-    for name, spec in found.items():
-        if isinstance(spec, dict) and not (name.endswith("router.proj") and int(spec.get("bits", 0)) == 8):
-            raise ValueError(f"Gemma 4's kernels read 4-bit projections with an 8-bit router; {name} has "
-                             f"{spec.get('bits')}-bit weights. {OWN_MODEL_HELP}")
+    block = config.get("quantization") or config.get("quantization_config") or {}
+    default_mode = str(block.get("mode") or "affine").lower()
+    text = config.get("text_config") or config
+    moe = bool(text.get("enable_moe_block"))
+    overrides = layer_quantization(config)
+
+    def readable(b: int, g: int, mode: str) -> bool:
+        return mode == "affine" and b in PROJECTION_BITS and g in PROJECTION_GROUPS
+
+    if not readable(int(bits), int(group), default_mode):
+        return (f"the default is {bits}-bit {default_mode} in groups of {group}; the projections read affine "
+                f"{'/'.join(map(str, PROJECTION_BITS))}-bit weights in groups of "
+                f"{'/'.join(map(str, PROJECTION_GROUPS))}")
+    for path, (b, g, mode) in sorted(overrides.items()):
+        if "vision" in path or "audio" in path:               # towers the text decoder never reads
+            continue
+        if not readable(b, g, mode):
+            return f"{path} is {b}-bit {mode} in groups of {g}"
+    if moe:
+        expert = [(p, s) for p, s in overrides.items() if ".experts." in p or "switch_glu" in p or "switch_mlp" in p]
+        if (int(bits) != 4 or int(group) not in EXPERT_GROUPS) and not expert:
+            return f"the experts are {bits}-bit in groups of {group}; the expert kernels read 4-bit weights"
+        for path, (b, g, _) in expert:
+            if b != 4 or g not in EXPERT_GROUPS:
+                return f"{path} is {b}-bit in groups of {g}; the expert kernels read 4-bit weights"
+    return ""
 
 
 def load(model_dir: Path, *, lane_kernels: str = "auto", drafter: str = "", drafter_bits: int = 8,
