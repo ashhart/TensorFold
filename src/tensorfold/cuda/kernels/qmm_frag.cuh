@@ -1,4 +1,4 @@
-// Shared by the 4-bit matmuls: cp.async staging, ldmatrix, the bf16 mma, nibble decoding from B-fragment order.
+// Shared by the 4- and 8-bit matmuls: cp.async staging, ldmatrix, the bf16 mma, decoding from B-fragment order.
 #pragma once
 
 #include <cuda_bf16.h>
@@ -8,15 +8,16 @@
 namespace qmm_frag {
 
 // Lane matmul tile shapes: BM rows by BN columns a block, WM x WN warps, each warp (BM / WM) x (BN / WN).
-template <int GS, int BM, int BN, int WM, int WN, int STAGES>
+template <int GS, int BM, int BN, int WM, int WN, int STAGES, int BITS = 4>
 struct LaneTile {
     static constexpr int THREADS = WM * WN * 32;
     static constexpr int MT = BM / WM / 16;               // m16 tiles a warp
     static constexpr int NT = BN / WN / 8;                // n8 tiles a warp
+    static constexpr int WORDS = GS * BITS / 128;         // a lane's words of one n8 tile a group
     static constexpr int ROW = GS * 2;                    // bytes of one input row a group
     static constexpr int CHUNKS = ROW / 16;
     static constexpr int X = BM * ROW;                    // stage bytes: inputs,
-    static constexpr int W = BN * GS / 2;                 // weights,
+    static constexpr int W = BN * GS * BITS / 8;          // weights,
     static constexpr int S = BN * 2;                      // scales, biases (bf16),
     static constexpr int XS = BM * 4;                     // and input sums (fp32)
     static constexpr int STAGE = X + W + 2 * S + XS;
@@ -88,6 +89,22 @@ __device__ __forceinline__ uint32_t pair(uint32_t w, int s) {
     asm("fma.rn.bf16x2 %0, %1, %2, %3;\n" : "=r"(r) : "r"(t), "r"(0x3F803F80u), "r"(0xC300C300u));
 #endif
     return r;
+}
+
+// 16 * hi + lo for exact bf16 pairs of nibbles: bytes 0-255 rebuilt exactly (bf16 holds every integer to 256).
+__device__ __forceinline__ uint32_t join(uint32_t lo, uint32_t hi) {
+    uint32_t r;
+    asm("fma.rn.bf16x2 %0, %1, %2, %3;\n" : "=r"(r) : "r"(hi), "r"(0x41804180u), "r"(lo));
+    return r;
+}
+
+// B-fragment register h (k rows 2t, 2t + 1, then 2t + 8, 2t + 9) of k16 step kt from a lane's words of an n8 tile.
+// 4 bits: a word holds two steps, nibble slots as ``pair`` reads them; 8 bits: a word a step, bytes at bits 8h and
+// 16 + 8h. ``unpack(w, s)`` is ``pair`` (or ``pairm`` with its mask): every value is exact, so the mma sees q.
+template <int BITS, typename Unpack>
+__device__ __forceinline__ uint32_t frag(const uint32_t* words, int kt, int h, Unpack unpack) {
+    if constexpr (BITS == 8) return join(unpack(words[kt], h * 8), unpack(words[kt], h * 8 + 4));
+    else return unpack(words[kt / 2], (kt & 1) * 8 + h * 4);
 }
 
 // Programmatic dependent launch (sm_90+; no-ops before, and when the launch did not ask for it): wait for the

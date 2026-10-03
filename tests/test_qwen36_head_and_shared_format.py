@@ -1,5 +1,6 @@
-"""Qwen3.6 MoE on CUDA, host side: an 8-bit lm_head keeps its format in the MTP draft head's vocab subset, and a
-shared expert stored in a different format from the routed experts is refused by name."""
+"""Qwen3.6 MoE on CUDA, host side: an 8-bit lm_head keeps its format in the MTP draft head's vocab subset (tiled
+for the lane matmul at its own width), and a shared expert stored in a different format from the routed experts is
+refused by name."""
 
 from types import SimpleNamespace
 
@@ -8,6 +9,7 @@ import pytest
 torch = pytest.importorskip("torch")
 pytest.importorskip("triton")
 
+from tensorfold.families.qwen3_5.cuda.qmm_fast import untile  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.weights import QLinear  # noqa: E402
 from tensorfold.families.qwen3_5_moe.cuda import mtp, weights  # noqa: E402
 
@@ -25,8 +27,9 @@ def test_an_8bit_head_keeps_its_bits_in_the_draft_vocab_subset():
     w = SimpleNamespace(head=full, norm=torch.zeros(1))
     ids = np.array([3, 17, 200, 255])
     head = mtp.Head(w, m=None, ids=ids).head
-    assert (head.bits, head.gs) == (8, 64)
-    assert torch.equal(head.weight, full.weight[ids]) and torch.equal(head.scales, full.scales[ids])
+    assert (head.layout, head.bits, head.gs, head.n) == ("tiled", 8, 64, len(ids))
+    back = untile(head)
+    assert torch.equal(back.weight, full.weight[ids]) and torch.equal(back.scales, full.scales[ids])
 
 
 def _get(experts: int, shared_bits: int):

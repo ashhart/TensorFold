@@ -215,7 +215,7 @@ def row_partial(x: torch.Tensor, q: QLinear, sk: int | None = None,
                 xs: torch.Tensor | None = None) -> torch.Tensor:
     """Row-parallel projection, returning an fp32 (rows, outputs) partial."""
 
-    if not q.fast:
+    if q.layout != "tiled" and not q.fast:
         from tensorfold.cuda.kernels.affine import matmul as affine_matmul
 
         return affine_matmul(x, q, f32=True)

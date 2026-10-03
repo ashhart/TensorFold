@@ -13,7 +13,7 @@ import torch
 
 @dataclass
 class QLinear:
-    weight: torch.Tensor      # original MLX words, or the optimized four-bit tile layout
+    weight: torch.Tensor      # original MLX words, or the lane matmul's tile layout (4 or 8 bits)
     scales: torch.Tensor | None
     biases: torch.Tensor | None
     layout: str = "mlx"       # "mlx" as stored, or "tiled" (``qmm_fast.tile``)
@@ -37,6 +37,13 @@ class QLinear:
     @cached_property
     def fast(self) -> bool:
         return (self.bits, self.gs) == (4, 64) and self.layout != "dense" and all(
+            t.dtype == torch.bfloat16 for t in (self.scales, self.biases))
+
+    @cached_property
+    def lane(self) -> bool:
+        """Tiled for the lane matmul: 4- or 8-bit words in groups of 64 (only ``fast`` 4-bit has prompt kernels)."""
+
+        return self.bits in (4, 8) and self.gs == 64 and self.layout != "dense" and all(
             t.dtype == torch.bfloat16 for t in (self.scales, self.biases))
 
 
@@ -308,7 +315,7 @@ def load(model_dir: str | Path, device: str = "cuda", *, tiled: bool = False, ml
         if tiled and pack:
             from .qmm_fast import tile
 
-            return tile(q)                                 # tile() leaves any format but 4-bit g64 as stored
+            return tile(q)                                 # tile() leaves any format but 4- or 8-bit g64 as stored
         return q
 
     layers = []
