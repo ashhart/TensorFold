@@ -1,4 +1,4 @@
-"""DeepSeek-V4-Flash (model_type ``deepseek_v4``): an MLX engine on a 256 GB Mac."""
+"""DeepSeek-V4-Flash: MLX weights on Mac, or local GGUF weights on native CUDA."""
 
 from __future__ import annotations
 
@@ -12,12 +12,13 @@ LANES = True
 MODELS = ("mlx-community/DeepSeek-V4-Flash-4bit",)
 # DeepSeek's DSpark blocks converted (MIT); TensorFold/DeepSeek-V4-Flash-MTP-MLX holds the MTP layer the same way
 DRAFTER = "TensorFold/DeepSeek-V4-Flash-DSpark-MLX"
+CUDA_DRAFTER = ""  # native CUDA uses a local GGUF declared in config or --drafter
 KERNEL_PACKAGE = "tensorfold.kernels.deepseek.v4"
 KERNEL_VERSION = "v1"
 # the shared GLM-5.3 pieces this engine runs (hyper-connections, row linears), hashed into snapshot keys
 KERNEL_DEPENDENCIES = ("tensorfold.kernels.glm.flash.v1", "tensorfold.families.glm5_next.linear",
                        "tensorfold.families.glm5_next.model")
-QUANT_METHODS = {"mlx": ("mlx",)}
+QUANT_METHODS = {"mlx": ("mlx",), "cuda": ("gguf",)}
 # buffers of 200 ops and 200 MB, so a prompt chunk's memory frees as it runs; no TF32: row kernels repeat fp32
 MLX_ENV = {"MLX_MAX_OPS_PER_BUFFER": "200", "MLX_MAX_MB_PER_BUFFER": "200", "MLX_ENABLE_TF32": "0"}
 LEAST_MLX = (0, 32, 2)
@@ -29,10 +30,14 @@ def check(model_dir: str | Path) -> None:
     import sys
 
     from tensorfold.families import OWN_MODEL_HELP, read_config
+    config = read_config(model_dir)
+    if (config.get("quantization_config") or {}).get("quant_method") == "gguf":
+        if not (config.get("gguf") or {}).get("path"):
+            raise ValueError("DeepSeek GGUF config requires gguf.path")
+        return
     from tensorfold.families.deepseek_v4.config import Config
     from tensorfold.families.deepseek_v4.weights import unreadable
 
-    config = read_config(model_dir)
     Config.from_dict(config)
     bad = unreadable(config)
     if bad:
@@ -96,3 +101,16 @@ def kernel_version(model: Any) -> str:
             digest.update(path.read_bytes())
     digest.update(mx.__version__.encode())
     return f"{MODEL_TYPES[0]}-{KERNEL_VERSION}-" + digest.hexdigest()[:12]
+
+
+def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0,
+                no_drafts: bool = False, **options: Any):
+    from .cuda.engine import DeepSeekEngine
+    return DeepSeekEngine(model_dir, drafter=drafter, tp=tp, rank=rank, no_drafts=no_drafts, **options)
+
+
+def __getattr__(name: str) -> Any:
+    if name == "CUDA_APP":
+        from .cuda.app import DeepSeekApp
+        return DeepSeekApp
+    raise AttributeError(name)

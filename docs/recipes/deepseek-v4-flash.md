@@ -104,6 +104,65 @@ The family keeps the default allowance, 70% of RAM for the whole process (179.2 
 weights resident the admission fits one request of 349,184 tokens; a token costs 6.7 KB of pools after the fixed
 rings. `TENSORFOLD_MEMORY_LIMIT_GB` raises the budget on a machine with nothing else loaded.
 
+## Native CUDA GGUF
+
+The CUDA path reads local DeepSeek-V4-Flash and DSpark GGUFs directly. TensorFold owns the engine,
+attention, compressor, indexer and quantized linears; hyper-connections and expert routing reuse its
+existing CUDA kernels. The shared GGUF reader, tokenizer and packed linear modules contain no model
+names. The IQ2_XXS format constants carry GGML's MIT license in `cuda/gguf/LICENSE.ggml`.
+
+Install TensorFold with its CUDA dependencies, then prepare a local checkpoint:
+
+```bash
+python tools/build_deepseek_v4_cuda.py --gguf /models/DeepSeek-V4-Flash.gguf \
+    --drafter /models/DSpark.gguf --model-dir /models/deepseek-native \
+    --context 163840 --retained-prefix 131072
+tensorfold serve /models/deepseek-native --backend cuda --tp 1 --parallel 1 --context 163840
+```
+
+The helper compiles TensorFold's own expert planner before loading large weights and writes tokenizer
+and config sidecars. It never downloads or rewrites weights. Select any local checkpoint whose tensors
+use the supported formats: Q8_0, Q2_K and IQ2_XXS, with F16/F32 dense tensors and I32 hash routing.
+Unsupported formats and incompatible shapes are rejected before uploads. Upload staging is bounded;
+uploaded tensors own their storage after the source mapping closes.
+
+One GPU serves one request at a time. CUDA supports local DSpark drafting, `--no-drafts`, DeepSeek's
+prompt encoder and DSML tool calls. MTP, vision, enforced structured output and logprobs are not yet
+implemented on this path. CUDA memory admission uses the shared `TENSORFOLD_MEMORY_RESERVE_GIB`
+and `TENSORFOLD_CUDA_MEMORY_LIMIT_GB` controls; keep room for companion services on unified memory.
+
+Prompts prefill in canonical 1,024-token chunks. Only completed prompt chunks enter the retained
+prefix cache. Matching growing prompts restore that checkpoint; a changed prefix invalidates it.
+Snapshots copy only populated pool rows. Prompt scratch retains one large row size per layer, so
+different conversation lengths cannot accumulate unbounded buffers. Speculative verification uses
+the serial row arithmetic, rolls back rejected rows and passes only committed target taps to DSpark.
+
+### Qualification and measurements
+
+```bash
+python tools/qualify_deepseek_v4_cuda.py /models/deepseek-native --output qualification.json
+```
+
+This checks a 163,840-token capacity, 131,072 retained tokens, seeded plain/draft equality at the long
+prefix, growing prompts and changed-prefix invalidation. Focused CPU and CUDA tests cover container
+bounds, quantization block geometry, independent scalar decoding and row arithmetic.
+
+Measured on one GB10 with an 80.76 GiB mixed IQ2_XXS/Q2_K/Q8_0 target and a 6.49 GiB DSpark GGUF,
+with Hunyuan resident. After kernel tuning, the same qualification fixture changed as follows:
+
+| Case | Initial native | Tuned native |
+| --- | --- | --- |
+| Cold 131,093-token prefill | 713.54 s | 341.59 s |
+| Retained 128Ki prefix, prefill | 0.51 s | 0.45 s |
+| Warm long-prefix plain decode | 9.24 tok/s | 9.77 tok/s |
+| Warm long-prefix DSpark decode | 11.27 tok/s | 14.15 tok/s |
+
+Cold prefill is 2.09 times faster than the initial native implementation. Every qualification reply
+retained its previous token IDs. These numbers do not establish a win over the previous external
+engine: an identical 8,213-token cold prompt took 20.61 s here and 8.88 s in that engine after kernel
+warmup. Cold prefill remains the main performance gap. The Mac measurements above use different
+weights and hardware and are not a CUDA comparison.
+
 ## Not yet
 
-CUDA on two DGX Sparks and DeepSeek-V4-flash-vision-exp are not in this family yet.
+CUDA tensor parallelism on two DGX Sparks and DeepSeek-V4-flash-vision-exp are not in this family yet.
