@@ -1,4 +1,4 @@
-"""Two-rank decode matches serial bits through fixed-order fp32 rank sums and rank-zero broadcasts of proposals and accepted paths."""
+"""Decode on several ranks matches serial bits through fixed-order fp32 rank sums and rank-zero broadcasts of proposals and accepted paths."""
 
 from __future__ import annotations
 
@@ -18,6 +18,19 @@ from .weights import Weights
 
 
 _FIRST = 256        # ints in a share's first broadcast: the length, then up to 255 values
+
+
+def _world() -> int:
+    """The process group's rank count (1 outside one)."""
+
+    return dist.get_world_size() if dist.is_initialized() else 1
+
+
+def _split(w: Weights) -> bool:
+    """Whether each rank holds its share of the head's rows (``split_weights(..., split_head=True)``)."""
+
+    world = _world()
+    return world > 1 and world * w.head.n == w.config.vocab
 
 
 def _share(values: Sequence[int] | None, rank: int, device: torch.device) -> list[int]:
@@ -81,30 +94,31 @@ def split_candidates(logits: torch.Tensor, sampling: Sampling | None, offset: in
 
 
 def choose_merged(values, ids, positions: Sequence[int], sampling: Sampling | None) -> list[int]:
-    """Merge rank-zero candidates first to preserve first-maximum ties, then sample the union in value-and-id order."""
+    """Merge candidates in rank order to preserve first-maximum ties, then sample the union in value-and-id order."""
 
     if sampling is None or sampling.temperature <= 0:
-        # the whole vocabulary's first maximum: rank 0's half holds the lower ids
-        return [int(ids[r, 0] if values[r, 0] >= values[r, 1] else ids[r, 1]) for r in range(ids.shape[0])]
+        # the whole vocabulary's first maximum: a lower rank's share holds the lower ids
+        return [int(ids[r, int(values[r].argmax())]) for r in range(ids.shape[0])]
     return choose_rows(values, ids, positions, sampling)
 
 
 def _sample_split(logits: torch.Tensor, positions: Sequence[int], sampling: Sampling | None,
                   rank: int) -> list[int] | None:
-    """Both ranks call this with their half of the logits; rank 0 returns the tokens, rank 1 None."""
+    """Every rank calls this with its share of the logits; rank 0 returns the tokens, the others None."""
 
     if sampling is not None and sampling.temperature > 0 and not sampling.top_k:     # the shared nucleus rule
         tokens = nucleus_rows(logits, positions, sampling, offset=rank * logits.shape[1], gather=dist_gather)
         return tokens if rank == 0 else None
+    world = _world()
     values, ids = split_candidates(logits, sampling, rank * logits.shape[1])
-    all_values = torch.empty((2, *values.shape), dtype=values.dtype, device=values.device)
-    all_ids = torch.empty((2, *ids.shape), dtype=ids.dtype, device=ids.device)
+    all_values = torch.empty((world, *values.shape), dtype=values.dtype, device=values.device)
+    all_ids = torch.empty((world, *ids.shape), dtype=ids.dtype, device=ids.device)
     dist.all_gather_into_tensor(all_values, values)
     dist.all_gather_into_tensor(all_ids, ids)
     if rank != 0:
         return None
-    return choose_merged(torch.cat((all_values[0], all_values[1]), dim=1).cpu().numpy(),
-                         torch.cat((all_ids[0], all_ids[1]), dim=1).cpu().numpy().astype("int64"),
+    return choose_merged(torch.cat(tuple(all_values), dim=1).cpu().numpy(),
+                         torch.cat(tuple(all_ids), dim=1).cpu().numpy().astype("int64"),
                          positions, sampling)
 
 
@@ -114,7 +128,7 @@ def _tokens(ids: Sequence[int], device: torch.device) -> torch.Tensor:
 
 def first_token(w: Weights, normed: torch.Tensor, n: int, sampling: Sampling | None, rank: int = 0,
                 world: int = 1, constraint=None) -> int:
-    """The token after an ``n``-token prompt from its last row's normed state; two ranks share rank 0's draw."""
+    """The token after an ``n``-token prompt from its last row's normed state; several ranks share rank 0's draw."""
 
     from .forward import _mm
 
@@ -126,7 +140,7 @@ def first_token(w: Weights, normed: torch.Tensor, n: int, sampling: Sampling | N
         if constraint is not None:
             constraint.advance([first])
         return first
-    split = 2 * w.head.n == w.config.vocab          # split_weights(..., split_head=True)
+    split = _split(w)
     last = _mm(normed, w.head) if split or rank == 0 else None
     if constraint is not None and last is not None:  # each rank masks the vocabulary columns it holds
         constraint.mask(last, None, rank * w.head.n if split else 0)
@@ -144,7 +158,7 @@ def first_token(w: Weights, normed: torch.Tensor, n: int, sampling: Sampling | N
 def prefill_tp(w: Weights, prompt: Sequence[int], sampling: Sampling | None, rank: int,
                draft=None, *, state: State | None = None, limit: int = 0, stops: Sequence[int] = (),
                keep: Callable | None = None, keep_at: int | None = None, vision=None, constraint=None):
-    """Both ranks prefill, from a kept ``state`` with a fresh prefill's bits; rank 0 shares the first token (``keep_at``: a third item, as ``decode.prefill``'s; the split chains are each rank's own)."""
+    """Every rank prefills, from a kept ``state`` with a fresh prefill's bits; rank 0 shares the first token (``keep_at``: a third item, as ``decode.prefill``'s; the split chains are each rank's own)."""
 
     from .decode import prefill_stops
 
@@ -154,7 +168,7 @@ def prefill_tp(w: Weights, prompt: Sequence[int], sampling: Sampling | None, ran
     taps = draft is not None and (rank == 0 or getattr(draft, "world", 1) == 2)
     out = prefill_stops(w, prompt, st, draft if taps else None, stops=stops, keep=keep, tp=True, keep_at=keep_at,
                         vision=vision)
-    first = first_token(w, out if keep_at is None else out[0], len(prompt), sampling, rank, 2, constraint)
+    first = first_token(w, out if keep_at is None else out[0], len(prompt), sampling, rank, _world(), constraint)
     return (st, first) if keep_at is None else (st, first, out[1])
 
 
@@ -185,7 +199,7 @@ def decode_tp(w: Weights, st: State, prompt: Sequence[int], pending: int, count:
     """Draft on rank zero or jointly with a two-rank drafter, then verify and commit on both ranks, whose ``prompt + tokens[:-1]`` agree despite rank one storing -1 for the uncommitted last token (``inplace``: as ``draft_decode``'s)."""
 
     device = w.norm.device
-    split = 2 * w.head.n == w.config.vocab          # split_weights(..., split_head=True)
+    split = _split(w)
     st = st if inplace else clone_state(st)
     out = [pending]
     context = list(prompt) + out

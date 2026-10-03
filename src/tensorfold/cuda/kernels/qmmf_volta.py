@@ -170,13 +170,19 @@ class VoltaLinear:
     def inputs(self, rank: int, world: int = 2) -> "VoltaLinear":
         """Row-parallel shard: whole 64-input groups with their block scales; the column factors kept."""
 
-        if world != 2 or rank not in (0, 1) or self.k % (64 * world):
-            raise ValueError(f"{self.layout}: K {self.k} does not split into two halves of whole 64-input groups")
+        if world not in (2, 4) or rank not in range(world) or self.k % (64 * world):
+            raise ValueError(f"{self.layout}: K {self.k} does not split into {world} parts of whole 64-input groups")
         half = self.k // 64 // world
-        g0, g1 = rank * half, (rank + 1) * half
+        return self.groups(rank * half, (rank + 1) * half)
+
+    def groups(self, g0: int, g1: int) -> "VoltaLinear":
+        """Row-parallel shard of the 64-input groups [g0, g1): stored words and block scales, column factors kept."""
+
+        if not 0 <= g0 < g1 <= self.k // 64:
+            raise ValueError(f"{self.layout}: input groups [{g0}, {g1}) outside [0, {self.k // 64})")
         return VoltaLinear(self.fmt, self.words[:, g0:g1].contiguous(),
                            self.scales[:, g0:g1].contiguous() if self.fmt == FP4 else None, self.alpha.clone(),
-                           self.n, 64 * half)
+                           self.n, 64 * (g1 - g0))
 
     def partial(self, x: torch.Tensor) -> torch.Tensor:
         """A row-parallel rank's fp32 (M, n) product, unrounded, for the rank-ordered sum."""

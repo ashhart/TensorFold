@@ -20,8 +20,8 @@ def packed_shape(weight, scales, biases, bits: int, group: int) -> tuple[int, in
 
 def input_slice(k: int, bits: int, group: int, rank: int, world: int = 2):
     """Split only whole quantization groups and packed words, without changing any values."""
-    if world != 2 or rank not in (0, 1) or bits not in BITS or group not in GROUPS or k % (world * group):
-        raise ValueError("tensor parallel affine inputs must split into two complete group-aligned halves")
+    if world not in (2, 4) or rank not in range(world) or bits not in BITS or group not in GROUPS or k % (world * group):
+        raise ValueError(f"tensor parallel affine inputs must split into {world} complete group-aligned parts")
     count = k // (world * group)
     a, b = rank * count, (rank + 1) * count
     return (a * group * bits // 32, b * group * bits // 32), (a, b)

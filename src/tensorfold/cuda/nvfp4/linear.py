@@ -136,8 +136,8 @@ def _even(t: torch.Tensor, count: int) -> torch.Tensor:
 def _input_groups(k: int, rank: int, world: int, what: str) -> tuple[int, int]:
     """A rank's 64-input groups [g0, g1): whole groups (each holds four whole 16-input NVFP4 blocks)."""
 
-    if world != 2 or rank not in (0, 1) or k % (64 * world):
-        raise ValueError(f"{what}: K {k} does not split into two halves of whole 64-input groups")
+    if world not in (2, 4) or rank not in range(world) or k % (64 * world):
+        raise ValueError(f"{what}: K {k} does not split into {world} parts of whole 64-input groups")
     half = k // 64 // world
     return rank * half, (rank + 1) * half
 

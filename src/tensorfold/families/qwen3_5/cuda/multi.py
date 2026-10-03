@@ -106,7 +106,7 @@ class MultiDecoder:
         self.rank, self.world, self.device = rank, world, w.norm.device
         cuda = torch.device(self.device).type == "cuda"     # a CPU stand-in on a GPU machine runs as on a host box
         self.depth = cuda and tuple(torch.cuda.get_device_capability(self.device)) in DEPTH_CHIPS
-        self.split = world == 2 and 2 * w.head.n == w.config.vocab       # each rank holds half the head
+        self.split = world > 1 and world * w.head.n == w.config.vocab    # each rank holds its share of the head
         self.drafts = draft is not None and (rank == 0 or getattr(draft, "world", 1) == 2)
         self.streams: dict[int, Stream] = {}                  # decoding
         self.filling: list[Stream] = []                        # admitted, prompts still prefilling (oldest first)
@@ -128,7 +128,7 @@ class MultiDecoder:
         return len(self.streams) + len(self.filling)
 
     def _send(self, values: list[int]) -> None:
-        if self.world == 2 and self.broken is None:
+        if self.world > 1 and self.broken is None:
             _share(values, 0, self.device)
 
     def _check(self) -> None:
@@ -159,7 +159,7 @@ class MultiDecoder:
         self._send([ADMIT, s.sid, s.count, int(s.draft), s.cached, *pack_sampling(s.sampling),
                     int(encoded is not None), *pack(s.constraint)])
         self._send(list(s.prompt))
-        if self.world == 2 and encoded is not None:     # rank 1 takes the image rows as rank 0 encoded them
+        if self.world > 1 and encoded is not None:     # rank 1 takes the image rows as rank 0 encoded them
             from tensorfold.vision.qwen_cuda import broadcast_encoded
 
             encoded = broadcast_encoded(encoded, 0, self.device, hidden=self.w.config.hidden,
@@ -259,7 +259,7 @@ class MultiDecoder:
         try:
             first = self._step(s, stop)
         except Exception as exc:                 # noqa: BLE001  (one GPU: this request fails, the others go on)
-            if self.world == 2:
+            if self.world > 1:
                 raise
             self.filling = [x for x in self.filling if x is not s]
             s.error, s.done = exc, True
@@ -293,7 +293,7 @@ class MultiDecoder:
         try:
             firsts = self._steps(batch)
         except Exception as exc:                 # noqa: BLE001  (one GPU: these requests fail, the others go on)
-            if self.world == 2:
+            if self.world > 1:
                 raise
             failed = {id(s) for s, _ in batch}
             self.filling = [x for x in self.filling if id(x) not in failed]
@@ -323,7 +323,7 @@ class MultiDecoder:
             pieces.append(Piece(s.prompt[:stop], s.st, end, s.snap if s.draft and drafter is not None else None))
         firsts = []
         try:
-            outs = prefill_batch(self.w, pieces, tp=self.world == 2, draft=drafter)
+            outs = prefill_batch(self.w, pieces, tp=self.world > 1, draft=drafter)
             for (s, stop), end, (normed, at, snap) in zip(batch, ends, outs):
                 if snap is not None:
                     s.snap = snap
@@ -335,7 +335,7 @@ class MultiDecoder:
                 if end is not None:
                     self.cache.add(list(s.prompt[:end]), viewed(at[0]) if end < n else kept(at[0]), own(at[1]))
         except Exception as exc:
-            if self.world == 2:
+            if self.world > 1:
                 self.broken = exc
             raise
         finally:
@@ -362,7 +362,7 @@ class MultiDecoder:
             n = len(s.prompt)             # the prompt end is kept one token early, unless a message start covers it
             end = entry_end(s.prompt) if (stop == n and s.draft and s.vision is None
                                           and not (s.stops and n - s.stops[-1] < MIN_GAP)) else None
-            out = prefill_state(self.w, s.prompt[:stop], s.st, tp=self.world == 2, draft=drafter, keep_at=end,
+            out = prefill_state(self.w, s.prompt[:stop], s.st, tp=self.world > 1, draft=drafter, keep_at=end,
                                 vision=s.vision)
             normed = out if end is None else out[0]
             if drafter is not None:
@@ -376,7 +376,7 @@ class MultiDecoder:
                 at, snap = out[1]
                 self.cache.add(list(s.prompt[:end]), viewed(at) if end < n else kept(at), own(snap))
         except Exception as exc:
-            if self.world == 2:
+            if self.world > 1:
                 self.broken = exc
             raise
         finally:
@@ -511,7 +511,7 @@ class MultiDecoder:
             for i in range(reps + 1):
                 torch.cuda.synchronize()
                 t0 = time.perf_counter()
-                multi_tree_forward(self.w, wins, full_logits=self.split or self.rank == 0, tp=self.world == 2)
+                multi_tree_forward(self.w, wins, full_logits=self.split or self.rank == 0, tp=self.world > 1)
                 torch.cuda.synchronize()
                 if i:
                     times.append(1e3 * (time.perf_counter() - t0))
@@ -535,14 +535,14 @@ class MultiDecoder:
             grammars = self._constrain(plan, wins)
             self._send([x for tokens, parents in wins for x in (len(tokens), *tokens, *parents)])
         else:
-            wins = _unflatten(_share(None, 1, self.device), pairs=True)
+            wins = _unflatten(_share(None, self.rank, self.device), pairs=True)
             grammars = self._masks(plan, wins) if self.split else {}
         self.block = self._deepest(plan, wins, block)
         states = [self.streams[item[0]].st for item in plan]
         taps_wanted = self.drafts and any(self.streams[item[0]].draft for item in plan)
         logits, record, taps, starts = multi_tree_forward(
             self.w, [(t, p, st) for (t, p), st in zip(wins, states)],
-            full_logits=self.split or self.rank == 0, tp=self.world == 2, capture_taps=taps_wanted)
+            full_logits=self.split or self.rank == 0, tp=self.world > 1, capture_taps=taps_wanted)
         for k, window in grammars.items():          # a constrained stream's rows, each masked by its path
             self.streams[plan[k][0]].constraint.mask(logits[starts[k]:starts[k + 1]], window,
                                                      self.rank * self.w.head.n if self.split else 0)
@@ -629,7 +629,7 @@ class MultiDecoder:
             del self.streams[s.sid]
         live += self.filling
         self.filling = []
-        if self.world == 2 and self.broken is None:
+        if self.world > 1 and self.broken is None:
             self.broken = RuntimeError("a round failed")
         return live
 
@@ -638,18 +638,18 @@ class MultiDecoder:
         """Rank 1: mirror rank 0's admissions, rounds and completions until rank 0 sends an empty message."""
 
         while True:
-            msg = _share(None, 1, self.device)
+            msg = _share(None, self.rank, self.device)
             if not msg:
                 return
             if msg[0] == ADMIT:
                 sid, count, draft, cached = msg[1:5]
-                s = Stream(_share(None, 1, self.device), count, unpack_sampling(msg[5:5 + W]), draft=bool(draft),
+                s = Stream(_share(None, self.rank, self.device), count, unpack_sampling(msg[5:5 + W]), draft=bool(draft),
                            sid=sid)
                 vision = None
                 if len(msg) > 5 + W and msg[5 + W]:
                     from tensorfold.vision.qwen_cuda import broadcast_encoded
 
-                    vision = broadcast_encoded(None, 1, self.device, hidden=self.w.config.hidden,
+                    vision = broadcast_encoded(None, self.rank, self.device, hidden=self.w.config.hidden,
                                                prompt_length=len(s.prompt))
                 packed = msg[6 + W:]
                 if packed:                              # compiled here as on rank 0
@@ -658,7 +658,8 @@ class MultiDecoder:
                     s.constraint = grammar.compiler(self, self.model_dir, self.eos).follow(packed)
                 hit = self.cache.named(s.prompt, cached) if cached else None
                 if cached and hit is None:
-                    raise RuntimeError(f"rank 1 has no cached state for the {cached} tokens rank 0 resumes from")
+                    raise RuntimeError(f"rank {self.rank} has no cached state for the {cached} tokens rank 0 "
+                                       "resumes from")
                 s.cached = cached
                 s.vision = vision
                 self._queue(s, hit)
@@ -671,7 +672,7 @@ class MultiDecoder:
             elif msg[0] == ROUND:
                 plan = [tuple(msg[2 + 4 * i:6 + 4 * i]) for i in range(msg[1])]
                 wins, record, taps, starts, _ = self._verify(plan)
-                paths = _unflatten(_share(None, 1, self.device), pairs=False)
+                paths = _unflatten(_share(None, self.rank, self.device), pairs=False)
                 self._commit(plan, wins, record, taps, starts, paths)
                 for (sid, *_), (tokens, _), path in zip(plan, wins, paths):
                     s = self.streams[sid]

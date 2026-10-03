@@ -1,4 +1,4 @@
-"""The Qwen3.8-27B CUDA engine: one GPU or two ranks; prompt ends are kept, replies are prefilled again."""
+"""The Qwen3.8-27B CUDA engine: one GPU, two ranks or four; prompt ends are kept, replies are prefilled again."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ def entry_end(prompt: Sequence[int]) -> int:
 
 
 class Qwen27Engine:
-    """Qwen3.8-27B on one GPU or two ranks (rank 0 here), DFlash2 drafting, prefix reuse."""
+    """Qwen3.8-27B on one GPU or several ranks (rank 0 here), DFlash2 drafting, prefix reuse."""
 
     tree_rows: int | None = None       # a lone stream's tree rows on one GPU (None: max_rows, as in 0.5.0)
     room = None                        # one GPU's attention-cache budget (streams.KVRoom), None on two
@@ -40,6 +40,8 @@ class Qwen27Engine:
 
         exl3 = quant_config(Path(model_dir)) is not None
         nvfp4 = not exl3 and is_quantized(Path(model_dir))
+        if tp not in (1, 2, 4) or rank not in range(tp):
+            raise ValueError(f"rank {rank} of {tp}: Qwen3.8-27B runs on one GPU, two ranks or four")
         if exl3 and tp != 1:
             raise ValueError("EXL3 packs of Qwen3.8-27B run on one GPU: drop --tp 2, or serve the MLX checkpoint "
                              "(TensorFold/Qwen3.8-27B-MLX-4bit) or an NVFP4 one on two")
@@ -65,27 +67,30 @@ class Qwen27Engine:
         if streams > 1 and tp == 1:          # streams' caches of many sizes come and go: growable segments, less slack
             torch.cuda.memory._set_allocator_settings("expandable_segments:True")
         keep = KEEP if keep is None else int(keep)         # --checkpoint-slots: each kept state is in the estimate
-        if tp == 2:
+        if tp > 1:
             import torch.distributed as dist
 
             from .distributed import split_weights
 
-            dist.init_process_group("nccl", init_method=f"tcp://{master}:{port}", rank=rank, world_size=2)
+            dist.init_process_group("nccl", init_method=f"tcp://{master}:{port}", rank=rank, world_size=tp)
             # both ranks must run the same calls: refuse to start when they were given different settings
             flags = torch.tensor([int(draft_dir is not None and tp_draft), max_rows, int(split_head), int(allow_copy),
                                   streams, -1 if context is None else int(context), int(bool(context_explicit)),
                                   int(vision), keep, int(prompt_precision.fp8())],      # precision last (same_on_ranks)
                                  dtype=torch.int64, device="cuda")
-            both = torch.empty((2, flags.numel()), dtype=torch.int64, device="cuda")
+            both = torch.empty((tp, flags.numel()), dtype=torch.int64, device="cuda")
             dist.all_gather_into_tensor(both, flags)
-            prompt_precision.same_on_ranks(int(both[0, -1]), int(both[1, -1]))
-            if not torch.equal(both[0], both[1]):
-                raise RuntimeError("the two ranks were started with different settings (two-rank drafter, rows, "
+            for r in range(1, tp):
+                prompt_precision.same_on_ranks(int(both[0, -1]), int(both[r, -1]))
+            odd = next((r for r in range(1, tp) if not torch.equal(both[0], both[r])), None)
+            if odd is not None:
+                raise RuntimeError("the ranks were started with different settings (two-rank drafter, rows, "
                                    f"head split, copies, --parallel, --context, --checkpoint-slots): rank 0 "
-                                   f"{both[0].tolist()}, rank 1 {both[1].tolist()}; pull the draft model on both "
-                                   "machines, and pass the same --no-drafts, --parallel, --context and "
-                                   "--checkpoint-slots to both")
-            gather = lambda values: gather_ints(torch, lambda send, recv: dist.all_gather_into_tensor(recv, send), values)
+                                   f"{both[0].tolist()}, rank {odd} {both[odd].tolist()}; pull the draft model "
+                                   "everywhere, and pass the same --no-drafts, --parallel, --context and "
+                                   "--checkpoint-slots to every rank")
+            gather = lambda values: gather_ints(torch, lambda send, recv: dist.all_gather_into_tensor(recv, send), values,
+                                                tp)
             from tensorfold.cuda import p2p
 
             if p2p.install(rank) and rank == 0:     # row-parallel sums in one launch: P2P, or shared host memory
@@ -108,10 +113,10 @@ class Qwen27Engine:
             from .nvfp4_load import admission as nvfp4_admission
 
             geometry, tensor_bytes = nvfp4_admission(geometry)
-            if tp == 2:                     # each rank keeps its shard of every layer as it loads (no startup copy)
+            if tp > 1:                      # each rank keeps its shard of every layer as it loads (no startup copy)
                 from .distributed import half_layers
 
-                tensor_bytes = half_layers(tensor_bytes)
+                tensor_bytes = half_layers(tensor_bytes, tp)
         # one admission for one stream or many, on every rank, before any weight loads
         self.capacity_plan = admit(model_dir, context, context_explicit, torch,
                                    capacity_geometry(geometry, model_dir, vision, rank, offload=vision_offload),
@@ -124,21 +129,21 @@ class Qwen27Engine:
                                                                               kept=keep + 1 if many else 0),
                                    # sm_70 (32 GB V100s): the full checkpoint (already the resident term) is split and freed
                                    # before caches exist; a second full copy is not part of that peak
-                                   # NVFP4 layers shard as they load on two ranks: no second full copy at startup
-                                   startup_copies=int(tp == 2 and not nvfp4 and not volta()),
+                                   # NVFP4 layers shard as they load on several ranks: no second full copy at startup
+                                   startup_copies=int(tp > 1 and not nvfp4 and not volta()),
                                    # MLX and NVFP4 checkpoints run on the sm_70 kernels; EXL3 needs the shared ones
                                    need=None if exl3 or (nvfp4 and not volta()) else VOLTA,
                                    # sm_70 NVFP4 repacks each upload in place: one extra copy of the largest tensor
                                    staging_copies=2 if nvfp4 and volta() else 3)
         self.context_window = self.capacity_plan["context_window"]
-        if tp == 2 and nvfp4:               # layers shard as they load; the embedding and head stay whole for the drafter
+        if tp > 1 and nvfp4:                # layers shard as they load; the embedding and head stay whole for the drafter
             from .distributed import shard_layer
 
-            full = load(model_dir, nvfp4_layer=shard_layer(rank))
-            self.w = split_weights(full, rank, tiled=True, split_head=split_head, layers_split=True)
-        elif tp == 2:
+            full = load(model_dir, nvfp4_layer=shard_layer(rank, tp))
+            self.w = split_weights(full, rank, tp, tiled=True, split_head=split_head, layers_split=True)
+        elif tp > 1:
             full = load(model_dir)
-            self.w = split_weights(full, rank, tiled=True, split_head=split_head)
+            self.w = split_weights(full, rank, tp, tiled=True, split_head=split_head)
         else:
             full = load(model_dir, tiled=True)
             self.w = full
@@ -184,7 +189,7 @@ class Qwen27Engine:
             self.multi.calibrate(streams)
             if rank == 0:
                 print(f"[tensorfold] {streams} streams of {self.context_window} prompt/reply tokens, {keep} prompt "
-                      "states kept" if tp == 2 else
+                      "states kept" if tp > 1 else
                       f"[tensorfold] up to {streams} streams, each growing to {self.context_window} prompt/reply "
                       f"tokens while memory lasts, {keep} prompt states kept", flush=True)
                 curve = ", ".join(f"{r}: {ms:.1f}" for r, ms in self.multi.costs)
@@ -254,7 +259,7 @@ class Qwen27Engine:
         t0 = time.perf_counter()
         hit = self._resume(prompt) if draft and vision is None else None
         encoded = self.vision.encode(vision, prompt) if vision is not None else None
-        if self.tp == 2:
+        if self.tp > 1:
             return self._generate_tp(prompt, max_tokens, sampling, on_tokens, hit, t0, draft, stop_eos, vision=encoded,
                                      constraint=constraint)
         drafter = self.draft if draft else None
@@ -281,7 +286,7 @@ class Qwen27Engine:
                 "cached": hit[1].pos if hit else 0, "drafts": draft, "min_rows": min(result.widths, default=0),
                 "drafted": result.drafted_rows, "accepted": result.accepted_drafts}
 
-    # two ranks: rank 0 sends each request's header and prompt to rank 1, both run the same calls
+    # several ranks: rank 0 broadcasts each request's header and prompt, every rank runs the same calls
     def _generate_tp(self, prompt, max_tokens, sampling, on_tokens, hit, t0, draft, stop_eos=True, vision=None,
                      constraint=None):
         from .decode_tp import _share, decode_tp, pack_sampling, prefill_tp
@@ -311,7 +316,7 @@ class Qwen27Engine:
             self._remember(list(prompt[:end]), *kept[0])
         prefill_s = time.perf_counter() - t0
         stop_now = bool(on_tokens([pending]))
-        # rank 0 alone decides where a reply ends; rank 1 follows its windows (no header field needed)
+        # rank 0 alone decides where a reply ends; the others follow its windows (no header field needed)
         result = decode_tp(self.w, st, prompt, pending, 1 if stop_now else max_tokens, sampling, 0, drafter,
                            max_rows=self.max_rows, allow_copy=self.allow_copy and draft, stop_eos=stop_eos,
                            on_tokens=on_tokens, inplace=True, **grammar)
@@ -319,7 +324,7 @@ class Qwen27Engine:
                 "drafts": draft, "min_rows": min(result.widths, default=0)}
 
     def follow(self) -> None:
-        """Rank 1: mirror every request rank 0 serves, forever."""
+        """Ranks past 0: mirror every request rank 0 serves, forever."""
 
         if self.multi is not None:
             self.multi.follow()
@@ -330,11 +335,11 @@ class Qwen27Engine:
 
         dev = self.w.norm.device
         while True:
-            header = _share(None, 1, dev)
+            header = _share(None, self.rank, dev)
             _, max_tokens, cached, draft = header[:4]
             sampling = unpack_sampling(header[4:4 + W])
-            prompt = _share(None, 1, dev)
-            vision = (broadcast_encoded(None, 1, dev, hidden=self.w.config.hidden, prompt_length=len(prompt))
+            prompt = _share(None, self.rank, dev)
+            vision = (broadcast_encoded(None, self.rank, dev, hidden=self.w.config.hidden, prompt_length=len(prompt))
                       if len(header) > 4 + W and header[4 + W] else None)
             packed = header[5 + W:]
             grammar = {}
@@ -345,7 +350,8 @@ class Qwen27Engine:
             drafter = self.draft if draft else None
             hit = self.cache.named(prompt, cached) if cached else None
             if cached and hit is None:
-                raise RuntimeError(f"rank 1 has no cached state for the {cached} tokens rank 0 resumes from")
+                raise RuntimeError(f"rank {self.rank} has no cached state for the {cached} tokens rank 0 resumes "
+                                   "from")
             if hit is not None:
                 self._drop_extensions(hit[0])
             if drafter is not None:             # a two-rank drafter: mirror rank 0's drafter state
@@ -354,10 +360,11 @@ class Qwen27Engine:
             stops, keep = self._stops(prompt, hit, draft) if vision is None else ((), None)
             # the same entries as rank 0
             end = entry_end(prompt) if draft and vision is None and self._ends(prompt, stops) else None
-            st, pending, *kept = prefill_tp(self.w, prompt, sampling, 1, drafter, state=hit[1] if hit else None,
+            st, pending, *kept = prefill_tp(self.w, prompt, sampling, self.rank, drafter, state=hit[1] if hit else None,
                                             limit=self.context_window, stops=stops, keep=keep, keep_at=end,
                                             vision=vision, **grammar)
             if end is not None:
                 self._remember(list(prompt[:end]), *kept[0])
-            result = decode_tp(self.w, st, prompt, pending, max_tokens, sampling, 1, drafter, max_rows=self.max_rows,
+            result = decode_tp(self.w, st, prompt, pending, max_tokens, sampling, self.rank, drafter,
+                               max_rows=self.max_rows,
                                inplace=True, **grammar)

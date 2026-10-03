@@ -1,4 +1,4 @@
-"""Qwen3.8-27B NVFP4 on two ranks on sm_70: shards are the checkpoint's bytes, partials stay fp32, windows stay exact."""
+"""Qwen3.8-27B NVFP4 on two or four ranks on sm_70: shards are the checkpoint's bytes, partials fp32, windows exact."""
 
 from __future__ import annotations
 
@@ -52,25 +52,40 @@ SEGMENTS = [(512, 256, None), (384, 256, None), (768, 128, (256, 256, 256)), (96
             (2, 128, None), (5120 + 64, 512, None)]
 
 
-@pytest.mark.parametrize("n,k,segments", SEGMENTS)
-def test_fp4_shards_are_the_sliced_checkpoint(n, k, segments):
+def _splits(n: int, k: int, segments, world: int) -> tuple[bool, bool]:
+    """NVFP4 column and row shards equal projections built from the sliced checkpoint tensors, whatever tiles they touch."""
+
+    lengths = segments or (n,)
+    return all(v % world == 0 for v in lengths), k % (64 * world) == 0
+
+
+@pytest.mark.parametrize("world", [2, 4])
+@pytest.mark.parametrize("n,k,segments", SEGMENTS + [(1024, 1024, None), (3072, 512, (1024, 1024, 1024))])
+def test_fp4_shards_are_the_sliced_checkpoint(n, k, segments, world):
     """NVFP4 column and row shards equal projections built from the sliced checkpoint tensors, whatever tiles they touch."""
 
     gen = torch.Generator().manual_seed(n + k)
     packed, scale = _raw4(n, k, gen)
     full = VoltaLinear.from_nvfp4(packed, scale, 0.05)
-    for rank in (0, 1):
-        rows = output_rows(n, rank, segments=segments, device="cuda")
-        _same(split_output(full, rank, segments=segments), VoltaLinear.from_nvfp4(packed[rows], scale[rows], 0.05))
-        _same(full.outputs(rows, chunk=64), VoltaLinear.from_nvfp4(packed[rows], scale[rows], 0.05))
-        h = k // 2
-        _same(split_input(full, rank),
-              VoltaLinear.from_nvfp4(packed[:, rank * h // 2:(rank + 1) * h // 2].contiguous(),
-                                     scale[:, rank * h // 16:(rank + 1) * h // 16].contiguous(), 0.05))
+    outs, ins = _splits(n, k, segments, world)
+    if not (outs or ins):
+        pytest.skip(f"({n}, {k}) does not split over {world} ranks")
+    for rank in range(world):
+        if outs:
+            rows = output_rows(n, rank, world, segments=segments, device="cuda")
+            _same(split_output(full, rank, world, segments=segments),
+                  VoltaLinear.from_nvfp4(packed[rows], scale[rows], 0.05))
+            _same(full.outputs(rows, chunk=64), VoltaLinear.from_nvfp4(packed[rows], scale[rows], 0.05))
+        if ins:
+            h = k // world
+            _same(split_input(full, rank, world),
+                  VoltaLinear.from_nvfp4(packed[:, rank * h // 2:(rank + 1) * h // 2].contiguous(),
+                                         scale[:, rank * h // 16:(rank + 1) * h // 16].contiguous(), 0.05))
 
 
-@pytest.mark.parametrize("n,k,segments", SEGMENTS)
-def test_fp8_and_bf16_shards_are_the_sliced_checkpoint(n, k, segments):
+@pytest.mark.parametrize("world", [2, 4])
+@pytest.mark.parametrize("n,k,segments", SEGMENTS + [(1024, 1024, None), (3072, 512, (1024, 1024, 1024))])
+def test_fp8_and_bf16_shards_are_the_sliced_checkpoint(n, k, segments, world):
     """FP8 shards and 16-bit column and row shards equal the projections built from the slices."""
 
     gen = torch.Generator().manual_seed(3 * n + k)
@@ -78,15 +93,21 @@ def test_fp8_and_bf16_shards_are_the_sliced_checkpoint(n, k, segments):
     full = VoltaLinear.from_fp8(w8, 0.004)
     wb = _rawb(n, k, gen)
     fb = VoltaLinear.from_bf16(wb)
-    for rank in (0, 1):
-        rows = output_rows(n, rank, segments=segments, device="cuda")
-        _same(split_output(full, rank, segments=segments), VoltaLinear.from_fp8(w8[rows], 0.004))
-        _same(split_output(fb, rank, segments=segments), VoltaLinear.from_bf16(wb[rows].contiguous()))
-        h = k // 2
-        _same(split_input(full, rank), VoltaLinear.from_fp8(w8[:, rank * h:(rank + 1) * h].contiguous(), 0.004))
-        got = split_input(fb, rank)
-        values = got.dense().double() * got.alpha[:n, None].double()
-        assert torch.equal(values, wb[:, rank * h:(rank + 1) * h].double())
+    outs, ins = _splits(n, k, segments, world)
+    if not (outs or ins):
+        pytest.skip(f"({n}, {k}) does not split over {world} ranks")
+    for rank in range(world):
+        if outs:
+            rows = output_rows(n, rank, world, segments=segments, device="cuda")
+            _same(split_output(full, rank, world, segments=segments), VoltaLinear.from_fp8(w8[rows], 0.004))
+            _same(split_output(fb, rank, world, segments=segments), VoltaLinear.from_bf16(wb[rows].contiguous()))
+        if ins:
+            h = k // world
+            _same(split_input(full, rank, world),
+                  VoltaLinear.from_fp8(w8[:, rank * h:(rank + 1) * h].contiguous(), 0.004))
+            got = split_input(fb, rank, world)
+            values = got.dense().double() * got.alpha[:n, None].double()
+            assert torch.equal(values, wb[:, rank * h:(rank + 1) * h].double())
 
 
 def test_rows_need_not_be_ordered_or_whole_tiles():
@@ -154,7 +175,8 @@ def test_row_partials_are_fp32_row_invariant_and_sum_to_the_product(fmt, n, k):
 MODEL = os.environ.get("TENSORFOLD_QWEN27_NVFP4", "")
 
 
-def test_real_checkpoint_shards_are_its_slices():
+@pytest.mark.parametrize("world", [2, 4])
+def test_real_checkpoint_shards_are_its_slices(world):
     """The real checkpoint's projections: each rank's shard equals the one built from its sliced tensors."""
 
     if not MODEL:
@@ -174,47 +196,48 @@ def test_real_checkpoint_shards_are_its_slices():
 
     w, s, g = nvfp4(root + "layers.3.mlp.down_proj")
     full = VoltaLinear.from_nvfp4(w, s, g)
-    h = w.shape[1] * 2 // 2
-    for rank in (0, 1):
-        _same(split_input(full, rank), VoltaLinear.from_nvfp4(w[:, rank * h // 2:(rank + 1) * h // 2].contiguous(),
+    h = w.shape[1] * 2 // world
+    for rank in range(world):
+        _same(split_input(full, rank, world), VoltaLinear.from_nvfp4(w[:, rank * h // 2:(rank + 1) * h // 2].contiguous(),
                                                               s[:, rank * h // 16:(rank + 1) * h // 16].contiguous(), g))
     w, s, g = nvfp4(root + "layers.3.mlp.gate_proj")
     full = VoltaLinear.from_nvfp4(w, s, g)
-    for rank in (0, 1):
-        rows = output_rows(w.shape[0], rank, device="cuda")
-        _same(split_output(full, rank), VoltaLinear.from_nvfp4(w[rows], s[rows], g))
+    for rank in range(world):
+        rows = output_rows(w.shape[0], rank, world, device="cuda")
+        _same(split_output(full, rank, world), VoltaLinear.from_nvfp4(w[rows], s[rows], g))
     for name, kind in (("layers.3.self_attn.o_proj", "in"), ("layers.3.self_attn.q_proj", "out"),
                        ("layers.0.linear_attn.in_proj_qkv", "out"), ("layers.0.linear_attn.out_proj", "in")):
         w8, sc = tensor(root + name + ".weight"), float(tensor(root + name + ".weight_scale").float().reshape(-1)[0])
         full = VoltaLinear.from_fp8(w8, sc)
-        for rank in (0, 1):
+        for rank in range(world):
             if kind == "in":
-                h = w8.shape[1] // 2
-                _same(split_input(full, rank), VoltaLinear.from_fp8(w8[:, rank * h:(rank + 1) * h].contiguous(), sc))
+                h = w8.shape[1] // world
+                _same(split_input(full, rank, world), VoltaLinear.from_fp8(w8[:, rank * h:(rank + 1) * h].contiguous(), sc))
             else:
-                rows = output_rows(w8.shape[0], rank, device="cuda")
-                _same(split_output(full, rank), VoltaLinear.from_fp8(w8[rows], sc))
+                rows = output_rows(w8.shape[0], rank, world, device="cuda")
+                _same(split_output(full, rank, world), VoltaLinear.from_fp8(w8[rows], sc))
     wb = tensor(root + "layers.0.linear_attn.in_proj_b.weight").to(torch.bfloat16)
     full = VoltaLinear.from_bf16(wb)
-    for rank in (0, 1):
-        rows = output_rows(wb.shape[0], rank, device="cuda")
-        _same(split_output(full, rank), VoltaLinear.from_bf16(wb[rows].contiguous()))
+    for rank in range(world):
+        rows = output_rows(wb.shape[0], rank, world, device="cuda")
+        _same(split_output(full, rank, world), VoltaLinear.from_bf16(wb[rows].contiguous()))
     head = tensor("lm_head.weight").to(torch.bfloat16)[:20000].contiguous()     # a slice of the head: memory
     full = VoltaLinear.from_bf16(head)
-    for rank in (0, 1):
-        rows = output_rows(head.shape[0], rank, device="cuda")
-        _same(split_output(full, rank), VoltaLinear.from_bf16(head[rows].contiguous()))
+    for rank in range(world):
+        rows = output_rows(head.shape[0], rank, world, device="cuda")
+        _same(split_output(full, rank, world), VoltaLinear.from_bf16(head[rows].contiguous()))
 
 
-# ---- the two-rank forward on one GPU (two threads) -----------------------------------------------------------------
+# ---- the multi-rank forward on one GPU (a thread a rank) ------------------------------------------------------------
 
 
 class _Ranks:
-    """``gather_rank_partials`` for two threads: each posts its partial, both add rank 0's first in fp32, round once."""
+    """``gather_rank_partials`` for a thread a rank: each posts its partial, all add them rank 0 first in fp32, round once."""
 
-    def __init__(self) -> None:
+    def __init__(self, world: int = 2) -> None:
+        self.world = world
         self.local = threading.local()
-        self.barrier = threading.Barrier(2)
+        self.barrier = threading.Barrier(world)
         self.posted: dict[int, torch.Tensor] = {}
         self.calls = 0
 
@@ -224,12 +247,15 @@ class _Ranks:
         self.barrier.wait()
         self.posted[rank] = local.contiguous()
         self.barrier.wait()
-        out = (self.posted[0].float() + self.posted[1].float()).to(dtype)
+        acc = self.posted[0].float()
+        for r in range(1, self.world):
+            acc = acc + self.posted[r].float()
+        out = acc.to(dtype)
         self.barrier.wait()
         return out
 
     def run(self, fn):
-        got, errors = [None, None], []
+        got, errors = [None] * self.world, []
 
         def body(rank):
             self.local.rank = rank
@@ -238,7 +264,7 @@ class _Ranks:
             except BaseException as exc:        # a failing rank would leave the other in the barrier
                 errors.append(exc)
                 self.barrier.abort()
-        threads = [threading.Thread(target=body, args=(r,)) for r in (0, 1)]
+        threads = [threading.Thread(target=body, args=(r,)) for r in range(self.world)]
         for t in threads:
             t.start()
         for t in threads:
@@ -249,8 +275,8 @@ class _Ranks:
         return got
 
 
-def _model() -> Weights:
-    """Two layers (GDN, then attention) stored as the RadixArk 27B stores them, on the sm_70 linears."""
+def _model(n: int = 2) -> Weights:
+    """Two layers (GDN, then attention) stored as the RadixArk 27B stores them, on the sm_70 linears; ``n`` heads a kind."""
 
     gen = torch.Generator().manual_seed(11)
 
@@ -263,16 +289,17 @@ def _model() -> Weights:
     def bf16(n, k, scale=0.05):
         return VoltaLinear.from_bf16((torch.randn(n, k, generator=gen) * scale).to(torch.bfloat16).cuda())
 
-    c = Config(hidden=128, intermediate=256, layers=2, heads=2, kv_heads=2, head_dim=128, vocab=256, k_heads=2,
-               v_heads=2, dk=128, dv=128, conv_kernel=4, interval=2, eps=1e-6, rope_dims=32, rope_theta=10000000.0,
+    c = Config(hidden=128, intermediate=128 * n, layers=2, heads=n, kv_heads=n, head_dim=128, vocab=256, k_heads=n,
+               v_heads=n, dk=128, dv=128, conv_kernel=4, interval=2, eps=1e-6, rope_dims=32, rope_theta=10000000.0,
                eos=(0,))
     norm = torch.ones(128, device="cuda", dtype=torch.bfloat16)
-    gdn = GDN(fp8(768, 128), fp8(256, 128), bf16(2, 128), bf16(2, 128), fp8(128, 256),
-              (torch.randn(768, 4, generator=gen) * 0.1).to(torch.bfloat16).cuda(),
-              torch.zeros(2, device="cuda"), torch.zeros(2, device="cuda"), norm)
-    attn = Attention(fp8(512, 128), fp8(256, 128), fp8(256, 128), fp8(128, 256), norm, norm)
-    layers = [Layer(True, norm, norm, gdn, None, fp4(256, 128), fp4(256, 128), fp4(128, 256)),
-              Layer(False, norm, norm, None, attn, fp4(256, 128), fp4(256, 128), fp4(128, 256))]
+    m = 128 * n
+    gdn = GDN(fp8(3 * m, 128), fp8(m, 128), bf16(n, 128), bf16(n, 128), fp8(128, m),
+              (torch.randn(3 * m, 4, generator=gen) * 0.1).to(torch.bfloat16).cuda(),
+              torch.zeros(n, device="cuda"), torch.zeros(n, device="cuda"), norm)
+    attn = Attention(fp8(2 * m, 128), fp8(m, 128), fp8(m, 128), fp8(128, m), norm, norm)
+    layers = [Layer(True, norm, norm, gdn, None, fp4(m, 128), fp4(m, 128), fp4(128, m)),
+              Layer(False, norm, norm, None, attn, fp4(m, 128), fp4(m, 128), fp4(128, m))]
     half = c.rope_dims // 2
     inv = (c.rope_theta ** (-torch.arange(0, half, dtype=torch.float64) / half)).float().cuda()
     embed = Plain((torch.randn(256, 128, generator=gen) * 0.5).to(torch.bfloat16).cuda())
@@ -281,12 +308,11 @@ def _model() -> Weights:
     return w
 
 
-@pytest.fixture(scope="module")
-def two():
+def _sharded(world: int):
     from tensorfold.families.qwen3_5.cuda.prefill import prefill_state
 
-    full = _model()
-    shards = [split_weights(full, r, tiled=True, split_head=True) for r in (0, 1)]
+    full = _model(world)
+    shards = [split_weights(full, r, world, tiled=True, split_head=True) for r in range(world)]
     for w in [full] + shards:                   # build every kernel once, so two threads never race to build one
         st = State(w)
         prefill_state(w, [5, 6, 7], st)
@@ -297,9 +323,19 @@ def two():
     return full, shards
 
 
+@pytest.fixture(scope="module")
+def two():
+    return _sharded(2)
+
+
+@pytest.fixture(scope="module", params=[2, 4], ids=["two", "four"])
+def sharded(request):
+    return _sharded(request.param)
+
+
 @pytest.fixture
-def ranks(monkeypatch):
-    r = _Ranks()
+def ranks(monkeypatch, sharded):
+    r = _Ranks(len(sharded[1]))
     monkeypatch.setattr(distributed, "gather_rank_partials", r.gather)
     return r
 
@@ -314,10 +350,18 @@ def test_split_weights_keeps_the_stored_formats(two):
         assert s.head.n == 128 and s.head.layout == "volta-f16" and s.embed is full.embed
 
 
-def test_two_rank_window_rows_equal_two_rank_serial_steps(two, ranks):
-    """A two-rank tree window equals serial steps and its committed state; logits match one GPU's to bf16 rounding."""
+def test_split_weights_on_four_ranks_take_a_quarter():
+    full, shards = _sharded(4)
+    for s in shards:
+        assert s.config.heads == s.config.kv_heads == 1 and s.config.intermediate == 128
+        assert s.layers[0].down.k == 128 and s.layers[0].gdn.qkv.n == 384 and s.layers[0].gdn.b.n == 1
+        assert s.layers[1].attn.o.k == 128 and s.head.n == 64 and s.embed is full.embed
 
-    full, shards = two
+
+def test_rank_window_rows_equal_that_rank_counts_serial_steps(sharded, ranks):
+    """A tree window on two or four ranks equals that rank count's serial steps; logits match one GPU's to bf16 rounding."""
+
+    full, shards = sharded
     tokens, parents, path = [7, 8, 9, 10, 11], [-1, 0, 0, 1, 3], [0, 1, 3, 4]
     prompt = [3 + (5 * i) % 250 for i in range(9)]
 
@@ -339,25 +383,25 @@ def test_two_rank_window_rows_equal_two_rank_serial_steps(two, ranks):
         commit(win_state, record, path)
         return logits, serial, win_state, st
 
-    (l0, s0, w0, t0), (l1, s1, w1, t1) = ranks.run(rank_run)
+    got = ranks.run(rank_run)
     assert ranks.calls == 7 * 4             # 2 prompts, 1 window, 4 steps: two row-parallel sums in each layer
-    assert l0.shape == l1.shape == (5, 128)
-    for row in path:
-        assert torch.equal(l0[row], s0[row]) and torch.equal(l1[row], s1[row]), f"row {row} differs from serial"
-    for a, b in ((w0, t0), (w1, t1)):
-        assert torch.equal(a.rec[0], b.rec[0]) and torch.equal(a.conv[0], b.conv[0])
-        assert torch.equal(a.kv[1][0][:a.pos], b.kv[1][0][:b.pos])
+    for logits, serial, win, st in got:
+        assert logits.shape == (5, 256 // len(shards))
+        for row in path:
+            assert torch.equal(logits[row], serial[row]), f"row {row} differs from serial"
+        assert torch.equal(win.rec[0], st.rec[0]) and torch.equal(win.conv[0], st.conv[0])
+        assert torch.equal(win.kv[1][0][:win.pos], st.kv[1][0][:st.pos])
     from tensorfold.families.qwen3_5.cuda.prefill import prefill_state
 
     st = State(full)
     prefill_state(full, prompt, st)
     one, _ = tree_forward(full, torch.tensor(tokens, device="cuda", dtype=torch.int32), parents, st)
-    both = torch.cat([l0, l1], dim=1).float()
-    assert (both - one.float()).abs().max().item() <= 0.05 * one.float().abs().max().item()
+    every = torch.cat([g[0] for g in got], dim=1).float()
+    assert (every - one.float()).abs().max().item() <= 0.05 * one.float().abs().max().item()
 
 
-def test_two_rank_runs_repeat_bit_for_bit(two, ranks):
-    full, shards = two
+def test_rank_runs_repeat_bit_for_bit(sharded, ranks):
+    full, shards = sharded
     prompt = [3 + (11 * i) % 250 for i in range(30)]
 
     def rank_run(rank):
@@ -376,8 +420,8 @@ def test_two_rank_runs_repeat_bit_for_bit(two, ranks):
         assert torch.equal(a, b)
 
 
-def test_two_rank_prompts_ignore_chunking(two, ranks):
-    full, shards = two
+def test_rank_prompts_ignore_chunking(sharded, ranks):
+    full, shards = sharded
     prompt = [3 + (7 * i) % 250 for i in range(67)]
 
     def rank_run(rank):

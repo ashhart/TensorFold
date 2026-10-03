@@ -45,6 +45,16 @@ def test_serve_parses_the_cuda_flags():
     assert (args.backend, args.tp, args.rank, args.master, args.master_port) == ("auto", 2, 1, "192.0.2.11", 29551)
 
 
+def test_serve_parses_four_ranks_and_refuses_a_rank_past_them(tmp_path):
+    args = cli.build_parser().parse_args(["serve", "owner/model", "--tp", "4", "--rank", "3", "--master", "192.0.2.11"])
+    assert (args.tp, args.rank) == (4, 3)
+    family = _family(cuda_engine=lambda *a, **k: None)
+    bad = argparse.Namespace(tp=2, rank=3, master="192.0.2.11", master_port=29551, no_drafts=True, drafter="none",
+                             mtp_drafts=None, name="", model=str(tmp_path))
+    with pytest.raises(ValueError, match="--rank 3 needs --tp 4"):
+        cli._serve_cuda(bad, family, tmp_path)
+
+
 @pytest.mark.parametrize("override, expected", [(None, 128), (0, 0), (64, 64)])
 def test_cuda_dispatch_keeps_the_resolved_context(tmp_path, monkeypatch, override, expected):
     import json

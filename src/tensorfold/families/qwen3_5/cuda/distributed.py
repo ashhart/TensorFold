@@ -1,4 +1,4 @@
-"""Two-rank shards preserve packed rows and quantization-group boundaries, keeping row-parallel partials in fp32 until rank-ordered summation."""
+"""Rank shards (two or four) preserve packed rows and quantization-group boundaries, keeping row-parallel partials in fp32 until rank-ordered summation."""
 
 from __future__ import annotations
 
@@ -19,9 +19,12 @@ except ImportError:  # CPU hosts can inspect and test the partition map.
     tl = None
 
 
+WORLDS = (2, 4)
+
+
 def _rank(rank: int, world_size: int) -> None:
-    if world_size != 2 or rank not in (0, 1):
-        raise ValueError("the CUDA partition map currently requires two ranks")
+    if world_size not in (2, 4) or rank not in range(world_size):
+        raise ValueError(f"the CUDA partition map takes two or four ranks, not rank {rank} of {world_size}")
 
 
 def output_rows(n: int, rank: int, world_size: int = 2,
@@ -85,12 +88,12 @@ def shard_layer(rank: int, world_size: int = 2):
     return lambda layer, cfg: split_layer(layer, cfg, rank, world_size).layer
 
 
-def half_layers(transform):
-    """Admission bytes for a rank of two that loads layers as shards: layer tensors halved, embedding and head whole."""
+def half_layers(transform, world_size: int = 2):
+    """Admission bytes for a rank that loads layers as shards: layer tensors split by the rank count, embedding and head whole."""
 
     def bytes_on_rank(name, info):
         amount, host = transform(name, info)
-        return (amount // 2 if ".layers." in name else amount), host
+        return (amount // world_size if ".layers." in name else amount), host
     return bytes_on_rank
 
 
@@ -137,27 +140,27 @@ def split_layer(layer: Layer, cfg: Config, rank: int, world_size: int = 2) -> La
     attn = None
     if layer.attn is not None:
         a = layer.attn
-        attn = Attention(q=split_output(a.q, rank, block=2 * cfg.head_dim),
-                         k=split_output(a.k, rank, block=cfg.head_dim),
-                         v=split_output(a.v, rank, block=cfg.head_dim),
-                         o=split_input(a.o, rank), q_norm=a.q_norm, k_norm=a.k_norm)
+        attn = Attention(q=split_output(a.q, rank, world_size, block=2 * cfg.head_dim),
+                         k=split_output(a.k, rank, world_size, block=cfg.head_dim),
+                         v=split_output(a.v, rank, world_size, block=cfg.head_dim),
+                         o=split_input(a.o, rank, world_size), q_norm=a.q_norm, k_norm=a.k_norm)
     gdn = None
     if layer.gdn is not None:
         g = layer.gdn
         kd, vd = cfg.k_heads * cfg.dk, cfg.v_heads * cfg.dv
-        rows = output_rows(g.qkv.n, rank, segments=(kd, kd, vd), device=g.conv.device)
+        rows = output_rows(g.qkv.n, rank, world_size, segments=(kd, kd, vd), device=g.conv.device)
         vh = cfg.v_heads // world_size
         lo, hi = rank * vh, (rank + 1) * vh
-        gdn = GDN(qkv=split_output(g.qkv, rank, segments=(kd, kd, vd)),
-                  z=split_output(g.z, rank, block=cfg.dv),
-                  b=split_output(g.b, rank), a=split_output(g.a, rank),
-                  out=split_input(g.out, rank),
+        gdn = GDN(qkv=split_output(g.qkv, rank, world_size, segments=(kd, kd, vd)),
+                  z=split_output(g.z, rank, world_size, block=cfg.dv),
+                  b=split_output(g.b, rank, world_size), a=split_output(g.a, rank, world_size),
+                  out=split_input(g.out, rank, world_size),
                   conv=g.conv.index_select(0, rows).contiguous(),
                   A_log=g.A_log[lo:hi].contiguous(),
                   dt_bias=g.dt_bias[lo:hi].contiguous(), norm=g.norm)
     local = Layer(linear=layer.linear, input_norm=layer.input_norm, post_norm=layer.post_norm,
-                  gdn=gdn, attn=attn, gate=split_output(layer.gate, rank),
-                  up=split_output(layer.up, rank), down=split_input(layer.down, rank))
+                  gdn=gdn, attn=attn, gate=split_output(layer.gate, rank, world_size),
+                  up=split_output(layer.up, rank, world_size), down=split_input(layer.down, rank, world_size))
     return LayerShard(local, rank, world_size, cfg.heads // world_size, cfg.kv_heads // world_size,
                       cfg.k_heads // world_size, cfg.v_heads // world_size)
 
@@ -294,19 +297,23 @@ def row_partial(x: torch.Tensor, q: QLinear, sk: int | None = None,
 
 
 def sum_rank_partials(partials: Sequence[torch.Tensor], dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
-    """Local rank-ordered sum, useful for one-GPU parity tests."""
+    """Local rank-ordered sum (fp32 adds, rank 0 first, one rounding), useful for one-GPU parity tests."""
 
-    if len(partials) != 2 or any(p.dtype != torch.float32 or p.shape != partials[0].shape for p in partials):
-        raise ValueError("expected two equally shaped fp32 partials in rank order")
-    return (partials[0] + partials[1]).to(dtype)
+    if len(partials) not in WORLDS or any(p.dtype != torch.float32 or p.shape != partials[0].shape for p in partials):
+        raise ValueError("expected two or four equally shaped fp32 partials in rank order")
+    acc = partials[0]
+    for p in partials[1:]:
+        acc = acc + p
+    return acc.to(dtype)
 
 
 def gather_rank_partials(local: torch.Tensor, group=None,
                          dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
-    """Add two ranks' partials rank 0 first in fp32 and round once; an NCCL all-reduce leaves the order to NCCL."""
+    """Add every rank's partial rank 0 first in fp32 and round once; an NCCL all-reduce leaves the order to NCCL."""
 
-    if not dist.is_initialized() or dist.get_world_size(group) != 2:
-        raise RuntimeError("a two-rank process group must be initialized")
+    if not dist.is_initialized() or dist.get_world_size(group) not in WORLDS:
+        raise RuntimeError("a process group of two or four ranks must be initialized")
+    world = dist.get_world_size(group)
     if local.dtype not in (torch.float32, torch.bfloat16) or local.ndim != 2:
         raise ValueError("local partial must be a 2-D fp32 or bf16 tensor")
     if dist.get_backend(group) == "nccl" and not local.is_cuda:
@@ -320,7 +327,10 @@ def gather_rank_partials(local: torch.Tensor, group=None,
     if os.environ.get("TF_TP_REDUCE") == "allreduce":
         dist.all_reduce(local, op=dist.ReduceOp.SUM, group=group)
         return local.to(dtype)
-    gathered = torch.empty((2 * local.shape[0], local.shape[1]), dtype=local.dtype, device=local.device)
+    gathered = torch.empty((world * local.shape[0], local.shape[1]), dtype=local.dtype, device=local.device)
     dist.all_gather_into_tensor(gathered, local, group=group)
-    rank_parts = gathered.view(2, *local.shape)
-    return (rank_parts[0].float() + rank_parts[1].float()).to(dtype)
+    rank_parts = gathered.view(world, *local.shape)
+    acc = rank_parts[0].float()
+    for r in range(1, world):
+        acc = acc + rank_parts[r].float()
+    return acc.to(dtype)

@@ -78,10 +78,10 @@ class Plain:
         return Plain(self.weight.index_select(0, rows.to(self.weight.device)).contiguous())
 
     def inputs(self, rank: int, world: int = 2) -> "Plain":
-        """Row-parallel shard: half the input columns, as stored."""
+        """Row-parallel shard: this rank's share of the input columns, as stored."""
 
-        if world != 2 or rank not in (0, 1) or self.k % (64 * world):
-            raise ValueError(f"bf16 weight K {self.k} does not split into two halves of whole 64-input groups")
+        if world not in (2, 4) or rank not in range(world) or self.k % (64 * world):
+            raise ValueError(f"bf16 weight K {self.k} does not split into {world} parts of whole 64-input groups")
         half = self.k // world
         return Plain(self.weight[:, rank * half:(rank + 1) * half].contiguous())
 
