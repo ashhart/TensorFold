@@ -12,10 +12,10 @@ import triton.language as tl
 
 from tensorfold.cuda import moe as shared
 
-from . import attention, moe
+from . import attention, glue, moe
 from .weights import Weights
 
-PROMPT_CHUNK = 2048
+PROMPT_CHUNK = 8192            # prompt rows a forward: every chunk reads all experts once, so wider is cheaper
 
 
 @triton.jit
@@ -68,7 +68,7 @@ class Model:
         ang = torch.arange(self.context, dtype=torch.float64, device=device)[:, None] / cfg.rope_theta ** steps
         self.cos = torch.cat([ang.cos(), ang.cos()], -1).float()          # [context, D] (neox halves)
         self.sin = torch.cat([ang.sin(), ang.sin()], -1).float()
-        self.half = cfg.head_dim // 2
+        self.qk_norms = [torch.stack([L.q_norm, L.k_norm]).contiguous() for L in w.layers]
         self.scale = cfg.head_dim ** -0.5
 
     @staticmethod
@@ -78,11 +78,6 @@ class Model:
         row = 2 * cfg.kv_heads * cfg.head_dim * 2
         full = sum(cfg.full)
         return row * (full * context + (len(cfg.full) - full) * attention.ring_size(PROMPT_CHUNK, cfg.window))
-
-    def _rope(self, x: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
-        cos, sin = self.cos[pos][:, None], self.sin[pos][:, None]
-        rot = torch.cat([-x[..., self.half:], x[..., :self.half]], -1)
-        return x * cos + rot * sin
 
     @torch.no_grad()
     def forward(self, chains: Sequence[Chain], *, prompt: bool, rows: Sequence[int] | None = None) -> torch.Tensor:
@@ -104,47 +99,32 @@ class Model:
         ids = ids.to(dev, non_blocking=True)
         pos = torch.tensor(pos_l, dtype=torch.int64).to(dev, non_blocking=True)
         pos32, slot32 = pos.to(torch.int32), torch.tensor(slot_l, dtype=torch.int32).to(dev, non_blocking=True)
-        slot64 = slot32.to(torch.int64)
-        ring_at = pos % self.ring
         groups = [(len(c.tokens), c.p0) for c in chains]
         res = w.embed[ids].float()
         h, hk, d, eps = cfg.heads, cfg.kv_heads, cfg.head_dim, cfg.eps
+        x = rms(res, w.layers[0].input_norm, eps, bf16=True)
         for i, L in enumerate(w.layers):
-            x = rms(res, L.input_norm, eps, bf16=True)
-            qkv = L.qkv(x)
-            q = rms(qkv[:, :h * d].reshape(n, h, d), L.q_norm, eps, bf16=False)
-            k = rms(qkv[:, h * d:(h + hk) * d].reshape(n, hk, d), L.k_norm, eps, bf16=False)
-            v = qkv[:, (h + hk) * d:].reshape(n, hk, d).contiguous()
+            q, k, v = glue.qkv(L.qkv(x), self.qk_norms[i], self.cos, self.sin, pos32, slot32, self.k[i], self.v[i],
+                               heads=h, kv_heads=hk, eps=eps, rope=not cfg.full[i])
             if not cfg.full[i]:
-                q, k = self._rope(q, pos), self._rope(k, pos)
-            q, k = q.to(torch.bfloat16).contiguous(), k.to(torch.bfloat16).contiguous()
-            if not cfg.full[i]:
-                self.k[i][slot64, ring_at] = k
-                self.v[i][slot64, ring_at] = v
                 a = attention.sliding(q, self.k[i], self.v[i], pos32, slot32, window=cfg.window, scale=self.scale)
             elif prompt:
                 c = chains[0]
-                kc, vc = self.k[i][c.slot], self.v[i][c.slot]
-                kc[c.p0:c.p0 + n] = k
-                vc[c.p0:c.p0 + n] = v
-                a = attention.full_prompt(q, kc, vc, c.p0, scale=self.scale)
+                a = attention.full_prompt(q, self.k[i][c.slot], self.v[i][c.slot], c.p0, scale=self.scale)
             else:
                 caches = [(self.k[i][c.slot], self.v[i][c.slot]) for c in chains]
                 a = attention.full_rows(q, k, v, caches, groups, scale=self.scale)
-                self.k[i][slot64, pos] = k
-                self.v[i][slot64, pos] = v
-            o = L.o(a.view(n, h * d))
-            res = res + rms(o, L.post_attn_norm, eps, bf16=False)
-            x = rms(res, L.pre_moe_norm, eps, bf16=True)
+            x = glue.add_rms(L.o(a.view(n, h * d)), res, L.post_attn_norm, L.pre_moe_norm, eps)
             m = moe.run(x, L.router, L.bias, L.experts, cfg.top_k, prefill=prompt)
-            res = res + rms(m, L.post_moe_norm, eps, bf16=False)
+            after = w.layers[i + 1].input_norm if i + 1 < len(w.layers) else w.norm
+            x = glue.add_rms(m, res, L.post_moe_norm, after, eps)
         if rows is None:
             ends, at = [], 0
             for c in chains:
                 at += len(c.tokens)
                 ends.append(at - 1)
             rows = ends
-        x = rms(res[torch.tensor(list(rows), device=dev)], w.norm, eps, bf16=True)
+        x = x[torch.tensor(list(rows), device=dev)]
         return shared.router(x, w.head)
 
     def prefill(self, prompt: Sequence[int], start: int = 0, slot: int = 0, chunk: int | None = None) -> torch.Tensor:

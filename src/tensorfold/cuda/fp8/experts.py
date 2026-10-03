@@ -12,6 +12,7 @@ from tensorfold.cuda import experts as grouped
 
 COLS = 32                 # output columns a warp
 BLOCK = 128               # the checkpoint's scale block, both ways
+PROMPT_TILE = 64          # pairs a prompt item holds: four warps of 16 share each staged block
 
 
 @lru_cache(maxsize=1)
@@ -19,7 +20,7 @@ def _ext():
     from tensorfold.cuda.build import MIN_CAPABILITY, load
 
     here = Path(__file__).parent
-    return load(name="tensorfold_fp8_experts_v1", sources=[str(here / "experts.cpp"), str(here / "experts.cu")],
+    return load(name="tensorfold_fp8_experts_v6", sources=[str(here / "experts.cpp"), str(here / "experts.cu")],
                 need=MIN_CAPABILITY, extra_cuda_cflags=["-O3"], verbose=False)
 
 
@@ -71,6 +72,10 @@ def make(gate: tuple, up: tuple, down: tuple, *, limit: float = 0.0) -> Experts8
 def _run(epi: int, x: torch.Tensor, slots: int, w: torch.Tensor, scale: torch.Tensor, kg: int, nb: int,
          plan: grouped.Plan, out: torch.Tensor, n: int, limit: float, skip: int, rows: int) -> None:
     units = grouped.max_items(rows * plan.slots, plan.experts, plan.tile) * nb
+    if plan.prefill and plan.tile == PROMPT_TILE:      # an item a CTA, its blocks staged once
+        _ext().prompt(epi, x, x.stride(0), slots, w, scale, kg, nb, plan.items, plan.counts, plan.members, out, n,
+                      limit, skip, units)
+        return
     _ext().experts(epi, x, x.stride(0), slots, w, scale, kg, nb, plan.items, plan.counts, plan.members, out, n,
                    limit, skip, units)
 

@@ -67,7 +67,7 @@ def run(x: torch.Tensor, router: torch.Tensor, bias: torch.Tensor, ex: fp8x.Expe
     shared.router(x, router, buf.logits[:rows])
     _topk[(rows,)](buf.logits, bias, buf.pick, buf.wts, NE=experts, TOPK=top_k, SLOTS=top_k + 1,
                    BLOCK=triton.next_power_of_2(experts), SLOTP=triton.next_power_of_2(top_k + 1), num_warps=4)
-    grouped.route(buf.pick[:rows], buf.plan, 16)
+    grouped.route(buf.pick[:rows], buf.plan, fp8x.PROMPT_TILE if prefill else 16)
     fp8x.gate_up(x, ex, buf.plan, buf.act[:rows * buf.slots], rows)
     fp8x.down(buf.act[:rows * buf.slots], ex, buf.plan, buf.y[:rows].view(-1, ex.dims), rows)
     return shared.combine(buf.y[:rows], buf.wts[:rows])

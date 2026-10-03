@@ -29,7 +29,7 @@ def setup(rows: int, e: int = 6, width: int = 256, dims: int = 512, slots: int =
 def run(grouped, fp8x, ex, x, picks, prefill: bool = False):
     rows, slots = picks.shape
     plan = grouped.Plan(rows, slots, ex.count, x.device, prefill=prefill)
-    grouped.route(picks.contiguous(), plan, 16)
+    grouped.route(picks.contiguous(), plan, fp8x.PROMPT_TILE if prefill else 16)
     act = torch.empty((rows * slots, ex.width), dtype=torch.bfloat16, device=x.device)
     fp8x.gate_up(x, ex, plan, act, rows)
     y = torch.empty((rows * slots, ex.dims), dtype=torch.float32, device=x.device)
@@ -57,8 +57,14 @@ def test_a_pairs_bits_never_depend_on_the_other_rows():
     for r in (0, 7, 39):
         a1, y1 = run(grouped, fp8x, ex, x[r:r + 1].contiguous(), picks[r:r + 1])
         assert torch.equal(act[r], a1[0]) and torch.equal(y[r], y1[0])
-    ap, yp = run(grouped, fp8x, ex, x, picks, prefill=True)            # a prompt plan's grouping, same bits
+    ap, yp = run(grouped, fp8x, ex, x, picks, prefill=True)            # the staged prompt kernel, same bits
     assert torch.equal(act, ap) and torch.equal(y, yp)
+
+
+def test_the_staged_prompt_kernel_equals_the_decode_kernel_on_long_items():
+    grouped, fp8x, ex, _, x, picks = setup(300, e=4, seed=2)          # ~225 pairs an expert: several 64-pair items
+    assert torch.equal(torch.cat(run(grouped, fp8x, ex, x, picks), -1),
+                       torch.cat(run(grouped, fp8x, ex, x, picks, prefill=True), -1))
 
 
 def test_unaligned_blocks_are_refused():
