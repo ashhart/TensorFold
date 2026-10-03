@@ -290,7 +290,7 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
             if world > 1:
                 gate, up, dn = gate[:, lo:hi], up[:, lo:hi], dn[:, :, dlo * gs:dhi * gs]
             moe4 = nvfp4_moe.moe4_from_bf16(torch.cat([gate, up], dim=1), dn, shared)
-        elif rd.has(prefix + f"{name}.experts.0.gate_proj.weight"):    # the main layers: per-expert FP4
+        elif rd.has(prefix + f"{name}.experts.0.gate_proj.weight"):    # per-expert FP4 (some exports' MTP too)
             def stack(proj: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
                 weights = [raw(f"{name}.experts.{i}.{proj}.weight") for i in range(e)]
                 if any(w.dtype != torch.uint8 for w in weights):
@@ -303,7 +303,7 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
             gate = stack("gate_proj")
             up = stack("up_proj")
             down = stack("down_proj")
-            if nvfp4_moe.own_math(world):                # rows in NVFP4 under the checkpoint's static input scales
+            if nvfp4_moe.own_math(world) and not name.startswith("mtp."):   # MTP's draft-only experts keep theirs
                 def acts(proj: str) -> torch.Tensor:
                     names = [f"{name}.experts.{i}.{proj}.input_scale" for i in range(e)]
                     if not all(rd.has(prefix + n) for n in names):

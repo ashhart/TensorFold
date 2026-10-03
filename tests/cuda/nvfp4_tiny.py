@@ -55,8 +55,8 @@ def write(dir: Path, *, layers: int = 2, experts: int = 2, vocab: int = 256, hid
           ple: bool = True, mtp: bool = True, seed: int = 0, prefix: str = "", ple_bf16: bool = False,
           mxfp8: bool = False, ple_nvfp4: bool = False, centred: bool = False, fp8block: bool = False,
           mtp_experts: str = "bf16", mtp_scale: str = "tensor") -> Path:
-    """Write ModelOpt weights with bf16 or FP8 MTP experts and tensor, row or block FP8 scales."""
-    if mtp_experts not in ("bf16", "fp8", "fp8_dequant") or mtp_scale not in ("tensor", "row", "block"):
+    """Write ModelOpt weights with bf16, FP8 or NVFP4 MTP experts and tensor, row or block FP8 scales."""
+    if mtp_experts not in ("bf16", "fp8", "fp8_dequant", "nvfp4") or mtp_scale not in ("tensor", "row", "block"):
         raise ValueError("unsupported MTP expert format or scale layout")
     dir.mkdir(parents=True, exist_ok=True)
     rng = torch.Generator().manual_seed(seed)
@@ -195,6 +195,15 @@ def write(dir: Path, *, layers: int = 2, experts: int = 2, vocab: int = 256, hid
         if mtp_experts == "bf16":
             add("mtp.layers.0.mlp.experts.gate_up_proj", rand(experts, 2 * moe_width, hidden))
             add("mtp.layers.0.mlp.experts.down_proj", rand(experts, hidden, moe_width))
+        elif mtp_experts == "nvfp4":                     # per-expert NVFP4 with no input scales, as some exports
+            for i in range(experts):
+                for p_, (n_, k_) in (("gate_proj", (moe_width, hidden)), ("up_proj", (moe_width, hidden)),
+                                     ("down_proj", (hidden, moe_width))):
+                    words, s8, s2 = _quant_rows(rand(n_, k_), rng)
+                    add(f"mtp.layers.0.mlp.experts.{i}.{p_}.weight", words)
+                    e4m3 = s8.view(torch.uint8).view(torch.float8_e4m3fn)
+                    add(f"mtp.layers.0.mlp.experts.{i}.{p_}.weight_scale", e4m3)
+                    add(f"mtp.layers.0.mlp.experts.{i}.{p_}.weight_scale_2", torch.tensor(s2))
         else:                                            # per-expert e4m3 with fp32 scales
             def expanded(scale: torch.Tensor) -> torch.Tensor:
                 if mtp_scale == "block":

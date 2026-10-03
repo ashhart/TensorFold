@@ -128,6 +128,21 @@ def test_the_checkpoint_math_stacks_the_routed_experts_for_the_fp4_mma(tiny: Pat
     assert not w.mtp.layer.moe.experts.own_math
 
 
+def test_nvfp4_mtp_experts_without_input_scales_keep_their_blocks_under_the_checkpoint_math(tmp_path: Path) -> None:
+    """An export whose MTP experts are per-expert NVFP4 with no input scales loads; only the main layers change math."""
+
+    if torch.cuda.get_device_capability()[0] != 12:
+        pytest.skip("the block-scaled FP4 mma needs an SM 12.x GPU")
+    from tensorfold.cuda import precision
+    from tensorfold.families.qwen4_exp.cuda.weights import load
+
+    with precision.using(precision.CHECKPOINT):
+        w = load(write(tmp_path / "mtp4", mtp_experts="nvfp4"), mtp=True, draft_vocab=None)
+    assert w.layers[0].moe.experts.own_math
+    mtp = w.mtp.layer.moe.experts
+    assert not mtp.own_math and getattr(mtp, "kernel", "") == "nvfp4"
+
+
 def test_the_reader_finds_the_published_naming(tmp_path: Path) -> None:
     """The published NVFP4 checkpoint spells its language-model tensors ``model.language_model.*`` while its
     lm_head and mtp stay top level; the loader reads the same faces as from the plain ``model.*`` layout."""
