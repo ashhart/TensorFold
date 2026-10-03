@@ -74,30 +74,35 @@ def vision_tensors(model_dir: Path, *, weights_path: Path | None = None) -> dict
     return result
 
 
+def read_vision_tensor(name: str, path: Path, item: dict, begin: int) -> np.ndarray:
+    """One tensor's bytes from its byte range, as stored (BF16 as raw ``uint16``)."""
+    dtype = item.get("dtype")
+    if dtype not in DTYPES:
+        raise ValueError(f"Unsupported vision tensor dtype {dtype}: {name}")
+    shape = item.get("shape", ())
+    if any(not isinstance(n, int) or n < 0 for n in shape):
+        raise ValueError(f"Invalid vision tensor shape: {name}")
+    offsets = item.get("data_offsets", ())
+    if len(offsets) != 2 or any(not isinstance(n, int) for n in offsets):
+        raise ValueError(f"Invalid vision tensor offsets: {name}")
+    start, end = offsets
+    dt = np.dtype(DTYPES[dtype])
+    if start < 0 or end - start != math.prod(shape) * dt.itemsize or begin + end > path.stat().st_size:
+        raise ValueError(f"Invalid vision tensor range: {name}")
+    with path.open("rb") as stream:
+        stream.seek(begin + start)
+        raw = stream.read(end - start)
+    if len(raw) != end - start:
+        raise ValueError(f"Incomplete vision tensor: {name}")
+    return np.frombuffer(raw, dtype=dt).reshape(shape).copy()
+
+
 def load_vision_weights(tensors: dict[str, tuple[Path, dict, int]], mx: Any) -> dict[str, Any]:
     """Read selected byte ranges rather than materializing the language tensors in mixed shards."""
     weights = {}
     for name, (path, item, begin) in tensors.items():
-        dtype = item.get("dtype")
-        if dtype not in DTYPES:
-            raise ValueError(f"Unsupported vision tensor dtype {dtype}: {name}")
-        shape = item.get("shape", ())
-        if any(not isinstance(n, int) or n < 0 for n in shape):
-            raise ValueError(f"Invalid vision tensor shape: {name}")
-        offsets = item.get("data_offsets", ())
-        if len(offsets) != 2 or any(not isinstance(n, int) for n in offsets):
-            raise ValueError(f"Invalid vision tensor offsets: {name}")
-        start, end = offsets
-        dt = np.dtype(DTYPES[dtype])
-        if start < 0 or end - start != math.prod(shape) * dt.itemsize or begin + end > path.stat().st_size:
-            raise ValueError(f"Invalid vision tensor range: {name}")
-        with path.open("rb") as stream:
-            stream.seek(begin + start)
-            raw = stream.read(end - start)
-        if len(raw) != end - start:
-            raise ValueError(f"Incomplete vision tensor: {name}")
-        array = mx.array(np.frombuffer(raw, dtype=dt).reshape(shape).copy())
-        weights[name] = array.view(mx.bfloat16) if dtype == "BF16" else array
+        array = mx.array(read_vision_tensor(name, path, item, begin))
+        weights[name] = array.view(mx.bfloat16) if item["dtype"] == "BF16" else array
     return weights
 
 

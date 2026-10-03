@@ -1,6 +1,7 @@
-"""Convert an EXL3 Qwen vision sidecar once; serving loads the cached floating tower.
+"""Convert an EXL3 Qwen vision tower once; serving loads the cached floating tower.
 
 Usage: python -m tensorfold.vision.exl3_convert vision_k6.safetensors vision-f16.safetensors
+   or: python -m tensorfold.vision.exl3_convert /models/pack vision-f16.safetensors   (tower inside the shards)
 Set TENSORFOLD_VISION_WEIGHTS to the output when starting a CUDA vision server.
 The source remains unchanged. The artifact records its hash, codec and conversion version.
 """
@@ -73,28 +74,50 @@ def convert_tensors(tensors, config=None):
     return {"vision_tower." + name: np.ascontiguousarray(value) for name, value in result.items()}
 
 
+def _read(source: Path) -> tuple[dict, str]:
+    """The tower's arrays from a sidecar file or a pack's indexed shards, and the hash that names that source."""
+    from .qwen_checkpoint import read_vision_tensor, vision_tensors
+
+    found = vision_tensors(source) if source.is_dir() else vision_tensors(source.parent, weights_path=source)
+    digest, tensors = hashlib.sha256(), {}
+    for name in sorted(found):
+        path, item, begin = found[name]
+        value = read_vision_tensor(name, path, item, begin)
+        if source.is_dir():          # a pack's shards also hold language weights: hash only the tower's tensors
+            digest.update(json.dumps([name, item["dtype"], item["shape"]]).encode())
+            digest.update(value.tobytes())
+        if item["dtype"] == "BF16":  # numpy has no bfloat16: widen the stored bits to float32
+            value = (value.astype(np.uint32) << 16).view(np.float32)
+        tensors["visual." + name] = value
+    if not source.is_dir():
+        with source.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(8 * 1024**2), b""):
+                digest.update(chunk)
+    return tensors, digest.hexdigest()
+
+
 def convert(source: Path, output: Path):
     from safetensors import safe_open
-    from safetensors.numpy import load_file, save_file
+    from safetensors.numpy import save_file
 
-    config_path = source.parent / "config.json"  # retain the snapshot directory before following HF blob symlinks
+    # retain the snapshot directory before following HF blob symlinks
+    config_path = (source if source.is_dir() else source.parent) / "config.json"
     source, output = source.resolve(), output.resolve()
     if source == output:
         raise ValueError("output must differ from the immutable source")
-    digest = hashlib.sha256()
-    with source.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(8 * 1024**2), b""):
-            digest.update(chunk)
+    found, digest = _read(source)
     config_raw = config_path.read_bytes() if config_path.exists() else b""
     config = json.loads(config_raw).get("vision_config") if config_raw else None
-    metadata = {"tensorfold_converter": VERSION, "source_sha256": digest.hexdigest(), "dtype": "F16",
+    metadata = {"tensorfold_converter": VERSION, "source_sha256": digest, "dtype": "F16",
                 "config_sha256": hashlib.sha256(config_raw).hexdigest()}
     if output.exists():
         with safe_open(str(output), framework="np") as existing:
             if existing.metadata() != metadata:
                 raise ValueError("existing artifact belongs to a different source or converter; choose a new output")
         return output
-    tensors = convert_tensors(load_file(str(source)), config)
+    tensors = convert_tensors(found, config)
+    if not all(np.isfinite(value).all() for value in tensors.values()):
+        raise ValueError("vision weights overflow float16")
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(output.name + ".tmp-" + str(os.getpid()))
     try:
