@@ -44,8 +44,10 @@ def output_rows(n: int, rank: int, world_size: int = 2,
 
 def split_output(q: QLinear, rank: int, world_size: int = 2,
                  segments: Sequence[int] | None = None, block: int = 1) -> QLinear:
-    """Column-parallel QLinear: each rank owns complete output rows."""
+    """Column-parallel QLinear: each rank owns complete output rows (NVFP4, FP8 and bf16 projections: whole 64-output tiles)."""
 
+    if not isinstance(q, QLinear):
+        return q.outputs(output_rows(q.n, rank, world_size, segments, block, _device(q)))
     if q.layout == "tiled":
         raise ValueError("split the checkpoint layout before tiling")
     rows = output_rows(q.n, rank, world_size, segments, block, q.weight.device)
@@ -56,9 +58,11 @@ def split_output(q: QLinear, rank: int, world_size: int = 2,
 
 
 def split_input(q: QLinear, rank: int, world_size: int = 2) -> QLinear:
-    """Row-parallel QLinear: each rank owns complete declared quantization groups."""
+    """Row-parallel QLinear: each rank owns complete declared quantization groups (NVFP4/FP8/bf16: whole 64-input groups)."""
 
     _rank(rank, world_size)
+    if not isinstance(q, QLinear):
+        return q.inputs(rank, world_size)
     if q.layout == "dense":
         if q.k % world_size:
             raise ValueError("dense input width must divide into equal rank halves")
@@ -73,6 +77,16 @@ def split_input(q: QLinear, rank: int, world_size: int = 2) -> QLinear:
     return QLinear(q.weight[:, w0:w1].contiguous(),
                    q.scales[:, g0:g1].contiguous(),
                    q.biases[:, g0:g1].contiguous(), gs=q.gs, bits=q.bits)
+
+
+def _device(q) -> torch.device:
+    """Where a checkpoint-format projection's stored bytes are."""
+
+    for name in ("words", "w8", "weight"):
+        t = getattr(q, name, None)
+        if torch.is_tensor(t):
+            return t.device
+    raise ValueError(f"{type(q).__name__} cannot be split across two ranks")
 
 
 def local_input(x: torch.Tensor, rank: int, world_size: int = 2, *, group_size: int = 64) -> torch.Tensor:
@@ -135,7 +149,7 @@ def split_layer(layer: Layer, cfg: Config, rank: int, world_size: int = 2) -> La
 
 def split_weights(w: Weights, rank: int, world_size: int = 2, *, tiled: bool = False,
                   fuse: bool = False, split_head: bool = False) -> Weights:
-    """Shard stored MLX words before optional bit-preserving tiling, optionally splitting head rows whose full dot products preserve logits and merged-candidate sampling."""
+    """Shard stored MLX words before optional bit-preserving tiling (an NVFP4 checkpoint's tiles as loaded), optionally splitting head rows whose full dot products preserve logits and merged-candidate sampling."""
 
     _rank(rank, world_size)
     c = w.config
@@ -145,7 +159,7 @@ def split_weights(w: Weights, rank: int, world_size: int = 2, *, tiled: bool = F
     layers = []
     for layer in w.layers:
         local = split_layer(layer, c, rank, world_size).layer
-        if tiled:
+        if tiled and w.quant == "mlx":          # an NVFP4 checkpoint's projections are tiled as loaded
             from .qmm_fast import stack_small, tile
 
             if fuse:
@@ -158,11 +172,15 @@ def split_weights(w: Weights, rank: int, world_size: int = 2, *, tiled: bool = F
                             setattr(owner, name, tile(getattr(owner, name)))
         layers.append(local)
     head = split_output(w.head, rank, world_size) if split_head else w.head
-    if tiled:
+    if tiled and isinstance(head, QLinear):
         from .qmm_fast import tile
 
         head = tile(head)
-    return Weights(local_cfg, w.embed, layers, w.norm, head, w.inv_freq)
+    local = Weights(local_cfg, w.embed, layers, w.norm, head, w.inv_freq, quant=w.quant, prompt_rows=w.prompt_rows)
+    for name in ("precision", "own"):                 # an NVFP4 checkpoint's math, as loaded
+        if hasattr(w, name):
+            setattr(local, name, getattr(w, name))
+    return local
 
 
 if triton is not None:
@@ -215,6 +233,10 @@ def row_partial(x: torch.Tensor, q: QLinear, sk: int | None = None,
                 xs: torch.Tensor | None = None) -> torch.Tensor:
     """Row-parallel projection, returning an fp32 (rows, outputs) partial."""
 
+    if not isinstance(q, QLinear):                    # NVFP4 / FP8 lane matmuls in fp32, bf16 rows as ``b16`` gives them
+        if sk is not None:
+            raise ValueError("checkpoint-format row partials use the shape's own split")
+        return q.partial(x)
     if not q.fast:
         from tensorfold.cuda.kernels.affine import matmul as affine_matmul
 

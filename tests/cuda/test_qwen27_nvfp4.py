@@ -184,18 +184,24 @@ def test_checkpoint_drafted_equals_serial(engine, seed):
     assert d_stats["rounds"] < s_stats["rounds"]                     # drafting did accept tokens
 
 
-def test_an_nvfp4_checkpoint_refuses_two_ranks_and_vision(tmp_path, monkeypatch):
-    """Two ranks and image input are tested on the MLX checkpoint only: an NVFP4 one stops at startup by name."""
+def test_an_nvfp4_checkpoint_starts_two_ranks_and_refuses_vision(tmp_path, monkeypatch):
+    """Two ranks start on an NVFP4 checkpoint (shards: ``test_qwen27_nvfp4_tp``); image input stops at startup by name."""
 
     import json
 
     from tensorfold.families.qwen3_5.cuda.engine import Qwen27Engine
 
-    monkeypatch.setattr("torch.distributed.init_process_group", lambda *a, **k: pytest.fail("the ranks started"))
+    class Started(Exception):
+        pass
+
+    def started(*a, **k):
+        raise Started()
+
+    monkeypatch.setattr("torch.distributed.init_process_group", started)
 
     (tmp_path / "config.json").write_text(json.dumps({"model_type": "qwen3_5", "quantization_config": {
         "quant_method": "modelopt", "quant_algo": "NVFP4"}}))
-    with pytest.raises(ValueError, match="one GPU"):
+    with pytest.raises(Started):
         Qwen27Engine(tmp_path, None, tp=2, master="127.0.0.1")
     with pytest.raises(ValueError, match="vision"):
         Qwen27Engine(tmp_path, None, vision=True)

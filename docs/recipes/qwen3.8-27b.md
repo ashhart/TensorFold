@@ -54,7 +54,7 @@ activations by default; what that costs against the FP8 prompt path (`--prefill-
 
 | Checkpoint | Weights | Ranks | bf16 prompts against `--prefill-fp8` |
 | --- | --- | --- | --- |
-| `nvidia/Qwen3.8-27B-NVFP4` | NVFP4 MLP and head, FP8 attention and DeltaNet | one | not measured yet |
+| `nvidia/Qwen3.8-27B-NVFP4` | NVFP4 MLP and head, FP8 attention and DeltaNet | one or two | not measured yet |
 | `turboderp/Qwen3.8-27B-exl3` (3.00bpw) | EXL3 | one | unchanged: EXL3 prompts never took FP8 activations |
 | `TensorFold/Qwen3.8-27B-MLX-4bit` | MLX affine 4-bit, groups of 64 | one or two | 0.73-0.82x from 2k to 128k |
 
@@ -70,8 +70,14 @@ compressed-tensors NVFP4 and FP8 exports, checked on synthetic tensors only. Eac
 FP8 bytes go to the device unchanged, and the lane matmuls turn them into exact bf16 operands (an e2m1 code times
 its block scale fits bf16), so drafted replies equal `"draft": false` ones and prompts keep their bits in any
 chunking. `--parallel` serves concurrent requests as on the MLX checkpoint, each reply equal to the same request
-alone. One GPU: `--tp 2` stops at startup (two ranks read the MLX checkpoint), and so does `--vision` until image
-input is qualified on this checkpoint.
+alone. `--vision` stops at startup until image input is qualified on this checkpoint.
+
+`--tp 2` shards it as the MLX checkpoint shards: NVFP4 and FP8 projections split on whole 64-output tiles (column
+parallel) or whole 64-input groups (row parallel, four e4m3-scaled 16-input blocks each), every stored byte and the
+per-tensor scales unchanged; bf16 gates and the head split by rows. Row-parallel partials stay fp32 and add in rank
+order. Two ranks have their own serial reference: drafted equals `"draft": false` and concurrent
+equals serial on two ranks, while their bits may differ from one GPU's. Checkpoint math (`--precision checkpoint`,
+FP4/FP8 activations) still runs on one GPU.
 
 ```bash
 tensorfold pull nvidia/Qwen3.8-27B-NVFP4 z-lab/Qwen3.8-27B-DFlash2
