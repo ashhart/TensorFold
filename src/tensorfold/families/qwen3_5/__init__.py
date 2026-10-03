@@ -170,8 +170,9 @@ def load(model_dir: Path, *, lane_kernels: str = "auto", drafter: str = "", draf
     return family, tokenizer
 
 
-def lane_family(model: Any, *, lanes: bool, drafter: str, drafter_bits: int, title: str, use: str) -> Any:
-    """Install the lane kernels (M5) or the row decoder (M1-M4) on ``model`` and wrap it, drafter included."""
+def lane_family(model: Any, *, lanes: bool, drafter: str, drafter_bits: int, title: str, use: str,
+                make: Any = None) -> Any:
+    """Install the lane kernels (M5) or the row decoder (M1-M4) on ``model``; wrap it in ``make`` (the family)."""
 
     from tensorfold.families.qwen3_5.family import Qwen35Family
     from tensorfold.kernels.qwen.dense.v1 import lane_qmm
@@ -187,13 +188,14 @@ def lane_family(model: Any, *, lanes: bool, drafter: str, drafter_bits: int, tit
     elif not install_row_decoder(model):
         raise SystemExit(f"[tensorfold] {title}: the lane decoder without tensor units does not take these weights")
     loaded = load_drafter(model, drafter, drafter_bits) if drafter else None
+    make = make or Qwen35Family
     if lanes:
-        family = Qwen35Family(model, drafter=loaded, widest=copy_rows(WIDEST, WIDEST), first_copy_rows=WIDEST)
+        family = make(model, drafter=loaded, widest=copy_rows(WIDEST, WIDEST), first_copy_rows=WIDEST)
     else:
         from tensorfold.kernels.qwen.dense.v1 import row_matmul
 
-        family = Qwen35Family(model, drafter=loaded, widest=copy_rows(row_matmul.WINDOW_ROWS, ROW_COPY_ROWS),
-                              rows=True, first_copy_rows=row_matmul.WINDOW_ROWS)
+        family = make(model, drafter=loaded, widest=copy_rows(row_matmul.WINDOW_ROWS, ROW_COPY_ROWS),
+                      rows=True, first_copy_rows=row_matmul.WINDOW_ROWS)
     timing = ", ".join(f"{w}: {ms:.1f}" for w, ms in sorted(family.window_costs.items()) if w in (1, 2, 4, 8, 16, 17,
                                                                                                     32, 64, 128))
     decoder = "lane kernels" if lanes else "lane decoder without tensor units"

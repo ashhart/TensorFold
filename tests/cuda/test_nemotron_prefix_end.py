@@ -3,6 +3,7 @@
 import pytest
 
 from nemotron_fakes import tiny_weights
+from tensorfold.cuda.draft_depth import Costs, DepthRule
 from tensorfold.engine.exact_sampling import Sampling
 from tensorfold.families.nemotron_h.cuda.app import NemotronEngine
 from tensorfold.families.nemotron_h.cuda.engine import Engine
@@ -17,6 +18,7 @@ def test_nemotron_resends_and_thinking_turns_resume(sampling):
     app.e = app._make()
     app.mtp = MTPHead(app.e)
     app.tp, app.rank, app.drafts, app.confidence = 1, 0, 3, 0.3
+    app.rules = {m: DepthRule(Costs(tuple(range(18)), 0.5), 3, floor=0.3) for m in (False, True)}
     app.max_len, app.cache, app.serial, app.eos = 1024, [], None, tuple(w.config.eos)
     prompt = list(range(11, 30))
 
@@ -81,6 +83,7 @@ def test_three_resends_preserve_every_kept_nemotron_state(sampling):
     app.e, app.mtp = app._make(), None
     app.mtp = MTPHead(app.e)
     app.tp, app.rank, app.drafts, app.confidence = 1, 0, 3, 0.3
+    app.rules = {m: DepthRule(Costs(tuple(range(18)), 0.5), 3, floor=0.3) for m in (False, True)}
     app.max_len, app.cache, app.serial, app.eos = 1024, [], None, ()
     ref = app._make()
     ref_head = MTPHead(ref)

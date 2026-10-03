@@ -18,6 +18,7 @@ from tensorfold.server.messages import validate_modalities
 from tensorfold.server.probabilities import TokenBytes, probability_options
 from tensorfold.server.request_options import heard_effort, parse_numbers, thinking_fields
 from tensorfold.server.stopping import matched_stop, stop_options
+from tensorfold.server.thinking_notes import unanswered
 from tensorfold.server.token_routes import flag, token_ids
 from tensorfold.server.tool_policy import ToolCallPolicy
 from tensorfold.engine.call_gate import CallGate, ThinkBudget, call_format, generate_gated
@@ -550,6 +551,9 @@ class App:
         if tail:
             final["content"] = tail
         finish = "tool_calls" if calls else ("stop" if stopped["stop"] or (out and out[-1] in ends) else "length")
+        warning = unanswered(finish, chat and thinking, content, calls)
+        if warning:
+            print(warning, flush=True)
         print_done(len(prompt), (cached or [0])[0], thinking, out, finish, stats, request)
         if body.get("return_token_ids"):              # the reply's ids in the "tensorfold" block, for exactness checks
             stats = {**(stats or {}), "token_ids": [int(t) for t in out]}

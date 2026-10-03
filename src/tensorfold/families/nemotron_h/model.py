@@ -100,6 +100,7 @@ class NemotronH:
         self.lane_matmul = True
         self.fused.lane_xs = True           # the norm kernels hand the projections their input sums
         self.window_rows = 64               # lane matmuls and attention keep wide windows' rows cheap
+        self.fused.group_rows = 2           # here a window shares its rows' expert reads from two rows on
 
     lane_matmul = False
 

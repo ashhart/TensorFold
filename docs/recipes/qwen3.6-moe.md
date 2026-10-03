@@ -1,8 +1,8 @@
 # Qwen3.6-35B-A3B
 
-The `qwen3_5_moe` family serves Qwen3.6-35B-A3B on one NVIDIA GPU. Its layers are the 27B's (Gated DeltaNet
-and gated full attention, every fourth layer attention) with routed experts in place of the dense MLP, and it
-drafts with the checkpoint's own MTP layer.
+The `qwen3_5_moe` family serves Qwen3.6-35B-A3B on Apple Silicon and on one NVIDIA GPU. Its layers are the 27B's
+(Gated DeltaNet and gated full attention, every fourth layer attention) with routed experts in place of the dense
+MLP, and on both backends it drafts with the checkpoint's own MTP layer.
 
 ## Checkpoint
 
@@ -20,6 +20,46 @@ is placed in it. After the weights, one Spark keeps about 75 GB for caches: atte
 DeltaNet 63 MB a stream.
 
 `--no-drafts` or request field `"draft": false` selects serial decoding, the reference drafted output equals.
+
+## Mac execution
+
+Macs verify on the dense family's row decoder (row-exact matmuls and attention, routed experts through MLX's
+grouped matmul), every window checked at load against one-row steps. Drafts come from the MTP layer:
+
+- The head reads each kept row's final normed state with the next token's embedding, and draws its drafts with
+  the target's keyed rule over a 79,616-id draft vocabulary. Drafts only choose the rows a round verifies, so
+  every reply equals its `"draft": false` run.
+- It absorbs every prompt row into its own attention cache; a long prompt's first token comes no later.
+- Each round's depth comes from this Mac's costs: the verify windows timed at load, then the stream's measured
+  rounds, against each depth's landing rate in the stream. Where no depth beats a plain round by 5%, a round
+  verifies the pending token alone; a probe draft follows 8 plain rounds, then 16, 32 and on to 128 while drafts
+  keep losing. `--mtp-drafts N` caps the chain (default 4).
+- Concurrent streams absorb their kept rows in one head pass and draft level by level, each by its own rule.
+- `mlx-community/Qwen3.6-35B-A3B-4bit` has the same weights without the MTP file. It drafts with the file from
+  `TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP` once that file is in the Hugging Face cache
+  (`hf download TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP mtp-4bit.safetensors`, 0.5 GB) or named by
+  `TF_QWEN36_MTP=<file>`; without it, it decodes one token a round and says so at startup.
+  `--drafter z-lab/Qwen3.6-35B-A3B-DFlash` drafts with DFlash v1 instead.
+
+On an M3 Ultra (60-core GPU, MLX 0.32.3), greedy, median of three after a warm-up. mlx-vlm 0.7.4 serves the same
+weights with `mlx-community/Qwen3.6-35B-A3B-MTP-4bit` (two drafts a round). The short prompts are about 85 tokens
+with 384 generated; the long one is 28,400 tokens of Python's `typing.py` with 128 generated.
+
+| tok/s | Short prose | Short code | Short, thinking on | 28,400-token prompt | First token at 28,400 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| TensorFold, MTP (default) | 173.4 | 244.7 | 196.4 | 124.0 | 15.9 s |
+| TensorFold, `--no-drafts` | 118.5 | 119.2 | 119.3 | 92.7 | 15.9 s |
+| TensorFold, `--drafter z-lab/Qwen3.6-35B-A3B-DFlash` | 156.1 | 288.2 | 183.1 | 87.5 | 15.7 s |
+| mlx-vlm 0.7.4, MTP | 111.9 | 141.8 | 120.7 | 85.6 | 14.8 s |
+| mlx-vlm 0.7.4 | 106.4 | 105.7 | 107.5 | 88.0 | 14.7 s |
+
+Each TensorFold reply has the same token SHA-256 in all three modes. MTP rounds verify 4 to 5 rows and keep about
+three tokens. DFlash's 16-row blocks keep more on short code, and fall behind plain decoding at the long prompt.
+
+The chat template thinks by default, as on vLLM: replies reason in `reasoning_content` before the answer in
+`content`, and `max_tokens` counts both. The server says so at startup, and prints a warning when a reply reaches
+`max_tokens` before it leaves its think block (its `content` is empty). `--no-thinking`, or
+`"chat_template_kwargs": {"enable_thinking": false}` in a request, turns thinking off.
 
 ## CUDA execution
 

@@ -2,6 +2,29 @@
 
 The base URL is `http://127.0.0.1:8080/v1` with the default server settings.
 
+## API keys
+
+Both servers accept repeated `--api-key KEY`, comma-separated `TENSORFOLD_API_KEY`, and `--api-key-file PATH`.
+The sources add keys together. A file has one key per line, optional `label: key` entries, and lines starting with
+`#` for comments. Set its permissions to `0600`; startup refuses a file readable by other users.
+The server stores SHA-256 digests and compares every configured digest for each authentication attempt.
+
+Send `Authorization: Bearer KEY` from OpenAI-compatible clients, or `x-api-key: KEY` from Messages clients.
+Missing or invalid credentials return HTTP 401 with `WWW-Authenticate: Bearer` and the route's error format.
+All `/v1/*`, tokenization, metrics and their inference aliases require a key; `--metrics-open` opens both metrics
+routes. `/health` remains open and returns only `{"status":"ok"}` when keys are configured.
+With no keys, the existing open routes and health details stay unchanged; a non-loopback bind prints a warning.
+
+Replace the key file atomically to rotate keys. Its modification time is checked at most once a second; SIGHUP
+requests an immediate reload. An empty, unreadable or malformed replacement closes authenticated routes until a
+valid file returns. Request logs and `tensorfold:requests_total` use labels, never keys or digests.
+Unnamed keys receive `cli-N`, `env-N` or `file-N` labels. Labels contain at most 64 letters, digits, dots,
+underscores or hyphens; choose non-secret labels.
+
+`tensorfold service install MODEL --api-key-file PATH` forwards the file to its server.
+For the control room, `tensorfold tui --url URL --token-env VARIABLE` sends that variable's value as a bearer key.
+Prefer a restricted file over command-line keys, which can appear in the operating system's process list.
+
 | Route | Behavior |
 | --- | --- |
 | `GET /v1/models` | Served model ID and any configured aliases (both servers) |

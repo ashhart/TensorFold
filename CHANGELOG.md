@@ -3,6 +3,18 @@
 `tensorfold update` prints the sections below that are newer than the version you had. Each release's page on
 GitHub has the full notes and the measurements behind them.
 
+## 0.6.5 (unreleased)
+
+- **Qwen3.6-35B-A3B drafts with its own MTP layer on Macs,** as on CUDA. Chains of up to four drafts are verified in
+  the lane rounds, alone or with other streams, and each round's depth comes from the Mac's measured costs, with plain
+  rounds where drafts do not pay. Replies equal `"draft": false`. On an M3 Ultra it decodes 1.5-2.1x `--no-drafts` on
+  short prompts, thinking on or off, and 1.3x at a 28,400-token prompt with the same time to first token: 1.5-1.7x
+  mlx-vlm 0.7.4 with its MTP drafter. DFlash v1 stays available with `--drafter z-lab/Qwen3.6-35B-A3B-DFlash`.
+- **Thinking stays the chat template's default, and the server says so:** one startup line names `--no-thinking`, and
+  a reply that reaches `max_tokens` before it leaves its think block (empty `content`, all `reasoning_content`) gets a
+  warning line.
+- Both servers support API keys, labelled metrics and live rotation from a restricted key file.
+
 ## 0.6.4 (3 Oct 2026)
 
 - **Flash Next on two DGX Sparks serves concurrent requests.** `--parallel N` with two CUDA ranks runs every stream

@@ -120,16 +120,18 @@ _MISSING = object()
 
 
 def _tool_json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
     if value is None:
-        parsed: Any = {}
-    elif isinstance(value, str):
-        text = value.strip()
-        parsed = json.loads(text) if text else {}
-    else:
-        parsed = value
-    if not isinstance(parsed, dict):
-        raise ValueError("tool_call arguments must be a JSON object")
-    return parsed
+        return {}
+    if isinstance(value, str):
+        document = value.strip()
+        if not document:
+            return {}
+        arguments = json.loads(document)
+        if isinstance(arguments, dict):
+            return arguments
+    raise ValueError("tool_call arguments must be a JSON object")
 
 
 def _loose_tool_arguments(payload: dict[str, Any], explicit: Any) -> Any:

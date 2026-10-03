@@ -52,22 +52,40 @@ class DraftDepth:
                 break
             rates[j] += self.depth_rate * ((1.0 if accepted > j else 0.0) - rates[j])
 
-    def _observe_cost(self, drafts: int, ms: float, *, initializing: bool = False) -> None:
-        # a stream's first round carries the prefill-to-decode switch: its time stays in round_stats, not the costs
-        if drafts <= 0 or initializing:
-            return
-        before = self._round_ms.get(drafts)
-        self._round_ms[drafts] = ms if before is None else before + self.cost_rate * (ms - before)
+    plain_guard = False                # depth 0 (a plain round) competes with the drafted depths
+    plain_margin = 1.05                # the expected tokens a ms a drafted depth must reach, as a multiple of plain's
 
-    def _round_cost(self, drafts: int) -> float | None:
+    def _costs(self, stream: Any = None) -> dict[int, float]:
+        """Round times by depth: the stream's own with ``plain_guard`` (its sampling sets a row's host work), else shared."""
+
+        if stream is None or not self.plain_guard:
+            return self._round_ms
+        self._depth_rates(stream)
+        return self._depth_state[stream.stream_id].setdefault("ms", {})
+
+    def _observe_cost(self, drafts: int, ms: float, *, initializing: bool = False, stream: Any = None) -> None:
+        # a stream's first round carries the prefill-to-decode switch: its time stays in round_stats, not the costs
+        if drafts < 0 or (drafts == 0 and not self.plain_guard) or initializing:
+            return
+        table = self._costs(stream)
+        before = table.get(drafts)
+        table[drafts] = ms if before is None else before + self.cost_rate * (ms - before)
+
+    def _round_cost(self, drafts: int, stream: Any = None) -> float | None:
         """Use round wall time when available, else the load-time forward cost plus head steps."""
 
-        if drafts in self._round_ms:
-            return self._round_ms[drafts]
+        table = self._costs(stream)
+        if drafts in table:
+            return table[drafts]
         forward = self.family_costs.get(drafts + 1)
         if forward is None:
             return None
-        return forward + self.mtp_step_ms * drafts
+        modeled = forward + self.mtp_step_ms * drafts
+        if self.plain_guard:     # untimed: its model plus the least time a row of a timed round took beyond its model
+            beyond = [(ms - self.family_costs[d + 1] - self.mtp_step_ms * d) / (d + 1)
+                      for d, ms in table.items() if d + 1 in self.family_costs]
+            modeled += (drafts + 1) * max(0.0, min(beyond, default=0.0))
+        return modeled
 
     def _depth(self, stream: Any) -> int:
         """Choose the most expected tokens per unit cost and periodically probe one depth farther to refresh acceptance estimates."""
@@ -81,9 +99,12 @@ class DraftDepth:
             rate = rates[0]
             return max(1, min(most, 1 if rate < 0.8 else 2 if rate < 0.9 else 3))
         best, best_rate = 1, -1.0
+        plain = self._round_cost(0, stream) if self.plain_guard else None
+        if plain:                       # a draft must beat plain by plain_margin: estimates near the line are noise
+            best, best_rate = 0, self.plain_margin / plain
         expected = run = 1.0
         for d in range(1, most + 1):
-            cost = self._round_cost(d)
+            cost = self._round_cost(d, stream)
             if cost is None:
                 break
             run *= rates[d - 1] if d - 1 < len(rates) else rates[-1]
@@ -92,9 +113,24 @@ class DraftDepth:
                 best, best_rate = d, expected / cost
         state = self._depth_state[stream.stream_id]
         state["rounds"] += 1
+        if best == 0:
+            return int(self._probe_plain(state))
+        state["plain"], state["wait"] = 0, self.depth_probe_every
         if best < most and state["rounds"] % self.depth_probe_every == 0:
             best += 1
         return best
+
+    plain_wait_most = 128              # plain rounds between probes at most
+
+    def _probe_plain(self, state: dict[str, Any]) -> bool:
+        """One draft after ``wait`` plain rounds in a row; each probe doubles the wait until drafting wins again."""
+
+        state["plain"] = state.get("plain", 0) + 1
+        wait = state.get("wait", self.depth_probe_every)
+        if state["plain"] < wait:
+            return False
+        state["plain"], state["wait"] = 0, min(2 * wait, self.plain_wait_most)
+        return True
 
     copy_rate = 0.94                   # a copied token lands this often (8+ matching tokens behind it)
     draft_slack = 2                    # drafts a stream offers past what its last shared round granted it
@@ -157,6 +193,15 @@ class DraftDepth:
         probs = [chain_probabilities(self._depth_rates(s), m) for s, m in zip(streams, most)]
         counts = allocate([1] * len(streams), probs, self.shared_costs, self._overhead(len(streams)),
                           max(len(streams), int(self.batch_rows)))
+        if self.plain_guard:            # no draft where none pays; a probe after a growing run of plain rounds
+            for i, (s, c) in enumerate(zip(streams, counts)):
+                state = self._depth_state[s.stream_id]
+                state["rounds"] += 1
+                if c:
+                    state["plain"], state["wait"] = 0, self.depth_probe_every
+                else:
+                    counts[i] = int(self._probe_plain(state))
+            return [self._head_depth(s, min(m, c)) for s, m, c in zip(streams, most, counts)]
         return [self._head_depth(s, min(m, max(1, c))) for s, m, c in zip(streams, most, counts)]
 
     def _overhead(self, streams: int) -> float:

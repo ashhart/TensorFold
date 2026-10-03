@@ -36,6 +36,7 @@ def register(commands) -> None:
     install.add_argument("--arg", action="append", default=[], help="extra literal serve argument, e.g. --arg=--vision")
     install.add_argument("--env", action="append", default=[], metavar="KEY=VALUE", help="non-secret override only")
     install.add_argument("--env-file", help="absolute private JSON file for credentials/overrides; mode 0600")
+    install.add_argument("--api-key-file", help="restricted API key file passed to tensorfold serve")
     install.add_argument(
         "--allow-network", action="store_true",
         help="acknowledge unauthenticated non-loopback binding")
@@ -107,6 +108,7 @@ def _profile(args) -> Profile:
     return Profile(args.name, model, python=args.python, host=args.host, port=args.port,
                    backend=args.backend, args=tuple(extra), environment=environment,
                    environment_file=str(absolute(args.env_file)) if args.env_file else None,
+                   api_key_file=str(absolute(args.api_key_file)) if getattr(args, "api_key_file", None) else None,
                    allow_network=args.allow_network, allow_download=args.allow_download)
 
 

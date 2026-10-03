@@ -18,7 +18,7 @@ class ControlError(RuntimeError):
 # Remove OSC/DCS (including hyperlinks/clipboard sequences), CSI and short escapes before C0 filtering.
 _ESCAPE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\|$)|"
                      r"\x1b[P^_].*?(?:\x1b\\|$)|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-_]", re.S)
-_SECRET = re.compile(r"(?i)(authorization\s*[:=]\s*(?:bearer\s+)?)[^\s,;]+|"
+_SECRET = re.compile(r"(?i)((?:authorization|x-api-key)\s*[:=]\s*(?:bearer\s+)?)[^\s,;]+|"
                      r"((?:hf_token|api[_-]?key|access[_-]?token|password|secret)\s*[:=]\s*)"
                      r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)|\b(?:hf_[A-Za-z0-9]{12,}|sk-[A-Za-z0-9_-]{12,})")
 
