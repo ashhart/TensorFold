@@ -18,7 +18,7 @@ def _ext():
     from tensorfold.cuda.build import MIN_CAPABILITY, load
 
     here = Path(__file__).parent
-    return load(name="tensorfold_nvfp4_v3", sources=[str(here / "qmmf.cpp"), str(here / "qmmf.cu"),
+    return load(name="tensorfold_nvfp4_v4", sources=[str(here / "qmmf.cpp"), str(here / "qmmf.cu"),
                                                       str(here / "experts.cu")], need=MIN_CAPABILITY,
                 extra_include_paths=[str(here)], extra_cuda_cflags=["-O3"], verbose=False)
 
