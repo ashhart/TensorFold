@@ -230,22 +230,34 @@ def absorb(e: Engine, streams: torch.Tensor, next_tokens: Sequence[int]) -> torc
 
 
 def draft(e: Engine, streams: torch.Tensor, next_tokens: Sequence[int], position: int, count: int,
-          sampling: Sampling | None, confidence: float = 0.0) -> list[int]:
-    """Absorb kept rows and chain drafts, always retaining the first even below ``confidence``, then stopping before later drafts below it or after a low-confidence first draft."""
+          sampling: Sampling | None, confidence: float = 0.0, price=None) -> list[int]:
+    """Absorb kept rows and chain drafts, always retaining the first even below ``confidence``, then stopping before later drafts below it or after a low-confidence first draft.
+
+    With ``price`` (a ``DraftPrice``, --mtp-cost) a chain also stops before a later draft whose calibrated chance of
+    being reached and kept no longer repays the ms it adds to the round; a draft that cannot pass costs no MTP step.
+    Drafts change speed only, never the output."""
 
     st = e.st
+    if price is not None:
+        price.begin(sampling is not None and sampling.temperature > 0)
     logits = absorb(e, streams, next_tokens)
     drafts: list[int] = []
+    chain = 1.0
     for j in range(count):
         low = False
-        if confidence > 0:
+        if confidence > 0 or price is not None:
             d, p = e.sample_draft(logits, position + j, sampling)
-            low = p < confidence
+            chain *= p
+            low = p < confidence or (price is not None and not price.pays(j, chain))
             if low and j > 0:
                 break
         else:
             d = e.sample(logits[:1], [position + j], sampling, draft=True)[0]
         drafts.append(d)
+        if price is not None:
+            price.products.append(chain)
+            if j + 1 < count and not price.pays(j + 1, chain):
+                break                                    # products only fall: the next draft cannot pay either
         if low:
             break
         if j + 1 < count:
@@ -410,8 +422,8 @@ def serial_decode(e: Engine, pending: int, count: int, sampling: Sampling | None
 @torch.no_grad()
 def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *, depth: int = DEPTH,
                confidence: float = CONFIDENCE, stop_eos: bool = False, on_tokens=None, constraint=None,
-               probabilities=None) -> DecodeResult:
-    """Verify pending and drafted tokens from the prefill state, commit rows before the first mismatched draft, and call ``on_tokens(new)`` with kept tokens after pending, stopping on True."""
+               probabilities=None, price=None) -> DecodeResult:
+    """Verify pending and drafted tokens from the prefill state, commit rows before the first mismatched draft, and call ``on_tokens(new)`` with kept tokens after pending, stopping on True; ``price``: ``draft``'s expected-time stop."""
 
     w, st, b = e.w, e.st, e.buf
     out = [pending]
@@ -422,7 +434,9 @@ def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *
     unabsorbed = None                                  # the last round's kept rows, not yet in the MTP cache
     torch.cuda.synchronize()
     start = time.perf_counter()
-    drafts = draft(e, e.last_streams, [pending], st.pos + 1, min(depth, count - len(out)), sampling, confidence)
+    more = {"price": price} if price is not None else {}   # a keyword only when on: tools may stand in a plain ``draft``
+    drafts = draft(e, e.last_streams, [pending], st.pos + 1, min(depth, count - len(out)), sampling, confidence,
+                   **more)
     while len(out) < count and not (stop_eos and out[-1] in w.cfg.eos):
         tokens = [out[-1]] + drafts
         window = constraint.window(tokens, list(range(-1, len(tokens) - 1))) if constraint is not None else None
@@ -442,6 +456,8 @@ def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *
             n = min(keep, count - len(out))
             capture(logits[:n], sampled[:n], list(range(st.pos + 1, st.pos + 1 + n)), probabilities)
         commit(w, st, b, R, keep)
+        if price is not None:
+            price.observe(len(drafts), keep - 1)
         unabsorbed = (keep, sampled[:keep])
         rounds += 1
         drafted += len(drafts)
@@ -459,7 +475,7 @@ def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *
         n = min(depth, count - len(out))
         drafts = []
         if n > 0:
-            drafts = draft(e, b.streams[:keep], sampled[:keep], st.pos + 1, n, sampling, confidence)
+            drafts = draft(e, b.streams[:keep], sampled[:keep], st.pos + 1, n, sampling, confidence, **more)
             unabsorbed = None
     torch.cuda.synchronize()
     seconds = time.perf_counter() - start

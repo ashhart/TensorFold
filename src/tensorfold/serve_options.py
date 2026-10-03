@@ -64,6 +64,16 @@ def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any =
     if getattr(args, "prefill_fp8", None) and not fp8:              # asked for by name, not a default
         raise ValueError(f"--prefill-fp8 picks FP8 prompt kernels on CUDA; {family.title} on "
                          f"{'CUDA' if backend == 'cuda' else 'MLX'} has none (its prompts run bf16 activations)")
+    cost = getattr(args, "mtp_cost", None)
+    if cost is not None:
+        engine = getattr(family.package, "cuda_engine", None) if backend == "cuda" else None
+        if engine is None or "mtp_cost" not in inspect.signature(engine).parameters:
+            raise ValueError(f"--mtp-cost prices a CUDA engine's MTP drafts; {family.title} on "
+                             f"{'CUDA' if backend == 'cuda' else 'MLX'} has no such rule")
+        if cost < 0:
+            raise ValueError(f"--mtp-cost is tokens per ms, 0 (off) or more, not {cost}")
+        if cost > 0 and _cuda_streams(getattr(args, "parallel", "auto")) > 1:
+            raise ValueError("--mtp-cost prices one stream's rounds; drop it or --parallel")
     confidence = getattr(args, "mtp_confidence", None)
     if confidence is None:
         return
