@@ -113,19 +113,64 @@ class NgramHash:
 _NP = {"U32": np.uint32, "BF16": np.uint16, "F16": np.float16, "F32": np.float32, "U8": np.uint8}
 
 
-def tensor_map(path: Path, key: str) -> np.memmap:
+PAGE = 16384
+PREFETCH_ROWS = 128          # a gather of more rows reads its pages concurrently first (oMLX's storage.py pattern)
+IO_WORKERS = 48
+_IO_POOL: Any = None
+
+
+class TensorMap:
     """One tensor of a safetensors file, memory-mapped, whose big gathers read their cold pages on worker threads."""
 
-    with open(path, "rb") as f:
-        size = int(np.frombuffer(f.read(8), dtype="<u8")[0])
-        header = json.loads(f.read(size))
-    entry = header[key]
-    start, end = entry["data_offsets"]
-    dtype = np.dtype(_NP[entry["dtype"]]).newbyteorder("<")
-    shape = tuple(int(s) for s in entry["shape"])
-    if (end - start) != int(np.prod(shape)) * dtype.itemsize:
-        raise ValueError(f"{path.name}: {key}'s bytes do not match its shape")
-    return np.memmap(path, dtype=dtype, mode="r", offset=8 + size + start, shape=shape)
+    def __init__(self, path: Path, key: str) -> None:
+        with open(path, "rb") as f:
+            size = int(np.frombuffer(f.read(8), dtype="<u8")[0])
+            header = json.loads(f.read(size))
+        entry = header[key]
+        start, end = entry["data_offsets"]
+        dtype = np.dtype(_NP[entry["dtype"]]).newbyteorder("<")
+        shape = tuple(int(s) for s in entry["shape"])
+        if (end - start) != int(np.prod(shape)) * dtype.itemsize:
+            raise ValueError(f"{path.name}: {key}'s bytes do not match its shape")
+        self.base = 8 + size + start
+        self.array = np.memmap(path, dtype=dtype, mode="r", offset=self.base, shape=shape)
+        self.path = Path(path)
+        self.row_bytes = (end - start) // shape[0] if shape[0] else 0
+        self.seen = np.zeros((self.base + (end - start)) // PAGE + 2, dtype=np.uint8)
+        self.shape, self.nbytes = shape, end - start
+
+    def rows(self, rows: np.ndarray) -> np.ndarray:
+        if rows.size > PREFETCH_ROWS and 0 < self.row_bytes <= PAGE:
+            self._prefetch(rows)
+        return np.ascontiguousarray(self.array[rows])
+
+    def _prefetch(self, rows: np.ndarray) -> None:
+        import os
+        from concurrent.futures import ThreadPoolExecutor
+
+        global _IO_POOL
+        offsets = self.base + rows.astype(np.int64) * self.row_bytes
+        pages = np.unique(np.concatenate([offsets // PAGE, (offsets + self.row_bytes - 1) // PAGE]))
+        fresh = pages[self.seen[pages] == 0]
+        if not fresh.size:
+            return
+        if _IO_POOL is None:
+            _IO_POOL = ThreadPoolExecutor(max_workers=IO_WORKERS, thread_name_prefix="dsv41-engram-io")
+        fd = os.open(self.path, os.O_RDONLY)
+
+        def touch(group: np.ndarray) -> None:
+            for page in group:
+                os.pread(fd, PAGE, int(page) * PAGE)
+
+        try:
+            list(_IO_POOL.map(touch, np.array_split(fresh, min(IO_WORKERS, fresh.size))))
+        finally:
+            os.close(fd)
+        self.seen[fresh] = 1
+
+
+def tensor_map(path: Path, key: str) -> TensorMap:
+    return TensorMap(path, key)
 
 
 class EngramTable:
@@ -152,9 +197,9 @@ class EngramTable:
         flat = np.asarray(rows, dtype=np.int64).reshape(-1)
         if flat.size and (flat.min() < 0 or flat.max() >= self.rows):
             raise IndexError("deepseek_v41: an Engram row outside its table")
-        w = mx.array(np.ascontiguousarray(self.weight[flat]))
-        s = mx.array(np.ascontiguousarray(self.scales[flat])).view(mx.bfloat16)
-        b = mx.array(np.ascontiguousarray(self.biases[flat])).view(mx.bfloat16)
+        w = mx.array(self.weight.rows(flat))
+        s = mx.array(self.scales.rows(flat)).view(mx.bfloat16)
+        b = mx.array(self.biases.rows(flat)).view(mx.bfloat16)
         values = mx.dequantize(w, s, b, group_size=self.group, bits=self.bits, mode="affine")
         return values.reshape(*rows.shape, self.dim).astype(mx.bfloat16)
 

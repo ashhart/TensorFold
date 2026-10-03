@@ -577,6 +577,13 @@ def matmul(x: mx.array, w: mx.array, out_dtype: Any = None, groups: int = 1) -> 
     """x @ w.T for unquantized (optionally grouped) w [N, K] as MLX computes it, decode rows one MLX call each."""
 
     out_dtype = out_dtype or mx.promote_types(x.dtype, w.dtype)
+    rows = int(x.shape[0])
+    if rows_mode() and 1 < rows <= ROWS_MAX and metal():
+        from tensorfold.kernels.deepseek.v41.gemv import gemv_config, gemv_rows
+
+        config = gemv_config(w, x.dtype, out_dtype, groups)
+        if config is not None:
+            return gemv_rows(x, w, out_dtype, config[0], config[1], groups)
 
     def plain(a: mx.array) -> mx.array:
         if groups == 1:
