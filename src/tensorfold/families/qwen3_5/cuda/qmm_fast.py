@@ -1,4 +1,4 @@
-"""Tile 4- and 8-bit projections for the lane matmul and dispatch other affine formats without converting them."""
+"""Tile 4- to 8-bit projections for the lane matmul and dispatch other affine formats without converting them."""
 
 from __future__ import annotations
 

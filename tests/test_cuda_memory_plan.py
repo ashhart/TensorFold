@@ -41,6 +41,22 @@ def test_one_gpu_counts_an_8bit_head_once(tmp_path):
     assert twice.resident - once.resident == n * k + 2 * n * (k // 64) * 2
 
 
+
+@pytest.mark.parametrize("bits", [5, 6])
+def test_one_gpu_counts_a_5_or_6bit_head_once(tmp_path, bits):
+    """5- and 6-bit heads in groups of 64 are tiled too, so the drafter's rows are views of them as well."""
+
+    from cuda_27b_headers import _write
+
+    n, k = 248320, TEXT["hidden_size"]
+    head = [("lm_head.weight", "U32", [n, k * bits // 32]), ("lm_head.scales", "BF16", [n, k // 64]),
+            ("lm_head.biases", "BF16", [n, k // 64])]
+    folder = _write(tmp_path / f"head{bits}", {"model_type": "qwen3_5", "text_config": TEXT,
+                                                "quantization": {"group_size": 64, "bits": bits}}, head)
+    twice = capacity.estimate_weights(folder, weight_transform(folder))
+    once = capacity.estimate_weights(folder, weight_transform(folder, one_gpu=True))
+    assert twice.resident - once.resident == n * k * bits // 8 + 2 * n * (k // 64) * 2
+
 def test_the_drafter_load_peak_is_its_largest_quantize(model):
     _, folder = model
     held = capacity.estimate_weights(folder, draft_bytes)

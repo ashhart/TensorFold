@@ -177,6 +177,36 @@ def test_sums_match_the_fp64_reference_as_closely_as_the_generic_kernel(kernel, 
     assert torch.equal(qmm.matmul(x, q), lane.to(torch.bfloat16))
 
 
+@pytest.mark.parametrize("bits", BITS)
+def test_tiled_qlinear_keeps_its_width_in_every_helper(bits):
+    """tile/untile, rows() views and copies, and a group of mixed widths: each projection keeps its own bits."""
+
+    wide = QLinear(*_weights(1024, 2048, bits, 41), bits=bits)
+    eight = QLinear(*_weights(1024, 2048, 8, 43), bits=8)
+    tw, t8 = qmm_fast.tile(wide), qmm_fast.tile(eight)
+    assert (tw.layout, tw.bits, tw.n, tw.k) == ("tiled", bits, 1024, 2048) and t8.bits == 8
+    back = qmm_fast.untile(tw)
+    assert back.bits == bits and all(torch.equal(a, b) for a, b in zip((back.weight, back.scales, back.biases),
+                                                                         (wide.weight, wide.scales, wide.biases)))
+    x = torch.randn((9, 2048), device="cuda").bfloat16()
+    full = qmm_fast.matmul(x, tw)
+    assert torch.equal(full, qmm.matmul(x, qmm.Q4(tw.weight, tw.scales, tw.biases, 1024, 2048, 64, bits)))
+    partial = qmm.matmul(x, qmm.pack(*_weights(1024, 2048, bits, 41), 64, bits=bits), f32=True)
+    assert torch.equal(qmm_fast.matmul_partial(x, tw), partial)
+    from tensorfold.families.qwen3_5.cuda.distributed import row_partial
+
+    assert torch.equal(row_partial(x, tw), partial)                     # a row-parallel rank's share
+    gotw, got8 = qmm_fast.matmul_group(x, [tw, t8])
+    assert torch.equal(gotw, full) and torch.equal(got8, qmm_fast.matmul(x, t8))
+    assert torch.equal(qmm_fast.matmul_group(x, [tw, tw])[1], full)
+    for a, b in ((0, 512), (64, 320), (100, 900)):                       # a view, then copies off the tile edges
+        part = qmm_fast.rows(tw, a, b)
+        assert part.bits == bits and part.n == b - a
+        sub = QLinear(wide.weight[a:b].contiguous(), wide.scales[a:b].contiguous(), wide.biases[a:b].contiguous(),
+                      bits=bits)
+        assert torch.equal(qmm_fast.matmul(x, part), qmm_fast.matmul(x, qmm_fast.tile(sub)))
+
+
 @pytest.mark.skipif(not MODEL.exists(), reason=f"needs a 5- or 6-bit g64 MLX checkpoint at {MODEL} "
                                                "(set TF_AFFINE56_MODEL)")
 def test_real_5_and_6bit_projections():
