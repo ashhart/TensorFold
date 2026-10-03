@@ -882,5 +882,492 @@
       "continued conversation",
       "token equality"
     ]
+  },
+  "performance_comparison": {
+    "baseline_revision": "9356df5",
+    "implementation_revision": "710ed91",
+    "server_options": {
+      "parallel": 2,
+      "context": 16384,
+      "no_thinking": true,
+      "drafter": true
+    },
+    "request_concurrency": 1,
+    "repetitions_per_phase": 3,
+    "decode": {
+      "tool": "tools/bench_openai.py",
+      "tokens": 64,
+      "temperature": 0,
+      "excluded_warmups_per_prompt": 1
+    },
+    "cold_prefill": {
+      "tool": "tools/prefill_cold.py",
+      "prompt_lengths": [
+        2048,
+        8192
+      ],
+      "warmup_length": 1024,
+      "distinct_prefixes": true,
+      "shared_prompt_file_across_phases": true,
+      "filesystem_cache": "warm"
+    },
+    "exactness": {
+      "prompt": "fibonacci-raw",
+      "tokens": 64,
+      "seed": 1234,
+      "temperature": 1,
+      "top_k": 20,
+      "top_p": 0.95,
+      "serial_and_drafted_match_each_phase": true,
+      "all_phases_match": true,
+      "service_token_sha": "7fbf34abac16"
+    },
+    "phases": [
+      {
+        "label": "baseline-before",
+        "token_sha": "7fbf34abac16",
+        "decode": [
+          {
+            "label": "",
+            "prompt": "fibonacci-raw",
+            "temperature": 0.0,
+            "tokens": 64,
+            "decode_tps_median": 50.27257153788451,
+            "decode_tps_all": [
+              50.4,
+              50.27,
+              50.25
+            ],
+            "ttft_s_median": 0.09443039097823203
+          },
+          {
+            "label": "",
+            "prompt": "gpu-chat-no-think",
+            "temperature": 0.0,
+            "tokens": 64,
+            "decode_tps_median": 40.862042221598244,
+            "decode_tps_all": [
+              40.89,
+              40.8,
+              40.86
+            ],
+            "ttft_s_median": 0.09318668697960675
+          }
+        ],
+        "cold": {
+          "model": "qualification",
+          "rows": [
+            {
+              "ttft_s": 0.4363,
+              "prompt_tokens": 1024,
+              "length": 1024,
+              "rep": 0
+            },
+            {
+              "ttft_s": 0.8036,
+              "prompt_tokens": 2048,
+              "length": 2048,
+              "rep": 0
+            },
+            {
+              "ttft_s": 0.7944,
+              "prompt_tokens": 2048,
+              "length": 2048,
+              "rep": 1
+            },
+            {
+              "ttft_s": 0.8004,
+              "prompt_tokens": 2048,
+              "length": 2048,
+              "rep": 2
+            },
+            {
+              "ttft_s": 2.8989,
+              "prompt_tokens": 8192,
+              "length": 8192,
+              "rep": 0
+            },
+            {
+              "ttft_s": 2.8929,
+              "prompt_tokens": 8192,
+              "length": 8192,
+              "rep": 1
+            },
+            {
+              "ttft_s": 2.9252,
+              "prompt_tokens": 8192,
+              "length": 8192,
+              "rep": 2
+            }
+          ],
+          "summary": [
+            {
+              "length": 2048,
+              "prompt_tokens": 2048,
+              "ttft_s": 0.8,
+              "tok_s": 2558.7,
+              "ttft_all": [
+                0.8036,
+                0.7944,
+                0.8004
+              ]
+            },
+            {
+              "length": 8192,
+              "prompt_tokens": 8192,
+              "ttft_s": 2.899,
+              "tok_s": 2825.9,
+              "ttft_all": [
+                2.8989,
+                2.8929,
+                2.9252
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "label": "enabled-before",
+        "token_sha": "7fbf34abac16",
+        "decode": [
+          {
+            "label": "",
+            "prompt": "fibonacci-raw",
+            "temperature": 0.0,
+            "tokens": 64,
+            "decode_tps_median": 50.48404571995763,
+            "decode_tps_all": [
+              50.25,
+              50.48,
+              50.58
+            ],
+            "ttft_s_median": 0.09389695298159495
+          },
+          {
+            "label": "",
+            "prompt": "gpu-chat-no-think",
+            "temperature": 0.0,
+            "tokens": 64,
+            "decode_tps_median": 41.0022176491072,
+            "decode_tps_all": [
+              41.0,
+              41.03,
+              40.9
+            ],
+            "ttft_s_median": 0.09406380401924253
+          }
+        ],
+        "cold": {
+          "model": "qualification",
+          "rows": [
+            {
+              "ttft_s": 0.4329,
+              "prompt_tokens": 1024,
+              "length": 1024,
+              "rep": 0
+            },
+            {
+              "ttft_s": 0.7958,
+              "prompt_tokens": 2048,
+              "length": 2048,
+              "rep": 0
+            },
+            {
+              "ttft_s": 0.7901,
+              "prompt_tokens": 2048,
+              "length": 2048,
+              "rep": 1
+            },
+            {
+              "ttft_s": 0.7881,
+              "prompt_tokens": 2048,
+              "length": 2048,
+              "rep": 2
+            },
+            {
+              "ttft_s": 2.897,
+              "prompt_tokens": 8192,
+              "length": 8192,
+              "rep": 0
+            },
+            {
+              "ttft_s": 2.9062,
+              "prompt_tokens": 8192,
+              "length": 8192,
+              "rep": 1
+            },
+            {
+              "ttft_s": 2.8812,
+              "prompt_tokens": 8192,
+              "length": 8192,
+              "rep": 2
+            }
+          ],
+          "summary": [
+            {
+              "length": 2048,
+              "prompt_tokens": 2048,
+              "ttft_s": 0.79,
+              "tok_s": 2592.1,
+              "ttft_all": [
+                0.7958,
+                0.7901,
+                0.7881
+              ]
+            },
+            {
+              "length": 8192,
+              "prompt_tokens": 8192,
+              "ttft_s": 2.897,
+              "tok_s": 2827.8,
+              "ttft_all": [
+                2.897,
+                2.9062,
+                2.8812
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "label": "enabled-after-wake",
+        "token_sha": "7fbf34abac16",
+        "decode": [
+          {
+            "label": "",
+            "prompt": "fibonacci-raw",
+            "temperature": 0.0,
+            "tokens": 64,
+            "decode_tps_median": 50.23486670048146,
+            "decode_tps_all": [
+              50.23,
+              50.18,
+              50.33
+            ],
+            "ttft_s_median": 0.09298827697057277
+          },
+          {
+            "label": "",
+            "prompt": "gpu-chat-no-think",
+            "temperature": 0.0,
+            "tokens": 64,
+            "decode_tps_median": 40.67858331297357,
+            "decode_tps_all": [
+              40.65,
+              40.79,
+              40.68
+            ],
+            "ttft_s_median": 0.09403941396158189
+          }
+        ],
+        "cold": {
+          "model": "qualification",
+          "rows": [
+            {
+              "ttft_s": 0.4338,
+              "prompt_tokens": 1024,
+              "length": 1024,
+              "rep": 0
+            },
+            {
+              "ttft_s": 0.7945,
+              "prompt_tokens": 2048,
+              "length": 2048,
+              "rep": 0
+            },
+            {
+              "ttft_s": 0.7978,
+              "prompt_tokens": 2048,
+              "length": 2048,
+              "rep": 1
+            },
+            {
+              "ttft_s": 0.7941,
+              "prompt_tokens": 2048,
+              "length": 2048,
+              "rep": 2
+            },
+            {
+              "ttft_s": 2.898,
+              "prompt_tokens": 8192,
+              "length": 8192,
+              "rep": 0
+            },
+            {
+              "ttft_s": 2.885,
+              "prompt_tokens": 8192,
+              "length": 8192,
+              "rep": 1
+            },
+            {
+              "ttft_s": 2.8827,
+              "prompt_tokens": 8192,
+              "length": 8192,
+              "rep": 2
+            }
+          ],
+          "summary": [
+            {
+              "length": 2048,
+              "prompt_tokens": 2048,
+              "ttft_s": 0.794,
+              "tok_s": 2577.7,
+              "ttft_all": [
+                0.7945,
+                0.7978,
+                0.7941
+              ]
+            },
+            {
+              "length": 8192,
+              "prompt_tokens": 8192,
+              "ttft_s": 2.885,
+              "tok_s": 2839.5,
+              "ttft_all": [
+                2.898,
+                2.885,
+                2.8827
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "label": "baseline-after",
+        "token_sha": "7fbf34abac16",
+        "decode": [
+          {
+            "label": "",
+            "prompt": "fibonacci-raw",
+            "temperature": 0.0,
+            "tokens": 64,
+            "decode_tps_median": 50.51253185914454,
+            "decode_tps_all": [
+              50.6,
+              50.51,
+              50.49
+            ],
+            "ttft_s_median": 0.09387362300185487
+          },
+          {
+            "label": "",
+            "prompt": "gpu-chat-no-think",
+            "temperature": 0.0,
+            "tokens": 64,
+            "decode_tps_median": 41.08789073474309,
+            "decode_tps_all": [
+              41.1,
+              41.09,
+              41.08
+            ],
+            "ttft_s_median": 0.09325340302893892
+          }
+        ],
+        "cold": {
+          "model": "qualification",
+          "rows": [
+            {
+              "ttft_s": 0.4307,
+              "prompt_tokens": 1024,
+              "length": 1024,
+              "rep": 0
+            },
+            {
+              "ttft_s": 0.7951,
+              "prompt_tokens": 2048,
+              "length": 2048,
+              "rep": 0
+            },
+            {
+              "ttft_s": 0.7849,
+              "prompt_tokens": 2048,
+              "length": 2048,
+              "rep": 1
+            },
+            {
+              "ttft_s": 0.7886,
+              "prompt_tokens": 2048,
+              "length": 2048,
+              "rep": 2
+            },
+            {
+              "ttft_s": 2.87,
+              "prompt_tokens": 8192,
+              "length": 8192,
+              "rep": 0
+            },
+            {
+              "ttft_s": 2.873,
+              "prompt_tokens": 8192,
+              "length": 8192,
+              "rep": 1
+            },
+            {
+              "ttft_s": 2.8987,
+              "prompt_tokens": 8192,
+              "length": 8192,
+              "rep": 2
+            }
+          ],
+          "summary": [
+            {
+              "length": 2048,
+              "prompt_tokens": 2048,
+              "ttft_s": 0.789,
+              "tok_s": 2597.0,
+              "ttft_all": [
+                0.7951,
+                0.7849,
+                0.7886
+              ]
+            },
+            {
+              "length": 8192,
+              "prompt_tokens": 8192,
+              "ttft_s": 2.873,
+              "tok_s": 2851.4,
+              "ttft_all": [
+                2.87,
+                2.873,
+                2.8987
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "pooled_medians": [
+      {
+        "measurement": "fibonacci-raw",
+        "unit": "tokens/s",
+        "baseline_median": 50.445,
+        "enabled_median": 50.29,
+        "enabled_change_percent": -0.3072653384874613
+      },
+      {
+        "measurement": "gpu-chat-no-think",
+        "unit": "tokens/s",
+        "baseline_median": 40.985,
+        "enabled_median": 40.845,
+        "enabled_change_percent": -0.3415883859948732
+      },
+      {
+        "measurement": "cold-prefill",
+        "prompt_tokens": 2048,
+        "unit": "seconds",
+        "baseline_median": 0.7947500000000001,
+        "enabled_median": 0.7943,
+        "enabled_change_percent": -0.056621579112936526
+      },
+      {
+        "measurement": "cold-prefill",
+        "prompt_tokens": 8192,
+        "unit": "seconds",
+        "baseline_median": 2.8958,
+        "enabled_median": 2.891,
+        "enabled_change_percent": -0.16575730368119101
+      }
+    ],
+    "pooled_decode_input_precision": "Recorded repetitions rounded to two decimals by bench_openai.py."
   }
 }

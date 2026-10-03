@@ -102,7 +102,11 @@ exercise HTTP stream draining and stored conversation continuation with:
 python tools/qualify_sleep_http.py http://127.0.0.1:8080 MODEL --output sleep-http.json
 ```
 
-For release qualification also run the HTTP exactness, cold-prefill and decode
-benchmarks from [Contributing](../CONTRIBUTING.md#the-receipt) against the last release
-on the same hardware. Long prompts, drafted execution, image input, NVFP4/EXL3 packs
-and unified-memory reclamation need their own measurements.
+The [full-checkpoint results](research/model-sleep-cuda-validation.md) cover the pinned
+NVFP4 model and DFlash2 drafter, unified-memory reclamation, HTTP conversation
+continuation, and decode plus 2048/8192-token cold-prefill comparisons against 0.6.3.
+For other configurations, run the benchmarks from
+[Contributing](../CONTRIBUTING.md#the-receipt) against the last release in the same
+environment. Longer prompts, aggregate concurrent throughput, first-request latency
+after wake, cold-storage reload latency, image input and other checkpoint formats
+remain to be measured.

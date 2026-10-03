@@ -99,13 +99,15 @@ passed 68 tests with four skips. These runs overlap and should not be summed.
 
 The subsequent [full-checkpoint validation](model-sleep-cuda-validation.md) covers
 NVFP4 plus DFlash2, single-stream and concurrent sleep/wake, and unified-memory
-reclamation, plus HTTP stream draining and stored conversation continuation. The
-results above remain the original synthetic and host-test evidence.
+reclamation, plus HTTP stream draining and stored conversation continuation. It also
+records decode and 2048/8192-token cold-prefill comparisons against unmodified 0.6.3
+before and after wake. The results above remain the original synthetic and host-test
+evidence.
 
 ## Additional qualification
 
-- Detailed cold-prefill/decode comparison receipts against unmodified 0.6.3,
-  including longer contexts and cold-storage reload latency.
+- Longer prompts, aggregate concurrent throughput, first-request latency immediately
+  after wake and cold-storage reload latency.
 - EXL3, full-size affine checkpoints and image-input hardware qualification. Their
   reload settings and host cleanup paths are covered; their full runtime reclamation
   is not established here.
