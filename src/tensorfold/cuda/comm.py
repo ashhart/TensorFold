@@ -169,12 +169,16 @@ def exchange(comm: Comm, sends: list[torch.Tensor], recvs: list[torch.Tensor], p
     """``comm.exchange`` when it has one, else (two ranks) each pair traded as bytes through the all-gather."""
 
     peer = 1 - comm.rank if peer is None else peer
+    if len(sends) != len(recvs):
+        raise ValueError("exchange: one receive per send")
     fn = getattr(comm, "exchange", None)
     if fn is not None:
         fn(sends, recvs, peer)
         return
     if comm.world != 2:
         raise ValueError("exchange: a communicator without exchange trades through its all-gather, two ranks only")
+    if peer == comm.rank or not 0 <= peer < comm.world:
+        raise ValueError("exchange: the peer must be another rank")
     for s, r in zip(sends, recvs):
         sb, rb = s.contiguous().view(-1).view(torch.uint8), r.view(-1).view(torch.uint8)
         n = max(sb.numel(), rb.numel())

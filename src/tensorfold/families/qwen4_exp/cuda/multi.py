@@ -257,13 +257,17 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
             st, resume, s.cached = self._prepare_admission(s, told)
         else:
             st, resume, s.cached = self._slot_for(list(s.prompt), s.draft and s.vision is None)
-        if self.w.comm is None and not self._grow(st, len(s.prompt) + self.depth + 2,
-                                                 alone=not self.streams and not self.filling):
-            if resume is None:
-                self.free.append(st)
-            else:                                        # the kept prompt end stays kept
-                self._remember(list(s.prompt[:s.cached]), st, resume["state"], resume["tail"])
-            raise NoRoom(f"a {len(s.prompt)}-token prompt waits for memory until a live stream finishes")
+        if self.w.comm is None:
+            try:
+                if not self._grow(st, len(s.prompt) + self.depth + 2,
+                                  alone=not self.streams and not self.filling):
+                    raise NoRoom(f"a {len(s.prompt)}-token prompt waits for memory until a live stream finishes")
+            except NoRoom:
+                if resume is None:
+                    self.free.append(st)
+                else:
+                    self._remember(list(s.prompt[:s.cached]), st, resume["state"], resume["tail"])
+                raise
         e = _slot(self.w, st, self.buf, self.mbuf, self.pbuf, self.capacity, self.prefill_rows)
         mtp = s.draft and self.depth > 0 and self.mbuf is not None
         try:

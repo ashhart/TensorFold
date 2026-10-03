@@ -211,7 +211,7 @@ class DecisionHostTests(unittest.TestCase):
         def budget(rows, live, *rest):
             seen.append(live)
             return 64 if live else rows
-        Decoder = source_class('tensorfold/families/qwen4_exp/cuda/multi.py', 'MultiDecoder', {'_pass_rows'},
+        Decoder = source_class('tensorfold/families/qwen4_exp/cuda/multi_fill.py', 'PromptPasses', {'_pass_rows'},
                                {'pass_limit': budget, 'PASS_MIN': 64})
         item = Decoder()
         item.streams = {1: types.SimpleNamespace(done=False)}

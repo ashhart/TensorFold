@@ -5,6 +5,9 @@ import torch
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA only", allow_module_level=True)
+if torch.cuda.get_device_capability()[0] != 12:
+    pytest.skip("Flash Next CUDA kernels run on sm_12x (GB10, RTX 50, RTX PRO 6000) only",
+                allow_module_level=True)
 
 from test_flashnext_forward import V, _model  # noqa: E402
 

@@ -6,7 +6,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from tensorfold.cuda import comm
+from tensorfold.cuda import comm  # noqa: E402
 
 
 class Pair:
@@ -126,3 +126,20 @@ def test_the_ranks_must_name_the_same_backend(monkeypatch, other):
     else:
         with pytest.raises(RuntimeError, match="different TF_COMM_BACKEND: nccl, fast"):
             comm.open_comm(0, 2, "192.0.2.1", 29551)
+
+
+@pytest.mark.parametrize("peer", [0, -1, 2])
+def test_fallback_exchange_refuses_an_invalid_peer_before_any_collective(peer):
+    plain = Pair(0, {})
+    with pytest.raises(ValueError, match="another rank"):
+        comm.exchange(plain, [torch.zeros(1)], [torch.zeros(1)], peer=peer)
+    assert plain.calls == []
+
+
+def test_exchange_refuses_truncated_pair_lists_before_calling_a_transport():
+    plain = Pair(0, {})
+    seen = []
+    plain.exchange = lambda *args: seen.append(args)
+    with pytest.raises(ValueError, match="one receive per send"):
+        comm.exchange(plain, [torch.zeros(1)], [])
+    assert plain.calls == [] and seen == []

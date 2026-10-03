@@ -356,3 +356,27 @@ def test_the_graph_slot_identity_is_part_of_the_rank_fingerprint():
     a.solo = SimpleNamespace(st=a.slots[0])
     b.solo = SimpleNamespace(st=b.slots[1])
     assert shape(a) != shape(b)
+
+
+@pytest.mark.parametrize("limit,expected", [(180200, True), (180199, False)])
+def test_a_rank_refuses_a_planned_lone_growth_above_its_explicit_copy_peak(monkeypatch, limit, expected):
+    from tensorfold.families.qwen4_exp.cuda import multi_plan
+
+    d = decoder()
+    monkeypatch.setattr(multi_plan, "torch", SimpleNamespace(cuda=SimpleNamespace(
+        is_available=lambda: True, memory_allocated=lambda: 1000)))
+    monkeypatch.setattr(multi_plan, "cuda_limit_bytes", lambda: limit)
+    plan = {"actions": [["resize", 2, 1024, "alone"]]}
+    assert ready(d, plan) is expected
+    assert d.slots[2].capacity == 256 and d.memory_gate.held == 0
+
+
+def test_planned_growth_counts_prior_copies_under_the_explicit_cap(monkeypatch):
+    from tensorfold.families.qwen4_exp.cuda import multi_plan
+
+    d = decoder()
+    monkeypatch.setattr(multi_plan, "torch", SimpleNamespace(cuda=SimpleNamespace(
+        is_available=lambda: True, memory_allocated=lambda: 1000)))
+    monkeypatch.setattr(multi_plan, "cuda_limit_bytes", lambda: 180000)
+    assert not ready(d, {"actions": [["resize", 2, 1024, "alone"], ["resize", 1, 1024, "alone"]]})
+    assert all(st.capacity == 256 and not st.operations for st in d.slots)

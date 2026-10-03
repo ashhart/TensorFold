@@ -124,15 +124,19 @@ class TwoRanks:
     def _index(self, st) -> int:
         return next(i for i, x in enumerate(self.slots) if x is st)
 
-    def _agree(self, what: str, plan: list) -> None:
+    def _agree(self, what: str, plan: list, checks: tuple = ()):
         """One small all-gather checks the whole step before either rank enters its model collectives."""
 
         if self.w.comm is None:
-            return
+            return tuple(bool(value) for value in checks)
         digest = int.from_bytes(hashlib.sha256(json.dumps(plan).encode()).digest()[:8], "big", signed=True)
-        mine, theirs = gather_ints(torch, self.w.comm.all_gather, [digest])
-        if mine != theirs:
+        width = 1 + len(checks)
+        ranks = gather_ints(torch, self.w.comm.all_gather, [digest, *map(int, checks)])
+        if len(ranks) != 2 or any(len(rank) != width for rank in ranks):
+            raise OutOfStep("the shared plan check returned an invalid rank count")
+        if ranks[0][0] != ranks[1][0]:
             raise OutOfStep(f"the two ranks planned different {what}s; the requests in it fail, serving goes on")
+        return tuple(all(bool(rank[index]) for rank in ranks) for index in range(1, width))
 
     def _joined_ranks(self) -> None:
         """A client may leave at its first token; both ranks then make the same next prompt-pass decision."""
@@ -167,9 +171,9 @@ class TwoRanks:
         if self.link is not None:
             self.link.send(["admit", self.next_id, list(s.prompt), s.count, _pack(s.sampling), bool(s.draft),
                             bool(s.stop_eos), bool(s.background), plan])
-        fits = ready(self, plan)
-        self._agree("admission", [shape(self), plan, valid, fits, list(s.prompt), s.count, _pack(s.sampling),
-                                  bool(s.draft), bool(s.stop_eos), bool(s.background)])
+        valid, fits = self._agree("admission", [shape(self), plan, list(s.prompt), s.count, _pack(s.sampling),
+                                               bool(s.draft), bool(s.stop_eos), bool(s.background)],
+                                  (valid, ready(self, plan)))
         if not valid:
             raise OutOfStep("the agreed prefix is not available on both ranks")
         if not fits:
@@ -188,8 +192,7 @@ class TwoRanks:
         plan = round_plan(self) if told is None else told
         if self.link is not None:
             self.link.send(["round", [s.sid for s in [*self.streams.values(), *self.filling] if s.done], plan])
-        fits = ready(self, plan)
-        self._agree("round", [shape(self), plan, fits])
+        (fits,) = self._agree("round", [shape(self), plan], (ready(self, plan),))
         if not fits:
             raise NoRoom("the proposed round cache growth does not fit on both ranks")
         ended = [self.streams[sid] for sid in plan["ended"]]

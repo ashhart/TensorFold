@@ -173,7 +173,10 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
                 kv_dtype: str = "bf16", decode_share: float | None = None, **options: Any):
     """Verify MTP on one or two CUDA GPUs; start rank 1 first for ``tp=2``, with bf16, int8 or int4 KV storage."""
 
+    from tensorfold.cuda import build
     from tensorfold.cuda.exl3.format import is_exl3
+
+    build.refuse_small_gpu()               # a card under sm_120 refuses this family by name, before anything is read
 
     if is_exl3(Path(model_dir)):
         print("[tensorfold] EXL3 packs are experimental: replies are exact; see "

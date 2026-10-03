@@ -7,6 +7,7 @@ import copy
 import torch
 
 from tensorfold.cuda.markers import MIN_GAP
+from tensorfold.cuda.capacity import cuda_limit_bytes
 from .decode import entry_end
 from .prompt_plan import pass_limit
 from .multi_fill import PASS_MIN
@@ -175,6 +176,8 @@ def ready(dec, plan) -> bool:
     """Each rank checks that the proposed cache moves fit locally before the shared plan check."""
 
     p = view(dec)
+    limit = cuda_limit_bytes() if torch.cuda.is_available() else None
+    allocated = int(torch.cuda.memory_allocated()) if limit is not None else 0
     for op in plan["actions"]:
         if op[0] == "reset":
             p.slots[op[1]].pos = p.slots[op[1]].mtp_len = 0
@@ -192,6 +195,8 @@ def ready(dec, plan) -> bool:
         st, rows = p.slots[op[1]], op[2]
         delta = st.cache_bytes(rows) - st.cache_bytes()
         if delta > 0:
+            if limit is not None and allocated + delta + st.layer_bytes(st.capacity) > limit:
+                return False
             peak = delta + st.layer_bytes(rows)
             if len(op) > 3 and op[3] == "alone":       # startup fitted one full window; keep the physical check
                 if p.memory_gate.live is not None and p.memory_gate.live() < peak:
@@ -199,5 +204,6 @@ def ready(dec, plan) -> bool:
             elif not p.memory_gate.fits(peak):
                 return False
         st.capacity = rows
+        allocated += delta
         p.memory_gate.take(delta) if delta > 0 else p.memory_gate.give(-delta)
     return True
