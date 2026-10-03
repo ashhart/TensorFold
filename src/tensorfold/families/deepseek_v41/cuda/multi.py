@@ -30,6 +30,7 @@ KEEP_MIN = int(os.environ.get("TF_DSV41_KEEP_MIN") or 256)    # shorter states a
 # a stream's extent covers its prompt and this many reply tokens at first, and grows by as much while it decodes
 # (in place, else moved to a free run, kept states evicted for it); 0: the whole reply up front
 GROW_AHEAD = int(os.environ.get("TF_DSV41_GROW_AHEAD") or 4096)
+RELEASE_AFTER = 4096                       # prompts prefilling more rows than this release cached blocks after
 
 
 @dataclass(eq=False)
@@ -610,6 +611,8 @@ class MultiDecoder:
                 return None
             if s.draft and self.pool is None:
                 e.keep_prompt(s.prompt)
+            if n - s.cached > RELEASE_AFTER:       # a long prompt's transient buffers back to the system (both
+                self._release()                    # ranks: the unified memory the OS and the next prompt share)
             last = logits[-1:]
             if s.constraint is not None:
                 last = s.constraint.mask(last.float().clone())
@@ -624,6 +627,25 @@ class MultiDecoder:
         self.filling = [x for x in self.filling if x is not s]
         self.streams[s.sid] = s
         return first
+
+    def _release(self) -> None:
+        """The allocator's cached free blocks back to the system (graph pools and live tensors stay), and the host
+        heap's free pages (rank 0 tokenized the request's text: a long prompt leaves ~1 GiB in glibc's arenas)."""
+
+        log = os.environ.get("TF_DSV41_MEMLOG") == "1"
+        before = torch.cuda.memory_reserved() if log else 0
+        torch.cuda.empty_cache()
+        try:
+            import ctypes
+
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except (OSError, AttributeError):
+            pass
+        if log:
+            from .engine import available_bytes
+
+            print(f"[memlog r{self.rank}] prompt released {(before - torch.cuda.memory_reserved()) / 2 ** 30:.2f} GiB; "
+                  f"available {available_bytes() / 2 ** 30:.2f} GiB", flush=True)
 
     # -- rounds ---------------------------------------------------------------------------------------------------
     def _plan(self, live: list[Stream]) -> list[tuple[int, int]]:
