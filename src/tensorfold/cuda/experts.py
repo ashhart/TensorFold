@@ -17,11 +17,16 @@ SMALL = 1024             # pairs the one-block plan takes; wider plans rank in b
 
 @lru_cache(maxsize=1)
 def _ext():
-    from tensorfold.cuda.build import load
+    from tensorfold.cuda.build import VOLTA, load, volta
 
     here = Path(__file__).parent
-    return load(name="tensorfold_experts_v7", sources=[str(here / "experts.cpp"), str(here / "experts.cu"),
-                                                        str(here / "experts_prefill.cu"), str(here / "experts_pack.cu")],
+    if volta():
+        return load(name="tensorfold_experts_volta_v1", need=VOLTA, extra_cuda_cflags=["-O3"], verbose=False,
+                    sources=[str(here / "experts.cpp"), str(here / "experts_plan.cu"), str(here / "experts_volta.cu"),
+                             str(here / "experts_pack.cu")])
+    return load(name="tensorfold_experts_v8", sources=[str(here / "experts.cpp"), str(here / "experts_plan.cu"),
+                                                        str(here / "experts.cu"), str(here / "experts_prefill.cu"),
+                                                        str(here / "experts_pack.cu")],
                 extra_cuda_cflags=["-O3"], verbose=False)
 
 

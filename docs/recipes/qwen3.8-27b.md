@@ -146,6 +146,41 @@ node's own path; recurrent commits replay that path. Two-rank reductions gather 
 rank order. Each rank count has its own serial reference. See the
 [CUDA kernel map](../../src/tensorfold/families/qwen3_5/cuda/README.md).
 
+### Tesla V100 (sm_70)
+
+```bash
+tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --context 163840 --name bench
+```
+
+On a Volta GPU the engine takes its own kernels (the [kernel map](../../src/tensorfold/families/qwen3_5/cuda/README.md)
+lists them): Triton's `tl.dot` has no tensor-core path on sm_70, and the shared FP8 and bf16 tensor-core extensions need
+sm_80 or newer, so decode matmuls, tree attention and the drafter's attention run on `mma.m8n8k4` with fp32 sums, and
+prompt chunks run through a dense fp16 copy of each weight and one cuBLASLt algorithm pinned per weight shape. Every
+kernel keeps the row-invariance contract, so drafted replies equal serial ones here too; the bits differ from the
+sm_80+ engine's, and this engine is its own serial reference. `--prefill-fp8` is refused, and EXL3 and NVFP4 packs are
+refused by name. On a 32 GB V100 the startup estimate admits 164,400 tokens with the drafter loaded; omitting
+`--context` takes that.
+
+Measured on one Tesla V100 32 GB (PCIe, power-capped to 200 W), greedy, the drafter on, `--context 163840`:
+
+| | prompt tokens | prefill | decode |
+| --- | --- | --- | --- |
+| short chat / code | under 100 | | 55-80 / 175-190 tok/s (serial 31) |
+| document | 2,446 | 2.2 s (1,100 tok/s) | 69 tok/s |
+| needle at mid-depth | 31,594 | 38.5 s (820 tok/s) | 44 tok/s |
+| needle at mid-depth | 63,092 | 98 s (646 tok/s) | 48 tok/s |
+| needle at mid-depth | 99,434 | 193 s (516 tok/s) | 38 tok/s |
+| needle at mid-depth | 128,513 | 292 s (441 tok/s) | 45 tok/s |
+| needle at mid-depth | 157,591 | 407 s (387 tok/s) | 34 tok/s |
+
+The needle was found at every depth, with a peak of 29.6 GB of the card's 32. Prompt time grows with the square of
+the context in the 16 full-attention layers, so long prompts lean on the prompt cache: a repeated 17,000-token prefix
+answers in 0.3-0.6 s. Every prompt chunk, however short, expands each weight to fp16 once (about 0.3 s a pass), the
+price of one prompt path whose bits never depend on the row count; a resume of a few rows pays it too. A tool call and
+streamed reasoning run as on other GPUs. Two V100s with NCCL peer access (`--tp 2`) fill a 17,000-token prompt 26%
+faster than one and decode at about the same speed; without peer access NCCL falls back to host memory and the pair
+gains nothing.
+
 ### Concurrent requests
 
 ```bash

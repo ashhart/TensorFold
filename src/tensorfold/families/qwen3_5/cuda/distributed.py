@@ -46,7 +46,7 @@ def split_output(q: QLinear, rank: int, world_size: int = 2,
                  segments: Sequence[int] | None = None, block: int = 1) -> QLinear:
     """Column-parallel QLinear: each rank owns complete output rows."""
 
-    if q.layout == "tiled":
+    if q.layout in ("tiled", "volta"):
         raise ValueError("split the checkpoint layout before tiling")
     rows = output_rows(q.n, rank, world_size, segments, block, q.weight.device)
     return QLinear(q.weight.index_select(0, rows).contiguous(),
@@ -221,7 +221,7 @@ def row_partial(x: torch.Tensor, q: QLinear, sk: int | None = None,
         return affine_matmul(x, q, f32=True)
     if triton is None:
         raise RuntimeError("row_partial requires Triton")
-    if q.layout == "tiled":
+    if q.layout in ("tiled", "volta"):
         from .qmm_fast import matmul_partial
 
         if sk is not None:

@@ -82,6 +82,9 @@ def vocab_rows(head: QLinear, lo: int, hi: int) -> QLinear:
 
     if lo % 64 or hi % 64:
         raise ValueError("vocabulary slices must be 64-aligned")
+    if head.layout == "volta":                      # sm_70's tiles run along 32 columns: slice the stored layout
+        m = untile(head)
+        return tile(QLinear(m.weight[lo:hi].contiguous(), m.scales[lo:hi].contiguous(), m.biases[lo:hi].contiguous()))
     return QLinear(head.weight[lo // 64:hi // 64], head.scales[:, lo:hi].contiguous(),
                    head.biases[:, lo:hi].contiguous(), layout="tiled", rows=hi - lo)
 

@@ -197,11 +197,11 @@ def scan(proj, xc, dt, state, a, d_skip, dt_bias, meta, rows: int, *, heads: int
 
 @lru_cache(maxsize=1)
 def _ext():
-    from tensorfold.cuda.build import load
+    from tensorfold.cuda.build import VOLTA, load
 
     here = Path(__file__).parent
     return load(name="tensorfold_nemotron_scan_rows", sources=[str(here / "scan_rows.cpp"), str(here / "scan_rows.cu")],
-                extra_cuda_cflags=["-O3", "--fmad=false"], verbose=False)
+                need=VOLTA, extra_cuda_cflags=["-O3", "--fmad=false"], verbose=False)
 
 
 def scan_rows(proj, xc, state, a, d_skip, dt_bias, rows: int, *, heads: int, head_dim: int, groups: int,

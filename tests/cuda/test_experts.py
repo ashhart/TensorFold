@@ -7,6 +7,7 @@ if not torch.cuda.is_available():
     pytest.skip("CUDA only", allow_module_level=True)
 
 from tensorfold.cuda import experts  # noqa: E402
+from tensorfold.cuda.build import volta  # noqa: E402
 
 DEV = "cuda"
 
@@ -159,7 +160,7 @@ def test_a_pairs_bits_never_depend_on_its_item(case):
 @pytest.mark.parametrize("prefill", [False, True])
 @pytest.mark.parametrize("case", CASES)
 def test_matches_fp64(case, prefill):
-    """Against float64 over the dequantized weights (rounded to bf16 first for the prefill form)."""
+    """Against float64 over the dequantized weights (rounded to bf16 first for the sm_80 prefill form)."""
 
     gs, swiglu, limit = case[0], case[1], case[2]
     ex, up, down = build(case, 31)
@@ -173,7 +174,7 @@ def test_matches_fp64(case, prefill):
 
     def weights(m):
         w = dequant(*m, gs)
-        return w.to(torch.bfloat16).double() if prefill else w
+        return w.to(torch.bfloat16).double() if prefill and not volta() else w
 
     projs = [torch.einsum("pk,pnk->pn", xr, weights(m)[pe]) for m in up]
     if swiglu:
@@ -185,7 +186,8 @@ def test_matches_fp64(case, prefill):
         ref = projs[0].float().to(torch.bfloat16).double().clamp(min=0) ** 2
     assert (act.double() - ref).abs().max() <= 2 ** -6 * ref.abs().max()
     yref = torch.einsum("pk,pnk->pn", act.double(), weights(down)[pe])
-    assert (y.double() - yref).abs().max() <= 1e-5 * yref.abs().max()
+    # sm_70 expands each weight to fp16 (11 significant bits), so the sums track float64 to about 2^-11, not fp32 rounding
+    assert (y.double() - yref).abs().max() <= (1e-3 if volta() else 1e-5) * yref.abs().max()
 
 
 def test_graph_replay_follows_the_picks():

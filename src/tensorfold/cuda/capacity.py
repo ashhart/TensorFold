@@ -299,12 +299,13 @@ def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, t
           draft_geometry: Geometry | Callable | None = None, startup_copies: int = 0,
           extra_files: tuple[Path, ...] = (), files: list[Path] | None = None,
           draft_transform: Callable | None = None,
-          draft_weights: Callable[[Path], Weights] | None = None) -> dict:
-    """One refusal or capacity on both ranks before allocating; the draft model by ``draft_weights`` or a transform."""
+          draft_weights: Callable[[Path], Weights] | None = None, need: tuple[int, int] | None = None) -> dict:
+    """One refusal or capacity on both ranks before allocating; the draft model by ``draft_weights`` or a transform;
+    ``need``: the capability the engine's kernels need for this checkpoint, when lower than every format's floor."""
 
     from tensorfold.cuda import build
 
-    build.refuse_old_gpu(floor(model_dir))          # an old GPU is refused here, before any weight loads
+    build.refuse_old_gpu(floor(model_dir) if need is None else need)   # an old GPU is refused before any weight loads
     error = None
     plan = None
     try:

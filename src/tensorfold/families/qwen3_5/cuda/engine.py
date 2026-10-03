@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from tensorfold.cuda import prompt_precision
+from tensorfold.cuda.build import VOLTA, volta
+
 
 KEEP = 3             # prompt states a concurrent decoder keeps to resume from (each holds a DeltaNet copy)
 KEEP_ONE = 4         # prompt states one stream keeps (they share its attention buffers)
@@ -41,6 +43,9 @@ class Qwen27Engine:
         if (exl3 or nvfp4) and tp != 1:
             raise ValueError(f"{'EXL3 packs' if exl3 else 'NVFP4 checkpoints'} of Qwen3.8-27B run on one GPU: drop "
                              "--tp 2, or serve the MLX checkpoint (TensorFold/Qwen3.8-27B-MLX-4bit) on two")
+        if (exl3 or nvfp4) and volta():
+            raise ValueError(f"{'EXL3 packs' if exl3 else 'NVFP4 checkpoints'} of Qwen3.8-27B need sm_80 or newer "
+                             "kernels: on a Volta GPU serve the MLX checkpoint (TensorFold/Qwen3.8-27B-MLX-4bit)")
         if nvfp4 and vision:
             raise ValueError("image input on CUDA is tested on the MLX checkpoint only: drop --vision for an NVFP4 "
                              "checkpoint, or serve TensorFold/Qwen3.8-27B-MLX-4bit")
@@ -86,8 +91,9 @@ class Qwen27Engine:
         many = streams > 1
         # prompt chunks sized to the card (4096 rows from 80 GB), the verify scratch to the rows a round takes
         chunk = prompt_rows(total_bytes(torch), prompt_row_bytes(config(model_dir), tp))
-        geometry = ((lambda text: stream_geometry(text, tp, streams, keep, first=256 if tp == 1 else None)) if many
-                    else (lambda text: gdn_geometry(text, tp, max_rows, rows=max_rows, prompt=chunk, evicts=tp == 1)))
+        sized = dict(prompt_staging=volta())
+        geometry = ((lambda text: stream_geometry(text, tp, streams, keep, first=256 if tp == 1 else None, **sized)) if many
+                    else (lambda text: gdn_geometry(text, tp, max_rows, rows=max_rows, prompt=chunk, evicts=tp == 1, **sized)))
         # an affine checkpoint's packed words at their stored precision; an EXL3 pack's by its own format
         tensor_bytes = weight_transform(model_dir, one_gpu=tp == 1)
         if exl3:
@@ -106,7 +112,11 @@ class Qwen27Engine:
                                    draft_geometry=lambda text: draft_geometry(text, tp if tp_draft else 1, max_rows,
                                                                               bounded=True, streams=streams,
                                                                               kept=keep + 1 if many else 0),
-                                   startup_copies=int(tp == 2))
+                                   # sm_70 (32 GB V100s): the full checkpoint (already the resident term) is split and freed
+                                   # before caches exist; a second full copy is not part of that peak
+                                   startup_copies=int(tp == 2 and not volta()),
+                                   # the MLX checkpoint runs on the sm_70 kernels; EXL3 and NVFP4 need the shared ones
+                                   need=None if exl3 or nvfp4 else VOLTA)
         self.context_window = self.capacity_plan["context_window"]
         if tp == 2:
             full = load(model_dir)

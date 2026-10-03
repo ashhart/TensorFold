@@ -32,6 +32,11 @@ def _mm(x, w: QLinear, f32: bool = False) -> torch.Tensor:
     if not isinstance(w, QLinear):
         return w.prefill(x)                               # an EXL3 pack's or an NVFP4 checkpoint's projection
     packed = tile(w)
+    if packed.layout == "volta":                          # sm_70: a dense fp16 copy through one cuBLASLt GEMM
+        from tensorfold.cuda.kernels import qmm_volta
+
+        t = qmm_volta.Tiled.wrap(packed.weight, packed.scales, packed.biases, packed.rows)
+        return qmm_volta.prompt_matmul(x, t, f32=f32)
     if packed.fast:                                       # each weight rounded once to bf16, one fp32 chain over K
         return shared.prefill_matmul(x, packed, f32=f32, tile=shared.prompt_tile(x.shape[0], packed.n))
     return matmul_partial(x, packed) if f32 else matmul(x, packed)

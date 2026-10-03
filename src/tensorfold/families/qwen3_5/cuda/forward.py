@@ -49,7 +49,7 @@ def _row_mm(x: torch.Tensor, w: QLinear, tp: bool,
         return _mm(x, w, xs)
     from .distributed import gather_rank_partials, row_partial
 
-    return gather_rank_partials(row_partial(x, w, xs=xs if w.layout == "tiled" else None))
+    return gather_rank_partials(row_partial(x, w, xs=xs if w.layout in ("tiled", "volta") else None))
 
 
 def _mlp(layer, h: torch.Tensor, xs: torch.Tensor, tp: bool) -> torch.Tensor:

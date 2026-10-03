@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from tensorfold.cuda import prompt_precision
+from tensorfold.cuda.build import VOLTA
 from . import CONFIDENCE, DRAFTS
 
 
@@ -60,7 +61,7 @@ class NemotronEngine:
                                    hybrid_weights(tp), rank=rank, world=tp, gather=gather,
                                    startup_copies=2 if tp == 2 else 0,     # the whole model loads before its split
                                    files=sorted(Path(model_dir).glob("model*.safetensors")),      # as ``load`` reads
-                                   extra_files=(head,) if self.drafts and head.is_file() else ())
+                                   extra_files=(head,) if self.drafts and head.is_file() else (), need=VOLTA)
         self.max_len = -(-self.capacity_plan["cache_slots"] // CHUNK) * CHUNK
         if tp == 2:
             self._same_settings(torch, draft_ids)

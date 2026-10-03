@@ -54,6 +54,28 @@ uses a separate serial engine. The default requested context is 16,384 tokens, s
 memory admission; `--context` sets an explicit window. Inspect the reported capacity before sending
 long requests. Both backends use the same public draft list below.
 
+### Tesla V100 (sm_70)
+
+The same checkpoint serves on Volta GPUs. The routed and shared experts run on `cuda/experts_volta.cu`, which reads
+the blocks the sm_80 kernels read: one weight column a thread on `mma.m8n8k4`, each group expanded to fp16, the rows
+scaled by a power of two so every bf16 value is an exact fp16, and fp32 sums over K in group order, so a pair's bits
+never depend on the other pairs of its call. Prompt matmuls take the dense fp16 cuBLASLt path that Qwen3.8-27B uses
+on Volta, and the Mamba scan, attention and router kernels run as they are. Drafted replies equal this engine's own
+`"draft": false` replies; the bits are not the sm_80 engine's.
+
+```bash
+tensorfold serve TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit --context 240000
+```
+
+One Tesla V100 32 GB (PCIe, 250 W), MTP drafts on, a 240,000-token window:
+
+| | 2k | 8k | 16k | 32k | 64k |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| cold prompt, tok/s | 3,410 | 3,322 | 3,181 | 2,930 | 2,517 |
+
+Decode is 115 tok/s with drafts off and 170 to 250 tok/s with them, depending on the reply. A needle in the middle
+of a 231,786-token prompt is found (160 s to fill, then 43 tok/s).
+
 ## Draft vocabulary provenance
 
 The shipped `draft_ids.txt` contains 32,768 sorted IDs. It can be rebuilt byte for byte from CPython

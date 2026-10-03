@@ -19,6 +19,10 @@ def dense(x: torch.Tensor, q, xs: torch.Tensor | None = None, *, f32: bool = Fal
 def prefill_dense(x: torch.Tensor, q, *, f32: bool = False) -> torch.Tensor:
     """A prompt chunk's matmul on the shared prefill kernel (bf16 weights, one chain over K; row-invariant)."""
 
+    if q.layout == "volta":                          # sm_70: a dense fp16 copy through one cuBLASLt GEMM
+        from tensorfold.cuda.kernels import qmm_volta
+
+        return qmm_volta.prompt_matmul(x, qmm_volta.Tiled.wrap(q.weight, q.scales, q.biases, q.rows), f32=f32)
     return shared.prefill_matmul(x, q, f32=f32)
 
 
