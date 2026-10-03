@@ -3,10 +3,10 @@
 
 bool qmm_clusters(int, bool);
 void qmm_cuda(const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
-              at::Tensor&, const at::Tensor&, int, int, int, int, bool, bool);
+              at::Tensor&, const at::Tensor&, int, int, int, int, bool, bool, int);
 void qmm_group_cuda(const at::Tensor&, const at::Tensor&, const std::vector<at::Tensor>&,
                     const std::vector<at::Tensor>&, const std::vector<at::Tensor>&, std::vector<at::Tensor>&,
-                    const std::vector<int64_t>&, const std::vector<int64_t>&, bool, int, int);
+                    const std::vector<int64_t>&, const std::vector<int64_t>&, bool, int, int, int);
 void qmm_prefill_cuda(const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, at::Tensor&, int,
                       int, bool, int);
 void qmm_prefill8w_cuda(const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, at::Tensor&, int,
@@ -14,11 +14,12 @@ void qmm_prefill8w_cuda(const at::Tensor&, const at::Tensor&, const at::Tensor&,
 void qmm_prefill8_cuda(const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
                        const at::Tensor&, at::Tensor&, int, int, bool, int);
 
-// x (M, K) bf16 times a packed 4-bit weight; ``reduce`` false leaves the K slices unadded in ``part`` (SK, M, n).
+// x (M, K) bf16 times a packed 4- or 8-bit weight; ``reduce`` false leaves the K slices unadded in ``part`` (SK, M, n).
 void qmm(const at::Tensor& x, const at::Tensor& xs, const at::Tensor& w, const at::Tensor& scales,
          const at::Tensor& biases, at::Tensor& out, const c10::optional<at::Tensor>& part, int64_t n, int64_t sk,
-         int64_t gs, int64_t bm, bool f32, bool reduce) {
+         int64_t gs, int64_t bm, bool f32, bool reduce, int64_t bits) {
     TORCH_CHECK(gs == 32 || gs == 64, "groups of 32 or 64");
+    TORCH_CHECK(bits == 4 || (bits == 8 && gs == 64), "4 bits, or 8 bits in groups of 64");
     TORCH_CHECK(bm == 16 || bm == 32 || bm == 64, "row tile 16, 32 or 64");
     TORCH_CHECK(x.is_cuda() && x.scalar_type() == at::kBFloat16 && x.dim() == 2 && x.size(0) >= 1 &&
                 x.stride(1) == 1 && x.stride(0) >= x.size(1), "x: (M, K) bf16 with contiguous rows");
@@ -28,7 +29,7 @@ void qmm(const at::Tensor& x, const at::Tensor& xs, const at::Tensor& w, const a
     TORCH_CHECK(k % gs == 0 && sk >= 1 && kg % sk == 0, "K splits into whole groups a slice");
     TORCH_CHECK(xs.is_cuda() && xs.is_contiguous() && xs.scalar_type() == at::kFloat && xs.size(0) == m &&
                 xs.size(1) == kg, "xs: (M, K / gs) fp32");
-    TORCH_CHECK(w.is_cuda() && w.is_contiguous() && w.scalar_type() == at::kInt && w.numel() == npad * k / 8,
+    TORCH_CHECK(w.is_cuda() && w.is_contiguous() && w.scalar_type() == at::kInt && w.numel() == npad * k * bits / 32,
                 "packed weight does not match n and K");
     TORCH_CHECK(scales.stride(1) == 1 && biases.stride(1) == 1 && scales.stride(0) >= npad &&
                 biases.stride(0) == scales.stride(0) && scales.scalar_type() == at::kBFloat16 &&
@@ -44,14 +45,15 @@ void qmm(const at::Tensor& x, const at::Tensor& xs, const at::Tensor& w, const a
                     "part: at least (SK, M, n) fp32");
     }
     qmm_cuda(x, xs, w, scales, biases, out, p, static_cast<int>(n), static_cast<int>(sk), static_cast<int>(gs),
-             static_cast<int>(bm), f32, reduce);
+             static_cast<int>(bm), f32, reduce, static_cast<int>(bits));
 }
 
-// Up to four packed 4-bit weights against one x in one sm_12x launch, each with its own K split (its own bits).
+// Up to four packed weights of one width (4 or 8 bits) against one x in one sm_12x launch, each with its own K split.
 void qmm_group(const at::Tensor& x, const at::Tensor& xs, const std::vector<at::Tensor>& ws,
                const std::vector<at::Tensor>& scales, const std::vector<at::Tensor>& biases,
                std::vector<at::Tensor> outs, const std::vector<int64_t>& ns, const std::vector<int64_t>& sks, bool f32,
-               int64_t tile, int64_t pdl) {
+               int64_t tile, int64_t pdl, int64_t bits) {
+    TORCH_CHECK(bits == 4 || bits == 8, "4 or 8 bits");
     const size_t parts = ws.size();
     TORCH_CHECK(parts >= 1 && parts <= 4 && scales.size() == parts && biases.size() == parts && outs.size() == parts &&
                 ns.size() == parts && sks.size() == parts, "one to four parts, each with weights, scales, biases, out");
@@ -67,7 +69,7 @@ void qmm_group(const at::Tensor& x, const at::Tensor& xs, const std::vector<at::
         TORCH_CHECK(sk == 1 || sk == 2 || sk == 4 || sk == 8, "K split 1, 2, 4 or 8");
         TORCH_CHECK(kg % sk == 0, "K splits into whole groups a slice");
         TORCH_CHECK(ws[i].is_cuda() && ws[i].is_contiguous() && ws[i].scalar_type() == at::kInt &&
-                    ws[i].numel() == npad * k / 8, "packed weight does not match n and K");
+                    ws[i].numel() == npad * k * bits / 32, "packed weight does not match n and K");
         TORCH_CHECK(scales[i].stride(1) == 1 && biases[i].stride(1) == 1 && scales[i].stride(0) >= npad &&
                     biases[i].stride(0) == scales[i].stride(0) && scales[i].scalar_type() == at::kBFloat16 &&
                     biases[i].scalar_type() == at::kBFloat16 && scales[i].size(0) == kg && scales[i].size(1) == npad &&
@@ -76,7 +78,8 @@ void qmm_group(const at::Tensor& x, const at::Tensor& xs, const std::vector<at::
                     outs[i].scalar_type() == (f32 ? at::kFloat : at::kBFloat16), "out: (M, n)");
     }
     c10::cuda::CUDAGuard guard(x.device());
-    qmm_group_cuda(x, xs, ws, scales, biases, outs, ns, sks, f32, static_cast<int>(tile), static_cast<int>(pdl));
+    qmm_group_cuda(x, xs, ws, scales, biases, outs, ns, sks, f32, static_cast<int>(tile), static_cast<int>(pdl),
+                   static_cast<int>(bits));
 }
 
 // Prefill: x (M, K) bf16 times a packed 4-bit weight with each weight rounded once to bf16, one fp32 chain over K.

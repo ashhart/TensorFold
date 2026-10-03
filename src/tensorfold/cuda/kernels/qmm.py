@@ -1,4 +1,4 @@
-"""4-bit lane matmul: rows run the same groups and K slices at any row count, so no row affects another."""
+"""4- and 8-bit lane matmul: rows run the same groups and K slices at any row count, so no row affects another."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ def _ext():
     from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
-    return load(name="tensorfold_qmm_v5", sources=[str(here / "qmm.cpp"), str(here / "qmm.cu"),
+    return load(name="tensorfold_qmm_v6", sources=[str(here / "qmm.cpp"), str(here / "qmm.cu"),
                                                    str(here / "qmm_group.cu"), str(here / "qmm_prefill.cu"),
                                                    str(here / "qmm_prefill8.cu")],
                 extra_cuda_cflags=["-O3"], verbose=False)
@@ -40,7 +40,7 @@ def grouped(device: int) -> bool:
 
 @dataclass
 class Q4:
-    """Packed (n, k): int32 words [n/64][k/gs][8][32][gs/32], bf16 scales and biases (k/gs, n); n padded to 128."""
+    """Packed (n, k): int32 words [n/64][k/gs][8][32][gs*bits/128], bf16 scales, biases (k/gs, n); n padded to 128."""
 
     weight: torch.Tensor
     scales: torch.Tensor
@@ -48,19 +48,22 @@ class Q4:
     n: int
     k: int
     gs: int
+    bits: int = 4
 
     def nbytes(self) -> int:
         return sum(t.numel() * t.element_size() for t in (self.weight, self.scales, self.biases))
 
 
-# nibble slot p of a lane's word holds input 32 v + 2 (lane % 4) + OFFSETS[p] of the group (see ``pair`` in qmm.cu)
-OFFSETS = (0, 8, 16, 24, 1, 9, 17, 25)
+# slot p of a lane's word v holds input SPAN v + 2 (lane % 4) + OFFSETS[p] of the group (see ``frag`` in qmm_frag.cuh):
+# a 4-bit word serves two k16 steps, an 8-bit word one
+OFFSETS = {4: (0, 8, 16, 24, 1, 9, 17, 25), 8: (0, 8, 1, 9)}
 
 
-def _offsets(gs: int, device) -> torch.Tensor:
-    v = torch.arange(gs // 32, device=device)[:, None, None]
+def _offsets(gs: int, device, bits: int = 4) -> torch.Tensor:
+    span = 128 // bits
+    v = torch.arange(gs // span, device=device)[:, None, None]
     c = torch.arange(4, device=device)[None, :, None]
-    return 32 * v + 2 * c + torch.tensor(OFFSETS, device=device)[None, None, :]           # (V, 4, 8)
+    return span * v + 2 * c + torch.tensor(OFFSETS[bits], device=device)[None, None, :]    # (V, 4, 32 / bits)
 
 
 def _to_int32(v: torch.Tensor) -> torch.Tensor:
@@ -69,52 +72,56 @@ def _to_int32(v: torch.Tensor) -> torch.Tensor:
     return torch.where(v >= 2 ** 31, v - 2 ** 32, v).to(torch.int32)
 
 
-def pack(weight: torch.Tensor, scales: torch.Tensor, biases: torch.Tensor, gs: int, chunk: int = 4096) -> Q4:
-    """MLX (n, k/8) words, (n, k/gs) scales and biases -> ``Q4``; n padded to 128 with zeros so tiles stay inside."""
+def pack(weight: torch.Tensor, scales: torch.Tensor, biases: torch.Tensor, gs: int, chunk: int = 4096, *,
+         bits: int = 4) -> Q4:
+    """MLX (n, k*bits/32) words, (n, k/gs) scales and biases -> ``Q4``; n padded to 128 with zeros (tiles stay in)."""
 
     words = weight.view(torch.int32) if weight.dtype != torch.int32 else weight
-    n, k8 = words.shape
-    k, kg, npad = k8 * 8, k8 * 8 // gs, -(-n // 128) * 128
+    per = 32 // bits
+    n, kw = words.shape
+    k, kg, npad = kw * per, kw * per // gs, -(-n // 128) * 128
     dev = words.device
-    out = torch.empty((npad // 64, kg, 8, 32, gs // 32), dtype=torch.int32, device=dev)
-    offs = _offsets(gs, dev)
-    shifts = torch.arange(8, device=dev, dtype=torch.int32) * 4
+    out = torch.empty((npad // 64, kg, 8, 32, gs * bits // 128), dtype=torch.int32, device=dev)
+    offs = _offsets(gs, dev, bits)
+    shifts = torch.arange(per, device=dev, dtype=torch.int32) * bits
     wide = shifts.to(torch.int64)
     for start in range(0, npad, chunk):
         stop = min(start + chunk, npad)
-        block = torch.zeros((stop - start, k8), dtype=torch.int32, device=dev)
+        block = torch.zeros((stop - start, kw), dtype=torch.int32, device=dev)
         if start < n:
             block[:min(stop, n) - start] = words[start:min(stop, n)]
-        q = ((block[:, :, None] >> shifts) & 0xF).reshape(stop - start, kg, gs)            # (cols, kg, gs)
+        q = ((block[:, :, None] >> shifts) & ((1 << bits) - 1)).reshape(stop - start, kg, gs)  # (cols, kg, gs)
         q = q.reshape((stop - start) // 64, 8, 8, kg, gs)                                   # (T, j, r, kg, gs)
-        picked = q[..., offs]                                                                # (T, j, r, kg, V, 4, 8)
+        picked = q[..., offs]                                                                # (T, j, r, kg, V, 4, per)
         packed = _to_int32((picked.to(torch.int64) << wide).sum(-1))                        # (T, j, r, kg, V, 4)
-        out[start // 64:stop // 64] = packed.permute(0, 3, 1, 2, 5, 4).reshape(-1, kg, 8, 32, gs // 32)
+        out[start // 64:stop // 64] = packed.permute(0, 3, 1, 2, 5, 4).reshape(-1, kg, 8, 32, out.shape[-1])
     pad = npad - n
 
     def major(t: torch.Tensor) -> torch.Tensor:
         t = t.t().contiguous()
         return torch.cat([t, t.new_zeros((kg, pad))], dim=1).contiguous() if pad else t
 
-    return Q4(out, major(scales), major(biases), n, k, gs)
+    return Q4(out, major(scales), major(biases), n, k, gs, bits)
 
 
 def unpack(q: Q4, chunk: int = 64) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """The stored MLX layout again: (n, k/8) int32 words, (n, k/gs) scales and biases, ``chunk`` tiles at a time."""
+    """The stored MLX layout again: (n, k*bits/32) int32 words, (n, k/gs) scales and biases, ``chunk`` tiles a step."""
 
     t, kg, _, _, v = q.weight.shape
     dev = q.weight.device
-    shifts = torch.arange(8, device=dev, dtype=torch.int32) * 4
+    bits = getattr(q, "bits", 4)
+    per = 32 // bits
+    shifts = torch.arange(per, device=dev, dtype=torch.int32) * bits
     wide = shifts.to(torch.int64)
-    offs = _offsets(q.gs, dev)
-    words = torch.empty((t * 64, q.k // 8), dtype=torch.int32, device=dev)
+    offs = _offsets(q.gs, dev, bits)
+    words = torch.empty((t * 64, q.k // per), dtype=torch.int32, device=dev)
     for a in range(0, t, chunk):
         b = min(a + chunk, t)
         w = q.weight[a:b].reshape(b - a, kg, 8, 8, 4, v).permute(0, 2, 3, 1, 5, 4)          # (T, j, r, kg, V, 4)
-        nib = (w[..., None] >> shifts) & 0xF                                                  # (T, j, r, kg, V, 4, 8)
+        codes = (w[..., None] >> shifts) & ((1 << bits) - 1)                                  # (T, j, r, kg, V, 4, per)
         qv = torch.zeros((b - a, 8, 8, kg, q.gs), dtype=torch.int32, device=dev)
-        qv[..., offs] = nib
-        qv = qv.reshape((b - a) * 64, q.k // 8, 8)
+        qv[..., offs] = codes
+        qv = qv.reshape((b - a) * 64, q.k // per, per)
         words[a * 64:b * 64] = _to_int32((qv.to(torch.int64) << wide).sum(-1))
     return words[:q.n].contiguous(), q.scales[:, :q.n].t().contiguous(), q.biases[:, :q.n].t().contiguous()
 
@@ -158,6 +165,8 @@ def matmul(x: torch.Tensor, q: Q4, xs: torch.Tensor | None = None, *, sk: int | 
            out: torch.Tensor | None = None, part: torch.Tensor | None = None, reduce: bool = True) -> torch.Tensor:
     """x @ q.T as (M, n) bf16, or unrounded fp32 with ``f32``; ``reduce=False`` returns K slices to add in order."""
 
+    bits = getattr(q, "bits", 4)
+
     if x.dtype != torch.bfloat16 or x.dim() != 2 or x.shape[1] != q.k:
         raise ValueError(f"matmul: x must be (M, {q.k}) bf16")
     if x.stride(1) != 1 or (x.shape[0] > 1 and x.stride(0) % 8) or x.data_ptr() % 16:
@@ -170,11 +179,11 @@ def matmul(x: torch.Tensor, q: Q4, xs: torch.Tensor | None = None, *, sk: int | 
         out = torch.empty((m, q.n), dtype=torch.float32 if f32 else torch.bfloat16, device=x.device)
     if q.gs == 64 and reduce and grouped(x.device.index):
         _ext().qmm_group(x, xs, [q.weight], [q.scales], [q.biases], [out], [q.n], [sk], f32,
-                         group_tile(m, *_chip(x.device.index)), -1)
+                         group_tile(m, *_chip(x.device.index)), -1, bits)
         return out
     if sk > 1 and not reduce and part is None:
         part = torch.empty((sk, m, q.n), dtype=torch.float32, device=x.device)
-    _ext().qmm(x, xs, q.weight, q.scales, q.biases, out, part, q.n, sk, q.gs, bucket(m), f32, reduce)
+    _ext().qmm(x, xs, q.weight, q.scales, q.biases, out, part, q.n, sk, q.gs, bucket(m), f32, reduce, bits)
     return out if sk == 1 or reduce else part.reshape(-1)[:sk * m * q.n].view(sk, m, q.n)
 
 
@@ -185,7 +194,8 @@ def matmul_group(x: torch.Tensor, qs: list[Q4], xs: torch.Tensor | None = None, 
     if x.dtype != torch.bfloat16 or x.dim() != 2 or any(x.shape[1] != q.k for q in qs):
         raise ValueError("matmul_group: x must be (M, K) bf16 with every weight's K")
     sks = sks or [split_k(q.n, q.k, q.gs) for q in qs]
-    if not (1 <= len(qs) <= 4 and all(q.gs == 64 for q in qs) and grouped(x.device.index)):
+    widths = {getattr(q, "bits", 4) for q in qs}
+    if not (1 <= len(qs) <= 4 and all(q.gs == 64 for q in qs) and len(widths) == 1 and grouped(x.device.index)):
         return [matmul(x, q, xs, sk=s, f32=f32) for q, s in zip(qs, sks)]
     if x.stride(1) != 1 or (x.shape[0] > 1 and x.stride(0) % 8) or x.data_ptr() % 16:
         x = x.clone(memory_format=torch.contiguous_format)
@@ -195,7 +205,7 @@ def matmul_group(x: torch.Tensor, qs: list[Q4], xs: torch.Tensor | None = None, 
     outs = [torch.empty((x.shape[0], q.n), dtype=dtype, device=x.device) for q in qs]
     tile = tile or group_tile(x.shape[0], *_chip(x.device.index))
     _ext().qmm_group(x, xs, [q.weight for q in qs], [q.scales for q in qs], [q.biases for q in qs], outs,
-                     [q.n for q in qs], sks, f32, tile, early)
+                     [q.n for q in qs], sks, f32, tile, early, widths.pop())
     return outs
 
 

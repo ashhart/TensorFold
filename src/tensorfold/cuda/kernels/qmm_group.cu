@@ -1,4 +1,5 @@
-// sm_12x lane matmul: up to four projections of one input a launch, each column with qmm.cu's order and so its bits.
+// sm_12x lane matmul: up to four projections of one input and bit width (4 or 8) a launch, each column with qmm.cu's
+// order and so its bits.
 
 #include <ATen/ATen.h>
 #include <algorithm>
@@ -50,12 +51,12 @@ using ic = std::integral_constant<int, N>;
 // SWAP (8-row tiles): weights are the MMA's A operand (16 columns) and the rows its B (8), half the MMAs of 16 rows.
 // SKIP: a warp's m16 tiles wholly past M skip their fragments, mmas and scaling (a part-filled row tile). SPREAD:
 // every K slice sums its share of the tile's outputs (else slice 0 sums them all); the same adds in the same order.
-template <int GS, int BM, int BN, int WM, int WN, int STAGES, bool F32, bool SWAP = false, bool SKIP = false,
-          bool SPREAD = false>
+template <int GS, int BM, int BN, int WM, int WN, int STAGES, bool F32, int BITS, bool SWAP = false,
+          bool SKIP = false, bool SPREAD = false>
 __global__ void __launch_bounds__(WM * WN * 32) group_kernel(
         const __nv_bfloat16* __restrict__ x, const float* __restrict__ xs, const __grid_constant__ Parts parts,
         int M, int K, int ldx, int rows_t, int C) {
-    using T = LaneTile<GS, BM, BN, WM, WN, STAGES>;
+    using T = LaneTile<GS, BM, BN, WM, WN, STAGES, BITS>;
     static_assert(!SWAP || (BM == 8 && WM == 1 && T::NT % 2 == 0), "swapped tiles: 8 rows, column pairs a warp");
     constexpr int I = SWAP ? T::NT / 2 : T::MT;     // MMA m16 tiles a warp: column pairs (swapped) or row tiles
     constexpr int J = SWAP ? 1 : T::NT;             // MMA n8 tiles a warp: the 8 rows (swapped) or column tiles
@@ -76,7 +77,7 @@ __global__ void __launch_bounds__(WM * WN * 32) group_kernel(
     auto stage = [&](int s) { return buf + s * T::STAGE; };
     const int rows = min(BM, M - m0);           // rows past M stay zero in every stage (set once below)
     // each thread's copies, fixed for the block: sources advance a group at a time
-    constexpr int TILE_BYTES = 64 * GS / 2;     // one stored 64-column tile's group block
+    constexpr int TILE_BYTES = 64 * GS * BITS / 8;  // one stored 64-column tile's group block
     constexpr int XC = (BM * T::CHUNKS + T::THREADS - 1) / T::THREADS, WC = (T::W / 16 + T::THREADS - 1) / T::THREADS;
     constexpr int SC = (2 * T::S / 16 + T::THREADS - 1) / T::THREADS;
     static_assert(BM <= T::THREADS, "one input sum a thread");
@@ -129,6 +130,7 @@ __global__ void __launch_bounds__(WM * WN * 32) group_kernel(
     };
     uint32_t mask;                              // 0x000F000F, opaque to the compiler (kept in a register)
     asm volatile("mov.b32 %0, 0x000F000F;\n" : "=r"(mask));
+    auto unpack = [mask](uint32_t w, int s) { return pairm(w, s, mask); };
 
     float acc[I][J][4];
 #pragma unroll
@@ -172,12 +174,12 @@ __global__ void __launch_bounds__(WM * WN * 32) group_kernel(
                 const uint32_t* pw = reinterpret_cast<const uint32_t*>(p + T::X);
                 const __nv_bfloat16* ps = reinterpret_cast<const __nv_bfloat16*>(p + T::X + T::W);
                 const float* px = reinterpret_cast<const float*>(p + T::X + T::W + 2 * T::S);
-                uint32_t words[T::NT][GS / 32];
+                uint32_t words[T::NT][T::WORDS];
 #pragma unroll
                 for (int j = 0; j < T::NT; ++j)
 #pragma unroll
-                    for (int v = 0; v < GS / 32; ++v)
-                        words[j][v] = pw[((wn * T::NT + j) * 32 + lane) * (GS / 32) + v];
+                    for (int v = 0; v < T::WORDS; ++v)
+                        words[j][v] = pw[((wn * T::NT + j) * 32 + lane) * T::WORDS + v];
                 float d[I][J][4];
                 if constexpr (SWAP) {
 #pragma unroll
@@ -187,11 +189,10 @@ __global__ void __launch_bounds__(WM * WN * 32) group_kernel(
                         ldmatrix2(bx, p + (lane & 7) * T::ROW + swz<T::CHUNKS>(lane & 7, ch) * 16);
 #pragma unroll
                         for (int i = 0; i < I; ++i) {             // A rows g, g + 8 are columns of n8 tiles 2i, 2i + 1
-                            const int s0 = (kt & 1) * 8;
-                            const uint32_t a[4] = {pairm(words[2 * i][kt / 2], s0, mask),
-                                                   pairm(words[2 * i + 1][kt / 2], s0, mask),
-                                                   pairm(words[2 * i][kt / 2], s0 + 4, mask),
-                                                   pairm(words[2 * i + 1][kt / 2], s0 + 4, mask)};
+                            const uint32_t a[4] = {frag<BITS>(words[2 * i], kt, 0, unpack),
+                                                   frag<BITS>(words[2 * i + 1], kt, 0, unpack),
+                                                   frag<BITS>(words[2 * i], kt, 1, unpack),
+                                                   frag<BITS>(words[2 * i + 1], kt, 1, unpack)};
                             if (kt == 0) mma0(d[i][0], a, bx[0], bx[1]);
                             else mma(d[i][0], a, bx[0], bx[1]);
                         }
@@ -217,8 +218,8 @@ __global__ void __launch_bounds__(WM * WN * 32) group_kernel(
                         }
 #pragma unroll
                         for (int j = 0; j < T::NT; ++j) {
-                            const uint32_t b0 = pairm(words[j][kt / 2], (kt & 1) * 8, mask);
-                            const uint32_t b1 = pairm(words[j][kt / 2], (kt & 1) * 8 + 4, mask);
+                            const uint32_t b0 = frag<BITS>(words[j], kt, 0, unpack);
+                            const uint32_t b1 = frag<BITS>(words[j], kt, 1, unpack);
 #pragma unroll
                             for (int i = 0; i < LIVE; ++i) {
                                 if (kt == 0) mma0(d[i][j], a[i], b0, b1);
@@ -346,10 +347,10 @@ __global__ void __launch_bounds__(WM * WN * 32) group_kernel(
             for (int h = 0; h < 2; ++h) emit(i, j, h, acc[i][j][2 * h], acc[i][j][2 * h + 1]);
 }
 
-template <int GS, int BM, int BN, int WM, int WN, int STAGES, bool F32, bool SWAP = false, bool SKIP = false,
-          bool SPREAD = false>
+template <int GS, int BM, int BN, int WM, int WN, int STAGES, bool F32, int BITS, bool SWAP = false,
+          bool SKIP = false, bool SPREAD = false>
 void launch(const at::Tensor& x, const at::Tensor& xs, Parts& parts, int C, bool pdl) {
-    using T = LaneTile<GS, BM, BN, WM, WN, STAGES>;
+    using T = LaneTile<GS, BM, BN, WM, WN, STAGES, BITS>;
     const int M = x.size(0), K = x.size(1), rows_t = (M + BM - 1) / BM;
     int clusters = 0;
     for (int i = 0; i < parts.count; ++i) {
@@ -358,7 +359,7 @@ void launch(const at::Tensor& x, const at::Tensor& xs, Parts& parts, int C, bool
         P.first = clusters;
         clusters += rows_t * ((P.tiles + C / P.sk - 1) / (C / P.sk));
     }
-    auto kernel = group_kernel<GS, BM, BN, WM, WN, STAGES, F32, SWAP, SKIP, SPREAD>;
+    auto kernel = group_kernel<GS, BM, BN, WM, WN, STAGES, F32, BITS, SWAP, SKIP, SPREAD>;
     static bool configured = false;
     if (!configured) {
         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, T::SMEM);
@@ -392,27 +393,28 @@ void launch(const at::Tensor& x, const at::Tensor& xs, Parts& parts, int C, bool
 
 // Tiles never change bits; 0 picks by rows and chip: the PRO 6000, power-capped at one row, takes fewer MMAs a weight.
 // 10-12 (``qmm.group_tile`` on SM 12.0 from 96 SMs) spread the slice sums and skip m16 tiles wholly past M.
-template <bool F32>
+template <bool F32, int B>
 void dispatch(int tile, int M, bool gb10, const at::Tensor& x, const at::Tensor& xs, Parts& parts, int C, bool pdl) {
     if (tile == 0 && gb10) tile = M <= 16 ? 2 : M <= 32 ? 3 : M <= 64 ? 4 : 5;
     if (tile == 0) tile = M <= 8 ? 7 : M <= 16 ? 8 : M <= 32 ? 9 : M <= 64 ? 4 : 5;
     auto go = [&](auto full, auto skip, int bm) { M % bm ? skip() : full(); };
     switch (tile) {
-        case 1: launch<64, 16, 64, 1, 4, 4, F32>(x, xs, parts, C, pdl); break;
-        case 2: launch<64, 16, 64, 1, 4, 8, F32>(x, xs, parts, C, pdl); break;
-        case 3: launch<64, 32, 64, 1, 4, 4, F32>(x, xs, parts, C, pdl); break;
-        case 4: launch<64, 64, 64, 1, 4, 4, F32>(x, xs, parts, C, pdl); break;
-        case 5: launch<64, 64, 128, 2, 4, 3, F32>(x, xs, parts, C, pdl); break;
-        case 6: launch<64, 8, 64, 1, 4, 4, F32, true>(x, xs, parts, C, pdl); break;
-        case 7: launch<64, 8, 128, 1, 4, 4, F32, true>(x, xs, parts, C, pdl); break;
-        case 8: launch<64, 16, 128, 1, 8, 4, F32>(x, xs, parts, C, pdl); break;
-        case 9: launch<64, 32, 128, 1, 8, 4, F32>(x, xs, parts, C, pdl); break;
-        case 10: go([&] { launch<64, 128, 128, 2, 4, 2, F32, false, false, true>(x, xs, parts, C, pdl); },
-                    [&] { launch<64, 128, 128, 2, 4, 2, F32, false, true, true>(x, xs, parts, C, pdl); }, 128); break;
-        case 11: go([&] { launch<64, 64, 128, 1, 8, 3, F32, false, false, true>(x, xs, parts, C, pdl); },
-                    [&] { launch<64, 64, 128, 1, 8, 3, F32, false, true, true>(x, xs, parts, C, pdl); }, 64); break;
-        case 12: go([&] { launch<64, 64, 128, 2, 4, 3, F32, false, false, true>(x, xs, parts, C, pdl); },
-                    [&] { launch<64, 64, 128, 2, 4, 3, F32, false, true, true>(x, xs, parts, C, pdl); }, 64); break;
+        case 1: launch<64, 16, 64, 1, 4, 4, F32, B>(x, xs, parts, C, pdl); break;
+        case 2: launch<64, 16, 64, 1, 4, 8, F32, B>(x, xs, parts, C, pdl); break;
+        case 3: launch<64, 32, 64, 1, 4, 4, F32, B>(x, xs, parts, C, pdl); break;
+        case 4: launch<64, 64, 64, 1, 4, 4, F32, B>(x, xs, parts, C, pdl); break;
+        case 5: launch<64, 64, 128, 2, 4, 3, F32, B>(x, xs, parts, C, pdl); break;
+        case 6: launch<64, 8, 64, 1, 4, 4, F32, B, true>(x, xs, parts, C, pdl); break;
+        case 7: launch<64, 8, 128, 1, 4, 4, F32, B, true>(x, xs, parts, C, pdl); break;
+        case 8: launch<64, 16, 128, 1, 8, 4, F32, B>(x, xs, parts, C, pdl); break;
+        case 9: launch<64, 32, 128, 1, 8, 4, F32, B>(x, xs, parts, C, pdl); break;
+        case 10: go([&] { launch<64, 128, 128, 2, 4, 2, F32, B, false, false, true>(x, xs, parts, C, pdl); },
+                    [&] { launch<64, 128, 128, 2, 4, 2, F32, B, false, true, true>(x, xs, parts, C, pdl); }, 128);
+                 break;
+        case 11: go([&] { launch<64, 64, 128, 1, 8, 3, F32, B, false, false, true>(x, xs, parts, C, pdl); },
+                    [&] { launch<64, 64, 128, 1, 8, 3, F32, B, false, true, true>(x, xs, parts, C, pdl); }, 64); break;
+        case 12: go([&] { launch<64, 64, 128, 2, 4, 3, F32, B, false, false, true>(x, xs, parts, C, pdl); },
+                    [&] { launch<64, 64, 128, 2, 4, 3, F32, B, false, true, true>(x, xs, parts, C, pdl); }, 64); break;
         default: TORCH_CHECK(false, "unknown group tile ", tile);
     }
 }
@@ -422,7 +424,7 @@ void dispatch(int tile, int M, bool gb10, const at::Tensor& x, const at::Tensor&
 void qmm_group_cuda(const at::Tensor& x, const at::Tensor& xs, const std::vector<at::Tensor>& ws,
                     const std::vector<at::Tensor>& scales, const std::vector<at::Tensor>& biases,
                     std::vector<at::Tensor>& outs, const std::vector<int64_t>& ns, const std::vector<int64_t>& sks,
-                    bool f32, int tile, int pdl) {
+                    bool f32, int tile, int pdl, int bits) {
     Parts parts = {};
     parts.count = static_cast<int>(ws.size());
     int C = 1;
@@ -440,6 +442,11 @@ void qmm_group_cuda(const at::Tensor& x, const at::Tensor& xs, const std::vector
     const auto* props = at::cuda::getCurrentDeviceProperties();
     const bool gb10 = props->major == 12 && props->minor == 1;
     const bool early = pdl < 0 ? gb10 : pdl > 0;           // overlapping launches pay on GB10, cost the capped PRO 6000
-    if (f32) dispatch<true>(tile, x.size(0), gb10, x, xs, parts, C, early);
-    else dispatch<false>(tile, x.size(0), gb10, x, xs, parts, C, early);
+    if (bits == 8) {
+        if (f32) dispatch<true, 8>(tile, x.size(0), gb10, x, xs, parts, C, early);
+        else dispatch<false, 8>(tile, x.size(0), gb10, x, xs, parts, C, early);
+    } else {
+        if (f32) dispatch<true, 4>(tile, x.size(0), gb10, x, xs, parts, C, early);
+        else dispatch<false, 4>(tile, x.size(0), gb10, x, xs, parts, C, early);
+    }
 }

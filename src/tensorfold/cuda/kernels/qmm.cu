@@ -1,4 +1,5 @@
-// Lane matmul: acc = fma(xs, b, fma(P, s, acc)) per group in order, K slices set by shape, so no row affects another.
+// Lane matmul (4- or 8-bit): acc = fma(xs, b, fma(P, s, acc)) per group in order, K slices set by shape, so no row
+// affects another.
 
 #include <ATen/ATen.h>
 #include <algorithm>
@@ -13,12 +14,13 @@ namespace {
 
 using namespace qmm_frag;
 
-template <int GS, int BM, int BN, int WM, int WN, int STAGES, bool F32, bool CLUSTER, bool PIPE = false>
+template <int GS, int BM, int BN, int WM, int WN, int STAGES, bool F32, bool CLUSTER, int BITS,
+          bool PIPE = false>
 __global__ void __launch_bounds__(WM * WN * 32) qmm_kernel(
         const __nv_bfloat16* __restrict__ x, const float* __restrict__ xs, const uint32_t* __restrict__ w,
         const __nv_bfloat16* __restrict__ scales, const __nv_bfloat16* __restrict__ biases,
         void* __restrict__ out, float* __restrict__ part, int M, int N, int K, int SK, int npad, int ldx, int group) {
-    using T = LaneTile<GS, BM, BN, WM, WN, STAGES>;
+    using T = LaneTile<GS, BM, BN, WM, WN, STAGES, BITS>;
     extern __shared__ __align__(128) unsigned char buf[];
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
     const int wm = warp / WN, wn = warp % WN;
@@ -37,7 +39,7 @@ __global__ void __launch_bounds__(WM * WN * 32) qmm_kernel(
                   m0 + r < M);
         }
         unsigned char* pw = p + T::X;
-        constexpr int TILE_BYTES = 64 * GS / 2;           // one stored 64-column tile's group block
+        constexpr int TILE_BYTES = 64 * GS * BITS / 8;    // one stored 64-column tile's group block
         for (int c = tid; c < T::W / 16; c += T::THREADS) {
             const int t = c / (TILE_BYTES / 16), off = c % (TILE_BYTES / 16);
             const size_t tile = static_cast<size_t>(n0 / 64 + t) * KG + g;
@@ -75,6 +77,7 @@ __global__ void __launch_bounds__(WM * WN * 32) qmm_kernel(
                                                                                        acc_[i][j][e]));
         };
         float dp[T::MT][T::NT][4], sp[T::NT][2], bp[T::NT][2], xp[T::MT][2];
+        auto unpack = [](uint32_t w, int s) { return pair(w, s); };
 #pragma unroll
         for (int s = 0; s < STAGES - 1; ++s) {
             if (s < per) load(s, g0 + s, m0);
@@ -90,12 +93,12 @@ __global__ void __launch_bounds__(WM * WN * 32) qmm_kernel(
             const uint32_t* pw = reinterpret_cast<const uint32_t*>(p + T::X);
             const __nv_bfloat16* ps = reinterpret_cast<const __nv_bfloat16*>(p + T::X + T::W);
             const float* px = reinterpret_cast<const float*>(p + T::X + T::W + 2 * T::S);
-            uint32_t words[T::NT][GS / 32];
+            uint32_t words[T::NT][T::WORDS];
 #pragma unroll
             for (int j = 0; j < T::NT; ++j)
 #pragma unroll
-                for (int v = 0; v < GS / 32; ++v)
-                    words[j][v] = pw[((wn * T::NT + j) * 32 + lane) * (GS / 32) + v];
+                for (int v = 0; v < T::WORDS; ++v)
+                    words[j][v] = pw[((wn * T::NT + j) * 32 + lane) * T::WORDS + v];
             float d[T::MT][T::NT][4];
 #pragma unroll
             for (int kt = 0; kt < GS / 16; ++kt) {
@@ -108,8 +111,8 @@ __global__ void __launch_bounds__(WM * WN * 32) qmm_kernel(
                 }
 #pragma unroll
                 for (int j = 0; j < T::NT; ++j) {
-                    const uint32_t b0 = pair(words[j][kt / 2], (kt & 1) * 8);
-                    const uint32_t b1 = pair(words[j][kt / 2], (kt & 1) * 8 + 4);
+                    const uint32_t b0 = frag<BITS>(words[j], kt, 0, unpack);
+                    const uint32_t b1 = frag<BITS>(words[j], kt, 1, unpack);
 #pragma unroll
                     for (int i = 0; i < T::MT; ++i) {
                         if (kt == 0) mma0(d[i][j], a[i], b0, b1);
@@ -229,12 +232,13 @@ __global__ void reduce_kernel(const float* __restrict__ part, void* __restrict__
     else reinterpret_cast<__nv_bfloat16*>(out)[i] = __float2bfloat16_rn(acc);
 }
 
-template <int GS, int BM, int BN, int WM, int WN, int STAGES, bool F32, bool CLUSTER, bool PIPE = false>
+template <int GS, int BM, int BN, int WM, int WN, int STAGES, bool F32, bool CLUSTER, int BITS,
+          bool PIPE = false>
 void launch(const at::Tensor& x, const at::Tensor& xs, const at::Tensor& w, const at::Tensor& scales,
             const at::Tensor& biases, at::Tensor& out, const at::Tensor& part, int N, int SK) {
-    using T = LaneTile<GS, BM, BN, WM, WN, STAGES>;
+    using T = LaneTile<GS, BM, BN, WM, WN, STAGES, BITS>;
     const int M = x.size(0), K = x.size(1);
-    auto kernel = qmm_kernel<GS, BM, BN, WM, WN, STAGES, F32, CLUSTER, PIPE>;
+    auto kernel = qmm_kernel<GS, BM, BN, WM, WN, STAGES, F32, CLUSTER, BITS, PIPE>;
     static bool configured = false;
     if (!configured) {
         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, T::SMEM);
@@ -265,13 +269,13 @@ void launch(const at::Tensor& x, const at::Tensor& xs, const at::Tensor& w, cons
         M == 1 ? K : static_cast<int>(x.stride(0)), group));
 }
 
-template <int GS, bool F32, bool CLUSTER>
+template <int GS, bool F32, bool CLUSTER, int BITS>
 void dispatch(int bm, const at::Tensor& x, const at::Tensor& xs, const at::Tensor& w, const at::Tensor& s,
               const at::Tensor& b, at::Tensor& out, const at::Tensor& part, int N, int SK) {
     switch (bm) {
-        case 16: launch<GS, 16, 64, 1, 4, 4, F32, CLUSTER>(x, xs, w, s, b, out, part, N, SK); break;
-        case 32: launch<GS, 32, 64, 1, 4, 4, F32, CLUSTER>(x, xs, w, s, b, out, part, N, SK); break;
-        default: launch<GS, 64, 64, 1, 4, 4, F32, CLUSTER>(x, xs, w, s, b, out, part, N, SK); break;
+        case 16: launch<GS, 16, 64, 1, 4, 4, F32, CLUSTER, BITS>(x, xs, w, s, b, out, part, N, SK); break;
+        case 32: launch<GS, 32, 64, 1, 4, 4, F32, CLUSTER, BITS>(x, xs, w, s, b, out, part, N, SK); break;
+        default: launch<GS, 64, 64, 1, 4, 4, F32, CLUSTER, BITS>(x, xs, w, s, b, out, part, N, SK); break;
     }
 }
 
@@ -284,16 +288,19 @@ bool qmm_clusters(int SK, bool reduce) {
 
 void qmm_cuda(const at::Tensor& x, const at::Tensor& xs, const at::Tensor& w, const at::Tensor& scales,
               const at::Tensor& biases, at::Tensor& out, const at::Tensor& part, int N, int SK, int gs, int bm,
-              bool f32, bool reduce) {
+              bool f32, bool reduce, int bits) {
     const int M = x.size(0);
     const bool cluster = qmm_clusters(SK, reduce);
-#define GO(G, F, C) dispatch<G, F, C>(bm, x, xs, w, scales, biases, out, part, N, SK)
-    if (gs == 64) {
-        if (f32) { if (cluster) GO(64, true, true); else GO(64, true, false); }
-        else { if (cluster) GO(64, false, true); else GO(64, false, false); }
+#define GO(G, F, C, B) dispatch<G, F, C, B>(bm, x, xs, w, scales, biases, out, part, N, SK)
+    if (bits == 8) {                                      // groups of 64 only
+        if (f32) { if (cluster) GO(64, true, true, 8); else GO(64, true, false, 8); }
+        else { if (cluster) GO(64, false, true, 8); else GO(64, false, false, 8); }
+    } else if (gs == 64) {
+        if (f32) { if (cluster) GO(64, true, true, 4); else GO(64, true, false, 4); }
+        else { if (cluster) GO(64, false, true, 4); else GO(64, false, false, 4); }
     } else {
-        if (f32) { if (cluster) GO(32, true, true); else GO(32, true, false); }
-        else { if (cluster) GO(32, false, true); else GO(32, false, false); }
+        if (f32) { if (cluster) GO(32, true, true, 4); else GO(32, true, false, 4); }
+        else { if (cluster) GO(32, false, true, 4); else GO(32, false, false, 4); }
     }
 #undef GO
     if (SK > 1 && reduce && !cluster) {
