@@ -11,6 +11,8 @@ families, Metal and tensor parallelism are not implemented. Qualification includ
 [synthetic runtime checks](research/model-sleep-validation.md) and
 [full-checkpoint NVFP4 checks](research/model-sleep-cuda-validation.md) with a drafter
 and unified-memory reclamation. Other checkpoint formats still need hardware qualification.
+The [prefix-preservation receipt](research/model-sleep-cache-validation.md) covers
+disk snapshots and stored-conversation cache reuse across sleep/wake.
 
 ## Start and control
 
@@ -64,9 +66,45 @@ survive. A client can continue a stored `previous_response_id` after wake, withi
 store's existing retention limits. Chat Completions clients continue by sending their
 message history as usual. This is same-process preservation, not restart persistence.
 
-This milestone releases KV, recurrent and drafter prefix caches. The next turn
-prefills its history again. Preserving those reusable caches across sleep/wake is a
-separate milestone described in the [research](research/model-offloading.md).
+By default, sleep discards runtime prefix caches and the next turn prefills its
+history again. Add `--sleep-cache-dir /path/to/cache-storage` to preserve reusable
+text prefixes on disk. This option requires `--enable-sleep-mode`.
+
+```bash
+tensorfold serve /path/to/qwen-checkpoint --backend cuda \
+  --drafter /path/to/dflash2-checkpoint --enable-sleep-mode \
+  --sleep-cache-dir /path/to/cache-storage
+```
+
+Each snapshot includes attention K/V, convolution history, recurrent state, positions,
+and compatible drafter context. Only committed rows are saved, with their original
+bits. Sleep writes and validates the complete selected set before releasing any
+runtime state. A failed write, including a full disk, refuses sleep and keeps the
+original runtime awake. Snapshot identity binds the files to the current process,
+checkpoint content, runtime, device capability and precision/context settings.
+
+Wake validates the snapshots but leaves their tensors on disk. A matching request
+loads the longest valid strict prefix under memory admission; unrelated prefixes
+stay on disk. Reply tokens and the new turn may still need prefill. A prefix that
+cannot fit, or whose file becomes unusable after wake, is a cache miss. Corruption
+detected during wake leaves the model sleeping for retry.
+
+The snapshot count follows the engine's existing prefix-cache capacity. Every live
+retained prefix is saved; older disk-only entries fill any remaining slots. Prefixes
+evicted before preservation are unavailable, and image state is not saved. Control
+responses expose `cache.saved_prefixes`, `snapshot_bytes`, `omitted_prefixes`,
+`unavailable_prefixes`, `loaded_prefixes`, `load_failures` and `memory_misses`.
+The unavailable count covers saved files found unusable during a later save or
+load; it cannot count conversations evicted before sleep. An old disk-only prefix
+that is already missing or corrupt is omitted from the next generation. A failure
+writing the new generation still refuses sleep and preserves the live runtime.
+
+Files live in a private process directory under the configured location. They contain
+conversation tokens and model state. A new generation replaces the old one only after
+it succeeds, so saving can temporarily require space for both generations. Tensor
+staging uses chunks of at most 8 MiB. Normal shutdown removes this process's files;
+an abrupt exit can leave its directory for manual removal. These files do not provide
+conversation or cache restoration after a process restart.
 
 Repeated completed sleep/wake calls are idempotent. Concurrent transitions return 409.
 A drain timeout or checkpoint preflight refusal leaves the original runtime awake.
@@ -85,6 +123,9 @@ PYTHONPATH=src python tools/qualify_sleep.py --synthetic --synthetic-draft \
   --parallel 2 --seed 1234 --output sleep-drafted.json
 PYTHONPATH=src python tools/qualify_sleep.py --model /path/to/qwen-checkpoint \
   --draft /path/to/dflash2-checkpoint --parallel 2 --cycles 3 --output sleep-model.json
+PYTHONPATH=src python tools/qualify_sleep.py --model /path/to/qwen-checkpoint \
+  --draft /path/to/dflash2-checkpoint --parallel 2 --preserve-cache --seed 1234 \
+  --cycles 3 --output sleep-cache.json
 ```
 
 The tool constructs a real CUDA engine, compares serial and concurrent/drafted token
@@ -101,6 +142,9 @@ exercise HTTP stream draining and stored conversation continuation with:
 ```bash
 python tools/qualify_sleep_http.py http://127.0.0.1:8080 MODEL --output sleep-http.json
 ```
+
+For a server started with `--sleep-cache-dir`, add `--require-cache` to check that
+stored-response continuations reuse the same cached-token count after wake.
 
 The [full-checkpoint results](research/model-sleep-cuda-validation.md) cover the pinned
 NVFP4 model and DFlash2 drafter, unified-memory reclamation, HTTP conversation

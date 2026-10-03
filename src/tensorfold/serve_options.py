@@ -12,6 +12,8 @@ from typing import Any
 def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any = None) -> None:
     """Refuse KV cache, draft rule, image, share, slot and precision options the backend or family can't serve."""
 
+    if getattr(args, "sleep_cache_dir", None) is not None and not getattr(args, "enable_sleep_mode", False):
+        raise ValueError("--sleep-cache-dir requires --enable-sleep-mode")
     if getattr(args, "enable_sleep_mode", False):
         if (backend != "cuda" or getattr(family.package, "CUDA_SLEEP_LEVELS", ()) != (2,)
                 or getattr(args, "tp", 1) != 1):

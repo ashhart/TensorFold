@@ -50,6 +50,7 @@ def test_sleep_flags_require_environment_secret_without_command_line_token(monke
 
     args = cli.build_parser().parse_args(["serve", "owner/model", "--enable-sleep-mode"])
     assert args.enable_sleep_mode and args.sleep_token_env == "TENSORFOLD_SLEEP_TOKEN" and args.sleep_timeout == 120
+    assert args.sleep_cache_dir is None
     args = cli.build_parser().parse_args(["serve", "owner/model", "--sleep-token-env", "MODEL_SECRET",
                                           "--sleep-timeout", "3.5"])
     assert args.sleep_token_env == "MODEL_SECRET" and args.sleep_timeout == 3.5
@@ -61,6 +62,21 @@ def test_sleep_flags_require_environment_secret_without_command_line_token(monke
     with pytest.raises(ValueError, match="nonblank secret") as refused:
         cli._check_serve_options(args, family, "cuda")
     assert candidate not in str(refused.value)
+
+
+def test_sleep_cache_directory_requires_sleep_before_model_download(tmp_path, monkeypatch):
+    from tensorfold import families, hub
+    from tensorfold.families import qwen3_5
+
+    family = SimpleNamespace(title=qwen3_5.TITLE, package=qwen3_5, model_type="qwen3_5")
+    monkeypatch.setattr(families, "detect", lambda path: family)
+    monkeypatch.setattr(cli, "_backend", lambda *a: "cuda")
+    monkeypatch.setattr(hub, "resolve", lambda *a, **k: pytest.fail("download before refusal"))
+    monkeypatch.setattr(families, "require_readable", lambda *a: pytest.fail("weights checked before refusal"))
+    args = cli.build_parser().parse_args(["serve", str(tmp_path), "--no-update-check",
+                                          "--sleep-cache-dir", str(tmp_path / "sleep-cache")])
+    with pytest.raises(ValueError, match="--sleep-cache-dir requires --enable-sleep-mode"):
+        cli.cmd_serve(args)
 
 
 @pytest.mark.parametrize("backend,kind,flags,secret,message", [
@@ -91,7 +107,8 @@ def test_sleep_refusals_precede_model_download(tmp_path, monkeypatch, backend, k
         cli.cmd_serve(args)
 
 
-@pytest.mark.parametrize("flags", [[], ["--no-drafts"], ["--parallel", "4", "--checkpoint-slots", "6"]])
+@pytest.mark.parametrize("flags", [[], ["--no-drafts"], ["--parallel", "4", "--checkpoint-slots", "6"],
+                                   ["--sleep-cache-dir", "sleep-cache"]])
 def test_sleep_accepts_existing_dense_cuda_draft_and_parallel_options(tmp_path, monkeypatch, flags):
     from tensorfold.families import qwen3_5
 
@@ -156,6 +173,65 @@ def test_sleep_cli_releases_initial_locals_and_pins_reload_paths_and_context(tmp
     assert made[1][1]["context"] == 4096 and made[1][1]["context_explicit"] is True
     assert made[1][1]["parallel"] == 2 and made[1][1]["drafter"] == str(tmp_path.resolve())
     assert "do-not-log-this-value" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("serve_fails", [False, True])
+def test_sleep_cli_prepares_cache_and_closes_snapshot_storage(tmp_path, monkeypatch, serve_fails):
+    from tensorfold.cuda import server, sleep
+
+    events = []
+    cache_dir = str(tmp_path / "sleep-cache")
+
+    class Adapter:
+        def __init__(self, app, factory, model_dir, options, *, identity, cache_dir):
+            events.append(("create", cache_dir))
+
+        def prepare(self):
+            events.append("prepare")
+
+        def release(self):
+            events.append("release")
+
+        def restore(self):
+            events.append("restore")
+
+        def cleanup(self):
+            events.append("cleanup")
+
+        def close(self):
+            events.append("close")
+
+        def memory_snapshot(self):
+            return {"allocated_bytes": 0}
+
+        def cache_snapshot(self):
+            return {"enabled": True}
+
+    monkeypatch.setattr(sleep, "CudaSleep", Adapter)
+    monkeypatch.setattr(sleep, "CheckpointIdentity", lambda *a: object())
+    monkeypatch.setenv("TENSORFOLD_SLEEP_TOKEN", "secret")
+    monkeypatch.setattr(server, "App", lambda engine, *a, **k: SimpleNamespace(
+        engine=engine, effective_context_window=4096))
+    family = _family(cuda_engine=lambda *a, **k: SimpleNamespace(), CUDA_SLEEP_LEVELS=(2,))
+    family.model_type = "qwen3_5"
+
+    def serve(app, *args):
+        assert app.sleep_cache() == {"enabled": True}
+        assert app.sleep_memory() == {"allocated_bytes": 0}
+        app.lifecycle.sleep()
+        app.lifecycle.wake_up()
+        if serve_fails:
+            raise RuntimeError("serve failed")
+
+    monkeypatch.setattr(server, "serve", serve)
+    args = cli.build_parser().parse_args(["serve", str(tmp_path), "--enable-sleep-mode", "--no-drafts",
+                                          "--sleep-cache-dir", cache_dir])
+    if serve_fails:
+        with pytest.raises(RuntimeError, match="serve failed"):
+            cli._serve_cuda(args, family, tmp_path)
+    else:
+        assert cli._serve_cuda(args, family, tmp_path) == 0
+    assert events == [("create", cache_dir), "prepare", "release", "restore", "close"]
 
 
 @pytest.mark.parametrize("override, expected", [(None, 128), (0, 0), (64, 64)])

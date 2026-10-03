@@ -55,7 +55,7 @@ def cuda(monkeypatch):
     prompt_precision.set_fp8(previous[2])
 
 
-def setup(checkpoint, cuda, monkeypatch, factory=None, drafter=None):
+def setup(checkpoint, cuda, monkeypatch, factory=None, drafter=None, cache_dir=None):
     from tensorfold.cuda import sleep
 
     monkeypatch.setattr(sleep, "clear_tensor_caches", lambda: cuda.append("globals"))
@@ -72,10 +72,76 @@ def setup(checkpoint, cuda, monkeypatch, factory=None, drafter=None):
         return factory() if factory else Engine(cuda)
 
     adapter = sleep.CudaSleep(app, load, checkpoint, {"drafter": str(drafter or checkpoint), "parallel": 2,
-                                                   "vision": True, "no_drafts": False})
+                                                   "vision": True, "no_drafts": False}, cache_dir=cache_dir)
     app.lifecycle = Lifecycle(release=adapter.release, restore=adapter.restore, cleanup=adapter.cleanup,
-                              preflight=adapter.verify_identity)
+                              preflight=adapter.prepare)
     return app, adapter, refs, calls
+
+
+def cache_setup(checkpoint, tmp_path, cuda, monkeypatch):
+    from test_cuda_prefix_store import Codec, cache
+
+    from tensorfold.families.qwen3_5 import cuda as package
+
+    codec = Codec()
+    monkeypatch.setitem(sys.modules, "tensorfold.families.qwen3_5.cuda.prefix_snapshot", codec)
+    monkeypatch.setattr(package, "prefix_snapshot", codec, raising=False)
+    monkeypatch.setattr(sys.modules["torch"].cuda, "get_device_capability", lambda: (9, 0), raising=False)
+    monkeypatch.setattr(sys.modules["torch"], "__version__", "test", raising=False)
+    monkeypatch.setattr(sys.modules["torch"], "version", SimpleNamespace(cuda="test"), raising=False)
+
+    def load():
+        engine = Engine(cuda)
+        engine.w.norm = SimpleNamespace(device="cpu")
+        engine.multi.cache = cache()
+        engine.multi.memory_gate = None
+        return engine
+
+    app, adapter, refs, _calls = setup(checkpoint, cuda, monkeypatch, factory=load,
+                                     cache_dir=tmp_path / "snapshots")
+    app.engine.multi.cache = cache([1, 2], [3, 4])
+    return app, adapter, codec, refs
+
+
+def test_snapshot_failure_refuses_sleep_without_stopping_runtime(checkpoint, tmp_path, cuda, monkeypatch):
+    app, adapter, codec, refs = cache_setup(checkpoint, tmp_path, cuda, monkeypatch)
+    codec.fail_save = True
+    with pytest.raises(LifecycleError, match="disk full"):
+        app.lifecycle.sleep()
+    assert app.lifecycle.snapshot()["state"] == "awake"
+    assert app.engine is refs[-1]() and "close" not in cuda
+    assert app.engine.multi.cache.longest([1, 2, 8])[0] == [1, 2]
+    adapter.close()
+
+
+def test_saved_cache_survives_teardown_and_is_loaded_only_on_matching_request(checkpoint, tmp_path, cuda, monkeypatch):
+    app, adapter, codec, refs = cache_setup(checkpoint, tmp_path, cuda, monkeypatch)
+    app.lifecycle.sleep()
+    assert all(ref() is None for ref in refs)
+    assert adapter.cache_snapshot()["saved_prefixes"] == 2
+    app.lifecycle.wake_up()
+    assert not codec.loads and not app.engine.multi.cache.entries
+    assert app.engine.multi.cache.longest([1, 2, 7])[0] == [1, 2]
+    assert codec.loads == [[1, 2]]
+    app.lifecycle.sleep()
+    app.lifecycle.wake_up()
+    assert app.engine.multi.cache.longest([3, 4, 5])[0] == [3, 4]
+    adapter.close()
+
+
+def test_bad_snapshot_keeps_wake_retryable_until_bytes_restored(checkpoint, tmp_path, cuda, monkeypatch):
+    app, adapter, _codec, _refs = cache_setup(checkpoint, tmp_path, cuda, monkeypatch)
+    app.lifecycle.sleep()
+    path = next((tmp_path / "snapshots").rglob("*.safetensors"))
+    original = path.read_bytes()
+    path.write_bytes(b"bad")
+    with pytest.raises(LifecycleError, match="invalid snapshot"):
+        app.lifecycle.wake_up()
+    assert app.lifecycle.snapshot()["state"] == "sleeping" and app.engine is None
+    path.write_bytes(original)
+    app.lifecycle.wake_up()
+    assert app.engine.multi.cache.longest([1, 2, 7])[0] == [1, 2]
+    adapter.close()
 
 
 def test_sleep_drops_all_runtime_owners_and_reloads_same_app(checkpoint, cuda, monkeypatch):

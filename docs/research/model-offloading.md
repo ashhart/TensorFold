@@ -229,6 +229,10 @@ explicitly reconstruct communicators. Refuse unsupported TP sleep until this is 
 
 ## Subsequent milestone: preserve conversations
 
+The single-device CUDA dense-Qwen text path now has an opt-in implementation and
+[validation receipt](model-sleep-cache-validation.md). The contract below remains
+the basis for additional backend and family adapters.
+
 Preserve reusable conversation prefixes across sleep/wake. There is no need to keep a
 live HTTP stream suspended. Ordinary chat callers still send conversation messages;
 Responses callers retain their existing `previous_response_id` chains in the frontend.

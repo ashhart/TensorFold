@@ -71,6 +71,9 @@ def admin(handler: Any, app: Any) -> bool:
         memory = getattr(app, "sleep_memory", None)
         if memory is not None:
             result = {**result, "memory": memory()}
+        cache = getattr(app, "sleep_cache", None)
+        if cache is not None:
+            result = {**result, "cache": cache()}
         _send(handler, 200, result)
     except RequestError as exc:
         _error(handler, LifecycleError(str(exc), status=400, code="invalid_request_body"))

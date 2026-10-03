@@ -13,7 +13,7 @@ import urllib.error
 import urllib.request
 
 
-def qualify(base, model, token, output, *, tokens=64):
+def qualify(base, model, token, output, *, tokens=64, require_cache=False):
     def call(route, body=None, *, method=None, authenticated=False, origin=False):
         headers = {"Content-Type": "application/json"}
         if authenticated:
@@ -72,6 +72,8 @@ def qualify(base, model, token, output, *, tokens=64):
     assert call("/sleep?level=1", method="POST", authenticated=True)[0] == 400
     initial, _ = control("/is_sleeping", method="GET")
     assert initial["ready"]
+    if require_cache:
+        assert initial.get("cache", {}).get("mode") == "disk", "server cache preservation is disabled"
     serial, drafted = chat(False), chat()
     assert serial == drafted, "drafted HTTP reply differs from serial"
 
@@ -83,6 +85,11 @@ def qualify(base, model, token, output, *, tokens=64):
                     "input": "What marker did I ask you to remember? Reply with the marker only."}
     status, before = call("/v1/responses", continuation)
     assert status == 200, (status, before)
+    if require_cache:
+        status, warm = call("/v1/responses", continuation)
+        assert status == 200 and warm["tensorfold"]["token_sha"] == before["tensorfold"]["token_sha"]
+        before = warm
+        assert before["usage"]["input_tokens_details"]["cached_tokens"] > 0, "awake prefix was not reused"
 
     entered = threading.Event()
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -102,6 +109,8 @@ def qualify(base, model, token, output, *, tokens=64):
         asleep, sleep_s = sleeping.result(timeout=1800)
 
     assert asleep["is_sleeping"] and asleep["memory"]["allocated_bytes"] == 0, asleep
+    if require_cache:
+        assert asleep["memory"]["reserved_bytes"] == 0 and asleep["cache"]["saved_prefixes"] > 0
     assert call("/v1/completions", {})[0] == 503
     assert call("/v1/models")[0] == 200
     assert call("/metrics")[0] == 200
@@ -111,6 +120,8 @@ def qualify(base, model, token, output, *, tokens=64):
     assert status == 200 and stored == first, "stored response changed during sleep"
     awake, wake_s = control("/wake_up")
     assert awake["ready"]
+    if require_cache:
+        assert awake["cache"]["loaded_prefixes"] == 0, "wake loaded prefixes eagerly"
     assert chat() == drafted and chat(False) == serial, "HTTP token hash changed after wake"
     status, after = call("/v1/responses", continuation)
     assert status == 200 and after["previous_response_id"] == first["id"], (status, after)
@@ -123,6 +134,13 @@ def qualify(base, model, token, output, *, tokens=64):
                   conversation_input_tokens=after["usage"]["input_tokens"],
                   checks=["auth", "Origin", "level refusal", "stream drain", "503 admission", "409 conflict",
                           "discovery while asleep", "stored response", "continued conversation", "token equality"])
+    if require_cache:
+        cached = after["usage"]["input_tokens_details"]["cached_tokens"]
+        assert cached == before["usage"]["input_tokens_details"]["cached_tokens"], "conversation prefix reuse lost"
+        state, _ = control("/is_sleeping", method="GET")
+        assert state["cache"]["loaded_prefixes"] > 0 and state["cache"]["load_failures"] == 0
+        report.update(conversation_cached_tokens=cached, restored_cache=state["cache"])
+        report["checks"].extend(["zero reserved memory", "lazy cache restore", "conversation prefix reuse"])
     output.write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps({"passed": True, "sleep_s": sleep_s, "wake_s": wake_s,
                       "asleep_allocated_bytes": asleep["memory"]["allocated_bytes"]}), flush=True)
@@ -134,12 +152,13 @@ def main():
     parser.add_argument("model")
     parser.add_argument("--token-env", default="TENSORFOLD_SLEEP_TOKEN")
     parser.add_argument("--tokens", type=int, default=64)
+    parser.add_argument("--require-cache", action="store_true", help="verify disk preservation and cached-token reuse")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     token = os.environ.get(args.token_env, "")
     if not token or args.tokens < 1:
         parser.error("a configured bearer secret and positive token count are required")
-    qualify(args.base.rstrip("/"), args.model, token, args.output, tokens=args.tokens)
+    qualify(args.base.rstrip("/"), args.model, token, args.output, tokens=args.tokens, require_cache=args.require_cache)
 
 
 if __name__ == "__main__":

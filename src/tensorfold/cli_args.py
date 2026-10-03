@@ -34,6 +34,8 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
                           help="environment variable containing the sleep/wake bearer secret")
     endpoint.add_argument("--sleep-timeout", type=float, default=120.0,
                           help="seconds to drain accepted requests before sleep is refused")
+    endpoint.add_argument("--sleep-cache-dir", default=None, metavar="DIRECTORY",
+                          help="with --enable-sleep-mode, preserve conversation caches on disk during sleep")
     endpoint.add_argument("--vision", action="store_true",
                           help="enable image input for supported GLM and Qwen vision checkpoints")
     endpoint.add_argument("--vision-urls", action="store_true",

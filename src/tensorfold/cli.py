@@ -317,17 +317,24 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
           f"(sampling: {shown}; drafts: {'off' if args.no_drafts else 'on'}; prompts: {prompts}; "
           f"context: {'unlimited' if effective_context is None else effective_context}; "
           f"loaded in {time.perf_counter() - started:.1f}s)", flush=True)
+    adapter = None
     if sleeping:
         from tensorfold.cuda.sleep import CudaSleep
         from tensorfold.server.lifecycle import Lifecycle
 
-        adapter = CudaSleep(app, family.package.cuda_engine, model_dir, options, identity=identity)
+        adapter = CudaSleep(app, family.package.cuda_engine, model_dir, options, identity=identity,
+                            cache_dir=getattr(args, "sleep_cache_dir", None))
         app.lifecycle = Lifecycle(release=adapter.release, restore=adapter.restore, cleanup=adapter.cleanup,
-                                  preflight=adapter.verify_identity, drain_timeout=args.sleep_timeout)
+                                  preflight=adapter.prepare, drain_timeout=args.sleep_timeout)
         app.sleep_token = os.environ[args.sleep_token_env]
         app.sleep_memory = adapter.memory_snapshot
+        app.sleep_cache = adapter.cache_snapshot
     del weights, engine
-    serve(app, args.host, int(args.port))
+    try:
+        serve(app, args.host, int(args.port))
+    finally:
+        if adapter is not None:
+            adapter.close()
     return 0
 
 

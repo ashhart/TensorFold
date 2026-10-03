@@ -379,6 +379,21 @@ def test_lifecycle_routes_include_allocator_counters_when_supported(app):
         assert call(server, "/v1/wake_up")[1]["memory"]["allocated"] == 100
 
 
+def test_lifecycle_routes_include_cache_status_when_supported(app):
+    app.sleep_cache = lambda: {"enabled": True, "stored": app.engine is None}
+    with serving(app) as server:
+        assert call(server, "/v1/is_sleeping", method="GET")[1]["cache"] == {"enabled": True, "stored": False}
+        assert call(server, "/v1/sleep?level=2")[1]["cache"] == {"enabled": True, "stored": True}
+        assert call(server, "/v1/wake_up")[1]["cache"] == {"enabled": True, "stored": False}
+
+
+def test_lifecycle_routes_omit_cache_status_without_a_callback(app):
+    with serving(app) as server:
+        for path, method in (("/is_sleeping", "GET"), ("/sleep", "POST"), ("/wake_up", "POST")):
+            status, body = call(server, path, method=method)
+            assert status == 200 and "cache" not in body
+
+
 @pytest.mark.parametrize("mode, expected", [("unauthorized", 401), ("origin", 403), ("sleeping", 503)])
 def test_refusal_closes_without_reading_a_stalled_body_or_dispatching_pipeline(app, mode, expected):
     if mode == "sleeping":

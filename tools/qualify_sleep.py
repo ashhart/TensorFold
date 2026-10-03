@@ -16,7 +16,7 @@ import time
 import weakref
 
 
-def qualify(args, model_dir):
+def qualify(args, model_dir, cache_dir=None):
     import torch
     import tensorfold
     from tensorfold.cuda import precision, prompt_precision
@@ -30,11 +30,13 @@ def qualify(args, model_dir):
     prompt_precision.set_fp8(args.prefill_fp8)
     options = dict(drafter=str(args.draft.resolve()) if args.draft else "", no_drafts=not args.draft,
                    parallel=args.parallel, context=args.context, context_explicit=True)
+    if args.preserve_cache and args.parallel > 1:
+        options["checkpoint_slots"] = max(3, args.parallel)
     app = App(cuda_engine(model_dir, **options), model_dir, "sleep-qualification")
     frontend = (id(app), id(app.tok), id(app.template))
-    adapter = CudaSleep(app, cuda_engine, model_dir, options)
+    adapter = CudaSleep(app, cuda_engine, model_dir, options, cache_dir=cache_dir)
     lifecycle = Lifecycle(release=adapter.release, restore=adapter.restore, cleanup=adapter.cleanup,
-                          preflight=adapter.verify_identity)
+                          preflight=adapter.prepare)
 
     def memory():
         torch.cuda.synchronize()
@@ -54,25 +56,36 @@ def qualify(args, model_dir):
 
     def generate(draft, offset=0):
         tokens = []
+        first_token_s = None
         sampling = Sampling(args.seed + offset, 1.0, 20, .95) if args.seed is not None else None
+
+        def received(ids):
+            nonlocal first_token_s
+            if ids and first_token_s is None:
+                first_token_s = time.perf_counter() - started
+            tokens.extend(ids)
+
         with lifecycle.admit():
+            started = time.perf_counter()
             stats = app.engine.generate([1 + (i + offset) % 128 for i in range(args.prompt_tokens)],
-                                        args.tokens, sampling, lambda ids: tokens.extend(ids),
+                                        args.tokens, sampling, received,
                                         draft=draft, stop_eos=False)
+            elapsed_s = time.perf_counter() - started
         assert len(tokens) == args.tokens, "generation did not reach the requested reply length"
-        return dict(tokens=tokens, stats=stats)
+        return dict(tokens=tokens, stats=stats, first_token_s=first_token_s, elapsed_s=elapsed_s)
 
     def runs():
         serial = [generate(False, offset) for offset in range(args.parallel)]
         with ThreadPoolExecutor(max_workers=args.parallel) as pool:
-            concurrent = list(pool.map(lambda offset: generate(bool(args.draft), offset), range(args.parallel)))
+            concurrent = list(pool.map(lambda offset: generate(bool(args.draft) or args.preserve_cache, offset),
+                                       range(args.parallel)))
         assert [r["tokens"] for r in serial] == [r["tokens"] for r in concurrent], "serial/concurrent tokens differ"
         return dict(serial=serial, concurrent=concurrent)
 
     report = dict(synthetic=args.synthetic, gpu=torch.cuda.get_device_name(), torch=torch.__version__,
                   cuda=torch.version.cuda, tensorfold=tensorfold.__version__,
                   precision=args.precision, prefill_fp8=args.prefill_fp8,
-                  seed=args.seed,
+                  seed=args.seed, preserve_cache=args.preserve_cache,
                   options={**options, "drafter": bool(args.draft)}, cycles=[])
     report["checkpoint_files"] = [dict(source=adapter.identity.paths.index(Path(root)), file=name, sha256=digest)
                                   for (root, name), digest in adapter.identity.manifest.items()]
@@ -80,6 +93,10 @@ def qualify(args, model_dir):
         generate(False)  # compile/warm kernels before measuring cold requests (serial bypasses prefix reuse)
         before = runs()
         report["before"] = before
+        if args.preserve_cache:
+            report["warm"] = runs()
+            expected_cached = [r["stats"]["cached"] for r in report["warm"]["concurrent"]]
+            assert all(expected_cached), "warm requests did not reuse a prefix"
         for _ in range(args.cycles):
             old = weakref.ref(app.engine)
             loaded = memory()
@@ -87,16 +104,27 @@ def qualify(args, model_dir):
             lifecycle.sleep()
             sleep_s = time.perf_counter() - start
             asleep = memory()
+            saved_cache = adapter.cache_snapshot()
             assert old() is None, "old engine is retained"
             assert asleep["allocated_bytes"] < loaded["allocated_bytes"], "CUDA allocations were not released"
             start = time.perf_counter()
             lifecycle.wake_up()
             wake_s = time.perf_counter() - start
+            if args.preserve_cache:
+                engine = app.engine
+                assert not (engine.multi.cache if engine.concurrent else engine.cache).entries, "eager cache load"
+                del engine
             after = runs()
             assert [r["tokens"] for r in after["serial"]] == [r["tokens"] for r in before["serial"]], \
                 "tokens changed across wake"
             assert frontend == (id(app), id(app.tok), id(app.template)), "frontend was replaced"
             cycle = dict(loaded=loaded, asleep=asleep, awake=memory(), sleep_s=sleep_s, wake_s=wake_s, after=after)
+            if args.preserve_cache:
+                assert asleep["allocated_bytes"] == asleep["reserved_bytes"] == 0, "cache tensors survived sleep"
+                assert [r["stats"]["cached"] for r in after["concurrent"]] == expected_cached, "prefix reuse lost"
+                assert adapter.cache_snapshot()["loaded_prefixes"] == args.parallel, "prefix was not restored"
+                assert adapter.cache_snapshot()["load_failures"] == 0, "prefix restore failed"
+                cycle.update(saved_cache=saved_cache, restored_cache=adapter.cache_snapshot())
             report["cycles"].append(cycle)
             print(json.dumps({"cycle": len(report["cycles"]), **{k: v for k, v in cycle.items() if k != "after"}}),
                   flush=True)
@@ -104,8 +132,11 @@ def qualify(args, model_dir):
         report["passed"] = True
         args.output.write_text(json.dumps(report, indent=2) + "\n")
     finally:
-        if lifecycle.snapshot()["state"] == "awake":
-            lifecycle.sleep()
+        try:
+            if lifecycle.snapshot()["state"] == "awake":
+                lifecycle.sleep()
+        finally:
+            adapter.close()
 
 
 def main():
@@ -123,6 +154,7 @@ def main():
     parser.add_argument("--seed", type=int, help="sample at temperature 1, top-k 20, top-p .95 (default: greedy)")
     parser.add_argument("--precision", choices=("checkpoint", "full"), default="checkpoint")
     parser.add_argument("--prefill-fp8", action="store_true")
+    parser.add_argument("--preserve-cache", action="store_true", help="save and lazily restore reusable prefixes")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if min(args.parallel, args.context, args.prompt_tokens, args.tokens, args.cycles) < 1:
@@ -142,7 +174,7 @@ def main():
                 args.draft = create_draft(Path(directory) / "draft")
         else:
             model = args.model.resolve()
-        qualify(args, model)
+        qualify(args, model, Path(directory) / "cache" if args.preserve_cache else None)
 
 
 if __name__ == "__main__":
