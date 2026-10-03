@@ -88,8 +88,10 @@ class Qwen27Engine:
             gather = lambda values: gather_ints(torch, lambda send, recv: dist.all_gather_into_tensor(recv, send), values)
             from tensorfold.cuda import p2p
 
-            if p2p.install(rank) and rank == 0:     # row-parallel sums in one launch over NVLink / PCIe P2P
-                print("[tensorfold] rank sums: P2P (the peer GPU mapped), NCCL for prompt-sized sums", flush=True)
+            if p2p.install(rank) and rank == 0:     # row-parallel sums in one launch: P2P, or shared host memory
+                print(f"[tensorfold] rank sums: {p2p.peer().kind}, NCCL for prompt-sized sums", flush=True)
+            elif rank == 0:
+                print("[tensorfold] rank sums: NCCL", flush=True)
         else:
             gather = None
         many = streams > 1
