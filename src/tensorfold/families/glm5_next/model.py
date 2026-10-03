@@ -77,6 +77,39 @@ class GLM5:
         self.norm = norm
         self.lm_head = lm_head
         self.last_normed: mx.array | None = None
+        self._hidden_states: list[mx.array | None] | None = None
+        self._tap_at: dict[int, list[int]] = {}
+
+    def capture_layers(self, layer_ids: Any) -> None:
+        """Expose the mean hyper-connection state after selected layers to a DFlash drafter."""
+
+        ids = tuple(int(layer) for layer in layer_ids)
+        if any(layer < 0 or layer >= len(self.layers) for layer in ids):
+            raise ValueError(f"DFlash tap layers {ids} do not fit this {len(self.layers)}-layer model")
+        self._hidden_states = [None] * len(ids)
+        self._tap_at = {}
+        for slot, layer in enumerate(ids):
+            self._tap_at.setdefault(layer, []).append(slot)
+
+    @staticmethod
+    def stream_mean(x: mx.array) -> mx.array:
+        """The target tap CUDA records: the fp32 mean of the hyper-connection streams, returned as [1, R, D]."""
+
+        xs = x.astype(mx.float32)
+        raw = xs[:, 0]
+        for stream in range(1, int(x.shape[1])):
+            raw = raw + xs[:, stream]
+        return (raw * (1.0 / int(x.shape[1]))).astype(x.dtype)[None]
+
+    def _capture_layer(self, layer: int, x: mx.array) -> None:
+        if self._hidden_states is None:
+            return
+        slots = self._tap_at.get(int(layer), ())
+        if not slots:
+            return
+        tapped = self.stream_mean(x)
+        for slot in slots:
+            self._hidden_states[slot] = tapped
 
     def make_cache(self) -> list[Any]:
         return [KDACache() if layer.is_linear else MLACache() for layer in self.layers]
@@ -98,6 +131,11 @@ class GLM5:
                                  bits=e.bits).astype(C.act())
         return mx.dequantize(e.weight[ids], e.scales[ids].astype(mx.float32), e.biases[ids].astype(mx.float32),
                              group_size=e.group, bits=e.bits).astype(C.act())
+
+    def draft_embed_tokens(self, tokens: mx.array) -> mx.array:
+        """DFlash's batched embedding view over the same target embedding rows."""
+
+        return self.embed_tokens(tokens).reshape(*tokens.shape, int(self.args.hidden_size))
 
     def hidden(self, tokens: Any, cache: list[Any], *, inputs_embeds: mx.array | None = None) -> mx.array:
         """One stream's R consecutive tokens: final-normed hidden states [1, R, D]."""
@@ -132,12 +170,17 @@ class GLM5:
         for i, layer in enumerate(self.layers):
             layer_caches = [c[i] for c in caches]
             x, normed, post, comb = self.boundary(x, pending, layer.attn_hc, layer.in_norm, decode)
+            if i:
+                self._capture_layer(i - 1, x)
             pending = (layer.attn(normed, layer_caches, lengths, decode), post, comb)
             x, normed, post, comb = self.boundary(x, pending, layer.ffn_hc, layer.post_norm, decode)
             pending = (layer.mlp(normed, decode), post, comb)
             if decode and C.EVAL_EVERY and (i + 1) % C.EVAL_EVERY == 0 and i + 1 < len(self.layers):
                 mx.async_eval(x, *pending)
-        self.last_normed = self.final_norm(self.boundary(x, pending, None, None, decode)[0])
+        x = self.boundary(x, pending, None, None, decode)[0]
+        if self.layers:
+            self._capture_layer(len(self.layers) - 1, x)
+        self.last_normed = self.final_norm(x)
         return self.last_normed[None]
 
     def boundary(self, x: mx.array, pending: Any, hc: HC | None, norm: mx.array | None,
@@ -184,10 +227,14 @@ class GLM5:
         xs = [mx.contiguous(mx.broadcast_to(h[a:a + n, None, :], (n, streams, width))) for a, n in zip(starts, sizes)]
         pend: list[Any] = [None] * len(xs)
         queue = ChunkQueue()
-        for layer, c in zip(self.layers, cache):
+        for i, (layer, c) in enumerate(zip(self.layers, cache)):
+            entered = [self.boundary(x, pend[j], layer.attn_hc, layer.in_norm, False)
+                       for j, x in enumerate(xs)]
+            if i and self._tap_at.get(i - 1):
+                # Keep each chunk's rows in prompt order, exactly as ``hidden_rows`` presents them.
+                self._capture_layer(i - 1, mx.concatenate([part[0] for part in entered]))
             mixes = []
-            for j, x in enumerate(xs):
-                x, normed, post, comb = self.boundary(x, pend[j], layer.attn_hc, layer.in_norm, False)
+            for j, (x, normed, post, comb) in enumerate(entered):
                 att = layer.attn(normed, [c], (int(x.shape[0]),), False)
                 xs[j], normed, post, comb = self.boundary(x, (att, post, comb), layer.ffn_hc, layer.post_norm, False)
                 mixes.append((normed, post, comb))
@@ -195,8 +242,10 @@ class GLM5:
             together = getattr(layer.mlp, "pass_chunks", None)
             ys = together([m[0] for m in mixes], queue) if together else [layer.mlp(m[0], False) for m in mixes]
             pend = [(y, post, comb) for y, (_, post, comb) in zip(ys, mixes)]
-        self.last_normed = mx.concatenate([self.final_norm(self.boundary(x, p, None, None, False)[0])
-                                           for x, p in zip(xs, pend)])
+        xs = [self.boundary(x, p, None, None, False)[0] for x, p in zip(xs, pend)]
+        if self.layers and self._tap_at.get(len(self.layers) - 1):
+            self._capture_layer(len(self.layers) - 1, mx.concatenate(xs))
+        self.last_normed = mx.concatenate([self.final_norm(x) for x in xs])
         return self.last_normed[None]
 
     def head(self, hidden: mx.array) -> mx.array:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import mlx.core as mx
 import numpy as np
@@ -430,19 +430,133 @@ class GLMFlash:
         return True
 
 
-def load(model_dir: Path, *, drafts: int | None = None, check: bool = True,
-         ssd_experts: float | None = None) -> tuple[GLMFlash, Any]:
-    """The runtime and tokenizer; ``drafts`` (default 3, 0: none) caps the MTP drafts a round."""
+class GLMDFlash(GLMFlash):
+    """The GLM target with DFlash2's verified chain drafter instead of its MTP head."""
+
+    draft_reads_hidden = False
+    speculate_early = False
+
+    def __init__(self, model: GLM5, drafter: Any, *, drafts: int, check: bool = True) -> None:
+        super().__init__(model, None, drafts=drafts, check=check)
+        from tensorfold.families.qwen3_5.dflash_head import DFlashHead
+
+        self.head_drafts = DFlashHead(drafter, nodes=int(drafts), chains=True)
+        self.mtp = drafter                       # The family engine's signal that a verified draft head is present.
+        self.drafts = int(drafts)
+        self.mtp_step_ms = 0.0                   # One DFlash block proposes every node together.
+        self._last: dict[int, tuple[int, int, int]] = {}  # cache id -> (target position, rows, first shared row)
+
+    @staticmethod
+    def _position(cache: list[Any], layers: int) -> int:
+        return next(int(item.offset) for item in cache[:layers] if hasattr(item, "offset"))
+
+    def make_cache(self) -> list[Any]:
+        return [*self.model.make_cache(), self.head_drafts.slot()]
+
+    def adopt_cache(self, cache: list[Any]) -> list[Any]:
+        from tensorfold.families.qwen3_5.dflash_head import DraftSlot
+
+        if not (cache and isinstance(cache[-1], DraftSlot)):
+            cache.append(self.head_drafts.slot())
+        return cache
+
+    def hidden(self, inputs: Any, cache: list[Any], parents: Any = None) -> mx.array:
+        start = self._position(cache, self.layer_count)
+        out = super().hidden(inputs, cache, parents)
+        self._last = {id(cache): (start, int(out.shape[1]), 0)}
+        return out
+
+    def hidden_pass(self, inputs: Any, cache: list[Any], sizes: Any) -> mx.array:
+        start = self._position(cache, self.layer_count)
+        out = super().hidden_pass(inputs, cache, sizes)
+        self._last = {id(cache): (start, int(out.shape[1]), 0)}
+        return out
+
+    def hidden_rows(self, windows: list[Any], caches: list[list[Any]], parents: Any = None) -> mx.array:
+        starts = [self._position(cache, self.layer_count) for cache in caches]
+        lengths = [int(window.reshape(-1).shape[0]) if isinstance(window, mx.array) else len(window)
+                   for window in windows]
+        out = super().hidden_rows(windows, caches, parents)
+        firsts = [sum(lengths[:i]) for i in range(len(lengths))]
+        self._last = {id(cache): (start, rows, first)
+                      for cache, start, rows, first in zip(caches, starts, lengths, firsts)}
+        return out
+
+    def absorb_draft_context(self, hidden: Any, next_tokens: Any, cache: list[Any], start: int = 0) -> None:
+        record = self._last.get(id(cache))
+        if record is None:
+            # An imported target cache has no Mac-side taps yet.  Its first decode forward primes DFlash below.
+            return
+        position, _, first = record
+        count = int(next_tokens.reshape(-1).shape[0]) if isinstance(next_tokens, mx.array) else len(next_tokens)
+        self.head_drafts.absorb(cache, position + int(start), count, first + int(start))
+
+    def _prime_imported(self, cache: list[Any], rows: Sequence[int], sampling: Any) -> list[int]:
+        """Initialize a drafter from the first target rows after a target-only cache handoff."""
+
+        kept = [int(row) for row in rows]
+        proposer = cache[-1].get(sampling)
+        if proposer.ready or not kept:
+            return kept
+        position, _, first = self._last[id(cache)]
+        local = [row - first for row in kept]
+        if local != list(range(local[0], local[0] + len(local))):
+            raise NotImplementedError("GLM DFlash initializes an imported cache from consecutive rows")
+        self.head_drafts.absorb(cache, position + local[0], len(local), kept[0])
+        return []
+
+    def speculate(self, cache: list[Any], tokens: Any, position: int, sampling: Any, start: int = 0,
+                  last_only: bool = False, rows: Sequence[int] | None = None) -> mx.array:
+        follow = [int(token) for token in (tokens.reshape(-1).tolist() if hasattr(tokens, "tolist") else tokens)]
+        _, _, first = self._last[id(cache)]
+        kept = [int(row) for row in rows] if rows is not None else list(
+            range(first + int(start), first + int(start) + len(follow)))
+        kept = self._prime_imported(cache, kept, sampling)
+        self.head_drafts.read(cache, kept, follow, sampling)
+        return mx.array([0], dtype=mx.uint32)             # ``settle`` builds the verified chain after the target read.
+
+    def settle(self, cache: list[Any], keep: int, first: Any, position: int, sampling: Any, count: int) -> Any:
+        return self.head_drafts.tree(cache, position, sampling, count) if count > 0 else []
+
+    def unspeculate(self, cache: list[Any]) -> None:
+        pass
+
+    def draft_streams(self, caches: Sequence[list[Any]], follows: Sequence[Sequence[int]],
+                      rows: Sequence[Sequence[int]], positions: Sequence[int], samplings: Sequence[Any],
+                      depths: Sequence[int]) -> list[Any]:
+        prepared = [self._prime_imported(cache, kept, sampling)
+                    for cache, kept, sampling in zip(caches, rows, samplings)]
+        return self.head_drafts.draft_streams(caches, follows, prepared, positions, samplings, depths)
+
+    def draft_probabilities(self, cache: list[Any]) -> list[float] | None:
+        return self.head_drafts.probabilities(cache)
+
+
+def load(model_dir: Path, *, drafts: int | None = None, check: bool = True, ssd_experts: float | None = None,
+         drafter: str = "", drafter_bits: int = 4) -> tuple[GLMFlash, Any]:
+    """The runtime and tokenizer; an optional DFlash2 helper replaces MTP while preserving target verification."""
 
     from tensorfold.families.glm5_next import has_mtp
     from tensorfold.families.glm5_next import mtp as mtp_module
     from tensorfold.families.glm5_next import weights as glm
 
     model, tokenizer = glm.load(Path(model_dir), ssd_experts=ssd_experts)
-    drafts = 3 if drafts is None else int(drafts)
-    head = mtp_module.load(model) if drafts > 0 and has_mtp(model_dir) else None
+    if drafter:
+        from tensorfold.drafters.dflash_drafter import DFlashDrafter
+
+        loaded = DFlashDrafter(model, drafter, bits=int(drafter_bits))
+        drafts = min(int(loaded.block_size) - 1, 7) if drafts is None else int(drafts)
+        if drafts < 1:
+            raise ValueError("a DFlash2 drafter needs at least one draft row")
+        head = None
+    else:
+        loaded = None
+        drafts = 3 if drafts is None else int(drafts)
+        head = mtp_module.load(model) if drafts > 0 and has_mtp(model_dir) else None
     model.weights = None                                                 # the checkpoint's shard index is done
-    runtime = GLMFlash(model, head, drafts=drafts, check=check)
+    runtime = (GLMDFlash(model, loaded, drafts=drafts, check=check) if loaded is not None
+               else GLMFlash(model, head, drafts=drafts, check=check))
     print(f"[glm5] exact window {runtime.exact_width} rows, forward ms by width {runtime.window_costs}, "
-          f"MTP step {runtime.mtp_step_ms} ms, drafts up to {runtime.drafts if runtime.mtp else 0}", flush=True)
+          f"{'DFlash2 block' if loaded is not None else 'MTP step'} {runtime.mtp_step_ms} ms, "
+          f"drafts up to {runtime.drafts if runtime.mtp else 0}", flush=True)
     return runtime, tokenizer

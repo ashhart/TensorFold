@@ -142,8 +142,9 @@ def expert_bytes(model_dir: Path) -> int:
 
 
 def load(model_dir: Path, *, mtp_drafts: int | None = None, ssd_experts: float | None = None,
-         vision: bool = False, vision_urls: bool = False, **_: Any) -> tuple[Any, Any]:
-    """The MLX engine; ``mtp_drafts`` caps the MTP drafts a round (0: none); ``ssd_experts``: the expert pool's GiB."""
+         drafter: str = "", drafter_bits: int = 4, vision: bool = False, vision_urls: bool = False,
+         **_: Any) -> tuple[Any, Any]:
+    """The MLX engine; optional DFlash2 replaces MTP; ``ssd_experts`` is the expert pool's GiB."""
 
     import mlx.core as mx
 
@@ -155,7 +156,8 @@ def load(model_dir: Path, *, mtp_drafts: int | None = None, ssd_experts: float |
         limit = int(info.get("max_recommended_working_set_size", 0))
         if limit:
             mx.set_wired_limit(limit)
-    family, tokenizer = load_runtime(Path(model_dir), drafts=mtp_drafts, ssd_experts=ssd_experts)
+    family, tokenizer = load_runtime(Path(model_dir), drafts=mtp_drafts, ssd_experts=ssd_experts,
+                                     drafter=drafter, drafter_bits=drafter_bits)
     if vision:
         from tensorfold.vision.glm_mlx import GLMVisionFrontend
 

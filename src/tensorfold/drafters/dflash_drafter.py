@@ -62,8 +62,18 @@ class DFlashDrafter:
                         class_predicate=lambda _, m: isinstance(m, nn.Linear) and m.weight.shape[-1] % 64 == 0)
             mx.eval(self.model.parameters())
         self.model.bind(target_model)
-        vendor._patch_model(target_model, list(self.model.config.target_layer_ids))
+        draft_embed = getattr(target_model, "draft_embed_tokens", None)
+        if callable(draft_embed):
+            self.model.embed_tokens = draft_embed
+        capture = getattr(target_model, "capture_layers", None)
+        if callable(capture):
+            capture(self.model.config.target_layer_ids)
+        else:
+            vendor._patch_model(target_model, list(self.model.config.target_layer_ids))
         self.target = target_model
+        if int(self.model.config.vocab_size) != 248_320:
+            # The shared reduced head below is Qwen's vocabulary layout. Other families keep their whole head.
+            self.draft_vocab = ((0, int(self.model.config.vocab_size)),)
         self.block_size = int(self.model.config.block_size)
         self.mask_id = int(self.model.config.mask_token_id)
         window = getattr(self.model.config, "sliding_window", None)
@@ -167,15 +177,22 @@ class DFlashDrafter:
             import mlx.nn as nn
 
             head = self._matmul_head()
-            if os.environ.get("TF_DRAFT_VOCAB", "") != "full" and isinstance(head, nn.QuantizedLinear) \
-                    and "bias" not in head and not getattr(head, "_lane_tiled", False):
-                n = int(head["weight"].shape[0])
+            standard = isinstance(head, nn.QuantizedLinear) and "bias" not in head
+            affine = all(hasattr(head, name) for name in ("weight", "scales", "biases", "bits", "group"))
+            if os.environ.get("TF_DRAFT_VOCAB", "") != "full" and (standard or affine) \
+                    and not getattr(head, "_lane_tiled", False):
+                def field(name: str) -> Any:
+                    return head[name] if standard else getattr(head, name)
+
+                n = int(field("weight").shape[0])
                 spans = [(a, min(b, n)) for a, b in self.draft_vocab if a < n]
                 if sum(b - a for a, b in spans) < n:
-                    parts = [(head["weight"][a:b], head["scales"][a:b], head["biases"][a:b]) for a, b in spans]
+                    parts = [(field("weight")[a:b], field("scales")[a:b], field("biases")[a:b])
+                             for a, b in spans]
                     ids = mx.concatenate([mx.arange(a, b, dtype=mx.int32) for a, b in spans])
                     mx.eval(ids)
-                    self._plain_sub = (parts, ids, int(head.group_size), int(head.bits))
+                    group = int(head.group_size) if standard else int(head.group)
+                    self._plain_sub = (parts, ids, group, int(head.bits))
         return self._plain_sub
 
     def _sub_head(self) -> tuple[mx.array, mx.array, mx.array, int, int] | None:
