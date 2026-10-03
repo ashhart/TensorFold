@@ -79,6 +79,17 @@ __device__ __forceinline__ void red_add_v4(float* p, float a, float b, float c, 
                  : "memory");
 }
 
+// mode 3: a row's slot outputs added as 64-bit fixed point (value * 2^FIX_BITS) - integer adds are associative, so the
+// sum has the same bits in any arrival order; range +-3.4e10, resolution 3.7e-9
+constexpr int FIX_BITS = 28;
+__device__ __forceinline__ void red_add_fix4(unsigned long long* p, float a, float b, float c, float d) {
+    const float s = (float)(1u << FIX_BITS);
+    const unsigned long long v[4] = {(unsigned long long)__float2ll_rn(a * s), (unsigned long long)__float2ll_rn(b * s),
+                                     (unsigned long long)__float2ll_rn(c * s), (unsigned long long)__float2ll_rn(d * s)};
+#pragma unroll
+    for (int j = 0; j < 4; ++j) asm volatile("red.global.add.u64 [%0], %1;\n" ::"l"(p + j), "l"(v[j]) : "memory");
+}
+
 __device__ __forceinline__ void fwht128(float (&v)[4], int lane) {
     float a = v[0] + v[1], b = v[0] - v[1], c = v[2] + v[3], d = v[2] - v[3];
     v[0] = a + c; v[1] = b + d; v[2] = a - c; v[3] = b - d;
@@ -600,7 +611,7 @@ struct DnEpi {
     const float* wts_sh;      // the item's routing weights (shared memory)
     float* out;
     const int* pair_sh;       // the item's rows of out (row * D), shared memory
-    int mode;                 // 0: red.add into fp32 out, 1: fp16 out, 2: store into the pair's own row (deterministic)
+    int mode;                 // 0: red.add fp32, 1: fp16, 2: store into the pair's own row, 3: red.add 64-bit fixed point
     int e, D, slots, cnt;
 };
 
@@ -663,7 +674,11 @@ __device__ __forceinline__ void dn_epilogue(const float (&acc)[2 * NB][4], float
 #pragma unroll
                 for (int blk = 0; blk < 2; ++blk) {
                     const float* u = v[ri * 2 + blk];
-                    if (p.mode == 2)
+                    if (p.mode == 3)
+                        red_add_fix4(reinterpret_cast<unsigned long long*>(p.out) + orow + blk * 128,
+                                     u[0] * sv[blk][0] * w, u[1] * sv[blk][1] * w, u[2] * sv[blk][2] * w,
+                                     u[3] * sv[blk][3] * w);
+                    else if (p.mode == 2)
                         *reinterpret_cast<float4*>(p.out + orow + blk * 128) = make_float4(
                             u[0] * sv[blk][0] * w, u[1] * sv[blk][1] * w, u[2] * sv[blk][2] * w, u[3] * sv[blk][3] * w);
                     else if (p.mode == 1)
@@ -841,6 +856,20 @@ void launch_cb(const at::Tensor& x, const at::Tensor& sorted, const at::Tensor& 
 }  // namespace
 
 int64_t exl3p_item_rows() { return IPM; }
+
+// mode 3's out: the fixed-point sums back to fp32
+__global__ void fix_to_float_kernel(const long long* __restrict__ in, float* __restrict__ out, long long n) {
+    const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = (float)((double)in[i] * (1.0 / (double)(1ll << FIX_BITS)));
+}
+
+void exl3p_fix_to_float_cuda(const at::Tensor& in, at::Tensor& out) {
+    const long long n = out.numel();
+    if (n == 0) return;
+    fix_to_float_kernel<<<(unsigned)((n + 255) / 256), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+        in.data_ptr<int64_t>(), out.data_ptr<float>(), n);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
 
 // mode 2's sum: out[r] = the pairs of row r added in slot order (picks outside [0, E) skipped), one float4 a thread
 __global__ void slot_sum_kernel(const float4* __restrict__ pairs, const int* __restrict__ pick, float4* __restrict__ out,
