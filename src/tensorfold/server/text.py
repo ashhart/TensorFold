@@ -7,6 +7,7 @@ from typing import Any
 from tensorfold.server.messages import _normalize_tool_call_arguments, late_system_role, normalize_messages
 
 _THINK_END = "</think>"
+_THINK_OPEN = "<think>"                  # a reply that opens its own block writes this (Kolibri 1); stripped
 # (what a reply writes to open its think block, what closes it): Qwen's prompt opens the block; Gemma 4's reply does
 THINK_MARKERS = ("", _THINK_END)
 CHANNEL_MARKERS = ("<|channel>thought", "<channel|>")
@@ -42,6 +43,10 @@ def split_thinking(text: str, *, finished: bool, markers: tuple[str, str] = THIN
         return "", text                                      # a finished reply that never opened the block
     if opener:
         text = text[len(opener):].lstrip("\n")
+    elif text.startswith(_THINK_OPEN):                   # a reply that opens its own block (Kolibri 1's template)
+        text = text[len(_THINK_OPEN):].lstrip("\n")
+    elif not finished and _THINK_OPEN.startswith(text):  # a tail that may still become that opener: held
+        return "", ""
     end = text.find(closer)
     if end >= 0:
         return text[:end], text[end + len(closer):].lstrip("\n")
