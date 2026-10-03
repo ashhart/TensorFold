@@ -220,7 +220,9 @@ class Dsv41Engine:
             raise RuntimeError(f"the two ranks were started with different settings (context, drafts, parallel): "
                                f"rank 0 {both[0]}, rank 1 {both[1]}; give both the same flags")
         started = time.perf_counter()
+        self._boot = [("start", started)]
         w = W.load(self.model_dir, rank=rank, log=lambda *a, **k: None, draft=bool(drafts))
+        self._mark("weights")
         torch.cuda.synchronize()
         torch.cuda.empty_cache()                     # the load's staging buffers back before memory is measured
         # admission, before any cache exists: both ranks' memory decides (a GB10 out of memory can wedge the node)
@@ -262,6 +264,7 @@ class Dsv41Engine:
         self.e = SerialEngine(w, Comm(self.nccl), str(engram), str(self.model_dir / "tokenizer.json"), cap=cap,
                               slots=self.streams, pool_tokens=pool)
         self.nccl.barrier()
+        self._mark("caches")
         self._memlog("after the caches")
         with torch.no_grad():
             if drafts:
@@ -269,6 +272,7 @@ class Dsv41Engine:
             if self.shared:
                 self.e.make_bank(KEPT_ENTRIES)
             torch.cuda.synchronize()
+            self._mark("drafter+bank")
             self._memlog("after drafter and bank")
             before, avail = torch.cuda.memory_reserved(), available_bytes()
             self.e.capture(1)
@@ -281,6 +285,7 @@ class Dsv41Engine:
             for rows in range(2, top + 1):
                 self.e.capture(rows)
             torch.cuda.synchronize()
+            self._mark("decode graphs")
             self._memlog("after the decode graphs")
             if rank == 0:
                 held = (torch.cuda.memory_reserved() - before) / 2 ** 30
@@ -310,7 +315,9 @@ class Dsv41Engine:
                   f"{torch.cuda.memory_allocated() / 2 ** 30:.1f} GiB a rank", flush=True)
         if warm and os.environ.get("TF_DSV41_WARM", "1") != "0":
             self._memlog("before warm-up")
+            self._mark("drafter graphs")
             self._warm()
+            self._mark("warm-up")
             self._memlog("after warm-up")
         if self.shared:                                 # kept prompts live in the shared pool (multi.Kept)
             self.e.pool = None
@@ -328,6 +335,7 @@ class Dsv41Engine:
                                       pool=Pool(self.e.pool_tokens) if self.shared else None)
             self.multi.model_dir = self.model_dir
             self.multi.calibrate(self._gather_ints)
+            self._mark("calibration")
             self._memlog("after calibration")
             if rank == 0:
                 curve = " ".join(f"{v:.0f}" for v in self.multi.costs)
@@ -336,6 +344,18 @@ class Dsv41Engine:
             if rank == 0:
                 self.scheduler = Scheduler(self.multi, max_streams=self.streams)
                 print(f"[tensorfold] {self.streams} concurrent streams of up to {cap} tokens each", flush=True)
+        self._mark("ready")
+        if rank == 0:
+            marks = self._boot
+            print("[boot] " + ", ".join(f"{name} {t - prev:.1f}s" for (_, prev), (name, t) in zip(marks, marks[1:]))
+                  + f"; total {marks[-1][1] - marks[0][1]:.1f}s", flush=True)
+
+    def _mark(self, stage: str) -> None:
+        """A startup timeline mark (printed as one [boot] line when ready)."""
+
+        if hasattr(self, "_boot"):
+            self.torch.cuda.synchronize()
+            self._boot.append((stage, time.perf_counter()))
 
     def _memlog(self, stage: str) -> None:
         """TF_DSV41_MEMLOG=1: what the system and the CUDA allocator hold at a startup stage (both ranks)."""

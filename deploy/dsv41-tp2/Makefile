@@ -105,8 +105,18 @@ guard:
 	  [ "$$v" = Y ] || { echo "❌ $$n: nvidia_drm modeset='$$v' — the display carveout needs modeset=1 (or set TF_CARVEOUT=0)"; exit 4; }; \
 	done; fi
 
+# Free memory, then defragment it: GB10's GPU allocates large contiguous blocks of system memory, and after an image
+# build or a long dev session the free pages are scattered, so every allocation of the start (weights, caches, graph
+# pools) stalls in direct compaction and the instance runs slow until restarted (measured: a 104 GiB fragmented
+# host loaded for > 35 min). compact_memory makes the blocks up front; the high-order free count is logged.
+# GiB of free memory in blocks of >= 2 MiB (buddy orders >= 9 of 4 KiB pages: /proc/buddyinfo fields 14..)
+BIG_FREE = awk '/Normal/{s=0; for (i=14; i<=NF; i++) s += $$i * 2^(i-5) / 262144; printf "%.0f", s}' /proc/buddyinfo
+BIG_FREE_SSH = awk '/Normal/{s=0; for (i=14; i<=NF; i++) s += \$$i * 2^(i-5) / 262144; printf \"%.0f\", s}' /proc/buddyinfo
+
 memwait:
 	@sudo -n sysctl -q vm.drop_caches=3; ssh $(WORKER) 'sudo -n sysctl -q vm.drop_caches=3'; \
+	sudo -n sysctl -q vm.compact_memory=1; ssh $(WORKER) 'sudo -n sysctl -q vm.compact_memory=1'; \
+	echo "free memory in blocks of >= 2 MiB after compaction: head $$($(BIG_FREE)) GiB, $(WORKER) $$(ssh $(WORKER) "$(BIG_FREE_SSH)") GiB"; \
 	end=$$(( $$(date +%s) + $(MEM_READY_WAIT) )); \
 	while :; do \
 	  h=$$(awk '/MemAvailable/{printf "%d", $$2/1048576}' /proc/meminfo); \

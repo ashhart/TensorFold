@@ -31,6 +31,7 @@ KEEP_MIN = int(os.environ.get("TF_DSV41_KEEP_MIN") or 256)    # shorter states a
 # (in place, else moved to a free run, kept states evicted for it); 0: the whole reply up front
 GROW_AHEAD = int(os.environ.get("TF_DSV41_GROW_AHEAD") or 4096)
 RELEASE_AFTER = 4096                       # prompts prefilling more rows than this release cached blocks after
+RELEASE_BELOW = int(float(os.environ.get("TF_DSV41_RELEASE_BELOW_GIB") or 2.5) * 2 ** 30)   # ... when memory is low
 
 
 @dataclass(eq=False)
@@ -648,10 +649,16 @@ class MultiDecoder:
         """The allocator's cached free blocks back to the system (graph pools and live tensors stay), and the host
         heap's free pages (rank 0 tokenized the request's text: a long prompt leaves ~1 GiB in glibc's arenas)."""
 
+        from .engine import available_bytes
+
         log = os.environ.get("TF_DSV41_MEMLOG") == "1"
         before = torch.cuda.memory_reserved() if log else 0
         t0 = time.perf_counter()
-        torch.cuda.empty_cache()
+        # the CUDA allocator's blocks go back only when memory runs low: handed back, they return as scattered
+        # pages, and the next prompt's ~1 GiB of buffers then waits on reclaim and compaction for large blocks
+        # (8K prompts ran 650-1000 tok/s instead of ~1750 with a release after every long prompt)
+        if available_bytes() < RELEASE_BELOW:
+            torch.cuda.empty_cache()
         t1 = time.perf_counter()
         try:
             import ctypes
@@ -661,8 +668,6 @@ class MultiDecoder:
             pass
         t2 = time.perf_counter()
         if log:
-            from .engine import available_bytes
-
             print(f"[memlog r{self.rank}] prompt released {(before - torch.cuda.memory_reserved()) / 2 ** 30:.2f} GiB; "
                   f"available {available_bytes() / 2 ** 30:.2f} GiB; empty_cache {1e3 * (t1 - t0):.0f} ms, "
                   f"malloc_trim {1e3 * (t2 - t1):.0f} ms", flush=True)
