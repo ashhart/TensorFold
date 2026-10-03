@@ -158,7 +158,11 @@ PROMPT_ROWS = int(os.environ.get("TF_DSV41_DECODE_ROWS") or 32)
 # limit's (the same entries are chosen: past a row's position every score is -inf). Each width's 32 graphs cost
 # ~1.2 GB of driver memory (the pool's rows), so one by default. TF_DSV41_WIDTHS=0: full only
 WIDTHS = [int(v) for v in (os.environ.get("TF_DSV41_WIDTHS") or "65536").split(",") if int(v) > 0]
-SHARED_GRAPH_POOL = os.environ.get("TF_DSV41_SHARED_GRAPHS", "1") != "0"   # all decode graphs on one memory pool
+SHARED_GRAPH_POOL = os.environ.get("TF_DSV41_SHARED_GRAPHS", "1") != "0"
+# prefill: the layers after the last kv source (21-39) keep no per-token state but their 128-row windows, so a
+# long prompt's early chunks run layers 0-20 only and its last tail_min rows all layers (exact: an early row reaches
+# the end only through those windows, 127 rows a layer); TF_DSV41_BOUNDED_TAIL=0 runs every layer everywhere
+BOUNDED_TAIL = os.environ.get("TF_DSV41_BOUNDED_TAIL", "1") != "0"   # all decode graphs on one memory pool
 
 
 class RoundProfile:
@@ -420,10 +424,15 @@ class SerialEngine:
         self.drafter = None
         self.debug: list | None = None
         self._pinned: list = []
+        self._pin_done: dict = {}                        # pinned Engram buffer -> event after its last copy out
         self._pool = None
         self.adaptive = True
         self.taps: list[torch.Tensor] = []
         self.cap = cap
+        # the bounded prefill tail: layers after the last kv source, their window's reach, the rows run in full
+        self.enc_last = max(c.kv_source_layer_ids) + 1
+        self.deep_reach = (len(w.layers) - self.enc_last) * (c.sliding_window - 1)
+        self.tail_min = self.deep_reach + DRING + PROMPT_ROWS + 1
         # the per-token caches (compressed entries, indexer keys) of every slot in one arena of ``pool_tokens`` rows
         # (``pool.py``): a slot holds an extent [base, base + size) of it, ``bind`` places it; by default each slot
         # gets its own fixed extent of the per-stream limit (the layout before the shared pool)
@@ -453,6 +462,7 @@ class SerialEngine:
             st.ids.clear()
             self.ring_from[self.slot] = 0
             self.prefilled[self.slot] = 0
+            self.deep_from[self.slot] = 0
             if self.drafter is not None:
                 self.drafter.reset()
             return
@@ -469,6 +479,9 @@ class SerialEngine:
         # state resumes at m when [m - WINDOW_ROWS, m) is there (``window_from``)
         self.ring_from = [0] * S
         self.prefilled = [0] * S                         # each slot's rows [0, this) came from prompt chunks
+        # each slot's first position whose window rows are exact in every layer: an early chunk that ran only the
+        # layers up to the last kv source leaves the later layers' windows stale for deep_reach rows past it
+        self.deep_from = [0] * S
         # decode rings (DRING rows a slot) live per slot; prompt chunks run in one shared set of RING-row staging
         # rings, the slot's window copied in before and out after (``_to_stage`` / ``_from_stage``)
         self.big = Caches(
@@ -618,7 +631,7 @@ class SerialEngine:
 
     # -- one forward over new rows ------------------------------------------------------------------------
     def forward(self, tokens: list[int], last_only: bool = False, raw: torch.Tensor | None = None,
-                prompt: bool = False) -> torch.Tensor:
+                prompt: bool = False, encode: bool = False) -> torch.Tensor | None:
         """Logits fp32 [R, vocab] of the new rows (``last_only``: only the last row's, [1, vocab] — what a prompt
         chunk needs); positions continue the committed ones."""
 
@@ -641,10 +654,12 @@ class SerialEngine:
         Linear.prompt_mode = R > PROMPT_ROWS             # (a <= PROMPT_ROWS chunk: the decode path's arithmetic)
         try:
             out = self.core(torch.tensor(tokens, device=self.dev), torch.arange(p0, p0 + R, device=self.dev), rows,
-                            static=False, last_only=last_only)
+                            static=False, last_only=last_only, encode=encode)
         finally:
             Linear.prompt_mode = False
         self.window_to_ring(p0 + R)
+        if encode:                                       # the later layers' windows: stale for deep_reach rows on
+            self.deep_from[self.slot] = max(self.deep_from[self.slot], p0 + R + self.deep_reach)
         if R > PROMPT_ROWS and p0 <= self.prefilled[self.slot]:
             self.prefilled[self.slot] = p0 + R
         else:                                            # (a short chunk: the decode path's arithmetic)
@@ -694,6 +709,9 @@ class SerialEngine:
         L = len(c.engram_layer_ids)
         row = c.engram_head_dim + c.engram_head_dim // 32
         need = L * R * 3 * c.engram_n_heads
+        done = self._pin_done.get(slot)                  # the copy out of this buffer, queued earlier, has run
+        if done is not None:
+            done.synchronize()
         pin = self._pinned[slot] if slot < len(self._pinned) else None
         if pin is None or pin.numel() < need * row:
             pin = torch.empty((need * row,), dtype=torch.uint8).pin_memory()
@@ -701,7 +719,9 @@ class SerialEngine:
                 self._pinned.append(None)
             self._pinned[slot] = pin
         out = pin[:need * row].view(L, R * 3 * c.engram_n_heads, row)
-        return self.tables.gather(np.stack([hashes[:, ell, :].reshape(-1) for ell in range(L)]), out=out)
+        out = self.tables.gather(np.stack([hashes[:, ell, :].reshape(-1) for ell in range(L)]), out=out)
+        out.pin_slot = slot
+        return out
 
     def prefetch(self, ids: list[int], p0: int, R: int, slot: int):
         """Read a later chunk's Engram rows on a background thread (the reads release the GIL)."""
@@ -721,16 +741,22 @@ class SerialEngine:
         R, L = len(tokens), len(c.engram_layer_ids)
         if raw is None:
             raw = self.read_rows(st.ids, p0, R)
+        slot = getattr(raw, "pin_slot", None)
         raw = raw.to(self.dev, non_blocking=True).view(L, R, -1, raw.shape[-1])
+        if slot is not None:                             # (a later read into the pinned buffer waits for this copy:
+            done = torch.cuda.Event()                    # a prompt step's next-but-one chunk reuses it while the GPU
+            done.record()                                # may not have reached this one yet)
+            self._pin_done[slot] = done
         hd = c.engram_head_dim
         return E.dequant(raw[..., :hd], raw[..., hd:])
 
     def core(self, ids: torch.Tensor, pos: torch.Tensor, rows: torch.Tensor, *, static: bool,
-             last_only: bool = False) -> torch.Tensor:
-        """The device-only forward over all layers (eager prompt chunks)."""
+             last_only: bool = False, encode: bool = False) -> torch.Tensor | None:
+        """The device-only forward over all layers (eager prompt chunks); ``encode``: only up to the last kv source
+        (its per-token caches written, no logits)."""
 
         carry = self.part_a(ids, pos, rows[0], static=static)
-        return self.part_b(carry, pos, rows[1], static=static, last_only=last_only)
+        return self.part_b(carry, pos, rows[1], static=static, last_only=last_only, encode=encode)
 
     def part_a(self, ids: torch.Tensor, pos: torch.Tensor, rows1: torch.Tensor, *, static: bool) -> tuple:
         """Embedding and the layers before the second Engram layer."""
@@ -752,13 +778,15 @@ class SerialEngine:
         return self.layers(carry, pos, {c.engram_layer_ids[0]: rows1}, c.engram_layer_ids[0], self.split, static)
 
     def part_b(self, carry: tuple, pos: torch.Tensor, rows14: torch.Tensor, *, static: bool,
-               last_only: bool = False) -> torch.Tensor:
-        """The remaining layers and the vocabulary head."""
+               last_only: bool = False, encode: bool = False) -> torch.Tensor | None:
+        """The remaining layers and the vocabulary head (``encode``: only up to the last kv source, no head)."""
 
         c = self.c
         self.taps = []
         X, pre, f, post, comb = self.layers(carry, pos, {c.engram_layer_ids[1]: rows14}, self.split,
-                                            len(self.w.layers), static)
+                                            self.enc_last if encode else len(self.w.layers), static, attn_last=encode)
+        if encode:
+            return None
         X = hcf.post(f, X, post, comb)
         if self.drafter is not None:
             self.drafter.context(self.taps, pos, self._sid * DRING if static else 0, static=static)
@@ -777,7 +805,8 @@ class SerialEngine:
             return X.float().sum(1).to(BF)
         return X.float().mean(1).to(BF)
 
-    def layers(self, carry: tuple, pos: torch.Tensor, rows: dict, first: int, last: int, static: bool) -> tuple:
+    def layers(self, carry: tuple, pos: torch.Tensor, rows: dict, first: int, last: int, static: bool,
+               attn_last: bool = False) -> tuple:
         X, pre, f, post, comb = carry
         fuse = (X.shape[0] > PROMPT_ROWS or hcf.FUSE_DECODE) and FUSE_HC   # post and the next pre in one pass
         for layer in self.w.layers[first:last]:
@@ -796,6 +825,8 @@ class SerialEngine:
             if self.debug is not None:
                 self.debug.append({"layer": layer.index, "attn_in": x.clone(),
                                    "attn_out": a.clone() if torch.is_tensor(a) else None})
+            if attn_last and layer.index == last - 1:   # (its caches written: nothing reads the rest)
+                break
             if fuse:
                 X, (post, comb, x, pre) = self.post_hc(a, X, post, comb, layer.hc_ffn, pre_a)
             else:
@@ -1415,21 +1446,24 @@ class SerialEngine:
 
     # -- requests ---------------------------------------------------------------------------------------------
     @torch.no_grad()
-    def prefill(self, prompt: list[int], chunk: int = MAX_ROWS) -> torch.Tensor:
+    def prefill(self, prompt: list[int], chunk: int = MAX_ROWS, final: int | None = None) -> torch.Tensor | None:
         """Chunked prompt, each chunk's Engram rows read while the previous chunk runs; the last row's logits.
 
         No chunk takes PROMPT_ROWS rows or fewer when that can be helped: those run the decode path's arithmetic,
         while every longer chunk gives each row the same values whatever its length (``Linear.prompt_mode``), so a
         prompt's caches do not depend on how it was cut (steps, kept states resumed). A short last chunk takes rows
         from the one before; a short call backs up into rows already prefilled (recomputed to the same values) when
-        the rings still hold their window."""
+        the rings still hold their window.
+
+        ``final``: where the whole prompt ends (absolute; the call may be one step of it): chunks ending tail_min or
+        more before it run only the layers up to the last kv source (BOUNDED_TAIL), and return no logits."""
 
         p0 = len(self.state.ids)
         n = p0 + len(prompt)
         small = PROMPT_ROWS + 1
         if 0 < n - p0 < small and p0 > 0:
             back = min(p0, small - (n - p0))
-            if p0 - back - min(p0 - back, WINDOW_ROWS) >= self.ring_from[self.slot]:
+            if p0 - back - min(p0 - back, WINDOW_ROWS) >= max(self.ring_from[self.slot], self.deep_from[self.slot]):
                 prompt = list(self.state.ids[p0 - back:p0]) + list(prompt)
                 del self.state.ids[p0 - back:]
         base = len(self.state.ids)
@@ -1445,7 +1479,8 @@ class SerialEngine:
             raw = ahead.result()
             if i + 1 < len(starts):
                 ahead = self.prefetch(ids, starts[i + 1], ends[i + 1] - starts[i + 1], (i + 1) % 2)
-            logits = self.forward(ids[p0:p0 + R], last_only=True, raw=raw, prompt=True)
+            encode = BOUNDED_TAIL and final is not None and ends[i] <= final - self.tail_min and R > PROMPT_ROWS
+            logits = self.forward(ids[p0:p0 + R], last_only=True, raw=raw, prompt=True, encode=encode)
         return logits
 
     @torch.no_grad()
@@ -1511,6 +1546,7 @@ class SerialEngine:
                 live.index_copy_(0, slots, saved)
         st.ids[:] = list(ids[:n])
         self.ring_from[self.slot] = n - min(n, WINDOW_ROWS)      # only the window rows came back
+        self.deep_from[self.slot] = self.ring_from[self.slot]
         self.prefilled[self.slot] = n
 
     def reusable(self, prompt: list[int]) -> int:
@@ -1531,6 +1567,8 @@ class SerialEngine:
         back = max(0, PROMPT_ROWS + 1 - (len(prompt) - L))
         if L < REUSE_MIN or len(ids) - L > DRING - WINDOW_ROWS or L - back - WINDOW_ROWS < self.ring_from[self.slot]:
             return 0
+        if L - back - WINDOW_ROWS < self.deep_from[self.slot] and L > len(prompt) - self.tail_min:
+            return 0                                     # (stale later-layer windows: fine only far from the end)
         return L
 
     def generate(self, prompt: list[int], max_tokens: int, *, chunk: int = MAX_ROWS, on_token=None,
@@ -1554,7 +1592,7 @@ class SerialEngine:
         else:
             self.reset()
         logits = None
-        logits = self.prefill(prompt[cached:], chunk)
+        logits = self.prefill(prompt[cached:], chunk, final=len(prompt))
         if reuse:                                                  # this prompt's state, before decoding moves on
             self.keep_prompt(prompt)
         dsp = self.drafter if draft and self.drafter is not None and self.drafter.graph is not None else None

@@ -35,6 +35,8 @@ class FakeEngine:
         self.views = [FakeView() for _ in range(slots)]
         self.extents = [(0, 0)] * slots
         self.ring_from = [0] * slots
+        self.deep_from = [0] * slots
+        self.tail_min = 2702
         self.bank = [torch.zeros((banks * DRING,))]
         self.arena = [-1] * pool_tokens
         self.saved: dict[int, tuple] = {}
@@ -62,7 +64,7 @@ class FakeEngine:
         self.ring_from[self.slot] = 0
         self.ring[self.slot] = ()
 
-    def prefill(self, tokens):
+    def prefill(self, tokens, final=None):
         base, size = self.extents[self.slot]
         p0 = len(self.state.ids)
         assert p0 + len(tokens) <= size

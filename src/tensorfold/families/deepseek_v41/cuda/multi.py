@@ -48,6 +48,7 @@ class Kept:
     ids: np.ndarray
     vs: int
     bank: int
+    vd: int = 0         # from where every layer's window is exact (vs, or later after early bounded-tail chunks)
 
     @property
     def n(self) -> int:
@@ -450,7 +451,10 @@ class MultiDecoder:
                 continue
             m = min(common_prefix(k.ids, p), len(p) - 1, k.n)
             back = max(0, ROWS + 1 - (len(p) - m))   # a short tail backs up into rows before m (prefill)
-            if m < KEEP_MIN or m - back - WINDOW_ROWS < k.vs:
+            full = m - back - WINDOW_ROWS >= k.vd
+            # (stale later-layer windows are fine far from the end: the bounded tail recomputes past their reach)
+            early = m <= len(p) - self.e.tail_min and m - WINDOW_ROWS >= k.vs
+            if m < KEEP_MIN or not (full or early):
                 continue
             kk = (m, k.x.owner is None, i)
             if key is None or kk > key:
@@ -497,7 +501,7 @@ class MultiDecoder:
             self._drop(self.kept[0])
         bank = self.banks.pop(0)
         self.e.save_window(s.slot, bank)
-        k = Kept(self.next_kid, x, a, vs, bank)
+        k = Kept(self.next_kid, x, a, vs, bank, max(vs, self.e.deep_from[s.slot]))
         self.next_kid += 1
         x.kept.append(k)
         self.kept.append(k)
@@ -557,6 +561,7 @@ class MultiDecoder:
                 e.select_slot(s.slot)
                 e.load_window(k.bank, s.slot)
                 e.ring_from[s.slot] = k.vs
+                e.deep_from[s.slot] = k.vd
                 self.kept.remove(k)                # most recently used
                 self.kept.append(k)
                 for c in [c for c in x.kept if c.n > m]:
@@ -611,7 +616,8 @@ class MultiDecoder:
                      and s.pos + ROWS < point < stop)        # (no <= ROWS-row call before it: prompt arithmetic)
             if split:
                 stop = point
-            logits = e.prefill(s.prompt[s.pos:stop])
+            # (a split call bounds its early chunks by the split point: the state kept there is exact in every layer)
+            logits = e.prefill(s.prompt[s.pos:stop], final=point if split else n)
             s.pos = stop
             if split:
                 self._keep(s, self.ext[s.sid], e.state.ids, e.ring_from[s.slot])

@@ -193,6 +193,45 @@ def main() -> None:
                 logits = eng.prefill(doc[a:b])
             return logits.float().clone()
 
+        if os.environ.get("TF_TAIL_TEST"):                # N: bounded-tail prefill vs every layer everywhere
+            from tensorfold.families.deepseek_v41.cuda import serial as SER
+
+            def full_run(bounded):
+                SER.BOUNDED_TAIL = bounded
+                eng.select_slot(0)
+                eng.reset()
+                logits = eng.prefill(doc[:N], final=N).float().clone()
+                c = eng.c
+                caches = [eng.state.comp[s_][:N // c.layer_ratios[s_]] for s_ in c.kv_source_layer_ids]
+                caches = [t.q.view(torch.uint8).clone() if hasattr(t, "q") else t.clone() for t in caches]
+                caches += [eng.state.ik[s_][:N // c.layer_ratios[s_]] for s_ in c.kv_source_layer_ids]
+                caches = [t.q.view(torch.uint8).clone() if hasattr(t, "q") else t.clone() for t in caches]
+                ring = torch.arange(N - 200, N, device=eng.dev) % 256
+                rings = [t[ring].clone() for t in eng._rings()]
+                toks, nxt = [], int(logits[-1].argmax())
+                for _ in range(32):
+                    toks.append(nxt)
+                    nxt = eng.step(nxt)
+                return logits, caches, rings, toks, list(eng.deep_from)
+
+            with torch.no_grad():
+                a = full_run(False)
+                b = full_run(True)
+                SER.BOUNDED_TAIL = True
+            if args.rank == 0:
+                same_c = all(torch.equal(x, y) for x, y in zip(a[1], b[1]))
+                names = [f"comp{s_}" for s_ in eng.c.kv_source_layer_ids] + [f"ik{s_}" for s_ in eng.c.kv_source_layer_ids]
+                for nm, x, y in zip(names, a[1], b[1]):
+                    if not torch.equal(x, y):
+                        bad = (x != y).reshape(x.shape[0], -1).any(1).nonzero().flatten()
+                        print(f"tail-test {nm}: {len(bad)} rows differ, first {bad[:5].tolist()} last {bad[-3:].tolist()}"
+                              f" of {x.shape[0]}", flush=True)
+                same_r = all(torch.equal(x, y) for x, y in zip(a[2], b[2]))
+                print(f"tail-test N={N} tail_min={eng.tail_min}: logits max|diff| {(a[0] - b[0]).abs().max().item():.3g},"
+                      f" caches equal {same_c}, last-200 ring rows equal {same_r}, 32 decode tokens equal "
+                      f"{a[3] == b[3]}, deep_from {b[4][0]}", flush=True)
+            nccl.barrier()
+            return
         if os.environ.get("TF_CHUNK_PREFILL"):            # N,cut[,cut..]: one prefill vs calls ending at each cut
             with torch.no_grad():
                 ref = pre([])
@@ -315,7 +354,7 @@ def main() -> None:
                     eng.reset()
                     nccl.barrier()
                     t = time.perf_counter()
-                    eng.prefill(doc[:n], 2048)
+                    eng.prefill(doc[:n], 2048, final=n)
                     torch.cuda.synchronize()
                     best = max(best, n / (time.perf_counter() - t))
                 if args.rank == 0:
