@@ -183,7 +183,7 @@ class TieredCache(PrefixCache):
         return self.codec.from_host(arrays)
 
     def victim(self, keep: Sequence[Sequence[int]] = ()) -> int | None:
-        """The index ``evict`` would drop next, never an entry holding exactly ids in ``keep``; None when none is left."""
+        """The index ``evict`` would drop next, never an entry holding ids in ``keep``; None when none is left."""
 
         pinned = [list(k) for k in keep]
         among = [e for e in self.entries if e[0] not in pinned]
