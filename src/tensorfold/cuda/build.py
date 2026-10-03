@@ -12,9 +12,21 @@ from typing import Any
 
 MIN_CAPABILITY = (8, 9)         # FP8 MMA and e4m3 conversions (Ada); kernels with clusters use them from 9.0
 CLUSTERS = (9, 0)               # extensions built only on thread-block clusters (NVFP4) need Hopper or newer
+VOLTA = (7, 0)                  # V100: an extension that runs there says so with need=VOLTA; the FP8 paths do not
 # stop first: when the lock goes, a waiting start imports whatever module is there without building, even an old one
 HINT = "if no other build is running, a killed build left it: stop this start, delete the lock and start again"
 LOCK_WAIT_SECONDS = 60.0        # a start still waiting on the same lock this long says so again
+
+
+def volta(device=None) -> bool:
+    """Whether ``device`` (the current one by default) is a Volta: the sm_70 kernels serve it, the FP8 paths do not."""
+
+    import torch
+
+    if not torch.cuda.is_available():
+        return False
+    index = device.index if device is not None and device.index is not None else torch.cuda.current_device()
+    return tuple(torch.cuda.get_device_capability(index)) == VOLTA
 
 
 def arch_flags(need: tuple[int, int] = MIN_CAPABILITY, arch_specific: bool = False) -> list[str]:

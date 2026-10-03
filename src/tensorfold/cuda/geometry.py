@@ -171,8 +171,9 @@ def live_kv(t: dict, world: int, window: int) -> int:
 
 def gdn_geometry(t: dict, world: int, reserve: int, *, indexed: bool = False, mtp: bool = False,
                  kv_bits: int = 16, rows: int | None = None, prompt: int = 0, evicts: bool = False,
-                 kept: int = 2, prefill_rows: int = PREFILL_ROWS) -> Geometry:
-    """``rows``: widest verify; ``prompt``: chunk rows sharing its scratch; ``evicts``: only the live window counts."""
+                 kept: int = 2, prefill_rows: int = PREFILL_ROWS, prompt_staging: bool = False) -> Geometry:
+    """``rows``: widest verify; ``prompt``: chunk rows sharing its scratch; ``evicts``: only the live window counts;
+    ``prompt_staging``: sm_70 prompt attention stages one key head's keys and values in fp16."""
 
     linear, attention = layer_counts(t)
     d, h = int(t["hidden_size"]), int(t["num_attention_heads"]) // world
@@ -218,6 +219,8 @@ def gdn_geometry(t: dict, world: int, reserve: int, *, indexed: bool = False, mt
             rounded = 1 << (max(1024, capacity - reserve) - 1).bit_length()
             cache = live_kv(t, world, capacity - reserve) if evicts else 4 * attention * rounded * hk * hd * 4
             scratch = rows * h * (hd + 2) * ((capacity + 511) // 512) * 4
+            if prompt_staging:
+                scratch += 2 * capacity * hd * 2
         return fixed + cache + scratch
     return Geometry(bytes_at, reserve)
 
@@ -390,8 +393,10 @@ def _gdn_dims(t: dict, world: int) -> tuple:
             nk, nv, dk, dv, 2 * nk * dk + 2 * nv * dv + 2 * nv)
 
 
-def stream_geometry(t: dict, world: int, streams: int, keep: int, *, first: int | None = None) -> Geometry:
-    """The 27B's concurrent decoder: live streams, ``keep`` kept prompt ends, windows; ``first``: growth on one GPU."""
+def stream_geometry(t: dict, world: int, streams: int, keep: int, *, first: int | None = None,
+                    prompt_staging: bool = False) -> Geometry:
+    """The 27B's concurrent decoder: live streams, ``keep`` kept prompt ends, windows; ``first``: growth on one GPU;
+    ``prompt_staging`` as in ``gdn_geometry``."""
 
     linear, attention = layer_counts(t)
     d, h, hk, hd, nk, nv, dk, dv, width = _gdn_dims(t, world)
@@ -408,6 +413,8 @@ def stream_geometry(t: dict, world: int, streams: int, keep: int, *, first: int 
         caches = (streams + keep + 1) * kv if first is None else \
             kv + (streams + keep) * attention * min(first, capacity) * hk * hd * 2 * 2
         scratch = rows * h * (hd + 2) * ((capacity + 511) // 512) * 4
+        if prompt_staging:
+            scratch += 2 * capacity * hd * 2
         return fixed + caches + kv // max(1, attention) + scratch   # one layer's growth copy
     return Geometry(bytes_at, 1)
 

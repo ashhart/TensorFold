@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import torch
 
+from tensorfold.cuda.build import volta
 from tensorfold.cuda.kernels import qmm as shared
 
 from .qmm import lane_matmul
@@ -11,8 +12,13 @@ from .weights import QLinear, Weights
 
 
 def tile(q: QLinear) -> QLinear:
-    if q.layout == "tiled" or not q.fast:
+    if q.layout in ("tiled", "volta") or not q.fast:
         return q
+    if volta():
+        from tensorfold.cuda.kernels.qmm_volta import Tiled
+
+        t = Tiled(q.weight, q.scales, q.biases)
+        return QLinear(t.weight, t.scales, t.biases, layout="volta", rows=t.n)
     p = shared.pack(q.weight, q.scales, q.biases, 64)
     return QLinear(p.weight, p.scales, p.biases, layout="tiled", rows=q.n)
 
@@ -20,6 +26,10 @@ def tile(q: QLinear) -> QLinear:
 def untile(q: QLinear) -> QLinear:
     """The stored MLX layout again (for the fp32 reference, TP sharding or slicing rows)."""
 
+    if q.layout == "volta":
+        from tensorfold.cuda.kernels.qmm_volta import Tiled
+
+        return QLinear(*Tiled.wrap(q.weight, q.scales, q.biases, q.rows).untile())
     if q.layout != "tiled":
         return q
     return QLinear(*shared.unpack(shared.Q4(q.weight, q.scales, q.biases, q.n, q.k, 64)))
@@ -49,18 +59,31 @@ def matmul_rows(x: torch.Tensor, parts: list[QLinear]) -> torch.Tensor:
 def matmul(x: torch.Tensor, q: QLinear, xs: torch.Tensor | None = None) -> torch.Tensor:
     """The lane matmul for either layout; both give the same bits."""
 
+    if q.layout == "volta":
+        from tensorfold.cuda.kernels import qmm_volta
+
+        return qmm_volta.tiled_matmul(x, qmm_volta.Tiled.wrap(q.weight, q.scales, q.biases, q.rows), xs=xs)
     if not q.fast:
         from tensorfold.cuda.kernels.affine import matmul as affine_matmul
 
         return affine_matmul(x, q)
     if q.layout == "tiled":
         return shared.matmul(x, q, xs)
+    if volta():                                            # stored layout on sm_70: the Volta kernel, not Triton's
+        from tensorfold.cuda.kernels import qmm_volta
+
+        return qmm_volta.lane_matmul(x, q.weight, q.scales, q.biases, xs=xs)
     return lane_matmul(x, q.weight, q.scales, q.biases, xs=xs)
 
 
 def matmul_group(x: torch.Tensor, qs: list[QLinear], xs: torch.Tensor | None = None) -> list[torch.Tensor]:
     """``[matmul(x, q, xs) for q in qs]`` with the same bits: one launch on sm_12x when all are tiled 4-bit."""
 
+    if all(q.layout == "volta" for q in qs):
+        from tensorfold.cuda.kernels import qmm_volta
+
+        prepped = qmm_volta.prep884(x) if not isinstance(xs, tuple) else xs  # one fp16 copy for every projection
+        return [matmul(x, q, prepped) for q in qs]
     if all(q.layout == "tiled" and q.fast for q in qs):
         return shared.matmul_group(x, qs, xs)
     return [matmul(x, q, xs) for q in qs]
@@ -69,6 +92,10 @@ def matmul_group(x: torch.Tensor, qs: list[QLinear], xs: torch.Tensor | None = N
 def matmul_partial(x: torch.Tensor, q: QLinear, xs: torch.Tensor | None = None) -> torch.Tensor:
     """fp32 sums for a tiled weight, unrounded: a row-parallel rank's share of a projection."""
 
+    if q.layout == "volta":
+        from tensorfold.cuda.kernels import qmm_volta
+
+        return qmm_volta.tiled_matmul(x, qmm_volta.Tiled.wrap(q.weight, q.scales, q.biases, q.rows), xs=xs, f32=True)
     if not q.fast:
         from tensorfold.cuda.kernels.affine import matmul as affine_matmul
 

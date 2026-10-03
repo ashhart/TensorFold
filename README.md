@@ -262,6 +262,16 @@ For two ranks, see the [CUDA runbook](RUNBOOK.md#nvidia-gpus). Each rank needs i
 optional drafter. Rank 0 serves HTTP. Unified GPU/host memory also holds runtime buffers and file-backed
 model data; the startup estimate is not a measured maximum capacity.
 
+### Tesla V100 (sm_70)
+
+Qwen3.8-27B (the MLX 4-bit checkpoint, with its DFlash2 drafter) also serves on Volta GPUs, where Triton has no
+tensor-core matmul and the FP8 and bf16 tensor-core kernels do not build. Decode, tree attention and the drafter run
+on Volta's own fp16 `mma.m8n8k4`, and prompt chunks run through a dense fp16 copy of each weight and cuBLASLt. One
+32 GB V100 serves a window of about 164,000 tokens with the drafter. Replies equal this engine's own serial decoding,
+as on newer GPUs, and its bits are its own. PyTorch's CUDA 12 wheels include sm_70; one or two ranks are supported,
+and two ranks need working NCCL peer access between the cards. Measurements
+and the launch line are in [the recipe](docs/recipes/qwen3.8-27b.md#tesla-v100-sm_70).
+
 ## Measurements
 
 Each release's notes give its measured decode, prompt and concurrency numbers against the previous release and the

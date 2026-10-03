@@ -16,19 +16,21 @@ class QLinear:
     weight: torch.Tensor      # original MLX words, or the optimized four-bit tile layout
     scales: torch.Tensor | None
     biases: torch.Tensor | None
-    layout: str = "mlx"       # "mlx" as stored, or "tiled" (``qmm_fast.tile``)
+    layout: str = "mlx"       # "mlx" as stored, "tiled" (``qmm_fast.tile``) or "volta" (``qmm_volta.Tiled`` words)
     rows: int = 0             # N when tiled (the tiled words are padded to 64 columns)
     gs: int = 64              # inputs per quantization group
     bits: int = 4
 
     @property
     def n(self) -> int:
-        return self.rows if self.layout == "tiled" else int(self.weight.shape[0])
+        return self.rows if self.layout in ("tiled", "volta") else int(self.weight.shape[0])
 
     @property
     def k(self) -> int:
         if self.layout == "dense":
             return int(self.weight.shape[1])
+        if self.layout == "volta":
+            return int(self.weight.shape[1]) * 64
         return int(self.weight.shape[1]) * 64 if self.layout == "tiled" else int(self.scales.shape[1]) * self.gs
 
     def nbytes(self) -> int:

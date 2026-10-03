@@ -17,12 +17,15 @@ from tensorfold.families.qwen3_5.cuda.qmm_fast import prepare  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.weights import Attention, Config, GDN, Layer, QLinear, Weights  # noqa: E402
 
 V = 256
+VOLTA = torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 7   # no FP8 prompts, no sm_80 kernels
 
 
 @pytest.fixture(params=[False, True], ids=["bf16", "fp8"])
 def fp8(request):
     """Each test once with bf16 prompts (the default) and once with --prefill-fp8."""
 
+    if request.param and VOLTA:
+        pytest.skip("FP8 prompts need sm_89")
     with prompt_precision.using(request.param):
         yield request.param
 
@@ -147,6 +150,7 @@ def test_a_cache_limit_changes_no_bits(length, limit, fp8):
     assert max(kv[0].shape[0] for kv in replied[1].kv if kv is not None) <= limit
 
 
+@pytest.mark.skipif(VOLTA, reason="FP8 prompts need sm_89")
 def test_bf16_prompts_track_decode_closer_than_fp8():
     """bf16 prompt rows sit nearer decode's arithmetic than FP8 rows do (this model, 300 rows: 0.26% against 0.57%)."""
 
@@ -170,6 +174,7 @@ def test_bf16_prompts_track_decode_closer_than_fp8():
     assert err[False] < 4e-3 and err[False] < err[True] / 1.5, err
 
 
+@pytest.mark.skipif(VOLTA, reason="the sm_80 prompt kernel; Volta: test_qmm_volta prompt tests")
 @pytest.mark.parametrize("n", [1000, 1100])                     # 1,100: 1,152 padded, not a multiple of 256
 def test_prefill_matmul_rows_do_not_depend_on_chunking(n):
     gen = torch.Generator(device="cuda").manual_seed(3)
@@ -212,6 +217,7 @@ def test_prefill_attention_rows_do_not_depend_on_chunking(heads, kv_heads, dim):
     assert ((whole.float() - ref).norm() / ref.norm()).item() < 1e-2
 
 
+@pytest.mark.skipif(VOLTA, reason="FP8 prompts need sm_89")
 @pytest.mark.parametrize("gs", [64, 32])
 def test_fp8_prefill_matmul_rows_do_not_depend_on_chunking(gs):
     gen = torch.Generator(device="cuda").manual_seed(8)

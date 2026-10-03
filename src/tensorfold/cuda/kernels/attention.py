@@ -11,6 +11,8 @@ import torch
 import triton
 import triton.language as tl
 
+from tensorfold.cuda.build import volta
+
 TILE = 64
 CHUNK = 512
 MAX_NODES = 128
@@ -159,6 +161,22 @@ def _merge(PO, PM, PL, OUT, STREAM, ROWS, W, H: tl.constexpr, D: tl.constexpr, G
     tl.store(OUT + (node * H + head[:, None]) * D + d[None, :], result.to(tl.bfloat16), mask=gg[:, None] < G)
 
 
+VOLTA_GROUP = 8         # query heads a key head the sm_70 kernel takes (QUERY_TILE for the Triton ones)
+
+
+@lru_cache(maxsize=1)
+def _volta_ext():
+    """The sm_70 chunk kernels (attention_volta.cu): tl.dot has no tensor-core path on Volta."""
+
+    from pathlib import Path
+
+    from tensorfold.cuda.build import VOLTA, load
+
+    here = Path(__file__).parent
+    return load(name="tensorfold_attention_volta_v1", sources=[str(here / "attention_volta.cu")], need=VOLTA,
+                extra_cuda_cflags=["-O3", f"-I{here}"], verbose=False)
+
+
 @dataclass
 class Plan:
     """A window's attention layout, shared by every attention layer of a forward."""
@@ -247,7 +265,7 @@ def offsets(caches: Sequence[tuple[torch.Tensor, torch.Tensor]], device) -> list
             delta = t.data_ptr() - origin
             if delta % 16:
                 raise ValueError("caches must be 16-byte aligned")
-            out.append(delta // 2)
+            out.append(delta // t.element_size())
     return out
 
 
@@ -269,13 +287,21 @@ def attention(q: torch.Tensor, k_nodes: torch.Tensor, v_nodes: torch.Tensor, off
     partial_o = torch.empty((p.chunks, w, h, d), dtype=torch.float32, device=q.device)
     partial_m = torch.empty((p.chunks, w, h), dtype=torch.float32, device=q.device)
     partial_l = torch.empty_like(partial_m)
-    if p.items.shape[0]:
-        _shared[(p.items.shape[0] * hk,)](q, origin, origin, offs, p.streams, p.items, partial_o, partial_m, partial_l,
-                                          w, H=h, HK=hk, D=d, G=g, CH=CHUNK, SCALE=scale, num_warps=4, num_stages=1)
-    tails = 1 + -(-MAX_NODES // CHUNK)
-    _tail[(w, hk, tails)](q, k_nodes, v_nodes, origin, origin, offs, p.streams, p.rows, p.paths, p.depths,
-                          partial_o, partial_m, partial_l, w, H=h, HK=hk, D=d, G=g, CH=CHUNK, MAXD=MAX_NODES,
-                          SCALE=scale, num_warps=4, num_stages=1)
+    if volta(q.device):
+        # sm_70: tl.dot has no tensor-core path there; CUDA kernels write every chunk partial in the same layout
+        if g > VOLTA_GROUP:
+            raise ValueError(f"the sm_70 attention kernel takes up to {VOLTA_GROUP} query heads a key head, not {g}")
+        _volta_ext().chunks(q, k_nodes, v_nodes, origin, offs, p.streams, p.rows, p.paths, p.depths,
+                            partial_o, partial_m, partial_l, p.chunks, scale)
+    else:
+        if p.items.shape[0]:
+            _shared[(p.items.shape[0] * hk,)](q, origin, origin, offs, p.streams, p.items, partial_o, partial_m,
+                                              partial_l, w, H=h, HK=hk, D=d, G=g, CH=CHUNK, SCALE=scale, num_warps=4,
+                                              num_stages=1)
+        tails = 1 + -(-MAX_NODES // CHUNK)
+        _tail[(w, hk, tails)](q, k_nodes, v_nodes, origin, origin, offs, p.streams, p.rows, p.paths, p.depths,
+                              partial_o, partial_m, partial_l, w, H=h, HK=hk, D=d, G=g, CH=CHUNK, MAXD=MAX_NODES,
+                              SCALE=scale, num_warps=4, num_stages=1)
     out = torch.empty_like(q)
     _merge[(w, hk, d // MERGE_COLUMNS)](partial_o, partial_m, partial_l, out, p.streams, p.rows, w, H=h, D=d, G=g,
                                         DS=MERGE_COLUMNS, num_warps=4)

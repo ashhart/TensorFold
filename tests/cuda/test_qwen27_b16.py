@@ -5,6 +5,8 @@ import torch
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA only", allow_module_level=True)
+if torch.cuda.get_device_capability()[0] == 7:
+    pytest.skip("the 16-bit projections of EXL3 and NVFP4 packs need sm_80 kernels; the Volta engine serves the MLX checkpoint", allow_module_level=True)
 
 from tensorfold.families.qwen3_5.cuda.b16 import matmul, matmul_pair, prompt, prompt_pair  # noqa: E402
 

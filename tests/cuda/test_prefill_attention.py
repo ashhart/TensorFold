@@ -19,6 +19,8 @@ def _caches(gen, keys, kv_heads, dim):
     return k, v
 
 
+@pytest.mark.skipif(torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 7,
+                    reason="sm_80 kernel vs Triton bits; Volta routes prompts to volta_attention")
 @pytest.mark.parametrize("heads,kv_heads,dim", SHAPES)
 def test_cuda_prompt_attention_has_the_triton_bits(heads, kv_heads, dim):
     gen = torch.Generator(device="cuda").manual_seed(heads * dim + kv_heads)

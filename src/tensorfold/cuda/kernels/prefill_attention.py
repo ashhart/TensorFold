@@ -9,6 +9,8 @@ import torch
 import triton
 import triton.language as tl
 
+from tensorfold.cuda.build import volta
+
 BM = 64
 BN = 64
 
@@ -64,6 +66,8 @@ def attention(q: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor, p0:
 
     w, h, d = q.shape
     hk = _check(q, k_cache, v_cache, p0)
+    if volta(q.device):
+        return volta_attention(q, k_cache, v_cache, p0, scale=scale, hk=hk)
     out = torch.empty_like(q)
     if d == 64:
         return triton_attention(q, k_cache, v_cache, p0, scale=scale, out=out)
@@ -107,3 +111,31 @@ def _ext():
     return load(name="tensorfold_prefill_attention_v1", sources=[str(here / "prefill_attention.cpp"),
                                                                  str(here / "prefill_attention.cu")],
                 extra_cuda_cflags=["-O3", "--fmad=false"], verbose=False)
+
+
+VOLTA_ALIGN = 128         # query rows pad back to a multiple of this: a row's tile in the kernel never moves with chunking
+
+
+def volta_attention(q: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor, p0: int, *, scale: float,
+                    hk: int) -> torch.Tensor:
+    """sm_70: PyTorch's memory-efficient (CUTLASS) attention in fp16 with a bottom-right causal mask, one key head at
+    a time (its query heads on the batch axis, its keys and values broadcast to them without a copy); the bf16
+    kernels need sm_80. Chunk invariant through ``VOLTA_ALIGN``, not the Triton tiles' bits. The fp16 keys and
+    values of one head are the pass's largest transient, which the engine's geometry counts on sm_70."""
+
+    w, h, d = q.shape
+    n, g = p0 + w, h // hk
+    lead = p0 % VOLTA_ALIGN
+    qh = q.to(torch.half)
+    if lead:
+        qh = torch.cat([qh.new_zeros((lead, h, d)), qh])
+    qb = qh.view(lead + w, hk, g, d)
+    out = torch.empty((lead + w, hk, g, d), dtype=torch.half, device=q.device)
+    for j in range(hk):
+        k, v = k_cache[:n, j].to(torch.half), v_cache[:n, j].to(torch.half)
+        qj = qb[:, j].permute(1, 0, 2)[:, :, None]                      # (g, rows, 1, d): the head's queries
+        kj, vj = k[None, :, None].expand(g, n, 1, d), v[None, :, None].expand(g, n, 1, d)
+        o = torch.ops.aten._efficient_attention_forward(qj, kj, vj, None, None, None, lead + w, n, 0.0, 2, False,
+                                                        scale=scale)[0]
+        out[:, j] = o[:, :, 0].permute(1, 0, 2)
+    return out[lead:].reshape(w, h, d).to(torch.bfloat16)
