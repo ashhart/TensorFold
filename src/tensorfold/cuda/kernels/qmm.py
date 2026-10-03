@@ -16,6 +16,11 @@ from .qmm_tiles import group_tile
 @lru_cache(maxsize=1)
 def _ext():
     from tensorfold.cuda.build import load
+    from tensorfold.cuda.rocm import HIP
+
+    if HIP:                          # qmm_frag.cuh is inline PTX (cp.async, ldmatrix, mma): NVIDIA only
+        raise RuntimeError("tensorfold_qmm_v3 is CUDA-only (inline PTX); on ROCm the 4-bit paths use the Triton "
+                           "lane matmul and the qgemv decode kernels")
 
     here = Path(__file__).parent
     return load(name="tensorfold_qmm_v5", sources=[str(here / "qmm.cpp"), str(here / "qmm.cu"),

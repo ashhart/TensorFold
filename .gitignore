@@ -11,3 +11,5 @@ venv/
 .DS_Store
 *.swp
 *.log
+# hipify output of the CUDA sources on ROCm builds
+src/tensorfold/hip/

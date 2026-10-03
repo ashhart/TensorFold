@@ -76,7 +76,9 @@ def split_candidates(logits: torch.Tensor, sampling: Sampling | None, offset: in
         values, ids = logits.float().max(dim=-1)
         return values[:, None].contiguous(), (ids + offset)[:, None].contiguous()
     count = min(logits.shape[1], int(sampling.top_k) + MARGIN) if sampling.top_k else logits.shape[1]
-    values, ids = torch.topk(logits.float(), count, dim=-1, sorted=False)
+    from tensorfold.cuda.sampling import top_by_value_then_id
+
+    values, ids = top_by_value_then_id(logits, count)
     return values.contiguous(), (ids + offset).contiguous()
 
 

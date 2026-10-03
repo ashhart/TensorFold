@@ -120,8 +120,16 @@ def lane_matmul(x: torch.Tensor, weight: torch.Tensor, scales: torch.Tensor, bia
     out = torch.empty((m, n), dtype=torch.bfloat16, device=x.device)
     part = out if sk == 1 else torch.empty((sk, m, n), dtype=torch.float32, device=x.device)
     grid = (triton.cdiv(m, bm), triton.cdiv(n, BN), sk)
+    warps, stages = (4 if bm <= 32 else 8), 3
+    from tensorfold.cuda.rocm import HIP
+
+    if HIP and bm > 64:                              # gfx1151: 64-row tiles, one stage (3.3x faster; a row's bits never
+        bm, stages = 64, 1                           # depend on the tile, see ``bucket``)
+        grid = (triton.cdiv(m, bm), triton.cdiv(n, BN), sk)
+    elif HIP:
+        stages = 1
     _qmm[grid](x, xs, weight, scales, biases, out, part, m, N=n, K=k, SK=sk, BM=bm, BLOCK_N=BN,
-               num_warps=4 if bm <= 32 else 8, num_stages=3)
+               num_warps=warps, num_stages=stages)
     if sk > 1:
         total = m * n
         block = 1024

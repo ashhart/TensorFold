@@ -29,7 +29,9 @@ def matmul(x: torch.Tensor, w: torch.Tensor, bias: torch.Tensor | None = None) -
 def prompt(x: torch.Tensor, w: torch.Tensor, bm: int = 0) -> torch.Tensor:
     """Prompt rows x [M, K] @ w [N, K]^T on the bf16 mma, one K chain a row: chunk-invariant; ``bm`` keeps bits."""
 
-    if w.dtype != torch.bfloat16 or x.shape[1] % 64:
+    from tensorfold.cuda.rocm import HIP
+
+    if HIP or w.dtype != torch.bfloat16 or x.shape[1] % 64:     # the mma kernel is PTX: ROCm takes the row kernel
         return matmul(x, w)
     return _ext().b16_prompt(x.to(torch.bfloat16).contiguous(), w.contiguous(), bm)
 
@@ -45,6 +47,10 @@ def matmul_pair(x: torch.Tensor, w0: torch.Tensor, w1: torch.Tensor) -> list[tor
 def prompt_pair(x: torch.Tensor, w0: torch.Tensor, w1: torch.Tensor) -> list[torch.Tensor]:
     """Prompt rows times two weights in one launch, each ``prompt``'s bits."""
 
+    from tensorfold.cuda.rocm import HIP
+
+    if HIP:
+        return matmul_pair(x, w0, w1)
     if w0.dtype != torch.bfloat16 or w1.dtype != torch.bfloat16 or x.shape[1] % 64:
         return [prompt(x, w0), prompt(x, w1)]
     return _ext().b16_prompt_pair(x.to(torch.bfloat16).contiguous(), w0.contiguous(), w1.contiguous(), 0)

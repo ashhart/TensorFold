@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
@@ -109,6 +110,94 @@ class Exl3:
                       self.workspace)
 
 
+def _fast() -> bool:
+    """Off by default: every row count stays on the exact kernel (decode's bits for prompts too), so prompts match the
+    native path bit for bit. TENSORFOLD_GGUF_FAST=1 on ROCm moves GGUF projections to Gufo's production routes (speed
+    first, different bits; see ``Gguf``)."""
+
+    from tensorfold.cuda.rocm import HIP
+
+    return HIP and os.environ.get("TENSORFOLD_GGUF_FAST", "0") == "1"
+
+
+@dataclass
+class Gguf:
+    """A GGUF K-quant/IQ projection on ``tensorfold.cuda.gguf``'s exact kernels (Gufo's): any row count, same row bits."""
+
+    weight: torch.Tensor      # (N, row bytes) uint8, the packed blocks as the file stores them
+    qtype: int                # ggml type id
+    cols: int                 # K
+    in_perm: torch.Tensor | None = None   # input columns in the file's order (out_proj's tiled V heads)
+    layout: str = "gguf"
+
+    @property
+    def n(self) -> int:
+        return int(self.weight.shape[0])
+
+    @property
+    def k(self) -> int:
+        return self.cols
+
+    def nbytes(self) -> int:
+        return self.weight.numel()
+
+    def rows(self, index: torch.Tensor) -> "Gguf":
+        """The rows at ``index`` (whole packed rows, so the same bits per row)."""
+
+        return Gguf(self.weight.index_select(0, index).contiguous(), self.qtype, self.cols, self.in_perm)
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        from tensorfold.cuda import gguf
+
+        if self.in_perm is not None:
+            x = x.index_select(1, self.in_perm)
+        if _fast():
+            return self._fast(x)
+        if x.shape[0] == 1:                    # two rows beat one in Gufo's dispatch; rows keep their bits at any count
+            return gguf.linear(x.expand(2, -1), self.weight, self.qtype, self.n)[:1].to(torch.bfloat16)
+        return gguf.linear(x, self.weight, self.qtype, self.n).to(torch.bfloat16)
+
+    def _fast(self, x: torch.Tensor) -> torch.Tensor:
+        """TENSORFOLD_GGUF_FAST: 1 row on Gufo's decode GEMV; 2+ rows (draft checks) per TENSORFOLD_GGUF_FAST_VERIFY
+        (exact, the default: Gufo's verify route; with it, drafted replies matched serial ones on Strix; wmma: the W8A8 GEMM's small-row tiles;
+        bf16: quant-direct bf16; gemv: the GEMV per row). Strix, 27B Q4_K_XL: wmma and bf16 change drafted replies and
+        are no faster, so exact stays the default."""
+
+        from tensorfold.cuda import gguf
+
+        rows = x.shape[0]
+        if rows == 1:
+            return gguf.gemv(x, self.weight, self.qtype, self.n).to(torch.bfloat16)
+        mode = os.environ.get("TENSORFOLD_GGUF_FAST_VERIFY", "exact")   # exact: drafted == serial, and fastest measured
+        if mode == "wmma" and self.qtype in gguf.PREFILL:
+            y = gguf.prefill_linear(x, self.weight, self.qtype, self.n, pad=0)
+        elif mode == "bf16":
+            y = gguf.linear_bf16(x, self.weight, self.qtype, self.n)
+        elif mode == "gemv":                   # Gufo's MTP route: its decode GEMV, one launch per row
+            y = torch.cat([gguf.gemv(x[i:i + 1], self.weight, self.qtype, self.n) for i in range(rows)])
+        else:
+            y = gguf.linear(x, self.weight, self.qtype, self.n)
+        return y.to(torch.bfloat16)
+
+    def prefill(self, x: torch.Tensor) -> torch.Tensor:
+        """Prompt rows: on ROCm with TENSORFOLD_GGUF_FAST=1, Gufo's WMMA W8A8 GEMM (not decode's bits), otherwise
+        the exact kernel; under 96 rows on its small-row tiles unless TENSORFOLD_GGUF_FAST_PAD=1 pads to one kernel per weight."""
+
+        from tensorfold.cuda import gguf
+
+        if not (_fast() and self.qtype in gguf.PREFILL):
+            return self(x)
+        if self.in_perm is not None:
+            x = x.index_select(1, self.in_perm)
+        pad = 96 if os.environ.get("TENSORFOLD_GGUF_FAST_PAD") == "1" else 0
+        return gguf.prefill_linear(x, self.weight, self.qtype, self.n, pad=pad).to(torch.bfloat16)
+
+    def embed(self, ids: torch.Tensor) -> torch.Tensor:
+        from tensorfold.cuda import gguf
+
+        return gguf.rows_bf16(self.weight.index_select(0, ids.reshape(-1).to(torch.int64)), self.qtype, self.cols)
+
+
 @dataclass
 class Config:
     hidden: int
@@ -213,15 +302,19 @@ class Weights:
     norm: torch.Tensor
     head: Any                                        # QLinear, Exl3, or an NVFP4 checkpoint's linear
     inv_freq: torch.Tensor | None = None             # (rope_dims/2,) fp32
-    quant: str = "mlx"                               # "exl3": an EXL3 pack (prompt glue then stays in bf16); "nvfp4"
+    quant: str = "mlx"                               # "exl3": an EXL3 pack (prompt glue then stays in bf16); "nvfp4"; "gguf"
     prompt_rows: int = 4096                          # a prompt chunk's rows, sized to the GPU: any count, the same bits
 
     @cached_property
     def fast_prefill(self) -> bool:
         """Whether every projection has an FP8 prompt kernel (run when prompts take FP8)."""
 
-        if self.quant == "exl3" or getattr(self, "precision", "full") == "checkpoint":
-            return False                             # EXL3 prompt glue stays bf16; checkpoint math has its own
+        from tensorfold.cuda.rocm import HIP
+
+        if HIP:                                      # FP8 prompt rows need the sm_90 kernels; ROCm keeps them in bf16
+            return False
+        if self.quant in ("exl3", "gguf") or getattr(self, "precision", "full") == "checkpoint":
+            return False                             # EXL3/GGUF prompt glue stays bf16; checkpoint math has its own
         for layer in self.layers:
             modules = [m for m in (layer.gate, layer.up, layer.down) if m is not None]    # a MoE layer's are None
             modules += [layer.gdn.qkv, layer.gdn.z, layer.gdn.b, layer.gdn.a, layer.gdn.out] if layer.gdn else []
@@ -271,9 +364,12 @@ def load(model_dir: str | Path, device: str = "cuda", *, tiled: bool = False, ml
     """MLX affine 4-bit (``tiled``: projections packed as read; ``mlp(prefix, get, qlinear, cfg)``: a layer's MLP fields), an EXL3 pack, or NVFP4."""
 
     from .exl3_load import load_exl3, quant_config
+    from .gguf_load import gguf_file, load_gguf
     from .nvfp4_load import load_nvfp4, quantized
 
     model_dir = Path(model_dir)
+    if gguf_file(model_dir) is not None:
+        return load_gguf(model_dir, device)
     if quant_config(model_dir) is not None:
         return load_exl3(model_dir, device)
     if quantized(model_dir):

@@ -14,7 +14,7 @@ BN = 64
 
 
 @triton.jit
-def _tile(q, k, v, m, l, o, valid, SCALE: tl.constexpr):
+def _tile(q, k, v, m, l, o, valid, SCALE: tl.constexpr, SPLIT_V: tl.constexpr):
     s = tl.dot(q, tl.trans(k)).to(tl.float32) * SCALE
     s = tl.where(valid, s, float("-inf"))
     tile_m = tl.max(s, 1)
@@ -22,14 +22,22 @@ def _tile(q, k, v, m, l, o, valid, SCALE: tl.constexpr):
     next_m = tl.where(active, tl.maximum(m, tile_m), m)
     alpha = tl.where(active, tl.where(m == float("-inf"), 0.0, tl.exp(m - next_m)), 1.0)
     p = tl.where(valid & active[:, None], tl.exp(s - next_m[:, None]), 0.0)
-    o = o * alpha[:, None] + tl.dot(p.to(tl.bfloat16), v)
+    if SPLIT_V:
+        # ROCm: a masked key's weight is +0, and +0 * v is -0 for a negative v; AMD's matrix sums do not treat those
+        # zeros alike, so a row's bits would depend on whether a chunk loaded the keys past it. Both halves of
+        # v = v+ - v- are non-negative, so every masked product is +0 whatever was loaded.
+        pb = p.to(tl.bfloat16)
+        pv = tl.dot(pb, tl.maximum(v, 0.0).to(tl.bfloat16)) - tl.dot(pb, tl.maximum(-v, 0.0).to(tl.bfloat16))
+    else:
+        pv = tl.dot(p.to(tl.bfloat16), v)
+    o = o * alpha[:, None] + pv
     l = l * alpha + tl.sum(p, 1)
     return next_m, l, o
 
 
 @triton.jit
 def _attend(Q, K, V, OUT, p0, W, H: tl.constexpr, HK: tl.constexpr, D: tl.constexpr, BM: tl.constexpr,
-            BN: tl.constexpr, SCALE: tl.constexpr):
+            BN: tl.constexpr, SCALE: tl.constexpr, SPLIT_V: tl.constexpr = False):
     block = tl.program_id(0)
     head = tl.program_id(1)
     hk = head // (H // HK)
@@ -48,13 +56,13 @@ def _attend(Q, K, V, OUT, p0, W, H: tl.constexpr, HK: tl.constexpr, D: tl.conste
         keys = t * BN + tl.arange(0, BN)
         k = tl.load(K + (keys[:, None] * HK + hk) * D + d[None, :])
         v = tl.load(V + (keys[:, None] * HK + hk) * D + d[None, :])
-        m, l, o = _tile(q, k, v, m, l, o, keys[None, :] <= pos[:, None], SCALE)
+        m, l, o = _tile(q, k, v, m, l, o, keys[None, :] <= pos[:, None], SCALE, SPLIT_V)
     for t in range(full, last_pos // BN + 1):
         keys = t * BN + tl.arange(0, BN)
         seen = keys <= last_pos
         k = tl.load(K + (keys[:, None] * HK + hk) * D + d[None, :], mask=seen[:, None], other=0.0)
         v = tl.load(V + (keys[:, None] * HK + hk) * D + d[None, :], mask=seen[:, None], other=0.0)
-        m, l, o = _tile(q, k, v, m, l, o, keys[None, :] <= pos[:, None], SCALE)
+        m, l, o = _tile(q, k, v, m, l, o, keys[None, :] <= pos[:, None], SCALE, SPLIT_V)
     out = o / l[:, None]
     tl.store(OUT + (rows[:, None] * H + head) * D + d[None, :], out.to(tl.bfloat16), mask=ok[:, None])
 
@@ -65,7 +73,9 @@ def attention(q: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor, p0:
     w, h, d = q.shape
     hk = _check(q, k_cache, v_cache, p0)
     out = torch.empty_like(q)
-    if d == 64:
+    from tensorfold.cuda.rocm import HIP
+
+    if d == 64 or HIP:                     # ROCm: the CUDA kernel is inline PTX; the Triton definition runs there
         return triton_attention(q, k_cache, v_cache, p0, scale=scale, out=out)
     _ext().prefill_attention(q, k_cache, v_cache, out, p0, scale, heads_a_block(h // hk))
     return out
@@ -78,8 +88,10 @@ def triton_attention(q: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tens
     w, h, d = q.shape
     hk = _check(q, k_cache, v_cache, p0)
     out = torch.empty_like(q) if out is None else out
+    from tensorfold.cuda.rocm import HIP
+
     _attend[(triton.cdiv(w, BM), h)](q, k_cache, v_cache, out, p0, w, H=h, HK=hk, D=d, BM=BM, BN=BN, SCALE=scale,
-                                     num_warps=8, num_stages=1 if d > 128 else 2)
+                                     SPLIT_V=HIP, num_warps=8, num_stages=1 if d > 128 else 2)
     return out
 
 

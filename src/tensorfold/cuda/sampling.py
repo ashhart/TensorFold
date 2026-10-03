@@ -15,6 +15,24 @@ MASS = 2.0 ** 40        # a token's share of the mass in fixed point: shard sums
 NUCLEUS = 1024          # candidates a rank reads for a top_k-off draw; a row they don't cover reads whole shards
 
 
+def top_by_value_then_id(logits: torch.Tensor, count: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """The ``count`` largest entries of each row by (value, then lowest id), whatever ``torch.topk`` does with ties.
+
+    ``torch.topk`` may keep any of the entries tied at the k-th value (ROCm's keeps different ones from CUDA's), so
+    the candidates, and a sampled token, could depend on the backend or the row count. Here every entry above the
+    k-th value is kept, then the lowest ids equal to it fill the rest: the same set on every backend and row count.
+    """
+
+    x = logits.float()
+    kth = torch.topk(x, count, dim=-1, sorted=False).values.min(dim=-1, keepdim=True).values
+    above = x > kth
+    tied = x == kth
+    room = count - above.sum(dim=-1, keepdim=True)
+    keep = above | (tied & (torch.cumsum(tied.to(torch.int32), dim=-1) <= room))
+    ids = keep.nonzero()[:, 1].reshape(x.shape[0], count)                   # row-major: each row's ids ascending
+    return x.gather(1, ids), ids
+
+
 def sample_rows(logits: torch.Tensor, positions: Sequence[int], sampling: Sampling | None) -> list[int]:
     """Sample each row from its logits and absolute position; serial and verify-window rows share this one path."""
 
@@ -27,7 +45,7 @@ def sample_rows(logits: torch.Tensor, positions: Sequence[int], sampling: Sampli
     width = logits.shape[1]
     count = min(width, int(sampling.top_k) + MARGIN) if sampling.top_k else width
     if count < width:
-        values, ids = torch.topk(logits.float(), count, dim=-1, sorted=False)
+        values, ids = top_by_value_then_id(logits, count)
         values_np = values.cpu().numpy()
         ids_np = ids.cpu().numpy().astype(np.int64, copy=False)
     else:
@@ -56,7 +74,7 @@ def sample_streams(logits: torch.Tensor, starts: Sequence[int], positions: Seque
         if count == 0:
             launched.append((count, members, rows.argmax(dim=-1), None))
         elif count < width:
-            values, ids = torch.topk(rows.float(), count, dim=-1, sorted=False)
+            values, ids = top_by_value_then_id(rows, count)
             launched.append((count, members, ids, values))
         else:
             launched.append((count, members, None, rows.float()))

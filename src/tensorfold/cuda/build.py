@@ -23,6 +23,10 @@ def arch_flags(need: tuple[int, int] = MIN_CAPABILITY, arch_specific: bool = Fal
 
     import torch
 
+    from .rocm import HIP, offload_arch
+
+    if HIP:                                         # hipcc: one AMD target; the portable paths avoid clusters and FP8 MMA
+        return [f"--offload-arch={offload_arch()}"]
     major, minor = torch.cuda.get_device_capability()
     if (major, minor) < need:
         why = "thread-block clusters" if need >= CLUSTERS else "FP8 MMA"
@@ -67,9 +71,14 @@ def load(name: str, sources: str | list[str], need: tuple[int, int] = MIN_CAPABI
          **kwargs: Any) -> Any:
     """torch's JIT ``load`` for this GPU only (NVIDIA's containers list every architecture back to sm_80), with a line when it compiles or waits on a lock."""
 
+    from .rocm import HIP, hip_flags, use_pip_sdk
+
+    if HIP:
+        use_pip_sdk()
     from torch.utils import cpp_extension
 
-    kwargs["extra_cuda_cflags"] = [*kwargs.get("extra_cuda_cflags", []), *arch_flags(need, arch_specific)]
+    flags = kwargs.get("extra_cuda_cflags", [])
+    kwargs["extra_cuda_cflags"] = [*(hip_flags(flags) if HIP else flags), *arch_flags(need, arch_specific)]
     links = _toolkit()
     if links:
         kwargs["extra_ldflags"] = [*kwargs.get("extra_ldflags", []), *links]

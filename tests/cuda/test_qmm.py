@@ -7,6 +7,9 @@ if not torch.cuda.is_available():
     pytest.skip("CUDA only", allow_module_level=True)
 
 from tensorfold.cuda.kernels import qmm  # noqa: E402
+from tensorfold.cuda.rocm import HIP  # noqa: E402
+
+ptx = pytest.mark.skipif(HIP, reason="tensorfold_qmm_v3 is inline PTX (cp.async, ldmatrix, mma): CUDA only")
 
 ROWS = [1, 2, 7, 15, 16, 17, 31, 32, 33, 63, 64, 65, 100, 127, 128, 129, 200, 256, 384, 512, 700, 1024, 1500, 2048]
 
@@ -34,6 +37,7 @@ def test_pack_round_trip(n, k, gs):
     assert all(torch.equal(a, b) for a, b in zip(back, w))
 
 
+@ptx
 @pytest.mark.parametrize("n,k,gs", [(48, 5120, 64), (1024, 5120, 64), (5120, 17408, 64), (200, 1024, 32),
                                     (1536, 2048, 32)])
 def test_rows_do_not_depend_on_row_count(n, k, gs):
@@ -48,6 +52,7 @@ def test_rows_do_not_depend_on_row_count(n, k, gs):
     assert torch.equal(torch.cat([qmm.matmul(x[r:r + 1], q, f32=True) for r in range(40)]), f32)
 
 
+@ptx
 @pytest.mark.parametrize("n,k", [(48, 5120), (1024, 5120), (5120, 6144), (10240, 5120), (5120, 17408)])
 def test_27b_triton_bits(n, k):
     """Groups of 64 give the 27B's stored-layout Triton kernel's bits (its serial reference) at every row count."""
@@ -61,6 +66,7 @@ def test_27b_triton_bits(n, k):
         assert torch.equal(qmm.matmul(x[:m], q), triton_qmm.lane_matmul(x[:m], *w)), (n, k, m)
 
 
+@ptx
 @pytest.mark.parametrize("n,k,gs", [(1024, 5120, 64), (512, 2048, 32)])
 def test_accuracy_matches_fp32_reference(n, k, gs):
     w = _weights(n, k, gs, 11 * n + k)
@@ -76,6 +82,7 @@ def test_split_depends_only_on_shape():
         assert sk == qmm.split_k(n, k) and (k // 64) % sk == 0
 
 
+@ptx
 def test_strided_rows_buffers_and_unreduced_slices():
     n, k, gs = 5120, 17408, 64
     q = qmm.pack(*_weights(n, k, gs, 17), gs)
@@ -95,6 +102,7 @@ def test_strided_rows_buffers_and_unreduced_slices():
     assert torch.equal(total, qmm.matmul(x, q, f32=True))
 
 
+@ptx
 @pytest.mark.parametrize("n,k,gs", [(128, 5120, 64), (200, 1024, 32)])
 def test_every_nibble_decodes_exactly(n, k, gs):
     """One-hot rows read back each stored nibble (scale 1, bias 0): pair() and every K split are exact on any GPU."""

@@ -65,6 +65,15 @@ def test_tiled_layout_gives_the_same_bits(n, k):
     back = qmm_fast.untile(t)
     assert torch.equal(back.weight, weight) and torch.equal(back.scales, scales)
     x = torch.randn((384, k), device="cuda").to(torch.bfloat16)
+    from tensorfold.cuda.rocm import HIP
+
+    if HIP:            # ROCm keeps the stored layout and decodes with its own row-invariant kernel
+        from tensorfold.families.qwen3_5.cuda import qgemv
+
+        full = qgemv.decode_matmul(x, weight, scales, biases)
+        for m in (1, 7, 16, 17, 32, 33, 64, 100, 128, 129, 384):
+            assert torch.equal(qmm_fast.matmul(x[:m], t), full[:m]), (n, k, m)
+        return
     for m in (1, 7, 16, 17, 32, 33, 64, 100, 128, 129, 384):
         assert torch.equal(qmm_fast.matmul(x[:m], t), qmm.lane_matmul(x[:m], weight, scales, biases)), (n, k, m)
 

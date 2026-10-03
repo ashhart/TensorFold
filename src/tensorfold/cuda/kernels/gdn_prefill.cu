@@ -6,6 +6,18 @@
 #include <cuda_runtime.h>
 #include <type_traits>
 
+// ROCm builds (hipified): 64-bit lane masks, HIP's bf16 conversion (round to nearest even) and a kernel
+// pointer cast for the attribute call; on CUDA each macro is exactly the original spelling.
+#if defined(__HIP_PLATFORM_AMD__) || defined(USE_ROCM)
+#define TF_FULL_MASK 0xffffffffffffffffull
+#define TF_FLOAT2BF16(x) __float2bfloat16(x)
+#define TF_KERNEL_PTR(k) reinterpret_cast<const void*>(k)
+#else
+#define TF_FULL_MASK 0xffffffffu
+#define TF_FLOAT2BF16(x) __float2bfloat16_rn(x)
+#define TF_KERNEL_PTR(k) (k)
+#endif
+
 namespace {
 
 constexpr int DK = 128;
@@ -116,7 +128,7 @@ __global__ void __launch_bounds__(2 * ROWS) chain_kernel(
                 m[3] = __fmaf_rn(s[4 * j + 3], kk.w, m[3]);
             }
             float mem = (m[0] + m[1]) + (m[2] + m[3]);
-            mem = mem + __shfl_xor_sync(0xffffffffu, mem, 1);
+            mem = mem + __shfl_xor_sync(TF_FULL_MASK, mem, 1);
             const float delta = (vt - mem) * bt;
             float o[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 #pragma unroll
@@ -132,8 +144,8 @@ __global__ void __launch_bounds__(2 * ROWS) chain_kernel(
                 o[3] = __fmaf_rn(s[4 * j + 3], qq.w, o[3]);
             }
             float out = (o[0] + o[1]) + (o[2] + o[3]);
-            out = out + __shfl_xor_sync(0xffffffffu, out, 1);
-            if (half == 0) y[vat] = __float2bfloat16_rn(out);
+            out = out + __shfl_xor_sync(TF_FULL_MASK, out, 1);
+            if (half == 0) y[vat] = TF_FLOAT2BF16(out);
         }
     }
     float* s1 = last + (static_cast<size_t>(head) * DV + row) * DK;

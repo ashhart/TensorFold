@@ -175,6 +175,12 @@ def test_a_long_prompt_tree_window_equals_serial_on_every_path(policy, monkeypat
             commit(serial, record, [0])
 
 
+SM90 = pytest.mark.skipif(bool(getattr(torch.version, "hip", None)),
+                          reason="the tiled and FP8 prompt kernels need sm_90 (thread-block clusters, FP8 MMA); "
+                                 "ROCm prompts use the lane matmul, covered by the whole-model chunking tests")
+
+
+@SM90
 def test_bf16_prompts_track_decode_closer_than_fp8():
     """bf16 prompt rows sit nearer decode's arithmetic than FP8 rows do (this model, 300 rows: 0.26% against 0.57%)."""
 
@@ -198,6 +204,7 @@ def test_bf16_prompts_track_decode_closer_than_fp8():
     assert err[False] < 4e-3 and err[False] < err[True] / 1.5, err
 
 
+@SM90
 @pytest.mark.parametrize("n", [1000, 1100])                     # 1,100: 1,152 padded, not a multiple of 256
 def test_prefill_matmul_rows_do_not_depend_on_chunking(n):
     gen = torch.Generator(device="cuda").manual_seed(3)
@@ -240,6 +247,7 @@ def test_prefill_attention_rows_do_not_depend_on_chunking(heads, kv_heads, dim):
     assert ((whole.float() - ref).norm() / ref.norm()).item() < 1e-2
 
 
+@SM90
 @pytest.mark.parametrize("gs", [64, 32])
 def test_fp8_prefill_matmul_rows_do_not_depend_on_chunking(gs):
     gen = torch.Generator(device="cuda").manual_seed(8)

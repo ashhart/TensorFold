@@ -1,0 +1,36 @@
+Gufo
+Copyright (c) 2026 Gufo contributors
+
+Original Gufo code is licensed under the MIT License in LICENSE.
+Third-party code retains its original copyright and license terms.
+See THIRD_PARTY_NOTICES.md for provenance, versions and distribution boundaries;
+full imported notices are installed alongside it in third-party/.
+
+Adapted code includes:
+- llama.cpp / ggml: Copyright (c) 2023-2026 The ggml authors (MIT).
+- DS4: Copyright (c) 2026 The ds4.c authors (MIT).
+- DS4 GB10/GX10 changes: Copyright (c) 2026 Marco Palaferri (MIT).
+- Qwen reference chat templates: Alibaba Cloud / Qwen (Apache-2.0); Gufo
+  implements a separate bounded renderer with local validation and API wiring.
+- h3.c: Copyright (c) 2026 Salvatore Sanfilippo (MIT).
+- ccv ancestry through h3.c: Copyright (c) 2010 Liu Liu (BSD-3-Clause).
+- ROCm kernels/headers: AMD and the contributors identified in their notices.
+- hipCUB: Duane Merrill, NVIDIA CORPORATION and AMD (BSD-3-Clause).
+
+Strix Halo optimization inspiration also came from these MIT-licensed projects:
+- LaurentZuijdwijk/llama.cpp: https://github.com/LaurentZuijdwijk/llama.cpp
+- Nathanw1014/strix-halo-llamacpp: https://github.com/Nathanw1014/strix-halo-llamacpp
+- gaetan-puleo/llama-cpp-strix-halo: https://github.com/gaetan-puleo/llama-cpp-strix-halo
+The llama.cpp forks retain the ggml authors' notice above. Nathan Wilson's
+Copyright (c) 2026 notice is retained in licenses/strix-halo-llamacpp.txt
+(installed in third-party/).
+
+This software is based in part on the work of the Independent JPEG Group.
+
+Gufo invokes FFmpeg/ffprobe as separate executables. Their license and source
+obligations, and those of any other bundled dependency, remain applicable to
+redistributed packages. Gufo's MIT license does not replace those obligations.
+
+Model weights are not included. Operators acquire them separately under the
+publisher's terms. Python reference/evaluation tools and their models belong
+to the development environment, not the production Gufo installation.

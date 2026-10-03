@@ -262,6 +262,8 @@ def embedding(ids: torch.Tensor, q) -> torch.Tensor:
 
     if q.layout == "b16":
         return q.weight[ids.to(torch.int64)].to(torch.bfloat16).contiguous()
+    if q.layout == "gguf":
+        return q.embed(ids)
     if q.fast:
         return embed(ids, q.weight, q.scales, q.biases, q.k)
     from tensorfold.cuda.kernels.affine import embed as affine_embed

@@ -11,7 +11,9 @@ from .weights import QLinear, Weights
 
 
 def tile(q: QLinear) -> QLinear:
-    if q.layout == "tiled" or not q.fast:
+    from tensorfold.cuda.rocm import HIP
+
+    if q.layout == "tiled" or not q.fast or HIP:     # ROCm: the stored layout and the Triton lane matmul
         return q
     p = shared.pack(q.weight, q.scales, q.biases, 64)
     return QLinear(p.weight, p.scales, p.biases, layout="tiled", rows=q.n)
@@ -28,6 +30,8 @@ def untile(q: QLinear) -> QLinear:
 def rows(q: QLinear, a: int, b: int) -> QLinear:
     """Rows [a, b) of a tiled weight: a view when they are whole 128-row blocks from a tile edge, else a small copy."""
 
+    if q.layout == "mlx":                            # ROCm keeps the stored layout: rows are plain views
+        return QLinear(q.weight[a:b], q.scales[a:b], q.biases[a:b], gs=q.gs, bits=q.bits)
     if a % 64 == 0 and (b - a) % 128 == 0:
         return QLinear(q.weight[a // 64:b // 64], q.scales[:, a:b], q.biases[:, a:b], layout="tiled", rows=b - a)
     t0, t1 = a // 64, -(-b // 64)
@@ -41,6 +45,12 @@ def rows(q: QLinear, a: int, b: int) -> QLinear:
 def matmul_rows(x: torch.Tensor, parts: list[QLinear]) -> torch.Tensor:
     """``x`` against row blocks of one weight, with the bits of the stacked weight's matmul."""
 
+    if all(p.layout == "mlx" and p.fast for p in parts):     # ROCm: the decode kernel with the stacked shape's K split
+        from .qgemv import decode_matmul, group_sums, kernel, split_k
+
+        sk = split_k(sum(p.n for p in parts), parts[0].k) if kernel() == "gemv" else 1
+        xs = group_sums(x)
+        return torch.cat([decode_matmul(x, p.weight, p.scales, p.biases, sk=sk, xs=xs) for p in parts], dim=1)
     sk = shared.split_k(sum(p.n for p in parts), parts[0].k, parts[0].gs)
     xs = shared.group_sums(x, parts[0].gs)
     return torch.cat([shared.matmul(x, p, xs, sk=sk) for p in parts], dim=1)
@@ -55,6 +65,12 @@ def matmul(x: torch.Tensor, q: QLinear, xs: torch.Tensor | None = None) -> torch
         return affine_matmul(x, q)
     if q.layout == "tiled":
         return shared.matmul(x, q, xs)
+    from tensorfold.cuda.rocm import HIP
+
+    if HIP:                                          # decode and verify rows: the row-invariant 4-bit decode kernel
+        from .qgemv import decode_matmul
+
+        return decode_matmul(x, q.weight, q.scales, q.biases)
     return lane_matmul(x, q.weight, q.scales, q.biases, xs=xs)
 
 

@@ -326,15 +326,20 @@ def attention(q: torch.Tensor, k_nodes: torch.Tensor, v_nodes: torch.Tensor, off
     partial_o = torch.empty((p.chunks, w, h, d), dtype=torch.float32, device=q.device)
     partial_m = torch.empty((p.chunks, w, h), dtype=torch.float32, device=q.device)
     partial_l = torch.empty_like(partial_m)
+    from tensorfold.cuda.rocm import HIP
+
+    # ROCm: the group program, tail and merge must round the shared fp32 fold the same way; with FMA contraction
+    # AMD's compiler fuses them differently per kernel, so rows crossing a group edge lost serial bits on gfx1151.
+    fuse = {"enable_fp_fusion": False} if HIP else {}
     if p.items.shape[0]:
         _shared[(p.items.shape[0] * hk,)](q, origin, origin, offs, p.streams, p.items, partial_o, partial_m, partial_l,
                                           w, H=h, HK=hk, D=d, G=g, CH=CHUNK, SCALE=scale, GR=GROUP, num_warps=4,
-                                          num_stages=1)
+                                          num_stages=1, **fuse)
     tails = 1 + -(-MAX_NODES // CHUNK)
     _tail[(w, hk, tails)](q, k_nodes, v_nodes, origin, origin, offs, p.streams, p.rows, p.paths, p.depths,
                           partial_o, partial_m, partial_l, w, H=h, HK=hk, D=d, G=g, CH=CHUNK, MAXD=MAX_NODES,
-                          SCALE=scale, GR=GROUP, num_warps=4, num_stages=1)
+                          SCALE=scale, GR=GROUP, num_warps=4, num_stages=1, **fuse)
     out = torch.empty_like(q)
     _merge[(w, hk, d // MERGE_COLUMNS)](partial_o, partial_m, partial_l, out, p.streams, p.rows, w, H=h, D=d, G=g,
-                                        DS=MERGE_COLUMNS, CH=CHUNK, GR=GROUP, num_warps=4)
+                                        DS=MERGE_COLUMNS, CH=CHUNK, GR=GROUP, num_warps=4, **fuse)
     return out

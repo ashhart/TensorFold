@@ -97,6 +97,10 @@ def headers(model_dir: str | Path, *, rank: int | None = None, files: list[Path]
         index = path / "model.safetensors.index.json"
         files = ([path / n for n in sorted(set(json.loads(index.read_text())["weight_map"].values()))]
                  if index.exists() else sorted(path.glob("*.safetensors")))
+    if not files and len(ggufs := sorted(path.glob("*.gguf"))) == 1:
+        from .gguf import headers as gguf_headers
+
+        return gguf_headers(ggufs[0])
     if not files:
         raise ValueError("startup memory estimate needs the checkpoint tensor headers")
     out = {}

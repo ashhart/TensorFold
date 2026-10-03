@@ -317,9 +317,13 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
                          "--tp 2), or pass --no-drafts for the serial reference")
     draft = Path(drafter) if drafter and not no_drafts else None
     streams = max(1, int(options.get("parallel") or 1))
+    from .cuda.gguf_detect import gguf_file
+
     # one stream on one GB10 takes the width it affords (16-row trees, widening to 128); other shapes keep 12 rows
     wide = tp == 1 and streams == 1 and gb10()
-    return Qwen27Engine(Path(model_dir), draft, max_rows=128 if wide else 12, tree_rows=16 if wide else None,
+    # GGUF verify rounds: Gufo's kernels run 8 rows in about 1.3x one row's time, 9-12 rows in about 1.9x
+    max_rows = int(os.environ.get("TF_GGUF_MAX_ROWS", 8)) if gguf_file(Path(model_dir)) is not None else 12
+    return Qwen27Engine(Path(model_dir), draft, max_rows=128 if wide else max_rows, tree_rows=16 if wide else None,
                         tp=tp, rank=rank, master=master, port=master_port,
                         split_head=tp == 2, tp_draft=tp == 2 and draft is not None, allow_copy=not no_drafts,
                         streams=streams, context=options.get("context"),

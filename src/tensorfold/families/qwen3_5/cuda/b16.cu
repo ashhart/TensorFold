@@ -7,6 +7,19 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 
+// ROCm builds (hipified): 64-bit lane masks, HIP's bf16 conversion (round to nearest even), a plain load for one
+// element (HIP's __ldg has no bf16 overload); on CUDA each macro is exactly the original spelling.
+#if defined(__HIP_PLATFORM_AMD__) || defined(USE_ROCM)
+#define TF_ROCM 1
+#define TF_FULL_MASK 0xffffffffffffffffull
+#define TF_FLOAT2BF16(x) __float2bfloat16(x)
+#define TF_LDG1(p) (*(p))
+#else
+#define TF_FULL_MASK 0xffffffffu
+#define TF_FLOAT2BF16(x) __float2bfloat16_rn(x)
+#define TF_LDG1(p) __ldg(p)
+#endif
+
 namespace {
 
 template <typename T>
@@ -21,7 +34,7 @@ __device__ __forceinline__ T f_from(float v);
 template <>
 __device__ __forceinline__ half f_from<half>(float v) { return __float2half_rn(v); }
 template <>
-__device__ __forceinline__ __nv_bfloat16 f_from<__nv_bfloat16>(float v) { return __float2bfloat16_rn(v); }
+__device__ __forceinline__ __nv_bfloat16 f_from<__nv_bfloat16>(float v) { return TF_FLOAT2BF16(v); }
 
 // Eight elements (16 bytes) as fp32.
 template <typename T>
@@ -75,9 +88,9 @@ __global__ void __launch_bounds__(WARPS * 32) b16_kernel(const T* __restrict__ x
         if (row0 + r >= M) break;
         float v = acc[r];
 #pragma unroll
-        for (int m = 16; m >= 1; m >>= 1) v += __shfl_xor_sync(0xffffffffu, v, m);
+        for (int m = 16; m >= 1; m >>= 1) v += __shfl_xor_sync(TF_FULL_MASK, v, m);
         if (lane == 0) {
-            if (bias != nullptr) v += f2f(__ldg(bias + col));
+            if (bias != nullptr) v += f2f(TF_LDG1(bias + col));
             y[(size_t)(row0 + r) * N + col] = f_from<T>(v);
         }
     }
@@ -105,6 +118,7 @@ void by_rows(const at::Tensor& x, const at::Tensor& w, const void* bp, at::Tenso
 }
 
 
+#if !defined(TF_ROCM)   // ldmatrix / cp.async / mma.sync PTX: NVIDIA only; ROCm prompt rows take b16_linear (b16.py)
 // Prompt rows on the bf16 mma: BM x 64 tiles of 2 x 2 warps, 64 inputs a stage, one fp32 chain over K a row, so a
 // row's bits never depend on its chunk or the tile height (they differ from the one-row kernel's, as prompts' do).
 constexpr int PBN = 64, PST = 3, PROW = 128;
@@ -213,6 +227,8 @@ void prompt_launch(const at::Tensor& x, const at::Tensor& w, at::Tensor& y, int 
         y1 ? reinterpret_cast<__nv_bfloat16*>(y1->data_ptr()) : nullptr, N1);
 }
 
+#endif  // !TF_ROCM
+
 }  // namespace
 
 static void pair_in(const at::Tensor& x, const at::Tensor& w) {
@@ -261,6 +277,7 @@ std::vector<at::Tensor> b16_linear_pair(const at::Tensor& x, const at::Tensor& w
     return {y0, y1};
 }
 
+#if !defined(TF_ROCM)
 static int prompt_bm(int64_t bm, int M, int N) {
     if (bm) return (int)bm;
     const long long want = 2LL * at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
@@ -304,3 +321,12 @@ std::vector<at::Tensor> b16_prompt_pair(const at::Tensor& x, const at::Tensor& w
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return {y0, y1};
 }
+#else
+at::Tensor b16_prompt(const at::Tensor&, const at::Tensor&, int64_t) {
+    TORCH_CHECK(false, "b16_prompt is NVIDIA-only (PTX mma); on ROCm prompt rows go through b16_linear");
+}
+
+std::vector<at::Tensor> b16_prompt_pair(const at::Tensor&, const at::Tensor&, const at::Tensor&, int64_t) {
+    TORCH_CHECK(false, "b16_prompt_pair is NVIDIA-only (PTX mma); on ROCm prompt rows go through b16_linear_pair");
+}
+#endif  // !TF_ROCM

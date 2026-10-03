@@ -13,6 +13,7 @@ import triton
 import triton.language as tl
 
 from tensorfold.cuda.direct_read import SafeTensors
+from tensorfold.cuda.sampling import top_by_value_then_id
 from tensorfold.engine.exact_sampling import Sampling
 
 from .affine_memory import packed_draft
@@ -21,7 +22,7 @@ from .glue import embedding, swiglu
 from .draft_attention import append, block_attention
 from .qmm import group_sums
 from .qmm_fast import matmul, matmul_group, matmul_rows, rows, tile, untile
-from .weights import Exl3, Plain, QLinear, Weights
+from .weights import Exl3, Gguf, Plain, QLinear, Weights
 
 
 @triton.jit
@@ -158,6 +159,13 @@ def _sub_parts(head, spans: tuple[tuple[int, int], ...]) -> list[tuple[object, i
     return parts
 
 
+def _plain_sub_head(head: Plain, spans: tuple[tuple[int, int], ...]) -> Plain:
+    """An unquantized head's rows for ``spans`` (a GGUF that keeps output.weight in F16/BF16/F32): ``b16`` computes
+    each output column on its own warp, so a row's logit has the target's bits whichever rows sit beside it."""
+
+    return Plain(torch.cat([head.weight[a:b] for a, b in spans]).contiguous())
+
+
 def _exl3_sub_head(layer, spans: tuple[tuple[int, int], ...]):
     """The EXL3 head's strips holding ``spans`` as stored (the target's own logits, bit for bit), and the span columns."""
 
@@ -229,6 +237,14 @@ class DFlash2:
             if world != 1:
                 raise ValueError("a two-rank drafter needs the MLX checkpoint's 4-bit head")
             self.sub_parts = _sub_parts(target.head, spans)
+        elif isinstance(target.head, Gguf):
+            if world != 1:
+                raise ValueError("a two-rank drafter needs the MLX checkpoint's 4-bit head")
+            self.sub_head = target.head.rows(self.head_ids)       # whole packed rows: each row keeps its bits
+        elif isinstance(target.head, Plain):
+            if world != 1:
+                raise ValueError("a two-rank drafter needs the MLX checkpoint's 4-bit head")
+            self.sub_head = _plain_sub_head(target.head, spans)
         elif isinstance(target.head, Exl3):
             if world != 1:
                 raise ValueError("a two-rank drafter needs the MLX checkpoint's 4-bit head")
@@ -526,9 +542,11 @@ class DFlash2:
             logits = self.sub_head(h.contiguous()).index_select(1, self.head_cols)
         elif self.sub_rows is not None:
             logits = matmul_rows(h, self.sub_rows)
+        elif not isinstance(self.sub_head, QLinear):
+            logits = self.sub_head(h.contiguous())                 # a GGUF head's rows on its own exact kernel
         else:
             logits = matmul(h, self.sub_head)
-        values, local_ids = torch.topk(logits.float(), k=16, dim=-1, sorted=False)
+        values, local_ids = top_by_value_then_id(logits, 16)           # ties to the lowest id, on any backend
         global_ids = self.head_ids[local_ids]
         if self.world == 2:
             import torch.distributed as dist
@@ -538,7 +556,7 @@ class DFlash2:
             dist.all_gather_into_tensor(both_values, values.contiguous())
             dist.all_gather_into_tensor(both_ids, global_ids.contiguous())
             merged = torch.cat((both_values[0], both_values[1]), dim=1)
-            values, pick = torch.topk(merged, k=16, dim=-1, sorted=False)
+            values, pick = top_by_value_then_id(merged, 16)            # rank 0's ids are the lower ones
             global_ids = torch.cat((both_ids[0], both_ids[1]), dim=1).gather(1, pick)
         shared = [global_ids, torch.cat((values, projected), dim=1), None]     # read back once, by the first finish
         for j, i in enumerate(live):
