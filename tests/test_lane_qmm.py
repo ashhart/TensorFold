@@ -209,6 +209,32 @@ def test_install_wide_is_the_plain_kernels_bits(bits):
         lane_qmm.uninstall()
 
 
+def test_install_narrow_rows_keeps_many_slice_weights_32_wide_with_the_same_bits():
+    """narrow_rows tiles a weight of 8 K slices 32 wide and one of fewer slices 64 wide; neither changes bits."""
+
+    _needs_tensor_units()
+    import mlx.nn as nn
+
+    mx.random.seed(23)
+    model = nn.Sequential(nn.Linear(4096, 512, bias=False), nn.Linear(512, 1024, bias=False))
+    model.set_dtype(mx.bfloat16)
+    nn.quantize(model, group_size=64, bits=4)
+    mx.eval(model.parameters())
+    assert lane_qmm.split_k(512, 4096) > lane_qmm.NARROW_MAX_SK >= lane_qmm.split_k(1024, 512)
+    plain = {id(m): (m.weight, lane_qmm.pack_scales(m.scales, m.biases)) for m in model.layers}
+    xs = {id(m): (mx.random.normal((32, int(m.weight.shape[1]) * 8)) * 0.5).astype(mx.bfloat16) for m in model.layers}
+    want = {i: lane_qmm.lane_matmul(xs[i], *plain[i]) for i in plain}
+    mx.eval(want)
+    try:
+        lane_qmm.install(model, rows=lane_qmm.MAX_ROWS, wide=True, narrow_rows=True)
+        assert [m._lane_nt for m in model.layers] == [32, 64]
+        for m in model.layers:
+            for rows in (1, 16, 32):
+                assert _same(m(xs[id(m)][:rows]), want[id(m)][:rows]), f"{rows} rows changed with narrow tiles"
+    finally:
+        lane_qmm.uninstall()
+
+
 def test_install_leaves_other_widths_to_mlx_and_reports_them():
     """3-bit g32 and unquantized layers keep MLX's layout and kernels, and uncovered() names them."""
 

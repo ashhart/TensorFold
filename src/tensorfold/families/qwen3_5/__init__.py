@@ -139,7 +139,7 @@ def check(model_dir: str | Path) -> None:
 
 
 def load(model_dir: Path, *, lane_kernels: str = "auto", drafter: str = "", drafter_bits: int = 4,
-         vision: bool = False, vision_urls: bool = False, **_: Any) -> tuple[Any, Any]:
+         vision: bool = False, vision_urls: bool = False, parallel: int = 8, **_: Any) -> tuple[Any, Any]:
     """Load a supported checkpoint with tensor-unit lane kernels when enabled, otherwise the row-exact decoder."""
 
     from tensorfold.families import read_config
@@ -156,7 +156,8 @@ def load(model_dir: Path, *, lane_kernels: str = "auto", drafter: str = "", draf
             raise ValueError("this format uses the packed affine row kernels; use --lane-kernels auto or off")
         lanes = False
     model, tokenizer = load_lane_model(Path(model_dir))
-    family = lane_family(model, lanes=lanes, drafter=drafter, drafter_bits=drafter_bits, title=TITLE, use=MODELS[0])
+    family = lane_family(model, lanes=lanes, drafter=drafter, drafter_bits=drafter_bits, title=TITLE, use=MODELS[0],
+                         streams=parallel)
     if vision:
         from tensorfold.vision.qwen_mlx import QwenVisionFrontend
         from tensorfold.vision.rotary import install_rotary
@@ -170,7 +171,8 @@ def load(model_dir: Path, *, lane_kernels: str = "auto", drafter: str = "", draf
     return family, tokenizer
 
 
-def lane_family(model: Any, *, lanes: bool, drafter: str, drafter_bits: int, title: str, use: str) -> Any:
+def lane_family(model: Any, *, lanes: bool, drafter: str, drafter_bits: int, title: str, use: str,
+                streams: int = 8) -> Any:
     """Install the lane kernels (M5) or the row decoder (M1-M4) on ``model`` and wrap it, drafter included."""
 
     from tensorfold.families.qwen3_5.family import Qwen35Family
@@ -183,12 +185,13 @@ def lane_family(model: Any, *, lanes: bool, drafter: str, drafter_bits: int, tit
             kinds = ", ".join(f"{n} {kind}" for kind, n in sorted(missed.items()))
             raise SystemExit(f"[tensorfold] {title}: the lane kernels do not take this checkpoint's layers ({kinds}): "
                              f"MLX's kernels would give drafted rows other bits than one-row steps. Use {use}")
-        install_lane_kernels(model)
+        widest = copy_rows(WIDEST, WIDEST)            # TF_COPY_ROWS can widen a lone stream's window past 32 rows
+        install_lane_kernels(model, narrow_rows=int(streams) * widest <= lane_qmm.ROW_BLOCK)
     elif not install_row_decoder(model):
         raise SystemExit(f"[tensorfold] {title}: the lane decoder without tensor units does not take these weights")
     loaded = load_drafter(model, drafter, drafter_bits) if drafter else None
     if lanes:
-        family = Qwen35Family(model, drafter=loaded, widest=copy_rows(WIDEST, WIDEST), first_copy_rows=WIDEST)
+        family = Qwen35Family(model, drafter=loaded, widest=widest, first_copy_rows=WIDEST)
     else:
         from tensorfold.kernels.qwen.dense.v1 import row_matmul
 
@@ -229,14 +232,17 @@ def load_drafter(model: Any, drafter: str, drafter_bits: int = 4) -> Any:
     return loaded
 
 
-def install_lane_kernels(model: Any) -> None:
-    """Install lane matmul, fused projections and lane attention, compiling every variant before requests arrive."""
+def install_lane_kernels(model: Any, *, narrow_rows: bool = False) -> None:
+    """Install lane matmul, fused projections and lane attention, compiling every variant before requests arrive.
+
+    ``narrow_rows``: rounds never pass 32 rows (one stream), where 32-wide tiles run the long-K projections faster."""
 
     from tensorfold.kernels.qwen.dense.v1 import exact_attention, lane_attention, lane_fuse, lane_qmm
 
     exact_attention.install()      # verify windows attend query by query, as one-row steps do
     # TF_LANE_TILE=0 keeps MLX's weight layout without changing results.
-    lane_qmm.install(model, rows=lane_qmm.MAX_ROWS, tile=os.environ.get("TF_LANE_TILE", "1") != "0", wide=True)
+    lane_qmm.install(model, rows=lane_qmm.MAX_ROWS, tile=os.environ.get("TF_LANE_TILE", "1") != "0", wide=True,
+                     narrow_rows=narrow_rows)
     warmed = lane_qmm.warm(model)
     lane_fuse.enabled = True
     fused = lane_fuse.build(model)          # stacks share the weights' memory: no second copy
