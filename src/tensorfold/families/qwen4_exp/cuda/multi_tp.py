@@ -114,7 +114,8 @@ def shape(dec) -> list:
              for s in [*dec.streams.values(), *dec.filling]],
             [[s.sid, dec.fills[s.sid][2], list(dec.fills[s.sid][0].stops)] for s in dec.filling],
             [[dec._index(k[1]), len(k[0])] for k in dec.kept],
-            [dec._index(st) for st in dec.free], sorted(dec.held.items()), bool(dec.solo_on), sorted(dec.passed.items()),
+            [dec._index(st) for st in dec.free], sorted(dec.held.items()), bool(dec.solo_on),
+            sorted(dec.passed.items()), None if dec.solo is None else dec._index(dec.solo.st),
             [dec.depth, dec.confidence, dec.capacity, dec.prefill_rows, dec.converged, dec.keep,
              list(dec.eos), dec.gdn.parity]]
 

@@ -78,7 +78,8 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
         free = torch_live(torch, available_bytes) if torch.cuda.is_available() else None
         # the mapped n-gram tables are not held back (they barely fit on a Spark); lookups page from disk instead
         live = free
-        self.memory_gate = MemoryGate(live() if live is not None else 1 << 62, reserve=max(2 * GIB, workspace_bytes), live=live)
+        self.memory_gate = MemoryGate(
+            live() if live is not None else 1 << 62, reserve=max(2 * GIB, workspace_bytes), live=live)
         self.streams: dict[int, Stream] = {}
         self.filling: list[Stream] = []                  # admitted, prompts still prefilling (oldest first)
         self.fills: dict[int, list] = {}                 # stream id -> [its engine, drafts?, next row, kept state]
@@ -143,8 +144,7 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
         return getattr(st, "source", st) is getattr(solo, "source", solo)
 
     def _shrink(self, st: State, *, release: bool = False, force: bool = False) -> None:
-        """An idle slot back to its first rows: its caches' memory returns to the gate. The lone stream's graph
-        slot keeps its rows (a resize recaptures its graphs) unless ``release``: memory is short."""
+        """Return idle caches to the gate, retaining the graph slot unless memory or cleanup requires its release."""
 
         st.reset(self.w)
         if force or st.capacity > FIRST and (release or not self._is_solo(st)):
@@ -162,8 +162,9 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
                 if all(f is not st for f in self.free):
                     self.free.append(st)
                 return True
-        solo = None if self.solo is None else self.solo.st     # an idle graph slot's rows (a Shadow while planning)
-        if solo is not None and solo is not keep and id(solo) not in busy and solo.capacity > FIRST:
+        solo = None if self.solo is None else self.solo.st
+        if (solo is not None and solo is not keep and solo is not protect
+                and id(solo) not in busy and solo.capacity > FIRST):
             self._shrink(solo, release=True)
             return True
         return False

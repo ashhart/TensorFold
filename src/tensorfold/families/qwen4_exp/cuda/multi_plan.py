@@ -150,6 +150,11 @@ def apply(dec, plan):
             dec.memory_gate.take(delta) if delta > 0 else dec.memory_gate.give(-delta)
         elif op[0] == "copy":
             st.copy_from(dec.slots[op[2]])
+        elif op[0] == "kept":
+            moved = [k for k in kept if k[0] == op[1]]
+            for key in moved:
+                ids, _, snap, tail = kept.pop(key)
+                kept[(op[2], key[1])] = (ids, dec.slots[op[2]], snap, tail)
         elif op[0] == "prefix":
             st.copy_prefix(dec.slots[op[2]], op[3], op[4])
     if plan["actions"] and torch.cuda.is_available():
@@ -175,6 +180,8 @@ def ready(dec, plan) -> bool:
             p.slots[op[1]].pos = p.slots[op[1]].mtp_len = 0
         elif op[0] == "copy":
             dst, src = p.slots[op[1]], p.slots[op[2]]
+            if dst.capacity < src.capacity or dst.source.kv_dtype != src.source.kv_dtype:
+                return False
             dst.pos, dst.mtp_len = src.pos, src.mtp_len
         elif op[0] == "prefix":
             dst, src = p.slots[op[1]], p.slots[op[2]]

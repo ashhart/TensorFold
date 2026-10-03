@@ -269,9 +269,7 @@ class State:
         return other
 
     def copy_from(self, other: State) -> None:
-        """Become ``other`` in place: every tensor copied into this state's own (CUDA graphs keep their addresses),
-        the host-side positions and histories taken over. This state may hold more cache rows than ``other`` (a graph
-        slot keeps its rows): ``other``'s rows land in the first ones; rows past ``pos`` are written before read."""
+        """Copy a same-format state into equal or larger caches without changing captured tensor addresses."""
 
         def tensors(obj):
             for name, value in vars(obj).items():
@@ -286,6 +284,8 @@ class State:
             else:
                 raise ValueError(f"copy_from: {tuple(t.shape)} does not fit {tuple(mine.shape)}")
 
+        if self.kv_dtype != other.kv_dtype:
+            raise ValueError("copy_from: states need matching KV formats")
         if other.capacity > self.capacity:
             raise ValueError(f"copy_from: {other.capacity} cache rows do not fit {self.capacity}")
         for name, value in vars(other).items():

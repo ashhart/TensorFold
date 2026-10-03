@@ -110,13 +110,16 @@ def _serial(ranks, prompt, sampling, count, kv_dtype):
     return got[0]
 
 
-def _two_rank_run(ranks, kv_dtype, drive, slots=4, tamper=None, **options):
+def _two_rank_run(ranks, kv_dtype, drive, slots=4, tamper=None, setup=None, **options):
     """rank 0: ``drive(decoder)`` with its link to rank 1, then stop; rank 1: follow (``tamper(decoder)`` first, to
     put it out of step on purpose). Returns drive's result."""
 
     decs = [MultiDecoder(w, slots=slots, capacity=1024, depth=3, confidence=0.3,
                          kv_dtype=kv_dtype, graphs=False, **options)
             for w in ranks]
+    if setup is not None:
+        for dec in decs:
+            setup(dec)
     if tamper is not None:
         tamper(decs[1])
     store = _Store()
@@ -242,9 +245,8 @@ def test_a_lone_stream_replays_the_one_stream_graphs_with_serial_tokens(sampling
 
 
 @pytest.mark.parametrize("kv_dtype", ["bf16", "int8"])
-def test_a_lone_stream_retargets_the_graphs_without_discarding_kept_prefixes(kv_dtype):
-    """A different lone stream takes the graph slot without dropping its graphs (one GPU: the kept prefix moves to a
-    free slot), keeping both prefix chains and the replies' bits."""
+def test_a_lone_stream_keeps_the_graph_slot_without_discarding_kept_prefixes(kv_dtype):
+    """A lone stream moves keeps out of its graph slot without changing either reply."""
 
     from test_flashnext_forward import _model
 
@@ -266,12 +268,17 @@ def test_a_lone_stream_retargets_the_graphs_without_discarding_kept_prefixes(kv_
 
     first, start = run(PROMPTS[0], 12)
     assert start is dec.solo.st and any(k[1] is dec.solo.st for k in dec.kept)     # its prompt end kept there
-    graph_slot, dropped, state_changed = dec.solo.st, [], dec._state_changed
+    first_slot = start
+    graphs = dec.solo.graphs
+    captured = dict(graphs.main)
+    dropped, state_changed = [], dec._state_changed
     dec._state_changed = lambda st: (dropped.append(st), state_changed(st))[1]
-    second, _ = run(PROMPTS[1], 16)                                               # admitted to a slot, then moved
-    assert second.st is graph_slot and dec.solo.st is graph_slot
-    assert graph_slot not in dropped                                              # its graphs were kept
-    assert any(k[1] is not graph_slot and k[0] == PROMPTS[0][:-1] for k in dec.kept)   # moved, not evicted
+    second, start = run(PROMPTS[1], 16)
+    assert start is not first_slot and second.st is dec.solo.st is first_slot
+    assert first_slot not in dropped
+    assert dec.solo.graphs is graphs
+    assert captured and all(graphs.main[key] is graph for key, graph in captured.items())
+    assert any(k[1] is not first_slot and k[0] == PROMPTS[0][:-1] for k in dec.kept)
     assert first.out == fresh(PROMPTS[0], 12) and second.out == fresh(PROMPTS[1], 16)
     assert not any(k[1] is dec.solo.st and k[0] == PROMPTS[0] for k in dec.kept)
     again, _ = run(PROMPTS[1] + second.out[:-1] + [42], 8)                       # resumes from the old slot's kept end

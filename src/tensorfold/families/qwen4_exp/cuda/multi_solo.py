@@ -59,11 +59,8 @@ class Alone:
         gdn.replay(table, sc.lin, 1, kept, counts, k[0], v[0], in_place=True)
 
     def _relocate_kept(self, target, avoid) -> bool:
-        """Move the kept prompt end held in the graph slot into a free slot of its size (one GPU), so a different lone
-        request can take the slot without dropping its graphs; False when no free slot fits without evicting."""
+        """Move all graph-slot keeps into spare rows without eviction; plans record the same copy and ownership move."""
 
-        if self.planning or getattr(self.w, "comm", None) is not None:
-            return False                         # two ranks name kept ends by slot: they keep the slot swap
         spare = next((f for f in self.free if f is not target and f is not avoid), None)
         if spare is None:
             return False
@@ -77,6 +74,8 @@ class Alone:
         spare.copy_from(target)
         self.free = [f for f in self.free if f is not spare]
         self.kept = [(ids, spare if st is target else st, snap, tail) for ids, st, snap, tail in self.kept]
+        if self.planning:
+            self.actions.append(["kept", self._index(target), self._index(spare)])
         return True
 
     def _move_to_solo(self, s) -> None:

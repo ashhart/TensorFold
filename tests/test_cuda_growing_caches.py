@@ -162,8 +162,7 @@ def test_the_lone_streams_graph_slot_keeps_its_rows_until_memory_is_short(alloca
 
 
 def test_the_graph_slot_keeps_its_rows_on_two_ranks_too(allocations):  # noqa: F811
-    """Rank 0 plans on Shadows of the slots: the graph slot is recognised through its Shadow, and keeping its rows
-    records no resize for rank 1 to replay."""
+    """The graph slot is recognised through its Shadow, and keeping its rows records no resize for rank 1."""
     import torch
 
     state = importlib.import_module("tensorfold.families.qwen4_exp.cuda.state")
@@ -211,8 +210,7 @@ def test_a_lone_stream_moves_into_a_graph_slot_with_more_rows(allocations):  # n
 
 
 def test_a_different_lone_request_takes_the_graph_slot_and_the_kept_prefix_moves_out(allocations):  # noqa: F811
-    """A kept prompt end in the graph slot moves to a free slot of its size, so the next lone request with another
-    prompt takes the slot without dropping its graphs, and the kept end still resumes from the same rows."""
+    """A kept end moves to spare rows so the next request takes the graph slot without dropping graphs or keeps."""
     import torch
 
     state = importlib.import_module("tensorfold.families.qwen4_exp.cuda.state")
@@ -231,3 +229,40 @@ def test_a_different_lone_request_takes_the_graph_slot_and_the_kept_prefix_moves
     assert torch.equal(solo.kc[0].k[:200], k)
     assert dec.kept == [([1, 2, 3], spare, snap, None)] and spare.capacity == 8192
     assert torch.equal(spare.kc[0].k[:200], kept_k) and spare not in dec.free
+
+
+@pytest.mark.parametrize("kv_dtype", ["bf16", "int8", "int4"])
+@pytest.mark.parametrize("source_rows,target_rows", [(8192, 32768), (24576, 16384)])
+def test_lone_migration_copies_into_retained_or_doubled_graph_capacity(allocations, kv_dtype, source_rows, target_rows):
+    import torch
+
+    state = importlib.import_module("tensorfold.families.qwen4_exp.cuda.state")
+    multi = importlib.import_module("tensorfold.families.qwen4_exp.cuda.multi")
+    old = filled(state, torch, kv_dtype, source_rows)
+    for cache in old.kc + [old.mtp_kc]:
+        cache.ks.fill_(1.25)
+        cache.vs.fill_(2.5)
+    old.conv.fill_(3)
+    old.rec.fill_(4)
+    old.cur = [1] * len(old.cur)
+    target = state.State(weights(), target_rows, 4, kv_dtype, limit=65536)
+    dec = decoder(multi, state, torch, room=1 << 40)
+    dec.solo, dec.free = SimpleNamespace(st=target), [target]
+    changed = []
+    dec._state_changed = lambda st: changed.append(st)
+    live = SimpleNamespace(sid=0, st=old)
+    dec.streams = {0: live}
+    before = old.clone()
+    dec._move_to_solo(live)
+    assert live.st is target and target.capacity == 32768
+    assert target.pos == before.pos and target.mtp_len == before.mtp_len and target.cur == before.cur
+    assert torch.equal(target.rec, before.rec) and torch.equal(target.conv, before.conv)
+    for dst, src in zip(target.kc + [target.mtp_kc], before.kc + [before.mtp_kc]):
+        for name in ("k", "v", "ks", "vs"):
+            a, b = getattr(dst, name), getattr(src, name)
+            assert torch.equal(a[:len(b)].view(torch.uint8), b.view(torch.uint8))
+    for a, b in zip(target.ikc + target.pooled + [target.mtp_ikc, target.mtp_pooled],
+                    before.ikc + before.pooled + [before.mtp_ikc, before.mtp_pooled]):
+        assert torch.equal(a[:len(b)].view(torch.uint8), b.view(torch.uint8))
+    assert old in dec.free and old.capacity == 256
+    assert (target in changed) == (target_rows < source_rows)

@@ -33,6 +33,11 @@ class Slot:
         self.operations.append(("reset",))
         self.pos = self.mtp_len = 0
 
+    def copy_from(self, other):
+        assert self.capacity >= other.capacity
+        self.operations.append(("copy", other))
+        self.pos, self.mtp_len, self.cur = other.pos, other.mtp_len, list(other.cur)
+
 
 def decoder():
     d = object.__new__(MultiDecoder)
@@ -77,8 +82,9 @@ def test_round_plan_carries_pure_passes_and_mixed_pieces_at_each_boundary():
         d.fills[sid] = [SimpleNamespace(stops=[]), True, 0, None]
     plan = round_plan(d)
     assert plan["pass_width"] == 128
-    assert plan["passes"] == [[[1, 0, 256]], [[1, 256, 44], [2, 0, 212]], [[2, 212, 98]]]
-    assert plan["mixed"] == [[[1, 0, 128]], [[1, 256, 44], [2, 0, 84]], [[2, 212, 98]], []]
+    assert plan["passes"] == [[[1, 0, 128]], [[1, 128, 128]], [[1, 256, 44], [2, 0, 84]],
+                              [[2, 84, 128]], [[2, 212, 98]]]
+    assert plan["mixed"] == [*plan["passes"], []]
     assert [d.fills[sid][2] for sid in (1, 2)] == [0, 0]
     assert len(d.filling) == 2 and not any(st.operations for st in d.slots)
 
@@ -207,7 +213,8 @@ def test_lone_graph_rebinding_preserves_both_prefix_chains_on_both_ranks():
         d.solo, d.solo_on = SimpleNamespace(st=d.slots[0]), True
         d.kept = [([7] * 256, d.slots[0], {}, None), ([8] * 256, d.slots[1], {}, None)]
         d.streams = {1: Stream([8] * 257, 8, sid=1, st=d.slots[1], out=[9])}
-        d.free = [d.slots[2]]
+        d.kept.append(([9] * 256, d.slots[2], {}, None))
+        d.free = []
         d._state_changed = lambda st: st.operations.append(("graphs",))
     plan = round_plan(leader)
     assert plan["actions"] == [["solo", 1]] and plan["solo"] == 1
@@ -215,4 +222,137 @@ def test_lone_graph_rebinding_preserves_both_prefix_chains_on_both_ranks():
     for d in (leader, follower):
         apply(d, plan)
         assert d.solo.st is d.slots[1] and d.slots[1].operations == [("graphs",)]
-        assert [ids for ids, _, _, _ in d.kept] == [[7] * 256, [8] * 256]
+        assert [ids for ids, _, _, _ in d.kept] == [[7] * 256, [8] * 256, [9] * 256]
+
+
+def test_planned_graph_slot_doubles_and_retains_capacity_without_touching_live_state():
+    from tensorfold.families.qwen4_exp.cuda.multi_plan import view
+
+    d = decoder()
+    real = d.slots[0]
+    real.capacity, real.limit = 16384, 65536
+    d.solo = SimpleNamespace(st=real)
+    p = view(d)
+    assert p._is_solo(p.slots[0])
+    assert p._grow(p.slots[0], 16385)
+    assert p.actions == [["resize", 0, 32768]]
+    p._shrink(p.slots[0])
+    assert p.slots[0].capacity == 32768 and p.actions[-1] == ["reset", 0]
+    assert real.capacity == 16384 and real.operations == []
+
+
+def test_planning_can_release_an_idle_graph_slot_but_never_the_protected_fork_source():
+    from tensorfold.families.qwen4_exp.cuda.multi_plan import view
+
+    d = decoder()
+    d.slots[0].capacity = 8192
+    d.solo = SimpleNamespace(st=d.slots[0])
+    p = view(d)
+    assert not p._evict_kept(p.slots[1], protect=p.slots[0])
+    assert not p.actions
+    assert p._evict_kept(p.slots[1])
+    assert p.actions == [["reset", 0], ["resize", 0, 256]]
+    assert d.slots[0].capacity == 8192 and not d.slots[0].operations
+
+
+def test_fork_admission_carries_source_and_copy_before_restoring_the_destination():
+    d = decoder()
+    source = d.slots[0]
+    source.capacity, source.pos, source.mtp_len = 1024, 700, 699
+    ids = list(range(300))
+    snap = {"pos": 300, "mtp_len": 299}
+    d.kept = [(ids, source, snap, "tail"), (ids + [4, 5], source, {"pos": 302}, "later")]
+    d.free = [d.slots[2]]
+    plan = admission(d, Stream(ids + [8], 8))
+    assert plan["cached"] == 300 and plan["resume_slot"] == 0 and plan["slot"] == 2
+    assert ["prefix", 2, 0, 300, 299] in plan["actions"]
+    assert not any(st.operations for st in d.slots)
+    assert ready(d, plan)
+    copied = []
+    d.slots[2].copy_prefix = lambda *args: copied.append(args)
+    d.w.comm = None
+    st, resume, cached = d._prepare_admission(Stream(ids + [8], 8), plan)
+    assert st is d.slots[2] and cached == 300 and resume == {"state": snap, "tail": "tail"}
+    assert copied == [(source, 300, 299)] and source.operations == []
+    assert source.pos == 700 and source.mtp_len == 699
+    source.pos = 299
+    assert not ready(d, plan)
+
+
+def test_shortest_first_plan_ages_waiters_without_mutating_live_counters():
+    from tensorfold.families.qwen4_exp.cuda.multi_fill import FILL_GUARD
+
+    d = decoder()
+    for sid, length in ((0, 700), (1, 200)):
+        s = Stream([7] * length, 8, sid=sid, st=d.slots[sid])
+        d.filling.append(s)
+        d.fills[sid] = [SimpleNamespace(stops=[]), True, 0, None]
+    d.passed = {0: FILL_GUARD, 1: 0}
+    plan = round_plan(d)
+    assert plan["passes"][0] == [[0, 0, 256]]
+    assert d.passed == {0: FILL_GUARD, 1: 0}
+    assert d.fills[0][2] == d.fills[1][2] == 0
+
+
+def test_prompt_pass_arrival_yield_is_the_leaders_decision_on_both_ranks():
+    a, b = decoder(), decoder()
+    messages = []
+    a.arrived = lambda: True
+    a.link = SimpleNamespace(send=messages.append)
+    b.arrived = lambda: pytest.fail("the follower consulted its own request queue")
+    b.follower = SimpleNamespace(receive=lambda: messages.pop(0))
+    a._joined_ranks()
+    b._joined_ranks()
+    assert a._waiting_request() and b._waiting_request()
+
+
+
+def relocating():
+    d = decoder()
+    target, old, spare = d.slots
+    target.capacity, target.pos, target.mtp_len = 1024, 700, 699
+    old.pos, old.mtp_len = 40, 43
+    d.solo, d.solo_on = SimpleNamespace(st=target, graphs=object()), True
+    d.kept = [([7] * n, target, {"pos": n, "mtp_len": n - 1}, object()) for n in (256, 400)]
+    d.kept.append(([8] * 32, old, {"pos": 32, "mtp_len": 31}, object()))
+    d.streams = {1: Stream([8] * 33, 16, sid=1, st=old, out=[9])}
+    d.free = [spare]
+    return d
+
+
+def test_two_rank_plan_moves_every_kept_snapshot_before_reusing_the_graph_slot():
+    a, b = relocating(), relocating()
+    plan = round_plan(a)
+    assert plan["solo"] == 1 and ["solo", 1] not in plan["actions"]
+    assert plan["actions"].index(["copy", 2, 0]) < plan["actions"].index(["kept", 0, 2])
+    assert plan["actions"].index(["kept", 0, 2]) < plan["actions"].index(["reset", 0])
+    assert plan["kept"] == [[2, 256], [2, 400], [1, 32]]
+    for d in (a, b):
+        saved, graphs = list(d.kept), d.solo.graphs
+        assert ready(d, plan) and not any(st.operations for st in d.slots)
+        apply(d, plan)
+        assert d.solo.st is d.slots[0] and d.solo.graphs is graphs
+        assert d.streams[1].st is d.slots[0] and d.slots[0].pos == 40 and d.slots[2].pos == 700
+        for before, after in zip(saved, d.kept):
+            assert before[0] == after[0] and before[2] is after[2] and before[3] is after[3]
+        assert all(k[1] is d.slots[2] for k in d.kept[:2]) and d.free == []
+        st, resume, cached = d._slot_for([7] * 400 + [11], True)
+        assert st is d.slots[2] and cached == 400 and resume["state"] is saved[1][2]
+
+
+def test_one_rank_can_refuse_relocation_before_any_reset_or_copy():
+    a, b = relocating(), relocating()
+    plan = round_plan(a)
+    b.memory_gate.room, b.memory_gate.live = 0, lambda: 0
+    assert ready(a, plan) and not ready(b, plan)
+    assert all(not st.operations for d in (a, b) for st in d.slots)
+    assert a.solo.st is a.slots[0] and b.solo.st is b.slots[0]
+
+
+def test_the_graph_slot_identity_is_part_of_the_rank_fingerprint():
+    from tensorfold.families.qwen4_exp.cuda.multi_tp import shape
+
+    a, b = decoder(), decoder()
+    a.solo = SimpleNamespace(st=a.slots[0])
+    b.solo = SimpleNamespace(st=b.slots[1])
+    assert shape(a) != shape(b)
