@@ -16,7 +16,7 @@ from tensorfold.engine.grammar import GrammarError, pack
 from .decode import CopyIndex, clone_state
 from .decode_tp import SAMPLING_WORDS as W, _sample_split, _share, first_token, pack_sampling, unpack_sampling
 from .draft_tree import allocate
-from .engine import entry_end
+from .engine import IdleBell, entry_end
 from .forward import State, _paths, commit_streams, multi_tree_forward, path_indices, reserve
 from .prefill import CHUNK, Piece, prefill_batch, prefill_state
 from .weights import Weights
@@ -90,17 +90,20 @@ class MultiDecoder:
     """The ``Scheduler``'s decoder on one GPU or as ``rank`` of two; a stream's window holds at most 16 rows."""
 
     memory_gate: MemoryGate | None = None     # one GPU: streams' caches grow by use (two ranks reserve up front)
+    idle: IdleBell | None = None              # two ranks' CPU wakeup; absent on one GPU and host stand-ins
     block: int = 16                           # rows of the drafter's next block with several streams (pending, masks)
     depth: bool = True                        # whether the block follows the trees here (DEPTH_CHIPS)
     spent: dict | None = None                 # streams -> the last rounds' ms beside the forward
     last: tuple | None = None                 # (start, streams, rows) of the round before
 
     def __init__(self, w: Weights, draft=None, *, max_rows: int = 16, allow_copy: bool = True, stop_eos: bool = True,
-                 keep: int = 8, rank: int = 0, world: int = 1, context: int = 0, points=None, vision=None) -> None:
+                 keep: int = 8, rank: int = 0, world: int = 1, context: int = 0, points=None, vision=None,
+                 idle: IdleBell | None = None) -> None:
         if not 1 <= max_rows <= 16:
             raise ValueError("a stream's window is 1 to 16 rows (the multi-stream GDN tree kernel's limit)")
         self.w, self.draft, self.max_rows, self.allow_copy = w, draft, max_rows, allow_copy
         self.vision = vision
+        self.idle = idle
         self.context = context                                # prompt plus reply tokens a stream holds (0: no bound)
         self.eos = tuple(w.config.eos) if stop_eos else ()
         self.rank, self.world, self.device = rank, world, w.norm.device
@@ -156,8 +159,11 @@ class MultiDecoder:
         s.sid, s.cached = self.next_id, len(hit[0]) if hit else 0
         self.next_id += 1
         # the request's grammar rides after the fields (rank 1 compiles the same): a plain ADMIT is unchanged
-        self._send([ADMIT, s.sid, s.count, int(s.draft), s.cached, *pack_sampling(s.sampling),
-                    int(encoded is not None), *pack(s.constraint)])
+        header = [ADMIT, s.sid, s.count, int(s.draft), s.cached, *pack_sampling(s.sampling),
+                  int(encoded is not None), *pack(s.constraint)]
+        if self.idle is not None and not self.live():
+            self.idle.ring()
+        self._send(header)
         self._send(list(s.prompt))
         if self.world == 2 and encoded is not None:     # rank 1 takes the image rows as rank 0 encoded them
             from tensorfold.vision.qwen_cuda import broadcast_encoded
@@ -638,6 +644,8 @@ class MultiDecoder:
         """Rank 1: mirror rank 0's admissions, rounds and completions until rank 0 sends an empty message."""
 
         while True:
+            if self.idle is not None and not self.live():
+                self.idle.wait()
             msg = _share(None, 1, self.device)
             if not msg:
                 return

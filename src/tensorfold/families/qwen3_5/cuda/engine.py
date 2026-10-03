@@ -18,6 +18,34 @@ def entry_end(prompt: Sequence[int]) -> int:
     return max(1, len(prompt) - 1)
 
 
+class IdleBell:
+    """Wake rank 1 before an idle request's GPU header, using the existing rendezvous store."""
+
+    def __init__(self, store):
+        self.store, self.sequence = store, 0
+
+    def ring(self) -> None:
+        sequence = self.sequence + 1
+        self.store.set(f"tf_qwen27_idle_{sequence}", b"1")
+        self.sequence = sequence
+
+    def wait(self) -> None:
+        from datetime import timedelta
+        from torch.distributed import DistStoreError
+
+        key = f"tf_qwen27_idle_{self.sequence + 1}"
+        while True:
+            try:
+                self.store.wait([key], timedelta(hours=1))
+                break
+            except DistStoreError as exc:
+                # An idle hour is fine; network errors (including network timeouts) must propagate.
+                if "wait timeout" not in str(exc).lower():
+                    raise
+        self.store.delete_key(key)
+        self.sequence += 1
+
+
 class Qwen27Engine:
     """Qwen3.8-27B on one GPU or two ranks (rank 0 here), DFlash2 drafting, prefix reuse."""
 
@@ -60,12 +88,16 @@ class Qwen27Engine:
         if streams > 1 and tp == 1:          # streams' caches of many sizes come and go: growable segments, less slack
             torch.cuda.memory._set_allocator_settings("expandable_segments:True")
         keep = KEEP if keep is None else int(keep)         # --checkpoint-slots: each kept state is in the estimate
+        self.idle = None
         if tp == 2:
+            from datetime import timedelta
             import torch.distributed as dist
 
             from .distributed import split_weights
 
-            dist.init_process_group("nccl", init_method=f"tcp://{master}:{port}", rank=rank, world_size=2)
+            store = dist.TCPStore(master, port, 2, rank == 0, timeout=timedelta(seconds=600))
+            self.idle = IdleBell(store)
+            dist.init_process_group("nccl", store=store, rank=rank, world_size=2)
             # both ranks must run the same calls: refuse to start when they were given different settings
             flags = torch.tensor([int(draft_dir is not None and tp_draft), max_rows, int(split_head), int(allow_copy),
                                   streams, -1 if context is None else int(context), int(bool(context_explicit)),
@@ -151,7 +183,7 @@ class Qwen27Engine:
 
             self.multi = MultiDecoder(self.w, self.draft, allow_copy=allow_copy, rank=rank, world=tp,
                                       context=self.capacity_plan["cache_slots"], keep=keep, points=self.points,
-                                      vision=self.vision)
+                                      vision=self.vision, idle=self.idle)
             self.multi.model_dir = self.model_dir             # rank 1 compiles a request's grammar from it
             self.multi.calibrate(streams)
             if rank == 0:
@@ -263,8 +295,10 @@ class Qwen27Engine:
         dev = self.w.norm.device
         cached = hit[1].pos if hit else 0
         # the request's grammar rides after the header's fields (rank 1 compiles the same): a plain header is unchanged
-        _share([1, max_tokens, cached, int(draft), *pack_sampling(sampling), int(vision is not None),
-                *pack(constraint)], 0, dev)
+        header = [1, max_tokens, cached, int(draft), *pack_sampling(sampling), int(vision is not None),
+                  *pack(constraint)]
+        self.idle.ring()
+        _share(header, 0, dev)
         _share(prompt, 0, dev)
         if vision is not None:
             vision = broadcast_encoded(vision, 0, dev, hidden=self.w.config.hidden, prompt_length=len(prompt))
@@ -302,6 +336,7 @@ class Qwen27Engine:
 
         dev = self.w.norm.device
         while True:
+            self.idle.wait()
             header = _share(None, 1, dev)
             _, max_tokens, cached, draft = header[:4]
             sampling = unpack_sampling(header[4:4 + W])

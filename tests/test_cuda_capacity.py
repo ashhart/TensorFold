@@ -144,6 +144,7 @@ def fake_runtime(monkeypatch):
         monkeypatch.setitem(sys.modules, prefix + ".weights", weights)
         monkeypatch.setitem(sys.modules, prefix + ".decode", SimpleNamespace(Engine=None))
     import torch.distributed as dist
+    monkeypatch.setattr(dist, "TCPStore", lambda *a, **kw: object())
     monkeypatch.setattr(dist, "init_process_group", lambda *a, **kw: None)
     monkeypatch.setattr(dist, "all_gather_into_tensor", lambda recv, send: both(send, recv))
     monkeypatch.setitem(sys.modules, "tensorfold.families.qwen3_5.cuda.distributed", SimpleNamespace(split_weights=None))
