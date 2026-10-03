@@ -858,7 +858,7 @@ void launch_cb(const at::Tensor& x, const at::Tensor& sorted, const at::Tensor& 
 int64_t exl3p_item_rows() { return IPM; }
 
 // mode 3's out: the fixed-point sums back to fp32
-__global__ void fix_to_float_kernel(const long long* __restrict__ in, float* __restrict__ out, long long n) {
+__global__ void fix_to_float_kernel(const int64_t* __restrict__ in, float* __restrict__ out, long long n) {
     const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) out[i] = (float)((double)in[i] * (1.0 / (double)(1ll << FIX_BITS)));
 }
