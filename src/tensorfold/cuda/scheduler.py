@@ -20,7 +20,10 @@ class Waiting(queue.PriorityQueue):
         self._order = itertools.count()
 
     def put(self, item, block: bool = True, timeout: float | None = None) -> None:
-        super().put((1 if item[0].background else 0, next(self._order), item), block, timeout)
+        order = item[0].order                         # a re-queued request keeps its place
+        if order is None:
+            order = item[0].order = next(self._order)
+        super().put((1 if item[0].background else 0, order, item), block, timeout)
 
     def get(self, block: bool = True, timeout: float | None = None):
         return super().get(block, timeout)[2]
@@ -83,6 +86,10 @@ class Scheduler:
         while self.decoder.live() < self.max_streams:
             if first is not None:
                 (stream, box), first = first, None
+            elif self.held is not None and self.held[0].background and self.waiting.foreground():
+                self.waiting.put(self.held)          # a held background request does not hold up a foreground one
+                self.held = None
+                continue
             elif self.held is not None:
                 (stream, box), self.held = self.held, None
             else:
@@ -95,6 +102,9 @@ class Scheduler:
                 self.decoder.admit(stream)
             except NoRoom as exc:
                 self.boxes.pop(id(stream))
+                if not stream.background and self._make_way(stream):
+                    first = (stream, box)            # background streams gave way: again
+                    continue
                 if self.decoder.live():              # waits, first in line, until a live stream finishes
                     self.held = (stream, box)
                     break
@@ -107,6 +117,25 @@ class Scheduler:
                 done.append(stream)
         return done
 
+    def _make_way(self, stream: Stream) -> bool:
+        """A foreground request found no room: the background streams whose memory would make it (a decoder's
+        ``yield_for``, newest first) re-queue to replay later. Whether any did."""
+
+        victims = self.decoder.yield_for(stream) if hasattr(self.decoder, "yield_for") else []
+        self._give_way(victims)
+        return bool(victims)
+
+    def _give_way(self, streams: list[Stream]) -> None:
+        """End these background streams and queue their replays (each keeps its place in line)."""
+
+        for s in streams:
+            box = self.boxes.pop(id(s))
+            self.decoder.finish([s])
+            self.yields += 1
+            again = s.continued()
+            again.order = s.order
+            self.waiting.put((again, box))
+
     def _yield(self) -> None:
         """Lanes full, a foreground request waiting: the newest background stream (no grammar or images) re-queues."""
 
@@ -117,10 +146,7 @@ class Scheduler:
                        and s.vision is None and len(s.out) < s.count), None)
         if stream is None:
             return
-        box = self.boxes.pop(id(stream))
-        self.decoder.finish([stream])
-        self.yields += 1
-        self.waiting.put((stream.continued(), box))
+        self._give_way([stream])
 
     def _reply(self, s: Stream, kind: str, value: Any) -> None:
         box = self.boxes.pop(id(s), None)            # None: the stream's request has had its reply
@@ -141,5 +167,8 @@ class Scheduler:
                 for s in self.decoder.drop():
                     self._reply(s, "error", exc)
             self.decoder.finish(done)
+            yielded = getattr(self.decoder, "yielded", None)
+            if yielded:                              # streams that gave their memory to older ones: replay later
+                self._give_way(list(yielded))
             for s in done:
                 self._reply(s, *(("error", s.error) if s.error is not None else ("done", s.stats())))

@@ -22,11 +22,14 @@ from tensorfold.cuda.streams import Stream, next_fill
 
 from .serial import DRING, MAX_ROWS, SerialEngine
 
-ADMIT, FILL, ROUND, DONE, EVICT = 1, 2, 3, 4, 5      # rank 0's messages
+ADMIT, FILL, ROUND, DONE, EVICT, GROW, MOVE = 1, 2, 3, 4, 5, 6, 7      # rank 0's messages
 FRESH, TAKEOVER, COPY = 0, 1, 2            # how an admitted stream gets its extent (a kept prompt's, or new rows)
 from .serial import PROMPT_ROWS as ROWS
 
 KEEP_MIN = int(os.environ.get("TF_DSV41_KEEP_MIN") or 256)    # shorter states are not kept
+# a stream's extent covers its prompt and this many reply tokens at first, and grows by as much while it decodes
+# (in place, else moved to a free run, kept states evicted for it); 0: the whole reply up front
+GROW_AHEAD = int(os.environ.get("TF_DSV41_GROW_AHEAD") or 4096)
 
 
 @dataclass(eq=False)
@@ -101,6 +104,7 @@ class MultiDecoder:
         self.banks = list(range(banks))            # free bank entries, ascending
         self.next_kid = 0
         self.ext: dict[int, Any] = {}              # sid -> its extent
+        self.yielded: list[Stream] = []            # rank 0: background streams giving up their rows (to replay)
         self.kstats = {"kept": 0, "hits": 0, "cached": 0, "takeovers": 0, "copies": 0, "evictions": 0}
         self.drafts = drafts if e.drafter is not None else 0
 
@@ -202,7 +206,7 @@ class MultiDecoder:
         ks = [0] * len(live)
         caps = []
         for s in live:
-            room = self.e.limit - len(self.e.views[s.slot].ids) - 1
+            room = min(self.e.limit, self.e.extents[s.slot][1]) - len(self.e.views[s.slot].ids) - 1
             ok = s.draft and s.constraint is None and self.drafts
             caps.append(max(0, min(self.drafts, room, s.count - len(s.out) - 1)) if ok else 0)
         if not any(caps) or self.costs is None:
@@ -280,9 +284,11 @@ class MultiDecoder:
         base = size = eid = -1
         k, m, mode = None, 0, FRESH
         if self.pool is not None:                  # the prompt, the reply and a verify window's rows past it
-            from .pool import align_up
+            if any(x.waiting for x in self.streams.values()):
+                from tensorfold.cuda.memory_gate import NoRoom
 
-            size = min(align_up(len(s.prompt) + s.count + ROWS + 1), self.e.span)
+                raise NoRoom("streams wait for their caches to grow; a new request waits until one finishes")
+            size = self._first(s)
             if self.kept_on and s.draft:
                 k, m = self._match(s.prompt)
             if k is not None and k.x.owner is None and size - k.x.size <= self.pool.room_after(k.x):
@@ -305,6 +311,130 @@ class MultiDecoder:
         if packed:
             self._send(packed)
         self._queue(s, base, size, eid, mode, k, m)
+
+    # -- extents: a stream's first rows, growth while it decodes ----------------------------------------------------
+    def _most(self, s: Stream) -> int:
+        """The rows a stream can ever write: its prompt, its reply and a verify window past it."""
+
+        from .pool import align_up
+
+        return min(align_up(len(s.prompt) + s.count + ROWS + 1), self.e.span)
+
+    def _first(self, s: Stream) -> int:
+        from .pool import align_up
+
+        if GROW_AHEAD <= 0:
+            return self._most(s)
+        return min(self._most(s), align_up(len(s.prompt) + GROW_AHEAD + ROWS + 1))
+
+    def _make_room(self, live: list[Stream]) -> list[Stream]:
+        """Rank 0, before a round: each decoding stream's extent covers the rows its round can write, oldest first
+        (grown in place, else moved to a free run, else after evicting kept states; GROW/MOVE/EVICT sent before the
+        ROUND). A stream that cannot grow waits, and so do the newer ones. When even the oldest cannot, one other
+        stream gives up its rows (they free when it finishes, before the next round): the newest background one,
+        handed back to replay later (``yielded``), else the newest, ended with an error. Returns the streams ended."""
+
+        from .pool import align_up
+
+        if self.pool is None:
+            return []
+        live = sorted(live, key=lambda x: x.sid)
+        blocked = False
+        for s in live:
+            x = self.ext[s.sid]
+            most = self._most(s)
+            need = min(len(self.e.views[s.slot].ids) + ROWS + 1, most)   # (never past the limit: _allocate)
+            if need <= x.size:
+                s.waiting = False
+                continue
+            size = min(most, max(align_up(need), align_up(need + GROW_AHEAD) if GROW_AHEAD > 0 else 0))
+            s.waiting = blocked or not self._grow(s, x, size)
+            blocked = blocked or s.waiting
+        if not live or not live[0].waiting or self.yielded:
+            return []                              # (a stream already giving way frees its rows first)
+        others = [x for x in [*live[1:], *self.filling] if not x.done and x not in self.yielded]
+        if not others:
+            return []
+        resumable = [x for x in others if x.background and x.constraint is None and x.vision is None]
+        victim = max(resumable or others, key=lambda x: x.sid)
+        victim.waiting = False
+        if resumable:
+            self.yielded.append(victim)            # the scheduler ends it and queues its replay
+            return []
+        victim.error = RuntimeError(
+            f"The shared cache pool ran out of room with {len(live)} streams decoding, so the newest (this request, "
+            f"after {len(victim.out)} tokens) was stopped for the older ones to finish. Retry it, shorten the prompt "
+            "or max_tokens, or start the server with a smaller --parallel.")
+        victim.done, victim.finished = True, time.perf_counter()
+        return [victim]
+
+    def _grow(self, s: Stream, x, size: int) -> bool:
+        """Rank 0: extent ``x`` of stream ``s`` to ``size`` rows; False when no room opens."""
+
+        if size - x.size <= self.pool.room_after(x):
+            self._send([GROW, s.sid, size])
+            self._resize(s.sid, size)
+            return True
+        base = self.pool.place(size, ignore=[x])
+        if base is None:                           # kept states' extents out of the way, the fewest that do
+            order = {id(k): i for i, k in enumerate(self.kept)}
+            loose = [y for y in self.pool.extents if y.owner is None and y.kept]
+            loose.sort(key=lambda y: max(order[id(k)] for k in y.kept))
+            for j in range(1, len(loose) + 1):
+                if self.pool.place(size, ignore=[x, *loose[:j]]) is not None:
+                    for y in loose[:j]:
+                        for k in sorted(y.kept, key=lambda k: order[id(k)]):
+                            self._send([EVICT, k.kid])
+                            self._drop(k)
+                            self.kstats["evictions"] += 1
+                    break
+            else:
+                return False
+            if size - x.size <= self.pool.room_after(x):
+                self._send([GROW, s.sid, size])
+                self._resize(s.sid, size)
+                return True
+            base = self.pool.place(size, ignore=[x])
+        self._send([MOVE, s.sid, base, size])
+        self._move(s.sid, base, size)
+        return True
+
+    def _resize(self, sid: int, size: int) -> None:
+        """Both ranks: stream ``sid``'s extent grown in place (its rows stay)."""
+
+        s, x = self.streams[sid], self.ext[sid]
+        self.pool.resize(x, size)
+        self.e.bind(s.slot, x.base, x.size, ids=list(self.e.views[s.slot].ids))
+        self.kstats["grows"] = self.kstats.get("grows", 0) + 1
+
+    def _move(self, sid: int, base: int, size: int) -> None:
+        """Both ranks: stream ``sid``'s extent moved to ``base`` with ``size`` rows (its committed rows, and the kept
+        states' in them, copied along)."""
+
+        s, x = self.streams[sid], self.ext[sid]
+        ids = list(self.e.views[s.slot].ids)
+        old = self.pool.move(x, base, size)
+        self.e.copy_rows(old, base, len(ids))
+        self.e.bind(s.slot, base, size, ids=ids)
+        self.kstats["moves"] = self.kstats.get("moves", 0) + 1
+
+    def yield_for(self, s: Stream) -> list[Stream]:
+        """Rank 0, ``s`` (foreground) found no room: the fewest background streams, newest first, whose extents (with
+        every kept state's) would open a run for its first rows; [] when even all of them would not. The scheduler
+        ends and re-queues them (they replay from their prompts)."""
+
+        if self.pool is None or any(x.waiting for x in self.streams.values()):
+            return []                              # (growth comes first: a yield would not admit it)
+        cands = [x for x in [*self.streams.values(), *self.filling]
+                 if x.background and not x.done and x.constraint is None and x.vision is None
+                 and len(x.out) < x.count and x.sid in self.ext]
+        cands.sort(key=lambda x: -x.sid)
+        loose = [y for y in self.pool.extents if y.owner is None and y.kept]
+        size = self._first(s)
+        for j in range(len(cands) + 1):           # (j = 0: evicting kept states makes room, no yield needed)
+            if self.pool.place(size, ignore=[*loose, *(self.ext[x.sid] for x in cands[:j])]) is not None:
+                return cands[:j]
+        return []
 
     # -- kept prompts in the shared pool (both ranks make the same calls in the same order) ------------------------
     def _match(self, prompt: list[int]) -> tuple[Kept | None, int]:
@@ -505,7 +635,7 @@ class MultiDecoder:
     def round(self) -> list[Stream]:
         self._check()
         tr = time.perf_counter()
-        busy = any(not x.done for x in self.streams.values())
+        busy = any(not x.done and not x.waiting for x in self.streams.values())   # (waiting ones: fill goes on)
         share = self.fill_share / max(1e-6, 1.0 - self.fill_share)
         done = []
         if self.filling and (not busy or self.t_fill <= share * self.t_decode):   # time-sliced while others decode
@@ -515,6 +645,9 @@ class MultiDecoder:
         if self.prof is not None and self.rank == 0:
             self.prof["fill"] += time.perf_counter() - tr
         live = [s for s in self.streams.values() if not s.done]
+        if self.rank == 0:
+            done += self._make_room(live)
+        live = [s for s in live if not s.done and not s.waiting and s not in self.yielded]
         if not live:
             return done
         plan = self._plan(live)
@@ -637,6 +770,7 @@ class MultiDecoder:
                 self._finish(s.sid)
 
     def _finish(self, sid: int) -> None:
+        self.yielded = [x for x in self.yielded if x.sid != sid]
         s = self.streams.pop(sid, None)
         if s is None:
             s = next((x for x in self.filling if x.sid == sid), None)
@@ -685,6 +819,10 @@ class MultiDecoder:
                 self._queue(s, base, size, eid, mode, k, m)    # rank 0's placement, replayed
             elif msg[0] == EVICT:
                 self._drop(self._kid(msg[1]))
+            elif msg[0] == GROW:
+                self._resize(msg[1], msg[2])
+            elif msg[0] == MOVE:
+                self._move(msg[1], msg[2], msg[3])
             elif msg[0] == FILL:
                 s = next(x for x in self.filling if x.sid == msg[1])
                 first = self._step(s, msg[2])

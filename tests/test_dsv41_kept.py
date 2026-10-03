@@ -179,3 +179,78 @@ def test_random_traffic_stays_in_step():
                 pass
         same(d0, d1)
     assert d0.kstats["hits"] > 0
+
+
+def decode(d0, d1, s, k):
+    """``k`` decoded tokens of stream ``s`` written on both ranks (the rows a round would write), after rank 0 made
+    room for them (GROW/MOVE/EVICT replayed by rank 1)."""
+
+    ended = d0._make_room([x for x in d0.streams.values() if not x.done])
+    d1.follow()
+    d0.ended = getattr(d0, "ended", []) + ended
+    if s.waiting or s.done:
+        return False
+    for d in (d0, d1):
+        e = d.e
+        st = d.streams[s.sid]
+        base, size = e.extents[st.slot]
+        ids = e.views[st.slot].ids
+        assert len(ids) + k <= size
+        for j in range(k):
+            e.arena[base + len(ids)] = 900 + (len(ids) % 50)
+            ids.append(900 + (len(ids) % 50))
+    return True
+
+
+def test_growth_in_place_and_by_move(monkeypatch):
+    monkeypatch.setattr(M, "GROW_AHEAD", 2048)
+    d0, d1 = pair(slots=3, rows=16 * ALIGN, span=6 * ALIGN)
+    rng = random.Random(3)
+    a = Stream([rng.randrange(2, 1000) for _ in range(1500)], 9000)
+    run(d0, a)
+    b = Stream([rng.randrange(2, 1000) for _ in range(1500)], 9000)
+    run(d0, b)                                                  # right after a: a must move to grow
+    same(d0, d1)
+    assert d0.ext[a.sid].size == 2 * ALIGN
+    for _ in range(270):                                        # a round writes at most ROWS rows
+        assert decode(d0, d1, a, 30) and decode(d0, d1, b, 30)
+        same(d0, d1)
+    assert d0.kstats.get("moves", 0) >= 1 and d0.kstats.get("grows", 0) >= 1
+    for d in (d0, d1):                                          # the moved rows still hold the stream's tokens
+        for s in d.streams.values():
+            base, _ = d.e.extents[s.slot]
+            assert d.e.arena[base:base + len(d.e.views[s.slot].ids)] == d.e.views[s.slot].ids
+
+
+def test_no_room_to_grow_ends_the_newest_and_yield_for(monkeypatch):
+    monkeypatch.setattr(M, "GROW_AHEAD", 2048)
+    d0, d1 = pair(slots=3, rows=6 * ALIGN, span=6 * ALIGN)
+    rng = random.Random(4)
+    a = Stream([rng.randrange(2, 1000) for _ in range(1500)], 12000)
+    b = Stream([rng.randrange(2, 1000) for _ in range(1500)], 12000)
+    b.background = True
+    run(d0, a)
+    run(d0, b)
+    same(d0, d1)
+    fg = Stream([5] * 1500, 100)
+    assert d0.yield_for(fg) == []                               # room already: nothing yields
+    c = Stream([rng.randrange(2, 1000) for _ in range(1500)], 12000)
+    run(d0, c)
+    assert d0.yield_for(Stream([6] * 1500, 100)) == [b]         # the background stream would make room
+    for _ in range(600):
+        for st in [x for x in (a, b, c) if not x.done and x not in d0.yielded]:
+            decode(d0, d1, st, 30)
+        if d0.yielded or c.done:
+            break
+    assert d0.yielded == [b] and not b.done and c.error is None   # the background stream gives way first
+    d0.finish([b])                                              # (the scheduler re-queues its replay)
+    same(d0, d1)
+    for _ in range(600):                                        # no background stream left
+        for st in [x for x in (a, c) if not x.done]:
+            decode(d0, d1, st, 30)
+        if c.done:
+            break
+    ended = d0.ended
+    assert ended == [c] and c.error is not None and not a.done  # the newest ends, alone
+    d0.finish(ended)
+    same(d0, d1)
