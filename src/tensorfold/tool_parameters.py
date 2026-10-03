@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 from collections.abc import Sequence
 from typing import Any
@@ -44,10 +45,43 @@ def closed_json(text: str) -> str | None:
     return text.rstrip() + "".join(reversed(closers)) if closers and not in_string else None
 
 
-def decode_parameter(value: str, schema: dict[str, Any]) -> Any:
+_PY_WORDS = {"true": True, "false": False, "none": None, "null": None}
+
+
+def _python_literal(text: str) -> Any:
+    """``text`` as a Python literal (``True``, ``['a']``, ``{'k': None}``), tuples as lists; ValueError if not one."""
+
+    word = _PY_WORDS.get(text.strip().lower(), ...)
+    if word is not ...:
+        return word
+
+    def lists(v: Any) -> Any:
+        if isinstance(v, (list, tuple)):
+            return [lists(x) for x in v]
+        if isinstance(v, dict):
+            return {k: lists(x) for k, x in v.items()}
+        return v
+
+    try:
+        return lists(ast.literal_eval(text.strip()))
+    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError) as exc:
+        raise ValueError(str(exc)) from None
+
+
+def decode_parameter(value: str, schema: dict[str, Any], *, python: bool = True) -> Any:
+    """``value`` as the schema's type when it spells one, else the text; ``python`` also reads Python's spelling."""
+
     if not typed_parameter(schema):
         return value
     kind = schema["type"]
+    valid = {
+        "array": lambda v: isinstance(v, list),
+        "object": lambda v: isinstance(v, dict),
+        "boolean": lambda v: isinstance(v, bool),
+        "integer": lambda v: type(v) is int,
+        "number": lambda v: type(v) in (int, float),
+        "null": lambda v: v is None,
+    }[kind]
     # a model can end an object or array value one closer short (#87): the value closed is what it meant
     for text in (value, closed_json(value) if kind in ("array", "object") else None):
         if text is None:
@@ -57,13 +91,13 @@ def decode_parameter(value: str, schema: dict[str, Any]) -> Any:
             json.dumps(parsed, allow_nan=False)
         except (ValueError, TypeError):
             continue
-        valid = {
-            "array": isinstance(parsed, list),
-            "object": isinstance(parsed, dict),
-            "boolean": isinstance(parsed, bool),
-            "integer": type(parsed) is int,
-            "number": type(parsed) in (int, float),
-            "null": parsed is None,
-        }
-        return parsed if valid[kind] else value
-    return value
+        return parsed if valid(parsed) else value
+    # not JSON: Python's spelling (True, None, single-quoted strings), as vLLM's Qwen parsers also accept
+    if not python:
+        return value
+    try:
+        parsed = _python_literal(value)
+        json.dumps(parsed, allow_nan=False)
+    except (ValueError, TypeError):
+        return value
+    return parsed if valid(parsed) else value

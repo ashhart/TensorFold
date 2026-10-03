@@ -8,6 +8,7 @@ from typing import Any
 import mlx.core as mx
 import numpy as np
 
+from tensorfold.families.glm5_next import config as C
 from tensorfold.families.glm5_next.caches import MLACache
 from tensorfold.families.glm5_next.config import DECODE_ROWS
 from tensorfold.families.glm5_next.mla import PREFILL_QUERIES
@@ -39,6 +40,7 @@ class GLMFlash:
     def __init__(self, model: GLM5, head: Any | None = None, *, drafts: int = 1, check: bool = True) -> None:
         self.model = model
         self.args = model.args
+        self.vision = None
         self.layer_count = len(model.layers)
         self.mtp = None
         self.drafts = int(drafts)
@@ -55,6 +57,7 @@ class GLMFlash:
             print(f"[{self.tag}] a forward over several streams' rows does not reproduce each stream's own call here: "
                   "one stream a forward", flush=True)
         self._rows: mx.array | None = None
+        self._vision_next: mx.array | None = None             # image prefill: rows the draft head reads next
         self._specs: dict[int, tuple[mx.array, int]] = {}     # head cache id -> (speculate's output rows, rows)
         self.mtp_step_ms = 0.0
         if self.multi_row_exact and head is not None and self.drafts > 0:
@@ -88,14 +91,31 @@ class GLMFlash:
         return self.model.last_normed
 
     def blank_draft_rows(self) -> mx.array:
-        return mx.zeros((1, int(self.args.hidden_size)), dtype=mx.bfloat16)
+        return mx.zeros((1, int(self.args.hidden_size)), dtype=C.act())
 
     def hidden(self, inputs: Any, cache: list[Any], parents: Any = None) -> mx.array:
         """Hidden states [1, R, D] of R tokens (maybe unread on the GPU): up to ``fused_rows`` decode, else prefill."""
 
+        self._vision_next = None
         self._chain_only(parents)
         tokens = inputs if isinstance(inputs, mx.array) else mx.array(np.asarray(inputs, dtype=np.int64))
         out = self.model.hidden(tokens, cache[: self.layer_count])
+        self._rows = self.draft_rows()
+        return out
+
+    @property
+    def prompt_pass(self) -> bool:
+        """Passes on M1-M4 only: on M5 (tensor units) a prompt fills a chunk a forward until a run there measures it."""
+
+        from tensorfold.kernels.qwen.flash_next.v1 import prefill_mm as PM
+
+        return not PM.gpu_tensor_units()
+
+    def hidden_pass(self, inputs: Any, cache: list[Any], sizes: Any) -> mx.array:
+        """Consecutive prompt chunks (``sizes`` rows each) in one forward, every chunk with its own forward's bits."""
+
+        tokens = inputs if isinstance(inputs, mx.array) else mx.array(np.asarray(inputs, dtype=np.int64))
+        out = self.model.hidden_pass(tokens, cache[: self.layer_count], sizes)
         self._rows = self.draft_rows()
         return out
 
@@ -114,6 +134,26 @@ class GLMFlash:
 
     def head(self, hidden: mx.array) -> mx.array:
         return self.model.head(hidden)
+
+    def encode_vision(self, prepared: Any, cache: list[Any]) -> Any:
+        """Encode image patches once on the shared GLM vision tower before chunked language prefill."""
+
+        if self.vision is None:
+            raise ValueError("GLM image input requires a vision checkpoint served with --vision")
+        return self.vision.encode(prepared)
+
+    def prefill_vision(self, inputs: Any, cache: list[Any], encoded: Any, begin: int, end: int) -> mx.array:
+        """Prefill a visual prompt chunk. The draft head then reads these same rows for the following tokens."""
+
+        tokens = inputs if isinstance(inputs, mx.array) else mx.array(np.asarray(inputs, dtype=np.int64))
+        tokens = tokens.reshape(-1).astype(mx.uint32)
+        embedded = encoded.inputs_embeds[:, begin:end]
+        following = encoded.inputs_embeds[:, begin + 1:end + 1]
+        self._vision_next = following[0] if int(following.shape[1]) else None
+        self._rows = None
+        hidden = self.model.hidden(tokens, cache[:self.layer_count], inputs_embeds=embedded)
+        self._rows = self.draft_rows()
+        return hidden
 
     def __call__(self, inputs: Any, cache: list[Any]) -> mx.array:
         return self.head(self.hidden(inputs, cache))
@@ -146,10 +186,11 @@ class GLMFlash:
 
     @property
     def prefill_workspace_per_token(self) -> int:
-        """Prefill bytes a position of context: two live copies of a query chunk's per-head indexer scores (bf16)."""
+        """Prefill bytes a position: two live copies of a query chunk's per-head indexer scores, plus selection arrays."""
 
         a = self.args
-        return PREFILL_QUERIES * (2 * a.index_n_heads * 2 + 10) // a.index_kpool
+        score = 4 if C.act() == mx.float32 else 2
+        return PREFILL_QUERIES * (2 * a.index_n_heads * score + 10) // a.index_kpool
 
     def resolve_prefill_identity(self) -> None:
         """Build and check the sorted expert kernels at startup, not at the first prompt (the CLI calls this)."""
@@ -165,14 +206,20 @@ class GLMFlash:
 
         tokens = next_tokens if isinstance(next_tokens, mx.array) else mx.array(np.asarray(next_tokens).reshape(-1))
         tokens = tokens.reshape(-1).astype(mx.uint32)
-        self._absorb(hidden.reshape(-1, hidden.shape[-1])[: int(tokens.shape[0])], tokens, cache[-1])
+        vision = self._vision_next
+        self._vision_next = None
+        if vision is not None and int(vision.shape[0]) != int(tokens.shape[0]):
+            raise ValueError("GLM vision rows for the draft head do not match the following tokens")
+        self._absorb(hidden.reshape(-1, hidden.shape[-1])[: int(tokens.shape[0])], tokens, cache[-1], vision)
 
-    def _absorb(self, rows: mx.array, tokens: mx.array, mtp_cache: MTPCache) -> mx.array:
+    def _absorb(self, rows: mx.array, tokens: mx.array, mtp_cache: MTPCache,
+                embeddings: mx.array | None = None) -> mx.array:
         """Rows (final-normed hidden [n, D], the tokens that follow them [n]) into the head; its output rows [n, D]."""
 
         self._trim_chained(mtp_cache)
         count = int(tokens.shape[0])
-        return self.mtp(self.model, rows, tokens, [mtp_cache], (count,), count <= self.fused_rows)
+        images = {} if embeddings is None else {"embeddings": embeddings}      # heads without vision take none
+        return self.mtp(self.model, rows, tokens, [mtp_cache], (count,), count <= self.fused_rows, **images)
 
     @staticmethod
     def _trim_chained(mtp_cache: MTPCache) -> None:

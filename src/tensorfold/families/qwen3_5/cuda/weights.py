@@ -63,7 +63,12 @@ class Plain:
 
         return matmul(x, self.weight)
 
-    prefill = __call__
+    def prefill(self, x: torch.Tensor) -> torch.Tensor:
+        """Prompt rows on the bf16 mma (chunk-invariant bits, not decode's)."""
+
+        from .b16 import prompt
+
+        return prompt(x, self.weight)
 
 
 @dataclass
@@ -209,18 +214,22 @@ class Weights:
     head: Any                                        # QLinear, Exl3, or an NVFP4 checkpoint's linear
     inv_freq: torch.Tensor | None = None             # (rope_dims/2,) fp32
     quant: str = "mlx"                               # "exl3": an EXL3 pack (prompt glue then stays in bf16); "nvfp4"
+    prompt_rows: int = 4096                          # a prompt chunk's rows, sized to the GPU: any count, the same bits
 
     @cached_property
     def fast_prefill(self) -> bool:
-        if self.quant == "exl3":                     # an EXL3 pack's prompt glue stays in bf16
-            return False
-        if self.quant == "nvfp4":                    # NVFP4, FP8 and the gates' copies all take FP8 prompt rows
-            return True
+        """Whether every projection has an FP8 prompt kernel (run when prompts take FP8)."""
+
+        if self.quant == "exl3" or getattr(self, "precision", "full") == "checkpoint":
+            return False                             # EXL3 prompt glue stays bf16; checkpoint math has its own
         for layer in self.layers:
             modules = [m for m in (layer.gate, layer.up, layer.down) if m is not None]    # a MoE layer's are None
             modules += [layer.gdn.qkv, layer.gdn.z, layer.gdn.b, layer.gdn.a, layer.gdn.out] if layer.gdn else []
             modules += [layer.attn.q, layer.attn.k, layer.attn.v, layer.attn.o] if layer.attn else []
-            if any(not q.fast for q in modules):
+            if self.quant == "nvfp4":                # NVFP4 and FP8 have one; bf16 gates only with their e4m3 copies
+                if any(not hasattr(q, "prefill8") for q in modules):
+                    return False
+            elif any(not q.fast for q in modules):
                 return False
         return True
 
@@ -238,17 +247,11 @@ class _Tensors:
     """Checkpoint tensors read one at a time, so the weights never sit in device memory twice while they pack."""
 
     def __init__(self, model_dir: Path, device: str, skip=None) -> None:
-        from contextlib import ExitStack
-
-        from safetensors import safe_open
+        from tensorfold.cuda.direct_read import SafeTensors
 
         skip = skip or (lambda name: name.startswith("vision_tower") or ".mtp." in name or name.startswith("mtp."))
-        self.device, self.files, self.where = device, ExitStack(), {}
-        for path in sorted(model_dir.glob("*.safetensors")):
-            f = self.files.enter_context(safe_open(str(path), framework="pt", device="cpu"))
-            for name in f.keys():
-                if not skip(name):
-                    self.where[name] = f
+        self.device, self.files = device, SafeTensors(sorted(model_dir.glob("*.safetensors")))
+        self.where = {name: None for name in self.files.keys() if not skip(name)}
 
     def __contains__(self, name: str) -> bool:
         return name in self.where
@@ -257,10 +260,11 @@ class _Tensors:
         return iter(list(self.where))
 
     def pop(self, name: str) -> torch.Tensor:
-        return self.where.pop(name).get_tensor(name).to(self.device)
+        del self.where[name]
+        return self.files.get(name, self.device)
 
     def close(self) -> None:
-        self.files.close()
+        self.files.close()                    # the reader's pinned staging goes back to the system
 
 
 def load(model_dir: str | Path, device: str = "cuda", *, tiled: bool = False, mlp=None) -> Weights:

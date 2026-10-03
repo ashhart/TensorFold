@@ -13,29 +13,12 @@ namespace {
 
 using namespace qmm_frag;
 
-// Tile shapes: BM rows by BN columns a block, WM x WN warps, each warp (BM / WM) x (BN / WN).
-template <int GS, int BM, int BN, int WM, int WN, int STAGES>
-struct Tile {
-    static constexpr int THREADS = WM * WN * 32;
-    static constexpr int MT = BM / WM / 16;               // m16 tiles a warp
-    static constexpr int NT = BN / WN / 8;                // n8 tiles a warp
-    static constexpr int ROW = GS * 2;                    // bytes of one input row a group
-    static constexpr int CHUNKS = ROW / 16;
-    static constexpr int X = BM * ROW;                    // stage bytes: inputs,
-    static constexpr int W = BN * GS / 2;                 // weights,
-    static constexpr int S = BN * 2;                      // scales, biases (bf16),
-    static constexpr int XS = BM * 4;                     // and input sums (fp32)
-    static constexpr int STAGE = X + W + 2 * S + XS;
-    static constexpr int PARTIALS = MT * NT * 4 * THREADS * 4;   // a K slice's partial, parked for the cluster sum
-    static constexpr int SMEM = STAGES * STAGE > PARTIALS ? STAGES * STAGE : PARTIALS;
-};
-
 template <int GS, int BM, int BN, int WM, int WN, int STAGES, bool F32, bool CLUSTER, bool PIPE = false>
 __global__ void __launch_bounds__(WM * WN * 32) qmm_kernel(
         const __nv_bfloat16* __restrict__ x, const float* __restrict__ xs, const uint32_t* __restrict__ w,
         const __nv_bfloat16* __restrict__ scales, const __nv_bfloat16* __restrict__ biases,
         void* __restrict__ out, float* __restrict__ part, int M, int N, int K, int SK, int npad, int ldx, int group) {
-    using T = Tile<GS, BM, BN, WM, WN, STAGES>;
+    using T = LaneTile<GS, BM, BN, WM, WN, STAGES>;
     extern __shared__ __align__(128) unsigned char buf[];
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
     const int wm = warp / WN, wn = warp % WN;
@@ -171,6 +154,9 @@ __global__ void __launch_bounds__(WM * WN * 32) qmm_kernel(
         wait<0>();
         __syncthreads();
         if constexpr (CLUSTER) {
+#if __CUDA_ARCH__ < 900
+            __trap();                                     // no clusters before sm_90: the host never launches this
+#else
             // K slices of a tile form a cluster: slice 0 adds peers' partials in slice order, as reduce_kernel does
             constexpr int E = T::MT * T::NT * 4;
             auto cluster = cooperative_groups::this_cluster();
@@ -198,6 +184,7 @@ __global__ void __launch_bounds__(WM * WN * 32) qmm_kernel(
             }
             cluster.sync();                               // peers keep their memory until slice 0 has read it
             if (slice != 0) return;
+#endif
         }
 #pragma unroll
         for (int i = 0; i < T::MT; ++i)
@@ -245,7 +232,7 @@ __global__ void reduce_kernel(const float* __restrict__ part, void* __restrict__
 template <int GS, int BM, int BN, int WM, int WN, int STAGES, bool F32, bool CLUSTER, bool PIPE = false>
 void launch(const at::Tensor& x, const at::Tensor& xs, const at::Tensor& w, const at::Tensor& scales,
             const at::Tensor& biases, at::Tensor& out, const at::Tensor& part, int N, int SK) {
-    using T = Tile<GS, BM, BN, WM, WN, STAGES>;
+    using T = LaneTile<GS, BM, BN, WM, WN, STAGES>;
     const int M = x.size(0), K = x.size(1);
     auto kernel = qmm_kernel<GS, BM, BN, WM, WN, STAGES, F32, CLUSTER, PIPE>;
     static bool configured = false;
@@ -290,12 +277,16 @@ void dispatch(int bm, const at::Tensor& x, const at::Tensor& xs, const at::Tenso
 
 } // namespace
 
+// Clusters hold up to 8 K slices (the portable size) from sm_90; more, unreduced slices or older GPUs use the buffer.
+bool qmm_clusters(int SK, bool reduce) {
+    return SK > 1 && SK <= 8 && reduce && at::cuda::getCurrentDeviceProperties()->major >= 9;
+}
+
 void qmm_cuda(const at::Tensor& x, const at::Tensor& xs, const at::Tensor& w, const at::Tensor& scales,
               const at::Tensor& biases, at::Tensor& out, const at::Tensor& part, int N, int SK, int gs, int bm,
               bool f32, bool reduce) {
     const int M = x.size(0);
-    // clusters hold up to 8 K slices (the portable size); more, or unreduced slices, go through the slice buffer
-    const bool cluster = SK > 1 && SK <= 8 && reduce;
+    const bool cluster = qmm_clusters(SK, reduce);
 #define GO(G, F, C) dispatch<G, F, C>(bm, x, xs, w, scales, biases, out, part, N, SK)
     if (gs == 64) {
         if (f32) { if (cluster) GO(64, true, true); else GO(64, true, false); }

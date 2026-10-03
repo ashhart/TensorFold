@@ -3,6 +3,175 @@
 `tensorfold update` prints the sections below that are newer than the version you had. Each release's page on
 GitHub has the full notes and the measurements behind them.
 
+## 0.6.4 (3 Oct 2026)
+
+- **Flash Next on two DGX Sparks serves concurrent requests.** `--parallel N` with two CUDA ranks runs every stream
+  in shared lane rounds, and drafted replies still equal one-token decoding (#141, #180, #219, closes #123). The two
+  ranks now share one communicator interface, so a faster transport can plug in without touching the engines.
+  Thanks to @BHCC2025, @jschmied, @plotarmordev and @jayleaton.
+- **Startup memory on Macs:** prompt chunks are probed smallest first, and a larger probe runs only when its worst
+  case fits the memory budget (#271). Thanks to @boxabirds for the report.
+- **`tensorfold plan`** prints the model and context budget before any weights load (#281), and both `/metrics`
+  routes report the process memory footprint (#277). Thanks to @akol1.
+- Flash Next on CUDA builds its extensions before loading weights (#202) and gathers prompt n-gram rows before
+  waiting on earlier copies (#201). Thanks to @mcclanahanaman.
+- Flash Next on CUDA rereads EXL3 n-gram tables after warm-up and pins their page runs (#254). Thanks to
+  @grearjake-star.
+- `--decode-share` takes effect on Flash Next CUDA: shared prompt rows are sized from completed stand-alone passes
+  (#248, closes #230). Thanks to @simon-lin88.
+- CUDA tree attention folds its partial sums in fp32 groups. Precision is unchanged, but long replies can differ
+  from 0.6.3 in the last bits (#268). Thanks to @Arminova.
+- Flash Next on CUDA refuses cards below sm_120 at startup, before loading weights, and its CUDA tests skip there
+  (#261). Thanks to @mcclanahanaman for the report.
+- `docs/recipes/README.md` lists the minimum card and Mac memory for each family (#139). Thanks to @tomByrer for
+  asking.
+- Benchmark helpers fail early on Python below 3.11 (#276). Thanks to @akol1.
+- Tests collect without the optional MLX or terminal-interface dependencies (#288), and the docs say `--alias`
+  works on the CUDA server too (#289). Thanks to @plotarmordev.
+
+## 0.6.3 (2 Oct 2026)
+
+- **Nemotron on M5 Macs: copied text verifies up to 64 tokens a round.** A lone stream's copy window grows from 16 to
+  64 rows while each lands whole, a window attends in one call, and wide windows keep their Mamba states every 8th
+  row. On an M5 Max, one stream editing code decodes about 1.4x faster (550 to 760 tok/s, and up to 1,000 on a cool
+  machine), prose and code writing gain 1.6-3.3%, and drafted replies still equal one-token decoding.
+- **Anthropic Messages API.** `/v1/messages` and `count_tokens` on the Mac and CUDA servers, with streaming, tools,
+  thinking and cache usage (#223, closes #168). Thanks to @kky42.
+- **Control Room.** `tensorfold service` runs a model as a launchd service, and `tensorfold tui` shows its decode and
+  prefill speed and its connections live.
+- **Flash Next on Macs before M5:** `TF_FLASH_DENSE=matrix` runs every dense projection on the matrix units, and the
+  fused DeltaNet stack uses the matrix kernel by default (#149). Thanks to @gilby.
+- **Vision:** `--vision-offload` keeps the CUDA image tower in host RAM between images (#187, closes #185); image
+  parts are accepted inside tool results (#235); `--vision-image-tokens` lets many images share a larger budget
+  (#239); Flash Next on CUDA takes video (#240). Thanks to @barelyworkingcode and @MiaAI-Lab.
+- **CUDA:** `/v1/decisions` on Flash Next scores labels from the prompt's last logits, the questions filling in one
+  pass (#232); `TENSORFOLD_PREFILL_ROWS` sets the prompt piece rows (#238); NVFP4 and FP8 prompt rows add a tile's K
+  slices in one block, with the same bits (#242); `TENSORFOLD_MEMORY_RESERVE_GIB` moves the memory floor the startup
+  keeps free, by default a tenth of the pool and at least 4 GiB as before (#165); Flash Next's chain kernel takes
+  5-17% less time at 2 to 8 rows, with the same bits. Thanks to @Mirrdhyn, @MiaAI-Lab, @jschmied and @eleqtrizit.
+- **Server:** chunked request bodies are decoded before JSON parsing (#244); `/tokenize` and `/detokenize` carry
+  vLLM's fields (#237); `chat_template_kwargs.thinking` is heard as `enable_thinking`, and GLM-5.3 keeps earlier
+  turns' reasoning (#236); streaming usage gets its own chunk when `stream_options.include_usage` asks for it (#216);
+  malformed tool-call history renders safely (#233); `/metrics` times each request's decode (#269); `/health` carries
+  the live decode and prefill speed. Thanks to @JordiPosthumus, @MiaAI-Lab, @salmanarshad321 and @sxuff.
+- **Fixes:** an EXL3 layer with no bias no longer faults in the split-K reduction (#186); an 8-bit `lm_head` keeps its
+  format in Qwen3.6's MTP draft head on CUDA (#270); a lone Flash Next stream's cache growth on CUDA stays inside the
+  explicit memory budget; two ranks refuse to start with different prompt rows. Thanks to @barelyworkingcode and
+  @BHCC2025.
+- **Models moved to the TensorFold Hugging Face org.** `Vontra/<name>` ids redirect, and the tree now names
+  `TensorFold/<name>`.
+- **Contributing.** `CONTRIBUTING.md` says what a pull request needs to land and how it lands, and new pull requests
+  open with a receipt template.
+
+## 0.6.2 (2 Oct 2026)
+
+- **Flash Next on Macs at 64k-128k.** On an M3 Ultra, one stream runs 1.2-3.4% faster at 64k and 3.9-5.5% at 128k,
+  with the same tokens: a window's n-gram ids are hashed on the GPU, and the chain's first step is built while the
+  GPU verifies.
+- **27B with several streams on CUDA.** The GDN tree kernel takes 8-35% less time with the same bits. On an RTX PRO
+  6000 at its 250 W limit, 4 and 8 streams of the NVFP4 27B decode 1.1-4.2% faster.
+- **Fixes:** the config check accepts the FP8 n-gram table in NVIDIA's MIXED_PRECISION Flash Next export; GLM-5.3
+  on CUDA counts its drafts in `/health`, `/metrics` and replies, and names a mixed-bit EXL3 checkpoint when it
+  refuses one; a client that leaves is noticed past file descriptor 1023; the CUDA server prints a line a request, as
+  the Mac server does; a failed snapshot write no longer leaves its partial file; Gemma 4's QKV kernel reserves its
+  1024 threads for M1, M2 and macOS VMs, and a VM's GPU is no longer taken for an M5.
+
+## 0.6.1 (1 Oct 2026)
+
+- **NVFP4 checkpoints in their own math.** `nvidia/Qwen3.8-27B-NVFP4` runs the 4-bit activations its checkpoint
+  names, as vLLM does; `--precision full` runs 16-bit activations against the same weights. On an RTX PRO 6000 at its
+  250 W limit, one stream decodes 1.4-2.0x vLLM and prompts fill at 0.95-0.97x its speed.
+- **Waiting prompts fill together on CUDA.** With `--parallel`, prompts that arrive together now share one prefill
+  forward instead of filling one a round: on an RTX PRO 6000 at its 250 W limit, 8 streams of the 27B run 1.14-1.36x
+  faster and the slowest first token comes in 0.05-0.10 s instead of 0.4-0.8 s (1.6 s to 0.15 s on a DGX Spark), with
+  the same replies.
+- **More 27B tokens with several streams on CUDA.** Streams plan on their measured round cost, and wider lane blocks
+  on RTX PRO and RTX 50 cards add 4-8% at 8 streams, with the same tokens.
+- **Flash Next on Macs at long context.** One stream runs up to 9.6% faster on code at 64k and 10.2% on chat at 128k
+  on an M3 Ultra, with the same tokens.
+- **`/v1/decisions`** scores a choice, a score or a yes/no from the next-token logits, on the shared prompt lanes.
+- **Flash Next on CUDA:** image input, forks that resume from their shared prefix, shared system prompts copied
+  instead of filled again, and short prompts admitted while a long one fills.
+- **RTX cards without Docker:** pip alone installs and builds the CUDA kernels. Native Windows is in as an
+  experimental host layer, not yet run on Windows hardware.
+- **Fixes:** a refused request no longer breaks the next one on its connection; Gemma 4 thought blocks stay out of
+  replies with thinking off; an unnamed reasoning effort goes to the nearest named level; mlx-lm 0.32 support.
+
+## 0.6.0 (30 Sep 2026)
+
+- **RTX 40 cards.** CUDA now runs on compute capability 8.9 (Ada). On one RTX 4090 the 27B serves with DFlash2 in a
+  40,182-token window, exact: drafted replies equal serial ones, and a resume or resend gives a fresh run's reply.
+  Prompts fill at 2.4-2.6k tok/s from 2k to 32k tokens, and replies decode at 64-86 tok/s. On one GPU the 27B's kept
+  prompt states give way, oldest first, when a live reply needs the room, so admission counts one live window.
+- **Prompts fill inside the decode rounds.** With `--parallel` on CUDA, Flash Next prefills a queued prompt in the
+  same forward as the live replies instead of stopping them: on one DGX Spark, first tokens came 2.8-3.1x sooner than
+  on 0.5.0. On Macs several prompts fill side by side, the fewest tokens left first: on an M3 Ultra, short requests
+  queued behind a long prompt got their first token in a median 9.9 s instead of 113 s (the slowest 11.7 s, not 130).
+- **Conversations resume on more engines.** An identical resend or the next thinking turn now resumes from the kept
+  prompt state on Flash Next, Qwen3.6, Nemotron and GLM-5.3 on CUDA, as the 27B did, with a fresh run's reply: an
+  18.7k-token Flash Next resend went from 8.3 s to 0.08 s. On Macs the prompt cache keeps each conversation's newest
+  checkpoint and grows into memory the model leaves idle.
+- **CUDA prompts run at bf16 by default.** Against an fp32 reference the 27B's prompt rows are 20x closer than with
+  FP8 (KL 0.0031 against 0.0624). `--prefill-fp8` keeps 0.5.0's faster FP8 prompts for those who want them.
+- **Tool calls for agents.** The CUDA server streams tool-call arguments as the model writes them (the longest
+  silence in a long call fell from about 30 s to half a second), Python-spelled values like `False` and `None`
+  decode to their schema types, Gemma 4's bare tool calls parse (#121), and a prompt past the context window gets
+  OpenAI's `context_length_exceeded`, so clients compact instead of retrying.
+- **More checkpoints.** GLM-5.3 on Macs reads 8-bit and Q8_0 GGUF checkpoints and takes images, and has an opt-in
+  float32 activation mode (bf16 stays the default). On Macs, Flash Next loads oMLX's oQ checkpoints with scaled
+  n-gram tables; on CUDA it reads consolidated EXL3 tables and block-scaled FP8 linears.
+- **Faster.** Flash Next NVFP4 decodes 4.9-7.1% faster and fills prompts 15-16% faster at 2k-16k, bit-identical. On an
+  M5 Ultra the 27B with DFlash2 on an oQ4e checkpoint went from 33 to 131-160 tok/s. Before M5, a lone stream's copy
+  windows widen to 128 rows (an M3 Ultra edit ran 190 -> 233 tok/s), and Flash Next's concurrent rounds use the matrix
+  units. GLM-5.3's DFlash2 reads only its sliding window: 8% faster at 52k, and 3.8 GiB lighter a rank on two Sparks.
+- **Operations.** Prometheus `/metrics` on both servers, `TENSORFOLD_MEMORY_RESERVE_GIB` for the CUDA startup
+  reserve, `--checkpoint-slots` for the 27B's concurrent decoder on CUDA, and an idle GLM rank no longer spins.
+- **Apache-2.0.** TensorFold is licensed under the Apache License 2.0 from this release, which adds an explicit patent
+  grant from contributors. Releases up to 0.5.0 stay MIT, and code written before 0.6.0 keeps its MIT notice in
+  `LICENSES/MIT.txt`.
+- **Community pull requests.**
+  - Resumed resends and thinking turns on Flash Next (#124). Thanks to @benthecarman, and to @Arminova for the
+    GB10 measurements and the third-resend test.
+  - Streamed tool-call arguments on CUDA (#114), `--alias` on CUDA (#111) and Python-spelled tool parameters
+    (#135). Thanks to @olexale, @philip-pentatonic and @outcastofmusic.
+  - GLM-5.3 on Macs: image input (#101), 8-bit and Q8_0 GGUF checkpoints (#119), float32 activations (#118) and
+    the backbone wiring notes (#120). Thanks to @mgoldwasser and @feni6.
+  - GLM-5.3 on two Sparks: lighter prompt buffers, the EXL3 estimate, the MTP setting, the idle rank and DFlash2's
+    ring (#128, #129, #131, #132, #134), visible-pool selection (#140), and the CUDA startup reserve setting (#133).
+    Thanks to @MiaAI-Lab and @mikolaj92.
+  - Flash Next: scaled n-gram tables (#148, reported in #142) and the M5 draft head fix (#147), consolidated EXL3
+    tables (#145), block-scaled FP8 (#126) and the NVFP4 expert speedups (#102, #105). Thanks to @gilby,
+    @cwschroeder, @shantanugoel, @jschmied and @tournierjc.
+  - On M5 Macs the 27B fuses the projections of 4-bit group-32 checkpoints such as oQ4e too (#164): four streams went
+    from 315-320 to 332-334 tok/s on an M5 Ultra, with the same bits. Thanks to @gilby.
+  - `--checkpoint-slots` (#125), and the DFlash2 drafter's admitted size (#112, from @jkuepker's ROCm work). Thanks
+    to @nood-co1 and @jkuepker.
+
+## 0.5.0 (29 Sep 2026)
+
+- **OpenAI's Responses API on both servers.** `/v1/responses` runs as a chat completion: every response has its chat
+  completion's token SHA and prompt tokens, and a tool round trip gives the same reply through `previous_response_id`,
+  the turn resent whole, or chat. A second turn resumes from the cache.
+- **Long context on Sparks, the same bits as 0.3.6.3.** The 27B's attention reads each key chunk once for a round's
+  rows, with 16-byte loads, and prompt attention runs in its own CUDA kernel. On one Spark (MLX 4-bit + DFlash2):
+  decode at 128k 18.4 -> 38.9 tok/s, at 96k 23.6 -> 45.9; cold prefill at 128k 860 -> 1,173 tok/s and at 255k
+  545 -> 809. On the same NVFP4 weights, prefill runs 1.16-1.27x vLLM at every depth from 32k to 255k.
+- **The CUDA server reads requests as the Mac server does.** `reasoning_effort` and `thinking_budget`, usage with the
+  cached prompt tokens in every reply (streamed ones too), typed tool arguments, `min_p` on both backends,
+  `ignore_eos` on Flash Next and Nemotron, and `top_k` 0 drawing the whole nucleus on two GPUs as on one. Thinking
+  uses the template's own default effort on both servers.
+- **`priority: background` on CUDA.** A background request yields to foreground ones and replays from its prompt,
+  so its reply still equals its solo run. Under `--parallel`, the 27B and Qwen3.6 prefill a background prompt 1,024
+  rows a step (measured waits in docs/api.md).
+- **Community pull requests.**
+  - Faster CUDA startup and model loading (#82). Thanks to @pmeenan.
+  - Qwen3.6-35B-A3B serves `--parallel N` on CUDA, each reply equal to its solo run (#84), and `response_format`
+    JSON schemas on the 27B, exact under drafts (#80). Thanks to @philip-pentatonic.
+  - `/health` publishes live token totals (#79). Thanks to @MiaAI-Lab.
+  - The 27B's concurrent drafter keeps no stale context after a prefill step (#92). Thanks to @nood-co1.
+  - Flash Next lists its sparse-attention blocks past 131,072 keys in tiles, the same lists (#93). Thanks to
+    @MovieMaker93.
+
 ## 0.4.0 (29 Sep 2026)
 
 - **oQ formats and MLX 8-bit at 4-bit speed on M1-M4.** 5-, 6- and 8-bit linears now run on the matrix units with the
@@ -224,7 +393,7 @@ GitHub has the full notes and the measurements behind them.
 ## 0.3.2 (26 Sep 2026)
 
 - `tensorfold update` installs the newest release.
-- GLM-5.3-Flash reads Mia-AiLab's EXL3 weights on two DGX Sparks (experimental).
+- GLM-5.3-Flash reads Brandon M. Music's EXL3/TR3 weights (re-hosted by Mia-AiLab) on two DGX Sparks (experimental).
 
 ## 0.3.1 (26 Sep 2026)
 

@@ -17,6 +17,13 @@ def longest_common_prefix(a: list[int], b: list[int]) -> int:
     return n
 
 
+def extends(longer: list[int], shorter: list[int]) -> bool:
+    """Whether ``longer`` continues ``shorter`` (its last token checked first: other conversations fail at once)."""
+
+    n = len(shorter)
+    return len(longer) > n > 0 and longer[n - 1] == shorter[-1] and longer[:n] == shorter
+
+
 def choose_checkpoints(
     history_len: int, cached: int, last_prompt: list[int] | None, prompt: list[int]
 ) -> list[int]:
@@ -38,6 +45,7 @@ class CheckpointEntry:
     nbytes: int = 0
     # A system block (loaded from disk, or saved to it): outside the slot count.
     pinned: bool = False
+    born: int = 0              # the length of the prompt that stored it: a later turn's is longer
 
 
 def save_conversations(store: "CheckpointStore", directory: Path, model_id: str, *, keep: int = 2,
@@ -48,8 +56,11 @@ def save_conversations(store: "CheckpointStore", directory: Path, model_id: str,
 
     with store._lock:
         entries = [entry for entry in store._entries if not entry.pinned]   # most recently used first
-    # Save longest conversations first, with recency breaking ties, so short background requests cannot displace them.
-    entries.sort(key=lambda entry: -len(entry.tokens))
+    # prompt-side entries before reply ends (a re-rendered reply never matches one), then the longest first
+    def reply_end(entry: CheckpointEntry) -> bool:
+        return entry.tokens != entry.last_prompt[:len(entry.tokens)]
+
+    entries.sort(key=lambda entry: (reply_end(entry), -len(entry.tokens)))
     saved = total = 0
     for entry in entries:
         if saved >= keep or total + entry.nbytes > limit_bytes:
@@ -140,6 +151,7 @@ class CheckpointStore:
         # each evicted conversation no remaining entry extends, outside the lock on the thread that owns the arrays
         self.on_evict = on_evict
         self.spilled = 0
+        self.refused = 0                   # a prefix memory or the budget refused: counted, never silent (issue #155)
 
     def _evicted(self, gone: list[CheckpointEntry]) -> None:
         if self.on_evict is None:
@@ -148,8 +160,7 @@ class CheckpointStore:
             remaining = [entry.tokens for entry in self._entries]
         for entry in gone:
             # an older checkpoint of a conversation that moved on continues from the newer entry: no write
-            n = len(entry.tokens)
-            if entry.pinned or any(len(t) > n and t[:n] == entry.tokens for t in remaining):
+            if entry.pinned or any(extends(t, entry.tokens) for t in remaining):
                 continue
             try:
                 if self.on_evict(entry) is not False:
@@ -203,6 +214,21 @@ class CheckpointStore:
             best = self._best(prompt, usable)
             return len(best.tokens) if best is not None else 0
 
+    def refuse(self, tokens: list[int], cache: list[Any], nbytes: int, reason: str) -> None:
+        """A refused prefix: spilled to disk where a later turn can re-read it, else counted and logged (#155)."""
+
+        entry = CheckpointEntry(list(tokens), cache, list(tokens), nbytes)
+        if self.on_evict is not None:
+            try:
+                if self.on_evict(entry) is not False:
+                    self.spilled += 1
+                    return
+            except Exception as exc:  # noqa: BLE001 - a bad file costs a refill, never the request
+                print(f"[tensorfold] refused snapshot spillover failed: {type(exc).__name__}: {exc}", flush=True)
+        self.refused += 1
+        print(f"[tensorfold] kept nothing at {len(tokens)} tokens ({reason}): a turn reusing this prefix "
+              "re-prefills it", flush=True)
+
     def insert(self, tokens: list[int], cache: list[Any], *, last_prompt: list[int],
                pinned: bool = False) -> None:
         if not tokens:
@@ -210,12 +236,13 @@ class CheckpointStore:
         nbytes = int(self.sizer(cache)) if self.sizer is not None else 0
         oversize = self.budget_bytes is not None and nbytes > self.budget_bytes
         if oversize and not self.admit_oversize:
+            self.refuse(tokens, cache, nbytes, f"its {nbytes} B copy passes the {self.budget_bytes} B budget")
             return
         with self._lock:
             replaced = [entry for entry in self._entries if entry.tokens == list(tokens)]
             kept = [entry for entry in self._entries if entry.tokens != list(tokens)]
             pinned = pinned or any(entry.pinned for entry in replaced)
-            entry = CheckpointEntry(list(tokens), cache, list(last_prompt), nbytes, pinned)
+            entry = CheckpointEntry(list(tokens), cache, list(last_prompt), nbytes, pinned, len(last_prompt))
             entries = [entry, *kept]
             for extra in [e for e in entries if e.pinned][self.pinned_slots:]:
                 extra.pinned = False
@@ -223,7 +250,7 @@ class CheckpointStore:
             limit = self.budget_bytes
             if oversize:
                 limit = nbytes + sum(e.nbytes for e in entries[1:] if e.pinned)
-            # Never evict the new entry; evict least recently used conversations before system blocks.
+            # Never evict the new entry; evict conversations (``_victim``'s order) before system blocks.
             gone: list[CheckpointEntry] = []
             while True:
                 over_slots = sum(1 for e in entries if not e.pinned) > self.slots
@@ -233,7 +260,7 @@ class CheckpointStore:
                     break
                 unpinned = [i for i in range(1, len(entries)) if not entries[i].pinned]
                 if unpinned:
-                    gone.append(entries.pop(unpinned[-1]))
+                    gone.append(entries.pop(self._victim(entries, unpinned)))
                 elif over_budget:
                     entries.pop()
                 else:
@@ -245,15 +272,25 @@ class CheckpointStore:
     def __len__(self) -> int:
         return len(self._entries)
 
+    @staticmethod
+    def _victim(entries: list[CheckpointEntry], candidates: list[int]) -> int:
+        """Of ``candidates`` (oldest last): one a later turn's checkpoint continues, oldest first, else the oldest."""
+
+        for i in reversed(candidates):
+            entry = entries[i]
+            if any(other.born > entry.born and extends(other.tokens, entry.tokens) for other in entries):
+                return i
+        return candidates[-1]
+
     def evict_one(self, keep: CheckpointEntry | None = None) -> bool:
-        """Release the oldest ordinary prefix first, then a pinned prefix when memory needs it; never ``keep``."""
+        """Free an ordinary prefix (``_victim``'s pick), then a pinned one when memory needs it; never ``keep``."""
 
         with self._lock:
             candidates = [i for i, entry in enumerate(self._entries) if entry is not keep]
             if not candidates:
                 return False
             ordinary = [i for i in candidates if not self._entries[i].pinned]
-            gone = self._entries.pop(ordinary[-1] if ordinary else candidates[-1])
+            gone = self._entries.pop(self._victim(self._entries, ordinary) if ordinary else candidates[-1])
             self.evictions += 1
         self._evicted([gone])
         return True

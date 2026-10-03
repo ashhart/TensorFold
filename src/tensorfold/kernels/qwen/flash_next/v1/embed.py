@@ -189,6 +189,7 @@ class PleTables:
     def __init__(self, emb: Any) -> None:
         self.dims = int(emb.dims)
         self.bits, self.group = int(getattr(emb, "quant_bits", 4)), int(getattr(emb, "quant_group", 32))
+        self.scale = float(getattr(emb, "table_scale", 1.0))
         self.host = getattr(emb, "host", None)
         if self.host is not None:
             return
@@ -217,12 +218,29 @@ class PleTables:
         self.starts = mx.array(starts[:-1], dtype=mx.uint32)
         mx.eval(self.starts)
 
+def scaled_rows(rows: mx.array, scale: float) -> mx.array:
+    """Looked-up bf16 rows times the table's scale, rounded once to bf16 (the identity for scale 1)."""
+
+    if scale == 1.0:
+        return rows
+    return (rows.astype(mx.float32) * scale).astype(rows.dtype)
+
+
 def ple_lookup(ids: Any, tables: PleTables) -> mx.array:
+    """Dequantized rows [R, H * DIMS] bf16 for global n-gram row ids [R, H], times the table's scale."""
+
+    return scaled_rows(_ple_lookup(ids, tables), getattr(tables, "scale", 1.0))
+
+
+def _ple_lookup(ids: Any, tables: PleTables) -> mx.array:
     """Dequantized rows [R, H * DIMS] bf16 for global n-gram row ids [R, H] (the shards' concatenated order)."""
 
     import numpy as np
 
-    ids = np.asarray(ids).reshape(-1, np.asarray(ids).shape[-1])
+    if isinstance(ids, mx.array) and tables.host is None:      # ids hashed on the GPU: no host read
+        ids = ids.reshape(-1, ids.shape[-1]).astype(mx.uint32)
+    else:
+        ids = np.asarray(ids).reshape(-1, np.asarray(ids).shape[-1])
     rows, heads = ids.shape
     if tables.host is not None:
         words, scales, biases = tables.host.gather(ids)
@@ -233,7 +251,7 @@ def ple_lookup(ids: Any, tables: PleTables) -> mx.array:
                    output_dtypes=[mx.bfloat16])[0]
     names = ["IDS", "GSTART"] + [f"{k}{g}" for g in range(8) for k in ("W", "S", "B")]
     run, fmt = _lookup("ple_lookup", _PLE_LOOKUP, _PLE_LOOKUP_Q, names, tables.bits, tables.group)
-    arrays = [mx.array(ids.astype(np.uint32)), tables.starts]
+    arrays = [ids if isinstance(ids, mx.array) else mx.array(ids.astype(np.uint32)), tables.starts]
     for g in range(8):
         arrays += [tables.weights[g], tables.scales[g], tables.biases[g]]
     return run(inputs=arrays, template=[("H", heads), ("DIMS", tables.dims), *fmt],

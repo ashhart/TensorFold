@@ -59,3 +59,44 @@ def test_fits_takes_5_6_8_bits_in_groups_of_64():
     assert not simd_qmm_bits.fits(q, s, b, 64, 4)
     q3, s3, b3 = mx.quantize(mx.zeros((64, 256), dtype=mx.bfloat16), group_size=32, bits=5)
     assert not simd_qmm_bits.fits(q3, s3.astype(mx.bfloat16), b3.astype(mx.bfloat16), 32, 5)
+
+
+G128_SHAPES = [(17408, 5120), (5120, 17408), (5120, 6144), (1024, 5120)]
+
+
+def _quant(n, k, bits, group, seed):
+    mx.random.seed(seed)
+    w = (mx.random.normal((n, k)) * 0.02).astype(mx.bfloat16)
+    return mx.quantize(w, group_size=group, bits=bits)
+
+
+@pytest.mark.parametrize("bits", simd_qmm_bits.BITS)
+@pytest.mark.parametrize("n,k", G128_SHAPES)
+def test_group_128_matches_two_groups_of_64(n, k, bits):
+    q, s, b = _quant(n, k, bits, 128, seed=11)
+    x = (mx.random.normal((16, k)) * 0.5).astype(mx.bfloat16)
+    s2, b2 = mx.repeat(s, 2, axis=1), mx.repeat(b, 2, axis=1)
+    native = simd_qmm_bits.qmm(x, q, s, b, bits, 128)
+    wide = simd_qmm_bits.qmm(x, q, s2, b2, bits, 64)
+    mx.eval(native, wide)
+    assert _same(native, wide)
+    assert _same(simd_qmm_bits.qmm(x[:1], q, s, b, bits, 128), native[:1])
+    assert simd_qmm_bits.check(q, s, b, bits, 128)
+
+
+def test_group_128_is_as_accurate_as_mlx():
+    n, k, bits = 1024, 5120, 5
+    q, s, b = _quant(n, k, bits, 128, seed=5)
+    x = (mx.random.normal((8, k)) * 0.5).astype(mx.bfloat16)
+    ref = x.astype(mx.float32) @ mx.dequantize(q, s, b, group_size=128, bits=bits).astype(mx.float32).T
+    scale = float(mx.abs(ref).max().item())
+    ours = float(mx.abs(simd_qmm_bits.qmm(x, q, s, b, bits, 128).astype(mx.float32) - ref).max().item()) / scale
+    theirs = float(mx.abs(mx.quantized_matmul(
+        x, q, s, b, transpose=True, group_size=128, bits=bits).astype(mx.float32) - ref).max().item()) / scale
+    assert ours <= max(theirs, 0.005)
+
+
+def test_fits_takes_groups_of_128():
+    q, s, b = _quant(64, 256, 8, 128, seed=1)
+    assert simd_qmm_bits.fits(q, s, b, 128, 8)
+    assert not simd_qmm_bits.fits(q, s, b, 128, 4)

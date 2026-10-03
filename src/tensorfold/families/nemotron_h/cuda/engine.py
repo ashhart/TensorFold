@@ -16,11 +16,11 @@ PREFILL_ROWS = 2048  # rows of a prompt chunk
 
 
 def sampling_mode(sampling) -> tuple:
-    """The part of a Sampling compiled into the graphs: greedy, or keyed with its top_k and top-p cut."""
+    """The part of a Sampling compiled into the graphs: greedy, or keyed with its top_k, top-p cut and min-p cut."""
 
     if sampling is None or sampling.temperature <= 0:
         return ("greedy",)
-    return ("keyed", int(sampling.top_k), 0.0 < float(sampling.top_p) < 1.0)
+    return ("keyed", int(sampling.top_k), 0.0 < float(sampling.top_p) < 1.0, float(sampling.min_p) > 0.0)
 
 
 class Engine:
@@ -63,6 +63,7 @@ class Engine:
         self._copied = torch.cuda.Event()       # the last copy from the pinned buffers has run
         self._copied.record()
         self.pos = self.parity = self.prev_keep = 0
+        self.bias, self.masked = None, False    # a reply grammar's -inf per disallowed column, rows of the next window
         self.graphs: dict[tuple, torch.cuda.CUDAGraph] = {}
         self.pool = None
         self.use_graphs = graphs
@@ -154,6 +155,8 @@ class Engine:
         _, normed, xs = self.norm(x, delta, w.norm_f)
         self.hidden[:rows].copy_(normed)
         self.logits[:rows].copy_(G.dense(normed, w.head, xs))
+        if self.masked:
+            self.logits[:rows].add_(self.bias[:rows])
         # every row samples its position (pos + row + 1) on the GPU; the tokens go to pinned host memory
         S.sample(self.logits[:rows], self.meta, self.params, self.sampled[:rows])
         self._host_sampled[:rows].copy_(self.sampled[:rows], non_blocking=True)
@@ -165,12 +168,21 @@ class Engine:
         self.p_meta.fill_(pos)
         return self.p_meta
 
-    def mamba_rows(self, m, normed, xs, rows: int, j: int):
+    def mamba_rows(self, m, normed, xs, rows: int, j: int, cut=0, kept=None):
         c = self.c
         proj = G.prefill_dense(normed, m.in_proj)
         M.conv_rows(proj, self.conv_base[j], self.p_xc[:rows], m.conv_w, m.conv_b, rows, xd=c.xd)
-        y = M.scan_rows(proj, self.p_xc[:rows], self.ssm[j], m.a, m.d, m.dt_bias, rows, heads=c.m_heads,
-                        head_dim=c.m_head_dim, groups=c.m_groups, state_dim=c.m_state, lo=c.dt_min, hi=c.dt_max)
+        params = dict(heads=c.m_heads, head_dim=c.m_head_dim, groups=c.m_groups,
+                      state_dim=c.m_state, lo=c.dt_min, hi=c.dt_max)
+        if kept is None:
+            y = M.scan_rows(proj, self.p_xc[:rows], self.ssm[j], m.a, m.d, m.dt_bias, rows, **params)
+        else:
+            first = M.scan_rows(proj, self.p_xc[:cut], self.ssm[j], m.a, m.d, m.dt_bias, cut, **params)
+            kept["ssm"][j].copy_(self.ssm[j])
+            M.commit_conv_rows(proj, kept["conv_base"][j], cut, xd=c.xd)
+            rest = M.scan_rows(proj[cut:], self.p_xc[cut:rows], self.ssm[j], m.a, m.d, m.dt_bias,
+                               rows - cut, **params)
+            y = torch.cat((first, rest))
         g, gxs = M.group_rmsnorm(y, m.gnorm, c.eps, c.m_groups)
         return self._dense_delta(g, m.out_proj, gxs)
 
@@ -207,10 +219,12 @@ class Engine:
     def sample_last(self, normed, xs) -> None:
         """The chunk's last row (its position pos - 1 once committed): sample the next token into ``p_sampled``."""
 
-        S.sample(G.prefill_dense(normed, self.w.head), self._meta_at(self.pos - 1), self.params, self.p_sampled)
+        logits = G.prefill_dense(normed, self.w.head)
+        S.sample(logits + self.bias[:1] if self.masked else logits, self._meta_at(self.pos - 1), self.params,
+                 self.p_sampled)
 
     @torch.no_grad()
-    def prefill_chunk(self, tokens) -> None:
+    def prefill_chunk(self, tokens, *, cut=0) -> dict | None:
         """Commit a prompt chunk (every row kept) and sample the next token from its last row."""
 
         rows = len(tokens)
@@ -218,6 +232,10 @@ class Engine:
             raise ValueError("a prompt chunk must fit the chunk buffers and the KV cache")
         if self.prev_keep:
             raise RuntimeError("a prompt chunk runs from a committed state (no window rows left to replay)")
+        kept = None
+        if 0 < cut < rows:
+            kept = {"ssm": torch.empty_like(self.ssm), "conv_base": self.conv_base.clone(),
+                    "host": (self.pos + cut, self.parity, 0)}
         w, c = self.w, self.c
         self.p_ids[:rows].copy_(torch.as_tensor(tokens, dtype=torch.int32), non_blocking=False)
         x = base.embed(self.p_ids[:rows], w.embed.weight, w.embed.scales, w.embed.biases, c.hidden)
@@ -226,7 +244,7 @@ class Engine:
         for blk in w.blocks:
             x, normed, xs = self.norm(x, delta, blk.norm)
             if blk.kind == "M":
-                delta = self.mamba_rows(blk.mamba, normed, xs, rows, mj)
+                delta = self.mamba_rows(blk.mamba, normed, xs, rows, mj, cut, kept)
                 mj += 1
             elif blk.kind == "*":
                 delta = self.attention_rows(blk.attn, normed, xs, rows, self.k_cache[aj], self.v_cache[aj])
@@ -239,6 +257,7 @@ class Engine:
         self.sample_last(normed[rows - 1:rows], xs[rows - 1:rows])
         self._host_p.copy_(self.p_sampled, non_blocking=True)
         self._sampled_ready.record()
+        return kept
 
     def prefill_token(self) -> int:
         """The token sampled from the last prompt chunk's last row."""
@@ -291,7 +310,7 @@ class Engine:
         self.ids[:n].copy_(self._host_ids[:n], non_blocking=True)
         self.meta.copy_(self._host_meta, non_blocking=True)
         self._copied.record()
-        g = self.graphs.get((rows, self.mode)) if self.use_graphs else None
+        g = self.graphs.get((rows, self.mode)) if self.use_graphs and not self.masked else None
         if g is not None:
             g.replay()
         else:
@@ -300,6 +319,27 @@ class Engine:
         self.parity ^= 1
         self._rows = rows
         return self.logits[:rows]
+
+    def mask(self, constraint, window) -> None:
+        """The next window's (or prompt's) sampling masked by a reply's grammar; ``None`` lifts it."""
+
+        if constraint is None or not window.rows:        # nothing masked: the plain graphs
+            self.masked = False
+            return
+        width, offset = self.head_width
+        if self.bias is None:
+            self.bias = torch.zeros((self.max_rows, width), dtype=torch.bfloat16, device=self.device)
+        self.bias.zero_()
+        allowed = constraint.allowed(window, width, self.device, offset)
+        index = torch.tensor(window.rows, device=self.device)
+        self.bias[index] = torch.zeros_like(allowed, dtype=torch.bfloat16).masked_fill_(~allowed, float("-inf"))
+        self.masked = True
+
+    @property
+    def head_width(self) -> tuple[int, int]:
+        """(columns, first token id) of the head this engine samples from."""
+
+        return self.c.vocab, 0
 
     def tokens(self) -> list[int]:
         """The last window's sampled tokens (row r: the token at position pos + r + 1)."""

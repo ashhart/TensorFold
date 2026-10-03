@@ -72,7 +72,7 @@ def test_long_prompt_resumes_like_a_fresh_prefill(engine_long):
     reply, _ = _generate(engine_long, first, sampling, tokens=16)
     follow = first + reply + _prompt(seed=14, n=40)
     warm, stats = _generate(engine_long, follow, sampling, tokens=16)
-    assert stats["cached"] == len(first)                # resumed at the prompt's end; the reply prefills again
+    assert stats["cached"] == len(first) - 1                # resumed at the prompt's end; the reply prefills again
     _forget(engine_long)                                # every kept state goes: the next prefill is fresh
     cold, stats = _generate(engine_long, follow, sampling, tokens=16)
     assert stats["cached"] == 0 and warm == cold
@@ -89,10 +89,10 @@ def test_switching_conversations_resumes_each_like_a_fresh_prefill(engine_long, 
     reply_b, _ = _generate(engine_long, b, sampling, tokens=12)
     next_a = a + reply_a + _prompt(seed=42, n=9)
     warm_a, stats = _generate(engine_long, next_a, sampling, tokens=12)
-    assert stats["cached"] == len(a), stats                              # resumed from A's saved rows
+    assert stats["cached"] == len(a) - 1, stats                              # resumed from A's saved rows
     next_b = b + reply_b + _prompt(seed=43, n=9)
     warm_b, stats = _generate(engine_long, next_b, sampling, tokens=12)
-    assert stats["cached"] == len(b), stats
+    assert stats["cached"] == len(b) - 1, stats
     serial_a, _ = _generate(engine_long, next_a, sampling, draft=False, tokens=12)   # fresh prefill, no cache
     serial_b, _ = _generate(engine_long, next_b, sampling, draft=False, tokens=12)
     assert warm_a == serial_a and warm_b == serial_b
@@ -117,7 +117,7 @@ def test_kept_entries_stay_within_the_memory_budget(engine_long):
             reply, _ = _generate(engine_long, last, sampling, tokens=8)
             assert engine_long._held_bytes() <= engine_long.cache_bytes
         warm, stats = _generate(engine_long, last + reply + _prompt(seed=70, n=5), sampling, tokens=8)
-        assert stats["cached"] >= len(last)
+        assert stats["cached"] == len(last) - 1
         assert len(engine_long.cache) >= 1
     finally:
         engine_long.cache_bytes = saved

@@ -27,10 +27,20 @@ def _partial_tag(text: str, tag: str) -> int:
 def split_thinking(text: str, *, finished: bool, markers: tuple[str, str] = THINK_MARKERS) -> tuple[str, str]:
     """(reasoning, answer) of a thinking reply; while it streams, a tail that could begin a marker is held back."""
 
+    # Gemma 4 can open its thought channel after visible text. Strip that block wherever it opens.
     opener, closer = markers
+    if opener and not text.startswith(opener):
+        start = text.find(opener)
+        if start > 0:                                        # a thought channel opened after some visible text
+            prefix = text[:start]
+            prefix = prefix[: len(prefix) - _partial_tag(prefix, opener)]   # drop a stray/doubled partial opener
+            reasoning, answer = split_thinking(text[start:], finished=finished, markers=markers)
+            return reasoning, prefix + answer
+        if not finished:                                     # no opener yet: hold a tail that could begin one
+            return "", text[: len(text) - max(_partial_tag(text, tag)
+                                               for tag in (opener, closer, *(o for o, _ in _CALLS)))]
+        return "", text                                      # a finished reply that never opened the block
     if opener:
-        if not text.startswith(opener):                      # a reply that did not open the block has no reasoning
-            return ("", "") if not finished and opener.startswith(text) else ("", text)
         text = text[len(opener):].lstrip("\n")
     end = text.find(closer)
     if end >= 0:
@@ -45,6 +55,14 @@ def split_thinking(text: str, *, finished: bool, markers: tuple[str, str] = THIN
         return text, ""
     held = 0 if finished else max(_partial_tag(text, tag) for tag in (closer, *(opener for opener, _ in _CALLS)))
     return text[: len(text) - held], ""
+
+
+def reasoning_count(tokens: list[int], think_end: int | None) -> int:
+    """A thinking reply's reasoning tokens: through its close ``think_end`` (None or -1: not thinking), else all."""
+
+    if think_end is None or think_end < 0:
+        return 0
+    return tokens.index(think_end) + 1 if think_end in tokens else len(tokens)
 
 
 def think_markers(tokenizer: Any) -> tuple[str, str]:

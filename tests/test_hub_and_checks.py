@@ -30,7 +30,7 @@ def fake_repo(cache: Path, repo_id: str, files: dict[str, str]) -> Path:
 
 def test_repo_ids_and_local_directories(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    assert hub.is_repo_id("Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP")
+    assert hub.is_repo_id("TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP")
     assert not hub.is_repo_id("just-a-name") and not hub.is_repo_id("a/b/c")
     (tmp_path / "local" / "model").mkdir(parents=True)
     assert not hub.is_repo_id("local/model")                 # an existing directory is a directory
@@ -49,6 +49,13 @@ def test_a_cache_without_refs_still_resolves(tmp_path):
     snapshot = fake_repo(tmp_path, "owner/model", {"config.json": "{}"})
     (tmp_path / "models--owner--model" / "refs" / "main").unlink()
     assert hub.cached("owner/model", cache_dir=tmp_path) == snapshot
+
+
+def test_a_moved_org_id_finds_the_old_cache_name(tmp_path):
+    # the org moved to TensorFold on 2 Oct 2026; a cache pulled before the move kept its Vontra folder name
+    snapshot = fake_repo(tmp_path, "Vontra/Qwen3.8-27B-MLX-4bit", {"config.json": "{}"})
+    assert hub.cached("TensorFold/Qwen3.8-27B-MLX-4bit", cache_dir=tmp_path) == snapshot
+    assert hub.resolve("TensorFold/Qwen3.8-27B-MLX-4bit", download=False, cache_dir=tmp_path) == snapshot
 
 
 def test_resolve_finishes_a_config_only_cached_model(tmp_path, monkeypatch):
@@ -114,7 +121,7 @@ def test_resolve_refuses_a_download_that_still_lacks_required_mtp(tmp_path, monk
 
 
 def test_nemotron_pull_checks_its_mtp_head(tmp_path, monkeypatch, capsys):
-    repo = "Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit"
+    repo = "TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit"
     snapshot = fake_repo(tmp_path, repo, {
         "config.json": '{"model_type": "nemotron_h", "quantization": {"bits": 4, "group_size": 64}}',
         "model.safetensors": "weights",
@@ -211,14 +218,46 @@ def test_flash_next_reads_the_nvfp4_checkpoint_and_refuses_other_fp4_blocks(tmp_
         (tmp_path / "config.json").write_text(json.dumps(other))
         with pytest.raises(ValueError, match="blocks of 16"):
             qwen4_exp.check(tmp_path)
+    # NVFP4 outside the routed experts (e.g. a W4A16 DeltaNet projection) is refused before any weight is read
+    gdn_fp4 = json.loads(json.dumps(mixed))
+    gdn_fp4["quantization_config"]["quantized_layers"]["model.language_model.layers.0.linear_attn.in_proj_qkv"] = {
+        "quant_algo": "W4A16_NVFP4", "group_size": 16}
+    (tmp_path / "config.json").write_text(json.dumps(gdn_fp4))
+    with pytest.raises(ValueError, match="routed experts and n-gram tables only.*in_proj_qkv"):
+        qwen4_exp.check(tmp_path)
+    for suffix in ("", ".shard_0"):
+        ple_fp4 = json.loads(json.dumps(mixed))
+        key = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding" + suffix
+        ple_fp4["quantization_config"]["quantized_layers"][key] = {"quant_algo": "NVFP4", "group_size": 16}
+        (tmp_path / "config.json").write_text(json.dumps(ple_fp4))
+        qwen4_exp.check(tmp_path)
+    # FP8 in the MTP drafter's experts is read (dequantized and re-quantized at load); in the main experts it is not
+    mtp_fp8 = json.loads(json.dumps(mixed))
+    mtp_fp8["quantization_config"]["quantized_layers"]["mtp.layers.0.mlp.experts"] = {"quant_algo": "FP8"}
+    (tmp_path / "config.json").write_text(json.dumps(mtp_fp8))
+    qwen4_exp.check(tmp_path)
+    main_fp8 = json.loads(json.dumps(mixed))
+    main_fp8["quantization_config"]["quantized_layers"]["model.language_model.layers.0.mlp.experts"] = {
+        "quant_algo": "FP8"}
+    (tmp_path / "config.json").write_text(json.dumps(main_fp8))
+    with pytest.raises(ValueError, match="blocks of 16"):
+        qwen4_exp.check(tmp_path)
+    # #179: an FP8 n-gram table (NVIDIA's MIXED_PRECISION export) is read by the table's FP8 lane, so it is accepted
+    for suffix in ("", ".shard_0"):
+        ple_fp8 = json.loads(json.dumps(mixed))
+        key = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding" + suffix
+        ple_fp8["quantization_config"]["quantized_layers"][key] = {"quant_algo": "FP8"}
+        ple_fp8["quantization_config"]["config_groups"]["ple"] = {"weights": {"num_bits": 8, "dynamic": False}}
+        (tmp_path / "config.json").write_text(json.dumps(ple_fp8))
+        qwen4_exp.check(tmp_path)
 
 
 def test_models_lists_the_tested_checkpoints(capsys):
     assert main(["models"]) == 0
     out = capsys.readouterr().out
-    for repo in ("Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP", "local-inference-lab/Qwen3.8-Flash-Next-NVFP4",
+    for repo in ("TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP", "local-inference-lab/Qwen3.8-Flash-Next-NVFP4",
                  "RadixArk/Qwen3.8-Flash-Next-NVFP4",
-                 "Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", "Vontra/Qwen3.8-27B-MLX-4bit",
+                 "TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", "TensorFold/Qwen3.8-27B-MLX-4bit",
                  "z-lab/Qwen3.8-27B-DFlash2", "mlx-community/gemma-4-26b-a4b-it-4bit"):
         assert repo in out
     for folder in ("qwen/dense/v1", "qwen/flash_next/v1", "nemotron/lightning/v1", "gemma/v1"):
@@ -236,8 +275,9 @@ def test_every_family_names_an_importable_kernel_version():
         if family.model_type == "qwen3_5":
             model = SimpleNamespace(_tensorfold_lanes=True)
             assert families.kernel_version(family, model).startswith(("qwen-dense-v1-", f"{family.model_type}-v1-"))
-        else:
-            assert families.kernel_version(family, None).startswith(f"{family.model_type}-v1-")
+        else:                               # an alias model_type (a newer export's name) keeps the package's own
+            names = getattr(package, "MODEL_TYPES", (family.model_type,))
+            assert families.kernel_version(family, None).startswith(tuple(f"{name}-v1-" for name in names))
 
 
 def test_info_reads_a_local_config(tmp_path, capsys):
@@ -287,3 +327,9 @@ def test_auto_drafter_waits_for_a_complete_cached_model(tmp_path, monkeypatch):
     assert _drafter(family, "auto") == ""
     (snapshot / "model.safetensors").write_bytes(b"weights")
     assert Path(_drafter(family, "auto")).resolve() == snapshot.resolve()
+
+
+def test_null_sampling_fields_in_generation_config_keep_the_defaults(tmp_path):
+    (tmp_path / "generation_config.json").write_text(json.dumps(
+        {"do_sample": True, "temperature": None, "top_k": 20, "top_p": 0.95, "min_p": None}))
+    assert _generation_config(tmp_path) == {"temperature": 1.0, "top_k": 20, "top_p": 0.95}

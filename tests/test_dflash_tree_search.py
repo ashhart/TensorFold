@@ -5,6 +5,8 @@ import heapq
 import numpy as np
 import pytest
 
+pytest.importorskip("mlx.core")                                      # the drafter module imports MLX
+
 from tensorfold.drafters.dflash_drafter import best_first_tree
 
 

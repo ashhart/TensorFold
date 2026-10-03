@@ -26,8 +26,9 @@ def _block_attention(Q, KB, VB, TABLE, LENS, O, scale, window, R,
     qrow = (j * L + r).to(tl.int64)
     q = tl.load(Q + head[:, None].to(tl.int64) * R * D + qrow[:, None] * D + d[None, :], mask=live[:, None], other=0.0)
     s = tl.load(LENS + j)
-    kc = tl.load(TABLE + 2 * j).to(tl.pointer_type(tl.bfloat16)) + g.to(tl.int64) * s * D
-    vc = tl.load(TABLE + 2 * j + 1).to(tl.pointer_type(tl.bfloat16)) + g.to(tl.int64) * s * D
+    # contexts are fresh torch tensors (16-byte aligned): the hint makes their loads 16 bytes wide, same arithmetic
+    kc = tl.multiple_of(tl.load(TABLE + 2 * j).to(tl.pointer_type(tl.bfloat16)), 16) + g.to(tl.int64) * s * D
+    vc = tl.multiple_of(tl.load(TABLE + 2 * j + 1).to(tl.pointer_type(tl.bfloat16)), 16) + g.to(tl.int64) * s * D
     m_i = tl.full((M,), float("-inf"), tl.float32)
     l_i = tl.zeros((M,), tl.float32)
     acc = tl.zeros((M, D), tl.float32)
@@ -78,8 +79,8 @@ def block_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, keys: Seq
         raise ValueError("one context a stream, and blocks of equal length")
     for kc, vc in zip(keys, values):
         if kc.shape != vc.shape or kc.shape[0] != kv_heads or kc.shape[2] != dim or not kc.is_contiguous() \
-                or not vc.is_contiguous() or kc.dtype != torch.bfloat16:
-            raise ValueError("contexts are contiguous bf16 [Hkv, n, D] keys and values")
+                or not vc.is_contiguous() or kc.dtype != torch.bfloat16 or (kc.data_ptr() | vc.data_ptr()) % 16:
+            raise ValueError("contexts are contiguous, 16-byte aligned bf16 [Hkv, n, D] keys and values")
     host = torch.tensor([p for kc, vc in zip(keys, values) for p in (kc.data_ptr(), vc.data_ptr())] +
                         [kc.shape[1] for kc in keys], dtype=torch.int64).pin_memory()
     dev = host.to(q.device, non_blocking=True)
@@ -103,8 +104,8 @@ def _append(TABLE, SIZES, NEW, R, H: tl.constexpr, D: tl.constexpr, BR: tl.const
     add = tl.load(SIZES + 4 * j + 1)
     first = tl.load(SIZES + 4 * j + 2)
     keep = tl.load(SIZES + 4 * j + 3)
-    old = tl.load(TABLE + 2 * j).to(tl.pointer_type(tl.bfloat16))
-    out = tl.load(TABLE + 2 * j + 1).to(tl.pointer_type(tl.bfloat16))
+    old = tl.multiple_of(tl.load(TABLE + 2 * j).to(tl.pointer_type(tl.bfloat16)), 16)
+    out = tl.multiple_of(tl.load(TABLE + 2 * j + 1).to(tl.pointer_type(tl.bfloat16)), 16)
     d = tl.arange(0, D)
     live = rows < keep
     src = rows + old_n + add - keep
@@ -121,6 +122,8 @@ def append(new: torch.Tensor, olds: Sequence[torch.Tensor | None], sizes: Sequen
     heads, rows, dim = new.shape
     outs, table, meta, first = [], [], [], 0
     for old, add in zip(olds, sizes):
+        if old is not None and (not old.is_contiguous() or old.data_ptr() % 16):
+            raise ValueError("a context to extend is a contiguous, 16-byte aligned [Hkv, n, D] tensor")
         n = 0 if old is None else old.shape[1]
         keep = min(window, n + add)
         out = torch.empty((heads, keep, dim), dtype=new.dtype, device=new.device)

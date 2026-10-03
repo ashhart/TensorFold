@@ -121,6 +121,73 @@ _EXPERT_DOWN = _GROUP_HEAD + r"""
   }
 """
 
+# route and group in one launch: simdgroup s routes rows s, s + T / 32, ... exactly as the route kernel does (one
+# simdgroup a row), keeping each row's K expert ids in threadgroup memory; then the group kernel's phase builds the
+# tables from them (thread e counts the pairs of expert e).
+_ROUTE_GROUP = r"""
+  const uint t = thread_position_in_threadgroup.x;
+  const uint lane = thread_index_in_simdgroup;
+  const uint sg = simdgroup_index_in_threadgroup;
+  const int R = rows[0];
+  const int P = R * K;
+  threadgroup uint ids[MAXP];
+  threadgroup int sg_pairs[T / 32], sg_used[T / 32];
+  for (int r = int(sg); r < R; r += T / 32) {
+    float sel[NE / 32], prob[NE / 32];
+    for (int j = 0; j < NE / 32; j++) {
+      const int e = int(lane) + 32 * j;
+      const float g = float(G[r * NE + e]);
+      prob[j] = 1.0f / (1.0f + metal::exp(-g));
+      sel[j] = prob[j] + bias[e];
+    }
+    float total = 0.0f;
+    float picked[K];
+    for (int k = 0; k < K; k++) {
+      float best = -INFINITY;
+      int best_e = 1 << 20;
+      for (int j = 0; j < NE / 32; j++) {
+        const int e = int(lane) + 32 * j;
+        if (sel[j] > best) { best = sel[j]; best_e = e; }
+      }
+      const float top = simd_max(best);
+      const int winner = simd_min(best == top ? best_e : (1 << 20));   // ties: the lowest expert id
+      float p = 0.0f;
+      for (int j = 0; j < NE / 32; j++) {
+        if (int(lane) + 32 * j == winner) { p = prob[j]; sel[j] = -INFINITY; }
+      }
+      p = simd_sum(p);
+      picked[k] = p;
+      total += p;
+      if (lane == 0) { IDX[r * K + k] = uint(winner); ids[r * K + k] = uint(winner); }
+    }
+    if (lane == 0) {
+      const float denominator = total + 1e-20f;
+      for (int k = 0; k < K; k++) WT[r * K + k] = picked[k] / denominator * scaling[0];
+    }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const int e = int(t);
+  int count = 0;
+  if (e < NE)
+    for (int p = 0; p < P; p++) count += int(ids[p]) == e ? 1 : 0;
+  const int used = count > 0 ? 1 : 0;
+  const int pairs_before = simd_prefix_exclusive_sum(count);
+  const int used_before = simd_prefix_exclusive_sum(used);
+  if (lane == 31) { sg_pairs[sg] = pairs_before + count; sg_used[sg] = used_before + used; }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  int start = pairs_before, u = used_before;
+  for (uint q = 0; q < sg; q++) { start += sg_pairs[q]; u += sg_used[q]; }
+  if (used) {
+    UIDS[u] = uint(e);
+    START[u] = start;
+    COUNT[u] = count;
+    int m = start;
+    for (int p = 0; p < P; p++)
+      if (int(ids[p]) == e) MEMBERS[m++] = p;
+  }
+  if (int(t) == T - 1) UCOUNT[0] = u + used;
+"""
+
 _GROUP = r"""
   // One threadgroup of T >= E threads: thread e counts the pairs that picked expert e; the used experts, in
   // increasing id, get groups u = 0, 1, ...: UIDS[u] = e, START[u] / COUNT[u] = its run in MEMBERS, where its
@@ -204,8 +271,8 @@ def qmv(x: mx.array, weight: mx.array, scales: mx.array, biases: mx.array, group
     return out.reshape(*shape[:-1], n)
 
 
-# Grouping shares each expert's weight reads above this row threshold while preserving the same per-pair bits.
-GROUP_ROWS = 12
+# Grouping shares each expert's weight reads from this many rows while preserving the same per-pair bits.
+GROUP_ROWS = 8
 MAX_GROUP_PAIRS = 1024          # pairs one grouping pass takes (it keeps the ids in threadgroup memory)
 _pair_tables: dict[int, tuple[mx.array, mx.array, mx.array, mx.array]] = {}
 _pair_counts: dict[int, mx.array] = {}
@@ -243,8 +310,37 @@ def group(ids: mx.array, experts: int) -> tuple[mx.array, ...]:
                         output_dtypes=[mx.uint32, mx.int32, mx.int32, mx.int32, mx.int32]))
 
 
-def experts(table: Any, x: mx.array, indices: mx.array, *, simdgroups: int = 2, grouped: bool | None = None
-            ) -> mx.array:
+ROUTE_GROUP = True              # grouped windows route and group in one launch
+ROUTE_THREADS = 512
+
+
+def route_group(logits: mx.array, bias: mx.array, top_k: int, scaling: mx.array
+                ) -> tuple[mx.array, mx.array, tuple[mx.array, ...]]:
+    """The route kernel's ids [R, K] and weights [R, K] plus the group kernel's tables, from one launch (R * K <= MAX_GROUP_PAIRS)."""
+
+    rows, experts_count = int(logits.shape[0]), int(logits.shape[1])
+    pairs = rows * int(top_k)
+    if pairs > MAX_GROUP_PAIRS or experts_count % 32 or experts_count > ROUTE_THREADS:
+        raise ValueError(f"rows.route_group: at most {MAX_GROUP_PAIRS} pairs and {ROUTE_THREADS} experts (a multiple of 32)")
+    count = _row_counts.get(rows)
+    if count is None:
+        count = _row_counts[rows] = mx.array([rows], dtype=mx.int32)
+    # constants in the source, not template arguments: the thread reservation attaches only to a plain kernel
+    consts = (("NE", experts_count), ("K", int(top_k)), ("T", ROUTE_THREADS), ("MAXP", MAX_GROUP_PAIRS))
+    source = "".join(f"  constexpr int {k} = {v};\n" for k, v in consts) + _ROUTE_GROUP
+    kernel = _kernel(f"nemotron_rows_route_group_{experts_count}_{int(top_k)}", source,
+                     ["G", "bias", "scaling", "rows"], ["IDX", "WT", "UIDS", "START", "COUNT", "MEMBERS", "UCOUNT"],
+                     _HEADER + threads.reserve(ROUTE_THREADS))
+    size = max(pairs, MIN_ELEMENTS)
+    out = kernel(inputs=[logits, bias, scaling, count],
+                 grid=(ROUTE_THREADS, 1, 1), threadgroup=(ROUTE_THREADS, 1, 1),
+                 output_shapes=[(rows, int(top_k)), (rows, int(top_k)), (size,), (size,), (size,), (size,), (1,)],
+                 output_dtypes=[mx.uint32, mx.float32, mx.uint32, mx.int32, mx.int32, mx.int32, mx.int32])
+    return out[0], out[1], tuple(out[2:])
+
+
+def experts(table: Any, x: mx.array, indices: mx.array, *, simdgroups: int = 2, grouped: bool | None = None,
+            tables: tuple[mx.array, ...] | None = None) -> mx.array:
     """Run SwitchMLP ``table`` for ``indices`` [R, k] on bf16 x [R, D], returning bf16 [R, k, D] with identical per-pair bits whether grouped or alone."""
 
     fc1, fc2 = table.fc1, table.fc2
@@ -259,13 +355,7 @@ def experts(table: Any, x: mx.array, indices: mx.array, *, simdgroups: int = 2, 
     if ids.dtype != mx.uint32:
         ids = ids.astype(mx.uint32)
     pairs = rows * top_k
-    if grouped is None:
-        grouped = rows >= GROUP_ROWS
-    if grouped and pairs <= MAX_GROUP_PAIRS:
-        uids, start, counts, members, used = group(ids, count)
-        groups = min(pairs, count)
-    else:
-        (start, counts, members, used), uids, groups = _pairs(pairs), padded(ids), pairs
+    uids, start, counts, members, used, groups = _grouping(ids, rows, count, grouped, tables)
     inputs = ["X", "UIDS", "START", "COUNT", "MEMBERS", "UCOUNT", "W", "S", "B"]
     up = _kernel("nemotron_rows_expert_up", _EXPERT_UP, inputs, ["ACT"])
     act = up(inputs=[x.reshape(rows, dims), uids, start, counts, members, used, fc1["weight"], fc1["scales"],
@@ -280,6 +370,23 @@ def experts(table: Any, x: mx.array, indices: mx.array, *, simdgroups: int = 2, 
              grid=(32 * simdgroups, out // block, groups), threadgroup=(32 * simdgroups, 1, 1),
              output_shapes=[(pairs, out)], output_dtypes=[mx.bfloat16])[0]
     return y.reshape(rows, top_k, out)
+
+
+_row_counts: dict[int, mx.array] = {}
+
+
+def _grouping(ids: mx.array, rows: int, count: int, grouped: bool | None,
+              tables: tuple[mx.array, ...] | None = None) -> tuple:
+    """(UIDS, START, COUNT, MEMBERS, UCOUNT, groups) for the pairs' ids: by expert (``tables`` when route_group made them), or a group a pair."""
+
+    pairs = int(ids.shape[0])
+    if grouped is None:
+        grouped = rows >= GROUP_ROWS
+    if grouped and pairs <= MAX_GROUP_PAIRS:
+        uids, start, counts, members, used = tables if tables is not None else group(ids, count)
+        return uids, start, counts, members, used, min(pairs, count)
+    (start, counts, members, used), uids = _pairs(pairs), padded(ids)
+    return uids, start, counts, members, used, pairs
 
 
 class RowLinear(nn.QuantizedLinear):
@@ -360,9 +467,16 @@ def install(nemotron: Any, *, mlx_one_row: bool = False) -> dict[str, int]:
     if tables:
         dims = int(tables[0].fc1["weight"].shape[-1]) * 8
         ids = mx.zeros((2, int(nemotron.args.num_experts_per_tok)), dtype=mx.uint32)
-        warm.append(experts(tables[0], mx.zeros((2, dims), dtype=mx.bfloat16), ids))
+        x = mx.zeros((2, dims), dtype=mx.bfloat16)
+        warm.append(experts(tables[0], x, ids))
+        experts_count = int(tables[0].fc1["weight"].shape[0])
+        if experts_count % 32 == 0 and experts_count <= ROUTE_THREADS:
+            logits = mx.zeros((2, experts_count), dtype=mx.bfloat16)
+            idx, wt, made = route_group(logits, mx.zeros((experts_count,), dtype=mx.float32),
+                                        int(nemotron.args.num_experts_per_tok), mx.ones((1,), dtype=mx.float32))
+            warm += [idx, wt, *made]
     mx.eval(warm)
     return {"linears": covered, "mlx_one_row": mlx_rows, "shapes": len(first), "expert_tables": len(tables)}
 
 
-__all__ = ["MAX_ROWS", "RowLinear", "experts", "fits", "install", "linears", "matches_mlx", "qmv"]
+__all__ = ["MAX_ROWS", "RowLinear", "experts", "fits", "install", "linears", "matches_mlx", "qmv", "route_group"]

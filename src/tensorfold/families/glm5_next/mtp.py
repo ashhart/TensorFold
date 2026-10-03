@@ -23,10 +23,14 @@ class GLMMTP:
         return MLACache()
 
     def __call__(self, model: GLM5, h: mx.array, tokens: mx.array, caches: list[MLACache], lengths: tuple[int, ...],
-                 decode: bool) -> mx.array:
+                 decode: bool, embeddings: mx.array | None = None) -> mx.array:
         """Rows h [n, D] with their next tokens, ``lengths`` rows for each stream's head cache: output rows [n, D]."""
 
-        e = mx.fast.rms_norm(model.embed_tokens(tokens), self.enorm, self.eps)
+        taken = model.embed_tokens(tokens) if embeddings is None else embeddings
+        if (embeddings is not None
+                and tuple(int(n) for n in taken.shape) != (int(tokens.shape[0]), int(h.shape[-1]))):
+            raise ValueError("GLM draft embeddings must match the following tokens and the hidden size")
+        e = mx.fast.rms_norm(taken, self.enorm, self.eps)
         hh = mx.fast.rms_norm(h, self.hnorm, self.eps)
         x = project(mx.concatenate([e, hh], axis=-1), self.eh_proj, rows_exact=decode)
         return self.layer(x, caches, lengths, decode)

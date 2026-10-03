@@ -7,6 +7,7 @@ MTP-drafted decoding emits serial decoding's tokens (greedy and sampled, full an
 rows give serial steps' bits; the two ranks' logits agree with the one-GPU model's to rounding.
 """
 
+import dataclasses
 import json
 import struct
 import threading
@@ -162,6 +163,9 @@ class _ThreadComm:
     def barrier(self) -> None:
         self.hub.barrier.wait()
 
+    def ready(self, label: str, **kwargs) -> None:
+        self.hub.barrier.wait()
+
 
 def _run_ranks(fn, engines: list) -> list:
     """fn(rank, engine) on every rank at once (threads); results in rank order."""
@@ -258,7 +262,9 @@ def test_tp_windows_match_serial_steps_and_prefix_commits_continue(models, kv_dt
 
 
 @pytest.mark.parametrize("kv_dtype", ["bf16", "int8"])
-@pytest.mark.parametrize("sampling", [None, Sampling(seed=1234, top_k=20, top_p=0.95)])
+@pytest.mark.parametrize("sampling", [None, Sampling(seed=1234, top_k=20, top_p=0.95),
+                                      Sampling(seed=1234, top_k=20, top_p=0.95, min_p=0.1),
+                                      Sampling(seed=1234, top_k=0, top_p=0.9, min_p=0.02)])
 def test_tp_mtp_drafts_give_serial_tokens_on_both_ranks(models, sampling, kv_dtype):
     _, ranks, drafts = models
 
@@ -285,6 +291,35 @@ def test_tp_mtp_drafts_give_serial_tokens_on_both_ranks(models, sampling, kv_dty
             assert a[name + "_min_rows"] >= 2, name                  # every round verifies a draft
         # at 90% the random head's first draft is always under the cut: it is verified alone
         assert a["d5c_drafted"] <= a["d5_drafted"] and a["d7c90_drafted"] == a["d7c90_rounds"]
+
+
+@pytest.mark.parametrize("sampling", [None, Sampling(seed=1234, top_k=20, top_p=0.95)])
+def test_tp_grammar_drafts_give_serial_tokens_on_both_ranks(models, sampling):
+    """A grammar on two ranks: each masks its own vocabulary columns and samples them without the step's gathered
+    candidates (they predate the mask); drafted == serial on both ranks, and the grammar takes every token."""
+
+    pytest.importorskip("xgrammar")
+    from toy_grammar import toy
+
+    grammars, compiled = toy(V)
+    _, ranks, _ = models
+
+    def body(r, e):
+        c = grammars.constraint(compiled)
+        first = prefill(e, PROMPT, sampling, constraint=c)
+        out = {"serial": serial_decode(e, first, 24, sampling, constraint=c).tokens}
+        for depth in (1, 3, 5):
+            c = grammars.constraint(compiled)
+            first = prefill(e, PROMPT, sampling, constraint=c)
+            out[depth] = mtp_decode(e, first, 24, sampling, depth=depth, confidence=0.0, constraint=c).tokens
+        return out
+
+    engines = [Engine(w, capacity=1024, max_rows=8, prefill_rows=16) for w in ranks]
+    a, b = _run_ranks(body, engines)
+    assert a == b and all(a[d] == a["serial"] for d in (1, 3, 5))
+    serial = a["serial"][:a["serial"].index(0) + 1] if 0 in a["serial"] else a["serial"]   # nothing after the end
+    m = grammars.xgr.GrammarMatcher(compiled)
+    assert all(m.accept_token(t) for t in serial)
 
 
 @pytest.mark.parametrize("sampling", [None, Sampling(seed=77, top_k=20, top_p=0.95)])
@@ -379,6 +414,9 @@ def _fake_nccl(monkeypatch, hub):
         def barrier(self):
             hub.barrier.wait()
 
+        def ready(self, label, **kwargs):
+            hub.barrier.wait()
+
     monkeypatch.setattr(comm_mod, "NCCL", FakeNCCL)
 
 
@@ -418,22 +456,34 @@ def test_tp_server_ranks_share_requests_and_stream_serial_tokens(checkpoint, mod
         stats = engines[0].generate(prompt, 20, samp, lambda new: got.extend(new), **kw)
         return got, stats
 
+    ends = tuple(engines[0].eos)                  # the checkpoint's end tokens, before the test sets its own
     with torch.no_grad():
         got, _ = ask(PROMPT, sampling)
         serial, serial_stats = ask(PROMPT, sampling, draft=False)      # one token a round on both ranks
         prompt2 = PROMPT + got + [7, 8, 9]
         warm, warm_stats = ask(prompt2, sampling)                      # resumes from the prompt on both ranks
         cold, _ = ask(prompt2, sampling, draft=False)
+        same, same_stats = ask(prompt2, sampling)                      # the same prompt again, on both ranks
+        third, third_stats = ask(prompt2, sampling)                    # and a third time: every resend hits
         greedy, _ = ask(PROMPT, None)
+        end = refs[0][5]                         # both ranks stop at this token now; ignore_eos decodes past it
+        for e in engines:
+            e.eos, e.w.cfg = (end,), dataclasses.replace(e.w.cfg, eos=(end,))
+        stopped, _ = ask(PROMPT, sampling)
+        free, _ = ask(PROMPT, sampling, stop_eos=False)
+        free_serial, _ = ask(PROMPT, sampling, draft=False, stop_eos=False)
     engines[0].shutdown()
     follower.join(timeout=120)
     assert not follower.is_alive() and not errors, errors
     ref = refs[0]
-    eos = [i for i, t in enumerate(ref) if t in engines[0].eos]
+    eos = [i for i, t in enumerate(ref) if t in ends]
     assert got == (ref[:eos[0] + 1] if eos else ref)
     assert serial == got and serial_stats["drafts"] is False
-    assert warm_stats["cached"] == len(PROMPT) and warm == cold             # the reply prefills again
+    assert warm_stats["cached"] == len(PROMPT) - 1 and warm == cold         # kept one token early
+    assert same_stats["cached"] == len(prompt2) - 1 and same == cold
+    assert third_stats["cached"] == len(prompt2) - 1 and third == cold
     assert len(greedy) >= 1
+    assert free == free_serial == ref and stopped == ref[:ref.index(end) + 1]     # rank 1 read ignore_eos
 
 
 @pytest.mark.parametrize("differ", ["depth", "kv_dtype"])

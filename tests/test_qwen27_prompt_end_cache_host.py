@@ -7,7 +7,9 @@ entry for the whole prompt then differs from the next prompt in its last token a
 
 - The one-stream engine's bookkeeping, on one GPU and on both ranks of two, with stand-ins for ``decode`` and
   ``decode_tp`` (no PyTorch needed): which entry each prompt resumes from and what each entry holds.
-- The concurrent decoder's admissions (``MultiDecoder``), one GPU and both ranks, with a stand-in prefill.
+- The concurrent decoder's admissions (``MultiDecoder``), one GPU and both ranks, with a stand-in prefill; with a
+  stand-in drafter on ``prefill_state`` and a stand-in chunk, the drafter contexts allocated around a stream's first
+  commit.
 - ``prefill_state(keep_at=...)`` with a stand-in ``prefill_chunk``: the spans, where a chunk is cut, the kept state's
   buffers, and the drafter's calls and snapshots.
 - The whole prefill on row-wise CPU stand-ins for the kernels: the prompt's state, last logits and first token are a
@@ -85,7 +87,7 @@ class Recorder:
         self.prefills = []
 
     def prefill(self, w, prompt, sampling, drafter=None, *, state=None, keep_at=None, rank=None, limit=0, stops=(),
-                keep=None, vision=None):
+                keep=None, vision=None, room=None):
         start = state.pos if state is not None else 0
         if state is not None:
             assert list(prompt[:start]) == state.ids, "resumed from a state that is not a prefix of the prompt"
@@ -103,7 +105,8 @@ class Recorder:
     def decode(st, prompt, pending, max_tokens):
         assert st.ids == list(prompt)
         tokens = ([pending] + _reply(prompt)[1:])[:max(1, max_tokens)]
-        return SimpleNamespace(tokens=tokens, seconds=0.1, rounds=len(tokens), widths=[1] * len(tokens))
+        return SimpleNamespace(tokens=tokens, seconds=0.1, rounds=len(tokens), widths=[1] * len(tokens), drafted_rows=0,
+                               accepted_drafts=0)
 
 
 def _bare_engine(tp=1, rank=0, drafter=None):
@@ -122,7 +125,7 @@ def _one_gpu(monkeypatch, drafter=None):
     fake.prefill = rec.prefill
 
     def draft_decode(w, st, prompt, pending, count, sampling, draft, *, max_rows, allow_copy, on_tokens, inplace,
-                     stop_eos=True):
+                     stop_eos=True, tree_rows=None):
         # the decode may commit into the prompt state: no entry holds it
         assert inplace and all(st is not entry for _, entry, _ in engine.cache.entries)
         result = rec.decode(st, prompt, pending, count)
@@ -311,7 +314,8 @@ def _two_ranks(monkeypatch):
         raise AssertionError("a two-rank engine ran the one-GPU path")
 
     fake._share, fake.prefill_tp, fake.decode_tp = share, prefill_tp, decode_tp
-    fake.pack_sampling, fake.unpack_sampling = (lambda sampling: [0] * 14), (lambda words: None)
+    fake.SAMPLING_WORDS = 14                                 # pack_sampling's length: rank 1 reads the header by it
+    fake.pack_sampling, fake.unpack_sampling = (lambda sampling: [0] * fake.SAMPLING_WORDS), (lambda words: None)
     monkeypatch.setitem(sys.modules, PKG + ".decode_tp", fake)
     single = types.ModuleType(PKG + ".decode")              # generate imports it before choosing the path
     single.prefill = single.draft_decode = one_gpu_only
@@ -525,6 +529,227 @@ def test_both_ranks_admit_from_and_keep_the_same_entries(cuda_modules, monkeypat
     assert any(p.start for p in rec1.prefills)
 
 
+# ----------------------------------------------------------------- the concurrent decoder's drafter contexts
+WINDOW = 16
+
+
+class ContextDraft:
+    """DFlash2's drafter contexts on its fused path: each layer's keys and values, ``[heads, rows, dim]`` tensors of at
+    most ``window`` rows. ``add_taps`` concatenates and keeps the last ``window`` rows, ``snapshot`` and ``restore``
+    copy the per-layer lists, ``skip`` empties them, ``add_taps_streams`` puts each stream's new tensors in its
+    snapshot's own lists, and ``launch_blocks`` reads only the snapshots it is given (and proposes nothing). Every
+    tensor put in a context is tracked."""
+
+    layers, heads, dim = 2, 2, 4
+
+    def __init__(self, torch, window, world=1):
+        self.torch, self.window, self.world = torch, window, world
+        self.kc, self.vc = [None] * self.layers, [None] * self.layers
+        self.context_len, self.context_end = 0, 0
+        self.made = []
+
+    def _made(self, t):
+        self.made.append(weakref.ref(t))
+        return t
+
+    def alive(self):
+        return [t for t in (ref() for ref in self.made) if t is not None]
+
+    def snapshot(self):
+        return (list(self.kc), list(self.vc), self.context_len, self.context_end)
+
+    def restore(self, snap):
+        kc, vc, self.context_len, self.context_end = snap
+        self.kc, self.vc = list(kc), list(vc)
+
+    def skip(self, n):
+        self.kc, self.vc = [None] * self.layers, [None] * self.layers
+        self.context_len, self.context_end = 0, self.context_end + n
+
+    def add_taps(self, taps):
+        n = taps.shape[0]
+        for cache in (self.kc, self.vc):
+            for layer in range(self.layers):
+                new, old = self.torch.zeros(self.heads, n, self.dim), cache[layer]
+                joined = new if old is None else self.torch.cat((old, new), dim=1)
+                cache[layer] = self._made(joined[:, -self.window:].contiguous())
+        self.context_len = min(self.window, self.context_len + n)
+        self.context_end += n
+
+    def add_taps_streams(self, snaps, taps):
+        sizes = [t.shape[0] for t in taps]
+        for snap, n in zip(snaps, sizes):
+            for cache in snap[:2]:
+                for layer in range(self.layers):
+                    rows = min(self.window, (0 if cache[layer] is None else cache[layer].shape[1]) + n)
+                    cache[layer] = self._made(self.torch.zeros(self.heads, rows, self.dim))
+        return [(snap[0], snap[1], min(self.window, snap[2] + n), snap[3] + n) for snap, n in zip(snaps, sizes)]
+
+    def launch_blocks(self, snaps, pendings, max_nodes, block=None):
+        assert all(t is not None for snap in snaps for t in snap[0] + snap[1])
+        return [None] * len(snaps)
+
+
+def _tapped_prefills(m, monkeypatch):
+    """``MultiDecoder`` on the real ``prefill_state``, ``private``, ``kept`` and ``viewed``, over ``_ids_state`` states:
+    a stand-in ``prefill_chunk`` writes each row's id into the attention buffers and returns one tap row a row; a
+    stand-in first token."""
+
+    def chunk(w, tokens, st, *, tp=False, capture_taps=False, last=True, every=False, cut=0, vision=None):
+        p0, rows = st.pos, int(tokens.shape[0])
+        assert 0 <= cut < rows
+        kbuf, vbuf = m.prefill._grow(st, 0, p0 + rows)
+        kbuf[p0:p0 + rows, 0, 0] = tokens.float()
+        vbuf[p0:p0 + rows, 0, 0] = tokens.float()
+        st.pos = p0 + rows
+        normed = ("normed", st.pos) if last else None
+        tapped = m.torch.zeros(rows, 1) if capture_taps else None
+        if not cut:
+            return normed, tapped
+        part = m.decode.clone_state(st)
+        part.pos = p0 + cut
+        return normed, tapped, part
+
+    monkeypatch.setattr(m.prefill, "prefill_chunk", chunk)
+    monkeypatch.setattr(m.multi, "State", lambda w: _ids_state(m, []))
+    monkeypatch.setattr(m.multi, "first_token", lambda w, normed, n, *rest: _reply([n])[0])
+
+
+def _context_rows_in(tensors):
+    """Drafter context rows in these tensors' storages, each storage once (a row: keys and values, every layer)."""
+
+    storages = {t.untyped_storage().data_ptr(): t.untyped_storage().nbytes() for t in tensors if t is not None}
+    return sum(storages.values()) // (2 * ContextDraft.layers * ContextDraft.heads * ContextDraft.dim * 4)
+
+
+def _held(dec):
+    """The context rows the cache entries and the decoding streams hold."""
+
+    snaps = [snap for _, _, snap in dec.cache.entries] + [s.snap for s in dec.streams.values()]
+    return _context_rows_in([t for snap in snaps if snap is not None for t in snap[0] + snap[1]])
+
+
+def _rounds(m, monkeypatch):
+    """A round's forward, sampling and commit as stand-ins: each window is its pending token alone, which samples 5
+    (no end token), so a round commits one row a stream and gives the drafter that row's taps."""
+
+    def forward(w, wins, *, full_logits, tp, capture_taps):
+        starts = [0]
+        for tokens, _, _ in wins:
+            starts.append(starts[-1] + len(tokens))
+        return None, None, m.torch.zeros(starts[-1], 1), starts
+
+    monkeypatch.setattr(m.multi, "multi_tree_forward", forward)
+    monkeypatch.setattr(m.multi, "sample_streams", lambda logits, starts, positions, samplings:
+                        [[5] * len(p) for p in positions])
+    monkeypatch.setattr(m.multi, "path_indices", lambda record, rows: [(None, None, m.torch.tensor(r)) for r in rows])
+    monkeypatch.setattr(m.multi, "commit_streams", lambda states, record, rows, indices, in_place: None)
+
+
+def _drafter_rows(m, monkeypatch, turns, *, whole_prompt, rank):
+    """Serve each (prompt, reply tokens) once the one before has finished, drafting with a ``WINDOW``-row drafter; for
+    each, (context rows allocated, rows the entries and decoding streams hold) when its decode starts and after its
+    first round's commit. ``whole_prompt``: the entry at the whole prompt, whose snapshot is the stream's context, as
+    before the entry moved to ``len(prompt) - 1``. ``rank`` None: one GPU; 0 or 1: that rank of two, rank 1 following
+    rank 0's messages."""
+
+    with monkeypatch.context() as mp:
+        _tapped_prefills(m, mp)
+        _rounds(m, mp)
+        if whole_prompt:
+            mp.setattr(m.multi, "entry_end", len)
+        queue = []
+
+        def share(values, r, device):
+            if r == 0:
+                queue.append(list(values))
+                return list(values)
+            return queue.pop(0)
+
+        mp.setattr(m.multi, "_share", share)
+        world = 1 if rank is None else 2
+        w = SimpleNamespace(config=SimpleNamespace(eos=(0,), vocab=8), norm=m.torch.zeros(1),
+                            head=SimpleNamespace(n=8), layers=[])
+        drafts = [ContextDraft(m.torch, WINDOW, world) for _ in range(world)]
+        decs = [m.multi.MultiDecoder(w, d, keep=KEEP, rank=r, world=world, context=CONTEXT, allow_copy=False)
+                for r, d in enumerate(drafts)]
+        dec, draft, seen = decs[rank or 0], drafts[rank or 0], []
+        step, commit = dec._step, dec._commit
+
+        def look():
+            seen.append((_context_rows_in(draft.alive()), _held(dec)))
+
+        def step_and_look(s, stop):
+            first = step(s, stop)
+            if s.sid in dec.streams:                          # the step that reached the prompt's end
+                look()
+            return first
+
+        def commit_and_look(*args):
+            commit(*args)
+            look()
+
+        dec._step, dec._commit = step_and_look, commit_and_look
+        for prompt, count in turns:
+            s = m.multi.Stream(list(prompt), count, None)
+            _admitted(decs[0], s)
+            assert not decs[0].filling and not s.done
+            assert decs[0].round() == ([s] if count == 2 else [])
+            decs[0].finish([s])
+        if world == 2:
+            queue.append([])                                  # rank 0 ends the follow loop
+            decs[1].follow()
+        assert len(seen) == 2 * len(turns)
+        return [seen[i:i + 2] for i in range(0, len(seen), 2)]
+
+
+@pytest.mark.parametrize("rank", [None, 0, 1], ids=["one GPU", "rank 0 of two", "rank 1 of two"])
+def test_the_entrys_own_drafter_context_is_held_only_until_the_first_commit(cuda_modules, monkeypatch, rank):
+    """The entry at ``n - 1`` holds a drafter context of its own; a whole-prompt entry shares its stream's. After a
+    prefill step the drafter keeps no reference of its own, so every context allocated is an entry's or a decoding
+    stream's. The stream's first commit replaces its context and frees the prompt-end one: from then on no more rows
+    are allocated than with the whole-prompt entry. Before it, at most the entry's own context more."""
+
+    m = cuda_modules
+    first = _chat([([40, 41, 42], None)])                                     # 10 tokens: an entry below the window
+    second = _chat([([40, 41, 42], [50, 51]), ([43, 44], None)])              # 21, resumed from first's entry here
+    turns = [(first, 3), (second, 2), (second, 3), ([7], 3)]    # 2: the reply ends in its first round; KEEP entries
+    here = _drafter_rows(m, monkeypatch, turns, whole_prompt=False, rank=rank)
+    whole = _drafter_rows(m, monkeypatch, turns, whole_prompt=True, rank=rank)
+    for (prompt, _), (start, after), (whole_start, whole_after) in zip(turns, here, whole):
+        assert start[0] == start[1] and after[0] == after[1], (prompt, start, after)
+        own = min(len(prompt) - 1, WINDOW) if len(prompt) > 1 else 0
+        assert start[0] <= whole_start[0] + own, (prompt, start, whole_start)
+        assert after[0] <= whole_after[0], (prompt, after, whole_after)
+    assert any(start[0] > whole_start[0] for (start, _), (whole_start, _) in zip(here, whole))
+
+
+@pytest.mark.parametrize("case", ["message start", "image"])
+def test_without_a_prompt_end_entry_the_first_commit_frees_the_prompt_end_context(cuda_modules, monkeypatch, case):
+    """Where no entry is kept at the prompt's end (a message start less than ``MIN_GAP`` before it covers it, or the
+    prompt has images), after the stream's first commit every context allocated is an entry's or the stream's."""
+
+    m = cuda_modules
+    _tapped_prefills(m, monkeypatch)
+    _rounds(m, monkeypatch)
+    monkeypatch.setattr(m.multi, "MIN_GAP", 3)
+    image = case == "image"
+    w = SimpleNamespace(config=SimpleNamespace(eos=(0,), vocab=8), norm=m.torch.zeros(1), head=SimpleNamespace(n=8),
+                        layers=[])
+    draft = ContextDraft(m.torch, WINDOW)
+    vision = SimpleNamespace(encode=lambda prepared, prompt: SimpleNamespace(rope_delta=0)) if image else None
+    dec = m.multi.MultiDecoder(w, draft, keep=KEEP, context=CONTEXT, allow_copy=False,
+                               points=lambda ids: [4] if len(ids) > 4 else [], vision=vision)
+    prompt = list(range(60, 66))
+    s = m.multi.Stream(prompt, 3, None, vision=("image",) if image else None)
+    dec.admit(s)
+    while dec.filling:
+        dec._fill()
+    assert _cache_ids(dec) == ([] if image else [prompt[:4]])
+    assert dec.round() == [] and not s.done
+    assert _context_rows_in(draft.alive()) == _held(dec)
+
+
 # ------------------------------------------------------------------ prefill_state(keep_at=...), a stand-in chunk
 class TapDraft:
     """DFlash2's context bookkeeping: the last ``window`` rows it absorbed, ``skip``, snapshots and restores."""
@@ -606,7 +831,7 @@ def test_keep_at_cuts_only_the_chunk_that_holds_the_point(cuda_modules, monkeypa
     assert [(p0, rows) for p0, rows, *_ in got] == [(a, b - a) for a, b in spans] == [(p0, r) for p0, r, *_ in ref_calls]
     assert [cut for _, _, cut, _, _ in got] == [keep_at - a if a < keep_at < b else 0 for a, b in spans]
     assert normed == ref == ("normed", n) and st.pos == n
-    assert kept.pos == keep_at and kept.kv == st.kv and kept.kv is not st.kv
+    assert kept.pos == keep_at and kept.kv is st.kv                 # one list: a later grow frees the old buffers
     assert kept.rec[0] == ("rec at", keep_at)
     if draft is None:
         assert snap is None
@@ -711,7 +936,8 @@ def _cpu_kernels(torch, monkeypatch, prefill, forward):
                            add_rmsnorm=glue_add_rmsnorm, gdn_pre=gdn_pre, attn_prep=attn_prep)
     pg = SimpleNamespace(add_rmsnorm=pg_add_rmsnorm, gated_norm=gated_norm, gate_mul=gate_mul, swiglu=swiglu)
     monkeypatch.setattr(prefill, "glue", glue)
-    monkeypatch.setattr(prefill, "prefill_glue", pg)         # the MLX checkpoint's prompt glue (w.quant "mlx")
+    monkeypatch.setattr(prefill, "prefill_glue", pg)         # the MLX checkpoint's prompt glue (w.quant "mlx"),
+    monkeypatch.setattr(prefill, "prefill_bf16", pg)         # FP8 or bf16 prompts alike
     monkeypatch.setattr(prefill, "_mm", matmul)
     monkeypatch.setattr(prefill, "deltanet", SimpleNamespace(chain=chain))
     monkeypatch.setattr(prefill, "attention", attention)
@@ -888,9 +1114,7 @@ def test_the_same_prompt_again_resumes_from_its_kept_state_with_one_token(cpu):
 
 @pytest.mark.parametrize("cached,length,point", [(0, 1025, 1024), (1000, 1025, 1024), (1000, 1030, 1024)])
 def test_the_kept_state_holds_the_buffers_grown_after_the_point(cpu, cached, length, point):
-    """Key/value buffers grow to at least 1,024 rows and double. A prefill resumed at 1,000 tokens grows them past
-    1,024 inside the chunk that holds the point: the kept state then holds the grown buffers, whose first rows are
-    the old ones' copies, and no buffer of its own."""
+    """A prefill resumed at 1,000 tokens grows the buffers in the kept chunk; the kept state and prefix share them."""
 
     torch = cpu.torch
     prompt = _prompt(length, 50)
@@ -901,7 +1125,7 @@ def test_the_kept_state_holds_the_buffers_grown_after_the_point(cpu, cached, len
     assert _bits_equal(torch, logits, ref_logits) and pending == ref_pending
     _assert_same_state(torch, st, ref)
     if cached:
-        assert prefix_b.kv[3][0].shape[0] == 1024 < st.kv[3][0].shape[0]    # grown inside the chunk
+        assert prefix_b.kv is st.kv and st.kv[3][0].shape[0] > 1024       # grown inside the chunk, for both
     assert _shares_kv(kept, st)
     (fresh, _), _ = cpu.run(prompt[:point])
     _assert_same_state(torch, kept, fresh)

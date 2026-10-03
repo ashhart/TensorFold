@@ -302,27 +302,30 @@ def _merge(PO, PM, PL, OUT, CNT, R, H: tl.constexpr, LW: tl.constexpr, NCH: tl.c
 
 
 class LatentScratch:
-    """Chunk partials for up to rows x heads x chunks, the absorbed queries and the attended latents."""
+    """Chunk partials for ``part_rows`` (one ``attention`` call) x heads x chunks; queries and latents for ``rows``."""
 
-    def __init__(self, rows: int, heads: int, chunks: int, device, lw: int = L) -> None:
-        self.rows, self.heads, self.nch, self.lw = rows, heads, chunks, lw
-        self.po = torch.empty((chunks * rows * heads * lw,), dtype=torch.float32, device=device)
-        self.pm = torch.empty((chunks * rows * heads,), dtype=torch.float32, device=device)
-        self.pl = torch.empty((chunks * rows * heads,), dtype=torch.float32, device=device)
+    def __init__(self, rows: int, heads: int, chunks: int, device, lw: int = L, part_rows: int | None = None) -> None:
+        part_rows = rows if part_rows is None else min(rows, part_rows)
+        self.rows, self.part_rows, self.heads, self.nch, self.lw = rows, part_rows, heads, chunks, lw
+        self.po = torch.empty((chunks * part_rows * heads * lw,), dtype=torch.float32, device=device)
+        self.pm = torch.empty((chunks * part_rows * heads,), dtype=torch.float32, device=device)
+        self.pl = torch.empty((chunks * part_rows * heads,), dtype=torch.float32, device=device)
         self.qa = torch.empty((rows, heads, lw), dtype=torch.bfloat16, device=device)
         self.ol = torch.empty((rows, heads, lw), dtype=torch.bfloat16, device=device)
         self.dummy = torch.zeros((1,), dtype=torch.int32, device=device)
 
 
 def attention(qa: torch.Tensor, cache: torch.Tensor, pos: torch.Tensor, s: LatentScratch, *, scale: float,
-              nch: int, out: torch.Tensor) -> torch.Tensor:
-    """Dense causal attention of qa [R, H, 512] over the cache through pos + R - 1, visiting nch 512-key chunks (empty ones skipped) -> out [R, H, 512]."""
+              nch: int, out: torch.Tensor, hb: int | None = None) -> torch.Tensor:
+    """Dense causal attention of qa [R, H, 512] through pos + R - 1 in nch 512-key chunks; a row ignores the others."""
     R, H, LW = qa.shape
-    if nch > s.nch or R > s.rows or LW != s.lw:
+    if nch > s.nch or R > s.part_rows or LW != s.lw:
         raise ValueError(f"latent attention: {R} rows, {nch} chunks, width {LW} past the scratch's "
-                         f"{s.rows}, {s.nch}, {s.lw}")
+                         f"{s.part_rows}, {s.nch}, {s.lw}")
     n = nch * R * H
-    hb = head_block(R)
+    hb = head_block(R) if hb is None else hb
+    if hb not in (HB, HB_WIDE):
+        raise ValueError(f"latent attention: {hb} heads a program, not {HB} or {HB_WIDE}")
     _dense_chunks[(R, triton.cdiv(H, hb), nch)](qa, cache, pos, s.po[:n * LW], s.pm[:n], s.pl[:n], R, H=H, LW=LW,
                                                 CH=CHUNK, SCALE=scale, HBT=hb, KTT=KT, num_warps=8, num_stages=1)
     _merge[(R, H)](s.po, s.pm, s.pl, out, s.dummy, R, H=H, LW=LW, NCH=nch, SPARSE=False, num_warps=4)

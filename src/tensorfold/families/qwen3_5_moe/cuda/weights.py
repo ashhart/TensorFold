@@ -40,6 +40,11 @@ def routed(prefix: str, get: Callable, top_k: int) -> Routed:
 
     def table(proj: str) -> tuple[torch.Tensor, ...]:
         mine, shared = triple(prefix + f"switch_mlp.{proj}"), triple(prefix + f"shared_expert.{proj}")
+        if any(a.shape[1:] != b.shape for a, b in zip(mine, shared)):
+            raise ValueError(f"{prefix}shared_expert.{proj} is stored in a different format from the routed experts "
+                             f"(words {tuple(shared[0].shape)} against {tuple(mine[0].shape[1:])} an expert); the "
+                             "shared expert runs in the routed experts' grouped table, so it needs their bits and "
+                             "group size")
         return tuple(torch.cat([a, b[None]]).contiguous() for a, b in zip(mine, shared))
 
     experts = grouped.make([table("gate_proj"), table("up_proj")], table("down_proj"), GS)
@@ -71,7 +76,7 @@ class MTP:
 def mtp_tensors(model_dir: str | Path) -> dict[str, torch.Tensor] | None:
     """The MTP layer's MLX tensors (named ``mtp.*``) from the checkpoint or its side file, or None without one."""
 
-    from safetensors import safe_open
+    from tensorfold.cuda.direct_read import SafeTensors
 
     model_dir = Path(model_dir)
     files = [model_dir / MTP_FILE] if (model_dir / MTP_FILE).is_file() else []
@@ -81,10 +86,10 @@ def mtp_tensors(model_dir: str | Path) -> dict[str, torch.Tensor] | None:
         files = sorted({model_dir / f for n, f in names.items() if n.startswith("mtp.") or ".mtp." in n})
     out: dict[str, torch.Tensor] = {}
     for path in files:
-        with safe_open(str(path), framework="pt", device="cpu") as f:
-            for name in f.keys():
-                if name.startswith("mtp.") or ".mtp." in name:
-                    out["mtp." + name.split("mtp.", 1)[1]] = f.get_tensor(name)
+        f = SafeTensors([path])
+        for name in f.keys():
+            if name.startswith("mtp.") or ".mtp." in name:
+                out["mtp." + name.split("mtp.", 1)[1]] = f.get(name)
     return out or None
 
 

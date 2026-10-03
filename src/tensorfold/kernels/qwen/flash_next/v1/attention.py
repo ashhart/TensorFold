@@ -7,6 +7,7 @@ from typing import Sequence
 import mlx.core as mx
 
 from tensorfold.kernels.qwen.flash_next.v1.base import MAX_STREAMS, consts, ints, kernel, log2, padded, pick
+from tensorfold.kernels.qwen.flash_next.v1.block_select import select_blocks  # noqa: F401 (callers read it here)
 
 _ATTN_PREP = r"""
   // one threadgroup of HD threads per (row, head): heads [0, NQ) are queries (from the stacked projection's
@@ -84,113 +85,45 @@ _IDX_POOL = r"""
   OUT[j * DI + d] = bfloat(out);
 """
 
-_SELECT_HEADER = r"""
-inline uint tf_key(float v) { uint b = as_type<uint>(v); return (b & 0x80000000u) ? ~b : (b | 0x80000000u); }
-"""
+# _IDX_POOL with raw rows counted from block START's first key (a chained draft's rows sit apart from the cache)
+_IDX_POOL_REL = _IDX_POOL.replace("const device bfloat* src = RAW + size_t(4 * b) * DI + d;",
+                                  "const device bfloat* src = RAW + size_t(4 * j) * DI + d;")
 
 _IDX_SCORES = r"""
-  // A simdgroup a block, rows in grid y: block b's score for row r is the sum over the HI indexer heads (in order)
+  // Simdgroup s of threadgroup (x, y) scores blocks (8 x + s) BB .. + BB - 1 for rows RB y .. RB y + RB - 1, each
+  // block's keys read once for those rows: block b's score for row r is the sum over the HI indexer heads (in order)
   // of relu(q . pooled b) (fp32: a lane's DI / 32 dims in order, then simd_sum), over sqrt(DI). Only rows past TOP
-  // complete blocks, and only their complete blocks, are scored (nothing else is read).
+  // complete blocks, and only their complete blocks, are scored.
   const uint lane = thread_index_in_simdgroup;
-  const int b = int(threadgroup_position_in_grid.x) * 8 + int(simdgroup_index_in_threadgroup);
-  const int r = int(threadgroup_position_in_grid.y);
-  const int complete = COMPLETE[r];
-  if (complete <= TOP || b >= complete) return;
+  const int b0 = (int(threadgroup_position_in_grid.x) * 8 + int(simdgroup_index_in_threadgroup)) * BB;
+  const int r0 = int(threadgroup_position_in_grid.y) * RB;
+  const int nb = int(POOLED_shape[0]), r1 = metal::min(int(Q_shape[0]), r0 + RB);
   constexpr int PER = DI / 32;
-  const device bfloat* pb = POOLED + size_t(b) * DI + lane * PER;
-  float p[PER];
-  for (int i = 0; i < PER; i++) p[i] = float(pb[i]);
-  float s = 0.0f;
-  for (int h = 0; h < HI; h++) {
-    const device bfloat* qh = Q + (r * HI + h) * DI + lane * PER;
-    float dot = 0.0f;
-    for (int i = 0; i < PER; i++) dot = fma(float(qh[i]), p[i], dot);
-    s += metal::max(simd_sum(dot), 0.0f);
+  for (int b = b0; b < b0 + BB && b < nb; b++) {
+    const device bfloat* pb = POOLED + size_t(b) * DI + lane * PER;
+    float p[PER];
+    for (int i = 0; i < PER; i++) p[i] = float(pb[i]);
+    for (int r = r0; r < r1; r++) {
+      const int complete = COMPLETE[r];
+      if (complete <= TOP || b >= complete) continue;
+      float s = 0.0f;
+      for (int h = 0; h < HI; h++) {
+        const device bfloat* qh = Q + (r * HI + h) * DI + lane * PER;
+        float dot = 0.0f;
+        for (int i = 0; i < PER; i++) dot = fma(float(qh[i]), p[i], dot);
+        s += metal::max(simd_sum(dot), 0.0f);
+      }
+      if (lane == 0) SC[size_t(r) * nb + b] = s / metal::precise::sqrt(float(DI));
+    }
   }
-  if (lane == 0) SC[size_t(r) * POOLED_shape[0] + b] = s / metal::precise::sqrt(float(DI));
 """
+SCORE_ROWS = 8      # rows a threadgroup scores: one read of a block's keys serves them
 
-_IDX_SELECT = r"""
-  // One threadgroup (1024 threads) a row past TOP complete blocks: its TOP best blocks by score (radix select over
-  // order-preserving keys, 8 bits a pass; among scores equal to the cut, the lowest block ids), written as the keys
-  // they cover (4 a block) in position order, then the row's tail keys [4 complete, ENDS).
-  const uint t = thread_position_in_threadgroup.x;
-  const uint lane = thread_index_in_simdgroup, sg = simdgroup_index_in_threadgroup;
-  const int r = int(threadgroup_position_in_grid.x);
-  const int nb = COMPLETE[r];
-  if (nb <= TOP) return;
-  const int ends = ENDS[r];
-  const int stride = SC_shape[1];
-  const device float* sc = SC + size_t(r) * stride;
-  device int* keys = KEYS + size_t(r) * KW;
-  threadgroup atomic_uint hist[256];
-  threadgroup uint cut_t, need_t;
-  threadgroup int tot_a[32], tot_e[32];
-  uint prefix = 0u, mask = 0u, need = TOP;
-  for (int shift = 24; shift >= 0; shift -= 8) {
-    if (t < 256) atomic_store_explicit(&hist[t], 0u, memory_order_relaxed);
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (int b = int(t); b < nb; b += 1024) {
-      const uint k = tf_key(sc[b]);
-      if ((k & mask) == prefix) atomic_fetch_add_explicit(&hist[(k >> shift) & 255u], 1u, memory_order_relaxed);
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (sg == 0) {                            // the cut bin: lane l scans bins 255 - 8l down to 248 - 8l
-      uint c[8], mine = 0u;
-      for (int i = 0; i < 8; i++) {
-        c[i] = atomic_load_explicit(&hist[255 - 8 * int(lane) - i], memory_order_relaxed);
-        mine += c[i];
-      }
-      uint above = simd_prefix_exclusive_sum(mine);
-      if (above < need && above + mine >= need) {
-        int bin = 248 - 8 * int(lane);
-        for (int i = 0; i < 8; i++) {
-          if (above + c[i] >= need) { bin = 255 - 8 * int(lane) - i; break; }
-          above += c[i];
-        }
-        cut_t = prefix | (uint(bin) << shift);
-        need_t = need - above;
-      }
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    prefix = cut_t;
-    need = need_t;
-    mask |= 255u << shift;
-  }
-  // `prefix` is the cut score's key: every block above it is taken, and the first `need` equal to it
-  const int chunk = (nb + 1023) / 1024;
-  const int lo = min(nb, int(t) * chunk), hi = min(nb, lo + chunk);
-  int n_above = 0, n_equal = 0;
-  for (int b = lo; b < hi; b++) {
-    const uint k = tf_key(sc[b]);
-    n_above += k > prefix ? 1 : 0;
-    n_equal += k == prefix ? 1 : 0;
-  }
-  int pa = simd_prefix_exclusive_sum(n_above), pe = simd_prefix_exclusive_sum(n_equal);
-  if (lane == 31) { tot_a[sg] = pa + n_above; tot_e[sg] = pe + n_equal; }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (sg == 0) {
-    const int a = tot_a[lane], e = tot_e[lane];
-    tot_a[lane] = simd_prefix_exclusive_sum(a);
-    tot_e[lane] = simd_prefix_exclusive_sum(e);
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  pa += tot_a[sg];
-  pe += tot_e[sg];
-  int out = pa + min(pe, int(need));
-  for (int b = lo; b < hi; b++) {
-    const uint k = tf_key(sc[b]);
-    bool take = k > prefix;
-    if (k == prefix) { take = pe < int(need); pe++; }
-    if (take) {
-      for (int j = 0; j < 4; j++) keys[out * 4 + j] = 4 * b + j;
-      out++;
-    }
-  }
-  if (t == 0)
-    for (int k = 4 * nb; k < ends; k++) keys[4 * TOP + (k - 4 * nb)] = k;
-"""
+
+def score_blocks(blocks: int, rows: int) -> int:
+    """Blocks a simdgroup scores: 8 at 16k+ blocks, fewer below so ~256 threadgroups stay busy; one for one row."""
+
+    return 1 if rows == 1 or blocks < 4096 else min(8, 1 << ((blocks // 2048).bit_length() - 1))
 
 _ATTN_PARTS = r"""
   // Threadgroup (h, r, p): query head h of row r over part p of the row's key list (SPARSE[r]: the NK[r] ids
@@ -291,38 +224,37 @@ def attn_prep(projected: mx.array, positions: mx.array, q_norm: mx.array, k_norm
                         output_dtypes=[mx.bfloat16, mx.bfloat16, mx.bfloat16]))
 
 def index_pool(raw: mx.array, start: int, stop: int, norm: mx.array, eps: mx.array, *, rotary_dim: int,
-               base: float) -> mx.array:
-    """Pooled indexer keys [stop - start, DI] of blocks [start, stop) from raw keys [keys, DI] (4 keys a block)."""
+               base: float, relative: bool = False) -> mx.array:
+    """Pooled keys [stop - start, DI] of blocks [start, stop) from raw keys; ``relative``: raw row 0 is key 4 start."""
 
     dims = int(raw.shape[-1])
-    run = kernel("q4_idx_pool", _IDX_POOL, ["RAW", "START", "W", "eps", "LOG2BASE"], ["OUT"])
+    if relative:
+        run = kernel("q4_idx_pool_rel", _IDX_POOL_REL, ["RAW", "START", "W", "eps", "LOG2BASE"], ["OUT"])
+    else:
+        run = kernel("q4_idx_pool", _IDX_POOL, ["RAW", "START", "W", "eps", "LOG2BASE"], ["OUT"])
     return run(inputs=[raw, mx.array([start], dtype=mx.int32), norm, eps, log2(base)],
                   template=[("DI", dims), ("RD", rotary_dim)],
                   grid=(dims, stop - start, 1), threadgroup=(dims, 1, 1),
                   output_shapes=[(stop - start, dims)], output_dtypes=[mx.bfloat16])[0]
 
-def index_select(q: mx.array, pooled: mx.array, complete: list[int], ends: list[int], *, top: int) -> mx.array:
-    """Return each row's top complete blocks in position order followed by its unfinished tail, skipping rows at or below top."""
+def index_scores(q: mx.array, pooled: mx.array, complete: Sequence[int], *, top: int) -> mx.array:
+    """Block scores [R, NB] (fp32) of each row past top complete blocks, over its complete blocks only (rest unset)."""
 
     rows, heads, dims = q.shape
     nb = int(pooled.shape[0])
+    bb = score_blocks(nb, rows)
     score = kernel("q4_idx_scores", _IDX_SCORES, ["Q", "POOLED", "COMPLETE"], ["SC"])
-    sc = score(inputs=[q, pooled, ints(complete)], template=[("HI", heads), ("DI", dims), ("TOP", top)],
-               grid=(-(-nb // 8) * 256, rows, 1), threadgroup=(256, 1, 1),
-               output_shapes=[(rows, nb)], output_dtypes=[mx.float32])[0]
-    return select_blocks(sc, complete, ends, top=top)
+    return score(inputs=[q, pooled, ints(complete)],
+                 template=[("HI", heads), ("DI", dims), ("TOP", top), ("BB", bb), ("RB", SCORE_ROWS)],
+                 grid=(-(-nb // (8 * bb)) * 256, -(-rows // SCORE_ROWS), 1), threadgroup=(256, 1, 1),
+                 output_shapes=[(rows, nb)], output_dtypes=[mx.float32])[0]
 
 
-def select_blocks(scores: mx.array, complete: list[int], ends: list[int], *, top: int) -> mx.array:
-    """``index_select`` from block scores [R, NB] (fp32): each row's best ``top`` of its complete blocks."""
+def index_select(q: mx.array, pooled: mx.array, complete: list[int], ends: list[int], *, top: int) -> mx.array:
+    """Each row's top complete blocks in position order, then its unfinished tail; rows at or below top are skipped."""
 
-    rows = int(scores.shape[0])
-    width = 4 * top + 3
-    select = kernel("q4_idx_select", _IDX_SELECT, ["SC", "COMPLETE", "ENDS"], ["KEYS"], header=_SELECT_HEADER)
-    return select(inputs=[scores, ints(complete), ints(ends)],
-                  template=[("TOP", top), ("KW", width)],
-                  grid=(1024 * rows, 1, 1), threadgroup=(1024, 1, 1),
-                  output_shapes=[(rows, width)], output_dtypes=[mx.int32])[0]
+    return select_blocks(index_scores(q, pooled, complete, top=top), complete, ends, top=top)
+
 
 def attention_rows(q: mx.array, keys: mx.array, values: mx.array, counts: list[int], ids: mx.array | None,
                    sparse: list[bool], scale: float, *, parts: int = 16, gate: mx.array | None = None) -> mx.array:
@@ -341,6 +273,51 @@ def attention_rows(q: mx.array, keys: mx.array, values: mx.array, counts: list[i
     po, pm = first(inputs=[q, keys, values, ids, ints(counts),
                            ints([int(bool(x)) for x in sparse]), scale_arr],
                    template=[("H", heads), ("KVH", kv_heads), ("D", dims), ("P", parts)],
+                   grid=(256 * heads, rows, parts), threadgroup=(256, 1, 1),
+                   output_shapes=[(rows, heads, parts, dims), (rows, heads, parts, 2)],
+                   output_dtypes=[mx.float32, mx.float32])
+    return _merge(po, pm, gate, rows, heads, dims, parts)
+
+
+def _split_source() -> str:
+    """_ATTN_PARTS with key ids from SPLIT[0] on read from the side buffers Ks / Vs (the same arithmetic)."""
+
+    swaps = [
+        ("  const device bfloat* vb = Vc + size_t(kvh) * cap * D + lane * PER;\n",
+         "  const device bfloat* vb = Vc + size_t(kvh) * cap * D + lane * PER;\n"
+         "  const int split = SPLIT[0], held = int(Ks_shape[2]);\n"
+         "  const device bfloat* ks = Ks + size_t(kvh) * held * D + lane * PER;\n"
+         "  const device bfloat* vs = Vs + size_t(kvh) * held * D + lane * PER;\n"),
+        ("    const size_t key = size_t(sparse ? ids[j] : j) * D;\n",
+         "    const int id = sparse ? ids[j] : j;\n"
+         "    const device bfloat* kp = id >= split ? ks + size_t(id - split) * D : kb + size_t(id) * D;\n"
+         "    const device bfloat* vp = id >= split ? vs + size_t(id - split) * D : vb + size_t(id) * D;\n"),
+        ("    for (int i = 0; i < PER; i++) sc = fma(q[i], float(kb[key + i]), sc);\n",
+         "    for (int i = 0; i < PER; i++) sc = fma(q[i], float(kp[i]), sc);\n"),
+        ("    for (int i = 0; i < PER; i++) o[i] = fma(e, float(vb[key + i]), o[i] * f);\n",
+         "    for (int i = 0; i < PER; i++) o[i] = fma(e, float(vp[i]), o[i] * f);\n"),
+    ]
+    src = _ATTN_PARTS
+    for old, new in swaps:
+        if src.count(old) != 1:
+            raise RuntimeError(f"attention source changed; cannot derive the split variant at: {old!r}")
+        src = src.replace(old, new)
+    return src
+
+
+def attention_rows_split(q: mx.array, keys: mx.array, values: mx.array, side_keys: mx.array, side_values: mx.array,
+                         split: int, counts: list[int], ids: mx.array | None, sparse: list[bool], scale: float, *,
+                         parts: int = 16, gate: mx.array | None = None) -> mx.array:
+    """``attention_rows`` with keys and values of positions ``split`` on from side buffers [1, KVH, n, D]."""
+
+    rows, heads, dims = q.shape
+    if ids is None:
+        ids = mx.zeros((max(rows, 8), 1), dtype=mx.int32)
+    first = kernel("q4_attn_parts_split", _split_source, ["Q", "Kc", "Vc", "Ks", "Vs", "IDS", "NK", "SPARSE", "SCALE",
+                                                          "SPLIT"], ["PO", "PM"])
+    po, pm = first(inputs=[q, keys, values, side_keys, side_values, ids, ints(counts),
+                           ints([int(bool(x)) for x in sparse]), mx.array([scale], dtype=mx.float32), ints([split])],
+                   template=[("H", heads), ("KVH", int(keys.shape[1])), ("D", dims), ("P", parts)],
                    grid=(256 * heads, rows, parts), threadgroup=(256, 1, 1),
                    output_shapes=[(rows, heads, parts, dims), (rows, heads, parts, 2)],
                    output_dtypes=[mx.float32, mx.float32])
@@ -407,14 +384,20 @@ def attention_rows_multi(q: mx.array, keys: Sequence[mx.array], values: Sequence
 
 def _scores_source(streams: int) -> str:
     src = _IDX_SCORES
+    load = ("    const device bfloat* pb = POOLED + size_t(b) * DI + lane * PER;\n"
+            "    float p[PER];\n"
+            "    for (int i = 0; i < PER; i++) p[i] = float(pb[i]);\n")
+    rows = ("    for (int r = r0; r < r1; r++) {\n"
+            "      const int complete = COMPLETE[r];\n"
+            "      if (complete <= TOP || b >= complete) continue;\n")
     swaps = [
-        ("  const int complete = COMPLETE[r];\n",
-         "  const int complete = COMPLETE[r];\n"
-         "  const int sb = SROW[r];\n"),
-        ("  const device bfloat* pb = POOLED + size_t(b) * DI + lane * PER;\n",
-         f"  const device bfloat* pb = {pick('POOLED', streams, 'sb')} + size_t(b) * DI + lane * PER;\n"),
-        ("  if (lane == 0) SC[size_t(r) * POOLED_shape[0] + b] = s / metal::precise::sqrt(float(DI));\n",
-         "  if (lane == 0) SC[size_t(r) * STRIDE[0] + b] = s / metal::precise::sqrt(float(DI));\n"),
+        ("  const int nb = int(POOLED_shape[0]), r1 = metal::min(int(Q_shape[0]), r0 + RB);\n",
+         "  const int nb = STRIDE[0], r1 = metal::min(int(Q_shape[0]), r0 + RB);\n"),
+        (load + rows,                                   # a row reads its own stream's blocks
+         rows + "      const int sb = SROW[r];\n"
+         f"      const device bfloat* pb = {pick('POOLED', streams, 'sb')} + size_t(b) * DI + lane * PER;\n"
+         "      float p[PER];\n"
+         "      for (int i = 0; i < PER; i++) p[i] = float(pb[i]);\n"),
     ]
     for old, new in swaps:
         if src.count(old) != 1:
@@ -422,26 +405,47 @@ def _scores_source(streams: int) -> str:
         src = src.replace(old, new)
     return src
 
-def index_select_multi(q: mx.array, pooled: Sequence[mx.array], stream_of_row: Sequence[int],
-                       complete: Sequence[int], ends: Sequence[int], *, top: int) -> mx.array:
-    """Score each row against its stream's pooled blocks, skipping rows at or below top complete blocks whose ids are unread."""
+def index_scores_multi(q: mx.array, pooled: Sequence[mx.array], stream_of_row: Sequence[int],
+                       complete: Sequence[int], *, top: int) -> mx.array:
+    """``index_scores`` with row r scored against its stream's pooled blocks, stream_of_row[r]."""
 
     rows, heads, dims = q.shape
     streams = len(pooled)
     if not 1 <= streams <= MAX_STREAMS:
         raise ValueError(f"index_select_multi: 1-{MAX_STREAMS} streams")
     nb = max(int(p.shape[0]) for p in pooled)
-    counts = ints(complete)
+    bb = score_blocks(nb, rows)
     names = ["Q"] + [f"POOLED{b}" for b in range(streams)] + ["COMPLETE", "SROW", "STRIDE"]
     score = kernel(f"q4_idx_scores_multi{streams}", lambda: _scores_source(streams), names, ["SC"])
-    sc = score(inputs=[q, *pooled, counts, ints(stream_of_row),
-                       mx.array([nb], dtype=mx.int32)],
-               template=[("HI", heads), ("DI", dims), ("TOP", top)],
-               grid=(-(-nb // 8) * 256, rows, 1), threadgroup=(256, 1, 1),
-               output_shapes=[(rows, nb)], output_dtypes=[mx.float32])[0]
-    width = 4 * top + 3
-    select = kernel("q4_idx_select", _IDX_SELECT, ["SC", "COMPLETE", "ENDS"], ["KEYS"], header=_SELECT_HEADER)
-    return select(inputs=[sc, counts, ints(ends)],
-                  template=[("TOP", top), ("KW", width)],
-                  grid=(1024 * rows, 1, 1), threadgroup=(1024, 1, 1),
-                  output_shapes=[(rows, width)], output_dtypes=[mx.int32])[0]
+    return score(inputs=[q, *pooled, ints(complete), ints(stream_of_row), mx.array([nb], dtype=mx.int32)],
+                 template=[("HI", heads), ("DI", dims), ("TOP", top), ("BB", bb), ("RB", SCORE_ROWS)],
+                 grid=(-(-nb // (8 * bb)) * 256, -(-rows // SCORE_ROWS), 1), threadgroup=(256, 1, 1),
+                 output_shapes=[(rows, nb)], output_dtypes=[mx.float32])[0]
+
+
+def index_select_multi(q: mx.array, pooled: Sequence[mx.array], stream_of_row: Sequence[int],
+                       complete: Sequence[int], ends: Sequence[int], *, top: int) -> mx.array:
+    """Score each row against its stream's pooled blocks; rows at or below top complete blocks are skipped."""
+
+    scores = index_scores_multi(q, pooled, stream_of_row, complete, top=top)
+    return select_blocks(scores, list(complete), list(ends), top=top)
+
+
+def warm_decode(*, heads: int, kv_heads: int, dims: int, index_heads: int, index_dims: int, top: int, scale: float,
+                width: int, norm: mx.array, eps: mx.array, rotary_dim: int, base: float) -> None:
+    """Build the sparse decode kernels' variants once at load: a long request would compile each on first use."""
+
+    outs = []
+    for blocks in (4 * top + 4, 4096, 8192, 16384):           # every score_blocks variant past top blocks
+        pooled = mx.zeros((blocks, index_dims), dtype=mx.bfloat16)
+        for rows in (1, 2):
+            q = mx.zeros((rows, index_heads, index_dims), dtype=mx.bfloat16)
+            outs.append(index_select(q, pooled, [blocks] * rows, [4 * blocks + 1] * rows, top=top))
+    q = mx.zeros((1, heads, dims), dtype=mx.bfloat16)
+    keys = mx.zeros((1, kv_heads, 16, dims), dtype=mx.bfloat16)
+    side = mx.zeros((1, kv_heads, 1, dims), dtype=mx.bfloat16)
+    gate = mx.zeros((1, width), dtype=mx.bfloat16)
+    outs.append(attention_rows_split(q, keys, keys, side, side, 8, [9], None, [False], scale, gate=gate))
+    raw = mx.zeros((8, index_dims), dtype=mx.bfloat16)
+    outs.append(index_pool(raw, 1, 3, norm, eps, rotary_dim=rotary_dim, base=base, relative=True))
+    mx.eval(outs)

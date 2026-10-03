@@ -50,7 +50,8 @@ def test_actual_attention_callsite_bounds_short_request_launches(monkeypatch, al
     cache = Allocation((slots, 2, 64), "bf16", "cpu")
     # a graph passes its bucket; an eager call covers the stream's live context (8,184 committed + 8 rows)
     pooled = Allocation(((slots + 3) // 4, 128), "bf16", "cpu")
-    st = SimpleNamespace(att_index={0: 0}, kc=[_kv(cache, bits)], ikc=[ikc], pooled=[pooled], pos_dev=None,
+    st = SimpleNamespace(image_positions=None, rope_delta=0, att_index={0: 0}, kc=[_kv(cache, bits)],
+                         ikc=[ikc], pooled=[pooled], pos_dev=None,
                          pos=8192 - 8 if not bucket else 100)
     mod.attn_block(layer, weights, [(st, 0, 8)], buffers, 8, False, 8192 if bucket else None)
     assert kernels["_chunks"].calls[0][0] == (8, 2, 5)
@@ -120,7 +121,8 @@ def test_prompt_blocks_bound_their_launches_by_their_own_rows(monkeypatch, alloc
     for name in ("attn_prep", "attn_gate"):
         monkeypatch.setattr(mod.glue, name, lambda *a, **kw: None)
     cache = Allocation((slots, 2, 64), "bf16", "cpu")
-    st = SimpleNamespace(att_index={0: 0}, kc=[_kv(cache, bits)], ikc=[Allocation((slots, 128), "bf16", "cpu")],
+    st = SimpleNamespace(image_positions=None, rope_delta=0, att_index={0: 0}, kc=[_kv(cache, bits)],
+                         ikc=[Allocation((slots, 128), "bf16", "cpu")],
                          pooled=[Allocation(((slots + 3) // 4, 128), "bf16", "cpu")], pos_dev=None, pos=0)
     mod.attn_block(layer, weights, [(st, 0, rows)], buffers, rows, False)
     ends = [mod.ATT_ROWS, 2 * mod.ATT_ROWS]

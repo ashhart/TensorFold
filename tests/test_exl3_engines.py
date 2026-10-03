@@ -56,7 +56,7 @@ def _group(k: int, n: int, bits: int, seed: int) -> dict[str, np.ndarray]:
 
 def test_a_group_split_across_shards_loads_from_each_part_s_own_file(tmp_path):
     from tensorfold.cuda.exl3 import format as fmt
-    from tensorfold.families.qwen3_5.cuda.exl3_load import _read_groups, _where
+    from tensorfold.families.qwen3_5.cuda.exl3_load import _files, _read_groups, _where
 
     prefix = "model.language_model.layers.0.mlp.down_proj"
     g = _group(256, 128, 3, 1)
@@ -65,7 +65,7 @@ def test_a_group_split_across_shards_loads_from_each_part_s_own_file(tmp_path):
     _config(tmp_path, quantization_config=EXL3)
     ckpt = fmt.scan(tmp_path, read_markers=False)
     assert set(ckpt.groups[prefix].files) == {"a.safetensors", "b.safetensors"}
-    layer = _read_groups(tmp_path, _where(tmp_path), ckpt.groups, "cpu")[prefix].layer
+    layer = _read_groups(_files(tmp_path, _where(tmp_path)), ckpt.groups, "cpu")[prefix].layer
     assert torch.equal(layer.suh, torch.from_numpy(g["suh"])) and torch.equal(layer.svh, torch.from_numpy(g["svh"]))
     assert layer.k == 256 and layer.n == 128 and layer.bits == 3 and layer.codebook == "mul1"
 
@@ -84,11 +84,12 @@ def test_admission_counts_an_exl3_pack_as_loaded():
     assert indexed_weights(1, True)("model.visual.merger.fc.weight", {"dtype": "BF16", "shape": [8, 8]}) == (0, 0)
 
 
-def test_extra_files_add_their_mapped_pages(tmp_path):
+@pytest.mark.parametrize("suffix", ["shard_0.trellis", "trellis"])
+def test_extra_files_add_their_mapped_pages(tmp_path, suffix):
     from tensorfold.cuda.capacity import estimate_weights
     from tensorfold.cuda.geometry import indexed_weights
 
-    shard = "model.language_model.layers.0.ple.ple_embedding.ngram_embedding.shard_0.trellis"
+    shard = "model.language_model.layers.0.ple.ple_embedding.ngram_embedding." + suffix
     save_file({shard: np.zeros((100, 51), dtype=np.int16),
                "model.language_model.layers.0.ple.ple_embedding.ngram_embedding.head_bias":
                    np.zeros((16, 160), dtype=np.float16)}, str(tmp_path / "ngram_embedding.safetensors"))

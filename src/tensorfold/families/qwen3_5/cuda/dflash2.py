@@ -11,15 +11,16 @@ import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
-from safetensors import safe_open
 
+from tensorfold.cuda.direct_read import SafeTensors
 from tensorfold.engine.exact_sampling import Sampling
 
+from .affine_memory import packed_draft
 from .draft_tree import best_first
 from .glue import embedding, swiglu
 from .draft_attention import append, block_attention
 from .qmm import group_sums
-from .qmm_fast import matmul, matmul_rows, rows, tile, untile
+from .qmm_fast import matmul, matmul_group, matmul_rows, rows, tile, untile
 from .weights import Exl3, Plain, QLinear, Weights
 
 
@@ -197,6 +198,7 @@ class DFlash2:
         self.eps = float(cfg["rms_norm_eps"])
         self.theta = float(cfg["rope_parameters"]["rope_theta"])
         self.mask_id = int(cfg["dflash_config"]["mask_token_id"])
+        self.trained = int(cfg["dflash_config"].get("block_size", 8))     # its training block: the planner's floor
         self.group_size = int(cfg["dflash_config"]["conv_group_size"])
         self.layers = int(cfg["num_hidden_layers"])
         self.window = int(cfg["sliding_window"]) - 1
@@ -204,14 +206,15 @@ class DFlash2:
         self.target_embed = target.embed
         self.device = target.norm.device
         self.weights: dict[str, torch.Tensor] = {}
-        with safe_open(str(path / "model.safetensors"), framework="pt", device="cpu") as f:
-            for name in f.keys():
-                tensor = f.get_tensor(name)
-                if name in ("candidate_selector.predecessor_codebook",
-                            "candidate_selector.successor_codebook"):
-                    self.weights[name] = tensor.float().numpy().copy()
-                else:
-                    self.weights[name] = tensor              # on the host until packed: no bf16 copy on the device
+        f = SafeTensors([path / "model.safetensors"])
+        for name in f.keys():
+            tensor = f.get(name)
+            if name in ("candidate_selector.predecessor_codebook",
+                        "candidate_selector.successor_codebook"):
+                self.weights[name] = tensor.float().numpy().copy()
+            else:
+                self.weights[name] = tensor                  # on the host until packed: no bf16 copy on the device
+        del f
         self.inv_freq = (1.0 / self.theta **
                          (torch.arange(self.head_dim // 2, device=self.device,
                                        dtype=torch.float32) * 2 / self.head_dim))
@@ -281,8 +284,7 @@ class DFlash2:
         if bits == 4:
             for name in list(self.weights):
                 t = self.weights[name]
-                if (isinstance(t, torch.Tensor) and t.ndim == 2 and name.endswith(".weight")
-                        and t.shape[0] % 64 == 0 and t.shape[1] % 64 == 0 and t.numel() >= 1 << 20):
+                if isinstance(t, torch.Tensor) and packed_draft(name, t.shape):    # as admission counts it
                     self.q4[name] = tile(quantize4(t.to(self.device, torch.bfloat16)))
                     del self.weights[name]
         for name, t in self.weights.items():
@@ -462,8 +464,8 @@ class DFlash2:
         conv = w[base + "mlp_conv.base_kernel"]
         h = _dconv(normed, dyn, conv, 0, self.group_size, seg=length)
         xs = group_sums(h)
-        act, act_xs = swiglu(matmul(h, self.q4[base + "mlp.gate_proj.weight"], xs),
-                             matmul(h, self.q4[base + "mlp.up_proj.weight"], xs))
+        act, act_xs = swiglu(*matmul_group(h, [self.q4[base + "mlp.gate_proj.weight"],
+                                               self.q4[base + "mlp.up_proj.weight"]], xs))   # one launch, each its bits
         mlp = self._row(act, base + "mlp.down_proj.weight", act_xs)
         return _dconv(mlp, dyn, conv, 1, self.group_size, x, seg=length)
 

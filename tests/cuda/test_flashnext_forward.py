@@ -7,11 +7,15 @@ import struct
 import tempfile
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA only", allow_module_level=True)
+if torch.cuda.get_device_capability()[0] != 12:
+    pytest.skip("Flash Next CUDA kernels run on sm_12x (GB10, RTX 50, RTX PRO 6000) only",
+                allow_module_level=True)
 
 from tensorfold.cuda import experts as grouped  # noqa: E402
 from tensorfold.engine.exact_sampling import Sampling  # noqa: E402
@@ -168,7 +172,8 @@ def test_a_bf16_ngram_table_holds_the_same_window_contract():
                 assert torch.equal(lg[i], logits[i]), (R, i)
 
 
-@pytest.mark.parametrize("sampling", [None, Sampling(seed=1234, top_k=20, top_p=0.95)])
+@pytest.mark.parametrize("sampling", [None, Sampling(seed=1234, top_k=20, top_p=0.95),
+                                      Sampling(seed=1234, top_k=20, top_p=0.95, min_p=0.1)])
 def test_graphs_and_mtp_drafts_give_serial_tokens(sampling):
     w = _model()
     prompt = [5, 17, 99, 250, 1023, 7, 64, 300, 11, 12, 13]
@@ -316,6 +321,64 @@ def test_prefill_chunks_and_resumes_give_the_same_state(sampling, kv_dtype):
     assert mtp_decode(e, first, 20, sampling, depth=4, confidence=0.0).tokens == ref
 
 
+@pytest.mark.parametrize("ple", [False, True])
+@pytest.mark.parametrize("mtp", [True, False])
+@pytest.mark.parametrize("kv_dtype", ["bf16", "int8", "int4"])
+@pytest.mark.parametrize("sampling", [None, Sampling(seed=13, top_k=20, top_p=0.95)])
+def test_a_point_kept_one_token_early_resumes_the_same_prompt_and_a_next_turn(tmp_path, sampling, kv_dtype, mtp,
+                                                                             ple):
+    """``keep_at`` keeps a fresh prefill of prompt[:keep_at]; the same prompt and a next turn resume from it as fresh."""
+
+    if ple:
+        c = _cfg(ple=True)
+        table = _bf16_table(tmp_path / "shard_0.safetensors", c.ngram(0).rows, c.ngram(0).dims)
+        w = _model(ple=_ple(c, table, _Rand(3)))
+    else:
+        w = _model()
+    prompt = [(37 * i + 11) % V for i in range(300)]
+    turn = prompt[:299] + [271, 77, 78]
+
+    def engine():
+        return Engine(w, capacity=1024, max_rows=8, prefill_rows=64, graphs=True, kv_dtype=kv_dtype)
+
+    def decode(e, first):
+        if mtp:
+            return mtp_decode(e, first, 20, sampling, depth=4, confidence=0.0).tokens
+        return serial_decode(e, first, 20, sampling).tokens
+
+    def fresh(p):
+        e = engine()
+        first = prefill(e, p, sampling, mtp=mtp)
+        return first, _state(e), decode(e, first)
+
+    def same(e, first, want, ref, tag):
+        assert all(torch.equal(a, b) for a, b in zip(_state(e), want)), tag
+        assert decode(e, first) == ref, tag
+
+    first, want, ref = fresh(prompt)
+    turn_first, turn_want, turn_ref = fresh(turn)
+    e = engine()
+    for keep_at in (1, 64, 100, 299, 300):
+        assert prefill(e, prompt, sampling, mtp=mtp, keep_at=keep_at) == first, keep_at
+        kept = e.kept
+        alone = engine()
+        prefill(alone, prompt[:keep_at], sampling, mtp=mtp)
+        snap = alone.st.snapshot()
+        assert all(torch.equal(kept["state"][k], snap[k]) for k in ("rec", "conv", "ple_tail")), keep_at
+        assert (kept["state"]["pos"], kept["state"]["mtp_len"]) == (snap["pos"], snap["mtp_len"]), keep_at
+        assert (kept["state"]["ple_history"] is None) == (snap["ple_history"] is None), keep_at
+        assert snap["ple_history"] is None or np.array_equal(kept["state"]["ple_history"], snap["ple_history"])
+        assert torch.equal(kept["tail"], alone.last_streams) if mtp else kept["tail"] is None, keep_at
+        same(e, first, want, ref, keep_at)                       # a reply decodes past the kept point
+        if keep_at == len(prompt):                               # the whole prompt: nothing it resumes
+            continue
+        assert prefill(e, prompt, sampling, mtp=mtp, resume=kept, keep_at=299) == first, keep_at
+        assert (e.kept is kept) == (keep_at == 299), keep_at     # the same prompt again keeps its own point
+        same(e, first, want, ref, keep_at)
+        assert prefill(e, turn, sampling, mtp=mtp, resume=kept, keep_at=len(turn) - 1) == turn_first, keep_at
+        same(e, turn_first, turn_want, turn_ref, keep_at)
+
+
 @pytest.mark.parametrize("sampling", [None, Sampling(seed=21, top_k=20, top_p=0.95)])
 def test_the_family_hook_serves_the_recipe(tmp_path, sampling):
     """``cuda_engine``, what ``tensorfold serve`` calls, builds the measured recipe (up to 6 drafts, the 30% stop,
@@ -327,10 +390,10 @@ def test_the_family_hook_serves_the_recipe(tmp_path, sampling):
 
     from test_flashnext_tp import _checkpoint
 
-    assert (DEPTH, CONFIDENCE, CONTEXT) == (6, 0.3, 8192)
+    assert (DEPTH, CONFIDENCE, CONTEXT) == (6, 0.7, 8192)
     _checkpoint(tmp_path)
     eng = cuda_engine(tmp_path, context=8185)                  # the synthetic checkpoint names no native window
-    assert (eng.depth, eng.confidence, eng.max_len, eng.tp) == (6, 0.3, 8192, 1)
+    assert (eng.depth, eng.confidence, eng.max_len, eng.tp) == (6, 0.7, 8192, 1)
     assert eng.w.draft_ids is not None
     prompt = [5, 17, 99, 250, 1023, 7, 64, 300, 11, 12, 13]
     first = prefill(eng.e, prompt, sampling)
@@ -347,10 +410,51 @@ def test_the_family_hook_serves_the_recipe(tmp_path, sampling):
         cuda_engine(tmp_path, drafter="some/draft-model")
 
 
+@pytest.mark.parametrize("streams", [1, 2])
+def test_the_engine_loads_its_extensions_before_the_weights(tmp_path, monkeypatch, streams):
+    """Every CUDA extension a start loads (built, on a first start) is loaded before the weights: none in the warm-up
+    or a first request after them."""
+
+    import sys
+
+    from tensorfold.cuda import build
+    from tensorfold.families.qwen4_exp.cuda import weights
+    from tensorfold.families.qwen4_exp.cuda.engine import FlashNextEngine
+
+    from test_flashnext_tp import _checkpoint
+
+    _checkpoint(tmp_path)
+    for module in [m for name, m in list(sys.modules.items()) if name.startswith("tensorfold.")]:
+        for loader in ("_ext", "_prompt_ext"):
+            cached = getattr(module, loader, None)
+            if hasattr(cached, "cache_clear"):
+                cached.cache_clear()               # each loader goes through build.load again (a load, no compile)
+    events: list = []
+    real_build, real_load = build.load, weights.load
+
+    def built(name, *args, **kwargs):
+        events.append(("extension", name))
+        return real_build(name, *args, **kwargs)
+
+    def loaded(*args, **kwargs):
+        events.append(("weights", None))
+        return real_load(*args, **kwargs)
+
+    monkeypatch.setattr(build, "load", built)
+    monkeypatch.setattr(weights, "load", loaded)
+    eng = FlashNextEngine(tmp_path, depth=4, confidence=0.3, draft_vocab=None, max_len=1024, prefetch=False,
+                          streams=streams)
+    got: list[int] = []
+    eng.generate([5, 17, 99, 250, 1023, 7, 64, 300, 11, 12, 13], 8, None, lambda new: got.extend(new))
+    assert got and events.count(("weights", None)) == 1
+    after = events[events.index(("weights", None)) + 1:]
+    assert [name for kind, name in events if kind == "extension"], events
+    assert not after, f"extensions loaded after the weights: {after}"
+
+
 @pytest.mark.parametrize("sampling", [None, Sampling(seed=31, top_k=20, top_p=0.95)])
 def test_prefix_reuse_and_the_serial_switch(tmp_path, sampling):
-    """A prompt that extends the last request's reply or prompt resumes from the kept state and decodes what a
-    fresh prefill of it decodes; ``draft=False`` decodes the same tokens one a round and leaves the kept states."""
+    """Extending or repeating a prompt resumes as a fresh prefill; ``draft=False`` decodes the same, kept states intact."""
 
     from tensorfold.families.qwen4_exp.cuda.engine import FlashNextEngine
 
@@ -372,11 +476,16 @@ def test_prefix_reuse_and_the_serial_switch(tmp_path, sampling):
             ask(first)                                           # the first request's states again
         prompt = first + (reply if extend == "reply" else []) + [401, 33, 2048]
         warm, warm_stats = ask(prompt)
-        assert warm_stats["cached"] == len(first), (extend, warm_stats)     # prompt ends only: the reply prefills again
+        # kept one token before a prompt's end: the reply and the first prompt's last token prefill again
+        assert warm_stats["cached"] == len(first) - 1, (extend, warm_stats)
         serial, serial_stats = ask(prompt, draft=False)          # one token a round, a fresh prefill
         assert serial == warm and serial_stats["drafts"] is False and serial_stats["cached"] == 0
         again, again_stats = ask(prompt + [9])                   # the kept states survived the serial request
-        assert again_stats["cached"] >= len(prompt)
+        assert again_stats["cached"] == len(prompt) - 1
+        same, same_stats = ask(prompt + [9])                     # the same prompt again: all but its last token kept
+        assert same == again and same_stats["cached"] == len(prompt), (extend, same_stats)
+        third, third_stats = ask(prompt + [9])                   # and a third time: every resend hits
+        assert third == again and third_stats["cached"] == len(prompt), (extend, third_stats)
         ask([1500, 9, 10])                                       # an unrelated prompt: nothing to resume from
         cold, cold_stats = ask(prompt)
         assert cold_stats["cached"] == 0 and cold == warm, extend
@@ -431,3 +540,53 @@ def test_capture_is_declined_when_the_experts_cannot_be_captured():
     prompt = [5, 17, 99, 250, 1023, 7, 64, 300, 11, 12, 13]
     first = prefill(e, prompt, None)
     assert len(serial_decode(e, first, 8, None).tokens) == 8
+
+
+def _set_end(eng, end: int) -> None:
+    """The engine's end tokens become ``end`` alone: stopping changes, the arithmetic does not."""
+
+    import dataclasses
+
+    eng.w.cfg = dataclasses.replace(eng.w.cfg, eos=(end,))
+    eng.eos = (end,)
+    if getattr(eng, "multi", None) is not None:
+        eng.multi.eos = (end,)
+
+
+@pytest.mark.parametrize("parallel", [1, 2])
+@pytest.mark.parametrize("sampling", [None, Sampling(seed=23, top_k=20, top_p=0.95)])
+def test_the_engine_decodes_past_end_tokens_with_ignore_eos(tmp_path, sampling, parallel):
+    """``stop_eos=False`` (ignore_eos) runs a reply to max_tokens through end tokens, drafted as serial, alone or
+    under ``--parallel`` beside a stream that stops at them (each equal to its solo run)."""
+
+    import threading
+
+    from tensorfold.families.qwen4_exp import cuda_engine
+
+    from test_flashnext_tp import _checkpoint
+
+    _checkpoint(tmp_path)
+    eng = cuda_engine(tmp_path, context=1017, **({"parallel": parallel} if parallel > 1 else {}))
+    prompt = [5, 17, 99, 250, 1023, 7, 64, 300, 11, 12, 13]
+
+    def ask(p=prompt, **kw):
+        got: list[int] = []
+        eng.generate(p, 32, sampling, lambda new: got.extend(new) or False, **kw)
+        return got
+
+    free = ask(draft=False, stop_eos=False)
+    end = next(t for i, t in enumerate(free) if i >= 3 and free.index(t) == i and i < len(free) - 1)
+    _set_end(eng, end)
+    assert len(free) == 32 and ask(stop_eos=False) == free and ask(draft=False, stop_eos=False) == free
+    assert ask() == free[:free.index(end) + 1] == ask(draft=False)
+    if parallel > 1:                             # one stream through its end token beside one that stops at it
+        other = prompt[:5] + [42]
+        alone = [ask(stop_eos=False), ask(other)]
+        together: list = [None, None]
+        threads = [threading.Thread(target=lambda: together.__setitem__(0, ask(stop_eos=False))),
+                   threading.Thread(target=lambda: together.__setitem__(1, ask(other)))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert together == alone

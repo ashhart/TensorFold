@@ -332,7 +332,7 @@ def test_bad_safetensors_headers_are_refused(tmp_path, raw):
 
 
 def test_only_flash_next_has_ple_tables_and_their_bytes_are_counted(tmp_path):
-    assert [k for k, f in families.families().items() if hasattr(f.package, "ple_bytes")] == ["qwen4_exp"]
+    assert {k for k, f in families.families().items() if hasattr(f.package, "ple_bytes")} == set(qwen4_exp.MODEL_TYPES)
     files, table = _checkpoint(tmp_path)
     _write(tmp_path / "model-00003-of-00003.safetensors",
            {"language_model.model.layers.0.ple.ple_embedding.ngram_embedding.shard_0.weight": table[0][:4],

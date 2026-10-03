@@ -80,7 +80,8 @@ def make_app(**kwargs: Any) -> ChatApp:
         "engine_factory": FakeEngine,
     }
     settings.update(kwargs)
-    return ChatApp(None, FakeTokenizer(), **settings)
+    tokenizer = settings.pop("tokenizer", None)
+    return ChatApp(None, tokenizer or FakeTokenizer(), **settings)
 
 
 def expected_reply(app: ChatApp, messages: list[dict[str, Any]], max_new: int) -> tuple[list[int], str]:
@@ -629,7 +630,7 @@ def test_a_job_that_would_not_fit_waits_for_a_live_stream_to_finish() -> None:
             job.stream, job.error = None, None
             scheduler.submit(job)
         scheduler._admit()
-        while scheduler._filling is not None:          # an admitted prompt waits a round (the loop's) to fill
+        while scheduler._fills:                        # an admitted prompt waits a round (the loop's) to fill
             scheduler._fill()
         return [s.stream_id for s in engine.streams], scheduler
 

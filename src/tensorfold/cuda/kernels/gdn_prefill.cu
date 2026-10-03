@@ -4,20 +4,74 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
+#include <type_traits>
 
 namespace {
 
 constexpr int DK = 128;
 constexpr int DV = 128;
 
-__device__ __forceinline__ float4 load4f(const __nv_bfloat16* p) {
-    const uint2 w = *reinterpret_cast<const uint2*>(p);
+__device__ __forceinline__ float4 widen(uint2 w) {
     const __nv_bfloat162 a = *reinterpret_cast<const __nv_bfloat162*>(&w.x);
     const __nv_bfloat162 b = *reinterpret_cast<const __nv_bfloat162*>(&w.y);
     return make_float4(__low2float(a), __high2float(a), __low2float(b), __high2float(b));
 }
 
-__device__ __forceinline__ float4 load4f(const float* p) { return *reinterpret_cast<const float4*>(p); }
+__device__ __forceinline__ float4 widen(float4 w) { return w; }
+
+// A stage's keys, queries, gates and value rows, loaded into registers a stage ahead (in flight while the current
+// stage computes) and then stored as chain_kernel stages them: keys and queries as fp32 float4s, values bf16.
+template <typename QK, int THREADS, int ROWS, int STEPS>
+struct Prefetch {
+    using Raw = typename std::conditional<std::is_same<QK, float>::value, float4, uint2>::type;
+    static constexpr int KQ = STEPS * (DK / 4) / THREADS, VV = STEPS * ROWS / 8 / THREADS;
+    static_assert(KQ * THREADS == STEPS * (DK / 4) && VV * THREADS * 8 == STEPS * ROWS, "whole slots a thread");
+    Raw kr[KQ], qr[KQ];
+    uint4 vr[VV];
+    float gr, br;
+
+    __device__ __forceinline__ void fetch(const QK* q, const QK* k, const __nv_bfloat16* v, const float* g,
+                                          const float* beta, int t0, int W, int hk, int hv, int head, int key_head,
+                                          int col0) {
+#pragma unroll
+        for (int it = 0; it < KQ; ++it) {
+            const int i = threadIdx.x + it * THREADS, st = i / (DK / 4), c = i % (DK / 4);
+            const size_t at = (static_cast<size_t>(min(t0 + st, W - 1)) * hk + key_head) * DK + 4 * c;
+            kr[it] = *reinterpret_cast<const Raw*>(k + at);
+            qr[it] = *reinterpret_cast<const Raw*>(q + at);
+        }
+#pragma unroll
+        for (int it = 0; it < VV; ++it) {
+            const int i = threadIdx.x + it * THREADS, st = i / (ROWS / 8), c = i % (ROWS / 8);
+            vr[it] = *reinterpret_cast<const uint4*>(v + (static_cast<size_t>(min(t0 + st, W - 1)) * hv + head) * DV
+                                                     + col0 + 8 * c);
+        }
+        if (threadIdx.x < STEPS) {
+            const size_t at = static_cast<size_t>(min(t0 + static_cast<int>(threadIdx.x), W - 1)) * hv + head;
+            gr = g[at];
+            br = beta[at];
+        }
+    }
+
+    __device__ __forceinline__ void store(float4 (*ks)[DK / 4], float4 (*qs)[DK / 4], float* gs, float* bs,
+                                          __nv_bfloat16 (*vs)[ROWS]) const {
+#pragma unroll
+        for (int it = 0; it < KQ; ++it) {
+            const int i = threadIdx.x + it * THREADS;
+            ks[i / (DK / 4)][i % (DK / 4)] = widen(kr[it]);
+            qs[i / (DK / 4)][i % (DK / 4)] = widen(qr[it]);
+        }
+#pragma unroll
+        for (int it = 0; it < VV; ++it) {
+            const int i = threadIdx.x + it * THREADS;
+            *reinterpret_cast<uint4*>(&vs[i / (ROWS / 8)][8 * (i % (ROWS / 8))]) = vr[it];
+        }
+        if (threadIdx.x < STEPS) {
+            gs[threadIdx.x] = gr;
+            bs[threadIdx.x] = br;
+        }
+    }
+};
 
 template <typename QK, int ROWS, int STEPS>
 __global__ void __launch_bounds__(2 * ROWS) chain_kernel(
@@ -26,7 +80,7 @@ __global__ void __launch_bounds__(2 * ROWS) chain_kernel(
         float* __restrict__ last, __nv_bfloat16* __restrict__ y, int W, int hk, int hv) {
     __shared__ float4 ks[STEPS][DK / 4], qs[STEPS][DK / 4];
     __shared__ float gs[STEPS], bs[STEPS];
-    __shared__ __nv_bfloat16 vs[STEPS][ROWS];
+    __shared__ __align__(16) __nv_bfloat16 vs[STEPS][ROWS];
     const int head = blockIdx.x, row = blockIdx.y * ROWS + (threadIdx.x >> 1), half = threadIdx.x & 1;
     const int key_head = head / (hv / hk);
     float s[64];
@@ -36,24 +90,14 @@ __global__ void __launch_bounds__(2 * ROWS) chain_kernel(
         const float4 t = *reinterpret_cast<const float4*>(s0 + 8 * j + 4 * half);
         s[4 * j] = t.x; s[4 * j + 1] = t.y; s[4 * j + 2] = t.z; s[4 * j + 3] = t.w;
     }
+    Prefetch<QK, 2 * ROWS, ROWS, STEPS> pf;                // each stage's loads in flight during the one before
+    pf.fetch(q, k, v, g, beta, 0, W, hk, hv, head, key_head, blockIdx.y * ROWS);
     for (int t0 = 0; t0 < W; t0 += STEPS) {
         const int n = min(STEPS, W - t0);
         __syncthreads();
-        for (int i = threadIdx.x; i < n * (DK / 4); i += 2 * ROWS) {
-            const int st = i / (DK / 4), c = i % (DK / 4);
-            const size_t at = (static_cast<size_t>(t0 + st) * hk + key_head) * DK + 4 * c;
-            ks[st][c] = load4f(k + at);
-            qs[st][c] = load4f(q + at);
-        }
-        for (int i = threadIdx.x; i < n; i += 2 * ROWS) {
-            gs[i] = g[static_cast<size_t>(t0 + i) * hv + head];
-            bs[i] = beta[static_cast<size_t>(t0 + i) * hv + head];
-        }
-        for (int i = threadIdx.x; i < n * ROWS; i += 2 * ROWS) {
-            const int st = i / ROWS, rr = i % ROWS;
-            vs[st][rr] = v[(static_cast<size_t>(t0 + st) * hv + head) * DV + blockIdx.y * ROWS + rr];
-        }
+        pf.store(ks, qs, gs, bs, vs);
         __syncthreads();
+        if (t0 + STEPS < W) pf.fetch(q, k, v, g, beta, t0 + STEPS, W, hk, hv, head, key_head, blockIdx.y * ROWS);
         for (int tt = 0; tt < n; ++tt) {
             const float gt = gs[tt], bt = bs[tt];
             const size_t vat = (static_cast<size_t>(t0 + tt) * hv + head) * DV + row;
@@ -95,7 +139,8 @@ __global__ void __launch_bounds__(2 * ROWS) chain_kernel(
     float* s1 = last + (static_cast<size_t>(head) * DV + row) * DK;
 #pragma unroll
     for (int j = 0; j < 16; ++j)
-        *reinterpret_cast<float4*>(s1 + 8 * j + 4 * half) = make_float4(s[4 * j], s[4 * j + 1], s[4 * j + 2], s[4 * j + 3]);
+        *reinterpret_cast<float4*>(s1 + 8 * j + 4 * half) = make_float4(s[4 * j], s[4 * j + 1], s[4 * j + 2],
+                                                                        s[4 * j + 3]);
 }
 
 template <typename QK, int ROWS>
@@ -118,7 +163,8 @@ void gdn_prefill_cuda(const at::Tensor& q, const at::Tensor& k, const at::Tensor
                       const at::Tensor& beta, const at::Tensor& state, at::Tensor& last, at::Tensor& y, int sms) {
     const bool wide = v.size(1) >= sms;
     if (q.scalar_type() == at::kFloat) {
-        if (wide) launch<float, 128>(q, k, v, g, beta, state, last, y); else launch<float, 64>(q, k, v, g, beta, state, last, y);
+        if (wide) launch<float, 128>(q, k, v, g, beta, state, last, y);
+        else launch<float, 64>(q, k, v, g, beta, state, last, y);
     } else {
         if (wide) launch<__nv_bfloat16, 128>(q, k, v, g, beta, state, last, y);
         else launch<__nv_bfloat16, 64>(q, k, v, g, beta, state, last, y);

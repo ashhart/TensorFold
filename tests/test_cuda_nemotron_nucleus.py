@@ -27,8 +27,9 @@ def sampler(monkeypatch):
     sys.modules.pop("tensorfold.families.nemotron_h.cuda.sampler", None)
 
 
-def reference(row, pos, seed, temp, top_p, mod):
-    """The keyed rule in Python integers: rank by (value desc, id asc), cut at top_p, Gumbel-max by the hash."""
+def reference(row, pos, seed, temp, top_p, mod, min_p=0.0):
+    """The keyed rule in Python integers: rank by (value desc, id asc), cut at top_p and min_p, Gumbel-max by the
+    hash."""
     mask = (1 << 64) - 1
 
     def mix(x):
@@ -47,6 +48,8 @@ def reference(row, pos, seed, temp, top_p, mod):
         run += q / total
         limit += run < top_p
     limit += 1
+    if min_p > 0.0:
+        limit = min(limit, sum(scaled[i] >= top + math.log(min_p) for i in order))
     best = None
     for rank, i in enumerate(order[:limit]):
         x = mix((seed + mod.C1) & mask)
@@ -70,3 +73,16 @@ def test_top_k_off_samples_the_whole_vocabulary_nucleus(sampler):
     rows = logits.double().tolist()
     want = [reference(rows[r], 17 + r + 1, 1234, 0.8, 0.9, sampler) for r in range(3)]
     assert out.tolist() == want
+
+
+@pytest.mark.parametrize("top_p, min_p", [(0.9, 0.05), (1.0, 0.2), (0.5, 0.01), (1.0, 1.0)])
+def test_top_k_off_cuts_min_p_as_the_rule_does(sampler, top_p, min_p):
+    torch.manual_seed(1)
+    logits = (torch.randn(3, 700) * 2).to(torch.bfloat16)
+    params = sampler.Params("cpu")
+    params.set(Sampling(99, 0.8, 0, top_p, min_p))
+    meta = torch.tensor([5, 0, 0, 0], dtype=torch.int32)
+    out = torch.zeros(3, dtype=torch.int32)
+    sampler.keyed(logits, meta, params, out)
+    rows = logits.double().tolist()
+    assert out.tolist() == [reference(rows[r], 5 + r + 1, 99, 0.8, top_p, sampler, min_p) for r in range(3)]

@@ -33,9 +33,12 @@ def admission(geometry):
 
 
 class Pack:
-    """Tensors by name from the index's shards and the extra files, read with large sequential reads; ``release`` drops read pages."""
+    """Tensors by name from the index's shards and the extra files, read with large O_DIRECT reads where allowed; ``release`` drops read pages."""
 
     def __init__(self, model_dir: str | Path) -> None:
+        from tensorfold.cuda.direct_read import Reader
+
+        self.io = Reader()
         self.dir = Path(model_dir)
         self.where: dict[str, str] = dict(json.loads((self.dir / "model.safetensors.index.json").read_text())
                                           ["weight_map"])
@@ -70,16 +73,7 @@ class Pack:
         return file, base + begin, base + end, e["dtype"], list(e["shape"])
 
     def read(self, file: str, begin: int, end: int) -> torch.Tensor:
-        raw = torch.empty((end - begin,), dtype=torch.uint8)
-        view = memoryview(raw.numpy())
-        with open(self.dir / file, "rb", buffering=0) as f:
-            f.seek(begin)
-            at = 0
-            while at < len(view):
-                got = f.readinto(view[at:at + (64 << 20)])
-                if not got:
-                    raise IOError(f"short read of {file} at {begin + at}")
-                at += got
+        raw = self.io.read(self.dir / file, begin, end - begin)
         self.touched.add(file)
         return raw
 
@@ -111,7 +105,7 @@ class Pack:
 
 
 class NgramTable:
-    """The n-gram embedding's shards in ExLlamaV3's row codec, memory-mapped; ``words``/``lock``/``prefetch`` as ``HostTable``."""
+    """The n-gram table in ExLlamaV3's row codec (one tensor or shards), memory-mapped; reads as ``HostTable``'s."""
 
     def __init__(self, pk: Pack, base: str, shards: int, device) -> None:
         starts, offsets, fidx, files, words = [0], [], [], [], None
@@ -119,12 +113,21 @@ class NgramTable:
         self.words: list[np.ndarray] = []
         self.scales: list[np.ndarray] = []
         self.biases: list[np.ndarray] = []
-        for i in range(shards):
-            file, begin, end, dtype, shape = pk.entry(f"{base}shard_{i}.trellis")
-            if dtype != "I16" or len(shape) != 2:
+        try:
+            consolidated = pk.entry(base + "trellis")
+        except KeyError:
+            consolidated = None
+        if consolidated is None and shards < 1:
+            raise ValueError("n-gram table needs at least one shard")
+        entries = [consolidated] if consolidated is not None else [
+            pk.entry(f"{base}shard_{i}.trellis") for i in range(shards)]
+        for i, (file, begin, end, dtype, shape) in enumerate(entries):
+            if dtype != "I16" or len(shape) != 2 or shape[0] <= 0:
                 raise ValueError(f"n-gram shard {i}: expected int16 [rows, words], got {dtype} {shape}")
             if words not in (None, shape[1]):
                 raise ValueError("n-gram shards of different widths")
+            if end - begin != 2 * shape[0] * shape[1]:
+                raise ValueError(f"n-gram segment {i}: byte range does not match its shape")
             words = shape[1]
             if file not in maps:
                 maps[file] = len(files)
@@ -136,7 +139,7 @@ class NgramTable:
         self.words_per_row = int(words)
         self.dh = 160
         self.bits = (self.words_per_row - 1) * 16 // self.dh
-        if 1 + self.dh * self.bits // 16 != self.words_per_row:
+        if self.bits not in range(2, 9) or 1 + self.dh * self.bits // 16 != self.words_per_row:
             raise ValueError(f"n-gram rows of {self.words_per_row} words are not one scale plus 160 values")
         self.maps = [np.memmap(pk.dir / f, dtype=np.uint8, mode="r") for f in files]
         self.fidx = np.array(fidx, dtype=np.int64)
@@ -149,11 +152,16 @@ class NgramTable:
         self.head_offsets = pk.get(base + "head_offsets").cpu().numpy()
         self.head_sizes = pk.get(base + "head_vocab_sizes").cpu().numpy()
         self.multipliers = pk.get(base + "layer_multipliers").cpu().numpy()
+        from tensorfold.cuda.ngram_pages import Pins
+
+        self._pins = Pins()
 
     def gather(self, ids: np.ndarray) -> np.ndarray:
         """Rows ``ids`` (global) -> int16 [n, words]."""
 
         flat = np.asarray(ids, dtype=np.int64).reshape(-1)
+        if np.any(flat < 0) or np.any(flat >= self.rows):
+            raise IndexError(f"n-gram row outside [0, {self.rows})")
         shard = np.searchsorted(self.starts, flat, side="right") - 1
         at = self.offsets[shard] + (flat - self.starts[shard]) * self.row_bytes
         where = self.fidx[shard]
@@ -165,9 +173,26 @@ class NgramTable:
         return out.view(np.int16)
 
     def lock(self) -> bool:
-        from ..host_table import HostTable
+        if os.name == "nt":
+            from ..host_table import HostTable
+            from tensorfold.cuda.ngram_pages import merge, span
 
-        return HostTable.lock(self)
+            got = HostTable.lock(self)
+            if got:
+                self._pins.ranges = merge(span(int(a.ctypes.data), int(a.nbytes)) for a in self.words)
+            return got
+        return self._pins.all(self.words)
+
+    RUN_BYTES = 1 << 30
+
+    def lock_runs(self, budget: int) -> int:
+        """Pin whole contiguous row runs, charging only new OS pages and never exceeding the remaining budget."""
+
+        return self._pins.runs(self.words, max(0, int(budget)), self.RUN_BYTES)
+
+    @property
+    def pinned_bytes(self) -> int:
+        return self._pins.nbytes
 
     def prefetch(self, workers: int = 8) -> float:
         from ..host_table import HostTable

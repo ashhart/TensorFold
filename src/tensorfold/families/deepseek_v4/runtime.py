@@ -18,6 +18,7 @@ class DeepSeekFlash(GLMFlash):
     """The backbone behind the lane protocol; the MTP head reads the 4 streams of the rows it drafts from."""
 
     tag = "deepseek_v4"
+    hidden_pass = None                  # V4's backbone has no prompt pass: the engine feeds a chunk a forward
 
     def new_mtp_cache(self) -> Any:
         return MTPCache(self.args.sliding_window)
@@ -181,7 +182,7 @@ def drafter_config(folder: Path) -> dict[str, Any]:
         config = {}
     if config.get("model_type") not in (DSPARK_TYPE, MTP_TYPE) or not (folder / HEAD_WEIGHTS).is_file():
         raise ValueError(f"{folder} holds no DeepSeek-V4-Flash draft head: it needs {HEAD_WEIGHTS} and a config.json "
-                         f"whose model_type is {DSPARK_TYPE} or {MTP_TYPE} (Vontra/DeepSeek-V4-Flash-DSpark-MLX, or "
+                         f"whose model_type is {DSPARK_TYPE} or {MTP_TYPE} (TensorFold/DeepSeek-V4-Flash-DSpark-MLX, or "
                          f"python -m tensorfold.families.deepseek_v4.convert)")
     return config
 

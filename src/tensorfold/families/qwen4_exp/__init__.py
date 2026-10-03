@@ -5,18 +5,18 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-MODEL_TYPES = ("qwen4_exp",)
+MODEL_TYPES = ("qwen4_exp", "qwen3_8_flash_next")   # the second: the name newer exports (Mia-AiLab's NVFP4) carry
 TITLE = "Qwen3.8 Flash Next"
 LANES = True
 # with their MTP head: MLX affine (4-bit the default; oQ4e, oQ5e, 6- and 8-bit read too), EXL3 and NVFP4
-MODELS = ("Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP", "turboderp/Qwen3.8-Flash-Next-exl3",
+MODELS = ("TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP", "turboderp/Qwen3.8-Flash-Next-exl3",
           "local-inference-lab/Qwen3.8-Flash-Next-NVFP4", "RadixArk/Qwen3.8-Flash-Next-NVFP4")
 NVFP4_MODELS = MODELS[2:]
 QUANT_METHODS = {"cuda": ("mlx", "exl3", "modelopt")}  # MLX affine 4-bit, EXL3 packs and NVFP4 (ModelOpt)
 EXL3_VARIANT = "any"                           # every EXL3 codebook and width (tensorfold.families.EXL3_VARIANT_ANY)
 KERNEL_PACKAGE = "tensorfold.kernels.qwen.flash_next.v1"
 KERNEL_VERSION = "v1"
-# The CLI sets these before MLX starts, respecting environment overrides, to keep expert bindings from ending each command buffer.
+# The CLI sets defaults before MLX starts so expert bindings do not end each command buffer.
 MLX_ENV = {"MLX_MAX_OPS_PER_BUFFER": "200", "MLX_MAX_MB_PER_BUFFER": "100000"}
 
 
@@ -56,17 +56,35 @@ def check(model_dir: Path) -> None:
             print("[tensorfold] this EXL3 checkpoint has no MTP head: decoding without MTP drafts", flush=True)
         return
     if quant_method(config) == "modelopt":
-        # the CUDA engine's NVFP4 route: NVFP4 experts in blocks of 16, other linears bf16, MXFP8 or NVFP4
+        from tensorfold.vision.qwen_checkpoint import vision_key
+
+        # NVFP4 experts and n-gram tables; other linears are bf16, MXFP8 or block FP8
         found = config.get("quantization") or config.get("quantization_config") or {}
         algo = str(found.get("quant_algo") or "NVFP4").upper()
-        layers = {str(v.get("quant_algo", "")).upper() for v in (found.get("quantized_layers") or {}).values()}
+        # FP8 is read in the MTP drafter's experts (dequantized and re-quantized at load: they only draft) and in the
+        # n-gram tables (their own FP8 reader, host_table.FP8Table); FP8 elsewhere stays refused
+        def fp8_read(name: str) -> bool:
+            return {"mtp", "experts"} <= set(name.split(".")) or ".ple.ple_embedding.ngram_embedding." in name + "."
+
+        layers = {str(v.get("quant_algo", "")).upper() for k, v in (found.get("quantized_layers") or {}).items()
+                  if not (str(v.get("quant_algo", "")).upper() == "FP8" and fp8_read(k))}
         algos = layers if algo == "MIXED_PRECISION" else {algo}
         weights = [g.get("weights") or {} for g in (found.get("config_groups") or {}).values()]
         fp4 = {int(w.get("group_size", 16)) for w in weights if int(w.get("num_bits", 4)) == 4}
-        if not algos <= {"NVFP4", "W4A16_NVFP4", "MXFP8"} or fp4 - {16}:
+        if not algos <= {"NVFP4", "W4A16_NVFP4", "MXFP8", "FP8_PB_WO"} or fp4 - {16}:
             raise ValueError(f"TensorFold's Flash Next kernels read NVFP4 (ModelOpt FP4) weights in blocks of 16, the "
-                             f"other linears bf16 or MXFP8 ({', '.join(NVFP4_MODELS)}); this checkpoint has "
+                             f"other linears bf16, MXFP8 or 128x128-block FP8 ({', '.join(NVFP4_MODELS)}); "
+                             "this checkpoint has "
                              + describe_quantization(config) + f". {OWN_MODEL_HELP}")
+        # N-gram tables have their own NVFP4 reader; other non-expert layers would cast packed bytes to bf16.
+        outside = sorted(name for name, layer in (found.get("quantized_layers") or {}).items()
+                         if "NVFP4" in str(layer.get("quant_algo", "")).upper() and "experts" not in name.split(".")
+                         and ".ple.ple_embedding.ngram_embedding." not in name + "."
+                         and vision_key(name) is None)
+        if outside:
+            raise ValueError("TensorFold's Flash Next kernels read NVFP4 in routed experts and n-gram tables only; "
+                             f"this checkpoint has it on {len(outside)} other layer(s), e.g. {outside[0]}. "
+                             f"{OWN_MODEL_HELP}")
         if (Path(model_dir) / "model.safetensors.index.json").is_file() and not has_mtp(model_dir):
             print("[tensorfold] this NVFP4 checkpoint has no MTP head: decoding without MTP drafts", flush=True)
         return
@@ -146,14 +164,19 @@ def kernel_version(model: Any) -> str:
 CUDA_QUANTIZATION = (4, 32)
 # the KV cache dtypes the CUDA engine can allocate (``--kv-dtype``)
 CUDA_KV_DTYPES = ("bf16", "int8", "int4")
+CUDA_DECODE_SHARE = True           # --parallel rounds size their prompt pass by --decode-share (0: whole passes)
+CUDA_PREFILL_FP8 = True            # --prefill-fp8: an NVFP4 checkpoint's MXFP8 linears have an FP8 prompt kernel
 
 def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",
                 master_port: int = 29551, no_drafts: bool = False, mtp_drafts: int | None = None,
                 mtp_confidence: float | None = None, context: int | None = None, ple_on_ssd: bool = False,
-                kv_dtype: str = "bf16", **options: Any):
-    """The CUDA engine: MTP chains verified exactly on one GPU or two (``tp=2``; start rank 1 first), keys and values bf16, int8 or int4."""
+                kv_dtype: str = "bf16", decode_share: float | None = None, **options: Any):
+    """Verify MTP on one or two CUDA GPUs; start rank 1 first for ``tp=2``, with bf16, int8 or int4 KV storage."""
 
+    from tensorfold.cuda import build
     from tensorfold.cuda.exl3.format import is_exl3
+
+    build.refuse_small_gpu()               # a card under sm_120 refuses this family by name, before anything is read
 
     if is_exl3(Path(model_dir)):
         print("[tensorfold] EXL3 packs are experimental: replies are exact; see "
@@ -174,4 +197,7 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
     return FlashNextEngine(Path(model_dir), depth=depth, confidence=confidence, max_len=context,
                            context_explicit=options.get("context_explicit"), tp=int(tp), rank=int(rank),
                            master=master, port=int(master_port), streams=max(1, int(options.get("parallel") or 1)),
-                           ple_on_ssd=ple_on_ssd, kv_dtype=kv_dtype)
+                           ple_on_ssd=ple_on_ssd, kv_dtype=kv_dtype,
+                           share=0.0 if decode_share is None else float(decode_share),
+                           vision=bool(options.get("vision", False)),
+                           vision_urls=bool(options.get("vision_urls", False)))

@@ -108,7 +108,7 @@ def test_prepare_expands_cpu_tokens_and_budgets_before_encoding():
                                                         + len(prepared.token_ids) * 3 * 8 + prepared.position_ids.nbytes)
     assert processor.calls == [(["PIL:one"], {"max_pixels": 8192, "min_pixels": 1024})]
     assert all(not a.flags.writeable for a in (prepared.pixel_values, prepared.image_grid_thw, prepared.position_ids))
-    with pytest.raises(ValueError, match="expanded image prompt"):
+    with pytest.raises(ValueError, match="maximum context length is 7 tokens: the expanded image prompt has 8"):
         front.prepare("a<start><image><end>b", [image()], max_prompt_tokens=7)
     with pytest.raises(ValueError, match="visual-token budget"):
         front.prepare("<start><image><end>", [image()], max_visual_tokens=3)

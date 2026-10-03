@@ -13,127 +13,19 @@ import time
 from typing import Any
 
 from tensorfold import __version__
+from tensorfold import cli_args
 from tensorfold.server import stacks
 from tensorfold.server.memory_budget import MEMORY_FRACTION
 from tensorfold.serve_options import check as _check_serve_options, vision_options as _vision_options
 
-COMMANDS = ("serve", "pull", "models", "info", "update")
+COMMANDS = ("serve", "pull", "models", "info", "update", "service", "tui", "plan")
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="tensorfold",
-        description="Fast, exact LLM decoding on Apple Silicon and NVIDIA GPUs behind an OpenAI-compatible endpoint.",
-    )
-    parser.add_argument("--version", action="version", version=f"tensorfold {__version__}")
-    commands = parser.add_subparsers(dest="command", required=True)
+    """The ``tensorfold`` parser with this module's subcommand handlers."""
 
-    serve = commands.add_parser("serve", help="serve a model at an OpenAI-compatible endpoint",
-                                formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    serve.add_argument("model", help="a Hugging Face repo id (downloaded on first use) or a model directory")
-    endpoint = serve.add_argument_group("endpoint")
-    endpoint.add_argument("--host", default="127.0.0.1", help="address to listen on (0.0.0.0: every interface)")
-    endpoint.add_argument("--port", type=int, default=8080)
-    endpoint.add_argument("--name", default="", help="model id clients ask for (default: the model's name)")
-    endpoint.add_argument("--alias", action="append", default=[], help="another model id to answer to")
-    endpoint.add_argument("--vision", action="store_true", help="enable image input for Qwen3.5/3.8 dense vision checkpoints")
-    endpoint.add_argument("--vision-urls", action="store_true",
-                          help="with --vision, accept public HTTP(S) image URLs (default: data URLs only)")
-    endpoint.add_argument("--dashboard", action="store_true",
-                          help="serve a live stats page at /dashboard (prefill and decode tok/s, context, cache, "
-                               "memory) fed by /stats; off unless asked for")
-
-    generation = serve.add_argument_group("generation (requests can override each of these)")
-    generation.add_argument("--context", type=int, default=None,
-                            help="prompt plus reply window (default: model config; CUDA default/0: affordable native capacity; Metal 0: remove metadata cap)")
-    generation.add_argument("--max-tokens", type=int, default=4096,
-                            help="reply tokens when a request does not say")
-    generation.add_argument("--temperature", type=float, default=None,
-                            help="0 decodes greedily (default: the model's generation_config.json, else 0)")
-    generation.add_argument("--top-p", type=float, default=None, help="(default: the model's generation config)")
-    generation.add_argument("--top-k", type=int, default=None, help="(default: the model's generation config)")
-    generation.add_argument("--thinking", action=argparse.BooleanOptionalAction, default=True,
-                            help="open a think block when the chat template supports it")
-    generation.add_argument("--reasoning-effort", choices=("low", "medium", "xhigh"), default="medium",
-                            help="for chat templates that take one (Qwen3.8); medium adds no system-prompt text")
-    generation.add_argument("--thinking-budget", type=int, default=0,
-                            help="most thinking tokens before the server closes the think block (0: no limit)")
-
-    speed = serve.add_argument_group("drafting and caches")
-    speed.add_argument("--no-drafts", action="store_true",
-                       help="one token a round: the serial reference (same output, slower)")
-    speed.add_argument("--drafter", default="auto",
-                       help="a draft model (repo id or directory); auto: the family's draft model when it has been "
-                            "pulled; none: no draft model")
-    speed.add_argument("--drafter-bits", type=int, default=4, help="quantize the draft model's linears (0: bf16)")
-    speed.add_argument("--mtp-drafts", type=int, default=None,
-                       help="most MTP drafts a round (Qwen3.8 Flash Next: 3 on Mac; on CUDA 6, stopping under 30%% "
-                            "confidence); 0: no MTP drafts (any family)")
-    speed.add_argument("--mtp-confidence", type=float, default=None,
-                       help="on CUDA, stop an MTP chain before a later draft under this probability "
-                            "(Flash Next default 0.30)")
-    speed.add_argument("--lane-kernels", choices=("auto", "on", "off"), default="auto",
-                       help="lane kernels for Qwen3.8 dense (auto: on GPUs with tensor units)")
-    speed.add_argument("--prompt-cache-gib", type=float, default=None,
-                       help="memory for cached conversation prefixes (0: off; default: an eighth of RAM, at most 16)")
-    speed.add_argument("--checkpoint-slots", type=int, default=None,
-                       help="cached conversation prefixes kept in memory (default: 3 per parallel lane, at least 8); "
-                            "with long conversations this, not --prompt-cache-gib, is usually the limit")
-    speed.add_argument("--spill-gib", type=float, default=0.0,
-                       help="write evicted conversation prefixes to disk, up to this many GiB, and read them back on "
-                            "demand instead of prefilling again (0: off; needs --snapshot-dir)")
-    speed.add_argument("--snapshot-dir", default=str(Path.home() / ".cache" / "tensorfold" / "prefix-snapshots"),
-                       help="where system-block and conversation snapshots are kept ('none': in memory only)")
-    speed.add_argument("--max-snapshots", type=int, default=3, help="system-block snapshots loaded at start")
-    speed.add_argument("--parallel", default="auto",
-                       help="requests decoded together, their windows sharing each round's forward: a number, or "
-                            "auto (Mac: up to 8, each started only while the projected memory fits the budget; "
-                            "CUDA: one at a time, the others waiting their turn)")
-    speed.add_argument("--decode-share", type=float, default=None, help="Mac: while a prompt prefills, running replies "
-                       "keep moving for this share of each chunk's time and later prompts start later (default 0.25; "
-                       "0: whole prompts first, as 0.3.6.2)")
-    speed.add_argument("--mlx-cache-gib", type=float, default=8.0, help="MLX's cache of freed buffers")
-    speed.add_argument("--ssd-experts", type=float, default=None, metavar="GIB",
-                       help="stream routed experts from the checkpoint into a GPU pool of this many GiB, for models "
-                            "past the memory budget (the rest stays resident; output is the resident model's)")
-    speed.add_argument("--ple-on-ssd", action="store_true",
-                       help="Flash Next: read the n-gram (PLE) tables from the checkpoint on SSD at each lookup "
-                            "instead of holding them in memory. A trade: a few percent of decode speed for about "
-                            "40 GiB less at peak (the tables are 29.8 GiB); a 128 GB Mac needs it")
-
-    speed.add_argument("--no-update-check", action="store_true",
-                       help="don't ask GitHub whether a newer release exists (also TENSORFOLD_NO_UPDATE_CHECK=1)")
-
-    cuda = serve.add_argument_group("NVIDIA GPUs (DGX Spark)")
-    cuda.add_argument("--backend", choices=("auto", "mlx", "cuda"), default="auto",
-                      help="auto: MLX on macOS, CUDA elsewhere")
-    cuda.add_argument("--tp", type=int, choices=(1, 2), default=1,
-                      help="GPUs (one per machine) the model is split over; run the same command on each")
-    cuda.add_argument("--rank", type=int, choices=(0, 1), default=0,
-                      help="with --tp 2: this machine's rank; rank 0 serves HTTP, rank 1 follows it")
-    cuda.add_argument("--master", default="", help="with --tp 2: rank 0's address on the link between the machines")
-    cuda.add_argument("--master-port", type=int, default=29551, help="with --tp 2: rank 0's rendezvous port")
-    cuda.add_argument("--kv-dtype", choices=("bf16", "int8", "int4"), default="bf16",
-                      help="KV cache: bf16 (the default), int8, or int4. Quantized keys and values use one "
-                           "fp16 scale per 32 values (changes the output; Flash Next on CUDA only)")
-    serve.set_defaults(func=cmd_serve)
-
-    pull = commands.add_parser("pull", help="download models (or draft models) from Hugging Face")
-    pull.add_argument("repos", nargs="+", help="repo ids, e.g. Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP")
-    pull.set_defaults(func=cmd_pull)
-
-    models = commands.add_parser("models", help="list the model families and the checkpoints they are tested with")
-    models.set_defaults(func=cmd_models)
-
-    update = commands.add_parser("update", help="install the newest TensorFold release from GitHub")
-    update.add_argument("--check", action="store_true", help="only say whether a newer release exists")
-    update.add_argument("--force", action="store_true", help="reinstall the newest release even when it is current")
-    update.set_defaults(func=cmd_update)
-
-    info = commands.add_parser("info", help="show which family serves a model (reads its config.json only)")
-    info.add_argument("model", help="a Hugging Face repo id or a model directory")
-    info.set_defaults(func=cmd_info)
-    return parser
+    return cli_args.build_parser({"serve": cmd_serve, "pull": cmd_pull, "models": cmd_models,
+                                  "update": cmd_update, "info": cmd_info, "plan": cmd_plan})
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -273,10 +165,18 @@ def cmd_info(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_plan(args: argparse.Namespace) -> int:
+    """Estimate local checkpoint weights without loading a model."""
+
+    from tensorfold.cli_plan import cmd_plan as plan
+
+    return plan(args)
+
+
 def _generation_config(model_dir: Path) -> dict[str, Any]:
     path = Path(model_dir) / "generation_config.json"
     config = json.loads(path.read_text()) if path.exists() else {}
-    sampling = {k: config[k] for k in ("temperature", "top_k", "top_p") if k in config}
+    sampling = {k: config[k] for k in ("temperature", "top_k", "top_p", "min_p") if config.get(k) is not None}
     if config.get("do_sample") is False:
         sampling["temperature"] = 0.0
     elif config.get("do_sample") is True and "temperature" not in sampling:
@@ -293,7 +193,7 @@ def _model_context(model_dir: Path) -> int:
     return int(limit) if isinstance(limit, int) and limit > 0 else 0
 
 
-def _drafter(family: Any, choice: str) -> str:
+def _drafter(family: Any, choice: str, backend: str = "mlx") -> str:
     """The draft model directory for ``--drafter`` (auto: the family's draft model if it has been pulled)."""
 
     from tensorfold import hub
@@ -302,7 +202,9 @@ def _drafter(family: Any, choice: str) -> str:
         return ""
     if choice != "auto":
         return str(hub.resolve(choice))
-    repo = getattr(family.package, "DRAFTER", "")
+    # a family that drafts otherwise on CUDA (Qwen3.6 MoE: its MTP layer) declares CUDA_DRAFTER = ""
+    repo = getattr(family.package, "CUDA_DRAFTER" if backend == "cuda" else "DRAFTER",
+                   getattr(family.package, "DRAFTER", ""))
     if not repo:
         return ""
     found = hub.cached(repo)
@@ -345,7 +247,7 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
     if args.tp == 1 and args.rank != 0:
         raise ValueError("--rank 1 needs --tp 2")
     started = time.perf_counter()
-    drafter = "" if args.no_drafts else _drafter(family, args.drafter)
+    drafter = "" if args.no_drafts else _drafter(family, args.drafter, "cuda")
     options: dict[str, Any] = {"drafter": drafter, "tp": int(args.tp), "rank": int(args.rank), "master": args.master,
                                "master_port": int(args.master_port), "no_drafts": bool(args.no_drafts)}
     if getattr(args, "kv_dtype", "bf16") != "bf16":
@@ -357,15 +259,33 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
         options["ple_on_ssd"] = True
     if getattr(args, "mtp_confidence", None) is not None:
         options["mtp_confidence"] = float(args.mtp_confidence)
+    if getattr(args, "decode_share", None) is not None:
+        options["decode_share"] = float(args.decode_share)
     options["context"] = context if context is not None else args.context
     options["context_explicit"] = args.context is not None
     streams = 1 if str(args.parallel).strip().lower() == "auto" else _parallel(args.parallel)
     if streams > 1:
         options["parallel"] = streams
+    if getattr(args, "checkpoint_slots", None) is not None and getattr(family.package, "CUDA_CHECKPOINT_SLOTS", False):
+        options["checkpoint_slots"] = int(args.checkpoint_slots)
     served = args.name or (args.model.rstrip("/").split("/")[-1] if hub.is_repo_id(args.model) else model_dir.name)
     where = f", rank {args.rank} of 2" if args.tp == 2 else ""
     print(f"[tensorfold] loading {served}: {family.title} ({family.model_type}) on CUDA{where}", flush=True)
+    from tensorfold.cuda import precision, prompt_precision
+
+    asked = getattr(args, "prefill_fp8", None)
+    prompt_precision.set_fp8(prompt_precision.FP8_BY_DEFAULT if asked is None else asked)   # before any weight loads
+    chosen = getattr(args, "precision", None)
+    precision.set_mode(chosen or precision.CHECKPOINT, asked=chosen is not None)
     engine = family.package.cuda_engine(model_dir, **options)
+    weights = getattr(engine, "w", None)
+    fp8 = prompt_precision.fp8() and bool(getattr(weights, "fast_prefill", False))
+    if asked and not fp8 and getattr(weights, "precision", "full") == precision.CHECKPOINT:
+        raise ValueError("--prefill-fp8 is for --precision full: the checkpoint's own math already runs its prompts in "
+                         "FP4 and FP8")
+    if asked and not fp8:
+        raise ValueError("--prefill-fp8: this checkpoint's prompt matmuls have no FP8 kernel (EXL3 packs, MLX formats "
+                         "other than Qwen's 4-bit g64, Flash Next without MXFP8 layers); drop the flag")
     stacks.arm()            # its warmup may have loaded a compiler that took USR1
     if args.tp == 2 and args.rank == 1:
         print(f"[tensorfold] rank 1 ready in {time.perf_counter() - started:.1f}s, following rank 0", flush=True)
@@ -374,17 +294,25 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
     from tensorfold.cuda.server import App, serve
 
     sampling = _generation_config(model_dir)
-    for key, value in (("temperature", args.temperature), ("top_p", args.top_p), ("top_k", args.top_k)):
+    for key, value in (("temperature", args.temperature), ("top_p", args.top_p), ("top_k", args.top_k),
+                       ("min_p", args.min_p)):
         if value is not None:
             sampling[key] = value
     app_class = getattr(family.package, "CUDA_APP", None) or App
     app = app_class(engine, model_dir, served, default_thinking=bool(args.thinking), sampling=sampling,
-                    max_tokens=int(args.max_tokens), context_window=context if context is not None else args.context)
+                    max_tokens=int(args.max_tokens), context_window=context if context is not None else args.context,
+                    reasoning_effort=args.reasoning_effort, thinking_budget=int(args.thinking_budget),
+                    vision_max_images=getattr(args, "vision_max_images", None),
+                    **({"vision_image_tokens": args.vision_image_tokens}
+                       if getattr(args, "vision_image_tokens", None) is not None else {}),
+                    aliases=list(args.alias))
     shown = "greedy" if float(sampling.get("temperature", 1.0)) <= 0 else ", ".join(
         f"{k} {v}" for k, v in sampling.items())
     effective_context = app.effective_context_window
+    own = getattr(weights, "precision", "") == precision.CHECKPOINT
+    prompts = "FP8 activations" if fp8 else "the checkpoint math" if own else "bf16 activations"
     print(f"[tensorfold] serving {served} at http://{args.host}:{args.port}/v1 on CUDA{where} "
-          f"(sampling: {shown}; drafts: {'off' if args.no_drafts else 'on'}; "
+          f"(sampling: {shown}; drafts: {'off' if args.no_drafts else 'on'}; prompts: {prompts}; "
           f"context: {'unlimited' if effective_context is None else effective_context}; "
           f"loaded in {time.perf_counter() - started:.1f}s)", flush=True)
     if args.dashboard:
@@ -528,9 +456,12 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
     from tensorfold.server.app import ChatApp
     from tensorfold.server.http import Server, make_handler
 
-    engine_factory = functools.partial(LaneEngine, prefill_plan=plan)      # every family decodes through lanes
+    engine_factory = functools.partial(LaneEngine, prefill_plan=plan,        # every family decodes through lanes
+                                       prefill_pass=max(1, int(args.prefill_pass)),
+                                       pass_cache=int(float(args.pass_cache_gib) * 1024**3))
     sampling = _generation_config(model_dir)
-    for key, value in (("temperature", args.temperature), ("top_p", args.top_p), ("top_k", args.top_k)):
+    for key, value in (("temperature", args.temperature), ("top_p", args.top_p), ("top_k", args.top_k),
+                       ("min_p", args.min_p)):
         if value is not None:
             sampling[key] = value
     snapshot_dir = None if str(args.snapshot_dir).lower() == "none" else Path(args.snapshot_dir).expanduser()
@@ -568,8 +499,10 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
         memory_budget_bytes=memory_limit,
         fit_context=args.context is None,
         use_proposer=not args.no_drafts,
-        snapshot_dir=snapshot_dir, model_id=model_id,
+        snapshot_dir=snapshot_dir, model_id=model_id, model_dir=model_dir,
         decode_share=0.25 if args.decode_share is None else float(args.decode_share),
+        grow_checkpoints=args.prompt_cache_gib is None,
+        vision_max_images=getattr(args, "vision_max_images", None),
     )
     if app.context_fitted:
         print(f"[tensorfold] context window {app.context_window:,} tokens: the most one request can use in the "

@@ -10,7 +10,8 @@ from tensorfold.engine.exact_sampling import Sampling
 from tensorfold.cuda.sampling import sample_rows
 
 
-@pytest.mark.parametrize("sampling", [None, Sampling(seed=7382, top_k=20, top_p=0.95)])
+@pytest.mark.parametrize("sampling", [None, Sampling(seed=7382, top_k=20, top_p=0.95),
+                                      Sampling(seed=7382, top_k=20, top_p=0.95, min_p=0.1)])
 def test_rows_match_single_row(sampling):
     torch.manual_seed(841)
     logits = torch.randn((128, 4096), device="cuda", dtype=torch.bfloat16)
@@ -30,8 +31,8 @@ def test_streams_match_their_own_calls():
     # bf16 logits rounded to a coarse grid: many ties at every candidate boundary
     logits = (torch.randn((520, vocab), device="cuda") * 2).mul(4).round().div(4).to(torch.bfloat16)
     logits[:, 100:140] = 6.0
-    samplings = [None, Sampling(1234, 1.0, 20, 0.95), Sampling(99, 0.7, 20, 1.0), Sampling(5, 1.0, 40, 0.9), None,
-                 Sampling(8, 1.0, 20, 0.95)] * 5
+    samplings = [None, Sampling(1234, 1.0, 20, 0.95), Sampling(99, 0.7, 20, 1.0, 0.2), Sampling(5, 1.0, 40, 0.9),
+                 None, Sampling(8, 1.0, 20, 0.95, 0.05)] * 5
     sizes = [16, 12, 1, 16, 3, 7] * 5
     starts = [0]
     for n in sizes[:len(samplings)]:

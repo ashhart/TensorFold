@@ -5,15 +5,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import math
+import os
 from pathlib import Path
 import re
 import struct
-from typing import Callable
+from typing import Callable, Mapping
 
 GIB = 1024**3
 # safetensors dtype names -> bytes a value (FP8: the FP4 checkpoints' block scales)
 SIZES = {"U8": 1, "I8": 1, "BOOL": 1, "F8_E4M3": 1, "F8_E5M2": 1, "F8_E8M0": 1,
          "BF16": 2, "F16": 2, "I16": 2, "U16": 2, "U32": 4, "I32": 4, "F32": 4, "I64": 8, "U64": 8, "F64": 8}
+LIMIT_ENV = "TENSORFOLD_CUDA_MEMORY_LIMIT_GB"
 
 
 def itemsize(info: dict, name: str) -> int:
@@ -55,8 +57,9 @@ class Plan:
     budget: int
     weights: Weights
     geometry: Geometry
-    keeps_tables: bool | None = None   # a default window sized so the mapped tables keep their pages
+    keeps_tables: bool | None = None   # the window leaves the mapped tables their pages (None: nothing to keep)
     largest: int = 0                   # the largest window the budget fits up to the native one: what a restart gets
+    resident: int = 0                  # the largest window that leaves the mapped tables their pages
 
     @property
     def settings(self) -> list[int]:
@@ -154,15 +157,68 @@ def unified(torch) -> bool:
         return False
 
 
-def available_bytes(torch) -> int:
-    free, total = map(int, torch.cuda.mem_get_info())
-    available = max(0, free - max(4 * GIB, math.ceil(total / 10)))
+def reserve_bytes(total: int) -> int:
+    """Memory the startup keeps free in a pool: max(4 GiB, a tenth of it), or TENSORFOLD_MEMORY_RESERVE_GIB (>= 2)."""
+
+    value = os.environ.get("TENSORFOLD_MEMORY_RESERVE_GIB", "").strip()
+    if not value:
+        return max(4 * GIB, total // 10)
+    try:
+        gib = float(value)
+    except ValueError:
+        gib = math.nan
+    if not 2 <= gib <= total / GIB:
+        raise ValueError(f"TENSORFOLD_MEMORY_RESERVE_GIB={value}: a number of GiB from 2 to the memory's size")
+    return int(gib * GIB)
+
+
+def host_stream_bytes() -> int | None:
+    """Host staging room, with a 2-GiB default reserve or the explicit startup reserve override."""
+
     memory = _meminfo()
     if memory is None:
-        return available
-    host = max(0, memory["MemAvailable"] - max(4 * GIB, memory["MemTotal"] // 10))
-    # one pool on a unified GPU: reclaimable page cache is available; a discrete GPU is bounded by both
-    return host if unified(torch) else min(available, host)
+        return None
+    reserve = (reserve_bytes(memory["MemTotal"])
+               if os.environ.get("TENSORFOLD_MEMORY_RESERVE_GIB", "").strip() else 2 * GIB)
+    return max(0, memory["MemAvailable"] - reserve)
+
+
+def cuda_limit_bytes(environ: Mapping[str, str] | None = None) -> int | None:
+    """The CUDA admission budget's explicit GiB cap in bytes, or None when unset.
+
+    ``TENSORFOLD_CUDA_MEMORY_LIMIT_GB`` caps the grant the same absolute way ``TENSORFOLD_MEMORY_LIMIT_GB``
+    caps the MLX budget. ValueError, naming the variable, for a nonpositive, non-finite, or non-numeric value.
+    """
+
+    value = (os.environ if environ is None else environ).get(LIMIT_ENV)
+    if value is None:
+        return None
+    try:
+        gib = float(value)
+    except ValueError:
+        raise ValueError(f"{LIMIT_ENV} must be a positive number in GiB") from None
+    if not math.isfinite(gib) or gib <= 0:
+        raise ValueError(f"{LIMIT_ENV} must be a positive number in GiB")
+    return int(gib * GIB)
+
+
+def available_bytes(torch) -> int:
+    """What admission and the runtime gate read as live: the pool's free memory less its floor, under the explicit cap."""
+
+    free, total = map(int, torch.cuda.mem_get_info())
+    memory = _meminfo() if unified(torch) else None
+    if memory is not None:
+        granted = memory["MemAvailable"] - reserve_bytes(memory["MemTotal"])     # one pool: page cache counts as free
+    else:
+        granted = free - reserve_bytes(total)        # a discrete card (or no /proc/meminfo): the floor comes off the card
+    limit = cuda_limit_bytes()
+    return max(0, min(granted, limit)) if limit is not None else max(0, granted)
+
+
+def total_bytes(torch) -> int:
+    """The GPU's memory (a GB10's is the host's): the same on every rank, so what it sizes agrees without a gather."""
+
+    return int(torch.cuda.mem_get_info()[1])
 
 
 def page_room(torch) -> int | None:
@@ -193,13 +249,16 @@ def make_plan(native: int, requested: int | None, explicit: bool, budget: int,
                 high = middle - 1
         return low
 
-    fitting, keeps = fit(budget), None
-    if not explicit and weights.mapped and room is not None:
-        # a default window leaves the mapped tables their pages (page cache, like the reserve); else they page
+    fitting, keeps, resident = fit(budget), None, 0
+    if weights.mapped and room is not None:
+        # windows up to ``resident`` keep mapped tables in the page cache; past it they page
         resident = fit(min(budget, room - weights.mapped))
-        fitting, keeps = (resident, True) if resident else (fitting, False)
+        if explicit:
+            keeps = 0 < resident >= upper
+        else:
+            fitting, keeps = (resident, True) if resident else (fitting, False)
     largest = fit(budget, native if native > 0 else target)
-    return Plan(native, requested, bool(explicit), fitting, int(budget), weights, geometry, keeps, largest)
+    return Plan(native, requested, bool(explicit), fitting, int(budget), weights, geometry, keeps, largest, resident)
 
 
 def choose(plan: Plan, peers: list[list[int]] | None = None) -> int:
@@ -226,33 +285,58 @@ def choose(plan: Plan, peers: list[list[int]] | None = None) -> int:
     return min(target, fitting)
 
 
+def floor(model_dir: str | Path) -> tuple[int, int]:
+    """The compute capability a checkpoint's kernels need: 8.9 for every format (clusters are taken where present)."""
+
+    from tensorfold.cuda import build
+
+    return build.MIN_CAPABILITY
+
+
 def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, torch,
           geometry: Geometry | Callable, transform: Callable, *, rank: int = 0, world: int = 1,
           gather: Callable | None = None, draft_dir: Path | None = None,
           draft_geometry: Geometry | Callable | None = None, startup_copies: int = 0,
-          extra_files: tuple[Path, ...] = (), files: list[Path] | None = None) -> dict:
-    """Reach the same refusal or capacity before either rank allocates model tensors."""
+          extra_files: tuple[Path, ...] = (), files: list[Path] | None = None,
+          draft_transform: Callable | None = None,
+          draft_weights: Callable[[Path], Weights] | None = None) -> dict:
+    """One refusal or capacity on both ranks before allocating; the draft model by ``draft_weights`` or a transform."""
 
+    from tensorfold.cuda import build
+
+    build.refuse_old_gpu(floor(model_dir))          # an old GPU is refused here, before any weight loads
     error = None
     plan = None
     try:
         text = config(model_dir)
         geometry = geometry(text) if callable(geometry) else geometry
         weights = estimate_weights(model_dir, transform, rank=rank, files=files)
+        host_staging = weights.staging
         if extra_files:                      # files outside the index, same layout (Nemotron's MTP head, EXL3 tables)
             more = estimate_weights(model_dir, transform, files=list(extra_files))
+            host_staging = max(host_staging, more.staging)
             weights = Weights(weights.resident + more.resident, max(weights.staging, more.staging),
                               weights.mapped + more.mapped)
         weights = Weights(weights.resident, weights.staging + startup_copies * weights.resident, weights.mapped)
         if draft_dir is not None:
-            draft = estimate_weights(draft_dir, lambda name, info: (math.prod(info["shape"]) *
-                                      max(4, itemsize(info, name)), 0))
-            weights = Weights(weights.resident + draft.resident, weights.staging + draft.staging, weights.mapped)
+            draft = draft_weights(draft_dir) if draft_weights is not None else estimate_weights(
+                draft_dir, draft_transform or (lambda name, info: (math.prod(info["shape"]) * max(4, itemsize(info, name)),
+                                                                   0)))
+            host_staging = max(host_staging, draft.staging)
+            # the drafter loads after the target: the peak is the larger of either load's
+            weights = Weights(weights.resident + draft.resident, max(weights.staging - draft.resident, draft.staging),
+                              weights.mapped)
             if draft_geometry is not None:
                 draft_geometry = draft_geometry(config(draft_dir)) if callable(draft_geometry) else draft_geometry
                 main = geometry
                 geometry = Geometry(lambda slots: main.bytes_at(slots) + draft_geometry.bytes_at(slots),
                                     main.reserve, main.minimum_slots)
+        if not unified(torch):
+            host_free = host_stream_bytes()
+            if host_free is not None and host_staging > host_free:
+                raise ValueError(f"host staging needs an estimated {host_staging / GIB:.2f} GiB, "
+                                 f"but only {host_free / GIB:.2f} GiB is available after its reserve; "
+                                 "free host memory or use a checkpoint with smaller loading buffers")
         plan = make_plan(int(text.get("max_position_embeddings") or 0), requested,
                          requested is not None if explicit is None else explicit,
                          available_bytes(torch), weights, geometry, room=page_room(torch))
@@ -268,10 +352,21 @@ def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, t
     print(f"[tensorfold] CUDA rank {rank} startup estimate {receipt['total_bytes_estimate'] / GIB:.2f} GiB "
           f"within {plan.budget / GIB:.2f} GiB; native {plan.native}, allocated prompt/reply window {window}, "
           f"cache slots {receipt['cache_slots']}", flush=True)
-    if plan.keeps_tables is False:
-        print(f"[tensorfold] the {plan.weights.mapped / GIB:.1f} GiB of mapped tables do not fit beside the weights "
-              "and caches: lookups will page them from disk (free memory to keep them resident)", flush=True)
+    note = tables_note(plan)
+    if note:
+        print(f"[tensorfold] {note}", flush=True)
     return receipt
+
+
+def tables_note(plan: Plan) -> str | None:
+    """What startup says when the window leaves the mapped tables no room (their lookups then read the disk)."""
+
+    if plan.keeps_tables is not False:
+        return None
+    fix = (f"a --context of {plan.resident} or less, or fewer --parallel streams, keeps them resident"
+           if plan.explicit and plan.resident else "free memory to keep them resident")
+    return (f"the {plan.weights.mapped / GIB:.1f} GiB of mapped tables do not fit beside the weights and caches: "
+            f"lookups will page them from disk, which slows prompts ({fix})")
 
 
 def gather_ints(torch, gather: Callable, values: list[int], world: int = 2) -> list[list[int]]:

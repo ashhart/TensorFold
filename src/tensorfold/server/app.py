@@ -10,15 +10,20 @@ from typing import Any, Callable
 import uuid
 
 from tensorfold.engine.lane_engine import LaneEngine, SuffixLookupProposer
+from tensorfold.engine import grammar
 from tensorfold.server.admission import concurrency
-from tensorfold.server.checkpoints import (CheckpointStore, longest_common_prefix, prune_conversations,
+from tensorfold.server.checkpoints import (CheckpointStore, prune_conversations,
                                            save_conversations, spill_conversation)
 from tensorfold.server.cancellation import Cancellation
-from tensorfold.server.errors import RequestError
+from tensorfold.server.errors import CONTEXT_LIMIT, ContextLengthError, RequestError
+from tensorfold.server.decision_requests import DecisionRequests
+from tensorfold.server.prompt_blocks import PromptBlocks, _REQUEST
 from tensorfold.server.request_options import RequestOptions
 from tensorfold.server.http import served_model_ids
+from tensorfold.server import metrics
 from tensorfold.server.scheduler import ChatJob, Scheduler
-from tensorfold.server.stopping import StopPolicy
+from tensorfold.server.stopping import StopPolicy, matched_stop
+from tensorfold.vision.images import DEFAULT_LIMITS, ImageLimits
 from tensorfold.server.text import (
     IncrementalText,
     _LockedTokenizer,
@@ -26,15 +31,11 @@ from tensorfold.server.text import (
     hide_tool_calls,
     is_title_request,
     parse_harmony_output,
-    render_prompt_ids,
-    split_thinking, think_markers,
+    CHANNEL_MARKERS, reasoning_count, split_thinking, think_markers,
     streaming_visible_text,
     template_late_system,
     strip_trailing_stops,
 )
-
-
-_REQUEST = threading.local()
 
 
 def _mlx_version() -> str:
@@ -51,7 +52,7 @@ def _token_sha(tokens: list[int]) -> str:
     return hashlib.sha256(",".join(str(int(t)) for t in tokens).encode()).hexdigest()[:12]
 
 
-class ChatApp(RequestOptions):
+class ChatApp(RequestOptions, PromptBlocks, DecisionRequests):
     """One model behind the OpenAI endpoint (``server.http.make_handler``)."""
 
     accepts_sampling = True
@@ -87,16 +88,20 @@ class ChatApp(RequestOptions):
         use_proposer: bool = True,
         snapshot_dir: Path | None = None,
         model_id: str = "",
+        model_dir: Path | None = None,
         memory_fraction: float | None = None,
         memory_overhead_bytes: int | None = None,
         fit_context: bool = False,
         decode_share: float = 0.25,
+        grow_checkpoints: bool = False,
+        vision_max_images: int | None = None,
     ) -> None:
         # three candidate entries per conversation (history boundary, stable prefix, reply end)
         if checkpoint_slots is None:
             checkpoint_slots = max(3 * int(lanes), 8)
         self._model = model
         self.vision = getattr(model, "vision", None)
+        self.image_limits = DEFAULT_LIMITS if vision_max_images is None else ImageLimits(max_images=vision_max_images)
         self.served_name = served_name
         self.model_ids = served_model_ids(served_name, model_aliases)
         self.max_batch_size = int(lanes)
@@ -121,6 +126,7 @@ class ChatApp(RequestOptions):
             "note": "every token is the model's own sample at its position; drafts only change speed",
         }
         self.stop_ids = eos_ids_of(tokenizer)
+        self.model_dir = model_dir                    # response_format's grammar compiler reads its tokenizer
         self.late_system = template_late_system(tokenizer)
         self.engine = factory(model, max_rows=int(max_rows), max_draft=int(max_draft),
                               retain_finished_caches=int(checkpoint_slots) > 0)
@@ -160,6 +166,8 @@ class ChatApp(RequestOptions):
             self.engine, measure, probe_tokens(tokenizer))
         if self.prompt_memory is not None:
             self.context_window, self.context_fitted = self.prompt_memory.fit_window(self.context_window, fit_context)
+            if grow_checkpoints and self.checkpoints is not None and self.checkpoints.budget_bytes is not None:
+                self._grow_checkpoints(admission.round_bytes(int(lanes)) if admission is not None else 0)
         self.scheduler = Scheduler(
             self.engine,
             lanes=int(lanes),
@@ -198,85 +206,16 @@ class ChatApp(RequestOptions):
             # only when these kernels have no block yet: a warmed block is pinned after the loaded ones
             self._warm_known_blocks(snapshot_dir, model_id)
 
-    def render(
-        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
-        thinking: bool | None = None,
-    ) -> tuple[list[int], int]:
-        """Prompt ids plus the length of the rendered history that prefixes them."""
+    def _grow_checkpoints(self, work: int) -> None:
+        """The default prompt cache takes what the weights, a whole-window request and a shared round leave idle."""
 
-        thinking = self.enable_thinking if thinking is None else bool(thinking)
-        effort = (getattr(_REQUEST, "sampling", None) or {}).get("reasoning_effort", self.reasoning_effort)
-        with self.tokenizer_lock:
-            prompt = render_prompt_ids(self.tokenizer, messages, tools=tools, enable_thinking=thinking,
-                                       reasoning_effort=effort, late_system=self.late_system)
-            history = render_prompt_ids(self.tokenizer, messages, tools=tools, enable_thinking=thinking,
-                                        reasoning_effort=effort, add_generation_prompt=False,
-                                        late_system=self.late_system)
-        history_len = len(history) if 0 < len(history) < len(prompt) and prompt[: len(history)] == history else 0
-        return prompt, history_len
-
-    def system_prefix_len(
-        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None,
-        prompt_ids: list[int], thinking: bool | None = None,
-    ) -> int:
-        """Find a reusable system prefix by substituting a probe for the first user message; return zero for short matches."""
-
-        effort = (getattr(_REQUEST, "sampling", None) or {}).get("reasoning_effort", self.reasoning_effort)
-        first_user = next((i for i, m in enumerate(messages) if m.get("role") == "user"), None)
-        if first_user is None:
-            return 0
-        probe = [*messages[:first_user], {"role": "user", "content": "⁣probe"}]
-        try:
-            with self.tokenizer_lock:
-                other = render_prompt_ids(
-                    self.tokenizer, probe, tools=tools,
-                    enable_thinking=self.enable_thinking if thinking is None else bool(thinking),
-                    reasoning_effort=effort, late_system=self.late_system)
-        except Exception:  # noqa: BLE001 - a template quirk must not fail the request
-            return 0
-        shared = longest_common_prefix(prompt_ids, other)
-        return shared if shared >= 512 else 0
-
-    def _warm_known_blocks(self, snapshot_dir: Path, model_id: str) -> None:
-        """Compute the newest system block saved by other kernels in the background, a prompt chunk a job."""
-
-        from tensorfold.engine.prefill_plan import block_jobs
-        from tensorfold.engine.prefix_snapshots import blocks_to_warm
-
-        blocks = blocks_to_warm(snapshot_dir, model_id)[:1]
-        if not blocks:
-            return
-        pad = int(self.tokenizer.encode("\n", add_special_tokens=False)[-1])
-
-        def warm() -> None:
-            try:
-                warm_blocks()
-            finally:
-                self.warming = False
-
-        def warm_blocks() -> None:
-            for tokens in blocks:
-                started = time.perf_counter()
-                jobs = block_jobs(self.engine.prefill_plan, tokens, pad)
-                for i, (prompt, at) in enumerate(jobs):
-                    final = i == len(jobs) - 1
-                    while True:
-                        job = ChatJob(
-                            job_id=f"warm-{uuid.uuid4().hex[:8]}", prompt_ids=prompt, max_tokens=1,
-                            temperature=0.0, history_len=at, shared_prefix_lens=(at,) if final else (),
-                            drafts=False, background=True)
-                        self.scheduler.submit(job)
-                        while job.chunks.get() is not None:
-                            pass
-                        if not job.preempted:
-                            break
-                print(f"[tensorfold] warmed system block tokens={jobs[-1][1] if jobs else 0} of {len(tokens)} in "
-                      f"{time.perf_counter() - started:.1f}s", flush=True)
-
-        print(f"[tensorfold] warming {len(blocks)} saved system block(s) for these kernels in the background: "
-              "until it ends, a request first waits for one prompt chunk (GET /health reports warming)", flush=True)
-        self.warming = True
-        threading.Thread(target=warm, name="warm-blocks", daemon=True).start()
+        window = self.context_window or int(self.prompt_memory.affordable or 0)       # 0: no limit, the largest fits
+        spare = self.prompt_memory.spare(window, work)
+        if spare > self.checkpoints.budget_bytes:
+            self.checkpoints.budget_bytes = spare
+            print(f"[tensorfold] prompt cache up to {spare / 1024**3:.1f} GiB: the memory the weights, a "
+                  f"{window:,}-token request and a shared round leave idle, freed whenever a request needs it",
+                  flush=True)
 
     def chat(
         self,
@@ -310,6 +249,7 @@ class ChatApp(RequestOptions):
         finally:
             if preparing is not None:
                 preparing.release()
+            metrics.finish_request()
 
     class _Preparing:
         """A user's request between arrival and submission: background requests wait for these."""
@@ -362,20 +302,22 @@ class ChatApp(RequestOptions):
             room = self.context_window - len(prompt_ids)
             if room < 1:
                 why = ", the most this server's memory budget fits" if self.context_fitted else ""
-                raise RequestError(f"This server's maximum context length is {self.context_window:,} tokens{why}, "
-                                   f"but the rendered prompt has {len(prompt_ids):,} tokens and leaves no room for a "
-                                   "reply. Compact or shorten the conversation.")
+                raise ContextLengthError(f"{CONTEXT_LIMIT} {self.context_window} tokens{why}, but the rendered prompt "
+                                         f"has {len(prompt_ids)} tokens and leaves no room for a reply, which exceeds "
+                                         "the context window. Compact or shorten the conversation.")
             if reply_limit_explicit and limit > room:
-                raise RequestError(
-                    f"the rendered prompt has {len(prompt_ids)} tokens and requests {limit} reply tokens; "
-                    f"this server's context window is {self.context_window}. Reduce the prompt to at most "
-                    f"{max(0, self.context_window - limit)} prompt tokens or request at most {room} reply tokens, "
-                    "including chat template and thinking tokens."
+                raise ContextLengthError(
+                    f"{CONTEXT_LIMIT} {self.context_window} tokens, but the rendered prompt has {len(prompt_ids)} "
+                    f"tokens and requests {limit} reply tokens, which exceeds the context window. Reduce the prompt "
+                    f"to at most {max(0, self.context_window - limit)} prompt tokens or request at most {room} reply "
+                    "tokens, including chat template and thinking tokens."
                 )
             limit = min(limit, room)
         system_len = 0 if prompt is not None or rendered.vision is not None else self.system_prefix_len(messages, tools, prompt_ids, thinking=thinking)
         spec = self._resolve_sampling(fields, temperature, prompt_ids)
         drafts = self.use_proposer and fields.get("draft", True) is not False
+        shaped = thinking and any(fields.get(k) is not None for k in grammar.FIELDS)
+        think_end = self._token_id(self.think_markers[1]) if shaped else -1     # a grammar starts after it
 
         def make_job() -> ChatJob:
             job = ChatJob(
@@ -392,6 +334,7 @@ class ChatApp(RequestOptions):
                 drafts=drafts,
                 ignore_eos=stops.ignore_eos, stop_check=stops if stops.strings else None,
                 cancellation=cancellation, call_gate=self._call_gate(fields, prompt_ids, tools),
+                constraint=grammar.request_constraint(self, fields, think_end if think_end >= 0 else None),
                 vision=rendered.vision,
             )
             budget = int(fields.get("thinking_budget") or self.thinking_budget) if thinking else 0
@@ -417,6 +360,8 @@ class ChatApp(RequestOptions):
                 time.sleep(0.005)
         cancellation.check()
         self.scheduler.submit(job)
+        metrics.begin(self, len(prompt_ids), received_at)
+        metrics.bind(job)
         if preparing is not None:
             preparing.release()           # submitted: a waiting background request may go now
 
@@ -446,6 +391,7 @@ class ChatApp(RequestOptions):
                     replay = list(collected)
                     job = make_job()
                     self.scheduler.submit(job)
+                    metrics.bind(job)
                     continue
                 break
             if replay:
@@ -460,6 +406,7 @@ class ChatApp(RequestOptions):
             if not first_token_at:
                 first_token_at = time.perf_counter()
             collected.extend(chunk)
+            metrics.tokens(len(collected), first_token_at)
             if on_delta is None or streaming_done:
                 continue
             fresh = []
@@ -472,7 +419,7 @@ class ChatApp(RequestOptions):
             if len(visible_text.tokens) and visible_text._read < len(visible_text.tokens):
                 continue                    # a character still split across tokens: wait for the rest
             answer = text
-            if thinking:
+            if thinking or self.think_markers == CHANNEL_MARKERS:
                 # the prompt opened a think block: reasoning streams as reasoning_content until </think>
                 reasoning_so_far, answer = split_thinking(text, finished=False, markers=self.think_markers)
                 piece = reasoning_so_far[len(streamed_reasoning):]
@@ -493,8 +440,9 @@ class ChatApp(RequestOptions):
 
         content_tokens = strip_trailing_stops(collected, set(stops.eos_ids))
         with self.tokenizer_lock:
-            text = stops.visible(self.tokenizer.decode(content_tokens))
-        if thinking:
+            raw_text = self.tokenizer.decode(content_tokens)
+            text = stops.visible(raw_text)
+        if thinking or self.think_markers == CHANNEL_MARKERS:
             reasoning_text, content = split_thinking(text, finished=True, markers=self.think_markers)
             reasoning = reasoning_text.strip() or None
         else:
@@ -506,20 +454,26 @@ class ChatApp(RequestOptions):
         decode_tokens = max(0, len(collected) - 1)
         reply: dict[str, Any] = {
             "content": content,
+            "stop_sequence": matched_stop(raw_text, stops.strings),
             "reasoning": reasoning,
             "tool_calls_streamed": bool(calls_stream is not None and calls_stream.streamed),
             "finish_reason": stream.finish_reason if stream is not None else "length",
             "prompt_tokens": len(prompt_ids),
             "cached_tokens": int(job.cached_tokens),
             "completion_tokens": len(collected),
+            "reasoning_tokens": reasoning_count(collected, self._token_id(self.think_markers[1]) if thinking else -1),
             "seconds": seconds,
             "runtime": {
                 "enable_thinking": thinking,
-                "reasoning_effort": fields.get("reasoning_effort", self.reasoning_effort) if thinking else "none",
+                "reasoning_effort": self.effort_for(fields.get("reasoning_effort")) if thinking else "none",
                 "engine": self.exact_mode["engine"],
                 "tokens_per_second": (decode_tokens / decode_seconds) if decode_seconds > 0 else 0.0,
                 "seconds": seconds,
                 "prefill_seconds": max(0.0, job.prefilled_at - job.submitted_at) if job.prefilled_at else None,
+                # plan chunks each prompt forward took (a prompt pass takes several while it fills alone)
+                "prefill_widths": list(getattr(stream, "prefill_widths", None) or []),
+                # whether each of those forwards kept its freed buffers in the raised pass cache
+                "prefill_raised": list(getattr(stream, "prefill_raised", None) or []),
                 "time_to_first_token": (first_token_at - received_at) if first_token_at else None,
                 "sampling": "exact" if spec is not None else "greedy",
                 "drafts": bool(job.drafts),

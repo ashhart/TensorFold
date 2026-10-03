@@ -27,8 +27,7 @@ def check(model_dir: str | Path) -> None:
 
 def load(model_dir: Path, *, lane_kernels: str = "auto", drafter: str = "", drafter_bits: int = 4,
          **_: Any) -> tuple[Any, Any]:
-    """2-bit lanes with tensor units; before M5 as many layers' codes widened to 4 bits as the budget fits, the rest
-    read as the pack's 2-bit rows."""
+    """2-bit lanes with tensor units; before M5 codes widen to 4 bits as far as the budget fits."""
 
     import mlx.core as mx
     from tensorfold.families.tokenizer import load_tokenizer

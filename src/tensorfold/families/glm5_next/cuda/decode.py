@@ -9,6 +9,7 @@ from typing import Sequence
 import numpy as np
 import torch
 
+from tensorfold.cuda.sampling import comm_gather, nucleus_rows, one_rank
 from tensorfold.engine.exact_sampling import MARGIN, Sampling, choose_rows
 
 from . import glue, prof, qmm
@@ -24,6 +25,9 @@ def sample_rows(w: Weights, logits: torch.Tensor, positions: Sequence[int], samp
 
     R = logits.shape[0]
     greedy = sampling is None or sampling.temperature <= 0
+    if not greedy and not sampling.top_k:           # top_k off: the shared nucleus rule over every rank's shard
+        return nucleus_rows(logits, positions, sampling, offset=w.vocab_offset if offset is None else offset,
+                            gather=one_rank if w.comm is None else comm_gather(w.comm), probs=probs)
     k = 1 if greedy else min(logits.shape[1], int(sampling.top_k) + MARGIN)
     if probs is not None and greedy:
         k = min(logits.shape[1], 20 + MARGIN)       # the draft's confidence needs its competitors too
@@ -92,6 +96,7 @@ class Engine:
         self.mbuf = Buffers(w, max_rows, capacity) if w.mtp is not None else None
         self.st = State(w, capacity, max_rows)
         self.last_hidden: torch.Tensor | None = None
+        self.constraint = self.window = None            # a request's grammar, and the next sample's rows under it
         self.draft_n = w.head.n
         self.graphs = None
         self.replays = {"main": 0, "sparse": 0, "mtp": 0, "sparse_mtp": 0, "eager": 0}   # steps by path
@@ -146,7 +151,22 @@ class Engine:
 
     def sample(self, logits: torch.Tensor, positions: Sequence[int], sampling: Sampling | None, *,
                draft: bool = False, probs: list[float] | None = None) -> list[int]:
+        if not draft and self.constraint is not None and self.window is not None:
+            self.constraint.mask(logits, self.window, self.w.vocab_offset)   # this rank's vocabulary columns
+            self.window = None
         return sample_rows(self.w, logits, positions, sampling, None, probs)
+
+    def verify_window(self, tokens: list[int]) -> list[int]:
+        """The window a reply's grammar keeps (a chain cut at its first rejected draft), masked at the next sample."""
+
+        if self.constraint is None:
+            return tokens
+        self.window = self.constraint.window(tokens, list(range(-1, len(tokens) - 1)))
+        return self.window.tokens
+
+    def follow(self, tokens: Sequence[int]) -> None:
+        if self.constraint is not None:
+            self.constraint.advance(tokens)
 
     def tap_rows(self, n: int, b: Buffers | None = None) -> torch.Tensor:
         """The last forward's first n rows of DFlash2 taps, concatenated in layer order: [n, taps * D]."""
@@ -221,15 +241,41 @@ class Snapshot:
     drafter_end: int
     rows: list | None = None      # the attention rows of ids, saved when another conversation took the live caches
     nbytes: int = 0
+    drafter_rows: list | None = None  # a ring drafter's window rows before drafter_end, copied when taken
 
 
 def take_snapshot(e: Engine, ids: Sequence[int], pending: torch.Tensor | None, *, mtp: bool,
                   drafter=None) -> Snapshot:
+    """A ring drafter's window rows are copied now (``_ring_window``): its next rows overwrite them in the ring."""
     st = e.st
     rec = st.rec[st.cur[0]].clone() if st.cur else st.rec[0].clone()
-    return Snapshot(list(ids), rec, st.conv.clone(), pending.clone() if pending is not None else None,
+    snap = Snapshot(list(ids), rec, st.conv.clone(), pending.clone() if pending is not None else None,
                     st.mtp_len - st.mtp_drafted if mtp and pending is not None else -1,
                     drafter.context_end if drafter is not None else -1)
+    if drafter is not None and getattr(drafter, "ring", 0) and snap.drafter_end == len(snap.ids):
+        snap.drafter_rows = _ring_window(drafter, len(snap.ids))
+    return snap
+
+
+def _ring_slots(drafter, n: int) -> torch.Tensor:
+    """The ring slots of the window rows a block pass at context end n reads (n - window - 1 .. n - 1)."""
+    lo = max(0, n - drafter.window - 1)
+    return torch.arange(lo, n, device=drafter.kc[0].device) % drafter.ring
+
+
+def _ring_window(drafter, n: int) -> list[torch.Tensor]:
+    """A copy of a ring drafter's window rows before n, in position order."""
+    idx = _ring_slots(drafter, n)
+    return [c.index_select(1, idx) for c in drafter.kc] + [c.index_select(1, idx) for c in drafter.vc]
+
+
+def _put_ring_window(drafter, n: int, rows: list[torch.Tensor]) -> None:
+    idx = _ring_slots(drafter, n)
+    caches = list(drafter.kc) + list(drafter.vc)
+    if len(rows) != len(caches) or any(r.shape[1] != idx.numel() for r in rows):
+        raise ValueError("a kept state's DFlash2 window does not match the drafter's ring")
+    for c, r in zip(caches, rows):
+        c.index_copy_(1, idx, r)
 
 
 def _row_views(st, n: int, m: int) -> list[torch.Tensor]:
@@ -255,6 +301,7 @@ def save_rows(e: Engine, snap: Snapshot) -> None:
     snap.rows = [v.clone() for v in views]
     snap.nbytes = sum(r.numel() * r.element_size() for r in snap.rows)
     snap.drafter_end = -1
+    snap.drafter_rows = None
 
 
 def row_bytes(e: Engine, snap: Snapshot) -> int:
@@ -263,8 +310,8 @@ def row_bytes(e: Engine, snap: Snapshot) -> int:
 
 
 def snapshot_bytes(snap: Snapshot) -> int:
-    """Device memory a kept snapshot holds: its KDA states, conv windows, pending MTP rows and any saved rows."""
-    held = [snap.rec, snap.conv] + ([snap.pending] if snap.pending is not None else [])
+    """A kept snapshot's device bytes: KDA states, conv windows, pending MTP rows, a ring window, saved rows."""
+    held = [snap.rec, snap.conv] + ([snap.pending] if snap.pending is not None else []) + (snap.drafter_rows or [])
     return sum(t.numel() * t.element_size() for t in held) + (snap.nbytes if snap.rows is not None else 0)
 
 
@@ -283,6 +330,10 @@ def restore(e: Engine, snap: Snapshot, drafter=None) -> None:
     st.set_mtp_len(max(snap.mtp_len, 0))
     st.mtp_drafted = 0
     if drafter is not None:
+        if getattr(drafter, "ring", 0):
+            if snap.drafter_rows is None or snap.drafter_end != len(snap.ids):
+                raise ValueError("this snapshot kept no DFlash2 window for the drafter's ring")
+            _put_ring_window(drafter, snap.drafter_end, snap.drafter_rows)
         drafter.context_end = snap.drafter_end
         drafter.pos_dev.fill_(snap.drafter_end)
 
@@ -290,7 +341,7 @@ def restore(e: Engine, snap: Snapshot, drafter=None) -> None:
 # -- prefill ----------------------------------------------------------------------------------------------------
 @torch.no_grad()
 def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp: bool = True, drafter=None,
-            resume: Snapshot | None = None) -> int:
+            resume: Snapshot | None = None, keep_at: int | None = None, keep=None) -> int:
     """Commit the prompt in chunks and sample its first token; a resumed prompt ends in a fresh prefill's state."""
 
     if not prompt:
@@ -312,15 +363,34 @@ def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp:
         if use_mtp:
             k = resume.pending.shape[0]
             _absorb_rows(e, resume.pending, list(prompt[begin - k + 1:begin + 1]))
+    from .forward import Cut
+
+    if keep_at is not None and (keep is None or not max(1, begin) <= keep_at <= len(prompt)):
+        raise ValueError("a kept prefix needs a callback and a point in the prompt's prefill")
+    kept = resume if keep_at == begin else None
     last = None
     prof.active = True
     for start in range(begin, len(prompt), e.prefill_rows):
         chunk = list(prompt[start:start + e.prefill_rows])
         R = len(chunk)
-        last = compute(w, st, b, stage(w, st, b, chunk), nch=chunks_for(st, R), host_pos=st.pos).clone()
+        point = keep_at - start if keep_at is not None else 0
+        cut = Cut(point, torch.empty_like(st.rec[0]), st.conv.clone()) if 0 < point < R else None
+        last = compute(w, st, b, stage(w, st, b, chunk), nch=chunks_for(st, R), host_pos=st.pos, cut=cut).clone()
         e.last_hidden = b.fnormed[R - 1:R].clone()
+        if 0 < point <= R:
+            rec = cut.rec if cut is not None else st.rec[st.cur[0] if st.cur else 0].clone()
+            conv = cut.conv if cut is not None else st.conv.clone()
+            kept = Snapshot(list(prompt[:keep_at]), rec, conv,
+                            b.fnormed[point - 1:point].clone() if use_mtp else None,
+                            keep_at - 1 if use_mtp else -1, keep_at if drafter is not None else -1)
         if drafter is not None:
             drafter.add_taps(e.tap_rows(R, b))
+            if 0 < point <= R and getattr(drafter, "ring", 0):
+                # a ring keeps the kept point's window unless this chunk wrote past it by more than the ring's slack
+                if R - point < drafter.ring - drafter.window:
+                    kept.drafter_rows = _ring_window(drafter, keep_at)
+                else:
+                    kept.drafter_end = -1
         if use_mtp:
             nxt = list(prompt[start + 1:start + R + 1])
             if nxt:
@@ -328,9 +398,15 @@ def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp:
                     _absorb_rows(e, b.fnormed[:len(nxt)], nxt)
         with prof.timed("commit"):
             commit(w, st, b, R, R)
+    if kept is not None:
+        keep(kept)
     prof.active = False
     prof.report(len(prompt) - begin)
-    return e.sample(last, [len(prompt)], sampling)[0]
+    if e.constraint is not None:                         # the first token's row, under the reply's grammar
+        e.window = e.constraint.window([0], [-1])
+    first = e.sample(last, [len(prompt)], sampling)[0]
+    e.follow([first])
+    return first
 
 
 def _absorb_rows(e: Engine, hidden: torch.Tensor, next_tokens: Sequence[int]) -> None:
@@ -376,10 +452,11 @@ def serial_decode(e: Engine, pending: int, count: int, sampling: Sampling | None
     start = time.perf_counter()
     while len(out) < count and not (stop_eos and out[-1] in w.cfg.eos):
         t0 = time.perf_counter()
-        logits = e.forward([out[-1]])
+        logits = e.forward(e.verify_window([out[-1]]))
         torch.cuda.synchronize()
         t1 = time.perf_counter()
         tok = e.sample(logits[:1], [st.pos + 1], sampling)[0]
+        e.follow([tok])
         t2 = time.perf_counter()
         commit(w, st, b, 1, 1)
         t3 = time.perf_counter()
@@ -430,7 +507,8 @@ def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *
     stages["draft"] += time.perf_counter() - t0
     while len(out) < count and not (stop_eos and out[-1] in w.cfg.eos):
         t0 = time.perf_counter()
-        tokens = [out[-1]] + drafts
+        tokens = e.verify_window([out[-1]] + drafts)
+        drafts = tokens[1:]
         R = len(tokens)
         logits = e.forward(tokens)
         torch.cuda.synchronize()
@@ -449,6 +527,7 @@ def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *
         accepted += keep - 1
         depths.append(len(drafts))
         keeps.append(keep)
+        e.follow(sampled[:keep])
         out.extend(sampled[:keep])
         if on_tokens is not None:
             on_tokens(sampled[:keep][:max(0, count - (len(out) - keep))])
@@ -485,7 +564,8 @@ def dflash_decode(e: Engine, drafter, pending: int, count: int, sampling: Sampli
         t0 = time.perf_counter()
         drafts = drafter.propose(out[-1], depth, sampling, policy.confidence) if depth > 0 else []
         t1 = time.perf_counter()
-        tokens = [out[-1]] + drafts
+        tokens = e.verify_window([out[-1]] + drafts)
+        drafts = tokens[1:]
         R = len(tokens)
         logits = e.forward(tokens)
         torch.cuda.synchronize()
@@ -506,6 +586,7 @@ def dflash_decode(e: Engine, drafter, pending: int, count: int, sampling: Sampli
         accepted += keep - 1
         depths.append(len(drafts))
         keeps.append(keep)
+        e.follow(sampled[:keep])
         out.extend(sampled[:keep])
         if on_tokens is not None:
             on_tokens(sampled[:keep][:max(0, count - (len(out) - keep))])

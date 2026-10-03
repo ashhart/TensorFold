@@ -13,6 +13,8 @@ pytestmark = pytest.mark.torch
 def decoder(module, free, kept, keep=8):
     dec = module.MultiDecoder.__new__(module.MultiDecoder)
     dec.streams, dec.free, dec.kept, dec.keep = {}, list(free), list(kept), keep
+    dec.filling, dec.fills = [], {}
+    dec.solo = None
     return dec
 
 

@@ -14,12 +14,22 @@ ENABLED = frozenset(ROW_KERNELS)
 # the KDA step in one launch and sparse MLA reading its chosen keys by index: these set the decode arithmetic
 FUSED_KDA = True
 SPARSE_KERNEL = True
-# the MoE block and each hyper-connection boundary as fused kernels (moe.py, hc.py), each with the row-by-row bits
-FUSED_KERNELS = ("moe", "hc")
+# fused kernels with their reference ops' bits: MoE, HC boundaries, a prompt's KDA glue and DSA index scores
+FUSED_KERNELS = ("moe", "hc", "kda", "dsa")
 FUSED = frozenset(FUSED_KERNELS)
 # the decode graph goes to the GPU every this many layers, so the GPU starts while Python builds the rest
 EVAL_EVERY = 2
 
+
+
+# the activation dtype: bf16, or float32 when the checkpoint's config sets tensorfold_activation_dtype
+ACT = None
+
+
+def act():
+    import mlx.core as mx
+
+    return mx.bfloat16 if ACT is None else ACT
 
 
 # the MLX affine formats the loader reads (the fused kernels take 4-bit groups of 64; others take MLX's one-row calls)

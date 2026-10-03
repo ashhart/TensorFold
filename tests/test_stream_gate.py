@@ -152,7 +152,7 @@ def test_a_stream_beside_others_holds_its_next_horizon_not_its_whole_reply():
     scheduler._admit()
     scheduler.submit(first)
     scheduler._admit()
-    while scheduler._filling is not None:
+    while scheduler._fills:
         scheduler._fill()
     assert scheduler._fits(second)                      # 300 + 2,048 tokens held, the other stream at its length
     gate, scheduler.gate = scheduler.gate, None

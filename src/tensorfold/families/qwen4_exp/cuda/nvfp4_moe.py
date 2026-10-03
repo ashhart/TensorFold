@@ -106,7 +106,7 @@ def moe(x: torch.Tensor, xs: torch.Tensor, router_rows: torch.Tensor, ex: MoE4, 
 
     rows, top_k = x.shape[0], int(cfg.num_experts_per_tok)
     moe_mod.router(x, router_rows, buf.logits[:rows])
-    moe_mod.select(buf.logits[:rows], buf, top_k, ex.routed)
+    moe_mod.select(buf.logits[:rows], buf, top_k, ex.routed, nvx.PREFILL_TILE)
     prompt = buf.y.dtype != torch.float32                  # a prompt's buffers keep bf16 slots
     nvx.gate_up(x, ex.routed_experts, buf.plan, buf.act.view(-1, ex.width), rows, skip=ex.routed)
     buf.act[:rows, top_k] = ex.shared_act(x, prompt)

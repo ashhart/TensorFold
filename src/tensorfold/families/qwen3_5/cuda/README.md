@@ -1,7 +1,7 @@
 # Qwen3.8 dense on CUDA
 
 The CUDA engine for Qwen3.8-27B with model type `qwen3_5`, written in PyTorch, Triton and shared CUDA
-extensions. It reads the MLX 4-bit checkpoint (`Vontra/Qwen3.8-27B-MLX-4bit`, affine 4-bit, groups of 64) as
+extensions. It reads the MLX 4-bit checkpoint (`TensorFold/Qwen3.8-27B-MLX-4bit`, affine 4-bit, groups of 64) as
 stored and drafts with `z-lab/Qwen3.8-27B-DFlash2`. See
 [the recipe](../../../../../docs/recipes/qwen3.8-27b.md#cuda) for setup and public benchmark fixtures.
 

@@ -1,4 +1,5 @@
-"""The 27B's prefill: any chunking gives the same bits, a resume equals a fresh prompt, and drafts equal serial."""
+"""The 27B's prefill, bf16 prompts and --prefill-fp8 alike: any chunking gives the same bits, a resume equals a fresh
+prompt, and drafts equal serial."""
 
 import pytest
 import torch
@@ -6,6 +7,8 @@ import torch
 if not torch.cuda.is_available():
     pytest.skip("CUDA only", allow_module_level=True)
 
+from tensorfold.cuda import prompt_precision  # noqa: E402
+from tensorfold.cuda.kernels import attention as tree_attention  # noqa: E402
 from tensorfold.cuda.kernels import qmm as shared  # noqa: E402
 from tensorfold.cuda.kernels.prefill_attention import attention  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.decode import clone_state, draft_decode, prefill, serial_decode  # noqa: E402
@@ -15,6 +18,14 @@ from tensorfold.families.qwen3_5.cuda.qmm_fast import prepare  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.weights import Attention, Config, GDN, Layer, QLinear, Weights  # noqa: E402
 
 V = 256
+
+
+@pytest.fixture(params=[False, True], ids=["bf16", "fp8"])
+def fp8(request):
+    """Each test once with bf16 prompts (the default) and once with --prefill-fp8."""
+
+    with prompt_precision.using(request.param):
+        yield request.param
 
 
 def _model():
@@ -71,7 +82,7 @@ def _same_state(a, b):
 
 
 @pytest.mark.parametrize("size", [1, 7, 16, 64, 256])
-def test_every_chunking_gives_the_same_state(size):
+def test_every_chunking_gives_the_same_state(size, fp8):
     w = _model()
     prompt = _prompt(300)
     whole, h_whole = _chunked(w, prompt, [(0, 300)])
@@ -80,7 +91,7 @@ def test_every_chunking_gives_the_same_state(size):
     assert torch.equal(h_whole, h_parts)
 
 
-def test_ragged_resume_equals_fresh():
+def test_ragged_resume_equals_fresh(fp8):
     w = _model()
     prompt = _prompt(300, seed=6)
     fresh, h_fresh = _chunked(w, prompt, [(0, 300)])
@@ -93,7 +104,7 @@ def test_ragged_resume_equals_fresh():
     assert torch.equal(h_fresh, h_resumed)
 
 
-def test_prefix_reuse_through_prefill_equals_fresh_and_drafts_equal_serial():
+def test_prefix_reuse_through_prefill_equals_fresh_and_drafts_equal_serial(fp8):
     w = _model()
     prompt = _prompt(240, seed=7)
     fresh, first_fresh = prefill(w, prompt, None)
@@ -107,7 +118,7 @@ def test_prefix_reuse_through_prefill_equals_fresh_and_drafts_equal_serial():
 
 
 @pytest.mark.parametrize("length,limit", [(9000, 9100), (1000, 1100)])
-def test_a_cache_limit_changes_no_bits(length, limit):
+def test_a_cache_limit_changes_no_bits(length, limit, fp8):
     """9,000 rows: the third chunk grows to 9,100 rows, not 12,000; 1,000 rows: the reply grows to 1,100, not 2,048."""
     w = _model()
     prompt = _prompt(length, seed=9)
@@ -137,17 +148,68 @@ def test_a_cache_limit_changes_no_bits(length, limit):
     assert max(kv[0].shape[0] for kv in replied[1].kv if kv is not None) <= limit
 
 
-def test_prefill_matmul_rows_do_not_depend_on_chunking():
+@pytest.mark.parametrize("policy", [0, None], ids=["fold-in-kernel", "default"])
+def test_a_long_prompt_tree_window_equals_serial_on_every_path(policy, monkeypatch):
+    """9,000 committed keys, four whole key groups of the tree attention: each row of a 16-row draft tree equals
+    serial decoding along its path, the tree folding the groups in their programs and a lone row in the merge (or
+    both in their programs)."""
+
+    if policy is not None:
+        monkeypatch.setattr(tree_attention, "MIN_GROUPED", policy)
+    w = _model()
+    prompt = _prompt(9000, seed=11)
+    st, first = prefill(w, prompt, None)
+    assert tree_attention.groups(st.pos, 16) == 4 and (policy == 0) == (tree_attention.groups(st.pos, 1) == 4)
+    parents = [-1, 0, 0, 1, 1, 2, 3, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    tokens = torch.randint(1, V, (16,), generator=torch.Generator().manual_seed(3)).to(torch.int32).cuda()
+    tokens[0] = first
+    logits, _ = tree_forward(w, tokens, parents, clone_state(st))
+    for leaf in (11, 12, 13, 14, 15):
+        path = [leaf]
+        while parents[path[-1]] >= 0:
+            path.append(parents[path[-1]])
+        serial = clone_state(st)
+        for row in reversed(path):
+            out, record = tree_forward(w, tokens[row:row + 1], [-1], serial)
+            assert torch.equal(out[0], logits[row]), f"row {row} on the path to {leaf}"
+            commit(serial, record, [0])
+
+
+def test_bf16_prompts_track_decode_closer_than_fp8():
+    """bf16 prompt rows sit nearer decode's arithmetic than FP8 rows do (this model, 300 rows: 0.26% against 0.57%)."""
+
+    w = _model()
+    prompt = _prompt(300, seed=11)
+    ids = torch.tensor(prompt, dtype=torch.int32, device="cuda")
+    rows = {}
+    for on in (False, True):
+        with prompt_precision.using(on):
+            rows[on], _ = prefill_chunk(w, ids, State(w), every=True)
+    st = State(w)
+    dec = []
+    for a in range(0, 300, 16):
+        n = min(16, 300 - a)
+        h, record = tree_forward(w, ids[a:a + n], list(range(-1, n - 1)), st, full_logits=False)
+        commit(st, record, list(range(n)))
+        dec.append(h)
+    dec = torch.cat(dec).float()
+    err = {on: float((rows[on].float() - dec).norm() / dec.norm()) for on in rows}
+    assert not torch.equal(rows[False], rows[True])
+    assert err[False] < 4e-3 and err[False] < err[True] / 1.5, err
+
+
+@pytest.mark.parametrize("n", [1000, 1100])                     # 1,100: 1,152 padded, not a multiple of 256
+def test_prefill_matmul_rows_do_not_depend_on_chunking(n):
     gen = torch.Generator(device="cuda").manual_seed(3)
-    n, k = 1000, 1024
+    k = 1024
     words = torch.randint(-(2**31), 2**31 - 1, (n, k // 8), generator=gen, device="cuda", dtype=torch.int64)
     scales = (torch.rand(n, k // 64, generator=gen, device="cuda") * 0.01 + 0.001).bfloat16()
     biases = (torch.randn(n, k // 64, generator=gen, device="cuda") * 0.02).bfloat16()
     q = shared.pack(words.to(torch.int32), scales, biases, 64)
     x = torch.randn(333, k, generator=gen, device="cuda").bfloat16()
     whole = shared.prefill_matmul(x, q, f32=True)
-    for tile in range(5):
-        assert torch.equal(whole, shared.prefill_matmul(x, q, f32=True, tile=tile))
+    for tile in range(12):
+        assert torch.equal(whole, shared.prefill_matmul(x, q, f32=True, tile=tile)), tile
     for size in (1, 7, 16, 64, 256):
         parts = [shared.prefill_matmul(x[a:a + size].contiguous(), q, f32=True) for a in range(0, 333, size)]
         assert torch.equal(whole, torch.cat(parts))
