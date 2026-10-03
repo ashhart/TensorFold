@@ -28,6 +28,38 @@ and waits for `/health`.
 The containers are not restarted on their own: one rank coming back alone would wait at rendezvous for a peer
 that is not coming. Start and stop both with `make`.
 
+## Watchdog
+
+`watchdog.sh` checks the pair once a minute from a systemd user timer (`make watch-install`; the user must linger
+for it to run at boot). A tick is bad when a container is not running, `/health` is not 200 (`TF_HEALTH=strict`
+answers 503 for a fatal engine or one engine call running longer than `TF_STALL_S`), or a 1-token probe sent
+every 10 minutes while idle fails. After `WATCH_FAILS` bad ticks (a dead container counts 2) it saves both ranks'
+logs and, with `WATCH_HEAL=1`, runs `make restart` in the background, at most once every `WATCH_MIN_HEAL` seconds;
+`WATCH_HEAL=0` (the default until the cluster tests below pass) only alerts. It stands down while:
+
+- `make lease` is unexpired (`LEASE_MIN`, default 20 minutes; benchmarks take one),
+- an `up` / `down` / `restart` holds the lock (`~/.local/state/tensorfold-dsv41/lock`),
+- both containers are absent after a deliberate `make down` (the stop marker holds across reboots; `make up` clears it),
+- vLLM runs on either node, or the head container is still loading (younger than `WATCH_GRACE`, 1800 s).
+
+Both containers absent without the marker (a reboot while serving) is a bad tick: the watchdog then starts the
+pair. `make watch-status` shows the timer, the counters and the last log lines; state and logs are in
+`~/.local/state/tensorfold-dsv41/`.
+
+Before setting `WATCH_HEAL=1`: check that `make up` runs from the unit (no TTY: `sudo -n` for `guard` / `memwait`
+and `ssh -o BatchMode=yes aiai2-ib true` must work), then on the pair: `docker kill` the worker (healed within
+~2 min); `kill -STOP` rank 1's python (`/health` still answers, `stalled` turns true, healed); `make down` and a
+reboot (stands down); `make lease && make soak` (no heal); two failures within 30 minutes (the second only alerts);
+the house mem-watchdog armed during a heal (the `guard` failure lands in `heal.log` and alerts).
+
+## Bench
+
+`make soak [MINUTES=30]`, `make stress` and `make structured` run `tools/dsv41_soak.py`, `dsv41_stress.py` and
+`dsv41_structured.py` from `SRC` against the endpoint, with the API key in their environment (never on a command
+line), after a watchdog lease covering the run; reports go to `results/`. The soak passes with no errors, the server
+drained at the end, the 17×23 sanity answer (391), no fatal `/health`, and one `token_sha` for every repeated greedy
+request. `structured --suites schemas,tools` needs `TF_DSV41_TOOL_GRAMMAR=required` on the server.
+
 ## Timings (2026-10-02)
 
 - first start after an image build with an empty cache: 5m39s (CUDA extensions build into `CACHE_DIR`)

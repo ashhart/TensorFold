@@ -1,0 +1,12 @@
+# Adapted from jayleaton/deepseek-v41-tensorfold-spark scripts/systemd/dsv41-tf-watchdog.timer, Apache License 2.0,
+# Copyright 2026 Jay Leaton (https://x.com/jayleaton). Modified: names.
+[Unit]
+Description=tensorfold-dsv41 watchdog, every minute
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

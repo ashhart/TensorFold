@@ -6,6 +6,8 @@
 #   make up         # refuses while vLLM / a dev server holds the GPUs or the port; worker first, then waits
 #   make down / restart / wait / status / logs / logs-worker / smoke
 #   make swap-in    # vLLM down, TensorFold up        make swap-out   # TensorFold down, vLLM up
+#   make watch-install / watch-status / watch-once / watch-uninstall   # the watchdog timer (watchdog.sh)
+#   make lease [LEASE_MIN=20]   # the watchdog stands down until then  make soak / stress / structured  (bench)
 #
 # vLLM and TensorFold cannot co-serve: each takes ~100 GiB a rank of the 121.7 GiB pool, and both bind :8888.
 SHELL := /bin/bash
@@ -39,11 +41,24 @@ GID_SCRIPT    = for i in 0 1 2 3 4 5 6 7 8 9; do g=$$(cat /sys/class/infiniband/
                 t=$$(cat /sys/class/infiniband/$(1)/ports/1/gid_attrs/types/$$i 2>/dev/null); \
                 case "$$g:$$t" in *0000:ffff:*"RoCE v2") echo $$i; break;; esac; done
 
-.PHONY: help env stage image prebuild sync guard memwait up down restart wait status logs logs-worker smoke \
-        vllm-down vllm-up swap-in swap-out
+# up / down / restart / swap-in / swap-out stop and start the pair in order: never run their steps in parallel
+# (a global MAKEFLAGS=-jN would race `restart: down up`)
+.NOTPARALLEL:
+
+# the watchdog's state (watchdog.sh): the lock, the stop marker, the lease, its logs
+STATE        := $(or $(XDG_STATE_HOME),$(HOME)/.local/state)/tensorfold-dsv41
+LEASE_MIN    ?= 20
+UNITS        := tensorfold-dsv41-watchdog.service tensorfold-dsv41-watchdog.timer
+# one up / down / restart at a time, the watchdog's heal included. A heal holds the lock and runs `make restart`
+# with TF_DSV41_LOCKED=1, as does every nested call: taking the lock again there would wait forever for itself.
+LOCK = $(if $(TF_DSV41_LOCKED),,flock -n -E 75 $(STATE)/lock env TF_DSV41_LOCKED=1)
+
+.PHONY: help env stage image prebuild sync guard memwait up down restart _up _down _restart wait status logs \
+        logs-worker smoke vllm-down vllm-up swap-in swap-out lease watch-install watch-uninstall watch-once \
+        watch-status soak stress structured
 
 help:
-	@sed -n '1,12p' Makefile | sed 's/^# \{0,1\}//'
+	@sed -n '1,14p' Makefile | sed 's/^# \{0,1\}//'
 
 env:
 	@if [ -f .env ]; then echo ".env exists"; else cp .env.example .env && chmod 600 .env && \
@@ -145,7 +160,15 @@ memwait:
 	  echo "⏳ MemAvailable head=$$h worker=$$w GiB, waiting for >= $(MEM_READY_GIB)..."; sleep 15; \
 	done
 
-up: guard sync memwait
+up down restart:
+	@mkdir -p $(STATE)
+	@$(LOCK) $(MAKE) --no-print-directory _$@ || { rc=$$?; [ $$rc != 75 ] || \
+	  echo "❌ another up / down / restart (or a watchdog heal) holds $(STATE)/lock"; exit $$rc; }
+
+# a deliberate start clears the stop marker once the guards pass: the watchdog guards the pair again, and a start
+# that fails after that is healed like a crash (WATCH_HEAL=1)
+_up: guard sync memwait
+	@rm -f $(STATE)/stopped
 	@docker image inspect $(IMAGE_NAME):latest >/dev/null 2>&1 || { echo "❌ no image: 'make image' first"; exit 1; }
 	@h=$$($(call GID_SCRIPT,$(HCA0))); w=$$(ssh $(WORKER) '$(call GID_SCRIPT,$(HCA1))'); \
 	[ -n "$$h" ] && [ -n "$$w" ] || { echo "❌ no RoCE v2 GID (head=$$h worker=$$w)"; exit 1; }; \
@@ -154,10 +177,12 @@ up: guard sync memwait
 	NCCL_IB_GID_INDEX=$$h $(COMPOSE0) up -d --force-recreate
 	@$(MAKE) --no-print-directory wait
 
-down:
+# a deliberate stop: the watchdog stands down until the next up, across reboots too (the marker keeps the boot id)
+_down:
+	@echo "$$(cat /proc/sys/kernel/random/boot_id) $$(date +%s)" > $(STATE)/stopped
 	@( $(COMPOSE0) down --timeout 30 ) & ( ssh $(WORKER) "cd $(DIR) && $(COMPOSE1) down --timeout 30" ) & wait
 
-restart: down up
+_restart: _down _up
 
 wait:
 	@end=$$(( $$(date +%s) + $(WAIT_TIMEOUT) )); \
@@ -203,3 +228,57 @@ vllm-up:
 swap-in: vllm-down up
 
 swap-out: down vllm-up
+
+# -- watchdog (watchdog.sh, systemd/) ----------------------------------------------------------------------------------
+# the lease: the watchdog stands down until it expires (its mtime is the expiry), e.g. while benchmarking
+lease:
+	@mkdir -p $(STATE) && touch -d "@$$(( $$(date +%s) + $(LEASE_MIN) * 60 ))" $(STATE)/lease
+	@echo "watchdog lease until $$(date -d "@$$(stat -c %Y $(STATE)/lease)" '+%F %T')"
+
+watch-once:
+	@bash $(DIR)/watchdog.sh
+
+# user units with WorkingDirectory=this directory; a user timer runs at boot only when the user lingers
+watch-install:
+	@mkdir -p $(HOME)/.config/systemd/user
+	@for u in $(UNITS); do sed 's|@DIR@|$(DIR)|g' systemd/$$u > $(HOME)/.config/systemd/user/$$u; done
+	systemctl --user daemon-reload
+	systemctl --user enable --now tensorfold-dsv41-watchdog.timer
+	@[ "$$(loginctl show-user $$USER -p Linger --value 2>/dev/null)" = yes ] || \
+	  echo "⚠️  $$USER does not linger: the timer stops at logout and does not start at boot (sudo loginctl enable-linger $$USER)"
+	@grep -qE '^WATCH_HEAL=1' .env 2>/dev/null || echo "WATCH_HEAL is not 1 in .env: the watchdog alerts but does not restart"
+
+watch-uninstall:
+	-systemctl --user disable --now tensorfold-dsv41-watchdog.timer
+	@for u in $(UNITS); do rm -f $(HOME)/.config/systemd/user/$$u; done
+	systemctl --user daemon-reload
+
+watch-status:
+	@systemctl --user --no-pager list-timers tensorfold-dsv41-watchdog.timer 2>/dev/null || true
+	@echo "bad ticks: $$(cat $(STATE)/fails 2>/dev/null || echo 0)  last heal: $$(t=$$(cat $(STATE)/last_heal 2>/dev/null); \
+	  [ -n "$$t" ] && date -d @$$t '+%F %T' || echo never)  stop marker: $$(cat $(STATE)/stopped 2>/dev/null || echo none)"
+	@[ -f $(STATE)/lease ] && [ $$(stat -c %Y $(STATE)/lease) -gt $$(date +%s) ] && \
+	  echo "lease until $$(date -d "@$$(stat -c %Y $(STATE)/lease)" '+%F %T')" || true
+	@tail -n 8 $(STATE)/watch.log 2>/dev/null || echo "no watchdog log yet ($(STATE)/watch.log)"
+
+# -- bench (tools/dsv41_{soak,stress,structured}.py from SRC): a lease first, so the watchdog leaves the run alone ----
+TOOLS_DIR ?= $(SRC)/tools
+MINUTES   ?= 30
+STAMP      = $$(date +%F-%H%M)
+# the key reaches the clients in their environment, never on a command line (visible to every user in ps)
+soak stress structured: export TF_API_KEY := $(API_KEY)
+
+soak:
+	@mkdir -p results && $(MAKE) --no-print-directory lease LEASE_MIN=$$(( $(MINUTES) + 15 ))
+	python3 $(TOOLS_DIR)/dsv41_soak.py --base $(BASE_URL) --model $(SERVED_NAME) --minutes $(MINUTES) \
+	  --out results/soak-$(STAMP).json
+
+stress:
+	@mkdir -p results && $(MAKE) --no-print-directory lease LEASE_MIN=90
+	python3 $(TOOLS_DIR)/dsv41_stress.py stress --base $(BASE_URL) --model $(SERVED_NAME) \
+	  --out results/stress-$(STAMP).json
+
+structured:
+	@mkdir -p results && $(MAKE) --no-print-directory lease LEASE_MIN=60
+	python3 $(TOOLS_DIR)/dsv41_structured.py --base $(BASE_URL) --model $(SERVED_NAME) \
+	  --out results/structured-$(STAMP).json

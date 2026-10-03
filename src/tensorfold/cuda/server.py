@@ -13,7 +13,7 @@ from typing import Any, Callable
 
 from tensorfold.engine import grammar
 from tensorfold.server.cancellation import RequestCancelled
-from tensorfold.server.errors import CONTEXT_LIMIT, RequestError, refusal
+from tensorfold.server.errors import CONTEXT_LIMIT, CapacityError, RequestError, refusal
 from tensorfold.server.messages import validate_modalities
 from tensorfold.server.probabilities import TokenBytes, probability_options
 from tensorfold.server.request_options import heard_effort, parse_numbers, thinking_fields
@@ -27,6 +27,7 @@ from tensorfold.cuda import health
 from tensorfold.cuda.chat_template import ChatTemplate
 from tensorfold.cuda.reply_text import StopStrings, StreamDecoder, hide_tool_calls, parse_tool_calls
 from tensorfold.cuda.turns import Turns, Yield
+from tensorfold.families.deepseek_v41.cuda import dsml
 from tensorfold.server.text import is_title_request, reasoning_count, split_thinking
 from tensorfold.vision.images import DEFAULT_LIMITS, ImageLimits
 
@@ -121,10 +122,36 @@ class App:
         if not isinstance(body.get("messages", []), list):
             return "messages must be a list"
         problem = grammar.refusal(body)                 # a malformed grammar field, or one beside a required call
-        if problem is None and grammar.request_spec(body) and "constraint" not in inspect.signature(
-                self.engine.generate).parameters:
-            problem = "this model's engine does not enforce structured output"
+        if problem is None and "constraint" not in inspect.signature(self.engine.generate).parameters:
+            if grammar.request_spec(body):
+                problem = "this model's engine does not enforce structured output"
+            elif self._dsml and "messages" in body:
+                try:
+                    shaped = self._tool_grammar(body, active_tool_specs(body.get("tools"), body.get("tool_choice")),
+                                                True)
+                except (RequestError, ValueError):
+                    shaped = None                       # refused with its own reason when prepared
+                if shaped is not None:
+                    problem = "this model's engine does not enforce tool-call grammars (TF_DSV41_TOOL_GRAMMAR)"
         return problem
+
+    def _tool_grammar(self, body: dict[str, Any], tools: list[dict[str, Any]], chat: bool) -> grammar.Spec | None:
+        """DSML calls held to the tools' schemas (``TF_DSV41_TOOL_GRAMMAR``, off by default), or None."""
+
+        if not (tools and chat and self._dsml):
+            return None
+        mode = grammar.tool_grammar_mode()
+        return None if mode == "off" else grammar.tool_spec(body, tools, auto=mode == "all")
+
+    @property
+    def _dsml(self) -> bool:
+        """Whether this tokenizer writes DeepSeek-V4.1's DSML calls (its family parser reads them, streamed)."""
+
+        found = self.__dict__.get("dsml")
+        if found is None:
+            lookup = getattr(self.tok, "token_to_id", None)
+            found = self.__dict__["dsml"] = lookup is not None and lookup("｜DSML｜") is not None
+        return found
 
     def _grammars(self) -> grammar.Grammars:
         return grammar.compiler(self, getattr(self, "model_dir", None), self.engine.eos)
@@ -233,6 +260,8 @@ class App:
         budget = parse_numbers({"thinking_budget": body.get("thinking_budget")})["thinking_budget"]
         budget = int(budget or getattr(self, "thinking_budget", 0)) if chat and thinking else 0     # 0: the default
         spec = grammar.request_spec(body)
+        if spec is None:                     # an output format wins over strict tools (the reply is then JSON)
+            spec = self._tool_grammar(body, tools, chat)
         top = probability_options(body, supported=bool(getattr(self.engine, "supports_logprobs", False)))
         if top is not None:
             if not chat or body.get("stream") or thinking or tools or stop or spec is not None or budget:
@@ -264,14 +293,27 @@ class App:
             text = render(body["messages"])
         else:
             text = body.get("prompt")
-            if not isinstance(text, str):
-                raise RequestError("prompt must be a string")
-        prompt = self.tok.encode(text, add_special_tokens=False).ids
+            if not isinstance(text, (str, list)):
+                raise RequestError("prompt must be a string or a list of token ids")
+        if isinstance(text, list):
+            prompt = self._token_ids(text)
+        else:
+            prompt = self.tok.encode(text, add_special_tokens=False).ids
         if not prompt:
             raise RequestError("rendered prompt is empty")
         # sampling is resolved here, so a malformed control is refused before a stream opens
         return PreparedRequest(prompt, max_tokens, tools, thinking, self.sampling_for(body, prompt),
                                ignore_eos=ignore_eos, stop=stop, grammar=compiled, think_budget=budget)
+
+    def _token_ids(self, ids: list[Any]) -> list[int]:
+        """A completions ``prompt`` given as token ids (OpenAI's list form, as stress clients send exact lengths)."""
+
+        size = getattr(self.tok, "get_vocab_size", None)
+        vocab = size(with_added_tokens=True) if size is not None else None
+        if not ids or not all(type(t) is int and t >= 0 and (vocab is None or t < vocab) for t in ids):
+            limit = f" below {vocab}" if vocab is not None else ""
+            raise RequestError(f"a prompt list must be a non-empty list of token ids (integers from 0{limit})")
+        return list(ids)
 
     def check(self, body: dict[str, Any], *, prepared: PreparedRequest | None = None) -> str | None:
         """Why the request cannot run, or None; rendered before a stream's headers are sent."""
@@ -302,6 +344,9 @@ class App:
         return None
 
     def prepare(self, body: dict[str, Any], chat: bool) -> PreparedRequest:
+        if getattr(getattr(getattr(self.engine, "scheduler", None), "decoder", None), "broken", None) is not None:
+            # every admission would fail the same way: a 503 a client retries elsewhere, not a 500 per request
+            raise CapacityError("the engine failed earlier and its ranks are out of step: restart both ranks")
         problem = self._check_fields(body)
         if problem:
             raise refusal(problem)
@@ -349,8 +394,23 @@ class App:
         stopped = {"client": False, "stop": False}
         failed: list[Exception] = []
         stream = StreamDecoder(self.tok, ends)
+        # DSML replies: one parser for reasoning, content and calls, so streamed and whole replies are the same text
+        ds = dsml.Stream(thinking=thinking, tools=tools, max_calls=policy.max_calls) if tools and chat and \
+            self._dsml else None
+        said: dict[str, list[str]] = {"reasoning_content": [], "content": []}
+
+        def say(deltas: list[dict[str, Any]]) -> bool:
+            for d in deltas:
+                d = {("reasoning_content" if k == "reasoning" else k): v for k, v in d.items()}
+                for k in said:
+                    if k in d:
+                        said[k].append(d[k])
+                if not emit(d):
+                    return False
+            return True
+
         # calls stream as argument deltas while written (as on the Mac); one-call requests keep the end parser
-        calls_stream = ToolCallStreamer(tools) if tools and not policy.single else None
+        calls_stream = ToolCallStreamer(tools) if tools and not policy.single and ds is None else None
         answer_raw = [""]
 
         def visible(finished: bool) -> tuple[str, str]:
@@ -386,6 +446,15 @@ class App:
                 else:
                     out.extend(new)
                 stream.add(new)
+                if ds is not None:
+                    raw = stops.visible(stream.text, partial=True) if stops.strings else stream.text
+                    if not say(ds.feed(raw)):
+                        stopped["client"] = True
+                    if not stopped["client"] and cancelled is not None and cancelled():
+                        stopped["client"] = True
+                    if serving[0] is not None:
+                        serving[0].saw()
+                    return stopped["client"] or stopped["stop"]
                 reasoning, answer = visible(False)
                 delta: dict[str, Any] = {}
                 if len(reasoning) > sent["reasoning"]:
@@ -411,7 +480,9 @@ class App:
             return stopped["client"] or stopped["stop"]
 
         draft = body.get("draft", True) is not False
-        gate = self._call_gate(prompt, tools) if tools and tool_choice_requires_call(body.get("tool_choice")) else None
+        held = prepared.grammar is not None and prepared.grammar[0].kind == "tools"     # the grammar writes the call
+        forced = tools and not held and tool_choice_requires_call(body.get("tool_choice"))
+        gate = self._call_gate(prompt, tools) if forced else None
 
         options: dict[str, Any] = {} if draft else {"draft": False}
         probabilities = None
@@ -478,18 +549,27 @@ class App:
         if stopped["client"]:                                        # as the Mac server: nothing more is written
             raise RequestCancelled("the client left during the reply")
         stats = {**(stats or {}), "token_sha": token_sha(out)}
-        reasoning, answer = visible(True)
         final: dict[str, Any] = {}
-        if len(reasoning) > sent["reasoning"]:
-            final["reasoning_content"] = reasoning[sent["reasoning"]:]
         text = stops.visible(self.tok.decode([t for t in out if t not in ends], skip_special_tokens=False))
-        raw_answer = split_thinking(text, finished=True)[1] if chat and thinking else text
-        content, calls = parse_tool_calls(raw_answer, tools, max_calls=policy.max_calls) if tools else (answer, None)
-        content = policy.content(content) if tools else content
-        tail = content[sent["content"]:] if content.startswith(answer[:sent["content"]]) else ""
-        if tail:
-            final["content"] = tail
-        finish = "tool_calls" if calls else ("stop" if stopped["stop"] or (out and out[-1] in ends) else "length")
+        ended = "stop" if stopped["stop"] or (out and out[-1] in ends) else "length"
+        if ds is not None:
+            say(ds.finish(text))                    # the client may have gone; the reply is still whole
+            reasoning, content = "".join(said["reasoning_content"]), "".join(said["content"])
+            calls = [c.openai() for c in ds.calls] or None
+            # a call cut before its </invoke> is reported as cut, as OpenAI reports a call cut by max_tokens
+            finish = "length" if any(not c.closed for c in ds.calls) else ("tool_calls" if calls else ended)
+        else:
+            reasoning, answer = visible(True)
+            if len(reasoning) > sent["reasoning"]:
+                final["reasoning_content"] = reasoning[sent["reasoning"]:]
+            raw_answer = split_thinking(text, finished=True)[1] if chat and thinking else text
+            content, calls = (parse_tool_calls(raw_answer, tools, max_calls=policy.max_calls) if tools
+                              else (answer, None))
+            content = policy.content(content) if tools else content
+            tail = content[sent["content"]:] if content.startswith(answer[:sent["content"]]) else ""
+            if tail:
+                final["content"] = tail
+            finish = "tool_calls" if calls else ended
         print_done(len(prompt), (cached or [0])[0], thinking, out, finish, stats, request)
         if body.get("return_token_ids"):              # the reply's ids in the "tensorfold" block, for exactness checks
             stats = {**(stats or {}), "token_ids": [int(t) for t in out]}
@@ -497,6 +577,8 @@ class App:
                     if probabilities is not None else None)
         # the calls already sent as deltas; the handler sends the rest (a call the streamer could not follow)
         streamed = calls_stream.index + 1 if calls_stream is not None and calls_stream.streamed else 0
+        if ds is not None:
+            streamed = len(ds.calls)
         return {"final": final, "calls": calls, "finish": finish, "content": content, "reasoning": reasoning,
                 **({"logprobs": logprobs} if logprobs is not None else {}),
                 "prompt_tokens": len(prompt), "completion_tokens": len(out), "cached_tokens": (cached or [0])[0],

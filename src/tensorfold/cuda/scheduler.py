@@ -6,6 +6,8 @@ from __future__ import annotations
 import itertools
 import queue
 import threading
+import time
+from contextlib import contextmanager
 from typing import Any, Callable
 
 from .memory_gate import NoRoom
@@ -48,6 +50,8 @@ class Scheduler:
         self.held: tuple | None = None               # a request waiting for memory, admitted before any other
         self.boxes: dict[int, queue.Queue] = {}
         self.yields = 0                              # background streams that gave up their lane
+        self.call_since: float | None = None         # monotonic start of the engine call running now (/health)
+        self.last_round: float | None = None         # monotonic end of the last round that returned
         if hasattr(decoder, "arrived"):              # a decoder filling prompts lets a new request in between passes
             decoder.arrived = self.waiting.foreground
         self.thread = threading.Thread(target=self._loop, daemon=True)
@@ -153,22 +157,37 @@ class Scheduler:
         if box is not None:
             box.put((kind, value))
 
+    @contextmanager
+    def _calling(self):
+        """Time the engine calls in this block for /health's stall check (never the idle wait for a request)."""
+
+        self.call_since = time.monotonic()
+        try:
+            yield
+        finally:
+            self.call_since = None
+
     def _loop(self) -> None:
         while True:
-            self._yield()
+            with self._calling():
+                self._yield()
             idle = not self.decoder.live() and self.held is None
             first = self.waiting.get() if idle else None                              # idle: wait for a request
             if idle and first is None:
                 return                                                                # close()
-            done = self._admit(first)
-            try:
-                done += self.decoder.round()
-            except Exception as exc:                 # noqa: BLE001  (the live requests fail)
-                for s in self.decoder.drop():
-                    self._reply(s, "error", exc)
-            self.decoder.finish(done)
-            yielded = getattr(self.decoder, "yielded", None)
-            if yielded:                              # streams that gave their memory to older ones: replay later
-                self._give_way(list(yielded))
+            with self._calling():
+                done = self._admit(first)
+            with self._calling():
+                try:
+                    done += self.decoder.round()
+                    self.last_round = time.monotonic()
+                except Exception as exc:             # noqa: BLE001  (the live requests fail)
+                    for s in self.decoder.drop():
+                        self._reply(s, "error", exc)
+            with self._calling():
+                self.decoder.finish(done)
+                yielded = getattr(self.decoder, "yielded", None)
+                if yielded:                          # streams that gave their memory to older ones: replay later
+                    self._give_way(list(yielded))
             for s in done:
                 self._reply(s, *(("error", s.error) if s.error is not None else ("done", s.stats())))

@@ -107,3 +107,96 @@ def test_a_concurrent_stream_reports_its_drafted_rows_and_kept_drafts():
     s.take([8])                               # a one-row round
     stats = s.stats()
     assert (stats["rounds"], stats["drafted"], stats["accepted"]) == (2, 3, 1)
+
+
+# -- fatal and stalled engines (TF_HEALTH=strict answers 503) ----------------------------------------------------------
+
+def get_health(port) -> tuple[int, dict]:
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=WAIT)
+    try:
+        connection.request("GET", "/health")
+        response = connection.getresponse()
+        return response.status, json.loads(response.read())
+    finally:
+        connection.close()
+
+
+def broken_app(tmp_path, *, broken=None, call_since=None):
+    engine = PacedEngine()
+    decoder = SimpleNamespace(streams={}, filling=[], broken=broken)
+    engine.scheduler = SimpleNamespace(decoder=decoder, max_streams=4, call_since=call_since, last_round=None)
+    return app_for(tmp_path, engine)
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_a_decoder_out_of_step_is_fatal(tmp_path, monkeypatch, strict):
+    monkeypatch.setenv("TF_HEALTH", "strict" if strict else "")
+    app = broken_app(tmp_path, broken=RuntimeError("a round failed"))
+    with serving(app) as port:
+        status, body = get_health(port)
+        refused, text = post(port, {"messages": MESSAGES, "max_tokens": 4})
+    assert status == (503 if strict else 200)
+    assert body["ok"] is False and "a round failed" in body["fatal"] and body["stalled"] is False
+    assert refused == 503 and "restart both ranks" in text                   # requests too, not a 500 each
+
+
+def test_one_engine_call_past_the_limit_is_a_stall(tmp_path, monkeypatch):
+    import time
+
+    app = broken_app(tmp_path, call_since=time.monotonic() - 400)
+    monkeypatch.delenv("TF_STALL_S", raising=False)                          # default: never stalled
+    assert health.of(app).snapshot(app)["stalled"] is False
+    monkeypatch.setenv("TF_STALL_S", "300")
+    monkeypatch.setenv("TF_HEALTH", "strict")
+    body = health.of(app).snapshot(app)
+    assert body["stalled"] is True and body["ok"] is False and body["call_age_s"] >= 400 and body["fatal"] is None
+    assert health.status(app)[0] == 503
+    app.engine.scheduler.call_since = time.monotonic() - 5                   # a slow round is not a stall
+    code, body = health.status(app)
+    assert code == 200 and body["ok"] is True and body["stalled"] is False
+    app.engine.scheduler.call_since = None              # between calls (a request waiting in the queue: no call)
+    body = health.of(app).snapshot(app)
+    assert body["ok"] is True and body["call_age_s"] is None
+
+
+def test_the_scheduler_times_its_engine_calls_only():
+    """``call_since`` is set while a round runs and cleared after it (an exception included), never while idle."""
+
+    import time
+
+    from tensorfold.cuda.scheduler import Scheduler
+
+    class Decoder:
+        def __init__(self):
+            self.running, self.release, self.rounds, self.alive = threading.Event(), threading.Event(), 0, 1
+
+        def live(self):
+            return self.alive
+
+        def round(self):
+            self.rounds += 1
+            self.running.set()
+            self.release.wait(WAIT)
+            if self.rounds == 1:
+                raise RuntimeError("a round failed")
+            self.alive = 0
+            return []
+
+        def finish(self, done):
+            pass
+
+        def drop(self):
+            return []
+
+    decoder = Decoder()
+    scheduler = Scheduler(decoder)
+    assert decoder.running.wait(WAIT)
+    assert scheduler.call_since is not None and time.monotonic() - scheduler.call_since < WAIT
+    decoder.running.clear()
+    decoder.release.set()                                                    # the first round raises
+    deadline = time.monotonic() + WAIT
+    while (decoder.alive or scheduler.call_since is not None) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert decoder.rounds == 2 and decoder.alive == 0
+    assert scheduler.call_since is None and scheduler.last_round is not None     # idle: waiting, not calling
+    scheduler.close()
