@@ -22,6 +22,18 @@ class Plane:
     per_tokens: int = 1
 
 
+def _runs(pages: Sequence[int]) -> list[tuple[int, int, int]]:
+    """(position in ``pages``, first page, count) for each run of consecutive page numbers."""
+
+    out = []
+    for i, p in enumerate(int(v) for v in pages):
+        if out and out[-1][1] + out[-1][2] == p:
+            out[-1] = (out[-1][0], out[-1][1], out[-1][2] + 1)
+        else:
+            out.append((i, p, 1))
+    return out
+
+
 def pages_for(tokens: int, page_tokens: int) -> int:
     return -(-max(int(tokens), 0) // page_tokens)
 
@@ -126,34 +138,41 @@ class PagePool:
                 buf[int(p) * n : (int(p) + 1) * n] = 0
 
     def read_pages(self, pages: Sequence[int]) -> dict[str, np.ndarray]:
-        """Each plane's rows of ``pages`` in order, on the host."""
+        """Each plane's rows of ``pages`` in order, copied straight into one host array (no device-side gather)."""
 
         out = {}
         for name, buf in self.buffers.items():
             n = self.rows_per_page(name)
-            parts = [buf[p * n : (p + 1) * n] for p in pages]
             if self.device is None:
-                out[name] = np.concatenate(parts) if parts else buf[:0].copy()
+                host = np.empty((len(pages) * n, buf.shape[1]), dtype=buf.dtype)
+                for at, first, count in _runs(pages):
+                    host[at * n : (at + count) * n] = buf[first * n : (first + count) * n]
+                out[name] = host
             else:
                 import torch
 
-                out[name] = (torch.cat(parts) if parts else buf[:0]).cpu().numpy()
+                host = torch.empty((len(pages) * n, buf.shape[1]), dtype=buf.dtype)
+                for at, first, count in _runs(pages):
+                    host[at * n : (at + count) * n].copy_(buf[first * n : (first + count) * n])
+                out[name] = host.numpy()
         return out
 
     def write_pages(self, pages: Sequence[int], data: dict[str, np.ndarray]) -> None:
-        """``read_pages``' arrays back into ``pages`` (mapped by the caller)."""
+        """``read_pages``' arrays back into ``pages`` (mapped by the caller), each run copied into its own rows."""
 
         for name, buf in self.buffers.items():
             n = self.rows_per_page(name)
-            rows = data[name]
+            rows = np.ascontiguousarray(data[name])
             if len(rows) != n * len(pages):
                 raise ValueError(f"plane {name}: {len(rows)} rows for {len(pages)} pages of {n}")
-            if self.device is not None:
-                import torch
+            for at, first, count in _runs(pages):
+                part = rows[at * n : (at + count) * n]
+                if self.device is None:
+                    buf[first * n : (first + count) * n] = part
+                else:
+                    import torch
 
-                rows = torch.from_numpy(np.ascontiguousarray(rows)).to(buf.device)
-            for i, p in enumerate(pages):
-                buf[p * n : (p + 1) * n] = rows[i * n : (i + 1) * n]
+                    buf[first * n : (first + count) * n].copy_(torch.from_numpy(part))
 
     def null_clean(self) -> bool:
         """Nothing wrote the null page."""

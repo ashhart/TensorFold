@@ -246,3 +246,25 @@ def test_the_disk_index_keeps_counts_not_ids(tmp_path):
     assert tokens == 5000 and isinstance(tokens, int) and t.lengths() == {5000}
     assert DiskTier(tmp_path, {"engine": "x"}, limit=1 << 20).index["k"][0] == 5000  # after a restart too
     assert t.find(list(range(5001))) == ("k", 5000) and t.find(list(range(5000))) is None
+
+
+def test_a_failed_write_leaves_no_partial_file(tmp_path, monkeypatch):
+    from tensorfold.cuda import session_disk
+
+    t = DiskTier(tmp_path, {"engine": "x"}, limit=1 << 20)
+    monkeypatch.setattr(session_disk.os, "replace", lambda *a: (_ for _ in ()).throw(OSError("rename failed")))
+    with pytest.raises(OSError):
+        t.put("k", [1, 2], {"x": np.zeros(2, dtype=np.int64)})
+    assert not list(t.dir.glob("*.tmp")) and t.keys() == []
+
+
+def test_a_header_longer_than_its_file_is_refused_without_reading_it(tmp_path):
+    import struct
+
+    from tensorfold.cuda.session_disk import MAGIC
+
+    t = DiskTier(tmp_path, {"engine": "x"}, limit=1 << 20)
+    t.path("k").write_bytes(MAGIC + struct.pack("<Q", 1 << 62) + b"{}")
+    with pytest.raises(ValueError, match="does not fit the file"):
+        t.get("k")
+    assert not t.path("k").exists()

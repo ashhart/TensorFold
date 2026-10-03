@@ -19,6 +19,7 @@ from .sessions import compat_hash, strict_prefix
 MAGIC = b"TFSTATE1"
 ALIGN = 4096
 CHUNK = 8 << 20  # bytes one aligned staging write or read moves
+MAX_HEADER = 64 << 20  # a segment table past this is a damaged file, never read
 
 
 def _up(n: int) -> int:
@@ -147,20 +148,24 @@ class DiskTier:
         if len(ids) < self.min_tokens or total > self.limit:
             return False
         tmp = self.dir / f"{key}.tmp"
-        f = _File(tmp, True, self.direct)
         try:
-            stage = mmap.mmap(-1, CHUNK)  # page-aligned, as O_DIRECT needs
+            f = _File(tmp, True, self.direct)
             try:
-                self._write(f, stage, 0, lead)
-                for (_, a), t in zip(segments, table):
-                    self._write(f, stage, base + t["offset"], np.ascontiguousarray(a).view(np.uint8).reshape(-1))
+                stage = mmap.mmap(-1, CHUNK)  # page-aligned, as O_DIRECT needs
+                try:
+                    self._write(f, stage, 0, lead)
+                    for (_, a), t in zip(segments, table):
+                        self._write(f, stage, base + t["offset"], np.ascontiguousarray(a).view(np.uint8).reshape(-1))
+                finally:
+                    stage.close()
+                os.ftruncate(f.fd, total)
+                f.drop_cache()
             finally:
-                stage.close()
-            os.ftruncate(f.fd, total)
-            f.drop_cache()
-        finally:
-            f.close()
-        os.replace(tmp, self.path(key))
+                f.close()
+            os.replace(tmp, self.path(key))
+        except BaseException:
+            self._unlink(tmp)  # a failed write leaves no partial file behind
+            raise
         with self.lock:
             self.clock += 1
             self._indexed(key, len(ids), total)
@@ -215,22 +220,21 @@ class DiskTier:
         f = _File(path, False, self.direct)
         try:
             span = _up(size) or ALIGN
-            block = mmap.mmap(-1, span)
-            try:
-                view, got = memoryview(block), 0
-                while got < size:
-                    part = view[got : got + min(CHUNK, span - got)]
-                    n = os.preadv(f.fd, [part], got)
-                    part.release()
-                    if n <= 0:
-                        break
-                    got += n
-                view.release()
-                if got < size:
-                    raise ValueError(f"short read ({got} of {size} bytes)")
-                return np.frombuffer(block, dtype=np.uint8, count=size).copy()
-            finally:
-                block.close()
+            raw = np.empty(span + ALIGN, dtype=np.uint8)  # one owned buffer, aligned as O_DIRECT needs
+            off = -raw.ctypes.data % ALIGN
+            buf = raw[off : off + span]
+            view, got = memoryview(buf), 0
+            while got < size:
+                part = view[got : got + min(CHUNK, span - got)]
+                n = os.preadv(f.fd, [part], got)
+                part.release()
+                if n <= 0:
+                    break
+                got += n
+            view.release()
+            if got < size:
+                raise ValueError(f"short read ({got} of {size} bytes)")
+            return buf[:size]
         finally:
             f.drop_cache()
             f.close()
@@ -242,6 +246,8 @@ class DiskTier:
             if len(lead) != 16 or lead[:8] != MAGIC:
                 raise ValueError("not a complete prompt state header")
             (n,) = struct.unpack("<Q", lead[8:16])
+            if n > min(os.fstat(fh.fileno()).st_size - 16, MAX_HEADER):
+                raise ValueError(f"a {n}-byte header does not fit the file")
             return json.loads(fh.read(n)), _up(16 + n)
 
     def drop(self, key: str) -> None:
