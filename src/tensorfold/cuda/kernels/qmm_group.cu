@@ -392,9 +392,11 @@ void launch(const at::Tensor& x, const at::Tensor& xs, Parts& parts, int C, bool
 }
 
 // Tiles never change bits; 0 picks by rows and chip: the PRO 6000, power-capped at one row, takes fewer MMAs a weight.
-// 10-12 (``qmm.group_tile`` on SM 12.0 from 96 SMs) spread the slice sums and skip m16 tiles wholly past M.
+// 10-12 (``qmm.group_tile`` on SM 12.0 from 96 SMs) spread the slice sums and skip m16 tiles wholly past M. GB10
+// streams 8-bit weights, twice the bytes a tile, best through 16 x 128 tiles, then the spread 64- and 128-row ones.
 template <bool F32, int B>
 void dispatch(int tile, int M, bool gb10, const at::Tensor& x, const at::Tensor& xs, Parts& parts, int C, bool pdl) {
+    if (tile == 0 && gb10 && B == 8) tile = M <= 32 ? 8 : M <= 128 ? 11 : 10;
     if (tile == 0 && gb10) tile = M <= 16 ? 2 : M <= 32 ? 3 : M <= 64 ? 4 : 5;
     if (tile == 0) tile = M <= 8 ? 7 : M <= 16 ? 8 : M <= 32 ? 9 : M <= 64 ? 4 : 5;
     auto go = [&](auto full, auto skip, int bm) { M % bm ? skip() : full(); };
