@@ -6,8 +6,8 @@ GitHub has the full notes and the measurements behind them.
 ## Unreleased
 
 - **GLM-5.3-Flash takes images on CUDA.** `--vision` now works on the two-rank CUDA engine as it does on Macs: rank 0
-  encodes each image with the checkpoint's BF16 tower and both ranks prefill its features in place of the
-  placeholders, in the main model and the MTP head. Image prompts start fresh and keep no prompt state; text requests
+  encodes each image with the checkpoint's tower, every tensor kept in the dtype it is stored in (no recast), and
+  both ranks prefill its features in place of the placeholders, in the main model and the MTP head. Image prompts start fresh and keep no prompt state; text requests
   are unchanged. On two DGX Sparks (EXL3 checkpoint) a 512x512 image costs about 1.2 s to first token, like a
   425-token text prompt, and the tower holds 1.05 GiB on rank 0. `--vision-offload` keeps the tower in host RAM and
   `--vision-image-tokens` lets many images share a larger budget, as on Qwen; video stays Flash Next's. Needs
