@@ -50,6 +50,8 @@ def qualify(base, model, token, output, *, tokens=64, require_cache=False):
         body = {"model": model, "prompt": "Write a short Python function that computes the Fibonacci sequence and explain it.",
                 "max_tokens": tokens, "temperature": 0, "ignore_eos": True, "stream": True,
                 "stream_options": {"include_usage": True}}
+        if require_cache:
+            body["draft"] = False  # The serial twin drains without evicting the retained conversation prefix.
         request = urllib.request.Request(base + "/v1/completions", data=json.dumps(body).encode(),
                                          headers={"Content-Type": "application/json"})
         result = {}

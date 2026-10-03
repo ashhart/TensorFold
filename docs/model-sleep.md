@@ -8,12 +8,14 @@ write another copy of the weights to disk.
 The reference adapters support single-device CUDA dense Qwen (`qwen3_5`), including
 its serial and concurrent engines, and Nemotron-H (`nemotron_h`), with its serial
 request execution and optional integrated MTP head. Sleep is opt-in. Level 1 (GPU to
-CPU), other families, Metal and tensor parallelism are not implemented. Qualification includes
-[synthetic runtime checks](research/model-sleep-validation.md) and
-[full-checkpoint NVFP4 checks](research/model-sleep-cuda-validation.md) with a drafter
-and unified-memory reclamation. Other checkpoint formats still need hardware qualification.
-The [prefix-preservation receipt](research/model-sleep-cache-validation.md) covers
-disk snapshots and stored-conversation cache reuse across sleep/wake.
+CPU), other families, Metal and tensor parallelism are not implemented. The
+[0.6.4 reference validation](research/model-sleep-reference-validation.md) covers
+the pinned Qwen NVFP4 and Nemotron affine checkpoints, drafting, unified-memory
+reclamation, disk prefixes and HTTP conversation continuity. Other checkpoints and
+formats need their own qualification. Earlier receipts cover
+[synthetic runtimes](research/model-sleep-validation.md),
+[Qwen weights](research/model-sleep-cuda-validation.md) and
+[Qwen prefix preservation](research/model-sleep-cache-validation.md).
 
 ## Start and control
 
@@ -101,7 +103,9 @@ detected during wake leaves the model sleeping for retry.
 
 The snapshot count follows the engine's existing prefix-cache capacity. Every live
 retained prefix is saved; older disk-only entries fill any remaining slots. Prefixes
-evicted before preservation are unavailable, and image state is not saved. Control
+evicted before preservation are unavailable, and image state is not saved.
+Nemotron clears its live retained prefixes when an unrelated drafted prompt starts;
+sleep cannot preserve a conversation prefix already displaced by that request. Control
 responses expose `cache.saved_prefixes`, `snapshot_bytes`, `omitted_prefixes`,
 `unavailable_prefixes`, `loaded_prefixes`, `load_failures` and `memory_misses`.
 The unavailable count covers saved files found unusable during a later save or
@@ -145,7 +149,7 @@ IDs, measures allocated/reserved memory and Linux process RSS, checks old engine
 collection, then compares the same prompts after each wake. It records checkpoint
 hashes and timing in JSON. Synthetic mode exercises a random two-layer affine model;
 `--synthetic-draft` uses 64 layers of width 2048 and a matching random DFlash2 model.
-Neither establishes pretrained-model quality or Spark behavior.
+Neither establishes pretrained-model quality or full-model memory behavior.
 CUDA allocator counters exclude the driver context and some library allocations.
 The tool detects the family from the checkpoint configuration. Nemotron-H uses its
 integrated MTP by default; add `--no-drafts` to qualify it without MTP. Its CUDA
@@ -164,11 +168,11 @@ python tools/qualify_sleep_http.py http://127.0.0.1:8080 MODEL --output sleep-ht
 For a server started with `--sleep-cache-dir`, add `--require-cache` to check that
 stored-response continuations reuse the same cached-token count after wake.
 
-The [full-checkpoint results](research/model-sleep-cuda-validation.md) cover the pinned
-NVFP4 model and DFlash2 drafter, unified-memory reclamation, HTTP conversation
-continuation, and decode plus 2048/8192-token cold-prefill comparisons against 0.6.3.
+The [reference results](research/model-sleep-reference-validation.md) cover both pinned
+families on 0.6.4. The [earlier Qwen results](research/model-sleep-cuda-validation.md)
+retain the original comparisons against 0.6.3.
 For other configurations, run the benchmarks from
 [Contributing](../CONTRIBUTING.md#the-receipt) against the last release in the same
-environment. Longer prompts, aggregate concurrent throughput, first-request latency
-after wake, cold-storage reload latency, image input and other checkpoint formats
+environment. Longer prompts, aggregate concurrent throughput,
+cold-storage reload latency, image input and other checkpoint formats
 remain to be measured.

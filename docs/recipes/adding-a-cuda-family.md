@@ -105,10 +105,15 @@ committed KV rows. Qwen creates independent growing `State` objects; Nemotron re
 compact saved rows into a fresh engine's fixed-capacity buffers. Neither serializes
 weight objects, graphs or arbitrary Python objects.
 
+Keep the family's retention rules explicit. Nemotron clears live retained prefixes
+when an unrelated drafted prompt starts; its two retained boundaries are not two
+independent conversation slots. Sleep preserves the state still retained at drain.
+
 Qualify repeated cycles with exact serial/drafted output, cached-token reuse, zero
 allocated and reserved bytes while asleep, failed-save rollback, failed-load retry,
 memory-denied cache misses and HTTP conversation continuation. Use
 `tools/qualify_sleep.py` and `tools/qualify_sleep_http.py --require-cache` as the
-reference checks. See [model sleep/wake](../model-sleep.md) for supported operation
-and snapshot lifetime. Adding a family is separate from adding Level 1, multi-rank
+reference checks. The [0.6.4 validation](../research/model-sleep-reference-validation.md)
+records both full-model implementations. See [model sleep/wake](../model-sleep.md)
+for supported operation and snapshot lifetime. Adding a family is separate from adding Level 1, multi-rank
 coordination, or restart persistence.
