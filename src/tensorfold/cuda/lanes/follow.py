@@ -20,6 +20,7 @@ class Held:
     snap: Any
     pages: list[int] | None = None
     data: dict | None = None  # a lower tier's page rows, before they are written into a lane
+    tokens: int = 0  # positions it keeps: complete rows below them are its, the rest of its last page is not
 
 
 class HeldCodec:
@@ -31,7 +32,11 @@ class HeldCodec:
     def to_host(self, held: Held) -> dict:
         out = {f"state/{k}": v for k, v in self.codec.to_host(held.snap).items()}
         if self.pool is not None:
-            out.update({f"page/{k}": v for k, v in self.pool.read_pages(held.pages).items()})
+            for name, rows in self.pool.read_pages(held.pages).items():
+                keep = held.tokens // self.pool.planes[name].per_tokens if held.tokens else len(rows)
+                rows = rows.copy()
+                rows[keep:] = 0  # stale rows past the kept positions never leave the device
+                out[f"page/{name}"] = rows
         return out
 
     def from_host(self, arrays: dict) -> Held:
@@ -249,7 +254,7 @@ class Lanes:
 
         s = self.lanes[lane]
         pages = self.tables[lane].share(len(s.history)) if self.tables is not None else None
-        self.cache.add(list(s.history), Held(self.forward.snapshot(lane), pages), None)
+        self.cache.add(list(s.history), Held(self.forward.snapshot(lane), pages, tokens=len(s.history)), None)
 
     def _windows(self, specs: Sequence[tuple[int, ...]], count: int, res: Result) -> None:
         drafts: dict[int, list[int]] = {}

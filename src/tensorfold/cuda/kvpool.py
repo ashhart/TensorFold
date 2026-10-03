@@ -15,7 +15,7 @@ from .memory_gate import NoRoom
 
 @dataclass(frozen=True)
 class Plane:
-    """One cache a page holds rows of: ``per_tokens`` tokens share a row (a compressed cache's ratio)."""
+    """One cache a page holds rows of: ``per_tokens`` tokens share a row, written only once all of them are known."""
 
     name: str
     row_bytes: int

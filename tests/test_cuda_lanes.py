@@ -549,3 +549,26 @@ def test_a_failed_round_on_two_ranks_refuses_further_work():
     pair.decoder.drop()
     with pytest.raises(RuntimeError, match="two ranks"):
         pair.decoder.admit(stream(prompts(1)[0], 5))
+
+
+def test_a_spilled_state_carries_no_rows_past_its_positions():
+    import numpy as np
+
+    from tensorfold.cuda.kvpool import PagePool, Plane
+    from tensorfold.cuda.lanes.follow import Held, HeldCodec
+
+    pool = PagePool([Plane("kv", 2), Plane("c", 2, per_tokens=4)], 4, 16)
+    pool.buffers["kv"][:] = 7
+    pool.buffers["c"][:] = 9
+    class NoState:
+        def to_host(self, snap):
+            return {}
+
+        def from_host(self, arrays):
+            return None
+
+    out = HeldCodec(NoState(), pool).to_host(Held(None, [0, 1], tokens=21))
+    kv, c = out["page/kv"], out["page/c"]
+    assert (kv[:21] == 7).all() and (kv[21:] == 0).all() and kv.shape == (32, 2)
+    assert (c[:5] == 9).all() and (c[5:] == 0).all() and c.shape == (8, 2)  # row 5 (20-23) is incomplete
+    assert (pool.buffers["kv"] == 7).all()  # the device rows are left alone

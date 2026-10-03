@@ -47,6 +47,8 @@ class Candidates:
 class LaneForward(Protocol):
     """A family's model over lanes. Optional: ``grid`` (pieces start on its multiples), ``replay_tail``, ``bind``."""
 
+    # A compressed plane's row is written once all its tokens are known; an incomplete one lives in ``snapshot``.
+
     # Optional ``request_bytes(prompt_len, max_new)``: what a request allocates outside the page pool (admission)
     vocab: int
 
