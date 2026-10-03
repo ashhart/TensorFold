@@ -325,38 +325,33 @@ def test_admission_waits_while_memory_is_short():
         pair.decoder.admit(b)
 
 
-def test_a_request_waits_until_memory_covers_its_pages():
-    free = [0]
-    admission = Admission(unified=True, meminfo=lambda: {"MemFree": free[0]}, floor=GIB, hard_floor=GIB)
-    pair = Pair(lanes=2, keep=0, admission=admission)
+def unified(free):
+    return Admission(unified=True, meminfo=lambda: {"MemFree": free[0]}, floor=GIB, hard_floor=GIB)
+
+
+def test_a_request_waits_until_memory_covers_what_it_allocates():
+    free, asked = [0], []
+    pair = Pair(lanes=2, keep=0, admission=unified(free))
+    pair.decoder.forward.request_bytes = lambda prompt_len, max_new: asked.append((prompt_len, max_new)) or 4096
     a, b = stream(prompts(1)[0], 5), stream(prompts(2)[1], 5)
     pair.decoder.admit(a)  # alone: admitted under the floor
-    pool = pair.decoder.pool
-    free[0] = GIB + pool.need(len(b.prompt) + 5 + 1) * pool.page_bytes() - 1  # above the floor, one byte short
+    free[0] = GIB + 4096 - 1  # above the floor, one byte short
     with pytest.raises(NoRoom, match="under the 1.00 GiB floor"):
         pair.decoder.admit(b)
     free[0] += 1
     pair.decoder.admit(b)
+    assert asked[-1] == (len(b.prompt), 5)
     assert pair.run([]) == [] and [a.out, b.out] == [serial(a.prompt, 5), serial(b.prompt, 5)]
 
 
-def test_a_resumed_request_counts_only_the_pages_it_does_not_share():
-    needs = []
-
-    class Record:
-        def fits(self, need):
-            needs.append(need)
-            return True
-
-    p = prompts(1, 64)[0]
-    pair = Pair(lanes=2, admission=Record())
-    pair.run([stream(p, 5)])
-    pair.decoder.admit(stream(prompts(2)[1], 5))
-    s = stream(p + [5] * 10, 5)
-    pair.decoder.admit(s)
-    pool = pair.decoder.pool
-    shared = s.cached // pool.page_tokens
-    assert shared == 3 and needs[-1] == (pool.need(len(s.prompt) + 5 + 1) - shared) * pool.page_bytes()
+def test_pool_pages_are_not_charged_to_memory():
+    free = [GIB]  # no headroom above the floor
+    pair = Pair(lanes=2, keep=0, admission=unified(free))
+    a, b = stream(prompts(1)[0], 5), stream(prompts(2)[1], 5)
+    pair.decoder.admit(a)
+    pair.decoder.admit(b)
+    assert pair.follower.tables[1].quota * pair.decoder.pool.page_bytes() > 0
+    assert pair.run([]) == [] and [a.out, b.out] == [serial(a.prompt, 5), serial(b.prompt, 5)]
 
 
 def test_admit_message_carries_the_sampling_and_the_prompt():

@@ -47,6 +47,7 @@ class Candidates:
 class LaneForward(Protocol):
     """A family's model over lanes. Optional: ``grid`` (pieces start on its multiples), ``replay_tail``, ``bind``."""
 
+    # Optional ``request_bytes(prompt_len, max_new)``: what a request allocates outside the page pool (admission)
     vocab: int
 
     def reset(self, lane: int) -> None:

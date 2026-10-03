@@ -120,7 +120,7 @@ class LaneDecoder:
         hit = self.cache.find(s.prompt) if self.cache is not None and s.draft else None
         cached, tier = hit if hit is not None else (0, -1)
         quota = self._quota(n + s.count + self.slack)
-        need = self._bytes(quota, cached if tier < 0 else 0)
+        need = self._need(n, s.count)
         # with nothing live it starts: no stream would finish to free memory, so waiting could only fail it
         if self.admission is not None and self.live() and not self.admission.fits(need):
             raise NoRoom(self.admission.why(need))
@@ -155,12 +155,11 @@ class LaneDecoder:
             raise ValueError(f"a request needs {quota} pages; the page pool has {self.pool.pages}")
         return quota
 
-    def _bytes(self, quota: int, shared: int) -> int:
-        """Bytes of every plane in the quota's pages, less the full pages it shares with the entry it resumes."""
+    def _need(self, prompt_len: int, max_new: int) -> int:
+        """Bytes the request allocates outside the page pool (its pages exist already): ``request_bytes``, else 0."""
 
-        if self.pool is None:
-            return 0
-        return (quota - shared // self.pool.page_tokens) * self.pool.page_bytes()
+        fn = getattr(self.forward, "request_bytes", None)
+        return int(fn(prompt_len, max_new)) if callable(fn) else 0
 
     def _room(self, quota: int, shared: int) -> None:
         """Kept entries are evicted until the pool can promise the quota (never the one the lane resumes)."""
