@@ -28,7 +28,7 @@ def _ext():
     from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
-    return load(name="tensorfold_exl3_prompt_experts_v3",
+    return load(name="tensorfold_exl3_prompt_experts_v4",
                 sources=[str(here / "prompt_experts.cpp"), str(here / "prompt_experts.cu")],
                 extra_cuda_cflags=["-O3", "-lineinfo"], extra_include_paths=[str(here)], verbose=False)
 
@@ -62,8 +62,9 @@ ORDER_BY_COUNT = int(__import__("os").environ.get("TF_EXL3_PROMPT_ORDER", "0")) 
 # point (integer adds are associative: same bits in any order, ~2x the atomic bytes); "slots": each slot into its own
 # row, summed in slot order (an extra pass over 8 rows a row); "0": fp32 red.add (fastest by a few %, not reproducible)
 _DET = __import__("os").environ.get("TF_EXL3_PROMPT_DET", "fixed").lower()
-DETERMINISTIC = _DET in ("1", "fixed", "slots")
-DET_MODE = 2 if _DET == "slots" else 3
+DETERMINISTIC = _DET in ("1", "fixed", "slots", "slots16")
+DET_MODE = {"slots": 2, "slots16": 4}.get(_DET, 3)
+NCB_ELEM_FIX = int(__import__("os").environ.get("TF_EXL3_PROMPT_FIX_SLAB_ELEM", "8"))   # slab sizing (8: true int64 width)
 CHUNK_ROWS = 4096              # longer calls run in row chunks: the down kernel re-reads xd once a column slab
 SLAB_BYTES = 9 << 20           # out columns a down pass keeps in L2 for its red.add (rows x columns x 4 bytes)
 
@@ -124,7 +125,7 @@ def _prompt_chunk(x, pick, wts, ex, out, scratch, limit, act_mode, ncb, f16, whi
         ext.experts(x, scratch.sorted[:R * S], scratch.items, scratch.count, ex.gate_ptr, ex.up_ptr, ex.down_ptr,
                     ex.gate_k2, ex.down_k2, ex.suh_g, ex.suh_u, ex.svh_g, ex.svh_u, ex.suh_d, ex.svh_d, wts,
                     scratch.xd, acc, ex.dims, ex.width, ex.gu_stride or ex.width // 16, S, items, float(limit),
-                    act_mode, ex.cb, ncb or auto_ncb(R, ex.dims, 8), which, 3)
+                    act_mode, ex.cb, ncb or auto_ncb(R, ex.dims, NCB_ELEM_FIX), which, 3)
         if which & 2:
             dst = out if out.dtype == torch.float32 and out.is_contiguous() else \
                 torch.empty((R, ex.dims), dtype=torch.float32, device=x.device)
@@ -132,19 +133,20 @@ def _prompt_chunk(x, pick, wts, ex, out, scratch, limit, act_mode, ncb, f16, whi
             if dst is not out:
                 out.copy_(dst)
         return
-    if det == 2:                          # each pair into its own row, then the slots summed in slot order
-        if scratch.pairs is None:
-            scratch.pairs = torch.empty((scratch.rows * scratch.slots, ex.dims), dtype=torch.float32, device=x.device)
+    if det in (2, 4):                     # each pair into its own row (fp32 / fp16), then summed in slot order
+        pdt = torch.float16 if det == 4 else torch.float32
+        if scratch.pairs is None or scratch.pairs.dtype != pdt:
+            scratch.pairs = torch.empty((scratch.rows * scratch.slots, ex.dims), dtype=pdt, device=x.device)
         pairs = scratch.pairs[:R * S]
         ext.route(pick, ex.count, scratch.sorted, scratch.items, scratch.count, items, ORDER_BY_COUNT)
         ext.experts(x, scratch.sorted[:R * S], scratch.items, scratch.count, ex.gate_ptr, ex.up_ptr, ex.down_ptr,
                     ex.gate_k2, ex.down_k2, ex.suh_g, ex.suh_u, ex.svh_g, ex.svh_u, ex.suh_d, ex.svh_d, wts,
                     scratch.xd, pairs, ex.dims, ex.width, ex.gu_stride or ex.width // 16, S, items, float(limit),
-                    act_mode, ex.cb, ncb or auto_ncb(R, ex.dims, 4), which, 2)
+                    act_mode, ex.cb, ncb or auto_ncb(R, ex.dims, 4), which, det)
         if which & 2:
             dst = out if out.dtype == torch.float32 and out.is_contiguous() else \
                 torch.empty((R, ex.dims), dtype=torch.float32, device=x.device)
-            ext.slot_sum(pairs, pick, dst, ex.count)
+            (ext.slot_sum16 if det == 4 else ext.slot_sum)(pairs, pick, dst, ex.count)
             if dst is not out:
                 out.copy_(dst)
         return

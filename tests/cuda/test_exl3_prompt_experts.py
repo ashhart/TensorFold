@@ -226,7 +226,7 @@ def test_item_order_by_count(layer):
 
 
 
-@pytest.mark.parametrize("mode", [3, 2])
+@pytest.mark.parametrize("mode", [3, 2, 4])
 @pytest.mark.parametrize("R", [1024, 4096])
 def test_deterministic_slot_sums(layer, R, mode, monkeypatch):
     """Modes 3 (fixed point, default) and 2 (slot rows): the same call twice gives the same bits (fp32 red.add sums a
@@ -247,7 +247,7 @@ def test_deterministic_slot_sums(layer, R, mode, monkeypatch):
     assert torch.equal(a, b), "deterministic mode differs between two identical calls"
     rel = ((a - atom).norm() / atom.norm()).item()
     print(f"R={R} mode {mode}: deterministic vs atomic rel {rel:.3e}")
-    assert rel <= 1e-5
+    assert rel <= (5e-4 if mode == 4 else 1e-5)           # mode 4 rounds each slot's row to fp16 before the sum
     rows = list(range(0, R, max(1, R // 16)))
     r64 = reference64(x, sel, w, layer, rows)
     e_det = ((a[rows].double() - r64).norm() / r64.norm()).item()
