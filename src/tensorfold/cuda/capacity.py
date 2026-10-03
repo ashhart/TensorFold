@@ -34,6 +34,7 @@ class Weights:
     resident: int
     staging: int
     mapped: int = 0  # read-only, unpinned file pages, reclaimable by the OS
+    host_staging: int = 0  # host bytes a load holds, where more than ``staging``
 
 
 @dataclass(frozen=True)
@@ -120,8 +121,10 @@ def headers(model_dir: str | Path, *, rank: int | None = None, files: list[Path]
 
 
 def estimate_weights(model_dir: str | Path, transform: Callable, *, rank: int | None = None,
-                     files: list[Path] | None = None) -> Weights:
+                     files: list[Path] | None = None,
+                     transient: Callable[[str, dict, int], int] | None = None) -> Weights:
     layers: dict[str, int] = {}
+    units: dict[str, int] = {}
     resident = mapped = largest = 0
     for name, info in headers(model_dir, rank=rank, files=files).items():
         size, host = transform(name, info)
@@ -134,8 +137,16 @@ def estimate_weights(model_dir: str | Path, transform: Callable, *, rank: int | 
         match = re.search(r"(?:layers|blocks)\.(\d+)\.", name)
         group = match.group(1) if match else name
         layers[group] = layers.get(group, 0) + size
+        if transient is not None:
+            extra = int(transient(name, info, size))
+            if extra < 0:
+                raise ValueError("negative startup staging estimate")
+            unit = group if match else name.rsplit(".", 1)[0]          # a head's parts load together, as a layer's
+            units[unit] = units.get(unit, 0) + extra
     # CPU expert lists/stack, GPU uploads and tiled outputs can coexist during one layer load.
     staging = 3 * max([largest, *layers.values()], default=0)
+    if transient is not None:   # one unit in flight on the GPU; the host check keeps the default bill
+        return Weights(resident, max(units.values(), default=0), mapped, staging)
     return Weights(resident, staging, mapped)
 
 
@@ -299,7 +310,8 @@ def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, t
           draft_geometry: Geometry | Callable | None = None, startup_copies: int = 0,
           extra_files: tuple[Path, ...] = (), files: list[Path] | None = None,
           draft_transform: Callable | None = None,
-          draft_weights: Callable[[Path], Weights] | None = None) -> dict:
+          draft_weights: Callable[[Path], Weights] | None = None,
+          transient: Callable[[str, dict, int], int] | None = None) -> dict:
     """One refusal or capacity on both ranks before allocating; the draft model by ``draft_weights`` or a transform."""
 
     from tensorfold.cuda import build
@@ -310,11 +322,11 @@ def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, t
     try:
         text = config(model_dir)
         geometry = geometry(text) if callable(geometry) else geometry
-        weights = estimate_weights(model_dir, transform, rank=rank, files=files)
-        host_staging = weights.staging
+        weights = estimate_weights(model_dir, transform, rank=rank, files=files, transient=transient)
+        host_staging = max(weights.staging, weights.host_staging)
         if extra_files:                      # files outside the index, same layout (Nemotron's MTP head, EXL3 tables)
-            more = estimate_weights(model_dir, transform, files=list(extra_files))
-            host_staging = max(host_staging, more.staging)
+            more = estimate_weights(model_dir, transform, files=list(extra_files), transient=transient)
+            host_staging = max(host_staging, more.staging, more.host_staging)
             weights = Weights(weights.resident + more.resident, max(weights.staging, more.staging),
                               weights.mapped + more.mapped)
         weights = Weights(weights.resident, weights.staging + startup_copies * weights.resident, weights.mapped)

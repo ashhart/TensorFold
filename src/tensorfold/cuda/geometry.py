@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import math
+import os
 import re
+from typing import Callable
 
 from .capacity import Geometry, Weights, headers, itemsize
 
@@ -52,6 +54,22 @@ def exl3_weights(name: str, info: dict) -> tuple[int, int]:
         return 0, 0
     amount = padded(info, info["shape"], float32=name.endswith((".A_log", ".dt_bias")), name=name)
     return (amount * 7 // 5 if name in ("lm_head.trellis", "lm_head.svh") else amount), 0
+
+
+def exl3_staging(name: str, info: dict, size: int) -> int:
+    """An EXL3 tensor's load bytes beside its resident copy: a group part its resident size, a plain tensor none."""
+
+    from tensorfold.cuda.exl3.format import PARTS
+
+    return size if name.rsplit(".", 1)[-1] in PARTS else 0
+
+
+def tight_staging(torch) -> Callable[[str, dict, int], int] | None:
+    """``exl3_staging`` under TENSORFOLD_TIGHT_STAGING=1 on a discrete GPU; unset or unified, the default bill."""
+
+    from .capacity import unified
+
+    return exl3_staging if os.environ.get("TENSORFOLD_TIGHT_STAGING") == "1" and not unified(torch) else None
 
 
 def exl3_workspace(largest: int, rows: int, width: int) -> int:

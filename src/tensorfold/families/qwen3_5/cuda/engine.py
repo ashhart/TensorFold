@@ -47,7 +47,7 @@ class Qwen27Engine:
         from .weights import load
         from tensorfold.cuda.capacity import admit, config, gather_ints, total_bytes
         from tensorfold.cuda.geometry import (draft_geometry, gdn_geometry, live_kv, prompt_row_bytes, prompt_rows,
-                                              stream_geometry)
+                                              stream_geometry, tight_staging)
         from .affine_memory import draft_weights, weight_transform
         from tensorfold.vision.qwen_cuda import capacity_geometry, weight_transform as vision_weights
 
@@ -90,8 +90,10 @@ class Qwen27Engine:
                     else (lambda text: gdn_geometry(text, tp, max_rows, rows=max_rows, prompt=chunk, evicts=tp == 1)))
         # an affine checkpoint's packed words at their stored precision; an EXL3 pack's by its own format
         tensor_bytes = weight_transform(model_dir, one_gpu=tp == 1)
+        transient = None                          # unset: three times the largest layer or tensor
         if exl3:
             geometry, tensor_bytes = admission(geometry)
+            transient = tight_staging(torch)      # opt-in: one layer's or the head's group parts on the GPU
         elif nvfp4:
             from .nvfp4_load import admission as nvfp4_admission
 
@@ -106,7 +108,7 @@ class Qwen27Engine:
                                    draft_geometry=lambda text: draft_geometry(text, tp if tp_draft else 1, max_rows,
                                                                               bounded=True, streams=streams,
                                                                               kept=keep + 1 if many else 0),
-                                   startup_copies=int(tp == 2))
+                                   startup_copies=int(tp == 2), transient=transient)
         self.context_window = self.capacity_plan["context_window"]
         if tp == 2:
             full = load(model_dir)
