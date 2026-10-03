@@ -171,8 +171,13 @@ class Sample:
 
 
 def normalize(now: float, health: dict, values: dict[str, list[float]]) -> Sample:
-    sample = Sample(now, True, "warming" if health.get("warming") else "ready",
-                    clean(health.get("model", ""), 160))
+    lifecycle = health.get("lifecycle")
+    state = lifecycle.get("state") if isinstance(lifecycle, dict) else None
+    phase = state if state in {"draining", "sleeping", "waking", "error"} else (
+        "warming" if health.get("warming") else "ready")
+    sample = Sample(now, True, phase, clean(health.get("model", ""), 160))
+    if state == "error":
+        sample.error = clean(lifecycle.get("last_error") or "model lifecycle failed", 240)
     live = health.get("live")
     if isinstance(live, dict):
         for key in ("connections", "waiting", "decode_tokens_per_second", "prefill_tokens_per_second"):

@@ -153,6 +153,19 @@ def test_warming_is_distinct_from_ready():
     assert sample.online and sample.phase == "warming"
 
 
+@pytest.mark.parametrize("state", ["draining", "sleeping", "waking", "error"])
+def test_lifecycle_states_are_online_but_not_generation_ready(state):
+    def route(path, _):
+        return (200, json.dumps({"ok": True, "ready": False, "lifecycle": {
+            "state": state, "last_error": "failed runtime cleanup" if state == "error" else None,
+        }}).encode(), {}) if path == "/health" else (200, b"", {})
+
+    with endpoint(route) as url:
+        sample = Client(url).sample()
+    assert sample.online and sample.phase == state
+    assert bool(sample.error) == (state == "error")
+
+
 def counter(at, value, source="live counter"):
     return Sample(at, True, "ready", counters={"generation": value}, sources={"generation": source})
 

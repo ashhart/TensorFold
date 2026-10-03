@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from tensorfold.engine import grammar
-from tensorfold.server import anthropic, live, responses, token_routes
+from tensorfold.server import anthropic, lifecycle_http, live, responses, token_routes
 from tensorfold.server.tools import (active_tool_specs, parse_tool_calls_from_content, stream_tool_call_deltas,
                                      tool_choice_requires_call)
 from tensorfold.server.decisions import DecisionError
@@ -119,23 +119,29 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
             return self.path.split("?", 1)[0].rstrip("/")
 
         def do_GET(self) -> None:
+            if lifecycle_http.admin(self, app):
+                return
             route = self._route()
             if responses.route(route):
                 return responses.get(self, app, responses.route(route))
             if route in {"/metrics", "/v1/metrics"}:
                 return metrics.send(self, app)
             if route in {"", "/health"}:
-                self._send_json(
-                    {
-                        "status": "ok",
-                        "model": app.served_name,
-                        "model_ids": app.model_ids,
-                        "max_batch_size": app.max_batch_size,
-                        "warming": bool(getattr(app, "warming", False)),
-                        "memory": _memory("reset_peak=1" in self.path, admission=getattr(app, "prompt_memory", None)),
-                        **({"live": live.snapshot(app.scheduler)} if getattr(app, "scheduler", None) is not None else {}),
-                    }
-                )
+                body = {
+                    "status": "ok",
+                    "model": app.served_name,
+                    "model_ids": app.model_ids,
+                    "max_batch_size": app.max_batch_size,
+                    "warming": bool(getattr(app, "warming", False)),
+                }
+
+                def runtime():
+                    return {"memory": _memory("reset_peak=1" in self.path,
+                                              admission=getattr(app, "prompt_memory", None)),
+                            **({"live": live.snapshot(app.scheduler)}
+                               if getattr(app, "scheduler", None) is not None else {})}
+                body.update(lifecycle_http.observe(app, runtime, lambda: {"memory": {}}))
+                self._send_json(lifecycle_http.health(app, body))
                 return
             if route.endswith("/models") or route == "/models":
                 self._send_json(
@@ -188,6 +194,9 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
             responses.delete(self, app, responses.route(self._route()))
 
         def do_POST(self) -> None:
+            lifecycle_http.post(self, app, self._post)
+
+        def _post(self) -> None:
             route = self._route()
             if route.endswith("/decisions"):
                 return self._post_decisions(app)

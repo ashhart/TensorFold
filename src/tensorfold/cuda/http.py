@@ -8,7 +8,7 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from tensorfold.cuda import health
-from tensorfold.server import anthropic, metrics, responses, token_routes
+from tensorfold.server import anthropic, lifecycle_http, metrics, responses, token_routes
 from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
 from tensorfold.server.decisions import DecisionError
 from tensorfold.server.errors import CapacityError, RequestError, error_body
@@ -85,6 +85,8 @@ def make_handler(app: App):
             self.close_connection = True
 
         def do_GET(self):
+            if lifecycle_http.admin(self, app):
+                return
             route = self.path.split("?", 1)[0].rstrip("/")
             if route in ("/metrics", "/v1/metrics"):
                 return metrics.send(self, app)
@@ -102,6 +104,9 @@ def make_handler(app: App):
             responses.delete(self, app, responses.route(self.path))
 
         def do_POST(self):
+            lifecycle_http.post(self, app, self._post)
+
+        def _post(self):
             path = self.path.split("?", 1)[0].rstrip("/")
             if path.endswith("/decisions"):
                 return self._post_decisions()
@@ -288,3 +293,5 @@ def serve(app: App, host: str, port: int) -> None:
         pass
     finally:
         server.server_close()
+    if getattr(server, "lifecycle_failed", False):
+        raise RuntimeError("model lifecycle failed; restart the server")

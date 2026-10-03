@@ -7,7 +7,7 @@ import time
 from contextlib import contextmanager
 from typing import Any
 
-from tensorfold.server import metrics
+from tensorfold.server import lifecycle_http, metrics
 
 STATS = {"prefill_s": "prefill_seconds_total", "decode_s": "decode_seconds_total", "cached": "cached_tokens_total",
          "rounds": "rounds_total", "drafted": "drafted_total", "accepted": "accepted_total"}
@@ -84,6 +84,15 @@ class Health:
             body["completion_tokens_total"] += sum(len(r.out) for r in self.live)
             running = len(self.live)
         body = {"ok": True, "backend": "tensorfold", "busy": running > 0, "requests_running": running, **body}
+        def fallback():
+            window = getattr(app, "context_window", 0)
+            return {"context_length": int(window)} if window else {}
+        body.update(lifecycle_http.observe(app, lambda: self._runtime(app), fallback))
+        return lifecycle_http.health(app, body)
+
+    @staticmethod
+    def _runtime(app) -> dict[str, Any]:
+        body = {}
         scheduler = getattr(getattr(app, "engine", None), "scheduler", None)     # /health answers whatever the app
         decoder = getattr(scheduler, "decoder", None)
         if decoder is not None:                         # read, never locked: sizes of the decoder's own tables

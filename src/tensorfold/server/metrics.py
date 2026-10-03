@@ -12,6 +12,8 @@ import threading
 import time
 from typing import Any
 
+from tensorfold.server import lifecycle_http
+
 PREFIX = "tensorfold:"
 # Request and time-to-first-token histograms share these upper edges. +Inf is added when rendered.
 BUCKETS = (0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0)
@@ -147,9 +149,21 @@ def render(app: Any) -> str:
         prompt, generation = metrics.prompt, metrics.generation
         drafted, accepted = metrics.drafted, metrics.accepted
         latency, ttft, decode = metrics.latency.copy(), metrics.ttft.copy(), metrics.decode.copy()
-    running, waiting = _requests(app)
-    pools = _pools(app)
+    def fallback():
+        health = getattr(app, "health", None)
+        running = len(getattr(health, "live", ()) or ())
+        state = app.lifecycle.snapshot()["state"]
+        return (running, 0), ([("0", 0.0)] if state == "sleeping" else []), (None, None)
+    (running, waiting), pools, (disconnects, preempted) = lifecycle_http.observe(
+        app, lambda: (_requests(app), _pools(app), _endings(app)), fallback)
     lines: list[str] = []
+    lifecycle = getattr(app, "lifecycle", None)
+    if lifecycle is not None:
+        state = lifecycle.snapshot()
+        _family(lines, "model_ready", "gauge", "Whether the model accepts inference requests.",
+                [f"{PREFIX}model_ready {int(state['ready'])}"])
+        _family(lines, "model_lifecycle_state", "gauge", "Current model lifecycle state.",
+                [f'{PREFIX}model_lifecycle_state{{state="{state["state"]}"}} 1'])
     _family(lines, "requests_running", "gauge", "Requests in prefill or decode.",
             [f"{PREFIX}requests_running {running}"])
     _family(lines, "requests_waiting", "gauge", "Requests queued or held until a lane is free.",
@@ -190,7 +204,6 @@ def render(app: Any) -> str:
     _histogram(lines, "request_decode_time_seconds",
                "Seconds a finished request spent decoding, under vLLM's name.", decode)
     # per-request event counts; a family is left out where this server doesn't count the event, never a fake zero
-    disconnects, preempted = _endings(app)
     if disconnects is not None:
         _family(lines, "client_disconnections_total", "counter",
                 "Requests a client left before the reply left the server.",
