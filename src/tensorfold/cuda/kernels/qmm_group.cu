@@ -47,6 +47,19 @@ __device__ __forceinline__ uint32_t pairm(uint32_t w, int s, uint32_t mask) {
 template <int N>
 using ic = std::integral_constant<int, N>;
 
+// A part's cluster lc (row tiles fastest, then column groups), renumbered at 5 and 6 bits so long prompts sweep the
+// column groups in bands of row tiles whose inputs stay in L2, as qmm.cu orders its blocks; unchanged in one band.
+template <int BITS, int BM>
+__device__ __forceinline__ int banded(int lc, int M, int K, int rows_t, int groups) {
+    if constexpr (BITS == 5 || BITS == 6) {
+        const int band = max(1, min(rows_t, static_cast<int>((12LL << 20) / (static_cast<long long>(BM) * K * 2))));
+        const int2 at = tile_of(lc, M, groups, BM, 1, band);
+        return at.y * rows_t + at.x / BM;
+    } else {
+        return lc;
+    }
+}
+
 // Clusters of C blocks along x, one part each: a cluster covers C / sk column tiles, each split in sk K slices.
 // SWAP (8-row tiles): weights are the MMA's A operand (16 columns) and the rows its B (8), half the MMAs of 16 rows.
 // SKIP: a warp's m16 tiles wholly past M skip their fragments, mmas and scaling (a part-filled row tile). SPREAD:
@@ -70,7 +83,7 @@ __global__ void __launch_bounds__(WM * WN * 32) group_kernel(
     for (int i = 1; i < PARTS; ++i)
         if (i < parts.count && cid >= parts.p[i].first) q = i;
     const Part P = parts.p[q];                   // in registers: the loads below index it every group
-    const int sk = P.sk, lc = cid - P.first;
+    const int sk = P.sk, lc = banded<BITS, BM>(cid - P.first, M, K, rows_t, (P.tiles + C / sk - 1) / (C / sk));
     const int tile = lc / rows_t * (C / sk) + rank / sk, slice = rank % sk;
     const int m0 = lc % rows_t * BM, n0 = tile * BN, per = KG / sk, g0 = slice * per;
     const bool live = tile < P.tiles;            // a cluster's spare blocks past the last tile only join its syncs

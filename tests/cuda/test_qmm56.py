@@ -124,6 +124,21 @@ def test_every_group_tile_keeps_qmm_cu_bits(bits, name, monkeypatch):
                 assert all(torch.equal(a, b[:rows]) for a, b in zip(got, want)), (rows, tile, early)
 
 
+@pytest.mark.skipif(not grouped_chip, reason="grouped launches run on sm_12x only")
+@pytest.mark.parametrize("bits", BITS)
+def test_prompt_chunks_keep_qmm_cu_bits(bits, monkeypatch):
+    """Prompt-sized row counts, where grouped launches take their row tiles in bands: qmm.cu's bits, row by row."""
+
+    qs = [qmm.pack(*_weights(n, k, bits, 9 * n + k), 64, bits=bits) for n, k in ((5120, 17408), (6144, 5120))]
+    xs = [torch.randn((1500, q.k), generator=torch.Generator(device="cuda").manual_seed(2), device="cuda").bfloat16()
+          for q in qs]
+    with monkeypatch.context() as m:
+        m.setattr(qmm, "grouped", lambda device: False)
+        want = [qmm.matmul(x, q) for x, q in zip(xs, qs)]
+    for x, q, w in zip(xs, qs, want):
+        assert torch.equal(qmm.matmul_group(x, [q])[0], w)
+        assert torch.equal(qmm.matmul_group(x[:700], [q])[0], w[:700])
+
 @pytest.mark.parametrize("bits", BITS)
 def test_4bit_codes_in_wider_words_give_the_4bit_bits(kernel, bits):
     """q = 2^s q4 with scales / 2^s (exact, s from 0 until the top bit) at the same K split: the same products in the
