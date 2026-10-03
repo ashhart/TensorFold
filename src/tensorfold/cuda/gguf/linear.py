@@ -217,7 +217,11 @@ class Packed:
                     raise ValueError("expert plan does not match the input")
                 route(picks, plan, tile=64)
             out = torch.empty((rows, slots, n), dtype=dtype, device=x.device)
-            _group_mm[(plan.items.shape[0], triton.cdiv(n, 32))](
+            # Small K tiles keep IQ2 grid/sign and Q2 scale decoding live ranges
+            # short; wider output tiles reuse gathered rows.
+            compact = self.format in ("IQ2_XXS", "Q2_K")
+            bn, bk = (128 if input_slots else 64, 32) if compact else (32, 128)
+            _group_mm[(plan.items.shape[0], triton.cdiv(n, bn))](
                 x.contiguous(),
                 self.data,
                 codebook(x.device),
@@ -233,9 +237,10 @@ class Packed:
                 self.shape[2],
                 rows * slots,
                 plan.tile,
-                32,
-                64 if self.format == "IQ2_XXS" and not input_slots else 128,
+                bn,
+                bk,
                 num_warps=8 if plan.tile == 64 else 4,
+                num_stages=1 if compact else 3,
                 enable_fp_fusion=False,
             )
             return out
@@ -245,8 +250,25 @@ class Packed:
             x = x.contiguous()
         out = torch.empty((rows, slots, n), dtype=dtype, device=x.device)
         if rows > 16 and picks is None:
-            _mm[(triton.cdiv(rows, 64), triton.cdiv(n, 32))](
-                x, self.data, codebook(x.device), out, rows, n, k, self.format, 64, 32, 128, enable_fp_fusion=False
+            # Q8 scales cover 32 values; avoid carrying four blocks' decoding
+            # through one dot. More rows then reuse each decoded weight tile.
+            q8 = self.format == "Q8_0"
+            bm, bn, bk = (128, 64, 32) if q8 else (64, 32, 128)
+            _mm[(triton.cdiv(rows, bm), triton.cdiv(n, bn))](
+                x,
+                self.data,
+                codebook(x.device),
+                out,
+                rows,
+                n,
+                k,
+                self.format,
+                bm,
+                bn,
+                bk,
+                num_warps=8 if q8 else 4,
+                num_stages=1 if q8 else 3,
+                enable_fp_fusion=False,
             )
         else:
             if picks is None:

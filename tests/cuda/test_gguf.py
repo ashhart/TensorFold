@@ -61,6 +61,18 @@ def test_decode_reference_and_row_independence(fmt):
     y = packed.linear(x)
     assert torch.equal(y, torch.cat([packed.linear(row[None]) for row in x]))
     torch.testing.assert_close(y.float(), x.float() @ torch.tensor(expected, device="cuda").T, rtol=0.01, atol=0.002)
+    # Exercise grouped prefill, including a partial row tile and output tile.
+    data = torch.cat((packed.data, packed.data.reshape(7, -1).flip(0).flatten()))
+    experts = Packed(data, (256, 7, 2), fmt)
+    x = torch.randn(65, 256, device="cuda", dtype=torch.bfloat16) * 0.01
+    ref = x.float() @ torch.tensor(expected, device="cuda").bfloat16().float().T
+    torch.testing.assert_close(packed.linear(x).float(), ref, rtol=0.01, atol=0.002)
+    picks = (torch.arange(65, device="cuda") % 2).to(torch.int32)[:, None]
+    y = experts.linear(x, picks)
+    matrices = torch.tensor(np.stack((expected, expected[::-1].copy())), device="cuda").bfloat16()
+    ref = torch.bmm(matrices[picks[:, 0]].float(), x.float()[:, :, None]).squeeze(-1)
+    torch.testing.assert_close(y[:, 0].float(), ref, rtol=0.01, atol=0.002)
+    torch.testing.assert_close(experts.linear(x[:, None], picks)[:, 0].float(), ref, rtol=0.01, atol=0.002)
 
 
 def test_invalid_expert_ids_and_shapes_are_refused_before_routing():

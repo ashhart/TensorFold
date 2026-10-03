@@ -150,18 +150,23 @@ bounds, quantization block geometry, independent scalar decoding and row arithme
 Measured on one GB10 with an 80.76 GiB mixed IQ2_XXS/Q2_K/Q8_0 target and a 6.49 GiB DSpark GGUF,
 with Hunyuan resident. After kernel tuning, the same qualification fixture changed as follows:
 
-| Case | Initial native | Tuned native |
-| --- | --- | --- |
-| Cold 131,093-token prefill | 713.54 s | 341.59 s |
-| Retained 128Ki prefix, prefill | 0.51 s | 0.45 s |
-| Warm long-prefix plain decode | 9.24 tok/s | 9.77 tok/s |
-| Warm long-prefix DSpark decode | 11.27 tok/s | 14.15 tok/s |
+| Case | Initial native | Tuned native | Native, GGUF tiles |
+| --- | --- | --- | --- |
+| Cold 131,093-token prefill | 713.54 s | 341.59 s | 237.29 s |
+| Retained 128Ki prefix, prefill | 0.51 s | 0.45 s | 0.37 s |
+| Warm long-prefix plain decode | 9.24 tok/s | 9.77 tok/s | 9.78 tok/s |
+| Warm long-prefix DSpark decode | 11.27 tok/s | 14.15 tok/s | 14.24 tok/s |
 
-Cold prefill is 2.09 times faster than the initial native implementation. Every qualification reply
+IQ2_XXS and Q2_K expert tiles consume 32 values at a time, keeping decoding live ranges short.
+Q8_0 dense tiles match their 32-value scale blocks. Wider output
+tiles reuse routed inputs without expanding weights or adding a resident cache. Narrow verification
+rows keep their existing arithmetic. This cuts long cold-prefill time another 30.5%.
+
+Cold prefill is 3.01 times faster than the initial native implementation. Every qualification reply
 retained its previous token IDs. These numbers do not establish a win over the previous external
-engine: an identical 8,213-token cold prompt took 20.61 s here and 8.88 s in that engine after kernel
-warmup. Cold prefill remains the main performance gap. The Mac measurements above use different
-weights and hardware and are not a CUDA comparison.
+engine: an identical 8,213-token cold prompt took 20.61 s before the GGUF tile change, 13.63-13.65 s
+after it, and 8.88 s in that engine after kernel warmup. Cold prefill remains the main performance gap.
+The Mac measurements above use different weights and hardware and are not a CUDA comparison.
 
 ## Not yet
 
