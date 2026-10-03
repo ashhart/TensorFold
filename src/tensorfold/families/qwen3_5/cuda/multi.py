@@ -13,10 +13,10 @@ from tensorfold.cuda.sampling import sample_streams
 from tensorfold.cuda.streams import PrefixCache, Stream, accept, next_fill
 from tensorfold.engine.grammar import GrammarError, pack
 
-from .decode import CopyIndex, clone_state
+from .decode import CopyIndex, clone_state, next_copy_rows
 from .decode_tp import SAMPLING_WORDS as W, _sample_split, _share, first_token, pack_sampling, unpack_sampling
 from .draft_tree import allocate
-from .engine import entry_end
+from .engine import COPY_ROWS, entry_end
 from .forward import State, _paths, commit_streams, multi_tree_forward, path_indices, reserve
 from .prefill import CHUNK, Piece, prefill_batch, prefill_state
 from .weights import Weights
@@ -31,12 +31,13 @@ DEPTH_CHIPS = ((12, 0),)                # tuned planning (measured overhead, cur
 BATCH = True                            # queued foreground prompts' steps share one prefill forward
 
 
-def calibration_rows(streams: int, steps: bool = True) -> list[int]:
-    """Row counts the startup curve times: ``streams`` full windows and (``steps``) a point past each tile step."""
+def calibration_rows(streams: int, steps: bool = True, most: int = 0) -> list[int]:
+    """Row counts the startup curve times: up to ``streams`` windows or ``most`` rows, and (``steps``) tile steps."""
 
+    top = max(16 * streams, most)
     grid = [r for r in (1, 2, 4, 8, 12, 16, 17, 24, 32, 33, 48, 64, 65, 96, 128, 129, 192, 256, 257, 384, 512)
             if steps or r not in (17, 33, 65, 129, 257)]
-    return sorted({r for r in grid if r <= 16 * streams} | {16 * streams})
+    return sorted({r for r in grid if r <= top} | {top})
 
 
 def private(st: State, rows: int) -> State:
@@ -87,19 +88,27 @@ def _unflatten(flat: list[int], pairs: bool) -> list:
 
 
 class MultiDecoder:
-    """The ``Scheduler``'s decoder on one GPU or as ``rank`` of two; a stream's window holds at most 16 rows."""
+    """The ``Scheduler``'s decoder on one GPU or as ``rank`` of two; trees take 16 rows, copies up to ``copy_rows``."""
 
     memory_gate: MemoryGate | None = None     # one GPU: streams' caches grow by use (two ranks reserve up front)
     block: int = 16                           # rows of the drafter's next block with several streams (pending, masks)
+    copy_rows: int = 0                        # a copy's widest window (0, or max_rows: copies keep the tree width)
+    spare: int = 0                            # this round's rows past max_rows a stream, for copies
     depth: bool = True                        # whether the block follows the trees here (DEPTH_CHIPS)
     spent: dict | None = None                 # streams -> the last rounds' ms beside the forward
     last: tuple | None = None                 # (start, streams, rows) of the round before
 
     def __init__(self, w: Weights, draft=None, *, max_rows: int = 16, allow_copy: bool = True, stop_eos: bool = True,
-                 keep: int = 8, rank: int = 0, world: int = 1, context: int = 0, points=None, vision=None) -> None:
+                 keep: int = 8, rank: int = 0, world: int = 1, context: int = 0, points=None, vision=None,
+                 copy_rows: int = 0) -> None:
         if not 1 <= max_rows <= 16:
-            raise ValueError("a stream's window is 1 to 16 rows (the multi-stream GDN tree kernel's limit)")
+            raise ValueError("a stream's tree is 1 to 16 rows")
+        if copy_rows and not max_rows <= copy_rows <= COPY_ROWS:
+            raise ValueError(f"copy windows take {max_rows} to {COPY_ROWS} rows, not {copy_rows}")
         self.w, self.draft, self.max_rows, self.allow_copy = w, draft, max_rows, allow_copy
+        # a round's rows: max_rows a stream, or copy_rows when fewer streams leave room for a wider copy
+        self.copy_rows = copy_rows or max_rows
+        self.copy_window: dict[int, int] = {}                 # stream id -> its copies' window, as a lone stream's
         self.vision = vision
         self.context = context                                # prompt plus reply tokens a stream holds (0: no bound)
         self.eos = tuple(w.config.eos) if stop_eos else ()
@@ -189,6 +198,11 @@ class MultiDecoder:
 
         return min(self._most(s), -(-(len(s.prompt) + self.max_rows + 2) // GROW) * GROW)
 
+    def _reach(self, s: Stream) -> int:
+        """The widest window the stream's next round can take: its tree, or the copy window it has grown to."""
+
+        return max(self.max_rows, self.copy_window.get(s.sid, 0)) if self.copy_rows > self.max_rows else self.max_rows
+
     def _room(self, s: Stream) -> None:
         """A new prompt's rows fit beside the live streams, cached prompt ends going first; else it waits (NoRoom)."""
 
@@ -220,7 +234,7 @@ class MultiDecoder:
         live = sorted(live, key=lambda x: x.sid)
         blocked = False
         for s in live:
-            rows = min(s.st.pos + self.max_rows + 2, self._most(s))   # a stream never commits past its prompt and reply
+            rows = min(s.st.pos + self._reach(s) + 2, self._most(s))  # never past its prompt and reply
             have = next((kv[0].shape[0] for kv in s.st.kv if kv is not None), rows)
             if rows <= have:
                 s.waiting = False
@@ -406,6 +420,7 @@ class MultiDecoder:
             self.last = None
             return done
         copied: dict[int, list[int]] = {}
+        self.spare = max(0, self.copy_rows - self.max_rows * len(live))
         plan = [(s.sid, self._mode(s, copied), s.out[-1], len(s.context)) for s in live]
         self._send([ROUND, len(plan), *[x for item in plan for x in item]])
         wins, record, taps, starts, sampled = self._verify(plan, copied)
@@ -414,6 +429,10 @@ class MultiDecoder:
             path, end = accept(tokens, parents, rows, s.count - len(s.out), self._ends(s))
             paths.append(path)
             ends.append(end)
+        for (sid, mode, _, _), (tokens, _), path in zip(plan, wins, paths):
+            if mode == COPY and self.copy_rows > self.max_rows:   # the verified rows: a grammar may have dropped some
+                self.copy_window[sid] = next_copy_rows(self.copy_window.get(sid, self.max_rows),
+                                                       len(path) == len(tokens), self.max_rows, self.copy_rows)
         self._send([x for path in paths for x in (len(path), *path)])
         self._commit(plan, wins, record, taps, starts, paths)
         self.last = (start, len(plan), sum(len(t) for t, _ in wins)) if self.costs is not None else None
@@ -461,7 +480,11 @@ class MultiDecoder:
     def _mode(self, s: Stream, copied: dict[int, list[int]]) -> int:
         if not s.draft:
             return ONE
-        copied[s.sid] = s.copies.propose(s.context, self.max_rows - 1) if s.copies is not None else []
+        rows = self.max_rows
+        if self.copy_rows > self.max_rows and s.constraint is None:   # its copy window, within the round's spare rows
+            rows = min(self.copy_window.get(s.sid, self.max_rows), self.max_rows + self.spare)
+        copied[s.sid] = s.copies.propose(s.context, rows - 1) if s.copies is not None else []
+        self.spare -= max(0, len(copied[s.sid]) + 1 - self.max_rows)
         return COPY if copied[s.sid] else (TREE if self.draft is not None else ONE)
 
     def _trees(self, plan, blocks) -> dict[int, tuple[list[int], list[int], list[float]]]:
@@ -503,7 +526,7 @@ class MultiDecoder:
         """Time the forward at the row counts ``streams`` windows bring; every rank runs the same forwards."""
 
         st, points = State(self.w), []
-        for r in calibration_rows(streams, self.depth):
+        for r in calibration_rows(streams, self.depth, self.copy_rows):
             n = -(-r // 16)
             sizes = [r // n + (i < r % n) for i in range(n)]
             wins = [([0] * k, list(range(-1, k - 1)), st) for k in sizes]
@@ -620,6 +643,8 @@ class MultiDecoder:
 
     def _finish(self, sid: int) -> None:
         self.streams.pop(sid, None)
+        if self.copy_rows > self.max_rows:
+            self.copy_window.pop(sid, None)
 
     def drop(self) -> list[Stream]:
         """After an error in a round: forget the live streams (two ranks can no longer be trusted to agree)."""

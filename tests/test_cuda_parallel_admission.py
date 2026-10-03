@@ -56,9 +56,14 @@ def test_parallel_window_that_cannot_fit_every_stream_is_refused_before_loading(
     from tensorfold.cuda.geometry import indexed_stream_geometry, stream_geometry
     checkpoint(tmp_path, small_config(), WEIGHTS)
     calls, capacity = fake_runtime
-    # one GPU: the window is what one stream reaches beside the others' first rows; two ranks: every stream's
-    four = (stream_geometry(small_config(), world, 4, 8, first=256 if world == 1 else None) if family == "linear"
-            else indexed_stream_geometry(small_config(), 5, 4, 8, mtp=True))
+    # one GPU: one stream's reach beside the others' first rows, rounds as wide as a copy; two ranks: every stream's
+    if family != "linear":
+        four = indexed_stream_geometry(small_config(), 5, 4, 8, mtp=True)
+    elif world == 2:
+        four = stream_geometry(small_config(), 2, 4, 8)
+    else:
+        from tensorfold.families.qwen3_5.cuda.engine import COPY_ROWS
+        four = stream_geometry(small_config(), 1, 4, 8, first=256, rows=max(64, COPY_ROWS))
     budget = four.needed(12000) + 32768                   # the streams fit 12,000 tokens, not 60,000
     monkeypatch.setattr(capacity, "available_bytes", lambda t: budget)
     _, go = start(family, tmp_path, 60000, True, world, 4)
@@ -87,6 +92,19 @@ def test_stream_geometry_counts_every_stream_and_kept_prompt_end():
     single = draft_geometry(draft, 1, 12, bounded=True)
     assert draft_geometry(draft, 1, 12, bounded=True, streams=1, kept=0).bytes_at(9000) == single.bytes_at(9000)
     assert draft_geometry(draft, 1, 12, bounded=True, streams=4, kept=9).bytes_at(9000) > 4 * single.bytes_at(9000) // 2
+
+
+def test_stream_geometry_counts_a_rounds_widest_copy():
+    """Admission counts a round's widest copy: more than 16 rows a stream, the same once the trees reach it."""
+
+    from tensorfold.cuda.geometry import stream_geometry
+
+    text = small_config()
+    narrow = stream_geometry(text, 1, 3, 4, first=256).bytes_at(8192)
+    wide = stream_geometry(text, 1, 3, 4, first=256, rows=128).bytes_at(8192)
+    assert wide > narrow
+    assert stream_geometry(text, 1, 8, 4, first=256, rows=128).bytes_at(8192) == \
+        stream_geometry(text, 1, 8, 4, first=256).bytes_at(8192)          # 8 streams of 16 rows: already 128
 
 
 @pytest.mark.torch
