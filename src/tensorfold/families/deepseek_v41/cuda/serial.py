@@ -451,6 +451,8 @@ class SerialEngine:
             for t in [*self.big.swa, *self.big.raw.values()]:
                 t[a:b].zero_()
             st.ids.clear()
+            self.ring_from[self.slot] = 0
+            self.prefilled[self.slot] = 0
             if self.drafter is not None:
                 self.drafter.reset()
             return
@@ -463,6 +465,10 @@ class SerialEngine:
         self.trash = {s_: E[s_] - 1 for s_ in E}
         self.ebase = torch.zeros((S,), dtype=torch.long, device=self.dev)   # each slot's extent base (token rows)
         self.extents: list[tuple[int, int]] = [(0, 0)] * S
+        # each slot's first position whose decode-ring rows still hold its window (DRING positions at most): a kept
+        # state resumes at m when [m - WINDOW_ROWS, m) is there (``window_from``)
+        self.ring_from = [0] * S
+        self.prefilled = [0] * S                         # each slot's rows [0, this) came from prompt chunks
         # decode rings (DRING rows a slot) live per slot; prompt chunks run in one shared set of RING-row staging
         # rings, the slot's window copied in before and out after (``_to_stage`` / ``_from_stage``)
         self.big = Caches(
@@ -494,6 +500,7 @@ class SerialEngine:
             raise ValueError(f"an extent of {size} tokens: a stream needs at most {self.span}")
         self.extents[slot] = (base, size)
         self.ebase[slot] = base
+        self.prefilled[slot] = len(ids or [])            # (kept states hold prompt-chunk rows only)
 
         def cut(t, r):
             return t[base // r:(base + size) // r]
@@ -542,6 +549,24 @@ class SerialEngine:
             r = self.c.layer_ratios[s_]
             for t in (self.big.comp[s_], self.big.ik[s_]):
                 move_rows(t, src // r, dst // r, -(-n // r))
+
+    def window_to_ring(self, p1: int) -> None:
+        """After a prompt chunk ending at ``p1``: the staged rows (up to DRING of them) back into the slot's decode
+        rings, more than the WINDOW_ROWS decoding needs, so a kept state resumes earlier and a short tail can back up
+        into rows already computed (``prefill``)."""
+
+        lo = max(0, p1 - DRING, self._staged_from)
+        pos = torch.arange(lo, p1, device=self.dev)
+        st_rows, dec_rows = pos % RING, self.slot * DRING + pos % DRING
+        for stage, dec in zip(self.stage_swa, self.big.swa):
+            dec.index_copy_(0, dec_rows, stage[st_rows])
+        for k, dec in self.big.raw.items():
+            dec.index_copy_(0, dec_rows, self.stage_raw[k][st_rows])
+        if self.drafter is not None:
+            for stage, dec in zip(self.drafter.stage, self.drafter.swa_big):
+                dec.index_copy_(0, dec_rows, stage[st_rows])
+        # the rings held [ring_from, p0) before (staged rows below that were stale) and every row the chunk wrote
+        self.ring_from[self.slot] = max(self.ring_from[self.slot], p1 - DRING)
 
     def _ebase(self, src: int) -> torch.Tensor:
         """Each decode row's stream's first entry of source ``src`` (in a graph: read from the base table)."""
@@ -592,7 +617,8 @@ class SerialEngine:
             self.drafter.slot = self.slot
 
     # -- one forward over new rows ------------------------------------------------------------------------
-    def forward(self, tokens: list[int], last_only: bool = False, raw: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(self, tokens: list[int], last_only: bool = False, raw: torch.Tensor | None = None,
+                prompt: bool = False) -> torch.Tensor:
         """Logits fp32 [R, vocab] of the new rows (``last_only``: only the last row's, [1, vocab] — what a prompt
         chunk needs); positions continue the committed ones."""
 
@@ -605,14 +631,24 @@ class SerialEngine:
             raise ValueError(f"context {p0 + R} beyond {self.limit} tokens")
         if p0 + R > self.extents[self.slot][1]:
             raise ValueError(f"position {p0 + R} beyond the slot's extent of {self.extents[self.slot][1]} tokens")
-        if R in self.graphs:
+        if R in self.graphs and not (prompt and R > PROMPT_ROWS):
             self.step_rows(tokens)
             return self.graph_for(R, p0 + R)["logits"]
         rows = self.engram_rows(tokens, raw)
         self._to_stage(p0)
-        out = self.core(torch.tensor(tokens, device=self.dev), torch.arange(p0, p0 + R, device=self.dev), rows,
-                        static=False, last_only=last_only)
-        self._from_stage(p0 + R)
+        from .weights import Linear
+
+        Linear.prompt_mode = R > PROMPT_ROWS             # (a <= PROMPT_ROWS chunk: the decode path's arithmetic)
+        try:
+            out = self.core(torch.tensor(tokens, device=self.dev), torch.arange(p0, p0 + R, device=self.dev), rows,
+                            static=False, last_only=last_only)
+        finally:
+            Linear.prompt_mode = False
+        self.window_to_ring(p0 + R)
+        if R > PROMPT_ROWS and p0 <= self.prefilled[self.slot]:
+            self.prefilled[self.slot] = p0 + R
+        else:                                            # (a short chunk: the decode path's arithmetic)
+            self.prefilled[self.slot] = min(self.prefilled[self.slot], p0)
         return out
 
     def _ring_rows(self, p1: int):
@@ -625,6 +661,7 @@ class SerialEngine:
     def _to_stage(self, p0: int) -> None:
         """The current slot's window (decode rings) into the staging rings, before a prompt chunk at ``p0``."""
 
+        self._staged_from = p0 - min(p0, WINDOW_ROWS)    # the staged positions the chunk's rows extend
         if p0 == 0:
             return
         st_rows, dec_rows = self._ring_rows(p0)
@@ -756,6 +793,9 @@ class SerialEngine:
                     X = self.engram(layer, X, rows[layer.index])
                 post, comb, x, pre_a = self.hc(layer.hc_attn, X, pre)
             a = self.attention(layer, x, pos, static)
+            if self.debug is not None:
+                self.debug.append({"layer": layer.index, "attn_in": x.clone(),
+                                   "attn_out": a.clone() if torch.is_tensor(a) else None})
             if fuse:
                 X, (post, comb, x, pre) = self.post_hc(a, X, post, comb, layer.hc_ffn, pre_a)
             else:
@@ -763,7 +803,8 @@ class SerialEngine:
                 post, comb, x, pre = self.hc(layer.hc_ffn, X, pre_a)
             f = self.moe(layer, x, x.shape[0])
             if self.debug is not None:
-                self.debug.append({"attn_in": x.clone(), "X": X.clone(), "f": f.clone() if torch.is_tensor(f) else f})
+                self.debug.append({"layer": layer.index, "moe_in": x.clone(), "X": X.clone(),
+                                   "f": f.clone() if torch.is_tensor(f) else None})
         self._join()                                                    # (a graph ends with every stream joined)
         return X, pre, f, post, comb
 
@@ -1052,6 +1093,7 @@ class SerialEngine:
             if p0 + len(toks) > self.limit:
                 raise ValueError(f"stream in slot {slot}: context {p0 + len(toks)} beyond {self.limit} tokens")
             first[slot] = p0
+            self.ring_from[slot] = max(self.ring_from[slot], p0 + len(toks) - DRING)   # rows these overwrite
             if p0 + len(toks) > self.extents[slot][1]:
                 raise ValueError(f"stream in slot {slot}: position {p0 + len(toks)} beyond its extent's "
                                  f"{self.extents[slot][1]} tokens")
@@ -1114,6 +1156,7 @@ class SerialEngine:
         if p0 + R > self.extents[self.slot][1]:
             raise ValueError(f"position {p0 + R} beyond the slot's extent of {self.extents[self.slot][1]} tokens")
         g = self.graph_for(R, p0 + R)
+        self.ring_from[self.slot] = max(self.ring_from[self.slot], p0 + R - DRING)
         st.ids.extend(tokens)
         start = max(0, p0 - (c.engram_max_ngram_size - 1))
         rp = self._rp
@@ -1373,20 +1416,36 @@ class SerialEngine:
     # -- requests ---------------------------------------------------------------------------------------------
     @torch.no_grad()
     def prefill(self, prompt: list[int], chunk: int = MAX_ROWS) -> torch.Tensor:
-        """Chunked prompt, each chunk's Engram rows read while the previous chunk runs; the last row's logits."""
+        """Chunked prompt, each chunk's Engram rows read while the previous chunk runs; the last row's logits.
 
-        starts = list(range(len(self.state.ids), len(self.state.ids) + len(prompt), chunk))
+        No chunk takes PROMPT_ROWS rows or fewer when that can be helped: those run the decode path's arithmetic,
+        while every longer chunk gives each row the same values whatever its length (``Linear.prompt_mode``), so a
+        prompt's caches do not depend on how it was cut (steps, kept states resumed). A short last chunk takes rows
+        from the one before; a short call backs up into rows already prefilled (recomputed to the same values) when
+        the rings still hold their window."""
+
+        p0 = len(self.state.ids)
+        n = p0 + len(prompt)
+        small = PROMPT_ROWS + 1
+        if 0 < n - p0 < small and p0 > 0:
+            back = min(p0, small - (n - p0))
+            if p0 - back - min(p0 - back, WINDOW_ROWS) >= self.ring_from[self.slot]:
+                prompt = list(self.state.ids[p0 - back:p0]) + list(prompt)
+                del self.state.ids[p0 - back:]
         base = len(self.state.ids)
+        starts = list(range(base, base + len(prompt), chunk))
+        if len(starts) > 1 and base + len(prompt) - starts[-1] < small:
+            starts[-1] = base + len(prompt) - small              # (the chunk before stays > PROMPT_ROWS)
         ids = list(self.state.ids) + list(prompt)
-        ahead = self.prefetch(ids, starts[0], min(chunk, base + len(prompt) - starts[0]), 0)
+        ends = starts[1:] + [base + len(prompt)]
+        ahead = self.prefetch(ids, starts[0], ends[0] - starts[0], 0)
         logits = None
-        for n, p0 in enumerate(starts):
-            R = min(chunk, base + len(prompt) - p0)
+        for i, p0 in enumerate(starts):
+            R = ends[i] - p0
             raw = ahead.result()
-            if n + 1 < len(starts):
-                p1 = starts[n + 1]
-                ahead = self.prefetch(ids, p1, min(chunk, base + len(prompt) - p1), (n + 1) % 2)
-            logits = self.forward(ids[p0:p0 + R], last_only=True, raw=raw)
+            if i + 1 < len(starts):
+                ahead = self.prefetch(ids, starts[i + 1], ends[i + 1] - starts[i + 1], (i + 1) % 2)
+            logits = self.forward(ids[p0:p0 + R], last_only=True, raw=raw, prompt=True)
         return logits
 
     @torch.no_grad()
@@ -1451,6 +1510,8 @@ class SerialEngine:
             for live, saved in zip(self.drafter.swa_big, snap["dswa"]):
                 live.index_copy_(0, slots, saved)
         st.ids[:] = list(ids[:n])
+        self.ring_from[self.slot] = n - min(n, WINDOW_ROWS)      # only the window rows came back
+        self.prefilled[self.slot] = n
 
     def reusable(self, prompt: list[int]) -> int:
         """How many leading tokens of ``prompt`` the live caches already hold (0: start fresh). The rest is prefilled
@@ -1464,7 +1525,11 @@ class SerialEngine:
         L = 0
         while L < n and ids[L] == prompt[L]:
             L += 1
-        if L < REUSE_MIN or len(ids) - L > DRING - WINDOW_ROWS:     # decode went a ring past the window
+        # only prompt-chunk rows are reused (a decode graph's rows differ in the last bits from what a fresh prefill
+        # computes), and only where the rings hold the window (and the rows a short tail backs up into)
+        L = min(L, self.prefilled[self.slot])
+        back = max(0, PROMPT_ROWS + 1 - (len(prompt) - L))
+        if L < REUSE_MIN or len(ids) - L > DRING - WINDOW_ROWS or L - back - WINDOW_ROWS < self.ring_from[self.slot]:
             return 0
         return L
 

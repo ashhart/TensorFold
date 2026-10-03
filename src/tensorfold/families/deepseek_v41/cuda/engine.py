@@ -83,7 +83,7 @@ def largest_context(free: int, streams: int = 1, carve: int = 0) -> int:
 SHARED_POOL = os.environ.get("TF_DSV41_SHARED_POOL", "1") != "0"
 # kept prompts inside the shared pool: their per-token caches stay in the pool's free rows, their window rings (a
 # slot's DRING rows of every ring, SLOT_BYTES) in a bank of this many entries
-KEPT_ENTRIES = int(os.environ.get("TF_DSV41_KEPT_ENTRIES") or "16")
+KEPT_ENTRIES = int(os.environ.get("TF_DSV41_KEPT_ENTRIES") or "32")
 
 
 # the decode graphs' buffers that scale with a stream's limit ([R, limit // ratio] indexer scores and top-k scratch):

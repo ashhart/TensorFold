@@ -20,7 +20,7 @@ import torch
 from tensorfold.cuda.sampling import sample_rows
 from tensorfold.cuda.streams import Stream, next_fill
 
-from .serial import DRING, MAX_ROWS, SerialEngine
+from .serial import DRING, MAX_ROWS, WINDOW_ROWS, SerialEngine
 
 ADMIT, FILL, ROUND, DONE, EVICT, GROW, MOVE = 1, 2, 3, 4, 5, 6, 7      # rank 0's messages
 FRESH, TAKEOVER, COPY = 0, 1, 2            # how an admitted stream gets its extent (a kept prompt's, or new rows)
@@ -35,16 +35,18 @@ RELEASE_AFTER = 4096                       # prompts prefilling more rows than t
 
 @dataclass(eq=False)
 class Kept:
-    """A kept prompt inside the shared pool: the per-token caches of ``ids`` in extent ``x``'s first rows and the
-    window rings after them in bank entry ``bank``; a prompt starting with ``ids`` resumes after them.
+    """A kept prompt inside the shared pool: the per-token caches of ``ids`` in extent ``x``'s first rows and its
+    window rings in bank entry ``bank``, which hold positions from ``vs`` on: a prompt sharing its first m tokens
+    resumes there when the window before m (and the rows a short tail backs up into) is held.
 
-    States are kept, and resumed, only at multiples of MAX_ROWS (the prompt chunk): a fresh prompt's chunks start
-    at those positions too, so the resumed rows and the ones prefilled after them are exactly a fresh prefill's (a
-    prompt chunk's rows and a decode graph's, or chunks of other lengths, can differ in the last bits)."""
+    Only prefilled rows are kept: every prompt chunk gives a row the same values whatever the chunk's length or
+    start (``SerialEngine.prefill``), so a resumed prompt's caches and reply equal a fresh prefill's. A reply's
+    decoded rows are not kept (a decode graph's arithmetic differs in the last bits)."""
 
     kid: int
     x: Any
     ids: np.ndarray
+    vs: int
     bank: int
 
     @property
@@ -99,8 +101,6 @@ class MultiDecoder:
         # are evicted (least recently used first) when an admission needs the rows
         banks = len(e.bank[0]) // DRING if pool is not None and getattr(e, "bank", None) else 0
         self.kept_on = banks > 0 and os.environ.get("TF_DSV41_POOL_KEEP", "1") != "0"
-        if self.kept_on and step % MAX_ROWS:
-            raise ValueError(f"kept prompts resume at multiples of the {MAX_ROWS}-row chunk: fill steps of {step}")
         self.kept: list[Kept] = []                 # least recently used first
         self.banks = list(range(banks))            # free bank entries, ascending
         self.next_kid = 0
@@ -439,15 +439,18 @@ class MultiDecoder:
 
     # -- kept prompts in the shared pool (both ranks make the same calls in the same order) ------------------------
     def _match(self, prompt: list[int]) -> tuple[Kept | None, int]:
-        """The kept state to resume ``prompt`` from and the tokens it covers: the longest whose tokens all start the
-        prompt (and leave one to prefill), then one whose extent is free (taken over without copying), then the most
-        recent."""
+        """The kept state to resume ``prompt`` from and the tokens it covers: the most (at least one left to
+        prefill, and the rings holding the window there), then one whose extent is free (taken over without
+        copying), then the most recent."""
 
         p = np.asarray(prompt, dtype=np.int64)
         best, key = None, None
         for i, k in enumerate(self.kept):
-            m = k.n
-            if m > len(p) - 1 or k.ids[0] != p[0] or common_prefix(k.ids, p) < m:
+            if k.ids[0] != p[0]:
+                continue
+            m = min(common_prefix(k.ids, p), len(p) - 1, k.n)
+            back = max(0, ROWS + 1 - (len(p) - m))   # a short tail backs up into rows before m (prefill)
+            if m < KEEP_MIN or m - back - WINDOW_ROWS < k.vs:
                 continue
             kk = (m, k.x.owner is None, i)
             if key is None or kk > key:
@@ -482,7 +485,7 @@ class MultiDecoder:
         raise NoRoom(f"the shared cache pool has no {size}-token extent free ({self.pool.free_rows()} of "
                      f"{self.pool.rows} tokens free, largest run {self.pool.largest_gap()})")
 
-    def _keep(self, s: Stream, x, ids: list[int]) -> None:
+    def _keep(self, s: Stream, x, ids: list[int], vs: int) -> None:
         """Keep stream ``s``'s state of ``ids`` (extent ``x``'s first rows, its slot's rings) as a kept prompt."""
 
         if not self.kept_on or len(ids) < KEEP_MIN:
@@ -494,7 +497,7 @@ class MultiDecoder:
             self._drop(self.kept[0])
         bank = self.banks.pop(0)
         self.e.save_window(s.slot, bank)
-        k = Kept(self.next_kid, x, a, bank)
+        k = Kept(self.next_kid, x, a, vs, bank)
         self.next_kid += 1
         x.kept.append(k)
         self.kept.append(k)
@@ -553,6 +556,7 @@ class MultiDecoder:
                 e.bind(s.slot, x.base, x.size, ids=list(s.prompt[:m]))
                 e.select_slot(s.slot)
                 e.load_window(k.bank, s.slot)
+                e.ring_from[s.slot] = k.vs
                 self.kept.remove(k)                # most recently used
                 self.kept.append(k)
                 for c in [c for c in x.kept if c.n > m]:
@@ -599,16 +603,22 @@ class MultiDecoder:
                     e.reset()
                 s.pos, s.cached = cached, cached
             stop = min(n, s.pos + rows)
-            point = (n - 1) // MAX_ROWS * MAX_ROWS             # where a kept state of this prompt resumes
-            keep = self.kept_on and s.draft and point >= KEEP_MIN and s.cached < point
-            if keep and s.pos < point < stop:
-                stop = point                       # (the next step starts the chunk a fresh prefill starts there)
+            # kept at the prompt's end and, for prompts that will share less, at its last chunk start (a long
+            # document asked a long new question resumes there)
+            point = (n - 1) // MAX_ROWS * MAX_ROWS
+            keep = self.kept_on and s.draft
+            split = (keep and point >= KEEP_MIN and s.cached < point < n - (DRING - WINDOW_ROWS)
+                     and s.pos + ROWS < point < stop)        # (no <= ROWS-row call before it: prompt arithmetic)
+            if split:
+                stop = point
             logits = e.prefill(s.prompt[s.pos:stop])
             s.pos = stop
-            if keep and stop == point:
-                self._keep(s, self.ext[s.sid], e.state.ids)
+            if split:
+                self._keep(s, self.ext[s.sid], e.state.ids, e.ring_from[s.slot])
             if stop < n:
                 return None
+            if keep and n >= KEEP_MIN and s.cached < n:
+                self._keep(s, self.ext[s.sid], e.state.ids, e.ring_from[s.slot])
             if s.draft and self.pool is None:
                 e.keep_prompt(s.prompt)
             if n - s.cached > RELEASE_AFTER:       # a long prompt's transient buffers back to the system (both

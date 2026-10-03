@@ -34,6 +34,7 @@ class FakeEngine:
         self.c = type("C", (), {"eos_token_id": 1})()
         self.views = [FakeView() for _ in range(slots)]
         self.extents = [(0, 0)] * slots
+        self.ring_from = [0] * slots
         self.bank = [torch.zeros((banks * DRING,))]
         self.arena = [-1] * pool_tokens
         self.saved: dict[int, tuple] = {}
@@ -58,6 +59,7 @@ class FakeEngine:
 
     def reset(self):
         self.state.ids.clear()
+        self.ring_from[self.slot] = 0
         self.ring[self.slot] = ()
 
     def prefill(self, tokens):
@@ -68,6 +70,7 @@ class FakeEngine:
             self.arena[base + p0 + j] = t
         self.state.ids.extend(tokens)
         self.ring[self.slot] = tuple(self.state.ids[-DRING:])
+        self.ring_from[self.slot] = max(self.ring_from[self.slot], len(self.state.ids) - DRING)
         return torch.zeros((len(tokens), 8))
 
     def save_window(self, slot, k):
@@ -102,7 +105,8 @@ def pair(slots=4, rows=16 * ALIGN, span=4 * ALIGN, banks=6):
 def same(d0, d1):
     d1.follow()
     assert d0.pool.digest() == d1.pool.digest()
-    assert [(k.kid, k.n, k.bank, k.x.eid) for k in d0.kept] == [(k.kid, k.n, k.bank, k.x.eid) for k in d1.kept]
+    assert [(k.kid, k.n, k.vs, k.bank, k.x.eid) for k in d0.kept] == [(k.kid, k.n, k.vs, k.bank, k.x.eid)
+                                                                        for k in d1.kept]
     assert d0.banks == d1.banks and d0.e.arena == d1.e.arena
 
 
@@ -121,21 +125,21 @@ def test_resume_takeover_and_copy():
     a = Stream(list(p), 50)
     run(d0, a)
     same(d0, d1)
-    assert len(d0.kept) == 1 and d0.kept[0].n == 2048         # kept at the prompt's last chunk start
+    assert sorted(k.n for k in d0.kept) == [2048, 3000]       # its last chunk start and its end
     b = Stream(list(p), 50)                                     # while a still owns its extent: copied
     run(d0, b)
-    assert b.cached == 2048 and d0.kstats["copies"] == 1
+    assert b.cached == len(p) - 1 and d0.kstats["copies"] == 1
     same(d0, d1)
     d0.finish([a, b])
     same(d0, d1)
     c = Stream(list(p[:2950]) + [5] * 40, 50)                  # a's extent is free now: taken over
     run(d0, c)
-    assert c.cached == 2048 and d0.kstats["takeovers"] == 1
+    assert c.cached == 2950 and d0.kstats["takeovers"] == 1
     same(d0, d1)
 
 
 def test_eviction_only_when_it_makes_room():
-    d0, d1 = pair(rows=8 * ALIGN, span=4 * ALIGN)
+    d0, d1 = pair(rows=8 * ALIGN, span=4 * ALIGN, banks=40)
     rng = random.Random(1)
     prompts = [[rng.randrange(2, 1000) for _ in range(3000)] for _ in range(9)]
     for p in prompts:

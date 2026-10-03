@@ -36,10 +36,13 @@ class Linear(Exl3Linear):
 
     PIECE = 128
     GEMM_MAX = 96 * 2**20
+    # set while a prompt chunk runs (``SerialEngine.forward``): every call takes the prompt GEMM whatever its rows,
+    # so a row's values do not depend on the chunk's length (its row blocks of <= 128 rows took the decode kernel)
+    prompt_mode = False
 
     def __call__(self, x: torch.Tensor, out: torch.Tensor | None = None, out_dtype: torch.dtype | None = None,
                  xh: torch.Tensor | None = None, z: torch.Tensor | None = None) -> torch.Tensor:
-        if x.shape[0] <= self.PIECE:
+        if x.shape[0] <= self.PIECE and not (Linear.prompt_mode and self.k * self.n <= self.GEMM_MAX):
             return super().__call__(x, out, out_dtype, xh, z)
         return self.prompt(x, out_dtype)
 

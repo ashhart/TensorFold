@@ -54,6 +54,8 @@ def main() -> None:
     ap.add_argument("--fixed-k", action="store_true", help="verify every draft each round (no adaptive policy)")
     ap.add_argument("--cases", type=Path, help="tools/dsv41_vllm_accept.py results: replay every case's prompt ids")
     ap.add_argument("--stack-after", type=int, default=0, help="dump every thread's stack after N seconds")
+    ap.add_argument("--chunk-test", default="", help="N,k[,k..]: a prompt's rows as one chunk vs split at k: the "
+                    "first sublayer where a row's values depend on its chunk (and, with --graph, a <=32-row tail)")
     args = ap.parse_args()
     if args.stack_after:
         import faulthandler
@@ -151,6 +153,68 @@ def main() -> None:
                 print(f"decoder-test: equal {s.out == ref}\n  ref {ref[:16]}\n  dec {s.out[:16]}", flush=True)
             else:
                 dec.follow()
+        nccl.barrier()
+        return
+    if args.chunk_test:
+        N, *splits = [int(v) for v in args.chunk_test.split(",")]
+        base = json.loads(Path("notes/dsv41/golden_long2.json").read_text())["goldens"][-1]["ids"]
+        doc = (base * (1 + N // len(base)))[:N]
+
+        def run(pieces):
+            eng.select_slot(0)
+            eng.reset()
+            eng.debug = []
+            logits = None
+            for a, b in pieces:
+                logits = eng.forward(doc[a:b], last_only=True)
+            dbg, eng.debug = eng.debug, None
+            per = len(dbg) // len(pieces)              # sublayer records a forward
+            return [dbg[i * per:(i + 1) * per] for i in range(len(pieces))], logits.float().clone()
+
+        def report(name, recs_a, recs_b, rows_a, rows_b):
+            first = None
+            worst = 0.0
+            for ra, rb in zip(recs_a, recs_b):
+                for key in ra:
+                    if key == "layer" or not torch.is_tensor(ra[key]):
+                        continue
+                    d = (ra[key][rows_a].float() - rb[key][rows_b].float()).abs().max().item()
+                    worst = max(worst, d)
+                    if d > 0 and first is None:
+                        first = (ra["layer"], key, d)
+            if args.rank == 0:
+                print(f"chunk-test {name}: first difference {first}, max {worst:.3g}", flush=True)
+
+        def pre(cuts):                                     # through prefill (its chunk plan): last-row logits
+            eng.select_slot(0)
+            eng.reset()
+            logits = None
+            for a, b in zip([0, *cuts], [*cuts, N]):
+                logits = eng.prefill(doc[a:b])
+            return logits.float().clone()
+
+        if os.environ.get("TF_CHUNK_PREFILL"):            # N,cut[,cut..]: one prefill vs calls ending at each cut
+            with torch.no_grad():
+                ref = pre([])
+                for k in splits:
+                    got = pre([k])
+                    if args.rank == 0:
+                        print(f"chunk-test prefill split {k} (tail {N - k}): logits max|diff| "
+                              f"{(ref - got).abs().max().item():.3g}", flush=True)
+            nccl.barrier()
+            return
+        with torch.no_grad():
+            whole, lw = run([(0, N)])
+            for k in splits:
+                parts, lp = run([(0, k), (k, N)])
+                # rows [0, k): computed in a chunk of N rows vs one of k rows
+                report(f"rows 0..{k} in a {N}-row vs {k}-row chunk", whole[0], parts[0], slice(0, k), slice(0, k))
+                # rows [k, N): same chunk start? no: positions k.. in the big chunk vs a chunk starting at k
+                report(f"rows {k}..{N} in a {N}-row chunk vs a chunk at {k}", whole[0], parts[1], slice(k, N),
+                       slice(0, N - k))
+                if args.rank == 0:
+                    print(f"chunk-test split {k}: last-row logits max|diff| {(lw - lp).abs().max().item():.3g}, "
+                          f"argmax {int(lw.argmax())} vs {int(lp.argmax())}", flush=True)
         nccl.barrier()
         return
     if args.step_test:
