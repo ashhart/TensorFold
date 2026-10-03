@@ -129,3 +129,32 @@ def test_small_outputs_fit_legacy_threadgroup_limit(n, rows):
     assert dict(constants)["S"] == 32
     scalar, _, _, _ = simd_qmm._launch("scalar", 1, n, 5120)
     assert dict(scalar)["S"] == dict(constants)["S"]
+
+
+@pytest.mark.parametrize("n,k,xb", [(16480, 5120, 32), (5120, 6144, 16)])
+def test_qwen27_deltanet_geometry_is_exact_and_opt_in(monkeypatch, n, k, xb):
+    monkeypatch.setattr(simd_qmm, '_m2_max', lambda: True)
+    monkeypatch.setattr(simd_qmm, '_QWEN27_GDN_TUNE', False)
+    original = simd_qmm._launch('scalar', 1, n, k)
+    q, s, b = _weights(n, k, seed=57)
+    x = (mx.random.normal((8, k)) * 0.5).astype(mx.bfloat16)
+    simd_qmm._plans.clear()
+    reference = simd_qmm.qmm(x[:1], q, s, b)
+    mx.eval(reference)
+    monkeypatch.setattr(simd_qmm, '_QWEN27_GDN_TUNE', True)
+    tuned = simd_qmm._launch('scalar', 1, n, k)
+    consts = dict(tuned[0])
+    assert (consts['SGS'],consts['NR'],consts['XB']) == (4,1,xb)
+    assert consts['S'] == dict(original[0])['S']
+    simd_qmm._plans.clear()
+    got = simd_qmm.qmm(x[:1], q, s, b)
+    assert _same(got, reference)
+    assert _same(got, simd_qmm.qmm(x, q, s, b)[:1])
+    monkeypatch.setattr(simd_qmm, '_m2_max', lambda: False)
+    assert simd_qmm._launch('scalar', 1, n, k) == original
+    for rows, outputs, inputs, group in ((2,n,k,64), (1,n,k,32), (1,1024,k,64)):
+        baseline = simd_qmm._launch('scalar', rows, outputs, inputs, group)
+        monkeypatch.setattr(simd_qmm, '_m2_max', lambda: True)
+        assert simd_qmm._launch('scalar', rows, outputs, inputs, group) == baseline
+        monkeypatch.setattr(simd_qmm, '_m2_max', lambda: False)
+    simd_qmm._plans.clear()

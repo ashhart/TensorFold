@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
+import os
 from typing import Any, NamedTuple, Sequence
 
 import mlx.core as mx
@@ -13,6 +15,7 @@ MAX_ROWS = 1 << 16   # rows a call routed here (prompt chunks included); every r
 RT_MAX = 2           # 8-row tiles a threadgroup: more rows than 8 RT_MAX spread over the grid's y axis
 MMA_SGS = 16         # physical simdgroups at most (fewer where a pipeline takes fewer threads): same chunks
 GROUP = 64
+_QWEN27_GDN_TUNE = os.environ.get("TF_QWEN27_GDN_TUNE", "0") == "1"
 
 _HEADER = r"""
 #define PRAGMA_UNROLL _Pragma("clang loop unroll(full)")
@@ -382,6 +385,13 @@ def fits(module: Any) -> bool:
             and getattr(module, "mode", "affine") == "affine")
 
 
+@functools.cache
+def _m2_max() -> bool:
+    """Limit the experimental one-row DeltaNet geometry to the measured GPU."""
+
+    return mx.metal.is_available() and mx.device_info(mx.gpu).get("device_name") == "Apple M2 Max"
+
+
 def _launch(kind: str, rows: int, n: int, dims: int, group: int = GROUP, most: int = MMA_SGS) -> tuple:
     """Return constants, grid, threadgroup and output shapes; an MMA launch uses up to ``most`` simdgroups."""
 
@@ -392,6 +402,10 @@ def _launch(kind: str, rows: int, n: int, dims: int, group: int = GROUP, most: i
         nr = NR if n > 2048 else 1
         # 16 outputs a threadgroup share one staging of the inputs (8 simdgroups for small outputs)
         sgs = max(1, 16 // ((32 // s) * nr)) if n > 2048 else 8
+        # Qwen 27B DeltaNet: fewer outputs per lane, with the original arithmetic chunks.
+        if (_QWEN27_GDN_TUNE and rows == 1 and group == 64
+                and (n, dims) in ((16480, 5120), (5120, 6144)) and _m2_max()):
+            sgs, nr, xb = (4, 1, 32) if n == 16480 else (4, 1, 16)
         per = sgs * (32 // s) * nr
         consts = (("K", dims), ("N", n), ("S", s), ("SGS", sgs), ("NR", nr), ("XB", xb), ("GS", group), ("RS", rows))
         return consts, (-(-n // per) * sgs * 32, 1, 1), (sgs * 32, 1, 1), [(rows, n)]
