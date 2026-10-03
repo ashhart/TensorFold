@@ -1,5 +1,7 @@
 """Flash Next concurrent rounds: each row gets its own stream's bits, and streams together emit what each does alone."""
 
+import random
+
 import pytest
 import torch
 
@@ -9,9 +11,9 @@ if torch.cuda.get_device_capability()[0] != 12:
     pytest.skip("Flash Next CUDA kernels run on sm_12x (GB10, RTX 50, RTX PRO 6000) only",
                 allow_module_level=True)
 
-from test_flashnext_forward import V, _model  # noqa: E402
+from test_flashnext_forward import V, _Copies, _model  # noqa: E402
 
-from tensorfold.families.qwen4_exp.cuda import qmm  # noqa: E402
+from tensorfold.families.qwen4_exp.cuda import multi, qmm  # noqa: E402
 
 from tensorfold.cuda.streams import Stream  # noqa: E402
 from tensorfold.engine.exact_sampling import Sampling  # noqa: E402
@@ -21,6 +23,7 @@ from tensorfold.families.qwen4_exp.cuda.multi import MultiDecoder  # noqa: E402
 from tensorfold.families.qwen4_exp.cuda.state import Buffers, State  # noqa: E402
 
 PROMPTS = [[5, 17, 99, 250], [1023, 7, 64, 300, 11, 12], [13], [8, 8, 9, 2000, 31]]
+COPY_INDEX = "tensorfold.families.qwen4_exp.cuda.copies.CopyIndex"        # the concurrent decoder's copy index
 
 
 def test_segments_give_each_stream_its_own_rows():
@@ -356,3 +359,110 @@ def test_packed_prompt_passes_keep_each_prompt_its_solo_run(kv_dtype, decoding):
         dec.finish(dec.round())
     assert [s.out for s in streams] == refs
     assert max(ends) >= 2                                             # a pass that ended two prompts at once
+
+
+@pytest.mark.parametrize("kv_dtype", ["bf16", "int8"])
+def test_streams_copy_from_their_context_within_a_rounds_rows_and_equal_each_alone(kv_dtype, monkeypatch):
+    """Each drafting stream copies (its window growing past 16 rows while copies land whole) or chains MTP drafts,
+    copies and chains in one round within its rows; every stream emits what it does alone, the serial one too."""
+
+    w = _model()
+    prompts, samplings, count = PROMPTS[:3], [None, Sampling(seed=1234, top_k=20, top_p=0.95), None], 200
+    refs = []
+    for prompt, sampling in zip(prompts, samplings):
+        e = Engine(w, capacity=1024, max_rows=8, prefill_rows=16, kv_dtype=kv_dtype)
+        refs.append(serial_decode(e, prefill(e, prompt, sampling), count, sampling).tokens)
+    rng = random.Random(3)
+    monkeypatch.setattr(COPY_INDEX, lambda: _Copies(prompts, refs, rng))
+    dec = MultiDecoder(w, slots=3, capacity=1024, depth=3, confidence=0.3, kv_dtype=kv_dtype)
+    widths, staged = [], multi.stage
+
+    def recorded(w_, b, windows):
+        if b is dec.buf:
+            widths.append([len(tokens) for _, tokens in windows])
+        return staged(w_, b, windows)
+
+    monkeypatch.setattr(multi, "stage", recorded)
+    streams = []
+    for i, (prompt, sampling) in enumerate(zip(prompts, samplings)):
+        got: list[int] = []
+        s = Stream(prompt, count, sampling, draft=i != 2, emit=lambda new, got=got: got.extend(new))
+        dec.admit(s)
+        streams.append((s, got))
+    while dec.live():
+        dec.finish(dec.round())
+    for i, (s, got) in enumerate(streams):
+        assert got == refs[i] and s.out == refs[i], i
+    assert any(max(r) > 4 and any(1 < n <= 4 for n in r) for r in widths), widths    # a copy beside a chain
+    assert max(max(r) for r in widths) > 16 and all(sum(r) <= dec.buf.rows == 64 for r in widths)
+    assert streams[2][0].min_rows == 1
+
+
+def test_copies_share_the_rows_chains_leave_oldest_first():
+    from tensorfold.families.qwen4_exp.cuda.copies import fit
+
+    w = _model()
+    dec = MultiDecoder(w, slots=3, capacity=1024, depth=3, confidence=0.3)
+    assert dec.buf.rows == 64                                # max(3 streams x 4 rows, a copy's 64)
+    streams = [Stream([5], 100, None) for _ in range(3)]
+    for sid, (s, drafts) in enumerate(zip(streams, (63, 63, 3))):
+        s.sid, s.drafts = sid, list(range(drafts))
+    fit(streams[::-1], dec.buf.rows, 4)
+    assert [len(s.drafts) for s in streams] == [55, 3, 3]    # 64 rows: 56, then a chain's 4 each
+    assert MultiDecoder(w, slots=3, capacity=1024, depth=3, copy_rows=0).buf.rows == 12
+
+
+def test_grammar_streams_copy_within_a_rounds_rows_and_equal_serial(monkeypatch):
+    """Wide copies cut to a round's rows, then to what each stream's grammar takes: every stream is its serial run."""
+
+    pytest.importorskip("xgrammar")
+    from toy_grammar import toy
+
+    grammars, compiled = toy(V)
+    w = _model()
+    prompts, count, refs = PROMPTS[:3], 120, []
+    for prompt in prompts:
+        e = Engine(w, capacity=1024, max_rows=8, prefill_rows=16)
+        c = grammars.constraint(compiled)
+        ref = serial_decode(e, prefill(e, prompt, None, constraint=c), count, None, constraint=c).tokens
+        refs.append(ref[:ref.index(0) + 1] if 0 in ref else ref)          # the reply ends at its end token
+    rng = random.Random(9)
+    monkeypatch.setattr(COPY_INDEX, lambda: _Copies(prompts, refs, rng))
+    dec = MultiDecoder(w, slots=3, capacity=1024, depth=3, confidence=0.3)
+    streams = []
+    for prompt in prompts:
+        got: list[int] = []
+        s = Stream(prompt, count, None, constraint=grammars.constraint(compiled),
+                   emit=lambda new, got=got: got.extend(new))
+        dec.admit(s)
+        streams.append((s, got))
+    while dec.live():
+        dec.finish(dec.round())
+    for (s, got), ref in zip(streams, refs):
+        assert s.error is None and got == ref, s.prompt
+
+
+def test_a_lone_stream_copies_in_its_graph_slot_and_equals_serial(monkeypatch):
+    """Alone, a stream verifies its copies (growing past 16 rows) through the graph slot; its tokens are serial's."""
+
+    w = _model()
+    prompt, count = PROMPTS[1], 200
+    e = Engine(w, capacity=1024, max_rows=8, prefill_rows=16)
+    ref = serial_decode(e, prefill(e, prompt, None), count, None).tokens
+    ref = ref[:ref.index(0) + 1] if 0 in ref else ref                    # the reply ends at its end token
+    monkeypatch.setattr(COPY_INDEX, lambda: _Copies([prompt], [ref], random.Random(4)))
+    dec = MultiDecoder(w, slots=2, capacity=1024, depth=3, confidence=0.3)
+    assert dec.solo is not None and dec.solo.rows == 64
+    widths, alone = [], dec._solo_round
+
+    def recorded(s):
+        widths.append(len(s.drafts) + 1)
+        return alone(s)
+
+    monkeypatch.setattr(dec, "_solo_round", recorded)
+    got: list[int] = []
+    s = Stream(prompt, count, None, emit=lambda new: got.extend(new))
+    dec.admit(s)
+    while dec.live():
+        dec.finish(dec.round())
+    assert got == ref and max(widths) > 16, widths

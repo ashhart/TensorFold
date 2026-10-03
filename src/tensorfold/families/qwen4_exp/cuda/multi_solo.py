@@ -8,17 +8,17 @@ from tensorfold.cuda.kernels import gdn
 from tensorfold.cuda.logprobs import capture
 from tensorfold.cuda.streams import Stream, accept
 
-from .decode import Engine, draft
+from .decode import Engine, absorb, draft
 from .forward import commit
 from .state import Buffers
 
 
-def solo(w, st, capacity, depth, pbuf):
+def solo(w, st, capacity, depth, pbuf, copy_rows=0):
     from .graphs import Graphs
 
     if any(getattr(layer.moe.experts, "capturable", True) is False for layer in w.layers):
         return None
-    rows = max(8, depth + 1)
+    rows = max(8, depth + 1, copy_rows)
     e = object.__new__(Engine)
     e.w, e.capacity, e.rows, e.prefill_rows = w, capacity, rows, pbuf.rows
     e.kv_dtype, e.st = st.kv_dtype, st
@@ -118,10 +118,16 @@ class Alone:
         s.counted(R)
         new = [tokens[r] for r in path[1:]] + [end]
         last = len(s.out) + len(new) >= s.count or end in self._ends(s)
+        if s.copies is not None:
+            s.copies.landed(R, len(path))
         s.drafts = []
-        room = min(self.depth, s.count - len(s.out) - len(path))
+        s.take(new, self._ends(s))                   # first, so a copy reads this round's tokens
+        room = min(self.depth, s.count - len(s.out))
         if not last and room > 0:
-            s.drafts = draft(e, e.buf.streams[:len(path)], rows[:len(path)], st.pos + 1, room, s.sampling,
-                             self.confidence)
-        s.take(new, self._ends(s))
+            s.drafts = s.copies.propose(s.context, s.count - len(s.out)) if s.copies is not None else []
+            if s.drafts:
+                absorb(e, e.buf.streams[:len(path)], rows[:len(path)])
+            else:
+                s.drafts = draft(e, e.buf.streams[:len(path)], rows[:len(path)], st.pos + 1, room, s.sampling,
+                                 self.confidence)
         return [s] if s.done else []

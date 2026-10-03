@@ -262,6 +262,12 @@ tensorfold serve TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP --tp 2 --rank 0 --ma
 
 The default CUDA cap is six MTP drafts, with chains stopping below the configured confidence threshold.
 `--mtp-drafts N` changes the cap; `--no-drafts` or `"draft": false` selects serial decoding.
+On one GPU, a round first verifies a copied continuation when the context repeats eight or more tokens, and
+otherwise the MTP chain, as Qwen3.6 MoE does. A copy's window starts at 16 rows, doubles while copies land whole
+(up to 64) and halves after a break, as the 27B's does. With `--parallel N`, every stream keeps its chain's rows and
+copies share the rest of a round's max(N x chain, 64) rows, oldest stream first. Replies that repeat their prompt,
+such as an agent rewriting or quoting a file it just read, keep up to 63 tokens a round instead of the chain's few;
+the tokens are the same. Two ranks draft MTP chains only.
 Single-request serving uses CUDA graphs for verify windows and draft steps. Two-rank reductions add
 gathered partials in rank order.
 

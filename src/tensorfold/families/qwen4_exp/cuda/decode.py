@@ -14,9 +14,10 @@ from tensorfold.cuda.logprobs import capture
 from tensorfold.cuda.sampling import comm_gather, nucleus_rows, sample_rows
 from tensorfold.engine.exact_sampling import MARGIN, Sampling, choose_rows
 
-from . import CONFIDENCE, DEPTH
+from . import CONFIDENCE, COPY_ROWS, DEPTH
 from .forward import Cut, commit, cut_snapshot, forward
 from . import image_rows
+from .copies import Copies
 from .state import CAND, Buffers, State
 from .mtp import mtp_forward
 from .weights import Weights
@@ -443,8 +444,8 @@ def serial_decode(e: Engine, pending: int, count: int, sampling: Sampling | None
 @torch.no_grad()
 def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *, depth: int = DEPTH,
                confidence: float = CONFIDENCE, stop_eos: bool = False, on_tokens=None, constraint=None,
-               probabilities=None) -> DecodeResult:
-    """Verify pending and drafted tokens from the prefill state, commit rows before the first mismatched draft, and call ``on_tokens(new)`` with kept tokens after pending, stopping on True."""
+               probabilities=None, prompt: Sequence[int] = ()) -> DecodeResult:
+    """Verify pending and drafted tokens from the prefill state, commit rows before the first mismatched draft, and call ``on_tokens(new)`` with kept tokens after pending, stopping on True; with ``prompt``, a copy from the context goes before an MTP chain, its window doubling while copies land whole."""
 
     w, st, b = e.w, e.st, e.buf
     out = [pending]
@@ -453,9 +454,20 @@ def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *
     widths: list[int] = []
     pos0 = st.pos
     unabsorbed = None                                  # the last round's kept rows, not yet in the MTP cache
+    context, copies = list(prompt) + [pending], Copies(depth + 1, min(e.rows, COPY_ROWS)) if prompt else None
+
+    def drafting(streams: torch.Tensor, kept: list[int], n: int) -> list[int]:
+        """An exact repeat of the context first (a long, likely window; the MTP cache absorbs the kept rows), else a chain."""
+
+        copied = copies.propose(context, n) if copies is not None else []
+        if copied:
+            absorb(e, streams, kept)
+            return copied
+        return draft(e, streams, kept, st.pos + 1, min(depth, n), sampling, confidence)
+
     torch.cuda.synchronize()
     start = time.perf_counter()
-    drafts = draft(e, e.last_streams, [pending], st.pos + 1, min(depth, count - len(out)), sampling, confidence)
+    drafts = drafting(e.last_streams, [pending], count - len(out))
     while len(out) < count and not (stop_eos and out[-1] in w.cfg.eos):
         tokens = [out[-1]] + drafts
         window = constraint.window(tokens, list(range(-1, len(tokens) - 1))) if constraint is not None else None
@@ -475,6 +487,8 @@ def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *
             n = min(keep, count - len(out))
             capture(logits[:n], sampled[:n], list(range(st.pos + 1, st.pos + 1 + n)), probabilities)
         commit(w, st, b, R, keep)
+        if copies is not None:
+            copies.landed(R, keep)
         unabsorbed = (keep, sampled[:keep])
         rounds += 1
         drafted += len(drafts)
@@ -485,15 +499,13 @@ def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *
         if constraint is not None:
             constraint.advance(sampled[:keep])
         out.extend(sampled[:keep])
+        context.extend(sampled[:keep])
         if on_tokens is not None and new and on_tokens(new):
             break
         if len(out) >= count or (stop_eos and out[-1] in w.cfg.eos):
             break
-        n = min(depth, count - len(out))
-        drafts = []
-        if n > 0:
-            drafts = draft(e, b.streams[:keep], sampled[:keep], st.pos + 1, n, sampling, confidence)
-            unabsorbed = None
+        drafts = drafting(b.streams[:keep], sampled[:keep], count - len(out))
+        unabsorbed = None
     torch.cuda.synchronize()
     seconds = time.perf_counter() - start
     if unabsorbed is not None:              # the MTP cache takes the last kept rows: it then covers the sequence

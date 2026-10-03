@@ -3,6 +3,7 @@ head): windows give serial steps' bits, commits of a window prefix continue like
 graphs replay the eager bits, and MTP-drafted decoding emits serial decoding's tokens."""
 
 import json
+import random
 import struct
 import tempfile
 from pathlib import Path
@@ -19,7 +20,7 @@ if torch.cuda.get_device_capability()[0] != 12:
 
 from tensorfold.cuda import experts as grouped  # noqa: E402
 from tensorfold.engine.exact_sampling import Sampling  # noqa: E402
-from tensorfold.families.qwen4_exp.cuda import qmm  # noqa: E402
+from tensorfold.families.qwen4_exp.cuda import decode, qmm  # noqa: E402
 from tensorfold.families.qwen4_exp.cuda.decode import Engine, mtp_decode, prefill, serial_decode  # noqa: E402
 from tensorfold.families.qwen4_exp.cuda.forward import commit, forward  # noqa: E402
 from tensorfold.families.qwen4_exp.cuda.weights import (  # noqa: E402
@@ -235,6 +236,47 @@ def test_confidence_stopped_chains_give_serial_tokens(sampling, vocab):
     assert drafted[0.9] == rounds[0.9] and drafted[0.0] > drafted[0.9]      # at 0.9: the first draft alone
 
 
+class _Copies:
+    """Copies from each prompt's serial continuation, so they land whole; now and then none (an MTP chain
+    instead) or one with a wrong token."""
+
+    def __init__(self, prompts, refs, rng):
+        self.pairs, self.rng = list(zip(prompts, refs)), rng
+
+    def propose(self, context, n):
+        if self.rng.random() < 0.3:
+            return []
+        prompt, ref = next((p, r) for p, r in self.pairs if list(context[:len(p)]) == p)
+        done = len(context) - len(prompt)
+        guesses = list(ref[done:done + n])
+        if guesses and self.rng.random() < 0.2:          # a broken copy: its round keeps the tokens before it
+            guesses[self.rng.randrange(len(guesses))] = self.rng.randrange(1, V)
+        return guesses
+
+
+@pytest.mark.parametrize("sampling", [None, Sampling(seed=21, top_k=20, top_p=0.95)])
+def test_copies_from_the_context_give_serial_tokens(sampling, monkeypatch):
+    """A copy goes before an MTP chain, its window growing from 16 rows while copies land whole (graphs and eager):
+    the tokens stay serial decoding's; without the prompt, chains alone."""
+
+    w = _model()
+    prompt = [5, 17, 99, 250, 1023, 7, 64, 300, 11, 12, 13]
+    ref_e = Engine(w, capacity=1024, max_rows=8, prefill_rows=16)
+    first = prefill(ref_e, prompt, sampling)
+    ref = serial_decode(ref_e, first, 300, sampling).tokens
+    rng = random.Random(5)
+    monkeypatch.setattr("tensorfold.families.qwen4_exp.cuda.copies.CopyIndex", lambda: _Copies([prompt], [ref], rng))
+    for graphs in (False, True):
+        e = Engine(w, capacity=1024, max_rows=decode.COPY_ROWS, prefill_rows=16, graphs=graphs)
+        prefill(e, prompt, sampling)
+        got = mtp_decode(e, first, 300, sampling, depth=3, confidence=0.0, prompt=prompt)
+        assert got.tokens == ref, graphs
+        assert 16 < max(got.widths) <= decode.COPY_ROWS and min(got.widths) <= 4, got.widths    # copies and chains
+        prefill(e, prompt, sampling)
+        alone = mtp_decode(e, first, 300, sampling, depth=3, confidence=0.0)
+        assert alone.tokens == ref and max(alone.widths) <= 4, graphs
+
+
 def test_server_engine_streams_serial_tokens(tmp_path):
     """engine.FlashNextEngine on one GPU: the streamed tokens are serial decoding's, and a client that stops
     early stops the decode."""
@@ -245,6 +287,7 @@ def test_server_engine_streams_serial_tokens(tmp_path):
 
     _checkpoint(tmp_path)
     eng = FlashNextEngine(tmp_path, depth=5, confidence=0.001, draft_vocab=None, max_len=512, prefetch=False)
+    assert eng.e.rows == decode.COPY_ROWS                          # one GPU: copies from the context, 16-row windows
     prompt = [5, 17, 99, 250, 1023, 7, 64, 300, 11, 12, 13]
     for sampling in (None, Sampling(seed=7, top_k=20, top_p=0.95)):
         first = prefill(eng.e, prompt, sampling)

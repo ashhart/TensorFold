@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from tensorfold.cuda import prompt_precision
-from . import CONFIDENCE, DEPTH
+from . import CONFIDENCE, COPY_ROWS, DEPTH
 
 MAX_DEPTH = 15           # a verify window of at most 16 rows
 KEEP_SERIAL = 4          # prompt states the serial engine keeps (they share its attention rows)
@@ -110,10 +110,13 @@ class FlashNextEngine:
             self.comm.barrier()
         gather = (lambda values: gather_ints(torch, self.comm.all_gather, values)) if tp == 2 else None
         each, mtp, bits = self.depth + 1, self.depth > 0, BITS_OF[self.kv_dtype]
+        copies = mtp and tp == 1                         # copies from the context: one GPU (two ranks: MTP chains)
+        rows, solo = max(each, COPY_ROWS) if copies else each, int(graphs and mtp)   # a window's most; the graph slot
         # one admission for one stream or many (every slot, the shared rows and kept snapshots), before any load
         rows0 = chunk or PREFILL_ROWS
-        geometry = ((lambda text: indexed_stream_geometry(text, streams + int(graphs and mtp), each, KEEP, mtp=mtp,
-                                                          kv_bits=bits, world=tp, prefill_rows=rows0))
+        geometry = ((lambda text: indexed_stream_geometry(text, streams + solo, each, KEEP, mtp=mtp, kv_bits=bits,
+                                                          world=tp, prefill_rows=rows0, scratch=rows,
+                                                          rows=max(streams * each, rows) + solo * rows))
                     if streams > 1 else
                     (lambda text: gdn_geometry(text, tp, each, indexed=True, mtp=mtp, kv_bits=bits,
                                                kept=KEEP_SERIAL + 1, prefill_rows=rows0)))
@@ -190,10 +193,11 @@ class FlashNextEngine:
             self.multi = MultiDecoder(w, slots=streams, capacity=self.max_len, depth=self.depth,
                                       confidence=self.confidence, keep=KEEP, points=self.points,
                                       kv_dtype=self.kv_dtype, share=share, vision=self.vision,
-                                      prefill_rows=self.prefill_rows, workspace_bytes=prompt_workspace, graphs=graphs)
+                                      prefill_rows=self.prefill_rows, workspace_bytes=prompt_workspace, graphs=graphs,
+                                      copy_rows=COPY_ROWS if copies else 0)
             self.scheduler = Scheduler(self.multi, max_streams=streams)
         else:
-            self.e = Engine(w, capacity=self.max_len, max_rows=max(8, self.depth + 1), graphs=graphs,
+            self.e = Engine(w, capacity=self.max_len, max_rows=max(8, rows), graphs=graphs,
                             kv_dtype=self.kv_dtype, prefill_rows=self.prefill_rows)
         started = time.perf_counter()
         locked = False
@@ -213,7 +217,7 @@ class FlashNextEngine:
                 pinned += getattr(table, "pinned_bytes", lock_bytes(table) if got else 0)
             locked = all(locks.values())
         read_s = time.perf_counter() - started
-        captured = self.e.graphs.warm(self.depth + 1) if self.e is not None and self.e.graphs is not None else 0
+        captured = self.e.graphs.warm(rows) if self.e is not None and self.e.graphs is not None else 0
         started = time.perf_counter()
         if self.concurrent:
             self.multi.warm()
@@ -246,6 +250,8 @@ class FlashNextEngine:
         self.serial = None                                # the serial requests' engine, made on first use
         rule = (f"1 to {self.depth} MTP drafts a round, a chain stops before a later draft under "
                 f"{self.confidence:.0%}" if self.depth else "no drafts: the serial reference, one token a round")
+        if copies:
+            rule = f"a copy from the context first (up to {COPY_ROWS - 1} tokens, while copies land whole), else {rule}"
         where = (f"up to {streams} streams, each growing to {self.context_window} prompt/reply tokens while memory "
                  f"lasts ({self.multi.memory_gate.room / 2**30:.1f} GiB free for their caches, "
                  f"{self.multi.window_bytes / 2**30:.2f} GiB for one at the full window), eager" if self.concurrent else
@@ -426,7 +432,8 @@ class FlashNextEngine:
             return stats
         if self.depth > 0:
             res = mtp_decode(self.e, first, max_tokens, sampling, depth=self.depth, confidence=self.confidence,
-                             stop_eos=stop_eos, on_tokens=on_tokens, constraint=constraint, probabilities=probabilities)
+                             stop_eos=stop_eos, on_tokens=on_tokens, constraint=constraint, probabilities=probabilities,
+                             prompt=prompt if self.tp == 1 else ())
             stats.update(drafted=res.drafted, accepted=res.accepted, min_rows=min(res.widths, default=0))
         else:
             res = serial_decode(self.e, first, max_tokens, sampling, stop_eos=stop_eos, on_tokens=on_tokens,
