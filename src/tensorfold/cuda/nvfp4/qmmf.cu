@@ -66,7 +66,7 @@ __global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
         float scale, void* __restrict__ out, float* __restrict__ part, int M, int N, int K, int SK, int npad, int ldx,
         int group) {
     using T = Tile<MODE, BM, BN, WM, WN, STAGES>;
-    static_assert(BN == 64, "a block reads one 64-column tile of words and scales");
+    static_assert(BN % 64 == 0, "a block reads whole 64-column tiles of words and scales");
     extern __shared__ __align__(128) unsigned char buf[];
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
     const int wm = warp / WN, wn = warp % WN;
@@ -89,10 +89,13 @@ __global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
             const int t = c / (TILE_BYTES / 16), off = c % (TILE_BYTES / 16);
             cp16(pw + c * 16, w + (static_cast<size_t>(n0 / 64 + t) * KG + g) * TILE_BYTES + off * 16);
         }
-        if constexpr (T::S > 0) {                          // block scales [npad/64][K/64][64][4|2]: one tile's
+        if constexpr (T::S > 0) {                          // block scales [npad/64][K/64][64][4|2], a tile's together
             unsigned char* ps = pw + T::W;
-            for (int c = tid; c < T::S / 16; c += T::THREADS)
-                cp16(ps + c * 16, bs + (static_cast<size_t>(n0 / 64) * KG + g) * T::S + c * 16);
+            constexpr int S64 = T::S / (BN / 64);
+            for (int c = tid; c < T::S / 16; c += T::THREADS) {
+                const int t = c / (S64 / 16), off = c % (S64 / 16);
+                cp16(ps + c * 16, bs + (static_cast<size_t>(n0 / 64 + t) * KG + g) * S64 + off * 16);
+            }
         }
     };
 
@@ -297,10 +300,10 @@ __global__ void reduce_kernel(const float* __restrict__ part, void* __restrict__
     else reinterpret_cast<__nv_bfloat16*>(out)[i] = __float2bfloat16_rn(acc);
 }
 
-template <int MODE, int BM, bool F32, bool CLUSTER, bool FUSE = false>
+template <int MODE, int BM, bool F32, bool CLUSTER, bool FUSE = false, int BN = 64, int WM = 1, int WN = 4,
+          int STAGES = 4>
 void launch(const at::Tensor& x, const at::Tensor& w, const at::Tensor& bs, double scale, at::Tensor& out,
             const at::Tensor& part, int N, int K, int SK, int npad) {
-    constexpr int BN = 64, WM = 1, WN = 4, STAGES = 4;
     using T = Tile<MODE, BM, BN, WM, WN, STAGES>;
     const int M = x.size(0);
     auto kernel = qmmf_kernel<MODE, BM, BN, WM, WN, STAGES, F32, CLUSTER, FUSE>;
@@ -339,7 +342,11 @@ void by_rows(int bm, const at::Tensor& x, const at::Tensor& w, const at::Tensor&
         case 16: launch<MODE, 16, F32, CLUSTER>(x, w, bs, scale, out, part, N, K, SK, npad); break;
         case 32: launch<MODE, 32, F32, CLUSTER>(x, w, bs, scale, out, part, N, K, SK, npad); break;
         case 64: launch<MODE, 64, F32, CLUSTER>(x, w, bs, scale, out, part, N, K, SK, npad); break;
-        default: launch<MODE, 64, F32, false, true>(x, w, bs, scale, out, part, N, K, SK, npad); break;   // 0: fused
+        default:                                                    // 0: fused; 128x128 where whole 128-column tiles
+            if (npad % 128 == 0)
+                launch<MODE, 128, F32, false, true, 128, 2, 4, 3>(x, w, bs, scale, out, part, N, K, SK, npad);
+            else launch<MODE, 64, F32, false, true>(x, w, bs, scale, out, part, N, K, SK, npad);
+            break;
     }
 }
 
