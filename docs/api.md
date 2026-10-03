@@ -16,6 +16,7 @@ The base URL is `http://127.0.0.1:8080/v1` with the default server settings.
 | `POST /v1/responses` | OpenAI's Responses API, run as the equivalent chat completion; streamed or non-streamed |
 | `GET /v1/responses/{id}`, `DELETE /v1/responses/{id}` | A stored response, or remove it |
 | `POST /v1/decisions` | Choice, score, and yes/no probabilities from the next-token logits; no text is generated |
+| `POST /sleep?level=2`, `POST /wake_up`, `GET /is_sleeping` | Authenticated [model sleep/wake](model-sleep.md), opt-in single-device CUDA dense Qwen prototype |
 
 On MLX, a completions body containing a nonempty `messages` list uses chat handling. CUDA completions
 take a string `prompt` (`add_special_tokens`, default false) or a list of token IDs, run as given.

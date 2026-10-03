@@ -120,6 +120,7 @@ between MLX and CUDA, different quantizations, or different tensor-parallel rank
 | `--thinking-budget N` | Token-count limit inside reasoning | Both |
 | `--backend auto`, `mlx`, `cuda` | Select backend; auto uses MLX on macOS | Both |
 | `--parallel N` | MLX `auto` admits up to 8 within budget; CUDA `auto` is 1, explicit N enables supported shared rounds | Both |
+| `--enable-sleep-mode` | Opt-in authenticated [Level 2 weights sleep/wake](docs/model-sleep.md); configure `--sleep-token-env` and `--sleep-timeout` | Single-device CUDA dense Qwen prototype |
 | `--no-drafts` | Decode serially | Both |
 | `--drafter auto`, `none`, or model ID | Select an optional draft model where the family supports it | Both |
 | `--mtp-drafts N` | Family-specific cap on MTP drafts | Both |

@@ -8,6 +8,11 @@ drafted and concurrent paths. Other families, MLX, Level 1, TP and strict conver
 cache preservation remain subsequent adapters/milestones; refuse unsupported opt-ins.
 Do not run Spark workloads until the user confirms their current tests have finished.
 
+Local implementation and focused verification are complete. See the
+[validation receipt](../research/model-sleep-validation.md) for actual CUDA results,
+host-suite limitations and the pending pretrained-model/Spark checks, and the
+[usage guide](../model-sleep.md) for the prototype API.
+
 ## Lifecycle and HTTP contract
 
 - Opt in with `--enable-sleep-mode`; require a secret from `--sleep-token-env`

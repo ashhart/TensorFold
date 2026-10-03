@@ -1,0 +1,603 @@
+{
+  "synthetic": true,
+  "gpu": "NVIDIA GeForce RTX 4090 Laptop GPU",
+  "torch": "2.13.0+cu130",
+  "cuda": "13.0",
+  "tensorfold": "0.6.3",
+  "precision": "checkpoint",
+  "prefill_fp8": false,
+  "seed": 1234,
+  "options": {
+    "drafter": false,
+    "no_drafts": true,
+    "parallel": 2,
+    "context": 1024,
+    "context_explicit": true
+  },
+  "cycles": [
+    {
+      "loaded": {
+        "allocated_bytes": 429056,
+        "reserved_bytes": 2097152,
+        "rss_bytes": 1283858432
+      },
+      "asleep": {
+        "allocated_bytes": 0,
+        "reserved_bytes": 0,
+        "rss_bytes": 1284034560
+      },
+      "awake": {
+        "allocated_bytes": 429056,
+        "reserved_bytes": 2097152,
+        "rss_bytes": 1284186112
+      },
+      "sleep_s": 0.05932558898348361,
+      "wake_s": 0.14586657099425793,
+      "after": {
+        "serial": [
+          {
+            "tokens": [
+              23,
+              28,
+              100,
+              23,
+              100,
+              104,
+              46,
+              48,
+              176,
+              13,
+              28,
+              216,
+              100,
+              120,
+              104,
+              13
+            ],
+            "stats": {
+              "prefill_s": 0.0031,
+              "decode_s": 0.0353,
+              "rounds": 15,
+              "drafts": false,
+              "cached": 0,
+              "min_rows": 1,
+              "drafted": 0,
+              "accepted": 0
+            }
+          },
+          {
+            "tokens": [
+              133,
+              100,
+              49,
+              100,
+              28,
+              116,
+              166,
+              33,
+              33,
+              49,
+              216,
+              126,
+              49,
+              28,
+              129,
+              216
+            ],
+            "stats": {
+              "prefill_s": 0.0018,
+              "decode_s": 0.0346,
+              "rounds": 15,
+              "drafts": false,
+              "cached": 0,
+              "min_rows": 1,
+              "drafted": 0,
+              "accepted": 0
+            }
+          }
+        ],
+        "concurrent": [
+          {
+            "tokens": [
+              23,
+              28,
+              100,
+              23,
+              100,
+              104,
+              46,
+              48,
+              176,
+              13,
+              28,
+              216,
+              100,
+              120,
+              104,
+              13
+            ],
+            "stats": {
+              "prefill_s": 0.0025,
+              "decode_s": 0.0407,
+              "rounds": 15,
+              "drafts": false,
+              "cached": 0,
+              "min_rows": 1,
+              "drafted": 0,
+              "accepted": 0
+            }
+          },
+          {
+            "tokens": [
+              133,
+              100,
+              49,
+              100,
+              28,
+              116,
+              166,
+              33,
+              33,
+              49,
+              216,
+              126,
+              49,
+              28,
+              129,
+              216
+            ],
+            "stats": {
+              "prefill_s": 0.0025,
+              "decode_s": 0.0407,
+              "rounds": 15,
+              "drafts": false,
+              "cached": 0,
+              "min_rows": 1,
+              "drafted": 0,
+              "accepted": 0
+            }
+          }
+        ]
+      }
+    },
+    {
+      "loaded": {
+        "allocated_bytes": 429056,
+        "reserved_bytes": 2097152,
+        "rss_bytes": 1284214784
+      },
+      "asleep": {
+        "allocated_bytes": 0,
+        "reserved_bytes": 0,
+        "rss_bytes": 1284157440
+      },
+      "awake": {
+        "allocated_bytes": 429056,
+        "reserved_bytes": 2097152,
+        "rss_bytes": 1284227072
+      },
+      "sleep_s": 0.051471756014507264,
+      "wake_s": 0.14052503800485283,
+      "after": {
+        "serial": [
+          {
+            "tokens": [
+              23,
+              28,
+              100,
+              23,
+              100,
+              104,
+              46,
+              48,
+              176,
+              13,
+              28,
+              216,
+              100,
+              120,
+              104,
+              13
+            ],
+            "stats": {
+              "prefill_s": 0.0032,
+              "decode_s": 0.0393,
+              "rounds": 15,
+              "drafts": false,
+              "cached": 0,
+              "min_rows": 1,
+              "drafted": 0,
+              "accepted": 0
+            }
+          },
+          {
+            "tokens": [
+              133,
+              100,
+              49,
+              100,
+              28,
+              116,
+              166,
+              33,
+              33,
+              49,
+              216,
+              126,
+              49,
+              28,
+              129,
+              216
+            ],
+            "stats": {
+              "prefill_s": 0.0018,
+              "decode_s": 0.037,
+              "rounds": 15,
+              "drafts": false,
+              "cached": 0,
+              "min_rows": 1,
+              "drafted": 0,
+              "accepted": 0
+            }
+          }
+        ],
+        "concurrent": [
+          {
+            "tokens": [
+              23,
+              28,
+              100,
+              23,
+              100,
+              104,
+              46,
+              48,
+              176,
+              13,
+              28,
+              216,
+              100,
+              120,
+              104,
+              13
+            ],
+            "stats": {
+              "prefill_s": 0.0026,
+              "decode_s": 0.0418,
+              "rounds": 15,
+              "drafts": false,
+              "cached": 0,
+              "min_rows": 1,
+              "drafted": 0,
+              "accepted": 0
+            }
+          },
+          {
+            "tokens": [
+              133,
+              100,
+              49,
+              100,
+              28,
+              116,
+              166,
+              33,
+              33,
+              49,
+              216,
+              126,
+              49,
+              28,
+              129,
+              216
+            ],
+            "stats": {
+              "prefill_s": 0.0026,
+              "decode_s": 0.0418,
+              "rounds": 15,
+              "drafts": false,
+              "cached": 0,
+              "min_rows": 1,
+              "drafted": 0,
+              "accepted": 0
+            }
+          }
+        ]
+      }
+    },
+    {
+      "loaded": {
+        "allocated_bytes": 429056,
+        "reserved_bytes": 2097152,
+        "rss_bytes": 1284231168
+      },
+      "asleep": {
+        "allocated_bytes": 0,
+        "reserved_bytes": 0,
+        "rss_bytes": 1284182016
+      },
+      "awake": {
+        "allocated_bytes": 429056,
+        "reserved_bytes": 2097152,
+        "rss_bytes": 1284268032
+      },
+      "sleep_s": 0.05432486400241032,
+      "wake_s": 0.13802687596762553,
+      "after": {
+        "serial": [
+          {
+            "tokens": [
+              23,
+              28,
+              100,
+              23,
+              100,
+              104,
+              46,
+              48,
+              176,
+              13,
+              28,
+              216,
+              100,
+              120,
+              104,
+              13
+            ],
+            "stats": {
+              "prefill_s": 0.0053,
+              "decode_s": 0.0392,
+              "rounds": 15,
+              "drafts": false,
+              "cached": 0,
+              "min_rows": 1,
+              "drafted": 0,
+              "accepted": 0
+            }
+          },
+          {
+            "tokens": [
+              133,
+              100,
+              49,
+              100,
+              28,
+              116,
+              166,
+              33,
+              33,
+              49,
+              216,
+              126,
+              49,
+              28,
+              129,
+              216
+            ],
+            "stats": {
+              "prefill_s": 0.0017,
+              "decode_s": 0.0347,
+              "rounds": 15,
+              "drafts": false,
+              "cached": 0,
+              "min_rows": 1,
+              "drafted": 0,
+              "accepted": 0
+            }
+          }
+        ],
+        "concurrent": [
+          {
+            "tokens": [
+              23,
+              28,
+              100,
+              23,
+              100,
+              104,
+              46,
+              48,
+              176,
+              13,
+              28,
+              216,
+              100,
+              120,
+              104,
+              13
+            ],
+            "stats": {
+              "prefill_s": 0.0029,
+              "decode_s": 0.044,
+              "rounds": 15,
+              "drafts": false,
+              "cached": 0,
+              "min_rows": 1,
+              "drafted": 0,
+              "accepted": 0
+            }
+          },
+          {
+            "tokens": [
+              133,
+              100,
+              49,
+              100,
+              28,
+              116,
+              166,
+              33,
+              33,
+              49,
+              216,
+              126,
+              49,
+              28,
+              129,
+              216
+            ],
+            "stats": {
+              "prefill_s": 0.0029,
+              "decode_s": 0.044,
+              "rounds": 15,
+              "drafts": false,
+              "cached": 0,
+              "min_rows": 1,
+              "drafted": 0,
+              "accepted": 0
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "checkpoint_files": [
+    {
+      "source": 0,
+      "file": "config.json",
+      "sha256": "a3eb71406f7a75e3b6404da5afe6542826a5978a9c13bebc732e46b27af56463"
+    },
+    {
+      "source": 0,
+      "file": "model.safetensors",
+      "sha256": "873ffc7cac31cfe10811efa8dc9eec1b82970e63fea0f570d378040b4021ea05"
+    },
+    {
+      "source": 0,
+      "file": "tokenizer.json",
+      "sha256": "d1e48c88433cc92ba512f2a182b558142bc12995fed8aa1a4186fb1b87c2c19b"
+    },
+    {
+      "source": 0,
+      "file": "tokenizer_config.json",
+      "sha256": "d559febc32c33c5eb53afcb602ca85b31e37d020cb0f2cd3c724206c088e2b1c"
+    }
+  ],
+  "before": {
+    "serial": [
+      {
+        "tokens": [
+          23,
+          28,
+          100,
+          23,
+          100,
+          104,
+          46,
+          48,
+          176,
+          13,
+          28,
+          216,
+          100,
+          120,
+          104,
+          13
+        ],
+        "stats": {
+          "prefill_s": 0.0018,
+          "decode_s": 0.0348,
+          "rounds": 15,
+          "drafts": false,
+          "cached": 0,
+          "min_rows": 1,
+          "drafted": 0,
+          "accepted": 0
+        }
+      },
+      {
+        "tokens": [
+          133,
+          100,
+          49,
+          100,
+          28,
+          116,
+          166,
+          33,
+          33,
+          49,
+          216,
+          126,
+          49,
+          28,
+          129,
+          216
+        ],
+        "stats": {
+          "prefill_s": 0.0021,
+          "decode_s": 0.0344,
+          "rounds": 15,
+          "drafts": false,
+          "cached": 0,
+          "min_rows": 1,
+          "drafted": 0,
+          "accepted": 0
+        }
+      }
+    ],
+    "concurrent": [
+      {
+        "tokens": [
+          23,
+          28,
+          100,
+          23,
+          100,
+          104,
+          46,
+          48,
+          176,
+          13,
+          28,
+          216,
+          100,
+          120,
+          104,
+          13
+        ],
+        "stats": {
+          "prefill_s": 0.0045,
+          "decode_s": 0.0425,
+          "rounds": 15,
+          "drafts": false,
+          "cached": 0,
+          "min_rows": 1,
+          "drafted": 0,
+          "accepted": 0
+        }
+      },
+      {
+        "tokens": [
+          133,
+          100,
+          49,
+          100,
+          28,
+          116,
+          166,
+          33,
+          33,
+          49,
+          216,
+          126,
+          49,
+          28,
+          129,
+          216
+        ],
+        "stats": {
+          "prefill_s": 0.0045,
+          "decode_s": 0.0425,
+          "rounds": 15,
+          "drafts": false,
+          "cached": 0,
+          "min_rows": 1,
+          "drafted": 0,
+          "accepted": 0
+        }
+      }
+    ]
+  },
+  "passed": true
+}

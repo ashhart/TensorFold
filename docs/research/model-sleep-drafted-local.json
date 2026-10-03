@@ -1,0 +1,613 @@
+{
+  "synthetic": true,
+  "gpu": "NVIDIA GeForce RTX 4090 Laptop GPU",
+  "torch": "2.13.0+cu130",
+  "cuda": "13.0",
+  "tensorfold": "0.6.3",
+  "precision": "checkpoint",
+  "prefill_fp8": false,
+  "seed": 1234,
+  "options": {
+    "drafter": true,
+    "no_drafts": false,
+    "parallel": 2,
+    "context": 1024,
+    "context_explicit": true
+  },
+  "cycles": [
+    {
+      "loaded": {
+        "allocated_bytes": 128013824,
+        "reserved_bytes": 150994944,
+        "rss_bytes": 1568710656
+      },
+      "asleep": {
+        "allocated_bytes": 0,
+        "reserved_bytes": 0,
+        "rss_bytes": 1568641024
+      },
+      "awake": {
+        "allocated_bytes": 128013824,
+        "reserved_bytes": 150994944,
+        "rss_bytes": 1589600256
+      },
+      "sleep_s": 0.228769265988376,
+      "wake_s": 2.0868893589940853,
+      "after": {
+        "serial": [
+          {
+            "tokens": [
+              84,
+              28,
+              130,
+              36,
+              206,
+              84,
+              153,
+              1,
+              36,
+              153,
+              28,
+              130,
+              18,
+              35,
+              36,
+              1
+            ],
+            "stats": {
+              "prefill_s": 0.0434,
+              "decode_s": 0.534,
+              "rounds": 15,
+              "drafts": false,
+              "cached": 0,
+              "min_rows": 1,
+              "drafted": 0,
+              "accepted": 0
+            }
+          },
+          {
+            "tokens": [
+              35,
+              35,
+              84,
+              78,
+              36,
+              137,
+              35,
+              84,
+              33,
+              36,
+              243,
+              18,
+              153,
+              137,
+              36,
+              137
+            ],
+            "stats": {
+              "prefill_s": 0.0402,
+              "decode_s": 0.5429,
+              "rounds": 15,
+              "drafts": false,
+              "cached": 0,
+              "min_rows": 1,
+              "drafted": 0,
+              "accepted": 0
+            }
+          }
+        ],
+        "concurrent": [
+          {
+            "tokens": [
+              84,
+              28,
+              130,
+              36,
+              206,
+              84,
+              153,
+              1,
+              36,
+              153,
+              28,
+              130,
+              18,
+              35,
+              36,
+              1
+            ],
+            "stats": {
+              "prefill_s": 0.0461,
+              "decode_s": 0.6239,
+              "rounds": 14,
+              "drafts": true,
+              "cached": 0,
+              "min_rows": 16,
+              "drafted": 210,
+              "accepted": 1
+            }
+          },
+          {
+            "tokens": [
+              35,
+              35,
+              84,
+              78,
+              36,
+              137,
+              35,
+              84,
+              33,
+              36,
+              243,
+              18,
+              153,
+              137,
+              36,
+              137
+            ],
+            "stats": {
+              "prefill_s": 0.0461,
+              "decode_s": 0.6658,
+              "rounds": 15,
+              "drafts": true,
+              "cached": 0,
+              "min_rows": 16,
+              "drafted": 225,
+              "accepted": 0
+            }
+          }
+        ]
+      }
+    },
+    {
+      "loaded": {
+        "allocated_bytes": 128013824,
+        "reserved_bytes": 150994944,
+        "rss_bytes": 1589600256
+      },
+      "asleep": {
+        "allocated_bytes": 0,
+        "reserved_bytes": 0,
+        "rss_bytes": 1589538816
+      },
+      "awake": {
+        "allocated_bytes": 128013824,
+        "reserved_bytes": 150994944,
+        "rss_bytes": 1589702656
+      },
+      "sleep_s": 0.23124164302134886,
+      "wake_s": 2.0574955709744245,
+      "after": {
+        "serial": [
+          {
+            "tokens": [
+              84,
+              28,
+              130,
+              36,
+              206,
+              84,
+              153,
+              1,
+              36,
+              153,
+              28,
+              130,
+              18,
+              35,
+              36,
+              1
+            ],
+            "stats": {
+              "prefill_s": 0.0438,
+              "decode_s": 0.5352,
+              "rounds": 15,
+              "drafts": false,
+              "cached": 0,
+              "min_rows": 1,
+              "drafted": 0,
+              "accepted": 0
+            }
+          },
+          {
+            "tokens": [
+              35,
+              35,
+              84,
+              78,
+              36,
+              137,
+              35,
+              84,
+              33,
+              36,
+              243,
+              18,
+              153,
+              137,
+              36,
+              137
+            ],
+            "stats": {
+              "prefill_s": 0.0402,
+              "decode_s": 0.5306,
+              "rounds": 15,
+              "drafts": false,
+              "cached": 0,
+              "min_rows": 1,
+              "drafted": 0,
+              "accepted": 0
+            }
+          }
+        ],
+        "concurrent": [
+          {
+            "tokens": [
+              84,
+              28,
+              130,
+              36,
+              206,
+              84,
+              153,
+              1,
+              36,
+              153,
+              28,
+              130,
+              18,
+              35,
+              36,
+              1
+            ],
+            "stats": {
+              "prefill_s": 0.0496,
+              "decode_s": 0.615,
+              "rounds": 14,
+              "drafts": true,
+              "cached": 0,
+              "min_rows": 16,
+              "drafted": 210,
+              "accepted": 1
+            }
+          },
+          {
+            "tokens": [
+              35,
+              35,
+              84,
+              78,
+              36,
+              137,
+              35,
+              84,
+              33,
+              36,
+              243,
+              18,
+              153,
+              137,
+              36,
+              137
+            ],
+            "stats": {
+              "prefill_s": 0.0496,
+              "decode_s": 0.6558,
+              "rounds": 15,
+              "drafts": true,
+              "cached": 0,
+              "min_rows": 16,
+              "drafted": 225,
+              "accepted": 0
+            }
+          }
+        ]
+      }
+    },
+    {
+      "loaded": {
+        "allocated_bytes": 128013824,
+        "reserved_bytes": 150994944,
+        "rss_bytes": 1589702656
+      },
+      "asleep": {
+        "allocated_bytes": 0,
+        "reserved_bytes": 0,
+        "rss_bytes": 1589641216
+      },
+      "awake": {
+        "allocated_bytes": 128013824,
+        "reserved_bytes": 150994944,
+        "rss_bytes": 1589702656
+      },
+      "sleep_s": 0.2265085669932887,
+      "wake_s": 2.022479228035081,
+      "after": {
+        "serial": [
+          {
+            "tokens": [
+              84,
+              28,
+              130,
+              36,
+              206,
+              84,
+              153,
+              1,
+              36,
+              153,
+              28,
+              130,
+              18,
+              35,
+              36,
+              1
+            ],
+            "stats": {
+              "prefill_s": 0.044,
+              "decode_s": 0.5353,
+              "rounds": 15,
+              "drafts": false,
+              "cached": 0,
+              "min_rows": 1,
+              "drafted": 0,
+              "accepted": 0
+            }
+          },
+          {
+            "tokens": [
+              35,
+              35,
+              84,
+              78,
+              36,
+              137,
+              35,
+              84,
+              33,
+              36,
+              243,
+              18,
+              153,
+              137,
+              36,
+              137
+            ],
+            "stats": {
+              "prefill_s": 0.0421,
+              "decode_s": 0.5385,
+              "rounds": 15,
+              "drafts": false,
+              "cached": 0,
+              "min_rows": 1,
+              "drafted": 0,
+              "accepted": 0
+            }
+          }
+        ],
+        "concurrent": [
+          {
+            "tokens": [
+              84,
+              28,
+              130,
+              36,
+              206,
+              84,
+              153,
+              1,
+              36,
+              153,
+              28,
+              130,
+              18,
+              35,
+              36,
+              1
+            ],
+            "stats": {
+              "prefill_s": 0.046,
+              "decode_s": 0.6158,
+              "rounds": 14,
+              "drafts": true,
+              "cached": 0,
+              "min_rows": 16,
+              "drafted": 210,
+              "accepted": 1
+            }
+          },
+          {
+            "tokens": [
+              35,
+              35,
+              84,
+              78,
+              36,
+              137,
+              35,
+              84,
+              33,
+              36,
+              243,
+              18,
+              153,
+              137,
+              36,
+              137
+            ],
+            "stats": {
+              "prefill_s": 0.046,
+              "decode_s": 0.6568,
+              "rounds": 15,
+              "drafts": true,
+              "cached": 0,
+              "min_rows": 16,
+              "drafted": 225,
+              "accepted": 0
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "checkpoint_files": [
+    {
+      "source": 0,
+      "file": "config.json",
+      "sha256": "fe4b37d227f817a7e2376bca8f903876df0302d2ef81acfd1a8c9ea264bce673"
+    },
+    {
+      "source": 0,
+      "file": "model.safetensors",
+      "sha256": "a4ee521f46ea1ff1af6b8d1a09fe042ae4b5331dbc44f4786a5e72039008af75"
+    },
+    {
+      "source": 0,
+      "file": "tokenizer.json",
+      "sha256": "d1e48c88433cc92ba512f2a182b558142bc12995fed8aa1a4186fb1b87c2c19b"
+    },
+    {
+      "source": 0,
+      "file": "tokenizer_config.json",
+      "sha256": "d559febc32c33c5eb53afcb602ca85b31e37d020cb0f2cd3c724206c088e2b1c"
+    },
+    {
+      "source": 1,
+      "file": "config.json",
+      "sha256": "f5b449c18b2970e5bff18b6d747da11b19ac70794f37a87e63def68b3bec6c05"
+    },
+    {
+      "source": 1,
+      "file": "model.safetensors",
+      "sha256": "bb7df8b48a2bbc67c411661e16884d08a40f86a5aa3d683f42517d286581e9c6"
+    }
+  ],
+  "before": {
+    "serial": [
+      {
+        "tokens": [
+          84,
+          28,
+          130,
+          36,
+          206,
+          84,
+          153,
+          1,
+          36,
+          153,
+          28,
+          130,
+          18,
+          35,
+          36,
+          1
+        ],
+        "stats": {
+          "prefill_s": 0.0438,
+          "decode_s": 0.5382,
+          "rounds": 15,
+          "drafts": false,
+          "cached": 0,
+          "min_rows": 1,
+          "drafted": 0,
+          "accepted": 0
+        }
+      },
+      {
+        "tokens": [
+          35,
+          35,
+          84,
+          78,
+          36,
+          137,
+          35,
+          84,
+          33,
+          36,
+          243,
+          18,
+          153,
+          137,
+          36,
+          137
+        ],
+        "stats": {
+          "prefill_s": 0.0401,
+          "decode_s": 0.5437,
+          "rounds": 15,
+          "drafts": false,
+          "cached": 0,
+          "min_rows": 1,
+          "drafted": 0,
+          "accepted": 0
+        }
+      }
+    ],
+    "concurrent": [
+      {
+        "tokens": [
+          84,
+          28,
+          130,
+          36,
+          206,
+          84,
+          153,
+          1,
+          36,
+          153,
+          28,
+          130,
+          18,
+          35,
+          36,
+          1
+        ],
+        "stats": {
+          "prefill_s": 0.4264,
+          "decode_s": 2.2553,
+          "rounds": 14,
+          "drafts": true,
+          "cached": 0,
+          "min_rows": 16,
+          "drafted": 210,
+          "accepted": 1
+        }
+      },
+      {
+        "tokens": [
+          35,
+          35,
+          84,
+          78,
+          36,
+          137,
+          35,
+          84,
+          33,
+          36,
+          243,
+          18,
+          153,
+          137,
+          36,
+          137
+        ],
+        "stats": {
+          "prefill_s": 0.4264,
+          "decode_s": 2.4668,
+          "rounds": 15,
+          "drafts": true,
+          "cached": 0,
+          "min_rows": 16,
+          "drafted": 225,
+          "accepted": 0
+        }
+      }
+    ]
+  },
+  "passed": true
+}
