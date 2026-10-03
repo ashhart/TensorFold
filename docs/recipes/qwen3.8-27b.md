@@ -81,6 +81,13 @@ mapping instead of an NCCL call, with the same bits (`TF_TP_P2P=0` keeps NCCL). 
 equals serial on two ranks, while their bits may differ from one GPU's. Checkpoint math (`--precision checkpoint`,
 FP4/FP8 activations) still runs on one GPU.
 
+One stream drafting with DFlash2 replays CUDA graphs on one GPU and on two ranks: the target's tree verify (each tree
+padded to a row bucket whose pad rows never reach a real row), the accepted path's commit and the drafter's step. They
+run the eager kernels on the same rows, so drafted replies keep their bits, and where a slow host set the round time
+the GPU sets it now. Under `--parallel N` a stream decoding alone takes the same graphs. On two ranks a round of several streams replays one graph too, each window padded to the same rows; on
+one GPU, where the padding would cost GPU time, those rounds stay eager. `TF_TREE_GRAPHS=0` keeps every round eager
+(pass it to both ranks); Volta GPUs and EXL3 checkpoints run eagerly.
+
 ```bash
 tensorfold pull nvidia/Qwen3.8-27B-NVFP4 z-lab/Qwen3.8-27B-DFlash2
 tensorfold serve nvidia/Qwen3.8-27B-NVFP4 --host 0.0.0.0 --port 8080

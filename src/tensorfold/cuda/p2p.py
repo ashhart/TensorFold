@@ -16,7 +16,7 @@ def _ext():
     from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
-    return load(name="tensorfold_p2p_v1", sources=[str(here / "p2p.cu")], extra_cuda_cflags=["-O3"], verbose=False)
+    return load(name="tensorfold_p2p_v2", sources=[str(here / "p2p.cu")], extra_cuda_cflags=["-O3"], verbose=False)
 
 
 class PeerSum:
@@ -27,6 +27,8 @@ class PeerSum:
 
         ext = _ext()
         self.rank, self.round = rank, 0
+        self.captured: int | None = None        # calls recorded by the capture in progress
+        self.base = torch.zeros(1, dtype=torch.int64, device="cuda")
         self.stage = ext.alloc(STAGE_BYTES)
         self.sig = ext.alloc(ext.signal_bytes())
         mine = torch.cat([ext.handle(self.stage), ext.handle(self.sig)]).cuda()
@@ -44,9 +46,29 @@ class PeerSum:
     def __call__(self, local: torch.Tensor, dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
         local = local.contiguous()
         out = torch.empty(local.shape, dtype=torch.bfloat16, device=local.device)
-        self.round += 1
-        _ext().p2p_sum(local, self.stage, self.peer_stage, self.sig, self.peer_sig, out, self.rank, self.round)
+        if self.captured is not None:          # captured: round = device base + this call's offset
+            self.captured += 1
+            _ext().p2p_sum(local, self.stage, self.peer_stage, self.sig, self.peer_sig, out, self.rank, self.captured,
+                           self.base.data_ptr())
+        else:
+            self.round += 1
+            _ext().p2p_sum(local, self.stage, self.peer_stage, self.sig, self.peer_sig, out, self.rank, self.round, 0)
         return out if dtype == torch.bfloat16 else out.to(dtype)
+
+    def begin_capture(self) -> None:
+        self.captured = 0
+
+    def end_capture(self) -> int:
+        """End a capture; return the sums it holds."""
+
+        calls, self.captured = self.captured or 0, None
+        return calls
+
+    def before_replay(self, calls: int) -> None:
+        """Set the device base so a replay of ``calls`` sums takes the next rounds."""
+
+        self.base.fill_(self.round)             # stream-ordered before the replay
+        self.round += calls
 
 
 _PEER: PeerSum | None = None

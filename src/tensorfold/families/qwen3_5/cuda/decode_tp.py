@@ -181,12 +181,14 @@ def decode_tp(w: Weights, st: State, prompt: Sequence[int], pending: int, count:
               sampling: Sampling | None, rank: int, draft=None, *, max_rows: int = 16,
               allow_copy: bool = False, stop_eos: bool = True,
               on_tokens: Callable[[list[int]], bool | None] | None = None,
-              inplace: bool = False, constraint=None) -> DecodeResult | None:
-    """Draft on rank zero or jointly with a two-rank drafter, then verify and commit on both ranks, whose ``prompt + tokens[:-1]`` agree despite rank one storing -1 for the uncommitted last token (``inplace``: as ``draft_decode``'s)."""
+              inplace: bool = False, constraint=None, runner=None) -> DecodeResult | None:
+    """Draft on rank zero or jointly with a two-rank drafter, then verify and commit on both ranks, whose ``prompt + tokens[:-1]`` agree despite rank one storing -1 for the uncommitted last token (``inplace``: as ``draft_decode``'s; ``runner``: verify and commit from ``tree_graphs.TreeGraphs``)."""
 
     device = w.norm.device
     split = 2 * w.head.n == w.config.vocab          # split_weights(..., split_head=True)
     st = st if inplace else clone_state(st)
+    if runner is not None:
+        st = runner.load(st)                    # GDN states in the graphs' buffers, attention caches its own
     out = [pending]
     context = list(prompt) + out
     committed: list[int] = []
@@ -242,8 +244,11 @@ def decode_tp(w: Weights, st: State, prompt: Sequence[int], pending: int, count:
         stages["draft"] += time.perf_counter() - stage
         stage = time.perf_counter()
         taps_wanted = draft is not None and (rank == 0 or tp_draft)
-        result = tree_forward(w, _tokens(window, device), parents, st, tp=True,
-                              full_logits=split or rank == 0, capture_taps=taps_wanted)
+        if runner is not None and taps_wanted == runner.taps and runner.full_logits == (split or rank == 0):
+            result = runner.verify(st, window, parents)
+        else:
+            result = tree_forward(w, _tokens(window, device), parents, st, tp=True,
+                                  full_logits=split or rank == 0, capture_taps=taps_wanted)
         if taps_wanted:
             logits, record, taps = result
         else:
@@ -268,7 +273,10 @@ def decode_tp(w: Weights, st: State, prompt: Sequence[int], pending: int, count:
         if constraint is not None:                  # rank 1 knows the kept drafts now, the last token next round
             constraint.advance([window[r] for r in path[1:]] + ([terminal] if rank == 0 else []))
             behind = rank != 0
-        commit(st, record, path)
+        if runner is not None:
+            runner.commit(st, record, path)
+        else:
+            commit(st, record, path)
         committed.extend(window[row] for row in path)
         if taps_wanted:
             draft.add_taps(taps[path])

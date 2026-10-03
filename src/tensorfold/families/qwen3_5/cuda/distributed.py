@@ -191,7 +191,8 @@ def split_weights(w: Weights, rank: int, world_size: int = 2, *, tiled: bool = F
         from .qmm_fast import tile
 
         head = tile(head)
-    local = Weights(local_cfg, w.embed, layers, w.norm, head, w.inv_freq, quant=w.quant, prompt_rows=w.prompt_rows)
+    local = Weights(local_cfg, w.embed, layers, w.norm, head, w.inv_freq, quant=w.quant, prompt_rows=w.prompt_rows,
+                    tap_layers=w.tap_layers)
     for name in ("precision", "own"):                 # an NVFP4 checkpoint's math, as loaded
         if hasattr(w, name):
             setattr(local, name, getattr(w, name))

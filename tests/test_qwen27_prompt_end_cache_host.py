@@ -303,7 +303,7 @@ def _two_ranks(monkeypatch):
         return rec.prefill(w, prompt, sampling, drafter, state=state, keep_at=keep_at, rank=rank)
 
     def decode_tp(w, st, prompt, pending, count, sampling, rank, drafter, *, max_rows, allow_copy=True,
-                  on_tokens=None, inplace=False, stop_eos=True):
+                  on_tokens=None, inplace=False, stop_eos=True, runner=None):
         assert inplace and all(st is not entry for _, entry, _ in engines[rank].cache.entries)
         result = rec.decode(st, prompt, pending, count)
         if on_tokens is not None:

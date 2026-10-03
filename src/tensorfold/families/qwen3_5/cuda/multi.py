@@ -94,6 +94,8 @@ class MultiDecoder:
     depth: bool = True                        # whether the block follows the trees here (DEPTH_CHIPS)
     spent: dict | None = None                 # streams -> the last rounds' ms beside the forward
     last: tuple | None = None                 # (start, streams, rows) of the round before
+    trees = None                              # TreeGraphs: a lone tree-drafting stream's verify and commit as graphs
+    tree_home = None                          # the stream whose GDN states are ``trees``' buffers
 
     def __init__(self, w: Weights, draft=None, *, max_rows: int = 16, allow_copy: bool = True, stop_eos: bool = True,
                  keep: int = 8, rank: int = 0, world: int = 1, context: int = 0, points=None, vision=None) -> None:
@@ -526,8 +528,10 @@ class MultiDecoder:
         tree = [(sid, pending) for sid, mode, pending, _ in plan if mode == TREE] if self.drafts else []
         block = self.block if self.depth else self.max_rows    # one stream too: DFlash2 drafts best near 8 rows
         if tree:                                      # every stream's block in one drafter pass
-            launched = self.draft.launch_blocks([self.streams[sid].snap for sid, _ in tree],
-                                                [pending for _, pending in tree], self.max_rows - 1, block)
+            graphed = getattr(self.draft, "graphs_on", False) and self._graphed(len(plan))
+            launch = self.draft.graph_blocks if graphed else self.draft.launch_blocks
+            launched = launch([self.streams[sid].snap for sid, _ in tree], [pending for _, pending in tree],
+                              self.max_rows - 1, block)
             blocks = {sid: block for (sid, _), block in zip(tree, launched)}
         grammars = {}
         if self.rank == 0:
@@ -540,20 +544,68 @@ class MultiDecoder:
         self.block = self._deepest(plan, wins, block)
         states = [self.streams[item[0]].st for item in plan]
         taps_wanted = self.drafts and any(self.streams[item[0]].draft for item in plan)
-        logits, record, taps, starts = multi_tree_forward(
-            self.w, [(t, p, st) for (t, p), st in zip(wins, states)],
-            full_logits=self.split or self.rank == 0, tp=self.world == 2, capture_taps=taps_wanted)
+        lone = self._lone(plan, taps_wanted)
+        if lone is not None:                          # one drafting stream: the same rows' bits from a graph replay
+            logits, record, *tapped = self.trees.verify(lone.st, *wins[0])
+            taps, starts = tapped[0] if tapped else None, [0, len(wins[0][0])]
+            rows = starts
+        elif self._together(plan, taps_wanted):       # several: one graph, each window padded to the same rows
+            logits, rows, record, taps, starts = self.trees.verify_streams(wins, states)
+        else:
+            logits, record, taps, starts = multi_tree_forward(
+                self.w, [(t, p, st) for (t, p), st in zip(wins, states)],
+                full_logits=self.split or self.rank == 0, tp=self.world == 2, capture_taps=taps_wanted)
+            rows = starts                             # logits rows by stream (``starts``: record and taps rows)
         for k, window in grammars.items():          # a constrained stream's rows, each masked by its path
-            self.streams[plan[k][0]].constraint.mask(logits[starts[k]:starts[k + 1]], window,
+            self.streams[plan[k][0]].constraint.mask(logits[rows[k]:rows[k + 1]], window,
                                                      self.rank * self.w.head.n if self.split else 0)
         positions = [[st.pos + d + 1 for d in _paths(parents)[0]] for (_, parents), st in zip(wins, states)]
         samplings = [self.streams[item[0]].sampling for item in plan]
         if self.split:                                # both ranks gather their halves' candidates
-            sampled = [_sample_split(logits[starts[k]:starts[k + 1]], positions[k], samplings[k], self.rank)
+            sampled = [_sample_split(logits[rows[k]:rows[k + 1]], positions[k], samplings[k], self.rank)
                        for k in range(len(plan))]
         else:
-            sampled = sample_streams(logits, starts, positions, samplings) if self.rank == 0 else [None] * len(plan)
+            sampled = sample_streams(logits, rows, positions, samplings) if self.rank == 0 else [None] * len(plan)
         return wins, record, taps, starts, sampled
+
+    def _lone(self, plan, taps_wanted: bool):
+        """The round's lone drafting stream, its GDN states moved into ``trees``' buffers, or None (both ranks agree)."""
+
+        g = self.trees
+        if g is None or len(plan) != 1 or (taps_wanted and not g.taps):
+            return None
+        s = self.streams[plan[0][0]]
+        if (not s.draft or s.constraint is not None or s.vision is not None
+                or g.full_logits != (self.split or self.rank == 0)):
+            return None                               # an undrafted request stays eager
+        if self.tree_home is not s or not self._home(s):
+            old = self.tree_home
+            if old is not None and old is not s and old.st is not None and self._home(old):
+                old.st.rec = [None if r is None else r.clone() for r in old.st.rec]   # the buffers change hands
+                old.st.conv = [None if c is None else c.clone() for c in old.st.conv]
+            view = g.load(s.st)
+            s.st.rec, s.st.conv = view.rec, view.conv     # its states are the graphs' now; commits stay in place
+            self.tree_home = s
+        return s
+
+    def _graphed(self, streams: int) -> bool:
+        """Whether a round of this many streams replays graphs (several need ``MultiGraphs``)."""
+
+        return self.trees is not None and (streams == 1 or hasattr(self.trees, "verify_streams"))
+
+    def _together(self, plan, taps_wanted: bool) -> bool:
+        """Whether several streams verify from ``trees``' multi-stream graph (both ranks decide alike)."""
+
+        g = self.trees
+        if len(plan) < 2 or not self._graphed(len(plan)) or (taps_wanted and not g.taps):
+            return False
+        if g.full_logits != (self.split or self.rank == 0):
+            return False
+        return all(self.streams[sid].constraint is None and self.streams[sid].vision is None for sid, *_ in plan)
+
+    def _home(self, s: Stream) -> bool:
+        fixed = self.trees.fixed
+        return s.st is not None and all(a is b for a, b in zip(s.st.rec + s.st.conv, fixed.rec + fixed.conv))
 
     def _deepest(self, plan, wins, block: int) -> int:
         """The drafter's next block: past the deepest kept tree node, between its trained block and ``max_rows``."""
@@ -598,7 +650,11 @@ class MultiDecoder:
         rows = [[starts[k] + r for r in path] for k, path in enumerate(paths)]
         indices = path_indices(record, rows)
         streams = [self.streams[item[0]] for item in plan]
-        commit_streams([s.st for s in streams], record, rows, indices, in_place=True)
+        g = self.trees
+        if len(streams) == 1 and g is not None and g.last is not None and g.last[1] is record:
+            g.commit(streams[0].st, record, rows[0])     # the lone stream's graph verify: its commit a graph too
+        else:
+            commit_streams([s.st for s in streams], record, rows, indices, in_place=True)
         drafting = []
         for s, (tokens, _), path, (_, _, take) in zip(streams, wins, paths, indices):
             s.committed.extend(tokens[r] for r in path)

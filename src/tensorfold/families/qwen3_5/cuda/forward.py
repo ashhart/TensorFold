@@ -284,7 +284,7 @@ def tree_forward(w: Weights, tokens: torch.Tensor, parents: Sequence[int], st: S
             record.append(AttentionRecord(key, value))
         x, h, xs = glue.add_rmsnorm(x, r, layer.post_norm, c.eps)
         pending = _mlp(layer, h, xs, tp)
-        if capture_taps and i in (5, 19, 33, 47, 61):
+        if capture_taps and i in w.tap_layers:
             taps.append((x.float() + pending.float()).to(torch.bfloat16))
     if not finish:
         if pending is None:
@@ -293,8 +293,8 @@ def tree_forward(w: Weights, tokens: torch.Tensor, parents: Sequence[int], st: S
     _, h, xs = glue.add_rmsnorm(x, pending, w.norm, c.eps)
     logits = _mm(h, w.head, xs) if full_logits else h
     if capture_taps:
-        if len(taps) != 5:
-            raise ValueError("DFlash2 taps require the complete 64-layer target")
+        if len(taps) != len(w.tap_layers):
+            raise ValueError("DFlash taps require the complete target")
         return logits, record, torch.cat(taps, dim=-1)
     if hidden:                                     # the rows' final normed states (what an MTP head reads)
         return logits, record, h
@@ -304,9 +304,13 @@ def tree_forward(w: Weights, tokens: torch.Tensor, parents: Sequence[int], st: S
 @torch.no_grad()
 def multi_tree_forward(w: Weights, streams: Sequence[tuple[Sequence[int], Sequence[int], State]], *,
                        full_logits: bool = True, tp: bool = False, capture_taps: bool = False,
-                       hidden: bool = False):
-    """Several streams' windows in one forward, each row with the bits of its stream's own ``tree_forward`` (``hidden``: the rows' final normed states third)."""
+                       hidden: bool = False, staged=None):
+    """Several streams' windows in one forward, each row with the bits of its stream's own ``tree_forward`` (``hidden``: the rows' final normed states third; ``staged``: a graph's device inputs in place of ``streams``)."""
 
+    if staged is not None:
+        return _multi_layers(w, staged.ids, staged.pos, staged.sids, staged.plan, staged.windows, staged.aplan,
+                             staged.tables, staged.aoffs, staged.conv, staged.starts, full_logits, tp, capture_taps,
+                             hidden)
     c = w.config
     device = w.norm.device
     keep = c.conv_kernel - 1
@@ -347,6 +351,18 @@ def multi_tree_forward(w: Weights, streams: Sequence[tuple[Sequence[int], Sequen
     ids_t = dev[5 * W + S + 1:6 * W + S + 1]
     windows_t = dev[6 * W + S + 1:6 * W + S + 1 + W * (keep + 1)].view(W, keep + 1)
     aplan = tree_attention.from_packed(dev[6 * W + S + 1 + W * (keep + 1):], S, W, attn_items, attn_chunks)
+    convs = {i: states[0].conv[i] if S == 1 else torch.cat([st.conv[i] for st in states]) for i in linear}
+    return _multi_layers(w, ids_t, pos, sid_t, plan, windows_t, aplan, tables, aoffs, convs, starts, full_logits, tp,
+                         capture_taps, hidden)
+
+
+def _multi_layers(w: Weights, ids_t, pos, sid_t, plan, windows_t, aplan, tables, aoffs, convs, starts, full_logits,
+                  tp, capture_taps, hidden):
+    """``multi_tree_forward``'s layers on its device inputs."""
+
+    c = w.config
+    W = ids_t.shape[0]
+    keep = c.conv_kernel - 1
     x = glue.embedding(ids_t, w.embed)
     pending: torch.Tensor | None = None
     record: list[Record] = []
@@ -364,8 +380,7 @@ def multi_tree_forward(w: Weights, streams: Sequence[tuple[Sequence[int], Sequen
             else:
                 qkv, z, b, a = _mm_group(h, [gdn.qkv, gdn.z, gdn.b, gdn.a], xs)
                 z = z.reshape(W, c.v_heads, c.dv)
-            conv = states[0].conv[i] if S == 1 else torch.cat([st.conv[i] for st in states])
-            q, k, v, g, beta = glue.gdn_pre(qkv, conv, gdn.conv, windows_t, a, b, gdn.A_log, gdn.dt_bias,
+            q, k, v, g, beta = glue.gdn_pre(qkv, convs[i], gdn.conv, windows_t, a, b, gdn.A_log, gdn.dt_bias,
                                             kh=c.k_heads, vh=c.v_heads, dk=c.dk, stream_ids=sid_t, nkeep=keep)
             yr = deltanet.tree(q, k, v, g, beta, plan, table=tables[i])
             out, out_xs = glue.gated_norm(yr, z, gdn.norm, c.eps)
@@ -390,13 +405,13 @@ def multi_tree_forward(w: Weights, streams: Sequence[tuple[Sequence[int], Sequen
             record.append(AttentionRecord(key, value))
         x, h, xs = glue.add_rmsnorm(x, r, layer.post_norm, c.eps)
         pending = _mlp(layer, h, xs, tp)
-        if capture_taps and i in (5, 19, 33, 47, 61):
+        if capture_taps and i in w.tap_layers:
             taps.append((x.float() + pending.float()).to(torch.bfloat16))
     _, h, xs = glue.add_rmsnorm(x, pending, w.norm, c.eps)
     logits = _mm(h, w.head, xs) if full_logits else h
     if capture_taps:
-        if len(taps) != 5:
-            raise ValueError("DFlash2 taps require the complete 64-layer target")
+        if len(taps) != len(w.tap_layers):
+            raise ValueError("DFlash taps require the complete target")
         return logits, record, torch.cat(taps, dim=-1), starts
     return logits, record, h if hidden else None, starts
 

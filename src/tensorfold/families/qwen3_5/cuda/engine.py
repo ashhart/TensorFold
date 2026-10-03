@@ -60,6 +60,10 @@ class Qwen27Engine:
         if streams > 1 and tp == 1:          # streams' caches of many sizes come and go: growable segments, less slack
             torch.cuda.memory._set_allocator_settings("expandable_segments:True")
         keep = KEEP if keep is None else int(keep)         # --checkpoint-slots: each kept state is in the estimate
+        from .tree_graphs import enabled as tree_graphs_enabled
+
+        # tree verify graphs need the sm_80+ kernels and no EXL3 weights
+        trees_on = tree_graphs_enabled() and not exl3
         if tp == 2:
             import torch.distributed as dist
 
@@ -69,7 +73,7 @@ class Qwen27Engine:
             # both ranks must run the same calls: refuse to start when they were given different settings
             flags = torch.tensor([int(draft_dir is not None and tp_draft), max_rows, int(split_head), int(allow_copy),
                                   streams, -1 if context is None else int(context), int(bool(context_explicit)),
-                                  int(vision), keep, int(prompt_precision.fp8())],      # precision last (same_on_ranks)
+                                  int(vision), keep, int(trees_on), int(prompt_precision.fp8())],   # precision last
                                  dtype=torch.int64, device="cuda")
             both = torch.empty((2, flags.numel()), dtype=torch.int64, device="cuda")
             dist.all_gather_into_tensor(both, flags)
@@ -78,8 +82,8 @@ class Qwen27Engine:
                 raise RuntimeError("the two ranks were started with different settings (two-rank drafter, rows, "
                                    f"head split, copies, --parallel, --context, --checkpoint-slots): rank 0 "
                                    f"{both[0].tolist()}, rank 1 {both[1].tolist()}; pull the draft model on both "
-                                   "machines, and pass the same --no-drafts, --parallel, --context and "
-                                   "--checkpoint-slots to both")
+                                   "machines, and pass the same --no-drafts, --parallel, --context, "
+                                   "--checkpoint-slots and TF_TREE_GRAPHS to both")
             gather = lambda values: gather_ints(torch, lambda send, recv: dist.all_gather_into_tensor(recv, send), values)
             from tensorfold.cuda import p2p
 
@@ -135,6 +139,15 @@ class Qwen27Engine:
 
             # tp_draft: both ranks hold half the drafter and draft together (rank 1 needs --draft too)
             self.draft = DFlash2(draft_dir, full, rank=rank, world=2) if tp == 2 and tp_draft else DFlash2(draft_dir, full)
+        # one stream with a tree drafter replays CUDA graphs (TF_TREE_GRAPHS=0: eager); the flag is in the rank check
+        self.trees = None
+        if self.draft is not None and streams == 1 and trees_on:
+            from .tree_graphs import TreeGraphs
+
+            self.trees = TreeGraphs(self.w, tp=tp == 2, taps=True, full_logits=True,
+                                    log=(lambda line: print(line, flush=True)) if rank == 0 else None)
+            if hasattr(self.draft, "graph_block"):
+                self.draft.graphs_on = True     # the draft step too: proposals only, so outputs stay exact
         del full
         if vision and rank == 0:
             from tensorfold.vision.qwen_cuda import QwenCudaVision
@@ -167,6 +180,15 @@ class Qwen27Engine:
                                       context=self.capacity_plan["cache_slots"], keep=keep, points=self.points,
                                       vision=self.vision)
             self.multi.model_dir = self.model_dir             # rank 1 compiles a request's grammar from it
+            if trees_on and self.draft is not None and self.multi.drafts:
+                from .tree_graphs import MultiGraphs, TreeGraphs
+
+                # a lone drafting stream's rounds replay CUDA graphs; several streams' too on two ranks only
+                kind = MultiGraphs if tp == 2 else TreeGraphs
+                self.multi.trees = kind(self.w, tp=tp == 2, taps=True, full_logits=self.multi.split or rank == 0,
+                                        log=(lambda line: print(line, flush=True)) if rank == 0 else None)
+                if hasattr(self.draft, "graph_block"):
+                    self.draft.graphs_on = True
             self.multi.calibrate(streams)
             if rank == 0:
                 print(f"[tensorfold] {streams} streams of {self.context_window} prompt/reply tokens, {keep} prompt "
@@ -259,10 +281,18 @@ class Qwen27Engine:
         if on_tokens([pending]):
             return {"prefill_s": prefill_s, "cached": hit[1].pos if hit else 0}
         # the cache holds the state before the last prompt token, not ``st``: the decode may commit into it
-        result = draft_decode(self.w, st, prompt, pending, max_tokens, sampling, drafter,
-                              max_rows=self.max_rows, tree_rows=self.tree_rows,
-                              allow_copy=self.allow_copy and draft, stop_eos=stop_eos,
-                              on_tokens=on_tokens, inplace=True, **grammar)
+        trees = getattr(self, "trees", None)
+        if trees is not None and drafter is not None and constraint is None and vision is None:
+            from .tree_graphs import tree_decode
+
+            result = tree_decode(self.w, st, prompt, pending, max_tokens, sampling, drafter, trees,
+                                 max_rows=self.max_rows, tree_rows=self.tree_rows, allow_copy=self.allow_copy,
+                                 stop_eos=stop_eos, on_tokens=on_tokens)
+        else:
+            result = draft_decode(self.w, st, prompt, pending, max_tokens, sampling, drafter,
+                                  max_rows=self.max_rows, tree_rows=self.tree_rows,
+                                  allow_copy=self.allow_copy and draft, stop_eos=stop_eos,
+                                  on_tokens=on_tokens, inplace=True, **grammar)
         return {"prefill_s": prefill_s, "decode_s": result.seconds, "rounds": result.rounds,
                 "cached": hit[1].pos if hit else 0, "drafts": draft, "min_rows": min(result.widths, default=0),
                 "drafted": result.drafted_rows, "accepted": result.accepted_drafts}
@@ -300,9 +330,17 @@ class Qwen27Engine:
         # rank 0 alone decides where a reply ends; rank 1 follows its windows (no header field needed)
         result = decode_tp(self.w, st, prompt, pending, 1 if stop_now else max_tokens, sampling, 0, drafter,
                            max_rows=self.max_rows, allow_copy=self.allow_copy and draft, stop_eos=stop_eos,
-                           on_tokens=on_tokens, inplace=True, **grammar)
+                           on_tokens=on_tokens, inplace=True, runner=self._tree_runner(drafter, constraint, vision),
+                           **grammar)
         return {"prefill_s": prefill_s, "decode_s": result.seconds, "rounds": result.rounds, "cached": cached,
-                "drafts": draft, "min_rows": min(result.widths, default=0)}
+                "drafts": draft, "min_rows": min(result.widths, default=0), "drafted": result.drafted_rows,
+                "accepted": result.accepted_drafts}
+
+    def _tree_runner(self, drafter, constraint, vision):
+        """The tree graphs for a two-rank request; both ranks decide alike from shared fields."""
+
+        trees = getattr(self, "trees", None)
+        return trees if trees is not None and drafter is not None and constraint is None and vision is None else None
 
     def follow(self) -> None:
         """Rank 1: mirror every request rank 0 serves, forever."""
@@ -346,4 +384,5 @@ class Qwen27Engine:
             if end is not None:
                 self._remember(list(prompt[:end]), *kept[0])
             result = decode_tp(self.w, st, prompt, pending, max_tokens, sampling, 1, drafter, max_rows=self.max_rows,
-                               inplace=True, **grammar)
+                               inplace=True, runner=self._tree_runner(drafter, grammar.get("constraint"), vision),
+                               **grammar)

@@ -18,7 +18,7 @@ from tensorfold.engine.exact_sampling import Sampling
 from .affine_memory import packed_draft
 from .draft_tree import best_first
 from .glue import embedding, swiglu
-from .draft_attention import append, block_attention
+from .draft_attention import append, block_attention, block_attention_static
 from .qmm import group_sums
 from .qmm_fast import matmul, matmul_group, matmul_rows, rows, tile, untile
 from .weights import Exl3, Plain, QLinear, Weights
@@ -196,6 +196,8 @@ def _exl3_sub_head(layer, spans: tuple[tuple[int, int], ...]):
 
 class DFlash2:
     """Five-layer DFlash2; context is the last 2,047 committed target taps."""
+
+    graphs_on = False           # propose_tree drafts through graph_block
 
     def __init__(self, draft_dir: str | Path, target: Weights, bits: int = 4, block: int = 16,
                  fast: bool = True, rank: int = 0, world: int = 1):
@@ -465,7 +467,7 @@ class DFlash2:
         return q, k, v
 
     def _layer_fast(self, i: int, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, ctx: list,
-                    length: int) -> torch.Tensor:
+                    length: int, static: tuple | None = None) -> torch.Tensor:
         """One layer over several streams' blocks (``length`` rows each); each block attends its own context."""
 
         w = self.weights
@@ -475,8 +477,12 @@ class DFlash2:
         conv = w[base + "attention_conv.base_kernel"]
         q, k, v = self._prep(self._lin(_dconv(normed, dyn, conv, 0, self.group_size, seg=length),
                                        base + "self_attn.qkv.weight"), i, cos, sin, self.heads_local)
-        out = block_attention(q, k, v, [snap[0][i] for snap in ctx], [snap[1][i] for snap in ctx], length,
-                              self.window, self.head_dim ** -0.5, self.is_causal)
+        if static is not None:                   # a graph's context pointers and lengths: the same kernel
+            out = block_attention_static(q, k, v, static[0], static[1], length, self.window, self.head_dim ** -0.5,
+                                         self.is_causal, 0)
+        else:
+            out = block_attention(q, k, v, [snap[0][i] for snap in ctx], [snap[1][i] for snap in ctx], length,
+                                  self.window, self.head_dim ** -0.5, self.is_causal)
         x = _dconv(self._row(out, base + "self_attn.o_proj.weight"), dyn, conv, 1, self.group_size, x, seg=length)
         normed = F.rms_norm(x, (self.hidden,), w[base + "post_attention_layernorm.weight"], self.eps)
         dyn = self._lin(normed, base + "mlp_conv.kernel_projection.weight")
@@ -564,6 +570,19 @@ class DFlash2:
             out[i] = (shared, j * (length - 1), length - 1, int(pendings[i]))
         return out
 
+    @torch.no_grad()
+    def graph_block(self, pending: int, max_nodes: int, block: int | None = None, snap=None):
+        """``launch_block`` (of ``snap``'s context when given) from ``graph_blocks``."""
+
+        return self.graph_blocks([snap if snap is not None else self.snapshot()], [pending], max_nodes, block)[0]
+
+    def graph_blocks(self, snaps: list, pendings: list[int], max_nodes: int, block: int | None = None) -> list:
+        """``launch_blocks`` from a graph for this many streams that reads each context in place."""
+
+        from .dflash2_graphs import graph_blocks
+
+        return graph_blocks(self, snaps, pendings, max_nodes, block)
+
     def finish_tree(self, launched, context_length: int, max_nodes: int,
                     sampling: Sampling | None = None) -> tuple[list[int], list[int], list[float]]:
         """The host half: the tree policy over a launched block's candidates; nodes, parents and scores in pop order."""
@@ -583,4 +602,5 @@ class DFlash2:
     @torch.no_grad()
     def propose_tree(self, pending: int, context_length: int, max_nodes: int,
                      sampling: Sampling | None = None, block: int | None = None) -> tuple[list[int], list[int]]:
-        return self.finish_tree(self.launch_block(pending, max_nodes, block), context_length, max_nodes, sampling)[:2]
+        launch = self.graph_block if self.graphs_on and self.fast else self.launch_block
+        return self.finish_tree(launch(pending, max_nodes, block), context_length, max_nodes, sampling)[:2]

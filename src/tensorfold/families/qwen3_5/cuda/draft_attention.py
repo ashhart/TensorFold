@@ -10,7 +10,7 @@ import triton.language as tl
 
 
 @triton.jit
-def _block_attention(Q, KB, VB, TABLE, LENS, O, scale, window, R,
+def _block_attention(Q, KB, VB, TABLE, LENS, O, scale, window, R, HSTRIDE,
                      G: tl.constexpr, HKV: tl.constexpr, L: tl.constexpr, LP: tl.constexpr, D: tl.constexpr,
                      BN: tl.constexpr, CAUSAL: tl.constexpr):
     """Program (stream j, kv head g): G query heads x L block rows against the context keys a row's window keeps, then the block's keys."""
@@ -26,9 +26,10 @@ def _block_attention(Q, KB, VB, TABLE, LENS, O, scale, window, R,
     qrow = (j * L + r).to(tl.int64)
     q = tl.load(Q + head[:, None].to(tl.int64) * R * D + qrow[:, None] * D + d[None, :], mask=live[:, None], other=0.0)
     s = tl.load(LENS + j)
+    hs = tl.where(HSTRIDE > 0, HSTRIDE, s).to(tl.int64)     # a head's rows: its own length, or a fixed buffer's
     # contexts are fresh torch tensors (16-byte aligned): the hint makes their loads 16 bytes wide, same arithmetic
-    kc = tl.multiple_of(tl.load(TABLE + 2 * j).to(tl.pointer_type(tl.bfloat16)), 16) + g.to(tl.int64) * s * D
-    vc = tl.multiple_of(tl.load(TABLE + 2 * j + 1).to(tl.pointer_type(tl.bfloat16)), 16) + g.to(tl.int64) * s * D
+    kc = tl.multiple_of(tl.load(TABLE + 2 * j).to(tl.pointer_type(tl.bfloat16)), 16) + g.to(tl.int64) * hs * D
+    vc = tl.multiple_of(tl.load(TABLE + 2 * j + 1).to(tl.pointer_type(tl.bfloat16)), 16) + g.to(tl.int64) * hs * D
     m_i = tl.full((M,), float("-inf"), tl.float32)
     l_i = tl.zeros((M,), tl.float32)
     acc = tl.zeros((M, D), tl.float32)
@@ -87,7 +88,7 @@ def block_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, keys: Seq
     table, lens = dev[:2 * streams], dev[2 * streams:].to(torch.int32)
     out = torch.empty((rows, heads * dim), dtype=torch.bfloat16, device=q.device)
     group = heads // kv_heads
-    _block_attention[(streams, kv_heads)](q, k, v, table, lens, out, scale, window, rows, G=group, HKV=kv_heads,
+    _block_attention[(streams, kv_heads)](q, k, v, table, lens, out, scale, window, rows, 0, G=group, HKV=kv_heads,
                                           L=length, LP=max(16, triton.next_power_of_2(length)), D=dim,
                                           BN=64, CAUSAL=causal, num_warps=4, num_stages=2)
     return out
@@ -137,3 +138,21 @@ def append(new: torch.Tensor, olds: Sequence[torch.Tensor | None], sizes: Sequen
     _append[(streams, heads, triton.cdiv(max(o.shape[1] for o in outs), 64))](dev[:2 * streams], dev[2 * streams:], new,
                                                                               rows, H=heads, D=dim, BR=64, num_warps=4)
     return outs
+
+
+def block_attention_static(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, table: torch.Tensor,
+                           lens: torch.Tensor, length: int, window: int, scale: float, causal: bool,
+                           capacity: int) -> torch.Tensor:
+    """``block_attention`` for streams whose contexts sit in fixed [Hkv, capacity, D] buffers named on the device."""
+
+    heads, rows, dim = q.shape
+    kv_heads = k.shape[0]
+    streams = int(lens.numel())
+    if rows != streams * length:
+        raise ValueError("one block of ``length`` rows a stream")
+    out = torch.empty((rows, heads * dim), dtype=torch.bfloat16, device=q.device)
+    _block_attention[(streams, kv_heads)](q, k, v, table, lens, out, scale, window, rows, int(capacity),
+                                    G=heads // kv_heads, HKV=kv_heads, L=length,
+                                    LP=max(16, triton.next_power_of_2(length)), D=dim, BN=64,
+                                    CAUSAL=causal, num_warps=4, num_stages=2)
+    return out
