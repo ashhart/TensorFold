@@ -108,10 +108,13 @@ _GEMMA_TOOL_CALL_BLOCK_RE = re.compile(r"<\|tool_call>\s*(.*?)\s*<tool_call\|>",
 _GEMMA_CALL_RE = re.compile(r"^(?:call)?:([\w.-]+)\s*(\{.*\})$", re.DOTALL)
 _GEMMA_STRING_RE = re.compile(r'<\|"\|>(.*?)<\|"\|>', re.DOTALL)
 _GEMMA_KEY_RE = re.compile(r"(?<=[{,])\s*([A-Za-z_][\w-]*)\s*:")
-# DeepSeek-V4's DSML: one <｜DSML｜tool_calls> block holds invokes of named parameters, string="false" ones as JSON
-_DSML_BLOCK_RE = re.compile(r"<｜DSML｜tool_calls>(.*?)</｜DSML｜tool_calls>", re.DOTALL)
-_DSML_INVOKE_RE = re.compile(r'<｜DSML｜invoke name="([^"]*)">(.*?)</｜DSML｜invoke>', re.DOTALL)
-_DSML_PARAM_RE = re.compile(r'<｜DSML｜parameter name="([^"]*)" string="(true|false)">(.*?)</｜DSML｜parameter>', re.DOTALL)
+# DeepSeek's DSML: one block holds invokes of named parameters, string="false" ones as JSON. V4 writes
+# <｜DSML｜tool_calls>/invoke/parameter, V4.1 <｜DSML｜ calls> and the same names after a space; one spelling per block.
+_DSML_BLOCK_RE = re.compile(r"<｜DSML｜(tool_calls| calls)>(.*?)</｜DSML｜\1>", re.DOTALL)
+_DSML_TAGS = {sp: (re.compile(rf'<｜DSML｜{sp}invoke name="([^"]*)">(.*?)</｜DSML｜{sp}invoke>', re.DOTALL),
+                   re.compile(rf'<｜DSML｜{sp}parameter name="([^"]*)" string="(true|false)">(.*?)</｜DSML｜{sp}parameter>',
+                              re.DOTALL))
+              for sp in ("", " ")}
 _JSON_FENCE_RE = re.compile(
     r"^\s*```(?:json)?\s*(.*?)\s*```\s*$",
     re.IGNORECASE | re.DOTALL,
@@ -249,19 +252,20 @@ def _parse_tool_call_payload(block: str, schemas: dict[str, dict[str, Any]] | No
     return name, arguments
 
 
-def _parse_dsml_calls(block: str) -> list[tuple[str, dict[str, Any]]] | None:
-    """Every invoke of a DSML block as (name, arguments), or None when anything in it is not a well-formed invoke."""
+def _parse_dsml_calls(block: str, sp: str) -> list[tuple[str, dict[str, Any]]] | None:
+    """Every invoke of a DSML block spelled with ``sp`` as (name, arguments), or None when anything is malformed."""
 
+    invoke_re, param_re = _DSML_TAGS[sp]
     calls, at = [], 0
-    for invoke in _DSML_INVOKE_RE.finditer(block):
+    for invoke in invoke_re.finditer(block):
         if block[at:invoke.start()].strip():
             return None
         at = invoke.end()
         arguments: dict[str, Any] = {}
         body = invoke.group(2)
-        if _DSML_PARAM_RE.sub("", body).strip():
+        if param_re.sub("", body).strip():
             return None
-        for name, string, value in _DSML_PARAM_RE.findall(body):
+        for name, string, value in param_re.findall(body):
             if string == "true":
                 arguments[name] = value
                 continue
@@ -366,8 +370,9 @@ def parse_tool_calls_from_content(
         if max_calls is not None and len(calls) >= max_calls:
             continue
         try:
-            if block.startswith("<｜DSML｜tool_calls>"):
-                parsed = _parse_dsml_calls(_DSML_BLOCK_RE.fullmatch(block).group(1))
+            dsml = _DSML_BLOCK_RE.fullmatch(block)
+            if dsml:
+                parsed = _parse_dsml_calls(dsml.group(2), " " if dsml.group(1) == " calls" else "")
             else:
                 one = _parse_tool_call_payload(block, schemas, complete=max_calls is not None)
                 parsed = None if one is None else [one]
