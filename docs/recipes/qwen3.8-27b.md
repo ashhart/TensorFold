@@ -44,6 +44,30 @@ formats they read; `auto` falls back to the packed row decoder for the rest.
 Lower weight precision does not guarantee faster decode or a fitting context. Release memory and
 quality comparisons are TBD [release-0.3.5].
 
+### Experimental M2 Max DeltaNet geometry
+
+`TF_QWEN27_GDN_TUNE=1` opts into a one-row launch geometry for the dense 27B's
+4-bit/group-64 stacked DeltaNet input and output projections on Apple M2 Max.
+It preserves precision, arithmetic chunks and reduction order; wider verification
+windows retain their existing kernels. It is disabled by default pending consistent
+full-decoder latency qualification.
+
+```bash
+TF_QWEN27_GDN_TUNE=1 tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit
+```
+
+To compare on an idle GPU with a local checkpoint, run the weight/state sweep and
+paired single-stream decoder benchmark:
+
+```bash
+python tools/bench_qwen_deltanet.py --model MODEL_DIR --output deltanet-kernels.json
+python tools/bench_qwen_deltanet_decode.py --model MODEL_DIR --tokens 32 --reps 3 --output deltanet-decode.json
+```
+
+The kernel sweep cycles real weights and all recurrent states. The decoder benchmark
+alternates baseline/candidate order, excludes prefill, and checks tokens, final logits
+and cache contents. Its measurements exclude HTTP, text decoding and streaming.
+
 ## CUDA
 
 On CUDA the 27B serves NVFP4 and EXL3 checkpoints, and the MLX 4-bit checkpoint as the portable option: the same
