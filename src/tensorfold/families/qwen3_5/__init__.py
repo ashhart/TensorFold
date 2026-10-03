@@ -12,7 +12,8 @@ TITLE = "Qwen3.8 dense"
 LANES = True
 MODELS = ("TensorFold/Qwen3.8-27B-MLX-4bit", "turboderp/Qwen3.8-27B-exl3", "nvidia/Qwen3.8-27B-NVFP4")
 DRAFTER = "z-lab/Qwen3.8-27B-DFlash2"
-QUANT_METHODS = {"cuda": ("mlx", "exl3", "modelopt", "compressed-tensors")}   # MLX affine, EXL3, NVFP4 / FP8
+# MLX affine, EXL3, NVFP4 / FP8; bf16 (None) for a decision model only, which cuda_engine checks by its files
+QUANT_METHODS = {"cuda": ("mlx", "exl3", "modelopt", "compressed-tensors", None)}
 EXL3_VARIANT = "any"                           # every EXL3 codebook and width (tensorfold.families.EXL3_VARIANT_ANY)
 KERNEL_PACKAGE = "tensorfold.kernels.qwen.dense.v1"
 KERNEL_VERSION = "v1"
@@ -305,12 +306,20 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
                 master_port: int = 29551, no_drafts: bool = False, **options: Any):
     """The CUDA engine for ``tensorfold serve``; tp=2 adds fp32 partials in rank order and needs the drafter on both."""
 
+    from tensorfold.families import quant_method, read_config
+    from tensorfold.server.joint_schema import has_head
+
     from .cuda.engine import Qwen27Engine
     from .cuda.exl3_load import quant_config
 
     if quant_config(Path(model_dir)) is not None:
         print("[tensorfold] EXL3 packs are experimental: replies are exact; on a DGX Spark decode runs 0.8-1.2x the MLX "
               "checkpoint and prompts about half as fast (docs/recipes/qwen3.8-27b.md#exl3-checkpoints-experimental)", flush=True)
+    if has_head(Path(model_dir)):          # a decision model answers from one prefill and never decodes a reply
+        drafter, no_drafts = "", True
+    elif (Path(model_dir) / "config.json").exists() and quant_method(read_config(Path(model_dir))) is None:
+        raise ValueError(f"{TITLE}'s CUDA engine serves unquantized weights only for a decision model with a joint "
+                         f"schema head (Cloudflare/clef); for chat, serve one of {', '.join(MODELS)}")
     if not drafter and not no_drafts:
         raise ValueError(f"{TITLE}'s CUDA engine drafts with {DRAFTER}, which is not here: without it every round "
                          f"would decode one token. Run `tensorfold pull {DRAFTER}` once (on both machines for "

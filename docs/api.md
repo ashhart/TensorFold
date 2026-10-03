@@ -39,6 +39,7 @@ Prefer a restricted file over command-line keys, which can appear in the operati
 | `POST /v1/responses` | OpenAI's Responses API, run as the equivalent chat completion; streamed or non-streamed |
 | `GET /v1/responses/{id}`, `DELETE /v1/responses/{id}` | A stored response, or remove it |
 | `POST /v1/decisions` | Choice, score, and yes/no probabilities from the next-token logits; no text is generated |
+| `POST /v1/systemone` | A decision model's own request body (Jev/SystemOne); CUDA only, see [decision models](#decision-models) |
 
 On MLX, a completions body containing a nonempty `messages` list uses chat handling. CUDA completions
 take a string `prompt` (`add_special_tokens`, default false) or a list of token IDs, run as given.
@@ -66,6 +67,17 @@ question id, and `usage.completion_tokens` 0. `probabilities` are a softmax over
 `temperature`. A request the tokenizer or the context window cannot score returns HTTP 400.
 For decisions, `chat_template_kwargs` may be omitted, null, or an object containing only
 `enable_thinking: false`; other types, keys, or thinking values return HTTP 400.
+
+### Decision models
+
+A checkpoint with a joint schema head (`joint_head.safetensors`, as in
+[Cloudflare/clef](recipes/clef.md)) answers `POST /v1/decisions` through that head instead of label tokens. One
+prefill reads every prompt row's final hidden state, and the head scores every option of every question at once. The
+request and the answer fields are the same, with three differences: the prompt is the model's own schema wording,
+`label_mass` is `null` because no vocabulary is scored, and `prompt_format_version` is `null`. A choice may have 2 to
+26 options and a score 2 to 10 levels, as above. `POST /v1/systemone` takes the model's own body (`state`, and
+`questions` keyed by id with `type` `noul`, `choice` or `score`) and returns its own answers. Image and video states
+return HTTP 400.
 
 ## Request fields
 

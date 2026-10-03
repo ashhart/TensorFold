@@ -23,6 +23,7 @@ class Qwen27Engine:
 
     tree_rows: int | None = None       # a lone stream's tree rows on one GPU (None: max_rows, as in 0.5.0)
     room = None                        # one GPU's attention-cache budget (streams.KVRoom), None on two
+    head_table = None                  # a quantized head's rows as bf16, built by the first head_rows (decision models)
 
     def __init__(self, model_dir: Path, draft_dir: Path | None, *, max_rows: int = 12, tp: int = 1,
                  rank: int = 0, master: str = "", port: int = 29551, split_head: bool = False,
@@ -202,6 +203,55 @@ class Qwen27Engine:
         if self.scheduler is not None:
             self.scheduler.close()
             self.scheduler = None
+
+    def hidden_rows(self, prompt: list[int]):
+        """Every prompt row's final normed state (a joint schema head reads them), from a fresh state nothing keeps."""
+
+        from .forward import State
+        from .prefill import DECISION_ROWS, chunks, prefill_chunk
+
+        if self.tp != 1 or self.concurrent:
+            raise ValueError("decision heads run on one GPU without --parallel")
+        if not prompt or len(prompt) >= self.context_window:
+            raise ValueError(f"a decision prompt of {len(prompt)} tokens does not fit the {self.context_window}-token "
+                             "safe capacity")
+        torch = self.torch
+        st = State(self.w)
+        st.limit, st.room = len(prompt), self.room
+        ids = torch.tensor(prompt, dtype=torch.int32, device=self.w.norm.device)
+        token = DECISION_ROWS.set(True)
+        try:
+            with torch.no_grad():
+                rows = [prefill_chunk(self.w, ids[a:b], st, every=True)[0]
+                        for a, b in chunks(0, len(prompt), self.w.prompt_rows)]
+        finally:
+            DECISION_ROWS.reset(token)
+        return torch.cat(rows)
+
+    def head_rows(self, ids):
+        """The LM head's rows for token ids (a joint schema head's lexical option vectors)."""
+
+        if getattr(self.w.head, "layout", None) == "dense":
+            return self.w.head.weight[ids]
+        if self.head_table is None:                     # a quantized head: its rows once, as bf16 (vocab x hidden)
+            self.head_table = self._dequantized_head()
+        return self.head_table[ids]
+
+    def _dequantized_head(self):
+        """The head's weights from its own prompt matmul on identity rows: column j of ``eye @ W.T`` is row j of W."""
+
+        from .prefill import _mm
+
+        torch, c = self.torch, self.w.config
+        dev = self.w.norm.device
+        table = torch.empty((c.vocab, c.hidden), dtype=torch.bfloat16, device=dev)
+        with torch.no_grad():
+            for a in range(0, c.hidden, 1024):
+                b = min(a + 1024, c.hidden)
+                eye = torch.zeros((b - a, c.hidden), dtype=torch.bfloat16, device=dev)
+                eye[:, a:b] = torch.eye(b - a, dtype=torch.bfloat16, device=dev)
+                table[:, a:b] = _mm(eye, self.w.head).T
+        return table
 
     def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens: Callable[[list[int]], bool | None],
                  draft: bool = True, stop_eos: bool = True, *, vision=None, constraint=None, background=False):
