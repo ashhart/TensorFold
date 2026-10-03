@@ -3,17 +3,27 @@
 `tensorfold update` prints the sections below that are newer than the version you had. Each release's page on
 GitHub has the full notes and the measurements behind them.
 
-## 0.6.5 (unreleased)
+## 0.6.5 (3 Oct 2026)
 
 - **Qwen3.6-35B-A3B drafts with its own MTP layer on Macs,** as on CUDA. Chains of up to four drafts are verified in
   the lane rounds, alone or with other streams, and each round's depth comes from the Mac's measured costs, with plain
   rounds where drafts do not pay. Replies equal `"draft": false`. On an M3 Ultra it decodes 1.5-2.1x `--no-drafts` on
   short prompts, thinking on or off, and 1.3x at a 28,400-token prompt with the same time to first token: 1.5-1.7x
   mlx-vlm 0.7.4 with its MTP drafter. DFlash v1 stays available with `--drafter z-lab/Qwen3.6-35B-A3B-DFlash`.
+- **Nemotron on CUDA drafts as deep as its rows pay for.** The MTP head drafts up to 15 levels, one CUDA graph each,
+  and a chain stops where the next verify row would cost more time than its draft is expected to save. Window and
+  level costs are measured at startup on each GPU. Against 0.6.4's default this decodes about 6% faster on one DGX
+  Spark and on two, and 7% faster on an RTX PRO 6000, with replies equal to `"draft": false`. `--mtp-confidence` sets
+  a fixed floor instead.
+- **Nemotron verify windows on M5 Macs read each routed expert once from two rows** (eight before). One stream decodes
+  1-3% faster at three to five lanes, with the same tokens.
+- **API keys on both servers:** `--api-key` (repeatable), `--api-key-file` (one key, or `label: key`, a line; reread on
+  `SIGHUP`) or `TENSORFOLD_API_KEY`. Requests send `Authorization: Bearer` or `x-api-key`. `/health` stays open;
+  `/metrics` needs a key unless `--metrics-open`.
 - **Thinking stays the chat template's default, and the server says so:** one startup line names `--no-thinking`, and
   a reply that reaches `max_tokens` before it leaves its think block (empty `content`, all `reasoning_content`) gets a
   warning line.
-- Both servers support API keys, labelled metrics and live rotation from a restricted key file.
+- The test suite collects on Macs that have PyTorch but not Triton.
 
 ## 0.6.4 (3 Oct 2026)
 
