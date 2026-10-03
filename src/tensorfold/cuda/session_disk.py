@@ -64,9 +64,10 @@ class DiskTier:
         self.dir.mkdir(parents=True, exist_ok=True)
         (self.dir / "compat.json").write_text(json.dumps(compat, sort_keys=True, default=str))
         self.limit, self.min_tokens, self.direct = int(limit), int(min_tokens), bool(direct)
-        self.index: dict[str, tuple[list[int], int, int]] = {}  # key -> (ids, file bytes, last use)
+        self.index: dict[str, tuple[int, int, int]] = {}  # key -> (tokens, file bytes, last use); ids on disk
         self.by_len: dict[int, set[str]] = {}
         self.clock = 0
+        self.error: Exception | None = None  # the last file the filesystem would not delete
         self.lock = threading.Lock()
         self.reconcile()
 
@@ -91,20 +92,37 @@ class DiskTier:
         with self.lock:
             return set(self.by_len)
 
-    def _indexed(self, key: str, ids: list[int], size: int) -> None:
-        self.index[key] = (ids, size, self.clock)
-        self.by_len.setdefault(len(ids), set()).add(key)
+    def _indexed(self, key: str, tokens: int, size: int) -> None:
+        self.index[key] = (int(tokens), size, self.clock)
+        self.by_len.setdefault(tokens, set()).add(key)
 
     def has(self, key: str) -> bool:
         with self.lock:
             return key in self.index
 
     def find(self, prompt: Sequence[int]) -> tuple[str, int] | None:
-        best = None
-        for key, (ids, _, _) in self.index.items():
-            if strict_prefix(ids, prompt) and (best is None or len(ids) > best[1]):
-                best = (key, len(ids))
-        return best
+        """Longest entry the prompt extends, ids read from disk (``TieredCache`` asks ``lengths``/``has`` instead)."""
+
+        for n in sorted(self.lengths(), reverse=True):
+            for key in sorted(self.by_len.get(n, ())):
+                try:
+                    if strict_prefix(self._ids(self.path(key)), prompt):
+                        return key, n
+                except (OSError, ValueError, KeyError, StopIteration):
+                    self.drop(key)
+        return None
+
+    def _ids(self, path: Path) -> list[int]:
+        """A file's ids segment, checked against its checksum."""
+
+        head, base = self._header(path)
+        ids_t = next(t for t in head["segments"] if t["name"] == "ids")
+        with open(path, "rb") as fh:
+            fh.seek(base + ids_t["offset"])
+            raw = fh.read(ids_t["nbytes"])
+        if hashlib.sha256(raw).hexdigest() != ids_t["sha256"]:
+            raise ValueError("ids do not match their checksum")
+        return np.frombuffer(raw, dtype=np.int32).tolist()
 
     def put(self, key: str, ids: Sequence[int], arrays: dict[str, np.ndarray], *, owned: bool = False) -> bool:
         segments = [("ids", np.asarray(ids, dtype=np.int32))] + sorted(arrays.items())
@@ -145,7 +163,7 @@ class DiskTier:
         os.replace(tmp, self.path(key))
         with self.lock:
             self.clock += 1
-            self._indexed(key, [int(t) for t in ids], total)
+            self._indexed(key, len(ids), total)
         self._trim(key)
         return True
 
@@ -188,8 +206,8 @@ class DiskTier:
         with self.lock:
             if key in self.index:
                 self.clock += 1
-                ids, size, _ = self.index[key]
-                self.index[key] = (ids, size, self.clock)
+                tokens, size, _ = self.index[key]
+                self.index[key] = (tokens, size, self.clock)
         return [int(t) for t in out.pop("ids").tolist()], out
 
     def _read(self, path: Path) -> np.ndarray:
@@ -221,8 +239,8 @@ class DiskTier:
     def _header(path: Path) -> tuple[dict, int]:
         with open(path, "rb") as fh:
             lead = fh.read(16)
-            if lead[:8] != MAGIC:
-                raise ValueError("not a prompt state file")
+            if len(lead) != 16 or lead[:8] != MAGIC:
+                raise ValueError("not a complete prompt state header")
             (n,) = struct.unpack("<Q", lead[8:16])
             return json.loads(fh.read(n)), _up(16 + n)
 
@@ -230,15 +248,22 @@ class DiskTier:
         with self.lock:
             gone = self.index.pop(key, None)
             if gone is not None:
-                keys = self.by_len.get(len(gone[0]))
+                keys = self.by_len.get(gone[0])
                 if keys is not None:
                     keys.discard(key)
                     if not keys:
-                        del self.by_len[len(gone[0])]
+                        del self.by_len[gone[0]]
+        self._unlink(self.path(key))
+
+    def _unlink(self, path: Path) -> None:
+        """Best effort: a file the filesystem will not let go of stays, unindexed, rather than fail a request."""
+
         try:
-            self.path(key).unlink()
+            path.unlink()
         except FileNotFoundError:
             pass
+        except OSError as exc:
+            self.error = exc
 
     def _trim(self, keep: str) -> None:
         """Least recently used entries out past the limit (never the one just written)."""
@@ -254,29 +279,21 @@ class DiskTier:
         found = []
         for p in self.dir.iterdir():
             if p.suffix == ".tmp":
-                p.unlink()
+                self._unlink(p)
                 continue
             if p.suffix != ".tfs":
                 continue
             try:
                 head, base = self._header(p)
-                ids_t = next(t for t in head["segments"] if t["name"] == "ids")
                 end = base + max(t["offset"] + t["nbytes"] for t in head["segments"])
                 if head["key"] != p.stem or p.stat().st_size < end:
                     raise ValueError("truncated or renamed")
-                with open(p, "rb") as fh:
-                    fh.seek(base + ids_t["offset"])
-                    raw = fh.read(ids_t["nbytes"])
-                if hashlib.sha256(raw).hexdigest() != ids_t["sha256"]:
-                    raise ValueError("ids do not match their checksum")
-                found.append(
-                    (p.stat().st_mtime_ns, p.stem, np.frombuffer(raw, dtype=np.int32).tolist(), p.stat().st_size)
-                )
-            except (OSError, ValueError, KeyError, StopIteration, json.JSONDecodeError):
-                p.unlink()
-        for _, key, ids, size in sorted(found):
+                found.append((p.stat().st_mtime_ns, p.stem, len(self._ids(p)), p.stat().st_size))
+            except (OSError, ValueError, KeyError, StopIteration):
+                self._unlink(p)
+        for _, key, tokens, size in sorted(found):
             self.clock += 1
-            self._indexed(key, ids, size)
+            self._indexed(key, tokens, size)
         while self.used > self.limit and self.index:
             self.drop(min(self.index, key=lambda k: self.index[k][2]))
         return len(self.index)

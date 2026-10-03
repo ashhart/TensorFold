@@ -67,13 +67,13 @@ class HostTier:
 
     def __init__(self, limit: int, *, min_tokens: int = 1) -> None:
         self.limit, self.min_tokens, self.used = int(limit), int(min_tokens), 0
-        self.entries: OrderedDict[str, tuple[list[int], dict]] = OrderedDict()
+        self.entries: OrderedDict[str, tuple[np.ndarray, dict]] = OrderedDict()  # ids as int32, counted in ``used``
         self.by_len: dict[int, set[str]] = {}
 
     def find(self, prompt: Sequence[int]) -> tuple[str, int] | None:
         best = None
         for key, (ids, _) in self.entries.items():
-            if strict_prefix(ids, prompt) and (best is None or len(ids) > best[1]):
+            if strict_prefix(ids.tolist(), prompt) and (best is None or len(ids) > best[1]):
                 best = (key, len(ids))
         return best
 
@@ -84,18 +84,20 @@ class HostTier:
                        owned: bool = False) -> tuple[bool, list[tuple[str, list[int], dict]]]:
         """Whether it took the entry, and the entries its limit pushed out (the tier keeps no reference to them)."""
 
-        size = nbytes(arrays)
+        tokens = np.asarray(ids, dtype=np.int32)
+        size = nbytes(arrays) + tokens.nbytes
         if len(ids) < self.min_tokens or size > self.limit:
             return False, []
         self.drop(key)
         kept = arrays if owned else {k: np.array(v, copy=True) for k, v in arrays.items()}
-        self.entries[key] = ([int(t) for t in ids], kept)
+        self.entries[key] = (tokens, kept)
         self.by_len.setdefault(len(ids), set()).add(key)
         self.used += size
         out = []
         while self.used > self.limit:
             old = next(iter(self.entries))
-            out.append((old, *self.entries[old]))
+            ids_old, arrays_old = self.entries[old]
+            out.append((old, ids_old.tolist(), arrays_old))
             self.drop(old)
         return True, out
 
@@ -108,12 +110,12 @@ class HostTier:
     def get(self, key: str) -> tuple[list[int], dict[str, np.ndarray]]:
         self.entries.move_to_end(key)
         ids, arrays = self.entries[key]
-        return list(ids), arrays
+        return ids.tolist(), arrays
 
     def drop(self, key: str) -> None:
         gone = self.entries.pop(key, None)
         if gone is not None:
-            self.used -= nbytes(gone[1])
+            self.used -= nbytes(gone[1]) + gone[0].nbytes
             keys = self.by_len.get(len(gone[0]))
             if keys is not None:
                 keys.discard(key)

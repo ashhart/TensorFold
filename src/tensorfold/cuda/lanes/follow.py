@@ -7,8 +7,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-import numpy as np
-
 from ..drafting import Proposals
 from ..sessions import TieredCache
 from .forward import Candidates, Piece, Rows, chain, check
@@ -41,9 +39,9 @@ class HeldCodec:
         self.codec, self.pool = codec, pool
 
     def to_host(self, held: Held) -> dict:
-        """Fresh host arrays: the family's state copied, each plane's rows in the one copy ``read_pages`` makes."""
+        """Fresh host arrays: the codec's (fresh by contract), each plane's rows as ``read_pages`` copied them."""
 
-        out = {f"state/{k}": np.array(v, copy=True) for k, v in self.codec.to_host(held.snap).items()}
+        out = {f"state/{k}": v for k, v in self.codec.to_host(held.snap).items()}
         if self.pool is not None:
             for name, rows in self.pool.read_pages(held.pages).items():
                 keep = held.tokens // self.pool.planes[name].per_tokens if held.tokens else len(rows)

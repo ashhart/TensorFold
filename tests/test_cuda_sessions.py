@@ -75,7 +75,7 @@ def test_victim_pins_the_resumed_entry_not_its_length():
 
 
 def test_an_entry_the_host_tier_pushes_out_moves_to_disk(tmp_path):
-    entry = 8 * 4  # one int64 array of four values
+    entry = 8 * 4 + 2 * 4  # one int64 array of four values and two int32 ids
     tiers = [HostTier(2 * entry), DiskTier(tmp_path, {"engine": "x"}, limit=1 << 20)]
     c = TieredCache(0, codec=Codec(), tiers=tiers)
     for i, ids in enumerate(([1, 1], [2, 2], [3, 3])):
@@ -93,14 +93,14 @@ def test_keep_zero_sends_every_entry_down():
 
 
 def test_the_host_tier_drops_the_least_recently_used_past_its_limit():
-    t = HostTier(3 * 8)
+    t = HostTier(3 * 16)  # an entry: 8 bytes of state and two int32 ids
     for i in range(4):
         t.put(f"k{i}", [i, i], {"x": np.zeros(1, dtype=np.int64)})
-    assert t.keys() == ["k1", "k2", "k3"] and t.used == 24
+    assert t.keys() == ["k1", "k2", "k3"] and t.used == 48
     t.get("k1")
     t.put("k4", [9, 9], {"x": np.zeros(1, dtype=np.int64)})
     assert t.keys() == ["k3", "k1", "k4"]
-    assert not t.put("big", [1], {"x": np.zeros(4, dtype=np.int64)})
+    assert not t.put("big", [1], {"x": np.zeros(6, dtype=np.int64)})
 
 
 def arrays(n=3):
@@ -176,7 +176,7 @@ def test_a_host_tier_used_alone_keeps_nothing_past_its_limit():
 
     import numpy as np
 
-    tier = HostTier(3 * 8 * 4)  # three entries of one int64 array of four values
+    tier = HostTier(3 * (8 * 4 + 2 * 4))  # three entries of one int64 array of four values and two ids
     refs = []
     for i in range(10):
         a = np.full(4, i, dtype=np.int64)
@@ -211,3 +211,38 @@ def test_one_hashing_pass_gives_each_prefix_its_entry_key():
     prompt = list(range(3, 300))
     keys = c._prefix_keys(prompt, {1, 7, 64, 200, 296})
     assert keys == {n: c.key(prompt[:n]) for n in (1, 7, 64, 200, 296)}
+
+
+@pytest.mark.parametrize("size", [0, 1, 7, 8, 9, 15])
+def test_a_truncated_state_file_is_refused_and_deleted(tmp_path, size):
+    from tensorfold.cuda.session_disk import MAGIC
+
+    t = DiskTier(tmp_path, {"engine": "x"}, limit=1 << 20)
+    path = t.path("k")
+    path.write_bytes((MAGIC + bytes(8))[:size])
+    with pytest.raises(ValueError, match="prompt state k"):
+        t.get("k")
+    assert not path.exists()
+    path.write_bytes((MAGIC + bytes(8))[:size])
+    assert t.reconcile() == 0 and not path.exists()
+
+
+def test_a_file_that_will_not_delete_never_fails_a_lookup(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    t = DiskTier(tmp_path, {"engine": "x"}, limit=1 << 20)
+    t.put("k", [1, 2], {"x": np.zeros(2, dtype=np.int64)})
+    t.path("k").write_bytes(b"garbage")
+    monkeypatch.setattr(Path, "unlink", lambda self, missing_ok=False: (_ for _ in ()).throw(OSError("read-only")))
+    with pytest.raises(ValueError, match="prompt state k"):  # the request starts fresh, it does not fail
+        t.get("k")
+    assert "k" not in t.keys() and isinstance(t.error, OSError)
+
+
+def test_the_disk_index_keeps_counts_not_ids(tmp_path):
+    t = DiskTier(tmp_path, {"engine": "x"}, limit=1 << 20)
+    t.put("k", list(range(5000)), {"x": np.zeros(2, dtype=np.int64)})
+    tokens, size, _ = t.index["k"]
+    assert tokens == 5000 and isinstance(tokens, int) and t.lengths() == {5000}
+    assert DiskTier(tmp_path, {"engine": "x"}, limit=1 << 20).index["k"][0] == 5000  # after a restart too
+    assert t.find(list(range(5001))) == ("k", 5000) and t.find(list(range(5000))) is None
