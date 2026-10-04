@@ -56,6 +56,12 @@
   .stats { display:flex; flex-wrap:wrap; gap:4px 16px; margin-top:5px;
            font-size:11.5px; color:var(--muted); font-variant-numeric:tabular-nums; }
   .stats b { color:var(--text); font-weight:500; }
+  #totalsbar { display:flex; flex-wrap:wrap; gap:4px 22px; margin-top:14px; padding:10px 14px;
+               background:var(--panel); border:1px solid var(--line); border-radius:10px;
+               font-size:12px; color:var(--muted); font-variant-numeric:tabular-nums; }
+  #totalsbar:empty { display:none; }
+  #totalsbar b { color:var(--text); font-weight:600; }
+  #totalsbar .ttft { color:var(--cool); }
   footer { text-align:center; color:var(--muted); font-size:11px; padding:12px 0 24px; }
 </style>
 </head>
@@ -76,7 +82,8 @@
   <div class="chart"><canvas id="hist"></canvas></div>
   <div class="tiles">
     <div class="tile"><div class="label">Context</div><div class="value" id="ctx">—</div>
-      <div class="cap" id="ctxcap"></div><div class="bar"><i id="ctxbar"></i></div></div>
+      <div class="cap" id="ctxcap"></div><div class="bar"><i id="ctxbar"></i></div>
+      <div class="cap" id="kvcap" style="margin-top:5px"></div></div>
     <div class="tile"><div class="label">Cached tokens</div><div class="value" id="cache">—</div>
       <div class="cap">held by the live streams</div></div>
     <div class="tile"><div class="label">5-min gen rate</div><div class="value" id="gen5">—</div>
@@ -86,6 +93,7 @@
     <div class="tile"><div class="label">MTP acceptance</div><div class="value" id="acc">—</div>
       <div class="cap" id="acccap">drafts the verify rounds committed</div></div>
   </div>
+  <div id="totalsbar"></div>
   <h2>Recent requests</h2>
   <div id="requests"></div>
 </main>
@@ -210,6 +218,12 @@ function apply(s) {
   const bar = el("ctxbar");
   bar.style.width = pct + "%"; bar.className = pct >= 95 ? "hot" : pct >= 75 ? "warm" : "";
 
+  // The fullest live stream's KV cache occupancy (the TUI's "KV peak pool"), under the context bar.
+  const kv = s.kv_pool;
+  el("kvcap").textContent = kv && kv.ratio > 0
+    ? `KV pool ${(100 * kv.ratio).toFixed(1)}% · fullest of ${kv.streams} stream${kv.streams == 1 ? "" : "s"}`
+    : "";
+
   el("cache").textContent = fmt(ctxs.cached_tokens);
 
   const m = s.memory;
@@ -247,6 +261,22 @@ function apply(s) {
     el("fillcap").textContent = fills.length > 1
       ? `${fills.length} prompts · ~${eta == null ? "—" : etaText(eta)} at ${fmt(rate)} tok/s`
       : `of ${fmt(fills[0].prompt_tokens)} · ~${eta == null ? "—" : etaText(eta)} at ${fmt(rate)} tok/s`;
+  }
+
+  // Lifetime totals since the server started, from the finished-request metrics the /metrics
+  // endpoint publishes; the bar stays hidden (empty) until the first request has finished.
+  const t = s.totals || {};
+  if (t.requests) {
+    const parts = [`<span>requests <b>${fmt(t.requests)}</b></span>`,
+                   `<span>prompt <b>${fmt(t.prompt_tokens)}</b> tok</span>`,
+                   `<span>generated <b>${fmt(t.generation_tokens)}</b> tok</span>`];
+    if (t.ttft_mean_s != null) {
+      parts.push(`<span class="ttft">TTFT <b>${t.ttft_mean_s.toFixed(2)}s</b> mean</span>`);
+    }
+    if (t.drafted > 0) {
+      parts.push(`<span>drafts <b>${(100 * t.acceptance_rate).toFixed(1)}%</b> · ${fmt(t.accepted)} of ${fmt(t.drafted)}</span>`);
+    }
+    el("totalsbar").innerHTML = parts.join("");
   }
   el("requests").innerHTML = (s.requests || []).map(row).join("") ||
     "<div class='req'><div class='stats'>no requests finished yet</div></div>";

@@ -180,6 +180,26 @@ def test_a_finished_request_lands_in_the_pages_recent_list():
         app.close()
 
 
+def test_lifetime_totals_and_kv_pool_reach_the_snapshot():
+    app = make_app()
+    collector = StatsCollector(app).start()
+    try:
+        app.chat([{"role": "user", "content": "count the tokens as they land"}], max_tokens=8)
+        snap = collector.sample()
+        totals = snap["totals"]
+        assert totals["requests"] >= 1
+        assert totals["prompt_tokens"] > 0 and totals["generation_tokens"] >= 8
+        assert totals["ttft_mean_s"] is not None and totals["ttft_mean_s"] > 0
+        # the fake engine drafts nothing: the drafts figures exist but stay zero
+        assert totals["drafted"] == 0 and totals["accepted"] == 0 and totals["acceptance_rate"] is None
+        kv = snap["kv_pool"]
+        assert kv is not None and 0 <= kv["ratio"] <= 1 and kv["streams"] >= 1
+    finally:
+        collector.stop()
+        app.scheduler.stats = None
+        app.close()
+
+
 def test_the_snapshot_carries_the_live_streams_speculative_state():
     app = make_app()
     collector = StatsCollector(app).start()

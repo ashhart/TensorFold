@@ -152,10 +152,49 @@ class StatsCollector:
                 "warming": bool(getattr(app, "warming", False)),
                 "connections": connections, "live": live, "context": context,
                 "fill_progress": scheduler.fill_progress if scheduler is not None else [],
+                "totals": _totals(app), "kv_pool": _kv_pool(app),
                 "memory": _memory(app), "decode_5m": self.decode.snapshot(),
                 "prefill": self.prefill_average.snapshot(), "requests": list(self._history),
                 "speculative": {**speculative,
                                 "acceptance_rate": (speculative["accepted"] / drafted) if drafted else None}}
+
+
+def _totals(app: Any) -> dict[str, Any]:
+    """Lifetime counters and mean TTFT from the server's finished-request metrics (None where uncounted)."""
+
+    try:
+        from tensorfold.server.metrics import of as _metrics_of
+
+        m = _metrics_of(app)
+    except Exception:  # noqa: BLE001 - the page shows what the server counts
+        return {}
+    with m.lock:
+        prompt, generation = int(m.prompt), int(m.generation)
+        drafted, accepted = int(m.drafted), int(m.accepted)
+        ttft_total, ttft_n = m.ttft.total, m.ttft.n
+        latency_total, latency_n = m.latency.total, m.latency.n
+    return {"prompt_tokens": prompt, "generation_tokens": generation,
+            "drafted": drafted, "accepted": accepted,
+            "acceptance_rate": (accepted / drafted) if drafted else None,
+            "ttft_mean_s": (ttft_total / ttft_n) if ttft_n else None,
+            "ttft_count": ttft_n,
+            "latency_mean_s": (latency_total / latency_n) if latency_n else None,
+            "requests": latency_n}
+
+
+def _kv_pool(app: Any) -> dict[str, Any] | None:
+    """The fullest live stream's cache occupancy against the context window (the TUI's KV peak pool)."""
+
+    try:
+        from tensorfold.server.metrics import _pools
+
+        pools = _pools(app)
+    except Exception:  # noqa: BLE001
+        return None
+    if not pools:
+        return None
+    name, ratio = max(pools, key=lambda pair: pair[1])
+    return {"streams": len(pools), "name": name, "ratio": ratio}
 
 
 def _memory(app: Any) -> dict[str, int] | None:
