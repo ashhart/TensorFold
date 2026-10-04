@@ -42,6 +42,7 @@ GLM-5.3-Flash images run on MLX; dense Qwen's run on MLX and CUDA. See
 | Qwen3.8 Flash Next (EXL3, experimental) | `turboderp/Qwen3.8-Flash-Next-exl3` (branch `3.05bpw_h5_ng5`; any codebook, a width per tensor) | CUDA | Included MTP head and context copies |
 | Ternary Bonsai 2 27B | `prism-ml/Ternary-Bonsai-2-27B-mlx-2bit` | MLX | `z-lab/Qwen3.8-27B-DFlash2` and context copies |
 | Qwen3.8 Flash Next (NVFP4) | `local-inference-lab/Qwen3.8-Flash-Next-NVFP4` (ModelOpt: NVFP4 experts, MXFP8 attention and DeltaNet); `RadixArk/Qwen3.8-Flash-Next-NVFP4` (bf16 besides the experts) | CUDA, one GPU | Included MTP head and context copies |
+| DeepSeek-V4.1-Flash | `sfxnz/DeepSeek-V4.1-Flash-EXL3` (revision `982b704`: EXL3 routed experts, DeepSeek FP8 elsewhere) | CUDA with two ranks | Included DSpark stages |
 
 `tensorfold models` lists families and checkpoints. `tensorfold info MODEL` checks configuration without
 fetching weights. `serve` downloads a missing checkpoint; `pull` downloads it ahead of time.

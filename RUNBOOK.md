@@ -97,7 +97,10 @@ drafting settings. The default rendezvous port is 29551. The rendezvous port and
 are not authenticated: keep them on a private link, or firewall the port to the peer. Flash Next under
 `--parallel` also opens one ephemeral TCP port on rank 0's address for rank 1's messages; the same applies to it.
 GLM requires two CUDA ranks; Flash Next can use one or two and needs `--no-drafts` when its checkpoint lacks an MTP
-head.
+head. DeepSeek-V4.1-Flash requires two ranks too, and each reads its half of the Engram tables (shards 47 and 48,
+94.6 GiB each) from its own disk, so both machines hold the whole checkpoint revision the
+[recipe](docs/recipes/deepseek-v4.1-flash.md) names (`tensorfold pull` fetches the repository's `main`, which
+holds only its model card).
 
 ### RTX cards without Docker
 

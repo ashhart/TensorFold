@@ -13,6 +13,7 @@ Native Windows is experimental, one GPU a process and not yet run on Windows har
 | [Nemotron 3.5 Lightning](nemotron-3.5.md#cuda) | One or two ranks, MTP chains and CUDA graphs |
 | [GLM-5.3-Flash](glm-5.3-flash.md#cuda) | Two ranks, MTP and optional DFlash2 |
 | [Qwen3.6-35B-A3B](qwen3.6-moe.md#cuda-execution) | One rank, MTP chains and context copies, CUDA graphs |
+| [DeepSeek-V4.1-Flash](deepseek-v4.1-flash.md) | Two ranks, DSpark drafts and CUDA graphs |
 
 An EXL3 checkpoint's trellis is read by one shared module for every family, any codebook (3inst, mcg, mul1)
 and any width 1 to 8, mixed across a checkpoint and inside one MoE layer: `src/tensorfold/cuda/exl3/`. A family
@@ -33,14 +34,18 @@ the checkpoint you name; it picks none by itself.
 | GLM-5.3-Flash | not read | `brandonmusic/GLM-5.3-Flash-tr3-4bpw` (Brandon M. Music's; re-hosted as `Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw`), two ranks (experimental) | two ranks |
 | Qwen3.6-35B-A3B | not read yet | not read yet | one rank |
 | Nemotron 3.5 Lightning | not read yet | not read yet | one or two ranks |
+| DeepSeek-V4.1-Flash | not read | `sfxnz/DeepSeek-V4.1-Flash-EXL3` at revision `982b704` (EXL3 routed experts, DeepSeek FP8 elsewhere), two ranks | not read |
 
 Mia-AiLab's checkpoints on Hugging Face (30 Sep 2026):
 - Loaded and served here: `Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw` (two Sparks; a byte-identical re-host of Brandon M.
   Music's `brandonmusic/GLM-5.3-Flash-tr3-4bpw`, under his ShapleyMCG License 1.0) and
   `Mia-AiLab/Qwen3.8-Flash-Next-NVFP4` (found by its `model_type`, `qwen3_8_flash_next`).
 - Not tried yet: `Mia-AiLab/Qwen3.8-27B-EXL3`, `Mia-AiLab/Qwen3.8-27B-EXL3-2.0bpw`,
-  `Mia-AiLab/Qwen3.8-27B-EXL3-3.5bpw`, `Mia-AiLab/Qwen3.8-27B-DFlash2-EXL3-5.0bpw` (a drafter),
-  `Mia-AiLab/DeepSeek-V4.1-Flash-EXL3-2.9bpw` and `-3.0bpw` (DeepSeek-V4 has no CUDA engine yet).
+  `Mia-AiLab/Qwen3.8-27B-EXL3-3.5bpw`, `Mia-AiLab/Qwen3.8-27B-DFlash2-EXL3-5.0bpw` (a drafter) and
+  `Mia-AiLab/DeepSeek-V4.1-Flash-EXL3-3.0bpw` (not checked).
+- Refused by the DeepSeek-V4.1 family's check: `Mia-AiLab/DeepSeek-V4.1-Flash-EXL3-2.9bpw`, whose `config.json`
+  stores the non-routed weights in EXL3 too, where the CUDA engine reads DeepSeek's FP8 (e4m3, ue8m0 scales per
+  32x32 block).
 - Not readable: the GGUF repositories (`Qwable-3.6-27b`, `Qwable-3.6-27b-MTP`, `Qwable-3.6-35b`,
   `Gemmable-4-12B-MTP-GGUF`, `Gemmable-4-31B-MTP-GGUF`); TensorFold reads no GGUF.
 
@@ -195,7 +200,7 @@ whose rows never depend on their chunk; an EXL3 27B's prompt bits change with it
 ## Requests and memory
 
 CUDA `--parallel auto` serves one request at a time. Set an explicit `--parallel N` above one for shared
-Qwen3.8-27B or Flash Next rounds on one or two ranks; Nemotron, GLM and Qwen3.6 remain serialized. The shared
+Qwen3.8-27B or Flash Next rounds on one or two ranks; the other families remain serialized. The shared
 scheduler admits requests between decode rounds, then verifies each active stream's drafts together and commits
 each stream independently. On the 27B, a new prompt prefills 1,024 tokens a round while the other streams keep
 decoding, and its state is kept at message starts (the second message and the last assistant turn), so prompts that
@@ -213,8 +218,8 @@ host's available memory, reclaimable page cache included, less a floor of a tent
 `TENSORFOLD_MEMORY_RESERVE_GIB` can move, and considers mapped-table residency when sizing an automatic
 window. It accounts for stream count and retained caches where concurrency is enabled.
 
-Two-rank Flash Next, Nemotron and GLM requests finish on both ranks after a client disconnects, keeping the
-collective sequence aligned. MLX disk snapshots and cache-budget flags do not configure these CUDA
+Two-rank Flash Next, Nemotron, GLM and DeepSeek-V4.1 requests finish on both ranks after a client disconnects,
+keeping the collective sequence aligned. MLX disk snapshots and cache-budget flags do not configure these CUDA
 caches. The CUDA CLI also does not apply `--alias`; use `--name` for the served model ID. `--thinking`,
 `--reasoning-effort` and `--thinking-budget` set the defaults a request's `chat_template_kwargs.enable_thinking`,
 `reasoning_effort` and `thinking_budget` override, as on the Mac.

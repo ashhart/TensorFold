@@ -62,7 +62,7 @@ For decisions, `chat_template_kwargs` may be omitted, null, or an object contain
 | `response_format`, `guided_json`, `guided_regex`, `guided_choice`, `guided_grammar`, `structured_outputs` | A JSON schema, any JSON object, a regex, a choice or an EBNF grammar the reply must match | Both |
 | `ignore_eos` | Disable model end-of-sequence stopping; the reply limit still applies | Both |
 | `stop` | Stop at a string or any string in a list; omit the matched text from the response | Both |
-| `reasoning_effort` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` | Both |
+| `reasoning_effort` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`; DeepSeek-V4.1-Flash also takes an integer from 1 to 100 | Both |
 | `thinking_budget` | Token-count limit inside reasoning | Both |
 | `priority` | `background` yields to foreground requests | Both |
 
@@ -149,6 +149,7 @@ offered name its written part starts. The template's own rendered call gives tha
 only tool the template offers. Each fix depends only on the tokens before it, so drafted, serial and concurrent
 decoding write the same call. The MLX engine fixes tokens inside its rounds; CUDA stops the engine at a fix and
 decodes on from the reply. The model writes the arguments; a malformed call returns as content.
+DeepSeek-V4.1-Flash, whose calls are DSML blocks with no single opener token, refuses both with HTTP 400.
 
 ## Structured output
 
@@ -164,6 +165,7 @@ their own vocabulary columns. With thinking on, the grammar starts after the thi
 is complete; a reply cut at `max_tokens` is incomplete, with `finish_reason: "length"`. JSON grammars allow at most
 32 blank characters between two tokens (pretty-printing fits; a run of blank lines does not), so a model cannot fill
 its reply with whitespace inside an unfinished value.
+DeepSeek-V4.1-Flash is the exception: its CUDA engine enforces no grammar, and these fields get HTTP 400.
 
 HTTP 400 comes before any token for a malformed field, a grammar xgrammar cannot compile (with xgrammar's reason), a
 server without xgrammar (with the install command), and a grammar sent with `tool_choice: "required"` or a named
@@ -191,6 +193,11 @@ a new user message leaves the earlier turns' tokens, and their kept prompt state
 `chat_template_kwargs.clear_thinking: true` drops it, as the model card advises for plain chat (on CUDA; on a Mac,
 `TF_GLM_CLEAR_THINKING=1` sets it for the server).
 
+DeepSeek-V4.1-Flash lists `low`, `high` and `max`, its encoder's budgets 50, 75 and 100 on a scale of 1 to 100,
+so `minimal` is heard as `low`, `medium` as `high` and `xhigh` as `max`, and thinking without an effort renders 75.
+It also takes the budget itself, an integer from 1 to 100, at the top level or in `chat_template_kwargs`; an
+integer turns thinking on as a name does, and one outside 1 to 100 gets HTTP 400.
+
 A tool call written before the think block closes is the reply's tool call when the reply ends inside the block,
 on both backends; the reasoning stops where the call starts, and streamed reasoning never carries the call's markup.
 A call only mentioned while thinking, with the block closed after it, stays reasoning.
@@ -200,6 +207,7 @@ while it is still thinking, with a newline, the closing think marker and a blank
 The cut depends on token count, so serial and drafted decoding use the same cut. A model that closes the block
 earlier is left alone. The MLX engine forces the close inside its rounds; CUDA stops the engine at the cut and
 decodes on from the reply, as for a required tool call.
+DeepSeek-V4.1-Flash, whose two ranks decode every request to its end, refuses a thinking budget with HTTP 400.
 
 ## Context and errors
 

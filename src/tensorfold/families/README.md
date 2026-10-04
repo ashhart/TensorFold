@@ -9,6 +9,7 @@ All MLX families use the lane engine; CUDA families provide their own engine.
 | `qwen3_5/` | Qwen3.8-27B | DFlash2 and context copies | One or two ranks; EXL3 or MLX 4-bit weights |
 | `qwen4_exp/` | Qwen3.8 Flash Next | MTP and context copies | One or two ranks; EXL3 or MLX 4-bit weights |
 | `glm5_next/` | GLM-5.3-Flash | MTP | Two ranks, MTP and optional DFlash2 |
+| `deepseek_v41/` | DeepSeek-V4.1-Flash | Not supported | Two ranks, DSpark drafts; EXL3 routed experts, DeepSeek FP8 elsewhere |
 | `gemma4/` | Gemma 4 26B-A4B | Context copies | Not supported |
 | `bonsai/` | Ternary Bonsai 2 27B | DFlash2 and context copies | Not supported |
 
