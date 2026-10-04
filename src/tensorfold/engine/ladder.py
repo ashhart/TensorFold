@@ -40,12 +40,16 @@ OUTLIER_M = 3
 MIN_REPEAT_S = 60.0
 WARM_FRACTION = 0.1
 LADDER_CAP = 64                  # rungs, not hull vertices: bounded by construction
-DECADE = 8_000
+LENGTH_BUCKET = 8_000            # L-bucket for the outlier consecutive rule (not a decade)
 
 
 class LadderWorkspace:
-    """Prefix-max staircase over measured rungs. Interface-compatible with
-    PrefillEnvelope. switch=None: one ladder; int switch: pre/post ladders."""
+    """Prefix-max staircase over measured rungs. One mechanism, no fallback.
+
+Pricing is monotone WITHIN brackets; it may step DOWN only at a measured rung
+(density genuinely rises there), never between them. The soundness floor —
+price >= dense-margin x every covered measured peak — holds everywhere.
+switch=None: one ladder; int switch: pre/post ladders (a declared regime)."""
 
     def __init__(self, seed_points, switch=None, margin: float = MARGIN_SPARSE):
         self._lock = threading.RLock()
@@ -134,7 +138,7 @@ class LadderWorkspace:
             with self._lock:
                 self.stats["warm_rejected"] += 1
             return False
-        decade = L // DECADE
+        bucket = L // LENGTH_BUCKET
         now = self._clock()
         with self._lock:
             side = self._side(L)
@@ -145,19 +149,19 @@ class LadderWorkspace:
                 self.stats["poison_low_ignored"] += 1
                 return False
             if peak_bytes > OUTLIER_K * current > 0:
-                streak = self._pending.get(decade, [])
-                if streak and now - self._last.get(decade, 0.0) < MIN_REPEAT_S:
+                streak = self._pending.get(bucket, [])
+                if streak and now - self._last.get(bucket, 0.0) < MIN_REPEAT_S:
                     self.stats["outlier_rejected"] += 1
                     return False
                 streak = (streak + [peak_bytes]) if streak else [peak_bytes]
-                self._pending[decade] = streak
-                self._last[decade] = now
+                self._pending[bucket] = streak
+                self._last[bucket] = now
                 if len(streak) < OUTLIER_M:
                     self.stats["outlier_rejected"] += 1
                     return False
                 self.stats["outlier_confirmed"] += 1
             else:
-                self._pending[decade] = []
+                self._pending[bucket] = []
             newpts = [(x, y) for x, y in ladder if x != float(L)] + [(float(L), float(peak_bytes))]
             if len(newpts) > LADDER_CAP:
                 near = min((x for x, _ in newpts if x != float(L)),

@@ -23,13 +23,17 @@ class EnvelopeStreamMemory:
     possibly wrong-regime seeds under-prices silently (mission P1, Q3/D8).
     """
 
+    # attributes the admission path reads on StreamMemory, forwarded explicitly
+    # (no __getattr__: special-method and type checks must not silently proxy)
+    _FORWARD = ("short", "short_tokens", "long", "long_tokens", "per_token",
+                "round_bytes", "chunk", "prefill_a", "prefill_b")
+
     def __init__(self, base: Any, envelope: Any, extend_beyond: bool) -> None:
         self._base = base
         self._envelope = envelope
         self._extend = extend_beyond
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._base, name)
+        for name in self._FORWARD:
+            setattr(self, name, getattr(base, name))
 
     def prefill_bytes(self, tokens: int) -> int:
         L = int(tokens)
@@ -40,14 +44,14 @@ class EnvelopeStreamMemory:
 
 
 def _build_envelope_stream(engine: Any, base: Any, seeds: list) -> Any:
-    """Wrap the measured StreamMemory with an admission pricing mechanism (flag ON).
+    """Wrap the measured StreamMemory with the ladder pricing (flag ON only).
 
-    TF_ADMISSION_MECHANISM selects the mechanism: "hull" (convex-hull envelope,
-    default) or "ladder" (probe-ladder prefix-max staircase). Both share the
-    wrapper below; they differ only in price() semantics and learning shape.
+    TF_ADMISSION_ENVELOPE=1: prefill workspace prices from the measured ladder
+    (prefix-max staircase over raw probe peaks). Flag OFF calls measure(engine)
+    exactly as shipped. Learning (observe/rung insertion) is v1.1: this PR is
+    pricing-only; the counters exist and the hook design is reviewed separately.
     """
 
-    from tensorfold.engine.envelope import PrefillEnvelope
     from tensorfold.engine.ladder import LadderWorkspace
 
     model = getattr(engine, "model", None)
@@ -63,20 +67,13 @@ def _build_envelope_stream(engine: Any, base: Any, seeds: list) -> Any:
     elif isinstance(switch, str) and switch.startswith("args."):
         switch_val = getattr(getattr(model, "args", None), switch[5:], None)
         switch_val = int(switch_val) if isinstance(switch_val, int) and switch_val > 0 else None
-    mechanism = os.environ.get("TF_ADMISSION_MECHANISM", "hull").strip().lower()
-    pts = [(float(n), float(t)) for n, t in seeds]
-    if mechanism == "ladder":
-        inner = LadderWorkspace(pts, switch=switch_val)
-    else:
-        inner = PrefillEnvelope(pts, switch=switch_val)
+    inner = LadderWorkspace([(float(n), float(t)) for n, t in seeds], switch=switch_val)
     seeds_out = ", ".join(f"{n:,}" for n, _ in sorted(seeds))
-    print(f"[tensorfold] admission envelope ({mechanism}): seed points at {seeds_out} "
-          f"tokens (raw prefill peaks), margin x{inner.margin():.2f}", flush=True)
-    # the ladder NEVER defers beyond its frontier (global max, by design); the hull
-    # defers to the shipped fit for undeclared families (D8: extension from possibly
-    # wrong-regime seeds silently under-prices) — declaration grants it extension
-    return EnvelopeStreamMemory(base, inner,
-                                extend_beyond=True if mechanism == "ladder" else bool(switch_val))
+    print(f"[tensorfold] admission workspace ladder: rungs at {seeds_out} tokens "
+          f"(raw prefill peaks)", flush=True)
+    # the ladder NEVER defers beyond its frontier (global max, by design):
+    # the shipped fit's fallback for undeclared families is gone, not gated
+    return EnvelopeStreamMemory(base, inner, extend_beyond=True)
 
 
 def concurrency(engine: Any, prompt_memory: Any, fraction: float, lanes: int, reply_tokens: int) -> Any:
