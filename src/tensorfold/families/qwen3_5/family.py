@@ -45,17 +45,22 @@ class Qwen35Family:
 
             trees = row_forward.ROW_ATTENTION
             self.batch_rows, self.max_streams = 32, 32
-        self.head_drafts = DFlashHead(drafter, nodes, _calibration(), chains=not trees) if drafter is not None else None
+        head_class = getattr(drafter, "head_class", DFlashHead)
+        self.head_drafts = head_class(drafter, nodes, _calibration(), chains=not trees) if drafter is not None else None
         if self.head_drafts is not None and self.head_drafts.v1:
             # DFlash (v1) gives no per-draft chances: the engine sizes its chains from per-depth acceptance and
             # measured round times (``DraftDepth._depth``), not from the forward's cost alone
             self.draft_probabilities = None
         self.mtp = drafter
+        if getattr(drafter, "reads_hidden", False):   # an MTP-head drafter reads the last hidden, not tapped layers
+            self.draft_reads_hidden = True
         self.drafts = int(nodes) if drafter is not None else 0
         self.mtp_step_ms = 0.0         # a lattice costs the same whatever the tree's size
         self._last: dict[int, tuple[Any, int, int, int]] = {}   # Cache id -> last forward record, row count, start and first row within the shared forward.
         self._shared: list[tuple[Any, int, int]] = []         # the last hidden_rows: (record, rows, start) a stream
         self.exact_width, self.window_costs = self.check_windows(int(widest), int(self.batch_rows))
+        if getattr(drafter, "reads_hidden", False):       # an MTP-head drafter sizes its chains on these too
+            drafter.window_costs = self.window_costs
         # a copy's first window; each copy that lands whole doubles the next, up to exact_width rows
         self.first_copy_rows = min(int(first_copy_rows or widest), self.exact_width)
 
@@ -96,6 +101,9 @@ class Qwen35Family:
         if parents is None:
             self._commit(layers, record, list(range(rows)), rows, start)
         self._last = {id(cache): (record, rows, start, 0)}
+        stash = getattr(self.mtp, "stash_taps", None)   # an MTP-head drafter reads the rows as its context
+        if stash is not None:
+            stash(hidden)
         return hidden
 
     def prefill(self, inputs: Any, cache: list[Any]) -> Any:
@@ -105,7 +113,11 @@ class Qwen35Family:
 
         tokens, layers = _tokens(inputs), self._layers(cache)
         self._last = {id(cache): (None, len(tokens), self._position(layers), 0)}
-        return self.core(mx.array([tokens], dtype=mx.uint32), cache=layers)
+        hidden = self.core(mx.array([tokens], dtype=mx.uint32), cache=layers)
+        stash = getattr(self.mtp, "stash_taps", None)
+        if stash is not None:
+            stash(hidden)
+        return hidden
 
     def encode_vision(self, prepared: Any, cache: list[Any]) -> Any:
         encoded = self.vision.encode(prepared)
@@ -161,6 +173,9 @@ class Qwen35Family:
         self._last = {id(c): (r, n, st, f) for c, r, n, st, f in zip(caches, records, lengths, starts, firsts)}
         if parents is None:
             self._commit_streams(layers, records, [list(range(n)) for n in lengths], lengths, starts)
+        stash = getattr(self.mtp, "stash_taps", None)
+        if stash is not None:
+            stash(hidden)
         return hidden
 
     def keep_rows_streams(self, caches: Sequence[list[Any]], lengths: Sequence[int], keeps: Sequence[Any]) -> None:
@@ -216,7 +231,11 @@ class Qwen35Family:
 
     def absorb_draft_context(self, hidden: Any, next_tokens: Any, cache: list[Any], start: int = 0) -> None:
         _, _, position, first = self._last[id(cache)]
-        self.head_drafts.absorb(cache, position + start, int(hidden.shape[1]), first + start)
+        stash = getattr(self.mtp, "stash_taps", None)
+        if stash is not None:
+            stash(hidden)
+        self.head_drafts.absorb(cache, position + start, int(hidden.shape[1]), first + start,
+                                next_tokens=next_tokens)
 
     def speculate(self, cache: list[Any], tokens: Any, position: int, sampling: Any, start: int = 0,
                   last_only: bool = False, rows: Sequence[int] | None = None) -> Any:

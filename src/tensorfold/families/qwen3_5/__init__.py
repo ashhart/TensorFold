@@ -138,7 +138,7 @@ def check(model_dir: str | Path) -> None:
         raise ValueError(f"{TITLE} cannot run this checkpoint: {why}. Use {MODELS[0]}")
 
 
-def load(model_dir: Path, *, lane_kernels: str = "auto", drafter: str = "", drafter_bits: int = 4,
+def load(model_dir: Path, *, lane_kernels: str = "auto", drafter: str = "", drafter_bits: int = 4, mtp_head: str = "",
          vision: bool = False, vision_urls: bool = False, **_: Any) -> tuple[Any, Any]:
     """Load a supported checkpoint with tensor-unit lane kernels when enabled, otherwise the row-exact decoder."""
 
@@ -156,7 +156,8 @@ def load(model_dir: Path, *, lane_kernels: str = "auto", drafter: str = "", draf
             raise ValueError("this format uses the packed affine row kernels; use --lane-kernels auto or off")
         lanes = False
     model, tokenizer = load_lane_model(Path(model_dir))
-    family = lane_family(model, lanes=lanes, drafter=drafter, drafter_bits=drafter_bits, title=TITLE, use=MODELS[0])
+    family = lane_family(model, lanes=lanes, drafter=drafter, drafter_bits=drafter_bits, mtp_head=mtp_head,
+              title=TITLE, use=MODELS[0])
     if vision:
         from tensorfold.vision.qwen_mlx import QwenVisionFrontend
         from tensorfold.vision.rotary import install_rotary
@@ -171,7 +172,7 @@ def load(model_dir: Path, *, lane_kernels: str = "auto", drafter: str = "", draf
 
 
 def lane_family(model: Any, *, lanes: bool, drafter: str, drafter_bits: int, title: str, use: str,
-                make: Any = None) -> Any:
+                make: Any = None, mtp_head: str = "") -> Any:
     """Install the lane kernels (M5) or the row decoder (M1-M4) on ``model``; wrap it in ``make`` (the family)."""
 
     from tensorfold.families.qwen3_5.family import Qwen35Family
@@ -188,6 +189,13 @@ def lane_family(model: Any, *, lanes: bool, drafter: str, drafter_bits: int, tit
     elif not install_row_decoder(model):
         raise SystemExit(f"[tensorfold] {title}: the lane decoder without tensor units does not take these weights")
     loaded = load_drafter(model, drafter, drafter_bits) if drafter else None
+    if mtp_head:
+        from tensorfold.families.qwen3_5 import mtp
+
+        loaded = mtp.MTPDrafter(model, mtp_head)
+        print(f"[tensorfold] drafter {mtp_head} (the checkpoint's own MTP head)", flush=True)
+    else:
+        loaded = load_drafter(model, drafter, drafter_bits) if drafter else None
     make = make or Qwen35Family
     if lanes:
         family = make(model, drafter=loaded, widest=copy_rows(WIDEST, WIDEST), first_copy_rows=WIDEST)
