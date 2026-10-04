@@ -16,15 +16,16 @@ from typing import Any
 
 DEFAULT_CONTEXT = 40960          # long-context parity is verified to 40K; --context takes more where memory allows
 DRAFTS = 5                       # the checkpoint's DSpark block (dspark_block_size) drafts up to 5 tokens a round
-# memory a context token costs: compressed + indexer-key caches (3.2 KB), RoPE tables (0.8 KB), and the prompt
+# memory a context token costs: compressed + indexer-key caches (1.8 KB in fp8), RoPE tables (0.8 KB), and the prompt
 # selection's per-block maxima and flags (512 rows / 8-entry blocks: ~0.3 KB; scores stream in fixed segments)
 def _cache_bytes() -> int:
     """A stream's per-token caches: compressed entries + indexer keys at 2.5 entries a token (ratio-2 sources 2, 8, 14
-    and ratio-1 source 20): bf16 1024 + 256 B an entry, fp8 604 (448 e4m3 + 64 bf16 RoPE + 7 scales) + 134."""
+    and ratio-1 source 20), ``serial.entry_bytes``: bf16 1024 + 256 B an entry, fp8 604 (448 e4m3 + 64 bf16 RoPE + 7
+    scales) + 134, fp4 288 (NVFP4) + 68 (MXFP4)."""
 
-    from .serial import KV_FP8
+    from .serial import entry_bytes
 
-    return int(2.5 * ((604 + 134) if KV_FP8 else (1024 + 256)))
+    return int(2.5 * sum(entry_bytes()))
 
 
 TOKEN_BYTES = _cache_bytes() + 768 + 512 * 4 // 8 + 512 // 8
@@ -57,9 +58,9 @@ CACHE_BYTES = _cache_bytes()     # a stream's per-token caches (compressed entri
 def _comp_bytes() -> int:
     """A stream's per-token compressed entries (the part a display carveout can hold)."""
 
-    from .serial import KV_FP8
+    from .serial import entry_bytes
 
-    return int(2.5 * (604 if KV_FP8 else 1024))
+    return int(2.5 * entry_bytes()[0])
 
 
 def largest_context(free: int, streams: int = 1, carve: int = 0) -> int:
@@ -125,9 +126,9 @@ def carved_bytes(pool: int, carve: int, ratios: tuple[int, ...] = (2, 2, 2, 1)) 
     """Bytes of compressed-entry planes ``_comp_pools`` places in a ``carve``-byte display carveout for a ``pool``-
     token arena: whole planes (one per kv source, ``pool // ratio + 1`` rows), largest first, while each fits."""
 
-    from .serial import KV_FP8
+    from .serial import entry_bytes
 
-    row = (448 + 64 * 2 + 7 * 4) if KV_FP8 else 1024
+    row = entry_bytes()[0]
     placed, left = 0, carve
     for r in sorted(ratios):                             # smallest ratio = largest plane first
         need = (pool // r + 1) * row

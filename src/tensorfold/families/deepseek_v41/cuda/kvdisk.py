@@ -778,12 +778,18 @@ def compat_ident(e, model_dir: str | Path, engram_dir: str | Path) -> dict:
 
     c = e.c
     model_dir = Path(model_dir)
-    comp = e.big.comp[min(c.kv_source_layer_ids)]
+
+    def fmt(t) -> list:                                  # a cache's storage format, self-describing
+        if isinstance(t, K.QRows):
+            return [type(t).__name__, t.dim, list(t.planes), *(getattr(t, a, None) for a in ("plain", "group", "scale"))]
+        return [str(t.dtype), int(t.shape[1])]
+
+    src = min(c.kv_source_layer_ids)
     ident = {
         "format": FORMAT,
         "layout": {"DRING": S.DRING, "WINDOW_ROWS": S.WINDOW_ROWS, "MAX_ROWS": S.MAX_ROWS, "RING": S.RING,
-                   "PROMPT_ROWS": S.PROMPT_ROWS, "KV_FP8": S.KV_FP8, "ALIGN": POOL_ALIGN,
-                   "fp8rows": [comp.plain, comp.group] if isinstance(comp, K.Fp8Rows) else None,
+                   "PROMPT_ROWS": S.PROMPT_ROWS, "ALIGN": POOL_ALIGN,
+                   "kv_format": {"mode": S.KV_MODE, "comp": fmt(e.big.comp[src]), "ik": fmt(e.big.ik[src])},
                    "rings": [[list(t.shape[1:]), str(t.dtype)] for t in e._rings()],
                    "ratios": [int(r) for r in c.layer_ratios], "sources": sorted(int(s) for s in c.kv_source_layer_ids)},
         "drafts": e.drafter is not None, "tail_min": e.tail_min, "deep_reach": e.deep_reach,

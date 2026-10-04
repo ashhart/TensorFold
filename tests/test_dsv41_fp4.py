@@ -6,11 +6,10 @@ oracle (nearest value by distance, ties to the even code, scales from frexp), an
 decode kernels are checked against it byte for byte.
 """
 
+import dsv41_fp4_ref as Q
 import numpy as np
 import pytest
 import torch
-
-import dsv41_fp4_ref as Q
 
 MAGS = np.array(Q.MAGS, dtype=np.float32)
 _E4M3 = torch.arange(0x7F, dtype=torch.uint8).view(torch.float8_e4m3fn).float().numpy()   # 0 .. 448, ascending
@@ -94,7 +93,7 @@ def test_floors_zero_groups_and_signed_zero():
 def test_nvfp4_clamps_when_the_scale_rounds_down():
     x = torch.zeros((1, 16), dtype=torch.bfloat16)
     x[0, 0] = 6.375                                          # 6.375 / 6 = 1.0625 -> e4m3 1.0: 6.375 / 1 clamps to 6
-    packed, sc, deq = Q.nvfp4(x)
+    _, sc, deq = Q.nvfp4(x)
     assert sc.item() == 0x38 and deq[0, 0].item() == 6.0
     assert torch.equal(deq.float(), torch.from_numpy(oracle_nvfp4(x)).float())
 
@@ -360,3 +359,25 @@ def test_blocked_select_over_packed_keys(ties):
             assert torch.equal(flags, mine.to(flags.dtype))
     finally:
         K.SELECT_SEG, K.TIE_KEYS = old
+
+
+@gpu
+@pytest.mark.parametrize("mode", ["bf16", "fp8", "fp4"])
+def test_one_source_of_cache_bytes(mode, monkeypatch):
+    """serial.entry_bytes == the row classes' bytes; the engine's per-token figures and carveout plan follow it."""
+
+    K = _kernels()
+    from tensorfold.families.deepseek_v41.cuda import engine as EN
+    from tensorfold.families.deepseek_v41.cuda import serial as S
+
+    monkeypatch.setattr(S, "KV_MODE", mode)
+    comp, ik = S.entry_bytes()
+    n = 1000
+    rows = {"fp4": (K.Fp4Rows(n, 512, device="cpu"), K.Fp4Rows(n, 128, group=32, scale="ue8m0", device="cpu")),
+            "fp8": (K.Fp8Rows(n, 512, plain=64, device="cpu"), K.Fp8Rows(n, 128, group=128, device="cpu"))}.get(mode)
+    want = (288, 68) if mode == "fp4" else (604, 134) if mode == "fp8" else (1024, 256)
+    assert (comp, ik) == want
+    if rows is not None:
+        assert (rows[0].nbytes(), rows[1].nbytes()) == (n * comp, n * ik)
+    assert EN._cache_bytes() == int(2.5 * (comp + ik)) and EN._comp_bytes() == int(2.5 * comp)
+    assert EN.carved_bytes(4096, 1 << 40) == sum((4096 // r + 1) * comp for r in (2, 2, 2, 1))

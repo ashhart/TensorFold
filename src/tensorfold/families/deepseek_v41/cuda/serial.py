@@ -135,8 +135,14 @@ ONE_GRAPH = os.environ.get("TF_ONE_GRAPH", "1") != "0"  # timing experiments: no
 STEP_READ_THREADS = int(os.environ.get("TF_STEP_THREADS") or "16")   # decode/verify Engram row reads (few rows)
 # decode/verify: each rank reads its share of a token's Engram rows and the graphs all-gather the bytes (same rows)
 SPLIT_READS = os.environ.get("TF_SPLIT_READS", "1") != "0"
-KV_FP8 = (os.environ.get("TF_DSV41_KV_FP8") or "1") == "1"   # compressed entries + indexer keys in fp8 (~1.8 KB a
-#   token instead of 3.2; long parity unchanged: NLL 1.676 / 1.631 / 1.613 at 8K / 24K / 40K vs bf16 1.674 / 1.630 / 1.612)
+# the per-token caches (TF_DSV41_KV): "fp8" (V4's layout: 448 e4m3 + 64 bf16 RoPE dims + 7 fp32 scales an entry, an
+# fp32 scale a key; ~1.8 KB a token instead of 3.2; long parity unchanged: NLL 1.676 / 1.631 / 1.613 at 8K / 24K / 40K
+# vs bf16 1.674 / 1.630 / 1.612), "bf16", or "fp4": V4.1's native numerics (the formats it was trained with): NVFP4
+# entries, MXFP4 indexer keys (890 B a token). TF_DSV41_KV_FP8=0 (the older switch) still means bf16.
+KV_MODE = os.environ.get("TF_DSV41_KV") or ("fp8" if (os.environ.get("TF_DSV41_KV_FP8") or "1") == "1" else "bf16")
+if KV_MODE not in ("bf16", "fp8", "fp4"):
+    raise ValueError(f"TF_DSV41_KV={KV_MODE}: bf16, fp8 or fp4")
+K.TIE_KEYS = KV_MODE == "fp4"
 BLOCKED_SELECT = True        # prompt chunks: segmented indexer top-k (no [rows, keys] fp32 matrix)
 REUSE = os.environ.get("TF_DSV41_REUSE", "1") != "0"    # keep the live caches for a prompt that extends them
 REUSE_MIN = 64               # shorter common prefixes start fresh
@@ -170,6 +176,18 @@ BOUNDED_TAIL = os.environ.get("TF_DSV41_BOUNDED_TAIL", "1") != "0"
 # decode / verify selection: the bounded radix-select top-k (topk.py) over each row's visible entries instead of
 # full-width torch topk / sort / mask chains (the same entries; ties of equal non-zero scores go to the lower index)
 FAST_TOPK = os.environ.get("TF_DSV41_FAST_TOPK", "1") != "0"
+
+
+def entry_bytes(dim: int = 512, kdim: int = 128, rope: int = 64, mode: str | None = None) -> tuple[int, int]:
+    """Bytes of a compressed entry and of an indexer key in ``mode`` (KV_MODE): the one source of the cache sizing
+    (``_comp_pools``, engine's ``_cache_bytes`` / ``_comp_bytes`` / ``carved_bytes``)."""
+
+    mode = mode or KV_MODE
+    if mode == "fp4":
+        return K.Fp4Rows.row_bytes(dim, 16), K.Fp4Rows.row_bytes(kdim, 32)
+    if mode == "fp8":
+        return K.Fp8Rows.row_bytes(dim, rope, 64), K.Fp8Rows.row_bytes(kdim, 0, kdim)
+    return dim * 2, kdim * 2
 
 
 def cached_token_map(tokenizer_json, expected: int) -> np.ndarray:
@@ -529,7 +547,7 @@ class SerialEngine:
             self._comp_pools(E),
             {s_: torch.zeros((S * DRING, 2 * c.head_dim), dtype=F32, device=self.dev)
              for s_ in c.kv_source_layer_ids if c.layer_ratios[s_] == 2},
-            {s_: self._entries(E[s_], c.index_head_dim, KV_FP8, keys=True) for s_ in c.kv_source_layer_ids},
+            {s_: self._entries(E[s_], c.index_head_dim, keys=True) for s_ in c.kv_source_layer_ids},
         )
         big = self.big
         self.stage_swa = [torch.zeros((RING, c.head_dim), dtype=BF, device=self.dev) for _ in self.w.layers]
@@ -658,22 +676,23 @@ class SerialEngine:
         for s_ in sorted(c.kv_source_layer_ids, key=lambda k: -E[k]):
             alloc = None
             if owner is not None:
-                need = self._pool_bytes(E[s_], c.head_dim, KV_FP8)
+                need = E[s_] * entry_bytes(c.head_dim, c.index_head_dim, c.qk_rope_head_dim)[0]
                 if need + 4096 <= owner.free:
                     alloc = owner.take
                     self.carved += need
-            pools[s_] = self._entries(E[s_], c.head_dim, KV_FP8, alloc=alloc)
+            pools[s_] = self._entries(E[s_], c.head_dim, alloc=alloc)
         return {s_: pools[s_] for s_ in c.kv_source_layer_ids}
 
-    @staticmethod
-    def _pool_bytes(n: int, dim: int, fp8: bool) -> int:
-        return n * (448 + 64 * 2 + 7 * 4) if fp8 else n * dim * 2
+    def _entries(self, n: int, dim: int, keys: bool = False, alloc=None):
+        """Per-position cache rows (KV_MODE): bf16; fp8 (``K.Fp8Rows``): compressed entries keep their RoPE dims bf16
+        and a scale per 64 values (DeepSeek's V4 fp8 KV layout), indexer keys a scale per key; fp4 (``K.Fp4Rows``):
+        compressed entries NVFP4 (an e4m3 scale per 16), indexer keys MXFP4 (a 2^k scale per 32)."""
 
-    def _entries(self, n: int, dim: int, fp8: bool, keys: bool = False, alloc=None):
-        """Per-position cache rows: bf16, or fp8 (``K.Fp8Rows``): compressed entries keep their RoPE dims bf16 and
-        a scale per 64 values (DeepSeek's fp8 KV layout), indexer keys a scale per key."""
-
-        if not fp8:
+        if KV_MODE == "fp4":
+            if keys:
+                return K.Fp4Rows(n, dim, group=32, scale="ue8m0", device=self.dev)
+            return K.Fp4Rows(n, dim, group=16, scale="e4m3", device=self.dev, alloc=alloc)
+        if KV_MODE == "bf16":
             return alloc((n, dim), BF) if alloc else torch.zeros((n, dim), dtype=BF, device=self.dev)
         if keys:
             return K.Fp8Rows(n, dim, plain=0, group=dim, device=self.dev)
@@ -1446,11 +1465,17 @@ class SerialEngine:
             if a.ratio == 2:                                            # rows that close no group: the trash row
                 slot = torch.where((ends + 1) % 2 == 0, slot, torch.full_like(slot, self.trash[L]))
             comp_t, ik_t = self.big.comp[L], self.big.ik[L]
-        comp_t.index_copy_(0, slot, K.rope(latent, start, cos, sin))
+        if isinstance(comp_t, K.Fp4Rows):                               # RoPE + quantize, one launch
+            comp_t.store(slot, latent, start, cos, sin)
+        else:
+            comp_t.index_copy_(0, slot, K.rope(latent, start, cos, sin))
         ix = a.indexer
         if ix is not None and ix.wk is not None:                        # this source's indexer keys
             key = K.rmsnorm(ix.wk(latent), ix.k_norm, c.rms_norm_eps)
-            ik_t.index_copy_(0, slot, K.rope(key, start, cos, sin))
+            if isinstance(ik_t, K.Fp4Rows):
+                ik_t.store(slot, key, start, cos, sin)
+            else:
+                ik_t.index_copy_(0, slot, K.rope(key, start, cos, sin))
 
     def _prefetch(self, table, programs: int = 48) -> None:
         """Warm L2 with ``table``'s weights on the prefetch stream (joined by ``_join``)."""
