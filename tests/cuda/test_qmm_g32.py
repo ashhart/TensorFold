@@ -1,5 +1,4 @@
-"""5-, 6- and 8-bit lane matmul in groups of 32: every code exact, a row's bits independent of the row count, the
-4-bit kernel's bits for 4-bit codes, fp32 sums within the reference bound."""
+"""5-, 6- and 8-bit lane matmul in groups of 32: exact codes, row-invariant bits, and helpers that keep the group."""
 
 import pytest
 
@@ -9,6 +8,7 @@ if not torch.cuda.is_available():
     pytest.skip("CUDA only", allow_module_level=True)
 
 from tensorfold.cuda.kernels import affine, qmm  # noqa: E402
+from tensorfold.families.qwen3_5.cuda import qmm_fast  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.weights import QLinear  # noqa: E402
 
 BITS = [5, 6, 8]
@@ -104,8 +104,7 @@ def test_prompt_rows_do_not_depend_on_the_chunk():
 
 @pytest.mark.parametrize("bits", BITS)
 def test_4bit_codes_in_wider_words_give_the_4bit_bits(bits):
-    """q = 2^s q4 with scales / 2^s (exact) at the same K split: the same products in the same order as the 4-bit
-    kernel in groups of 32, so the same bits."""
+    """4-bit codes stored in wider words give the 4-bit group-32 kernel's bits (same products, same order)."""
 
     n, k = 2048, 4096
     g = torch.Generator(device="cuda").manual_seed(13)
@@ -153,3 +152,43 @@ def test_sums_match_the_fp64_reference_as_closely_as_the_generic_kernel(bits, n,
     generic = affine.matmul(x, QLinear(*w, gs=GS, bits=bits), f32=True).double()
     assert ((lane.double() - ref).abs() <= bound).all() and ((generic - ref).abs() <= bound).all()
     assert torch.equal(qmm.matmul(x, q), lane.to(torch.bfloat16))
+
+
+@pytest.mark.parametrize("bits", [4, *BITS])
+def test_tiled_qlinear_keeps_its_group_in_every_helper(bits):
+    """tile/untile, rows() views and copies, callers' 64-input sums, and groups mixing group sizes and widths."""
+
+    plain = QLinear(*_weights(1024, 2048, bits, 41), gs=GS, bits=bits)
+    t = qmm_fast.tile(plain)
+    assert (t.layout, t.bits, t.gs, t.n, t.k) == ("tiled", bits, GS, 1024, 2048)
+    back = qmm_fast.untile(t)
+    assert (back.bits, back.gs) == (bits, GS) and all(
+        torch.equal(a, b) for a, b in zip((back.weight, back.scales, back.biases),
+                                          (plain.weight, plain.scales, plain.biases)))
+    x = torch.randn((9, 2048), device="cuda").bfloat16()
+    xs64 = qmm.group_sums(x, 64)                                         # what the family's glue hands every projection
+    full = qmm.matmul(x, qmm.Q4(t.weight, t.scales, t.biases, 1024, 2048, GS, bits))
+    assert torch.equal(qmm_fast.matmul(x, t), full) and torch.equal(qmm_fast.matmul(x, t, xs64), full)
+    partial = qmm.matmul(x, qmm.pack(*_weights(1024, 2048, bits, 41), GS, bits=bits), f32=True)
+    assert torch.equal(qmm_fast.matmul_partial(x, t, xs64), partial)
+    from tensorfold.families.qwen3_5.cuda.distributed import row_partial
+
+    assert torch.equal(row_partial(x, t, xs=xs64), partial)
+    g64 = qmm_fast.tile(QLinear(*_weights(512, 2048, 8, 43)[:1], *_g64(512, 2048), bits=8))
+    for group in ([t, t], [t, g64], [g64, t]):
+        got = qmm_fast.matmul_group(x, group, xs64)
+        want = [qmm_fast.matmul(x, q) for q in group]
+        assert all(torch.equal(a, b) for a, b in zip(got, want))
+    for a, b in ((0, 512), (64, 320), (100, 900)):                       # a view, then copies off the tile edges
+        part = qmm_fast.rows(t, a, b)
+        assert (part.bits, part.gs, part.n) == (bits, GS, b - a)
+        sub = QLinear(plain.weight[a:b].contiguous(), plain.scales[a:b].contiguous(), plain.biases[a:b].contiguous(),
+                      gs=GS, bits=bits)
+        assert torch.equal(qmm_fast.matmul(x, part, xs64), qmm_fast.matmul(x, qmm_fast.tile(sub)))
+    assert torch.equal(qmm_fast.matmul_rows(x, [qmm_fast.rows(t, 0, 512), qmm_fast.rows(t, 512, 1024)]), full)
+
+
+def _g64(n: int, k: int):
+    g = torch.Generator(device="cuda").manual_seed(n + k)
+    scales = (torch.rand((n, k // 64), generator=g, device="cuda") * 0.002 + 0.0001).to(torch.bfloat16)
+    return scales, (torch.randn((n, k // 64), generator=g, device="cuda") * 0.05).to(torch.bfloat16)

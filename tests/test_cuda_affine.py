@@ -196,12 +196,12 @@ def test_loader_resolves_each_module_and_keeps_metadata_precision():
 def test_generic_memory_counts_eight_bit_words_without_four_bit_padding(tmp_path):
     from tensorfold.families.qwen3_5.cuda.affine_memory import weight_transform
 
-    config = {"quantization": {"bits": 8, "group_size": 32}}
+    config = {"quantization": {"bits": 8, "group_size": 128}}                # groups the lane matmul does not read
     (tmp_path / "config.json").write_text(json.dumps(config))
     prefix = "language_model.model.layers.0.self_attn.q_proj"
     entries, offset = {}, 0
     for suffix, dtype, shape, item in [("weight", "U32", [35, 64], 4),
-                                      ("scales", "BF16", [35, 8], 2), ("biases", "BF16", [35, 8], 2)]:
+                                      ("scales", "BF16", [35, 2], 2), ("biases", "BF16", [35, 2], 2)]:
         size = int(np.prod(shape)) * item
         entries[prefix + "." + suffix] = {"dtype": dtype, "shape": shape, "data_offsets": [offset, offset + size]}
         offset += size

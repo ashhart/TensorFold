@@ -13,8 +13,8 @@ from .weights import QLinear, Weights
 def tile(q: QLinear) -> QLinear:
     if q.layout == "tiled" or not q.lane:
         return q
-    p = shared.pack(q.weight, q.scales, q.biases, 64, bits=q.bits)
-    return QLinear(p.weight, p.scales, p.biases, layout="tiled", rows=q.n, bits=q.bits)
+    p = shared.pack(q.weight, q.scales, q.biases, q.gs, bits=q.bits)
+    return QLinear(p.weight, p.scales, p.biases, layout="tiled", rows=q.n, gs=q.gs, bits=q.bits)
 
 
 def untile(q: QLinear) -> QLinear:
@@ -22,7 +22,8 @@ def untile(q: QLinear) -> QLinear:
 
     if q.layout != "tiled":
         return q
-    return QLinear(*shared.unpack(shared.Q4(q.weight, q.scales, q.biases, q.n, q.k, 64, q.bits)), bits=q.bits)
+    return QLinear(*shared.unpack(shared.Q4(q.weight, q.scales, q.biases, q.n, q.k, q.gs, q.bits)), gs=q.gs,
+                   bits=q.bits)
 
 
 def rows(q: QLinear, a: int, b: int) -> QLinear:
@@ -30,13 +31,14 @@ def rows(q: QLinear, a: int, b: int) -> QLinear:
 
     if a % 64 == 0 and (b - a) % 128 == 0:
         return QLinear(q.weight[a // 64:b // 64], q.scales[:, a:b], q.biases[:, a:b], layout="tiled", rows=b - a,
-                       bits=q.bits)
+                       gs=q.gs, bits=q.bits)
     t0, t1 = a // 64, -(-b // 64)
     part = shared.Q4(q.weight[t0:t1], q.scales[:, t0 * 64:t1 * 64].contiguous(),
                      q.biases[:, t0 * 64:t1 * 64].contiguous(), (t1 - t0) * 64, q.k, q.gs, q.bits)
     w, s, bias = shared.unpack(part)
     lo, hi = a - t0 * 64, b - t0 * 64
-    return tile(QLinear(w[lo:hi].contiguous(), s[lo:hi].contiguous(), bias[lo:hi].contiguous(), bits=q.bits))
+    return tile(QLinear(w[lo:hi].contiguous(), s[lo:hi].contiguous(), bias[lo:hi].contiguous(), gs=q.gs,
+                        bits=q.bits))
 
 
 def matmul_rows(x: torch.Tensor, parts: list[QLinear]) -> torch.Tensor:

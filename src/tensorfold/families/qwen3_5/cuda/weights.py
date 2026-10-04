@@ -29,7 +29,7 @@ class QLinear:
     def k(self) -> int:
         if self.layout == "dense":
             return int(self.weight.shape[1])
-        return int(self.weight.shape[1]) * 64 if self.layout == "tiled" else int(self.scales.shape[1]) * self.gs
+        return int(self.weight.shape[1]) * self.gs if self.layout == "tiled" else int(self.scales.shape[1]) * self.gs
 
     def nbytes(self) -> int:
         return sum(t.numel() * t.element_size() for t in (self.weight, self.scales, self.biases) if t is not None)
@@ -41,10 +41,10 @@ class QLinear:
 
     @cached_property
     def lane(self) -> bool:
-        """Tiled for the lane matmul: 4-, 5-, 6- or 8-bit words in groups of 64 (only ``fast`` 4-bit has prompt
+        """Tiled for the lane matmul: 4-, 5-, 6- or 8-bit words in groups of 32 or 64 (only ``fast`` 4-bit has prompt
         kernels)."""
 
-        return self.bits in (4, 5, 6, 8) and self.gs == 64 and self.layout != "dense" and all(
+        return self.bits in (4, 5, 6, 8) and self.gs in (32, 64) and self.layout != "dense" and all(
             t.dtype == torch.bfloat16 for t in (self.scales, self.biases))
 
 
@@ -316,7 +316,7 @@ def load(model_dir: str | Path, device: str = "cuda", *, tiled: bool = False, ml
         if tiled and pack:
             from .qmm_fast import tile
 
-            return tile(q)                                 # tile() leaves any format but 4- to 8-bit g64 as stored
+            return tile(q)                                 # tile() leaves any format but 4- to 8-bit g32/g64 as stored
         return q
 
     layers = []
