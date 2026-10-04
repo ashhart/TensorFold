@@ -42,3 +42,25 @@ def test_one_turns_checkpoints_are_all_its_newest():
     store.insert([1, 2, 3], ["history"], last_prompt=[1, 2, 3, 4])
     store.insert([9], ["c"], last_prompt=[9, 9])
     assert _order(store) == ["c", "history", "stable"]                   # the next turn may diverge before 3
+
+
+def test_a_finished_reply_matches_at_its_own_position_under_a_plan():
+    store = CheckpointStore(4, copier=lambda c: list(c))
+    starts = {0, 8}
+    usable = lambda n: n in starts                      # the prompt's plan points
+    prompt = [1] * 10
+    reply = [2] * 6
+    store.insert(prompt, ["prompt-end"], last_prompt=prompt)                    # a plan-start checkpoint
+    store.insert(prompt + reply, ["reply-end"], last_prompt=prompt, any_position=True)
+    nxt = prompt + reply + [3] * 12                       # the next turn's prompt, tool message and all
+    entry = store.peek(nxt, usable=usable)
+    assert entry is not None and len(entry.tokens) == 16  # the reply end, not a plan start
+    store2 = CheckpointStore(4, copier=lambda c: list(c))
+    store2.insert(prompt + reply, ["reply-end"], last_prompt=prompt)            # unmarked: the old behaviour
+    assert store2.peek(nxt, usable=usable) is None
+
+
+def test_a_finished_reply_never_extends_a_diverging_prompt():
+    store = CheckpointStore(4, copier=lambda c: list(c))
+    store.insert([1] * 16, ["reply-end"], last_prompt=[1] * 10, any_position=True)
+    assert store.peek([1] * 10 + [9] * 10) is None        # strict prefix still rules

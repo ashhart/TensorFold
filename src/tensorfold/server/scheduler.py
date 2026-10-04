@@ -574,7 +574,7 @@ class Scheduler(PromptFill):
         if retained is not None and self.checkpoints is not None and job.vision is None:
             tokens, cache = retained
             if len(tokens) > len(job.prompt_ids):
-                self.checkpoints.insert(tokens, cache, last_prompt=job.prompt_ids)
+                self.checkpoints.insert(tokens, cache, last_prompt=job.prompt_ids, any_position=True)
         if stream is not None and stream in self.engine.streams:
             self.engine.streams.remove(stream)
         self.completed += 1

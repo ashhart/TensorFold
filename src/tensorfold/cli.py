@@ -463,7 +463,8 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
 
     engine_factory = functools.partial(LaneEngine, prefill_plan=plan,        # every family decodes through lanes
                                        prefill_pass=max(1, int(args.prefill_pass)),
-                                       pass_cache=int(float(args.pass_cache_gib) * 1024**3))
+                                       pass_cache=int(float(args.pass_cache_gib) * 1024**3),
+                                       finished_prefix_tokens=int(args.finished_prefix_tokens))
     sampling = _generation_config(model_dir)
     for key, value in (("temperature", args.temperature), ("top_p", args.top_p), ("top_k", args.top_k),
                        ("min_p", args.min_p)):

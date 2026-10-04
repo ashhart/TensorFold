@@ -102,12 +102,43 @@ def test_a_state_off_the_grid_is_not_resumed_and_decoded_states_are_not_kept():
     assert again.emitted == fresh.emitted
 
 
+def test_a_marked_state_off_the_grid_is_resumed():
+    prompt = list(range(30, 43))
+    fresh = LaneStream("fresh", prompt, 6)
+    _run(_engine(), fresh)
+    engine = _engine()
+    off = engine.model.make_cache()
+    engine.model.hidden(mx.array([prompt[:6]], dtype=mx.uint32), off)   # a state after 6 tokens, off the grid
+    again = LaneStream("again", prompt, 6)
+    engine.add_stream(again, cache=off, cached_tokens=6, any_position=True)
+    while engine.active_count:
+        engine.step()
+    assert again.cached_tokens == 6                                     # a finished reply resumes at its own length
+    assert again.emitted == fresh.emitted
+
+
 def test_without_a_plan_decoded_states_are_kept():
+    engine = LaneEngine(ChunkModel(), retain_finished_caches=True)
+    engine.prefill_plan = None
+    stream = LaneStream("a", list(range(4100)), 4)
+    _run(engine, stream)
+    assert "a" in engine.finished_caches
+
+
+def test_short_finished_states_are_not_kept():
     engine = LaneEngine(ChunkModel(), retain_finished_caches=True)
     engine.prefill_plan = None
     stream = LaneStream("a", list(range(5)), 4)
     _run(engine, stream)
-    assert "a" in engine.finished_caches
+    assert engine.finished_caches == {}            # below finished_prefix_tokens: the copy is not worth a slot
+
+
+def test_the_finished_prefix_floor_is_configurable():
+    engine = LaneEngine(ChunkModel(), retain_finished_caches=True, finished_prefix_tokens=0)
+    engine.prefill_plan = None
+    stream = LaneStream("a", list(range(5)), 4)
+    _run(engine, stream)
+    assert "a" in engine.finished_caches                               # 0: keep a finished state of any length
 
 
 def test_every_prompt_chunk_counts_as_progress():

@@ -86,6 +86,7 @@ class PromptFill:
                 memory.require(current_cache=None if entry is None else entry.cache, keep=entry)
                 take = entry is not None and not memory.fits_now()
             hit = self.checkpoints.match(job.prompt_ids, usable=usable, take=take)
+            own_position = entry is not None and entry.any_position
             entry = None        # held through the prefill, a stored prefix evicted for this prompt's copy stays
             if hit is not None:
                 cached, cache, last_prompt = hit
@@ -122,7 +123,7 @@ class PromptFill:
             stream.label_ids = tuple(job.label_ids)     # the prefill stops at these logits and draws nothing
         job.stream = stream
         filling.steps = self.engine.begin_stream(stream, cache=cache, cached_tokens=cached,
-                                                 checkpoints_at=checkpoints_at)
+                                                 checkpoints_at=checkpoints_at, any_position=own_position)
 
     def _rounds_had_turn(self) -> bool:
         """Whether rounds spent the credit chunks gave them (decode_share of each chunk's time) or fill_rounds ran."""
