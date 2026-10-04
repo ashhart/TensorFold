@@ -87,6 +87,17 @@ Flash Next's optional int8 and int4 KV caches (`families/qwen4_exp/cuda/kvcache.
 The MTP layer TensorFold drafts with comes from that checkpoint's last shard (MIT), converted by
 `families/deepseek_v4/convert.py`.
 
+`src/tensorfold/families/deepseek_v41/vendor/encoding_dsv41.py` is the unmodified `encoding/encoding.py` of
+[deepseek-ai/DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) (revision dba1be0), and
+`tests/fixtures/deepseek_v41/` holds its test cases, MIT License, Copyright (c) 2023 DeepSeek.
+`tests/dsv41_reference.py` ports the forward pass of that checkpoint's `inference/model.py` and the arithmetic of
+its `inference/kernel.py` to plain PyTorch as a test comparator, MIT License, Copyright (c) 2023 DeepSeek.
+`tests/fixtures/deepseek_v41/config.json` is the configuration of the EXL3 export the family serves (DeepSeek's, with
+the export's quantization fields), and `tests/fixtures/deepseek_v41/engram_ids.json` holds n-gram row ids computed by
+that checkpoint's `inference/engram.py` (MIT). The family's CUDA engine (`src/tensorfold/families/deepseek_v41/`) implements the model
+math of `inference/model.py` and `inference/kernel.py`, and `engram_hash.py` the n-gram hashing of
+`inference/engram.py`, without including that source (MIT License, Copyright (c) 2023 DeepSeek).
+
 TensorFold ships no model weights. The `z-lab/Qwen3.8-27B-DFlash2` model card states Apache-2.0.
 The optional `incoai/GLM-5.3-Flash-DFlash2` model card states CC BY-NC-ND 4.0, for non-commercial use
 without derivatives. Each checkpoint keeps its own license.
