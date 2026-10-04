@@ -105,21 +105,12 @@ on high-contrast edges; it is an upscale, not the detail of a larger generation.
 
 ## Audio with the Turbo adapter
 
-With 3 forwards the released audio shift of 3 puts the audio nodes at 1, 0.857 and 0.6, so the last step jumps from
-0.6 to clean. The result is thin: on one 5 s clip the 120-300 Hz band holds 19% of the energy against 22% at 20
-steps, the 1-4 kHz band 27% against 17%, and the first 400 ms sit about 10 dB under the 20-step clip, a fade-in.
-`denoise(..., audio_shift=1.3)` and the tool's `--audio-shift 1.3` move the nodes to 1, 0.72 and 0.39 at no cost:
+Few-step audio varies a lot from take to take. Across six 8 s renders of one prompt (three seeds at 672x384 and at
+1024x576) the 120-300 Hz band held from 8% to 42% of the energy, with no consistent difference between the sizes.
 
-| 5 s clip, 864x480, Turbo, int8 | Forwards | 120-300 Hz | 1-4 kHz | Spectral centroid | First 100-200 ms |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| 20 steps, no adapter | 20 | 21.9% | 17.3% | 692 Hz | -27 dB |
-| Turbo, audio shift 3 (released) | 3 | 18.8% | 27.3% | 1,139 Hz | -37 dB |
-| Turbo, audio shift 1.7 | 3 | 26.9% | 18.3% | 774 Hz | -36 dB |
-| Turbo, audio shift 1.3 | 3 | 23.1% | 17.5% | 737 Hz | -36 dB |
-| Turbo, audio shift 3 | 4 | 30.7% | 18.0% | 817 Hz | -35 dB |
-| Turbo, audio shift 3 | 8 | 35.3% | 13.1% | 660 Hz | -30 dB |
-
-The spoken line is transcribed correctly in every row. On a second prompt (text to video, a scene that opens on
-sound) the first 100 ms are 37 dB under the clip's level at shift 3 and 5 dB under at 1.3. Higher shifts are worse
-(6: centroid 1,668 Hz). Measured, not listened to; two prompts, one seed each.
-\n
+`denoise(..., audio_shift=...)` and the tool's `--audio-shift` change the audio schedule's sigma shift (3 in the
+released model). Lower values measure fuller: on one 5 s clip the spectral centroid went from 1,139 Hz at shift 3 to
+737 Hz at 1.3, against 692 Hz for a 20-step render. A listener then reported speech artifacts at 1.3, and the voice's
+periodicity on an 8 s clip does fall, from 0.47 to 0.40. The spectrum was the wrong thing to optimise; the option is
+kept for experiments and the default stays 3. A fourth forward (`--points 5`) kept the periodicity of the 20-step
+render (0.54) with a centroid of 817 Hz, for a third more time.
