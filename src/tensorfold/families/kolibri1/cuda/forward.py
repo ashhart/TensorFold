@@ -80,8 +80,9 @@ class Model:
         return row * (full * context + (len(cfg.full) - full) * attention.ring_size(PROMPT_CHUNK, cfg.window))
 
     @torch.no_grad()
-    def forward(self, chains: Sequence[Chain], *, prompt: bool, rows: Sequence[int] | None = None) -> torch.Tensor:
-        """fp32 logits of ``rows`` (default: each chain's last); ``prompt``: one chain on the prompt kernels."""
+    def forward(self, chains: Sequence[Chain], *, prompt: bool, rows: Sequence[int] | None = None,
+                features: bool = False):
+        """fp32 logits of ``rows`` (default: each chain's last), or with ``features`` every row's normed state."""
 
         cfg, w = self.cfg, self.w
         if prompt and len(chains) != 1:
@@ -124,6 +125,8 @@ class Model:
                 at += len(c.tokens)
                 ends.append(at - 1)
             rows = ends
+        if features:                                          # every row's normed state, as the head reads it
+            return x
         x = x[torch.tensor(list(rows), device=dev)]
         return shared.router(x, w.head)
 
