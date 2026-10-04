@@ -24,6 +24,15 @@ pytestmark = [pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CU
 from threadcomm import run_ranks  # noqa: E402
 
 
+@pytest.fixture
+def _fill_in_steps(monkeypatch):
+    """These short prompts must still fill a few layers a step while others decode: production fills chunks under
+    FILL_MIN_ROWS whole (a short prompt in steps waited ~10 rounds), so the stepped path is forced here."""
+    from tensorfold.families.glm_moe_dsa.cuda import multi
+
+    monkeypatch.setattr(multi, "FILL_MIN_ROWS", 0)
+
+
 @pytest.fixture(autouse=True)
 def _prompt_rows_4096(monkeypatch):
     """Four rank threads share one GPU here: 8192-row prompt buffers (the serving default, one rank a GPU) four times
@@ -342,7 +351,7 @@ class _Reduce:
         self.c._done()
 
 
-def test_fill_between_layers_four_ranks():
+def test_fill_between_layers_four_ranks(_fill_in_steps):
     """Four ranks, followers mirroring FILL layer ranges, chunks as two overlapped micro-batches paused one layer at
     a time while two streams decode: every reply equals its lone reply."""
     reqs = _ilv_requests()
@@ -358,7 +367,7 @@ def test_fill_between_layers_four_ranks():
     _ilv_check(solo, got, mid, overlap, True, 10)
 
 
-def test_fill_between_layers_graphs():
+def test_fill_between_layers_graphs(_fill_in_steps):
     """One thread (rank 0's quarter), decode rounds replayed as CUDA graphs between fill steps of two layers."""
     reqs = _ilv_requests()
     with torch.no_grad():
@@ -368,7 +377,7 @@ def test_fill_between_layers_graphs():
     _ilv_check(solo, got, mid, overlap, False, 5)
 
 
-def test_fill_between_layers_sp_four_ranks(monkeypatch):
+def test_fill_between_layers_sp_four_ranks(monkeypatch, _fill_in_steps):
     """As test_fill_between_layers_four_ranks with sequence-parallel prompt chunks (TF_GLM53_PROMPT_SP=1): the
     paused chunks run compute_prompt_sp one layer a step, lone replies use it whole; every reply equals its lone
     reply."""
