@@ -2,36 +2,10 @@
 // IQ2_XXS SoA: [half dq[nblk]][pad64][uint64 qs words as 8×u64 per block].
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
-#include <algorithm>
 #include <stdint.h>
 #include <torch/extension.h>
 
 namespace {
-
-__global__ void pack_bn_kernel(const uint8_t* __restrict__ raw, uint8_t* __restrict__ out, int k, int n, int e,
-                               int block, int bn) {
-  const int kg = k / 256;
-  const int nb = (n + bn - 1) / bn;
-  const size_t tiles = (size_t)e * nb * kg;
-  for (size_t tile = blockIdx.x; tile < tiles; tile += gridDim.x) {
-    const int t = (int)tile;
-    const int kg_i = t % kg;
-    const int tmp = t / kg;
-    const int nb_i = tmp % nb;
-    const int e_i = tmp / nb;
-    uint8_t* dst = out + tile * (size_t)bn * block;
-    for (int c = threadIdx.x; c < bn; c += blockDim.x) {
-      const int n_i = nb_i * bn + c;
-      uint8_t* d = dst + c * block;
-      if (n_i >= n) {
-        for (int b = 0; b < block; ++b) d[b] = 0;
-        continue;
-      }
-      const uint8_t* src = raw + (((size_t)e_i * n + n_i) * kg + kg_i) * block;
-      for (int b = 0; b < block; ++b) d[b] = src[b];
-    }
-  }
-}
 
 // One thread per (block, 8-byte qs group). p==0 also writes the half scale.
 __global__ void pack_iq2_soa_kernel(const uint8_t* __restrict__ raw, uint16_t* __restrict__ dq,
@@ -63,18 +37,6 @@ __global__ void pack_q2_soa_kernel(const uint8_t* __restrict__ raw, uint32_t* __
 }
 
 }  // namespace
-
-void gguf_pack_cuda(const at::Tensor& raw, at::Tensor& out, int64_t k, int64_t n, int64_t e, int64_t block,
-                    int64_t bn) {
-  const c10::cuda::CUDAGuard guard(raw.device());
-  const int kg = (int)(k / 256);
-  const int nb = (int)((n + bn - 1) / bn);
-  const size_t tiles = (size_t)e * nb * kg;
-  const int grid = (int)std::min(tiles, (size_t)4096);
-  pack_bn_kernel<<<grid, 128, 0, at::cuda::getCurrentCUDAStream()>>>(
-      raw.data_ptr<uint8_t>(), out.data_ptr<uint8_t>(), (int)k, (int)n, (int)e, (int)block, (int)bn);
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
-}
 
 void gguf_pack_iq2_soa_cuda(const at::Tensor& raw, at::Tensor& out, int64_t nblk, int64_t dq_bytes) {
   const c10::cuda::CUDAGuard guard(raw.device());

@@ -6,7 +6,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .linear import _values, codebook
+from .kernels import _values, codebook
 
 MAX_ELEMENTS = 32 << 20  # One shared buffer, at most 64 MiB per model.
 

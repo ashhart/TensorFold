@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 
-from .linear import codebook
+from .kernels import codebook
 from .prepare import _ext
 
 
@@ -44,38 +44,6 @@ def q2_soa_group_prefill(x: torch.Tensor, weight, plan, out: torch.Tensor, *, sl
     _ext().q2_soa_prefill(
         x_in,
         slot_arg,
-        weight.data,
-        dm_bytes,
-        sc_bytes,
-        plan.items,
-        plan.counts,
-        plan.members,
-        out.reshape(rows * slots, n),
-        n,
-        k,
-        weight.shape[2],
-    )
-
-
-def quantize_q8_1(x: torch.Tensor) -> torch.Tensor:
-    """Quantize contiguous bf16 ``[M, K]`` (K%32==0) to packed ``block_q8_1`` bytes."""
-
-    m, k = x.shape
-    y = torch.empty(m * (k // 32) * 36, dtype=torch.uint8, device=x.device)
-    _ext().quantize_q8_1(x.contiguous(), y)
-    return y
-
-
-def q2_soa_q8_group_prefill(x8: torch.Tensor, weight, plan, out: torch.Tensor, *, slots: int) -> None:
-    """Q2_K SoA × Q8_1 activations into ``out`` [rows, slots, N]."""
-
-    k, n = weight.shape[:2]
-    rows = out.shape[0]
-    dm_bytes = int(weight.bn) & 0xFFFFFFFF
-    sc_bytes = int(weight.bn) >> 32
-    _ext().q2_soa_q8_prefill(
-        x8,
-        slots,
         weight.data,
         dm_bytes,
         sc_bytes,

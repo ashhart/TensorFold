@@ -117,9 +117,9 @@ def test_invalid_expert_ids_and_shapes_are_refused_before_routing():
         packed.linear(x, torch.ones(17, device="cuda", dtype=torch.int32))
 
 
-def test_prepare_tiles_and_decode_row_sharing_match_raw():
+def test_prepare_soa_and_decode_row_sharing_match_raw():
+    """SoA preparation is lossless; narrow grouped rows keep serial reductions."""
     torch.manual_seed(7)
-    """Synthetic 3D IQ2 SoA / Q2 raw: prepare is lossless; grouped prefill matches per-row _mv."""
 
     from tensorfold.cuda.gguf.prepare import prepare_packed
 
@@ -134,7 +134,7 @@ def test_prepare_tiles_and_decode_row_sharing_match_raw():
             raw[:, :2] = np.frombuffer(struct.pack("<e", 0.03125), dtype=np.uint8)
         data = torch.from_numpy(raw.copy()).cuda().flatten()
         packed = Packed(data, (k, n, e), fmt)
-        prepared = prepare_packed(packed, bn=64)
+        prepared = prepare_packed(packed)
         assert prepared.layout == "soa"
         if fmt == "IQ2_XXS":
             from tensorfold.cuda.gguf.prepare import iq2_soa_bytes

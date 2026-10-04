@@ -6,7 +6,8 @@ import torch
 import triton
 import triton.language as tl
 
-from .linear import _values_iq2_soa, codebook
+from .expert_kernels import _values_iq2_soa
+from .kernels import codebook
 
 
 @triton.jit

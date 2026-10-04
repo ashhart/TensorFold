@@ -229,24 +229,3 @@ void gguf_q2_soa_prefill_cuda(const at::Tensor& x, int64_t x_stride, int64_t slo
       reinterpret_cast<__nv_bfloat16*>(out.data_ptr()), (int)n, (int)k, (int)experts, (int)pairs);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
-
-// Keep raw-path symbol for ABI; unused once SoA is default.
-void gguf_q2_prefill_cuda(const at::Tensor& x, int64_t x_stride, int64_t slots, const at::Tensor& w,
-                          const at::Tensor& items, const at::Tensor& counts, const at::Tensor& members,
-                          at::Tensor& out, int64_t n, int64_t k, int64_t experts, int64_t pairs,
-                          int64_t max_items) {
-  TORCH_CHECK(false, "q2 raw prefill retired; use Q2 SoA prepare");
-  (void)x;
-  (void)x_stride;
-  (void)slots;
-  (void)w;
-  (void)items;
-  (void)counts;
-  (void)members;
-  (void)out;
-  (void)n;
-  (void)k;
-  (void)experts;
-  (void)pairs;
-  (void)max_items;
-}

@@ -8,11 +8,10 @@ from pathlib import Path
 
 import torch
 
-from .linear import FORMATS, Packed
+from .linear import Packed
 
 LAYOUT_VERSION = 3  # IQ2 SoA + Q2_K SoA (dm/sc/qs split)
 PREPARE_FORMATS = ("IQ2_XXS", "Q2_K")
-DEFAULT_BN = 64
 
 
 @lru_cache(maxsize=1)
@@ -27,7 +26,6 @@ def _ext():
             str(here / "experts_pack.cu"),
             str(here / "experts_iq2_prefill.cu"),
             str(here / "experts_q2_prefill.cu"),
-            str(here / "experts_q8_act.cu"),
         ],
         extra_cuda_cflags=["-O3", "--fmad=false", f"-I{here.parent}"],
         verbose=False,
@@ -71,19 +69,7 @@ def pack_q2_soa(raw: torch.Tensor, shape: tuple[int, ...]) -> tuple[torch.Tensor
     return out, dm_bytes, sc_bytes
 
 
-def pack_tiles(raw: torch.Tensor, shape: tuple[int, ...], fmt: str, *, bn: int = DEFAULT_BN) -> torch.Tensor:
-    if not prepare_capable(fmt, shape):
-        raise ValueError(f"prepare does not support {fmt} {shape}")
-    k, n, e = shape
-    block = FORMATS[fmt][1]
-    nb = (n + bn - 1) // bn
-    kg = k // 256
-    out = torch.empty(e * nb * kg * bn * block, dtype=torch.uint8, device=raw.device)
-    _ext().pack(raw.contiguous(), out, k, n, e, block, bn)
-    return out
-
-
-def prepare_packed(weight: Packed, *, bn: int = DEFAULT_BN) -> Packed:
+def prepare_packed(weight: Packed) -> Packed:
     """Replace raw GGUF bytes with the prepare layout for this format."""
 
     if weight.layout != "raw" or not prepare_capable(weight.format, weight.shape):
@@ -98,7 +84,7 @@ def prepare_packed(weight: Packed, *, bn: int = DEFAULT_BN) -> Packed:
     return weight
 
 
-def prepare_file(gguf_path: str | Path, out_dir: str | Path, *, bn: int = DEFAULT_BN) -> dict:
+def prepare_file(gguf_path: str | Path, out_dir: str | Path) -> dict:
     """Offline cache: prepare every 3D IQ2/Q2 tensor from a GGUF into ``out_dir``."""
 
     from .weights import Weights
@@ -114,7 +100,7 @@ def prepare_file(gguf_path: str | Path, out_dir: str | Path, *, bn: int = DEFAUL
             packed = weights.tensor(name)
             if not isinstance(packed, Packed):
                 continue
-            prepared = prepare_packed(packed, bn=bn) if packed.layout == "raw" else packed
+            prepared = prepare_packed(packed) if packed.layout == "raw" else packed
             if prepared.layout == "raw":
                 continue
             torch.save(
@@ -133,7 +119,6 @@ def prepare_file(gguf_path: str | Path, out_dir: str | Path, *, bn: int = DEFAUL
             torch.cuda.empty_cache()
     meta = {
         "layout_version": LAYOUT_VERSION,
-        "bn": bn,
         "gguf": str(gguf_path),
         "gguf_size": gguf_path.stat().st_size,
         "gguf_mtime_ns": gguf_path.stat().st_mtime_ns,
@@ -171,7 +156,7 @@ def load_prepared(
     if not path.is_file():
         return None
     blob = torch.load(path, map_location=device, weights_only=True)
-    layout = blob.get("layout", "tile")
+    layout = blob.get("layout", "soa")
     return Packed(
         blob["data"].to(device=device, dtype=torch.uint8),
         tuple(blob["shape"]),
