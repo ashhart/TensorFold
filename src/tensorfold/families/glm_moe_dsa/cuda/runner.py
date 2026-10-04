@@ -275,7 +275,8 @@ class Runner:
         row = len(w.layers) * (c.kv_lora_rank + c.qk_rope_head_dim) * 2         # bf16 latent rows, every layer
         need = row * local * slots
         free = torch.cuda.mem_get_info()[0]
-        spare = float(os.environ.get("TF_GLM53_CACHE_RESERVE_GB", "6")) * (1 << 30)
+        spare = min(float(os.environ.get("TF_GLM53_CACHE_RESERVE_GB", "6")) * (1 << 30), free / 2)   # small GPUs /
+        # several ranks on one GPU (tests: four rank threads): the reserve never exceeds half of what is free
         if need > free - spare:
             fit = max(0, int((free - spare) // (row * slots)) * w.dcp)
             raise RuntimeError(f"context {capacity} x {slots} streams needs {need / 2**30:.1f} GiB of caches a rank, "
