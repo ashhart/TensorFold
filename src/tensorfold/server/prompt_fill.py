@@ -235,8 +235,12 @@ class PromptFill:
                 active_now = int(mx.get_active_memory())
                 env_mem = getattr(getattr(self.admission, "memory", None), "_envelope", None)
                 if env_mem is not None and env_mem.learning:
-                    active_floor = int(getattr(env_mem, "active_floor", 0) or 0)
-                    workspace = max(0, int(mx.get_peak_memory()) - sample[0] + active_floor)
+                    # FIELD rung = the DELTA above arm (peak - active_at_arm). Do NOT
+                    # add boot_floor back: the wired weights are inside active-at-arm,
+                    # and adding the floor re-counts them (live test: 181.8 GiB samples
+                    # for a 9.6 GiB workspace). Floor normalization is for BOOT seeds
+                    # only (they are measured at the zero-KV floor by construction).
+                    workspace = max(0, int(mx.get_peak_memory()) - sample[0])
                     peak_gib = workspace / 1024**3
                     cached = int(getattr(filling.job, "cached_tokens", 0) or 0)
                     accepted = env_mem.observe(len(filling.job.prompt_ids), workspace,
