@@ -40,9 +40,15 @@ class EnvelopeStreamMemory:
 
 
 def _build_envelope_stream(engine: Any, base: Any, seeds: list) -> Any:
-    """Wrap the measured StreamMemory with the admission envelope (flag ON only)."""
+    """Wrap the measured StreamMemory with an admission pricing mechanism (flag ON).
+
+    TF_ADMISSION_MECHANISM selects the mechanism: "hull" (convex-hull envelope,
+    default) or "ladder" (probe-ladder prefix-max staircase). Both share the
+    wrapper below; they differ only in price() semantics and learning shape.
+    """
 
     from tensorfold.engine.envelope import PrefillEnvelope
+    from tensorfold.engine.ladder import LadderWorkspace
 
     model = getattr(engine, "model", None)
     # the DECLARATION is the #245 attribute (family asserts its prefill steps there),
@@ -57,14 +63,20 @@ def _build_envelope_stream(engine: Any, base: Any, seeds: list) -> Any:
     elif isinstance(switch, str) and switch.startswith("args."):
         switch_val = getattr(getattr(model, "args", None), switch[5:], None)
         switch_val = int(switch_val) if isinstance(switch_val, int) and switch_val > 0 else None
-    envelope = PrefillEnvelope([(float(n), float(t)) for n, t in seeds],
-                               switch=switch_val)
+    mechanism = os.environ.get("TF_ADMISSION_MECHANISM", "hull").strip().lower()
+    pts = [(float(n), float(t)) for n, t in seeds]
+    if mechanism == "ladder":
+        inner = LadderWorkspace(pts, switch=switch_val)
+    else:
+        inner = PrefillEnvelope(pts, switch=switch_val)
     seeds_out = ", ".join(f"{n:,}" for n, _ in sorted(seeds))
-    print(f"[tensorfold] admission envelope: seed points at {seeds_out} tokens "
-          f"(raw prefill peaks), margin x{envelope.margin():.2f}, "
-          f"beyond-range pricing: {'hull extension (declared switch)' if switch else 'shipped fit'}",
-          flush=True)
-    return EnvelopeStreamMemory(base, envelope, extend_beyond=bool(switch))
+    print(f"[tensorfold] admission envelope ({mechanism}): seed points at {seeds_out} "
+          f"tokens (raw prefill peaks), margin x{inner.margin():.2f}", flush=True)
+    # the ladder NEVER defers beyond its frontier (global max, by design); the hull
+    # defers to the shipped fit for undeclared families (D8: extension from possibly
+    # wrong-regime seeds silently under-prices) — declaration grants it extension
+    return EnvelopeStreamMemory(base, inner,
+                                extend_beyond=True if mechanism == "ladder" else bool(switch_val))
 
 
 def concurrency(engine: Any, prompt_memory: Any, fraction: float, lanes: int, reply_tokens: int) -> Any:
