@@ -4,6 +4,15 @@ Model-agnostic: a drafted round verifies ``[pending, *drafts]`` like any other d
 serial decoding; a copy proposal only replaces the drafter's for that round. Replies that quote, edit or repeat
 their context (code edits, structured output, tool arguments) accept long copies; prose rarely matches, and a round
 without a match costs one small numpy search.
+
+Adapted from ``tensorfold/families/glm5_next/cuda/copy_drafts.py`` of MiaAI-Lab's GLM-5.3-Flash TensorFold recipe
+(https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold, patches/0007-glm-copy-drafts.patch and
+0032-glm-code-copy-drafts.patch), Apache License 2.0, Copyright 2026 MiaAI-Lab (Mia's AI Lab): ``CopySettings`` /
+``CopyDrafts``, ``MATCH``, the last-token-then-columns search and the ``propose(room)`` rule. Changed for TensorFold:
+model-agnostic (``tensorfold.cuda``), on by default (TF_COPY_DRAFTS / TF_COPY_MATCH / TF_COPY_MAX instead of
+TF_GLM_COPY_*), int64 buffer with ``truncate()``, search limited to the last ``WINDOW`` tokens, the fallback takes the
+occurrence with the most tokens after it; no rank ``code()`` check and none of 0032's reply_match / miss_most / pad.
+The method is prompt lookup decoding (A. Saxena, 2023, https://github.com/apoorvumang/prompt-lookup-decoding).
 """
 
 from __future__ import annotations

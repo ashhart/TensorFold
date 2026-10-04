@@ -1,4 +1,5 @@
-"""Copy drafts propose what followed the latest earlier occurrence of the context's last tokens."""
+"""Copy drafts propose what followed the latest earlier occurrence of the context's last tokens (copy_drafts.py is
+adapted from MiaAI-Lab's GLM-5.3-Flash TensorFold recipe, Apache-2.0; see THIRD_PARTY_NOTICES.md)."""
 
 import pytest
 

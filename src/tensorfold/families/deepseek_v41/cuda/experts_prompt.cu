@@ -1,6 +1,8 @@
 // Grouped EXL3 expert GEMM for prompt chunks: each program decodes a trellis tile once and multiplies it against up to
 // MTP member tiles of 16 rows (the decode kernel re-decodes the tile for every 16 rows). Same Z layout as
 // tensorfold/cuda/exl3/experts_grouped.cuh with one K split, so its epilogues apply unchanged.
+// Reads ExLlamaV3's EXL3 format (https://github.com/turboderp-org/exllamav3, MIT, Copyright (c) 2025 Turboderp); see
+// THIRD_PARTY_NOTICES.md.
 #include <torch/extension.h>
 
 #include "experts_grouped.cuh"

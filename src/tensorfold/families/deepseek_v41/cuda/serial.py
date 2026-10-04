@@ -184,7 +184,10 @@ WIDTHS = [int(v) for v in (os.environ.get("TF_DSV41_WIDTHS") or "65536").split("
 SHARED_GRAPH_POOL = os.environ.get("TF_DSV41_SHARED_GRAPHS", "1") != "0"   # all decode graphs on one memory pool
 # prefill: the layers after the last kv source (21-39) keep no per-token state but their 128-row windows, so a
 # long prompt's early chunks run layers 0-20 only and its last tail_min rows all layers (exact: an early row reaches
-# the end only through those windows, 127 rows a layer); TF_DSV41_BOUNDED_TAIL=0 runs every layer everywhere
+# the end only through those windows, 127 rows a layer); TF_DSV41_BOUNDED_TAIL=0 runs every layer everywhere.
+# Idea after the CED bounded-replay prefill of Jay Leaton's deepseek-v41-tensorfold-spark (TF_DSV41_PREFILL=replay,
+# an approximate replay over a prompt's last 128 rows, itself after DeepSeek's V4.1-Flash report); this exact form
+# and its code are ours (THIRD_PARTY_NOTICES.md)
 BOUNDED_TAIL = os.environ.get("TF_DSV41_BOUNDED_TAIL", "1") != "0"
 # decode / verify selection: the bounded radix-select top-k (topk.py) over each row's visible entries instead of
 # full-width torch topk / sort / mask chains (the same entries; ties of equal non-zero scores go to the lower index)

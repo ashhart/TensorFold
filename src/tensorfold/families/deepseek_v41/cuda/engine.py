@@ -303,6 +303,8 @@ class Dsv41Engine:
             from .serial import PROMPT_ROWS
 
             top = PROMPT_ROWS if self.streams > 1 else (DRAFTS + 1 if drafts else 1)
+            # copy-draft wiring follows MiaAI-Lab's GLM recipe patches 0007 / 0032 (Apache-2.0);
+            # see THIRD_PARTY_NOTICES.md
             if drafts and self.streams == 1 and os.environ.get("TF_COPY_DRAFTS", "1") != "0":   # longer copy windows
                 top = max(top, min(PROMPT_ROWS, int(os.environ.get("TF_COPY_MAX") or 15) + 1))
             for rows in range(2, top + 1):

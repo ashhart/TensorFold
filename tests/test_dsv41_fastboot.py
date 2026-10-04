@@ -1,5 +1,6 @@
 """Prepared folders (fastboot): a tree round-trips with the same bytes, views and structure; keys, checksums, the
-storage guard and pruning (host only)."""
+storage guard and pruning (host only). Follows the cases of Jay Leaton's tests/test_dsv41_fastboot.py
+(deepseek-v41-tensorfold-spark, MIT; see THIRD_PARTY_NOTICES.md)."""
 
 import json
 import os

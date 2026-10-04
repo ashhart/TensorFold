@@ -1,6 +1,8 @@
 """Does cp.async.bulk.prefetch.L2 warm GB10's L2? Times a read of a 12 MB buffer cold (L2 flushed by a 256 MB write)
 and after a bulk prefetch of it from a small kernel, and the same with prefetch.global.L2 lines (the go / no-go
-gate before any L2 prefetch in the decode step). Prefetch kernel after Jay Leaton's l2pf.cu (MIT)."""
+gate before any L2 prefetch in the decode step). The bulk / lines prefetch kernels adapt l2pf.cu's range<Bulk> loop
+(glm5_next/spark/l2pf.cu in deepseek-v41-tensorfold-spark patches/0001, from glm53-tensorfold-spark patch 0460), MIT
+License, Copyright (c) 2026 TensorFold contributors and Jay Leaton; see THIRD_PARTY_NOTICES.md."""
 
 import argparse
 

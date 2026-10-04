@@ -4,6 +4,13 @@ of every stream verified in one forward (``SerialEngine.step_multi``), so the we
 Rows are row-invariant, so a stream's tokens equal its serial decoding however many streams share its rounds. Rank 0
 decides (admissions, prefill steps, each stream's draft count, completions) and sends every decision to rank 1 before
 acting on it; both ranks then compute the same tokens (argmax or position-keyed samples of the gathered logits).
+
+The shared-pool extent lifecycle (``_make_room``, ``_grow``, ``_room``, ``_settle``, ``yield_for``: grow in place,
+else move to a free run, else evict kept prompts; the newest replayable stream gives its rows back) and rank 0
+sending ADMIT / EVICT / MOVE / GROW for rank 1 to apply follow ``glm5_next/cuda/multi.py`` of MiaAI-Lab's
+GLM-5.3-Flash TensorFold recipe (patches 0030, 0040-0042; Apache License 2.0, Copyright 2026 MiaAI-Lab).
+``_settle`` is adapted from its ``_settle``; the rest is rewritten for this engine (sid-keyed messages, the
+fewest whole kept extents chosen up front, no compaction, NoRoom). See THIRD_PARTY_NOTICES.md.
 """
 
 from __future__ import annotations
@@ -371,6 +378,8 @@ class MultiDecoder:
         self._queue(s, base, size, eid, mode, k, m)
 
     # -- extents: a stream's first rows, growth while it decodes ----------------------------------------------------
+    # grow / move / evict / settle: after MiaAI-Lab's GLM recipe patch 0030 multi.py (Apache-2.0); see the module
+    # docstring
     def _most(self, s: Stream) -> int:
         """The rows a stream can ever write: its prompt, its reply and a verify window past it."""
 

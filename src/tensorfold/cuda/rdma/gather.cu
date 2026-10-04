@@ -1,5 +1,14 @@
 // GPU side of the small two-rank all-gather over RoCE (rdma_proxy.c has the host side and the region layout).
 //
+// Two-rank re-implementation of the GPU side of b12x's "RoCEnante" one-shot RoCE all-gather
+// (https://github.com/local-inference-lab/b12x, b12x/comm/roce/_allgather_cute.py at commit
+// 8a99d639410e39d5f39cb4037675331beceea1d4; Apache License 2.0, Luke Alonso and the b12x contributors),
+// after its CUDA C++ port in MiaAI-Lab's GLM-5.3-Flash TensorFold recipe (patches/0006-cuda-roce-allgather.patch,
+// tensorfold/cuda/roce.cu; Apache License 2.0, Copyright 2026 MiaAI-Lab). The five stages, the PTX load/store
+// helpers, the arrival-counter doorbell, the acquire wait on the flag and the device-epoch advance follow that port.
+// Modified for TensorFold: two ranks, one HCA, one flag per slot, a fixed grid, the epoch/counters/stop word in one
+// device state tensor, stop on timeout in place of the poison record.
+//
 // One launch of GRID blocks:
 //   1. every block copies its share of the local shard into the pinned send slot (seq & 1), then fences system-wide;
 //   2. the last block to arrive (a free-running counter, compared modulo GRID) stores the slot's byte count and rings

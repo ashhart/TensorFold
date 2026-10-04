@@ -320,8 +320,8 @@ Follow-up (same day): sublayer timing (graph of one sublayer over layers 4-39, 1
 
 - DSpark up to 5 drafts a round (the checkpoint's `dspark_block_size`; was capped at 3): reasoning 65.5 -> 71.6 tok/s,
   code ~50 -> 57.6, story ~flat (35.1); DSpark == serial. Engine default now 5.
-- Copy (prompt-lookup) drafts (`tensorfold/cuda/copy_drafts.py`, on by default, `TF_COPY_DRAFTS=0` off): when the last
-  8 tokens occurred before, the tokens that followed are verified instead of DSpark's (up to 15, single stream; verify
+- Copy (prompt-lookup) drafts (`tensorfold/cuda/copy_drafts.py`, adapted from MiaAI-Lab's GLM recipe, Apache-2.0;
+  on by default, `TF_COPY_DRAFTS=0` off): when the last 8 tokens occurred before, the tokens that followed are verified instead of DSpark's (up to 15, single stream; verify
   graphs to 16 rows). Edit-style requests, identical replies: rename a class in a 60-line file 79.9 -> 117.3 tok/s,
   add docstrings 76.5 -> 95.2. Standard cases: rarely fire, no change; copy == serial.
 - Concurrent (`--parallel`) rounds do not use copy drafts yet.

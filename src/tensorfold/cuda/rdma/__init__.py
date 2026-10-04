@@ -5,6 +5,12 @@ Here the GPU stages its shard in pinned host memory, a host thread RDMA-writes i
 peer's GPU polls the flag in its own pinned memory: one kernel per gather, CUDA-graph replayable, the same output
 layout (rank order) and bits as NCCL. ``RdmaComm`` sends gathers that fit a slot this way and the rest through NCCL.
 Host side: ``rdma_proxy.c``; GPU side: ``gather.cu``.
+
+The protocol is b12x's "RoCEnante" one-shot all-gather (https://github.com/local-inference-lab/b12x,
+b12x/comm/roce/ at commit 8a99d639410e; Apache License 2.0, Luke Alonso and the b12x contributors), as ported in
+MiaAI-Lab's GLM-5.3-Flash TensorFold recipe (patch 0006-cuda-roce-allgather, roce.py; Apache License 2.0, Copyright
+2026 MiaAI-Lab). Reduced to two ranks and one QP; the NCCL_IB_HCA parse, the NCCL fall-through and the connect error
+follow that port.
 """
 
 from __future__ import annotations

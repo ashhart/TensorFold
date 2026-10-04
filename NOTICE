@@ -12,3 +12,15 @@ Copyright 2026 Jay Leaton (https://x.com/jayleaton)
 deploy/dsv41-tp2/watchdog.sh, deploy/dsv41-tp2/systemd/ and tools/dsv41_{soak,stress,structured}.py adapt
 Apache-2.0 code of https://github.com/jayleaton/deepseek-v41-tensorfold-spark (scripts/serve.sh, scripts/systemd/,
 bench/); each file states what was changed. Its MIT-licensed parts are listed in THIRD_PARTY_NOTICES.md.
+
+GLM-5.3-Flash EXL3 on 2x DGX Spark with TensorFold
+Copyright 2026 MiaAI-Lab
+src/tensorfold/families/deepseek_v41/cuda/pool.py, src/tensorfold/cuda/copy_drafts.py and src/tensorfold/cuda/rdma/
+adapt, and the extent protocol of src/tensorfold/families/deepseek_v41/cuda/multi.py follows, Apache-2.0 code of
+https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold (patches 0006, 0007, 0030, 0032, 0040-0042);
+each file states what was changed.
+
+b12x
+Luke Alonso and the b12x contributors (https://github.com/local-inference-lab/b12x)
+src/tensorfold/cuda/rdma/ re-implements its "RoCEnante" RoCE all-gather protocol (b12x/comm/roce/, commit 8a99d63),
+Apache License 2.0. b12x ships no NOTICE file.

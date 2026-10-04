@@ -606,6 +606,8 @@ def _index_scores(IQ, WTS, KEYS, POS, OUT, n_keys, ratio, KBASE, KS, HI: tl.cons
     q = tl.load(IQ + (r * HI + h[:, None]) * DI + d[None, :])
     # only visible keys are read: a slot sized for a long window (600K) holds ~150K entries of which a decode row
     # sees (p + 1) // ratio; reading the rest cost ~20 MB a layer a step (their scores are -inf either way)
+    # The visible bound follows this repo's GLM sparse._select_rows and MiaAI-Lab's GLM recipe patch 0043 (visible
+    # pools); no code copied.
     live = (sidx < n_keys) & (sidx < n_vis)
     if FP4:
         k = _fp4_rows(KEYS, KS, (kbase + sidx)[:, None].to(tl.int64), live[:, None], d, DI, 32, False).to(tl.bfloat16)
@@ -723,7 +725,11 @@ def top_entries(scores: torch.Tensor, topk: int) -> torch.Tensor:
 
 def candidate_blocks(scores: torch.Tensor, pos: torch.Tensor, ratio: int, block: int, keep: int) -> torch.Tensor:
     """Layer 20's blocks of ``block`` entries scored by their best entry, the newest block pinned, the ``keep`` best
-    kept: int64 [R, keep], -1 padded."""
+    kept: int64 [R, keep], -1 padded.
+
+    DeepSeek's reference has no candidate-block kernel; these semantics follow coolbho3k's
+    DeepSeek-v4.1-Flash-2x-DGX-Spark (release/runtime/ds41/dcp_candidates.py, AGPL-3.0-only) and are checked against
+    the long-context goldens. A separate single-rank implementation: no code copied (THIRD_PARTY_NOTICES.md)."""
 
     R, S = scores.shape
     nb = -(-S // block)
@@ -998,7 +1004,9 @@ def l2_prefetch(table: tuple[torch.Tensor, torch.Tensor], programs: int = 48) ->
 def _l2_bulk(ADDR, BYTES, n, CHUNK: tl.constexpr, B: tl.constexpr):
     """One cp.async.bulk.prefetch.L2 a CHUNK-byte piece of regions (ADDR[j], BYTES[j]): the SM's bulk-copy unit streams
     them into L2 with no registers or data returned (measured on GB10: a 12-20 MB read 1.4-1.5x faster right after;
-    prefetch.global.L2 lines are dropped). Writes nothing. After Jay Leaton's l2pf.cu (MIT)."""
+    prefetch.global.L2 lines are dropped). Writes nothing. Re-implements in Triton the bulk segment kernel of l2pf.cu
+    (glm5_next/spark/l2pf.cu in deepseek-v41-tensorfold-spark patches/0001, from glm53-tensorfold-spark patch 0460),
+    MIT License, Copyright (c) 2026 TensorFold contributors and Jay Leaton; see THIRD_PARTY_NOTICES.md."""
 
     pid = tl.program_id(0)
     npg = tl.num_programs(0)

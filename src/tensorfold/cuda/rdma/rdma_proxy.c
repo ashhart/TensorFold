@@ -1,5 +1,11 @@
 // Host side of TensorFold's small all-gather over RoCE between two machines (no GPUDirect needed).
 //
+// The protocol (a pinned registered ctrl/flags/send/recv region, a proxy thread spinning on ctrl.seq, the payload and
+// then a seq flag RDMA-written on one RC QP) follows b12x's "RoCEnante" proxy, b12x/comm/roce/_roce_proxy.c
+// (https://github.com/local-inference-lab/b12x, commit 8a99d639410e; Apache License 2.0, Luke Alonso and the b12x
+// contributors), as carried in MiaAI-Lab's GLM-5.3-Flash recipe patch 0006 (Apache License 2.0). Rewritten for
+// TensorFold: one RC QP between two ranks, no HCA striping, its own region layout, ABI and connection exchange.
+//
 // Each rank owns one pinned host region, registered with the NIC, laid out as (byte offsets, see tf_rdma_layout):
 //   ctrl   {u32 seq, u32 nbytes[2], u32 error}   the GPU rings seq after staging nbytes[seq & 1] bytes
 //   flags  [2] x 64 bytes                        the peer writes a slot's seq here after the slot's payload

@@ -8,8 +8,9 @@ Baseline to beat (vLLM recipe on the same pair, DSpark k=3): decode 31.6 tok/s �
 aggregate 113.7 at ×6; prefill ~1,000 tok/s to 128k. Per-token weight floor ≈ 3.7 GB/rank → ~17 ms,
 so serial ≈ 45–55 tok/s is the ceiling.
 
-Clean-room rule: the vLLM recipe overlay and `display_kv.c` are **AGPL-3.0**. Read vLLM (Apache-2.0)
-and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this MIT tree.
+Clean-room rule: the MiaAI-Lab vLLM recipe overlay and coolbho3k's `display_kv.c` (DeepSeek-v4.1-Flash-2x-DGX-Spark)
+are **AGPL-3.0**. Read vLLM (Apache-2.0) and DeepSeek's reference (MIT) freely; take only ideas from AGPL code and
+copy none of it into this Apache-2.0 tree.
 
 ## Phase 0 — groundwork
 
@@ -18,7 +19,8 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
   (dev container `tf-dev` on aiai: repo at /tf, models at /models, Engram at /engram-src)
 - [x] Toolchain smoke: `python -m tensorfold.cuda.exl3.inspect` — all 47,900 groups readable (`notes/dsv41/inspect.txt`)
 - [x] Toolchain smoke: `tests/cuda/test_exl3_*` on GB10 — 114 passed, 54 skipped (need other checkpoints)
-- [x] **DRM scanout carveout allocator, clean-room rewrite** (`tensorfold/cuda/carveout.py`, pure ctypes, MIT)
+- [x] **DRM scanout carveout allocator, independent re-implementation of coolbho3k's display_kv idea**
+  (`tensorfold/cuda/carveout.py`, pure ctypes, Apache-2.0, no AGPL code)
   - [x] DRM dumb buffer create/map, `cudaHostRegister(DEVICEMAP)`, torch tensor view, process-lifetime owner
   - [x] Opt-in via `TF_CARVEOUT=1`, size `TF_CARVEOUT_BYTES` (default 1792 MiB), card `TF_DRM_CARD`
   - [x] Probe CLI: `python -m tensorfold.cuda.carveout probe [--cuda]`
@@ -40,7 +42,7 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
 - [x] Single-GPU layer-streaming reference forward, T ≤ 512 (`families/deepseek_v41/reference.py`)
 - [x] Goldens: vLLM `prompt_logprobs` for 7 prompts (`tools/dsv41_golden.py`) → `notes/dsv41/golden.json`
 - [x] Reference vs goldens: 94.2% top-1 / NLL 1.400 vs 1.383 on 365 tokens after dropping q per-head RMS
-      (found with vLLM activation dumps: private recipe copy `/home/docker/ai/vllm-serve/tf-dump`, eager mode,
+      (found with vLLM activation dumps: a private vLLM recipe checkout, eager mode,
       hook in `overlay/patch_memory_log.py`; `tools/dsv41_dump_diff.py`). vLLM itself is noisy on short
       prompts (eager vs CUDA graphs differ by up to 0.6 mean |Δlogprob|).
 - [x] Chat template: the checkpoint's `chat_template.jinja` (V4.1 encoder port; DSML tool calls, reasoning_effort)
@@ -135,7 +137,7 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
 
 ## Ops notes
 
-- vLLM service: `/home/docker/ai/vllm-serve/deepseek41flash-exl3-TP2` (`make`/`recipe/start.sh stop|start`).
+- vLLM service: a private vLLM recipe checkout (`make`/`recipe/start.sh stop|start`).
   OK to stop for GPU work; restart when done.
 - Unified memory: a GB10 OOM once wedged both nodes (2026-09-11). Cap side jobs with
   `systemd-run --scope -p MemoryMax=…`; `--oom-score-adj 1000` on our containers.

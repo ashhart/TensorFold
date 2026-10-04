@@ -10,6 +10,10 @@ How it was used (2026-09-30, found the V4.1 q-norm bug):
   5. run the reference with TF_REF_DUMP_DIR set and compare: tools/dsv41_dump_diff.py REFDIR VLLMDIR
 
 Dumps: embed, l0{0,1,2}_{attn,ffn,gate,engram} (module hooks) and layerNN (full stream, pre/post/comb, residual).
+
+The two anchors below are lines of vLLM's vllm/model_executor/models/deepseek_v4_1/nvidia/model.py
+(https://github.com/vllm-project/vllm, Apache-2.0, Copyright contributors to the vLLM project). The inserted body is
+TensorFold's; this script ships no vLLM or recipe-overlay code.
 """
 
 def _tf_install_dump():

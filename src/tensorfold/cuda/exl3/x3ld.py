@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Jay Leaton. The DeepSeek-V4.1-Flash family of TensorFold (Apache-2.0): see THIRD_PARTY_NOTICES.md.
-# Modified for TensorFold dsv41-cuda: from expert_loads.py, without the PDL launch and probe knobs; TF_EXPERT_LOADS.
+# Modified for TensorFold dsv41-cuda: from patches/0002 src/tensorfold/families/deepseek_v41/cuda/expert_loads.py of
+# deepseek-v41-tensorfold-spark, without the PDL launch and probe knobs; TF_EXPERT_LOADS.
 """The routed experts' load path (``x3ld.cu``): upstream's grouped EXL3 expert kernel with 16-byte, several-deep
 weight loads, the same Z (each output element's warp K range, mma chain and warp sum order are upstream's; only when
 the bytes arrive changes).
