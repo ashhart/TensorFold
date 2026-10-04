@@ -141,9 +141,9 @@ class Scheduler(PromptFill):
         self.proposer_factory = proposer_factory
         # v1.1 learning: solo-fill sampling windows (admission.py hard-failed unless
         # ENVELOPE is on; the switch itself rides the admission's envelope memory)
-        self.learn = bool(admission is not None and admission.memory is not None
-                          and getattr(admission.memory, "_envelope", None) is not None
-                          and os.environ.get("TF_ADMISSION_LEARN") == "1")
+        self.learn = (os.environ.get("TF_ADMISSION_LEARN") == "1"
+                      and admission is not None
+                      and getattr(getattr(admission, "memory", None), "_envelope", None) is not None)
         self.idle_wait = float(idle_wait)
         self.slow_round_ms = 1000.0
         self._held: ChatJob | None = None
