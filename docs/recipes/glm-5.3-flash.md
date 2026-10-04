@@ -38,8 +38,10 @@ sampled code faster, but greedy chat about 4% slower, so the head stays by defau
 
 Brandon M. Music created this EXL3/TR3 checkpoint (`brandonmusic/GLM-5.3-Flash-tr3-4bpw`, ShapleyMCG License 1.0,
 which asks for attribution); `Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw` is a byte-identical re-host of it. Either ID
-serves. It is an experimental CUDA checkpoint. The reader supports 4-bit
-mcg-codebook routed experts with BF16 weights elsewhere, not arbitrary EXL3 layouts. Start it with the
+serves. It is an experimental CUDA checkpoint. The reader supports
+mcg-codebook routed experts with BF16 weights elsewhere, not arbitrary EXL3 layouts. Each expert tensor keeps its own
+width, 1 to 8 bits, read from its trellis, so encodes of this layout at other or mixed widths load too, and the server
+names the mix at startup. An expert runs the same arithmetic as in a layer of its widths alone. Start it with the
 two-rank command above, substituting its checkpoint ID on both ranks. With DFlash2 available, the EXL3
 `auto` policy uses DFlash2; without it, MTP remains available.
 

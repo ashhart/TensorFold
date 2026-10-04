@@ -279,7 +279,9 @@ def test_check_accepts_mlx_4bit_and_mias_exl3_only(tmp_path):
         "exl3": ({"quantization_config": {"quant_method": "exl3", "bits": 4, "codebook": "mcg",
                                           "scope": "glm53_routed_experts_only"}}, True),
         "exl3-3bit": ({"quantization_config": {"quant_method": "exl3", "bits": 3, "codebook": "mcg",
-                                               "scope": "glm53_routed_experts_only"}}, False),
+                                               "scope": "glm53_routed_experts_only"}}, True),
+        "exl3-mixed": ({"quantization_config": {"quant_method": "exl3", "bits": 3.3333, "codebook": "mcg",
+                                                "scope": "glm53_routed_experts_only"}}, True),
         "exl3-all": ({"quantization_config": {"quant_method": "exl3", "bits": 4, "codebook": "3inst",
                                               "scope": "all"}}, False),
     }

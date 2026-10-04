@@ -17,8 +17,9 @@ KERNEL_DEPENDENCIES = ("tensorfold.kernels.qwen.flash_next.v1.prefill_mm",)
 KERNEL_VERSION = "v1"
 # the storage formats each engine reads: MLX affine on a Mac; that or EXL3 routed experts on CUDA
 QUANT_METHODS = {"mlx": ("mlx",), "cuda": ("mlx", "exl3")}
-# the EXL3 variant the CUDA kernels read (4-bit trellis, the "mcg" codebook, routed experts only)
-EXL3_VARIANT = {"bits": 4, "codebook": "mcg", "scope": "glm53_routed_experts_only"}
+# the EXL3 variant the CUDA kernels read (the "mcg" codebook, routed experts only); each expert tensor's width is its
+# own (1 to 8 bits), read from its trellis
+EXL3_VARIANT = {"codebook": "mcg", "scope": "glm53_routed_experts_only"}
 # buffers of 200 ops and 200 MB, so a prompt chunk's memory frees as it runs; no TF32: row kernels repeat fp32
 MLX_ENV = {"MLX_MAX_OPS_PER_BUFFER": "200", "MLX_MAX_MB_PER_BUFFER": "200", "MLX_ENABLE_TF32": "0"}
 
@@ -47,10 +48,21 @@ def check(model_dir: str | Path) -> None:
         # the CUDA engine's layout; the Mac engine refuses it before this through QUANT_METHODS (require_readable)
         found = config.get("quantization_config") or config.get("quantization") or {}
         got = {k: found.get(k) for k in EXL3_VARIANT}
-        if {k: (int(v) if k == "bits" and v is not None else v) for k, v in got.items()} != EXL3_VARIANT:
-            raise ValueError(f"GLM-5.3-Flash's CUDA engine reads EXL3 checkpoints with 4-bit mcg-codebook routed "
-                             f"experts and BF16 elsewhere ({MODELS[1]}); this one has "
+        if got != EXL3_VARIANT:
+            raise ValueError(f"GLM-5.3-Flash's CUDA engine reads EXL3 checkpoints with mcg-codebook routed experts "
+                             f"(a width per tensor) and BF16 elsewhere ({MODELS[1]}); this one has "
                              + ", ".join(f"{k} {v}" for k, v in got.items()) + f". {OWN_MODEL_HELP}")
+        if any(Path(model_dir).glob("*.safetensors")):        # the weights are here: their headers name each width
+            from .cuda.exl3_widths import describe, widths
+
+            try:
+                bits = widths(model_dir)
+            except ValueError as e:
+                raise ValueError(f"GLM-5.3-Flash's CUDA engine does not read this EXL3 checkpoint ({e}). "
+                                 f"{OWN_MODEL_HELP}") from None
+            if len(bits) > 1:
+                print(f"[tensorfold] EXL3 routed experts of mixed widths: {describe(bits)} of their weights",
+                      flush=True)
         print("[tensorfold] EXL3 support is experimental: replies are exact, but the MLX checkpoint "
               f"({MODELS[0]}) is tested more and runs faster (docs/recipes/glm-5.3-flash.md)", flush=True)
     elif quantization(config) != (4, 64) and not (sys.platform == "darwin" and _mac_reads(quantization(config))):

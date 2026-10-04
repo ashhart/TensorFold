@@ -18,14 +18,18 @@ from .qmm import B16, Q4, as_i32, make_b16, make_q4, quantize4, stack_b16, stack
 PREFIX = "model.language_model."
 
 
-def bits_of(quant: dict) -> int:
-    """The checkpoint's one bit width; a mixed-bit encode (bits such as "mixed_k34_per_tensor") is refused by name."""
+def bits_of(quant: dict) -> float:
+    """MLX's one width; EXL3's stated average, or 0 for a label such as "mixed_k34_per_tensor" (a width per tensor)."""
 
     bits = quant.get("bits", 4)
     if isinstance(bits, int) or (isinstance(bits, str) and bits.isdigit()):
         return int(bits)
-    raise ValueError(f"this checkpoint's quantization bits are {bits!r}: GLM-5.3 on CUDA reads one bit width a "
-                     "checkpoint, so mixed-bit EXL3 encodes are not supported yet")
+    if str(quant.get("quant_method") or "").lower() == "exl3":
+        try:
+            return float(bits)
+        except (TypeError, ValueError):
+            return 0
+    raise ValueError(f"this checkpoint's quantization bits are {bits!r}: MLX weights on CUDA take one bit width")
 
 
 @dataclass
@@ -63,7 +67,7 @@ class Config:
     eos: tuple[int, ...]
     mtp_layers: int
     group_size: int
-    bits: int
+    bits: float                # MLX: the one width; EXL3: the stated average (each tensor's own is in its trellis)
     quant: str = "mlx"         # "mlx" (affine 4-bit everywhere) or "exl3" (EXL3 routed experts, BF16 elsewhere)
 
     @classmethod

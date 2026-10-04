@@ -77,7 +77,11 @@ def test_glm_reads_mias_exl3_checkpoint_as_an_experiment(tmp_path, capsys):
     (tmp_path / "config.json").write_text(json.dumps(EXL3))
     glm5_next.check(tmp_path)
     assert "experimental" in capsys.readouterr().out
-    for key, value in (("bits", 3), ("codebook", "3inst"), ("scope", "all_linear")):
+    for bits in (3, 3.3333, "mixed_k34_per_tensor"):               # each expert tensor's width is in its header
+        other = {**EXL3, "quantization_config": {**EXL3["quantization_config"], "bits": bits}}
+        (tmp_path / "config.json").write_text(json.dumps(other))
+        glm5_next.check(tmp_path)
+    for key, value in (("codebook", "3inst"), ("scope", "all_linear")):
         other = {**EXL3, "quantization_config": {**EXL3["quantization_config"], key: value}}
         (tmp_path / "config.json").write_text(json.dumps(other))
         with pytest.raises(ValueError, match="recipe book"):
