@@ -291,7 +291,9 @@ The scrape carries `requests_running`, `requests_waiting`, `prompt_tokens_total`
 (draft tokens verified and kept on finished requests; the engines keep one draft counter, so copies and chain
 drafts share it), `request_latency_seconds`, `time_to_first_token_seconds` and `request_decode_seconds` (each
 finished request's decode time: the CUDA engine's own figure, or first token to end on the Mac server; its `_sum`
-over `generation_tokens_total` is the decode rate), all under the `tensorfold:` prefix. Every reading is repeated under a vLLM-compatible name (`num_requests_running`, `num_requests_waiting`,
+over `generation_tokens_total` is the decode rate) and `request_time_per_output_token_seconds` (vLLM's TPOT: the
+server's clock from a reply's first generated token to its last, over its tokens less one, in buckets from 2.5 ms
+to 1 s; a one-token reply has no gap and adds no sample, where vLLM records 0), all under the `tensorfold:` prefix. Every reading is repeated under a vLLM-compatible name (`num_requests_running`, `num_requests_waiting`,
 `kv_cache_usage_perc`, `spec_decode_num_draft_tokens_total`, `spec_decode_num_accepted_tokens_total`,
 `e2e_request_latency_seconds`, `request_decode_time_seconds`) with identical values, so a dashboard copied from vLLM fills by swapping the
 `tensorfold:` prefix for the metric name. `client_disconnections_total` (requests the client walked away from)

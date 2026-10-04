@@ -21,12 +21,16 @@ class Request:
         self.prompt, self.out, self.stats = prompt, out, None
         self.started = time.perf_counter() if arrived is None else float(arrived)
         self.first: float | None = None
+        self.last: float | None = None
+        self.seen = 0
 
     def saw(self) -> None:
-        """The first generated token has landed in ``out``."""
+        """Generated tokens have landed in ``out``: the first one's clock time, and the latest one's."""
 
-        if self.first is None and self.out:
-            self.first = time.perf_counter()
+        if len(self.out) > self.seen:
+            now = time.perf_counter()
+            self.first = now if self.first is None else self.first
+            self.last, self.seen = now, len(self.out)
 
 
 class Health:
@@ -74,7 +78,8 @@ class Health:
                      drafted=_stat(stats, "drafted"), accepted=_stat(stats, "accepted"),
                      latency=max(0.0, ended - request.started),
                      ttft=(request.first - request.started) if request.first is not None else None,
-                     decode=None if decode is None else max(0.0, float(decode)))
+                     decode=None if decode is None else max(0.0, float(decode)),
+                     tpot=metrics.tpot(request.first, request.last, request.seen))
 
     def snapshot(self, app) -> dict[str, Any]:
         """The counters now: finished totals, live replies' tokens so far, and a concurrent engine's streams."""

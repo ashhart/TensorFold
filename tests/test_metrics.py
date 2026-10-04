@@ -14,7 +14,8 @@ from tensorfold.server.http import make_handler
 
 NAMES = ("requests_running", "requests_waiting", "prompt_tokens_total", "generation_tokens_total",
          "kv_cache_usage_ratio", "mtp_drafted_total", "mtp_accepted_total",
-         "request_latency_seconds", "time_to_first_token_seconds", "request_decode_seconds")
+         "request_latency_seconds", "time_to_first_token_seconds", "request_decode_seconds",
+         "request_time_per_output_token_seconds")
 
 
 def sample(body: str, name: str) -> str:
@@ -194,6 +195,52 @@ def test_decode_seconds_come_from_the_engine_on_cuda_and_from_the_first_token_on
         sample(body, f"{metrics.PREFIX}request_latency_seconds_sum"))
 
 
+def test_tpot_runs_from_the_first_returned_token_to_the_last_on_both_servers(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(time, "perf_counter", lambda: now[0])
+    name = "request_time_per_output_token_seconds"
+
+    cuda = SimpleNamespace()
+    out: list[int] = []
+    with health.of(cuda).running(5, out, arrived=0.0) as request:
+        now[0] = 1.0
+        out.append(7)
+        request.saw()
+        now[0] = 1.024
+        out.extend([8, 9])
+        request.saw()
+        request.saw()                   # a round with nothing new keeps the last token's time
+        out.append(10)                  # a token the server appends itself has no arrival time
+        request.stats = {"decode_s": 5.0}
+        now[0] = 2.0
+    body = metrics.render(cuda)
+    assert sample(body, f"{metrics.PREFIX}{name}_count") == "1"
+    assert sample(body, f"{metrics.PREFIX}{name}_sum") == "0.012", "the gaps the client saw, not the engine's decode"
+    assert bucket(body, name, "0.01") == "0" and bucket(body, name, "0.015") == "1"
+    assert sample(body, f"{metrics.PREFIX}request_decode_seconds_sum") == "5"
+    with health.of(cuda).running(5, [11], arrived=2.0) as request:
+        request.saw()
+    assert sample(metrics.render(cuda), f"{metrics.PREFIX}{name}_count") == "1", "one token has no gap"
+
+    mac = SimpleNamespace()
+    metrics.begin(mac, 6, 0.0)
+    now[0] = 1.0
+    metrics.tokens(1, 1.0)
+    now[0] = 1.024
+    metrics.tokens(3, 1.0)
+    now[0] = 2.0
+    metrics.finish_request()
+    body = metrics.render(mac)
+    assert sample(body, f"{metrics.PREFIX}{name}_count") == "1"
+    assert sample(body, f"{metrics.PREFIX}{name}_sum") == "0.012"
+    assert sample(body, f"{metrics.PREFIX}request_decode_seconds_sum") == "1"
+    metrics.begin(mac, 6, 2.0)
+    metrics.tokens(1, 2.0)
+    metrics.finish_request()
+    assert sample(metrics.render(mac), f"{metrics.PREFIX}{name}_count") == "1", "one token has no gap"
+    assert bucket(metrics.render(mac), "request_decode_seconds", "1") == "2", "the request histograms keep their edges"
+
+
 def test_mac_finish_request_counts_once():
     app = SimpleNamespace()
     metrics.begin(app, 6, time.perf_counter())
@@ -232,6 +279,8 @@ def test_a_mac_chat_counts_the_reply_the_http_thread_returns():
     assert int(reply["completion_tokens"]) > 0
     assert reply["runtime"]["time_to_first_token"] is not None
     assert sample(body, f"{metrics.PREFIX}time_to_first_token_seconds_count") == "1"
+    assert sample(body, f"{metrics.PREFIX}request_time_per_output_token_seconds_count") == (
+        "1" if int(reply["completion_tokens"]) > 1 else "0")
 
 
 def test_a_live_request_is_running_and_the_next_one_is_waiting(tmp_path):
@@ -273,6 +322,7 @@ def test_a_live_request_is_running_and_the_next_one_is_waiting(tmp_path):
         assert int(sample(done, f"{metrics.PREFIX}prompt_tokens_total")) > 0
         assert sample(done, f"{metrics.PREFIX}request_latency_seconds_count") == "2"
         assert sample(done, f"{metrics.PREFIX}time_to_first_token_seconds_count") == "2"
+        assert sample(done, f"{metrics.PREFIX}request_time_per_output_token_seconds_count") == "2"
 
 
 def test_the_vllm_mirror_names_carry_the_same_readings():

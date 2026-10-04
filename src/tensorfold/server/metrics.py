@@ -17,6 +17,9 @@ from tensorfold.server.memory_budget import process_footprint
 PREFIX = "tensorfold:"
 # Request and time-to-first-token histograms share these upper edges. +Inf is added when rendered.
 BUCKETS = (0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0)
+# A token's share of decode runs in milliseconds, below BUCKETS' first edge on a fast model.
+TPOT_BUCKETS = (0.0025, 0.005, 0.0075, 0.01, 0.015, 0.02, 0.025, 0.03, 0.04, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3,
+                0.5, 1.0)
 _MADE = threading.Lock()
 _local = threading.local()
 
@@ -24,8 +27,9 @@ _local = threading.local()
 class Histogram:
     """Counts in one bucket each. Render adds them up into Prometheus's cumulative buckets."""
 
-    def __init__(self) -> None:
-        self.counts = [0] * (len(BUCKETS) + 1)
+    def __init__(self, edges: tuple[float, ...] = BUCKETS) -> None:
+        self.edges = edges
+        self.counts = [0] * (len(edges) + 1)
         self.total = 0.0
         self.n = 0
 
@@ -33,14 +37,14 @@ class Histogram:
         value = max(0.0, float(value))
         self.n += 1
         self.total += value
-        for i, edge in enumerate(BUCKETS):
+        for i, edge in enumerate(self.edges):
             if value <= edge:
                 self.counts[i] += 1
                 return
         self.counts[-1] += 1
 
     def copy(self) -> "Histogram":
-        other = Histogram()
+        other = Histogram(self.edges)
         other.counts = list(self.counts)
         other.total, other.n = self.total, self.n
         return other
@@ -58,10 +62,12 @@ class Metrics:
         self.latency = Histogram()
         self.ttft = Histogram()
         self.decode = Histogram()
+        self.tpot = Histogram(TPOT_BUCKETS)
         self.http_requests: dict[tuple[str, int], int] = {}
 
     def add(self, *, prompt: int, generation: int, drafted: int, accepted: int,
-            latency: float | None, ttft: float | None, decode: float | None = None) -> None:
+            latency: float | None, ttft: float | None, decode: float | None = None,
+            tpot: float | None = None) -> None:
         with self.lock:
             self.prompt += int(prompt)
             self.generation += int(generation)
@@ -73,6 +79,8 @@ class Metrics:
                 self.ttft.observe(ttft)
             if decode is not None:
                 self.decode.observe(decode)
+            if tpot is not None:
+                self.tpot.observe(tpot)
 
 
 def of(app: Any) -> Metrics:
@@ -86,13 +94,14 @@ def of(app: Any) -> Metrics:
 
 
 def note(app: Any, *, prompt: int = 0, generation: int = 0, drafted: int = 0, accepted: int = 0,
-         latency: float | None = None, ttft: float | None = None, decode: float | None = None) -> None:
+         latency: float | None = None, ttft: float | None = None, decode: float | None = None,
+         tpot: float | None = None) -> None:
     """Fold one finished request. A missing app is a no-op."""
 
     if app is None:
         return
     of(app).add(prompt=prompt, generation=generation, drafted=drafted, accepted=accepted,
-                latency=latency, ttft=ttft, decode=decode)
+                latency=latency, ttft=ttft, decode=decode, tpot=tpot)
 
 
 def http_request(app: Any, key: str, status: int) -> None:
@@ -113,6 +122,7 @@ def begin(app: Any, prompt: int, started: float) -> None:
     _local.generation = 0
     _local.started = float(started)
     _local.first = 0.0
+    _local.last = 0.0
     _local.job = None
 
 
@@ -124,13 +134,15 @@ def bind(job: Any) -> None:
 
 
 def tokens(count: int, first: float) -> None:
-    """Generated tokens so far, and the clock time of the first one."""
+    """Generated tokens so far, the clock time of the first one, and now as the latest one's."""
 
     if not getattr(_local, "armed", False):
         return
     _local.generation = int(count)
     if first and not _local.first:
         _local.first = float(first)
+    if count:
+        _local.last = time.perf_counter()
 
 
 def finish_request() -> None:
@@ -148,7 +160,16 @@ def finish_request() -> None:
     note(_local.app, prompt=_local.prompt, generation=_local.generation,
          drafted=int(getattr(stream, "drafted", 0) or 0),
          accepted=int(getattr(stream, "accepted", 0) or 0),
-         latency=max(0.0, ended - _local.started), ttft=ttft, decode=decode)
+         latency=max(0.0, ended - _local.started), ttft=ttft, decode=decode,
+         tpot=tpot(_local.first, _local.last, _local.generation))
+
+
+def tpot(first: float | None, last: float | None, generated: int) -> float | None:
+    """vLLM's TPOT: first to last generated token over the gaps between them; one token has none."""
+
+    if not first or not last or generated < 2:
+        return None
+    return max(0.0, last - first) / (generated - 1)
 
 
 def render(app: Any) -> str:
@@ -159,6 +180,7 @@ def render(app: Any) -> str:
         prompt, generation = metrics.prompt, metrics.generation
         drafted, accepted = metrics.drafted, metrics.accepted
         latency, ttft, decode = metrics.latency.copy(), metrics.ttft.copy(), metrics.decode.copy()
+        per_token = metrics.tpot.copy()
         requests = dict(metrics.http_requests)
     running, waiting = _requests(app)
     pools = _pools(app)
@@ -187,6 +209,9 @@ def render(app: Any) -> str:
     _histogram(lines, "request_decode_seconds",
                "Seconds a finished request spent decoding. Its sum over generation_tokens_total is the decode rate.",
                decode)
+    _histogram(lines, "request_time_per_output_token_seconds",
+               "A finished request's first to last generated token over the tokens less one (vLLM's TPOT).",
+               per_token)
     # the process's own footprint, where the platform counts it (macOS): weights, caches and streams as one number
     footprint = process_footprint()
     if footprint is not None:
@@ -251,7 +276,7 @@ def _histogram(lines: list[str], name: str, help_text: str, hist: Histogram) -> 
     lines.append(f"# HELP {full} {help_text}")
     lines.append(f"# TYPE {full} histogram")
     cumulative = 0
-    for edge, count in zip(BUCKETS, hist.counts):
+    for edge, count in zip(hist.edges, hist.counts):
         cumulative += count
         lines.append(f'{full}_bucket{{le="{_edge(edge)}"}} {cumulative}')
     lines.append(f'{full}_bucket{{le="+Inf"}} {cumulative + hist.counts[-1]}')
@@ -379,5 +404,5 @@ def _edge(value: float) -> str:
     return f"{value:.4f}".rstrip("0").rstrip(".")
 
 
-__all__ = ["BUCKETS", "PREFIX", "Histogram", "Metrics", "begin", "bind", "finish_request", "note", "of", "render",
-           "send", "tokens"]
+__all__ = ["BUCKETS", "PREFIX", "TPOT_BUCKETS", "Histogram", "Metrics", "begin", "bind", "finish_request", "note",
+           "of", "render", "send", "tokens", "tpot"]
