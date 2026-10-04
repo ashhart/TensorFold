@@ -144,7 +144,9 @@ def main():
     parser.add_argument("--int8-out", action="store_true", help="int8 attention-output projection")
     parser.add_argument("--unfused-qkv", action="store_true", help="int8 QKV without the fused norm and rotation")
     parser.add_argument("--keep-adaln", action="store_true", help="keep the AdaLN projection weights loaded")
+    parser.add_argument("--audio-shift", type=float, default=None, help="sigma shift of the audio schedule (released: 3)")
     parser.add_argument("--upscale-vae", help="safetensors of a packed-head (2x) video decoder; frames come out larger")
+    parser.add_argument("--crop", help="WxH: centre-crop the decoded frames before the MP4 is written")
     parser.add_argument("--float-vae", action="store_true", help="video decoder in float32, without int8 kernels")
     parser.add_argument("--first-frame", default=None, help="image the clip starts from (image to video)")
     parser.add_argument("--parity", action="store_true")
@@ -192,7 +194,8 @@ def main():
     latents = denoise(dit, text, tags, args.width, args.height, args.frames, points, args.seed, subset,
                       release=not args.keep_adaln, condition=condition,
                       keyframes=("first",) if condition is not None else (),
-                      on_step=lambda i, n, s: print(f"[tensorfold] step {i}/{n} {s:.2f}s", flush=True))
+                      on_step=lambda i, n, s: print(f"[tensorfold] step {i}/{n} {s:.2f}s", flush=True),
+                      audio_shift=args.audio_shift)
     denoise_seconds = time.perf_counter() - started
     del dit
     gc.collect()
@@ -201,6 +204,13 @@ def main():
     started = time.perf_counter()
     frames, wave, rate = decode(args.model_dir, root, latents, h3.DiTConfig.from_checkpoint(args.model_dir),
                                 int8=not args.float_vae, upscale_decoder=args.upscale_vae)
+    if args.crop:
+        crop_w, crop_h = (int(v) for v in args.crop.lower().split("x"))
+        full_h, full_w = frames.shape[1:3]
+        if crop_w > full_w or crop_h > full_h or (full_w - crop_w) % 2 or (full_h - crop_h) % 2:
+            raise SystemExit(f"cannot centre-crop {full_w}x{full_h} frames to {crop_w}x{crop_h}")
+        top, left = (full_h - crop_h) // 2, (full_w - crop_w) // 2
+        frames = np.ascontiguousarray(frames[:, top : top + crop_h, left : left + crop_w])
     from minimax_h3_mlx.media import save_mp4
 
     mux_started = time.perf_counter()

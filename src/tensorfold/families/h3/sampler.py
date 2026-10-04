@@ -62,11 +62,13 @@ def check_noise(name: str, rows: mx.array) -> None:
 
 def denoise(dit, text, text_tags, width: int, height: int, frames: int, points: int, seed: int = 0,
             subset: tuple[int, ...] | None = None, on_step=None, forward=None, release: bool = False,
-            condition: mx.array | None = None, keyframes: tuple[str, ...] = ()) -> Latents:
+            condition: mx.array | None = None, keyframes: tuple[str, ...] = (),
+            audio_shift: float | None = None) -> Latents:
     """Denoise one clip. ``points`` is the number of sigma points, so ``points - 1`` forwards (fewer with
     ``subset``). ``forward`` replaces the plain DiT call. The AdaLN tables for the whole run are projected once
     up front; ``release`` then frees the projection weights. ``condition`` holds the encoded keyframe rows for
-    ``keyframes`` (``first`` or ``last`` each); they condition every step and are not denoised."""
+    ``keyframes`` (``first`` or ``last`` each); they condition every step and are not denoised. ``audio_shift``
+    replaces the audio schedule's sigma shift (3 in the released model)."""
 
     config = dit.config
     latent_frames = h3.latent_frames(frames)
@@ -83,7 +85,7 @@ def denoise(dit, text, text_tags, width: int, height: int, frames: int, points: 
     check_noise("audio", audio_rows)
 
     video_schedule = Schedule(VIDEO_SHIFT, points, subset)
-    audio_schedule = Schedule(AUDIO_SHIFT, points, subset)
+    audio_schedule = Schedule(AUDIO_SHIFT if audio_shift is None else audio_shift, points, subset)
     table, plan = timestep_plan(packed, video_schedule.timesteps, audio_schedule.timesteps)
     text = text.astype(mx.bfloat16)
     dit.cache_modulation(table, release=release)

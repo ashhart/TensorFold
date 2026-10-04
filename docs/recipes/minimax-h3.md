@@ -101,3 +101,25 @@ One prompt and seed. The 2x decode of the small clip is softer than the native 1
 on high-contrast edges; it is an upscale, not the detail of a larger generation. A 1344x768 generation decodes to
 2688x1536 in the same time as its normal decode.
 
+
+
+## Audio with the Turbo adapter
+
+With 3 forwards the released audio shift of 3 puts the audio nodes at 1, 0.857 and 0.6, so the last step jumps from
+0.6 to clean. The result is thin: on one 5 s clip the 120-300 Hz band holds 19% of the energy against 22% at 20
+steps, the 1-4 kHz band 27% against 17%, and the first 400 ms sit about 10 dB under the 20-step clip, a fade-in.
+`denoise(..., audio_shift=1.3)` and the tool's `--audio-shift 1.3` move the nodes to 1, 0.72 and 0.39 at no cost:
+
+| 5 s clip, 864x480, Turbo, int8 | Forwards | 120-300 Hz | 1-4 kHz | Spectral centroid | First 100-200 ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 20 steps, no adapter | 20 | 21.9% | 17.3% | 692 Hz | -27 dB |
+| Turbo, audio shift 3 (released) | 3 | 18.8% | 27.3% | 1,139 Hz | -37 dB |
+| Turbo, audio shift 1.7 | 3 | 26.9% | 18.3% | 774 Hz | -36 dB |
+| Turbo, audio shift 1.3 | 3 | 23.1% | 17.5% | 737 Hz | -36 dB |
+| Turbo, audio shift 3 | 4 | 30.7% | 18.0% | 817 Hz | -35 dB |
+| Turbo, audio shift 3 | 8 | 35.3% | 13.1% | 660 Hz | -30 dB |
+
+The spoken line is transcribed correctly in every row. On a second prompt (text to video, a scene that opens on
+sound) the first 100 ms are 37 dB under the clip's level at shift 3 and 5 dB under at 1.3. Higher shifts are worse
+(6: centroid 1,668 Hz). Measured, not listened to; two prompts, one seed each.
+\n

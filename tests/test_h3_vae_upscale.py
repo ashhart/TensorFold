@@ -82,3 +82,13 @@ def test_replacement_decoder_head_is_loaded_and_the_rest_kept(tmp_path):
     mx.save_safetensors(str(bad), {"decoder.proj_out.weight": mx.zeros((5 * block, 16))})
     with pytest.raises(ValueError):
         vae_video.load_video_decoder(tmp_path, int8=False, upscale_decoder=bad)
+
+
+def test_audio_shift_moves_the_few_step_nodes_down():
+    from tensorfold.families.h3.schedule import AUDIO_SHIFT, Schedule
+
+    released = Schedule(AUDIO_SHIFT, 4).sigmas
+    lowered = Schedule(1.3, 4).sigmas
+    np.testing.assert_allclose(released, [1.0, 6 / 7, 0.6, 0.0], rtol=1e-6)
+    assert lowered[0] == 1.0 and lowered[-1] == 0.0
+    assert lowered[1] < released[1] and lowered[2] < released[2]  # a smaller last jump to zero
