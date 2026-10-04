@@ -30,7 +30,8 @@ class Scratch:
 class Tables:
     """A round's device tables: rows' streams and conv taps, layers' conv and state pointers, chains, pending rows."""
 
-    def __init__(self, w, scratch: Scratch, segs: Sequence, pending: Sequence[Sequence[int]]) -> None:
+    def __init__(self, w, scratch: Scratch, segs: Sequence, pending: Sequence[Sequence[int]], *,
+                 pending_width: int | None = None) -> None:
         n, rows = len(segs), segs[-1][2]
         lin = scratch.lin
         taps = np.arange(4)[None, :]
@@ -42,6 +43,10 @@ class Tables:
             sid[a0:a1] = s
         entries, starts, slots, most = shared.plan_host([list(range(-1, a1 - a0 - 1)) for _, a0, a1 in segs])
         width = max([len(rows_) for rows_ in pending] + [1])
+        if pending_width is not None:
+            if pending_width < width:
+                raise ValueError("pending_width must hold every pending row")
+            width = pending_width
         held = np.zeros((n, width), dtype=np.int32)             # each stream's last-round kept rows, not yet folded
         for s, rows_ in enumerate(pending):
             held[s, :len(rows_)] = rows_
@@ -55,6 +60,7 @@ class Tables:
         dev = w.device
         i32 = shared.to_device(ints.tolist(), torch.int32, dev)
         i64 = shared.to_device(ptrs.ravel().tolist(), torch.int64, dev)
+        self.ints, self.ptrs = i32, i64
         self.sid, self.win = i32[:rows], i32[rows:5 * rows].view(rows, 4)
         at = 8 * rows + n + 1
         self.plan = shared.Plan(i32[5 * rows:8 * rows].view(rows, 3), i32[8 * rows:at], slots, most)

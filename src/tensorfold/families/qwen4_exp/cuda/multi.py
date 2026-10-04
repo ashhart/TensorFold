@@ -27,6 +27,8 @@ from .multi_solo import Alone, solo
 from .multi_fill import FILL_GUARD, PASS_MIN, PromptPasses
 from .multi_tp import Link as Link
 from .multi_tp import OutOfStep, TwoRanks
+from .multi_target_graphs import (FourStreamTargetGraphs, eligible as target_graph_eligible,
+                                 requested as target_graph_requested)
 from ..cuda import CONFIDENCE, DEPTH
 
 FIRST, STEP = 256, 8192          # rows an idle slot keeps; rows a stream's caches grow by at a time
@@ -50,6 +52,7 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
     def __init__(self, w, *, slots: int, capacity: int, depth: int = DEPTH, confidence: float = CONFIDENCE,
                  stop_eos: bool = True, keep: int = 8, kv_dtype: str = "bf16", prefill_rows: int = PREFILL_ROWS,
                  share: float = SHARE, points=None, graphs: bool = True, vision=None, workspace_bytes: int = 0) -> None:
+        target_graphs = target_graph_requested()
         self.link = self.follower = None
         self.planning, self.pass_plan, self.mixed_plan = False, None, None
         self.pass_index, self.pass_width = 0, prefill_rows
@@ -73,6 +76,8 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
         self.solo = (solo(w, self.free[0], capacity, depth, self.pbuf)
                      if graphs and depth > 0 and self.mbuf is not None else None)
         self.solo_on = self.solo is not None
+        self.four_stream_target_graphs = (FourStreamTargetGraphs()
+                                         if target_graphs and graphs and depth == 6 and w.comm is None else None)
         self.slot_bytes = sum(t.numel() * t.element_size() for t in _tensors(self.free[0]))
         self.window_bytes = self.free[0].cache_bytes(capacity)          # one stream's caches at the full window
         free = torch_live(torch, available_bytes) if torch.cuda.is_available() else None
@@ -352,7 +357,11 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
                 ended += self._failed(pieces, exc)
                 pieces = []
         held = [self.held.pop(s.sid, []) for s in live]
-        tables = self.buf.gdn_tables = gdn_multi.Tables(self.w, self.gdn, segs, held)
+        target = self.four_stream_target_graphs
+        admitted = target is not None and not pieces and target_graph_eligible(
+            self.w, self.buf, segs, held, live, depth=self.depth, filling=bool(self.filling))
+        tables = self.buf.gdn_tables = gdn_multi.Tables(
+            self.w, self.gdn, segs, held, pending_width=7 if admitted else None)
         self.buf.attn_step = attn_multi.Step(self.w, segs, mtp=False)
         try:
             if pieces:                                 # the window and the pass: each layer's experts once for both
@@ -361,7 +370,10 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
                 heads = heads[:len(pends)].clone() if pends else None
                 candidates = self._prompt_candidates(len(pends))
             else:
-                logits = compute(self.w, segs, self.buf)
+                logits = target.run(self.w, self.buf, segs, tables, self.buf.attn_step,
+                                    admitted=admitted) if target is not None else None
+                if logits is None:
+                    logits = compute(self.w, segs, self.buf)
         finally:
             self.buf.gdn_tables = self.buf.attn_step = None
         lasts = self._absorb(pieces, psegs, cuts) if pieces else None
