@@ -653,6 +653,32 @@ def untie(scores: torch.Tensor, first: int = 0) -> torch.Tensor:
 TIE_KEYS = False
 
 
+@triton.jit
+def _tie_pick(X, THR, OUT, S, K: tl.constexpr, BS: tl.constexpr):
+    """Row r of X [R, S] fp32: the columns above THR[r] (its k-th value) and the lowest-index ones equal to it, K in
+    all, ascending into OUT [R, K] int64 (two passes: count above, then select with running counts)."""
+
+    r = tl.program_id(0).to(tl.int64)
+    thr = tl.load(THR + r)
+    above = 0
+    for s0 in range(0, S, BS):
+        o = s0 + tl.arange(0, BS)
+        x = tl.load(X + r * S + o, mask=o < S, other=0.0)
+        above += tl.sum(((x > thr) & (o < S)).to(tl.int32), 0)
+    need = K - above
+    eqs = 0
+    outs = 0
+    for s0 in range(0, S, BS):
+        o = s0 + tl.arange(0, BS)
+        live = o < S
+        x = tl.load(X + r * S + o, mask=live, other=0.0)
+        eq = (x == thr) & live
+        keep = ((x > thr) & live) | (eq & (eqs + tl.cumsum(eq.to(tl.int32), 0) <= need))
+        tl.store(OUT + r * K + outs + tl.cumsum(keep.to(tl.int32), 0) - 1, o.to(tl.int64), mask=keep)
+        eqs += tl.sum(eq.to(tl.int32), 0)
+        outs += tl.sum(keep.to(tl.int32), 0)
+
+
 def topk_lo(x: torch.Tensor, k: int, ids: torch.Tensor | None = None, sorted: bool = True):
     """torch.topk(x, k, dim=1) -> (values, ids), equal values going to the lower id (``ids`` [R, n] int64, default
     the column): one int64 topk over (the fp32 bits made monotone) << 32 | (2^31 - 1 - id)."""
@@ -660,16 +686,15 @@ def topk_lo(x: torch.Tensor, k: int, ids: torch.Tensor | None = None, sorted: bo
     if not TIE_KEYS:
         v, i = torch.topk(x, k, dim=1, sorted=sorted)
         return v, (i if ids is None else torch.gather(ids, 1, i))
-    if ids is None:
-        # the same set from fp32 top-ks (an int64 top-k is ~3-8x one in fp32, the prompt indexer's main cost at long
-        # context): all above the k-th value, then the lowest-index entries equal to it, picked as a 0/1 mask's
-        # top-k (exactly k ones: their set whatever the order); sorted: by value, ties by index
-        thr = torch.topk(x, k, dim=1, sorted=False).values.amin(1, keepdim=True)
-        gt, eq = x > thr, x == thr
-        sel = gt | (eq & (eq.cumsum(1, dtype=torch.int32) <= k - gt.sum(1, keepdim=True, dtype=torch.int32)))
-        i = torch.topk(sel.to(torch.float16), k, dim=1, sorted=False).indices
+    if ids is None and x.dtype == torch.float32:
+        # the same set from one fp32 top-k (an int64 top-k is ~3-8x one in fp32, the prompt indexer's main cost at
+        # long context): its k-th value, then _tie_pick: everything above it and the lowest-index entries equal to
+        # it, ascending; sorted: by value, ties by index
+        x = x.contiguous()
+        thr = torch.topk(x, k, dim=1, sorted=False).values.amin(1).contiguous()
+        i = torch.empty((x.shape[0], k), dtype=torch.int64, device=x.device)
+        _tie_pick[(x.shape[0],)](x, thr, i, x.shape[1], K=k, BS=1024, num_warps=4)
         if sorted:
-            i = torch.sort(i, dim=1).values
             i = torch.gather(i, 1, torch.sort(torch.gather(x, 1, i), dim=1, descending=True, stable=True).indices)
         return torch.gather(x, 1, i), i
     b = x.contiguous().view(torch.int32).long()
