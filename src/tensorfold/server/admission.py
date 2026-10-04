@@ -26,7 +26,7 @@ class EnvelopeStreamMemory:
     # attributes the admission path reads on StreamMemory, forwarded explicitly
     # (no __getattr__: special-method and type checks must not silently proxy)
     _FORWARD = ("short", "short_tokens", "long", "long_tokens", "per_token",
-                "round_bytes", "chunk", "prefill_a", "prefill_b")
+                "round_bytes", "chunk", "prefill_a", "prefill_b", "stream_bytes")
 
     def __init__(self, base: Any, envelope: Any, extend_beyond: bool) -> None:
         self._base = base
