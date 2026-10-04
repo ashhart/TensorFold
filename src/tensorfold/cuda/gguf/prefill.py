@@ -1,4 +1,4 @@
-"""Bounded Q8 prompt scratch: decode once, then reuse fixed-order BF16 dots."""
+"""Bounded Q8 prompt scratch: decode once, then use BF16 operands and FP32 sums."""
 
 from __future__ import annotations
 
@@ -23,22 +23,17 @@ def _gemm(X, W, OUT, M: tl.constexpr, N: tl.constexpr, K: tl.constexpr, GROUPS: 
     group = tl.program_id(2)
     width = N // GROUPS
     m = tl.program_id(0) * 128 + tl.arange(0, 128)
-    n = group * width + tl.program_id(1) * 64 + tl.arange(0, 64)
-    k = tl.arange(0, 32)
-    acc = tl.zeros((128, 64), tl.float32)
-    for start in range(tl.cdiv(K, 32)):
-        ki = start * 32 + k
+    n = group * width + tl.program_id(1) * 128 + tl.arange(0, 128)
+    k = tl.arange(0, 64)
+    acc = tl.zeros((128, 128), tl.float32)
+    for start in range(tl.cdiv(K, 64)):
+        ki = start * 64 + k
         a = tl.load(X + m[:, None] * GROUPS * K + group * K + ki[None, :], (m[:, None] < M) & (ki[None, :] < K), 0).to(
             tl.bfloat16
         )
         offset = n[None, :] * K + ki[:, None]
         mask = (ki[:, None] < K) & (n[None, :] < (group + 1) * width)
-        # Byte operands retain the packed kernel's kWidth=4 fragment ordering.
-        # A direct BF16 load uses kWidth=2 and changes FP32 accumulation bits.
-        words = W.to(tl.pointer_type(tl.uint8))
-        lo = tl.load(words + offset * 2, mask, 0).to(tl.uint16)
-        hi = tl.load(words + offset * 2 + 1, mask, 0).to(tl.uint16)
-        b = (lo | (hi << 8)).to(tl.bfloat16, bitcast=True)
+        b = tl.load(W + offset, mask, 0)
         acc = tl.dot(a, b, acc)
     tl.store(OUT + m[:, None] * N + n[None, :], acc, (m[:, None] < M) & (n[None, :] < (group + 1) * width))
 
@@ -51,9 +46,8 @@ class Workspace:
 
     @staticmethod
     def accepts(rows: int, k: int, n: int) -> bool:
-        # Short chunks cannot amortize decoding. Narrow-K projections prefer
-        # the packed kernel; cap scratch instead of expanding resident weights.
-        return rows >= 1024 and k >= 4096 and n >= 1024 and k * n <= MAX_ELEMENTS
+        # Amortize decoding without expanding the resident weights.
+        return rows >= 1024 and k >= 1024 and n >= 1024 and k * n <= MAX_ELEMENTS
 
     def _prepare(self, weight, device):
         k, n = weight.shape
@@ -66,8 +60,8 @@ class Workspace:
 
     def matmul(self, weight, x: torch.Tensor, out: torch.Tensor) -> None:
         k, n = self._prepare(weight, x.device)
-        _gemm[(triton.cdiv(x.shape[0], 128), triton.cdiv(n, 64))](
-            x, self.w, out, x.shape[0], n, k, num_warps=8, num_stages=3, enable_fp_fusion=False
+        _gemm[(triton.cdiv(x.shape[0], 128), triton.cdiv(n, 128))](
+            x, self.w, out, x.shape[0], n, k, num_warps=8, num_stages=4, enable_fp_fusion=False
         )
 
     def grouped(self, weight, x: torch.Tensor, *, dtype=torch.bfloat16) -> torch.Tensor:
@@ -76,7 +70,7 @@ class Workspace:
         k, n = self._prepare(weight, x.device)
         rows, groups, _ = x.shape
         out = torch.empty((rows, n), device=x.device, dtype=dtype)
-        _gemm[(triton.cdiv(rows, 128), triton.cdiv(n // groups, 64), groups)](
-            x, self.w, out, rows, n, k, groups, num_warps=8, num_stages=3, enable_fp_fusion=False
+        _gemm[(triton.cdiv(rows, 128), triton.cdiv(n // groups, 128), groups)](
+            x, self.w, out, rows, n, k, groups, num_warps=8, num_stages=4, enable_fp_fusion=False
         )
         return out

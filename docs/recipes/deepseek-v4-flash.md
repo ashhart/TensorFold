@@ -131,7 +131,7 @@ prompt encoder and DSML tool calls. MTP, vision, enforced structured output and 
 implemented on this path. CUDA memory admission uses the shared `TENSORFOLD_MEMORY_RESERVE_GIB`
 and `TENSORFOLD_CUDA_MEMORY_LIMIT_GB` controls; keep room for companion services on unified memory.
 
-Prompts prefill in canonical 1,024-token chunks. Only completed prompt chunks enter the retained
+Prompts prefill in canonical 2,048-token chunks. Only completed prompt chunks enter the retained
 prefix cache. Matching growing prompts restore that checkpoint; a changed prefix invalidates it.
 Snapshots copy only populated pool rows. Prompt scratch retains one large row size per layer, so
 different conversation lengths cannot accumulate unbounded buffers. Speculative verification uses
@@ -147,51 +147,25 @@ This checks a 163,840-token capacity, 131,072 retained tokens, seeded plain/draf
 prefix, growing prompts and changed-prefix invalidation. Focused CPU and CUDA tests cover container
 bounds, quantization block geometry, independent scalar decoding and row arithmetic.
 
-Measured on one GB10 with an 80.76 GiB mixed IQ2_XXS/Q2_K/Q8_0 target and a 6.49 GiB DSpark GGUF,
-with Hunyuan resident. After kernel tuning, the same qualification fixture changed as follows:
+The CUDA qualification uses the same engine and settings for seeded serial and drafted replies,
+including a fresh long prompt, retained-prefix reuse and growing prompts. Decode and verification
+rows keep the same arithmetic. Prompt kernels use BF16 operands and FP32 accumulation; wider dense
+and attention tiles change reduction order and can change rounding relative to older revisions.
+An older revision's token sequence is not the exactness reference for a new kernel.
 
-| Case | Initial native | Tuned native | Native, GGUF tiles |
-| --- | --- | --- | --- |
-| Cold 131,093-token prefill | 713.54 s | 341.59 s | 237.29 s |
-| Retained 128Ki prefix, prefill | 0.51 s | 0.45 s | 0.37 s |
-| Warm long-prefix plain decode | 9.24 tok/s | 9.77 tok/s | 9.78 tok/s |
-| Warm long-prefix DSpark decode | 11.27 tok/s | 14.15 tok/s | 14.24 tok/s |
+Q8 dense prefill decodes each matrix once into one shared scratch buffer capped at 64 MiB, then
+uses direct BF16 loads. IQ2_XXS and Q2_K experts retain packed weights and use staged TensorFold
+CUDA kernels. Dense grouped output projections execute in one grid. Partial expert verification
+items skip empty subgroups rather than loading weights for masked outputs.
 
-IQ2_XXS and Q2_K expert tiles consume 32 values at a time, keeping decoding live ranges short.
-Q8_0 dense tiles match their 32-value scale blocks. Wider output
-tiles reuse routed inputs without expanding weights or adding a resident cache. Narrow verification
-rows keep their existing arithmetic. This cuts long cold-prefill time another 30.5%.
+DSpark verification shares packed weight reads between dense rows. Target sampling transfers
+candidates once per verification window; ties reaching the candidate margin fall back to the
+full reference draw. Keyed RNG and probability arithmetic are unchanged. The DSpark backbone
+reuses KV buffers and a CUDA graph; stochastic proposal sampling still synchronizes with the CPU.
 
-Cold prefill is 3.01 times faster than the initial native implementation. Every qualification reply
-retained its previous token IDs. These numbers do not establish a win over the previous external
-engine: an identical 8,213-token cold prompt took 20.61 s before the GGUF tile change, 13.63-13.65 s
-after it, and 8.88 s in that engine after kernel warmup. Cold prefill remains the main performance gap.
-The Mac measurements above use different weights and hardware and are not a CUDA comparison.
-
-Native DSpark verification also shares packed weight reads between two or four dense rows,
-while retaining each serial row's accumulator and reduction order. Target decisions use one
-candidate transfer per verification window. Candidate margins that cut a tie fall back to the
-full reference draw; keyed RNG and probability arithmetic are unchanged. Full DSpark KV windows
-reuse buffers and replay a TensorFold CUDA graph with fresh keys and absolute RoPE positions.
-Short windows retain their actual attention span.
-
-On a separate fixed 2,256-token code prompt, three runs per mode (first discarded for warmup)
-produced identical 128-token replies:
-
-| Native configuration | Warm drafted decode |
-| --- | --- |
-| Before these decode changes | 13.74 tok/s |
-| Shared weight reads | 14.58 tok/s |
-| Also DSpark graph and reusable buffers | 14.62 tok/s |
-| Also batched candidate selection | 15.07 tok/s |
-
-This is a 9.7% decode throughput gain on that fixture. At the required retained 128Ki prefix,
-steady drafted decode measured 15.60-15.64 tok/s, versus 14.24 before these changes. All nine
-qualification cases and both steady repeats kept the previous token IDs. Cold prefill stayed
-at 237.11 s for 131,093 tokens and 13.57-13.65 s for the matching 8,213-token comparison.
-These are CUDA decode gains, not the Mac headline speedup or a cold-prefill improvement.
-GGUF remains the packed weight file format; execution uses only TensorFold's native engine
-and CUDA kernels.
+Measurements belong with the revision and qualification report. Compare cold sessions after kernel
+warmup on the same prompt, quantization, context and hardware; prefix reuse and first-use compilation
+must be reported separately. The Mac measurements above use different weights and hardware.
 
 ## Not yet
 

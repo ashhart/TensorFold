@@ -120,7 +120,8 @@ def attend(q, raw, pool, picks, sink, *, start, rawbase, ratio, window=128, draf
         raise ValueError("attention picks must be int32 [rows,slots]")
     out = torch.empty_like(q)
     picked = picks is not None
-    _attend[(rows, triton.cdiv(heads, 16))](
+    head_rows = 32 if rows > 16 else 16
+    _attend[(rows, triton.cdiv(heads, head_rows))](
         q.contiguous(),
         raw.contiguous(),
         pool if pool is not None else raw,
@@ -138,7 +139,7 @@ def attend(q, raw, pool, picks, sink, *, start, rawbase, ratio, window=128, draf
         heads,
         dims,
         window,
-        16,
+        head_rows,
         32,
         num_warps=8,
         enable_fp_fusion=False,

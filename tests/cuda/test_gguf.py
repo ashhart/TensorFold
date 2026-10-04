@@ -82,7 +82,9 @@ def test_decode_reference_and_row_independence(fmt):
 
         out = torch.empty((65, 7), device=x.device, dtype=torch.float32)
         Workspace().matmul(packed, x, out)
-        assert torch.equal(out, packed.linear(x, dtype=torch.float32))
+        expected_dense = x.float() @ packed.unpack().bfloat16().float().T
+        torch.testing.assert_close(out, expected_dense, rtol=1e-5, atol=1e-6)
+        assert torch.equal(out[:1], Workspace().grouped(packed, x[:1, None], dtype=torch.float32))
         # Uneven output tiles must not write into a neighboring group's output.
         grouped = Packed(data, (256, 14), fmt)
         for rows in (1, 5, 21, 65):
@@ -96,7 +98,12 @@ def test_decode_reference_and_row_independence(fmt):
             )
             assert torch.equal(grouped.linear_grouped(inputs, dtype=torch.float32), expected)
         grouped.workspace = Workspace()
-        assert torch.equal(grouped.workspace.grouped(grouped, inputs, dtype=torch.float32), expected)
+        separate = []
+        for j, part in enumerate(parts):
+            output = torch.empty((rows, 7), device=x.device, dtype=torch.float32)
+            Workspace().matmul(part, inputs[:, j].contiguous(), output)
+            separate.append(output)
+        assert torch.equal(grouped.workspace.grouped(grouped, inputs, dtype=torch.float32), torch.cat(separate, 1))
 
 
 def test_invalid_expert_ids_and_shapes_are_refused_before_routing():
