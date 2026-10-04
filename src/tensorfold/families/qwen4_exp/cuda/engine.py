@@ -162,9 +162,10 @@ class FlashNextEngine:
             raise ValueError("this checkpoint has no MTP head, which Flash Next's CUDA engine drafts with: use one "
                              "that has it, or --no-drafts for the serial reference (one token a round)")
         self.w = w
-        from tensorfold.cuda.markers import resume_points
+        from tensorfold.cuda.markers import checkpoint_rows, resume_points
 
-        self.points = resume_points(model_dir)          # a prompt's message starts to keep states at, or None
+        # a prompt's message starts (and its system-block checkpoint) to keep states at, or None
+        self.points = resume_points(model_dir, checkpoint_rows())
         if vision:
             from tensorfold.vision.qwen_cuda import QwenCudaVision
 
