@@ -116,7 +116,13 @@ switch=None: one ladder; int switch: pre/post ladders (a declared regime)."""
                 break
             running = max(running, y)
         margin = self._bracket_margin(ladder, L, frontier)
-        return margin * max(running, upper)
+        covered = max(running, upper)
+        # insurance is never compounded: the density margin and the sparse-margin
+        # insurance are the same guarantee over the same covered peak — take the
+        # max of the RATIOS, applied once (property tests caught 1.5 x 1.5 = 6.75x
+        # compounding on a flat family with a late step).
+        effective = max(margin, MARGIN_SPARSE if frontier else MARGIN_DENSE)
+        return effective * covered
 
     def note_underprice(self, L: int, admitted_price: float, observed: float) -> None:
         """Post-fill audit (hull's counter, absorbed per the round-2 verdict): a real
