@@ -1,0 +1,307 @@
+const std = @import("std");
+const builtin = @import("builtin");
+const cuda_build = @import("zig/build/cuda.zig");
+
+comptime {
+    const required = std.mem.trim(u8, @embedFile(".zig-version"), "\r\n");
+    if (!std.mem.eql(u8, builtin.zig_version_string, required))
+        @compileError("TensorFold's Zig engine requires Zig " ++ required);
+}
+
+/// Our Metal sources, compiled into one metallib that executables embed.
+const kernels = [_][]const u8{
+    "zig/kernels/metal/runtime_tests.metal",
+    "zig/kernels/metal/nemotron_expert_up.metal",
+    "zig/kernels/metal/nemotron_expert_down.metal",
+};
+
+/// Kernels generated from our Python sources (tools/zig/gen_nemotron_metal.py), also built under fast math as a control.
+const generated = kernels[1..];
+
+/// Kimi K3's kernels: one metallib, sharing kimi_common.h.
+const kimi_dir = "zig/kernels/metal/kimi";
+const kimi_kernels = [_][]const u8{ "dense.metal", "dense_mma.metal", "norms.metal", "experts.metal", "kda.metal", "mla.metal", "synth.metal" };
+
+/// MLX's language version for mx.fast.metal_kernel on this macOS: 4.1 from 27, 4.0 on 26, 3.2 on 15, else 3.1.
+fn mlxMetalStd(b: *std.Build) []const u8 {
+    const os = b.graph.host.result.os;
+    const major = if (os.tag == .macos) os.version_range.semver.min.major else 0;
+    if (major >= 27) return "metal4.1";
+    if (major >= 26) return "metal4.0";
+    if (major >= 15) return "metal3.2";
+    return "metal3.1";
+}
+
+/// xcrun metal -c each source to .air with `flags`, then link them into `name`.metallib.
+fn metallib(b: *std.Build, name: []const u8, sources: []const []const u8, flags: []const []const u8) std.Build.LazyPath {
+    const link = b.addSystemCommand(&.{ "xcrun", "-sdk", "macosx", "metallib", "-o" });
+    const out = link.addOutputFileArg(b.fmt("{s}.metallib", .{name}));
+    for (sources) |src| {
+        const cc = b.addSystemCommand(&.{ "xcrun", "-sdk", "macosx", "metal" });
+        cc.addArgs(flags);
+        cc.addArg("-c");
+        cc.addFileArg(b.path(src));
+        cc.addArg("-o");
+        link.addFileArg(cc.addOutputFileArg(b.fmt("{s}.air", .{std.fs.path.stem(src)})));
+    }
+    return out;
+}
+
+/// The Kimi metallib: each source compiled with kimi_dir on the include path, the shared header a dependency.
+fn kimiMetallib(b: *std.Build, flags: []const []const u8) std.Build.LazyPath {
+    const link = b.addSystemCommand(&.{ "xcrun", "-sdk", "macosx", "metallib", "-o" });
+    const out = link.addOutputFileArg("kimi.metallib");
+    for (kimi_kernels) |name| {
+        const cc = b.addSystemCommand(&.{ "xcrun", "-sdk", "macosx", "metal" });
+        cc.addArgs(flags);
+        cc.addPrefixedDirectoryArg("-I", b.path(kimi_dir));
+        cc.addFileInput(b.path(kimi_dir ++ "/kimi_common.h"));
+        cc.addArg("-c");
+        cc.addFileArg(b.path(b.fmt("{s}/{s}", .{ kimi_dir, name })));
+        cc.addArg("-o");
+        link.addFileArg(cc.addOutputFileArg(b.fmt("kimi_{s}.air", .{std.fs.path.stem(name)})));
+    }
+    return out;
+}
+
+/// A module whose `bytes` is the metallib at `lib`, embedded at compile time.
+fn embedded(b: *std.Build, lib: std.Build.LazyPath, file: []const u8) *std.Build.Module {
+    const wf = b.addWriteFiles();
+    _ = wf.addCopyFile(lib, file);
+    const src = wf.add("metallib.zig", b.fmt("pub const bytes = @embedFile(\"{s}\");\n", .{file}));
+    return b.createModule(.{ .root_source_file = src });
+}
+
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.option(std.builtin.OptimizeMode, "optimize", "debug, safe, fast or small (default fast)") orelse .fast;
+    // Nemotron's draft vocabulary, the Python package's own list, for every backend
+    const ids_files = b.addWriteFiles();
+    _ = ids_files.addCopyFile(b.path("src/tensorfold/families/nemotron_h/draft_ids.txt"), "draft_ids.txt");
+    const draft_ids = b.createModule(.{ .root_source_file = ids_files.add("draft_ids.zig", "pub const text = @embedFile(\"draft_ids.txt\");\n") });
+    const test_step = b.step("test", "Host-side unit tests (no GPU work)");
+    switch (target.result.os.tag) {
+        .macos => metalTargets(b, target, optimize, draft_ids, test_step),
+        .linux => cuda_build.targets(b, target, optimize, draft_ids),
+        else => {},
+    }
+    cuda_build.hostTests(b, draft_ids, test_step);
+}
+
+/// `zig build native -Dcpu=apple_m1`: tensorfold-native with the Metal engines for the Python package's bundle (a native M5 build traps on M1-M4).
+fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module) void {
+    const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
+    const engines = b.createModule(.{
+        .root_source_file = b.path("zig/src/native/metal.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "engine_api", .module = api }, .{ .name = "tensorfold", .module = engine } },
+    });
+    // the HTTP side keeps its safety checks; the engine below it runs at `optimize`
+    const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
+    const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
+    const exe = b.addExecutable(.{ .name = "tensorfold-native", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/server/main.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "native_engines", .module = engines } },
+    }) });
+    const install = b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = .{ .custom = "native/bin" } } });
+    b.step("native", "tensorfold-native with the Metal engines into zig-out/native/bin (bundles: -Dcpu=apple_m1)").dependOn(&install.step);
+    b.step("test-native", "The Metal engines module's host-side tests").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engines })).step);
+}
+
+/// macOS: the metallib, the Metal runtime's test programs and the engine over Metal.
+fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, draft_ids: *std.Build.Module, test_step: *std.Build.Step) void {
+    const metal_std = b.option([]const u8, "metal-std", "Metal language version (default: MLX's for this macOS)") orelse mlxMetalStd(b);
+
+    // MLX's mx.fast.metal_kernel JIT: MTLCompileOptions mathMode safe, fp32 functions fast (the default), its language version.
+    const mlx_flags = [_][]const u8{ b.fmt("-std={s}", .{metal_std}), "-fmetal-math-mode=safe", "-fmetal-math-fp32-functions=fast" };
+    const lib = metallib(b, "tensorfold", &kernels, &mlx_flags);
+    const lib_install = b.addInstallFile(lib, "lib/tensorfold.metallib");
+    b.step("metallib", "Compile zig/kernels/metal into tensorfold.metallib").dependOn(&lib_install.step);
+
+    // Control: the same Nemotron kernels under fast math, which the bit-exact check must be able to tell apart.
+    const fast_flags = [_][]const u8{ b.fmt("-std={s}", .{metal_std}), "-fmetal-math-mode=fast", "-fmetal-math-fp32-functions=fast" };
+    const fast_lib = metallib(b, "nemotron_fastmath", generated, &fast_flags);
+    b.getInstallStep().dependOn(&b.addInstallFile(fast_lib, "lib/nemotron_fastmath.metallib").step);
+    b.getInstallStep().dependOn(&lib_install.step);
+
+    const metal = b.createModule(.{
+        .root_source_file = b.path("zig/src/metal/metal.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    metal.linkFramework("Metal", .{});
+    metal.linkFramework("Foundation", .{});
+    metal.linkSystemLibrary("objc", .{});
+    const kernels_mod = embedded(b, lib, "tensorfold.metallib");
+
+    const programs = [_]struct { name: []const u8, path: []const u8, about: []const u8 }{
+        .{ .name = "tf-metal-tests", .path = "zig/tests/gpu_tests.zig", .about = "GPU runtime tests" },
+        .{ .name = "tf-dispatch-bench", .path = "zig/tests/dispatch_bench.zig", .about = "Dispatch boundary benchmark" },
+        .{ .name = "tf-kernel-exact", .path = "zig/tests/kernel_exact.zig", .about = "Bit-exact check of a kernel against an MLX oracle case" },
+    };
+    for (programs) |p| {
+        const mod = b.createModule(.{
+            .root_source_file = b.path(p.path),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "metallib", .module = kernels_mod } },
+        });
+        const exe = b.addExecutable(.{ .name = p.name, .root_module = mod });
+        b.installArtifact(exe);
+        b.step(p.name, p.about).dependOn(&b.addInstallArtifact(exe, .{}).step);
+    }
+
+    // Kimi K3: the family module, its metallib, and its GPU check and benchmark programs.
+    const kimi_lib = kimiMetallib(b, &mlx_flags);
+    b.getInstallStep().dependOn(&b.addInstallFile(kimi_lib, "lib/kimi.metallib").step);
+    const kimi = b.createModule(.{
+        .root_source_file = b.path("zig/src/families/kimi_k3/kimi_k3.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "metal", .module = metal }},
+    });
+    const kimi_bytes = embedded(b, kimi_lib, "kimi.metallib");
+    const kimi_programs = [_]struct { name: []const u8, path: []const u8, about: []const u8 }{
+        .{ .name = "tf-k3-check", .path = "zig/tests/kimi_k3/check.zig", .about = "Kimi K3 kernels and layers on synthetic weights at real shapes" },
+        .{ .name = "tf-k3-bench", .path = "zig/tests/kimi_k3/bench.zig", .about = "Kimi K3 kernel bandwidth" },
+    };
+    for (kimi_programs) |p| {
+        const mod = b.createModule(.{
+            .root_source_file = b.path(p.path),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kimi_k3", .module = kimi }, .{ .name = "kimi_metallib", .module = kimi_bytes } },
+        });
+        const exe = b.addExecutable(.{ .name = p.name, .root_module = mod });
+        b.installArtifact(exe);
+        b.step(p.name, p.about).dependOn(&b.addInstallArtifact(exe, .{}).step);
+    }
+
+    // Kimi's tiktoken tokenizer and its parity program (tools/zig/k3_tokenizer_parity.py).
+    const tiktoken = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tiktoken.zig"), .target = target, .optimize = optimize });
+    const tok_mod = b.createModule(.{
+        .root_source_file = b.path("zig/tests/kimi_k3/tokenizer.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "tiktoken", .module = tiktoken }},
+    });
+    const tok_exe = b.addExecutable(.{ .name = "tf-k3-tokenizer", .root_module = tok_mod });
+    b.installArtifact(tok_exe);
+    b.step("tf-k3-tokenizer", "Kimi K3's tiktoken tokenizer over parity cases").dependOn(&b.addInstallArtifact(tok_exe, .{}).step);
+
+    // The cluster layer: inventory, membership, planner, loading and converged rounds over the lane core.
+    const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    const fabric = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/fabric.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    const cluster = b.createModule(.{
+        .root_source_file = b.path("zig/src/cluster/cluster.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric } },
+    });
+    // The engine: kernel sources compiled at run time (MLX's options), the families, the lane core.
+    const sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig") });
+    const engine = b.createModule(.{
+        .root_source_file = b.path("zig/src/tensorfold.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "nemotron_draft_ids", .module = draft_ids }, .{ .name = "lanes", .module = lanes } },
+    });
+    const engine_programs = [_]struct { name: []const u8, path: []const u8, about: []const u8 }{
+        .{ .name = "tensorfold", .path = "zig/src/main.zig", .about = "The native engine's command line" },
+        .{ .name = "tf-nemotron-fixtures", .path = "zig/tests/nemotron_fixtures.zig", .about = "Nemotron kernels against the Python engine's captured ops" },
+        .{ .name = "tf-nemotron-bench", .path = "zig/tests/nemotron_bench.zig", .about = "One-row projection kernels timed by tile count" },
+        .{ .name = "tf-nemotron-wide", .path = "zig/tests/nemotron_wide.zig", .about = "Window costs by kernel class and expert overlap of drafted, sibling and stream rows" },
+        .{ .name = "tf-nemotron-prefill-check", .path = "zig/tests/nemotron_prefill_check.zig", .about = "A prompt chunk layer by layer against prefill_dump.py's rows" },
+        .{ .name = "tf-nemotron-dense", .path = "zig/tests/nemotron_dense.zig", .about = "Dense projection schedules bit-checked against the engine's kernels, then timed" },
+        .{ .name = "tf-nemotron-experts", .path = "zig/tests/nemotron_experts.zig", .about = "Routed-expert pass shapes bit-checked against the engine's kernels, then timed by window width" },
+    };
+    for (engine_programs) |p| {
+        const mod = b.createModule(.{
+            .root_source_file = b.path(p.path),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "cluster", .module = cluster }, .{ .name = "kernel_sources", .module = sources } },
+        });
+        const exe = b.addExecutable(.{ .name = p.name, .root_module = mod });
+        b.installArtifact(exe);
+        b.step(p.name, p.about).dependOn(&b.addInstallArtifact(exe, .{}).step);
+    }
+
+    nativeServer(b, target, optimize, metal, engine, lanes);
+
+    const cluster_metal = b.createModule(.{
+        .root_source_file = b.path("zig/src/cluster/metal_sink.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "cluster", .module = cluster } },
+    });
+    const cluster_exe = b.addExecutable(.{ .name = "tf-cluster", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/cluster/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "cluster", .module = cluster }},
+    }) });
+    b.installArtifact(cluster_exe);
+    b.step("tf-cluster", "tensorfold cluster / serve --cluster / node").dependOn(&b.addInstallArtifact(cluster_exe, .{}).step);
+    // Kimi K3's checkpoint validator: the cluster's header reader cross-checked with the family's own specs.
+    const k3_validate = b.addExecutable(.{ .name = "tf-k3-validate", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/kimi_k3/validate.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "kimi_k3", .module = kimi }, .{ .name = "cluster", .module = cluster } },
+    }) });
+    b.installArtifact(k3_validate);
+    b.step("tf-k3-validate", "Kimi K3's checkpoint: index, headers, coverage and every tensor against the family").dependOn(&b.addInstallArtifact(k3_validate, .{}).step);
+    const k3_cluster = b.addExecutable(.{ .name = "tf-k3-cluster", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/kimi_k3/cluster.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kimi_k3", .module = kimi }, .{ .name = "kimi_metallib", .module = kimi_bytes }, .{ .name = "cluster", .module = cluster } },
+    }) });
+    b.installArtifact(k3_cluster);
+    b.step("tf-k3-cluster", "Kimi K3 tensor- and expert-parallel ranks against one node, through the cluster's canon").dependOn(&b.addInstallArtifact(k3_cluster, .{}).step);
+    const cluster_tests = b.step("test-cluster", "Cluster tests: fake nodes and fabric, K3 planning (TF_K3_DIR), Metal sink");
+    cluster_tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cluster })).step);
+    cluster_tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cluster_metal })).step);
+
+    // The generated kernel sources must match the Python kernels they come from (needs python3, not MLX).
+    const gen_check = b.addSystemCommand(&.{ "python3", "-B", "tools/zig/gen_nemotron_metal.py", "--check" });
+    const gen_all = b.addSystemCommand(&.{ "python3", "-B", "tools/zig/gen_nemotron_kernels.py", "--check" });
+    const check_step = b.step("check-generated", "Fail if zig/kernels/metal's generated sources are stale");
+    check_step.dependOn(&gen_check.step);
+    check_step.dependOn(&gen_all.step);
+
+    // Host-only unit tests: no GPU work.
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = metal })).step);
+    const helpers = b.createModule(.{
+        .root_source_file = b.path("zig/tests/common.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "metallib", .module = kernels_mod } },
+    });
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = helpers })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engine })).step);
+    const kimi_test = b.step("test-k3", "Kimi K3's host-side unit tests (no GPU work)");
+    for ([_]*std.Build.Module{ kimi, tiktoken }) |m| {
+        const run = b.addRunArtifact(b.addTest(.{ .root_module = m }));
+        kimi_test.dependOn(&run.step);
+        test_step.dependOn(&run.step);
+    }
+}

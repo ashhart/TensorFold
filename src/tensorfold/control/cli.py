@@ -12,6 +12,7 @@ import sys
 import time
 
 from . import __version__
+from ..native import ENGINES
 from .config import Profile, Store, install_name
 from .launchd import Manager, plist
 from .logs import Tail
@@ -33,6 +34,7 @@ def register(commands) -> None:
     install.add_argument("--parallel", default="auto",
                          help="serve --parallel value written on the service command (default auto)")
     install.add_argument("--drafter")
+    install.add_argument("--engine", choices=ENGINES, default=None, help=argparse.SUPPRESS)   # written on serve
     install.add_argument("--arg", action="append", default=[], help="extra literal serve argument, e.g. --arg=--vision")
     install.add_argument("--env", action="append", default=[], metavar="KEY=VALUE", help="non-secret override only")
     install.add_argument("--env-file", help="absolute private JSON file for credentials/overrides; mode 0600")
@@ -98,6 +100,8 @@ def _profile(args) -> Profile:
         extra += ["--context", str(args.context)]
     if args.drafter:
         extra += ["--drafter", args.drafter]
+    if getattr(args, "engine", None) not in (None, "auto"):
+        extra += ["--engine", args.engine]
     extra += args.arg
     environment = {}
     for item in args.env:

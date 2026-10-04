@@ -54,6 +54,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "tensorfold.control.assets" = ["*.json"]
+"tensorfold.native" = ["*.schema.json"]
 "tensorfold.drafters.vendor.z_lab_dflash" = ["README.md"]
 "tensorfold.cuda" = ["*.cu", "*.cuh", "*.cpp"]
 "tensorfold.cuda.kernels" = ["*.cu", "*.cuh", "*.cpp"]

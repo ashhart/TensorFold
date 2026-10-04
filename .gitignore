@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 build/
+!zig/build/
 dist/
 .venv/
 venv/
@@ -11,3 +12,6 @@ venv/
 .DS_Store
 *.swp
 *.log
+.zig-toolchain
+.zig-cache/
+zig-out/

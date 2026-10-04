@@ -1,0 +1,183 @@
+//! A host-only test backend whose tokens depend on all fed history, so a rollback or position mistake changes them.
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+const be = @import("backend.zig");
+const Stream = @import("stream.zig").Stream;
+const Sampling = @import("sampling.zig").Sampling;
+const keyBits = @import("sampling.zig").keyBits;
+const accept = @import("accept.zig");
+
+pub const vocab = 97;
+
+/// The fake target's draw after `history` at `position` (keyed noise when sampled).
+pub fn next(history: []const u32, s: ?Sampling, position: u64) u32 {
+    var sum: u64 = 0;
+    for (history) |t| sum +%= t;
+    var token = (sum *% 7 +% history.len *% 3) % vocab;
+    if (s) |st| token = (token + keyBits(st.seed, position, 0) % 5) % vocab;
+    return @intCast(token);
+}
+
+const Lane = struct {
+    history: std.ArrayList(u32) = .empty, // the stream's cache: prompt and fed tokens
+    held: std.ArrayList(u32) = .empty, // drafts for the next round
+    base: usize = 0, // the history length before the last verify
+    rows: std.ArrayList(u32) = .empty, // the last verify's row tokens
+};
+
+pub const Fake = struct {
+    gpa: Allocator,
+    lanes: std.AutoHashMapUnmanaged(*Stream, Lane) = .empty,
+    drawn: std.ArrayList(u32) = .empty, // handle -> token
+    rounds: u64 = 0,
+
+    pub fn deinit(x: *Fake) void {
+        var it = x.lanes.valueIterator();
+        while (it.next()) |l| freeLane(x.gpa, l);
+        x.lanes.deinit(x.gpa);
+        x.drawn.deinit(x.gpa);
+    }
+
+    fn freeLane(gpa: Allocator, l: *Lane) void {
+        l.history.deinit(gpa);
+        l.held.deinit(gpa);
+        l.rows.deinit(gpa);
+    }
+
+    pub fn backend(x: *Fake) be.Backend {
+        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release } };
+    }
+
+    fn self(ptr: *anyopaque) *Fake {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    fn lane(x: *Fake, s: *Stream) *Lane {
+        return x.lanes.getPtr(s).?;
+    }
+
+    fn draw(x: *Fake, l: *Lane, s: *Stream, position: u64) !u64 {
+        if (position != l.history.items.len) return error.PositionMismatch;
+        try x.drawn.append(x.gpa, next(l.history.items, s.sampling, position));
+        return x.drawn.items.len - 1;
+    }
+
+    fn value(x: *Fake, feed: be.Feed) u32 {
+        return switch (feed) {
+            .handle => |h| x.drawn.items[h],
+            .value => |v| v,
+        };
+    }
+
+    fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
+        const x = self(ptr);
+        const got = try x.lanes.getOrPut(x.gpa, s);
+        if (got.found_existing) freeLane(x.gpa, got.value_ptr);
+        got.value_ptr.* = .{};
+        try got.value_ptr.history.appendSlice(x.gpa, s.prompt());
+    }
+
+    fn first(ptr: *anyopaque, s: *Stream, position: u64) anyerror!u64 {
+        const x = self(ptr);
+        return x.draw(x.lane(s), s, position);
+    }
+
+    fn queue(ptr: *anyopaque, s: *Stream, feed: be.Feed, position: u64) anyerror!u64 {
+        const x = self(ptr);
+        const l = x.lane(s);
+        try l.history.append(x.gpa, x.value(feed));
+        return x.draw(l, s, position);
+    }
+
+    fn read(ptr: *anyopaque, handle: u64) anyerror!u32 {
+        return self(ptr).drawn.items[handle];
+    }
+
+    fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
+        const x = self(ptr);
+        x.rounds += 1;
+        for (windows, out) |w, o| {
+            const l = x.lane(w.stream);
+            l.base = l.history.items.len;
+            l.rows.clearRetainingCapacity();
+            try l.rows.append(x.gpa, w.pending);
+            try l.rows.appendSlice(x.gpa, l.held.items[0..w.held]);
+            try l.rows.appendSlice(x.gpa, w.tokens);
+            @memcpy(o.drafts, l.rows.items[1..]);
+            const parents = try accept.rowParents(x.gpa, l.rows.items.len, w.parents);
+            defer x.gpa.free(parents);
+            for (0..l.rows.items.len) |r| {
+                // each row reads the cache and its own path from the pending row
+                l.history.shrinkRetainingCapacity(l.base);
+                var path: std.ArrayList(u32) = .empty;
+                defer path.deinit(x.gpa);
+                var at: i32 = @intCast(r);
+                while (at >= 0) : (at = parents[@intCast(at)]) try path.insert(x.gpa, 0, l.rows.items[@intCast(at)]);
+                try l.history.appendSlice(x.gpa, path.items);
+                if (w.positions[r] != l.history.items.len) return error.PositionMismatch;
+                o.sampled[r] = next(l.history.items, w.stream.sampling, w.positions[r]);
+            }
+            l.history.shrinkRetainingCapacity(l.base);
+            try l.history.appendSlice(x.gpa, l.rows.items); // a chain keeps every row unless rolled back
+        }
+    }
+
+    fn keep(ptr: *anyopaque, windows: []const be.Window, paths: []const []const u32) anyerror!void {
+        const x = self(ptr);
+        for (windows, paths) |w, path| {
+            const l = x.lane(w.stream);
+            l.history.shrinkRetainingCapacity(l.base);
+            for (path) |r| try l.history.append(x.gpa, l.rows.items[r]);
+        }
+    }
+
+    fn draft(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
+        const x = self(ptr);
+        for (requests) |r| {
+            const l = x.lane(r.stream);
+            // the head reads the last verify's kept rows (a shared round drafts before its rollback)
+            var guess: std.ArrayList(u32) = .empty;
+            defer guess.deinit(x.gpa);
+            if (r.rows) |path| {
+                try guess.appendSlice(x.gpa, l.history.items[0..l.base]);
+                for (path) |row| try guess.append(x.gpa, l.rows.items[row]);
+            } else try guess.appendSlice(x.gpa, l.history.items);
+            if (r.position != guess.items.len + 1) return error.PositionMismatch;
+            const pending = if (r.first) |feed| x.value(feed) else r.follow[r.follow.len - 1];
+            l.held.clearRetainingCapacity();
+            try guess.append(x.gpa, pending);
+            for (0..r.depth) |j| {
+                const at = r.position + j;
+                var t = next(guess.items, r.stream.sampling, at);
+                if ((at *% 2654435761 + j) % 5 == 0) t = (t + 1) % vocab; // a wrong guess now and then
+                try l.held.append(x.gpa, t);
+                try guess.append(x.gpa, t);
+            }
+        }
+    }
+
+    fn release(ptr: *anyopaque, s: *Stream) void {
+        const x = self(ptr);
+        if (x.lanes.fetchRemove(s)) |kv| {
+            var l = kv.value;
+            freeLane(x.gpa, &l);
+        }
+    }
+};
+
+/// Round times from a fixed cost model, so tests decide depth the same way every run.
+pub const FixedClock = struct {
+    calls: u64 = 0,
+
+    pub fn clock(c: *FixedClock) be.Clock {
+        return .{ .ptr = c, .vtable = &.{ .start = start, .elapsed_ms = elapsed } };
+    }
+
+    fn start(_: *anyopaque) void {}
+
+    fn elapsed(ptr: *anyopaque, _: be.Mark) f64 {
+        const c: *FixedClock = @ptrCast(@alignCast(ptr));
+        c.calls += 1;
+        return 6.0 + @as(f64, @floatFromInt(c.calls % 7)) * 0.5;
+    }
+};

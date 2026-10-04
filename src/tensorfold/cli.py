@@ -18,7 +18,7 @@ from tensorfold.server import stacks, thinking_notes
 from tensorfold.server.memory_budget import MEMORY_FRACTION
 from tensorfold.serve_options import check as _check_serve_options, vision_options as _vision_options
 
-COMMANDS = ("serve", "pull", "models", "info", "update", "service", "tui", "plan")
+COMMANDS = ("serve", "pull", "models", "info", "update", "service", "tui", "plan", "cluster", "node")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,14 +30,23 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    from tensorfold.native import cluster
+
+    if cluster.wanted(argv):
+        return cluster.run(argv)                # execs the native engine; clusters have no Python path
     # ``tensorfold MODEL ...`` is ``tensorfold serve MODEL ...``
     if argv and not argv[0].startswith("-") and argv[0] not in COMMANDS:
         from tensorfold import hub
 
         if Path(argv[0]).expanduser().is_dir() or hub.is_repo_id(argv[0]):
             argv = ["serve", *argv]
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
     try:
+        if args.command == "serve":
+            from tensorfold.native.switch import hand_off
+
+            hand_off(parser, args, argv, lambda: _config_dir(args.model))     # execs the native engine, or returns
         return int(args.func(args) or 0)
     except (FileNotFoundError, ValueError) as exc:
         print(f"tensorfold: {exc}", file=sys.stderr)

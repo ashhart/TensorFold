@@ -1,0 +1,344 @@
+//! Nemotron-H weights on the GPU in the Python engine's layouts: tiled projections, packed expert blocks, fp32 Mamba.
+
+const std = @import("std");
+const cuda = @import("cuda");
+const core = @import("core");
+const Config = @import("config.zig").Config;
+const Kind = @import("config.zig").Kind;
+const kern = @import("cuda_kernels.zig");
+const draft_ids = @import("draft_ids.zig");
+
+pub const QLinear = kern.QLinear;
+pub const Experts = kern.Experts;
+const Tensor = core.checkpoint.Tensor;
+
+pub const mtp_file = "mtp-4bit.safetensors";
+
+/// The token table as stored (MLX words, scales, biases): a row lookup, not a matmul.
+pub const Embed = struct { w: u64, s: u64, b: u64, n: usize, k: usize };
+pub const Mamba = struct { in_proj: QLinear, out_proj: QLinear, conv_w: u64, conv_b: u64, a: u64, d: u64, dt_bias: u64, gnorm: u64 };
+pub const Attention = struct { qkv: QLinear, o: QLinear };
+pub const MoE = struct { router: u64, bias: u64, experts: Experts };
+pub const Block = struct { kind: Kind, norm: u64, mamba: Mamba = undefined, attn: Attention = undefined, moe: MoE = undefined };
+pub const Mtp = struct { enorm: u64, hnorm: u64, eh_proj: QLinear, attn_norm: u64, attn: Attention, moe_norm: u64, moe: MoE, final_norm: u64 };
+
+/// A loaded tensor by the Python engine's dotted name, for digests against its weights.
+pub const Named = struct { name: []u8, ptr: u64, len: usize };
+
+pub const Weights = struct {
+    gpa: std.mem.Allocator,
+    config: Config,
+    embed: Embed = undefined,
+    blocks: []Block = &.{},
+    norm_f: u64 = 0,
+    head: QLinear = undefined,
+    mtp: ?Mtp = null,
+    draft_head: ?QLinear = null,
+    draft_ids: u64 = 0,
+    draft_count: usize = 0,
+    buffers: std.ArrayList(cuda.DeviceBuffer) = .empty,
+    named: std.ArrayList(Named) = .empty,
+
+    pub fn deinit(w: *Weights) void {
+        for (w.buffers.items) |*b| b.free();
+        for (w.named.items) |n| w.gpa.free(n.name);
+        w.buffers.deinit(w.gpa);
+        w.named.deinit(w.gpa);
+        w.gpa.free(w.blocks);
+        w.* = undefined;
+    }
+};
+
+const Loader = struct {
+    gpa: std.mem.Allocator,
+    ops: kern.Ops,
+    w: *Weights,
+    scratch: cuda.DeviceBuffer,
+    host: std.ArrayList(u8) = .empty,
+
+    fn alloc(L: *Loader, name: []const u8, bytes: usize) !u64 {
+        const b = try cuda.DeviceBuffer.alloc(L.ops.k.d, bytes);
+        try L.w.buffers.append(L.gpa, b);
+        try L.w.named.append(L.gpa, .{ .name = try L.gpa.dupe(u8, name), .ptr = b.ptr, .len = bytes });
+        return b.ptr;
+    }
+
+    /// Device scratch of at least `bytes`; growing waits for the stream so pending packs keep their inputs.
+    fn tmp(L: *Loader, bytes: usize) !u64 {
+        if (L.scratch.len < bytes) {
+            try L.ops.s.synchronize();
+            L.scratch.free();
+            L.scratch = try cuda.DeviceBuffer.alloc(L.ops.k.d, bytes);
+        }
+        return L.scratch.ptr;
+    }
+
+    /// The host staging buffer, once the stream has read its last contents.
+    fn staging(L: *Loader, bytes: usize) ![]u8 {
+        try L.ops.s.synchronize();
+        try L.host.resize(L.gpa, bytes);
+        return L.host.items;
+    }
+
+    fn raw(L: *Loader, name: []const u8, t: Tensor) !u64 {
+        const ptr = try L.alloc(name, t.bytes.len);
+        try L.ops.upload(ptr, t.bytes);
+        return ptr;
+    }
+
+    /// `.float()` of a bf16 tensor into the host staging buffer: exact.
+    fn widened(L: *Loader, t: Tensor) ![]u8 {
+        if (t.dtype != .bf16) return error.UnexpectedTensor;
+        const n = t.bytes.len / 2;
+        const out = std.mem.bytesAsSlice(u32, try L.staging(n * 4));
+        for (out, 0..) |*o, i| o.* = @as(u32, std.mem.readInt(u16, t.bytes[2 * i ..][0..2], .little)) << 16;
+        return L.host.items;
+    }
+
+    fn widen(L: *Loader, name: []const u8, t: Tensor) !u64 {
+        const host = try L.widened(t);
+        const ptr = try L.alloc(name, host.len);
+        try L.ops.upload(ptr, host);
+        return ptr;
+    }
+
+    /// qmm_fast.tile of row-stacked parts (one projection, or q, k, v as attention stacks them).
+    fn tile(L: *Loader, name: []const u8, parts: []const [3]Tensor) !QLinear {
+        var n: usize = 0;
+        const k8 = parts[0][0].dim(1);
+        for (parts) |pt| {
+            if (pt[0].dtype != .u32 or pt[1].dtype != .bf16 or pt[2].dtype != .bf16) return error.UnsupportedQuantization;
+            if (pt[0].dim(1) != k8 or pt[1].dim(1) * 8 != k8) return error.UnexpectedTensor;
+            n += pt[0].dim(0);
+        }
+        const k = k8 * 8;
+        const kg = k / 64;
+        const npad = (n + 127) / 128 * 128;
+        const sizes = [3]usize{ @as(usize, n) * k8 * 4, @as(usize, n) * kg * 2, @as(usize, n) * kg * 2 };
+        const base = try L.tmp(sizes[0] + sizes[1] + sizes[2]);
+        var at = [3]usize{ 0, sizes[0], sizes[0] + sizes[1] };
+        for (parts) |pt| for (0..3) |j| {
+            try L.ops.upload(base + at[j], pt[j].bytes);
+            at[j] += pt[j].bytes.len;
+        };
+        var buf: [128]u8 = undefined;
+        const q: QLinear = .{
+            .w = try L.alloc(try std.fmt.bufPrint(&buf, "{s}.weight", .{name}), @as(usize, npad) * k / 2),
+            .s = try L.alloc(try std.fmt.bufPrint(&buf, "{s}.scales", .{name}), @as(usize, kg) * npad * 2),
+            .b = try L.alloc(try std.fmt.bufPrint(&buf, "{s}.biases", .{name}), @as(usize, kg) * npad * 2),
+            .n = n,
+            .k = k,
+            .npad = npad,
+        };
+        const total: u64 = @as(u64, npad / 64) * kg * 512;
+        var a: cuda.Args = .{};
+        a.add(base);
+        for ([_]usize{ n, k / 8, kg }) |v| a.add(@as(c_int, @intCast(v)));
+        a.add(q.w);
+        a.add(@as(c_longlong, @intCast(total)));
+        try cuda.launch.launch(L.ops.k.pack_dense, .{ .grid = .{ .x = @intCast((total + 255) / 256) }, .block = .{ .x = 256 } }, L.ops.s, &a);
+        for ([_]u64{ q.s, q.b }, [_]usize{ sizes[0], sizes[0] + sizes[1] }) |out, off| {
+            var t: cuda.Args = .{};
+            t.add(base + off);
+            for ([_]usize{ n, kg, npad }) |v| t.add(@as(c_int, @intCast(v)));
+            t.add(out);
+            const cells = @as(u64, kg) * npad;
+            try cuda.launch.launch(L.ops.k.transpose16, .{ .grid = .{ .x = @intCast((cells + 255) / 256) }, .block = .{ .x = 256 } }, L.ops.s, &t);
+        }
+        return q;
+    }
+
+    fn dense(L: *Loader, ck: *core.Checkpoint, name: []const u8, prefixes: []const []const u8) !QLinear {
+        var parts: [3][3]Tensor = undefined;
+        for (prefixes, 0..) |pre, i| parts[i] = try three(ck, pre, "");
+        return L.tile(name, parts[0..prefixes.len]);
+    }
+
+    /// weights.fold_shared then experts.make: the shared expert's halves become experts E and E + 1.
+    fn experts(L: *Loader, ck: *core.Checkpoint, name: []const u8, pre: []const u8, c: Config) !Experts {
+        var buf: [128]u8 = undefined;
+        const s_up = try three(ck, pre, "shared_experts.up_proj");
+        if (s_up[0].dim(0) != 2 * c.expert_width) return error.SharedExpertWidth;
+        const e = c.experts + 2;
+        return .{
+            .up = try L.packExperts(try std.fmt.bufPrint(&buf, "{s}.up", .{name}), try three(ck, pre, "switch_mlp.fc1"), s_up, false, e, c.expert_width, c.hidden),
+            .down = try L.packExperts(try std.fmt.bufPrint(&buf, "{s}.down", .{name}), try three(ck, pre, "switch_mlp.fc2"), try three(ck, pre, "shared_experts.down_proj"), true, e, c.hidden, c.expert_width),
+            .count = e,
+            .width = c.expert_width,
+            .dims = c.hidden,
+        };
+    }
+
+    /// One expert matrix (n outputs of k inputs) with the shared halves appended; `split` halves the shared columns.
+    fn packExperts(L: *Loader, name: []const u8, routed: [3]Tensor, shared: [3]Tensor, split: bool, e: usize, n: usize, k: usize) !u64 {
+        const kg = k / 64;
+        const sizes = [3]usize{ @as(usize, e) * n * (k / 8) * 4, @as(usize, e) * n * kg * 2, @as(usize, e) * n * kg * 2 };
+        const base = try L.tmp(sizes[0] + sizes[1] + sizes[2]);
+        var at: usize = 0;
+        for (0..3) |j| {
+            if (routed[j].bytes.len + shared[j].bytes.len != sizes[j]) return error.UnexpectedTensor;
+            try L.ops.upload(base + at, routed[j].bytes);
+            if (split) {
+                const row = shared[j].bytes.len / n;
+                const half = row / 2;
+                const host = try L.staging(shared[j].bytes.len);
+                for (0..2) |h| for (0..n) |r| @memcpy(host[(h * n + r) * half ..][0..half], shared[j].bytes[r * row + h * half ..][0..half]);
+                try L.ops.upload(base + at + routed[j].bytes.len, host);
+            } else {
+                try L.ops.upload(base + at + routed[j].bytes.len, shared[j].bytes);
+            }
+            at += sizes[j];
+        }
+        const nb = n / 32;
+        const ptr = try L.alloc(name, @as(usize, e) * nb * kg * 288 * 4);
+        var a: cuda.Args = .{};
+        for ([_]u64{ base, base + sizes[0], base + sizes[0] + sizes[1], ptr }) |v| a.add(v);
+        for ([_]usize{ n, k / 8, kg, nb }) |v| a.add(@as(c_int, @intCast(v)));
+        try cuda.launch.launch(L.ops.k.pack_experts, .{ .grid = .{ .x = @intCast(kg), .y = @intCast(nb), .z = @intCast(e) }, .block = .{ .x = 288 } }, L.ops.s, &a);
+        return ptr;
+    }
+
+    fn mamba(L: *Loader, ck: *core.Checkpoint, name: []const u8, pre: []const u8) !Mamba {
+        var a: [128]u8 = undefined;
+        var b: [128]u8 = undefined;
+        var m: Mamba = undefined;
+        m.in_proj = try L.dense(ck, try join(&a, name, ".in_proj"), &.{try join(&b, pre, "in_proj")});
+        m.out_proj = try L.dense(ck, try join(&a, name, ".out_proj"), &.{try join(&b, pre, "out_proj")});
+        const conv = try ck.get(try join(&b, pre, "conv1d.weight"));
+        if (conv.rank != 3 or conv.dim(1) != 4 or conv.dim(2) != 1 or conv.dtype != .bf16) return error.UnexpectedTensor;
+        const ch = conv.dim(0);
+        const taps = std.mem.bytesAsSlice(u32, try L.staging(ch * 4 * 4));
+        for (0..ch) |c| for (0..4) |t| {
+            taps[t * ch + c] = @as(u32, std.mem.readInt(u16, conv.bytes[(c * 4 + t) * 2 ..][0..2], .little)) << 16;
+        };
+        m.conv_w = try L.alloc(try join(&a, name, ".conv_w"), L.host.items.len);
+        try L.ops.upload(m.conv_w, L.host.items);
+        m.conv_b = try L.widen(try join(&a, name, ".conv_b"), try ck.get(try join(&b, pre, "conv1d.bias")));
+        const alog = try L.widened(try ck.get(try join(&b, pre, "A_log")));
+        const src = try L.tmp(alog.len);
+        try L.ops.upload(src, alog);
+        m.a = try L.alloc(try join(&a, name, ".a"), alog.len);
+        try L.ops.torch().mambaA(src, m.a, alog.len / 4);
+        m.d = try L.widen(try join(&a, name, ".d"), try ck.get(try join(&b, pre, "D")));
+        m.dt_bias = try L.widen(try join(&a, name, ".dt_bias"), try ck.get(try join(&b, pre, "dt_bias")));
+        m.gnorm = try L.raw(try join(&a, name, ".gnorm"), try ck.get(try join(&b, pre, "norm.weight")));
+        return m;
+    }
+
+    fn attention(L: *Loader, ck: *core.Checkpoint, name: []const u8, pre: []const u8) !Attention {
+        var a: [128]u8 = undefined;
+        var q: [128]u8 = undefined;
+        var k: [128]u8 = undefined;
+        var v: [128]u8 = undefined;
+        const qkv = try L.dense(ck, try join(&a, name, ".qkv"), &.{ try join(&q, pre, "q_proj"), try join(&k, pre, "k_proj"), try join(&v, pre, "v_proj") });
+        return .{ .qkv = qkv, .o = try L.dense(ck, try join(&a, name, ".o"), &.{try join(&q, pre, "o_proj")}) };
+    }
+
+    fn moe(L: *Loader, ck: *core.Checkpoint, name: []const u8, pre: []const u8, c: Config) !MoE {
+        var a: [128]u8 = undefined;
+        var b: [128]u8 = undefined;
+        const router = try ck.expect(try join(&b, pre, "gate.weight"), .bf16, &.{ c.experts, c.hidden });
+        const bias = try ck.expect(try join(&b, pre, "gate.e_score_correction_bias"), .f32, &.{c.experts});
+        return .{
+            .router = try L.raw(try join(&a, name, ".router"), router),
+            .bias = try L.raw(try join(&a, name, ".bias"), bias),
+            .experts = try L.experts(ck, try join(&a, name, ".experts"), pre, c),
+        };
+    }
+};
+
+fn join(buf: *[128]u8, a: []const u8, b: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "{s}{s}", .{ a, b });
+}
+
+/// A quantized matrix's words, scales and biases ("{pre}{mid}.weight" ...), refused unless 4-bit with bf16 scales.
+fn three(ck: *core.Checkpoint, pre: []const u8, mid: []const u8) ![3]Tensor {
+    var out: [3]Tensor = undefined;
+    var buf: [192]u8 = undefined;
+    for ([_][]const u8{ "weight", "scales", "biases" }, 0..) |s, i| out[i] = try ck.get(try std.fmt.bufPrint(&buf, "{s}{s}.{s}", .{ pre, mid, s }));
+    if (out[0].dtype != .u32 or out[1].dtype != .bf16 or out[2].dtype != .bf16) return error.UnsupportedQuantization;
+    return out;
+}
+
+/// weights.load: the model folder's checkpoint (and its MTP head when `with_mtp`) on the GPU, leftovers refused.
+pub fn load(gpa: std.mem.Allocator, io: std.Io, ops: kern.Ops, dir: []const u8, c: Config, with_mtp: bool) !Weights {
+    if (c.group_size != 64 or c.bits != 4) return error.UnsupportedQuantization;
+    var w: Weights = .{ .gpa = gpa, .config = c };
+    errdefer w.deinit();
+    var L: Loader = .{ .gpa = gpa, .ops = ops, .w = &w, .scratch = try cuda.DeviceBuffer.alloc(ops.k.d, 1 << 20) };
+    defer {
+        ops.s.synchronize() catch {};
+        L.scratch.free();
+        L.host.deinit(gpa);
+    }
+    var ck = try core.Checkpoint.openModel(gpa, io, dir);
+    defer ck.close();
+    w.blocks = try gpa.alloc(Block, c.layers);
+    for (c.kinds[0..c.layers], 0..) |kind, i| {
+        var nm: [128]u8 = undefined;
+        var nb: [128]u8 = undefined;
+        var pb: [128]u8 = undefined;
+        const name = try std.fmt.bufPrint(&nm, "blocks.{d}", .{i});
+        const norm = try ck.expect(try std.fmt.bufPrint(&pb, "backbone.layers.{d}.norm.weight", .{i}), .bf16, &.{c.hidden});
+        var b: Block = .{ .kind = kind, .norm = try L.raw(try join(&nb, name, ".norm"), norm) };
+        const mixer = try std.fmt.bufPrint(&pb, "backbone.layers.{d}.mixer.", .{i});
+        switch (kind) {
+            .mamba => b.mamba = try L.mamba(&ck, try join(&nb, name, ".mamba"), mixer),
+            .attention => b.attn = try L.attention(&ck, try join(&nb, name, ".attn"), mixer),
+            .moe => b.moe = try L.moe(&ck, try join(&nb, name, ".moe"), mixer, c),
+        }
+        w.blocks[i] = b;
+    }
+    const emb = try ck.get("backbone.embeddings.weight");
+    w.embed = .{
+        .w = try L.raw("embed.weight", emb),
+        .s = try L.raw("embed.scales", try ck.get("backbone.embeddings.scales")),
+        .b = try L.raw("embed.biases", try ck.get("backbone.embeddings.biases")),
+        .n = emb.dim(0),
+        .k = emb.dim(1) * 8,
+    };
+    w.norm_f = try L.raw("norm_f", try ck.expect("backbone.norm_f.weight", .bf16, &.{c.hidden}));
+    w.head = try L.dense(&ck, "head", &.{"lm_head"});
+    if (ck.unused() != 0) return error.UnusedCheckpointTensors;
+    if (with_mtp) try loadMtp(gpa, io, &L, &ck, dir, c);
+    try ops.s.synchronize();
+    return w;
+}
+
+fn loadMtp(gpa: std.mem.Allocator, io: std.Io, L: *Loader, main: *core.Checkpoint, dir: []const u8, c: Config) !void {
+    var ck: core.Checkpoint = .{ .gpa = gpa, .io = io };
+    defer ck.close();
+    try ck.add(dir, mtp_file);
+    L.w.mtp = .{
+        .enorm = try L.raw("mtp.enorm", try ck.get("layers.0.enorm.weight")),
+        .hnorm = try L.raw("mtp.hnorm", try ck.get("layers.0.hnorm.weight")),
+        .eh_proj = try L.dense(&ck, "mtp.eh_proj", &.{"layers.0.eh_proj"}),
+        .attn_norm = try L.raw("mtp.attn_norm", try ck.get("layers.0.norm.weight")),
+        .attn = try L.attention(&ck, "mtp.attn", "layers.0.mixer."),
+        .moe_norm = try L.raw("mtp.moe_norm", try ck.get("layers.1.norm.weight")),
+        .moe = try L.moe(&ck, "mtp.moe", "layers.1.mixer.", c),
+        .final_norm = try L.raw("mtp.final_norm", try ck.get("layers.1.final_layernorm.weight")),
+    };
+    if (ck.unused() != 0) return error.UnusedMtpTensors;
+    const ids = try draft_ids.load(gpa, c.vocab);
+    defer gpa.free(ids);
+    // head_rows: the vocabulary head's rows for the draft ids, tiled as a head of their own
+    var parts = try three(main, "lm_head", "");
+    var total: usize = 0;
+    for (parts) |t| total += ids.len * (t.bytes.len / t.dim(0));
+    const host = try L.staging(total);
+    var at: usize = 0;
+    for (&parts) |*t| {
+        const row = t.bytes.len / t.dim(0);
+        for (ids, 0..) |id, r| @memcpy(host[at + r * row ..][0..row], t.bytes[id * row ..][0..row]);
+        t.shape[0] = ids.len;
+        t.bytes = host[at..][0 .. ids.len * row];
+        at += ids.len * row;
+    }
+    L.w.draft_head = try L.tile("draft_head", &.{parts});
+    const wide = std.mem.bytesAsSlice(i64, try L.staging(ids.len * 8));
+    for (ids, wide) |id, *x| x.* = id;
+    L.w.draft_ids = try L.alloc("draft_ids", ids.len * 8);
+    try L.ops.upload(L.w.draft_ids, L.host.items);
+    L.w.draft_count = ids.len;
+}

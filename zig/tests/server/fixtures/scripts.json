@@ -1,0 +1,472 @@
+{
+ "default": {
+  "chunks": [
+   [
+    "Hello"
+   ],
+   [
+    " world"
+   ],
+   [
+    "<|im_end|>"
+   ]
+  ]
+ },
+ "plain": {
+  "chunks": [
+   [
+    "Hello",
+    " world"
+   ],
+   [
+    "!"
+   ],
+   [
+    "<|im_end|>"
+   ]
+  ]
+ },
+ "think": {
+  "cached": 3,
+  "chunks": [
+   [
+    "Let",
+    " me"
+   ],
+   [
+    " think"
+   ],
+   [
+    "</think>",
+    "\n\n"
+   ],
+   [
+    "The",
+    " answer"
+   ],
+   [
+    " is",
+    " fast",
+    "."
+   ],
+   [
+    "<|im_end|>"
+   ]
+  ]
+ },
+ "think_long": {
+  "chunks": [
+   [
+    "Let",
+    " me"
+   ],
+   [
+    " think"
+   ],
+   [
+    " about"
+   ],
+   [
+    " it"
+   ],
+   [
+    " about"
+   ],
+   [
+    " it"
+   ]
+  ]
+ },
+ "stop_words": {
+  "chunks": [
+   [
+    "Hello"
+   ],
+   [
+    " wor"
+   ],
+   [
+    "ld"
+   ],
+   [
+    " STOP"
+   ],
+   [
+    " there"
+   ],
+   [
+    "<|im_end|>"
+   ]
+  ]
+ },
+ "split_utf8": {
+  "chunks": [
+   [
+    "caf",
+    195
+   ],
+   [
+    169,
+    " ",
+    226,
+    130
+   ],
+   [
+    172,
+    " ok"
+   ],
+   [
+    240,
+    159
+   ],
+   [
+    152,
+    128
+   ],
+   [
+    "<|im_end|>"
+   ]
+  ]
+ },
+ "harmony": {
+  "chunks": [
+   [
+    "<|channel|>",
+    "analysis",
+    "<|message|>",
+    "Let",
+    " me",
+    " think"
+   ],
+   [
+    "<|end|>",
+    "<|channel|>",
+    "final",
+    "<|message|>"
+   ],
+   [
+    "The",
+    " answer"
+   ],
+   [
+    "<|return|>"
+   ]
+  ]
+ },
+ "qwen_tool": {
+  "chunks": [
+   [
+    "<tool_call>",
+    "\n",
+    "{\"",
+    "name",
+    "\":\"",
+    "lookup",
+    "\", \"",
+    "arguments",
+    "\":",
+    " {\"",
+    "query",
+    "\":\"",
+    "speed",
+    "\"}}"
+   ],
+   [
+    "\n",
+    "</tool_call>"
+   ],
+   [
+    "<|im_end|>"
+   ]
+  ]
+ },
+ "qwen_tool_think": {
+  "chunks": [
+   [
+    "Let",
+    " me"
+   ],
+   [
+    " think",
+    "</think>",
+    "\n\n"
+   ],
+   [
+    "<tool_call>",
+    "\n{\"name\": \"lookup\", \"arguments\": {\"query\": \"speed\"}}\n",
+    "</tool_call>"
+   ],
+   [
+    "<|im_end|>"
+   ]
+  ]
+ },
+ "xml_tool": {
+  "chunks": [
+   [
+    "I",
+    " will",
+    " look"
+   ],
+   [
+    " it up.\n",
+    "<tool_call>",
+    "\n",
+    "<function=",
+    "lookup",
+    ">",
+    "\n"
+   ],
+   [
+    "<parameter=",
+    "query",
+    ">",
+    "\n",
+    "fast cars"
+   ],
+   [
+    "\n",
+    "</parameter>",
+    "\n"
+   ],
+   [
+    "<parameter=",
+    "limit",
+    ">",
+    "\n",
+    "5",
+    "\n",
+    "</parameter>",
+    "\n",
+    "</function>",
+    "\n",
+    "</tool_call>"
+   ],
+   [
+    "<|im_end|>"
+   ]
+  ]
+ },
+ "two_tools": {
+  "chunks": [
+   [
+    "<tool_call>",
+    "\n{\"name\": \"lookup\", \"arguments\": {\"query\": \"a\"}}\n",
+    "</tool_call>",
+    "\n",
+    "<tool_call>",
+    "\n{\"name\": \"lookup\", \"arguments\": {\"query\": \"b\"}}\n",
+    "</tool_call>"
+   ],
+   [
+    "<|im_end|>"
+   ]
+  ]
+ },
+ "glm_tool": {
+  "chunks": [
+   [
+    "<tool_call>",
+    "lookup",
+    "<arg_key>",
+    "query",
+    "</arg_key>",
+    "<arg_value>",
+    "fast",
+    "</arg_value>"
+   ],
+   [
+    "<arg_key>",
+    "limit",
+    "</arg_key>",
+    "<arg_value>",
+    "3",
+    "</arg_value>",
+    "</tool_call>"
+   ],
+   [
+    "<|im_end|>"
+   ]
+  ]
+ },
+ "gemma_tool": {
+  "chunks": [
+   [
+    "<|tool_call>",
+    "call:",
+    "lookup",
+    "{query:",
+    "<|\"|>",
+    "hi, there",
+    "<|\"|>",
+    ",limit:2}",
+    "<tool_call|>"
+   ],
+   [
+    "<|im_end|>"
+   ]
+  ]
+ },
+ "dsml_tool": {
+  "chunks": [
+   [
+    "<｜DSML｜tool_calls>",
+    "\n",
+    "<｜DSML｜invoke name=\"",
+    "lookup",
+    "\">",
+    "\n"
+   ],
+   [
+    "<｜DSML｜parameter name=\"",
+    "query",
+    "\" string=\"true\">",
+    "fast",
+    "</｜DSML｜parameter>",
+    "\n",
+    "<｜DSML｜parameter name=\"",
+    "limit",
+    "\" string=\"false\">",
+    "4",
+    "</｜DSML｜parameter>",
+    "\n"
+   ],
+   [
+    "</｜DSML｜invoke>",
+    "\n",
+    "</｜DSML｜tool_calls>"
+   ],
+   [
+    "<|im_end|>"
+   ]
+  ]
+ },
+ "bare_json": {
+  "chunks": [
+   [
+    "{\"tool\": \"lookup\", \"query\": \"ping\"}"
+   ],
+   [
+    "<|im_end|>"
+   ]
+  ]
+ },
+ "bad_tool": {
+  "chunks": [
+   [
+    "Sure",
+    " ",
+    "<tool_call>",
+    "{\"name\": \"other\", \"arguments\": {}}",
+    "</tool_call>",
+    " done"
+   ],
+   [
+    "<|im_end|>"
+   ]
+  ]
+ },
+ "long": {
+  "chunks": [
+   [
+    "Hello"
+   ],
+   [
+    " world"
+   ],
+   [
+    " there"
+   ],
+   [
+    " world"
+   ],
+   [
+    " there"
+   ],
+   [
+    " world"
+   ],
+   [
+    " there"
+   ],
+   [
+    " world"
+   ],
+   [
+    "<|im_end|>"
+   ]
+  ]
+ },
+ "slow": {
+  "delay_ms": 40,
+  "chunks": [
+   [
+    "Hello"
+   ],
+   [
+    " world"
+   ],
+   [
+    " there"
+   ],
+   [
+    " world"
+   ],
+   [
+    " there"
+   ],
+   [
+    " world"
+   ],
+   [
+    " there"
+   ],
+   [
+    " world"
+   ],
+   [
+    " there"
+   ],
+   [
+    " world"
+   ],
+   [
+    "<|im_end|>"
+   ]
+  ]
+ },
+ "eos_mid": {
+  "chunks": [
+   [
+    "Hello",
+    "<|im_end|>",
+    " world"
+   ],
+   [
+    " there"
+   ]
+  ]
+ },
+ "no_end": {
+  "chunks": [
+   [
+    "Hello"
+   ],
+   [
+    " world"
+   ]
+  ]
+ },
+ "json_answer": {
+  "chunks": [
+   [
+    "{\"",
+    "answer",
+    "\": 42}"
+   ],
+   [
+    "<|im_end|>"
+   ]
+  ]
+ }
+}

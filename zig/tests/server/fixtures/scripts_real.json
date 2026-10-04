@@ -1,0 +1,76 @@
+{
+ "default": {
+  "chunks": [
+   [
+    "Hello"
+   ],
+   [
+    " world"
+   ],
+   [
+    "<EOS>"
+   ]
+  ]
+ },
+ "think": {
+  "chunks": [
+   [
+    "Let me think"
+   ],
+   [
+    " about it"
+   ],
+   [
+    "</think>"
+   ],
+   [
+    "\n\nThe answer is fast."
+   ],
+   [
+    "<EOS>"
+   ]
+  ]
+ },
+ "unicode": {
+  "chunks": [
+   [
+    "café ☕"
+   ],
+   [
+    " 日本語"
+   ],
+   [
+    " 🚀 done"
+   ],
+   [
+    "<EOS>"
+   ]
+  ]
+ },
+ "tool": {
+  "chunks": [
+   [
+    "<tool_call>\n{\"name\": \"lookup\", \"arguments\": {\"query\": \"speed\"}}\n</tool_call>"
+   ],
+   [
+    "<EOS>"
+   ]
+  ]
+ },
+ "stop": {
+  "chunks": [
+   [
+    "one two"
+   ],
+   [
+    " three four"
+   ],
+   [
+    " five"
+   ],
+   [
+    "<EOS>"
+   ]
+  ]
+ }
+}

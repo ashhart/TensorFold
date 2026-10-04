@@ -1,0 +1,6284 @@
+{
+ "compile": {
+  "api": "newLibraryWithSource at run time, local #include \"nax.h\" inlined first",
+  "language": "metal4.0 (MLX's for this macOS)",
+  "math_mode": "safe",
+  "fp32_functions": "fast",
+  "trap": "an offline xcrun metallib (toolchain 32023.883) gives wrong bf16 tensor-op results here"
+ },
+ "dispatch": "dispatchThreads(grid, threadgroup); grid in threads, as mx.fast.metal_kernel launches",
+ "params": {
+  "tf_gemm_nax": [
+   "M",
+   "N",
+   "K",
+   "lda",
+   "ldb",
+   "ldd",
+   "tiles_n",
+   "tiles_m",
+   "swizzle",
+   "k_blocks",
+   "batch_a",
+   "batch_b",
+   "batch_d",
+   "a_offset",
+   "b_offset"
+  ],
+  "tf_gemm_splitk_nax": [
+   "M",
+   "N",
+   "K",
+   "lda",
+   "ldb",
+   "ldc",
+   "tiles_n",
+   "tiles_m",
+   "parts",
+   "part_stride",
+   "part_size",
+   "swizzle",
+   "a_offset",
+   "b_offset"
+  ],
+  "tf_gemm_splitk_sum": [
+   "parts",
+   "part_stride",
+   "ldd"
+  ],
+  "tf_attention_nax": [
+   "B",
+   "H",
+   "qL",
+   "kL",
+   "gqa",
+   "NQ",
+   "NK",
+   "NQ_full",
+   "NK_full",
+   "qL_rem",
+   "kL_rem",
+   "qL_off",
+   "q_batch",
+   "q_head",
+   "q_row",
+   "k_batch",
+   "k_head",
+   "k_row",
+   "v_batch",
+   "v_head",
+   "v_row",
+   "o_batch",
+   "o_head",
+   "o_row"
+  ],
+  "tf_scan_sum_strided": [
+   "axis",
+   "stride",
+   "stride_blocks",
+   "offset"
+  ],
+  "tf_conv1d_depthwise": [
+   "x_batch",
+   "x_time",
+   "x_channel",
+   "taps"
+  ],
+  "tf_qmm_t_nax": [
+   "K",
+   "N",
+   "M"
+  ],
+  "tf_gemv_rows": [
+   "K",
+   "M",
+   "lda",
+   "ndim",
+   "shape0",
+   "shape1",
+   "shape2",
+   "shape3",
+   "x_stride0",
+   "x_stride1",
+   "x_stride2",
+   "x_stride3",
+   "a_stride0",
+   "a_stride1",
+   "a_stride2",
+   "a_stride3"
+  ],
+  "tf_expert_offsets": [
+   "rows"
+  ],
+  "tf_gather_qmm_rhs_nax": [
+   "M",
+   "N",
+   "K",
+   "experts"
+  ]
+ },
+ "cases": [
+  {
+   "case": "ssd C.B s=17",
+   "mlx": "steel_gemm_fused_nax_nt_bfloat16_bfloat16_bm64_bn128_bk256_wm2_wn4_has_batch_n_use_out_source_n_do_axpby_n_align_M_n_align_N_n_align_K_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_nax_bf16_n_t_n_n_n_64_128_256_2_4_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      4,
+      16
+     ],
+     "threadgroup": [
+      32,
+      4,
+      2
+     ],
+     "params": {
+      "M": 17,
+      "N": 17,
+      "K": 128,
+      "lda": 6144,
+      "ldb": 6144,
+      "ldd": 17,
+      "tiles_n": 1,
+      "tiles_m": 1,
+      "swizzle": 2,
+      "k_blocks": 0,
+      "batch_a": 128,
+      "batch_b": 128,
+      "batch_d": 289,
+      "a_offset": 5120,
+      "b_offset": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "ssd y s=17",
+   "mlx": "steel_gemm_fused_nax_nn_float32_float32_bm64_bn128_bk256_wm2_wn4_has_batch_n_use_out_source_n_do_axpby_n_align_M_n_align_N_n_align_K_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_nax_f32_n_n_n_n_n_64_128_256_2_4_float_float_int32_t_float",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      4,
+      128
+     ],
+     "threadgroup": [
+      32,
+      4,
+      2
+     ],
+     "params": {
+      "M": 17,
+      "N": 64,
+      "K": 17,
+      "lda": 17,
+      "ldb": 4096,
+      "ldd": 64,
+      "tiles_n": 1,
+      "tiles_m": 1,
+      "swizzle": 2,
+      "k_blocks": 0,
+      "batch_a": 289,
+      "batch_b": 64,
+      "batch_d": 1088,
+      "a_offset": 0,
+      "b_offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "ssd state s=17",
+   "mlx": "steel_gemm_fused_nax_tt_float32_float32_bm64_bn128_bk256_wm2_wn4_has_batch_n_use_out_source_n_do_axpby_n_align_M_t_align_N_t_align_K_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_nax_f32_t_t_t_t_n_64_128_256_2_4_float_float_int32_t_float",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      4,
+      128
+     ],
+     "threadgroup": [
+      32,
+      4,
+      2
+     ],
+     "params": {
+      "M": 64,
+      "N": 128,
+      "K": 17,
+      "lda": 4096,
+      "ldb": 17,
+      "ldd": 128,
+      "tiles_n": 1,
+      "tiles_m": 1,
+      "swizzle": 2,
+      "k_blocks": 0,
+      "batch_a": 64,
+      "batch_b": 2176,
+      "batch_d": 8192,
+      "a_offset": 0,
+      "b_offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "scan segsum s=17",
+   "mlx": "strided_scan_inclusive_sum_float32_float32",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_scan_sum_strided_f32_float_int32_t_float",
+     "file": "scan.metal",
+     "grid": [
+      256,
+      64,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "axis": 17,
+      "stride": 17,
+      "stride_blocks": 1,
+      "offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "scan dtA s=17",
+   "mlx": "strided_scan_inclusive_sum_float32_float32",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_scan_sum_strided_f32_float_int32_t_float",
+     "file": "scan.metal",
+     "grid": [
+      256,
+      2,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "axis": 17,
+      "stride": 64,
+      "stride_blocks": 2,
+      "offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "gemv s=17",
+   "mlx": "gemv_float32_bm4_bn1_sm1_sn32_tm4_tn4_nc1_axpby0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemv_rows_f32_4_4_4_float_float_int32_t_float",
+     "file": "gemv.metal",
+     "grid": [
+      128,
+      1,
+      4352
+     ],
+     "threadgroup": [
+      32,
+      1,
+      4
+     ],
+     "params": {
+      "K": 128,
+      "M": 64,
+      "lda": 128,
+      "ndim": 3,
+      "shape0": 17,
+      "shape1": 8,
+      "shape2": 8,
+      "shape3": 1,
+      "x_stride0": 1024,
+      "x_stride1": 128,
+      "x_stride2": 0,
+      "x_stride3": 0,
+      "a_stride0": 0,
+      "a_stride1": 65536,
+      "a_stride2": 8192,
+      "a_stride3": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "ssd C.B s=35",
+   "mlx": "steel_gemm_fused_nax_nt_bfloat16_bfloat16_bm64_bn128_bk256_wm2_wn4_has_batch_n_use_out_source_n_do_axpby_n_align_M_n_align_N_n_align_K_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_nax_bf16_n_t_n_n_n_64_128_256_2_4_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      4,
+      16
+     ],
+     "threadgroup": [
+      32,
+      4,
+      2
+     ],
+     "params": {
+      "M": 35,
+      "N": 35,
+      "K": 128,
+      "lda": 6144,
+      "ldb": 6144,
+      "ldd": 35,
+      "tiles_n": 1,
+      "tiles_m": 1,
+      "swizzle": 2,
+      "k_blocks": 0,
+      "batch_a": 128,
+      "batch_b": 128,
+      "batch_d": 1225,
+      "a_offset": 5120,
+      "b_offset": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "ssd y s=35",
+   "mlx": "steel_gemm_fused_nax_nn_float32_float32_bm64_bn128_bk256_wm2_wn4_has_batch_n_use_out_source_n_do_axpby_n_align_M_n_align_N_n_align_K_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_nax_f32_n_n_n_n_n_64_128_256_2_4_float_float_int32_t_float",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      4,
+      128
+     ],
+     "threadgroup": [
+      32,
+      4,
+      2
+     ],
+     "params": {
+      "M": 35,
+      "N": 64,
+      "K": 35,
+      "lda": 35,
+      "ldb": 4096,
+      "ldd": 64,
+      "tiles_n": 1,
+      "tiles_m": 1,
+      "swizzle": 2,
+      "k_blocks": 0,
+      "batch_a": 1225,
+      "batch_b": 64,
+      "batch_d": 2240,
+      "a_offset": 0,
+      "b_offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "ssd state s=35",
+   "mlx": "steel_gemm_fused_nax_tt_float32_float32_bm64_bn128_bk256_wm2_wn4_has_batch_n_use_out_source_n_do_axpby_n_align_M_t_align_N_t_align_K_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_nax_f32_t_t_t_t_n_64_128_256_2_4_float_float_int32_t_float",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      4,
+      128
+     ],
+     "threadgroup": [
+      32,
+      4,
+      2
+     ],
+     "params": {
+      "M": 64,
+      "N": 128,
+      "K": 35,
+      "lda": 4096,
+      "ldb": 35,
+      "ldd": 128,
+      "tiles_n": 1,
+      "tiles_m": 1,
+      "swizzle": 2,
+      "k_blocks": 0,
+      "batch_a": 64,
+      "batch_b": 4480,
+      "batch_d": 8192,
+      "a_offset": 0,
+      "b_offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "scan segsum s=35",
+   "mlx": "strided_scan_inclusive_sum_float32_float32",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_scan_sum_strided_f32_float_int32_t_float",
+     "file": "scan.metal",
+     "grid": [
+      256,
+      128,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "axis": 35,
+      "stride": 35,
+      "stride_blocks": 2,
+      "offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "scan dtA s=35",
+   "mlx": "strided_scan_inclusive_sum_float32_float32",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_scan_sum_strided_f32_float_int32_t_float",
+     "file": "scan.metal",
+     "grid": [
+      256,
+      2,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "axis": 35,
+      "stride": 64,
+      "stride_blocks": 2,
+      "offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "gemv s=35",
+   "mlx": "gemv_float32_bm4_bn1_sm1_sn32_tm4_tn4_nc1_axpby0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemv_rows_f32_4_4_4_float_float_int32_t_float",
+     "file": "gemv.metal",
+     "grid": [
+      128,
+      1,
+      8960
+     ],
+     "threadgroup": [
+      32,
+      1,
+      4
+     ],
+     "params": {
+      "K": 128,
+      "M": 64,
+      "lda": 128,
+      "ndim": 3,
+      "shape0": 35,
+      "shape1": 8,
+      "shape2": 8,
+      "shape3": 1,
+      "x_stride0": 1024,
+      "x_stride1": 128,
+      "x_stride2": 0,
+      "x_stride3": 0,
+      "a_stride0": 0,
+      "a_stride1": 65536,
+      "a_stride2": 8192,
+      "a_stride3": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "ssd C.B s=64",
+   "mlx": "steel_gemm_fused_nax_nt_bfloat16_bfloat16_bm64_bn128_bk256_wm2_wn4_has_batch_n_use_out_source_n_do_axpby_n_align_M_t_align_N_n_align_K_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_nax_bf16_n_t_t_n_n_64_128_256_2_4_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      4,
+      16
+     ],
+     "threadgroup": [
+      32,
+      4,
+      2
+     ],
+     "params": {
+      "M": 64,
+      "N": 64,
+      "K": 128,
+      "lda": 6144,
+      "ldb": 6144,
+      "ldd": 64,
+      "tiles_n": 1,
+      "tiles_m": 1,
+      "swizzle": 2,
+      "k_blocks": 0,
+      "batch_a": 128,
+      "batch_b": 128,
+      "batch_d": 4096,
+      "a_offset": 5120,
+      "b_offset": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "ssd y s=64",
+   "mlx": "steel_gemm_fused_nax_nn_float32_float32_bm64_bn128_bk256_wm2_wn4_has_batch_n_use_out_source_n_do_axpby_n_align_M_t_align_N_n_align_K_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_nax_f32_n_n_t_n_n_64_128_256_2_4_float_float_int32_t_float",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      4,
+      128
+     ],
+     "threadgroup": [
+      32,
+      4,
+      2
+     ],
+     "params": {
+      "M": 64,
+      "N": 64,
+      "K": 64,
+      "lda": 64,
+      "ldb": 4096,
+      "ldd": 64,
+      "tiles_n": 1,
+      "tiles_m": 1,
+      "swizzle": 2,
+      "k_blocks": 0,
+      "batch_a": 4096,
+      "batch_b": 64,
+      "batch_d": 4096,
+      "a_offset": 0,
+      "b_offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "ssd state s=64",
+   "mlx": "steel_gemm_fused_nax_tt_float32_float32_bm64_bn128_bk256_wm2_wn4_has_batch_n_use_out_source_n_do_axpby_n_align_M_t_align_N_t_align_K_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_nax_f32_t_t_t_t_n_64_128_256_2_4_float_float_int32_t_float",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      4,
+      128
+     ],
+     "threadgroup": [
+      32,
+      4,
+      2
+     ],
+     "params": {
+      "M": 64,
+      "N": 128,
+      "K": 64,
+      "lda": 4096,
+      "ldb": 64,
+      "ldd": 128,
+      "tiles_n": 1,
+      "tiles_m": 1,
+      "swizzle": 2,
+      "k_blocks": 0,
+      "batch_a": 64,
+      "batch_b": 8192,
+      "batch_d": 8192,
+      "a_offset": 0,
+      "b_offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "scan segsum s=64",
+   "mlx": "strided_scan_inclusive_sum_float32_float32",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_scan_sum_strided_f32_float_int32_t_float",
+     "file": "scan.metal",
+     "grid": [
+      256,
+      128,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "axis": 64,
+      "stride": 64,
+      "stride_blocks": 2,
+      "offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "scan dtA s=64",
+   "mlx": "strided_scan_inclusive_sum_float32_float32",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_scan_sum_strided_f32_float_int32_t_float",
+     "file": "scan.metal",
+     "grid": [
+      256,
+      2,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "axis": 64,
+      "stride": 64,
+      "stride_blocks": 2,
+      "offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "gemv s=64",
+   "mlx": "gemv_float32_bm4_bn1_sm1_sn32_tm4_tn4_nc1_axpby0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemv_rows_f32_4_4_4_float_float_int32_t_float",
+     "file": "gemv.metal",
+     "grid": [
+      128,
+      1,
+      16384
+     ],
+     "threadgroup": [
+      32,
+      1,
+      4
+     ],
+     "params": {
+      "K": 128,
+      "M": 64,
+      "lda": 128,
+      "ndim": 3,
+      "shape0": 64,
+      "shape1": 8,
+      "shape2": 8,
+      "shape3": 1,
+      "x_stride0": 1024,
+      "x_stride1": 128,
+      "x_stride2": 0,
+      "x_stride3": 0,
+      "a_stride0": 0,
+      "a_stride1": 65536,
+      "a_stride2": 8192,
+      "a_stride3": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "ssd C.B s=100",
+   "mlx": "steel_gemm_fused_nax_nt_bfloat16_bfloat16_bm64_bn128_bk256_wm2_wn4_has_batch_n_use_out_source_n_do_axpby_n_align_M_n_align_N_n_align_K_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_nax_bf16_n_t_n_n_n_64_128_256_2_4_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      4,
+      16
+     ],
+     "threadgroup": [
+      32,
+      4,
+      2
+     ],
+     "params": {
+      "M": 100,
+      "N": 100,
+      "K": 128,
+      "lda": 6144,
+      "ldb": 6144,
+      "ldd": 100,
+      "tiles_n": 1,
+      "tiles_m": 2,
+      "swizzle": 2,
+      "k_blocks": 0,
+      "batch_a": 128,
+      "batch_b": 128,
+      "batch_d": 10000,
+      "a_offset": 5120,
+      "b_offset": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "ssd y s=100",
+   "mlx": "steel_gemm_fused_nax_nn_float32_float32_bm64_bn128_bk256_wm2_wn4_has_batch_n_use_out_source_n_do_axpby_n_align_M_n_align_N_n_align_K_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_nax_f32_n_n_n_n_n_64_128_256_2_4_float_float_int32_t_float",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      4,
+      128
+     ],
+     "threadgroup": [
+      32,
+      4,
+      2
+     ],
+     "params": {
+      "M": 100,
+      "N": 64,
+      "K": 100,
+      "lda": 100,
+      "ldb": 4096,
+      "ldd": 64,
+      "tiles_n": 1,
+      "tiles_m": 2,
+      "swizzle": 2,
+      "k_blocks": 0,
+      "batch_a": 10000,
+      "batch_b": 64,
+      "batch_d": 6400,
+      "a_offset": 0,
+      "b_offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "ssd state s=100",
+   "mlx": "steel_gemm_fused_nax_tt_float32_float32_bm64_bn128_bk256_wm2_wn4_has_batch_n_use_out_source_n_do_axpby_n_align_M_t_align_N_t_align_K_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_nax_f32_t_t_t_t_n_64_128_256_2_4_float_float_int32_t_float",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      4,
+      128
+     ],
+     "threadgroup": [
+      32,
+      4,
+      2
+     ],
+     "params": {
+      "M": 64,
+      "N": 128,
+      "K": 100,
+      "lda": 4096,
+      "ldb": 100,
+      "ldd": 128,
+      "tiles_n": 1,
+      "tiles_m": 1,
+      "swizzle": 2,
+      "k_blocks": 0,
+      "batch_a": 64,
+      "batch_b": 12800,
+      "batch_d": 8192,
+      "a_offset": 0,
+      "b_offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "scan segsum s=100",
+   "mlx": "strided_scan_inclusive_sum_float32_float32",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_scan_sum_strided_f32_float_int32_t_float",
+     "file": "scan.metal",
+     "grid": [
+      256,
+      256,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "axis": 100,
+      "stride": 100,
+      "stride_blocks": 4,
+      "offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "scan dtA s=100",
+   "mlx": "strided_scan_inclusive_sum_float32_float32",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_scan_sum_strided_f32_float_int32_t_float",
+     "file": "scan.metal",
+     "grid": [
+      256,
+      2,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "axis": 100,
+      "stride": 64,
+      "stride_blocks": 2,
+      "offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "gemv s=100",
+   "mlx": "gemv_float32_bm4_bn1_sm1_sn32_tm4_tn4_nc1_axpby0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemv_rows_f32_4_4_4_float_float_int32_t_float",
+     "file": "gemv.metal",
+     "grid": [
+      128,
+      1,
+      25600
+     ],
+     "threadgroup": [
+      32,
+      1,
+      4
+     ],
+     "params": {
+      "K": 128,
+      "M": 64,
+      "lda": 128,
+      "ndim": 3,
+      "shape0": 100,
+      "shape1": 8,
+      "shape2": 8,
+      "shape3": 1,
+      "x_stride0": 1024,
+      "x_stride1": 128,
+      "x_stride2": 0,
+      "x_stride3": 0,
+      "a_stride0": 0,
+      "a_stride1": 65536,
+      "a_stride2": 8192,
+      "a_stride3": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "ssd C.B s=128",
+   "mlx": "steel_gemm_fused_nax_nt_bfloat16_bfloat16_bm64_bn128_bk256_wm2_wn4_has_batch_n_use_out_source_n_do_axpby_n_align_M_t_align_N_t_align_K_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_nax_bf16_n_t_t_t_n_64_128_256_2_4_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      4,
+      16
+     ],
+     "threadgroup": [
+      32,
+      4,
+      2
+     ],
+     "params": {
+      "M": 128,
+      "N": 128,
+      "K": 128,
+      "lda": 6144,
+      "ldb": 6144,
+      "ldd": 128,
+      "tiles_n": 1,
+      "tiles_m": 2,
+      "swizzle": 2,
+      "k_blocks": 0,
+      "batch_a": 128,
+      "batch_b": 128,
+      "batch_d": 16384,
+      "a_offset": 5120,
+      "b_offset": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "ssd y s=128",
+   "mlx": "steel_gemm_fused_nax_nn_float32_float32_bm64_bn128_bk256_wm2_wn4_has_batch_n_use_out_source_n_do_axpby_n_align_M_t_align_N_n_align_K_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_nax_f32_n_n_t_n_n_64_128_256_2_4_float_float_int32_t_float",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      4,
+      128
+     ],
+     "threadgroup": [
+      32,
+      4,
+      2
+     ],
+     "params": {
+      "M": 128,
+      "N": 64,
+      "K": 128,
+      "lda": 128,
+      "ldb": 4096,
+      "ldd": 64,
+      "tiles_n": 1,
+      "tiles_m": 2,
+      "swizzle": 2,
+      "k_blocks": 0,
+      "batch_a": 16384,
+      "batch_b": 64,
+      "batch_d": 8192,
+      "a_offset": 0,
+      "b_offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "ssd state s=128",
+   "mlx": "steel_gemm_fused_nax_tt_float32_float32_bm64_bn128_bk256_wm2_wn4_has_batch_n_use_out_source_n_do_axpby_n_align_M_t_align_N_t_align_K_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_nax_f32_t_t_t_t_n_64_128_256_2_4_float_float_int32_t_float",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      4,
+      128
+     ],
+     "threadgroup": [
+      32,
+      4,
+      2
+     ],
+     "params": {
+      "M": 64,
+      "N": 128,
+      "K": 128,
+      "lda": 4096,
+      "ldb": 128,
+      "ldd": 128,
+      "tiles_n": 1,
+      "tiles_m": 1,
+      "swizzle": 2,
+      "k_blocks": 0,
+      "batch_a": 64,
+      "batch_b": 16384,
+      "batch_d": 8192,
+      "a_offset": 0,
+      "b_offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "scan segsum s=128",
+   "mlx": "strided_scan_inclusive_sum_float32_float32",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_scan_sum_strided_f32_float_int32_t_float",
+     "file": "scan.metal",
+     "grid": [
+      256,
+      256,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "axis": 128,
+      "stride": 128,
+      "stride_blocks": 4,
+      "offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "scan dtA s=128",
+   "mlx": "strided_scan_inclusive_sum_float32_float32",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_scan_sum_strided_f32_float_int32_t_float",
+     "file": "scan.metal",
+     "grid": [
+      256,
+      2,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "axis": 128,
+      "stride": 64,
+      "stride_blocks": 2,
+      "offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "gemv s=128",
+   "mlx": "gemv_float32_bm4_bn1_sm1_sn32_tm4_tn4_nc1_axpby0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemv_rows_f32_4_4_4_float_float_int32_t_float",
+     "file": "gemv.metal",
+     "grid": [
+      128,
+      1,
+      32768
+     ],
+     "threadgroup": [
+      32,
+      1,
+      4
+     ],
+     "params": {
+      "K": 128,
+      "M": 64,
+      "lda": 128,
+      "ndim": 3,
+      "shape0": 128,
+      "shape1": 8,
+      "shape2": 8,
+      "shape3": 1,
+      "x_stride0": 1024,
+      "x_stride1": 128,
+      "x_stride2": 0,
+      "x_stride3": 0,
+      "a_stride0": 0,
+      "a_stride1": 65536,
+      "a_stride2": 8192,
+      "a_stride3": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "ssd C.B s=192",
+   "mlx": "steel_gemm_fused_nax_nt_bfloat16_bfloat16_bm64_bn128_bk256_wm2_wn4_has_batch_n_use_out_source_n_do_axpby_n_align_M_t_align_N_n_align_K_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_nax_bf16_n_t_t_n_n_64_128_256_2_4_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "gemm_nax.metal",
+     "grid": [
+      256,
+      4,
+      16
+     ],
+     "threadgroup": [
+      32,
+      4,
+      2
+     ],
+     "params": {
+      "M": 192,
+      "N": 192,
+      "K": 128,
+      "lda": 6144,
+      "ldb": 6144,
+      "ldd": 192,
+      "tiles_n": 2,
+      "tiles_m": 3,
+      "swizzle": 2,
+      "k_blocks": 0,
+      "batch_a": 128,
+      "batch_b": 128,
+      "batch_d": 36864,
+      "a_offset": 5120,
+      "b_offset": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "ssd y s=192",
+   "mlx": "steel_gemm_fused_nax_nn_float32_float32_bm64_bn128_bk256_wm2_wn4_has_batch_n_use_out_source_n_do_axpby_n_align_M_t_align_N_n_align_K_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_nax_f32_n_n_t_n_n_64_128_256_2_4_float_float_int32_t_float",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      4,
+      128
+     ],
+     "threadgroup": [
+      32,
+      4,
+      2
+     ],
+     "params": {
+      "M": 192,
+      "N": 64,
+      "K": 192,
+      "lda": 192,
+      "ldb": 4096,
+      "ldd": 64,
+      "tiles_n": 1,
+      "tiles_m": 3,
+      "swizzle": 2,
+      "k_blocks": 0,
+      "batch_a": 36864,
+      "batch_b": 64,
+      "batch_d": 12288,
+      "a_offset": 0,
+      "b_offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "ssd state s=192",
+   "mlx": "steel_gemm_fused_nax_tt_float32_float32_bm64_bn128_bk256_wm2_wn4_has_batch_n_use_out_source_n_do_axpby_n_align_M_t_align_N_t_align_K_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_nax_f32_t_t_t_t_n_64_128_256_2_4_float_float_int32_t_float",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      4,
+      128
+     ],
+     "threadgroup": [
+      32,
+      4,
+      2
+     ],
+     "params": {
+      "M": 64,
+      "N": 128,
+      "K": 192,
+      "lda": 4096,
+      "ldb": 192,
+      "ldd": 128,
+      "tiles_n": 1,
+      "tiles_m": 1,
+      "swizzle": 2,
+      "k_blocks": 0,
+      "batch_a": 64,
+      "batch_b": 24576,
+      "batch_d": 8192,
+      "a_offset": 0,
+      "b_offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "scan segsum s=192",
+   "mlx": "strided_scan_inclusive_sum_float32_float32",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_scan_sum_strided_f32_float_int32_t_float",
+     "file": "scan.metal",
+     "grid": [
+      256,
+      384,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "axis": 192,
+      "stride": 192,
+      "stride_blocks": 6,
+      "offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "scan dtA s=192",
+   "mlx": "strided_scan_inclusive_sum_float32_float32",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_scan_sum_strided_f32_float_int32_t_float",
+     "file": "scan.metal",
+     "grid": [
+      256,
+      2,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "axis": 192,
+      "stride": 64,
+      "stride_blocks": 2,
+      "offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "gemv s=192",
+   "mlx": "gemv_float32_bm4_bn1_sm1_sn32_tm4_tn4_nc1_axpby0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemv_rows_f32_4_4_4_float_float_int32_t_float",
+     "file": "gemv.metal",
+     "grid": [
+      128,
+      1,
+      49152
+     ],
+     "threadgroup": [
+      32,
+      1,
+      4
+     ],
+     "params": {
+      "K": 128,
+      "M": 64,
+      "lda": 128,
+      "ndim": 3,
+      "shape0": 192,
+      "shape1": 8,
+      "shape2": 8,
+      "shape3": 1,
+      "x_stride0": 1024,
+      "x_stride1": 128,
+      "x_stride2": 0,
+      "x_stride3": 0,
+      "a_stride0": 0,
+      "a_stride1": 65536,
+      "a_stride2": 8192,
+      "a_stride3": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "ssd C.B s=256",
+   "mlx": "steel_gemm_fused_nax_nt_bfloat16_bfloat16_bm64_bn128_bk256_wm2_wn4_has_batch_n_use_out_source_n_do_axpby_n_align_M_t_align_N_t_align_K_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_nax_bf16_n_t_t_t_n_64_128_256_2_4_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "gemm_nax.metal",
+     "grid": [
+      256,
+      4,
+      16
+     ],
+     "threadgroup": [
+      32,
+      4,
+      2
+     ],
+     "params": {
+      "M": 256,
+      "N": 256,
+      "K": 128,
+      "lda": 6144,
+      "ldb": 6144,
+      "ldd": 256,
+      "tiles_n": 2,
+      "tiles_m": 4,
+      "swizzle": 2,
+      "k_blocks": 0,
+      "batch_a": 128,
+      "batch_b": 128,
+      "batch_d": 65536,
+      "a_offset": 5120,
+      "b_offset": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "ssd y s=256",
+   "mlx": "steel_gemm_fused_nax_nn_float32_float32_bm64_bn128_bk256_wm2_wn4_has_batch_n_use_out_source_n_do_axpby_n_align_M_t_align_N_n_align_K_t",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_nax_f32_n_n_t_n_t_64_128_256_2_4_float_float_int32_t_float",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      4,
+      128
+     ],
+     "threadgroup": [
+      32,
+      4,
+      2
+     ],
+     "params": {
+      "M": 256,
+      "N": 64,
+      "K": 256,
+      "lda": 256,
+      "ldb": 4096,
+      "ldd": 64,
+      "tiles_n": 1,
+      "tiles_m": 4,
+      "swizzle": 2,
+      "k_blocks": 1,
+      "batch_a": 65536,
+      "batch_b": 64,
+      "batch_d": 16384,
+      "a_offset": 0,
+      "b_offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "ssd state s=256",
+   "mlx": "steel_gemm_fused_nax_tt_float32_float32_bm64_bn128_bk256_wm2_wn4_has_batch_n_use_out_source_n_do_axpby_n_align_M_t_align_N_t_align_K_t",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_nax_f32_t_t_t_t_t_64_128_256_2_4_float_float_int32_t_float",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      4,
+      128
+     ],
+     "threadgroup": [
+      32,
+      4,
+      2
+     ],
+     "params": {
+      "M": 64,
+      "N": 128,
+      "K": 256,
+      "lda": 4096,
+      "ldb": 256,
+      "ldd": 128,
+      "tiles_n": 1,
+      "tiles_m": 1,
+      "swizzle": 2,
+      "k_blocks": 1,
+      "batch_a": 64,
+      "batch_b": 32768,
+      "batch_d": 8192,
+      "a_offset": 0,
+      "b_offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "scan segsum s=256",
+   "mlx": "strided_scan_inclusive_sum_float32_float32",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_scan_sum_strided_f32_float_int32_t_float",
+     "file": "scan.metal",
+     "grid": [
+      256,
+      512,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "axis": 256,
+      "stride": 256,
+      "stride_blocks": 8,
+      "offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "scan dtA s=256",
+   "mlx": "strided_scan_inclusive_sum_float32_float32",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_scan_sum_strided_f32_float_int32_t_float",
+     "file": "scan.metal",
+     "grid": [
+      256,
+      2,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "axis": 256,
+      "stride": 64,
+      "stride_blocks": 2,
+      "offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "gemv s=256",
+   "mlx": "gemv_float32_bm4_bn1_sm1_sn32_tm4_tn4_nc1_axpby0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemv_rows_f32_4_4_4_float_float_int32_t_float",
+     "file": "gemv.metal",
+     "grid": [
+      128,
+      1,
+      65536
+     ],
+     "threadgroup": [
+      32,
+      1,
+      4
+     ],
+     "params": {
+      "K": 128,
+      "M": 64,
+      "lda": 128,
+      "ndim": 3,
+      "shape0": 256,
+      "shape1": 8,
+      "shape2": 8,
+      "shape3": 1,
+      "x_stride0": 1024,
+      "x_stride1": 128,
+      "x_stride2": 0,
+      "x_stride3": 0,
+      "a_stride0": 0,
+      "a_stride1": 65536,
+      "a_stride2": 8192,
+      "a_stride3": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "router L=17",
+   "mlx": "steel_gemm_splitk_nax_nt_bfloat16_float32_bm64_bn64_bk256_wm2_wn2_align_M_n_align_N_t_align_K_n + steel_gemm_splitk_accum_bfloat16_float32",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_splitk_nax_bf16_n_t_n_t_64_64_256_2_2_bfloat16_t_bfloat16_t_int32_t_float",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      2,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "M": 17,
+      "N": 128,
+      "K": 2688,
+      "lda": 2688,
+      "ldb": 2688,
+      "ldc": 128,
+      "tiles_n": 2,
+      "tiles_m": 1,
+      "parts": 2,
+      "part_stride": 2176,
+      "part_size": 2048,
+      "swizzle": 0,
+      "a_offset": 0,
+      "b_offset": 0
+     }
+    },
+    {
+     "function": "custom_kernel_tf_gemm_splitk_sum_bf16_float_int32_t_bfloat16_t",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      17,
+      1
+     ],
+     "threadgroup": [
+      32,
+      8,
+      1
+     ],
+     "params": {
+      "parts": 2,
+      "part_stride": 2176,
+      "ldd": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "router L=35",
+   "mlx": "steel_gemm_splitk_nax_nt_bfloat16_float32_bm64_bn64_bk256_wm2_wn2_align_M_n_align_N_t_align_K_n + steel_gemm_splitk_accum_bfloat16_float32",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_splitk_nax_bf16_n_t_n_t_64_64_256_2_2_bfloat16_t_bfloat16_t_int32_t_float",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      2,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "M": 35,
+      "N": 128,
+      "K": 2688,
+      "lda": 2688,
+      "ldb": 2688,
+      "ldc": 128,
+      "tiles_n": 2,
+      "tiles_m": 1,
+      "parts": 2,
+      "part_stride": 4480,
+      "part_size": 2048,
+      "swizzle": 0,
+      "a_offset": 0,
+      "b_offset": 0
+     }
+    },
+    {
+     "function": "custom_kernel_tf_gemm_splitk_sum_bf16_float_int32_t_bfloat16_t",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      35,
+      1
+     ],
+     "threadgroup": [
+      32,
+      8,
+      1
+     ],
+     "params": {
+      "parts": 2,
+      "part_stride": 4480,
+      "ldd": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "router L=64",
+   "mlx": "steel_gemm_splitk_nax_nt_bfloat16_float32_bm64_bn64_bk256_wm2_wn2_align_M_t_align_N_t_align_K_n + steel_gemm_splitk_accum_bfloat16_float32",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_splitk_nax_bf16_n_t_t_t_64_64_256_2_2_bfloat16_t_bfloat16_t_int32_t_float",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      2,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "M": 64,
+      "N": 128,
+      "K": 2688,
+      "lda": 2688,
+      "ldb": 2688,
+      "ldc": 128,
+      "tiles_n": 2,
+      "tiles_m": 1,
+      "parts": 2,
+      "part_stride": 8192,
+      "part_size": 2048,
+      "swizzle": 0,
+      "a_offset": 0,
+      "b_offset": 0
+     }
+    },
+    {
+     "function": "custom_kernel_tf_gemm_splitk_sum_bf16_float_int32_t_bfloat16_t",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      64,
+      1
+     ],
+     "threadgroup": [
+      32,
+      8,
+      1
+     ],
+     "params": {
+      "parts": 2,
+      "part_stride": 8192,
+      "ldd": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "router L=100",
+   "mlx": "steel_gemm_splitk_nax_nt_bfloat16_float32_bm64_bn64_bk256_wm2_wn2_align_M_n_align_N_t_align_K_n + steel_gemm_splitk_accum_bfloat16_float32",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_splitk_nax_bf16_n_t_n_t_64_64_256_2_2_bfloat16_t_bfloat16_t_int32_t_float",
+     "file": "gemm_nax.metal",
+     "grid": [
+      256,
+      2,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "M": 100,
+      "N": 128,
+      "K": 2688,
+      "lda": 2688,
+      "ldb": 2688,
+      "ldc": 128,
+      "tiles_n": 2,
+      "tiles_m": 2,
+      "parts": 2,
+      "part_stride": 12800,
+      "part_size": 2048,
+      "swizzle": 0,
+      "a_offset": 0,
+      "b_offset": 0
+     }
+    },
+    {
+     "function": "custom_kernel_tf_gemm_splitk_sum_bf16_float_int32_t_bfloat16_t",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      100,
+      1
+     ],
+     "threadgroup": [
+      32,
+      8,
+      1
+     ],
+     "params": {
+      "parts": 2,
+      "part_stride": 12800,
+      "ldd": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "router L=256",
+   "mlx": "steel_gemm_splitk_nax_nt_bfloat16_float32_bm64_bn64_bk256_wm2_wn2_align_M_t_align_N_t_align_K_n + steel_gemm_splitk_accum_bfloat16_float32",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_splitk_nax_bf16_n_t_t_t_64_64_256_2_2_bfloat16_t_bfloat16_t_int32_t_float",
+     "file": "gemm_nax.metal",
+     "grid": [
+      512,
+      2,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "M": 256,
+      "N": 128,
+      "K": 2688,
+      "lda": 2688,
+      "ldb": 2688,
+      "ldc": 128,
+      "tiles_n": 2,
+      "tiles_m": 4,
+      "parts": 2,
+      "part_stride": 32768,
+      "part_size": 2048,
+      "swizzle": 1,
+      "a_offset": 0,
+      "b_offset": 0
+     }
+    },
+    {
+     "function": "custom_kernel_tf_gemm_splitk_sum_bf16_float_int32_t_bfloat16_t",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      256,
+      1
+     ],
+     "threadgroup": [
+      32,
+      8,
+      1
+     ],
+     "params": {
+      "parts": 2,
+      "part_stride": 32768,
+      "ldd": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "router L=300",
+   "mlx": "steel_gemm_splitk_nax_nt_bfloat16_float32_bm64_bn64_bk256_wm2_wn2_align_M_n_align_N_t_align_K_n + steel_gemm_splitk_accum_bfloat16_float32",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_splitk_nax_bf16_n_t_n_t_64_64_256_2_2_bfloat16_t_bfloat16_t_int32_t_float",
+     "file": "gemm_nax.metal",
+     "grid": [
+      768,
+      2,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "M": 300,
+      "N": 128,
+      "K": 2688,
+      "lda": 2688,
+      "ldb": 2688,
+      "ldc": 128,
+      "tiles_n": 2,
+      "tiles_m": 5,
+      "parts": 2,
+      "part_stride": 38400,
+      "part_size": 2048,
+      "swizzle": 1,
+      "a_offset": 0,
+      "b_offset": 0
+     }
+    },
+    {
+     "function": "custom_kernel_tf_gemm_splitk_sum_bf16_float_int32_t_bfloat16_t",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      300,
+      1
+     ],
+     "threadgroup": [
+      32,
+      8,
+      1
+     ],
+     "params": {
+      "parts": 2,
+      "part_stride": 38400,
+      "ldd": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "router L=896",
+   "mlx": "steel_gemm_splitk_nax_nt_bfloat16_float32_bm64_bn64_bk256_wm2_wn2_align_M_t_align_N_t_align_K_n + steel_gemm_splitk_accum_bfloat16_float32",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_splitk_nax_bf16_n_t_t_t_64_64_256_2_2_bfloat16_t_bfloat16_t_int32_t_float",
+     "file": "gemm_nax.metal",
+     "grid": [
+      1792,
+      2,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "M": 896,
+      "N": 128,
+      "K": 2688,
+      "lda": 2688,
+      "ldb": 2688,
+      "ldc": 128,
+      "tiles_n": 2,
+      "tiles_m": 14,
+      "parts": 2,
+      "part_stride": 114688,
+      "part_size": 2048,
+      "swizzle": 1,
+      "a_offset": 0,
+      "b_offset": 0
+     }
+    },
+    {
+     "function": "custom_kernel_tf_gemm_splitk_sum_bf16_float_int32_t_bfloat16_t",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      896,
+      1
+     ],
+     "threadgroup": [
+      32,
+      8,
+      1
+     ],
+     "params": {
+      "parts": 2,
+      "part_stride": 114688,
+      "ldd": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "router L=1024",
+   "mlx": "steel_gemm_splitk_nax_nt_bfloat16_float32_bm64_bn64_bk256_wm2_wn2_align_M_t_align_N_t_align_K_n + steel_gemm_splitk_accum_bfloat16_float32",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_splitk_nax_bf16_n_t_t_t_64_64_256_2_2_bfloat16_t_bfloat16_t_int32_t_float",
+     "file": "gemm_nax.metal",
+     "grid": [
+      2048,
+      2,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "M": 1024,
+      "N": 128,
+      "K": 2688,
+      "lda": 2688,
+      "ldb": 2688,
+      "ldc": 128,
+      "tiles_n": 2,
+      "tiles_m": 16,
+      "parts": 2,
+      "part_stride": 131072,
+      "part_size": 2048,
+      "swizzle": 1,
+      "a_offset": 0,
+      "b_offset": 0
+     }
+    },
+    {
+     "function": "custom_kernel_tf_gemm_splitk_sum_bf16_float_int32_t_bfloat16_t",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      1024,
+      1
+     ],
+     "threadgroup": [
+      32,
+      8,
+      1
+     ],
+     "params": {
+      "parts": 2,
+      "part_stride": 131072,
+      "ldd": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "router L=1025",
+   "mlx": "steel_gemm_fused_nax_nt_bfloat16_bfloat16_bm64_bn128_bk256_wm2_wn4_has_batch_n_use_out_source_n_do_axpby_n_align_M_n_align_N_t_align_K_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_nax_bf16_n_t_n_t_n_64_128_256_2_4_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      20,
+      2
+     ],
+     "threadgroup": [
+      32,
+      4,
+      2
+     ],
+     "params": {
+      "M": 1025,
+      "N": 128,
+      "K": 2688,
+      "lda": 2688,
+      "ldb": 2688,
+      "ldd": 128,
+      "tiles_n": 1,
+      "tiles_m": 17,
+      "swizzle": 2,
+      "k_blocks": 10,
+      "batch_a": 0,
+      "batch_b": 0,
+      "batch_d": 131200,
+      "a_offset": 0,
+      "b_offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "router L=1100",
+   "mlx": "steel_gemm_fused_nax_nt_bfloat16_bfloat16_bm64_bn128_bk256_wm2_wn4_has_batch_n_use_out_source_n_do_axpby_n_align_M_n_align_N_t_align_K_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_nax_bf16_n_t_n_t_n_64_128_256_2_4_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      20,
+      2
+     ],
+     "threadgroup": [
+      32,
+      4,
+      2
+     ],
+     "params": {
+      "M": 1100,
+      "N": 128,
+      "K": 2688,
+      "lda": 2688,
+      "ldb": 2688,
+      "ldd": 128,
+      "tiles_n": 1,
+      "tiles_m": 18,
+      "swizzle": 2,
+      "k_blocks": 10,
+      "batch_a": 0,
+      "batch_b": 0,
+      "batch_d": 140800,
+      "a_offset": 0,
+      "b_offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "router L=2048",
+   "mlx": "steel_gemm_fused_nax_nt_bfloat16_bfloat16_bm64_bn128_bk256_wm2_wn4_has_batch_n_use_out_source_n_do_axpby_n_align_M_t_align_N_t_align_K_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_nax_bf16_n_t_t_t_n_64_128_256_2_4_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      32,
+      2
+     ],
+     "threadgroup": [
+      32,
+      4,
+      2
+     ],
+     "params": {
+      "M": 2048,
+      "N": 128,
+      "K": 2688,
+      "lda": 2688,
+      "ldb": 2688,
+      "ldd": 128,
+      "tiles_n": 1,
+      "tiles_m": 32,
+      "swizzle": 2,
+      "k_blocks": 10,
+      "batch_a": 0,
+      "batch_b": 0,
+      "batch_d": 262144,
+      "a_offset": 0,
+      "b_offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "router L=4096",
+   "mlx": "steel_gemm_fused_nax_nt_bfloat16_bfloat16_bm64_bn128_bk256_wm2_wn4_has_batch_n_use_out_source_n_do_axpby_n_align_M_t_align_N_t_align_K_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_nax_bf16_n_t_t_t_n_64_128_256_2_4_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      64,
+      2
+     ],
+     "threadgroup": [
+      32,
+      4,
+      2
+     ],
+     "params": {
+      "M": 4096,
+      "N": 128,
+      "K": 2688,
+      "lda": 2688,
+      "ldb": 2688,
+      "ldd": 128,
+      "tiles_n": 1,
+      "tiles_m": 64,
+      "swizzle": 2,
+      "k_blocks": 10,
+      "batch_a": 0,
+      "batch_b": 0,
+      "batch_d": 524288,
+      "a_offset": 0,
+      "b_offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "router L=8192",
+   "mlx": "steel_gemm_fused_nax_nt_bfloat16_bfloat16_bm64_bn128_bk256_wm2_wn4_has_batch_n_use_out_source_n_do_axpby_n_align_M_t_align_N_t_align_K_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_gemm_nax_bf16_n_t_t_t_n_64_128_256_2_4_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "gemm_nax.metal",
+     "grid": [
+      128,
+      128,
+      2
+     ],
+     "threadgroup": [
+      32,
+      4,
+      2
+     ],
+     "params": {
+      "M": 8192,
+      "N": 128,
+      "K": 2688,
+      "lda": 2688,
+      "ldb": 2688,
+      "ldd": 128,
+      "tiles_n": 1,
+      "tiles_m": 128,
+      "swizzle": 2,
+      "k_blocks": 10,
+      "batch_a": 0,
+      "batch_b": 0,
+      "batch_d": 1048576,
+      "a_offset": 0,
+      "b_offset": 0
+     }
+    }
+   ]
+  },
+  {
+   "case": "conv L=17",
+   "mlx": "depthwise_conv_1d_bfloat16",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_conv1d_depthwise_bf16_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "conv.metal",
+     "grid": [
+      6144,
+      17,
+      1
+     ],
+     "threadgroup": [
+      32,
+      32,
+      1
+     ],
+     "params": {
+      "x_batch": 122880,
+      "x_time": 6144,
+      "x_channel": 1,
+      "taps": 4
+     }
+    }
+   ]
+  },
+  {
+   "case": "conv L=35",
+   "mlx": "depthwise_conv_1d_bfloat16",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_conv1d_depthwise_bf16_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "conv.metal",
+     "grid": [
+      6144,
+      35,
+      1
+     ],
+     "threadgroup": [
+      32,
+      32,
+      1
+     ],
+     "params": {
+      "x_batch": 233472,
+      "x_time": 6144,
+      "x_channel": 1,
+      "taps": 4
+     }
+    }
+   ]
+  },
+  {
+   "case": "conv L=64",
+   "mlx": "depthwise_conv_1d_bfloat16",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_conv1d_depthwise_bf16_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "conv.metal",
+     "grid": [
+      6144,
+      64,
+      1
+     ],
+     "threadgroup": [
+      32,
+      32,
+      1
+     ],
+     "params": {
+      "x_batch": 411648,
+      "x_time": 6144,
+      "x_channel": 1,
+      "taps": 4
+     }
+    }
+   ]
+  },
+  {
+   "case": "conv L=100",
+   "mlx": "depthwise_conv_1d_bfloat16",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_conv1d_depthwise_bf16_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "conv.metal",
+     "grid": [
+      6144,
+      100,
+      1
+     ],
+     "threadgroup": [
+      32,
+      32,
+      1
+     ],
+     "params": {
+      "x_batch": 632832,
+      "x_time": 6144,
+      "x_channel": 1,
+      "taps": 4
+     }
+    }
+   ]
+  },
+  {
+   "case": "conv L=256",
+   "mlx": "depthwise_conv_1d_bfloat16",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_conv1d_depthwise_bf16_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "conv.metal",
+     "grid": [
+      6144,
+      256,
+      1
+     ],
+     "threadgroup": [
+      32,
+      32,
+      1
+     ],
+     "params": {
+      "x_batch": 1591296,
+      "x_time": 6144,
+      "x_channel": 1,
+      "taps": 4
+     }
+    }
+   ]
+  },
+  {
+   "case": "conv L=300",
+   "mlx": "depthwise_conv_1d_bfloat16",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_conv1d_depthwise_bf16_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "conv.metal",
+     "grid": [
+      6144,
+      300,
+      1
+     ],
+     "threadgroup": [
+      32,
+      32,
+      1
+     ],
+     "params": {
+      "x_batch": 1861632,
+      "x_time": 6144,
+      "x_channel": 1,
+      "taps": 4
+     }
+    }
+   ]
+  },
+  {
+   "case": "conv L=896",
+   "mlx": "depthwise_conv_1d_bfloat16",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_conv1d_depthwise_bf16_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "conv.metal",
+     "grid": [
+      6144,
+      896,
+      1
+     ],
+     "threadgroup": [
+      32,
+      32,
+      1
+     ],
+     "params": {
+      "x_batch": 5523456,
+      "x_time": 6144,
+      "x_channel": 1,
+      "taps": 4
+     }
+    }
+   ]
+  },
+  {
+   "case": "conv L=1024",
+   "mlx": "depthwise_conv_1d_bfloat16",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_conv1d_depthwise_bf16_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "conv.metal",
+     "grid": [
+      6144,
+      1024,
+      1
+     ],
+     "threadgroup": [
+      32,
+      32,
+      1
+     ],
+     "params": {
+      "x_batch": 6309888,
+      "x_time": 6144,
+      "x_channel": 1,
+      "taps": 4
+     }
+    }
+   ]
+  },
+  {
+   "case": "conv L=1025",
+   "mlx": "depthwise_conv_1d_bfloat16",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_conv1d_depthwise_bf16_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "conv.metal",
+     "grid": [
+      6144,
+      1025,
+      1
+     ],
+     "threadgroup": [
+      32,
+      32,
+      1
+     ],
+     "params": {
+      "x_batch": 6316032,
+      "x_time": 6144,
+      "x_channel": 1,
+      "taps": 4
+     }
+    }
+   ]
+  },
+  {
+   "case": "conv L=1100",
+   "mlx": "depthwise_conv_1d_bfloat16",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_conv1d_depthwise_bf16_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "conv.metal",
+     "grid": [
+      6144,
+      1100,
+      1
+     ],
+     "threadgroup": [
+      32,
+      32,
+      1
+     ],
+     "params": {
+      "x_batch": 6776832,
+      "x_time": 6144,
+      "x_channel": 1,
+      "taps": 4
+     }
+    }
+   ]
+  },
+  {
+   "case": "conv L=2048",
+   "mlx": "depthwise_conv_1d_bfloat16",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_conv1d_depthwise_bf16_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "conv.metal",
+     "grid": [
+      6144,
+      2048,
+      1
+     ],
+     "threadgroup": [
+      32,
+      32,
+      1
+     ],
+     "params": {
+      "x_batch": 12601344,
+      "x_time": 6144,
+      "x_channel": 1,
+      "taps": 4
+     }
+    }
+   ]
+  },
+  {
+   "case": "conv L=4096",
+   "mlx": "depthwise_conv_1d_bfloat16",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_conv1d_depthwise_bf16_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "conv.metal",
+     "grid": [
+      6144,
+      4096,
+      1
+     ],
+     "threadgroup": [
+      32,
+      32,
+      1
+     ],
+     "params": {
+      "x_batch": 25184256,
+      "x_time": 6144,
+      "x_channel": 1,
+      "taps": 4
+     }
+    }
+   ]
+  },
+  {
+   "case": "conv L=8192",
+   "mlx": "depthwise_conv_1d_bfloat16",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_conv1d_depthwise_bf16_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "conv.metal",
+     "grid": [
+      6144,
+      8192,
+      1
+     ],
+     "threadgroup": [
+      32,
+      32,
+      1
+     ],
+     "params": {
+      "x_batch": 50350080,
+      "x_time": 6144,
+      "x_channel": 1,
+      "taps": 4
+     }
+    }
+   ]
+  },
+  {
+   "case": "attention L=17 after 0",
+   "mlx": "steel_attention_bfloat16_bq64_bk32_bd128_bv128_wm4_wn1_maskbfloat16_align_Q_n_align_K_n_has_mask_n_do_causal_t_has_sinks_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_attention_nax_bf16_n_n_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_float_bfloat16_t",
+     "file": "attention_nax.metal",
+     "grid": [
+      32,
+      128,
+      1
+     ],
+     "threadgroup": [
+      32,
+      4,
+      1
+     ],
+     "params": {
+      "B": 1,
+      "H": 32,
+      "qL": 17,
+      "kL": 17,
+      "gqa": 16,
+      "NQ": 1,
+      "NK": 1,
+      "NQ_full": 0,
+      "NK_full": 0,
+      "qL_rem": 17,
+      "kL_rem": 17,
+      "qL_off": 0,
+      "q_batch": 69632,
+      "q_head": 128,
+      "q_row": 4096,
+      "k_batch": 65536,
+      "k_head": 32768,
+      "k_row": 128,
+      "v_batch": 65536,
+      "v_head": 32768,
+      "v_row": 128,
+      "o_batch": 69632,
+      "o_head": 128,
+      "o_row": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "attention L=35 after 0",
+   "mlx": "steel_attention_bfloat16_bq64_bk32_bd128_bv128_wm4_wn1_maskbfloat16_align_Q_n_align_K_n_has_mask_n_do_causal_t_has_sinks_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_attention_nax_bf16_n_n_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_float_bfloat16_t",
+     "file": "attention_nax.metal",
+     "grid": [
+      32,
+      128,
+      1
+     ],
+     "threadgroup": [
+      32,
+      4,
+      1
+     ],
+     "params": {
+      "B": 1,
+      "H": 32,
+      "qL": 35,
+      "kL": 35,
+      "gqa": 16,
+      "NQ": 1,
+      "NK": 2,
+      "NQ_full": 0,
+      "NK_full": 1,
+      "qL_rem": 35,
+      "kL_rem": 3,
+      "qL_off": 0,
+      "q_batch": 143360,
+      "q_head": 128,
+      "q_row": 4096,
+      "k_batch": 65536,
+      "k_head": 32768,
+      "k_row": 128,
+      "v_batch": 65536,
+      "v_head": 32768,
+      "v_row": 128,
+      "o_batch": 143360,
+      "o_head": 128,
+      "o_row": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "attention L=64 after 0",
+   "mlx": "steel_attention_bfloat16_bq64_bk32_bd128_bv128_wm4_wn1_maskbfloat16_align_Q_t_align_K_t_has_mask_n_do_causal_t_has_sinks_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_attention_nax_bf16_t_t_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_float_bfloat16_t",
+     "file": "attention_nax.metal",
+     "grid": [
+      32,
+      128,
+      1
+     ],
+     "threadgroup": [
+      32,
+      4,
+      1
+     ],
+     "params": {
+      "B": 1,
+      "H": 32,
+      "qL": 64,
+      "kL": 64,
+      "gqa": 16,
+      "NQ": 1,
+      "NK": 2,
+      "NQ_full": 1,
+      "NK_full": 2,
+      "qL_rem": 0,
+      "kL_rem": 0,
+      "qL_off": 0,
+      "q_batch": 262144,
+      "q_head": 128,
+      "q_row": 4096,
+      "k_batch": 65536,
+      "k_head": 32768,
+      "k_row": 128,
+      "v_batch": 65536,
+      "v_head": 32768,
+      "v_row": 128,
+      "o_batch": 262144,
+      "o_head": 128,
+      "o_row": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "attention L=96 after 0",
+   "mlx": "steel_attention_bfloat16_bq64_bk32_bd128_bv128_wm4_wn1_maskbfloat16_align_Q_n_align_K_t_has_mask_n_do_causal_t_has_sinks_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_attention_nax_bf16_n_t_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_float_bfloat16_t",
+     "file": "attention_nax.metal",
+     "grid": [
+      64,
+      128,
+      1
+     ],
+     "threadgroup": [
+      32,
+      4,
+      1
+     ],
+     "params": {
+      "B": 1,
+      "H": 32,
+      "qL": 96,
+      "kL": 96,
+      "gqa": 16,
+      "NQ": 2,
+      "NK": 3,
+      "NQ_full": 1,
+      "NK_full": 3,
+      "qL_rem": 32,
+      "kL_rem": 0,
+      "qL_off": 0,
+      "q_batch": 393216,
+      "q_head": 128,
+      "q_row": 4096,
+      "k_batch": 65536,
+      "k_head": 32768,
+      "k_row": 128,
+      "v_batch": 65536,
+      "v_head": 32768,
+      "v_row": 128,
+      "o_batch": 393216,
+      "o_head": 128,
+      "o_row": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "attention L=100 after 0",
+   "mlx": "steel_attention_bfloat16_bq64_bk32_bd128_bv128_wm4_wn1_maskbfloat16_align_Q_n_align_K_n_has_mask_n_do_causal_t_has_sinks_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_attention_nax_bf16_n_n_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_float_bfloat16_t",
+     "file": "attention_nax.metal",
+     "grid": [
+      64,
+      128,
+      1
+     ],
+     "threadgroup": [
+      32,
+      4,
+      1
+     ],
+     "params": {
+      "B": 1,
+      "H": 32,
+      "qL": 100,
+      "kL": 100,
+      "gqa": 16,
+      "NQ": 2,
+      "NK": 4,
+      "NQ_full": 1,
+      "NK_full": 3,
+      "qL_rem": 36,
+      "kL_rem": 4,
+      "qL_off": 0,
+      "q_batch": 409600,
+      "q_head": 128,
+      "q_row": 4096,
+      "k_batch": 65536,
+      "k_head": 32768,
+      "k_row": 128,
+      "v_batch": 65536,
+      "v_head": 32768,
+      "v_row": 128,
+      "o_batch": 409600,
+      "o_head": 128,
+      "o_row": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "attention L=256 after 0",
+   "mlx": "steel_attention_bfloat16_bq64_bk32_bd128_bv128_wm4_wn1_maskbfloat16_align_Q_t_align_K_t_has_mask_n_do_causal_t_has_sinks_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_attention_nax_bf16_t_t_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_float_bfloat16_t",
+     "file": "attention_nax.metal",
+     "grid": [
+      128,
+      128,
+      1
+     ],
+     "threadgroup": [
+      32,
+      4,
+      1
+     ],
+     "params": {
+      "B": 1,
+      "H": 32,
+      "qL": 256,
+      "kL": 256,
+      "gqa": 16,
+      "NQ": 4,
+      "NK": 8,
+      "NQ_full": 4,
+      "NK_full": 8,
+      "qL_rem": 0,
+      "kL_rem": 0,
+      "qL_off": 0,
+      "q_batch": 1048576,
+      "q_head": 128,
+      "q_row": 4096,
+      "k_batch": 65536,
+      "k_head": 32768,
+      "k_row": 128,
+      "v_batch": 65536,
+      "v_head": 32768,
+      "v_row": 128,
+      "o_batch": 1048576,
+      "o_head": 128,
+      "o_row": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "attention L=300 after 0",
+   "mlx": "steel_attention_bfloat16_bq64_bk32_bd128_bv128_wm4_wn1_maskbfloat16_align_Q_n_align_K_n_has_mask_n_do_causal_t_has_sinks_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_attention_nax_bf16_n_n_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_float_bfloat16_t",
+     "file": "attention_nax.metal",
+     "grid": [
+      160,
+      128,
+      1
+     ],
+     "threadgroup": [
+      32,
+      4,
+      1
+     ],
+     "params": {
+      "B": 1,
+      "H": 32,
+      "qL": 300,
+      "kL": 300,
+      "gqa": 16,
+      "NQ": 5,
+      "NK": 10,
+      "NQ_full": 4,
+      "NK_full": 9,
+      "qL_rem": 44,
+      "kL_rem": 12,
+      "qL_off": 0,
+      "q_batch": 1228800,
+      "q_head": 128,
+      "q_row": 4096,
+      "k_batch": 131072,
+      "k_head": 65536,
+      "k_row": 128,
+      "v_batch": 131072,
+      "v_head": 65536,
+      "v_row": 128,
+      "o_batch": 1228800,
+      "o_head": 128,
+      "o_row": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "attention L=1024 after 0",
+   "mlx": "steel_attention_bfloat16_bq64_bk32_bd128_bv128_wm4_wn1_maskbfloat16_align_Q_t_align_K_t_has_mask_n_do_causal_t_has_sinks_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_attention_nax_bf16_t_t_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_float_bfloat16_t",
+     "file": "attention_nax.metal",
+     "grid": [
+      512,
+      128,
+      1
+     ],
+     "threadgroup": [
+      32,
+      4,
+      1
+     ],
+     "params": {
+      "B": 1,
+      "H": 32,
+      "qL": 1024,
+      "kL": 1024,
+      "gqa": 16,
+      "NQ": 16,
+      "NK": 32,
+      "NQ_full": 16,
+      "NK_full": 32,
+      "qL_rem": 0,
+      "kL_rem": 0,
+      "qL_off": 0,
+      "q_batch": 4194304,
+      "q_head": 128,
+      "q_row": 4096,
+      "k_batch": 262144,
+      "k_head": 131072,
+      "k_row": 128,
+      "v_batch": 262144,
+      "v_head": 131072,
+      "v_row": 128,
+      "o_batch": 4194304,
+      "o_head": 128,
+      "o_row": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "attention L=1100 after 0",
+   "mlx": "steel_attention_bfloat16_bq64_bk32_bd128_bv128_wm4_wn1_maskbfloat16_align_Q_n_align_K_n_has_mask_n_do_causal_t_has_sinks_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_attention_nax_bf16_n_n_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_float_bfloat16_t",
+     "file": "attention_nax.metal",
+     "grid": [
+      576,
+      128,
+      1
+     ],
+     "threadgroup": [
+      32,
+      4,
+      1
+     ],
+     "params": {
+      "B": 1,
+      "H": 32,
+      "qL": 1100,
+      "kL": 1100,
+      "gqa": 16,
+      "NQ": 18,
+      "NK": 35,
+      "NQ_full": 17,
+      "NK_full": 34,
+      "qL_rem": 12,
+      "kL_rem": 12,
+      "qL_off": 0,
+      "q_batch": 4505600,
+      "q_head": 128,
+      "q_row": 4096,
+      "k_batch": 327680,
+      "k_head": 163840,
+      "k_row": 128,
+      "v_batch": 327680,
+      "v_head": 163840,
+      "v_row": 128,
+      "o_batch": 4505600,
+      "o_head": 128,
+      "o_row": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "attention L=2048 after 0",
+   "mlx": "steel_attention_bfloat16_bq64_bk32_bd128_bv128_wm4_wn1_maskbfloat16_align_Q_t_align_K_t_has_mask_n_do_causal_t_has_sinks_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_attention_nax_bf16_t_t_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_float_bfloat16_t",
+     "file": "attention_nax.metal",
+     "grid": [
+      1024,
+      128,
+      1
+     ],
+     "threadgroup": [
+      32,
+      4,
+      1
+     ],
+     "params": {
+      "B": 1,
+      "H": 32,
+      "qL": 2048,
+      "kL": 2048,
+      "gqa": 16,
+      "NQ": 32,
+      "NK": 64,
+      "NQ_full": 32,
+      "NK_full": 64,
+      "qL_rem": 0,
+      "kL_rem": 0,
+      "qL_off": 0,
+      "q_batch": 8388608,
+      "q_head": 128,
+      "q_row": 4096,
+      "k_batch": 524288,
+      "k_head": 262144,
+      "k_row": 128,
+      "v_batch": 524288,
+      "v_head": 262144,
+      "v_row": 128,
+      "o_batch": 8388608,
+      "o_head": 128,
+      "o_row": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "attention L=17 after 35",
+   "mlx": "steel_attention_bfloat16_bq64_bk32_bd128_bv128_wm4_wn1_maskbfloat16_align_Q_n_align_K_n_has_mask_n_do_causal_t_has_sinks_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_attention_nax_bf16_n_n_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_float_bfloat16_t",
+     "file": "attention_nax.metal",
+     "grid": [
+      32,
+      128,
+      1
+     ],
+     "threadgroup": [
+      32,
+      4,
+      1
+     ],
+     "params": {
+      "B": 1,
+      "H": 32,
+      "qL": 17,
+      "kL": 52,
+      "gqa": 16,
+      "NQ": 1,
+      "NK": 2,
+      "NQ_full": 0,
+      "NK_full": 1,
+      "qL_rem": 17,
+      "kL_rem": 20,
+      "qL_off": 35,
+      "q_batch": 69632,
+      "q_head": 128,
+      "q_row": 4096,
+      "k_batch": 65536,
+      "k_head": 32768,
+      "k_row": 128,
+      "v_batch": 65536,
+      "v_head": 32768,
+      "v_row": 128,
+      "o_batch": 69632,
+      "o_head": 128,
+      "o_row": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "attention L=100 after 300",
+   "mlx": "steel_attention_bfloat16_bq64_bk32_bd128_bv128_wm4_wn1_maskbfloat16_align_Q_n_align_K_n_has_mask_n_do_causal_t_has_sinks_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_attention_nax_bf16_n_n_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_float_bfloat16_t",
+     "file": "attention_nax.metal",
+     "grid": [
+      64,
+      128,
+      1
+     ],
+     "threadgroup": [
+      32,
+      4,
+      1
+     ],
+     "params": {
+      "B": 1,
+      "H": 32,
+      "qL": 100,
+      "kL": 400,
+      "gqa": 16,
+      "NQ": 2,
+      "NK": 13,
+      "NQ_full": 1,
+      "NK_full": 12,
+      "qL_rem": 36,
+      "kL_rem": 16,
+      "qL_off": 300,
+      "q_batch": 409600,
+      "q_head": 128,
+      "q_row": 4096,
+      "k_batch": 131072,
+      "k_head": 65536,
+      "k_row": 128,
+      "v_batch": 131072,
+      "v_head": 65536,
+      "v_row": 128,
+      "o_batch": 409600,
+      "o_head": 128,
+      "o_row": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "attention L=64 after 1",
+   "mlx": "steel_attention_bfloat16_bq64_bk32_bd128_bv128_wm4_wn1_maskbfloat16_align_Q_t_align_K_n_has_mask_n_do_causal_t_has_sinks_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_attention_nax_bf16_t_n_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_float_bfloat16_t",
+     "file": "attention_nax.metal",
+     "grid": [
+      32,
+      128,
+      1
+     ],
+     "threadgroup": [
+      32,
+      4,
+      1
+     ],
+     "params": {
+      "B": 1,
+      "H": 32,
+      "qL": 64,
+      "kL": 65,
+      "gqa": 16,
+      "NQ": 1,
+      "NK": 3,
+      "NQ_full": 1,
+      "NK_full": 2,
+      "qL_rem": 0,
+      "kL_rem": 1,
+      "qL_off": 1,
+      "q_batch": 262144,
+      "q_head": 128,
+      "q_row": 4096,
+      "k_batch": 65536,
+      "k_head": 32768,
+      "k_row": 128,
+      "v_batch": 65536,
+      "v_head": 32768,
+      "v_row": 128,
+      "o_batch": 262144,
+      "o_head": 128,
+      "o_row": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "attention L=64 after 2048",
+   "mlx": "steel_attention_bfloat16_bq64_bk32_bd128_bv128_wm4_wn1_maskbfloat16_align_Q_t_align_K_t_has_mask_n_do_causal_t_has_sinks_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_attention_nax_bf16_t_t_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_float_bfloat16_t",
+     "file": "attention_nax.metal",
+     "grid": [
+      32,
+      128,
+      1
+     ],
+     "threadgroup": [
+      32,
+      4,
+      1
+     ],
+     "params": {
+      "B": 1,
+      "H": 32,
+      "qL": 64,
+      "kL": 2112,
+      "gqa": 16,
+      "NQ": 1,
+      "NK": 66,
+      "NQ_full": 1,
+      "NK_full": 66,
+      "qL_rem": 0,
+      "kL_rem": 0,
+      "qL_off": 2048,
+      "q_batch": 262144,
+      "q_head": 128,
+      "q_row": 4096,
+      "k_batch": 589824,
+      "k_head": 294912,
+      "k_row": 128,
+      "v_batch": 589824,
+      "v_head": 294912,
+      "v_row": 128,
+      "o_batch": 262144,
+      "o_head": 128,
+      "o_row": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "attention L=300 after 2048",
+   "mlx": "steel_attention_bfloat16_bq64_bk32_bd128_bv128_wm4_wn1_maskbfloat16_align_Q_n_align_K_n_has_mask_n_do_causal_t_has_sinks_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_attention_nax_bf16_n_n_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_float_bfloat16_t",
+     "file": "attention_nax.metal",
+     "grid": [
+      160,
+      128,
+      1
+     ],
+     "threadgroup": [
+      32,
+      4,
+      1
+     ],
+     "params": {
+      "B": 1,
+      "H": 32,
+      "qL": 300,
+      "kL": 2348,
+      "gqa": 16,
+      "NQ": 5,
+      "NK": 74,
+      "NQ_full": 4,
+      "NK_full": 73,
+      "qL_rem": 44,
+      "kL_rem": 12,
+      "qL_off": 2048,
+      "q_batch": 1228800,
+      "q_head": 128,
+      "q_row": 4096,
+      "k_batch": 655360,
+      "k_head": 327680,
+      "k_row": 128,
+      "v_batch": 655360,
+      "v_head": 327680,
+      "v_row": 128,
+      "o_batch": 1228800,
+      "o_head": 128,
+      "o_row": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "attention L=2048 after 1100",
+   "mlx": "steel_attention_bfloat16_bq64_bk32_bd128_bv128_wm4_wn1_maskbfloat16_align_Q_t_align_K_n_has_mask_n_do_causal_t_has_sinks_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_attention_nax_bf16_t_n_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_float_bfloat16_t",
+     "file": "attention_nax.metal",
+     "grid": [
+      1024,
+      128,
+      1
+     ],
+     "threadgroup": [
+      32,
+      4,
+      1
+     ],
+     "params": {
+      "B": 1,
+      "H": 32,
+      "qL": 2048,
+      "kL": 3148,
+      "gqa": 16,
+      "NQ": 32,
+      "NK": 99,
+      "NQ_full": 32,
+      "NK_full": 98,
+      "qL_rem": 0,
+      "kL_rem": 12,
+      "qL_off": 1100,
+      "q_batch": 8388608,
+      "q_head": 128,
+      "q_row": 4096,
+      "k_batch": 851968,
+      "k_head": 425984,
+      "k_row": 128,
+      "v_batch": 851968,
+      "v_head": 425984,
+      "v_row": 128,
+      "o_batch": 8388608,
+      "o_head": 128,
+      "o_row": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "attention L=2048 after 2048",
+   "mlx": "steel_attention_bfloat16_bq64_bk32_bd128_bv128_wm4_wn1_maskbfloat16_align_Q_t_align_K_t_has_mask_n_do_causal_t_has_sinks_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_attention_nax_bf16_t_t_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_float_bfloat16_t",
+     "file": "attention_nax.metal",
+     "grid": [
+      1024,
+      128,
+      1
+     ],
+     "threadgroup": [
+      32,
+      4,
+      1
+     ],
+     "params": {
+      "B": 1,
+      "H": 32,
+      "qL": 2048,
+      "kL": 4096,
+      "gqa": 16,
+      "NQ": 32,
+      "NK": 128,
+      "NQ_full": 32,
+      "NK_full": 128,
+      "qL_rem": 0,
+      "kL_rem": 0,
+      "qL_off": 2048,
+      "q_batch": 8388608,
+      "q_head": 128,
+      "q_row": 4096,
+      "k_batch": 1048576,
+      "k_head": 524288,
+      "k_row": 128,
+      "v_batch": 1048576,
+      "v_head": 524288,
+      "v_row": 128,
+      "o_batch": 8388608,
+      "o_head": 128,
+      "o_row": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "attention L=4096 after 0",
+   "mlx": "steel_attention_bfloat16_bq64_bk32_bd128_bv128_wm4_wn1_maskbfloat16_align_Q_t_align_K_t_has_mask_n_do_causal_t_has_sinks_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_attention_nax_bf16_t_t_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_float_bfloat16_t",
+     "file": "attention_nax.metal",
+     "grid": [
+      2048,
+      128,
+      1
+     ],
+     "threadgroup": [
+      32,
+      4,
+      1
+     ],
+     "params": {
+      "B": 1,
+      "H": 32,
+      "qL": 4096,
+      "kL": 4096,
+      "gqa": 16,
+      "NQ": 64,
+      "NK": 128,
+      "NQ_full": 64,
+      "NK_full": 128,
+      "qL_rem": 0,
+      "kL_rem": 0,
+      "qL_off": 0,
+      "q_batch": 16777216,
+      "q_head": 128,
+      "q_row": 4096,
+      "k_batch": 1048576,
+      "k_head": 524288,
+      "k_row": 128,
+      "v_batch": 1048576,
+      "v_head": 524288,
+      "v_row": 128,
+      "o_batch": 16777216,
+      "o_head": 128,
+      "o_row": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "attention L=8192 after 0",
+   "mlx": "steel_attention_bfloat16_bq64_bk32_bd128_bv128_wm4_wn1_maskbfloat16_align_Q_t_align_K_t_has_mask_n_do_causal_t_has_sinks_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_attention_nax_bf16_t_t_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_float_bfloat16_t",
+     "file": "attention_nax.metal",
+     "grid": [
+      4096,
+      128,
+      1
+     ],
+     "threadgroup": [
+      32,
+      4,
+      1
+     ],
+     "params": {
+      "B": 1,
+      "H": 32,
+      "qL": 8192,
+      "kL": 8192,
+      "gqa": 16,
+      "NQ": 128,
+      "NK": 256,
+      "NQ_full": 128,
+      "NK_full": 256,
+      "qL_rem": 0,
+      "kL_rem": 0,
+      "qL_off": 0,
+      "q_batch": 33554432,
+      "q_head": 128,
+      "q_row": 4096,
+      "k_batch": 2097152,
+      "k_head": 1048576,
+      "k_row": 128,
+      "v_batch": 2097152,
+      "v_head": 1048576,
+      "v_row": 128,
+      "o_batch": 33554432,
+      "o_head": 128,
+      "o_row": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "attention L=4096 after 4096",
+   "mlx": "steel_attention_bfloat16_bq64_bk32_bd128_bv128_wm4_wn1_maskbfloat16_align_Q_t_align_K_t_has_mask_n_do_causal_t_has_sinks_n",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_attention_nax_bf16_t_t_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_float_bfloat16_t",
+     "file": "attention_nax.metal",
+     "grid": [
+      2048,
+      128,
+      1
+     ],
+     "threadgroup": [
+      32,
+      4,
+      1
+     ],
+     "params": {
+      "B": 1,
+      "H": 32,
+      "qL": 4096,
+      "kL": 8192,
+      "gqa": 16,
+      "NQ": 64,
+      "NK": 256,
+      "NQ_full": 64,
+      "NK_full": 256,
+      "qL_rem": 0,
+      "kL_rem": 0,
+      "qL_off": 4096,
+      "q_batch": 16777216,
+      "q_head": 128,
+      "q_row": 4096,
+      "k_batch": 2097152,
+      "k_head": 1048576,
+      "k_row": 128,
+      "v_batch": 2097152,
+      "v_head": 1048576,
+      "v_row": 128,
+      "o_batch": 16777216,
+      "o_head": 128,
+      "o_row": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "splitk k_proj L=129 parts=7",
+   "mlx": "affine_qmm_t_splitk_bfloat16_t_gs_64_b_4_alN_true + col_reduce_small_1_reduce_sumbfloat16",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_splitk_part_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      256,
+      20,
+      7
+     ],
+     "threadgroup": [
+      32,
+      4,
+      1
+     ],
+     "params": {
+      "K": 2688,
+      "N": 256,
+      "M": 129,
+      "part": 384,
+      "part_stride": 33024
+     }
+    },
+    {
+     "function": "custom_kernel_tf_qmm_splitk_sum_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      33024,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "parts": 7,
+      "stride": 33024,
+      "count": 33024
+     }
+    }
+   ]
+  },
+  {
+   "case": "splitk k_proj L=300 parts=6",
+   "mlx": "affine_qmm_t_splitk_bfloat16_t_gs_64_b_4_alN_true + col_reduce_small_1_reduce_sumbfloat16",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_splitk_part_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      256,
+      40,
+      6
+     ],
+     "threadgroup": [
+      32,
+      4,
+      1
+     ],
+     "params": {
+      "K": 2688,
+      "N": 256,
+      "M": 300,
+      "part": 448,
+      "part_stride": 76800
+     }
+    },
+    {
+     "function": "custom_kernel_tf_qmm_splitk_sum_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      76800,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "parts": 6,
+      "stride": 76800,
+      "count": 76800
+     }
+    }
+   ]
+  },
+  {
+   "case": "splitk k_proj L=600 parts=3",
+   "mlx": "affine_qmm_t_splitk_bfloat16_t_gs_64_b_4_alN_true + col_reduce_small_1_reduce_sumbfloat16",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_splitk_part_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      256,
+      76,
+      3
+     ],
+     "threadgroup": [
+      32,
+      4,
+      1
+     ],
+     "params": {
+      "K": 2688,
+      "N": 256,
+      "M": 600,
+      "part": 896,
+      "part_stride": 153600
+     }
+    },
+    {
+     "function": "custom_kernel_tf_qmm_splitk_sum_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      153600,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "parts": 3,
+      "stride": 153600,
+      "count": 153600
+     }
+    }
+   ]
+  },
+  {
+   "case": "splitk k_proj L=1024 parts=2",
+   "mlx": "affine_qmm_t_splitk_bfloat16_t_gs_64_b_4_alN_true + col_reduce_small_1_reduce_sumbfloat16",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_splitk_part_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      256,
+      128,
+      2
+     ],
+     "threadgroup": [
+      32,
+      4,
+      1
+     ],
+     "params": {
+      "K": 2688,
+      "N": 256,
+      "M": 1024,
+      "part": 1344,
+      "part_stride": 262144
+     }
+    },
+    {
+     "function": "custom_kernel_tf_qmm_splitk_sum_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      262144,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "parts": 2,
+      "stride": 262144,
+      "count": 262144
+     }
+    }
+   ]
+  },
+  {
+   "case": "argsort ids L=17",
+   "mlx": "carg_block_sort / mbsort uint32",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_sort_count_uint32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      256,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 102,
+      "experts": 128
+     }
+    },
+    {
+     "function": "custom_kernel_tf_sort_starts_int32_t_int32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "n": 102,
+      "experts": 128
+     }
+    },
+    {
+     "function": "custom_kernel_tf_sort_place_uint32_t_int32_t_int32_t_uint32_t_uint32_t",
+     "file": "sort.metal",
+     "grid": [
+      256,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 102,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "expert offsets L=17",
+   "mlx": "gather_mm_offsets",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_sort_count_uint32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      256,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 102,
+      "experts": 128
+     }
+    },
+    {
+     "function": "custom_kernel_tf_sort_starts_int32_t_int32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "n": 102,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "argsort order L=17",
+   "mlx": "carg_block_sort / mbsort uint32 (unsort)",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_sort_inverse_uint32_t_int32_t_uint32_t",
+     "file": "sort.metal",
+     "grid": [
+      102,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 102
+     }
+    }
+   ]
+  },
+  {
+   "case": "argsort ids L=35",
+   "mlx": "carg_block_sort / mbsort uint32",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_sort_count_uint32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      256,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 210,
+      "experts": 128
+     }
+    },
+    {
+     "function": "custom_kernel_tf_sort_starts_int32_t_int32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "n": 210,
+      "experts": 128
+     }
+    },
+    {
+     "function": "custom_kernel_tf_sort_place_uint32_t_int32_t_int32_t_uint32_t_uint32_t",
+     "file": "sort.metal",
+     "grid": [
+      256,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 210,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "expert offsets L=35",
+   "mlx": "gather_mm_offsets",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_sort_count_uint32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      256,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 210,
+      "experts": 128
+     }
+    },
+    {
+     "function": "custom_kernel_tf_sort_starts_int32_t_int32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "n": 210,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "argsort order L=35",
+   "mlx": "carg_block_sort / mbsort uint32 (unsort)",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_sort_inverse_uint32_t_int32_t_uint32_t",
+     "file": "sort.metal",
+     "grid": [
+      210,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 210
+     }
+    }
+   ]
+  },
+  {
+   "case": "argsort ids L=64",
+   "mlx": "carg_block_sort / mbsort uint32",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_sort_count_uint32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      512,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 384,
+      "experts": 128
+     }
+    },
+    {
+     "function": "custom_kernel_tf_sort_starts_int32_t_int32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "n": 384,
+      "experts": 128
+     }
+    },
+    {
+     "function": "custom_kernel_tf_sort_place_uint32_t_int32_t_int32_t_uint32_t_uint32_t",
+     "file": "sort.metal",
+     "grid": [
+      512,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 384,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "expert offsets L=64",
+   "mlx": "gather_mm_offsets",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_sort_count_uint32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      512,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 384,
+      "experts": 128
+     }
+    },
+    {
+     "function": "custom_kernel_tf_sort_starts_int32_t_int32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "n": 384,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "argsort order L=64",
+   "mlx": "carg_block_sort / mbsort uint32 (unsort)",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_sort_inverse_uint32_t_int32_t_uint32_t",
+     "file": "sort.metal",
+     "grid": [
+      384,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 384
+     }
+    }
+   ]
+  },
+  {
+   "case": "argsort ids L=100",
+   "mlx": "carg_block_sort / mbsort uint32",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_sort_count_uint32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      768,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 600,
+      "experts": 128
+     }
+    },
+    {
+     "function": "custom_kernel_tf_sort_starts_int32_t_int32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "n": 600,
+      "experts": 128
+     }
+    },
+    {
+     "function": "custom_kernel_tf_sort_place_uint32_t_int32_t_int32_t_uint32_t_uint32_t",
+     "file": "sort.metal",
+     "grid": [
+      768,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 600,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "expert offsets L=100",
+   "mlx": "gather_mm_offsets",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_sort_count_uint32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      768,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 600,
+      "experts": 128
+     }
+    },
+    {
+     "function": "custom_kernel_tf_sort_starts_int32_t_int32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "n": 600,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "argsort order L=100",
+   "mlx": "carg_block_sort / mbsort uint32 (unsort)",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_sort_inverse_uint32_t_int32_t_uint32_t",
+     "file": "sort.metal",
+     "grid": [
+      600,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 600
+     }
+    }
+   ]
+  },
+  {
+   "case": "argsort ids L=300",
+   "mlx": "carg_block_sort / mbsort uint32",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_sort_count_uint32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      2048,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 1800,
+      "experts": 128
+     }
+    },
+    {
+     "function": "custom_kernel_tf_sort_starts_int32_t_int32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "n": 1800,
+      "experts": 128
+     }
+    },
+    {
+     "function": "custom_kernel_tf_sort_place_uint32_t_int32_t_int32_t_uint32_t_uint32_t",
+     "file": "sort.metal",
+     "grid": [
+      2048,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 1800,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "expert offsets L=300",
+   "mlx": "gather_mm_offsets",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_sort_count_uint32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      2048,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 1800,
+      "experts": 128
+     }
+    },
+    {
+     "function": "custom_kernel_tf_sort_starts_int32_t_int32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "n": 1800,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "argsort order L=300",
+   "mlx": "carg_block_sort / mbsort uint32 (unsort)",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_sort_inverse_uint32_t_int32_t_uint32_t",
+     "file": "sort.metal",
+     "grid": [
+      1800,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 1800
+     }
+    }
+   ]
+  },
+  {
+   "case": "argsort ids L=1100",
+   "mlx": "carg_block_sort / mbsort uint32",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_sort_count_uint32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      6656,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 6600,
+      "experts": 128
+     }
+    },
+    {
+     "function": "custom_kernel_tf_sort_starts_int32_t_int32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "n": 6600,
+      "experts": 128
+     }
+    },
+    {
+     "function": "custom_kernel_tf_sort_place_uint32_t_int32_t_int32_t_uint32_t_uint32_t",
+     "file": "sort.metal",
+     "grid": [
+      6656,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 6600,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "expert offsets L=1100",
+   "mlx": "gather_mm_offsets",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_sort_count_uint32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      6656,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 6600,
+      "experts": 128
+     }
+    },
+    {
+     "function": "custom_kernel_tf_sort_starts_int32_t_int32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "n": 6600,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "argsort order L=1100",
+   "mlx": "carg_block_sort / mbsort uint32 (unsort)",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_sort_inverse_uint32_t_int32_t_uint32_t",
+     "file": "sort.metal",
+     "grid": [
+      6600,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 6600
+     }
+    }
+   ]
+  },
+  {
+   "case": "argsort ids L=4096",
+   "mlx": "carg_block_sort / mbsort uint32",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_sort_count_uint32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      24576,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 24576,
+      "experts": 128
+     }
+    },
+    {
+     "function": "custom_kernel_tf_sort_starts_int32_t_int32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "n": 24576,
+      "experts": 128
+     }
+    },
+    {
+     "function": "custom_kernel_tf_sort_place_uint32_t_int32_t_int32_t_uint32_t_uint32_t",
+     "file": "sort.metal",
+     "grid": [
+      24576,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 24576,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "expert offsets L=4096",
+   "mlx": "gather_mm_offsets",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_sort_count_uint32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      24576,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 24576,
+      "experts": 128
+     }
+    },
+    {
+     "function": "custom_kernel_tf_sort_starts_int32_t_int32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "n": 24576,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "argsort order L=4096",
+   "mlx": "carg_block_sort / mbsort uint32 (unsort)",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_sort_inverse_uint32_t_int32_t_uint32_t",
+     "file": "sort.metal",
+     "grid": [
+      24576,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 24576
+     }
+    }
+   ]
+  },
+  {
+   "case": "argsort ids L=8192",
+   "mlx": "carg_block_sort / mbsort uint32",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_sort_count_uint32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      49152,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 49152,
+      "experts": 128
+     }
+    },
+    {
+     "function": "custom_kernel_tf_sort_starts_int32_t_int32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "n": 49152,
+      "experts": 128
+     }
+    },
+    {
+     "function": "custom_kernel_tf_sort_place_uint32_t_int32_t_int32_t_uint32_t_uint32_t",
+     "file": "sort.metal",
+     "grid": [
+      49152,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 49152,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "expert offsets L=8192",
+   "mlx": "gather_mm_offsets",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_sort_count_uint32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      49152,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 49152,
+      "experts": 128
+     }
+    },
+    {
+     "function": "custom_kernel_tf_sort_starts_int32_t_int32_t_int32_t_int32_t",
+     "file": "sort.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "n": 49152,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "argsort order L=8192",
+   "mlx": "carg_block_sort / mbsort uint32 (unsort)",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_sort_inverse_uint32_t_int32_t_uint32_t",
+     "file": "sort.metal",
+     "grid": [
+      49152,
+      1,
+      1
+     ],
+     "threadgroup": [
+      256,
+      1,
+      1
+     ],
+     "params": {
+      "n": 49152
+     }
+    }
+   ]
+  },
+  {
+   "case": "experts fc1 L=86",
+   "mlx": "affine_gather_qmm_rhs_nax_nt_bfloat16_t_gs_64_b_4_bm_32_bn_64_bk_64_wm_2_wn_2 + gather_mm_offsets",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_expert_offsets_uint32_t_int32_t_int32_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "rows": 516
+     }
+    },
+    {
+     "function": "custom_kernel_tf_gather_qmm_rhs_nax_bf16_32_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_int32_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      928,
+      288,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "M": 516,
+      "N": 1856,
+      "K": 2688,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "experts fc1 L=100",
+   "mlx": "affine_gather_qmm_rhs_nax_nt_bfloat16_t_gs_64_b_4_bm_32_bn_64_bk_64_wm_2_wn_2 + gather_mm_offsets",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_expert_offsets_uint32_t_int32_t_int32_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "rows": 600
+     }
+    },
+    {
+     "function": "custom_kernel_tf_gather_qmm_rhs_nax_bf16_32_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_int32_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      928,
+      292,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "M": 600,
+      "N": 1856,
+      "K": 2688,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "experts fc1 L=300",
+   "mlx": "affine_gather_qmm_rhs_nax_nt_bfloat16_t_gs_64_b_4_bm_32_bn_64_bk_64_wm_2_wn_2 + gather_mm_offsets",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_expert_offsets_uint32_t_int32_t_int32_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "rows": 1800
+     }
+    },
+    {
+     "function": "custom_kernel_tf_gather_qmm_rhs_nax_bf16_32_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_int32_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      928,
+      368,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "M": 1800,
+      "N": 1856,
+      "K": 2688,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "experts fc1 L=1100",
+   "mlx": "affine_gather_qmm_rhs_nax_nt_bfloat16_t_gs_64_b_4_bm_32_bn_64_bk_64_wm_2_wn_2 + gather_mm_offsets",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_expert_offsets_uint32_t_int32_t_int32_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "rows": 6600
+     }
+    },
+    {
+     "function": "custom_kernel_tf_gather_qmm_rhs_nax_bf16_32_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_int32_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      928,
+      668,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "M": 6600,
+      "N": 1856,
+      "K": 2688,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "experts fc1 L=1400",
+   "mlx": "affine_gather_qmm_rhs_nax_nt_bfloat16_t_gs_64_b_4_bm_64_bn_64_bk_64_wm_2_wn_2 + gather_mm_offsets",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_expert_offsets_uint32_t_int32_t_int32_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "rows": 8400
+     }
+    },
+    {
+     "function": "custom_kernel_tf_gather_qmm_rhs_nax_bf16_64_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_int32_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      928,
+      518,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "M": 8400,
+      "N": 1856,
+      "K": 2688,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "experts fc1 L=2048",
+   "mlx": "affine_gather_qmm_rhs_nax_nt_bfloat16_t_gs_64_b_4_bm_64_bn_64_bk_64_wm_2_wn_2 + gather_mm_offsets",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_expert_offsets_uint32_t_int32_t_int32_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "rows": 12288
+     }
+    },
+    {
+     "function": "custom_kernel_tf_gather_qmm_rhs_nax_bf16_64_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_int32_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      928,
+      638,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "M": 12288,
+      "N": 1856,
+      "K": 2688,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "experts fc1 L=4096",
+   "mlx": "affine_gather_qmm_rhs_nax_nt_bfloat16_t_gs_64_b_4_bm_64_bn_64_bk_64_wm_2_wn_2 + gather_mm_offsets",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_expert_offsets_uint32_t_int32_t_int32_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "rows": 24576
+     }
+    },
+    {
+     "function": "custom_kernel_tf_gather_qmm_rhs_nax_bf16_64_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_int32_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      928,
+      1022,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "M": 24576,
+      "N": 1856,
+      "K": 2688,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "experts fc1 L=8192",
+   "mlx": "affine_gather_qmm_rhs_nax_nt_bfloat16_t_gs_64_b_4_bm_64_bn_64_bk_64_wm_2_wn_2 + gather_mm_offsets",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_expert_offsets_uint32_t_int32_t_int32_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "rows": 49152
+     }
+    },
+    {
+     "function": "custom_kernel_tf_gather_qmm_rhs_nax_bf16_64_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_int32_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      928,
+      1790,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "M": 49152,
+      "N": 1856,
+      "K": 2688,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "experts fc2 L=86",
+   "mlx": "affine_gather_qmm_rhs_nax_nt_bfloat16_t_gs_64_b_4_bm_32_bn_64_bk_64_wm_2_wn_2 + gather_mm_offsets",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_expert_offsets_uint32_t_int32_t_int32_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "rows": 516
+     }
+    },
+    {
+     "function": "custom_kernel_tf_gather_qmm_rhs_nax_bf16_32_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_int32_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1344,
+      288,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "M": 516,
+      "N": 2688,
+      "K": 1856,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "experts fc2 L=100",
+   "mlx": "affine_gather_qmm_rhs_nax_nt_bfloat16_t_gs_64_b_4_bm_32_bn_64_bk_64_wm_2_wn_2 + gather_mm_offsets",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_expert_offsets_uint32_t_int32_t_int32_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "rows": 600
+     }
+    },
+    {
+     "function": "custom_kernel_tf_gather_qmm_rhs_nax_bf16_32_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_int32_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1344,
+      292,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "M": 600,
+      "N": 2688,
+      "K": 1856,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "experts fc2 L=300",
+   "mlx": "affine_gather_qmm_rhs_nax_nt_bfloat16_t_gs_64_b_4_bm_32_bn_64_bk_64_wm_2_wn_2 + gather_mm_offsets",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_expert_offsets_uint32_t_int32_t_int32_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "rows": 1800
+     }
+    },
+    {
+     "function": "custom_kernel_tf_gather_qmm_rhs_nax_bf16_32_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_int32_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1344,
+      368,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "M": 1800,
+      "N": 2688,
+      "K": 1856,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "experts fc2 L=1100",
+   "mlx": "affine_gather_qmm_rhs_nax_nt_bfloat16_t_gs_64_b_4_bm_32_bn_64_bk_64_wm_2_wn_2 + gather_mm_offsets",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_expert_offsets_uint32_t_int32_t_int32_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "rows": 6600
+     }
+    },
+    {
+     "function": "custom_kernel_tf_gather_qmm_rhs_nax_bf16_32_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_int32_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1344,
+      668,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "M": 6600,
+      "N": 2688,
+      "K": 1856,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "experts fc2 L=1400",
+   "mlx": "affine_gather_qmm_rhs_nax_nt_bfloat16_t_gs_64_b_4_bm_64_bn_64_bk_64_wm_2_wn_2 + gather_mm_offsets",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_expert_offsets_uint32_t_int32_t_int32_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "rows": 8400
+     }
+    },
+    {
+     "function": "custom_kernel_tf_gather_qmm_rhs_nax_bf16_64_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_int32_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1344,
+      518,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "M": 8400,
+      "N": 2688,
+      "K": 1856,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "experts fc2 L=2048",
+   "mlx": "affine_gather_qmm_rhs_nax_nt_bfloat16_t_gs_64_b_4_bm_64_bn_64_bk_64_wm_2_wn_2 + gather_mm_offsets",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_expert_offsets_uint32_t_int32_t_int32_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "rows": 12288
+     }
+    },
+    {
+     "function": "custom_kernel_tf_gather_qmm_rhs_nax_bf16_64_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_int32_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1344,
+      638,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "M": 12288,
+      "N": 2688,
+      "K": 1856,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "experts fc2 L=4096",
+   "mlx": "affine_gather_qmm_rhs_nax_nt_bfloat16_t_gs_64_b_4_bm_64_bn_64_bk_64_wm_2_wn_2 + gather_mm_offsets",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_expert_offsets_uint32_t_int32_t_int32_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "rows": 24576
+     }
+    },
+    {
+     "function": "custom_kernel_tf_gather_qmm_rhs_nax_bf16_64_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_int32_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1344,
+      1022,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "M": 24576,
+      "N": 2688,
+      "K": 1856,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "experts fc2 L=8192",
+   "mlx": "affine_gather_qmm_rhs_nax_nt_bfloat16_t_gs_64_b_4_bm_64_bn_64_bk_64_wm_2_wn_2 + gather_mm_offsets",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_expert_offsets_uint32_t_int32_t_int32_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      128,
+      1,
+      1
+     ],
+     "threadgroup": [
+      128,
+      1,
+      1
+     ],
+     "params": {
+      "rows": 49152
+     }
+    },
+    {
+     "function": "custom_kernel_tf_gather_qmm_rhs_nax_bf16_64_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_int32_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1344,
+      1790,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "M": 49152,
+      "N": 2688,
+      "K": 1856,
+      "experts": 128
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm in_proj L=129",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      5152,
+      6,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 2688,
+      "N": 10304,
+      "M": 129
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm in_proj L=300",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      5152,
+      10,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 2688,
+      "N": 10304,
+      "M": 300
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm in_proj L=1025",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      5152,
+      34,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 2688,
+      "N": 10304,
+      "M": 1025
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm in_proj L=2048",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      5152,
+      64,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 2688,
+      "N": 10304,
+      "M": 2048
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm in_proj L=4096",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      5152,
+      128,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 2688,
+      "N": 10304,
+      "M": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm in_proj L=8192",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      5152,
+      256,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 2688,
+      "N": 10304,
+      "M": 8192
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm out_proj L=129",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1344,
+      6,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 4096,
+      "N": 2688,
+      "M": 129
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm out_proj L=300",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1344,
+      10,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 4096,
+      "N": 2688,
+      "M": 300
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm out_proj L=1025",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1344,
+      34,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 4096,
+      "N": 2688,
+      "M": 1025
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm out_proj L=2048",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1344,
+      64,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 4096,
+      "N": 2688,
+      "M": 2048
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm out_proj L=4096",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1344,
+      128,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 4096,
+      "N": 2688,
+      "M": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm out_proj L=8192",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1344,
+      256,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 4096,
+      "N": 2688,
+      "M": 8192
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm shared_up L=129",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1856,
+      6,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 2688,
+      "N": 3712,
+      "M": 129
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm shared_up L=300",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1856,
+      10,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 2688,
+      "N": 3712,
+      "M": 300
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm shared_up L=1025",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1856,
+      34,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 2688,
+      "N": 3712,
+      "M": 1025
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm shared_up L=2048",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1856,
+      64,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 2688,
+      "N": 3712,
+      "M": 2048
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm shared_up L=4096",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1856,
+      128,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 2688,
+      "N": 3712,
+      "M": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm shared_up L=8192",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1856,
+      256,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 2688,
+      "N": 3712,
+      "M": 8192
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm shared_down L=129",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1344,
+      6,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 3712,
+      "N": 2688,
+      "M": 129
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm shared_down L=300",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1344,
+      10,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 3712,
+      "N": 2688,
+      "M": 300
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm shared_down L=1025",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1344,
+      34,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 3712,
+      "N": 2688,
+      "M": 1025
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm shared_down L=2048",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1344,
+      64,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 3712,
+      "N": 2688,
+      "M": 2048
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm shared_down L=4096",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1344,
+      128,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 3712,
+      "N": 2688,
+      "M": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm shared_down L=8192",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1344,
+      256,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 3712,
+      "N": 2688,
+      "M": 8192
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm q_proj L=129",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      2048,
+      6,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 2688,
+      "N": 4096,
+      "M": 129
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm q_proj L=300",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      2048,
+      10,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 2688,
+      "N": 4096,
+      "M": 300
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm q_proj L=1025",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      2048,
+      34,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 2688,
+      "N": 4096,
+      "M": 1025
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm q_proj L=2048",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      2048,
+      64,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 2688,
+      "N": 4096,
+      "M": 2048
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm q_proj L=4096",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      2048,
+      128,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 2688,
+      "N": 4096,
+      "M": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm q_proj L=8192",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      2048,
+      256,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 2688,
+      "N": 4096,
+      "M": 8192
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm k_proj L=1025",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      128,
+      34,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 2688,
+      "N": 256,
+      "M": 1025
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm k_proj L=2048",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      128,
+      64,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 2688,
+      "N": 256,
+      "M": 2048
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm k_proj L=4096",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      128,
+      128,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 2688,
+      "N": 256,
+      "M": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm k_proj L=8192",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      128,
+      256,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 2688,
+      "N": 256,
+      "M": 8192
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm o_proj L=129",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1344,
+      6,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 4096,
+      "N": 2688,
+      "M": 129
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm o_proj L=300",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1344,
+      10,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 4096,
+      "N": 2688,
+      "M": 300
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm o_proj L=1025",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1344,
+      34,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 4096,
+      "N": 2688,
+      "M": 1025
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm o_proj L=2048",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1344,
+      64,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 4096,
+      "N": 2688,
+      "M": 2048
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm o_proj L=4096",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1344,
+      128,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 4096,
+      "N": 2688,
+      "M": 4096
+     }
+    }
+   ]
+  },
+  {
+   "case": "qmm o_proj L=8192",
+   "mlx": "affine_qmm_t_nax_bfloat16_t_gs_64_b_4_bm64_bn64_bk64_wm2_wn2_alN_true_batch_0",
+   "launches": [
+    {
+     "function": "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t",
+     "file": "qmm_nax.metal",
+     "grid": [
+      1344,
+      256,
+      2
+     ],
+     "threadgroup": [
+      32,
+      2,
+      2
+     ],
+     "params": {
+      "K": 4096,
+      "N": 2688,
+      "M": 8192
+     }
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,246 @@
+{
+ "about": "Launches for zig/kernels/metal/ops: each entry point is bit-identical to the MLX 0.32.3 kernel named in 'mlx' at the shapes in 'nemotron' (checked by tools/zig/check_mlx_ops.py).",
+ "compile": {
+  "api": "newLibraryWithSource, one .metal file a library",
+  "mathMode": "safe",
+  "mathFloatingPointFunctions": "fast",
+  "languageVersion": "4.0",
+  "note": "MLX's options for its run-time kernels; a library built offline is a different compiler build"
+ },
+ "binding": "buffer(i) in signature order (inputs, then outputs); inputs declared 'constant' take setBytes or a small buffer; small P/SHAPE/BATCH arrays are int32/int64/float as declared",
+ "grid": "'threads' grids go to dispatchThreads, 'threadgroups' grids to dispatchThreadgroups, with the given threadgroup",
+ "devices": "rules marked 's' are the M5 Max's (applegpu_g17s); MLX picks other tiles or block counts on 'd' (Ultra) and base chips, given under 'other_devices'",
+ "files": {
+  "embed_norm.metal": {
+   "tf_embed_b{4,6,8}_g64": {
+    "mlx": "gather_front (JIT) x3 + affine_dequantize_bfloat16_t_gs_64_b_{bits}",
+    "io": "IDS u32 [>= 8, padded], TABLE u8 [V, D bits/8], S, B bf16 [V, D/64], P i32 [D] -> OUT bf16 [R, D]",
+    "launch": "threads [D / values a unit (2 at 4-bit, 4 at 6-bit, 1 at 8-bit), R, 1], threadgroup [256, 1, 1]"
+   },
+   "tf_rms_norm_bf16": {
+    "mlx": "rmsbfloat16 = rms_single_row<bf16, 4> (D <= 4096): layer 0's input norm and every MTP norm",
+    "io": "X bf16 [R, D], W bf16 [D], EPS f32[1], DIM i32[1] -> OUT bf16 [R, D]",
+    "launch": "threads [T R, 1, 1], threadgroup [T, 1, 1], T = 32 ceil(ceil(D / 4) / 32) (672 at D 2688)"
+   },
+   "tf_embed_rms_b4_g64": {
+    "mlx": "the decode prologue: gather_front x3 + affine_dequantize + rmsbfloat16 in one launch",
+    "io": "IDS u32 [>= 8], TABLE u8, S, B bf16, W bf16 [D], EPS f32[1], DIM i32[1] -> H bf16 [R, D] (residual), OUT bf16 [R, D] (normed)",
+    "launch": "as tf_rms_norm_bf16"
+   }
+  },
+  "qmv.metal": {
+   "entry_points": {
+    "tf_qmv_b4_g64": {
+     "mlx": "affine_qmv_bfloat16_t_gs_64_b_4_batch_0",
+     "when": "M = 1 and not qmv_fast"
+    },
+    "tf_qmv_fast_b4_g64": {
+     "mlx": "affine_qmv_fast_bfloat16_t_gs_64_b_4_batch_0",
+     "when": "M = 1, N % 8 == 0, K % 512 == 0"
+    },
+    "tf_qmv_wide_b4_g64_v2": {
+     "mlx": "affine_qmv_wide_bfloat16_t_gs_64_b_4_nv_2_kl_8_batch_0",
+     "when": "2 <= M < limit with ceil(M / ceil(M / 5)) == 2"
+    },
+    "tf_qmv_wide_b4_g64_v3": {
+     "mlx": "affine_qmv_wide_bfloat16_t_gs_64_b_4_nv_3_kl_8_batch_0",
+     "when": "2 <= M < limit with ceil(M / ceil(M / 5)) == 3"
+    },
+    "tf_qmv_wide_b4_g64_v4": {
+     "mlx": "affine_qmv_wide_bfloat16_t_gs_64_b_4_nv_4_kl_8_batch_0",
+     "when": "2 <= M < limit with ceil(M / ceil(M / 5)) == 4"
+    },
+    "tf_qmv_wide_b4_g64_v5": {
+     "mlx": "affine_qmv_wide_bfloat16_t_gs_64_b_4_nv_5_kl_8_batch_0",
+     "when": "2 <= M < limit with ceil(M / ceil(M / 5)) == 5"
+    },
+    "tf_gather_qmv_b4_g64": {
+     "mlx": "affine_gather_qmv_bfloat16_t_gs_64_b_4",
+     "when": "gather_qmm, M = 1, not fast"
+    },
+    "tf_qmv_b6_g64": {
+     "mlx": "affine_qmv_bfloat16_t_gs_64_b_6_batch_0",
+     "when": "M = 1 and not qmv_fast"
+    },
+    "tf_qmv_fast_b6_g64": {
+     "mlx": "affine_qmv_fast_bfloat16_t_gs_64_b_6_batch_0",
+     "when": "M = 1, N % 8 == 0, K % 256 == 0"
+    },
+    "tf_qmv_wide_b6_g64_v2": {
+     "mlx": "affine_qmv_wide_bfloat16_t_gs_64_b_6_nv_2_kl_8_batch_0",
+     "when": "2 <= M < limit with ceil(M / ceil(M / 5)) == 2"
+    },
+    "tf_qmv_wide_b6_g64_v3": {
+     "mlx": "affine_qmv_wide_bfloat16_t_gs_64_b_6_nv_3_kl_8_batch_0",
+     "when": "2 <= M < limit with ceil(M / ceil(M / 5)) == 3"
+    },
+    "tf_qmv_wide_b6_g64_v4": {
+     "mlx": "affine_qmv_wide_bfloat16_t_gs_64_b_6_nv_4_kl_8_batch_0",
+     "when": "2 <= M < limit with ceil(M / ceil(M / 5)) == 4"
+    },
+    "tf_qmv_wide_b6_g64_v5": {
+     "mlx": "affine_qmv_wide_bfloat16_t_gs_64_b_6_nv_5_kl_8_batch_0",
+     "when": "2 <= M < limit with ceil(M / ceil(M / 5)) == 5"
+    },
+    "tf_gather_qmv_b6_g64": {
+     "mlx": "affine_gather_qmv_bfloat16_t_gs_64_b_6",
+     "when": "gather_qmm, M = 1, not fast"
+    },
+    "tf_qmv_b8_g64": {
+     "mlx": "affine_qmv_bfloat16_t_gs_64_b_8_batch_0",
+     "when": "M = 1 and not qmv_fast"
+    },
+    "tf_qmv_fast_b8_g64": {
+     "mlx": "affine_qmv_fast_bfloat16_t_gs_64_b_8_batch_0",
+     "when": "M = 1, N % 8 == 0, K % 256 == 0"
+    },
+    "tf_qmv_wide_b8_g64_v2": {
+     "mlx": "affine_qmv_wide_bfloat16_t_gs_64_b_8_nv_2_kl_8_batch_0",
+     "when": "2 <= M < limit with ceil(M / ceil(M / 5)) == 2"
+    },
+    "tf_qmv_wide_b8_g64_v3": {
+     "mlx": "affine_qmv_wide_bfloat16_t_gs_64_b_8_nv_3_kl_8_batch_0",
+     "when": "2 <= M < limit with ceil(M / ceil(M / 5)) == 3"
+    },
+    "tf_qmv_wide_b8_g64_v4": {
+     "mlx": "affine_qmv_wide_bfloat16_t_gs_64_b_8_nv_4_kl_8_batch_0",
+     "when": "2 <= M < limit with ceil(M / ceil(M / 5)) == 4"
+    },
+    "tf_qmv_wide_b8_g64_v5": {
+     "mlx": "affine_qmv_wide_bfloat16_t_gs_64_b_8_nv_5_kl_8_batch_0",
+     "when": "2 <= M < limit with ceil(M / ceil(M / 5)) == 5"
+    },
+    "tf_gather_qmv_b8_g64": {
+     "mlx": "affine_gather_qmv_bfloat16_t_gs_64_b_8",
+     "when": "gather_qmm, M = 1, not fast"
+    }
+   },
+   "io": {
+    "qmv, qmv_fast": "W u32 [N, K bits/32], S, B bf16 [N, K/64], X bf16 [M, K], SHAPE i32 [K, N] -> Y bf16 [M, N]",
+    "qmv_wide": "same, SHAPE i32 [K, N, M]",
+    "gather_qmv": "W [E, N, K bits/32], S, B [E, N, K/64], X [rows, K], IDS u32 [>= 8] (expert per output row), XIDS u32 [>= 8] (input row per output row), SHAPE [K, N] -> Y [outputs, N]; MLX's fast gather (K % 512 == 0 at 4-bit) is not built: no Nemotron expert shape reaches it"
+   },
+   "launch": {
+    "qmv, qmv_fast": "threadgroups [M, ceil(N / 8), 1] of [32, 2, 1]",
+    "qmv_wide": "threadgroups [ceil(M / nv), ceil(N / 8), 1] of [32, 2, 1]",
+    "gather_qmv": "threadgroups [1, ceil(N / 8), outputs] of [32, 2, 1]"
+   },
+   "mlx_rule": {
+    "M = 1": "qmv_fast when N % 8 == 0 and K % (32 x 2 x values a pack) == 0, else qmv",
+    "2 <= M < limit (gen >= 15)": "qmv_wide, nv = ceil(M / ceil(M / 5)); gen 13-14 run qmv rows",
+    "limit on 's' (gen 17)": "33 when K, N <= 2048; 25 when <= 4096; 13 otherwise; M >= limit runs qmm_splitk (not here)",
+    "other_devices": "gen 15 's': 13 / 15 / 13; gen 13-14 base 14 / 10 / 6, 'd' 32 / 18 / 12"
+   },
+   "nemotron": {
+    "in_proj K 2688 N 10304": "M 1 qmv; limit 13",
+    "out_proj K 4096 N 2688": "M 1 qmv_fast; limit 25",
+    "q K 2688 N 4096, k/v N 256": "M 1 qmv; limit 25",
+    "o_proj K 4096 N 2688": "M 1 qmv_fast",
+    "shared up K 2688 N 3712": "qmv",
+    "shared down K 3712 N 2688": "qmv",
+    "lm_head K 2688 N 131072": "qmv; limit 13",
+    "mtp eh_proj K 5376 N 2688": "4-bit qmv (fast at 6/8-bit)",
+    "draft head K 2688 N 32768": "qmv",
+    "routed fc1 K 2688 N 1856, fc2 K 1856 N 2688": "gather_qmv (6 outputs a row)"
+   }
+  },
+  "sdpa.metal": {
+   "entry_points": {
+    "tf_sdpa_vec_d128": {
+     "mlx": "sdpa_vector_bfloat16_t_128_128 (no mask, query contiguous): 1 row",
+     "launch": "threadgroups [B H, R, 1] of [1024, 1, 1]"
+    },
+    "tf_sdpa_vec_d128_cqt": {
+     "mlx": "sdpa_vector_bfloat16_t_128_128 (causal, query transposed): 2 rows",
+     "launch": "threadgroups [B H, R, 1] of [1024, 1, 1]"
+    },
+    "tf_sdpa_2p1_d128": {
+     "mlx": "sdpa_vector_2pass_1_bfloat16_t_128_128 (no mask)",
+     "launch": "threadgroups [KVH, B, blocks] of [32, gqa, R]"
+    },
+    "tf_sdpa_2p1_d128_cqt": {
+     "mlx": "sdpa_vector_2pass_1 (causal, query transposed)",
+     "launch": "threadgroups [KVH, B, blocks] of [32, gqa, R]"
+    },
+    "tf_sdpa_2p1_gqa16_d128": {
+     "mlx": "sdpa_vector_2pass_1_gqa_16_bfloat16_t_128_128 (R 1, no mask, keys >= 8192)",
+     "launch": "threadgroups [KVH, B, blocks] of [32, 16, 1]"
+    },
+    "tf_sdpa_2p2_d128": {
+     "mlx": "sdpa_vector_2pass_2_bfloat16_t_128",
+     "launch": "threadgroups [B H, R, 1] of [1024, 1, 1]"
+    }
+   },
+   "io": "Q bf16 (the projection's memory: [1, R, H, 128]; row-contiguous [B, H, R, 128] when R = 1), K, V bf16 cache [B, KVH, cap, 128], P i32 (vec: [gqa, keys]; pass 1: [keys, blocks]; pass 2: [blocks]), ST i64 [k_head, k_seq, v_head, v_seq] strides in elements, SC f32 [scale] -> O bf16 [B, H, R, 128]; pass 1 writes PART bf16 [B H R, blocks, 128], SUMS, MAXS f32 [B H R, blocks]",
+   "mlx_rule": {
+    "fused": "R <= 8 and R x gqa <= 32 (Nemotron: R <= 2); otherwise the unfused fallback (see nax_gemm.metal)",
+    "2-pass": "'s' and 'd' devices: keys >= 1024; others: keys >= 4096 with GQA",
+    "blocks on 's'": "64; when keys > 1024 and gqa R > 4: 128 to 8192 keys, 256 to 32768, 512 to 65536, else 1024",
+    "gqa16 pass 1": "R 1, no mask, D = V = 128, gqa 16, keys >= 8192",
+    "other_devices": "'d': 128, 256 when gqa R <= 2 and keys > 8192, 512 / 1024 for gqa R >= 6 at 16384+ / 65536+; base: 64 if gqa R >= 4 else 32"
+   }
+  },
+  "argmax.metal": {
+   "tf_argmax_part_bf16 + tf_argmax_merge": {
+    "mlx": "argmax_bfloat16 (arg_reduce_general): the same index (first NaN, else the lowest index of the max)",
+    "launch": "part: threadgroups [ceil(V / span), R, 1] of [256, 1, 1], P [V, span] (span 2048); merge: threadgroups [1, R, 1] of [32, 1, 1], P [spans]",
+    "io": "part: X bf16 [R, V] -> PV f32, PI u32 [R, spans]; merge -> IDX u32 [R]"
+   }
+  },
+  "gemv.metal": {
+   "tf_gemv_bf16_tm4": {
+    "mlx": "gemv_bfloat16_bm1_bn8_sm1_sn32_tm4_tn4_nc0_axpby0 (x @ W.T with K >= 16 N, N >= 4): the MTP router gate",
+    "io": "MAT bf16 [N, ld], VEC bf16 [K], P i32 [K, N, ld] -> OUT bf16 [N]",
+    "launch": "threadgroups [ceil(N / 4), 1, batch] of [32, 8, 1]"
+   },
+   "tf_gemv_wide_bf16_v{3,4,5}_kl32": {
+    "mlx": "gemv_wide_bfloat16_nv{nv}_kl32_nc1_axpby0: the multi-row MTP attention's scores",
+    "io": "MAT bf16 rows (keys), X bf16 vectors, P i32 [K, N, M, mat_ld, x_ld], BATCH i64 [inner, x outer/inner strides, mat outer/inner strides] -> OUT bf16 [batch, M, N]",
+    "launch": "threadgroups [grid_x, ceil(N / 4), batch] of [32, 4, 1]",
+    "mlx_rule": "passes = ceil(M / 5) <= 3, nv = ceil(M / passes), grid_x = passes (1 when N >= 65536); kl 32 when passes == 1 or N <= 64, else 16, which at K = 128 (the head dim) gives kl 32's bits",
+    "note": "only R = 3-8 query rows reach the unfused attention; R 2 is fused (sdpa.metal)"
+   }
+  },
+  "softmax.metal": {
+   "tf_softmax_bf16": {
+    "mlx": "block_softmax_precise_bfloat16 (softmax_single_row<bf16, float>, row <= 4096)",
+    "launch": "threads [T rows, 1, 1], T = 32 ceil(ceil(n / 4) / 32)",
+    "io": "X bf16 [rows, n], P i32 [n] -> OUT bf16"
+   },
+   "tf_softmax_looped_bf16": {
+    "mlx": "looped_softmax_precise_bfloat16 (row > 4096)",
+    "launch": "threads [1024 rows, 1, 1], threadgroup [1024, 1, 1]"
+   }
+  },
+  "route.metal": {
+   "tf_route_topk": {
+    "mlx": "all of mlx-lm's compiled group_expert_select (n_group 1): the Sigmoid fusion, the -(p + bias) fusion, carg_block_sort_float32_uint32_bn32_tn4, gather_axis, row_reduce_small_1_reduce_sumfloat32 and the normalise-and-scale fusion",
+    "io": "G bf16 [R, E] gates, BIAS f32 [E], C f32 [1e-20, routed_scaling_factor], P i32 [E, k] -> IDS u32 [R, k], WT f32 [R, k]",
+    "launch": "threads [E, R, 1], threadgroup [E, 1, 1] (E 128): one threadgroup a row"
+   }
+  },
+  "elementwise.metal": {
+   "tf_add_bf16": "vv_Addbfloat16",
+   "tf_relu2_bf16": "the relu2 fusion (CV2I...MaximumCDFV2OSquareE)",
+   "tf_scale_bf16": "sv_Multiplybfloat16 (bf16(scale) x q in the unfused attention)",
+   "tf_moe_combine": "v_copybfloat16float32 + g2_Multiplyfloat32 + col_reduce_small_1_reduce_sumfloat32 + v_copyfloat32bfloat16 in one launch (one row, k <= 7 weights)",
+   "tf_causal_mask_bf16": "arangeint32 x2 + g2_GreaterEqualint32 + g2_Selectbfloat16: where(q >= k, s, lowest bf16)",
+   "tf_gather_u32": "gather_frontuint32_uint32_int_1 (token = draft_ids[argmax]; up to 7 ids)",
+   "launch": "threads [count, 1, 1] (mask: [n, R, batch]; combine: [D, rows, 1]), threadgroup [256, 1, 1] or fewer"
+  },
+  "nax_gemm.metal": {
+   "tf_nax_gemm_nn_bf16": {
+    "mlx": "steel_gemm_fused_nax_nn_bfloat16_bfloat16_bm64_bn128_bk256_wm2_wn4 (has_batch, align_M false, align_N true, align_K false): the MTP's P @ V for 3-8 query rows",
+    "io": "A bf16 [batch, M, K] (lda), B bf16 [K, N] (ldb), P i32 [M, N, K, lda, ldb, ldd], BATCH i64 [inner, A outer/inner, B outer/inner strides, D stride] -> D bf16",
+    "launch": "threadgroups [ceil(N / 128), ceil(M / 64), batch] of [32, 4, 1]",
+    "note": "each 16x32 output fragment runs MPP matmul2d(16, 32, 16, relaxed) over 2 ceil(K / 32) 16-wide K chunks in order, as MLX's 's' tile (bk 256, or 64 from K >= 8192) and its other tiles all do"
+   },
+   "fallback chain (R x gqa > 32, R <= 8)": "tf_scale_bf16 -> tf_gemv_wide_bf16_v{nv}_kl32 -> tf_causal_mask_bf16 -> tf_softmax(_looped)_bf16 -> tf_nax_gemm_nn_bf16; equals mx.fast.scaled_dot_product_attention there"
+  }
+ },
+ "not_covered": {
+  "pre-M5 multi-row attention": "R 3-8 on chips without tensor units runs MLX's steel (simdgroup MMA) GEMM, not built here",
+  "R > 8 MTP rows": "steel_attention / NAX attention and qmm_splitk / qmm_nax: the prefill agent's kernels",
+  "layout copies": "the Zig engine stores layouts directly (lead)"
+ }
+}

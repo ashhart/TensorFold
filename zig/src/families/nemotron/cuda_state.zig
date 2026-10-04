@@ -1,0 +1,203 @@
+//! Device buffers of one Nemotron sequence: its caches and recurrent state, and the scratch a window or chunk uses.
+
+const std = @import("std");
+const cuda = @import("cuda");
+const Config = @import("config.zig").Config;
+const kern = @import("cuda_kernels.zig");
+const torch_ops = @import("cuda_torch_ops.zig");
+const sampler = @import("cuda_sampler.zig");
+
+pub const max_rows = 16; // a verify window's rows (the row tile of the row-parallel kernels)
+pub const prefill_rows = 2048; // rows of a prompt chunk
+pub const chunk_keys = 512; // keys an attention chunk holds, at fixed absolute positions
+
+/// Sub-allocations of one device allocation, 256-byte aligned like the driver's own.
+const Arena = struct {
+    buf: cuda.DeviceBuffer,
+    used: usize = 0,
+
+    fn take(a: *Arena, bytes: usize) u64 {
+        const at = std.mem.alignForward(usize, a.used, 256);
+        a.used = at + bytes;
+        std.debug.assert(a.used <= a.buf.len);
+        return a.buf.ptr + at;
+    }
+};
+
+/// A sequence's own Buffers fields: caches and state (the first seven, one range), window io and sampler settings.
+pub const seq_fields = [_][]const u8{ "k_cache", "v_cache", "ssm", "conv_base", "raw", "xc", "dt", "meta", "ids", "hidden", "sampled", "seed", "fp" };
+
+fn seqSizes(c: Config, max_len: usize) [seq_fields.len]usize {
+    const W: usize = max_rows;
+    const nm: usize = c.count(.mamba);
+    const na: usize = c.count(.attention);
+    const kv = na * max_len * c.kv_heads * c.head_dim * 2;
+    const cd: usize = c.convDim();
+    return .{ kv, kv, nm * c.mamba_heads * c.mamba_head_dim * c.state * 4, nm * 3 * cd * 2, nm * 2 * W * cd * 2, nm * 2 * W * cd * 2, nm * 2 * W * c.mamba_heads * 4, 16, W * 4, W * c.hidden * 2, W * 4, 8, 32 };
+}
+
+/// One sequence: its own buffers (seq_fields, then its MTP head's) and where it stands while another is bound.
+pub const Seq = struct {
+    arena: ?Arena, // null: the engine's own buffers
+    ptr: [seq_fields.len]u64,
+    head: [4]u64 = @splat(0),
+    pos: usize = 0,
+    parity: usize = 0,
+    prev_keep: usize = 0,
+    rows: usize = 0,
+    head_pos: usize = 0,
+    sampling: ?sampler.Sampling = null,
+
+    /// Zeroed buffers for `max_len` cache rows and a head's `head` buffers.
+    pub fn init(d: *const cuda.Driver, c: Config, max_len: usize, head: []const usize) !Seq {
+        const sizes = seqSizes(c, max_len);
+        var total: usize = 0;
+        for (sizes) |n| total += n + 256;
+        for (head) |n| total += n + 256;
+        var a: Arena = .{ .buf = try cuda.DeviceBuffer.alloc(d, total) };
+        errdefer a.buf.free();
+        try a.buf.fill8(0, null);
+        var s: Seq = .{ .arena = null, .ptr = undefined };
+        for (&s.ptr, sizes) |*p, n| p.* = a.take(n);
+        for (s.head[0..head.len], head) |*p, n| p.* = a.take(n);
+        s.arena = a;
+        return s;
+    }
+
+    /// The engine's own buffers as a sequence.
+    pub fn view(b: *const Buffers) Seq {
+        var s: Seq = .{ .arena = null, .ptr = undefined };
+        inline for (seq_fields, &s.ptr) |name, *p| p.* = @field(b, name);
+        return s;
+    }
+
+    pub fn deinit(s: *Seq) void {
+        if (s.arena) |*a| a.buf.free();
+        s.* = undefined;
+    }
+};
+
+pub const Buffers = struct {
+    arena: Arena,
+    // sequence state (Engine.STATE in the Python engine)
+    k_cache: u64,
+    v_cache: u64,
+    ssm: u64,
+    conv_base: u64,
+    raw: u64,
+    xc: u64,
+    dt: u64,
+    state_bytes: [7]usize,
+    // a window's inputs and outputs
+    meta: u64,
+    ids: u64,
+    hidden: u64,
+    logits: u64,
+    sampled: u64,
+    // a prompt chunk's own inputs and outputs
+    p_meta: u64,
+    p_ids: u64,
+    p_hidden: u64,
+    p_logits: u64,
+    p_sampled: u64,
+    // scratch shared by windows and chunks (they never overlap on the stream)
+    emb: u64,
+    h: [2]u64,
+    y: u64,
+    xs: u64,
+    delta: u64,
+    proj: u64,
+    p_xc: u64,
+    sy: u64,
+    g: u64,
+    gxs: u64,
+    qkv: u64,
+    q: u64,
+    att: u64,
+    axs: u64,
+    po: u64,
+    pm: u64,
+    pl: u64,
+    part: u64,
+    pick: u64,
+    wts: u64,
+    plan: kern.Plan,
+    act: u64,
+    ymoe: u64,
+    // the keyed sampler: Params' seed and fp, logits.float(), the top candidates and topk's scratch
+    seed: u64,
+    fp: u64,
+    flog: u64,
+    vals: u64,
+    cols: u64,
+    topk: u64,
+
+    /// Sizes every buffer for `max_len` cache rows and `nch` attention chunk partials a row; the own sequence's first.
+    pub fn init(d: *const cuda.Driver, c: Config, max_len: usize, nch_: usize) !Buffers {
+        const R: usize = prefill_rows;
+        const W: usize = max_rows;
+        const D: usize = c.hidden;
+        const ns: usize = c.slots();
+        const nch: usize = nch_;
+        const qd: usize = c.heads * c.head_dim;
+        const cd: usize = c.convDim();
+        const xd: usize = c.inner();
+        const pairs = R * ns;
+        const items = kern.maxItems(@intCast(pairs), c.experts + 2, 16);
+        const own = seqSizes(c, max_len);
+        const scratch = [_]usize{
+            W * c.vocab * 2,  16,                   R * 4,              R * D * 2,       c.vocab * 2,    16,
+            R * D * 2,        R * D * 2,            R * D * 2,          R * D * 2,       R * D / 64 * 4, R * D * 2,
+            R * c.projDim() * 2, R * cd * 2,         R * xd * 2,         R * xd * 2,      R * xd / 64 * 4, R * c.qkvDim() * 2,
+            R * qd * 2,       R * qd * 2,           R * qd / 64 * 4,    W * nch * qd * 4, W * nch * c.heads * 4,
+            W * nch * c.heads * 4, 6 * R * c.experts * 4, R * ns * 4,  R * ns * 4,      pairs * 4, items * 12,
+            8,                pairs * 4,            (pairs + 1023) / 1024 * (c.experts + 2) * 4, pairs * c.expert_width * 2,
+            pairs * D * 4,    W * c.vocab * 4,      W * sampler.max_candidates * 4, W * sampler.max_candidates * 8,
+            torch_ops.topkScratchBytes(W, c.vocab),
+        };
+        var total: usize = 0;
+        for (own) |s| total += s + 256;
+        for (scratch) |s| total += s + 256;
+        var a: Arena = .{ .buf = try cuda.DeviceBuffer.alloc(d, total) };
+        errdefer a.buf.free();
+        var b: Buffers = undefined;
+        b.state_bytes = own[0..7].*;
+        inline for (seq_fields, own) |name, n| @field(b, name) = a.take(n);
+        const fields = [_]*u64{
+            &b.logits, &b.p_meta, &b.p_ids, &b.p_hidden, &b.p_logits, &b.p_sampled, &b.emb,   &b.h[0],  &b.h[1],  &b.y,
+            &b.xs,     &b.delta,  &b.proj,  &b.p_xc,     &b.sy,       &b.g,         &b.gxs,   &b.qkv,   &b.q,     &b.att,
+            &b.axs,    &b.po,     &b.pm,    &b.pl,       &b.part,     &b.pick,      &b.wts,   &b.plan.members, &b.plan.items,
+            &b.plan.counts, &b.plan.rank, &b.plan.hist, &b.act, &b.ymoe, &b.flog, &b.vals, &b.cols, &b.topk,
+        };
+        for (fields, scratch) |f, n| f.* = a.take(n);
+        b.arena = a;
+        return b;
+    }
+
+    pub fn deinit(b: *Buffers) void {
+        b.arena.buf.free();
+        b.* = undefined;
+    }
+
+    /// The caches and recurrent state as one device range (they are the arena's first buffers).
+    fn stateBytes(b: *const Buffers) usize {
+        return b.dt + b.state_bytes[6] - b.k_cache;
+    }
+
+    /// Engine.snapshot: a device copy of every cache and state buffer.
+    pub fn snapshot(b: *const Buffers, ops: kern.Ops) !cuda.DeviceBuffer {
+        const copy = try cuda.DeviceBuffer.alloc(ops.k.d, b.stateBytes());
+        try ops.copy(copy.ptr, b.k_cache, b.stateBytes());
+        return copy;
+    }
+
+    pub fn restore(b: *const Buffers, ops: kern.Ops, saved: cuda.DeviceBuffer) !void {
+        try ops.copy(b.k_cache, saved.ptr, b.stateBytes());
+    }
+
+    /// Engine.reset: every cache and state buffer zeroed, as a fresh request starts.
+    pub fn reset(b: *const Buffers, ops: kern.Ops) !void {
+        const ptrs = [_]u64{ b.k_cache, b.v_cache, b.ssm, b.conv_base, b.raw, b.xc, b.dt };
+        for (ptrs, b.state_bytes) |p, n| try ops.fill32(p, 0, n / 4);
+    }
+};

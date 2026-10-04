@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ashhart/TensorFold/zig/src/cluster/cluster.schema.json",
+  "title": "TensorFold cluster",
+  "description": "Nodes, how the leader reaches them for the launch step, and per model the nodes, parallel layout and budgets. The data plane is MCDMA direct memory access only.",
+  "type": "object",
+  "required": ["schema", "cluster", "nodes"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "tensorfold-cluster/1" },
+    "cluster": { "type": "string", "minLength": 1, "description": "The cluster's name." },
+    "transport": { "const": "mcdma", "default": "mcdma", "description": "Direct memory access over MCDMA links; there is no TCP transport." },
+    "ssh": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Key-only access for the launch step.",
+      "properties": {
+        "user": { "type": "string" },
+        "key": { "type": "string", "description": "Private key file; password logins are never used." }
+      }
+    },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/node" }
+    },
+    "models": {
+      "type": "object",
+      "description": "Keyed by model id.",
+      "additionalProperties": { "$ref": "#/$defs/model" }
+    }
+  },
+  "$defs": {
+    "name": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,20}$" },
+    "degree": {
+      "oneOf": [
+        { "type": "integer", "minimum": 1, "maximum": 256 },
+        { "const": "auto" }
+      ]
+    },
+    "node": {
+      "type": "object",
+      "required": ["name", "address", "backend"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/name" },
+        "address": { "type": "string", "minLength": 1, "description": "Host or IP for the launch step, never the data plane." },
+        "via": { "$ref": "#/$defs/name", "description": "A node this one is reached through (its jump host); one hop only." },
+        "backend": { "enum": ["metal", "cuda"] },
+        "chip": { "type": "string" },
+        "gpu": { "type": "string" },
+        "memory_gb": { "type": "number", "exclusiveMinimum": 0 },
+        "gpu_limit_gb": { "type": "number", "exclusiveMinimum": 0, "description": "What the GPU may hold; inventory fills it in." },
+        "model_root": { "type": "string" },
+        "ports": {
+          "oneOf": [
+            { "const": "auto" },
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["device", "peer"],
+                "additionalProperties": false,
+                "properties": {
+                  "device": { "type": "string", "description": "The RDMA device, e.g. rdma_en3." },
+                  "peer": { "$ref": "#/$defs/name" },
+                  "gbps": { "type": "number" }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "model": {
+      "type": "object",
+      "required": ["path"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "object", "additionalProperties": { "type": "string" }, "description": "Per node name." }
+          ]
+        },
+        "nodes": { "type": "array", "items": { "$ref": "#/$defs/name" }, "description": "Defaults to every node." },
+        "parallel": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tensor": { "$ref": "#/$defs/degree" },
+            "pipeline": { "$ref": "#/$defs/degree" },
+            "expert": { "$ref": "#/$defs/degree" }
+          }
+        },
+        "mode": {
+          "enum": ["converged", "disaggregated"],
+          "default": "converged",
+          "description": "converged: lane rounds span every node, prompt and decode rows together; disaggregated: prefill nodes hand KV caches to decode nodes."
+        },
+        "prefill": { "type": "array", "items": { "$ref": "#/$defs/name" } },
+        "decode": { "type": "array", "items": { "$ref": "#/$defs/name" } },
+        "drafter": {
+          "type": "object",
+          "required": ["path"],
+          "additionalProperties": false,
+          "properties": {
+            "path": { "type": "string" },
+            "size_gb": { "type": "number", "minimum": 0 },
+            "uses_target_head": { "type": "boolean", "default": true }
+          }
+        },
+        "context": { "type": "integer", "minimum": 1, "description": "Tokens each stream may hold; admission sizes caches for streams x context." },
+        "streams": { "type": "integer", "minimum": 1, "description": "Concurrent streams the caches are sized for." },
+        "rows": { "type": "integer", "minimum": 1, "description": "Decode rows one round may carry." },
+        "chunk": { "type": "integer", "minimum": 0, "description": "Prompt rows a round takes while streams decode; 0: admission sizes it." },
+        "mla": { "enum": ["heads", "streams", "auto"], "default": "auto", "description": "MLA attention split by heads (latent cache on every rank) or by streams (caches split, weights replicated)." },
+        "vision": { "type": "boolean" },
+        "memory": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "margin_gb": { "type": "number", "minimum": 0 } }
+        }
+      }
+    }
+  }
+}

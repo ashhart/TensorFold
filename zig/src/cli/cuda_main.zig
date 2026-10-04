@@ -1,0 +1,196 @@
+//! `tensorfold` on Linux with CUDA: a model run on token ids with no Python at all, plus the oracle checks.
+
+const std = @import("std");
+const cuda = @import("cuda");
+const nemotron = @import("nemotron");
+const core = @import("core");
+const lanes = @import("lanes");
+const checks = @import("cuda_checks.zig");
+const lanes_cli = @import("cuda_lanes.zig");
+const decode = nemotron.decode;
+
+const usage =
+    \\usage: tensorfold run MODEL --tokens ID,ID,... [--max-tokens N] [--no-drafts] [--report PATH] [--kernels DIR]
+    \\         [--temperature T] [--top-k K] [--top-p P] [--min-p M] [--seed S]   (temperature 0: greedy)
+    \\         [--context N] [--ignore-eos] [--eager] [--costs MS1,...,MS16,LEVEL]
+    \\       tensorfold check-weights MODEL DIGESTS.json [--kernels DIR]
+    \\       tensorfold teacher MODEL TEACHER.json [--dump DIR] [--kernels DIR]
+    \\       tensorfold prefill MODEL PROMPTS.json NAME [--dump DIR] [--kernels DIR]
+    \\       tensorfold rounds MODEL --tokens ID,... [--max-tokens N]   (GPU ms a serial and a window graph round)
+    \\       tensorfold check-draws MODEL FIXTURES_DIR   (MTP draws against the lane fixtures)
+    \\       tensorfold lanes MODEL PROMPTS.json [--solo] [--max-tokens N] [--no-drafts] [sampling as run] [--report PATH]
+    \\                (every prompt through the lane core at once, or one at a time with --solo)
+    \\
+;
+
+pub fn main(init: std.process.Init) !u8 {
+    const gpa = init.gpa;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len < 3) {
+        std.debug.print("{s}", .{usage});
+        return 2;
+    }
+    var opts = Options{ .model = args[2] };
+    var positional: std.ArrayList([]const u8) = .empty;
+    defer positional.deinit(gpa);
+    defer gpa.free(opts.tokens);
+    defer if (opts.costs) |c| gpa.free(c);
+    var i: usize = 3;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        const value = if (i + 1 < args.len) args[i + 1] else "";
+        if (std.mem.eql(u8, a, "--tokens")) {
+            opts.tokens = try parseIds(gpa, value);
+            i += 1;
+        } else if (std.mem.eql(u8, a, "--max-tokens")) {
+            opts.max_tokens = try std.fmt.parseInt(u32, value, 10);
+            i += 1;
+        } else if (std.mem.eql(u8, a, "--temperature")) {
+            opts.sampling.temperature = try std.fmt.parseFloat(f64, value);
+            i += 1;
+        } else if (std.mem.eql(u8, a, "--top-k")) {
+            opts.sampling.top_k = try std.fmt.parseInt(u32, value, 10);
+            i += 1;
+        } else if (std.mem.eql(u8, a, "--top-p")) {
+            opts.sampling.top_p = try std.fmt.parseFloat(f64, value);
+            i += 1;
+        } else if (std.mem.eql(u8, a, "--min-p")) {
+            opts.sampling.min_p = try std.fmt.parseFloat(f64, value);
+            i += 1;
+        } else if (std.mem.eql(u8, a, "--seed")) {
+            opts.sampling.seed = try std.fmt.parseInt(u64, value, 10);
+            i += 1;
+        } else if (std.mem.eql(u8, a, "--report")) {
+            opts.report = value;
+            i += 1;
+        } else if (std.mem.eql(u8, a, "--kernels")) {
+            opts.kernels = value;
+            i += 1;
+        } else if (std.mem.eql(u8, a, "--dump")) {
+            opts.dump = value;
+            i += 1;
+        } else if (std.mem.eql(u8, a, "--costs")) {
+            opts.costs = try parseFloats(gpa, value);
+            i += 1;
+        } else if (std.mem.eql(u8, a, "--context")) {
+            opts.context = try std.fmt.parseInt(u32, value, 10);
+            i += 1;
+        } else if (std.mem.eql(u8, a, "--no-drafts")) {
+            opts.drafts = false;
+        } else if (std.mem.eql(u8, a, "--solo")) {
+            opts.solo = true;
+        } else if (std.mem.eql(u8, a, "--ignore-eos")) {
+            opts.stop_eos = false;
+        } else if (std.mem.eql(u8, a, "--eager")) {
+            opts.graphs = false;
+        } else if (std.mem.startsWith(u8, a, "--")) {
+            std.debug.print("unknown option {s}\n{s}", .{ a, usage });
+            return 2;
+        } else try positional.append(gpa, a);
+    }
+    const kernels = opts.kernels orelse init.environ_map.get("TENSORFOLD_CUDA_KERNELS") orelse blk: {
+        const exe = try std.process.executableDirPathAlloc(init.io, init.arena.allocator());
+        break :blk try std.fs.path.join(init.arena.allocator(), &.{ exe, "..", "share", "tensorfold", "cuda", "sm121" });
+    };
+    var driver = try cuda.Driver.open();
+    defer driver.close();
+    var ctx = try cuda.Context.init(&driver, 0);
+    defer ctx.deinit();
+    const cmd = args[1];
+    const decoding = std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "lanes");
+    const mtp = std.mem.eql(u8, cmd, "check-weights") or std.mem.eql(u8, cmd, "rounds") or std.mem.eql(u8, cmd, "check-draws") or (decoding and opts.drafts);
+    const graphs = opts.graphs and (std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "rounds"));
+    const sampling: ?lanes.Sampling = if (std.mem.eql(u8, cmd, "run") and opts.sampling.temperature > 0) opts.sampling else null;
+    const engine = try nemotron.Engine.init(gpa, init.io, &ctx, opts.model, kernels, .{ .context = opts.context, .mtp = mtp, .graphs = graphs, .sampling = sampling });
+    defer engine.deinit();
+    const rest = positional.items;
+    if (std.mem.eql(u8, cmd, "run")) return run(gpa, init.io, engine, opts);
+    if (std.mem.eql(u8, cmd, "lanes") and rest.len == 1) {
+        const s: ?lanes.Sampling = if (opts.sampling.temperature > 0) opts.sampling else null;
+        return lanes_cli.run(gpa, init.io, engine, opts.model, .{ .prompts = rest[0], .max_tokens = @intCast(opts.max_tokens), .sampling = s, .drafts = opts.drafts, .solo = opts.solo, .report = opts.report });
+    }
+    if (std.mem.eql(u8, cmd, "check-weights") and rest.len == 1) return checks.weights(gpa, init.io, engine, rest[0]);
+    if (std.mem.eql(u8, cmd, "teacher") and rest.len == 1) return checks.teacher(gpa, init.io, engine, rest[0], opts.dump);
+    if (std.mem.eql(u8, cmd, "prefill") and rest.len == 2) return checks.prefill(gpa, init.io, engine, rest[0], rest[1], opts.dump);
+    if (std.mem.eql(u8, cmd, "rounds")) return checks.rounds(engine, opts.tokens, opts.max_tokens);
+    if (std.mem.eql(u8, cmd, "check-draws") and rest.len == 1) return checks.draws(gpa, init.io, engine, rest[0]);
+    std.debug.print("{s}", .{usage});
+    return 2;
+}
+
+const Options = struct {
+    model: []const u8,
+    tokens: []u32 = &.{},
+    max_tokens: usize = 256,
+    sampling: lanes.Sampling = .{ .seed = 0, .temperature = 0 },
+    drafts: bool = true,
+    report: ?[]const u8 = null,
+    kernels: ?[]const u8 = null,
+    dump: ?[]const u8 = null,
+    context: ?usize = null,
+    stop_eos: bool = true,
+    graphs: bool = true,
+    solo: bool = false,
+    costs: ?[]f64 = null,
+};
+
+fn parseFloats(gpa: std.mem.Allocator, text: []const u8) ![]f64 {
+    var out: std.ArrayList(f64) = .empty;
+    errdefer out.deinit(gpa);
+    var it = std.mem.tokenizeAny(u8, text, ", ");
+    while (it.next()) |t| try out.append(gpa, try std.fmt.parseFloat(f64, t));
+    return out.toOwnedSlice(gpa);
+}
+
+fn parseIds(gpa: std.mem.Allocator, text: []const u8) ![]u32 {
+    var out: std.ArrayList(u32) = .empty;
+    errdefer out.deinit(gpa);
+    var it = std.mem.tokenizeAny(u8, text, ", ");
+    while (it.next()) |t| try out.append(gpa, try std.fmt.parseInt(u32, t, 10));
+    return out.toOwnedSlice(gpa);
+}
+
+fn run(gpa: std.mem.Allocator, io: std.Io, e: *nemotron.Engine, o: Options) !u8 {
+    if (o.tokens.len == 0) return error.NoPromptTokens;
+    const room = e.max_len - o.tokens.len - nemotron.state.max_rows;
+    const count = @max(1, @min(o.max_tokens, room));
+    var drafter: ?nemotron.Drafter = if (o.drafts) try nemotron.Drafter.init(gpa, io, e, o.model, o.graphs, o.costs) else null;
+    defer if (drafter) |*d| d.deinit();
+    if (drafter) |d| {
+        const v = d.rule.costs.verify;
+        std.debug.print("up to 15 MTP drafts a round, each verified while it pays for its row (measured: {d:.2}/{d:.2}/{d:.2}/{d:.2}/{d:.2} ms at 1/2/4/8/16 rows, {d:.3} ms a draft)\n", .{ v[1], v[2], v[4], v[8], v[16], d.rule.costs.level });
+    }
+    const res = try decode.generate(gpa, io, e, if (drafter) |*d| d else null, o.tokens, count, .{ .stop_eos = o.stop_eos });
+    defer gpa.free(res.tokens);
+    var digest: [32]u8 = undefined;
+    const text = try core.ids_json.write(gpa, res.tokens);
+    defer gpa.free(text);
+    std.crypto.hash.sha2.Sha256.hash(text, &digest, .{});
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    const steps = @max(1, res.tokens.len - 1);
+    const ms = res.decode_seconds * 1e3 / @as(f64, @floatFromInt(steps));
+    std.debug.print("tokens {d} sha {s} prefill {d:.4}s decode {d:.4}s {d:.3} ms/token rounds {d} accepted {d}\n", .{ res.tokens.len, hex[0..12], res.prefill_seconds, res.decode_seconds, ms, res.rounds, res.accepted });
+    if (o.report) |path| {
+        const report = .{
+            .engine = "zig-cuda",
+            .prompt_tokens = o.tokens,
+            .tokens = res.tokens,
+            .token_sha256 = hex,
+            .prefill_seconds = res.prefill_seconds,
+            .decode_seconds = res.decode_seconds,
+            .ms_per_token = ms,
+            .rounds = res.rounds,
+            .accepted_drafts = res.accepted,
+            .drafted = res.drafted,
+            .drafts = o.drafts,
+            .sampling = e.sampling,
+            .graphs = o.graphs,
+            .load_seconds = e.load_seconds,
+            .max_len = e.max_len,
+        };
+        const json = try std.json.Stringify.valueAlloc(gpa, report, .{});
+        defer gpa.free(json);
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = json });
+    }
+    return 0;
+}

@@ -8,6 +8,7 @@ from typing import Callable
 
 from tensorfold import __version__
 from tensorfold.cuda.prompt_precision import FP8_BY_DEFAULT
+from tensorfold.native import ENGINES
 
 
 def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> argparse.ArgumentParser:
@@ -149,6 +150,8 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
                            "layers a GPU has no mma for run W4A16, and the startup line says which); full runs bf16 "
                            "activations against the stored weights exactly. The weights never change, only the math; "
                            "MLX checkpoints have one math. Replies equal this server's own serial decoding either way")
+    # auto: the native engine where the release gate passed it, else Python; also TENSORFOLD_ENGINE; kept out of --help
+    serve.add_argument("--engine", choices=ENGINES, default=None, help=argparse.SUPPRESS)
     serve.set_defaults(func=handlers["serve"])
 
     pull = commands.add_parser("pull", help="download models (or draft models) from Hugging Face")

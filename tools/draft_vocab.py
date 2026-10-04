@@ -28,6 +28,8 @@ def main() -> None:
     p.add_argument("--min-count", type=int, default=10,
                    help="leave out ids seen fewer times (rare names and one-off words); the id prefix fills the rest")
     p.add_argument("--added-tokens", action="store_true", help="always keep the tokenizer's added (special) tokens")
+    p.add_argument("--base", help="an existing list kept whole (the new ids extend it)")
+    p.add_argument("--exclude", help="ids never kept (tokens the privacy gate flags)")
     args = p.parse_args()
     tok = Tokenizer.from_file(args.tokenizer)
     counts: collections.Counter = collections.Counter()
@@ -48,13 +50,20 @@ def main() -> None:
     keep = set(range(args.keep_below))
     if args.added_tokens:
         keep |= {t["id"] for t in json.loads(open(args.tokenizer).read())["added_tokens"]}
+    if args.base:
+        keep |= {int(t) for t in open(args.base).read().split()}
+    drop = {int(t) for t in open(args.exclude).read().split()} if args.exclude else set()
+    keep -= drop
     for tid, count in counts.most_common():
         if len(keep) >= args.size or count < args.min_count:
             break
-        keep.add(tid)
+        if tid not in drop:
+            keep.add(tid)
     fill = iter(range(args.keep_below, tok.get_vocab_size()))
     while len(keep) < args.size:                       # the id prefix fills a short list
-        keep.add(next(fill))
+        t = next(fill)
+        if t not in drop:
+            keep.add(t)
     ids = sorted(keep)
     covered = sum(c for t, c in counts.items() if t in keep)
     with open(args.out, "w") as handle:
