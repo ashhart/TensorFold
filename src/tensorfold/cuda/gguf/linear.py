@@ -147,11 +147,7 @@ class Packed:
     def linear(
         self, x: torch.Tensor, picks: torch.Tensor | None = None, *, plan=None, dtype=torch.bfloat16, validated=False
     ) -> torch.Tensor:
-        """Project dense rows or routed slots, leaving weights packed.
-
-        ``validated`` is for a trusted router with checked expert ids; its supplied
-        plan must have been routed with these same picks. Public calls check ids.
-        """
+        """Project dense or routed rows packed; ``validated`` skips id checks when the plan matches picks."""
         k, n = self.shape[:2]
         if x.ndim not in (2, 3) or not x.is_cuda or x.dtype not in (torch.float16, torch.bfloat16, torch.float32):
             raise ValueError("packed linear requires CUDA floating input [rows,K] or [rows,slots,K]")
@@ -255,8 +251,7 @@ class Packed:
                     enable_fp_fusion=False,
                 )
                 return out
-            # Small K tiles keep IQ2 grid/sign and Q2 scale decoding live ranges
-            # short; wider output tiles reuse gathered rows.
+            # Compact IQ2/Q2 tiles keep decode live ranges short; wider N reuses gathered rows.
             compact = self.format in ("IQ2_XXS", "Q2_K")
             bn, bk = (128 if input_slots else 64, 32) if compact else (32, 128)
             _group_mm[(plan.items.shape[0], triton.cdiv(n, bn))](
@@ -291,8 +286,7 @@ class Packed:
             if self.format == "Q8_0" and self.workspace is not None and self.workspace.accepts(rows, k, n):
                 self.workspace.matmul(self, x, out)
                 return out[:, 0]
-            # Q8 scales cover 32 values; avoid carrying four blocks' decoding
-            # through one dot. More rows then reuse each decoded weight tile.
+            # Q8: one scale block per dot; more rows then reuse each decoded weight tile.
             q8 = self.format == "Q8_0"
             bm, bn, bk = (128, 64, 32) if q8 else (64, 32, 128)
             _mm[(triton.cdiv(rows, bm), triton.cdiv(n, bn))](
@@ -312,8 +306,7 @@ class Packed:
                 enable_fp_fusion=False,
             )
         elif picks is None and rows > 1:
-            # Share packed weight reads; each row retains the serial accumulator
-            # shape, block order and reduction (tensor-core dots would change it).
+            # Shared packed reads; each row keeps serial accumulator shape and FP32 order.
             bm = 2 if rows == 2 else 4
             _mv_rows[(triton.cdiv(rows, bm), triton.cdiv(n, 4))](
                 x,
@@ -333,8 +326,7 @@ class Packed:
         else:
             if picks is None:
                 picks = torch.zeros((rows, 1), dtype=torch.int32, device=x.device)
-            # Share expert weight reads across decode/verify rows that pick the same
-            # expert (dense already uses _mv_rows); keep each row's FP32 reduction.
+            # Share expert weight reads across rows that pick the same expert; keep each FP32 reduction.
             if len(self.shape) == 3 and self.layout in ("raw", "soa") and rows > 1:
                 from tensorfold.cuda.experts import Plan, route
 

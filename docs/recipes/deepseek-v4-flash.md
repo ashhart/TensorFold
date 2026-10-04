@@ -159,9 +159,15 @@ CUDA kernels. Dense grouped output projections execute in one grid. Partial expe
 items skip empty subgroups rather than loading weights for masked outputs.
 
 F16 compressor weights are split exactly into two BF16 components for prompt projections. Both
-components use tensor cores with FP32 accumulation, preserving stored weight and activation precision
-while avoiding FP32 SIMT GEMMs. Other operand formats keep the FP32 fallback; decode reductions are
-unchanged. Q2 expert prefill loads contiguous input fragments with shared-memory matrix instructions.
+components use tensor cores with FP32 accumulation, so stored F16 weights and BF16 activations are
+preserved; only the GEMM path changes from an FP32 SIMT product. Other operand formats keep the FP32
+fallback; decode reductions are unchanged. Q2 expert prefill loads contiguous k16 A/B fragments with
+shared-memory matrix instructions, which reorders the FP32 MMA partials relative to the prior
+interleaved layout and can change intermediate rounding; activation and weight precision are unchanged.
+
+This native CUDA GGUF path was measured on CUDA. Metal on Apple Silicon (M1 through M5) was not run
+for these kernels. On the qualified CUDA server, drafted replies equal `"draft": false`, and concurrent
+streams equal their alone runs (`tools/bench_concurrent.py --alone --serial`).
 
 DSpark verification shares packed weight reads between dense rows. Target sampling transfers
 candidates once per verification window; ties reaching the candidate margin fall back to the

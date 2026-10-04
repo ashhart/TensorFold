@@ -179,8 +179,7 @@ def _mm(
 
 @triton.jit
 def _float_mm(X, W, Y, M: tl.constexpr, N: tl.constexpr, K: tl.constexpr):
-    # An F16 weight is exactly the sum of two BF16 values. Keep both components
-    # and BF16 activations, with FP32 tensor-core accumulators.
+    # Exact F16 = BF16 hi+lo; BF16 activations; FP32 tensor-core accumulators.
     m = tl.program_id(0) * 128 + tl.arange(0, 128)
     n = tl.program_id(1) * 64 + tl.arange(0, 64)
     k = tl.arange(0, 32)
