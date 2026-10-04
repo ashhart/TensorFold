@@ -602,6 +602,26 @@ class SerialEngine:
             for t in (self.big.comp[s_], self.big.ik[s_]):
                 move_rows(t, src // r, dst // r, -(-n // r))
 
+    def kept_views(self, base: int, n: int, bank: int) -> list[tuple[str, torch.Tensor]]:
+        """A kept state's bytes as named uint8 views (no copies; the NVMe tier, ``kvdisk``): the per-token caches of
+        tokens [base, base + n) of the arena (the entries ``copy_rows`` moves, of every kv source in order: an
+        ``Fp8Rows`` as its q, r and s planes) and bank entry ``bank`` (the DRING block ``save_window`` writes, of every
+        ring). Written back into the same views, they are the state a COPY resume reads."""
+
+        out = []
+        for s_ in sorted(self.c.kv_source_layer_ids):
+            r = self.c.layer_ratios[s_]
+            a, m = base // r, -(-n // r)
+            for name, t in (("comp", self.big.comp[s_]), ("ik", self.big.ik[s_])):
+                v = t[a:a + m]
+                if isinstance(v, K.Fp8Rows):
+                    out += [(f"{name}/{s_}/q", v.q.view(torch.uint8)), (f"{name}/{s_}/r", v.r.view(torch.uint8)),
+                            (f"{name}/{s_}/s", v.s.view(torch.uint8))]
+                else:
+                    out.append((f"{name}/{s_}", v.view(torch.uint8)))
+        out += [(f"bank/{i}", b[bank * DRING:(bank + 1) * DRING].view(torch.uint8)) for i, b in enumerate(self.bank)]
+        return out
+
     def window_to_ring(self, p1: int) -> None:
         """After a prompt chunk ending at ``p1``: the staged rows (up to DRING of them) back into the slot's decode
         rings, more than the WINDOW_ROWS decoding needs, so a kept state resumes earlier and a short tail can back up

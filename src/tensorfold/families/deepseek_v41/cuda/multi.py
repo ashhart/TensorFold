@@ -23,7 +23,7 @@ from tensorfold.cuda.streams import Stream, next_fill
 
 from .serial import DRING, MAX_ROWS, WINDOW_ROWS, SerialEngine
 
-ADMIT, FILL, ROUND, DONE, EVICT, GROW, MOVE = 1, 2, 3, 4, 5, 6, 7      # rank 0's messages
+ADMIT, FILL, ROUND, DONE, EVICT, GROW, MOVE, RESTORE, PERSIST = 1, 2, 3, 4, 5, 6, 7, 8, 9     # rank 0's messages
 FRESH, TAKEOVER, COPY = 0, 1, 2            # how an admitted stream gets its extent (a kept prompt's, or new rows)
 from .serial import PROMPT_ROWS as ROWS
 
@@ -33,6 +33,9 @@ KEEP_MIN = int(os.environ.get("TF_DSV41_KEEP_MIN") or 256)    # shorter states a
 GROW_AHEAD = int(os.environ.get("TF_DSV41_GROW_AHEAD") or 4096)
 RELEASE_AFTER = 4096                       # prompts prefilling more rows than this release cached blocks after
 RELEASE_BELOW = int(float(os.environ.get("TF_DSV41_RELEASE_BELOW_GIB") or 2.5) * 2 ** 30)   # ... when memory is low
+# the NVMe tier (``kvdisk``): a kept state on disk is restored when it covers this many more tokens than the best
+# kept state in the pool (a restore costs the read; fewer tokens prefill about as fast)
+DISK_GAIN = int(os.environ.get("TF_DSV41_DISK_GAIN") or 1024)
 
 
 @dataclass(eq=False)
@@ -51,6 +54,7 @@ class Kept:
     vs: int
     bank: int
     vd: int = 0         # from where every layer's window is exact (vs, or later after early bounded-tail chunks)
+    disk: bytes | None = None   # its key on the NVMe tier once written there or restored from it
 
     @property
     def n(self) -> int:
@@ -95,7 +99,7 @@ class MultiDecoder:
     """The ``tensorfold.cuda.scheduler.Scheduler``'s decoder over ``SerialEngine`` slots (rank 0 or 1 of two)."""
 
     def __init__(self, e: SerialEngine, share: Callable[[list[int] | None], list[int]], *, rank: int,
-                 drafts: int = 3, step: int = MAX_ROWS, pool=None) -> None:
+                 drafts: int = 3, step: int = MAX_ROWS, pool=None, gather=None, disk=None) -> None:
         self.e, self.share, self.rank = e, share, rank
         # the shared cache pool (``pool.Pool``): each admitted stream gets an extent of it, or (None) its slot's
         # fixed extent; a request whose extent does not fit waits (NoRoom) until a stream finishes
@@ -110,6 +114,13 @@ class MultiDecoder:
         self.ext: dict[int, Any] = {}              # sid -> its extent
         self.yielded: list[Stream] = []            # rank 0: background streams giving up their rows (to replay)
         self.kstats = {"kept": 0, "hits": 0, "cached": 0, "takeovers": 0, "copies": 0, "evictions": 0}
+        # kept states spilled to NVMe when dropped and restored when a prompt resumes from one (``kvdisk.KeptDisk``;
+        # both ranks agree on each restore through ``gather``, the engine's synchronous all-gather of ints)
+        self.gather = gather
+        self.disk = disk if disk is not None and gather is not None and self.kept_on else None
+        if self.disk is not None:
+            self.kstats.update({"spills": 0, "spill_mb": 0.0, "spill_ms": 0.0, "disk_hits": 0, "disk_tokens": 0,
+                                "disk_bad": 0, "restore_ms": 0.0})
         self.drafts = drafts if e.drafter is not None else 0
 
         self.check = os.environ.get("TF_MULTI_CHECK") == "1"
@@ -336,6 +347,8 @@ class MultiDecoder:
             size = self._first(s)
             if self.kept_on and s.draft:
                 k, m = self._match(s.prompt)
+                if self.disk is not None:
+                    k, m = self._from_disk(s, size, k, m)
             if k is not None and k.x.owner is None and size - k.x.size <= self.pool.room_after(k.x):
                 mode, base, size = TAKEOVER, k.x.base, max(size, k.x.size)
             else:
@@ -493,16 +506,22 @@ class MultiDecoder:
             if k.ids[0] != p[0]:
                 continue
             m = min(common_prefix(k.ids, p), len(p) - 1, k.n)
-            back = max(0, ROWS + 1 - (len(p) - m))   # a short tail backs up into rows before m (prefill)
-            full = m - back - WINDOW_ROWS >= k.vd
-            # (stale later-layer windows are fine far from the end: the bounded tail recomputes past their reach)
-            early = m <= len(p) - self.e.tail_min and m - WINDOW_ROWS >= k.vs
-            if m < KEEP_MIN or not (full or early):
+            if m < KEEP_MIN or not self._resumable(m, len(p), k.vs, k.vd):
                 continue
             kk = (m, k.x.owner is None, i)
             if key is None or kk > key:
                 best, key = k, kk
         return (best, key[0]) if best is not None else (None, 0)
+
+    def _resumable(self, m: int, plen: int, vs: int, vd: int) -> bool:
+        """Whether a ``plen``-token prompt resumes at m from a state whose rings hold positions from ``vs`` on (every
+        layer's exact from ``vd``): the window before m held (and the rows a short tail backs up into)."""
+
+        back = max(0, ROWS + 1 - (plen - m))     # a short tail backs up into rows before m (prefill)
+        full = m - back - WINDOW_ROWS >= vd
+        # (stale later-layer windows are fine far from the end: the bounded tail recomputes past their reach)
+        early = m <= plen - self.e.tail_min and m - WINDOW_ROWS >= vs
+        return full or early
 
     def _room(self, size: int, protect: list) -> int:
         """Rank 0: a base for a new ``size``-row extent, evicting kept states (least recently used first, none in a
@@ -539,7 +558,7 @@ class MultiDecoder:
             return
         a = np.asarray(ids, dtype=np.int64)
         for k in [k for k in self.kept if k.n == len(a) and np.array_equal(k.ids, a)]:
-            self._drop(k)                          # the same tokens again: the newer state
+            self._drop(k, spill=False)             # the same tokens again: the newer state
         if not self.banks:
             self._drop(self.kept[0])
         bank = self.banks.pop(0)
@@ -550,7 +569,12 @@ class MultiDecoder:
         self.kept.append(k)
         self.kstats["kept"] += 1
 
-    def _drop(self, k: Kept) -> None:
+    def _drop(self, k: Kept, spill: bool = True) -> None:
+        """Kept state ``k`` out of the pool (its rows and bank entry free); written to the NVMe tier first, if any,
+        unless ``spill`` is False (the same state is kept again, or the caches may be broken)."""
+
+        if spill and self.disk is not None:
+            self._spill(k)
         self.kept.remove(k)
         k.x.kept.remove(k)
         self.banks.append(k.bank)
@@ -576,6 +600,112 @@ class MultiDecoder:
         if k is None:
             raise RuntimeError(f"the ranks disagree on the kept prompts (no kept state {kid})")
         return k
+
+    # -- the NVMe tier of kept prompts (``kvdisk``; both ranks make the same calls in the same order) ----------------
+    def _spill(self, k: Kept) -> None:
+        """Kept state ``k`` written to disk before its rows and bank entry are reused (only touched when its key is
+        there already). The disk's index changes the same way on both ranks; a failed write only costs a miss."""
+
+        d = self.disk
+        if k.n < d.min_tokens:
+            return
+        t0 = time.perf_counter()
+        key = k.disk or d.key(k.ids)
+        if d.spill(key, k.n, k.vs, k.vd, k.ids, lambda: self.e.kept_views(k.x.base, k.n, k.bank)):
+            self.kstats["spills"] += 1
+            self.kstats["spill_mb"] += d.index[key].size / 2 ** 20 if key in d.index else 0.0
+            self.kstats["spill_ms"] += 1e3 * (time.perf_counter() - t0)
+        k.disk = key
+
+    def _from_disk(self, s: Stream, size: int, k: Kept | None, m: int) -> tuple[Kept | None, int]:
+        """Rank 0, admitting ``s``: when an entry on disk covers DISK_GAIN more of its prompt than the pool's best
+        kept state ``k`` (m tokens), restore it into a free extent and bank entry (RESTORE sent first; evictions for
+        the room sent as usual, never of ``k``'s extent), then match again: the kept state to resume from."""
+
+        from tensorfold.cuda.memory_gate import NoRoom
+
+        from .kvdisk import key_ints
+        from .pool import align_up
+
+        found = self.disk.find(s.prompt, self._resumable, span=self.e.span, least=KEEP_MIN)
+        if found is None or found[0] < m + DISK_GAIN:
+            return k, m
+        dm, key, ent = found
+        protect = [k.x] if k is not None else []
+        try:
+            base = self._room(max(size, align_up(ent.n)), protect)
+        except NoRoom:
+            return k, m
+        if not self.banks:                         # a bank entry: the least recently used state's outside protect
+            v = next((c for c in self.kept if all(c.x is not y for y in protect)), None)
+            if v is None:
+                return self._match(s.prompt)
+            self._send([EVICT, v.kid])
+            self._drop(v)
+            self.kstats["evictions"] += 1
+        args = [ent.n, base, self.pool.next_eid, self.banks[0], self.next_kid, ent.vs, ent.vd]
+        self._send([RESTORE, *key_ints(key), *args, dm])
+        self._restore(key, *args, prompt=s.prompt, m=dm)
+        return self._match(s.prompt)             # (evictions happened whether or not it was restored)
+
+    def _restore(self, key: bytes, n: int, base: int, eid: int, bank: int, kid: int, vs: int, vd: int,
+                 prompt: list[int] | None = None, m: int = 0) -> None:
+        """Both ranks: disk entry ``key`` (n tokens) into pool rows [base, base + n) and bank entry ``bank`` (both
+        free), kept as ``kid`` in a new extent ``eid`` when both ranks read it whole (rank 0 also checks its first m
+        tokens against ``prompt``); else deleted on both and nothing changes."""
+
+        from .pool import align_up
+
+        t0 = time.perf_counter()
+        ids = None
+        try:                                       # (no exception may skip the agreement: the other rank waits)
+            ids = self.disk.restore(key, n, vs, vd, lambda: self.e.kept_views(base, n, bank))
+            if ids is not None and prompt is not None and not np.array_equal(ids[:m], np.asarray(prompt[:m])):
+                ids = None
+        except Exception as exc:                   # noqa: BLE001
+            print(f"[tensorfold] rank {self.rank}: restoring a kept prompt failed: {exc}", flush=True)
+            ids = None
+        if not all(row[0] for row in self.gather([int(ids is not None)])):
+            self.disk.delete(key)
+            self.kstats["disk_bad"] += 1
+            return
+        try:
+            x = self.pool.add(base, align_up(n), owner=None, eid=eid)
+            self.banks.remove(bank)
+            if kid != self.next_kid:
+                raise RuntimeError(f"the ranks disagree on the kept prompts (kept state {kid}, next {self.next_kid})")
+            self.next_kid += 1
+            k = Kept(kid, x, ids, vs, bank, vd, disk=key)
+            x.kept.append(k)
+            self.kept.append(k)
+            self.disk.touch(key)
+        except Exception as exc:
+            self.broken = exc
+            raise
+        self.kstats["disk_hits"] += 1
+        self.kstats["disk_tokens"] += n
+        self.kstats["restore_ms"] += 1e3 * (time.perf_counter() - t0)
+
+    def _persist(self) -> None:
+        """Both ranks, shutting down: every kept state written to disk (none dropped: nothing runs after this)."""
+
+        for k in list(self.kept):
+            self._spill(k)
+        self.disk.drain()
+
+    def shutdown(self) -> list[Stream]:
+        """Rank 0, on the scheduler's thread when the server stops: the live streams ended, every kept state written
+        to the NVMe tier on both ranks, and rank 1's ``follow`` released. Returns the streams ended."""
+
+        live = [*self.streams.values(), *self.filling]
+        if self.broken is None:
+            self.finish(live)
+            if self.disk is not None:
+                self._send([PERSIST])
+                self._persist()
+                print(f"[tensorfold] kept prompts written to NVMe: {self.disk.describe()}", flush=True)
+            self._send([])
+        return live
 
     def _queue(self, s: Stream, base: int = -1, size: int = -1, eid: int = -1, mode: int = FRESH,
                k: Kept | None = None, m: int = 0) -> None:
@@ -608,7 +738,9 @@ class MultiDecoder:
                 self.kept.remove(k)                # most recently used
                 self.kept.append(k)
                 for c in [c for c in x.kept if c.n > m]:
-                    self._drop(c)                  # rows the stream overwrites (the hit too, its window loaded)
+                    # rows the stream overwrites (the hit too, its window loaded); not spilled when this prompt is
+                    # that state again (a regenerated reply: kept again, the same bytes, at the prompt's end)
+                    self._drop(c, spill=not (c.n == len(s.prompt) and np.array_equal(c.ids, s.prompt)))
                 s.pos = s.cached = m
                 self.kstats["hits"] += 1
                 self.kstats["cached"] += m
@@ -879,7 +1011,7 @@ class MultiDecoder:
         for s in live:
             self._finish(s.sid)
         for k in list(self.kept):
-            self._drop(k)
+            self._drop(k, spill=False)
         if self.broken is None:
             self.broken = RuntimeError("a round failed")
         return live
@@ -924,6 +1056,14 @@ class MultiDecoder:
             elif msg[0] == DONE:
                 for sid in msg[2:2 + msg[1]]:
                     self._finish(sid)
+            elif msg[0] == RESTORE:
+                from .kvdisk import ints_key
+
+                if self.disk is None:
+                    raise RuntimeError("the ranks disagree on the NVMe tier")
+                self._restore(ints_key(msg[1], msg[2]), *msg[3:10])
+            elif msg[0] == PERSIST:
+                self._persist()
 
 
 def stream_stats(s: Stream) -> dict[str, Any]:

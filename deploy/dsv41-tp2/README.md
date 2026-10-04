@@ -28,6 +28,17 @@ and waits for `/health`.
 The containers are not restarted on their own: one rank coming back alone would wait at rendezvous for a peer
 that is not coming. Start and stop both with `make`.
 
+## Kept prompts on NVMe
+
+With `TF_DSV41_DISK=/kvdisk` (and `KV_DISK_DIR`, node-local NVMe, on both nodes; see `.env.example`) a kept prompt
+state the shared pool evicts is written to disk (both ranks, in step) and restored into the pool when a later prompt
+resumes from it: a read of ~75 MB for 32K tokens instead of half a minute of prefill. `make down` ends the live
+streams and writes every kept state first (`STOP_GRACE_S`, 150 s when the tier is on); the next start keeps the
+entries both ranks hold. Entries live in a directory named by a hash of the build (source, model files, knobs,
+libraries, device): a new image starts empty, and the old directories can be deleted. `TF_DSV41_DISK_GIB` (128)
+bounds the space, least recently used first; `TF_DSV41_DISK_MIN` (2048) is the smallest state written;
+`TF_DSV41_DISK_STAGE_MIB` (1024) of pinned memory a rank stage the copies. `/models` may share the NVMe (Engram reads).
+
 ## Watchdog
 
 `watchdog.sh` checks the pair once a minute from a systemd user timer (`make watch-install`; the user must linger

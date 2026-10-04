@@ -112,6 +112,15 @@ def _keep_words() -> list[int]:
     return [KEEP_MIN, int(os.environ.get("TF_DSV41_POOL_KEEP", "1") != "0")]
 
 
+def _disk_words() -> list[int]:
+    """The NVMe tier of kept prompts (``kvdisk``): on, budget, minimum tokens, stage (both ranks' disk indexes change
+    together and the stage is counted before the pool is sized: the ranks must agree)."""
+
+    from .kvdisk import agreement_words
+
+    return agreement_words()
+
+
 def carved_bytes(pool: int, carve: int, ratios: tuple[int, ...] = (2, 2, 2, 1)) -> int:
     """Bytes of compressed-entry planes ``_comp_pools`` places in a ``carve``-byte display carveout for a ``pool``-
     token arena: whole planes (one per kv source, ``pool // ratio + 1`` rows), largest first, while each fits."""
@@ -214,15 +223,24 @@ class Dsv41Engine:
                                     "there (or point TF_DSV41_ENGRAM_DIR at them)")
         self.streams = max(1, int(parallel))
         mine = [cap, int(bool(drafts)), int(explicit), self.streams, int(SHARED_POOL and self.streams > 1),
-                KEPT_ENTRIES, *_widths_words(), *_keep_words()]
+                KEPT_ENTRIES, *_widths_words(), *_keep_words(), *_disk_words()]
         both = self._gather_ints(mine)
         if both[0] != both[1]:
-            raise RuntimeError(f"the two ranks were started with different settings (context, drafts, parallel): "
-                               f"rank 0 {both[0]}, rank 1 {both[1]}; give both the same flags")
+            raise RuntimeError(f"the two ranks were started with different settings (context, drafts, parallel, "
+                               f"TF_DSV41_DISK*): rank 0 {both[0]}, rank 1 {both[1]}; give both the same flags")
         started = time.perf_counter()
         self._boot = [("start", started)]
         w = W.load(self.model_dir, rank=rank, log=lambda *a, **k: None, draft=bool(drafts))
         self._mark("weights")
+        # the NVMe tier of kept prompts (TF_DSV41_DISK; shared pool only): its pinned stage before memory is measured
+        self.disk = None
+        if SHARED_POOL and self.streams > 1 and _keep_words()[1]:
+            from . import kvdisk
+
+            self.disk = kvdisk.from_env(rank)
+        elif rank == 0 and _disk_words()[0]:
+            print("[tensorfold] TF_DSV41_DISK is for kept prompts in the shared pool (--parallel 2 or more, "
+                  "TF_DSV41_POOL_KEEP on): off", flush=True)
         torch.cuda.synchronize()
         torch.cuda.empty_cache()                     # the load's staging buffers back before memory is measured
         # admission, before any cache exists: both ranks' memory decides (a GB10 out of memory can wedge the node)
@@ -332,8 +350,11 @@ class Dsv41Engine:
             from .multi import MultiDecoder
             from .pool import Pool
 
+            if self.disk is not None:
+                self._attach_disk(Path(engram))
             self.multi = MultiDecoder(self.e, self._share, rank=rank, drafts=DRAFTS if drafts else 0,
-                                      pool=Pool(self.e.pool_tokens) if self.shared else None)
+                                      pool=Pool(self.e.pool_tokens) if self.shared else None,
+                                      gather=self._gather_ints, disk=self.disk)
             self.multi.model_dir = self.model_dir
             self.multi.calibrate(self._gather_ints)
             self._mark("calibration")
@@ -350,6 +371,41 @@ class Dsv41Engine:
             marks = self._boot
             print("[boot] " + ", ".join(f"{name} {t - prev:.1f}s" for (_, prev), (name, t) in zip(marks, marks[1:]))
                   + f"; total {marks[-1][1] - marks[0][1]:.1f}s", flush=True)
+
+    def _attach_disk(self, engram: Path) -> None:
+        """Both ranks: this build's directory of the NVMe tier indexed (``reconcile``), the entry layout checked
+        equal, and only the entries both ranks hold kept, in rank 0's order (both indexes the same)."""
+
+        from . import kvdisk
+        from .pool import ALIGN
+
+        d = self.disk
+        t = time.perf_counter()
+        mine = [0, 0, 0]
+        try:                                       # (no exception may skip the gather: the other rank waits)
+            d.attach(kvdisk.compat_ident(self.e, self.model_dir, engram))
+            views = self.e.kept_views(0, ALIGN, 0)
+            mine = [1, sum(kvdisk._nbytes(v) for _, v in views), len(views)]
+        except Exception as exc:                   # noqa: BLE001
+            print(f"[tensorfold] rank {self.rank}: kept prompts on NVMe unavailable: {exc}", flush=True)
+        both = self._gather_ints(mine)
+        if not (both[0][0] and both[1][0]) or both[0] != both[1]:
+            if self.rank == 0:
+                print(f"[tensorfold] kept prompts on NVMe: off (ranks' entry layouts {both})", flush=True)
+            self.disk = None
+            return
+        kvdisk.intersect(d, self._gather_ints)
+        if self.rank == 0:
+            print(f"[tensorfold] {d.describe()}; {len(d.index)} kept on both ranks, ready in "
+                  f"{time.perf_counter() - t:.1f}s", flush=True)
+
+    def stop_serving(self) -> None:
+        """Rank 0, the server stopping (SIGTERM / ``make down``): with the NVMe tier on, the scheduler ends the live
+        streams and both ranks write their kept prompts to disk, then rank 1 leaves ``follow``. Off: nothing (the
+        process exits as before)."""
+
+        if self.scheduler is not None and getattr(self.multi, "disk", None) is not None:
+            self.scheduler.shutdown()
 
     def _mark(self, stage: str) -> None:
         """A startup timeline mark (printed as one [boot] line when ready)."""
