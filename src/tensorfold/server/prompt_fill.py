@@ -23,6 +23,7 @@ class Filling:
     left: int = 0              # prompt tokens not fed yet
     passed: int = 0            # other prompts' chunks since this one's last
     held: Any = None           # its PromptMemory reservation (None: no prompt memory)
+    sample: Any = None         # v1.1 learning window: (active_at_arm, peak) while clean, None once dirty
 
 
 class PromptFill:
@@ -44,6 +45,21 @@ class PromptFill:
         self.starts += 1
         self._starting = job
         filling = Filling(job, left=len(job.prompt_ids))
+        # v1.1 learning: arm a sampling window when this fill opens SOLO (no other
+        # fill) and the engine has no live decode — the only window whose peak is
+        # attributable to one prompt (GLM review F1/F3: concurrent fills share the
+        # process-global peak counter; decode rounds allocate GiB-scale transients).
+        # Any later overlap/preemption marks the window dirty (sample=None) and the
+        # fill contributes nothing. Flag-off: never armed, never reset (K3 OQ5:
+        # flag-off means zero peak-counter touches in the fill path).
+        if (self.learn and len(self._fills) == 0
+                and getattr(self.engine, "active_count", 0) == 0):
+            try:
+                import mlx.core as mx
+                filling.sample = [int(mx.get_active_memory()), None]   # [active_at_arm, peak]
+                mx.reset_peak_memory()
+            except Exception:
+                filling.sample = None          # counters unavailable: learn nothing, run normally
         try:
             job.cancellation.check()
             memory = self.prompt_memory
@@ -66,6 +82,11 @@ class PromptFill:
             self._end_fill(filling, exc)
             return None
         self._fills.append(filling)
+        # v1.1: a second fill opening marks every existing sampling window dirty
+        # (the global peak counter now sees two prompts' work)
+        if self.learn:
+            for other in self._fills[:-1]:
+                other.sample = None
         return filling
 
     def _start_fill(self, filling: Filling) -> None:
@@ -188,6 +209,10 @@ class PromptFill:
         if abort is None:
             for other in self._fills:
                 other.passed = 0 if other is filling else other.passed + 1
+        # v1.1 learning: another fill opened mid-window (or this fill was wide/aborted
+        # beside others) -> the window saw GPU work that isn't this prompt's: dirty.
+        if filling.sample is not None and len(self._fills) > 1:
+            filling.sample = None
         # a debt of the last round carries over, an unspent credit does not
         self._credit = min(self._credit, 0.0) + self.decode_share * (self.clock() - started)
         self._rounds_left = self.fill_rounds
@@ -197,6 +222,30 @@ class PromptFill:
 
         if filling in self._fills:
             self._fills.remove(filling)
+        # v1.1 learning: a clean solo window's peak becomes a ladder rung. Read AFTER
+        # the fill's chunks are materialized (they are: StopIteration means the prefill
+        # generator completed its evals) and before any next dispatch. Normalized to
+        # the boot floor: rung = peak − active_at_arm + active_floor, so resident KV
+        # and round transients shared with the process don't inflate the rung.
+        sample = filling.sample
+        filling.sample = None
+        if sample is not None and error is None:
+            try:
+                import mlx.core as mx
+                active_now = int(mx.get_active_memory())
+                env_mem = getattr(getattr(self.admission, "memory", None), "_envelope", None)
+                if env_mem is not None and env_mem.learning:
+                    active_floor = int(getattr(env_mem, "active_floor", 0) or 0)
+                    workspace = max(0, int(mx.get_peak_memory()) - sample[0] + active_floor)
+                    peak_gib = workspace / 1024**3
+                    cached = int(getattr(filling.job, "cached_tokens", 0) or 0)
+                    accepted = env_mem.observe(len(filling.job.prompt_ids), workspace,
+                                               cached_tokens=cached)
+                    print(f"[tensorfold] envelope sample: prompt={len(filling.job.prompt_ids)} "
+                          f"workspace={peak_gib:.2f} GiB cached={cached} "
+                          f"inserted={'yes' if accepted else 'no'}", flush=True)
+            except Exception:
+                pass                              # learning never takes the fill down
         job, shared_at = filling.job, filling.shared_at
         try:
             if error is not None:

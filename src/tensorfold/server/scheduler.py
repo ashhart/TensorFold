@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import heapq
 import itertools
+import os
 from pathlib import Path
 import queue
 import threading
@@ -138,6 +139,11 @@ class Scheduler(PromptFill):
         self.checkpoints = checkpoints
         self.prompt_memory = prompt_memory
         self.proposer_factory = proposer_factory
+        # v1.1 learning: solo-fill sampling windows (admission.py hard-failed unless
+        # ENVELOPE is on; the switch itself rides the admission's envelope memory)
+        self.learn = bool(admission is not None and admission.memory is not None
+                          and getattr(admission.memory, "_envelope", None) is not None
+                          and os.environ.get("TF_ADMISSION_LEARN") == "1")
         self.idle_wait = float(idle_wait)
         self.slow_round_ms = 1000.0
         self._held: ChatJob | None = None

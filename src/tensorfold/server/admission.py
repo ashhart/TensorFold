@@ -105,6 +105,11 @@ def concurrency(engine: Any, prompt_memory: Any, fraction: float, lanes: int, re
             stream = _build_envelope_stream(engine, stream, envelope_seeds)
             if _learn_enabled():
                 stream._envelope.learning = True  # solo-fill rung insertion (v1.1)
+                try:
+                    import mlx.core as mx
+                    stream._envelope.active_floor = int(mx.get_active_memory())
+                except Exception:
+                    stream._envelope.active_floor = 0
     else:
         stream = memory.measure(engine)          # the shipped call, unchanged
     getattr(engine, "release_rounds", lambda: None)()     # the probe round's rollback rows: no stream's

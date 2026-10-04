@@ -63,6 +63,7 @@ switch=None: one ladder; int switch: pre/post ladders (a declared regime)."""
         self._last: dict[int, float] = {}
         self._clock = time.monotonic
         self.learning = False                     # v1.1: set by admission when TF_ADMISSION_LEARN=1
+        self.active_floor = 0                     # v1.1: process active memory at boot (sample normalization)
         self.stats = {"accepted": 0, "warm_rejected": 0, "outlier_rejected": 0,
                       "outlier_confirmed": 0, "poison_low_ignored": 0,
                       "underpriced_events": 0}
