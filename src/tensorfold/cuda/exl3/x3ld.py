@@ -5,9 +5,11 @@
 weight loads, the same Z (each output element's warp K range, mma chain and warp sum order are upstream's; only when
 the bytes arrive changes).
 
-``TF_EXPERT_LOADS=1``        routed layers' two grouped launches (gate/up, down) run ``ld_kernel`` where it fits.
-``TF_EXPERT_LOADS_CFG``      "nt,pd" for both or "nt,pd/nt,pd" (gate/up, down), default "8,1"; nt column tiles a
-                             program, pd k steps in flight a warp. Every setting places work only.
+``TF_EXPERT_LOADS``          routed layers' two grouped launches (gate/up, down) run ``ld_kernel`` where it fits
+                             (default 1; 0: upstream's kernel).
+``TF_EXPERT_LOADS_CFG``      "nt,pd" for both or "nt,pd/nt,pd" (gate/up, down), default "4,2" (DeepSeek-V4.1 on
+                             GB10: 16 clients 122.8 -> 128.2 tok/s, serial +2.7%); nt column tiles a program, pd k
+                             steps in flight a warp. Every setting places work only.
 """
 
 from __future__ import annotations
@@ -29,9 +31,9 @@ def _cfg(text: str) -> tuple[int, int]:
 
 def _parse() -> dict:
     raw = os.environ.get("TF_EXPERT_LOADS_CFG", "").strip()
-    halves = raw.split("/") if raw else ["8,1"]
+    halves = raw.split("/") if raw else ["4,2"]
     gu = _cfg(halves[0])
-    return {"on": os.environ.get("TF_EXPERT_LOADS", "0") == "1", "gu": gu,
+    return {"on": os.environ.get("TF_EXPERT_LOADS", "1") != "0", "gu": gu,
             "dn": _cfg(halves[1]) if len(halves) > 1 else gu}
 
 

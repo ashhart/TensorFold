@@ -724,6 +724,49 @@ def l2_prefetch(table: tuple[torch.Tensor, torch.Tensor], programs: int = 48) ->
 
 
 @triton.jit
+def _l2_bulk(ADDR, BYTES, n, CHUNK: tl.constexpr, B: tl.constexpr):
+    """One cp.async.bulk.prefetch.L2 a CHUNK-byte piece of regions (ADDR[j], BYTES[j]): the SM's bulk-copy unit streams
+    them into L2 with no registers or data returned (measured on GB10: a 12-20 MB read 1.4-1.5x faster right after;
+    prefetch.global.L2 lines are dropped). Writes nothing. After Jay Leaton's l2pf.cu (MIT)."""
+
+    pid = tl.program_id(0)
+    npg = tl.num_programs(0)
+    for j in range(n):
+        base = tl.load(ADDR + j)
+        size = tl.load(BYTES + j)
+        pieces = (size + CHUNK - 1) // CHUNK
+        for i0 in range(pid * B, pieces, npg * B):
+            i = i0 + tl.arange(0, B)
+            off = i.to(tl.int64) * CHUNK
+            left = tl.minimum(size - off, CHUNK).to(tl.int32)
+            ok = i < pieces
+            a = tl.where(ok, base + off, base)
+            m = tl.where(ok, left, 16)
+            tl.inline_asm_elementwise("cp.async.bulk.prefetch.L2.global [$1], $2; mov.u32 $0, 0;", "=r,l,r", [a, m],
+                                      dtype=tl.int32, is_pure=False, pack=1)
+
+
+def bulk_table(tensors: list[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+    """(addresses, bytes) of tensors' storage for ``l2_bulk``: 16-byte aligned starts, sizes a multiple of 16."""
+
+    dev = tensors[0].device
+    addr, size = [], []
+    for t in tensors:
+        a = t.data_ptr()
+        lead = -a % 16
+        n = (t.numel() * t.element_size() - lead) // 16 * 16
+        if n > 0:
+            addr.append(a + lead)
+            size.append(n)
+    return (torch.tensor(addr, dtype=torch.int64, device=dev), torch.tensor(size, dtype=torch.int64, device=dev))
+
+
+def l2_bulk(table: tuple[torch.Tensor, torch.Tensor], programs: int = 2) -> None:
+    addr, size = table
+    _l2_bulk[(programs,)](addr, size, addr.numel(), CHUNK=32768, B=128, num_warps=4)
+
+
+@triton.jit
 def _await_rows(FLAG, SEEN, SRC, DST, ERR, n, B: tl.constexpr, SPIN: tl.constexpr):
     """Wait until the host's flag passes this graph's counter (``SEEN`` + 1), then copy ``n`` int32 words of rows from
     pinned host memory into the graph's buffer. ``ERR`` (pinned) <- 1 when the host never published (a bounded wait)."""

@@ -121,7 +121,11 @@ class Caches:
 SKIP_READS = os.environ.get("TF_SKIP_READS") == "1"   # timing experiments: stale Engram rows (wrong output)
 # decode / verify: while an all-gather waits on the other rank, a side stream warms L2 with the weights read next
 # (the router and shared expert before the MoE, the next layer's first projections before its attention)
-L2_PREFETCH = os.environ.get("TF_L2_PREFETCH") == "1"
+L2_PREFETCH = os.environ.get("TF_L2_PREFETCH") in ("1", "bulk")
+# "bulk": the three sites (the MoE's router + shared expert during the attention's gather, the next layer's wq_a /
+# wkv during the MoE's, wo_a during the attention core) with cp.async.bulk.prefetch.L2 (kernels.l2_bulk), which holds
+# no SM for the transfer; "1": the older evict-last loads (measured no gain)
+L2_BULK = os.environ.get("TF_L2_PREFETCH") == "bulk"
 PF_WOA = os.environ.get("TF_PF_WOA") == "1"            # (experiment) wo_a weights into L2 during the attention core   # measured: no gain at one row (and idle gaps before the gather)
 SKIP_SHARED = os.environ.get("TF_SKIP_SHARED") == "1"
 PF_PROGRAMS = int(os.environ.get("TF_PF_PROGRAMS") or 4)
@@ -415,19 +419,24 @@ class SerialEngine:
         self.hcbuf = hcf.HCBuffers(MAX_ROWS, c.hidden_size, device=self.dev)
         self.par = Par()
         self._pf_stream, self._pf_moe, self._pf_attn, self._pf_woa = None, {}, {}, {}
-        if PF_WOA:
+        table = K.bulk_table if L2_BULK else K.prefetch_table
+        if PF_WOA or L2_BULK:
             self._pf_stream = torch.cuda.Stream()
             for lw in w.layers:
                 if lw.attn.wo_a_grouped is not None:
-                    self._pf_woa[lw.index] = K.prefetch_table([lw.attn.wo_a_grouped.words])
+                    g = lw.attn.wo_a_grouped
+                    self._pf_woa[lw.index] = table([g.suh, g.svh, g.words] if L2_BULK else [g.words])
         if L2_PREFETCH and comm.world > 1:
             self._pf_stream = torch.cuda.Stream()
             for i, lw in enumerate(w.layers):
                 m = lw.moe
-                self._pf_moe[lw.index] = K.prefetch_table([m.gate, m.shared[0].words, m.shared[1].words])
+                sh = [t for lin in m.shared[:2] for t in (lin.suh, lin.svh, lin.words)] if L2_BULK else \
+                    [m.shared[0].words, m.shared[1].words]
+                self._pf_moe[lw.index] = table([m.gate, *sh])
                 if i + 1 < len(w.layers):
                     a = w.layers[i + 1].attn
-                    self._pf_attn[lw.index] = K.prefetch_table([a.wq_a.words, a.wkv.words])
+                    self._pf_attn[lw.index] = table([a.wq_a.suh, a.wq_a.words, a.wkv.suh, a.wkv.words] if L2_BULK
+                                                    else [a.wq_a.words, a.wkv.words])
         self._rp = RoundProfile() if os.environ.get("TF_ROUND_PROF") else None
         self.pool = None                                            # tensorfold.cuda.kv_pool.PrefixPool, when kept
         self.state = None
@@ -1299,6 +1308,8 @@ class SerialEngine:
 
         if R <= PROMPT_ROWS:                                            # independent: q, window KV, compressor
             (qr, q), _, _ = self.par(q_branch, kv_branch, comp_branch)
+            if L2_BULK and L in self._pf_woa:
+                self._prefetch(self._pf_woa[L])                         # wo_a streams in during selection + core
         else:
             qr, q = q_branch()
             kv_branch()
@@ -1313,7 +1324,7 @@ class SerialEngine:
             if static:                                                  # entries of the row's stream
                 comp = self.big.comp[src]
                 idx = torch.where(idx >= 0, idx + self._ebase(src).int()[:, None], idx)
-        if R <= PROMPT_ROWS and L in self._pf_woa:
+        if R <= PROMPT_ROWS and L in self._pf_woa and not L2_BULK:
             self._prefetch(self._pf_woa[L], programs=PF_PROGRAMS)  # wo_a streams in while the attention core runs
         if static:
             o = K.mqa(q, comp, idx, self.big.swa[L], pos, a.sink, W, self.attnbuf, Dh ** -0.5, cos, sin,
@@ -1428,7 +1439,10 @@ class SerialEngine:
         main, side = torch.cuda.current_stream(), self._pf_stream
         side.wait_stream(main)
         with torch.cuda.stream(side):
-            K.l2_prefetch(table, programs)
+            if L2_BULK:
+                K.l2_bulk(table)
+            else:
+                K.l2_prefetch(table, programs)
         self._pf_live = True
 
     def _join(self) -> None:
