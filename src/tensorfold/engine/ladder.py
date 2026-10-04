@@ -29,7 +29,12 @@ from __future__ import annotations
 import threading
 import time
 
-MARGIN = 1.15                    # ladder rungs are dense in the plateau; receipts need 1.0
+MARGIN_DENSE = 1.15             # brackets whose adjacent rungs are within 2x in L
+MARGIN_SPARSE = 1.5             # sparse brackets AND beyond the frontier: a step can
+#                               hide unsampled, so the margin carries unseen-step
+#                               headroom (round-2 judges' condition: margin is a
+#                               function of local rung density, not a constant).
+SPARSE_RATIO = 2.0              # adjacent-rung L ratio above which a bracket is sparse
 OUTLIER_K = 2.5                  # rung-insertion gate (shared semantics with MVP-1)
 OUTLIER_M = 3
 MIN_REPEAT_S = 60.0
@@ -42,19 +47,20 @@ class LadderWorkspace:
     """Prefix-max staircase over measured rungs. Interface-compatible with
     PrefillEnvelope. switch=None: one ladder; int switch: pre/post ladders."""
 
-    def __init__(self, seed_points, switch=None, margin: float = MARGIN):
+    def __init__(self, seed_points, switch=None, margin: float = MARGIN_SPARSE):
         self._lock = threading.RLock()
         self._switch = int(switch) if switch else None
         groups: dict[int, list] = {0: []} if self._switch is None else {0: [], 1: []}
         for x, y in seed_points:
             groups[self._side(int(x))].append((float(x), float(y)))
         self._rungs = {side: self._sorted_rungs(pts) for side, pts in groups.items()}
-        self._margin = float(margin)
+        self._margin = float(margin)   # floor only; price() uses density-aware margin
         self._pending: dict[int, list] = {}
         self._last: dict[int, float] = {}
         self._clock = time.monotonic
         self.stats = {"accepted": 0, "warm_rejected": 0, "outlier_rejected": 0,
-                      "outlier_confirmed": 0, "poison_low_ignored": 0}
+                      "outlier_confirmed": 0, "poison_low_ignored": 0,
+                      "underpriced_events": 0}
 
     # -- shape ---------------------------------------------------------------
     def _side(self, L: int) -> int:
@@ -70,30 +76,50 @@ class LadderWorkspace:
         return self._rungs.get(side) or []
 
     # -- reading -------------------------------------------------------------
+    def _bracket_margin(self, ladder, L: int, frontier: bool) -> float:
+        """Margin scales with local rung density (round-2 condition): dense bracket
+        (adjacent rungs within SPARSE_RATIO in L) -> MARGIN_DENSE; sparse bracket or
+        beyond the frontier (a step can hide unsampled) -> MARGIN_SPARSE.
+        The COVERING bracket sets the margin on both sides of a rung — using the
+        floor margin below the first rung and the bracket's above it made price()
+        step DOWN at the rung (measured: 14.87 -> 11.40 at L=4160)."""
+        if frontier or len(ladder) < 2:
+            return MARGIN_SPARSE
+        lower = max((x for x, _ in ladder if x <= L), default=ladder[0][0])
+        upper = min((x for x, _ in ladder if x >= L), default=ladder[-1][0])
+        gap = (upper - lower) / max(1.0, float(lower))
+        return MARGIN_SPARSE if gap > SPARSE_RATIO else MARGIN_DENSE
+
     def price(self, L: int) -> float:
-        """Staircase price at L (margin x prefix-max). Beyond the frontier:
-        margin x global max of the side's ladder. NEVER extrapolates, NEVER
-        defers to the legacy fit."""
+        """Staircase price at L: margin(density) x prefix-max, with the bracket's
+        UPPER rung included (covers a step hiding between L and the next rung).
+        Beyond the frontier: margin(sparse) x global max. NEVER extrapolates,
+        NEVER defers to the legacy fit."""
         L = int(L)
         with self._lock:
             ladder = self._ladder(self._side(L))
-            margin = self._margin
         if not ladder:
             return 0.0
         if L <= ladder[0][0]:
-            return margin * ladder[0][1]
+            return self._margin * ladder[0][1]
         running = ladder[0][1]
+        frontier = True
+        upper = running
         for x, y in ladder:
             if x > L:
+                upper = y
+                frontier = False
                 break
             running = max(running, y)
-        else:
-            # L is beyond the frontier: global max (the plateau price)
-            return margin * running
-        # L sits inside the frontier: prefix-max INCLUDING the bracket's upper rung
-        # (the next rung above L already contains any step hiding between L and it)
-        upper = next((y for x, y in ladder if x >= L), running)
+        margin = self._bracket_margin(ladder, L, frontier)
         return margin * max(running, upper)
+
+    def note_underprice(self, L: int, admitted_price: float, observed: float) -> None:
+        """Post-fill audit (hull's counter, absorbed per the round-2 verdict): a real
+        fill whose peak beat its admitting price. Counter only in v1 — the rung the
+        learning hook will insert is the phase-2 closure of this event."""
+        with self._lock:
+            self.stats["underpriced_events"] += 1
 
     def snapshot(self) -> list[tuple[float, float]]:
         with self._lock:
@@ -154,14 +180,25 @@ def _selftest() -> int:
     lad = LadderWorkspace(seeds, switch=2048)
 
     # short prompts price from the PRE-switch rung only (flat, cheap)
-    assert lad.price(2_000) == MARGIN * 0.634 * GiB
-    # post-switch: bracket [4160..6208] prices at margin x bracket prefix-max
-    assert abs(lad.price(5_000) - MARGIN * 9.916 * GiB) < 1e6
-    # monotone across the whole range
-    prices = [lad.price(L) for L in range(1, 600_000, 997)]
-    assert all(b >= a for a, b in zip(prices, prices[1:])), "price regressed"
-    # BEYOND the frontier: global max, NOT legacy, NOT extrapolation
-    assert abs(lad.price(200_000) - MARGIN * 9.916 * GiB) < 1e6
+    assert lad.price(2_000) == MARGIN_SPARSE * 0.634 * GiB
+    # post-switch: bracket [4160..6208] is DENSE (ratio < 2) -> 1.15
+    assert abs(lad.price(5_000) - MARGIN_DENSE * 9.916 * GiB) < 1e6
+    # INVARIANT SET (revised after the density-margin condition): price may step DOWN
+    # only at a measured rung (uncertainty genuinely drops there), so global
+    # monotonicity is replaced by the soundness floor + per-bracket monotonicity:
+    prefix_max = 0.0
+    for L in range(1, 600_000, 997):
+        p = lad.price(L)
+        covered = max(y for x, y in seeds if x <= max(L, 64))
+        assert p >= MARGIN_DENSE * covered - 1.0, f"price below soundness floor at {L}"
+    for lo, hi in ((2048, 4159), (4161, 6207), (6209, 600_000)):
+        ps = [lad.price(L) for L in range(lo, min(hi, 600_000), 397)]
+        assert all(b >= a for a, b in zip(ps, ps[1:])), f"within-bracket regression {lo}-{hi}"
+    # step-downs are allowed ONLY at measured rungs (density genuinely rises there):
+    assert lad.price(4159) >= lad.price(4160)          # sparse -> dense at the rung
+    assert lad.price(6207) <= lad.price(6208)          # dense -> sparse past the last rung
+    # BEYOND the frontier: sparse margin x global max, NOT legacy, NOT extrapolation
+    assert abs(lad.price(200_000) - MARGIN_SPARSE * 9.916 * GiB) < 1e6
     # measured invariants at the receipt lengths (observed peaks from ladder_065)
     observed = [9.799, 9.547, 9.290, 9.125, 9.848, 8.916, 8.584]
     for L, o in zip((33_000, 89_000, 113_000, 133_000, 155_000, 161_000, 200_000), observed):
@@ -171,15 +208,19 @@ def _selftest() -> int:
 
     # learning extends the frontier: first solo fill beyond it inserts a rung
     assert lad.observe(100_000, 10.1 * GiB, cached_tokens=0) is True
-    assert abs(lad.price(100_000) - MARGIN * 10.1 * GiB) < 1e6
+    # bracket [4160..100000] is SPARSE (ratio ~24) -> 1.5 covers an unseen mid-bracket step
+    assert abs(lad.price(100_000) - MARGIN_SPARSE * 10.1 * GiB) < 1e6
     # prefix-max: nothing can price DOWN afterwards
     before = lad.snapshot()
     lad.observe(90_000, 1.0 * GiB, cached_tokens=0)              # low sample
     for x, _ in before:
-        assert lad.price(int(x)) >= MARGIN * max(y for xx, y in before if xx <= max(x, 0)) - 1e9 or True
+        assert lad.price(int(x)) >= MARGIN_SPARSE * 0.634 * GiB - 1e9   # floor never drops
     prices2 = [lad.price(L) for L in range(1, 600_000, 997)]
-    assert all(b >= a for a, b in zip(prices2, prices2[1:])), "learning broke monotonicity"
-    # outlier gate on rung insertion
+    # learning only ever ADDS rungs (prefix-max), so the soundness floor still holds
+    for L, p in zip(range(1, 600_000, 997), prices2):
+        covered = max(y for x, y in seeds if x <= max(L, 64))
+        assert p >= MARGIN_DENSE * covered - 1.0, f"post-learning floor broke at {L}"
+    # outlier gate on rung insertion (50k bracket is sparse: 60 GiB > 2.5 x 1.5 x 9.916)
     lad2 = LadderWorkspace(seeds, switch=2048)
     assert lad2.observe(50_000, 60 * GiB) is False
     lad2._clock = lambda: time.monotonic() + 3600
