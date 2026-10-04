@@ -6,6 +6,7 @@ import torch
 
 from tensorfold.cuda.kernels import gdn
 from tensorfold.cuda.logprobs import capture
+from tensorfold.cuda.memory_gate import NoRoom
 from tensorfold.cuda.streams import Stream, accept
 
 from .decode import Engine, draft
@@ -25,6 +26,7 @@ def solo(w, st, capacity, depth, pbuf):
     e.buf = Buffers(w, rows, capacity, moe_prefill=True)       # the serial engine and shared rounds use these bits
     e.mbuf, e.pbuf = Buffers(w, rows, capacity), pbuf
     e.graphs = Graphs(e, max_rows=rows)
+    e.slot_graphs = {id(st): e.graphs}         # each slot's graphs, kept until that slot is resized
     return e
 
 
@@ -32,10 +34,23 @@ class Alone:
     def _state_changed(self, st) -> None:
         """Drop graphs before reallocating a slot: graph pointers must never outlive its cache geometry."""
 
-        if not self.planning and self.solo is not None and st is self.solo.st:
-            from .graphs import Graphs
+        if self.planning or self.solo is None:
+            return
+        vars(self.solo).setdefault("slot_graphs", {}).pop(id(st), None)
+        if st is self.solo.st:
+            self._graphs_to(st)
 
-            self.solo.graphs = Graphs(self.solo, max_rows=self.solo.rows)
+    def _graphs_to(self, st) -> None:
+        """Make ``st`` the graph slot, with the graphs it captured before unless it was resized since."""
+
+        from .graphs import Graphs
+
+        self.solo.st = st
+        kept = vars(self.solo).setdefault("slot_graphs", {})
+        graphs = kept.get(id(st))
+        if graphs is None:
+            graphs = kept[id(st)] = Graphs(self.solo, max_rows=self.solo.rows)
+        self.solo.graphs = graphs
 
     def _flush(self, s) -> None:
         """Materialize the shared round's deferred recurrent rows before a graph reads or copies the slot."""
@@ -70,6 +85,7 @@ class Alone:
             need = spare.cache_bytes(size) - spare.cache_bytes() + spare.layer_bytes(size)
             if not self.memory_gate.fits(need):
                 return False
+            self._state_changed(spare)
             self.memory_gate.take(spare.resize(size))
         spare.copy_from(target)
         self.free = [f for f in self.free if f is not spare]
@@ -78,23 +94,47 @@ class Alone:
             self.actions.append(["kept", self._index(target), self._index(spare)])
         return True
 
+    def _hand_over(self, st) -> bool:
+        """A fresh prompt takes the idle graph slot when its kept ends can move to a spare (``st`` at the latest)."""
+
+        slot = None if self.solo is None else self.solo.st
+        if (slot is None or st is slot or self.w.comm is not None or id(slot) in self._busy()
+                or not any(k[1] is slot for k in self.kept)):
+            return False
+        self.free.append(st)
+        if self._relocate_kept(slot, None):
+            return True
+        self.free = [f for f in self.free if f is not st]
+        return False
+
     def _move_to_solo(self, s) -> None:
         """Copy a lone stream into the graph slot after committing its pending rows and matching cache sizes."""
 
         target, old = self.solo.st, s.st
         self._flush(s)
         if any(k[1] is target for k in self.kept) and not self._relocate_kept(target, old):
-            self.solo.st = old                   # preserve both prefix chains instead of evicting a kept slot
-            if self.planning:
+            if self.planning:                    # preserve both prefix chains instead of evicting a kept slot
+                self.solo.st = old
                 self.actions.append(["solo", self._index(old)])
             else:
-                self._state_changed(old)
+                self._graphs_to(old)
             return
         self._drop_kept(target)
         self.free = [f for f in self.free if f is not target]
         self._shrink(target)
-        if not self._grow(target, old.capacity, alone=True):
-            raise RuntimeError("the lone stream's graph slot cannot hold its existing cache")
+        try:
+            grown = self._grow(target, old.capacity, alone=True)
+        except NoRoom:
+            if self.planning or self.w.comm is not None:
+                raise
+            grown = False
+        if not grown:
+            if self.planning or self.w.comm is not None:
+                raise RuntimeError("the lone stream's graph slot cannot hold its existing cache")
+            self._graphs_to(old)                 # no room for the copy's peak: the graphs go to the stream instead
+            self._shrink(target)
+            self.free.append(target)
+            return
         target.copy_from(old)
         s.st = target
         if not any(k[1] is old for k in self.kept) and all(f is not old for f in self.free):

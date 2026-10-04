@@ -211,7 +211,10 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
 
         if self.solo is not None and any(st is self.solo.st for st in self.free):
             self.free = [st for st in self.free if st is not self.solo.st] + [self.solo.st]
-        return prefixes.slot_for(self, prompt, reuse)
+        st, resume, n = prefixes.slot_for(self, prompt, reuse)
+        if resume is None and self.solo is not None and self._hand_over(st):
+            return self.solo.st, None, 0
+        return st, resume, n
 
     def _remember(self, ids: list[int], st: State, snap: dict, tail) -> None:
         prefixes.remember(self, ids, st, snap, tail)
