@@ -24,6 +24,14 @@ import torch
 import test_glm_moe_dsa_multi as base
 from threadcomm import run_ranks
 
+
+@pytest.fixture(autouse=True)
+def _prompt_rows_4096(monkeypatch):
+    """Four rank threads share one GPU here: 8192-row prompt buffers four times over exhaust a 128 GB node."""
+    from tensorfold.families.glm_moe_dsa.cuda import runner
+
+    monkeypatch.setattr(runner, "PROMPT_ROWS", min(runner.PROMPT_ROWS, 4096))
+
 DFLASH = os.environ.get("TF_GLM53_DFLASH_TEST", "")
 pytestmark = [pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA"),
               pytest.mark.skipif(not base.CKPT, reason="set TF_GLM53_CKPT to a GLM-5.3 EXL3 checkpoint"),

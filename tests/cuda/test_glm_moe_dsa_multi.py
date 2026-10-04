@@ -23,6 +23,15 @@ pytestmark = [pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CU
 
 from threadcomm import run_ranks  # noqa: E402
 
+
+@pytest.fixture(autouse=True)
+def _prompt_rows_4096(monkeypatch):
+    """Four rank threads share one GPU here: 8192-row prompt buffers (the serving default, one rank a GPU) four times
+    over exhausted a 128 GB node; these prompts need no more than 4096-row chunks."""
+    from tensorfold.families.glm_moe_dsa.cuda import runner
+
+    monkeypatch.setattr(runner, "PROMPT_ROWS", min(runner.PROMPT_ROWS, 4096))
+
 LAYERS = (0, 1, 2, 3)
 CAPACITY = 2400                      # per stream: room for a prompt past index_topk (2048) and its reply
 K = 2                                # MTP drafts: 4 streams x 3 rows = 12 rows a window
