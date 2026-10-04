@@ -105,6 +105,7 @@ class Step:
                                  ikc.data_ptr(), pooled.data_ptr()]
         dev = w.device
         ints = shared.to_device(np.concatenate([posr, sid, first, counts]).tolist(), torch.int32, dev)
+        self.ints = ints
         self.posr, self.sid = ints[:rows], ints[rows:2 * rows]
         self.first, self.counts = ints[2 * rows:2 * rows + n], ints[2 * rows + n:]
         self.ptrs = shared.to_device(ptrs.ravel().tolist(), torch.int64, dev).view(len(layers), PTRS * n)
