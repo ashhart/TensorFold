@@ -3,6 +3,17 @@
 `tensorfold update` prints the sections below that are newer than the version you had. Each release's page on
 GitHub has the full notes and the measurements behind them.
 
+## Unreleased
+
+- **CUDA memory budgets keep a reserve, sized by an environment variable.** With `TENSORFOLD_MEMORY_RESERVE_GIB`
+  unset, admission grants free GPU memory less a reserve of max(4 GiB, a tenth of VRAM), bounded by available
+  host RAM less the same reserve on a unified GPU. The variable sets that reserve in GiB (at least 2 GiB).
+  `TENSORFOLD_CUDA_MEMORY_LIMIT_GB` is a hard override: it names the allocator's budget in GiB, above or below
+  free memory; no reserve is subtracted, the estimate takes the CUDA context, its kernels and streams (about
+  2 GiB) out, and the request caches claim the line's GiB at startup. Startup refusals print the budget.
+- **Nemotron-H workspace estimates** account for the lazy serial engine and all snapshot state while charging
+  the draft head's tiled rows and construction transient instead of 24 bytes per vocabulary weight.
+
 ## 0.6.5 (3 Oct 2026)
 
 - **Qwen3.6-35B-A3B drafts with its own MTP layer on Macs,** as on CUDA. Chains of up to four drafts are verified in

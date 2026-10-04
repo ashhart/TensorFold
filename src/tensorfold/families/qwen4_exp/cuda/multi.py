@@ -7,27 +7,34 @@ import time
 import numpy as np
 import torch
 
+from tensorfold.cuda.capacity import LIMIT_ENV, available_bytes, cuda_limit_bytes, cuda_tensor_budget
 from tensorfold.cuda.logprobs import capture
-
-from tensorfold.cuda.capacity import LIMIT_ENV, available_bytes, cuda_limit_bytes
-from tensorfold.cuda.memory_gate import MemoryGate, NoRoom, torch_live
 from tensorfold.cuda.markers import MIN_GAP
+from tensorfold.cuda.memory_gate import MemoryGate, NoRoom, torch_live
 from tensorfold.cuda.sampling import sample_streams
 from tensorfold.cuda.streams import Stream, accept
 from tensorfold.engine.exact_sampling import MARGIN, choose_rows
 from tensorfold.engine.grammar import GrammarError
 
-from .decode import (PREFILL_ROWS, WARM_TAIL, Engine, _gathered_fits, choose_gathered_streams,
-                     entry_end, prefill_begin, tp_sample_rows)
+from ..cuda import CONFIDENCE, DEPTH
 from . import attn_multi, gdn_multi, image_rows, prefixes
+from .decode import (
+    PREFILL_ROWS,
+    WARM_TAIL,
+    Engine,
+    _gathered_fits,
+    choose_gathered_streams,
+    entry_end,
+    prefill_begin,
+    tp_sample_rows,
+)
 from .forward import commit, compute, compute_mixed, converges, stage
 from .mtp import mtp_compute, mtp_stage
-from .state import Buffers, State
+from .multi_fill import PromptPasses
 from .multi_solo import Alone, solo
-from .multi_fill import FILL_GUARD, PASS_MIN, PromptPasses
 from .multi_tp import Link as Link
 from .multi_tp import OutOfStep, TwoRanks
-from ..cuda import CONFIDENCE, DEPTH
+from .state import Buffers, State
 
 FIRST, STEP = 256, 8192          # rows an idle slot keeps; rows a stream's caches grow by at a time
 GIB = 1024**3
@@ -110,18 +117,20 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
         while not self.memory_gate.fits(grow + st.layer_bytes(size)):     # a layer's old buffers stay until its copy
             if not self._evict_kept(st, protect=protect):
                 if alone:
-                    limit = cuda_limit_bytes() if torch.cuda.is_available() else None
-                    if limit is not None:
+                    budget = cuda_tensor_budget() if torch.cuda.is_available() else None
+                    if budget is not None:
                         # A lone stream may use its startup reserve without exceeding the copy peak cap.
                         peak = int(torch.cuda.memory_allocated()) + grow + st.layer_bytes(st.capacity)
-                        if peak > limit:
+                        if peak > budget:
                             if self.filling:
                                 return False             # a filling request can finish and release its slot
                             raise NoRoom(
-                                f"Growing this request's attention caches to {size} tokens would exceed "
-                                f"{LIMIT_ENV}={limit / GIB:g}: the estimated copy peak is {peak / GIB:.2f} GiB. "
-                                "Shorten the prompt or max_tokens, reduce --context or --parallel, or raise "
-                                f"{LIMIT_ENV} if more GPU memory is available.")
+                                f"Growing this request's attention caches to {size} tokens would pass the "
+                                f"tensor budget the {LIMIT_ENV}={cuda_limit_bytes() / GIB:g} GiB line leaves "
+                                f"(a {budget / GIB:g} GiB tensor budget: the line also counts the CUDA context "
+                                "and its kernels): the estimated copy peak is " +
+                                f"{peak / GIB:.2f} GiB. Shorten the prompt or max_tokens, reduce --context or "
+                                f"--parallel, or raise {LIMIT_ENV} if more GPU memory is available.")
                     break
                 return False
         self._state_changed(st)

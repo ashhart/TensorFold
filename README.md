@@ -162,13 +162,13 @@ its smaller cache, so the same memory admits a longer window. Explicit `--contex
 A positive CUDA value must fit both the native window and the capacity estimate on every rank;
 otherwise startup refuses it with fitting guidance. Increasing GLM beyond its dense window enables
 its sparse-attention path. The startup report distinguishes native and allocated capacity.
-The CUDA budget grants a GPU its free memory less a floor of a tenth of that memory, at least 4 GiB: a discrete
-card's own memory, or the host's available memory on a unified GPU. `TENSORFOLD_MEMORY_RESERVE_GIB` moves the
-floor (at least 2 GiB), and `TENSORFOLD_CUDA_MEMORY_LIMIT_GB` caps the grant from above in GiB, an absolute budget
-like `TENSORFOLD_MEMORY_LIMIT_GB` on the MLX side. A smaller floor can end requests with CUDA errors mid-reply,
-and a floor you choose takes that risk knowingly. A discrete card's host need is its loading buffers, which
-startup weighs on its own.
-
+The CUDA budget grants the GPU's free memory less a reserve of max(4 GiB, a tenth of VRAM); on a unified GPU
+it is available host RAM less the same reserve. `TENSORFOLD_MEMORY_RESERVE_GIB` sets that reserve in GiB,
+raising or lowering it. `TENSORFOLD_CUDA_MEMORY_LIMIT_GB` is a hard override: it names the allocator's budget
+in GiB, raising or lowering it past free memory and the reserve, which no longer applies. The estimate sizes
+tensors only, so the line takes the memory serving also holds outside the allocator (the CUDA context, its
+kernels and streams: about 2 GiB) out, and the request caches claim the line's GiB at startup. A budget past
+what the GPU holds can end startup or requests with CUDA out-of-memory errors.
 MLX defaults to a process budget of 70% of RAM. A family can state a larger share: GLM-5.3-Flash takes 85%
 on a Mac with 256 GB or less, with nothing else loaded. `TENSORFOLD_MEMORY_LIMIT_GB` replaces that default in
 GiB, raising or lowering it; physical RAM and the GPU's recommended working set still cap the result.

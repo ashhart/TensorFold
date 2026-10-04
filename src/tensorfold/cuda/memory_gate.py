@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
-from .capacity import cuda_limit_bytes
+from .capacity import cuda_tensor_budget
 
 
 class NoRoom(RuntimeError):
@@ -39,8 +39,8 @@ def torch_live(torch, available: Callable) -> Callable[[], int]:
     def room() -> int:
         allocated = int(torch.cuda.memory_allocated())
         free = int(available(torch)) + int(torch.cuda.memory_reserved()) - allocated
-        limit = cuda_limit_bytes()
-        return max(0, min(free, limit - allocated)) if limit is not None else max(0, free)
+        budget = cuda_tensor_budget()
+        return max(0, min(free, budget - allocated)) if budget is not None else max(0, free)
 
     return room
 

@@ -145,17 +145,18 @@ TENSORFOLD_MEMORY_LIMIT_GB=110 tensorfold serve TensorFold/Qwen3.8-Flash-Next-ML
 On a 128 GiB M4 Max this gives 110 GiB to the process and 107 GiB to MLX after the 3 GiB reserve.
 The same budget reaches concurrent admission; context and request memory checks still apply.
 
-On CUDA, a discrete card's admission budget is its own free memory; on a unified GPU it is the host's
-available memory less a floor of a tenth of RAM, at least 4 GiB. `TENSORFOLD_CUDA_MEMORY_LIMIT_GB` caps that
-grant from above in GiB, an absolute budget like the MLX one; free memory still caps it:
-
+On CUDA, the admission budget is the GPU's free memory less a reserve of max(4 GiB, a tenth of VRAM), bounded by
+available host RAM less the same reserve. `TENSORFOLD_MEMORY_RESERVE_GIB` sets that reserve in GiB, raising or
+lowering it. `TENSORFOLD_CUDA_MEMORY_LIMIT_GB` is a hard override: it names the startup budget in GiB, above or
+below free memory, and no reserve is subtracted. The estimate sizes tensors only, so the line takes the CUDA
+context, its kernels and streams (about 2 GiB) out. On a 32 GB card, this command gives tensors a 29 GiB budget:
 ```bash
 TENSORFOLD_CUDA_MEMORY_LIMIT_GB=31 tensorfold serve nvidia/Qwen3.8-27B-NVFP4
 ```
 
-A budget close to a shared pool can end requests with CUDA errors mid-reply, which is why a unified GPU keeps
-its floor; `TENSORFOLD_MEMORY_RESERVE_GIB` moves that floor. A discrete card's host need is its loading
-buffers, which startup checks on its own.
+The reserve absorbs workspace and staging spikes the estimate does not count. With the override, that headroom is
+yours to leave: a budget past what the GPU holds can end startup or requests with CUDA out-of-memory errors.
+
 Requested replies need cache space too. Reduce context, reply length, retained prefixes on MLX, or
 checkpoint size after a memory refusal. The MLX process budget reserves 3 GiB outside the allocator.
 Release-qualified memory and speed results are TBD [release-0.3.5]; see the

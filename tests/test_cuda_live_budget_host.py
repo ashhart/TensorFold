@@ -30,7 +30,7 @@ class CudaLiveBudgetTests(unittest.TestCase):
         self.addCleanup(self.meminfo.stop)
 
     def test_existing_weights_leave_only_the_unused_absolute_budget(self):
-        os.environ[capacity.LIMIT_ENV] = "60"
+        os.environ[capacity.LIMIT_ENV] = "62"   # the line less 2 GiB of overhead: a 60-GiB tensor budget
         torch, _ = device(free=88, allocated=40)
         budget = capacity.available_bytes(torch)
         plan = capacity.make_plan(100, None, False, budget, capacity.Weights(40 * GIB, 0),
@@ -43,27 +43,34 @@ class CudaLiveBudgetTests(unittest.TestCase):
         self.assertFalse(gate.fits(30 * GIB))
 
     def test_reusable_reserved_bytes_do_not_raise_the_absolute_budget(self):
-        os.environ[capacity.LIMIT_ENV] = "60"
+        os.environ[capacity.LIMIT_ENV] = "62"   # the line less 2 GiB of overhead: a 60-GiB tensor budget
         torch, _ = device(free=83, allocated=40, reserved=45)
         self.assertEqual(torch_live(torch, capacity.available_bytes)(), 20 * GIB)
 
     def test_low_physical_room_is_not_charged_for_existing_weights_again(self):
         os.environ[capacity.LIMIT_ENV] = "100"
         torch, _ = device(free=3, allocated=40, reserved=45)
-        self.assertEqual(capacity.available_bytes(torch), 0)
-        self.assertEqual(torch_live(torch, capacity.available_bytes)(), 5 * GIB)
+        self.assertEqual(capacity.available_bytes(torch), 3 * GIB)   # the reserve no longer applies under the line
+        self.assertEqual(torch_live(torch, capacity.available_bytes)(), 8 * GIB)
 
     def test_without_a_limit_the_allocator_cache_remains_reusable(self):
         torch, _ = device(free=30, allocated=12, reserved=18)
         self.assertEqual(torch_live(torch, capacity.available_bytes)(), 36 * GIB - 128 * GIB // 10)
 
     def test_the_unified_floor_still_caps_physical_room(self):
-        os.environ[capacity.LIMIT_ENV] = "100"
         os.environ["TENSORFOLD_MEMORY_RESERVE_GIB"] = "10"
         torch, _ = device(free=20, allocated=40, reserved=45, integrated=True)
         with patch.object(capacity, "_meminfo", return_value={"MemTotal": 128 * GIB, "MemAvailable": 35 * GIB}):
             self.assertEqual(capacity.available_bytes(torch), 25 * GIB)
             self.assertEqual(torch_live(torch, capacity.available_bytes)(), 30 * GIB)
+
+    def test_the_limit_line_replaces_the_unified_floor(self):
+        os.environ[capacity.LIMIT_ENV] = "100"
+        os.environ["TENSORFOLD_MEMORY_RESERVE_GIB"] = "10"
+        torch, _ = device(free=20, allocated=40, reserved=45, integrated=True)
+        with patch.object(capacity, "_meminfo", return_value={"MemTotal": 128 * GIB, "MemAvailable": 35 * GIB}):
+            self.assertEqual(capacity.available_bytes(torch), 35 * GIB)   # the reserve no longer applies
+            self.assertEqual(torch_live(torch, capacity.available_bytes)(), 40 * GIB)
 
     def test_the_default_unified_floor_is_preserved_without_meminfo(self):
         torch, _ = device(free=30, allocated=40, reserved=45, integrated=True)
@@ -77,7 +84,7 @@ class CudaLiveBudgetTests(unittest.TestCase):
                 self.assertEqual(torch_live(torch, capacity.available_bytes)(), 0)
 
     def test_a_live_update_counts_growth_once(self):
-        os.environ[capacity.LIMIT_ENV] = "60"
+        os.environ[capacity.LIMIT_ENV] = "62"   # the line less 2 GiB of overhead: a 60-GiB tensor budget
         torch, counters = device(free=83, allocated=40, reserved=45)
         live = torch_live(torch, capacity.available_bytes)
         gate = MemoryGate(live(), reserve=2 * GIB, live=live)

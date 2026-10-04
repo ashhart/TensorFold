@@ -6,11 +6,12 @@ import copy
 
 import torch
 
+from tensorfold.cuda.capacity import cuda_tensor_budget
 from tensorfold.cuda.markers import MIN_GAP
-from tensorfold.cuda.capacity import cuda_limit_bytes
+
 from .decode import entry_end
-from .prompt_plan import pass_limit
 from .multi_fill import PASS_MIN
+from .prompt_plan import pass_limit
 
 
 class Shadow:
@@ -176,7 +177,7 @@ def ready(dec, plan) -> bool:
     """Each rank checks that the proposed cache moves fit locally before the shared plan check."""
 
     p = view(dec)
-    limit = cuda_limit_bytes() if torch.cuda.is_available() else None
+    limit = cuda_tensor_budget() if torch.cuda.is_available() else None
     allocated = int(torch.cuda.memory_allocated()) if limit is not None else 0
     for op in plan["actions"]:
         if op[0] == "reset":
