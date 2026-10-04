@@ -149,7 +149,21 @@ switch=None: one ladder; int switch: pre/post ladders (a declared regime)."""
         with self._lock:
             side = self._side(L)
             ladder = self._ladder(side)
-            current = self.price(L) / self._margin if ladder else 0.0
+            # gate on the UNMARGIN'D staircase: dividing price() by the constructor
+            # floor margin cannot recover the base (the margin is density-dependent,
+            # not constant) — the independent suite's violation 1a/1b.
+            base = 0.0
+            if ladder:
+                if L <= ladder[0][0]:
+                    base = ladder[0][1]
+                else:
+                    run = ladder[0][1]
+                    for x, y in ladder:
+                        if x > L:
+                            break
+                        run = max(run, y)
+                    base = run
+            current = base
             same = [(x, y) for x, y in ladder if x == float(L)]
             if same and peak_bytes <= max(y for _, y in same):
                 self.stats["poison_low_ignored"] += 1
