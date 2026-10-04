@@ -274,14 +274,14 @@ def test_a_lone_stream_keeps_the_graph_slot_without_discarding_kept_prefixes(kv_
     dropped, state_changed = [], dec._state_changed
     dec._state_changed = lambda st: (dropped.append(st), state_changed(st))[1]
     second, start = run(PROMPTS[1], 16)
-    assert start is not first_slot and second.st is dec.solo.st is first_slot
+    assert start is first_slot and second.st is dec.solo.st is first_slot     # admitted into the idle graph slot
     assert first_slot not in dropped
     assert dec.solo.graphs is graphs
     assert captured and all(graphs.main[key] is graph for key, graph in captured.items())
     assert any(k[1] is not first_slot and k[0] == PROMPTS[0][:-1] for k in dec.kept)
     assert first.out == fresh(PROMPTS[0], 12) and second.out == fresh(PROMPTS[1], 16)
     assert not any(k[1] is dec.solo.st and k[0] == PROMPTS[0] for k in dec.kept)
-    again, _ = run(PROMPTS[1] + second.out[:-1] + [42], 8)                       # resumes from the old slot's kept end
+    again, _ = run(PROMPTS[1] + second.out[:-1] + [42], 8)                       # resumes from its kept end
     assert again.cached == len(PROMPTS[1]) - 1 and again.out == fresh(PROMPTS[1] + second.out[:-1] + [42], 8)
 
 
