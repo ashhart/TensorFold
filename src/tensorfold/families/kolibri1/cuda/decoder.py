@@ -1,9 +1,12 @@
 """The ``Scheduler``'s decoder for Kolibri 1: a prompt chunk a round, then every decoding stream's window together."""
 # Windows copy what followed the context's last 8 tokens before; rows are row-invariant, so drafted equals serial.
+# A free slot keeps its prompt rows (prompt kernels' bits); a prompt extending them resumes there, equal to fresh.
 
 from __future__ import annotations
 
 import time
+
+import numpy as np
 
 from tensorfold.cuda.memory_gate import NoRoom
 from tensorfold.cuda.sampling import sample_rows
@@ -28,6 +31,9 @@ class Decoder:
         self.copies: dict[int, CopyIndex] = {}
         self.context: dict[int, list[int]] = {}   # prompt and reply, for the copy index
         self.width: dict[int, int] = {}
+        self.written: dict[int, int] = {}         # positions a stream has written its slot through
+        self.kept: dict[int, tuple[np.ndarray, int, int]] = {}   # free slot -> (prompt rows, written, last use)
+        self.tick = 0
         self.next_id = 0
 
     def live(self) -> int:
@@ -45,9 +51,31 @@ class Decoder:
         s.count = min(s.count, room)
         s.sid = self.next_id
         self.next_id += 1
-        self.slot[s.sid] = self.free.pop(0)
-        self.done_at[s.sid] = 0
+        slot, start = self._resume(s)
+        self.free.remove(slot)
+        self.kept.pop(slot, None)
+        self.slot[s.sid] = slot
+        self.done_at[s.sid] = self.written[s.sid] = s.cached = start
         self.filling.append(s)
+
+    def _resume(self, s: Stream) -> tuple[int, int]:
+        """The free slot whose kept prompt rows the prompt extends furthest (within its ring), else the oldest."""
+
+        best, start = None, 0
+        prompt = np.asarray(s.prompt, dtype=np.int64)
+        guard = self.model.ring - self.model.cfg.window          # rows written past a resume point that keep its window
+        for slot in self.free if s.draft else ():               # "draft": false is the serial reference: never resumed
+            if slot not in self.kept:
+                continue
+            ids, written, _ = self.kept[slot]
+            n = min(len(ids), len(prompt) - 1)                   # a resumed prompt still prefills its last row
+            miss = np.flatnonzero(ids[:n] != prompt[:n])
+            lcp = int(miss[0]) if len(miss) else n
+            if lcp > start and written - lcp <= guard:
+                best, start = slot, lcp
+        if best is None:
+            best = min(self.free, key=lambda x: self.kept[x][2] if x in self.kept else -1)
+        return best, start
 
     def _ends(self, s: Stream) -> tuple[int, ...]:
         return self.eos if s.stop_eos else ()
@@ -65,6 +93,7 @@ class Decoder:
             s.error, s.done = exc, True
             return [s]
         self.done_at[s.sid] = b
+        self.written[s.sid] = max(self.written[s.sid], b)
         s.prefill_s += time.perf_counter() - t0
         if first is None:
             return []
@@ -95,6 +124,7 @@ class Decoder:
                 drafts = self.copies[s.sid].propose(self.context[s.sid], most)[:most]
             starts.append(sum(len(c.tokens) for c in chains))
             chains.append(Chain(self.slot[s.sid], p, [s.out[-1], *drafts]))
+            self.written[s.sid] = max(self.written[s.sid], p + 1 + len(drafts))
         total = sum(len(c.tokens) for c in chains)
         logits = self.model.forward(chains, prompt=False, rows=range(total))
         for s, c, a in zip(live, chains, starts):
@@ -115,10 +145,13 @@ class Decoder:
             if s in self.filling:
                 self.filling.remove(s)
             slot = self.slot.pop(s.sid, None)
+            rows = self.done_at.pop(s.sid, 0)
             if slot is not None:
+                self.tick += 1
+                ids = np.asarray(s.prompt[:rows], dtype=np.int64)
+                self.kept[slot] = (ids, self.written.pop(s.sid, rows), self.tick)
                 self.free.append(slot)
                 self.free.sort()
-            self.done_at.pop(s.sid, None)
             for d in (self.copies, self.context, self.width):
                 d.pop(s.sid, None)
 
@@ -128,6 +161,8 @@ class Decoder:
         self.free = list(range(self.model.slots))
         self.slot.clear()
         self.done_at.clear()
+        self.written.clear()
+        self.kept.clear()
         self.copies.clear()
         self.context.clear()
         self.width.clear()

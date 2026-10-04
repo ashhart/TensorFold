@@ -130,3 +130,34 @@ def test_copy_drafts_equal_the_serial_reply(weights, monkeypatch):
     for sampling in (None, Sampling(seed=5, temperature=0.8, top_k=20, top_p=0.95)):
         (drafted, rows), (serial, none) = reply(sampling, True), reply(sampling, False)
         assert drafted == serial and rows > 0 and none == 0
+
+
+def test_a_follow_up_resumes_its_kept_prompt_rows_and_equals_fresh(weights, monkeypatch):
+    from tensorfold.cuda.streams import Stream
+    from tensorfold.engine.exact_sampling import Sampling
+    from tensorfold.families.kolibri1.cuda import decoder, forward
+
+    def run(d, prompt, sampling, count=24):
+        s = Stream(list(prompt), count, sampling)
+        d.admit(s)
+        while not s.done:
+            d.round()
+        d.finish([s])
+        return list(s.out), s.cached
+
+    first = tokens(60, seed=21)
+    for sampling in (None, Sampling(seed=3, temperature=0.9, top_k=30, top_p=0.95)):
+        d = decoder.Decoder(forward.Model(weights, 512, 2), (511,))
+        reply, cached = run(d, first, sampling)
+        assert cached == 0
+        follow = first + reply + tokens(17, seed=22)              # the agent's next turn: prompt, reply, tool output
+        resumed, cached = run(d, follow, sampling)
+        fresh, none = run(decoder.Decoder(forward.Model(weights, 512, 1), (511,)), follow, sampling)
+        assert cached == len(first) and none == 0 and resumed == fresh
+    monkeypatch.setattr(forward, "PROMPT_CHUNK", 64)              # a 128-key ring: a long reply overruns the window
+    d = decoder.Decoder(forward.Model(weights, 512, 1), (511,))
+    reply, _ = run(d, first, None, count=120)
+    follow = first + reply + [5]
+    resumed, cached = run(d, follow, None)
+    fresh, _ = run(decoder.Decoder(forward.Model(weights, 512, 1), (511,)), follow, None)
+    assert cached == 0 and resumed == fresh
