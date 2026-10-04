@@ -143,6 +143,19 @@ KV_MODE = os.environ.get("TF_DSV41_KV") or ("fp8" if (os.environ.get("TF_DSV41_K
 if KV_MODE not in ("bf16", "fp8", "fp4"):
     raise ValueError(f"TF_DSV41_KV={KV_MODE}: bf16, fp8 or fp4")
 K.TIE_KEYS = KV_MODE == "fp4"
+
+
+def _fp4_knob(name: str) -> bool:
+    return (os.environ.get(name) or ("1" if KV_MODE == "fp4" else "0")) == "1"
+
+
+# the rest of V4.1's KV numerics, on by default with fp4 (ablations): the indexer queries fake-quantized MXFP4 after
+# RoPE (fp4_act_quant), the window keys FP8 e4m3 with a 2^k scale per 32 (act_quant ue8m0; the rings stay bf16), the
+# compressor's output rounded to bf16 before its norm (the reference's kv.to(dtype); here it was fp32)
+IQ_FP4 = _fp4_knob("TF_DSV41_IQ_FP4")
+SWA_FP8 = _fp4_knob("TF_DSV41_SWA_FP8")
+COMP_BF16 = _fp4_knob("TF_DSV41_COMP_BF16")
+IQ_Q, SWA_Q = "mxfp4" if IQ_FP4 else None, "fp8" if SWA_FP8 else None
 BLOCKED_SELECT = True        # prompt chunks: segmented indexer top-k (no [rows, keys] fp32 matrix)
 REUSE = os.environ.get("TF_DSV41_REUSE", "1") != "0"    # keep the live caches for a prompt that extends them
 REUSE_MIN = 64               # shorter common prefixes start fresh
@@ -1336,9 +1349,9 @@ class SerialEngine:
         def kv_branch():
             kv = K.rmsnorm(a.wkv(x), a.kv_norm, eps)
             if static:                                                  # each row into its own stream's ring
-                self.big.swa[L].index_copy_(0, self._sid * DRING + pos % DRING, K.rope(kv, pos, cos, sin))
+                self.big.swa[L].index_copy_(0, self._sid * DRING + pos % DRING, K.rope_q(kv, pos, cos, sin, SWA_Q))
             else:
-                st.swa[L].index_copy_(0, pos % RING, K.rope(kv, pos, cos, sin))
+                st.swa[L].index_copy_(0, pos % RING, K.rope_q(kv, pos, cos, sin, SWA_Q))
 
         def comp_branch():
             if a.ratio > 0 and a.compressor is not None:
@@ -1390,7 +1403,7 @@ class SerialEngine:
         ix = a.indexer
         R = x.shape[0]
         cos, sin = self.tables_rope[a.ratio]
-        iq = K.rope(ix.wq_b(qr).view(R, c.index_n_heads, c.index_head_dim), pos, cos, sin)
+        iq = K.rope_q(ix.wq_b(qr).view(R, c.index_n_heads, c.index_head_dim), pos, cos, sin, IQ_Q)
         wts = K.router_logits(x, ix.weights_proj) * (c.index_head_dim ** -0.5 * c.index_n_heads ** -0.5)
         L = layer.index
         src = max(s for s in c.kv_source_layer_ids if s <= L)
@@ -1440,7 +1453,7 @@ class SerialEngine:
         cw = a.compressor
         kv = cw.wkv(x, out_dtype=F32)
         if r == 1:
-            latent = K.rmsnorm(kv, cw.norm, c.rms_norm_eps)
+            latent = K.rmsnorm(kv.to(BF) if COMP_BF16 else kv, cw.norm, c.rms_norm_eps)
             ends, start, slot = pos, pos, pos
         else:
             gate = cw.wgate(x, out_dtype=F32)
@@ -1457,7 +1470,8 @@ class SerialEngine:
                 ends = torch.tensor(closing, device=self.dev)
             pair = torch.stack([raw[roff + (ends - 1).clamp(min=0) % rs], raw[roff + ends % rs]], dim=1)
             wts = torch.softmax(pair[..., c.head_dim:], dim=1)
-            latent = K.rmsnorm((wts * pair[..., :c.head_dim]).sum(1), cw.norm, c.rms_norm_eps)
+            pooled = (wts * pair[..., :c.head_dim]).sum(1)
+            latent = K.rmsnorm(pooled.to(BF) if COMP_BF16 else pooled, cw.norm, c.rms_norm_eps)
             start, slot = (ends // 2) * 2, ends // 2
         comp_t, ik_t = st.comp[L], st.ik[L]
         if static:                                                      # the row's stream's entries

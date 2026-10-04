@@ -35,9 +35,10 @@ class DSpark:
             raise ValueError(f"DSpark drafts 1..{c.dspark_block_size} tokens a round, got {tokens}")
         self.N = tokens
         self.dev = eng.dev
-        from .serial import DRING, RING
+        from .serial import DRING, RING, SWA_Q
 
         self.ring = DRING
+        self.swa_q = SWA_Q                      # the window keys' fake quant (V4.1: FP8, as the target's windows)
         # every stream slot's decode context rings side by side (the engine's slots; ``swa`` is the current slot's),
         # and the prompt chunks' staging rings (the engine copies a slot's window in and out around them)
         S = eng.slots
@@ -77,9 +78,9 @@ class DSpark:
             a = block.attn
             kv = K.rmsnorm(a.wkv(main_x), a.kv_norm, c.rms_norm_eps)
             if static:
-                self.swa_big[j].index_copy_(0, off + pos % self.ring, K.rope(kv, pos, cos, sin))
+                self.swa_big[j].index_copy_(0, off + pos % self.ring, K.rope_q(kv, pos, cos, sin, self.swa_q))
             else:                                                   # a prompt chunk: the staging rings
-                self.stage[j].index_copy_(0, pos % self.stage_ring, K.rope(kv, pos, cos, sin))
+                self.stage[j].index_copy_(0, pos % self.stage_ring, K.rope_q(kv, pos, cos, sin, self.swa_q))
 
     # -- one drafting pass ------------------------------------------------------------------------------------
     def draft(self, anchor: torch.Tensor, P: torch.Tensor) -> torch.Tensor:
@@ -123,7 +124,7 @@ class DSpark:
         H = a.wq_b.n // Dh
         q = K.rope(a.wq_b(qr).view(R, H, Dh), pos, cos, sin).float()
         base = self.g_base                                                  # the drafting stream's ring
-        self.swa_big[j].index_copy_(0, base + pos % self.ring, K.rope(kv, pos, cos, sin))
+        self.swa_big[j].index_copy_(0, base + pos % self.ring, K.rope_q(kv, pos, cos, sin, self.swa_q))
         idx = P - (W - 1) + torch.arange(W - 1 + R, device=self.dev)           # P - 127 .. P + N - 1
         keys = self.swa_big[j][base + idx.clamp(min=0) % self.ring].float()
         mask = (idx[None, :] >= (pos[:, None] - (W - 1))) & (idx[None, :] >= 0)
@@ -210,7 +211,7 @@ class DSpark:
         kv = K.rmsnorm(a.wkv(x), a.kv_norm, c.rms_norm_eps)
         H = a.wq_b.n // Dh
         q = K.rope(a.wq_b(qr).view(R, H, Dh), pos, cos, sin).float().view(M, N, H, Dh)
-        self.swa_big[j].index_copy_(0, rbase + pos % self.ring, K.rope(kv, pos, cos, sin))
+        self.swa_big[j].index_copy_(0, rbase + pos % self.ring, K.rope_q(kv, pos, cos, sin, self.swa_q))
         idx = P[:, None] - (W - 1) + torch.arange(W - 1 + N, device=self.dev)[None, :]      # [M, keys]
         keys = self.swa_big[j][base[:, None] + idx.clamp(min=0) % self.ring].float()        # [M, keys, D]
         pr = pos.view(M, N)
