@@ -138,7 +138,7 @@ class Lanes:
                 self.disagreed(kind, ints, ok)
 
     def disagreed(self, kind: int, ints: Sequence[int], ok: bool) -> None:
-        """Another rank failed a message this rank applied: an admission is undone; anything else ends the engine."""
+        """Another rank failed a message this rank applied: an admission is undone; a failed eviction ends the engine."""
 
         if kind == ADMIT and ok:
             self._undo(int(ints[0]), self._kept)

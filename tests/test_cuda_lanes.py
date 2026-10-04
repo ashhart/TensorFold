@@ -532,7 +532,7 @@ def test_a_failed_admission_on_rank_0_is_undone_on_every_rank(monkeypatch):
     assert pair.run([stream(prompts(1)[0], 4)]) == [serial(prompts(1)[0], 4)]
 
 
-def test_a_follower_votes_instead_of_leaving_on_a_failed_round():
+def test_a_follower_does_not_vote_on_a_round():
     from tensorfold.cuda.lanes.link import ROUND, STOP
 
     pair = Pair(lanes=1)
@@ -549,8 +549,9 @@ def test_a_follower_votes_instead_of_leaving_on_a_failed_round():
             votes.append(ok)
             return False
 
-    pair.follower.follow(Script())  # returns at STOP instead of raising out of the loop
-    assert votes == [False]
+    with pytest.raises(RuntimeError):  # out of the loop, as before: no vote for rank 0's next collective to meet
+        pair.follower.follow(Script())
+    assert votes == []
 
 
 def test_a_failed_round_fails_every_admitted_request_and_one_rank_goes_on():

@@ -10,7 +10,8 @@ from typing import Any, Protocol
 from tensorfold.engine.exact_sampling import Sampling
 
 ADMIT, ROUND, DONE, EVICT, STOP, IDLE = 1, 2, 3, 4, 5, 6
-AGREED = (ADMIT, EVICT, ROUND)  # every rank reports whether it applied these, and all learn whether all did
+# every rank reports whether it applied these; never ROUND, whose collectives a vote would fall out of step with
+AGREED = (ADMIT, EVICT)
 SAMPLING_WORDS = 18  # pack_sampling's length
 
 

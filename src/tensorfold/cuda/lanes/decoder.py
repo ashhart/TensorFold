@@ -99,7 +99,7 @@ class LaneDecoder:
         self.broken: Exception | None = None
 
     def _send(self, kind: int, ints: list[int], **kw):
-        """Send, apply here, and for ADMIT, EVICT and ROUND learn whether every rank applied it."""
+        """Send, apply here, and for ADMIT and EVICT learn whether every rank applied it."""
 
         self.link.send(kind, ints)
         err, res = None, None
