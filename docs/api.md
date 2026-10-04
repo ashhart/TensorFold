@@ -247,13 +247,14 @@ A startup capacity estimate is not a measured release capacity.
 
 On a unified-memory GPU (the DGX Spark's GB10), the CUDA server's allocations come out of the host's RAM but are not
 charged to a container's memory limit (`docker run --memory`, cgroup `memory.max`): the limit neither caps the
-model's weights and cache nor keeps them from crowding other work on the machine. The server sizes its window from the
-host's `MemAvailable` less a reserve (a tenth of RAM, at least 4 GiB); to leave room for other containers, start it
-with a smaller `--context` or `--parallel`. `TENSORFOLD_MEMORY_RESERVE_GIB` replaces that reserve (at least 2 GiB)
+model's weights and cache nor keeps them from crowding other work on the machine. The server sizes its window from
+the host's `MemAvailable` less a reserve (a tenth of RAM, at least 4 GiB); to leave room for other containers, start
+it with a smaller `--context` or `--parallel`. `TENSORFOLD_MEMORY_RESERVE_GIB` replaces that reserve (at least 2 GiB)
 when you know the machine's headroom: a larger one leaves more for other work, a smaller one more for KV caches. The
 reserve also carries CUDA context, NCCL and workspace memory the estimate does not count, and exhausting a unified
-GPU's memory can freeze the host, so lower it only with room to spare.
-
+GPU's memory can freeze the host, so lower it only with room to spare. `TENSORFOLD_CUDA_MEMORY_LIMIT_GB` is a hard
+override: it names the allocator's budget in GiB, above or below available memory, the reserve no longer applies,
+and the line takes the CUDA context, its kernels and streams (about 2 GiB) out.
 ## Responses
 
 `choices[0].message.content` holds the answer. Reasoning uses `reasoning_content`, or

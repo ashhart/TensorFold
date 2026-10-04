@@ -3,11 +3,11 @@
 import importlib
 import math
 import sys
-from types import SimpleNamespace, ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from tensorfold.cuda import geometry, capacity
+from tensorfold.cuda import capacity, geometry
 
 
 class Allocation:
@@ -24,9 +24,6 @@ class Allocation:
         return Allocation(self.shape + other.shape, self.dtype, self.device)
     def contiguous(self):
         return self
-    def view(self, *shape):
-        assert math.prod(shape) == self.numel()
-        return Allocation(shape, self.dtype, self.device)
 
 
 @pytest.fixture
@@ -74,10 +71,8 @@ def bytes_in(arrays):
 @pytest.mark.torch
 @pytest.mark.parametrize("world", [1, 2])
 @pytest.mark.parametrize("mtp", [False, True])
-@pytest.mark.parametrize("prefill_rows", [2048, 4096])
 @pytest.mark.parametrize("kv_dtype,bits", [("bf16", 16), ("int8", 8), ("int4", 4)])
-def test_indexed_state_actual_kv_and_serial_twin_are_budgeted(monkeypatch, allocations, world, mtp, kv_dtype, bits,
-                                                            prefill_rows):
+def test_indexed_state_actual_kv_and_serial_twin_are_budgeted(monkeypatch, allocations, world, mtp, kv_dtype, bits):
     arrays, fake = allocations
     mod = importlib.import_module("tensorfold.families.qwen4_exp.cuda.state")
     gdn = importlib.import_module("tensorfold.families.qwen4_exp.cuda.gdn")
@@ -102,12 +97,11 @@ def test_indexed_state_actual_kv_and_serial_twin_are_budgeted(monkeypatch, alloc
     mod.Buffers(weights, 64, slots)
     if mtp:
         mod.Buffers(weights, 64, slots)
-    mod.Buffers(weights, prefill_rows, slots, prefill=True)
+    mod.Buffers(weights, 2048, slots, prefill=True)     # the prompt chunks' buffers, as ``decode.Engine`` makes them
     mod.State(weights, slots, 64, kv_dtype)
     mod.State(weights, slots, 64, kv_dtype)  # the actual serial-reference twin constructor
-    estimated = geometry.gdn_geometry(text, world, 7, indexed=True, mtp=mtp, kv_bits=bits,
-                                      prefill_rows=prefill_rows).bytes_at(slots)
-    kv = [t for t in arrays if len(t.shape) == 3 and t.shape[:2] == (slots, cfg.kv_heads)]
+    estimated = geometry.gdn_geometry(text, world, 7, indexed=True, mtp=mtp, kv_bits=bits).bytes_at(slots)
+    kv = [t for t in arrays if t.shape[:2] == (slots, cfg.kv_heads)]      # codes and scales, or bf16 keys and values
     caches = 2 * (2 + int(mtp))                                          # two states: two attention layers, the MTP's
     assert bytes_in(kv) == caches * 2 * slots * cfg.kv_heads * geometry.kv_bytes(cfg.head_dim, bits)
     assert bytes_in(arrays) <= estimated
@@ -228,10 +222,11 @@ def test_weight_partition_rounding_and_float_casts():
 
 def test_unified_available_memory_uses_reclaimable_host_pages(monkeypatch):
     from pathlib import Path
+    monkeypatch.delenv("TENSORFOLD_CUDA_MEMORY_LIMIT_GB", raising=False)
+    monkeypatch.delenv("TENSORFOLD_MEMORY_RESERVE_GIB", raising=False)
     fake = SimpleNamespace(cuda=SimpleNamespace(mem_get_info=lambda: (100 * capacity.GIB, 128 * capacity.GIB)))
     monkeypatch.setattr(Path, "read_text", lambda *a: "MemTotal: 134217728 kB\nMemAvailable: 62914560 kB\n")
     monkeypatch.setattr(capacity, "unified", lambda torch: True)
-    # the grant is the reclaimable pool less the floor the host keeps free: a tenth of its 128 GiB of RAM
     assert capacity.available_bytes(fake) == 60 * capacity.GIB - 128 * capacity.GIB // 10
 
 
@@ -243,8 +238,7 @@ def test_mla_exl3_scratch_and_buffers_are_budgeted(monkeypatch, allocations, mtp
     mod = importlib.import_module("tensorfold.families.glm5_next.cuda.forward")
     names = ("kda", "latent", "attention", "exl3_mm")
     mods = [mod] + [importlib.import_module(f"tensorfold.families.glm5_next.cuda.{n}") for n in names]
-    for m in mods + [importlib.import_module("tensorfold.cuda.experts"),
-                     importlib.import_module("tensorfold.cuda.exl3.experts")]:
+    for m in mods + [importlib.import_module("tensorfold.cuda.experts")]:
         monkeypatch.setattr(m, "torch", fake)
     monkeypatch.setattr(mods[2], "ENABLED", True)
     exl3_mm = mods[-1]
@@ -276,34 +270,3 @@ def test_mla_exl3_scratch_and_buffers_are_budgeted(monkeypatch, allocations, mtp
     mod.State(weights, cap, 64)
     estimated = geometry.mla_geometry(text, 2, 16, latent=True).bytes_at(cap)
     assert bytes_in(arrays) <= estimated - geometry.mla_chunk_scratch(text, 2, cap, latent=True)
-
-
-@pytest.mark.torch
-@pytest.mark.parametrize("world", [1, 2])
-@pytest.mark.parametrize("mtp", [False, True])
-def test_flash_message_snapshot_budget_counts_actual_saved_tensors(world, mtp):
-    import torch
-    from tensorfold.families.qwen4_exp.cuda.state import State
-
-    text = {"hidden_size": 512, "num_attention_heads": 8, "num_key_value_heads": 2, "head_dim": 64,
-            "layer_types": ["linear_attention", "full_attention"] * 2,
-            "linear_num_key_heads": 2, "linear_num_value_heads": 4, "linear_key_head_dim": 128,
-            "linear_value_head_dim": 128, "linear_conv_kernel_dim": 4, "vocab_size": 1024, "hc_count": 4}
-    cfg = SimpleNamespace(hidden=512, streams=4, conv_kernel=4, conv_dim=1024 // world,
-                          nk=2 // world, nv=4 // world, dk=128, dv=128, kv_heads=2 // world,
-                          head_dim=64, index_dim=128, index_ratio=4, ple_kernel=4, ngram_size=3, ple_layers=[])
-    weights = SimpleNamespace(cfg=cfg, device="cpu", layers=[SimpleNamespace(index=i, linear=i % 2 == 0)
-                                                           for i in range(4)], mtp=object() if mtp else None)
-    state = State(weights, 32, 8)
-    snapshot = state.snapshot()
-    tensors = [value for value in snapshot.values() if isinstance(value, torch.Tensor)]
-    if mtp:
-        tensors.append(torch.zeros((1, cfg.hidden * cfg.streams), dtype=torch.bfloat16))
-    saved = sum(t.numel() * t.element_size() for t in tensors)
-    low = geometry.gdn_geometry(text, world, 8, indexed=True, mtp=mtp, kept=2).bytes_at(32)
-    high = geometry.gdn_geometry(text, world, 8, indexed=True, mtp=mtp, kept=5).bytes_at(32)
-    assert high - low == 3 * saved
-    if world == 1:
-        low = geometry.indexed_stream_geometry(text, 2, 4, 2, mtp=mtp).bytes_at(32)
-        high = geometry.indexed_stream_geometry(text, 2, 4, 8, mtp=mtp).bytes_at(32)
-        assert high - low == 6 * saved

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Callable, Sequence
 
 from tensorfold.cuda import prompt_precision
 
@@ -44,12 +44,20 @@ class Qwen27Engine:
         if nvfp4 and vision:
             raise ValueError("image input on CUDA is tested on the MLX checkpoint only: drop --vision for an NVFP4 "
                              "checkpoint, or serve TensorFold/Qwen3.8-27B-MLX-4bit")
-        from .weights import load
         from tensorfold.cuda.capacity import admit, config, gather_ints, total_bytes
-        from tensorfold.cuda.geometry import (draft_geometry, gdn_geometry, live_kv, prompt_row_bytes, prompt_rows,
-                                              stream_geometry)
+        from tensorfold.cuda.geometry import (
+            draft_geometry,
+            gdn_geometry,
+            live_kv,
+            prompt_row_bytes,
+            prompt_rows,
+            stream_geometry,
+        )
+        from tensorfold.vision.qwen_cuda import capacity_geometry
+        from tensorfold.vision.qwen_cuda import weight_transform as vision_weights
+
         from .affine_memory import draft_weights, weight_transform
-        from tensorfold.vision.qwen_cuda import capacity_geometry, weight_transform as vision_weights
+        from .weights import load
 
         self.torch = torch
         self.tp, self.rank, self.max_rows, self.allow_copy = tp, rank, max_rows, allow_copy
@@ -141,6 +149,7 @@ class Qwen27Engine:
             plan = self.capacity_plan
             spare = plan["budget_bytes"] - plan["weight_bytes_estimate"] - plan["cache_workspace_bytes_estimate"]
             self.room = KVRoom(self.cache, spare + live_kv(config(model_dir), 1, self.context_window))
+        self._claim_budget()
         # ``streams`` > 1: up to that many requests decoded together, their windows verified in one forward
         self.concurrent = streams > 1
         self.multi = self.scheduler = None
@@ -162,6 +171,29 @@ class Qwen27Engine:
                 curve = ", ".join(f"{r}: {ms:.1f}" for r, ms in self.multi.costs)
                 print(f"[tensorfold] verify ms by rows (tree widths follow it): {curve}", flush=True)
                 self.scheduler = Scheduler(self.multi, max_streams=streams)
+
+    def _claim_budget(self) -> None:
+        """Fill the explicit limit's GiB at once: the caches grow into the claimed room instead of the driver.
+
+        With ``TENSORFOLD_CUDA_MEMORY_LIMIT_GB`` set the operator bought the whole GiB line, so serving takes it
+        from the start: a filler of the bytes the tensors have not taken is allocated and handed back to the
+        allocator without an ``empty_cache``, whose segments stay reserved and are reused by the request caches.
+        nvidia-smi then shows the limit's figure while the GPU idles, and no later cache growth asks the driver
+        for memory the admission did not count. Without the limit, caches grow as they go, as before.
+        """
+
+        from tensorfold.cuda.capacity import cuda_limit_bytes
+
+        if cuda_limit_bytes() is None:
+            return
+        torch = self.torch
+        margin = 256 * 1024 * 1024          # room for the allocator's own growth beyond the claim's one slab
+        fill = self.capacity_plan["budget_bytes"] - int(torch.cuda.memory_allocated()) - margin
+        if fill > 0:
+            slab = torch.empty((fill,), dtype=torch.uint8, device="cuda")
+            del slab            # back to the allocator, not the driver: its segments stay reserved
+            print(f"[tensorfold] claimed the {self.capacity_plan['budget_bytes'] / 2**30:.2f} GiB limit at startup: "
+                  f"the request caches reuse the reserved room that is already on the card", flush=True)
 
     def _resume(self, prompt: list[int]):
         best = self.cache.longest(prompt)
@@ -256,9 +288,10 @@ class Qwen27Engine:
     # two ranks: rank 0 sends each request's header and prompt to rank 1, both run the same calls
     def _generate_tp(self, prompt, max_tokens, sampling, on_tokens, hit, t0, draft, stop_eos=True, vision=None,
                      constraint=None):
-        from .decode_tp import _share, decode_tp, pack_sampling, prefill_tp
         from tensorfold.engine.grammar import pack
         from tensorfold.vision.qwen_cuda import broadcast_encoded
+
+        from .decode_tp import _share, decode_tp, pack_sampling, prefill_tp
 
         dev = self.w.norm.device
         cached = hit[1].pos if hit else 0
@@ -297,8 +330,10 @@ class Qwen27Engine:
             self.multi.follow()
             return
 
-        from .decode_tp import SAMPLING_WORDS as W, _share, decode_tp, prefill_tp, unpack_sampling
         from tensorfold.vision.qwen_cuda import broadcast_encoded
+
+        from .decode_tp import SAMPLING_WORDS as W
+        from .decode_tp import _share, decode_tp, prefill_tp, unpack_sampling
 
         dev = self.w.norm.device
         while True:

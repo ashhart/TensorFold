@@ -2,9 +2,9 @@
 
 import ast
 import os
+import unittest
 from pathlib import Path
 from types import SimpleNamespace
-import unittest
 from unittest.mock import patch
 
 from tensorfold.cuda import capacity
@@ -92,7 +92,7 @@ def state(owner):
 
 class AbsoluteGrowthTests(unittest.TestCase):
     def setUp(self):
-        env = patch.dict(os.environ, {capacity.LIMIT_ENV: "60"}, clear=True)
+        env = patch.dict(os.environ, {capacity.LIMIT_ENV: "62"}, clear=True)  # the line less 2 GiB of overhead: 60
         env.start()
         self.addCleanup(env.stop)
         meminfo = patch.object(capacity, "_meminfo", return_value=None)
@@ -108,14 +108,15 @@ class AbsoluteGrowthTests(unittest.TestCase):
             is_available=lambda: True,
             memory_allocated=lambda: self.alloc.allocated,
             memory_reserved=lambda: self.alloc.allocated + self.alloc.cached,
-            # a 160-GiB card: 128 GiB stay grantable under its 16-GiB floor
+            # a 160-GiB card; the limit line's tensor budget of 60 GiB caps its free figure
             mem_get_info=lambda: (144 * GIB - self.alloc.allocated - self.alloc.cached, 160 * GIB),
             get_device_properties=lambda index: SimpleNamespace(is_integrated=False),
             empty_cache=lambda: None,
         ))
         ns = {"torch": self.torch, "STEP": 8192, "FIRST": 256, "GIB": GIB,
               "MemoryGate": MemoryGate, "NoRoom": NoRoom, "prefixes": prefixes,
-              "cuda_limit_bytes": capacity.cuda_limit_bytes, "LIMIT_ENV": capacity.LIMIT_ENV,
+              "cuda_limit_bytes": capacity.cuda_limit_bytes, "cuda_tensor_budget": capacity.cuda_tensor_budget,
+              "LIMIT_ENV": capacity.LIMIT_ENV,
               "time": SimpleNamespace(perf_counter=lambda: 1.0), "MIN_GAP": 32,
               "_slot": lambda *args: SimpleNamespace(), "prefill_begin": lambda *args, **kw: 0,
               "image_rows": SimpleNamespace(begin=lambda *args: None)}

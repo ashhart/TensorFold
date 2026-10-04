@@ -2,20 +2,28 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import math
 import os
-from pathlib import Path
 import re
 import struct
-from typing import Callable, Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from pathlib import Path
 
 GIB = 1024**3
 # safetensors dtype names -> bytes a value (FP8: the FP4 checkpoints' block scales)
 SIZES = {"U8": 1, "I8": 1, "BOOL": 1, "F8_E4M3": 1, "F8_E5M2": 1, "F8_E8M0": 1,
          "BF16": 2, "F16": 2, "I16": 2, "U16": 2, "U32": 4, "I32": 4, "F32": 4, "I64": 8, "U64": 8, "F64": 8}
 LIMIT_ENV = "TENSORFOLD_CUDA_MEMORY_LIMIT_GB"
+
+# Memory a serving process holds outside the tensor allocator: the CUDA context and its kernels, Triton's
+# modules and streams, and the allocator's own reserved-but-unallocated slabs. Measured on a 27B Qwen3.8
+# serve at its peak window: PyTorch tensors sit this far under the process's nvidia-smi figure.
+NON_TENSOR_OVERHEAD = 2 * GIB
+
+# The least budget the limit line leaves, so a tiny limit still serves something instead of refusing at once.
+LENGTH_LIMIT_FLOOR = 2 * GIB
 
 
 def itemsize(info: dict, name: str) -> int:
@@ -202,17 +210,58 @@ def cuda_limit_bytes(environ: Mapping[str, str] | None = None) -> int | None:
     return int(gib * GIB)
 
 
-def available_bytes(torch) -> int:
-    """What admission and the runtime gate read as live: the pool's free memory less its floor, under the explicit cap."""
+def cuda_tensor_budget(environ: Mapping[str, str] | None = None) -> int | None:
+    """The limit line's tensor budget: the GiB it names less the memory serving holds outside the allocator.
 
+    None when ``TENSORFOLD_CUDA_MEMORY_LIMIT_GB`` is unset. The estimate it sizes counts tensors only, so the
+    line takes ``NON_TENSOR_OVERHEAD`` (the CUDA context, its kernels and streams: PyTorch tensors sit this far
+    under the process's nvidia-smi figure) out, and a tiny limit still serves something instead of refusing at once.
+    """
+
+    limit = cuda_limit_bytes(environ)
+    return None if limit is None else max(LENGTH_LIMIT_FLOOR, limit - NON_TENSOR_OVERHEAD)
+
+
+def available_bytes(torch) -> int:
+    """Free memory admission can use now: GPU free memory less a reserve; the runtime memory gate reads it live.
+
+    The reserve is max(4 GiB, a tenth of the memory), or TENSORFOLD_MEMORY_RESERVE_GIB (>= 2). One pool on a
+    unified GPU: the figure is available host memory less the reserve, reclaimable page cache included; a
+    discrete GPU's is its free VRAM less the reserve, and the host's staging room is checked separately. With
+    ``TENSORFOLD_CUDA_MEMORY_LIMIT_GB`` set, the operator owns the headroom: no reserve is subtracted, and the
+    figure is free memory capped at the limit.
+
+    :raises ValueError: TENSORFOLD_MEMORY_RESERVE_GIB or TENSORFOLD_CUDA_MEMORY_LIMIT_GB is invalid.
+    """
+
+    budget = cuda_tensor_budget()
     free, total = map(int, torch.cuda.mem_get_info())
-    memory = _meminfo() if unified(torch) else None
-    if memory is not None:
-        granted = memory["MemAvailable"] - reserve_bytes(memory["MemTotal"])     # one pool: page cache counts as free
-    else:
-        granted = free - reserve_bytes(total)        # a discrete card (or no /proc/meminfo): the floor comes off the card
-    limit = cuda_limit_bytes()
-    return max(0, min(granted, limit)) if limit is not None else max(0, granted)
+    memory = _meminfo()
+    if memory is not None and unified(torch):
+        free, total = memory["MemAvailable"], memory["MemTotal"]     # one pool: reclaimable page cache is available
+    reserve = reserve_bytes(total) if budget is None else 0
+    granted = max(0, free - reserve)
+    if budget is None:
+        return granted
+    return min(granted, budget)
+
+
+def budget_bytes(torch) -> int:
+    """The startup admission budget: the ``TENSORFOLD_CUDA_MEMORY_LIMIT_GB`` line, else ``available_bytes``.
+
+    The limit is a hard override in GiB: it replaces the reserve and the free-memory figure, raising or lowering the
+    budget. The estimate it sizes counts tensors only, so the limit line takes off the memory serving also holds
+    outside the tensor allocator (the CUDA context, kernels and streams, the allocator's unallocated reserved
+    slabs): an admitted checkpoint then fits its GiB as nvidia-smi shows it, without serving-time OOM. A budget
+    past what the GPU can hold ends startup or requests with CUDA out-of-memory errors.
+
+    :raises ValueError: TENSORFOLD_MEMORY_RESERVE_GIB or TENSORFOLD_CUDA_MEMORY_LIMIT_GB is invalid.
+    """
+
+    limit = cuda_tensor_budget()
+    if limit is not None:
+        return limit
+    return available_bytes(torch)
 
 
 def total_bytes(torch) -> int:
@@ -271,14 +320,15 @@ def choose(plan: Plan, peers: list[list[int]] | None = None) -> int:
     target = plan.requested if plan.requested else plan.native
     if plan.explicit and plan.requested and plan.native > 0 and plan.requested > plan.native:
         raise ValueError(f"requested --context {plan.requested} exceeds the checkpoint's {plan.native}-token native window; "
-                         f"estimated fitting prompt-plus-reply capacity is {fitting} tokens; reduce --context and "
+                         f"estimated fitting prompt-plus-reply capacity is {fitting} tokens within the "
+                         f"{plan.budget / GIB:.2f} GiB startup memory budget; reduce --context and "
                          "the prompt/reply reserve, or free memory/use smaller weights")
     if fitting <= 0 or (plan.explicit and plan.requested and target > fitting):
         kind = "native" if target == plan.native else "default"
         wanted = (f"requested context {target}" if plan.explicit and plan.requested
                   else f"the {target}-token {kind} window or any smaller one")
-        raise ValueError(f"CUDA startup memory budget cannot fit {wanted}; estimated largest fitting "
-                         f"prompt-plus-reply window: {fitting} tokens across the ranks. " +
+        raise ValueError(f"CUDA startup memory budget of {plan.budget / GIB:.2f} GiB cannot fit {wanted}; "
+                         f"estimated largest fitting prompt-plus-reply window: {fitting} tokens across the ranks. " +
                          (f"Use --context {fitting} with a smaller prompt/reply reserve, or " if fitting else "Please ") +
                          "free memory or use smaller/quantized weights; no model weights "
                          "or KV caches have been loaded. KV precision is unchanged.")
@@ -339,7 +389,7 @@ def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, t
                                  "free host memory or use a checkpoint with smaller loading buffers")
         plan = make_plan(int(text.get("max_position_embeddings") or 0), requested,
                          requested is not None if explicit is None else explicit,
-                         available_bytes(torch), weights, geometry, room=page_room(torch))
+                         budget_bytes(torch), weights, geometry, room=page_room(torch))
     except (OSError, ValueError, KeyError, TypeError, struct.error) as exc:
         error = f"{type(exc).__name__}: {exc}"     # name the cause: its text alone has hidden a dtype's KeyError
     status = [1 if error else 0, *(plan.settings + [plan.fitting, plan.largest] if plan else [0, -1, 0, 0, 0])]

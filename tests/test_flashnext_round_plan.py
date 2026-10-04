@@ -370,7 +370,7 @@ def test_a_rank_refuses_a_planned_lone_growth_above_its_explicit_copy_peak(monke
     d = decoder()
     monkeypatch.setattr(multi_plan, "torch", SimpleNamespace(cuda=SimpleNamespace(
         is_available=lambda: True, memory_allocated=lambda: 1000)))
-    monkeypatch.setattr(multi_plan, "cuda_limit_bytes", lambda: limit)
+    monkeypatch.setattr(multi_plan, "cuda_tensor_budget", lambda: limit)
     plan = {"actions": [["resize", 2, 1024, "alone"]]}
     assert ready(d, plan) is expected
     assert d.slots[2].capacity == 256 and d.memory_gate.held == 0
@@ -382,6 +382,6 @@ def test_planned_growth_counts_prior_copies_under_the_explicit_cap(monkeypatch):
     d = decoder()
     monkeypatch.setattr(multi_plan, "torch", SimpleNamespace(cuda=SimpleNamespace(
         is_available=lambda: True, memory_allocated=lambda: 1000)))
-    monkeypatch.setattr(multi_plan, "cuda_limit_bytes", lambda: 180000)
+    monkeypatch.setattr(multi_plan, "cuda_tensor_budget", lambda: 180000)
     assert not ready(d, {"actions": [["resize", 2, 1024, "alone"], ["resize", 1, 1024, "alone"]]})
     assert all(st.capacity == 256 and not st.operations for st in d.slots)
