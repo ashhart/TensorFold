@@ -281,8 +281,10 @@ class Dsv41Engine:
         if self.shared:
             self.capacity_plan["pool_tokens"] = pool
             if rank == 0:
-                print(f"[tensorfold] shared cache pool: {pool:,} tokens for {self.streams} streams of up to {cap:,} "
-                      f"each; its free rows keep up to {KEPT_ENTRIES} prompt states", flush=True)
+                from .serial import KV_MODE
+
+                print(f"[tensorfold] shared cache pool: {pool:,} tokens ({KV_MODE} KV) for {self.streams} streams of "
+                      f"up to {cap:,} each; its free rows keep up to {KEPT_ENTRIES} prompt states", flush=True)
         self._memlog("before the caches")
         self.e = SerialEngine(w, Comm(self.nccl), str(engram), str(self.model_dir / "tokenizer.json"), cap=cap,
                               slots=self.streams, pool_tokens=pool)

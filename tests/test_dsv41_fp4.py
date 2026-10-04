@@ -436,11 +436,32 @@ def test_rank_agreement_words_carry_the_kv_format(monkeypatch):
 
 
 def test_compose_leaves_the_older_kv_switch_working():
-    """The compose file passes TF_DSV41_KV through empty when unset, so serial.py's fallback still reads
-    TF_DSV41_KV_FP8 (0: bf16) instead of a compose default of fp8 shadowing it."""
+    """The compose file passes TF_DSV41_KV and the older TF_DSV41_KV_FP8 through empty when unset, so serial.py's
+    default (fp4) decides, and TF_DSV41_KV_FP8=0 still means bf16."""
 
     import re
     from pathlib import Path
 
     compose = (Path(__file__).resolve().parents[1] / "deploy" / "dsv41-tp2" / "docker-compose.yaml").read_text()
     assert re.findall(r"^\s*TF_DSV41_KV:\s*(.*)$", compose, re.MULTILINE) == ["${TF_DSV41_KV:-}"]
+    assert re.findall(r"^\s*TF_DSV41_KV_FP8:\s*(.*)$", compose, re.MULTILINE) == ["${TF_DSV41_KV_FP8:-}"]
+
+
+def test_kv_mode_defaults_to_fp4():
+    """fp4 unless TF_DSV41_KV says otherwise; the older TF_DSV41_KV_FP8=0 means bf16, its old 1 the default."""
+
+    import ast
+    from pathlib import Path
+
+    # serial.py needs Triton; its kv_mode is a pure function of the environment, so it runs from the source
+    src = (Path(__file__).resolve().parents[1] / "src/tensorfold/families/deepseek_v41/cuda/serial.py").read_text()
+    fn = next(n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == "kv_mode")
+    scope = {"os": __import__("os")}
+    exec(compile(ast.Module([fn], []), "serial.py", "exec"), scope)
+    kv_mode = scope["kv_mode"]
+
+    assert kv_mode({}) == "fp4"
+    assert kv_mode({"TF_DSV41_KV": "", "TF_DSV41_KV_FP8": ""}) == "fp4"
+    assert kv_mode({"TF_DSV41_KV_FP8": "1"}) == "fp4"
+    assert kv_mode({"TF_DSV41_KV_FP8": "0"}) == "bf16"
+    assert kv_mode({"TF_DSV41_KV": "fp8", "TF_DSV41_KV_FP8": "0"}) == "fp8"

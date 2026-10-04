@@ -35,9 +35,9 @@ services:
       TF_PORT: ${PORT:-8888}
       TF_API_KEY: ${TF_API_KEY:-}
       TF_CARVEOUT: ${TF_CARVEOUT:-1}
-      TF_DSV41_KV_FP8: ${TF_DSV41_KV_FP8:-1}
-      # per-token cache format: fp8 (V4 layout), fp4 (V4.1's native NVFP4 / MXFP4 / FP8-window numerics), bf16;
-      # empty: TF_DSV41_KV_FP8 decides (1 fp8, 0 bf16)
+      TF_DSV41_KV_FP8: ${TF_DSV41_KV_FP8:-}
+      # per-token cache format: fp4 (V4.1's native NVFP4 / MXFP4 / FP8-window numerics), fp8 (V4 layout), bf16;
+      # empty: fp4, or bf16 with the older TF_DSV41_KV_FP8=0
       TF_DSV41_KV: ${TF_DSV41_KV:-}
       TF_DSV41_FIXED_GIB: ${TF_DSV41_FIXED_GIB:-}
       TF_DSV41_ENGRAM_DIR: /models/${ENGRAM:-dsv41/DeepSeek-V4.1-Flash-engram}

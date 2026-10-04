@@ -32,7 +32,7 @@ that is not coming. Start and stop both with `make`.
 
 With `TF_DSV41_DISK=/kvdisk` (and `KV_DISK_DIR`, node-local NVMe, on both nodes; see `.env.example`) a kept prompt
 state the shared pool evicts is written to disk (both ranks, in step) and restored into the pool when a later prompt
-resumes from it: a read of ~75 MB for 32K tokens instead of half a minute of prefill. `make down` ends the live
+resumes from it: a read of ~45 MB for 32K tokens (fp4 KV; ~75 MB in fp8) instead of half a minute of prefill. `make down` ends the live
 streams and writes every kept state first (`STOP_GRACE_S`, 150 s when the tier is on); the next start keeps the
 entries both ranks hold. Entries live in a directory named by a hash of the build (source, model files, knobs,
 libraries, device): a new image starts empty, and the old directories can be deleted. `TF_DSV41_DISK_GIB` (128)

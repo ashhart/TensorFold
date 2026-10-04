@@ -135,11 +135,15 @@ ONE_GRAPH = os.environ.get("TF_ONE_GRAPH", "1") != "0"  # timing experiments: no
 STEP_READ_THREADS = int(os.environ.get("TF_STEP_THREADS") or "16")   # decode/verify Engram row reads (few rows)
 # decode/verify: each rank reads its share of a token's Engram rows and the graphs all-gather the bytes (same rows)
 SPLIT_READS = os.environ.get("TF_SPLIT_READS", "1") != "0"
-# the per-token caches (TF_DSV41_KV): "fp8" (V4's layout: 448 e4m3 + 64 bf16 RoPE dims + 7 fp32 scales an entry, an
-# fp32 scale a key; ~1.8 KB a token instead of 3.2; long parity unchanged: NLL 1.676 / 1.631 / 1.613 at 8K / 24K / 40K
-# vs bf16 1.674 / 1.630 / 1.612), "bf16", or "fp4": V4.1's native numerics (the formats it was trained with): NVFP4
-# entries, MXFP4 indexer keys (890 B a token). TF_DSV41_KV_FP8=0 (the older switch) still means bf16.
-KV_MODE = os.environ.get("TF_DSV41_KV") or ("fp8" if (os.environ.get("TF_DSV41_KV_FP8") or "1") == "1" else "bf16")
+# the per-token caches (TF_DSV41_KV): "fp4" (default): V4.1's native numerics (the formats it was trained with): NVFP4
+# entries, MXFP4 indexer keys (890 B a token; teacher-forced NLL vs bf16 +0.0016, fp8 +0.0003; at 16 x 614400 the
+# shared pool held 5.93M tokens vs 2.38M, long prefill 3-7% slower), "fp8" (V4's layout: 448 e4m3 + 64 bf16 RoPE dims + 7 fp32 scales an entry,
+# an fp32 scale a key; ~1.8 KB a token instead of 3.2) or "bf16". TF_DSV41_KV_FP8=0 (the older switch) still means bf16.
+def kv_mode(env=os.environ) -> str:
+    return env.get("TF_DSV41_KV") or ("bf16" if env.get("TF_DSV41_KV_FP8") == "0" else "fp4")
+
+
+KV_MODE = kv_mode()
 if KV_MODE not in ("bf16", "fp8", "fp4"):
     raise ValueError(f"TF_DSV41_KV={KV_MODE}: bf16, fp8 or fp4")
 K.TIE_KEYS = KV_MODE == "fp4"

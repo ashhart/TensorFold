@@ -16,7 +16,7 @@ import torch
 
 from tensorfold.cuda.comm import NCCL
 from tensorfold.families.deepseek_v41.cuda import weights as W
-from tensorfold.families.deepseek_v41.cuda.serial import MAX_ROWS, Comm, SerialEngine
+from tensorfold.families.deepseek_v41.cuda.serial import KV_MODE, MAX_ROWS, Comm, SerialEngine
 
 
 def main() -> None:
@@ -332,7 +332,7 @@ def main() -> None:
             if int(got[0]) != int(got[1]):
                 raise RuntimeError("the ranks built different documents")
 
-        out = {"kv": os.environ.get("TF_DSV41_KV") or "fp8", "env": {k: v for k, v in os.environ.items()
+        out = {"kv": KV_MODE, "env": {k: v for k, v in os.environ.items()
                                                                        if k.startswith("TF_DSV41")}, "docs": {}}
         if args.rank == 0:
             print(f"[quality] repo code {len(code)} tokens, markdown {len(prose)}, golden {len(golden)}", flush=True)

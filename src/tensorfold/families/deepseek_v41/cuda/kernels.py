@@ -656,9 +656,10 @@ TIE_KEYS = False
 
 
 @triton.jit
-def _tie_pick(X, THR, OUT, S, K: tl.constexpr, BS: tl.constexpr):
+def _tie_pick(X, THR, OUT, S, K, BS: tl.constexpr):
     """Row r of X [R, S] fp32: the columns above THR[r] (its k-th value) and the lowest-index ones equal to it, K in
-    all, ascending into OUT [R, K] int64 (two passes: count above, then select with running counts)."""
+    all, ascending into OUT [R, K] int64 (two passes: count above, then select with running counts). K is a runtime
+    value: short prompts' k follows their length, and a constexpr would compile a kernel per length mid-request."""
 
     r = tl.program_id(0).to(tl.int64)
     thr = tl.load(THR + r)
@@ -695,7 +696,7 @@ def topk_lo(x: torch.Tensor, k: int, ids: torch.Tensor | None = None, sorted: bo
         x = x.contiguous()
         thr = torch.topk(x, k, dim=1, sorted=False).values.amin(1).contiguous()
         i = torch.empty((x.shape[0], k), dtype=torch.int64, device=x.device)
-        _tie_pick[(x.shape[0],)](x, thr, i, x.shape[1], K=k, BS=1024, num_warps=4)
+        _tie_pick[(x.shape[0],)](x, thr, i, x.shape[1], k, BS=1024, num_warps=4)
         if sorted:
             i = torch.gather(i, 1, torch.sort(torch.gather(x, 1, i), dim=1, descending=True, stable=True).indices)
         return torch.gather(x, 1, i), i
