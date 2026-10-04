@@ -129,3 +129,11 @@ https://github.com/antirez/h3.c, revision 8974cc0, MIT, Copyright (c) 2026 Salva
 activation scales, per-output-channel weight scales and 128x128x128 int8 tiles. No h3.c source is included.
 
 MiniMax H3 weights are under the MiniMax Community License; TensorFold ships no model weights.
+
+`src/tensorfold/families/qwen_image/` (`dit.py`, `schedule.py`, `vae.py`) is adapted from mflux,
+https://github.com/mflux-community/mflux, revision add5164, MIT, Copyright (c) 2026 Filip Strand. mflux's qwen21
+model follows `QwenImage21Transformer2DModel` and `AutoencoderKLQwenImage21` from Hugging Face diffusers,
+Apache-2.0, Copyright 2026 The Qwen Team and The HuggingFace Team.
+
+Qwen-Image-2.1 weights are under the Qwen Research License Agreement (non-commercial); TensorFold ships no model
+weights.
