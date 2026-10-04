@@ -44,7 +44,8 @@ constexpr int NT = 32 * NW;
 constexpr int T_BYTES = ST * D * 2;                 // bf16 stage, swizzled 16-byte granules
 constexpr int PP = 40;                              // partial-score row pitch (floats): conflict-free float2
 constexpr int PART_BYTES = NW * 16 * PP * 4;
-constexpr int FIN_BYTES = 16 * PP * 4;
+constexpr int PBP = 20;                             // P row pitch (bf16 pairs): conflict-free A fragments
+constexpr int FIN_BYTES = (16 * PBP + 32) * 4;
 constexpr int SMEM = 2 * T_BYTES + PART_BYTES + FIN_BYTES + 3 * NT * 4;
 
 // granule c of stage row r: low 3 bits xored with a bijection of r & 7 that puts rows 2m, 2m+1 four granules apart
@@ -123,9 +124,9 @@ __device__ __forceinline__ void cp_async16(uint32_t dst, const void* src, bool o
 }
 
 // One stage of 32 candidates in T (bf16, swizzled) against the CTA's 16 heads, as a partial of its own: QK over warp
-// w's 64 dims (the 8 partial scores summed in a fixed tree), the stage's max m, numerators p = e^(s - m) (natural
-// log, as the Triton chunks; P rounded to bf16 for PV) and their sum l, PV into the warp's 64 output dims (acc: zero
-// on entry). vm: the stage's valid candidates (none: m = -inf, l = 0, acc stays zero).
+// w's 64 dims, the stage's max m, numerators p = e^(s - m) and their sum l (computed once, shared through fin), PV
+// into the warp's 64 output dims (acc: zero on entry). vm: the stage's valid candidates (none: m = -inf, l = 0, acc
+// stays zero).
 __device__ __forceinline__ void attend(const uint8_t* T, float* part, float* fin, uint32_t vm, const uint4 (&qa)[2][2],
                                        float (&acc)[8][4], float& m0, float& m1, float& l0, float& l1,
                                        float scale) {
@@ -152,57 +153,43 @@ __device__ __forceinline__ void attend(const uint8_t* T, float* part, float* fin
         *reinterpret_cast<float2*>(mine + (gr + 8) * PP + 8 * j + 2 * t) = make_float2(sc[j][2], sc[j][3]);
     }
     __syncthreads();
-    // the 8 quarters summed in a fixed tree, two scores a thread, scaled and masked
+    // two scores a thread (row tid / 16): the 8 quarters summed in a fixed tree, scaled and masked; the row's max and
+    // numerators e^(s - m) (natural log, as the Triton chunks), their sum over the row's 16 threads in a fixed tree;
+    // P to bf16 for PV
     {
         const int hh = tid >> 4, c = (tid & 15) * 2;
         float2 v[NW];
 #pragma unroll
         for (int u = 0; u < NW; ++u) v[u] = *reinterpret_cast<const float2*>(part + (u * 16 + hh) * PP + c);
-        const float a = ((v[0].x + v[1].x) + (v[2].x + v[3].x)) + ((v[4].x + v[5].x) + (v[6].x + v[7].x));
-        const float b = ((v[0].y + v[1].y) + (v[2].y + v[3].y)) + ((v[4].y + v[5].y) + (v[6].y + v[7].y));
-        *reinterpret_cast<float2*>(fin + hh * PP + c) =
-            make_float2((vm >> c) & 1u ? a * scale : -INFINITY, (vm >> (c + 1)) & 1u ? b * scale : -INFINITY);
+        float sa = ((v[0].x + v[1].x) + (v[2].x + v[3].x)) + ((v[4].x + v[5].x) + (v[6].x + v[7].x));
+        float sb = ((v[0].y + v[1].y) + (v[2].y + v[3].y)) + ((v[4].y + v[5].y) + (v[6].y + v[7].y));
+        sa = (vm >> c) & 1u ? sa * scale : -INFINITY;
+        sb = (vm >> (c + 1)) & 1u ? sb * scale : -INFINITY;
+        float mx = fmaxf(sa, sb);
+#pragma unroll
+        for (int x = 1; x < 16; x <<= 1) mx = fmaxf(mx, __shfl_xor_sync(0xFFFFFFFFu, mx, x));
+        const float pa = sa == -INFINITY ? 0.f : ex(__fsub_rn(sa, mx));
+        const float pb = sb == -INFINITY ? 0.f : ex(__fsub_rn(sb, mx));
+        float sum = __fadd_rn(pa, pb);
+#pragma unroll
+        for (int x = 1; x < 16; x <<= 1) sum = __fadd_rn(sum, __shfl_xor_sync(0xFFFFFFFFu, sum, x));
+        reinterpret_cast<uint32_t*>(fin)[hh * PBP + (tid & 15)] = pack_bf16(pa, pb);
+        if ((tid & 15) == 0) {
+            fin[16 * PBP + hh] = mx;
+            fin[16 * PBP + 16 + hh] = sum;
+        }
     }
     __syncthreads();
-    float x[4][4];
-    float mx0 = -INFINITY, mx1 = -INFINITY;
-#pragma unroll
-    for (int j = 0; j < 4; ++j) {
-        const float2 a = *reinterpret_cast<const float2*>(fin + gr * PP + 8 * j + 2 * t);
-        const float2 b = *reinterpret_cast<const float2*>(fin + (gr + 8) * PP + 8 * j + 2 * t);
-        x[j][0] = a.x; x[j][1] = a.y; x[j][2] = b.x; x[j][3] = b.y;
-        mx0 = fmaxf(mx0, fmaxf(x[j][0], x[j][1]));
-        mx1 = fmaxf(mx1, fmaxf(x[j][2], x[j][3]));
-    }
-    mx0 = fmaxf(mx0, __shfl_xor_sync(0xFFFFFFFFu, mx0, 1));
-    mx0 = fmaxf(mx0, __shfl_xor_sync(0xFFFFFFFFu, mx0, 2));
-    mx1 = fmaxf(mx1, __shfl_xor_sync(0xFFFFFFFFu, mx1, 1));
-    mx1 = fmaxf(mx1, __shfl_xor_sync(0xFFFFFFFFu, mx1, 2));
-    // the stage's own softmax numerators (every stage starts afresh: fold() combines them)
-    float s0 = 0.f, s1 = 0.f;
-#pragma unroll
-    for (int j = 0; j < 4; ++j) {
-        x[j][0] = x[j][0] == -INFINITY ? 0.f : ex(__fsub_rn(x[j][0], mx0));
-        x[j][1] = x[j][1] == -INFINITY ? 0.f : ex(__fsub_rn(x[j][1], mx0));
-        x[j][2] = x[j][2] == -INFINITY ? 0.f : ex(__fsub_rn(x[j][2], mx1));
-        x[j][3] = x[j][3] == -INFINITY ? 0.f : ex(__fsub_rn(x[j][3], mx1));
-        s0 = __fadd_rn(s0, __fadd_rn(x[j][0], x[j][1]));
-        s1 = __fadd_rn(s1, __fadd_rn(x[j][2], x[j][3]));
-    }
-    s0 = __fadd_rn(s0, __shfl_xor_sync(0xFFFFFFFFu, s0, 1));
-    s0 = __fadd_rn(s0, __shfl_xor_sync(0xFFFFFFFFu, s0, 2));
-    s1 = __fadd_rn(s1, __shfl_xor_sync(0xFFFFFFFFu, s1, 1));
-    s1 = __fadd_rn(s1, __shfl_xor_sync(0xFFFFFFFFu, s1, 2));
-    m0 = mx0;
-    m1 = mx1;
-    l0 = s0;
-    l1 = s1;
+    const uint32_t* pw = reinterpret_cast<const uint32_t*>(fin);
+    m0 = fin[16 * PBP + gr];
+    m1 = fin[16 * PBP + gr + 8];
+    l0 = fin[16 * PBP + 16 + gr];
+    l1 = fin[16 * PBP + 16 + gr + 8];
     // PV: P (bf16, from the score fragments) x V^T (ldmatrix.trans) over the warp's 64 output dims
 #pragma unroll
     for (int kk = 0; kk < 2; ++kk) {
-        const uint32_t pa[4] = {pack_bf16(x[2 * kk][0], x[2 * kk][1]), pack_bf16(x[2 * kk][2], x[2 * kk][3]),
-                                pack_bf16(x[2 * kk + 1][0], x[2 * kk + 1][1]),
-                                pack_bf16(x[2 * kk + 1][2], x[2 * kk + 1][3])};
+        const uint32_t pa[4] = {pw[gr * PBP + 8 * kk + t], pw[(gr + 8) * PBP + 8 * kk + t],
+                                pw[gr * PBP + 8 * kk + 4 + t], pw[(gr + 8) * PBP + 8 * kk + 4 + t]};
         const int mi = lane >> 3, cand = kk * 16 + (mi & 1) * 8 + (lane & 7);
         const uint8_t* rowp = T + cand * 1024;
 #pragma unroll
@@ -399,14 +386,19 @@ merge_kernel(const float* __restrict__ PO, const float* __restrict__ PM, const f
     const int r = blockIdx.x, h = blockIdx.y, d = threadIdx.x * 4;
     float fm = SINK[h], fl = 1.f;
     float4 fo = make_float4(0.f, 0.f, 0.f, 0.f);
-    // parts in batches of MB: every load of a batch in flight at once, then folded in order
+    // parts in batches of MB: every load of a batch in flight at once, then folded in order (a missing part is an
+    // empty one; a group's end folds it onto the sink and starts the next group empty)
     float cm = -INFINITY, cl = 0.f;
     float4 cv = make_float4(0.f, 0.f, 0.f, 0.f);
+    int left = ppg;                                       // parts until the current group ends
     for (int k0 = 0; k0 < nparts; k0 += MB) {
         float bm[MB], bl[MB];
         float4 bv[MB];
 #pragma unroll
         for (int u = 0; u < MB; ++u) {
+            bm[u] = -INFINITY;
+            bl[u] = 0.f;
+            bv[u] = make_float4(0.f, 0.f, 0.f, 0.f);
             if (k0 + u < nparts) {
                 const int64_t b = ((int64_t)r * nparts + k0 + u) * H + h;
                 bm[u] = PM[b];
@@ -416,16 +408,14 @@ merge_kernel(const float* __restrict__ PO, const float* __restrict__ PM, const f
         }
 #pragma unroll
         for (int u = 0; u < MB; ++u) {
-            const int k = k0 + u;
-            if (k >= nparts) break;
             float a, bb;
             const bool keep = fold_w(cm, cl, bm[u], bl[u], a, bb);
             cv.x = fold_o(cv.x, bv[u].x, a, bb, keep);
             cv.y = fold_o(cv.y, bv[u].y, a, bb, keep);
             cv.z = fold_o(cv.z, bv[u].z, a, bb, keep);
             cv.w = fold_o(cv.w, bv[u].w, a, bb, keep);
-            if ((k + 1) % ppg == 0 || k + 1 == nparts) {    // a group done: onto the sink (never empty)
-                const bool kg = fold_w(fm, fl, cm, cl, a, bb);
+            if (--left == 0 || k0 + u + 1 == nparts) {       // (uniform across the block: one row and head)
+                const bool kg = fold_w(fm, fl, cm, cl, a, bb);   // onto the sink (never empty)
                 fo.x = fold_o(fo.x, cv.x, a, bb, kg);
                 fo.y = fold_o(fo.y, cv.y, a, bb, kg);
                 fo.z = fold_o(fo.z, cv.z, a, bb, kg);
@@ -433,6 +423,7 @@ merge_kernel(const float* __restrict__ PO, const float* __restrict__ PM, const f
                 cm = -INFINITY;
                 cl = 0.f;
                 cv = make_float4(0.f, 0.f, 0.f, 0.f);
+                left = ppg;
             }
         }
     }
