@@ -83,3 +83,21 @@ shots). With 3 forwards the int8 path lands on a different composition from the 
 reports the difference: zero with the same bfloat16 input rounding. The float32 video decode equals minimax-h3-mlx's
 on real latents. The sampler refuses a modality that does not start from unit noise: video and audio denoise in one
 sequence, so a constant audio start corrupts the picture as well as the sound.
+
+## A 2x decoder (optional)
+
+`load_video_decoder(..., upscale_decoder=FILE)` and the tool's `--upscale-vae FILE` take a replacement ViT decoder
+whose head packs 12 channels, such as `speach1sdef178/MiniMax-H3-X2-Detail-VAE` (`MiniMax-H3-X2-Detail-v1.safetensors`,
+MiniMax H3 Community License). The tiles are decoded and blended as usual and each packed pixel is then spread over a
+2x2 cell, so the frames come out twice as large along each side for the same latents and the same decode time. Only
+that file's decoder is used; its reference-image detail branch is not ported.
+
+| 8 s clip, Turbo adapter, int8 | Rows | Per forward | Clip |
+| --- | ---: | ---: | ---: |
+| generated and decoded at 1344x768 | 60,403 | 104.9 s | 353 s |
+| generated at 672x384, decoded at 1344x768 | 15,800 | 8.9 s | 56 s |
+
+One prompt and seed. The 2x decode of the small clip is softer than the native 1344x768 clip, with visible stair-steps
+on high-contrast edges; it is an upscale, not the detail of a larger generation. A 1344x768 generation decodes to
+2688x1536 in the same time as its normal decode.
+

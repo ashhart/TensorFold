@@ -46,6 +46,12 @@ class DecoderConfig:
     def dim(self) -> int:
         return self.heads * self.head_dim
 
+    @property
+    def upscale(self) -> int:
+        """Pixels per decoded pixel along each side: 1 for the released decoder, 2 for a packed 12-channel head."""
+
+        return math.isqrt(self.out_channels // 3)
+
     @classmethod
     def from_checkpoint(cls, model_dir) -> DecoderConfig:
         root = pipeline_root(model_dir)
@@ -324,13 +330,22 @@ class VideoDecoder(nn.Module):
         mean = mx.array(np.array(config.latents_mean, np.float32)).reshape(1, -1, 1, 1, 1)
         std = mx.array(np.array(config.latents_std, np.float32)).reshape(1, -1, 1, 1, 1)
         pixels = np.array(self.decode((latents * std + mean).astype(mx.float32)))
+        up = config.upscale
+        if up > 1:  # packed head: channel c * up * up + i * up + j is pixel (i, j) of colour c's up x up cell
+            batch, _, count, height, width = pixels.shape
+            pixels = pixels.reshape(batch, 3, up, up, count, height, width).transpose(0, 1, 4, 5, 2, 6, 3)
+            pixels = pixels.reshape(batch, 3, count, height * up, width * up)
         pixels = pixels * np.array(PIXEL_STD, np.float32).reshape(1, 3, 1, 1, 1)
         pixels = pixels + np.array(PIXEL_MEAN, np.float32).reshape(1, 3, 1, 1, 1)
         return (np.clip(pixels, 0.0, 1.0)[0].transpose(1, 2, 3, 0) * 255.0 + 0.5).astype(np.uint8)
 
 
-def load_video_decoder(model_dir, int8: bool = True, batch: int = 8) -> VideoDecoder:
+def load_video_decoder(model_dir, int8: bool = True, batch: int = 8, upscale_decoder=None) -> VideoDecoder:
     """The video decoder from a released pipeline folder; the encoder half of the checkpoint is not read.
+
+    ``upscale_decoder`` is a safetensors file holding a replacement ViT decoder whose output head packs
+    ``3 * n * n`` channels (a 2x decoder has 12): its frames come out ``n`` times larger along each side. Tensors
+    it does not hold, such as the latent convolution, are taken from the released checkpoint.
 
     ``int8`` runs the ViT's SwiGLU, QKV and output projections through the tensor-unit kernels (about 47 dB
     against the float32 decode); it is ignored where those operations are unavailable.
@@ -341,16 +356,31 @@ def load_video_decoder(model_dir, int8: bool = True, batch: int = 8) -> VideoDec
     root = pipeline_root(model_dir)
     if root is None:
         raise FileNotFoundError(f"{model_dir} is not a MiniMax H3 pipeline folder")
-    model = VideoDecoder(DecoderConfig.from_checkpoint(model_dir), batch=batch)
-    expected = {name for name, _ in tree_flatten(model.parameters())}
+    config = DecoderConfig.from_checkpoint(model_dir)
+    sources = [mx.load(str(root / "video_vae" / "source" / "model.safetensors"))]
+    if upscale_decoder is not None:
+        replacement = mx.load(str(upscale_decoder))
+        head = replacement.get("decoder.proj_out.weight")
+        block = config.temporal_ratio * config.spatial_ratio * config.spatial_ratio
+        if head is None or head.shape[0] % (3 * block) or math.isqrt(head.shape[0] // (3 * block)) ** 2 != head.shape[0] // (
+                3 * block):
+            raise ValueError(f"{upscale_decoder} has no packed decoder head")
+        config = DecoderConfig(**{**config.__dict__, "out_channels": head.shape[0] // block})
+        sources.append(replacement)  # read last, so its decoder tensors replace the released ones
+    model = VideoDecoder(config, batch=batch)
+    expected = {name: value for name, value in tree_flatten(model.parameters())}
     found = {}
-    for name, tensor in mx.load(str(root / "video_vae" / "source" / "model.safetensors")).items():
-        if name == "post_quant_conv.weight":
-            found["post_quant.weight"] = tensor.reshape(tensor.shape[0], 1, 1, 1, tensor.shape[1])
-        elif name == "post_quant_conv.bias":
-            found["post_quant.bias"] = tensor
-        elif name in expected:
-            found[name] = tensor
+    for tensors in sources:
+        for name, tensor in tensors.items():
+            if name == "post_quant_conv.weight":
+                found["post_quant.weight"] = tensor.reshape(tensor.shape[0], 1, 1, 1, tensor.shape[1])
+            elif name == "post_quant_conv.bias":
+                found["post_quant.bias"] = tensor
+            elif name in expected and tuple(tensor.shape) == tuple(expected[name].shape):
+                found[name] = tensor
+    reference = found["decoder.x_embedder.weight"].dtype if upscale_decoder is None else mx.float32
+    found = {name: tensor.astype(reference) if tensor.dtype != reference and upscale_decoder is not None else tensor
+             for name, tensor in found.items()}
     missing = sorted(expected - found.keys())
     if missing:
         raise KeyError(f"{len(missing)} decoder parameters are not in the checkpoint, e.g. {missing[:3]}")
