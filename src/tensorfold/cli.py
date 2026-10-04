@@ -281,6 +281,11 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
     stacks.arm()            # its warmup may have loaded a compiler that took USR1
     if args.tp == 2 and args.rank == 1:
         print(f"[tensorfold] rank 1 ready in {time.perf_counter() - started:.1f}s, following rank 0", flush=True)
+        if getattr(engine, "disk", None) is not None:
+            # kept prompts are written to disk when rank 0 stops (it says when): a SIGTERM must not end rank 1
+            # first (as in docker, where python is PID 1 and ignores it; rank 1 leaves follow when rank 0 is done)
+            signal.signal(signal.SIGTERM, lambda *a: print("[tensorfold] rank 1: SIGTERM, waiting for rank 0 to "
+                                                           "write the kept prompts and stop", flush=True))
         engine.follow()
         return 0
     from tensorfold.cuda.server import App, serve
@@ -306,7 +311,12 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
           f"(sampling: {shown}; drafts: {'off' if args.no_drafts else 'on'}; prompts: {prompts}; "
           f"context: {'unlimited' if effective_context is None else effective_context}; "
           f"loaded in {time.perf_counter() - started:.1f}s)", flush=True)
-    serve(app, args.host, int(args.port))
+    try:
+        serve(app, args.host, int(args.port))
+    finally:
+        stop = getattr(engine, "stop_serving", None)       # e.g. DeepSeek-V4.1 writes its kept prompts to NVMe
+        if stop is not None:
+            stop()
     return 0
 
 

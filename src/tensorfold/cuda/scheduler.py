@@ -52,6 +52,7 @@ class Scheduler:
         self.yields = 0                              # background streams that gave up their lane
         self.call_since: float | None = None         # monotonic start of the engine call running now (/health)
         self.last_round: float | None = None         # monotonic end of the last round that returned
+        self._quit = False                           # shutdown(): the worker stops between rounds
         if hasattr(decoder, "arrived"):              # a decoder filling prompts lets a new request in between passes
             decoder.arrived = self.waiting.foreground
         self.thread = threading.Thread(target=self._loop, daemon=True)
@@ -63,6 +64,31 @@ class Scheduler:
         self.waiting.stop()
         self.thread.join()
         self.decoder = None
+
+    def shutdown(self, timeout: float = 120.0) -> None:
+        """The server stops: the worker refuses what waits, then (between rounds) has the decoder end its live
+        streams and wrap up (``decoder.shutdown``: e.g. write kept prompts to disk on both ranks), and returns."""
+
+        self._quit = True
+        self.waiting.stop()
+        self.thread.join(timeout)
+
+    def _stop(self) -> None:
+        """The worker's last act after ``shutdown``: every request waiting or live answered with an error."""
+
+        exc = RuntimeError("the server is shutting down; retry the request after it restarts")
+        if self.held is not None:
+            self.held[1].put(("error", exc))
+            self.held = None
+        while True:
+            try:
+                item = self.waiting.get_nowait()
+            except queue.Empty:
+                break
+            if item is not None:
+                item[1].put(("error", exc))
+        for s in getattr(self.decoder, "shutdown", list)():
+            self._reply(s, "error", exc)
 
     def submit(self, prompt: list[int], count: int, sampling: Any, draft: bool,
                emit: Callable[[list[int]], bool | None], stop_eos: bool = True, *, vision: Any = None,
@@ -169,10 +195,19 @@ class Scheduler:
 
     def _loop(self) -> None:
         while True:
+            if self._quit:                                                            # shutdown()
+                self._stop()
+                return
             with self._calling():
                 self._yield()
             idle = not self.decoder.live() and self.held is None
             first = self.waiting.get() if idle else None                              # idle: wait for a request
+            if self._quit:
+                if first is not None:
+                    first[1].put(("error", RuntimeError("the server is shutting down; retry the request after it "
+                                                        "restarts")))
+                self._stop()
+                return
             if idle and first is None:
                 return                                                                # close()
             with self._calling():
