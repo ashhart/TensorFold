@@ -11,7 +11,7 @@ from typing import Any
 
 import numpy as np
 
-from tensorfold.families.qwen4_exp.ssd_table import SSDTable
+from tensorfold.families.qwen4_exp.ssd_table import SSDRows, SSDTable
 
 _PARTS = ("weight", "scales", "biases")
 # a prompt chunk's gather copies big row runs on worker threads (GIL released); bytes stay the same as single-threaded
@@ -221,8 +221,6 @@ class FP8Table(BF16Table):
     """e4m3 n-gram shards with one table scale: lookups give bf16(e4m3 x scale) through a 256-entry table."""
 
     def __init__(self, files: list[tuple[Path, dict]], scale: float) -> None:
-        from tensorfold.cuda.nvfp4.format import e4m3
-
         self.values, starts = [], [0]
         for path, weight in files:
             if not isinstance(weight, dict) or weight.get("dtype") != "F8_E4M3":
@@ -237,9 +235,7 @@ class FP8Table(BF16Table):
         self.wrow = self.width
         self.nbytes = sum(a.nbytes for a in self.values)
         self._pool = ThreadPoolExecutor(GATHER_THREADS, thread_name_prefix="ngram-gather")
-        f32 = (e4m3(np.arange(256)) * np.float32(scale)).astype(np.float32).view(np.uint32).astype(np.uint64)
-        self.lut = ((f32 + 0x7FFF + ((f32 >> 16) & 1)) >> 16).astype(np.uint16)   # round to nearest even
-        self.lut[(np.arange(256) & 0x7F) == 0x7F] = 0x7FC0                         # e4m3's NaN codes stay NaN
+        self.lut = _fp8_lut(scale)
 
     def gather(self, ids: np.ndarray) -> np.ndarray:
         """Rows ``ids`` (global) -> [n, W] uint16 (bf16 bits of e4m3 x scale)."""
@@ -250,15 +246,15 @@ class FP8Table(BF16Table):
 class NVFP4Table(BF16Table):
     """NVFP4 n-gram shards (e2m1 codes, e4m3 a 16 values, one fp32 table scale): lookups give bf16(code x scale x g)."""
 
-    def __init__(self, files: list[tuple[Path, dict, dict]], scale: float) -> None:
+    def __init__(self, files: list[tuple[Path, dict, dict] | tuple[Path, dict, dict, Path]], scale: float) -> None:
         from tensorfold.cuda.nvfp4.format import E2M1, e4m3
 
         self.values, self.scales, starts = [], [], [0]
-        for path, weight, block in files:
+        for path, weight, block, *block_path in files:
             if weight.get("dtype") != "U8" or block.get("dtype") != "F8_E4M3":
                 raise ValueError(f"{Path(path).name}: NVFP4 n-gram shards are U8 codes with F8_E4M3 scales")
             self.values.append(_memmap(path, weight, np.uint8))
-            self.scales.append(_memmap(path, block, np.uint8))
+            self.scales.append(_memmap(block_path[0] if block_path else path, block, np.uint8))
             if self.values[-1].shape[1] != self.values[0].shape[1] or \
                     self.scales[-1].shape[1] * 8 != self.values[-1].shape[1]:
                 raise ValueError(f"{Path(path).name}: the n-gram shards differ in row width")
@@ -282,16 +278,91 @@ class NVFP4Table(BF16Table):
             codes[at], blocks[at] = self.values[f][local[at]], self.scales[f][local[at]]
 
         _copy_rows(self._pool, shard, copy)
-        nib = np.stack([codes & 0xF, codes >> 4], -1).reshape(shard.size, self.width)
-        v = (self.e2m1[nib] * np.repeat(self.e4m3[blocks], 16, axis=1)).astype(np.float32) * self.g
-        f32 = v.astype(np.float32).view(np.uint32).astype(np.uint64)
-        return ((f32 + 0x7FFF + ((f32 >> 16) & 1)) >> 16).astype(np.uint16)
+        return _nvfp4_rows(codes, blocks, self.e2m1, self.e4m3, self.g)
 
     def lock(self) -> bool:
         return False
 
     def prefetch(self, workers: int = 8) -> float:
         return _prefetch(self.values + self.scales, workers)
+
+
+def _fp8_lut(scale: float) -> np.ndarray:
+    """The resident FP8 table's exact bf16 rounding, including canonical NaN codes."""
+
+    from tensorfold.cuda.nvfp4.format import e4m3
+
+    f32 = (e4m3(np.arange(256)) * np.float32(scale)).astype(np.float32).view(np.uint32).astype(np.uint64)
+    lut = ((f32 + 0x7FFF + ((f32 >> 16) & 1)) >> 16).astype(np.uint16)
+    lut[(np.arange(256) & 0x7F) == 0x7F] = 0x7FC0
+    return lut
+
+
+def _nvfp4_rows(codes: np.ndarray, blocks: np.ndarray, e2m1: np.ndarray, e4m3: np.ndarray,
+                scale: np.float32) -> np.ndarray:
+    """Resident NVFP4 arithmetic: low nibble first, two fp32 multiplies and one bf16 rounding."""
+
+    nib = np.stack([codes & 0xF, codes >> 4], -1).reshape(codes.shape[0], codes.shape[1] * 2)
+    v = (e2m1[nib] * np.repeat(e4m3[blocks], 16, axis=1)).astype(np.float32) * scale
+    f32 = v.astype(np.float32).view(np.uint32).astype(np.uint64)
+    return ((f32 + 0x7FFF + ((f32 >> 16) & 1)) >> 16).astype(np.uint16)
+
+
+class SSDValueTable(SSDRows):
+    """BF16, scalar FP8 or NVFP4 rows decoded at each lookup, using the resident table's arithmetic."""
+
+    bits = 16
+
+    def __init__(self, files: list[list[tuple[Path, dict]]], layout: str, scale: float = 1.0,
+                 *, nocache: bool = True) -> None:
+        self.layout = layout
+        kinds = {"bf16": (("weight", "BF16", 2),), "fp8": (("weight", "F8_E4M3", 1),),
+                 "nvfp4": (("weight", "U8", 1), ("weight_scale", "F8_E4M3", 1))}
+        if layout not in kinds:
+            raise ValueError(f"unsupported n-gram SSD layout: {layout}")
+        if layout in ("fp8", "nvfp4"):
+            scale = _ssd_scale(scale)
+        super().__init__(files, kinds[layout], nocache=nocache)
+        self.wrow = self.widths[0]
+        self.width = self.wrow // 2 if layout == "bf16" else self.wrow * (2 if layout == "nvfp4" else 1)
+        if layout == "fp8":
+            self.lut = _fp8_lut(scale)
+        elif layout == "nvfp4":
+            from tensorfold.cuda.nvfp4.format import E2M1, e4m3
+
+            self.e2m1, self.e4m3, self.g = E2M1, e4m3(np.arange(256)), np.float32(scale)
+            self._inline_rows = 16
+
+    def _validate(self, rows: int, spans: list[tuple[int, int, int]], name: str) -> None:
+        """Require one NVFP4 block scale for every 16 unpacked values."""
+
+        super()._validate(rows, spans, name)
+        if self.layout == "nvfp4" and spans[0][1] != 8 * spans[1][1]:
+            raise ValueError(f"{name}: NVFP4 n-gram rows need a scale every 16 values")
+
+    def gather(self, ids: np.ndarray) -> np.ndarray:
+        """Rows ``ids`` -> [n, W] uint16 bf16 bits, identical to resident gathers."""
+
+        rows = super().gather(ids)
+        if self.layout == "bf16":
+            return rows[0].view(np.uint16)
+        if self.layout == "fp8":
+            return self.lut[rows[0]]
+        return _nvfp4_rows(*rows, self.e2m1, self.e4m3, self.g)
+
+    def lock(self) -> bool:
+        """No table mappings exist to pin."""
+
+        return False
+
+
+def _ssd_scale(scale: float) -> np.float32:
+    """Require one finite scalar representable by the checkpoint's fp32 arithmetic."""
+
+    value = np.asarray(scale)
+    if value.size != 1 or not np.isfinite(value).all() or abs(float(value.reshape(-1)[0])) > float(np.finfo(np.float32).max):
+        raise ValueError("the n-gram table scale must be one finite fp32 scalar")
+    return np.float32(value.reshape(-1)[0])
 
 
 def shard_keys(name: str, count: int, names) -> list[str]:
@@ -301,33 +372,62 @@ def shard_keys(name: str, count: int, names) -> list[str]:
                   if key + ".weight" in names), f"{name}.shard_{i}") for i in range(count)]
 
 
-def open_table(model_dir: Path, shards: list[tuple[str, str]], scale, *, ssd: bool = False):
-    """The n-gram table in its shards' layout (MLX 4-bit, bf16, FP8, NVFP4); ``scale(name)`` reads a table scale."""
+def open_table(model_dir: Path, shards: list[tuple[str, str]], scale, *, ssd: bool = False,
+               tensor_files: dict[str, str] | None = None):
+    """Open each stored layout; optional checkpoint metadata places scales in their own files."""
 
     headers: dict[str, dict] = {}
     kinds: dict[str, list] = {"mlx": [], "bf16": [], "fp8": [], "nvfp4": []}
-    for shard, key in shards:
+
+    def component(shard: str, name: str) -> tuple[Path, dict]:
+        source = tensor_files.get(name, shard) if tensor_files is not None else shard
+        if source not in headers:
+            headers[source] = read_header(model_dir / source)
+        if name not in headers[source]:
+            raise ValueError(f"{source}: missing n-gram tensor {name}")
+        entry = headers[source][name]
+        if not isinstance(entry, dict):
+            raise ValueError(f"{source}: invalid n-gram tensor metadata for {name}")
+        return model_dir / source, entry
+
+    def present(shard: str, name: str) -> bool:
+        if tensor_files is not None:
+            return name in tensor_files
         if shard not in headers:
             headers[shard] = read_header(model_dir / shard)
-        h, path = headers[shard], model_dir / shard
-        if key + ".scales" in h:
-            kinds["mlx"].append((path, h[key + ".weight"], h[key + ".scales"], h[key + ".biases"]))
-        elif h[key + ".weight"].get("dtype") == "F8_E4M3":
-            kinds["fp8"].append((path, h[key + ".weight"]))
-        elif key + ".weight_scale" in h:
-            kinds["nvfp4"].append((path, h[key + ".weight"], h[key + ".weight_scale"]))
+        return name in headers[shard]
+
+    for shard, key in shards:
+        weight = component(shard, key + ".weight")
+        if present(shard, key + ".scales"):
+            parts = [weight, component(shard, key + ".scales"), component(shard, key + ".biases")]
+            kinds["mlx"].append(parts)
+        elif weight[1].get("dtype") == "F8_E4M3":
+            kinds["fp8"].append([weight])
+        elif present(shard, key + ".weight_scale"):
+            kinds["nvfp4"].append([weight, component(shard, key + ".weight_scale")])
         else:
-            kinds["bf16"].append((path, h[key + ".weight"]))
+            kinds["bf16"].append([weight])
     used = [k for k, v in kinds.items() if v]
     if len(used) != 1:
         raise ValueError(f"the n-gram shards mix layouts: {', '.join(used)}")
-    files = kinds[used[0]]
-    if used[0] == "nvfp4":
-        return NVFP4Table(files, scale("weight_scale_2"))
-    if used[0] == "fp8":
-        return FP8Table(files, scale("weight_scale"))
-    table = BF16Table(files) if used[0] == "bf16" else SSDTable(files) if ssd else HostTable(files)
-    table.weight_scale = float(scale("weight_scale"))
+    layout, files = used[0], kinds[used[0]]
+    table_scale = float(scale("weight_scale_2" if layout == "nvfp4" else "weight_scale"))
+    if ssd and layout != "mlx":
+        table = SSDValueTable(files, layout, table_scale)
+    elif layout == "nvfp4":
+        table = NVFP4Table([(wpath, weight, block, spath) for (wpath, weight), (spath, block) in files], table_scale)
+    elif layout == "fp8":
+        table = FP8Table([(path, weight) for [(path, weight)] in files], table_scale)
+    elif layout == "bf16":
+        table = BF16Table([(path, weight) for [(path, weight)] in files])
+    else:
+        if any(len({path for path, _ in parts}) != 1 for parts in files):
+            raise ValueError("the affine n-gram weight, scales and biases must share a file")
+        affine = [(parts[0][0], *(entry for _, entry in parts)) for parts in files]
+        table = SSDTable(affine) if ssd else HostTable(affine)
+    if layout in ("bf16", "mlx"):
+        table.weight_scale = table_scale
     return table
 
 
@@ -342,6 +442,7 @@ class ReadAhead:
         self.table = table
         self._pool = ThreadPoolExecutor(1, thread_name_prefix="ngram-read-ahead")
         self._ahead: dict[bytes, Any] = {}
+        self._closed = False
 
     def __getattr__(self, name: str) -> Any:
         if name == "table":
@@ -351,6 +452,8 @@ class ReadAhead:
     def read_ahead(self, ids: np.ndarray) -> None:
         """Start reading rows ``ids`` for a lookup of the same ids to take."""
 
+        if self._closed:
+            raise ValueError("the n-gram table is closed")
         key = _key(ids)
         if key not in self._ahead:
             while len(self._ahead) >= self.depth:
@@ -358,8 +461,22 @@ class ReadAhead:
             self._ahead[key] = self._pool.submit(self.table.gather, ids)
 
     def gather(self, ids: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if self._closed:
+            raise ValueError("the n-gram table is closed")
         ahead = self._ahead.pop(_key(ids), None)
         return ahead.result() if ahead is not None else self.table.gather(ids)
+
+    def close(self) -> None:
+        """Finish active lookups and discard queued results before closing the underlying reader."""
+
+        if self._closed:
+            return
+        self._closed = True
+        self._pool.shutdown(wait=True, cancel_futures=True)
+        self._ahead.clear()
+        close = getattr(self.table, "close", None)
+        if close is not None:
+            close()
 
 
 def _copy_rows(pool: ThreadPoolExecutor, shard: np.ndarray, copy) -> None:

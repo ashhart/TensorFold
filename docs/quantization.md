@@ -21,7 +21,7 @@ Choose an 8-bit checkpoint made from the original model when you want its 8-bit 
 | Qwen dense, packed row kernels on Apple Silicon | Affine 2/3/4/5/6/8-bit, groups 32/64/128 |
 | Qwen dense, CUDA | Affine 2/3/4/5/6/8-bit, groups 32/64/128 |
 | Nemotron | Existing affine 4-bit recipe; broader expert formats are not enabled here |
-| Flash Next | Existing uniform affine 4-bit/group-32 recipe |
+| Flash Next | MLX affine 4-bit/group-32; CUDA also reads the NVFP4 and EXL3 formats in [its recipe](recipes/qwen3.8-flash-next.md#cuda) |
 | GLM and EXL3 | Existing family recipes and separate EXL3 integration |
 
 With `--lane-kernels auto`, M5 uses its native kernels when they support the checkpoint's formats and otherwise uses the packed row decoder.

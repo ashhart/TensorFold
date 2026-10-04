@@ -17,7 +17,7 @@ _KINDS = (("weight", "U32", 4), ("scales", "BF16", 2), ("biases", "BF16", 2))
 
 
 def _no_cache(fd: int) -> None:
-    """Keep the file's pages out of the cache (macOS F_NOCACHE) or its readahead off (Linux FADV_RANDOM)."""
+    """Disable caching on macOS; Linux FADV_RANDOM disables readahead but keeps buffered I/O."""
 
     if sys.platform == "darwin":
         import fcntl
@@ -37,8 +37,10 @@ def _span(entry: object, kind: tuple[str, str, int], data: int, size: int, name:
     """(rows, bytes a row, file offset of row 0) of one tensor; refuses a dtype, shape or range it can't read."""
 
     part, dtype, item = kind
-    if not isinstance(entry, dict) or entry.get("dtype") != dtype:
-        raise ValueError(f"{name}: the n-gram {part} must be a {dtype} tensor")
+    allowed = ("U32", "I32") if kind == _KINDS[0] else (dtype,)  # affine words are packed bits
+    if not isinstance(entry, dict) or entry.get("dtype") not in allowed:
+        expected = " or ".join(allowed)
+        raise ValueError(f"{name}: the n-gram {part} must be a {expected} tensor")
     shape, span = entry.get("shape"), entry.get("data_offsets")
     if not (isinstance(shape, list) and len(shape) == 2 and all(type(n) is int and n > 0 for n in shape)):
         raise ValueError(f"{name}: the n-gram {part} shape {shape} is not [rows, columns]")
@@ -61,59 +63,73 @@ def _fill(reads: list[tuple[int, int, int, memoryview, int]]) -> None:
             done += len(data)
 
 
-class SSDTable:
-    """HostTable's rows, byte for byte, read from the checkpoint at each gather: deduplicated, coalesced, parallel."""
+class SSDRows:
+    """Validated tensor rows read at each gather: deduplicated, coalesced and parallel, without memory maps."""
 
-    def __init__(self, files: list[tuple[Path, dict, dict, dict]], *, nocache: bool = True) -> None:
+    def __init__(self, files: list[list[tuple[Path, dict]]], kinds: tuple[tuple[str, str, int], ...],
+                 *, nocache: bool = True) -> None:
         self._fds: list[int] = []
+        self._inline_rows = 0
         self._pool = ThreadPoolExecutor(WORKERS, thread_name_prefix="ple-ssd")
         self._closer = weakref.finalize(self, _release, self._fds, self._pool)
         try:
-            self._layout(files, nocache)
+            self._layout(files, kinds, nocache)
         except BaseException:
             self.close()
             raise
 
-    def _layout(self, files: list[tuple[Path, dict, dict, dict]], nocache: bool) -> None:
+    def _layout(self, files: list[list[tuple[Path, dict]]], kinds: tuple[tuple[str, str, int], ...],
+                nocache: bool) -> None:
         if not files:
             raise ValueError("the n-gram table has no shards")
         opened: dict[Path, tuple[int, int, int]] = {}
-        starts, fidx, bases, widths = [0], [], [], None
+        starts, indices, bases, widths = [0], [], [], None
         total = 0
-        for path, *entries in files:
-            path = Path(path)
-            if path not in opened:
-                fd = os.open(path, os.O_RDONLY)
-                self._fds.append(fd)
-                if nocache:
-                    _no_cache(fd)
-                size, head = os.fstat(fd).st_size, os.pread(fd, 8, 0)
-                data = 8 + struct.unpack("<Q", head)[0] if len(head) == 8 else size + 1
-                if data > size:
-                    raise ValueError(f"{path.name}: truncated safetensors header")
-                opened[path] = (len(self._fds) - 1, data, size)
-            index, data, size = opened[path]
-            (rows, wrow, w0), (srows, grow, s0), (brows, brow, b0) = (
-                _span(entry, kind, data, size, path.name) for entry, kind in zip(entries, _KINDS))
-            if not rows == srows == brows or wrow != 8 * grow or brow != grow:
-                raise ValueError(f"{path.name}: an n-gram shard is not 4-bit rows with a scale and bias every 32")
-            if widths not in (None, (wrow, grow)):
-                raise ValueError(f"{path.name}: the n-gram shards differ in row width")
-            widths = (wrow, grow)
-            total += rows * (wrow + 2 * grow)
+        for components in files:
+            if len(components) != len(kinds):
+                raise ValueError("an n-gram shard has missing tensor components")
+            spans, shard_indices = [], []
+            for (path, entry), kind in zip(components, kinds, strict=True):
+                path = Path(path)
+                if path not in opened:
+                    fd = os.open(path, os.O_RDONLY)
+                    self._fds.append(fd)
+                    if nocache:
+                        _no_cache(fd)
+                    size, head = os.fstat(fd).st_size, os.pread(fd, 8, 0)
+                    data = 8 + struct.unpack("<Q", head)[0] if len(head) == 8 else size + 1
+                    if data > size:
+                        raise ValueError(f"{path.name}: truncated safetensors header")
+                    opened[path] = (len(self._fds) - 1, data, size)
+                index, data, size = opened[path]
+                spans.append(_span(entry, kind, data, size, path.name))
+                shard_indices.append(index)
+            rows = spans[0][0]
+            row_widths = tuple(span[1] for span in spans)
+            self._validate(rows, spans, Path(components[0][0]).name)
+            if widths not in (None, row_widths):
+                raise ValueError(f"{Path(components[0][0]).name}: the n-gram shards differ in row width")
+            widths = row_widths
+            total += rows * sum(widths)
             starts.append(starts[-1] + rows)
-            fidx.append(index)
-            bases.append((w0, s0, b0))
+            indices.append(shard_indices)
+            bases.append([span[2] for span in spans])
         self.starts = np.array(starts, dtype=np.int64)
         self.rows = int(self.starts[-1])
-        self.fidx = np.array(fidx, dtype=np.int64)
-        self.bases = np.array(bases, dtype=np.int64)        # [shard, component]: file offset of row 0
-        self.wrow, self.grow = widths
+        self.fidx = np.array(indices, dtype=np.int64)     # [shard, component]: file containing its rows
+        self.bases = np.array(bases, dtype=np.int64)      # [shard, component]: file offset of row 0
+        self.widths = widths
         self.nbytes = total
         self._fd_of = np.array(self._fds, dtype=np.int64)
 
-    def gather(self, ids: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Rows ``ids`` (global) -> words [n, W] uint32, scales and biases [n, G] (bf16 bits as uint16)."""
+    def _validate(self, rows: int, spans: list[tuple[int, int, int]], name: str) -> None:
+        """Refuse tensor components with different row counts."""
+
+        if any(span[0] != rows for span in spans):
+            raise ValueError(f"{name}: the n-gram components differ in row count")
+
+    def gather(self, ids: np.ndarray) -> tuple[np.ndarray, ...]:
+        """Rows ``ids`` (global) -> one [n, row bytes] uint8 array per tensor component."""
 
         if not self._closer.alive:
             raise ValueError("the n-gram table is closed")
@@ -124,18 +140,17 @@ class SSDTable:
             raise ValueError(f"n-gram row ids must lie in [0, {self.rows})")
         unique, inverse = np.unique(flat.astype(np.int64), return_inverse=True)
         shard = np.searchsorted(self.starts, unique, side="right") - 1
-        local, where = unique - self.starts[shard], self.fidx[shard]
+        local = unique - self.starts[shard]
         outs, reads = [], []
-        for part, width in enumerate((self.wrow, self.grow, self.grow)):
+        for part, width in enumerate(self.widths):
             outs.append(np.empty((unique.size, width), dtype=np.uint8))
-            reads += self._reads(where, self.bases[shard, part] + local * width, width, outs[-1])
+            reads += self._reads(self.fidx[shard, part], self.bases[shard, part] + local * width, width, outs[-1])
         batches = min(WORKERS, len(reads))
-        if batches > 1:
+        if batches > 1 and unique.size > self._inline_rows:
             list(self._pool.map(_fill, [reads[i::batches] for i in range(batches)]))
         else:
             _fill(reads)
-        words, scales, biases = (out[inverse] for out in outs)
-        return words.view(np.uint32), scales.view(np.uint16), biases.view(np.uint16)
+        return tuple(out[inverse] for out in outs)
 
     def _reads(self, where: np.ndarray, offsets: np.ndarray, width: int, out: np.ndarray) -> list[tuple]:
         """One read per run of rows adjacent in one file, each at most MAX_READ bytes, into ``out``'s rows."""
@@ -150,8 +165,10 @@ class SSDTable:
         first = np.flatnonzero(cut)
         rows = np.diff(first, append=n)
         view = memoryview(out.reshape(-1))
-        return list(zip(self._fd_of[where[first]].tolist(), offsets[first].tolist(), (rows * width).tolist(),
-                        [view] * first.size, (first * width).tolist()))
+        runs = zip(self._fd_of[where[first]].tolist(), offsets[first].tolist(), (rows * width).tolist(),
+                   (first * width).tolist(), strict=True)
+        return [(fd, offset + start, min(MAX_READ, size - start), view, at + start)
+                for fd, offset, size, at in runs for start in range(0, size, MAX_READ)]
 
     def prefetch(self, workers: int = 8) -> float:
         """Nothing to warm: rows are read at each lookup, so this reads nothing (0 seconds)."""
@@ -162,3 +179,25 @@ class SSDTable:
         """Close the checkpoint's files and the read threads (also done at exit); a later gather raises."""
 
         self._closer()
+
+
+class SSDTable(SSDRows):
+    """HostTable's affine rows read from files at each gather, with the same words, scales and biases."""
+
+    def __init__(self, files: list[tuple[Path, dict, dict, dict]], *, nocache: bool = True) -> None:
+        super().__init__([[(path, entry) for entry in entries] for path, *entries in files], _KINDS,
+                         nocache=nocache)
+        self.wrow, self.grow, _ = self.widths
+
+    def _validate(self, rows: int, spans: list[tuple[int, int, int]], name: str) -> None:
+        """Require affine 4-bit rows with scales and biases every 32 values."""
+
+        (_, wrow, _), (srows, grow, _), (brows, brow, _) = spans
+        if not rows == srows == brows or wrow != 8 * grow or brow != grow:
+            raise ValueError(f"{name}: an n-gram shard is not 4-bit rows with a scale and bias every 32")
+
+    def gather(self, ids: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Rows ``ids`` -> uint32 words and uint16 bf16 scale and bias bits."""
+
+        words, scales, biases = super().gather(ids)
+        return words.view(np.uint32), scales.view(np.uint16), biases.view(np.uint16)

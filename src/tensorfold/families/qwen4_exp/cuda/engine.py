@@ -435,11 +435,18 @@ class FlashNextEngine:
         return stats
 
     def close(self) -> None:
-        """Stop the concurrent scheduler's worker, so the engine's GPU memory can go (tests start several engines)."""
+        """Stop scheduled work before releasing each distinct PLE reader and its read threads."""
 
         if self.scheduler is not None:
             self.scheduler.close()
             self.scheduler = None
+        if not getattr(self, "_ple_closed", False):
+            tables = {id(layer.ple.table): layer.ple.table for layer in self.w.layers if layer.ple is not None}
+            for table in tables.values():
+                close = getattr(table, "close", None)
+                if close is not None:
+                    close()
+            self._ple_closed = True
 
     def generate(self, prompt: list[int], max_tokens: int, sampling,
                  on_tokens: Callable[[list[int]], bool | None], draft: bool = True, constraint=None,

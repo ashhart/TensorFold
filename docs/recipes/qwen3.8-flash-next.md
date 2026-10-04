@@ -57,14 +57,15 @@ to one stream, while successful checks allow the lane engine to combine requests
 ## CUDA
 
 On CUDA Flash Next serves NVFP4 and EXL3 checkpoints, and the MLX 4-bit checkpoint as the portable option: the same
-files a Mac serves, and the only format two ranks and `--ple-on-ssd` read. `tensorfold serve` loads the checkpoint
+files a Mac serves, and the only format two ranks read. `--ple-on-ssd` also reads NVFP4 checkpoints' n-gram rows.
+`tensorfold serve` loads the checkpoint
 you name; it picks none by itself. Use the [container setup](../../RUNBOOK.md#nvidia-gpus) for any of them. Prompts
 take bf16 activations by default; what that costs against the FP8 prompt path (`--prefill-fp8`) depends on the
 format ([prompt precision](cuda.md#prompt-precision)):
 
 | Checkpoint | Weights | bf16 prompts against `--prefill-fp8` |
 | --- | --- | --- |
-| `Mia-AiLab/Qwen3.8-Flash-Next-NVFP4` (`925d7be6`), a mirror of local-inference-lab's export | NVFP4 routed experts, MXFP8 elsewhere and in the n-gram table | the next row's kernels; not timed on its own |
+| `Mia-AiLab/Qwen3.8-Flash-Next-NVFP4` (`925d7be6`), a mirror of local-inference-lab's export | NVFP4 routed experts and n-gram rows, MXFP8 elsewhere | the next row's kernels; not timed on its own |
 | `local-inference-lab/Qwen3.8-Flash-Next-NVFP4` (`7c4f1bc1`) | NVFP4 routed experts, MXFP8 elsewhere | 0.94-1.03x from 2k to 64k |
 | `RadixArk/Qwen3.8-Flash-Next-NVFP4` (`7b719225`) | NVFP4 routed experts, bf16 elsewhere | unchanged: no FP8 prompt kernel |
 | `turboderp/Qwen3.8-Flash-Next-exl3` (`3.05bpw_h5_ng5`) | EXL3 | unchanged: EXL3 prompts never took FP8 activations |
@@ -85,7 +86,7 @@ tensorfold serve local-inference-lab/Qwen3.8-Flash-Next-NVFP4 --host 0.0.0.0 --p
 | --- | --- | --- | --- |
 | `local-inference-lab/Qwen3.8-Flash-Next-NVFP4` (`7c4f1bc1`) | NVFP4 | MXFP8 | NVFP4 rows |
 | `RadixArk/Qwen3.8-Flash-Next-NVFP4` (`7b719225`) | NVFP4 | bf16 | FP8 rows |
-| `Mia-AiLab/Qwen3.8-Flash-Next-NVFP4` (`925d7be6`), a mirror of local-inference-lab's export | NVFP4 | MXFP8 | MXFP8 rows |
+| `Mia-AiLab/Qwen3.8-Flash-Next-NVFP4` (`925d7be6`), a mirror of local-inference-lab's export | NVFP4 | MXFP8 | NVFP4 rows |
 
 The loader reads each linear by its tensors. An NVFP4 weight is an E2M1 code times its e4m3 scale (a block of 16
 inputs) times the tensor's fp32 `weight_scale_2`; an MXFP8 weight is an e4m3 byte times a power of two (a block of
@@ -124,9 +125,17 @@ local-inference-lab's and RadixArk's exports were served with `tensorfold serve`
 each reply of concurrent requests (`--parallel 4`) equals the same request alone. Mia-AiLab's mirror loads and serves
 through the same code; its replies have not been checked on their own.
 
+`--ple-on-ssd` reads the requested BF16, scalar FP8 or packed NVFP4 n-gram rows from checkpoint files without
+mapping or prefetching the whole table. The stored scales and the resident reader's bf16 rounding are preserved.
+Reads are deduplicated, coalesced and parallel. On Linux they use buffered `pread` with `POSIX_FADV_RANDOM`;
+the OS may cache the pages, so this is not an `O_DIRECT` path or a guarantee of zero page-cache use.
+Add `--ple-on-ssd` to the NVFP4 serving command above. This changes how the table rows are read, not the
+checkpoint's weights or compute precision. The memory saved depends on the table's stored format; the Mac
+measurements below apply to the MLX affine checkpoint. Row-format tests do not qualify every complete checkpoint
+that uses that format.
+
 Not supported here:
-- `--tp 2` and `--ple-on-ssd` on an NVFP4 checkpoint stop at startup: two ranks read the MLX checkpoint, and the
-  NVFP4 exports' tables stay memory-mapped.
+- `--tp 2` on an NVFP4 checkpoint stops at startup: two ranks read the MLX checkpoint.
 - `ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4` (186 GB; bf16 linears and n-gram table) has the RadixArk layout apart
   from its bf16 table, which the loader reads, but the whole checkpoint has not been loaded or served here, so it
   is not listed as tested.
@@ -144,8 +153,8 @@ python -m tensorfold.cuda.exl3.inspect flashnext-exl3-3.05bpw   # bits per tenso
 tensorfold serve flashnext-exl3-3.05bpw --host 0.0.0.0 --port 8080
 ```
 
-A pack maps its n-gram table from its own file and runs on one GPU: `--tp 2` and `--ple-on-ssd` are for the MLX
-checkpoint, and an EXL3 pack refuses both.
+A pack maps its n-gram table from its own file and runs on one GPU. An EXL3 pack refuses both `--tp 2` and
+`--ple-on-ssd`.
 
 - Dense projections (attention, DeltaNet, the MTP head's fc layers, the head) run on the row-invariant EXL3
   linear (`cuda/exl3/linear.py`). Routed experts and the shared expert (as expert 512 of the same table) run on

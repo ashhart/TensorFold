@@ -381,13 +381,31 @@ def test_graph_replay_follows_each_steps_experts(tmp_path: Path, monkeypatch) ->
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="the loader builds CUDA tensors")
-def test_an_nvfp4_checkpoint_refuses_ple_on_ssd(tmp_path: Path) -> None:
-    """The SSD reader takes the MLX layout's shards only, so --ple-on-ssd on an NVFP4 checkpoint stops by name."""
+@pytest.mark.parametrize("layout", [{}, {"ple_bf16": True}, {"ple_nvfp4": True}])
+def test_an_nvfp4_checkpoint_reads_ple_on_ssd(tmp_path: Path, layout: dict) -> None:
+    """SSD gathers from an NVFP4 checkpoint keep the resident affine or bf16 output bits."""
 
     from tensorfold.families.qwen4_exp.cuda.weights import load
+    from tensorfold.families.qwen4_exp.host_table import SSDValueTable
+    from tensorfold.families.qwen4_exp.ssd_table import SSDTable
 
-    with pytest.raises(ValueError, match="ple-on-ssd"):
-        load(write(tmp_path / "ssd", ple_nvfp4=True), mtp=True, draft_vocab=None, ple_on_ssd=True)
+    path = write(tmp_path / "ssd", **layout)
+    mapped = load(path, mtp=False, draft_vocab=None)
+    read = load(path, mtp=False, draft_vocab=None, ple_on_ssd=True)
+    resident = next(layer.ple.table for layer in mapped.layers if layer.ple is not None)
+    disk = next(layer.ple.table for layer in read.layers if layer.ple is not None)
+    try:
+        assert isinstance(disk, SSDValueTable if layout else SSDTable)
+        ids = np.array([0, 17, resident.rows - 1, 17])
+        got, want = disk.gather(ids), resident.gather(ids)
+        if isinstance(got, np.ndarray):
+            assert got.tobytes() == want.tobytes()
+        else:
+            assert all(a.tobytes() == b.tobytes() for a, b in zip(got, want, strict=True))
+        assert disk.prefetch() == 0.0
+    finally:
+        disk.close()
+        resident._pool.shutdown()
 
 
 def test_an_nvfp4_checkpoint_refuses_two_ranks(tiny: Path, monkeypatch) -> None:
