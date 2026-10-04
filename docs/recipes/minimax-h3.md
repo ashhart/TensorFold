@@ -1,0 +1,81 @@
+# MiniMax H3 (`h3`)
+
+Joint video and audio generation, not a language model: H3 denoises one packed sequence of video, audio and text
+rows and decodes it to an MP4. It does not decode through lanes and has no `load`; `tensorfold serve` does not
+route it. Packages: `src/tensorfold/families/h3/` and `src/tensorfold/kernels/minimax/h3/v1/`.
+
+Measured on a Mac Studio M5 Ultra with 256 GB, macOS 27.0.1, MLX 0.32.3, with `MiniMaxAI/MiniMax-H3` (the `FL2VA`
+partition, bfloat16). MiniMax H3 is under the MiniMax H3 Community License, which limits the territories it may be
+used in; TensorFold ships no weights.
+
+## What is here and what is not
+
+| Part | State |
+| --- | --- |
+| Diffusion transformer (33B, 50 blocks) | `dit.py`, `weights.py`; equal to minimax-h3-mlx's forward on a real step |
+| Packed sequence, schedules, joint denoise loop | `packing.py`, `schedule.py`, `sampler.py` |
+| Adapters | `lora.py`: runner layout and FastVideo `fastvideo-lora-v2`, merged in float32 |
+| Video decoder | `vae_video.py`; equal to minimax-h3-mlx's decode in float32, int8 by default |
+| Text encoder (Qwen3-VL), audio decoder, MP4 writer | not ported; `tools/h3_generate_dev.py` borrows minimax-h3-mlx's |
+| `tensorfold generate`, checkpoint detection through `families.detect`, a resident engine | not started |
+
+`tools/h3_generate_dev.py` renders a clip with this family between minimax-h3-mlx's text encoder and audio decoder.
+Run it from an environment that has minimax-h3-mlx and its requirements on the path.
+
+## What decides the speed
+
+- A 5 second 864x480 clip (124 frames) is 15,918 rows: 14,985 video, 414 audio and the prompt's text rows. Hidden
+  size 5,376, 56 heads of 128, SwiGLU width 14,336.
+- One block in bfloat16 takes 235 ms: MLP 81, attention 93, QKV with the q/k norm and rotation 46, attention output
+  12. Each matmul stage runs at about 80-95e12 operations a second; float16 weights give the same times.
+- The projections run as int8 through the M5 tensor units: activations take one scale per row (per row and 1,024
+  channels on the wide inputs), weights one per output channel, in 128x128x128 tiles. MLP 41 ms, QKV with the norm
+  and rotation inside the kernel 22.5 ms, attention output 7 ms. A forward goes from 13.9 s to 9.0 s.
+- AdaLN tables depend only on the schedule: they are projected once per run and the projection weights (24 GiB)
+  released.
+- The video decoder is a 36-layer ViT over 105 overlapping tiles for this clip. Its SwiGLU, QKV and output
+  projections on the same int8 kernels take the decode from 17.3 s to 10.7 s at 47 dB against the float32 decode.
+
+## Adapters
+
+An adapter's update is about a thousandth of the weight it rides on. Rounding the merged weight back to bfloat16
+keeps 50-85% of the update and adds rounding noise of the same size. Adapters are therefore added in float32 and
+quantized straight to int8, which keeps the update in expectation. A projection that is not on an int8 kernel is
+rounded to bfloat16 and the tool says so.
+
+Step-distilled adapters set the number of forwards: lightx2v's Turbo adapter with 4 sigma points (3 forwards),
+FastVideo's FastH3 dense adapter with 5 points (4 forwards).
+
+## Measurements
+
+5 second clip with audio, seed 2077, one render at a time, wall time from process start unless noted.
+
+| 864x480, 124 frames | Forwards | Per forward | Denoise | Clip |
+| --- | --- | --- | --- | --- |
+| bfloat16 | 20 | 13.9 s | 277 s | about 305 s |
+| int8 MLP, QKV, attention output | 20 | 9.7 s | 195 s | about 223 s |
+| Turbo adapter, int8, int8 video decoder | 3 | 9.0 s | 27.6 s | about 50 s |
+
+At 768x448 with the Turbo adapter the same configuration renders in 40-41 s (denoise 21.6-22.3 s, decode 8.2 s).
+
+The int8 20-step render keeps the bfloat16 composition (median 18 dB between the two clips' frames, the same
+shots). With 3 forwards the int8 path lands on a different composition from the bfloat16 one.
+
+## What did not work
+
+- **int8 attention.** A flash-style kernel (int8 scores, half probabilities, int8 values, online softmax over
+  64-key tiles) takes 95.5 ms against 95.8 ms for MLX's scaled dot-product attention at 15,918 rows. The inner
+  dimension of both matmuls is 64-128, so the work between them costs what int8 saves.
+- **Block-sparse attention.** On a real 20-step run, keeping 95% of each 32-row query block's attention needs
+  22-68% of block pairs per head and 51-95% with one mask shared by all heads.
+- **Video decoder precision and batch.** float16, bfloat16 and a batch of 32 tiles decode in the same time as
+  float32 with 8.
+- **A matmul for the decoder's 1x1x1 convolution** differs from the convolution by 5e-4, which 36 layers grow to
+  0.1 in places; it stays a convolution.
+
+## Verification
+
+`tools/h3_generate_dev.py --parity` runs one real first step through this transformer and minimax-h3-mlx's and
+reports the difference: zero with the same bfloat16 input rounding. The float32 video decode equals minimax-h3-mlx's
+on real latents. The sampler refuses a modality that does not start from unit noise: video and audio denoise in one
+sequence, so a constant audio start corrupts the picture as well as the sound.

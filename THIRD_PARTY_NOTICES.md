@@ -117,3 +117,15 @@ The multimodal rotary and image-feature integration is adapted from MiaAI-Lab's
 [Flash Next vision patch 0008](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/blob/a3aa89835022c55ca8e55008c37785954834e04f/patches/0008-flash-next-vision.patch),
 MIT License, Copyright (c) 2026 MiaAI-Lab. The license is included in `LICENSES/MiaAI-Lab-MIT.txt`.
 The port preserves the v0.5 CUDA execution APIs and adds an offline EXL3 vision adapter.
+
+## MiniMax H3 adaptations
+
+`src/tensorfold/families/h3/` (`dit.py`, `packing.py`, `schedule.py`, `vae_video.py`, and the name and layout
+mapping in `lora.py`)
+is adapted from minimax-h3-mlx, https://github.com/mrbizarro/minimax-h3-mlx, revision 7919020, Apache-2.0.
+
+`src/tensorfold/kernels/minimax/h3/v1/mlp_int8.py` follows the quantization scheme of antirez's h3.c,
+https://github.com/antirez/h3.c, revision 8974cc0, MIT, Copyright (c) 2026 Salvatore Sanfilippo: per-row
+activation scales, per-output-channel weight scales and 128x128x128 int8 tiles. No h3.c source is included.
+
+MiniMax H3 weights are under the MiniMax Community License; TensorFold ships no model weights.

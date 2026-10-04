@@ -7,6 +7,7 @@
 | Qwen3.8 dense | `qwen/dense/v1/` |
 | Qwen3.8 Flash Next | `qwen/flash_next/v1/` |
 | Gemma 4 | `gemma/v1/` |
+| MiniMax H3 | `minimax/h3/v1/` |
 
 The version names the implementation, not the model release. Each family imports its active package;
 incompatible versions can occupy separate directories. CUDA kernels live in the family's `cuda/` package.
