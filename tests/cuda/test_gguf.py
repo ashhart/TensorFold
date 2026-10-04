@@ -48,6 +48,7 @@ def reference(data, fmt):
 
 @pytest.mark.parametrize("fmt", list(FORMATS))
 def test_decode_reference_and_row_independence(fmt):
+    torch.manual_seed(7)
     block, size = FORMATS[fmt]
     raw = np.random.default_rng(7).integers(0, 256, (7 * 256 // block, size), dtype=np.uint8)
     if fmt == "Q2_K":
@@ -73,12 +74,29 @@ def test_decode_reference_and_row_independence(fmt):
     ref = torch.bmm(matrices[picks[:, 0]].float(), x.float()[:, :, None]).squeeze(-1)
     torch.testing.assert_close(y[:, 0].float(), ref, rtol=0.01, atol=0.002)
     torch.testing.assert_close(experts.linear(x[:, None], picks)[:, 0].float(), ref, rtol=0.01, atol=0.002)
+    narrow = experts.linear(x[:5], picks[:5], dtype=torch.float32)
+    solo = torch.cat([experts.linear(x[i : i + 1], picks[i : i + 1], dtype=torch.float32) for i in range(5)])
+    assert torch.equal(narrow, solo)
     if fmt == "Q8_0":
         from tensorfold.cuda.gguf.prefill import Workspace
 
         out = torch.empty((65, 7), device=x.device, dtype=torch.float32)
         Workspace().matmul(packed, x, out)
         assert torch.equal(out, packed.linear(x, dtype=torch.float32))
+        # Uneven output tiles must not write into a neighboring group's output.
+        grouped = Packed(data, (256, 14), fmt)
+        for rows in (1, 5, 21, 65):
+            inputs = torch.randn(rows, 2, 256, device=x.device, dtype=torch.bfloat16) * 0.01
+            parts = [
+                Packed(data[j * packed.data.numel() : (j + 1) * packed.data.numel()], packed.shape, fmt)
+                for j in range(2)
+            ]
+            expected = torch.cat(
+                [part.linear(inputs[:, j].contiguous(), dtype=torch.float32) for j, part in enumerate(parts)], 1
+            )
+            assert torch.equal(grouped.linear_grouped(inputs, dtype=torch.float32), expected)
+        grouped.workspace = Workspace()
+        assert torch.equal(grouped.workspace.grouped(grouped, inputs, dtype=torch.float32), expected)
 
 
 def test_invalid_expert_ids_and_shapes_are_refused_before_routing():
@@ -93,6 +111,7 @@ def test_invalid_expert_ids_and_shapes_are_refused_before_routing():
 
 
 def test_prepare_tiles_and_decode_row_sharing_match_raw():
+    torch.manual_seed(7)
     """Synthetic 3D IQ2 SoA / Q2 raw: prepare is lossless; grouped prefill matches per-row _mv."""
 
     from tensorfold.cuda.gguf.prepare import prepare_packed

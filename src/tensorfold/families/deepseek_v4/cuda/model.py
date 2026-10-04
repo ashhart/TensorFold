@@ -90,7 +90,12 @@ class Layer:
                 row_bytes = w.data.numel() // w.shape[1]
                 lo, hi = group * self.rank, (group + 1) * self.rank
                 self.wo.append(
-                    Packed(w.data[lo * row_bytes : hi * row_bytes], (w.shape[0], self.rank), w.format, workspace=w.workspace)
+                    Packed(
+                        w.data[lo * row_bytes : hi * row_bytes],
+                        (w.shape[0], self.rank),
+                        w.format,
+                        workspace=w.workspace,
+                    )
                 )
             else:
                 self.wo.append(w[group * self.rank : (group + 1) * self.rank])
@@ -165,7 +170,8 @@ class Layer:
 
     def expand(self, x, y, post, comb):
         out = torch.empty_like(x)
-        glue.hc_post(x, out, y.float()[None].contiguous(), post, comb)
+        # One GPU: hc_post already converts the branch to FP32 after BF16 rounding.
+        glue.hc_post(x, out, y[None].contiguous(), post, comb)
         return out
 
     def compress(self, x, state, positions, index=False):
@@ -254,8 +260,12 @@ class Layer:
             draft=draft,
         )
         out = norm_rope(out, pos, self.tables, normalize=False, inverse=True).reshape(rows, self.groups, -1)
-        parts = [linear(out[:, g].contiguous(), self.wo[g]) for g in range(self.groups)]
-        result = linear(torch.cat(parts, 1), w["attn_output_b.weight"])
+        wo = w["attn_output_a.weight"]
+        if isinstance(wo, Packed) and wo.format == "Q8_0":
+            parts = wo.linear_grouped(out)
+        else:
+            parts = torch.cat([linear(out[:, g].contiguous(), self.wo[g]) for g in range(self.groups)], 1)
+        result = linear(parts, w["attn_output_b.weight"])
         if not draft:
             state.keys = raw[-int(self.meta["deepseek4.attention.sliding_window"]) :].clone()
             state.offset += rows

@@ -124,9 +124,12 @@ def _mv_rows(
     BM: tl.constexpr,
     BN: tl.constexpr,
     BK: tl.constexpr,
+    GROUPS: tl.constexpr = 1,
 ):
     r = tl.program_id(0) * BM
-    n = tl.program_id(1) * BN + tl.arange(0, BN)
+    group = tl.program_id(2)
+    width = N // GROUPS
+    n = group * width + tl.program_id(1) * BN + tl.arange(0, BN)
     kk = tl.arange(0, BK)
     a0 = tl.zeros((BN, BK), tl.float32)
     a1 = tl.zeros((BN, BK), tl.float32)
@@ -135,21 +138,21 @@ def _mv_rows(
         a3 = tl.zeros((BN, BK), tl.float32)
     for start in range(tl.cdiv(K, BK)):
         k = start * BK + kk
-        w = _values(W, G, n[:, None], k[None, :], (n[:, None] < N) & (k[None, :] < K), K, F)
-        x0 = tl.load(X + r * K + k, (r < R) & (k < K), 0).to(tl.float32)
-        x1 = tl.load(X + (r + 1) * K + k, (r + 1 < R) & (k < K), 0).to(tl.float32)
+        w = _values(W, G, n[:, None], k[None, :], (n[:, None] < (group + 1) * width) & (k[None, :] < K), K, F)
+        x0 = tl.load(X + r * GROUPS * K + group * K + k, (r < R) & (k < K), 0).to(tl.float32)
+        x1 = tl.load(X + (r + 1) * GROUPS * K + group * K + k, (r + 1 < R) & (k < K), 0).to(tl.float32)
         a0 += w * x0[None, :]
         a1 += w * x1[None, :]
         if BM == 4:
-            x2 = tl.load(X + (r + 2) * K + k, (r + 2 < R) & (k < K), 0).to(tl.float32)
-            x3 = tl.load(X + (r + 3) * K + k, (r + 3 < R) & (k < K), 0).to(tl.float32)
+            x2 = tl.load(X + (r + 2) * GROUPS * K + group * K + k, (r + 2 < R) & (k < K), 0).to(tl.float32)
+            x3 = tl.load(X + (r + 3) * GROUPS * K + group * K + k, (r + 3 < R) & (k < K), 0).to(tl.float32)
             a2 += w * x2[None, :]
             a3 += w * x3[None, :]
-    tl.store(Y + r * N + n, tl.sum(a0, 1), (r < R) & (n < N))
-    tl.store(Y + (r + 1) * N + n, tl.sum(a1, 1), (r + 1 < R) & (n < N))
+    tl.store(Y + r * N + n, tl.sum(a0, 1), (r < R) & (n < (group + 1) * width))
+    tl.store(Y + (r + 1) * N + n, tl.sum(a1, 1), (r + 1 < R) & (n < (group + 1) * width))
     if BM == 4:
-        tl.store(Y + (r + 2) * N + n, tl.sum(a2, 1), (r + 2 < R) & (n < N))
-        tl.store(Y + (r + 3) * N + n, tl.sum(a3, 1), (r + 3 < R) & (n < N))
+        tl.store(Y + (r + 2) * N + n, tl.sum(a2, 1), (r + 2 < R) & (n < (group + 1) * width))
+        tl.store(Y + (r + 3) * N + n, tl.sum(a3, 1), (r + 3 < R) & (n < (group + 1) * width))
 
 
 @triton.jit
@@ -165,17 +168,22 @@ def _mm(
     BM: tl.constexpr,
     BN: tl.constexpr,
     BK: tl.constexpr,
+    GROUPS: tl.constexpr = 1,
 ):
     m = tl.program_id(0) * BM + tl.arange(0, BM)
-    n = tl.program_id(1) * BN + tl.arange(0, BN)
+    group = tl.program_id(2)
+    width = N // GROUPS
+    n = group * width + tl.program_id(1) * BN + tl.arange(0, BN)
     k = tl.arange(0, BK)
     acc = tl.zeros((BM, BN), tl.float32)
     for start in range(tl.cdiv(K, BK)):
         ki = start * BK + k
-        a = tl.load(X + m[:, None] * K + ki[None, :], (m[:, None] < M) & (ki[None, :] < K), 0)
-        b = _values(W, GRID, n[None, :], ki[:, None], (n[None, :] < N) & (ki[:, None] < K), K, FORMAT).to(tl.bfloat16)
+        a = tl.load(X + m[:, None] * GROUPS * K + group * K + ki[None, :], (m[:, None] < M) & (ki[None, :] < K), 0)
+        b = _values(
+            W, GRID, n[None, :], ki[:, None], (n[None, :] < (group + 1) * width) & (ki[:, None] < K), K, FORMAT
+        ).to(tl.bfloat16)
         acc = tl.dot(a.to(tl.bfloat16), b, acc)
-    tl.store(Y + m[:, None] * N + n[None, :], acc, (m[:, None] < M) & (n[None, :] < N))
+    tl.store(Y + m[:, None] * N + n[None, :], acc, (m[:, None] < M) & (n[None, :] < (group + 1) * width))
 
 
 @dataclass
@@ -239,6 +247,67 @@ class Packed:
             256,
             enable_fp_fusion=False,
         )
+        return out
+
+    def linear_grouped(self, x: torch.Tensor, *, dtype=torch.bfloat16) -> torch.Tensor:
+        """Project [rows, groups, K] against consecutive output groups of a Q8 matrix."""
+
+        k, n = self.shape[:2]
+        if self.format != "Q8_0" or self.layout != "raw" or len(self.shape) != 2:
+            raise ValueError("grouped linear requires a dense raw Q8 matrix")
+        if (
+            x.ndim != 3
+            or not x.is_cuda
+            or x.device != self.data.device
+            or x.shape[0] < 1
+            or x.shape[1] < 1
+            or x.shape[-1] != k
+            or n % x.shape[1]
+            or x.dtype not in (torch.float16, torch.bfloat16, torch.float32)
+            or dtype not in (torch.float16, torch.bfloat16, torch.float32)
+        ):
+            raise ValueError("grouped input requires CUDA floating [rows, groups, K] with matching matrix groups")
+        x = x.contiguous()
+        rows, groups, _ = x.shape
+        if self.workspace is not None and self.workspace.accepts(rows, k, n):
+            return self.workspace.grouped(self, x, dtype=dtype)
+        out = torch.empty((rows, n), device=x.device, dtype=dtype)
+        if rows > 16:
+            _mm[(triton.cdiv(rows, 128), triton.cdiv(n // groups, 64), groups)](
+                x,
+                self.data,
+                codebook(x.device),
+                out,
+                rows,
+                n,
+                k,
+                self.format,
+                128,
+                64,
+                32,
+                groups,
+                num_warps=8,
+                num_stages=1,
+                enable_fp_fusion=False,
+            )
+        else:
+            bm = 2 if rows <= 2 else 4
+            _mv_rows[(triton.cdiv(rows, bm), triton.cdiv(n // groups, 4), groups)](
+                x,
+                self.data,
+                codebook(x.device),
+                out,
+                rows,
+                n,
+                k,
+                self.format,
+                bm,
+                4,
+                256,
+                groups,
+                num_warps=4,
+                enable_fp_fusion=False,
+            )
         return out
 
     def linear(
@@ -430,8 +499,19 @@ class Packed:
             # shape, block order and reduction (tensor-core dots would change it).
             bm = 2 if rows == 2 else 4
             _mv_rows[(triton.cdiv(rows, bm), triton.cdiv(n, 4))](
-                x, self.data, codebook(x.device), out, rows, n, k, self.format,
-                bm, 4, 256, num_warps=4, enable_fp_fusion=False,
+                x,
+                self.data,
+                codebook(x.device),
+                out,
+                rows,
+                n,
+                k,
+                self.format,
+                bm,
+                4,
+                256,
+                num_warps=4,
+                enable_fp_fusion=False,
             )
         else:
             if picks is None:
@@ -622,33 +702,42 @@ def _mv_group_q2_soa(
         sc = W + DM_BYTES
         qs = W + DM_BYTES + SC_BYTES
         for base in tl.static_range(0, BM, 4):
-            p0 = tl.load(MEMBERS + first + base, base < count, 0)
-            p1 = tl.load(MEMBERS + first + base + 1, base + 1 < count, 0)
-            p2 = tl.load(MEMBERS + first + base + 2, base + 2 < count, 0)
-            p3 = tl.load(MEMBERS + first + base + 3, base + 3 < count, 0)
-            ok0 = (base < count) & (p0 >= 0) & (p0 < PAIRS) & (expert >= 0) & (expert < EXPERTS)
-            ok1 = (base + 1 < count) & (p1 >= 0) & (p1 < PAIRS) & (expert >= 0) & (expert < EXPERTS)
-            ok2 = (base + 2 < count) & (p2 >= 0) & (p2 < PAIRS) & (expert >= 0) & (expert < EXPERTS)
-            ok3 = (base + 3 < count) & (p3 >= 0) & (p3 < PAIRS) & (expert >= 0) & (expert < EXPERTS)
-            a0 = tl.zeros((BN, BK), tl.float32)
-            a1 = tl.zeros((BN, BK), tl.float32)
-            a2 = tl.zeros((BN, BK), tl.float32)
-            a3 = tl.zeros((BN, BK), tl.float32)
-            for start in range(tl.cdiv(K, BK)):
-                k = start * BK + kk
-                w = _values_q2_soa(dmh, sc, qs, expert * N + n[:, None], k[None, :], (n[:, None] < N) & (k[None, :] < K) & (expert >= 0) & (expert < EXPERTS), K)
-                x0 = tl.load(X + p0 * K + k, ok0 & (k < K), 0).to(tl.float32)
-                x1 = tl.load(X + p1 * K + k, ok1 & (k < K), 0).to(tl.float32)
-                x2 = tl.load(X + p2 * K + k, ok2 & (k < K), 0).to(tl.float32)
-                x3 = tl.load(X + p3 * K + k, ok3 & (k < K), 0).to(tl.float32)
-                a0 += w * x0[None, :]
-                a1 += w * x1[None, :]
-                a2 += w * x2[None, :]
-                a3 += w * x3[None, :]
-            tl.store(Y + p0.to(tl.int64) * N + n, tl.sum(a0, 1), ok0 & (n < N))
-            tl.store(Y + p1.to(tl.int64) * N + n, tl.sum(a1, 1), ok1 & (n < N))
-            tl.store(Y + p2.to(tl.int64) * N + n, tl.sum(a2, 1), ok2 & (n < N))
-            tl.store(Y + p3.to(tl.int64) * N + n, tl.sum(a3, 1), ok3 & (n < N))
+            if base < count:
+                p0 = tl.load(MEMBERS + first + base, base < count, 0)
+                p1 = tl.load(MEMBERS + first + base + 1, base + 1 < count, 0)
+                p2 = tl.load(MEMBERS + first + base + 2, base + 2 < count, 0)
+                p3 = tl.load(MEMBERS + first + base + 3, base + 3 < count, 0)
+                ok0 = (base < count) & (p0 >= 0) & (p0 < PAIRS) & (expert >= 0) & (expert < EXPERTS)
+                ok1 = (base + 1 < count) & (p1 >= 0) & (p1 < PAIRS) & (expert >= 0) & (expert < EXPERTS)
+                ok2 = (base + 2 < count) & (p2 >= 0) & (p2 < PAIRS) & (expert >= 0) & (expert < EXPERTS)
+                ok3 = (base + 3 < count) & (p3 >= 0) & (p3 < PAIRS) & (expert >= 0) & (expert < EXPERTS)
+                a0 = tl.zeros((BN, BK), tl.float32)
+                a1 = tl.zeros((BN, BK), tl.float32)
+                a2 = tl.zeros((BN, BK), tl.float32)
+                a3 = tl.zeros((BN, BK), tl.float32)
+                for start in range(tl.cdiv(K, BK)):
+                    k = start * BK + kk
+                    w = _values_q2_soa(
+                        dmh,
+                        sc,
+                        qs,
+                        expert * N + n[:, None],
+                        k[None, :],
+                        (n[:, None] < N) & (k[None, :] < K) & (expert >= 0) & (expert < EXPERTS),
+                        K,
+                    )
+                    x0 = tl.load(X + p0 * K + k, ok0 & (k < K), 0).to(tl.float32)
+                    x1 = tl.load(X + p1 * K + k, ok1 & (k < K), 0).to(tl.float32)
+                    x2 = tl.load(X + p2 * K + k, ok2 & (k < K), 0).to(tl.float32)
+                    x3 = tl.load(X + p3 * K + k, ok3 & (k < K), 0).to(tl.float32)
+                    a0 += w * x0[None, :]
+                    a1 += w * x1[None, :]
+                    a2 += w * x2[None, :]
+                    a3 += w * x3[None, :]
+                tl.store(Y + p0.to(tl.int64) * N + n, tl.sum(a0, 1), ok0 & (n < N))
+                tl.store(Y + p1.to(tl.int64) * N + n, tl.sum(a1, 1), ok1 & (n < N))
+                tl.store(Y + p2.to(tl.int64) * N + n, tl.sum(a2, 1), ok2 & (n < N))
+                tl.store(Y + p3.to(tl.int64) * N + n, tl.sum(a3, 1), ok3 & (n < N))
 
 
 @triton.jit
@@ -719,41 +808,42 @@ def _mv_group_iq2_soa(
         dq = W.to(tl.pointer_type(tl.float16))
         qs = (W + DQ_BYTES).to(tl.pointer_type(tl.uint64))
         for base in tl.static_range(0, BM, 4):
-            p0 = tl.load(MEMBERS + first + base, base < count, 0)
-            p1 = tl.load(MEMBERS + first + base + 1, base + 1 < count, 0)
-            p2 = tl.load(MEMBERS + first + base + 2, base + 2 < count, 0)
-            p3 = tl.load(MEMBERS + first + base + 3, base + 3 < count, 0)
-            ok0 = (base < count) & (p0 >= 0) & (p0 < PAIRS) & (expert >= 0) & (expert < EXPERTS)
-            ok1 = (base + 1 < count) & (p1 >= 0) & (p1 < PAIRS) & (expert >= 0) & (expert < EXPERTS)
-            ok2 = (base + 2 < count) & (p2 >= 0) & (p2 < PAIRS) & (expert >= 0) & (expert < EXPERTS)
-            ok3 = (base + 3 < count) & (p3 >= 0) & (p3 < PAIRS) & (expert >= 0) & (expert < EXPERTS)
-            a0 = tl.zeros((BN, BK), tl.float32)
-            a1 = tl.zeros((BN, BK), tl.float32)
-            a2 = tl.zeros((BN, BK), tl.float32)
-            a3 = tl.zeros((BN, BK), tl.float32)
-            for start in range(tl.cdiv(K, BK)):
-                k = start * BK + kk
-                w = _values_iq2_soa(
-                    dq,
-                    qs,
-                    GRID,
-                    expert * N + n[:, None],
-                    k[None, :],
-                    (n[:, None] < N) & (k[None, :] < K) & (expert >= 0) & (expert < EXPERTS),
-                    K,
-                )
-                x0 = tl.load(X + p0.to(tl.int64) * K + k, ok0 & (k < K), 0).to(tl.float32)
-                x1 = tl.load(X + p1.to(tl.int64) * K + k, ok1 & (k < K), 0).to(tl.float32)
-                x2 = tl.load(X + p2.to(tl.int64) * K + k, ok2 & (k < K), 0).to(tl.float32)
-                x3 = tl.load(X + p3.to(tl.int64) * K + k, ok3 & (k < K), 0).to(tl.float32)
-                a0 += w * x0[None, :]
-                a1 += w * x1[None, :]
-                a2 += w * x2[None, :]
-                a3 += w * x3[None, :]
-            tl.store(Y + p0.to(tl.int64) * N + n, tl.sum(a0, 1), ok0 & (n < N))
-            tl.store(Y + p1.to(tl.int64) * N + n, tl.sum(a1, 1), ok1 & (n < N))
-            tl.store(Y + p2.to(tl.int64) * N + n, tl.sum(a2, 1), ok2 & (n < N))
-            tl.store(Y + p3.to(tl.int64) * N + n, tl.sum(a3, 1), ok3 & (n < N))
+            if base < count:
+                p0 = tl.load(MEMBERS + first + base, base < count, 0)
+                p1 = tl.load(MEMBERS + first + base + 1, base + 1 < count, 0)
+                p2 = tl.load(MEMBERS + first + base + 2, base + 2 < count, 0)
+                p3 = tl.load(MEMBERS + first + base + 3, base + 3 < count, 0)
+                ok0 = (base < count) & (p0 >= 0) & (p0 < PAIRS) & (expert >= 0) & (expert < EXPERTS)
+                ok1 = (base + 1 < count) & (p1 >= 0) & (p1 < PAIRS) & (expert >= 0) & (expert < EXPERTS)
+                ok2 = (base + 2 < count) & (p2 >= 0) & (p2 < PAIRS) & (expert >= 0) & (expert < EXPERTS)
+                ok3 = (base + 3 < count) & (p3 >= 0) & (p3 < PAIRS) & (expert >= 0) & (expert < EXPERTS)
+                a0 = tl.zeros((BN, BK), tl.float32)
+                a1 = tl.zeros((BN, BK), tl.float32)
+                a2 = tl.zeros((BN, BK), tl.float32)
+                a3 = tl.zeros((BN, BK), tl.float32)
+                for start in range(tl.cdiv(K, BK)):
+                    k = start * BK + kk
+                    w = _values_iq2_soa(
+                        dq,
+                        qs,
+                        GRID,
+                        expert * N + n[:, None],
+                        k[None, :],
+                        (n[:, None] < N) & (k[None, :] < K) & (expert >= 0) & (expert < EXPERTS),
+                        K,
+                    )
+                    x0 = tl.load(X + p0.to(tl.int64) * K + k, ok0 & (k < K), 0).to(tl.float32)
+                    x1 = tl.load(X + p1.to(tl.int64) * K + k, ok1 & (k < K), 0).to(tl.float32)
+                    x2 = tl.load(X + p2.to(tl.int64) * K + k, ok2 & (k < K), 0).to(tl.float32)
+                    x3 = tl.load(X + p3.to(tl.int64) * K + k, ok3 & (k < K), 0).to(tl.float32)
+                    a0 += w * x0[None, :]
+                    a1 += w * x1[None, :]
+                    a2 += w * x2[None, :]
+                    a3 += w * x3[None, :]
+                tl.store(Y + p0.to(tl.int64) * N + n, tl.sum(a0, 1), ok0 & (n < N))
+                tl.store(Y + p1.to(tl.int64) * N + n, tl.sum(a1, 1), ok1 & (n < N))
+                tl.store(Y + p2.to(tl.int64) * N + n, tl.sum(a2, 1), ok2 & (n < N))
+                tl.store(Y + p3.to(tl.int64) * N + n, tl.sum(a3, 1), ok3 & (n < N))
 
 
 @triton.jit
@@ -784,41 +874,42 @@ def _mv_group(
         kk = tl.arange(0, BK)
         # Waves of 4 match dense `_mv_rows`: one weight decode feeds four [BN,BK] lanes.
         for base in tl.static_range(0, BM, 4):
-            p0 = tl.load(MEMBERS + first + base, base < count, 0)
-            p1 = tl.load(MEMBERS + first + base + 1, base + 1 < count, 0)
-            p2 = tl.load(MEMBERS + first + base + 2, base + 2 < count, 0)
-            p3 = tl.load(MEMBERS + first + base + 3, base + 3 < count, 0)
-            ok0 = (base < count) & (p0 >= 0) & (p0 < PAIRS) & (expert >= 0) & (expert < EXPERTS)
-            ok1 = (base + 1 < count) & (p1 >= 0) & (p1 < PAIRS) & (expert >= 0) & (expert < EXPERTS)
-            ok2 = (base + 2 < count) & (p2 >= 0) & (p2 < PAIRS) & (expert >= 0) & (expert < EXPERTS)
-            ok3 = (base + 3 < count) & (p3 >= 0) & (p3 < PAIRS) & (expert >= 0) & (expert < EXPERTS)
-            a0 = tl.zeros((BN, BK), tl.float32)
-            a1 = tl.zeros((BN, BK), tl.float32)
-            a2 = tl.zeros((BN, BK), tl.float32)
-            a3 = tl.zeros((BN, BK), tl.float32)
-            for start in range(tl.cdiv(K, BK)):
-                k = start * BK + kk
-                w = _values(
-                    W,
-                    GRID,
-                    expert * N + n[:, None],
-                    k[None, :],
-                    (n[:, None] < N) & (k[None, :] < K) & (expert >= 0) & (expert < EXPERTS),
-                    K,
-                    FORMAT,
-                )
-                x0 = tl.load(X + p0.to(tl.int64) * K + k, ok0 & (k < K), 0).to(tl.float32)
-                x1 = tl.load(X + p1.to(tl.int64) * K + k, ok1 & (k < K), 0).to(tl.float32)
-                x2 = tl.load(X + p2.to(tl.int64) * K + k, ok2 & (k < K), 0).to(tl.float32)
-                x3 = tl.load(X + p3.to(tl.int64) * K + k, ok3 & (k < K), 0).to(tl.float32)
-                a0 += w * x0[None, :]
-                a1 += w * x1[None, :]
-                a2 += w * x2[None, :]
-                a3 += w * x3[None, :]
-            tl.store(Y + p0.to(tl.int64) * N + n, tl.sum(a0, 1), ok0 & (n < N))
-            tl.store(Y + p1.to(tl.int64) * N + n, tl.sum(a1, 1), ok1 & (n < N))
-            tl.store(Y + p2.to(tl.int64) * N + n, tl.sum(a2, 1), ok2 & (n < N))
-            tl.store(Y + p3.to(tl.int64) * N + n, tl.sum(a3, 1), ok3 & (n < N))
+            if base < count:
+                p0 = tl.load(MEMBERS + first + base, base < count, 0)
+                p1 = tl.load(MEMBERS + first + base + 1, base + 1 < count, 0)
+                p2 = tl.load(MEMBERS + first + base + 2, base + 2 < count, 0)
+                p3 = tl.load(MEMBERS + first + base + 3, base + 3 < count, 0)
+                ok0 = (base < count) & (p0 >= 0) & (p0 < PAIRS) & (expert >= 0) & (expert < EXPERTS)
+                ok1 = (base + 1 < count) & (p1 >= 0) & (p1 < PAIRS) & (expert >= 0) & (expert < EXPERTS)
+                ok2 = (base + 2 < count) & (p2 >= 0) & (p2 < PAIRS) & (expert >= 0) & (expert < EXPERTS)
+                ok3 = (base + 3 < count) & (p3 >= 0) & (p3 < PAIRS) & (expert >= 0) & (expert < EXPERTS)
+                a0 = tl.zeros((BN, BK), tl.float32)
+                a1 = tl.zeros((BN, BK), tl.float32)
+                a2 = tl.zeros((BN, BK), tl.float32)
+                a3 = tl.zeros((BN, BK), tl.float32)
+                for start in range(tl.cdiv(K, BK)):
+                    k = start * BK + kk
+                    w = _values(
+                        W,
+                        GRID,
+                        expert * N + n[:, None],
+                        k[None, :],
+                        (n[:, None] < N) & (k[None, :] < K) & (expert >= 0) & (expert < EXPERTS),
+                        K,
+                        FORMAT,
+                    )
+                    x0 = tl.load(X + p0.to(tl.int64) * K + k, ok0 & (k < K), 0).to(tl.float32)
+                    x1 = tl.load(X + p1.to(tl.int64) * K + k, ok1 & (k < K), 0).to(tl.float32)
+                    x2 = tl.load(X + p2.to(tl.int64) * K + k, ok2 & (k < K), 0).to(tl.float32)
+                    x3 = tl.load(X + p3.to(tl.int64) * K + k, ok3 & (k < K), 0).to(tl.float32)
+                    a0 += w * x0[None, :]
+                    a1 += w * x1[None, :]
+                    a2 += w * x2[None, :]
+                    a3 += w * x3[None, :]
+                tl.store(Y + p0.to(tl.int64) * N + n, tl.sum(a0, 1), ok0 & (n < N))
+                tl.store(Y + p1.to(tl.int64) * N + n, tl.sum(a1, 1), ok1 & (n < N))
+                tl.store(Y + p2.to(tl.int64) * N + n, tl.sum(a2, 1), ok2 & (n < N))
+                tl.store(Y + p3.to(tl.int64) * N + n, tl.sum(a3, 1), ok3 & (n < N))
 
 
 @triton.jit
