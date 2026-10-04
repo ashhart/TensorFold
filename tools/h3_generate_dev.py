@@ -60,6 +60,41 @@ def encode_first_frame(root: Path, image, width: int, height: int, patch):
     return rows
 
 
+AUDIO_PEAK = 0.89  # -1 dBFS: where the loudest sample of a clip is brought to when the decoder overshoots
+
+
+def unclipped_audio(audio_vae, latents):
+    """The audio decoder's waveform without its hard clip at +-1, scaled down as a whole when it overshoots.
+
+    minimax-h3-mlx's vocoder ends in `mx.clip(x, -1, 1)`. Few-step renders drive it past full scale in places and
+    the clip flattens those peaks, which is audible as harshness. Here the clip is lifted for the call and a clip
+    whose peak exceeds `AUDIO_PEAK` is turned down by one gain, so no sample is flattened.
+    """
+
+    import minimax_h3_mlx.audio_vae as module
+
+    class _Passthrough:
+        def __getattr__(self, name):
+            return getattr(mx, name)
+
+        @staticmethod
+        def clip(x, *_):
+            return x
+
+    original = module.mx
+    module.mx = _Passthrough()
+    try:
+        wave = np.array(audio_vae.decode(latents))[:, 0, :].astype(np.float32)
+    finally:
+        module.mx = original
+    peak = float(np.abs(wave).max())
+    over = int((np.abs(wave) > 1.0).sum())
+    gain = min(1.0, AUDIO_PEAK / peak) if peak > 0 else 1.0
+    print(f"[tensorfold] audio peak {peak:.2f} before any clip, {over} samples past full scale, gain "
+          f"{20 * np.log10(gain):.1f} dB", flush=True)
+    return wave * np.float32(gain)
+
+
 def decode(model_dir, root: Path, latents, config, int8: bool = True, upscale_decoder=None):
     """Frames from TensorFold's video decoder; the audio decoder is still minimax-h3-mlx's."""
 
@@ -85,7 +120,7 @@ def decode(model_dir, root: Path, latents, config, int8: bool = True, upscale_de
     audio = unpack_audio(latents.audio_rows, latents.audio_latents)
     amean = mx.array(np.array(acfg.latents_mean, np.float32)).reshape(1, -1, 1)
     astd = mx.array(np.array(acfg.latents_std, np.float32)).reshape(1, -1, 1)
-    wave = np.array(audio_vae.decode((audio * astd + amean).astype(mx.float32)))[:, 0, :].astype(np.float32)
+    wave = unclipped_audio(audio_vae, (audio * astd + amean).astype(mx.float32))
     lap("audio_decode")
     print(f"[tensorfold] decode_parts {parts}", flush=True)
     return frames, wave, acfg.sampling_rate
