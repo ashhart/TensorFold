@@ -605,7 +605,7 @@ class SerialEngine:
     def kept_views(self, base: int, n: int, bank: int) -> list[tuple[str, torch.Tensor]]:
         """A kept state's bytes as named uint8 views (no copies; the NVMe tier, ``kvdisk``): the per-token caches of
         tokens [base, base + n) of the arena (the entries ``copy_rows`` moves, of every kv source in order: an
-        ``Fp8Rows`` as its q, r and s planes) and bank entry ``bank`` (the DRING block ``save_window`` writes, of every
+        ``QRows`` as its planes, e.g. q, r and s) and bank entry ``bank`` (the DRING block ``save_window`` writes, of every
         ring). Written back into the same views, they are the state a COPY resume reads."""
 
         out = []
@@ -614,9 +614,8 @@ class SerialEngine:
             a, m = base // r, -(-n // r)
             for name, t in (("comp", self.big.comp[s_]), ("ik", self.big.ik[s_])):
                 v = t[a:a + m]
-                if isinstance(v, K.Fp8Rows):
-                    out += [(f"{name}/{s_}/q", v.q.view(torch.uint8)), (f"{name}/{s_}/r", v.r.view(torch.uint8)),
-                            (f"{name}/{s_}/s", v.s.view(torch.uint8))]
+                if isinstance(v, K.QRows):
+                    out += [(f"{name}/{s_}/{p}", b) for p, b in zip(v.planes, v._bytes())]
                 else:
                     out.append((f"{name}/{s_}", v.view(torch.uint8)))
         out += [(f"bank/{i}", b[bank * DRING:(bank + 1) * DRING].view(torch.uint8)) for i, b in enumerate(self.bank)]
@@ -1127,7 +1126,7 @@ class SerialEngine:
             r = c.layer_ratios[s_]
             ent = torch.unique(torch.cat([pos // r + base // r, torch.tensor([self.trash[s_]], device=self.dev)]))
             for t in (self.big.comp[s_], self.big.ik[s_]):
-                out.append((t, ent, t.take(ent) if isinstance(t, K.Fp8Rows) else t[ent].clone()))
+                out.append((t, ent, t.take(ent) if isinstance(t, K.QRows) else t[ent].clone()))
         if self.drafter is not None:
             dpos = pos if draft is None else torch.cat([pos, draft.to(self.dev).long()])
             dring = torch.unique(slot * DRING + dpos.clamp(min=0) % DRING)
@@ -1137,7 +1136,7 @@ class SerialEngine:
     @staticmethod
     def _restore_rows(saved: list) -> None:
         for t, idx, vals in saved:
-            if isinstance(t, K.Fp8Rows):
+            if isinstance(t, K.QRows):
                 t.put_rows(idx, vals)
             else:
                 t.index_copy_(0, idx, vals)

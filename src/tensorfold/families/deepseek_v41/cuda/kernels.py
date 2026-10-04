@@ -80,16 +80,66 @@ def rope_tables(freqs: torch.Tensor, max_pos: int) -> tuple[torch.Tensor, torch.
 FP8_MAX = 448.0
 
 
-class Fp8Rows:
+class QRows:
+    """Quantized cache rows as byte planes (``planes``: attribute names, row-major [n, ...] tensors) plus metadata.
+    Supports what the caches use: slicing (views) / clone / copy_ / zero_ / take / put_rows / shape, all as byte
+    copies of every plane (rows are never re-quantized); kernels read the planes."""
+
+    planes: tuple[str, ...] = ()
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        return (getattr(self, self.planes[0]).shape[0], self.dim)
+
+    def _parts(self, ts) -> QRows:
+        out = object.__new__(type(self))
+        out.__dict__.update(self.__dict__)
+        for p, t in zip(self.planes, ts):
+            setattr(out, p, t)
+        return out
+
+    def _bytes(self) -> list[torch.Tensor]:
+        return [getattr(self, p).view(torch.uint8) for p in self.planes]
+
+    def __getitem__(self, key) -> QRows:
+        return self._parts([getattr(self, p)[key] for p in self.planes])
+
+    def clone(self) -> QRows:
+        return self._parts([getattr(self, p).clone() for p in self.planes])
+
+    def copy_(self, other: QRows) -> QRows:
+        for a, b in zip(self._bytes(), other._bytes()):
+            a.copy_(b)
+        return self
+
+    def zero_(self) -> QRows:
+        for a in self._bytes():
+            a.zero_()
+        return self
+
+    def take(self, index: torch.Tensor) -> QRows:
+        """Copies of rows ``index`` (through uint8: no fp8 gather kernel)."""
+
+        return self._parts([b[index].view(getattr(self, p).dtype) for p, b in zip(self.planes, self._bytes())])
+
+    def put_rows(self, index: torch.Tensor, rows: QRows) -> None:
+        """Rows ``index`` set to ``rows`` as stored (no re-quantization)."""
+
+        for a, b in zip(self._bytes(), rows._bytes()):
+            a.index_copy_(0, index, b)
+
+    def nbytes(self) -> int:
+        return sum(t.numel() * t.element_size() for t in self._bytes())
+
+
+class Fp8Rows(QRows):
     """Rows stored as fp8 e4m3 with an fp32 scale per ``group`` values, the last ``plain`` values kept bf16 (the
-    compressed KV keeps its 64 RoPE dims bf16, as DeepSeek's fp8 KV cache does). Supports what the caches use:
-    index_copy_ / zero_ / slicing (views) / clone / copy_ / shape; kernels read q, r and s."""
+    compressed KV keeps its 64 RoPE dims bf16, as DeepSeek's V4 fp8 KV cache does); kernels read q, r and s."""
+
+    planes = ("q", "r", "s")
 
     def __init__(self, n: int = 0, dim: int = 0, *, plain: int = 0, group: int = 64, device="cuda",
-                 parts: tuple | None = None, alloc=None) -> None:
-        if parts is not None:
-            self.q, self.r, self.s, self.dim, self.plain, self.group = parts
-            return
+                 alloc=None) -> None:
         self.dim, self.plain, self.group = dim, plain, group
         f = dim - plain
         alloc = alloc or (lambda shape, dtype: torch.zeros(shape, dtype=dtype, device=device))
@@ -97,45 +147,9 @@ class Fp8Rows:
         self.r = alloc((n, max(plain, 1)), torch.bfloat16)
         self.s = alloc((n, f // group), torch.float32)
 
-    @property
-    def shape(self) -> tuple[int, int]:
-        return (self.q.shape[0], self.dim)
-
-    def _parts(self, q, r, s) -> Fp8Rows:
-        return Fp8Rows(parts=(q, r, s, self.dim, self.plain, self.group))
-
-    def __getitem__(self, key) -> Fp8Rows:
-        return self._parts(self.q[key], self.r[key], self.s[key])
-
-    def clone(self) -> Fp8Rows:
-        return self._parts(self.q.clone(), self.r.clone(), self.s.clone())
-
-    def copy_(self, other: Fp8Rows) -> Fp8Rows:
-        self.q.view(torch.uint8).copy_(other.q.view(torch.uint8))
-        self.r.copy_(other.r)
-        self.s.copy_(other.s)
-        return self
-
-    def zero_(self) -> Fp8Rows:
-        self.q.view(torch.uint8).zero_()
-        self.r.zero_()
-        self.s.zero_()
-        return self
-
-    def take(self, index: torch.Tensor) -> Fp8Rows:
-        """Copies of rows ``index`` (no fp8 gather kernel: through uint8)."""
-
-        return self._parts(self.q.view(torch.uint8)[index].view(torch.float8_e4m3fn), self.r[index], self.s[index])
-
-    def put_rows(self, index: torch.Tensor, rows: Fp8Rows) -> None:
-        """Rows ``index`` set to ``rows`` as stored (no re-quantization)."""
-
-        self.q.view(torch.uint8).index_copy_(0, index, rows.q.view(torch.uint8))
-        self.r.index_copy_(0, index, rows.r)
-        self.s.index_copy_(0, index, rows.s)
-
-    def nbytes(self) -> int:
-        return sum(t.numel() * t.element_size() for t in (self.q, self.r, self.s))
+    @staticmethod
+    def row_bytes(dim: int, plain: int, group: int) -> int:
+        return (dim - plain) + max(plain, 1) * 2 + (dim - plain) // group * 4
 
     def quantize(self, x: torch.Tensor):
         """(q, r, s) of rows x [G, dim] (fp32 or bf16)."""
@@ -165,7 +179,7 @@ class Fp8Rows:
 
 
 def cache_nbytes(t) -> int:
-    return t.nbytes() if isinstance(t, Fp8Rows) else t.numel() * t.element_size()
+    return t.nbytes() if isinstance(t, QRows) else t.numel() * t.element_size()
 
 
 @triton.jit
