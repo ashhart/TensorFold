@@ -108,6 +108,9 @@ class DSpark:
         return self.graph_logits
 
     def markov(self, previous):
-        return linear(
-            self.w["markov_w1.weight"][previous : previous + 1].float(), self.w["markov_w2.weight"], dtype=torch.float32
-        )[0]
+        # Int or 1-element CUDA index: proposal sampling can keep the chain on-device.
+        if isinstance(previous, torch.Tensor):
+            row = self.w["markov_w1.weight"].index_select(0, previous.to(dtype=torch.long).reshape(-1)[:1])
+        else:
+            row = self.w["markov_w1.weight"][int(previous) : int(previous) + 1]
+        return linear(row.float(), self.w["markov_w2.weight"], dtype=torch.float32)[0]

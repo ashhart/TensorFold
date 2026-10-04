@@ -70,7 +70,9 @@ class Layer:
             angles = weights._positions.float()[:, None] * self.freq[None]
             weights._rope_tables[kind] = (angles.cos(), angles.sin())
         self.tables = weights._rope_tables[kind]
-        self._buffers = {}
+        if not hasattr(weights, "_buffers"):
+            weights._buffers = {}
+        self._buffers = weights._buffers
         names = [n for n in weights.inventory if n.startswith(prefix + ".")]
         self.w = {n[len(prefix) + 1 :]: weights.tensor(n) for n in names}
         # Hyper-connection dots keep full precision, matching TensorFold's shared kernel.
@@ -87,7 +89,9 @@ class Layer:
             if isinstance(w, Packed):
                 row_bytes = w.data.numel() // w.shape[1]
                 lo, hi = group * self.rank, (group + 1) * self.rank
-                self.wo.append(Packed(w.data[lo * row_bytes : hi * row_bytes], (w.shape[0], self.rank), w.format))
+                self.wo.append(
+                    Packed(w.data[lo * row_bytes : hi * row_bytes], (w.shape[0], self.rank), w.format, workspace=w.workspace)
+                )
             else:
                 self.wo.append(w[group * self.rank : (group + 1) * self.rank])
 
@@ -126,7 +130,9 @@ class Layer:
         if rows not in self._buffers:
             if rows > 16:
                 # Keep decode widths, but never accumulate every prompt-tail size.
-                self._buffers = {k: v for k, v in self._buffers.items() if k <= 16}
+                for k in list(self._buffers):
+                    if k > 16:
+                        del self._buffers[k]
             d, dev = self.dims, self.weights.device
             self._buffers[rows] = (
                 torch.empty((rows, d), device=dev, dtype=torch.bfloat16),
@@ -274,9 +280,20 @@ class Layer:
         if x.shape[0] > 16:
             plan = Plan(x.shape[0], self.slots, self.experts, x.device, prefill=True)
             route(picks, plan, tile=64)
-        gate = w["ffn_gate_exps.weight"].linear(x, picks, plan=plan, validated=True)
-        up = w["ffn_up_exps.weight"].linear(x, picks, plan=plan, validated=True)
-        inner = swiglu(gate, up)
+        gate_w, up_w = w["ffn_gate_exps.weight"], w["ffn_up_exps.weight"]
+        if (
+            plan is not None
+            and getattr(gate_w, "layout", None) == "soa"
+            and getattr(up_w, "layout", None) == "soa"
+            and gate_w.format == up_w.format == "IQ2_XXS"
+        ):
+            from tensorfold.cuda.gguf.fused import gate_up_swiglu
+
+            inner = gate_up_swiglu(x, gate_w, up_w, picks, plan)
+        else:
+            gate = gate_w.linear(x, picks, plan=plan, validated=True)
+            up = up_w.linear(x, picks, plan=plan, validated=True)
+            inner = swiglu(gate, up)
         down = w["ffn_down_exps.weight"].linear(inner, picks, plan=plan, validated=True)
         shared = swiglu(linear(x, w["ffn_gate_shexp.weight"]), linear(x, w["ffn_up_shexp.weight"]))
         shared = linear(shared, w["ffn_down_shexp.weight"])
@@ -290,9 +307,9 @@ class Layer:
 
 
 class Model:
-    def __init__(self, path, limit=163840):
+    def __init__(self, path, limit=163840, *, prepared_dir=None, prepare_experts=True):
         torch.backends.cuda.matmul.allow_tf32 = False
-        self.weights = Weights(path)
+        self.weights = Weights(path, prepared_dir=prepared_dir, prepare_experts=prepare_experts)
         try:
             self._load(limit)
         finally:

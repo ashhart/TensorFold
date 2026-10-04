@@ -30,7 +30,7 @@ class DeepSeekEngine:
         context=None,
         drafter="",
         no_drafts=False,
-        prefill_rows=1024,
+        prefill_rows=2048,
         retained_prefix=131072,
         tp=1,
         rank=0,
@@ -67,7 +67,8 @@ class DeepSeekEngine:
         self._closed = False
         selected = str(drafter or native.get("drafter", "")) if not no_drafts else ""
         self._admit(native["path"], selected)
-        self.model = Model(native["path"], self.limit)
+        prepared = native.get("prepared") or None
+        self.model = Model(native["path"], self.limit, prepared_dir=prepared)
         self.drafter = DSpark(selected, self.model) if selected else None
         self.state = self.model.state()
         self.dstate = self.drafter.state() if self.drafter else None
@@ -228,6 +229,24 @@ class DeepSeekEngine:
         ids = np.broadcast_to(self._ids, values.shape)
         return choose_rows(values, ids, positions, sampling)
 
+    def _propose(self, pending, draft_logits, position, sampling, count):
+        """Sample draft proposals; keep the Markov chain on GPU until one host list is needed."""
+
+        device = draft_logits.device
+        prev = torch.tensor([int(pending)], dtype=torch.int64, device=device)
+        out = torch.empty((count,), dtype=torch.int64, device=device)
+        greedy = sampling is None or sampling.temperature <= 0
+        for j in range(count):
+            logits = draft_logits[j] + self.drafter.markov(prev)
+            if greedy:
+                prev = logits.argmax(dim=-1)
+                out[j] = prev
+                continue
+            drawn = self._draw(logits, position + j, sampling)
+            prev = torch.tensor([drawn], dtype=torch.int64, device=device)
+            out[j] = prev
+        return out.tolist()
+
     def generate(self, prompt, max_tokens, sampling, on_tokens, draft=True, constraint=None, stop_eos=None):
         if constraint is not None:
             raise ValueError("native DeepSeek GGUF structured output is not implemented")
@@ -266,14 +285,9 @@ class DeepSeekEngine:
                     pending = self._draw(logits, len(prompt) + len(tokens), sampling)
                     continue
                 # DSpark reads committed target taps; it never receives rejected speculative rows.
-                proposals = []
-                previous = pending
                 draft_logits = self.drafter.logits(pending, self.dstate)
                 count = min(self.drafter.size - 1, max_tokens - len(tokens))
-                for j in range(count):
-                    bias = self.drafter.markov(previous)
-                    previous = self._draw(draft_logits[j] + bias, len(prompt) + len(tokens) + j, sampling)
-                    proposals.append(previous)
+                proposals = self._propose(pending, draft_logits, len(prompt) + len(tokens), sampling, count)
                 old = self.state[0].offset
                 # Target rows share the serial math at every width. Absorb only after verification.
                 logits = self.model.forward([pending] + proposals, self.state)

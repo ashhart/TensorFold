@@ -16,7 +16,7 @@ from tensorfold.gguf import parse_gguf_tensors
 from tensorfold.gguf_tokenizer import tokenizer
 
 
-def prepare(path, output, *, context=163840, drafter="", retained_prefix=131072):
+def prepare(path, output, *, context=163840, drafter="", retained_prefix=131072, prepare_experts=False):
     path = Path(path).resolve(strict=True)
     output = Path(output)
     if not 0 <= retained_prefix < context:
@@ -56,6 +56,12 @@ def prepare(path, output, *, context=163840, drafter="", retained_prefix=131072)
         )
         + "\n"
     )
+    if prepare_experts:
+        from tensorfold.cuda.gguf import prepare_file
+
+        prepared = prepare_file(path, output / "prepared_experts")
+        cfg["gguf"]["prepared"] = str((output / "prepared_experts").resolve())
+        cfg["gguf"]["prepared_tensors"] = len(prepared.get("tensors", []))
     tmp = output / "config.json.tmp"
     tmp.write_text(json.dumps(cfg, indent=2) + "\n")
     tmp.replace(output / "config.json")
@@ -69,10 +75,18 @@ if __name__ == "__main__":
     p.add_argument("--drafter", default="")
     p.add_argument("--context", type=int, default=163840)
     p.add_argument("--retained-prefix", type=int, default=131072)
+    p.add_argument("--prepare-experts", action="store_true", help="offline IQ2/Q2 expert tile cache")
     a = p.parse_args()
     print(
         json.dumps(
-            prepare(a.gguf, a.model_dir, context=a.context, drafter=a.drafter, retained_prefix=a.retained_prefix),
+            prepare(
+                a.gguf,
+                a.model_dir,
+                context=a.context,
+                drafter=a.drafter,
+                retained_prefix=a.retained_prefix,
+                prepare_experts=a.prepare_experts,
+            ),
             indent=2,
         )
     )

@@ -73,6 +73,12 @@ def test_decode_reference_and_row_independence(fmt):
     ref = torch.bmm(matrices[picks[:, 0]].float(), x.float()[:, :, None]).squeeze(-1)
     torch.testing.assert_close(y[:, 0].float(), ref, rtol=0.01, atol=0.002)
     torch.testing.assert_close(experts.linear(x[:, None], picks)[:, 0].float(), ref, rtol=0.01, atol=0.002)
+    if fmt == "Q8_0":
+        from tensorfold.cuda.gguf.prefill import Workspace
+
+        out = torch.empty((65, 7), device=x.device, dtype=torch.float32)
+        Workspace().matmul(packed, x, out)
+        assert torch.equal(out, packed.linear(x, dtype=torch.float32))
 
 
 def test_invalid_expert_ids_and_shapes_are_refused_before_routing():
@@ -84,3 +90,68 @@ def test_invalid_expert_ids_and_shapes_are_refused_before_routing():
             packed.linear(x, torch.full((17, 1), bad, device="cuda", dtype=torch.int32))
     with pytest.raises(ValueError, match="expert picks"):
         packed.linear(x, torch.ones(17, device="cuda", dtype=torch.int32))
+
+
+def test_prepare_tiles_and_decode_row_sharing_match_raw():
+    """Synthetic 3D IQ2 SoA / Q2 raw: prepare is lossless; grouped prefill matches per-row _mv."""
+
+    from tensorfold.cuda.gguf.prepare import prepare_packed
+
+    rng = np.random.default_rng(11)
+    for fmt, n, e in (("IQ2_XXS", 64, 3), ("Q2_K", 64, 3)):
+        block, size = FORMATS[fmt]
+        k = 256
+        raw = rng.integers(0, 256, (e * n * (k // block), size), dtype=np.uint8)
+        if fmt == "Q2_K":
+            raw[:, 80:84] = np.frombuffer(struct.pack("<ee", 0.03125, 0.015625), dtype=np.uint8)
+        else:
+            raw[:, :2] = np.frombuffer(struct.pack("<e", 0.03125), dtype=np.uint8)
+        data = torch.from_numpy(raw.copy()).cuda().flatten()
+        packed = Packed(data, (k, n, e), fmt)
+        prepared = prepare_packed(packed, bn=64)
+        assert prepared.layout == "soa"
+        if fmt == "IQ2_XXS":
+            from tensorfold.cuda.gguf.prepare import iq2_soa_bytes
+
+            nblk = e * n * (k // 256)
+            dq_bytes, total = iq2_soa_bytes(nblk)
+            assert prepared.bn == dq_bytes and prepared.data.numel() == total
+            dq = prepared.data[:dq_bytes].view(torch.float16)
+            qs = prepared.data[dq_bytes:].view(torch.uint64)
+            for ei in range(e):
+                for ni in range(n):
+                    for g in range(k // 256):
+                        blk = (ei * n + ni) * (k // 256) + g
+                        src = packed.data[blk * size : (blk + 1) * size]
+                        assert src[:2].view(torch.float16).item() == dq[blk].item()
+                        for w in range(8):
+                            word = int.from_bytes(src[2 + w * 8 : 10 + w * 8].cpu().numpy().tobytes(), "little")
+                            assert int(qs[blk * 8 + w].item()) == word
+        else:
+            from tensorfold.cuda.gguf.prepare import q2_soa_bytes
+
+            nblk = e * n * (k // 256)
+            dm_bytes, sc_bytes, total = q2_soa_bytes(nblk)
+            assert (prepared.bn & 0xFFFFFFFF) == dm_bytes and (prepared.bn >> 32) == sc_bytes
+            assert prepared.data.numel() == total
+        x = torch.randn(4, k, device="cuda", dtype=torch.bfloat16) * 0.01
+        picks = torch.tensor([[0], [1], [1], [2]], device="cuda", dtype=torch.int32)
+        y = prepared.linear(x, picks, dtype=torch.float32)
+        ref = torch.cat([prepared.linear(x[i : i + 1], picks[i : i + 1], dtype=torch.float32) for i in range(4)])
+        assert torch.equal(y, ref)
+        # Prefill-sized grouping (rows>16) must match the decode-width path within bf16 ULP.
+        x64 = torch.randn(65, k, device="cuda", dtype=torch.bfloat16) * 0.01
+        picks64 = (torch.arange(65, device="cuda") % e).to(torch.int32)[:, None]
+        import os
+
+        os.environ["TENSORFOLD_GGUF_CUDA_PREFILL"] = "1"
+        cuda_out = prepared.linear(x64, picks64)
+        os.environ["TENSORFOLD_GGUF_CUDA_PREFILL"] = "0"
+        tri_out = prepared.linear(x64, picks64)
+        os.environ.pop("TENSORFOLD_GGUF_CUDA_PREFILL", None)
+        # CUDA D2R vs Triton SoA: same bf16 MMA contract (≤1–2 ULP).
+        torch.testing.assert_close(cuda_out.float(), tri_out.float(), rtol=0, atol=0.001)
+        if fmt == "Q2_K":
+            assert torch.equal(cuda_out, tri_out)
+        per_row = torch.cat([prepared.linear(x64[i : i + 1], picks64[i : i + 1]) for i in range(65)])
+        torch.testing.assert_close(cuda_out[:, 0].float(), per_row.float(), rtol=0.01, atol=0.01)
