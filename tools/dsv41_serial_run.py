@@ -54,6 +54,11 @@ def main() -> None:
     ap.add_argument("--fixed-k", action="store_true", help="verify every draft each round (no adaptive policy)")
     ap.add_argument("--cases", type=Path, help="tools/dsv41_vllm_accept.py results: replay every case's prompt ids")
     ap.add_argument("--stack-after", type=int, default=0, help="dump every thread's stack after N seconds")
+    ap.add_argument("--views-test", type=int, default=0, help="N: after an N-token prefill, the kept state's bytes "
+                    "(kept_views) hashed on both ranks and compared")
+    ap.add_argument("--resume-test", default="", help="N,Q: a kept N-token state resumed (COPY to another extent, "
+                    "its bytes through a kept_views round trip, TAKEOVER) and Q more prompt tokens vs a fresh prefill: "
+                    "16 greedy tokens each (needs --slots 2)")
     ap.add_argument("--chunk-test", default="", help="N,k[,k..]: a prompt's rows as one chunk vs split at k: the "
                     "first sublayer where a row's values depend on its chunk (and, with --graph, a <=32-row tail)")
     args = ap.parse_args()
@@ -254,6 +259,83 @@ def main() -> None:
                 if args.rank == 0:
                     print(f"chunk-test split {k}: last-row logits max|diff| {(lw - lp).abs().max().item():.3g}, "
                           f"argmax {int(lw.argmax())} vs {int(lp.argmax())}", flush=True)
+        nccl.barrier()
+        return
+    if args.views_test:                                   # TP=2: a kept state's bytes are the same on both ranks
+        import hashlib
+
+        base = json.loads(Path("notes/dsv41/golden_long2.json").read_text())["goldens"][-1]["ids"]
+        doc = (base * (1 + args.views_test // len(base)))[:args.views_test]
+        with torch.no_grad():
+            eng.select_slot(0)
+            eng.reset()
+            eng.prefill(doc)
+            eng.make_bank(1)
+            eng.save_window(0, 0)
+            torch.cuda.synchronize()
+            views = eng.kept_views(eng.extents[0][0], len(doc), 0)
+            mine = [int.from_bytes(hashlib.sha256(v.contiguous().cpu().numpy().tobytes()).digest()[:7], "little")
+                    for _, v in views]
+            got = torch.empty((2 * len(mine),), dtype=torch.int64, device="cuda")
+            nccl.all_gather(torch.tensor(mine, dtype=torch.int64, device="cuda"), got)
+            both = got.view(2, -1).tolist()
+        if args.rank == 0:
+            same = [n for (n, _), a, b in zip(views, *both) if a == b]
+            print(f"views-test N={len(doc)}: {len(same)}/{len(views)} views equal across ranks "
+                  f"({sum(v.numel() for _, v in views) / 2 ** 20:.1f} MiB); names {[n for n, _ in views][:6]}..., "
+                  f"differ {[n for (n, _), a, b in zip(views, *both) if a != b]}", flush=True)
+        nccl.barrier()
+        return
+    if args.resume_test:                                 # kept COPY / disk bytes / TAKEOVER resume == fresh
+        N, Q = [int(v) for v in args.resume_test.split(",")]
+        base = json.loads(Path("notes/dsv41/golden_long2.json").read_text())["goldens"][-1]["ids"]
+        doc = (base * (1 + (N + Q) // len(base)))[:N + Q]
+
+        def decode(nxt):
+            toks = [nxt]
+            for _ in range(15):
+                nxt = eng.step(nxt)
+                toks.append(nxt)
+            return toks
+
+        res = {}
+        with torch.no_grad():
+            eng.make_bank(1)
+            eng.select_slot(1)
+            eng.reset()
+            res["fresh"] = decode(int(eng.prefill(doc)[-1].argmax()))
+            eng.select_slot(0)                              # the kept state: slot 0's extent and rings
+            eng.reset()
+            eng.prefill(doc[:N])
+            eng.save_window(0, 0)
+            vs = eng.ring_from[0]
+            vd = max(vs, eng.deep_from[0])
+            b0 = eng.extents[0][0]
+
+            def resume(slot):
+                x0, size = eng.extents[slot]
+                if x0 != b0:
+                    eng.copy_rows(b0, x0, N)
+                eng.bind(slot, x0, size, ids=doc[:N])
+                eng.select_slot(slot)
+                eng.load_window(0, slot)
+                eng.ring_from[slot] = vs
+                eng.deep_from[slot] = vd
+                return decode(int(eng.prefill(doc[N:])[-1].argmax()))
+
+            res["copy"] = resume(1)
+            views = eng.kept_views(b0, N, 0)                # the NVMe tier's bytes: out, scrambled, back
+            saved = [v.cpu().clone() for _, v in views]
+            for _, v in views:
+                v.random_(0, 256)
+            for (_, v), b in zip(views, saved):
+                v.copy_(b)
+            res["disk"] = resume(1)
+            res["takeover"] = resume(0)
+        if args.rank == 0:
+            print(f"resume-test N={N} Q={Q}: " + ", ".join(f"{k} == fresh {v == res['fresh']}" for k, v in res.items()
+                                                         if k != "fresh") + f"\n  fresh {res['fresh']}\n  copy  "
+                  f"{res['copy']}", flush=True)
         nccl.barrier()
         return
     if args.step_test:
