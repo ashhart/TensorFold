@@ -202,13 +202,37 @@ def _e2m1_val(c):
 
 @triton.jit
 def _e4m3_val(b):
-    """fp32 of e4m3 bytes b (int32, finite) from bits (no fp8 type in a dot operand's chain: see _comp_rows)."""
+    """fp32 of e4m3 bytes b (int32, finite) from bits (no fp8 type in a dot operand's chain: see _fp4_rows)."""
 
     e = (b >> 3) & 15
     m = b & 7
     v = tl.where(e > 0, ((e + 120) << 23) | (m << 20), 0).to(tl.float32, bitcast=True)
     v = tl.where(e > 0, v, m.to(tl.float32) * 0.001953125)                  # subnormal: m * 2^-9
     return tl.where(b >= 128, -v, v)
+
+
+@triton.jit
+def _fp4_rows(Q, S, row, ok, d, D: tl.constexpr, G: tl.constexpr, E4M3: tl.constexpr):
+    """Fp4Rows rows ``row`` [N, 1] (int64) as fp32 [N, D] (exact in bf16), 0 where not ``ok`` [N, 1]. Whole int32
+    words: an 8-bit load (or fp8 value) in a dot operand's chain gives it another kWidth, a k order whose sums round
+    unlike a bf16 cache's. Masked: a row nobody wrote may hold anything (an e4m3 NaN)."""
+
+    wq = tl.load(Q.to(tl.pointer_type(tl.int32)) + row * (D // 8) + d[None, :] // 8, mask=ok, other=0)
+    ws = tl.load(S.to(tl.pointer_type(tl.int32)) + row * (D // G // 4) + d[None, :] // (4 * G), mask=ok, other=0)
+    sb = (ws >> (d[None, :] // G % 4 * 8)) & 255
+    sc = _e4m3_val(sb) if E4M3 else (sb << 23).to(tl.float32, bitcast=True)
+    return _e2m1_val((wq >> (d[None, :] % 8 * 4)) & 15) * sc
+
+
+@triton.jit
+def _fp4_dequant(Q, S, OUT, off, n, D: tl.constexpr, G: tl.constexpr, E4M3: tl.constexpr, BR: tl.constexpr):
+    """OUT [n, D] bf16 = rows off .. off + n - 1 of an Fp4Rows."""
+
+    j = tl.program_id(0) * BR + tl.arange(0, BR)
+    d = tl.arange(0, D)
+    ok = (j < n)[:, None]
+    v = _fp4_rows(Q, S, (off + j)[:, None].to(tl.int64), ok, d, D, G, E4M3)
+    tl.store(OUT + j[:, None].to(tl.int64) * D + d[None, :], v.to(tl.bfloat16), mask=ok)
 
 
 @triton.jit
@@ -319,6 +343,13 @@ class Fp4Rows(QRows):
         _rope_q[(x.shape[0], 1)](x.contiguous(), pos, cos, sin, self.q, self.s, slot, 1, D=self.dim,
                                  HALF=cos.shape[1], G=self.group, MODE=0 if self.scale == "e4m3" else 1, num_warps=4)
 
+    def dequant_rows(self, out: torch.Tensor, off: int, n: int) -> torch.Tensor:
+        """Rows off .. off + n - 1 as bf16 into ``out`` [>= n, dim] (the kernels' decode); returns out[:n]."""
+
+        _fp4_dequant[(triton.cdiv(n, 32),)](self.q, self.s, out, off, n, D=self.dim, G=self.group,
+                                           E4M3=self.scale == "e4m3", BR=32, num_warps=4)
+        return out[:n]
+
     def dequant(self) -> torch.Tensor:
         """bf16 [n, dim] (tests)."""
 
@@ -349,14 +380,8 @@ def _comp_rows(COMP, CR, CS, kidx, ok_c, d, D: tl.constexpr, FMT: tl.constexpr, 
         r = tl.load(CR + row * (D - F) + (d[None, :] - F), mask=ok_c[:, None] & (d[None, :] >= F),
                     other=0.0).to(tl.float32)
         out = tl.where(body, tl.where(ok_c[:, None], q, 0.0) * sc, r)
-    elif FMT == 2:
-        # whole int32 words: an 8-bit load (or fp8 value) in a dot operand's chain gives it another kWidth, a k order
-        # whose sums round unlike a bf16 cache's. Masked: an unselected row may hold anything, and kk feeds PV too.
-        wq = tl.load(COMP.to(tl.pointer_type(tl.int32)) + row * (D // 8) + d[None, :] // 8, mask=ok_c[:, None],
-                     other=0)
-        ws = tl.load(CS.to(tl.pointer_type(tl.int32)) + row * (D // 64) + d[None, :] // 64, mask=ok_c[:, None],
-                     other=0)
-        out = _e2m1_val((wq >> (d[None, :] % 8 * 4)) & 15) * _e4m3_val((ws >> (d[None, :] // 16 % 4 * 8)) & 255)
+    elif FMT == 2:                                  # (masked: kk feeds PV too, not only the masked scores)
+        out = _fp4_rows(COMP, CS, row, ok_c[:, None], d, D, 16, True)
     else:
         out = tl.load(COMP + row * D + d[None, :], mask=ok_c[:, None], other=0.0).to(tl.float32)
     return out
@@ -565,8 +590,10 @@ def mqa(q: torch.Tensor, comp: torch.Tensor | None, idx: torch.Tensor | None, sw
 
 @triton.jit
 def _index_scores(IQ, WTS, KEYS, POS, OUT, n_keys, ratio, KBASE, KS, HI: tl.constexpr, DI: tl.constexpr,
-                  BS: tl.constexpr, HAS_BASE: tl.constexpr = False, FP8: tl.constexpr = False):
-    """I[r, s] = sum_h w[r, h] * relu(iq[r, h] . k[s]) for visible s < (p + 1) // ratio, -inf elsewhere."""
+                  BS: tl.constexpr, HAS_BASE: tl.constexpr = False, FP8: tl.constexpr = False,
+                  FP4: tl.constexpr = False):
+    """I[r, s] = sum_h w[r, h] * relu(iq[r, h] . k[s]) for visible s < (p + 1) // ratio, -inf elsewhere. Keys: bf16,
+    fp8 (a scale per key, after the dot) or MXFP4 (FP4: decoded before the dot, 68 bytes a key)."""
 
     r = tl.program_id(0)
     sb = tl.program_id(1)
@@ -580,7 +607,10 @@ def _index_scores(IQ, WTS, KEYS, POS, OUT, n_keys, ratio, KBASE, KS, HI: tl.cons
     # only visible keys are read: a slot sized for a long window (600K) holds ~150K entries of which a decode row
     # sees (p + 1) // ratio; reading the rest cost ~20 MB a layer a step (their scores are -inf either way)
     live = (sidx < n_keys) & (sidx < n_vis)
-    k = tl.load(KEYS + (kbase + sidx)[:, None].to(tl.int64) * DI + d[None, :], mask=live[:, None], other=0.0)
+    if FP4:
+        k = _fp4_rows(KEYS, KS, (kbase + sidx)[:, None].to(tl.int64), live[:, None], d, DI, 32, False).to(tl.bfloat16)
+    else:
+        k = tl.load(KEYS + (kbase + sidx)[:, None].to(tl.int64) * DI + d[None, :], mask=live[:, None], other=0.0)
     if FP8:                                                    # e4m3 -> bf16 is exact; the key's scale after the dot
         k = k.to(tl.bfloat16)
     dots = tl.dot(q, tl.trans(k)).to(tl.float32)                     # [HI, BS]
@@ -601,11 +631,11 @@ def index_scores(iq: torch.Tensor, wts: torch.Tensor, keys: torch.Tensor, pos: t
     S = keys.shape[0] if n_keys is None else n_keys
     scores = torch.empty((R, S), dtype=torch.float32, device=iq.device)
     BS = 64
-    fp8 = isinstance(keys, Fp8Rows)
-    kq, ks = (keys.q, keys.s) if fp8 else (keys, pos)
+    fp8, q4 = isinstance(keys, Fp8Rows), isinstance(keys, Fp4Rows)
+    kq, ks = (keys.q, keys.s) if fp8 or q4 else (keys, pos)
     _index_scores[(R, triton.cdiv(S, BS))](iq.contiguous(), wts.contiguous(), kq, pos, scores, S, ratio,
                                            kbase if kbase is not None else pos, ks, HI=HI, DI=DI, BS=BS,
-                                           HAS_BASE=kbase is not None, FP8=fp8, num_warps=4)
+                                           HAS_BASE=kbase is not None, FP8=fp8, num_warps=4, **({"FP4": True} if q4 else {}))
     return scores
 
 
@@ -617,12 +647,35 @@ def untie(scores: torch.Tensor, first: int = 0) -> torch.Tensor:
     return torch.where(scores == 0, -1e-30 * (1.0 + idx * 2.0 ** -21), scores)
 
 
+# the prompt path's top-k with ties to the lower index, as the decode path's (topk.py) breaks them: torch.topk leaves
+# ties unspecified (a row's choice could depend on its chunk); set by serial in fp4 mode, where FP4 keys and queries
+# make exactly equal scores likelier (off: fp8 / bf16 select exactly as before)
+TIE_KEYS = False
+
+
+def topk_lo(x: torch.Tensor, k: int, ids: torch.Tensor | None = None, sorted: bool = True):
+    """torch.topk(x, k, dim=1) -> (values, ids), equal values going to the lower id (``ids`` [R, n] int64, default
+    the column): one int64 topk over (the fp32 bits made monotone) << 32 | (2^31 - 1 - id)."""
+
+    if not TIE_KEYS:
+        v, i = torch.topk(x, k, dim=1, sorted=sorted)
+        return v, (i if ids is None else torch.gather(ids, 1, i))
+    b = x.contiguous().view(torch.int32).long()
+    b = torch.where(b < 0, b ^ 0x7FFFFFFF, b)
+    if ids is None:
+        ids = torch.arange(x.shape[1], device=x.device)[None, :]
+    kv = torch.topk((b << 32) | (0x7FFFFFFF - ids), k, dim=1, sorted=sorted).values
+    hi = kv >> 32
+    v = torch.where(hi < 0, hi ^ 0x7FFFFFFF, hi).int().view(torch.float32)
+    return v, 0x7FFFFFFF - (kv & 0xFFFFFFFF)
+
+
 def top_entries(scores: torch.Tensor, topk: int) -> torch.Tensor:
     """int32 [R, topk]: the best visible entries ascending, -1 padded (every visible one when <= topk)."""
 
     R, S = scores.shape
     k = min(topk, S)
-    vals, idx = torch.topk(untie(scores), k, dim=1, sorted=False)
+    vals, idx = topk_lo(untie(scores), k, sorted=False)
     idx = torch.where(torch.isinf(vals) & (vals < 0), torch.full_like(idx, S), idx)   # invisible sort last, dropped
     idx = torch.sort(idx, dim=1).values
     idx = torch.where(idx >= S, torch.full_like(idx, -1), idx).int()
@@ -642,7 +695,7 @@ def candidate_blocks(scores: torch.Tensor, pos: torch.Tensor, ratio: int, block:
     best = untie(padded.view(R, nb, block).amax(-1))
     newest = ((pos + 1) // ratio - 1).clamp(min=0) // block
     best.scatter_(1, newest[:, None].long(), float("inf"))
-    vals, idx = torch.topk(best, min(keep, nb), dim=1)
+    vals, idx = topk_lo(best, min(keep, nb))
     idx = torch.where(torch.isinf(vals) & (vals < 0), torch.full_like(idx, -1), idx)
     if idx.shape[1] < keep:
         idx = torch.cat([idx, torch.full((R, keep - idx.shape[1]), -1, dtype=idx.dtype, device=idx.device)], dim=1)
@@ -662,9 +715,9 @@ def mask_to_blocks(scores: torch.Tensor, blocks: torch.Tensor, block: int) -> to
 
 @triton.jit
 def _index_scores_seg(IQ, WTS, KEYS, POS, OUT, n_keys, off, seg, out_stride, ratio, KS, HI: tl.constexpr,
-                      DI: tl.constexpr, BS: tl.constexpr, FP8: tl.constexpr = False):
+                      DI: tl.constexpr, BS: tl.constexpr, FP8: tl.constexpr = False, SCRATCH: tl.constexpr = False):
     """_index_scores over the key segment [off, off + seg): OUT[r, j] for key off + j (-inf past n_keys or not yet
-    visible), the same arithmetic per key."""
+    visible), the same arithmetic per key. SCRATCH: KEYS holds the segment alone (bf16, FP4 keys decoded)."""
 
     r = tl.program_id(0)
     sb = tl.program_id(1)
@@ -675,7 +728,8 @@ def _index_scores_seg(IQ, WTS, KEYS, POS, OUT, n_keys, off, seg, out_stride, rat
     j = sb * BS + tl.arange(0, BS)
     sidx = off + j
     q = tl.load(IQ + (r * HI + h[:, None]) * DI + d[None, :])
-    k = tl.load(KEYS + sidx[:, None].to(tl.int64) * DI + d[None, :], mask=(sidx < n_keys)[:, None], other=0.0)
+    krow = j if SCRATCH else sidx
+    k = tl.load(KEYS + krow[:, None].to(tl.int64) * DI + d[None, :], mask=(sidx < n_keys)[:, None], other=0.0)
     if FP8:
         k = k.to(tl.bfloat16)
     dots = tl.dot(q, tl.trans(k)).to(tl.float32)
@@ -708,8 +762,10 @@ def index_select_blocked(iq: torch.Tensor, wts: torch.Tensor, keys: torch.Tensor
     cand_out = torch.full((R, candidates), -1, dtype=torch.int64, device=dev) if candidates else None
     nb = -(-S // block)
     buf = torch.empty((min(R, SELECT_ROWS), seg), dtype=torch.float32, device=dev)
-    fp8 = isinstance(keys, Fp8Rows)
+    fp8, q4 = isinstance(keys, Fp8Rows), isinstance(keys, Fp4Rows)
     kq, ks = (keys.q, keys.s) if fp8 else (keys, pos)
+    # FP4 keys: each segment decoded once a pass into bf16 scratch (a key decoded per scoring program would be 512x)
+    scratch = torch.empty((seg, DI), dtype=torch.bfloat16, device=dev) if q4 else None
     for r0 in range(0, R, SELECT_ROWS):
         r1 = min(R, r0 + SELECT_ROWS)
         n = r1 - r0
@@ -724,9 +780,11 @@ def index_select_blocked(iq: torch.Tensor, wts: torch.Tensor, keys: torch.Tensor
         for off in range(0, S, seg):
             length = min(seg, S - off)
             sc = buf[:n, :length]
+            if q4:
+                kq = keys.dequant_rows(scratch, off, length)
             _index_scores_seg[(n, triton.cdiv(length, 64))](iq[r0:r1], wts[r0:r1], kq, pos[r0:r1], sc, S, off,
                                                            length, buf.stride(0), ratio, ks, HI=HI, DI=DI, BS=64,
-                                                           FP8=fp8, num_warps=4)
+                                                           FP8=fp8, num_warps=4, **({"SCRATCH": True} if q4 else {}))
             if best is not None:                               # the source layer's block maxima (unmasked)
                 padded = sc if length % block == 0 else torch.nn.functional.pad(sc, (0, block - length % block),
                                                                                 value=float("-inf"))
@@ -735,9 +793,8 @@ def index_select_blocked(iq: torch.Tensor, wts: torch.Tensor, keys: torch.Tensor
                 keep = flags[:, off // block: off // block + -(-length // block)].repeat_interleave(block, 1)
                 sc = sc.masked_fill(~keep[:, :length], float("-inf"))
             kk = min(k, length)
-            v, i = torch.topk(untie(sc, off), kk, dim=1, sorted=False)
-            vals, pick = torch.topk(torch.cat([vals, v], dim=1), k, dim=1, sorted=False)
-            ids = torch.gather(torch.cat([ids, i + off], dim=1), 1, pick)
+            v, i = topk_lo(untie(sc, off), kk, sorted=False)
+            vals, ids = topk_lo(torch.cat([vals, v], dim=1), k, torch.cat([ids, i + off], dim=1), sorted=False)
         ids = torch.where(torch.isinf(vals) & (vals < 0), torch.full_like(ids, S), ids)   # invisible: dropped
         ids = torch.sort(ids, dim=1).values
         idx_out[r0:r1, :k] = torch.where(ids >= S, torch.full_like(ids, -1), ids).int()
@@ -745,7 +802,7 @@ def index_select_blocked(iq: torch.Tensor, wts: torch.Tensor, keys: torch.Tensor
             best = untie(best)
             newest = ((pos[r0:r1] + 1) // ratio - 1).clamp(min=0) // block
             best.scatter_(1, newest[:, None].long(), float("inf"))
-            v, i = torch.topk(best, min(candidates, nb), dim=1)
+            v, i = topk_lo(best, min(candidates, nb))
             cand_out[r0:r1, :i.shape[1]] = torch.where(torch.isinf(v) & (v < 0), torch.full_like(i, -1), i)
     return idx_out, cand_out
 

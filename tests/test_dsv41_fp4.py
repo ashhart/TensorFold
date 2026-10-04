@@ -282,3 +282,81 @@ def test_attention_over_packed_rows_equals_its_dequant(R, streams):
     assert torch.isfinite(a).all() and torch.equal(a, b)
     c = K.mqa(q, rows, idx, swa, pos, sink, W, buf, D ** -0.5, **kw)              # fp32 out, no inverse RoPE
     assert torch.equal(c, K.mqa(q, deq, idx, swa, pos, sink, W, buf, D ** -0.5, **kw))
+
+
+def _ik(K, E, seed):
+    cos, sin = _tables(K, 1 << 16)
+    keys = K.Fp4Rows(E, 128, group=32, scale="ue8m0", device="cuda")
+    keys.store(torch.arange(E, device="cuda"), _rows(E, 128, seed), torch.arange(E, device="cuda"), cos, sin)
+    return keys
+
+
+@gpu
+def test_indexer_scores_over_packed_keys_equal_their_dequant():
+    """_index_scores over MXFP4 keys == over their bf16 dequantization: whole table, decode rows with key bases and a
+    narrower width, the segment scratch (dequant_rows) equal to dequant(), FAST_TOPK's selection alike."""
+
+    K = _kernels()
+    from tensorfold.families.deepseek_v41.cuda import topk as TK
+
+    E = 9000
+    keys = _ik(K, E, 21)
+    keys.s[E - 50:] = 255                                     # past every row's visible keys: never read
+    deq = keys.dequant()
+    assert torch.equal(keys.dequant_rows(torch.empty((E, 128), dtype=torch.bfloat16, device="cuda"), 0, E)[:E - 50],
+                       deq[:E - 50])
+    assert torch.equal(keys.dequant_rows(torch.empty((777, 128), dtype=torch.bfloat16, device="cuda"), 4000, 777),
+                       deq[4000:4777])
+    g = torch.Generator(device="cuda").manual_seed(3)
+    R = 7
+    iq = (torch.randn((R, 64, 128), generator=g, device="cuda") * 0.3).to(torch.bfloat16)
+    wts = torch.randn((R, 64), generator=g, device="cuda")
+    pos = torch.tensor([10, 900, 4000, 8000, 3, 5000, 6100], device="cuda")
+    a = K.index_scores(iq, wts, keys[:E - 50], pos, 1)
+    assert torch.equal(a, K.index_scores(iq, wts, deq[:E - 50], pos, 1))
+    kbase = torch.tensor([0, 0, 1000, 1000, 2000, 2000, 2000], device="cuda")
+    a = K.index_scores(iq, wts, keys, pos // 2, 2, kbase=kbase, n_keys=3000)
+    assert torch.equal(a, K.index_scores(iq, wts, deq, pos // 2, 2, kbase=kbase, n_keys=3000))
+    assert torch.equal(TK.top_entries(a, pos // 2, 2, 512), TK.top_entries(
+        K.index_scores(iq, wts, deq, pos // 2, 2, kbase=kbase, n_keys=3000), pos // 2, 2, 512))
+
+
+@gpu
+@pytest.mark.parametrize("ties", [False, True])
+def test_blocked_select_over_packed_keys(ties):
+    """index_select_blocked over MXFP4 keys == over bf16 dequantized keys == top_entries / candidate_blocks of the
+    full scores (with and without candidate blocks); with equal keys (exact ties) and TIE_KEYS the lower index wins
+    on every path, as topk.py's decode selection."""
+
+    K = _kernels()
+    from tensorfold.families.deepseek_v41.cuda import topk as TK
+
+    E, R = 6000, 700
+    keys = _ik(K, E, 31)
+    if ties:                                                 # blocks of identical keys: equal non-zero scores
+        keys.q[1::3] = keys.q[0::3][:keys.q[1::3].shape[0]]
+        keys.s[1::3] = keys.s[0::3][:keys.s[1::3].shape[0]]
+    deq = keys.dequant()
+    g = torch.Generator(device="cuda").manual_seed(5)
+    iq = (torch.randn((R, 64, 128), generator=g, device="cuda") * 0.3).to(torch.bfloat16)
+    wts = torch.randn((R, 64), generator=g, device="cuda")
+    pos = torch.randint(0, E, (R,), generator=g, device="cuda")
+    old = K.SELECT_SEG, K.TIE_KEYS
+    try:
+        K.SELECT_SEG, K.TIE_KEYS = 2048, ties
+        full = K.index_scores(iq, wts, deq, pos, 1)
+        want_c = K.candidate_blocks(full, pos, 1, 8, 64)
+        got, cand = K.index_select_blocked(iq, wts, keys, pos, 1, 512, block=8, candidates=64)
+        ref, rcand = K.index_select_blocked(iq, wts, deq, pos, 1, 512, block=8, candidates=64)
+        assert torch.equal(got, ref) and torch.equal(cand, rcand)
+        assert torch.equal(got, K.top_entries(full, 512))
+        assert torch.equal(cand.sort(1).values, want_c.sort(1).values)
+        masked, _ = K.index_select_blocked(iq, wts, keys, pos, 1, 512, block=8, blocks=want_c)
+        assert torch.equal(masked, K.top_entries(K.mask_to_blocks(full, want_c, 8), 512))
+        if ties:
+            assert torch.equal(got, TK.top_entries(full, pos, 1, 512))
+            flags = TK.candidate_flags(full, pos, 1, 8, 64)
+            mine = torch.zeros_like(flags).scatter_(1, cand.clamp(min=0), 1) * (cand >= 0).any(1, keepdim=True)
+            assert torch.equal(flags, mine.to(flags.dtype))
+    finally:
+        K.SELECT_SEG, K.TIE_KEYS = old
