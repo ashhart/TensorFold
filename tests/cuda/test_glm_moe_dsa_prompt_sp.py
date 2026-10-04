@@ -18,6 +18,15 @@ pytestmark = [pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CU
               pytest.mark.skipif(not CKPT, reason="set TF_GLM53_CKPT to a GLM-5.3 EXL3 checkpoint")]
 
 from threadcomm import run_ranks  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _prompt_rows_4096(monkeypatch):
+    """Four rank threads share one GPU here: 8192-row prompt buffers (the serving default) four times over exhaust a
+    128 GB node; these tests need no more than 4096-row chunks."""
+    from tensorfold.families.glm_moe_dsa.cuda import runner
+
+    monkeypatch.setattr(runner, "PROMPT_ROWS", min(runner.PROMPT_ROWS, 4096))
 from test_glm_moe_dsa_fused import _fused, _tokens  # noqa: E402
 
 
