@@ -9,10 +9,11 @@ import math
 import numpy as np
 import torch
 
-from tensorfold.engine.exact_sampling import MARGIN, Sampling, choose_rows, uniform
+from tensorfold.engine.exact_sampling import MARGIN, Sampling, _mix, choose_rows, uniform, uniform_rows
 
 MASS = 2.0 ** 40        # a token's share of the mass in fixed point: shard sums are exact, so ranks agree bit for bit
 NUCLEUS = 1024          # candidates a rank reads for a top_k-off draw; a row they don't cover reads whole shards
+SLACK = 2.0 ** -30      # relative bound far above any gap between device and host float64 logs (a few ulps)
 
 
 def sample_rows(logits: torch.Tensor, positions: Sequence[int], sampling: Sampling | None) -> list[int]:
@@ -114,11 +115,17 @@ def nucleus_rows(logits: torch.Tensor, positions: Sequence[int], sampling: Sampl
                  probs: list[float] | None = None) -> list[int]:
     """top_k off: the keyed draw over the top_p nucleus then min_p, cut by fixed-point mass, the same on each shape."""
 
-    scaled = logits.float().double() / max(float(sampling.temperature), 1e-6)
-    top = _stacked(gather, scaled.max(dim=-1).values).max(dim=0).values           # every rank's maxima
+    t = max(float(sampling.temperature), 1e-6)
+    scaled = logits.float().double() / t
+    peak = logits.float().amax(dim=-1).double() / t             # scaled's row maxima: dividing by t is monotone
+    top = _stacked(gather, peak).max(dim=0).values             # every rank's maxima
     mass = torch.floor(torch.exp(scaled - top[:, None]) * MASS).to(torch.int64)
-    got = _shares(gather, scaled, mass, NUCLEUS, offset, id_map)
-    drawn = _draw(got, positions, sampling)
+    drawn = None
+    if not 0.0 < sampling.top_p < 1.0:          # no cut: the kept set is {v >= floor}, scored on the device
+        drawn = _keyed(gather, scaled, top, mass, positions, sampling, offset, id_map)
+    if drawn is None:
+        got = _shares(gather, scaled, mass, NUCLEUS, offset, id_map)
+        drawn = _draw(got, positions, sampling)
     if drawn is None:                           # some row's nucleus runs past the candidates: every whole shard
         drawn = _draw(_shares(gather, scaled, mass, int(got[4].max()), offset, id_map), positions, sampling)
     if probs is not None:
@@ -182,3 +189,58 @@ def _draw(got, positions, s: Sampling) -> list[tuple[int, float]] | None:
         best = int(np.argmax(score))
         drawn.append((int(i[best]), float(m[best]) / total))
     return drawn
+
+
+def _keyed(gather, scaled, top, mass, positions, s: Sampling, offset, id_map) -> list[tuple[int, float]] | None:
+    """No top_p cut: ``_draw``'s keyed argmax over {v >= floor}, each rank's best device score rescored on the host.
+
+    A rank's other tokens score on the host at most its runner-up's device score plus the device-host gap, so a host
+    best above each such bound plus ``SLACK`` is the whole-shard draw; otherwise None (``_draw`` decides)."""
+
+    floor = top + s.min_log
+    if scaled.is_cuda:
+        from .keyed_draw import best_two
+
+        with np.errstate(over="ignore"):
+            key = _mix(np.uint64(s.seed & 0xFFFFFFFFFFFFFFFF) + np.uint64(0x9E3779B97F4A7C15))
+            keys = _mix(key ^ (np.asarray(positions).astype(np.uint64) * np.uint64(0xD1B54A32D192ED03)))
+        keys = torch.from_numpy(keys.view(np.int64)).to(scaled.device)
+        f, i = best_two(scaled, keys, floor, int(offset), id_map)
+    else:
+        f, i = _best_two(scaled, positions, s, floor, offset, id_map)
+    packed = torch.cat([f.view(torch.int64), i[:, 1:], mass.gather(1, i[:, :1]), mass.sum(dim=-1, keepdim=True)], 1)
+    both = _stacked(gather, packed).cpu().numpy()
+    first_np, second_np, vals_np = (np.ascontiguousarray(both[:, :, c]).view(np.float64) for c in range(3))
+    ids_np, mass_np, sums = both[:, :, 3], both[:, :, 4], both[:, :, 5]
+    drawn = []
+    for r, position in enumerate(positions):
+        live = first_np[:, r] > -math.inf                     # a rank with no token at or above the min_p floor
+        v, i, m = vals_np[live, r], ids_np[live, r], mass_np[live, r]
+        if not len(v):
+            return None
+        order = np.lexsort((i, -v))
+        v, i, m = v[order], i[order], m[order]
+        score = v - np.log(-np.log(uniform(s.seed, int(position), i)))
+        best = int(np.argmax(score))
+        if not math.isfinite(score[best]):
+            return None
+        for last in second_np[:, r].tolist():                 # a rank's other tokens cannot reach the best
+            if last > -math.inf and not score[best] > last + SLACK * (1.0 + abs(last)):
+                return None
+        drawn.append((int(i[best]), float(m[best]) / int(sums[:, r].sum())))
+    return drawn
+
+
+def _best_two(scaled, positions, s: Sampling, floor, offset, id_map) -> tuple[torch.Tensor, torch.Tensor]:
+    """``keyed_draw.best_two`` for host tensors, from the host's own uniforms."""
+
+    rows, width = scaled.shape
+    ids = id_map[:width].to(torch.int64) if id_map is not None else torch.arange(offset, offset + width)
+    u = uniform_rows(s.seed, np.asarray(positions), np.broadcast_to(ids.numpy(), (rows, width)))
+    score = scaled - torch.log(-torch.log(torch.from_numpy(u)))
+    score.masked_fill_(scaled < floor[:, None], -math.inf)
+    best, cols = torch.topk(score, min(2, width), dim=-1)
+    if width == 1:                                            # no runner-up
+        best = torch.cat([best, torch.full_like(best, -math.inf)], dim=1)
+    col = cols[:, :1]
+    return torch.cat([best, scaled.gather(1, col)], dim=1), torch.cat([col, ids[col]], dim=1)
