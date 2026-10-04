@@ -3,6 +3,67 @@ const std = @import("std");
 const family = @import("flashnext.zig");
 const st = @import("../../core/safetensors.zig");
 
+test "pinned public FlashNext config preserves MTP EOS and indexer declarations" {
+    const bytes = @embedFile("fixtures/config.json");
+    const expected = "f5574e3431b94b6297e0490778e6f528928593e2b0b545bc9da09f951dc981db";
+    var hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
+    try std.testing.expectEqualStrings(expected, &std.fmt.bytesToHex(hash, .lower));
+    var c = try family.config.parse(std.testing.allocator, bytes);
+    defer c.deinit();
+    try std.testing.expectEqual(@as(usize, 2560), c.hidden);
+    try std.testing.expectEqual(@as(usize, 10_240), try c.wide());
+    try std.testing.expectEqual(@as(usize, 36), std.mem.count(family.config.Kind, c.kinds[0..c.layers], &.{.linear_attention}));
+    try std.testing.expectEqual(@as(usize, 10_240), try c.convWidth());
+    try std.testing.expectEqual(@as(usize, 1), c.index_kv_heads);
+    try std.testing.expectEqual(@as(usize, 1), c.mtp.layers);
+    try std.testing.expectEqual(family.config.Kind.sparse_attention, c.mtp.kinds[0]);
+    try std.testing.expect(c.mtp.hybrid and !c.mtp.dedicated_embeddings);
+    try std.testing.expect(c.mtp.source_layer == null);
+    try std.testing.expectEqualSlices(u32, &.{ 248046, 248044 }, c.eos[0..c.eos_count]);
+    try std.testing.expectEqualSlices(usize, &.{ 11, 11, 10 }, &c.mrope_section);
+    try std.testing.expect(c.mrope_interleaved);
+    try std.testing.expectEqual(@as(u8, 6), c.global_affine.bits);
+    try std.testing.expectEqual(@as(usize, 32), c.global_affine.group);
+}
+
+test "pinned public MTP and rotary metadata cannot be silently discarded" {
+    const bytes = @embedFile("fixtures/config.json");
+    for ([_]struct { old: []const u8, replacement: []const u8 }{
+        .{ .old = "\"num_hidden_layers\": 1,", .replacement = "\"num_hidden_layers\": 17," },
+        .{ .old = "\"indexer_kv_heads\": 1,", .replacement = "\"indexer_kv_heads\": 3," },
+        .{ .old = "\"type\": \"default\"", .replacement = "\"type\": \"unsupported\"" },
+    }) |change| {
+        const changed = try std.mem.replaceOwned(u8, std.testing.allocator, bytes, change.old, change.replacement);
+        defer std.testing.allocator.free(changed);
+        if (family.config.parse(std.testing.allocator, changed)) |valid| {
+            var c = valid;
+            c.deinit();
+            return error.InvalidConfigAccepted;
+        } else |_| {}
+    }
+}
+
+test "public index admits every configured text MTP and PLE tensor name without claiming headers" {
+    const a = std.testing.allocator;
+    var c = try family.config.parse(a, @embedFile("fixtures/config.json"));
+    defer c.deinit();
+    const bytes = @embedFile("fixtures/index.json");
+    const inventory = try family.index.admit(a, bytes, &c);
+    try std.testing.expectEqual(@as(usize, 3747), inventory.tensor_names);
+    try std.testing.expectEqual(@as(usize, 30), inventory.shards);
+    try std.testing.expect(inventory.required_names > 3300 and !inventory.headers_verified);
+    for ([_]struct { old: []const u8, replacement: []const u8, err: anyerror }{
+        .{ .old = "\"language_model.lm_head.weight\"", .replacement = "\"missing.weight\"", .err = error.MissingFlashTensor },
+        .{ .old = "\"language_model.model.layers.0.linear_attn.in_proj_qkv.scales\"", .replacement = "\"missing.scales\"", .err = error.IncompleteFlashAffine },
+        .{ .old = "model-00001-of-00030.safetensors", .replacement = "../model-00001-of-00030.safetensors", .err = error.UnsafeFlashShard },
+    }) |change| {
+        const altered = try std.mem.replaceOwned(u8, a, bytes, change.old, change.replacement);
+        defer a.free(altered);
+        try std.testing.expectError(change.err, family.index.admit(a, altered, &c));
+    }
+}
+
 const toy =
     \\{"model_type":"qwen4_exp","hidden_size":64,"vocab_size":128,"num_hidden_layers":2,
     \\"layer_types":["linear_attention","full_attention"],"rms_norm_eps":0.00001,

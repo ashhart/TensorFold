@@ -5,6 +5,7 @@ const affine = @import("affine.zig");
 pub const Kind = enum { linear_attention, sparse_attention };
 pub const Gate = enum { sigmoid, silu };
 pub const max_layers = 512;
+pub const Mtp = struct { layers: usize = 0, kinds: [16]Kind = @splat(.sparse_attention), hybrid: bool = false, dedicated_embeddings: bool = false, source_layer: ?usize = null, rope_theta: f64 = 10_000_000 };
 
 pub const Config = struct {
     parsed: std.json.Parsed(std.json.Value),
@@ -33,6 +34,7 @@ pub const Config = struct {
     hc_count: usize,
     hc_lowrank: usize,
     index_heads: usize,
+    index_kv_heads: usize,
     index_dim: usize,
     index_budget: usize,
     index_ratio: usize,
@@ -46,6 +48,9 @@ pub const Config = struct {
     ngram_divisor: usize,
     ngram_shards: usize,
     seed: u64,
+    mtp: Mtp,
+    mrope_interleaved: bool,
+    mrope_section: [3]usize,
     eos: [16]u32 = @splat(0),
     eos_count: usize = 0,
     global_affine: affine.Spec,
@@ -150,6 +155,34 @@ fn number(v: std.json.Value) !f64 {
     return value;
 }
 
+fn boolean(o: std.json.ObjectMap, name: []const u8, fallback: bool) !bool {
+    const v = o.get(name) orelse return fallback;
+    return if (v == .bool) v.bool else error.InvalidFlashFlag;
+}
+
+fn mtpConfig(text: std.json.ObjectMap) !Mtp {
+    const o = if (text.get("mtp")) |v| if (v == .null) std.json.ObjectMap.empty else try object(v) else std.json.ObjectMap.empty;
+    var m = Mtp{
+        .layers = try optional(o, "num_hidden_layers", try optional(text, "mtp_num_hidden_layers", 0)),
+        .hybrid = try boolean(o, "hybrid", false),
+        .dedicated_embeddings = try boolean(text, "mtp_use_dedicated_embeddings", false),
+        .rope_theta = try number(o.get("rope_theta") orelse .{ .float = 10_000_000 }),
+    };
+    if (m.layers > m.kinds.len or m.rope_theta <= 0) return error.InvalidFlashMtp;
+    if (o.get("mtp_use_hidden_state_from_layer")) |v| {
+        if (v != .null) m.source_layer = try integer(v);
+    }
+    if (m.layers > 0) {
+        const types = o.get("layer_types") orelse return error.InvalidFlashMtp;
+        if (types != .array or types.array.items.len != m.layers) return error.InvalidFlashMtp;
+        for (types.array.items, 0..) |v, i| {
+            if (v != .string) return error.InvalidFlashMtp;
+            m.kinds[i] = if (std.mem.eql(u8, v.string, "linear_attention")) .linear_attention else if (std.mem.eql(u8, v.string, "full_attention") or std.mem.eql(u8, v.string, "sparse_attention")) .sparse_attention else return error.InvalidFlashMtp;
+        }
+    }
+    return m;
+}
+
 fn spec(o: std.json.ObjectMap, default_bits: ?usize) !affine.Spec {
     const bits = if (o.get("bits")) |v| try integer(v) else default_bits orelse return error.MissingAffineBits;
     if (o.get("mode")) |v| if (v != .null and (v != .string or (v.string.len > 0 and !std.mem.eql(u8, v.string, "affine")))) return error.UnsupportedAffineMode;
@@ -173,7 +206,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
     const quant = try quantBlock(root, text);
     if (quant.get("quant_method")) |v| if (v != .null and (v != .string or (!std.mem.eql(u8, v.string, "mlx") and !std.mem.eql(u8, v.string, "affine")))) return error.UnsupportedAffineMode;
     const rope = if (text.get("rope_parameters")) |v| if (v == .null) std.json.ObjectMap.empty else try object(v) else std.json.ObjectMap.empty;
-    if (rope.get("rope_type")) |v| if (v != .string or !std.mem.eql(u8, v.string, "default")) return error.UnsupportedFlashRope;
+    for ([_][]const u8{ "rope_type", "type" }) |key| if (rope.get(key)) |v| if (v != .string or !std.mem.eql(u8, v.string, "default")) return error.UnsupportedFlashRope;
     const hidden = try required(text, "hidden_size");
     const heads = try required(text, "num_attention_heads");
     const head_dim = if (text.get("head_dim")) |v| if (v == .null or (v == .integer and v.integer == 0)) hidden / heads else try integer(v) else hidden / heads;
@@ -207,6 +240,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
         .hc_count = try optional(text, "hc_count", 4),
         .hc_lowrank = try optional(text, "hc_lowrank", 320),
         .index_heads = try optional(text, "indexer_n_heads", 4),
+        .index_kv_heads = try optional(text, "indexer_kv_heads", 1),
         .index_dim = try optional(text, "indexer_head_dim", 128),
         .index_budget = try optional(text, "indexer_budget", 2048),
         .index_ratio = try optional(text, "indexer_compress_ratio", 4),
@@ -218,10 +252,20 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
         .ngram_divisor = try optional(text, "make_ngram_vocab_size_divisible_by", 128),
         .ngram_shards = try optional(text, "split_ngram_parts", 128),
         .seed = try optional(text, "seed", 1234),
+        .mtp = try mtpConfig(text),
+        .mrope_interleaved = try boolean(rope, "mrope_interleaved", true),
+        .mrope_section = .{ 11, 11, 10 },
         .global_affine = try spec(quant, null),
     };
     if (c.layers > max_layers or c.heads % c.kv_heads != 0 or c.value_heads % c.key_heads != 0 or c.topk > c.experts) return error.InvalidFlashShape;
-    if (c.conv < 2 or c.hc_count == 0 or c.hc_lowrank == 0 or c.index_ratio == 0 or c.index_heads == 0 or c.index_dim == 0 or c.index_budget == 0 or c.index_budget % c.index_ratio != 0) return error.InvalidFlashShape;
+    if (c.conv < 2 or c.hc_count == 0 or c.hc_lowrank == 0 or c.index_ratio == 0 or c.index_heads == 0 or c.index_kv_heads == 0 or c.index_heads % c.index_kv_heads != 0 or c.index_dim == 0 or c.index_budget == 0 or c.index_budget % c.index_ratio != 0) return error.InvalidFlashShape;
+    if (c.mtp.source_layer) |i| if (i >= c.layers) return error.InvalidFlashMtp;
+    if (rope.get("mrope_section")) |v| {
+        if (v != .array or v.array.items.len != 3) return error.UnsupportedFlashRope;
+        for (v.array.items, 0..) |section, i| c.mrope_section[i] = try integer(section);
+    }
+    const sections = try std.math.add(usize, try std.math.add(usize, c.mrope_section[0], c.mrope_section[1]), c.mrope_section[2]);
+    if (c.rotary_dim > 0 and try std.math.mul(usize, sections, 2) != c.rotary_dim and rope.get("mrope_section") != null) return error.UnsupportedFlashRope;
     if (c.eps <= 0 or !std.math.isFinite(c.eps) or c.rope_theta <= 0 or c.rotary_dim % 2 != 0 or c.rotary_dim > c.head_dim or c.rotary_dim > c.index_dim) return error.UnsupportedFlashRope;
     if (c.ngram < 2 or c.ngram_heads == 0 or c.ngram_vocab == 0 or c.ngram_divisor == 0 or c.ngram_shards == 0 or c.ple_conv < 2) return error.InvalidFlashNgram;
     const table_heads = try c.ngramHeadCount();
@@ -243,7 +287,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
             c.ple[index - 1] = true;
         }
     };
-    if (text.get("eos_token_id")) |v| if (v != .null) {
+    if (root.get("eos_token_id") orelse text.get("eos_token_id")) |v| if (v != .null) {
         const ids = if (v == .array) v.array.items else &.{v};
         if (ids.len > c.eos.len) return error.InvalidFlashEos;
         for (ids) |id| {
