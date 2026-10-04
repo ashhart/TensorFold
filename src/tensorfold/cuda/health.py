@@ -74,7 +74,8 @@ class Health:
                      drafted=_stat(stats, "drafted"), accepted=_stat(stats, "accepted"),
                      latency=max(0.0, ended - request.started),
                      ttft=(request.first - request.started) if request.first is not None else None,
-                     decode=None if decode is None else max(0.0, float(decode)))
+                     decode=None if decode is None else max(0.0, float(decode)),
+                     cached=_stat(stats, "cached"), rounds=_stat(stats, "rounds"), prefill=_seconds(stats, "prefill_s"))
 
     def snapshot(self, app) -> dict[str, Any]:
         """The counters now: finished totals, live replies' tokens so far, and a concurrent engine's streams."""
@@ -109,6 +110,11 @@ def of(app) -> Health:
 def _stat(stats: dict[str, Any], key: str) -> int:
     value = stats.get(key)
     return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
+
+
+def _seconds(stats: dict[str, Any], key: str) -> float | None:
+    value = stats.get(key)
+    return max(0.0, float(value)) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
 __all__ = ["Health", "Request", "of"]
