@@ -284,6 +284,18 @@ void dispatch(int bm, const at::Tensor& x, const at::Tensor& xs, const at::Tenso
     }
 }
 
+template <int GS, int BITS>
+void widths(bool f32, bool cluster, int bm, const at::Tensor& x, const at::Tensor& xs, const at::Tensor& w,
+            const at::Tensor& s, const at::Tensor& b, at::Tensor& out, const at::Tensor& part, int N, int SK) {
+    if (f32) {
+        if (cluster) dispatch<GS, true, true, BITS>(bm, x, xs, w, s, b, out, part, N, SK);
+        else dispatch<GS, true, false, BITS>(bm, x, xs, w, s, b, out, part, N, SK);
+    } else {
+        if (cluster) dispatch<GS, false, true, BITS>(bm, x, xs, w, s, b, out, part, N, SK);
+        else dispatch<GS, false, false, BITS>(bm, x, xs, w, s, b, out, part, N, SK);
+    }
+}
+
 } // namespace
 
 // Clusters hold up to 8 K slices (the portable size) from sm_90; more, unreduced slices or older GPUs use the buffer.
@@ -296,22 +308,11 @@ void qmm_cuda(const at::Tensor& x, const at::Tensor& xs, const at::Tensor& w, co
               bool f32, bool reduce, int bits) {
     const int M = x.size(0);
     const bool cluster = qmm_clusters(SK, reduce);
-#define GO(G, F, C, B) dispatch<G, F, C, B>(bm, x, xs, w, scales, biases, out, part, N, SK)
-    if (bits == 8) {                                      // groups of 64 only
-        if (f32) { if (cluster) GO(64, true, true, 8); else GO(64, true, false, 8); }
-        else { if (cluster) GO(64, false, true, 8); else GO(64, false, false, 8); }
-    } else if (bits == 6) {
-        if (f32) { if (cluster) GO(64, true, true, 6); else GO(64, true, false, 6); }
-        else { if (cluster) GO(64, false, true, 6); else GO(64, false, false, 6); }
-    } else if (bits == 5) {
-        if (f32) { if (cluster) GO(64, true, true, 5); else GO(64, true, false, 5); }
-        else { if (cluster) GO(64, false, true, 5); else GO(64, false, false, 5); }
-    } else if (gs == 64) {
-        if (f32) { if (cluster) GO(64, true, true, 4); else GO(64, true, false, 4); }
-        else { if (cluster) GO(64, false, true, 4); else GO(64, false, false, 4); }
+#define GO(G, B) widths<G, B>(f32, cluster, bm, x, xs, w, scales, biases, out, part, N, SK)
+    if (gs == 64) {
+        if (bits == 8) GO(64, 8); else if (bits == 6) GO(64, 6); else if (bits == 5) GO(64, 5); else GO(64, 4);
     } else {
-        if (f32) { if (cluster) GO(32, true, true, 4); else GO(32, true, false, 4); }
-        else { if (cluster) GO(32, false, true, 4); else GO(32, false, false, 4); }
+        if (bits == 8) GO(32, 8); else if (bits == 6) GO(32, 6); else if (bits == 5) GO(32, 5); else GO(32, 4);
     }
 #undef GO
     if (SK > 1 && reduce && !cluster) {

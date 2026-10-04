@@ -20,8 +20,7 @@ void qmm(const at::Tensor& x, const at::Tensor& xs, const at::Tensor& w, const a
          const at::Tensor& biases, at::Tensor& out, const c10::optional<at::Tensor>& part, int64_t n, int64_t sk,
          int64_t gs, int64_t bm, bool f32, bool reduce, int64_t bits) {
     TORCH_CHECK(gs == 32 || gs == 64, "groups of 32 or 64");
-    TORCH_CHECK(bits == 4 || ((bits == 5 || bits == 6 || bits == 8) && gs == 64),
-                "4 bits, or 5, 6 or 8 bits in groups of 64");
+    TORCH_CHECK(bits == 4 || bits == 5 || bits == 6 || bits == 8, "4, 5, 6 or 8 bits");
     TORCH_CHECK(bm == 16 || bm == 32 || bm == 64, "row tile 16, 32 or 64");
     TORCH_CHECK(x.is_cuda() && x.scalar_type() == at::kBFloat16 && x.dim() == 2 && x.size(0) >= 1 &&
                 x.stride(1) == 1 && x.stride(0) >= x.size(1), "x: (M, K) bf16 with contiguous rows");

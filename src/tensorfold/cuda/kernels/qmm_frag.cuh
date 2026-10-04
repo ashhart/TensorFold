@@ -13,7 +13,7 @@ struct LaneTile {
     static constexpr int THREADS = WM * WN * 32;
     static constexpr int MT = BM / WM / 16;               // m16 tiles a warp
     static constexpr int NT = BN / WN / 8;                // n8 tiles a warp
-    static constexpr int WORDS = BITS == 5 ? 3 : GS * BITS / 128;   // a lane's words of one n8 tile a group
+    static constexpr int WORDS = BITS == 5 || BITS == 6 ? 3 : GS * BITS / 128;  // a lane's words of an n8 tile a group
     static constexpr int ROW = GS * 2;                    // bytes of one input row a group
     static constexpr int CHUNKS = ROW / 16;
     static constexpr int X = BM * ROW;                    // stage bytes: inputs,
@@ -124,16 +124,16 @@ __device__ __forceinline__ uint32_t frag(const uint32_t* words, int kt, int h, U
 }
 
 // A lane's words of n8 tile j of a stage at 5 or 6 bits. Each stored 64-column tile keeps its nibbles in the 4-bit
-// order ([8][32][2] words), then its high bits: [8][32] words at 6 bits; [4][32] at 5, where tiles 2p and 2p + 1 share
-// a word (bytes 0 and 2 the even tile's, 1 and 3 the odd one's), shifted here so slot 2 kt + h sits at bit 2 kt + h.
+// order ([8][32][GS / 32] words), then its high bits, H = (BITS - 4) GS / 8 a lane and n8 tile in each half word:
+// 16 / H tiles share a word (tile r at bits r H and 16 + r H), shifted so slot 2 kt + h is at bit (BITS - 4)(2 kt + h).
 template <int GS, int BITS>
 __device__ __forceinline__ void high_words(uint32_t (&words)[3], const uint32_t* pw, int j, int lane) {
-    static_assert(GS == 64 && (BITS == 5 || BITS == 6), "5 and 6 bits in groups of 64");
+    static_assert((GS == 32 || GS == 64) && (BITS == 5 || BITS == 6), "5 and 6 bits in groups of 32 or 64");
+    constexpr int V = GS / 32, HALF = (BITS - 4) * GS / 8, SHARE = 16 / HALF;
     const uint32_t* t = pw + (j >> 3) * (2 * GS * BITS);
-    words[0] = t[((j & 7) * 32 + lane) * 2];
-    words[1] = t[((j & 7) * 32 + lane) * 2 + 1];
-    if constexpr (BITS == 6) words[2] = t[512 + (j & 7) * 32 + lane];
-    else words[2] = t[512 + (j & 7) / 2 * 32 + lane] >> ((j & 1) * 8);
+#pragma unroll
+    for (int v = 0; v < V; ++v) words[v] = t[((j & 7) * 32 + lane) * V + v];
+    words[2] = t[8 * GS + (j & 7) / SHARE * 32 + lane] >> ((j % SHARE) * HALF);
 }
 
 // Programmatic dependent launch (sm_90+; no-ops before, and when the launch did not ask for it): wait for the

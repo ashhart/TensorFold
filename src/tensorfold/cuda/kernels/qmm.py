@@ -56,9 +56,9 @@ class Q4:
 
 
 # slot p of a lane's word v holds input SPAN v + 2 (lane % 4) + OFFSETS[p] of the group (see ``frag`` in qmm_frag.cuh):
-# a 4-bit word serves two k16 steps, an 8-bit word one, and a 5- or 6-bit lane's high word all four (slot 2 kt + h)
+# a 4-bit word serves two k16 steps, an 8-bit word one, and a 5- or 6-bit lane's high word all of a group's (2 kt + h)
 OFFSETS = {4: (0, 8, 16, 24, 1, 9, 17, 25), 8: (0, 8, 1, 9)}
-HIGH = (0, 8, 16, 24, 32, 40, 48, 56, 1, 9, 17, 25, 33, 41, 49, 57)
+HIGH = {64: (0, 8, 16, 24, 32, 40, 48, 56, 1, 9, 17, 25, 33, 41, 49, 57), 32: OFFSETS[4]}
 
 
 def _to_int32(v: torch.Tensor) -> torch.Tensor:
@@ -118,16 +118,25 @@ def _words(q: torch.Tensor, bits: int) -> torch.Tensor:
 
 def _tile(q: torch.Tensor, bits: int) -> torch.Tensor:
     """Codes (cols, kg, gs) -> stored tiles: 4 and 8 bits in lane order; 5 and 6 bits per (64-column tile, group)
-    the nibbles in the 4-bit order, then the high bits, a word a lane and n8 tile (6) or pair of n8 tiles (5)."""
+    the nibbles in the 4-bit order, then the high bits, ``_shared`` n8 tiles to a word a lane (see ``high_words``)."""
 
     if bits in OFFSETS:
         return _lanes(q, bits, OFFSETS[bits])
+    gs = q.shape[2]
     low = _lanes(q & 15, 4, OFFSETS[4]).flatten(2)
-    high = _lanes(q >> 4, bits - 4, HIGH)[..., 0].to(torch.int64)                          # (T, kg, 8, 32)
-    if bits == 5:                       # even n8 tile in bytes 0 and 2, odd tile in bytes 1 and 3
-        even, odd = high[:, :, 0::2], high[:, :, 1::2]
-        high = (even & 0xFF) | (odd & 0xFF) << 8 | (even >> 8) << 16 | (odd >> 8) << 24
+    high = _lanes(q >> 4, bits - 4, HIGH[gs])[..., 0].to(torch.int64) & 0xFFFFFFFF         # (T, kg, 8, 32)
+    half, share = _shared(bits, gs)
+    high = high.reshape(*high.shape[:2], 8 // share, share, 32)
+    r = torch.arange(share, device=q.device)[:, None] * half
+    high = (((high & ((1 << half) - 1)) << r) | ((high >> half) << (16 + r))).sum(3)
     return torch.cat([low, _to_int32(high).flatten(2)], dim=2)
+
+
+def _shared(bits: int, gs: int) -> tuple[int, int]:
+    """A 5- or 6-bit lane's high bits of one n8 tile in each half word, and the n8 tiles that share a word."""
+
+    half = (bits - 4) * gs // 8
+    return half, 16 // half
 
 
 def _untile(w: torch.Tensor, bits: int, gs: int) -> torch.Tensor:
@@ -136,13 +145,13 @@ def _untile(w: torch.Tensor, bits: int, gs: int) -> torch.Tensor:
     if bits in OFFSETS:
         return _unlanes(w, bits, OFFSETS[bits], gs)
     t, kg = w.shape[:2]
-    low = _unlanes(w[..., :512].reshape(t, kg, 8, 32, 2), 4, OFFSETS[4], gs)
-    high = w[..., 512:].reshape(t, kg, -1, 32)
-    if bits == 5:
-        even = (high & 0xFF) | ((high >> 16) & 0xFF) << 8
-        odd = ((high >> 8) & 0xFF) | ((high >> 24) & 0xFF) << 8
-        high = torch.stack([even, odd], dim=3).reshape(t, kg, 8, 32)
-    return low | _unlanes(high[..., None], bits - 4, HIGH, gs) << 4
+    low = _unlanes(w[..., :8 * gs].reshape(t, kg, 8, 32, gs // 32), 4, OFFSETS[4], gs)
+    half, share = _shared(bits, gs)
+    high = w[..., 8 * gs:].reshape(t, kg, 8 // share, 1, 32).to(torch.int64) & 0xFFFFFFFF
+    r = torch.arange(share, device=w.device)[:, None] * half
+    mask = (1 << half) - 1
+    high = _to_int32((((high >> r) & mask) | (((high >> (16 + r)) & mask) << half)).reshape(t, kg, 8, 32))
+    return low | _unlanes(high[..., None], bits - 4, HIGH[gs], gs) << 4
 
 
 def pack(weight: torch.Tensor, scales: torch.Tensor, biases: torch.Tensor, gs: int, chunk: int = 4096, *,
@@ -232,7 +241,7 @@ def matmul(x: torch.Tensor, q: Q4, xs: torch.Tensor | None = None, *, sk: int | 
     if x.stride(1) != 1 or (x.shape[0] > 1 and x.stride(0) % 8) or x.data_ptr() % 16:
         x = x.clone(memory_format=torch.contiguous_format)     # cp.async reads rows in 16-byte pieces
     m = x.shape[0]
-    if xs is None:
+    if xs is None or xs.shape[1] * q.gs != q.k:          # callers may pass another group size's sums
         xs = group_sums(x, q.gs)
     sk = sk or split_k(q.n, q.k, q.gs, bits=bits)
     if out is None:
@@ -256,7 +265,11 @@ def matmul_group(x: torch.Tensor, qs: list[Q4], xs: torch.Tensor | None = None, 
     sks = sks or [split_k(q.n, q.k, q.gs, bits=getattr(q, "bits", 4)) for q in qs]
     widths = {getattr(q, "bits", 4) for q in qs}
     if not (1 <= len(qs) <= 4 and all(q.gs == 64 for q in qs) and len(widths) == 1 and grouped(x.device.index)):
-        return [matmul(x, q, xs, sk=s, f32=f32) for q, s in zip(qs, sks)]
+        sums = {x.shape[1] // xs.shape[1]: xs} if xs is not None else {}
+        for q in qs:                                       # each group size's sums once
+            if q.gs not in sums:
+                sums[q.gs] = group_sums(x, q.gs)
+        return [matmul(x, q, sums[q.gs], sk=s, f32=f32) for q, s in zip(qs, sks)]
     if x.stride(1) != 1 or (x.shape[0] > 1 and x.stride(0) % 8) or x.data_ptr() % 16:
         x = x.clone(memory_format=torch.contiguous_format)
     if xs is None:
