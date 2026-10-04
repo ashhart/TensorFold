@@ -376,11 +376,98 @@ split_kernel(const __nv_bfloat16* __restrict__ Q, const uint8_t* __restrict__ CQ
 }
 
 // Finish rows: per (row, head), the parts folded group by group (``ppg`` parts a group, in order: the group's
-// stages folded left to right), then the groups folded onto the sink (a logit with a zero value vector); divide,
-// inverse RoPE of the last 2 * half dims (cos / sin given: bf16 out) or fp32 out. 128 threads x 4 dims.
-template <int MB>
+// stages folded left to right; warp w takes groups w, w + 4, ..), then the groups folded onto the sink (a logit with
+// a zero value vector); divide, inverse RoPE of the last 2 * half dims (cos / sin given: bf16 out) or fp32 out.
+constexpr int MAXG = 8, MAXPPG = 8;
 __global__ void __launch_bounds__(128)
 merge_kernel(const float* __restrict__ PO, const float* __restrict__ PM, const float* __restrict__ PL,
+             const float* __restrict__ SINK, const int64_t* __restrict__ POS, const float* __restrict__ COS,
+             const float* __restrict__ SIN, int half, void* __restrict__ OUT, int nparts, int ppg) {
+    __shared__ __align__(16) float gv[MAXG][D];
+    __shared__ float gml[MAXG][2];
+    const int r = blockIdx.x, h = blockIdx.y, tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+    const int ngroups = (nparts + ppg - 1) / ppg;
+    for (int g = warp; g < ngroups; g += 4) {
+        const int k0 = g * ppg, n = min(ppg, nparts - k0);
+        float bm[MAXPPG], bl[MAXPPG];
+        float4 bv[MAXPPG][4];
+#pragma unroll
+        for (int u = 0; u < MAXPPG; ++u) {             // every load of the group in flight at once
+            bm[u] = -INFINITY;
+            bl[u] = 0.f;
+            if (u < n) {
+                const int64_t b = ((int64_t)r * nparts + k0 + u) * H + h;
+                bm[u] = PM[b];
+                bl[u] = PL[b];
+#pragma unroll
+                for (int e = 0; e < 4; ++e)               // (unused when the part is empty)
+                    bv[u][e] = *reinterpret_cast<const float4*>(PO + b * D + e * 128 + lane * 4);
+            }
+        }
+        float cm = -INFINITY, cl = 0.f;
+        float4 cv[4];
+#pragma unroll
+        for (int e = 0; e < 4; ++e) cv[e] = make_float4(0.f, 0.f, 0.f, 0.f);
+#pragma unroll
+        for (int u = 0; u < MAXPPG; ++u) {
+            if (u >= n) break;
+            float a, bb;
+            const bool keep = fold_w(cm, cl, bm[u], bl[u], a, bb);
+#pragma unroll
+            for (int e = 0; e < 4; ++e) {
+                cv[e].x = fold_o(cv[e].x, bv[u][e].x, a, bb, keep);
+                cv[e].y = fold_o(cv[e].y, bv[u][e].y, a, bb, keep);
+                cv[e].z = fold_o(cv[e].z, bv[u][e].z, a, bb, keep);
+                cv[e].w = fold_o(cv[e].w, bv[u][e].w, a, bb, keep);
+            }
+        }
+#pragma unroll
+        for (int e = 0; e < 4; ++e) *reinterpret_cast<float4*>(&gv[g][e * 128 + lane * 4]) = cv[e];
+        if (lane == 0) {
+            gml[g][0] = cm;
+            gml[g][1] = cl;
+        }
+    }
+    __syncthreads();
+    const int d = tid * 4;
+    float fm = SINK[h], fl = 1.f;
+    float4 fo = make_float4(0.f, 0.f, 0.f, 0.f);
+    for (int g = 0; g < ngroups; ++g) {
+        float a, bb;
+        const bool keep = fold_w(fm, fl, gml[g][0], gml[g][1], a, bb);    // (the sink: never empty)
+        const float4 v = *reinterpret_cast<const float4*>(&gv[g][d]);
+        fo.x = fold_o(fo.x, v.x, a, bb, keep);
+        fo.y = fold_o(fo.y, v.y, a, bb, keep);
+        fo.z = fold_o(fo.z, v.z, a, bb, keep);
+        fo.w = fold_o(fo.w, v.w, a, bb, keep);
+    }
+    float o[4] = {__fdiv_rn(fo.x, fl), __fdiv_rn(fo.y, fl), __fdiv_rn(fo.z, fl), __fdiv_rn(fo.w, fl)};
+    const int64_t ob = ((int64_t)r * H + h) * D + d;
+    if (COS != nullptr) {
+        const int64_t p = POS[r];
+#pragma unroll
+        for (int e = 0; e < 4; e += 2) {                       // inverse RoPE: e' = e c + o s, o' = o c - e s
+            if (d + e >= D - 2 * half) {
+                const int i = (d + e - (D - 2 * half)) / 2;
+                const float c = COS[p * half + i], sn = SIN[p * half + i];
+                const float ev = o[e], od = o[e + 1];
+                o[e] = __fadd_rn(__fmul_rn(ev, c), __fmul_rn(od, sn));
+                o[e + 1] = __fsub_rn(__fmul_rn(od, c), __fmul_rn(ev, sn));
+            }
+        }
+        __nv_bfloat16* out = reinterpret_cast<__nv_bfloat16*>(OUT) + ob;
+        *reinterpret_cast<__nv_bfloat162*>(out) = __floats2bfloat162_rn(o[0], o[1]);
+        *reinterpret_cast<__nv_bfloat162*>(out + 2) = __floats2bfloat162_rn(o[2], o[3]);
+    } else {
+        *reinterpret_cast<float4*>(reinterpret_cast<float*>(OUT) + ob) = make_float4(o[0], o[1], o[2], o[3]);
+    }
+}
+
+// merge_kernel with the parts in one flat loop, 128 threads x 4 dims (the same folds; few registers: rows whose parts
+// are whole groups, ppg 1).
+template <int MB>
+__global__ void __launch_bounds__(128)
+merge_flat(const float* __restrict__ PO, const float* __restrict__ PM, const float* __restrict__ PL,
              const float* __restrict__ SINK, const int64_t* __restrict__ POS, const float* __restrict__ COS,
              const float* __restrict__ SIN, int half, void* __restrict__ OUT, int nparts, int ppg) {
     const int r = blockIdx.x, h = blockIdx.y, d = threadIdx.x * 4;
@@ -473,7 +560,7 @@ int64_t attend_rows(torch::Tensor q, c10::optional<torch::Tensor> cq, c10::optio
                     c10::optional<torch::Tensor> sinp, torch::Tensor out, torch::Tensor po, torch::Tensor pm,
                     torch::Tensor pl, int64_t ring, int64_t group, int64_t per, double scale) {
     using namespace tf_mqa4;
-    TORCH_CHECK(group >= 1 && (per == 1 || per == group), "per: 1 or group");
+    TORCH_CHECK(group >= 1 && group <= MAXPPG && (per == 1 || per == group), "per: 1 or group (<= 8)");
     TORCH_CHECK(q.is_cuda() && q.scalar_type() == at::kBFloat16 && q.dim() == 3 && q.size(1) == H && q.size(2) == D &&
                 q.is_contiguous(), "q: contiguous bf16 [R, 32, 512]");
     const int64_t R = q.size(0);
@@ -524,6 +611,7 @@ int64_t attend_rows(torch::Tensor q, c10::optional<torch::Tensor> cq, c10::optio
     const int64_t stages = stages_of(n_idx);
     TORCH_CHECK(stages * ST <= NT * 3, "index table");
     const int nparts = (int)((stages + per - 1) / per);
+    TORCH_CHECK((stages + group - 1) / group <= MAXG, "groups a row: at most 8");
     TORCH_CHECK(po.scalar_type() == at::kFloat && po.numel() >= R * nparts * H * D && pm.numel() >= R * nparts * H &&
                 pl.numel() >= R * nparts * H, "partial buffers too small");
     if (R == 0) return nparts;
@@ -539,7 +627,7 @@ int64_t attend_rows(torch::Tensor q, c10::optional<torch::Tensor> cq, c10::optio
         reinterpret_cast<const __nv_bfloat16*>(swa.data_ptr()), pos.data_ptr<int64_t>(), sb, (int)ring,
         po.data_ptr<float>(), pm.data_ptr<float>(), pl.data_ptr<float>(), (int)per, nparts, (float)scale);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
-    auto merge = nparts <= 4 ? merge_kernel<4> : merge_kernel<24>;    // (few parts: registers for occupancy)
+    auto merge = per == 1 && group > 1 ? merge_kernel : merge_flat<4>;
     merge<<<dim3((unsigned)R, H), 128, 0, st>>>(
         po.data_ptr<float>(), pm.data_ptr<float>(), pl.data_ptr<float>(), sink.data_ptr<float>(),
         pos.data_ptr<int64_t>(), rope ? cosp->data_ptr<float>() : nullptr, rope ? sinp->data_ptr<float>() : nullptr,

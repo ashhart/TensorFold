@@ -228,7 +228,7 @@ def test_build_has_no_spills():
         pytest.skip("no cuobjdump")
     out = subprocess.run([tool, "-res-usage", mqa_fp4.ext().__file__], capture_output=True, text=True).stdout
     lines = out.splitlines()
-    found = [lines[i + 1] for i, ln in enumerate(lines) if "split_kernel" in ln or "merge_kernel" in ln]
+    found = [lines[i + 1] for i, ln in enumerate(lines) if "split_kernel" in ln or "merge_kernel" in ln or "merge_flat" in ln]
     assert len(found) == 3
     for usage in found:
         assert "STACK:0 " in usage and "LOCAL:0 " in usage, usage
