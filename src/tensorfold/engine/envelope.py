@@ -150,7 +150,9 @@ class PrefillEnvelope:
 
             # retirement first: a suspect vertex with RETIRE_N same-decade belows drops
             for sx in [x for x in list(self._suspects) if abs(x - L) <= DECADE]:
-                if peak_bytes < hull_price(self._hull(self._suspects[sx][0]), sx) / OUTLIER_K:
+                if peak_bytes < self._margin * hull_price(self._hull(self._suspects[sx][0]), sx):
+                    # "prices below" includes the margin: D5's letter (GLM r2 found the
+                    # /OUTLIER_K reading leaves a 2.5x-camouflaged scar in place)
                     self._below[sx] = self._below.get(sx, 0) + 1
                     if self._below[sx] >= RETIRE_N:
                         s_side = self._suspects[sx][0]
@@ -229,6 +231,30 @@ def _selftest() -> int:
     # D8 motivation: steep short seeds + extension blows up — caller falls back instead
     env_bad = PrefillEnvelope([(64.0, 0.5 * GiB), (2112.0, 4.0 * GiB), (4160.0, 9.9 * GiB)])
     assert env_bad.price(200_000) > 100 * GiB, "steep-seed extension blows up (why D8)"
+    # D2, stronger: only the steep-seed environment discriminates a budget clamp —
+    # its extension must exceed the 202 GiB budget class (14.85 GiB would not).
+    assert env_bad.price(10_000_000) > 202 * GiB, "a budget clamp would mute this (D2)"
+
+    # D1 fixture: margin derives from the receipt residuals (recompute, don't vibe).
+    # Receipt pairs (observed GiB, priced-flat GiB) at the seven lengths, relocated
+    # flat price 9.89: worst observed/price = 9.799/9.89. MARGIN must dominate it.
+    residuals = [(9.799, 9.89), (9.547, 9.89), (9.290, 9.89), (9.125, 9.89),
+                 (9.848, 9.89), (8.916, 9.89), (8.584, 9.89)]
+    need = max(o / p for o, p in residuals)
+    assert MARGIN > need, f"MARGIN {MARGIN} must exceed worst receipt residual {need:.3f}"
+    # ratchet-down bound: evidence threshold stays above the residual too
+    assert 1.35 > need
+
+    # eviction path keeps the hull-grows invariant (GLM r2: untested bypass)
+    env_e = PrefillEnvelope(seeds, switch=2048)
+    base_pts = env_e.snapshot()
+    for i in range(300):
+        env_e.observe(5_000 + 131 * i, 10.2 * GiB)   # > current price: accepts, evicts at cap
+        after = env_e.snapshot()
+        for x, _ in base_pts:
+            assert hull_price(upper_hull(after), int(x)) >= hull_price(upper_hull(base_pts), int(x)) - 1e-9, \
+                f"eviction lowered the price at previously-observed x={x}"
+    print("eviction-path invariant held across", 300, "evicting accepts")
 
     # MEASURED regression (seedpeaks.out, 2026-10-03): relocated raw peaks are
     # NON-MONOTONE (9.916 then 9.871 GiB); the running-max pre-pass must keep
