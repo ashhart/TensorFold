@@ -86,7 +86,7 @@ inline uint k3_stage(threadgroup bfloat* xs, device const bfloat* X, device cons
 // Lane 8o + c runs chain c (groups c, c+8, ...) of output o: per group 32 codes in order from zero, then fma by its scale.
 template <int RP, int NW>
 inline void k3_xp_chains(thread float (&acc)[NW][RP], threadgroup const bfloat* xs, uint K, uint rn,
-                         thread device const uchar* const (&wp)[NW], thread device const uchar* const (&ws)[NW],
+                         device const uchar* const thread (&wp)[NW], device const uchar* const thread (&ws)[NW],
                          uint c) {
   for (int v = 0; v < NW; ++v)
     for (int r = 0; r < RP; ++r) acc[v][r] = 0.0f;
