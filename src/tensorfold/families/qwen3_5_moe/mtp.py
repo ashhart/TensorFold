@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ import mlx.nn as nn
 from mlx_lm.models.cache import KVCache
 
 MTP_FILE = "mtp-4bit.safetensors"      # beside the checkpoint (TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP ships it)
+INDEX = "model.safetensors.index.json"  # or in the checkpoint's own shards, as oQ quants with preserve_mtp keep it
 
 
 class MTPCache(KVCache):
@@ -108,10 +110,24 @@ def _formats(weights: dict[str, mx.array], module: Any, path: str) -> dict[str, 
             "bits": int(weights[f"{path}.weight"].shape[-1]) * 32 // inputs}
 
 
-def load(path: Path, args: Any) -> Qwen36MTP:
-    """The MTP layer from ``mtp-4bit.safetensors`` (names under ``language_model.mtp.`` or bare), formats as stored."""
+def _is_mtp(name: str) -> bool:
+    return name.startswith("mtp.") or ".mtp." in name
 
-    raw = mx.load(str(path))
+
+def _stored(path: Path) -> dict[str, mx.array]:
+    """A side file's tensors, or the ``mtp.`` tensors of the shards a checkpoint's index lists."""
+
+    if path.name != INDEX:
+        return mx.load(str(path))
+    shards = sorted({shard for name, shard in json.loads(path.read_text())["weight_map"].items() if _is_mtp(name)})
+    return {name: value for shard in shards for name, value in mx.load(str(path.parent / shard)).items()
+            if _is_mtp(name)}
+
+
+def load(path: Path, args: Any) -> Qwen36MTP:
+    """The MTP layer from a side file or a shard index (``language_model.mtp.`` names or bare), formats as stored."""
+
+    raw = _stored(Path(path))
     weights = {name.split("mtp.", 1)[1] if "mtp." in name else name: value for name, value in raw.items()}
     mtp = Qwen36MTP(args)
     nn.quantize(mtp, class_predicate=lambda p, m: hasattr(m, "to_quantized") and _formats(weights, m, p))
@@ -121,7 +137,7 @@ def load(path: Path, args: Any) -> Qwen36MTP:
 
 
 def find(model_dir: Path, choice: str = "") -> Path | None:
-    """The MTP file: ``choice`` ("0" turns drafting off), else the checkpoint's own side file."""
+    """The MTP file: ``choice`` ("0": none), else the checkpoint's side file, else its index if the shards hold it."""
 
     if choice == "0":
         return None
@@ -131,7 +147,12 @@ def find(model_dir: Path, choice: str = "") -> Path | None:
             raise FileNotFoundError(f"the MTP file {named} does not exist")
         return named
     found = Path(model_dir) / MTP_FILE
-    return found if found.is_file() else None
+    if found.is_file():
+        return found
+    index = Path(model_dir) / INDEX
+    if index.is_file() and any(_is_mtp(name) for name in json.loads(index.read_text()).get("weight_map", {})):
+        return index
+    return None
 
 
 __all__ = ["MTPCache", "MTP_FILE", "Qwen36MTP", "absorb_attention", "chain_attention", "find", "load"]

@@ -32,7 +32,7 @@ def check(model_dir: str | Path) -> None:
 
 
 def mtp_file(model_dir: Path) -> Path | None:
-    """The MTP layer: TF_QWEN36_MTP (a path, or 0 for none), the checkpoint's side file, else the tested repo's."""
+    """The MTP layer: TF_QWEN36_MTP (a path, or 0: none), its side file or shards, else the tested repo's."""
 
     import os
 

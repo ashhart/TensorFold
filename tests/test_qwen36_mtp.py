@@ -87,6 +87,36 @@ def test_the_side_file_loads_with_its_stored_formats(tiny):
     assert all(bool(mx.array_equal(mine[k], theirs[k]).item()) for k in mine)
 
 
+def test_a_layer_kept_in_the_checkpoints_shards_is_found_and_loads(tiny, tmp_path):
+    import json
+
+    _, side, head = tiny
+    layer = mx.load(str(side))
+    mx.save_safetensors(str(tmp_path / "model-00001-of-00002.safetensors"),
+                        {"language_model.model.norm.weight": mx.ones((8,)), **dict(list(layer.items())[:5])})
+    mx.save_safetensors(str(tmp_path / "model-00002-of-00002.safetensors"), dict(list(layer.items())[5:]))
+    names = {"language_model.model.norm.weight": "model-00001-of-00002.safetensors"}
+    names.update({n: "model-00001-of-00002.safetensors" for n in list(layer)[:5]})
+    names.update({n: "model-00002-of-00002.safetensors" for n in list(layer)[5:]})
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": names}))
+    found = qmtp.find(tmp_path)
+    assert found == tmp_path / "model.safetensors.index.json"
+    loaded = dict(tree_flatten(qmtp.load(found, tiny[0].args).parameters()))
+    theirs = dict(tree_flatten(head.parameters()))
+    assert loaded.keys() == theirs.keys()
+    assert all(bool(mx.array_equal(loaded[k], theirs[k]).item()) for k in loaded)
+    (tmp_path / qmtp.MTP_FILE).write_bytes(side.read_bytes())
+    assert qmtp.find(tmp_path) == tmp_path / qmtp.MTP_FILE             # a side file wins over the shards
+
+
+def test_shards_without_a_layer_find_none(tmp_path):
+    import json
+
+    names = {"language_model.model.norm.weight": "m.safetensors"}
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": names}))
+    assert qmtp.find(tmp_path) is None
+
+
 def test_a_chain_row_attends_the_buffers_and_its_chain_as_one_attention(tiny):
     attn = tiny[2].layers[0].self_attn
     mx.random.seed(3)
