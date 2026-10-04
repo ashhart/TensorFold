@@ -34,5 +34,5 @@ def ext(lut: bool = False):
     from tensorfold.cuda.build import load
 
     flags = ["-O3", "-lineinfo"] + (["-DTF_MQA4_LUT"] if lut else [])
-    return load("tf_dsv41_mqa_fp4_lut_v2" if lut else "tf_dsv41_mqa_fp4_v2",
+    return load("tf_dsv41_mqa_fp4_lut_v3" if lut else "tf_dsv41_mqa_fp4_v3",
                 [str(Path(__file__).with_name("mqa_fp4.cu"))], arch_specific=True, extra_cuda_cflags=flags)

@@ -193,6 +193,17 @@ chunks_kernel(const __nv_bfloat16* __restrict__ Q, const uint8_t* __restrict__ C
         mine = row >= 0;
     }
     const int h0 = tg * 16 + gr, h1 = h0 + 8;
+    // Q fragments (in flight across the index barrier): lane t of quarter wt owns dims wt*128 + 8(t + 4q) .. +7 (q = 0..3) of heads h0 and h1
+    uint4 qa[2][4];
+    {
+        const uint4* q0 = reinterpret_cast<const uint4*>(Q + ((int64_t)r * H + h0) * D + wt * 128);
+        const uint4* q1 = reinterpret_cast<const uint4*>(Q + ((int64_t)r * H + h1) * D + wt * 128);
+#pragma unroll
+        for (int q = 0; q < 4; ++q) {
+            qa[0][q] = __ldg(q0 + t + 4 * q);
+            qa[1][q] = __ldg(q1 + t + 4 * q);
+        }
+    }
     if (!__syncthreads_or(mine)) {               // nothing in this split: the merge skips l <= 0
         if (tid < 16 * TILES) {
             const int64_t b = ((int64_t)r * nsplit + k) * H + blockIdx.y * 16 * TILES + tid;
@@ -202,12 +213,17 @@ chunks_kernel(const __nv_bfloat16* __restrict__ Q, const uint8_t* __restrict__ C
         return;
     }
 
-    // stage 0's gather first (window: cp.async straight into the stage; compressed: raw bytes into registers)
-    Raw raw[RPT];
+    // the whole split's gather at once (window: cp.async straight into the stage; compressed: raw bytes into
+    // registers, every stage's)
+    constexpr int NS = CS / ST;
+    Raw raw[NS][RPT];
     const int rrow = tid >> 3, seg = tid & 7;
     if (comp) {
 #pragma unroll
-        for (int i = 0; i < RPT; ++i) load_raw(raw[i], CQ, CSC, qstride, sstride, tab[rrow + i * NT / 8], seg);
+        for (int s = 0; s < NS; ++s)
+#pragma unroll
+            for (int i = 0; i < RPT; ++i)
+                load_raw(raw[s][i], CQ, CSC, qstride, sstride, tab[s * ST + rrow + i * NT / 8], seg);
     } else {
         const int c = tid & 63;
 #pragma unroll
@@ -219,17 +235,6 @@ chunks_kernel(const __nv_bfloat16* __restrict__ Q, const uint8_t* __restrict__ C
         }
         asm volatile("cp.async.commit_group;\n" ::);
     }
-    // Q fragments: lane t of quarter wt owns dims wt*128 + 8(t + 4q) .. +7 (q = 0..3) of heads h0 and h1
-    uint4 qa[2][4];
-    {
-        const uint4* q0 = reinterpret_cast<const uint4*>(Q + ((int64_t)r * H + h0) * D + wt * 128);
-        const uint4* q1 = reinterpret_cast<const uint4*>(Q + ((int64_t)r * H + h1) * D + wt * 128);
-#pragma unroll
-        for (int q = 0; q < 4; ++q) {
-            qa[0][q] = __ldg(q0 + t + 4 * q);
-            qa[1][q] = __ldg(q1 + t + 4 * q);
-        }
-    }
 
     float acc[16][4];
 #pragma unroll
@@ -239,15 +244,13 @@ chunks_kernel(const __nv_bfloat16* __restrict__ Q, const uint8_t* __restrict__ C
     const float* tpart = part + lt * 4 * 16 * PP;
     const int nstages = nc / ST;
 
-    for (int s = 0; s < nstages; ++s) {
+#pragma unroll
+    for (int s = 0; s < NS; ++s) {
+        if (s >= nstages) break;
         if (comp) {
             if (s > 0) __syncthreads();                       // the previous stage's PV is done with T
 #pragma unroll
-            for (int i = 0; i < RPT; ++i) store_raw(T, raw[i], rrow + i * NT / 8, seg);
-            if (s + 1 < nstages)
-#pragma unroll
-                for (int i = 0; i < RPT; ++i)
-                    load_raw(raw[i], CQ, CSC, qstride, sstride, tab[(s + 1) * ST + rrow + i * NT / 8], seg);
+            for (int i = 0; i < RPT; ++i) store_raw(T, raw[s][i], rrow + i * NT / 8, seg);
         } else {
             asm volatile("cp.async.wait_group 0;\n" ::);
         }
