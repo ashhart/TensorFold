@@ -201,6 +201,17 @@ def _e2m1_val(c):
 
 
 @triton.jit
+def _e4m3_val(b):
+    """fp32 of e4m3 bytes b (int32, finite) from bits (no fp8 type in a dot operand's chain: see _comp_rows)."""
+
+    e = (b >> 3) & 15
+    m = b & 7
+    v = tl.where(e > 0, ((e + 120) << 23) | (m << 20), 0).to(tl.float32, bitcast=True)
+    v = tl.where(e > 0, v, m.to(tl.float32) * 0.001953125)                  # subnormal: m * 2^-9
+    return tl.where(b >= 128, -v, v)
+
+
+@triton.jit
 def _pow2_ceil(t):
     """(k, 2^k, 2^-k) for fp32 t > 0, k = ceil(log2 t) from the bits (DeepSeek's fast_log2_ceil): exponent, plus one
     when any mantissa bit is set."""
@@ -326,18 +337,26 @@ def cache_nbytes(t) -> int:
 
 
 @triton.jit
-def _comp_rows(COMP, CR, CS, kidx, ok_c, d, D: tl.constexpr, FP8: tl.constexpr, F: tl.constexpr, G: tl.constexpr):
-    """Compressed entries ``kidx`` [KT] as fp32/bf16 [KT, D]: bf16 rows, or fp8 rows (F values, a scale per G) with
-    the last D - F values bf16."""
+def _comp_rows(COMP, CR, CS, kidx, ok_c, d, D: tl.constexpr, FMT: tl.constexpr, F: tl.constexpr, G: tl.constexpr):
+    """Compressed entries ``kidx`` [KT] as fp32/bf16 [KT, D]: FMT 0 bf16 rows; 1 fp8 rows (F values, a scale per G)
+    with the last D - F values bf16; 2 Fp4Rows NVFP4 (nibbles in COMP, e4m3 scales per 16 in CS), exact in bf16."""
 
     row = tl.maximum(kidx, 0)[:, None].to(tl.int64)
-    if FP8:
+    if FMT == 1:
         body = d[None, :] < F
         q = tl.load(COMP + row * F + d[None, :], mask=ok_c[:, None] & body).to(tl.float32)
         sc = tl.load(CS + row * (F // G) + d[None, :] // G, mask=ok_c[:, None] & body, other=0.0)
         r = tl.load(CR + row * (D - F) + (d[None, :] - F), mask=ok_c[:, None] & (d[None, :] >= F),
                     other=0.0).to(tl.float32)
         out = tl.where(body, tl.where(ok_c[:, None], q, 0.0) * sc, r)
+    elif FMT == 2:
+        # whole int32 words: an 8-bit load (or fp8 value) in a dot operand's chain gives it another kWidth, a k order
+        # whose sums round unlike a bf16 cache's. Masked: an unselected row may hold anything, and kk feeds PV too.
+        wq = tl.load(COMP.to(tl.pointer_type(tl.int32)) + row * (D // 8) + d[None, :] // 8, mask=ok_c[:, None],
+                     other=0)
+        ws = tl.load(CS.to(tl.pointer_type(tl.int32)) + row * (D // 64) + d[None, :] // 64, mask=ok_c[:, None],
+                     other=0)
+        out = _e2m1_val((wq >> (d[None, :] % 8 * 4)) & 15) * _e4m3_val((ws >> (d[None, :] // 16 % 4 * 8)) & 255)
     else:
         out = tl.load(COMP + row * D + d[None, :], mask=ok_c[:, None], other=0.0).to(tl.float32)
     return out
@@ -347,7 +366,7 @@ def _comp_rows(COMP, CR, CS, kidx, ok_c, d, D: tl.constexpr, FP8: tl.constexpr, 
 def _mqa_chunks(Q, COMP, IDX, SWA, POS, PO, PM, PL, n_idx, idx_stride, SBASE, CR, CS, H: tl.constexpr,
                 D: tl.constexpr, W: tl.constexpr, RING: tl.constexpr, CH: tl.constexpr, SCALE: tl.constexpr,
                 NCH: tl.constexpr, HT: tl.constexpr, KT: tl.constexpr, HAS_BASE: tl.constexpr = False,
-                FP8: tl.constexpr = False, F: tl.constexpr = 448, G: tl.constexpr = 64):
+                FMT: tl.constexpr = 0, F: tl.constexpr = 448, G: tl.constexpr = 64):
     """Keys: the first ``n_idx`` slots are compressed entries named by IDX (-1: none), then the row's window
     positions p - W + 1 .. p read from the SWA ring at pos % RING."""
 
@@ -371,7 +390,7 @@ def _mqa_chunks(Q, COMP, IDX, SWA, POS, PO, PM, PL, n_idx, idx_stride, SBASE, CR
         slot = p - (W - 1) + (k - n_idx)                             # window position of a window key
         ok_c = is_comp & (kidx >= 0)
         ok_w = (k >= n_idx) & (k < total) & (slot >= 0)
-        kc = _comp_rows(COMP, CR, CS, kidx, ok_c, d, D, FP8, F, G)
+        kc = _comp_rows(COMP, CR, CS, kidx, ok_c, d, D, FMT, F, G)
         kw = tl.load(SWA + (sbase + tl.maximum(slot, 0) % RING)[:, None].to(tl.int64) * D + d[None, :],
                      mask=ok_w[:, None], other=0.0)
         kk = tl.where(ok_c[:, None], kc.to(tl.bfloat16), kw.to(tl.bfloat16))
@@ -394,7 +413,7 @@ def _mqa_chunks(Q, COMP, IDX, SWA, POS, PO, PM, PL, n_idx, idx_stride, SBASE, CR
 @triton.jit
 def _mqa_full(Q, COMP, IDX, SWA, POS, SINK, OUT, COS, SIN, n_idx, idx_stride, CR, CS, H: tl.constexpr,
               D: tl.constexpr, W: tl.constexpr, RING: tl.constexpr, SCALE: tl.constexpr, HT: tl.constexpr,
-              KT: tl.constexpr, HALF: tl.constexpr, FP8: tl.constexpr = False, F: tl.constexpr = 448,
+              KT: tl.constexpr, HALF: tl.constexpr, FMT: tl.constexpr = 0, F: tl.constexpr = 448,
               G: tl.constexpr = 64):
     """Prompt rows: one program takes a row's every key (as _mqa_chunks) and finishes it (sink, normalize, inverse
     RoPE of the last 2 * HALF dims), writing bf16 [R, H, D]; no per-chunk partials."""
@@ -416,7 +435,7 @@ def _mqa_full(Q, COMP, IDX, SWA, POS, SINK, OUT, COS, SIN, n_idx, idx_stride, CR
         slot = p - (W - 1) + (k - n_idx)
         ok_c = is_comp & (kidx >= 0)
         ok_w = (k >= n_idx) & (k < total) & (slot >= 0)
-        kc = _comp_rows(COMP, CR, CS, kidx, ok_c, d, D, FP8, F, G)
+        kc = _comp_rows(COMP, CR, CS, kidx, ok_c, d, D, FMT, F, G)
         kw = tl.load(SWA + (tl.maximum(slot, 0) % RING)[:, None].to(tl.int64) * D + d[None, :], mask=ok_w[:, None],
                      other=0.0)
         kk = tl.where(ok_c[:, None], kc.to(tl.bfloat16), kw.to(tl.bfloat16))
@@ -520,10 +539,11 @@ def mqa(q: torch.Tensor, comp: torch.Tensor | None, idx: torch.Tensor | None, sw
     rope = cos is not None
     out = torch.empty((R, H, D), dtype=torch.bfloat16 if rope else torch.float32, device=q.device)
     idx_t = idx if idx is not None else pos
+    q4 = isinstance(comp, Fp4Rows)
     fp8 = isinstance(comp, Fp8Rows)
-    cq = comp.q if fp8 else (comp if comp is not None else swa)
-    cr, cs = (comp.r, comp.s) if fp8 else (swa, swa)
-    fkw = {"FP8": True, "F": comp.dim - comp.plain, "G": comp.group} if fp8 else {}
+    cq = comp.q if fp8 or q4 else (comp if comp is not None else swa)
+    cr, cs = (comp.r, comp.s) if fp8 else (swa, comp.s) if q4 else (swa, swa)
+    fkw = {"FMT": 1, "F": comp.dim - comp.plain, "G": comp.group} if fp8 else {"FMT": 2} if q4 else {}
     if sbase is not None and R > FULL_ROWS:
         raise ValueError("stream window bases are for decode rows (the chunk path)")
     if rope and R > FULL_ROWS:

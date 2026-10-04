@@ -249,3 +249,36 @@ def test_store_under_a_graph_and_row_moves():
     assert torch.equal(rows.q[idx], ref.q[idx]) and torch.equal(rows.s[9], ref.s[9]) and not rows.q[0].any()
     assert rows.nbytes() == 4096 * K.Fp4Rows.row_bytes(512, 16) == 4096 * 288
     assert [p for p in rows.planes] == ["q", "s"] and K.Fp8Rows(1, 512, plain=64).planes == ("q", "r", "s")
+
+
+@gpu
+@pytest.mark.parametrize("R,streams", [(1, 1), (6, 1), (5, 2), (40, 1)])
+def test_attention_over_packed_rows_equals_its_dequant(R, streams):
+    """mqa over Fp4Rows == mqa over their bf16 dequantization, bit for bit: decode chunks (one stream or rows of two
+    with window bases), prompt rows (_mqa_full), -1 indices, and NaN scale bytes in rows nobody selects."""
+
+    K = _kernels()
+    cos, sin = _tables(K, 1 << 16)
+    E, D, H, W = 3000, 512, 32, 128
+    rows = K.Fp4Rows(E, D, device="cuda")
+    rows.store(torch.arange(E, device="cuda"), _rows(E, D, 11), torch.arange(E, device="cuda") * 2, cos, sin)
+    rows.s[E - 100:] = 0x7F                                   # e4m3 NaN: never selected below
+    g = torch.Generator(device="cuda").manual_seed(R)
+    q = (torch.randn((R, H, D), generator=g, device="cuda") * 0.05).to(torch.bfloat16)
+    pos = torch.arange(5000, 5000 + R, device="cuda")
+    idx = torch.stack([torch.randperm(E - 100, generator=g, device="cuda")[:512] for _ in range(R)]).int()
+    idx[0, 100:140] = -1
+    sink = torch.randn((H,), generator=g, device="cuda")
+    buf = K.AttnBuffers(max(R, 32), H, D, 512 + W, "cuda")
+    if streams == 1:
+        swa = torch.randn((4096, D), generator=g, device="cuda").to(torch.bfloat16)
+        kw = {}
+    else:                                                     # two streams' 256-row rings side by side
+        swa = torch.randn((512, D), generator=g, device="cuda").to(torch.bfloat16)
+        kw = {"sbase": (torch.arange(R, device="cuda") % 2) * 256, "ring": 256}
+    a = K.mqa(q, rows, idx, swa, pos, sink, W, buf, D ** -0.5, cos, sin, **kw)
+    deq = rows.dequant()
+    b = K.mqa(q, deq, idx, swa, pos, sink, W, buf, D ** -0.5, cos, sin, **kw)
+    assert torch.isfinite(a).all() and torch.equal(a, b)
+    c = K.mqa(q, rows, idx, swa, pos, sink, W, buf, D ** -0.5, **kw)              # fp32 out, no inverse RoPE
+    assert torch.equal(c, K.mqa(q, deq, idx, swa, pos, sink, W, buf, D ** -0.5, **kw))
