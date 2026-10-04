@@ -660,6 +660,18 @@ def topk_lo(x: torch.Tensor, k: int, ids: torch.Tensor | None = None, sorted: bo
     if not TIE_KEYS:
         v, i = torch.topk(x, k, dim=1, sorted=sorted)
         return v, (i if ids is None else torch.gather(ids, 1, i))
+    if ids is None:
+        # the same set from fp32 top-ks (an int64 top-k is ~3-8x one in fp32, the prompt indexer's main cost at long
+        # context): all above the k-th value, then the lowest-index entries equal to it, picked as a 0/1 mask's
+        # top-k (exactly k ones: their set whatever the order); sorted: by value, ties by index
+        thr = torch.topk(x, k, dim=1, sorted=False).values.amin(1, keepdim=True)
+        gt, eq = x > thr, x == thr
+        sel = gt | (eq & (eq.cumsum(1, dtype=torch.int32) <= k - gt.sum(1, keepdim=True, dtype=torch.int32)))
+        i = torch.topk(sel.to(torch.float16), k, dim=1, sorted=False).indices
+        if sorted:
+            i = torch.sort(i, dim=1).values
+            i = torch.gather(i, 1, torch.sort(torch.gather(x, 1, i), dim=1, descending=True, stable=True).indices)
+        return torch.gather(x, 1, i), i
     b = x.contiguous().view(torch.int32).long()
     b = torch.where(b < 0, b ^ 0x7FFFFFFF, b)
     if ids is None:

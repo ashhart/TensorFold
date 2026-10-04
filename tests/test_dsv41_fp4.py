@@ -357,8 +357,41 @@ def test_blocked_select_over_packed_keys(ties):
             flags = TK.candidate_flags(full, pos, 1, 8, 64)
             mine = torch.zeros_like(flags).scatter_(1, cand.clamp(min=0), 1) * (cand >= 0).any(1, keepdim=True)
             assert torch.equal(flags, mine.to(flags.dtype))
+        else:                                                # tie-keyed without ties: the same sets
+            K.TIE_KEYS = True
+            fast, fcand = K.index_select_blocked(iq, wts, keys, pos, 1, 512, block=8, candidates=64)
+            assert torch.equal(fast, got) and torch.equal(fcand, cand)
+            assert torch.equal(fast, K.top_entries(full, 512))
     finally:
         K.SELECT_SEG, K.TIE_KEYS = old
+
+
+@gpu
+def test_unsorted_tie_topk_equals_the_int64_keys():
+    """topk_lo's fp32 path (ids None) picks the int64 tie-key path's set, sorted in its order: few distinct values,
+    -inf rows."""
+
+    K = _kernels()
+    g = torch.Generator(device="cuda").manual_seed(9)
+    old = K.TIE_KEYS
+    try:
+        K.TIE_KEYS = True
+        for n, k, levels in ((512, 512, 7), (300, 512, 3), (64, 33, 1000), (128, 512, 2)):
+            x = torch.randint(0, levels, (n, 4000), generator=g, device="cuda").float() * 0.25 - 0.5
+            x[:5, 100:] = float("-inf")                       # fewer visible than k: -inf ties too
+            x[7] = 1.5
+            v, i = K.topk_lo(x, k, sorted=False)
+            b = x.view(torch.int32).long()
+            b = torch.where(b < 0, b ^ 0x7FFFFFFF, b)
+            ref = torch.topk((b << 32) | (0x7FFFFFFF - torch.arange(x.shape[1], device="cuda")), k, dim=1).values
+            want = (0x7FFFFFFF - (ref & 0xFFFFFFFF)).sort(1).values
+            order = i.sort(1)
+            assert torch.equal(order.values, want)
+            assert torch.equal(torch.gather(v, 1, order.indices), torch.gather(x, 1, want))
+            vs, is_ = K.topk_lo(x, k)                         # sorted: value descending, ties lower index first
+            assert torch.equal(is_, 0x7FFFFFFF - (ref & 0xFFFFFFFF)) and torch.equal(vs, torch.gather(x, 1, is_))
+    finally:
+        K.TIE_KEYS = old
 
 
 @gpu
