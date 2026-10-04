@@ -31,6 +31,8 @@ API_KEY      := $(call env_of,TF_API_KEY)
 SERVED_NAME  := $(or $(call env_of,SERVED_NAME),DeepSeek-v4.1-Flash-EXL3)
 CACHE_DIR    := $(call env_of,CACHE_DIR)
 PREPARED_DIR := $(call env_of,PREPARED_DIR)
+# a stop waits this long for the ranks to exit (with TF_DSV41_DISK they write their kept prompts first)
+STOP_GRACE_S := $(or $(call env_of,STOP_GRACE_S),$(if $(call env_of,TF_DSV41_DISK),150,30))
 MODEL        := $(or $(call env_of,MODEL),dsv41/DeepSeek-V4.1-Flash-EXL3-2.9bpw)
 FASTBOOT     := python -m tensorfold.families.deepseek_v41.cuda.fastboot
 BASE_URL     := http://localhost:$(PORT)
@@ -180,7 +182,7 @@ _up: guard sync memwait
 # a deliberate stop: the watchdog stands down until the next up, across reboots too (the marker keeps the boot id)
 _down:
 	@echo "$$(cat /proc/sys/kernel/random/boot_id) $$(date +%s)" > $(STATE)/stopped
-	@( $(COMPOSE0) down --timeout 30 ) & ( ssh $(WORKER) "cd $(DIR) && $(COMPOSE1) down --timeout 30" ) & wait
+	@( $(COMPOSE0) down --timeout $(STOP_GRACE_S) ) & ( ssh $(WORKER) "cd $(DIR) && $(COMPOSE1) down --timeout $(STOP_GRACE_S)" ) & wait
 
 _restart: _down _up
 

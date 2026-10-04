@@ -28,6 +28,8 @@ services:
       - ${MODELS_DIR:?MODELS_DIR must be set in .env}:/models:ro
       - ${CACHE_DIR:?CACHE_DIR must be set in .env}:/root/.cache  # built CUDA extensions, Triton kernels
       - ${PREPARED_DIR:?PREPARED_DIR must be set in .env}:/prepared  # this rank's built weights (make prepare)
+      # kept prompts spilled to node-local NVMe (used only with TF_DSV41_DISK=/kvdisk in .env)
+      - ${KV_DISK_DIR:-${CACHE_DIR}/kvdisk}:/kvdisk
     environment:
       TF_RANK: ${TF_RANK:?TF_RANK comes from rank0.env / rank1.env}
       TF_PORT: ${PORT:-8888}
@@ -42,6 +44,12 @@ services:
       TF_DSV41_TOOL_GRAMMAR: ${TF_DSV41_TOOL_GRAMMAR:-off}
       PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
       TF_DSV41_PREPARED: /prepared                       # read the prepared folder when current (fastboot)
+      # the NVMe tier of kept prompts: off unless set (/kvdisk); budget (128 GiB), smallest state written (2048
+      # tokens), pinned stage (1024 MiB); empty: the defaults
+      TF_DSV41_DISK: ${TF_DSV41_DISK:-}
+      TF_DSV41_DISK_GIB: ${TF_DSV41_DISK_GIB:-}
+      TF_DSV41_DISK_MIN: ${TF_DSV41_DISK_MIN:-}
+      TF_DSV41_DISK_STAGE_MIB: ${TF_DSV41_DISK_STAGE_MIB:-}
       # no transparent huge pages for NumPy buffers or mimalloc arenas: THP first-touch compaction under memory
       # pressure stalls long prefills on GB10 (seen in jayleaton/deepseek-v41-tensorfold-spark, G12)
       NUMPY_MADVISE_HUGEPAGE: "0"
@@ -61,4 +69,5 @@ services:
       timeout: 10s
       start_period: 15m
       retries: 3
-    stop_grace_period: 30s
+    # with TF_DSV41_DISK both ranks write their kept prompts on stop: give them time (STOP_GRACE_S=150 in .env)
+    stop_grace_period: ${STOP_GRACE_S:-30}s
