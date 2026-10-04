@@ -117,8 +117,9 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
                             "past the memory budget (the rest stays resident; output is the resident model's)")
     speed.add_argument("--ple-on-ssd", action="store_true",
                        help="Flash Next: read the n-gram (PLE) tables from the checkpoint on SSD at each lookup "
-                            "instead of holding them in memory. A trade: a few percent of decode speed for about "
-                            "40 GiB less at peak (the tables are 29.8 GiB); a 128 GB Mac needs it")
+                            "instead of holding them in memory; supports MLX affine tables and CUDA NVFP4 "
+                            "checkpoints' BF16, scalar FP8 or NVFP4 tables. Memory savings and speed depend on "
+                            "the checkpoint, workload and SSD")
 
     speed.add_argument("--no-update-check", action="store_true",
                        help="don't ask GitHub whether a newer release exists (also TENSORFOLD_NO_UPDATE_CHECK=1)")

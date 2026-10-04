@@ -245,7 +245,7 @@ def _edited(files, index: int, part: int, **fields):
 
 
 @pytest.mark.parametrize("part, fields, match", [
-    (0, {"dtype": "I32"}, "weight must be a U32"), (1, {"dtype": "F16"}, "scales must be a BF16"),
+    (0, {"dtype": "I16"}, "weight must be a U32"), (1, {"dtype": "F16"}, "scales must be a BF16"),
     (2, {"dtype": "U16"}, "biases must be a BF16"), (0, {"shape": [37]}, r"not \[rows, columns\]"),
     (0, {"shape": [0, 20]}, r"not \[rows, columns\]"), (0, {"shape": [37, 20, 1]}, r"not \[rows, columns\]"),
     (0, {"data_offsets": [0, 2**40]}, "disagree"), (1, {"data_offsets": [-2, 368]}, "disagree"),

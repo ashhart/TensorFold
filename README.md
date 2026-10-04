@@ -62,7 +62,7 @@ Nemotron uses TensorFold projections and routed-expert kernels. Its load-time ro
 keep the installed MLX version within the package requirements. The named checkpoint includes
 `mtp-4bit.safetensors`, which `pull` and `serve` check for.
 
-Flash Next requires 4-bit/group-32 weights. Without an MTP head it can run without MTP drafting on MLX;
+Flash Next's MLX affine checkpoints require 4-bit/group-32 weights. Without an MTP head it can run without MTP drafting on MLX;
 on CUDA, explicitly pass `--no-drafts`. On one CUDA GPU it also reads the two NVFP4 exports in the table as they
 ship, and block-scaled FP8 (ModelOpt `FP8_PB_WO`) linears in such exports; see [the recipe](docs/recipes/qwen3.8-flash-next.md#nvfp4-checkpoints) for their formats, the checks they
 passed and what is not supported. Nemotron CUDA requires 4-bit/group-64 weights and an MTP head
