@@ -237,7 +237,10 @@ def _ple_lookup(ids: Any, tables: PleTables) -> mx.array:
 
     import numpy as np
 
-    ids = np.asarray(ids).reshape(-1, np.asarray(ids).shape[-1])
+    if isinstance(ids, mx.array) and tables.host is None:      # ids hashed on the GPU: no host read
+        ids = ids.reshape(-1, ids.shape[-1]).astype(mx.uint32)
+    else:
+        ids = np.asarray(ids).reshape(-1, np.asarray(ids).shape[-1])
     rows, heads = ids.shape
     if tables.host is not None:
         words, scales, biases = tables.host.gather(ids)
@@ -248,7 +251,7 @@ def _ple_lookup(ids: Any, tables: PleTables) -> mx.array:
                    output_dtypes=[mx.bfloat16])[0]
     names = ["IDS", "GSTART"] + [f"{k}{g}" for g in range(8) for k in ("W", "S", "B")]
     run, fmt = _lookup("ple_lookup", _PLE_LOOKUP, _PLE_LOOKUP_Q, names, tables.bits, tables.group)
-    arrays = [mx.array(ids.astype(np.uint32)), tables.starts]
+    arrays = [ids if isinstance(ids, mx.array) else mx.array(ids.astype(np.uint32)), tables.starts]
     for g in range(8):
         arrays += [tables.weights[g], tables.scales[g], tables.biases[g]]
     return run(inputs=arrays, template=[("H", heads), ("DIMS", tables.dims), *fmt],

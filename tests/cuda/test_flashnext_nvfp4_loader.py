@@ -236,6 +236,29 @@ def test_the_loader_reads_mxfp8_linears_and_an_nvfp4_table(tmp_path: Path) -> No
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="the loader builds CUDA tensors")
+def test_stage_reads_the_ngram_rows_ahead_with_the_same_bits(tmp_path: Path, monkeypatch) -> None:
+    """``stage`` gathering the n-gram rows before its wait (the default) or after it (TF_FLASH_STAGE_AHEAD=0) stages
+    the same rows: a prompt in passes and its decode give the same tokens, streams and staged rows."""
+
+    from tensorfold.families.qwen4_exp.cuda.decode import Engine, prefill, serial_decode
+    from tensorfold.families.qwen4_exp.cuda.weights import load
+
+    tiny = write(tmp_path / "ahead", mxfp8=True, ple_nvfp4=True, hidden=512)      # PLE kernels: 512-wide streams
+    w = load(tiny, mtp=True, draft_vocab=None)
+    prompt = [(7 * i + 5) % 250 for i in range(53)]                             # four passes of 16, then 5 rows
+    got = {}
+    for flag in ("1", "0"):
+        monkeypatch.setenv("TF_FLASH_STAGE_AHEAD", flag)
+        e = Engine(w, capacity=256, max_rows=8, prefill_rows=16, graphs=False)
+        first = prefill(e, prompt, None)
+        staged = e.pbuf.ple_v.clone()
+        streams = e.last_streams.clone()
+        got[flag] = (first, staged, streams, serial_decode(e, first, 6, None).tokens)
+    assert got["1"][0] == got["0"][0] and got["1"][3] == got["0"][3]
+    assert torch.equal(got["1"][1], got["0"][1]) and torch.equal(got["1"][2], got["0"][2])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the loader builds CUDA tensors")
 def test_the_loader_reads_block_fp8_linears(tmp_path: Path) -> None:
     """``FP8_PB_WO`` linears, the head's too, reach the lane matmul as stored beside their bf16 neighbours."""
 

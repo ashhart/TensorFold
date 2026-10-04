@@ -12,6 +12,7 @@ from typing import Any
 
 MIN_CAPABILITY = (8, 9)         # FP8 MMA and e4m3 conversions (Ada); kernels with clusters use them from 9.0
 CLUSTERS = (9, 0)               # extensions built only on thread-block clusters (NVFP4) need Hopper or newer
+FLASHNEXT_FLOOR = (12, 0)       # Flash Next serves CUDA on sm_120/sm_121 cards only; anything below is refused by name
 # stop first: when the lock goes, a waiting start imports whatever module is there without building, even an old one
 HINT = "if no other build is running, a killed build left it: stop this start, delete the lock and start again"
 LOCK_WAIT_SECONDS = 60.0        # a start still waiting on the same lock this long says so again
@@ -44,6 +45,22 @@ def refuse_old_gpu(need: tuple[int, int] = MIN_CAPABILITY) -> None:
             arch_flags(need)
         except RuntimeError as exc:
             raise ValueError(str(exc)) from None
+
+
+def refuse_small_gpu(need: tuple[int, int] = FLASHNEXT_FLOOR) -> None:
+    """At startup, before any weight loads: a GPU below Flash Next's CUDA floor is refused by name (no GPU: skipped)."""
+
+    try:
+        import torch
+    except ImportError:
+        return
+    if torch.cuda.is_available():
+        major, minor = torch.cuda.get_device_capability()
+        if (major, minor) < need:
+            raise ValueError("TensorFold's Flash Next CUDA kernels run on sm_120 and sm_121 GPUs only "
+                             "(DGX Spark GB10, RTX 50 and RTX PRO 6000); this GPU "
+                             f"({torch.cuda.get_device_name()}) is {major}.{minor}. Serve Flash Next on CUDA on one "
+                             "of those, on the MLX backend, or with another model.")
 
 
 def load(name: str, sources: str | list[str], need: tuple[int, int] = MIN_CAPABILITY, *, arch_specific: bool = False,

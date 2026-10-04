@@ -20,10 +20,10 @@ from tensorfold.server.request_options import RequestOptions, thinking_fields
 from tensorfold.server.text import render_prompt_ids, template_late_system
 
 CHECKPOINTS = {                       # name: (environment variable, Hugging Face repo)
-    "qwen27": ("TENSORFOLD_MLX_MODEL", "Vontra/Qwen3.8-27B-MLX-4bit"),
-    "flashnext": ("TF_FLASHNEXT_MODEL", "Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP"),
-    "glm": ("TF_GLM5_MODEL", "Vontra/GLM-5.3-Flash-MLX-4bit-MTP"),
-    "nemotron": ("TF_NEMOTRON_MODEL", "Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit"),
+    "qwen27": ("TENSORFOLD_MLX_MODEL", "TensorFold/Qwen3.8-27B-MLX-4bit"),
+    "flashnext": ("TF_FLASHNEXT_MODEL", "TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP"),
+    "glm": ("TF_GLM5_MODEL", "TensorFold/GLM-5.3-Flash-MLX-4bit-MTP"),
+    "nemotron": ("TF_NEMOTRON_MODEL", "TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit"),
 }
 WEATHER = [{"type": "function", "function": {"name": "get_weather", "description": "Current weather",
                                              "parameters": {"type": "object", "required": ["city"],
@@ -38,11 +38,19 @@ CONVERSATIONS = {
                {"role": "user", "content": "And Bergen?"}], WEATHER),
     "late system": ([{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello!"},
                      {"role": "system", "content": "Be brief."}, {"role": "user", "content": "Bye"}], None),
+    "earlier reasoning": ([{"role": "user", "content": "Weather in Oslo?"},
+                           {"role": "assistant", "content": "", "reasoning_content": "Ask the tool.", "tool_calls": [
+                               {"id": "call_1", "type": "function",
+                                "function": {"name": "get_weather", "arguments": json.dumps({"city": "Oslo"})}}]},
+                           {"role": "tool", "tool_call_id": "call_1", "content": "{\"celsius\": 12}"},
+                           {"role": "assistant", "content": "12 C.", "reasoning_content": "It is 12."},
+                           {"role": "user", "content": "And Bergen?"}], WEATHER),
 }
 REQUESTS = [{}, {"reasoning_effort": "none"}, {"reasoning_effort": "minimal"}, {"reasoning_effort": "low"},
             {"reasoning_effort": "medium"}, {"reasoning_effort": "high"}, {"reasoning_effort": "xhigh"},
             {"chat_template_kwargs": {"enable_thinking": False}},
-            {"chat_template_kwargs": {"enable_thinking": True, "reasoning_effort": "high"}}]
+            {"chat_template_kwargs": {"enable_thinking": True, "reasoning_effort": "high"}},
+            {"chat_template_kwargs": {"thinking": False}}, {"chat_template_kwargs": {"thinking": {"type": "enabled"}}}]
 
 
 def _folder(name):
@@ -153,3 +161,30 @@ def test_the_effort_each_template_writes(name, request_fields, words):
     body = {"messages": messages, **request_fields}
     ids = mac.prompt(body, messages, None)
     assert ids == cuda._prepare(body, True).prompt and words in mac.tokenizer.decode(ids)
+
+
+@pytest.mark.parametrize("name", sorted(CHECKPOINTS))
+def test_tokenize_gives_the_chat_route_s_prompt_on_both_servers(name):
+    """vLLM's /tokenize: the ids each server's chat route runs, and the same on both; detokenize gives the text back."""
+
+    from tensorfold.server import token_routes
+
+    folder = _folder(name)
+    mac, cuda = Mac(name, folder, True, None), cuda_app(name, folder, True, None)
+    mac.tokenizer_lock, mac.context_window = threading.Lock(), 0
+    for label, (messages, tools) in CONVERSATIONS.items():
+        for request in REQUESTS:
+            body = {"messages": messages, **({"tools": tools} if tools else {}), **request}
+            want = cuda._prepare(body, True).prompt
+            assert cuda.tokenize(body)["tokens"] == want == token_routes.tokenize(mac, body)["tokens"], (label, request)
+            history = {**body, "add_generation_prompt": False}
+            cut = cuda.tokenize(history)["tokens"]
+            assert cut == token_routes.tokenize(mac, history)["tokens"] and len(cut) < len(want), (label, request)
+    text = "Grüße, 世界! <think>"
+    for special in (False, True):
+        body = {"prompt": text, "add_special_tokens": special, "return_token_strs": True}
+        mine, theirs = cuda.tokenize(body), token_routes.tokenize(mac, body)
+        assert mine["tokens"] == theirs["tokens"] and mine["token_strs"] == theirs["token_strs"]
+        assert cuda.detokenize({"tokens": mine["tokens"]}) == token_routes.detokenize(mac, {"tokens": mine["tokens"]})
+    assert cuda.detokenize({"tokens": cuda.tokenize({"prompt": text, "add_special_tokens": False})["tokens"]}) == {
+        "prompt": text}

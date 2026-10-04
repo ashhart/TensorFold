@@ -1,4 +1,4 @@
-"""Row-exact 5/6/8-bit code arithmetic in groups of 64; the scalar twin is checked equal per shape."""
+"""Row-exact 5/6/8-bit code arithmetic in groups of 64 or 128; the scalar twin is checked equal per shape."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from tensorfold.kernels.qwen.dense.v1 import simd_qmm
 
 BITS = (5, 6, 8)
 GROUP = 64
-fallback: set[tuple[int, int, int]] = set()     # (n, k, bits) whose twin differs from the matrix kernel here
+fallback: set[tuple[int, int, int, int]] = set()  # (n, k, bits, group) whose twin differs from the matrix kernel
 
 _HEADER = simd_qmm._HEADER + r"""
 // code j of B-bit codes packed from bit 0 of v (j a compile-time constant after unrolling)
@@ -36,7 +36,7 @@ _MMA = r"""
   const int fm = (qid & 4) + ((int(lane) / 2) % 4);
   const int fn = (qid & 2) * 2 + (int(lane) % 2) * 2;
   const int R = X_shape[0];
-  constexpr int G = K / 64, WPR = K * B / 32, LW = B == 8 ? 4 : 3;
+  constexpr int G = K / 64, SG = K / GS, WPR = K * B / 32, LW = B == 8 ? 4 : 3;
   const float one = ONE[0];
   const int nb = int(threadgroup_position_in_grid.x) * (8 * NT);
   const int rb = int(threadgroup_position_in_grid.y) * (8 * RT);
@@ -99,8 +99,9 @@ _MMA = r"""
       }
       PRAGMA_UNROLL
       for (int t = 0; t < NT; t++) {
-        const float sc = float(SC[size_t(wrow[t]) * G + g]);
-        const float bi = float(BI[size_t(wrow[t]) * G + g]);
+        const int si = GS == 128 ? (g >> 1) : g;          // one scale covers two groups of 64
+        const float sc = float(SC[size_t(wrow[t]) * SG + si]);
+        const float bi = float(BI[size_t(wrow[t]) * SG + si]);
         PRAGMA_UNROLL
         for (int rt = 0; rt < RT; rt++) {
           acc[rt][t][0] = fma(bi, xs0[rt], fma(sc, P[rt][t].thread_elements()[0], acc[rt][t][0]));
@@ -138,7 +139,7 @@ _SCALAR = r"""
   // RS rows (1 to 4). Lane (chunk c = lane % S, slot j = lane / S) runs chunk c of NR outputs n0 + j + (32 / S) u,
   // a whole group (2 B words) of each in registers; the threadgroup stages XB groups of each row's inputs in chain
   // order (step s, k at 8 s + k). A row's chain is the same at any RS and the matrix kernel's.
-  constexpr int GW = 2 * B, XP = 76, G = K / 64, WPR = K * B / 32;
+  constexpr int GW = 2 * B, XP = 76, G = K / 64, SG = K / GS, WPR = K * B / 32;
   threadgroup float xs[RS * XB * XP];
   const uint lane = thread_index_in_simdgroup;
   const int tid = int(simdgroup_index_in_threadgroup) * 32 + int(lane);
@@ -155,8 +156,8 @@ _SCALAR = r"""
   for (int u = 0; u < NR; u++) {
     const int nn = min(n0 + SLOTS * u, N - 1);
     wr[u] = W + size_t(nn) * WPR;
-    sr[u] = SC + size_t(nn) * G;
-    br[u] = BI + size_t(nn) * G;
+    sr[u] = SC + size_t(nn) * SG;
+    br[u] = BI + size_t(nn) * SG;
     PRAGMA_UNROLL
     for (int r = 0; r < RS; r++) acc[u][r] = 0.0f;
   }
@@ -216,7 +217,8 @@ _SCALAR = r"""
       }
       PRAGMA_UNROLL
       for (int u = 0; u < NR; u++) {
-        const float sc = float(sr[u][g]), bi = float(br[u][g]);
+        const int si = GS == 128 ? (g >> 1) : g;
+        const float sc = float(sr[u][si]), bi = float(br[u][si]);
         PRAGMA_UNROLL
         for (int r = 0; r < RS; r++) {
           acc[u][r] = fma(sc, P[u][r], acc[u][r]);
@@ -254,15 +256,16 @@ def _compiled(kind: str, consts: tuple[tuple[str, int], ...]) -> Any:
 
 
 def fits(weight: mx.array, scales: mx.array, biases: mx.array, group_size: int, bits: int) -> bool:
-    """5/6/8-bit codes in groups of 64 with bf16 scales and biases, outputs in eights, not a shape that fell back."""
+    """5/6/8-bit codes in groups of 64 or 128, bf16 scales, outputs in eights, not a shape that fell back."""
 
-    if bits not in BITS or group_size != GROUP or scales.dtype != mx.bfloat16 or biases.dtype != mx.bfloat16:
+    if bits not in BITS or group_size not in (64, 128) or scales.dtype != mx.bfloat16 or biases.dtype != mx.bfloat16:
         return False
     n, k = int(weight.shape[0]), int(weight.shape[1]) * 32 // bits
-    return weight.ndim == 2 and n % 8 == 0 and k % GROUP == 0 and (n, k, bits) not in fallback
+    return weight.ndim == 2 and n % 8 == 0 and k % group_size == 0 and (n, k, bits, group_size) not in fallback
 
 
-def _launch(kind: str, rows: int, n: int, dims: int, bits: int, most: int = simd_qmm.MMA_SGS) -> tuple:
+def _launch(kind: str, rows: int, n: int, dims: int, bits: int, group: int,
+            most: int = simd_qmm.MMA_SGS) -> tuple:
     s = simd_qmm.splits(n, dims)
     if kind == "scalar":
         xb = simd_qmm.scalar_block(rows, s, GROUP)
@@ -270,12 +273,13 @@ def _launch(kind: str, rows: int, n: int, dims: int, bits: int, most: int = simd
         nr = 1 if bits == 8 or n <= 2048 else simd_qmm.NR
         sgs = max(1, 16 // ((32 // s) * nr)) if n > 2048 else 8
         per = sgs * (32 // s) * nr
-        consts = (("K", dims), ("N", n), ("S", s), ("SGS", sgs), ("NR", nr), ("XB", xb), ("RS", rows), ("B", bits))
+        consts = (("K", dims), ("N", n), ("S", s), ("SGS", sgs), ("NR", nr), ("XB", xb), ("RS", rows),
+                  ("B", bits), ("GS", group))
         return consts, (-(-n // per) * sgs * 32, 1, 1), (sgs * 32, 1, 1), [(rows, n)]
     rt = min(simd_qmm.RT_MAX, (rows + 7) // 8)
     nt = simd_qmm.tiles(n, rt * 8, s)
     sgs = min(s, most)
-    consts = (("K", dims), ("N", n), ("S", s), ("SGS", sgs), ("NT", nt), ("RT", rt), ("B", bits))
+    consts = (("K", dims), ("N", n), ("S", s), ("SGS", sgs), ("NT", nt), ("RT", rt), ("B", bits), ("GS", group))
     return consts, (-(-n // (8 * nt)) * sgs * 32, -(-rows // (8 * rt)), 1), (sgs * 32, 1, 1), [(rows, n)]
 
 
@@ -285,19 +289,19 @@ def _go(kind: str, plan: tuple, inputs: list) -> mx.array:
                                    output_dtypes=[mx.bfloat16])[0]
 
 
-def _run(kind: str, rows: int, n: int, dims: int, bits: int, inputs: list) -> mx.array:
-    key = (kind, rows, n, dims, bits)
+def _run(kind: str, rows: int, n: int, dims: int, bits: int, group: int, inputs: list) -> mx.array:
+    key = (kind, rows, n, dims, bits, group)
     plan = _plans.get(key)
     if plan is not None:
         return _go(kind, plan, inputs)
     if kind == "scalar":
-        plan = _plans[key] = _launch(kind, rows, n, dims, bits)
+        plan = _plans[key] = _launch(kind, rows, n, dims, bits, group)
         return _go(kind, plan, inputs)
-    consts = _launch(kind, rows, n, dims, bits)[0]
+    consts = _launch(kind, rows, n, dims, bits, group)[0]
     made: list[tuple] = []
 
     def launch(size: int) -> mx.array:
-        made.append(_launch(kind, rows, n, dims, bits, size // 32))
+        made.append(_launch(kind, rows, n, dims, bits, group, size // 32))
         return _go(kind, made[-1], inputs)
 
     pipeline = ("simd_qmm_bits", tuple(c for c in consts if c[0] != "SGS"))
@@ -307,31 +311,34 @@ def _run(kind: str, rows: int, n: int, dims: int, bits: int, inputs: list) -> mx
     return out
 
 
-def qmm(x: mx.array, weight: mx.array, scales: mx.array, biases: mx.array, bits: int, *,
-        kind: str | None = None) -> mx.array:
-    """Row-exact bf16 x @ W.T for 5/6/8-bit codes in groups of 64: every row's bits its one-row call's."""
+def qmm(x: mx.array, weight: mx.array, scales: mx.array, biases: mx.array, bits: int,
+        group_size: int = GROUP, *, kind: str | None = None) -> mx.array:
+    """Row-exact bf16 x @ W.T for 5/6/8-bit codes in groups of 64 or 128: every row matches its one-row call."""
 
     shape = x.shape
     x2 = x.reshape(-1, shape[-1])
     rows, dims = int(x2.shape[0]), int(x2.shape[1])
     n = int(weight.shape[0])
-    if kind is None:     # the twin for one row; from two, the matrix kernel (cheaper here than the twin's two rows)
+    if kind is None:     # one row uses the twin; from two rows, the matrix kernel
         kind = "scalar" if rows == 1 and simd_qmm.scalar_block(rows, simd_qmm.splits(n, dims), GROUP) else "mma"
     one = mx.array([1.0], dtype=mx.float32)
-    return _run(kind, rows, n, dims, bits, [x2, weight, scales, biases, one]).reshape(*shape[:-1], n)
+    return _run(kind, rows, n, dims, bits, group_size, [x2, weight, scales, biases, one]).reshape(*shape[:-1], n)
 
 
-def check(weight: mx.array, scales: mx.array, biases: mx.array, bits: int, *, seed: int = 0) -> bool:
+def check(weight: mx.array, scales: mx.array, biases: mx.array, bits: int, group_size: int = GROUP, *,
+          seed: int = 0) -> bool:
     """The scalar twin's 1-4-row calls against the matrix kernel's rows, bit for bit, for this weight here."""
 
     k, n = int(weight.shape[1]) * 32 // bits, int(weight.shape[0])
     x = (mx.random.normal((8, k), key=mx.random.key(seed)) * 0.5).astype(mx.bfloat16)
-    full = qmm(x, weight, scales, biases, bits, kind="mma")
+    full = qmm(x, weight, scales, biases, bits, group_size, kind="mma")
     s = simd_qmm.splits(n, k)
     calls = [(r, 1) for r in range(8)]
-    calls += [(r, m) for m in range(2, simd_qmm.SCALAR_ROWS + 1) if simd_qmm.scalar_block(m, s, GROUP) for r in (0, 8 - m)]
-    return all(bool(mx.array_equal(qmm(x[r:r + m], weight, scales, biases, bits, kind="scalar"), full[r:r + m]).item())
-               for r, m in calls)
+    calls += [(r, m) for m in range(2, simd_qmm.SCALAR_ROWS + 1)
+              if simd_qmm.scalar_block(m, s, GROUP) for r in (0, 8 - m)]
+    return all(bool(mx.array_equal(
+        qmm(x[r:r + m], weight, scales, biases, bits, group_size, kind="scalar"), full[r:r + m]).item())
+        for r, m in calls)
 
 
 __all__ = ["BITS", "GROUP", "check", "fallback", "fits", "qmm"]

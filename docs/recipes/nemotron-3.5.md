@@ -6,8 +6,8 @@ The MLX family is `src/tensorfold/families/nemotron_h/`, with Metal kernels in
 ## Run
 
 ```bash
-tensorfold pull Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
-tensorfold serve Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit --name bench
+tensorfold pull TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
+tensorfold serve TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit --name bench
 ```
 
 The checkpoint includes `mtp-4bit.safetensors`; `pull` and `serve` check that it is available.
@@ -37,8 +37,8 @@ Use the [CUDA container setup](../../RUNBOOK.md#nvidia-gpus). One or two ranks a
 Pull the checkpoint on each rank and start rank 1 first:
 
 ```bash
-tensorfold serve Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit --tp 2 --rank 1 --master 192.0.2.1
-tensorfold serve Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit --tp 2 --rank 0 --master 192.0.2.1 --name bench --host 0.0.0.0
+tensorfold serve TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit --tp 2 --rank 1 --master 192.0.2.1
+tensorfold serve TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit --tp 2 --rank 0 --master 192.0.2.1 --name bench --host 0.0.0.0
 ```
 
 The default cap is three MTP drafts. Later drafts stop when their cumulative head confidence falls below
@@ -113,7 +113,7 @@ Use the [public benchmark command](README.md#measurements) with the server above
 Compare drafted/serial and resumed/fresh output on each backend and rank count, plus concurrent/solo
 requests on MLX. Decode rate, cold/resumed first-token latency and peak memory are TBD [release-0.3.5].
 
-On a 64 GB M5 Pro with TensorFold 0.3.5.1 and `Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit@8bbcb5b6`
+On a 64 GB M5 Pro with TensorFold 0.3.5.1 and `TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit@8bbcb5b6`
 (#70; setup in the [Qwen3.8-27B recipe](qwen3.8-27b.md#a-64-gb-m5-pro-on-0351)), the fitted context was the full
 262,144 tokens and the lifetime peak footprint 42.21 GiB, reached during load and warm-up. A 261,780-token prompt
 prefilled in 311.5 s and resumed in 0.63 s with 261,774 tokens cached. Decode medians were 146.0, 123.3, 131.3 and

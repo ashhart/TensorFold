@@ -95,6 +95,23 @@ def test_vision_memory_is_reserved_only_on_the_tower_rank(tmp_path):
     assert weight_transform(original, True, 1)("vision_tower.x", info) == (0, 0)
 
 
+def test_offloaded_tower_leaves_the_gpu_budget_but_keeps_a_smaller_workspace(tmp_path):
+    from tensorfold.cuda.capacity import Geometry
+    from tensorfold.vision.qwen_cuda import OFFLOAD_WORKSPACE_BYTES, WORKSPACE_BYTES
+
+    _checkpoint(tmp_path)
+    base = lambda text: Geometry(lambda slots: slots * 64, 8)
+    resident = capacity_geometry(base, tmp_path, True, 0)({})
+    offloaded = capacity_geometry(base, tmp_path, True, 0, offload=True)({})
+    plain = capacity_geometry(base, tmp_path, False, 0)({})
+    assert resident.needed(32) > offloaded.needed(32) > plain.needed(32)
+    assert offloaded.needed(32) - plain.needed(32) == OFFLOAD_WORKSPACE_BYTES < WORKSPACE_BYTES
+    original = lambda *args: (0, 0)
+    info = {"shape": [8, 8], "dtype": "BF16"}
+    assert weight_transform(original, True, 0, True)("vision_tower.x", info) == (0, 0)
+    assert weight_transform(original, True, 0, False)("vision_tower.x", info) == (128, 0)
+
+
 def test_tp_transports_features_and_negative_offset_bit_for_bit(monkeypatch):
     records, arrays = [], []
     rank = [0]

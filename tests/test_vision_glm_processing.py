@@ -123,5 +123,5 @@ def test_glm_image_prompt_refuses_marker_count_and_context_overflow():
                                                     "temporal_patch_size": 2, "spatial_merge_size": 2}}, processor)
     with pytest.raises(ValueError, match="one image marker"):
         front.prepare("no image here", [image()])
-    with pytest.raises(ValueError, match="expanded image prompt"):
+    with pytest.raises(ValueError, match="maximum context length is 5 tokens: the expanded image prompt"):
         front.prepare("<|begin_of_image|><|image|><|end_of_image|>", [image()], max_prompt_tokens=5)

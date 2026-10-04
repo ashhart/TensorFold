@@ -11,7 +11,17 @@ Each family page describes its supported checkpoint, kernels and operating limit
 | GLM-5.3-Flash | [MLX on a 256 GB Mac, two-rank CUDA](glm-5.3-flash.md) |
 | Gemma 4 26B-A4B | [MLX, fused one-row decode](gemma-4.md) |
 | DeepSeek-V4-Flash | [MLX on a 256 GB Mac, DSpark and MTP drafts](deepseek-v4-flash.md) |
-| Qwen3.6-35B-A3B | [One-GPU CUDA](qwen3.6-moe.md) |
+| Qwen3.6-35B-A3B | [MLX with MTP drafts, one-GPU CUDA](qwen3.6-moe.md) |
+
+## Capability floor
+
+Quoted from the family pages, not measured per card.
+
+| Engine | Floor |
+| --- | --- |
+| CUDA, other families | Compute capability 8.9 or newer: Ada RTX 40, Hopper, and Blackwell cards (RTX 50, RTX PRO 6000, DGX Spark GB10). RTX 30 (8.6) is not supported yet. |
+| Flash Next, CUDA | sm_120 and sm_121 only: DGX Spark GB10, RTX 50, RTX PRO 6000. A card below sm_120 refuses Flash Next at startup. |
+| MLX, Apple Silicon | GLM-5.3-Flash is written for a 256 GB Mac, about 151 GiB resident. DeepSeek-V4-Flash is the same, about 151 GiB resident. Flash Next's default command sizes to a 128 GiB M4 Max. Qwen3.8-27B on a 32 GB Mac needs more than the default 22.4 GiB. Machine classes, not measured minimums. |
 
 Contributor guides cover [adding an MLX family](adding-a-family.md),
 [adding a CUDA family](adding-a-cuda-family.md) and [CUDA implementation rules](cuda.md).

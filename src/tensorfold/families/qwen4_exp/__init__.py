@@ -9,7 +9,7 @@ MODEL_TYPES = ("qwen4_exp", "qwen3_8_flash_next")   # the second: the name newer
 TITLE = "Qwen3.8 Flash Next"
 LANES = True
 # with their MTP head: MLX affine (4-bit the default; oQ4e, oQ5e, 6- and 8-bit read too), EXL3 and NVFP4
-MODELS = ("Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP", "turboderp/Qwen3.8-Flash-Next-exl3",
+MODELS = ("TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP", "turboderp/Qwen3.8-Flash-Next-exl3",
           "local-inference-lab/Qwen3.8-Flash-Next-NVFP4", "RadixArk/Qwen3.8-Flash-Next-NVFP4")
 NVFP4_MODELS = MODELS[2:]
 QUANT_METHODS = {"cuda": ("mlx", "exl3", "modelopt")}  # MLX affine 4-bit, EXL3 packs and NVFP4 (ModelOpt)
@@ -61,9 +61,13 @@ def check(model_dir: Path) -> None:
         # NVFP4 experts and n-gram tables; other linears are bf16, MXFP8 or block FP8
         found = config.get("quantization") or config.get("quantization_config") or {}
         algo = str(found.get("quant_algo") or "NVFP4").upper()
-        # FP8 is read in the MTP drafter's experts only (dequantized and re-quantized at load: they only draft)
+        # FP8 is read in the MTP drafter's experts (dequantized and re-quantized at load: they only draft) and in the
+        # n-gram tables (their own FP8 reader, host_table.FP8Table); FP8 elsewhere stays refused
+        def fp8_read(name: str) -> bool:
+            return {"mtp", "experts"} <= set(name.split(".")) or ".ple.ple_embedding.ngram_embedding." in name + "."
+
         layers = {str(v.get("quant_algo", "")).upper() for k, v in (found.get("quantized_layers") or {}).items()
-                  if not (str(v.get("quant_algo", "")).upper() == "FP8" and {"mtp", "experts"} <= set(k.split(".")))}
+                  if not (str(v.get("quant_algo", "")).upper() == "FP8" and fp8_read(k))}
         algos = layers if algo == "MIXED_PRECISION" else {algo}
         weights = [g.get("weights") or {} for g in (found.get("config_groups") or {}).values()]
         fp4 = {int(w.get("group_size", 16)) for w in weights if int(w.get("num_bits", 4)) == 4}
@@ -169,7 +173,10 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
                 kv_dtype: str = "bf16", decode_share: float | None = None, **options: Any):
     """Verify MTP on one or two CUDA GPUs; start rank 1 first for ``tp=2``, with bf16, int8 or int4 KV storage."""
 
+    from tensorfold.cuda import build
     from tensorfold.cuda.exl3.format import is_exl3
+
+    build.refuse_small_gpu()               # a card under sm_120 refuses this family by name, before anything is read
 
     if is_exl3(Path(model_dir)):
         print("[tensorfold] EXL3 packs are experimental: replies are exact; see "

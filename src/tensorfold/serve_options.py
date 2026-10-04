@@ -18,6 +18,20 @@ def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any =
             raise ValueError("--vision-max-images must be a positive integer")
         if not getattr(args, "vision", False):
             raise ValueError("--vision-max-images needs --vision")
+    tokens = getattr(args, "vision_image_tokens", None)
+    if tokens is not None:
+        if not isinstance(tokens, int) or isinstance(tokens, bool) or not 1 <= tokens <= 65536:
+            raise ValueError("--vision-image-tokens is a number of tokens from 1 to 65,536")
+        if not getattr(args, "vision", False):
+            raise ValueError("--vision-image-tokens needs --vision")
+        if backend != "cuda":
+            raise ValueError("--vision-image-tokens sets the CUDA Qwen image budget; the MLX towers size their "
+                             "workspace for 4,096 visual tokens")
+    if getattr(args, "vision_offload", False):
+        if not getattr(args, "vision", False):
+            raise ValueError("--vision-offload needs --vision")
+        if backend != "cuda":
+            raise ValueError("--vision-offload is for the CUDA backend; the Mac's image tower already shares host memory")
     if getattr(args, "vision", False):             # only --vision reads the config here
         if family.model_type == "glm5_next" and backend != "mlx":
             raise ValueError("GLM-5.3-Flash image input is currently MLX-only")
@@ -74,11 +88,12 @@ def _cuda_streams(value: Any) -> int:
 
 
 def vision_options(args: argparse.Namespace) -> dict[str, Any]:
-    """``--vision`` and ``--vision-urls`` as a family's load options."""
+    """``--vision``, ``--vision-urls`` and ``--vision-offload`` as a family's load options."""
 
     if not getattr(args, "vision", False):
         return {}
-    return {"vision": True, "vision_urls": bool(getattr(args, "vision_urls", False))}
+    return {"vision": True, "vision_urls": bool(getattr(args, "vision_urls", False)),
+            "vision_offload": bool(getattr(args, "vision_offload", False))}
 
 
 __all__ = ["check", "vision_options"]

@@ -28,13 +28,23 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
     endpoint.add_argument("--port", type=int, default=8080)
     endpoint.add_argument("--name", default="", help="model id clients ask for (default: the model's name)")
     endpoint.add_argument("--alias", action="append", default=[], help="another model id to answer to")
+    endpoint.add_argument("--api-key", action="append", default=[], help="require this API key; repeat for more keys")
+    endpoint.add_argument("--api-key-file", help="restricted key file, one key or label: key per line; # comments")
+    endpoint.add_argument("--metrics-open", action="store_true", help="allow metrics without an API key")
     endpoint.add_argument("--vision", action="store_true",
                           help="enable image input for supported GLM and Qwen vision checkpoints")
     endpoint.add_argument("--vision-urls", action="store_true",
                           help="with --vision, accept public HTTP(S) image URLs (default: data URLs only)")
+    endpoint.add_argument("--vision-offload", action="store_true",
+                          help="with --vision on CUDA, keep the image tower in host RAM and copy it to the GPU only "
+                               "while an image is encoded (frees about 5 GiB of the startup budget on a small card; "
+                               "each image pays the copy)")
     endpoint.add_argument("--vision-max-images", type=int, default=None,
                           help="with --vision, maximum images across the full request history (default: 4); "
                                "byte, pixel and visual-token limits still apply")
+    endpoint.add_argument("--vision-image-tokens", type=int, default=None,
+                          help="with --vision on CUDA Qwen checkpoints, the visual tokens a request's images share "
+                               "(default: 4096, at most 65536); each image keeps at most 4096")
 
     generation = serve.add_argument_group("generation (requests can override each of these)")
     generation.add_argument("--context", type=int, default=None,
@@ -67,10 +77,11 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
     speed.add_argument("--drafter-bits", type=int, default=4, help="quantize the draft model's linears (0: bf16)")
     speed.add_argument("--mtp-drafts", type=int, default=None,
                        help="most MTP drafts a round (Qwen3.8 Flash Next: 3 on Mac; on CUDA 6, stopping under 70%% "
-                            "confidence); 0: no MTP drafts (any family)")
+                            "confidence; Nemotron on CUDA: 15, stopping where a row stops paying; Qwen3.6 MoE on Mac: "
+                            "4, each round's depth, plain included, from measured costs); 0: no MTP drafts")
     speed.add_argument("--mtp-confidence", type=float, default=None,
                        help="on CUDA, stop an MTP chain before a later draft under this probability "
-                            "(Flash Next default 0.70)")
+                            "(Flash Next default 0.70; Nemotron: by the row costs it measures at start)")
     speed.add_argument("--lane-kernels", choices=("auto", "on", "off"), default="auto",
                        help="lane kernels for Qwen3.8 dense (auto: on GPUs with tensor units)")
     speed.add_argument("--prompt-cache-gib", type=float, default=None,
@@ -142,7 +153,7 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
     serve.set_defaults(func=handlers["serve"])
 
     pull = commands.add_parser("pull", help="download models (or draft models) from Hugging Face")
-    pull.add_argument("repos", nargs="+", help="repo ids, e.g. Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP")
+    pull.add_argument("repos", nargs="+", help="repo ids, e.g. TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP")
     pull.set_defaults(func=handlers["pull"])
 
     models = commands.add_parser("models", help="list the model families and the checkpoints they are tested with")
@@ -156,4 +167,16 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
     info = commands.add_parser("info", help="show which family serves a model (reads its config.json only)")
     info.add_argument("model", help="a Hugging Face repo id or a model directory")
     info.set_defaults(func=handlers["info"])
+    from tensorfold.control.cli import register
+
+    register(commands)
+
+    plan = commands.add_parser("plan",
+                               help="estimate local checkpoint weights against MLX budgets without loading a model")
+    plan.add_argument("model", help="a local model directory or already cached Hugging Face repo id")
+    plan.add_argument("--memory-gb", type=float, default=None, metavar="GIB",
+                      help="also check this explicit budget, as TENSORFOLD_MEMORY_LIMIT_GB would set it")
+    plan.add_argument("--ram", type=int, action="append", default=[], metavar="GIB",
+                      help="also estimate this RAM class under the current GPU ceiling (repeatable)")
+    plan.set_defaults(func=handlers["plan"])
     return parser

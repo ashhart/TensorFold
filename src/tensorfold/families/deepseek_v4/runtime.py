@@ -182,7 +182,7 @@ def drafter_config(folder: Path) -> dict[str, Any]:
         config = {}
     if config.get("model_type") not in (DSPARK_TYPE, MTP_TYPE) or not (folder / HEAD_WEIGHTS).is_file():
         raise ValueError(f"{folder} holds no DeepSeek-V4-Flash draft head: it needs {HEAD_WEIGHTS} and a config.json "
-                         f"whose model_type is {DSPARK_TYPE} or {MTP_TYPE} (Vontra/DeepSeek-V4-Flash-DSpark-MLX, or "
+                         f"whose model_type is {DSPARK_TYPE} or {MTP_TYPE} (TensorFold/DeepSeek-V4-Flash-DSpark-MLX, or "
                          f"python -m tensorfold.families.deepseek_v4.convert)")
     return config
 

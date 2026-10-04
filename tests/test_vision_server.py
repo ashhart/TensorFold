@@ -108,12 +108,48 @@ def test_normalize_images_preserves_parts_and_instruction_order():
     assert messages[0]["role"] == "developer"
 
 
-@pytest.mark.parametrize("role", ["system", "developer", "assistant", "tool"])
-def test_normalize_rejects_images_outside_user_role(role):
+@pytest.mark.parametrize("role", ["system", "developer", "assistant"])
+def test_normalize_rejects_images_outside_user_and_tool_roles(role):
     messages = image_messages()
     messages[0]["role"] = role
-    with pytest.raises(RequestError, match="only in user"):
+    with pytest.raises(RequestError, match="only in user and tool"):
         normalize_messages(messages, allow_images=True)
+
+
+def tool_result_messages():
+    """An agent's history: a call, its screenshot as the tool result, and the next user turn."""
+    shot = image_messages("blue")[0]["content"][1]
+    call = {"id": "call_1", "type": "function", "function": {"name": "screenshot", "arguments": "{}"}}
+    return [{"role": "user", "content": "open the page"},
+            {"role": "assistant", "content": "", "tool_calls": [call]},
+            {"role": "tool", "tool_call_id": "call_1", "content": [{"type": "text", "text": "the page"}, shot]},
+            {"role": "user", "content": "what does it say?"}]
+
+
+def test_normalize_keeps_a_tool_result_s_images_and_refuses_them_without_vision():
+    messages = tool_result_messages()
+    result = normalize_messages(messages, allow_images=True)
+    assert result[2] == messages[2] and isinstance(result[2]["content"], list)
+    with pytest.raises(RequestError, match="text parts only"):
+        normalize_messages(messages)               # a text-only server still says so
+
+
+def test_prepare_prompt_renders_a_tool_result_s_image_in_place():
+    app = prompt_app(Frontend())
+    prepared = prepare_prompt(app, tool_result_messages(), [], True, None, {})
+    template, _ = app.tokenizer.calls[0]
+    assert prepared.vision is not None
+    assert template[2]["role"] == "tool" and template[2]["tool_call_id"] == "call_1"
+    assert template[2]["content"] == [{"type": "text", "text": "the page"}, {"type": "image", "detail": "auto"}]
+    assert app.vision.calls[0][1][0].pixels == bytes([0, 0, 255]) * 4
+
+
+def test_cuda_prepare_accepts_a_tool_result_s_image():
+    app = cuda_app(Frontend())
+    prepared = app.prepare({"messages": tool_result_messages(), "max_tokens": 2}, True)
+    assert prepared.prompt == [10, 11, 12, 13] and prepared.vision is not None
+    rendered, kwargs = app.template_calls[0]
+    assert kwargs["allow_images"] is True and rendered[2]["content"][1] == {"type": "image", "detail": "auto"}
 
 
 def test_normalize_images_are_opt_in_and_audio_remains_unsupported():
@@ -152,6 +188,21 @@ def test_prepare_images_errors_are_request_refusals():
         prepare_images(Frontend(), messages, str)
     with pytest.raises(RequestError, match="context limit"):
         prepare_images(Frontend(), image_messages(), str, context_limit=3)
+
+
+def test_an_image_prompt_past_the_window_is_context_length_exceeded():
+    from tensorfold.server.errors import CONTEXT_LIMIT, ContextLengthError
+
+    class Long(Frontend):
+        def prepare(self, rendered, images, *, max_prompt_tokens):
+            raise ValueError(f"{CONTEXT_LIMIT} {max_prompt_tokens} tokens: the expanded image prompt has 40 tokens")
+
+    with pytest.raises(ContextLengthError, match="maximum context length is 8 tokens") as caught:
+        prepare_images(Long(), image_messages(), str, context_limit=8)
+    assert caught.value.code == "context_length_exceeded"
+    with pytest.raises(RequestError) as other:                        # other image refusals carry no code
+        prepare_images(Frontend(), image_messages(), str, context_limit=3)
+    assert not isinstance(other.value, ContextLengthError)
 
 
 def test_prepare_prompt_preserves_text_render_and_direct_prompt_paths():

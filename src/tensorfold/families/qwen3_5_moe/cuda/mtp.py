@@ -62,7 +62,7 @@ class Staged:
         h[:w] = tokens
         h[w:2 * w] = np.arange(p0, p0 + w)
         h[3 * w + 2] = p0
-        h[3 * w + 3] = -(-(p0 + w) // tree_attention.CHUNK)
+        h[3 * w + 3] = tree_attention.slots(p0, w)
         self.dev.copy_(self.host, non_blocking=True)
         self.states.copy_(states)
 
@@ -77,7 +77,7 @@ class Head:
             full = untile(w.head)
             self.ids = torch.as_tensor(ids, dtype=torch.int64, device=w.norm.device)
             self.head = tile(QLinear(full.weight[self.ids].contiguous(), full.scales[self.ids].contiguous(),
-                                     full.biases[self.ids].contiguous()))
+                                     full.biases[self.ids].contiguous(), gs=full.gs, bits=full.bits))
             del full
 
     @torch.no_grad()

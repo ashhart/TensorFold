@@ -22,7 +22,8 @@ from tensorfold.server.request_options import RequestOptions
 from tensorfold.server.http import served_model_ids
 from tensorfold.server import metrics
 from tensorfold.server.scheduler import ChatJob, Scheduler
-from tensorfold.server.stopping import StopPolicy
+from tensorfold.server.stopping import StopPolicy, matched_stop
+from tensorfold.server.thinking_notes import unanswered
 from tensorfold.vision.images import DEFAULT_LIMITS, ImageLimits
 from tensorfold.server.text import (
     IncrementalText,
@@ -440,7 +441,8 @@ class ChatApp(RequestOptions, PromptBlocks, DecisionRequests):
 
         content_tokens = strip_trailing_stops(collected, set(stops.eos_ids))
         with self.tokenizer_lock:
-            text = stops.visible(self.tokenizer.decode(content_tokens))
+            raw_text = self.tokenizer.decode(content_tokens)
+            text = stops.visible(raw_text)
         if thinking or self.think_markers == CHANNEL_MARKERS:
             reasoning_text, content = split_thinking(text, finished=True, markers=self.think_markers)
             reasoning = reasoning_text.strip() or None
@@ -453,6 +455,7 @@ class ChatApp(RequestOptions, PromptBlocks, DecisionRequests):
         decode_tokens = max(0, len(collected) - 1)
         reply: dict[str, Any] = {
             "content": content,
+            "stop_sequence": matched_stop(raw_text, stops.strings),
             "reasoning": reasoning,
             "tool_calls_streamed": bool(calls_stream is not None and calls_stream.streamed),
             "finish_reason": stream.finish_reason if stream is not None else "length",
@@ -494,6 +497,9 @@ class ChatApp(RequestOptions, PromptBlocks, DecisionRequests):
             reply["speculative"] = speculative
         self.requests_completed += 1
         store = self.checkpoints
+        warning = unanswered(reply["finish_reason"], thinking, content)
+        if warning:
+            print(warning, flush=True)
         print(
             f"[tensorfold] done {job.job_id} prompt={len(prompt_ids)} cached={job.cached_tokens} "
             f"thinking={thinking} effort={reply['runtime']['reasoning_effort']} "

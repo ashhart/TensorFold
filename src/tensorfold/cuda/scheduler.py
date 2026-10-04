@@ -25,6 +25,15 @@ class Waiting(queue.PriorityQueue):
     def get(self, block: bool = True, timeout: float | None = None):
         return super().get(block, timeout)[2]
 
+    def put_many(self, items) -> None:
+        """Publish a group before waking the worker, preserving arrival and background priority."""
+
+        with self.not_empty:
+            for item in items:
+                self._put((1 if item[0].background else 0, next(self._order), item))
+                self.unfinished_tasks += 1
+            self.not_empty.notify()
+
     def stop(self) -> None:
         """Wake an idle worker to stop: None comes after every waiting request."""
 
@@ -77,6 +86,33 @@ class Scheduler:
                 raise value
             else:
                 return value
+
+    def submit_many(self, requests: list[dict]) -> list[dict]:
+        """Queue isolated one-shot requests atomically and return ordered stats, draining errors too."""
+
+        boxes = []
+        for r in requests:
+            box: queue.Queue = queue.Queue()
+            stream = Stream(list(r["prompt"]), max(1, r["count"]), r["sampling"], draft=r.get("draft", True),
+                            stop_eos=r.get("stop_eos", True), probabilities=r.get("probabilities"))
+            stream.emit = lambda new: False
+            boxes.append((stream, box))
+        self.waiting.put_many(boxes)
+        results, error = [], None
+        for _, box in boxes:
+            while True:
+                kind, value = box.get()
+                if kind == "tokens":
+                    continue
+                if kind == "error":
+                    error = error or value
+                    results.append(None)
+                else:
+                    results.append(value)
+                break
+        if error is not None:
+            raise error
+        return results
 
     def _admit(self, first=None) -> list[Stream]:
         done = []

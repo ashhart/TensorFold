@@ -10,17 +10,17 @@ from pathlib import Path
 from typing import Any, Callable
 
 from tensorfold.cuda import prompt_precision
-from . import CONFIDENCE, DRAFTS
+from . import CALIBRATION, CONFIDENCE, DRAFT_TAU, DRAFTS, MAX_CHAIN
 
 
 class NemotronEngine:
     """``eos``, ``generate`` (rank 0 or one GPU), ``follow`` (rank 1) and ``shutdown``, as the server expects."""
 
-    def __init__(self, model_dir: Path, *, drafts: int = DRAFTS, confidence: float = CONFIDENCE,
+    def __init__(self, model_dir: Path, *, drafts: int = DRAFTS, confidence: float | None = CONFIDENCE,
                  draft_ids: str | list[int] | None = "default", context: int | None = None,
                  context_explicit: bool | None = None, tp: int = 1, rank: int = 0, master: str = "",
-                 port: int = 29571) -> None:
-        """``draft_ids``: "default" (the family's ``draft_ids.txt``, the Mac engine's list), a list, or None (all)."""
+                 port: int = 29571, tau: float = DRAFT_TAU) -> None:
+        """``draft_ids``: "default" (the family's ``draft_ids.txt``), a list or None; ``confidence`` None: cost rule."""
         import torch
 
         from tensorfold.cuda.capacity import admit, gather_ints
@@ -33,8 +33,10 @@ class NemotronEngine:
 
         if tp not in (1, 2) or rank not in range(tp):
             raise ValueError(f"rank {rank} of {tp}: Nemotron runs on one GPU or two")
-        if not 0 <= int(drafts) <= 8:
-            raise ValueError(f"MTP drafts a round: 0 to 8, not {drafts}")
+        if not 0 <= int(drafts) <= MAX_CHAIN:
+            raise ValueError(f"MTP drafts a round: 0 to {MAX_CHAIN}, not {drafts}")
+        if confidence is not None and not 0.0 <= float(confidence) <= 1.0:
+            raise ValueError(f"MTP draft confidence: a probability from 0 to 1, not {confidence}")
         torch.cuda.set_device(0)
         if draft_ids == "default":
             draft_ids = [int(v) for v in (Path(__file__).parent.parent / "draft_ids.txt").read_text().split()]
@@ -42,14 +44,15 @@ class NemotronEngine:
         if draft_ids is not None and (len(set(draft_ids)) != len(draft_ids) or
                                       not all(0 <= int(t) < vocab for t in draft_ids)):
             raise ValueError(f"draft ids must be distinct token ids below the vocabulary's {vocab}")
-        self.tp, self.rank, self.drafts, self.confidence = tp, rank, int(drafts), float(confidence)
+        self.tp, self.rank, self.drafts = tp, rank, int(drafts)
+        self.confidence = None if confidence is None else float(confidence)
         self.comm = None
         if tp == 2:
-            from tensorfold.cuda.comm import NCCL
+            from tensorfold.cuda.comm import open_comm
 
             if not master:
                 raise ValueError("two ranks need rank 0's address (master)")
-            self.comm = NCCL(rank, 2, master, port)
+            self.comm = open_comm(rank, 2, master, port)
             self.comm.barrier()
         gather = (lambda values: gather_ints(torch, self.comm.all_gather, values)) if tp == 2 else None
         head = Path(model_dir) / MTP_FILE
@@ -78,21 +81,51 @@ class NemotronEngine:
             torch.cuda.empty_cache()
             self._make = lambda: TPEngine(w, self._gather, max_len=self.max_len)  # noqa: E731
         self.e = self._make()
-        self.mtp = MTPHead(self.e, draft_ids=draft_ids, split=tp == 2) if self.drafts else None
+        self.mtp = MTPHead(self.e, draft_ids=draft_ids, split=tp == 2, tau=tau) if self.drafts else None
         started = time.perf_counter()
         for mode in (_default_sampling(), None):             # the common modes get CUDA graphs
             self.e.capture(range(1, self.e.max_rows + 1), mode)
             if self.mtp is not None:
-                self.mtp.capture(range(1, self.e.max_rows + 1), (0, self.drafts))
+                self.mtp.capture(range(1, self.e.max_rows + 1))
+        self.rules = self._rules(model_dir) if self.mtp is not None else {}
         self.eos = tuple(self.e.c.eos)
         self.model_dir = Path(model_dir)
         self.served = 0
         self.cache: list[tuple[list[int], dict]] = []       # (committed ids, what resuming from them needs)
         self.serial = None                                    # the serial requests' engine, made on first use
-        rule = (f"up to {self.drafts} MTP drafts a round, verified while their running confidence stays at or above "
-                f"{self.confidence:.0%}" if self.drafts else "no drafts: the serial reference, one token a round")
+        if not self.drafts:
+            rule = "no drafts: the serial reference, one token a round"
+        elif self.confidence is not None:
+            rule = (f"up to {self.drafts} MTP drafts a round, verified while their running confidence stays at or "
+                    f"above {self.confidence:.0%}")
+        else:
+            costs = self.rules[False].costs
+            v = costs.verify
+            rule = (f"up to {self.drafts} MTP drafts a round, each verified while it pays for its row (measured: "
+                    f"{v[1]:.1f}/{v[2]:.1f}/{v[4]:.1f}/{v[8]:.1f}/{v[-1]:.1f} ms at 1/2/4/8/{len(v) - 1} rows, "
+                    f"{costs.level:.2f} ms a draft)")
         print(f"[tensorfold] Nemotron on CUDA: {rule}; {self.max_len}-token context; graphs captured in "
               f"{time.perf_counter() - started:.1f}s", flush=True)
+
+    def _rules(self, model_dir: Path) -> dict:
+        """Greedy and sampled depth rules from this GPU's measured costs (both ranks keep the larger of each)."""
+
+        import torch
+        from tokenizers import Tokenizer
+
+        from tensorfold.cuda.draft_depth import Costs, DepthRule
+
+        from .costs import TEXT, measure
+
+        ids = Tokenizer.from_file(str(Path(model_dir) / "tokenizer.json")).encode(TEXT, add_special_tokens=False).ids
+        costs = measure(self.e, self.mtp, ids)
+        if self.tp == 2:
+            mine = torch.tensor(costs.verify + (costs.level,), dtype=torch.float32, device="cuda")
+            both = self._gather(mine).view(2, -1).amax(dim=0).tolist()
+            costs = Costs.measured(both[:-1], both[-1])
+        most = min(self.drafts, self.mtp.most)
+        return {sampled: DepthRule(costs, most, floor=self.confidence, power=CALIBRATION[sampled])
+                for sampled in (False, True)}
 
     def _gather(self, local):
         import torch
@@ -107,7 +140,8 @@ class NemotronEngine:
 
         ids = list(draft_ids) if draft_ids is not None else []
         digest = int.from_bytes(hashlib.sha256(" ".join(map(str, ids)).encode()).digest()[:7], "big")   # order too
-        mine = torch.tensor([self.drafts, round(self.confidence * 1e6), self.max_len, len(ids), digest,
+        floor = -1 if self.confidence is None else round(self.confidence * 1e6)
+        mine = torch.tensor([self.drafts, floor, self.max_len, len(ids), digest,
                              int(prompt_precision.fp8())], dtype=torch.int64, device="cuda")
         both = torch.empty((2 * mine.numel(),), dtype=torch.int64, device="cuda")
         self.comm.all_gather(mine, both)
@@ -227,9 +261,9 @@ class NemotronEngine:
                 max_tokens <= 1:
             return stats
         if self.mtp is not None:
-            res = draft_decode(self.e, self.mtp, pre, max_tokens, sampling, drafts=self.drafts,
-                               confidence=self.confidence, stop_eos=stop_eos, on_tokens=on_tokens,
-                               constraint=constraint)
+            rule = self.rules.get(sampling is not None and sampling.temperature > 0)
+            res = draft_decode(self.e, self.mtp, pre, max_tokens, sampling, drafts=self.drafts, rule=rule,
+                               stop_eos=stop_eos, on_tokens=on_tokens, constraint=constraint)
             stats.update(drafted=res.drafted, accepted=res.accepted, min_rows=min(res.widths, default=0))
         else:
             res = serial_decode(self.e, pre, max_tokens, sampling, stop_eos=stop_eos, on_tokens=on_tokens,

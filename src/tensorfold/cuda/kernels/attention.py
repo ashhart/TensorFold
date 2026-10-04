@@ -1,4 +1,4 @@
-"""Tree attention: key chunks by absolute position merge in key order, so a row's bits never depend on its launch."""
+"""Tree attention folds absolute-position groups in a fixed order, independent of committed and drafted rows."""
 
 from __future__ import annotations
 
@@ -13,6 +13,9 @@ import triton.language as tl
 
 TILE = 64
 CHUNK = 512
+GROUP = 4               # chunks folded into one fp32 partial
+SPAN = CHUNK * GROUP
+MIN_GROUPED = 64        # groups times window rows needed to keep enough programs busy
 MAX_NODES = 128
 QUERY_TILE = 16
 MERGE_COLUMNS = 64      # output columns a merge program folds (the chunk fold is per column: more programs, same bits)
@@ -52,19 +55,35 @@ def _tile(q, k, v, m, l, o, valid, scale: tl.constexpr):
 
 
 @triton.jit
+def _fold(m, l, o, cm, cl, co):
+    """The same fp32 fold in the group program and the merge keeps each row independent of its launch."""
+
+    active = cl > 0.0
+    next_m = tl.where(active, tl.maximum(m, cm), m)
+    a = tl.where(active, tl.where(m == float("-inf"), 0.0, tl.exp(m - next_m)), 1.0)
+    b = tl.where(active, tl.exp(cm - next_m), 0.0)
+    return next_m, l * a + cl * b, o * a[:, None] + co * b[:, None]
+
+
+@triton.jit
 def _shared(Q, KC, VC, OFF, STREAM, ITEMS, PO, PM, PL, W, H: tl.constexpr, HK: tl.constexpr, D: tl.constexpr,
-            G: tl.constexpr, CH: tl.constexpr, SCALE: tl.constexpr):
-    """(Item, KV head), heads fastest: 16 (row, head) pairs of one stream against one chunk of committed keys."""
+            G: tl.constexpr, CH: tl.constexpr, SCALE: tl.constexpr, GR: tl.constexpr):
+    """An item code is a whole group j >= 0, or chunk -1-j after the whole groups."""
 
     item = tl.program_id(0) // HK            # a chunk's heads and query tiles launch together: one DRAM read
     hk = tl.program_id(0) % HK
     s = tl.load(ITEMS + item * 3)
     first = tl.load(ITEMS + item * 3 + 1)
-    chunk = tl.load(ITEMS + item * 3 + 2)
+    code = tl.load(ITEMS + item * 3 + 2)
     start = tl.load(STREAM + s * 4)
     rows = tl.load(STREAM + s * 4 + 1)
     p = tl.load(STREAM + s * 4 + 2)
-    if (chunk + 1) * CH <= p:                 # a plan padded for a longer context (a graph's) skips missing chunks
+    groups = ((p + rows + CH - 1) // CH - tl.load(STREAM + s * 4 + 3)) // (GR - 1)     # folded in their programs
+    whole = code >= 0
+    chunk = tl.where(whole, code * GR, groups * GR - 1 - code)
+    n = tl.where(whole, GR, 1)
+    slot = tl.where(whole, code, chunk - groups * (GR - 1))
+    if ((chunk + n) * CH <= p) & (code < groups):     # a padded plan (a graph's) skips what the keys don't fill
         koff = tl.multiple_of(tl.load(OFF + s * 2), 8)     # ``offsets`` checks 16 bytes: loads go 16 bytes wide
         voff = tl.multiple_of(tl.load(OFF + s * 2 + 1), 8)
         rr = first + tl.arange(0, 16)
@@ -72,33 +91,43 @@ def _shared(Q, KC, VC, OFF, STREAM, ITEMS, PO, PM, PL, W, H: tl.constexpr, HK: t
         node = start + rr // G
         head = hk * G + rr % G
         d = tl.arange(0, D)
-        key = chunk * CH + tl.arange(0, 64)
         q = tl.load(Q + (node[:, None] * H + head[:, None]) * D + d[None, :], mask=ok[:, None],
                     other=0).to(tl.bfloat16)
-        m = tl.full((16,), float("-inf"), tl.float32)
-        l = tl.zeros((16,), tl.float32)
-        o = tl.zeros((16, D), tl.float32)
-        for t in range(CH // 64):
-            ki = key + t * 64
-            kk = tl.load(KC + koff + (ki[:, None] * HK + hk) * D + d[None, :]).to(tl.bfloat16)
-            vv = tl.load(VC + voff + (ki[:, None] * HK + hk) * D + d[None, :]).to(tl.bfloat16)
-            m, l, o = _tile(q, kk, vv, m, l, o, ki < p, SCALE)
-        base = (chunk * W + node) * H + head
-        tl.store(PO + base[:, None] * D + d[None, :], o, mask=ok[:, None])
-        tl.store(PM + base, m, mask=ok)
-        tl.store(PL + base, l, mask=ok)
+        gm = tl.full((16,), float("-inf"), tl.float32)
+        gl = tl.zeros((16,), tl.float32)
+        go = tl.zeros((16, D), tl.float32)
+        m, l, o = gm, gl, go
+        for c in range(n):
+            key = (chunk + c) * CH + tl.arange(0, 64)
+            m = tl.full((16,), float("-inf"), tl.float32)
+            l = tl.zeros((16,), tl.float32)
+            o = tl.zeros((16, D), tl.float32)
+            for t in range(CH // 64):
+                ki = key + t * 64
+                kk = tl.load(KC + koff + (ki[:, None] * HK + hk) * D + d[None, :]).to(tl.bfloat16)
+                vv = tl.load(VC + voff + (ki[:, None] * HK + hk) * D + d[None, :]).to(tl.bfloat16)
+                m, l, o = _tile(q, kk, vv, m, l, o, ki < p, SCALE)
+            gm, gl, go = _fold(gm, gl, go, m, l, o)
+        if not whole:                         # a chunk's partial goes out as the tail writes its own: unfolded
+            gm, gl, go = m, l, o
+        base = (slot * W + node) * H + head
+        tl.store(PO + base[:, None] * D + d[None, :], go, mask=ok[:, None])
+        tl.store(PM + base, gm, mask=ok)
+        tl.store(PL + base, gl, mask=ok)
 
 
 @triton.jit
 def _tail(Q, KN, VN, KC, VC, OFF, STREAM, ROWS, PATHS, DEPTHS, PO, PM, PL, W, H: tl.constexpr, HK: tl.constexpr,
-          D: tl.constexpr, G: tl.constexpr, CH: tl.constexpr, MAXD: tl.constexpr, SCALE: tl.constexpr):
+          D: tl.constexpr, G: tl.constexpr, CH: tl.constexpr, MAXD: tl.constexpr, SCALE: tl.constexpr,
+          GR: tl.constexpr):
     """Row, head group, tail chunk: the last committed keys and the row's own path."""
 
     node = tl.program_id(0)
     hk = tl.program_id(1)
     s = tl.load(ROWS + node)
     p = tl.load(STREAM + s * 4 + 2)
-    nch = tl.load(STREAM + s * 4 + 3)
+    nch = (p + tl.load(STREAM + s * 4 + 1) + CH - 1) // CH        # chunks through the window's last key
+    groups = (nch - tl.load(STREAM + s * 4 + 3)) // (GR - 1)       # folded in their programs
     chunk = p // CH + tl.program_id(2)
     if chunk < nch:
         koff = tl.multiple_of(tl.load(OFF + s * 2), 8)
@@ -124,37 +153,48 @@ def _tail(Q, KN, VN, KC, VC, OFF, STREAM, ROWS, PATHS, DEPTHS, PO, PM, PL, W, H:
             kk = tl.where(committed[:, None], kc, kn).to(tl.bfloat16)
             vv = tl.where(committed[:, None], vc, vn).to(tl.bfloat16)
             m, l, o = _tile(q, kk, vv, m, l, o, committed | on_path, SCALE)
-        base = (chunk * W + node) * H + hk * G + gg
+        base = ((chunk - groups * (GR - 1)) * W + node) * H + hk * G + gg      # the chunk's slot
         tl.store(PO + base[:, None] * D + d[None, :], o, mask=gg[:, None] < G)
         tl.store(PM + base, m, mask=gg < G)
         tl.store(PL + base, l, mask=gg < G)
 
 
 @triton.jit
-def _merge(PO, PM, PL, OUT, STREAM, ROWS, W, H: tl.constexpr, D: tl.constexpr, G: tl.constexpr, DS: tl.constexpr):
-    """Row, head group, DS output columns: each column's fold is its own, and every part recomputes m and l alike."""
+def _merge(PO, PM, PL, OUT, STREAM, ROWS, W, H: tl.constexpr, D: tl.constexpr, G: tl.constexpr, DS: tl.constexpr,
+           CH: tl.constexpr, GR: tl.constexpr):
+    """Fold every group's chunks in order, then each group in order, regardless of where it was computed."""
 
     node = tl.program_id(0)
     hk = tl.program_id(1)
-    nch = tl.load(STREAM + tl.load(ROWS + node) * 4 + 3)
+    s = tl.load(ROWS + node)
+    nslots = tl.load(STREAM + s * 4 + 3)
+    groups = ((tl.load(STREAM + s * 4 + 2) + tl.load(STREAM + s * 4 + 1) + CH - 1) // CH - nslots) // (GR - 1)
     gg = tl.arange(0, 16)
     d = tl.program_id(2) * DS + tl.arange(0, DS)
     head = hk * G + gg
     m = tl.full((16,), float("-inf"), tl.float32)
     l = tl.zeros((16,), tl.float32)
     o = tl.zeros((16, DS), tl.float32)
-    for chunk in range(nch):
-        base = (chunk * W + node) * H + head
+    for slot in range(groups):
+        base = (slot * W + node) * H + head
         cm = tl.load(PM + base, mask=gg < G, other=float("-inf"))
         cl = tl.load(PL + base, mask=gg < G, other=0.0)
         co = tl.load(PO + base[:, None] * D + d[None, :], mask=gg[:, None] < G, other=0.0)
-        active = cl > 0.0
-        next_m = tl.where(active, tl.maximum(m, cm), m)
-        a = tl.where(active, tl.where(m == float("-inf"), 0.0, tl.exp(m - next_m)), 1.0)
-        b = tl.where(active, tl.exp(cm - next_m), 0.0)
-        o = o * a[:, None] + co * b[:, None]
-        l = l * a + cl * b
-        m = next_m
+        m, l, o = _fold(m, l, o, cm, cl, co)
+    gm = tl.full((16,), float("-inf"), tl.float32)
+    gl = tl.zeros((16,), tl.float32)
+    go = tl.zeros((16, DS), tl.float32)
+    for slot in range(groups, nslots):
+        base = (slot * W + node) * H + head
+        cm = tl.load(PM + base, mask=gg < G, other=float("-inf"))
+        cl = tl.load(PL + base, mask=gg < G, other=0.0)
+        co = tl.load(PO + base[:, None] * D + d[None, :], mask=gg[:, None] < G, other=0.0)
+        gm, gl, go = _fold(gm, gl, go, cm, cl, co)
+        if ((slot - groups + 1) % GR == 0) | (slot == nslots - 1):     # a group's last chunk, or the last one
+            m, l, o = _fold(m, l, o, gm, gl, go)
+            gm = tl.full((16,), float("-inf"), tl.float32)
+            gl = tl.zeros((16,), tl.float32)
+            go = tl.zeros((16, DS), tl.float32)
     result = o / l[:, None]
     tl.store(OUT + (node * H + head[:, None]) * D + d[None, :], result.to(tl.bfloat16), mask=gg[:, None] < G)
 
@@ -164,13 +204,27 @@ class Plan:
     """A window's attention layout, shared by every attention layer of a forward."""
 
     rows: torch.Tensor          # (W,) int32: each window row's stream
-    streams: torch.Tensor       # (S, 4) int32: first row, rows, committed keys, chunks
-    items: torch.Tensor         # (items, 3) int32: (stream, first (row, head) pair, chunk), chunk-major
+    streams: torch.Tensor       # (S, 4) int32: first row, rows, committed keys, partial slots (``slots``)
+    items: torch.Tensor         # (items, 3) int32: (stream, first (row, head) pair, group j or chunk -1 - j), key-major
     parents: torch.Tensor       # (W,) int32 window rows, -1 at a root
     paths: torch.Tensor         # (W, MAX_NODES) int32
     depths: torch.Tensor        # (W,) int32
-    chunks: int                 # the most chunks any stream has
+    chunks: int                 # the most partial slots any stream has
     width: int                  # W
+
+
+def groups(p: int, w: int) -> int:
+    """Whole committed groups fold in their programs only when groups times rows fills the GPU."""
+
+    g = p // SPAN
+    return g if g * w >= MIN_GROUPED else 0
+
+
+def slots(p: int, w: int) -> int:
+    """One slot per folded group, then one per chunk through the window's last key."""
+
+    g = groups(p, w)
+    return g + -(-(p + w) // CHUNK) - g * GROUP
 
 
 def plan_host(parents: Sequence[Sequence[int]], lengths: Sequence[int], group: int) -> tuple[list[int], int, int]:
@@ -182,26 +236,29 @@ def plan_host(parents: Sequence[Sequence[int]], lengths: Sequence[int], group: i
         w = len(local)
         if not 1 <= w <= MAX_NODES:
             raise ValueError(f"a stream's window takes 1..{MAX_NODES} rows")
-        nch = -(-(p + w) // CHUNK)
-        most = max(most, nch)
+        n = slots(p, w)
+        most = max(most, n)
         rows += [s] * w
-        streams += [start, w, p, nch]
+        streams += [start, w, p, n]
         glob += [-1 if x < 0 else x + start for x in local]
-        for chunk in range(p // CHUNK):
+        g = groups(p, w)
+        codes = list(range(g)) + [-1 - j for j in range(p // CHUNK - g * GROUP)]    # folded groups, then chunks
+        for code in codes:
             for first in range(0, w * group, QUERY_TILE):
-                items += [s, first, chunk]
+                items += [s, first, code]
         start += w
     return rows + streams + items + glob, len(items) // 3, most
 
 
 def padded_host(parents: Sequence[int], context: int, group: int) -> tuple[list[int], int, int]:
-    """``plan_host`` for one stream with items for every full chunk below ``context`` (a graph covers that range)."""
+    """A graph includes all groups and chunks below its context; kernels skip items its keys do not fill."""
 
     flat, _, _ = plan_host([parents], [0], group)            # rows, the stream's row (refreshed per replay), parents
     w = len(parents)
-    items = [x for chunk in range(context // CHUNK) for first in range(0, w * group, QUERY_TILE)
-             for x in (0, first, chunk)]
-    return flat[:w + 4] + items + flat[w + 4:], len(items) // 3, -(-(context + w) // CHUNK)
+    codes = list(range(context // SPAN)) + [-1 - j for j in range(context // CHUNK)]
+    items = [x for code in codes for first in range(0, w * group, QUERY_TILE) for x in (0, first, code)]
+    most = -(-(context + w) // CHUNK)                        # ``slots`` of any p <= context is at most this
+    return flat[:w + 4] + items + flat[w + 4:], len(items) // 3, most
 
 
 def plan(parents: Sequence[Sequence[int]], lengths: Sequence[int], group: int, device) -> Plan:
@@ -271,12 +328,13 @@ def attention(q: torch.Tensor, k_nodes: torch.Tensor, v_nodes: torch.Tensor, off
     partial_l = torch.empty_like(partial_m)
     if p.items.shape[0]:
         _shared[(p.items.shape[0] * hk,)](q, origin, origin, offs, p.streams, p.items, partial_o, partial_m, partial_l,
-                                          w, H=h, HK=hk, D=d, G=g, CH=CHUNK, SCALE=scale, num_warps=4, num_stages=1)
+                                          w, H=h, HK=hk, D=d, G=g, CH=CHUNK, SCALE=scale, GR=GROUP, num_warps=4,
+                                          num_stages=1)
     tails = 1 + -(-MAX_NODES // CHUNK)
     _tail[(w, hk, tails)](q, k_nodes, v_nodes, origin, origin, offs, p.streams, p.rows, p.paths, p.depths,
                           partial_o, partial_m, partial_l, w, H=h, HK=hk, D=d, G=g, CH=CHUNK, MAXD=MAX_NODES,
-                          SCALE=scale, num_warps=4, num_stages=1)
+                          SCALE=scale, GR=GROUP, num_warps=4, num_stages=1)
     out = torch.empty_like(q)
     _merge[(w, hk, d // MERGE_COLUMNS)](partial_o, partial_m, partial_l, out, p.streams, p.rows, w, H=h, D=d, G=g,
-                                        DS=MERGE_COLUMNS, num_warps=4)
+                                        DS=MERGE_COLUMNS, CH=CHUNK, GR=GROUP, num_warps=4)
     return out

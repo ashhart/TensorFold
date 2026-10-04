@@ -5,13 +5,12 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import re
 from typing import Any
 
 MODEL_TYPES = ("qwen3_5",)
 TITLE = "Qwen3.8 dense"
 LANES = True
-MODELS = ("Vontra/Qwen3.8-27B-MLX-4bit", "turboderp/Qwen3.8-27B-exl3", "nvidia/Qwen3.8-27B-NVFP4")
+MODELS = ("TensorFold/Qwen3.8-27B-MLX-4bit", "turboderp/Qwen3.8-27B-exl3", "nvidia/Qwen3.8-27B-NVFP4")
 DRAFTER = "z-lab/Qwen3.8-27B-DFlash2"
 QUANT_METHODS = {"cuda": ("mlx", "exl3", "modelopt", "compressed-tensors")}   # MLX affine, EXL3, NVFP4 / FP8
 EXL3_VARIANT = "any"                           # every EXL3 codebook and width (tensorfold.families.EXL3_VARIANT_ANY)
@@ -38,11 +37,9 @@ def copy_rows(first: int, default: int) -> int:
 def tensor_units() -> bool:
     """Whether this GPU has Metal 4 tensor units (``applegpu_g17`` and later), which the lane kernels need."""
 
-    import mlx.core as mx
+    from tensorfold.kernels import device
 
-    info = mx.device_info() if hasattr(mx, "device_info") else mx.metal.device_info()
-    found = re.match(r"applegpu_g(\d+)", str(info.get("architecture", "")))
-    return bool(found) and int(found.group(1)) >= 17
+    return device.tensor_units()
 
 
 def load_lane_model(model_dir: Path) -> tuple[Any, Any]:
@@ -173,8 +170,9 @@ def load(model_dir: Path, *, lane_kernels: str = "auto", drafter: str = "", draf
     return family, tokenizer
 
 
-def lane_family(model: Any, *, lanes: bool, drafter: str, drafter_bits: int, title: str, use: str) -> Any:
-    """Install the lane kernels (M5) or the row decoder (M1-M4) on ``model`` and wrap it, drafter included."""
+def lane_family(model: Any, *, lanes: bool, drafter: str, drafter_bits: int, title: str, use: str,
+                make: Any = None) -> Any:
+    """Install the lane kernels (M5) or the row decoder (M1-M4) on ``model``; wrap it in ``make`` (the family)."""
 
     from tensorfold.families.qwen3_5.family import Qwen35Family
     from tensorfold.kernels.qwen.dense.v1 import lane_qmm
@@ -190,13 +188,14 @@ def lane_family(model: Any, *, lanes: bool, drafter: str, drafter_bits: int, tit
     elif not install_row_decoder(model):
         raise SystemExit(f"[tensorfold] {title}: the lane decoder without tensor units does not take these weights")
     loaded = load_drafter(model, drafter, drafter_bits) if drafter else None
+    make = make or Qwen35Family
     if lanes:
-        family = Qwen35Family(model, drafter=loaded, widest=copy_rows(WIDEST, WIDEST), first_copy_rows=WIDEST)
+        family = make(model, drafter=loaded, widest=copy_rows(WIDEST, WIDEST), first_copy_rows=WIDEST)
     else:
         from tensorfold.kernels.qwen.dense.v1 import row_matmul
 
-        family = Qwen35Family(model, drafter=loaded, widest=copy_rows(row_matmul.WINDOW_ROWS, ROW_COPY_ROWS),
-                              rows=True, first_copy_rows=row_matmul.WINDOW_ROWS)
+        family = make(model, drafter=loaded, widest=copy_rows(row_matmul.WINDOW_ROWS, ROW_COPY_ROWS),
+                      rows=True, first_copy_rows=row_matmul.WINDOW_ROWS)
     timing = ", ".join(f"{w}: {ms:.1f}" for w, ms in sorted(family.window_costs.items()) if w in (1, 2, 4, 8, 16, 17,
                                                                                                     32, 64, 128))
     decoder = "lane kernels" if lanes else "lane decoder without tensor units"
@@ -325,4 +324,5 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
                         split_head=tp == 2, tp_draft=tp == 2 and draft is not None, allow_copy=not no_drafts,
                         streams=streams, context=options.get("context"),
                         context_explicit=options.get("context_explicit"), vision=bool(options.get("vision", False)),
-                        vision_urls=bool(options.get("vision_urls", False)), keep=options.get("checkpoint_slots"))
+                        vision_urls=bool(options.get("vision_urls", False)),
+                        vision_offload=bool(options.get("vision_offload", False)), keep=options.get("checkpoint_slots"))

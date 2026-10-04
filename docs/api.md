@@ -1,21 +1,55 @@
-# OpenAI-compatible API
+# Compatible APIs
 
 The base URL is `http://127.0.0.1:8080/v1` with the default server settings.
 
+## API keys
+
+Both servers accept repeated `--api-key KEY`, comma-separated `TENSORFOLD_API_KEY`, and `--api-key-file PATH`.
+The sources add keys together. A file has one key per line, optional `label: key` entries, and lines starting with
+`#` for comments. Set its permissions to `0600`; startup refuses a file readable by other users.
+The server stores SHA-256 digests and compares every configured digest for each authentication attempt.
+
+Send `Authorization: Bearer KEY` from OpenAI-compatible clients, or `x-api-key: KEY` from Messages clients.
+Missing or invalid credentials return HTTP 401 with `WWW-Authenticate: Bearer` and the route's error format.
+All `/v1/*`, tokenization, metrics and their inference aliases require a key; `--metrics-open` opens both metrics
+routes. `/health` remains open and returns only `{"status":"ok"}` when keys are configured.
+With no keys, the existing open routes and health details stay unchanged; a non-loopback bind prints a warning.
+
+Replace the key file atomically to rotate keys. Its modification time is checked at most once a second; SIGHUP
+requests an immediate reload. An empty, unreadable or malformed replacement closes authenticated routes until a
+valid file returns. Request logs and `tensorfold:requests_total` use labels, never keys or digests.
+Unnamed keys receive `cli-N`, `env-N` or `file-N` labels. Labels contain at most 64 letters, digits, dots,
+underscores or hyphens; choose non-secret labels.
+
+`tensorfold service install MODEL --api-key-file PATH` forwards the file to its server.
+For the control room, `tensorfold tui --url URL --token-env VARIABLE` sends that variable's value as a bearer key.
+Prefer a restricted file over command-line keys, which can appear in the operating system's process list.
+
 | Route | Behavior |
 | --- | --- |
-| `GET /v1/models` | Served model ID; MLX also lists configured aliases |
+| `GET /v1/models` | Served model ID and any configured aliases (both servers) |
 | `GET /health` | Server health and available status information |
 | `GET /metrics`, `GET /v1/metrics` | Prometheus text: requests, KV occupancy, drafts and latency (both servers) |
 | `POST /v1/chat/completions` | Text chat, optional image input, tools and reasoning; streamed or non-streamed |
-| `POST /v1/completions` | Raw text without a chat template; MLX also accepts token IDs |
+| `POST /v1/completions` | Raw text without a chat template, or token IDs |
+| `POST /v1/messages` | Anthropic Messages: text, supported images, function tools and thinking; JSON or SSE |
+| `POST /v1/messages/count_tokens` | Render the same model prompt without generating |
+| `POST /tokenize`, `POST /v1/tokenize` | vLLM's: a `prompt`'s token IDs, or the IDs a chat request's `messages` render to |
+| `POST /detokenize`, `POST /v1/detokenize` | vLLM's: the text of `tokens`, special tokens included |
 | `POST /v1/responses` | OpenAI's Responses API, run as the equivalent chat completion; streamed or non-streamed |
 | `GET /v1/responses/{id}`, `DELETE /v1/responses/{id}` | A stored response, or remove it |
 | `POST /v1/decisions` | Choice, score, and yes/no probabilities from the next-token logits; no text is generated |
 
 On MLX, a completions body containing a nonempty `messages` list uses chat handling. CUDA completions
-require a string `prompt`.
-With `--vision`, supported Qwen3.5/3.8 dense checkpoints accept user `image_url` content parts alongside text.
+take a string `prompt` (`add_special_tokens`, default false) or a list of token IDs, run as given.
+
+`/tokenize` takes vLLM's fields: a `prompt` string (`add_special_tokens`, default true), or `messages` with the
+chat fields that shape the prompt (`tools`, `reasoning_effort`, `chat_template_kwargs`) and `add_generation_prompt`
+(default true). It returns `count`, `max_model_len` (the context window; null when none is set on MLX) and
+`tokens`, and `token_strs` with `return_token_strs: true`. The IDs are the ones the chat route runs for the same
+request, images expanded. `/detokenize` takes `tokens` and returns `prompt`.
+With `--vision`, supported Qwen3.5/3.8 dense checkpoints accept `image_url` content parts alongside text in user
+messages and in tool results (`role: "tool"`), such as an agent's screenshots.
 See [image input](vision.md) for data URLs, public image URLs, limits and cache behavior.
 Unsupported image input, audio, video and non-text output requests receive HTTP 400.
 
@@ -45,7 +79,8 @@ For decisions, `chat_template_kwargs` may be omitted, null, or an object contain
 | `temperature`, `top_p`, `top_k`, `min_p` | Sampling overrides; zero temperature is greedy | Both |
 | `seed` | Sampling key; otherwise derived from the prompt (and `TENSORFOLD_SEED_SALT`) | Both |
 | `stream` | Server-sent events; the last event carries usage | Both |
-| `chat_template_kwargs.enable_thinking` | Template thinking toggle | Both |
+| `stream_options.include_usage` | Usage in its own final event with `"choices": []`, not on the finish event | Both |
+| `chat_template_kwargs.enable_thinking` | Template thinking toggle; `chat_template_kwargs.thinking` (`true`/`false` or `{"type": "enabled"}`/`{"type": "disabled"}`, as DeepSeek-V4 clients send it) is read the same way when `enable_thinking` is absent; other values are ignored | Both |
 | `draft` | False selects the serial reference; CUDA rejects it if the engine has no serial switch | Both |
 | `response_format`, `guided_json`, `guided_regex`, `guided_choice`, `guided_grammar`, `structured_outputs` | A JSON schema, any JSON object, a regex, a choice or an EBNF grammar the reply must match | Both |
 | `ignore_eos` | Disable model end-of-sequence stopping; the reply limit still applies | Both |
@@ -173,7 +208,11 @@ the template renders its own default, as vLLM and mlx-lm render it (Qwen3.8's is
 to the system prompt; `medium` adds none). The template hears an effort only while thinking, and both backends render
 the same prompt for the same request. Effort support depends on the checkpoint's template, and effort does not set a
 token budget. With thinking off, GLM-5.3's prompt is its thinking-off template's: no reasoning-effort line and an
-empty think block.
+empty think block. GLM-5.3 keeps every earlier assistant turn's reasoning in the prompt, as zai-org's template does by
+default (`clear_thinking` false), also on checkpoints whose template still clears it before the last user message, so
+a new user message leaves the earlier turns' tokens, and their kept prompt states, as they were. A request's
+`chat_template_kwargs.clear_thinking: true` drops it, as the model card advises for plain chat (on CUDA; on a Mac,
+`TF_GLM_CLEAR_THINKING=1` sets it for the server).
 
 A tool call written before the think block closes is the reply's tool call when the reply ends inside the block,
 on both backends; the reasoning stops where the call starts, and streamed reasoning never carries the call's markup.
@@ -193,8 +232,10 @@ and fitting guidance before generation. MLX returns HTTP 400 for non-streamed re
 `invalid_request_error` event after opening a stream. CUDA returns HTTP 400 before opening a stream.
 The 0.3.4.1 MLX server capped that explicit limit to the remaining context.
 A prompt that leaves no room for a reply is refused the same way, and on both backends every such refusal
-carries OpenAI's `context_length_exceeded` code and a message that starts "This server's maximum context length
-is N tokens", so clients that compact a conversation on that error do so.
+carries OpenAI's `context_length_exceeded` code, the field it is about in `param` (`messages` for a chat completion,
+`prompt` for a completion), and a message that starts "This server's maximum context length is N tokens", so clients
+that compact a conversation on that error do so. An image prompt that expands past the window is refused the same
+way, and so are GLM-5.3's own context refusals on CUDA.
 When the request omits the reply limit, the server still caps its configured default to the remaining context.
 CUDA returns HTTP 400 before generation when the chat template rejects the request or
 `chat_template_kwargs` is neither an object nor null. A generation error returns HTTP 500 for a
@@ -248,10 +289,11 @@ out of the text rather than reported at a permanent zero.
 The scrape carries `requests_running`, `requests_waiting`, `prompt_tokens_total`, `generation_tokens_total`,
 `kv_cache_usage_ratio` (one `pool` label per live stream cache), `mtp_drafted_total` and `mtp_accepted_total`
 (draft tokens verified and kept on finished requests; the engines keep one draft counter, so copies and chain
-drafts share it), `request_latency_seconds` and `time_to_first_token_seconds`, all under the `tensorfold:`
-prefix. Every reading is repeated under a vLLM-compatible name (`num_requests_running`, `num_requests_waiting`,
+drafts share it), `request_latency_seconds`, `time_to_first_token_seconds` and `request_decode_seconds` (each
+finished request's decode time: the CUDA engine's own figure, or first token to end on the Mac server; its `_sum`
+over `generation_tokens_total` is the decode rate), all under the `tensorfold:` prefix. Every reading is repeated under a vLLM-compatible name (`num_requests_running`, `num_requests_waiting`,
 `kv_cache_usage_perc`, `spec_decode_num_draft_tokens_total`, `spec_decode_num_accepted_tokens_total`,
-`e2e_request_latency_seconds`) with identical values, so a dashboard copied from vLLM fills by swapping the
+`e2e_request_latency_seconds`, `request_decode_time_seconds`) with identical values, so a dashboard copied from vLLM fills by swapping the
 `tensorfold:` prefix for the metric name. `client_disconnections_total` (requests the client walked away from)
 and `preemptions_total` (background work that gave up a lane to a later request) are published where the
 server counts those events, and never at a fabricated zero.
@@ -263,7 +305,8 @@ same handler and engine path. A response has that chat completion's prompt and t
 `token_sha` matches), drafts, and equals its `"draft": false` run and its solo run.
 
 - `input` is a string or a list of items: messages (`input_text`, and `input_image` with `--vision`),
-  `function_call`, `function_call_output`, and `reasoning` items with their `content` text, which the template gets
+  `function_call`, `function_call_output` (its `output` text, or `input_text` and `input_image` parts with
+  `--vision`), and `reasoning` items with their `content` text, which the template gets
   back as the next assistant message's `reasoning_content`. `instructions` becomes the system message and is not
   carried to a later turn.
 - `tools` takes function tools; `tool_choice` takes `none`, `auto`, `required`, a function or `allowed_tools`;
@@ -298,3 +341,26 @@ HTTP 400 refuses what this server does not run: built-in tools (web search, file
 others), `background`, `include` (encrypted reasoning among them), `conversation`, `prompt` templates,
 `truncation: "auto"`, `top_logprobs`, `input_file` parts and file IDs, `item_reference` items, encrypted reasoning
 items, and a `previous_response_id` that is not stored.
+
+## Anthropic Messages
+
+The Messages routes reuse the same chat handler and engine on MLX and CUDA. They accept `system`, text/image
+blocks (including mid-conversation system text), `tool_use`/`tool_result`, custom tools and `tool_choice`, sampling, `stop_sequences`, `thinking`
+(disabled, enabled with `budget_tokens`, or adaptive), and `output_config` effort/JSON schema. Image support
+requires a vision-capable model served with `--vision`. Thinking is off unless enabled or adaptive. It round-trips as plaintext with an empty signature;
+`display` does not suppress it. Claude Code's `context_management` keep-all thinking directive is accepted. Mid-conversation system text stays
+in place with its system role; the model's chat template must support later system messages. Turn-scoped
+system messages, per-message output configuration and inline tool changes are unsupported.
+JSON schema output, including Claude Code title requests, requires `pip install 'tensorfold[grammar]'`.
+
+Usage separates uncached `input_tokens` from `cache_read_input_tokens` and reports `output_tokens_details.thinking_tokens`
+when the backend counts them. Prefix caching remains automatic,
+so `cache_control` hints do not allocate an Anthropic cache or report cache-creation tokens. Errors use the
+Anthropic error envelope, including after an SSE stream opens. Server-side tools, documents/file IDs,
+redacted thinking and other context edits return HTTP 400.
+
+Connect Claude Code using the ID from `/v1/models`:
+
+```bash
+ANTHROPIC_BASE_URL=http://127.0.0.1:8080 ANTHROPIC_API_KEY=local claude --model local-model
+```

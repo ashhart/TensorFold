@@ -162,6 +162,7 @@ def test_native_boundary_refuses_explicit_completion_alias(model_dir, chat):
     assert "9 reply tokens" in error["message"] and "12-token context window" in error["message"]
     # OpenAI's code and wording, which clients match to compact instead of stopping
     assert error["code"] == "context_length_exceeded" and "exceeds the context window" in error["message"]
+    assert error["param"] == ("messages" if chat else "prompt")              # OpenAI's field, as clients read it
     assert re.search(r"maximum context length is \d+ tokens", error["message"])
     assert not engine.calls
 

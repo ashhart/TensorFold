@@ -56,7 +56,7 @@ def _nemotron(monkeypatch, calls):
     monkeypatch.setattr(decode, "draft_decode", _recording(calls, "mtp"))
     eng = mod.NemotronEngine.__new__(mod.NemotronEngine)
     eng.e, eng.mtp, eng.serial = SimpleNamespace(max_rows=16), object(), SimpleNamespace()
-    eng.tp, eng.drafts, eng.confidence, eng.cache = 1, 3, 0.0, []
+    eng.tp, eng.drafts, eng.confidence, eng.rules, eng.cache = 1, 3, 0.0, {}, []
     eng.eos, eng.max_len, eng.served = (END,), 1024, 0
     return mod, eng
 

@@ -25,3 +25,17 @@ class Probabilities:
         if [row["id"] for row in rows] != list(tokens):
             raise RuntimeError("target probabilities do not match emitted tokens")
         return rows
+
+
+class LabelProbabilities(Probabilities):
+    """Collect label logits and full-vocabulary logsumexp only at the prompt's final position."""
+
+    def __init__(self, labels, start: int):
+        super().__init__(0, start, 1)
+        self.labels = [int(token) for token in labels]
+        self.label_logits: list[float] | None = None
+        self.logsumexp: float | None = None
+
+    def add_labels(self, position: int, logits: list[float], logsumexp: float) -> None:
+        if position == self.start:
+            self.label_logits, self.logsumexp = logits, logsumexp

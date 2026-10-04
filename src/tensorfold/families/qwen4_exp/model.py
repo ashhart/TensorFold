@@ -34,7 +34,7 @@ from tensorfold.families.qwen4_exp.model_layers import (
     SparseMoE,
 )
 
-from tensorfold.kernels.qwen.flash_next.v1 import embed, prefill, prefill_hc, prefill_mm
+from tensorfold.kernels.qwen.flash_next.v1 import embed, ngram, prefill, prefill_hc, prefill_mm
 
 MODEL_TYPE = "qwen4_exp"
 
@@ -182,7 +182,7 @@ class PLELayer(nn.Module):
 
     def __call__(self, h: mx.array, tokens: np.ndarray, cache: LinearCache) -> mx.array:
         batch, length, _ = h.shape
-        history = cache.history
+        history = ngram.host_ids(cache.history)          # a decode window may have left it on the GPU
         if history is None:
             history = np.full((batch, self.ple_embedding.context), self.ple_embedding.eos, dtype=np.int64)
         ids = self.ple_embedding.ids(history, tokens)

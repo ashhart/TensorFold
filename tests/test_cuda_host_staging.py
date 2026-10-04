@@ -88,15 +88,17 @@ def test_extra_file_loading_peak_is_checked(startup, monkeypatch):
 
 @pytest.mark.parametrize("override", [None, "2", "6"])
 @pytest.mark.parametrize("host_free", [5 * GIB, 110 * GIB + 3])
-def test_unified_admission_keeps_release_budget_and_receipt(startup, monkeypatch, override, host_free):
+def test_a_unified_grant_is_available_memory_less_its_floor(startup, monkeypatch, override, host_free):
     memory, weights, torch, admit = startup
-    memory.update(MemTotal=121 * GIB + 7, MemAvailable=host_free)
+    total = 121 * GIB + 7
+    memory.update(MemTotal=total, MemAvailable=host_free)
     weights["target"] = capacity.Weights(GIB, GIB, 2 * GIB)
     monkeypatch.setattr(capacity, "unified", lambda torch: True)
     if override is not None:
         monkeypatch.setenv("TENSORFOLD_MEMORY_RESERVE_GIB", override)
-    reserve = int(override) * GIB if override else max(4 * GIB, memory["MemTotal"] // 10)
-    budget = max(0, host_free - reserve)
+    # the shared pool is available RAM less the floor, whether the default tenth of RAM or the override sized it
+    floor = max(4 * GIB, total // 10) if override is None else int(float(override) * GIB)
+    budget = max(0, host_free - floor)
     assert capacity.available_bytes(torch) == budget
     plan = capacity.make_plan(4096, None, False, budget, weights["target"],
                               capacity.Geometry(lambda slots: slots * 32, 8), room=host_free)

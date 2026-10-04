@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Callable
 
+from .capacity import cuda_limit_bytes
+
 
 class NoRoom(RuntimeError):
     """A request that can't start until a live stream finishes and frees its caches."""
@@ -32,9 +34,15 @@ class MemoryGate:
 
 
 def torch_live(torch, available: Callable) -> Callable[[], int]:
-    """What the host has free now plus what torch's allocator holds freed (it reuses those without asking)."""
+    """Reusable allocator bytes plus free memory, capped by the budget left after current allocations."""
 
-    return lambda: int(available(torch)) + int(torch.cuda.memory_reserved()) - int(torch.cuda.memory_allocated())
+    def room() -> int:
+        allocated = int(torch.cuda.memory_allocated())
+        free = int(available(torch)) + int(torch.cuda.memory_reserved()) - allocated
+        limit = cuda_limit_bytes()
+        return max(0, min(free, limit - allocated)) if limit is not None else max(0, free)
+
+    return room
 
 
 __all__ = ["MemoryGate", "NoRoom", "torch_live"]

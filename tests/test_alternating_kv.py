@@ -2,8 +2,10 @@
 
 import random
 
-import mlx.core as mx
-from mlx_lm.models.cache import KVCache
+import pytest
+
+mx = pytest.importorskip("mlx.core")
+KVCache = pytest.importorskip("mlx_lm.models.cache").KVCache
 
 from tensorfold.engine.alternating_kv import AlternatingKVCache, drop_spares
 from tensorfold.engine.family_common import cache_contents

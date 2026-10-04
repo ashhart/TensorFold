@@ -307,11 +307,14 @@ def test_prompt_chunks_leave_the_same_state(engine):
 def test_drafted_replies_equal_serial(engine, sampling):
     prompt = list(np.random.default_rng(5).integers(0, 1000, size=37))
     serial, stats = _generate(engine, prompt, sampling, draft=False)
-    assert len(serial) == 24 and stats["drafts"] is False
+    assert len(serial) == 24 and stats["drafts"] is False and stats.get("drafted", 0) == 0
     for policy in (None, "auto", "1", "2", "3", "c3:0.35", "a:0.6:0.85"):
         drafted, stats = _generate(engine, prompt, sampling, policy=policy)
         assert drafted == serial, policy
         assert stats["rounds"] >= 1 and stats["min_rows"] >= 2, (policy, stats)     # every round a window
+        # each round keeps one token and its accepted drafts: the counts /health and /metrics report cover the reply
+        assert 0 <= stats["accepted"] <= stats["drafted"], (policy, stats)
+        assert len(drafted) - 1 <= stats["rounds"] + stats["accepted"], (policy, stats)
 
 
 @pytest.mark.parametrize("sampling", [Sampling(1234, 1.0, 20, 0.95), None], ids=["sampled", "greedy"])

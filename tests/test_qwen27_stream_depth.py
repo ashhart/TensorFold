@@ -88,6 +88,25 @@ def test_other_gpus_draft_every_level(allocations, monkeypatch):  # noqa: F811
     assert dec.draft.blocks == [16, 16]
 
 
+def test_a_cpu_stand_in_on_a_gpu_machine_plans_as_on_a_host_box(allocations, monkeypatch):  # noqa: F811
+    multi = importlib.import_module("tensorfold.families.qwen3_5.cuda.multi")
+
+    def capability(device):                                     # as torch: CUDA devices only
+        if multi.torch.device(device).type != "cuda":
+            raise ValueError(f"Expected a cuda device, but got: {device}")
+        return 12, 0
+
+    def stand_in(device):
+        return SimpleNamespace(config=SimpleNamespace(eos=(0,), vocab=10), norm=SimpleNamespace(device=device),
+                               head=SimpleNamespace(n=10))
+
+    monkeypatch.setattr(multi.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(multi.torch.cuda, "get_device_capability", capability)
+    assert multi.MultiDecoder(stand_in("cuda:0"), None, world=2).depth       # two ranks: no memory gate to build
+    dec = multi.MultiDecoder(stand_in("cpu"), None)
+    assert not dec.depth and dec.memory_gate is None
+
+
 def test_the_block_never_drops_under_the_drafters_training_block(allocations, monkeypatch):  # noqa: F811
     multi = importlib.import_module("tensorfold.families.qwen3_5.cuda.multi")
     dec = decoder(multi, monkeypatch, [3, 2])

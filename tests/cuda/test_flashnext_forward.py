@@ -13,6 +13,9 @@ import torch
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA only", allow_module_level=True)
+if torch.cuda.get_device_capability()[0] != 12:
+    pytest.skip("Flash Next CUDA kernels run on sm_12x (GB10, RTX 50, RTX PRO 6000) only",
+                allow_module_level=True)
 
 from tensorfold.cuda import experts as grouped  # noqa: E402
 from tensorfold.engine.exact_sampling import Sampling  # noqa: E402
@@ -405,6 +408,48 @@ def test_the_family_hook_serves_the_recipe(tmp_path, sampling):
     assert plain == ref
     with pytest.raises(ValueError):
         cuda_engine(tmp_path, drafter="some/draft-model")
+
+
+@pytest.mark.parametrize("streams", [1, 2])
+def test_the_engine_loads_its_extensions_before_the_weights(tmp_path, monkeypatch, streams):
+    """Every CUDA extension a start loads (built, on a first start) is loaded before the weights: none in the warm-up
+    or a first request after them."""
+
+    import sys
+
+    from tensorfold.cuda import build
+    from tensorfold.families.qwen4_exp.cuda import weights
+    from tensorfold.families.qwen4_exp.cuda.engine import FlashNextEngine
+
+    from test_flashnext_tp import _checkpoint
+
+    _checkpoint(tmp_path)
+    for module in [m for name, m in list(sys.modules.items()) if name.startswith("tensorfold.")]:
+        for loader in ("_ext", "_prompt_ext"):
+            cached = getattr(module, loader, None)
+            if hasattr(cached, "cache_clear"):
+                cached.cache_clear()               # each loader goes through build.load again (a load, no compile)
+    events: list = []
+    real_build, real_load = build.load, weights.load
+
+    def built(name, *args, **kwargs):
+        events.append(("extension", name))
+        return real_build(name, *args, **kwargs)
+
+    def loaded(*args, **kwargs):
+        events.append(("weights", None))
+        return real_load(*args, **kwargs)
+
+    monkeypatch.setattr(build, "load", built)
+    monkeypatch.setattr(weights, "load", loaded)
+    eng = FlashNextEngine(tmp_path, depth=4, confidence=0.3, draft_vocab=None, max_len=1024, prefetch=False,
+                          streams=streams)
+    got: list[int] = []
+    eng.generate([5, 17, 99, 250, 1023, 7, 64, 300, 11, 12, 13], 8, None, lambda new: got.extend(new))
+    assert got and events.count(("weights", None)) == 1
+    after = events[events.index(("weights", None)) + 1:]
+    assert [name for kind, name in events if kind == "extension"], events
+    assert not after, f"extensions loaded after the weights: {after}"
 
 
 @pytest.mark.parametrize("sampling", [None, Sampling(seed=31, top_k=20, top_p=0.95)])

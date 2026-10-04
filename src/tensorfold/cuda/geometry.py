@@ -14,6 +14,19 @@ MLA_PROMPT_ATT_ROWS = 512   # GLM's prompt-chunk rows one dense latent attention
 MLA_SELECT_ROWS = 512       # GLM's prompt-chunk rows whose pool scores are held at once (sparse.SELECT_ROWS)
 
 
+def indexed_prefill_rows() -> int | None:
+    """Flash Next prompt-piece rows from TENSORFOLD_PREFILL_ROWS (256 to 16,384), or None: the engine's own plan."""
+
+    import os
+
+    value = os.environ.get("TENSORFOLD_PREFILL_ROWS", "").strip()
+    if not value:
+        return None
+    if not value.isdecimal() or not 256 <= int(value) <= 16384:
+        raise ValueError(f"TENSORFOLD_PREFILL_ROWS: 256 to 16,384 rows, not {value!r}")
+    return int(value)
+
+
 def size(info: dict, name: str = "tensor") -> int:
     return math.prod(info["shape"]) * itemsize(info, name)
 
@@ -400,11 +413,11 @@ def stream_geometry(t: dict, world: int, streams: int, keep: int, *, first: int 
 
 
 def indexed_stream_geometry(t: dict, streams: int, each: int, keep: int, *, mtp: bool, kv_bits: int = 16,
-                            first: int = 256, prefill_rows: int = PREFILL_ROWS) -> Geometry:
+                            first: int = 256, prefill_rows: int = PREFILL_ROWS, world: int = 1) -> Geometry:
     """Flash Next's concurrent decoder on one GPU: per-row windows and kept snapshots sized to share one GPU."""
 
     linear, attention = layer_counts(t)
-    d, h, hk, hd, nk, nv, dk, dv, width = _gdn_dims(t, 1)
+    d, h, hk, hd, nk, nv, dk, dv, width = _gdn_dims(t, world)
     hc = int(t.get("hc_count", 1))
     index_dim, ratio = int(t.get("indexer_head_dim", 128)), int(t.get("indexer_compress_ratio", 4))
     budget, rows = int(t.get("indexer_budget", 2048)), streams * each
@@ -414,10 +427,10 @@ def indexed_stream_geometry(t: dict, streams: int, each: int, keep: int, *, mtp:
     fixed = streams * (2 * rec + conv + tail + linear * each * (nk * dk * 4 + nv * dv * 4 + nv * 8))
     fixed += (keep + streams) * (rec + conv + tail + int(mtp) * hc * d * 2)  # retained plus this pass's cuts
     slots = int(t.get("num_experts_per_tok", 1)) + 1
-    moe = int(t.get("moe_intermediate_size", t.get("intermediate_size", d)))
-    extent = d * hc + int(t["vocab_size"]) + slots * (moe + d) + width + h * hd
+    moe = int(t.get("moe_intermediate_size", t.get("intermediate_size", d))) // world
+    extent = d * hc + int(t["vocab_size"]) // world + slots * (moe + d) + width + h * hd
     fixed += (1 + mtp) * (linear * rows * width * 2 + 32 * max(rows, 4) * 2560 * 4) + 16 * max(64, rows) * extent * 4
-    fixed += prefill_rows * _indexed_prefill_row(t, 1, h, hk, hd, nv, dv, width, slots, moe)
+    fixed += prefill_rows * _indexed_prefill_row(t, world, h, hk, hd, nv, dv, width, slots, moe)
     count, row = attention + int(mtp), kv_bytes(hd, kv_bits)
     def caches(rows: int) -> int:
         return count * (2 * rows * hk * row + (rows + (rows + ratio - 1) // ratio) * index_dim * 2)
@@ -439,7 +452,7 @@ def _pattern(t: dict) -> str:
 
 def hybrid_geometry(t: dict, world: int, reserve: int, *, rows: int, chunk: int, drafts: bool,
                     draft: int) -> Geometry:
-    """Nemotron-H: the engine and its serial twin, the MTP head, three prompt-end snapshots and the row buffers."""
+    """Nemotron-H: the engine, its lazy serial twin, three prompt-end snapshots and the row buffers."""
 
     pattern = _pattern(t)
     nm, na = pattern.count("M"), pattern.count("*")
@@ -450,19 +463,20 @@ def hybrid_geometry(t: dict, world: int, reserve: int, *, rows: int, chunk: int,
     proj, qkv, experts = mh * mhd + cd + mh, (heads + 2 * kv) * hd, int(t["n_routed_experts"]) + 2
     slots, width = int(t["num_experts_per_tok"]) + 2, int(t["moe_intermediate_size"])
     extent = d + proj + qkv + slots * (width + d) + experts
-    state = nm * (mh * mhd * ms * 4 + (int(t["conv_kernel"]) - 1) * cd * 2 + 2 * rows * (2 * cd * 2 + mh * 4))
+    state = nm * (mh * mhd * ms * 4 + (int(t["conv_kernel"]) - 1) * cd * 2
+                  + 2 * rows * (2 * cd * 2 + mh * 4))
     buffers = rows * (vocab * 2 + 4 * extent * 4) + PREFILL_ROWS * (2 * d + cd + slots * (width + d) + 8 * slots) * 2
-    fixed = 2 * buffers + 5 * state                  # the engine and its twin; three snapshots clone the state
-    fixed += 8 * max(rows, 64) * extent * 4 + PREFILL_ROWS * (d + proj + qkv + experts) * 4 * 4
+    fixed = (2 + 3) * state + 2 * buffers + 8 * max(rows, 64) * extent * 4
+    fixed += PREFILL_ROWS * (d + proj + qkv + experts) * 4 * 2
     row = d // 2 + d // 64 * 4                       # a 4-bit head row with its scales and biases
     if world > 1:                                    # the rank's vocabulary scales and biases, and the partials
         fixed += vocab // world * (d // 64) * 4 + 4 * PREFILL_ROWS * d * 4
-    if drafts:                                       # a draft list's rows, cut from the untiled head (24 B a weight)
-        fixed += rows * d * 2 + ((draft // world) * row + 24 * vocab * d if draft else 0)
+    if drafts:                                       # the draft list's tiled rows and the untile transient that builds them
+        fixed += rows * d * 2 + (vocab * d * 2 if draft else 0) + (draft // world) * row
     def bytes_at(capacity: int) -> int:
         length = -(-capacity // chunk) * chunk
-        cache = (2 + 3) * 2 * na * length * kv * hd * 2
-        cache += (1 + 3) * 2 * length * kv * hd * 2 if drafts else 0
+        cache = (2 + 3) * 2 * na * length * kv * hd * 2          # engine, serial twin and three snapshots
+        cache += (1 + 3) * 2 * length * kv * hd * 2 if drafts else 0   # the MTP head's k/v and their snapshots
         scratch = (2 + int(drafts)) * rows * (length // chunk) * heads * (hd + 2) * 4
         return fixed + cache + scratch
     return Geometry(bytes_at, reserve)

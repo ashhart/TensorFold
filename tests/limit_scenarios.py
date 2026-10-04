@@ -151,8 +151,35 @@ def flash_next() -> None:
         keep(f"qmv_rows {r}", rows.qmv_rows(x[:r], q))
 
 
+def gemma() -> None:
+    from gemma4_tiny import tiny_text, tokens
+
+    from tensorfold.families.gemma4.model import Gemma4
+    from tensorfold.kernels.gemma.v1 import glue
+    from tensorfold.kernels.inputs import ints
+
+    eps = mx.array([1e-6], dtype=mx.float32)
+    dims, heads, kv = 2816, 4, 2
+    for head_dim in (256, 512):                     # the checkpoint's sliding and full layers
+        for values_are_keys in (False, True):
+            width = (heads + kv * (1 if values_are_keys else 2)) * head_dim
+            q, sc, b = _weights(width, dims, 11)
+            x = (mx.random.normal((3, dims), key=mx.random.key(12)) * 0.5).astype(mx.bfloat16)
+            qw = mx.random.uniform(0.5, 1.5, (head_dim,), key=mx.random.key(13)).astype(mx.bfloat16)
+            inv = mx.array(np.linspace(1.0, 1e-4, head_dim // 2, dtype=np.float32))
+            keep(f"qkv_rows {head_dim} {values_are_keys}",
+                 *glue.qkv_rows(x, q, sc, b, 64, qw, qw, inv, ints([7, 900, 40000]), eps, heads=heads,
+                                kv_heads=kv, head_dim=head_dim, values_are_keys=values_are_keys))
+    model = Gemma4(tiny_text(), backend="rows", check=False)
+    cache = model.make_cache()
+    keep("prefill", model.prefill(mx.array([tokens(20)], dtype=mx.uint32), cache))
+    for i, token in enumerate(tokens(4, seed=5)):
+        keep(f"step {i}", model.head(model.hidden(mx.array([[token]], dtype=mx.uint32), cache)))
+    keep("window", model.head(model.hidden(mx.array([tokens(6, seed=7)], dtype=mx.uint32), cache)))
+
+
 SCENARIOS = {"simd_qmm": simd_qmm, "norm": norm, "row_forward": row_forward, "sampling": sampling,
-             "nemotron": nemotron, "row_attention": row_attention, "flash_next": flash_next}
+             "nemotron": nemotron, "row_attention": row_attention, "flash_next": flash_next, "gemma": gemma}
 
 
 if __name__ == "__main__":

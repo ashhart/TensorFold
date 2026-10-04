@@ -1,6 +1,7 @@
 """Concurrent Flash Next sizes the prompt pass a round carries so the round's decoding keeps its share of the time."""
 
 import importlib
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,6 +13,7 @@ pytestmark = pytest.mark.torch
 def test_a_rounds_pass_keeps_decoding_its_share(allocations):  # noqa: F811
     multi = importlib.import_module("tensorfold.families.qwen4_exp.cuda.multi")
     dec = multi.MultiDecoder.__new__(multi.MultiDecoder)
+    dec.streams = {0: SimpleNamespace(done=False)}
     dec.prefill_rows, dec.share, dec.round_s, dec.row_s = 2048, 0.25, None, None
     assert dec._pass_rows() == 2048                                   # nothing timed yet: whole passes
     dec._timed(0.1, 0)                                                # a round alone: 0.1 s
@@ -24,3 +26,5 @@ def test_a_rounds_pass_keeps_decoding_its_share(allocations):  # noqa: F811
     assert dec._pass_rows() == multi.PASS_MIN                         # never below the floor
     dec.share = 0.0
     assert dec._pass_rows() == 2048                                   # share 0: whole passes
+    dec.share, dec.streams[0].done = 0.25, True
+    assert dec._pass_rows() == 2048

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import math
+from dataclasses import replace
+
 import torch
 import triton
 import triton.language as tl
@@ -26,7 +29,7 @@ def _mix(x, m1, m2):
 @triton.jit
 def _keyed(VALS, IDS, META, OUT, SEED, FP, PROB, c1, c2, m1, m2, offset,
            C: tl.constexpr, CP: tl.constexpr, K: tl.constexpr, CUT: tl.constexpr, GREEDY: tl.constexpr = False,
-           WRITE_PROB: tl.constexpr = False, MINP: tl.constexpr = False):
+           WRITE_PROB: tl.constexpr = False, MINP: tl.constexpr = False, CONF_T: tl.constexpr = False):
     r = tl.program_id(0)
     seed = tl.load(SEED)
     temp = tl.load(FP)
@@ -74,7 +77,11 @@ def _keyed(VALS, IDS, META, OUT, SEED, FP, PROB, c1, c2, m1, m2, offset,
     first = tl.min(tl.where(score == best, rank, CP), axis=0)
     tok = tl.sum(tl.where(rank == first, ids, 0), axis=0)
     tl.store(OUT + r, tok.to(tl.int32))
-    if WRITE_PROB:                         # the drawn token's share of the top-k mass
+    if WRITE_PROB and CONF_T:              # a draft drawn sharper: its share at the request's temperature FP[3]
+        sc = v / tl.load(FP + 3)
+        pc = tl.where(kept, tl.exp(sc - tl.max(tl.where(kept, sc, float("-inf")), axis=0)), 0.0)
+        tl.store(PROB + r, (tl.sum(tl.where(rank == first, pc, 0.0), axis=0) / tl.sum(pc, axis=0)).to(tl.float32))
+    elif WRITE_PROB:                       # the drawn token's share of the top-k mass
         tl.store(PROB + r, (tl.sum(tl.where(rank == first, p, 0.0), axis=0) / total).to(tl.float32))
 
 
@@ -83,19 +90,38 @@ class Params:
 
     def __init__(self, device):
         self.seed = torch.zeros(1, dtype=torch.int64, device=device)
-        self.fp = torch.zeros(3, dtype=torch.float64, device=device)
+        self.fp = torch.zeros(4, dtype=torch.float64, device=device)
         self.sampling: Sampling | None = None
 
     def set(self, sampling: Sampling | None) -> None:
         self.sampling = sampling
         if sampling is not None:
             self.seed.fill_(int(sampling.seed) & ((1 << 63) - 1))
-            self.fp.copy_(torch.tensor([max(float(sampling.temperature), 1e-6), float(sampling.top_p),
-                                        sampling.min_log], dtype=torch.float64))
+            temp = max(float(sampling.temperature), 1e-6)
+            self.fp.copy_(torch.tensor([temp, float(sampling.top_p), sampling.min_log, temp], dtype=torch.float64))
+
+
+class DraftParams:
+    """A draft's keyed rule: the request's top_k at tau x T, no top-p or min-p; the noise is the target's."""
+
+    def __init__(self, params: Params, tau: float):
+        if not 0.0 < tau <= 1.0:
+            raise ValueError(f"the draft temperature factor is in (0, 1], not {tau}")
+        self.seed, self.tau = params.seed, float(tau)
+        self.fp = torch.zeros(4, dtype=torch.float64, device=params.seed.device)
+        self.sampling: Sampling | None = None
+        self.source: Sampling | None = None             # the request's rule these follow
+
+    def set(self, sampling: Sampling | None) -> None:
+        self.sampling, self.source = None, sampling
+        if sampling is not None and sampling.temperature > 0:
+            temp = max(float(sampling.temperature), 1e-6)
+            self.sampling = replace(sampling, temperature=self.tau * temp, top_p=1.0, min_p=0.0)
+            self.fp.copy_(torch.tensor([max(self.tau * temp, 1e-6), 1.0, -math.inf, temp], dtype=torch.float64))
 
 
 def keyed(logits: torch.Tensor, meta: torch.Tensor, params: Params, out: torch.Tensor, *, offset: int = 0,
-          prob: torch.Tensor | None = None, id_map: torch.Tensor | None = None):
+          prob: torch.Tensor | None = None, id_map: torch.Tensor | None = None, conf_t: bool = False):
     """Row r samples position meta[0] + r + 1 + offset; ``prob`` takes each draw's top-k share, a draft's confidence."""
 
     s = params.sampling
@@ -103,7 +129,7 @@ def keyed(logits: torch.Tensor, meta: torch.Tensor, params: Params, out: torch.T
     rows, vocab = logits.shape
     top_k = 20 if greedy_mode else int(s.top_k)
     if not top_k:                                  # top_k off: the nucleus over the whole vocabulary
-        return nucleus(logits, meta, params, out, offset=offset, prob=prob, id_map=id_map)
+        return nucleus(logits, meta, params, out, offset=offset, prob=prob, id_map=id_map, conf_t=conf_t)
     count = min(vocab, top_k + MARGIN) if top_k else vocab
     if count > 256:
         raise ValueError("the GPU sampler takes top_k + margin <= 256 candidates")
@@ -114,7 +140,8 @@ def keyed(logits: torch.Tensor, meta: torch.Tensor, params: Params, out: torch.T
     cut = (not greedy_mode) and 0.0 < float(s.top_p) < 1.0
     _keyed[(rows,)](vals, ids, meta, out, params.seed, params.fp, prob if prob is not None else out, C1, C2, M1, M2,
                     offset, C=count, CP=triton.next_power_of_2(count), K=k, CUT=cut, GREEDY=greedy_mode,
-                    WRITE_PROB=prob is not None, MINP=(not greedy_mode) and float(s.min_p) > 0.0, num_warps=1)
+                    WRITE_PROB=prob is not None, MINP=(not greedy_mode) and float(s.min_p) > 0.0,
+                    CONF_T=conf_t and not greedy_mode, num_warps=1)
     return out
 
 
@@ -135,7 +162,7 @@ def _mix_t(x: torch.Tensor) -> torch.Tensor:
 
 
 def nucleus(logits: torch.Tensor, meta: torch.Tensor, params: Params, out: torch.Tensor, *, offset: int = 0,
-            prob: torch.Tensor | None = None, id_map: torch.Tensor | None = None):
+            prob: torch.Tensor | None = None, id_map: torch.Tensor | None = None, conf_t: bool = False):
     """``_keyed``'s rule with top_k off: rank the whole vocabulary by (value desc, id asc), cut at top_p, draw."""
 
     rows, vocab = logits.shape
@@ -162,12 +189,14 @@ def nucleus(logits: torch.Tensor, meta: torch.Tensor, params: Params, out: torch
     first = torch.argmax(score, dim=-1)                                        # the lowest rank among equal scores
     out.copy_(ids[order.gather(1, first[:, None])[:, 0]].to(out.dtype))
     if prob is not None:
+        if conf_t:                                                             # the draw's share at temperature fp[3]
+            p = torch.exp((ranked - ranked[:, :1]) * (temp / params.fp[3]))
         prob.copy_((p.gather(1, first[:, None])[:, 0] / p.sum(dim=-1)).to(prob.dtype))
     return out
 
 
 def sample_candidates(vals: torch.Tensor, ids: torch.Tensor, meta: torch.Tensor, params: Params, out: torch.Tensor,
-                      *, offset: int = 0, prob: torch.Tensor | None = None):
+                      *, offset: int = 0, prob: torch.Tensor | None = None, conf_t: bool = False):
     """As ``sample`` over candidate lists (R, C) holding each row's top top_k + MARGIN, such as the ranks' union."""
 
     s = params.sampling
@@ -178,7 +207,8 @@ def sample_candidates(vals: torch.Tensor, ids: torch.Tensor, meta: torch.Tensor,
     cut = (not greedy_mode) and 0.0 < float(s.top_p) < 1.0
     _keyed[(rows,)](vals, ids, meta, out, params.seed, params.fp, prob if prob is not None else out, C1, C2, M1, M2,
                     offset, C=count, CP=triton.next_power_of_2(count), K=k, CUT=cut, GREEDY=greedy_mode,
-                    WRITE_PROB=prob is not None, MINP=(not greedy_mode) and float(s.min_p) > 0.0, num_warps=1)
+                    WRITE_PROB=prob is not None, MINP=(not greedy_mode) and float(s.min_p) > 0.0,
+                    CONF_T=conf_t and not greedy_mode, num_warps=1)
     return out
 
 
@@ -188,10 +218,10 @@ def greedy(logits: torch.Tensor, out: torch.Tensor):
 
 
 def sample(logits: torch.Tensor, meta: torch.Tensor, params: Params, out: torch.Tensor, *, offset: int = 0,
-           prob: torch.Tensor | None = None, id_map: torch.Tensor | None = None):
+           prob: torch.Tensor | None = None, id_map: torch.Tensor | None = None, conf_t: bool = False):
     """Greedy is the first argmax; with ``prob`` or ``id_map`` the keyed kernel picks the same token."""
 
     s = params.sampling
     if (s is None or s.temperature <= 0) and prob is None and id_map is None:
         return greedy(logits, out)
-    return keyed(logits, meta, params, out, offset=offset, prob=prob, id_map=id_map)
+    return keyed(logits, meta, params, out, offset=offset, prob=prob, id_map=id_map, conf_t=conf_t)

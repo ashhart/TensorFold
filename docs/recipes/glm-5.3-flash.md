@@ -1,23 +1,24 @@
 # GLM-5.3-Flash
 
-The `glm5_next` family serves `Vontra/GLM-5.3-Flash-MLX-4bit-MTP` on two-rank CUDA and, on a Mac with
+The `glm5_next` family serves `TensorFold/GLM-5.3-Flash-MLX-4bit-MTP` on two-rank CUDA and, on a Mac with
 256 GB, on the MLX lane engine ([Apple Silicon](#apple-silicon-mlx)).
 The checkpoint uses affine 4-bit weights in groups of 64 and includes its MTP layer.
 Kimi delta attention, sparse MLA and MoE blocks mix four residual streams.
 
 ## CUDA
 
-On CUDA GLM-5.3-Flash runs on two ranks from Mia-AiLab's EXL3 checkpoint (`Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw`,
-experimental; [EXL3](#exl3)) or from the MLX 4-bit checkpoint, the portable option that a 256 GB Mac serves too.
+On CUDA GLM-5.3-Flash runs on two ranks from Brandon M. Music's EXL3/TR3 checkpoint
+(`brandonmusic/GLM-5.3-Flash-tr3-4bpw`, re-hosted as `Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw`; experimental;
+[EXL3](#exl3)) or from the MLX 4-bit checkpoint, the portable option that a 256 GB Mac serves too.
 No NVFP4 checkpoint of it is read. `tensorfold serve` loads the checkpoint you name; it picks none by itself. Prompt
 precision does not change here: neither checkpoint has an FP8 prompt kernel, so `--prefill-fp8` is refused.
 
 Use the [two-rank container setup](../../RUNBOOK.md#nvidia-gpus) and pull the same checkpoint on both ranks:
 
 ```bash
-tensorfold pull Vontra/GLM-5.3-Flash-MLX-4bit-MTP
-tensorfold serve Vontra/GLM-5.3-Flash-MLX-4bit-MTP --tp 2 --rank 1 --master 192.0.2.1
-tensorfold serve Vontra/GLM-5.3-Flash-MLX-4bit-MTP --tp 2 --rank 0 --master 192.0.2.1 --name bench --host 0.0.0.0
+tensorfold pull TensorFold/GLM-5.3-Flash-MLX-4bit-MTP
+tensorfold serve TensorFold/GLM-5.3-Flash-MLX-4bit-MTP --tp 2 --rank 1 --master 192.0.2.1
+tensorfold serve TensorFold/GLM-5.3-Flash-MLX-4bit-MTP --tp 2 --rank 0 --master 192.0.2.1 --name bench --host 0.0.0.0
 ```
 
 Rank 1 starts first and rank 0 serves HTTP. Use the same context and drafting settings on both ranks.
@@ -35,7 +36,9 @@ sampled code faster, but greedy chat about 4% slower, so the head stays by defau
 
 ### EXL3
 
-`Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw` is an experimental CUDA checkpoint. The reader supports 4-bit
+Brandon M. Music created this EXL3/TR3 checkpoint (`brandonmusic/GLM-5.3-Flash-tr3-4bpw`, ShapleyMCG License 1.0,
+which asks for attribution); `Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw` is a byte-identical re-host of it. Either ID
+serves. It is an experimental CUDA checkpoint. The reader supports 4-bit
 mcg-codebook routed experts with BF16 weights elsewhere, not arbitrary EXL3 layouts. Start it with the
 two-rank command above, substituting its checkpoint ID on both ranks. With DFlash2 available, the EXL3
 `auto` policy uses DFlash2; without it, MTP remains available.
@@ -74,8 +77,11 @@ Prompt prefill uses the shared CUDA prefill kernels. Decode uses CUDA graphs, pa
 pool bucket. The engine keeps up to 8 conversations' prompts (`TF_GLM_CACHE_ENTRIES`): when another
 conversation takes the attention caches, a kept prompt's rows are saved. Kept states and saved rows together get
 `TF_GLM_CACHE_GIB` (default 3), or less when the window leaves less memory on either Spark; the startup log says
-when it is less, and the memory estimate includes it. It serves one request at a time. Both ranks finish a started
-reply after a client disconnects.
+when it is less, and the memory estimate includes it. Earlier turns keep their reasoning in the prompt
+(`clear_thinking` false, zai-org's default), so an agent's next user message resumes from its previous tool loop
+instead of filling it again; `TF_GLM_CLEAR_THINKING=1` drops it, as the TR3 checkpoint's template does by default,
+and a request's `chat_template_kwargs.clear_thinking` wins over either. It serves one request at a time. Both ranks
+finish a started reply after a client disconnects.
 
 DFlash2 attends only its 2,048-row sliding window: a block pass reads only the window's tiles, and the drafter keeps
 its context in a ring of that window, its block and a tile (2,176 rows, 21 MiB a rank whatever the window, instead
@@ -123,8 +129,8 @@ speeds); `TF_GLM_LATENT=0` gives 0.3.6's replies exactly.
 On a Mac with 256 GB and MLX 0.32.2 or later (`serve` refuses an older MLX):
 
 ```bash
-tensorfold pull Vontra/GLM-5.3-Flash-MLX-4bit-MTP
-tensorfold serve Vontra/GLM-5.3-Flash-MLX-4bit-MTP
+tensorfold pull TensorFold/GLM-5.3-Flash-MLX-4bit-MTP
+tensorfold serve TensorFold/GLM-5.3-Flash-MLX-4bit-MTP
 ```
 
 The chat template names `low`, `high` and `max`. GLM's default is Max, and `high` suits agent and coding work.
@@ -154,7 +160,7 @@ a 128 GB Mac can serve GLM-5.3-Flash:
 
 ```bash
 python -m pip install "tensorfold[ssd]"       # cmake and nanobind, to build a small MLX extension on first use
-tensorfold serve Vontra/GLM-5.3-Flash-MLX-4bit-MTP --ssd-experts 64
+tensorfold serve TensorFold/GLM-5.3-Flash-MLX-4bit-MTP --ssd-experts 64
 ```
 
 - After each layer's router, the GPU signals the host through a shared Metal event and waits.
@@ -176,7 +182,7 @@ streamed run was compared with the resident one on the same machine:
 
 ### Mixed-bit checkpoints
 
-The loader reads two layouts of the same weights: the original one (`Vontra/GLM-5.3-Flash-MLX-4bit-MTP`) and the
+The loader reads two layouts of the same weights: the original one (`TensorFold/GLM-5.3-Flash-MLX-4bit-MTP`) and the
 one mlx-lm's converter writes (`language_model.model.*`, one fused `conv1d`, `forget_gate.*`, the absorbed
 `embed_q` / `unembed_out` pair in place of `kv_b_proj`, the MTP layer as `mtp.0.*` with a bf16 `eh_proj`). Such
 conversions usually store per-tensor overrides: routed experts at 4 bits, attention, shared experts and the head at

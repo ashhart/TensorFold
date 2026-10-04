@@ -8,11 +8,12 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from tensorfold.cuda import health
-from tensorfold.server import metrics, responses
+from tensorfold.server import anthropic, metrics, responses, token_routes
 from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
 from tensorfold.server.decisions import DecisionError
 from tensorfold.server.errors import CapacityError, RequestError, error_body
-from tensorfold.server.http import Server
+from tensorfold.server.http import Server, wants_usage_chunk
+from tensorfold.server.request_body import read_body
 from tensorfold.server.stacks import Rearming
 
 if TYPE_CHECKING:
@@ -37,12 +38,20 @@ def _log_error(exc: BaseException) -> None:
     traceback.print_exception(exc)
 
 
+POLLED = ("/metrics", "/v1/metrics", "/health", "/v1/health")
+
+
 def make_handler(app: App):
     class Handler(Rearming):              # USR1's stack dump armed again after each request
         protocol_version = "HTTP/1.1"
 
-        def log_message(self, fmt, *args):  # quiet
-            pass
+        def log_message(self, fmt, *args):    # one line a request, as the Mac server prints
+            print(f"[tensorfold] {self.address_string()} {fmt % args}", flush=True)
+
+        def log_request(self, code="-", size="-"):
+            # a scraper polls these every few seconds and would bury the requests; a failed poll still prints
+            if not (self.command == "GET" and self.path.split("?", 1)[0].rstrip("/") in POLLED and code == 200):
+                super().log_request(code, size)
 
         def _json(self, code: int, payload: dict[str, Any]) -> None:
             data = json.dumps(payload).encode()
@@ -61,13 +70,9 @@ def make_handler(app: App):
             """Read a refused request's body, so it cannot reach the next request on this connection."""
 
             try:
-                length = int(self.headers.get("Content-Length", 0))
-            except ValueError:
-                length = -1
-            if 0 <= length <= 32 * 1024**2:
-                self.rfile.read(length)
-            else:
-                self.close_connection = True
+                read_body(self)
+            except RequestError:
+                pass  # the reader closes the connection when framing cannot be drained
 
         def _stream_error(self, error: dict[str, Any]) -> None:
             """End an open stream with an error event and ``[DONE]``, as the MLX server does."""
@@ -87,7 +92,8 @@ def make_handler(app: App):
                 self._json(200, {"object": "list", "data": [{"id": model_id, "object": "model", "owned_by": "tensorfold"}
                                                             for model_id in app.model_ids]})
             elif self.path.rstrip("/") in ("/health", "/v1/health"):
-                self._json(200, health.of(app).snapshot(app))
+                self._json(200, {"status": "ok"} if getattr(getattr(app, "auth", None), "enabled", False)
+                           else health.of(app).snapshot(app))
             elif responses.route(self.path):
                 responses.get(self, app, responses.route(self.path))
             else:
@@ -100,26 +106,36 @@ def make_handler(app: App):
             path = self.path.split("?", 1)[0].rstrip("/")
             if path.endswith("/decisions"):
                 return self._post_decisions()
+            if anthropic.route(self.path):
+                return anthropic.post(self, app)
             if responses.route(self.path) == "":         # a Response: this handler's chat completion, translated
                 return responses.post(self, app)
             chat = self.path.rstrip("/").endswith("/chat/completions")
-            if not chat and not self.path.rstrip("/").endswith("/completions"):
+            tokenizer = path in token_routes.ROUTES
+            if not chat and not tokenizer and not self.path.rstrip("/").endswith("/completions"):
                 self._discard_body()
                 return self._json(404, {"error": "not found"})
             try:
-                length = int(self.headers.get("Content-Length", 0))
-                if not 0 <= length <= 32 * 1024**2:
-                    self.close_connection = True             # the unread body must not reach the next request
-                    return self._json(400, {"error": {"message": "request body exceeds the 32 MiB limit",
-                                                      "type": "invalid_request_error"}})
-                body = json.loads(self.rfile.read(length) or b"{}")
+                body = json.loads(read_body(self) or b"{}")
+            except RequestError as exc:
+                return self._json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
             except (json.JSONDecodeError, UnicodeDecodeError):
                 return self._json(400, {"error": {"message": "the request body is not JSON", "type": "invalid_request_error"}})
+            if tokenizer:                                   # vLLM's /tokenize and /detokenize
+                try:
+                    reply = app.detokenize(body) if path.endswith("/detokenize") else app.tokenize(body)
+                except RequestError as exc:
+                    return self._json(503 if isinstance(exc, CapacityError) else 400, {"error": error_body(exc)})
+                except Exception as exc:
+                    _log_error(exc)
+                    return self._json(400, {"error": {"message": _error_message(exc)}})
+                return self._json(200, reply)
+            field = "messages" if chat else "prompt"            # the field an error's code names (OpenAI's param)
             try:
                 prepared = app.prepare(body, chat)
             except RequestError as exc:
                 return self._json(503 if isinstance(exc, CapacityError) else 400,
-                                  {"error": error_body(exc)})
+                                  {"error": error_body(exc, field)})
             except Exception as exc:        # any other failure to read the request is refused too, as on MLX
                 _log_error(exc)
                 return self._json(400, {"error": {"message": _error_message(exc)}})
@@ -127,6 +143,7 @@ def make_handler(app: App):
             created = int(time.time())
             model = app.reply_model(body)
             stream = bool(body.get("stream"))
+            separate_usage = wants_usage_chunk(body)          # usage then rides its own chunk before [DONE]
             kind = "chat.completion.chunk" if chat else "text_completion"
             gone = socket_cancellation(self.connection)          # the Mac server's check: the client has closed
             cancelled = lambda: gone.cancelled                  # noqa: E731
@@ -161,7 +178,7 @@ def make_handler(app: App):
                     self.close_connection = True
                     return
                 except RequestError as exc:
-                    return self._stream_error(error_body(exc))
+                    return self._stream_error(error_body(exc, field))
                 except Exception as exc:
                     _log_error(exc)
                     return self._stream_error({"message": _error_message(exc), "type": "server_error"})
@@ -175,10 +192,18 @@ def make_handler(app: App):
                                               "function": {"name": call["function"]["name"],
                                                            "arguments": call["function"]["arguments"]}}]})
                 end = chunk({}, result["finish"])
+                if result.get("stop_sequence") is not None:
+                    end["stop_sequence"] = result["stop_sequence"]
                 end["tensorfold"] = result["stats"]
-                end["usage"] = usage_of(result)          # every stream, as the Mac server's: clients count from it
+                frames = [end]
+                if separate_usage:                              # the spec: usage rides its own chunk before [DONE]
+                    frames.append({"id": rid, "object": kind, "created": created, "model": model,
+                                   "choices": [], "usage": usage_of(result)})
+                else:
+                    end["usage"] = usage_of(result)      # every stream, as the Mac server's: clients count from it
                 try:
-                    self.wfile.write(f"data: {json.dumps(end)}\n\ndata: [DONE]\n\n".encode())
+                    self.wfile.write("".join(f"data: {json.dumps(frame)}\n\n" for frame in frames).encode()
+                                     + b"data: [DONE]\n\n")
                     self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
                     pass
@@ -191,7 +216,7 @@ def make_handler(app: App):
                 return
             except RequestError as exc:
                 return self._json(503 if isinstance(exc, CapacityError) else 400,
-                                  {"error": error_body(exc)})
+                                  {"error": error_body(exc, field)})
             except Exception as exc:
                 _log_error(exc)
                 try:
@@ -215,19 +240,18 @@ def make_handler(app: App):
                 payload = {"id": rid, "object": "text_completion", "created": created, "model": model,
                            "choices": [{"index": 0, "text": result["content"], "finish_reason": result["finish"]}],
                            "usage": usage, "tensorfold": result["stats"]}
+            if result.get("stop_sequence") is not None:
+                payload["stop_sequence"] = result["stop_sequence"]
             self._json(200, payload)
 
         def _post_decisions(self) -> None:
             decide = getattr(app, "decisions", None)
             if decide is None:
+                self._discard_body()
                 return self._json(404, {"error": {"message": f"unknown path {self.path}",
                                                   "type": "invalid_request_error"}})
             try:
-                length = int(self.headers.get("Content-Length", "0"))
-                if not 0 <= length <= 32 * 1024**2:
-                    return self._json(400, {"error": {"message": "request body exceeds the 32 MiB limit",
-                                                      "type": "invalid_request_error"}})
-                body = json.loads(self.rfile.read(length) or b"{}")
+                body = json.loads(read_body(self) or b"{}")
                 if not isinstance(body, dict):
                     raise RequestError("request body must be an object")
             except RequestError as exc:
@@ -246,7 +270,8 @@ def make_handler(app: App):
                     return
             self._json(200, payload)
 
-    return Handler
+    from tensorfold.server.auth_http import handler
+    return handler(Handler, app)
 
 
 def serve(app: App, host: str, port: int) -> None:
@@ -260,7 +285,10 @@ def serve(app: App, host: str, port: int) -> None:
     signal.signal(signal.SIGTERM, _terminate)
     server = Server((host, port), make_handler(app))
     try:
-        server.serve_forever()
+        from contextlib import nullcontext
+        auth = getattr(app, "auth", None)
+        with auth.signals() if auth is not None else nullcontext():
+            server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:

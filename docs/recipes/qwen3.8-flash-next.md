@@ -4,8 +4,8 @@ The `qwen4_exp` family has Gated DeltaNet, sparse attention, MoE, hyper-connecti
 embeddings. The supported checkpoint uses MLX affine 4-bit weights in groups of 32 and includes an MTP head.
 
 ```bash
-tensorfold pull Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP
-tensorfold serve Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP --name bench
+tensorfold pull TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP
+tensorfold serve TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP --name bench
 ```
 
 On MLX, a supported conversion without the head runs without MTP drafting. On CUDA, pass `--no-drafts`
@@ -68,7 +68,7 @@ format ([prompt precision](cuda.md#prompt-precision)):
 | `local-inference-lab/Qwen3.8-Flash-Next-NVFP4` (`7c4f1bc1`) | NVFP4 routed experts, MXFP8 elsewhere | 0.94-1.03x from 2k to 64k |
 | `RadixArk/Qwen3.8-Flash-Next-NVFP4` (`7b719225`) | NVFP4 routed experts, bf16 elsewhere | unchanged: no FP8 prompt kernel |
 | `turboderp/Qwen3.8-Flash-Next-exl3` (`3.05bpw_h5_ng5`) | EXL3 | unchanged: EXL3 prompts never took FP8 activations |
-| `Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP` | MLX affine 4-bit | unchanged: its prompts were already bf16 |
+| `TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP` | MLX affine 4-bit | unchanged: its prompts were already bf16 |
 
 TensorFold finds Mia-AiLab's export by its `model_type` (`qwen3_8_flash_next`) and serves it like
 local-inference-lab's.
@@ -254,8 +254,8 @@ With drafts on the current engine (the table above), the 3.05 bpw pack decodes 1
 For two ranks, pull the checkpoint on both and start rank 1 first:
 
 ```bash
-tensorfold serve Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP --tp 2 --rank 1 --master 192.0.2.1
-tensorfold serve Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP --tp 2 --rank 0 --master 192.0.2.1 --name bench --host 0.0.0.0
+tensorfold serve TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP --tp 2 --rank 1 --master 192.0.2.1
+tensorfold serve TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP --tp 2 --rank 0 --master 192.0.2.1 --name bench --host 0.0.0.0
 ```
 
 ### Serving
@@ -265,13 +265,16 @@ The default CUDA cap is six MTP drafts, with chains stopping below the configure
 Single-request serving uses CUDA graphs for verify windows and draft steps. Two-rank reductions add
 gathered partials in rank order.
 
-With one GPU, `--parallel N` enables eager shared forwards for up to N requests; CUDA
-`--parallel auto` selects one request. Two ranks serve one request at a time and reject `--parallel N`
-when N exceeds one. For prefix reuse, the single-request engine and the concurrent decoder keep prompt
+On one GPU or two ranks, `--parallel N` shares forwards across up to N requests, with a lone stream on CUDA graphs
+where its weights support capture; `--parallel auto` selects one request. Pass the same N on both ranks: rank 0 sends
+admissions, prompt pieces, cache growth and rounds over one TCP connection on its `--master` address, with an
+ephemeral port published by the rendezvous store. Two-rank parallel requests take text without structured output;
+`response_format` and `guided_*` receive HTTP 400 before generation. For prefix reuse, the single-request engine
+and the concurrent decoder keep prompt
 states; a follow-up prefills the reply again. A kept state stops one token before its prompt's end, so the
 same prompt sent again resumes, and so does a next chat turn that renders the generation prompt's `<think>`
-and newline as `<think>` and two newlines. Cache capacity is allocated at startup; inspect the reported
-capacity rather than assuming an older fixed token limit.
+and newline as `<think>` and two newlines. Stream caches grow within the startup window as memory allows;
+inspect the reported capacity.
 
 With `--parallel N`, a prompt prefills inside the rounds: each round runs the live replies' windows and the next
 prompt pass (up to 2,048 rows, several prompts packed) in one forward, and each layer's experts once for both. Every
@@ -280,6 +283,12 @@ most of the experts, so live replies decode at about a tenth of their usual rate
 of 32-41 tok/s on one Spark) instead of stopping. `--decode-share S` sizes the passes so a round's decoding takes
 that share of the pass's time: 0.25 about doubles decode during a prefill and roughly halves prompt speed. The
 default, 0, keeps whole passes.
+
+Prompt pieces are 2,048 rows, or 4,096 while nothing decodes on a DGX Spark serving the MLX checkpoint without
+`--vision`, when the admitted window leaves room (the startup log names the choice). `TENSORFOLD_PREFILL_ROWS=N` (256 to 16,384) sets the rows instead, for one GPU
+or two: the prompt buffers are sized for N rows in the startup estimate, so the window shrinks or grows to match,
+and the plan above no longer applies. A round that runs beside live replies still takes at most 2,048 of them.
+Replies are the same tokens at any setting; the best value depends on the machine, so measure it there.
 
 N-gram tables are file-backed host data. On unified-memory GPUs they compete with weights and cache
 allocations for RAM, so a checkpoint's GPU allocation alone does not describe its memory requirement. An explicit

@@ -115,7 +115,7 @@ class GlmEngine:
 
         import torch
 
-        from tensorfold.cuda.comm import NCCL
+        from tensorfold.cuda.comm import open_comm
         from .decode import Engine
         from .weights import Config, load
         from .split import rule
@@ -129,7 +129,7 @@ class GlmEngine:
         self.rank = rank
         self.policy = "0" if serial_only else policy
         self.serial_only = serial_only
-        self.comm = comm if comm is not None else NCCL(rank, 2, master, port)
+        self.comm = comm if comm is not None else open_comm(rank, 2, master, port)
         self.comm.barrier()
         cfg = Config.read(model_dir)
         # Without --context the window stays dense, attending every key without indexer work.
@@ -477,6 +477,8 @@ class GlmEngine:
                      sha256=hashlib.sha256(json.dumps(res.tokens).encode()).hexdigest()[:16])
         if res.arms:
             stats.update(drafters=res.arms, keeps=res.keeps)
+        if policy is not None:                   # the drafts' counts, which /health, /metrics and the reply report
+            stats.update(drafted=res.drafted, accepted=res.accepted)
         if res.stages:
             stats["stages_ms"] = {k: round(v * 1e3, 1) for k, v in res.stages.items()}
         return stats

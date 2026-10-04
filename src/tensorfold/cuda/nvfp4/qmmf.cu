@@ -58,7 +58,9 @@ struct Tile {
     static constexpr int SMEM = STAGES * STAGE > PARTIALS ? STAGES * STAGE : PARTIALS;
 };
 
-template <int MODE, int BM, int BN, int WM, int WN, int STAGES, bool F32, bool CLUSTER>
+// FUSE (prompt rows): one block runs all SK slices of its tile, each from zero over its own groups, and adds them in
+// slice order: the cluster's (or the reduce's) arithmetic without the cluster, the partials or the second pass.
+template <int MODE, int BM, int BN, int WM, int WN, int STAGES, bool F32, bool CLUSTER, bool FUSE = false>
 __global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
         const __nv_bfloat16* __restrict__ x, const unsigned char* __restrict__ w, const uint8_t* __restrict__ bs,
         float scale, void* __restrict__ out, float* __restrict__ part, int M, int N, int K, int SK, int npad, int ldx,
@@ -68,9 +70,9 @@ __global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
     extern __shared__ __align__(128) unsigned char buf[];
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
     const int wm = warp / WN, wn = warp % WN;
-    const int KG = K / GS, per = KG / SK;
+    const int KG = K / GS, slice_groups = KG / SK, per = FUSE ? KG : slice_groups;
     const int2 at = tile_of(blockIdx.x, M, N, BM, BN, group);
-    const int m0 = at.x, n0 = at.y, slice = blockIdx.z, g0 = slice * per;
+    const int m0 = at.x, n0 = at.y, slice = FUSE ? 0 : blockIdx.z, g0 = slice * per;
 
     auto stage = [&](int s) { return buf + s * T::STAGE; };
     auto load = [&](int s, int g) {
@@ -95,6 +97,7 @@ __global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
     };
 
     float acc[T::MT][T::NT][4];
+    float tot[FUSE ? T::MT : 1][FUSE ? T::NT : 1][4];           // FUSE: the slices' sum so far, in slice order
 #pragma unroll
     for (int i = 0; i < T::MT; ++i)
 #pragma unroll
@@ -107,6 +110,19 @@ __global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
         commit();
     }
     for (int it = 0; it < per; ++it) {
+        if constexpr (FUSE) {
+            if (it > 0 && it % slice_groups == 0) {        // a slice ends: add it to the sum, start the next from zero
+#pragma unroll
+                for (int i = 0; i < T::MT; ++i)
+#pragma unroll
+                    for (int j = 0; j < T::NT; ++j)
+#pragma unroll
+                        for (int e = 0; e < 4; ++e) {
+                            tot[i][j][e] = it == slice_groups ? acc[i][j][e] : tot[i][j][e] + acc[i][j][e];
+                            acc[i][j][e] = 0.0f;
+                        }
+            }
+        }
         wait<STAGES - 2>();
         __syncthreads();
         const int next = it + STAGES - 1;
@@ -195,6 +211,16 @@ __global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
     }
     wait<0>();
     __syncthreads();
+    if constexpr (FUSE) {                                  // the last slice; one slice: acc is the sum already
+        if (SK > 1) {
+#pragma unroll
+            for (int i = 0; i < T::MT; ++i)
+#pragma unroll
+                for (int j = 0; j < T::NT; ++j)
+#pragma unroll
+                    for (int e = 0; e < 4; ++e) acc[i][j][e] = tot[i][j][e] + acc[i][j][e];
+        }
+    }
     if constexpr (CLUSTER) {
 #if __CUDA_ARCH__ < 900
         __trap();                                     // no clusters before sm_90: the host never launches this
@@ -235,7 +261,7 @@ __global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
             for (int h = 0; h < 2; ++h) {
                 const int row = m0 + wm * (BM / WM) + i * 16 + (lane >> 2) + h * 8;
                 if (row >= M) continue;
-                if (SK > 1 && !CLUSTER) {                 // unscaled slice partials; the reduce scales their sum
+                if (SK > 1 && !CLUSTER && !FUSE) {        // unscaled slice partials; the reduce scales their sum
                     float* dst = part + (static_cast<size_t>(slice) * M + row) * N + col;
                     if (col < N) dst[0] = acc[i][j][2 * h];
                     if (col + 1 < N) dst[1] = acc[i][j][2 * h + 1];
@@ -271,13 +297,13 @@ __global__ void reduce_kernel(const float* __restrict__ part, void* __restrict__
     else reinterpret_cast<__nv_bfloat16*>(out)[i] = __float2bfloat16_rn(acc);
 }
 
-template <int MODE, int BM, bool F32, bool CLUSTER>
+template <int MODE, int BM, bool F32, bool CLUSTER, bool FUSE = false>
 void launch(const at::Tensor& x, const at::Tensor& w, const at::Tensor& bs, double scale, at::Tensor& out,
             const at::Tensor& part, int N, int K, int SK, int npad) {
     constexpr int BN = 64, WM = 1, WN = 4, STAGES = 4;
     using T = Tile<MODE, BM, BN, WM, WN, STAGES>;
     const int M = x.size(0);
-    auto kernel = qmmf_kernel<MODE, BM, BN, WM, WN, STAGES, F32, CLUSTER>;
+    auto kernel = qmmf_kernel<MODE, BM, BN, WM, WN, STAGES, F32, CLUSTER, FUSE>;
     static bool configured = false;
     if (!configured) {
         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, T::SMEM);
@@ -286,7 +312,7 @@ void launch(const at::Tensor& x, const at::Tensor& w, const at::Tensor& bs, doub
     cudaLaunchConfig_t config = {};
     const int rows_t = (M + BM - 1) / BM;
     const int group = std::max(1, std::min(rows_t, static_cast<int>((12LL << 20) / (static_cast<long long>(BM) * K * 2))));
-    config.gridDim = dim3(rows_t * ((N + BN - 1) / BN), 1, SK);
+    config.gridDim = dim3(rows_t * ((N + BN - 1) / BN), 1, FUSE ? 1 : SK);
     config.blockDim = dim3(T::THREADS);
     config.dynamicSmemBytes = T::SMEM;
     config.stream = at::cuda::getCurrentCUDAStream();
@@ -312,7 +338,8 @@ void by_rows(int bm, const at::Tensor& x, const at::Tensor& w, const at::Tensor&
     switch (bm) {
         case 16: launch<MODE, 16, F32, CLUSTER>(x, w, bs, scale, out, part, N, K, SK, npad); break;
         case 32: launch<MODE, 32, F32, CLUSTER>(x, w, bs, scale, out, part, N, K, SK, npad); break;
-        default: launch<MODE, 64, F32, CLUSTER>(x, w, bs, scale, out, part, N, K, SK, npad); break;
+        case 64: launch<MODE, 64, F32, CLUSTER>(x, w, bs, scale, out, part, N, K, SK, npad); break;
+        default: launch<MODE, 64, F32, false, true>(x, w, bs, scale, out, part, N, K, SK, npad); break;   // 0: fused
     }
 }
 
@@ -330,18 +357,21 @@ void by_output(int bm, bool f32, bool cluster, const at::Tensor& x, const at::Te
 void qmmf_cuda(const at::Tensor& x, const at::Tensor& w, const at::Tensor& bs, double scale, at::Tensor& out,
                const at::Tensor& part, int64_t mode, int64_t N, int64_t K, int64_t SK, int64_t npad, int64_t bm,
                bool f32) {
-    // slices add in one order via a cluster's shared memory (sm_90 on) or ``part`` and the reduce: the same bits
-    const bool cluster = SK > 1 && SK <= 8 && !part.defined() && at::cuda::getCurrentDeviceProperties()->major >= 9;
+    // slices add in one order via a cluster's shared memory (sm_90 on) or ``part`` and the reduce, or (bm 0, prompt
+    // rows) in one block: the same bits
+    const bool fused = bm == 0;
+    const bool cluster = !fused && SK > 1 && SK <= 8 && !part.defined() &&
+                         at::cuda::getCurrentDeviceProperties()->major >= 9;
     const int n = static_cast<int>(N), k = static_cast<int>(K), sk = static_cast<int>(SK), np = static_cast<int>(npad);
     at::Tensor slices = part;                         // sm_89: no clusters, so slices up to 8 meet here too
-    if (SK > 1 && !cluster && !slices.defined())
+    if (!fused && SK > 1 && !cluster && !slices.defined())
         slices = at::empty({SK, x.size(0), N}, out.options().dtype(at::kFloat));
     const int b = static_cast<int>(bm);
     if (mode == FP4) by_output<FP4>(b, f32, cluster, x, w, bs, scale, out, slices, n, k, sk, np);
     else if (mode == FP8) by_output<FP8>(b, f32, cluster, x, w, bs, scale, out, slices, n, k, sk, np);
     else if (mode == MXFP8) by_output<MXFP8>(b, f32, cluster, x, w, bs, scale, out, slices, n, k, sk, np);
     else by_output<FP8G>(b, f32, cluster, x, w, bs, scale, out, slices, n, k, sk, np);
-    if (SK > 1 && !cluster) {
+    if (!fused && SK > 1 && !cluster) {
         const long long total = static_cast<long long>(x.size(0)) * N;
         const int threads = 256, blocks = static_cast<int>((total + threads - 1) / threads);
         auto stream = at::cuda::getCurrentCUDAStream();

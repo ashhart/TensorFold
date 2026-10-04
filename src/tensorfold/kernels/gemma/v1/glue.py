@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import mlx.core as mx
 
+from tensorfold.kernels import threads as tg
 from tensorfold.kernels.gemma.v1.base import Kernel
 from tensorfold.kernels.nemotron.lightning.v1 import rows as row_kernels
 
@@ -195,8 +196,9 @@ _MOE_TAIL = r"""
    .replace("REDUCE3", _reduce("ss3", "p3", "total3")).replace("REDUCE4", _reduce("ss4", "p4", "total4"))
 
 _prep = Kernel("gemma_qkv_prep", _QKV_PREP, ["QKV", "QW", "KW", "INVF", "POS", "eps"], ["Q", "K", "V"])
+# up to 32 simdgroups a threadgroup: the pipeline reserves them on every GPU (M1/M2 and VMs take fewer otherwise)
 _rows = Kernel("gemma_qkv_rows", _QKV_ROWS, ["X", "W", "S", "B", "QW", "KW", "INVF", "POS", "eps"], ["Q", "K", "V"],
-               header=row_kernels.HEADER)
+               header=row_kernels.HEADER + tg.reserve(32 * 32))
 _attn_tail = Kernel("gemma_attn_tail", _ATTN_TAIL, ["H", "O", "WA", "W1", "W2", "W3", "eps"], ["HN", "N1", "N2", "N3"])
 _moe_tail = Kernel("gemma_moe_tail", _MOE_TAIL, ["H", "Y1", "Y2", "W1", "W2", "WP", "SC", "WN", "eps"],
                    ["HN", "NEXT"])

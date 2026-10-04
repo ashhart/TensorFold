@@ -65,10 +65,16 @@ class Health:
 
     def _metrics(self, request: Request) -> None:
         stats = request.stats or {}
+        ended = time.perf_counter()
+        # The engine's own decode time when it reports one (the same figure /health sums); else first token to end.
+        decode = stats.get("decode_s")
+        if not isinstance(decode, (int, float)) or isinstance(decode, bool):
+            decode = (ended - request.first) if request.first is not None else None
         metrics.note(getattr(self, "app", None), prompt=request.prompt, generation=len(request.out),
                      drafted=_stat(stats, "drafted"), accepted=_stat(stats, "accepted"),
-                     latency=max(0.0, time.perf_counter() - request.started),
-                     ttft=(request.first - request.started) if request.first is not None else None)
+                     latency=max(0.0, ended - request.started),
+                     ttft=(request.first - request.started) if request.first is not None else None,
+                     decode=None if decode is None else max(0.0, float(decode)))
 
     def snapshot(self, app) -> dict[str, Any]:
         """The counters now: finished totals, live replies' tokens so far, and a concurrent engine's streams."""
