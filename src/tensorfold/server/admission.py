@@ -10,6 +10,23 @@ def _envelope_enabled() -> bool:
     return os.environ.get("TF_ADMISSION_ENVELOPE") == "1"
 
 
+def _learn_enabled() -> bool:
+    """v1.1 admission-time learning (rung insertion from real solo fills).
+
+    Requires the pricing envelope: learning without the ladder prices nothing.
+    The composition LEARN=1 + ENVELOPE!=1 is a configuration trap (a silently
+    ignored flag surfaces months later as "we thought we were learning") — it
+    hard-fails at boot instead.
+    """
+
+    learn = os.environ.get("TF_ADMISSION_LEARN") == "1"
+    if learn and not _envelope_enabled():
+        raise SystemExit(
+            "[tensorfold] TF_ADMISSION_LEARN=1 requires TF_ADMISSION_ENVELOPE=1 "
+            "(learning extends the ladder's rungs; without pricing there is no ladder)")
+    return learn
+
+
 class EnvelopeStreamMemory:
     """The measured StreamMemory with the prefill workspace priced by a monotonic
     envelope over observed peaks instead of the two-point linear fit.
@@ -86,6 +103,8 @@ def concurrency(engine: Any, prompt_memory: Any, fraction: float, lanes: int, re
         stream = memory.measure(engine, envelope_seeds=envelope_seeds)
         if envelope_seeds:
             stream = _build_envelope_stream(engine, stream, envelope_seeds)
+            if _learn_enabled():
+                stream._envelope.learning = True  # solo-fill rung insertion (v1.1)
     else:
         stream = memory.measure(engine)          # the shipped call, unchanged
     getattr(engine, "release_rounds", lambda: None)()     # the probe round's rollback rows: no stream's
