@@ -24,3 +24,9 @@ b12x
 Luke Alonso and the b12x contributors (https://github.com/local-inference-lab/b12x)
 src/tensorfold/cuda/rdma/ re-implements its "RoCEnante" RoCE all-gather protocol (b12x/comm/roce/, commit 8a99d63),
 Apache License 2.0. b12x ships no NOTICE file.
+
+FlashInfer
+Copyright 2025-2026 NVIDIA; Copyright 2023-2026 FlashInfer community
+src/tensorfold/families/deepseek_v41/cuda/mqa_fp4.cu adapts Apache-2.0 code of https://github.com/flashinfer-ai/flashinfer
+(csrc/cake_dsv4/sm_120a/cake_sparse_mla_dsv41_mixed_h32.cu, commit 2c1c0525, PR #5983); the file states what was
+changed.

@@ -252,11 +252,13 @@ def test_store_under_a_graph_and_row_moves():
 
 @gpu
 @pytest.mark.parametrize("R,streams", [(1, 1), (6, 1), (5, 2), (40, 1)])
-def test_attention_over_packed_rows_equals_its_dequant(R, streams):
+def test_attention_over_packed_rows_equals_its_dequant(R, streams, monkeypatch):
     """mqa over Fp4Rows == mqa over their bf16 dequantization, bit for bit: decode chunks (one stream or rows of two
-    with window bases), prompt rows (_mqa_full), -1 indices, and NaN scale bytes in rows nobody selects."""
+    with window bases), prompt rows (_mqa_full), -1 indices, and NaN scale bytes in rows nobody selects. The Triton
+    path's contract (the CUDA pass reads no bf16 cache: tests/cuda/test_dsv41_mqa_fp4.py)."""
 
     K = _kernels()
+    monkeypatch.setattr(K, "CUDA_MQA", False)
     cos, sin = _tables(K, 1 << 16)
     E, D, H, W = 3000, 512, 32, 128
     rows = K.Fp4Rows(E, D, device="cuda")

@@ -147,6 +147,8 @@ KV_MODE = kv_mode()
 if KV_MODE not in ("bf16", "fp8", "fp4"):
     raise ValueError(f"TF_DSV41_KV={KV_MODE}: bf16, fp8 or fp4")
 K.TIE_KEYS = KV_MODE == "fp4"
+# fp4: decode / verify rows and small prompt chunks run attention's chunk pass in CUDA (mqa_fp4.cu) instead of Triton
+K.CUDA_MQA = KV_MODE == "fp4" and (os.environ.get("TF_DSV41_CUDA_MQA") or "0") == "1"
 
 
 def _fp4_knob(name: str) -> bool:

@@ -115,6 +115,17 @@ from the checkpoint at run time. `tools/dsv41_vllm_dump_patch.py` patches a loca
 its `model.py`. `notes/dsv41/golden*.json` and `vllm_*.json` are outputs recorded from a vLLM server.
 See [the license text](LICENSES/Apache-2.0.txt).
 
+`src/tensorfold/families/deepseek_v41/cuda/mqa_fp4.cu` (the CUDA chunk pass of decode attention over the NVFP4
+compressed KV cache) adapts FlashInfer's "Cake" DeepSeek-V4.1 mixed-cache decode kernel,
+[flashinfer-ai/flashinfer](https://github.com/flashinfer-ai/flashinfer)
+`csrc/cake_dsv4/sm_120a/cake_sparse_mla_dsv41_mixed_h32.cu` (`decode_dual`), commit
+`2c1c0525067452c411944fb1c40d8112040ea229` (PR #5983), Apache License 2.0, Copyright 2025-2026 NVIDIA and Copyright
+2023-2026 FlashInfer community: one gathered candidate set shared by every local head, bf16 `mma.sync` with the FP4
+rows widened exactly (its two-`prmt` E2M1 table, or `cvt.rn.bf16x2.e2m1x2` on CUDA 13.2+), a lane owning whole scale
+groups, V^T through `ldmatrix.trans`. It is rewritten by hand for TensorFold's `Fp4Rows` planes, bf16 window ring,
+fixed split partition and Triton merge; the file lists what was changed. Its NOTICE line is in our `NOTICE`. See
+[the license text](LICENSES/Apache-2.0.txt).
+
 The DeepSeek-V4.1 tool-call constraint in `src/tensorfold/engine/grammar.py` (`TOOL_TAG`) uses the built-in
 `deepseek_v4_1` structural tag of [xgrammar](https://github.com/mlc-ai/xgrammar) (Apache License 2.0), the optional
 `tensorfold[grammar]` dependency; nothing from it is copied. `deploy/dsv41-tp2/Dockerfile` builds locally on NVIDIA's
