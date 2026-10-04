@@ -198,7 +198,6 @@ def test_kv_dtype_reaches_only_the_families_that_declare_it(tmp_path, monkeypatc
     (["--kv-dtype", "int8"], "cuda", "nemotron_h", "KV cache, not --kv-dtype int8"),
     (["--mtp-confidence", "0.6"], "mlx", "qwen4_exp", "on MLX has no such rule"),
     (["--mtp-confidence", "0.6"], "cuda", "glm5_next", "on CUDA has no such rule"),
-    (["--mtp-confidence", "0.6"], "cuda", "nemotron_h", "on CUDA has no such rule"),
     (["--mtp-confidence", "1.5"], "cuda", "qwen4_exp", "probability from 0 to 1"),
     (["--mtp-confidence", "-0.1"], "cuda", "qwen4_exp", "probability from 0 to 1"),
     (["--prefill-fp8"], "mlx", "qwen3_5", "Qwen3.8 dense on MLX has none"),

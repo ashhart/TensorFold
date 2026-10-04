@@ -101,6 +101,8 @@ class Client:
             warning = ""
             try:
                 metrics_response = self.get("/metrics")
+                if metrics_response.status in {401, 403}:
+                    return Sample(now, phase="unauthorized", error=f"HTTP {metrics_response.status}; check --token-env")
                 metrics = parse_metrics(metrics_response.body.decode("utf-8", errors="replace")) \
                     if metrics_response.status == 200 else {}
                 if metrics_response.status != 200:

@@ -130,6 +130,9 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
             if route in {"/metrics", "/v1/metrics"}:
                 return metrics.send(self, app)
             if route in {"", "/health"}:
+                if getattr(getattr(app, "auth", None), "enabled", False):
+                    self._send_json({"status": "ok"})
+                    return
                 self._send_json(
                     {
                         "status": "ok",
@@ -585,4 +588,5 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 return
             self._send_json(payload)
 
-    return Handler
+    from tensorfold.server.auth_http import handler
+    return handler(Handler, app)

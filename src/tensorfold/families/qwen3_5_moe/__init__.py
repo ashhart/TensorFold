@@ -1,5 +1,5 @@
 """Qwen3.6 MoE (qwen3_5_moe): DeltaNet, attention, and routed experts."""
-# CUDA drafts with MTP on the lanes. Macs use the dense row decoder and DFlash v1.
+# Both backends draft with the checkpoint's MTP layer on the lanes; Macs verify on the dense row decoder.
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ LANES = True
 # MLX 4-bit, groups of 64, routers 8-bit, MTP layer in mtp-4bit.safetensors (mlx-community's files take it too)
 MODELS = ("TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP", "mlx-community/Qwen3.6-35B-A3B-4bit")
 REQUIRED_FILES = {MODELS[0]: ("mtp-4bit.safetensors",)}
-DRAFTER = "z-lab/Qwen3.6-35B-A3B-DFlash"      # Macs: DFlash (v1), chains of each position's own argmax
-CUDA_DRAFTER = ""                             # CUDA: the checkpoint's own MTP layer
+DRAFTER = ""                  # Macs and CUDA draft with the checkpoint's MTP layer; --drafter takes a DFlash v1 model
+DFLASH = "z-lab/Qwen3.6-35B-A3B-DFlash"       # Macs, --drafter: chains of each position's own argmax
 KERNEL_PACKAGE = "tensorfold.kernels.qwen.dense.v1"
 KERNEL_VERSION = "v1"
 # the CUDA engine's kernels read MLX affine weights of this (bits, group size)
@@ -31,15 +31,45 @@ def check(model_dir: str | Path) -> None:
                          f"checkpoint has {describe_quantization(read_config(model_dir))}. {OWN_MODEL_HELP}")
 
 
-def load(model_dir: Path, *, drafter: str = "", drafter_bits: int = 4, **_: Any) -> tuple[Any, Any]:
-    """The row decoder on every Mac. Text only: mlx_lm drops the vision weights."""
+def mtp_file(model_dir: Path) -> Path | None:
+    """The MTP layer: TF_QWEN36_MTP (a path, or 0 for none), the checkpoint's side file, else the tested repo's."""
+
+    import os
+
+    from tensorfold import hub
+
+    from .mtp import MTP_FILE, find
+
+    choice = os.environ.get("TF_QWEN36_MTP", "")
+    found = find(Path(model_dir), choice)
+    if found is not None or choice == "0":
+        return found
+    tested = hub.cached(MODELS[0])          # mlx-community's 4-bit shards are byte-identical to this repo's
+    return tested / MTP_FILE if tested is not None and (tested / MTP_FILE).is_file() else None
+
+
+def load(model_dir: Path, *, drafter: str = "", drafter_bits: int = 4, mtp_drafts: int | None = None,
+         **_: Any) -> tuple[Any, Any]:
+    """The row decoder on every Mac, drafting with the MTP layer unless ``drafter`` names a draft model. Text only."""
     # Lane kernels take no routed experts. row_forward.moe computes one row's bits at any width.
+
+    from functools import partial
 
     from tensorfold.families.qwen3_5 import lane_family, load_lane_model
 
     model, tokenizer = load_lane_model(Path(model_dir))
-    return lane_family(model, lanes=False, drafter=drafter, drafter_bits=drafter_bits, title=TITLE,
-                       use=MODELS[1]), tokenizer
+    if drafter:
+        return lane_family(model, lanes=False, drafter=drafter, drafter_bits=drafter_bits, title=TITLE,
+                           use=MODELS[1]), tokenizer
+    from .family import DRAFTS, Qwen36Family
+
+    path = None if mtp_drafts == 0 else mtp_file(Path(model_dir))
+    if path is None and mtp_drafts != 0:
+        print(f"[tensorfold] {TITLE}: no MTP layer for this checkpoint, so one token a round. To draft, fetch it "
+              f"(0.5 GB): hf download {MODELS[0]} mtp-4bit.safetensors", flush=True)
+    make = partial(Qwen36Family, mtp_path=path, drafts=DRAFTS if mtp_drafts is None else int(mtp_drafts))
+    return lane_family(model, lanes=False, drafter="", drafter_bits=drafter_bits, title=TITLE, use=MODELS[0],
+                       make=make), tokenizer
 
 
 def engine_settings(model: Any) -> dict[str, Any]:

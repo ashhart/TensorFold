@@ -41,6 +41,8 @@ class FamilyRounds(FamilyPrefill, SharedRounds, DraftDepth):
         prior = getattr(model, "draft_prior", None)
         if prior:
             self.depth_prior = tuple(float(p) for p in prior)
+        # a family whose drafts can cost more than they land lets the depth rule pick plain rounds
+        self.plain_guard = bool(getattr(model, "plain_guard", False))
         self.most_drafts = max(0, min(int(getattr(model, "drafts", 1) or 0), self.family_width - 1,
                                       int(self.max_draft)))
         costs = getattr(model, "window_costs", None) or {}
@@ -340,6 +342,11 @@ class FamilyRounds(FamilyPrefill, SharedRounds, DraftDepth):
         model = self.model
         depth = self._head_depth(stream, budget)
         where = ({"start": rows[0]} if rows == list(range(rows[0], rows[0] + len(rows))) else {"rows": list(rows)})
+        absorb = getattr(model, "absorb_kept", None)
+        if depth == 0 and callable(absorb):                  # a plain round: the head reads the kept rows, drafts none
+            absorb(cache, mx.array(follow, dtype=mx.uint32), position, **where)
+            self._next[stream.stream_id] = []
+            return
         heads = model.speculate(cache, mx.array(follow, dtype=mx.uint32), position, stream.sampling, **where,
                                 last_only=True)
         self._next[stream.stream_id] = model.settle(cache, len(follow), heads[-1], stream.cache_len + 1,
@@ -407,9 +414,9 @@ class FamilyRounds(FamilyPrefill, SharedRounds, DraftDepth):
                 if speculate:
                     model.unspeculate(cache)
                 self._draft_late(stream, cache, position, follow, path)
-            if kind == "head":
+            if kind == "head" or (kind == "none" and self.plain_guard):
                 self._observe_cost(len(proposed), (time.perf_counter() - started) * 1e3,
-                                   initializing=stream.rounds == 1)
+                                   initializing=stream.rounds == 1, stream=stream)
         if _PROFILE:
             self._profile(rows, built - started, read - built, time.perf_counter() - read)
         ms = (time.perf_counter() - started) * 1e3

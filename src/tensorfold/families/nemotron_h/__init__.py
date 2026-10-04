@@ -101,15 +101,17 @@ CUDA_QUANTIZATION = (4, 64)
 
 def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",
                 master_port: int = 29571, no_drafts: bool = False, mtp_drafts: int | None = None,
-                context: int | None = None, **options: Any):
+                mtp_confidence: float | None = None, context: int | None = None, **options: Any):
     """The CUDA engine: MTP chains verified exactly on one GPU or two (``tp=2``; start rank 1 first)."""
 
     if drafter:
         raise ValueError(f"{TITLE} drafts with its own MTP head on CUDA: a separate draft model does not apply")
-    from .cuda import CONTEXT, DRAFTS
+    from .cuda import CONFIDENCE, CONTEXT, DRAFTS
     from .cuda.app import NemotronEngine
 
     drafts = 0 if no_drafts else DRAFTS if mtp_drafts is None else int(mtp_drafts)
+    confidence = CONFIDENCE if mtp_confidence is None else float(mtp_confidence)
     explicit = bool(options.get("context_explicit"))
-    return NemotronEngine(Path(model_dir), drafts=drafts, context=context if explicit else CONTEXT,
-                          context_explicit=explicit, tp=int(tp), rank=int(rank), master=master, port=int(master_port))
+    return NemotronEngine(Path(model_dir), drafts=drafts, confidence=confidence,
+                          context=context if explicit else CONTEXT, context_explicit=explicit, tp=int(tp),
+                          rank=int(rank), master=master, port=int(master_port))

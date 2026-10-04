@@ -84,6 +84,7 @@ class Profile:
     args: tuple[str, ...] = ()
     environment: dict[str, str] = field(default_factory=dict)
     environment_file: str | None = None
+    api_key_file: str | None = None
     allow_network: bool = False
     allow_download: bool = False
     log_bytes: int = 8 << 20
@@ -130,6 +131,10 @@ class Profile:
             string(self.environment_file, "environment_file")
             if not Path(self.environment_file).is_absolute():
                 raise ControlError("environment_file must be absolute")
+        if self.api_key_file is not None:
+            string(self.api_key_file, "api_key_file")
+            if not Path(self.api_key_file).is_absolute():
+                raise ControlError("api_key_file must be absolute")
         if type(self.log_bytes) is not int or not 65536 <= self.log_bytes <= 64 << 20:
             raise ControlError("log_bytes must be 64 KiB through 64 MiB")
         if type(self.log_backups) is not int or not 1 <= self.log_backups <= 10:
@@ -148,7 +153,7 @@ class Profile:
     def command(self) -> list[str]:
         return [self.python, "-u", "-m", "tensorfold", "serve", self.model, "--host", self.host,
                 "--port", str(self.port), "--name", self.name, "--backend", self.backend,
-                "--no-update-check", *self.args]
+                "--no-update-check", *(["--api-key-file", self.api_key_file] if self.api_key_file else []), *self.args]
 
     def encode(self) -> bytes:
         return (json.dumps(asdict(self), indent=2, ensure_ascii=False) + "\n").encode("utf-8")

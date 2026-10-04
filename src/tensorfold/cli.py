@@ -14,7 +14,7 @@ from typing import Any
 
 from tensorfold import __version__
 from tensorfold import cli_args
-from tensorfold.server import stacks
+from tensorfold.server import stacks, thinking_notes
 from tensorfold.server.memory_budget import MEMORY_FRACTION
 from tensorfold.serve_options import check as _check_serve_options, vision_options as _vision_options
 
@@ -202,7 +202,7 @@ def _drafter(family: Any, choice: str, backend: str = "mlx") -> str:
         return ""
     if choice != "auto":
         return str(hub.resolve(choice))
-    # a family that drafts otherwise on CUDA (Qwen3.6 MoE: its MTP layer) declares CUDA_DRAFTER = ""
+    # a family may name another draft model for CUDA (CUDA_DRAFTER); "" drafts with its own MTP layer there
     repo = getattr(family.package, "CUDA_DRAFTER" if backend == "cuda" else "DRAFTER",
                    getattr(family.package, "DRAFTER", ""))
     if not repo:
@@ -317,6 +317,10 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
           f"loaded in {time.perf_counter() - started:.1f}s)", flush=True)
     if args.dashboard:
         print("[tensorfold] --dashboard is not wired to the CUDA server yet", flush=True)
+    app.auth = getattr(args, "auth", None)
+    note = thinking_notes.startup(model_dir, bool(args.thinking))
+    if note:
+        print(note, flush=True)
     serve(app, args.host, int(args.port))
     return 0
 
@@ -337,6 +341,9 @@ def _parallel(value: Any) -> int:
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
+    from tensorfold.server.authentication import configure
+
+    args.auth = configure(args)
     from tensorfold import families, hub
 
     if not args.no_update_check:
@@ -433,7 +440,7 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
     model, tokenizer = family.package.load(model_dir, **options)
     engine_kwargs = dict(getattr(family.package, "engine_settings", lambda m: {})(model))
     if required_files:
-        print(f"[tensorfold] Nemotron MTP head: "
+        print(f"[tensorfold] {family.title} MTP head: "
               f"{'active' if not args.no_drafts and getattr(model, 'mtp', None) is not None else 'inactive'}",
               flush=True)
     from tensorfold.engine import prefill_step
@@ -516,6 +523,10 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
     hook = getattr(family.package, "setup", None)
     if hook is not None:
         hook(app, model, **options)
+    app.auth = getattr(args, "auth", None)
+    note = thinking_notes.startup(model_dir, bool(args.thinking))
+    if note:
+        print(note, flush=True)
     server = Server((args.host, int(args.port)), make_handler(app))  # type: ignore[arg-type]
     shown = "greedy" if float(sampling.get("temperature", 0.0) or 0.0) <= 0 else ", ".join(
         f"{k} {v}" for k, v in sampling.items())
@@ -536,7 +547,9 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
         print(f"[tensorfold] dashboard: http://{args.host}:{args.port}/dashboard "
               f"(stats at /stats; sampled every {stats_module.EVERY:.0f}s)", flush=True)
     try:
-        server.serve_forever()
+        from contextlib import nullcontext
+        with app.auth.signals() if app.auth is not None else nullcontext():
+            server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
