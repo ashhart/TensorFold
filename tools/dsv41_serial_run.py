@@ -59,6 +59,17 @@ def main() -> None:
     ap.add_argument("--resume-test", default="", help="N,Q: a kept N-token state resumed (COPY to another extent, "
                     "its bytes through a kept_views round trip, TAKEOVER) and Q more prompt tokens vs a fresh prefill: "
                     "16 greedy tokens each (needs --slots 2)")
+    ap.add_argument("--tf-compare", default="", help="comma lengths: teacher-forced scoring of the last --tf-score "
+                    "positions of four documents of each length (this repo's markdown and code, the golden); rank 0 saves per-position "
+                    "NLL / top-k to --out (tools/dsv41_tf_compare.py compares two runs)")
+    ap.add_argument("--tf-score", type=int, default=MAX_ROWS, help="--tf-compare: positions scored a document")
+    ap.add_argument("--needle", default="", help="comma lengths: a magic number at --needle-depths of repo code filler, "
+                    "asked for after it (chat template, greedy)")
+    ap.add_argument("--needle-trials", type=int, default=1, help="--needle: trials a depth (different numbers)")
+    ap.add_argument("--needle-depths", default="0.1,0.5,0.9", help="--needle: where the number sits (fractions)")
+    ap.add_argument("--out", type=Path, help="--tf-compare / --needle: rank 0 writes results here")
+    ap.add_argument("--decode-bench", default="", help="comma lengths: one prefill (timed), its state copied into "
+                    "every slot, then greedy decode steps over all --slots streams timed (graphs)")
     ap.add_argument("--chunk-test", default="", help="N,k[,k..]: a prompt's rows as one chunk vs split at k: the "
                     "first sublayer where a row's values depend on its chunk (and, with --graph, a <=32-row tail)")
     args = ap.parse_args()
@@ -286,6 +297,185 @@ def main() -> None:
                   f"differ {[n for (n, _), a, b in zip(views, *both) if a != b]}", flush=True)
         nccl.barrier()
         return
+    if args.tf_compare or args.needle:                   # quality across KV formats: documents both ranks build
+        import hashlib
+        import random
+
+        from tokenizers import Tokenizer
+
+        tok = Tokenizer.from_file(str(args.model / "tokenizer.json"))
+
+        def corpus(pattern):                                # this repo's own text: not in the training data
+            files = sorted(p for p in Path(".").glob(pattern) if not {"ref", "out", ".venv", ".git", ".claude"}
+                           & set(p.parts))
+            text = "".join(f"# {p}\n{p.read_text(errors='ignore')}\n" for p in files)
+            return tok.encode(text, add_special_tokens=False).ids
+
+        def from_rank0(values):                             # rank 0's list on both ranks (the trees may differ)
+            n = torch.tensor([len(values) if args.rank == 0 else 0], dtype=torch.int64, device="cuda")
+            got = torch.empty((2,), dtype=torch.int64, device="cuda")
+            nccl.all_gather(n, got)
+            mine = (torch.tensor(values, dtype=torch.int64, device="cuda") if args.rank == 0
+                    else torch.zeros((int(got[0]),), dtype=torch.int64, device="cuda"))
+            both = torch.empty((2 * int(got[0]),), dtype=torch.int64, device="cuda")
+            nccl.all_gather(mine, both)
+            return both[:int(got[0])].tolist()
+
+        code = from_rank0(corpus("src/**/*.py") if args.rank == 0 else [])
+        prose = from_rank0(corpus("**/*.md") if args.rank == 0 else [])
+        golden = json.loads(Path("notes/dsv41/golden_long2.json").read_text())["goldens"][-1]["ids"]
+
+        def same_on_both(ids):                              # the ranks must feed identical tokens
+            h = int.from_bytes(hashlib.sha256(json.dumps(ids).encode()).digest()[:7], "little")
+            got = torch.empty((2,), dtype=torch.int64, device="cuda")
+            nccl.all_gather(torch.tensor([h], dtype=torch.int64, device="cuda"), got)
+            if int(got[0]) != int(got[1]):
+                raise RuntimeError("the ranks built different documents")
+
+        out = {"kv": os.environ.get("TF_DSV41_KV") or "fp8", "env": {k: v for k, v in os.environ.items()
+                                                                       if k.startswith("TF_DSV41")}, "docs": {}}
+        if args.rank == 0:
+            print(f"[quality] repo code {len(code)} tokens, markdown {len(prose)}, golden {len(golden)}", flush=True)
+        with torch.no_grad():
+            for L in [int(v) for v in args.tf_compare.split(",") if v]:
+                S = args.tf_score
+                docs = {}
+                if L <= len(golden):
+                    docs["golden"] = golden[:L]
+                docs["md"] = (prose + golden)[:L]
+                for j in range(3 if L > len(golden) else 2):
+                    a = j * len(code) // 3
+                    docs[f"code{j}"] = (code[a:] + code)[:L]
+                for name, doc in docs.items():
+                    assert len(doc) == L, (name, len(doc))
+                    same_on_both(doc)
+                    eng.select_slot(0)
+                    eng.reset()
+                    t = time.perf_counter()
+                    eng.prefill(doc[:L - S])
+                    lg = eng.forward(doc[L - S:L])
+                    torch.cuda.synchronize()
+                    dt = time.perf_counter() - t
+                    tgt = torch.tensor(doc[L - S + 1:L], device=lg.device)
+                    parts = []
+                    for i in range(0, S - 1, 256):              # (a whole [S, vocab] fp32 softmax is GBs)
+                        lp = torch.log_softmax(lg[i:min(i + 256, S - 1)].float(), -1)
+                        top_lp, top_id = lp.topk(8, -1)
+                        parts.append((-lp.gather(1, tgt[i:i + lp.shape[0], None]).squeeze(1), top_id, top_lp,
+                                      -(lp.exp() * lp).sum(-1)))
+                        del lp
+                    nll, top_id, top_lp, ent = (torch.cat(x) for x in zip(*parts))
+                    rec = {"nll": nll.cpu(), "top_id": top_id.int().cpu(), "top_lp": top_lp.cpu(), "ent": ent.cpu(),
+                           "tgt": tgt.int().cpu()}
+                    out["docs"][f"{L}/{name}"] = rec
+                    if args.rank == 0:
+                        acc = (rec["top_id"][:, 0] == rec["tgt"]).float().mean()
+                        print(f"[tf] {L}/{name}: NLL {nll.mean():.4f}, top-1 = actual {100 * acc:.1f}%, "
+                              f"entropy {ent.mean():.3f} ({dt:.0f} s)", flush=True)
+                    del lg
+            needles = [int(v) for v in args.needle.split(",") if v]
+            if needles:
+                from tensorfold.cuda.chat_template import ChatTemplate
+
+                tmpl = ChatTemplate(args.model)
+                mark = "\u2063NEEDLEDOC\u2063"
+                pre, post = tmpl.render([{"role": "user", "content": mark}], tools=None,
+                                        enable_thinking=False).split(mark)
+                pre_ids = tok.encode(pre, add_special_tokens=False).ids
+                post_ids = tok.encode(post, add_special_tokens=False).ids
+                names = ["Hawthorn", "Bluefin", "Larkspur", "Quillon", "Marigold", "Tesseract", "Obsidian", "Juniper"]
+                out["needle"] = []
+                for L in needles:
+                    for depth in [float(v) for v in args.needle_depths.split(",")]:
+                        for trial in range(args.needle_trials):
+                            rng = random.Random(f"{L}/{depth}/{trial}")
+                            num, name = rng.randint(100000, 999999), rng.choice(names)
+                            nd = tok.encode(f"\nThe special magic number for project {name} is {num}. Remember "
+                                            f"it.\n", add_special_tokens=False).ids
+                            q = tok.encode(f"\n\nWhat is the special magic number for project {name}? Reply with "
+                                           f"the number only.", add_special_tokens=False).ids
+                            room = L - len(pre_ids) - len(post_ids) - len(nd) - len(q)
+                            a = int(depth * room)
+                            off = (trial + 1) * len(code) // 7
+                            fill = (code[off:] + code[:off])[:room]
+                            ids = pre_ids + fill[:a] + nd + fill[a:] + q + post_ids
+                            same_on_both(ids)
+                            eng.select_slot(0)
+                            eng.reset()
+                            t = time.perf_counter()
+                            nxt = int(eng.prefill(ids, final=len(ids))[-1].argmax())
+                            torch.cuda.synchronize()
+                            dt = time.perf_counter() - t
+                            toks = [nxt]
+                            for _ in range(23):
+                                nxt = eng.step(nxt)
+                                toks.append(nxt)
+                            reply = tok.decode(toks)
+                            ok = str(num) in reply
+                            out["needle"].append({"len": len(ids), "depth": depth, "trial": trial, "num": num,
+                                                  "reply": reply, "pass": ok, "prefill_s": dt})
+                            if args.rank == 0:
+                                print(f"[needle] {len(ids)} tokens depth {depth:.0%} trial {trial}: "
+                                      f"{'PASS' if ok else 'FAIL'} ({num}) reply {reply!r} (prefill {dt:.0f} s, "
+                                      f"{len(ids) / dt:.0f} tok/s)", flush=True)
+        if args.rank == 0 and args.out:
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(out, args.out)
+        nccl.barrier()
+        return
+    if args.decode_bench:                                # decode speed at a context length, 1..slots streams
+        base = json.loads(Path("notes/dsv41/golden_long2.json").read_text())["goldens"][-1]["ids"]
+        S = args.slots
+        with torch.no_grad():
+            for rows in range(1, S + 1):
+                if rows not in eng.graphs:
+                    eng.capture(rows)
+            eng.make_bank(1)
+            for L in [int(v) for v in args.decode_bench.split(",")]:
+                doc = (base * (1 + L // len(base)))[:L]
+                eng.select_slot(0)
+                eng.reset()
+                nccl.barrier()
+                torch.cuda.synchronize()
+                t = time.perf_counter()
+                nxt = int(eng.prefill(doc, final=L)[-1].argmax())
+                torch.cuda.synchronize()
+                pf = time.perf_counter() - t
+                eng.save_window(0, 0)
+                vs, vd, b0 = eng.ring_from[0], max(eng.ring_from[0], eng.deep_from[0]), eng.extents[0][0]
+                for slot in range(1, S):
+                    x0, size = eng.extents[slot]
+                    assert x0 != b0, "fixed extents needed (pool too small for the slots)"
+                    eng.copy_rows(b0, x0, L)
+                    eng.bind(slot, x0, size, ids=doc)
+                    eng.select_slot(slot)
+                    eng.load_window(0, slot)
+                    eng.ring_from[slot], eng.deep_from[slot] = vs, vd
+                for n_streams in sorted({1, S}):
+                    pend = [nxt] * n_streams
+                    lens = [len(eng.views[s_].ids) for s_ in range(n_streams)]
+                    steps, warm = 64, 4
+                    for i in range(warm + steps):
+                        if i == warm:
+                            nccl.barrier()
+                            torch.cuda.synchronize()
+                            t = time.perf_counter()
+                        if n_streams == 1:
+                            eng.select_slot(0)
+                            pend = [eng.step(pend[0])]
+                        else:
+                            _, pend = eng.step_multi([(s_, pend[s_]) for s_ in range(n_streams)])
+                    torch.cuda.synchronize()
+                    dt = time.perf_counter() - t
+                    for s_ in range(n_streams):                 # back to the prompt for the next measurement
+                        del eng.views[s_].ids[lens[s_]:]
+                    if args.rank == 0:
+                        print(f"decode-bench L={L}: prefill {pf:.1f} s ({L / pf:.0f} tok/s); {n_streams} stream(s): "
+                              f"{steps / dt:.2f} steps/s, {n_streams * steps / dt:.1f} tok/s total, "
+                              f"{dt / steps * 1e3:.2f} ms a step; torch peak {torch.cuda.max_memory_allocated() / 2**30:.1f}"
+                              f" GiB, reserved {torch.cuda.memory_reserved() / 2**30:.1f} GiB", flush=True)
+        nccl.barrier()
+        return
     if args.resume_test:                                 # kept COPY / disk bytes / TAKEOVER resume == fresh
         N, Q = [int(v) for v in args.resume_test.split(",")]
         base = json.loads(Path("notes/dsv41/golden_long2.json").read_text())["goldens"][-1]["ids"]
@@ -426,6 +616,8 @@ def main() -> None:
         return
     if args.prefill_bench:
         doc = json.loads(Path("notes/dsv41/golden_long2.json").read_text())["goldens"][-1]["ids"]
+        top = max(int(v) for v in args.prefill_bench.split(","))
+        doc = (doc * (1 + top // len(doc)))[:top]                 # (lengths past the document: it repeated)
         with torch.no_grad():
             eng.reset()
             eng.prefill(doc[:2048], 2048)                         # warm kernels
