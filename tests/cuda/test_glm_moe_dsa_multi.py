@@ -367,8 +367,13 @@ def test_fill_between_layers_four_ranks(_fill_in_steps):
     _ilv_check(solo, got, mid, overlap, True, 10)
 
 
-def test_fill_between_layers_graphs(_fill_in_steps):
-    """One thread (rank 0's quarter), decode rounds replayed as CUDA graphs between fill steps of two layers."""
+def test_fill_between_layers_graphs(monkeypatch, _fill_in_steps):
+    """One thread (rank 0's quarter), decode rounds replayed as CUDA graphs between fill steps of two layers. The fake
+    single-thread comm has all_to_all, so sequence-parallel prompts (on by default) would turn the two-micro-batch
+    overlap on; this test is the plain path."""
+    from tensorfold.families.glm_moe_dsa.cuda import fused
+
+    monkeypatch.setattr(fused, "PROMPT_SP", False)
     reqs = _ilv_requests()
     with torch.no_grad():
         comm = _Alone()
