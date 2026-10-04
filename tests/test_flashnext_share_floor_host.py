@@ -60,6 +60,13 @@ def test_actual_piece_rows_use_the_floor_without_turning_it_into_a_ceiling(round
     assert sum(rows for _, _, rows in pieces) == 300
 
 
+def test_exl3_live_passes_use_the_floor_before_calibration():
+    dec, _ = _decoder()
+    dec.converged = False
+    dec.prefill_rows, dec.share, dec.round_s, dec.row_s = 4096, 0.5, None, None
+    assert dec._pass_rows() == 512
+
+
 def test_shared_prompt_row_floors_host():
     dec, _ = _decoder()
     for round_s, row_s, expected in [(0.001, 0.001, 512), (0.08, 0.0005, 640), (0.1, 0.0004, 960)]:

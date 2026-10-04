@@ -36,6 +36,10 @@ class PromptPasses:
         """A round's prompt rows: its decode (a round alone) takes ``share`` of the pass's time, by the last rounds."""
 
         live = any(not s.done for s in self.streams.values())
+        # EXL3 never mixes decode into the expert launch, so the row-time estimate stays empty
+        # and a live reply would otherwise wait out a full chunk.
+        if live and self.share > 0 and not getattr(self, "converged", True) and not (self.round_s and self.row_s):
+            return min(self.prefill_rows, PASS_MIN)
         return pass_limit(self.prefill_rows, live, self.share, self.round_s, self.row_s, PASS_MIN)
 
     def _waiting_request(self) -> bool:
@@ -54,12 +58,12 @@ class PromptPasses:
             self.round_s = seconds if self.round_s is None else 0.7 * self.round_s + 0.3 * seconds
 
     def _order(self) -> list[Stream]:
-        """Order overdue prompts first, then foreground, fewest rows left and stable arrival order."""
+        """Order overdue prompts first, then foreground, least already prefilled, then arrival."""
 
         def key(s: Stream):
             passed = self.passed.get(s.sid, 0)
             due = passed >= FILL_GUARD
-            return (not due, -passed if due else 0, s.background, len(s.prompt) - self.fills[s.sid][2])
+            return (not due, -passed if due else 0, s.background, self.fills[s.sid][2])
 
         return sorted(self.filling, key=key)                         # stable: ties keep arrival order
 

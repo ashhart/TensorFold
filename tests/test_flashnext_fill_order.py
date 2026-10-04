@@ -1,4 +1,4 @@
-"""Shortest-first CUDA prompt passes preserve foreground priority and bounded starvation."""
+"""CUDA prompt passes keep foreground priority and bounded starvation, and stay aligned."""
 
 from types import SimpleNamespace
 
@@ -17,9 +17,9 @@ def _decoder(prompts):
     return m
 
 
-def test_fewest_rows_left_first_then_arrival():
+def test_equal_progress_keeps_arrival_order():
     m = _decoder([(120_000, False), (2_000, False), (2_000, False), (30_000, False)])
-    assert [s.sid for s in m._order()] == [1, 2, 3, 0]
+    assert [s.sid for s in m._order()] == [0, 1, 2, 3]
 
 
 def test_background_prompts_after_foreground_ones():
@@ -68,10 +68,10 @@ def test_a_waiting_request_stops_a_lone_prompts_passes():
     assert len(passes) == 16
 
 
-def test_order_uses_remaining_rows_and_preserves_oldest_equal_prompt():
+def test_order_serves_the_least_prefilled_prompt_first():
     m = _decoder([(8_000, False), (2_000, False), (1_000, False)])
     m.fills[0][2] = 7_000
-    assert [s.sid for s in m._order()] == [0, 2, 1]
+    assert [s.sid for s in m._order()] == [1, 2, 0]
 
 
 def test_pieces_keep_message_boundaries_and_live_row_limits():
@@ -82,7 +82,7 @@ def test_pieces_keep_message_boundaries_and_live_row_limits():
         fill[0] = SimpleNamespace(stops=[])
     m.fills[1][0].stops = [800]
     pieces = m._pieces()
-    assert [(s.sid, a, n) for s, a, n in pieces] == [(1, 0, 800), (0, 0, 1_248)]
+    assert [(s.sid, a, n) for s, a, n in pieces] == [(0, 0, 2_048)]
     m.streams.clear()
     assert sum(n for _, _, n in m._pieces()) == 4_096
 
