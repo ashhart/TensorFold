@@ -441,6 +441,9 @@ def main() -> None:
                 nxt = int(eng.prefill(doc, final=L)[-1].argmax())
                 torch.cuda.synchronize()
                 pf = time.perf_counter() - t
+                if args.rank == 0:
+                    print(f"decode-bench L={L}: after prefill torch peak {torch.cuda.max_memory_allocated() / 2**30:.1f} "
+                          f"GiB, reserved {torch.cuda.memory_reserved() / 2**30:.1f} GiB", flush=True)
                 eng.save_window(0, 0)
                 vs, vd, b0 = eng.ring_from[0], max(eng.ring_from[0], eng.deep_from[0]), eng.extents[0][0]
                 for slot in range(1, S):
@@ -467,6 +470,19 @@ def main() -> None:
                             _, pend = eng.step_multi([(s_, pend[s_]) for s_ in range(n_streams)])
                     torch.cuda.synchronize()
                     dt = time.perf_counter() - t
+                    if os.environ.get("TF_DECODE_PROF") and n_streams == 1:   # the step's kernels at this context
+                        from torch.profiler import ProfilerActivity, profile
+
+                        eng.select_slot(0)
+                        with profile(activities=[ProfilerActivity.CUDA]) as prof:
+                            for _ in range(8):
+                                pend = [eng.step(pend[0])]
+                            torch.cuda.synchronize()
+                        if args.rank == 0:
+                            ev = sorted(prof.key_averages(), key=lambda e: -e.self_device_time_total)
+                            for e in ev[:25]:
+                                print(f"  {e.self_device_time_total / 8 / 1e3:7.3f} ms  {e.count / 8:6.1f}x  "
+                                      f"{e.key[:100]}", flush=True)
                     for s_ in range(n_streams):                 # back to the prompt for the next measurement
                         del eng.views[s_].ids[lens[s_]:]
                     if args.rank == 0:
