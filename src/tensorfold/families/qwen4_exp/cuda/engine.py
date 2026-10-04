@@ -39,7 +39,7 @@ class FlashNextEngine:
                  kv_dtype: str = "bf16", share: float = 0.0, vision: bool = False, vision_urls: bool = False) -> None:
         import torch
 
-        from .exl3_pack import admission, extra_files, is_exl3
+        from .exl3_pack import admission, extra_files, is_exl3, prompt_rows
 
         from tensorfold.families import quant_method, read_config
 
@@ -61,7 +61,7 @@ class FlashNextEngine:
                                               indexed_stream_geometry, indexed_weights)
 
         # TENSORFOLD_PREFILL_ROWS: prompt pieces of that many rows, admitted with the window (not the idle plan)
-        chunk = None if is_exl3(model_dir) else indexed_prefill_rows()
+        chunk = indexed_prefill_rows()
 
         if tp not in (1, 2) or rank not in range(tp):
             raise ValueError(f"rank {rank} of {tp}: Flash Next runs on one GPU or two")
@@ -104,7 +104,7 @@ class FlashNextEngine:
                                    vision_weights(indexed_weights(tp, mtp, mapped_tables=not ple_on_ssd), vision, rank),
                                    rank=rank, world=tp,
                                    gather=gather, extra_files=extra_files(model_dir) if exl3 else ())
-        self.prefill_rows, prompt_workspace = (PREFILL_ROWS, 0) if exl3 else (chunk, 0) if chunk else prompt_plan(
+        self.prefill_rows, prompt_workspace = (prompt_rows(), 0) if exl3 else (chunk, 0) if chunk else prompt_plan(
             self.capacity_plan, config(model_dir), torch.cuda.get_device_capability(), world=tp, vision=vision,
             fp8=prompt_precision.fp8())
         if prompt_workspace:

@@ -12,9 +12,8 @@ from tensorfold.cuda.exl3 import experts as x3experts
 from tensorfold.cuda.exl3 import format as fmt
 
 from .exl3_mm import Scratch, f16, stack, x3
-from .exl3_pack import _DT, NgramTable, Pack, is_exl3
+from .exl3_pack import _DT, NgramTable, Pack, is_exl3, prompt_rows
 
-PREFILL_ROWS = 2048       # the prompt buffers' rows (``decode.PREFILL_ROWS``): the n-gram staging holds as many
 
 __all__ = ["is_exl3", "load"]
 
@@ -215,7 +214,7 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
                      x3(sc, pk, "mtp.fc_embedding", device), x3(sc, pk, "mtp.fc_hidden", device),
                      layer(-1, "mtp.layers.0", "attention", False), hc("mtp.hyper_connection_mixer", False))
     ple = next((lay.ple for lay in loaded if lay.ple is not None), None)
-    sc.allocate(device, experts=loaded[0].moe.experts, rows=PREFILL_ROWS,
+    sc.allocate(device, experts=loaded[0].moe.experts, rows=prompt_rows(),
                 ple_words=ple.table.words_per_row if ple else 0, ple_heads=ple.ngram.heads if ple else 0,
                 ple_dim=cfg.ple_dim)
     w.x3 = sc

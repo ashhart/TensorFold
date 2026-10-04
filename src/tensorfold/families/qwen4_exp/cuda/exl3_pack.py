@@ -39,12 +39,20 @@ def extra_files(model_dir: str | Path) -> tuple[Path, ...]:
     return tuple(Path(model_dir) / f for f in EXTRA_FILES if (Path(model_dir) / f).is_file())
 
 
+def prompt_rows() -> int:
+    """An EXL3 prompt piece's rows: TENSORFOLD_PREFILL_ROWS when set, else the 2048-row chunk."""
+
+    from tensorfold.cuda.geometry import PREFILL_ROWS, indexed_prefill_rows
+
+    return indexed_prefill_rows() or PREFILL_ROWS
+
+
 def admission(geometry):
     """The engine's geometry plus the EXL3 path's fixed scratch: routed-expert windows and prompt rows."""
 
-    from tensorfold.cuda.geometry import PREFILL_ROWS, exl3_indexed_scratch, with_fixed
+    from tensorfold.cuda.geometry import exl3_indexed_scratch, with_fixed
 
-    return lambda text: with_fixed(geometry(text), exl3_indexed_scratch(text, MOE_WINDOW, PREFILL_ROWS))
+    return lambda text: with_fixed(geometry(text), exl3_indexed_scratch(text, MOE_WINDOW, prompt_rows()))
 
 
 class Pack:
