@@ -243,7 +243,8 @@ def test_no_cuda_engine_serves_one_token_a_round_by_default(tmp_path, monkeypatc
 
     import json
 
-    from tensorfold.families import glm5_next, qwen3_5, qwen4_exp
+    from tensorfold.families import deepseek_v41, glm5_next, qwen3_5, qwen4_exp
+    from tensorfold.families.deepseek_v41.cuda import engine as ds_engine
     from tensorfold.families.glm5_next.cuda import engine as glm_engine
     from tensorfold.families.qwen3_5.cuda import engine as q27_engine
     from tensorfold.families.qwen4_exp.cuda import engine as fn_engine
@@ -290,6 +291,12 @@ def test_no_cuda_engine_serves_one_token_a_round_by_default(tmp_path, monkeypatc
     assert glm5_next.cuda_engine(tmp_path, mtp_drafts=0, **glm).policy == "0"
     assert glm5_next.cuda_engine(tmp_path, drafter=str(tmp_path), **glm).policy == "auto"
     assert glm5_next.cuda_engine(tmp_path, mtp_drafts=2, **glm).policy == "2"
+
+    # DeepSeek-V4.1-Flash drafts with its DSpark stages: three a round by default; --mtp-drafts 0 is serial, as GLM's
+    monkeypatch.setattr(ds_engine, "DeepSeekV41Engine", stub)
+    assert deepseek_v41.cuda_engine(tmp_path, **glm).policy == (3, None)
+    assert deepseek_v41.cuda_engine(tmp_path, mtp_drafts=0, **glm).policy == (0, None)
+    assert deepseek_v41.cuda_engine(tmp_path, no_drafts=True, **glm).serial_only is True
 
 
 @pytest.mark.parametrize("flag, streams", [(None, None), ("auto", None), ("1", None), ("4", 4)])
