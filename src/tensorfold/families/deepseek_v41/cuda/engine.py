@@ -209,13 +209,7 @@ class Dsv41Engine:
         self.model_dir = Path(model_dir)
         self.nccl = NCCL(rank, 2, master, port)
         self.nccl.barrier()
-        if os.environ.get("TF_COMM", "nccl") == "rdma":            # small all-gathers over our RoCE transport
-            from tensorfold.cuda.rdma import RdmaComm
-
-            self.nccl = RdmaComm(self.nccl, rank)
-            if rank == 0:
-                print(f"[tensorfold] all-gathers up to {self.nccl.rdma.slot_bytes >> 10} KiB over RoCE "
-                      f"({self.nccl.rdma.device}), larger ones over NCCL", flush=True)
+        self._use_rdma(rank)
         explicit = context is not None if context_explicit is None else bool(context_explicit)
         cap = int(context) if context and explicit else DEFAULT_CONTEXT   # the CLI hands the native window otherwise
         if not (Path(engram) / "config.json").exists() and not any(Path(engram).glob("*.safetensors")):
@@ -464,6 +458,37 @@ class Dsv41Engine:
                   f"conversation prefixes)", flush=True)
 
     # -- rank agreement -------------------------------------------------------------------------------------------
+    def _use_rdma(self, rank: int) -> None:
+        """Small all-gathers over our RoCE transport (``tensorfold.cuda.rdma``: the same bits, +1.7% serial) unless
+        TF_COMM=nccl. Both ranks first check they can open it (the proxy library, an RDMA device) and agree; the setup
+        itself fails on both ranks together (it votes), and any failure leaves NCCL in place."""
+
+        if (os.environ.get("TF_COMM") or "rdma") != "rdma":
+            return
+        try:
+            from tensorfold.cuda import rdma
+
+            rdma.proxy()
+            rdma._device()
+            ok = 1
+        except Exception as exc:  # noqa: BLE001 - reported below, then NCCL
+            ok, why = 0, f"{type(exc).__name__}: {exc}"
+        flags = self._gather_ints([ok])
+        if not all(f[0] for f in flags):
+            if rank == 0:
+                print("[tensorfold] RoCE all-gathers unavailable on a rank"
+                      + (f" ({why})" if not ok else "") + "; NCCL carries every gather", flush=True)
+            return
+        try:
+            self.nccl = rdma.RdmaComm(self.nccl, rank)
+        except RuntimeError as exc:                                 # (both ranks raise together)
+            if rank == 0:
+                print(f"[tensorfold] {exc}; NCCL carries every gather", flush=True)
+            return
+        if rank == 0:
+            print(f"[tensorfold] all-gathers up to {self.nccl.rdma.slot_bytes >> 10} KiB over RoCE "
+                  f"({self.nccl.rdma.device}), larger ones over NCCL", flush=True)
+
     def _gather_ints(self, values: list[int]) -> list[list[int]]:
         torch = self.torch
         mine = torch.tensor(values, dtype=torch.int64, device="cuda")

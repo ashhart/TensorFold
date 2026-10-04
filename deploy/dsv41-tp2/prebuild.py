@@ -10,4 +10,5 @@ x3ld._ext()
 experts_prompt.ext()
 rowread.reader()
 rdma._ext()
+rdma.proxy()                          # the RoCE host proxy (gcc + libibverbs), the default transport
 print("extensions ready", flush=True)
