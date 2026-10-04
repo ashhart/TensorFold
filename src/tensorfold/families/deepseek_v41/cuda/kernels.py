@@ -18,8 +18,9 @@ KEY_TILE = 64
 FULL_ROWS = int(__import__("os").environ.get("TF_DSV41_DECODE_ROWS") or 32)
 FULL_HT, FULL_KT, FULL_WARPS, FULL_STAGES = 32, 32, 8, 1
 CHUNK = int(__import__("os").environ.get("TF_MQA_CHUNK") or 128)   # keys a chunk program takes (multiple of 32)
-# rows <= FULL_ROWS over Fp4Rows (or no compressed entries): the CUDA chunk pass (mqa_fp4.cu) instead of _mqa_chunks,
-# then the same merge; set by serial (fp4 KV, TF_DSV41_CUDA_MQA). fp8 / bf16 caches never take it.
+# rows <= FULL_ROWS over Fp4Rows (or no compressed entries): attention in CUDA (mqa_fp4.cu: its split and merge
+# kernels) instead of _mqa_chunks + _mqa_merge; set by serial (fp4 KV, TF_DSV41_CUDA_MQA). fp8 / bf16 caches never
+# take it.
 CUDA_MQA = False
 
 
@@ -542,53 +543,13 @@ def _mqa_merge(PO, PM, PL, SINK, OUT, POS, COS, SIN, H: tl.constexpr, D: tl.cons
         tl.store(OUT + (r * H + h) * D + d, o)
 
 
-@triton.jit
-def _mqa_merge_wide(PO, PM, PL, SINK, OUT, POS, COS, SIN, H: tl.constexpr, D: tl.constexpr, NCH: tl.constexpr,
-                    NP2: tl.constexpr, HALF: tl.constexpr, ROPE: tl.constexpr):
-    """_mqa_merge for the CUDA pass's many splits: the maximum over every split's m and the sink first, then the
-    weighted partials summed in split order (an unrolled loop: every load issued at once). The same sink, inverse
-    RoPE and output types; a fixed order a row, whatever the rows of the call."""
-
-    r = tl.program_id(0)
-    h = tl.program_id(1)
-    d = tl.arange(0, D)
-    c = tl.arange(0, NP2)
-    cm = tl.load(PM + (r * NCH + c) * H + h, mask=c < NCH, other=float("-inf"))
-    cl = tl.load(PL + (r * NCH + c) * H + h, mask=c < NCH, other=0.0)
-    sink = tl.load(SINK + h)                # a logit with a zero value vector
-    top = tl.maximum(sink, tl.max(tl.where(cl > 0.0, cm, float("-inf")), 0))
-    wts = tl.where(cl > 0.0, tl.exp(cm - top), 0.0)
-    l = tl.exp(sink - top) + tl.sum(wts * cl, 0)
-    o = tl.zeros((D,), tl.float32)
-    for k in tl.static_range(NCH):
-        base = (r * NCH + k) * H + h
-        km = tl.load(PM + base)
-        kl = tl.load(PL + base)
-        w = tl.where(kl > 0.0, tl.exp(km - top), 0.0)
-        o += w * tl.load(PO + base * D + d, mask=(d < D) & (kl > 0.0), other=0.0)
-    o = o / l
-    if ROPE:
-        p = tl.load(POS + r)
-        rot = d >= D - 2 * HALF
-        i = tl.maximum(d - (D - 2 * HALF), 0) // 2
-        c_ = tl.load(COS + p * HALF + i, mask=rot, other=1.0)
-        s_ = tl.load(SIN + p * HALF + i, mask=rot, other=0.0)
-        ev, od = tl.split(tl.reshape(o, (D // 2, 2)))
-        cev, _ = tl.split(tl.reshape(c_, (D // 2, 2)))
-        sev, _ = tl.split(tl.reshape(s_, (D // 2, 2)))
-        o = tl.reshape(tl.join(ev * cev + od * sev, od * cev - ev * sev), (D,))
-        tl.store(OUT + (r * H + h) * D + d, o.to(tl.bfloat16))
-    else:
-        tl.store(OUT + (r * H + h) * D + d, o)
-
-
 class AttnBuffers:
     def __init__(self, rows: int, heads: int, dims: int, max_keys: int, device="cuda") -> None:
         nch = triton.cdiv(max_keys, CHUNK)
-        if CUDA_MQA:                                    # the CUDA pass's splits (a 128-key window)
+        if CUDA_MQA:                                    # the CUDA pass's partials (a 128-key window)
             from . import mqa_fp4
 
-            nch = max(nch, mqa_fp4.nsplit(max(max_keys - 128, 0)))
+            nch = max(nch, triton.cdiv(mqa_fp4.scratch_rows(rows, max(max_keys - 128, 0)), rows))
         self.nch = nch
         self.po = torch.empty((rows * nch * heads * dims,), dtype=torch.float32, device=device)
         self.pm = torch.empty((rows * nch * heads,), dtype=torch.float32, device=device)
@@ -624,15 +585,12 @@ def mqa(q: torch.Tensor, comp: torch.Tensor | None, idx: torch.Tensor | None, sw
 
         ext = mqa_fp4.ext()
         if ext is not None:
-            nsp = mqa_fp4.nsplit(n_idx, window)
-            assert nsp <= buf.nch
-            ext.chunks(q.contiguous(), comp.q if q4 else None, comp.s if q4 else None,
-                       idx.int() if idx is not None else None, swa, pos.long(),
-                       sbase.long() if sbase is not None else None, buf.po, buf.pm, buf.pl, ring or swa.shape[0],
-                       mqa_fp4.SPLIT, mqa_fp4.TILES, scale)
-            _mqa_merge_wide[(R, H)](buf.po, buf.pm, buf.pl, sink, out, pos, cos if rope else sink,
-                                    sin if rope else sink, H=H, D=D, NCH=nsp, NP2=triton.next_power_of_2(nsp),
-                                    HALF=cos.shape[1] if rope else 1, ROPE=rope, num_warps=4)
+            per, nparts = mqa_fp4.parts(R, n_idx, window)
+            assert R * nparts <= buf.po.numel() // (H * D)
+            ext.attend_rows(q.contiguous(), comp.q if q4 else None, comp.s if q4 else None,
+                            idx.int() if idx is not None else None, swa, pos.long(),
+                            sbase.long() if sbase is not None else None, sink.float(), cos, sin, out, buf.po, buf.pm,
+                            buf.pl, ring or swa.shape[0], mqa_fp4.GROUP, per, scale)
             return out
     if rope and R > FULL_ROWS:
         _mqa_full[(R, H // FULL_HT)](q.contiguous(), cq, idx_t, swa, pos, sink, out, cos, sin, n_idx,

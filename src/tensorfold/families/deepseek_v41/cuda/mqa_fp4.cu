@@ -1,24 +1,25 @@
-// DeepSeek-V4.1 decode attention over the NVFP4 compressed KV cache (Fp4Rows) plus the bf16 window ring: the chunk
-// (split) pass of kernels.mqa for decode / verify rows and small prompt chunks. The Triton _mqa_merge combines the
-// partials (sink, normalisation, inverse RoPE) exactly as for the Triton chunk kernel.
+// DeepSeek-V4.1 decode attention over the NVFP4 compressed KV cache (Fp4Rows) plus the bf16 window ring: the split
+// pass of kernels.mqa for decode / verify rows and small prompt chunks; kernels._mqa_merge_wide combines the splits
+// (sink, normalisation, inverse RoPE).
 //
 // SPDX-License-Identifier: Apache-2.0
 // Adapted from FlashInfer's "Cake" DeepSeek-V4.1 mixed-cache decode, flashinfer-ai/flashinfer
 // csrc/cake_dsv4/sm_120a/cake_sparse_mla_dsv41_mixed_h32.cu (decode_dual), commit
 // 2c1c0525067452c411944fb1c40d8112040ea229 (PR #5983, generated from Cake 092b4b1f5fd8913d7c01390c7ceb6bc7e866d8e2),
 // Apache License 2.0; Copyright 2025-2026 NVIDIA, Copyright 2023-2026 FlashInfer community (LICENSES/Apache-2.0.txt,
-// NOTICE, THIRD_PARTY_NOTICES.md). Taken from it: one CTA scores every local head (two 16-head tiles) against one
-// gathered candidate set, bf16 mma.sync m16n8k16 with the FP4 rows widened exactly to bf16 (cvt.rn.bf16x2.e2m1x2 on
-// CUDA 13.2+, else its two-prmt table; e4m3 scales widened and multiplied in bf16, exact), a lane owning whole scale
-// groups of dims (Q and K permuted alike), V^T read with ldmatrix.trans.
+// NOTICE, THIRD_PARTY_NOTICES.md). Taken from it: 16-head tiles scored against one gathered candidate set, bf16
+// mma.sync m16n8k16 with the FP4 rows widened exactly to bf16 (cvt.rn.bf16x2.e2m1x2 on CUDA 13.2+, else its two-prmt
+// table; e4m3 scales widened and multiplied in bf16, exact), a lane owning whole 16-dim scale groups (Q and K permuted
+// alike), V^T read with ldmatrix.trans.
 // Modified for TensorFold dsv41-cuda: hand-written loops instead of the generated unrolled code; no IO warps or
-// mbarrier ring (each CTA gathers its whole split up front: decode rows are latency bound); the FP4 rows are decoded
-// once into a bf16 stage shared by QK and PV; separate Fp4Rows planes (q nibbles, s e4m3 bytes) instead of paged
-// footers; the bf16 window ring read directly (rows from pos, the stream's ring base and the ring length) instead of
-// FP8 528-byte main rows; QK split over dims across a tile's 4 warps with the partial scores summed in a fixed order;
-// a fixed split partition that depends only on the layer's index count (row invariance) instead of the planner;
-// TensorFold's natural-log online softmax and partial layout (sinks applied in the merge); no lse_scale / out_lse, no
-// main-only kernel, no PDL.
+// mbarrier ring: a CTA (one row x one split x one 16-head tile, 8 warps each owning 64 dims for QK and PV) gathers
+// every compressed row of its split into registers up front and decodes each 32-row stage once into a bf16 stage in
+// shared memory (double-buffered; window stages stream in with cp.async one stage ahead); separate Fp4Rows planes (q
+// nibbles, s e4m3 bytes) instead of paged footers; the bf16 window ring read directly (rows from pos, the stream's
+// ring base and the ring length) instead of FP8 528-byte main rows; QK split over dims across the 8 warps with the
+// partial scores summed in a fixed tree; few long splits (a fixed partition that depends only on the layer's index
+// count: row invariance) so that the partials stay small at 32 rows; TensorFold's natural-log online softmax, the
+// sink applied in the merge; no lse_scale / out_lse, no main-only kernel, no PDL.
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -38,12 +39,13 @@ constexpr int H = 32;           // local heads (TP=2 of 64)
 constexpr int D = 512;          // latent: key and value
 constexpr int W = 128;          // window
 constexpr int ST = 32;          // candidates a stage
-constexpr int WSPLIT = 32;      // window candidates a split (one stage)
+constexpr int NW = 8;           // warps a CTA: warp w owns dims w * 64 .. + 63
+constexpr int NT = 32 * NW;
 constexpr int T_BYTES = ST * D * 2;                 // bf16 stage, swizzled 16-byte granules
 constexpr int PP = 40;                              // partial-score row pitch (floats): conflict-free float2
-constexpr int PART_TILE = 4 * 16 * PP * 4;
-template <int TILES>
-constexpr int smem_bytes() { return T_BYTES + TILES * PART_TILE + 64 * 4; }
+constexpr int PART_BYTES = NW * 16 * PP * 4;
+constexpr int FIN_BYTES = 16 * PP * 4;
+constexpr int SMEM = 2 * T_BYTES + PART_BYTES + FIN_BYTES + 3 * NT * 4;
 
 // granule c of stage row r: low 3 bits xored with a bijection of r & 7 that puts rows 2m, 2m+1 four granules apart
 // (QK: a quarter warp reads rows 2m, 2m+1 at four consecutive granules) and any 8 consecutive rows apart (ldmatrix)
@@ -108,7 +110,7 @@ __device__ __forceinline__ uint32_t pack_bf16(float lo, float hi) {
 
 __device__ __forceinline__ float ex(float x) {      // e^x
     float y;
-    asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x * 1.4426950408889634f));
+    asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(__fmul_rn(x, 1.4426950408889634f)));
     return y;
 }
 
@@ -116,257 +118,343 @@ __device__ __forceinline__ uint32_t smem_u32(const void* p) {
     return static_cast<uint32_t>(__cvta_generic_to_shared(p));
 }
 
-// raw FP4 bytes of one compressed stage row segment: thread (row tid / 8, seg tid % 8) owns granules seg + 8u
-struct Raw {
-    uint32_t n[8];          // nibbles of granule seg + 8u (8 dims each)
-    uint32_t s[8];          // the row's 32 scale bytes
-};
-
-__device__ __forceinline__ void load_raw(Raw& x, const uint8_t* __restrict__ cq, const uint8_t* __restrict__ cs,
-                                         int64_t qstride, int64_t sstride, int row, int seg) {
-    if (row < 0) {
-#pragma unroll
-        for (int u = 0; u < 8; ++u) x.n[u] = x.s[u] = 0u;
-        return;
-    }
-    const uint32_t* q = reinterpret_cast<const uint32_t*>(cq + (int64_t)row * qstride);
-#pragma unroll
-    for (int u = 0; u < 8; ++u) x.n[u] = __ldg(q + seg + 8 * u);
-    const uint4* s = reinterpret_cast<const uint4*>(cs + (int64_t)row * sstride);
-    const uint4 s0 = __ldg(s), s1 = __ldg(s + 1);
-    x.s[0] = s0.x; x.s[1] = s0.y; x.s[2] = s0.z; x.s[3] = s0.w;
-    x.s[4] = s1.x; x.s[5] = s1.y; x.s[6] = s1.z; x.s[7] = s1.w;
-}
-
-// decode the raw segment into stage row r: granule g = seg + 8u (dims 8g..8g+7), scale group g / 2
-__device__ __forceinline__ void store_raw(uint8_t* T, const Raw& x, int r, int seg) {
-#pragma unroll
-    for (int u = 0; u < 8; ++u) {
-        const int g = seg + 8 * u;
-        const uint32_t sb = (x.s[u] >> (8 * (seg >> 1))) & 0xFFu;     // byte g / 2 = 4u + seg / 2
-        const uint32_t s2 = e4m3_bf16x2(sb);
-        uint32_t v[4];
-        e2m1x8(x.n[u], v);
-        uint4 o;
-        o.x = bmul(v[0], s2); o.y = bmul(v[1], s2); o.z = bmul(v[2], s2); o.w = bmul(v[3], s2);
-        *reinterpret_cast<uint4*>(T + r * 1024 + phys(g, r) * 16) = o;
-    }
-}
-
 __device__ __forceinline__ void cp_async16(uint32_t dst, const void* src, bool ok) {
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;" ::"r"(dst), "l"(src), "r"(ok ? 16 : 0));
 }
 
-// One CTA = one row x one split x TILES 16-head tiles (4 warps a tile: warp wt takes dims wt*128 .. +127 in QK and
-// PV). Splits 0 .. ncomp-1: CS compressed candidates each (idx order), processed as CS / 32 stages; then W / 32
-// window splits of 32 positions p - 127 + j. Grid (nsplit, 2 / TILES, R).
-template <int CS, int TILES>
-__global__ void __launch_bounds__(128 * TILES)
-chunks_kernel(const __nv_bfloat16* __restrict__ Q, const uint8_t* __restrict__ CQ, const uint8_t* __restrict__ CSC,
-              int64_t qstride, int64_t sstride, const int* __restrict__ IDX, int64_t idx_stride, int n_idx,
-              int ncomp, const __nv_bfloat16* __restrict__ SWA, const int64_t* __restrict__ POS,
-              const int64_t* __restrict__ SBASE, int ring, float* __restrict__ PO, float* __restrict__ PM,
-              float* __restrict__ PL, int nsplit, float scale) {
+// One stage of 32 candidates in T (bf16, swizzled) against the CTA's 16 heads, as a partial of its own: QK over warp
+// w's 64 dims (the 8 partial scores summed in a fixed tree), the stage's max m, numerators p = e^(s - m) (natural
+// log, as the Triton chunks; P rounded to bf16 for PV) and their sum l, PV into the warp's 64 output dims (acc: zero
+// on entry). vm: the stage's valid candidates (none: m = -inf, l = 0, acc stays zero).
+__device__ __forceinline__ void attend(const uint8_t* T, float* part, float* fin, uint32_t vm, const uint4 (&qa)[2][2],
+                                       float (&acc)[8][4], float& m0, float& m1, float& l0, float& l1,
+                                       float scale) {
+    const int tid = threadIdx.x, w = tid >> 5, lane = tid & 31, gr = lane >> 2, t = lane & 3;
+    float sc[4][4];
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        sc[j][0] = sc[j][1] = sc[j][2] = sc[j][3] = 0.f;
+        const int row = 8 * j + gr;
+        const uint8_t* base = T + row * 1024;
+#pragma unroll
+        for (int q = 0; q < 2; ++q) {
+            const uint4 kb = *reinterpret_cast<const uint4*>(base + phys(w * 8 + t + 4 * q, row) * 16);
+            const uint32_t a0[4] = {qa[0][q].x, qa[1][q].x, qa[0][q].y, qa[1][q].y};
+            const uint32_t a1[4] = {qa[0][q].z, qa[1][q].z, qa[0][q].w, qa[1][q].w};
+            mma(sc[j], a0, kb.x, kb.y);
+            mma(sc[j], a1, kb.z, kb.w);
+        }
+    }
+    float* mine = part + w * 16 * PP;
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        *reinterpret_cast<float2*>(mine + gr * PP + 8 * j + 2 * t) = make_float2(sc[j][0], sc[j][1]);
+        *reinterpret_cast<float2*>(mine + (gr + 8) * PP + 8 * j + 2 * t) = make_float2(sc[j][2], sc[j][3]);
+    }
+    __syncthreads();
+    // the 8 quarters summed in a fixed tree, two scores a thread, scaled and masked
+    {
+        const int hh = tid >> 4, c = (tid & 15) * 2;
+        float2 v[NW];
+#pragma unroll
+        for (int u = 0; u < NW; ++u) v[u] = *reinterpret_cast<const float2*>(part + (u * 16 + hh) * PP + c);
+        const float a = ((v[0].x + v[1].x) + (v[2].x + v[3].x)) + ((v[4].x + v[5].x) + (v[6].x + v[7].x));
+        const float b = ((v[0].y + v[1].y) + (v[2].y + v[3].y)) + ((v[4].y + v[5].y) + (v[6].y + v[7].y));
+        *reinterpret_cast<float2*>(fin + hh * PP + c) =
+            make_float2((vm >> c) & 1u ? a * scale : -INFINITY, (vm >> (c + 1)) & 1u ? b * scale : -INFINITY);
+    }
+    __syncthreads();
+    float x[4][4];
+    float mx0 = -INFINITY, mx1 = -INFINITY;
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        const float2 a = *reinterpret_cast<const float2*>(fin + gr * PP + 8 * j + 2 * t);
+        const float2 b = *reinterpret_cast<const float2*>(fin + (gr + 8) * PP + 8 * j + 2 * t);
+        x[j][0] = a.x; x[j][1] = a.y; x[j][2] = b.x; x[j][3] = b.y;
+        mx0 = fmaxf(mx0, fmaxf(x[j][0], x[j][1]));
+        mx1 = fmaxf(mx1, fmaxf(x[j][2], x[j][3]));
+    }
+    mx0 = fmaxf(mx0, __shfl_xor_sync(0xFFFFFFFFu, mx0, 1));
+    mx0 = fmaxf(mx0, __shfl_xor_sync(0xFFFFFFFFu, mx0, 2));
+    mx1 = fmaxf(mx1, __shfl_xor_sync(0xFFFFFFFFu, mx1, 1));
+    mx1 = fmaxf(mx1, __shfl_xor_sync(0xFFFFFFFFu, mx1, 2));
+    // the stage's own softmax numerators (every stage starts afresh: fold() combines them)
+    float s0 = 0.f, s1 = 0.f;
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        x[j][0] = x[j][0] == -INFINITY ? 0.f : ex(__fsub_rn(x[j][0], mx0));
+        x[j][1] = x[j][1] == -INFINITY ? 0.f : ex(__fsub_rn(x[j][1], mx0));
+        x[j][2] = x[j][2] == -INFINITY ? 0.f : ex(__fsub_rn(x[j][2], mx1));
+        x[j][3] = x[j][3] == -INFINITY ? 0.f : ex(__fsub_rn(x[j][3], mx1));
+        s0 = __fadd_rn(s0, __fadd_rn(x[j][0], x[j][1]));
+        s1 = __fadd_rn(s1, __fadd_rn(x[j][2], x[j][3]));
+    }
+    s0 = __fadd_rn(s0, __shfl_xor_sync(0xFFFFFFFFu, s0, 1));
+    s0 = __fadd_rn(s0, __shfl_xor_sync(0xFFFFFFFFu, s0, 2));
+    s1 = __fadd_rn(s1, __shfl_xor_sync(0xFFFFFFFFu, s1, 1));
+    s1 = __fadd_rn(s1, __shfl_xor_sync(0xFFFFFFFFu, s1, 2));
+    m0 = mx0;
+    m1 = mx1;
+    l0 = s0;
+    l1 = s1;
+    // PV: P (bf16, from the score fragments) x V^T (ldmatrix.trans) over the warp's 64 output dims
+#pragma unroll
+    for (int kk = 0; kk < 2; ++kk) {
+        const uint32_t pa[4] = {pack_bf16(x[2 * kk][0], x[2 * kk][1]), pack_bf16(x[2 * kk][2], x[2 * kk][3]),
+                                pack_bf16(x[2 * kk + 1][0], x[2 * kk + 1][1]),
+                                pack_bf16(x[2 * kk + 1][2], x[2 * kk + 1][3])};
+        const int mi = lane >> 3, cand = kk * 16 + (mi & 1) * 8 + (lane & 7);
+        const uint8_t* rowp = T + cand * 1024;
+#pragma unroll
+        for (int np = 0; np < 4; ++np) {
+            const int c = w * 8 + 2 * np + (mi >> 1);
+            uint32_t b0, b1, b2, b3;
+            asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];"
+                         : "=r"(b0), "=r"(b1), "=r"(b2), "=r"(b3)
+                         : "r"(smem_u32(rowp + phys(c, cand) * 16)));
+            mma(acc[2 * np], pa, b0, b1);
+            mma(acc[2 * np + 1], pa, b2, b3);
+        }
+    }
+}
+
+// A partial over some stages: unnormalised o, running max m, sum l (l == 0: nothing, m = -inf). fold() is the one
+// way two partials combine, here and in merge_kernel alike (explicit roundings, no branches to diverge on), so a
+// row's result is the same whichever kernel folds which part. An empty C (m = -inf, l = 0, o = 0) takes P exactly:
+// a = 0, b = 1. An empty P leaves C as it is.
+__device__ __forceinline__ bool fold_w(float& cm, float& cl, float pm, float pl, float& a, float& b) {
+    const bool keep = !(pl > 0.f);
+    const float mx = fmaxf(cm, pm);
+    a = ex(__fsub_rn(cm, mx));
+    b = ex(__fsub_rn(pm, mx));
+    cl = keep ? cl : __fadd_rn(__fmul_rn(a, cl), __fmul_rn(b, pl));
+    cm = keep ? cm : mx;
+    return keep;
+}
+
+__device__ __forceinline__ float fold_o(float co, float po, float a, float b, bool keep) {
+    return keep ? co : __fadd_rn(__fmul_rn(a, co), __fmul_rn(b, po));
+}
+
+// One CTA = one row x one part x one 16-head tile; grid (nparts, 2, R). The row's stages (32 candidates each):
+// ncs = n_idx / 32 compressed (idx order), then W / 32 window (positions p - 127 + 32w ..); part k takes stages
+// k * per .. (k + 1) * per - 1, each attended alone and folded in order into the part's partial. Thread (row tid / 8,
+// seg tid % 8) of a compressed stage owns granules seg + 8u (8 dims each) of that row: 8 nibble words, plus scale
+// word seg (shared with the row's other 7 threads by shuffle), loaded one stage ahead.
+__global__ void __launch_bounds__(NT, 1)
+split_kernel(const __nv_bfloat16* __restrict__ Q, const uint8_t* __restrict__ CQ, const uint8_t* __restrict__ CSC,
+             int64_t qstride, int64_t sstride, const int* __restrict__ IDX, int64_t idx_stride, int n_idx,
+             const __nv_bfloat16* __restrict__ SWA, const int64_t* __restrict__ POS,
+             const int64_t* __restrict__ SBASE, int ring, float* __restrict__ PO, float* __restrict__ PM,
+             float* __restrict__ PL, int per, int nparts, float scale) {
     extern __shared__ __align__(128) uint8_t smem[];
-    uint8_t* T = smem;
-    float* part = reinterpret_cast<float*>(smem + T_BYTES);
-    int* tab = reinterpret_cast<int*>(smem + T_BYTES + TILES * PART_TILE);
-    constexpr int NT = 128 * TILES, RPT = 256 / NT;           // raw stage rows a thread
-    const int k = blockIdx.x, r = blockIdx.z, tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
-    const int lt = warp >> 2, tg = blockIdx.y * TILES + lt, wt = warp & 3, gr = lane >> 2, t = lane & 3;
-    const bool comp = k < ncomp;
-    const int nc = comp ? CS : WSPLIT;
+    float* part = reinterpret_cast<float*>(smem + 2 * T_BYTES);
+    float* fin = reinterpret_cast<float*>(smem + 2 * T_BYTES + PART_BYTES);
+    int* tab = reinterpret_cast<int*>(smem + 2 * T_BYTES + PART_BYTES + FIN_BYTES);
+    const int k = blockIdx.x, tg = blockIdx.y, r = blockIdx.z, tid = threadIdx.x, w = tid >> 5, lane = tid & 31;
+    const int gr = lane >> 2, t = lane & 3;
+    const int ncs = (n_idx + ST - 1) / ST, s0 = k * per;
+    const int nst = min(per, ncs + W / ST - s0);             // this part's stages: s0 .. s0 + nst - 1
+    const int nco = max(0, min(nst, ncs - s0));              // the compressed ones come first
     const int64_t p = POS[r];
 
-    bool mine = false;
-    if (tid < nc) {
+    bool any = false;
+    for (int e = tid; e < nst * ST; e += NT) {
+        const int i = e >> 5, c = e & 31, s = s0 + i;
         int row = -1;
-        if (comp) {
-            const int c = k * CS + tid;
-            if (c < n_idx) row = IDX[(int64_t)r * idx_stride + c];
+        if (s < ncs) {
+            const int cc = s * ST + c;
+            if (cc < n_idx) row = IDX[(int64_t)r * idx_stride + cc];
             row = row < 0 ? -1 : row;
         } else {
-            const int64_t slot = p - (W - 1) + (int64_t)(k - ncomp) * WSPLIT + tid;
+            const int64_t slot = p - (W - 1) + (int64_t)(s - ncs) * ST + c;
             if (slot >= 0) row = (int)((SBASE != nullptr ? SBASE[r] : 0) + (slot & (ring - 1)));
         }
-        tab[tid] = row;
-        mine = row >= 0;
+        tab[e] = row;
+        any |= row >= 0;
     }
+    // Q fragments (in flight across the barrier): lane t owns dims w*64 + 8(t + 4q) .. +7 (q = 0, 1) of h0, h1
     const int h0 = tg * 16 + gr, h1 = h0 + 8;
-    // Q fragments (in flight across the index barrier): lane t of quarter wt owns dims wt*128 + 8(t + 4q) .. +7 (q = 0..3) of heads h0 and h1
-    uint4 qa[2][4];
+    uint4 qa[2][2];
     {
-        const uint4* q0 = reinterpret_cast<const uint4*>(Q + ((int64_t)r * H + h0) * D + wt * 128);
-        const uint4* q1 = reinterpret_cast<const uint4*>(Q + ((int64_t)r * H + h1) * D + wt * 128);
+        const uint4* q0 = reinterpret_cast<const uint4*>(Q + ((int64_t)r * H + h0) * D + w * 64);
+        const uint4* q1 = reinterpret_cast<const uint4*>(Q + ((int64_t)r * H + h1) * D + w * 64);
 #pragma unroll
-        for (int q = 0; q < 4; ++q) {
+        for (int q = 0; q < 2; ++q) {
             qa[0][q] = __ldg(q0 + t + 4 * q);
             qa[1][q] = __ldg(q1 + t + 4 * q);
         }
     }
-    if (!__syncthreads_or(mine)) {               // nothing in this split: the merge skips l <= 0
-        if (tid < 16 * TILES) {
-            const int64_t b = ((int64_t)r * nsplit + k) * H + blockIdx.y * 16 * TILES + tid;
+    if (!__syncthreads_or(any)) {                // nothing in this part: the merge skips l <= 0
+        if (tid < 16) {
+            const int64_t b = ((int64_t)r * nparts + k) * H + tg * 16 + tid;
             PM[b] = -INFINITY;
             PL[b] = 0.f;
         }
         return;
     }
 
-    // the whole split's gather at once (window: cp.async straight into the stage; compressed: raw bytes into
-    // registers, every stage's)
-    constexpr int NS = CS / ST;
-    Raw raw[NS][RPT];
     const int rrow = tid >> 3, seg = tid & 7;
-    if (comp) {
+    uint32_t rq[8], rs;
+    auto load = [&](int i) {                     // compressed stage i's raw bytes into registers
+        const int row = i < nco ? tab[i * ST + rrow] : -1;
+        if (row >= 0) {
+            const uint32_t* q = reinterpret_cast<const uint32_t*>(CQ + (int64_t)row * qstride);
 #pragma unroll
-        for (int s = 0; s < NS; ++s)
-#pragma unroll
-            for (int i = 0; i < RPT; ++i)
-                load_raw(raw[s][i], CQ, CSC, qstride, sstride, tab[s * ST + rrow + i * NT / 8], seg);
-    } else {
-        const int c = tid & 63;
-#pragma unroll
-        for (int i = 0; i < 2048 / NT; ++i) {
-            const int rr = (tid >> 6) + (NT / 64) * i;
-            const int row = tab[rr];
-            cp_async16(smem_u32(T + rr * 1024 + phys(c, rr) * 16), SWA + (int64_t)(row < 0 ? 0 : row) * D + c * 8,
-                       row >= 0);
-        }
-        asm volatile("cp.async.commit_group;\n" ::);
-    }
-
-    float acc[16][4];
-#pragma unroll
-    for (int n = 0; n < 16; ++n) acc[n][0] = acc[n][1] = acc[n][2] = acc[n][3] = 0.f;
-    float m0 = -INFINITY, m1 = -INFINITY, l0 = 0.f, l1 = 0.f;
-    float* mypart = part + (lt * 4 + wt) * 16 * PP;
-    const float* tpart = part + lt * 4 * 16 * PP;
-    const int nstages = nc / ST;
-
-#pragma unroll
-    for (int s = 0; s < NS; ++s) {
-        if (s >= nstages) break;
-        if (comp) {
-            if (s > 0) __syncthreads();                       // the previous stage's PV is done with T
-#pragma unroll
-            for (int i = 0; i < RPT; ++i) store_raw(T, raw[s][i], rrow + i * NT / 8, seg);
+            for (int u = 0; u < 8; ++u) rq[u] = __ldg(q + seg + 8 * u);
+            rs = __ldg(reinterpret_cast<const uint32_t*>(CSC + (int64_t)row * sstride) + seg);
         } else {
-            asm volatile("cp.async.wait_group 0;\n" ::);
+#pragma unroll
+            for (int u = 0; u < 8; ++u) rq[u] = 0u;
+            rs = 0u;
+        }
+    };
+    auto fill = [&](int i) {                     // stage i into T[i & 1]: decode, or the window rows' cp.async
+        uint8_t* T = smem + (i & 1) * T_BYTES;
+        if (i < nco) {
+#pragma unroll
+            for (int u = 0; u < 8; ++u) {
+                const int g = seg + 8 * u;                        // scale group g / 2 = 4u + seg / 2: word u
+                const uint32_t sw = __shfl_sync(0xFFFFFFFFu, rs, (lane & ~7) | u);
+                const uint32_t s2 = e4m3_bf16x2((sw >> (8 * (seg >> 1))) & 0xFFu);
+                uint32_t v[4];
+                e2m1x8(rq[u], v);
+                uint4 o;
+                o.x = bmul(v[0], s2); o.y = bmul(v[1], s2); o.z = bmul(v[2], s2); o.w = bmul(v[3], s2);
+                *reinterpret_cast<uint4*>(T + rrow * 1024 + phys(g, rrow) * 16) = o;
+            }
+        } else {
+            const int c = tid & 63;
+#pragma unroll
+            for (int u = 0; u < 8; ++u) {
+                const int rr = (tid >> 6) + 4 * u;
+                const int row = tab[i * ST + rr];
+                cp_async16(smem_u32(T + rr * 1024 + phys(c, rr) * 16),
+                           SWA + (int64_t)(row < 0 ? 0 : row) * D + c * 8, row >= 0);
+            }
+            asm volatile("cp.async.commit_group;\n" ::);
+        }
+    };
+
+    float co[8][4];
+    float cm0 = -INFINITY, cm1 = -INFINITY, cl0 = 0.f, cl1 = 0.f;
+#pragma unroll
+    for (int n = 0; n < 8; ++n) co[n][0] = co[n][1] = co[n][2] = co[n][3] = 0.f;
+    load(0);
+    fill(0);
+    load(1);
+    for (int i = 0; i < nst; ++i) {
+        if (i > 0) __syncthreads();                           // stage i - 1 is done with T[(i + 1) & 1]
+        const bool ahead = i + 1 < nst;
+        if (ahead) {
+            fill(i + 1);
+            load(i + 2);
+        }
+        if (i >= nco) {                                       // a window stage: its rows (one group may follow)
+            if (ahead) asm volatile("cp.async.wait_group 1;\n" ::);
+            else asm volatile("cp.async.wait_group 0;\n" ::);
         }
         __syncthreads();
-        const uint32_t vm = __ballot_sync(0xFFFFFFFFu, tab[s * ST + lane] >= 0);
-
-        // QK over this warp's 128 dims: 4 candidate tiles x 8 k-steps
-        float sc[4][4];
+        const uint32_t vm = __ballot_sync(0xFFFFFFFFu, tab[i * ST + lane] >= 0);
+        float po[8][4];
 #pragma unroll
-        for (int j = 0; j < 4; ++j) {
-            sc[j][0] = sc[j][1] = sc[j][2] = sc[j][3] = 0.f;
-            const int row = 8 * j + gr;
-            const uint8_t* base = T + row * 1024;
+        for (int n = 0; n < 8; ++n) po[n][0] = po[n][1] = po[n][2] = po[n][3] = 0.f;
+        float pm0 = -INFINITY, pm1 = -INFINITY, pl0 = 0.f, pl1 = 0.f;
+        attend(smem + (i & 1) * T_BYTES, part, fin, vm, qa, po, pm0, pm1, pl0, pl1, scale);
+        float a0, b0, a1, b1;
+        const bool k0 = fold_w(cm0, cl0, pm0, pl0, a0, b0), k1 = fold_w(cm1, cl1, pm1, pl1, a1, b1);
 #pragma unroll
-            for (int q = 0; q < 4; ++q) {
-                const uint4 kb = *reinterpret_cast<const uint4*>(base + phys(wt * 16 + t + 4 * q, row) * 16);
-                const uint32_t a0[4] = {qa[0][q].x, qa[1][q].x, qa[0][q].y, qa[1][q].y};
-                const uint32_t a1[4] = {qa[0][q].z, qa[1][q].z, qa[0][q].w, qa[1][q].w};
-                mma(sc[j], a0, kb.x, kb.y);
-                mma(sc[j], a1, kb.z, kb.w);
-            }
-        }
-#pragma unroll
-        for (int j = 0; j < 4; ++j) {
-            *reinterpret_cast<float2*>(mypart + gr * PP + 8 * j + 2 * t) = make_float2(sc[j][0], sc[j][1]);
-            *reinterpret_cast<float2*>(mypart + (gr + 8) * PP + 8 * j + 2 * t) = make_float2(sc[j][2], sc[j][3]);
-        }
-        if (TILES == 2)
-            asm volatile("bar.sync %0, 128;" ::"r"(1 + lt));
-        else
-            __syncthreads();
-        // every warp of the tile sums the four quarters in the same order: the same scores, bit for bit
-        float x[4][4];
-        float mx0 = -INFINITY, mx1 = -INFINITY;
-#pragma unroll
-        for (int j = 0; j < 4; ++j) {
-            float2 v[4][2];
-#pragma unroll
-            for (int w = 0; w < 4; ++w) {
-                v[w][0] = *reinterpret_cast<const float2*>(tpart + w * 16 * PP + gr * PP + 8 * j + 2 * t);
-                v[w][1] = *reinterpret_cast<const float2*>(tpart + w * 16 * PP + (gr + 8) * PP + 8 * j + 2 * t);
-            }
-            const int c = 8 * j + 2 * t;
-            const bool ok0 = (vm >> c) & 1u, ok1 = (vm >> (c + 1)) & 1u;
-            x[j][0] = ok0 ? ((v[0][0].x + v[1][0].x) + (v[2][0].x + v[3][0].x)) * scale : -INFINITY;
-            x[j][1] = ok1 ? ((v[0][0].y + v[1][0].y) + (v[2][0].y + v[3][0].y)) * scale : -INFINITY;
-            x[j][2] = ok0 ? ((v[0][1].x + v[1][1].x) + (v[2][1].x + v[3][1].x)) * scale : -INFINITY;
-            x[j][3] = ok1 ? ((v[0][1].y + v[1][1].y) + (v[2][1].y + v[3][1].y)) * scale : -INFINITY;
-            mx0 = fmaxf(mx0, fmaxf(x[j][0], x[j][1]));
-            mx1 = fmaxf(mx1, fmaxf(x[j][2], x[j][3]));
-        }
-        mx0 = fmaxf(mx0, __shfl_xor_sync(0xFFFFFFFFu, mx0, 1));
-        mx0 = fmaxf(mx0, __shfl_xor_sync(0xFFFFFFFFu, mx0, 2));
-        mx1 = fmaxf(mx1, __shfl_xor_sync(0xFFFFFFFFu, mx1, 1));
-        mx1 = fmaxf(mx1, __shfl_xor_sync(0xFFFFFFFFu, mx1, 2));
-        const bool act0 = mx0 != -INFINITY, act1 = mx1 != -INFINITY;
-        const float n0 = act0 ? fmaxf(m0, mx0) : m0, n1 = act1 ? fmaxf(m1, mx1) : m1;
-        const float al0 = act0 ? (m0 == -INFINITY ? 0.f : ex(m0 - n0)) : 1.f;
-        const float al1 = act1 ? (m1 == -INFINITY ? 0.f : ex(m1 - n1)) : 1.f;
-        float s0 = 0.f, s1 = 0.f;
-#pragma unroll
-        for (int j = 0; j < 4; ++j) {
-            x[j][0] = x[j][0] == -INFINITY ? 0.f : ex(x[j][0] - n0);
-            x[j][1] = x[j][1] == -INFINITY ? 0.f : ex(x[j][1] - n0);
-            x[j][2] = x[j][2] == -INFINITY ? 0.f : ex(x[j][2] - n1);
-            x[j][3] = x[j][3] == -INFINITY ? 0.f : ex(x[j][3] - n1);
-            s0 += x[j][0] + x[j][1];
-            s1 += x[j][2] + x[j][3];
-        }
-        s0 += __shfl_xor_sync(0xFFFFFFFFu, s0, 1);
-        s0 += __shfl_xor_sync(0xFFFFFFFFu, s0, 2);
-        s1 += __shfl_xor_sync(0xFFFFFFFFu, s1, 1);
-        s1 += __shfl_xor_sync(0xFFFFFFFFu, s1, 2);
-        l0 = l0 * al0 + s0;
-        l1 = l1 * al1 + s1;
-        m0 = n0;
-        m1 = n1;
-#pragma unroll
-        for (int n = 0; n < 16; ++n) {
-            acc[n][0] *= al0; acc[n][1] *= al0;
-            acc[n][2] *= al1; acc[n][3] *= al1;
-        }
-        // PV: P (bf16, from the score fragments) x V^T (ldmatrix.trans) over this warp's 128 output dims
-#pragma unroll
-        for (int kk = 0; kk < 2; ++kk) {
-            const uint32_t pa[4] = {pack_bf16(x[2 * kk][0], x[2 * kk][1]), pack_bf16(x[2 * kk][2], x[2 * kk][3]),
-                                    pack_bf16(x[2 * kk + 1][0], x[2 * kk + 1][1]),
-                                    pack_bf16(x[2 * kk + 1][2], x[2 * kk + 1][3])};
-            const int mi = lane >> 3, cand = kk * 16 + (mi & 1) * 8 + (lane & 7);
-            const uint8_t* rowp = T + cand * 1024;
-#pragma unroll
-            for (int np = 0; np < 8; ++np) {
-                const int c = wt * 16 + 2 * np + (mi >> 1);
-                uint32_t b0, b1, b2, b3;
-                asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];"
-                             : "=r"(b0), "=r"(b1), "=r"(b2), "=r"(b3)
-                             : "r"(smem_u32(rowp + phys(c, cand) * 16)));
-                mma(acc[2 * np], pa, b0, b1);
-                mma(acc[2 * np + 1], pa, b2, b3);
-            }
+        for (int n = 0; n < 8; ++n) {
+            co[n][0] = fold_o(co[n][0], po[n][0], a0, b0, k0);
+            co[n][1] = fold_o(co[n][1], po[n][1], a0, b0, k0);
+            co[n][2] = fold_o(co[n][2], po[n][2], a1, b1, k1);
+            co[n][3] = fold_o(co[n][3], po[n][3], a1, b1, k1);
         }
     }
 
-    const int64_t b0 = ((int64_t)r * nsplit + k) * H;
-    float* o0 = PO + (b0 + h0) * D + wt * 128 + 2 * t;
-    float* o1 = PO + (b0 + h1) * D + wt * 128 + 2 * t;
+    const int64_t b = ((int64_t)r * nparts + k) * H;
+    float* o0 = PO + (b + h0) * D + w * 64 + 2 * t;
+    float* o1 = PO + (b + h1) * D + w * 64 + 2 * t;
 #pragma unroll
-    for (int n = 0; n < 16; ++n) {
-        *reinterpret_cast<float2*>(o0 + 8 * n) = make_float2(acc[n][0], acc[n][1]);
-        *reinterpret_cast<float2*>(o1 + 8 * n) = make_float2(acc[n][2], acc[n][3]);
+    for (int n = 0; n < 8; ++n) {
+        *reinterpret_cast<float2*>(o0 + 8 * n) = make_float2(co[n][0], co[n][1]);
+        *reinterpret_cast<float2*>(o1 + 8 * n) = make_float2(co[n][2], co[n][3]);
     }
-    if (wt == 0 && t == 0) {
-        PM[b0 + h0] = m0;
-        PL[b0 + h0] = l0;
-        PM[b0 + h1] = m1;
-        PL[b0 + h1] = l1;
+    if (w == 0 && t == 0) {
+        PM[b + h0] = cm0;
+        PL[b + h0] = cl0;
+        PM[b + h1] = cm1;
+        PL[b + h1] = cl1;
+    }
+}
+
+// Finish rows: per (row, head), the parts folded group by group (``ppg`` parts a group, in order: the group's
+// stages folded left to right), then the groups folded onto the sink (a logit with a zero value vector); divide,
+// inverse RoPE of the last 2 * half dims (cos / sin given: bf16 out) or fp32 out. 128 threads x 4 dims.
+template <int MB>
+__global__ void __launch_bounds__(128)
+merge_kernel(const float* __restrict__ PO, const float* __restrict__ PM, const float* __restrict__ PL,
+             const float* __restrict__ SINK, const int64_t* __restrict__ POS, const float* __restrict__ COS,
+             const float* __restrict__ SIN, int half, void* __restrict__ OUT, int nparts, int ppg) {
+    const int r = blockIdx.x, h = blockIdx.y, d = threadIdx.x * 4;
+    float fm = SINK[h], fl = 1.f;
+    float4 fo = make_float4(0.f, 0.f, 0.f, 0.f);
+    // parts in batches of MB: every load of a batch in flight at once, then folded in order
+    float cm = -INFINITY, cl = 0.f;
+    float4 cv = make_float4(0.f, 0.f, 0.f, 0.f);
+    for (int k0 = 0; k0 < nparts; k0 += MB) {
+        float bm[MB], bl[MB];
+        float4 bv[MB];
+#pragma unroll
+        for (int u = 0; u < MB; ++u) {
+            if (k0 + u < nparts) {
+                const int64_t b = ((int64_t)r * nparts + k0 + u) * H + h;
+                bm[u] = PM[b];
+                bl[u] = PL[b];
+                bv[u] = *reinterpret_cast<const float4*>(PO + b * D + d);   // (unused when the part is empty)
+            }
+        }
+#pragma unroll
+        for (int u = 0; u < MB; ++u) {
+            const int k = k0 + u;
+            if (k >= nparts) break;
+            float a, bb;
+            const bool keep = fold_w(cm, cl, bm[u], bl[u], a, bb);
+            cv.x = fold_o(cv.x, bv[u].x, a, bb, keep);
+            cv.y = fold_o(cv.y, bv[u].y, a, bb, keep);
+            cv.z = fold_o(cv.z, bv[u].z, a, bb, keep);
+            cv.w = fold_o(cv.w, bv[u].w, a, bb, keep);
+            if ((k + 1) % ppg == 0 || k + 1 == nparts) {    // a group done: onto the sink (never empty)
+                const bool kg = fold_w(fm, fl, cm, cl, a, bb);
+                fo.x = fold_o(fo.x, cv.x, a, bb, kg);
+                fo.y = fold_o(fo.y, cv.y, a, bb, kg);
+                fo.z = fold_o(fo.z, cv.z, a, bb, kg);
+                fo.w = fold_o(fo.w, cv.w, a, bb, kg);
+                cm = -INFINITY;
+                cl = 0.f;
+                cv = make_float4(0.f, 0.f, 0.f, 0.f);
+            }
+        }
+    }
+    float o[4] = {__fdiv_rn(fo.x, fl), __fdiv_rn(fo.y, fl), __fdiv_rn(fo.z, fl), __fdiv_rn(fo.w, fl)};
+    const int64_t ob = ((int64_t)r * H + h) * D + d;
+    if (COS != nullptr) {
+        const int64_t p = POS[r];
+#pragma unroll
+        for (int e = 0; e < 4; e += 2) {                       // inverse RoPE: e' = e c + o s, o' = o c - e s
+            if (d + e >= D - 2 * half) {
+                const int i = (d + e - (D - 2 * half)) / 2;
+                const float c = COS[p * half + i], sn = SIN[p * half + i];
+                const float ev = o[e], od = o[e + 1];
+                o[e] = __fadd_rn(__fmul_rn(ev, c), __fmul_rn(od, sn));
+                o[e + 1] = __fsub_rn(__fmul_rn(od, c), __fmul_rn(ev, sn));
+            }
+        }
+        __nv_bfloat16* out = reinterpret_cast<__nv_bfloat16*>(OUT) + ob;
+        *reinterpret_cast<__nv_bfloat162*>(out) = __floats2bfloat162_rn(o[0], o[1]);
+        *reinterpret_cast<__nv_bfloat162*>(out + 2) = __floats2bfloat162_rn(o[2], o[3]);
+    } else {
+        *reinterpret_cast<float4*>(reinterpret_cast<float*>(OUT) + ob) = make_float4(o[0], o[1], o[2], o[3]);
     }
 }
 
@@ -378,39 +466,23 @@ __global__ void table_kernel(uint32_t* e2m1, uint16_t* e4m3) {
     e4m3[b] = (uint16_t)(e4m3_bf16x2((uint32_t)b) & 0xFFFFu);
 }
 
-template <int CS, int TILES>
-void launch(const int64_t R, int nsplit, cudaStream_t st, const __nv_bfloat16* q, const uint8_t* cq,
-            const uint8_t* cs, int64_t qs, int64_t ss, const int* idx, int64_t istr, int n_idx, int ncomp,
-            const __nv_bfloat16* swa, const int64_t* pos, const int64_t* sbase, int ring, float* po, float* pm,
-            float* pl, float scale) {
-    static bool attr = false;
-    constexpr int SM = smem_bytes<TILES>();
-    if (!attr) {
-        C10_CUDA_CHECK(cudaFuncSetAttribute(chunks_kernel<CS, TILES>, cudaFuncAttributeMaxDynamicSharedMemorySize, SM));
-        attr = true;
-    }
-    const dim3 grid(nsplit, 2 / TILES, (unsigned)R);
-    chunks_kernel<CS, TILES><<<grid, 128 * TILES, SM, st>>>(q, cq, cs, qs, ss, idx, istr, n_idx, ncomp, swa, pos,
-                                                           sbase, ring, po, pm, pl, nsplit, scale);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
-}
-
 }  // namespace tf_mqa4
 
-int64_t nsplit_of(int64_t n_idx, int64_t split) {
-    return (n_idx + split - 1) / split + tf_mqa4::W / tf_mqa4::WSPLIT;
-}
+int64_t stages_of(int64_t n_idx) { return (n_idx + tf_mqa4::ST - 1) / tf_mqa4::ST + tf_mqa4::W / tf_mqa4::ST; }
 
-// q [R, 32, 512] bf16; cq u8 [n, 256], cs u8 [n, 32] (Fp4Rows planes) and idx int32 [R, n_idx] (rows of cq, -1:
-// none), or all three None (a window-only layer); swa bf16 [rows, 512] ring(s); pos int64 [R]; sbase int64 [R] (the
-// row's ring's first row) or None (0); ring: rows a ring (a power of two). Writes partials for nsplit_of(n_idx) splits.
-int64_t chunks(torch::Tensor q, c10::optional<torch::Tensor> cq, c10::optional<torch::Tensor> cs,
-               c10::optional<torch::Tensor> idx, torch::Tensor swa, torch::Tensor pos,
-               c10::optional<torch::Tensor> sbase, torch::Tensor po, torch::Tensor pm, torch::Tensor pl, int64_t ring,
-               int64_t split, int64_t tiles, double scale) {
+// The whole attention of rows <= 32: q [R, 32, 512] bf16; cq u8 [n, 256], cs u8 [n, 32] (Fp4Rows planes) and idx
+// int32 [R, n_idx] (rows of cq, -1: none), or all three None (a window-only layer); swa bf16 [rows, 512] ring(s);
+// pos int64 [R]; sbase int64 [R] (the row's ring's first row) or None (0); sink fp32 [32]; cos / sin fp32 [positions,
+// half] (inverse RoPE, bf16 out) or None (fp32 out); out [R, 32, 512]; po / pm / pl partial scratch; ring: rows a
+// ring (a power of two); group: stages a group (the fixed reduction tree); per: stages a CTA, 1 or ``group`` (the
+// same result either way). Returns the parts written.
+int64_t attend_rows(torch::Tensor q, c10::optional<torch::Tensor> cq, c10::optional<torch::Tensor> cs,
+                    c10::optional<torch::Tensor> idx, torch::Tensor swa, torch::Tensor pos,
+                    c10::optional<torch::Tensor> sbase, torch::Tensor sink, c10::optional<torch::Tensor> cosp,
+                    c10::optional<torch::Tensor> sinp, torch::Tensor out, torch::Tensor po, torch::Tensor pm,
+                    torch::Tensor pl, int64_t ring, int64_t group, int64_t per, double scale) {
     using namespace tf_mqa4;
-    TORCH_CHECK(split == 32 || split == 64, "split 32 or 64");
-    TORCH_CHECK(tiles == 1 || tiles == 2, "tiles 1 or 2");
+    TORCH_CHECK(group >= 1 && (per == 1 || per == group), "per: 1 or group");
     TORCH_CHECK(q.is_cuda() && q.scalar_type() == at::kBFloat16 && q.dim() == 3 && q.size(1) == H && q.size(2) == D &&
                 q.is_contiguous(), "q: contiguous bf16 [R, 32, 512]");
     const int64_t R = q.size(0);
@@ -419,6 +491,17 @@ int64_t chunks(torch::Tensor q, c10::optional<torch::Tensor> cq, c10::optional<t
                 "swa: bf16 [rows, 512] rows contiguous");
     TORCH_CHECK(ring > 0 && (ring & (ring - 1)) == 0, "ring: a power of two");
     TORCH_CHECK(pos.scalar_type() == at::kLong && pos.numel() == R && pos.is_contiguous(), "pos: int64 [R]");
+    TORCH_CHECK(sink.scalar_type() == at::kFloat && sink.numel() == H && sink.is_contiguous(), "sink: fp32 [32]");
+    const bool rope = cosp.has_value();
+    int half = 1;
+    if (rope) {
+        TORCH_CHECK(sinp.has_value() && cosp->scalar_type() == at::kFloat && sinp->scalar_type() == at::kFloat &&
+                    cosp->is_contiguous() && sinp->is_contiguous() && cosp->dim() == 2 && cosp->size(1) % 2 == 0,
+                    "cos / sin: fp32 tables");
+        half = (int)cosp->size(1);
+    }
+    TORCH_CHECK(out.is_contiguous() && out.numel() == R * H * D &&
+                out.scalar_type() == (rope ? at::kBFloat16 : at::kFloat), "out: [R, 32, 512], bf16 with RoPE");
     const int64_t* sb = nullptr;
     if (sbase.has_value()) {
         TORCH_CHECK(sbase->scalar_type() == at::kLong && sbase->numel() == R && sbase->is_contiguous(),
@@ -437,8 +520,8 @@ int64_t chunks(torch::Tensor q, c10::optional<torch::Tensor> cq, c10::optional<t
                     cq->stride(0) % 16 == 0 && reinterpret_cast<uintptr_t>(cq->data_ptr()) % 16 == 0,
                     "cq: u8 [n, 256], 16-byte aligned rows");
         TORCH_CHECK(cs->scalar_type() == at::kByte && cs->dim() == 2 && cs->size(1) == D / 16 && cs->stride(1) == 1 &&
-                    cs->stride(0) % 16 == 0 && reinterpret_cast<uintptr_t>(cs->data_ptr()) % 16 == 0,
-                    "cs: u8 [n, 32], 16-byte aligned rows");
+                    cs->stride(0) % 4 == 0 && reinterpret_cast<uintptr_t>(cs->data_ptr()) % 4 == 0,
+                    "cs: u8 [n, 32], 4-byte aligned rows");
         n_idx = (int)idx->size(1);
         qp = cq->data_ptr<uint8_t>();
         sp = cs->data_ptr<uint8_t>();
@@ -447,26 +530,31 @@ int64_t chunks(torch::Tensor q, c10::optional<torch::Tensor> cq, c10::optional<t
         ss = cs->stride(0);
         is = idx->stride(0);
     }
-    const int ncomp = (int)((n_idx + split - 1) / split);
-    const int nsplit = (int)nsplit_of(n_idx, split);
-    TORCH_CHECK(po.scalar_type() == at::kFloat && po.numel() >= R * nsplit * H * D && pm.numel() >= R * nsplit * H &&
-                pl.numel() >= R * nsplit * H, "partial buffers too small");
-    if (R == 0) return nsplit;
+    const int64_t stages = stages_of(n_idx);
+    TORCH_CHECK(stages * ST <= NT * 3, "index table");
+    const int nparts = (int)((stages + per - 1) / per);
+    TORCH_CHECK(po.scalar_type() == at::kFloat && po.numel() >= R * nparts * H * D && pm.numel() >= R * nparts * H &&
+                pl.numel() >= R * nparts * H, "partial buffers too small");
+    if (R == 0) return nparts;
     const at::cuda::CUDAGuard guard(q.device());
     cudaStream_t st = at::cuda::getCurrentCUDAStream();
-    auto* qd = reinterpret_cast<const __nv_bfloat16*>(q.data_ptr());
-    auto* wd = reinterpret_cast<const __nv_bfloat16*>(swa.data_ptr());
-    const int64_t* pd = pos.data_ptr<int64_t>();
-    float *o = po.data_ptr<float>(), *m = pm.data_ptr<float>(), *l = pl.data_ptr<float>();
-    const float sc = (float)scale;
-#define TF_MQA4_GO(CS_, T_) launch<CS_, T_>(R, nsplit, st, qd, qp, sp, qs, ss, ip, is, n_idx, ncomp, wd, pd, sb, \
-                                            (int)ring, o, m, l, sc)
-    if (split == 64 && tiles == 2) TF_MQA4_GO(64, 2);
-    else if (split == 64) TF_MQA4_GO(64, 1);
-    else if (tiles == 2) TF_MQA4_GO(32, 2);
-    else TF_MQA4_GO(32, 1);
-#undef TF_MQA4_GO
-    return nsplit;
+    static bool attr = false;
+    if (!attr) {
+        C10_CUDA_CHECK(cudaFuncSetAttribute(split_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM));
+        attr = true;
+    }
+    split_kernel<<<dim3(nparts, 2, (unsigned)R), NT, SMEM, st>>>(
+        reinterpret_cast<const __nv_bfloat16*>(q.data_ptr()), qp, sp, qs, ss, ip, is, n_idx,
+        reinterpret_cast<const __nv_bfloat16*>(swa.data_ptr()), pos.data_ptr<int64_t>(), sb, (int)ring,
+        po.data_ptr<float>(), pm.data_ptr<float>(), pl.data_ptr<float>(), (int)per, nparts, (float)scale);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    auto merge = nparts <= 4 ? merge_kernel<4> : merge_kernel<24>;    // (few parts: registers for occupancy)
+    merge<<<dim3((unsigned)R, H), 128, 0, st>>>(
+        po.data_ptr<float>(), pm.data_ptr<float>(), pl.data_ptr<float>(), sink.data_ptr<float>(),
+        pos.data_ptr<int64_t>(), rope ? cosp->data_ptr<float>() : nullptr, rope ? sinp->data_ptr<float>() : nullptr,
+        half, out.data_ptr(), nparts, (int)(group / per));
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return nparts;
 }
 
 // the decode helpers over every byte: (bf16x2 of each nibble pair as int32 [256], bf16 bits of each e4m3 byte as
@@ -482,7 +570,7 @@ std::tuple<torch::Tensor, torch::Tensor, bool> decode_table(torch::Tensor like) 
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("chunks", &chunks);
-    m.def("nsplit", &nsplit_of);
+    m.def("attend_rows", &attend_rows);
+    m.def("stages", &stages_of);
     m.def("decode_table", &decode_table);
 }

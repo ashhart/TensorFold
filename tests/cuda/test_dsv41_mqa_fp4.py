@@ -215,3 +215,20 @@ def test_prompt_staging_ring(cuda_mqa):
     ref = _ref(q, rows, idx, swa, pos, sink)
     got = _mqa(q, rows, idx, swa, pos, sink, {})
     assert (got.double() - ref).abs().max().item() < 4e-3 * ref.abs().max().item()
+
+
+def test_build_has_no_spills():
+    """Every chunk kernel instance compiles without local memory (spills) or a stack frame."""
+
+    import shutil
+    import subprocess
+
+    tool = shutil.which("cuobjdump")
+    if tool is None:
+        pytest.skip("no cuobjdump")
+    out = subprocess.run([tool, "-res-usage", mqa_fp4.ext().__file__], capture_output=True, text=True).stdout
+    lines = out.splitlines()
+    found = [lines[i + 1] for i, ln in enumerate(lines) if "split_kernel" in ln or "merge_kernel" in ln]
+    assert len(found) == 3
+    for usage in found:
+        assert "STACK:0 " in usage and "LOCAL:0 " in usage, usage
