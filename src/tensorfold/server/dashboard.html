@@ -39,6 +39,8 @@
   .bar { height:4px; border-radius:2px; background:var(--line); margin-top:8px; overflow:hidden; }
   .bar i { display:block; height:100%; background:var(--accent); transition:width .5s; }
   .bar i.warm { background:var(--warm); } .bar i.hot { background:var(--hot); }
+  .chart { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:10px 12px 6px; }
+  .chart canvas { display:block; width:100%; height:96px; }
   h2 { font-size:11px; text-transform:uppercase; letter-spacing:.1em; color:var(--muted);
        margin:26px 0 8px; font-weight:500; }
   .req { background:var(--panel); border:1px solid var(--line); border-radius:8px;
@@ -70,6 +72,8 @@
         <div class="cap" id="fillcap">tokens left to prefill</div></div>
     </div>
   </div>
+  <h2 id="histlabel">Decode rate · last 5 minutes</h2>
+  <div class="chart"><canvas id="hist"></canvas></div>
   <div class="tiles">
     <div class="tile"><div class="label">Context</div><div class="value" id="ctx">—</div>
       <div class="cap" id="ctxcap"></div><div class="bar"><i id="ctxbar"></i></div></div>
@@ -98,6 +102,8 @@ const STATS = location.pathname.replace(/\/(dashboard)?\/?$/, "") + "/stats";
 
 let shown = { decode: 0, prefill: 0 }, target = { decode: 0, prefill: 0 }, scaleMax = 80;
 let lastGood = 0;
+let histPoints = [];            // the decode_5m history: [{t, tok_s}], newest last, sparse over 5 minutes
+let histTop = 0;                // the chart's current y scale, decayed like the dial's
 
 function band(v) { return v >= 60 ? css("--accent") : v >= 40 ? css("--cool") : v >= 20 ? css("--warm") : css("--hot"); }
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
@@ -131,13 +137,65 @@ function draw() {
   x.fillText(fmt(shown.prefill) + " tok/s prefill", cx, cy + 112);
   x.fillStyle = css("--muted"); x.font = "400 22px ui-sans-serif,system-ui";
   x.fillText("0", cx - 176, cy + 182); x.fillText(Math.round(scaleMax), cx + 158, cy + 182);
+  drawHistory();
   requestAnimationFrame(draw);
 }
 requestAnimationFrame(draw);
 
+function drawHistory() {
+  // The decode tok/s the sampler recorded, timestamped: idle seconds leave gaps, so x follows t,
+  // not the point index. Points stop when the dial's poll stops; the right edge is the newest point.
+  const c = el("hist"), box = c.getBoundingClientRect();
+  const W = Math.max(50, Math.round(box.width)), H = Math.max(30, Math.round(box.height));
+  const dpr = window.devicePixelRatio || 1;
+  if (c.width !== W * dpr || c.height !== H * dpr) { c.width = W * dpr; c.height = H * dpr; }
+  const x = c.getContext("2d");
+  x.setTransform(dpr, 0, 0, dpr, 0, 0);
+  x.clearRect(0, 0, W, H);
+  const padL = 2, padR = 44, padT = 6, padB = 16;      // padR keeps the peak label off the last point
+  const iw = W - padL - padR, ih = H - padT - padB;
+  const now = Date.now() / 1000, span = 300;
+  const px = t => padL + iw - ((now - t) / span) * iw;  // 5-minute window slides right to left
+  const finite = histPoints.filter(p => p.tok_s != null && isFinite(p.tok_s));
+  if (!finite.length) {
+    x.fillStyle = css("--muted"); x.font = "400 12px ui-sans-serif,system-ui"; x.textAlign = "left";
+    x.fillText("no decode yet — idle", padL + 2, padT + ih / 2);
+    return;
+  }
+  const peak = Math.max(...finite.map(p => p.tok_s));
+  histTop = Math.max(peak, histTop * 0.995);           // grows at once, deflates slowly, like the dial
+  const py = v => padT + ih - Math.min(1, v / (histTop || 1)) * ih;
+  // baseline and the peak guide
+  x.strokeStyle = css("--line"); x.lineWidth = 1;
+  x.beginPath(); x.moveTo(padL, padT + ih + .5); x.lineTo(padL + iw, padT + ih + .5); x.stroke();
+  x.setLineDash([2, 4]);
+  x.beginPath(); x.moveTo(padL, py(histTop)); x.lineTo(padL + iw, py(histTop)); x.stroke();
+  x.setLineDash([]);
+  // the rate line over the sparse points
+  x.strokeStyle = css("--cool"); x.lineWidth = 2; x.lineJoin = "round";
+  x.beginPath();
+  finite.forEach((p, i) => i ? x.lineTo(px(p.t), py(p.tok_s)) : x.moveTo(px(p.t), py(p.tok_s)));
+  x.stroke();
+  // fill under the line down to the baseline
+  x.lineTo(px(finite[finite.length - 1].t), padT + ih);
+  x.lineTo(px(finite[0].t), padT + ih);
+  x.closePath();
+  x.fillStyle = css("--cool"); x.globalAlpha = 0.12; x.fill(); x.globalAlpha = 1;
+  // axis labels
+  x.fillStyle = css("--muted"); x.font = "400 11px ui-sans-serif,system-ui"; x.textAlign = "left";
+  x.fillText("0", padL, H - 3);
+  x.textAlign = "right";
+  x.fillText(`${Math.round(histTop)} tok/s`, padL + iw, padT + 4);
+  x.fillText("5 min ago", padL, H - 3);
+  x.fillText("now", padL + iw, H - 3);
+}
+
 function apply(s) {
   target.decode = s.live?.decode_tok_s ?? 0;
   target.prefill = s.live?.prefill_tok_s ?? 0;
+  histPoints = (s.decode_5m?.history || []).slice(-360);
+  el("histlabel").style.display = histPoints.length ? "" : "none";
+  el("hist").parentElement.style.display = histPoints.length ? "" : "none";
   el("model").textContent = s.model + (s.warming ? " · warming" : "");
   const cn = s.connections || {};
   el("conns").textContent = ((cn.active || 0) + (cn.waiting || 0)) > 0
