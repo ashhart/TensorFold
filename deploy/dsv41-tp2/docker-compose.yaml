@@ -36,8 +36,9 @@ services:
       TF_API_KEY: ${TF_API_KEY:-}
       TF_CARVEOUT: ${TF_CARVEOUT:-1}
       TF_DSV41_KV_FP8: ${TF_DSV41_KV_FP8:-1}
-      # per-token cache format: fp8 (V4 layout), fp4 (V4.1's native NVFP4 / MXFP4 / FP8-window numerics), bf16
-      TF_DSV41_KV: ${TF_DSV41_KV:-fp8}
+      # per-token cache format: fp8 (V4 layout), fp4 (V4.1's native NVFP4 / MXFP4 / FP8-window numerics), bf16;
+      # empty: TF_DSV41_KV_FP8 decides (1 fp8, 0 bf16)
+      TF_DSV41_KV: ${TF_DSV41_KV:-}
       TF_DSV41_FIXED_GIB: ${TF_DSV41_FIXED_GIB:-}
       TF_DSV41_ENGRAM_DIR: /models/${ENGRAM:-dsv41/DeepSeek-V4.1-Flash-engram}
       # /health: 503 when the engine is fatal (ranks out of step) or one engine call runs past TF_STALL_S (watchdog.sh)

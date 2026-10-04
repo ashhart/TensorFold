@@ -414,3 +414,33 @@ def test_one_source_of_cache_bytes(mode, monkeypatch):
         assert (rows[0].nbytes(), rows[1].nbytes()) == (n * comp, n * ik)
     assert EN._cache_bytes() == int(2.5 * (comp + ik)) and EN._comp_bytes() == int(2.5 * comp)
     assert EN.carved_bytes(4096, 1 << 40) == sum((4096 // r + 1) * comp for r in (2, 2, 2, 1))
+
+
+@gpu
+def test_rank_agreement_words_carry_the_kv_format(monkeypatch):
+    """The TP=2 start-up check compares the cache format and its fp4 knobs: a rank in fp4 and one in fp8 (or with a
+    different knob) would store different bytes and decide keeps apart."""
+
+    _kernels()
+    from tensorfold.families.deepseek_v41.cuda import engine as EN
+    from tensorfold.families.deepseek_v41.cuda import serial as S
+
+    seen = set()
+    for mode in ("bf16", "fp8", "fp4"):
+        for knobs in ((0, 0, 0), (1, 1, 1), (0, 1, 1), (1, 0, 1), (1, 1, 0)):
+            monkeypatch.setattr(S, "KV_MODE", mode)
+            for name, v in zip(("IQ_FP4", "SWA_FP8", "COMP_BF16"), knobs, strict=True):
+                monkeypatch.setattr(S, name, bool(v))
+            seen.add(tuple(EN._kv_words()))
+    assert len(seen) == 15
+
+
+def test_compose_leaves_the_older_kv_switch_working():
+    """The compose file passes TF_DSV41_KV through empty when unset, so serial.py's fallback still reads
+    TF_DSV41_KV_FP8 (0: bf16) instead of a compose default of fp8 shadowing it."""
+
+    import re
+    from pathlib import Path
+
+    compose = (Path(__file__).resolve().parents[1] / "deploy" / "dsv41-tp2" / "docker-compose.yaml").read_text()
+    assert re.findall(r"^\s*TF_DSV41_KV:\s*(.*)$", compose, re.MULTILINE) == ["${TF_DSV41_KV:-}"]

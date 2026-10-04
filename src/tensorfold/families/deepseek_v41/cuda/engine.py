@@ -113,6 +113,15 @@ def _keep_words() -> list[int]:
     return [KEEP_MIN, int(os.environ.get("TF_DSV41_POOL_KEEP", "1") != "0")]
 
 
+def _kv_words() -> list[int]:
+    """The per-token cache format and its fp4 knobs (TF_DSV41_KV, TF_DSV41_IQ_FP4 / SWA_FP8 / COMP_BF16): a state's
+    bytes and numerics follow them, and each rank sizes and keeps prompts from its own: the ranks must agree."""
+
+    from .serial import COMP_BF16, IQ_FP4, KV_MODE, SWA_FP8
+
+    return [("bf16", "fp8", "fp4").index(KV_MODE), int(IQ_FP4), int(SWA_FP8), int(COMP_BF16)]
+
+
 def _disk_words() -> list[int]:
     """The NVMe tier of kept prompts (``kvdisk``): on, budget, minimum tokens, stage (both ranks' disk indexes change
     together and the stage is counted before the pool is sized: the ranks must agree)."""
@@ -218,11 +227,12 @@ class Dsv41Engine:
                                     "there (or point TF_DSV41_ENGRAM_DIR at them)")
         self.streams = max(1, int(parallel))
         mine = [cap, int(bool(drafts)), int(explicit), self.streams, int(SHARED_POOL and self.streams > 1),
-                KEPT_ENTRIES, *_widths_words(), *_keep_words(), *_disk_words()]
+                KEPT_ENTRIES, *_widths_words(), *_keep_words(), *_disk_words(), *_kv_words()]
         both = self._gather_ints(mine)
         if both[0] != both[1]:
             raise RuntimeError(f"the two ranks were started with different settings (context, drafts, parallel, "
-                               f"TF_DSV41_DISK*): rank 0 {both[0]}, rank 1 {both[1]}; give both the same flags")
+                               f"TF_DSV41_DISK*, TF_DSV41_KV and its knobs): rank 0 {both[0]}, rank 1 {both[1]}; "
+                               "give both the same flags")
         started = time.perf_counter()
         self._boot = [("start", started)]
         w = W.load(self.model_dir, rank=rank, log=lambda *a, **k: None, draft=bool(drafts))
