@@ -155,6 +155,8 @@ class Scheduler:
         self._give_way(victims)
         return bool(victims)
 
+    # re-queue to replay later, as GlmScheduler._requeue does in MiaAI-Lab's GLM-5.3-Flash recipe
+    # (patch 0030, Apache-2.0)
     def _give_way(self, streams: list[Stream]) -> None:
         """End these background streams and queue their replays (each keeps its place in line)."""
 

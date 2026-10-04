@@ -5,6 +5,12 @@ mapped into the process and registered with CUDA, is a device-visible buffer tha
 bandwidth is about half of ordinary memory, so it suits cache pools that decode reads sparsely, not weights or
 per-step scratch. Opt in with ``TF_CARVEOUT=1``; nothing here runs otherwise.
 
+Idea credit: placing caches in GB10's display-reserved memory (a 4096-wide 32-bpp DRM dumb buffer, 1792 MiB,
+/dev/dri/card0, registered with cuMemHostRegister DEVICEMAP | IOMEMORY) comes from display_kv.c of coolbho3k's
+DeepSeek-v4.1-Flash-2x-DGX-Spark (https://github.com/coolbho3k/DeepSeek-v4.1-Flash-2x-DGX-Spark,
+release/runtime/sources/display_kv.c at 91b19f6, AGPL-3.0-only). This module is an independent Python implementation
+from the Linux DRM uapi and the CUDA driver API; it contains no code from that file.
+
 Env: ``TF_CARVEOUT`` (1 = on), ``TF_CARVEOUT_BYTES`` (default 1792 MiB), ``TF_DRM_CARD`` (default /dev/dri/card0).
 """
 

@@ -1,8 +1,10 @@
 """Engram n-gram tables of DeepSeek-V4.1 (layers 1 and 14): token map, bucket layout, hashes, row reads.
 
-The hashing follows vLLM's ``models/deepseek_v4_1/common/engram.py`` (Apache-2.0): compressed token ids, one
-odd multiplier per (layer, lookback) from NumPy's PCG64, a rolling XOR, and 24 prime-sized buckets per layer
-(3 n-gram orders x 8 heads). The tables stay in the original release's FP8 shards and are read by row.
+The token map and hashing are ported to NumPy from vLLM's ``models/deepseek_v4_1/common/engram.py`` (Apache-2.0,
+Copyright contributors to the vLLM project; itself a port of DeepSeek's MIT reference): ``token_map`` and
+``_next_prime`` follow its ``build_compressed_token_map`` and ``find_next_prime``; see THIRD_PARTY_NOTICES.md:
+compressed token ids, one odd multiplier per (layer, lookback) from NumPy's PCG64, a rolling XOR, and 24 prime-sized
+buckets per layer (3 n-gram orders x 8 heads). The tables stay in the original release's FP8 shards and are read by row.
 """
 
 from __future__ import annotations

@@ -127,7 +127,8 @@ def make_handler(app: App):
 
         def _tokenize(self) -> None:
             """vLLM's /tokenize: ``messages`` (rendered as the chat route renders them) or ``prompt`` -> token ids,
-            their ``count`` and ``max_model_len``."""
+            their ``count`` and ``max_model_len``. MiaAI-Lab's GLM recipe adds the same route (patch 0037-cuda-tokenize,
+            Apache-2.0); _token_ids' vocabulary check follows it."""
 
             try:
                 length = int(self.headers.get("Content-Length", 0))

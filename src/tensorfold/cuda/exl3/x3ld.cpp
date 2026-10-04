@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Jay Leaton. The DeepSeek-V4.1-Flash family of TensorFold (Apache-2.0): see THIRD_PARTY_NOTICES.md.
-// Modified for TensorFold dsv41-cuda: moved under tensorfold/cuda/exl3 (beside upstream's experts_grouped.cuh), loaded by x3ld.py; code unchanged.
+// Modified for TensorFold dsv41-cuda: moved from patches/0002 families/deepseek_v41/cuda/ under tensorfold/cuda/exl3 (beside upstream's experts_grouped.cuh), loaded by x3ld.py; code unchanged.
 // Bindings of x3ld.cu: upstream exl3 ``grouped`` (tensorfold/cuda/exl3/experts.cpp, the same arguments and Z) with
 // the 0580 load path: nt column tiles a program, pd k steps in flight a warp, probe 0 (real) / 3 (load path alone,
 // timing only), pdl = launch as a programmatic dependent (sm_90+).

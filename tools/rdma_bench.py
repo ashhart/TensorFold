@@ -1,4 +1,5 @@
-"""Two-rank check and timing of the RoCE all-gather against NCCL: rdma_bench.py --rank R --master IP."""
+"""Two-rank check and timing of the RoCE all-gather against NCCL: rdma_bench.py --rank R --master IP
+(protocol after b12x RoCEnante via MiaAI-Lab patch 0006, Apache-2.0; see THIRD_PARTY_NOTICES.md)."""
 
 import argparse
 import time

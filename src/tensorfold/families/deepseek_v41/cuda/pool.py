@@ -10,8 +10,14 @@ needs them. Bases and sizes are multiples of ``ALIGN``, which every compress rat
 The bookkeeping is host-only and deterministic: both ranks apply the same calls in the same order (rank 0 decides and
 sends each decision), so their pools stay equal; ``digest`` checks it.
 
-Design and parts of the code (``Extent``, ``room_after``/``resize``/``move``, ``_move``) after Mia's AI Lab
-GLM-5.3-Flash TensorFold recipe (Apache-2.0); adapted for TensorFold's DeepSeek-V4.1 engine.
+Adapted from MiaAI-Lab's GLM-5.3-Flash TensorFold recipe
+(https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold, patches/0030-glm-multi-stream-engine.patch,
+``tensorfold/families/glm5_next/cuda/pool.py``), Apache License 2.0, Copyright 2026 MiaAI-Lab (Mia's AI Lab): the
+first-fit extent design and the code of ``ALIGN``/``align_up``, ``Extent`` and ``Pool`` (``gaps``, ``free_rows``,
+``place``, ``room_after``, ``get``, ``add``, ``resize``, ``move``, ``remove``) and ``move_rows`` (its ``_move``).
+Changed for TensorFold's DeepSeek-V4.1 engine: no ``Plane``/``Arena`` (the arenas are ``SerialEngine.big``), fixed
+ALIGN with sizes aligned by the caller, extents carry an ``owner``, ``add`` checks ``eid`` against the next id,
+``_merge`` inlined into ``gaps``; ``find``, ``largest_gap`` and ``digest`` are new.
 """
 
 from __future__ import annotations

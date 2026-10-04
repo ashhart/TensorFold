@@ -6,8 +6,12 @@ same fp32 steps), invisible / masked entries never count, and the result is the 
 Exactly equal non-zero scores straddling the k-th place go to the lower index (``torch.topk`` leaves that case
 unspecified). Graph-safe: no host sync, every bound is read on the device.
 
-Design after Jay Leaton's DeepSeek-V4.1 TensorFold recipe (``csa2/dtopk.py``: digit histograms, a masked radix walk,
-an ordered compaction; MIT); written for this engine's scores, untie and candidate blocks.
+Design after Jay Leaton's deepseek-v41-tensorfold-spark (https://github.com/jayleaton/deepseek-v41-tensorfold-spark,
+``patches/0002``, ``csa2/dtopk.py``: digit histograms, a masked radix walk, an ordered compaction; MIT, Copyright (c)
+2026 Jay Leaton), this repository's GLM ``sparse._select_rows`` (8-bit passes, the lowest ties, the visible bound) and
+the visible-pools bound of MiaAI-Lab's GLM-5.3-Flash recipe (patch 0043). No code copied; written for this engine's
+scores, untie and candidate blocks. Candidate-block semantics: see ``kernels.candidate_blocks``. See
+THIRD_PARTY_NOTICES.md.
 """
 
 from __future__ import annotations

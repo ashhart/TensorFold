@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Jay Leaton. The DeepSeek-V4.1-Flash family of TensorFold (Apache-2.0): see THIRD_PARTY_NOTICES.md.
-// Modified for TensorFold dsv41-cuda: moved under tensorfold/cuda/exl3 (beside upstream's experts_grouped.cuh), loaded by x3ld.py; code unchanged.
+// Modified for TensorFold dsv41-cuda: moved from patches/0002 families/deepseek_v41/cuda/ under tensorfold/cuda/exl3 (beside upstream's experts_grouped.cuh), loaded by x3ld.py; code unchanged.
 // DeepSeek-V4.1-Flash routed experts (TF_DSV41_EXPERT_LOADS=1): TensorFold 0.6.0's grouped EXL3 expert GEMV
 // (tensorfold/cuda/exl3/experts_grouped.cuh: any codebook, a width per expert, mul1 for this checkpoint) with the
 // load path of our GLM patch 0580 (docs/DECODE-KERNELS-2.md in the GLM repo; adopted in W19: in situ routed decode

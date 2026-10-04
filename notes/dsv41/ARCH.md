@@ -1,8 +1,10 @@
 # DeepSeek-V4.1-Flash: implementation spec for TensorFold (CUDA)
 
 This spec covers the text model's forward pass (decode and prefill) and DSpark drafting, in the
-order a token flows through them. It is derived from the vLLM port under `notes/ref/` (Apache-2.0),
-the checkpoint inventory (`notes/dsv41/inspect.txt`, `notes/dsv41/tensors.json`) and the fixture
+order a token flows through them. It is derived from vLLM's DeepSeek-V4.1 model and DSpark code
+(https://github.com/vllm-project/vllm, Apache-2.0, Copyright contributors to the vLLM project), read from a
+local, gitignored copy at `notes/ref/` that mirrors `vllm/` (taken from the vLLM container of the DeepSeek-V4.1
+serving recipe), the checkpoint inventory (`notes/dsv41/inspect.txt`, `notes/dsv41/tensors.json`) and the fixture
 config (`tests/fixtures/deepseek_v41/config.json`).
 
 Path abbreviations used in citations:
@@ -432,7 +434,9 @@ that case.
   blocks. Block b = compressed indices `[8b, 8b+7]`. The block score is the **max** of `I` over the
   block's visible entries. The **newest block is pinned** to +∞. The top 2048 blocks are kept, with
   −1 for empty. The kernel is not in ref. These semantics come from the third-party
-  re-implementation `…/coolbho-2x-dgx-spark/release/runtime/ds41/dcp_candidates.py:34-85`, whose
+  re-implementation `release/runtime/ds41/dcp_candidates.py:34-85` of
+  [coolbho3k/DeepSeek-v4.1-Flash-2x-DGX-Spark](https://github.com/coolbho3k/DeepSeek-v4.1-Flash-2x-DGX-Spark)
+  @91b19f6 (Emi Huang, AGPL-3.0-only; semantics only, no code taken), whose
   docstring claims V4.1 parity.
 * Layers 24, 28, 32, 36 set `I[t,s] = −∞` for s outside the chosen blocks, then take the top 512.
 * The mask only matters beyond 2048·8 = **16384** tokens (ratio 1). Below that every block is a
@@ -660,8 +664,9 @@ indexer run in the draft blocks.
 
 For L ∈ {37, 38, 39}: `tap_L = mean over the 4 streams of the residual after layer L's FFN
 hc_post` (`M:654-663`, aux layers {38, 39, 40}). The `+1` convention is confirmed in
-`…/mia-recipe/recipe/overlay/vllm/models/deepseek_v4/nvidia/model.py:1897-1918` (it captures after
-layer `layer_id`). This is a plain mean, not the pre-mix collapse.
+`recipe/overlay/vllm/models/deepseek_v4/nvidia/model.py:1897-1918` of MiaAI-Lab's DeepSeek-V4.1 vLLM
+recipe overlay (AGPL-3.0; only this indexing fact was checked, no code taken), which captures after
+layer `layer_id`. This is a plain mean, not the pre-mix collapse.
 
 ```
 main_x = RMSNorm( concat(tap37, tap38, tap39) @ main_proj , main_norm, 1e-20 )   # D:148-153
