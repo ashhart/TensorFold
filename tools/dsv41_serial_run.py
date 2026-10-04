@@ -63,6 +63,8 @@ def main() -> None:
                     "positions of four documents of each length (this repo's markdown and code, the golden); rank 0 saves per-position "
                     "NLL / top-k to --out (tools/dsv41_tf_compare.py compares two runs)")
     ap.add_argument("--tf-score", type=int, default=MAX_ROWS, help="--tf-compare: positions scored a document")
+    ap.add_argument("--tf-rows", type=int, default=0, help="--tf-compare: score them in calls of this many rows (<= 32: "
+                    "the decode / verify attention path) instead of one prompt chunk")
     ap.add_argument("--needle", default="", help="comma lengths: a magic number at --needle-depths of repo code filler, "
                     "asked for after it (chat template, greedy)")
     ap.add_argument("--needle-trials", type=int, default=1, help="--needle: trials a depth (different numbers)")
@@ -353,7 +355,11 @@ def main() -> None:
                     eng.reset()
                     t = time.perf_counter()
                     eng.prefill(doc[:L - S])
-                    lg = eng.forward(doc[L - S:L])
+                    if args.tf_rows:
+                        lg = torch.cat([eng.forward(doc[a:min(a + args.tf_rows, L)]).float().clone()
+                                        for a in range(L - S, L, args.tf_rows)])
+                    else:
+                        lg = eng.forward(doc[L - S:L])
                     torch.cuda.synchronize()
                     dt = time.perf_counter() - t
                     tgt = torch.tensor(doc[L - S + 1:L], device=lg.device)
