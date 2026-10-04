@@ -140,3 +140,112 @@ def test_ties_reached_through_the_scale():
         codes = Q.unpack(packed)[0].tolist()
         assert codes == [0, 2, 2, 4, 4, 6, 6, 7, 0, 10, 10, 12, 12, 14, 14, 15]
         assert torch.equal(deq.float(), torch.from_numpy(oracle_nvfp4(x.to(torch.bfloat16))).float())
+
+
+# -- the engine's kernels against the port (GPU) -----------------------------------------------------------------
+gpu = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA only")
+
+
+def _kernels():
+    from tensorfold.families.deepseek_v41.cuda import kernels as K
+
+    return K
+
+
+def _tables(K, n=1 << 20):
+    freqs = 1.0 / (160000.0 ** (torch.arange(0, 64, 2, device="cuda").float() / 64))
+    return K.rope_tables(freqs, n)
+
+
+def _rows(n, dim, seed, ties=True):
+    """bf16 rows of mixed magnitudes, with zero groups and, at position 0 (identity RoPE), values landing on E2M1
+    midpoints through scales 1, 0.5 and 2^-9."""
+
+    g = torch.Generator(device="cuda").manual_seed(seed)
+    x = torch.randn((n, dim), generator=g, device="cuda") * torch.exp2(torch.randint(-12, 5, (n, 1), generator=g,
+                                                                                     device="cuda").float())
+    x[:3, :32] = 0.0
+    if ties:
+        mids = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0, 6.0], device="cuda")
+        for k, sc in enumerate((1.0, 0.5, 2.0 ** -9)):
+            x[3 + k, :16] = torch.cat([mids, -mids]) * sc
+    return x.to(torch.bfloat16)
+
+
+@gpu
+@pytest.mark.parametrize("dim,group,scale", [(512, 16, "e4m3"), (128, 32, "ue8m0")])
+def test_store_is_byte_exact(dim, group, scale):
+    """Fp4Rows.store (RoPE + quantize in one kernel) == the port of the reference on K.rope's bf16 output, for 1M
+    rows, written at scattered slots (duplicate slots: the last writer of a row is unspecified, so none here)."""
+
+    K = _kernels()
+    cos, sin = _tables(K)
+    E = 1 << 17
+    rows = K.Fp4Rows(E, dim, group=group, scale=scale, device="cuda")
+    for b in range(8):
+        x = _rows(E, dim, b)
+        pos = torch.randint(0, 1 << 20, (E,), device="cuda")
+        pos[:8] = 0
+        slot = torch.randperm(E, device="cuda")
+        rows.store(slot, x, pos, cos, sin)
+        ref = K.rope(x, pos, cos, sin)
+        packed, sc, deq = Q.nvfp4(ref) if scale == "e4m3" else Q.mxfp4(ref, group)
+        assert torch.equal(rows.q[slot], packed) and torch.equal(rows.s[slot], sc)
+        assert torch.equal(rows.dequant()[slot], deq)
+
+
+@gpu
+@pytest.mark.parametrize("fmt", ["fp8", "mxfp4"])
+def test_fake_quant_matches_the_port(fmt):
+    K = _kernels()
+    cos, sin = _tables(K)
+    for b in range(4):
+        shape = (4096, 512) if fmt == "fp8" else (64, 64, 128)
+        x = _rows(shape[0] * (shape[1] if len(shape) == 3 else 1), shape[-1], 100 + b).view(shape)
+        pos = torch.randint(0, 1 << 20, (shape[0],), device="cuda")
+        pos[:2] = 0
+        got = K.rope_q(x, pos, cos, sin, fmt)
+        ref = K.rope(x, pos, cos, sin)
+        want = Q.mxfp8(ref) if fmt == "fp8" else Q.mxfp4(ref)[2]
+        assert torch.equal(got, want)
+
+
+@gpu
+def test_store_under_a_graph_and_row_moves():
+    K = _kernels()
+    from tensorfold.families.deepseek_v41.cuda.pool import move_rows
+
+    cos, sin = _tables(K, 8192)
+    rows = K.Fp4Rows(4096, 512, device="cuda")
+    x = torch.zeros((4, 512), dtype=torch.bfloat16, device="cuda")
+    pos = torch.zeros((4,), dtype=torch.long, device="cuda")
+    slot = torch.zeros((4,), dtype=torch.long, device="cuda")
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        rows.store(slot, x, pos, cos, sin)
+    torch.cuda.current_stream().wait_stream(side)
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        rows.store(slot, x, pos, cos, sin)
+    for k in range(3):
+        x.copy_(_rows(4, 512, 7 + k, ties=False))
+        pos.copy_(torch.tensor([5, 77, 4000, 1], device="cuda"))
+        slot.copy_(torch.tensor([10, 11, 12 + k, 400], device="cuda"))
+        g.replay()
+        want = Q.nvfp4(K.rope(x, pos, cos, sin))
+        assert torch.equal(rows.q[slot], want[0]) and torch.equal(rows.s[slot], want[1])
+    full = _rows(4096, 512, 3)
+    rows.store(torch.arange(4096, device="cuda"), full, torch.arange(4096, device="cuda"), cos, sin)
+    ref = rows.clone()
+    move_rows(rows, 100, 140, 300)                           # overlapping, up and down
+    assert torch.equal(rows.q[140:440], ref.q[100:400]) and torch.equal(rows.s[140:440], ref.s[100:400])
+    move_rows(rows, 140, 100, 300)
+    assert torch.equal(rows.q[100:400], ref.q[100:400])
+    idx = torch.tensor([5, 9, 4095], device="cuda")
+    taken = rows.take(idx)
+    rows[0:8].zero_()
+    rows.put_rows(idx, taken)
+    assert torch.equal(rows.q[idx], ref.q[idx]) and torch.equal(rows.s[9], ref.s[9]) and not rows.q[0].any()
+    assert rows.nbytes() == 4096 * K.Fp4Rows.row_bytes(512, 16) == 4096 * 288
+    assert [p for p in rows.planes] == ["q", "s"] and K.Fp8Rows(1, 512, plain=64).planes == ("q", "r", "s")

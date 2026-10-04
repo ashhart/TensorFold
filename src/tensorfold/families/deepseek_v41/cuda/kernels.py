@@ -178,6 +178,149 @@ class Fp8Rows(QRows):
             body.to(torch.bfloat16)
 
 
+FP4_MAGS = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
+
+
+@triton.jit
+def _e2m1_code(y):
+    """E2M1 nibbles of fp32 y within +-6: round to nearest, ties to the even code (cvt.rn's thresholds); -0 -> 0."""
+
+    a = tl.abs(y)
+    m = ((a > 0.25).to(tl.int32) + (a >= 0.75).to(tl.int32) + (a > 1.25).to(tl.int32) + (a >= 1.75).to(tl.int32)
+         + (a > 2.5).to(tl.int32) + (a >= 3.5).to(tl.int32) + (a > 5.0).to(tl.int32))
+    return tl.where((y < 0) & (m > 0), m | 8, m)
+
+
+@triton.jit
+def _e2m1_val(c):
+    """fp32 of E2M1 nibbles c (int32) from bits, no table: m >= 2 is 2^((m >> 1) - 1) * (1 + (m & 1) / 2), 1 is 0.5."""
+
+    m = c & 7
+    bits = tl.where(m >= 2, (((m >> 1) + 126) << 23) | ((m & 1) << 22), tl.where(m == 1, 0x3F000000, 0))
+    return (bits | ((c & 8) << 28)).to(tl.float32, bitcast=True)
+
+
+@triton.jit
+def _pow2_ceil(t):
+    """(k, 2^k, 2^-k) for fp32 t > 0, k = ceil(log2 t) from the bits (DeepSeek's fast_log2_ceil): exponent, plus one
+    when any mantissa bit is set."""
+
+    b = t.to(tl.int32, bitcast=True)
+    k = ((b >> 23) & 0xFF) - 127 + ((b & 0x7FFFFF) != 0).to(tl.int32)
+    return k, ((k + 127) << 23).to(tl.float32, bitcast=True), ((127 - k) << 23).to(tl.float32, bitcast=True)
+
+
+@triton.jit
+def _rope_q(X, POS, COS, SIN, OUT, OS, SLOT, heads, D: tl.constexpr, HALF: tl.constexpr, G: tl.constexpr,
+            MODE: tl.constexpr):
+    """_rope of each [D] head vector (its last 2 * HALF dims), rounded to bf16 as the reference's apply_rotary_emb
+    writes it, then DeepSeek's quantizer over groups of G values. MODE 0: NVFP4 (e4m3 scale = amax / 6 rounded), 1:
+    MXFP4 (2^k scale), both packed into row SLOT[r] of OUT (nibbles) / OS (scale bytes); 2: MXFP4, 3: FP8 e4m3 (2^k
+    scale per G), both written back to OUT as bf16 (fake quant: every value times its scale is exact in bf16)."""
+
+    r = tl.program_id(0)
+    h = tl.program_id(1)
+    base = (r * heads + h) * D
+    P: tl.constexpr = D // 2
+    NG: tl.constexpr = D // G
+    i = tl.arange(0, P)
+    e = tl.load(X + base + 2 * i).to(tl.float32)
+    od = tl.load(X + base + 2 * i + 1).to(tl.float32)
+    p = tl.load(POS + r)
+    j = i - (P - HALF)
+    rot = j >= 0
+    c = tl.load(COS + p * HALF + j, mask=rot, other=1.0)
+    s = tl.load(SIN + p * HALF + j, mask=rot, other=0.0)
+    # the fused multiply-adds _rope compiles to (checked bitwise): a tie of the bf16 rounding must go the same way
+    e, od = (tl.where(rot, tl.fma(e, c, -(od * s)), e).to(tl.bfloat16).to(tl.float32),
+             tl.where(rot, tl.fma(e, s, od * c), od).to(tl.bfloat16).to(tl.float32))
+    amax = tl.max(tl.reshape(tl.maximum(tl.abs(e), tl.abs(od)), (NG, G // 2)), axis=1)
+    if MODE == 0:
+        s8 = tl.math.div_rn(tl.maximum(amax, 6 * 2 ** -9), 6.0).to(tl.float8e4nv)
+        sc = tl.reshape(tl.broadcast_to(s8.to(tl.float32)[:, None], (NG, G // 2)), (P,))
+        ye = tl.math.div_rn(e, sc)
+        yo = tl.math.div_rn(od, sc)
+        sbyte = s8.to(tl.uint8, bitcast=True)
+    else:
+        if MODE == 3:
+            k, s2, inv = _pow2_ceil(tl.maximum(amax, 1e-4) * (1.0 / 448.0))
+        else:
+            k, s2, inv = _pow2_ceil(tl.maximum(amax, 6 * 2 ** -126) * (1.0 / 6.0))
+        sc = tl.reshape(tl.broadcast_to(s2[:, None], (NG, G // 2)), (P,))
+        inv = tl.reshape(tl.broadcast_to(inv[:, None], (NG, G // 2)), (P,))
+        ye = e * inv                                        # = x / 2^k exactly
+        yo = od * inv
+        sbyte = (k + 127).to(tl.uint8)
+    if MODE == 3:
+        ve = tl.minimum(tl.maximum(ye, -448.0), 448.0).to(tl.float8e4nv).to(tl.float32) * sc
+        vo = tl.minimum(tl.maximum(yo, -448.0), 448.0).to(tl.float8e4nv).to(tl.float32) * sc
+    else:
+        ce = _e2m1_code(tl.minimum(tl.maximum(ye, -6.0), 6.0))
+        co = _e2m1_code(tl.minimum(tl.maximum(yo, -6.0), 6.0))
+        ve = _e2m1_val(ce) * sc
+        vo = _e2m1_val(co) * sc
+    if MODE < 2:
+        row = tl.load(SLOT + r).to(tl.int64)
+        tl.store(OUT + row * P + i, (ce | (co << 4)).to(tl.uint8))
+        tl.store(OS + row * NG + tl.arange(0, NG), sbyte)
+    else:
+        tl.store(OUT + base + 2 * i, ve.to(tl.bfloat16))
+        tl.store(OUT + base + 2 * i + 1, vo.to(tl.bfloat16))
+
+
+def rope_q(x: torch.Tensor, pos: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, fmt: str | None) -> torch.Tensor:
+    """``rope`` (bf16), then fake-quantized as DeepSeek-V4.1 does: fmt "fp8" (e4m3, a 2^k scale per 32: the window
+    keys), "mxfp4" (E2M1, a 2^k scale per 32: the indexer queries) or None (plain rope)."""
+
+    if fmt is None:
+        return rope(x, pos, cos, sin)
+    shape = x.shape
+    x3 = x.reshape(shape[0], -1, shape[-1]).contiguous()
+    out = torch.empty(x3.shape, dtype=torch.bfloat16, device=x.device)
+    _rope_q[(x3.shape[0], x3.shape[1])](x3, pos, cos, sin, out, out, pos, x3.shape[1], D=shape[-1], HALF=cos.shape[1],
+                                        G=32, MODE=3 if fmt == "fp8" else 2, num_warps=4)
+    return out.reshape(shape)
+
+
+class Fp4Rows(QRows):
+    """DeepSeek-V4.1's packed KV rows: E2M1 nibbles ``q`` u8 [n, dim / 2] (element 2j in the low nibble, 2j + 1 in
+    the high; sign bit 3 | magnitude index over FP4_MAGS, -0 stored as 0) and a scale byte per ``group`` values ``s``
+    u8 [n, dim / group]: e4m3 bits (``scale`` "e4m3", NVFP4 without its global scale: the compressed entries, 16) or
+    the exponent k + 127 of 2^k ("ue8m0", MXFP4: the indexer keys, 32). Written only by ``store``."""
+
+    planes = ("q", "s")
+
+    def __init__(self, n: int = 0, dim: int = 0, *, group: int = 16, scale: str = "e4m3", device="cuda",
+                 alloc=None) -> None:
+        self.dim, self.group, self.scale = dim, group, scale
+        alloc = alloc or (lambda shape, dtype: torch.zeros(shape, dtype=dtype, device=device))
+        self.q = alloc((n, dim // 2), torch.uint8)
+        self.s = alloc((n, dim // group), torch.uint8)
+
+    @staticmethod
+    def row_bytes(dim: int, group: int) -> int:
+        return dim // 2 + dim // group
+
+    def store(self, slot: torch.Tensor, x: torch.Tensor, pos: torch.Tensor, cos: torch.Tensor,
+              sin: torch.Tensor) -> None:
+        """Rows ``slot`` <- ``x`` [R, dim] RoPE'd at ``pos`` and quantized, in one launch (no host sync)."""
+
+        _rope_q[(x.shape[0], 1)](x.contiguous(), pos, cos, sin, self.q, self.s, slot, 1, D=self.dim,
+                                 HALF=cos.shape[1], G=self.group, MODE=0 if self.scale == "e4m3" else 1, num_warps=4)
+
+    def dequant(self) -> torch.Tensor:
+        """bf16 [n, dim] (tests)."""
+
+        b = self.q.int()
+        c = torch.stack([b & 15, b >> 4], dim=-1).flatten(1)
+        v = torch.tensor(FP4_MAGS, device=b.device)[(c & 7).long()]
+        v = torch.where(c >= 8, -v, v)
+        s = self.s.view(torch.float8_e4m3fn).float() if self.scale == "e4m3" else (self.s.int() << 23).view(
+            torch.float32)
+        n = b.shape[0]
+        return (v.view(n, -1, self.group) * s[..., None]).view(n, self.dim).to(torch.bfloat16)
+
+
 def cache_nbytes(t) -> int:
     return t.nbytes() if isinstance(t, QRows) else t.numel() * t.element_size()
 
