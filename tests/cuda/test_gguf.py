@@ -14,6 +14,20 @@ from tensorfold.cuda.gguf.codebook import IQ2_XXS_GRID
 from tensorfold.cuda.gguf.linear import FORMATS
 
 
+def test_f16_projection_preserves_weights_and_masks_partial_tiles():
+    from tensorfold.cuda.gguf.linear import linear
+
+    torch.manual_seed(7)
+    w = torch.randn(7, 259, device="cuda", dtype=torch.float16) * 0.1
+    hi = w.bfloat16()
+    lo = (w.float() - hi.float()).bfloat16()
+    assert torch.equal(hi.float() + lo.float(), w.float())
+    x = torch.randn(65, 259, device="cuda", dtype=torch.bfloat16) * 0.01
+    for rows in (1, 5, 21, 65):
+        expected = x[:rows].float() @ w.float().T
+        torch.testing.assert_close(linear(x[:rows], w, dtype=torch.float32), expected, rtol=2e-5, atol=2e-6)
+
+
 def reference(data, fmt):
     result = []
     _, size = FORMATS[fmt]

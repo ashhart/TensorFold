@@ -158,6 +158,11 @@ uses direct BF16 loads. IQ2_XXS and Q2_K experts retain packed weights and use s
 CUDA kernels. Dense grouped output projections execute in one grid. Partial expert verification
 items skip empty subgroups rather than loading weights for masked outputs.
 
+F16 compressor weights are split exactly into two BF16 components for prompt projections. Both
+components use tensor cores with FP32 accumulation, preserving stored weight and activation precision
+while avoiding FP32 SIMT GEMMs. Other operand formats keep the FP32 fallback; decode reductions are
+unchanged. Q2 expert prefill loads contiguous input fragments with shared-memory matrix instructions.
+
 DSpark verification shares packed weight reads between dense rows. Target sampling transfers
 candidates once per verification window; ties reaching the candidate margin fall back to the
 full reference draw. Keyed RNG and probability arithmetic are unchanged. The DSpark backbone

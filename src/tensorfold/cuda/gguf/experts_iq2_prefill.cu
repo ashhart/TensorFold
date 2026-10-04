@@ -175,8 +175,7 @@ __global__ void __launch_bounds__(THREADS, 2) iq2_soa_prefill_kernel(
     for (int ks = 0; ks < 4; ++ks) {
       const int k0 = k_blk + ks * 16;
       const int c = lane & 3;
-      // The same k32 pair ordering for A and B; ordinary ldmatrix kWidth=2
-      // would change rounding even though the mathematical dot is unchanged.
+      // Contiguous k16 fragments use TensorFold's shared-memory matrix load.
       uint32_t a[MI][4];
 #pragma unroll
       for (int i = 0; i < MI; ++i)

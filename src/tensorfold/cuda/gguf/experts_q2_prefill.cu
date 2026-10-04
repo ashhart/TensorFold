@@ -62,11 +62,9 @@ __device__ __forceinline__ float q2_at(const Q2Cache& w, int col, int j) {
 }
 
 __device__ __forceinline__ void q2_bfrag(const Q2Cache& w, int col, int k0, int c, uint32_t& b0, uint32_t& b1) {
-  // Match Triton's byte-derived kWidth=4 fragments: two k16 MMAs cover
-  // alternate pairs in one k32 span, preserving the FP32 accumulator order.
-  const int j0 = (k0 & ~31) + ((k0 >> 4) & 1) * 2 + 4 * c;
+  const int j0 = k0 + 2 * c;
   b0 = pack2(q2_at(w, col, j0), q2_at(w, col, j0 + 1));
-  b1 = pack2(q2_at(w, col, j0 + 16), q2_at(w, col, j0 + 17));
+  b1 = pack2(q2_at(w, col, j0 + 8), q2_at(w, col, j0 + 9));
 }
 
 __global__ void __launch_bounds__(THREADS, 2) q2_soa_prefill_kernel(
@@ -159,17 +157,11 @@ __global__ void __launch_bounds__(THREADS, 2) q2_soa_prefill_kernel(
     for (int ks = 0; ks < 4; ++ks) {
       const int k0 = k_blk + ks * 16;
       const int c = lane & 3;
-      // The same k32 pair ordering for A and B; ordinary ldmatrix kWidth=2
-      // would change rounding even though the mathematical dot is unchanged.
+      // Contiguous k16 fragments use TensorFold's shared-memory matrix load.
       uint32_t a[MI][4];
 #pragma unroll
       for (int i = 0; i < MI; ++i) {
-        const int row = wm * (BM / WM) + i * 16 + (lane >> 2);
-        const int k = (ks >> 1) * 32 + (ks & 1) * 2 + 4 * c;
-        a[i][0] = *reinterpret_cast<const uint32_t*>(p + pswz(row, k / 8) + (k % 8) * 2);
-        a[i][1] = *reinterpret_cast<const uint32_t*>(p + pswz(row + 8, k / 8) + (k % 8) * 2);
-        a[i][2] = *reinterpret_cast<const uint32_t*>(p + pswz(row, (k + 16) / 8) + (k % 8) * 2);
-        a[i][3] = *reinterpret_cast<const uint32_t*>(p + pswz(row + 8, (k + 16) / 8) + (k % 8) * 2);
+        ldsm4(a[i], p + pswz(wm * (BM / WM) + i * 16 + (lane & 7) + ((lane >> 3) & 1) * 8, ks * 2 + (lane >> 4)));
       }
 #pragma unroll
       for (int j = 0; j < NT; ++j) {

@@ -178,6 +178,25 @@ def _mm(
 
 
 @triton.jit
+def _float_mm(X, W, Y, M: tl.constexpr, N: tl.constexpr, K: tl.constexpr):
+    # An F16 weight is exactly the sum of two BF16 values. Keep both components
+    # and BF16 activations, with FP32 tensor-core accumulators.
+    m = tl.program_id(0) * 128 + tl.arange(0, 128)
+    n = tl.program_id(1) * 64 + tl.arange(0, 64)
+    k = tl.arange(0, 32)
+    acc = tl.zeros((128, 64), tl.float32)
+    for start in range(tl.cdiv(K, 32)):
+        ki = start * 32 + k
+        a = tl.load(X + m[:, None] * K + ki[None, :], (m[:, None] < M) & (ki[None, :] < K), 0)
+        w = tl.load(W + n[None, :] * K + ki[:, None], (n[None, :] < N) & (ki[:, None] < K), 0).to(tl.float32)
+        hi = w.to(tl.bfloat16)
+        lo = (w - hi.to(tl.float32)).to(tl.bfloat16)
+        acc = tl.dot(a, hi, acc)
+        acc = tl.dot(a, lo, acc)
+    tl.store(Y + m[:, None] * N + n[None, :], acc, (m[:, None] < M) & (n[None, :] < N))
+
+
+@triton.jit
 def _float_mv(X, W, Y, N: tl.constexpr, K: tl.constexpr, BK: tl.constexpr, BN: tl.constexpr):
     r = tl.program_id(0)
     n = tl.program_id(1) * BN + tl.arange(0, BN)

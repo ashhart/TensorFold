@@ -19,7 +19,7 @@ from .expert_kernels import (
     _mv_iq2_soa,
     _mv_q2_soa,
 )
-from .kernels import _float_mv, _mm, _mv, _mv_rows, _unpack, codebook
+from .kernels import _float_mm, _float_mv, _mm, _mv, _mv_rows, _unpack, codebook
 
 if TYPE_CHECKING:
     from .prefill import Workspace
@@ -457,7 +457,21 @@ def linear(x: torch.Tensor, weight: Packed | torch.Tensor, *, dtype=torch.bfloat
         raise ValueError("dense linear expects input [rows, K] and weight [N, K] on one device")
     n, k = weight.shape
     if x.shape[0] > 16:
-        # Compressors require FP32 projections. Disable TF32 at engine startup.
+        if x.is_cuda and x.dtype == torch.bfloat16 and weight.dtype == torch.float16:
+            out = torch.empty((x.shape[0], n), dtype=dtype, device=x.device)
+            _float_mm[(triton.cdiv(x.shape[0], 128), triton.cdiv(n, 64))](
+                x.contiguous(),
+                weight.contiguous(),
+                out,
+                x.shape[0],
+                n,
+                k,
+                num_warps=4,
+                num_stages=3,
+                enable_fp_fusion=False,
+            )
+            return out
+        # Other operand formats require FP32 projections; TF32 stays disabled.
         return (x.float() @ weight.float().T).to(dtype)
     out = torch.empty((x.shape[0], n), dtype=dtype, device=x.device)
     _float_mv[(x.shape[0], triton.cdiv(n, 4))](
