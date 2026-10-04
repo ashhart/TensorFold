@@ -24,9 +24,13 @@
   header .state.on { color:var(--accent); }
   #stale { display:none; padding:6px 20px; background:var(--hot); color:#fff; font-size:12px; }
   main { max-width:860px; margin:0 auto; padding:20px; }
-  .dial { display:flex; justify-content:center; padding:8px 0 4px; }
+  .dialwrap { display:flex; align-items:center; justify-content:center; gap:28px; padding:8px 0 4px; flex-wrap:wrap; }
+  .dial { display:flex; justify-content:center; padding:0; }
+  .dialside { display:flex; flex-direction:column; gap:12px; width:220px; }
+  .dialside .tile .value { font-size:17px; }
   canvas { width:280px; height:280px; }
-  .tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-top:16px; }
+  .tiles { display:grid; grid-template-columns:repeat(5, 1fr); gap:12px; margin-top:16px; }
+  @media (max-width:760px) { .tiles { grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); } }
   .tile { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
   .tile .label { font-size:10px; text-transform:uppercase; letter-spacing:.1em; color:var(--muted); }
   .tile .value { font-size:20px; font-weight:600; font-variant-numeric:tabular-nums; margin-top:4px; }
@@ -57,14 +61,20 @@
 <header><b>TensorFold</b><span class="state" id="model">—</span><span class="state" id="conns"></span></header>
 <div id="stale">no answer from the server — retrying</div>
 <main>
-  <div class="dial"><canvas id="gauge" width="560" height="560"></canvas></div>
+  <div class="dialwrap">
+    <div class="dial"><canvas id="gauge" width="560" height="560"></canvas></div>
+    <div class="dialside">
+      <div class="tile mem"><div class="label">Memory</div><div class="value" id="mem">—</div>
+        <div class="cap" id="memcap"></div><div class="bar"><i id="membar"></i></div></div>
+      <div class="tile fill"><div class="label">Prefill queue</div><div class="value" id="fill">idle</div>
+        <div class="cap" id="fillcap">tokens left to prefill</div></div>
+    </div>
+  </div>
   <div class="tiles">
     <div class="tile"><div class="label">Context</div><div class="value" id="ctx">—</div>
       <div class="cap" id="ctxcap"></div><div class="bar"><i id="ctxbar"></i></div></div>
     <div class="tile"><div class="label">Cached tokens</div><div class="value" id="cache">—</div>
       <div class="cap">held by the live streams</div></div>
-    <div class="tile"><div class="label">Memory</div><div class="value" id="mem">—</div>
-      <div class="cap" id="memcap"></div><div class="bar"><i id="membar"></i></div></div>
     <div class="tile"><div class="label">5-min gen rate</div><div class="value" id="gen5">—</div>
       <div class="cap" id="gen5cap"></div></div>
     <div class="tile"><div class="label">Avg prefill</div><div class="value" id="pavg">—</div>
@@ -106,10 +116,14 @@ function draw() {
   const c = el("gauge"), x = c.getContext("2d"), S = 560;
   x.clearRect(0, 0, S, S);
   const cx = S / 2, cy = S / 2;
-  arc(x, cx, cy, 240, 26, 1, css("--line"), 1);               // tracks
-  arc(x, cx, cy, 196, 12, 1, css("--line"), 1);
-  arc(x, cx, cy, 240, 26, shown.decode / scaleMax, band(shown.decode), 1);
-  if (shown.prefill > 0.5) arc(x, cx, cy, 196, 12, Math.min(1, Math.log10(1 + shown.prefill) / 4), css("--cool"), 1);
+  arc(x, cx, cy, 232, 22, 1, css("--line"), 1);               // one track
+  // prefill and decode share the dial: whichever mode is live colors the arc (they never run together)
+  const mode = shown.prefill > 0.5 ? "prefill" : "decode";
+  if (mode === "prefill") {
+    arc(x, cx, cy, 232, 22, Math.min(1, Math.log10(1 + shown.prefill) / 4), css("--cool"), 1);
+  } else {
+    arc(x, cx, cy, 232, 22, shown.decode / scaleMax, band(shown.decode), 1);
+  }
   x.textAlign = "center"; x.fillStyle = css("--text");
   x.font = "600 88px ui-sans-serif,system-ui"; x.fillText(shown.decode.toFixed(1), cx, cy + 10);
   x.font = "400 26px ui-sans-serif,system-ui"; x.fillStyle = css("--muted"); x.fillText("tok/s decode", cx, cy + 52);
@@ -156,12 +170,26 @@ function apply(s) {
   el("acccap").textContent = sp.drafted ? `${fmt(sp.accepted)} of ${fmt(sp.drafted)} drafts · ${fmt(sp.rounds)} rounds`
                                         : "drafts the verify rounds committed";
   const g = s.decode_5m || {};
-  el("gen5").innerHTML = g.min == null ? "—" :
-    `${fmt(g.min)} <small>min ·</small> ${fmt(g.max)} <small>tok/s max</small>`;
-  el("gen5cap").textContent = g.count ? `mean ${fmt(g.mean)} · ${g.count} samples` : "";
+  el("gen5").innerHTML = g.mean == null ? "—" : `${fmt(g.mean)} <small>tok/s</small>`;
+  el("gen5cap").textContent = g.count ? `min ${fmt(g.min)} · max ${fmt(g.max)} · ${g.count} samples` : "";
   const p = s.prefill || {};
   el("pavg").innerHTML = p.avg_tok_s == null ? "—" : `${fmt(p.avg_tok_s)} <small>tok/s</small>`;
   el("pavgcap").textContent = p.count ? `${p.count} chunks · last ${fmt(p.last_tok_s)}` : "";
+
+  // The prefill queue: tokens left per filling prompt, an ETA from the completed-chunks average rate.
+  const fills = s.fill_progress || [];
+  if (!fills.length) {
+    el("fill").textContent = "idle";
+    el("fillcap").textContent = "tokens left to prefill";
+  } else {
+    const rate = p.avg_tok_s;                          // the steady completed-chunks average, not the 2 s burst
+    const left = fills.reduce((a, f) => a + f.left, 0);
+    el("fill").innerHTML = `${fmt(left)} <small>tok</small>`;
+    const eta = rate ? left / rate : null;
+    el("fillcap").textContent = fills.length > 1
+      ? `${fills.length} prompts · ~${eta == null ? "—" : etaText(eta)} at ${fmt(rate)} tok/s`
+      : `of ${fmt(fills[0].prompt_tokens)} · ~${eta == null ? "—" : etaText(eta)} at ${fmt(rate)} tok/s`;
+  }
   el("requests").innerHTML = (s.requests || []).map(row).join("") ||
     "<div class='req'><div class='stats'>no requests finished yet</div></div>";
 }
@@ -170,6 +198,12 @@ function ago(when) {
   const d = Date.now() / 1000 - when;
   return d < 90 ? `${Math.max(1, Math.round(d))}s ago` :
          d < 5400 ? `${Math.round(d / 60)}m ago` : `${(d / 3600).toFixed(1)}h ago`;
+}
+
+function etaText(seconds) {
+  if (seconds < 90) return `${Math.round(seconds)}s`;
+  if (seconds < 5400) return `${Math.round(seconds / 60)}m`;
+  return `${(seconds / 3600).toFixed(1)}h`;
 }
 
 function row(r) {

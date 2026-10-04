@@ -142,7 +142,7 @@ class StatsCollector:
             live["decode_tok_s"] = scheduler.decoded.rate()
             live["prefill_tok_s"] = scheduler.prefilled.rate()
             connections = {"active": scheduler.active, "waiting": scheduler.waiting,
-                           "filling": scheduler.filling is not None}
+                           "filling": bool(scheduler.filling)}
             if live["decode_tok_s"] > 0:
                 self.decode.add(live["decode_tok_s"])
             context.update(scheduler.context_snapshot())
@@ -151,6 +151,7 @@ class StatsCollector:
         return {"ts": self.clock(), "model": getattr(app, "served_name", ""),
                 "warming": bool(getattr(app, "warming", False)),
                 "connections": connections, "live": live, "context": context,
+                "fill_progress": scheduler.fill_progress if scheduler is not None else [],
                 "memory": _memory(app), "decode_5m": self.decode.snapshot(),
                 "prefill": self.prefill_average.snapshot(), "requests": list(self._history),
                 "speculative": {**speculative,

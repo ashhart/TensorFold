@@ -296,6 +296,12 @@ class Scheduler(PromptFill):
 
         return [f.job for f in self._fills]
 
+    @property
+    def fill_progress(self) -> list[dict[str, int]]:
+        """How far each prefilling prompt has left: the dashboard's tokens-remaining and ETA read this."""
+
+        return [{"prompt_tokens": len(f.job.prompt_ids), "left": max(0, int(f.left))} for f in self._fills]
+
     def context_snapshot(self) -> dict[str, int]:
         """What the dashboard's context tile shows now: tokens the live streams hold, and the prefix hits among them.
 
@@ -621,10 +627,16 @@ class Scheduler(PromptFill):
     def _request_summary(self, job: ChatJob, stream: Any) -> dict[str, Any]:
         """One finished request for the dashboard: its times, its speed, and the cache it hit or missed on."""
 
-        finished = time.perf_counter()
+        finished = time.time()                                 # a Unix second: the page's ago() diffs against Date.now()
+        wall_clock = time.perf_counter()                       # the job's own stamps are perf_counter seconds
         decode_tokens = max(0, len(stream.emitted) - 1) if stream is not None else 0
         prefill_seconds = max(0.0, job.prefilled_at - job.started_at) if job.started_at and job.prefilled_at else None
-        decode_seconds = max(0.0, job.finished_at - job.prefilled_at) if job.prefilled_at else 0.0
+        # A decode's end: the stream's own stop stamp (finish_job), else now for a stream that just
+        # hit eos in a round, else the job's _finish stamp (a summary taken after the request ended).
+        decode_end = (getattr(stream, "finished_at", 0.0)
+                      or (wall_clock if stream is not None and getattr(stream, "finished", False) else 0.0)
+                      or job.finished_at)
+        decode_seconds = (max(0.0, decode_end - job.prefilled_at) if job.prefilled_at else 0.0)
         # The job's own rate over its decode window, plus the meter's shortest-window reading for the burst
         # its last rounds reached (the live line's 2 s window outlives a short request's rounds).
         rates = [decode_tokens / decode_seconds] if decode_seconds > 0 else []
@@ -636,7 +648,7 @@ class Scheduler(PromptFill):
                 "prompt_tokens": len(job.prompt_ids), "completion_tokens": decode_tokens + 1,
                 "cached_tokens": int(job.cached_tokens),
                 "cache": "hit" if job.cached_tokens > 0 else ("off" if checkpoints is None else "miss"),
-                "total_seconds": max(0.0, finished - job.submitted_at),
+                "total_seconds": max(0.0, wall_clock - job.submitted_at),
                 "prefill_seconds": prefill_seconds, "decode_seconds": decode_seconds or None,
                 "tok_s": (decode_tokens / decode_seconds) if decode_seconds > 0 else None,
                 "tok_s_min": min(rates) if rates else None, "tok_s_max": max(rates) if rates else None,
