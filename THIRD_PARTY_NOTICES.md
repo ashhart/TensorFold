@@ -131,6 +131,11 @@ Parts of the DeepSeek-V4.1 serving path are adapted from Jay Leaton's
   `patches/0001-spark-stack-060.patch`; MIT License, Copyright (c) 2026 TensorFold contributors and Copyright (c) 2026
   Jay Leaton, glm53-tensorfold-spark) and the tool compile of its `engine/serving/structured.py` (MIT License,
   Copyright (c) 2026 Jay Leaton).
+- The NVMe tier of kept prompts (`src/tensorfold/families/deepseek_v41/cuda/kvdisk.py`) adapts its session store's
+  disk tier (`engine/serving/sessdisk.py`: the O_DIRECT file helper, the entry format, reconcile / trim / retain /
+  delete, the compat ident and `from_env`), and the startup intersection of both ranks' entries follows its `_serve`,
+  MIT License, Copyright (c) 2026 Jay Leaton. The license is included in `LICENSES/JayLeaton-MIT.txt`; the file
+  keeps its SPDX line and states what was changed.
 - `deploy/dsv41-tp2/watchdog.sh` and `deploy/dsv41-tp2/systemd/` adapt the watchdog of its `scripts/serve.sh` and
   `scripts/systemd/`, and `tools/dsv41_soak.py`, `tools/dsv41_stress.py` and `tools/dsv41_structured.py` adapt its
   `bench/soak.py`, `bench/stress.py` and `bench/structured.py`:
