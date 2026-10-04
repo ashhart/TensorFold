@@ -11,6 +11,7 @@ if not torch.cuda.is_available():
 
 from nemotron_fakes import tiny_weights  # noqa: E402
 
+from tensorfold.cuda.draft_depth import Costs, DepthRule  # noqa: E402
 from tensorfold.engine.exact_sampling import Sampling  # noqa: E402
 from tensorfold.families.nemotron_h.cuda import reference as ref  # noqa: E402
 from tensorfold.families.nemotron_h.cuda.decode import CopyIndex, draft_decode, prefill, serial_decode  # noqa: E402
@@ -98,20 +99,60 @@ def test_fast_forward_tracks_fp32_reference(tiny):
     assert agree >= 0.9 and rel < 0.05, (agree, rel)
 
 
-@pytest.mark.parametrize("greedy, min_p", [(False, 0.0), (True, 0.0), (False, 0.05), (False, 0.4)])
-def test_drafted_decode_equals_serial(tiny, greedy, min_p):
+def _costs(row: float, level: float = 0.5) -> Costs:
+    return Costs(tuple([0.0] + [10.0 + row * r for r in range(16)]), level)
+
+
+@pytest.mark.parametrize("greedy, min_p, tau", [(False, 0.0, 1.0), (True, 0.0, 1.0), (False, 0.05, 0.6),
+                                                (False, 0.4, 0.6), (False, 0.0, 0.6)])
+def test_drafted_decode_equals_serial(tiny, greedy, min_p, tau):
+    """Fixed chains to 15 drafts, the 0.6.4 confidence floor and the cost rule all equal serial, drafts at any tau."""
+
     prompt = _tokens(21, 6)
     sampling = None if greedy else Sampling(1234, 1.0, 20, 0.95, min_p)
     eng = Engine(tiny, max_len=1024, graphs=True)
     eng.capture(range(1, 17), sampling)
-    mtp = MTPHead(eng)
-    mtp.capture(range(1, 17), (0, 1, 3))
+    mtp = MTPHead(eng, tau=tau)
+    mtp.capture(range(1, 17))
     pre = prefill(eng, mtp, prompt, sampling)
     serial = serial_decode(eng, pre, 48, sampling)
-    for drafts, confidence in ((1, 0.0), (3, 0.0), (3, 0.2)):
-        drafted = draft_decode(eng, mtp, pre, 48, sampling, drafts=drafts, confidence=confidence)
-        assert drafted.tokens == serial.tokens, (drafts, confidence)
-        assert drafted.rounds <= 47 and min(drafted.widths) >= 2
+    for drafts, rule in ((1, None), (3, None), (15, None), (15, DepthRule(_costs(1.0), 15, floor=0.2)),
+                         (15, DepthRule(_costs(1.0), 15)), (8, DepthRule(_costs(0.1), 8))):
+        drafted = draft_decode(eng, mtp, pre, 48, sampling, drafts=drafts, rule=rule)
+        assert drafted.tokens == serial.tokens, (drafts, rule and rule.floor)
+        assert drafted.rounds <= 47
+        if rule is None:
+            assert min(drafted.widths) >= 2
+
+
+@pytest.mark.parametrize("greedy", [False, True])
+def test_the_rule_stops_drafting_where_rows_stop_paying(tiny, greedy):
+    """Rows that never pay stop the chain at its first draft and level; free rows verify every level drafted."""
+
+    sampling = None if greedy else Sampling(5, 1.0, 20, 0.95)
+    eng = Engine(tiny, max_len=1024, graphs=True)
+    eng.capture(range(1, 17), sampling)
+    mtp = MTPHead(eng)
+    mtp.capture(range(1, 17))
+    pre = prefill(eng, mtp, _tokens(21, 14), sampling)
+    serial = serial_decode(eng, pre, 30, sampling).tokens
+    levels = []
+    level = mtp.level
+
+    def counted(j):
+        levels.append(j)
+        level(j)
+
+    mtp.level = counted
+    try:
+        never = draft_decode(eng, mtp, pre, 30, sampling, drafts=6, rule=DepthRule(_costs(1e9), 6), copy=False)
+        assert never.tokens == serial and set(never.widths) == {2}
+        assert max(levels) == 1
+        levels.clear()
+        free = draft_decode(eng, mtp, pre, 30, sampling, drafts=6, rule=DepthRule(_costs(0.0, 0.0), 6), copy=False)
+        assert free.tokens == serial and max(free.widths) == 7 and max(levels) == 6
+    finally:
+        mtp.level = level
 
 
 def test_copy_chains_equal_serial(tiny):
@@ -270,11 +311,12 @@ def test_real_checkpoint_drafted_equals_serial():
     eng = Engine(w, max_len=2048)
     sampling = Sampling(99, 1.0, 20, 0.95)
     eng.capture(range(1, 17), sampling)
-    mtp = MTPHead(eng)
-    mtp.capture(range(1, 17), (0, 3))
+    mtp = MTPHead(eng, tau=0.6)
+    mtp.capture(range(1, 17))
     prompt = [18746, 1261, 4958, 17616, 2254, 1455, 1115, 1261, 1766]
     pre = prefill(eng, mtp, prompt, sampling)
     serial = serial_decode(eng, pre, 32, sampling)
-    drafted = draft_decode(eng, mtp, pre, 32, sampling, drafts=3, confidence=0.2)
-    assert drafted.tokens == serial.tokens
-    assert drafted.accepted > 0
+    for drafts, rule in ((3, DepthRule(_costs(2.0), 3, floor=0.2)), (15, DepthRule(_costs(2.0), 15))):
+        drafted = draft_decode(eng, mtp, pre, 32, sampling, drafts=drafts, rule=rule)
+        assert drafted.tokens == serial.tokens
+        assert drafted.accepted > 0

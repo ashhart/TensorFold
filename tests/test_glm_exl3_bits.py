@@ -3,6 +3,7 @@
 import pytest
 
 pytest.importorskip("torch")
+pytest.importorskip("triton")         # the CUDA weights module imports the latent kernels
 
 from tensorfold.families.glm5_next.cuda.weights import bits_of  # noqa: E402
 

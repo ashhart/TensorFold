@@ -332,6 +332,8 @@ class FusedDecode:
         # Norms supply the next lane projection's 64-group input sums; ``_no_xs`` marks inputs without sums.
         self.lane_xs = False
         self._no_xs = mx.zeros((1,), dtype=mx.float32)
+        # windows of this many rows or more read each routed expert once (set before the first forward compiles)
+        self.group_rows = row_kernels.GROUP_ROWS
 
     def __call__(self, inputs: mx.array, cache: list[Any]) -> mx.array:
         """Hidden states after the final norm, [1, R, D], for R consecutive tokens (batch 1)."""
@@ -612,10 +614,12 @@ class FusedDecode:
         logits = router_logits(x, mixer.gate.weight)
         rows, experts_count = int(logits.shape[0]), int(logits.shape[1])
         tables = None
-        if (row_kernels.ROUTE_GROUP and rows >= row_kernels.GROUP_ROWS and rows * self.top_k <= row_kernels.MAX_GROUP_PAIRS
+        grouped = rows >= self.group_rows
+        if (row_kernels.ROUTE_GROUP and grouped and rows * self.top_k <= row_kernels.MAX_GROUP_PAIRS
                 and experts_count % 32 == 0 and experts_count <= row_kernels.ROUTE_THREADS):
             # a grouped window: the route kernel's picks and the group kernel's tables from one launch
             experts, weights, tables = row_kernels.route_group(logits, self.gate_bias[index], self.top_k, self.scaling)
         else:
             experts, weights = route(logits, self.gate_bias[index], self.top_k, self.scaling)
-        return row_kernels.experts(mixer.switch_mlp, x, experts, tables=tables), weights, self._shared(mixer.shared_experts, x, xs)
+        routed = row_kernels.experts(mixer.switch_mlp, x, experts, grouped=grouped, tables=tables)
+        return routed, weights, self._shared(mixer.shared_experts, x, xs)

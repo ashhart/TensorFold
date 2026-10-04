@@ -13,9 +13,13 @@ import urllib.error
 import urllib.request
 
 
-def qualify(base, model, token, output, *, tokens=64, require_cache=False):
-    def call(route, body=None, *, method=None, authenticated=False, origin=False):
+def qualify(base, model, token, output, *, tokens=64, require_cache=False, api_key=None):
+    inference_headers = {"Authorization": "Bearer " + api_key} if api_key else {}
+
+    def call(route, body=None, *, method=None, authenticated=False, origin=False, inference=True):
         headers = {"Content-Type": "application/json"}
+        if inference:
+            headers.update(inference_headers)
         if authenticated:
             headers["Authorization"] = "Bearer " + token
         if origin:
@@ -53,7 +57,7 @@ def qualify(base, model, token, output, *, tokens=64, require_cache=False):
         if require_cache:
             body["draft"] = False  # The serial twin drains without evicting the retained conversation prefix.
         request = urllib.request.Request(base + "/v1/completions", data=json.dumps(body).encode(),
-                                         headers={"Content-Type": "application/json"})
+                                         headers={"Content-Type": "application/json", **inference_headers})
         result = {}
         with urllib.request.urlopen(request, timeout=1800) as response:
             for line in response:
@@ -69,7 +73,17 @@ def qualify(base, model, token, output, *, tokens=64, require_cache=False):
         assert result["usage"]["completion_tokens"] == tokens
         return result
 
-    assert call("/is_sleeping")[0] == 401
+    for prefix in ("", "/v1"):
+        for route, method in (("/sleep", "POST"), ("/wake_up", "POST"), ("/is_sleeping", "GET")):
+            assert call(prefix + route, method=method, inference=False)[0] == 401
+            if api_key:
+                assert call(prefix + route, method=method)[0] == 401, "API key granted sleep authority"
+        state, _ = control(prefix + "/is_sleeping", method="GET")
+        assert state["ready"]
+    if api_key:
+        assert call("/v1/models", inference=False)[0] == 401
+        assert call("/v1/models", authenticated=True)[0] == 401, "sleep token granted API authority"
+        assert call("/metrics", inference=False)[0] == 401
     assert call("/sleep", method="POST", authenticated=True, origin=True)[0] == 403
     assert call("/sleep?level=1", method="POST", authenticated=True)[0] == 400
     initial, _ = control("/is_sleeping", method="GET")
@@ -97,7 +111,7 @@ def qualify(base, model, token, output, *, tokens=64, require_cache=False):
     with ThreadPoolExecutor(max_workers=2) as pool:
         generating = pool.submit(stream, entered)
         assert entered.wait(120), "stream did not begin"
-        sleeping = pool.submit(control, "/sleep?level=2")
+        sleeping = pool.submit(control, "/v1/sleep?level=2")
         deadline = time.monotonic() + 10
         while True:
             state, _ = control("/is_sleeping", method="GET")
@@ -116,11 +130,15 @@ def qualify(base, model, token, output, *, tokens=64, require_cache=False):
     assert call("/v1/completions", {})[0] == 503
     assert call("/v1/models")[0] == 200
     assert call("/metrics")[0] == 200
-    status, health = call("/health")
-    assert status == 200 and not health["ready"] and health["lifecycle"]["state"] == "sleeping"
+    status, health = call("/health", inference=False)
+    assert status == 200
+    if api_key:
+        assert health == {"status": "ok"}
+    else:
+        assert not health["ready"] and health["lifecycle"]["state"] == "sleeping"
     status, stored = call("/v1/responses/" + first["id"])
     assert status == 200 and stored == first, "stored response changed during sleep"
-    awake, wake_s = control("/wake_up")
+    awake, wake_s = control("/v1/wake_up")
     assert awake["ready"]
     if require_cache:
         assert awake["cache"]["loaded_prefixes"] == 0, "wake loaded prefixes eagerly"
@@ -129,13 +147,16 @@ def qualify(base, model, token, output, *, tokens=64, require_cache=False):
     assert status == 200 and after["previous_response_id"] == first["id"], (status, after)
     assert after["tensorfold"]["token_sha"] == before["tensorfold"]["token_sha"], "conversation continuation changed"
     assert after["usage"]["input_tokens"] == before["usage"]["input_tokens"], "conversation history length changed"
-    report = dict(passed=True, reply_tokens=tokens, initial=initial, asleep=asleep, awake=awake,
+    report = dict(passed=True, api_auth_enabled=bool(api_key), reply_tokens=tokens,
+                  initial=initial, asleep=asleep, awake=awake,
                   sleep_s=sleep_s, wake_s=wake_s, serial_hash=serial, drafted_hash=drafted,
                   stream_hash=streamed["tensorfold"]["token_sha"],
                   conversation_hash=after["tensorfold"]["token_sha"],
                   conversation_input_tokens=after["usage"]["input_tokens"],
                   checks=["auth", "Origin", "level refusal", "stream drain", "503 admission", "409 conflict",
                           "discovery while asleep", "stored response", "continued conversation", "token equality"])
+    if api_key:
+        report["checks"].extend(["separate API and sleep credentials", "root and v1 controls", "minimal health"])
     if require_cache:
         cached = after["usage"]["input_tokens_details"]["cached_tokens"]
         assert cached == before["usage"]["input_tokens_details"]["cached_tokens"], "conversation prefix reuse lost"
@@ -153,14 +174,19 @@ def main():
     parser.add_argument("base")
     parser.add_argument("model")
     parser.add_argument("--token-env", default="TENSORFOLD_SLEEP_TOKEN")
+    parser.add_argument("--api-key-env", help="environment variable holding the separate inference API key")
     parser.add_argument("--tokens", type=int, default=64)
     parser.add_argument("--require-cache", action="store_true", help="verify disk preservation and cached-token reuse")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     token = os.environ.get(args.token_env, "")
+    api_key = os.environ.get(args.api_key_env, "") if args.api_key_env else None
+    if args.api_key_env and (not api_key or api_key == token):
+        parser.error("the API key must be configured and differ from the sleep secret")
     if not token or args.tokens < 1:
         parser.error("a configured bearer secret and positive token count are required")
-    qualify(args.base.rstrip("/"), args.model, token, args.output, tokens=args.tokens, require_cache=args.require_cache)
+    qualify(args.base.rstrip("/"), args.model, token, args.output, tokens=args.tokens,
+            require_cache=args.require_cache, api_key=api_key)
 
 
 if __name__ == "__main__":

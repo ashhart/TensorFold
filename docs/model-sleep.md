@@ -53,14 +53,18 @@ curl -fsS -X POST 'http://127.0.0.1:8080/wake_up' \
   -H "Authorization: Bearer $TENSORFOLD_SLEEP_TOKEN"
 ```
 
-These routes also accept a `/v1` prefix. They return 404 when sleep is disabled,
-401 for an invalid secret, and 403 for a browser `Origin` header. The secret protects
-these lifecycle routes; it does not add authentication to the existing inference API.
+These routes also accept a `/v1` prefix. Both aliases use the dedicated sleep secret,
+including when inference API keys are configured. An inference API key cannot control
+sleep, and the sleep secret cannot authenticate inference. Controls return 401 for an
+invalid sleep secret and 403 for a browser `Origin` header. Disabled controls return
+404 after any applicable API authentication. Configure inference authentication
+separately with the server's API-key options.
 
 Responses include `state`, `ready`, `is_sleeping`, `level`, `active_requests`,
 `last_error`, and CUDA `memory.allocated_bytes` / `memory.reserved_bytes`.
-`GET /health` keeps returning 200 for a live sleeping server; use `ready` for inference
-readiness. Prometheus exposes `tensorfold:model_ready` and
+`GET /health` keeps returning 200 for a live sleeping server. With API authentication
+enabled, it returns only `{"status":"ok"}`; use authenticated `GET /is_sleeping` and
+its `ready` field for inference readiness. Prometheus exposes `tensorfold:model_ready` and
 `tensorfold:model_lifecycle_state{state="sleeping"}`; control telemetry displays the
 lifecycle state.
 
@@ -90,6 +94,9 @@ Each snapshot includes attention K/V, convolution history, recurrent state, posi
 and compatible drafter context. Only committed rows are saved, with their original
 bits. Qwen preserves its gated-delta state and optional DFlash context; Nemotron-H
 preserves Mamba state, its retained hidden row, and optional MTP attention state.
+Nemotron wake recalibrates adaptive draft costs and starts a fresh throughput estimate;
+draft count, confidence and temperature scaling remain pinned. Calibration affects
+proposal depth without changing target sampling or the preserved prefix.
 Sleep writes and validates the complete selected set before releasing any
 runtime state. A failed write, including a full disk, refuses sleep and keeps the
 original runtime awake. Snapshot identity binds the files to the current process,
@@ -167,6 +174,8 @@ python tools/qualify_sleep_http.py http://127.0.0.1:8080 MODEL --output sleep-ht
 
 For a server started with `--sleep-cache-dir`, add `--require-cache` to check that
 stored-response continuations reuse the same cached-token count after wake.
+If inference API authentication is enabled with protected metrics, also pass
+`--api-key-env VARIABLE` naming the environment variable holding its separate key.
 
 The [reference results](research/model-sleep-reference-validation.md) cover both pinned
 families on 0.6.4. The [earlier Qwen results](research/model-sleep-cuda-validation.md)

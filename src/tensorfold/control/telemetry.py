@@ -101,6 +101,8 @@ class Client:
             warning = ""
             try:
                 metrics_response = self.get("/metrics")
+                if metrics_response.status in {401, 403}:
+                    return Sample(now, phase="unauthorized", error=f"HTTP {metrics_response.status}; check --token-env")
                 metrics = parse_metrics(metrics_response.body.decode("utf-8", errors="replace")) \
                     if metrics_response.status == 200 else {}
                 if metrics_response.status != 200:
@@ -121,9 +123,11 @@ def numeric(value) -> float | None:
     return value if math.isfinite(value) and value >= 0 else None
 
 
-# Accept labels without interpreting them. We need family aggregates, never arbitrary dynamic labels.
+# Retain only known lifecycle labels; every other metric uses family aggregates.
 _METRIC = re.compile(r'^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{(?:[^"{}]|"(?:[^"\\]|\\.)*")*\})?'
                      r'\s+([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)(?:\s+\d+)?\s*$')
+_LIFECYCLE_METRICS = {f'tensorfold:model_lifecycle_state{{state="{state}"}}': state
+                      for state in ("awake", "draining", "sleeping", "waking", "error")}
 
 
 def parse_metrics(text: str) -> dict[str, list[float]]:
@@ -135,7 +139,8 @@ def parse_metrics(text: str) -> dict[str, list[float]]:
         if match:
             value = numeric(float(match[2]))
             if value is not None:
-                metrics.setdefault(match[1], []).append(value)
+                name = line[:match.start(2)].strip()
+                metrics.setdefault(name if name in _LIFECYCLE_METRICS else match[1], []).append(value)
     return metrics
 
 
@@ -172,12 +177,20 @@ class Sample:
 
 def normalize(now: float, health: dict, values: dict[str, list[float]]) -> Sample:
     lifecycle = health.get("lifecycle")
-    state = lifecycle.get("state") if isinstance(lifecycle, dict) else None
-    phase = state if state in {"draining", "sleeping", "waking", "error"} else (
-        "warming" if health.get("warming") else "ready")
+    states = [state for name, state in _LIFECYCLE_METRICS.items() if metric(values, name) == 1]
+    # Metrics are read after health, so a transition observed there is newer.
+    state = states[0] if len(states) == 1 else (
+        lifecycle.get("state") if isinstance(lifecycle, dict) else None)
+    if state in {"draining", "sleeping", "waking", "error"}:
+        phase = state
+    elif metric(values, "tensorfold:model_ready") == 0:
+        phase = "unhealthy"
+    else:
+        phase = "warming" if health.get("warming") else "ready"
     sample = Sample(now, True, phase, clean(health.get("model", ""), 160))
     if state == "error":
-        sample.error = clean(lifecycle.get("last_error") or "model lifecycle failed", 240)
+        detail = lifecycle.get("last_error") if isinstance(lifecycle, dict) else None
+        sample.error = clean(detail or "model lifecycle failed", 240)
     live = health.get("live")
     if isinstance(live, dict):
         for key in ("connections", "waiting", "decode_tokens_per_second", "prefill_tokens_per_second"):

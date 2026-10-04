@@ -37,10 +37,16 @@ def setup(checkpoint, cuda, monkeypatch, *, cache_dir=None, mismatch=False, nati
         obj.tp, obj.rank, obj.drafts, obj.confidence = 1, 0, 3, .3
         obj.draft_ids = (1, 2)
         obj.mtp, obj.serial = Buffer(), Buffer()
+        obj.mtp.params = SimpleNamespace(tau=.6)
+        # Calibration is runtime state, refreshed by each load.
+        obj.rules = {True: SimpleNamespace(costs=len(calls) + 1, tokens=2., ms=1.)}
         obj.cache, obj.sleep_cache = [], None
         obj._make = lambda: obj.e.w
         if calls and mismatch:
-            obj.confidence = .5
+            if mismatch == "tau":
+                obj.mtp.params.tau = .8
+            else:
+                obj.confidence = .5
         calls.append(options)
         refs.extend(weakref.ref(x) for x in (obj, obj.e, obj.e.w, obj.mtp, obj.serial))
         return obj
@@ -63,12 +69,24 @@ def test_sleep_releases_weights_serial_twin_and_factory_closure(checkpoint, cuda
     assert calls[-1] == {"context": 4096, "context_explicit": True}
 
 
-def test_changed_draft_settings_refuse_publication(checkpoint, cuda, monkeypatch):  # noqa: F811
-    app, _adapter, _calls, refs = setup(checkpoint, cuda, monkeypatch, mismatch=True)
+@pytest.mark.parametrize("setting", ["confidence", "tau"])
+def test_changed_draft_settings_refuse_publication(checkpoint, cuda, monkeypatch, setting):  # noqa: F811
+    app, _adapter, _calls, refs = setup(checkpoint, cuda, monkeypatch, mismatch=setting)
     app.lifecycle.sleep()
     with pytest.raises(LifecycleError, match="settings"):
         app.lifecycle.wake_up()
     assert app.engine is None and all(ref() is None for ref in refs)
+
+
+def test_fresh_adaptive_calibration_allows_wake(checkpoint, cuda, monkeypatch):  # noqa: F811
+    app, _adapter, _calls, _refs = setup(checkpoint, cuda, monkeypatch)
+    original = app.engine.rules[True]
+    original.tokens, original.ms = 8., 3.
+    app.lifecycle.sleep()
+    app.lifecycle.wake_up()
+    refreshed = app.engine.rules[True]
+    assert refreshed.costs != original.costs
+    assert (refreshed.tokens, refreshed.ms) == (2., 1.)
 
 
 def test_served_window_stays_pinned_when_native_capacity_rounds_up(checkpoint, cuda, monkeypatch):  # noqa: F811

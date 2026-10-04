@@ -101,6 +101,36 @@ def test_admin_routes_are_authenticated_idempotent_and_keep_discovery_available(
         assert app.transitions == ["sleep", "wake"]
 
 
+@pytest.mark.parametrize("prefix", ["", "/v1"])
+def test_sleep_credentials_stay_separate_from_api_keys(app, prefix):
+    from tensorfold.control.telemetry import Client
+    from tensorfold.server.authentication import KeyStore
+
+    app.auth = KeyStore(["test-inference-secret"])
+    inference = {"Authorization": "Bearer test-inference-secret"}
+    with serving(app) as server:
+        for route, method in (("/sleep", "POST"), ("/wake_up", "POST"), ("/is_sleeping", "GET")):
+            for headers in ({}, inference):
+                status, body = call(server, prefix + route, method=method, headers=headers)
+                assert status == 401 and body["error"]["code"] == "invalid_sleep_token"
+        assert app.transitions == []
+        assert call(server, "/v1/models", method="GET")[0] == 401
+        assert call(server, "/v1/models", method="GET", headers=inference)[0] == 200
+        assert call(server, prefix + "/sleep", headers={**AUTH, "Origin": "https://example.invalid"})[0] == 403
+        assert call(server, prefix + "/sleep")[1]["is_sleeping"]
+        assert call(server, prefix + "/is_sleeping", method="GET")[1]["state"] == "sleeping"
+        assert call(server, "/health", method="GET", headers={}) == (200, {"status": "ok"})
+        sample = Client(f"http://127.0.0.1:{server.server_port}", "test-inference-secret").sample()
+        assert sample.online and sample.phase == "sleeping"
+        assert call(server, "/metrics", method="GET", headers={})[0] == 401
+        status, metrics = call(server, "/metrics", method="GET", headers=inference)
+        assert status == 200 and "tensorfold:model_ready 0" in metrics
+        assert 'requests_total{key="cli-1",status="200"}' in metrics
+        assert call(server, "/v1/chat/completions", body=CHAT, headers=inference)[0] == 503
+        assert call(server, prefix + "/wake_up")[1]["ready"]
+        assert app.transitions == ["sleep", "wake"]
+
+
 @pytest.mark.parametrize("path", ["/sleep?level=1", "/sleep?level=", "/sleep?level=no", "/sleep?level=2&level=1"])
 def test_bad_sleep_levels_leave_the_runtime_awake(app, path):
     with serving(app) as server:
@@ -125,6 +155,22 @@ def test_disabled_controls_are_not_exposed(app):
         assert call(server, "/wake_up")[0] == 404
         assert call(server, "/is_sleeping", method="GET")[0] == 404
         assert call(server, "/v1/chat/completions", body=CHAT)[0] == 200
+
+
+def test_api_auth_still_gates_disabled_and_unknown_controls(app):
+    from tensorfold.server.authentication import KeyStore
+
+    app.auth = KeyStore(["test-inference-secret"])
+    inference = {"Authorization": "Bearer test-inference-secret"}
+    with serving(app) as server:
+        for path in ("/v1/sleep/unknown", "/v1/is_sleeping"):
+            assert call(server, path)[0] == 401
+            assert call(server, path, headers=inference)[0] == 404
+        del app.lifecycle
+        for path in ("/v1/sleep", "/v1/wake_up"):
+            assert call(server, path)[0] == 401
+            assert call(server, path, headers=inference)[0] == 404
+        assert not app.transitions
 
 
 def test_empty_configured_secret_never_authenticates(app):

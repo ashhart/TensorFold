@@ -34,15 +34,24 @@ def _error(handler: Any, exc: LifecycleError) -> None:
                                          "type": "invalid_request_error" if exc.status < 500 else "server_error"}})
 
 
+def control_route(handler: Any, app: Any) -> str | None:
+    """Enabled lifecycle routes use their own credential, with or without the API prefix."""
+
+    route = handler.path.split("?", 1)[0].rstrip("/")
+    route = route.removeprefix("/v1")
+    if getattr(app, "lifecycle", None) is not None and (handler.command, route) in {
+            ("POST", "/sleep"), ("POST", "/wake_up"), ("GET", "/is_sleeping")}:
+        return route
+    return None
+
+
 def admin(handler: Any, app: Any) -> bool:
     """Handle only enabled control routes; consume valid framing before changing lifecycle state."""
 
-    lifecycle = getattr(app, "lifecycle", None)
-    route = handler.path.split("?", 1)[0].rstrip("/")
-    route = route.removeprefix("/v1")
-    if lifecycle is None or (handler.command, route) not in {
-            ("POST", "/sleep"), ("POST", "/wake_up"), ("GET", "/is_sleeping")}:
+    route = control_route(handler, app)
+    if route is None:
         return False
+    lifecycle = app.lifecycle
     try:
         if "Origin" in handler.headers:
             handler.close_connection = True

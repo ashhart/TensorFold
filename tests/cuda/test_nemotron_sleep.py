@@ -4,6 +4,7 @@ import pytest
 import torch
 from nemotron_fakes import tiny_weights
 
+from tensorfold.cuda.draft_depth import Costs, DepthRule
 from tensorfold.engine.exact_sampling import Sampling
 from tensorfold.families.nemotron_h.cuda.app import NemotronEngine
 from tensorfold.families.nemotron_h.cuda.engine import Engine
@@ -16,8 +17,9 @@ def test_compact_prefix_restores_exact_continuation(drafts):
     app = NemotronEngine.__new__(NemotronEngine)
     app._make = lambda: Engine(w, max_len=1024, graphs=False, prefill_rows=16)
     app.e = app._make()
-    app.mtp = MTPHead(app.e) if drafts else None
-    app.tp, app.rank, app.drafts, app.confidence = 1, 0, 3 if drafts else 0, .3
+    app.mtp = MTPHead(app.e, tau=.6) if drafts else None
+    app.tp, app.rank, app.drafts, app.confidence = 1, 0, 3 if drafts else 0, None
+    app.rules = {key: DepthRule(Costs((0., 1., 1.2, 1.4, 1.6), .1), 3) for key in (False, True)}
     app.max_len, app.cache, app.serial, app.eos = 1024, [], None, ()
     sampling = Sampling(23, 1.0, 20, .95)
     prompt = list(range(11, 30))
@@ -38,7 +40,8 @@ def test_compact_prefix_restores_exact_continuation(drafts):
                           "v": state["mtp"]["v"][:pos - 1].clone()}
     for tokens in (prompt, prompt[:-1] + [271, 77, 78]):
         app.e = app._make()
-        app.mtp = MTPHead(app.e) if drafts else None
+        app.mtp = MTPHead(app.e, tau=.6) if drafts else None
+        app.rules = {key: DepthRule(Costs((0., 2., 2.1, 2.2, 2.3), .2), 3) for key in (False, True)}
         app.cache = [(ids, compact)]
         actual, stats = ask(tokens)
         assert stats["cached"] == pos

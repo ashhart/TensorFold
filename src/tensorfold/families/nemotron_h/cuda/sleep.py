@@ -12,6 +12,7 @@ def settings(engine):
     return {"context_window": engine.context_window, "max_len": engine.max_len,
             "max_rows": engine.e.max_rows, "tp": engine.tp, "rank": engine.rank,
             "drafts": engine.drafts, "confidence": engine.confidence,
+            "draft_tau": engine.mtp.params.tau if engine.mtp is not None else None,
             "draft_ids": engine.draft_ids, "config": asdict(engine.e.c)}
 
 

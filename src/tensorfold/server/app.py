@@ -23,6 +23,7 @@ from tensorfold.server.http import served_model_ids
 from tensorfold.server import metrics
 from tensorfold.server.scheduler import ChatJob, Scheduler
 from tensorfold.server.stopping import StopPolicy, matched_stop
+from tensorfold.server.thinking_notes import unanswered
 from tensorfold.vision.images import DEFAULT_LIMITS, ImageLimits
 from tensorfold.server.text import (
     IncrementalText,
@@ -496,6 +497,9 @@ class ChatApp(RequestOptions, PromptBlocks, DecisionRequests):
             reply["speculative"] = speculative
         self.requests_completed += 1
         store = self.checkpoints
+        warning = unanswered(reply["finish_reason"], thinking, content)
+        if warning:
+            print(warning, flush=True)
         print(
             f"[tensorfold] done {job.job_id} prompt={len(prompt_ids)} cached={job.cached_tokens} "
             f"thinking={thinking} effort={reply['runtime']['reasoning_effort']} "

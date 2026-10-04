@@ -166,6 +166,36 @@ def test_lifecycle_states_are_online_but_not_generation_ready(state):
     assert bool(sample.error) == (state == "error")
 
 
+@pytest.mark.parametrize("state", ["awake", "draining", "sleeping", "waking", "error"])
+def test_minimal_health_uses_authenticated_lifecycle_metrics(state):
+    def route(path, headers):
+        if path == "/health":
+            return 200, b'{"status":"ok"}', {}
+        if headers.get("Authorization") != "Bearer test-inference-key":
+            return 401, b"{}", {}
+        return 200, (f'tensorfold:model_lifecycle_state{{state="{state}"}} 1\n'
+                     f'tensorfold:model_ready {int(state == "awake")}\n').encode(), {}
+
+    with endpoint(route) as url:
+        sample = Client(url, "test-inference-key").sample()
+    assert sample.online and sample.phase == ("ready" if state == "awake" else state)
+    assert bool(sample.error) == (state == "error")
+
+
+@pytest.mark.parametrize("state_line", ["", 'tensorfold:model_lifecycle_state{state="unknown"} 1\n',
+                                       'tensorfold:model_lifecycle_state{state="sleeping"} 0\n'])
+def test_readiness_gauge_prevents_false_ready_without_an_active_known_state(state_line):
+    values = parse_metrics(state_line + "tensorfold:model_ready 0\n")
+    sample = normalize(1, {"status": "ok"}, values)
+    assert sample.online and sample.phase == "unhealthy"
+
+
+def test_newer_metrics_state_takes_precedence_over_health():
+    values = parse_metrics('tensorfold:model_lifecycle_state{state="sleeping"} 1\n')
+    sample = normalize(1, {"status": "ok", "lifecycle": {"state": "awake"}}, values)
+    assert sample.phase == "sleeping"
+
+
 def counter(at, value, source="live counter"):
     return Sample(at, True, "ready", counters={"generation": value}, sources={"generation": source})
 

@@ -59,6 +59,7 @@ class Metrics:
         self.latency = Histogram()
         self.ttft = Histogram()
         self.decode = Histogram()
+        self.http_requests: dict[tuple[str, int], int] = {}
 
     def add(self, *, prompt: int, generation: int, drafted: int, accepted: int,
             latency: float | None, ttft: float | None, decode: float | None = None) -> None:
@@ -93,6 +94,15 @@ def note(app: Any, *, prompt: int = 0, generation: int = 0, drafted: int = 0, ac
         return
     of(app).add(prompt=prompt, generation=generation, drafted=drafted, accepted=accepted,
                 latency=latency, ttft=ttft, decode=decode)
+
+
+def http_request(app: Any, key: str, status: int) -> None:
+    """Authentication labels count HTTP replies, including refusals, once."""
+
+    counters = of(app)
+    with counters.lock:
+        pair = (key, int(status))
+        counters.http_requests[pair] = counters.http_requests.get(pair, 0) + 1
 
 
 def begin(app: Any, prompt: int, started: float) -> None:
@@ -150,6 +160,7 @@ def render(app: Any) -> str:
         prompt, generation = metrics.prompt, metrics.generation
         drafted, accepted = metrics.drafted, metrics.accepted
         latency, ttft, decode = metrics.latency.copy(), metrics.ttft.copy(), metrics.decode.copy()
+        requests = dict(metrics.http_requests)
     def fallback():
         health = getattr(app, "health", None)
         running = len(getattr(health, "live", ()) or ())
@@ -165,6 +176,10 @@ def render(app: Any) -> str:
                 [f"{PREFIX}model_ready {int(state['ready'])}"])
         _family(lines, "model_lifecycle_state", "gauge", "Current model lifecycle state.",
                 [f'{PREFIX}model_lifecycle_state{{state="{state["state"]}"}} 1'])
+    if requests:
+        _family(lines, "requests_total", "counter", "HTTP replies by API key label and status.",
+                [f'{PREFIX}requests_total{{key="{key}",status="{status}"}} {count}'
+                 for (key, status), count in sorted(requests.items())])
     _family(lines, "requests_running", "gauge", "Requests in prefill or decode.",
             [f"{PREFIX}requests_running {running}"])
     _family(lines, "requests_waiting", "gauge", "Requests queued or held until a lane is free.",
