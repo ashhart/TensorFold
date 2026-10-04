@@ -27,16 +27,37 @@ from tensorfold.families.h3.schedule import parse_subset
 from tensorfold.families.h3.weights import int8_attention, int8_mlp, load_dit
 
 
-def encode_text(root: Path, prompt: str):
+def encode_text(root: Path, prompt: str, image=None):
     from minimax_h3_mlx.text_encoder import MiniMaxH3TextEncoder
 
-    encoder = MiniMaxH3TextEncoder(root / "text_encoder", dtype=mx.bfloat16, load_vision=False)
-    embeds, tags = encoder.encode(prompt)
+    encoder = MiniMaxH3TextEncoder(root / "text_encoder", dtype=mx.bfloat16, load_vision=image is not None)
+    if image is not None:
+        # the checkpoint's processor folder asks for PyTorch; the image processor built from the vision config
+        # needs only numpy, and the image arrives already on the render canvas
+        from minimax_h3_mlx.text_encoder import _FallbackProcessor
+
+        encoder._processor = _FallbackProcessor(encoder._build_image_processor())
+    embeds, tags = encoder.encode(prompt, [image] if image is not None else None)
     mx.eval(embeds)
     del encoder
     gc.collect()
     mx.clear_cache()
     return embeds, tags
+
+
+def encode_first_frame(root: Path, image, width: int, height: int, patch):
+    """Conditioning rows for a first frame, from minimax-h3-mlx's video VAE encoder (not ported)."""
+
+    from minimax_h3_mlx.load import load_video_vae
+    from minimax_h3_mlx.pipeline import encode_keyframe_rows
+
+    vae = load_video_vae(root / "video_vae")
+    rows = encode_keyframe_rows(vae, [image], height, width, patch)
+    mx.eval(rows)
+    del vae
+    gc.collect()
+    mx.clear_cache()
+    return rows
 
 
 def decode(model_dir, root: Path, latents, config, int8: bool = True):
@@ -124,13 +145,25 @@ def main():
     parser.add_argument("--unfused-qkv", action="store_true", help="int8 QKV without the fused norm and rotation")
     parser.add_argument("--keep-adaln", action="store_true", help="keep the AdaLN projection weights loaded")
     parser.add_argument("--float-vae", action="store_true", help="video decoder in float32, without int8 kernels")
+    parser.add_argument("--first-frame", default=None, help="image the clip starts from (image to video)")
     parser.add_argument("--parity", action="store_true")
     args = parser.parse_args()
 
     root = h3.pipeline_root(args.model_dir)
     prompt = Path(args.prompt_file).read_text() if args.prompt_file else args.prompt
     started = time.perf_counter()
-    text, tags = encode_text(root, prompt)
+    image = None
+    if args.first_frame:
+        from minimax_h3_mlx.packing import prepare_keyframe_image
+        from PIL import Image
+
+        image = prepare_keyframe_image(Image.open(args.first_frame).convert("RGB"), args.height, args.width,
+                                       stretch=True)
+    text, tags = encode_text(root, prompt, image)
+    condition = None
+    if image is not None:
+        condition = encode_first_frame(root, image, args.width, args.height,
+                                       h3.DiTConfig.from_checkpoint(args.model_dir).patch_size)
     text_seconds = time.perf_counter() - started
     print(f"[tensorfold] text: {text.shape[1]} rows in {text_seconds:.1f}s", flush=True)
 
@@ -156,7 +189,8 @@ def main():
         points, subset = parse_subset(args.subset)
     started = time.perf_counter()
     latents = denoise(dit, text, tags, args.width, args.height, args.frames, points, args.seed, subset,
-                      release=not args.keep_adaln,
+                      release=not args.keep_adaln, condition=condition,
+                      keyframes=("first",) if condition is not None else (),
                       on_step=lambda i, n, s: print(f"[tensorfold] step {i}/{n} {s:.2f}s", flush=True))
     denoise_seconds = time.perf_counter() - started
     del dit

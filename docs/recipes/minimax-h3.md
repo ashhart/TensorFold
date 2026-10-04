@@ -15,12 +15,16 @@ used in; TensorFold ships no weights.
 | Diffusion transformer (33B, 50 blocks) | `dit.py`, `weights.py`; equal to minimax-h3-mlx's forward on a real step |
 | Packed sequence, schedules, joint denoise loop | `packing.py`, `schedule.py`, `sampler.py` |
 | Adapters | `lora.py`: runner layout and FastVideo `fastvideo-lora-v2`, merged in float32 |
+| First-frame image to video | `sampler.py` holds the keyframe rows at their noise level; `packing.py` places them |
 | Video decoder | `vae_video.py`; equal to minimax-h3-mlx's decode in float32, int8 by default |
-| Text encoder (Qwen3-VL), audio decoder, MP4 writer | not ported; `tools/h3_generate_dev.py` borrows minimax-h3-mlx's |
+| Text encoder (Qwen3-VL, with its vision tower for a first frame), the VAE encoder that turns a first frame into rows, audio decoder, MP4 writer | not ported; `tools/h3_generate_dev.py` borrows minimax-h3-mlx's |
 | `tensorfold generate`, checkpoint detection through `families.detect`, a resident engine | not started |
 
 `tools/h3_generate_dev.py` renders a clip with this family between minimax-h3-mlx's text encoder and audio decoder.
-Run it from an environment that has minimax-h3-mlx and its requirements on the path.
+Run it from an environment that has minimax-h3-mlx and its requirements on the path. `--first-frame IMAGE` starts the
+clip from an image: the image is stretched onto the canvas, encoded by the VAE to one latent frame of conditioning
+rows and shown to the text encoder; those rows sit at timestep 0.999 for every step and are not denoised. Last-frame
+and reference modes are not wired.
 
 ## What decides the speed
 
