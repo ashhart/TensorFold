@@ -66,7 +66,8 @@ inline void mma_16x32(thread frag<C>& lo, thread frag<C>& hi, thread const frag<
   matmul2d<shape, execution_simdgroup> op;
   auto left = op.template get_left_input_cooperative_tensor<A, B, C>();
   auto right = op.template get_right_input_cooperative_tensor<A, B, C>();
-  auto acc = op.template get_destination_cooperative_tensor<decltype(left), decltype(right), C>();
+  auto acc = op.template get_destination_cooperative_tensor<metal::remove_addrspace_t<decltype(left)>,
+                                                            metal::remove_addrspace_t<decltype(right)>, C>();
   TF_UNROLL
   for (short e = 0; e < 8; e++) {
     left[e] = a[e];

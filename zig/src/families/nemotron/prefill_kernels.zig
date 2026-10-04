@@ -96,3 +96,10 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !Kernels {
     }
     return k;
 }
+
+test "every prompt-chunk source compiles at this macOS's Metal language" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    var k = try load(std.testing.allocator, device);
+    k.deinit();
+}
