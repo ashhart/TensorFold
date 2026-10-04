@@ -96,6 +96,9 @@ Include serial twins, captured graphs, draft heads and closures when checking ow
 The shared adapter pins `capacity_plan["context_window"]` when available, separately
 from the served HTTP limit: rounded cache capacity can exceed the checkpoint's
 native context and must not become the explicit context passed to the loader.
+Keep stable settings separate from recalibrated runtime state: Nemotron pins draft
+count, confidence and temperature scaling, while measured draft costs and its
+throughput estimate are refreshed on wake.
 
 The codec exposes `save_prefix`, `verify_prefix` and `load_prefix`; the two reference
 modules show their signatures. Delegate file I/O and integrity checks to
@@ -113,7 +116,7 @@ Qualify repeated cycles with exact serial/drafted output, cached-token reuse, ze
 allocated and reserved bytes while asleep, failed-save rollback, failed-load retry,
 memory-denied cache misses and HTTP conversation continuation. Use
 `tools/qualify_sleep.py` and `tools/qualify_sleep_http.py --require-cache` as the
-reference checks. The [0.6.4 validation](../research/model-sleep-reference-validation.md)
+reference checks. The [0.6.5 validation](../research/model-sleep-065-validation.md)
 records both full-model implementations. See [model sleep/wake](../model-sleep.md)
 for supported operation and snapshot lifetime. Adding a family is separate from adding Level 1, multi-rank
 coordination, or restart persistence.

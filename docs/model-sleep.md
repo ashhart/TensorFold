@@ -9,7 +9,7 @@ The reference adapters support single-device CUDA dense Qwen (`qwen3_5`), includ
 its serial and concurrent engines, and Nemotron-H (`nemotron_h`), with its serial
 request execution and optional integrated MTP head. Sleep is opt-in. Level 1 (GPU to
 CPU), other families, Metal and tensor parallelism are not implemented. The
-[0.6.4 reference validation](research/model-sleep-reference-validation.md) covers
+[0.6.5 reference validation](research/model-sleep-065-validation.md) covers
 the pinned Qwen NVFP4 and Nemotron affine checkpoints, drafting, unified-memory
 reclamation, disk prefixes and HTTP conversation continuity. Other checkpoints and
 formats need their own qualification. Earlier receipts cover
@@ -177,9 +177,10 @@ stored-response continuations reuse the same cached-token count after wake.
 If inference API authentication is enabled with protected metrics, also pass
 `--api-key-env VARIABLE` naming the environment variable holding its separate key.
 
-The [reference results](research/model-sleep-reference-validation.md) cover both pinned
-families on 0.6.4. The [earlier Qwen results](research/model-sleep-cuda-validation.md)
-retain the original comparisons against 0.6.3.
+The [reference results](research/model-sleep-065-validation.md) cover both pinned
+families on 0.6.5. Historical receipts retain the
+[0.6.4 comparisons](research/model-sleep-reference-validation.md) and the original
+[Qwen comparisons against 0.6.3](research/model-sleep-cuda-validation.md).
 For other configurations, run the benchmarks from
 [Contributing](../CONTRIBUTING.md#the-receipt) against the last release in the same
 environment. Longer prompts, aggregate concurrent throughput,
