@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -152,12 +153,12 @@ class Lanes:
         self._done(lane)
         if kept is not None:
             self.cache.entries, self.cache.hit = kept
-        for reset in (lambda: self.forward.reset(lane), lambda: self.drafter and self.drafter.reset(lane, []),
-                      lambda: self.depth and self.depth.reset(lane)):
-            try:  # best effort: a part that cannot reset leaves only a free lane's scratch behind
-                reset()
-            except Exception:  # noqa: BLE001
-                pass
+        parts = [(self.forward.reset, (lane,))]
+        parts += [(self.drafter.reset, (lane, []))] if self.drafter is not None else []
+        parts += [(self.depth.reset, (lane,))] if self.depth is not None else []
+        for reset, args in parts:
+            with contextlib.suppress(Exception):  # best effort: a part that cannot reset leaves a free lane's scratch
+                reset(*args)
 
     def _release(self, held: Held) -> None:
         if held.pages:

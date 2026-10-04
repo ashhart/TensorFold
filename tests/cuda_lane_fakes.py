@@ -9,8 +9,8 @@ import numpy as np
 from tensorfold.cuda.drafting import Proposals
 from tensorfold.cuda.kvpool import PagePool, Plane
 from tensorfold.cuda.lanes.follow import Lanes
-from tensorfold.cuda.lanes.link import AGREED
 from tensorfold.cuda.lanes.forward import Candidates
+from tensorfold.cuda.lanes.link import AGREED
 from tensorfold.cuda.memory_gate import NoRoom
 from tensorfold.cuda.streams import Stream
 
@@ -224,7 +224,7 @@ class Mirror:
         try:
             self.follower.apply(kind, list(ints))
             self.last = (kind, list(ints), True)
-        except Exception:  # noqa: BLE001  (its vote says so)
+        except Exception:  # noqa: BLE001 - its vote says so
             self.last = (kind, list(ints), False)
 
     def agree(self, ok: bool) -> bool:

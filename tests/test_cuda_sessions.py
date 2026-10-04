@@ -6,11 +6,10 @@ import os
 
 import numpy as np
 import pytest
+from cuda_lane_fakes import FailingTier
 
 from tensorfold.cuda.session_disk import DiskTier
 from tensorfold.cuda.sessions import HostTier, TieredCache, compat_hash, entry_key, strict_prefix
-
-from cuda_lane_fakes import FailingTier
 
 
 class Codec:
@@ -236,13 +235,13 @@ def test_a_file_that_will_not_delete_never_fails_a_lookup(tmp_path, monkeypatch)
     monkeypatch.setattr(Path, "unlink", lambda self, missing_ok=False: (_ for _ in ()).throw(OSError("read-only")))
     with pytest.raises(ValueError, match="prompt state k"):  # the request starts fresh, it does not fail
         t.get("k")
-    assert "k" not in t.keys() and isinstance(t.error, OSError)
+    assert "k" not in t.index and isinstance(t.error, OSError)
 
 
 def test_the_disk_index_keeps_counts_not_ids(tmp_path):
     t = DiskTier(tmp_path, {"engine": "x"}, limit=1 << 20)
     t.put("k", list(range(5000)), {"x": np.zeros(2, dtype=np.int64)})
-    tokens, size, _ = t.index["k"]
+    tokens, _, _ = t.index["k"]
     assert tokens == 5000 and isinstance(tokens, int) and t.lengths() == {5000}
     assert DiskTier(tmp_path, {"engine": "x"}, limit=1 << 20).index["k"][0] == 5000  # after a restart too
     assert t.find(list(range(5001))) == ("k", 5000) and t.find(list(range(5000))) is None

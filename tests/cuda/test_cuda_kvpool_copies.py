@@ -6,7 +6,7 @@ torch = pytest.importorskip("torch")
 if not torch.cuda.is_available():
     pytest.skip("needs a GPU", allow_module_level=True)
 
-from tensorfold.cuda.kvpool import PagePool, Plane  # noqa: E402
+from tensorfold.cuda.kvpool import PagePool, Plane
 
 
 def test_pages_cross_to_the_host_and_back_exactly_without_a_device_temporary():
