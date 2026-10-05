@@ -1672,14 +1672,18 @@ const Prompt = struct {
     r: *Run,
     qmm6: mtl.Pipeline,
     gather64: mtl.Pipeline,
-    pl: [11]mtl.Pipeline, // normed, act, mix, router, route, offsets, sort, gather rows, act2, scatter, copy
+    router_mm: mtl.Pipeline,
+    splitk: mtl.Pipeline,
+    parts_sum: mtl.Pipeline,
+    pl: [14]mtl.Pipeline, // normed, act, mix, router, route, offsets, sort, gather rows, act2, scatter, copy, DeltaNet pre/scan/post
     gdn: Variant,
     gdn_grid: mtl.Size,
     gdn_tg: mtl.Size,
+    skip: u32 = 0, // timing knock-outs: 1 experts, 2 DeltaNet, 4 attention, 8 projections, 16 hyper-connections, 32 routing, 64 router, 128 sort, 256 row moves, 512 shared expert
     proj: [LAYERS][3]Buf,
     out: [LAYERS][3]Buf,
     ple_kv: [3]Buf,
-    b: struct { ids: Buf, pids: Buf, h: [2]Buf, ssp: Buf, normed: Buf, dn: Buf, hact: Buf, inj_a: Buf, inj_m: Buf, up: Buf, mixed: Buf, p: Buf, gout: Buf, branch: Buf, cso: Buf, q: Buf, kout: Buf, iq: Buf, po: Buf, pm: Buf, aout: Buf, pos: Buf, nk: Buf, zeros: Buf, kvmeta: Buf, lg: Buf, pick: Buf, wts: Buf, cnt: Buf, off: Buf, cur: Buf, row_of: Buf, xs: Buf, g: Buf, u: Buf, a: Buf, ds: Buf, sg: Buf, su: Buf, sa: Buf, ydown: Buf, emb: Buf, kvp: Buf, gated: Buf, hout: Buf, cin: Buf, rows: Buf },
+    b: struct { ids: Buf, pids: Buf, h: [2]Buf, ssp: Buf, normed: Buf, dn: Buf, hact: Buf, inj_a: Buf, inj_m: Buf, up: Buf, mixed: Buf, p: Buf, gout: Buf, branch: Buf, cso: Buf, q: Buf, kout: Buf, iq: Buf, po: Buf, pm: Buf, aout: Buf, pos: Buf, nk: Buf, zeros: Buf, kvmeta: Buf, lg: Buf, pick: Buf, wts: Buf, cnt: Buf, off: Buf, cur: Buf, row_of: Buf, xs: Buf, g: Buf, u: Buf, a: Buf, ds: Buf, sg: Buf, su: Buf, sa: Buf, ydown: Buf, emb: Buf, kvp: Buf, gated: Buf, hout: Buf, cin: Buf, rows: Buf, part: Buf, qn: Buf, kn: Buf, v: Buf, gg: Buf, beta: Buf, ys: Buf },
 
     fn init(r: *Run, dir: []const u8, header: []const u8) !Prompt {
         var p: Prompt = undefined;
@@ -1688,8 +1692,11 @@ const Prompt = struct {
         const qlib = try mtl.Library.fromSource(r.device, qsrc, mtl.CompileOptions.mlx());
         p.qmm6 = try mtl.Pipeline.init(r.device, qlib, "tf_qmm6_t_nax", false);
         p.gather64 = try mtl.Pipeline.init(r.device, qlib, "tf_gather_qmm6_nax_64", false);
+        p.router_mm = try mtl.Pipeline.init(r.device, qlib, "tf_mm_bf16_f32_t_nax", false);
+        p.splitk = try mtl.Pipeline.init(r.device, qlib, "tf_qmm6_splitk_nax", false);
+        p.parts_sum = try mtl.Pipeline.init(r.device, qlib, "tf_parts_sum", false);
         const glib = try mtl.Library.fromSource(r.device, try std.mem.concat(r.arena, u8, &.{ header, ks.flashnext_prompt }), mtl.CompileOptions.mlx());
-        const names = [_][:0]const u8{ "pf_hc_normed", "pf_hc_act", "pf_hc_mix", "pf_router", "pf_route", "pf_offsets", "pf_sort", "pf_gather_rows", "pf_act", "pf_scatter_y", "pf_copy" };
+        const names = [_][:0]const u8{ "pf_hc_normed", "pf_hc_act", "pf_hc_mix", "pf_router", "pf_route", "pf_offsets", "pf_sort", "pf_gather_rows", "pf_act", "pf_scatter_y", "pf_copy", "pf_gdn_pre", "pf_gdn_scan", "pf_gdn_post" };
         for (names, 0..) |n, i| p.pl[i] = try mtl.Pipeline.init(r.device, glib, n, false);
         // DeltaNet at the chunk's rows, storing only the last row's recurrent state (in row 0)
         const gs = r.roles.get("q4_gdn@gdn|8") orelse return error.NoSite;
@@ -1736,6 +1743,8 @@ const Prompt = struct {
             .su = try B.of(r, R * 640 * 2), .sa = try B.of(r, R * 640 * 2), .ydown = try B.of(r, R * 11 * D * 2),
             .emb = try B.of(r, R * D * 2), .kvp = try B.of(r, R * 12800 * 2), .gated = try B.of(r, R * WIDE * 2),
             .hout = try B.of(r, R * WIDE * 2), .cin = try B.of(r, (PLE_TAIL + R) * WIDE * 2), .rows = try B.of(r, 16),
+            .part = try B.of(r, 8 * R * 324 * 4), .qn = try B.of(r, R * 16 * 128 * 4), .kn = try B.of(r, R * 16 * 128 * 4),
+            .v = try B.of(r, R * 48 * 128 * 4), .gg = try B.of(r, R * 48 * 4), .beta = try B.of(r, R * 48 * 4), .ys = try B.of(r, R * 6144 * 4),
         };
         return p;
     }
@@ -1751,6 +1760,7 @@ const Prompt = struct {
 
     /// y[rows, n] (row stride ldy, 0: n) = x[rows, k] W^T, W 6-bit g32 in MLX's layout.
     fn qmm(p: *Prompt, x: Buf, w: [3]Buf, k: usize, n: usize, rows: usize, y: Buf, ldy: usize) void {
+        if (p.skip & 8 != 0) return;
         p.bind(p.qmm6, &.{ w[0], w[1], w[2], x });
         const prm = [4]i32{ @intCast(k), @intCast(n), @intCast(rows), @intCast(ldy) };
         p.r.enc.setBytes(std.mem.asBytes(&prm), 4);
@@ -1761,6 +1771,7 @@ const Prompt = struct {
 
     /// y[pairs, n] = x[slot] W_e^T over the sorted slots, the experts' first slots in b.off.
     fn gather(p: *Prompt, x: Buf, w: []const Buf, k: usize, n: usize, pairs: usize, y: Buf) void {
+        if (p.skip & 1 != 0) return;
         p.bind(p.gather64, &.{ x, w[0], w[1], w[2], p.b.off });
         const prm = [4]i32{ @intCast(pairs), @intCast(n), @intCast(k), 512 };
         p.r.enc.setBytes(std.mem.asBytes(&prm), 5);
@@ -1771,12 +1782,27 @@ const Prompt = struct {
 
     /// The block input from streams hn (after hc_norm wrote b.ssp): normed, down + inject, act, up, the stream mix.
     fn hc(p: *Prompt, m: *Model, hn: Buf, w: Hc, rows: usize, inj: Buf) void {
+        if (p.skip & 16 != 0) return;
         const b = &p.b;
         const nd = w.dw.b.length() / (WIDE * 6 / 32 * 4);
         p.bind(p.pl[0], &.{ hn, b.ssp, w.scale, m.t.eps, b.normed });
         p.r.enc.dispatchThreads(mtl.Size.of(WIDE, rows, 1), mtl.Size.of(256, 1, 1));
         p.barrier();
-        p.qmm(b.normed, .{ w.dw, w.ds, w.db }, WIDE, nd, rows, b.dn, 0);
+        if (p.skip & 8 == 0) { // the down projection's 10,240-deep sum in 8 parts, added in order
+            const parts: usize = 8;
+            p.bind(p.splitk, &.{ w.dw, w.ds, w.db, b.normed });
+            const prm = [4]i32{ WIDE, @intCast(nd), @intCast(rows), @intCast(parts) };
+            p.r.enc.setBytes(std.mem.asBytes(&prm), 4);
+            p.r.enc.setBuffer(b.part.b, b.part.off, 5);
+            p.r.enc.dispatchThreads(mtl.Size.of(((nd + 63) / 64) * 128, (rows + 63) / 64, parts), mtl.Size.of(128, 1, 1));
+            p.barrier();
+            p.bind(p.parts_sum, &.{b.part});
+            const ps = [2]i32{ @intCast(parts), @intCast(rows * nd) };
+            p.r.enc.setBytes(std.mem.asBytes(&ps), 1);
+            p.r.enc.setBuffer(b.dn.b, b.dn.off, 2);
+            p.r.enc.dispatchThreads(mtl.Size.of(rows * nd, 1, 1), mtl.Size.of(256, 1, 1));
+            p.barrier();
+        }
         p.bind(p.pl[1], &.{b.dn});
         const ndi: i32 = @intCast(nd);
         p.r.enc.setBytes(std.mem.asBytes(&ndi), 1);
@@ -1795,9 +1821,19 @@ const Prompt = struct {
         const b = &p.b;
         const r = p.r;
         const pairs = rows * 10;
-        p.bind(p.pl[3], &.{ b.mixed, L.router, b.lg });
-        r.enc.dispatchThreads(mtl.Size.of(((513 + 7) / 8) * 256, rows, 1), mtl.Size.of(256, 1, 1));
+        if (p.skip & 32 != 0) {
+            p.gather(b.xs, L.ex[0..3], D, 640, pairs, b.g);
+            p.gather(b.xs, L.ex[3..6], D, 640, pairs, b.u);
+            p.gather(b.a, L.ex[12..15], 640, D, pairs, b.ds);
+            return;
+        }
+        if (p.skip & 64 == 0) p.bind(p.router_mm, &.{ L.router, b.mixed }) else p.bind(p.pl[10], &.{ b.lg, b.lg });
+        const rp = [3]i32{ D, 513, @intCast(rows) };
+        r.enc.setBytes(std.mem.asBytes(&rp), 2);
+        r.enc.setBuffer(b.lg.b, b.lg.off, 3);
+        r.enc.dispatchThreads(if (p.skip & 64 == 0) mtl.Size.of(((513 + 63) / 64) * 128, (rows + 63) / 64, 1) else mtl.Size.of(1, 1, 1), mtl.Size.of(if (p.skip & 64 == 0) 128 else 1, 1, 1));
         p.barrier();
+        if (p.skip & 128 == 0) {
         p.bind(p.pl[4], &.{ b.lg, b.pick, b.wts, b.cnt });
         r.enc.dispatchThreads(mtl.Size.of(32, rows, 1), mtl.Size.of(32, 1, 1));
         p.barrier();
@@ -1809,24 +1845,135 @@ const Prompt = struct {
         r.enc.setBytes(std.mem.asBytes(&np), 3);
         r.enc.dispatchThreads(mtl.Size.of(pairs, 1, 1), mtl.Size.of(256, 1, 1));
         p.barrier();
-        p.bind(p.pl[7], &.{ b.mixed, b.row_of, b.xs });
-        r.enc.dispatchThreads(mtl.Size.of(D / 8, pairs, 1), mtl.Size.of(64, 1, 1));
-        p.barrier();
+        }
+        if (p.skip & 256 == 0) {
+            p.bind(p.pl[7], &.{ b.mixed, b.row_of, b.xs });
+            r.enc.dispatchThreads(mtl.Size.of(D / 8, pairs, 1), mtl.Size.of(64, 1, 1));
+            p.barrier();
+        }
         p.gather(b.xs, L.ex[0..3], D, 640, pairs, b.g);
         p.gather(b.xs, L.ex[3..6], D, 640, pairs, b.u);
         p.bind(p.pl[8], &.{ b.g, b.u, b.a });
         r.enc.dispatchThreads(mtl.Size.of(pairs * 640, 1, 1), mtl.Size.of(256, 1, 1));
         p.barrier();
         p.gather(b.a, L.ex[12..15], 640, D, pairs, b.ds);
-        p.bind(p.pl[9], &.{ b.ds, b.row_of, b.ydown });
-        r.enc.dispatchThreads(mtl.Size.of(D / 8, pairs, 1), mtl.Size.of(64, 1, 1));
-        p.barrier();
+        if (p.skip & 256 == 0) {
+            p.bind(p.pl[9], &.{ b.ds, b.row_of, b.ydown });
+            r.enc.dispatchThreads(mtl.Size.of(D / 8, pairs, 1), mtl.Size.of(64, 1, 1));
+            p.barrier();
+        }
+        if (p.skip & 512 != 0) return;
         p.qmm(b.mixed, .{ L.ex[6], L.ex[7], L.ex[8] }, D, 640, rows, b.sg, 0);
         p.qmm(b.mixed, .{ L.ex[9], L.ex[10], L.ex[11] }, D, 640, rows, b.su, 0);
         p.bind(p.pl[8], &.{ b.sg, b.su, b.sa });
         r.enc.dispatchThreads(mtl.Size.of(rows * 640, 1, 1), mtl.Size.of(256, 1, 1));
         p.barrier();
         p.qmm(b.sa, .{ L.ex[15], L.ex[16], L.ex[17] }, 640, D, rows, .{ .b = b.ydown.b, .off = 10 * D * 2 }, 11 * D);
+    }
+
+    /// Each kernel class alone, 48 times in one command buffer, on the buffers the last chunk left (layer 0's and 3's
+    /// weights): its GPU time a chunk.
+    fn classes(p: *Prompt, m: *Model, rows: usize) !void {
+        const r = p.r;
+        const b = &p.b;
+        const L0 = &m.layers[0];
+        const L3 = &m.layers[3];
+        const pairs = rows * 10;
+        const names = [_][]const u8{ "router", "top-k+offsets+sort", "row gather+scatter", "expert gate+up gathers", "expert act", "expert down gather", "shared expert", "hyper-connection", "DeltaNet in+out projections", "DeltaNet pre", "DeltaNet scan", "DeltaNet post", "attention proj+o", "attention parts", "hc norms (3)" };
+        for (names, 0..) |name, which| {
+            const cb = r.queue.commandBuffer();
+            r.enc = cb.compute(if (r.serial) .serial else .concurrent);
+            for (0..48) |_| {
+                switch (which) {
+                    0 => {
+                        p.bind(p.router_mm, &.{ L0.router, b.mixed });
+                        const rp = [3]i32{ D, 513, @intCast(rows) };
+                        r.enc.setBytes(std.mem.asBytes(&rp), 2);
+                        r.enc.setBuffer(b.lg.b, b.lg.off, 3);
+                        r.enc.dispatchThreads(mtl.Size.of(((513 + 63) / 64) * 128, (rows + 63) / 64, 1), mtl.Size.of(128, 1, 1));
+                        p.barrier();
+                    },
+                    1 => {
+                        p.bind(p.pl[4], &.{ b.lg, b.pick, b.wts, b.cnt });
+                        r.enc.dispatchThreads(mtl.Size.of(32, rows, 1), mtl.Size.of(32, 1, 1));
+                        p.barrier();
+                        p.bind(p.pl[5], &.{ b.cnt, b.off, b.cur });
+                        r.enc.dispatchThreads(mtl.Size.of(512, 1, 1), mtl.Size.of(512, 1, 1));
+                        p.barrier();
+                        p.bind(p.pl[6], &.{ b.pick, b.cur, b.row_of });
+                        const np: i32 = @intCast(pairs);
+                        r.enc.setBytes(std.mem.asBytes(&np), 3);
+                        r.enc.dispatchThreads(mtl.Size.of(pairs, 1, 1), mtl.Size.of(256, 1, 1));
+                        p.barrier();
+                    },
+                    2 => {
+                        p.bind(p.pl[7], &.{ b.mixed, b.row_of, b.xs });
+                        r.enc.dispatchThreads(mtl.Size.of(D / 8, pairs, 1), mtl.Size.of(64, 1, 1));
+                        p.barrier();
+                        p.bind(p.pl[9], &.{ b.ds, b.row_of, b.ydown });
+                        r.enc.dispatchThreads(mtl.Size.of(D / 8, pairs, 1), mtl.Size.of(64, 1, 1));
+                        p.barrier();
+                    },
+                    3 => {
+                        p.gather(b.xs, L0.ex[0..3], D, 640, pairs, b.g);
+                        p.gather(b.xs, L0.ex[3..6], D, 640, pairs, b.u);
+                    },
+                    4 => {
+                        p.bind(p.pl[8], &.{ b.g, b.u, b.a });
+                        r.enc.dispatchThreads(mtl.Size.of(pairs * 640, 1, 1), mtl.Size.of(256, 1, 1));
+                        p.barrier();
+                    },
+                    5 => p.gather(b.a, L0.ex[12..15], 640, D, pairs, b.ds),
+                    6 => {
+                        p.qmm(b.mixed, .{ L0.ex[6], L0.ex[7], L0.ex[8] }, D, 640, rows, b.sg, 0);
+                        p.qmm(b.mixed, .{ L0.ex[9], L0.ex[10], L0.ex[11] }, D, 640, rows, b.su, 0);
+                        p.bind(p.pl[8], &.{ b.sg, b.su, b.sa });
+                        r.enc.dispatchThreads(mtl.Size.of(rows * 640, 1, 1), mtl.Size.of(256, 1, 1));
+                        p.barrier();
+                        p.qmm(b.sa, .{ L0.ex[15], L0.ex[16], L0.ex[17] }, 640, D, rows, .{ .b = b.ydown.b, .off = 10 * D * 2 }, 11 * D);
+                    },
+                    7 => p.hc(m, b.h[0], L0.ahc, rows, b.inj_a),
+                    8 => {
+                        p.qmm(b.mixed, p.proj[0], D, 16480, rows, b.p, 0);
+                        p.qmm(b.gout, p.out[0], 6144, D, rows, b.branch, 0);
+                    },
+                    9, 10, 11 => {
+                        const ri: i32 = @intCast(rows);
+                        if (which == 9) {
+                            p.bind(p.pl[11], &.{ b.p, L0.cs[0], L0.conv, L0.alog, L0.dt });
+                            r.enc.setBytes(std.mem.asBytes(&ri), 5);
+                            for ([_]Buf{ b.qn, b.kn, b.v, b.gg, b.beta, L0.cs[1] }, 6..) |bb, j| r.enc.setBuffer(bb.b, bb.off, j);
+                            r.enc.dispatchThreads(mtl.Size.of(80 * 128, rows, 1), mtl.Size.of(128, 1, 1));
+                        } else if (which == 10) {
+                            p.bind(p.pl[12], &.{ b.qn, b.kn, b.v, b.gg, b.beta, L0.so[0] });
+                            r.enc.setBytes(std.mem.asBytes(&ri), 6);
+                            r.enc.setBuffer(b.ys.b, b.ys.off, 7);
+                            r.enc.setBuffer(L0.so[1].b, L0.so[1].off, 8);
+                            r.enc.dispatchThreads(mtl.Size.of(48 * 4 * 1024, 1, 1), mtl.Size.of(1024, 1, 1));
+                        } else {
+                            p.bind(p.pl[13], &.{ b.ys, b.p, L0.norm, m.t.eps, b.gout });
+                            r.enc.dispatchThreads(mtl.Size.of(48 * 128, rows, 1), mtl.Size.of(128, 1, 1));
+                        }
+                        p.barrier();
+                    },
+                    12 => {
+                        p.qmm(b.mixed, p.proj[3], D, 13952, rows, b.p, 0);
+                        p.qmm(b.aout, p.out[3], 6144, D, rows, b.branch, 0);
+                    },
+                    13 => try r.callRows("q4_attn_parts#[24, 256]", rows, &.{ b.q, L3.keys, L3.vals, b.zeros, b.nk, b.zeros, m.t.scale }, &.{ b.po, b.pm }, null),
+                    14 => {
+                        try r.callRows("q4_hc_norm_none#[10240]", rows, &.{b.h[0]}, &.{ b.h[1], b.ssp }, null);
+                        try r.callRows("q4_hc_norm_plain#[10240]", rows, &.{ b.h[1], b.inj_a, b.branch }, &.{ b.h[0], b.ssp }, null);
+                        try r.callRows("q4_hc_norm_grouped#[10240]", rows, &.{ b.h[0], b.inj_m, b.ydown, b.wts, b.lg }, &.{ b.h[1], b.ssp }, null);
+                    },
+                    else => {},
+                }
+            }
+            r.enc.end();
+            cb.commit();
+            cb.wait();
+            std.debug.print("  {s:28} {d:7.2} ms a chunk (48 layers' worth)\n", .{ name, cb.gpuSeconds() * 1e3 });
+        }
     }
 
     fn copyWords(p: *Prompt, src: Buf, dst: Buf, words: usize) void {
@@ -1912,10 +2059,23 @@ const Prompt = struct {
                 p.qmm(b.mixed, p.proj[i], D, 16480, rows, b.p, 0);
                 const cs_in: Buf = .{ .b = L.cs[a].b, .off = L.cs[a].off + m.state_row * CS_ROW };
                 const so_in: Buf = .{ .b = L.so[a].b, .off = L.so[a].off + m.state_row * SO_ROW };
-                try r.bindV(&p.gdn, &.{ b.p, cs_in, so_in, L.conv, L.alog, L.dt, L.norm, t.eps, b.rows }, &.{ b.gout, b.cso, L.so[1 - a] });
-                r.enc.dispatchThreads(p.gdn_grid, p.gdn_tg);
-                p.barrier();
-                p.copyWords(.{ .b = b.cso.b, .off = (rows - 1) * CS_ROW }, L.cs[1 - a], CS_ROW / 4);
+                if (p.skip & 2 == 0) { // conv, norms and gates of every row; the recurrence; the gated norm of every row
+                    const ri: i32 = @intCast(rows);
+                    p.bind(p.pl[11], &.{ b.p, cs_in, L.conv, L.alog, L.dt });
+                    r.enc.setBytes(std.mem.asBytes(&ri), 5);
+                    for ([_]Buf{ b.qn, b.kn, b.v, b.gg, b.beta, L.cs[1 - a] }, 6..) |bb, j| r.enc.setBuffer(bb.b, bb.off, j);
+                    r.enc.dispatchThreads(mtl.Size.of(80 * 128, rows, 1), mtl.Size.of(128, 1, 1));
+                    p.barrier();
+                    p.bind(p.pl[12], &.{ b.qn, b.kn, b.v, b.gg, b.beta, so_in });
+                    r.enc.setBytes(std.mem.asBytes(&ri), 6);
+                    r.enc.setBuffer(b.ys.b, b.ys.off, 7);
+                    r.enc.setBuffer(L.so[1 - a].b, L.so[1 - a].off, 8);
+                    r.enc.dispatchThreads(mtl.Size.of(48 * 4 * 1024, 1, 1), mtl.Size.of(1024, 1, 1));
+                    p.barrier();
+                    p.bind(p.pl[13], &.{ b.ys, b.p, L.norm, t.eps, b.gout });
+                    r.enc.dispatchThreads(mtl.Size.of(48 * 128, rows, 1), mtl.Size.of(128, 1, 1));
+                    p.barrier();
+                }
                 p.qmm(b.gout, p.out[i], 6144, D, rows, b.branch, 0);
             } else {
                 p.qmm(b.mixed, p.proj[i], D, 13952, rows, b.p, 0);
@@ -1923,7 +2083,7 @@ const Prompt = struct {
                 p.bind(r.kv_pipe, &.{ b.kout, b.p, L.keys, L.vals, L.raw, b.kvmeta });
                 r.enc.dispatchThreads(mtl.Size.of(512 * rows, 1, 1), mtl.Size.of(256, 1, 1));
                 p.barrier();
-                try r.callRows("q4_attn_parts#[24, 256]", rows, &.{ b.q, L.keys, L.vals, b.zeros, b.nk, b.zeros, t.scale }, &.{ b.po, b.pm }, null);
+                if (p.skip & 4 == 0) try r.callRows("q4_attn_parts#[24, 256]", rows, &.{ b.q, L.keys, L.vals, b.zeros, b.nk, b.zeros, t.scale }, &.{ b.po, b.pm }, null);
                 try r.callRows("q4_attn_merge_gate#[24, 16, 256]", rows, &.{ b.po, b.pm, b.p }, &.{b.aout}, null);
                 p.qmm(b.aout, p.out[i], 6144, D, rows, b.branch, 0);
             }
@@ -2421,6 +2581,29 @@ pub fn main(init: std.process.Init) !void {
         while (same < n_dec and got_t.items[same] == want_t.items[same]) same += 1;
         std.debug.print("prompt {d} tokens: 8-row windows {d:.3} s ({d:.0} tok/s); prompt path {d:.3} s ({d:.0} tok/s)\n", .{ toks.len, a1 - a0, @as(f64, @floatFromInt(toks.len)) / (a1 - a0), b1 - b0, @as(f64, @floatFromInt(toks.len)) / (b1 - b0) });
         std.debug.print("first token {d} vs {d}; last-row logits max diff {d:.4} (max |logit| {d:.2}); decode after it: {d}/{d} tokens equal\n", .{ first, want_t.items[0], worst, scale, same, n_dec });
+        try pr.classes(m, toks.len);
+        const skips = [_]u32{0};
+        const what = [_][]const u8{"none"};
+        var base_s: f64 = 0;
+        for (skips, what) |sk, w| {
+            pr.skip = sk;
+            var best: f64 = 1e9;
+            for (0..3) |_| {
+                m.reset();
+                m.gpu_seconds = 0;
+                const c0 = mtl.clock.seconds();
+                at = 0;
+                while (at < toks.len) {
+                    const n: usize = @min(PMAX, toks.len - at);
+                    _ = try pr.chunk(m, gpa, toks[at .. at + n]);
+                    at += n;
+                }
+                best = @min(best, mtl.clock.seconds() - c0);
+            }
+            if (sk == 0) base_s = best;
+            std.debug.print("warm, without {s:18}: {d:.3} s ({d:.0} tok/s), saves {d:.3} s\n", .{ w, best, @as(f64, @floatFromInt(toks.len)) / best, base_s - best });
+        }
+        pr.skip = 0;
         return;
     }
     if (std.c.getenv("FZ_QMM6") != null) { // 6-bit tensor-unit projections for prompt chunks: checked and timed

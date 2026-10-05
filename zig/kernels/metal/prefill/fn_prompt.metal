@@ -124,3 +124,142 @@ inline float pf_rinv(const device float* ssp, int r, int s, int nt, int streams,
 [[kernel]] void pf_copy(const device uint* S [[buffer(0)]], device uint* T [[buffer(1)]], uint i [[thread_position_in_grid]]) {
   T[i] = S[i];
 }
+
+// DeltaNet over a prompt chunk in three launches with q4_gdn_step's arithmetic: every row's conv, norms and gates at
+// once; the recurrence, each simdgroup alone over its four state rows; every row's gated RMS norm at once.
+inline float pf_fsig(float x) { return 1.0f / (1.0f + metal::exp(-x)); }
+inline float pf_log1p(float x) {
+  const float u = 1.0f + x;
+  return u == 1.0f ? x : x * (metal::log(u) / (u - 1.0f));
+}
+inline float pf_softplus(float x) { return x > 20.0f ? x : pf_log1p(metal::exp(x)); }
+
+// Threadgroup (group, r): 128 channels of row r, groups 0..15 q heads, 16..31 k heads, 32..79 v heads. Conv + SiLU,
+// the q/k L2 norms, the v head's gates; the conv window after the last row into CSO.
+[[kernel]] void pf_gdn_pre(const device bfloat* P [[buffer(0)]], const device bfloat* CS [[buffer(1)]],
+    const device bfloat* CW [[buffer(2)]], const device bfloat* ALOG [[buffer(3)]], const device bfloat* DT [[buffer(4)]],
+    const constant int& R [[buffer(5)]], device float* QN [[buffer(6)]], device float* KN [[buffer(7)]],
+    device float* V [[buffer(8)]], device float* G [[buffer(9)]], device float* BETA [[buffer(10)]],
+    device bfloat* CSO [[buffer(11)]], uint t [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]], uint3 tg [[threadgroup_position_in_grid]]) {
+  constexpr int NK = 16, NV = 48, DK = 128, DV = 128, TAPS = 4;
+  constexpr int C = 2 * NK * DK + NV * DV;
+  constexpr int PW = C + NV * DV + 2 * NV;
+  threadgroup float x[128];
+  threadgroup float inv_s;
+  const int group = int(tg.x), r = int(tg.y);
+  const int c = group < 32 ? group * DK + int(t) : 2 * NK * DK + (group - 32) * DV + int(t);
+  float conv = 0.0f;
+  for (int tap = 0; tap < TAPS; tap++) {
+    const int at = r + tap;
+    const float xv = at < TAPS - 1 ? float(CS[at * C + c]) : float(P[size_t(at - (TAPS - 1)) * PW + c]);
+    conv = fma(float(CW[c * TAPS + tap]), xv, conv);
+  }
+  const float act = pf_bsilu(conv);
+  if (r == R - 1) {
+    for (int j = 0; j < TAPS - 1; j++) {
+      const int at = r + 1 + j;
+      CSO[j * C + c] = at < TAPS - 1 ? CS[at * C + c] : P[size_t(at - (TAPS - 1)) * PW + c];
+    }
+  }
+  if (group >= 32) {
+    const int hv = group - 32;
+    V[(size_t(r) * NV + hv) * DV + t] = act;
+    if (t == 0) {
+      const float b = float(P[size_t(r) * PW + C + NV * DV + hv]);
+      const float a = float(P[size_t(r) * PW + C + NV * DV + NV + hv]);
+      G[r * NV + hv] = metal::exp(-metal::exp(float(ALOG[hv])) * pf_softplus(a + float(DT[hv])));
+      BETA[r * NV + hv] = pf_bsig(b);
+    }
+    return;
+  }
+  x[t] = act;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const bool isq = group < 16;
+  if (sg == 0) {
+    float ss = 0.0f;
+    for (int i = 0; i < DK / 32; i++) {
+      const float v = x[lane * (DK / 32) + i];
+      ss = fma(v, v, ss);
+    }
+    ss = simd_sum(ss);
+    if (lane == 0) inv_s = metal::rsqrt(ss + 1e-6f) * (isq ? metal::rsqrt(float(DK)) : 1.0f);
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const int hk = isq ? group : group - 16;
+  (isq ? QN : KN)[(size_t(r) * NK + hk) * DK + t] = x[t] * inv_s;
+}
+
+// Four threadgroups a value head: simdgroup s of threadgroup (hv, quarter) owns state row dv = 32 quarter + s (lane l
+// its columns 4 l .. 4 l + 3) through every row with no barrier, the next row's inputs loading while this one computes;
+// YS gets bf16-rounded outputs, SO the state after the last row.
+[[kernel]] void pf_gdn_scan(const device float* QN [[buffer(0)]], const device float* KN [[buffer(1)]],
+    const device float* V [[buffer(2)]], const device float* G [[buffer(3)]], const device float* BETA [[buffer(4)]],
+    const device float* SIN [[buffer(5)]], const constant int& R [[buffer(6)]], device float* YS [[buffer(7)]],
+    device float* SO [[buffer(8)]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    uint3 tg [[threadgroup_position_in_grid]]) {
+  constexpr int NK = 16, NV = 48, DK = 128, DV = 128;
+  const int hv = int(tg.x) / 4, hk = hv / (NV / NK), dv = (int(tg.x) % 4) * 32 + int(sg);
+  float state[4];
+  for (int i = 0; i < 4; i++) state[i] = SIN[(size_t(hv) * DV + dv) * DK + lane * 4 + i];
+  float g_n = G[hv], beta_n = BETA[hv], v_n = V[size_t(hv) * DV + dv], kk_n[4], qq_n[4];
+  for (int i = 0; i < 4; i++) {
+    kk_n[i] = KN[size_t(hk) * DK + lane * 4 + i];
+    qq_n[i] = QN[size_t(hk) * DK + lane * 4 + i];
+  }
+  for (int r = 0; r < R; r++) {
+    const float g = g_n, beta = beta_n, vv = v_n;
+    float kk[4], qq[4];
+    for (int i = 0; i < 4; i++) { kk[i] = kk_n[i]; qq[i] = qq_n[i]; }
+    if (r + 1 < R) {
+      const int rn = r + 1;
+      g_n = G[rn * NV + hv];
+      beta_n = BETA[rn * NV + hv];
+      v_n = V[(size_t(rn) * NV + hv) * DV + dv];
+      for (int i = 0; i < 4; i++) {
+        kk_n[i] = KN[(size_t(rn) * NK + hk) * DK + lane * 4 + i];
+        qq_n[i] = QN[(size_t(rn) * NK + hk) * DK + lane * 4 + i];
+      }
+    }
+    float kv = 0.0f;
+    for (int i = 0; i < 4; i++) {
+      state[i] = state[i] * g;
+      kv += state[i] * kk[i];
+    }
+    kv = simd_sum(kv);
+    const float delta = (vv - kv) * beta;
+    float out = 0.0f;
+    for (int i = 0; i < 4; i++) {
+      state[i] = state[i] + kk[i] * delta;
+      out += state[i] * qq[i];
+    }
+    out = simd_sum(out);
+    if (lane == 0) YS[(size_t(r) * NV + hv) * DV + dv] = float(bfloat(out));
+  }
+  for (int i = 0; i < 4; i++) SO[(size_t(hv) * DV + dv) * DK + lane * 4 + i] = state[i];
+}
+
+// Threadgroup (hv, r): the sigmoid-gated RMS norm of row r's head hv, bf16 out.
+[[kernel]] void pf_gdn_post(const device float* YS [[buffer(0)]], const device bfloat* P [[buffer(1)]],
+    const device bfloat* NW [[buffer(2)]], const device float* eps [[buffer(3)]], device bfloat* OUT [[buffer(4)]],
+    uint t [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]], uint3 tg [[threadgroup_position_in_grid]]) {
+  constexpr int NK = 16, NV = 48, DK = 128, DV = 128;
+  constexpr int C = 2 * NK * DK + NV * DV;
+  constexpr int PW = C + NV * DV + 2 * NV;
+  threadgroup float ys[DV];
+  threadgroup float red;
+  const int hv = int(tg.x), r = int(tg.y);
+  ys[t] = YS[(size_t(r) * NV + hv) * DV + t];
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (sg == 0) {
+    float ss = 0.0f;
+    for (int i = 0; i < DV / 32; i++) { const float v = ys[lane * (DV / 32) + i]; ss = fma(v, v, ss); }
+    ss = simd_sum(ss);
+    if (lane == 0) red = metal::rsqrt(ss / float(DV) + eps[0]);
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const float y = float(bfloat(float(NW[t]) * float(bfloat(ys[t] * red))));
+  const float z = float(P[size_t(r) * PW + C + hv * DV + int(t)]);
+  OUT[size_t(r) * NV * DV + hv * DV + int(t)] = bfloat(y * pf_fsig(z));
+}
