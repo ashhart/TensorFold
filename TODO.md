@@ -227,25 +227,38 @@ copy none of it into this Apache-2.0 tree.
       and the RoCE all-gather find the IPv4 RoCE v2 GID per device (a reboot under a live QP moved aiai2's to 4)
 - [x] FP4 prefill gap (67d6b36, bit-identical): row-tiled segment scores, one tie-keyed pick a pass, prompt entries
       decoded once a chunk: PP8192 1649 (fp8 1596), 100K 2581 (fp8 2428); dev 500K 1762 (fp8 1619)
-- [ ] fp4 indexer with many streams at full context: unmeasured (shared-tile kernel measured on unit cases only)
-- [ ] C1 ~4% behind fp8 in fp4
+- [x] fp4 indexer with many streams at full context (a5dd419, bit-identical): the shared-tile kernel ran a tile's
+      rows in one program once tiles >= 192 (1.30-1.51x the per-row kernel at 16 or 8 streams x 1 row, 16K-614K keys);
+      now a program scores one stream's run of rows: 16x1 / 8x8 1.03-1.05x per-row, 16 rows of one stream 0.61-0.75x,
+      4x4 0.70-0.77x, 32 rows of 8 streams 0.72-0.76x (`tools/dsv41_ik_bench.py`); decode-bench 4 x 128K 36.89 ms
+      (HEAD 37.24, per-row 37.36), same tokens
+- [x] C1 ~4% behind fp8 in fp4: not there with the current code (2026-10-06). Engine at 4K, --dspark 3: fp4 step
+      26.2-26.6 ms vs fp8 26.8-27.0, verify R=2/3/4 30.4/35.8/41.1 vs 31.1/36.3/41.5, drafter 5.0-5.1 both, ~70
+      fewer launches a step; server, 6 fixed prompts greedy: fp4 101.2 / fp8 98.2 tok/s; bench_decode C1 (temperature
+      0.2: trials 80-104 on one server) fp4 103.3 / fp8 101.6 and 93.0
 - [ ] FP4 tensor-core indexer: parked (not bit-exact against the reference order)
 - [x] Dev loop (notes/dsv41/DEV.md): one-load suites and tiers (`tools/dsv41_suite2.sh quick`: 168 s vs 499 s as
       fresh runs), prepared weights in dev runs (22-24 s loads), OOM guard (torch cap + per-run memwatch, start
       refusal), `make hot` / `make cold` (119 s, no image build)
-- [ ] Slow first start after `make image` (C1 81, PP 1029, 100K 1276 on the first fp4 start; no compaction stalls):
-      cause unknown
-- [ ] Review-flagged test gaps: indexer equality test only at n_keys 2900; mqa_fp4 R=1 masking
+- [x] Slow first start after `make image`: not reproduced (2026-10-06) in first starts after a cache-hit image, a
+      pip-layer rebuild and 40 GB of fresh writes, nor in 4 restarts (C1 99.6-103, PP 1583-1670, 100K 2449-2578; no
+      compaction, reclaim or dirty pages, clocks and governor unchanged). The one slow run (PP 1092, 100K 1715, hard
+      31) overlapped an outside client's request in the server log: check `/health` requests_running before benching.
+      Every start compiled ~84 Triton kernels at boot and ~12 mid-serving (the cache was in the container layer): now
+      in CACHE_DIR (efb3911)
+- [ ] Review-flagged test gaps: mqa_fp4 R=1 masking ([x] indexer: many streams at full visibility, n_keys 4096 / 4100)
 - [x] FP4 quality (188bcdf, notes/dsv41/DEV.md): teacher-forced 26 docs top-1 vs bf16 fp4 96.75% / fp8 97.69% (sig.),
       dNLL +0.0012; MMLU 2280 paired fp4 85.75 / fp8 86.23 (p 0.11; gap = 16-token budget overruns); tool-eval
       111 / 117 of 138 (4 scenarios, sign p 0.125)
 - [ ] Tool-eval fp4 vs fp8: 2-3 repeats each to settle the 6-point gap
-- [ ] Dev runs: expandable segments on by default in `dsv41_run2.sh` (64K teacher-forced needed it)
+- [x] Dev runs: expandable segments on by default in `dsv41_run2.sh` (4c9b2a3; quick tier fingerprints unchanged)
 - [ ] Draft PR #342: description predates FP4, the CUDA kernels, the dev loop and the doorbell
 - [ ] Serial decode >= 40 tok/s (now ~37.8; see Phase 3)
 - [ ] Copy drafts in concurrent rounds
 - [ ] RoCE two rails
-- [ ] Triton kernels compiled in `make prebuild` (now compiled at first start)
+- [x] Triton kernels: `TRITON_CACHE_DIR` / `CUDA_CACHE_PATH` in the cache volume, shared by prebuild and every
+      container (efb3911): boot 87 -> 44 s, none compiled on the first start after `make image`; a changed kernel
+      compiles once on the first start that runs it (prebuild does not run kernels)
 - [ ] Exact-chunk TTFT mode
 - [ ] More narrow decode widths (each width's graphs cost ~40 MB a graph of driver memory)
 - [ ] L2 prefetch sweep (`TF_L2_PREFETCH=bulk` sites measured only together)
