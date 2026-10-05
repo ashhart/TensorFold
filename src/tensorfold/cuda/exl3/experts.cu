@@ -157,6 +157,32 @@ __global__ void gateup_epilogue_kernel(const float* __restrict__ Z, const int* _
     for (int j = 0; j < 4; ++j) o[j] = __float2half_rn(v[j] * HAD_SCALE);
 }
 
+// Up splits -> inverse 128-Hadamard -> scale -> ReLU² -> trim padded channels -> down input rotation.
+__global__ void relu2_epilogue_kernel(const float* __restrict__ Z, const int* __restrict__ pick,
+                                     const half* __restrict__ svh_u, const half* __restrict__ suh_d,
+                                     half* __restrict__ xd, int P, int N, int logical, int SK, int E) {
+    const int p = blockIdx.x, blk = blockIdx.y, e = pick[p];
+    if (e < 0 || e >= E) return;
+    const int lane = threadIdx.x, n = blk * 128 + 4 * lane;
+    float v[4];
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        float sum = 0.f;
+        for (int s = 0; s < SK; ++s) sum += Z[((size_t)s * P + p) * N + n + j];
+        v[j] = sum;
+    }
+    fwht128(v, lane);
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        const float up = fmaxf(v[j] * HAD_SCALE * __half2float(svh_u[(size_t)e * N + n + j]), 0.f);
+        v[j] = n + j < logical ? up * up * __half2float(suh_d[(size_t)e * N + n + j]) : 0.f;
+    }
+    fwht128(v, lane);
+    half* o = xd + (size_t)p * N + n;
+#pragma unroll
+    for (int j = 0; j < 4; ++j) o[j] = __float2half_rn(v[j] * HAD_SCALE);
+}
+
 // Program (member row, 128-block of the model width): Y = (splits summed in order) @ H * svh_d, fp32.
 __global__ void down_epilogue_kernel(const float* __restrict__ Z, const int* __restrict__ pick,
                                      const half* __restrict__ svh_d, float* __restrict__ y, int P, int D, int SK,
@@ -326,6 +352,35 @@ void exl3x_rot_in_cuda(const at::Tensor& x, int64_t x_stride, const at::Tensor& 
         rot_in_kernel<half><<<grid, 32, 0, stream>>>(reinterpret_cast<const half*>(x.data_ptr()), (int)x_stride,
                                                      pick.data_ptr<int>(), s0, s1, o0, o1, (int)K, (int)slots,
                                                      (int)E);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+void exl3x_rot_in_single_cuda(const at::Tensor& x, int64_t x_stride, const at::Tensor& pick,
+                              const at::Tensor& suh, at::Tensor& out, int64_t rows, int64_t K,
+                              int64_t slots, int64_t E) {
+    dim3 grid((unsigned)(rows * slots), (unsigned)(K / 128));
+    auto stream = at::cuda::getCurrentCUDAStream();
+    auto scales = reinterpret_cast<const half*>(suh.data_ptr());
+    auto output = reinterpret_cast<half*>(out.data_ptr());
+    if (x.scalar_type() == at::kBFloat16)
+        rot_in_kernel<__nv_bfloat16><<<grid, 32, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), (int)x_stride, pick.data_ptr<int>(),
+            scales, scales, output, output, (int)K, (int)slots, (int)E);
+    else
+        rot_in_kernel<half><<<grid, 32, 0, stream>>>(
+            reinterpret_cast<const half*>(x.data_ptr()), (int)x_stride, pick.data_ptr<int>(),
+            scales, scales, output, output, (int)K, (int)slots, (int)E);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+void exl3x_relu2_epilogue_cuda(const at::Tensor& Z, const at::Tensor& pick, const at::Tensor& svh_u,
+                               const at::Tensor& suh_d, at::Tensor& xd, int64_t rows, int64_t P, int64_t N,
+                               int64_t logical, int64_t SK, int64_t slots, int64_t E) {
+    dim3 grid((unsigned)(rows * slots), (unsigned)(N / 128));
+    relu2_epilogue_kernel<<<grid, 32, 0, at::cuda::getCurrentCUDAStream()>>>(
+        Z.data_ptr<float>(), pick.data_ptr<int>(), reinterpret_cast<const half*>(svh_u.data_ptr()),
+        reinterpret_cast<const half*>(suh_d.data_ptr()), reinterpret_cast<half*>(xd.data_ptr()),
+        (int)P, (int)N, (int)logical, (int)SK, (int)E);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

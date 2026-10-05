@@ -9,6 +9,10 @@ void exl3x_dequant_cuda(const at::Tensor&, at::Tensor&, int64_t, int64_t, int64_
 void exl3x_group_cuda(const at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&, int64_t, int64_t, int64_t);
 void exl3x_rot_in_cuda(const at::Tensor&, int64_t, const at::Tensor&, const at::Tensor&, const at::Tensor&,
                        at::Tensor&, at::Tensor&, int64_t, int64_t, int64_t, int64_t);
+void exl3x_rot_in_single_cuda(const at::Tensor&, int64_t, const at::Tensor&, const at::Tensor&, at::Tensor&,
+                              int64_t, int64_t, int64_t, int64_t);
+void exl3x_relu2_epilogue_cuda(const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+                               at::Tensor&, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 void exl3x_gateup_epilogue_cuda(const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
                                 const at::Tensor&, at::Tensor&, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t,
                                 double, int64_t);
@@ -82,6 +86,31 @@ void rot_in(const at::Tensor& x, int64_t x_stride, const at::Tensor& pick, const
     exl3x_rot_in_cuda(x, x_stride, pick, suh0, suh1, out0, out1, rows, K, slots, E);
 }
 
+void rot_in_single(const at::Tensor& x, int64_t x_stride, const at::Tensor& pick, const at::Tensor& suh,
+                   at::Tensor out, int64_t rows, int64_t K, int64_t slots, int64_t E) {
+    TORCH_CHECK(x.is_cuda() && (x.scalar_type() == at::kBFloat16 || x.scalar_type() == at::kHalf), "x: bf16/fp16 CUDA");
+    check(pick, at::kInt, "pick");
+    check(suh, at::kHalf, "suh");
+    check(out, at::kHalf, "out");
+    TORCH_CHECK(K % 128 == 0 && out.numel() >= rows * slots * K, "invalid single rotation dimensions");
+    c10::cuda::CUDAGuard guard(x.device());
+    exl3x_rot_in_single_cuda(x, x_stride, pick, suh, out, rows, K, slots, E);
+}
+
+void relu2_epilogue(const at::Tensor& Z, const at::Tensor& pick, const at::Tensor& svh_u,
+                    const at::Tensor& suh_d, at::Tensor xd, int64_t rows, int64_t P, int64_t N,
+                    int64_t logical, int64_t SK, int64_t slots, int64_t E) {
+    check(Z, at::kFloat, "Z");
+    check(pick, at::kInt, "pick");
+    check(svh_u, at::kHalf, "svh_u");
+    check(suh_d, at::kHalf, "suh_d");
+    check(xd, at::kHalf, "xd");
+    TORCH_CHECK(N % 128 == 0 && logical > 0 && logical <= N && P == rows * slots, "invalid ReLU2 dimensions");
+    TORCH_CHECK(Z.numel() >= SK * P * N && xd.numel() >= P * N, "ReLU2 scratch too small");
+    c10::cuda::CUDAGuard guard(Z.device());
+    exl3x_relu2_epilogue_cuda(Z, pick, svh_u, suh_d, xd, rows, P, N, logical, SK, slots, E);
+}
+
 void gateup_epilogue(const at::Tensor& Z, const at::Tensor& pick, const at::Tensor& svh_g, const at::Tensor& svh_u,
                      const at::Tensor& suh_d, at::Tensor xd, int64_t rows, int64_t P, int64_t N, int64_t SK,
                      int64_t slots, int64_t E, double limit, int64_t act_mode) {
@@ -134,7 +163,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("dequant", &dequant);
     m.def("group", &group);
     m.def("rot_in", &rot_in);
+    m.def("rot_in_single", &rot_in_single);
     m.def("gateup_epilogue", &gateup_epilogue);
+    m.def("relu2_epilogue", &relu2_epilogue);
     m.def("down_epilogue", &down_epilogue);
     m.def("combine", &combine);
     m.def("down_combine", &down_combine);

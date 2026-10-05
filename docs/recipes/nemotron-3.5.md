@@ -1,6 +1,6 @@
 # Nemotron 3.5 Lightning
 
-The MLX family is `src/tensorfold/families/nemotron_h/`, with Metal kernels in
+The Nemotron-H family is `src/tensorfold/families/nemotron_h/`, with Metal kernels in
 `src/tensorfold/kernels/nemotron/lightning/v1/`. It combines Mamba-2, attention and MoE blocks.
 
 ## Run
@@ -30,11 +30,12 @@ cuts, so cold and resumed prompts use the same chunks; templates without markers
 
 ## CUDA
 
-CUDA reads this model's MLX 4-bit checkpoint only; NVFP4 and EXL3 exports of it are not read yet. Its prompt matmuls
-have no FP8 kernel, so prompt precision does not change and `--prefill-fp8` is refused.
+CUDA reads the MLX 4-bit checkpoint and a native EXL3 Nemotron-H checkpoint. NVFP4 is not read. The
+MLX checkpoint's prompt matmuls have no FP8 kernel, so prompt precision does not change and
+`--prefill-fp8` is refused.
 
-Use the [CUDA container setup](../../RUNBOOK.md#nvidia-gpus). One or two ranks are supported.
-Pull the checkpoint on each rank and start rank 1 first:
+Use the [CUDA container setup](../../RUNBOOK.md#nvidia-gpus). One or two ranks are supported for
+the MLX 4-bit checkpoint. Pull it on each rank and start rank 1 first:
 
 ```bash
 tensorfold serve TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit --tp 2 --rank 1 --master 192.0.2.1
@@ -53,6 +54,31 @@ Requests take turns. The engine retains prompt and reply states for prefix reuse
 uses a separate serial engine. The default requested context is 16,384 tokens, subject to startup
 memory admission; `--context` sets an explicit window. Inspect the reported capacity before sending
 long requests. Both backends use the same public draft list below.
+
+## CUDA EXL3 (single-GPU serial path)
+
+The EXL3 loader reads packed projections and plain tensors across safetensors shards, trims padded
+projections to logical widths, assembles attention Q/K/V in order, and evaluates Nemotron's gateless
+ReLU² routed and shared experts. Routed expert outputs are computed per selected slot; the shared
+expert is added separately. The original checkpoint files are not rewritten.
+
+Use a local Nemotron-H EXL3 directory with its `config.json`, tokenizer, generation config, index,
+and every indexed shard. For example:
+
+```bash
+tensorfold info /path/to/nemotron-exl3
+tensorfold serve /path/to/nemotron-exl3 --backend cuda --tp 1 --no-drafts \
+  --context 8192 --host 127.0.0.1 --port 8080 --name nemotron-exl3 \
+  --api-key-file /path/to/restricted-keys --no-update-check
+```
+
+MTP drafting and two-rank tensor parallelism are explicitly unsupported for EXL3; do not substitute
+the MLX checkpoint's MTP file. EOS IDs from both `config.json` and `generation_config.json` are honored
+(this checkpoint uses the chat end token as an additional EOS). One calibrated 4.00bpw-HQ candidate
+has passed full weight load, real prompt/decode, and authenticated OpenAI-compatible chat requests
+on a DGX Spark SM121. This is an initial serial serving path, not a quality or throughput benchmark
+of all EXL3 variants. Bind externally only through a restricted interface or a tailnet proxy; keep
+the API key file private.
 
 ## Draft vocabulary provenance
 

@@ -19,12 +19,19 @@ MLX_ENV = {"MLX_MAX_OPS_PER_BUFFER": "200", "MLX_MAX_MB_PER_BUFFER": "100000"}
 
 
 GROUPS = (32, 64)          # 4-bit groups every chip's kernels read: lane_qmm on M5, rows' matvecs and experts
+QUANT_METHODS = {"cuda": ("mlx", "exl3")}
+EXL3_VARIANT = "any"
 
 
 def refusal(config: dict[str, Any]) -> str | None:
     """Why the kernels cannot read a checkpoint, from config.json: they read MLX 4-bit weights in GROUPS only."""
 
-    from tensorfold.families import describe_quantization, layer_quantization, quantization
+    from tensorfold.families import describe_quantization, layer_quantization, quant_method, quantization
+
+    if quant_method(config) == "exl3":
+        from tensorfold.cuda.exl3.format import require_config
+        require_config(config)
+        return None
 
     bits, group = quantization(config)
     odd = sorted({f"{b}-bit g{g}" + ("" if m == "affine" else f" {m}") for path, (b, g, m)    # embeddings: a lookup
@@ -106,6 +113,13 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
 
     if drafter:
         raise ValueError(f"{TITLE} drafts with its own MTP head on CUDA: a separate draft model does not apply")
+    from tensorfold.cuda.exl3.format import is_exl3
+
+    if is_exl3(model_dir):
+        if not no_drafts:
+            raise ValueError("Nemotron EXL3 MTP drafting is not supported yet; pass --no-drafts for serial decoding")
+        if int(tp) != 1:
+            raise ValueError("Nemotron EXL3 two-rank CUDA execution is not supported yet; use one GPU")
     from .cuda import CONFIDENCE, CONTEXT, DRAFTS
     from .cuda.app import NemotronEngine
 

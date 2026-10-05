@@ -5,10 +5,14 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import torch
 
 from tensorfold.cuda import experts as grouped
+
+if TYPE_CHECKING:
+    from tensorfold.cuda.exl3.experts import NemotronExl3Experts
 from tensorfold.families.qwen3_5.cuda.qmm_fast import tile
 from tensorfold.families.qwen3_5.cuda.weights import QLinear
 
@@ -73,6 +77,12 @@ class Config:
             raise ValueError("Nemotron-H checkpoints with dense MLP blocks are not supported on CUDA")
         limit = raw.get("time_step_limit") or (0.0, float("inf"))
         eos = raw.get("eos_token_id", 2)
+        eos = list(eos) if isinstance(eos, list) else [eos]
+        generation_path = Path(model_dir) / "generation_config.json"
+        if generation_path.is_file():
+            generation_eos = json.loads(generation_path.read_text()).get("eos_token_id")
+            if generation_eos is not None:
+                eos.extend(generation_eos if isinstance(generation_eos, list) else [generation_eos])
         return cls(
             hidden=int(raw["hidden_size"]), vocab=int(raw["vocab_size"]), pattern=pattern,
             heads=int(raw["num_attention_heads"]), kv_heads=int(raw["num_key_value_heads"]),
@@ -84,7 +94,7 @@ class Config:
             shared_width=int(raw["moe_shared_expert_intermediate_size"]),
             scaling=float(raw.get("routed_scaling_factor") or 1.0), norm_topk=bool(raw.get("norm_topk_prob", True)),
             eps=float(raw.get("layer_norm_epsilon", 1e-5)), dt_min=float(limit[0]), dt_max=float(limit[1]),
-            eos=tuple(eos) if isinstance(eos, list) else (int(eos),),
+            eos=tuple(dict.fromkeys(int(token) for token in eos)),
         )
 
 
@@ -110,7 +120,9 @@ class Attention:
 class MoE:
     router: torch.Tensor        # (E, D) bf16
     bias: torch.Tensor          # (E,) fp32 score correction
-    experts: grouped.Experts    # E routed + the shared expert's two halves
+    experts: grouped.Experts | NemotronExl3Experts  # MLX halves or EXL3 routed experts
+    shared_up: object | None = None     # EXL3 keeps the shared expert separate
+    shared_down: object | None = None
 
 
 @dataclass
@@ -236,6 +248,13 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True) -> We
     """The checkpoint in ``model_dir``, and its ``mtp-4bit.safetensors`` unless ``mtp`` is False."""
 
     model_dir = Path(model_dir)
+    from tensorfold.cuda.exl3.format import is_exl3
+
+    if is_exl3(model_dir):
+        if mtp:
+            raise ValueError("Nemotron EXL3 MTP loading is not supported yet; use serial decoding")
+        from . import exl3_weights
+        return exl3_weights.load(model_dir, device)
     c = Config.read(model_dir)
     r = _Reader(sorted(model_dir.glob("model*.safetensors")), device)
     blocks: list[Block] = []

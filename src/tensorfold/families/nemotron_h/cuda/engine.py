@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 
 from tensorfold.cuda import experts as grouped
+from tensorfold.cuda.exl3.experts import NemotronExl3Experts, NemotronScratch, routed_nemotron
 from tensorfold.cuda.kernels import prefill_attention
 from tensorfold.families.qwen3_5.cuda import glue as base
 
@@ -79,6 +80,12 @@ class Engine:
         self.p_meta = torch.zeros(4, dtype=torch.int32, device=dev)
         self.p_sampled = torch.zeros(1, dtype=torch.int32, device=dev)
         self._host_p = torch.zeros(1, dtype=torch.int32).pin_memory()
+        self.exl3_window = self.exl3_prompt = None
+        first_exl3 = next((b.moe.experts for b in w.blocks if b.moe is not None and
+                           isinstance(b.moe.experts, NemotronExl3Experts)), None)
+        if first_exl3 is not None:
+            self.exl3_window = NemotronScratch(first_exl3, max_rows, self.ns)
+            self.exl3_prompt = NemotronScratch(first_exl3, prefill_rows, self.ns)
 
     # -- state ------------------------------------------------------------------------------------
     def reset(self) -> None:
@@ -105,6 +112,13 @@ class Engine:
             return G.add_moe_norm(x, delta[1], delta[2], weight, eps, self.c.top_k)
         return base.add_rmsnorm(x, delta[1], weight, eps)
 
+    def embed(self, ids: torch.Tensor) -> torch.Tensor:
+        """The checkpoint's plain EXL3 embedding or its MLX affine row lookup."""
+
+        if isinstance(self.w.embed, torch.Tensor):
+            return torch.nn.functional.embedding(ids.long(), self.w.embed)
+        return base.embed(ids, self.w.embed.weight, self.w.embed.scales, self.w.embed.biases, self.c.hidden)
+
     def mamba(self, m, normed, xs, rows: int, j: int):
         c = self.c
         proj = G.dense(normed, m.in_proj, xs)
@@ -129,6 +143,11 @@ class Engine:
         c, ex = self.c, moe.experts
         G.route(normed, moe.router, moe.bias, self.pick[:rows], self.wts[:rows], top_k=c.top_k, scaling=c.scaling,
                 norm=c.norm_topk)
+        if moe.shared_up is not None:
+            assert isinstance(ex, NemotronExl3Experts) and self.exl3_window is not None
+            y = routed_nemotron(normed, self.pick[:rows], ex, self.exl3_window, rows)
+            y[:, c.top_k].copy_(G.relu2_mlp(normed, moe.shared_up, moe.shared_down).float())
+            return ("moe", y.view(rows * self.ns, c.hidden), self.wts[:rows])
         grouped.route(self.pick[:rows], self.plan)
         y = torch.empty((rows * self.ns, c.hidden), dtype=torch.float32, device=normed.device)
         act = self.act[:self.max_rows * self.ns * ex.width].view(-1, ex.width)      # a rank holds part of the width
@@ -138,7 +157,7 @@ class Engine:
 
     def _forward(self, rows: int) -> None:
         w, c = self.w, self.c
-        x = base.embed(self.ids[:rows], w.embed.weight, w.embed.scales, w.embed.biases, c.hidden)
+        x = self.embed(self.ids[:rows])
         delta = None
         mj = aj = 0
         for blk in w.blocks:
@@ -206,6 +225,11 @@ class Engine:
         c, ex = self.c, moe.experts
         G.route(normed, moe.router, moe.bias, self.p_pick[:rows], self.p_wts[:rows], top_k=c.top_k,
                 scaling=c.scaling, norm=c.norm_topk)
+        if moe.shared_up is not None:
+            assert isinstance(ex, NemotronExl3Experts) and self.exl3_prompt is not None
+            y = routed_nemotron(normed, self.p_pick[:rows], ex, self.exl3_prompt, rows)
+            y[:, c.top_k].copy_(G.relu2_mlp(normed, moe.shared_up, moe.shared_down, prefill=True).float())
+            return ("moe", y.view(rows * self.ns, c.hidden), self.p_wts[:rows])
         grouped.route(self.p_pick[:rows], self.p_plan)
         act = self.p_act[:rows * self.ns * ex.width].view(-1, ex.width)
         y = self.p_y[:rows * self.ns]
@@ -238,7 +262,7 @@ class Engine:
                     "host": (self.pos + cut, self.parity, 0)}
         w, c = self.w, self.c
         self.p_ids[:rows].copy_(torch.as_tensor(tokens, dtype=torch.int32), non_blocking=False)
-        x = base.embed(self.p_ids[:rows], w.embed.weight, w.embed.scales, w.embed.biases, c.hidden)
+        x = self.embed(self.p_ids[:rows])
         delta = None
         mj = aj = 0
         for blk in w.blocks:

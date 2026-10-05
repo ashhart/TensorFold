@@ -133,6 +133,74 @@ def prepare_stacked(gt: torch.Tensor, ut: torch.Tensor, dt: torch.Tensor, suh_g,
                    [(dt[e], suh_d[e], svh_d[e]) for e in range(E)], codebook, device=gt.device)
 
 
+@dataclass
+class NemotronExl3Experts:
+    """Gateless ReLU² experts with a padded EXL3 intermediate; ``keep`` owns the trellises behind the pointers."""
+
+    up_ptr: torch.Tensor
+    down_ptr: torch.Tensor
+    up_k2: torch.Tensor
+    down_k2: torch.Tensor
+    suh_u: torch.Tensor
+    svh_u: torch.Tensor
+    suh_d: torch.Tensor
+    svh_d: torch.Tensor
+    count: int
+    dims: int
+    width: int                  # stored, padded intermediate width
+    intermediate_size: int      # logical width (padded activations must be zero before down)
+    cb: int
+    k2_u: tuple[int, int]
+    k2_d: tuple[int, int]
+    keep: list = field(default_factory=list, repr=False)
+
+
+def prepare_nemotron(up: Sequence[tuple], down: Sequence[tuple], codebook: int | str, *,
+                     intermediate_size: int) -> NemotronExl3Experts:
+    """Prepare ordered per-expert ``(trellis, suh, svh)`` up/down triples, already on one CUDA device.
+
+    ``intermediate_size`` is the unpadded width; trellises include the padded columns and rows.
+    ``suh``/``svh`` are fp16 scale vectors (not packed sign words).
+    """
+    cb = codebook_id(codebook) if isinstance(codebook, str) else int(codebook)
+    if cb not in (CB_3INST, CB_MCG, CB_MUL1):
+        raise ValueError(f"unknown EXL3 codebook id {cb}")
+    if not up or len(up) != len(down):
+        raise ValueError("up and down need the same, non-zero number of experts")
+    first = up[0][0]
+    if first.ndim != 3:
+        raise ValueError("up trellis must be [K/16, N/16, 8 * k2]")
+    D, I = first.shape[0] * 16, first.shape[1] * 16
+    if D % 128 or I % 128 or not 0 < intermediate_size <= I:
+        raise ValueError("D and padded width must be multiples of 128; logical intermediate_size must be in (0, width]")
+    device = first.device
+    if device.type != "cuda":
+        raise ValueError("expert trellises must be on CUDA")
+    keep = []
+
+    def table(mats, k, n):
+        ptrs, k2s, ins, outs = [], [], [], []
+        for trellis, suh, svh in mats:
+            if (trellis.ndim != 3 or trellis.shape[:2] != (k // 16, n // 16) or
+                    trellis.dtype != torch.int16 or not trellis.is_contiguous() or trellis.device != device):
+                raise ValueError(f"trellis must be contiguous CUDA int16 [{k // 16}, {n // 16}, 8 * k2]")
+            if suh.dtype != torch.float16 or suh.numel() != k or svh.dtype != torch.float16 or svh.numel() != n:
+                raise ValueError(f"suh/svh must be fp16 vectors of lengths {k}/{n}")
+            ptrs.append(trellis.data_ptr())
+            k2s.append(k2_of(trellis))
+            ins.append(suh.reshape(-1).to(device))
+            outs.append(svh.reshape(-1).to(device))
+            keep.append(trellis)
+        return (torch.tensor(ptrs, dtype=torch.int64, device=device),
+                torch.tensor(k2s, dtype=torch.int32, device=device),
+                torch.stack(ins), torch.stack(outs), (min(k2s), max(k2s)))
+
+    upp, uk, su, sv, urange = table(up, D, I)
+    dp, dk, sd, vd, drange = table(down, I, D)
+    return NemotronExl3Experts(upp, dp, uk, dk, su, sv, sd, vd, len(up), D, I, intermediate_size, cb,
+                               urange, drange, keep)
+
+
 def default_config(K: int, N: int, gateup: bool) -> tuple[int, int, int, int]:
     """The tile setting for a K -> N projection (GLM's where it divides): the shape's alone, so rows stay independent."""
 
@@ -200,6 +268,63 @@ def routed(x: torch.Tensor, pick: torch.Tensor, wts: torch.Tensor | None, ex: Ex
     # the down epilogue and the combine in one launch (the same arithmetic in the same order as the two)
     ext.down_combine(s.z, pick, ex.svh_d, s.y, wts, out, R, P, D, sk, slots, E)
     return out
+
+
+class NemotronScratch:
+    """Reusable one-GPU scratch for up to ``rows`` rows and ``slots`` picks per row."""
+
+    def __init__(self, ex: NemotronExl3Experts, rows: int, slots: int, cfg_up=None, cfg_down=None) -> None:
+        if rows < 1 or not 1 <= slots <= 32:
+            raise ValueError("rows must be positive and slots must be in 1..32")
+        D, I, dev = ex.dims, ex.width, ex.up_ptr.device
+        self.cfg_up = cfg_up or default_config(D, I, True)
+        self.cfg_down = cfg_down or default_config(I, D, False)
+        P = rows * slots
+        self.xu = torch.empty((P, D), dtype=torch.float16, device=dev)
+        self.xd = torch.empty((P, I), dtype=torch.float16, device=dev)
+        self.z = torch.empty((max(self.cfg_up[2] * I, self.cfg_down[2] * D) * P,),
+                             dtype=torch.float32, device=dev)
+        self.y = torch.empty((P, D), dtype=torch.float32, device=dev)
+        maxu = min(P, ex.count)
+        self.ids = torch.empty((maxu,), dtype=torch.int32, device=dev)
+        self.count = torch.empty((1,), dtype=torch.int32, device=dev)
+        self.members_buf = torch.empty((maxu * rows,), dtype=torch.int32, device=dev)
+        self.rows, self.slots, self.count_experts = rows, slots, ex.count
+
+    def window(self, R: int):
+        maxu = min(R * self.slots, self.count_experts)
+        return self.ids[:maxu], self.members_buf[:maxu * R].view(maxu, R)
+
+
+def routed_nemotron(x: torch.Tensor, pick: torch.Tensor, ex: NemotronExl3Experts, s: NemotronScratch,
+                    R: int) -> torch.Tensor:
+    """Evaluate precomputed int32 ``pick[R, slots]`` (< E routed, >= E skipped), per-slot fp32 [R, slots, D].
+
+    Skipped slots are zero, so a separate shared expert can be added by the caller. The returned view
+    aliases scratch and is overwritten on the next call. No host synchronization or route/weight computation.
+    """
+    D, I, E, slots = ex.dims, ex.width, ex.count, s.slots
+    if not 1 <= R <= s.rows or x.shape != (R, D) or pick.shape != (R, slots):
+        raise ValueError(f"expected x [{R}, {D}], pick [{R}, {slots}] and R in 1..{s.rows}")
+    if x.device != ex.up_ptr.device or pick.device != x.device or pick.dtype != torch.int32:
+        raise ValueError("x, experts and int32 pick must be on the same CUDA device")
+    if x.dtype not in (torch.float16, torch.bfloat16) or x.stride(1) != 1 or not pick.is_contiguous():
+        raise ValueError("x must be row-strided fp16/bf16; pick must be contiguous int32")
+    ext = _ext()
+    P = R * slots
+    ids, members = s.window(R)
+    ext.group(pick, ids, s.count, members, R, slots, E)
+    ext.rot_in_single(x, x.stride(0), pick, ex.suh_u, s.xu, R, D, slots, E)
+    nt, w, sk, pf = s.cfg_up
+    ext.grouped(s.xu, s.xu, ex.up_ptr, ex.up_ptr, ex.up_k2, ex.up_k2, ids, s.count, members, s.z,
+                1, D, I, P, sk, slots, ex.cb, nt, w, pf, ex.k2_u[0], ex.k2_u[1])
+    ext.relu2_epilogue(s.z, pick, ex.svh_u, ex.suh_d, s.xd, R, P, I, ex.intermediate_size, sk, slots, E)
+    nt, w, sk, pf = s.cfg_down
+    ext.grouped(s.xd, s.xd, ex.down_ptr, ex.down_ptr, ex.down_k2, ex.down_k2, ids, s.count, members, s.z,
+                1, I, D, P, sk, slots, ex.cb, nt, w, pf, ex.k2_d[0], ex.k2_d[1])
+    s.y[:P].zero_()
+    ext.down_epilogue(s.z, pick, ex.svh_d, s.y, R, P, D, sk, slots, E)
+    return s.y[:P].view(R, slots, D)
 
 
 def dequant(trellis: torch.Tensor, codebook: int | str) -> torch.Tensor:

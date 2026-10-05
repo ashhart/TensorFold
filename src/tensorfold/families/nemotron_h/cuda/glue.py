@@ -13,13 +13,29 @@ from tensorfold.families.qwen3_5.cuda import qmm_fast
 def dense(x: torch.Tensor, q, xs: torch.Tensor | None = None, *, f32: bool = False) -> torch.Tensor:
     """The shared 4-bit lane matmul (tiled weights): bf16 out, or unrounded fp32 sums (a rank's partial)."""
 
+    if hasattr(q, "prefill"):
+        if f32:
+            raise ValueError("EXL3 partial projections need a separate two-rank implementation")
+        return q(x)
     return qmm_fast.matmul_partial(x, q, xs) if f32 else qmm_fast.matmul(x, q, xs)
 
 
 def prefill_dense(x: torch.Tensor, q, *, f32: bool = False) -> torch.Tensor:
     """A prompt chunk's matmul on the shared prefill kernel (bf16 weights, one chain over K; row-invariant)."""
 
+    if hasattr(q, "prefill"):
+        if f32:
+            raise ValueError("EXL3 partial projections need a separate two-rank implementation")
+        return q.prefill(x)
     return shared.prefill_matmul(x, q, f32=f32)
+
+
+def relu2_mlp(x: torch.Tensor, up, down, *, prefill: bool = False) -> torch.Tensor:
+    """Nemotron-H's non-gated shared expert: down(ReLU(up(x)) squared)."""
+
+    project = prefill_dense if prefill else dense
+    activated = torch.relu(project(x, up)).square()
+    return project(activated, down)
 
 
 def _divisor(n: int, want: int) -> int:
