@@ -30,6 +30,10 @@ pub const Fake = struct {
     lanes: std.AutoHashMapUnmanaged(*Stream, Lane) = .empty,
     drawn: std.ArrayList(u32) = .empty, // handle -> token
     rounds: u64 = 0,
+    cycle_after: ?usize = null,
+    probe_prompt: usize = 0,
+    pattern: []const u32 = &.{ 11, 12, 13 },
+    answer_cycles: bool = false,
 
     pub fn deinit(x: *Fake) void {
         var it = x.lanes.valueIterator();
@@ -58,8 +62,26 @@ pub const Fake = struct {
 
     fn draw(x: *Fake, l: *Lane, s: *Stream, position: u64) !u64 {
         if (position != l.history.items.len) return error.PositionMismatch;
-        try x.drawn.append(x.gpa, next(l.history.items, s.sampling, position));
+        try x.drawn.append(x.gpa, x.targetNext(l.history.items, s.sampling, position));
         return x.drawn.items.len - 1;
+    }
+
+    fn targetNext(x: *Fake, history: []const u32, sampling: ?Sampling, position: u64) u32 {
+        if (x.cycle_after) |start| if (history.len >= x.probe_prompt) {
+            const reply = history[x.probe_prompt..];
+            if (std.mem.indexOfScalar(u32, reply, 91)) |close| {
+                if (reply.len == close + 1) return 92;
+                const after = reply.len - close - 2;
+                if (x.answer_cycles) {
+                    const answer = [_]u32{ 21, 22, 23 };
+                    return answer[after % 3];
+                }
+                const answer = [_]u32{ 40, 41, 42, 96 };
+                return answer[@min(after, 3)];
+            }
+            if (reply.len >= start) return x.pattern[(reply.len - start) % x.pattern.len];
+        };
+        return next(history, sampling, position);
     }
 
     fn value(x: *Fake, feed: be.Feed) u32 {
@@ -115,7 +137,7 @@ pub const Fake = struct {
                 while (at >= 0) : (at = parents[@intCast(at)]) try path.insert(x.gpa, 0, l.rows.items[@intCast(at)]);
                 try l.history.appendSlice(x.gpa, path.items);
                 if (w.positions[r] != l.history.items.len) return error.PositionMismatch;
-                o.sampled[r] = next(l.history.items, w.stream.sampling, w.positions[r]);
+                o.sampled[r] = x.targetNext(l.history.items, w.stream.sampling, w.positions[r]);
             }
             l.history.shrinkRetainingCapacity(l.base);
             try l.history.appendSlice(x.gpa, l.rows.items); // a chain keeps every row unless rolled back
@@ -148,7 +170,7 @@ pub const Fake = struct {
             try guess.append(x.gpa, pending);
             for (0..r.depth) |j| {
                 const at = r.position + j;
-                var t = next(guess.items, r.stream.sampling, at);
+                var t = x.targetNext(guess.items, r.stream.sampling, at);
                 if ((at *% 2654435761 + j) % 5 == 0) t = (t + 1) % vocab; // a wrong guess now and then
                 try l.held.append(x.gpa, t);
                 try guess.append(x.gpa, t);

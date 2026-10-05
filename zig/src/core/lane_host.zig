@@ -51,7 +51,9 @@ pub const LaneHost = struct {
     };
 
     pub fn init(gpa: Allocator, io: std.Io, core: *lanes.Engine, info_: Info) LaneHost {
-        return .{ .gpa = gpa, .io = io, .core = core, .info_ = info_ };
+        var enforced = info_;
+        enforced.loop_guard = true;
+        return .{ .gpa = gpa, .io = io, .core = core, .info_ = enforced };
     }
 
     pub fn start(h: *LaneHost) !void {
@@ -170,7 +172,7 @@ pub const LaneHost = struct {
 
     fn finish(h: *LaneHost, job: *Job, reason: Reason, message: []const u8) void {
         const s = &job.stream;
-        const stats: Stats = if (job.started) .{ .rounds = s.rounds, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows } else .{};
+        const stats: Stats = if (job.started) .{ .rounds = s.rounds, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows, .loop_period = s.loop_period } else .{};
         emit(job, .{ .finished = .{ .reason = reason, .stats = stats, .message = message } });
         if (job.started) {
             s.deinit(h.gpa);
@@ -257,6 +259,7 @@ pub const LaneHost = struct {
             .think_budget = r.think_budget,
             .think_close = r.think_close,
             .think_end = if (r.think_end) |t| t else -1,
+            .loop_guard = r.loop_guard,
             .chunks = r.chunks,
         }) catch {
             job.proposer.deinit();
@@ -283,7 +286,7 @@ pub const LaneHost = struct {
     /// A greedy drafted request alone in the engine, with nothing waiting: the backend's own driver takes it.
     fn loneFits(h: *LaneHost, job: *Job) bool {
         const r = job.request;
-        if (h.lone == null or r.sampling != null or !r.drafts or r.think_budget > 0 or r.call != null or r.structure != null) return false;
+        if (h.lone == null or r.sampling != null or !r.drafts or r.think_budget > 0 or r.loop_guard or r.call != null or r.structure != null) return false;
         h.lock();
         defer h.unlock();
         return h.admitted.items.len == 1 and h.queued.items.len == 0 and h.cancels.items.len == 0 and h.core.activeCount() == 0;

@@ -21,6 +21,47 @@ pub const Reason = enum {
 
 pub const Mode = enum { pipe, drain, verify, exit };
 
+pub const loop_max_period: usize = 8;
+pub const loop_min_run: usize = 256;
+pub const loop_warm_in: usize = 64;
+
+/// Return the shortest exact cycle at the end of a combined token prefix.
+fn cycleAt(head: []const u32, tail: []const u32, n: usize) ?u32 {
+    if (n < loop_min_run + 1) return null;
+    for (1..loop_max_period + 1) |period| {
+        if (n < loop_min_run + period) break;
+        if (n - loop_min_run - period < loop_warm_in) break;
+        var matches = true;
+        for (1..loop_min_run + 1) |k| {
+            const right = n - k;
+            const left = right - period;
+            const right_token = if (right < head.len) head[right] else tail[right - head.len];
+            const left_token = if (left < head.len) head[left] else tail[left - head.len];
+            if (right_token != left_token) {
+                matches = false;
+                break;
+            }
+        }
+        if (matches) return @intCast(period);
+    }
+    return null;
+}
+
+/// Return the first token index in a candidate batch that would fire the guard.
+pub fn loopCut(s: *const Stream, tokens: []const u32) ?usize {
+    if (!s.loop_guard or !s.think_open or s.think_end < 0 or s.loop_period != null) return null;
+    for (tokens, 0..) |token, i| {
+        if (@as(i64, token) == s.think_end) return null;
+        if (cycleAt(s.emitted(), tokens, s.emitted().len + i + 1) != null) return i;
+    }
+    return null;
+}
+
+/// Return the detected period at the end of committed tokens, or null.
+pub fn detectLoop(emitted: []const u32) ?u32 {
+    return cycleAt(emitted, &.{}, emitted.len);
+}
+
 /// A stop-string check over the emitted tokens (the server's StopPolicy decodes their tail).
 pub const StopCheck = struct {
     ptr: *anyopaque,
@@ -47,6 +88,7 @@ pub const Spec = struct {
     think_close: []const u32 = &.{},
     think_end: i64 = -1,
     think_open: ?bool = null, // null: open when a budget is set (the server's rule)
+    loop_guard: bool = false,
     chunks: []const u32 = &.{}, // where prefill chunks start after 0 (Python's PrefillPlan); empty: the backend's step
 };
 
@@ -63,6 +105,8 @@ pub const Stream = struct {
     think_close: []const u32,
     think_end: i64,
     think_open: bool,
+    loop_guard: bool,
+    loop_period: ?u32 = null,
     chunks: []const u32,
     context: std.ArrayList(u32) = .empty,
     pending: ?u32 = null,
@@ -109,7 +153,8 @@ pub const Stream = struct {
             .think_budget = spec.think_budget,
             .think_close = spec.think_close,
             .think_end = spec.think_end,
-            .think_open = spec.think_open orelse (spec.think_budget > 0),
+            .think_open = spec.think_open orelse (spec.think_budget > 0 or (spec.loop_guard and spec.think_end >= 0)),
+            .loop_guard = spec.loop_guard,
             .chunks = spec.chunks,
         };
         try s.context.appendSlice(gpa, spec.prompt);
@@ -203,9 +248,24 @@ pub const Stream = struct {
             try s.context.append(gpa, t);
             landed += 1;
             if (@as(i64, t) == s.think_end) s.think_open = false;
+            const fire = if (s.loop_guard and s.think_open and s.think_end >= 0 and s.loop_period == null) detectLoop(s.emitted()) else null;
             if (s.isEos(t) or s.stopped()) {
                 s.finished = true;
                 s.reason = .stop;
+            } else if (fire) |period| {
+                s.loop_period = period;
+                if (s.emitted().len >= s.max_new) {
+                    s.finished = true;
+                    s.reason = .length;
+                } else if (s.think_close.len == 0) {
+                    s.finished = true;
+                    s.reason = .stop;
+                } else {
+                    s.think_open = false;
+                    s.force.clearRetainingCapacity();
+                    try s.force.appendSlice(gpa, s.think_close);
+                }
+                break;
             } else if (s.emitted().len >= s.max_new) {
                 s.finished = true;
                 s.reason = .length;
@@ -232,4 +292,31 @@ test "commit stops at eos and length" {
     try std.testing.expectEqual(@as(usize, 2), try s.commit(gpa, &.{ 5, 9, 7 }));
     try std.testing.expectEqualSlices(u32, &.{ 5, 9 }, s.emitted());
     try std.testing.expect(s.finished and s.reason == .stop);
+}
+
+test "loop guard stops at the cap even when no cycle fires" {
+    const gpa = std.testing.allocator;
+    var tokens: [20]u32 = undefined;
+    for (&tokens, 0..) |*token, i| token.* = @intCast(100 + i);
+    var guarded = try Stream.init(gpa, .{ .id = "guarded", .prompt = &.{1}, .max_new = 10, .think_close = &.{ 90, 91, 92 }, .think_end = 91, .loop_guard = true });
+    defer guarded.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 10), try guarded.commit(gpa, &tokens));
+    try std.testing.expect(guarded.finished and guarded.reason == .length);
+}
+
+test "loop guard fires, closes thinking, and latches once" {
+    const gpa = std.testing.allocator;
+    var tokens: std.ArrayList(u32) = .empty;
+    defer tokens.deinit(gpa);
+    for (0..loop_warm_in) |i| try tokens.append(gpa, @intCast(1000 + i));
+    for (0..257) |_| try tokens.append(gpa, 7);
+    var s = try Stream.init(gpa, .{ .id = "loop", .prompt = &.{1}, .max_new = 400, .think_close = &.{ 90, 91, 92 }, .think_end = 91, .loop_guard = true });
+    defer s.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 321), try s.commit(gpa, tokens.items));
+    try std.testing.expectEqual(@as(u32, 1), s.loop_period.?);
+    try std.testing.expect(!s.finished and !s.think_open and s.force.items.len == 3);
+    while (s.popForce()) |token| _ = try s.commit(gpa, &.{token});
+    try std.testing.expect(!s.finished and s.force.items.len == 0);
+    _ = try s.commit(gpa, &.{8});
+    try std.testing.expect(!s.finished and s.loop_period.? == 1);
 }

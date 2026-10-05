@@ -65,6 +65,8 @@ pub const Request = struct {
     /// Set only when ``Info`` says the engine enforces it.
     call: ?CallGate = null,
     structure: ?Structure = null,
+    /// Stop a short exact cycle while the think block is open.
+    loop_guard: bool = false,
 };
 
 pub const Reason = enum { stop, length, cancelled, failed };
@@ -78,6 +80,8 @@ pub const Stats = struct {
     min_rows: u32 = 0,
     prefill_widths: []const u32 = &.{},
     prefill_raised: []const bool = &.{},
+    /// The loop period that ended or interrupted the think block, if any.
+    loop_period: ?u32 = null,
     /// The drafter's own counters as a JSON object, or empty.
     telemetry_json: []const u8 = "",
 };
@@ -106,6 +110,8 @@ pub const Info = struct {
     context_fitted: bool = false,
     /// What the engine enforces; the server refuses requests that need more.
     call_gates: bool = false,
+    /// The engine observes loop_guard requests in its lane stream.
+    loop_guard: bool = false,
     structures: bool = false,
     /// Prompt rows a prefill chunk at most, for the server's chunk starts (0: the engine cuts prompts itself).
     prefill_step: u32 = 0,

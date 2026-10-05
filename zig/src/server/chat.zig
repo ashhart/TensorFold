@@ -169,8 +169,9 @@ pub fn run(srv: *Server, cx: *Cx, input: Input, sink: ?Sink, gone: anytype) Fail
     if (thinking) {
         const budget_field = f.get("thinking_budget");
         const budget: i64 = if (budget_field != null and budget_field.?.truthy()) budget_field.?.int64() orelse 0 else srv.config.thinking_budget;
-        if (budget > 0 and srv.think_close.len > 0) {
-            request.think_budget = @intCast(@min(budget, std.math.maxInt(u32)));
+        if (srv.think_close.len > 0) request.loop_guard = srv.config.loop_guard;
+        if ((budget > 0 or request.loop_guard) and srv.think_close.len > 0) {
+            if (budget > 0) request.think_budget = @intCast(@min(budget, std.math.maxInt(u32)));
             request.think_close = srv.think_close;
             request.think_end = srv.think_close_end;
         }
@@ -440,6 +441,11 @@ const Generation = struct {
         const sha = tokenSha(g.collected.items);
         try runtime.put(a, "token_sha", .{ .string = try a.dupe(u8, &sha) });
         try runtime.put(a, "min_rows", try json.intValue(a, m.stats.min_rows));
+        if (m.stats.loop_period) |period| {
+            const loop_field = try json.newObject(a);
+            try loop_field.put(a, "period", try json.intValue(a, period));
+            try runtime.put(a, "loop", .{ .object = loop_field });
+        }
         const s = m.stats;
         const spec = try json.newObject(a);
         try spec.put(a, "rounds", try json.intValue(a, s.rounds));
@@ -464,7 +470,9 @@ const Generation = struct {
         };
         if (std.mem.eql(u8, reason, "length") and thinking and reply_text.pyStrip(content).len == 0)
             log.line("warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {{\"enable_thinking\": false}} (server: --no-thinking)", .{});
-        log.line("done req-{d} prompt={d} cached={d} thinking={s} tokens={d} sha={s} finish={s} rounds={d} accepted={d}/{d}", .{ g.id, prompt_len, reply.cached_tokens, if (thinking) "True" else "False", g.collected.items.len, sha, reason, s.rounds, s.accepted, s.drafted });
+        var cycle_text: [32]u8 = undefined;
+        const cycle = if (s.loop_period) |period| std.fmt.bufPrint(&cycle_text, " loop=period:{d}", .{period}) catch "" else "";
+        log.line("done req-{d} prompt={d} cached={d} thinking={s} tokens={d} sha={s} finish={s}{s} rounds={d} accepted={d}/{d}", .{ g.id, prompt_len, reply.cached_tokens, if (thinking) "True" else "False", g.collected.items.len, sha, reason, cycle, s.rounds, s.accepted, s.drafted });
         return reply;
     }
 };

@@ -373,8 +373,16 @@ pub const Engine = struct {
                 }
             }
         }
-        const cut = s.thinkCut(committed.items);
-        if (cut) |c| {
+        const budget_cut = s.thinkCut(committed.items);
+        const loop_cut = sm.loopCut(s, committed.items);
+        const loop_wins = if (loop_cut) |c| budget_cut == null or c < budget_cut.? else false;
+        var cut: ?usize = null;
+        if (loop_wins) {
+            cut = loop_cut;
+            path = path[0 .. loop_cut.? + 1];
+            committed.shrinkRetainingCapacity(loop_cut.? + 1);
+        } else if (budget_cut) |c| {
+            cut = c;
             path = path[0 .. c + 1];
             committed.shrinkRetainingCapacity(c);
             try committed.append(a, try s.startClose(e.gpa));

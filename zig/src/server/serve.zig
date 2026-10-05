@@ -80,6 +80,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .enable_thinking = args.thinking,
         .reasoning_effort = args.reasoning_effort,
         .thinking_budget = args.thinking_budget,
+        .loop_guard = args.loop_guard,
         .default_sampling = s.sampling,
         .use_drafts = !args.no_drafts,
         .seed_salt = salt,
@@ -90,6 +91,10 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         return 1;
     };
     defer srv.deinit();
+    if (args.loop_guard and !srv.info.loop_guard) {
+        log.line("tensorfold: --loop-guard is not supported by this native engine", .{});
+        return 2;
+    }
     const address = resolve(io, args.host, args.port) orelse {
         std.debug.print("tensorfold: cannot resolve --host {s}\n", .{args.host});
         return 1;
@@ -106,9 +111,8 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     const loaded = if (s.started > 0) @as(f64, @floatFromInt(now - s.started)) / 1e9 else 0;
     var window_text: [24]u8 = undefined;
     log.line("serving {s} at http://{s}:{d}/v1 (sampling: {s}; drafts: {s}; context: {s}; loaded in {d:.1}s)", .{
-        s.served,                                           args.host, port, shownSampling(a, s.sampling),
-        if (args.no_drafts) "off" else "on",                if (window > 0) std.fmt.bufPrint(&window_text, "{d}", .{window}) catch "?" else "unlimited",
-        loaded,
+        s.served,                            args.host,                                                                                   port,   shownSampling(a, s.sampling),
+        if (args.no_drafts) "off" else "on", if (window > 0) std.fmt.bufPrint(&window_text, "{d}", .{window}) catch "?" else "unlimited", loaded,
     });
     if (args.thinking and std.mem.indexOf(u8, s.text.templateSource(), "enable_thinking") != null)
         log.line("thinking on (the chat template's default): replies reason in reasoning_content before the answer in content, and max_tokens counts both. --no-thinking turns it off; a request can send chat_template_kwargs {{\"enable_thinking\": false}}", .{});
