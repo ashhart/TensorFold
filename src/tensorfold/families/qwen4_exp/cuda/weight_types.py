@@ -261,12 +261,15 @@ class Weights:
         return sum(seen.values()) + (self.x3.nbytes() if self.x3 is not None else 0)
 
 
+DRAFT_VOCABS = {"default": "draft_vocab.txt", "cjk": "draft_vocab_cjk.txt"}
+
+
 def draft_token_ids(draft_vocab: int | str | None) -> np.ndarray | None:
-    """The MTP drafts' scored ids, sorted: "default" (draft_vocab.txt), a file of ids, N (ids below N) or None (all)."""
+    """The MTP drafts' scored ids, sorted: "default"/"cjk" (lists shipped beside this module), a file of ids, N or None."""
 
     if not draft_vocab:
         return None
     if isinstance(draft_vocab, int):
         return np.arange(draft_vocab, dtype=np.int64)
-    source = Path(__file__).with_name("draft_vocab.txt") if draft_vocab == "default" else Path(draft_vocab)
+    source = Path(__file__).with_name(DRAFT_VOCABS[draft_vocab]) if draft_vocab in DRAFT_VOCABS else Path(draft_vocab)
     return np.unique(np.loadtxt(source, dtype=np.int64).reshape(-1))
