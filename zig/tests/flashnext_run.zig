@@ -757,6 +757,7 @@ const Run = struct {
     xpack: bool = false,
     xfused: bool = false,
     xsx: bool = false,
+    copy: bool = false,
     xgu_sx_pipe: mtl.Pipeline = undefined,
     xdown_sx_pipe: mtl.Pipeline = undefined,
     prefetch: bool = false,
@@ -1588,6 +1589,26 @@ const Model = struct {
     }
 };
 
+/// Copy lanes: the longest suffix of `hist` (`min`..8 tokens) seen earlier; the tokens after its latest earlier
+/// occurrence go into `out`. Returns how many (0 when nothing matches).
+fn copyDrafts(hist: []const u32, min: usize, out: []u32) usize {
+    const n = hist.len;
+    if (n < min + 1) return 0;
+    var len: usize = @min(8, n - 1);
+    while (len >= min) : (len -= 1) {
+        const suffix = hist[n - len ..];
+        var end: usize = n - 1;
+        while (end >= len) : (end -= 1) {
+            if (std.mem.eql(u32, hist[end - len .. end], suffix)) {
+                const k = @min(out.len, n - end);
+                @memcpy(out[0..k], hist[end .. end + k]);
+                return k;
+            }
+        }
+    }
+    return 0;
+}
+
 fn jsonInt(v: std.json.Value) i64 {
     return switch (v) {
         .integer => |x| x,
@@ -1623,6 +1644,7 @@ pub fn main(init: std.process.Init) !void {
     r.grouped = r.xnew and !r.xpack and std.c.getenv("FZ_GROUPED") != null;
     r.xfused = r.xnew and !r.xpack and !r.grouped and std.c.getenv("FZ_XFUSED") != null;
     r.xsx = r.xnew and std.c.getenv("FZ_XSX") != null;
+    r.copy = std.c.getenv("FZ_COPY") != null;
     r.prefetch = !r.serial and std.c.getenv("FZ_PREFETCH") != null;
     const t0 = mtl.clock.seconds();
     try r.compile(args[2]);
@@ -1637,7 +1659,9 @@ pub fn main(init: std.process.Init) !void {
     while (fit.next()) |name| try r.indexFile(try std.fmt.allocPrintSentinel(arena, "{s}/{s}", .{ args[1], name.* }, 0));
     try r.indexFile(try std.fmt.allocPrintSentinel(arena, "{s}/pack.safetensors", .{args[2]}, 0));
 
-    const ref_file = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/ref.json", .{args[2]}, 0));
+    const own_prompt = std.c.getenv("FZ_REF") != null; // another prompt: passes against Python's records are skipped
+    const ref_path = if (std.c.getenv("FZ_REF")) |p| try std.fmt.allocPrintSentinel(arena, "{s}", .{std.mem.span(p)}, 0) else try std.fmt.allocPrintSentinel(arena, "{s}/ref.json", .{args[2]}, 0);
+    const ref_file = try mtl.MappedFile.open(ref_path);
     const ref = try std.json.parseFromSliceLeaky(std.json.Value, arena, ref_file.bytes[0..ref_file.size], .{});
     const ple_ref = ref.object.get("ple").?.object;
 
@@ -2085,7 +2109,7 @@ pub fn main(init: std.process.Init) !void {
     }
     var bad: usize = 0;
     var total_rows: usize = 0;
-    const rounds = ref.object.get("rounds").?.array.items;
+    const rounds = if (own_prompt) &[_]std.json.Value{} else ref.object.get("rounds").?.array.items;
     for (rounds, 0..) |round, ri| {
         const o = round.object;
         const win = o.get("window").?.array.items;
@@ -2106,7 +2130,7 @@ pub fn main(init: std.process.Init) !void {
 
     const ref_tokens: []const u32 = got.items;
     // 4. the MTP head against the Python engine's drafts (absorb windows of 1-8 rows, then a chain)
-    {
+    if (!own_prompt) {
         const mref = ref.object.get("mtp").?.object;
         var seq: std.ArrayList(u32) = .empty;
         for (prompt) |x| try seq.append(gpa, @intCast(x.integer));
@@ -2141,7 +2165,8 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // 5. one stream with MTP chains of a fixed depth: tokens against the one-row reference, lanes landed, tok/s
-    for ([_]usize{ 1, 2, 3, 4, 6 }) |depth| {
+    const depths5: []const usize = if (own_prompt) &.{} else &.{ 1, 2, 3, 4, 6 };
+    for (depths5) |depth| {
         m.reset();
         m.mtp.pos = 0;
         m.mtp.drafted = 0;
@@ -2189,8 +2214,18 @@ pub fn main(init: std.process.Init) !void {
     // 6. one command buffer a round: the head absorbs the kept rows and chains its drafts into the next window's
     //    token slots on the GPU, the window hashes its n-grams on the GPU, and the host reads the picks once
     const wids: Buf = .{ .b = try r.buffer(64) };
-    const adapt = [_][3]usize{ .{ 3, 3, 0 }, .{ 1, 4, 1 }, .{ 1, 5, 1 }, .{ 2, 5, 1 }, .{ 2, 5, 2 }, .{ 1, 6, 2 } };
-    for (adapt) |cfg_a| {
+    const adapt_story = [_][3]usize{ .{ 3, 3, 0 }, .{ 1, 4, 1 }, .{ 1, 5, 1 }, .{ 2, 5, 1 }, .{ 2, 5, 2 }, .{ 1, 6, 2 } };
+    const adapt_own = [_][3]usize{ .{ 3, 3, 0 }, .{ 4, 4, 0 }, .{ 5, 5, 0 }, .{ 6, 6, 0 }, .{ 7, 7, 0 }, .{ 2, 7, 1 }, .{ 2, 7, 2 }, .{ 3, 7, 2 } };
+    const adapt: []const [3]usize = if (own_prompt) &adapt_own else &adapt_story;
+    const copy_min: usize = if (std.c.getenv("FZ_COPY_MIN")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 3;
+    var hist: std.ArrayList(u32) = .empty;
+    for (prompt) |x| try hist.append(gpa, @intCast(x.integer));
+    const n_prompt = hist.items.len;
+    for (0..if (r.copy) 2 else adapt.len) |run6| {
+        const cfg_a = if (r.copy) adapt[0] else adapt[run6];
+        const use_copy = r.copy and run6 == 1;
+        var copy_rounds: usize = 0;
+        var copy_landed: usize = 0;
         var depth: usize = cfg_a[0];
         m.reset();
         m.mtp.pos = 0;
@@ -2210,12 +2245,24 @@ pub fn main(init: std.process.Init) !void {
         const w = wids.b.slice(u32, 16);
         var absorb_rows: []const u32 = nexts.items;
         var absorb_from: Buf = .{ .b = all };
+        if (absorb_rows.len > MAXR) { // a long prompt: the head absorbs it before the rounds, a command buffer a chunk
+            w[1] = try m.mtpAbsorb(absorb_rows, absorb_from);
+            absorb_rows = &.{};
+        }
         var n_rounds: usize = 0;
         var landed: usize = 0;
         const s0 = mtl.clock.seconds();
         m.gpu_seconds = 0;
         while (out.items.len < want.len) {
             w[0] = out.items[out.items.len - 1];
+            var d = depth;
+            var copied: usize = 0;
+            if (use_copy) { // copy lanes: the window takes the tokens after an earlier match of its suffix
+                hist.shrinkRetainingCapacity(n_prompt);
+                try hist.appendSlice(gpa, out.items);
+                copied = copyDrafts(hist.items, copy_min, w[1..MAXR]);
+                if (copied > 0) d = copied;
+            }
             const cb = r.queue.commandBuffer();
             r.enc = cb.compute(if (r.serial) .serial else .concurrent);
             // the head: absorb the kept rows (chunks of up to MAXR), its draft into slot 1, then chain into 2..depth
@@ -2228,16 +2275,16 @@ pub fn main(init: std.process.Init) !void {
                 const sl = &m.mtp.slots[slot];
                 const ids = sl.ids8.b.slice(u32, 8);
                 for (0..8) |i| ids[i] = if (i < n) absorb_rows[at + i] else 0;
-                try m.mtpEncode(slot, n, sl.ids8, .{ .b = absorb_from.b, .off = absorb_from.off + at * WIDE * 2 }, .{ .b = wids.b, .off = 4 });
+                try m.mtpEncode(slot, n, sl.ids8, .{ .b = absorb_from.b, .off = absorb_from.off + at * WIDE * 2 }, .{ .b = wids.b, .off = if (copied > 0) 4 * 12 else 4 });
                 m.mtp.pos += n;
                 at += n;
             }
-            for (1..depth) |j| {
+            if (copied == 0) for (1..depth) |j| {
                 try m.mtpEncode(slot, 1, .{ .b = wids.b, .off = 4 * j }, m.mtp.last, .{ .b = wids.b, .off = 4 * (j + 1) });
                 m.mtp.pos += 1;
                 m.mtp.drafted += 1;
                 slot += 1;
-            }
+            };
             // the target window [pending, drafts]: with FZ_SPLIT the head's part is committed first and the window
             // is encoded while the GPU runs it (same queue, so the window still follows it)
             var wcb = cb;
@@ -2250,20 +2297,24 @@ pub fn main(init: std.process.Init) !void {
                 wcb.waitFor(r.event, r.event_value);
                 r.enc = wcb.compute(if (r.serial) .serial else .concurrent);
             }
-            m.windowMeta(depth + 1);
-            m.pleIdsGpu(depth + 1, wids);
-            try m.windowEncode(depth + 1, wids);
+            m.windowMeta(d + 1);
+            m.pleIdsGpu(d + 1, wids);
+            try m.windowEncode(d + 1, wids);
             try m.finish(wcb);
             if (r.split) m.gpu_seconds += cb.gpuSeconds();
-            const picks = m.t.picks.b.slice(u32, depth + 1);
+            const picks = m.t.picks.b.slice(u32, d + 1);
             var keep: usize = 1;
-            while (keep <= depth and w[keep] == picks[keep - 1]) keep += 1;
+            while (keep <= d and w[keep] == picks[keep - 1]) keep += 1;
             try out.appendSlice(gpa, picks[0..keep]);
             n_rounds += 1;
             landed += keep - 1;
+            if (copied > 0) {
+                copy_rounds += 1;
+                copy_landed += keep - 1;
+            }
             var win: [MAXR]u32 = undefined;
-            @memcpy(win[0 .. depth + 1], w[0 .. depth + 1]);
-            m.keepRows(win[0 .. depth + 1], keep);
+            @memcpy(win[0 .. d + 1], w[0 .. d + 1]);
+            m.keepRows(win[0 .. d + 1], keep);
             @memcpy(pick[0..keep], picks[0..keep]);
             absorb_rows = pick[0..keep];
             absorb_from = m.last;
@@ -2273,13 +2324,14 @@ pub fn main(init: std.process.Init) !void {
         var eq: usize = 0;
         while (eq < want.len and out.items[eq] == (if (r.xnew) ref_tokens[eq] else @as(u32, @intCast(want[eq].integer)))) eq += 1;
         const made: f64 = @floatFromInt(out.items.len - 1);
-        std.debug.print("one buffer a round, depth {d}-{d} (+{d}): {d}/{d} tokens equal; {d:.2} tokens a round, {d:.2} drafts landing; {d:.1} tok/s (GPU busy {d:.0}%)\n", .{ cfg_a[0], cfg_a[1], cfg_a[2], eq, want.len, made / @as(f64, @floatFromInt(n_rounds)), @as(f64, @floatFromInt(landed)) / @as(f64, @floatFromInt(n_rounds)), made / wall, 100 * m.gpu_seconds / wall });
+        std.debug.print("one buffer a round, depth {d}-{d} (+{d}){s}: {d}/{d} tokens equal; {d:.2} tokens a round, {d:.2} drafts landing; {d:.1} tok/s (GPU busy {d:.0}%)\n", .{ cfg_a[0], cfg_a[1], cfg_a[2], if (use_copy) " + copy lanes" else "", eq, want.len, made / @as(f64, @floatFromInt(n_rounds)), @as(f64, @floatFromInt(landed)) / @as(f64, @floatFromInt(n_rounds)), made / wall, 100 * m.gpu_seconds / wall });
+        if (use_copy) std.debug.print("  copy rounds {d} of {d}, {d:.2} copied lanes landing a copy round\n", .{ copy_rounds, n_rounds, @as(f64, @floatFromInt(copy_landed)) / @as(f64, @floatFromInt(@max(copy_rounds, 1))) });
         if (eq < want.len) bad += 1;
     }
 
     // 7. GPU-side rounds: the verdict, positions, history and kept states stay on the GPU; the host encodes round
     //    N+1 while round N runs and reads the emitted tokens from a ring
-    if (r.xnew) for ([_]usize{ 2, 3, 4 }) |depth| {
+    if (r.xnew and !own_prompt) for ([_]usize{ 2, 3, 4 }) |depth| {
         const W = depth + 1;
         const n_lin: usize = 36;
         const g_cs = try r.buffer(n_lin * CS_ROW);
