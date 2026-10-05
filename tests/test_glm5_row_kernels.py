@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 mx = pytest.importorskip("mlx.core")
@@ -333,8 +331,9 @@ def test_moe_window_with_8bit_shared_expert_is_row_by_row(gpu, monkeypatch):
     x = (0.5 * mx.random.normal((16, 512))).astype(mx.bfloat16)
     one = mx.concatenate([moe(x[r:r + 1], True) for r in range(16)])
     for rows in (2, 3, 4, 8, 16):
-        # TF_GLM_DENSE=matrix: the block hands the fused MoE its shared expert, computed on the matrix units
-        kw = {"shared_out": moe.shared(x[:rows], True)} if linear.DENSE == "matrix" else {}
+        # a shared expert whose shapes take the matrix kernel: the block hands the fused MoE its output
+        on = linear.on_matrix(moe.shared.gate_up) or linear.on_matrix(moe.shared.down)
+        kw = {"shared_out": moe.shared(x[:rows], True)} if on else {}
         assert _same(F.moe_rows(moe, x[:rows], **kw), one[:rows]), rows
 
 

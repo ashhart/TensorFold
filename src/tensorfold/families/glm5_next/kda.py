@@ -59,7 +59,7 @@ class KDA:
         """f_b / g_b (128 inputs: MLX's one-row kernel for them is qmv_quad, which qmv_rows does not cover)."""
 
         rows = int(x.shape[0])
-        if decode and L.DENSE == "matrix" and isinstance(q, Q) and K.metal():   # one kernel at every row count
+        if decode and isinstance(q, Q):                  # the matrix kernel where the shape takes it (linear.choose)
             y = L.matrix(x, q)
             if y is not None:
                 return y

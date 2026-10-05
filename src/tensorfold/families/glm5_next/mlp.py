@@ -184,8 +184,8 @@ class MoE:
             return stream.moe(self, x, rows_exact)
         rows = int(x.shape[0])
         if rows_exact and "moe" in C.FUSED and self.fused_ok and K.metal() and x.dtype == mx.bfloat16:
-            if L.DENSE == "matrix" and self.shared is not None:
-                # the shared expert on the matrix units at every row count (linear.DENSE), the routed experts fused
+            if self.shared is not None and (L.on_matrix(self.shared.gate_up) or L.on_matrix(self.shared.down)):
+                # the shared expert through project (the matrix kernel its shapes take), the routed experts fused
                 return MK.moe_rows(self, x, shared_out=self.shared(x, True))
             return MK.moe_rows(self, x)
         if row_kernel("experts", rows, rows_exact):
