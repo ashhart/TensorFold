@@ -38,6 +38,11 @@ pub const Checkpoint = struct {
 
     /// Read `path`'s tensors, each named `prefix ++ name`.
     pub fn addFile(self: *Checkpoint, device: mtl.Device, path: [:0]const u8, prefix: []const u8) !void {
+        return self.addFileSelected(device, path, prefix, null);
+    }
+
+    /// Load only `selected`'s tensor namespace and its contiguous data region; names retain the caller's prefix.
+    pub fn addFileSelected(self: *Checkpoint, device: mtl.Device, path: [:0]const u8, prefix: []const u8, selected: ?[]const u8) !void {
         const fd = std.c.open(path, .{ .ACCMODE = .RDONLY });
         if (fd < 0) {
             std.log.err("cannot open {s}", .{path});
@@ -54,20 +59,33 @@ pub const Checkpoint = struct {
         const data_start = 8 + header_len;
         const data_len: usize = @as(usize, @intCast(end)) - data_start;
 
-        const buffer = try device.buffer(@max(data_len, 16), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-        try readParallel(fd, buffer.contents()[0..data_len], data_start);
-        try self.shards.append(self.allocator, .{ .buffer = buffer, .bytes = data_len });
-
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
-        const entries = try st.parseHeader(arena.allocator(), header, data_len);
+        const entries = try st.parseHeaderPrefix(arena.allocator(), header, data_len, selected);
+        if (entries.count() == 0) return;
+        var begin: usize = if (selected == null) 0 else data_len;
+        var limit: usize = if (selected == null) data_len else 0;
+        for (entries.values()) |e| {
+            begin = @min(begin, e.begin);
+            limit = @max(limit, e.end);
+        }
+        const bytes = limit - begin;
+        const buffer = try device.buffer(@max(bytes, 16), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+        var transferred = false;
+        errdefer if (!transferred) buffer.deinit();
+        try readParallel(fd, buffer.contents()[0..bytes], data_start + begin);
+        try self.shards.append(self.allocator, .{ .buffer = buffer, .bytes = bytes });
+        transferred = true;
         var it = entries.iterator();
         while (it.next()) |entry| {
             const e = entry.value_ptr.*;
-            var t = Tensor{ .buffer = buffer, .offset = e.begin, .bytes = e.end - e.begin, .dtype = e.dtype, .rank = e.rank };
+            var t = Tensor{ .buffer = buffer, .offset = e.begin - begin, .bytes = e.end - e.begin, .dtype = e.dtype, .rank = e.rank };
             for (0..e.rank) |i| t.shape[i] = e.shape[i];
             const name = try std.mem.concat(self.allocator, u8, &.{ prefix, entry.key_ptr.* });
-            try self.tensors.put(self.allocator, name, t);
+            errdefer self.allocator.free(name);
+            const slot = try self.tensors.getOrPut(self.allocator, name);
+            if (slot.found_existing) return error.DuplicateTensor;
+            slot.value_ptr.* = t;
         }
     }
 

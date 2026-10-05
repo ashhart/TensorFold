@@ -8,7 +8,10 @@ const nemotron = tf.nemotron;
 const Allocator = std.mem.Allocator;
 
 pub const backends: []const []const u8 = &.{"metal"};
-pub const families: []const api.Family = &.{.{ .model_type = "nemotron_h", .formats = &.{"mlx-q4g64"} }};
+pub const families: []const api.Family = &.{
+    .{ .model_type = "nemotron_h", .formats = &.{"mlx-q4g64"} },
+    .{ .model_type = "qwen3_5", .formats = &.{"mlx-q4g64"} },
+};
 
 /// The chip class gate entries name ("apple-m5" for an Apple M5 Max); null without an Apple GPU.
 pub fn chip(a: Allocator) ?[]const u8 {
@@ -78,6 +81,7 @@ const Host = struct {
 
 /// The engine for `o.dir`, or null with `problem` set when no Metal engine reads the checkpoint.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (std.mem.eql(u8, o.model_type, "qwen3_5")) return @import("qwen35.zig").open(a, gpa, io, o, problem);
     if (!std.mem.eql(u8, o.model_type, "nemotron_h")) {
         problem.* = try std.fmt.allocPrint(a, "the native engine has no backend for {s} checkpoints yet; serve with --engine python", .{o.model_type});
         return null;
