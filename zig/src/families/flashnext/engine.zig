@@ -405,6 +405,15 @@ pub const Engine = struct {
         if (prompt.len + max_tokens + MARGIN > CAP) return error.ContextFull;
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
+        if (r.tp) |tp| if (tp.rank == 0) { // served speed-up mode: rank 1 runs the same request (follow)
+            var head: [12]u32 = @splat(0);
+            head[0] = @intCast(prompt.len);
+            head[1] = @intCast(@min(max_tokens, std.math.maxInt(u32)));
+            head[2] = @intCast(@min(eos.len, 8));
+            head[3] = if (depth) |d| @intCast(d) else std.math.maxInt(u32);
+            for (eos[0..head[2]], 0..) |t, i| head[4 + i] = t;
+            try tp.sendRequest(std.mem.asBytes(&head), prompt);
+        };
         e.hostMode();
         defer e.hostMode();
         m.reset();
@@ -415,7 +424,7 @@ pub const Engine = struct {
         var last_n: usize = 1;
         const ps = [2]*Prompt{ e.pr, e.pr2 };
         while (at < prompt.len) {
-            if (out.cancelled(out.ctx)) return .{ .reason = .cancelled };
+            if (try e.agree(out.cancelled(out.ctx))) return .{ .reason = .cancelled };
             const left = prompt.len - at;
             if (r.tp) |tp| { // speed-up mode: the chunk's rows split across the two Macs
                 const call = segments.next(left, e.pr.step, PAIR_MIN);
@@ -448,7 +457,7 @@ pub const Engine = struct {
         }
         out.prefilled(out.ctx);
         var res: Result = .{ .reason = .length };
-        if (out.tokens(out.ctx, &.{pick}) or isEos(eos, pick)) return .{ .reason = .stop };
+        if (try e.agree(out.tokens(out.ctx, &.{pick}) or isEos(eos, pick))) return .{ .reason = .stop };
         if (max_tokens <= 1) return res;
         var emitted: usize = 1;
         const ar = r.ar.b.slice(i32, fz.AR_WORDS);
@@ -615,13 +624,13 @@ pub const Engine = struct {
             }
             if (take > 0 and out.tokens(out.ctx, got[0..take])) stop = true;
             emitted += take;
-            if (stop) {
-                res.reason = .stop;
+            const cancel = !stop and emitted < max_tokens and out.cancelled(out.ctx);
+            const quit = e.agree(stop or emitted >= max_tokens or cancel) catch |err| {
+                failed = err;
                 break;
-            }
-            if (emitted >= max_tokens) break;
-            if (out.cancelled(out.ctx)) {
-                res.reason = .cancelled;
+            };
+            if (quit) {
+                res.reason = if (stop) .stop else if (emitted >= max_tokens) .length else .cancelled;
                 break;
             }
         }
@@ -634,25 +643,73 @@ pub const Engine = struct {
         return res;
     }
 
+    /// Speed-up mode: whether to stop at a step both ranks take (rank 0 decides, rank 1 follows); alone, `quit`.
+    fn agree(e: *Engine, quit: bool) !bool {
+        return if (e.r.tp) |tp| tp.agree(quit) else quit;
+    }
+
+    /// Speed-up mode's rank 1: it runs rank 0's requests (follow) and serves none of its own.
+    pub fn followsPeer(e: *const Engine) bool {
+        return if (e.r.tp) |tp| tp.rank == 1 else false;
+    }
+
+    /// Served speed-up mode, rank 1: end `follow`'s wait for rank 0's next request (before deinit).
+    pub fn stopFollowing(e: *Engine) void {
+        if (e.r.tp) |tp| tp.quitting.store(true, .release);
+    }
+
+    /// Served speed-up mode, rank 1: run rank 0's requests as they come, the replies thrown away, until rank 0's
+    /// empty request (its engine closing).
+    pub fn follow(e: *Engine) !void {
+        while (try e.followOne()) {}
+    }
+
+    fn followOne(e: *Engine) !bool {
+        const tp = e.r.tp orelse return error.NotSpeedUpMode;
+        const req = tp.waitRequest() orelse return false;
+        var head: [12]u32 = undefined;
+        @memcpy(std.mem.asBytes(&head), req.head[0..48]);
+        if (head[0] == 0) return false;
+        const prompt = try e.gpa.dupe(u32, req.tokens[0..head[0]]); // rank 0 may write its next request meanwhile
+        defer e.gpa.free(prompt);
+        const eos = try e.gpa.dupe(u32, head[4 .. 4 + head[2]]);
+        defer e.gpa.free(eos);
+        var dummy: u8 = 0;
+        _ = try e.generate(prompt, head[1], eos, if (head[3] == std.math.maxInt(u32)) null else head[3], .{ .ctx = &dummy, .prefilled = Quiet.prefilled, .tokens = Quiet.tokens, .cancelled = Quiet.cancelled });
+        return true;
+    }
+
+    const Quiet = struct {
+        fn prefilled(_: *anyopaque) void {}
+        fn tokens(_: *anyopaque, _: []const u32) bool {
+            return false;
+        }
+        fn cancelled(_: *anyopaque) bool {
+            return false;
+        }
+    };
+
     /// A short reply on fixed tokens: the kernels' first launches and the weights' first reads happen here, not in
-    /// the first request.
+    /// the first request. In speed-up mode rank 1 runs rank 0's warm-up request instead.
     pub fn warm(e: *Engine) !void {
+        if (e.r.tp) |tp| if (tp.rank == 1) {
+            _ = try e.followOne();
+            return;
+        };
         var toks: [96]u32 = undefined;
         for (&toks, 0..) |*t, i| t.* = @intCast(1000 + i);
-        const Quiet = struct {
-            fn prefilled(_: *anyopaque) void {}
-            fn tokens(_: *anyopaque, _: []const u32) bool {
-                return false;
-            }
-            fn cancelled(_: *anyopaque) bool {
-                return false;
-            }
-        };
         var dummy: u8 = 0;
         _ = try e.generate(&toks, 24, &.{}, null, .{ .ctx = &dummy, .prefilled = Quiet.prefilled, .tokens = Quiet.tokens, .cancelled = Quiet.cancelled });
     }
 
     pub fn deinit(e: *Engine) void {
+        if (e.r.tp) |tp| { // rank 1's follow ends on rank 0's empty request; then the link closes, before the memory
+            if (tp.rank == 0) {
+                const none: [12]u32 = @splat(0);
+                tp.sendRequest(std.mem.asBytes(&none), &.{}) catch {};
+            }
+            tp.deinit();
+        }
         const gpa = e.gpa;
         e.arena_state.deinit();
         gpa.destroy(e);

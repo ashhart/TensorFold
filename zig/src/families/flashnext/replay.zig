@@ -17,6 +17,7 @@ pub const CAP = 262144; // keys an attention layer holds in this runner
 pub const PLE_TAIL = 9;
 pub const GROUPS = 8;
 pub const MAXR = 16; // a decode window's rows at most
+const HEAD_TILES = VOCAB / 32; // the vocabulary head's 32-column tiles
 pub const CS_ROW = 3 * WIDE * 2; // a DeltaNet conv state row (bytes)
 pub const SO_ROW = 48 * 128 * 128 * 4; // a DeltaNet recurrent state row (bytes)
 
@@ -2010,6 +2011,13 @@ pub const Model = struct {
         cur = 1 - cur;
         m.last = t.h[cur];
         try m.hcProject(t.h[cur], m.mix, "qa_hc_down@mix", "qa_hc_up@mix", t.inj_a);
+        if (r.tp) |tp| { // TP: this Mac's half of the vocabulary (the same kernel, half its tiles), then one swap
+            const half = HEAD_TILES / 2;
+            if (!r.fused_xsum) try r.call("lane_qmm_xsum#[2560]", &.{ t.mixed, t.mdims }, &.{t.xs});
+            try r.laneTiles("lane_qmm_bytes_grouped@head", &.{ t.mixed, t.xs, m.head.wq, m.head.sbt, t.mdims }, t.logits, &.{.{ half * tp.rank, half }}, 1, null);
+            tp.argmax(r.enc, t.logits, HEAD_TILES * 32, half * 32 * tp.rank, half * 32, t.picks, t.rows, rows);
+            return;
+        }
         try m.lane(t.mixed, D, m.head, "lane_qmm_bytes_grouped@head", t.logits);
         r.enc.setPipeline(r.argmax_pipe);
         r.enc.setBuffer(t.logits.b, 0, 0);

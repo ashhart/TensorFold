@@ -40,7 +40,11 @@ const FLAGS = MTP + ATT_SLOT;
 const SYNC = FLAGS + PAGE;
 const SENDX = SYNC + PAGE; // this rank's packed expert slots, sent from here: two by parity, a page of room before each
 const SENDR = SENDX + 2 * (PAGE + SLOT); // this rank's fp32 partials, sent from here, the same way
-const WINDOW = SENDR + 2 * (PAGE + PART);
+const SENDA = SENDR + 2 * (PAGE + PART); // this rank's head argmax a row (value, index), sent from here the same way
+const RECVA = SENDA + 4 * PAGE; // the peer's, alternating by parity
+const REQ_TOKENS = 262144; // a served request's prompt tokens at most (the engine's context)
+const REQ = RECVA + 2 * PAGE; // served: rank 0's request for rank 1 (a 64-byte head, then the prompt)
+const WINDOW = REQ + pages(64 + 4 * REQ_TOKENS);
 
 fn sendX(x: u32) usize {
     return SENDX + (x % 2) * (PAGE + SLOT) + PAGE;
@@ -49,12 +53,18 @@ fn sendX(x: u32) usize {
 fn sendR(x: u32) usize {
     return SENDR + (x % 2) * (PAGE + PART) + PAGE;
 }
+
+fn sendA(x: u32) usize {
+    return SENDA + (x % 2) * 2 * PAGE + PAGE;
+}
 const FLAG = FLAGS; // decode: the last sequence whose outputs have landed
 const HELLO = FLAGS + 8;
 pub const LAYER_FLAG = FLAGS + 64; // prefill: a word a layer, then the n-gram tail, back, and MTP words
 pub const TAIL_FLAG = LAYER_FLAG + LAYERS * 8;
 pub const BACK_FLAG = TAIL_FLAG + 8;
 pub const MTP_FLAG = BACK_FLAG + 8;
+const REQ_FLAG = MTP_FLAG + 8; // served: the last request rank 0 has written
+const CTRL_FLAG = REQ_FLAG + 8; // served: rank 0's decision at each step both ranks take: (step << 1) | quit
 const HOST = 0;
 const GPU = 1024;
 const GAVE_UP = 2048;
@@ -91,6 +101,46 @@ const source =
     \\  uint polls = 0;
     \\  while (int(atomic_load_explicit(&sync[0], memory_order_relaxed) - seq) < 0) {
     \\    if (++polls > 400000000u) { atomic_fetch_add_explicit(&sync[2048], 1u, memory_order_relaxed); return; }
+    \\  }
+    \\}
+    \\// a row's argmax over this rank's vocab columns [lo, lo + n) of the full-width logits: (value, index), the
+    \\// larger value and on a tie the lower index, as fz_argmax
+    \\kernel void tp_argmax_part(device const bfloat* logits [[buffer(0)]], device uint* out [[buffer(1)]],
+    \\    constant uint4& dims [[buffer(2)]], uint row [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]],
+    \\    uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
+    \\  device const bfloat* x = logits + row * dims.x;
+    \\  float best = -INFINITY; uint at = 0xffffffffu;
+    \\  for (uint i = dims.y + t; i < dims.y + dims.z; i += 1024) { const float v = float(x[i]); if (v > best) { best = v; at = i; } }
+    \\  for (ushort o = 16; o > 0; o >>= 1) {
+    \\    const float ob = simd_shuffle_xor(best, o); const uint oa = simd_shuffle_xor(at, o);
+    \\    if (ob > best || (ob == best && oa < at)) { best = ob; at = oa; }
+    \\  }
+    \\  threadgroup float vb[32]; threadgroup uint va[32];
+    \\  if (lane == 0) { vb[sg] = best; va[sg] = at; }
+    \\  threadgroup_barrier(mem_flags::mem_threadgroup);
+    \\  if (sg != 0) return;
+    \\  best = vb[lane]; at = va[lane];
+    \\  for (ushort o = 16; o > 0; o >>= 1) {
+    \\    const float ob = simd_shuffle_xor(best, o); const uint oa = simd_shuffle_xor(at, o);
+    \\    if (ob > best || (ob == best && oa < at)) { best = ob; at = oa; }
+    \\  }
+    \\  if (lane == 0) { out[2 * row] = as_type<uint>(best); out[2 * row + 1] = at; }
+    \\}
+    \\// post, poll for the serve, then each row's pick from both halves: the larger value, the lower index on a tie
+    \\kernel void tp_pick(device atomic_uint* sync [[buffer(0)]], constant uint& seq [[buffer(1)]],
+    \\    const constant int* rows [[buffer(2)]], const device uint* mine [[buffer(3)]],
+    \\    device atomic_uint* peer [[buffer(4)]], device uint* picks [[buffer(5)]]) {
+    \\  atomic_store_explicit(&sync[1024], (seq << 5) | uint(rows[0]), memory_order_relaxed);
+    \\  uint polls = 0;
+    \\  while (int(atomic_load_explicit(&sync[0], memory_order_relaxed) - seq) < 0) {
+    \\    if (++polls > 400000000u) { atomic_fetch_add_explicit(&sync[2048], 1u, memory_order_relaxed); return; }
+    \\  }
+    \\  for (int r = 0; r < rows[0]; r++) {
+    \\    const float vm = as_type<float>(mine[2 * r]);
+    \\    const uint am = mine[2 * r + 1];
+    \\    const float vp = as_type<float>(atomic_load_explicit(&peer[2 * r], memory_order_relaxed));
+    \\    const uint ap = atomic_load_explicit(&peer[2 * r + 1], memory_order_relaxed);
+    \\    picks[r] = (vp > vm || (vp == vm && ap < am)) ? ap : am;
     \\  }
     \\}
     \\// one thread polls until the 32-bit word reaches `value`; a give-up is counted, never silent
@@ -156,7 +206,7 @@ pub const Write = struct { src: [*]const u8, len: usize, dst: usize };
 
 /// A posted sequence's work: a decode exchange, or prefill writes and their flag.
 const Job = struct {
-    kind: enum { exchange, reduce, send } = .send,
+    kind: enum { exchange, reduce, pick, send } = .send,
     writes: [8]Write = undefined,
     n: usize = 0,
     flag: usize = 0,
@@ -174,8 +224,12 @@ pub const Tp2 = struct {
     post: mtl.Pipeline,
     wait: mtl.Pipeline,
     moe_part_pipe: mtl.Pipeline,
+    argmax_pipe: mtl.Pipeline,
+    pick_pipe: mtl.Pipeline,
     combine_pipe: mtl.Pipeline,
     last_x: u32 = 0, // the last expert exchange: where the next combine finds both partials
+    req: u64 = 0, // served requests so far, the same on both ranks
+    ctrl: u64 = 0, // stop decisions so far, the same on both ranks
     post_wait: mtl.Pipeline,
     fused: bool = false, // TF_TP_FUSED: post and wait in one launch
     sum_pipe: mtl.Pipeline,
@@ -187,6 +241,7 @@ pub const Tp2 = struct {
     queued: std.atomic.Value(u32) = .init(0), // jobs written: the service reads a job only below this
     thread: ?std.Thread = null,
     stop: std.atomic.Value(bool) = .init(false),
+    quitting: std.atomic.Value(bool) = .init(false), // served rank 1: end the wait for the next request
     failed: std.atomic.Value(bool) = .init(false),
     trace: bool = false, // TF_TP_TRACE: log every job the host serves
     local: bool = false, // TF_TP_LOCAL: serve every job at once, nothing sent (the GPU side's cost alone; wrong replies)
@@ -216,6 +271,8 @@ pub const Tp2 = struct {
             .post = try mtl.Pipeline.init(device, lib_m, "tp_post", false),
             .wait = try mtl.Pipeline.init(device, lib_m, "tp_wait", false),
             .moe_part_pipe = try mtl.Pipeline.init(device, lib_m, "tp_moe_part", false),
+            .argmax_pipe = try mtl.Pipeline.init(device, lib_m, "tp_argmax_part", false),
+            .pick_pipe = try mtl.Pipeline.init(device, lib_m, "tp_pick", false),
             .combine_pipe = try mtl.Pipeline.init(device, lib_m, "tp_combine", false),
             .post_wait = try mtl.Pipeline.init(device, lib_m, "tp_post_wait", false),
             .sum_pipe = try mtl.Pipeline.init(device, lib_m, "tp_sum", false),
@@ -235,7 +292,9 @@ pub const Tp2 = struct {
         return t;
     }
 
+    /// Stop the host's service thread and close the link; every GPU use of the window has ended.
     pub fn deinit(t: *Tp2) void {
+        t.rd.flush() catch {}; // what this rank sent (rank 0's last request) is out before the link closes
         t.stop.store(true, .release);
         if (t.thread) |th| th.join();
         t.ep.deinit();
@@ -305,6 +364,28 @@ pub const Tp2 = struct {
         enc.dispatchThreads(mtl.Size.of(D, rows, 1), mtl.Size.of(256, 1, 1));
     }
 
+    /// The head's picks from this rank's vocab columns [lo, lo + n) of `logits` (rows x vocab, bf16) and the peer's:
+    /// each half's argmax, swapped, merged (the larger value, the lower index on a tie: one Mac's argmax exactly).
+    pub fn argmax(t: *Tp2, enc: mtl.ComputeEncoder, logits: anytype, vocab: usize, lo: usize, n: usize, picks: anytype, rows_buf: anytype, rows: usize) void {
+        t.xseq += 1;
+        const x = t.xseq;
+        const seq = t.queue(.{ .kind = .pick, .value = x });
+        const dims = [4]u32{ @intCast(vocab), @intCast(lo), @intCast(n), 0 };
+        enc.setPipeline(t.argmax_pipe);
+        enc.setBuffer(logits.b, logits.off, 0);
+        enc.setBuffer(t.wbuf, sendA(x), 1);
+        enc.setBytes(std.mem.asBytes(&dims), 2);
+        enc.dispatchThreads(mtl.Size.of(1024 * rows, 1, 1), mtl.Size.of(1024, 1, 1));
+        enc.setPipeline(t.pick_pipe);
+        enc.setBuffer(t.wbuf, SYNC, 0);
+        enc.setBytes(std.mem.asBytes(&seq), 1);
+        enc.setBuffer(rows_buf.b, rows_buf.off, 2);
+        enc.setBuffer(t.wbuf, sendA(x), 3);
+        enc.setBuffer(t.wbuf, RECVA + (x % 2) * PAGE, 4);
+        enc.setBuffer(picks.b, picks.off, 5);
+        enc.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
+    }
+
     /// Post `seq` and wait for its serve: one launch (TF_TP_FUSED) or two.
     fn postWait(t: *Tp2, enc: mtl.ComputeEncoder, seq: u32, rows_buf: mtl.Buffer, rows_off: usize) void {
         if (!t.fused) {
@@ -355,6 +436,48 @@ pub const Tp2 = struct {
             if (j + 1 == writes.len) try t.rd.write2Signal(t.peer, w.dst, w.src[0..w.len], &.{}, flag, value) else try t.rd.write(t.peer, w.dst, w.src[0..w.len]);
         }
         if (writes.len == 0) try t.rd.signal(t.peer, flag, value);
+    }
+
+    /// Served, rank 0: hand rank 1 the next request (`head` then the prompt's tokens) in one message.
+    pub fn sendRequest(t: *Tp2, head: []const u8, prompt: []const u32) !void {
+        if (head.len > 64 or prompt.len > REQ_TOKENS) return error.TpRequestTooLarge;
+        t.req += 1;
+        var h64: [64]u8 = @splat(0);
+        @memcpy(h64[0..head.len], head);
+        try t.rd.write2Signal(t.peer, REQ, &h64, std.mem.sliceAsBytes(prompt), REQ_FLAG, t.req);
+    }
+
+    /// Served, rank 1: wait for rank 0's next request; its 64-byte head and the window's prompt tokens after it; null
+    /// once `quitting` ends the wait.
+    pub fn waitRequest(t: *Tp2) ?struct { head: *const [64]u8, tokens: [*]const u32 } {
+        t.req += 1;
+        var spins: usize = 0;
+        while (@atomicLoad(u64, t.word64(REQ_FLAG), .acquire) < t.req) {
+            if (t.quitting.load(.acquire)) return null;
+            spins += 1;
+            if (spins > 100_000) { // idle: back off
+                const ts: std.c.timespec = .{ .sec = 0, .nsec = 50_000 };
+                _ = std.c.nanosleep(&ts, null);
+            } else std.atomic.spinLoopHint();
+        }
+        return .{ .head = @ptrCast(t.win.ptr + REQ), .tokens = @ptrCast(@alignCast(t.win.ptr + REQ + 64)) };
+    }
+
+    /// A step both ranks take in the same order (a prompt chunk, the first token, a round): rank 0's decision to
+    /// stop there (a stop string, a cancel) reaches rank 1, so both end on the same step. Rank 1 waits for it.
+    pub fn agree(t: *Tp2, quit: bool) !bool {
+        t.ctrl += 1;
+        if (t.rank == 0) {
+            try t.rd.signal(t.peer, CTRL_FLAG, (t.ctrl << 1) | @intFromBool(quit));
+            return quit;
+        }
+        const t0 = std.c.mach_absolute_time();
+        while (true) {
+            const v = @atomicLoad(u64, t.word64(CTRL_FLAG), .acquire);
+            if (v >> 1 >= t.ctrl) return quit or (v >> 1 == t.ctrl and v & 1 != 0);
+            if (std.c.mach_absolute_time() - t0 > 240_000_000) return error.TpPeerSilent; // 10 s
+            std.atomic.spinLoopHint();
+        }
     }
 
     /// The host waits until the window's word at `off` reaches `value`.
@@ -412,6 +535,12 @@ pub const Tp2 = struct {
                 .reduce => {
                     const x = job.value;
                     t.ep.writeSignalFrom(t.peer, sendR(@intCast(x)), REDUCE + (x % 2) * PART, @as(usize, w & 31) * D * 4, FLAG, x) catch |err| t.fail(seq, err);
+                    if (!t.peerAt(flag, x)) return;
+                    @atomicStore(u32, served, seq, .release);
+                },
+                .pick => {
+                    const x = job.value;
+                    t.ep.writeSignalFrom(t.peer, sendA(@intCast(x)), RECVA + (x % 2) * PAGE, @as(usize, w & 31) * 8, FLAG, x) catch |err| t.fail(seq, err);
                     if (!t.peerAt(flag, x)) return;
                     @atomicStore(u32, served, seq, .release);
                 },

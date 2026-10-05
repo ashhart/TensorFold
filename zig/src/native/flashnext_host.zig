@@ -25,6 +25,7 @@ pub const Host = struct {
     wake: std.Io.Condition = .init,
     queued: std.ArrayList(*Job) = .empty,
     cancels: std.ArrayList(api.Id) = .empty,
+    follower: ?std.Thread = null, // speed-up mode's rank 1: the thread running rank 0's requests
     running: ?*Job = null,
     closing: bool = false,
     thread: ?std.Thread = null,
@@ -240,6 +241,10 @@ pub const Host = struct {
             emit(job, .{ .prefilled = 0 });
             return h.finish(job, .failed, .{}, "the native Flash Next engine decodes greedily only: send temperature 0");
         };
+        if (h.eng.followsPeer()) {
+            emit(job, .{ .prefilled = 0 });
+            return h.finish(job, .failed, .{}, "speed-up mode: this Mac runs rank 0's requests; send requests to rank 0");
+        }
         var c: Ctx = .{ .h = h, .job = job };
         const out: fx.Out = .{ .ctx = &c, .prefilled = Ctx.prefilled, .tokens = Ctx.tokens, .cancelled = Ctx.cancelled };
         const depth: ?usize = if (r.drafts) null else 0;
@@ -262,17 +267,26 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: []const u8, windo
     const eng = try fx.Engine.load(gpa, dir, dump);
     errdefer eng.deinit();
     try eng.warm();
+    const follower: ?std.Thread = if (eng.followsPeer()) try std.Thread.spawn(.{}, follow, .{eng}) else null; // rank 1
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     const limit: i64 = tf.flashnext_replay.CAP - fx.MARGIN;
-    h.* = .{ .gpa = gpa, .io = io, .eng = eng, .info_ = .{ .name = "flashnext-zig", .lanes = 1, .context_window = @intCast(if (window > 0) @min(window, limit) else limit) } };
+    h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .info_ = .{ .name = "flashnext-zig", .lanes = 1, .context_window = @intCast(if (window > 0) @min(window, limit) else limit) } };
     try h.start();
     return h;
+}
+
+fn follow(eng: *fx.Engine) void {
+    eng.follow() catch |err| std.log.err("speed-up mode: following rank 0 ended: {s}", .{@errorName(err)});
 }
 
 pub fn close(ctx: *anyopaque) void {
     const h: *Host = @ptrCast(@alignCast(ctx));
     h.stop();
+    if (h.follower) |th| { // rank 1: its wait for rank 0's next request ends, then the thread
+        h.eng.stopFollowing();
+        th.join();
+    }
     h.eng.deinit();
     h.gpa.destroy(h);
 }
