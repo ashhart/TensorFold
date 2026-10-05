@@ -81,6 +81,23 @@ def test_fp8_and_bf16_shards_are_the_sliced_checkpoint():
     assert torch.equal(split_output(tiny, 1).weight, tiny.weight[24:])
 
 
+@pytest.mark.parametrize("n", [48, 128, 384])
+def test_bf16_gate_prompt_copies_split_at_any_row_count(n):
+    """--prefill-fp8's e4m3 gate copies split two ways at any row count (the GDN gates a and b: 48 rows, 24 a rank)."""
+
+    gen = torch.Generator().manual_seed(n)
+    wb = (torch.randn(n, 5120, generator=gen) * 0.05).to(torch.bfloat16).cuda()
+    gate = Plain8(wb, rows8=Fp8Linear.from_bf16(wb))
+    for rank in (0, 1):
+        rows = output_rows(n, rank, device="cuda")
+        got = split_output(gate, rank)
+        want = Fp8Linear.from_bf16(wb[rows].contiguous())
+        _same(got, Plain8(wb[rows], rows8=want))
+        _same(got.rows8, want)
+        full = gate.rows8.groups[:, :n].index_select(1, rows)
+        assert torch.equal(got.rows8.groups[:, :rows.numel()], full)
+
+
 def test_shards_refuse_partial_tiles():
     gen = torch.Generator().manual_seed(5)
     full = Fp4Linear.from_checkpoint(*_raw4(192, 128, gen), 0.05)

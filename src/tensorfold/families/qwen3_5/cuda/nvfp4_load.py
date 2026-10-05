@@ -45,7 +45,8 @@ class Plain8(Plain):
         return super().nbytes() + self.rows8.nbytes()
 
     def outputs(self, rows: torch.Tensor) -> "Plain8":
-        return Plain8(super().outputs(rows).weight, rows8=self.rows8.outputs(rows))
+        w = super().outputs(rows).weight
+        return Plain8(w, rows8=type(self.rows8).from_bf16(w))     # per-row scales: the full copy's bytes, at any row count
 
     def inputs(self, rank: int, world: int = 2) -> "Plain8":
         return Plain8(super().inputs(rank, world).weight, rows8=self.rows8.inputs(rank, world))
