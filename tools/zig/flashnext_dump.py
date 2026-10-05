@@ -181,6 +181,7 @@ def main() -> None:
     ap.add_argument("--tokens", type=int, default=64)
     ap.add_argument("--fixture-step", type=int, default=3)
     ap.add_argument("--windows", default="2,3,4,6,8")
+    ap.add_argument("--absorb", type=int, default=8, help="the MTP head's absorb windows: 1 .. this many rows")
     args = ap.parse_args()
     assert os.environ.get("TF_FLASH_PLE_KERNELS") == "1", "run with TF_FLASH_PLE_KERNELS=1"
     out = args.out
@@ -238,7 +239,7 @@ def main() -> None:
         rounds.append({"rows": rows, "window": window, "picks": picks, "keep": keep})
         r += 1
     assert got[:len(made)] == made, "drafted windows differ from one-row steps"
-    # the MTP head: absorb windows of 1..8 rows (prompt rows, then generated ones) and a chain of drafts
+    # the MTP head: absorb windows of 1..--absorb rows (prompt rows, then generated ones) and a chain of drafts
     cache, mtp_cache, streams = rt.model.make_cache(), MTPCache(), []
     seq = prompt + made[:16]
     for t in seq:
@@ -246,7 +247,7 @@ def main() -> None:
         streams.append(rt.fused.last_streams[-1:])
     mtp_ref, at = {"absorb": [], "chain": []}, 0
     FIX["phase"] = "mtp:"
-    for rows in (1, 2, 3, 4, 5, 6, 7, 8):
+    for rows in range(1, args.absorb + 1):
         nexts = seq[at + 1:at + 1 + rows]
         FIX["on"], FIX["rows"] = True, rows
         mixed, out_streams = rt._absorb(mx.concatenate(streams[at:at + rows]), nexts, mtp_cache)

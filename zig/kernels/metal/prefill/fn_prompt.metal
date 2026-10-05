@@ -239,6 +239,66 @@ inline float pf_softplus(float x) { return x > 20.0f ? x : pf_log1p(metal::exp(x
   for (int i = 0; i < 4; i++) SO[(size_t(hv) * DV + dv) * DK + lane * 4 + i] = state[i];
 }
 
+// The recurrence with four state rows a simdgroup (dv = 32 part + 4 s + i, lane l columns 4 l .. 4 l + 3) and both
+// reductions of a row at once: Sk = S k and Sq = S q from the state before the row, then delta = (v - g Sk) beta,
+// out = g Sq + delta (k . q), S = g S + delta k^T (the same fp32 terms as pf_gdn_scan, in another order). Threadgroup
+// (hv, part) of 8 simdgroups covers 32 state rows; the next row's inputs load while this one computes.
+[[kernel]] void pf_gdn_scan4(const device float* QN [[buffer(0)]], const device float* KN [[buffer(1)]],
+    const device float* V [[buffer(2)]], const device float* G [[buffer(3)]], const device float* BETA [[buffer(4)]],
+    const device float* SIN [[buffer(5)]], const constant int& R [[buffer(6)]], device float* YS [[buffer(7)]],
+    device float* SO [[buffer(8)]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    uint3 tg [[threadgroup_position_in_grid]]) {
+  constexpr int NK = 16, NV = 48, DK = 128, DV = 128, NR = 4;
+  const int hv = int(tg.x) / 4, hk = hv / (NV / NK), dv0 = (int(tg.x) % 4) * 32 + int(sg) * NR;
+  float S[NR][4];
+  for (int i = 0; i < NR; i++)
+    for (int c = 0; c < 4; c++) S[i][c] = SIN[(size_t(hv) * DV + dv0 + i) * DK + lane * 4 + c];
+  float g_n = G[hv], beta_n = BETA[hv], v_n[NR], k_n[4], q_n[4];
+  for (int i = 0; i < NR; i++) v_n[i] = V[size_t(hv) * DV + dv0 + i];
+  for (int c = 0; c < 4; c++) {
+    k_n[c] = KN[size_t(hk) * DK + lane * 4 + c];
+    q_n[c] = QN[size_t(hk) * DK + lane * 4 + c];
+  }
+  for (int r = 0; r < R; r++) {
+    const float g = g_n, beta = beta_n;
+    float v[NR], k[4], q[4];
+    for (int i = 0; i < NR; i++) v[i] = v_n[i];
+    for (int c = 0; c < 4; c++) { k[c] = k_n[c]; q[c] = q_n[c]; }
+    if (r + 1 < R) {
+      const int rn = r + 1;
+      g_n = G[rn * NV + hv];
+      beta_n = BETA[rn * NV + hv];
+      for (int i = 0; i < NR; i++) v_n[i] = V[(size_t(rn) * NV + hv) * DV + dv0 + i];
+      for (int c = 0; c < 4; c++) {
+        k_n[c] = KN[(size_t(rn) * NK + hk) * DK + lane * 4 + c];
+        q_n[c] = QN[(size_t(rn) * NK + hk) * DK + lane * 4 + c];
+      }
+    }
+    float kq = 0.0f, sk[NR], sq[NR];
+    for (int c = 0; c < 4; c++) kq = fma(k[c], q[c], kq);
+    for (int i = 0; i < NR; i++) {
+      sk[i] = 0.0f;
+      sq[i] = 0.0f;
+      for (int c = 0; c < 4; c++) {
+        sk[i] = fma(S[i][c], k[c], sk[i]);
+        sq[i] = fma(S[i][c], q[c], sq[i]);
+      }
+    }
+    kq = simd_sum(kq);
+    for (int i = 0; i < NR; i++) {
+      sk[i] = simd_sum(sk[i]);
+      sq[i] = simd_sum(sq[i]);
+    }
+    for (int i = 0; i < NR; i++) {
+      const float delta = (v[i] - g * sk[i]) * beta;
+      for (int c = 0; c < 4; c++) S[i][c] = fma(delta, k[c], g * S[i][c]);
+      if (lane == 0) YS[(size_t(r) * NV + hv) * DV + dv0 + i] = float(bfloat(fma(delta, kq, g * sq[i])));
+    }
+  }
+  for (int i = 0; i < NR; i++)
+    for (int c = 0; c < 4; c++) SO[(size_t(hv) * DV + dv0 + i) * DK + lane * 4 + c] = S[i][c];
+}
+
 // Threadgroup (hv, r): the sigmoid-gated RMS norm of row r's head hv, bf16 out.
 [[kernel]] void pf_gdn_post(const device float* YS [[buffer(0)]], const device bfloat* P [[buffer(1)]],
     const device bfloat* NW [[buffer(2)]], const device float* eps [[buffer(3)]], device bfloat* OUT [[buffer(4)]],

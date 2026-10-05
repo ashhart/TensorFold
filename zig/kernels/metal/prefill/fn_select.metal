@@ -5,24 +5,24 @@ using namespace metal;
 
 // One thread: rows t .. t + W - 1 (t = AR[1]): complete blocks, ends, key counts and sparse flags; the pooling range
 // [min(pooled, t / 4), (t + W) / 4) after rows a rejected window completed; the pooled count in the shape buffers.
-// SEL: complete[8] ends[8] counts[8] sparse[8] start count pooled.
+// SEL: complete[16] ends[16] counts[16] sparse[16] start count pooled.
 [[kernel]] void fz_sel_meta(const device int* AR [[buffer(0)]], const constant uint& W [[buffer(1)]],
     device int* SEL [[buffer(2)]], device int* POOLED_SHAPE [[buffer(3)]], device int* SC_SHAPE [[buffer(4)]],
     uint t [[thread_position_in_grid]]) {
   if (t != 0) return;
   constexpr int TOP = 512;
   const int tn = AR[1];
-  const int pooled = min(SEL[34], tn / 4), last = (tn + int(W)) / 4, now = max(pooled, last);
-  SEL[32] = pooled;
-  SEL[33] = max(0, last - pooled);
-  SEL[34] = now;
+  const int pooled = min(SEL[66], tn / 4), last = (tn + int(W)) / 4, now = max(pooled, last);
+  SEL[64] = pooled;
+  SEL[65] = max(0, last - pooled);
+  SEL[66] = now;
   for (int i = 0; i < int(W); i++) {
     const int e = tn + i + 1, c = e / 4;
     const bool sparse = c > TOP;
     SEL[i] = c;
-    SEL[8 + i] = e;
-    SEL[16 + i] = sparse ? 4 * TOP + e - 4 * c : e;
-    SEL[24 + i] = sparse ? 1 : 0;
+    SEL[16 + i] = e;
+    SEL[32 + i] = sparse ? 4 * TOP + e - 4 * c : e;
+    SEL[48 + i] = sparse ? 1 : 0;
   }
   POOLED_SHAPE[0] = now;
   POOLED_SHAPE[1] = 128;
@@ -30,7 +30,7 @@ using namespace metal;
   SC_SHAPE[1] = now;
 }
 
-// Threadgroup j (128 threads): block SEL[32] + j if j < SEL[33]: the mean of its 4 raw keys (fp32 in order, bf16),
+// Threadgroup j (128 threads): block SEL[64] + j if j < SEL[65]: the mean of its 4 raw keys (fp32 in order, bf16),
 // RMSNorm with the weight (fp32, bf16), RoPE (64 dims, non-interleaved halves) at the block's first position.
 [[kernel]] void fz_idx_pool_abs(const device bfloat* RAW [[buffer(0)]], const device int* SEL [[buffer(1)]],
     const device float* Wn [[buffer(2)]], const device float* eps [[buffer(3)]], const device float* LOG2BASE [[buffer(4)]],
@@ -39,9 +39,9 @@ using namespace metal;
   constexpr int DI = 128;
   constexpr int RD = 64;
   const int j = int(tg.y);
-  if (j >= SEL[33]) return;
+  if (j >= SEL[65]) return;
   const int d = int(tpos.x);
-  const int b = SEL[32] + j;
+  const int b = SEL[64] + j;
   threadgroup float part[DI / 32];
   threadgroup float normed[DI];
   const device bfloat* src = RAW + size_t(4 * b) * DI + d;

@@ -40,7 +40,16 @@ pub const MARGIN = 2 * MAXR;
 
 pub const Reason = enum { stop, length, cancelled };
 
-pub const Result = struct { reason: Reason, rounds: u64 = 0, drafted: u64 = 0, accepted: u64 = 0, min_rows: u32 = 0 };
+pub const Result = struct {
+    reason: Reason,
+    rounds: u64 = 0,
+    drafted: u64 = 0,
+    accepted: u64 = 0,
+    min_rows: u32 = 0,
+    copy_rounds: u64 = 0,
+    copy_accepted: u64 = 0,
+    copy_by_len: [9][2]u64 = @splat(.{ 0, 0 }), // copied rounds and drafts landed by match length
+};
 
 /// What a reply reports while it runs (called on the engine's thread).
 pub const Out = struct {
@@ -65,11 +74,16 @@ pub const Engine = struct {
     o_so: mtl.Buffer,
     cins: [2]Buf,
     ring: mtl.Buffer,
+    hist: mtl.Buffer, // the token history the copy drafts search
+    copy: bool = true, // copy drafts from the history when a long enough match exists
+    copy_min: u32 = 3,
+    copy_long: u32 = 6, // shorter matches copy only when the head's first draft agrees
+    // while copies land worse than the head's drafts, only 8-token matches the head agrees with are copied
     wids: Buf,
     rows_w: [MAXR + 1]Buf,
     mdims_w: [MAXR + 1]Buf,
-    host: struct { rows: Buf, mdims: Buf, pos8: Buf, nk8: Buf, kvmeta: Buf, slots: [16]Slot },
-    gpu_slots: [16]Slot,
+    host: struct { rows: Buf, mdims: Buf, pos8: Buf, nk8: Buf, kvmeta: Buf, slots: [2 * MAXR]Slot },
+    gpu_slots: [2 * MAXR]Slot,
     tsel: GSelect,
     msel: GSelect,
 
@@ -205,11 +219,11 @@ pub const Engine = struct {
             .rows = try i32Buf(r, &.{1}),
             .mdims = try i32Buf(r, &.{ 1, 16, 0, 0, 0, 0, 0, 0 }),
             .eps = try r.load("eps"),
-            .ids8 = try i32Buf(r, &(@as([8]i32, @splat(0)))),
-            .pos8 = try i32Buf(r, &(@as([8]i32, @splat(0)))),
-            .nk8 = try i32Buf(r, &(@as([8]i32, @splat(0)))),
-            .zero8 = try i32Buf(r, &(@as([8]i32, @splat(0)))),
-            .ids81 = try i32Buf(r, &(@as([8]i32, @splat(0)))),
+            .ids8 = try i32Buf(r, &(@as([MAXR]i32, @splat(0)))),
+            .pos8 = try i32Buf(r, &(@as([MAXR]i32, @splat(0)))),
+            .nk8 = try i32Buf(r, &(@as([MAXR]i32, @splat(0)))),
+            .zero8 = try i32Buf(r, &(@as([MAXR]i32, @splat(0)))),
+            .ids81 = try i32Buf(r, &(@as([MAXR]i32, @splat(0)))),
             .scale = try f32Buf(r, @floatCast(ref.object.get("attention_scale").?.float)),
             .log2base = try f32Buf(r, 23.253496170043945),
             .ple_ids = try i32Buf(r, &(@as([16 * MAXR]i32, @splat(0)))),
@@ -266,9 +280,9 @@ pub const Engine = struct {
                 .rows = try i32Buf(r, &.{1}),
                 .md = try i32Buf(r, &.{ 1, 16, 0, 0, 0, 0, 0, 0 }),
                 .md4 = try i32Buf(r, &.{ 4, 16, 0, 0, 0, 0, 0, 0 }),
-                .ids8 = try i32Buf(r, &(@as([8]i32, @splat(0)))),
-                .pos8 = try i32Buf(r, &(@as([8]i32, @splat(0)))),
-                .nk8 = try i32Buf(r, &(@as([8]i32, @splat(0)))),
+                .ids8 = try i32Buf(r, &(@as([MAXR]i32, @splat(0)))),
+                .pos8 = try i32Buf(r, &(@as([MAXR]i32, @splat(0)))),
+                .nk8 = try i32Buf(r, &(@as([MAXR]i32, @splat(0)))),
                 .kvmeta = try i32Buf(r, &.{ 0, CAP, 1 }),
                 .n_add = try i32Buf(r, &.{0}),
             };
@@ -276,7 +290,7 @@ pub const Engine = struct {
             if (m.mtp.ids_n * 2 > 80000 * 2) return error.DraftVocab;
         }
         try r.shapes.put(arena, "Kc_shape", (try i32Buf(r, &.{ 1, 2, CAP, 256 })).b);
-        try r.shapes.put(arena, "IDS_shape", (try i32Buf(r, &.{ 8, 1 })).b);
+        try r.shapes.put(arena, "IDS_shape", (try i32Buf(r, &.{ MAXR, 1 })).b);
 
         e.r = r;
         e.m = m;
@@ -307,8 +321,9 @@ pub const Engine = struct {
             gi += 1;
         };
         e.cins = .{ m.ple.cin, .{ .b = try r.buffer((PLE_TAIL + MAXR) * WIDE * 2) } };
-        r.ar = .{ .b = try r.buffer(4 * 256) };
-        e.ring = try r.buffer(9 * 4 * RING);
+        r.ar = .{ .b = try r.buffer(4 * fz.AR_WORDS) };
+        e.ring = try r.buffer(fz.RING_WORDS * 4 * RING);
+        e.hist = try r.buffer((CAP + 64) * 4);
         e.wids = .{ .b = try r.buffer(64) };
         m.mtp.mixsel = .{ .b = try r.buffer(D * 2) };
         m.mtp.hsel = .{ .b = try r.buffer(WIDE * 2) };
@@ -318,24 +333,24 @@ pub const Engine = struct {
         }
         e.host = .{ .rows = m.t.rows, .mdims = m.t.mdims, .pos8 = m.t.pos8, .nk8 = m.t.nk8, .kvmeta = m.t.kvmeta, .slots = m.mtp.slots };
         e.gpu_slots = m.mtp.slots;
-        for (1..MAXR + 1) |n| { // the head absorbing a window of n rows: slot 7 + n
-            const sl = &e.gpu_slots[7 + n];
+        for (1..MAXR + 1) |n| { // the head absorbing a window of n rows: slot MAXR - 1 + n
+            const sl = &e.gpu_slots[MAXR - 1 + n];
             try m.mtpMeta(sl, n);
-            sl.pos8 = .{ .b = r.ar.b, .off = 24 * 4 };
-            sl.nk8 = .{ .b = r.ar.b, .off = 32 * 4 };
-            sl.kvmeta = .{ .b = r.ar.b, .off = 40 * 4 };
+            sl.pos8 = .{ .b = r.ar.b, .off = fz.AR_ABS_POS * 4 };
+            sl.nk8 = .{ .b = r.ar.b, .off = fz.AR_ABS_NK * 4 };
+            sl.kvmeta = .{ .b = r.ar.b, .off = fz.AR_ABS_KV * 4 };
         }
         for (1..MAXR - 1) |j| { // chained draft j: slot j
             try m.mtpMeta(&e.gpu_slots[j], 1);
-            const b = (44 + (j - 1) * 20) * 4;
+            const b = (fz.AR_CHAIN + (j - 1) * fz.AR_CHAIN_STRIDE) * 4;
             e.gpu_slots[j].pos8 = .{ .b = r.ar.b, .off = b };
-            e.gpu_slots[j].nk8 = .{ .b = r.ar.b, .off = b + 32 };
-            e.gpu_slots[j].kvmeta = .{ .b = r.ar.b, .off = b + 64 };
+            e.gpu_slots[j].nk8 = .{ .b = r.ar.b, .off = b + 16 * 4 };
+            e.gpu_slots[j].kvmeta = .{ .b = r.ar.b, .off = b + 32 * 4 };
         }
     }
 
     /// Host-driven calls (prompt chunks, the head's first drafts) read the host's metadata buffers.
-    fn hostMode(e: *Engine) void {
+    pub fn hostMode(e: *Engine) void {
         const m = e.m;
         e.r.gpu_round = false;
         e.r.gsel = null;
@@ -350,9 +365,9 @@ pub const Engine = struct {
         const m = e.m;
         const r = e.r;
         r.gpu_round = true;
-        m.t.pos8 = .{ .b = r.ar.b, .off = 4 * 4 };
-        m.t.nk8 = .{ .b = r.ar.b, .off = 12 * 4 };
-        m.t.kvmeta = .{ .b = r.ar.b, .off = 20 * 4 };
+        m.t.pos8 = .{ .b = r.ar.b, .off = fz.AR_POS * 4 };
+        m.t.nk8 = .{ .b = r.ar.b, .off = fz.AR_NK * 4 };
+        m.t.kvmeta = .{ .b = r.ar.b, .off = fz.AR_KV * 4 };
         m.mtp.slots = e.gpu_slots;
     }
 
@@ -384,7 +399,7 @@ pub const Engine = struct {
         var last_n: usize = 1;
         while (at < prompt.len) {
             if (out.cancelled(out.ctx)) return .{ .reason = .cancelled };
-            const n = @min(PMAX, prompt.len - at);
+            const n = @min(e.pr.step, prompt.len - at);
             pick = try e.pr.chunk(m, e.gpa, prompt[at .. at + n]);
             const k = if (at + n < prompt.len) n else n - 1;
             try e.pr.mtpKeys(m, at, prompt[at + 1 .. at + 1 + k], m.last);
@@ -396,7 +411,7 @@ pub const Engine = struct {
         if (out.tokens(out.ctx, &.{pick}) or isEos(eos, pick)) return .{ .reason = .stop };
         if (max_tokens <= 1) return res;
         var emitted: usize = 1;
-        const ar = r.ar.b.slice(i32, 256);
+        const ar = r.ar.b.slice(i32, fz.AR_WORDS);
         if (m.state == 1) { // the state into the rounds' state buffers
             ar[0] = 1;
             const cb = r.queue.commandBuffer();
@@ -407,6 +422,8 @@ pub const Engine = struct {
             m.state_row = 0;
         }
         var rule: DepthRule = .{};
+        var copy_rate: f64 = 0.6; // drafts landed over offered: copied rounds, the head's rounds
+        var head_rate: f64 = 0.6;
         const fixed = depth;
         const depth0 = fixed orelse rule.pick();
         const w = e.wids.b.slice(u32, 16);
@@ -425,16 +442,20 @@ pub const Engine = struct {
             for (&m.layers) |*L| if (!L.linear) try r.sel.?.catchUp(r, L, m.t.eps, m.t.log2base, m.pos / 4);
             try r.sel.?.catchUp(r, &m.mtp, m.t.eps, m.t.log2base, m.pos / 4);
             try m.finish(cb);
-            e.tsel.sel.b.slice(i32, 64)[34] = @intCast(m.pos / 4);
-            e.msel.sel.b.slice(i32, 64)[34] = @intCast(m.pos / 4);
+            e.tsel.sel.b.slice(i32, 128)[fz.SEL_POOLED] = @intCast(m.pos / 4);
+            e.msel.sel.b.slice(i32, 128)[fz.SEL_POOLED] = @intCast(m.pos / 4);
         }
         @memset(ar, 0);
         ar[1] = T;
-        for (0..8) |i| {
-            ar[4 + i] = if (i < W0) T + @as(i32, @intCast(i)) else 0;
-            ar[12 + i] = if (i < W0) T + @as(i32, @intCast(i)) + 1 else 0;
+        const hs = e.hist.slice(u32, CAP + 64); // the history: the prompt and the first token
+        @memcpy(hs[0..prompt.len], prompt);
+        hs[prompt.len] = pick;
+        ar[fz.AR_HLEN] = @intCast(prompt.len + 1);
+        for (0..MAXR) |i| {
+            ar[fz.AR_POS + i] = if (i < W0) T + @as(i32, @intCast(i)) else 0;
+            ar[fz.AR_NK + i] = if (i < W0) T + @as(i32, @intCast(i)) + 1 else 0;
         }
-        ar[20], ar[21], ar[22] = .{ T, CAP, @intCast(W0) };
+        ar[fz.AR_KV], ar[fz.AR_KV + 1], ar[fz.AR_KV + 2] = .{ T, CAP, @intCast(W0) };
         const pm = m.t.ple_meta.b.slice(i64, 39);
         pm[0], pm[1], pm[2], pm[3] = .{ m.ple.hist[0], m.ple.hist[1], m.ple.eos, 0 };
         for (0..3) |k| pm[4 + k] = m.ple.mult[k];
@@ -455,7 +476,7 @@ pub const Engine = struct {
         var done: usize = 0;
         var w_sum: usize = 0;
         res.min_rows = @intCast(W0);
-        const rg = e.ring.slice(u32, 9 * RING);
+        const rg = e.ring.slice(u32, fz.RING_WORDS * RING);
         var failed: ?anyerror = null;
         while (true) {
             const wr = widths[round % 4];
@@ -469,10 +490,20 @@ pub const Engine = struct {
                 e.statesCopy();
                 r.copyKept(e.cins[(round - 1) % 2], e.cins[round % 2], PLE_TAIL * WIDE / 2, WIDE / 2, 0, 0, 1, 0);
                 if (wr > 1) {
-                    try m.mtpEncode(7 + wp, wp, m.t.picks, m.last, .{ .b = e.wids.b, .off = 4 });
+                    try m.mtpEncode(MAXR - 1 + wp, wp, m.t.picks, m.last, .{ .b = e.wids.b, .off = 4 });
                     for (1..wr - 1) |j| {
                         const streams = if (j == 1) m.mtp.hsel else Buf{ .b = m.mtp.h[1].b, .off = 0 };
                         try m.mtpEncode(j, 1, .{ .b = e.wids.b, .off = 4 * j }, streams, .{ .b = e.wids.b, .off = 4 * (j + 1) });
+                    }
+                    if (e.copy) { // copied drafts replace the head's when the history repeats its last tokens
+                        r.enc.setPipeline(r.lookup_pipe);
+                        r.enc.setBuffer(e.hist, 0, 0);
+                        r.enc.setBuffer(r.ar.b, r.ar.off, 1);
+                        r.enc.setBuffer(e.wids.b, e.wids.off, 2);
+                        const lenient = copy_rate + 0.05 >= head_rate;
+                        const lc = [4]u32{ @intCast(wr), if (lenient) e.copy_min else 4, if (lenient) e.copy_long else 9, if (lenient) 1 else 2 };
+                        r.enc.setBytes(std.mem.asBytes(&lc), 3);
+                        r.enc.dispatchThreads(mtl.Size.of(1024, 1, 1), mtl.Size.of(1024, 1, 1));
                     }
                 }
             }
@@ -483,12 +514,16 @@ pub const Engine = struct {
             if (r.gsel) |*g| g.nb_ub = ub;
             if (m.mtp.gsel) |*g| g.nb_ub = ub;
             try m.windowEncode(wr, e.wids);
-            const wn = (if (fixed) |d| d else rule.pick()) + 1;
+            // the widest windows only while copies land; the head's own chains stop at 6 drafts
+            const copying = e.copy and copy_rate + 0.05 >= head_rate and copy_rate > 0.7;
+            const cap: usize = if (copying) MAXR - 1 else 6;
+            const wn = (if (fixed) |d| d else @min(rule.pick(), cap)) + 1;
             widths[(round + 1) % 4] = wn;
             const cfg = [4]u32{ @intCast(wr), @intCast(wn), CAP, 0 };
             r.enc.setPipeline(r.accept_pipe);
             for ([_]Buf{ e.wids, m.t.picks, r.ar, .{ .b = e.ring }, m.t.ple_meta }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
             r.enc.setBytes(std.mem.asBytes(&cfg), 5);
+            r.enc.setBuffer(e.hist, 0, 6);
             r.enc.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
             r.enc.end();
             cb.signal(r.event, base + round + 1);
@@ -504,16 +539,27 @@ pub const Engine = struct {
                 failed = error.GpuFailed;
                 break;
             }
-            const slot = (done % RING) * 9;
+            const slot = (done % RING) * fz.RING_WORDS;
             const keep = rg[slot];
             const wd = widths[done % 4];
-            if (fixed == null) rule.update(wd - 1, keep - 1);
+            if (wd > 1) {
+                const frac = @as(f64, @floatFromInt(keep - 1)) / @as(f64, @floatFromInt(wd - 1));
+                if (rg[slot + 1] != 0) copy_rate = 0.8 * copy_rate + 0.2 * frac else head_rate = 0.8 * head_rate + 0.2 * frac;
+            }
+            if (rg[slot + 1] != 0) {
+                res.copy_rounds += 1;
+                res.copy_accepted += keep - 1;
+                const n = @min(rg[slot + 2], 8);
+                res.copy_by_len[n][0] += 1;
+                res.copy_by_len[n][1] += keep - 1;
+            }
+            if (fixed == null and wd > 1) rule.update(wd - 1, keep - 1);
             res.rounds += 1;
             res.drafted += wd - 1;
             res.accepted += keep - 1;
             res.min_rows = @min(res.min_rows, @as(u32, @intCast(wd)));
             done += 1;
-            const got = rg[slot + 1 .. slot + 1 + keep];
+            const got = rg[slot + 3 .. slot + 3 + keep];
             var take: usize = 0;
             var stop = false;
             while (take < got.len and emitted + take < max_tokens) {

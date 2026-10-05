@@ -86,6 +86,8 @@ pub fn main(init: std.process.Init) !void {
         const toks = try arena.alloc(u32, items.len);
         for (items, 0..) |x, i| toks[i] = @intCast(x.integer);
         const e = try fx.Engine.load(gpa, args[1], args[2]);
+        if (std.c.getenv("FZ_COPY_MIN")) |v| e.copy_min = try std.fmt.parseInt(u32, std.mem.span(v), 10);
+        if (std.c.getenv("FZ_COPY_LONG")) |v| e.copy_long = try std.fmt.parseInt(u32, std.mem.span(v), 10);
         if (std.c.getenv("FZ_ENGINE_WARM") != null) try e.warm();
         const Show = struct {
             got: std.ArrayList(u32) = .empty,
@@ -100,11 +102,60 @@ pub fn main(init: std.process.Init) !void {
                 return false;
             }
         };
-        for (0..2) |run| {
+        const n_out: usize = if (std.c.getenv("FZ_N")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 256;
+        var replies: [2][]u32 = undefined;
+        for (0..2) |arm| { // copy drafts off, then on
+            e.copy = arm == 1;
             var sh: Show = .{ .a = arena };
+            _ = try e.generate(toks, 8, &.{}, null, .{ .ctx = &sh, .prefilled = Show.prefilled, .tokens = Show.tokens, .cancelled = Show.cancelled });
+            sh = .{ .a = arena };
+            var first_at: f64 = 0;
+            const Timed = struct {
+                sh: *Show,
+                t0: f64,
+                first: *f64,
+                fn prefilled(ctx: *anyopaque) void {
+                    const tt: *@This() = @ptrCast(@alignCast(ctx));
+                    tt.first.* = mtl.clock.seconds() - tt.t0;
+                }
+                fn tokens(ctx: *anyopaque, t: []const u32) bool {
+                    const tt: *@This() = @ptrCast(@alignCast(ctx));
+                    return Show.tokens(tt.sh, t);
+                }
+            };
             const s0 = mtl.clock.seconds();
-            const res = try e.generate(toks, 64, &.{}, null, .{ .ctx = &sh, .prefilled = Show.prefilled, .tokens = Show.tokens, .cancelled = Show.cancelled });
-            std.debug.print("engine run {d}: {d} tokens in {d:.2} s, {d} rounds; first {any}\n", .{ run, sh.got.items.len, mtl.clock.seconds() - s0, res.rounds, sh.got.items[0..@min(24, sh.got.items.len)] });
+            var tm: Timed = .{ .sh = &sh, .t0 = s0, .first = &first_at };
+            const res = try e.generate(toks, n_out, &.{}, null, .{ .ctx = &tm, .prefilled = Timed.prefilled, .tokens = Timed.tokens, .cancelled = Show.cancelled });
+            const wall = mtl.clock.seconds() - s0;
+            const made: f64 = @floatFromInt(sh.got.items.len - 1);
+            std.debug.print("copy {s}: {d} tokens; prompt {d:.2} s; decode {d:.1} tok/s; {d:.2} tokens a round ({d} rounds, {d} copied rounds landing {d:.2})\n", .{ if (arm == 1) "on " else "off", sh.got.items.len, first_at, made / (wall - first_at), made / @as(f64, @floatFromInt(@max(res.rounds, 1))), res.rounds, res.copy_rounds, @as(f64, @floatFromInt(res.copy_accepted)) / @as(f64, @floatFromInt(@max(res.copy_rounds, 1))) });
+            replies[arm] = sh.got.items;
+            if (arm == 1) for (res.copy_by_len, 0..) |cl, n| if (cl[0] > 0) std.debug.print("    match {d}: {d} rounds, {d:.2} landed\n", .{ n, cl[0], @as(f64, @floatFromInt(cl[1])) / @as(f64, @floatFromInt(cl[0])) });
+        }
+        // the reference: the same prompt chunks, then one row a step
+        e.hostMode();
+        const mm = e.m;
+        mm.reset();
+        var at: usize = 0;
+        var tok: u32 = 0;
+        while (at < toks.len) {
+            const n = @min(e.pr.step, toks.len - at);
+            tok = try e.pr.chunk(mm, gpa, toks[at .. at + n]);
+            at += n;
+        }
+        var refr: std.ArrayList(u32) = .empty;
+        try refr.append(arena, tok);
+        var pk: [MAXR]u32 = undefined;
+        while (refr.items.len < n_out) {
+            const last = refr.items[refr.items.len - 1];
+            try mm.window(&.{last}, &pk);
+            mm.keepRows(&.{last}, 1);
+            try refr.append(arena, pk[0]);
+        }
+        for (replies, 0..) |rep_toks, arm| {
+            var same: usize = 0;
+            while (same < @min(rep_toks.len, refr.items.len) and rep_toks[same] == refr.items[same]) same += 1;
+            std.debug.print("copy {s}: {d}/{d} tokens equal to the one-row reference\n", .{ if (arm == 1) "on " else "off", same, n_out });
         }
         return;
     }
@@ -245,11 +296,11 @@ pub fn main(init: std.process.Init) !void {
         .rows = try i32Buf(&r, &.{1}),
         .mdims = try i32Buf(&r, &.{ 1, 16, 0, 0, 0, 0, 0, 0 }),
         .eps = try r.load("eps"),
-        .ids8 = try i32Buf(&r, &(@as([8]i32, @splat(0)))),
-        .pos8 = try i32Buf(&r, &(@as([8]i32, @splat(0)))),
-        .nk8 = try i32Buf(&r, &(@as([8]i32, @splat(0)))),
-        .zero8 = try i32Buf(&r, &(@as([8]i32, @splat(0)))),
-        .ids81 = try i32Buf(&r, &(@as([8]i32, @splat(0)))),
+        .ids8 = try i32Buf(&r, &(@as([MAXR]i32, @splat(0)))),
+        .pos8 = try i32Buf(&r, &(@as([MAXR]i32, @splat(0)))),
+        .nk8 = try i32Buf(&r, &(@as([MAXR]i32, @splat(0)))),
+        .zero8 = try i32Buf(&r, &(@as([MAXR]i32, @splat(0)))),
+        .ids81 = try i32Buf(&r, &(@as([MAXR]i32, @splat(0)))),
         .scale = try f32Buf(&r, @floatCast(ref.object.get("attention_scale").?.float)),
         .log2base = try f32Buf(&r, 23.253496170043945),
         .ple_ids = try i32Buf(&r, &(@as([16 * MAXR]i32, @splat(0)))),
@@ -306,9 +357,9 @@ pub fn main(init: std.process.Init) !void {
             .rows = try i32Buf(&r, &.{1}),
             .md = try i32Buf(&r, &.{ 1, 16, 0, 0, 0, 0, 0, 0 }),
             .md4 = try i32Buf(&r, &.{ 4, 16, 0, 0, 0, 0, 0, 0 }),
-            .ids8 = try i32Buf(&r, &(@as([8]i32, @splat(0)))),
-            .pos8 = try i32Buf(&r, &(@as([8]i32, @splat(0)))),
-            .nk8 = try i32Buf(&r, &(@as([8]i32, @splat(0)))),
+            .ids8 = try i32Buf(&r, &(@as([MAXR]i32, @splat(0)))),
+            .pos8 = try i32Buf(&r, &(@as([MAXR]i32, @splat(0)))),
+            .nk8 = try i32Buf(&r, &(@as([MAXR]i32, @splat(0)))),
             .kvmeta = try i32Buf(&r, &.{ 0, CAP, 1 }),
             .n_add = try i32Buf(&r, &.{0}),
         };
@@ -316,7 +367,7 @@ pub fn main(init: std.process.Init) !void {
         if (m.mtp.ids_n * 2 > 80000 * 2) return error.DraftVocab;
     }
     try r.shapes.put(arena, "Kc_shape", (try i32Buf(&r, &.{ 1, 2, CAP, 256 })).b);
-    try r.shapes.put(arena, "IDS_shape", (try i32Buf(&r, &.{ 8, 1 })).b);
+    try r.shapes.put(arena, "IDS_shape", (try i32Buf(&r, &.{ MAXR, 1 })).b);
     const t2 = mtl.clock.seconds();
     std.debug.print("compiled in {d:.2} s, loaded {d:.1} GB in {d:.1} s\n", .{ t1 - t0, @as(f64, @floatFromInt(r.loaded)) / 1e9, t2 - t1 });
 
@@ -374,13 +425,13 @@ pub fn main(init: std.process.Init) !void {
             var toks: [MAXR]u32 = undefined;
             for (0..rows) |i| toks[i] = @intCast(want0[i].integer);
             m.windowMeta(rows);
-            const ids = ta.ids8.b.slice(u32, 8);
-            for (0..8) |i| ids[i] = if (i < rows) toks[i] else 0;
+            const ids = ta.ids8.b.slice(u32, MAXR);
+            for (0..MAXR) |i| ids[i] = if (i < rows) toks[i] else 0;
             m.pleIds(toks[0..rows]);
             var toks_b: [MAXR]u32 = undefined; // the second group: other tokens at the same positions
             for (0..rows) |i| toks_b[i] = @intCast(want0[16 + i].integer);
-            const ids_b = tb.ids8.b.slice(u32, 8);
-            for (0..8) |i| ids_b[i] = if (i < rows) toks_b[i] else 0;
+            const ids_b = tb.ids8.b.slice(u32, MAXR);
+            for (0..MAXR) |i| ids_b[i] = if (i < rows) toks_b[i] else 0;
             m.t = tb;
             m.pleIds(toks_b[0..rows]);
             m.t = ta;
@@ -487,8 +538,9 @@ pub fn main(init: std.process.Init) !void {
             var outs: [2][48]u32 = undefined;
             const logits: [2][]u16 = .{ try gpa.alloc(u16, VOCAB), try gpa.alloc(u16, VOCAB) };
             var best: [2]f64 = .{ 1e9, 1e9 };
-            for (0..2) |arm| {
-                pr.fast_attn = arm == 1;
+            const ab: []const u8 = if (std.c.getenv("FZ_AB")) |v| std.mem.span(v) else "attn";
+            for (0..2) |arm| { // arm 0 the old kernels, arm 1 the new: FZ_AB attn (default), scan or tiles
+                if (std.mem.eql(u8, ab, "scan")) pr.scan4 = arm == 1 else if (std.mem.eql(u8, ab, "tiles")) pr.tall_tiles = arm == 1 else pr.fast_attn = arm == 1;
                 for (0..3) |run| {
                     m.reset();
                     const c0 = mtl.clock.seconds();
@@ -519,7 +571,7 @@ pub fn main(init: std.process.Init) !void {
             }
             var same: usize = 0;
             while (same < 48 and outs[0][same] == outs[1][same]) same += 1;
-            std.debug.print("prompt {d} tokens, chunks of {d}: decode kernels {d:.3} s ({d:.0} tok/s), tensor units {d:.3} s ({d:.0} tok/s)\n", .{ toks.len, pr.step, best[0], @as(f64, @floatFromInt(toks.len)) / best[0], best[1], @as(f64, @floatFromInt(toks.len)) / best[1] });
+            std.debug.print("prompt {d} tokens, chunks of {d}: old {d:.3} s ({d:.0} tok/s), new {d:.3} s ({d:.0} tok/s)\n", .{ toks.len, pr.step, best[0], @as(f64, @floatFromInt(toks.len)) / best[0], best[1], @as(f64, @floatFromInt(toks.len)) / best[1] });
             std.debug.print("first token {d} vs {d}; last-row logits max diff {d:.4}; 48 decoded after each: {d} equal\n", .{ outs[0][0], outs[1][0], worst, same });
             std.debug.print("  old {any}\n  new {any}\n", .{ outs[0][0..16], outs[1][0..16] });
             return;
@@ -1080,8 +1132,8 @@ pub fn main(init: std.process.Init) !void {
             while (at < absorb_rows.len) : (slot += 1) {
                 const n = @min(MAXR, absorb_rows.len - at);
                 const sl = &m.mtp.slots[slot];
-                const ids = sl.ids8.b.slice(u32, 8);
-                for (0..8) |i| ids[i] = if (i < n) absorb_rows[at + i] else 0;
+                const ids = sl.ids8.b.slice(u32, MAXR);
+                for (0..MAXR) |i| ids[i] = if (i < n) absorb_rows[at + i] else 0;
                 try m.mtpEncode(slot, n, sl.ids8, .{ .b = absorb_from.b, .off = absorb_from.off + at * WIDE * 2 }, .{ .b = wids.b, .off = if (copied > 0) 4 * 12 else 4 });
                 m.mtp.pos += n;
                 at += n;
@@ -1169,11 +1221,12 @@ pub fn main(init: std.process.Init) !void {
         };
         const cin_saved = m.ple.cin;
         const cins = [2]Buf{ m.ple.cin, .{ .b = try r.buffer((PLE_TAIL + MAXR) * WIDE * 2) } };
-        r.ar = .{ .b = try r.buffer(4 * 256) };
-        const ring = try r.buffer(9 * 4 * 512);
+        r.ar = .{ .b = try r.buffer(4 * fz.AR_WORDS) };
+        const ring = try r.buffer(fz.RING_WORDS * 4 * 512);
+        const g_hist = try r.buffer((CAP + 64) * 4);
         m.mtp.mixsel = .{ .b = try r.buffer(D * 2) };
         m.mtp.hsel = .{ .b = try r.buffer(WIDE * 2) };
-        const ar = r.ar.b.slice(i32, 256);
+        const ar = r.ar.b.slice(i32, fz.AR_WORDS);
         const Copy = struct { // the kept row of every DeltaNet layer's window output into its state
             fn states(rr: *Run, gcs: mtl.Buffer, gso: mtl.Buffer, ocs: mtl.Buffer, oso: mtl.Buffer) void {
                 rr.copyKept(.{ .b = oso }, .{ .b = gso }, SO_ROW / 4, SO_ROW / 4, MAXR * SO_ROW / 4, SO_ROW / 4, 36, -1);
@@ -1237,11 +1290,12 @@ pub fn main(init: std.process.Init) !void {
         const T: i32 = @intCast(m.pos);
         @memset(ar, 0);
         ar[1] = T;
-        for (0..8) |i| {
-            ar[4 + i] = if (i < W0) T + @as(i32, @intCast(i)) else 0;
-            ar[12 + i] = if (i < W0) T + @as(i32, @intCast(i)) + 1 else 0;
+        ar[fz.AR_HLEN] = @intCast(prompt.len + 1); // the accept kernel appends emitted tokens to the history
+        for (0..MAXR) |i| {
+            ar[fz.AR_POS + i] = if (i < W0) T + @as(i32, @intCast(i)) else 0;
+            ar[fz.AR_NK + i] = if (i < W0) T + @as(i32, @intCast(i)) + 1 else 0;
         }
-        ar[20], ar[21], ar[22] = .{ T, CAP, @intCast(W0) };
+        ar[fz.AR_KV], ar[fz.AR_KV + 1], ar[fz.AR_KV + 2] = .{ T, CAP, @intCast(W0) };
         const pm = m.t.ple_meta.b.slice(i64, 39);
         pm[0], pm[1], pm[2], pm[3] = .{ m.ple.hist[0], m.ple.hist[1], m.ple.eos, 0 };
         for (0..3) |k| pm[4 + k] = m.ple.mult[k];
@@ -1256,23 +1310,23 @@ pub fn main(init: std.process.Init) !void {
             rows_w[n] = try i32Buf(&r, &.{@intCast(n)});
             mdims_w[n] = try i32Buf(&r, &.{ @intCast(n), 16, 0, 0, 0, 0, 0, 0 });
         }
-        m.t.pos8 = .{ .b = r.ar.b, .off = 4 * 4 };
-        m.t.nk8 = .{ .b = r.ar.b, .off = 12 * 4 };
-        m.t.kvmeta = .{ .b = r.ar.b, .off = 20 * 4 };
+        m.t.pos8 = .{ .b = r.ar.b, .off = fz.AR_POS * 4 };
+        m.t.nk8 = .{ .b = r.ar.b, .off = fz.AR_NK * 4 };
+        m.t.kvmeta = .{ .b = r.ar.b, .off = fz.AR_KV * 4 };
         const slots_saved = m.mtp.slots;
-        for (1..MAXR + 1) |n| { // the head absorbing a window of n rows: slot 7 + n
-            const sl = &m.mtp.slots[7 + n];
+        for (1..MAXR + 1) |n| { // the head absorbing a window of n rows: slot MAXR - 1 + n
+            const sl = &m.mtp.slots[MAXR - 1 + n];
             try m.mtpMeta(sl, n);
-            sl.pos8 = .{ .b = r.ar.b, .off = 24 * 4 };
-            sl.nk8 = .{ .b = r.ar.b, .off = 32 * 4 };
-            sl.kvmeta = .{ .b = r.ar.b, .off = 40 * 4 };
+            sl.pos8 = .{ .b = r.ar.b, .off = fz.AR_ABS_POS * 4 };
+            sl.nk8 = .{ .b = r.ar.b, .off = fz.AR_ABS_NK * 4 };
+            sl.kvmeta = .{ .b = r.ar.b, .off = fz.AR_ABS_KV * 4 };
         }
         for (1..MAXR - 1) |j| { // chained draft j: slot j
             try m.mtpMeta(&m.mtp.slots[j], 1);
-            const b = (44 + (j - 1) * 20) * 4;
+            const b = (fz.AR_CHAIN + (j - 1) * fz.AR_CHAIN_STRIDE) * 4;
             m.mtp.slots[j].pos8 = .{ .b = r.ar.b, .off = b };
-            m.mtp.slots[j].nk8 = .{ .b = r.ar.b, .off = b + 32 };
-            m.mtp.slots[j].kvmeta = .{ .b = r.ar.b, .off = b + 64 };
+            m.mtp.slots[j].nk8 = .{ .b = r.ar.b, .off = b + 16 * 4 };
+            m.mtp.slots[j].kvmeta = .{ .b = r.ar.b, .off = b + 32 * 4 };
         }
         if (r.sel != null and prompt.len + want.len + 8 > 4 * TOP) { // long context: selection on the GPU
             const cb0 = r.queue.commandBuffer();
@@ -1299,7 +1353,7 @@ pub fn main(init: std.process.Init) !void {
         var landed: usize = 0;
         var offered: usize = 0;
         var at_w: [MAXR + 1]usize = @splat(0);
-        const rg = ring.slice(u32, 9 * 512);
+        const rg = ring.slice(u32, fz.RING_WORDS * 512);
         while (true) {
             const wr = widths.items[round];
             const cb = r.queue.commandBuffer();
@@ -1311,7 +1365,7 @@ pub fn main(init: std.process.Init) !void {
                 const wp = widths.items[round - 1];
                 Copy.states(&r, g_cs, g_so, o_cs, o_so);
                 r.copyKept(cins[(round - 1) % 2], cins[round % 2], PLE_TAIL * WIDE / 2, WIDE / 2, 0, 0, 1, 0);
-                try m.mtpEncode(7 + wp, wp, m.t.picks, m.last, .{ .b = wids.b, .off = 4 });
+                try m.mtpEncode(MAXR - 1 + wp, wp, m.t.picks, m.last, .{ .b = wids.b, .off = 4 });
                 for (1..wr - 1) |j| {
                     const streams = if (j == 1) m.mtp.hsel else Buf{ .b = m.mtp.h[1].b, .off = 0 };
                     try m.mtpEncode(j, 1, .{ .b = wids.b, .off = 4 * j }, streams, .{ .b = wids.b, .off = 4 * (j + 1) });
@@ -1329,6 +1383,7 @@ pub fn main(init: std.process.Init) !void {
             r.enc.setPipeline(r.accept_pipe);
             for ([_]Buf{ wids, m.t.picks, r.ar, .{ .b = ring }, m.t.ple_meta }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
             r.enc.setBytes(std.mem.asBytes(&cfg), 5);
+            r.enc.setBuffer(g_hist, 0, 6);
             r.enc.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
             r.enc.end();
             cb.signal(r.event, base + round + 1);
@@ -1343,8 +1398,9 @@ pub fn main(init: std.process.Init) !void {
                     return error.GpuFailed;
                 }
                 m.gpu_seconds += prev.gpuSeconds();
-                const keep = rg[done * 9];
-                try out.appendSlice(gpa, rg[done * 9 + 1 .. done * 9 + 1 + keep]);
+                const slot = (done % 512) * fz.RING_WORDS;
+                const keep = rg[slot];
+                try out.appendSlice(gpa, rg[slot + 3 .. slot + 3 + keep]);
                 const wd = widths.items[done];
                 if (ruled) rule.update(wd - 1, keep - 1);
                 landed += keep - 1;

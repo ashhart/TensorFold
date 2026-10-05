@@ -13,7 +13,7 @@ pub const VOCAB = 248320;
 pub const CAP = 262144; // keys an attention layer holds in this runner
 pub const PLE_TAIL = 9;
 pub const GROUPS = 8;
-pub const MAXR = 8;
+pub const MAXR = 16; // a decode window's rows at most
 pub const CS_ROW = 3 * WIDE * 2; // a DeltaNet conv state row (bytes)
 pub const SO_ROW = 48 * 128 * 128 * 4; // a DeltaNet recurrent state row (bytes)
 
@@ -89,7 +89,7 @@ const glue_source =
     \\    device uint* out [[buffer(2)]], constant uint& rows [[buffer(3)]], uint i [[thread_position_in_grid]]) {
     \\  const uint row = i / 16, hh = i % 16;
     \\  if (row >= rows) return;
-    \\  long seq[10];
+    \\  long seq[18];
     \\  seq[0] = pm[0]; seq[1] = pm[1];
     \\  for (uint q = 0; q <= row; q++) seq[2 + q] = long(tok[q]);
     \\  const long eos = pm[2];
@@ -118,36 +118,77 @@ const glue_source =
     \\  dst[gid.y * p.w + gid.x] = src[gid.y * p.z + row * p.y + gid.x];
     \\}
     \\// The round's verdict on the GPU: drafts kept, the emitted tokens to the ring, the next window's pending token,
-    \\// positions and n-gram history; ar = keep, target length, round, then the meta blocks the next round reads.
-    \\// cfg = this window's rows, the next window's rows, cache capacity.
+    \\// positions and n-gram history; ar = keep, target length, round, then the meta blocks the next round reads:
+    \\// the window's positions [4, 20), key counts [20, 36), cache meta [36, 39); the head's absorb [40, 56), [56, 72),
+    \\// [72, 75); chained draft j at 76 + 36 (j - 1): positions, key counts (16 each), cache meta.
+    \\// cfg = this window's rows, the next window's rows, cache capacity. The ring keeps 512 rounds of 20 words: keep,
+    \\// the drafts' source (1: copied, from ar[801]), the copy's match length (ar[802]), the emitted tokens; H, the
+    \\// token history (prompt, then every emitted token; its length in ar[800]), gets this round's.
     \\kernel void fz_accept(device uint* wids [[buffer(0)]], device const uint* picks [[buffer(1)]],
     \\    device int* ar [[buffer(2)]], device uint* ring [[buffer(3)]], device long* pm [[buffer(4)]],
-    \\    constant uint4& cfg [[buffer(5)]], uint tid [[thread_position_in_grid]]) {
+    \\    constant uint4& cfg [[buffer(5)]], device uint* H [[buffer(6)]], uint tid [[thread_position_in_grid]]) {
     \\  if (tid != 0) return;
     \\  const int W = int(cfg.x), Wn = int(cfg.y), cap = int(cfg.z);
     \\  int keep = 1;
     \\  while (keep < W && wids[keep] == picks[keep - 1]) keep++;
-    \\  const int round = ar[2];
-    \\  ring[round * 9] = uint(keep);
-    \\  for (int i = 0; i < keep; i++) ring[round * 9 + 1 + i] = picks[i];
+    \\  const int round = ar[2], slot = (round & 511) * 20;
+    \\  ring[slot] = uint(keep);
+    \\  ring[slot + 1] = uint(ar[801]);
+    \\  ring[slot + 2] = uint(ar[802]);
+    \\  for (int i = 0; i < keep; i++) ring[slot + 3 + i] = picks[i];
+    \\  const int hl = ar[800];
+    \\  for (int i = 0; i < keep; i++) H[hl + i] = picks[i];
+    \\  ar[800] = hl + keep;
     \\  for (int i = 0; i < keep; i++) { pm[0] = pm[1]; pm[1] = long(wids[i]); }
     \\  const int t_old = ar[1], t_new = t_old + keep;
     \\  ar[0] = keep; ar[1] = t_new; ar[2] = round + 1;
-    \\  for (int i = 0; i < 8; i++) {
+    \\  for (int i = 0; i < 16; i++) {
     \\    ar[4 + i] = i < Wn ? t_new + i : 0;
-    \\    ar[12 + i] = i < Wn ? t_new + i + 1 : 0;
-    \\    ar[24 + i] = i < W ? t_old + i : 0;
-    \\    ar[32 + i] = i < W ? t_old + i + 1 : 0;
+    \\    ar[20 + i] = i < Wn ? t_new + i + 1 : 0;
+    \\    ar[40 + i] = i < W ? t_old + i : 0;
+    \\    ar[56 + i] = i < W ? t_old + i + 1 : 0;
     \\  }
-    \\  ar[20] = t_new; ar[21] = cap; ar[22] = Wn;
-    \\  ar[40] = t_old; ar[41] = cap; ar[42] = W;
+    \\  ar[36] = t_new; ar[37] = cap; ar[38] = Wn;
+    \\  ar[72] = t_old; ar[73] = cap; ar[74] = W;
     \\  for (int j = 1; j < Wn - 1; j++) {
-    \\    const int b = 44 + (j - 1) * 20;
-    \\    for (int i = 0; i < 8; i++) { ar[b + i] = 0; ar[b + 8 + i] = 0; }
-    \\    ar[b] = t_new + j - 1; ar[b + 8] = t_new + j;
-    \\    ar[b + 16] = t_new + j - 1; ar[b + 17] = cap; ar[b + 18] = 1;
+    \\    const int b = 76 + (j - 1) * 36;
+    \\    for (int i = 0; i < 16; i++) { ar[b + i] = 0; ar[b + 16 + i] = 0; }
+    \\    ar[b] = t_new + j - 1; ar[b + 16] = t_new + j;
+    \\    ar[b + 32] = t_new + j - 1; ar[b + 33] = cap; ar[b + 34] = 1;
     \\  }
     \\  wids[0] = picks[keep - 1];
+    \\}
+    \\// Copy drafts: the latest earlier occurrence of the longest suffix (cfg.y .. 8 tokens) of the history H[0, L);
+    \\// when there is one and it is at least cfg.z long or the tokens after it start with the head's first cfg.w drafts,
+    \\// they replace the drafts wids[1 .. cfg.x) (as many as follow it); ar[801] = 1 then, else 0; ar[802] the match
+    \\// length. One threadgroup of 1024.
+    \\kernel void fz_lookup(device const uint* H [[buffer(0)]], device int* ar [[buffer(1)]], device uint* wids [[buffer(2)]],
+    \\    constant uint4& cfg [[buffer(3)]], uint t [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    \\    uint sg [[simdgroup_index_in_threadgroup]]) {
+    \\  const int L = ar[800], W = int(cfg.x), MINN = int(cfg.y), LONGN = int(cfg.z), AGREE = int(cfg.w);
+    \\  const uint last = H[L - 1];
+    \\  uint best = 0;
+    \\  for (int p = int(t); p < L - 1; p += 1024) {
+    \\    if (H[p] != last) continue;
+    \\    int n = 1;
+    \\    while (n < 8 && p - n >= 0 && H[p - n] == H[L - 1 - n]) n++;
+    \\    best = max(best, (uint(n) << 24) | uint(p + 1));
+    \\  }
+    \\  best = simd_max(best);
+    \\  threadgroup uint part[32];
+    \\  if (lane == 0) part[sg] = best;
+    \\  threadgroup_barrier(mem_flags::mem_threadgroup);
+    \\  if (t != 0) return;
+    \\  for (int i = 0; i < 32; i++) best = max(best, part[i]);
+    \\  const int n = int(best >> 24), p = int(best & 0xffffffu) - 1;
+    \\  ar[801] = 0;
+    \\  ar[802] = n;
+    \\  if (n < MINN || p < 0) return;
+    \\  if (n < LONGN)
+    \\    for (int i = 0; i < AGREE && i < W - 1; i++) if (p + 1 + i >= L || H[p + 1 + i] != wids[1 + i]) return;
+    \\  const int k = min(W - 1, L - 1 - p);
+    \\  for (int i = 0; i < k; i++) wids[1 + i] = H[p + 1 + i];
+    \\  ar[801] = 1;
     \\}
     \\// An expert row from [part][group][6 words] to [group][part][6 words] (FZ_XPACK): the lanes of one group read
     \\// one block; the sums keep their order. d = (parts, groups a part).
@@ -738,6 +779,7 @@ pub const Run = struct {
     pleids_pipe: mtl.Pipeline = undefined,
     copy_pipe: mtl.Pipeline = undefined,
     accept_pipe: mtl.Pipeline = undefined,
+    lookup_pipe: mtl.Pipeline = undefined,
     gpu_round: bool = false,
     ar: Buf = undefined,
     probe: ?Buf = null,
@@ -871,6 +913,7 @@ pub const Run = struct {
         r.pleids_pipe = try mtl.Pipeline.init(r.device, glue, "fz_ple_ids", false);
         r.copy_pipe = try mtl.Pipeline.init(r.device, glue, "fz_copy_kept", false);
         r.accept_pipe = try mtl.Pipeline.init(r.device, glue, "fz_accept", false);
+        r.lookup_pipe = try mtl.Pipeline.init(r.device, glue, "fz_lookup", false);
         r.repack_w = try mtl.Pipeline.init(r.device, glue, "fz_repack_w", false);
         r.repack_s = try mtl.Pipeline.init(r.device, glue, "fz_repack_s", false);
         r.touch_pipe = try mtl.Pipeline.init(r.device, glue, "fz_touch", false);
@@ -1132,6 +1175,20 @@ pub const Run = struct {
 
 /// Past 512 complete 4-key blocks the attention reads each row's 512 best blocks and its tail: the recorded pool,
 /// scores and selection kernels (dispatched at any context), with per-row metadata from the host.
+/// GPU-side rounds: a ring entry's words (keep, source, match length, up to 17 tokens), the arena's history length.
+pub const RING_WORDS = 20;
+pub const AR_HLEN = 800;
+/// The arena's words, and where its metadata blocks start.
+pub const AR_WORDS = 1024;
+pub const AR_POS = 4;
+pub const AR_NK = 20;
+pub const AR_KV = 36;
+pub const AR_ABS_POS = 40;
+pub const AR_ABS_NK = 56;
+pub const AR_ABS_KV = 72;
+pub const AR_CHAIN = 76;
+pub const AR_CHAIN_STRIDE = 36;
+
 pub const TOP = 512;
 pub const KW = 4 * TOP + 3;
 pub const Select = struct {
@@ -1244,8 +1301,11 @@ pub const Select = struct {
 
 /// Block selection in GPU-side rounds: fz_sel_meta writes each round's rows, pooling range and pooled count; the pool
 /// runs at absolute blocks (up to 3 a round); scores cover an upper bound of the pooled blocks the host keeps.
+/// fz_sel_meta's layout: complete, ends, counts, sparse (MAXR each), then start, count, pooled.
+pub const SEL_POOLED = 4 * MAXR + 2;
+
 pub const GSelect = struct {
-    sel: Buf, // complete[8] ends[8] counts[8] sparse[8] start count pooled
+    sel: Buf, // complete[16] ends[16] counts[16] sparse[16] start count pooled
     sc: Buf,
     keys: Buf,
     pooled_shape: mtl.Buffer,
@@ -1256,11 +1316,11 @@ pub const GSelect = struct {
 
     pub fn init(r: *Run, pooled: usize) !GSelect {
         var g: GSelect = .{
-            .sel = .{ .b = try r.buffer(64 * 4) }, .sc = .{ .b = try r.buffer(MAXR * (CAP / 4) * 4) },
+            .sel = .{ .b = try r.buffer(128 * 4) }, .sc = .{ .b = try r.buffer(MAXR * (CAP / 4) * 4) },
             .keys = .{ .b = try r.buffer(MAXR * KW * 4) }, .pooled_shape = try r.buffer(16), .q_shape = undefined,
             .sc_shape = try r.buffer(16), .ids_shape = undefined,
         };
-        g.sel.b.slice(i32, 64)[34] = @intCast(pooled);
+        g.sel.b.slice(i32, 128)[SEL_POOLED] = @intCast(pooled);
         for (0..MAXR + 1) |w| {
             g.q_shape[w] = (try i32Buf(r, &.{ @intCast(w), 4, 128 })).b;
             g.ids_shape[w] = (try i32Buf(r, &.{ @intCast(w), KW })).b;
@@ -1427,7 +1487,7 @@ pub const Mtp = struct {
     pick: Buf,
     md1: Buf,
     n_ids: Buf,
-    slots: [16]Slot,
+    slots: [2 * MAXR]Slot, // 0: host calls; GPU-side rounds: chained draft j at j, an absorb of n rows at MAXR - 1 + n
     mixsel: Buf = undefined,
     hsel: Buf = undefined,
     last: Buf = undefined, // the last call's output streams, row by row
@@ -1518,9 +1578,9 @@ pub const Model = struct {
         const t = &m.t;
         t.rows.b.slice(i32, 1)[0] = @intCast(rows);
         t.mdims.b.slice(i32, 2)[0] = @intCast(rows);
-        const pos8 = t.pos8.b.slice(i32, 8);
-        const nk8 = t.nk8.b.slice(i32, 8);
-        for (0..8) |i| {
+        const pos8 = t.pos8.b.slice(i32, MAXR);
+        const nk8 = t.nk8.b.slice(i32, MAXR);
+        for (0..MAXR) |i| {
             pos8[i] = if (i < rows) @intCast(m.pos + i) else 0;
             nk8[i] = if (i < rows) @intCast(m.pos + i + 1) else 0;
         }
@@ -1534,8 +1594,8 @@ pub const Model = struct {
         const t = &m.t;
         const rows = tokens.len;
         m.windowMeta(rows);
-        const ids = t.ids8.b.slice(u32, 8);
-        for (0..8) |i| ids[i] = if (i < rows) tokens[i] else 0;
+        const ids = t.ids8.b.slice(u32, MAXR);
+        for (0..MAXR) |i| ids[i] = if (i < rows) tokens[i] else 0;
         m.pleIds(tokens);
         const cb = r.queue.commandBuffer();
         r.enc = cb.compute(if (r.serial) .serial else .concurrent);
@@ -1652,12 +1712,12 @@ pub const Model = struct {
                     try r.bindV(sl.scores, &.{ t.iq, L.pooled, g.view(0) }, &.{g.sc});
                     r.enc.dispatchThreads(mtl.Size.of(((g.nb_ub + 7) / 8) * 256, (rows + 7) / 8, 1), mtl.Size.of(256, 1, 1));
                     if (!r.serial) r.enc.barrier();
-                    try r.bindV(sl.select, &.{ g.sc, g.view(0), g.view(8) }, &.{g.keys});
+                    try r.bindV(sl.select, &.{ g.sc, g.view(0), g.view(MAXR) }, &.{g.keys});
                     r.enc.dispatchThreads(mtl.Size.of(1024 * rows, 1, 1), mtl.Size.of(1024, 1, 1));
                     if (!r.serial) r.enc.barrier();
                     const dense_ids = r.shapes.get("IDS_shape").?;
                     try r.shapes.put(r.arena, "IDS_shape", g.ids_shape[rows]);
-                    try r.call("q4_attn_parts#[24, 256]", &.{ t.q, L.keys, L.vals, g.keys, g.view(16), g.view(24), t.scale }, &.{ t.po, t.pm });
+                    try r.call("q4_attn_parts#[24, 256]", &.{ t.q, L.keys, L.vals, g.keys, g.view(2 * MAXR), g.view(3 * MAXR), t.scale }, &.{ t.po, t.pm });
                     try r.shapes.put(r.arena, "IDS_shape", dense_ids);
                 } else if (r.sel != null and !r.gpu_round and r.sel.?.meta(m.pos, rows)) {
                     var sl = &r.sel.?;
@@ -1701,8 +1761,8 @@ pub const Model = struct {
         h.pos -= h.drafted;
         h.drafted = 0;
         h.pooled_n = @min(h.pooled_n, h.pos / 4); // blocks dropped rows completed are pooled again
-        const ids = h.slots[0].ids8.b.slice(u32, 8);
-        for (0..8) |i| ids[i] = if (i < rows) nexts[i] else 0;
+        const ids = h.slots[0].ids8.b.slice(u32, MAXR);
+        for (0..MAXR) |i| ids[i] = if (i < rows) nexts[i] else 0;
         const cb = r.queue.commandBuffer();
         r.enc = cb.compute(if (r.serial) .serial else .concurrent);
         try m.mtpEncode(0, rows, h.slots[0].ids8, streams, h.pick);
@@ -1727,9 +1787,9 @@ pub const Model = struct {
         sl.md.b.slice(i32, 2)[0] = @intCast(rows);
         sl.md4.b.slice(i32, 2)[0] = @intCast(4 * rows);
         sl.md4.b.slice(i32, 2)[1] = @intCast(16 * ((4 * rows + 15) / 16)); // rows padded to whole 16-row tiles
-        const pos8 = sl.pos8.b.slice(i32, 8);
-        const nk8 = sl.nk8.b.slice(i32, 8);
-        for (0..8) |i| {
+        const pos8 = sl.pos8.b.slice(i32, MAXR);
+        const nk8 = sl.nk8.b.slice(i32, MAXR);
+        for (0..MAXR) |i| {
             pos8[i] = if (i < rows) @intCast(h.pos + i) else 0;
             nk8[i] = if (i < rows) @intCast(h.pos + i + 1) else 0;
         }
@@ -1787,12 +1847,12 @@ pub const Model = struct {
             try r.bindV(ss.scores, &.{ t.iq, h.pooled, g.view(0) }, &.{g.sc});
             r.enc.dispatchThreads(mtl.Size.of(((g.nb_ub + 7) / 8) * 256, (rows + 7) / 8, 1), mtl.Size.of(256, 1, 1));
             if (!r.serial) r.enc.barrier();
-            try r.bindV(ss.select, &.{ g.sc, g.view(0), g.view(8) }, &.{g.keys});
+            try r.bindV(ss.select, &.{ g.sc, g.view(0), g.view(MAXR) }, &.{g.keys});
             r.enc.dispatchThreads(mtl.Size.of(1024 * rows, 1, 1), mtl.Size.of(1024, 1, 1));
             if (!r.serial) r.enc.barrier();
             const dense_ids = r.shapes.get("IDS_shape").?;
             try r.shapes.put(r.arena, "IDS_shape", g.ids_shape[rows]);
-            try r.call("mtp:q4_attn_parts#[24, 256]", &.{ t.q, h.keys, h.vals, g.keys, g.view(16), g.view(24), t.scale }, &.{ t.po, t.pm });
+            try r.call("mtp:q4_attn_parts#[24, 256]", &.{ t.q, h.keys, h.vals, g.keys, g.view(2 * MAXR), g.view(3 * MAXR), t.scale }, &.{ t.po, t.pm });
             try r.shapes.put(r.arena, "IDS_shape", dense_ids);
         } else if (r.sel != null and !r.gpu_round and r.sel.?.meta(h.pos, rows)) { // one call a command buffer
             var ss = &r.sel.?;
@@ -1870,7 +1930,8 @@ pub const Model = struct {
     }
 };
 
-/// Drafts a round from recent landing: 6 while drafts land (code-like text), 3 otherwise (prose).
+/// Drafts a round from recent landing: 3 (prose), 6 while drafts land (code-like text), the widest window while
+/// nearly all land (copied text).
 pub const DepthRule = struct {
     rate: f64 = 0.6, // moving average of drafts landed over drafts offered
     depth: usize = 3,
@@ -1882,6 +1943,8 @@ pub const DepthRule = struct {
     pub fn update(self: *DepthRule, depth: usize, landed: usize) void {
         self.rate = 0.7 * self.rate + 0.3 * @as(f64, @floatFromInt(landed)) / @as(f64, @floatFromInt(depth));
         if (self.depth == 3 and self.rate > 0.8) self.depth = 6;
+        if (self.depth == 6 and self.rate > 0.92) self.depth = MAXR - 1;
+        if (self.depth == MAXR - 1 and self.rate < 0.85) self.depth = 6;
         if (self.depth == 6 and self.rate < 0.65) self.depth = 3;
     }
 };
@@ -1915,11 +1978,15 @@ pub const Prompt = struct {
     qmm6: mtl.Pipeline,
     gather64: mtl.Pipeline,
     gather32: mtl.Pipeline,
+    qmm6_128: mtl.Pipeline,
+    gather128: mtl.Pipeline,
+    tall_tiles: bool = true, // 128-row tiles (a dequantized weight block serves twice the rows; the same sums)
     router_mm: mtl.Pipeline,
     attn256: mtl.Pipeline,
     splitk: mtl.Pipeline,
     parts_sum: mtl.Pipeline,
-    pl: [14]mtl.Pipeline, // normed, act, mix, router, route, offsets, sort, gather rows, act2, scatter, copy, DeltaNet pre/scan/post
+    pl: [15]mtl.Pipeline, // normed, act, mix, router, route, offsets, sort, gather rows, act2, scatter, copy, DeltaNet pre/scan/post, scan4
+    scan4: bool = true, // the DeltaNet recurrence with four state rows a simdgroup and both reductions at once
     gdn: Variant,
     gdn_grid: mtl.Size,
     gdn_tg: mtl.Size,
@@ -1941,6 +2008,8 @@ pub const Prompt = struct {
         p.sel = null;
         p.step = PMAX;
         p.fast_attn = true;
+        p.scan4 = true;
+        p.tall_tiles = true;
         const asrc = try std.mem.replaceOwned(u8, r.arena, ks.flashnext_attn, "#include \"../nax.h\"", ks.nax);
         const alib = try mtl.Library.fromSource(r.device, asrc, mtl.CompileOptions.mlx());
         p.sattn = try mtl.Pipeline.init(r.device, alib, "tf_sattn_nax", false);
@@ -1950,12 +2019,14 @@ pub const Prompt = struct {
         p.qmm6 = try mtl.Pipeline.init(r.device, qlib, "tf_qmm6_t_nax", false);
         p.gather64 = try mtl.Pipeline.init(r.device, qlib, "tf_gather_qmm6_nax_64", false);
         p.gather32 = try mtl.Pipeline.init(r.device, qlib, "tf_gather_qmm6_nax_32", false);
+        p.qmm6_128 = try mtl.Pipeline.init(r.device, qlib, "tf_qmm6_t_nax_128", false);
+        p.gather128 = try mtl.Pipeline.init(r.device, qlib, "tf_gather_qmm6_nax_128", false);
         p.router_mm = try mtl.Pipeline.init(r.device, qlib, "tf_mm_bf16_f32_t_nax", false);
         p.attn256 = try mtl.Pipeline.init(r.device, qlib, "tf_attn256_nax", false);
         p.splitk = try mtl.Pipeline.init(r.device, qlib, "tf_qmm6_splitk_nax", false);
         p.parts_sum = try mtl.Pipeline.init(r.device, qlib, "tf_parts_sum", false);
         const glib = try mtl.Library.fromSource(r.device, try std.mem.concat(r.arena, u8, &.{ header, ks.flashnext_prompt }), mtl.CompileOptions.mlx());
-        const names = [_][:0]const u8{ "pf_hc_normed", "pf_hc_act", "pf_hc_mix", "pf_router", "pf_route", "pf_offsets", "pf_sort", "pf_gather_rows", "pf_act", "pf_scatter_y", "pf_copy", "pf_gdn_pre", "pf_gdn_scan", "pf_gdn_post" };
+        const names = [_][:0]const u8{ "pf_hc_normed", "pf_hc_act", "pf_hc_mix", "pf_router", "pf_route", "pf_offsets", "pf_sort", "pf_gather_rows", "pf_act", "pf_scatter_y", "pf_copy", "pf_gdn_pre", "pf_gdn_scan", "pf_gdn_post", "pf_gdn_scan4" };
         for (names, 0..) |n, i| p.pl[i] = try mtl.Pipeline.init(r.device, glib, n, false);
         // DeltaNet at the chunk's rows, storing only the last row's recurrent state (in row 0)
         const gs = r.roles.get("q4_gdn@gdn|8") orelse return error.NoSite;
@@ -2022,23 +2093,26 @@ pub const Prompt = struct {
     /// y[rows, n] (row stride ldy, 0: n) = x[rows, k] W^T, W 6-bit g32 in MLX's layout.
     pub fn qmm(p: *Prompt, x: Buf, w: [3]Buf, k: usize, n: usize, rows: usize, y: Buf, ldy: usize) void {
         if (p.skip & 8 != 0) return;
-        p.bind(p.qmm6, &.{ w[0], w[1], w[2], x });
+        const tall = p.tall_tiles and rows >= 512;
+        p.bind(if (tall) p.qmm6_128 else p.qmm6, &.{ w[0], w[1], w[2], x });
         const prm = [4]i32{ @intCast(k), @intCast(n), @intCast(rows), @intCast(ldy) };
         p.r.enc.setBytes(std.mem.asBytes(&prm), 4);
         p.r.enc.setBuffer(y.b, y.off, 5);
-        p.r.enc.dispatchThreads(mtl.Size.of(((n + 63) / 64) * 128, (rows + 63) / 64, 1), mtl.Size.of(128, 1, 1));
+        const bm: usize = if (tall) 128 else 64;
+        p.r.enc.dispatchThreads(mtl.Size.of(((n + 63) / 64) * 128, (rows + bm - 1) / bm, 1), mtl.Size.of(128, 1, 1));
         p.barrier();
     }
 
     /// y[pairs, n] = x[slot] W_e^T over the sorted slots, the experts' first slots in b.off.
     pub fn gather(p: *Prompt, x: Buf, w: []const Buf, k: usize, n: usize, pairs: usize, y: Buf) void {
         if (p.skip & 1 != 0) return;
-        const tall = pairs >= 512 * 32; // 64-row tiles once experts average 32 rows
-        p.bind(if (tall) p.gather64 else p.gather32, &.{ x, w[0], w[1], w[2], p.b.off });
+        // tiles of 32, 64 or 128 rows as experts average 32 and 128 rows (128: FZ prompt chunks of thousands of rows)
+        const bm: usize = if (p.tall_tiles and pairs >= 512 * 128) 128 else if (pairs >= 512 * 32) 64 else 32;
+        p.bind(if (bm == 128) p.gather128 else if (bm == 64) p.gather64 else p.gather32, &.{ x, w[0], w[1], w[2], p.b.off });
         const prm = [4]i32{ @intCast(pairs), @intCast(n), @intCast(k), 512 };
         p.r.enc.setBytes(std.mem.asBytes(&prm), 5);
         p.r.enc.setBuffer(y.b, y.off, 6);
-        p.r.enc.dispatchThreads(mtl.Size.of(((n + 63) / 64) * 128, pairs / (if (tall) @as(usize, 64) else 32) + 512, 1), mtl.Size.of(128, 1, 1));
+        p.r.enc.dispatchThreads(mtl.Size.of(((n + 63) / 64) * 128, pairs / bm + 512, 1), mtl.Size.of(128, 1, 1));
         p.barrier();
     }
 
@@ -2207,11 +2281,11 @@ pub const Prompt = struct {
                             for ([_]Buf{ b.qn, b.kn, b.v, b.gg, b.beta, L0.cs[1] }, 6..) |bb, j| r.enc.setBuffer(bb.b, bb.off, j);
                             r.enc.dispatchThreads(mtl.Size.of(80 * 128, rows, 1), mtl.Size.of(128, 1, 1));
                         } else if (which == 10) {
-                            p.bind(p.pl[12], &.{ b.qn, b.kn, b.v, b.gg, b.beta, L0.so[0] });
+                            p.bind(p.pl[if (p.scan4) 14 else 12], &.{ b.qn, b.kn, b.v, b.gg, b.beta, L0.so[0] });
                             r.enc.setBytes(std.mem.asBytes(&ri), 6);
                             r.enc.setBuffer(b.ys.b, b.ys.off, 7);
                             r.enc.setBuffer(L0.so[1].b, L0.so[1].off, 8);
-                            r.enc.dispatchThreads(mtl.Size.of(48 * 4 * 1024, 1, 1), mtl.Size.of(1024, 1, 1));
+                            if (p.scan4) r.enc.dispatchThreads(mtl.Size.of(48 * 4 * 256, 1, 1), mtl.Size.of(256, 1, 1)) else r.enc.dispatchThreads(mtl.Size.of(48 * 4 * 1024, 1, 1), mtl.Size.of(1024, 1, 1));
                         } else {
                             p.bind(p.pl[13], &.{ b.ys, b.p, L0.norm, m.t.eps, b.gout });
                             r.enc.dispatchThreads(mtl.Size.of(48 * 128, rows, 1), mtl.Size.of(128, 1, 1));
@@ -2336,11 +2410,11 @@ pub const Prompt = struct {
                     for ([_]Buf{ b.qn, b.kn, b.v, b.gg, b.beta, L.cs[1 - a] }, 6..) |bb, j| r.enc.setBuffer(bb.b, bb.off, j);
                     r.enc.dispatchThreads(mtl.Size.of(80 * 128, rows, 1), mtl.Size.of(128, 1, 1));
                     p.barrier();
-                    p.bind(p.pl[12], &.{ b.qn, b.kn, b.v, b.gg, b.beta, so_in });
+                    p.bind(p.pl[if (p.scan4) 14 else 12], &.{ b.qn, b.kn, b.v, b.gg, b.beta, so_in });
                     r.enc.setBytes(std.mem.asBytes(&ri), 6);
                     r.enc.setBuffer(b.ys.b, b.ys.off, 7);
                     r.enc.setBuffer(L.so[1 - a].b, L.so[1 - a].off, 8);
-                    r.enc.dispatchThreads(mtl.Size.of(48 * 4 * 1024, 1, 1), mtl.Size.of(1024, 1, 1));
+                    if (p.scan4) r.enc.dispatchThreads(mtl.Size.of(48 * 4 * 256, 1, 1), mtl.Size.of(256, 1, 1)) else r.enc.dispatchThreads(mtl.Size.of(48 * 4 * 1024, 1, 1), mtl.Size.of(1024, 1, 1));
                     p.barrier();
                     p.bind(p.pl[13], &.{ b.ys, b.p, L.norm, t.eps, b.gout });
                     r.enc.dispatchThreads(mtl.Size.of(48 * 128, rows, 1), mtl.Size.of(128, 1, 1));
