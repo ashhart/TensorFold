@@ -10,6 +10,7 @@ The rule the whole engine is built around: drafted output is byte-for-byte ident
 |---|---|---|
 | Nemotron 3.5 Lightning 30B-A3B, MLX 4-bit + MTP head ([TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit](https://huggingface.co/TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit)) | Metal, Apple M5 | Served through the OpenAI-compatible server. Exact against the Python engine on the same chip. Measured below. |
 | Nemotron 3.5 Lightning 30B-A3B | CUDA, NVIDIA GB10 (DGX Spark) | `tensorfold run` from the command line. Token-identical to the Python engine on 16 of 16 runs. Speed about level with the Python engine. Not wired into the server yet. |
+| Qwen3.5-2B, pinned MLX affine 4-bit/group-64 checkpoint | Metal, Apple M5 Max | Text generation through the native server and lane core, with shared tied embeddings. [Recipe, scope and verification](docs/recipes/qwen3.5-2b-native.md). M1–M4 untested for this model. |
 | Kimi K3 | Metal, several Macs over Thunderbolt | Research code for multi-Mac tensor parallelism (`zig/src/families/kimi_k3`, `zig/src/cluster`). Not ready for testing. |
 
 ## Speed so far
@@ -61,7 +62,7 @@ Then point any OpenAI-compatible client at `http://127.0.0.1:8090/v1`. Add `--pa
 - No prompt reuse between turns yet. Each turn of a long chat reads the whole conversation again.
 - Not exact on M1 to M4 yet. On chips without tensor units, drafted output can differ from plain output, so use an M5 for now. The dense projections and routed experts are already proven row-exact there. The open suspects are the attention kernels sized per window, the Mamba tree conv/scan, and the norms.
 - A forward holds at most 32 rows.
-- Nemotron 3.5 Lightning is the only model served.
+- The native server serves Nemotron 3.5 Lightning and the Qwen3.5-2B checkpoint in its recipe.
 
 ## Where the work goes next, and where you can help
 

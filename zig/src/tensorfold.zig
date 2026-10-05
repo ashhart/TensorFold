@@ -12,4 +12,5 @@ test {
     std.testing.refAllDecls(@This());
     _ = @import("families/nemotron/prefill_kernels.zig"); // its sources compile at this macOS's Metal language
     _ = @import("families/qwen3_5/config.zig");
+    _ = @import("families/qwen3_5/backend.zig");
 }

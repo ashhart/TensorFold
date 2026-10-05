@@ -174,7 +174,7 @@ pub fn draw(gpa: std.mem.Allocator, logits: []const u16, settings: ?lanes.Sampli
     var filled: usize = 0;
     for (logits, 0..) |word, id| {
         const x = value(word);
-        if (sampling.top_k == 0) {
+        if (k == logits.len) {
             values[id] = x;
             ids[id] = id;
             continue;
@@ -190,4 +190,30 @@ pub fn draw(gpa: std.mem.Allocator, logits: []const u16, settings: ?lanes.Sampli
         filled = @min(filled + 1, k);
     }
     return @intCast(try lanes.sampling.choose(gpa, values, ids, position, sampling));
+}
+
+test "candidate selection preserves full-vocabulary keyed draws and tie order" {
+    const gpa = std.testing.allocator;
+    const words = try gpa.alloc(u16, c.vocab);
+    defer gpa.free(words);
+    const values = try gpa.alloc(f64, c.vocab);
+    defer gpa.free(values);
+    const ids = try gpa.alloc(u64, c.vocab);
+    defer gpa.free(ids);
+    for (words, values, ids, 0..) |*w, *v, *id, i| {
+        const x: f32 = @as(f32, @floatFromInt((i * 37) % 257)) / 8.0 - 16.0;
+        w.* = @intCast(@as(u32, @bitCast(x)) >> 16);
+        v.* = value(w.*);
+        id.* = i;
+    }
+    for ([_]u32{ 0, 1, 20, 257, c.vocab }) |k| {
+        for ([_]u64{ 0, 128, 65536 }) |position| {
+            const s: lanes.Sampling = .{ .seed = 1234, .top_k = k, .temperature = 0.7, .top_p = 0.95, .min_p = 0.1 };
+            const want = try lanes.sampling.choose(gpa, values, ids, position, s);
+            try std.testing.expectEqual(want, try draw(gpa, words, s, position));
+        }
+    }
+    try std.testing.expectEqual(try draw(gpa, words, null, 0), try draw(gpa, words, .{ .seed = 7, .temperature = 0 }, 99));
+    words[0] = 0x7fc0;
+    try std.testing.expectError(error.NonfiniteQwenLogits, draw(gpa, words, null, 0));
 }

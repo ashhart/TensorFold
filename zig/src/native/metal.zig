@@ -1,4 +1,4 @@
-//! The engines a native server opens on Metal: Nemotron 4-bit (MLX affine, groups of 64) on the lane core.
+//! The engines a native server opens on Metal: Nemotron and Qwen3.5-2B on the lane core.
 const std = @import("std");
 const mtl = @import("metal");
 const api = @import("engine_api");
