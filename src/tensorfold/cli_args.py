@@ -82,6 +82,12 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
     speed.add_argument("--mtp-confidence", type=float, default=None,
                        help="on CUDA, stop an MTP chain before a later draft under this probability "
                             "(Flash Next default 0.70; Nemotron: by the row costs it measures at start)")
+    speed.add_argument("--draft-vocab", default=None,
+                       help="Qwen3.8 Flash Next on CUDA: the MTP draft head's scored token ids -- 'default' "
+                            "(the shipped English/code list), 'cjk' (the shipped list extended to every "
+                            "CJK id), a file of ids, or N (every id below N); a language outside the list "
+                            "cannot be drafted at all, so a workload whose text is not English needs a list "
+                            "that covers it (tools/draft_vocab_extend.py builds one off any tokenizer)")
     speed.add_argument("--lane-kernels", choices=("auto", "on", "off"), default="auto",
                        help="lane kernels for Qwen3.8 dense (auto: on GPUs with tensor units)")
     speed.add_argument("--prompt-cache-gib", type=float, default=None,

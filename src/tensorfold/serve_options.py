@@ -64,6 +64,7 @@ def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any =
     if getattr(args, "prefill_fp8", None) and not fp8:              # asked for by name, not a default
         raise ValueError(f"--prefill-fp8 picks FP8 prompt kernels on CUDA; {family.title} on "
                          f"{'CUDA' if backend == 'cuda' else 'MLX'} has none (its prompts run bf16 activations)")
+    _draft_vocab(args, family, backend)
     confidence = getattr(args, "mtp_confidence", None)
     if confidence is None:
         return
@@ -73,6 +74,22 @@ def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any =
                          f"{'CUDA' if backend == 'cuda' else 'MLX'} has no such rule")
     if not 0.0 <= confidence <= 1.0:
         raise ValueError(f"--mtp-confidence is a probability from 0 to 1, not {confidence}")
+
+
+def _draft_vocab(args: Any, family: Any, backend: str) -> None:
+    """``--draft-vocab``: refuse it on an engine that has no such list, and name a missing file early."""
+
+    value = getattr(args, "draft_vocab", None)
+    if value is None:
+        return
+    engine = getattr(family.package, "cuda_engine", None) if backend == "cuda" else None
+    if engine is None or "draft_vocab" not in inspect.signature(engine).parameters:
+        raise ValueError(f"--draft-vocab sets a CUDA engine's MTP draft ids; {family.title} on "
+                         f"{'CUDA' if backend == 'cuda' else 'MLX'} has no such list")
+    if isinstance(value, str) and value not in ("default", "cjk") and not value.isdigit():
+        from pathlib import Path as _Path
+        if not _Path(value).is_file():
+            raise ValueError(f"--draft-vocab {value!r} is not a file, 'default', 'cjk', or a count of ids")
 
 
 def _cuda_streams(value: Any) -> int:

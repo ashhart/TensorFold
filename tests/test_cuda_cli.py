@@ -400,3 +400,32 @@ def test_vision_offload_is_a_cuda_option_that_needs_vision(tmp_path, flags, back
     family = SimpleNamespace(title=qwen3_5.TITLE, package=qwen3_5, model_type="qwen3_5")
     with pytest.raises(ValueError, match=message):
         cli._check_serve_options(args, family, backend)
+
+
+def test_the_draft_vocab_flag_parses_and_reaches_the_families_that_declare_it():
+    args = cli.build_parser().parse_args(["serve", "owner/model", "--draft-vocab", "cjk"])
+    assert args.draft_vocab == "cjk"
+
+
+@pytest.mark.parametrize("value,declares,message", [
+    ("cjk", False, "has no such list"),
+    ("default", False, "has no such list"),
+    ("missing.txt", True, "is not a file"),
+    ("200000", True, None),
+    ("default", True, None),
+    ("cjk", True, None),
+])
+def test_draft_vocab_is_checked_before_anything_loads(tmp_path, value, declares, message):
+    from tensorfold.families import qwen4_exp
+
+    engine = (lambda *a, draft_vocab=None, **k: None) if declares else (lambda *a, **k: None)
+    family = SimpleNamespace(title=qwen4_exp.TITLE, package=SimpleNamespace(cuda_engine=engine,
+                                                                           load=lambda *a, **k: None))
+    args = cli.build_parser().parse_args(["serve", str(tmp_path), "--draft-vocab",
+                                          str(tmp_path / value) if value.endswith(".txt") else value])
+    if message is None:
+        assert cli._check_serve_options(args, family, "cuda") is None
+    else:
+        with pytest.raises(ValueError, match=message):
+            cli._check_serve_options(args, family, "cuda")
+

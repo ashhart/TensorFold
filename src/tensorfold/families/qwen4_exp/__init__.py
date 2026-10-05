@@ -169,7 +169,8 @@ CUDA_PREFILL_FP8 = True            # --prefill-fp8: an NVFP4 checkpoint's MXFP8 
 
 def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",
                 master_port: int = 29551, no_drafts: bool = False, mtp_drafts: int | None = None,
-                mtp_confidence: float | None = None, context: int | None = None, ple_on_ssd: bool = False,
+                mtp_confidence: float | None = None, draft_vocab: str | int | None = None,
+                context: int | None = None, ple_on_ssd: bool = False,
                 kv_dtype: str = "bf16", decode_share: float | None = None, **options: Any):
     """Verify MTP on one or two CUDA GPUs; start rank 1 first for ``tp=2``, with bf16, int8 or int4 KV storage."""
 
@@ -194,7 +195,8 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
                          "has one): without it every round would decode one token. Serve a checkpoint with the "
                          "head, or pass --no-drafts for the serial reference")
     confidence = CONFIDENCE if mtp_confidence is None else float(mtp_confidence)
-    return FlashNextEngine(Path(model_dir), depth=depth, confidence=confidence, max_len=context,
+    return FlashNextEngine(Path(model_dir), depth=depth, confidence=confidence,
+                           draft_vocab=draft_vocab if depth else None, max_len=context,
                            context_explicit=options.get("context_explicit"), tp=int(tp), rank=int(rank),
                            master=master, port=int(master_port), streams=max(1, int(options.get("parallel") or 1)),
                            ple_on_ssd=ple_on_ssd, kv_dtype=kv_dtype,
