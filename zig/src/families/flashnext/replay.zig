@@ -1149,6 +1149,7 @@ pub const Select = struct {
     q_shape: mtl.Buffer,
     sc_shape: mtl.Buffer,
     ids_shape: mtl.Buffer,
+    nax_scores: ?mtl.Pipeline = null, // prompt rows: the block scores on the tensor units
 
     pub fn init(r: *Run, rows_max: usize) !?Select {
         var found: [3]?*Variant = .{ null, null, null };
@@ -1221,8 +1222,18 @@ pub const Select = struct {
         try r.shapes.put(r.arena, "POOLED_shape", s.pooled_shape);
         try r.shapes.put(r.arena, "Q_shape", s.q_shape);
         try r.shapes.put(r.arena, "SC_shape", s.sc_shape);
-        try r.bindV(s.scores, &.{ iq, L.pooled, s.complete }, &.{s.sc});
-        r.enc.dispatchThreads(mtl.Size.of(((nb + 7) / 8) * 256, (rows + 7) / 8, 1), mtl.Size.of(256, 1, 1));
+        if (s.nax_scores) |pipe| {
+            r.enc.setPipeline(pipe);
+            r.enc.setBuffer(iq.b, iq.off, 0);
+            r.enc.setBuffer(L.pooled.b, L.pooled.off, 1);
+            const prm = [2]i32{ @intCast(rows), @intCast(nb) };
+            r.enc.setBytes(std.mem.asBytes(&prm), 2);
+            r.enc.setBuffer(s.sc.b, s.sc.off, 3);
+            r.enc.dispatchThreads(mtl.Size.of(((nb + 63) / 64) * 128, (rows + 31) / 32, 1), mtl.Size.of(128, 1, 1));
+        } else {
+            try r.bindV(s.scores, &.{ iq, L.pooled, s.complete }, &.{s.sc});
+            r.enc.dispatchThreads(mtl.Size.of(((nb + 7) / 8) * 256, (rows + 7) / 8, 1), mtl.Size.of(256, 1, 1));
+        }
         if (!r.serial) r.enc.barrier();
         try r.bindV(s.select, &.{ s.sc, s.complete, s.ends }, &.{s.keys});
         r.enc.dispatchThreads(mtl.Size.of(1024 * rows, 1, 1), mtl.Size.of(1024, 1, 1));
@@ -1898,7 +1909,7 @@ pub fn copyDrafts(hist: []const u32, min: usize, out: []u32) usize {
 
 /// Prompt chunks of up to PMAX rows: projections on the 6-bit tensor-unit kernels, experts sorted by expert and
 /// gathered, the decode's row kernels at the chunk's rows, and DeltaNet storing only its last row's state.
-pub const PMAX = 2048;
+pub const PMAX = 8192; // the prompt buffers' rows; `step` cuts the chunks
 pub const Prompt = struct {
     r: *Run,
     qmm6: mtl.Pipeline,
@@ -1913,7 +1924,11 @@ pub const Prompt = struct {
     gdn_grid: mtl.Size,
     gdn_tg: mtl.Size,
     sel: ?Select = null, // long prompts: selection for the chunk's rows
-    skip: u32 = 0, // timing knock-outs: 1 experts, 2 DeltaNet, 4 attention, 8 projections, 16 hyper-connections, 32 routing, 64 router, 128 sort, 256 row moves, 512 shared expert
+    step: usize = PMAX, // rows a chunk
+    fast_attn: bool = true, // prompt rows' scores and attention on the tensor units (false: the decode's kernels)
+    sattn: mtl.Pipeline,
+    scores_nax: mtl.Pipeline,
+    skip: u32 = 0, // timing knock-outs: 1 experts, 2 DeltaNet, 4 attention, 8 projections, 16 hyper-connections, 32 routing, 64 router, 128 sort, 256 row moves, 512 shared expert, 1024 sparse attention
     proj: [LAYERS][3]Buf,
     out: [LAYERS][3]Buf,
     ple_kv: [3]Buf,
@@ -1924,6 +1939,12 @@ pub const Prompt = struct {
         p.r = r;
         p.skip = 0;
         p.sel = null;
+        p.step = PMAX;
+        p.fast_attn = true;
+        const asrc = try std.mem.replaceOwned(u8, r.arena, ks.flashnext_attn, "#include \"../nax.h\"", ks.nax);
+        const alib = try mtl.Library.fromSource(r.device, asrc, mtl.CompileOptions.mlx());
+        p.sattn = try mtl.Pipeline.init(r.device, alib, "tf_sattn_nax", false);
+        p.scores_nax = try mtl.Pipeline.init(r.device, alib, "tf_idx_scores_nax", false);
         const qsrc = try std.mem.replaceOwned(u8, r.arena, ks.flashnext_qmm6, "#include \"../nax.h\"", ks.nax);
         const qlib = try mtl.Library.fromSource(r.device, qsrc, mtl.CompileOptions.mlx());
         p.qmm6 = try mtl.Pipeline.init(r.device, qlib, "tf_qmm6_t_nax", false);
@@ -2333,7 +2354,22 @@ pub const Prompt = struct {
                 r.enc.dispatchThreads(mtl.Size.of(512 * rows, 1, 1), mtl.Size.of(256, 1, 1));
                 p.barrier();
                 const sparse = p.sel != null and p.sel.?.meta(m.pos, rows);
-                if (sparse) { // rows past the dense range: each row's selected blocks and tail (the decode's kernels)
+                if (sparse and p.skip & 1024 != 0) {
+                    // timing knock-out: no attention for chunks with rows past the dense range
+                } else if (p.fast_attn and p.sel != null and p.skip & 4 == 0) { // every row on the tensor units
+                    var sl = &p.sel.?;
+                    if (sparse) {
+                        sl.nax_scores = p.scores_nax;
+                        defer sl.nax_scores = null;
+                        try sl.encode(r, L, b.iq, t.eps, t.log2base, m.pos, rows);
+                    }
+                    p.bind(p.sattn, &.{ b.q, L.keys, L.vals, sl.keys, sl.counts, sl.sparse, b.p, t.scale });
+                    const cap: i32 = CAP;
+                    r.enc.setBytes(std.mem.asBytes(&cap), 8);
+                    r.enc.setBuffer(b.aout.b, b.aout.off, 9);
+                    r.enc.dispatchThreads(mtl.Size.of(rows * 128, 2, 1), mtl.Size.of(128, 1, 1));
+                    p.barrier();
+                } else if (sparse) { // rows past the dense range: each row's selected blocks and tail (the decode's kernels)
                     var sl = &p.sel.?;
                     try sl.encode(r, L, b.iq, t.eps, t.log2base, m.pos, rows);
                     const dense_ids = r.shapes.get("IDS_shape").?;

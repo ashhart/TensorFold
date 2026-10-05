@@ -63,6 +63,7 @@ pub fn main(init: std.process.Init) !void {
         var files: std.ArrayList(ks.File) = .empty;
         try files.appendSlice(gpa, &ks.prefill);
         try files.append(gpa, .{ .name = "qmm6_nax", .text = ks.flashnext_qmm6 });
+        try files.append(gpa, .{ .name = "fn_attn", .text = ks.flashnext_attn });
         for (files.items) |f| {
             const text = try std.mem.replaceOwned(u8, gpa, f.text, "#include \"../nax.h\"", ks.nax);
             defer gpa.free(text);
@@ -480,6 +481,49 @@ pub fn main(init: std.process.Init) !void {
         const toks = try gpa.alloc(u32, pr_items.len);
         defer gpa.free(toks);
         for (pr_items, 0..) |x, i| toks[i] = @intCast(x.integer);
+        if (std.c.getenv("FZ_SATTN_CHECK") != null) { // prompt attention: the decode's kernels vs the tensor units
+            var pr = try Prompt.init(&r, args[2], r.xnew_header);
+            if (std.c.getenv("FZ_STEP")) |v| pr.step = try std.fmt.parseInt(usize, std.mem.span(v), 10);
+            var outs: [2][48]u32 = undefined;
+            const logits: [2][]u16 = .{ try gpa.alloc(u16, VOCAB), try gpa.alloc(u16, VOCAB) };
+            var best: [2]f64 = .{ 1e9, 1e9 };
+            for (0..2) |arm| {
+                pr.fast_attn = arm == 1;
+                for (0..3) |run| {
+                    m.reset();
+                    const c0 = mtl.clock.seconds();
+                    var at: usize = 0;
+                    var first: u32 = 0;
+                    while (at < toks.len) {
+                        const n: usize = @min(pr.step, toks.len - at);
+                        first = try pr.chunk(m, gpa, toks[at .. at + n]);
+                        at += n;
+                    }
+                    best[arm] = @min(best[arm], mtl.clock.seconds() - c0);
+                    if (run > 0) continue;
+                    @memcpy(logits[arm], m.t.logits.b.slice(u16, VOCAB));
+                    var pk: [MAXR]u32 = undefined;
+                    outs[arm][0] = first;
+                    for (1..48) |k| {
+                        try m.window(&.{outs[arm][k - 1]}, &pk);
+                        m.keepRows(&.{outs[arm][k - 1]}, 1);
+                        outs[arm][k] = pk[0];
+                    }
+                }
+            }
+            var worst: f64 = 0;
+            for (logits[0], logits[1]) |x, y| {
+                const fx: f64 = @floatCast(@as(f32, @bitCast(@as(u32, x) << 16)));
+                const fy: f64 = @floatCast(@as(f32, @bitCast(@as(u32, y) << 16)));
+                worst = @max(worst, @abs(fx - fy));
+            }
+            var same: usize = 0;
+            while (same < 48 and outs[0][same] == outs[1][same]) same += 1;
+            std.debug.print("prompt {d} tokens, chunks of {d}: decode kernels {d:.3} s ({d:.0} tok/s), tensor units {d:.3} s ({d:.0} tok/s)\n", .{ toks.len, pr.step, best[0], @as(f64, @floatFromInt(toks.len)) / best[0], best[1], @as(f64, @floatFromInt(toks.len)) / best[1] });
+            std.debug.print("first token {d} vs {d}; last-row logits max diff {d:.4}; 48 decoded after each: {d} equal\n", .{ outs[0][0], outs[1][0], worst, same });
+            std.debug.print("  old {any}\n  new {any}\n", .{ outs[0][0..16], outs[1][0..16] });
+            return;
+        }
         var pk: [MAXR]u32 = undefined;
         const n_dec: usize = 48;
         // the reference: windows of up to 8 rows (each row's bits equal a one-row step); FZ_PF_REF=n stops it after n
@@ -523,12 +567,13 @@ pub fn main(init: std.process.Init) !void {
         }
         // the prompt path
         var pr = try Prompt.init(&r, args[2], r.xnew_header);
+        if (std.c.getenv("FZ_STEP")) |v| pr.step = try std.fmt.parseInt(usize, std.mem.span(v), 10);
         m.reset();
         const b0 = mtl.clock.seconds();
         var first: u32 = 0;
         at = 0;
         while (at < toks.len) {
-            const n: usize = @min(PMAX, toks.len - at);
+            const n: usize = @min(pr.step, toks.len - at);
             first = try pr.chunk(m, gpa, toks[at .. at + n]);
             at += n;
         }
@@ -559,9 +604,9 @@ pub fn main(init: std.process.Init) !void {
             std.mem.sort(f32, sorted[1..n_dec], {}, std.sort.asc(f32));
             break :blk sorted[n_dec / 2];
         } });
-        try pr.classes(m, toks.len);
-        const skips = [_]u32{0};
-        const what = [_][]const u8{"none"};
+        try pr.classes(m, @min(toks.len, pr.step));
+        const skips = [_]u32{ 0, 4 | 1024, 1024, 2, 16, 1 };
+        const what = [_][]const u8{ "none", "attention", "sparse attention", "DeltaNet", "hyper-connections", "experts" };
         var base_s: f64 = 0;
         for (skips, what) |sk, w| {
             pr.skip = sk;
@@ -572,7 +617,7 @@ pub fn main(init: std.process.Init) !void {
                 const c0 = mtl.clock.seconds();
                 at = 0;
                 while (at < toks.len) {
-                    const n: usize = @min(PMAX, toks.len - at);
+                    const n: usize = @min(pr.step, toks.len - at);
                     _ = try pr.chunk(m, gpa, toks[at .. at + n]);
                     at += n;
                 }
@@ -809,6 +854,9 @@ pub fn main(init: std.process.Init) !void {
     const long_mode = std.c.getenv("FZ_LONG") != null;
     if (std.c.getenv("FZ_PRE1") != null) try m.window(&.{1000}, &pick); // a decode window before the prompt chunks
     var pr_long: ?Prompt = if (long_mode) try Prompt.init(&r, args[2], r.xnew_header) else null;
+    if (pr_long) |*pr| if (std.c.getenv("FZ_STEP")) |v| {
+        pr.step = try std.fmt.parseInt(usize, std.mem.span(v), 10);
+    };
     const ptoks = try gpa.alloc(u32, prompt.len);
     defer gpa.free(ptoks);
     for (prompt, 0..) |x, i| ptoks[i] = @intCast(x.integer);
@@ -819,7 +867,7 @@ pub fn main(init: std.process.Init) !void {
         const p0 = mtl.clock.seconds();
         var at: usize = 0;
         while (at < ptoks.len) {
-            const n = @min(PMAX, ptoks.len - at);
+            const n = @min(pr.step, ptoks.len - at);
             pick[0] = try pr.chunk(m, gpa, ptoks[at .. at + n]);
             at += n;
         }
@@ -1141,7 +1189,7 @@ pub fn main(init: std.process.Init) !void {
             var at: usize = 0;
             var last_n: usize = 1;
             while (at < ptoks.len) {
-                const n = @min(PMAX, ptoks.len - at);
+                const n = @min(pr.step, ptoks.len - at);
                 pick[0] = try pr.chunk(m, gpa, ptoks[at .. at + n]);
                 const k = if (at + n < ptoks.len) n else n - 1;
                 try pr.mtpKeys(m, at, ptoks[at + 1 .. at + 1 + k], m.last);

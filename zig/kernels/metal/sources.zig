@@ -27,6 +27,8 @@ pub const flashnext_qmm6 = @embedFile("prefill/qmm6_nax.metal");
 pub const flashnext_prompt = @embedFile("prefill/fn_prompt.metal");
 /// Flash Next block selection in GPU-side rounds: per-row metadata from the arena and pooling at absolute blocks.
 pub const flashnext_select = @embedFile("prefill/fn_select.metal");
+/// Flash Next prompt rows' block scores and sparse attention on the tensor units.
+pub const flashnext_attn = @embedFile("prefill/fn_attn.metal");
 
 /// A source file of MLX-exact kernels: compiled as one library, its kernels found by name.
 pub const File = struct { name: []const u8, text: []const u8 };
