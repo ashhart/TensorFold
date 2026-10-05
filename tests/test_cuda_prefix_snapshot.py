@@ -82,6 +82,20 @@ def test_without_drafter_and_noncontiguous_tensors(codec, tmp_path):
     assert bits(restored.rec[0]) == bits(state.rec[0])
 
 
+def test_drafter_layers_with_different_windows_preserve_rows_and_bits(codec, tmp_path):
+    ids, state, snap = prefix()
+    snap[0][1] = torch.tensor([[[2, 3]], [[4, 5]]], dtype=torch.bfloat16)
+    snap[1][1] = torch.tensor([[[6, 7]], [[8, 9]]], dtype=torch.bfloat16)
+    path = tmp_path / "prefix.safetensors"
+    receipt = codec.save_prefix(path, ids, state, snap, identity="model")
+    codec.verify_prefix(path, receipt, identity="model")
+    _, _, restored = codec.load_prefix(path, receipt, identity="model", device="cpu")
+    assert restored[2:] == (2, 3)
+    for old_cache, new_cache in zip(snap[:2], restored[:2]):
+        assert [t.shape[1] for t in new_cache] == [2, 1]
+        assert [bits(t) for t in new_cache] == [bits(t) for t in old_cache]
+
+
 @pytest.mark.parametrize("bad", ["ids", "position", "rope", "dtype", "rows", "limit"])
 def test_invalid_state_refused_before_file_creation(codec, tmp_path, bad):
     ids, state, snap = prefix()
@@ -97,7 +111,8 @@ def test_invalid_state_refused_before_file_creation(codec, tmp_path, bad):
     assert not path.exists()
 
 
-@pytest.mark.parametrize("bad", ["identity", "hash", "truncated", "schema", "dtype", "offset", "tokens"])
+@pytest.mark.parametrize("bad", ["identity", "hash", "truncated", "schema", "dtype", "offset", "tokens",
+                                 "draft_rows", "draft_length", "draft_pair"])
 def test_bad_snapshot_rejected_before_allocating(codec, tmp_path, monkeypatch, bad):
     path = tmp_path / "prefix.safetensors"
     receipt = codec.save_prefix(path, *prefix(), identity="model")
@@ -114,10 +129,17 @@ def test_bad_snapshot_rejected_before_allocating(codec, tmp_path, monkeypatch, b
     else:
         size = struct.unpack("<Q", raw[:8])[0]
         header = json.loads(raw[8:8 + size])
-        if bad == "schema":
+        if bad in ("schema", "draft_rows", "draft_length"):
             meta = json.loads(header["__metadata__"]["tensorfold_prefix"])
-            meta["schema"] = 99
+            if bad == "schema":
+                meta["schema"] = 99
+            elif bad == "draft_rows":
+                meta["draft"]["layers"][0] = 1
+            else:
+                meta["draft"]["context_len"] = 3
             header["__metadata__"]["tensorfold_prefix"] = json.dumps(meta)
+        elif bad == "draft_pair":
+            header["draft_v.0"]["shape"] = [1, 2, 4]
         else:
             entry = next(v for k, v in header.items() if k != "__metadata__")
             entry["dtype" if bad == "dtype" else "data_offsets"] = "F16" if bad == "dtype" else [0, 1]

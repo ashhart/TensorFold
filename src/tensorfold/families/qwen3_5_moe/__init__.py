@@ -10,10 +10,16 @@ MODEL_TYPES = ("qwen3_5_moe",)
 TITLE = "Qwen3.6 MoE"
 LANES = True
 # MLX 4-bit, groups of 64, routers 8-bit, MTP layer in mtp-4bit.safetensors (mlx-community's files take it too)
-MODELS = ("TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP", "mlx-community/Qwen3.6-35B-A3B-4bit")
+MODELS = ("TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP", "mlx-community/Qwen3.6-35B-A3B-4bit",
+          "nvidia/Qwen3.6-35B-A3B-NVFP4", "UnstableLlama/Qwen3.6-35B-A3B-exl3-4.00bpw")
+# CUDA also reads ModelOpt checkpoints and EXL3 packs (any codebook and width), each drafting with a bf16 MTP layer
+QUANT_METHODS = {"cuda": ("mlx", "modelopt", "exl3")}
+EXL3_VARIANT = "any"                           # tensorfold.families.EXL3_VARIANT_ANY
+
 REQUIRED_FILES = {MODELS[0]: ("mtp-4bit.safetensors",)}
 DRAFTER = ""                  # Macs and CUDA draft with the checkpoint's MTP layer; --drafter takes a DFlash v1 model
 DFLASH = "z-lab/Qwen3.6-35B-A3B-DFlash"       # Macs, --drafter: chains of each position's own argmax
+DFLASH_ROWS = 16                              # CUDA verify rows a round with a DFlash drafter (TF_DFLASH_ROWS)
 KERNEL_PACKAGE = "tensorfold.kernels.qwen.dense.v1"
 KERNEL_VERSION = "v1"
 # the CUDA engine's kernels read MLX affine weights of this (bits, group size)
@@ -22,13 +28,29 @@ CUDA_PREFILL_FP8 = True            # --prefill-fp8: the attention and DeltaNet p
 
 
 def check(model_dir: str | Path) -> None:
-    """One GPU, MLX 4-bit weights in groups of 64."""
+    """CUDA: one GPU, MLX 4-bit weights in groups of 64 or a ModelOpt NVFP4 checkpoint. Macs: the row decoder's rule, any MLX affine width and group."""
+
+    import sys
 
     from tensorfold.families import OWN_MODEL_HELP, describe_quantization, quantization, read_config
 
-    if quantization(read_config(model_dir)) != CUDA_QUANTIZATION:
+    config = read_config(model_dir)
+    if sys.platform == "darwin":
+        # a Mac decodes through the dense family's row decoder, so its refusal is the one that applies
+
+        from tensorfold.families.qwen3_5 import refusal
+
+        why = refusal(config, False)
+        if why:
+            raise ValueError(f"{TITLE} cannot run this checkpoint on a Mac: {why}. {OWN_MODEL_HELP}")
+        return
+    from tensorfold.families import quant_method
+
+    if quant_method(config) in ("modelopt", "exl3"):
+        return                               # require_readable checks its schemes, the loader each tensor's
+    if quantization(config) != CUDA_QUANTIZATION:
         raise ValueError(f"{TITLE}'s CUDA engine reads MLX 4-bit weights in groups of 64 ({MODELS[0]}); this "
-                         f"checkpoint has {describe_quantization(read_config(model_dir))}. {OWN_MODEL_HELP}")
+                         f"checkpoint has {describe_quantization(config)}. {OWN_MODEL_HELP}")
 
 
 def mtp_file(model_dir: Path) -> Path | None:
@@ -97,8 +119,24 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
     """One GPU: MTP chains verified exactly, or the serial reference when no_drafts is set."""
     # parallel above 1 decodes that many requests together.
 
-    if drafter:
-        raise ValueError(f"{TITLE} drafts with its own MTP layer on CUDA: a separate draft model does not apply")
+    if drafter and not no_drafts:
+        # a DFlash drafter (v1, e.g. ornith-ai/Ornith-1.5-35B-A3B-DFlash): the dense family's engine, these weights
+        if int(tp) != 1:
+            raise ValueError(f"{TITLE} runs on one GPU: drop --tp")
+        import os
+
+        from tensorfold.families.qwen3_5.cuda.engine import Qwen27Engine
+
+        def load(path):                       # this family's weights: routed experts, NVFP4 or EXL3 included
+            from .cuda.weights import load as moe_weights
+
+            return moe_weights(path)
+
+        streams = max(1, int(options.get("parallel") or 1))
+        rows = int(os.environ.get("TF_DFLASH_ROWS") or DFLASH_ROWS)
+        return Qwen27Engine(Path(model_dir), Path(drafter), max_rows=rows, tree_rows=None, tp=1, allow_copy=True,
+                            streams=streams, context=context, context_explicit=options.get("context_explicit"),
+                            keep=options.get("checkpoint_slots"), loader=load)
     if int(tp) != 1:
         raise ValueError(f"{TITLE} runs on one GPU: drop --tp")
     from .cuda import DEPTH

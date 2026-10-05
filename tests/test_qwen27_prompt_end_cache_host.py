@@ -1032,6 +1032,28 @@ def _prompt(n, seed):
     return [gen.randrange(1, VOCAB) for _ in range(n)]
 
 
+@pytest.mark.parametrize("batched", [False, True])
+def test_prefill_taps_follow_declared_layer_order(cpu, monkeypatch, batched):
+    m, w, torch = cpu.m, cpu.w, cpu.torch
+    # Attention-only layers use the existing CPU kernels in both prefill paths.
+    w.layers = [w.layers[-1]] * 4
+    monkeypatch.setattr(m.prefill, "_pinned", lambda a, device: torch.as_tensor(a, device=device))
+    tokens = torch.tensor([7, 8, 9], dtype=torch.int32)
+
+    def run(layers):
+        w.tap_layers = layers
+        state = m.forward.State(w)
+        if batched:
+            return m.prefill.prefill_rows(w, [(tokens.tolist(), state, 0)], capture_taps=True)[0][1]
+        return m.prefill.prefill_chunk(w, tokens, state, capture_taps=True)[1]
+
+    first, last = run((0,)), run((3,))
+    got = run((3, 0))
+    assert got.shape == (3, 256)
+    assert torch.equal(got[:, :128], last)
+    assert torch.equal(got[:, 128:], first)
+
+
 @pytest.mark.parametrize("cached", [0, 5, 37])
 @pytest.mark.parametrize("cut", [1, 2, 3, 4, 17, 38, 39])
 def test_a_cut_chunk_commits_as_one_and_returns_the_state_at_the_cut(cpu, cached, cut):

@@ -232,7 +232,9 @@ def test_failed_constructor_drops_traceback_allocations_before_cleanup(checkpoin
 
 
 @pytest.mark.parametrize("field,value", [("context_window", 2048), ("allow_copy", False),
-                                         ("w.precision", "checkpoint"), ("scheduler.max_streams", 1)])
+                                         ("w.precision", "checkpoint"), ("scheduler.max_streams", 1),
+                                         ("draft.taps", (1, 5)), ("draft.windows", [4095, 32768]),
+                                         ("draft.fast", True)])
 def test_mismatched_reload_closes_partial_worker_and_permits_retry(checkpoint, cuda, monkeypatch, field, value):
     attempts, partial = [], []
 

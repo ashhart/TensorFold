@@ -16,6 +16,7 @@ from tensorfold.cuda.direct_read import SafeTensors
 from tensorfold.engine.exact_sampling import Sampling
 
 from .affine_memory import packed_draft
+from .draft_config import target_layers
 from .draft_tree import best_first
 from .glue import embedding, swiglu
 from .draft_attention import append, block_attention
@@ -198,6 +199,8 @@ class DFlash2:
         self.eps = float(cfg["rms_norm_eps"])
         self.theta = float(cfg["rope_parameters"]["rope_theta"])
         self.mask_id = int(cfg["dflash_config"]["mask_token_id"])
+        # the target's tap layers (a config without them: Qwen3.8-27B's five)
+        self.taps = target_layers(cfg)
         self.trained = int(cfg["dflash_config"].get("block_size", 8))     # its training block: the planner's floor
         self.group_size = int(cfg["dflash_config"]["conv_group_size"])
         self.layers = int(cfg["num_hidden_layers"])
@@ -218,6 +221,14 @@ class DFlash2:
         self.inv_freq = (1.0 / self.theta **
                          (torch.arange(self.head_dim // 2, device=self.device,
                                        dtype=torch.float32) * 2 / self.head_dim))
+        self._head(target, rank, world)
+        if isinstance(target.head, QLinear) and target.head.layout == "tiled" and self.sub_rows is None:
+            self.sub_head = tile(self.sub_head)
+        self._weights(fast, bits, rank, world)
+
+    def _head(self, target: Weights, rank: int, world: int) -> None:
+        """The draft vocabulary's rows of the target's head: views where its layout allows, no copy."""
+
         vocab = target.config.vocab
         spans = tuple((a, min(b, vocab)) for a, b in ((0, 98304), (248032, 248320)) if a < vocab)
         self.vocab_spans = spans
@@ -250,8 +261,10 @@ class DFlash2:
             self.sub_head = QLinear(*[None if t is None else t[lo:hi].contiguous()
                                       for t in (sub.weight, sub.scales, sub.biases)],
                                     layout=sub.layout, gs=sub.gs, bits=sub.bits)
-        if isinstance(target.head, QLinear) and target.head.layout == "tiled" and self.sub_rows is None:
-            self.sub_head = tile(self.sub_head)
+
+    def _weights(self, fast: bool, bits: int, rank: int, world: int) -> None:
+        """Fuse and pack the drafter's projections, then open empty contexts."""
+
         # Quantized draft projections can change acceptance but never target output.
         self.q4: dict[str, QLinear] = {}
         # Fused projections, norms, rotary embeddings, and convolutions may round differently and change draft proposals.
@@ -318,8 +331,8 @@ class DFlash2:
 
     @torch.no_grad()
     def add_taps(self, taps: torch.Tensor) -> None:
-        if taps.ndim != 2 or taps.shape[1] != 5 * self.hidden:
-            raise ValueError("DFlash2 expects five target layer taps per committed row")
+        if taps.ndim != 2 or taps.shape[1] != len(self.taps) * self.hidden:
+            raise ValueError(f"DFlash2 expects {len(self.taps)} target layer taps per committed row")
         projected = _norm(self._lin(taps, "fc.weight"), self.weights["hidden_norm.weight"], self.eps)
         n = projected.shape[0]
         if self.fast:

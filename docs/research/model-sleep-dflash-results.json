@@ -1,0 +1,819 @@
+{
+  "source": {
+    "sleep_parent": "9b0438909c30a6a948d53b1f369d423794b27c9b",
+    "draft_parent": "0b20ed38883d1ae6205adf005e0a97f3bed98c8b",
+    "qualified_python_files": 430,
+    "python_manifest_sha256": "9a23253f5d1f4d7672a3fb4bae8d1e54419a5df6ec84d0fdb8df608b772f3313"
+  },
+  "checkpoints": {
+    "repo": "capyctl/FrogNano-4B-2609-MLX-4bit",
+    "revision": "7175ee2b94eae649dfd1e7605cd2dc3dcd1e3e2f",
+    "drafter": "z-lab/Qwen3.5-4B-DFlash",
+    "draft_revision": "9a1996ccf887b79ab3af4fcbf8c1d1f4b5658bcf"
+  },
+  "backend": "cuda",
+  "direct": {
+    "weights-single": {
+      "passed": true,
+      "options": {
+        "drafter": true,
+        "no_drafts": false,
+        "parallel": 1,
+        "context": 4096,
+        "context_explicit": true
+      },
+      "serial_token_sha256": [
+        "3ff8c089badb2b86922f690b8b952f44756731203e55ab36c24bb94c19888728"
+      ],
+      "drafted_token_sha256": [
+        "3ff8c089badb2b86922f690b8b952f44756731203e55ab36c24bb94c19888728"
+      ],
+      "accepted_drafts": [
+        38
+      ],
+      "cycles": [
+        {
+          "sleep_s": 1.8519722900236957,
+          "wake_s": 6.857402743014973,
+          "asleep_allocated_bytes": 0,
+          "asleep_reserved_bytes": 0,
+          "serial_token_sha256": [
+            "3ff8c089badb2b86922f690b8b952f44756731203e55ab36c24bb94c19888728"
+          ],
+          "drafted_token_sha256": [
+            "3ff8c089badb2b86922f690b8b952f44756731203e55ab36c24bb94c19888728"
+          ],
+          "cached_tokens": [
+            0
+          ]
+        },
+        {
+          "sleep_s": 1.8477993099950254,
+          "wake_s": 6.791140508954413,
+          "asleep_allocated_bytes": 0,
+          "asleep_reserved_bytes": 0,
+          "serial_token_sha256": [
+            "3ff8c089badb2b86922f690b8b952f44756731203e55ab36c24bb94c19888728"
+          ],
+          "drafted_token_sha256": [
+            "3ff8c089badb2b86922f690b8b952f44756731203e55ab36c24bb94c19888728"
+          ],
+          "cached_tokens": [
+            0
+          ]
+        }
+      ]
+    },
+    "cache-single": {
+      "passed": true,
+      "options": {
+        "drafter": true,
+        "no_drafts": false,
+        "parallel": 1,
+        "context": 4096,
+        "context_explicit": true
+      },
+      "serial_token_sha256": [
+        "3ff8c089badb2b86922f690b8b952f44756731203e55ab36c24bb94c19888728"
+      ],
+      "drafted_token_sha256": [
+        "3ff8c089badb2b86922f690b8b952f44756731203e55ab36c24bb94c19888728"
+      ],
+      "accepted_drafts": [
+        38
+      ],
+      "cycles": [
+        {
+          "sleep_s": 2.2179718130500987,
+          "wake_s": 6.695945903018583,
+          "asleep_allocated_bytes": 0,
+          "asleep_reserved_bytes": 0,
+          "serial_token_sha256": [
+            "3ff8c089badb2b86922f690b8b952f44756731203e55ab36c24bb94c19888728"
+          ],
+          "drafted_token_sha256": [
+            "3ff8c089badb2b86922f690b8b952f44756731203e55ab36c24bb94c19888728"
+          ],
+          "cached_tokens": [
+            2047
+          ],
+          "saved_cache": {
+            "mode": "disk",
+            "restore": "lazy",
+            "saved_prefixes": 1,
+            "snapshot_bytes": 168907680,
+            "omitted_prefixes": 0,
+            "unavailable_prefixes": 0,
+            "loaded_prefixes": 0,
+            "load_failures": 0,
+            "memory_misses": 0
+          },
+          "restored_cache": {
+            "mode": "disk",
+            "restore": "lazy",
+            "saved_prefixes": 1,
+            "snapshot_bytes": 168907680,
+            "omitted_prefixes": 0,
+            "unavailable_prefixes": 0,
+            "loaded_prefixes": 1,
+            "load_failures": 0,
+            "memory_misses": 0
+          }
+        },
+        {
+          "sleep_s": 2.1331242719898,
+          "wake_s": 6.575617150985636,
+          "asleep_allocated_bytes": 0,
+          "asleep_reserved_bytes": 0,
+          "serial_token_sha256": [
+            "3ff8c089badb2b86922f690b8b952f44756731203e55ab36c24bb94c19888728"
+          ],
+          "drafted_token_sha256": [
+            "3ff8c089badb2b86922f690b8b952f44756731203e55ab36c24bb94c19888728"
+          ],
+          "cached_tokens": [
+            2047
+          ],
+          "saved_cache": {
+            "mode": "disk",
+            "restore": "lazy",
+            "saved_prefixes": 1,
+            "snapshot_bytes": 168907680,
+            "omitted_prefixes": 0,
+            "unavailable_prefixes": 0,
+            "loaded_prefixes": 0,
+            "load_failures": 0,
+            "memory_misses": 0
+          },
+          "restored_cache": {
+            "mode": "disk",
+            "restore": "lazy",
+            "saved_prefixes": 1,
+            "snapshot_bytes": 168907680,
+            "omitted_prefixes": 0,
+            "unavailable_prefixes": 0,
+            "loaded_prefixes": 1,
+            "load_failures": 0,
+            "memory_misses": 0
+          }
+        }
+      ]
+    },
+    "cache-eight-long": {
+      "passed": true,
+      "options": {
+        "drafter": true,
+        "no_drafts": false,
+        "parallel": 8,
+        "context": 16384,
+        "context_explicit": true,
+        "checkpoint_slots": 8
+      },
+      "serial_token_sha256": [
+        "04888a2337baa53a0917235e06e71153afc434a60320aa0b4284e842825d2579",
+        "95be87699074a04dc014c7593b1a5648f01d4ee40a6c985bd65ef47e2d9f8a23",
+        "81b7062cc8762f39006f6975ad64bc5db1a7bec2593b5fe354577e3619af2b24",
+        "a30ea0d23fe26b0563e9a6cd19cad854304b19a21200659fe1c4902a8df6dca5",
+        "1d96d019377a70d12f4fd37b362d1196ed4984ad50b0d696b5521e759b5c4211",
+        "214ea1dc99bb16b6e5b66a1928ac1f71220052e6eea86471cf22c752d25ec64a",
+        "7e24d1429e398ee639a59af25c87174173dbf0ba8d00860a79d74d1f74b0fd3b",
+        "58a3347be0d4cc5e5020d6686adb91fbebbb38532e6b9e1ee6cb28e892c781c0"
+      ],
+      "drafted_token_sha256": [
+        "04888a2337baa53a0917235e06e71153afc434a60320aa0b4284e842825d2579",
+        "95be87699074a04dc014c7593b1a5648f01d4ee40a6c985bd65ef47e2d9f8a23",
+        "81b7062cc8762f39006f6975ad64bc5db1a7bec2593b5fe354577e3619af2b24",
+        "a30ea0d23fe26b0563e9a6cd19cad854304b19a21200659fe1c4902a8df6dca5",
+        "1d96d019377a70d12f4fd37b362d1196ed4984ad50b0d696b5521e759b5c4211",
+        "214ea1dc99bb16b6e5b66a1928ac1f71220052e6eea86471cf22c752d25ec64a",
+        "7e24d1429e398ee639a59af25c87174173dbf0ba8d00860a79d74d1f74b0fd3b",
+        "58a3347be0d4cc5e5020d6686adb91fbebbb38532e6b9e1ee6cb28e892c781c0"
+      ],
+      "accepted_drafts": [
+        37,
+        35,
+        36,
+        31,
+        40,
+        52,
+        34,
+        38
+      ],
+      "cycles": [
+        {
+          "sleep_s": 6.917438156960998,
+          "wake_s": 9.088805962004699,
+          "asleep_allocated_bytes": 0,
+          "asleep_reserved_bytes": 0,
+          "serial_token_sha256": [
+            "04888a2337baa53a0917235e06e71153afc434a60320aa0b4284e842825d2579",
+            "95be87699074a04dc014c7593b1a5648f01d4ee40a6c985bd65ef47e2d9f8a23",
+            "81b7062cc8762f39006f6975ad64bc5db1a7bec2593b5fe354577e3619af2b24",
+            "a30ea0d23fe26b0563e9a6cd19cad854304b19a21200659fe1c4902a8df6dca5",
+            "1d96d019377a70d12f4fd37b362d1196ed4984ad50b0d696b5521e759b5c4211",
+            "214ea1dc99bb16b6e5b66a1928ac1f71220052e6eea86471cf22c752d25ec64a",
+            "7e24d1429e398ee639a59af25c87174173dbf0ba8d00860a79d74d1f74b0fd3b",
+            "58a3347be0d4cc5e5020d6686adb91fbebbb38532e6b9e1ee6cb28e892c781c0"
+          ],
+          "drafted_token_sha256": [
+            "04888a2337baa53a0917235e06e71153afc434a60320aa0b4284e842825d2579",
+            "95be87699074a04dc014c7593b1a5648f01d4ee40a6c985bd65ef47e2d9f8a23",
+            "81b7062cc8762f39006f6975ad64bc5db1a7bec2593b5fe354577e3619af2b24",
+            "a30ea0d23fe26b0563e9a6cd19cad854304b19a21200659fe1c4902a8df6dca5",
+            "1d96d019377a70d12f4fd37b362d1196ed4984ad50b0d696b5521e759b5c4211",
+            "214ea1dc99bb16b6e5b66a1928ac1f71220052e6eea86471cf22c752d25ec64a",
+            "7e24d1429e398ee639a59af25c87174173dbf0ba8d00860a79d74d1f74b0fd3b",
+            "58a3347be0d4cc5e5020d6686adb91fbebbb38532e6b9e1ee6cb28e892c781c0"
+          ],
+          "cached_tokens": [
+            8191,
+            8191,
+            8191,
+            8191,
+            8191,
+            8191,
+            8191,
+            8191
+          ],
+          "saved_cache": {
+            "mode": "disk",
+            "restore": "lazy",
+            "saved_prefixes": 8,
+            "snapshot_bytes": 3498900736,
+            "omitted_prefixes": 0,
+            "unavailable_prefixes": 0,
+            "loaded_prefixes": 0,
+            "load_failures": 0,
+            "memory_misses": 0
+          },
+          "restored_cache": {
+            "mode": "disk",
+            "restore": "lazy",
+            "saved_prefixes": 8,
+            "snapshot_bytes": 3498900736,
+            "omitted_prefixes": 0,
+            "unavailable_prefixes": 0,
+            "loaded_prefixes": 8,
+            "load_failures": 0,
+            "memory_misses": 0
+          }
+        },
+        {
+          "sleep_s": 7.5298826430225745,
+          "wake_s": 9.870779239980038,
+          "asleep_allocated_bytes": 0,
+          "asleep_reserved_bytes": 0,
+          "serial_token_sha256": [
+            "04888a2337baa53a0917235e06e71153afc434a60320aa0b4284e842825d2579",
+            "95be87699074a04dc014c7593b1a5648f01d4ee40a6c985bd65ef47e2d9f8a23",
+            "81b7062cc8762f39006f6975ad64bc5db1a7bec2593b5fe354577e3619af2b24",
+            "a30ea0d23fe26b0563e9a6cd19cad854304b19a21200659fe1c4902a8df6dca5",
+            "1d96d019377a70d12f4fd37b362d1196ed4984ad50b0d696b5521e759b5c4211",
+            "214ea1dc99bb16b6e5b66a1928ac1f71220052e6eea86471cf22c752d25ec64a",
+            "7e24d1429e398ee639a59af25c87174173dbf0ba8d00860a79d74d1f74b0fd3b",
+            "58a3347be0d4cc5e5020d6686adb91fbebbb38532e6b9e1ee6cb28e892c781c0"
+          ],
+          "drafted_token_sha256": [
+            "04888a2337baa53a0917235e06e71153afc434a60320aa0b4284e842825d2579",
+            "95be87699074a04dc014c7593b1a5648f01d4ee40a6c985bd65ef47e2d9f8a23",
+            "81b7062cc8762f39006f6975ad64bc5db1a7bec2593b5fe354577e3619af2b24",
+            "a30ea0d23fe26b0563e9a6cd19cad854304b19a21200659fe1c4902a8df6dca5",
+            "1d96d019377a70d12f4fd37b362d1196ed4984ad50b0d696b5521e759b5c4211",
+            "214ea1dc99bb16b6e5b66a1928ac1f71220052e6eea86471cf22c752d25ec64a",
+            "7e24d1429e398ee639a59af25c87174173dbf0ba8d00860a79d74d1f74b0fd3b",
+            "58a3347be0d4cc5e5020d6686adb91fbebbb38532e6b9e1ee6cb28e892c781c0"
+          ],
+          "cached_tokens": [
+            8191,
+            8191,
+            8191,
+            8191,
+            8191,
+            8191,
+            8191,
+            8191
+          ],
+          "saved_cache": {
+            "mode": "disk",
+            "restore": "lazy",
+            "saved_prefixes": 8,
+            "snapshot_bytes": 3498900736,
+            "omitted_prefixes": 0,
+            "unavailable_prefixes": 0,
+            "loaded_prefixes": 0,
+            "load_failures": 0,
+            "memory_misses": 0
+          },
+          "restored_cache": {
+            "mode": "disk",
+            "restore": "lazy",
+            "saved_prefixes": 8,
+            "snapshot_bytes": 3498900736,
+            "omitted_prefixes": 0,
+            "unavailable_prefixes": 0,
+            "loaded_prefixes": 8,
+            "load_failures": 0,
+            "memory_misses": 0
+          }
+        }
+      ]
+    }
+  },
+  "http": [
+    {
+      "passed": true,
+      "api_auth_enabled": true,
+      "reply_tokens": 128,
+      "initial": {
+        "state": "awake",
+        "ready": true,
+        "is_sleeping": false,
+        "level": null,
+        "active_requests": 0,
+        "last_error": null,
+        "memory": {
+          "allocated_bytes": 3107320832,
+          "reserved_bytes": 3191865344
+        },
+        "cache": {
+          "mode": "disk",
+          "restore": "lazy",
+          "saved_prefixes": 0,
+          "snapshot_bytes": 0,
+          "omitted_prefixes": 0,
+          "unavailable_prefixes": 0,
+          "loaded_prefixes": 0,
+          "load_failures": 0,
+          "memory_misses": 0
+        }
+      },
+      "asleep": {
+        "state": "sleeping",
+        "ready": false,
+        "is_sleeping": true,
+        "level": 2,
+        "active_requests": 0,
+        "last_error": null,
+        "memory": {
+          "allocated_bytes": 0,
+          "reserved_bytes": 0
+        },
+        "cache": {
+          "mode": "disk",
+          "restore": "lazy",
+          "saved_prefixes": 3,
+          "snapshot_bytes": 160632768,
+          "omitted_prefixes": 0,
+          "unavailable_prefixes": 0,
+          "loaded_prefixes": 0,
+          "load_failures": 0,
+          "memory_misses": 0
+        }
+      },
+      "awake": {
+        "state": "awake",
+        "ready": true,
+        "is_sleeping": false,
+        "level": null,
+        "active_requests": 0,
+        "last_error": null,
+        "memory": {
+          "allocated_bytes": 3107320832,
+          "reserved_bytes": 3191865344
+        },
+        "cache": {
+          "mode": "disk",
+          "restore": "lazy",
+          "saved_prefixes": 3,
+          "snapshot_bytes": 160632768,
+          "omitted_prefixes": 0,
+          "unavailable_prefixes": 0,
+          "loaded_prefixes": 0,
+          "load_failures": 0,
+          "memory_misses": 0
+        }
+      },
+      "sleep_s": 3.879771284002345,
+      "wake_s": 7.6572465390199795,
+      "serial_hash": "7002b1b924a3",
+      "drafted_hash": "7002b1b924a3",
+      "stream_hash": "6eca1cca7d04",
+      "conversation_hash": "fdbd0b1d6bcb",
+      "conversation_input_tokens": 52,
+      "checks": [
+        "auth",
+        "Origin",
+        "level refusal",
+        "stream drain",
+        "503 admission",
+        "409 conflict",
+        "discovery while asleep",
+        "stored response",
+        "continued conversation",
+        "token equality",
+        "separate API and sleep credentials",
+        "root and v1 controls",
+        "minimal health",
+        "zero reserved memory",
+        "lazy cache restore",
+        "conversation prefix reuse"
+      ],
+      "conversation_cached_tokens": 51,
+      "restored_cache": {
+        "mode": "disk",
+        "restore": "lazy",
+        "saved_prefixes": 3,
+        "snapshot_bytes": 160632768,
+        "omitted_prefixes": 0,
+        "unavailable_prefixes": 0,
+        "loaded_prefixes": 2,
+        "load_failures": 0,
+        "memory_misses": 0
+      }
+    },
+    {
+      "passed": true,
+      "api_auth_enabled": true,
+      "reply_tokens": 128,
+      "initial": {
+        "state": "awake",
+        "ready": true,
+        "is_sleeping": false,
+        "level": null,
+        "active_requests": 0,
+        "last_error": null,
+        "memory": {
+          "allocated_bytes": 3273626624,
+          "reserved_bytes": 3397386240
+        },
+        "cache": {
+          "mode": "disk",
+          "restore": "lazy",
+          "saved_prefixes": 3,
+          "snapshot_bytes": 160632768,
+          "omitted_prefixes": 0,
+          "unavailable_prefixes": 0,
+          "loaded_prefixes": 2,
+          "load_failures": 0,
+          "memory_misses": 0
+        }
+      },
+      "asleep": {
+        "state": "sleeping",
+        "ready": false,
+        "is_sleeping": true,
+        "level": 2,
+        "active_requests": 0,
+        "last_error": null,
+        "memory": {
+          "allocated_bytes": 0,
+          "reserved_bytes": 0
+        },
+        "cache": {
+          "mode": "disk",
+          "restore": "lazy",
+          "saved_prefixes": 3,
+          "snapshot_bytes": 160632768,
+          "omitted_prefixes": 0,
+          "unavailable_prefixes": 0,
+          "loaded_prefixes": 0,
+          "load_failures": 0,
+          "memory_misses": 0
+        }
+      },
+      "awake": {
+        "state": "awake",
+        "ready": true,
+        "is_sleeping": false,
+        "level": null,
+        "active_requests": 0,
+        "last_error": null,
+        "memory": {
+          "allocated_bytes": 3107320832,
+          "reserved_bytes": 3191865344
+        },
+        "cache": {
+          "mode": "disk",
+          "restore": "lazy",
+          "saved_prefixes": 3,
+          "snapshot_bytes": 160632768,
+          "omitted_prefixes": 0,
+          "unavailable_prefixes": 0,
+          "loaded_prefixes": 0,
+          "load_failures": 0,
+          "memory_misses": 0
+        }
+      },
+      "sleep_s": 3.937985487980768,
+      "wake_s": 7.616825977980625,
+      "serial_hash": "7002b1b924a3",
+      "drafted_hash": "7002b1b924a3",
+      "stream_hash": "6eca1cca7d04",
+      "conversation_hash": "fdbd0b1d6bcb",
+      "conversation_input_tokens": 52,
+      "checks": [
+        "auth",
+        "Origin",
+        "level refusal",
+        "stream drain",
+        "503 admission",
+        "409 conflict",
+        "discovery while asleep",
+        "stored response",
+        "continued conversation",
+        "token equality",
+        "separate API and sleep credentials",
+        "root and v1 controls",
+        "minimal health",
+        "zero reserved memory",
+        "lazy cache restore",
+        "conversation prefix reuse"
+      ],
+      "conversation_cached_tokens": 51,
+      "restored_cache": {
+        "mode": "disk",
+        "restore": "lazy",
+        "saved_prefixes": 3,
+        "snapshot_bytes": 160632768,
+        "omitted_prefixes": 0,
+        "unavailable_prefixes": 0,
+        "loaded_prefixes": 2,
+        "load_failures": 0,
+        "memory_misses": 0
+      }
+    }
+  ],
+  "runtime": {
+    "torch": "2.13.0+cu130",
+    "cuda": "13.0",
+    "tensorfold": "0.6.5",
+    "precision": "checkpoint",
+    "prefill_fp8": false,
+    "seed": 1234
+  },
+  "tap_order_cuda_tests": {
+    "passed": 4,
+    "failed": 0
+  },
+  "qwen27_cold_prefill": {
+    "release-before": [
+      {
+        "prompt_tokens": 2048,
+        "rep": 0,
+        "prefill_s": 0.6930982959456742,
+        "token_sha": "080a9ed428559ef602668b4c00f114f1a11c3f6b02a435f0bdc154578e4d7f22"
+      },
+      {
+        "prompt_tokens": 2048,
+        "rep": 1,
+        "prefill_s": 0.6925998019869439,
+        "token_sha": "038966de9f6b9a901b20b4c6ca8b2a46009feebe031babc842d43690c0bc222b"
+      },
+      {
+        "prompt_tokens": 2048,
+        "rep": 2,
+        "prefill_s": 0.6981904830317944,
+        "token_sha": "06d033ece6645de592db973644cf7357255f24536ff7b03c3b2ace10736f7636"
+      },
+      {
+        "prompt_tokens": 8192,
+        "rep": 0,
+        "prefill_s": 2.7562076650210656,
+        "token_sha": "080a9ed428559ef602668b4c00f114f1a11c3f6b02a435f0bdc154578e4d7f22"
+      },
+      {
+        "prompt_tokens": 8192,
+        "rep": 1,
+        "prefill_s": 2.7540246010175906,
+        "token_sha": "038966de9f6b9a901b20b4c6ca8b2a46009feebe031babc842d43690c0bc222b"
+      },
+      {
+        "prompt_tokens": 8192,
+        "rep": 2,
+        "prefill_s": 2.763603185012471,
+        "token_sha": "06d033ece6645de592db973644cf7357255f24536ff7b03c3b2ace10736f7636"
+      }
+    ],
+    "integration-before": [
+      {
+        "prompt_tokens": 2048,
+        "rep": 0,
+        "prefill_s": 0.698382267029956,
+        "token_sha": "080a9ed428559ef602668b4c00f114f1a11c3f6b02a435f0bdc154578e4d7f22"
+      },
+      {
+        "prompt_tokens": 2048,
+        "rep": 1,
+        "prefill_s": 0.709024464013055,
+        "token_sha": "038966de9f6b9a901b20b4c6ca8b2a46009feebe031babc842d43690c0bc222b"
+      },
+      {
+        "prompt_tokens": 2048,
+        "rep": 2,
+        "prefill_s": 0.7037817329983227,
+        "token_sha": "06d033ece6645de592db973644cf7357255f24536ff7b03c3b2ace10736f7636"
+      },
+      {
+        "prompt_tokens": 8192,
+        "rep": 0,
+        "prefill_s": 2.7762370260315947,
+        "token_sha": "080a9ed428559ef602668b4c00f114f1a11c3f6b02a435f0bdc154578e4d7f22"
+      },
+      {
+        "prompt_tokens": 8192,
+        "rep": 1,
+        "prefill_s": 2.7823880239739083,
+        "token_sha": "038966de9f6b9a901b20b4c6ca8b2a46009feebe031babc842d43690c0bc222b"
+      },
+      {
+        "prompt_tokens": 8192,
+        "rep": 2,
+        "prefill_s": 2.7955459390068427,
+        "token_sha": "06d033ece6645de592db973644cf7357255f24536ff7b03c3b2ace10736f7636"
+      }
+    ],
+    "integration-after": [
+      {
+        "prompt_tokens": 2048,
+        "rep": 0,
+        "prefill_s": 0.7002126590232365,
+        "token_sha": "080a9ed428559ef602668b4c00f114f1a11c3f6b02a435f0bdc154578e4d7f22"
+      },
+      {
+        "prompt_tokens": 2048,
+        "rep": 1,
+        "prefill_s": 0.6984638659632765,
+        "token_sha": "038966de9f6b9a901b20b4c6ca8b2a46009feebe031babc842d43690c0bc222b"
+      },
+      {
+        "prompt_tokens": 2048,
+        "rep": 2,
+        "prefill_s": 0.6966413290356286,
+        "token_sha": "06d033ece6645de592db973644cf7357255f24536ff7b03c3b2ace10736f7636"
+      },
+      {
+        "prompt_tokens": 8192,
+        "rep": 0,
+        "prefill_s": 2.7607858680421486,
+        "token_sha": "080a9ed428559ef602668b4c00f114f1a11c3f6b02a435f0bdc154578e4d7f22"
+      },
+      {
+        "prompt_tokens": 8192,
+        "rep": 1,
+        "prefill_s": 2.779563102987595,
+        "token_sha": "038966de9f6b9a901b20b4c6ca8b2a46009feebe031babc842d43690c0bc222b"
+      },
+      {
+        "prompt_tokens": 8192,
+        "rep": 2,
+        "prefill_s": 2.816559672995936,
+        "token_sha": "06d033ece6645de592db973644cf7357255f24536ff7b03c3b2ace10736f7636"
+      }
+    ],
+    "release-after": [
+      {
+        "prompt_tokens": 2048,
+        "rep": 0,
+        "prefill_s": 0.694832835055422,
+        "token_sha": "080a9ed428559ef602668b4c00f114f1a11c3f6b02a435f0bdc154578e4d7f22"
+      },
+      {
+        "prompt_tokens": 2048,
+        "rep": 1,
+        "prefill_s": 0.6910643219598569,
+        "token_sha": "038966de9f6b9a901b20b4c6ca8b2a46009feebe031babc842d43690c0bc222b"
+      },
+      {
+        "prompt_tokens": 2048,
+        "rep": 2,
+        "prefill_s": 0.6970123299979605,
+        "token_sha": "06d033ece6645de592db973644cf7357255f24536ff7b03c3b2ace10736f7636"
+      },
+      {
+        "prompt_tokens": 8192,
+        "rep": 0,
+        "prefill_s": 2.791278010001406,
+        "token_sha": "080a9ed428559ef602668b4c00f114f1a11c3f6b02a435f0bdc154578e4d7f22"
+      },
+      {
+        "prompt_tokens": 8192,
+        "rep": 1,
+        "prefill_s": 2.7785682840039954,
+        "token_sha": "038966de9f6b9a901b20b4c6ca8b2a46009feebe031babc842d43690c0bc222b"
+      },
+      {
+        "prompt_tokens": 8192,
+        "rep": 2,
+        "prefill_s": 2.7662444449961185,
+        "token_sha": "06d033ece6645de592db973644cf7357255f24536ff7b03c3b2ace10736f7636"
+      }
+    ]
+  },
+  "reference_checkpoints": {
+    "target": "nvidia/Qwen3.8-27B-NVFP4",
+    "target_revision": "482ca0f3832238542f8f5295dde86b5f22711d80",
+    "drafter": "z-lab/Qwen3.8-27B-DFlash2",
+    "draft_revision": "50307d4c4cde6860d4eee73e2547cd786fe8e8a4",
+    "release_revision": "609ca419abecebdc5a059498a613680bd3aa847f"
+  },
+  "qwen27_sleep": {
+    "passed": true,
+    "options": {
+      "drafter": true,
+      "no_drafts": false,
+      "parallel": 1,
+      "context": 16384,
+      "context_explicit": true
+    },
+    "serial_token_sha256": [
+      "965ce3710f01df81303200dd450aea34a8f115ed3f17895c9919269c9997f96d"
+    ],
+    "drafted_token_sha256": [
+      "965ce3710f01df81303200dd450aea34a8f115ed3f17895c9919269c9997f96d"
+    ],
+    "accepted_drafts": [
+      25
+    ],
+    "cycles": [
+      {
+        "sleep_s": 13.162262706027832,
+        "wake_s": 30.286766854987945,
+        "asleep_allocated_bytes": 0,
+        "asleep_reserved_bytes": 0,
+        "serial_token_sha256": [
+          "965ce3710f01df81303200dd450aea34a8f115ed3f17895c9919269c9997f96d"
+        ],
+        "drafted_token_sha256": [
+          "965ce3710f01df81303200dd450aea34a8f115ed3f17895c9919269c9997f96d"
+        ],
+        "cached_tokens": [
+          8191
+        ],
+        "saved_cache": {
+          "mode": "disk",
+          "restore": "lazy",
+          "saved_prefixes": 1,
+          "snapshot_bytes": 732710096,
+          "omitted_prefixes": 0,
+          "unavailable_prefixes": 0,
+          "loaded_prefixes": 0,
+          "load_failures": 0,
+          "memory_misses": 0
+        },
+        "restored_cache": {
+          "mode": "disk",
+          "restore": "lazy",
+          "saved_prefixes": 1,
+          "snapshot_bytes": 732710096,
+          "omitted_prefixes": 0,
+          "unavailable_prefixes": 0,
+          "loaded_prefixes": 1,
+          "load_failures": 0,
+          "memory_misses": 0
+        }
+      },
+      {
+        "sleep_s": 13.129155255970545,
+        "wake_s": 30.122134701989125,
+        "asleep_allocated_bytes": 0,
+        "asleep_reserved_bytes": 0,
+        "serial_token_sha256": [
+          "965ce3710f01df81303200dd450aea34a8f115ed3f17895c9919269c9997f96d"
+        ],
+        "drafted_token_sha256": [
+          "965ce3710f01df81303200dd450aea34a8f115ed3f17895c9919269c9997f96d"
+        ],
+        "cached_tokens": [
+          8191
+        ],
+        "saved_cache": {
+          "mode": "disk",
+          "restore": "lazy",
+          "saved_prefixes": 1,
+          "snapshot_bytes": 732710096,
+          "omitted_prefixes": 0,
+          "unavailable_prefixes": 0,
+          "loaded_prefixes": 0,
+          "load_failures": 0,
+          "memory_misses": 0
+        },
+        "restored_cache": {
+          "mode": "disk",
+          "restore": "lazy",
+          "saved_prefixes": 1,
+          "snapshot_bytes": 732710096,
+          "omitted_prefixes": 0,
+          "unavailable_prefixes": 0,
+          "loaded_prefixes": 1,
+          "load_failures": 0,
+          "memory_misses": 0
+        }
+      }
+    ]
+  },
+  "host_cpu_checks": {
+    "distinct_passed": 567,
+    "skipped": 1,
+    "scope": "focused runs, not the complete suite"
+  }
+}

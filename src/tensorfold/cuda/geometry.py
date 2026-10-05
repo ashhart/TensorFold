@@ -153,7 +153,9 @@ def layer_counts(t: dict) -> tuple[int, int]:
 def prompt_row_bytes(t: dict, world: int = 1) -> int:
     """Bytes one dense prompt row's arrays hold at once, drafter taps included (the 27B measured 306-315 KiB)."""
 
-    return 16 * (int(t["hidden_size"]) + int(t["intermediate_size"]) // world)
+    # a MoE row: its routed slots (top-k and the shared expert) of expert width, where a dense one has its MLP
+    inter = t.get("intermediate_size") or (int(t["num_experts_per_tok"]) + 1) * int(t["moe_intermediate_size"])
+    return 16 * (int(t["hidden_size"]) + int(inter) // world)
 
 
 def prompt_rows(total: int, row_bytes: int, most: int = 4096) -> int:
@@ -322,12 +324,17 @@ def draft_geometry(t: dict, world: int, reserve: int, *, bounded: bool = False, 
     hd = int(t["head_dim"])
     block = int((t.get("dflash_config") or {}).get("block_size", 16))
     window = int(t.get("sliding_window", 0))
+    default = "full_attention" if "DFlashDraftModel" in (t.get("architectures") or []) else "sliding_attention"
+    kinds = t.get("layer_types") or [default] * layers
+    full = sum(kind != "sliding_attention" for kind in kinds)
     hidden = int(t["hidden_size"])
     fixed = 16 * max(64, streams * block) * (hidden + int(t["intermediate_size"])) * 4
     copies = 2 * streams + kept      # a stream's context and the one its taps replace it with; each kept prompt end
     def bytes_at(capacity: int) -> int:
         slots = min(capacity, window) if bounded and window > 0 else capacity
-        return fixed + copies * 2 * layers * heads * hd * (slots + block) * 2
+        # Full-attention DFlash layers retain more rows than their sliding peers.
+        rows = (layers - full) * (slots + block) + full * (capacity + block)
+        return fixed + copies * 2 * heads * hd * rows * 2
     return Geometry(bytes_at, reserve)
 
 

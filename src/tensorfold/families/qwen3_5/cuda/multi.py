@@ -247,7 +247,9 @@ class MultiDecoder:
         """Prefill queued prompts a step: several foreground ones in one forward (``_batch``), else the oldest to its
         next kept state, or STEP rows while others decode."""
 
-        batch = self._batch() if BATCH and sum(not x.background for x in self.filling) > 1 else []
+        # a batched prefill takes dense layers only (prefill_rows): a MoE target fills one prompt a step
+        dense = all(getattr(layer, "moe", None) is None for layer in self.w.layers)
+        batch = self._batch() if BATCH and dense and sum(not x.background for x in self.filling) > 1 else []
         if len(batch) > 1:
             return self._fill_batch(batch)
         s = next_fill(self.filling)

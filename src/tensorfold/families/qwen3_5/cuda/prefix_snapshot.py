@@ -10,7 +10,7 @@ from tensorfold.cuda.prefix_snapshot import SIZES as _SIZES
 from tensorfold.cuda.prefix_snapshot import check as _check
 from tensorfold.cuda.prefix_snapshot import integer as _integer
 
-_SCHEMA = 1
+_SCHEMA = 2
 
 
 def _validate(meta, tensors, identity):
@@ -40,10 +40,13 @@ def _validate(meta, tensors, identity):
         _check(isinstance(draft, dict) and set(draft) == {"layers", "context_len", "context_end"}, "drafter fields")
         length, end = draft["context_len"], draft["context_end"]
         _check(_integer(length) and _integer(end) and length <= end, "drafter positions")
-        _check(isinstance(draft["layers"], list) and all(type(x) is bool for x in draft["layers"]), "drafter layers")
-        for i, present in enumerate(draft["layers"]):
-            if present:
-                expected[f"draft_k.{i}"] = expected[f"draft_v.{i}"] = ("BF16", 3, (1, length))
+        rows = draft["layers"]
+        _check(isinstance(rows, list) and all(x is None or (_integer(x) and x <= length) for x in rows),
+               "drafter layers")
+        _check(max((x for x in rows if x is not None), default=0) == length, "drafter context length")
+        for i, count in enumerate(rows):
+            if count is not None:
+                expected[f"draft_k.{i}"] = expected[f"draft_v.{i}"] = ("BF16", 3, (1, count))
     _check(set(tensors) == set(expected), "tensor names")
     total = 0
     for name, descriptor in tensors.items():
@@ -89,7 +92,8 @@ def _collect(ids, state, snap, identity):
         meta["draft"] = {"layers": [], "context_len": length, "context_end": end}
         for i, (k, v) in enumerate(zip(kc, vc)):
             _check((k is None) == (v is None), "drafter key/value presence")
-            meta["draft"]["layers"].append(k is not None)
+            _check(k is None or k.ndim == 3, "drafter tensor rank")
+            meta["draft"]["layers"].append(None if k is None else k.shape[1])
             if k is not None:
                 tensors[f"draft_k.{i}"], tensors[f"draft_v.{i}"] = k, v
     return meta, tensors

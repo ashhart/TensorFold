@@ -15,7 +15,11 @@ def settings(engine: Any) -> dict[str, Any]:
         "context_window", "tp", "rank", "max_rows", "tree_rows", "allow_copy", "concurrent", "vision_enabled")}
     settings.update({name: getattr(weights, name, None) for name in ("precision", "quant", "fast_prefill")})
     settings["own"] = tuple(sorted((getattr(weights, "own", None) or {}).items()))
-    settings["draft"] = getattr(engine, "draft", None) is not None
+    draft = getattr(engine, "draft", None)
+    settings["draft"] = draft is not None
+    settings["draft_settings"] = {name: getattr(draft, name, None) for name in ("window", "block", "fast")}
+    settings["draft_settings"].update({name: tuple(getattr(draft, name, ()))
+                                     for name in ("taps", "windows")})
     settings["vision"] = getattr(engine, "vision", None) is not None
     settings["streams"] = getattr(getattr(engine, "scheduler", None), "max_streams", 1)
     return settings

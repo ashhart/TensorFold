@@ -36,8 +36,15 @@ def admission(geometry):
     def with_workspace(text):
         from .prefill import CHUNK
 
-        d, i = int(text["hidden_size"]), int(text["intermediate_size"])
-        return with_fixed(geometry(text), exl3_workspace(d * i, CHUNK, max(d, i)))
+        d = int(text["hidden_size"])
+        i = int(text.get("intermediate_size") or text.get("shared_expert_intermediate_size")
+                or text["moe_intermediate_size"])
+        heads = int(text["num_attention_heads"])
+        hd = int(text.get("head_dim") or d // heads)
+        nk, nv = int(text.get("linear_num_key_heads", 0)), int(text.get("linear_num_value_heads", 0))
+        dk, dv = int(text.get("linear_key_head_dim", 0)), int(text.get("linear_value_head_dim", 0))
+        widest = max(i, 2 * heads * hd, 2 * nk * dk + nv * dv)   # a MoE's widest prompt projection is attention's
+        return with_fixed(geometry(text), exl3_workspace(d * widest, CHUNK, max(d, i, heads * hd, nv * dv)))
 
     return with_workspace, exl3_weights
 
@@ -95,8 +102,8 @@ PLANS: dict[tuple[float, int, int], tuple[int, int]] = {
 }
 
 
-def load_exl3(model_dir: str | Path, device: str = "cuda"):
-    """An EXL3 pack: the model's groups as ``Exl3``, its unquantized tensors as stored; vision tower and MTP skipped."""
+def load_exl3(model_dir: str | Path, device: str = "cuda", *, mlp=None):
+    """An EXL3 pack as ``Exl3`` groups and stored tensors (no vision or MTP); ``mlp`` reads each layer's MLP itself."""
 
     from tensorfold.cuda.exl3 import format as fmt
     from tensorfold.cuda.exl3.prefill import Workspace
@@ -109,7 +116,8 @@ def load_exl3(model_dir: str | Path, device: str = "cuda"):
     prefix = "model.language_model."
 
     def foreign(name: str) -> bool:
-        return not (name.startswith(prefix) or name.startswith("lm_head")) or ".mtp." in name
+        return (not (name.startswith(prefix) or name.startswith("lm_head")) or ".mtp." in name
+                or (mlp is not None and ".mlp." in name))
 
     if ckpt.bad:
         raise ValueError(f"unreadable EXL3 groups: {list(ckpt.bad.items())[:3]}")
@@ -160,10 +168,11 @@ def load_exl3(model_dir: str | Path, device: str = "cuda"):
                              v=group(p + "self_attn.v_proj"), o=group(p + "self_attn.o_proj"),
                              q_norm=norm(p + "self_attn.q_norm.weight"),
                              k_norm=norm(p + "self_attn.k_norm.weight"))
+        fields = mlp(prefix + p + "mlp.", cfg, device) if mlp is not None else \
+            {"gate": group(p + "mlp.gate_proj"), "up": group(p + "mlp.up_proj"), "down": group(p + "mlp.down_proj")}
         layers.append(Layer(linear=cfg.is_linear(i), input_norm=norm(p + "input_layernorm.weight"),
                             post_norm=norm(p + "post_attention_layernorm.weight"), gdn=gdn, attn=attn,
-                            gate=group(p + "mlp.gate_proj"), up=group(p + "mlp.up_proj"),
-                            down=group(p + "mlp.down_proj")))
+                            **{"gate": None, "up": None, "down": None, **fields}))
     w = Weights(config=cfg, embed=Plain(stored("embed_tokens.weight")), layers=layers,
                 norm=norm("norm.weight"), head=group("lm_head"), quant="exl3")
     half = cfg.rope_dims // 2

@@ -244,7 +244,7 @@ def tree_forward(w: Weights, tokens: torch.Tensor, parents: Sequence[int], st: S
         if x.shape != (W, c.hidden) or pending.shape != x.shape:
             raise ValueError("pipeline activation shape must match window and hidden width")
     record: list[Record] = []
-    taps: list[torch.Tensor] = []
+    taps: dict[int, torch.Tensor] = {}
     for i, layer in enumerate(w.layers):
         x, h, xs = glue.add_rmsnorm(x, pending, layer.input_norm, c.eps)
         if layer.linear:
@@ -284,8 +284,8 @@ def tree_forward(w: Weights, tokens: torch.Tensor, parents: Sequence[int], st: S
             record.append(AttentionRecord(key, value))
         x, h, xs = glue.add_rmsnorm(x, r, layer.post_norm, c.eps)
         pending = _mlp(layer, h, xs, tp)
-        if capture_taps and i in (5, 19, 33, 47, 61):
-            taps.append((x.float() + pending.float()).to(torch.bfloat16))
+        if capture_taps and i in w.tap_layers:
+            taps[i] = (x.float() + pending.float()).to(torch.bfloat16)
     if not finish:
         if pending is None:
             raise ValueError("pipeline stage must contain at least one layer")
@@ -293,9 +293,9 @@ def tree_forward(w: Weights, tokens: torch.Tensor, parents: Sequence[int], st: S
     _, h, xs = glue.add_rmsnorm(x, pending, w.norm, c.eps)
     logits = _mm(h, w.head, xs) if full_logits else h
     if capture_taps:
-        if len(taps) != 5:
-            raise ValueError("DFlash2 taps require the complete 64-layer target")
-        return logits, record, torch.cat(taps, dim=-1)
+        if len(taps) != len(w.tap_layers):
+            raise ValueError("DFlash taps require the complete target")
+        return logits, record, torch.cat([taps[i] for i in w.tap_layers], dim=-1)
     if hidden:                                     # the rows' final normed states (what an MTP head reads)
         return logits, record, h
     return logits, record
@@ -350,7 +350,7 @@ def multi_tree_forward(w: Weights, streams: Sequence[tuple[Sequence[int], Sequen
     x = glue.embedding(ids_t, w.embed)
     pending: torch.Tensor | None = None
     record: list[Record] = []
-    taps: list[torch.Tensor] = []
+    taps: dict[int, torch.Tensor] = {}
     for i, layer in enumerate(w.layers):
         x, h, xs = glue.add_rmsnorm(x, pending, layer.input_norm, c.eps)
         if layer.linear:
@@ -390,14 +390,14 @@ def multi_tree_forward(w: Weights, streams: Sequence[tuple[Sequence[int], Sequen
             record.append(AttentionRecord(key, value))
         x, h, xs = glue.add_rmsnorm(x, r, layer.post_norm, c.eps)
         pending = _mlp(layer, h, xs, tp)
-        if capture_taps and i in (5, 19, 33, 47, 61):
-            taps.append((x.float() + pending.float()).to(torch.bfloat16))
+        if capture_taps and i in w.tap_layers:
+            taps[i] = (x.float() + pending.float()).to(torch.bfloat16)
     _, h, xs = glue.add_rmsnorm(x, pending, w.norm, c.eps)
     logits = _mm(h, w.head, xs) if full_logits else h
     if capture_taps:
-        if len(taps) != 5:
-            raise ValueError("DFlash2 taps require the complete 64-layer target")
-        return logits, record, torch.cat(taps, dim=-1), starts
+        if len(taps) != len(w.tap_layers):
+            raise ValueError("DFlash taps require the complete target")
+        return logits, record, torch.cat([taps[i] for i in w.tap_layers], dim=-1), starts
     return logits, record, h if hidden else None, starts
 
 

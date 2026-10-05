@@ -21,7 +21,7 @@ from .qmm_fast import matmul, matmul_partial, tile
 from .weights import Plain, QLinear, Weights
 
 CHUNK = 4096
-TAP_LAYERS = (5, 19, 33, 47, 61)
+TAP_LAYERS = (5, 19, 33, 47, 61)          # Qwen3.8-27B's (Weights.tap_layers)
 
 
 def _mm(x, w: QLinear, f32: bool = False) -> torch.Tensor:
@@ -101,7 +101,7 @@ def prefill_chunk(w: Weights, tokens: torch.Tensor, st: State, *, tp: bool = Fal
 
         x = replace_rows(x, vision, p0, p0 + W)
     pending: torch.Tensor | None = None
-    taps: list[torch.Tensor] = []
+    taps: dict[int, torch.Tensor] = {}
     part = clone_state(st) if cut else None     # its attention buffers are the chunk's, through the shared list
     for i, layer in enumerate(w.layers):
         x, h = pg.add_rmsnorm(x, pending, layer.input_norm, c.eps)
@@ -152,15 +152,15 @@ def prefill_chunk(w: Weights, tokens: torch.Tensor, st: State, *, tp: bool = Fal
         else:
             x, h = pg.add_rmsnorm(x, r, layer.post_norm, c.eps)
             pending = _mlp(h, layer, pg, tp)
-        if capture_taps and i in TAP_LAYERS:
-            taps.append((x.float() + pending.float()).to(torch.bfloat16))
+        if capture_taps and i in w.tap_layers:
+            taps[i] = (x.float() + pending.float()).to(torch.bfloat16)
     st.pos = p0 + W
     normed = None
     if every:
         _, normed, _ = glue.add_rmsnorm(x, pending, w.norm, c.eps)
     elif last:
         _, normed, _ = glue.add_rmsnorm(x[-1:].contiguous(), pending[-1:].contiguous(), w.norm, c.eps)
-    taps_out = torch.cat(taps, dim=-1) if capture_taps else None
+    taps_out = torch.cat([taps[i] for i in w.tap_layers], dim=-1) if capture_taps else None
     if part is None:
         return normed, taps_out
     part.pos = p0 + cut                             # the chunk's buffers: their rows below part.pos stay as committed
@@ -263,7 +263,7 @@ def prefill_rows(w: Weights, items: list[tuple[Sequence[int], State, int]], *, t
     ids = _pinned(np.concatenate([np.asarray(ids, dtype=np.int64) for ids, _, _ in items]), dev)
     x = glue.embedding(ids, w.embed)
     pending: torch.Tensor | None = None
-    taps: list[torch.Tensor] = []
+    taps: dict[int, torch.Tensor] = {}
     parts = [clone_state(st) if cut else None for _, st, cut in items]
     spans = list(zip(starts, sizes))
     for i, layer in enumerate(w.layers):
@@ -318,9 +318,9 @@ def prefill_rows(w: Weights, items: list[tuple[Sequence[int], State, int]], *, t
             r = _row_mm(pg.gate_mul(torch.cat(outs), qg, heads=c.heads, head_dim=c.head_dim), attn.o, tp)
         x, h = pg.add_rmsnorm(x, r, layer.post_norm, c.eps)
         pending = _mlp(h, layer, pg, tp)
-        if capture_taps and i in TAP_LAYERS:
-            taps.append((x.float() + pending.float()).to(torch.bfloat16))
-    every = torch.cat(taps, dim=-1) if capture_taps else None
+        if capture_taps and i in w.tap_layers:
+            taps[i] = (x.float() + pending.float()).to(torch.bfloat16)
+    every = torch.cat([taps[i] for i in w.tap_layers], dim=-1) if capture_taps else None
     out = []
     for st, part, p0, (_, _, cut), (o, n) in zip(sts, parts, p0s, items, spans):
         st.pos = p0 + n
