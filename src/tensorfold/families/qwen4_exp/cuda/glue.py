@@ -552,6 +552,52 @@ def ple_conv(gated, pss, norm_conv, tail, conv_w, h, hout, nrow, eps: float, str
 
 
 @triton.jit
+def _ple_conv_rows(GATED, PSS, NC, TAILS, CW, H, HOUT, NROW, SID, STARTS, eps,
+                   D: tl.constexpr, S: tl.constexpr, TAPS: tl.constexpr, DIL: tl.constexpr, BLOCK: tl.constexpr):
+    """Original PLE tap arithmetic with device segment starts and four staged tails."""
+
+    r = tl.program_id(0)
+    c = tl.program_id(1)
+    W: tl.constexpr = S * D
+    NT: tl.constexpr = (TAPS - 1) * DIL
+    sid = tl.load(SID + r)
+    start = tl.load(STARTS + sid)
+    local = r - start
+    e = c * BLOCK + tl.arange(0, BLOCK)
+    s = (c * BLOCK) // D
+    acc = tl.zeros((BLOCK,), dtype=tl.float32)
+    for t in tl.static_range(TAPS):
+        at = local + t * DIL
+        if at < NT:
+            xv = tl.load(TAILS + (sid * NT + at) * W + e).to(tl.float32)
+        else:
+            rr = start + at - NT
+            rinv = 1.0 / tl.sqrt(tl.load(PSS + rr * S + s) / D + eps)
+            g = tl.load(GATED + rr * W + e).to(tl.float32)
+            xv = (g * rinv * tl.load(NC + e).to(tl.float32)).to(tl.bfloat16).to(tl.float32)
+        acc += tl.load(CW + e * TAPS + t).to(tl.float32) * xv
+    conv = acc.to(tl.bfloat16).to(tl.float32)
+    act = _bsilu(conv)
+    g = tl.load(GATED + r * W + e).to(tl.float32)
+    ple = (g + act).to(tl.bfloat16).to(tl.float32)
+    hv = tl.load(H + r * W + e).to(tl.float32)
+    tl.store(HOUT + r * W + e, (hv + ple).to(tl.bfloat16))
+    rinv = 1.0 / tl.sqrt(tl.load(PSS + r * S + s) / D + eps)
+    own = (g * rinv * tl.load(NC + e).to(tl.float32)).to(tl.bfloat16)
+    tl.store(NROW + r * W + e, own)
+
+
+def ple_conv_rows(gated, pss, norm_conv, tails, conv_w, h, hout, nrow, sid, starts,
+                  eps: float, streams: int, dilation: int) -> None:
+    """Convolve exactly the real rows; no target or expert row padding."""
+
+    rows, wide = h.shape
+    _ple_conv_rows[(rows, wide // 512)](
+        gated, pss, norm_conv, tails, conv_w, h, hout, nrow, sid, starts, eps,
+        D=wide // streams, S=streams, TAPS=conv_w.shape[1], DIL=dilation, BLOCK=512, num_warps=4)
+
+
+@triton.jit
 def _add_streams(E, HS, OUT, D: tl.constexpr, S: tl.constexpr, BLOCK: tl.constexpr):
     """out[r, s, :] = bf16(e[r] + hs[r, s]) (the MTP input: the embedding branch added to each stream)."""
 
