@@ -1667,13 +1667,14 @@ fn copyDrafts(hist: []const u32, min: usize, out: []u32) usize {
 
 /// Prompt chunks of up to PMAX rows: projections on the 6-bit tensor-unit kernels, experts sorted by expert and
 /// gathered, the decode's row kernels at the chunk's rows, and DeltaNet storing only its last row's state.
-const PMAX = 512;
+const PMAX = 2048;
 const Prompt = struct {
     r: *Run,
     qmm6: mtl.Pipeline,
     gather64: mtl.Pipeline,
     gather32: mtl.Pipeline,
     router_mm: mtl.Pipeline,
+    attn256: mtl.Pipeline,
     splitk: mtl.Pipeline,
     parts_sum: mtl.Pipeline,
     pl: [14]mtl.Pipeline, // normed, act, mix, router, route, offsets, sort, gather rows, act2, scatter, copy, DeltaNet pre/scan/post
@@ -1695,6 +1696,7 @@ const Prompt = struct {
         p.gather64 = try mtl.Pipeline.init(r.device, qlib, "tf_gather_qmm6_nax_64", false);
         p.gather32 = try mtl.Pipeline.init(r.device, qlib, "tf_gather_qmm6_nax_32", false);
         p.router_mm = try mtl.Pipeline.init(r.device, qlib, "tf_mm_bf16_f32_t_nax", false);
+        p.attn256 = try mtl.Pipeline.init(r.device, qlib, "tf_attn256_nax", false);
         p.splitk = try mtl.Pipeline.init(r.device, qlib, "tf_qmm6_splitk_nax", false);
         p.parts_sum = try mtl.Pipeline.init(r.device, qlib, "tf_parts_sum", false);
         const glib = try mtl.Library.fromSource(r.device, try std.mem.concat(r.arena, u8, &.{ header, ks.flashnext_prompt }), mtl.CompileOptions.mlx());
@@ -1734,9 +1736,9 @@ const Prompt = struct {
             .ssp = try B.of(r, R * 10 * 4 * 4), .normed = try B.of(r, R * WIDE * 2), .dn = try B.of(r, R * 324 * 2),
             .hact = try B.of(r, R * 320 * 2), .inj_a = try B.of(r, R * 4 * 2), .inj_m = try B.of(r, R * 4 * 2),
             .up = try B.of(r, R * WIDE * 2), .mixed = try B.of(r, R * D * 2), .p = try B.of(r, R * 16480 * 2),
-            .gout = try B.of(r, R * 6144 * 2), .branch = try B.of(r, R * D * 2), .cso = try B.of(r, R * CS_ROW),
+            .gout = try B.of(r, R * 6144 * 2), .branch = try B.of(r, R * D * 2), .cso = try B.of(r, CS_ROW),
             .q = try B.of(r, R * 24 * 256 * 2), .kout = try B.of(r, R * 2 * 256 * 2), .iq = try B.of(r, R * 4 * 128 * 2),
-            .po = try B.of(r, R * 24 * 16 * 256 * 4), .pm = try B.of(r, R * 24 * 16 * 2 * 4), .aout = try B.of(r, R * 6144 * 2),
+            .po = try B.of(r, 64), .pm = try B.of(r, 64), .aout = try B.of(r, R * 6144 * 2),
             .pos = try B.of(r, R * 4), .nk = try B.of(r, R * 4), .zeros = try B.of(r, R * 4), .kvmeta = try B.of(r, 16),
             .lg = try B.of(r, R * 513 * 4), .pick = try B.of(r, R * 10 * 4), .wts = try B.of(r, R * 10 * 4),
             .cnt = try B.of(r, 512 * 4), .off = try B.of(r, 513 * 4), .cur = try B.of(r, 512 * 4), .row_of = try B.of(r, R * 10 * 4),
@@ -1882,7 +1884,7 @@ const Prompt = struct {
         const L0 = &m.layers[0];
         const L3 = &m.layers[3];
         const pairs = rows * 10;
-        const names = [_][]const u8{ "router", "top-k+offsets+sort", "row gather+scatter", "expert gate+up gathers", "expert act", "expert down gather", "shared expert", "hyper-connection", "DeltaNet in+out projections", "DeltaNet pre", "DeltaNet scan", "DeltaNet post", "attention proj+o", "attention parts", "hc norms (3)" };
+        const names = [_][]const u8{ "router", "top-k+offsets+sort", "row gather+scatter", "expert gate+up gathers", "expert act", "expert down gather", "shared expert", "hyper-connection", "DeltaNet in+out projections", "DeltaNet pre", "DeltaNet scan", "DeltaNet post", "attention proj+o", "attention (tensor units)", "hc norms (3)" };
         for (names, 0..) |name, which| {
             const cb = r.queue.commandBuffer();
             r.enc = cb.compute(if (r.serial) .serial else .concurrent);
@@ -1963,7 +1965,15 @@ const Prompt = struct {
                         p.qmm(b.mixed, p.proj[3], D, 13952, rows, b.p, 0);
                         p.qmm(b.aout, p.out[3], 6144, D, rows, b.branch, 0);
                     },
-                    13 => try r.callRows("q4_attn_parts#[24, 256]", rows, &.{ b.q, L3.keys, L3.vals, b.zeros, b.nk, b.zeros, m.t.scale }, &.{ b.po, b.pm }, null),
+                    13 => {
+                        p.bind(p.attn256, &.{ b.q, L3.keys, L3.vals, b.p });
+                        const ap = [4]i32{ @intCast(rows), @intCast(rows), 0, CAP };
+                        r.enc.setBytes(std.mem.asBytes(&ap), 4);
+                        r.enc.setBuffer(m.t.scale.b, m.t.scale.off, 5);
+                        r.enc.setBuffer(b.aout.b, b.aout.off, 6);
+                        r.enc.dispatchThreads(mtl.Size.of(((rows + 63) / 64) * 128, 24, 1), mtl.Size.of(128, 1, 1));
+                        p.barrier();
+                    },
                     14 => {
                         try r.callRows("q4_hc_norm_none#[10240]", rows, &.{b.h[0]}, &.{ b.h[1], b.ssp }, null);
                         try r.callRows("q4_hc_norm_plain#[10240]", rows, &.{ b.h[1], b.inj_a, b.branch }, &.{ b.h[0], b.ssp }, null);
@@ -2086,8 +2096,15 @@ const Prompt = struct {
                 p.bind(r.kv_pipe, &.{ b.kout, b.p, L.keys, L.vals, L.raw, b.kvmeta });
                 r.enc.dispatchThreads(mtl.Size.of(512 * rows, 1, 1), mtl.Size.of(256, 1, 1));
                 p.barrier();
-                if (p.skip & 4 == 0) try r.callRows("q4_attn_parts#[24, 256]", rows, &.{ b.q, L.keys, L.vals, b.zeros, b.nk, b.zeros, t.scale }, &.{ b.po, b.pm }, null);
-                try r.callRows("q4_attn_merge_gate#[24, 16, 256]", rows, &.{ b.po, b.pm, b.p }, &.{b.aout}, null);
+                if (p.skip & 4 == 0) { // causal attention over the cache and the chunk, gated on the way out
+                    p.bind(p.attn256, &.{ b.q, L.keys, L.vals, b.p });
+                    const ap = [4]i32{ @intCast(rows), @intCast(m.pos + rows), @intCast(m.pos), CAP };
+                    r.enc.setBytes(std.mem.asBytes(&ap), 4);
+                    r.enc.setBuffer(t.scale.b, t.scale.off, 5);
+                    r.enc.setBuffer(b.aout.b, b.aout.off, 6);
+                    r.enc.dispatchThreads(mtl.Size.of(((rows + 63) / 64) * 128, 24, 1), mtl.Size.of(128, 1, 1));
+                    p.barrier();
+                }
                 p.qmm(b.aout, p.out[i], 6144, D, rows, b.branch, 0);
             }
             try r.callRows("q4_hc_norm_plain#[10240]", rows, &.{ b.h[cur], b.inj_a, b.branch }, &.{ b.h[1 - cur], b.ssp }, null);
