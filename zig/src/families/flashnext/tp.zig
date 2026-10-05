@@ -1,8 +1,9 @@
 //! Speed-up mode for Flash Next: two Macs with the whole model each, half the work each, over MCDMA.
-//! Decode: each rank computes the routed experts it owns (rank 0 the first 256 and the shared expert, rank 1 the rest);
-//! after each target layer's experts the GPU packs its own slots in row and slot order and posts a sequence; the host
-//! sends them to the peer and serves the sequence once the peer's have landed; the GPU unpacks them. Both ranks route
-//! the same, so each knows the other's slots, and every slot holds one rank's value: the bits equal one Mac's.
+//! Decode: each rank computes the routed experts it owns (rank 0 the first 256, rank 1 the rest) and both the shared
+//! one; after each target layer's experts the GPU sums its routed slots (fp32, slot order) and posts a sequence; the
+//! host sends the sum to the peer and serves the sequence once the peer's has landed; the next layer's combine adds
+//! the two in rank order (an fp32 reorder of one Mac's slot sum, the same on both ranks). DeltaNet layers split their
+//! heads the same way: each rank's out-projection partial, exchanged and added in rank order.
 //! Prefill: a chunk's rows split across the two Macs (replay.zig `chunkPair`); the host sends each layer's handoff into
 //! the peer's slot for that layer and signals the layer's flag, which the peer's GPU waits for.
 const std = @import("std");
@@ -29,13 +30,25 @@ pub const DN_SLOT = pages(CS_ROW + SO_ROW); // a DeltaNet layer: conv state row,
 pub const ATT_SLOT = 4 * PMAX * 512 + PMAX * 256; // an attention layer: keys of both heads, values of both, raw keys
 pub const KV_HEAD = PMAX * 512; // one head's keys (or values) at the most rows, inside ATT_SLOT
 const DECODE = 0;
-const PREFILL = 2 * SLOT;
+const PART = MAXR * D * 4; // one rank's fp32 partial of a split projection, at the widest window
+const REDUCE = 2 * SLOT; // the peer's partials, alternating by parity
+const PREFILL = REDUCE + 2 * PART;
 pub const TAIL = PREFILL + 36 * DN_SLOT + 12 * ATT_SLOT; // the n-gram tail: PLE_TAIL rows of WIDE
 pub const LAST = TAIL + pages(9 * WIDE * 2); // the last prompt row's streams, then its first token
 pub const MTP = LAST + pages(WIDE * 2 + 16); // the MTP head's keys, an attention slot
 const FLAGS = MTP + ATT_SLOT;
 const SYNC = FLAGS + PAGE;
-const WINDOW = SYNC + PAGE;
+const SENDX = SYNC + PAGE; // this rank's packed expert slots, sent from here: two by parity, a page of room before each
+const SENDR = SENDX + 2 * (PAGE + SLOT); // this rank's fp32 partials, sent from here, the same way
+const WINDOW = SENDR + 2 * (PAGE + PART);
+
+fn sendX(x: u32) usize {
+    return SENDX + (x % 2) * (PAGE + SLOT) + PAGE;
+}
+
+fn sendR(x: u32) usize {
+    return SENDR + (x % 2) * (PAGE + PART) + PAGE;
+}
 const FLAG = FLAGS; // decode: the last sequence whose outputs have landed
 const HELLO = FLAGS + 8;
 pub const LAYER_FLAG = FLAGS + 64; // prefill: a word a layer, then the n-gram tail, back, and MTP words
@@ -63,11 +76,6 @@ test "prefill slots tile the region without overlap" {
 
 pub const Settings = struct { rank: u32, library: []const u8, links: []const fabric.mcdma.Link };
 
-/// Which rank computes slot k of a row whose routed experts are `pick` (k == 10: the shared expert, rank 0).
-fn owner(pick: []const u32, k: usize) u32 {
-    return if (k == 10) 0 else @intFromBool(pick[k] >= 256);
-}
-
 const source =
     \\#include <metal_stdlib>
     \\using namespace metal;
@@ -75,6 +83,15 @@ const source =
     \\kernel void tp_post(device atomic_uint* sync [[buffer(0)]], constant uint& seq [[buffer(1)]],
     \\                    const constant int* rows [[buffer(2)]]) {
     \\  atomic_store_explicit(&sync[1024], (seq << 5) | uint(rows[0]), memory_order_relaxed);
+    \\}
+    \\// post then poll in one launch: the host sees the post while this thread polls for its serve
+    \\kernel void tp_post_wait(device atomic_uint* sync [[buffer(0)]], constant uint& seq [[buffer(1)]],
+    \\                         const constant int* rows [[buffer(2)]]) {
+    \\  atomic_store_explicit(&sync[1024], (seq << 5) | uint(rows[0]), memory_order_relaxed);
+    \\  uint polls = 0;
+    \\  while (int(atomic_load_explicit(&sync[0], memory_order_relaxed) - seq) < 0) {
+    \\    if (++polls > 400000000u) { atomic_fetch_add_explicit(&sync[2048], 1u, memory_order_relaxed); return; }
+    \\  }
     \\}
     \\// one thread polls until the 32-bit word reaches `value`; a give-up is counted, never silent
     \\kernel void tp_wait(device atomic_uint* word [[buffer(0)]], constant uint& value [[buffer(1)]],
@@ -84,34 +101,53 @@ const source =
     \\    if (++polls > 400000000u) { atomic_fetch_add_explicit(&sync[2048], 1u, memory_order_relaxed); return; }
     \\  }
     \\}
-    \\// the slot's owner: the shared expert (slot 10) is rank 0's, routed experts below 256 rank 0's, the rest rank 1's
-    \\inline uint tp_owner(const device uint* pick, uint p) {
-    \\  const uint r = p / 11u, k = p % 11u;
-    \\  return k == 10u ? 0u : (pick[r * 10u + k] >= 256u ? 1u : 0u);
+    \\// the two ranks' fp32 partials added in rank order and rounded once
+    \\kernel void tp_sum(const device float* mine [[buffer(0)]], const device float* peer [[buffer(1)]],
+    \\                   device bfloat* out [[buffer(2)]], const constant int* rows [[buffer(3)]],
+    \\                   constant uint& rank [[buffer(4)]], uint i [[thread_position_in_grid]]) {
+    \\  if (i >= uint(rows[0]) * 2560u) return;
+    \\  out[i] = bfloat(rank == 0u ? mine[i] + peer[i] : peer[i] + mine[i]);
     \\}
-    \\// slot p's place among `rank`'s slots, in row and slot order
-    \\inline uint tp_index(const device uint* pick, uint p, uint rank) {
-    \\  uint n = 0;
-    \\  for (uint q = 0; q < p; q++) n += tp_owner(pick, q) == rank ? 1u : 0u;
-    \\  return n;
+    \\// this rank's routed slots summed in slot order, fp32 (the peer's slots are zero here): what the peer adds
+    \\kernel void tp_moe_part(const device bfloat* y [[buffer(0)]], const device float* wts [[buffer(1)]],
+    \\                        device float* part [[buffer(2)]], const constant int* rows [[buffer(3)]],
+    \\                        uint i [[thread_position_in_grid]]) {
+    \\  const uint r = i / 2560u, d = i % 2560u;
+    \\  if (r >= uint(rows[0])) return;
+    \\  float acc = 0.0f;
+    \\  for (uint k = 0; k < 10u; k++) acc = fma(float(y[(r * 11u + k) * 2560u + d]), wts[r * 10u + k], acc);
+    \\  part[i] = acc;
     \\}
-    \\// threadgroup per slot: this rank's slots, packed in order
-    \\kernel void tp_pack(const device bfloat* y [[buffer(0)]], const device uint* pick [[buffer(1)]],
-    \\                    device bfloat* packed [[buffer(2)]], const constant int* rows [[buffer(3)]],
-    \\                    constant uint& rank [[buffer(4)]], uint t [[thread_position_in_threadgroup]],
-    \\                    uint p [[threadgroup_position_in_grid]]) {
-    \\  if (p >= uint(rows[0]) * 11u || tp_owner(pick, p) != rank) return;
-    \\  const uint at = tp_index(pick, p, rank);
-    \\  for (uint d = t; d < 2560u; d += 256u) packed[at * 2560u + d] = y[p * 2560u + d];
-    \\}
-    \\// threadgroup per slot: the peer's packed slots into theirs
-    \\kernel void tp_unpack(device bfloat* y [[buffer(0)]], const device uint* pick [[buffer(1)]],
-    \\                      const device bfloat* packed [[buffer(2)]], const constant int* rows [[buffer(3)]],
-    \\                      constant uint& peer [[buffer(4)]], uint t [[thread_position_in_threadgroup]],
-    \\                      uint p [[threadgroup_position_in_grid]]) {
-    \\  if (p >= uint(rows[0]) * 11u || tp_owner(pick, p) != peer) return;
-    \\  const uint at = tp_index(pick, p, peer);
-    \\  for (uint d = t; d < 2560u; d += 256u) y[p * 2560u + d] = packed[at * 2560u + d];
+    \\inline float tp_bsig(float x) { return float(bfloat(1.0f / (1.0f + metal::exp(-x)))); }
+    \\// q4_hc_norm_grouped with the routed sum from the two ranks' partials (rank 0's + rank 1's): the MoE branch into
+    \\// the 4 streams, and each stream's partial sum of squares over this threadgroup's 256 dims
+    \\kernel void tp_combine(const device bfloat* H [[buffer(0)]], const device bfloat* INJ [[buffer(1)]],
+    \\    const device bfloat* Y [[buffer(2)]], const device float* LG [[buffer(3)]], const device float* P0 [[buffer(4)]],
+    \\    const device float* P1 [[buffer(5)]], device bfloat* HN [[buffer(6)]], device float* SSP [[buffer(7)]],
+    \\    uint g [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    \\    uint3 tpos [[thread_position_in_threadgroup]], uint3 tg [[threadgroup_position_in_grid]]) {
+    \\  constexpr int S = 4, D = 2560, TOPK = 10, NL = 513, W = S * D, NT = D / 256;
+    \\  const uint t = tpos.x;
+    \\  const int j = int(tg.x), r = int(tg.y), d = j * 256 + int(t);
+    \\  threadgroup float part[8][S];
+    \\  float ss[S];
+    \\  const float routed = P0[r * D + d] + P1[r * D + d];
+    \\  const float shared = float(bfloat(float(Y[(r * (TOPK + 1) + TOPK) * D + d]) * tp_bsig(float(bfloat(LG[r * NL + NL - 1])))));
+    \\  const float branch = float(bfloat(float(bfloat(routed)) + shared));
+    \\  for (int s = 0; s < S; s++) {
+    \\    const int e = s * D + d;
+    \\    float hv = float(H[r * W + e]);
+    \\    hv = float(bfloat(hv + float(bfloat(branch * float(INJ[r * S + s])))));
+    \\    HN[r * W + e] = bfloat(hv);
+    \\    ss[s] = simd_sum(hv * hv);
+    \\  }
+    \\  if (lane == 0) for (int s = 0; s < S; s++) part[g][s] = ss[s];
+    \\  threadgroup_barrier(mem_flags::mem_threadgroup);
+    \\  if (t < S) {
+    \\    float total = 0.0f;
+    \\    for (int k = 0; k < 8; k++) total += part[k][t];
+    \\    SSP[(r * NT + j) * S + t] = total;
+    \\  }
     \\}
 ;
 
@@ -120,7 +156,7 @@ pub const Write = struct { src: [*]const u8, len: usize, dst: usize };
 
 /// A posted sequence's work: a decode exchange, or prefill writes and their flag.
 const Job = struct {
-    kind: enum { exchange, send } = .send,
+    kind: enum { exchange, reduce, send } = .send,
     writes: [8]Write = undefined,
     n: usize = 0,
     flag: usize = 0,
@@ -137,10 +173,12 @@ pub const Tp2 = struct {
     wbuf: mtl.Buffer,
     post: mtl.Pipeline,
     wait: mtl.Pipeline,
-    pack_pipe: mtl.Pipeline,
-    unpack_pipe: mtl.Pipeline,
-    pack_buf: mtl.Buffer, // this rank's slots, packed: what the host sends
-    pick: [*]const u32, // the routed experts of each row (the model's pick), so the host knows the packed size
+    moe_part_pipe: mtl.Pipeline,
+    combine_pipe: mtl.Pipeline,
+    last_x: u32 = 0, // the last expert exchange: where the next combine finds both partials
+    post_wait: mtl.Pipeline,
+    fused: bool = false, // TF_TP_FUSED: post and wait in one launch
+    sum_pipe: mtl.Pipeline,
     one: mtl.Buffer, // a rows word holding 1, for posts that carry no rows
     seq: u32 = 0, // the last sequence this Mac's GPU posts (its own count: prefill sends are rank 0's alone)
     xseq: u32 = 0, // decode exchanges so far, the same count on both Macs: their slots' parity and flag values
@@ -151,10 +189,13 @@ pub const Tp2 = struct {
     stop: std.atomic.Value(bool) = .init(false),
     failed: std.atomic.Value(bool) = .init(false),
     trace: bool = false, // TF_TP_TRACE: log every job the host serves
+    local: bool = false, // TF_TP_LOCAL: serve every job at once, nothing sent (the GPU side's cost alone; wrong replies)
+    stats: bool = false, // TF_TP_STATS: the host's time from a job's post to its serve, every 4096 jobs
+    held_ns: u64 = 0,
+    held_max: u64 = 0,
 
-    /// Connect to the peer named in the settings file and start the host's service thread; `pick` holds each
-    /// window row's routed experts.
-    pub fn init(gpa: std.mem.Allocator, device: mtl.Device, settings_path: []const u8, pick: anytype) !*Tp2 {
+    /// Connect to the peer named in the settings file and start the host's service thread.
+    pub fn init(gpa: std.mem.Allocator, device: mtl.Device, settings_path: []const u8) !*Tp2 {
         const f = try mtl.MappedFile.open(try gpa.dupeSentinel(u8, settings_path, 0));
         const s = try std.json.parseFromSliceLeaky(Settings, gpa, f.bytes[0..f.size], .{ .allocate = .alloc_always });
         if (s.rank > 1 or s.links.len != 1) return error.TpTwoRanksOneLink;
@@ -174,15 +215,18 @@ pub const Tp2 = struct {
             .wbuf = try device.bufferNoCopy(win.ptr, win.len, opts),
             .post = try mtl.Pipeline.init(device, lib_m, "tp_post", false),
             .wait = try mtl.Pipeline.init(device, lib_m, "tp_wait", false),
-            .pack_pipe = try mtl.Pipeline.init(device, lib_m, "tp_pack", false),
-            .unpack_pipe = try mtl.Pipeline.init(device, lib_m, "tp_unpack", false),
-            .pack_buf = try device.buffer(SLOT, opts),
-            .pick = @ptrCast(@alignCast(pick.b.contents() + pick.off)),
+            .moe_part_pipe = try mtl.Pipeline.init(device, lib_m, "tp_moe_part", false),
+            .combine_pipe = try mtl.Pipeline.init(device, lib_m, "tp_combine", false),
+            .post_wait = try mtl.Pipeline.init(device, lib_m, "tp_post_wait", false),
+            .sum_pipe = try mtl.Pipeline.init(device, lib_m, "tp_sum", false),
             .one = try device.buffer(16, opts),
             .jobs = try gpa.alloc(Job, JOBS),
         };
         t.one.slice(i32, 1)[0] = 1;
         t.trace = std.c.getenv("TF_TP_TRACE") != null;
+        t.local = std.c.getenv("TF_TP_LOCAL") != null;
+        t.stats = std.c.getenv("TF_TP_STATS") != null;
+        t.fused = std.c.getenv("TF_TP_FUSED") != null;
         // both ranks up before the first round: a word each way
         try rd.signal(t.peer, HELLO, 1);
         while (@atomicLoad(u64, t.word64(HELLO), .acquire) < 1) std.atomic.spinLoopHint();
@@ -197,9 +241,9 @@ pub const Tp2 = struct {
         t.ep.deinit();
     }
 
-    /// The experts this rank computes: [lo, hi) and whether the shared expert is its.
+    /// The experts this rank computes: [lo, hi) and whether the shared expert is its (both compute it).
     pub fn own(t: *const Tp2) [4]u32 {
-        return if (t.rank == 0) .{ 0, 256, 1, 0 } else .{ 256, 512, 0, 0 };
+        return if (t.rank == 0) .{ 0, 256, 1, 0 } else .{ 256, 512, 1, 0 };
     }
 
     /// GPU waits that gave up (a peer that never answered); nonzero means the run is invalid.
@@ -232,28 +276,68 @@ pub const Tp2 = struct {
         enc.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
     }
 
-    /// After a target layer's experts, on the serial encoder: pack this rank's slots, post the layer's sequence and
-    /// rows, wait for the host to serve it, unpack the peer's slots into theirs.
-    pub fn exchange(t: *Tp2, enc: mtl.ComputeEncoder, y: anytype, pick: anytype, rows_buf: anytype) void {
+    /// After a target layer's experts (`y` its slots, the peer's zero), on the serial encoder: sum this rank's routed
+    /// slots into the send buffer, post, wait for the host to swap sums with the peer; `combine` then adds them.
+    pub fn exchange(t: *Tp2, enc: mtl.ComputeEncoder, y: anytype, wts: anytype, rows_buf: anytype, rows: usize) void {
         t.xseq += 1;
         const x = t.xseq;
+        t.last_x = x;
         const seq = t.queue(.{ .kind = .exchange, .value = x });
-        enc.setPipeline(t.pack_pipe);
+        enc.setPipeline(t.moe_part_pipe);
         enc.setBuffer(y.b, y.off, 0);
-        enc.setBuffer(pick.b, pick.off, 1);
-        enc.setBuffer(t.pack_buf, 0, 2);
+        enc.setBuffer(wts.b, wts.off, 1);
+        enc.setBuffer(t.wbuf, sendX(x), 2);
+        enc.setBuffer(rows_buf.b, rows_buf.off, 3);
+        enc.dispatchThreads(mtl.Size.of(rows * D, 1, 1), mtl.Size.of(256, 1, 1));
+        t.postWait(enc, seq, rows_buf.b, rows_buf.off);
+    }
+
+    /// The last exchange's MoE branch into the streams (q4_hc_norm_grouped's job): routed = rank 0's sum + rank 1's.
+    pub fn combine(t: *Tp2, enc: mtl.ComputeEncoder, h: anytype, inj: anytype, y: anytype, lg: anytype, out: anytype, ssp: anytype, rows: usize) void {
+        const mine = sendX(t.last_x);
+        const theirs = DECODE + (t.last_x % 2) * SLOT;
+        enc.setPipeline(t.combine_pipe);
+        for ([_]@TypeOf(h){ h, inj, y, lg }, 0..) |b, j| enc.setBuffer(b.b, b.off, j);
+        enc.setBuffer(t.wbuf, if (t.rank == 0) mine else theirs, 4);
+        enc.setBuffer(t.wbuf, if (t.rank == 0) theirs else mine, 5);
+        enc.setBuffer(out.b, out.off, 6);
+        enc.setBuffer(ssp.b, ssp.off, 7);
+        enc.dispatchThreads(mtl.Size.of(D, rows, 1), mtl.Size.of(256, 1, 1));
+    }
+
+    /// Post `seq` and wait for its serve: one launch (TF_TP_FUSED) or two.
+    fn postWait(t: *Tp2, enc: mtl.ComputeEncoder, seq: u32, rows_buf: mtl.Buffer, rows_off: usize) void {
+        if (!t.fused) {
+            t.encodePost(enc, seq, rows_buf, rows_off);
+            t.waitWord(enc, SYNC + HOST * 4, seq);
+            return;
+        }
+        enc.setPipeline(t.post_wait);
+        enc.setBuffer(t.wbuf, SYNC, 0);
+        enc.setBytes(std.mem.asBytes(&seq), 1);
+        enc.setBuffer(rows_buf, rows_off, 2);
+        enc.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
+    }
+
+    /// Where the next reduce's partial goes (fp32, rows x 2560): the host sends it from there.
+    pub fn partNext(t: *const Tp2) struct { b: mtl.Buffer, off: usize } {
+        return .{ .b = t.wbuf, .off = sendR(t.xseq + 1) };
+    }
+
+    /// After a split projection wrote this rank's partial into `part`: post, wait for the host to swap partials
+    /// with the peer, then `out` (bf16, rows x 2560) = rank 0's partial + rank 1's, rounded once.
+    pub fn reduce(t: *Tp2, enc: mtl.ComputeEncoder, out: anytype, rows_buf: anytype, rows: usize) void {
+        t.xseq += 1;
+        const x = t.xseq;
+        const seq = t.queue(.{ .kind = .reduce, .value = x });
+        t.postWait(enc, seq, rows_buf.b, rows_buf.off);
+        enc.setPipeline(t.sum_pipe);
+        enc.setBuffer(t.wbuf, sendR(x), 0);
+        enc.setBuffer(t.wbuf, REDUCE + (x % 2) * PART, 1);
+        enc.setBuffer(out.b, out.off, 2);
         enc.setBuffer(rows_buf.b, rows_buf.off, 3);
         enc.setBytes(std.mem.asBytes(&t.rank), 4);
-        enc.dispatchGroups(mtl.Size.of(MAXR * 11, 1, 1), mtl.Size.of(256, 1, 1));
-        t.encodePost(enc, seq, rows_buf.b, rows_buf.off);
-        t.waitWord(enc, SYNC + HOST * 4, seq);
-        enc.setPipeline(t.unpack_pipe);
-        enc.setBuffer(y.b, y.off, 0);
-        enc.setBuffer(pick.b, pick.off, 1);
-        enc.setBuffer(t.wbuf, DECODE + (x % 2) * SLOT, 2);
-        enc.setBuffer(rows_buf.b, rows_buf.off, 3);
-        enc.setBytes(std.mem.asBytes(&t.peer), 4);
-        enc.dispatchGroups(mtl.Size.of(MAXR * 11, 1, 1), mtl.Size.of(256, 1, 1));
+        enc.dispatchThreads(mtl.Size.of(rows * D, 1, 1), mtl.Size.of(256, 1, 1));
     }
 
     /// On the serial encoder, after the work that wrote the sources: once the GPU gets here the host copies `writes`
@@ -311,26 +395,55 @@ pub const Tp2 = struct {
                 w = @atomicLoad(u32, posted, .acquire);
             }
             const job = t.jobs[seq % JOBS];
+            const seen = if (t.stats) std.c.mach_absolute_time() else 0;
+            if ((t.local and job.kind != .send) or t.failed.load(.acquire)) { // a failed link drains: the GPU never hangs
+                @atomicStore(u32, served, seq, .release);
+                seq += 1;
+                continue;
+            }
             if (t.trace) std.debug.print("TP rank{d} seq {d} {s} writes {d} flag {d} value {d} gave_up {d}\n", .{ t.rank, seq, @tagName(job.kind), job.n, job.flag, job.value, t.gaveUp() });
             switch (job.kind) {
                 .exchange => {
-                    var mine: usize = 0; // this rank's slots in the window's rows: the packed size
-                    for (0..@as(usize, w & 31)) |r| {
-                        for (0..11) |k| mine += @intFromBool(owner(t.pick[r * 10 ..][0..10], k) == t.rank);
-                    }
-                    const src: [*]const u8 = @ptrCast(t.pack_buf.contents());
                     const x = job.value;
-                    t.rd.write2Signal(t.peer, DECODE + (x % 2) * SLOT, src[0 .. mine * D * 2], &.{}, FLAG, x) catch |err| return t.fail(seq, err);
-                    while (@atomicLoad(u64, flag, .acquire) < x) {
-                        if (t.stop.load(.acquire)) return;
-                        std.atomic.spinLoopHint();
-                    }
+                    t.ep.writeSignalFrom(t.peer, sendX(@intCast(x)), DECODE + (x % 2) * SLOT, @as(usize, w & 31) * D * 4, FLAG, x) catch |err| t.fail(seq, err);
+                    if (!t.peerAt(flag, x)) return;
                     @atomicStore(u32, served, seq, .release);
                 },
-                .send => t.sendNow(job.writes[0..job.n], job.flag, job.value) catch |err| return t.fail(seq, err),
+                .reduce => {
+                    const x = job.value;
+                    t.ep.writeSignalFrom(t.peer, sendR(@intCast(x)), REDUCE + (x % 2) * PART, @as(usize, w & 31) * D * 4, FLAG, x) catch |err| t.fail(seq, err);
+                    if (!t.peerAt(flag, x)) return;
+                    @atomicStore(u32, served, seq, .release);
+                },
+                .send => t.sendNow(job.writes[0..job.n], job.flag, job.value) catch |err| t.fail(seq, err),
+            }
+            if (t.stats) {
+                const held = std.c.mach_absolute_time() - seen; // ticks: 41.67 ns each on Apple silicon
+                t.held_ns += held;
+                t.held_max = @max(t.held_max, held);
+                if (seq % 4096 == 0) {
+                    std.debug.print("TP rank{d} jobs to {d}: host held {d:.1} us a job, max {d:.1} us\n", .{ t.rank, seq, @as(f64, @floatFromInt(t.held_ns)) / 4096.0 / 24.0, @as(f64, @floatFromInt(t.held_max)) / 24.0 });
+                    t.held_ns = 0;
+                    t.held_max = 0;
+                }
             }
             seq += 1;
         }
+    }
+
+    /// Wait for the peer's flag to reach `x`: false when stopping; a failed link or 10 s of silence fails and drains.
+    fn peerAt(t: *Tp2, flag: *const u64, x: u64) bool {
+        const t0 = std.c.mach_absolute_time();
+        while (@atomicLoad(u64, flag, .acquire) < x) {
+            if (t.stop.load(.acquire)) return false;
+            if (t.failed.load(.acquire)) return true;
+            if (std.c.mach_absolute_time() - t0 > 240_000_000) { // 10 s of 24 MHz ticks
+                t.fail(@intCast(x), error.PeerSilent);
+                return true;
+            }
+            std.atomic.spinLoopHint();
+        }
+        return true;
     }
 
     fn fail(t: *Tp2, seq: u32, err: anyerror) void {

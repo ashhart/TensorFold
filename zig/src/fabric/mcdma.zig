@@ -107,6 +107,19 @@ pub const Endpoint = struct {
         self.gpa.destroy(self);
     }
 
+    /// Send `len` bytes already in this rank's window at `local` to the peer's window at `offset`, then store `value`
+    /// at its `flag`, in one message and without staging. The library uses the room just before `local` for its head;
+    /// the caller leaves the bytes unchanged until the peer has them (a reply from the peer that needed them is proof).
+    pub fn writeSignalFrom(self: *Endpoint, peer: u32, local: usize, offset: usize, len: usize, flag: usize, value: u64) rma.Error!void {
+        if (local < abi.ws_room or !self.in(local - abi.ws_room, len + abi.ws_room) or !self.in(offset, len) or !self.in(flag, 8)) return error.OutOfBounds;
+        if (flag % 8 != 0) return error.Unaligned;
+        const port = try self.portFor(peer);
+        try port.mutex.lock(try self.end());
+        defer port.mutex.unlock();
+        try check(self.library.write_signal.?(port.peer.?, local, offset, len, flag, value));
+        port.pending = true;
+    }
+
     pub fn rdma(self: *Endpoint) rma.Rdma {
         if (self.library.write_signal != null) return .{ .ptr = self, .vtable = &.{ .rank = rank, .size = size, .window = window, .write = write, .write2 = write2, .signal = signal, .write2_signal = write2Signal, .fetch_add = fetchAdd, .read = read, .flush = flush, .link = kind, .deadline = deadline } };
         return .{ .ptr = self, .vtable = &.{ .rank = rank, .size = size, .window = window, .write = write, .write2 = write2, .signal = signal, .fetch_add = fetchAdd, .read = read, .flush = flush, .link = kind, .deadline = deadline } };

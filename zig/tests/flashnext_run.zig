@@ -143,7 +143,15 @@ pub fn main(init: std.process.Init) !void {
         const n_out: usize = if (std.c.getenv("FZ_N")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 256;
         var replies: [2][]u32 = undefined;
         const seg_ab = std.c.getenv("FZ_AB") != null and std.mem.eql(u8, std.mem.span(std.c.getenv("FZ_AB").?), "seg");
-        for (0..2) |arm| { // copy drafts off, then on (FZ_AB=seg: staggered prompt segments off, then on)
+        var depths: std.ArrayList(?usize) = .empty; // FZ_DEPTHS=3,5,7: each depth's arms in turn (0: the depth rule)
+        if (std.c.getenv("FZ_DEPTHS")) |v| {
+            var it = std.mem.tokenizeScalar(u8, std.mem.span(v), ',');
+            while (it.next()) |d| {
+                const n = try std.fmt.parseInt(usize, d, 10);
+                try depths.append(arena, if (n == 0) null else n);
+            }
+        } else try depths.append(arena, if (std.c.getenv("FZ_DEPTH")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else null);
+        for (depths.items) |depth| for (0..2) |arm| { // copy drafts off, then on (FZ_AB=seg: staggered prompt segments off, then on)
             if (seg_ab) e.segments = arm == 1 else e.copy = arm == 1;
             var sh: Show = .{ .a = arena };
             _ = try e.generate(toks, 8, &.{}, null, .{ .ctx = &sh, .prefilled = Show.prefilled, .tokens = Show.tokens, .cancelled = Show.cancelled });
@@ -164,14 +172,14 @@ pub fn main(init: std.process.Init) !void {
             };
             const s0 = mtl.clock.seconds();
             var tm: Timed = .{ .sh = &sh, .t0 = s0, .first = &first_at };
-            const res = try e.generate(toks, n_out, &.{}, null, .{ .ctx = &tm, .prefilled = Timed.prefilled, .tokens = Timed.tokens, .cancelled = Show.cancelled });
+            const res = try e.generate(toks, n_out, &.{}, depth, .{ .ctx = &tm, .prefilled = Timed.prefilled, .tokens = Timed.tokens, .cancelled = Show.cancelled });
             const wall = mtl.clock.seconds() - s0;
             const made: f64 = @floatFromInt(sh.got.items.len - 1);
-            std.debug.print("{s}: {d} tokens; prompt {d:.2} s; decode {d:.1} tok/s; {d:.2} tokens a round ({d} rounds, {d} copied rounds landing {d:.2})\n", .{ armName(seg_ab, arm), sh.got.items.len, first_at, made / (wall - first_at), made / @as(f64, @floatFromInt(@max(res.rounds, 1))), res.rounds, res.copy_rounds, @as(f64, @floatFromInt(res.copy_accepted)) / @as(f64, @floatFromInt(@max(res.copy_rounds, 1))) });
+            std.debug.print("{s} depth {d}: {d} tokens; prompt {d:.2} s; decode {d:.1} tok/s; {d:.2} tokens a round ({d} rounds, {d} copied rounds landing {d:.2})\n", .{ armName(seg_ab, arm), depth orelse 0, sh.got.items.len, first_at, made / (wall - first_at), made / @as(f64, @floatFromInt(@max(res.rounds, 1))), res.rounds, res.copy_rounds, @as(f64, @floatFromInt(res.copy_accepted)) / @as(f64, @floatFromInt(@max(res.copy_rounds, 1))) });
             replies[arm] = sh.got.items;
             std.debug.print("{s}: reply hash {x:0>16}\n", .{ armName(seg_ab, arm), std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sh.got.items)) });
             if (arm == 1) for (res.copy_by_len, 0..) |cl, n| if (cl[0] > 0) std.debug.print("    match {d}: {d} rounds, {d:.2} landed\n", .{ n, cl[0], @as(f64, @floatFromInt(cl[1])) / @as(f64, @floatFromInt(cl[0])) });
-        }
+        };
         if (std.c.getenv("FZ_NO_REF") != null) return; // the reply hashes are the check (two Macs against one)
         // the reference: the same prompt chunks, then one row a step
         e.hostMode();
@@ -413,13 +421,14 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("compiled in {d:.2} s, loaded {d:.1} GB in {d:.1} s\n", .{ t1 - t0, @as(f64, @floatFromInt(r.loaded)) / 1e9, t2 - t1 });
 
     if (std.c.getenv("FZ_PROFILE") != null) {
+        if (std.c.getenv("TF_FLASHNEXT_TP")) |path| r.tp = try fz.Tp2.init(arena, r.device, std.mem.span(path));
         const names = [_][]const u8{ "none", "hc", "dense", "experts", "router", "gdn", "attn", "ple", "head" };
         var toks: [MAXR]u32 = undefined;
         for (0..MAXR) |i| toks[i] = @intCast(ref.object.get("prompt").?.array.items[i].integer);
         var pk: [MAXR]u32 = undefined;
         m.reset();
         for (0..3) |_| try m.window(toks[0..1], &pk);
-        for ([_]usize{ 1, 8 }) |rows| {
+        for ([_]usize{ 1, 4, 8 }) |rows| {
             var base: f64 = 0;
             for (names, 0..) |name, c| {
                 r.skip = if (c == 0) 0 else @as(u32, 1) << @intCast(c - 1);
@@ -431,6 +440,15 @@ pub fn main(init: std.process.Init) !void {
             }
         }
         r.skip = 0;
+        for ([_]usize{ 1, 4, 8 }) |rows| { // the MTP head: a chain step (one row) and a window's catch-up
+            m.gpu_seconds = 0;
+            for (0..20) |_| {
+                m.mtp.drafted = 0;
+                _ = try m.mtpRun(toks[0..rows], m.mtp.last);
+                m.mtp.pos -= rows;
+            }
+            std.debug.print("mtp rows {d}: {d:6.2} ms GPU\n", .{ rows, m.gpu_seconds * 1e3 / 20 });
+        }
         return;
     }
     if (std.c.getenv("FZ_DUAL") != null) { // two lane groups on two queues: one window, two in a row, two at once
@@ -564,6 +582,92 @@ pub fn main(init: std.process.Init) !void {
                 }
                 r.skip = 0;
                 std.debug.print("rows {d} {s}: window {d:6.2} ms, experts {d:5.2} ms\n", .{ rows, if (same) "one token" else "chain    ", ms[0], ms[0] - ms[1] });
+            }
+        }
+        return;
+    }
+    if (std.c.getenv("FZ_TP_KERNELS") != null) { // TP's split projections against the whole ones, GPU time a layer
+        const L0 = &m.layers[0];
+        for ([_]usize{ 1, 4, 8 }) |rows| {
+            r.rows = rows;
+            m.t.rows.b.slice(i32, 1)[0] = @intCast(rows);
+            m.t.mdims.b.slice(i32, 2)[0] = @intCast(rows);
+            const Arm = enum { lane_in, tiles_in_all2, tiles_in_half2, tiles_in_half4, tiles_in_half8, tiles_in_all8, densec_in_half16, lane_out, densep_out_half, tilesp_out_half4, tilesp_out_half8, gdn_all, gdn_half };
+            const half = [_][2]usize{ .{ 0, 32 }, .{ 64, 32 }, .{ 128, 96 }, .{ 320, 96 }, .{ 512, 3 } };
+            const all = [_][2]usize{.{ 0, 515 }};
+            var tl: [259]u16 = undefined; // rank 0's tiles: q 0..31, k 64..95, v 128..223, z 320..415, b and a 512..514
+            var nt: usize = 0;
+            for ([_][2]usize{ .{ 0, 32 }, .{ 64, 32 }, .{ 128, 96 }, .{ 320, 96 }, .{ 512, 3 } }) |c| for (0..c[1]) |j| {
+                tl[nt] = @intCast(c[0] + j);
+                nt += 1;
+            };
+            const tiles = try r.buffer(259 * 2);
+            const tpart = try r.buffer(16 * 2560 * 4);
+            @memcpy(tiles.slice(u16, 259), &tl);
+            const a = m.state;
+            for ([_]Arm{ .lane_in, .tiles_in_all2, .tiles_in_half2, .tiles_in_half4, .tiles_in_half8, .tiles_in_all8, .densec_in_half16, .lane_out, .densep_out_half, .tilesp_out_half4, .tilesp_out_half8, .gdn_all, .gdn_half }) |arm| {
+                var best: f64 = 1e9;
+                for (0..5) |_| {
+                    const cb = r.queue.commandBuffer();
+                    r.enc = cb.compute(if (r.serial) .serial else .concurrent);
+                    for (0..36) |_| switch (arm) {
+                        .lane_in => try m.lane(m.t.mixed, fz.D, L0.proj, "lane_qmm_bytes_grouped@gdn.in", m.t.p),
+                        .tiles_in_all2, .tiles_in_half2, .tiles_in_half4, .tiles_in_half8, .tiles_in_all8 => {
+                            const sk: usize = switch (arm) {
+                                .tiles_in_half4 => 4,
+                                .tiles_in_half8, .tiles_in_all8 => 8,
+                                else => 2,
+                            };
+                            const map: []const [2]usize = if (arm == .tiles_in_all2 or arm == .tiles_in_all8) &all else &half;
+                            try r.laneTiles("lane_qmm_bytes_grouped@gdn.in", &.{ m.t.mixed, m.t.xs, L0.proj.wq, L0.proj.sbt, m.t.mdims }, m.t.p, map, sk, null);
+                        },
+                        .tilesp_out_half4, .tilesp_out_half8 => try r.laneTiles("lane_qmm_bytes_grouped@gdn.out", &.{ m.t.gout, m.t.xs, L0.out.wq, L0.out.sbt, m.t.mdims }, .{ .b = tpart }, &.{.{ 0, 80 }}, if (arm == .tilesp_out_half4) 4 else 8, .{ 0, 96 }),
+                        .densec_in_half16 => r.denseCols(m.t.mixed, fz.D, L0.proj, rows, m.t.p, .{ .b = tiles }, nt, 16),
+                        .gdn_all => try r.callAs("q4_gdn@gdn", rows, &.{ m.t.p, L0.cs[a], L0.so[a], L0.conv, L0.alog, L0.dt, L0.norm, m.t.eps, m.t.rows }, &.{ m.t.gout, L0.cs[1 - a], L0.so[1 - a] }),
+                        .gdn_half => try r.gdnHeads("q4_gdn@gdn", rows, &.{ m.t.p, L0.cs[a], L0.so[a], L0.conv, L0.alog, L0.dt, L0.norm, m.t.eps, m.t.rows }, &.{ m.t.gout, L0.cs[1 - a], L0.so[1 - a] }, 0),
+                        .lane_out => try m.lane(m.t.gout, 6144, L0.out, "lane_qmm_bytes_grouped@gdn.out", m.t.branch),
+                        .densep_out_half => r.densePart(m.t.gout, 6144, L0.out, rows, m.t.po, 0, 96),
+                    };
+                    try m.finish(cb);
+                    best = @min(best, cb.gpuSeconds());
+                }
+                std.debug.print("TPK rows={d} {s:16} {d:8.1} us a layer\n", .{ rows, @tagName(arm), best / 36.0 * 1e6 });
+            }
+            { // the tile maps against the recorded kernel: SK 2 must match bit for bit on its columns
+                const n = rows * 16480;
+                const want = try gpa.alloc(u16, n);
+                defer gpa.free(want);
+                const got: [*]u16 = @ptrCast(@alignCast(m.t.p.b.contents() + m.t.p.off));
+                for ([_]Arm{ .lane_in, .tiles_in_all2, .tiles_in_half2, .tiles_in_all8 }) |arm| {
+                    @memset(got[0..n], 0);
+                    const cb = r.queue.commandBuffer();
+                    r.enc = cb.compute(.serial);
+                    switch (arm) {
+                        .lane_in => try m.lane(m.t.mixed, fz.D, L0.proj, "lane_qmm_bytes_grouped@gdn.in", m.t.p),
+                        .tiles_in_all2 => try r.laneTiles("lane_qmm_bytes_grouped@gdn.in", &.{ m.t.mixed, m.t.xs, L0.proj.wq, L0.proj.sbt, m.t.mdims }, m.t.p, &all, 2, null),
+                        .tiles_in_half2 => try r.laneTiles("lane_qmm_bytes_grouped@gdn.in", &.{ m.t.mixed, m.t.xs, L0.proj.wq, L0.proj.sbt, m.t.mdims }, m.t.p, &half, 2, null),
+                        else => try r.laneTiles("lane_qmm_bytes_grouped@gdn.in", &.{ m.t.mixed, m.t.xs, L0.proj.wq, L0.proj.sbt, m.t.mdims }, m.t.p, &all, 8, null),
+                    }
+                    try m.finish(cb);
+                    if (arm == .lane_in) {
+                        @memcpy(want, got[0..n]);
+                        continue;
+                    }
+                    var diff: usize = 0;
+                    var checked: usize = 0;
+                    for (0..rows) |row| for (0..515) |tile| {
+                        const mine = arm != .tiles_in_half2 or for (half) |c| {
+                            if (tile >= c[0] and tile < c[0] + c[1]) break true;
+                        } else false;
+                        if (!mine) continue;
+                        for (0..32) |j| {
+                            const i = row * 16480 + tile * 32 + j;
+                            checked += 1;
+                            if (got[i] != want[i]) diff += 1;
+                        }
+                    };
+                    std.debug.print("TPK rows={d} {s:16} {d} of {d} values differ from the recorded kernel\n", .{ rows, @tagName(arm), diff, checked });
+                }
             }
         }
         return;

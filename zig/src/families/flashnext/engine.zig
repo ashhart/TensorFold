@@ -314,7 +314,7 @@ pub const Engine = struct {
         e.tsel = try GSelect.init(r, 0);
         e.msel = try GSelect.init(r, 0);
         // TF_FLASHNEXT_TP: TP=2 with the peer named there (tp.zig); both ranks then run the same replies in lockstep
-        if (std.c.getenv("TF_FLASHNEXT_TP")) |path| r.tp = try fz.Tp2.init(arena, r.device, std.mem.span(path), m.t.pick);
+        if (std.c.getenv("TF_FLASHNEXT_TP")) |path| r.tp = try fz.Tp2.init(arena, r.device, std.mem.span(path));
         return e;
     }
 
@@ -579,6 +579,10 @@ pub const Engine = struct {
                 failed = error.GpuFailed;
                 break;
             }
+            if (r.tp) |tp| if (tp.failed.load(.acquire)) { // the link failed: the host drained the round, its tokens are wrong
+                failed = error.TpLinkFailed;
+                break;
+            };
             const slot = (done % RING) * fz.RING_WORDS;
             const keep = rg[slot];
             const wd = widths[done % 4];

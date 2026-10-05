@@ -396,6 +396,103 @@ const xnew_source =
     \\  threadgroup float part[16][8][32];
     \\  fz_dense_body<16>(X, W, SB, Y, dims, sgi, lane, tgi, part);
     \\}
+    \\// TP: fz_dense over input groups [G0, G0 + GN) only (dims.w = G0 | GN << 16), fp32 out: one rank's partial of a
+    \\// projection whose inputs are split across two Macs; the two partials add in rank order and round once.
+    \\template <int SK>
+    \\inline void fz_densep_body(const device bfloat* X, const device uint* W, const device bfloat* SB, device float* Y,
+    \\    constant uint4& dims, uint sgi, uint lane, uint tgi, threadgroup float (*part)[8][32]) {
+    \\  const int R = int(dims.x), N = int(dims.y), K = int(dims.z), KG = K / 32;
+    \\  const int G0 = int(dims.w & 0xffffu), GN = int(dims.w >> 16);
+    \\  const int t = int(tgi), n = t * 32 + int(lane);
+    \\  const int g0 = G0 + int(sgi) * (GN / SK), g1 = g0 + GN / SK;
+    \\  float acc[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    \\  for (int g = g0; g < g1; g++) {
+    \\    float q[32];
+    \\    fz_codes6(W + (size_t(t * KG + g) * 32 + lane) * 6, q);
+    \\    const device bfloat* sb = SB + (size_t(g) * N + n) * 2;
+    \\    const float sc = float(sb[0]), bi = float(sb[1]);
+    \\    #pragma unroll
+    \\    for (int r = 0; r < 8; r++) {
+    \\      if (r < R) {
+    \\        float qx, sx;
+    \\        fz_dot32(q, X + size_t(r) * K + g * 32, qx, sx);
+    \\        acc[r] += sc * qx + bi * sx;
+    \\      }
+    \\    }
+    \\  }
+    \\  #pragma unroll
+    \\  for (int r = 0; r < 8; r++) part[sgi][r][lane] = acc[r];
+    \\  threadgroup_barrier(mem_flags::mem_threadgroup);
+    \\  if (sgi == 0) {
+    \\    for (int r = 0; r < R; r++) {
+    \\      float v = 0.0f;
+    \\      for (int k = 0; k < SK; k++) v += part[k][r][lane];
+    \\      Y[size_t(r) * N + n] = v;
+    \\    }
+    \\  }
+    \\}
+    \\// TP: fz_dense over the output tiles listed in TILES (one dispatch over this Mac's columns), bf16 out at the full
+    \\// width's columns; every column's sum is fz_dense's.
+    \\template <int SK>
+    \\inline void fz_densec_body(const device bfloat* X, const device uint* W, const device bfloat* SB, device bfloat* Y,
+    \\    constant uint4& dims, const device ushort* TILES, uint sgi, uint lane, uint tgi, threadgroup float (*part)[8][32]) {
+    \\  const int R = int(dims.x), N = int(dims.y), K = int(dims.z), KG = K / 32;
+    \\  const int t = int(TILES[tgi]), n = t * 32 + int(lane);
+    \\  const int g0 = int(sgi) * (KG / SK), g1 = g0 + KG / SK;
+    \\  float acc[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    \\  for (int g = g0; g < g1; g++) {
+    \\    float q[32];
+    \\    fz_codes6(W + (size_t(t * KG + g) * 32 + lane) * 6, q);
+    \\    const device bfloat* sb = SB + (size_t(g) * N + n) * 2;
+    \\    const float sc = float(sb[0]), bi = float(sb[1]);
+    \\    #pragma unroll
+    \\    for (int r = 0; r < 8; r++) {
+    \\      if (r < R) {
+    \\        float qx, sx;
+    \\        fz_dot32(q, X + size_t(r) * K + g * 32, qx, sx);
+    \\        acc[r] += sc * qx + bi * sx;
+    \\      }
+    \\    }
+    \\  }
+    \\  #pragma unroll
+    \\  for (int r = 0; r < 8; r++) part[sgi][r][lane] = acc[r];
+    \\  threadgroup_barrier(mem_flags::mem_threadgroup);
+    \\  if (sgi == 0) {
+    \\    for (int r = 0; r < R; r++) {
+    \\      float v = 0.0f;
+    \\      for (int k = 0; k < SK; k++) v += part[k][r][lane];
+    \\      Y[size_t(r) * N + n] = bfloat(v);
+    \\    }
+    \\  }
+    \\}
+    \\[[kernel]] void fz_densec8(const device bfloat* X [[buffer(0)]], const device uint* W [[buffer(1)]],
+    \\    const device bfloat* SB [[buffer(2)]], device bfloat* Y [[buffer(3)]], constant uint4& dims [[buffer(4)]],
+    \\    const device ushort* TILES [[buffer(5)]], uint sgi [[simdgroup_index_in_threadgroup]],
+    \\    uint lane [[thread_index_in_simdgroup]], uint tgi [[threadgroup_position_in_grid]]) {
+    \\  threadgroup float part[8][8][32];
+    \\  fz_densec_body<8>(X, W, SB, Y, dims, TILES, sgi, lane, tgi, part);
+    \\}
+    \\[[kernel]] void fz_densec16(const device bfloat* X [[buffer(0)]], const device uint* W [[buffer(1)]],
+    \\    const device bfloat* SB [[buffer(2)]], device bfloat* Y [[buffer(3)]], constant uint4& dims [[buffer(4)]],
+    \\    const device ushort* TILES [[buffer(5)]], uint sgi [[simdgroup_index_in_threadgroup]],
+    \\    uint lane [[thread_index_in_simdgroup]], uint tgi [[threadgroup_position_in_grid]]) {
+    \\  threadgroup float part[16][8][32];
+    \\  fz_densec_body<16>(X, W, SB, Y, dims, TILES, sgi, lane, tgi, part);
+    \\}
+    \\[[kernel]] void fz_densep8(const device bfloat* X [[buffer(0)]], const device uint* W [[buffer(1)]],
+    \\    const device bfloat* SB [[buffer(2)]], device float* Y [[buffer(3)]], constant uint4& dims [[buffer(4)]],
+    \\    uint sgi [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    \\    uint tgi [[threadgroup_position_in_grid]]) {
+    \\  threadgroup float part[8][8][32];
+    \\  fz_densep_body<8>(X, W, SB, Y, dims, sgi, lane, tgi, part);
+    \\}
+    \\[[kernel]] void fz_densep16(const device bfloat* X [[buffer(0)]], const device uint* W [[buffer(1)]],
+    \\    const device bfloat* SB [[buffer(2)]], device float* Y [[buffer(3)]], constant uint4& dims [[buffer(4)]],
+    \\    uint sgi [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    \\    uint tgi [[threadgroup_position_in_grid]]) {
+    \\  threadgroup float part[16][8][32];
+    \\  fz_densep_body<16>(X, W, SB, Y, dims, sgi, lane, tgi, part);
+    \\}
     \\// FZ_XSX=1: fz_xgu and fz_xdown with each input group's sum computed once a threadgroup (fz_group's order) and the
     \\// inputs converted once for gate and up; simdgroup 0 routes while the rest sum. Bits equal fz_xgu / fz_xdown.
     \\inline float fz_qdot(thread const float* q, thread const float4* xv) {
@@ -825,6 +922,12 @@ pub const Run = struct {
     gdown_pipe: mtl.Pipeline = undefined,
     ul: Buf = undefined,
     dense16_pipe: mtl.Pipeline = undefined,
+    densep8_pipe: mtl.Pipeline = undefined, // TP: fp32 partials over an input-group range
+    densec8_pipe: mtl.Pipeline = undefined, // TP: an output-tile subset in one dispatch
+    densec16_pipe: mtl.Pipeline = undefined,
+    densep16_pipe: mtl.Pipeline = undefined,
+    tp_gdn: std.AutoHashMapUnmanaged(*Variant, mtl.Pipeline) = .empty,
+    tp_lane: std.AutoHashMapUnmanaged(u64, mtl.Pipeline) = .empty, // TP: recorded lane kernels over tile maps // TP: DeltaNet steps from value head 24
     xnew_header: []const u8 = "",
     tp: ?*Tp2 = null, // TP=2 across two Macs (tp.zig): the target layers' experts split by id, outputs exchanged
     tp_layer: bool = false, // the experts being encoded are a target layer's (the MTP head keeps all of its own)
@@ -950,6 +1053,10 @@ pub const Run = struct {
             r.xdown_pipe = try mtl.Pipeline.init(r.device, lib, "fz_xdown", false);
             r.dense8_pipe = try mtl.Pipeline.init(r.device, lib, "fz_dense8", false);
             r.dense16_pipe = try mtl.Pipeline.init(r.device, lib, "fz_dense16", false);
+            r.densep8_pipe = try mtl.Pipeline.init(r.device, lib, "fz_densep8", false);
+            r.densec8_pipe = try mtl.Pipeline.init(r.device, lib, "fz_densec8", false);
+            r.densec16_pipe = try mtl.Pipeline.init(r.device, lib, "fz_densec16", false);
+            r.densep16_pipe = try mtl.Pipeline.init(r.device, lib, "fz_densep16", false);
             r.route_pipe = try mtl.Pipeline.init(r.device, lib, "fz_route", false);
             r.xfused_pipe = try mtl.Pipeline.init(r.device, lib, "fz_xfused", false);
             r.xgu_sx_pipe = try mtl.Pipeline.init(r.device, lib, "fz_xgu_sx", false);
@@ -1047,6 +1154,131 @@ pub const Run = struct {
             if (!r.serial) r.enc.barrier();
         }
     }
+    /// TP: y[rows, n] (fp32) = x[rows, k] W^T over input groups [g0, g0 + gn) only: one rank's partial.
+    pub fn densePart(r: *Run, x: Buf, k: usize, l: Lane, rows: usize, y: Buf, g0: usize, gn: usize) void {
+        const n = l.wq.b.length() * 4 / (3 * k);
+        const narrow = n <= 4096;
+        var at: usize = 0;
+        while (at < rows) : (at += 8) {
+            const rr = @min(8, rows - at);
+            const dims = [4]u32{ @intCast(rr), @intCast(n), @intCast(k), @intCast(g0 | gn << 16) };
+            r.enc.setPipeline(if (narrow) r.densep16_pipe else r.densep8_pipe);
+            r.enc.setBuffer(x.b, x.off + at * k * 2, 0);
+            r.enc.setBuffer(l.wq.b, l.wq.off, 1);
+            r.enc.setBuffer(l.sbt.b, l.sbt.off, 2);
+            r.enc.setBuffer(y.b, y.off + at * n * 4, 3);
+            r.enc.setBytes(std.mem.asBytes(&dims), 4);
+            const sk: usize = if (narrow) 16 else 8;
+            r.enc.dispatchThreads(mtl.Size.of(32 * sk * (n / 32), 1, 1), mtl.Size.of(32 * sk, 1, 1));
+            if (!r.serial) r.enc.barrier();
+        }
+    }
+
+    /// TP: fz_dense over the output tiles listed in `tiles` (u16s) only, in one dispatch; bf16 at the full width.
+    pub fn denseCols(r: *Run, x: Buf, k: usize, l: Lane, rows: usize, y: Buf, tiles: Buf, count: usize, sk: usize) void {
+        const n = l.wq.b.length() * 4 / (3 * k);
+        var at: usize = 0;
+        while (at < rows) : (at += 8) {
+            const rr = @min(8, rows - at);
+            const dims = [4]u32{ @intCast(rr), @intCast(n), @intCast(k), 0 };
+            r.enc.setPipeline(if (sk == 16) r.densec16_pipe else r.densec8_pipe);
+            r.enc.setBuffer(x.b, x.off + at * k * 2, 0);
+            r.enc.setBuffer(l.wq.b, l.wq.off, 1);
+            r.enc.setBuffer(l.sbt.b, l.sbt.off, 2);
+            r.enc.setBuffer(y.b, y.off + at * n * 2, 3);
+            r.enc.setBytes(std.mem.asBytes(&dims), 4);
+            r.enc.setBuffer(tiles.b, tiles.off, 5);
+            r.enc.dispatchThreads(mtl.Size.of(32 * sk * count, 1, 1), mtl.Size.of(32 * sk, 1, 1));
+            if (!r.serial) r.enc.barrier();
+        }
+    }
+
+    /// TP: a recorded lane projection over this Mac's output tiles only, in one dispatch: a copy of the kernel whose
+    /// tile index goes through `ranges` ({first tile, count} pairs), with `sk` K slices; `groups` ({first, count}) cuts
+    /// the sum to those input groups and writes fp32 partials. The recorded SK and no group cut keep its sums.
+    pub fn laneTiles(r: *Run, role: []const u8, ins: []const Buf, y: Buf, ranges: []const [2]usize, sk: usize, groups: ?[2]usize) !void {
+        var key: [96]u8 = undefined;
+        const s = r.roles.get(try std.fmt.bufPrint(&key, "{s}|{d}", .{ role, r.rows })) orelse return error.NoSite;
+        var h = std.hash.Wyhash.init(@intFromPtr(s.v));
+        h.update(std.mem.sliceAsBytes(ranges));
+        h.update(std.mem.asBytes(&sk));
+        if (groups) |g| h.update(std.mem.asBytes(&g));
+        var v = s.v.*;
+        v.pipe = r.tp_lane.get(h.final()) orelse blk: {
+            const f = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(r.arena, "{s}", .{s.v.file}, 0));
+            var text: []const u8 = f.bytes[0..f.size];
+            const a = r.arena;
+            const sk_at = std.mem.indexOf(u8, text, "constexpr int SK = ") orelse return error.LanePatch;
+            const sk_end = sk_at + (std.mem.indexOfScalar(u8, text[sk_at..], ';') orelse return error.LanePatch);
+            text = try std.fmt.allocPrint(a, "{s}constexpr int SK = {d}{s}", .{ text[0..sk_at], sk, text[sk_end..] });
+            text = try swap(a, text, "threadgroup_position_in_grid.x", "tp_tile", 2);
+            text = try swap(a, text, "const int n0 = ", "const int tp_tile = tp_map(int(threadgroup_position_in_grid.x));\n  const int n0 = ", 1);
+            var map: std.ArrayList(u8) = .empty;
+            try map.appendSlice(a, "inline int tp_map(int j) {\n");
+            var at: usize = 0;
+            for (ranges) |c| {
+                try map.print(a, "  if (j < {d}) return {d} + j - {d};\n", .{ at + c[1], c[0], at });
+                at += c[1];
+            }
+            try map.appendSlice(a, "  return 0;\n}\n[[kernel]]");
+            text = try swap(a, text, "[[kernel]]", map.items, 1);
+            if (groups) |g| {
+                text = try swap(a, text, "const int g_begin = (sg * KG) / SK;", try std.fmt.allocPrint(a, "const int g_begin = {d} + (sg * {d}) / SK;", .{ g[0], g[1] }), 1);
+                text = try swap(a, text, "const int g_end = ((sg + 1) * KG) / SK;", try std.fmt.allocPrint(a, "const int g_end = {d} + ((sg + 1) * {d}) / SK;", .{ g[0], g[1] }), 1);
+                text = try swap(a, text, "device bfloat16_t* Y [[buffer(5)]]", "device float* Y [[buffer(5)]]", 1);
+                text = try swap(a, text, "static_cast<bfloat>(C[t][f * 8 + r * 4 + j])", "C[t][f * 8 + r * 4 + j]", 1);
+            }
+            const lib = try mtl.Library.fromSource(r.device, text, mtl.CompileOptions.mlx());
+            const pipe = try mtl.Pipeline.init(r.device, lib, try std.fmt.allocPrintSentinel(a, "{s}", .{s.v.name}, 0), false);
+            try r.tp_lane.put(a, h.final(), pipe);
+            break :blk pipe;
+        };
+        try r.bindV(&v, ins, &.{y});
+        var tiles: usize = 0;
+        for (ranges) |c| tiles += c[1];
+        r.enc.dispatchThreads(mtl.Size.of(tiles * 32 * sk, s.grid.height, s.grid.depth), mtl.Size.of(32 * sk, 1, 1));
+        if (!r.serial) r.enc.barrier();
+    }
+
+    fn swap(a: std.mem.Allocator, text: []const u8, from: []const u8, to: []const u8, count: usize) ![]const u8 {
+        if (std.mem.count(u8, text, from) != count) return error.LanePatch;
+        return std.mem.replaceOwned(u8, a, text, from, to);
+    }
+
+    /// TP: a recorded lane projection over output tiles [tile0, tile0 + tiles) only: the weight tiles, scale columns
+    /// and output columns offset, the grid cut to those tiles (the kernel's strides stay the full width's).
+    pub fn laneCols(r: *Run, role: []const u8, x: Buf, xs: Buf, l: Lane, mdims: Buf, k: usize, y: Buf, tile0: usize, tiles: usize) !void {
+        var key: [96]u8 = undefined;
+        const s = r.roles.get(try std.fmt.bufPrint(&key, "{s}|{d}", .{ role, r.rows })) orelse return error.NoSite;
+        const wq: Buf = .{ .b = l.wq.b, .off = l.wq.off + tile0 * k * 24 };
+        const sbt: Buf = .{ .b = l.sbt.b, .off = l.sbt.off + tile0 * 128 };
+        try r.bindV(s.v, &.{ x, xs, wq, sbt, mdims }, &.{.{ .b = y.b, .off = y.off + tile0 * 64 }});
+        r.enc.dispatchThreads(mtl.Size.of(tiles * s.tg.width, s.grid.height, s.grid.depth), s.tg);
+        if (!r.serial) r.enc.barrier();
+    }
+
+    /// TP: the recorded DeltaNet step over value heads [24 rank, 24 rank + 24) only (rank 1 runs a copy of the kernel
+    /// whose head index starts at 24); every other index the kernel derives from the head, at the full layout.
+    pub fn gdnHeads(r: *Run, role: []const u8, as_rows: usize, ins: []const Buf, outs: []const Buf, rank: u32) !void {
+        var key: [96]u8 = undefined;
+        const s = r.roles.get(try std.fmt.bufPrint(&key, "{s}|{d}", .{ role, as_rows })) orelse return error.NoSite;
+        var v = s.v.*;
+        if (rank == 1) v.pipe = r.tp_gdn.get(s.v) orelse blk: {
+            const f = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(r.arena, "{s}", .{s.v.file}, 0));
+            const from = "const int hv = int(threadgroup_position_in_grid.x);";
+            const text = f.bytes[0..f.size];
+            if (std.mem.count(u8, text, from) != 1) return error.GdnPatch;
+            const patched = try std.mem.replaceOwned(u8, r.arena, text, from, "const int hv = int(threadgroup_position_in_grid.x) + 24;");
+            const lib = try mtl.Library.fromSource(r.device, patched, mtl.CompileOptions.mlx());
+            const pipe = try mtl.Pipeline.init(r.device, lib, try std.fmt.allocPrintSentinel(r.arena, "{s}", .{s.v.name}, 0), false);
+            try r.tp_gdn.put(r.arena, s.v, pipe);
+            break :blk pipe;
+        };
+        try r.bindV(&v, ins, outs);
+        r.enc.dispatchThreads(mtl.Size.of(s.grid.width / 2, s.grid.height, s.grid.depth), s.tg);
+        if (!r.serial) r.enc.barrier();
+    }
+
     /// The MoE's routed and shared experts for `rows` rows: gate/up (with routing) then down.
     pub fn experts(r: *Run, gu_role: []const u8, down_role: []const u8, x: Buf, lg: Buf, e: [18]Buf, act: Buf, pick: Buf, wts: Buf, rows_buf: Buf, y: Buf) !void {
         if (r.skip & (1 << 2) != 0) return;
@@ -1557,6 +1789,7 @@ pub const Model = struct {
 
     pub fn grouped(m: *Model, h: Buf, out: Buf) !void {
         const t = &m.t;
+        if (m.r.tp) |tp| return tp.combine(m.r.enc, h, t.inj_m, t.ydown, t.lg, out, t.ssp, m.r.rows); // TP: the two ranks' sums
         try m.r.call("q4_hc_norm_grouped#[10240]", &.{ h, t.inj_m, t.ydown, t.wts, t.lg }, &.{ out, t.ssp });
     }
 
@@ -1627,6 +1860,7 @@ pub const Model = struct {
             std.log.err("command buffer failed: {s}", .{msg});
             return error.GpuFailed;
         }
+        if (m.r.tp) |tp| if (tp.failed.load(.acquire)) return error.TpLinkFailed;
         m.gpu_seconds += cb.gpuSeconds();
     }
 
@@ -1694,7 +1928,22 @@ pub const Model = struct {
             }
             cur = 1 - cur;
             try m.hcProject(t.h[cur], L.ahc, "qa_hc_down@ahc", "qa_hc_up@ahc", t.inj_a);
-            if (L.linear) {
+            if (L.linear and r.tp != null) { // TP: this Mac's 8 key heads and 24 value heads, then one partial-sum exchange
+                const tp = r.tp.?;
+                const k0: usize = tp.rank;
+                if (!r.fused_xsum) try r.call("lane_qmm_xsum#[2560]", &.{ t.mixed, t.mdims }, &.{t.xs});
+                // [q 64 tiles | k 64 | v 192 | z 192 | b, a 3]: this Mac's q, k, v and z heads, b and a whole, 8 K slices
+                const cols = [_][2]usize{ .{ 32 * k0, 32 }, .{ 64 + 32 * k0, 32 }, .{ 128 + 96 * k0, 96 }, .{ 320 + 96 * k0, 96 }, .{ 512, 3 } };
+                try r.laneTiles("lane_qmm_bytes_grouped@gdn.in", &.{ t.mixed, t.xs, L.proj.wq, L.proj.sbt, t.mdims }, t.p, &cols, 8, null);
+                const a = m.state;
+                const cs_in: Buf = .{ .b = L.cs[a].b, .off = L.cs[a].off + m.state_row * CS_ROW };
+                const so_in: Buf = .{ .b = L.so[a].b, .off = L.so[a].off + m.state_row * SO_ROW };
+                try r.gdnHeads("q4_gdn@gdn", if (r.gdn_step and rows > 1) 8 else rows, &.{ t.p, cs_in, so_in, L.conv, L.alog, L.dt, L.norm, t.eps, t.rows }, &.{ t.gout, L.cs[1 - a], L.so[1 - a] }, tp.rank);
+                const pn = tp.partNext();
+                const part: Buf = .{ .b = pn.b, .off = pn.off };
+                if (rows < 4) r.densePart(t.gout, 6144, L.out, rows, part, 96 * k0, 96) else try r.laneTiles("lane_qmm_bytes_grouped@gdn.out", &.{ t.gout, t.xs, L.out.wq, L.out.sbt, t.mdims }, part, &.{.{ 0, 80 }}, 8, .{ 96 * k0, 96 });
+                tp.reduce(r.enc, t.branch, t.rows, rows);
+            } else if (L.linear) {
                 try m.lane(t.mixed, D, L.proj, "lane_qmm_bytes_grouped@gdn.in", t.p);
                 const a = m.state;
                 const cs_in: Buf = .{ .b = L.cs[a].b, .off = L.cs[a].off + m.state_row * CS_ROW };
@@ -1753,7 +2002,7 @@ pub const Model = struct {
             r.tp_layer = true;
             try r.experts("qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown);
             r.tp_layer = false;
-            if (r.tp) |tp| tp.exchange(r.enc, t.ydown, t.pick, t.rows);
+            if (r.tp) |tp| tp.exchange(r.enc, t.ydown, t.wts, t.rows, rows);
             if (r.probe) |pb| r.copyKept(t.pick, .{ .b = pb.b, .off = pb.off + i * MAXR * 10 * 4 }, rows * 10, 0, 0, 0, 1, -1);
             pending = .grouped;
         }
