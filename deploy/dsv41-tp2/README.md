@@ -105,8 +105,8 @@ image ones. `TF_REVISION=hot-<hash>` keeps per-image caches (the decode cost cur
 - A change to the code that builds the weights (`fastboot.CODE`) misses the prepared folder: starts build from the
   checkpoint (~82 s instead of ~24 s) until `make cold`. `make prepare` refuses while hot (`PREPARE_HOT=1` overrides):
   one folder fits on aiai's disk and it would replace the image's.
-- `make image` remains the clean path: a pinned snapshot both nodes build, prebuilt and prepared. It warns while hot
-  source is still mounted.
+- `make image` remains the clean path: a pinned snapshot both nodes build, prebuilt and prepared. While hot source is
+  still mounted it builds and prebuilds, then stops at `prepare` (exit 1): `make cold` first, or `PREPARE_HOT=1`.
 - Measured 2026-10-05 (merged dsv41-cuda, extensions cached, prepared folders current): `make hot` 119 s from the
   command to serving (the server's own boot 89 s: weights 24 s, decode graphs 20 s, warm-up 12 s, calibration 25 s),
   `make cold` 117 s; `make image` after Python-only changes 10 s plus the same restart.

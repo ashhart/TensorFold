@@ -363,3 +363,22 @@ def test_hot_override_mounts_the_source_over_the_editable_install():
     assert "pip install --no-cache-dir --no-deps --no-build-isolation -e /opt/tensorfold" in \
         (DEPLOY / "Dockerfile").read_text()
     assert "COPY tensorfold /opt/tensorfold" in (DEPLOY / "Dockerfile").read_text()
+
+
+def test_merge_fails_a_tier_test_without_a_result(tmp_path, capsys):
+    """A group killed before all its results (memwatch, OOM, NCCL init) must not read as PASS."""
+
+    names = [t.name for t in SU.resolve("quick")]
+    log = tmp_path / "q.log"
+    log.write_text(SU.line(SU.Result(names[0], "PASS", {"a": 1})) + "\n")
+    (tmp_path / "fp8.log").write_text("Traceback (most recent call last):\n")
+    assert SU.main(["merge", str(log), str(tmp_path / "fp8.log")]) == 0          # without --spec: what was printed
+    assert SU.main(["merge", "--spec", "quick", str(log), str(tmp_path / "fp8.log")]) == 1
+    out = capsys.readouterr().out
+    assert f"{names[1]} ERROR" in out and out.rstrip().splitlines()[-1].startswith("[suite] FAIL")
+
+
+def test_prove_fails_a_fresh_run_without_a_result():
+    r = SU.Result("multi-test", "PASS", {"a": 1})
+    lines, ok = SU.prove(SU.line(r), [SU.line(r), "Traceback (most recent call last):\n"])
+    assert not ok and any("no [result] line" in s for s in lines)

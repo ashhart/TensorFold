@@ -90,7 +90,8 @@ The compose server's `make prepare` writes each rank's built weights to `PREPARE
 A key miss is not an error: the run builds from the checkpoint as before and says why (`key differs (code)`). Nothing in
 a dev run writes a folder: aiai's disk holds one (79 GB free beside a 99 GB folder on 2026-10-05), and `make prepare`
 prunes the old one first. tf-dev on aiai and aiai2 was recreated with the mount on 2026-10-05 (old containers kept stopped as
-`tf-dev-old-<stamp>`, their layers as `tf-dev-snapshot:<stamp>`). To recreate tf-dev with the mount (once a node, both nodes):
+`tf-dev-old-<stamp>`, deletable; the new tf-dev runs ON the image `tf-dev-snapshot:<stamp>`, its old layer with the
+editable install of /tf, so keep that image). To recreate tf-dev with the mount (once a node, both nodes):
 
     python3 tools/dsv41_tfdev_recreate.py aiai            # dry run: docker inspect saved to out/, commands printed
     python3 tools/dsv41_tfdev_recreate.py aiai --apply    # commit, rename + stop the old one, run the new one, check

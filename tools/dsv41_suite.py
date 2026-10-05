@@ -268,7 +268,10 @@ def prove(suite_text: str, fresh_texts: list[str]) -> tuple[list[str], bool]:
 
     in_suite = {d["name"]: d for d in parse_lines(suite_text)}
     out, ok = [], True
-    for text in fresh_texts:
+    for i, text in enumerate(fresh_texts):
+        if not parse_lines(text):                   # a fresh run that died before its result proves nothing
+            out.append(f"fresh run {i + 1}: no [result] line")
+            ok = False
         for d in parse_lines(text):
             s = in_suite.get(d["name"])
             if s is None:
@@ -303,11 +306,19 @@ def main(argv: list[str]) -> int:
     elif cmd == "testenv":
         for k, v in (*GROUPS[BY_NAME[rest[0]].group].env, *BY_NAME[rest[0]].env):
             print(f"{k}={v}")
-    elif cmd == "merge":
+    elif cmd == "merge":                         # merge [--spec SPEC] LOG..: a tier's test without a result fails
+        spec = None
+        if rest[:1] == ["--spec"]:
+            spec, rest = rest[1], rest[2:]
         rows = []
         for path in rest:
             with open(path, errors="replace") as f:
                 rows += parse_lines(f.read())
+        if spec is not None:                        # a group killed (memwatch, OOM, NCCL) prints only some results
+            seen = {d["name"] for d in rows}
+            rows += [{"name": t.name, "status": "ERROR", "fp": "-", "secs": "0",
+                      "summary": "no result: its group's process ended first (see the group log)"}
+                     for t in resolve(spec) if t.name not in seen]
         for d in rows:
             print(f"[result] {d['name']} {d['status']} fp={d['fp']} {d['secs']}s {d['summary']}".rstrip())
         text, ok = summary(rows, "suite")
