@@ -169,8 +169,10 @@ pub fn main(init: std.process.Init) !void {
             const made: f64 = @floatFromInt(sh.got.items.len - 1);
             std.debug.print("{s}: {d} tokens; prompt {d:.2} s; decode {d:.1} tok/s; {d:.2} tokens a round ({d} rounds, {d} copied rounds landing {d:.2})\n", .{ armName(seg_ab, arm), sh.got.items.len, first_at, made / (wall - first_at), made / @as(f64, @floatFromInt(@max(res.rounds, 1))), res.rounds, res.copy_rounds, @as(f64, @floatFromInt(res.copy_accepted)) / @as(f64, @floatFromInt(@max(res.copy_rounds, 1))) });
             replies[arm] = sh.got.items;
+            std.debug.print("{s}: reply hash {x:0>16}\n", .{ armName(seg_ab, arm), std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sh.got.items)) });
             if (arm == 1) for (res.copy_by_len, 0..) |cl, n| if (cl[0] > 0) std.debug.print("    match {d}: {d} rounds, {d:.2} landed\n", .{ n, cl[0], @as(f64, @floatFromInt(cl[1])) / @as(f64, @floatFromInt(cl[0])) });
         }
+        if (std.c.getenv("FZ_NO_REF") != null) return; // the reply hashes are the check (two Macs against one)
         // the reference: the same prompt chunks, then one row a step
         e.hostMode();
         const mm = e.m;

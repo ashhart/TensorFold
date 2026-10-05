@@ -41,6 +41,8 @@ pub const MARGIN = 2 * MAXR;
 /// Prompt chunks run as two staggered segments once each gets this many rows (core/segments.zig). Measured on the
 /// M5 Ultra, two segments against one chunk: 2k rows a segment -7%, 3k level, 4k +1.6%, 8k +9%.
 pub const SEG_MIN = 4096;
+/// Speed-up mode splits a prompt chunk across the two Macs once each gets this many rows.
+pub const PAIR_MIN = 256;
 
 pub const Reason = enum { stop, length, cancelled };
 
@@ -311,6 +313,8 @@ pub const Engine = struct {
         try e.rounds();
         e.tsel = try GSelect.init(r, 0);
         e.msel = try GSelect.init(r, 0);
+        // TF_FLASHNEXT_TP: TP=2 with the peer named there (tp.zig); both ranks then run the same replies in lockstep
+        if (std.c.getenv("TF_FLASHNEXT_TP")) |path| r.tp = try fz.Tp2.init(arena, r.device, std.mem.span(path), m.t.pick);
         return e;
     }
 
@@ -413,6 +417,24 @@ pub const Engine = struct {
         while (at < prompt.len) {
             if (out.cancelled(out.ctx)) return .{ .reason = .cancelled };
             const left = prompt.len - at;
+            if (r.tp) |tp| { // speed-up mode: the chunk's rows split across the two Macs
+                const call = segments.next(left, e.pr.step, PAIR_MIN);
+                if (call.parts == 2) {
+                    pick = try Prompt.chunkPair(e.pr, m, e.gpa, prompt[at .. at + call.rows], tp);
+                    var span: [2][2]usize = undefined; // each Mac's segment: first position, rows with an MTP key
+                    for (0..2) |k| {
+                        const s = at + segments.start(call.rows, 2, k);
+                        const n = segments.rows(call.rows, 2, k);
+                        span[k] = .{ s, if (s + n < prompt.len) n else n - 1 };
+                    }
+                    const mine = span[tp.rank];
+                    try e.pr.mtpKeys(m, mine[0], prompt[mine[0] + 1 .. mine[0] + 1 + mine[1]], e.pr.last);
+                    try e.pr.pairMtp(m, tp, mine, span[1 - tp.rank]);
+                    last_n = 1; // m.last points at the last row
+                    at += call.rows;
+                    continue;
+                }
+            }
             const c: segments.Call = if (e.segments) segments.next(left, e.pr.step, SEG_MIN) else .{ .rows = @min(e.pr.step, left), .parts = 1 };
             pick = try Prompt.chunkN(ps[0..c.parts], m, e.gpa, prompt[at .. at + c.rows]);
             for (ps[0..c.parts], 0..) |p, k| { // the MTP head's keys for each segment's rows, from its streams

@@ -68,7 +68,10 @@ pub const Cluster = struct {
 
     pub fn deinit(c: *Cluster) void {
         for (c.windows) |w| std.posix.munmap(w);
-        for (c.queues) |*q| q.deinit(c.gpa);
+        for (c.queues) |*q| {
+            for (q.items) |op| if (op.kind == .write) c.gpa.free(op.bytes);
+            q.deinit(c.gpa);
+        }
         const gpa = c.gpa;
         gpa.free(c.windows);
         gpa.free(c.access);
@@ -120,9 +123,12 @@ pub const Cluster = struct {
         try c.check(op, len, op.kind == .signal or op.kind == .fetch_add);
         _ = c.posted[op.src].fetchAdd(1, .monotonic);
         if (c.mode == .immediate) return c.execute(op);
+        var queued = op;
+        // a queued write owns its bytes, as a real link's staging copy does: callers may reuse theirs before a flush
+        if (op.kind == .write) queued.bytes = c.gpa.dupe(u8, op.bytes) catch @panic("fake queue");
         c.acquire();
         defer c.lock.unlock();
-        c.queues[op.src * c.size() + op.dst].append(c.gpa, op) catch @panic("fake queue");
+        c.queues[op.src * c.size() + op.dst].append(c.gpa, queued) catch @panic("fake queue");
     }
 
     fn execute(c: *Cluster, op: Op) void {
@@ -131,6 +137,7 @@ pub const Cluster = struct {
             .write => {
                 @memcpy(w[op.offset..][0..op.bytes.len], op.bytes);
                 _ = c.written[op.src * c.size() + op.dst].fetchAdd(op.bytes.len, .monotonic);
+                if (c.mode == .queued) c.gpa.free(op.bytes);
             },
             .read => @memcpy(op.out, w[op.offset..][0..op.out.len]),
             .signal => @atomicStore(u64, @as(*u64, @ptrCast(@alignCast(w.ptr + op.offset))), op.value, .release),

@@ -4,6 +4,8 @@ const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
 const segments = @import("../../core/segments.zig");
+const tpm = @import("tp.zig");
+pub const Tp2 = tpm.Tp2;
 
 pub const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
@@ -260,6 +262,7 @@ const xnew_source =
     \\    const device uint* SGW [[buffer(8)]], const device bfloat* SGS [[buffer(9)]], const device bfloat* SGB [[buffer(10)]],
     \\    const device uint* SUW [[buffer(11)]], const device bfloat* SUS [[buffer(12)]], const device bfloat* SUB [[buffer(13)]],
     \\    device bfloat* ACT [[buffer(14)]], device uint* PICK [[buffer(15)]], device float* WTS [[buffer(16)]],
+    \\    constant uint4& OWN [[buffer(17)]],
     \\    uint sgi [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
     \\    uint3 tg [[threadgroup_position_in_grid]]) {
     \\  constexpr int K = 2560, N = 640, TOPK = 10, NE = 512, NL = 513, SLOTS = TOPK + 1, WPR = K * 6 / 32, KG = K / 32;
@@ -277,6 +280,7 @@ const xnew_source =
     \\      for (int kk = 0; kk < TOPK; kk++) WTS[r * TOPK + kk] = float(bfloat(ex[kk] / total));
     \\    }
     \\  }
+    \\  if (shared ? OWN.z == 0 : (uint(e) < OWN.x || uint(e) >= OWN.y)) return; // TP: another rank's expert
     \\  const int row = int(tg.y) * 8 + int(sgi) * 2 + int(lane >> 4);
     \\  const int part = int(lane & 15);
     \\  constexpr int GJ = FZ_PACKED ? 96 : 6, SJ = FZ_PACKED ? 16 : 1; // a lane's group stride: words, scales
@@ -303,7 +307,7 @@ const xnew_source =
     \\[[kernel]] void fz_xdown(const device bfloat* ACT [[buffer(0)]], const device uint* PICK [[buffer(1)]],
     \\    const device uint* DW [[buffer(2)]], const device bfloat* DS [[buffer(3)]], const device bfloat* DB [[buffer(4)]],
     \\    const device uint* SDW [[buffer(5)]], const device bfloat* SDS [[buffer(6)]], const device bfloat* SDB [[buffer(7)]],
-    \\    const constant int* rows [[buffer(8)]], device bfloat* Y [[buffer(9)]],
+    \\    const constant int* rows [[buffer(8)]], device bfloat* Y [[buffer(9)]], constant uint4& OWN [[buffer(10)]],
     \\    uint sgi [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
     \\    uint3 tg [[threadgroup_position_in_grid]]) {
     \\  constexpr int NI = 640, D = 2560, TOPK = 10, SLOTS = TOPK + 1, WPR = NI * 6 / 32, KG = NI / 32;
@@ -314,6 +318,10 @@ const xnew_source =
     \\  const size_t e = shared ? 0 : size_t(PICK[r * TOPK + k]);
     \\  const int d = int(tg.y) * 32 + int(sgi) * 8 + int(lane >> 2);
     \\  const int part = int(lane & 3);
+    \\  if (shared ? OWN.z == 0 : (uint(e) < OWN.x || uint(e) >= OWN.y)) { // TP: another rank's expert, zero here
+    \\    if (part == 0) Y[(r * SLOTS + k) * D + d] = bfloat(0.0f);
+    \\    return;
+    \\  }
     \\  constexpr int GJ = FZ_PACKED ? 24 : 6, SJ = FZ_PACKED ? 4 : 1;
     \\  const device uint* w = (shared ? SDW : DW + e * D * WPR) + size_t(d) * WPR + part * (FZ_PACKED ? 6 : 30);
     \\  const size_t g0 = (shared ? 0 : e * D * KG) + size_t(d) * KG + part * (FZ_PACKED ? 1 : 5);
@@ -818,6 +826,8 @@ pub const Run = struct {
     ul: Buf = undefined,
     dense16_pipe: mtl.Pipeline = undefined,
     xnew_header: []const u8 = "",
+    tp: ?*Tp2 = null, // TP=2 across two Macs (tp.zig): the target layers' experts split by id, outputs exchanged
+    tp_layer: bool = false, // the experts being encoded are a target layer's (the MTP head keeps all of its own)
     sel: ?Select = null, // long contexts: the indexer's pool, scores and selection
     gsel: ?GSelect = null, // the same in GPU-side rounds
     sel_meta_pipe: mtl.Pipeline = undefined,
@@ -1075,14 +1085,18 @@ pub const Run = struct {
             return;
         }
         const pairs = r.rows * 11;
+        const own = if (r.tp != null and r.tp_layer) r.tp.?.own() else [4]u32{ 0, 512, 1, 0 };
+        if (r.tp != null and r.tp_layer and r.xsx) return error.TpNeedsPlainExperts;
         r.enc.setPipeline(if (r.xsx) r.xgu_sx_pipe else r.xgu_pipe);
         const gu = [_]Buf{ x, lg, e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8], e[9], e[10], e[11], act, pick, wts };
         for (gu, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
+        r.enc.setBytes(std.mem.asBytes(&own), 17);
         r.enc.dispatchThreads(mtl.Size.of(128, 80, pairs), mtl.Size.of(128, 1, 1));
         if (!r.serial) r.enc.barrier();
         r.enc.setPipeline(if (r.xsx) r.xdown_sx_pipe else r.xdown_pipe);
         const dn = [_]Buf{ act, pick, e[12], e[13], e[14], e[15], e[16], e[17], rows_buf, y };
         for (dn, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
+        r.enc.setBytes(std.mem.asBytes(&own), 10);
         r.enc.dispatchThreads(mtl.Size.of(128, 80, pairs), mtl.Size.of(128, 1, 1));
         if (!r.serial) r.enc.barrier();
     }
@@ -1736,7 +1750,10 @@ pub const Model = struct {
             r.touch(L.router);
             try m.hcProject(t.h[cur], L.mhc, "qa_hc_down@mhc", "qa_hc_up@mhc", t.inj_m);
             try r.call("q4_router_float@moe", &.{ t.mixed, L.router, t.rows }, &.{t.lg});
+            r.tp_layer = true;
             try r.experts("qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown);
+            r.tp_layer = false;
+            if (r.tp) |tp| tp.exchange(r.enc, t.ydown, t.pick, t.rows);
             if (r.probe) |pb| r.copyKept(t.pick, .{ .b = pb.b, .off = pb.off + i * MAXR * 10 * 4 }, rows * 10, 0, 0, 0, 1, -1);
             pending = .grouped;
         }
@@ -2560,9 +2577,72 @@ pub const Prompt = struct {
 
     /// Flash Next's hooks for core/segments.zig: a segment's embedding, layer parts and final streams, encoded into its
     /// lane's encoder. Layer 1 waits ahead of the n-gram block, which reads the segment before's last gate rows.
+    /// Speed-up mode's prefill (chunkPair): this Mac's segment of a chunk whose rows are split across two Macs.
+    const Pair = struct {
+        tp: *Tp2,
+        call: u32,
+        k: usize, // this Mac's segment: 0 hands each layer to the peer, 1 waits for it
+        pos0: usize, // segment 0's first position and rows: what segment 1 receives
+        rows0: usize,
+        a: usize, // the DeltaNet slot the chunk starts from; segment 0 writes 1 - a, segment 1 writes a
+    };
+
+    fn bytesOf(b: Buf) [*]const u8 {
+        return b.b.contents() + b.off;
+    }
+
+    /// Segment 0, after layer i's mixer: once the GPU gets here the host sends the state (DeltaNet) or new key, value
+    /// and indexer rows (attention) of this layer to the peer's slot, with the n-gram tail at layer 1.
+    fn pairSend(pr: *const Pair, m: *Model, s: *Seg, i: usize) void {
+        const L = &m.layers[i];
+        const slot = tpm.layerSlot(i);
+        var ws: [8]tpm.Write = undefined;
+        var n: usize = 0;
+        if (L.linear) {
+            ws[0] = .{ .src = bytesOf(L.cs[1 - pr.a]), .len = CS_ROW, .dst = slot };
+            ws[1] = .{ .src = bytesOf(L.so[1 - pr.a]), .len = SO_ROW, .dst = slot + CS_ROW };
+            n = 2;
+        } else {
+            for (0..2) |hd| {
+                ws[n] = .{ .src = bytesOf(L.keys) + (hd * CAP + pr.pos0) * 512, .len = pr.rows0 * 512, .dst = slot + hd * tpm.KV_HEAD };
+                ws[n + 1] = .{ .src = bytesOf(L.vals) + (hd * CAP + pr.pos0) * 512, .len = pr.rows0 * 512, .dst = slot + (2 + hd) * tpm.KV_HEAD };
+                n += 2;
+            }
+            ws[n] = .{ .src = bytesOf(L.raw) + pr.pos0 * 256, .len = pr.rows0 * 256, .dst = slot + 4 * tpm.KV_HEAD };
+            n += 1;
+        }
+        if (i == 1) {
+            ws[n] = .{ .src = bytesOf(s.p.b.cin) + s.rows * WIDE * 2, .len = PLE_TAIL * WIDE * 2, .dst = tpm.TAIL };
+            n += 1;
+        }
+        pr.tp.send(s.p.r.enc, ws[0..n], tpm.LAYER_FLAG + 8 * i, pr.call);
+    }
+
+    /// Segment 1, before layer i's mixer (its n-gram block at layer 1): the GPU waits for the layer's flag, then copies
+    /// the peer's handoff into the slot it reads, the caches, and its n-gram tail.
+    fn pairTake(pr: *const Pair, m: *Model, s: *Seg, i: usize) void {
+        const L = &m.layers[i];
+        const w = pr.tp.window();
+        const slot = tpm.layerSlot(i);
+        const p = s.p;
+        pr.tp.waitWord(p.r.enc, tpm.LAYER_FLAG + 8 * i, pr.call);
+        if (L.linear) {
+            p.copyWords(.{ .b = w, .off = slot }, L.cs[1 - pr.a], CS_ROW / 4);
+            p.copyWords(.{ .b = w, .off = slot + CS_ROW }, L.so[1 - pr.a], SO_ROW / 4);
+        } else {
+            for (0..2) |hd| {
+                p.copyWords(.{ .b = w, .off = slot + hd * tpm.KV_HEAD }, .{ .b = L.keys.b, .off = L.keys.off + (hd * CAP + pr.pos0) * 512 }, pr.rows0 * 128);
+                p.copyWords(.{ .b = w, .off = slot + (2 + hd) * tpm.KV_HEAD }, .{ .b = L.vals.b, .off = L.vals.off + (hd * CAP + pr.pos0) * 512 }, pr.rows0 * 128);
+            }
+            p.copyWords(.{ .b = w, .off = slot + 4 * tpm.KV_HEAD }, .{ .b = L.raw.b, .off = L.raw.off + pr.pos0 * 256 }, pr.rows0 * 64);
+        }
+        if (i == 1) p.copyWords(.{ .b = w, .off = tpm.TAIL }, p.b.cin, PLE_TAIL * WIDE * 2 / 4);
+    }
+
     const Hooks = struct {
         m: *Model,
         segs: []Seg,
+        pair: ?*const Pair = null,
 
         fn at(h: *Hooks, l: *const segments.Lane) *Seg {
             const s = &h.segs[l.k];
@@ -2585,10 +2665,15 @@ pub const Prompt = struct {
             s.p.copyWords(.{ .b = prev.p.b.cin.b, .off = prev.p.b.cin.off + prev.rows * WIDE * 2 }, s.p.b.cin, PLE_TAIL * WIDE * 2 / 4);
         }
         pub fn pre(h: *Hooks, l: *segments.Lane, i: usize) !void {
-            try segPre(h.at(l), h.m, i);
+            const s = h.at(l);
+            if (h.pair) |pr| if (pr.k == 1 and i == 1) pairTake(pr, h.m, s, i);
+            try segPre(s, h.m, i);
         }
         pub fn mixer(h: *Hooks, l: *segments.Lane, i: usize) !void {
-            try segMixer(h.at(l), h.m, i);
+            const s = h.at(l);
+            if (h.pair) |pr| if (pr.k == 1 and i != 1) pairTake(pr, h.m, s, i);
+            try segMixer(s, h.m, i);
+            if (h.pair) |pr| if (pr.k == 0) pairSend(pr, h.m, s, i);
         }
         pub fn post(h: *Hooks, l: *segments.Lane, i: usize) !void {
             try segPost(h.at(l), h.m, i);
@@ -2605,6 +2690,7 @@ pub const Prompt = struct {
             s.cur = 1 - s.cur;
             p.last = b.h[s.cur];
             if (l.k + 1 < h.segs.len) return;
+            if (h.pair) |pr| if (pr.k == 0) return; // the peer's segment ends the chunk: it runs the head
             m.last = p.last;
             p.hc(m, b.h[s.cur], m.mix, s.rows, b.inj_a);
             r.rows = 1;
@@ -2656,6 +2742,123 @@ pub const Prompt = struct {
         @memcpy(cin_old[0 .. PLE_TAIL * WIDE * 2], sl.p.b.cin.b.contents()[sl.rows * WIDE * 2 .. (sl.rows + PLE_TAIL) * WIDE * 2]);
         for (tokens) |tok| m.ple.hist = .{ m.ple.hist[1], tok };
         return m.t.picks.b.slice(u32, 1)[0];
+    }
+
+    /// Speed-up mode's prefill: a chunk's rows split across two Macs (tp.zig). This Mac runs its segment (rank 0 the
+    /// first half, rank 1 the second, a layer behind); rank 0 hands each layer's state or new keys to rank 1, then rank
+    /// 1 hands its final state, keys, n-gram tail, last row and first token back. Each segment does a serial chunk's
+    /// arithmetic, so both Macs end with one Mac's bits. Returns the greedy token after the chunk; m.last points at the
+    /// last row's streams.
+    pub fn chunkPair(p: *Prompt, m: *Model, gpa: std.mem.Allocator, tokens: []const u32, tp: *Tp2) !u32 {
+        const r = p.r;
+        const n = tokens.len;
+        if (n < 2 or n > 2 * PMAX) return error.ChunkSize;
+        const k: usize = tp.rank;
+        const a = m.state;
+        const at = segments.start(n, 2, k);
+        const rows = segments.rows(n, 2, k);
+        const rows0 = segments.rows(n, 2, 0);
+        tp.call += 1;
+        const pr: Pair = .{ .tp = tp, .call = tp.call, .k = k, .pos0 = m.pos, .rows0 = rows0, .a = a };
+        var hist = m.ple.hist;
+        for (tokens[at - @min(at, 2) .. at]) |tok| hist = .{ hist[1], tok };
+        try p.prep(m, gpa, tokens[at .. at + rows], m.pos + at, hist);
+        const ra = if (k == 0) a else 1 - a;
+        var segs = [1]Seg{.{ .p = p, .rows = rows, .pos = m.pos + at, .ra = ra, .rr = if (k == 0) m.state_row else 0, .wa = 1 - ra, .cur = 0, .pending = false }};
+        const cin_old = m.ple.cin.b.contents()[m.ple.cin.off..];
+        if (k == 0) @memcpy(p.b.cin.b.contents()[0 .. PLE_TAIL * WIDE * 2], cin_old[0 .. PLE_TAIL * WIDE * 2]);
+        var hooks: Hooks = .{ .m = m, .segs = &segs, .pair = &pr };
+        if (tp.trace) std.debug.print("TP rank{d} chunk {d}: rows {d} at {d} (pos {d}), state slot {d}\n", .{ k, pr.call, rows, at, m.pos + at, a });
+        m.gpu_seconds += try segments.run(r.device, &.{r.queue}, LAYERS, if (r.serial) .serial else .concurrent, &hooks);
+        if (tp.trace) std.debug.print("TP rank{d} chunk {d}: GPU done, gave_up {d}\n", .{ k, pr.call, tp.gaveUp() });
+        const t = &m.t;
+        var pick: u32 = undefined;
+        if (k == 1) { // the chunk's end: hand it back
+            var ws: std.ArrayList(tpm.Write) = .empty;
+            defer ws.deinit(gpa);
+            const pos1 = m.pos + at;
+            for (0..LAYERS) |i| {
+                const L = &m.layers[i];
+                const slot = tpm.layerSlot(i);
+                if (L.linear) {
+                    try ws.append(gpa, .{ .src = bytesOf(L.cs[a]), .len = CS_ROW, .dst = slot });
+                    try ws.append(gpa, .{ .src = bytesOf(L.so[a]), .len = SO_ROW, .dst = slot + CS_ROW });
+                } else {
+                    for (0..2) |hd| {
+                        try ws.append(gpa, .{ .src = bytesOf(L.keys) + (hd * CAP + pos1) * 512, .len = rows * 512, .dst = slot + hd * tpm.KV_HEAD });
+                        try ws.append(gpa, .{ .src = bytesOf(L.vals) + (hd * CAP + pos1) * 512, .len = rows * 512, .dst = slot + (2 + hd) * tpm.KV_HEAD });
+                    }
+                    try ws.append(gpa, .{ .src = bytesOf(L.raw) + pos1 * 256, .len = rows * 256, .dst = slot + 4 * tpm.KV_HEAD });
+                }
+            }
+            try ws.append(gpa, .{ .src = bytesOf(p.b.cin) + rows * WIDE * 2, .len = PLE_TAIL * WIDE * 2, .dst = tpm.TAIL });
+            try ws.append(gpa, .{ .src = bytesOf(p.last) + (rows - 1) * WIDE * 2, .len = WIDE * 2, .dst = tpm.LAST });
+            try ws.append(gpa, .{ .src = bytesOf(t.picks), .len = 16, .dst = tpm.LAST + WIDE * 2 });
+            try tp.sendNow(ws.items, tpm.BACK_FLAG, pr.call);
+            pick = t.picks.b.slice(u32, 1)[0];
+            @memcpy(cin_old[0 .. PLE_TAIL * WIDE * 2], p.b.cin.b.contents()[p.b.cin.off + rows * WIDE * 2 ..][0 .. PLE_TAIL * WIDE * 2]);
+            m.last = .{ .b = p.last.b, .off = p.last.off + (rows - 1) * WIDE * 2 };
+        } else { // the peer's half of the chunk into place
+            tp.hostWait(tpm.BACK_FLAG, pr.call);
+            const w = tp.window();
+            const rows1 = n - rows0;
+            const pos1 = m.pos + rows0;
+            const cb = r.queue.commandBuffer();
+            r.enc = cb.compute(if (r.serial) .serial else .concurrent);
+            for (0..LAYERS) |i| {
+                const L = &m.layers[i];
+                const slot = tpm.layerSlot(i);
+                if (L.linear) {
+                    p.copyWords(.{ .b = w, .off = slot }, L.cs[a], CS_ROW / 4);
+                    p.copyWords(.{ .b = w, .off = slot + CS_ROW }, L.so[a], SO_ROW / 4);
+                } else {
+                    for (0..2) |hd| {
+                        p.copyWords(.{ .b = w, .off = slot + hd * tpm.KV_HEAD }, .{ .b = L.keys.b, .off = L.keys.off + (hd * CAP + pos1) * 512 }, rows1 * 128);
+                        p.copyWords(.{ .b = w, .off = slot + (2 + hd) * tpm.KV_HEAD }, .{ .b = L.vals.b, .off = L.vals.off + (hd * CAP + pos1) * 512 }, rows1 * 128);
+                    }
+                    p.copyWords(.{ .b = w, .off = slot + 4 * tpm.KV_HEAD }, .{ .b = L.raw.b, .off = L.raw.off + pos1 * 256 }, rows1 * 64);
+                }
+            }
+            try m.finish(cb);
+            @memcpy(cin_old[0 .. PLE_TAIL * WIDE * 2], tp.bytes(tpm.TAIL)[0 .. PLE_TAIL * WIDE * 2]);
+            pick = std.mem.readInt(u32, tp.bytes(tpm.LAST + WIDE * 2)[0..4], .little);
+            m.last = .{ .b = w, .off = tpm.LAST };
+        }
+        m.state = a; // two segments: each flipped it once
+        m.state_row = 0;
+        m.pos += n;
+        for (tokens) |tok| m.ple.hist = .{ m.ple.hist[1], tok };
+        return pick;
+    }
+
+    /// Speed-up mode: once each Mac has written the MTP head's prompt keys for its segment's rows (`mine`: first
+    /// position, rows), each sends them to the other and copies the other's (`theirs`) into place.
+    pub fn pairMtp(p: *Prompt, m: *Model, tp: *Tp2, mine: [2]usize, theirs: [2]usize) !void {
+        const r = p.r;
+        const h = &m.mtp;
+        var ws: [5]tpm.Write = undefined;
+        var n: usize = 0;
+        if (mine[1] > 0) {
+            for (0..2) |hd| {
+                ws[n] = .{ .src = bytesOf(h.keys) + (hd * CAP + mine[0]) * 512, .len = mine[1] * 512, .dst = tpm.MTP + hd * tpm.KV_HEAD };
+                ws[n + 1] = .{ .src = bytesOf(h.vals) + (hd * CAP + mine[0]) * 512, .len = mine[1] * 512, .dst = tpm.MTP + (2 + hd) * tpm.KV_HEAD };
+                n += 2;
+            }
+            ws[n] = .{ .src = bytesOf(h.raw) + mine[0] * 256, .len = mine[1] * 256, .dst = tpm.MTP + 4 * tpm.KV_HEAD };
+            n += 1;
+        }
+        try tp.sendNow(ws[0..n], tpm.MTP_FLAG, tp.call);
+        tp.hostWait(tpm.MTP_FLAG, tp.call);
+        if (theirs[1] == 0) return;
+        const w = tp.window();
+        const cb = r.queue.commandBuffer();
+        r.enc = cb.compute(if (r.serial) .serial else .concurrent);
+        for (0..2) |hd| {
+            p.copyWords(.{ .b = w, .off = tpm.MTP + hd * tpm.KV_HEAD }, .{ .b = h.keys.b, .off = h.keys.off + (hd * CAP + theirs[0]) * 512 }, theirs[1] * 128);
+            p.copyWords(.{ .b = w, .off = tpm.MTP + (2 + hd) * tpm.KV_HEAD }, .{ .b = h.vals.b, .off = h.vals.off + (hd * CAP + theirs[0]) * 512 }, theirs[1] * 128);
+        }
+        p.copyWords(.{ .b = w, .off = tpm.MTP + 4 * tpm.KV_HEAD }, .{ .b = h.raw.b, .off = h.raw.off + theirs[0] * 256 }, theirs[1] * 64);
+        try m.finish(cb);
     }
 
     /// The MTP head's keys and values for prompt rows start .. start + n from their streams (n rows of `streams`)

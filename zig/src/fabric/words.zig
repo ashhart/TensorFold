@@ -41,6 +41,12 @@ pub fn pause(ns: u64) void {
     _ = std.c.nanosleep(&ts, null);
 }
 
+pub fn checkedNowNs() error{ClockUnavailable}!u64 {
+    var ts: std.c.timespec = undefined;
+    if (std.c.clock_gettime(.MONOTONIC, &ts) != 0 or ts.sec < 0 or ts.nsec < 0 or ts.nsec >= std.time.ns_per_s) return error.ClockUnavailable;
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
+
 /// The library's rules in Zig, for in-process fakes and for checking the library against them.
 pub const native: Words = .{ .ptr = null, .store_fn = nativeStore, .wait_fn = nativeWait };
 
