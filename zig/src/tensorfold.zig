@@ -9,5 +9,5 @@ pub const nemotron = @import("families/nemotron/nemotron.zig");
 
 test {
     std.testing.refAllDecls(@This());
-    _ = @import("families/nemotron/prefill_kernels.zig"); // its sources compile at this macOS's Metal language
+    _ = @import("families/nemotron/prefill_kernels.zig"); // Compile the prompt-chunk sources in tests.
 }
