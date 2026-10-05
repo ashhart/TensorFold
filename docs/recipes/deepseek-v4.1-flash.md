@@ -1,8 +1,17 @@
 # DeepSeek-V4.1-Flash (MLX)
 
-TensorFold's `deepseek_v41` family runs the text model on Apple Silicon with MLX 0.32.2 or later. It implements Single-Pass hyper-connections, CSA2 window and compressed-pool attention, the lightning indexer, Engram memory, routed and shared experts, and the native three-stage DSpark draft head. The family uses TensorFold's lane engine; exact multi-row verification, draft rollback and concurrent-stream equality are covered by its tiny-checkpoint suite.
+TensorFold's `deepseek_v41` family runs the text model on Apple Silicon with MLX 0.32.2 or 0.32.3. It implements Single-Pass hyper-connections, CSA2 window and compressed-pool attention, the lightning indexer, Engram memory, routed and shared experts, and the native three-stage DSpark draft head. The family uses TensorFold's lane engine; exact multi-row verification, draft rollback and concurrent-stream equality are covered by its tiny-checkpoint suite.
 
-The loader accepts converted checkpoints in MLX affine 3-bit or 4-bit groups of 64, with BF16 exceptions. DeepSeek's original mixed FP4/FP8 checkpoint is not directly readable by this family; conversion tooling is separate. This path is text-only. It does not load the vision tower or aligner.
+The family loader accepts affine 3-bit or 4-bit group-64 weights with BF16 exceptions. The included converter turns DeepSeek's mixed FP4/FP8 source shards into MLX affine 3-bit group-64 weights, keeping the source untouched and processing one shard at a time. This path is text-only; it does not load the vision tower or aligner. Install the optional conversion dependencies:
+
+```bash
+python -m pip install "tensorfold[convert]"
+python -m tensorfold.families.deepseek_v41.convert \
+  --src /path/to/DeepSeek-V4.1-Flash-source \
+  --out /path/to/DeepSeek-V4.1-Flash-MLX-Q3
+```
+
+The output receives a runnable safetensors index and tokenizer/config files only after every source shard converts successfully. A partial `--shards` probe deliberately does not create a runnable checkpoint.
 
 ```bash
 tensorfold serve /path/to/converted-checkpoint --name deepseek-v41
@@ -18,6 +27,12 @@ Run the focused suite on a Mac with MLX installed:
 
 ```bash
 python -m pytest -q tests/test_deepseek_v41_family.py
+```
+
+With `tensorfold[convert]` installed, test the CPU conversion path too:
+
+```bash
+python -m pytest -q tests/test_deepseek_v41_converter.py
 ```
 
 ## Memory and measurements

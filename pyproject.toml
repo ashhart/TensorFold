@@ -42,6 +42,7 @@ vision = ["Pillow>=10", "transformers>=5.3,<6", "mlx-vlm>=0.7.3,<0.8; sys_platfo
           "av>=12; sys_platform != 'darwin'"]
 # response_format, guided_* and structured_outputs on every server: grammar-shaped replies (xgrammar brings torch)
 grammar = ["xgrammar>=0.2.8,<0.3"]
+convert = ["torch>=2.8", "safetensors>=0.4"]
 
 [project.scripts]
 tensorfold = "tensorfold.cli:main"

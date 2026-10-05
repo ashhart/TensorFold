@@ -5,10 +5,9 @@ GitHub has the full notes and the measurements behind them.
 
 ## Unreleased
 
-- **DeepSeek-V4.1-Flash on MLX.** The `deepseek_v41` family supports converted affine 3/4-bit group-64 checkpoints,
-  exact lane verification, native DSpark drafts, CSA2 attention and Engram. See
-  [`docs/recipes/deepseek-v4.1-flash.md`](docs/recipes/deepseek-v4.1-flash.md); the original mixed FP4/FP8 source
-  checkpoint is not directly readable.
+- **DeepSeek-V4.1-Flash on MLX.** The `deepseek_v41` family converts the original mixed FP4/FP8 source to affine
+  group-64 3-bit weights, then runs exact lane verification, DSpark drafts, CSA2 attention and Engram. See the
+  [recipe](docs/recipes/deepseek-v4.1-flash.md) for the streaming converter and usage limits.
 - **DeepSeek-V4.1 groups routed expert work across rows.** Rows selecting the same expert share one call, while each
   row's contribution is still accumulated in its original route order.
 - **DeepSeek-V4.1 startup avoids re-parsing its weight index for draft discovery.** The backbone loader carries the
