@@ -1,10 +1,11 @@
 """Host ownership and reload checks; these do not measure GPU reclamation."""
 
-from pathlib import Path
-from types import SimpleNamespace
 import gc
+import hashlib
 import sys
 import weakref
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -200,6 +201,73 @@ def test_changed_draft_blocks_wake_and_original_content_allows_retry(checkpoint,
     path.write_bytes(original)
     app.lifecycle.wake_up()
     assert app.lifecycle.snapshot()["ready"]
+
+
+def test_checkpoint_identity_hashes_complete_shards_and_distinguishes_target_and_draft(checkpoint, tmp_path):
+    from tensorfold.cuda.sleep import CheckpointIdentity
+
+    draft = tmp_path / "draft"
+    draft.mkdir()
+    (draft / "config.json").write_bytes(b"draft config")
+    (draft / "model.safetensors").write_bytes(b"draft weights")
+    payload = bytes(range(256)) * 8192 + b"partial final block"
+    shard = checkpoint / "model-00002.safetensors"
+    shard.write_bytes(payload)
+    expected = {(str(root.resolve()), path.name): hashlib.sha256(path.read_bytes()).hexdigest()
+                for root in (checkpoint, draft) for path in root.iterdir()}
+    (checkpoint / ".cache").mkdir()
+    (checkpoint / ".cache" / "ignored.json").write_bytes(b"ignored")
+    (checkpoint / "ignored.md").write_bytes(b"ignored")
+    identity = CheckpointIdentity(checkpoint, str(draft))
+    assert identity.manifest == expected
+    identity.verify()
+    shard.write_bytes(payload[:-1] + b"X")
+    with pytest.raises(ValueError, match="content changed"):
+        identity.verify()
+
+
+def test_checkpoint_read_failure_refuses_sleep_without_releasing_runtime(checkpoint, cuda, monkeypatch):
+    app, _adapter, refs, _calls = setup(checkpoint, cuda, monkeypatch)
+    original_open = Path.open
+
+    def unreadable(path, *args, **kwargs):
+        if path == checkpoint / "model.safetensors":
+            raise PermissionError("checkpoint read refused")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", unreadable)
+    with pytest.raises(LifecycleError, match="missing or unreadable"):
+        app.lifecycle.sleep()
+    assert app.lifecycle.snapshot()["state"] == "awake"
+    assert app.engine is refs[-1]() and not cuda
+
+
+def test_checkpoint_changed_during_reload_is_not_published_and_can_retry(checkpoint, cuda, monkeypatch):
+    import os
+
+    path = checkpoint / "model.safetensors"
+    original = path.read_bytes()
+    attempts, reloaded = [], []
+
+    def load():
+        engine = Engine(cuda)
+        attempts.append(1)
+        reloaded.append(weakref.ref(engine))
+        if len(attempts) == 1:
+            before = path.stat()
+            path.write_bytes(b"X" * len(original))
+            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        return engine
+
+    app, _adapter, _refs, _calls = setup(checkpoint, cuda, monkeypatch, load)
+    app.lifecycle.sleep()
+    with pytest.raises(LifecycleError, match="content changed"):
+        app.lifecycle.wake_up()
+    assert app.lifecycle.snapshot()["state"] == "sleeping"
+    assert app.engine is None and reloaded[0]() is None
+    path.write_bytes(original)
+    app.lifecycle.wake_up()
+    assert app.lifecycle.snapshot()["ready"] and app.engine is reloaded[1]()
 
 
 def test_failed_constructor_drops_traceback_allocations_before_cleanup(checkpoint, cuda, monkeypatch):

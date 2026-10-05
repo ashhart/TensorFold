@@ -42,7 +42,13 @@ tensorfold serve /path/to/nemotron-checkpoint --backend cuda \
 Use `--no-drafts` to disable drafting for either family. The checkpoint files must remain
 available and unchanged throughout the server's lifetime. The prototype verifies
 their full SHA-256 content before releasing the runtime and when reloading it;
-verification reads the entire checkpoint and contributes to transition latency.
+up to four files are hashed concurrently with bounded reads. Verification still reads
+the entire checkpoint and contributes to transition latency.
+
+The [latency and cache-performance measurements](research/model-sleep-performance.md)
+compare ordinary startup with wake, including time to the first token and total
+output throughput. Retained prefixes help the resumed request, but wake is not
+always faster than starting a fresh process.
 
 Qwen accepts compatible DFlash v1 and DFlash2 checkpoints through `--drafter`.
 The drafter's `dflash_config.target_layer_ids` determines which target hidden states

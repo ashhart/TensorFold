@@ -1,0 +1,1407 @@
+{
+  "methodology": {
+    "source_runtime": "84b9bd4+parallel-checkpoint-hashes",
+    "source_files": 430,
+    "source_sha256": "4fc2566ab68679d14eea3b3f9552f963472bbec4b3b86d7080463e8b30e574e4",
+    "prompt_tokens": 8192,
+    "context": 16384,
+    "parallel": 1,
+    "repetitions": 3,
+    "priming_runs_per_model": 1,
+    "cold": "Fresh process to first token, including imports, engine load and frontend initialization; no retained prefix.",
+    "wake": "Wake call to first token, including reload and first lazy prefix restoration; same process.",
+    "cache_policy": "Warm filesystem and compiled-kernel disk caches; no system cache drops.",
+    "cold_sleep_setup": "Excluded: cold baseline initializes no sleep adapter before its first request.",
+    "scope": "Runtime/app measurement; HTTP transport, model-to-model switch and cold storage are not timed.",
+    "date": "2026-10-05",
+    "base_commit": "84b9bd415687376cde93cf1000df7859c4f91004",
+    "baseline_source_sha256": "9a23253f5d1f4d7672a3fb4bae8d1e54419a5df6ec84d0fdb8df608b772f3313",
+    "optimized_sleep_module_sha256": "178bcf41fc64d02423cc518cd8be3d2594a63e3da8bacf92b0359a6a95800072",
+    "token_sequence": "[1 + i % 128 for i in range(8192)]",
+    "sampling": {
+      "seed": 1234,
+      "temperature": 1.0,
+      "top_k": 20,
+      "top_p": 0.95,
+      "stop_eos": false
+    },
+    "ordering": "One excluded priming cycle per model, then three repetitions with alternating model order; baseline campaign precedes optimized campaign.",
+    "metric_definitions": {
+      "request_output_tps": "64 / request.elapsed_s",
+      "total_output_tps": "64 / (startup_or_wake_s + request.elapsed_s)",
+      "prompt_token_reuse": "cached prompt tokens / 8192",
+      "aggregation": "Median of each per-run quantity; priming runs excluded."
+    },
+    "hardware": {
+      "backend": "single-device CUDA",
+      "memory": "unified",
+      "compute_capability": "12.1",
+      "torch": "2.13.0+cu130",
+      "cuda": "13.0"
+    },
+    "model_revisions": {
+      "capyctl/FrogNano-4B-2609-MLX-4bit": "7175ee2b94eae649dfd1e7605cd2dc3dcd1e3e2f",
+      "z-lab/Qwen3.5-4B-DFlash": "9a1996ccf887b79ab3af4fcbf8c1d1f4b5658bcf",
+      "nvidia/Qwen3.8-27B-NVFP4": "482ca0f3832238542f8f5295dde86b5f22711d80",
+      "z-lab/Qwen3.8-27B-DFlash2": "50307d4c4cde6860d4eee73e2547cd786fe8e8a4"
+    }
+  },
+  "summary": {
+    "before": {
+      "frog": {
+        "cold_startup_s": 4.71280590898823,
+        "sleep_setup_s": 3.5366620880085975,
+        "sleep_s": 2.55242012598319,
+        "wake_s": 6.872047139971983,
+        "cold_first_token_total_s": 6.207816898997407,
+        "wake_first_token_total_s": 7.156246617960278,
+        "cold_first_token_s": 1.5045044120051898,
+        "cold_elapsed_s": 2.22950039699208,
+        "cold_request_tps": 28.705982778179948,
+        "cold_total_tps": 9.226326595261073,
+        "resumed_first_token_s": 0.2849694949691184,
+        "resumed_elapsed_s": 0.9153545669978485,
+        "resumed_request_tps": 69.91826152122147,
+        "resumed_total_tps": 8.218402287212065
+      },
+      "qwen": {
+        "cold_startup_s": 8.753494764037896,
+        "sleep_setup_s": 23.08316665905295,
+        "sleep_s": 13.104601352999453,
+        "wake_s": 30.015548227005638,
+        "cold_first_token_total_s": 11.917987988970708,
+        "wake_first_token_total_s": 30.531566294957884,
+        "cold_first_token_s": 3.131224258977454,
+        "cold_elapsed_s": 7.047077563998755,
+        "cold_request_tps": 9.081778853542827,
+        "cold_total_tps": 4.0417082195338,
+        "resumed_first_token_s": 0.5277926520211622,
+        "resumed_elapsed_s": 4.338380084023811,
+        "resumed_request_tps": 14.752050018780405,
+        "resumed_total_tps": 1.863955937837796
+      }
+    },
+    "after": {
+      "frog": {
+        "cold_startup_s": 4.8143436259706505,
+        "sleep_setup_s": 2.423042152018752,
+        "sleep_s": 2.0865810030372813,
+        "wake_s": 5.731769303965848,
+        "cold_first_token_total_s": 6.342604096978903,
+        "wake_first_token_total_s": 6.022724701964762,
+        "cold_first_token_s": 1.5117401269963011,
+        "cold_elapsed_s": 2.2454471940291114,
+        "cold_request_tps": 28.50211760498442,
+        "cold_total_tps": 9.046802376149296,
+        "resumed_first_token_s": 0.2914305879967287,
+        "resumed_elapsed_s": 0.9239182510063984,
+        "resumed_request_tps": 69.2701978019014,
+        "resumed_total_tps": 9.61583600062291
+      },
+      "qwen": {
+        "cold_startup_s": 8.444469192996621,
+        "sleep_setup_s": 9.063300380017608,
+        "sleep_s": 6.070216159976553,
+        "wake_s": 16.062239507038612,
+        "cold_first_token_total_s": 11.581977609952446,
+        "wake_first_token_total_s": 16.57849285105476,
+        "cold_first_token_s": 3.137508416955825,
+        "cold_elapsed_s": 7.053922139981296,
+        "cold_request_tps": 9.072966603536923,
+        "cold_total_tps": 4.12946083402985,
+        "resumed_first_token_s": 0.516330627957359,
+        "resumed_elapsed_s": 4.330411086964887,
+        "resumed_request_tps": 14.77919733594081,
+        "resumed_total_tps": 3.1389020135471357
+      }
+    }
+  },
+  "runs": {
+    "before": {
+      "frog-prime": {
+        "model": "capyctl/FrogNano-4B-2609-MLX-4bit",
+        "draft": "z-lab/Qwen3.5-4B-DFlash",
+        "context": 16384,
+        "prompt_tokens": 8192,
+        "reply_tokens": 64,
+        "parallel": 1,
+        "precision": "checkpoint",
+        "prefill_fp8": false,
+        "torch": "2.13.0+cu130",
+        "cuda": "13.0",
+        "cold_startup_s": 4.880885628983378,
+        "cold_first_token_total_s": 61.36667548696278,
+        "cold_request": {
+          "first_token_s": 56.4857898579794,
+          "elapsed_s": 57.24949847400421,
+          "tokens_sha256": "04888a2337baa53a0917235e06e71153afc434a60320aa0b4284e842825d2579",
+          "stats": {
+            "prefill_s": 56.4713510349975,
+            "decode_s": 0.7634131899685599,
+            "rounds": 26,
+            "cached": 0,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 390,
+            "accepted": 37
+          }
+        },
+        "sleep_setup_s": 3.5452605200116523,
+        "sleep_s": 2.70535532804206,
+        "wake_s": 6.829522687010467,
+        "wake_first_token_total_s": 7.113601076009218,
+        "resumed_request": {
+          "first_token_s": 0.2840783889987506,
+          "elapsed_s": 0.9135814619949088,
+          "tokens_sha256": "04888a2337baa53a0917235e06e71153afc434a60320aa0b4284e842825d2579",
+          "stats": {
+            "prefill_s": 0.2840554289869033,
+            "decode_s": 0.6292625929927453,
+            "rounds": 26,
+            "cached": 8191,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 390,
+            "accepted": 37
+          }
+        },
+        "asleep_memory": {
+          "allocated_bytes": 0,
+          "reserved_bytes": 0
+        },
+        "restored_cache": {
+          "mode": "disk",
+          "restore": "lazy",
+          "saved_prefixes": 1,
+          "snapshot_bytes": 437362592,
+          "omitted_prefixes": 0,
+          "unavailable_prefixes": 0,
+          "loaded_prefixes": 1,
+          "load_failures": 0,
+          "memory_misses": 0
+        },
+        "passed": true
+      },
+      "frog-rep1": {
+        "model": "capyctl/FrogNano-4B-2609-MLX-4bit",
+        "draft": "z-lab/Qwen3.5-4B-DFlash",
+        "context": 16384,
+        "prompt_tokens": 8192,
+        "reply_tokens": 64,
+        "parallel": 1,
+        "precision": "checkpoint",
+        "prefill_fp8": false,
+        "torch": "2.13.0+cu130",
+        "cuda": "13.0",
+        "cold_startup_s": 4.784580061037559,
+        "cold_first_token_total_s": 6.348802348016761,
+        "cold_request": {
+          "first_token_s": 1.5642222869792022,
+          "elapsed_s": 2.345874571998138,
+          "tokens_sha256": "04888a2337baa53a0917235e06e71153afc434a60320aa0b4284e842825d2579",
+          "stats": {
+            "prefill_s": 1.54978136299178,
+            "decode_s": 0.7813710999907926,
+            "rounds": 26,
+            "cached": 0,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 390,
+            "accepted": 37
+          }
+        },
+        "sleep_setup_s": 3.538402981008403,
+        "sleep_s": 2.593872305005789,
+        "wake_s": 6.945154535991605,
+        "wake_first_token_total_s": 7.230606346973218,
+        "resumed_request": {
+          "first_token_s": 0.28545181098161265,
+          "elapsed_s": 0.9173994059674442,
+          "tokens_sha256": "04888a2337baa53a0917235e06e71153afc434a60320aa0b4284e842825d2579",
+          "stats": {
+            "prefill_s": 0.2854292669799179,
+            "decode_s": 0.6317063940223306,
+            "rounds": 26,
+            "cached": 8191,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 390,
+            "accepted": 37
+          }
+        },
+        "asleep_memory": {
+          "allocated_bytes": 0,
+          "reserved_bytes": 0
+        },
+        "restored_cache": {
+          "mode": "disk",
+          "restore": "lazy",
+          "saved_prefixes": 1,
+          "snapshot_bytes": 437362592,
+          "omitted_prefixes": 0,
+          "unavailable_prefixes": 0,
+          "loaded_prefixes": 1,
+          "load_failures": 0,
+          "memory_misses": 0
+        },
+        "passed": true
+      },
+      "frog-rep2": {
+        "model": "capyctl/FrogNano-4B-2609-MLX-4bit",
+        "draft": "z-lab/Qwen3.5-4B-DFlash",
+        "context": 16384,
+        "prompt_tokens": 8192,
+        "reply_tokens": 64,
+        "parallel": 1,
+        "precision": "checkpoint",
+        "prefill_fp8": false,
+        "torch": "2.13.0+cu130",
+        "cuda": "13.0",
+        "cold_startup_s": 4.71280590898823,
+        "cold_first_token_total_s": 6.207816898997407,
+        "cold_request": {
+          "first_token_s": 1.4950109900091775,
+          "elapsed_s": 2.223865944019053,
+          "tokens_sha256": "04888a2337baa53a0917235e06e71153afc434a60320aa0b4284e842825d2579",
+          "stats": {
+            "prefill_s": 1.480699250008911,
+            "decode_s": 0.7285761060193181,
+            "rounds": 26,
+            "cached": 0,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 390,
+            "accepted": 37
+          }
+        },
+        "sleep_setup_s": 3.5366620880085975,
+        "sleep_s": 2.55242012598319,
+        "wake_s": 6.872047139971983,
+        "wake_first_token_total_s": 7.156246617960278,
+        "resumed_request": {
+          "first_token_s": 0.28419947798829526,
+          "elapsed_s": 0.9153545669978485,
+          "tokens_sha256": "04888a2337baa53a0917235e06e71153afc434a60320aa0b4284e842825d2579",
+          "stats": {
+            "prefill_s": 0.28417640598490834,
+            "decode_s": 0.6309183999546804,
+            "rounds": 26,
+            "cached": 8191,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 390,
+            "accepted": 37
+          }
+        },
+        "asleep_memory": {
+          "allocated_bytes": 0,
+          "reserved_bytes": 0
+        },
+        "restored_cache": {
+          "mode": "disk",
+          "restore": "lazy",
+          "saved_prefixes": 1,
+          "snapshot_bytes": 437362592,
+          "omitted_prefixes": 0,
+          "unavailable_prefixes": 0,
+          "loaded_prefixes": 1,
+          "load_failures": 0,
+          "memory_misses": 0
+        },
+        "passed": true
+      },
+      "frog-rep3": {
+        "model": "capyctl/FrogNano-4B-2609-MLX-4bit",
+        "draft": "z-lab/Qwen3.5-4B-DFlash",
+        "context": 16384,
+        "prompt_tokens": 8192,
+        "reply_tokens": 64,
+        "parallel": 1,
+        "precision": "checkpoint",
+        "prefill_fp8": false,
+        "torch": "2.13.0+cu130",
+        "cuda": "13.0",
+        "cold_startup_s": 4.606255994003732,
+        "cold_first_token_total_s": 6.110760406008922,
+        "cold_request": {
+          "first_token_s": 1.5045044120051898,
+          "elapsed_s": 2.22950039699208,
+          "tokens_sha256": "04888a2337baa53a0917235e06e71153afc434a60320aa0b4284e842825d2579",
+          "stats": {
+            "prefill_s": 1.4905225170077756,
+            "decode_s": 0.7247399200568907,
+            "rounds": 26,
+            "cached": 0,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 390,
+            "accepted": 37
+          }
+        },
+        "sleep_setup_s": 3.527243197953794,
+        "sleep_s": 2.535320152004715,
+        "wake_s": 6.705354092991911,
+        "wake_first_token_total_s": 6.990323587961029,
+        "resumed_request": {
+          "first_token_s": 0.2849694949691184,
+          "elapsed_s": 0.9144011549651623,
+          "tokens_sha256": "04888a2337baa53a0917235e06e71153afc434a60320aa0b4284e842825d2579",
+          "stats": {
+            "prefill_s": 0.2849479910219088,
+            "decode_s": 0.6291980120004155,
+            "rounds": 26,
+            "cached": 8191,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 390,
+            "accepted": 37
+          }
+        },
+        "asleep_memory": {
+          "allocated_bytes": 0,
+          "reserved_bytes": 0
+        },
+        "restored_cache": {
+          "mode": "disk",
+          "restore": "lazy",
+          "saved_prefixes": 1,
+          "snapshot_bytes": 437362592,
+          "omitted_prefixes": 0,
+          "unavailable_prefixes": 0,
+          "loaded_prefixes": 1,
+          "load_failures": 0,
+          "memory_misses": 0
+        },
+        "passed": true
+      },
+      "qwen-prime": {
+        "model": "nvidia/Qwen3.8-27B-NVFP4",
+        "draft": "z-lab/Qwen3.8-27B-DFlash2",
+        "context": 16384,
+        "prompt_tokens": 8192,
+        "reply_tokens": 64,
+        "parallel": 1,
+        "precision": "checkpoint",
+        "prefill_fp8": false,
+        "torch": "2.13.0+cu130",
+        "cuda": "13.0",
+        "cold_startup_s": 32.09153316402808,
+        "cold_first_token_total_s": 47.61940611503087,
+        "cold_request": {
+          "first_token_s": 15.527872951002792,
+          "elapsed_s": 19.451076266006567,
+          "tokens_sha256": "965ce3710f01df81303200dd450aea34a8f115ed3f17895c9919269c9997f96d",
+          "stats": {
+            "prefill_s": 15.513485556992237,
+            "decode_s": 3.922812017961405,
+            "rounds": 38,
+            "cached": 0,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 570,
+            "accepted": 25
+          }
+        },
+        "sleep_setup_s": 22.921448842040263,
+        "sleep_s": 12.945113709021825,
+        "wake_s": 29.62937800597865,
+        "wake_first_token_total_s": 30.146241576992907,
+        "resumed_request": {
+          "first_token_s": 0.5168635710142553,
+          "elapsed_s": 4.33372147398768,
+          "tokens_sha256": "965ce3710f01df81303200dd450aea34a8f115ed3f17895c9919269c9997f96d",
+          "stats": {
+            "prefill_s": 0.5168411390041001,
+            "decode_s": 3.8164565899642184,
+            "rounds": 38,
+            "cached": 8191,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 570,
+            "accepted": 25
+          }
+        },
+        "asleep_memory": {
+          "allocated_bytes": 0,
+          "reserved_bytes": 0
+        },
+        "restored_cache": {
+          "mode": "disk",
+          "restore": "lazy",
+          "saved_prefixes": 1,
+          "snapshot_bytes": 732710096,
+          "omitted_prefixes": 0,
+          "unavailable_prefixes": 0,
+          "loaded_prefixes": 1,
+          "load_failures": 0,
+          "memory_misses": 0
+        },
+        "passed": true
+      },
+      "qwen-rep1": {
+        "model": "nvidia/Qwen3.8-27B-NVFP4",
+        "draft": "z-lab/Qwen3.8-27B-DFlash2",
+        "context": 16384,
+        "prompt_tokens": 8192,
+        "reply_tokens": 64,
+        "parallel": 1,
+        "precision": "checkpoint",
+        "prefill_fp8": false,
+        "torch": "2.13.0+cu130",
+        "cuda": "13.0",
+        "cold_startup_s": 8.753494764037896,
+        "cold_first_token_total_s": 11.919668225047644,
+        "cold_request": {
+          "first_token_s": 3.1661734610097483,
+          "elapsed_s": 7.1128907760139555,
+          "tokens_sha256": "965ce3710f01df81303200dd450aea34a8f115ed3f17895c9919269c9997f96d",
+          "stats": {
+            "prefill_s": 3.1517158140195534,
+            "decode_s": 3.9463066260213964,
+            "rounds": 38,
+            "cached": 0,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 570,
+            "accepted": 25
+          }
+        },
+        "sleep_setup_s": 22.957858486974146,
+        "sleep_s": 12.994490602985024,
+        "wake_s": 29.963470175047405,
+        "wake_first_token_total_s": 30.491262827068567,
+        "resumed_request": {
+          "first_token_s": 0.5277926520211622,
+          "elapsed_s": 4.338380084023811,
+          "tokens_sha256": "965ce3710f01df81303200dd450aea34a8f115ed3f17895c9919269c9997f96d",
+          "stats": {
+            "prefill_s": 0.5277683640015312,
+            "decode_s": 3.8101139750215225,
+            "rounds": 38,
+            "cached": 8191,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 570,
+            "accepted": 25
+          }
+        },
+        "asleep_memory": {
+          "allocated_bytes": 0,
+          "reserved_bytes": 0
+        },
+        "restored_cache": {
+          "mode": "disk",
+          "restore": "lazy",
+          "saved_prefixes": 1,
+          "snapshot_bytes": 732710096,
+          "omitted_prefixes": 0,
+          "unavailable_prefixes": 0,
+          "loaded_prefixes": 1,
+          "load_failures": 0,
+          "memory_misses": 0
+        },
+        "passed": true
+      },
+      "qwen-rep2": {
+        "model": "nvidia/Qwen3.8-27B-NVFP4",
+        "draft": "z-lab/Qwen3.8-27B-DFlash2",
+        "context": 16384,
+        "prompt_tokens": 8192,
+        "reply_tokens": 64,
+        "parallel": 1,
+        "precision": "checkpoint",
+        "prefill_fp8": false,
+        "torch": "2.13.0+cu130",
+        "cuda": "13.0",
+        "cold_startup_s": 8.787811181973666,
+        "cold_first_token_total_s": 11.917987988970708,
+        "cold_request": {
+          "first_token_s": 3.130176806997042,
+          "elapsed_s": 7.047077563998755,
+          "tokens_sha256": "965ce3710f01df81303200dd450aea34a8f115ed3f17895c9919269c9997f96d",
+          "stats": {
+            "prefill_s": 3.1156550999730825,
+            "decode_s": 3.916430052020587,
+            "rounds": 38,
+            "cached": 0,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 570,
+            "accepted": 25
+          }
+        },
+        "sleep_setup_s": 23.1167241630028,
+        "sleep_s": 13.104601352999453,
+        "wake_s": 30.015548227005638,
+        "wake_first_token_total_s": 30.531566294957884,
+        "resumed_request": {
+          "first_token_s": 0.5160180679522455,
+          "elapsed_s": 4.320027362962719,
+          "tokens_sha256": "965ce3710f01df81303200dd450aea34a8f115ed3f17895c9919269c9997f96d",
+          "stats": {
+            "prefill_s": 0.515996339963749,
+            "decode_s": 3.803617967001628,
+            "rounds": 38,
+            "cached": 8191,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 570,
+            "accepted": 25
+          }
+        },
+        "asleep_memory": {
+          "allocated_bytes": 0,
+          "reserved_bytes": 0
+        },
+        "restored_cache": {
+          "mode": "disk",
+          "restore": "lazy",
+          "saved_prefixes": 1,
+          "snapshot_bytes": 732710096,
+          "omitted_prefixes": 0,
+          "unavailable_prefixes": 0,
+          "loaded_prefixes": 1,
+          "load_failures": 0,
+          "memory_misses": 0
+        },
+        "passed": true
+      },
+      "qwen-rep3": {
+        "model": "nvidia/Qwen3.8-27B-NVFP4",
+        "draft": "z-lab/Qwen3.8-27B-DFlash2",
+        "context": 16384,
+        "prompt_tokens": 8192,
+        "reply_tokens": 64,
+        "parallel": 1,
+        "precision": "checkpoint",
+        "prefill_fp8": false,
+        "torch": "2.13.0+cu130",
+        "cuda": "13.0",
+        "cold_startup_s": 8.436808892991394,
+        "cold_first_token_total_s": 11.568033151968848,
+        "cold_request": {
+          "first_token_s": 3.131224258977454,
+          "elapsed_s": 7.0425795370247215,
+          "tokens_sha256": "965ce3710f01df81303200dd450aea34a8f115ed3f17895c9919269c9997f96d",
+          "stats": {
+            "prefill_s": 3.116733930015471,
+            "decode_s": 3.9109074529842474,
+            "rounds": 38,
+            "cached": 0,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 570,
+            "accepted": 25
+          }
+        },
+        "sleep_setup_s": 23.08316665905295,
+        "sleep_s": 13.128504029999021,
+        "wake_s": 30.596739850006998,
+        "wake_first_token_total_s": 31.128344122960698,
+        "resumed_request": {
+          "first_token_s": 0.5316042729537003,
+          "elapsed_s": 4.355756130011287,
+          "tokens_sha256": "965ce3710f01df81303200dd450aea34a8f115ed3f17895c9919269c9997f96d",
+          "stats": {
+            "prefill_s": 0.5315789279993623,
+            "decode_s": 3.8236894570291042,
+            "rounds": 38,
+            "cached": 8191,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 570,
+            "accepted": 25
+          }
+        },
+        "asleep_memory": {
+          "allocated_bytes": 0,
+          "reserved_bytes": 0
+        },
+        "restored_cache": {
+          "mode": "disk",
+          "restore": "lazy",
+          "saved_prefixes": 1,
+          "snapshot_bytes": 732710096,
+          "omitted_prefixes": 0,
+          "unavailable_prefixes": 0,
+          "loaded_prefixes": 1,
+          "load_failures": 0,
+          "memory_misses": 0
+        },
+        "passed": true
+      }
+    },
+    "after": {
+      "frog-prime": {
+        "model": "capyctl/FrogNano-4B-2609-MLX-4bit",
+        "draft": "z-lab/Qwen3.5-4B-DFlash",
+        "context": 16384,
+        "prompt_tokens": 8192,
+        "reply_tokens": 64,
+        "parallel": 1,
+        "precision": "checkpoint",
+        "prefill_fp8": false,
+        "torch": "2.13.0+cu130",
+        "cuda": "13.0",
+        "cold_startup_s": 4.685234470991418,
+        "cold_first_token_total_s": 60.724730507994536,
+        "cold_request": {
+          "first_token_s": 56.03949603700312,
+          "elapsed_s": 56.781774977978785,
+          "tokens_sha256": "04888a2337baa53a0917235e06e71153afc434a60320aa0b4284e842825d2579",
+          "stats": {
+            "prefill_s": 56.025445618026424,
+            "decode_s": 0.7419760039774701,
+            "rounds": 26,
+            "cached": 0,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 390,
+            "accepted": 37
+          }
+        },
+        "sleep_setup_s": 2.4179198250058107,
+        "sleep_s": 2.1286101280129515,
+        "wake_s": 5.605513843998779,
+        "wake_first_token_total_s": 5.894711522967555,
+        "resumed_request": {
+          "first_token_s": 0.289197678968776,
+          "elapsed_s": 0.9198378019500524,
+          "tokens_sha256": "04888a2337baa53a0917235e06e71153afc434a60320aa0b4284e842825d2579",
+          "stats": {
+            "prefill_s": 0.28917569504119456,
+            "decode_s": 0.6303806260111742,
+            "rounds": 26,
+            "cached": 8191,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 390,
+            "accepted": 37
+          }
+        },
+        "asleep_memory": {
+          "allocated_bytes": 0,
+          "reserved_bytes": 0
+        },
+        "restored_cache": {
+          "mode": "disk",
+          "restore": "lazy",
+          "saved_prefixes": 1,
+          "snapshot_bytes": 437362592,
+          "omitted_prefixes": 0,
+          "unavailable_prefixes": 0,
+          "loaded_prefixes": 1,
+          "load_failures": 0,
+          "memory_misses": 0
+        },
+        "passed": true
+      },
+      "frog-rep1": {
+        "model": "capyctl/FrogNano-4B-2609-MLX-4bit",
+        "draft": "z-lab/Qwen3.5-4B-DFlash",
+        "context": 16384,
+        "prompt_tokens": 8192,
+        "reply_tokens": 64,
+        "parallel": 1,
+        "precision": "checkpoint",
+        "prefill_fp8": false,
+        "torch": "2.13.0+cu130",
+        "cuda": "13.0",
+        "cold_startup_s": 4.8143436259706505,
+        "cold_first_token_total_s": 6.342604096978903,
+        "cold_request": {
+          "first_token_s": 1.5282604710082524,
+          "elapsed_s": 2.259979139023926,
+          "tokens_sha256": "04888a2337baa53a0917235e06e71153afc434a60320aa0b4284e842825d2579",
+          "stats": {
+            "prefill_s": 1.5139794109854847,
+            "decode_s": 0.7314310740330257,
+            "rounds": 26,
+            "cached": 0,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 390,
+            "accepted": 37
+          }
+        },
+        "sleep_setup_s": 2.4164032149710692,
+        "sleep_s": 2.1131416110438295,
+        "wake_s": 5.83149215701269,
+        "wake_first_token_total_s": 6.1248783430201,
+        "resumed_request": {
+          "first_token_s": 0.2933861860074103,
+          "elapsed_s": 0.9292043179739267,
+          "tokens_sha256": "04888a2337baa53a0917235e06e71153afc434a60320aa0b4284e842825d2579",
+          "stats": {
+            "prefill_s": 0.2933611309854314,
+            "decode_s": 0.6355479289777577,
+            "rounds": 26,
+            "cached": 8191,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 390,
+            "accepted": 37
+          }
+        },
+        "asleep_memory": {
+          "allocated_bytes": 0,
+          "reserved_bytes": 0
+        },
+        "restored_cache": {
+          "mode": "disk",
+          "restore": "lazy",
+          "saved_prefixes": 1,
+          "snapshot_bytes": 437362592,
+          "omitted_prefixes": 0,
+          "unavailable_prefixes": 0,
+          "loaded_prefixes": 1,
+          "load_failures": 0,
+          "memory_misses": 0
+        },
+        "passed": true
+      },
+      "frog-rep2": {
+        "model": "capyctl/FrogNano-4B-2609-MLX-4bit",
+        "draft": "z-lab/Qwen3.5-4B-DFlash",
+        "context": 16384,
+        "prompt_tokens": 8192,
+        "reply_tokens": 64,
+        "parallel": 1,
+        "precision": "checkpoint",
+        "prefill_fp8": false,
+        "torch": "2.13.0+cu130",
+        "cuda": "13.0",
+        "cold_startup_s": 4.806743105989881,
+        "cold_first_token_total_s": 6.311362995998934,
+        "cold_request": {
+          "first_token_s": 1.504619890009053,
+          "elapsed_s": 2.2327523580170237,
+          "tokens_sha256": "04888a2337baa53a0917235e06e71153afc434a60320aa0b4284e842825d2579",
+          "stats": {
+            "prefill_s": 1.4901362050441094,
+            "decode_s": 0.7278463449911214,
+            "rounds": 26,
+            "cached": 0,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 390,
+            "accepted": 37
+          }
+        },
+        "sleep_setup_s": 2.423042152018752,
+        "sleep_s": 1.9825455480022356,
+        "wake_s": 5.653090320003685,
+        "wake_first_token_total_s": 5.944520908000413,
+        "resumed_request": {
+          "first_token_s": 0.2914305879967287,
+          "elapsed_s": 0.9232603860436939,
+          "tokens_sha256": "04888a2337baa53a0917235e06e71153afc434a60320aa0b4284e842825d2579",
+          "stats": {
+            "prefill_s": 0.29141062102280557,
+            "decode_s": 0.6315653389901854,
+            "rounds": 26,
+            "cached": 8191,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 390,
+            "accepted": 37
+          }
+        },
+        "asleep_memory": {
+          "allocated_bytes": 0,
+          "reserved_bytes": 0
+        },
+        "restored_cache": {
+          "mode": "disk",
+          "restore": "lazy",
+          "saved_prefixes": 1,
+          "snapshot_bytes": 437362592,
+          "omitted_prefixes": 0,
+          "unavailable_prefixes": 0,
+          "loaded_prefixes": 1,
+          "load_failures": 0,
+          "memory_misses": 0
+        },
+        "passed": true
+      },
+      "frog-rep3": {
+        "model": "capyctl/FrogNano-4B-2609-MLX-4bit",
+        "draft": "z-lab/Qwen3.5-4B-DFlash",
+        "context": 16384,
+        "prompt_tokens": 8192,
+        "reply_tokens": 64,
+        "parallel": 1,
+        "precision": "checkpoint",
+        "prefill_fp8": false,
+        "torch": "2.13.0+cu130",
+        "cuda": "13.0",
+        "cold_startup_s": 4.874545388971455,
+        "cold_first_token_total_s": 6.3862855159677565,
+        "cold_request": {
+          "first_token_s": 1.5117401269963011,
+          "elapsed_s": 2.2454471940291114,
+          "tokens_sha256": "04888a2337baa53a0917235e06e71153afc434a60320aa0b4284e842825d2579",
+          "stats": {
+            "prefill_s": 1.4973819109727629,
+            "decode_s": 0.7334126079804264,
+            "rounds": 26,
+            "cached": 0,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 390,
+            "accepted": 37
+          }
+        },
+        "sleep_setup_s": 2.4237264150287956,
+        "sleep_s": 2.0865810030372813,
+        "wake_s": 5.731769303965848,
+        "wake_first_token_total_s": 6.022724701964762,
+        "resumed_request": {
+          "first_token_s": 0.2909553979989141,
+          "elapsed_s": 0.9239182510063984,
+          "tokens_sha256": "04888a2337baa53a0917235e06e71153afc434a60320aa0b4284e842825d2579",
+          "stats": {
+            "prefill_s": 0.29093327099690214,
+            "decode_s": 0.6326977059943601,
+            "rounds": 26,
+            "cached": 8191,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 390,
+            "accepted": 37
+          }
+        },
+        "asleep_memory": {
+          "allocated_bytes": 0,
+          "reserved_bytes": 0
+        },
+        "restored_cache": {
+          "mode": "disk",
+          "restore": "lazy",
+          "saved_prefixes": 1,
+          "snapshot_bytes": 437362592,
+          "omitted_prefixes": 0,
+          "unavailable_prefixes": 0,
+          "loaded_prefixes": 1,
+          "load_failures": 0,
+          "memory_misses": 0
+        },
+        "passed": true
+      },
+      "qwen-prime": {
+        "model": "nvidia/Qwen3.8-27B-NVFP4",
+        "draft": "z-lab/Qwen3.8-27B-DFlash2",
+        "context": 16384,
+        "prompt_tokens": 8192,
+        "reply_tokens": 64,
+        "parallel": 1,
+        "precision": "checkpoint",
+        "prefill_fp8": false,
+        "torch": "2.13.0+cu130",
+        "cuda": "13.0",
+        "cold_startup_s": 44.97475715004839,
+        "cold_first_token_total_s": 60.60670498199761,
+        "cold_request": {
+          "first_token_s": 15.631947831949219,
+          "elapsed_s": 19.51065459899837,
+          "tokens_sha256": "965ce3710f01df81303200dd450aea34a8f115ed3f17895c9919269c9997f96d",
+          "stats": {
+            "prefill_s": 15.614258294983301,
+            "decode_s": 3.8783099279971793,
+            "rounds": 38,
+            "cached": 0,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 570,
+            "accepted": 25
+          }
+        },
+        "sleep_setup_s": 9.03426306397887,
+        "sleep_s": 6.037994392972905,
+        "wake_s": 16.66945437900722,
+        "wake_first_token_total_s": 17.20864890201483,
+        "resumed_request": {
+          "first_token_s": 0.539194523007609,
+          "elapsed_s": 4.352258643019013,
+          "tokens_sha256": "965ce3710f01df81303200dd450aea34a8f115ed3f17895c9919269c9997f96d",
+          "stats": {
+            "prefill_s": 0.5391733709839173,
+            "decode_s": 3.8126139219966717,
+            "rounds": 38,
+            "cached": 8191,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 570,
+            "accepted": 25
+          }
+        },
+        "asleep_memory": {
+          "allocated_bytes": 0,
+          "reserved_bytes": 0
+        },
+        "restored_cache": {
+          "mode": "disk",
+          "restore": "lazy",
+          "saved_prefixes": 1,
+          "snapshot_bytes": 732710096,
+          "omitted_prefixes": 0,
+          "unavailable_prefixes": 0,
+          "loaded_prefixes": 1,
+          "load_failures": 0,
+          "memory_misses": 0
+        },
+        "passed": true
+      },
+      "qwen-rep1": {
+        "model": "nvidia/Qwen3.8-27B-NVFP4",
+        "draft": "z-lab/Qwen3.8-27B-DFlash2",
+        "context": 16384,
+        "prompt_tokens": 8192,
+        "reply_tokens": 64,
+        "parallel": 1,
+        "precision": "checkpoint",
+        "prefill_fp8": false,
+        "torch": "2.13.0+cu130",
+        "cuda": "13.0",
+        "cold_startup_s": 8.356167908001225,
+        "cold_first_token_total_s": 11.477227216993924,
+        "cold_request": {
+          "first_token_s": 3.121059308992699,
+          "elapsed_s": 7.041899711010046,
+          "tokens_sha256": "965ce3710f01df81303200dd450aea34a8f115ed3f17895c9919269c9997f96d",
+          "stats": {
+            "prefill_s": 3.1071338250185363,
+            "decode_s": 3.920376107969787,
+            "rounds": 38,
+            "cached": 0,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 570,
+            "accepted": 25
+          }
+        },
+        "sleep_setup_s": 9.060074157023337,
+        "sleep_s": 6.0598384229815565,
+        "wake_s": 15.87776576000033,
+        "wake_first_token_total_s": 16.39409638795769,
+        "resumed_request": {
+          "first_token_s": 0.516330627957359,
+          "elapsed_s": 4.330411086964887,
+          "tokens_sha256": "965ce3710f01df81303200dd450aea34a8f115ed3f17895c9919269c9997f96d",
+          "stats": {
+            "prefill_s": 0.5163102759979665,
+            "decode_s": 3.8136680829920806,
+            "rounds": 38,
+            "cached": 8191,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 570,
+            "accepted": 25
+          }
+        },
+        "asleep_memory": {
+          "allocated_bytes": 0,
+          "reserved_bytes": 0
+        },
+        "restored_cache": {
+          "mode": "disk",
+          "restore": "lazy",
+          "saved_prefixes": 1,
+          "snapshot_bytes": 732710096,
+          "omitted_prefixes": 0,
+          "unavailable_prefixes": 0,
+          "loaded_prefixes": 1,
+          "load_failures": 0,
+          "memory_misses": 0
+        },
+        "passed": true
+      },
+      "qwen-rep2": {
+        "model": "nvidia/Qwen3.8-27B-NVFP4",
+        "draft": "z-lab/Qwen3.8-27B-DFlash2",
+        "context": 16384,
+        "prompt_tokens": 8192,
+        "reply_tokens": 64,
+        "parallel": 1,
+        "precision": "checkpoint",
+        "prefill_fp8": false,
+        "torch": "2.13.0+cu130",
+        "cuda": "13.0",
+        "cold_startup_s": 8.444469192996621,
+        "cold_first_token_total_s": 11.581977609952446,
+        "cold_request": {
+          "first_token_s": 3.137508416955825,
+          "elapsed_s": 7.053922139981296,
+          "tokens_sha256": "965ce3710f01df81303200dd450aea34a8f115ed3f17895c9919269c9997f96d",
+          "stats": {
+            "prefill_s": 3.1230477330391295,
+            "decode_s": 3.915954867959954,
+            "rounds": 38,
+            "cached": 0,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 570,
+            "accepted": 25
+          }
+        },
+        "sleep_setup_s": 9.072834869963117,
+        "sleep_s": 6.070216159976553,
+        "wake_s": 16.062239507038612,
+        "wake_first_token_total_s": 16.57849285105476,
+        "resumed_request": {
+          "first_token_s": 0.5162533440161496,
+          "elapsed_s": 4.327055770030711,
+          "tokens_sha256": "965ce3710f01df81303200dd450aea34a8f115ed3f17895c9919269c9997f96d",
+          "stats": {
+            "prefill_s": 0.5162343679694459,
+            "decode_s": 3.8103932020021603,
+            "rounds": 38,
+            "cached": 8191,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 570,
+            "accepted": 25
+          }
+        },
+        "asleep_memory": {
+          "allocated_bytes": 0,
+          "reserved_bytes": 0
+        },
+        "restored_cache": {
+          "mode": "disk",
+          "restore": "lazy",
+          "saved_prefixes": 1,
+          "snapshot_bytes": 732710096,
+          "omitted_prefixes": 0,
+          "unavailable_prefixes": 0,
+          "loaded_prefixes": 1,
+          "load_failures": 0,
+          "memory_misses": 0
+        },
+        "passed": true
+      },
+      "qwen-rep3": {
+        "model": "nvidia/Qwen3.8-27B-NVFP4",
+        "draft": "z-lab/Qwen3.8-27B-DFlash2",
+        "context": 16384,
+        "prompt_tokens": 8192,
+        "reply_tokens": 64,
+        "parallel": 1,
+        "precision": "checkpoint",
+        "prefill_fp8": false,
+        "torch": "2.13.0+cu130",
+        "cuda": "13.0",
+        "cold_startup_s": 8.822989863983821,
+        "cold_first_token_total_s": 11.974309876968618,
+        "cold_request": {
+          "first_token_s": 3.1513200129847974,
+          "elapsed_s": 7.081894199014641,
+          "tokens_sha256": "965ce3710f01df81303200dd450aea34a8f115ed3f17895c9919269c9997f96d",
+          "stats": {
+            "prefill_s": 3.1369866890017875,
+            "decode_s": 3.9301185149815865,
+            "rounds": 38,
+            "cached": 0,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 570,
+            "accepted": 25
+          }
+        },
+        "sleep_setup_s": 9.063300380017608,
+        "sleep_s": 6.142908276000526,
+        "wake_s": 16.138318505021743,
+        "wake_first_token_total_s": 16.655455689993687,
+        "resumed_request": {
+          "first_token_s": 0.5171371849719435,
+          "elapsed_s": 4.332249915983994,
+          "tokens_sha256": "965ce3710f01df81303200dd450aea34a8f115ed3f17895c9919269c9997f96d",
+          "stats": {
+            "prefill_s": 0.5171149130328558,
+            "decode_s": 3.8147016020375304,
+            "rounds": 38,
+            "cached": 8191,
+            "drafts": true,
+            "min_rows": 16,
+            "drafted": 570,
+            "accepted": 25
+          }
+        },
+        "asleep_memory": {
+          "allocated_bytes": 0,
+          "reserved_bytes": 0
+        },
+        "restored_cache": {
+          "mode": "disk",
+          "restore": "lazy",
+          "saved_prefixes": 1,
+          "snapshot_bytes": 732710096,
+          "omitted_prefixes": 0,
+          "unavailable_prefixes": 0,
+          "loaded_prefixes": 1,
+          "load_failures": 0,
+          "memory_misses": 0
+        },
+        "passed": true
+      }
+    }
+  },
+  "qwen_wake_profiles": {
+    "before": {
+      "model": "nvidia/Qwen3.8-27B-NVFP4",
+      "draft": "z-lab/Qwen3.8-27B-DFlash2",
+      "context": 16384,
+      "prompt_tokens": 8192,
+      "reply_tokens": 64,
+      "parallel": 1,
+      "precision": "checkpoint",
+      "prefill_fp8": false,
+      "torch": "2.13.0+cu130",
+      "cuda": "13.0",
+      "cold_startup_s": 8.853447050962131,
+      "cold_first_token_total_s": 11.949510439997539,
+      "cold_request": {
+        "first_token_s": 3.0960633890354075,
+        "elapsed_s": 6.971608196035959,
+        "tokens_sha256": "965ce3710f01df81303200dd450aea34a8f115ed3f17895c9919269c9997f96d",
+        "stats": {
+          "prefill_s": 3.081800111976918,
+          "decode_s": 3.8751555519993417,
+          "rounds": 38,
+          "cached": 0,
+          "drafts": true,
+          "min_rows": 16,
+          "drafted": 570,
+          "accepted": 25
+        }
+      },
+      "sleep_setup_s": 22.89717778097838,
+      "sleep_s": 13.007382633979432,
+      "wake_s": 29.5908227400505,
+      "wake_first_token_total_s": 30.106781994050834,
+      "resumed_request": {
+        "first_token_s": 0.5159592540003359,
+        "elapsed_s": 4.310763222980313,
+        "tokens_sha256": "965ce3710f01df81303200dd450aea34a8f115ed3f17895c9919269c9997f96d",
+        "stats": {
+          "prefill_s": 0.5159376550000161,
+          "decode_s": 3.7944107280345634,
+          "rounds": 38,
+          "cached": 8191,
+          "drafts": true,
+          "min_rows": 16,
+          "drafted": 570,
+          "accepted": 25
+        }
+      },
+      "asleep_memory": {
+        "allocated_bytes": 0,
+        "reserved_bytes": 0
+      },
+      "restored_cache": {
+        "mode": "disk",
+        "restore": "lazy",
+        "saved_prefixes": 1,
+        "snapshot_bytes": 732710096,
+        "omitted_prefixes": 0,
+        "unavailable_prefixes": 0,
+        "loaded_prefixes": 1,
+        "load_failures": 0,
+        "memory_misses": 0
+      },
+      "wake_phase_timings": [
+        {
+          "phase": "checkpoint_hash_verification",
+          "seconds": 11.442608806944918
+        },
+        {
+          "phase": "prefix_snapshot_verification",
+          "seconds": 0.32324794598389417
+        },
+        {
+          "phase": "runtime_load",
+          "seconds": 6.358314601995517
+        },
+        {
+          "phase": "checkpoint_hash_verification",
+          "seconds": 11.466486610006541
+        }
+      ],
+      "passed": true
+    },
+    "after": {
+      "model": "nvidia/Qwen3.8-27B-NVFP4",
+      "draft": "z-lab/Qwen3.8-27B-DFlash2",
+      "context": 16384,
+      "prompt_tokens": 8192,
+      "reply_tokens": 64,
+      "parallel": 1,
+      "precision": "checkpoint",
+      "prefill_fp8": false,
+      "torch": "2.13.0+cu130",
+      "cuda": "13.0",
+      "cold_startup_s": 8.810941697040107,
+      "cold_first_token_total_s": 11.919762605044525,
+      "cold_request": {
+        "first_token_s": 3.108820908004418,
+        "elapsed_s": 6.98885576298926,
+        "tokens_sha256": "965ce3710f01df81303200dd450aea34a8f115ed3f17895c9919269c9997f96d",
+        "stats": {
+          "prefill_s": 3.0944827439961955,
+          "decode_s": 3.879648461006582,
+          "rounds": 38,
+          "cached": 0,
+          "drafts": true,
+          "min_rows": 16,
+          "drafted": 570,
+          "accepted": 25
+        }
+      },
+      "sleep_setup_s": 9.032014665019233,
+      "sleep_s": 6.104109542968217,
+      "wake_s": 15.676849796029273,
+      "wake_first_token_total_s": 16.191836171026807,
+      "resumed_request": {
+        "first_token_s": 0.5149863749975339,
+        "elapsed_s": 4.313161837984808,
+        "tokens_sha256": "965ce3710f01df81303200dd450aea34a8f115ed3f17895c9919269c9997f96d",
+        "stats": {
+          "prefill_s": 0.5149653989938088,
+          "decode_s": 3.797776748018805,
+          "rounds": 38,
+          "cached": 8191,
+          "drafts": true,
+          "min_rows": 16,
+          "drafted": 570,
+          "accepted": 25
+        }
+      },
+      "asleep_memory": {
+        "allocated_bytes": 0,
+        "reserved_bytes": 0
+      },
+      "restored_cache": {
+        "mode": "disk",
+        "restore": "lazy",
+        "saved_prefixes": 1,
+        "snapshot_bytes": 732710096,
+        "omitted_prefixes": 0,
+        "unavailable_prefixes": 0,
+        "loaded_prefixes": 1,
+        "load_failures": 0,
+        "memory_misses": 0
+      },
+      "wake_phase_timings": [
+        {
+          "phase": "checkpoint_hash_verification",
+          "seconds": 4.540153126989026
+        },
+        {
+          "phase": "prefix_snapshot_verification",
+          "seconds": 0.3235083590261638
+        },
+        {
+          "phase": "runtime_load",
+          "seconds": 6.336116975988261
+        },
+        {
+          "phase": "checkpoint_hash_verification",
+          "seconds": 4.476931560027879
+        }
+      ],
+      "passed": true
+    }
+  },
+  "hash_experiment": [
+    {
+      "repetition": 0,
+      "workers": 1,
+      "strategy": "read",
+      "seconds": 11.498766440025065,
+      "files": 17,
+      "bytes": 25793770138,
+      "hashes_match": true
+    },
+    {
+      "repetition": 0,
+      "workers": 1,
+      "strategy": "readinto",
+      "seconds": 11.44060917099705,
+      "files": 17,
+      "bytes": 25793770138,
+      "hashes_match": true
+    },
+    {
+      "repetition": 0,
+      "workers": 2,
+      "strategy": "read",
+      "seconds": 6.207057150953915,
+      "files": 17,
+      "bytes": 25793770138,
+      "hashes_match": true
+    },
+    {
+      "repetition": 0,
+      "workers": 4,
+      "strategy": "read",
+      "seconds": 4.526862570026424,
+      "files": 17,
+      "bytes": 25793770138,
+      "hashes_match": true
+    },
+    {
+      "repetition": 0,
+      "workers": 8,
+      "strategy": "read",
+      "seconds": 4.472786938014906,
+      "files": 17,
+      "bytes": 25793770138,
+      "hashes_match": true
+    },
+    {
+      "repetition": 1,
+      "workers": 8,
+      "strategy": "read",
+      "seconds": 4.510548380960245,
+      "files": 17,
+      "bytes": 25793770138,
+      "hashes_match": true
+    },
+    {
+      "repetition": 1,
+      "workers": 4,
+      "strategy": "read",
+      "seconds": 4.506462919001933,
+      "files": 17,
+      "bytes": 25793770138,
+      "hashes_match": true
+    },
+    {
+      "repetition": 1,
+      "workers": 2,
+      "strategy": "read",
+      "seconds": 6.238111998012755,
+      "files": 17,
+      "bytes": 25793770138,
+      "hashes_match": true
+    },
+    {
+      "repetition": 1,
+      "workers": 1,
+      "strategy": "readinto",
+      "seconds": 11.44642642600229,
+      "files": 17,
+      "bytes": 25793770138,
+      "hashes_match": true
+    },
+    {
+      "repetition": 1,
+      "workers": 1,
+      "strategy": "read",
+      "seconds": 11.500752303982154,
+      "files": 17,
+      "bytes": 25793770138,
+      "hashes_match": true
+    }
+  ]
+}

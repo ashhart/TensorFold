@@ -8,6 +8,7 @@ import json
 import sys
 import uuid
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,7 @@ from tensorfold.cuda import precision, prompt_precision
 
 
 class CheckpointIdentity:
-    """Full content hashes use a bounded read buffer even for multi-gigabyte shards."""
+    """Hash at most four files concurrently with bounded reads, including multi-gigabyte shards."""
 
     _SUFFIXES = {".safetensors", ".json", ".model", ".tiktoken", ".txt", ".jinja", ".jinja2", ".bpe", ".vocab"}
 
@@ -24,7 +25,7 @@ class CheckpointIdentity:
         self.manifest = self._read()
 
     def _read(self) -> dict[tuple[str, str], str]:
-        manifest = {}
+        files = {}
         for root in self.paths:
             if not (root / "config.json").is_file() or not any(root.glob("*.safetensors")):
                 raise ValueError("sleep checkpoint is missing its config or weights")
@@ -34,12 +35,17 @@ class CheckpointIdentity:
                     continue
                 if not path.is_file():
                     raise ValueError(f"sleep checkpoint file is missing: {relative}")
-                digest = hashlib.sha256()
-                with path.open("rb") as source:
-                    while block := source.read(1024 * 1024):
-                        digest.update(block)
-                manifest[(str(root), str(relative))] = digest.hexdigest()
-        return manifest
+                files[(str(root), str(relative))] = path
+        with ThreadPoolExecutor(max_workers=min(4, len(files))) as pool:
+            return dict(zip(files, pool.map(self._digest, files.values())))
+
+    @staticmethod
+    def _digest(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            while block := source.read(1024 * 1024):
+                digest.update(block)
+        return digest.hexdigest()
 
     def verify(self) -> None:
         try:
