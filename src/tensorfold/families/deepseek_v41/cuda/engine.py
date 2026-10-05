@@ -31,7 +31,9 @@ def _cache_bytes() -> int:
 TOKEN_BYTES = _cache_bytes() + 768 + 512 * 4 // 8 + 512 // 8
 NATIVE_CONTEXT = 1048576         # the model's window (config max_position_embeddings)
 FIXED_GIB = float(os.environ.get("TF_DSV41_FIXED_GIB") or "4")      # engine buffers 2.7 + prompt transients 1.0 (measured)
-RESERVE_GIB = float(os.environ.get("TF_DSV41_RESERVE_GIB") or "2.5")  # left to the OS (unified memory: an OOM wedges)
+# left to the OS (unified memory: an OOM wedges); 2.5 left 2.8-2.9 GiB available after warm-up on aiai, under the
+# dev loop's 3 GiB floor (notes/dsv41/DEV.md)
+RESERVE_GIB = float(os.environ.get("TF_DSV41_RESERVE_GIB") or "3")
 PROMPT_TRANSIENT_GIB = 1.5       # a prompt chunk's buffers beyond the context's (expert Z, GEMM workspace, ...)
 
 

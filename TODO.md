@@ -255,7 +255,7 @@ copy none of it into this Apache-2.0 tree.
 - [ ] Watchdog: decide `WATCH_HEAL=1` (cluster heal tests in deploy README) and user linger
 - [x] Rank 1 idled at ~95% GPU util spinning in the collective: CPU idle doorbell (2248e36, `TF_IDLE_DOORBELL`):
       0-1% / ~11 W idle, outputs and latency unchanged
-- [ ] Server MemAvailable after warm-up 2.8-2.9 GiB on aiai, under the dev loop's 3 GiB floor: trim the pool sizing
+- [x] Server MemAvailable after warm-up was 2.8-2.9 GiB: TF_DSV41_RESERVE_GIB 2.5 -> 3 (3.86 / 3.91 GiB; pool 6.52M -> 6.41M)
 - [ ] Old `tf-dev-old-*` containers on both nodes can go (keep the `tf-dev-snapshot:*` images: tf-dev runs on them)
 
 ## Ops notes
