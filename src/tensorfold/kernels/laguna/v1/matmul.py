@@ -1,4 +1,4 @@
-"""Row-exact decode projections of any MLX affine width: the lane matmul, or the packed affine row kernel."""
+"""Row-exact decode projections of any MLX affine width: the lane matmul, matrix kernels or the affine row kernel."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from tensorfold.kernels import device
 from tensorfold.kernels.qwen.dense.v1 import affine_rows, lane_qmm
 
 BACKENDS = ("lane", "rows")
+_simd: list[Any] = []
 
 
 def tensor_units() -> bool:
@@ -34,6 +35,22 @@ def regroup(scales: mx.array, biases: mx.array, group: int, to: int) -> tuple[mx
     return mx.repeat(scales, times, axis=-1), mx.repeat(biases, times, axis=-1)
 
 
+def choose(bits: int, group: int, n: int, k: int) -> bool:
+    """Whether a projection before M5 takes the matrix kernels rather than affine_rows, by its format and shape only."""
+
+    if n < 1024 or n % 8 or k % group:
+        return False
+    return (bits == 4 and group in (32, 64, 128)) or (bits in (5, 6, 8) and group in (64, 128))
+
+
+def simd_backend() -> Any:
+    if not _simd:
+        from tensorfold.kernels.qwen.dense.v1.row_matmul import simd_qmm_backend
+
+        _simd.append(simd_qmm_backend())
+    return _simd[0]
+
+
 class Projection:
     """One affine linear, or several of one format that read the same input stacked along the output, for decode."""
 
@@ -54,6 +71,9 @@ class Projection:
         self.k = int(weight.shape[1]) * 32 // self.bits
         self.cuts = [int(sum(int(p[0].shape[0]) for p in parts[:i + 1])) for i in range(len(parts) - 1)]
         self.backend = backend if backend == "rows" or self._lane_fits() else "rows"
+        if self.backend == "rows" and choose(self.bits, self.group, self.n, self.k) and self._matrix(weight, scales,
+                                                                                                      biases):
+            self.backend = "matrix"
         if self.backend == "lane":
             group = 64 if self.group == 128 else self.group
             scales, biases = regroup(scales, biases, self.group, group)
@@ -64,10 +84,27 @@ class Projection:
                            else mx.contiguous(weight))
             self.sbt = lane_qmm.pack_scales(scales, biases)
             mx.eval(self.weight, self.sbt)
-        else:
+        elif self.backend == "rows":
             self.weight, self.scales, self.biases = weight, scales, biases
             if len(parts) > 1:
                 mx.eval(self.weight, self.scales, self.biases)
+
+    def _matrix(self, weight: mx.array, scales: mx.array, biases: mx.array) -> bool:
+        """Set up the matrix kernels for this projection; False keeps affine_rows (their one-row twin differs here)."""
+
+        from tensorfold.kernels.qwen.dense.v1 import simd_qmm_bits
+
+        if scales.dtype != mx.bfloat16 or biases.dtype != mx.bfloat16:
+            return False
+        mx.eval(weight, scales, biases)
+        if self.bits == 4 and self.group == 128:          # one scale load a group of 128, its twin checked once
+            if not (simd_qmm_bits.reads(weight, scales, biases, 128, 4)
+                    and simd_qmm_bits.check(weight, scales, biases, 4, 128)):
+                return False
+        else:
+            simd_backend().prepare([(weight, scales, biases, self.group, self.bits)])
+        self.weight, self.scales, self.biases = weight, scales, biases
+        return True
 
     def _lane_fits(self) -> bool:
         group = 64 if self.group == 128 else self.group
@@ -88,6 +125,12 @@ class Projection:
             x2 = x.reshape(-1, self.k)        # rows are independent: longer inputs in calls of MAX_ROWS rows
             out = mx.concatenate([self(x2[i:i + lane_qmm.MAX_ROWS]) for i in range(0, rows, lane_qmm.MAX_ROWS)])
             return out.reshape(*x.shape[:-1], self.n)
+        if self.backend == "matrix":
+            if self.bits == 4 and self.group == 128:
+                from tensorfold.kernels.qwen.dense.v1 import simd_qmm_bits
+
+                return simd_qmm_bits.qmm(x, self.weight, self.scales, self.biases, 4, 128)
+            return simd_backend()(x, self.weight, self.scales, self.biases, self.group, self.bits)
         return affine_rows.qmm(x, self.weight, self.scales, self.biases, self.group, self.bits)
 
     def split(self, y: mx.array) -> list[mx.array]:
@@ -129,4 +172,5 @@ class Projections:
         return [p.backend for p, _ in self.parts]
 
 
-__all__ = ["BACKENDS", "Projection", "Projections", "fmt", "regroup", "stacks", "tensor_units"]
+__all__ = ["BACKENDS", "Projection", "Projections", "choose", "fmt", "regroup", "simd_backend", "stacks",
+           "tensor_units"]

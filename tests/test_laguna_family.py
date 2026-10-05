@@ -14,11 +14,24 @@ from laguna_tiny import TINY, config, tiny_model, tokens  # noqa: E402
 from tensorfold.engine.exact_sampling import Sampling  # noqa: E402
 from tensorfold.engine.lane_engine import LaneEngine, LaneStream  # noqa: E402
 from tensorfold.families.laguna.model import Laguna  # noqa: E402
-from tensorfold.kernels.laguna.v1 import glue  # noqa: E402
+from tensorfold.kernels.laguna.v1 import glue, matmul  # noqa: E402
 from tensorfold.kernels.laguna.v1.matmul import Projection, regroup, tensor_units  # noqa: E402
 
-BACKENDS = ["rows", pytest.param("lane", marks=pytest.mark.skipif(not tensor_units(), reason="needs tensor units"))]
+# "matrix": the rows backend with every projection on the matrix kernels (the tiny model's are below choose's size)
+BACKENDS = ["rows", "matrix",
+            pytest.param("lane", marks=pytest.mark.skipif(not tensor_units(), reason="needs tensor units"))]
 copy = LaneEngine.copy_single_cache
+
+
+@pytest.fixture(autouse=True)
+def _kernels(request, monkeypatch):
+    params = getattr(request.node, "callspec", None)
+    if params is not None and params.params.get("backend") == "matrix":
+        monkeypatch.setattr(matmul, "choose", lambda *a, **k: True)
+
+
+def kind(backend: str) -> str:
+    return "rows" if backend == "matrix" else backend
 
 
 @pytest.fixture(scope="module")
@@ -27,7 +40,7 @@ def model():
 
 
 def family(model, backend: str, width: int = 16) -> Laguna:
-    out = Laguna(model, backend=backend, check=False)
+    out = Laguna(model, backend=kind(backend), check=False)
     out.exact_width = width
     return out
 
@@ -66,7 +79,8 @@ def test_projections_match_mlx_and_keep_each_rows_bits(backend, bits, group):
     linear = nn.Linear(512, 192, bias=False)
     linear = nn.QuantizedLinear.from_linear(linear, group_size=group, bits=bits)
     linear.set_dtype(mx.bfloat16)
-    proj = Projection([linear], backend)
+    proj = Projection([linear], kind(backend))
+    assert proj.backend == backend
     x = mx.random.normal((9, 512)).astype(mx.bfloat16)
     y = proj(x)
     assert close(y, linear(x), 0.02)
@@ -84,6 +98,44 @@ def test_regrouped_scales_dequantize_to_the_same_weights():
     a = mx.dequantize(q.weight, q.scales, q.biases, group_size=128, bits=8)
     b = mx.dequantize(q.weight, scales, biases, group_size=64, bits=8)
     assert same(a, b)
+
+
+def test_kernel_choice_reads_format_and_shape_only():
+    for bits, group in [(4, 32), (4, 64), (4, 128), (5, 64), (6, 64), (8, 64), (8, 128), (5, 128), (2, 64), (3, 64)]:
+        for n, k in [(72, 3072), (2048, 3072), (11264, 3072), (3072, 9216)]:
+            once = matmul.choose(bits, group, n, k)
+            assert all(matmul.choose(bits, group, n, k) == once for _ in range(3))
+            assert once == (n >= 1024 and bits in (4, 5, 6, 8) and (group in (64, 128) or bits == 4))
+    import mlx.nn as nn
+
+    for n, want in ((512, "rows"), (2048, "matrix")):
+        q = nn.QuantizedLinear.from_linear(nn.Linear(1024, n, bias=False), group_size=64, bits=8)
+        q.set_dtype(mx.bfloat16)
+        assert Projection([q], "rows").backend == want
+
+
+@pytest.mark.parametrize("bits,group", [(4, 128), (5, 64), (6, 64), (8, 64), (8, 128), (4, 64), (5, 128)])
+def test_matrix_projections_against_fp32_and_every_row_count(bits, group):
+    import mlx.nn as nn
+
+    mx.random.seed(bits + group)
+    q = nn.QuantizedLinear.from_linear(nn.Linear(3072, 2048, bias=False), group_size=group, bits=bits)
+    q.set_dtype(mx.bfloat16)
+    proj = Projection([q], "rows")
+    assert proj.backend == "matrix"
+    x = mx.random.normal((16, 3072)).astype(mx.bfloat16)
+    y = proj(x)
+    for r in range(16):
+        assert same(proj(x[r:r + 1])[0], y[r])
+    for rows in (2, 3, 4, 8):
+        assert same(proj(x[:rows]), y[:rows])
+    ref = x.astype(mx.float32) @ mx.dequantize(q.weight, q.scales, q.biases, group_size=group,
+                                               bits=bits).astype(mx.float32).T
+    rms = mx.sqrt(mx.mean(ref * ref))
+    affine = matmul.affine_rows.qmm(x, q.weight, q.scales, q.biases, group, bits).astype(mx.float32)
+    rows_err = mx.mean(mx.abs(affine - ref)) / rms
+    err = mx.mean(mx.abs(y.astype(mx.float32) - ref)) / rms
+    assert float(err.item()) <= 2.5e-3 and float(err.item()) <= 1.05 * float(rows_err.item())
 
 
 def test_route_is_sigmoid_top_k_by_biased_scores_with_unbiased_weights():
@@ -303,7 +355,7 @@ def test_drafted_replies_equal_serial_ones(backend, sampled, tmp_path):
     plain = tiny_model(seed=6)
     target = tiny_model(seed=6)
     draft = LagunaDrafter(target, str(path), bits=0)
-    lm = Laguna(target, backend=backend, check=False, drafter=draft)
+    lm = Laguna(target, backend=kind(backend), check=False, drafter=draft)
     lm.exact_width = 16
     ref = family(plain, backend)
     prompt = tokens(140, seed=21)
