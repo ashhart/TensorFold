@@ -1672,6 +1672,7 @@ const Prompt = struct {
     r: *Run,
     qmm6: mtl.Pipeline,
     gather64: mtl.Pipeline,
+    gather32: mtl.Pipeline,
     router_mm: mtl.Pipeline,
     splitk: mtl.Pipeline,
     parts_sum: mtl.Pipeline,
@@ -1692,6 +1693,7 @@ const Prompt = struct {
         const qlib = try mtl.Library.fromSource(r.device, qsrc, mtl.CompileOptions.mlx());
         p.qmm6 = try mtl.Pipeline.init(r.device, qlib, "tf_qmm6_t_nax", false);
         p.gather64 = try mtl.Pipeline.init(r.device, qlib, "tf_gather_qmm6_nax_64", false);
+        p.gather32 = try mtl.Pipeline.init(r.device, qlib, "tf_gather_qmm6_nax_32", false);
         p.router_mm = try mtl.Pipeline.init(r.device, qlib, "tf_mm_bf16_f32_t_nax", false);
         p.splitk = try mtl.Pipeline.init(r.device, qlib, "tf_qmm6_splitk_nax", false);
         p.parts_sum = try mtl.Pipeline.init(r.device, qlib, "tf_parts_sum", false);
@@ -1772,11 +1774,12 @@ const Prompt = struct {
     /// y[pairs, n] = x[slot] W_e^T over the sorted slots, the experts' first slots in b.off.
     fn gather(p: *Prompt, x: Buf, w: []const Buf, k: usize, n: usize, pairs: usize, y: Buf) void {
         if (p.skip & 1 != 0) return;
-        p.bind(p.gather64, &.{ x, w[0], w[1], w[2], p.b.off });
+        const tall = pairs >= 512 * 32; // 64-row tiles once experts average 32 rows
+        p.bind(if (tall) p.gather64 else p.gather32, &.{ x, w[0], w[1], w[2], p.b.off });
         const prm = [4]i32{ @intCast(pairs), @intCast(n), @intCast(k), 512 };
         p.r.enc.setBytes(std.mem.asBytes(&prm), 5);
         p.r.enc.setBuffer(y.b, y.off, 6);
-        p.r.enc.dispatchThreads(mtl.Size.of(((n + 63) / 64) * 128, pairs / 64 + 512, 1), mtl.Size.of(128, 1, 1));
+        p.r.enc.dispatchThreads(mtl.Size.of(((n + 63) / 64) * 128, pairs / (if (tall) @as(usize, 64) else 32) + 512, 1), mtl.Size.of(128, 1, 1));
         p.barrier();
     }
 
