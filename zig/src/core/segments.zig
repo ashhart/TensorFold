@@ -66,7 +66,9 @@ fn drive(n: usize, layers: usize, x: anytype) !void {
 /// Runs one chunk's segments, segment k on queues[k], over `layers` layers, through the family's hooks on `fam`:
 ///   begin(lane), pre(lane, i), mixer(lane, i), post(lane, i), finish(lane): the segment's work into lane.enc;
 ///   wait(i) Wait: where layer i waits for the segment before; handoff(lane, i): right after that wait.
-/// Commits every segment and waits for all; returns the longest segment's GPU seconds. One queue is a serial chunk.
+/// Hooks leave the encoder open and commit nothing; what segment k+1 reads of segment k's must be written by k's
+/// mixer or earlier. Commits every segment and waits for all, failed or not; returns the longest segment's GPU seconds.
+/// One queue is a serial chunk.
 pub fn run(device: mtl.Device, queues: []const mtl.Queue, layers: usize, mode: mtl.DispatchType, fam: anytype) !f64 {
     const n = queues.len;
     if (n == 0 or n > MAX) return error.Segments;
@@ -125,12 +127,15 @@ pub fn run(device: mtl.Device, queues: []const mtl.Queue, layers: usize, mode: m
         }
     };
     const x: X = .{ .fam = fam, .lanes = lanes[0..n], .evs = evs[0..n_evs], .mode = mode };
-    try drive(n, layers, &x);
+    drive(n, layers, &x) catch |err| { // nothing committed yet: close the open encoders, drop the command buffers
+        for (lanes[0..n]) |l| l.enc.end();
+        return err;
+    };
     for (lanes[0..n]) |l| l.enc.end();
     for (lanes[0..n]) |l| l.cb.commit();
+    for (lanes[0..n]) |l| l.cb.wait(); // every segment ends before a failure returns and its buffers are reused
     var gpu: f64 = 0;
     for (lanes[0..n]) |l| {
-        l.cb.wait();
         if (l.cb.failure()) |msg| {
             std.log.err("command buffer failed: {s}", .{msg});
             return error.GpuFailed;

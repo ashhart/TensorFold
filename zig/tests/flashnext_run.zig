@@ -581,6 +581,7 @@ pub fn main(init: std.process.Init) !void {
             // engine's rule (two segments of at least FZ_SEG_MIN rows), 1 one segment, 3-4 that many of up to a chunk
             const nseg: usize = if (std.c.getenv("FZ_SEGS")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 2;
             const seg_min: usize = if (std.c.getenv("FZ_SEG_MIN")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 1;
+            if (seg2 and (nseg == 0 or nseg > tf.segments.MAX)) return error.Segments;
             var extra: [3]Prompt = undefined;
             var ps: [4]*Prompt = undefined;
             ps[0] = &pr;
