@@ -373,11 +373,43 @@ Expected output SHA-256:
 Check this hash before adopting a rebuild; a different stdlib distribution can change the corpus.
 The current list replaces the older list whose PyPI corpus was not reproducible.
 
+### A corpus in one language leaves every other script undraftable
+
+The list above is Python stdlib, and `--keep-below 65536` keeps only the low IDs: of its 79,591 IDs, 912 sit
+at or above 100,000. Tokenizers do not put every script in that range, so a workload whose text is not
+English and code loses drafting for those tokens outright -- not "drafts less often", but "cannot propose
+them". Measured on two DGX Sparks with the MLX 4-bit checkpoint, six scenes x 1,200 tokens, thinking off:
+
+| scene | shipped list | + CJK list | |
+|---|---|---|---|
+| Chinese prose | 47.8 tok/s | **72.2** | accepted 0.23 drafts/round -> 0.83 |
+| Chinese chat | 50.5 | **77.2** | 0.38 -> 1.13 |
+| Chinese code | 97.8 | **113.7** | 1.75 -> 2.70 |
+| English prose / chat / code | 71.5 / 75.4 / 109.8 | 71.6 / 76.7 / 108.2 | within 2% |
+| six-scene mean | 75.5 | **85.9** | |
+| four concurrent streams | 153.8 | **216.4** | |
+
+The replies are byte-identical to the shipped list on all seven probe prompts -- expected, since a draft never
+changes what the target accepts -- so this is a pure speed change, not a behaviour change.
+
+`draft_vocab_cjk.txt` (135,040 IDs, SHA-256
+`e51bf14898314c9ff1f08d9c0923ef3f01ab42dbf3f247ce3e348ff33be94c0a`, 54% of the vocabulary) is that list:
+every ID whose text holds a CJK character, added to the shipped list. 秋天, 梯度下降 and 散文 decode to
+110,093 / 124,267 / 110,840, all above the shipped ceiling. Select it with `--draft-vocab cjk`, or build the
+same shape of list for another tokenizer and script:
+
+```bash
+python3 tools/draft_vocab_extend.py tokenizer.json draft_vocab.txt draft_vocab_cjk.txt --script cjk
+```
+
 ## Measurements
 
 Use the [public benchmark command](README.md#measurements) with the server above; omit tensor-parallel
 flags for one rank. The client supplies fixed public prompts, 64-token replies and seeds 1234 through
 1238. Historical rates measured with the earlier draft list do not qualify the current list.
+
+The table above was measured on two DGX Sparks, one rank per box, TP=2, 262,144-token context and
+`--parallel 4`, with the same server, checkpoint and client for both arms.
 
 Use a separately pinned public long-context fixture when measuring prefill and reuse. Check fresh versus
 resumed prompts across sparse-attention transitions and template changes, as well as drafted versus
