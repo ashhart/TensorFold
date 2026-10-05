@@ -30,7 +30,7 @@ from tensorfold.cuda.streams import Stream, next_fill
 
 from .serial import DRING, MAX_ROWS, WINDOW_ROWS, SerialEngine
 
-ADMIT, FILL, ROUND, DONE, EVICT, GROW, MOVE, RESTORE, PERSIST = 1, 2, 3, 4, 5, 6, 7, 8, 9     # rank 0's messages
+ADMIT, FILL, ROUND, DONE, EVICT, GROW, MOVE, RESTORE, PERSIST, IDLE = 1, 2, 3, 4, 5, 6, 7, 8, 9, 10  # rank 0's messages
 FRESH, TAKEOVER, COPY = 0, 1, 2            # how an admitted stream gets its extent (a kept prompt's, or new rows)
 from .serial import PROMPT_ROWS as ROWS
 
@@ -106,8 +106,11 @@ class MultiDecoder:
     """The ``tensorfold.cuda.scheduler.Scheduler``'s decoder over ``SerialEngine`` slots (rank 0 or 1 of two)."""
 
     def __init__(self, e: SerialEngine, share: Callable[[list[int] | None], list[int]], *, rank: int,
-                 drafts: int = 3, step: int = MAX_ROWS, pool=None, gather=None, disk=None) -> None:
+                 drafts: int = 3, step: int = MAX_ROWS, pool=None, gather=None, disk=None, bell=None) -> None:
         self.e, self.share, self.rank = e, share, rank
+        # the idle doorbell (``tensorfold.cuda.doorbell``; None: off): armed on both ranks at IDLE, so rank 1 waits for
+        # rank 0's next message on the CPU instead of in the GPU collective (``share`` rings / waits on it)
+        self.bell = bell
         # the shared cache pool (``pool.Pool``): each admitted stream gets an extent of it, or (None) its slot's
         # fixed extent; a request whose extent does not fit waits (NoRoom) until a stream finishes
         self.pool = pool
@@ -325,6 +328,16 @@ class MultiDecoder:
     def _send(self, values: list[int]) -> None:
         if self.broken is None:
             self.share(values)
+
+    def idle(self) -> None:
+        """Rank 0, the scheduler going idle (nothing live, nothing waiting): IDLE sent and the doorbell armed on
+        both ranks; the next message, whatever it is (an admission, PERSIST or the end at shutdown), rings it first.
+        Again before any message: nothing (rank 1 already waits for the ring)."""
+
+        if self.bell is None or self.bell.armed or self.broken is not None:
+            return
+        self._send([IDLE])
+        self.bell.arm()
 
     def _check(self) -> None:
         if self.broken is not None:
@@ -1073,6 +1086,10 @@ class MultiDecoder:
                 self._restore(ints_key(msg[1], msg[2]), *msg[3:10])
             elif msg[0] == PERSIST:
                 self._persist()
+            elif msg[0] == IDLE:                       # wait for the next message on the CPU (share: the doorbell)
+                if self.bell is None:
+                    raise RuntimeError("the ranks disagree on the idle doorbell")
+                self.bell.arm()
 
 
 def stream_stats(s: Stream) -> dict[str, Any]:

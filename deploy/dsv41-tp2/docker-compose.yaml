@@ -44,6 +44,8 @@ services:
       # fp4: decode / verify indexer decodes each key tile once for all rows (bit-identical); 0: a row each
       TF_DSV41_SHARED_IK: ${TF_DSV41_SHARED_IK:-}
       TF_DSV41_FIXED_GIB: ${TF_DSV41_FIXED_GIB:-}
+      # idle server: rank 1 waits for the next request on a CPU socket, not in a GPU collective; 0: in the collective
+      TF_IDLE_DOORBELL: ${TF_IDLE_DOORBELL:-}
       TF_DSV41_ENGRAM_DIR: /models/${ENGRAM:-dsv41/DeepSeek-V4.1-Flash-engram}
       # /health: 503 when the engine is fatal (ranks out of step) or one engine call runs past TF_STALL_S (watchdog.sh)
       TF_HEALTH: ${TF_HEALTH:-}

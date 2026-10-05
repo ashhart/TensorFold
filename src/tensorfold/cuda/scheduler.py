@@ -203,6 +203,9 @@ class Scheduler:
             with self._calling():
                 self._yield()
             idle = not self.decoder.live() and self.held is None
+            if idle and hasattr(self.decoder, "idle"):     # e.g. a TP=2 follower then idles on the CPU, not the GPU
+                with self._calling():
+                    self.decoder.idle()
             first = self.waiting.get() if idle else None                              # idle: wait for a request
             if self._quit:
                 if first is not None:

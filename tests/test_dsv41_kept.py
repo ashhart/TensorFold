@@ -2,6 +2,7 @@
 its messages in its own thread) over a fake engine stay in step, resume kept states and evict them only when that
 makes room; with the NVMe tier on (``kvdisk``), spill evicted states and restore them on both ranks or neither."""
 
+import itertools
 import queue
 import random
 import threading
@@ -114,9 +115,11 @@ def disks(root, budget_gib=1.0, min_tokens=1000):
     return out
 
 
-def pair(slots=4, rows=16 * ALIGN, span=4 * ALIGN, banks=6, disk=None):
+def pair(slots=4, rows=16 * ALIGN, span=4 * ALIGN, banks=6, disk=None, bell=False, engine=None):
     """Rank 0 here, rank 1 replaying its messages in a thread (``d1.sync()``: wait until it caught up); both agree
-    through a barrier all-gather. ``disk``: the two ranks' ``KeptDisk`` (``disks``), or None."""
+    through a barrier all-gather. ``disk``: the two ranks' ``KeptDisk`` (``disks``), or None. ``bell``: the idle
+    doorbell over a socket pair, gating each message as the engine's ``_share`` does (``d1.calls``: rank 1's
+    collectives entered, ``d1.inside``: whether it waits in one now)."""
 
     q: queue.Queue = queue.Queue()
     acks: queue.Queue = queue.Queue()
@@ -132,20 +135,39 @@ def pair(slots=4, rows=16 * ALIGN, span=4 * ALIGN, banks=6, disk=None):
             return out
         return g
 
+    bells = [None, None]
+    if bell:
+        import socket
+
+        from tensorfold.cuda.doorbell import Doorbell
+
+        bells = [Doorbell(r, sock) for r, sock in enumerate(socket.socketpair())]
+    calls, inside = [0], [False]
+
     def send(v):
+        if bells[0] is not None:
+            bells[0].gate()
         if v:
             sent.append(list(v))
         q.put(list(v))
         return v
 
     def recv(_):
-        return q.get(timeout=120)
+        if bells[1] is not None and not bells[1].gate():
+            return []
+        calls[0] += 1
+        inside[0] = True
+        try:
+            return q.get(timeout=120)
+        finally:
+            inside[0] = False
 
-    e0, e1 = FakeEngine(slots, rows, span, banks), FakeEngine(slots, rows, span, banks)
+    make = engine or FakeEngine
+    e0, e1 = make(slots, rows, span, banks), make(slots, rows, span, banks)
     d0 = M.MultiDecoder(e0, lambda v: send(v) if v is not None else None, rank=0, drafts=0, pool=Pool(rows),
-                        gather=gather(0), disk=disk[0] if disk else None)
+                        gather=gather(0), disk=disk[0] if disk else None, bell=bells[0])
     d1 = M.MultiDecoder(e1, recv, rank=1, drafts=0, pool=Pool(rows), gather=gather(1),
-                        disk=disk[1] if disk else None)
+                        disk=disk[1] if disk else None, bell=bells[1])
 
     def follow():
         while True:
@@ -162,8 +184,11 @@ def pair(slots=4, rows=16 * ALIGN, span=4 * ALIGN, banks=6, disk=None):
             raise err
 
     threading.Thread(target=follow, daemon=True).start()
-    d1.sync = lambda: (q.put([]), caught_up())
+    d1.sync = lambda: (send([]), caught_up())
     d1.caught_up = caught_up
+    d1.calls = lambda: calls[0]
+    d1.inside = lambda: inside[0]
+    d1.pending = q.qsize                        # rank 0's messages rank 1 has yet to take
     d0.sent = sent
     return d0, d1
 
@@ -511,3 +536,167 @@ def test_random_traffic_with_disk_stays_in_step(tmp_path, monkeypatch):
             disk[1].drain()
             disk[1].path(rng.choice(disk[1].keys())).unlink(missing_ok=True)
     assert d0.kstats["spills"] > 0 and d0.kstats["disk_hits"] > 0
+
+
+# -- the idle doorbell: rank 1 waits for rank 0's next message on the CPU while idle, not in the collective ----------
+class DecodingEngine(FakeEngine):
+    """FakeEngine with rounds: every row's greedy token is 5 (never the end token)."""
+
+    def step_multi(self, rows):
+        for slot, token in rows:
+            self.views[slot].ids.append(token)
+        return torch.zeros((len(rows), 8)), [5] * len(rows)
+
+
+def until(cond, what, timeout=30.0):
+    import time
+
+    end = time.monotonic() + timeout
+    while not cond():
+        assert time.monotonic() < end, what
+        time.sleep(0.005)
+
+
+def idles_on_cpu(d0, d1, bell):
+    """With the doorbell rank 1 ends up waiting for the ring and enters no collective meanwhile; without it, it
+    waits inside the collective (as before)."""
+
+    import time
+
+    if bell:                                    # (rank 0 idle, rank 1 caught up with its messages and waiting)
+        until(lambda: d0.bell.armed and d1.bell.waiting and not d1.pending(),
+              "rank 1 waits for the doorbell")
+        calls = d1.calls()
+        time.sleep(0.1)
+        assert d1.bell.waiting and not d1.inside() and d1.calls() == calls
+    else:
+        until(lambda: d1.inside() and not d1.pending(), "rank 1 waits in the collective")
+
+
+@pytest.mark.parametrize("bell", [True, False])
+def test_idle_doorbell_through_the_scheduler(bell):
+    """Startup idle -> a request -> idle -> two requests -> idle -> shutdown: each way out of idle rings the doorbell
+    once, before rank 0's first message, and rank 1 replays the same messages either way."""
+
+    from tensorfold.cuda.scheduler import Scheduler
+
+    d0, d1 = pair(slots=2, bell=bell, engine=DecodingEngine)
+    rng = random.Random(4)
+    sched = Scheduler(d0, max_streams=2)
+    idles_on_cpu(d0, d1, bell)
+
+    def ask(n):
+        return sched.submit([rng.randrange(2, 1000) for _ in range(300)], n, None, True, lambda new: None)
+
+    assert ask(6)["rounds"] > 0
+    idles_on_cpu(d0, d1, bell)
+    out: list = []
+    both = [threading.Thread(target=lambda n=n: out.append(ask(n))) for n in (4, 9)]
+    for t in both:
+        t.start()
+    for t in both:
+        t.join(60)
+    assert len(out) == 2
+    idles_on_cpu(d0, d1, bell)
+    sched.shutdown()
+    d1.caught_up()                              # rank 1 left follow at the end message
+    idle = [i for i, m in enumerate(d0.sent) if m == [M.IDLE]]
+    if bell:
+        # startup, after the first request, after the two (and no IDLE twice without a message between)
+        assert len(idle) >= 3 and all(b - a > 1 for a, b in itertools.pairwise(idle))
+        assert d0.bell.rings == d1.bell.rings == len(idle) and not d0.bell.armed and not d1.bell.armed
+    else:
+        assert not idle
+    assert not d0.streams and not d1.streams and d0.pool.digest() == d1.pool.digest()
+
+
+def test_idle_doorbell_persist_at_shutdown(tmp_path, monkeypatch):
+    """Idle -> admit -> idle -> shutdown with the NVMe tier: PERSIST (the first message out of idle) rings once, and
+    both ranks write the same kept prompts; idle twice without a message between sends one IDLE."""
+
+    monkeypatch.setattr(M, "DISK_GAIN", 500)
+    disk = disks(tmp_path)
+    d0, d1 = pair(slots=2, rows=8 * ALIGN, span=4 * ALIGN, banks=8, disk=disk, bell=True)
+    rng = random.Random(9)
+    d0.idle()
+    d0.idle()
+    idles_on_cpu(d0, d1, True)
+    a = Stream([rng.randrange(2, 1000) for _ in range(3000)], 20)
+    run(d0, a)                                  # its ADMIT rang the doorbell
+    assert d0.bell.rings == 1
+    d0.finish([a])
+    same(d0, d1)
+    d0.idle()
+    idles_on_cpu(d0, d1, True)
+    d0.sent.clear()
+    assert d0.shutdown() == []
+    d1.caught_up()
+    assert [m[0] for m in d0.sent] == [M.PERSIST] and d0.bell.rings == d1.bell.rings == 2
+    kept = sorted(disk[0].key(k.ids) for k in d0.kept)
+    assert kept and sorted(disk[0].keys()) == sorted(disk[1].keys()) == kept
+    for d in disk:
+        d.close()
+
+
+def test_idle_doorbell_rank0_gone():
+    """Rank 0 closing the doorbell while rank 1 waits on it (it stopped) ends rank 1's follow like the end message."""
+
+    d0, d1 = pair(bell=True)
+    d0.idle()
+    idles_on_cpu(d0, d1, True)
+    d0.bell.close()
+    d1.caught_up()                              # (the harness then follows again, in the collective)
+    assert d0.sent == [[M.IDLE]] and not d1.bell.armed
+
+
+def test_doorbell_connect_over_tcp(monkeypatch):
+    """Startup: rank 0 listens on the master address, publishes the port in the store, rank 1 connects; both vote
+    through the all-gather. TF_IDLE_DOORBELL=0: off on both, no socket."""
+
+    from tensorfold.cuda import doorbell
+
+    store: dict = {}
+    ready = threading.Event()
+
+    class Store:
+        def set(self, k, v):
+            store[k] = v
+            ready.set()
+
+        def get(self, k):
+            assert ready.wait(30)
+            return store[k].encode()
+
+    bar, box = threading.Barrier(2), [None, None]
+
+    def gather(rank):
+        def g(values):
+            box[rank] = list(values)
+            bar.wait(timeout=30)
+            out = [list(box[0]), list(box[1])]
+            bar.wait(timeout=30)
+            return out
+        return g
+
+    def both():
+        got = [None, None]
+        t = threading.Thread(target=lambda: got.__setitem__(1, doorbell.connect(1, "127.0.0.1", Store(), gather(1))))
+        t.start()
+        got[0] = doorbell.connect(0, "127.0.0.1", Store(), gather(0))
+        t.join(30)
+        return got
+
+    b0, b1 = both()
+    assert b0 is not None and b1 is not None
+    b0.arm()
+    b1.arm()
+    assert b0.gate() and b1.gate() and not b0.armed and not b1.armed
+    assert b0.gate() and b1.gate()              # disarmed: nothing sent, nothing waited for
+    b1.arm()
+    b0.close()
+    assert not b1.gate()                        # rank 0 gone
+    b1.close()
+    monkeypatch.setenv("TF_IDLE_DOORBELL", "0")
+    store.clear()
+    ready.clear()
+    assert both() == [None, None]

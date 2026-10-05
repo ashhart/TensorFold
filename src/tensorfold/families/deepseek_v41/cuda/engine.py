@@ -222,6 +222,10 @@ class Dsv41Engine:
         self.nccl = NCCL(rank, 2, master, port)
         self.nccl.barrier()
         self._use_rdma(rank)
+        from tensorfold.cuda import doorbell
+
+        # rank 1 waits for rank 0's next request on a CPU socket while the server idles, not in a GPU collective
+        self.bell = doorbell.connect(rank, master, self.nccl.store, self._gather_ints)
         explicit = context is not None if context_explicit is None else bool(context_explicit)
         cap = int(context) if context and explicit else DEFAULT_CONTEXT   # the CLI hands the native window otherwise
         if not (Path(engram) / "config.json").exists() and not any(Path(engram).glob("*.safetensors")):
@@ -365,7 +369,7 @@ class Dsv41Engine:
                 self._attach_disk(Path(engram))
             self.multi = MultiDecoder(self.e, self._share, rank=rank, drafts=DRAFTS if drafts else 0,
                                       pool=Pool(self.e.pool_tokens) if self.shared else None,
-                                      gather=self._gather_ints, disk=self.disk)
+                                      gather=self._gather_ints, disk=self.disk, bell=self.bell)
             self.multi.model_dir = self.model_dir
             self.multi.calibrate(self._gather_ints)
             self._mark("calibration")
@@ -514,8 +518,12 @@ class Dsv41Engine:
         return [got[:len(values)].tolist(), got[len(values):].tolist()]
 
     def _share(self, values: list[int] | None) -> list[int]:
-        """Rank 0's int list on every rank (its length first, then the values)."""
+        """Rank 0's int list on every rank (its length first, then the values). The first message after an idle
+        point (the doorbell armed) rings it first on rank 0; rank 1 waits for the ring on the CPU, and gets [] when
+        rank 0 closed the doorbell instead (it stopped)."""
 
+        if self.bell is not None and not self.bell.gate():
+            return []
         count = self._gather_ints([len(values) if self.rank == 0 else 0])[0][0]
         if count == 0:
             return []
@@ -573,6 +581,8 @@ class Dsv41Engine:
                   *_f64_ints(sampling.temperature if sampling else 0.0), int(sampling.top_k) if sampling else 0,
                   *_f64_ints(sampling.top_p if sampling else 1.0), *_f64_ints(sampling.min_p if sampling else 0.0),
                   int(constraint is not None)]
+        if self.bell is not None:                      # serial requests: each comes after an idle point
+            self.bell.arm()
         self._share(header)
         self._share(list(prompt))
         if constraint is not None:                     # the request's grammar: rank 1 compiles the same
@@ -602,8 +612,13 @@ class Dsv41Engine:
             return
 
         while True:
-            (max_tokens, stop_eos, draft, s_lo, s_hi, t_lo, t_hi, top_k, p_lo, p_hi, m_lo, m_hi,
-             shaped) = self._share(None)
+            if self.bell is not None:                  # idle between requests: wait for the next on the CPU
+                self.bell.arm()
+            header = self._share(None)
+            if not header:                             # rank 0 closed the doorbell: it has stopped
+                print("[tensorfold] rank 1: rank 0 has stopped", flush=True)
+                return
+            (max_tokens, stop_eos, draft, s_lo, s_hi, t_lo, t_hi, top_k, p_lo, p_hi, m_lo, m_hi, shaped) = header
             prompt = self._share(None)
             constraint = None
             if shaped:                                 # compiled here as on rank 0
