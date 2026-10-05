@@ -231,8 +231,39 @@ tensorfold serve GLM-5.3-Flash-q8_0
 ```
 
 On a 512 GB M3 Ultra, a 310 GiB Q8_0 GGUF became 328.5 GiB in 85 shards in about six minutes; `--verify` found every
-one of its 1,383 tensors equal to the GGUF's values. The weights take 365 GiB resident; the GGUF has no MTP layer, so
-the model decodes without drafts. The group-32 8-bit layers run MLX's one-row calls, not the fused 4-bit kernels.
+one of its 1,383 tensors equal to the GGUF's values. The weights take 365 GiB resident. The group-32 8-bit layers run
+MLX's one-row calls, not the fused 4-bit kernels.
+
+The GGUF has no MTP layer, so on its own the result decodes without drafts. `--mtp-from` takes the layer from the
+original zai-org/GLM-5.3-Flash checkpoint (its safetensors shards and `model.safetensors.index.json`), and the Mac
+engine then drafts with it. A full conversion decodes the whole head before it reads the GGUF, so a bad head fails
+in seconds. The head is added once the conversion is complete, so if writing it fails, the conversion without a head
+is left complete and `--mtp-only` can add the head later.
+
+`--mtp-only` adds it to a conversion you already have, without reading the GGUF again:
+
+- The head goes into shards of its own (`model-mtp-*.safetensors`).
+- The index and `SHA256SUMS` are renamed into place last; on a failure the old ones are restored and the head's
+  files removed.
+- Every other file stays byte for byte as it was.
+- It refuses a checkpoint that already has a head, unless you pass `--replace-mtp`.
+
+```bash
+python tools/glm5_q8_0_gguf_to_mlx.py --mtp-only --mtp-from zai-org-GLM-5.3-Flash --out GLM-5.3-Flash-q8_0 --verify
+```
+
+The original stores that layer in FP8, not Q8_0, so it is not carried over without loss:
+
+- Its FP8 linears and `kv_b_proj` are decoded and re-encoded as 8-bit in groups of 32. FP8 decodes as e4m3 times the
+  scale of its 128×128 block. The re-encoding rounds to nearest with float32 scales and biases, so each value moves
+  by at most half a step.
+- `eh_proj`, the indexer projections, the router and the norms keep their stored bytes.
+
+Drafts are verified against the model, so the re-encoding changes only how many drafts are accepted, and replies
+equal `"draft": false`. The head adds about 8.7 GiB, on disk and resident. On an M3 Ultra, `--mtp-only` took 39 s
+with 14.5 GB maximum RSS (11.7 GB peak footprint). With `--verify`, the tool checks the head
+against the original: the norms and the other kept tensors for equality, the re-encoded values for that half step
+(four routed experts a projection, all of the rest).
 
 ### Prefill
 
