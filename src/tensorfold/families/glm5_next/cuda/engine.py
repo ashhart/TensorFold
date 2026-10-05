@@ -380,35 +380,57 @@ class GlmEngine:
             torch.cuda.empty_cache()
 
     def _take_over(self, keep: list[int]) -> None:
-        """Save the rows of every kept snapshot the next prefill overwrites, dropping the oldest entries past the memory budget; both ranks decide alike."""
-        from .decode import row_bytes, save_rows
+        """Save the rows of every kept snapshot the next prefill overwrites, dropping the oldest entries past the memory budget; both ranks decide alike.
+
+        Decide first, copy after: which snapshots fit the budget is worked out from sizes alone, the rest are dropped
+        without a copy, and only the survivors are cloned. Cloning each in turn and dropping it for the next, larger
+        one grew torch's pool with every copy (reserved memory far past the budget)."""
+        from .decode import row_bytes, save_rows, snapshot_bytes
 
         live = self.live
-        dropped = False
+        order = list(self.cache)
+        alive = {id(c) for c in order}
+        saved: dict[int, int] = {}                   # a survivor's held bytes once its rows are saved
+        drops: list = []
+        over_budget = False
 
         def resumes(c) -> bool:
             return len(c.ids) <= len(keep) and keep[:len(c.ids)] == c.ids
 
-        for snap in list(self.cache):
+        def held() -> int:
+            return sum(saved[id(c)] if id(c) in saved else snapshot_bytes(c) for c in order if id(c) in alive)
+
+        def forget(c) -> None:
+            alive.discard(id(c))
+            saved.pop(id(c), None)
+            drops.append(c)
+
+        for snap in order:                           # the old save-one-by-one walk, with sizes standing in for copies
             n = len(snap.ids)
-            if snap not in self.cache or snap.rows is not None or resumes(snap):
+            if id(snap) not in alive or snap.rows is not None or resumes(snap):
                 continue
             if live[:n] != snap.ids:                  # its rows are already gone: nothing to resume from
-                self._drop(snap)
+                forget(snap)
                 continue
             need = row_bytes(self.e, snap)
-            while self._held_bytes() + need > self.cache_bytes:
-                old = next((c for c in self.cache if c is not snap and not resumes(c)), None)
+            while held() + need > self.cache_bytes:
+                old = next((c for c in order if id(c) in alive and c is not snap and not resumes(c)), None)
                 if old is None:
                     break
-                self._drop(old)
-                dropped = True
-            if self._held_bytes() + need > self.cache_bytes:
-                self._drop(snap)
-                dropped = True
+                forget(old)
+                over_budget = True
+            if held() + need > self.cache_bytes:
+                forget(snap)
+                over_budget = True
                 continue
-            save_rows(self.e, snap)
-        if dropped:
+            shed = sum(t.numel() * t.element_size() for t in snap.drafter_rows or [])   # save_rows clears these
+            saved[id(snap)] = snapshot_bytes(snap) - shed + need
+        for snap in drops:
+            self._drop(snap)
+        for snap in order:
+            if id(snap) in saved:
+                save_rows(self.e, snap)
+        if over_budget:
             import torch
 
             torch.cuda.empty_cache()             # give the freed rows back rather than keep them in torch's pool
