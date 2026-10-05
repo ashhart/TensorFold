@@ -378,19 +378,25 @@ The current list replaces the older list whose PyPI corpus was not reproducible.
 The list above is Python stdlib, and `--keep-below 65536` keeps only the low IDs: of its 79,591 IDs, 912 sit
 at or above 100,000. Tokenizers do not put every script in that range, so a workload whose text is not
 English and code loses drafting for those tokens outright -- not "drafts less often", but "cannot propose
-them". Measured on two DGX Sparks with the MLX 4-bit checkpoint, six scenes x 1,200 tokens, thinking off:
+them": on real Chinese text the shipped list covers 33-43% of token occurrences, and what it drops are the
+most frequent characters of the language (的, 了, 是, 在, 和, 为, 地, 这, IDs around 95.7k-100k).
 
-| scene | shipped list | + CJK list | |
-|---|---|---|---|
-| Chinese prose | 47.8 tok/s | **72.2** | accepted 0.23 drafts/round -> 0.83 |
-| Chinese chat | 50.5 | **77.2** | 0.38 -> 1.13 |
-| Chinese code | 97.8 | **113.7** | 1.75 -> 2.70 |
-| English prose / chat / code | 71.5 / 75.4 / 109.8 | 71.6 / 76.7 / 108.2 | within 2% |
-| six-scene mean | 75.5 | **85.9** | |
-| four concurrent streams | 153.8 | **216.4** | |
+Measured against the released list, six scenes x 1,200 tokens, thinking off, on one DGX Spark (`--tp 1
+--ple-on-ssd`) and on two (`--tp 2`); each cell is tok/s, and the CJK column adds the drafts accepted a
+round:
 
-The replies are byte-identical to the shipped list on all seven probe prompts -- expected, since a draft never
-changes what the target accepts -- so this is a pure speed change, not a behaviour change.
+| scene | one Spark | one Spark, `--draft-vocab cjk` | two ranks | two ranks, `--draft-vocab cjk` |
+|---|---|---|---|---|
+| Chinese prose | 35.8 (0.21) | **55.0 (0.65)** | 47.6 (0.22) | **72.4 (0.60)** |
+| Chinese chat | 38.0 (0.26) | **58.0 (0.65)** | 50.4 (0.27) | **75.4 (0.62)** |
+| Chinese code | 69.1 (0.65) | **83.3 (0.79)** | 96.0 (0.70) | **116.8 (0.81)** |
+| English prose / code / chat | 53.6 / 80.0 / 60.4 | 52.1 / 77.5 / 58.7 | 70.3 / 109.0 / 75.7 | 70.6 / 109.7 / 75.6 |
+| six-scene mean | 56.1 | **64.1 (+14%)** | 74.8 | **86.8 (+16%)** |
+
+The CJK head is 1.7x wider and is read once per draft step, so the fix costs 2-6% on English and code on one
+rank (the whole head is read there) and lands within run-to-run spread on two; Chinese gains 20-53%. It pays
+for itself in Chinese, and it is not a free speed-up. Replies are byte-identical to the shipped list on all
+seven greedy probe prompts -- expected, since a draft never changes what the target accepts.
 
 `draft_vocab_cjk.txt` (135,040 IDs, SHA-256
 `e51bf14898314c9ff1f08d9c0923ef3f01ab42dbf3f247ce3e348ff33be94c0a`, 54% of the vocabulary) is that list:
