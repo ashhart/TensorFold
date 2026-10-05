@@ -166,6 +166,16 @@ def fixture(face='nvfp4', one=False, exl3=False, layers=2):
     return w, b, states, windows, log
 
 
+class NoConcatenate:
+    """Reject batched ID allocation on the original single-window/EXL3 paths."""
+
+    def __getattr__(self, name):
+        return getattr(np, name)
+
+    def concatenate(self, *args, **kwargs):
+        raise AssertionError('single-window and EXL3 staging must not concatenate IDs')
+
+
 def execute(path, face, ahead, one=False, exl3=False):
     ns = bodies(path)
     w, b, states, windows, log = fixture(face, one, exl3)
@@ -173,7 +183,10 @@ def execute(path, face, ahead, one=False, exl3=False):
     ns['shift_windows'] = lambda old, new, keep, channels: shifts.append((new.copy(), keep, channels))
     ns['stage_ple'] = lambda table, x3, ids, at: log.append(('exl3', ids.copy(), at))
     before = [s.ple_history.copy() for s in states]
+    if one or exl3:
+        ns['np'] = NoConcatenate()
     segs = ns['stage'](w, b, windows)
+    ns['np'] = np  # Commit legitimately concatenates the accepted token history.
     assert [(a, z) for _, a, z in segs] == ([(0, 2)] if one else [(0, 2), (2, 5), (5, 7), (7, 8)])
     for st, history, (_, toks) in zip(states, before, windows):
         np.testing.assert_array_equal(st.ple_history, history)
@@ -190,6 +203,8 @@ def execute(path, face, ahead, one=False, exl3=False):
         np.testing.assert_array_equal(shifts[-1][0][0, :, 0], np.arange(a0, a1))
     first_log = list(log)
     resumed = [(s, [12, 0, 9]) for s in states]
+    if one or exl3:
+        ns['np'] = NoConcatenate()
     ns['stage'](w, b, resumed)
     return w, b, states, first_log, log
 
@@ -218,6 +233,8 @@ def test_actual_stage_and_commit_bytes_equal(face, ahead, one, monkeypatch):
         gathers = [i for i, row in enumerate(log) if row[0] == 'gather']
         assert all(i < wait if ahead else i > wait for i in gathers)
         assert all(i > wait for i, row in enumerate(log) if row[0] in ('write', 'copy'))
+    if one:
+        assert left[3] == right[3], 'single-window calls and copy ordering changed'
     # Compare each complete layer copy, not only the final layer's reused buffer.
     names = ('ple_v',) if face != 'affine' else ('ple_w', 'ple_s', 'ple_b')
     for name in names:
