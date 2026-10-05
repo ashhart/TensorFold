@@ -123,7 +123,7 @@ compressed KV cache) adapts FlashInfer's "Cake" DeepSeek-V4.1 mixed-cache decode
 2023-2026 FlashInfer community: one gathered candidate set shared by every local head, bf16 `mma.sync` with the FP4
 rows widened exactly (its two-`prmt` E2M1 table, or `cvt.rn.bf16x2.e2m1x2` on CUDA 13.2+), a lane owning whole scale
 groups, V^T through `ldmatrix.trans`. It is rewritten by hand for TensorFold's `Fp4Rows` planes, bf16 window ring,
-fixed split partition and Triton merge; the file lists what was changed. Its NOTICE line is in our `NOTICE`. See
+per-stage partials folded in a fixed tree and its own CUDA merge; the file lists what was changed. Its NOTICE line is in our `NOTICE`. See
 [the license text](LICENSES/Apache-2.0.txt).
 
 The DeepSeek-V4.1 tool-call constraint in `src/tensorfold/engine/grammar.py` (`TOOL_TAG`) uses the built-in

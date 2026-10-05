@@ -1,6 +1,6 @@
 // DeepSeek-V4.1 decode attention over the NVFP4 compressed KV cache (Fp4Rows) plus the bf16 window ring: the split
-// pass of kernels.mqa for decode / verify rows and small prompt chunks; kernels._mqa_merge_wide combines the splits
-// (sink, normalisation, inverse RoPE).
+// pass of kernels.mqa for decode / verify rows and small prompt chunks; this file's merge_kernel / merge_flat combine
+// the partials (sink, normalisation, inverse RoPE).
 //
 // SPDX-License-Identifier: Apache-2.0
 // Adapted from FlashInfer's "Cake" DeepSeek-V4.1 mixed-cache decode, flashinfer-ai/flashinfer
@@ -12,14 +12,15 @@
 // table; e4m3 scales widened and multiplied in bf16, exact), a lane owning whole 16-dim scale groups (Q and K permuted
 // alike), V^T read with ldmatrix.trans.
 // Modified for TensorFold dsv41-cuda: hand-written loops instead of the generated unrolled code; no IO warps or
-// mbarrier ring: a CTA (one row x one split x one 16-head tile, 8 warps each owning 64 dims for QK and PV) gathers
-// every compressed row of its split into registers up front and decodes each 32-row stage once into a bf16 stage in
-// shared memory (double-buffered; window stages stream in with cp.async one stage ahead); separate Fp4Rows planes (q
+// mbarrier ring: a CTA (one row x one part x one 16-head tile, 8 warps each owning 64 dims for QK and PV) loads the
+// compressed rows a stage ahead into registers and decodes each 32-row stage once into a bf16 stage in shared memory
+// (double-buffered; window stages stream in with cp.async one stage ahead); separate Fp4Rows planes (q
 // nibbles, s e4m3 bytes) instead of paged footers; the bf16 window ring read directly (rows from pos, the stream's
 // ring base and the ring length) instead of FP8 528-byte main rows; QK split over dims across the 8 warps with the
-// partial scores summed in a fixed tree; few long splits (a fixed partition that depends only on the layer's index
-// count: row invariance) so that the partials stay small at 32 rows; TensorFold's natural-log online softmax, the
-// sink applied in the merge; no lse_scale / out_lse, no main-only kernel, no PDL.
+// partial scores summed in a fixed tree; each 32-candidate stage attended on its own and the stages folded in a fixed
+// tree (groups of TF_DSV41_MQA_GROUP, then onto the sink) that depends only on the layer's index count, so a row alone
+// and in a batch fold the same way (row invariance); a CTA per stage at one row, a CTA per group above; TensorFold's
+// natural-log online softmax, the sink applied in the CUDA merge; no lse_scale / out_lse, no main-only kernel, no PDL.
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>

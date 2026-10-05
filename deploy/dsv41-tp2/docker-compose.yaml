@@ -39,6 +39,8 @@ services:
       # per-token cache format: fp4 (V4.1's native NVFP4 / MXFP4 / FP8-window numerics), fp8 (V4 layout), bf16;
       # empty: fp4, or bf16 with the older TF_DSV41_KV_FP8=0
       TF_DSV41_KV: ${TF_DSV41_KV:-}
+      # fp4: decode attention in CUDA (mqa_fp4.cu); 0 runs the Triton kernel
+      TF_DSV41_CUDA_MQA: ${TF_DSV41_CUDA_MQA:-}
       TF_DSV41_FIXED_GIB: ${TF_DSV41_FIXED_GIB:-}
       TF_DSV41_ENGRAM_DIR: /models/${ENGRAM:-dsv41/DeepSeek-V4.1-Flash-engram}
       # /health: 503 when the engine is fatal (ranks out of step) or one engine call runs past TF_STALL_S (watchdog.sh)
