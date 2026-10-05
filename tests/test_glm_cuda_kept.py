@@ -16,6 +16,7 @@ pytestmark = pytest.mark.torch
 class Snap:
     def __init__(self, ids, need, states=5):
         self.ids, self.need, self.states, self.rows, self.nbytes = list(ids), need, states, None, 0
+        self.drafter_rows = None  # as decode's snapshot carries it; _take_over reads it
 
 
 @pytest.fixture

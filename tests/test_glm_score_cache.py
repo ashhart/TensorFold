@@ -23,6 +23,7 @@ class _Snap:
         self.ids, self.need, self.states = list(ids), need, 5
         self.rows, self.nbytes = None, 0
         self.mtp_len, self.drafter_end = len(self.ids), len(self.ids)
+        self.drafter_rows = None  # as decode's snapshot carries it; _take_over reads it
 
 
 def _engine(monkeypatch, cells, logits):
