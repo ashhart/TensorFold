@@ -1,16 +1,45 @@
-# Sleep/wake latency and retained-cache performance
+# Warm resume versus cold start
 
-Bounded concurrent checkpoint hashing reduced median wake-to-first-token latency
-from 30.53 to 16.58 seconds for Qwen 27B with DFlash2, and from 7.16 to 6.02 seconds
-for FrogNano 4B with DFlash. Both complete SHA256 verification passes remain.
-These measurements use the same 8K prompt and 64-token reply in each trial.
+The primary comparison is **warm resume versus cold start on the same current
+runtime**, including the whole path to the first token and the completed reply.
+The measurements below use runtime `938d085`, drafts, an 8K prompt and a 64-token reply.
 
-The optimized Qwen wake still takes longer than an ordinary fresh-process start
-at this prompt length. Retaining a prefix improves the first request after readiness;
-it does not guarantee a faster result when reload time is included.
+- **Warm resume:** wake the sleeping runtime, reload weights, restore the retained
+  conversation prefix lazily, and generate the reply.
+- **Cold start:** launch a fresh process, load the same model and draft, process
+  the full prompt without retained KV state, and generate the reply.
+
+Both use warm filesystem and compiled-kernel disk caches. Here, cold means a
+fresh runtime with no conversation cache; cold-storage startup is unmeasured.
+The resume timer starts at wake, excluding the earlier sleep operation. Full
+model-switch timing must also account for outgoing sleep and the other model.
+
+## Primary comparison
+
+| Median metric | FrogNano cold | FrogNano warm | Qwen 27B cold | Qwen 27B warm |
+| --- | ---: | ---: | ---: | ---: |
+| Start/resume through first token | 6.34 s | 6.02 s | 11.58 s | 16.58 s |
+| Start/resume through completed 64-token reply | 7.07 s | 6.66 s | 15.50 s | 20.39 s |
+| Total output tokens/s, including start/resume | 9.05 | 9.62 | 4.13 | 3.14 |
+| Reused prompt tokens | 0 | 8191 | 0 | 8191 |
+
+FrogNano warm resume is about 5% quicker to the first token and 6% quicker to the
+completed reply in this sample. Qwen warm resume takes about 43% longer to the
+first token and 32% longer to complete the reply; its total output TPS is 24%
+lower. These are medians of three repetitions, which do not establish statistical
+bounds on small differences.
+
+For Qwen, the current gap is **5.00 seconds to the first token and 4.89 seconds to
+reply completion**, computed from the measured medians. Improvements should be
+judged by reducing these warm-versus-cold gaps. The earlier 46% wake improvement
+is useful diagnostic history, not a warm-versus-cold advantage.
+
+All six measured warm requests reused 8,191/8,192 prompt tokens and reproduced
+all 64 output tokens exactly. A cache hit alone does not establish a net speedup:
+verification, reload and lazy restoration all count toward the result.
 
 [Individual measurements, profiles and methodology](model-sleep-performance-results.json)
-include excluded priming runs and all measured repetitions.
+include excluded priming runs, all measured repetitions and the computed comparison.
 
 ## Method
 
@@ -38,7 +67,7 @@ include excluded priming runs and all measured repetitions.
 - No other CUDA compute process was present before each trial. All benchmark
   processes exited and released their runtime after testing.
 
-## Bottleneck and change
+## Investigation: checkpoint hashing
 
 A separate Qwen phase profile attributed 22.91 of 29.59 seconds of wake time to
 two sequential checkpoint checks: 77.4% of the transition. The target and draft
@@ -66,7 +95,7 @@ single diagnostic profiles, separate from the repeated comparisons below.
 Larger gains for Qwen reflect its multi-shard target: concurrency is across files,
 so a single large shard remains serial within its reader.
 
-## Transition and total response time
+## Secondary comparison: progress before and after the hashing change
 
 | Median metric | FrogNano before | FrogNano after | Qwen before | Qwen after |
 | --- | ---: | ---: | ---: | ---: |
@@ -84,7 +113,7 @@ Qwen's remains slower. Three repetitions do not establish statistical bounds,
 especially for small differences. The cold-baseline variation is reported rather
 than attributed to a code path that did not change.
 
-## What the retained prefix saves
+## Diagnostic request metrics after readiness
 
 All six measured optimized restored requests reuse 8,191 of 8,192 prompt tokens
 (99.9878%). All 64 output tokens match their uncached counterparts exactly.
@@ -116,18 +145,27 @@ read failure before release, and a checkpoint modified during reload with its
 size and timestamp preserved. Scoped lint introduces no new findings; existing
 findings remain. The broader suite limitations in the previous receipts still apply.
 
+The next optimization target is lower first-token and completed-reply time for
+warm resume against its paired cold start. Keep exact output, full checkpoint
+integrity checks, cache accounting and asleep memory reclamation as guardrails.
+Repeat the cold control for each candidate and report the complete elapsed time;
+a faster internal phase is insufficient if total warm latency regresses.
+
 The remaining costs suggest these next experiments:
 
-1. Measure longer histories and distinct retained conversations to find the
+1. Profile the current warm/cold readiness difference, splitting checkpoint
+   validation, target loading, draft loading and other initialization. The warm
+   phase profile attributes 9.02 seconds to hashing and 6.34 seconds to loading;
+   verify the corresponding cold stages before changing shared loading code.
+2. Measure longer histories and distinct retained conversations to find the
    workload where saved prefill outweighs verification and reload. Include
    changed suffixes; exact replay alone cannot characterize normal cache reuse.
-2. Time an actual A-to-B-to-A switch, including both outgoing sleeps and incoming
+3. Time an actual A-to-B-to-A switch, including both outgoing sleeps and incoming
    wakes, with output-token throughput across the whole workload. The results
    above time one runtime's startup or wake, not a complete swap.
-3. Profile loader allocation, staging and graph initialization inside the
-   remaining 6.34-second load. Checkpoint validation is still the largest cost,
-   but integrating validation with loading would need to preserve rejection of
-   changed content and failed-wake cleanup before replacing either check.
+   Count all generated output and the entire switch interval when comparing
+   aggregate throughput. Include an already-resident cached-request control to
+   separate cache reuse from process and reload costs.
 4. Test cold storage and competing I/O. These warm-cache results do not establish
    that concurrent readers help every disk. Lazy prefix restore is synchronous;
    its queueing cost under concurrent resumed requests remains unmeasured.

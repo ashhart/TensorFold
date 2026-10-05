@@ -46,9 +46,10 @@ up to four files are hashed concurrently with bounded reads. Verification still 
 the entire checkpoint and contributes to transition latency.
 
 The [latency and cache-performance measurements](research/model-sleep-performance.md)
-compare ordinary startup with wake, including time to the first token and total
-output throughput. Retained prefixes help the resumed request, but wake is not
-always faster than starting a fresh process.
+compare warm resume with a fresh-process cold start on the same runtime, including
+time to the first token, completed-reply latency and total output throughput.
+Retained prefixes help the resumed request, but wake is not always faster than
+starting a fresh process.
 
 Qwen accepts compatible DFlash v1 and DFlash2 checkpoints through `--drafter`.
 The drafter's `dflash_config.target_layer_ids` determines which target hidden states

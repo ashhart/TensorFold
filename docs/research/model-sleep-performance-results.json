@@ -44,7 +44,9 @@
       "z-lab/Qwen3.5-4B-DFlash": "9a1996ccf887b79ab3af4fcbf8c1d1f4b5658bcf",
       "nvidia/Qwen3.8-27B-NVFP4": "482ca0f3832238542f8f5295dde86b5f22711d80",
       "z-lab/Qwen3.8-27B-DFlash2": "50307d4c4cde6860d4eee73e2547cd786fe8e8a4"
-    }
+    },
+    "primary_comparison": "Current runtime: warm Level 2 resume with retained prefix versus fresh-process cold start without retained prefix. Filesystem and compiled-kernel disk caches remain warm on both sides.",
+    "primary_runtime_commit": "938d0856c553e75c7e062890db966a6feb4e0266"
   },
   "summary": {
     "before": {
@@ -1403,5 +1405,63 @@
       "bytes": 25793770138,
       "hashes_match": true
     }
-  ]
+  ],
+  "warm_vs_cold_comparison": {
+    "frog": {
+      "cold_start": {
+        "ready_s": 4.8143436259706505,
+        "first_token_total_s": 6.342604096978903,
+        "completed_reply_total_s": 7.074322764994577,
+        "total_output_tps": 9.046802376149296,
+        "request_first_token_s": 1.5117401269963011,
+        "request_output_tps": 28.50211760498442,
+        "cached_prompt_tokens": 0
+      },
+      "warm_resume": {
+        "ready_s": 5.731769303965848,
+        "first_token_total_s": 6.022724701964762,
+        "completed_reply_total_s": 6.655687554972246,
+        "total_output_tps": 9.61583600062291,
+        "request_first_token_s": 0.2914305879967287,
+        "request_output_tps": 69.2701978019014,
+        "cached_prompt_tokens": 8191
+      },
+      "warm_vs_cold": {
+        "first_token_percent_change": -5.043344817415063,
+        "completed_reply_percent_change": -5.917671894952781,
+        "total_output_tps_percent_change": 6.2898867557203975,
+        "first_token_delta_s": -0.31987939501414075,
+        "paired_ready_penalty_s": 0.8572239149943925,
+        "paired_request_first_token_saving_s": 1.220784728997387
+      }
+    },
+    "qwen": {
+      "cold_start": {
+        "ready_s": 8.444469192996621,
+        "first_token_total_s": 11.581977609952446,
+        "completed_reply_total_s": 15.498391332977917,
+        "total_output_tps": 4.12946083402985,
+        "request_first_token_s": 3.137508416955825,
+        "request_output_tps": 9.072966603536923,
+        "cached_prompt_tokens": 0
+      },
+      "warm_resume": {
+        "ready_s": 16.062239507038612,
+        "first_token_total_s": 16.57849285105476,
+        "completed_reply_total_s": 20.389295277069323,
+        "total_output_tps": 3.1389020135471357,
+        "request_first_token_s": 0.516330627957359,
+        "request_output_tps": 14.77919733594081,
+        "cached_prompt_tokens": 8191
+      },
+      "warm_vs_cold": {
+        "first_token_percent_change": 43.14043257007152,
+        "completed_reply_percent_change": 31.557494187699355,
+        "total_output_tps_percent_change": -23.987606622147084,
+        "first_token_delta_s": 4.9965152411023155,
+        "paired_ready_penalty_s": 7.521597851999104,
+        "paired_request_first_token_saving_s": 2.6212550729396753
+      }
+    }
+  }
 }
