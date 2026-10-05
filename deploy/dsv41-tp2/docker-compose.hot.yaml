@@ -1,0 +1,16 @@
+# `make hot`: serve the current source without `make image`. Layered on docker-compose.yaml (-f both) only while
+# build/hot/REVISION exists; `make cold` removes it and the image's own source serves again.
+#
+# The image installs TensorFold editable (pip install -e /opt/tensorfold: its .pth names /opt/tensorfold/src), so the
+# source synced into build/hot/src (SRC's src/, by `make hot`) mounted read-only over /opt/tensorfold/src is what
+# `python -m tensorfold` imports. CUDA extensions still build into CACHE_DIR (/root/.cache), keyed by their sources:
+# a changed .cu compiles once (`make hot` runs prebuild before the start). TF_REVISION names the hot source, so
+# per-image caches keyed by it (the decode cost curves) are not shared with the image's.
+services:
+  serve:
+    volumes:
+      - ./build/hot/src:/opt/tensorfold/src:ro
+    environment:
+      TF_REVISION: hot-${TF_HOT_REV:?make hot sets TF_HOT_REV from build/hot/REVISION}
+      # bytecode beside the read-only source cannot be written: keep it in the cache volume instead
+      PYTHONPYCACHEPREFIX: /root/.cache/tensorfold-pycache

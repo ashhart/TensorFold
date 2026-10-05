@@ -8,6 +8,7 @@
 #   make swap-in    # vLLM down, TensorFold up        make swap-out   # TensorFold down, vLLM up
 #   make watch-install / watch-status / watch-once / watch-uninstall   # the watchdog timer (watchdog.sh)
 #   make lease [LEASE_MIN=20]   # the watchdog stands down until then  make soak / stress / structured  (bench)
+#   make hot / cold # serve SRC's current src/ over the image's (no image build; restarts) / the image's own again
 #
 # vLLM and TensorFold cannot co-serve: each takes ~100 GiB a rank of the 121.7 GiB pool, and both bind :8888.
 SHELL := /bin/bash
@@ -38,8 +39,15 @@ STOP_GRACE_S := $(or $(call env_of,STOP_GRACE_S),$(if $(call env_of,TF_DSV41_DIS
 MODEL        := $(or $(call env_of,MODEL),dsv41/DeepSeek-V4.1-Flash-EXL3-2.9bpw)
 FASTBOOT     := python -m tensorfold.families.deepseek_v41.cuda.fastboot
 BASE_URL     := http://localhost:$(PORT)
-COMPOSE0     := docker compose --env-file .env --env-file rank0.env
-COMPOSE1     := docker compose --env-file .env --env-file rank1.env
+# hot source (make hot / make cold): SRC's src/ in build/hot/src, mounted over the image's editable install by
+# docker-compose.hot.yaml while build/hot/REVISION exists (every up / restart / prepare then serves it, a watchdog
+# heal too); without it the commands below are the plain image ones
+HOT_REV      := $(shell cat $(DIR)/build/hot/REVISION 2>/dev/null)
+HOT          := $(if $(HOT_REV),TF_HOT_REV=$(HOT_REV) )
+HOT_FILES    := $(if $(HOT_REV),-f docker-compose.yaml -f docker-compose.hot.yaml )
+HOT_MOUNT    := $(if $(HOT_REV),-v $(DIR)/build/hot/src:/opt/tensorfold/src:ro )
+COMPOSE0     := $(HOT)docker compose $(HOT_FILES)--env-file .env --env-file rank0.env
+COMPOSE1     := $(HOT)docker compose $(HOT_FILES)--env-file .env --env-file rank1.env
 # each device's RoCE v2 IPv4 GID index, for the log and the guard only: NCCL (NCCL_IB_ROCE_VERSION_NUM=2,
 # NCCL_IB_ADDR_FAMILY=AF_INET in the compose file) and the RoCE all-gather pick it per device by type and address.
 # The index moves: the kernel keeps a deleted GID's slot while a queue pair still uses it, so an address re-added
@@ -62,10 +70,10 @@ LOCK = $(if $(TF_DSV41_LOCKED),,flock -n -E 75 $(STATE)/lock env TF_DSV41_LOCKED
 
 .PHONY: help env stage image prebuild sync guard memwait up down restart _up _down _restart wait status logs \
         logs-worker smoke vllm-down vllm-up swap-in swap-out lease watch-install watch-uninstall watch-once \
-        watch-status soak stress structured
+        watch-status soak stress structured hot hot-stage cold
 
 help:
-	@sed -n '1,14p' Makefile | sed 's/^# \{0,1\}//'
+	@sed -n '1,15p' Makefile | sed 's/^# \{0,1\}//'
 
 env:
 	@if [ -f .env ]; then echo ".env exists"; else cp .env.example .env && chmod 600 .env && \
@@ -91,6 +99,7 @@ image: stage sync
 	rc=0; wait $$h || { rc=1; echo "❌ head build:"; tail -20 build/head.log; }; \
 	wait $$w || { rc=1; echo "❌ worker build:"; tail -20 build/worker.log; }; \
 	[ $$rc = 0 ] && echo "✅ $(IMAGE_NAME):$$rev (also :latest) on both nodes"; [ $$rc = 0 ] || exit $$rc
+	@$(if $(HOT_REV),echo "⚠️  hot source $(HOT_REV) is still mounted over the image's: 'make cold' serves the new image's own")
 	@$(MAKE) --no-print-directory prebuild
 	@$(MAKE) --no-print-directory prepare
 
@@ -98,7 +107,7 @@ image: stage sync
 # free) can push a GB10 into the OOM killer. Refuses while a server holds the GPU; a no-op when the cache is warm.
 prebuild:
 	@test -n "$(CACHE_DIR)" || { echo "❌ CACHE_DIR is not set in .env"; exit 1; }
-	@run="docker run --rm --gpus all -v $(CACHE_DIR):/root/.cache -v $(DIR)/prebuild.py:/prebuild.py:ro $(IMAGE_NAME):latest python /prebuild.py"; \
+	@run="docker run --rm --gpus all -v $(CACHE_DIR):/root/.cache -v $(DIR)/prebuild.py:/prebuild.py:ro $(HOT_MOUNT)$(IMAGE_NAME):latest python /prebuild.py"; \
 	if docker ps --format '{{.Names}}' | grep -qE '^tensorfold-dsv41-serve|$(VLLM_NAMES)'; then \
 	  echo "prebuild: a server holds the GPU here, skipped (run make prebuild after make down)"; exit 0; fi; \
 	echo "compiling CUDA extensions on the head and $(WORKER) (minutes on a new image)"; \
@@ -111,6 +120,7 @@ prebuild:
 # ones; refuses while a server holds the GPU (the build takes a rank's full memory); a no-op when current.
 prepare:
 	@test -n "$(PREPARED_DIR)" || { echo "❌ PREPARED_DIR is not set in .env"; exit 1; }
+	@$(if $(and $(HOT_REV),$(if $(PREPARE_HOT),,1)),echo "❌ hot source $(HOT_REV) is mounted: a folder prepared from it replaces the image's (one fits on disk); PREPARE_HOT=1 to do it anyway"; exit 1)
 	@if docker ps --format '{{.Names}}' | grep -qE '^tensorfold-dsv41-serve|$(VLLM_NAMES)'; then \
 	  echo "prepare: a server holds the GPU here, skipped (run make prepare after make down)"; exit 0; fi; \
 	mkdir -p $(PREPARED_DIR); ssh $(WORKER) "mkdir -p $(PREPARED_DIR)"; \
@@ -120,6 +130,30 @@ prepare:
 	( ssh $(WORKER) "cd $(DIR) && $(COMPOSE1) run --rm --no-deps serve $(FASTBOOT) prepare /models/$(MODEL) --rank 1 --root /prepared" 2>&1 \
 	  | grep -E "prepared folder|built in|removed|Error|error" ) & w=$$!; \
 	wait $$h; wait $$w
+
+# -- hot source: Python changes without an image build ----------------------------------------------------------------
+# make hot: SRC's src/ into build/hot/src (its hash in build/hot/REVISION), to the worker (sync), then down, prebuild
+# (a changed .cu compiles here, not beside a loaded model) and up with docker-compose.hot.yaml mounting it over the
+# image's /opt/tensorfold/src. Run it again after each change. make cold: the marker and copy gone, the image's own
+# source serves again (down, prebuild, up). make image stays the clean path (a pinned, reproducible snapshot).
+hot-stage:
+	@test -f $(SRC)/pyproject.toml || { echo "❌ no TensorFold source at SRC=$(SRC)"; exit 1; }
+	@mkdir -p build/hot
+	@rsync -a --delete --exclude __pycache__ --exclude '*.pyc' $(SRC)/src/ build/hot/src/
+	@tar --sort=name --mtime=@0 --owner=0 --group=0 -C build/hot -cf - src | sha256sum | cut -c1-12 > build/hot/REVISION
+	@echo "hot source $$(cat build/hot/REVISION) from $(SRC)/src"
+
+hot: hot-stage sync
+	@$(MAKE) --no-print-directory down
+	@$(MAKE) --no-print-directory prebuild
+	@$(MAKE) --no-print-directory up
+
+cold:
+	@rm -rf build/hot
+	@$(MAKE) --no-print-directory sync
+	@$(MAKE) --no-print-directory down
+	@$(MAKE) --no-print-directory prebuild
+	@$(MAKE) --no-print-directory up
 
 sync:
 	@test -f .env || { echo "❌ no .env: 'make env' first"; exit 1; }
@@ -208,6 +242,7 @@ wait:
 	done
 
 status:
+	@$(if $(HOT_REV),echo "source: hot $(HOT_REV) (build/hot/src over the image's; make cold to drop it)")
 	@echo "head:";   $(COMPOSE0) ps --format 'table {{.Name}}\t{{.Status}}\t{{.Image}}'
 	@echo "worker:"; ssh $(WORKER) "cd $(DIR) && $(COMPOSE1) ps --format 'table {{.Name}}\t{{.Status}}\t{{.Image}}'"
 	@curl -sf -m 5 $(BASE_URL)/health | jq -c '{ok, busy, requests_running, requests_total, context_length}' 2>/dev/null \

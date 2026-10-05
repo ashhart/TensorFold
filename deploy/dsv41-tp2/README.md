@@ -9,6 +9,7 @@ The two cannot run at once (each takes ~100 GiB a rank, both bind :8888); `make 
 |---|---|
 | `Dockerfile` | NGC PyTorch 26.07 + xgrammar / transformers + a snapshot of the TensorFold source (`build/tensorfold`) |
 | `docker-compose.yaml` | one service for both ranks; `rank0.env` (head) / `rank1.env` (worker) set the rank and its NICs |
+| `docker-compose.hot.yaml` | `make hot` only: the synced source over the image's (below) |
 | `.env` | shared settings: paths, port, model id, API key, `PARALLEL`, `CONTEXT` (from `.env.example`, chmod 600) |
 | `Makefile` | runs on the head; mirrors this directory to the worker (`WORKER=aiai2-ib`) at the same path |
 
@@ -86,3 +87,23 @@ request. `structured --suites schemas,tools` needs `TF_DSV41_TOOL_GRAMMAR=requir
 Sync the new source to `SRC` on the head, then `make image && make restart`. The image tag is a hash of the
 Dockerfile and the source snapshot; `docker image ls tensorfold-dsv41` lists earlier builds for a rollback
 (`TF_IMAGE=tensorfold-dsv41:<rev>` in `.env`).
+
+## Hot source (Python changes without an image build)
+
+    make hot     # SRC's src/ -> build/hot/src (both nodes), down, prebuild, up with docker-compose.hot.yaml
+    make cold    # back to the image's own source (down, prebuild, up)
+
+The image installs TensorFold editable (`pip install -e /opt/tensorfold`, whose `.pth` names `/opt/tensorfold/src`),
+so `docker-compose.hot.yaml` mounts `build/hot/src` read-only over `/opt/tensorfold/src` and the container imports
+the synced tree; nothing else in the image changes. While `build/hot/REVISION` exists every `up`, `restart`,
+`prepare` and watchdog heal uses the override (`make status` says so); without it the compose commands are exactly the
+image ones. `TF_REVISION=hot-<hash>` keeps per-image caches (the decode cost curves) apart; bytecode goes to
+`/root/.cache/tensorfold-pycache`.
+
+- CUDA extensions are still built into `CACHE_DIR` and keyed by their sources: a changed `.cu` compiles once, in the
+  `prebuild` step `make hot` runs before the start (not beside a loaded model); unchanged ones load from the cache.
+- A change to the code that builds the weights (`fastboot.CODE`) misses the prepared folder: starts build from the
+  checkpoint (~82 s instead of ~24 s) until `make cold`. `make prepare` refuses while hot (`PREPARE_HOT=1` overrides):
+  one folder fits on aiai's disk and it would replace the image's.
+- `make image` remains the clean path: a pinned snapshot both nodes build, prebuilt and prepared. It warns while hot
+  source is still mounted.
