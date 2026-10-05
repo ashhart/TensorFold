@@ -437,6 +437,8 @@ class _Fixed:
 
 
 class SerialEngine:
+    _deq_comp = None              # ((kv source, visible entries), bf16 decode) for the layers of one prompt chunk
+
     def __init__(self, w: Weights, comm: Comm, engram_dir: str, tokenizer_json: str, *, cap: int = 4096,
                  device: str = "cuda", slots: int = 1, pool_tokens: int | None = None) -> None:
         self.w, self.c, self.comm, self.dev = w, w.cfg, comm, torch.device(device)
@@ -909,6 +911,7 @@ class SerialEngine:
                attn_last: bool = False) -> tuple:
         X, pre, f, post, comb = carry
         fuse = (X.shape[0] > PROMPT_ROWS or hcf.FUSE_DECODE) and FUSE_HC   # post and the next pre in one pass
+        self._deq_comp = None
         for layer in self.w.layers[first:last]:
             fused = fuse and f is not None and layer.engram is None
             if fused:
@@ -937,6 +940,7 @@ class SerialEngine:
                 self.debug.append({"layer": layer.index, "moe_in": x.clone(), "X": X.clone(),
                                    "f": f.clone() if torch.is_tensor(f) else None})
         self._join()                                                    # (a graph ends with every stream joined)
+        self._deq_comp = None                                          # (its scratch back to the allocator)
         return X, pre, f, post, comb
 
     # -- decode graphs ----------------------------------------------------------------------------------------
@@ -1391,7 +1395,15 @@ class SerialEngine:
             o = K.mqa(q, comp, idx, self.big.swa[L], pos, a.sink, W, self.attnbuf, Dh ** -0.5, cos, sin,
                       sbase=self._sid * DRING, ring=DRING)
         else:
-            o = K.mqa(q, comp, idx, st.swa[L], pos, a.sink, W, self.attnbuf, Dh ** -0.5, cos, sin)   # inverse-rotated
+            deq = None
+            if comp is not None and R > K.FULL_ROWS and K.FULL_DEQ and isinstance(comp, K.Fp4Rows):
+                # the visible entries decoded once at their source layer, read by the layers after it (this chunk)
+                key = (src, (int(pos[-1]) + 1) // a.ratio)
+                if L == src or self._deq_comp is None or self._deq_comp[0] != key:
+                    self._deq_comp = (key, K.deq_entries(comp, key[1]))
+                deq = self._deq_comp[1]
+            o = K.mqa(q, comp, idx, st.swa[L], pos, a.sink, W, self.attnbuf, Dh ** -0.5, cos, sin,
+                      comp_bf16=deq)                                       # inverse-rotated
         groups = len(a.wo_a)
         o = o.view(R, groups, (H // groups) * Dh)
         if R <= PROMPT_ROWS and a.wo_a_grouped is not None:

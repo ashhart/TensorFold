@@ -457,6 +457,83 @@ def test_unsorted_tie_topk_equals_the_int64_keys():
 
 
 @gpu
+@pytest.mark.parametrize("seg", [2048, 4096, 16384])
+@pytest.mark.parametrize("ratio", [1, 2])
+def test_prompt_select_restructured_equals_the_per_segment_merge(seg, ratio, monkeypatch):
+    """The fp4 prompt selection (TIE_KEYS) restructured, bit for bit the old path's output: SEG_ROWS (a key tile
+    scored by a group of rows) and SELECT_ONCE (each segment's top-k kept, one pick a pass) against _index_scores_seg
+    a program a row and an int64 merge a segment. Exact ties at the k-th value across segments (runs of identical
+    keys), several passes (rows > SELECT_ROWS, a short last one), one segment and many, rows that see nothing or a
+    few keys (fewer than k: -inf padding), chunk boundaries (rows of a later chunk), the candidate-source layer
+    (blocks) and a masked later layer."""
+
+    K = _kernels()
+    E, R = 9000, 1100
+    keys = _ik(K, E, 61)
+    for a, b in ((1, 0), (2, 0), (2048, 2047), (4096, 2047), (6000, 100), (6001, 100), (8191, 4000)):
+        keys.q[a], keys.s[a] = keys.q[b], keys.s[b]              # equal scores, across segment boundaries too
+    keys.q[3000:3300] = keys.q[2700:3000]                        # a run of 300 ties
+    keys.s[3000:3300] = keys.s[2700:3000]
+    g = torch.Generator(device="cuda").manual_seed(17 + ratio)
+    iq = (torch.randn((R, 64, 128), generator=g, device="cuda") * 0.3).to(torch.bfloat16)
+    wts = torch.randn((R, 64), generator=g, device="cuda")
+    start = E * ratio - R - 5                                    # a late chunk: rows see E - (R + 5) / ratio .. E
+    pos = torch.arange(start, start + R, device="cuda")
+    pos[:3] = torch.tensor([-1, ratio - 1, 3 * ratio - 1], device="cuda")   # nothing visible, one key, three
+    iq[600:620] = iq[599]                                        # identical rows: identical selections
+    wts[600:620] = wts[599]
+    monkeypatch.setattr(K, "TIE_KEYS", True)
+    monkeypatch.setattr(K, "SELECT_SEG", seg)
+
+    def run(rows, once):
+        monkeypatch.setattr(K, "SEG_ROWS", rows)
+        monkeypatch.setattr(K, "SELECT_ONCE", once)
+        idx, cand = K.index_select_blocked(iq, wts, keys, pos, ratio, 512, block=8, candidates=64)
+        masked, _ = K.index_select_blocked(iq, wts, keys, pos, ratio, 512, block=8, blocks=cand)
+        return idx, cand, masked
+
+    u = K.untie(K.index_scores(iq, wts, keys, pos, ratio))
+    thr = torch.topk(u, 512, dim=1).values.amin(1, keepdim=True)
+    cut = (u == thr).sum(1) > 512 - (u > thr).sum(1)              # rows whose k-th value ties past the cut
+    assert int(cut[3:].sum()) >= 20
+    old = run(1, False)
+    assert (old[0][3:] >= 0).sum(1).min() == 512 and (old[0][1] >= 0).sum() == 1 and (old[0][0] < 0).all()
+    for rows, once in ((1, True), (8, False), (8, True), (3, True), (32, True)):
+        for o, n in zip(old, run(rows, once)):
+            assert torch.equal(o, n), (rows, once)
+
+
+@gpu
+@pytest.mark.parametrize("R", [33, 300])
+def test_prompt_attention_decoded_once_equals_per_row(R, monkeypatch):
+    """mqa for prompt rows over Fp4Rows with n_comp (FULL_DEQ: the visible entries decoded once into bf16 scratch)
+    == each row unpacking its own entries, bit for bit; -1 indices; a cap below the need falls back."""
+
+    K = _kernels()
+    monkeypatch.setattr(K, "CUDA_MQA", False)
+    cos, sin = _tables(K, 1 << 16)
+    E, D, H, W = 5000, 512, 32, 128
+    rows = K.Fp4Rows(E + 500, D, device="cuda")
+    rows.store(torch.arange(E, device="cuda"), _rows(E, D, 13), torch.arange(E, device="cuda") * 2, cos, sin)
+    rows.s[E:] = 0x7F                                         # past n_comp: e4m3 NaN, never decoded or selected
+    g = torch.Generator(device="cuda").manual_seed(R)
+    q = (torch.randn((R, H, D), generator=g, device="cuda") * 0.05).to(torch.bfloat16)
+    pos = torch.arange(9000, 9000 + R, device="cuda")
+    idx = torch.stack([torch.randperm(E, generator=g, device="cuda")[:512].sort().values for _ in range(R)]).int()
+    idx[0, 100:140] = -1
+    sink = torch.randn((H,), generator=g, device="cuda")
+    buf = K.AttnBuffers(max(R, 32), H, D, 512 + W, "cuda")
+    swa = torch.randn((4096, D), generator=g, device="cuda").to(torch.bfloat16)
+    monkeypatch.setattr(K, "FULL_DEQ", False)
+    a = K.mqa(q, rows, idx, swa, pos, sink, W, buf, D ** -0.5, cos, sin, n_comp=E)
+    monkeypatch.setattr(K, "FULL_DEQ", True)
+    b = K.mqa(q, rows, idx, swa, pos, sink, W, buf, D ** -0.5, cos, sin, n_comp=E)
+    assert torch.isfinite(a).all() and torch.equal(a, b)
+    monkeypatch.setattr(K, "FULL_DEQ_MIB", 1)
+    assert torch.equal(a, K.mqa(q, rows, idx, swa, pos, sink, W, buf, D ** -0.5, cos, sin, n_comp=E))
+
+
+@gpu
 @pytest.mark.parametrize("mode", ["bf16", "fp8", "fp4"])
 def test_one_source_of_cache_bytes(mode, monkeypatch):
     """serial.entry_bytes == the row classes' bytes; the engine's per-token figures and carveout plan follow it."""

@@ -557,12 +557,32 @@ class AttnBuffers:
         self.max_keys = max_keys
 
 
+# prompt chunks over Fp4Rows (TF_DSV41_FULL_DEQ, default on): the compressed entries the chunk can see decoded once
+# into bf16 scratch that every row's _mqa_full reads (as a bf16 cache), instead of each row unpacking its 512 entries
+# itself; bit for bit the same output (_mqa_full over Fp4Rows == over their dequant: tests/test_dsv41_fp4.py). Up to
+# FULL_DEQ_MIB of scratch (1 KiB an entry: ratio-1 layers to 128K context, ratio-2 to 256K; past it each row
+# unpacks); 0: unpack per row.
+FULL_DEQ = __import__("os").environ.get("TF_DSV41_FULL_DEQ", "1") != "0"
+FULL_DEQ_MIB = int(__import__("os").environ.get("TF_DSV41_FULL_DEQ_MIB") or 128)
+
+
+def deq_entries(comp, n_comp: int | None) -> torch.Tensor | None:
+    """FULL_DEQ: Fp4Rows entries 0 .. n_comp - 1 as bf16 (None when off, not FP4, or past the cap)."""
+
+    if not (FULL_DEQ and isinstance(comp, Fp4Rows) and n_comp and n_comp * comp.dim * 2 <= FULL_DEQ_MIB << 20):
+        return None
+    return comp.dequant_rows(torch.empty((n_comp, comp.dim), dtype=torch.bfloat16, device=comp.q.device), 0, n_comp)
+
+
 def mqa(q: torch.Tensor, comp: torch.Tensor | None, idx: torch.Tensor | None, swa: torch.Tensor, pos: torch.Tensor,
         sink: torch.Tensor, window: int, buf: AttnBuffers, scale: float, cos: torch.Tensor | None = None,
-        sin: torch.Tensor | None = None, sbase: torch.Tensor | None = None, ring: int | None = None) -> torch.Tensor:
+        sin: torch.Tensor | None = None, sbase: torch.Tensor | None = None, ring: int | None = None,
+        n_comp: int | None = None, comp_bf16: torch.Tensor | None = None) -> torch.Tensor:
     """q [R, H, D] (RoPE'd) -> o [R, H, D] over the compressed entries ``idx`` [R, n] of ``comp`` and the window
     (``swa`` a ring of window rows addressed by position modulo its length): fp32, or with RoPE tables the
-    inverse-rotated bf16 the output projection takes."""
+    inverse-rotated bf16 the output projection takes. ``n_comp`` (prompt chunks): every index is below it (the
+    entries the chunk can see), so FP4 entries may be decoded once for all rows (FULL_DEQ); ``comp_bf16``: that
+    decode, made by the caller (deq_entries) and shared by the layers reading the same entries."""
 
     R, H, D = q.shape
     assert H % HEAD_TILE == 0
@@ -592,6 +612,10 @@ def mqa(q: torch.Tensor, comp: torch.Tensor | None, idx: torch.Tensor | None, sw
                             sbase.long() if sbase is not None else None, sink.float(), cos, sin, out, buf.po, buf.pm,
                             buf.pl, ring or swa.shape[0], mqa_fp4.GROUP, per, scale)
             return out
+    if rope and R > FULL_ROWS and q4 and idx is not None and comp_bf16 is None:
+        comp_bf16 = deq_entries(comp, n_comp)
+    if rope and R > FULL_ROWS and q4 and idx is not None and comp_bf16 is not None:
+        cq, cr, cs, fkw = comp_bf16, swa, swa, {}
     if rope and R > FULL_ROWS:
         _mqa_full[(R, H // FULL_HT)](q.contiguous(), cq, idx_t, swa, pos, sink, out, cos, sin, n_idx,
                                      idx_t.stride(0) if idx is not None else 0, cr, cs, H=H, D=D, W=window,
@@ -897,6 +921,79 @@ def _index_scores_seg(IQ, WTS, KEYS, POS, OUT, n_keys, off, seg, out_stride, rat
     tl.store(OUT + r * out_stride + j, score, mask=j < seg)
 
 
+@triton.jit
+def _index_scores_seg_rows(IQ, WTS, KEYS, POS, OUT, n_keys, off, seg, out_stride, ratio, n_rows, FLAGS, flag_stride,
+                           BEST, best_stride, HI: tl.constexpr, DI: tl.constexpr, BS: tl.constexpr, RB: tl.constexpr,
+                           FUSED: tl.constexpr = False, HAS_FLAGS: tl.constexpr = False,
+                           HAS_BEST: tl.constexpr = False, BLK: tl.constexpr = 8):
+    """_index_scores_seg (SCRATCH: KEYS the segment's bf16 keys) for rows [g * RB, g * RB + RB): the key tile loaded
+    once and scored by each row in turn, per row the same [HI, BS] dot and fp32 order. A row that sees none of the
+    tile writes -inf there without the dot (which the visible mask would have set to -inf anyway).
+    FUSED (the select-once path): HAS_BEST stores the block maxima of the raw scores (BLK keys a block, the source
+    layer's candidate blocks), then OUT gets what _untie_seg would write: -inf outside the candidate blocks
+    (HAS_FLAGS), exact zeros untied."""
+
+    sb = tl.program_id(0)
+    g = tl.program_id(1)
+    h = tl.arange(0, HI)
+    d = tl.arange(0, DI)
+    j = sb * BS + tl.arange(0, BS)
+    sidx = off + j
+    k = tl.load(KEYS + j[:, None].to(tl.int64) * DI + d[None, :], mask=(sidx < n_keys)[:, None], other=0.0)
+    for t in range(RB):
+        r = g * RB + t
+        if r < n_rows:
+            n_vis = (tl.load(POS + r) + 1) // ratio
+            if off + sb * BS < n_vis:
+                q = tl.load(IQ + (r * HI + h[:, None]) * DI + d[None, :])
+                dots = tl.dot(q, tl.trans(k)).to(tl.float32)
+                w = tl.load(WTS + r * HI + h)
+                score = tl.sum(w[:, None] * tl.maximum(dots, 0.0), axis=0)
+                score = tl.where((sidx < n_vis) & (sidx < n_keys), score, float("-inf"))
+            else:
+                score = tl.full((BS,), float("-inf"), tl.float32)
+            if FUSED:
+                if HAS_BEST:
+                    bj = sb * (BS // BLK) + tl.arange(0, BS // BLK)
+                    tl.store(BEST + r.to(tl.int64) * best_stride + off // BLK + bj,
+                             tl.max(tl.reshape(score, (BS // BLK, BLK)), axis=1), mask=bj * BLK < seg)
+                if HAS_FLAGS:
+                    keep = tl.load(FLAGS + r.to(tl.int64) * flag_stride + off // BLK + j // BLK, mask=j < seg,
+                                   other=0)
+                    score = tl.where(keep != 0, score, float("-inf"))
+                score = tl.where(score == 0, -1e-30 * (1.0 + sidx.to(tl.float32) * 4.76837158203125e-07), score)
+            tl.store(OUT + r.to(tl.int64) * out_stride + j, score, mask=j < seg)
+
+
+@triton.jit
+def _untie_seg(X, FLAGS, OUT, n_cols, x_stride, first, flag_off, flag_stride, block, HAS_FLAGS: tl.constexpr,
+               BS: tl.constexpr):
+    """OUT [R, n_cols] (contiguous) = untie(X masked to the candidate blocks, first): mask_to_blocks' -inf outside
+    FLAGS[r, flag_off + c // block], then exact zeros as -1e-30 * (1 + (first + c) * 2^-21), the torch ops' fp32
+    values (idx * 2^-21 is exact, so a fused multiply-add rounds as the add)."""
+
+    r = tl.program_id(0).to(tl.int64)
+    c = tl.program_id(1) * BS + tl.arange(0, BS)
+    m = c < n_cols
+    x = tl.load(X + r * x_stride + c, mask=m, other=0.0)
+    if HAS_FLAGS:
+        keep = tl.load(FLAGS + r * flag_stride + flag_off + c // block, mask=m, other=0)
+        x = tl.where(keep != 0, x, float("-inf"))
+    idx = (first + c).to(tl.float32)
+    x = tl.where(x == 0, -1e-30 * (1.0 + idx * 4.76837158203125e-07), x)
+    tl.store(OUT + r * n_cols + c, x, mask=m)
+
+
+# prompt chunks over FP4 keys (TF_DSV41_SEG_ROWS, rows a program scores against one key tile of the segment scratch;
+# 0: _index_scores_seg, a program a row). The same scores bit for bit (tests/test_dsv41_fp4.py).
+SEG_ROWS = int(__import__("os").environ.get("TF_DSV41_SEG_ROWS") or 8)
+# prompt chunks, TIE_KEYS (TF_DSV41_SELECT_ONCE, default on): each segment's exact tie-keyed top-k (ascending ids)
+# kept side by side and the pass's top-k picked once from them (an fp32 k-th value and _tie_pick: the candidates lie
+# in ascending id order, so the lowest position among equals is the lowest id; one segment: its own top-k), instead
+# of an int64 top-k merge per segment. The same selection bit for bit; 0: the per-segment merge.
+SELECT_ONCE = __import__("os").environ.get("TF_DSV41_SELECT_ONCE", "1") != "0"
+
+
 SELECT_ROWS = 512          # prompt rows a blocked selection pass takes
 SELECT_SEG = 16384         # keys a segment scores at once (a multiple of every candidate block size)
 
@@ -922,35 +1019,79 @@ def index_select_blocked(iq: torch.Tensor, wts: torch.Tensor, keys: torch.Tensor
     kq, ks = (keys.q, keys.s) if fp8 else (keys, pos)
     # FP4 keys: each segment decoded once a pass into bf16 scratch (a key decoded per scoring program would be 512x)
     scratch = torch.empty((seg, DI), dtype=torch.bfloat16, device=dev) if q4 else None
+    ubuf = torch.empty((min(R, SELECT_ROWS) * seg,), dtype=torch.float32, device=dev) if TIE_KEYS and SELECT_ONCE \
+        else None
     for r0 in range(0, R, SELECT_ROWS):
         r1 = min(R, r0 + SELECT_ROWS)
         n = r1 - r0
-        vals = torch.full((n, k), float("-inf"), dtype=torch.float32, device=dev)
-        ids = torch.full((n, k), S, dtype=torch.int64, device=dev)
         best = torch.full((n, nb), float("-inf"), dtype=torch.float32, device=dev) if candidates else None
         flags = None
         if blocks is not None:
             flags = torch.zeros((n, nb + 1), dtype=torch.bool, device=dev)
             b = blocks[r0:r1]
             flags.scatter_(1, torch.where(b >= 0, b, nb), True)
-        for off in range(0, S, seg):
+        nseg = -(-S // seg)
+        once = TIE_KEYS and SELECT_ONCE
+        fused = once and q4 and SEG_ROWS > 1 and 64 % block == 0
+        if once:                                               # every segment's top-k, in ascending id order
+            cv = torch.full((n, nseg * k), float("-inf"), dtype=torch.float32, device=dev)
+            ci = torch.full((n, nseg * k), S, dtype=torch.int64, device=dev)
+        else:                                                  # the running top-k
+            vals = torch.full((n, k), float("-inf"), dtype=torch.float32, device=dev)
+            ids = torch.full((n, k), S, dtype=torch.int64, device=dev)
+        for si, off in enumerate(range(0, S, seg)):
             length = min(seg, S - off)
             sc = buf[:n, :length]
             if q4:
                 kq = keys.dequant_rows(scratch, off, length)
-            _index_scores_seg[(n, triton.cdiv(length, 64))](iq[r0:r1], wts[r0:r1], kq, pos[r0:r1], sc, S, off,
-                                                           length, buf.stride(0), ratio, ks, HI=HI, DI=DI, BS=64,
-                                                           FP8=fp8, num_warps=4, **({"SCRATCH": True} if q4 else {}))
+            kk = min(k, length)
+            if fused:                                          # scores masked and untied, block maxima, one pass
+                u = ubuf[:n * length].view(n, length)
+                _index_scores_seg_rows[(triton.cdiv(length, 64), triton.cdiv(n, SEG_ROWS))](
+                    iq[r0:r1], wts[r0:r1], kq, pos[r0:r1], u, S, off, length, length, ratio, n,
+                    flags if flags is not None else u, flags.stride(0) if flags is not None else 0,
+                    best if best is not None else u, best.stride(0) if best is not None else 0, HI=HI, DI=DI, BS=64,
+                    RB=SEG_ROWS, FUSED=True, HAS_FLAGS=flags is not None, HAS_BEST=best is not None, BLK=block,
+                    num_warps=4)
+                v, i = topk_lo(u, kk, sorted=False)
+                cv[:, si * k: si * k + kk] = v
+                ci[:, si * k: si * k + kk] = i + off
+                continue
+            if q4 and SEG_ROWS > 1:
+                _index_scores_seg_rows[(triton.cdiv(length, 64), triton.cdiv(n, SEG_ROWS))](
+                    iq[r0:r1], wts[r0:r1], kq, pos[r0:r1], sc, S, off, length, buf.stride(0), ratio, n, sc, 0, sc, 0,
+                    HI=HI, DI=DI, BS=64, RB=SEG_ROWS, num_warps=4)   # (BS 128 or 8 warps: other sums, not bit-equal)
+            else:
+                _index_scores_seg[(n, triton.cdiv(length, 64))](iq[r0:r1], wts[r0:r1], kq, pos[r0:r1], sc, S, off,
+                                                               length, buf.stride(0), ratio, ks, HI=HI, DI=DI, BS=64,
+                                                               FP8=fp8, num_warps=4,
+                                                               **({"SCRATCH": True} if q4 else {}))
             if best is not None:                               # the source layer's block maxima (unmasked)
                 padded = sc if length % block == 0 else torch.nn.functional.pad(sc, (0, block - length % block),
                                                                                 value=float("-inf"))
                 best[:, off // block: off // block + padded.shape[1] // block] = padded.view(n, -1, block).amax(-1)
-            if flags is not None:                              # the later layers: only the candidate blocks
-                keep = flags[:, off // block: off // block + -(-length // block)].repeat_interleave(block, 1)
-                sc = sc.masked_fill(~keep[:, :length], float("-inf"))
-            kk = min(k, length)
-            v, i = topk_lo(untie(sc, off), kk, sorted=False)
+            if once:                                           # mask and untie in one pass
+                u = ubuf[:n * length].view(n, length)
+                _untie_seg[(n, triton.cdiv(length, 1024))](sc, flags if flags is not None else sc, u, length,
+                                                           buf.stride(0), off, off // block,
+                                                           flags.stride(0) if flags is not None else 0, block,
+                                                           HAS_FLAGS=flags is not None, BS=1024, num_warps=4)
+                v, i = topk_lo(u, kk, sorted=False)
+            else:
+                if flags is not None:                          # the later layers: only the candidate blocks
+                    keep = flags[:, off // block: off // block + -(-length // block)].repeat_interleave(block, 1)
+                    sc = sc.masked_fill(~keep[:, :length], float("-inf"))
+                v, i = topk_lo(untie(sc, off), kk, sorted=False)
+            if once:
+                cv[:, si * k: si * k + kk] = v
+                ci[:, si * k: si * k + kk] = i + off
+                continue
             vals, ids = topk_lo(torch.cat([vals, v], dim=1), k, torch.cat([ids, i + off], dim=1), sorted=False)
+        if once and nseg > 1:
+            vals, at = topk_lo(cv, k, sorted=False)
+            ids = torch.gather(ci, 1, at)
+        elif once:                                             # one segment: its top-k is the pass's
+            vals, ids = cv, ci
         ids = torch.where(torch.isinf(vals) & (vals < 0), torch.full_like(ids, S), ids)   # invisible: dropped
         ids = torch.sort(ids, dim=1).values
         idx_out[r0:r1, :k] = torch.where(ids >= S, torch.full_like(ids, -1), ids).int()
