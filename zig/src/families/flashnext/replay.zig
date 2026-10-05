@@ -1980,6 +1980,10 @@ pub const Prompt = struct {
     gather32: mtl.Pipeline,
     qmm6_128: mtl.Pipeline,
     gather128: mtl.Pipeline,
+    gu64: mtl.Pipeline,
+    gu32: mtl.Pipeline,
+    fused_gu: bool = true, // the experts' gate and up products and activation in one pass (same bits)
+    mtp_w: ?[3][3]Buf = null, // the MTP head's attention projection, fce, fch in MLX layout (pack_mtp_mlx.safetensors)
     tall_tiles: bool = true, // 128-row tiles (a dequantized weight block serves twice the rows; the same sums)
     router_mm: mtl.Pipeline,
     attn256: mtl.Pipeline,
@@ -2009,7 +2013,8 @@ pub const Prompt = struct {
         p.step = PMAX;
         p.fast_attn = true;
         p.scan4 = true;
-        p.tall_tiles = true;
+        p.tall_tiles = false; // measured: no faster than 64-row tiles (same bits)
+        p.fused_gu = true;
         const asrc = try std.mem.replaceOwned(u8, r.arena, ks.flashnext_attn, "#include \"../nax.h\"", ks.nax);
         const alib = try mtl.Library.fromSource(r.device, asrc, mtl.CompileOptions.mlx());
         p.sattn = try mtl.Pipeline.init(r.device, alib, "tf_sattn_nax", false);
@@ -2021,6 +2026,8 @@ pub const Prompt = struct {
         p.gather32 = try mtl.Pipeline.init(r.device, qlib, "tf_gather_qmm6_nax_32", false);
         p.qmm6_128 = try mtl.Pipeline.init(r.device, qlib, "tf_qmm6_t_nax_128", false);
         p.gather128 = try mtl.Pipeline.init(r.device, qlib, "tf_gather_qmm6_nax_128", false);
+        p.gu64 = try mtl.Pipeline.init(r.device, qlib, "tf_gather_gu6_nax_64", false);
+        p.gu32 = try mtl.Pipeline.init(r.device, qlib, "tf_gather_gu6_nax_32", false);
         p.router_mm = try mtl.Pipeline.init(r.device, qlib, "tf_mm_bf16_f32_t_nax", false);
         p.attn256 = try mtl.Pipeline.init(r.device, qlib, "tf_attn256_nax", false);
         p.splitk = try mtl.Pipeline.init(r.device, qlib, "tf_qmm6_splitk_nax", false);
@@ -2051,6 +2058,14 @@ pub const Prompt = struct {
             }
         }
         p.ple_kv = .{ try r.load("ple.kv.mw"), try r.load("ple.kv.ms"), try r.load("ple.kv.mb") };
+        p.mtp_w = null;
+        if (r.indexFile(try std.fmt.allocPrintSentinel(r.arena, "{s}/pack_mtp_mlx.safetensors", .{dir}, 0))) |_| {
+            var w: [3][3]Buf = undefined;
+            for ([_][]const u8{ "mtp.att.proj", "mtp.fce", "mtp.fch" }, 0..) |name, i| {
+                for ([_][]const u8{ "mw", "ms", "mb" }, 0..) |suf, k| w[i][k] = try r.loadf("{s}.{s}", .{ name, suf });
+            }
+            p.mtp_w = w;
+        } else |_| {}
         const B = struct {
             fn of(rr: *Run, n: usize) !Buf {
                 return .{ .b = try rr.buffer(n) };
@@ -2112,6 +2127,18 @@ pub const Prompt = struct {
         const prm = [4]i32{ @intCast(pairs), @intCast(n), @intCast(k), 512 };
         p.r.enc.setBytes(std.mem.asBytes(&prm), 5);
         p.r.enc.setBuffer(y.b, y.off, 6);
+        p.r.enc.dispatchThreads(mtl.Size.of(((n + 63) / 64) * 128, pairs / bm + 512, 1), mtl.Size.of(128, 1, 1));
+        p.barrier();
+    }
+
+    /// a[pairs, n] = act(x[slot] Wg_e^T, x[slot] Wu_e^T) over the sorted slots in one pass (gather's tiles and sums).
+    pub fn gatherGU(p: *Prompt, x: Buf, wg: []const Buf, wu: []const Buf, k: usize, n: usize, pairs: usize, y: Buf) void {
+        if (p.skip & 1 != 0) return;
+        const bm: usize = if (pairs >= 512 * 32) 64 else 32;
+        p.bind(if (bm == 64) p.gu64 else p.gu32, &.{ x, wg[0], wg[1], wg[2], wu[0], wu[1], wu[2], p.b.off });
+        const prm = [4]i32{ @intCast(pairs), @intCast(n), @intCast(k), 512 };
+        p.r.enc.setBytes(std.mem.asBytes(&prm), 8);
+        p.r.enc.setBuffer(y.b, y.off, 9);
         p.r.enc.dispatchThreads(mtl.Size.of(((n + 63) / 64) * 128, pairs / bm + 512, 1), mtl.Size.of(128, 1, 1));
         p.barrier();
     }
@@ -2187,11 +2214,13 @@ pub const Prompt = struct {
             r.enc.dispatchThreads(mtl.Size.of(D / 8, pairs, 1), mtl.Size.of(64, 1, 1));
             p.barrier();
         }
-        p.gather(b.xs, L.ex[0..3], D, 640, pairs, b.g);
-        p.gather(b.xs, L.ex[3..6], D, 640, pairs, b.u);
-        p.bind(p.pl[8], &.{ b.g, b.u, b.a });
-        r.enc.dispatchThreads(mtl.Size.of(pairs * 640, 1, 1), mtl.Size.of(256, 1, 1));
-        p.barrier();
+        if (p.fused_gu) p.gatherGU(b.xs, L.ex[0..3], L.ex[3..6], D, 640, pairs, b.a) else {
+            p.gather(b.xs, L.ex[0..3], D, 640, pairs, b.g);
+            p.gather(b.xs, L.ex[3..6], D, 640, pairs, b.u);
+            p.bind(p.pl[8], &.{ b.g, b.u, b.a });
+            r.enc.dispatchThreads(mtl.Size.of(pairs * 640, 1, 1), mtl.Size.of(256, 1, 1));
+            p.barrier();
+        }
         p.gather(b.a, L.ex[12..15], 640, D, pairs, b.ds);
         if (p.skip & 256 == 0) {
             p.bind(p.pl[9], &.{ b.ds, b.row_of, b.ydown });
@@ -2509,15 +2538,15 @@ pub const Prompt = struct {
         r.enc = cb.compute(if (r.serial) .serial else .concurrent);
         try r.callRows("mtp:qa_embed_rows@embed", n, &.{ b.mids, m.embed[0], m.embed[1], m.embed[2] }, &.{b.emb}, null);
         try r.callRows("mtp:q4_rms_rows@mtp.enorm", n, &.{ b.emb, h.enorm, t.eps }, &.{b.branch}, null);
-        r.denseRows(b.branch, D, h.fce, n, b.aout);
+        if (p.mtp_w) |w| p.qmm(b.branch, w[1], D, D, n, b.aout, 0) else r.denseRows(b.branch, D, h.fce, n, b.aout);
         try r.callRows("mtp:q4_rms_rows@mtp.hnorm", n, &.{ streams, h.hnorm, t.eps }, &.{b.normed}, null);
-        r.denseRows(b.normed, D, h.fch, 4 * n, b.gated);
+        if (p.mtp_w) |w| p.qmm(b.normed, w[2], D, D, 4 * n, b.gated, 0) else r.denseRows(b.normed, D, h.fch, 4 * n, b.gated);
         p.bind(r.add_pipe, &.{ b.aout, b.gated, b.xs, b.n_add });
         r.enc.dispatchThreads(mtl.Size.of(n * WIDE, 1, 1), mtl.Size.of(256, 1, 1));
         p.barrier();
         try r.callRows("mtp:q4_hc_norm_none#[10240]", n, &.{b.xs}, &.{ b.hout, b.ssp }, null);
         p.hc(m, b.hout, h.ahc, n, b.inj_a);
-        r.denseRows(b.mixed, D, h.proj, n, b.p);
+        if (p.mtp_w) |w| p.qmm(b.mixed, w[0], D, 13952, n, b.p, 0) else r.denseRows(b.mixed, D, h.proj, n, b.p);
         try r.callRows("mtp:q4_attn_prep@mtp.att", n, &.{ b.p, b.pos, h.qn, h.kn, h.iqn, t.eps, t.log2base }, &.{ b.q, b.kout, b.iq }, null);
         p.bind(r.kv_pipe, &.{ b.kout, b.p, h.keys, h.vals, h.raw, b.kvmeta });
         r.enc.dispatchThreads(mtl.Size.of(512 * n, 1, 1), mtl.Size.of(256, 1, 1));

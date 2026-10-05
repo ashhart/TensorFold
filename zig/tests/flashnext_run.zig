@@ -540,7 +540,7 @@ pub fn main(init: std.process.Init) !void {
             var best: [2]f64 = .{ 1e9, 1e9 };
             const ab: []const u8 = if (std.c.getenv("FZ_AB")) |v| std.mem.span(v) else "attn";
             for (0..2) |arm| { // arm 0 the old kernels, arm 1 the new: FZ_AB attn (default), scan or tiles
-                if (std.mem.eql(u8, ab, "scan")) pr.scan4 = arm == 1 else if (std.mem.eql(u8, ab, "tiles")) pr.tall_tiles = arm == 1 else pr.fast_attn = arm == 1;
+                if (std.mem.eql(u8, ab, "scan")) pr.scan4 = arm == 1 else if (std.mem.eql(u8, ab, "tiles")) pr.tall_tiles = arm == 1 else if (std.mem.eql(u8, ab, "gu")) pr.fused_gu = arm == 1 else pr.fast_attn = arm == 1;
                 for (0..3) |run| {
                     m.reset();
                     const c0 = mtl.clock.seconds();

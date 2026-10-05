@@ -111,6 +111,112 @@ inline void k_loop6(thread frag<float> (&acc)[TM][2], const device T* x, int K, 
   threadgroup_barrier(mem_flags::mem_threadgroup);
 }
 
+// x times the gate's and the up projection's same 64 weight rows at once: each step's two tiles are dequantized side
+// by side (thread t: row t / 2's group t % 2 of each), every x fragment feeds both products (k_loop6's sums, twice).
+template <typename T, int TM>
+inline void k_loop6x2(thread frag<float> (&ag)[TM][2], thread frag<float> (&au)[TM][2], const device T* x, int K,
+                      int live, bool inside, const device uint* wg, const device T* sg, const device T* bg,
+                      const device uint* wu, const device T* su, const device T* bu, threadgroup T* tg_,
+                      threadgroup T* tu, int tn, uint t, short2 home) {
+  constexpr int PAD = 64 + 16 / sizeof(T);
+  threadgroup T* mg = tg_ + (t / 2) * PAD + 32 * (t % 2);
+  threadgroup T* mu = tu + (t / 2) * PAD + 32 * (t % 2);
+  TF_UNROLL
+  for (short i = 0; i < TM; i++) {
+    ag[i][0] = frag<float>(0);
+    ag[i][1] = frag<float>(0);
+    au[i][0] = frag<float>(0);
+    au[i][1] = frag<float>(0);
+  }
+  uint2 ga = *(const device uint2*)(wg), gb = *(const device uint2*)(wg + 2), gc = *(const device uint2*)(wg + 4);
+  uint2 ua = *(const device uint2*)(wu), ub = *(const device uint2*)(wu + 2), uc = *(const device uint2*)(wu + 4);
+  T gs = *sg, gbi = *bg, us = *su, ubi = *bu;
+  for (int k = 0; k < K; k += 64) {
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    dequant6r<T>(ga, gb, gc, gs, gbi, mg);
+    dequant6r<T>(ua, ub, uc, us, ubi, mu);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (k + 64 < K) {
+      wg += 12;
+      wu += 12;
+      sg += 2;
+      bg += 2;
+      su += 2;
+      bu += 2;
+      ga = *(const device uint2*)(wg);
+      gb = *(const device uint2*)(wg + 2);
+      gc = *(const device uint2*)(wg + 4);
+      ua = *(const device uint2*)(wu);
+      ub = *(const device uint2*)(wu + 2);
+      uc = *(const device uint2*)(wu + 4);
+      gs = *sg;
+      gbi = *bg;
+      us = *su;
+      ubi = *bu;
+    }
+#pragma clang loop unroll(disable)
+    for (int kk = 0; kk < 64; kk += 32) {
+      if (live > 0) {
+        frag<T> a[TM][2], b[2][2], c[2][2];
+        TF_UNROLL
+        for (short i = 0; i < 2; i++) {
+          TF_UNROLL
+          for (short j = 0; j < 2; j++) {
+            frag_get(b[j][i], (const threadgroup T*)tg_, PAD, tn + 16 * i, kk + 16 * j, home);
+            frag_get(c[j][i], (const threadgroup T*)tu, PAD, tn + 16 * i, kk + 16 * j, home);
+          }
+        }
+        TF_UNROLL
+        for (short i = 0; i < TM; i++) {
+          TF_UNROLL
+          for (short j = 0; j < 2; j++) {
+            if (inside) {
+              frag_get(a[i][j], x, K, 16 * i, kk + 16 * j, home);
+            } else {
+              frag_get_in(a[i][j], x, K, 16 * i, kk + 16 * j, home, live, kk + 32);
+            }
+          }
+        }
+        TF_UNROLL
+        for (short m = 0; m < TM; m++) {
+          TF_UNROLL
+          for (short j = 0; j < 2; j++) {
+            mma_16x32<false, true>(ag[m][0], ag[m][1], a[m][j], b[j][0], b[j][1]);
+            mma_16x32<false, true>(au[m][0], au[m][1], a[m][j], c[j][0], c[j][1]);
+          }
+        }
+      }
+    }
+    x += 64;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+}
+
+// The expert activation from the two products, as the unfused path rounds it: bf16(bf16(silu(bf16 g)) * bf16 u).
+inline float act6(float g, float u) {
+  const float gb = float(bfloat16_t(g)), ub = float(bfloat16_t(u));
+  return float(bfloat16_t(float(bfloat16_t(gb / (1.0f + metal::exp(-gb)))) * ub));
+}
+
+template <int TM>
+inline void store_act(thread const frag<float> (&ag)[TM][2], thread const frag<float> (&au)[TM][2], device bfloat16_t* y,
+                      int ld, int live, int nc, short2 home) {
+  TF_UNROLL
+  for (short i = 0; i < TM; i++) {
+    TF_UNROLL
+    for (short j = 0; j < 2; j++) {
+      frag<float> f;
+      TF_UNROLL
+      for (short e = 0; e < 8; e++) f[e] = act6(ag[i][j][e], au[i][j][e]);
+      if (live == 16 * TM && nc >= 32) {
+        frag_put(f, y, ld, 16 * i, 16 * j, home);
+      } else {
+        frag_put_in(f, y, ld, 16 * i, 16 * j, home, live, nc);
+      }
+    }
+  }
+}
+
 // A simdgroup's TM x 2 fragments to y (row stride ld): rows below live, columns below nc.
 template <typename T, int TM>
 inline void store(thread const frag<float> (&acc)[TM][2], device T* y, int ld, int live, int nc, short2 home) {
@@ -228,6 +334,50 @@ inline void gather6(const device bfloat16_t* X, const device uint* W, const devi
                                       tile, tn, uint(t), frag_home(ushort(lane)));
   if (col + tn < N && live > 0)
     tfq6::store<bfloat16_t, SM / 16>(acc, Y + long(row + tm) * N + col + tn, N, live, N - (col + tn), frag_home(ushort(lane)));
+}
+
+// The experts' gate and up products and their activation in one pass: y[r] = act(x[r] Wg_e^T, x[r] Wu_e^T) for rows
+// sorted by expert, BM-row tiles within an expert (gather6's tiles). P: M N K experts.
+template <int BM>
+inline void gather_gu6(const device bfloat16_t* X, const device uint* WG, const device bfloat16_t* SG,
+                       const device bfloat16_t* BG, const device uint* WU, const device bfloat16_t* SU,
+                       const device bfloat16_t* BU, const device int32_t* O, device bfloat16_t* Y, const device int* P,
+                       threadgroup bfloat16_t* tile_g, threadgroup bfloat16_t* tile_u, uint3 tg, uint sg, uint lane) {
+  constexpr int SM = BM / 2;
+  const int M = P[0], N = P[1], K = P[2];
+  int expert, row, rows;
+  if (!tfq6::expert_tile<BM>(O, P[3], M, int(tg.y), lane, expert, row, rows)) {
+    return;
+  }
+  const int col = int(tg.x) * 64, t = int(sg) * 32 + int(lane);
+  const int tm = SM * int(sg / 2), tn = 32 * int(sg % 2), live = clamp(rows - tm, 0, SM);
+  const long wrow = long(expert) * N + min(col + t / 2, N - 1);
+  const int WPR = K * 6 / 32, KG = K / 32;
+  frag<float> ag[SM / 16][2], au[SM / 16][2];
+  tfq6::k_loop6x2<bfloat16_t, SM / 16>(ag, au, X + long(row + tm) * K, K, live, row + tm + SM <= M,
+                                        WG + wrow * WPR + 6 * (t % 2), SG + wrow * KG + (t % 2), BG + wrow * KG + (t % 2),
+                                        WU + wrow * WPR + 6 * (t % 2), SU + wrow * KG + (t % 2), BU + wrow * KG + (t % 2),
+                                        tile_g, tile_u, tn, uint(t), frag_home(ushort(lane)));
+  if (col + tn < N && live > 0)
+    tfq6::store_act<SM / 16>(ag, au, Y + long(row + tm) * N + col + tn, N, live, N - (col + tn), frag_home(ushort(lane)));
+}
+
+[[kernel]] void tf_gather_gu6_nax_64(const device bfloat16_t* X [[buffer(0)]], const device uint* WG [[buffer(1)]],
+    const device bfloat16_t* SG [[buffer(2)]], const device bfloat16_t* BG [[buffer(3)]], const device uint* WU [[buffer(4)]],
+    const device bfloat16_t* SU [[buffer(5)]], const device bfloat16_t* BU [[buffer(6)]], const device int32_t* O [[buffer(7)]],
+    const device int32_t* P [[buffer(8)]], device bfloat16_t* Y [[buffer(9)]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]], uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup bfloat16_t tile_g[64 * (64 + 16 / sizeof(bfloat16_t))], tile_u[64 * (64 + 16 / sizeof(bfloat16_t))];
+  gather_gu6<64>(X, WG, SG, BG, WU, SU, BU, O, Y, P, tile_g, tile_u, tg, sg, lane);
+}
+
+[[kernel]] void tf_gather_gu6_nax_32(const device bfloat16_t* X [[buffer(0)]], const device uint* WG [[buffer(1)]],
+    const device bfloat16_t* SG [[buffer(2)]], const device bfloat16_t* BG [[buffer(3)]], const device uint* WU [[buffer(4)]],
+    const device bfloat16_t* SU [[buffer(5)]], const device bfloat16_t* BU [[buffer(6)]], const device int32_t* O [[buffer(7)]],
+    const device int32_t* P [[buffer(8)]], device bfloat16_t* Y [[buffer(9)]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]], uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup bfloat16_t tile_g[64 * (64 + 16 / sizeof(bfloat16_t))], tile_u[64 * (64 + 16 / sizeof(bfloat16_t))];
+  gather_gu6<32>(X, WG, SG, BG, WU, SU, BU, O, Y, P, tile_g, tile_u, tg, sg, lane);
 }
 
 [[kernel]] void tf_gather_qmm6_nax_64(const device bfloat16_t* X [[buffer(0)]], const device uint* W [[buffer(1)]],
