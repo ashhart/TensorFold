@@ -114,3 +114,29 @@ released model). Lower values measure fuller: on one 5 s clip the spectral centr
 periodicity on an 8 s clip does fall, from 0.47 to 0.40. The spectrum was the wrong thing to optimise; the option is
 kept for experiments and the default stays 3. A fourth forward (`--points 5`) kept the periodicity of the 20-step
 render (0.54) with a centroid of 817 Hz, for a third more time.
+
+## Re-voicing a few-step clip
+
+The Turbo adapter's audio was judged poor by ear on speech and worse on singing (harsh, an echo-like quality), with
+or without more passes, a mono fold-down or level changes; its two audio channels also disagree (side signal 13 dB
+under the mid, against 29 dB at 20 steps). `sampler.revoice` and the tool's `--revoice STEPS` keep the few-step
+picture and make the sound again with the weights without adapters: the video, keyframe and text rows are held at
+the keyframe timestep and only the audio rows are denoised, from noise, on the audio schedule.
+
+To make that cheap, the held rows go through the stack once and each block's keys and values over them are kept
+(`held_context`); an audio step then runs the audio rows alone against those (`audio_velocity`). A test checks that
+this equals the whole-sequence pass it was kept from. Across steps it is an approximation: the held rows do not see
+the audio changing. `--revoice-exact` runs the whole sequence every step instead.
+
+| 15 s clip (362 frames) at 672x384, int8 | Passes | Re-voice, 20 steps | Clip |
+| --- | ---: | ---: | ---: |
+| Turbo | 3 | - | about 115 s |
+| Turbo + re-voice | 3 | 53 s | about 170 s |
+| Turbo + re-voice | 5 | 57 s | 219 s |
+| no adapter | 20 | - | 606 s |
+
+An audio step takes about 1.3 s there (29,009 rows, of which 1,206 are audio). At 192 frames the re-voice takes 23 s.
+The re-voiced channels agree like a 20-step render's (correlation 1.00) and the lyric is transcribed correctly.
+A listener judged the re-voiced sound good and, for the picture at 362 frames, preferred 5 passes to 3, 4 and 6;
+at 192 frames 3 passes keeps detail that it loses at 362. Lip-sync was not measured. One prompt, one seed.
+
