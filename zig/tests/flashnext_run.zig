@@ -216,6 +216,64 @@ const xnew_source =
     \\  acc += simd_shuffle_xor(acc, 2);
     \\  if (part == 0) Y[(r * SLOTS + k) * D + d] = bfloat(acc);
     \\}
+    \\inline void fz_dot32(thread const float* q, const device bfloat* x, thread float& qx, thread float& sx) {
+    \\  const device bfloat4* x4 = (const device bfloat4*)x;
+    \\  qx = 0.0f; sx = 0.0f;
+    \\  #pragma unroll
+    \\  for (int i = 0; i < 8; i++) {
+    \\    const float4 v = float4(x4[i]);
+    \\    qx += q[4 * i] * v.x + q[4 * i + 1] * v.y + q[4 * i + 2] * v.z + q[4 * i + 3] * v.w;
+    \\    sx += v.x + v.y + v.z + v.w;
+    \\  }
+    \\}
+    \\// A 6-bit dense projection of up to 8 rows from lane_qmm's tiled weights [N/32][K/32][32 cols][6 words] and its
+    \\// group-major scale/bias pairs: lane = output column, SK simdgroups split the groups, summed in order.
+    \\template <int SK>
+    \\inline void fz_dense_body(const device bfloat* X, const device uint* W, const device bfloat* SB, device bfloat* Y,
+    \\    constant uint4& dims, uint sgi, uint lane, uint tgi, threadgroup float (*part)[8][32]) {
+    \\  const int R = int(dims.x), N = int(dims.y), K = int(dims.z), KG = K / 32;
+    \\  const int t = int(tgi), n = t * 32 + int(lane);
+    \\  const int g0 = int(sgi) * (KG / SK), g1 = g0 + KG / SK;
+    \\  float acc[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    \\  for (int g = g0; g < g1; g++) {
+    \\    float q[32];
+    \\    fz_codes6(W + (size_t(t * KG + g) * 32 + lane) * 6, q);
+    \\    const device bfloat* sb = SB + (size_t(g) * N + n) * 2;
+    \\    const float sc = float(sb[0]), bi = float(sb[1]);
+    \\    #pragma unroll
+    \\    for (int r = 0; r < 8; r++) {
+    \\      if (r < R) {
+    \\        float qx, sx;
+    \\        fz_dot32(q, X + size_t(r) * K + g * 32, qx, sx);
+    \\        acc[r] += sc * qx + bi * sx;
+    \\      }
+    \\    }
+    \\  }
+    \\  #pragma unroll
+    \\  for (int r = 0; r < 8; r++) part[sgi][r][lane] = acc[r];
+    \\  threadgroup_barrier(mem_flags::mem_threadgroup);
+    \\  if (sgi == 0) {
+    \\    for (int r = 0; r < R; r++) {
+    \\      float v = 0.0f;
+    \\      for (int k = 0; k < SK; k++) v += part[k][r][lane];
+    \\      Y[size_t(r) * N + n] = bfloat(v);
+    \\    }
+    \\  }
+    \\}
+    \\[[kernel]] void fz_dense8(const device bfloat* X [[buffer(0)]], const device uint* W [[buffer(1)]],
+    \\    const device bfloat* SB [[buffer(2)]], device bfloat* Y [[buffer(3)]], constant uint4& dims [[buffer(4)]],
+    \\    uint sgi [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    \\    uint tgi [[threadgroup_position_in_grid]]) {
+    \\  threadgroup float part[8][8][32];
+    \\  fz_dense_body<8>(X, W, SB, Y, dims, sgi, lane, tgi, part);
+    \\}
+    \\[[kernel]] void fz_dense16(const device bfloat* X [[buffer(0)]], const device uint* W [[buffer(1)]],
+    \\    const device bfloat* SB [[buffer(2)]], device bfloat* Y [[buffer(3)]], constant uint4& dims [[buffer(4)]],
+    \\    uint sgi [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    \\    uint tgi [[threadgroup_position_in_grid]]) {
+    \\  threadgroup float part[16][8][32];
+    \\  fz_dense_body<16>(X, W, SB, Y, dims, sgi, lane, tgi, part);
+    \\}
 ;
 
 fn readAll(fd: std.c.fd_t, dest: []u8, at: usize) !void {
@@ -248,6 +306,10 @@ const Run = struct {
     xnew: bool = false,
     xgu_pipe: mtl.Pipeline = undefined,
     xdown_pipe: mtl.Pipeline = undefined,
+    dense: bool = false,
+    dense_target: bool = false,
+    dense8_pipe: mtl.Pipeline = undefined,
+    dense16_pipe: mtl.Pipeline = undefined,
 
     fn buffer(r: *Run, len: usize) !mtl.Buffer {
         const n = @max(len, 64);
@@ -352,6 +414,8 @@ const Run = struct {
             const lib = try mtl.Library.fromSource(r.device, full, mtl.CompileOptions.mlx());
             r.xgu_pipe = try mtl.Pipeline.init(r.device, lib, "fz_xgu", false);
             r.xdown_pipe = try mtl.Pipeline.init(r.device, lib, "fz_xdown", false);
+            r.dense8_pipe = try mtl.Pipeline.init(r.device, lib, "fz_dense8", false);
+            r.dense16_pipe = try mtl.Pipeline.init(r.device, lib, "fz_dense16", false);
         }
     }
 
@@ -367,6 +431,26 @@ const Run = struct {
     }
 
 
+
+    /// y = x W for `rows` rows of K inputs through fz_dense (blocks of 8 rows; 16 K-slices for narrow outputs).
+    fn denseRows(r: *Run, x: Buf, k: usize, l: Lane, rows: usize, y: Buf) void {
+        const n = l.wq.b.length() * 4 / (3 * k);
+        const narrow = n <= 4096;
+        var at: usize = 0;
+        while (at < rows) : (at += 8) {
+            const rr = @min(8, rows - at);
+            const dims = [4]u32{ @intCast(rr), @intCast(n), @intCast(k), 0 };
+            r.enc.setPipeline(if (narrow) r.dense16_pipe else r.dense8_pipe);
+            r.enc.setBuffer(x.b, x.off + at * k * 2, 0);
+            r.enc.setBuffer(l.wq.b, l.wq.off, 1);
+            r.enc.setBuffer(l.sbt.b, l.sbt.off, 2);
+            r.enc.setBuffer(y.b, y.off + at * n * 2, 3);
+            r.enc.setBytes(std.mem.asBytes(&dims), 4);
+            const sk: usize = if (narrow) 16 else 8;
+            r.enc.dispatchThreads(mtl.Size.of(32 * sk * (n / 32), 1, 1), mtl.Size.of(32 * sk, 1, 1));
+            if (!r.serial) r.enc.barrier();
+        }
+    }
     /// The MoE's routed and shared experts for `rows` rows: gate/up (with routing) then down.
     fn experts(r: *Run, gu_role: []const u8, down_role: []const u8, x: Buf, lg: Buf, e: [18]Buf, act: Buf, pick: Buf, wts: Buf, rows_buf: Buf, y: Buf) !void {
         if (!r.xnew) {
@@ -606,6 +690,7 @@ const Model = struct {
     }
 
     fn lane(m: *Model, x: Buf, k: usize, l: Lane, role: []const u8, y: Buf) !void {
+        if (m.r.dense_target) return m.r.denseRows(x, k, l, m.r.rows, y);
         if (!m.r.fused_xsum) try m.r.call(if (k == D) "lane_qmm_xsum#[2560]" else "lane_qmm_xsum#[6144]", &.{ x, m.t.mdims }, &.{m.t.xs});
         try m.r.call(role, &.{ x, m.t.xs, l.wq, l.sbt, m.t.mdims }, &.{y});
     }
@@ -818,10 +903,10 @@ const Model = struct {
         try r.call("mtp:qa_embed_rows@embed", &.{ ids, m.embed[0], m.embed[1], m.embed[2] }, &.{h.emb});
         try r.call("mtp:q4_rms_rows@mtp.enorm", &.{ h.emb, h.enorm, t.eps }, &.{h.en});
         if (!r.fused_xsum) try r.call("mtp:lane_qmm_xsum#[2560]", &.{ h.en, sl.md }, &.{t.xs});
-        try r.call("mtp:lane_qmm_bytes_grouped@mtp.fce", &.{ h.en, t.xs, h.fce.wq, h.fce.sbt, sl.md }, &.{h.e});
+        if (r.dense) r.denseRows(h.en, D, h.fce, rows, h.e) else try r.call("mtp:lane_qmm_bytes_grouped@mtp.fce", &.{ h.en, t.xs, h.fce.wq, h.fce.sbt, sl.md }, &.{h.e});
         try r.call("mtp:q4_rms_rows@mtp.hnorm", &.{ streams, h.hnorm, t.eps }, &.{h.hn});
         if (!r.fused_xsum) try r.call("mtp:lane_qmm_xsum#[4R, 2560]", &.{ h.hn, sl.md4 }, &.{t.xs});
-        try r.call("mtp:lane_qmm_bytes_grouped@mtp.fch", &.{ h.hn, t.xs, h.fch.wq, h.fch.sbt, sl.md4 }, &.{h.hs});
+        if (r.dense) r.denseRows(h.hn, D, h.fch, 4 * rows, h.hs) else try r.call("mtp:lane_qmm_bytes_grouped@mtp.fch", &.{ h.hn, t.xs, h.fch.wq, h.fch.sbt, sl.md4 }, &.{h.hs});
         r.enc.setPipeline(r.add_pipe);
         for ([_]Buf{ h.e, h.hs, h.h[0], sl.n_add }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
         r.enc.dispatchThreads(mtl.Size.of(rows * WIDE, 1, 1), mtl.Size.of(256, 1, 1));
@@ -831,7 +916,7 @@ const Model = struct {
         const up = [_][]const u8{ "mtp:qa_hc_up@mtp.ahc", "mtp:qa_hc_up@mtp.mhc", "mtp:qa_hc_up@mtp.mix" };
         try m.mtpProject(h.h[1], h.ahc, down[0], up[0], t.inj_a, sl.rows);
         if (!r.fused_xsum) try r.call("mtp:lane_qmm_xsum#[2560]", &.{ t.mixed, sl.md }, &.{t.xs});
-        try r.call("mtp:lane_qmm_bytes_grouped@mtp.att.proj", &.{ t.mixed, t.xs, h.proj.wq, h.proj.sbt, sl.md }, &.{t.p});
+        if (r.dense) r.denseRows(t.mixed, D, h.proj, rows, t.p) else try r.call("mtp:lane_qmm_bytes_grouped@mtp.att.proj", &.{ t.mixed, t.xs, h.proj.wq, h.proj.sbt, sl.md }, &.{t.p});
         try r.call("mtp:q4_attn_prep@mtp.att", &.{ t.p, sl.pos8, h.qn, h.kn, h.iqn, t.eps, t.log2base }, &.{ t.q, t.kout, t.iq });
         r.enc.setPipeline(r.kv_pipe);
         for ([_]Buf{ t.kout, t.p, h.keys, h.vals, h.raw, sl.kvmeta }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
@@ -840,7 +925,7 @@ const Model = struct {
         try r.call("mtp:q4_attn_parts#[24, 256]", &.{ t.q, h.keys, h.vals, t.ids81, sl.nk8, t.zero8, t.scale }, &.{ t.po, t.pm });
         try r.call("mtp:q4_attn_merge_gate#[24, 16, 256]", &.{ t.po, t.pm, t.p }, &.{t.aout});
         if (!r.fused_xsum) try r.call("mtp:lane_qmm_xsum#[6144]", &.{ t.aout, sl.md }, &.{t.xs});
-        try r.call("mtp:lane_qmm_bytes_grouped@mtp.att.o", &.{ t.aout, t.xs, h.out.wq, h.out.sbt, sl.md }, &.{t.branch});
+        if (r.dense) r.denseRows(t.aout, 6144, h.out, rows, t.branch) else try r.call("mtp:lane_qmm_bytes_grouped@mtp.att.o", &.{ t.aout, t.xs, h.out.wq, h.out.sbt, sl.md }, &.{t.branch});
         try r.call("mtp:q4_hc_norm_plain#[10240]", &.{ h.h[1], t.inj_a, t.branch }, &.{ h.h[0], t.ssp });
         try m.mtpProject(h.h[0], h.mhc, down[1], up[1], t.inj_m, sl.rows);
         try r.call("mtp:q4_router_float@mtp.moe", &.{ t.mixed, h.router, sl.rows }, &.{t.lg});
@@ -851,7 +936,7 @@ const Model = struct {
         r.rows = 1;
         const x: Buf = .{ .b = t.mixed.b, .off = (rows - 1) * D * 2 };
         if (!r.fused_xsum) try r.call("mtp:lane_qmm_xsum#[2560]", &.{ x, h.md1 }, &.{t.xs});
-        try r.call("mtp:lane_qmm_bytes_grouped@mtp.draft", &.{ x, t.xs, h.draft.wq, h.draft.sbt, h.md1 }, &.{h.logits});
+        if (r.dense) r.denseRows(x, D, h.draft, 1, h.logits) else try r.call("mtp:lane_qmm_bytes_grouped@mtp.draft", &.{ x, t.xs, h.draft.wq, h.draft.sbt, h.md1 }, &.{h.logits});
         r.enc.setPipeline(r.argids_pipe);
         for ([_]Buf{ h.logits, out, h.n_ids, h.ids }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
         r.enc.dispatchThreads(mtl.Size.of(1024, 1, 1), mtl.Size.of(1024, 1, 1));
@@ -922,6 +1007,8 @@ pub fn main(init: std.process.Init) !void {
     r.fused_xsum = std.c.getenv("FZ_FUSED_XSUM") != null;
     r.serial = std.c.getenv("FZ_SERIAL") != null;
     r.xnew = std.c.getenv("FZ_XNEW") != null;
+    r.dense = r.xnew and std.c.getenv("FZ_DENSE") != null;
+    r.dense_target = r.dense and std.c.getenv("FZ_DENSE_TARGET") != null;
     const t0 = mtl.clock.seconds();
     try r.compile(args[2]);
     const t1 = mtl.clock.seconds();
