@@ -1553,8 +1553,7 @@ pub fn main(init: std.process.Init) !void {
 
     // 7. GPU-side rounds: the verdict, positions, history and kept states stay on the GPU; the host encodes round
     //    N+1 while round N runs and reads the emitted tokens from a ring
-    if (r.xnew) {
-        const depth: usize = 3;
+    if (r.xnew) for ([_]usize{ 2, 3, 4 }) |depth| {
         const W = depth + 1;
         const n_lin: usize = 36;
         const g_cs = try r.buffer(n_lin * CS_ROW);
@@ -1712,7 +1711,7 @@ pub fn main(init: std.process.Init) !void {
         const made: f64 = @floatFromInt(out.items.len - 1);
         std.debug.print("GPU-side rounds, depth {d}: {d}/{d} tokens equal; {d:.2} tokens a round; {d:.1} tok/s (GPU busy {d:.0}%)\n", .{ depth, eq, want.len, made / @as(f64, @floatFromInt(done)), made / (s1 - s0), 100 * m.gpu_seconds / (s1 - s0) });
         if (eq < want.len) bad += 1;
-    }
+    };
 
     // 3. each window size's cost
     for ([_]usize{ 1, 2, 3, 4, 6, 8 }) |rows| {

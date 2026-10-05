@@ -229,6 +229,7 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .{ .name = "tf-nemotron-dense", .path = "zig/tests/nemotron_dense.zig", .about = "Dense projection schedules bit-checked against the engine's kernels, then timed" },
         .{ .name = "tf-nemotron-experts", .path = "zig/tests/nemotron_experts.zig", .about = "Routed-expert pass shapes bit-checked against the engine's kernels, then timed by window width" },
         .{ .name = "tf-flashnext-run", .path = "zig/tests/flashnext_run.zig", .about = "Flash Next one-row greedy steps on the Python engine's recorded kernels, against its tokens" },
+        .{ .name = "tf-grid-sync-bench", .path = "zig/tests/grid_sync_bench.zig", .about = "A GPU-wide barrier in one persistent dispatch against dependent relaunches" },
     };
     for (engine_programs) |p| {
         const mod = b.createModule(.{
