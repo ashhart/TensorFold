@@ -29,8 +29,6 @@ from .multi_tp import Link as Link
 from .multi_tp import OutOfStep, TwoRanks
 from .multi_target_graphs import (FourStreamTargetGraphs, eligible as target_graph_eligible,
                                  requested as target_graph_requested)
-from .mixed_row_target_graphs import (MixedRowTargetGraphs, eligible as mixed_graph_eligible,
-                                      requested as mixed_graph_requested)
 from ..cuda import CONFIDENCE, DEPTH
 
 FIRST, STEP = 256, 8192          # rows an idle slot keeps; rows a stream's caches grow by at a time
@@ -55,7 +53,6 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
                  stop_eos: bool = True, keep: int = 8, kv_dtype: str = "bf16", prefill_rows: int = PREFILL_ROWS,
                  share: float = SHARE, points=None, graphs: bool = True, vision=None, workspace_bytes: int = 0) -> None:
         target_graphs = target_graph_requested()
-        mixed_graphs = mixed_graph_requested()
         self.link = self.follower = None
         self.planning, self.pass_plan, self.mixed_plan = False, None, None
         self.pass_index, self.pass_width = 0, prefill_rows
@@ -81,8 +78,6 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
         self.solo_on = self.solo is not None
         self.four_stream_target_graphs = (FourStreamTargetGraphs()
                                          if target_graphs and graphs and depth == 6 and w.comm is None else None)
-        self.mixed_row_target_graphs = (MixedRowTargetGraphs()
-                                        if mixed_graphs and graphs and depth == 6 and w.comm is None else None)
         self.slot_bytes = sum(t.numel() * t.element_size() for t in _tensors(self.free[0]))
         self.window_bytes = self.free[0].cache_bytes(capacity)          # one stream's caches at the full window
         free = torch_live(torch, available_bytes) if torch.cuda.is_available() else None
@@ -365,11 +360,8 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
         target = self.four_stream_target_graphs
         admitted = target is not None and not pieces and target_graph_eligible(
             self.w, self.buf, segs, held, live, depth=self.depth, filling=bool(self.filling))
-        mixed = self.mixed_row_target_graphs
-        mixed_admitted = mixed is not None and not pieces and mixed_graph_eligible(
-            self.w, self.buf, segs, held, live, depth=self.depth, filling=bool(self.filling))
         tables = self.buf.gdn_tables = gdn_multi.Tables(
-            self.w, self.gdn, segs, held, pending_width=7 if admitted or mixed_admitted else None)
+            self.w, self.gdn, segs, held, pending_width=7 if admitted else None)
         self.buf.attn_step = attn_multi.Step(self.w, segs, mtp=False)
         try:
             if pieces:                                 # the window and the pass: each layer's experts once for both
@@ -380,14 +372,10 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
             else:
                 logits = target.run(self.w, self.buf, segs, tables, self.buf.attn_step,
                                     admitted=admitted) if target is not None else None
-                if logits is None and mixed is not None:
-                    logits = mixed.run(self.w, self.buf, segs, tables, self.buf.attn_step,
-                                       admitted=mixed_admitted)
                 if logits is None:
                     logits = compute(self.w, segs, self.buf)
         finally:
             self.buf.gdn_tables = self.buf.attn_step = None
-            self.buf.mixed_ple = None
         lasts = self._absorb(pieces, psegs, cuts) if pieces else None
         starts = [a0 for _, a0, _ in segs] + [segs[-1][2]]
         for s, (_, a0, a1) in zip(live, segs):
