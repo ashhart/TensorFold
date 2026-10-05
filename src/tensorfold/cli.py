@@ -259,6 +259,10 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
         options["ple_on_ssd"] = True
     if getattr(args, "mtp_confidence", None) is not None:
         options["mtp_confidence"] = float(args.mtp_confidence)
+    if getattr(args, "spill_gib", None) is not None and float(args.spill_gib) > 0 and \
+            str(getattr(args, "snapshot_dir", "none")).lower() != "none":
+        options["snapshot_dir"] = str(Path(args.snapshot_dir).expanduser())
+        options["spill_gib"] = float(args.spill_gib)
     if getattr(args, "decode_share", None) is not None:
         options["decode_share"] = float(args.decode_share)
     options["context"] = context if context is not None else args.context

@@ -61,3 +61,10 @@ class GlmApp(App):
         self.engine.request.policy = body.get("tf_policy") or (model.split("@", 1)[1] if "@" in model else None)
         self.engine.request.stop_eos = not bool(body.get("ignore_eos", False))
         return super().run(body, chat, emit, prepared=prepared, cancelled=cancelled)
+
+    def close(self) -> None:
+        """A clean shutdown spills the kept snapshots (evictions were spilled as they happened)."""
+
+        save = getattr(self.engine, "save_sessions", None)
+        if save is not None:
+            save()

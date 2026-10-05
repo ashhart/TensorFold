@@ -10,7 +10,6 @@ from pathlib import Path
 import time
 from typing import Any, Sequence
 
-import mlx.core as mx
 import numpy as np
 
 FORMAT = 1
@@ -66,6 +65,8 @@ def snapshot_key(model_id: str, tokens: Sequence[int]) -> str:
 def save_snapshot(directory: Path, model_id: str, tokens: Sequence[int], cache: list[Any],
                   *, keep: int = 8) -> Path | None:
     """Write one snapshot unless it is already there; keep the ``keep`` newest."""
+
+    import mlx.core as mx
 
     directory.mkdir(parents=True, exist_ok=True)
     key = snapshot_key(model_id, tokens)
@@ -160,6 +161,8 @@ def load_snapshots(directory: Path, model_id: str, *, limit: int | None = None, 
 
 def load_snapshot(path: Path, model_id: str) -> tuple[list[int], list[Any]] | None:
     """One stored block as (tokens, cache), evaluated in the calling thread; None if unusable."""
+
+    import mlx.core as mx
 
     try:
         arrays, meta = mx.load(str(path), return_metadata=True)

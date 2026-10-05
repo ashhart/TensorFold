@@ -292,4 +292,7 @@ def serve(app: App, host: str, port: int) -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        close = getattr(app, "close", None)
+        if close is not None:
+            close()                       # a clean shutdown's save (the spill tier, session snapshots)
         server.server_close()

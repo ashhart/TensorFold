@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 DEFAULT_POLICY = "auto"
 DFLASH_POLICY = "fc5:0.3"             # DFlash2 drafts every round: up to 5 while their probability product holds 0.3
+SPILL_STOP = 7                        # the one-int shutdown header: rank 1 spills its kept states and stops
 EXL3_AUTO = DFLASH_POLICY             # what auto runs on an EXL3 checkpoint with the draft model
 GRAPH_ROWS = (1, 2, 3, 4, 5, 6)       # verify windows captured as CUDA graphs
 MAX_ROWS = 8                          # the widest verify window (a pending token and up to 7 drafts)
@@ -108,9 +109,16 @@ def without_mtp(transform, layers: int):
 class GlmEngine:
     """GLM-5.3-Flash on two ranks (this one ``rank``): weights, MTP and DFlash2 drafting, per-request policies."""
 
+    # class defaults: engines built without __init__ (the kept-state tests) have no spill tier
+    snapshot_dir = None
+    snapshot_model_id = ""
+    spill_bytes = 0
+    _spill = None
+    _busy = False
+
     def __init__(self, model_dir: Path, *, rank: int, master: str, port: int, policy: str = DEFAULT_POLICY,
                  drafter: Path | None = None, context: int | None = None, context_explicit: bool | None = None, serial_only: bool = False, comm=None,
-                 prefill_rows: int | None = None) -> None:
+                 prefill_rows: int | None = None, snapshot_dir: str | None = None, spill_gib: float = 0.0) -> None:
         """``comm``: a communicator with ``all_gather`` and ``barrier`` instead of NCCL between two machines (tests)."""
 
         import torch
@@ -208,6 +216,27 @@ class GlmEngine:
         self.cache: list = []
         self.live: list[int] = []
         self.cache_entries = int(os.environ.get("TF_GLM_CACHE_ENTRIES", "8"))
+        # the spill tier: evicted kept states go to a per-rank disk directory and come back on a matching prompt
+        self.snapshot_dir = Path(snapshot_dir).expanduser() if snapshot_dir else None
+        self.spill_bytes = int(float(spill_gib) * 2 ** 30) if self.snapshot_dir else 0
+        self.snapshot_model_id = ""
+        self._spill = None
+        if self.snapshot_dir is not None:
+            from .spill import SpillWriter, startup as spill_startup
+            from tensorfold import __version__
+
+            self.snapshot_model_id = (f"{Path(model_dir).resolve()}|tensorfold={__version__}|torch={torch.__version__}"
+                                      f"|latent={int(LATENT)}|ring={int(DRAFT_RING)}|mtp={int(self.mtp_on)}"
+                                      f"|drafter={int(self.drafter is not None)}")
+            if rank == 0:
+                freed = spill_startup(self.snapshot_dir)
+                if freed:
+                    print(f"[tensorfold] freed {freed / 2 ** 30:.2f} GiB of abandoned spill writes in "
+                          f"{self.snapshot_dir}", flush=True)
+            else:
+                spill_startup(self.snapshot_dir)       # this rank's machine cleans its own abandoned partials
+            self._spill = SpillWriter(self.snapshot_dir, self.snapshot_model_id, rank, self.spill_bytes)
+        self._busy = False                             # a request is on the engine (the shutdown save waits for it)
 
     def _calibrate(self) -> dict:
         """Per-piece ms for ``drafter_choice.DrafterChoice``: fastest of interleaved passes, equal on both ranks."""
@@ -359,10 +388,26 @@ class GlmEngine:
             if fits and len(snap.ids) < len(prompt) and prompt[:len(snap.ids)] == snap.ids and (
                     best is None or len(snap.ids) > len(best.ids)):
                 best = snap
+        if self.snapshot_dir is not None and not dflash:
+            best = self._disk_resume(prompt, mtp, best)
+        return best
+
+    def _disk_resume(self, prompt: list[int], mtp: bool, best):
+        """The longest spilled prefix of ``prompt`` whose draft caches fit, loaded from this rank's files."""
+
+        from .spill import best as spilled, load
+
+        for tokens in spilled(self.snapshot_dir, self.snapshot_model_id, self.rank, prompt,
+                              len(best.ids) if best is not None else 0):
+            hit = load(self.snapshot_dir, self.snapshot_model_id, self.rank, tokens, self.e.st.conv.device)
+            if hit is not None and (not mtp or hit.mtp_len >= 0):
+                return hit
         return best
 
     def _drop(self, snap) -> None:
         """Forget a kept snapshot and free its saved rows now, even while a caller still holds the object."""
+        if self._spill is not None and self.spill_bytes > 0 and snap.rows is not None:
+            self._spill.enqueue(snap)        # the rows are dead to the engine; the writer copies them to disk
         snap.rows, snap.nbytes, snap.drafter_rows = None, 0, None
         self.cache.remove(snap)
 
@@ -417,6 +462,34 @@ class GlmEngine:
         from .decode import snapshot_bytes
 
         return sum(snapshot_bytes(c) for c in self.cache)
+
+    def save_sessions(self) -> int:
+        """At clean shutdown, spill every kept snapshot (a rows-less one's rows are copied from the live caches first).
+        Rank 0 tells rank 1 to do the same and stop: its un-evicted states would otherwise be gone on restart, and a
+        resume rank 0 chooses from its own files would fail on rank 1's missing one."""
+
+        if self.snapshot_dir is None or self._spill is None:
+            return 0
+        if self.rank == 0 and self.comm is not None:
+            deadline = time.time() + 120
+            while self._busy and time.time() < deadline:
+                time.sleep(0.05)                  # let an in-flight request finish before the shutdown header
+            if self._busy:
+                print("[tensorfold] a request is still running: rank 1's kept states are not spilled", flush=True)
+            else:
+                self._ring()
+                self._share([SPILL_STOP])
+        from .decode import save_rows
+
+        for snap in list(self.cache):
+            if snap.rows is None and self.live[:len(snap.ids)] == snap.ids:
+                save_rows(self.e, snap)          # its rows are still in the live caches: copy them before the process ends
+            if snap.rows is not None:
+                self._spill.enqueue(snap)
+        self._spill.flush()
+        self._spill.close()
+        self._spill = None
+        return len(self.cache)
 
     def _run(self, prompt: list[int], max_tokens: int, sampling, stop_eos: bool, on_tokens: Callable[[list[int]], Any],
              code: list[int], hit, draft: bool, constraint=None) -> dict[str, Any]:
@@ -505,12 +578,16 @@ class GlmEngine:
                   int(constraint is not None)] + code
         from tensorfold.engine.grammar import pack
 
-        self._ring()                                   # wakes rank 1, which idles on the store, not in the all-gather
-        self._share(header)
-        self._share(list(prompt))
-        if constraint is not None:                     # the request's grammar: rank 1 compiles the same
-            self._share(pack(constraint))
-        stats = self._run(list(prompt), max_tokens, sampling, stop_eos, on_tokens, code, hit, draft, constraint)
+        self._busy = True
+        try:
+            self._ring()                                   # wakes rank 1, which idles on the store, not in the all-gather
+            self._share(header)
+            self._share(list(prompt))
+            if constraint is not None:                     # the request's grammar: rank 1 compiles the same
+                self._share(pack(constraint))
+            stats = self._run(list(prompt), max_tokens, sampling, stop_eos, on_tokens, code, hit, draft, constraint)
+        finally:
+            self._busy = False
         stats.update(policy=spec, drafts=draft)
         return stats
 
@@ -563,6 +640,9 @@ class GlmEngine:
         while True:
             self._await_bell()
             header = self._share(None)
+            if len(header) == 1 and header[0] == SPILL_STOP:
+                self.save_sessions()                # rank 0 is closing: spill what eviction has not, then stop
+                return
             if len(header) == 2 and header[0] == 0:     # a decision: both ranks prefill, neither samples
                 prompt = self._share(None)
                 labels = self._share(None)
@@ -584,6 +664,11 @@ class GlmEngine:
             hit = None
             if cached:
                 hit = next((c for c in self.cache if len(c.ids) == cached and prompt[:cached] == c.ids), None)
+                if hit is None and self.snapshot_dir is not None:
+                    from .spill import load
+
+                    hit = load(self.snapshot_dir, self.snapshot_model_id, self.rank, prompt[:cached],
+                               self.e.st.conv.device)      # rank 0 chose the length; this rank's file holds its own rows
                 if hit is None:
                     raise RuntimeError(f"rank 1 has no snapshot of the {cached} tokens rank 0 resumes from")
             self._run(prompt, max_tokens, sampling, bool(stop_eos), lambda new: None, code, hit, bool(draft),
