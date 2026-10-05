@@ -114,12 +114,14 @@ def _keep_words() -> list[int]:
 
 
 def _kv_words() -> list[int]:
-    """The per-token cache format and its fp4 knobs (TF_DSV41_KV, TF_DSV41_IQ_FP4 / SWA_FP8 / COMP_BF16): a state's
-    bytes and numerics follow them, and each rank sizes and keeps prompts from its own: the ranks must agree."""
+    """The per-token cache format and its fp4 knobs (TF_DSV41_KV, TF_DSV41_IQ_FP4 / SWA_FP8 / COMP_BF16 /
+    CUDA_MQA): a state's bytes and numerics follow them, and each rank sizes and keeps prompts from its own: the ranks
+    must agree."""
 
+    from . import kernels as K
     from .serial import COMP_BF16, IQ_FP4, KV_MODE, SWA_FP8
 
-    return [("bf16", "fp8", "fp4").index(KV_MODE), int(IQ_FP4), int(SWA_FP8), int(COMP_BF16)]
+    return [("bf16", "fp8", "fp4").index(KV_MODE), int(IQ_FP4), int(SWA_FP8), int(COMP_BF16), int(K.CUDA_MQA)]
 
 
 def _disk_words() -> list[int]:

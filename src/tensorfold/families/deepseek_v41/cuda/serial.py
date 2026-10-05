@@ -147,14 +147,15 @@ KV_MODE = kv_mode()
 if KV_MODE not in ("bf16", "fp8", "fp4"):
     raise ValueError(f"TF_DSV41_KV={KV_MODE}: bf16, fp8 or fp4")
 K.TIE_KEYS = KV_MODE == "fp4"
-# fp4: decode / verify rows and small prompt chunks run attention's chunk pass in CUDA (mqa_fp4.cu) instead of Triton
-K.CUDA_MQA = KV_MODE == "fp4" and (os.environ.get("TF_DSV41_CUDA_MQA") or "0") == "1"
 
 
 def _fp4_knob(name: str) -> bool:
     return (os.environ.get(name) or ("1" if KV_MODE == "fp4" else "0")) == "1"
 
 
+# fp4: attention of decode / verify rows and of small prompt chunks in CUDA (mqa_fp4.cu) instead of Triton; fp8 and
+# bf16 caches keep the Triton kernels (TF_DSV41_CUDA_MQA=0: Triton in fp4 too)
+K.CUDA_MQA = KV_MODE == "fp4" and _fp4_knob("TF_DSV41_CUDA_MQA")
 # the rest of V4.1's KV numerics, on by default with fp4 (ablations): the indexer queries fake-quantized MXFP4 after
 # RoPE (fp4_act_quant), the window keys FP8 e4m3 with a 2^k scale per 32 (act_quant ue8m0; the rings stay bf16), the
 # compressor's output rounded to bf16 before its norm (the reference's kv.to(dtype); here it was fp32)
