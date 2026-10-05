@@ -1373,7 +1373,9 @@ pub fn main(init: std.process.Init) !void {
     // 6. one command buffer a round: the head absorbs the kept rows and chains its drafts into the next window's
     //    token slots on the GPU, the window hashes its n-grams on the GPU, and the host reads the picks once
     const wids: Buf = .{ .b = try r.buffer(64) };
-    for ([_]usize{ 2, 3, 4 }) |depth| {
+    const adapt = [_][3]usize{ .{ 3, 3, 0 }, .{ 1, 4, 1 }, .{ 1, 5, 1 }, .{ 2, 5, 1 }, .{ 2, 5, 2 }, .{ 1, 6, 2 } };
+    for (adapt) |cfg_a| {
+        var depth: usize = cfg_a[0];
         m.reset();
         m.mtp.pos = 0;
         m.mtp.drafted = 0;
@@ -1449,12 +1451,13 @@ pub fn main(init: std.process.Init) !void {
             @memcpy(pick[0..keep], picks[0..keep]);
             absorb_rows = pick[0..keep];
             absorb_from = m.last;
+            if (cfg_a[0] != cfg_a[1]) depth = @max(cfg_a[0], @min(cfg_a[1], keep - 1 + cfg_a[2]));
         }
         const wall = mtl.clock.seconds() - s0;
         var eq: usize = 0;
         while (eq < want.len and out.items[eq] == (if (r.xnew) ref_tokens[eq] else @as(u32, @intCast(want[eq].integer)))) eq += 1;
         const made: f64 = @floatFromInt(out.items.len - 1);
-        std.debug.print("one buffer a round, depth {d}: {d}/{d} tokens equal; {d:.2} tokens a round, {d:.2} of {d} drafts landing; {d:.1} tok/s (GPU busy {d:.0}%)\n", .{ depth, eq, want.len, made / @as(f64, @floatFromInt(n_rounds)), @as(f64, @floatFromInt(landed)) / @as(f64, @floatFromInt(n_rounds)), depth, made / wall, 100 * m.gpu_seconds / wall });
+        std.debug.print("one buffer a round, depth {d}-{d} (+{d}): {d}/{d} tokens equal; {d:.2} tokens a round, {d:.2} drafts landing; {d:.1} tok/s (GPU busy {d:.0}%)\n", .{ cfg_a[0], cfg_a[1], cfg_a[2], eq, want.len, made / @as(f64, @floatFromInt(n_rounds)), @as(f64, @floatFromInt(landed)) / @as(f64, @floatFromInt(n_rounds)), made / wall, 100 * m.gpu_seconds / wall });
         if (eq < want.len) bad += 1;
     }
 
