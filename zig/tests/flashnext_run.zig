@@ -1876,7 +1876,7 @@ const Prompt = struct {
     proj: [LAYERS][3]Buf,
     out: [LAYERS][3]Buf,
     ple_kv: [3]Buf,
-    b: struct { ids: Buf, pids: Buf, h: [2]Buf, ssp: Buf, normed: Buf, dn: Buf, hact: Buf, inj_a: Buf, inj_m: Buf, up: Buf, mixed: Buf, p: Buf, gout: Buf, branch: Buf, cso: Buf, q: Buf, kout: Buf, iq: Buf, po: Buf, pm: Buf, aout: Buf, pos: Buf, nk: Buf, zeros: Buf, kvmeta: Buf, lg: Buf, pick: Buf, wts: Buf, cnt: Buf, off: Buf, cur: Buf, row_of: Buf, xs: Buf, g: Buf, u: Buf, a: Buf, ds: Buf, sg: Buf, su: Buf, sa: Buf, ydown: Buf, emb: Buf, kvp: Buf, gated: Buf, hout: Buf, cin: Buf, rows: Buf, part: Buf, qn: Buf, kn: Buf, v: Buf, gg: Buf, beta: Buf, ys: Buf },
+    b: struct { ids: Buf, pids: Buf, h: [2]Buf, ssp: Buf, normed: Buf, dn: Buf, hact: Buf, inj_a: Buf, inj_m: Buf, up: Buf, mixed: Buf, p: Buf, gout: Buf, branch: Buf, cso: Buf, q: Buf, kout: Buf, iq: Buf, po: Buf, pm: Buf, aout: Buf, pos: Buf, nk: Buf, zeros: Buf, kvmeta: Buf, lg: Buf, pick: Buf, wts: Buf, cnt: Buf, off: Buf, cur: Buf, row_of: Buf, xs: Buf, g: Buf, u: Buf, a: Buf, ds: Buf, sg: Buf, su: Buf, sa: Buf, ydown: Buf, emb: Buf, kvp: Buf, gated: Buf, hout: Buf, cin: Buf, rows: Buf, part: Buf, qn: Buf, kn: Buf, v: Buf, gg: Buf, beta: Buf, ys: Buf, mids: Buf, n_add: Buf },
 
     fn init(r: *Run, dir: []const u8, header: []const u8) !Prompt {
         var p: Prompt = undefined;
@@ -1940,6 +1940,7 @@ const Prompt = struct {
             .hout = try B.of(r, R * WIDE * 2), .cin = try B.of(r, (PLE_TAIL + R) * WIDE * 2), .rows = try B.of(r, 16),
             .part = try B.of(r, 8 * R * 324 * 4), .qn = try B.of(r, R * 16 * 128 * 4), .kn = try B.of(r, R * 16 * 128 * 4),
             .v = try B.of(r, R * 48 * 128 * 4), .gg = try B.of(r, R * 48 * 4), .beta = try B.of(r, R * 48 * 4), .ys = try B.of(r, R * 6144 * 4),
+            .mids = try B.of(r, R * 4), .n_add = try B.of(r, 16),
         };
         p.sel = try Select.init(r, PMAX);
         return p;
@@ -2333,6 +2334,41 @@ const Prompt = struct {
         @memcpy(cin_old[0 .. PLE_TAIL * WIDE * 2], b.cin.b.contents()[rows * WIDE * 2 .. (rows + PLE_TAIL) * WIDE * 2]);
         for (tokens) |tok| m.ple.hist = .{ m.ple.hist[1], tok };
         return t.picks.b.slice(u32, 1)[0];
+    }
+
+    /// The MTP head's keys and values for prompt rows start .. start + n from their streams (n rows of `streams`)
+    /// and next tokens: the head's layer up to its cache write, at prompt widths. The head's full layer runs later
+    /// on the last prompt row, with the first generated token.
+    fn mtpKeys(p: *Prompt, m: *Model, start: usize, nexts: []const u32, streams: Buf) !void {
+        const r = p.r;
+        const b = &p.b;
+        const t = &m.t;
+        const h = &m.mtp;
+        const n = nexts.len;
+        if (n == 0) return;
+        if (n > PMAX) return error.ChunkSize;
+        @memcpy(b.mids.b.slice(u32, n), nexts);
+        for (0..n) |i| b.pos.b.slice(i32, PMAX)[i] = @intCast(start + i);
+        const kvm = b.kvmeta.b.slice(u32, 3);
+        kvm[0], kvm[1], kvm[2] = .{ @intCast(start), CAP, @intCast(n) };
+        b.n_add.b.slice(u32, 1)[0] = @intCast(n * WIDE);
+        const cb = r.queue.commandBuffer();
+        r.enc = cb.compute(if (r.serial) .serial else .concurrent);
+        try r.callRows("mtp:qa_embed_rows@embed", n, &.{ b.mids, m.embed[0], m.embed[1], m.embed[2] }, &.{b.emb}, null);
+        try r.callRows("mtp:q4_rms_rows@mtp.enorm", n, &.{ b.emb, h.enorm, t.eps }, &.{b.branch}, null);
+        r.denseRows(b.branch, D, h.fce, n, b.aout);
+        try r.callRows("mtp:q4_rms_rows@mtp.hnorm", n, &.{ streams, h.hnorm, t.eps }, &.{b.normed}, null);
+        r.denseRows(b.normed, D, h.fch, 4 * n, b.gated);
+        p.bind(r.add_pipe, &.{ b.aout, b.gated, b.xs, b.n_add });
+        r.enc.dispatchThreads(mtl.Size.of(n * WIDE, 1, 1), mtl.Size.of(256, 1, 1));
+        p.barrier();
+        try r.callRows("mtp:q4_hc_norm_none#[10240]", n, &.{b.xs}, &.{ b.hout, b.ssp }, null);
+        p.hc(m, b.hout, h.ahc, n, b.inj_a);
+        r.denseRows(b.mixed, D, h.proj, n, b.p);
+        try r.callRows("mtp:q4_attn_prep@mtp.att", n, &.{ b.p, b.pos, h.qn, h.kn, h.iqn, t.eps, t.log2base }, &.{ b.q, b.kout, b.iq }, null);
+        p.bind(r.kv_pipe, &.{ b.kout, b.p, h.keys, h.vals, h.raw, b.kvmeta });
+        r.enc.dispatchThreads(mtl.Size.of(512 * n, 1, 1), mtl.Size.of(256, 1, 1));
+        try m.finish(cb);
     }
 };
 
@@ -3069,9 +3105,26 @@ pub fn main(init: std.process.Init) !void {
     const want = ref.object.get("tokens").?.array.items;
     var pick: [MAXR]u32 = undefined;
 
+    // FZ_LONG: prompts of any length through the prompt chunks (reference and GPU-side rounds alike)
+    const long_mode = std.c.getenv("FZ_LONG") != null;
+    var pr_long: ?Prompt = if (long_mode) try Prompt.init(&r, args[2], r.xnew_header) else null;
+    const ptoks = try gpa.alloc(u32, prompt.len);
+    defer gpa.free(ptoks);
+    for (prompt, 0..) |x, i| ptoks[i] = @intCast(x.integer);
+
     // 1. one-row greedy steps against the Python engine's tokens
     m.reset();
-    for (prompt) |tok| {
+    if (pr_long) |*pr| {
+        const p0 = mtl.clock.seconds();
+        var at: usize = 0;
+        while (at < ptoks.len) {
+            const n = @min(PMAX, ptoks.len - at);
+            pick[0] = try pr.chunk(m, gpa, ptoks[at .. at + n]);
+            at += n;
+        }
+        const ps = mtl.clock.seconds() - p0;
+        std.debug.print("prompt {d} tokens in prompt chunks: {d:.2} s ({d:.0} tok/s)\n", .{ ptoks.len, ps, @as(f64, @floatFromInt(ptoks.len)) / ps });
+    } else for (prompt) |tok| {
         try m.window(&.{@intCast(tok.integer)}, &pick);
         m.keepRows(&.{@intCast(tok.integer)}, 1);
     }
@@ -3097,13 +3150,13 @@ pub fn main(init: std.process.Init) !void {
 
     // 2. the Python engine's drafted windows, every row's pick, with rollback
     m.reset();
-    for (prompt) |tok| {
+    if (!long_mode and std.c.getenv("FZ_ONLY17") == null) for (prompt) |tok| {
         try m.window(&.{@intCast(tok.integer)}, &pick);
         m.keepRows(&.{@intCast(tok.integer)}, 1);
-    }
+    };
     var bad: usize = 0;
     var total_rows: usize = 0;
-    const skip_mid = std.c.getenv("FZ_ONLY17") != null; // the one-row reference, then GPU-side rounds only
+    const skip_mid = long_mode or std.c.getenv("FZ_ONLY17") != null; // the one-row reference, then GPU-side rounds only
     const rounds = if (own_prompt or skip_mid) &[_]std.json.Value{} else ref.object.get("rounds").?.array.items;
     for (rounds, 0..) |round, ri| {
         const o = round.object;
@@ -3166,10 +3219,8 @@ pub fn main(init: std.process.Init) !void {
         m.mtp.pos = 0;
         m.mtp.drafted = 0;
         const all = try r.buffer(prompt.len * WIDE * 2);
-        var ptoks: std.ArrayList(u32) = .empty;
         for (prompt, 0..) |x, i| {
             const tok: u32 = @intCast(x.integer);
-            try ptoks.append(gpa, tok);
             try m.window(&.{tok}, &pick);
             m.keepRows(&.{tok}, 1);
             @memcpy(all.contents()[i * WIDE * 2 .. (i + 1) * WIDE * 2], m.last.b.contents()[0 .. WIDE * 2]);
@@ -3178,7 +3229,7 @@ pub fn main(init: std.process.Init) !void {
         try out.append(gpa, pick[0]);
         const s0 = mtl.clock.seconds();
         var nexts: std.ArrayList(u32) = .empty;
-        try nexts.appendSlice(gpa, ptoks.items[1..]);
+        try nexts.appendSlice(gpa, ptoks[1..]);
         try nexts.append(gpa, pick[0]);
         var drafts: [MAXR]u32 = undefined;
         drafts[0] = try m.mtpAbsorb(nexts.items, .{ .b = all });
@@ -3342,8 +3393,12 @@ pub fn main(init: std.process.Init) !void {
     // 7. GPU-side rounds: the verdict, positions, history and kept states stay on the GPU; the host encodes round
     //    N+1 while round N runs and reads the emitted tokens from a ring. Depth 0: the depth rule picks each round's
     //    drafts from the rounds read back so far (the window two rounds behind the one being encoded).
-    const depths7 = [_]usize{ 3, 6, 0 };
-    if (r.xnew) for (depths7) |depth_cfg| {
+    var depths7: std.ArrayList(usize) = .empty;
+    if (std.c.getenv("FZ_D7")) |v| { // e.g. FZ_D7=6,0
+        var it = std.mem.tokenizeScalar(u8, std.mem.span(v), ',');
+        while (it.next()) |d| try depths7.append(gpa, try std.fmt.parseInt(usize, d, 10));
+    } else try depths7.appendSlice(gpa, &.{ 3, 6, 0 });
+    if (r.xnew) for (depths7.items) |depth_cfg| {
         const ruled = depth_cfg == 0;
         var rule: DepthRule = .{};
         const depth0 = if (ruled) rule.pick() else depth_cfg;
@@ -3378,27 +3433,53 @@ pub fn main(init: std.process.Init) !void {
         m.reset();
         m.mtp.pos = 0;
         m.mtp.drafted = 0;
-        const all = try r.buffer(prompt.len * WIDE * 2);
-        var nexts: std.ArrayList(u32) = .empty;
-        for (prompt, 0..) |x, i| {
-            const tok: u32 = @intCast(x.integer);
-            try m.window(&.{tok}, &pick);
-            ar[0] = 1;
-            const cb = r.queue.commandBuffer();
-            r.enc = cb.compute(if (r.serial) .serial else .concurrent);
-            Copy.states(&r, g_cs, g_so, o_cs, o_so);
-            try m.finish(cb);
-            const cin = m.ple.cin.b.contents()[m.ple.cin.off..];
-            std.mem.copyForwards(u8, cin[0 .. PLE_TAIL * WIDE * 2], cin[WIDE * 2 .. (PLE_TAIL + 1) * WIDE * 2]);
-            m.ple.hist = .{ m.ple.hist[1], tok };
-            m.pos += 1;
-            @memcpy(all.contents()[i * WIDE * 2 .. (i + 1) * WIDE * 2], m.last.b.contents()[0 .. WIDE * 2]);
-            if (i > 0) try nexts.append(gpa, tok);
-        }
-        try nexts.append(gpa, pick[0]);
         var drafts: [MAXR]u32 = undefined;
-        drafts[0] = try m.mtpAbsorb(nexts.items, .{ .b = all });
+        const p0 = mtl.clock.seconds();
+        if (pr_long) |*pr| { // prompt chunks; the head's keys for every prompt row, its layer on the last
+            var at: usize = 0;
+            var last_n: usize = 1;
+            while (at < ptoks.len) {
+                const n = @min(PMAX, ptoks.len - at);
+                pick[0] = try pr.chunk(m, gpa, ptoks[at .. at + n]);
+                const k = if (at + n < ptoks.len) n else n - 1;
+                try pr.mtpKeys(m, at, ptoks[at + 1 .. at + 1 + k], m.last);
+                at += n;
+                last_n = n;
+            }
+            if (m.state == 1) { // the state into the rounds' state buffers
+                ar[0] = 1;
+                const cb = r.queue.commandBuffer();
+                r.enc = cb.compute(if (r.serial) .serial else .concurrent);
+                Copy.states(&r, g_cs, g_so, o_cs, o_so);
+                try m.finish(cb);
+                m.state = 0;
+                m.state_row = 0;
+            }
+            m.mtp.pos = ptoks.len - 1;
+            drafts[0] = try m.mtpRun(&.{pick[0]}, .{ .b = m.last.b, .off = m.last.off + (last_n - 1) * WIDE * 2 });
+        } else {
+            const all = try r.buffer(prompt.len * WIDE * 2);
+            var nexts: std.ArrayList(u32) = .empty;
+            for (prompt, 0..) |x, i| {
+                const tok: u32 = @intCast(x.integer);
+                try m.window(&.{tok}, &pick);
+                ar[0] = 1;
+                const cb = r.queue.commandBuffer();
+                r.enc = cb.compute(if (r.serial) .serial else .concurrent);
+                Copy.states(&r, g_cs, g_so, o_cs, o_so);
+                try m.finish(cb);
+                const cin = m.ple.cin.b.contents()[m.ple.cin.off..];
+                std.mem.copyForwards(u8, cin[0 .. PLE_TAIL * WIDE * 2], cin[WIDE * 2 .. (PLE_TAIL + 1) * WIDE * 2]);
+                m.ple.hist = .{ m.ple.hist[1], tok };
+                m.pos += 1;
+                @memcpy(all.contents()[i * WIDE * 2 .. (i + 1) * WIDE * 2], m.last.b.contents()[0 .. WIDE * 2]);
+                if (i > 0) try nexts.append(gpa, tok);
+            }
+            try nexts.append(gpa, pick[0]);
+            drafts[0] = try m.mtpAbsorb(nexts.items, .{ .b = all });
+        }
         for (1..depth0) |j| drafts[j] = try m.mtpChain(drafts[j - 1]);
+        const first_s = mtl.clock.seconds() - p0;
         const w = wids.b.slice(u32, 16);
         w[0] = pick[0];
         for (0..depth0) |j| w[1 + j] = drafts[j];
@@ -3541,7 +3622,7 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("GPU-side rounds, depth rule", .{});
             for (at_w, 0..) |c, n| if (c > 0) std.debug.print(" {d} rounds at {d} drafts", .{ c, n - 1 });
         } else std.debug.print("GPU-side rounds, depth {d}", .{depth_cfg});
-        std.debug.print(": {d}/{d} tokens equal; {d:.2} tokens a round, {d} of {d} drafts landed; {d:.1} tok/s (GPU busy {d:.0}%)\n", .{ eq, want.len, made / nd, landed, offered, made / (s1 - s0), 100 * m.gpu_seconds / (s1 - s0) });
+        std.debug.print(": {d}/{d} tokens equal; {d:.2} tokens a round, {d} of {d} drafts landed; {d:.1} tok/s (GPU busy {d:.0}%); prompt to first drafts {d:.2} s\n", .{ eq, want.len, made / nd, landed, offered, made / (s1 - s0), 100 * m.gpu_seconds / (s1 - s0), first_s });
         if (eq < want.len) bad += 1;
     };
 
