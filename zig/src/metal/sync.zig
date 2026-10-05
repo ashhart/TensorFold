@@ -24,3 +24,12 @@ pub const SharedEvent = struct {
         objc.release(self.id);
     }
 };
+
+/// MTLEvent: a GPU-only counter that orders command buffers, also across queues; no host access, cheaper than shared.
+pub const Event = struct {
+    id: Id,
+
+    pub fn deinit(self: Event) void {
+        objc.release(self.id);
+    }
+};

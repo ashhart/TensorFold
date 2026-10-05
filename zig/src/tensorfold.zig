@@ -5,6 +5,7 @@ pub const checkpoint = @import("core/checkpoint_metal.zig");
 pub const npy = @import("core/npy.zig");
 pub const ids_json = @import("core/ids_json.zig");
 pub const lanes = @import("lanes");
+pub const segments = @import("core/segments.zig");
 pub const nemotron = @import("families/nemotron/nemotron.zig");
 pub const flashnext_replay = @import("families/flashnext/replay.zig");
 pub const flashnext_engine = @import("families/flashnext/engine.zig");

@@ -80,6 +80,10 @@ pub const Device = struct {
         return .{ .id = objc.msg(?Id, self.id, "newSharedEvent", .{}) orelse return error.NoEvent };
     }
 
+    pub fn event(self: Device) Error!sync.Event {
+        return .{ .id = objc.msg(?Id, self.id, "newEvent", .{}) orelse return error.NoEvent };
+    }
+
     /// A residency set (macOS 15+), or error.Unsupported.
     pub fn residencySet(self: Device, capacity: usize) Error!residency.ResidencySet {
         if (!self.responds("newResidencySetWithDescriptor:error:")) return error.Unsupported;

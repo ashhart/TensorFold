@@ -5,6 +5,7 @@ const types = @import("types.zig");
 const Buffer = @import("device.zig").Buffer;
 const Pipeline = @import("library.zig").Pipeline;
 const SharedEvent = @import("sync.zig").SharedEvent;
+const Event = @import("sync.zig").Event;
 const IndirectCommandBuffer = @import("icb.zig").IndirectCommandBuffer;
 const ResidencySet = @import("residency.zig").ResidencySet;
 
@@ -52,6 +53,15 @@ pub const CommandBuffer = struct {
 
     /// The GPU sets `event` to `value` once the work before this point completes.
     pub fn signal(self: CommandBuffer, event: SharedEvent, value: u64) void {
+        objc.msg(void, self.id, "encodeSignalEvent:value:", .{ event.id, value });
+    }
+
+    /// waitFor and signal with a GPU-only event.
+    pub fn waitForEvent(self: CommandBuffer, event: Event, value: u64) void {
+        objc.msg(void, self.id, "encodeWaitForEvent:value:", .{ event.id, value });
+    }
+
+    pub fn signalEvent(self: CommandBuffer, event: Event, value: u64) void {
         objc.msg(void, self.id, "encodeSignalEvent:value:", .{ event.id, value });
     }
 
