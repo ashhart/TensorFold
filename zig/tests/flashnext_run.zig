@@ -776,6 +776,9 @@ const Run = struct {
     dense16_pipe: mtl.Pipeline = undefined,
     xnew_header: []const u8 = "",
     sel: ?Select = null, // long contexts: the indexer's pool, scores and selection
+    gsel: ?GSelect = null, // the same in GPU-side rounds
+    sel_meta_pipe: mtl.Pipeline = undefined,
+    pool_abs_pipe: mtl.Pipeline = undefined,
 
     fn buffer(r: *Run, len: usize) !mtl.Buffer {
         const n = @max(len, 64);
@@ -871,6 +874,9 @@ const Run = struct {
         r.repack_w = try mtl.Pipeline.init(r.device, glue, "fz_repack_w", false);
         r.repack_s = try mtl.Pipeline.init(r.device, glue, "fz_repack_s", false);
         r.touch_pipe = try mtl.Pipeline.init(r.device, glue, "fz_touch", false);
+        const slib = try mtl.Library.fromSource(r.device, ks.flashnext_select, mtl.CompileOptions.mlx());
+        r.sel_meta_pipe = try mtl.Pipeline.init(r.device, slib, "fz_sel_meta", false);
+        r.pool_abs_pipe = try mtl.Pipeline.init(r.device, slib, "fz_idx_pool_abs", false);
         r.sink = .{ .b = try r.buffer(64) };
         if (r.xnew) { // the recorded gate/up kernel's header (simd_topk, bsilu) with the full-width expert kernels after it
             var hit: ?[]const u8 = null;
@@ -1187,6 +1193,16 @@ const Select = struct {
         return any;
     }
 
+    /// Pool every complete block below `upto` the layer has not pooled (before GPU-side rounds take over).
+    fn catchUp(s: *Select, r: *Run, L: *Layer, eps: Buf, log2base: Buf, upto: usize) !void {
+        if (upto <= L.pooled_n) return;
+        s.start.b.slice(i32, 1)[0] = @intCast(L.pooled_n);
+        try r.bindV(s.pool, &.{ L.raw, s.start, L.pool, eps, log2base }, &.{.{ .b = L.pooled.b, .off = L.pooled.off + L.pooled_n * 128 * 2 }});
+        r.enc.dispatchThreads(mtl.Size.of(128, upto - L.pooled_n, 1), mtl.Size.of(128, 1, 1));
+        if (!r.serial) r.enc.barrier();
+        L.pooled_n = upto;
+    }
+
     /// Pool the blocks the window completes, score every complete block for each row, select each row's keys.
     fn encode(s: *Select, r: *Run, L: *Layer, iq: Buf, eps: Buf, log2base: Buf, pos: usize, rows: usize) !void {
         const last = (pos + rows) / 4;
@@ -1211,6 +1227,36 @@ const Select = struct {
         try r.bindV(s.select, &.{ s.sc, s.complete, s.ends }, &.{s.keys});
         r.enc.dispatchThreads(mtl.Size.of(1024 * rows, 1, 1), mtl.Size.of(1024, 1, 1));
         if (!r.serial) r.enc.barrier();
+    }
+};
+
+
+/// Block selection in GPU-side rounds: fz_sel_meta writes each round's rows, pooling range and pooled count; the pool
+/// runs at absolute blocks (up to 3 a round); scores cover an upper bound of the pooled blocks the host keeps.
+const GSelect = struct {
+    sel: Buf, // complete[8] ends[8] counts[8] sparse[8] start count pooled
+    sc: Buf,
+    keys: Buf,
+    pooled_shape: mtl.Buffer,
+    q_shape: mtl.Buffer,
+    sc_shape: mtl.Buffer,
+    ids_shape: mtl.Buffer,
+    nb_ub: usize = 0,
+
+    fn init(r: *Run, w: usize, pooled: usize) !GSelect {
+        var g: GSelect = .{
+            .sel = .{ .b = try r.buffer(64 * 4) }, .sc = .{ .b = try r.buffer(MAXR * (CAP / 4) * 4) },
+            .keys = .{ .b = try r.buffer(MAXR * KW * 4) }, .pooled_shape = try r.buffer(16), .q_shape = try r.buffer(16),
+            .sc_shape = try r.buffer(16), .ids_shape = try r.buffer(16),
+        };
+        g.sel.b.slice(i32, 64)[34] = @intCast(pooled);
+        @memcpy(g.q_shape.slice(i32, 3), &[3]i32{ @intCast(w), 4, 128 });
+        @memcpy(g.ids_shape.slice(i32, 2), &[2]i32{ @intCast(w), KW });
+        return g;
+    }
+
+    fn view(g: *GSelect, at: usize) Buf {
+        return .{ .b = g.sel.b, .off = at * 4 };
     }
 };
 
@@ -1515,6 +1561,18 @@ const Model = struct {
         const r = m.r;
         const t = &m.t;
         r.rows = rows;
+        if (r.gpu_round and r.gsel != null) {
+            const g = &r.gsel.?;
+            r.enc.setPipeline(r.sel_meta_pipe);
+            r.enc.setBuffer(r.ar.b, r.ar.off, 0);
+            const wu: u32 = @intCast(rows);
+            r.enc.setBytes(std.mem.asBytes(&wu), 1);
+            r.enc.setBuffer(g.sel.b, 0, 2);
+            r.enc.setBuffer(g.pooled_shape, 0, 3);
+            r.enc.setBuffer(g.sc_shape, 0, 4);
+            r.enc.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
+            if (!r.serial) r.enc.barrier();
+        }
         var cur: usize = 0;
         try r.call("qa_embed_rows@embed", &.{ ids, m.embed[0], m.embed[1], m.embed[2] }, &.{t.h[0]});
         var pending: enum { none, grouped } = .none;
@@ -1561,7 +1619,27 @@ const Model = struct {
                     r.enc.dispatchThreads(mtl.Size.of(512 * rows, 1, 1), mtl.Size.of(256, 1, 1));
                 }
                 if (!r.serial) r.enc.barrier();
-                if (r.sel != null and !r.gpu_round and r.sel.?.meta(m.pos, rows)) {
+                if (r.gpu_round and r.gsel != null) { // the round's selection, all on the GPU
+                    const g = &r.gsel.?;
+                    const sl = &r.sel.?;
+                    r.enc.setPipeline(r.pool_abs_pipe);
+                    for ([_]Buf{ L.raw, g.sel, L.pool, t.eps, t.log2base, L.pooled }, 0..) |bb, j| r.enc.setBuffer(bb.b, bb.off, j);
+                    r.enc.dispatchThreads(mtl.Size.of(128, 3, 1), mtl.Size.of(128, 1, 1));
+                    if (!r.serial) r.enc.barrier();
+                    try r.shapes.put(r.arena, "POOLED_shape", g.pooled_shape);
+                    try r.shapes.put(r.arena, "Q_shape", g.q_shape);
+                    try r.shapes.put(r.arena, "SC_shape", g.sc_shape);
+                    try r.bindV(sl.scores, &.{ t.iq, L.pooled, g.view(0) }, &.{g.sc});
+                    r.enc.dispatchThreads(mtl.Size.of(((g.nb_ub + 7) / 8) * 256, (rows + 7) / 8, 1), mtl.Size.of(256, 1, 1));
+                    if (!r.serial) r.enc.barrier();
+                    try r.bindV(sl.select, &.{ g.sc, g.view(0), g.view(8) }, &.{g.keys});
+                    r.enc.dispatchThreads(mtl.Size.of(1024 * rows, 1, 1), mtl.Size.of(1024, 1, 1));
+                    if (!r.serial) r.enc.barrier();
+                    const dense_ids = r.shapes.get("IDS_shape").?;
+                    try r.shapes.put(r.arena, "IDS_shape", g.ids_shape);
+                    try r.call("q4_attn_parts#[24, 256]", &.{ t.q, L.keys, L.vals, g.keys, g.view(16), g.view(24), t.scale }, &.{ t.po, t.pm });
+                    try r.shapes.put(r.arena, "IDS_shape", dense_ids);
+                } else if (r.sel != null and !r.gpu_round and r.sel.?.meta(m.pos, rows)) {
                     var sl = &r.sel.?;
                     try sl.encode(r, L, t.iq, t.eps, t.log2base, m.pos, rows);
                     const dense_ids = r.shapes.get("IDS_shape").?;
@@ -2682,11 +2760,24 @@ pub fn main(init: std.process.Init) !void {
         defer gpa.free(ref_logits);
         @memcpy(ref_logits, m.t.logits.b.slice(u16, MAXR * VOCAB)[(last_n - 1) * VOCAB .. last_n * VOCAB]);
         var want_t: std.ArrayList(u32) = .empty;
+        var margins: [64]f32 = @splat(0);
         try want_t.append(gpa, pk[last_n - 1]);
         while (want_t.items.len < n_dec) {
             const tk = want_t.items[want_t.items.len - 1];
             try m.window(&.{tk}, &pk);
             m.keepRows(&.{tk}, 1);
+            { // the top-two logit margin of this step's pick
+                var top1: f32 = -std.math.inf(f32);
+                var top2: f32 = -std.math.inf(f32);
+                for (m.t.logits.b.slice(u16, VOCAB)) |raw| {
+                    const v: f32 = @bitCast(@as(u32, raw) << 16);
+                    if (v > top1) {
+                        top2 = top1;
+                        top1 = v;
+                    } else if (v > top2) top2 = v;
+                }
+                margins[want_t.items.len] = top1 - top2;
+            }
             try want_t.append(gpa, pk[0]);
         }
         // the prompt path
@@ -2722,6 +2813,11 @@ pub fn main(init: std.process.Init) !void {
         while (same < n_dec and got_t.items[same] == want_t.items[same]) same += 1;
         std.debug.print("prompt {d} tokens: 8-row windows {d:.3} s ({d:.0} tok/s); prompt path {d:.3} s ({d:.0} tok/s)\n", .{ toks.len, a1 - a0, @as(f64, @floatFromInt(toks.len)) / (a1 - a0), b1 - b0, @as(f64, @floatFromInt(toks.len)) / (b1 - b0) });
         std.debug.print("first token {d} vs {d}; last-row logits max diff {d:.4} (max |logit| {d:.2}); decode after it: {d}/{d} tokens equal\n", .{ first, want_t.items[0], worst, scale, same, n_dec });
+        if (same < n_dec) std.debug.print("  the exact path's top-two margin where they part (token {d}): {d:.4}; median margin {d:.3}\n", .{ same, margins[same], blk: {
+            var sorted = margins;
+            std.mem.sort(f32, sorted[1..n_dec], {}, std.sort.asc(f32));
+            break :blk sorted[n_dec / 2];
+        } });
         try pr.classes(m, toks.len);
         const skips = [_]u32{0};
         const what = [_][]const u8{"none"};
@@ -3002,7 +3098,8 @@ pub fn main(init: std.process.Init) !void {
     }
     var bad: usize = 0;
     var total_rows: usize = 0;
-    const rounds = if (own_prompt) &[_]std.json.Value{} else ref.object.get("rounds").?.array.items;
+    const skip_mid = std.c.getenv("FZ_ONLY17") != null; // the one-row reference, then GPU-side rounds only
+    const rounds = if (own_prompt or skip_mid) &[_]std.json.Value{} else ref.object.get("rounds").?.array.items;
     for (rounds, 0..) |round, ri| {
         const o = round.object;
         const win = o.get("window").?.array.items;
@@ -3023,7 +3120,7 @@ pub fn main(init: std.process.Init) !void {
 
     const ref_tokens: []const u32 = got.items;
     // 4. the MTP head against the Python engine's drafts (absorb windows of 1-8 rows, then a chain)
-    if (!own_prompt) {
+    if (!own_prompt and !skip_mid) {
         const mref = ref.object.get("mtp").?.object;
         var seq: std.ArrayList(u32) = .empty;
         for (prompt) |x| try seq.append(gpa, @intCast(x.integer));
@@ -3058,7 +3155,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // 5. one stream with MTP chains of a fixed depth: tokens against the one-row reference, lanes landed, tok/s
-    const depths5: []const usize = if (own_prompt) &.{} else &.{ 1, 2, 3, 4, 6 };
+    const depths5: []const usize = if (own_prompt or skip_mid) &.{} else &.{ 1, 2, 3, 4, 6 };
     for (depths5) |depth| {
         m.reset();
         m.mtp.pos = 0;
@@ -3114,7 +3211,7 @@ pub fn main(init: std.process.Init) !void {
     var hist: std.ArrayList(u32) = .empty;
     for (prompt) |x| try hist.append(gpa, @intCast(x.integer));
     const n_prompt = hist.items.len;
-    for (0..if (r.copy) 2 else adapt.len) |run6| {
+    for (0..if (skip_mid) 0 else if (r.copy) 2 else adapt.len) |run6| {
         const cfg_a = if (r.copy) adapt[0] else adapt[run6];
         const use_copy = r.copy and run6 == 1;
         var copy_rounds: usize = 0;
@@ -3329,6 +3426,13 @@ pub fn main(init: std.process.Init) !void {
             m.mtp.slots[j].nk8 = .{ .b = r.ar.b, .off = b + 32 };
             m.mtp.slots[j].kvmeta = .{ .b = r.ar.b, .off = b + 64 };
         }
+        if (r.sel != null and prompt.len + want.len + 8 > 4 * TOP) { // long context: selection on the GPU
+            const cb0 = r.queue.commandBuffer();
+            r.enc = cb0.compute(if (r.serial) .serial else .concurrent);
+            for (&m.layers) |*L| if (!L.linear) try r.sel.?.catchUp(&r, L, m.t.eps, m.t.log2base, m.pos / 4);
+            try m.finish(cb0);
+            r.gsel = try GSelect.init(&r, W, m.pos / 4);
+        }
         r.gpu_round = true;
         const cfg = [4]u32{ @intCast(W), @intCast(depth), CAP, 0 };
         const base = r.event_value;
@@ -3356,6 +3460,7 @@ pub fn main(init: std.process.Init) !void {
             }
             m.ple.cin = cins[round % 2];
             m.pleIdsGpu(W, wids);
+            if (r.gsel) |*g| g.nb_ub = (@as(usize, @intCast(T)) + W * (round + 1)) / 4 + 2;
             try m.windowEncode(W, wids);
             r.enc.setPipeline(r.accept_pipe);
             for ([_]Buf{ wids, m.t.picks, r.ar, .{ .b = ring }, m.t.ple_meta }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
@@ -3386,6 +3491,7 @@ pub fn main(init: std.process.Init) !void {
         for (cbs.items[done..]) |cb| cb.wait();
         r.event_value = base + round + 1;
         r.gpu_round = false;
+        r.gsel = null;
         m.t.rows, m.t.mdims, m.t.pos8, m.t.nk8, m.t.kvmeta = t_saved;
         m.mtp.slots = slots_saved;
         m.ple.cin = cin_saved;
