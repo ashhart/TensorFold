@@ -139,3 +139,98 @@ def test_check_takes_the_mlx_checkpoints_and_refuses_others(tmp_path):
     (tmp_path / "config.json").write_text(json.dumps(dict(config, quantization={"group_size": 64, "bits": 3})))
     with pytest.raises(ValueError, match="4-bit or 8-bit"):
         package.check(tmp_path)
+
+
+def _write_safetensors(path, tensors: dict) -> None:
+    """A safetensors file with the official dtypes (F8_E4M3 codes as uint8 bytes, BF16, F32)."""
+
+    import struct
+
+    header, blobs, at = {}, [], 0
+    for name, (dtype, array) in tensors.items():
+        raw = np.asarray(array).tobytes()
+        header[name] = {"dtype": dtype, "shape": list(np.asarray(array).shape), "data_offsets": [at, at + len(raw)]}
+        blobs.append(raw)
+        at += len(raw)
+    data = json.dumps(header).encode()
+    data += b" " * (-len(data) % 8)
+    path.write_bytes(struct.pack("<Q", len(data)) + data + b"".join(blobs))
+
+
+def _bf16(a) -> np.ndarray:
+    return np.asarray(mx.array(a).astype(mx.bfloat16).view(mx.uint16))
+
+
+def test_an_fp8_checkpoint_converts_to_an_mlx_one_that_decodes_like_its_weights(model, tmp_path):
+    """The official layout (FP8 codes, fp32 block scales, per-expert tensors) -> MLX 8-bit: the converted model's
+    logits are bit for bit those of the exact bf16 weights quantized by mlx_lm (the reference dequant, then 8-bit)."""
+
+    import mlx.nn as nn
+    from mlx.utils import tree_flatten
+
+    from tensorfold.families.kolibri1.convert import convert
+    from tensorfold.families.kolibri1.model import load
+
+    mx.random.seed(1)
+    exact = kolibri1.Model(kolibri1.ModelArgs.from_dict(TINY))       # bf16, filled from the FP8 checkpoint below
+    exact.set_dtype(mx.bfloat16)
+    params = dict(tree_flatten(exact.parameters()))
+    src = tmp_path / "fp8"
+    src.mkdir()
+    stored, loaded = {}, {}
+    for name, value in params.items():
+        layer = name.split(".mlp.switch_mlp.")
+        if name.endswith("expert_bias"):
+            bias = mx.random.normal(value.shape) * 0.1
+            stored[name.replace(".mlp.expert_bias", ".moe.router.expert_bias")] = ("BF16", _bf16(bias))
+            loaded[name] = bias.astype(mx.bfloat16)
+        elif value.ndim >= 2 and "norm" not in name and not name.endswith("mlp.gate.weight") \
+                and "embed_tokens" not in name and not name.startswith("lm_head"):
+            weights = [value[e] for e in range(value.shape[0])] if value.ndim == 3 else [value]
+            exacts = []
+            for e, w in enumerate(weights):
+                rows, cols = w.shape
+                scale = mx.random.uniform(0.001, 0.01, ((rows + 127) // 128, (cols + 127) // 128))
+                big = mx.repeat(mx.repeat(scale, 128, axis=0)[:rows], 128, axis=1)[:, :cols]
+                codes = mx.to_fp8(w.astype(mx.float32) / big)
+                key = f"{layer[0]}.mlp.experts.{e}.{layer[1]}" if value.ndim == 3 else name
+                stored[key] = ("F8_E4M3", np.asarray(codes))
+                stored[key.replace(".weight", ".weight_scale_inv")] = ("F32", np.asarray(scale))
+                exacts.append((mx.from_fp8(codes, dtype=mx.bfloat16) * big).astype(mx.bfloat16))   # the reference's dequant
+            loaded[name] = mx.stack(exacts) if value.ndim == 3 else exacts[0]
+        else:
+            stored[name] = ("BF16", _bf16(value))
+            loaded[name] = value
+    _write_safetensors(src / "model-00001-of-00001.safetensors", stored)
+    (src / "model.safetensors.index.json").write_text(json.dumps(
+        {"weight_map": {k: "model-00001-of-00001.safetensors" for k in stored}}))
+    (src / "config.json").write_text(json.dumps(dict(TINY, quantization_config={
+        "quant_method": "fp8", "activation_scheme": "dynamic", "weight_block_size": [128, 128]})))
+    exact.load_weights(list(loaded.items()))
+    mx.eval(exact.parameters())
+
+    out = convert(src, tmp_path / "mlx", bits=8)
+    config = json.loads((out / "config.json").read_text())
+    assert config["quantization"]["bits"] == 8 and "quant_method" not in config["quantization_config"]
+    from tensorfold.families import kolibri1 as package
+
+    package.check(out)
+    (out / "tokenizer.json").unlink(missing_ok=True)
+    import mlx_lm.utils
+
+    original = mlx_lm.utils.load_tokenizer
+    mlx_lm.utils.load_tokenizer = lambda *a, **k: None                # no tokenizer in the tiny checkpoint
+    try:
+        family, _ = load(out)
+    finally:
+        mlx_lm.utils.load_tokenizer = original
+    from mlx_lm.models.switch_layers import QuantizedSwitchLinear
+
+    assert isinstance(family.model.layers[0].mlp.switch_mlp.gate_proj, QuantizedSwitchLinear)
+    assert not isinstance(family.model.layers[0].mlp.gate, nn.QuantizedLinear)
+    nn.quantize(exact, group_size=64, bits=8, class_predicate=lambda path, m: hasattr(m, "to_quantized")
+                and exact.quant_predicate(path, m))
+    ids = tokens(20)
+    want = exact(mx.array([ids]))[0]
+    got = family.head(family.prefill(mx.array([ids], dtype=mx.uint32), family.make_cache()))[0]
+    assert same(got, want)
