@@ -383,6 +383,57 @@ def test_shared_tile_indexer_equals_the_per_row_kernel(R, programs, monkeypatch)
 
 
 @gpu
+@pytest.mark.parametrize("layout", ["16x1", "4x4", "2x8", "mixed"])
+@pytest.mark.parametrize("programs", [1, 24, 192, 100000])
+def test_shared_tile_indexer_many_streams_full_visibility(layout, programs, monkeypatch):
+    """_index_scores_tile == _index_scores, torch.equal, for 16 rows of many streams that all see every key (the
+    serving case at full context): 16 streams of 1 row, 4 x 4 verify rows, 2 streams x 8 rows, runs of 1..5 rows with a
+    stream's rows split by another's; a capacity divisible by 16 and by the 64-key tile (n_keys 4096) and one ending
+    mid-tile (4100), so the last tile is full or partial; row groups of every size (``programs``: runs cut at
+    multiples of RB); FAST_TOPK's selection on top, and the same inside a CUDA graph replay."""
+
+    K = _kernels()
+    from tensorfold.families.deepseek_v41.cuda import topk as TK
+
+    monkeypatch.setattr(K, "SHARED_IK_PROGRAMS", programs)
+    R, ratio = 16, 4
+    if layout == "mixed":
+        stream = torch.tensor([0, 0, 0, 1, 2, 2, 3, 3, 3, 3, 3, 0, 4, 5, 5, 1], device="cuda")
+    else:
+        streams, rows = (int(v) for v in layout.split("x"))     # streams x rows a stream
+        stream = torch.arange(R, device="cuda") // rows
+    for N in (4096, 4100):
+        S = int(stream.max()) + 1
+        keys = _ik(K, S * N, 61 + N)
+        g = torch.Generator(device="cuda").manual_seed(N + programs)
+        iq = (torch.randn((R, 64, 128), generator=g, device="cuda") * 0.3).to(torch.bfloat16)
+        wts = torch.randn((R, 64), generator=g, device="cuda")
+        kbase = stream * N
+        # every row sees all N keys: (pos + 1) // ratio == N, a stream's rows at consecutive positions
+        pos = N * ratio - 1 + torch.arange(R, device="cuda") % 3
+
+        def run(shared):
+            a = K.index_scores(iq, wts, keys, pos, ratio, kbase=kbase, n_keys=N, shared=shared)
+            return a, TK.top_entries(a, pos, ratio, 512)
+
+        old, new = run(False), run(True)
+        for o, n in zip(old, new):
+            assert torch.equal(o, n)
+        assert torch.isfinite(new[0]).all()
+        for _ in range(2):
+            run(True)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            cap = run(True)
+        pos.sub_(ratio * 1000)                                  # shorter bounds, replayed
+        graph.replay()
+        torch.cuda.synchronize()
+        for o, n in zip(run(False), cap):
+            assert torch.equal(o, n)
+
+
+@gpu
 @pytest.mark.parametrize("ties", [False, True])
 def test_blocked_select_over_packed_keys(ties):
     """index_select_blocked over MXFP4 keys == over bf16 dequantized keys == top_entries / candidate_blocks of the

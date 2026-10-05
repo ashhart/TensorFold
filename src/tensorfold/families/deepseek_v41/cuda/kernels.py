@@ -682,27 +682,30 @@ SHARED_IK_PROGRAMS = int(__import__("os").environ.get("TF_DSV41_SHARED_IK_PROGRA
 def _index_scores_tile(IQ, WTS, KEYS, POS, OUT, n_keys, ratio, KBASE, KS, R, RB, HI: tl.constexpr,
                        DI: tl.constexpr, BS: tl.constexpr, RP: tl.constexpr, HAS_BASE: tl.constexpr,
                        SINGLE: tl.constexpr = False):
-    """_index_scores over MXFP4 keys, a key tile of BS a program: rows [g * RB, g * RB + RB) of the call scored
-    against it, the tile decoded once per stream (key base) among those rows. Per row exactly _index_scores' math
-    (its q, the same [HI, BS] dot, ReLU * weight summed over heads, -inf where not visible). The tile is decoded up
-    to the furthest visible key of the group's rows of that stream: a key past this row's bound scores in its own
-    column only, which the visible mask sets to -inf as before (a key past n_keys is never stored). A row whose
-    visible keys end before the tile writes -inf there and decodes nothing. SINGLE (RB == 1): straight-line, the
-    row's own bound (a loop-carried tile costs ~25% when every row has its own)."""
+    """_index_scores over MXFP4 keys, a key tile of BS a program. Program (tile, r) scores a run of rows starting at
+    row r: r and the rows after it of the same stream (key base), up to the next multiple of RB; it has work only
+    when r starts such a run (r is a multiple of RB, or its stream differs from row r - 1's), else it exits. The
+    tile is decoded once for the run, so a stream's verify rows share it while rows of different streams run in
+    parallel programs (one program for all rows of a tile serialised 16 decodes at 16 streams x 1 row: 1.3-1.5x the
+    per-row kernel). Per row exactly _index_scores' math (its q, the same [HI, BS] dot, ReLU * weight summed over
+    heads, -inf where not visible). The tile is decoded up to the furthest visible key of the run's rows: a key past
+    this row's bound scores in its own column only, which the visible mask sets to -inf as before (a key past n_keys
+    is never stored). A run whose visible keys end before the tile writes -inf and decodes nothing. SINGLE (RB == 1):
+    straight-line, the row's own bound (a loop-carried tile costs ~25% when every row has its own)."""
 
-    sb = tl.program_id(0)
+    sb = tl.program_id(1)
     if SINGLE:
-        r = tl.program_id(1)
+        r = tl.program_id(0)
         n_vis = (tl.load(POS + r) + 1) // ratio
         sidx = sb * BS + tl.arange(0, BS)
         if sb * BS < tl.minimum(n_keys, n_vis):
             h = tl.arange(0, HI)
             d = tl.arange(0, DI)
             kbase = tl.load(KBASE + r).to(tl.int64) if HAS_BASE else 0
+            q = tl.load(IQ + (r * HI + h[:, None]) * DI + d[None, :])     # issued before the decode
             live = (sidx < n_keys) & (sidx < n_vis)
             k = _fp4_rows(KEYS, KS, (kbase + sidx)[:, None].to(tl.int64), live[:, None], d, DI, 32,
                           False).to(tl.bfloat16)
-            q = tl.load(IQ + (r * HI + h[:, None]) * DI + d[None, :])
             dots = tl.dot(q, tl.trans(k)).to(tl.float32)
             w = tl.load(WTS + r * HI + h)
             score = tl.sum(w[:, None] * tl.maximum(dots, 0.0), axis=0)
@@ -711,41 +714,63 @@ def _index_scores_tile(IQ, WTS, KEYS, POS, OUT, n_keys, ratio, KBASE, KS, R, RB,
             score = tl.full((BS,), float("-inf"), tl.float32)
         tl.store(OUT + r * n_keys + sidx, score, mask=sidx < n_keys)
         return
-    r0 = tl.program_id(1) * RB
-    r1 = tl.minimum(r0 + RB, R)
-    h = tl.arange(0, HI)
-    d = tl.arange(0, DI)
-    s0 = sb * BS
-    sidx = s0 + tl.arange(0, BS)
-    rr = tl.arange(0, RP)
-    inr = (rr >= r0) & (rr < r1)
-    nv_all = (tl.load(POS + rr, mask=inr, other=0) + 1) // ratio
-    if HAS_BASE:
-        kb_all = tl.load(KBASE + rr, mask=inr, other=0).to(tl.int64)
+    r0 = tl.program_id(0)
+    r1 = tl.minimum((r0 // RB + 1) * RB, R)
+    n_vis = (tl.load(POS + r0) + 1) // ratio
+    if HAS_BASE:                         # the row's, the previous and the next row's streams, loaded together
+        kb0 = tl.load(KBASE + r0).to(tl.int64)
+        prev = tl.load(KBASE + tl.maximum(r0 - 1, 0)).to(tl.int64)
+        nxt = tl.load(KBASE + tl.minimum(r0 + 1, R - 1)).to(tl.int64)
+        first = (r0 % RB == 0) | (prev != kb0)
+        alone = (r0 + 1 == r1) | (nxt != kb0)                # a run of one row: the next row ends it
     else:
-        kb_all = tl.zeros((RP,), dtype=tl.int64)
-    cur = tl.full((), -1, tl.int64)                          # the stream whose tile k holds
-    k = tl.zeros((BS, DI), dtype=tl.bfloat16)
-    for r in range(r0, r1):
-        n_vis = (tl.load(POS + r) + 1) // ratio
-        if HAS_BASE:
-            kbase = tl.load(KBASE + r).to(tl.int64)
+        kb0 = tl.full((), 0, tl.int64)
+        first = r0 % RB == 0
+        alone = r0 + 1 == r1
+    if first:
+        s0 = sb * BS
+        sidx = s0 + tl.arange(0, BS)
+        if alone:                                            # one row a stream: straight-line, as SINGLE
+            if s0 < tl.minimum(n_keys, n_vis):
+                h = tl.arange(0, HI)
+                d = tl.arange(0, DI)
+                q = tl.load(IQ + (r0 * HI + h[:, None]) * DI + d[None, :])
+                live = (sidx < n_keys) & (sidx < n_vis)
+                k = _fp4_rows(KEYS, KS, (kb0 + sidx)[:, None], live[:, None], d, DI, 32, False).to(tl.bfloat16)
+                dots = tl.dot(q, tl.trans(k)).to(tl.float32)
+                w = tl.load(WTS + r0 * HI + h)
+                score = tl.sum(w[:, None] * tl.maximum(dots, 0.0), axis=0)
+                score = tl.where(sidx < n_vis, score, float("-inf"))
+            else:
+                score = tl.full((BS,), float("-inf"), tl.float32)
+            tl.store(OUT + r0 * n_keys + sidx, score, mask=sidx < n_keys)
+            return
+        rr = tl.arange(0, RP)
+        inr = (rr >= r0) & (rr < r1)
+        if HAS_BASE:                                         # the run ends at the first row of another stream
+            kb_all = tl.load(KBASE + rr, mask=inr, other=0).to(tl.int64)
+            r1 = tl.min(tl.where(inr & (kb_all != kb0), rr, r1), axis=0)
+            inr = (rr >= r0) & (rr < r1)
+        far = tl.max(tl.where(inr, (tl.load(POS + rr, mask=inr, other=0) + 1) // ratio, 0), axis=0)
+        if s0 < tl.minimum(n_keys, far):
+            h = tl.arange(0, HI)
+            d = tl.arange(0, DI)
+            live = (sidx < n_keys) & (sidx < far)
+            k = _fp4_rows(KEYS, KS, (kb0 + sidx)[:, None], live[:, None], d, DI, 32, False).to(tl.bfloat16)
+            for r in range(r0, r1):
+                n_vis = (tl.load(POS + r) + 1) // ratio
+                if s0 < tl.minimum(n_keys, n_vis):
+                    q = tl.load(IQ + (r * HI + h[:, None]) * DI + d[None, :])
+                    dots = tl.dot(q, tl.trans(k)).to(tl.float32)             # [HI, BS]
+                    w = tl.load(WTS + r * HI + h)
+                    score = tl.sum(w[:, None] * tl.maximum(dots, 0.0), axis=0)
+                    score = tl.where(sidx < n_vis, score, float("-inf"))
+                else:
+                    score = tl.full((BS,), float("-inf"), tl.float32)
+                tl.store(OUT + r * n_keys + sidx, score, mask=sidx < n_keys)
         else:
-            kbase = tl.full((), 0, tl.int64)
-        if s0 < tl.minimum(n_keys, n_vis):
-            if kbase != cur:
-                far = tl.max(tl.where(inr & (kb_all == kbase), nv_all, 0), axis=0)
-                live = (sidx < n_keys) & (sidx < far)
-                k = _fp4_rows(KEYS, KS, (kbase + sidx)[:, None], live[:, None], d, DI, 32, False).to(tl.bfloat16)
-                cur = kbase
-            q = tl.load(IQ + (r * HI + h[:, None]) * DI + d[None, :])
-            dots = tl.dot(q, tl.trans(k)).to(tl.float32)             # [HI, BS]
-            w = tl.load(WTS + r * HI + h)
-            score = tl.sum(w[:, None] * tl.maximum(dots, 0.0), axis=0)
-            score = tl.where(sidx < n_vis, score, float("-inf"))
-        else:
-            score = tl.full((BS,), float("-inf"), tl.float32)
-        tl.store(OUT + r * n_keys + sidx, score, mask=sidx < n_keys)
+            for r in range(r0, r1):
+                tl.store(OUT + r * n_keys + sidx, tl.full((BS,), float("-inf"), tl.float32), mask=sidx < n_keys)
 
 
 def index_scores(iq: torch.Tensor, wts: torch.Tensor, keys: torch.Tensor, pos: torch.Tensor, ratio: int,
@@ -762,14 +787,15 @@ def index_scores(iq: torch.Tensor, wts: torch.Tensor, keys: torch.Tensor, pos: t
     fp8, q4 = isinstance(keys, Fp8Rows), isinstance(keys, Fp4Rows)
     kq, ks = (keys.q, keys.s) if fp8 or q4 else (keys, pos)
     nblk = triton.cdiv(S, BS)
-    RB = triton.cdiv(R, min(R, max(1, triton.cdiv(SHARED_IK_PROGRAMS, nblk))))   # rows a tile program scores
+    RB = triton.cdiv(R, min(R, max(1, triton.cdiv(SHARED_IK_PROGRAMS, nblk))))   # most rows a tile program scores
     if shared is None:                    # decode / verify rows (graph widths, warmed with their graphs)
         shared = SHARED_IK and kbase is not None
     if q4 and shared:
-        _index_scores_tile[(nblk, triton.cdiv(R, RB))](iq.contiguous(), wts.contiguous(), kq, pos, scores, S, ratio,
-                                                       kbase if kbase is not None else pos, ks, R, RB, HI=HI, DI=DI,
-                                                       BS=BS, RP=triton.next_power_of_2(R),
-                                                       HAS_BASE=kbase is not None, SINGLE=RB == 1, num_warps=4)
+        # a program a (row, tile): with RB > 1 only those at a run's first row work (_index_scores_tile)
+        _index_scores_tile[(R, nblk)](iq.contiguous(), wts.contiguous(), kq, pos, scores, S, ratio,
+                                      kbase if kbase is not None else pos, ks, R, RB, HI=HI, DI=DI, BS=BS,
+                                      RP=triton.next_power_of_2(R), HAS_BASE=kbase is not None, SINGLE=RB == 1,
+                                      num_warps=4)
         return scores
     _index_scores[(R, triton.cdiv(S, BS))](iq.contiguous(), wts.contiguous(), kq, pos, scores, S, ratio,
                                            kbase if kbase is not None else pos, ks, HI=HI, DI=DI, BS=BS,
