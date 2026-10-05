@@ -22,8 +22,10 @@ WAIT_TIMEOUT ?= 1800
 # a rank's weights, caches and kept prompts take ~100 GiB; vLLM's recipe waits for 114 before booting
 MEM_READY_GIB  ?= 112
 MEM_READY_WAIT ?= 600
-HCA0         ?= roceP2p1s0f0
-HCA1         ?= roceP2p1s0f1
+# each rank's RoCE devices: its rankN.env NCCL_IB_HCA (NCCL stripes over both halves of the 200G port)
+hcas_of      = $(shell grep -E '^NCCL_IB_HCA=' $(DIR)/$(1) 2>/dev/null | tail -1 | cut -d= -f2- | sed 's/^[=^]*//; s/:[0-9]*//g; s/,/ /g')
+HCAS0        ?= $(or $(call hcas_of,rank0.env),roceP2p1s0f0)
+HCAS1        ?= $(or $(call hcas_of,rank1.env),roceP2p1s0f1)
 
 env_of = $(shell grep -E '^$(1)=' $(DIR)/.env 2>/dev/null | tail -1 | cut -d= -f2-)
 PORT         := $(or $(call env_of,PORT),8888)
@@ -38,10 +40,13 @@ FASTBOOT     := python -m tensorfold.families.deepseek_v41.cuda.fastboot
 BASE_URL     := http://localhost:$(PORT)
 COMPOSE0     := docker compose --env-file .env --env-file rank0.env
 COMPOSE1     := docker compose --env-file .env --env-file rank1.env
-# the RoCE v2 GID of a port's IPv4 address (index can move when addresses change)
-GID_SCRIPT    = for i in 0 1 2 3 4 5 6 7 8 9; do g=$$(cat /sys/class/infiniband/$(1)/ports/1/gids/$$i 2>/dev/null); \
-                t=$$(cat /sys/class/infiniband/$(1)/ports/1/gid_attrs/types/$$i 2>/dev/null); \
-                case "$$g:$$t" in *0000:ffff:*"RoCE v2") echo $$i; break;; esac; done
+# each device's RoCE v2 IPv4 GID index, for the log and the guard only: NCCL (NCCL_IB_ROCE_VERSION_NUM=2,
+# NCCL_IB_ADDR_FAMILY=AF_INET in the compose file) and the RoCE all-gather pick it per device by type and address.
+# The index moves: the kernel keeps a deleted GID's slot while a queue pair still uses it, so an address re-added
+# under a live connection (the peer rebooting drops the link) lands one slot up, on one device and not the other.
+GID_SCRIPT    = for d in $(1); do x=-; for i in $$(seq 0 15); do g=$$(cat /sys/class/infiniband/$$d/ports/1/gids/$$i 2>/dev/null); \
+                t=$$(cat /sys/class/infiniband/$$d/ports/1/gid_attrs/types/$$i 2>/dev/null); \
+                case "$$g:$$t" in *0000:ffff:*"RoCE v2") x=$$i; break;; esac; done; printf "%s=%s " $$d $$x; done
 
 # up / down / restart / swap-in / swap-out stop and start the pair in order: never run their steps in parallel
 # (a global MAKEFLAGS=-jN would race `restart: down up`)
@@ -172,11 +177,11 @@ up down restart:
 _up: guard sync memwait
 	@rm -f $(STATE)/stopped
 	@docker image inspect $(IMAGE_NAME):latest >/dev/null 2>&1 || { echo "❌ no image: 'make image' first"; exit 1; }
-	@h=$$($(call GID_SCRIPT,$(HCA0))); w=$$(ssh $(WORKER) '$(call GID_SCRIPT,$(HCA1))'); \
-	[ -n "$$h" ] && [ -n "$$w" ] || { echo "❌ no RoCE v2 GID (head=$$h worker=$$w)"; exit 1; }; \
-	echo "RoCE v2 GID index: head=$$h worker=$$w"; \
-	ssh $(WORKER) "cd $(DIR) && NCCL_IB_GID_INDEX=$$w $(COMPOSE1) up -d --force-recreate" && \
-	NCCL_IB_GID_INDEX=$$h $(COMPOSE0) up -d --force-recreate
+	@h=$$($(call GID_SCRIPT,$(HCAS0))); w=$$(ssh $(WORKER) '$(call GID_SCRIPT,$(HCAS1))'); \
+	echo "RoCE v2 GID index: head $$h worker $$w"; \
+	case "$$h $$w" in *=-*) echo "❌ a RoCE device has no RoCE v2 IPv4 GID (no address on its interface?)"; exit 1;; esac; \
+	ssh $(WORKER) "cd $(DIR) && $(COMPOSE1) up -d --force-recreate" && \
+	$(COMPOSE0) up -d --force-recreate
 	@$(MAKE) --no-print-directory wait
 
 # a deliberate stop: the watchdog stands down until the next up, across reboots too (the marker keeps the boot id)

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ctypes
 import hashlib
+import ipaddress
 import os
 import shutil
 import subprocess
@@ -85,6 +86,52 @@ def _device() -> str:
     return names[0]
 
 
+def roce_v2_ipv4_gids(device: str, port: int = 1, root: str = "/sys/class/infiniband") -> list[tuple[int, str]]:
+    """The port's RoCE v2 GIDs that carry an IPv4 address, as (index, address), lowest index first."""
+
+    base = Path(root) / device / "ports" / str(port)
+    found = []
+    try:
+        names = sorted((p.name for p in (base / "gids").iterdir() if p.name.isdigit()), key=int)
+    except OSError:
+        return []
+    for name in names:
+        try:                                     # an empty or stale slot reads as zeros or fails (EINVAL)
+            gid = (base / "gids" / name).read_text().strip()
+            kind = (base / "gid_attrs" / "types" / name).read_text().strip()
+        except OSError:
+            continue
+        raw = bytes.fromhex(gid.replace(":", ""))
+        if kind == "RoCE v2" and len(raw) == 16 and raw[:12] == bytes(10) + b"\xff\xff":
+            found.append((int(name), str(ipaddress.IPv4Address(raw[12:]))))
+    return found
+
+
+def gid_index(device: str, port: int = 1, root: str = "/sys/class/infiniband") -> int:
+    """This rank's source GID: TF_RDMA_GID_INDEX if set, else the port's RoCE v2 IPv4 GID found by type and address
+    (inside TF_RDMA_ADDR_RANGE or NCCL_IB_ADDR_RANGE when one is set), else NCCL_IB_GID_INDEX.
+
+    The index of that GID is not stable: the kernel keeps a deleted GID's slot while a queue pair still uses it, so
+    an address re-added under a live connection (the peer rebooting drops the link; NetworkManager removes and
+    re-adds the address) takes the next free slot (3 becomes 4)."""
+
+    explicit = os.environ.get("TF_RDMA_GID_INDEX")
+    if explicit:
+        return int(explicit)
+    found = roce_v2_ipv4_gids(device, port, root)
+    span = os.environ.get("TF_RDMA_ADDR_RANGE") or os.environ.get("NCCL_IB_ADDR_RANGE")
+    if span:
+        net = ipaddress.ip_network(span.strip(), strict=False)
+        found = [(i, a) for i, a in found if ipaddress.ip_address(a) in net]
+    if found:
+        return found[0][0]
+    fallback = os.environ.get("NCCL_IB_GID_INDEX")
+    if fallback:
+        return int(fallback)
+    raise RuntimeError(f"{device} port {port} has no RoCE v2 IPv4 GID{' in ' + span if span else ''} (an address "
+                       "on its interface?); TF_RDMA_GID_INDEX names one")
+
+
 class RdmaGather:
     """One rank's pinned region, queue pair and proxy thread; ``all_gather`` launches the gather kernel."""
 
@@ -101,10 +148,15 @@ class RdmaGather:
         self.ctrl = self.region[:64].view(torch.int32).numpy()
         self.state = torch.zeros(4, dtype=torch.int32, device="cuda")          # epoch, arrivals, departures, stopped
         self.device = _device()
-        gid = int(os.environ.get("TF_RDMA_GID_INDEX") or os.environ.get("NCCL_IB_GID_INDEX") or 3)
         err = ctypes.create_string_buffer(256)
-        self.ctx = lib.tf_rdma_create(self.device.encode(), gid, ctypes.c_void_p(self.region.data_ptr()), total,
-                                      self.slot_bytes, err, len(err))
+        try:
+            self.gid = gid_index(self.device)
+        except RuntimeError as exc:                      # both ranks still meet in the exchange below
+            self.gid, self.ctx = -1, None
+            err.value = str(exc).encode()[:255]
+        else:
+            self.ctx = lib.tf_rdma_create(self.device.encode(), self.gid, ctypes.c_void_p(self.region.data_ptr()),
+                                          total, self.slot_bytes, err, len(err))
         mine = torch.zeros(INFO_WORDS + 2, dtype=torch.int64)
         if self.ctx:
             info = (ctypes.c_uint64 * INFO_WORDS)()

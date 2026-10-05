@@ -22,8 +22,11 @@ The two cannot run at once (each takes ~100 GiB a rank, both bind :8888); `make 
 
 `make up` refuses while vLLM, a dev run in `tf-dev`, or anything else holds the GPUs or :8888, while the house
 memory watchdog is armed, or (with the carveout) while `nvidia_drm` modeset is off. It drops caches, waits
-for `MEM_READY_GIB` free on both nodes, finds each node's RoCE v2 GID index, starts the worker, then the head,
-and waits for `/health`.
+for `MEM_READY_GIB` free on both nodes, checks that every RoCE device has a RoCE v2 IPv4 GID (and
+logs its index), starts the worker, then the head, and waits for `/health`. Nothing pins the GID index: the
+index moves (a peer's reboot can leave aiai2's `roceP2p1s0f1` at 4 while `rocep1s0f1` stays at 3), so NCCL picks
+it per device (`NCCL_IB_ROCE_VERSION_NUM=2`, `NCCL_IB_ADDR_FAMILY=AF_INET`, `NCCL_IB_ADDR_RANGE` 10.42.0.0/15) and
+the RoCE all-gather finds it by type and address (`TF_RDMA_GID_INDEX` pins it).
 
 The containers are not restarted on their own: one rank coming back alone would wait at rendezvous for a peer
 that is not coming. Start and stop both with `make`.

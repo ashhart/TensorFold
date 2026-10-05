@@ -63,7 +63,11 @@ services:
       MIMALLOC_ALLOW_THP: "0"
       NCCL_SOCKET_IFNAME: ${NCCL_SOCKET_IFNAME:?per rank, in rankN.env}
       NCCL_IB_HCA: ${NCCL_IB_HCA:?per rank, in rankN.env}
-      NCCL_IB_GID_INDEX: ${NCCL_IB_GID_INDEX:-3}
+      # no NCCL_IB_GID_INDEX: the index of a port's RoCE v2 IPv4 GID moves (3 or 4) and differs between the two
+      # devices of a rank; NCCL picks it per device by version and family (and the RoCE all-gather by type and address)
+      NCCL_IB_ROCE_VERSION_NUM: "2"
+      NCCL_IB_ADDR_FAMILY: AF_INET
+      NCCL_IB_ADDR_RANGE: ${NCCL_IB_ADDR_RANGE:-10.42.0.0/15}
       NCCL_DEBUG: ${NCCL_DEBUG:-ERROR}
     command: >-
       python -m tensorfold serve /models/${MODEL:-dsv41/DeepSeek-V4.1-Flash-EXL3-2.9bpw}
