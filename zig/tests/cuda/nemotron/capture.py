@@ -248,7 +248,8 @@ def main() -> int:
     if not a.bench:
         e = eng.e
         e.use_graphs = False
-        tf = ids["code"][:TEACHER]
+        short, longest = ("math", "huge") if a.second else ("code", "long")    # the set's teacher prompt, its longest
+        tf = ids[short][:TEACHER]
         sampled, logit_sha = [], []
         e.reset()
         e.set_sampling(None)
@@ -264,9 +265,9 @@ def main() -> int:
         from tensorfold.families.nemotron_h.cuda.decode import prefill
 
         pre_out = {}
-        for name in ("code", "long"):
-            dumps.at(out / "prefill" / name, blocks=name == "code")
-            with phase(f"prefill-{name}", detail=name == "code"):
+        for name in (short, longest):
+            dumps.at(out / "prefill" / name, blocks=name == short)
+            with phase(f"prefill-{name}", detail=name == short):
                 pre = prefill(e, None, ids[name], None)
             dumps.save("p_hidden_last", pre.last_hidden)
             dumps.at(None)
