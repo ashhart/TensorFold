@@ -148,6 +148,29 @@ const glue_source =
     \\  }
     \\  wids[0] = picks[keep - 1];
     \\}
+    \\// An expert row from [part][group][6 words] to [group][part][6 words] (FZ_XPACK): the lanes of one group read
+    \\// one block; the sums keep their order. d = (parts, groups a part).
+    \\[[kernel]] void fz_repack_w(device uint* W [[buffer(0)]], constant uint2& d [[buffer(1)]],
+    \\    uint row [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]]) {
+    \\  threadgroup uint tmp[480];
+    \\  const uint n = d.x * d.y * 6;
+    \\  device uint* w = W + size_t(row) * n;
+    \\  for (uint i = t; i < n; i += 128) tmp[i] = w[i];
+    \\  threadgroup_barrier(mem_flags::mem_threadgroup);
+    \\  for (uint i = t; i < n; i += 128) {
+    \\    const uint j = i / (d.x * 6), part = (i / 6) % d.x, k = i % 6;
+    \\    w[i] = tmp[part * d.y * 6 + j * 6 + k];
+    \\  }
+    \\}
+    \\[[kernel]] void fz_repack_s(device ushort* S [[buffer(0)]], constant uint2& d [[buffer(1)]],
+    \\    uint row [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]]) {
+    \\  threadgroup ushort tmp[80];
+    \\  const uint n = d.x * d.y;
+    \\  device ushort* s = S + size_t(row) * n;
+    \\  for (uint i = t; i < n; i += 128) tmp[i] = s[i];
+    \\  threadgroup_barrier(mem_flags::mem_threadgroup);
+    \\  for (uint i = t; i < n; i += 128) s[i] = tmp[(i % d.x) * d.y + i / d.x];
+    \\}
 ;
 
 
@@ -206,8 +229,9 @@ const xnew_source =
     \\  }
     \\  const int row = int(tg.y) * 8 + int(sgi) * 2 + int(lane >> 4);
     \\  const int part = int(lane & 15);
-    \\  const size_t wrow = (shared ? 0 : e * N * WPR) + size_t(row) * WPR + part * 30;
-    \\  const size_t grow = (shared ? 0 : e * N * KG) + size_t(row) * KG + part * 5;
+    \\  constexpr int GJ = FZ_PACKED ? 96 : 6, SJ = FZ_PACKED ? 16 : 1; // a lane's group stride: words, scales
+    \\  const size_t wrow = (shared ? 0 : e * N * WPR) + size_t(row) * WPR + part * (FZ_PACKED ? 6 : 30);
+    \\  const size_t grow = (shared ? 0 : e * N * KG) + size_t(row) * KG + part * (FZ_PACKED ? 1 : 5);
     \\  const device uint* gw = (shared ? SGW : GW) + wrow;
     \\  const device uint* uw = (shared ? SUW : UW) + wrow;
     \\  const device bfloat* gs = (shared ? SGS : GS) + grow;
@@ -218,10 +242,10 @@ const xnew_source =
     \\  float ag = 0.0f, au = 0.0f;
     \\  for (int j = 0; j < 5; j++) {
     \\    float qg, qu, sx, sx2;
-    \\    fz_group(gw + j * 6, x + j * 32, qg, sx);
-    \\    fz_group(uw + j * 6, x + j * 32, qu, sx2);
-    \\    ag += float(gs[j]) * qg + float(gb[j]) * sx;
-    \\    au += float(us[j]) * qu + float(ub[j]) * sx;
+    \\    fz_group(gw + j * GJ, x + j * 32, qg, sx);
+    \\    fz_group(uw + j * GJ, x + j * 32, qu, sx2);
+    \\    ag += float(gs[j * SJ]) * qg + float(gb[j * SJ]) * sx;
+    \\    au += float(us[j * SJ]) * qu + float(ub[j * SJ]) * sx;
     \\  }
     \\  for (ushort o = 8; o > 0; o >>= 1) { ag += simd_shuffle_xor(ag, o); au += simd_shuffle_xor(au, o); }
     \\  if (part == 0) ACT[p * N + row] = bfloat(bsilu(float(bfloat(ag))) * float(bfloat(au)));
@@ -240,16 +264,17 @@ const xnew_source =
     \\  const size_t e = shared ? 0 : size_t(PICK[r * TOPK + k]);
     \\  const int d = int(tg.y) * 32 + int(sgi) * 8 + int(lane >> 2);
     \\  const int part = int(lane & 3);
-    \\  const device uint* w = (shared ? SDW : DW + e * D * WPR) + size_t(d) * WPR + part * 30;
-    \\  const size_t g0 = (shared ? 0 : e * D * KG) + size_t(d) * KG + part * 5;
+    \\  constexpr int GJ = FZ_PACKED ? 24 : 6, SJ = FZ_PACKED ? 4 : 1;
+    \\  const device uint* w = (shared ? SDW : DW + e * D * WPR) + size_t(d) * WPR + part * (FZ_PACKED ? 6 : 30);
+    \\  const size_t g0 = (shared ? 0 : e * D * KG) + size_t(d) * KG + part * (FZ_PACKED ? 1 : 5);
     \\  const device bfloat* sc = (shared ? SDS : DS) + g0;
     \\  const device bfloat* bi = (shared ? SDB : DB) + g0;
     \\  const device bfloat* x = ACT + (r * SLOTS + k) * NI + part * 160;
     \\  float acc = 0.0f;
     \\  for (int j = 0; j < 5; j++) {
     \\    float qx, sx;
-    \\    fz_group(w + j * 6, x + j * 32, qx, sx);
-    \\    acc += float(sc[j]) * qx + float(bi[j]) * sx;
+    \\    fz_group(w + j * GJ, x + j * 32, qx, sx);
+    \\    acc += float(sc[j * SJ]) * qx + float(bi[j * SJ]) * sx;
     \\  }
     \\  acc += simd_shuffle_xor(acc, 1);
     \\  acc += simd_shuffle_xor(acc, 2);
@@ -313,6 +338,157 @@ const xnew_source =
     \\  threadgroup float part[16][8][32];
     \\  fz_dense_body<16>(X, W, SB, Y, dims, sgi, lane, tgi, part);
     \\}
+    \\// Grouped experts (FZ_GROUPED=1): fz_route picks every row's experts (the recorded top-k rounds) and lists each
+    \\// distinct expert's (row, slot) pairs; fz_ggu and fz_gdown read each distinct expert once for all its pairs, and
+    \\// every pair's sums run in fz_xgu's and fz_xdown's order, so each row's bits are the ungrouped kernels' bits.
+    \\constant constexpr int FZ_UMAX = 320, FZ_MMAX = 32;
+    \\[[kernel]] void fz_route(const device float* LOGITS [[buffer(0)]], const constant int* rows [[buffer(1)]],
+    \\    device uint* PICK [[buffer(2)]], device float* WTS [[buffer(3)]], device int* UL [[buffer(4)]],
+    \\    uint sgi [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    \\    uint tid [[thread_index_in_threadgroup]]) {
+    \\  constexpr int TOPK = 10, NE = 512, NL = 513;
+    \\  threadgroup int tids[FZ_UMAX];
+    \\  threadgroup int first[FZ_UMAX];
+    \\  const int R = rows[0], n = R * TOPK, i = int(tid);
+    \\  if (int(sgi) < R) {
+    \\    int ids[TOPK];
+    \\    float picked[TOPK];
+    \\    simd_topk_all<NE, TOPK>(LOGITS + int(sgi) * NL, lane, ids, picked);
+    \\    if (lane == 0) {
+    \\      float total = 0.0f;
+    \\      float ex[TOPK];
+    \\      for (int kk = 0; kk < TOPK; kk++) { ex[kk] = metal::exp(picked[kk] - picked[0]); total += ex[kk]; }
+    \\      for (int kk = 0; kk < TOPK; kk++) {
+    \\        WTS[sgi * TOPK + kk] = float(bfloat(ex[kk] / total));
+    \\        PICK[sgi * TOPK + kk] = uint(ids[kk]);
+    \\        tids[sgi * TOPK + kk] = ids[kk];
+    \\      }
+    \\    }
+    \\  }
+    \\  threadgroup_barrier(mem_flags::mem_threadgroup);
+    \\  int f = 0;
+    \\  if (i < n) {
+    \\    f = 1;
+    \\    for (int j = 0; j < i; j++) if (tids[j] == tids[i]) { f = 0; break; }
+    \\    first[i] = f;
+    \\  }
+    \\  threadgroup_barrier(mem_flags::mem_threadgroup);
+    \\  if (i < n && f == 1) {
+    \\    int u = 0;
+    \\    for (int j = 0; j < i; j++) u += first[j];
+    \\    const int e = tids[i];
+    \\    UL[1 + u] = e;
+    \\    int c = 0;
+    \\    for (int j = i; j < n; j++) if (tids[j] == e) { UL[1 + 2 * FZ_UMAX + u * FZ_MMAX + c] = (j / TOPK) * (TOPK + 1) + j % TOPK; c++; }
+    \\    UL[1 + FZ_UMAX + u] = c;
+    \\  }
+    \\  if (i == 0) { int u = 0; for (int j = 0; j < n; j++) u += first[j]; UL[0] = u; }
+    \\}
+    \\// A distinct expert's pairs, 8 at a time: pair index (row * 11 + slot) or -1; the shared expert is z = 0.
+    \\inline void fz_members(const device int* UL, int R, bool shared, int u, int c0, int cnt, thread int* pr) {
+    \\  #pragma unroll
+    \\  for (int m = 0; m < 8; m++) pr[m] = c0 + m < cnt ? (shared ? (c0 + m) * 11 + 10 : UL[1 + 2 * FZ_UMAX + u * FZ_MMAX + c0 + m]) : -1;
+    \\}
+    \\[[kernel]] void fz_ggu(const device bfloat* X [[buffer(0)]], const device int* UL [[buffer(1)]],
+    \\    const device uint* GW [[buffer(2)]], const device bfloat* GS [[buffer(3)]], const device bfloat* GB [[buffer(4)]],
+    \\    const device uint* UW [[buffer(5)]], const device bfloat* US [[buffer(6)]], const device bfloat* UB [[buffer(7)]],
+    \\    const device uint* SGW [[buffer(8)]], const device bfloat* SGS [[buffer(9)]], const device bfloat* SGB [[buffer(10)]],
+    \\    const device uint* SUW [[buffer(11)]], const device bfloat* SUS [[buffer(12)]], const device bfloat* SUB [[buffer(13)]],
+    \\    device bfloat* ACT [[buffer(14)]], const constant int* rows [[buffer(15)]],
+    \\    uint sgi [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    \\    uint3 tg [[threadgroup_position_in_grid]]) {
+    \\  constexpr int K = 2560, N = 640, SLOTS = 11, WPR = K * 6 / 32, KG = K / 32;
+    \\  const bool shared = tg.z == 0;
+    \\  const int u = int(tg.z) - 1;
+    \\  if (!shared && u >= UL[0]) return;
+    \\  const int cnt = shared ? rows[0] : UL[1 + FZ_UMAX + u];
+    \\  const size_t e = shared ? 0 : size_t(UL[1 + u]);
+    \\  const int row = int(tg.y) * 8 + int(sgi) * 2 + int(lane >> 4);
+    \\  const int part = int(lane & 15);
+    \\  const size_t wrow = e * N * WPR + size_t(row) * WPR + part * 30;
+    \\  const size_t grow = e * N * KG + size_t(row) * KG + part * 5;
+    \\  const device uint* gw = (shared ? SGW : GW) + wrow;
+    \\  const device uint* uw = (shared ? SUW : UW) + wrow;
+    \\  const device bfloat* gs = (shared ? SGS : GS) + grow;
+    \\  const device bfloat* gb = (shared ? SGB : GB) + grow;
+    \\  const device bfloat* us = (shared ? SUS : US) + grow;
+    \\  const device bfloat* ub = (shared ? SUB : UB) + grow;
+    \\  for (int c0 = 0; c0 < cnt; c0 += 8) {
+    \\    int pr[8];
+    \\    fz_members(UL, rows[0], shared, u, c0, cnt, pr);
+    \\    float ag[8], au[8];
+    \\    #pragma unroll
+    \\    for (int m = 0; m < 8; m++) { ag[m] = 0.0f; au[m] = 0.0f; }
+    \\    #pragma unroll
+    \\    for (int j = 0; j < 5; j++) {
+    \\      float q[32];
+    \\      fz_codes6(gw + j * 6, q);
+    \\      #pragma unroll
+    \\      for (int m = 0; m < 8; m++) if (pr[m] >= 0) {
+    \\        float qx, sx;
+    \\        fz_dot32(q, X + (pr[m] / SLOTS) * K + part * 160 + j * 32, qx, sx);
+    \\        ag[m] += float(gs[j]) * qx + float(gb[j]) * sx;
+    \\      }
+    \\      fz_codes6(uw + j * 6, q);
+    \\      #pragma unroll
+    \\      for (int m = 0; m < 8; m++) if (pr[m] >= 0) {
+    \\        float qx, sx;
+    \\        fz_dot32(q, X + (pr[m] / SLOTS) * K + part * 160 + j * 32, qx, sx);
+    \\        au[m] += float(us[j]) * qx + float(ub[j]) * sx;
+    \\      }
+    \\    }
+    \\    #pragma unroll
+    \\    for (int m = 0; m < 8; m++) {
+    \\      float a = ag[m], b = au[m];
+    \\      for (ushort o = 8; o > 0; o >>= 1) { a += simd_shuffle_xor(a, o); b += simd_shuffle_xor(b, o); }
+    \\      if (part == 0 && pr[m] >= 0) ACT[pr[m] * N + row] = bfloat(bsilu(float(bfloat(a))) * float(bfloat(b)));
+    \\    }
+    \\  }
+    \\}
+    \\[[kernel]] void fz_gdown(const device bfloat* ACT [[buffer(0)]], const device int* UL [[buffer(1)]],
+    \\    const device uint* DW [[buffer(2)]], const device bfloat* DS [[buffer(3)]], const device bfloat* DB [[buffer(4)]],
+    \\    const device uint* SDW [[buffer(5)]], const device bfloat* SDS [[buffer(6)]], const device bfloat* SDB [[buffer(7)]],
+    \\    const constant int* rows [[buffer(8)]], device bfloat* Y [[buffer(9)]],
+    \\    uint sgi [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    \\    uint3 tg [[threadgroup_position_in_grid]]) {
+    \\  constexpr int NI = 640, D = 2560, WPR = NI * 6 / 32, KG = NI / 32;
+    \\  const bool shared = tg.z == 0;
+    \\  const int u = int(tg.z) - 1;
+    \\  if (!shared && u >= UL[0]) return;
+    \\  const int cnt = shared ? rows[0] : UL[1 + FZ_UMAX + u];
+    \\  const size_t e = shared ? 0 : size_t(UL[1 + u]);
+    \\  const int d = int(tg.y) * 32 + int(sgi) * 8 + int(lane >> 2);
+    \\  const int part = int(lane & 3);
+    \\  const device uint* w = (shared ? SDW : DW + e * D * WPR) + size_t(d) * WPR + part * 30;
+    \\  const size_t g0 = (shared ? 0 : e * D * KG) + size_t(d) * KG + part * 5;
+    \\  const device bfloat* sc = (shared ? SDS : DS) + g0;
+    \\  const device bfloat* bi = (shared ? SDB : DB) + g0;
+    \\  for (int c0 = 0; c0 < cnt; c0 += 8) {
+    \\    int pr[8];
+    \\    fz_members(UL, rows[0], shared, u, c0, cnt, pr);
+    \\    float acc[8];
+    \\    #pragma unroll
+    \\    for (int m = 0; m < 8; m++) acc[m] = 0.0f;
+    \\    #pragma unroll
+    \\    for (int j = 0; j < 5; j++) {
+    \\      float q[32];
+    \\      fz_codes6(w + j * 6, q);
+    \\      #pragma unroll
+    \\      for (int m = 0; m < 8; m++) if (pr[m] >= 0) {
+    \\        float qx, sx;
+    \\        fz_dot32(q, ACT + pr[m] * NI + part * 160 + j * 32, qx, sx);
+    \\        acc[m] += float(sc[j]) * qx + float(bi[j]) * sx;
+    \\      }
+    \\    }
+    \\    #pragma unroll
+    \\    for (int m = 0; m < 8; m++) {
+    \\      float a = acc[m];
+    \\      a += simd_shuffle_xor(a, 1);
+    \\      a += simd_shuffle_xor(a, 2);
+    \\      if (part == 0 && pr[m] >= 0) Y[pr[m] * D + d] = bfloat(a);
+    \\    }
+    \\  }
+    \\}
 ;
 
 fn readAll(fd: std.c.fd_t, dest: []u8, at: usize) !void {
@@ -346,6 +522,7 @@ const Run = struct {
     accept_pipe: mtl.Pipeline = undefined,
     gpu_round: bool = false,
     ar: Buf = undefined,
+    probe: ?Buf = null,
     xnew: bool = false,
     xgu_pipe: mtl.Pipeline = undefined,
     xdown_pipe: mtl.Pipeline = undefined,
@@ -358,6 +535,15 @@ const Run = struct {
     event: mtl.SharedEvent = undefined,
     event_value: u64 = 0,
     dense8_pipe: mtl.Pipeline = undefined,
+    grouped: bool = false,
+    gskip: u32 = 0,
+    xpack: bool = false,
+    repack_w: mtl.Pipeline = undefined,
+    repack_s: mtl.Pipeline = undefined,
+    route_pipe: mtl.Pipeline = undefined,
+    ggu_pipe: mtl.Pipeline = undefined,
+    gdown_pipe: mtl.Pipeline = undefined,
+    ul: Buf = undefined,
     dense16_pipe: mtl.Pipeline = undefined,
 
     fn buffer(r: *Run, len: usize) !mtl.Buffer {
@@ -451,6 +637,8 @@ const Run = struct {
         r.pleids_pipe = try mtl.Pipeline.init(r.device, glue, "fz_ple_ids", false);
         r.copy_pipe = try mtl.Pipeline.init(r.device, glue, "fz_copy_kept", false);
         r.accept_pipe = try mtl.Pipeline.init(r.device, glue, "fz_accept", false);
+        r.repack_w = try mtl.Pipeline.init(r.device, glue, "fz_repack_w", false);
+        r.repack_s = try mtl.Pipeline.init(r.device, glue, "fz_repack_s", false);
         if (r.xnew) { // the recorded gate/up kernel's header (simd_topk, bsilu) with the full-width expert kernels after it
             var hit: ?[]const u8 = null;
             var it = plan.object.get("variants").?.object.iterator();
@@ -461,12 +649,17 @@ const Run = struct {
             const ff = try mtl.MappedFile.open(fp);
             const text = ff.bytes[0..ff.size];
             const cut = std.mem.indexOf(u8, text, "[[kernel]]") orelse return error.NoKernel;
-            const full = try std.mem.concat(r.arena, u8, &.{ text[0..cut], xnew_source });
+            const define: []const u8 = if (r.xpack) "#define FZ_PACKED 1\n" else "#define FZ_PACKED 0\n";
+            const full = try std.mem.concat(r.arena, u8, &.{ define, text[0..cut], xnew_source });
             const lib = try mtl.Library.fromSource(r.device, full, mtl.CompileOptions.mlx());
             r.xgu_pipe = try mtl.Pipeline.init(r.device, lib, "fz_xgu", false);
             r.xdown_pipe = try mtl.Pipeline.init(r.device, lib, "fz_xdown", false);
             r.dense8_pipe = try mtl.Pipeline.init(r.device, lib, "fz_dense8", false);
             r.dense16_pipe = try mtl.Pipeline.init(r.device, lib, "fz_dense16", false);
+            r.route_pipe = try mtl.Pipeline.init(r.device, lib, "fz_route", false);
+            r.ggu_pipe = try mtl.Pipeline.init(r.device, lib, "fz_ggu", false);
+            r.gdown_pipe = try mtl.Pipeline.init(r.device, lib, "fz_gdown", false);
+            r.ul = .{ .b = try r.buffer((1 + 2 * 320 + 320 * 32) * 4) };
         }
     }
 
@@ -483,6 +676,35 @@ const Run = struct {
 
 
 
+
+    /// FZ_XPACK: an expert set's rows (gate, up, shared gate, shared up, down, shared down) to the packed layout.
+    fn repack(r: *Run, ex: []Buf) !void {
+        const cb = r.queue.commandBuffer();
+        const enc = cb.compute(.concurrent);
+        for (0..6) |j| {
+            const parts: u32 = if (j < 4) 16 else 4;
+            const d = [2]u32{ parts, 5 };
+            const words = ex[j * 3].b.length() / 4;
+            const rows = words / (parts * 30);
+            enc.setPipeline(r.repack_w);
+            enc.setBuffer(ex[j * 3].b, ex[j * 3].off, 0);
+            enc.setBytes(std.mem.asBytes(&d), 1);
+            enc.dispatchThreads(mtl.Size.of(128 * rows, 1, 1), mtl.Size.of(128, 1, 1));
+            for (1..3) |k| {
+                enc.setPipeline(r.repack_s);
+                enc.setBuffer(ex[j * 3 + k].b, ex[j * 3 + k].off, 0);
+                enc.setBytes(std.mem.asBytes(&d), 1);
+                enc.dispatchThreads(mtl.Size.of(128 * rows, 1, 1), mtl.Size.of(128, 1, 1));
+            }
+        }
+        enc.end();
+        cb.commit();
+        cb.wait();
+        if (cb.failure()) |msg| {
+            std.log.err("repack failed: {s}", .{msg});
+            return error.GpuFailed;
+        }
+    }
 
     /// fz_copy_kept: `layers` copies of `n` words from row (keep + base) of src (row and layer strides in words).
     fn copyKept(r: *Run, src: Buf, dst: Buf, n: usize, row: usize, src_stride: usize, dst_stride: usize, layers: usize, base: i32) void {
@@ -521,6 +743,27 @@ const Run = struct {
         if (!r.xnew) {
             try r.call(gu_role, &.{ x, lg, e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8], e[9], e[10], e[11] }, &.{ act, pick, wts });
             try r.call(down_role, &.{ act, pick, e[12], e[13], e[14], e[15], e[16], e[17], rows_buf }, &.{y});
+            return;
+        }
+        if (r.grouped and r.rows > 1) { // each distinct expert read once for every row that picked it
+            if (r.gskip & 1 == 0) {
+                r.enc.setPipeline(r.route_pipe);
+                for ([_]Buf{ lg, rows_buf, pick, wts, r.ul }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
+                r.enc.dispatchThreads(mtl.Size.of(32 * r.rows, 1, 1), mtl.Size.of(32 * r.rows, 1, 1));
+                if (!r.serial) r.enc.barrier();
+            }
+            if (r.gskip & 2 != 0) return;
+            r.enc.setPipeline(r.ggu_pipe);
+            const ggu = [_]Buf{ x, r.ul, e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8], e[9], e[10], e[11], act, rows_buf };
+            for (ggu, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
+            r.enc.dispatchThreads(mtl.Size.of(128, 80, r.rows * 10 + 1), mtl.Size.of(128, 1, 1));
+            if (!r.serial) r.enc.barrier();
+            if (r.gskip & 4 != 0) return;
+            r.enc.setPipeline(r.gdown_pipe);
+            const gdn = [_]Buf{ act, r.ul, e[12], e[13], e[14], e[15], e[16], e[17], rows_buf, y };
+            for (gdn, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
+            r.enc.dispatchThreads(mtl.Size.of(128, 80, r.rows * 10 + 1), mtl.Size.of(128, 1, 1));
+            if (!r.serial) r.enc.barrier();
             return;
         }
         const pairs = r.rows * 11;
@@ -933,6 +1176,7 @@ const Model = struct {
             try m.hcProject(t.h[cur], L.mhc, "qa_hc_down@mhc", "qa_hc_up@mhc", t.inj_m);
             try r.call("q4_router_float@moe", &.{ t.mixed, L.router, t.rows }, &.{t.lg});
             try r.experts("qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown);
+            if (r.probe) |pb| r.copyKept(t.pick, .{ .b = pb.b, .off = pb.off + i * MAXR * 10 * 4 }, rows * 10, 0, 0, 0, 1, -1);
             pending = .grouped;
         }
         try m.grouped(t.h[cur], t.h[1 - cur]);
@@ -1117,6 +1361,8 @@ pub fn main(init: std.process.Init) !void {
     r.event = try device.sharedEvent();
     r.dense = r.xnew and std.c.getenv("FZ_DENSE") != null;
     r.dense_target = r.dense and std.c.getenv("FZ_DENSE_TARGET") != null;
+    r.xpack = r.xnew and std.c.getenv("FZ_XPACK") != null;
+    r.grouped = r.xnew and !r.xpack and std.c.getenv("FZ_GROUPED") != null;
     const t0 = mtl.clock.seconds();
     try r.compile(args[2]);
     const t1 = mtl.clock.seconds();
@@ -1166,6 +1412,7 @@ pub fn main(init: std.process.Init) !void {
                 L.ex[j * 3 + k] = try r.loadf("language_model.model.layers.{d}.mlp.{s}.{s}", .{ i, proj, suffix });
             }
         }
+        if (r.xpack) try r.repack(&L.ex);
         m.layers[i] = L;
     }
     m.mix = try hcOf(&r, "mix", .{});
@@ -1253,6 +1500,7 @@ pub fn main(init: std.process.Init) !void {
                 ex[j * 3 + k] = try r.loadf("language_model.mtp.layers.0.mlp.{s}.{s}", .{ proj, suffix });
             }
         }
+        if (r.xpack) try r.repack(&ex);
         m.mtp = .{
             .ahc = try hcOf(&r, "mtp.ahc", .{}),
             .mhc = try hcOf(&r, "mtp.mhc", .{}),
@@ -1311,7 +1559,7 @@ pub fn main(init: std.process.Init) !void {
         var pk: [MAXR]u32 = undefined;
         m.reset();
         for (0..3) |_| try m.window(toks[0..1], &pk);
-        for ([_]usize{ 1, 4 }) |rows| {
+        for ([_]usize{ 1, 8 }) |rows| {
             var base: f64 = 0;
             for (names, 0..) |name, c| {
                 r.skip = if (c == 0) 0 else @as(u32, 1) << @intCast(c - 1);
@@ -1323,6 +1571,147 @@ pub fn main(init: std.process.Init) !void {
             }
         }
         r.skip = 0;
+        return;
+    }
+    if (std.c.getenv("FZ_GCHECK") != null) { // grouped experts against fz_xgu/fz_xdown: every row's logits, bit for bit
+        const want0 = ref.object.get("tokens").?.array.items;
+        const pr = ref.object.get("prompt").?.array.items;
+        var pk: [MAXR]u32 = undefined;
+        m.reset();
+        for (pr) |x| {
+            try m.window(&.{@intCast(x.integer)}, &pk);
+            m.keepRows(&.{@intCast(x.integer)}, 1);
+        }
+        const keep = try gpa.alloc(u16, MAXR * VOCAB);
+        defer gpa.free(keep);
+        for (2..MAXR + 1) |rows| {
+            var toks: [MAXR]u32 = undefined;
+            for (0..rows) |i| toks[i] = @intCast(want0[i].integer);
+            r.grouped = false;
+            try m.window(toks[0..rows], &pk);
+            @memcpy(keep[0 .. rows * VOCAB], m.t.logits.b.slice(u16, rows * VOCAB));
+            r.grouped = true;
+            try m.window(toks[0..rows], &pk);
+            const now = m.t.logits.b.slice(u16, rows * VOCAB);
+            var diff: usize = 0;
+            for (keep[0 .. rows * VOCAB], now) |a, b| diff += @intFromBool(a != b);
+            std.debug.print("rows {d}: {d} of {d} logits differ\n", .{ rows, diff, rows * VOCAB });
+        }
+        return;
+    }
+    if (std.c.getenv("FZ_XTIME") != null) { // the experts' share of a window: chain rows against one token repeated
+        const want0 = ref.object.get("tokens").?.array.items;
+        var pk: [MAXR]u32 = undefined;
+        m.reset();
+        for (0..3) |_| try m.window(&.{@intCast(want0[0].integer)}, &pk);
+        if (std.c.getenv("FZ_GPARTS") != null) for ([_]usize{ 2, 8 }) |rows| {
+            var toks: [MAXR]u32 = undefined;
+            for (0..rows) |i| toks[i] = @intCast(want0[i].integer);
+            for ([_]u32{ 0, 1, 4, 6 }) |gs| {
+                r.gskip = gs;
+                m.gpu_seconds = 0;
+                for (0..30) |_| try m.window(toks[0..rows], &pk);
+                std.debug.print("rows {d} gskip {d}: window {d:6.2} ms\n", .{ rows, gs, m.gpu_seconds * 1e3 / 30 });
+            }
+            r.gskip = 0;
+        };
+        for ([_]usize{ 1, 2, 4, 8 }) |rows| {
+            for ([_]bool{ false, true }) |same| {
+                var toks: [MAXR]u32 = undefined;
+                for (0..rows) |i| toks[i] = @intCast(want0[if (same) 0 else i].integer);
+                var ms: [2]f64 = undefined;
+                for ([_]u32{ 0, 1 << 2 }, 0..) |skip, j| {
+                    r.skip = skip;
+                    m.gpu_seconds = 0;
+                    for (0..30) |_| try m.window(toks[0..rows], &pk);
+                    ms[j] = m.gpu_seconds * 1e3 / 30;
+                }
+                r.skip = 0;
+                std.debug.print("rows {d} {s}: window {d:6.2} ms, experts {d:5.2} ms\n", .{ rows, if (same) "one token" else "chain    ", ms[0], ms[0] - ms[1] });
+            }
+        }
+        return;
+    }
+    if (std.c.getenv("FZ_OVERLAP") != null) { // how many experts a window's rows share, layer by layer
+        const pr = ref.object.get("prompt").?.array.items;
+        const want0 = ref.object.get("tokens").?.array.items;
+        r.ar = .{ .b = try r.buffer(64) };
+        r.ar.b.slice(i32, 1)[0] = 1;
+        const pb: Buf = .{ .b = try r.buffer(LAYERS * MAXR * 10 * 4) };
+        var pk: [MAXR]u32 = undefined;
+        m.reset();
+        for (pr) |x| {
+            try m.window(&.{@intCast(x.integer)}, &pk);
+            m.keepRows(&.{@intCast(x.integer)}, 1);
+        }
+        r.probe = pb;
+        const picks = pb.b.slice(u32, LAYERS * MAXR * 10);
+        const Count = struct {
+            fn distinct(sets: []std.AutoHashMap(u32, void)) f64 {
+                var n: usize = 0;
+                for (sets) |*u| n += u.count();
+                return @as(f64, @floatFromInt(n)) / LAYERS;
+            }
+            fn add(sets: []std.AutoHashMap(u32, void), all: []const u32, rows: usize) !void {
+                for (0..LAYERS) |l| for (all[l * MAXR * 10 .. l * MAXR * 10 + rows * 10]) |e| try sets[l].put(e, {});
+            }
+        };
+        var chain_sum: [4]f64 = @splat(0);
+        var sib_sum: [4]f64 = @splat(0);
+        var far: [LAYERS]std.AutoHashMap(u32, void) = undefined;
+        for (&far) |*u| u.* = std.AutoHashMap(u32, void).init(gpa);
+        const starts = [_]usize{ 0, 8, 16, 24 };
+        for (starts) |s0| {
+            for ([_]usize{ 8, 4, 2, 1 }, 0..) |rows, ri| { // chain windows from the pending token, widest first
+                var toks: [MAXR]u32 = undefined;
+                for (0..rows) |i| toks[i] = @intCast(want0[s0 + i].integer);
+                try m.window(toks[0..rows], &pk);
+                var sets: [LAYERS]std.AutoHashMap(u32, void) = undefined;
+                for (&sets) |*u| u.* = std.AutoHashMap(u32, void).init(gpa);
+                try Count.add(&sets, picks, rows);
+                chain_sum[3 - ri] += Count.distinct(&sets);
+                if (rows == 1) try Count.add(&far, picks, 1);
+            }
+            // the target's 8 best tokens for the next position, each a row from the same state (tree siblings)
+            const lg = m.t.logits.b.slice(u16, VOCAB);
+            var best: [8]u32 = undefined;
+            var bestv: [8]f32 = @splat(-std.math.inf(f32));
+            for (lg, 0..) |raw, id| {
+                const v: f32 = @bitCast(@as(u32, raw) << 16);
+                if (v <= bestv[7]) continue;
+                var k: usize = 7;
+                while (k > 0 and v > bestv[k - 1]) : (k -= 1) {
+                    bestv[k] = bestv[k - 1];
+                    best[k] = best[k - 1];
+                }
+                bestv[k] = v;
+                best[k] = @intCast(id);
+            }
+            m.keepRows(&.{@intCast(want0[s0].integer)}, 1);
+            var sib: [LAYERS]std.AutoHashMap(u32, void) = undefined;
+            for (&sib) |*u| u.* = std.AutoHashMap(u32, void).init(gpa);
+            for (best, 0..) |cand, ci| {
+                try m.window(&.{cand}, &pk);
+                try Count.add(&sib, picks, 1);
+                const at: ?usize = switch (ci) {
+                    0 => 0,
+                    1 => 1,
+                    3 => 2,
+                    7 => 3,
+                    else => null,
+                };
+                if (at) |j| sib_sum[j] += Count.distinct(&sib);
+            }
+            var toks: [MAXR]u32 = undefined;
+            for (0..7) |i| toks[i] = @intCast(want0[s0 + 1 + i].integer);
+            try m.window(toks[0..7], &pk);
+            m.keepRows(toks[0..7], 7);
+        }
+        const nstarts: f64 = @floatFromInt(starts.len);
+        for ([_]usize{ 1, 2, 4, 8 }, 0..) |rows, j| {
+            std.debug.print("{d} rows (of {d} picks a layer): chain {d:.1} distinct, siblings {d:.1}\n", .{ rows, rows * 10, chain_sum[j] / nstarts, sib_sum[j] / nstarts });
+        }
+        std.debug.print("4 rows 8 tokens apart: {d:.1} distinct\n", .{Count.distinct(&far)});
         return;
     }
     const prompt = ref.object.get("prompt").?.array.items;
