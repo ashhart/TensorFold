@@ -213,6 +213,7 @@ def render(app: Any) -> str:
                "Seconds from arrival to the reply leaving, under vLLM's name.", latency)
     _histogram(lines, "request_decode_time_seconds",
                "Seconds a finished request spent decoding, under vLLM's name.", decode)
+    _spill(lines, app)
     # per-request event counts; a family is left out where this server doesn't count the event, never a fake zero
     disconnects, preempted = _endings(app)
     if disconnects is not None:
@@ -223,6 +224,53 @@ def render(app: Any) -> str:
         _family(lines, "preemptions_total", "counter", "Requests that had to give a lane up to a later one.",
                 [f"{PREFIX}preemptions_total {preempted}"])
     return "\n".join(lines) + "\n"
+
+
+# the CUDA spill tier (--spill-gib): /health's "spill" keys under this file's names, its milliseconds in seconds
+_SPILL = (("entries", "spill_entries", "gauge", "Prompt states the spill tier holds on disk."),
+          ("pending", "spill_pending", "gauge", "Spill writes queued or in flight."),
+          ("stored_bytes", "spill_stored_bytes", "gauge", "Bytes the spill tier holds on this rank's disk."),
+          ("disk_free_bytes", "spill_disk_free_bytes", "gauge", "Free bytes on the spill tier's disk."),
+          ("restore_ms_p50", "spill_restore_p50_seconds", "gauge", "Median seconds of a recent restore from disk."),
+          ("restore_ms_p95", "spill_restore_p95_seconds", "gauge",
+           "95th percentile seconds of a recent restore from disk."),
+          ("written", "spill_written_total", "counter", "Prompt states written to disk."),
+          ("written_bytes", "spill_written_bytes_total", "counter", "Bytes written to the spill tier."),
+          ("write_s", "spill_write_seconds_total", "counter", "Seconds the writer threads spent on writes."),
+          ("save_s", "spill_save_seconds_total", "counter", "Seconds the engine spent queueing writes."),
+          ("skipped", "spill_skipped_total", "counter", "Writes skipped: the state was stored already."),
+          ("behind", "spill_behind_total", "counter", "Early writes queued past --spill-highwater."),
+          ("deferred", "spill_deferred_total", "counter", "Early writes put off while the writers were busy."),
+          ("unwritten_evicted", "spill_unwritten_evicted_total", "counter",
+           "States that left memory unwritten (rows gone, superseded, or no resumable draft window)."),
+          ("full", "spill_full_total", "counter", "States not written: the size cap left no room."),
+          ("no_space", "spill_no_space_total", "counter", "States not written: the free-disk floor."),
+          ("write_failed", "spill_write_failed_total", "counter", "Writes that failed."),
+          ("loaded", "spill_loaded_total", "counter", "Prompt states read back from disk instead of prefilled."),
+          ("loaded_bytes", "spill_loaded_bytes_total", "counter", "Bytes read back from the spill tier."),
+          ("loaded_tokens", "spill_loaded_tokens_total", "counter", "Prompt tokens read back instead of prefilled."),
+          ("load_s", "spill_load_seconds_total", "counter", "Seconds restores from disk took."),
+          ("load_failed", "spill_load_failed_total", "counter", "Reads that failed on a rank (the request prefilled)."),
+          ("crc_failed", "spill_crc_failed_total", "counter",
+           "Reads on this rank whose data did not match its CRC-32 (the request prefilled)."),
+          ("load_unfit", "spill_load_unfit_total", "counter",
+           "Reads whose draft caches did not fit the request (it prefilled)."),
+          ("pruned", "spill_pruned_total", "counter", "Stored states removed for the size cap or as unreadable."),
+          ("copy_waits", "spill_copy_waits_total", "counter", "Times the engine waited for a copy off the device."),
+          ("copy_wait_s", "spill_copy_wait_seconds_total", "counter",
+           "Seconds the engine waited for copies off the device."))
+
+
+def _spill(lines: list[str], app: Any) -> None:
+    store = getattr(getattr(app, "engine", None), "spill", None)
+    if store is None or not hasattr(store, "info"):
+        return
+    info = store.info()
+    for key, name, kind, help_text in _SPILL:
+        value = info.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            value = value / 1e3 if "_ms_" in key else value
+            _family(lines, name, kind, help_text, [f"{PREFIX}{name} {_num(value)}"])
 
 
 def send(handler: Any, app: Any) -> None:

@@ -214,9 +214,15 @@ def kernel_source_version(family: Family) -> str:
         module = importlib.import_module(module_name)
         source = Path(str(module.__file__))
         paths = sorted(source.parent.rglob("*.py")) if source.name == "__init__.py" else [source]
-        for path in paths:
-            digest.update(path.relative_to(source.parent).as_posix().encode())
-            digest.update(path.read_bytes())
+        hash_sources(digest, source.parent, paths)
     version = getattr(family.package, "KERNEL_VERSION", "")
     prefix = f"{family.model_type}-{version}-" if version else ""
     return prefix + digest.hexdigest()[:12]
+
+
+def hash_sources(digest: Any, base: Path, paths: Any) -> None:
+    """Feed each file's path below ``base`` and its bytes to ``digest`` (MLX snapshot keys, the CUDA spill tier's)."""
+
+    for path in paths:
+        digest.update(path.relative_to(base).as_posix().encode())
+        digest.update(path.read_bytes())

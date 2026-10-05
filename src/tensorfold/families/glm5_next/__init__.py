@@ -202,6 +202,10 @@ def memory_fraction(ram_bytes: int) -> float | None:
 CUDA_QUANTIZATION = (4, 64)
 
 
+# --spill-gib on CUDA: kept prompt states go to disk (cuda/spill.py)
+CUDA_SPILL = True
+
+
 def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",
                 master_port: int = 29551, no_drafts: bool = False, mtp_drafts: int | None = None, **options: Any):
     """Build the two-rank engine with adaptive drafting, reusable prompt state, or serial decoding when drafts are disabled."""
@@ -222,7 +226,7 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
     return GlmEngine(Path(model_dir), rank=int(rank), master=master, port=int(master_port), policy=policy,
                      drafter=Path(drafter) if drafter and not no_drafts else None,
                      context=options.get("context"), context_explicit=options.get("context_explicit"),
-                     serial_only=bool(no_drafts))
+                     serial_only=bool(no_drafts), spill=options.get("spill"))
 
 
 def __getattr__(name: str) -> Any:

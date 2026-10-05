@@ -306,6 +306,30 @@ def test_cuda_parallel_is_one_request_at_a_time_unless_a_number_asks(tmp_path, m
     assert made[0].get("parallel") == streams
 
 
+@pytest.mark.parametrize("flag, refused", [("1", False), ("auto", False), ("2", True)])
+def test_the_spill_tier_is_refused_beside_parallel_streams(tmp_path, monkeypatch, flag, refused):
+    """Its hooks sit on the one-request path: --parallel 2 or more would leave --spill-gib silently unused."""
+
+    pytest.importorskip("torch")
+    import tensorfold.cuda.server as server
+
+    made = []
+    family = _family(cuda_engine=lambda *a, **k: made.append(k) or SimpleNamespace(context_window=4096),
+                     CUDA_SPILL=True)
+    family.model_type = "test"
+    monkeypatch.setattr(server, "App", lambda *a, **k: SimpleNamespace(effective_context_window=4096))
+    monkeypatch.setattr(server, "serve", lambda *a: None)
+    command = ["serve", str(tmp_path), "--backend", "cuda", "--no-drafts", "--spill-gib", "1", "--snapshot-dir",
+               str(tmp_path), "--parallel", flag]
+    args = cli.build_parser().parse_args(command)
+    if refused:
+        with pytest.raises(ValueError, match="--parallel 1"):
+            cli._serve_cuda(args, family, tmp_path, 4096)
+        assert made == []                                   # before the engine loads
+    else:
+        assert cli._serve_cuda(args, family, tmp_path, 4096) == 0 and made[0]["spill"].gib == 1.0
+
+
 @pytest.mark.parametrize("available,capability,name,expected", [
     (True, (12, 1), "NVIDIA GB10", True), (True, (12, 1), "", True), (True, (11, 0), "NVIDIA GB10", True),
     (True, (12, 0), "NVIDIA GeForce RTX 5090", False), (True, (9, 0), "NVIDIA H100 80GB HBM3", False),

@@ -290,6 +290,11 @@ def serve(app: App, host: str, port: int) -> None:
         with auth.signals() if auth is not None else nullcontext():
             server.serve_forever()
     except KeyboardInterrupt:
-        pass
+        hook = getattr(app, "on_exit", None)      # the spill tier's shutdown flush
+        if hook is not None:
+            try:
+                hook()
+            except Exception as exc:              # noqa: BLE001 - a shutdown never fails on a hook
+                print(f"[tensorfold] shutdown hook failed: {exc!r}", flush=True)
     finally:
         server.server_close()

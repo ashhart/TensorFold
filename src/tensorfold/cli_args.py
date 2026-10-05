@@ -93,8 +93,18 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
                             "on CUDA with --parallel 2 or more: the prompt states its concurrent decoder keeps "
                             "(default 3; one GPU keeps them while memory lasts, two ranks reserve a window each)")
     speed.add_argument("--spill-gib", type=float, default=0.0,
-                       help="write evicted conversation prefixes to disk, up to this many GiB, and read them back on "
-                            "demand instead of prefilling again (0: off; needs --snapshot-dir)")
+                       help="write evicted conversation prefixes to disk, up to this many GiB (a rank on CUDA with "
+                            "--tp 2), and read them back on demand instead of prefilling again (0: off; needs "
+                            "--snapshot-dir; CUDA: GLM-5.3-Flash with --parallel 1)")
+    speed.add_argument("--spill-highwater", type=float, default=0.70,
+                       help="CUDA spill: past this fraction of the kept-prompt memory, the states eviction would take "
+                            "next are written in the background (1.0: written only when evicted)")
+    speed.add_argument("--spill-min-tokens", type=int, default=8192,
+                       help="CUDA spill: shorter prompt states are not written")
+    speed.add_argument("--spill-min-free-gib", type=float, default=50.0,
+                       help="CUDA spill: no write leaves less than this much disk free (on either rank)")
+    speed.add_argument("--spill-keep-builds", type=int, default=1,
+                       help="CUDA spill: other builds' stored prompts (other directories) kept at start")
     speed.add_argument("--snapshot-dir", default=str(Path.home() / ".cache" / "tensorfold" / "prefix-snapshots"),
                        help="where system-block and conversation snapshots are kept ('none': in memory only)")
     speed.add_argument("--max-snapshots", type=int, default=3, help="system-block snapshots loaded at start")

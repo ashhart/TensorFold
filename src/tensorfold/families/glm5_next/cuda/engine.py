@@ -11,6 +11,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from .spill_hooks import GlmSpill
+
 DEFAULT_POLICY = "auto"
 DFLASH_POLICY = "fc5:0.3"             # DFlash2 drafts every round: up to 5 while their probability product holds 0.3
 EXL3_AUTO = DFLASH_POLICY             # what auto runs on an EXL3 checkpoint with the draft model
@@ -105,13 +107,13 @@ def without_mtp(transform, layers: int):
     return lambda name, info: (0, 0) if name.startswith(prefix) else transform(name, info)
 
 
-class GlmEngine:
+class GlmEngine(GlmSpill):
     """GLM-5.3-Flash on two ranks (this one ``rank``): weights, MTP and DFlash2 drafting, per-request policies."""
 
     def __init__(self, model_dir: Path, *, rank: int, master: str, port: int, policy: str = DEFAULT_POLICY,
                  drafter: Path | None = None, context: int | None = None, context_explicit: bool | None = None, serial_only: bool = False, comm=None,
-                 prefill_rows: int | None = None) -> None:
-        """``comm``: a communicator with ``all_gather`` and ``barrier`` instead of NCCL between two machines (tests)."""
+                 prefill_rows: int | None = None, spill=None) -> None:
+        """``comm``: ``all_gather`` and ``barrier`` instead of NCCL (tests); ``spill``: ``--spill-gib``'s config."""
 
         import torch
 
@@ -131,6 +133,7 @@ class GlmEngine:
         self.serial_only = serial_only
         self.comm = comm if comm is not None else open_comm(rank, 2, master, port)
         self.comm.barrier()
+        self._spill_setup(spill)                        # --spill-gib: its staging pinned before memory is planned
         cfg = Config.read(model_dir)
         # Without --context the window stays dense, attending every key without indexer work.
         explicit = context is not None if context_explicit is None else bool(context_explicit)
@@ -204,6 +207,7 @@ class GlmEngine:
         self.eos = tuple(w.cfg.eos)
         self.model_dir = Path(model_dir)
         self.request = threading.local()    # the calling request's policy and stop-at-EOS (``app.GlmApp``)
+        self._spill_open(mine[:1] + mine[2:], drafter)  # keyed by the agreed settings but mine[1] (the window's slots)
         # kept conversations (decode.Snapshot, least recently used first) and the live caches' ids; states and saved rows stay within cache_bytes
         self.cache: list = []
         self.live: list[int] = []
@@ -352,17 +356,16 @@ class GlmEngine:
     def _resume(self, prompt: list[int], code: list[int]):
         """The longest snapshot of a strict prefix of ``prompt`` whose draft caches fit the request's drafters."""
 
-        _, mtp, dflash = self._drafters(code)
         best = None
         for snap in self.cache:
-            fits = (not dflash or snap.drafter_end == len(snap.ids)) and (not mtp or snap.mtp_len >= 0)
-            if fits and len(snap.ids) < len(prompt) and prompt[:len(snap.ids)] == snap.ids and (
+            if self._fits(snap, code) and len(snap.ids) < len(prompt) and prompt[:len(snap.ids)] == snap.ids and (
                     best is None or len(snap.ids) > len(best.ids)):
                 best = snap
         return best
 
     def _drop(self, snap) -> None:
         """Forget a kept snapshot and free its saved rows now, even while a caller still holds the object."""
+        self._spill_snap(snap, leaving=True)            # --spill-gib: written as it leaves, while its rows exist
         snap.rows, snap.nbytes, snap.drafter_rows = None, 0, None
         self.cache.remove(snap)
 
@@ -407,7 +410,10 @@ class GlmEngine:
                 self._drop(snap)
                 dropped = True
                 continue
+            window, end = (snap.drafter_rows, snap.drafter_end) if self.spill is not None else (None, -1)
             save_rows(self.e, snap)
+            self._spill_kept(snap, window, end)          # --spill-gib: written with the DFlash2 window the copy drops
+        self._spill_wait()                       # copies of the live caches for drops above end before a prefill
         if dropped:
             import torch
 
@@ -496,9 +502,10 @@ class GlmEngine:
             spec = getattr(self.request, "policy", None) or self.policy
         code = self._effective(encode_policy(spec))
         stop_eos = bool(getattr(self.request, "stop_eos", True))
-        hit = self._resume(list(prompt), code) if draft else None
+        resume = draft                                 # one condition for a kept resume point and a stored one
+        hit = self._resume(list(prompt), code) if resume else None
         seed = (sampling.seed if sampling else 0) & 0xFFFFFFFFFFFFFFFF
-        header = [max_tokens, int(stop_eos), int(draft), len(hit.ids) if hit is not None else 0,
+        header = [max_tokens, int(stop_eos), int(draft), self._spill_cached(list(prompt), hit, resume, code),
                   seed & 0x7FFFFFFF, (seed >> 31) & 0x7FFFFFFF, seed >> 62,
                   *_f64_ints(sampling.temperature if sampling else 0.0), int(sampling.top_k) if sampling else 0,
                   *_f64_ints(sampling.top_p if sampling else 1.0), *_f64_ints(sampling.min_p if sampling else 0.0),
@@ -510,6 +517,7 @@ class GlmEngine:
         self._share(list(prompt))
         if constraint is not None:                     # the request's grammar: rank 1 compiles the same
             self._share(pack(constraint))
+        hit = self._spill_before_run(list(prompt), code, hit, header[3])     # header[3] < 0: a prefix stored on disk
         stats = self._run(list(prompt), max_tokens, sampling, stop_eos, on_tokens, code, hit, draft, constraint)
         stats.update(policy=spec, drafts=draft)
         return stats
@@ -563,6 +571,8 @@ class GlmEngine:
         while True:
             self._await_bell()
             header = self._share(None)
+            if self._spill_flushed(header):             # rank 0's clean shutdown (--spill-gib), written here alike
+                continue
             if len(header) == 2 and header[0] == 0:     # a decision: both ranks prefill, neither samples
                 prompt = self._share(None)
                 labels = self._share(None)
@@ -582,9 +592,10 @@ class GlmEngine:
             sampling = (Sampling(seed, temperature, top_k, _ints_f64(p_lo, p_hi), _ints_f64(m_lo, m_hi))
                         if temperature > 0 else None)
             hit = None
-            if cached:
+            if cached > 0:
                 hit = next((c for c in self.cache if len(c.ids) == cached and prompt[:cached] == c.ids), None)
                 if hit is None:
                     raise RuntimeError(f"rank 1 has no snapshot of the {cached} tokens rank 0 resumes from")
+            hit = self._spill_before_run(prompt, code, hit, cached)    # cached < 0: a prefix stored on disk
             self._run(prompt, max_tokens, sampling, bool(stop_eos), lambda new: None, code, hit, bool(draft),
                       constraint)

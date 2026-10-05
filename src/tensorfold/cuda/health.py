@@ -92,6 +92,9 @@ class Health:
         window = getattr(app, "effective_context_window", None)
         if window:
             body["context_length"] = int(window)
+        spill = getattr(getattr(app, "engine", None), "spill", None)
+        if spill is not None and hasattr(spill, "info"):   # the CUDA spill tier (--spill-gib)
+            body["spill"] = spill.info()
         return body
 
 

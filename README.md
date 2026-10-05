@@ -133,9 +133,13 @@ between MLX and CUDA, different quantizations, or different tensor-parallel rank
 | `--prefill-pass N` | Plan chunks one forward takes while a prompt fills alone, for families with a prompt pass (default 8; 1 as 0.5.0) | MLX |
 | `--pass-cache-gib N` | Freed-buffer cache during such a pass where the memory budget has room, default 16 GiB | MLX |
 | `--checkpoint-slots N` | Retained conversation prefixes (default 3 per lane, at least 8); long conversations hit this before the byte budget. On CUDA, the prompt states Qwen3.8-27B keeps under `--parallel` 2 or more (default 3) | Both |
-| `--spill-gib N` | Write evicted conversation prefixes to disk (up to N GiB) and read them back instead of prefilling again; zero disables | MLX |
+| `--spill-gib N` | Write evicted conversation prefixes to disk (up to N GiB; a rank, on two CUDA ranks) and read them back instead of prefilling again; zero disables. CUDA: GLM-5.3-Flash with `--parallel 1`, see [CUDA spill tier](docs/cuda-spill.md) | Both |
+| `--spill-highwater F` | CUDA spill: past this fraction of the kept-prompt memory, the states eviction would take next are written in the background (default 0.70; 1.0: only when evicted) | CUDA |
+| `--spill-min-tokens N` | CUDA spill: shorter prompt states are not written (default 8192) | CUDA |
+| `--spill-min-free-gib N` | CUDA spill: no write leaves less disk free than this, on any rank (default 50) | CUDA |
+| `--spill-keep-builds N` | CUDA spill: other builds' stored prompts kept at start (default 1) | CUDA |
 | `--mlx-cache-gib N` | Reusable freed-buffer cache, default 8 GiB | MLX |
-| `--snapshot-dir DIR` | Persistent prefix snapshots; `none` disables them | MLX |
+| `--snapshot-dir DIR` | Persistent prefix snapshots; `none` disables them. CUDA: where `--spill-gib` writes | Both |
 | `--max-snapshots N` | System-block snapshots loaded at start, default 3 | MLX |
 | `--no-update-check` | Disable the startup release check | Both |
 

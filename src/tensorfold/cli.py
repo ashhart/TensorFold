@@ -268,6 +268,18 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
         options["parallel"] = streams
     if getattr(args, "checkpoint_slots", None) is not None and getattr(family.package, "CUDA_CHECKPOINT_SLOTS", False):
         options["checkpoint_slots"] = int(args.checkpoint_slots)
+    spill = None
+    if getattr(args, "spill_gib", 0):                  # the tier imports torch: only when the flag asks for it
+        from tensorfold.cuda.spill import SpillConfig, flush_on_exit
+
+        spill = SpillConfig.from_args(args)
+    if spill is not None:
+        if not getattr(family.package, "CUDA_SPILL", False):
+            raise ValueError(f"--spill-gib: {family.title}'s CUDA engine has no spill tier yet "
+                             "(the Mac server has one)")
+        if streams > 1:                     # its hooks sit on the one-request path, not a concurrent decoder's
+            raise ValueError(f"--spill-gib: {family.title}'s spill tier serves --parallel 1 for now, not {streams}")
+        options["spill"] = spill
     served = args.name or (args.model.rstrip("/").split("/")[-1] if hub.is_repo_id(args.model) else model_dir.name)
     where = f", rank {args.rank} of 2" if args.tp == 2 else ""
     print(f"[tensorfold] loading {served}: {family.title} ({family.model_type}) on CUDA{where}", flush=True)
@@ -319,6 +331,8 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
     note = thinking_notes.startup(model_dir, bool(args.thinking))
     if note:
         print(note, flush=True)
+    if spill is not None:
+        app.on_exit = functools.partial(flush_on_exit, app, spill.flush_s)
     serve(app, args.host, int(args.port))
     return 0
 
