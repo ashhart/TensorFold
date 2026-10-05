@@ -429,3 +429,14 @@ def test_draft_vocab_is_checked_before_anything_loads(tmp_path, value, declares,
         with pytest.raises(ValueError, match=message):
             cli._check_serve_options(args, family, "cuda")
 
+
+
+def test_no_draft_vocab_flag_keeps_the_shipped_list():
+    """Absent the flag the engine's own default must apply: a None here would mean the full head."""
+
+    import inspect
+
+    from tensorfold.families import qwen4_exp
+
+    param = inspect.signature(qwen4_exp.cuda_engine).parameters["draft_vocab"]
+    assert param.default == "default"

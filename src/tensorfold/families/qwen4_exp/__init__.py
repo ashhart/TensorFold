@@ -169,7 +169,7 @@ CUDA_PREFILL_FP8 = True            # --prefill-fp8: an NVFP4 checkpoint's MXFP8 
 
 def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",
                 master_port: int = 29551, no_drafts: bool = False, mtp_drafts: int | None = None,
-                mtp_confidence: float | None = None, draft_vocab: str | int | None = None,
+                mtp_confidence: float | None = None, draft_vocab: str | int | None = "default",
                 context: int | None = None, ple_on_ssd: bool = False,
                 kv_dtype: str = "bf16", decode_share: float | None = None, **options: Any):
     """Verify MTP on one or two CUDA GPUs; start rank 1 first for ``tp=2``, with bf16, int8 or int4 KV storage."""
