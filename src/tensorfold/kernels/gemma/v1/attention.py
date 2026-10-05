@@ -112,7 +112,7 @@ _partial = Kernel("gemma_attention_partial", _PARTIAL, ["Q", "K", "V", "KN", "VN
 _merge = Kernel("gemma_attention_merge", _MERGE, ["PM", "PL", "PO", "META"], ["OUT"])
 
 # (keys a chunk, simdgroups a query head, keys scored before an update) by head dim: part of the arithmetic
-SHAPES = {256: (128, 4, 4), 512: (64, 1, 4)}
+SHAPES = {128: (64, 2, 4), 256: (128, 4, 4), 512: (64, 1, 4)}     # 128: Kolibri 1's 12 query heads a key head
 OTHER = (64, 4, 4)
 
 

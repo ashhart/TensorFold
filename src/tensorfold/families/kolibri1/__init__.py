@@ -9,6 +9,11 @@ MODEL_TYPES = ("kolibri1",)
 TITLE = "Kolibri 1"
 LANES = True
 MODELS = ("velaia/Kolibri-1-MLX-4bit",)
+KERNEL_PACKAGE = "tensorfold.kernels.kolibri.v1"
+KERNEL_VERSION = "v1"
+# the decode runs Gemma 4's attention, glue and expert kernels and their matmuls
+KERNEL_DEPENDENCIES = ("tensorfold.kernels.gemma.v1", "tensorfold.kernels.qwen.dense.v1.lane_qmm",
+                       "tensorfold.kernels.nemotron.lightning.v1.rows")
 
 
 def check(model_dir: str | Path) -> None:
@@ -27,10 +32,16 @@ def check(model_dir: str | Path) -> None:
                          f"{', '.join(sorted(kinds))}. {OWN_MODEL_HELP}")
 
 
-def load(model_dir: Path, **_: Any) -> tuple[Any, Any]:
+def load(model_dir: Path, *, lane_kernels: str = "auto", **_: Any) -> tuple[Any, Any]:
+    """Decode rows through the row kernels: MLX's qmv loop a row by default; ``lane_kernels`` "on": the lane matmul.
+    8-bit checkpoints decode through mlx_lm's forward, one row a step (the row kernels read 4-bit weights)."""
+
+    from tensorfold.families import quantization, read_config
     from tensorfold.families.kolibri1.model import load as load_model
 
-    return load_model(Path(model_dir))
+    bits, _group = quantization(read_config(model_dir))
+    backend = None if bits != 4 else ("lane" if str(lane_kernels) == "on" else "rows")
+    return load_model(Path(model_dir), backend=backend)
 
 
 def engine_settings(model: Any) -> dict[str, Any]:

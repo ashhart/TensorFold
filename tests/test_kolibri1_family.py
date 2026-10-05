@@ -1,4 +1,5 @@
-"""Kolibri 1 as a lane family on a tiny random checkpoint (Metal): the vendored forward, ring caches and rollback."""
+"""Kolibri 1 as a lane family on a tiny random checkpoint (Metal): the vendored forward, ring caches, rollback and
+the row-exact decode's windows, streams and drafts."""
 
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ from mlx_lm.models import kolibri1  # noqa: E402
 TINY = {
     "model_type": "kolibri1", "hidden_size": 128, "num_hidden_layers": 5, "num_attention_heads": 4,
     "num_key_value_heads": 2, "head_dim": 64, "rms_norm_eps": 1e-6, "vocab_size": 256, "num_experts": 8,
-    "num_experts_per_tok": 2, "moe_intermediate_size": 128, "shared_expert_intermediate_size": 128,
+    "num_experts_per_tok": 2, "moe_intermediate_size": 512, "shared_expert_intermediate_size": 512,
     "sliding_window": 7, "rope_theta": 10000.0, "tie_word_embeddings": False,
     "layer_types": ["sliding_attention", "sliding_attention", "full_attention", "sliding_attention", "full_attention"],
 }
@@ -70,7 +71,7 @@ def same(a, b) -> bool:
 # prompts shorter than, equal to and past the window (7), decoding across its end
 @pytest.mark.parametrize("prompt", [3, 7, 20])
 def test_the_family_decodes_what_the_reference_forward_decodes(model, prompt):
-    family = Kolibri1(model)
+    family = Kolibri1(model, backend=None)
     ids, window = tokens(prompt), tokens(12, seed=5)
     reference = model.make_cache()
     expected = [model(mx.array([ids]), cache=reference)[0, -1]]
@@ -79,12 +80,16 @@ def test_the_family_decodes_what_the_reference_forward_decodes(model, prompt):
     cache = family.make_cache()
     got = [family.head(family.prefill(mx.array([ids], dtype=mx.uint32), cache))[0, -1]]
     got += steps(family, cache, window)
-    # the same kernels on the same keys: a window off by one row is off by about the logits' own size
-    assert all(same(a, b) for a, b in zip(got, expected))
+    # the same kernels on the same keys, though mlx_lm's full rotating cache hands them over rotated (another sum
+    # order, an ulp or two); a window off by one row is off by about the logits' own size
+    for a, b in zip(got, expected):
+        a, b = a.astype(mx.float32), b.astype(mx.float32)
+        assert int(mx.argmax(a).item()) == int(mx.argmax(b).item())
+        assert float(mx.abs(a - b).max().item()) < 0.05 * float(mx.abs(b).max().item())
 
 
 def test_a_prompt_in_chunks_equals_it_whole(model):
-    family = Kolibri1(model)
+    family = Kolibri1(model, backend=None)
     ids = tokens(30)
     whole = family.make_cache()
     a = family.head(family.prefill(mx.array([ids], dtype=mx.uint32), whole))[0, -1]
@@ -97,9 +102,10 @@ def test_a_prompt_in_chunks_equals_it_whole(model):
         [int(mx.argmax(x).item()) for x in steps(family, chunked, window)]
 
 
-@pytest.mark.parametrize("prompt", [5, 20])
-def test_rollback_then_steps_equal_serial_decoding(model, prompt):
-    family = Kolibri1(model)
+@pytest.mark.parametrize("backend", [None, "rows"])
+@pytest.mark.parametrize("prompt", [5, 20, 131])
+def test_rollback_then_steps_equal_serial_decoding(model, prompt, backend):
+    family = Kolibri1(model, backend=backend, check=False)
     base = prefilled(family, prompt)
     window = tokens(12, seed=5)
     serial = steps(family, copy(base), window)
@@ -111,7 +117,7 @@ def test_rollback_then_steps_equal_serial_decoding(model, prompt):
 
 
 def test_engine_replies_equal_serial_decoding(model):
-    family = Kolibri1(model)
+    family = Kolibri1(model, backend=None)
     prompt = tokens(25, seed=21)
     engine = LaneEngine(family, max_rows=1, max_draft=0)
     stream = LaneStream(stream_id="s", prompt_ids=list(prompt), max_new_tokens=16)
@@ -221,7 +227,7 @@ def test_an_fp8_checkpoint_converts_to_an_mlx_one_that_decodes_like_its_weights(
     original = mlx_lm.utils.load_tokenizer
     mlx_lm.utils.load_tokenizer = lambda *a, **k: None                # no tokenizer in the tiny checkpoint
     try:
-        family, _ = load(out)
+        family, _ = load(out, backend=None)        # 8-bit: mlx_lm's forward
     finally:
         mlx_lm.utils.load_tokenizer = original
     from mlx_lm.models.switch_layers import QuantizedSwitchLinear
@@ -234,3 +240,84 @@ def test_an_fp8_checkpoint_converts_to_an_mlx_one_that_decodes_like_its_weights(
     want = exact(mx.array([ids]))[0]
     got = family.head(family.prefill(mx.array([ids], dtype=mx.uint32), family.make_cache()))[0]
     assert same(got, want)
+
+
+# -- the row-exact decode (4-bit) ----------------------------------------------------------------------------------------
+def rows_family(model, width: int = 16) -> Kolibri1:
+    family = Kolibri1(model, check=False)
+    family.exact_width = width
+    return family
+
+
+# 150 tokens pass the ring (window 7 + 128 slots): windows write across its end
+@pytest.mark.parametrize("prompt", [5, 20, 150])
+def test_windows_give_every_row_its_serial_bits(model, prompt):
+    family = rows_family(model)
+    base = prefilled(family, prompt)
+    window = tokens(14, seed=5)
+    serial = steps(family, copy(base), window)
+    for width in range(2, len(window) + 1):
+        logits = family.head(family.hidden(mx.array([window[:width]], dtype=mx.uint32), copy(base)))
+        mx.eval(logits)
+        assert all(same(logits[0, i], serial[i]) for i in range(width)), width
+
+
+def test_the_row_decode_follows_the_reference_forward(model):
+    """Its own kernels round differently from mlx_lm's, but decode the same tokens on a random model's clear margins."""
+
+    rows, plain = rows_family(model), Kolibri1(model, backend=None)
+    ids, window = tokens(20), tokens(12, seed=5)
+    got = steps(rows, prefilled(rows, 20), window)
+    want = steps(plain, prefilled(plain, 20), window)
+    for a, b in zip(got, want):
+        a, b = a.astype(mx.float32), b.astype(mx.float32)
+        assert float(mx.abs(a - b).max().item()) < 0.05 * float(mx.abs(b).max().item())
+    del ids
+
+
+def test_load_checks_find_every_width_exact_and_streams_shared(model):
+    family = Kolibri1(model)
+    assert family.exact_width == family.fused_rows and family.max_streams > 1
+
+
+def test_a_shared_forward_gives_each_stream_its_own_bits(model):
+    family = rows_family(model)
+    assert family.check_streams(None)
+    bases = [prefilled(family, n, seed=n) for n in (20, 133, 140)]
+    windows = [tokens(n, seed=11 + n) for n in (3, 5, 1)]
+    alone = []
+    for base, window in zip(bases, windows):
+        logits = family.head(family.hidden(mx.array([window], dtype=mx.uint32), copy(base)))
+        mx.eval(logits)
+        alone.append(logits[0])
+    joint = family.head(family.hidden_rows(windows, [copy(b) for b in bases]))[0]
+    mx.eval(joint)
+    at = 0
+    for window, own in zip(windows, alone):
+        assert same(joint[at:at + len(window)], own)
+        at += len(window)
+
+
+def _reply(family, prompt, n, *, sampling=None, proposer=None):
+    engine = LaneEngine(family, max_rows=16, max_draft=15)
+    stream = LaneStream(stream_id="s", prompt_ids=list(prompt), max_new_tokens=n, sampling=sampling,
+                        proposer=proposer, drafts=proposer is not None)
+    engine.add_stream(stream)
+    engine.run()
+    return list(stream.emitted), engine
+
+
+@pytest.mark.parametrize("sampled", [False, True])
+def test_drafted_replies_equal_serial_ones(model, sampled):
+    from gemma4_tiny import KnownReply
+
+    from tensorfold.engine.exact_sampling import Sampling
+
+    family = rows_family(model)
+    prompt = tokens(140, seed=21)
+    sampling = Sampling(seed=5, temperature=1.0, top_k=20, top_p=0.95) if sampled else None
+    serial, _ = _reply(family, prompt, 40, sampling=sampling)
+    drafted, engine = _reply(family, prompt, 40, sampling=sampling, proposer=KnownReply(prompt + serial))
+    assert drafted == serial
+    assert engine.drafted > 0 and 0 < engine.accepted < engine.drafted
+    assert max(r.rows for r in engine.round_stats) > 2
