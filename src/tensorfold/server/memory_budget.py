@@ -7,6 +7,8 @@ import math
 import os
 from typing import Any, Mapping, Sequence
 
+from tensorfold.i18n import t
+
 GIB = 1024**3
 MEMORY_FRACTION = 0.70
 LIMIT_ENV = "TENSORFOLD_MEMORY_LIMIT_GB"
@@ -33,7 +35,7 @@ def physical_memory_bytes() -> int:
         status = MemoryStatusEx()
         status.dwLength = ctypes.sizeof(status)
         if not api(ctypes.byref(status)) or not status.ullTotalPhys:
-            raise RuntimeError("GlobalMemoryStatusEx refused to size RAM on this Windows host")
+            raise RuntimeError(t("GlobalMemoryStatusEx refused to size RAM on this Windows host"))
         return int(status.ullTotalPhys)
     return int(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"))
 
@@ -71,16 +73,16 @@ def memory_limit_bytes(mx: Any, *, fraction: float = MEMORY_FRACTION,
 
     ram = physical_memory_bytes() if physical_bytes is None else int(physical_bytes)
     if ram <= 0:
-        raise ValueError("physical memory must be positive")
+        raise ValueError(t("physical memory must be positive"))
     limit = int(fraction * ram)
     value = (os.environ if environ is None else environ).get(LIMIT_ENV)
     if value is not None:
         try:
             gib = float(value)
         except ValueError:
-            raise ValueError(f"{LIMIT_ENV} must be a positive number in GiB") from None
+            raise ValueError(t("{name} must be a positive number in GiB", name=LIMIT_ENV)) from None
         if not math.isfinite(gib) or gib <= 0:
-            raise ValueError(f"{LIMIT_ENV} must be a positive number in GiB")
+            raise ValueError(t("{name} must be a positive number in GiB", name=LIMIT_ENV))
         limit = max(1, int(min(gib, ram / GIB) * GIB))
     return min(limit, budget_ceiling(mx, ram))
 
@@ -99,8 +101,9 @@ def raise_hint(need: int, ceiling: int) -> str:
 
     if need >= ceiling:
         return ""
-    return (f"Raise the budget past {need / GIB:.1f} GiB with {LIMIT_ENV} (this Mac takes up to {ceiling / GIB:.1f}; "
-            "the default leaves the rest of RAM to other apps), or serve it")
+    return t("Raise the budget past {need} GiB with {variable} (this Mac takes up to {ceiling}; the default leaves "
+             "the rest of RAM to other apps), or serve it", need=f"{need / GIB:.1f}", variable=LIMIT_ENV,
+             ceiling=f"{ceiling / GIB:.1f}")
 
 
 def configure_mlx(mx: Any, cache_limit_bytes: int, *, reserve_bytes: int = PROCESS_BYTES, **kwargs: Any) -> int:
@@ -109,7 +112,7 @@ def configure_mlx(mx: Any, cache_limit_bytes: int, *, reserve_bytes: int = PROCE
     budget = memory_limit_bytes(mx, **kwargs)
     cache = int(cache_limit_bytes)
     if cache < 0:
-        raise ValueError("MLX cache limit must be nonnegative")
+        raise ValueError(t("MLX cache limit must be nonnegative"))
     limit = max(1, budget - int(reserve_bytes))
     mx.set_memory_limit(limit)
     mx.set_cache_limit(min(cache, limit))
@@ -149,7 +152,7 @@ class CacheMemory:
 
     def __post_init__(self) -> None:
         if min(self.fixed_bytes, self.bytes_per_token, self.entry_bytes_per_token) < 0 or self.step < 1:
-            raise ValueError("cache sizes must be nonnegative and step positive")
+            raise ValueError(t("cache sizes must be nonnegative and step positive"))
 
     @classmethod
     def from_cache(cls, cache: Sequence[Any]) -> "CacheMemory":
@@ -174,7 +177,7 @@ class CacheMemory:
                 continue
             positions = int(keys.shape[2])
             if positions < 1 or int(values.shape[2]) != positions:
-                raise ValueError("KV arrays must contain the same positive number of positions")
+                raise ValueError(t("KV arrays must contain the same positive number of positions"))
             main = _array_bytes(keys) + _array_bytes(values)
             each = -(-main // positions)
             spare = _array_bytes(getattr(item, "spare_keys", None))
@@ -194,7 +197,7 @@ class CacheMemory:
 
     def cache_bytes(self, tokens: int) -> int:
         if tokens < 0:
-            raise ValueError("tokens must be nonnegative")
+            raise ValueError(t("tokens must be nonnegative"))
         positions = -(-int(tokens) // self.step) * self.step
         return self.fixed_bytes + positions * self.bytes_per_token
 
@@ -212,7 +215,7 @@ def needed_bytes(memory: CacheMemory, tokens: int, *, resident_bytes: int, worki
     """Projected bytes; resident excludes the new cache, work includes prompt temporaries and KV growth."""
 
     if min(tokens, resident_bytes, working_bytes, reserve_tokens) < 0 or cache_copies < 1:
-        raise ValueError("memory sizes and tokens must be nonnegative, cache copies positive")
+        raise ValueError(t("memory sizes and tokens must be nonnegative, cache copies positive"))
     return int(resident_bytes + working_bytes + cache_copies * memory.cache_bytes(tokens + reserve_tokens))
 
 
@@ -224,7 +227,7 @@ def largest_context(memory: CacheMemory, window_tokens: int, *, budget_bytes: in
     """Largest prompt in the full model window, leaving ``reserve_tokens`` for its reply."""
 
     if window_tokens < 0:
-        raise ValueError("window tokens must be nonnegative")
+        raise ValueError(t("window tokens must be nonnegative"))
     if not fits(memory, 0, budget_bytes=budget_bytes, **kwargs):
         return 0
     lo, hi = 0, max(0, int(window_tokens) - int(kwargs.get("reserve_tokens", 0)))

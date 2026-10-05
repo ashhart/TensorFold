@@ -10,6 +10,7 @@ import re
 import sys
 from typing import Any
 
+from ..i18n import t
 from .safety import ControlError, absolute, atomic_write, private_read
 
 _NAME = re.compile(r"[a-z][a-z0-9-]{0,47}\Z")
@@ -23,7 +24,7 @@ _ENV_NAMES = {"TOKENIZERS_PARALLELISM", "OMP_NUM_THREADS"}
 
 def name_of(name: str) -> str:
     if not isinstance(name, str) or not _NAME.fullmatch(name):
-        raise ControlError("profile name: 1–48 lowercase letters, digits or hyphens; start with a letter")
+        raise ControlError(t("profile name: 1–48 lowercase letters, digits or hyphens; start with a letter"))
     return name
 
 
@@ -32,13 +33,14 @@ def install_name(name: str) -> str:
 
     checked = name_of(name)
     if checked in _RESERVED_NAMES:
-        raise ControlError(f"profile name {checked} is reserved")
+        raise ControlError(t("profile name {name} is reserved", name=checked))
     return checked
 
 
 def string(value: Any, label: str, maximum: int = 4096) -> str:
     if not isinstance(value, str) or not value or len(value) > maximum or any(ord(c) < 32 for c in value):
-        raise ControlError(f"{label} must be nonempty text without control characters (max {maximum})")
+        raise ControlError(t("{label} must be nonempty text without control characters (max {maximum})",
+                                label=label, maximum=maximum))
     return value
 
 
@@ -95,50 +97,53 @@ class Profile:
         name_of(self.name)
         string(self.model, "model")
         if self.model.startswith("-"):
-            raise ControlError("model may not start with a dash")
+            raise ControlError(t("model may not start with a dash"))
         python = absolute(string(self.python, "python"))
         if not Path(self.python).is_absolute():
-            raise ControlError("python must be an absolute path to the serving virtual environment")
+            raise ControlError(t("python must be an absolute path to the serving virtual environment"))
         object.__setattr__(self, "python", str(python))
         try:
             address = ipaddress.ip_address(self.host)
         except ValueError as exc:
-            raise ControlError("host must be a numeric IPv4 or IPv6 address") from exc
+            raise ControlError(t("host must be a numeric IPv4 or IPv6 address")) from exc
         if not address.is_loopback and not self.allow_network:
-            raise ControlError("non-loopback binding needs --allow-network; put authentication in front of it")
+            raise ControlError(
+                t("non-loopback binding needs --allow-network; put authentication in front of it"))
         if type(self.port) is not int or not 1024 <= self.port <= 65535:
-            raise ControlError("port must be an integer from 1024 through 65535")
+            raise ControlError(t("port must be an integer from 1024 through 65535"))
         if self.backend not in {"mlx", "auto"}:
-            raise ControlError("macOS LaunchAgents support backend mlx or auto; remote CUDA is monitor-only")
+            raise ControlError(
+                t("macOS LaunchAgents support backend mlx or auto; remote CUDA is monitor-only"))
         if type(self.schema) is not int or self.schema != 1:
-            raise ControlError("unsupported profile schema (expected 1)")
+            raise ControlError(t("unsupported profile schema (expected 1)"))
         if type(self.allow_network) is not bool or type(self.allow_download) is not bool:
-            raise ControlError("allow_network and allow_download must be booleans")
+            raise ControlError(t("allow_network and allow_download must be booleans"))
         if not isinstance(self.args, (tuple, list)) or len(self.args) > 128:
-            raise ControlError("args must be a list of at most 128 literal arguments")
+            raise ControlError(t("args must be a list of at most 128 literal arguments"))
         for arg in self.args:
-            string(arg, "serve argument")
+            string(arg, t("serve argument"))
             option = arg.split("=", 1)[0]
             if (option in _RESERVED or arg == "--"
                     or (option.startswith("--") and any(r.startswith(option) for r in _RESERVED))):
-                raise ControlError(f"{option} is managed by the profile; do not put it in --arg")
+                raise ControlError(t("{option} is managed by the profile; do not put it in --arg",
+                                        option=option))
             # max-tokens is harmless; authentication material must never reach the process argument list.
             if option.startswith("--") and _SENSITIVE.search(option) and option not in {"--max-tokens"}:
-                raise ControlError("secret-bearing flags belong in a private environment file")
+                raise ControlError(t("secret-bearing flags belong in a private environment file"))
         object.__setattr__(self, "args", tuple(self.args))
         validate_env(self.environment, secrets=False)
         if self.environment_file is not None:
             string(self.environment_file, "environment_file")
             if not Path(self.environment_file).is_absolute():
-                raise ControlError("environment_file must be absolute")
+                raise ControlError(t("environment_file must be absolute"))
         if self.api_key_file is not None:
             string(self.api_key_file, "api_key_file")
             if not Path(self.api_key_file).is_absolute():
-                raise ControlError("api_key_file must be absolute")
+                raise ControlError(t("api_key_file must be absolute"))
         if type(self.log_bytes) is not int or not 65536 <= self.log_bytes <= 64 << 20:
-            raise ControlError("log_bytes must be 64 KiB through 64 MiB")
+            raise ControlError(t("log_bytes must be 64 KiB through 64 MiB"))
         if type(self.log_backups) is not int or not 1 <= self.log_backups <= 10:
-            raise ControlError("log_backups must be 1 through 10")
+            raise ControlError(t("log_backups must be 1 through 10"))
 
     @property
     def label(self) -> str:
@@ -163,23 +168,23 @@ class Profile:
         try:
             values = json.loads(data)
             if not isinstance(values, dict):
-                raise ValueError("expected object")
+                raise ValueError(t("expected object"))
             return cls(**values)
         except (TypeError, ValueError, UnicodeError) as exc:
-            raise ControlError(f"invalid service profile: {exc}") from exc
+            raise ControlError(t("invalid service profile: {error}", error=exc)) from exc
 
 
 def validate_env(values: dict, *, secrets: bool) -> dict[str, str]:
     if not isinstance(values, dict) or len(values) > 64:
-        raise ControlError("environment must be an object with at most 64 entries")
+        raise ControlError(t("environment must be an object with at most 64 entries"))
     for key, value in values.items():
         if not isinstance(key, str) or not _ENV.fullmatch(key):
-            raise ControlError("environment names must be uppercase identifiers")
+            raise ControlError(t("environment names must be uppercase identifiers"))
         if not (key.startswith(_ENV_PREFIXES) or key in _ENV_NAMES):
-            raise ControlError(f"environment override not allowed: {key}")
+            raise ControlError(t("environment override not allowed: {name}", name=key))
         string(value, f"environment {key}", 16384)
         if not secrets and _SENSITIVE.search(key):
-            raise ControlError(f"{key} must be in --env-file, not the profile")
+            raise ControlError(t("{name} must be in --env-file, not the profile", name=key))
     return dict(values)
 
 
@@ -189,7 +194,7 @@ def read_environment(profile: Profile) -> dict[str, str]:
         try:
             external = json.loads(private_read(Path(profile.environment_file), 65536))
         except (ValueError, UnicodeError) as exc:
-            raise ControlError("environment file must be a private JSON object") from exc
+            raise ControlError(t("environment file must be a private JSON object")) from exc
         values.update(validate_env(external, secrets=True))
     values.update(PYTHONUNBUFFERED="1", TENSORFOLD_NO_LIVE="1", TENSORFOLD_NO_UPDATE_CHECK="1")
     if not profile.allow_download:
@@ -206,9 +211,9 @@ class Store:
         try:
             result = Profile.decode(private_read(path))
         except FileNotFoundError as exc:
-            raise ControlError(f"no installed profile: {name}") from exc
+            raise ControlError(t("no installed profile: {name}", name=name)) from exc
         if result.name != name:
-            raise ControlError(f"profile name disagrees with filename: {path}")
+            raise ControlError(t("profile name disagrees with filename: {path}", path=path))
         return result
 
     def list(self) -> tuple[list[Profile], list[str]]:

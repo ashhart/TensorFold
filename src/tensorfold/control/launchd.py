@@ -11,6 +11,7 @@ import sys
 import time
 from typing import Callable
 
+from ..i18n import t
 from .config import Paths, Profile, Store, read_environment
 from .safety import ControlError, atomic_write, file_lock, no_symlinks, private_dir, private_read, redact
 
@@ -27,7 +28,7 @@ def execute(argv: list[str], timeout: float = 20) -> Result:
         result = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
                                 timeout=timeout, check=False, env={**os.environ, "LC_ALL": "C"})
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise ControlError(f"launchctl could not complete: {type(exc).__name__}") from exc
+        raise ControlError(t("launchctl could not complete: {error}", error=type(exc).__name__)) from exc
     return Result(result.returncode, result.stdout, result.stderr)
 
 
@@ -97,15 +98,16 @@ class Manager:
 
     def _guard(self) -> None:
         if self.platform != "darwin":
-            raise ControlError("launchd control is macOS-only; use --url for read-only remote monitoring")
+            raise ControlError(t("launchd control is macOS-only; use --url for read-only remote monitoring"))
         if self.uid <= 0:
-            raise ControlError("run as your logged-in user, not root or sudo")
+            raise ControlError(t("run as your logged-in user, not root or sudo"))
 
     def _call(self, *arguments: str, check: bool = True) -> Result:
         result = self.run(["/bin/launchctl", *arguments], 25)
         if check and result.returncode:
             detail = redact(result.stderr or result.stdout, 1600)
-            raise ControlError(f"launchctl {arguments[0]} failed ({result.returncode}): {detail}")
+            raise ControlError(t("launchctl {verb} failed ({code}): {detail}", verb=arguments[0],
+                                    code=result.returncode, detail=detail))
         return result
 
     def status(self, name: str) -> Status:
@@ -114,26 +116,29 @@ class Manager:
     def _status(self, profile: Profile) -> Status:
         name = profile.name
         if self.platform != "darwin":
-            return Status(name, False, "monitor-only", detail="launchd requires macOS")
+            return Status(name, False, "monitor-only", detail=t("launchd requires macOS"))
         result = self._call("print", f"{self.domain}/{profile.label}", check=False)
         if result.returncode:
             # Never reinterpret permission errors, missing GUI domains or arbitrary failures as 'not loaded'.
             message = (result.stderr + result.stdout).lower()
             if result.returncode in (3, 113) and "could not find service" in message:
                 return Status(name, False, "stopped")
-            raise ControlError(f"cannot inspect {profile.label}: {redact(result.stderr or result.stdout, 1600)}")
+            raise ControlError(t("cannot inspect {label}: {detail}", label=profile.label,
+                                    detail=redact(result.stderr or result.stdout, 1600)))
         return parse_status(name, result.stdout)
 
     def _owned(self, profile: Profile) -> None:
         try:
             installed = plistlib.loads(private_read(self.paths.plist(profile.name)))
         except (plistlib.InvalidFileException, ValueError) as exc:
-            raise ControlError("managed plist is malformed; refusing to modify it") from exc
+            raise ControlError(t("managed plist is malformed; refusing to modify it")) from exc
         if installed != plist(profile, self.paths):
-            raise ControlError("plist differs from the managed profile; refusing to overwrite or control it")
+            raise ControlError(
+                t("plist differs from the managed profile; refusing to overwrite or control it"))
         state = self.status(profile.name)
         if state.loaded and state.path != str(self.paths.plist(profile.name)):
-            raise ControlError("loaded label has a different or unknown plist path; refusing to control it")
+            raise ControlError(
+                t("loaded label has a different or unknown plist path; refusing to control it"))
 
     def _gui(self) -> None:
         self._call("print", self.domain)
@@ -145,7 +150,7 @@ class Manager:
         self._guard()
         self._gui()
         if not Path(profile.python).is_file() or not os.access(profile.python, os.X_OK):
-            raise ControlError("the profile's Python interpreter does not exist or is not executable")
+            raise ControlError(t("the profile's Python interpreter does not exist or is not executable"))
         read_environment(profile)   # validate secrets/permissions before writing anything
         with file_lock(self.paths.root / "operation.lock"):
             current = self.paths.profile(profile.name)
@@ -153,20 +158,24 @@ class Manager:
             old_profile = old_plist = None
             if current.exists() or current.is_symlink() or target.exists() or target.is_symlink():
                 if not replace:
-                    raise ControlError("profile or plist already exists; stop it, then use install --replace")
+                    raise ControlError(
+                        t("profile or plist already exists; stop it, then use install --replace"))
                 previous = self.store.get(profile.name)
                 self._owned(previous)
                 if self.status(profile.name).loaded:
-                    raise ControlError("stop the service before replacing its profile")
+                    raise ControlError(t("stop the service before replacing its profile"))
                 old_profile, old_plist = private_read(current), private_read(target)
             elif self._status(profile).loaded:
-                raise ControlError("this label is already loaded without a managed profile; refusing installation")
+                raise ControlError(
+                    t("this label is already loaded without a managed profile; refusing installation"))
             profiles, errors = self.store.list()
             if errors:
-                raise ControlError("fix malformed profiles before installing: " + "; ".join(errors))
+                raise ControlError(t("fix malformed profiles before installing: {errors}",
+                                        errors=t("; ").join(errors)))
             # Conservative on purpose: even different bind addresses may overlap a wildcard listener.
             if any(p.name != profile.name and p.port == profile.port for p in profiles):
-                raise ControlError(f"port {profile.port} is already reserved by another TensorFold profile")
+                raise ControlError(t("port {port} is already reserved by another TensorFold profile",
+                                        port=profile.port))
             private_dir(self.paths.working(profile.name))
             private_dir(self.paths.log_dir(profile.name))
             try:
@@ -184,7 +193,8 @@ class Manager:
             self._call("enable", f"{self.domain}/{profile.label}")
             if start:
                 return self._start(profile)
-            return Status(profile.name, False, "installed", detail="starts at next login, or with service start")
+            return Status(profile.name, False, "installed",
+                          detail=t("starts at next login, or with service start"))
 
     def _start(self, profile: Profile) -> Status:
         self._owned(profile)
@@ -211,9 +221,9 @@ class Manager:
         deadline = self.clock() + timeout
         while self.status(profile.name).loaded:
             if self.clock() >= deadline:
-                raise ControlError("service is still unloading; restart was not attempted")
+                raise ControlError(t("service is still unloading; restart was not attempted"))
             self.sleep(0.1)
-        return Status(profile.name, False, "stopped", detail="disabled until explicitly started")
+        return Status(profile.name, False, "stopped", detail=t("disabled until explicitly started"))
 
     def stop(self, name: str) -> Status:
         self._guard()
@@ -238,4 +248,4 @@ class Manager:
                 no_symlinks(path)
                 path.unlink()
             # Logs and working directory intentionally survive removal.
-        return Status(name, False, "uninstalled", detail="logs retained; no model files were removed")
+        return Status(name, False, "uninstalled", detail=t("logs retained; no model files were removed"))

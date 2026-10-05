@@ -7,6 +7,8 @@ from pathlib import Path
 import re
 from typing import Any
 
+from tensorfold.i18n import t
+
 _REPO_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
 MOVED_ORG = "Vontra"           # the Hugging Face org TensorFold moved its models out of on 2 Oct 2026
 
@@ -55,7 +57,7 @@ def pull(repo_id: str, *, cache_dir: Any = None) -> Path:
 
     from huggingface_hub import snapshot_download
 
-    print(f"[tensorfold] downloading {repo_id} from Hugging Face", flush=True)
+    print(t("[tensorfold] downloading {repo} from Hugging Face", repo=repo_id), flush=True)
     return Path(snapshot_download(repo_id, cache_dir=cache_dir))
 
 
@@ -102,17 +104,20 @@ def resolve(name: str, *, download: bool = True, cache_dir: Any = None,
     if path.is_dir():
         return path
     if not is_repo_id(str(name)):
-        raise FileNotFoundError(f"{name} is neither a directory nor a Hugging Face repo id (owner/name)")
+        raise FileNotFoundError(t("{model} is neither a directory nor a Hugging Face repo id (owner/name)",
+                                     model=name))
     found = cached(str(name), cache_dir=cache_dir)
     if found is not None and (found / "config.json").is_file() and (
         not download or _cached_weights_complete(found, required_files=required_files)
     ):
         return found
     if not download:
-        raise FileNotFoundError(f"{name} is not in the Hugging Face cache; run: tensorfold pull {name}")
+        raise FileNotFoundError(t("{model} is not in the Hugging Face cache; run: tensorfold pull {model}",
+                                     model=name))
     downloaded = pull(str(name), cache_dir=cache_dir)
     if required_files and not _cached_weights_complete(downloaded, required_files=required_files):
-        raise FileNotFoundError(f"{name} is missing required files: {', '.join(required_files)}")
+        raise FileNotFoundError(t("{model} is missing required files: {files}", model=name,
+                                     files=", ".join(required_files)))
     return downloaded
 
 

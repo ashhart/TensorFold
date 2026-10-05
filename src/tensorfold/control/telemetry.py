@@ -9,6 +9,7 @@ import re
 import time
 from urllib import error, parse, request
 
+from ..i18n import t
 from .safety import ControlError, clean, redact
 
 LIMIT = 1 << 20
@@ -21,16 +22,16 @@ class NoRedirect(request.HTTPRedirectHandler):
 
 def base_url(value: str) -> str:
     if not isinstance(value, str) or any(ord(c) < 33 for c in value):
-        raise ControlError("endpoint must be an HTTP(S) URL without whitespace")
+        raise ControlError(t("endpoint must be an HTTP(S) URL without whitespace"))
     try:
         url = parse.urlsplit(value)
         port = url.port
     except ValueError as exc:
-        raise ControlError("invalid endpoint URL") from exc
+        raise ControlError(t("invalid endpoint URL")) from exc
     if url.scheme not in {"http", "https"} or not url.hostname or url.username or url.password:
-        raise ControlError("endpoint must be HTTP(S), without embedded credentials")
+        raise ControlError(t("endpoint must be HTTP(S), without embedded credentials"))
     if url.query or url.fragment or (port is not None and not 1 <= port <= 65535):
-        raise ControlError("endpoint must not contain a query, fragment, or invalid port")
+        raise ControlError(t("endpoint must not contain a query, fragment, or invalid port"))
     path = url.path.rstrip("/")
     if path.endswith("/v1"):
         path = path[:-3]
@@ -47,9 +48,9 @@ class Client:
     def __init__(self, endpoint: str, token: str | None = None, timeout: float = 2):
         self.endpoint = base_url(endpoint)
         if not 0 < timeout <= 30 or not math.isfinite(timeout):
-            raise ControlError("HTTP timeout must be > 0 and <= 30 seconds")
+            raise ControlError(t("HTTP timeout must be > 0 and <= 30 seconds"))
         if token is not None and any(ord(c) < 32 for c in token):
-            raise ControlError("invalid API token")
+            raise ControlError(t("invalid API token"))
         self.token, self.timeout = token, timeout
         # Avoid leaking credentials to proxy environment variables or redirected origins.
         self.opener = request.build_opener(request.ProxyHandler({}), NoRedirect())
@@ -58,7 +59,7 @@ class Client:
         parts, size = [], 0
         while True:
             if time.monotonic() >= deadline:
-                raise ControlError("telemetry body deadline exceeded")
+                raise ControlError(t("telemetry body deadline exceeded"))
             # read1 returns after available bytes, so a trickle cannot extend the body forever.
             chunk = stream.read1(min(65536, LIMIT + 1 - size))
             if not chunk:
@@ -66,7 +67,7 @@ class Client:
             parts.append(chunk)
             size += len(chunk)
             if size > LIMIT:
-                raise ControlError("telemetry response exceeds 1 MiB")
+                raise ControlError(t("telemetry response exceeds 1 MiB"))
         return b"".join(parts)
 
     def get(self, path: str) -> Response:
@@ -83,30 +84,33 @@ class Client:
             with exc:
                 return Response(exc.code, self._read(exc, deadline))
         except (error.URLError, TimeoutError, OSError) as exc:
-            raise ControlError(f"endpoint unreachable ({type(exc).__name__})") from exc
+            raise ControlError(t("endpoint unreachable ({error})", error=type(exc).__name__)) from exc
 
     def sample(self) -> "Sample":
         now = time.monotonic()
         try:
             health = self.get("/health")
             if health.status in {401, 403}:
-                return Sample(now, phase="unauthorized", error=f"HTTP {health.status}; check --token-env")
+                return Sample(now, phase="unauthorized",
+                              error=t("HTTP {status}; check --token-env", status=health.status))
             data = json.loads(health.body)
             if not isinstance(data, dict):
-                raise ValueError("health must be an object")
+                raise ValueError(t("health must be an object"))
             ready = data.get("ok") is True or data.get("status") in {"ok", "healthy", "ready"}
             warming = data.get("warming") is True
             if health.status != 200 or not (ready or warming):
-                return Sample(now, phase="warming" if warming else "unhealthy", error=f"health HTTP {health.status}")
+                return Sample(now, phase="warming" if warming else "unhealthy",
+                              error=t("health HTTP {status}", status=health.status))
             warning = ""
             try:
                 metrics_response = self.get("/metrics")
                 if metrics_response.status in {401, 403}:
-                    return Sample(now, phase="unauthorized", error=f"HTTP {metrics_response.status}; check --token-env")
+                    return Sample(now, phase="unauthorized",
+                                  error=t("HTTP {status}; check --token-env", status=metrics_response.status))
                 metrics = parse_metrics(metrics_response.body.decode("utf-8", errors="replace")) \
                     if metrics_response.status == 200 else {}
                 if metrics_response.status != 200:
-                    warning = f"metrics unavailable (HTTP {metrics_response.status})"
+                    warning = t("metrics unavailable (HTTP {status})", status=metrics_response.status)
             except ControlError as exc:
                 metrics, warning = {}, str(exc)
             sample = normalize(now, data, metrics)

@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from tensorfold.i18n import t
+
 OFF = 'chat_template_kwargs {"enable_thinking": false}'
 
 
@@ -27,8 +29,9 @@ def startup(model_dir: Path, thinking: bool) -> str | None:
 
     if not thinking or not template_thinks(model_dir):
         return None
-    return ("[tensorfold] thinking on (the chat template's default): replies reason in reasoning_content before the "
-            f"answer in content, and max_tokens counts both. --no-thinking turns it off; a request can send {OFF}")
+    return t("[tensorfold] thinking on (the chat template's default): replies reason in reasoning_content before "
+             "the answer in content, and max_tokens counts both. --no-thinking turns it off; a request can send "
+             "{off}", off=OFF)
 
 
 def unanswered(finish: str, thinking: bool, content: Any, calls: Any = None) -> str | None:
@@ -36,8 +39,9 @@ def unanswered(finish: str, thinking: bool, content: Any, calls: Any = None) -> 
 
     if finish != "length" or not thinking or calls or str(content or "").strip():
         return None
-    return ("[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its "
-            f"text is all in reasoning_content; raise max_tokens, or send {OFF} (server: --no-thinking)")
+    return t("[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and "
+             "its text is all in reasoning_content; raise max_tokens, or send {off} (server: --no-thinking)",
+             off=OFF)
 
 
 __all__ = ["startup", "template_thinks", "unanswered"]

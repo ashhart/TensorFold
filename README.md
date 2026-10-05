@@ -12,6 +12,8 @@ On a Mac, Homebrew installs it too: `brew install ashhart/tensorfold/tensorfold`
 
 Use `http://127.0.0.1:8080/v1` as the client base URL and the model ID from `/v1/models`. Both backends serve chat
 completions, completions, OpenAI Responses (`/v1/responses`) and Anthropic Messages (`/v1/messages`); see the [API reference](docs/api.md).
+The commands and the dashboard print Simplified Chinese where the environment selects it, and English
+elsewhere; see [the language section](docs/control.md#language).
 Python 3.11 or newer is required, and MLX 0.32.2 or newer on a Mac (pip installs it). See the [runbook](RUNBOOK.md)
 for installation and a first request. On NVIDIA GPUs the CUDA kernels need compute capability 8.9 or newer: Ada (RTX 40
 series), Hopper and Blackwell, including the DGX Spark's GB10 and the RTX 50 series. NVFP4 and FP8 checkpoints run from

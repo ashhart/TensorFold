@@ -149,6 +149,15 @@ It also shows TensorFold when the header is under 24 columns.
 The smallest usable size is 72 by 23. At 126 by 32 or larger the overview is complete.
 The UI redraws on input, telemetry, and resize. The poll default is one second.
 
+## Language
+
+Every command line and the dashboard print Simplified Chinese when the environment selects it:
+`TENSORFOLD_LANG=zh` forces it, otherwise `LC_ALL`, `LC_MESSAGES`, `LANGUAGE` and `LANG` are read in that
+order (`zh_CN`, `zh-Hans`, `zh-SG` and plain `zh` select Chinese). A Traditional Chinese locale
+(`zh_TW`, `zh_HK`, `zh-Hant`) and every other locale stay English, and options, model ids, paths and
+protocol fields are English in both. The catalogs live in `src/tensorfold/i18n/`, one file per surface,
+next to the translation rules in `GLOSSARY_zh.md`.
+
 ## Metrics
 
 Output and prompt rates are aggregate counter deltas over a rolling window.

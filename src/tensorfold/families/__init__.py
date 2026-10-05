@@ -11,6 +11,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+from tensorfold.i18n import t
+
 
 @dataclass(frozen=True)
 class Family:
@@ -53,9 +55,16 @@ def read_config(model_dir: str | Path) -> dict[str, Any]:
 
 RECIPES_URL = "https://github.com/ashhart/TensorFold/blob/main/docs/recipes/README.md"
 RUNBOOK_URL = "https://github.com/ashhart/TensorFold/blob/main/RUNBOOK.md"
-OWN_MODEL_HELP = (f"To run a model or checkpoint TensorFold has no recipe for, write one with the recipe book "
-                  f"({RECIPES_URL}: adding a family on a Mac, adding a CUDA family on NVIDIA GPUs), and read the "
-                  f"runbook first ({RUNBOOK_URL}).")
+_OWN_MODEL_HELP = ("To run a model or checkpoint TensorFold has no recipe for, write one with the recipe book "
+                   "({recipes}: adding a family on a Mac, adding a CUDA family on NVIDIA GPUs), and read the "
+                   "runbook first ({runbook}).")
+OWN_MODEL_HELP = _OWN_MODEL_HELP.format(recipes=RECIPES_URL, runbook=RUNBOOK_URL)
+
+
+def own_model_help() -> str:
+    """``OWN_MODEL_HELP`` in the active language, for advice the command line composes itself."""
+
+    return t(_OWN_MODEL_HELP, recipes=RECIPES_URL, runbook=RUNBOOK_URL)
 MLX_QUANT = "mlx"
 EXL3_QUANT = "exl3"
 EXL3_VARIANT_ANY = "any"          # a family declaring EXL3_VARIANT = EXL3_VARIANT_ANY reads every codebook and width

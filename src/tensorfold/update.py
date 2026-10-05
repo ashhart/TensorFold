@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from tensorfold import __version__
+from tensorfold.i18n import t
 
 REPO = "ashhart/TensorFold"
 RELEASES_API = f"https://api.github.com/repos/{REPO}/releases/latest"
@@ -28,7 +29,7 @@ def parse_version(text: str) -> tuple[int, ...]:
 
     match = re.match(r"v?(\d+(?:\.\d+)*)", text.strip())
     if not match:
-        raise ValueError(f"not a version: {text!r}")
+        raise ValueError(t("not a version: {text!r}", text=text))
     return tuple(int(part) for part in match.group(1).split("."))
 
 
@@ -68,8 +69,8 @@ def latest_release(timeout: float = 3.0, *, use_cache: bool = True) -> str | Non
 
 def notice(tag: str | None) -> str | None:
     if tag and newer(tag):
-        return (f"[tensorfold] TensorFold {tag.lstrip('v')} is available (this is {__version__}): run "
-                f"`tensorfold update`, then restart the server")
+        return t("[tensorfold] TensorFold {latest} is available (this is {version}): run `tensorfold update`, "
+                 "then restart the server", latest=tag.lstrip("v"), version=__version__)
     return None
 
 
@@ -125,8 +126,9 @@ def show_whats_new(since: str, tag: str, clone: Path | None = None) -> None:
     text = changelog(tag, clone)
     notes = whats_new(text, since, tag) if text else ""
     if notes:
-        print(f"\nWhat's new since {since}:\n\n{notes}\n", flush=True)
-    print(f"[tensorfold] every release's notes: https://github.com/{REPO}/blob/{tag}/{CHANGELOG}", flush=True)
+        print(t("\nWhat's new since {since}:\n\n{notes}\n", since=since, notes=notes), flush=True)
+    print(t("[tensorfold] every release's notes: {url}",
+            url=f"https://github.com/{REPO}/blob/{tag}/{CHANGELOG}"), flush=True)
     _remember(tag.lstrip("v"))
 
 
@@ -144,8 +146,8 @@ def first_run_notice() -> str | None:
     _remember(__version__)
     if seen and not newer(__version__, seen):
         return None
-    return (f"[tensorfold] this is TensorFold {__version__}; what's new: "
-            f"https://github.com/{REPO}/blob/v{__version__}/{CHANGELOG}")
+    return t("[tensorfold] this is TensorFold {version}; what's new: {url}", version=__version__,
+             url=f"https://github.com/{REPO}/blob/v{__version__}/{CHANGELOG}")
 
 
 def check_in_background() -> threading.Thread | None:
@@ -193,26 +195,29 @@ def update(*, check_only: bool = False, force: bool = False) -> int:
 
     tag = latest_release(timeout=10.0, use_cache=False)
     if tag is None:
-        print(f"[tensorfold] could not reach GitHub to look for releases ({RELEASES_API})", file=sys.stderr)
+        print(t("[tensorfold] could not reach GitHub to look for releases ({url})", url=RELEASES_API),
+              file=sys.stderr)
         return 1
     if not newer(tag) and not force:
-        print(f"[tensorfold] TensorFold {__version__} is the latest release")
+        print(t("[tensorfold] TensorFold {version} is the latest release", version=__version__))
         return 0
-    print(f"[tensorfold] TensorFold {tag.lstrip('v')} is available (this is {__version__})")
+    print(t("[tensorfold] TensorFold {latest} is available (this is {version})", latest=tag.lstrip("v"),
+            version=__version__))
     if check_only:
         return 0
     clone = _editable_clone()
     if clone is not None:
         dirty = subprocess.run(["git", "-C", str(clone), "status", "--porcelain"], capture_output=True, text=True)
         if dirty.returncode != 0 or dirty.stdout.strip():
-            print(f"[tensorfold] this is an editable install from {clone}, which has local changes: update it "
-                  f"yourself (git fetch --tags, then check out {tag})", file=sys.stderr)
+            print(t("[tensorfold] this is an editable install from {clone}, which has local changes: update it "
+                    "yourself (git fetch --tags, then check out {tag})", clone=clone, tag=tag), file=sys.stderr)
             return 1
         if _run(["git", "-C", str(clone), "fetch", "--tags", "origin"]) != 0:
             return 1
         code = _run(["git", "-C", str(clone), "merge", "--ff-only", tag])
         if code != 0:
-            print(f"[tensorfold] {clone} could not fast-forward to {tag}: update it yourself", file=sys.stderr)
+            print(t("[tensorfold] {clone} could not fast-forward to {tag}: update it yourself", clone=clone,
+                    tag=tag), file=sys.stderr)
         else:
             show_whats_new(__version__, tag, clone)
         return code
@@ -221,7 +226,8 @@ def update(*, check_only: bool = False, force: bool = False) -> int:
     if code == 0:
         installed = subprocess.run([sys.executable, "-c", "import tensorfold; print(tensorfold.__version__)"],
                                    capture_output=True, text=True).stdout.strip()
-        print(f"[tensorfold] installed TensorFold {installed or tag.lstrip('v')}; restart any running server")
+        print(t("[tensorfold] installed TensorFold {version}; restart any running server",
+                version=installed or tag.lstrip("v")))
         try:
             CACHE.unlink()
         except OSError:

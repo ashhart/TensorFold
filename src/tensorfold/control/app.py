@@ -17,6 +17,7 @@ from prompt_toolkit.layout import Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.output import ColorDepth
 
+from ..i18n import t
 from .config import Profile, Store, install_name
 from .demo import demo_view
 from .launchd import Manager
@@ -31,7 +32,7 @@ class ControlApp:
                  profile: str | None = None, demo: bool = False, interval: float = 1,
                  token: str | None = None, color: str = "auto", input=None, output=None):
         if not 0.5 <= interval <= 30:
-            raise ControlError("poll interval must be 0.5 through 30 seconds")
+            raise ControlError(t("poll interval must be 0.5 through 30 seconds"))
         self.manager = manager or Manager()
         self.store = Store(self.manager.paths)
         self.interval, self.token = interval, token
@@ -49,7 +50,7 @@ class ControlApp:
         if profile:
             found = next((i for i, n in enumerate(self.view.nodes) if n.name == profile), None)
             if found is None:
-                raise ControlError(f"unknown profile: {profile}")
+                raise ControlError(t("unknown profile: {name}", name=profile))
             self.view.selected = found
         self.bindings = self._bindings()
         control = FormattedTextControl(self._text, focusable=True, show_cursor=False)
@@ -85,7 +86,7 @@ class ControlApp:
         self.view.nodes = nodes
         self.view.selected = next((i for i, n in enumerate(nodes) if n.name == selected), 0)
         if errors:
-            self.view.notice = "Profile error: " + "; ".join(errors)
+            self.view.notice = t("Profile error: {errors}", errors=t("; ").join(errors))
         self._last_profiles = time.monotonic()
 
     async def refresh(self) -> None:
@@ -128,7 +129,7 @@ class ControlApp:
                 tail = self.tails.setdefault(node.name, Tail(self.manager.paths.log(node.name)))
                 node.logs = await asyncio.to_thread(tail.read)
             except (ControlError, OSError) as exc:
-                node.logs = ["[control] log unavailable: " + redact(str(exc))]
+                node.logs = [t("[control] log unavailable: {error}", error=redact(str(exc)))]
 
     async def _poll(self) -> None:
         while True:
@@ -152,7 +153,7 @@ class ControlApp:
 
     def _quit(self) -> None:
         if self.view.busy:
-            self.view.notice = "Wait for the bounded service operation to finish before exiting."
+            self.view.notice = t("Wait for the bounded service operation to finish before exiting.")
         else:
             self.application.exit()
 
@@ -176,7 +177,7 @@ class ControlApp:
             self.view.help = True
         elif action == "new":
             if self.view.demo or self.manager.platform != "darwin":
-                self.view.notice = "Service installation is disabled in demo / non-macOS monitoring."
+                self.view.notice = t("Service installation is disabled in demo / non-macOS monitoring.")
             elif not self.view.busy:
                 ports = {p.port for p in self.store.list()[0]}
                 port = next((p for p in range(8080, 9000) if p not in ports), 8080)
@@ -185,9 +186,9 @@ class ControlApp:
         elif action in {"start", "stop", "restart"}:
             node = self.view.node
             if self.view.demo or not node or not node.managed or self.manager.platform != "darwin":
-                self.view.notice = "Monitor-only endpoint: no service or remote process will be changed."
+                self.view.notice = t("Monitor-only endpoint: no service or remote process will be changed.")
             elif self.view.busy:
-                self.view.notice = "A service operation is already running."
+                self.view.notice = t("A service operation is already running.")
             elif action == "start":
                 self.view.busy = True
                 self.application.create_background_task(self.operate(action, node.name))
@@ -199,11 +200,11 @@ class ControlApp:
     async def operate(self, action: str, name: str, profile: Profile | None = None) -> None:
         self._epoch += 1
         self.view.busy = True
-        self.view.notice = f"{action} {name} …"
+        self.view.notice = f"{t(action)} {name} …"
         try:
             method = getattr(self.manager, action)
             status = await asyncio.to_thread(method, profile if profile else name)
-            self.view.notice = f"{name}: {status.state}. {status.detail}"
+            self.view.notice = f"{name}: {t(status.state)}. {status.detail}"
             profiles = await asyncio.to_thread(self.store.list)
             self.reload_profiles(profiles)
             for node in self.view.nodes:
@@ -214,7 +215,7 @@ class ControlApp:
                     self.rates.pop(name, None)
                     self.view.selected = self.view.nodes.index(node)
         except (ControlError, OSError, ValueError) as exc:
-            self.view.notice = "Operation failed: " + redact(str(exc), 600)
+            self.view.notice = t("Operation failed: {error}", error=redact(str(exc), 600))
         finally:
             self._epoch += 1
             self.view.busy = False
@@ -228,7 +229,7 @@ class ControlApp:
                 self.view.busy = True
                 self.application.create_background_task(self.operate(action, name))
         elif self.view.palette:
-            self.request(ACTIONS[self.view.palette_index][0])
+            self.request(ACTIONS[self.view.palette_index])
         elif self.view.editor is not None:
             fields = self.view.editor
             if "filter" in fields:
@@ -289,7 +290,8 @@ class ControlApp:
         @keys.add(" ", filter=normal)
         def pause(event):
             self.view.paused = not self.view.paused
-            self.view.notice = "Monitoring paused; inference continues." if self.view.paused else "Monitoring resumed."
+            self.view.notice = t("Monitoring paused; inference continues." if self.view.paused
+                                    else "Monitoring resumed.")
             self.rates.clear()  # first sample after any pause is a baseline, not a fabricated rate
             self._invalidate()
         @keys.add("tab")

@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import stat
 
+from ..i18n import t
 from .safety import ControlError, no_symlinks, redact
 
 
@@ -39,20 +40,20 @@ class Tail:
         try:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode):
-                raise ControlError("log is not a regular file")
+                raise ControlError(t("log is not a regular file"))
             identity = (info.st_dev, info.st_ino)
             fresh = identity != self._identity or info.st_size < self._position
             if fresh:
                 self._partial = b""
                 self._position = max(0, info.st_size - self.byte_limit)
                 if self._identity is not None:
-                    self._append("— log rotated / truncated —")
+                    self._append(t("— log rotated / truncated —"))
                 self._identity = identity
             skipped = self._position < max(0, info.st_size - self.byte_limit)
             if skipped:
                 self._position = max(0, info.st_size - self.byte_limit)
                 self._partial = b""
-                self._append("— log burst truncated to keep the UI responsive —")
+                self._append(t("— log burst truncated to keep the UI responsive —"))
             with os.fdopen(fd, "rb", closefd=False) as stream:
                 stream.seek(self._position)
                 data = stream.read(self.byte_limit)

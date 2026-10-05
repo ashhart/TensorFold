@@ -43,3 +43,5 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     for item in items:
         if item.path.name in TENSOR_UNIT_TESTS:
             item.add_marker(skip)
+# English output keeps every assertion stable whatever locale the developer runs under (see tensorfold/i18n)
+os.environ["TENSORFOLD_LANG"] = "en"

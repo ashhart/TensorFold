@@ -10,6 +10,8 @@ import tempfile
 import unicodedata
 from typing import Iterator
 
+from ..i18n import t
+
 
 class ControlError(RuntimeError):
     """A recoverable user-facing control-plane error."""
@@ -44,7 +46,7 @@ def no_symlinks(path: Path) -> None:
     """Reject existing symlink components, including a dangling leaf. No mutations here."""
     for item in (path, *path.parents):
         if item.is_symlink():
-            raise ControlError(f"refusing symlink: {item}")
+            raise ControlError(t("refusing symlink: {path}", path=item))
 
 
 def private_dir(path: Path) -> None:
@@ -52,7 +54,7 @@ def private_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     st = path.stat()
     if hasattr(os, "getuid") and st.st_uid != os.getuid():
-        raise ControlError(f"directory is not owned by this user: {path}")
+        raise ControlError(t("directory is not owned by this user: {path}", path=path))
     path.chmod(0o700)
 
 
@@ -63,17 +65,17 @@ def private_read(path: Path, maximum: int = 1 << 20, *, owner_only: bool = True)
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
-            raise ControlError(f"not a regular file: {path}")
+            raise ControlError(t("not a regular file: {path}", path=path))
         if hasattr(os, "getuid") and st.st_uid != os.getuid():
-            raise ControlError(f"file is not owned by this user: {path}")
+            raise ControlError(t("file is not owned by this user: {path}", path=path))
         if owner_only and os.name != "nt" and st.st_mode & 0o077:
-            raise ControlError(f"private file must be mode 0600: {path}")
+            raise ControlError(t("private file must be mode 0600: {path}", path=path))
         if st.st_size > maximum:
-            raise ControlError(f"file exceeds {maximum} bytes: {path}")
+            raise ControlError(t("file exceeds {maximum} bytes: {path}", maximum=maximum, path=path))
         with os.fdopen(fd, "rb", closefd=False) as stream:
             data = stream.read(maximum + 1)
         if len(data) > maximum:
-            raise ControlError(f"file exceeds {maximum} bytes: {path}")
+            raise ControlError(t("file exceeds {maximum} bytes: {path}", maximum=maximum, path=path))
         return data
     finally:
         os.close(fd)
@@ -111,11 +113,11 @@ def file_lock(path: Path) -> Iterator[None]:
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
-            raise ControlError("invalid service lock")
+            raise ControlError(t("invalid service lock"))
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise ControlError("another TensorFold service operation is in progress") from exc
+            raise ControlError(t("another TensorFold service operation is in progress")) from exc
         yield
     finally:
         os.close(fd)

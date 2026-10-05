@@ -285,3 +285,31 @@ def test_cards_prefer_the_health_live_block():
     text, _ = console_frame(View([node]), 144, 42, color=False)
     assert "17.5" in text and "6.5" in text and "2 / 4" in text
     assert "completed prompt tokens" in text
+
+
+def test_simplified_chinese_frame_is_translated_and_fits(monkeypatch):
+    monkeypatch.setenv("TENSORFOLD_LANG", "zh")
+    text, _ = console_frame(demo_view(), 144, 42, color=False)
+    for label in ("控制台", "模型服务", "输出历史", "会话", "实时日志", "解码 token/s", "连接 / 等待", "演示 / 模拟",
+                  "KV 峰值池", "草稿接受率", "TTFT 均值"):
+        assert label in text, label
+    for english in ("CONTROL ROOM", "OUTPUT HISTORY", "SESSION", "LIVE LOG", "MODEL SERVICES", "DECODE TOK/S"):
+        assert english not in text, english
+    empty, _ = console_frame(View(), 100, 32, color=False)
+    assert "尚无配置" in empty and "No profiles yet" not in empty
+    # Wide characters take two cells each: the localized frame must still fit every supported size.
+    for width, height in ((72, 23), (80, 24), (100, 32), (144, 42), (220, 60)):
+        for tab in ("overview", "logs"):
+            view = demo_view()
+            view.tab = tab
+            rendered, _ = console_frame(view, width, height, color=False)
+            lines = rendered.splitlines()
+            assert len(lines) <= height
+            assert max(map(cell_len, lines)) <= width
+
+
+def test_english_frame_stays_english(monkeypatch):
+    monkeypatch.delenv("TENSORFOLD_LANG", raising=False)
+    text, _ = console_frame(demo_view(), 144, 42, color=False)
+    assert "CONTROL ROOM" in text and "OUTPUT HISTORY" in text
+    assert not any("\u4e00" <= character <= "\u9fff" for character in text)
