@@ -330,10 +330,10 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
 
     def attention(name: str) -> AttnW:
         hd = full.head_dim
-        hl, kl = full.heads // world, full.kv_heads // world
+        hl, kl, k0 = full.heads // world, kv_local, kv_first
         q = _rows(triple(name + ".q_proj"), rank * hl * 2 * hd, (rank + 1) * hl * 2 * hd)
-        k = _rows(triple(name + ".k_proj"), rank * kl * hd, (rank + 1) * kl * hd)
-        v = _rows(triple(name + ".v_proj"), rank * kl * hd, (rank + 1) * kl * hd)
+        k = _rows(triple(name + ".k_proj"), k0 * hd, (k0 + kl) * hd)
+        v = _rows(triple(name + ".v_proj"), k0 * hd, (k0 + kl) * hd)
         proj = stack_q4([q, k, v, triple(name + ".indexer.index_qk_proj")])          # the indexer: every rank
         o = _groups(triple(name + ".o_proj"), rank * hl * hd // 32, (rank + 1) * hl * hd // 32)
         return AttnW(proj, cscale(name + ".q_norm.weight"), cscale(name + ".k_norm.weight"),
