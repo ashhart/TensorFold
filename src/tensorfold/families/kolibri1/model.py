@@ -31,18 +31,20 @@ class Kolibri1:
     mtp = None
     drafts = 0
     speculate_early = False
-    # the widest verify window checked at load
-    fused_rows = 16
-    # a shared forward's rows and streams (``hidden_rows``): the bf16 router's matmul is row-exact to 16 rows here
-    batch_rows = 16
-    max_streams = 8
+    # the widest verify window checked at load: 16-row windows pass the load check, yet on real text some row gets
+    # other bits than its one-row step (2,160 windows of 8 to 16 rows at 4 prompt lengths: all 24 misses at 16)
+    fused_rows = 15
+    batch_rows = 15
+    # one stream a forward: a shared forward (``hidden_rows``) passes ``check_streams`` yet gives some streams other
+    # bits than their own calls on some prompts (which stream depends on the tokens), so no fixed check admits it
+    streams_exact = False
+    max_streams = 1
 
     # Gemma 4's load-time checks: they read only the lane interface below
     _check_tokens = Gemma4._check_tokens
     _base = Gemma4._base
     check_windows = Gemma4.check_windows
     check_streams = Gemma4.check_streams
-    time_shared_rows = Gemma4.time_shared_rows
     _kept = staticmethod(Gemma4._kept)
     _chain_only = staticmethod(Gemma4._chain_only)
     _tokens = staticmethod(Gemma4._tokens)
@@ -58,23 +60,13 @@ class Kolibri1:
             self.decode = RowDecode(model, backend)
         # mlx_lm's batched kernels give a window's rows other bits than one-row steps: without RowDecode, one row
         self.exact_width, self.window_costs = 1, {}
-        self.shared_costs: dict[int, float] = {}
         if check and self.decode is not None:
             self.exact_width, self.window_costs = self.check_windows(tokenizer)
         self.multi_row_exact = self.exact_width >= 2
-        if not self.multi_row_exact:
-            self.max_streams = 1
-        elif check and not self.check_streams(tokenizer):
-            self.max_streams = 1
-            print("[kolibri1] a forward over several streams' rows does not reproduce each stream's own call here: one "
-                  "stream a forward", flush=True)
-        if check and self.multi_row_exact and self.max_streams > 1:
-            self.shared_costs = self.time_shared_rows(tokenizer)
         if check and self.decode is not None:
             timing = ", ".join(f"{w}: {ms:.1f}" for w, ms in sorted(self.window_costs.items()))
-            shared = ", ".join(f"{w}: {ms:.1f}" for w, ms in sorted(self.shared_costs.items()))
             print(f"[kolibri1] {self.decode.backend} matmul; windows of up to {self.exact_width} rows reproduce one-row "
-                  f"steps here (ms by rows {timing}; shared forwards {shared or 'none'})", flush=True)
+                  f"steps here (ms by rows {timing}); one stream a forward", flush=True)
 
     # -- the engine's model interface --------------------------------------------------------------------------------
     @property

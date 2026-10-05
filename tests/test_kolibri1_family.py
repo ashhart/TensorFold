@@ -275,9 +275,11 @@ def test_the_row_decode_follows_the_reference_forward(model):
     del ids
 
 
-def test_load_checks_find_every_width_exact_and_streams_shared(model):
+def test_load_checks_find_every_width_exact_and_streams_go_one_a_forward(model):
     family = Kolibri1(model)
-    assert family.exact_width == family.fused_rows and family.max_streams > 1
+    assert family.exact_width == family.fused_rows
+    engine = LaneEngine(family, max_rows=16, max_draft=15)
+    assert not engine.family_streams and engine.batch_streams == 1
 
 
 def test_a_shared_forward_gives_each_stream_its_own_bits(model):
