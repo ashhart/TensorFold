@@ -11,7 +11,7 @@ const D = 2560;
 const WIDE = 4 * D;
 const LAYERS = 48;
 const VOCAB = 248320;
-const CAP = 8192; // keys an attention layer holds in this runner
+const CAP = 262144; // keys an attention layer holds in this runner
 const PLE_TAIL = 9;
 const GROUPS = 8;
 const MAXR = 8;
@@ -775,6 +775,7 @@ const Run = struct {
     ul: Buf = undefined,
     dense16_pipe: mtl.Pipeline = undefined,
     xnew_header: []const u8 = "",
+    sel: ?Select = null, // long contexts: the indexer's pool, scores and selection
 
     fn buffer(r: *Run, len: usize) !mtl.Buffer {
         const n = @max(len, 64);
@@ -1122,6 +1123,97 @@ const Run = struct {
     }
 };
 
+
+/// Past 512 complete 4-key blocks the attention reads each row's 512 best blocks and its tail: the recorded pool,
+/// scores and selection kernels (dispatched at any context), with per-row metadata from the host.
+const TOP = 512;
+const KW = 4 * TOP + 3;
+const Select = struct {
+    pool: *Variant,
+    scores: *Variant,
+    select: *Variant,
+    start: Buf,
+    sc: Buf,
+    keys: Buf,
+    complete: Buf,
+    ends: Buf,
+    counts: Buf,
+    sparse: Buf,
+    pooled_shape: mtl.Buffer,
+    q_shape: mtl.Buffer,
+    sc_shape: mtl.Buffer,
+    ids_shape: mtl.Buffer,
+
+    fn init(r: *Run, rows_max: usize) !?Select {
+        var found: [3]?*Variant = .{ null, null, null };
+        var it = r.variants.iterator();
+        while (it.next()) |kv| {
+            const n = kv.key_ptr.*;
+            if (std.mem.indexOf(u8, n, "q4_idx_pool_") != null and std.mem.indexOf(u8, n, "_rel") == null) found[0] = kv.value_ptr.*;
+            if (std.mem.indexOf(u8, n, "q4_idx_scores_") != null) found[1] = kv.value_ptr.*;
+            if (std.mem.indexOf(u8, n, "q4_idx_select_") != null) found[2] = kv.value_ptr.*;
+        }
+        if (found[0] == null or found[1] == null or found[2] == null) return null;
+        const B = struct {
+            fn of(rr: *Run, n: usize) !Buf {
+                return .{ .b = try rr.buffer(n) };
+            }
+        };
+        return .{
+            .pool = found[0].?, .scores = found[1].?, .select = found[2].?,
+            .start = try B.of(r, 16), .sc = try B.of(r, rows_max * (CAP / 4) * 4), .keys = try B.of(r, rows_max * KW * 4),
+            .complete = try B.of(r, rows_max * 4), .ends = try B.of(r, rows_max * 4), .counts = try B.of(r, rows_max * 4),
+            .sparse = try B.of(r, rows_max * 4),
+            .pooled_shape = try r.buffer(16), .q_shape = try r.buffer(16), .sc_shape = try r.buffer(16), .ids_shape = try r.buffer(16),
+        };
+    }
+
+    /// The window's per-row metadata from its first position; true when some row reads selected blocks.
+    fn meta(s: *Select, pos: usize, rows: usize) bool {
+        const cp = s.complete.b.slice(i32, rows);
+        const en = s.ends.b.slice(i32, rows);
+        const ct = s.counts.b.slice(i32, rows);
+        const sp = s.sparse.b.slice(i32, rows);
+        var any = false;
+        for (0..rows) |i| {
+            const e = pos + i + 1;
+            const c = e / 4;
+            const sparse = c > TOP;
+            cp[i], en[i] = .{ @intCast(c), @intCast(e) };
+            ct[i] = @intCast(if (sparse) 4 * TOP + e - 4 * c else e);
+            sp[i] = @intFromBool(sparse);
+            any = any or sparse;
+        }
+        return any;
+    }
+
+    /// Pool the blocks the window completes, score every complete block for each row, select each row's keys.
+    fn encode(s: *Select, r: *Run, L: *Layer, iq: Buf, eps: Buf, log2base: Buf, pos: usize, rows: usize) !void {
+        const last = (pos + rows) / 4;
+        if (last > L.pooled_n) {
+            s.start.b.slice(i32, 1)[0] = @intCast(L.pooled_n); // read at run time: one window a command buffer
+            try r.bindV(s.pool, &.{ L.raw, s.start, L.pool, eps, log2base }, &.{.{ .b = L.pooled.b, .off = L.pooled.off + L.pooled_n * 128 * 2 }});
+            r.enc.dispatchThreads(mtl.Size.of(128, last - L.pooled_n, 1), mtl.Size.of(128, 1, 1));
+            if (!r.serial) r.enc.barrier();
+            L.pooled_n = last;
+        }
+        const nb = L.pooled_n;
+        @memcpy(s.pooled_shape.slice(i32, 2), &[2]i32{ @intCast(nb), 128 });
+        @memcpy(s.q_shape.slice(i32, 3), &[3]i32{ @intCast(rows), 4, 128 });
+        @memcpy(s.sc_shape.slice(i32, 2), &[2]i32{ @intCast(rows), @intCast(nb) });
+        @memcpy(s.ids_shape.slice(i32, 2), &[2]i32{ @intCast(rows), KW });
+        try r.shapes.put(r.arena, "POOLED_shape", s.pooled_shape);
+        try r.shapes.put(r.arena, "Q_shape", s.q_shape);
+        try r.shapes.put(r.arena, "SC_shape", s.sc_shape);
+        try r.bindV(s.scores, &.{ iq, L.pooled, s.complete }, &.{s.sc});
+        r.enc.dispatchThreads(mtl.Size.of(((nb + 7) / 8) * 256, (rows + 7) / 8, 1), mtl.Size.of(256, 1, 1));
+        if (!r.serial) r.enc.barrier();
+        try r.bindV(s.select, &.{ s.sc, s.complete, s.ends }, &.{s.keys});
+        r.enc.dispatchThreads(mtl.Size.of(1024 * rows, 1, 1), mtl.Size.of(1024, 1, 1));
+        if (!r.serial) r.enc.barrier();
+    }
+};
+
 const Hc = struct { scale: Buf, dw: Buf, ds: Buf, db: Buf, uw: Buf, us: Buf, ub: Buf };
 const Lane = struct { wq: Buf, sbt: Buf };
 const Layer = struct {
@@ -1144,6 +1236,9 @@ const Layer = struct {
     keys: Buf = undefined,
     vals: Buf = undefined,
     raw: Buf = undefined,
+    pool: Buf = undefined,
+    pooled: Buf = undefined, // the indexer's pooled block keys [CAP / 4, 128]
+    pooled_n: usize = 0,
 };
 
 fn hcOf(r: *Run, comptime fmt: []const u8, args: anytype) !Hc {
@@ -1301,6 +1396,8 @@ const Model = struct {
         for (&m.layers) |*L| if (L.linear) {
             @memset(L.cs[0].b.contents()[L.cs[0].off .. L.cs[0].off + CS_ROW], 0);
             @memset(L.so[0].b.contents()[L.so[0].off .. L.so[0].off + SO_ROW], 0);
+        } else {
+            L.pooled_n = 0;
         };
         m.ple.hist = .{ m.ple.eos, m.ple.eos };
         @memset(m.ple.cin.b.contents()[m.ple.cin.off .. m.ple.cin.off + (PLE_TAIL + MAXR) * WIDE * 2], 0);
@@ -1464,7 +1561,14 @@ const Model = struct {
                     r.enc.dispatchThreads(mtl.Size.of(512 * rows, 1, 1), mtl.Size.of(256, 1, 1));
                 }
                 if (!r.serial) r.enc.barrier();
-                try r.call("q4_attn_parts#[24, 256]", &.{ t.q, L.keys, L.vals, t.ids81, t.nk8, t.zero8, t.scale }, &.{ t.po, t.pm });
+                if (r.sel != null and !r.gpu_round and r.sel.?.meta(m.pos, rows)) {
+                    var sl = &r.sel.?;
+                    try sl.encode(r, L, t.iq, t.eps, t.log2base, m.pos, rows);
+                    const dense_ids = r.shapes.get("IDS_shape").?;
+                    try r.shapes.put(r.arena, "IDS_shape", sl.ids_shape);
+                    try r.call("q4_attn_parts#[24, 256]", &.{ t.q, L.keys, L.vals, sl.keys, sl.counts, sl.sparse, t.scale }, &.{ t.po, t.pm });
+                    try r.shapes.put(r.arena, "IDS_shape", dense_ids);
+                } else try r.call("q4_attn_parts#[24, 256]", &.{ t.q, L.keys, L.vals, t.ids81, t.nk8, t.zero8, t.scale }, &.{ t.po, t.pm });
                 try r.call("q4_attn_merge_gate#[24, 16, 256]", &.{ t.po, t.pm, t.p }, &.{t.aout});
                 try m.lane(t.aout, 6144, L.out, "lane_qmm_bytes_grouped@att.o", t.branch);
             }
@@ -1622,6 +1726,9 @@ const Model = struct {
         m.state = 1 - m.state;
         m.state_row = keep - 1;
         m.pos += keep;
+        for (&m.layers) |*L| if (!L.linear) {
+            L.pooled_n = @min(L.pooled_n, m.pos / 4); // a block a rejected row completed is pooled again
+        };
         const cin = m.ple.cin.b.contents();
         std.mem.copyForwards(u8, cin[0 .. PLE_TAIL * WIDE * 2], cin[keep * WIDE * 2 .. (keep + PLE_TAIL) * WIDE * 2]);
         for (tokens[0..keep]) |tok| m.ple.hist = .{ m.ple.hist[1], tok };
@@ -1681,6 +1788,7 @@ const Prompt = struct {
     gdn: Variant,
     gdn_grid: mtl.Size,
     gdn_tg: mtl.Size,
+    sel: ?Select = null, // long prompts: selection for the chunk's rows
     skip: u32 = 0, // timing knock-outs: 1 experts, 2 DeltaNet, 4 attention, 8 projections, 16 hyper-connections, 32 routing, 64 router, 128 sort, 256 row moves, 512 shared expert
     proj: [LAYERS][3]Buf,
     out: [LAYERS][3]Buf,
@@ -1738,7 +1846,7 @@ const Prompt = struct {
             .up = try B.of(r, R * WIDE * 2), .mixed = try B.of(r, R * D * 2), .p = try B.of(r, R * 16480 * 2),
             .gout = try B.of(r, R * 6144 * 2), .branch = try B.of(r, R * D * 2), .cso = try B.of(r, CS_ROW),
             .q = try B.of(r, R * 24 * 256 * 2), .kout = try B.of(r, R * 2 * 256 * 2), .iq = try B.of(r, R * 4 * 128 * 2),
-            .po = try B.of(r, 64), .pm = try B.of(r, 64), .aout = try B.of(r, R * 6144 * 2),
+            .po = try B.of(r, R * 24 * 16 * 256 * 4), .pm = try B.of(r, R * 24 * 16 * 2 * 4), .aout = try B.of(r, R * 6144 * 2),
             .pos = try B.of(r, R * 4), .nk = try B.of(r, R * 4), .zeros = try B.of(r, R * 4), .kvmeta = try B.of(r, 16),
             .lg = try B.of(r, R * 513 * 4), .pick = try B.of(r, R * 10 * 4), .wts = try B.of(r, R * 10 * 4),
             .cnt = try B.of(r, 512 * 4), .off = try B.of(r, 513 * 4), .cur = try B.of(r, 512 * 4), .row_of = try B.of(r, R * 10 * 4),
@@ -1750,6 +1858,7 @@ const Prompt = struct {
             .part = try B.of(r, 8 * R * 324 * 4), .qn = try B.of(r, R * 16 * 128 * 4), .kn = try B.of(r, R * 16 * 128 * 4),
             .v = try B.of(r, R * 48 * 128 * 4), .gg = try B.of(r, R * 48 * 4), .beta = try B.of(r, R * 48 * 4), .ys = try B.of(r, R * 6144 * 4),
         };
+        p.sel = try Select.init(r, PMAX);
         return p;
     }
 
@@ -2096,7 +2205,16 @@ const Prompt = struct {
                 p.bind(r.kv_pipe, &.{ b.kout, b.p, L.keys, L.vals, L.raw, b.kvmeta });
                 r.enc.dispatchThreads(mtl.Size.of(512 * rows, 1, 1), mtl.Size.of(256, 1, 1));
                 p.barrier();
-                if (p.skip & 4 == 0) { // causal attention over the cache and the chunk, gated on the way out
+                const sparse = p.sel != null and p.sel.?.meta(m.pos, rows);
+                if (sparse) { // rows past the dense range: each row's selected blocks and tail (the decode's kernels)
+                    var sl = &p.sel.?;
+                    try sl.encode(r, L, b.iq, t.eps, t.log2base, m.pos, rows);
+                    const dense_ids = r.shapes.get("IDS_shape").?;
+                    try r.shapes.put(r.arena, "IDS_shape", sl.ids_shape);
+                    try r.callRows("q4_attn_parts#[24, 256]", rows, &.{ b.q, L.keys, L.vals, sl.keys, sl.counts, sl.sparse, t.scale }, &.{ b.po, b.pm }, null);
+                    try r.shapes.put(r.arena, "IDS_shape", dense_ids);
+                    try r.callRows("q4_attn_merge_gate#[24, 16, 256]", rows, &.{ b.po, b.pm, b.p }, &.{b.aout}, null);
+                } else if (p.skip & 4 == 0) { // causal attention over the cache and the chunk, gated on the way out
                     p.bind(p.attn256, &.{ b.q, L.keys, L.vals, b.p });
                     const ap = [4]i32{ @intCast(rows), @intCast(m.pos + rows), @intCast(m.pos), CAP };
                     r.enc.setBytes(std.mem.asBytes(&ap), 4);
@@ -2192,6 +2310,7 @@ pub fn main(init: std.process.Init) !void {
     r.prefetch = !r.serial and std.c.getenv("FZ_PREFETCH") != null;
     const t0 = mtl.clock.seconds();
     try r.compile(args[2]);
+    r.sel = try Select.init(&r, MAXR);
     const t1 = mtl.clock.seconds();
 
     const index_file = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/model.safetensors.index.json", .{args[1]}, 0));
@@ -2234,6 +2353,8 @@ pub fn main(init: std.process.Init) !void {
             L.keys = .{ .b = try r.buffer(2 * CAP * 256 * 2) };
             L.vals = .{ .b = try r.buffer(2 * CAP * 256 * 2) };
             L.raw = .{ .b = try r.buffer(CAP * 128 * 2) };
+            L.pool = try r.loadf("L{d}.att.pool", .{i});
+            L.pooled = .{ .b = try r.buffer(CAP / 4 * 128 * 2) };
         }
         const projs = [_][]const u8{ "switch_mlp.gate_proj", "switch_mlp.up_proj", "shared_expert.gate_proj", "shared_expert.up_proj", "switch_mlp.down_proj", "shared_expert.down_proj" };
         for (projs, 0..) |proj, j| {
@@ -2868,6 +2989,10 @@ pub fn main(init: std.process.Init) !void {
     while (same < want.len and got.items[same] == @as(u32, @intCast(want[same].integer))) same += 1;
     const steps: f64 = @floatFromInt(want.len - 1);
     std.debug.print("one row: {d}/{d} tokens equal to Python's; {d:.1} tok/s ({d:.2} ms a step, GPU {d:.2} ms)\n", .{ same, want.len, steps / (t4 - t3), (t4 - t3) * 1e3 / steps, m.gpu_seconds * 1e3 / steps });
+    if (std.c.getenv("FZ_ONLY1") != null) {
+        if (same < want.len) std.debug.print("first difference at token {d}: got {d}, Python {d}\n", .{ same, got.items[same], want[same].integer });
+        return;
+    }
 
     // 2. the Python engine's drafted windows, every row's pick, with rollback
     m.reset();

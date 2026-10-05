@@ -177,6 +177,7 @@ def main() -> None:
     ap.add_argument("model", type=Path)
     ap.add_argument("out", type=Path)
     ap.add_argument("--prompt", default="Write a story about a lighthouse keeper.")
+    ap.add_argument("--prompt-file", type=Path, help="the prompt's text from a file (long contexts)")
     ap.add_argument("--tokens", type=int, default=64)
     ap.add_argument("--fixture-step", type=int, default=3)
     ap.add_argument("--windows", default="2,3,4,6,8")
@@ -189,7 +190,8 @@ def main() -> None:
 
     rt, tok = load(args.model, drafts=3)
     from tensorfold.families.qwen4_exp.mtp_cache import MTPCache
-    prompt = [int(t) for t in render_prompt_ids(tok, [{"role": "user", "content": args.prompt}],
+    text = args.prompt_file.read_text() if args.prompt_file else args.prompt
+    prompt = [int(t) for t in render_prompt_ids(tok, [{"role": "user", "content": text}],
                                                 enable_thinking=False)]
     cache = rt.model.make_cache()
 
