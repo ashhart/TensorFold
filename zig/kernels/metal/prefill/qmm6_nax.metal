@@ -83,16 +83,17 @@ inline void k_loop6(thread frag<float> (&acc)[TM][2], const device T* x, int K, 
   threadgroup_barrier(mem_flags::mem_threadgroup);
 }
 
+// A simdgroup's TM x 2 fragments to y (row stride ld): rows below live, columns below nc.
 template <typename T, int TM>
-inline void store(thread const frag<float> (&acc)[TM][2], device T* y, int N, int live, short2 home) {
+inline void store(thread const frag<float> (&acc)[TM][2], device T* y, int ld, int live, int nc, short2 home) {
   TF_UNROLL
   for (short i = 0; i < TM; i++) {
     TF_UNROLL
     for (short j = 0; j < 2; j++) {
-      if (live == 16 * TM) {
-        frag_put(acc[i][j], y, N, 16 * i, 16 * j, home);
+      if (live == 16 * TM && nc >= 32) {
+        frag_put(acc[i][j], y, ld, 16 * i, 16 * j, home);
       } else {
-        frag_put_in(acc[i][j], y, N, 16 * i, 16 * j, home, live, 32);
+        frag_put_in(acc[i][j], y, ld, 16 * i, 16 * j, home, live, nc);
       }
     }
   }
@@ -137,13 +138,13 @@ inline bool expert_tile(const device int32_t* offsets, int experts, int total, i
 
 }  // namespace tfq6
 
-// y = x W^T for 6-bit g32 W [N, K]: 64x64 output tiles, 4 simdgroups of 32x32; N a multiple of 32. P: K N M.
+// y = x W^T for 6-bit g32 W [N, K]: 64x64 output tiles, 4 simdgroups of 32x32. P: K N M and y's row stride (0: N).
 [[kernel]] void tf_qmm6_t_nax(const device uint* W [[buffer(0)]], const device bfloat16_t* S [[buffer(1)]],
     const device bfloat16_t* B [[buffer(2)]], const device bfloat16_t* X [[buffer(3)]], const device int* P [[buffer(4)]],
     device bfloat16_t* Y [[buffer(5)]], uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]], uint3 tg [[threadgroup_position_in_grid]]) {
   threadgroup bfloat16_t tile[64 * (64 + 16 / sizeof(bfloat16_t))];
-  const int K = P[0], N = P[1], M = P[2];
+  const int K = P[0], N = P[1], M = P[2], LD = P[3] > 0 ? P[3] : N;
   const int row = int(tg.y) * 64, col = int(tg.x) * 64, t = int(sg) * 32 + int(lane);
   const int tm = 32 * int(sg / 2), tn = 32 * int(sg % 2), live = min(32, M - (row + tm));
   const long wrow = long(min(col + t / 2, N - 1));
@@ -152,7 +153,8 @@ inline bool expert_tile(const device int32_t* offsets, int experts, int total, i
   tfq6::k_loop6<bfloat16_t, 2>(acc, X + long(row + tm) * K, K, live, live == 32, W + wrow * WPR + 6 * (t % 2),
                                 S + wrow * KG + (t % 2), B + wrow * KG + (t % 2), tile, tn, uint(t),
                                 frag_home(ushort(lane)));
-  if (col + tn < N) tfq6::store<bfloat16_t, 2>(acc, Y + long(row + tm) * N + col + tn, N, live, frag_home(ushort(lane)));
+  if (col + tn < N && live > 0)
+    tfq6::store<bfloat16_t, 2>(acc, Y + long(row + tm) * LD + col + tn, LD, live, N - (col + tn), frag_home(ushort(lane)));
 }
 
 [[kernel]] void tf_expert_offsets6(const device uint32_t* I [[buffer(0)]], const device int32_t* P [[buffer(1)]],
@@ -179,7 +181,8 @@ inline void gather6(const device bfloat16_t* X, const device uint* W, const devi
   tfq6::k_loop6<bfloat16_t, SM / 16>(acc, X + long(row + tm) * K, K, live, row + tm + SM <= M,
                                       W + wrow * WPR + 6 * (t % 2), S + wrow * KG + (t % 2), B + wrow * KG + (t % 2),
                                       tile, tn, uint(t), frag_home(ushort(lane)));
-  if (col + tn < N) tfq6::store<bfloat16_t, SM / 16>(acc, Y + long(row + tm) * N + col + tn, N, live, frag_home(ushort(lane)));
+  if (col + tn < N && live > 0)
+    tfq6::store<bfloat16_t, SM / 16>(acc, Y + long(row + tm) * N + col + tn, N, live, N - (col + tn), frag_home(ushort(lane)));
 }
 
 [[kernel]] void tf_gather_qmm6_nax_64(const device bfloat16_t* X [[buffer(0)]], const device uint* W [[buffer(1)]],

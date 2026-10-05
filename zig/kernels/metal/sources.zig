@@ -23,6 +23,8 @@ pub const nax = @embedFile("nax.h");
 
 /// Flash Next 6-bit (group 32) prompt projections on the tensor units: dense and sorted-expert gather.
 pub const flashnext_qmm6 = @embedFile("prefill/qmm6_nax.metal");
+/// Flash Next prompt-chunk glue: hyper-connection pieces, router rows, top-k, the expert sort, gathers and scatters.
+pub const flashnext_prompt = @embedFile("prefill/fn_prompt.metal");
 
 /// A source file of MLX-exact kernels: compiled as one library, its kernels found by name.
 pub const File = struct { name: []const u8, text: []const u8 };
