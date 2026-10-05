@@ -100,6 +100,25 @@ def test_windows_reproduce_one_row_steps(tiny):
             assert _same(window[0, i], serial[i]), f"row {i} of a {width}-row window differs from its one-row step"
 
 
+def test_windows_past_the_tile_span_reproduce_one_row_steps(tiny, monkeypatch):
+    """Windows wider than the matmul's two-tile threadgroup keep every row's bits: 17 to 24 rows take a third
+    tile in one threadgroup, and 25 splits over the grid's y axis again. The served row decoder groups up to
+    128 queries exactly; the test default of 16 would take another kernel past it."""
+    monkeypatch.setattr(exact_attention, "EXACT_MAX_QUERIES", 128)
+    model, _, _ = tiny
+    mx.random.seed(15)
+    prompt = [int(t) for t in mx.random.randint(0, 512, (17,)).tolist()]
+    tokens = [int(t) for t in mx.random.randint(0, 512, (40,)).tolist()]
+    base = _prefill(model, prompt)
+    start = len(prompt)
+    serial_cache = LaneEngine.copy_single_cache(base)
+    serial = [_run(model, [t], serial_cache, start + i)[0, -1] for i, t in enumerate(tokens)]
+    for width in (17, 20, 24, 25, 32, 40):
+        window = _run(model, tokens[:width], LaneEngine.copy_single_cache(base), start)
+        for i in range(width):
+            assert _same(window[0, i], serial[i]), f"row {i} of a {width}-row window differs from its one-row step"
+
+
 def test_partly_kept_windows_leave_serial_state(tiny):
     """A window kept to its first rows leaves the cache exactly as that many one-row steps: the next rows agree."""
 

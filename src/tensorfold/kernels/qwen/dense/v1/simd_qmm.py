@@ -10,7 +10,7 @@ import mlx.core as mx
 from tensorfold.kernels import threads
 
 MAX_ROWS = 1 << 16   # rows a call routed here (prompt chunks included); every row's bits are its one-row bits
-RT_MAX = 2           # 8-row tiles a threadgroup: more rows than 8 RT_MAX spread over the grid's y axis
+RT_MAX = 3           # 8-row tiles a threadgroup spans at most; rows past the span spread over the grid's y axis
 MMA_SGS = 16         # physical simdgroups at most (fewer where a pipeline takes fewer threads): same chunks
 GROUP = 64
 
@@ -382,6 +382,16 @@ def fits(module: Any) -> bool:
             and getattr(module, "mode", "affine") == "affine")
 
 
+def row_tiles(rows: int, s: int) -> int:
+    """Row tiles a threadgroup takes: two past 8 rows, or three while that covers every row in one group."""
+    # a further grid-y threadgroup reads the weights again, so a span of three tiles takes rows 17 to 24 without
+    # the second read; past 24 more tiles cost more than the reads they save, and two tiles a group keeps the
+    # output tiles (tiles() halves them as the row span grows)
+    if 16 < rows <= 24:
+        return 3 if s <= 8 else 2
+    return 2 if rows > 8 else 1 if rows > 0 else 0
+
+
 def _launch(kind: str, rows: int, n: int, dims: int, group: int = GROUP, most: int = MMA_SGS) -> tuple:
     """Return constants, grid, threadgroup and output shapes; an MMA launch uses up to ``most`` simdgroups."""
 
@@ -395,7 +405,7 @@ def _launch(kind: str, rows: int, n: int, dims: int, group: int = GROUP, most: i
         per = sgs * (32 // s) * nr
         consts = (("K", dims), ("N", n), ("S", s), ("SGS", sgs), ("NR", nr), ("XB", xb), ("GS", group), ("RS", rows))
         return consts, (-(-n // per) * sgs * 32, 1, 1), (sgs * 32, 1, 1), [(rows, n)]
-    rt = min(RT_MAX, (rows + 7) // 8)          # past 16 rows the grid's y axis takes more threadgroups of two tiles
+    rt = row_tiles(rows, s)                  # each grid-y threadgroup reads the weights once for its 8 rt rows
     nt = tiles(n, rt * 8, s)
     sgs = min(s, most)
     consts = (("K", dims), ("N", n), ("S", s), ("SGS", sgs), ("NT", nt), ("RT", rt), ("GS", group))

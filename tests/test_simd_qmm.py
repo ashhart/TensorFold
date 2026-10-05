@@ -27,11 +27,29 @@ def test_rows_do_not_depend_on_row_count(n, k):
     x = (mx.random.normal((128, k)) * 0.5).astype(mx.bfloat16)
     full = simd_qmm.qmm(x, q, s, b)
     mx.eval(full)
-    for m in (1, 2, 3, 4, 5, 8, 9, 16, 17, 33, 100, 128):     # 1-4 rows: the scalar kernel
+    for m in (1, 2, 3, 4, 5, 8, 9, 16, 17, 24, 25, 31, 32, 33, 40, 64, 100, 128):
         assert _same(simd_qmm.qmm(x[:m], q, s, b), full[:m]), f"rows 0..{m - 1} changed with the row count"
     # a row computed alone (the scalar kernel) equals the same row anywhere inside a window (the MMA kernel)
     for r in (0, 7, 20, 127):
         assert _same(simd_qmm.qmm(x[r:r + 1], q, s, b), full[r:r + 1]), f"row {r} alone differs"
+
+
+@pytest.mark.parametrize("n,k", SHAPES)
+def test_one_threadgroup_spans_the_widest_window(n, k):
+    """A threadgroup takes a third 8-row tile while that covers every row, so rows 17 to 24 cost one weight
+    read plus a tile, not the second full read a further grid-y group takes; past 24 the plans stay as they
+    were, and the reduction buffer fits every launch."""
+    for rows in range(1, 129):
+        constants, grid, _, _ = simd_qmm._launch("mma", rows, n, k)
+        s, rt, nt = (dict(constants)[k2] for k2 in ("S", "RT", "NT"))
+        assert s * rt * nt * 64 * 4 <= 16384                # the reduction buffer fits
+        assert (grid[1] - 1) * rt * 8 < rows <= grid[1] * rt * 8   # no idle threadgroup, none left out
+        if rows <= 8:
+            assert rt == 1, f"{rows} rows took {rt} tiles"
+        elif 16 < rows <= 24 and s <= 8:
+            assert (rt, grid[1]) == (3, 1), f"{rows} rows took {(rt, grid[1])} (one threadgroup's third tile)"
+        else:
+            assert rt == 2, f"{rows} rows took {rt} tiles"
 
 
 @pytest.mark.parametrize("n,k", SHAPES)
