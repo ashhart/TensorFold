@@ -18,6 +18,7 @@ torch's allocator at MemAvailable less TF_MEM_RESERVE_GIB + TF_MEM_SLACK_GIB (TF
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -331,7 +332,10 @@ def mode_chunk_test(eng, nccl, args, env) -> SU.Result:
                     print(f"chunk-test prefill split {k} (tail {N - k}): logits max|diff| "
                           f"{diffs[k]:.3g}", flush=True)
         ok = all(d == 0 for d in diffs.values())
-        return SU.Result("chunk-prefill", "PASS" if ok else "FAIL", {"N": N, "diffs": diffs},
+        # the whole prefill's last-row logits themselves (bytes and argmax): a suite run must reproduce them exactly
+        sha = hashlib.sha256(ref.cpu().numpy().tobytes()).hexdigest()[:16]
+        return SU.Result("chunk-prefill", "PASS" if ok else "FAIL",
+                         {"N": N, "diffs": diffs, "logits_sha": sha, "argmax": int(ref[-1].argmax())},
                          f"N={N}: last-row logits max|diff| " + ", ".join(f"split {k} {d:.3g}" for k, d in diffs.items()))
     facts = []
     with torch.no_grad():
@@ -353,8 +357,6 @@ def mode_chunk_test(eng, nccl, args, env) -> SU.Result:
 
 def mode_views_test(eng, nccl, args, env) -> SU.Result:
     """TP=2: a kept state's bytes are the same on both ranks."""
-
-    import hashlib
 
     base = golden_ids()
     doc = (base * (1 + args.views_test // len(base)))[:args.views_test]

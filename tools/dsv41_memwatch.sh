@@ -24,6 +24,8 @@ if [ "${1:-}" = --stop ]; then
     echo "$(date '+%F %T') memwatch $TAG: stop: killed the run's processes still there after ${GRACE}s" | tee -a "$LOG"
   fi
   pkill -TERM -f -- "dsv41_memwatch\.sh ${TAG}( |\$)"
+  # bash runs the TERM trap after the watcher's current sleep: gone when this returns (at most ~2 s after a KILL)
+  for _ in $(seq 1 40); do pgrep -f -- "dsv41_memwatch\.sh ${TAG}( |\$)" >/dev/null 2>&1 || break; sleep 0.1; done
   grep -h -- "memwatch $TAG: KILL" "$LOG" 2>/dev/null
   exit 0
 fi
