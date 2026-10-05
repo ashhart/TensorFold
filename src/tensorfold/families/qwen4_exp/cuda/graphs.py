@@ -22,9 +22,11 @@ class Graphs:
         import gc
 
         torch.cuda.synchronize()
-        gc.collect()
         g = torch.cuda.CUDAGraph()
-        # Collecting old graphs calls cuGraphExecDestroy and invalidates an active capture.
+        # no garbage collection while capturing: collecting an old engine's graphs calls cuGraphExecDestroy, which
+        # invalidates the capture (seen when one process built a second engine). A collect before every capture
+        # would put a full traversal on the critical path of a mid-reply recapture set (#336), and the graphs an
+        # engine drops are already reaped by reference counting when its slot is reallocated.
         enabled = gc.isenabled()
         gc.disable()
         try:
