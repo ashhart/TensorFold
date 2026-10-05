@@ -2,8 +2,8 @@
 
 This integration combines sleep support from [PR #386](https://github.com/ashhart/TensorFold/pull/386)
 with the pending DFlash v1 implementation in [PR #347](https://github.com/ashhart/TensorFold/pull/347).
-It adds compatibility checks and the sleep-cache changes needed for that combination. The existing
-sleep PR is unchanged.
+The combined sleep PR includes compatibility checks and the sleep-cache changes needed for that
+combination, with the drafting dependency's original commits preserved.
 The [machine-readable receipt](model-sleep-dflash-results.json) records the qualified source digest,
 checkpoint revisions, token hashes and lifecycle measurements.
 

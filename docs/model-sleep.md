@@ -12,7 +12,9 @@ CPU), other families, Metal and tensor parallelism are not implemented. The
 [0.6.5 reference validation](research/model-sleep-065-validation.md) covers
 the pinned Qwen NVFP4 and Nemotron affine checkpoints, drafting, unified-memory
 reclamation, disk prefixes and HTTP conversation continuity. Other checkpoints and
-formats need their own qualification. Earlier receipts cover
+formats need their own qualification. The [DFlash validation](research/model-sleep-dflash-validation.md)
+also covers `capyctl/FrogNano-4B-2609-MLX-4bit` with `z-lab/Qwen3.5-4B-DFlash`, including
+eight concurrent streams, retained prefixes and HTTP conversation continuation. Earlier receipts cover
 [synthetic runtimes](research/model-sleep-validation.md),
 [Qwen weights](research/model-sleep-cuda-validation.md) and
 [Qwen prefix preservation](research/model-sleep-cache-validation.md).
@@ -41,6 +43,15 @@ Use `--no-drafts` to disable drafting for either family. The checkpoint files mu
 available and unchanged throughout the server's lifetime. The prototype verifies
 their full SHA-256 content before releasing the runtime and when reloading it;
 verification reads the entire checkpoint and contributes to transition latency.
+
+Qwen accepts compatible DFlash v1 and DFlash2 checkpoints through `--drafter`.
+The drafter's `dflash_config.target_layer_ids` determines which target hidden states
+are captured and their order. Startup checks layer bounds, hidden width, declared target
+depth and vocabulary, and projection shape before loading weights. These IDs must match
+the drafter's training; changing them alone does not make an unrelated model compatible.
+Legacy DFlash2 checkpoints without the field retain the 27B's original five layers.
+Retained prefix snapshots preserve each drafter layer's context length, including mixed
+sliding and full-attention windows, and wake checks the original drafter settings.
 
 The following calls require the same secret in the caller's environment:
 
