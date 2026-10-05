@@ -66,18 +66,31 @@ def one(url: str, model: str, m) -> dict:
     req = urllib.request.Request(url + "/v1/chat/completions", data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
     sent, first, usage = time.perf_counter(), None, {}
+    done = False
     with urllib.request.urlopen(req, timeout=3600) as resp:
         for raw in resp:
             line = raw.decode().strip()
-            if not line.startswith("data:") or line == "data: [DONE]":
+            if line == "data: [DONE]":
+                done = True
+                break
+            if not line.startswith("data:"):
                 continue
             chunk = json.loads(line[5:])
+            if "error" in chunk:
+                raise RuntimeError("cold prefill stream reported a server error")
             for c in chunk.get("choices") or []:
                 d = c.get("delta") or {}
                 if first is None and (d.get("content") or d.get("reasoning_content") or d.get("reasoning")):
                     first = time.perf_counter()
             usage = chunk.get("usage") or usage
-    return {"ttft_s": round((first or time.perf_counter()) - sent, 4), "prompt_tokens": usage.get("prompt_tokens")}
+    if not done:
+        raise RuntimeError("cold prefill stream ended before [DONE]")
+    if first is None:
+        raise RuntimeError("cold prefill stream completed without an output token")
+    prompt_tokens = usage.get("prompt_tokens")
+    if type(prompt_tokens) is not int or prompt_tokens <= 0:
+        raise RuntimeError("cold prefill stream did not report positive integer prompt_tokens")
+    return {"ttft_s": round(first - sent, 4), "prompt_tokens": prompt_tokens}
 
 
 def run(url: str, model: str, prompts: str, out: str) -> None:
