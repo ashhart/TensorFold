@@ -110,6 +110,8 @@ def indexed_weights(world: int, mtp: bool, mapped_tables: bool = True, *, host_e
                 axis = -1 if ".down_proj" in name else -2
                 if shape and len(shape) >= 2:
                     shape[axis] = -(-shape[axis] * share[0] // share[1])
+                    if host_embedding and not nvfp4_experts and axis == -1:  # sm_70: 16-bit down in 64-input groups
+                        shape[axis] = -(-shape[axis] // 64) * 64
             elif ".switch_mlp." in name or ".shared_expert." in name:
                 axis = -1 if ".down_proj." in name else -2
                 shape[axis] //= world

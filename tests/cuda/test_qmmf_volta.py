@@ -9,7 +9,8 @@ if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 7:
 from tensorfold.cuda.kernels.qmmf_volta import DENSE_PROMPT_LIMIT, FP4, FP8, F16, VoltaLinear  # noqa: E402
 
 E2M1 = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0])
-SHAPES = [(48, 5120), (1024, 5120), (5120, 6144), (10240, 5120), (5120, 17408), (17408, 5120), (1000, 256)]
+SHAPES = [(48, 5120), (1024, 5120), (5120, 6144), (10240, 5120), (5120, 17408), (17408, 5120), (1000, 256),
+          (2560, 160), (1000, 96), (320, 2592)]                     # K ending in a 32-input half group
 ROWS = list(range(1, 34)) + [63, 64, 65, 100, 127, 128, 129, 200]
 
 
@@ -55,7 +56,7 @@ def test_rows_do_not_depend_on_row_count(fmt, n, k):
 
 
 @pytest.mark.parametrize("fmt", [FP4, FP8, F16])
-@pytest.mark.parametrize("n,k", [(1024, 5120), (1000, 256), (5120, 17408)])
+@pytest.mark.parametrize("n,k", [(1024, 5120), (1000, 256), (5120, 17408), (2560, 160), (100, 96)])
 def test_expanded_weights_are_the_stored_values(fmt, n, k):
     """The fp16 values the kernels multiply, times the column factors, are the checkpoint's values bit for bit."""
 
@@ -118,3 +119,25 @@ def test_f32_and_strided_rows():
     a = lin.matmul(big[:, :1024], f32=True)
     b = lin.matmul(big[:, :1024].contiguous(), f32=True)
     assert a.dtype == torch.float32 and torch.equal(a, b)
+
+
+@pytest.mark.parametrize("cols", [slice(0, 160), slice(160, 320), slice(480, 640), slice(64, 128), slice(32, 64)])
+def test_half_group_shards_are_the_rows_slices(cols):
+    """A 16-bit shard of whole 32-input halves: its inputs' stored values with the whole rows' column factors."""
+
+    g = _gen(cols.start + 1)
+    w = (torch.randn((2560, 640), generator=g, device="cuda") * 0.02).to(torch.bfloat16)
+    w[3] *= 1e-3
+    full = VoltaLinear.from_bf16(w)
+    shard = VoltaLinear.from_bf16(w, cols=cols)
+    assert shard.k == cols.stop - cols.start
+    assert torch.equal(shard.alpha, full.alpha)
+    assert torch.equal(shard.dense().double() * shard.alpha[:shard.n, None].double(), w[:, cols].double())
+    if cols.start % 64 == 0 and cols.stop % 64 == 0:
+        part = full.groups(cols.start // 64, cols.stop // 64)
+        assert torch.equal(shard.words, part.words)
+    x = torch.randn((9, shard.k), generator=g, device="cuda").to(torch.bfloat16)
+    ref = x.float() @ w[:, cols].float().T
+    got = shard.matmul(x, f32=True)
+    assert (got - ref).abs().max() <= ref.abs().max() * 2 ** -12
+    assert torch.equal(torch.cat([shard.matmul(x[r:r + 1], f32=True) for r in range(9)]), got)

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-UNIT = 64                 # an NVFP4 expert width share is whole 64-input groups
+UNIT = 32                 # a width share is whole 32-input halves (sm_70's expert kernels take a half group)
+GROUP = 64                # the 64-input group an NVFP4 expert share keeps on other GPUs
 
 
 def share(width: int, rank: int, world: int, unit: int = UNIT) -> tuple[int, int]:

@@ -375,7 +375,7 @@ std::vector<torch::Tensor> prep(torch::Tensor x) {
 std::vector<torch::Tensor> prep884(torch::Tensor x, int64_t frag_min) {
     TORCH_CHECK(x.dim() == 2 && x.scalar_type() == at::kBFloat16 && x.stride(1) == 1, "prep884: x must be (M, K) bf16 rows");
     const int M = x.size(0), K = x.size(1);
-    TORCH_CHECK(K % 64 == 0, "prep884: K must be a multiple of 64, not ", K);
+    TORCH_CHECK(K % 32 == 0, "prep884: K must be a multiple of 32, not ", K);
     if (M < frag_min) return prep(x);                        // a few rows: row-major reads share cache lines
     const int M8 = (M + 7) / 8;
     auto xf = torch::empty({M8, K / 8, 8, 8}, x.options().dtype(at::kHalf));

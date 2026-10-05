@@ -46,14 +46,14 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
     from tensorfold.cuda.build import volta as on_volta
 
     from . import volta as vk
-    from .ranks import UNIT, share
+    from .ranks import GROUP, UNIT, share
 
     sm70 = full.quant == "modelopt" and on_volta()
     if world > 1 and (full.heads % world or full.nk % world or full.nv % world
                       or (full.kv_heads % world and world % full.kv_heads)):
         raise ValueError(f"Flash Next's heads ({full.heads} query, {full.kv_heads} key/value, {full.nk}/{full.nv} "
                          f"DeltaNet) do not split over {world} ranks")
-    unit = UNIT if full.quant == "modelopt" else 32            # whole NVFP4 groups of 64, MLX groups of 32
+    unit = GROUP if full.quant == "modelopt" and not sm70 else UNIT   # NVFP4 groups of 64 off sm_70, else halves
     lo, hi = share(full.moe_width, rank, world, unit) if world > 1 else (0, full.moe_width)   # shared expert too
     # key/value heads past the rank count are shared: each rank keeps the one its query heads read
     kv_local = max(1, full.kv_heads // world)

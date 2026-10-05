@@ -20,7 +20,7 @@ FRAG_ALWAYS_FROM_K = 16384
 @lru_cache(maxsize=1)
 def _ext():
     here = Path(__file__).parent
-    return load(name="tensorfold_qmm_volta_v1", sources=[str(here / "qmm_volta.cu")], need=VOLTA,
+    return load(name="tensorfold_qmm_volta_v2", sources=[str(here / "qmm_volta.cu")], need=VOLTA,
                 extra_cuda_cflags=["-O3"], extra_ldflags=_cublaslt_flags(), verbose=False)
 
 
@@ -63,7 +63,7 @@ def prep884(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 def split_k884(n: int, k: int, target: int = 640) -> int:
     """K slices for an (n, k) weight: a function of the shape only, enough blocks to fill 80 SMs."""
 
-    tiles, groups, sk = -(-n // 128), k // 64, 1
+    tiles, groups, sk = -(-n // 128), -(-k // 64), 1
     while sk < 16 and tiles * sk < target and groups % (sk * 2) == 0 and groups // (sk * 2) >= 4:
         sk *= 2
     return sk

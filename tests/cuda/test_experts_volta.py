@@ -35,9 +35,10 @@ def _run(ex, x, picks):
     return act, y
 
 
+@pytest.mark.parametrize("ni", [512, 160, 96])                 # 160, 96: a 32-input half group ends the down's K
 @pytest.mark.parametrize("rows", [1, 3, 16, 33])
-def test_pairs_match_reference(rows):
-    ex, (gd, ud, dd) = _experts()
+def test_pairs_match_reference(rows, ni):
+    ex, (gd, ud, dd) = _experts(ni=ni)
     g = torch.Generator(device="cuda").manual_seed(rows)
     x = torch.randn((rows, ex.dims), generator=g, device="cuda").to(torch.bfloat16)
     picks = torch.randint(0, ex.count, (rows, 4), generator=g, device="cuda", dtype=torch.int32)
@@ -53,8 +54,9 @@ def test_pairs_match_reference(rows):
             assert ((y[p] - yref).abs().max() <= yref.abs().max() * 2 ** -12 + 1e-6), (r, s)
 
 
-def test_a_pair_never_depends_on_the_others():
-    ex, _ = _experts(seed=5)
+@pytest.mark.parametrize("ni", [512, 160])
+def test_a_pair_never_depends_on_the_others(ni):
+    ex, _ = _experts(ni=ni, seed=5)
     g = torch.Generator(device="cuda").manual_seed(9)
     rows, slots = 40, 5
     x = torch.randn((rows, ex.dims), generator=g, device="cuda").to(torch.bfloat16)
@@ -71,3 +73,12 @@ def test_a_pair_never_depends_on_the_others():
     for m in (1, 2, 8, 9, 17):
         am, ym = _run(ex, x[:m], picks[:m])
         assert torch.equal(am, act[:m * slots]) and torch.equal(ym, y[:m * slots]), m
+
+
+def test_a_half_group_tail_stores_no_padding():
+    """160-wide experts hold 160 inputs' codes and scales a down column, not 192."""
+
+    ex, _ = _experts(e=3, ni=160, d=256)
+    assert ex.down.numel() * 4 == 3 * 256 * 160 // 2
+    assert ex.down_s.numel() * 4 == 3 * 256 * 160 // 16
+    assert ex.up.numel() * 4 == 3 * 2 * 160 * 256 // 2

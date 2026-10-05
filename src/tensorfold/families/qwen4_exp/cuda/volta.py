@@ -10,13 +10,14 @@ from tensorfold.cuda.kernels.qmmf_volta import VoltaExperts, VoltaLinear
 
 
 def linear(w: torch.Tensor, cols: slice | None = None) -> VoltaLinear:
-    """A bf16 [N, K] weight as a 16-bit Volta linear; ``cols``: a row-parallel shard of whole 64-input groups."""
+    """A bf16 [N, K] weight as a 16-bit Volta linear; ``cols``: a row-parallel shard of whole 32-input halves."""
 
-    full = VoltaLinear.from_bf16(w.to(torch.bfloat16).contiguous())
+    w = w.to(torch.bfloat16).contiguous()
+    if cols is not None and (cols.start % 64 or cols.stop % 64):
+        return VoltaLinear.from_bf16(w, cols=cols)             # a half group: the whole rows' column factors
+    full = VoltaLinear.from_bf16(w)
     if cols is None:
         return full
-    if cols.start % 64 or cols.stop % 64:
-        raise ValueError(f"input columns [{cols.start}, {cols.stop}) are not whole 64-input groups")
     return full.groups(cols.start // 64, cols.stop // 64).copy()
 
 

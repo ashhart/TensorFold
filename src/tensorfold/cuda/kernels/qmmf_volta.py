@@ -18,7 +18,7 @@ DENSE_PROMPT_LIMIT = 1 << 28                   # weights of more inputs x output
 @lru_cache(maxsize=1)
 def _ext():
     here = Path(__file__).parent
-    return load(name="tensorfold_qmmf_volta_v3", sources=[str(here / "qmmf_volta.cu")], need=VOLTA,
+    return load(name="tensorfold_qmmf_volta_v4", sources=[str(here / "qmmf_volta.cu")], need=VOLTA,
                 extra_cuda_cflags=["-O3"], verbose=False)
 
 
@@ -48,14 +48,25 @@ def prep(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def _tile(words: torch.Tensor, wpg: int) -> torch.Tensor:
-    """int32 (N, K/64 * wpg) -> [N/32][K/64][32][wpg], N padded to 32 with zeros."""
+    """int32 (N, K/64 * wpg) -> [N/32][K/64][32][wpg], N padded to 32 and a half group's K to 64 with zeros."""
 
     n, kw = words.shape
+    if kw % wpg:
+        words = torch.cat([words, words.new_zeros((n, -kw % wpg))], dim=1)
+        kw = words.shape[1]
     kg = kw // wpg
     pad = -n % 32
     if pad:
         words = torch.cat([words, words.new_zeros((pad, kw))])
     return words.view((n + pad) // 32, 32, kg, wpg).permute(0, 2, 1, 3).contiguous()
+
+
+def _bytes_as_words(b: torch.Tensor) -> torch.Tensor:
+    """uint8 (..., B) -> int32 (..., ceil(B / 4)), zero bytes past B."""
+
+    if b.shape[-1] % 4:
+        b = torch.cat([b, b.new_zeros((*b.shape[:-1], -b.shape[-1] % 4))], dim=-1)
+    return b.contiguous().view(torch.int32)
 
 
 def _alpha(values: torch.Tensor | float, n: int, device) -> torch.Tensor:
@@ -82,10 +93,10 @@ class VoltaLinear:
         """``weight`` uint8 [N, K/2] (code k at nibble k % 2 of byte k // 2), e4m3 ``weight_scale`` [N, K/16]."""
 
         n, k = weight.shape[0], weight.shape[1] * 2
-        if k % 64:
-            raise ValueError(f"NVFP4 weight [{n}, {k}]: K must be a multiple of 64")
+        if k % 32:
+            raise ValueError(f"NVFP4 weight [{n}, {k}]: K must be a multiple of 32")
         words = _tile(weight.contiguous().view(torch.int32), 8)
-        scales = _tile(weight_scale.contiguous().view(torch.uint8).view(torch.int32), 1).view(words.shape[:3])
+        scales = _tile(_bytes_as_words(weight_scale.contiguous().view(torch.uint8)), 1).view(words.shape[:3])
         return cls(FP4, words, scales.contiguous(), _alpha(float(global_scale) * 16384.0, n, weight.device), n, k)
 
     @classmethod
@@ -93,31 +104,32 @@ class VoltaLinear:
         """``weight`` e4m3 [N, K] with one tensor scale."""
 
         n, k = weight.shape
-        if k % 64:
-            raise ValueError(f"FP8 weight [{n}, {k}]: K must be a multiple of 64")
+        if k % 32:
+            raise ValueError(f"FP8 weight [{n}, {k}]: K must be a multiple of 32")
         words = _tile(weight.contiguous().view(torch.uint8).view(torch.int32), 16)
         return cls(FP8, words, None, _alpha(float(scale) * 256.0, n, weight.device), n, k)
 
     @classmethod
-    def from_bf16(cls, weight: torch.Tensor, chunk: int = 8192) -> "VoltaLinear":
+    def from_bf16(cls, weight: torch.Tensor, chunk: int = 8192, cols: slice | None = None) -> "VoltaLinear":
         """A 16-bit [N, K] weight as fp16, each column scaled by a power of two into [2^14, 2^15), a chunk at a time."""
 
         n, k = weight.shape
-        if k % 64:
-            raise ValueError(f"16-bit weight [{n}, {k}]: K must be a multiple of 64")
-        n32, kg = -(-n // 32), k // 64
+        lo, hi = (0, k) if cols is None else (cols.start, cols.stop)    # ``cols``: whole 32-input halves of each row
+        if lo % 32 or hi % 32 or not 0 <= lo < hi <= k:
+            raise ValueError(f"16-bit weight [{n}, {k}]: inputs [{lo}, {hi}) are not whole 32-input halves")
+        n32, kg = -(-n // 32), -(-(hi - lo) // 64)
         words = torch.empty((n32, kg, 32, 32), dtype=torch.int32, device=weight.device)
         exps = torch.empty(n, dtype=torch.float32, device=weight.device)
         for a in range(0, n, chunk):                            # chunk is a multiple of 32
             part = weight[a:a + chunk].float()
-            amax = part.abs().amax(1)
+            amax = part.abs().amax(1)                           # the whole row's maximum, whatever ``cols`` keeps
             e = torch.where(amax > 0, torch.frexp(amax).exponent.float() - 15.0, torch.zeros_like(amax))
-            w16 = torch.ldexp(part, -e[:, None]).to(torch.float16)
+            w16 = torch.ldexp(part[:, lo:hi], -e[:, None]).to(torch.float16)
             del part
             words[a // 32:a // 32 + -(-w16.shape[0] // 32)] = _tile(w16.view(torch.int32), 32)
             exps[a:a + chunk] = torch.ldexp(torch.ones_like(e), e)
             del w16
-        return cls(F16, words, None, _alpha(exps, n, weight.device), n, k)
+        return cls(F16, words, None, _alpha(exps, n, weight.device), n, hi - lo)
 
     # ---- views -------------------------------------------------------------------------------------------------
 
@@ -152,7 +164,7 @@ class VoltaLinear:
         n = int(rows.numel())
         if n == 0 or int(rows.min()) < 0 or int(rows.max()) >= self.n:
             raise ValueError(f"{self.layout}: output rows outside [0, {self.n})")
-        kg, wpg = self.k // 64, WORDS[self.fmt]
+        kg, wpg = -(-self.k // 64), WORDS[self.fmt]
         words = torch.empty((-(-n // 32), kg, 32, wpg), dtype=torch.int32, device=self.words.device)
         scales = (torch.empty((-(-n // 32), kg, 32), dtype=torch.int32, device=self.words.device)
                   if self.fmt == FP4 else None)
@@ -178,11 +190,12 @@ class VoltaLinear:
     def groups(self, g0: int, g1: int) -> "VoltaLinear":
         """Row-parallel shard of the 64-input groups [g0, g1): stored words and block scales, column factors kept."""
 
-        if not 0 <= g0 < g1 <= self.k // 64:
-            raise ValueError(f"{self.layout}: input groups [{g0}, {g1}) outside [0, {self.k // 64})")
+        kg = -(-self.k // 64)
+        if not 0 <= g0 < g1 <= kg:
+            raise ValueError(f"{self.layout}: input groups [{g0}, {g1}) outside [0, {kg})")
         return VoltaLinear(self.fmt, self.words[:, g0:g1].contiguous(),
                            self.scales[:, g0:g1].contiguous() if self.fmt == FP4 else None, self.alpha.clone(),
-                           self.n, 64 * (g1 - g0))
+                           self.n, min(self.k, 64 * g1) - 64 * g0)
 
     def partial(self, x: torch.Tensor) -> torch.Tensor:
         """A row-parallel rank's fp32 (M, n) product, unrounded, for the rank-ordered sum."""
@@ -261,10 +274,23 @@ def _tile_experts(words: torch.Tensor, scales: torch.Tensor) -> tuple[torch.Tens
     """NVFP4 [E, N, K/2] codes and e4m3 [E, N, K/16] scales -> [E, N/32, K/64, 32, 8] words, [E, N/32, K/64, 32]."""
 
     e, n, k2 = words.shape
-    kg = k2 * 2 // 64
-    w = words.contiguous().view(torch.int32).view(e, n // 32, 32, kg, 8).permute(0, 1, 3, 2, 4).contiguous()
-    s = scales.contiguous().view(torch.uint8).view(torch.int32).view(e, n // 32, 32, kg).permute(0, 1, 3, 2).contiguous()
-    return w, s
+    k = k2 * 2
+    kg = k // 64
+    w32 = words.contiguous().view(torch.int32)
+    s8 = scales.contiguous().view(torch.uint8)
+    if k % 64 == 0:
+        w = w32.view(e, n // 32, 32, kg, 8).permute(0, 1, 3, 2, 4).contiguous()
+        s = s8.view(torch.int32).view(e, n // 32, 32, kg).permute(0, 1, 3, 2).contiguous()
+        return w, s
+    if k % 32:
+        raise ValueError(f"experts [{e}, {n}, {k}]: K must be a multiple of 32")
+    # a 32-input tail: each column tile's whole groups, then the tail packed ([32][4] words, 16-bit scale pairs)
+    wf = w32[..., :kg * 8].reshape(e, n // 32, 32, kg, 8).permute(0, 1, 3, 2, 4).reshape(e, n // 32, kg * 256)
+    wt = w32[..., kg * 8:].reshape(e, n // 32, 128)
+    sf = s8[..., :kg * 4].contiguous().view(torch.int32).view(e, n // 32, 32, kg).permute(0, 1, 3, 2)
+    st = s8[..., kg * 4:].contiguous().view(torch.int16).view(e, n // 32, 32)
+    s = torch.cat([sf.reshape(e, n // 32, kg * 32), st.contiguous().view(torch.int32).view(e, n // 32, 16)], dim=2)
+    return torch.cat([wf, wt], dim=2).contiguous(), s.contiguous()
 
 
 class VoltaExperts:
@@ -289,8 +315,8 @@ class VoltaExperts:
         """Each of gate, up, down: (words [E, N, K/2] uint8, e4m3 scales [E, N, K/16], per-expert scales [E])."""
 
         e, width, dims = int(gate[0].shape[0]), int(gate[0].shape[1]), int(gate[0].shape[2]) * 2
-        if width % 32 or dims % 64 or width % 64:
-            raise ValueError(f"experts [{e}, {width}, {dims}]: widths must be multiples of 64")
+        if width % 32 or dims % 64:
+            raise ValueError(f"experts [{e}, {width}, {dims}]: the width must be whole 32s, the hidden size whole 64s")
         dev = gate[0].device
         uw = torch.empty((e, width // 32, dims // 64, 32, 2, 8), dtype=torch.int32, device=dev)
         us = torch.empty((e, width // 32, dims // 64, 32, 2), dtype=torch.int32, device=dev)
@@ -299,8 +325,10 @@ class VoltaExperts:
                 w, s = _tile_experts(wds[e0:e0 + chunk], scs[e0:e0 + chunk])
                 uw[e0:e0 + chunk, :, :, :, m] = w
                 us[e0:e0 + chunk, :, :, :, m] = s
-        dw = torch.empty((e, dims // 32, width // 64, 32, 8), dtype=torch.int32, device=dev)
-        ds = torch.empty((e, dims // 32, width // 64, 32), dtype=torch.int32, device=dev)
+        dw0, ds0 = _tile_experts(down[0][:1], down[1][:1])          # one expert gives the (packed) shapes
+        dw = torch.empty((e, *dw0.shape[1:]), dtype=torch.int32, device=dev)
+        ds = torch.empty((e, *ds0.shape[1:]), dtype=torch.int32, device=dev)
+        del dw0, ds0
         for e0 in range(0, e, chunk):
             dw[e0:e0 + chunk], ds[e0:e0 + chunk] = _tile_experts(down[0][e0:e0 + chunk], down[1][e0:e0 + chunk])
         ua = torch.stack([gate[2], up[2]], dim=1).to(torch.float32).mul(16384.0).contiguous().to(dev)
@@ -330,7 +358,8 @@ class VoltaExperts:
         _ext().experts884(2, x16, rs, self.up, self.up_s, self.up_a, sc["members"], sc["items"], sc["counts"], slots,
                           act, part[:need] if sk > 1 else part, cnt, self.width, sk, top, self.limit)
         a16, ars = qmm_volta.prep(act[:pairs])
-        sk = 4 if self.width // 64 >= 32 else 1
+        kg = -(-self.width // 64)
+        sk = 4 if kg >= 32 and kg % 4 == 0 else 1
         _ext().experts884(0 if y.dtype == torch.float32 else 3, a16, ars, self.down, self.down_s, self.down_a,
                           sc["members"], sc["items"], sc["counts"], 0, y, sc["none"], cnt, self.dims, sk, top, 0.0)
 
