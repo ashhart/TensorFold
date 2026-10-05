@@ -109,6 +109,45 @@ const glue_source =
     \\  if (mod < 0) mod += size;
     \\  out[row * 16 + hh] = uint(mod + pm[23 + hh]);
     \\}
+    \\// dst[l][i] = src[l][(keep + base) row][i] for i < p.x words: kept DeltaNet states, the PLE tail, the MTP's row
+    \\kernel void fz_copy_kept(device const uint* src [[buffer(0)]], device uint* dst [[buffer(1)]],
+    \\    device const int* ar [[buffer(2)]], constant uint4& p [[buffer(3)]], constant int& base [[buffer(4)]],
+    \\    uint2 gid [[thread_position_in_grid]]) {
+    \\  if (gid.x >= p.x) return;
+    \\  const uint row = uint(ar[0] + base);
+    \\  dst[gid.y * p.w + gid.x] = src[gid.y * p.z + row * p.y + gid.x];
+    \\}
+    \\// The round's verdict on the GPU: drafts kept, the emitted tokens to the ring, the next window's pending token,
+    \\// positions and n-gram history; ar = keep, target length, round, then the meta blocks the next round reads.
+    \\kernel void fz_accept(device uint* wids [[buffer(0)]], device const uint* picks [[buffer(1)]],
+    \\    device int* ar [[buffer(2)]], device uint* ring [[buffer(3)]], device long* pm [[buffer(4)]],
+    \\    constant uint4& cfg [[buffer(5)]], uint tid [[thread_position_in_grid]]) {
+    \\  if (tid != 0) return;
+    \\  const int W = int(cfg.x), depth = int(cfg.y), cap = int(cfg.z);
+    \\  int keep = 1;
+    \\  while (keep < W && wids[keep] == picks[keep - 1]) keep++;
+    \\  const int round = ar[2];
+    \\  ring[round * 9] = uint(keep);
+    \\  for (int i = 0; i < keep; i++) ring[round * 9 + 1 + i] = picks[i];
+    \\  for (int i = 0; i < keep; i++) { pm[0] = pm[1]; pm[1] = long(wids[i]); }
+    \\  const int t_old = ar[1], t_new = t_old + keep;
+    \\  ar[0] = keep; ar[1] = t_new; ar[2] = round + 1;
+    \\  for (int i = 0; i < 8; i++) {
+    \\    ar[4 + i] = i < W ? t_new + i : 0;
+    \\    ar[12 + i] = i < W ? t_new + i + 1 : 0;
+    \\    ar[24 + i] = i < W ? t_old + i : 0;
+    \\    ar[32 + i] = i < W ? t_old + i + 1 : 0;
+    \\  }
+    \\  ar[20] = t_new; ar[21] = cap; ar[22] = W;
+    \\  ar[40] = t_old; ar[41] = cap; ar[42] = W;
+    \\  for (int j = 1; j < depth; j++) {
+    \\    const int b = 44 + (j - 1) * 20;
+    \\    for (int i = 0; i < 8; i++) { ar[b + i] = 0; ar[b + 8 + i] = 0; }
+    \\    ar[b] = t_new + j - 1; ar[b + 8] = t_new + j;
+    \\    ar[b + 16] = t_new + j - 1; ar[b + 17] = cap; ar[b + 18] = 1;
+    \\  }
+    \\  wids[0] = picks[keep - 1];
+    \\}
 ;
 
 
@@ -303,6 +342,10 @@ const Run = struct {
     add_pipe: mtl.Pipeline = undefined,
     argids_pipe: mtl.Pipeline = undefined,
     pleids_pipe: mtl.Pipeline = undefined,
+    copy_pipe: mtl.Pipeline = undefined,
+    accept_pipe: mtl.Pipeline = undefined,
+    gpu_round: bool = false,
+    ar: Buf = undefined,
     xnew: bool = false,
     xgu_pipe: mtl.Pipeline = undefined,
     xdown_pipe: mtl.Pipeline = undefined,
@@ -406,6 +449,8 @@ const Run = struct {
         r.add_pipe = try mtl.Pipeline.init(r.device, glue, "fz_bcast_add", false);
         r.argids_pipe = try mtl.Pipeline.init(r.device, glue, "fz_argmax_ids", false);
         r.pleids_pipe = try mtl.Pipeline.init(r.device, glue, "fz_ple_ids", false);
+        r.copy_pipe = try mtl.Pipeline.init(r.device, glue, "fz_copy_kept", false);
+        r.accept_pipe = try mtl.Pipeline.init(r.device, glue, "fz_accept", false);
         if (r.xnew) { // the recorded gate/up kernel's header (simd_topk, bsilu) with the full-width expert kernels after it
             var hit: ?[]const u8 = null;
             var it = plan.object.get("variants").?.object.iterator();
@@ -438,6 +483,19 @@ const Run = struct {
 
 
 
+
+    /// fz_copy_kept: `layers` copies of `n` words from row (keep + base) of src (row and layer strides in words).
+    fn copyKept(r: *Run, src: Buf, dst: Buf, n: usize, row: usize, src_stride: usize, dst_stride: usize, layers: usize, base: i32) void {
+        r.enc.setPipeline(r.copy_pipe);
+        r.enc.setBuffer(src.b, src.off, 0);
+        r.enc.setBuffer(dst.b, dst.off, 1);
+        r.enc.setBuffer(r.ar.b, r.ar.off, 2);
+        const p = [4]u32{ @intCast(n), @intCast(row), @intCast(src_stride), @intCast(dst_stride) };
+        r.enc.setBytes(std.mem.asBytes(&p), 3);
+        r.enc.setBytes(std.mem.asBytes(&base), 4);
+        r.enc.dispatchThreads(mtl.Size.of(n, layers, 1), mtl.Size.of(256, 1, 1));
+        if (!r.serial) r.enc.barrier();
+    }
     /// y = x W for `rows` rows of K inputs through fz_dense (blocks of 8 rows; 16 K-slices for narrow outputs).
     fn denseRows(r: *Run, x: Buf, k: usize, l: Lane, rows: usize, y: Buf) void {
         const n = l.wq.b.length() * 4 / (3 * k);
@@ -680,6 +738,8 @@ const Mtp = struct {
     md1: Buf,
     n_ids: Buf,
     slots: [16]Slot,
+    mixsel: Buf = undefined,
+    hsel: Buf = undefined,
     last: Buf = undefined, // the last call's output streams, row by row
 };
 
@@ -703,11 +763,11 @@ const Model = struct {
         m.state = 0;
         m.state_row = 0;
         for (&m.layers) |*L| if (L.linear) {
-            @memset(L.cs[0].b.contents()[0..CS_ROW], 0);
-            @memset(L.so[0].b.contents()[0..SO_ROW], 0);
+            @memset(L.cs[0].b.contents()[L.cs[0].off .. L.cs[0].off + CS_ROW], 0);
+            @memset(L.so[0].b.contents()[L.so[0].off .. L.so[0].off + SO_ROW], 0);
         };
         m.ple.hist = .{ m.ple.eos, m.ple.eos };
-        @memset(m.ple.cin.b.contents()[0 .. (PLE_TAIL + MAXR) * WIDE * 2], 0);
+        @memset(m.ple.cin.b.contents()[m.ple.cin.off .. m.ple.cin.off + (PLE_TAIL + MAXR) * WIDE * 2], 0);
     }
 
     fn lane(m: *Model, x: Buf, k: usize, l: Lane, role: []const u8, y: Buf) !void {
@@ -757,6 +817,7 @@ const Model = struct {
 
     /// A window's per-row values from the cache position (rows, matmul dims, positions, key counts, kv rows).
     fn windowMeta(m: *Model, rows: usize) void {
+        if (m.r.gpu_round) return; // fz_accept wrote them
         const t = &m.t;
         t.rows.b.slice(i32, 1)[0] = @intCast(rows);
         t.mdims.b.slice(i32, 2)[0] = @intCast(rows);
@@ -801,12 +862,14 @@ const Model = struct {
     fn pleIdsGpu(m: *Model, rows: usize, ids: Buf) void {
         const r = m.r;
         const p = &m.ple;
-        const pm = m.t.ple_meta.b.slice(i64, 39);
-        pm[0], pm[1], pm[2], pm[3] = .{ p.hist[0], p.hist[1], p.eos, @intCast(rows) };
-        for (0..3) |k| pm[4 + k] = p.mult[k];
-        for (0..16) |k| {
-            pm[7 + k] = p.sizes[k];
-            pm[23 + k] = p.offsets[k];
+        if (!r.gpu_round) { // in GPU-side rounds fz_accept keeps the history and the rest is set once
+            const pm = m.t.ple_meta.b.slice(i64, 39);
+            pm[0], pm[1], pm[2], pm[3] = .{ p.hist[0], p.hist[1], p.eos, @intCast(rows) };
+            for (0..3) |k| pm[4 + k] = p.mult[k];
+            for (0..16) |k| {
+                pm[7 + k] = p.sizes[k];
+                pm[23 + k] = p.offsets[k];
+            }
         }
         r.enc.setPipeline(r.pleids_pipe);
         for ([_]Buf{ ids, m.t.ple_meta, m.t.ple_ids }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
@@ -848,8 +911,8 @@ const Model = struct {
             if (L.linear) {
                 try m.lane(t.mixed, D, L.proj, "lane_qmm_bytes_grouped@gdn.in", t.p);
                 const a = m.state;
-                const cs_in: Buf = .{ .b = L.cs[a].b, .off = m.state_row * CS_ROW };
-                const so_in: Buf = .{ .b = L.so[a].b, .off = m.state_row * SO_ROW };
+                const cs_in: Buf = .{ .b = L.cs[a].b, .off = L.cs[a].off + m.state_row * CS_ROW };
+                const so_in: Buf = .{ .b = L.so[a].b, .off = L.so[a].off + m.state_row * SO_ROW };
                 try r.callAs("q4_gdn@gdn", if (r.gdn_step and rows > 1) 8 else rows, &.{ t.p, cs_in, so_in, L.conv, L.alog, L.dt, L.norm, t.eps, t.rows }, &.{ t.gout, L.cs[1 - a], L.so[1 - a] });
                 try m.lane(t.gout, 6144, L.out, "lane_qmm_bytes_grouped@gdn.out", t.branch);
             } else {
@@ -907,9 +970,14 @@ const Model = struct {
     /// `slot` (each call in one command buffer has its own).
     fn mtpEncode(m: *Model, slot: usize, rows: usize, ids: Buf, streams: Buf, out: Buf) !void {
         const r = m.r;
-        const t = &m.t;
         const h = &m.mtp;
         const sl = &h.slots[slot];
+        if (!r.gpu_round) try m.mtpMeta(sl, rows);
+        try m.mtpLayer(sl, rows, ids, streams, out);
+    }
+
+    fn mtpMeta(m: *Model, sl: *Slot, rows: usize) !void {
+        const h = &m.mtp;
         sl.rows.b.slice(i32, 1)[0] = @intCast(rows);
         sl.md.b.slice(i32, 2)[0] = @intCast(rows);
         sl.md4.b.slice(i32, 2)[0] = @intCast(4 * rows);
@@ -923,6 +991,12 @@ const Model = struct {
         const kvm = sl.kvmeta.b.slice(u32, 3);
         kvm[0], kvm[1], kvm[2] = .{ @intCast(h.pos), CAP, @intCast(rows) };
         sl.n_add.b.slice(u32, 1)[0] = @intCast(rows * WIDE);
+    }
+
+    fn mtpLayer(m: *Model, sl: *Slot, rows: usize, ids: Buf, streams: Buf, out: Buf) !void {
+        const r = m.r;
+        const t = &m.t;
+        const h = &m.mtp;
         r.rows = rows;
         try r.call("mtp:qa_embed_rows@embed", &.{ ids, m.embed[0], m.embed[1], m.embed[2] }, &.{h.emb});
         try r.call("mtp:q4_rms_rows@mtp.enorm", &.{ h.emb, h.enorm, t.eps }, &.{h.en});
@@ -957,8 +1031,14 @@ const Model = struct {
         try r.call("mtp:q4_hc_norm_grouped#[10240]", &.{ h.h[0], t.inj_m, t.ydown, t.wts, t.lg }, &.{ h.h[1], t.ssp });
         h.last = .{ .b = h.h[1].b, .off = (rows - 1) * WIDE * 2 };
         try m.mtpProject(h.h[1], h.mix, down[2], up[2], t.inj_a, sl.rows);
+        var x: Buf = .{ .b = t.mixed.b, .off = (rows - 1) * D * 2 };
+        if (r.gpu_round and rows > 1) { // the kept row's mix and streams, chosen on the GPU
+            r.copyKept(t.mixed, h.mixsel, D / 2, D / 2, 0, 0, 1, -1);
+            r.copyKept(h.h[1], h.hsel, WIDE / 2, WIDE / 2, 0, 0, 1, -1);
+            x = h.mixsel;
+            h.last = h.hsel;
+        }
         r.rows = 1;
-        const x: Buf = .{ .b = t.mixed.b, .off = (rows - 1) * D * 2 };
         if (!r.fused_xsum) try r.call("mtp:lane_qmm_xsum#[2560]", &.{ x, h.md1 }, &.{t.xs});
         if (r.dense) r.denseRows(x, D, h.draft, 1, h.logits) else try r.call("mtp:lane_qmm_bytes_grouped@mtp.draft", &.{ x, t.xs, h.draft.wq, h.draft.sbt, h.md1 }, &.{h.logits});
         r.enc.setPipeline(r.argids_pipe);
@@ -1468,6 +1548,169 @@ pub fn main(init: std.process.Init) !void {
         while (eq < want.len and out.items[eq] == (if (r.xnew) ref_tokens[eq] else @as(u32, @intCast(want[eq].integer)))) eq += 1;
         const made: f64 = @floatFromInt(out.items.len - 1);
         std.debug.print("one buffer a round, depth {d}-{d} (+{d}): {d}/{d} tokens equal; {d:.2} tokens a round, {d:.2} drafts landing; {d:.1} tok/s (GPU busy {d:.0}%)\n", .{ cfg_a[0], cfg_a[1], cfg_a[2], eq, want.len, made / @as(f64, @floatFromInt(n_rounds)), @as(f64, @floatFromInt(landed)) / @as(f64, @floatFromInt(n_rounds)), made / wall, 100 * m.gpu_seconds / wall });
+        if (eq < want.len) bad += 1;
+    }
+
+    // 7. GPU-side rounds: the verdict, positions, history and kept states stay on the GPU; the host encodes round
+    //    N+1 while round N runs and reads the emitted tokens from a ring
+    if (r.xnew) {
+        const depth: usize = 3;
+        const W = depth + 1;
+        const n_lin: usize = 36;
+        const g_cs = try r.buffer(n_lin * CS_ROW);
+        const g_so = try r.buffer(n_lin * SO_ROW);
+        const o_cs = try r.buffer(n_lin * MAXR * CS_ROW);
+        const o_so = try r.buffer(n_lin * MAXR * SO_ROW);
+        var saved: [LAYERS][4]Buf = undefined;
+        var gi: usize = 0;
+        for (&m.layers, 0..) |*L, i| if (L.linear) {
+            saved[i] = .{ L.cs[0], L.cs[1], L.so[0], L.so[1] };
+            L.cs[0] = .{ .b = g_cs, .off = gi * CS_ROW };
+            L.cs[1] = .{ .b = o_cs, .off = gi * MAXR * CS_ROW };
+            L.so[0] = .{ .b = g_so, .off = gi * SO_ROW };
+            L.so[1] = .{ .b = o_so, .off = gi * MAXR * SO_ROW };
+            gi += 1;
+        };
+        const cin_saved = m.ple.cin;
+        const cins = [2]Buf{ m.ple.cin, .{ .b = try r.buffer((PLE_TAIL + MAXR) * WIDE * 2) } };
+        r.ar = .{ .b = try r.buffer(4 * 256) };
+        const ring = try r.buffer(9 * 4 * 512);
+        m.mtp.mixsel = .{ .b = try r.buffer(D * 2) };
+        m.mtp.hsel = .{ .b = try r.buffer(WIDE * 2) };
+        const ar = r.ar.b.slice(i32, 256);
+        const Copy = struct { // the kept row of every DeltaNet layer's window output into its state
+            fn states(rr: *Run, gcs: mtl.Buffer, gso: mtl.Buffer, ocs: mtl.Buffer, oso: mtl.Buffer) void {
+                rr.copyKept(.{ .b = oso }, .{ .b = gso }, SO_ROW / 4, SO_ROW / 4, MAXR * SO_ROW / 4, SO_ROW / 4, 36, -1);
+                rr.copyKept(.{ .b = ocs }, .{ .b = gcs }, CS_ROW / 4, CS_ROW / 4, MAXR * CS_ROW / 4, CS_ROW / 4, 36, -1);
+            }
+        };
+        m.reset();
+        m.mtp.pos = 0;
+        m.mtp.drafted = 0;
+        const all = try r.buffer(prompt.len * WIDE * 2);
+        var nexts: std.ArrayList(u32) = .empty;
+        for (prompt, 0..) |x, i| {
+            const tok: u32 = @intCast(x.integer);
+            try m.window(&.{tok}, &pick);
+            ar[0] = 1;
+            const cb = r.queue.commandBuffer();
+            r.enc = cb.compute(if (r.serial) .serial else .concurrent);
+            Copy.states(&r, g_cs, g_so, o_cs, o_so);
+            try m.finish(cb);
+            const cin = m.ple.cin.b.contents()[m.ple.cin.off..];
+            std.mem.copyForwards(u8, cin[0 .. PLE_TAIL * WIDE * 2], cin[WIDE * 2 .. (PLE_TAIL + 1) * WIDE * 2]);
+            m.ple.hist = .{ m.ple.hist[1], tok };
+            m.pos += 1;
+            @memcpy(all.contents()[i * WIDE * 2 .. (i + 1) * WIDE * 2], m.last.b.contents()[0 .. WIDE * 2]);
+            if (i > 0) try nexts.append(gpa, tok);
+        }
+        try nexts.append(gpa, pick[0]);
+        var drafts: [MAXR]u32 = undefined;
+        drafts[0] = try m.mtpAbsorb(nexts.items, .{ .b = all });
+        for (1..depth) |j| drafts[j] = try m.mtpChain(drafts[j - 1]);
+        const w = wids.b.slice(u32, 16);
+        w[0] = pick[0];
+        for (0..depth) |j| w[1 + j] = drafts[j];
+        const T: i32 = @intCast(m.pos);
+        @memset(ar, 0);
+        ar[1] = T;
+        for (0..8) |i| {
+            ar[4 + i] = if (i < W) T + @as(i32, @intCast(i)) else 0;
+            ar[12 + i] = if (i < W) T + @as(i32, @intCast(i)) + 1 else 0;
+        }
+        ar[20], ar[21], ar[22] = .{ T, CAP, @intCast(W) };
+        const pm = m.t.ple_meta.b.slice(i64, 39);
+        pm[0], pm[1], pm[2], pm[3] = .{ m.ple.hist[0], m.ple.hist[1], m.ple.eos, @intCast(W) };
+        for (0..3) |k| pm[4 + k] = m.ple.mult[k];
+        for (0..16) |k| {
+            pm[7 + k] = m.ple.sizes[k];
+            pm[23 + k] = m.ple.offsets[k];
+        }
+        const t_saved = .{ m.t.rows, m.t.mdims, m.t.pos8, m.t.nk8, m.t.kvmeta };
+        m.t.rows = try i32Buf(&r, &.{@intCast(W)});
+        m.t.mdims = try i32Buf(&r, &.{ @intCast(W), 16, 0, 0, 0, 0, 0, 0 });
+        m.t.pos8 = .{ .b = r.ar.b, .off = 4 * 4 };
+        m.t.nk8 = .{ .b = r.ar.b, .off = 12 * 4 };
+        m.t.kvmeta = .{ .b = r.ar.b, .off = 20 * 4 };
+        const slots_saved = m.mtp.slots;
+        try m.mtpMeta(&m.mtp.slots[0], W);
+        m.mtp.slots[0].pos8 = .{ .b = r.ar.b, .off = 24 * 4 };
+        m.mtp.slots[0].nk8 = .{ .b = r.ar.b, .off = 32 * 4 };
+        m.mtp.slots[0].kvmeta = .{ .b = r.ar.b, .off = 40 * 4 };
+        for (1..depth) |j| {
+            try m.mtpMeta(&m.mtp.slots[j], 1);
+            const b = (44 + (j - 1) * 20) * 4;
+            m.mtp.slots[j].pos8 = .{ .b = r.ar.b, .off = b };
+            m.mtp.slots[j].nk8 = .{ .b = r.ar.b, .off = b + 32 };
+            m.mtp.slots[j].kvmeta = .{ .b = r.ar.b, .off = b + 64 };
+        }
+        r.gpu_round = true;
+        const cfg = [4]u32{ @intCast(W), @intCast(depth), CAP, 0 };
+        const base = r.event_value;
+        var cbs: std.ArrayList(mtl.CommandBuffer) = .empty;
+        var out: std.ArrayList(u32) = .empty;
+        try out.append(gpa, pick[0]);
+        m.gpu_seconds = 0;
+        const s0 = mtl.clock.seconds();
+        var s1 = s0;
+        var round: usize = 0;
+        var done: usize = 0;
+        const rg = ring.slice(u32, 9 * 512);
+        while (true) {
+            const cb = r.queue.commandBuffer();
+            if (round > 0) cb.waitFor(r.event, base + round);
+            r.enc = cb.compute(if (r.serial) .serial else .concurrent);
+            if (round > 0) {
+                Copy.states(&r, g_cs, g_so, o_cs, o_so);
+                r.copyKept(cins[(round - 1) % 2], cins[round % 2], PLE_TAIL * WIDE / 2, WIDE / 2, 0, 0, 1, 0);
+                try m.mtpEncode(0, W, m.t.picks, m.last, .{ .b = wids.b, .off = 4 });
+                for (1..depth) |j| {
+                    const streams = if (j == 1) m.mtp.hsel else Buf{ .b = m.mtp.h[1].b, .off = 0 };
+                    try m.mtpEncode(j, 1, .{ .b = wids.b, .off = 4 * j }, streams, .{ .b = wids.b, .off = 4 * (j + 1) });
+                }
+            }
+            m.ple.cin = cins[round % 2];
+            m.pleIdsGpu(W, wids);
+            try m.windowEncode(W, wids);
+            r.enc.setPipeline(r.accept_pipe);
+            for ([_]Buf{ wids, m.t.picks, r.ar, .{ .b = ring }, m.t.ple_meta }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
+            r.enc.setBytes(std.mem.asBytes(&cfg), 5);
+            r.enc.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
+            r.enc.end();
+            cb.signal(r.event, base + round + 1);
+            cb.commit();
+            try cbs.append(gpa, cb);
+            round += 1;
+            if (round >= 2) {
+                const prev = cbs.items[done];
+                prev.wait();
+                if (prev.failure()) |msg| {
+                    std.log.err("command buffer failed: {s}", .{msg});
+                    return error.GpuFailed;
+                }
+                m.gpu_seconds += prev.gpuSeconds();
+                const keep = rg[done * 9];
+                try out.appendSlice(gpa, rg[done * 9 + 1 .. done * 9 + 1 + keep]);
+                done += 1;
+                if (out.items.len >= want.len) {
+                    s1 = mtl.clock.seconds();
+                    break;
+                }
+            }
+        }
+        for (cbs.items[done..]) |cb| cb.wait();
+        r.event_value = base + round + 1;
+        r.gpu_round = false;
+        m.t.rows, m.t.mdims, m.t.pos8, m.t.nk8, m.t.kvmeta = t_saved;
+        m.mtp.slots = slots_saved;
+        m.ple.cin = cin_saved;
+        for (&m.layers, 0..) |*L, i| if (L.linear) {
+            L.cs[0], L.cs[1], L.so[0], L.so[1] = saved[i];
+        };
+        var eq: usize = 0;
+        while (eq < want.len and out.items[eq] == ref_tokens[eq]) eq += 1;
+        const made: f64 = @floatFromInt(out.items.len - 1);
+        std.debug.print("GPU-side rounds, depth {d}: {d}/{d} tokens equal; {d:.2} tokens a round; {d:.1} tok/s (GPU busy {d:.0}%)\n", .{ depth, eq, want.len, made / @as(f64, @floatFromInt(done)), made / (s1 - s0), 100 * m.gpu_seconds / (s1 - s0) });
         if (eq < want.len) bad += 1;
     }
 
