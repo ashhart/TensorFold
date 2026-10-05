@@ -18,6 +18,11 @@ from tensorfold.cuda.comm import NCCL
 from tensorfold.families.deepseek_v41.cuda import weights as W
 from tensorfold.families.deepseek_v41.cuda.serial import KV_MODE, MAX_ROWS, Comm, SerialEngine
 
+if os.environ.get("TF_STUDY_TIE") == "0":           # (fp4 study) the prompt top-k without the lower-index tie keys
+    from tensorfold.families.deepseek_v41.cuda import kernels as _K
+
+    _K.TIE_KEYS = False
+
 
 def main() -> None:
     ap = argparse.ArgumentParser()
@@ -486,11 +491,78 @@ def main() -> None:
                             torch.cuda.synchronize()
                         if args.rank == 0:
                             ev = sorted(prof.key_averages(), key=lambda e: -e.self_device_time_total)
-                            for e in ev[:25]:
+                            print(f"  [step1] kernels {sum(e.self_device_time_total for e in ev) / 8e3:.3f} ms", flush=True)
+                            for e in ev[:70]:
                                 print(f"  {e.self_device_time_total / 8 / 1e3:7.3f} ms  {e.count / 8:6.1f}x  "
                                       f"{e.key[:100]}", flush=True)
                     for s_ in range(n_streams):                 # back to the prompt for the next measurement
                         del eng.views[s_].ids[lens[s_]:]
+                    if os.environ.get("TF_DECODE_ROWS") and n_streams == 1:   # (fp4 study) verify rows, drafter
+                        from torch.profiler import ProfilerActivity, profile
+
+                        eng.select_slot(0)
+                        n0 = len(eng.views[0].ids)
+                        for R in [int(v) for v in os.environ["TF_DECODE_ROWS"].split(",")]:
+                            if R not in eng.graphs:
+                                eng.capture(R)
+                            toks = list(base[1000:1000 + R])
+
+                            def vstep():
+                                eng.step_rows(toks)
+                                del eng.views[0].ids[n0:]
+                            for _ in range(4):
+                                vstep()
+                            nccl.barrier()
+                            torch.cuda.synchronize()
+                            t = time.perf_counter()
+                            for _ in range(32):
+                                vstep()
+                            torch.cuda.synchronize()
+                            vms = (time.perf_counter() - t) / 32 * 1e3
+                            if args.rank == 0:
+                                print(f"decode-bench L={L}: verify R={R}: {vms:.2f} ms a step", flush=True)
+                            if os.environ.get("TF_DECODE_PROF"):
+                                with profile(activities=[ProfilerActivity.CUDA]) as prof:
+                                    for _ in range(8):
+                                        vstep()
+                                    torch.cuda.synchronize()
+                                if args.rank == 0:
+                                    ev = sorted(prof.key_averages(), key=lambda e: -e.self_device_time_total)
+                                    print(f"  [R={R}] kernels {sum(e.self_device_time_total for e in ev) / 8e3:.3f} ms",
+                                          flush=True)
+                                    for e in ev[:70]:
+                                        print(f"  {e.self_device_time_total / 8 / 1e3:7.3f} ms  {e.count / 8:6.1f}x  "
+                                              f"{e.key[:100]}", flush=True)
+                        dsp = eng.drafter
+                        if dsp is not None and dsp.graph is not None:
+                            ids_ = eng.views[0].ids
+                            dsp.g_anchor.fill_(ids_[-1])
+                            dsp.g_P.fill_(len(ids_))
+                            dsp.g_base.fill_(0)
+                            for _ in range(3):
+                                dsp.graph.replay()
+                            torch.cuda.synchronize()
+                            t = time.perf_counter()
+                            for _ in range(32):
+                                dsp.graph.replay()
+                            torch.cuda.synchronize()
+                            dms = (time.perf_counter() - t) / 32 * 1e3
+                            if os.environ.get("TF_DECODE_PROF"):
+                                with profile(activities=[ProfilerActivity.CUDA]) as prof:
+                                    for _ in range(8):
+                                        dsp.graph.replay()
+                                    torch.cuda.synchronize()
+                            if args.rank == 0:
+                                print(f"decode-bench L={L}: drafter graph {dms:.2f} ms", flush=True)
+                                if os.environ.get("TF_DECODE_PROF"):
+                                    ev = sorted(prof.key_averages(), key=lambda e: -e.self_device_time_total)
+                                    for e in ev[:40]:
+                                        print(f"  {e.self_device_time_total / 8 / 1e3:7.3f} ms  {e.count / 8:6.1f}x  "
+                                              f"{e.key[:100]}", flush=True)
+                            eng._round_costs = None
+                            rc = eng.round_costs()
+                            if args.rank == 0:
+                                print(f"decode-bench L={L}: round costs k=0..n {[round(c, 2) for c in rc]}", flush=True)
                     if args.rank == 0:
                         print(f"decode-bench L={L}: prefill {pf:.1f} s ({L / pf:.0f} tok/s); {n_streams} stream(s): "
                               f"{steps / dt:.2f} steps/s, {n_streams * steps / dt:.1f} tok/s total, "
@@ -662,15 +734,20 @@ def main() -> None:
 
         doc = json.loads(Path("notes/dsv41/golden_long2.json").read_text())["goldens"][-1]["ids"]
         n = args.profile_prefill
+        at = int(os.environ.get("TF_PROF_AT") or 0)              # (fp4 study) the profiled chunk's start position
+        doc = (doc * (1 + (at + 6 * n) // len(doc)))[:at + 6 * n]
         with torch.no_grad():
             eng.reset()
+            if at:
+                eng.prefill(doc[:at], n)
+                doc = doc[at:]
             eng.prefill(doc[:n], n)                               # warm: kernels, Engram pages
             torch.cuda.synchronize()
             t = time.perf_counter()
             eng.prefill(doc[n:5 * n], n)                          # four chunks, rows read ahead
             torch.cuda.synchronize()
             steady = time.perf_counter() - t
-            with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+            with profile(activities=[ProfilerActivity.CUDA]) as prof:
                 t = time.perf_counter()
                 eng.prefill(doc[5 * n:6 * n], n)
                 torch.cuda.synchronize()
@@ -680,7 +757,7 @@ def main() -> None:
             gpu = sum(e.self_device_time_total for e in ev) / 1e3
             print(f"prefill {4 * n} tokens in chunks of {n}: {4 * n / steady:.0f} tok/s; profiled chunk wall "
                   f"{wall * 1e3:.0f} ms, GPU busy {gpu:.0f} ms", flush=True)
-            print(ev.table(sort_by="self_device_time_total", row_limit=25, max_name_column_width=60), flush=True)
+            print(ev.table(sort_by="self_device_time_total", row_limit=45, max_name_column_width=90), flush=True)
         nccl.barrier()
         return
 
