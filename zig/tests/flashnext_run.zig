@@ -338,6 +338,103 @@ const xnew_source =
     \\  threadgroup float part[16][8][32];
     \\  fz_dense_body<16>(X, W, SB, Y, dims, sgi, lane, tgi, part);
     \\}
+    \\// Experts in one launch (FZ_XFUSED=1): threadgroup (slice s, pair) runs fz_xgu's sums for intermediate rows
+    \\// [160 s, 160 s + 160) and fz_xdown's lane-s sums over those rows for every output; the pair's last slice adds
+    \\// the four parts in fz_xdown's shuffle order, so every bit equals fz_xgu then fz_xdown.
+    \\inline void fz_dot32t(thread const float* q, threadgroup const float* a, thread float& qx, thread float& sx) {
+    \\  qx = 0.0f; sx = 0.0f;
+    \\  #pragma unroll
+    \\  for (int i = 0; i < 8; i++) {
+    \\    const float4 v = float4(a[4 * i], a[4 * i + 1], a[4 * i + 2], a[4 * i + 3]);
+    \\    qx += q[4 * i] * v.x + q[4 * i + 1] * v.y + q[4 * i + 2] * v.z + q[4 * i + 3] * v.w;
+    \\    sx += v.x + v.y + v.z + v.w;
+    \\  }
+    \\}
+    \\[[kernel]] void fz_xfused(const device bfloat* X [[buffer(0)]], const device float* LOGITS [[buffer(1)]],
+    \\    const device uint* GW [[buffer(2)]], const device bfloat* GS [[buffer(3)]], const device bfloat* GB [[buffer(4)]],
+    \\    const device uint* UW [[buffer(5)]], const device bfloat* US [[buffer(6)]], const device bfloat* UB [[buffer(7)]],
+    \\    const device uint* SGW [[buffer(8)]], const device bfloat* SGS [[buffer(9)]], const device bfloat* SGB [[buffer(10)]],
+    \\    const device uint* SUW [[buffer(11)]], const device bfloat* SUS [[buffer(12)]], const device bfloat* SUB [[buffer(13)]],
+    \\    const device uint* DW [[buffer(14)]], const device bfloat* DS [[buffer(15)]], const device bfloat* DB [[buffer(16)]],
+    \\    const device uint* SDW [[buffer(17)]], const device bfloat* SDS [[buffer(18)]], const device bfloat* SDB [[buffer(19)]],
+    \\    device uint* PICK [[buffer(20)]], device float* WTS [[buffer(21)]], device bfloat* Y [[buffer(22)]],
+    \\    coherent(device) device float* PART [[buffer(23)]], device atomic_uint* DONE [[buffer(24)]],
+    \\    uint sgi [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    \\    uint tid [[thread_index_in_threadgroup]], uint3 tg [[threadgroup_position_in_grid]]) {
+    \\  constexpr int K = 2560, N = 640, D = 2560, TOPK = 10, NE = 512, NL = 513, SLOTS = TOPK + 1, TGS = 512;
+    \\  constexpr int WPR = K * 6 / 32, KG = K / 32, DWPR = N * 6 / 32, DKG = N / 32;
+    \\  const int s = int(tg.x), p = int(tg.y);
+    \\  const int r = p / SLOTS, slot = p % SLOTS;
+    \\  const bool shared = slot == TOPK;
+    \\  threadgroup float act[160];
+    \\  threadgroup uint last;
+    \\  float picked[TOPK];
+    \\  const size_t e = shared ? 0 : size_t(simd_topk<NE>(LOGITS + r * NL, slot, lane, picked));
+    \\  if (!shared && s == 0 && sgi == 0 && lane == 0) {
+    \\    PICK[r * TOPK + slot] = uint32_t(e);
+    \\    if (slot == TOPK - 1) {
+    \\      float total = 0.0f;
+    \\      float ex[TOPK];
+    \\      for (int kk = 0; kk < TOPK; kk++) { ex[kk] = metal::exp(picked[kk] - picked[0]); total += ex[kk]; }
+    \\      for (int kk = 0; kk < TOPK; kk++) WTS[r * TOPK + kk] = float(bfloat(ex[kk] / total));
+    \\    }
+    \\  }
+    \\  const int part = int(lane & 15);
+    \\  const device bfloat* x = X + r * K + part * 160;
+    \\  for (int pass = 0; pass < 160 / (TGS / 16); pass++) {
+    \\    const int lrow = pass * (TGS / 16) + int(sgi) * 2 + int(lane >> 4);
+    \\    const int row = s * 160 + lrow;
+    \\    const size_t wrow = (shared ? 0 : e * N * WPR) + size_t(row) * WPR + part * 30;
+    \\    const size_t grow = (shared ? 0 : e * N * KG) + size_t(row) * KG + part * 5;
+    \\    const device uint* gw = (shared ? SGW : GW) + wrow;
+    \\    const device uint* uw = (shared ? SUW : UW) + wrow;
+    \\    const device bfloat* gs = (shared ? SGS : GS) + grow;
+    \\    const device bfloat* gb = (shared ? SGB : GB) + grow;
+    \\    const device bfloat* us = (shared ? SUS : US) + grow;
+    \\    const device bfloat* ub = (shared ? SUB : UB) + grow;
+    \\    float ag = 0.0f, au = 0.0f;
+    \\    for (int j = 0; j < 5; j++) {
+    \\      float qg, qu, sx, sx2;
+    \\      fz_group(gw + j * 6, x + j * 32, qg, sx);
+    \\      fz_group(uw + j * 6, x + j * 32, qu, sx2);
+    \\      ag += float(gs[j]) * qg + float(gb[j]) * sx;
+    \\      au += float(us[j]) * qu + float(ub[j]) * sx;
+    \\    }
+    \\    for (ushort o = 8; o > 0; o >>= 1) { ag += simd_shuffle_xor(ag, o); au += simd_shuffle_xor(au, o); }
+    \\    if (part == 0) act[lrow] = float(bfloat(bsilu(float(bfloat(ag))) * float(bfloat(au))));
+    \\  }
+    \\  threadgroup_barrier(mem_flags::mem_threadgroup);
+    \\  for (int i = 0; i < D / TGS; i++) {
+    \\    const int d = int(tid) + TGS * i;
+    \\    const device uint* w = (shared ? SDW : DW + e * D * DWPR) + size_t(d) * DWPR + s * 30;
+    \\    const size_t g0 = (shared ? 0 : e * D * DKG) + size_t(d) * DKG + s * 5;
+    \\    const device bfloat* sc = (shared ? SDS : DS) + g0;
+    \\    const device bfloat* bi = (shared ? SDB : DB) + g0;
+    \\    float acc = 0.0f;
+    \\    for (int j = 0; j < 5; j++) {
+    \\      float q[32];
+    \\      fz_codes6(w + j * 6, q);
+    \\      float qx, sx;
+    \\      fz_dot32t(q, act + j * 32, qx, sx);
+    \\      acc += float(sc[j]) * qx + float(bi[j]) * sx;
+    \\    }
+    \\    PART[(size_t(p) * 4 + s) * D + d] = acc;
+    \\  }
+    \\  threadgroup_barrier(mem_flags::mem_device);
+    \\  if (tid == 0) {
+    \\    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
+    \\    last = atomic_fetch_add_explicit(DONE + p, 1u, memory_order_relaxed);
+    \\    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
+    \\  }
+    \\  threadgroup_barrier(mem_flags::mem_device);
+    \\  if (last != 3) return;
+    \\  for (int i = 0; i < D / TGS; i++) {
+    \\    const int d = int(tid) + TGS * i;
+    \\    const size_t at = size_t(p) * 4 * D + d;
+    \\    Y[p * D + d] = bfloat((PART[at] + PART[at + D]) + (PART[at + 2 * D] + PART[at + 3 * D]));
+    \\  }
+    \\  if (tid == 0) atomic_store_explicit(DONE + p, 0u, memory_order_relaxed);
+    \\}
     \\// Grouped experts (FZ_GROUPED=1): fz_route picks every row's experts (the recorded top-k rounds) and lists each
     \\// distinct expert's (row, slot) pairs; fz_ggu and fz_gdown read each distinct expert once for all its pairs, and
     \\// every pair's sums run in fz_xgu's and fz_xdown's order, so each row's bits are the ungrouped kernels' bits.
@@ -538,6 +635,10 @@ const Run = struct {
     grouped: bool = false,
     gskip: u32 = 0,
     xpack: bool = false,
+    xfused: bool = false,
+    xfused_pipe: mtl.Pipeline = undefined,
+    xpart: Buf = undefined,
+    xdone: Buf = undefined,
     repack_w: mtl.Pipeline = undefined,
     repack_s: mtl.Pipeline = undefined,
     route_pipe: mtl.Pipeline = undefined,
@@ -657,6 +758,9 @@ const Run = struct {
             r.dense8_pipe = try mtl.Pipeline.init(r.device, lib, "fz_dense8", false);
             r.dense16_pipe = try mtl.Pipeline.init(r.device, lib, "fz_dense16", false);
             r.route_pipe = try mtl.Pipeline.init(r.device, lib, "fz_route", false);
+            r.xfused_pipe = try mtl.Pipeline.init(r.device, lib, "fz_xfused", false);
+            r.xpart = .{ .b = try r.buffer(MAXR * 11 * 4 * D * 4) };
+            r.xdone = .{ .b = try r.buffer(MAXR * 11 * 4) };
             r.ggu_pipe = try mtl.Pipeline.init(r.device, lib, "fz_ggu", false);
             r.gdown_pipe = try mtl.Pipeline.init(r.device, lib, "fz_gdown", false);
             r.ul = .{ .b = try r.buffer((1 + 2 * 320 + 320 * 32) * 4) };
@@ -743,6 +847,14 @@ const Run = struct {
         if (!r.xnew) {
             try r.call(gu_role, &.{ x, lg, e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8], e[9], e[10], e[11] }, &.{ act, pick, wts });
             try r.call(down_role, &.{ act, pick, e[12], e[13], e[14], e[15], e[16], e[17], rows_buf }, &.{y});
+            return;
+        }
+        if (r.xfused) { // gate/up and down in one launch
+            r.enc.setPipeline(r.xfused_pipe);
+            const fb = [_]Buf{ x, lg, e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8], e[9], e[10], e[11], e[12], e[13], e[14], e[15], e[16], e[17], pick, wts, y, r.xpart, r.xdone };
+            for (fb, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
+            r.enc.dispatchThreads(mtl.Size.of(512 * 4, r.rows * 11, 1), mtl.Size.of(512, 1, 1));
+            if (!r.serial) r.enc.barrier();
             return;
         }
         if (r.grouped and r.rows > 1) { // each distinct expert read once for every row that picked it
@@ -1363,6 +1475,7 @@ pub fn main(init: std.process.Init) !void {
     r.dense_target = r.dense and std.c.getenv("FZ_DENSE_TARGET") != null;
     r.xpack = r.xnew and std.c.getenv("FZ_XPACK") != null;
     r.grouped = r.xnew and !r.xpack and std.c.getenv("FZ_GROUPED") != null;
+    r.xfused = r.xnew and !r.xpack and !r.grouped and std.c.getenv("FZ_XFUSED") != null;
     const t0 = mtl.clock.seconds();
     try r.compile(args[2]);
     const t1 = mtl.clock.seconds();
@@ -1573,7 +1686,82 @@ pub fn main(init: std.process.Init) !void {
         r.skip = 0;
         return;
     }
-    if (std.c.getenv("FZ_GCHECK") != null) { // grouped experts against fz_xgu/fz_xdown: every row's logits, bit for bit
+    if (std.c.getenv("FZ_DUAL") != null) { // two lane groups on two queues: one window, two in a row, two at once
+        const want0 = ref.object.get("tokens").?.array.items;
+        const pr = ref.object.get("prompt").?.array.items;
+        var pk: [MAXR]u32 = undefined;
+        m.reset();
+        for (pr) |x| {
+            try m.window(&.{@intCast(x.integer)}, &pk);
+            m.keepRows(&.{@intCast(x.integer)}, 1);
+        }
+        const q2 = try device.queue();
+        const ta = m.t;
+        var tb = m.t;
+        const info = @typeInfo(Tmp).@"struct";
+        inline for (info.field_names, info.field_types) |fname, ftype| {
+            const f = .{ .name = fname, .type = ftype };
+            if (f.type == Buf) {
+                const old = @field(ta, f.name);
+                const n = old.b.length() - old.off;
+                const nb = try r.buffer(n);
+                @memcpy(nb.contents()[0..n], old.b.contents()[old.off .. old.off + n]);
+                @field(tb, f.name) = .{ .b = nb };
+            } else if (f.type == [2]Buf) {
+                for (0..2) |k| {
+                    const old = @field(ta, f.name)[k];
+                    const n = old.b.length() - old.off;
+                    @field(tb, f.name)[k] = .{ .b = try r.buffer(n) };
+                }
+            }
+        }
+        for ([_]usize{ 1, 4, 8 }) |rows| {
+            var toks: [MAXR]u32 = undefined;
+            for (0..rows) |i| toks[i] = @intCast(want0[i].integer);
+            m.windowMeta(rows);
+            const ids = ta.ids8.b.slice(u32, 8);
+            for (0..8) |i| ids[i] = if (i < rows) toks[i] else 0;
+            m.pleIds(toks[0..rows]);
+            var toks_b: [MAXR]u32 = undefined; // the second group: other tokens at the same positions
+            for (0..rows) |i| toks_b[i] = @intCast(want0[16 + i].integer);
+            const ids_b = tb.ids8.b.slice(u32, 8);
+            for (0..8) |i| ids_b[i] = if (i < rows) toks_b[i] else 0;
+            m.t = tb;
+            m.pleIds(toks_b[0..rows]);
+            m.t = ta;
+            var wall: [3]f64 = undefined;
+            for (0..3) |mode| {
+                const n_it: usize = 20;
+                const a = mtl.clock.seconds();
+                for (0..n_it) |_| {
+                    const cb1 = r.queue.commandBuffer();
+                    r.enc = cb1.compute(.serial);
+                    m.t = ta;
+                    try m.windowEncode(rows, ta.ids8);
+                    r.enc.end();
+                    if (mode == 0) {
+                        cb1.commit();
+                        cb1.wait();
+                        continue;
+                    }
+                    const cb2 = (if (mode == 1) r.queue else q2).commandBuffer();
+                    r.enc = cb2.compute(.serial);
+                    m.t = tb;
+                    try m.windowEncode(rows, tb.ids8);
+                    r.enc.end();
+                    cb1.commit();
+                    cb2.commit();
+                    cb1.wait();
+                    cb2.wait();
+                }
+                wall[mode] = (mtl.clock.seconds() - a) * 1e3 / @as(f64, @floatFromInt(n_it));
+            }
+            m.t = ta;
+            std.debug.print("{d} lanes: one group {d:.2} ms, two groups in a row {d:.2} ms ({d:.2}x), two groups at once {d:.2} ms ({d:.2}x)\n", .{ rows, wall[0], wall[1], wall[1] / wall[0], wall[2], wall[2] / wall[0] });
+        }
+        return;
+    }
+    if (std.c.getenv("FZ_GCHECK") != null) { // grouped or fused experts against fz_xgu/fz_xdown: every row's logits, bit for bit
         const want0 = ref.object.get("tokens").?.array.items;
         const pr = ref.object.get("prompt").?.array.items;
         var pk: [MAXR]u32 = undefined;
@@ -1584,13 +1772,14 @@ pub fn main(init: std.process.Init) !void {
         }
         const keep = try gpa.alloc(u16, MAXR * VOCAB);
         defer gpa.free(keep);
-        for (2..MAXR + 1) |rows| {
+        for (1..MAXR + 1) |rows| {
             var toks: [MAXR]u32 = undefined;
             for (0..rows) |i| toks[i] = @intCast(want0[i].integer);
-            r.grouped = false;
+            const g0, const f0 = .{ r.grouped, r.xfused };
+            r.grouped, r.xfused = .{ false, false };
             try m.window(toks[0..rows], &pk);
             @memcpy(keep[0 .. rows * VOCAB], m.t.logits.b.slice(u16, rows * VOCAB));
-            r.grouped = true;
+            r.grouped, r.xfused = .{ g0, f0 };
             try m.window(toks[0..rows], &pk);
             const now = m.t.logits.b.slice(u16, rows * VOCAB);
             var diff: usize = 0;
