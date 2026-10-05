@@ -1,5 +1,6 @@
-//! Flash Next one-row greedy steps on the Python engine's own kernels (tools/zig/flashnext_dump.py): every launch is
-//! a recorded variant, every weight is the pack's or the checkpoint's; tokens are checked against the Python engine's.
+//! Flash Next windows of 1-8 rows on the Python engine's own kernels (tools/zig/flashnext_dump.py): every launch is a
+//! recorded variant, every weight the pack's or the checkpoint's. Checks one-row greedy tokens and every row of the
+//! Python engine's drafted windows (with rollback), then times each window size.
 const std = @import("std");
 const mtl = @import("metal");
 
@@ -12,6 +13,9 @@ const VOCAB = 248320;
 const CAP = 8192; // keys an attention layer holds in this runner
 const PLE_TAIL = 9;
 const GROUPS = 8;
+const MAXR = 8;
+const CS_ROW = 3 * WIDE * 2; // a DeltaNet conv state row (bytes)
+const SO_ROW = 48 * 128 * 128 * 4; // a DeltaNet recurrent state row (bytes)
 
 const Buf = struct { b: mtl.Buffer, off: usize = 0 };
 const Entry = struct { fd: std.c.fd_t, at: usize, len: usize };
@@ -21,16 +25,22 @@ const Site = struct { v: *Variant, grid: mtl.Size, tg: mtl.Size };
 const glue_source =
     \\#include <metal_stdlib>
     \\using namespace metal;
+    \\// meta: position of row 0, key capacity, rows
     \\kernel void fz_kv_write(device const bfloat* kout [[buffer(0)]], device const bfloat* p [[buffer(1)]],
     \\    device bfloat* keys [[buffer(2)]], device bfloat* vals [[buffer(3)]], device bfloat* raw [[buffer(4)]],
     \\    constant uint* meta [[buffer(5)]], uint i [[thread_position_in_grid]]) {
-    \\  const uint pos = meta[0], cap = meta[1];
-    \\  if (i < 512) { const uint at = ((i >> 8) * cap + pos) * 256 + (i & 255); keys[at] = kout[i]; vals[at] = p[12800 + i]; }
-    \\  if (i < 128) raw[pos * 128 + i] = p[13824 + i];
+    \\  const uint pos = meta[0], cap = meta[1], rows = meta[2];
+    \\  const uint r = i >> 9, j = i & 511;
+    \\  if (r >= rows) return;
+    \\  const uint at = ((j >> 8) * cap + pos + r) * 256 + (j & 255);
+    \\  keys[at] = kout[r * 512 + j];
+    \\  vals[at] = p[r * 13952 + 12800 + j];
+    \\  if (j < 128) raw[(pos + r) * 128 + j] = p[r * 13952 + 13824 + j];
     \\}
-    \\kernel void fz_argmax(device const bfloat* x [[buffer(0)]], device uint* out [[buffer(1)]],
-    \\    constant uint& n [[buffer(2)]], uint t [[thread_index_in_threadgroup]],
+    \\kernel void fz_argmax(device const bfloat* logits [[buffer(0)]], device uint* out [[buffer(1)]],
+    \\    constant uint& n [[buffer(2)]], uint row [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]],
     \\    uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
+    \\  device const bfloat* x = logits + row * n;
     \\  float best = -INFINITY; uint at = 0xffffffffu;
     \\  for (uint i = t; i < n; i += 1024) { const float v = float(x[i]); if (v > best) { best = v; at = i; } }
     \\  for (ushort o = 16; o > 0; o >>= 1) {
@@ -46,7 +56,7 @@ const glue_source =
     \\    const float ob = simd_shuffle_xor(best, o); const uint oa = simd_shuffle_xor(at, o);
     \\    if (ob > best || (ob == best && oa < at)) { best = ob; at = oa; }
     \\  }
-    \\  if (lane == 0) out[0] = at;
+    \\  if (lane == 0) out[row] = at;
     \\}
 ;
 
@@ -60,22 +70,23 @@ fn readAll(fd: std.c.fd_t, dest: []u8, at: usize) !void {
 }
 
 const Run = struct {
-    gpa: std.mem.Allocator,
     arena: std.mem.Allocator,
     device: mtl.Device,
     queue: mtl.Queue,
     index: std.StringHashMapUnmanaged(Entry) = .empty,
     variants: std.StringHashMapUnmanaged(*Variant) = .empty,
-    sites: std.StringHashMapUnmanaged(Site) = .empty,
+    roles: std.StringHashMapUnmanaged(Site) = .empty,
     shapes: std.StringHashMapUnmanaged(mtl.Buffer) = .empty,
     loaded: usize = 0,
+    rows: usize = 1,
     enc: mtl.ComputeEncoder = undefined,
     kv_pipe: mtl.Pipeline = undefined,
     argmax_pipe: mtl.Pipeline = undefined,
 
     fn buffer(r: *Run, len: usize) !mtl.Buffer {
-        const b = try r.device.buffer(@max(len, 64), opts);
-        @memset(b.contents()[0..@max(len, 64)], 0);
+        const n = @max(len, 64);
+        const b = try r.device.buffer(n, opts);
+        @memset(b.contents()[0..n], 0);
         return b;
     }
 
@@ -123,11 +134,12 @@ const Run = struct {
     fn group(r: *Run, first: usize, count: usize, suffix: []const u8) !Buf {
         var total: usize = 0;
         var name: [160]u8 = undefined;
-        for (first..first + count) |s| total += (try r.entry(try std.fmt.bufPrint(&name, "language_model.model.layers.1.ple.ple_embedding.ngram_embedding.shard_{d}.{s}", .{ s, suffix }))).len;
+        const fmt = "language_model.model.layers.1.ple.ple_embedding.ngram_embedding.shard_{d}.{s}";
+        for (first..first + count) |s| total += (try r.entry(try std.fmt.bufPrint(&name, fmt, .{ s, suffix }))).len;
         const b = try r.device.buffer(total, opts);
         var at: usize = 0;
         for (first..first + count) |s| {
-            const e = try r.entry(try std.fmt.bufPrint(&name, "language_model.model.layers.1.ple.ple_embedding.ngram_embedding.shard_{d}.{s}", .{ s, suffix }));
+            const e = try r.entry(try std.fmt.bufPrint(&name, fmt, .{ s, suffix }));
             try readAll(e.fd, b.contents()[at .. at + e.len], e.at);
             at += e.len;
         }
@@ -149,10 +161,10 @@ const Run = struct {
             v.* = .{ .inputs = try strings(r.arena, o.get("inputs").?), .outputs = try strings(r.arena, o.get("outputs").?), .meta = try strings(r.arena, o.get("meta").?), .pipe = try mtl.Pipeline.init(r.device, lib, kv.key_ptr.*, false) };
             try r.variants.put(r.arena, kv.key_ptr.*, v);
         }
-        var sit = plan.object.get("sites").?.object.iterator();
-        while (sit.next()) |kv| {
+        var rit = plan.object.get("roles").?.object.iterator();
+        while (rit.next()) |kv| {
             const o = kv.value_ptr.object;
-            try r.sites.put(r.arena, kv.key_ptr.*, .{ .v = r.variants.get(o.get("function").?.string).?, .grid = size3(o.get("grid").?), .tg = size3(o.get("threadgroup").?) });
+            try r.roles.put(r.arena, kv.key_ptr.*, .{ .v = r.variants.get(o.get("function").?.string).?, .grid = size3(o.get("grid").?), .tg = size3(o.get("threadgroup").?) });
         }
         const glue = try mtl.Library.fromSource(r.device, glue_source, mtl.CompileOptions.mlx());
         r.kv_pipe = try mtl.Pipeline.init(r.device, glue, "fz_kv_write", false);
@@ -170,25 +182,27 @@ const Run = struct {
         return mtl.Size.of(@intCast(a[0].integer), @intCast(a[1].integer), @intCast(a[2].integer));
     }
 
-    /// One launch of `site` with its inputs and outputs in the variant's order (shape buffers after their array).
-    fn call(r: *Run, site: []const u8, ins: []const Buf, outs: []const Buf) !void {
-        const s = r.sites.get(site) orelse {
-            std.log.err("no launch site {s}", .{site});
+    /// One launch of `role` at the current row count, inputs and outputs in the variant's order.
+    fn call(r: *Run, role: []const u8, ins: []const Buf, outs: []const Buf) !void {
+        var key: [96]u8 = undefined;
+        const name = try std.fmt.bufPrint(&key, "{s}|{d}", .{ role, r.rows });
+        const s = r.roles.get(name) orelse {
+            std.log.err("no launch site {s}", .{name});
             return error.NoSite;
         };
         const v = s.v;
         if (ins.len != v.inputs.len or outs.len != v.outputs.len) {
-            std.log.err("{s}: {d} inputs and {d} outputs given, the kernel takes {d} and {d}", .{ site, ins.len, outs.len, v.inputs.len, v.outputs.len });
+            std.log.err("{s}: {d} inputs and {d} outputs given, the kernel takes {d} and {d}", .{ name, ins.len, outs.len, v.inputs.len, v.outputs.len });
             return error.Arity;
         }
         r.enc.setPipeline(v.pipe);
         var at: usize = 0;
-        for (v.inputs, ins) |name, b| {
+        for (v.inputs, ins) |input, b| {
             r.enc.setBuffer(b.b, b.off, at);
             at += 1;
             for ([_][]const u8{ "_shape", "_strides", "_ndim" }) |suffix| {
                 for (v.meta) |m| {
-                    if (m.len == name.len + suffix.len and std.mem.startsWith(u8, m, name) and std.mem.endsWith(u8, m, suffix)) {
+                    if (m.len == input.len + suffix.len and std.mem.startsWith(u8, m, input) and std.mem.endsWith(u8, m, suffix)) {
                         r.enc.setBuffer(r.shapes.get(m) orelse return error.NoShape, 0, at);
                         at += 1;
                     }
@@ -220,8 +234,7 @@ const Layer = struct {
     kn: Buf = undefined,
     iqn: Buf = undefined,
     router: Buf,
-    ex: [18]Buf, // gate, up, sgate, sup (w,s,b) then down, sdown (w,s,b)
-    // state
+    ex: [18]Buf, // gate, up, shared gate, shared up (weight, scales, biases), then down, shared down
     cs: [2]Buf = undefined,
     so: [2]Buf = undefined,
     keys: Buf = undefined,
@@ -262,7 +275,7 @@ const Ple = struct {
     offsets: [16]i64,
 };
 
-/// The step's scratch: every intermediate a one-row forward writes.
+/// Every intermediate a window of up to MAXR rows writes, and the per-window values the kernels read.
 const Tmp = struct {
     h: [2]Buf,
     ssp: Buf,
@@ -290,9 +303,8 @@ const Tmp = struct {
     gated: Buf,
     hout: Buf,
     logits: Buf,
-    pick_out: Buf,
-    // constants and per-step values
-    rows1: Buf,
+    picks: Buf,
+    rows: Buf,
     mdims: Buf,
     eps: Buf,
     ids8: Buf,
@@ -328,62 +340,87 @@ const Model = struct {
     ple: Ple,
     t: Tmp,
     pos: usize = 0,
-    parity: usize = 0,
+    state: usize = 0, // the DeltaNet buffer pair holding the state
+    state_row: usize = 0, // its row
+    gpu_seconds: f64 = 0,
 
-    fn lane(m: *Model, x: Buf, k: usize, l: Lane, site: []const u8, y: Buf) !void {
-        const xs_site = if (k == D) "lane_qmm_xsum#[1, 2560]" else "lane_qmm_xsum#[1, 6144]";
-        try m.r.call(xs_site, &.{ x, m.t.mdims }, &.{m.t.xs});
-        try m.r.call(site, &.{ x, m.t.xs, l.wq, l.sbt, m.t.mdims }, &.{y});
+    fn reset(m: *Model) void {
+        m.pos = 0;
+        m.state = 0;
+        m.state_row = 0;
+        for (&m.layers) |*L| if (L.linear) {
+            @memset(L.cs[0].b.contents()[0..CS_ROW], 0);
+            @memset(L.so[0].b.contents()[0..SO_ROW], 0);
+        };
+        m.ple.hist = .{ m.ple.eos, m.ple.eos };
+        @memset(m.ple.cin.b.contents()[0 .. (PLE_TAIL + MAXR) * WIDE * 2], 0);
     }
 
-    fn hcProject(m: *Model, hn: Buf, hc: Hc, down_site: []const u8, up_site: []const u8, inj: ?Buf) !void {
+    fn lane(m: *Model, x: Buf, k: usize, l: Lane, role: []const u8, y: Buf) !void {
+        try m.r.call(if (k == D) "lane_qmm_xsum#[2560]" else "lane_qmm_xsum#[6144]", &.{ x, m.t.mdims }, &.{m.t.xs});
+        try m.r.call(role, &.{ x, m.t.xs, l.wq, l.sbt, m.t.mdims }, &.{y});
+    }
+
+    fn hcProject(m: *Model, hn: Buf, hc: Hc, down: []const u8, up: []const u8, inj: Buf) !void {
         const t = &m.t;
-        try m.r.call(down_site, &.{ hn, t.ssp, hc.scale, hc.dw, hc.ds, hc.db, t.eps, t.rows1 }, &.{t.part});
-        if (inj) |out_inj| {
-            try m.r.call(up_site, &.{ hn, t.ssp, hc.scale, t.part, hc.uw, hc.us, hc.ub, t.eps, t.rows1 }, &.{ t.mixed, out_inj });
-        } else {
-            try m.r.call(up_site, &.{ hn, t.ssp, hc.scale, t.part, hc.uw, hc.us, hc.ub, t.eps, t.rows1 }, &.{t.mixed});
-        }
+        try m.r.call(down, &.{ hn, t.ssp, hc.scale, hc.dw, hc.ds, hc.db, t.eps, t.rows }, &.{t.part});
+        try m.r.call(up, &.{ hn, t.ssp, hc.scale, t.part, hc.uw, hc.us, hc.ub, t.eps, t.rows }, &.{ t.mixed, inj });
     }
 
     fn grouped(m: *Model, h: Buf, out: Buf) !void {
         const t = &m.t;
-        try m.r.call("q4_hc_norm_grouped#[1, 10240]", &.{ h, t.inj_m, t.ydown, t.wts, t.lg }, &.{ out, t.ssp });
+        try m.r.call("q4_hc_norm_grouped#[10240]", &.{ h, t.inj_m, t.ydown, t.wts, t.lg }, &.{ out, t.ssp });
     }
 
-    fn pleIds(m: *Model, tok: i64) void {
+    /// The window's n-gram row ids [rows, 16] after the history (NGramEmbedding.ids on [history, tokens]).
+    fn pleIds(m: *Model, tokens: []const u32) void {
         const p = &m.ple;
-        const seq = [3]i64{ p.hist[0], p.hist[1], tok };
-        var before: i64 = -1;
-        if (p.hist[0] == p.eos) before = 0;
-        if (p.hist[1] == p.eos) before = 1;
-        const in_seg = 2 - (before + 1);
-        var sh: [3]i64 = undefined;
-        for (0..3) |s| sh[s] = if (in_seg >= @as(i64, @intCast(s))) seq[2 - s] else p.eos;
-        const out = m.t.ple_ids.b.slice(u32, 16);
-        for (2..4) |ng| {
-            var mixed: i64 = sh[0] *% p.mult[0];
-            for (1..ng) |q| mixed ^= sh[q] *% p.mult[q];
-            for (0..8) |k| {
-                const hh = (ng - 2) * 8 + k;
-                out[hh] = @intCast(@mod(mixed, p.sizes[hh]) + p.offsets[hh]);
+        var seq: [2 + MAXR]i64 = undefined;
+        seq[0], seq[1] = .{ p.hist[0], p.hist[1] };
+        for (tokens, 0..) |tok, i| seq[2 + i] = tok;
+        const out = m.t.ple_ids.b.slice(u32, 16 * MAXR);
+        for (0..tokens.len) |row| {
+            const at = 2 + row;
+            var before: i64 = -1;
+            for (0..at) |q| if (seq[q] == p.eos) {
+                before = @intCast(q);
+            };
+            const in_seg = @as(i64, @intCast(at)) - (before + 1);
+            var sh: [3]i64 = undefined;
+            for (0..3) |s| sh[s] = if (in_seg >= @as(i64, @intCast(s))) seq[at - s] else p.eos;
+            for (2..4) |ng| {
+                var mixed: i64 = sh[0] *% p.mult[0];
+                for (1..ng) |q| mixed ^= sh[q] *% p.mult[q];
+                for (0..8) |k| {
+                    const hh = (ng - 2) * 8 + k;
+                    out[row * 16 + hh] = @intCast(@mod(mixed, p.sizes[hh]) + p.offsets[hh]);
+                }
             }
         }
-        p.hist = .{ p.hist[1], tok };
     }
 
-    /// One token through every layer; returns the argmax of its logits.
-    fn step(m: *Model, tok: u32) !u32 {
+    /// One forward over `tokens` (a window of up to MAXR rows from the cache's position): each row's argmax.
+    fn window(m: *Model, tokens: []const u32, picks: []u32) !void {
         const r = m.r;
         const t = &m.t;
-        t.ids8.b.slice(u32, 8)[0] = tok;
-        t.pos8.b.slice(i32, 8)[0] = @intCast(m.pos);
-        t.nk8.b.slice(i32, 8)[0] = @intCast(m.pos + 1);
-        t.kvmeta.b.slice(u32, 2)[0] = @intCast(m.pos);
-        m.pleIds(tok);
+        const rows = tokens.len;
+        r.rows = rows;
+        t.rows.b.slice(i32, 1)[0] = @intCast(rows);
+        t.mdims.b.slice(i32, 2)[0] = @intCast(rows);
+        const ids = t.ids8.b.slice(u32, 8);
+        const pos8 = t.pos8.b.slice(i32, 8);
+        const nk8 = t.nk8.b.slice(i32, 8);
+        for (0..8) |i| {
+            ids[i] = if (i < rows) tokens[i] else 0;
+            pos8[i] = if (i < rows) @intCast(m.pos + i) else 0;
+            nk8[i] = if (i < rows) @intCast(m.pos + i + 1) else 0;
+        }
+        const kvm = t.kvmeta.b.slice(u32, 3);
+        kvm[0], kvm[2] = .{ @intCast(m.pos), @intCast(rows) };
+        m.pleIds(tokens);
         const cb = r.queue.commandBuffer();
         r.enc = cb.compute(.concurrent);
-        var cur: usize = 0; // t.h[cur] holds the streams
+        var cur: usize = 0;
         try r.call("qa_embed_rows@embed", &.{ t.ids8, m.embed[0], m.embed[1], m.embed[2] }, &.{t.h[0]});
         var pending: enum { none, grouped } = .none;
         for (0..LAYERS) |i| {
@@ -401,48 +438,50 @@ const Model = struct {
                 try m.lane(t.emb, D, p.kv, "lane_qmm_bytes_grouped@ple.kv", t.kvp);
                 try r.call("q4_ple_gate@ple", &.{ t.kvp, t.h[cur], p.ks, p.qs, p.cs, t.eps }, &.{ t.gated, .{ .b = p.cin.b, .off = PLE_TAIL * WIDE * 2 } });
                 try r.call("q4_ple_conv@ple", &.{ p.cin, p.conv, t.gated, t.h[cur] }, &.{t.hout});
-                try r.call("q4_hc_norm_none#[1, 10240]", &.{t.hout}, &.{ t.h[1 - cur], t.ssp });
+                try r.call("q4_hc_norm_none#[10240]", &.{t.hout}, &.{ t.h[1 - cur], t.ssp });
             } else if (pending == .none) {
-                try r.call("q4_hc_norm_none#[1, 10240]", &.{t.h[cur]}, &.{ t.h[1 - cur], t.ssp });
+                try r.call("q4_hc_norm_none#[10240]", &.{t.h[cur]}, &.{ t.h[1 - cur], t.ssp });
             } else {
                 try m.grouped(t.h[cur], t.h[1 - cur]);
             }
             cur = 1 - cur;
-            try m.hcProject(t.h[cur], L.ahc, "qa_hc_down_row@ahc", "qa_hc_up_row@ahc", t.inj_a);
+            try m.hcProject(t.h[cur], L.ahc, "qa_hc_down@ahc", "qa_hc_up@ahc", t.inj_a);
             if (L.linear) {
                 try m.lane(t.mixed, D, L.proj, "lane_qmm_bytes_grouped@gdn.in", t.p);
-                const a = m.parity;
-                try r.call("q4_gdn_pipe@gdn", &.{ t.p, L.cs[a], L.so[a], L.conv, L.alog, L.dt, L.norm, t.eps, t.rows1 }, &.{ t.gout, L.cs[1 - a], L.so[1 - a] });
+                const a = m.state;
+                const cs_in: Buf = .{ .b = L.cs[a].b, .off = m.state_row * CS_ROW };
+                const so_in: Buf = .{ .b = L.so[a].b, .off = m.state_row * SO_ROW };
+                try r.call("q4_gdn@gdn", &.{ t.p, cs_in, so_in, L.conv, L.alog, L.dt, L.norm, t.eps, t.rows }, &.{ t.gout, L.cs[1 - a], L.so[1 - a] });
                 try m.lane(t.gout, 6144, L.out, "lane_qmm_bytes_grouped@gdn.out", t.branch);
             } else {
                 try m.lane(t.mixed, D, L.proj, "lane_qmm_bytes_grouped@att.proj", t.p);
                 try r.call("q4_attn_prep@att", &.{ t.p, t.pos8, L.qn, L.kn, L.iqn, t.eps, t.log2base }, &.{ t.q, t.kout, t.iq });
                 r.enc.setPipeline(r.kv_pipe);
                 for ([_]Buf{ t.kout, t.p, L.keys, L.vals, L.raw, t.kvmeta }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
-                r.enc.dispatchThreads(mtl.Size.of(512, 1, 1), mtl.Size.of(256, 1, 1));
+                r.enc.dispatchThreads(mtl.Size.of(512 * rows, 1, 1), mtl.Size.of(256, 1, 1));
                 r.enc.barrier();
-                try r.call("q4_attn_parts#[1, 24, 256]", &.{ t.q, L.keys, L.vals, t.ids81, t.nk8, t.zero8, t.scale }, &.{ t.po, t.pm });
-                try r.call("q4_attn_merge_gate#[1, 24, 16, 256]", &.{ t.po, t.pm, t.p }, &.{t.aout});
+                try r.call("q4_attn_parts#[24, 256]", &.{ t.q, L.keys, L.vals, t.ids81, t.nk8, t.zero8, t.scale }, &.{ t.po, t.pm });
+                try r.call("q4_attn_merge_gate#[24, 16, 256]", &.{ t.po, t.pm, t.p }, &.{t.aout});
                 try m.lane(t.aout, 6144, L.out, "lane_qmm_bytes_grouped@att.o", t.branch);
             }
-            try r.call("q4_hc_norm_plain#[1, 10240]", &.{ t.h[cur], t.inj_a, t.branch }, &.{ t.h[1 - cur], t.ssp });
+            try r.call("q4_hc_norm_plain#[10240]", &.{ t.h[cur], t.inj_a, t.branch }, &.{ t.h[1 - cur], t.ssp });
             cur = 1 - cur;
-            try m.hcProject(t.h[cur], L.mhc, "qa_hc_down_row@mhc", "qa_hc_up_row@mhc", t.inj_m);
-            try r.call("q4_router_float@moe", &.{ t.mixed, L.router, t.rows1 }, &.{t.lg});
+            try m.hcProject(t.h[cur], L.mhc, "qa_hc_down@mhc", "qa_hc_up@mhc", t.inj_m);
+            try r.call("q4_router_float@moe", &.{ t.mixed, L.router, t.rows }, &.{t.lg});
             const e = L.ex;
             try r.call("qa_expert_gateup@moe.gate", &.{ t.mixed, t.lg, e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8], e[9], e[10], e[11] }, &.{ t.act, t.pick, t.wts });
-            try r.call("qa_expert_down_y@moe.down", &.{ t.act, t.pick, e[12], e[13], e[14], e[15], e[16], e[17], t.rows1 }, &.{t.ydown});
+            try r.call("qa_expert_down_y@moe.down", &.{ t.act, t.pick, e[12], e[13], e[14], e[15], e[16], e[17], t.rows }, &.{t.ydown});
             pending = .grouped;
         }
         try m.grouped(t.h[cur], t.h[1 - cur]);
         cur = 1 - cur;
-        try m.hcProject(t.h[cur], m.mix, "qa_hc_down_row@mix", "qa_hc_up_row@mix", t.inj_a);
+        try m.hcProject(t.h[cur], m.mix, "qa_hc_down@mix", "qa_hc_up@mix", t.inj_a);
         try m.lane(t.mixed, D, m.head, "lane_qmm_bytes_grouped@head", t.logits);
         r.enc.setPipeline(r.argmax_pipe);
         r.enc.setBuffer(t.logits.b, 0, 0);
-        r.enc.setBuffer(t.pick_out.b, 0, 1);
+        r.enc.setBuffer(t.picks.b, 0, 1);
         r.enc.setBuffer(t.vocab.b, 0, 2);
-        r.enc.dispatchThreads(mtl.Size.of(1024, 1, 1), mtl.Size.of(1024, 1, 1));
+        r.enc.dispatchThreads(mtl.Size.of(1024 * rows, 1, 1), mtl.Size.of(1024, 1, 1));
         r.enc.end();
         cb.commit();
         cb.wait();
@@ -450,11 +489,18 @@ const Model = struct {
             std.log.err("command buffer failed: {s}", .{msg});
             return error.GpuFailed;
         }
+        m.gpu_seconds += cb.gpuSeconds();
+        @memcpy(picks[0..rows], t.picks.b.slice(u32, rows));
+    }
+
+    /// Keep the window's first `keep` rows: the DeltaNet state of row keep-1, the n-gram history and conv tail.
+    fn keepRows(m: *Model, tokens: []const u32, keep: usize) void {
+        m.state = 1 - m.state;
+        m.state_row = keep - 1;
+        m.pos += keep;
         const cin = m.ple.cin.b.contents();
-        std.mem.copyForwards(u8, cin[0 .. PLE_TAIL * WIDE * 2], cin[WIDE * 2 .. (PLE_TAIL + 1) * WIDE * 2]);
-        m.parity = 1 - m.parity;
-        m.pos += 1;
-        return t.pick_out.b.slice(u32, 1)[0];
+        std.mem.copyForwards(u8, cin[0 .. PLE_TAIL * WIDE * 2], cin[keep * WIDE * 2 .. (keep + PLE_TAIL) * WIDE * 2]);
+        for (tokens[0..keep]) |tok| m.ple.hist = .{ m.ple.hist[1], tok };
     }
 };
 
@@ -479,12 +525,11 @@ pub fn main(init: std.process.Init) !void {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const device = try mtl.Device.init();
-    var r = Run{ .gpa = gpa, .arena = arena, .device = device, .queue = try device.queue() };
+    var r = Run{ .arena = arena, .device = device, .queue = try device.queue() };
     const t0 = mtl.clock.seconds();
     try r.compile(args[2]);
     const t1 = mtl.clock.seconds();
 
-    // the checkpoint's shards and the pack
     const index_file = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/model.safetensors.index.json", .{args[1]}, 0));
     const index = try std.json.parseFromSliceLeaky(std.json.Value, arena, index_file.bytes[0..index_file.size], .{});
     var files: std.StringHashMapUnmanaged(void) = .empty;
@@ -499,7 +544,7 @@ pub fn main(init: std.process.Init) !void {
     const ple_ref = ref.object.get("ple").?.object;
 
     const m = try arena.create(Model);
-    m.r = &r;
+    m.* = .{ .r = &r, .layers = undefined, .mix = undefined, .head = undefined, .embed = undefined, .ple = undefined, .t = undefined };
     for (0..LAYERS) |i| {
         const linear = i % 4 != 3;
         var L: Layer = .{ .ahc = try hcOf(&r, "L{d}.ahc", .{i}), .mhc = try hcOf(&r, "L{d}.mhc", .{i}), .linear = linear, .proj = undefined, .out = undefined, .router = try r.loadf("L{d}.moe.router", .{i}), .ex = undefined };
@@ -511,8 +556,8 @@ pub fn main(init: std.process.Init) !void {
             L.dt = try r.loadf("L{d}.gdn.dt", .{i});
             L.norm = try r.loadf("L{d}.gdn.norm", .{i});
             for (0..2) |j| {
-                L.cs[j] = .{ .b = try r.buffer(8 * 3 * WIDE * 2) };
-                L.so[j] = .{ .b = try r.buffer(8 * 48 * 128 * 128 * 4) };
+                L.cs[j] = .{ .b = try r.buffer(MAXR * CS_ROW) };
+                L.so[j] = .{ .b = try r.buffer(MAXR * SO_ROW) };
             }
         } else {
             L.proj = try laneOf(&r, "L{d}.att.proj", .{i});
@@ -525,15 +570,12 @@ pub fn main(init: std.process.Init) !void {
             L.raw = .{ .b = try r.buffer(CAP * 128 * 2) };
         }
         const projs = [_][]const u8{ "switch_mlp.gate_proj", "switch_mlp.up_proj", "shared_expert.gate_proj", "shared_expert.up_proj", "switch_mlp.down_proj", "shared_expert.down_proj" };
-        // gateup takes gate, up, shared gate, shared up; down takes down, shared down
-        const order = [_]usize{ 0, 1, 2, 3, 4, 5 };
-        for (order, 0..) |pi, j| {
+        for (projs, 0..) |proj, j| {
             for ([_][]const u8{ "weight", "scales", "biases" }, 0..) |suffix, k| {
-                L.ex[j * 3 + k] = try r.loadf("language_model.model.layers.{d}.mlp.{s}.{s}", .{ i, projs[pi], suffix });
+                L.ex[j * 3 + k] = try r.loadf("language_model.model.layers.{d}.mlp.{s}.{s}", .{ i, proj, suffix });
             }
         }
         m.layers[i] = L;
-        if (i % 8 == 7) std.debug.print("layer {d} loaded ({d:.1} GB so far)\n", .{ i, @as(f64, @floatFromInt(r.loaded)) / 1e9 });
     }
     m.mix = try hcOf(&r, "mix", .{});
     m.head = try laneOf(&r, "head", .{});
@@ -546,14 +588,13 @@ pub fn main(init: std.process.Init) !void {
         .conv = try r.load("ple.conv"),
         .starts = try r.load("ple.starts"),
         .tables = undefined,
-        .cin = .{ .b = try r.buffer((PLE_TAIL + 1) * WIDE * 2) },
+        .cin = .{ .b = try r.buffer((PLE_TAIL + MAXR) * WIDE * 2) },
         .hist = undefined,
         .eos = jsonInt(ple_ref.get("eos").?),
         .mult = undefined,
         .sizes = undefined,
         .offsets = undefined,
     };
-    m.ple.hist = .{ m.ple.eos, m.ple.eos };
     for (0..3) |k| m.ple.mult[k] = jsonInt(ple_ref.get("multipliers").?.array.items[k]);
     for (0..16) |k| {
         m.ple.sizes[k] = jsonInt(ple_ref.get("sizes").?.array.items[k]);
@@ -564,51 +605,51 @@ pub fn main(init: std.process.Init) !void {
         m.ple.tables[3 * g + 1] = try r.group(16 * g, 16, "scales");
         m.ple.tables[3 * g + 2] = try r.group(16 * g, 16, "biases");
     }
-    const big = struct {
+    const B = struct {
         fn of(rr: *Run, n: usize) !Buf {
             return .{ .b = try rr.buffer(n) };
         }
     };
     m.t = .{
-        .h = .{ try big.of(&r, WIDE * 2), try big.of(&r, WIDE * 2) },
-        .ssp = try big.of(&r, 10 * 4 * 4),
-        .part = try big.of(&r, 10 * 324 * 4),
-        .mixed = try big.of(&r, D * 2),
-        .inj_a = try big.of(&r, 8 * 2),
-        .inj_m = try big.of(&r, 8 * 2),
-        .xs = try big.of(&r, 192 * 16 * 4),
-        .p = try big.of(&r, 16480 * 2),
-        .gout = try big.of(&r, 6144 * 2),
-        .branch = try big.of(&r, D * 2),
-        .lg = try big.of(&r, 513 * 4),
-        .act = try big.of(&r, 11 * 640 * 2),
-        .pick = try big.of(&r, 10 * 4),
-        .wts = try big.of(&r, 10 * 4),
-        .ydown = try big.of(&r, 11 * D * 2),
-        .q = try big.of(&r, 24 * 256 * 2),
-        .kout = try big.of(&r, 2 * 256 * 2),
-        .iq = try big.of(&r, 4 * 128 * 2),
-        .po = try big.of(&r, 24 * 16 * 256 * 4),
-        .pm = try big.of(&r, 24 * 16 * 2 * 4),
-        .aout = try big.of(&r, 6144 * 2),
-        .emb = try big.of(&r, D * 2),
-        .kvp = try big.of(&r, (WIDE + D) * 2),
-        .gated = try big.of(&r, WIDE * 2),
-        .hout = try big.of(&r, WIDE * 2),
-        .logits = try big.of(&r, VOCAB * 2),
-        .pick_out = try big.of(&r, 16),
-        .rows1 = try i32Buf(&r, &.{1}),
+        .h = .{ try B.of(&r, MAXR * WIDE * 2), try B.of(&r, MAXR * WIDE * 2) },
+        .ssp = try B.of(&r, MAXR * 10 * 4 * 4),
+        .part = try B.of(&r, 10 * MAXR * 324 * 4),
+        .mixed = try B.of(&r, MAXR * D * 2),
+        .inj_a = try B.of(&r, MAXR * 4 * 2),
+        .inj_m = try B.of(&r, MAXR * 4 * 2),
+        .xs = try B.of(&r, 192 * 16 * 4),
+        .p = try B.of(&r, MAXR * 16480 * 2),
+        .gout = try B.of(&r, MAXR * 6144 * 2),
+        .branch = try B.of(&r, MAXR * D * 2),
+        .lg = try B.of(&r, MAXR * 513 * 4),
+        .act = try B.of(&r, MAXR * 11 * 640 * 2),
+        .pick = try B.of(&r, MAXR * 10 * 4),
+        .wts = try B.of(&r, MAXR * 10 * 4),
+        .ydown = try B.of(&r, MAXR * 11 * D * 2),
+        .q = try B.of(&r, MAXR * 24 * 256 * 2),
+        .kout = try B.of(&r, MAXR * 2 * 256 * 2),
+        .iq = try B.of(&r, MAXR * 4 * 128 * 2),
+        .po = try B.of(&r, MAXR * 24 * 16 * 256 * 4),
+        .pm = try B.of(&r, MAXR * 24 * 16 * 2 * 4),
+        .aout = try B.of(&r, MAXR * 6144 * 2),
+        .emb = try B.of(&r, MAXR * D * 2),
+        .kvp = try B.of(&r, MAXR * (WIDE + D) * 2),
+        .gated = try B.of(&r, MAXR * WIDE * 2),
+        .hout = try B.of(&r, MAXR * WIDE * 2),
+        .logits = try B.of(&r, MAXR * VOCAB * 2),
+        .picks = try B.of(&r, MAXR * 4),
+        .rows = try i32Buf(&r, &.{1}),
         .mdims = try i32Buf(&r, &.{ 1, 16, 0, 0, 0, 0, 0, 0 }),
         .eps = try r.load("eps"),
-        .ids8 = try i32Buf(&r, &.{ 0, 0, 0, 0, 0, 0, 0, 0 }),
-        .pos8 = try i32Buf(&r, &.{ 0, 0, 0, 0, 0, 0, 0, 0 }),
-        .nk8 = try i32Buf(&r, &.{ 0, 0, 0, 0, 0, 0, 0, 0 }),
-        .zero8 = try i32Buf(&r, &.{ 0, 0, 0, 0, 0, 0, 0, 0 }),
-        .ids81 = try i32Buf(&r, &.{ 0, 0, 0, 0, 0, 0, 0, 0 }),
+        .ids8 = try i32Buf(&r, &(@as([8]i32, @splat(0)))),
+        .pos8 = try i32Buf(&r, &(@as([8]i32, @splat(0)))),
+        .nk8 = try i32Buf(&r, &(@as([8]i32, @splat(0)))),
+        .zero8 = try i32Buf(&r, &(@as([8]i32, @splat(0)))),
+        .ids81 = try i32Buf(&r, &(@as([8]i32, @splat(0)))),
         .scale = try f32Buf(&r, @floatCast(ref.object.get("attention_scale").?.float)),
         .log2base = try f32Buf(&r, 23.253496170043945),
-        .ple_ids = try i32Buf(&r, &(@as([16]i32, @splat(0)))),
-        .kvmeta = try i32Buf(&r, &.{ 0, CAP }),
+        .ple_ids = try i32Buf(&r, &(@as([16 * MAXR]i32, @splat(0)))),
+        .kvmeta = try i32Buf(&r, &.{ 0, CAP, 1 }),
         .vocab = try i32Buf(&r, &.{VOCAB}),
     };
     try r.shapes.put(arena, "Kc_shape", (try i32Buf(&r, &.{ 1, 2, CAP, 256 })).b);
@@ -618,23 +659,66 @@ pub fn main(init: std.process.Init) !void {
 
     const prompt = ref.object.get("prompt").?.array.items;
     const want = ref.object.get("tokens").?.array.items;
-    var next: u32 = 0;
-    for (prompt) |tok| next = try m.step(@intCast(tok.integer));
+    var pick: [MAXR]u32 = undefined;
+
+    // 1. one-row greedy steps against the Python engine's tokens
+    m.reset();
+    for (prompt) |tok| {
+        try m.window(&.{@intCast(tok.integer)}, &pick);
+        m.keepRows(&.{@intCast(tok.integer)}, 1);
+    }
     var got: std.ArrayList(u32) = .empty;
-    try got.append(gpa, next);
+    try got.append(gpa, pick[0]);
     const t3 = mtl.clock.seconds();
-    while (got.items.len < want.len) try got.append(gpa, try m.step(got.items[got.items.len - 1]));
+    m.gpu_seconds = 0;
+    while (got.items.len < want.len) {
+        const last = got.items[got.items.len - 1];
+        try m.window(&.{last}, &pick);
+        m.keepRows(&.{last}, 1);
+        try got.append(gpa, pick[0]);
+    }
     const t4 = mtl.clock.seconds();
     var same: usize = 0;
     while (same < want.len and got.items[same] == @as(u32, @intCast(want[same].integer))) same += 1;
     const steps: f64 = @floatFromInt(want.len - 1);
-    std.debug.print("tokens equal to Python's: {d}/{d}; decode {d:.1} tok/s ({d:.2} ms a step)\n", .{ same, want.len, steps / (t4 - t3), (t4 - t3) * 1e3 / steps });
-    if (same != want.len) {
-        std.debug.print("first difference at {d}: got", .{same});
-        for (got.items[same..@min(same + 8, got.items.len)]) |x| std.debug.print(" {d}", .{x});
-        std.debug.print(", want", .{});
-        for (want[same..@min(same + 8, want.len)]) |x| std.debug.print(" {d}", .{x.integer});
-        std.debug.print("\n", .{});
-        std.process.exit(1);
+    std.debug.print("one row: {d}/{d} tokens equal to Python's; {d:.1} tok/s ({d:.2} ms a step, GPU {d:.2} ms)\n", .{ same, want.len, steps / (t4 - t3), (t4 - t3) * 1e3 / steps, m.gpu_seconds * 1e3 / steps });
+
+    // 2. the Python engine's drafted windows, every row's pick, with rollback
+    m.reset();
+    for (prompt) |tok| {
+        try m.window(&.{@intCast(tok.integer)}, &pick);
+        m.keepRows(&.{@intCast(tok.integer)}, 1);
     }
+    var bad: usize = 0;
+    var total_rows: usize = 0;
+    const rounds = ref.object.get("rounds").?.array.items;
+    for (rounds, 0..) |round, ri| {
+        const o = round.object;
+        const win = o.get("window").?.array.items;
+        var tokens: [MAXR]u32 = undefined;
+        for (win, 0..) |x, i| tokens[i] = @intCast(x.integer);
+        try m.window(tokens[0..win.len], &pick);
+        const exp = o.get("picks").?.array.items;
+        for (exp, 0..) |x, i| {
+            total_rows += 1;
+            if (pick[i] != @as(u32, @intCast(x.integer))) {
+                bad += 1;
+                if (bad <= 5) std.debug.print("round {d} ({d} rows) row {d}: got {d}, Python {d}\n", .{ ri, win.len, i, pick[i], x.integer });
+            }
+        }
+        m.keepRows(tokens[0..win.len], @intCast(o.get("keep").?.integer));
+    }
+    std.debug.print("drafted windows: {d} rounds, {d}/{d} rows equal to Python's\n", .{ rounds.len, total_rows - bad, total_rows });
+
+    // 3. each window size's cost
+    for ([_]usize{ 1, 2, 3, 4, 6, 8 }) |rows| {
+        var toks: [MAXR]u32 = undefined;
+        for (0..rows) |i| toks[i] = got.items[i];
+        m.gpu_seconds = 0;
+        const s0 = mtl.clock.seconds();
+        for (0..10) |_| try m.window(toks[0..rows], &pick);
+        const wall = (mtl.clock.seconds() - s0) * 1e2;
+        std.debug.print("window of {d} rows: {d:.2} ms (GPU {d:.2} ms)\n", .{ rows, wall, m.gpu_seconds * 1e2 });
+    }
+    if (same != want.len or bad != 0) std.process.exit(1);
 }

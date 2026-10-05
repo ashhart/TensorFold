@@ -18,7 +18,7 @@ from metal_source import PREAMBLE, Arg, kernel_text  # noqa: E402
 KERNELS: dict[str, dict] = {}
 CALLS: list[dict] = []
 ROLE: dict[int, str] = {}           # id of a persistent prepared array -> its role name
-FIX = {"on": False, "blobs": [], "offset": 0}
+FIX = {"on": False, "blobs": [], "offset": 0, "rows": 1}
 _orig = mx.fast.metal_kernel
 
 
@@ -36,7 +36,7 @@ def metal_kernel(name, input_names, output_names, source, header="", ensure_row_
         outs = k(*args, **kw)
         if FIX["on"]:
             ins = kw.get("inputs", args[0] if args else [])
-            entry = {"kernel": name, "grid": list(kw["grid"]), "threadgroup": list(kw["threadgroup"]),
+            entry = {"kernel": name, "rows": FIX["rows"], "grid": list(kw["grid"]), "threadgroup": list(kw["threadgroup"]),
                      "template": [[t[0], t[1] if isinstance(t[1], (bool, int)) else str(t[1])]
                                   for t in kw.get("template", [])],
                      "inputs": [], "outputs": []}
@@ -156,6 +156,7 @@ def main() -> None:
     ap.add_argument("--prompt", default="Write a story about a lighthouse keeper.")
     ap.add_argument("--tokens", type=int, default=64)
     ap.add_argument("--fixture-step", type=int, default=3)
+    ap.add_argument("--windows", default="2,3,4,6,8")
     args = ap.parse_args()
     assert os.environ.get("TF_FLASH_PLE_KERNELS") == "1", "run with TF_FLASH_PLE_KERNELS=1"
     out = args.out
@@ -183,6 +184,31 @@ def main() -> None:
             fixture_input = made[-1]
         made.append(step(made[-1]))
         FIX["on"] = False
+    rounds, sizes, seen = [], [int(x) for x in args.windows.split(",")], set()
+    cache = rt.model.make_cache()
+    for t in prompt:
+        pick = step(t)
+    got, r = [pick], 0
+    while len(got) < len(made):
+        rows = min(sizes[r % len(sizes)], len(made) - len(got) + 1)
+        drafts = list(made[len(got):len(got) + rows - 1])
+        bad = r % rows
+        if bad:
+            drafts[bad - 1] = (drafts[bad - 1] + 1) % rt.model.args.vocab_size
+        window = [got[-1]] + drafts
+        FIX["on"], FIX["rows"] = rows not in seen, rows
+        logits = rt.head(rt.model.hidden(np.array([window], dtype=np.int64), cache))
+        picks = [int(x) for x in mx.argmax(logits[0], axis=-1).tolist()]
+        FIX["on"], FIX["rows"] = False, 1
+        seen.add(rows)
+        keep = 1
+        while keep < rows and drafts[keep - 1] == picks[keep - 1]:
+            keep += 1
+        got.extend(picks[:keep])
+        rt.keep_rows(cache, rows, keep)
+        rounds.append({"rows": rows, "window": window, "picks": picks, "keep": keep})
+        r += 1
+    assert got[:len(made)] == made, "drafted windows differ from one-row steps"
     mx.save_safetensors(str(out / "pack.safetensors"), pack)
     (out / "fixtures.bin").write_bytes(b"".join(FIX["blobs"]))
     variants, sites = {}, {}
@@ -197,12 +223,12 @@ def main() -> None:
             variants[fname] = {"kernel": c["kernel"], "file": f"kernels/{c['kernel']}.metal", "inputs": k["inputs"], "outputs": k["outputs"],
                                "meta": sorted({m for n in k["inputs"] for m in (n + "_shape", n + "_strides")
                                                if m in k["source"]})}
-        c["site"] = site = site_of(c)
+        c["site"] = site = site_of(c) + (f"|{c['rows']}" if c["rows"] > 1 else "")
         sites.setdefault(site, {"function": fname, "grid": c["grid"], "threadgroup": c["threadgroup"]})
     cfg = rt.model.args
     ple = next(l.ple for l in rt.model.layers if "ple" in l)
     e = ple.ple_embedding
-    ref = {"prompt": prompt, "tokens": made, "fixture_step": args.fixture_step, "fixture_input": fixture_input,
+    ref = {"prompt": prompt, "tokens": made, "rounds": rounds, "fixture_step": args.fixture_step, "fixture_input": fixture_input,
            "lane_tiles": tiles, "ple": {"n": int(e.n), "context": int(e.context), "per": int(e.per_ngram),
                                         "heads": int(e.heads), "eos": int(e.eos), "sizes": e.head_sizes.tolist(),
                                         "offsets": e.head_offsets.tolist(),
