@@ -223,14 +223,16 @@ copy none of it into this Apache-2.0 tree.
 
 ## Open (2026-10-05)
 
-- [ ] aiai2 RoCE GID index robustness (in progress): after a reboot roceP2p1s0f1's IPv4 GID moved 3 -> 4 and broke
-      NCCL in `dsv41_run2.sh` / `serve2.sh` (compose `make up` already finds it)
-- [ ] FP4 prefill gap vs fp8 (in progress): 3-13% at long context (PP8192 1508 vs 1596, 100K 2286 vs 2428)
+- [x] RoCE GID index robustness (70abae0): no fixed index; NCCL (`NCCL_IB_ADDR_FAMILY=AF_INET`, RoCE v2, 10.42.0.0/15)
+      and the RoCE all-gather find the IPv4 RoCE v2 GID per device (a reboot under a live QP moved aiai2's to 4)
+- [x] FP4 prefill gap (67d6b36, bit-identical): row-tiled segment scores, one tie-keyed pick a pass, prompt entries
+      decoded once a chunk: PP8192 1649 (fp8 1596), 100K 2581 (fp8 2428); dev 500K 1762 (fp8 1619)
 - [ ] fp4 indexer with many streams at full context: unmeasured (shared-tile kernel measured on unit cases only)
 - [ ] C1 ~4% behind fp8 in fp4
 - [ ] FP4 tensor-core indexer: parked (not bit-exact against the reference order)
-- [ ] OOM safety for dev tests: long-context runs OOM'd the nodes twice (sublayer `--chunk-test` at 2000, fp4 at 600K
-      before 67d6ef3); run under a MemAvailable watchdog (kill below ~3 GiB)
+- [x] Dev loop (notes/dsv41/DEV.md): one-load suites and tiers (`tools/dsv41_suite2.sh quick`: 168 s vs 499 s as
+      fresh runs), prepared weights in dev runs (22-24 s loads), OOM guard (torch cap + per-run memwatch, start
+      refusal), `make hot` / `make cold` (119 s, no image build)
 - [ ] Slow first start after `make image` (C1 81, PP 1029, 100K 1276 on the first fp4 start; no compaction stalls):
       cause unknown
 - [ ] Review-flagged test gaps: indexer equality test only at n_keys 2900; mqa_fp4 R=1 masking
@@ -251,7 +253,10 @@ copy none of it into this Apache-2.0 tree.
 - [ ] Housekeeping: agent worktrees (`attribution`, `item4-kvdisk`, `item5-serving` under `.claude/worktrees`),
       stray `uv.lock`, private path in `tools/dsv41_vllm_dump_patch.py`
 - [ ] Watchdog: decide `WATCH_HEAL=1` (cluster heal tests in deploy README) and user linger
-- [ ] Rank 1 idle shows ~95% GPU util: NCCL spin in `follow()` waiting for rank 0's header; optional CPU-side doorbell
+- [x] Rank 1 idled at ~95% GPU util spinning in the collective: CPU idle doorbell (2248e36, `TF_IDLE_DOORBELL`):
+      0-1% / ~11 W idle, outputs and latency unchanged
+- [ ] Server MemAvailable after warm-up 2.8-2.9 GiB on aiai, under the dev loop's 3 GiB floor: trim the pool sizing
+- [ ] Old `tf-dev-old-*` containers on both nodes can go (keep the `tf-dev-snapshot:*` images: tf-dev runs on them)
 
 ## Ops notes
 
