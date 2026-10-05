@@ -183,23 +183,25 @@ def test_attention_is_softmax_over_each_rows_keys_and_rows_are_independent(dims,
         assert bool(mx.array_equal(alone[0], out[r]).item()), r
 
 
+@pytest.mark.parametrize("backend", ["rows", "matrix"])
 @pytest.mark.parametrize("kind", ["moe", "dense-oq"])
-def test_each_kernel_keeps_one_metal_signature_at_every_row_count(monkeypatch, kind):
+def test_each_kernel_keeps_one_metal_signature_at_every_row_count(monkeypatch, kind, backend):
     """MLX 0.31 recompiles a kernel whose input crosses 8 elements, which can drop a queued dispatch (mlx#3662)."""
 
     from tensorfold.families.gemma4.cache import make_cache
     from tensorfold.kernels.gemma.v1.base import Kernel
     from tensorfold.kernels.nemotron.lightning.v1 import rows
-    from tensorfold.kernels.qwen.dense.v1 import affine_rows
+    from tensorfold.kernels.qwen.dense.v1 import affine_rows, simd_qmm, simd_qmm_bits
 
-    monkeypatch.setattr(affine_rows, "_kernels", {})
+    for module in (affine_rows, simd_qmm, simd_qmm_bits):
+        monkeypatch.setattr(module, "_kernels", {})
     for module in (attention, glue, moe):             # kernels built earlier would not pass the recorder
         for value in vars(module).values():
             if isinstance(value, Kernel):
                 monkeypatch.setattr(value, "compiled", {})
     monkeypatch.setattr(rows, "_kernels", {})
     text = tiny_text(kind=kind)
-    decode = RowDecode(text, "rows")
+    decode = RowDecode(text, backend)
     with recording() as seen:
         for rows in (1, 2, 3, 5, 8, 9, 13):
             cache = make_cache(text)
@@ -236,7 +238,8 @@ def test_each_fused_layer_is_mlx_lm_s_layer(seed):
         assert close(got, want, rel=0.02), i
 
 
-BACKENDS = ["rows", pytest.param("lane", marks=pytest.mark.skipif(not tensor_units(), reason="needs tensor units"))]
+BACKENDS = ["rows", "matrix", "auto",
+            pytest.param("lane", marks=pytest.mark.skipif(not tensor_units(), reason="needs tensor units"))]
 
 
 def _linear(n_in, n_out, bits, group, seed):

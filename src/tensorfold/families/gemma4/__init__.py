@@ -82,11 +82,15 @@ def quantization_refusal(config: dict[str, Any]) -> str:
 
 def load(model_dir: Path, *, lane_kernels: str = "auto", drafter: str = "", drafter_bits: int = 8,
          **_: Any) -> tuple[Any, Any]:
-    """MLX's qmv loop a row by default; ``lane_kernels`` "on": the lane matmul; ``drafter``: a DFlash model's chains."""
+    """Before M5 each linear's faster of rows and matrix by shape; ``lane_kernels`` "on": lane; ``drafter``: DFlash."""
+
+    import os
 
     from tensorfold.families.gemma4.model import load as load_model
+    from tensorfold.kernels.gemma.v1.matmul import tensor_units
 
-    backend = "lane" if str(lane_kernels) == "on" else "rows"
+    backend = "lane" if str(lane_kernels) == "on" else ("rows" if tensor_units() else "auto")
+    backend = os.environ.get("TF_GEMMA_DENSE") or backend      # rows, matrix or auto: for measurements
     return load_model(Path(model_dir), backend=backend, drafter=drafter, drafter_bits=drafter_bits)
 
 

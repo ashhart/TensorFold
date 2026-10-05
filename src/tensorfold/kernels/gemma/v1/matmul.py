@@ -8,9 +8,9 @@ import mlx.core as mx
 
 from tensorfold.kernels import device
 from tensorfold.kernels.nemotron.lightning.v1 import rows as row_kernels
-from tensorfold.kernels.qwen.dense.v1 import affine_rows, lane_qmm
+from tensorfold.kernels.qwen.dense.v1 import affine_rows, lane_qmm, simd_qmm, simd_qmm_bits
 
-BACKENDS = ("lane", "rows")
+BACKENDS = ("lane", "rows", "matrix", "auto")
 # widths and groups some decode kernel here reads (MLX affine)
 BITS = affine_rows.BITS
 GROUP_SIZES = affine_rows.GROUP_SIZES
@@ -53,6 +53,24 @@ def share(linears: Sequence[Any], stacked: tuple[mx.array, mx.array, mx.array]) 
     mx.eval([linear[name] for linear in linears for name in ("weight", "scales", "biases")])
 
 
+def matrix_kind(weight: mx.array, scales: mx.array, biases: mx.array, bits: int, group: int) -> str:
+    """The simdgroup matrix kernel that reads this weight ("simd" or "simd_bits"), or "" when neither does."""
+
+    n, k = int(weight.shape[0]), int(weight.shape[1]) * 32 // bits
+    if (bits == 4 and group in (32, 64) and scales.dtype == mx.bfloat16 and biases.dtype == mx.bfloat16
+            and n % 8 == 0 and k % 64 == 0):
+        return "simd"
+    return "simd_bits" if simd_qmm_bits.reads(weight, scales, biases, group, bits) and k % 64 == 0 else ""
+
+
+def prefers_matrix(bits: int, group: int, n: int, k: int) -> bool:
+    """Whether this format and shape is faster on the matrix kernels over 2 to 16 rows and level at one."""
+
+    if bits == 4 and group in (32, 64):
+        return n * k >= 1 << 22         # a 128-wide router stays on the row matvec
+    return True
+
+
 class _Run:
     """Linears of one width and group stacked along the output: one matmul."""
 
@@ -65,6 +83,17 @@ class _Run:
         if backend == "lane" and not (lane_qmm.reads(bits, group) and self.k % 64 == 0 and self.n % 32 == 0
                                       and scales.dtype == mx.bfloat16):
             backend = "rows"                    # a width or shape the lane matmul does not take: the row matvec
+        self.one = ""
+        if backend in ("matrix", "auto"):
+            matrix = matrix_kind(weight, scales, biases, bits, group)
+            if matrix and (backend == "matrix" or prefers_matrix(bits, group, self.n, self.k)):
+                self.kind, self.weight, self.scales, self.biases = matrix, weight, scales, biases
+                self._check()
+                if len(parts) > 1:
+                    mx.eval(self.weight, self.scales, self.biases)
+                    share(linears, (weight, scales, biases))
+                return
+            backend = "rows"
         if backend == "lane":
             self.kind = "lane"
             self.nt = 64 if (bits == 4 and self.n % 64 == 0) else 32
@@ -80,7 +109,22 @@ class _Run:
             mx.eval(self.weight, self.scales, self.biases)
             share(linears, (weight, scales, biases))
 
+    def _check(self) -> None:
+        """A one-row call takes the scalar twin only where it gives the matrix kernel's bits for this weight."""
+
+        w, s, b = self.weight, self.scales, self.biases
+        if self.kind == "simd":
+            if not simd_qmm.check(w, s, b, group_size=self.group):
+                simd_qmm.mma_one_row.add((self.n, self.k, self.group))
+        elif not simd_qmm_bits.check(w, s, b, self.bits, self.group):
+            self.one = "mma"
+
     def __call__(self, x: mx.array) -> mx.array:
+        if self.kind == "simd":
+            return simd_qmm.qmm(x, self.weight, self.scales, self.biases, self.group)
+        if self.kind == "simd_bits":
+            return simd_qmm_bits.qmm(x, self.weight, self.scales, self.biases, self.bits, self.group,
+                                     kind=self.one or None)
         if self.kind == "lane":
             return lane_qmm.lane_matmul(x, self.weight, self.sbt, tiled=True, nt=self.nt, group=self.group)
         if self.kind == "q4":
@@ -125,4 +169,5 @@ class Projection:
         return mx.split(y, self.cuts, axis=-1) if self.cuts else [y]
 
 
-__all__ = ["BACKENDS", "BITS", "GROUP_SIZES", "Projection", "readable", "tensor_units"]
+__all__ = ["BACKENDS", "BITS", "GROUP_SIZES", "Projection", "matrix_kind", "prefers_matrix", "readable",
+           "tensor_units"]

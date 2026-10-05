@@ -17,7 +17,8 @@ from tensorfold.engine.lane_engine import LaneEngine, LaneStream  # noqa: E402
 from tensorfold.families.gemma4.model import Gemma4  # noqa: E402
 from tensorfold.kernels.gemma.v1.matmul import tensor_units  # noqa: E402
 
-BACKENDS = ["rows", pytest.param("lane", marks=pytest.mark.skipif(not tensor_units(), reason="needs tensor units"))]
+BACKENDS = ["rows", "matrix", "auto",
+            pytest.param("lane", marks=pytest.mark.skipif(not tensor_units(), reason="needs tensor units"))]
 copy = LaneEngine.copy_single_cache
 
 
