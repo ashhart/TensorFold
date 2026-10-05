@@ -308,6 +308,10 @@ const Run = struct {
     xdown_pipe: mtl.Pipeline = undefined,
     dense: bool = false,
     dense_target: bool = false,
+    skip: u32 = 0,
+    split: bool = false,
+    event: mtl.SharedEvent = undefined,
+    event_value: u64 = 0,
     dense8_pipe: mtl.Pipeline = undefined,
     dense16_pipe: mtl.Pipeline = undefined,
 
@@ -453,6 +457,7 @@ const Run = struct {
     }
     /// The MoE's routed and shared experts for `rows` rows: gate/up (with routing) then down.
     fn experts(r: *Run, gu_role: []const u8, down_role: []const u8, x: Buf, lg: Buf, e: [18]Buf, act: Buf, pick: Buf, wts: Buf, rows_buf: Buf, y: Buf) !void {
+        if (r.skip & (1 << 2) != 0) return;
         if (!r.xnew) {
             try r.call(gu_role, &.{ x, lg, e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8], e[9], e[10], e[11] }, &.{ act, pick, wts });
             try r.call(down_role, &.{ act, pick, e[12], e[13], e[14], e[15], e[16], e[17], rows_buf }, &.{y});
@@ -472,7 +477,16 @@ const Run = struct {
     }
 
     /// One launch of `role` at the current row count, inputs and outputs in the variant's order.
+    /// The launch class of a role, for FZ_PROFILE's knock-outs.
+    fn class(role: []const u8) u32 {
+        const names = [_][]const u8{ "hc_", "lane_qmm", "expert", "router", "gdn", "attn", "ple", "head" };
+        if (std.mem.indexOf(u8, role, "@head") != null) return 1 << 7;
+        for (names, 0..) |n, i| if (std.mem.indexOf(u8, role, n) != null) return @as(u32, 1) << @intCast(i);
+        return 0;
+    }
+
     fn call(r: *Run, role: []const u8, ins: []const Buf, outs: []const Buf) !void {
+        if (r.skip & class(role) != 0) return;
         var key: [96]u8 = undefined;
         const name = try std.fmt.bufPrint(&key, "{s}|{d}", .{ role, r.rows });
         const s = r.roles.get(name) orelse {
@@ -833,9 +847,11 @@ const Model = struct {
             } else {
                 try m.lane(t.mixed, D, L.proj, "lane_qmm_bytes_grouped@att.proj", t.p);
                 try r.call("q4_attn_prep@att", &.{ t.p, t.pos8, L.qn, L.kn, L.iqn, t.eps, t.log2base }, &.{ t.q, t.kout, t.iq });
-                r.enc.setPipeline(r.kv_pipe);
-                for ([_]Buf{ t.kout, t.p, L.keys, L.vals, L.raw, t.kvmeta }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
-                r.enc.dispatchThreads(mtl.Size.of(512 * rows, 1, 1), mtl.Size.of(256, 1, 1));
+                if (r.skip & (1 << 5) == 0) {
+                    r.enc.setPipeline(r.kv_pipe);
+                    for ([_]Buf{ t.kout, t.p, L.keys, L.vals, L.raw, t.kvmeta }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
+                    r.enc.dispatchThreads(mtl.Size.of(512 * rows, 1, 1), mtl.Size.of(256, 1, 1));
+                }
                 if (!r.serial) r.enc.barrier();
                 try r.call("q4_attn_parts#[24, 256]", &.{ t.q, L.keys, L.vals, t.ids81, t.nk8, t.zero8, t.scale }, &.{ t.po, t.pm });
                 try r.call("q4_attn_merge_gate#[24, 16, 256]", &.{ t.po, t.pm, t.p }, &.{t.aout});
@@ -1007,6 +1023,8 @@ pub fn main(init: std.process.Init) !void {
     r.fused_xsum = std.c.getenv("FZ_FUSED_XSUM") != null;
     r.serial = std.c.getenv("FZ_SERIAL") != null;
     r.xnew = std.c.getenv("FZ_XNEW") != null;
+    r.split = std.c.getenv("FZ_SPLIT") != null;
+    r.event = try device.sharedEvent();
     r.dense = r.xnew and std.c.getenv("FZ_DENSE") != null;
     r.dense_target = r.dense and std.c.getenv("FZ_DENSE_TARGET") != null;
     const t0 = mtl.clock.seconds();
@@ -1196,6 +1214,27 @@ pub fn main(init: std.process.Init) !void {
     const t2 = mtl.clock.seconds();
     std.debug.print("compiled in {d:.2} s, loaded {d:.1} GB in {d:.1} s\n", .{ t1 - t0, @as(f64, @floatFromInt(r.loaded)) / 1e9, t2 - t1 });
 
+    if (std.c.getenv("FZ_PROFILE") != null) {
+        const names = [_][]const u8{ "none", "hc", "dense", "experts", "router", "gdn", "attn", "ple", "head" };
+        var toks: [MAXR]u32 = undefined;
+        for (0..MAXR) |i| toks[i] = @intCast(ref.object.get("prompt").?.array.items[i].integer);
+        var pk: [MAXR]u32 = undefined;
+        m.reset();
+        for (0..3) |_| try m.window(toks[0..1], &pk);
+        for ([_]usize{ 1, 4 }) |rows| {
+            var base: f64 = 0;
+            for (names, 0..) |name, c| {
+                r.skip = if (c == 0) 0 else @as(u32, 1) << @intCast(c - 1);
+                m.gpu_seconds = 0;
+                for (0..20) |_| try m.window(toks[0..rows], &pk);
+                const ms = m.gpu_seconds * 1e3 / 20;
+                if (c == 0) base = ms;
+                std.debug.print("rows {d}: without {s:8} {d:6.2} ms GPU  ({d:5.2} ms)\n", .{ rows, name, ms, base - ms });
+            }
+        }
+        r.skip = 0;
+        return;
+    }
     const prompt = ref.object.get("prompt").?.array.items;
     const want = ref.object.get("tokens").?.array.items;
     var pick: [MAXR]u32 = undefined;
@@ -1381,11 +1420,23 @@ pub fn main(init: std.process.Init) !void {
                 m.mtp.drafted += 1;
                 slot += 1;
             }
-            // the target window [pending, drafts]
+            // the target window [pending, drafts]: with FZ_SPLIT the head's part is committed first and the window
+            // is encoded while the GPU runs it (same queue, so the window still follows it)
+            var wcb = cb;
+            if (r.split) { // untracked buffers: the window waits on the head's signal, not on queue order alone
+                r.enc.end();
+                r.event_value += 1;
+                cb.signal(r.event, r.event_value);
+                cb.commit();
+                wcb = r.queue.commandBuffer();
+                wcb.waitFor(r.event, r.event_value);
+                r.enc = wcb.compute(if (r.serial) .serial else .concurrent);
+            }
             m.windowMeta(depth + 1);
             m.pleIdsGpu(depth + 1, wids);
             try m.windowEncode(depth + 1, wids);
-            try m.finish(cb);
+            try m.finish(wcb);
+            if (r.split) m.gpu_seconds += cb.gpuSeconds();
             const picks = m.t.picks.b.slice(u32, depth + 1);
             var keep: usize = 1;
             while (keep <= depth and w[keep] == picks[keep - 1]) keep += 1;
