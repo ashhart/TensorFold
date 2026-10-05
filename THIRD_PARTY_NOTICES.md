@@ -87,6 +87,12 @@ Flash Next's optional int8 and int4 KV caches (`families/qwen4_exp/cuda/kvcache.
 The MTP layer TensorFold drafts with comes from that checkpoint's last shard (MIT), converted by
 `families/deepseek_v4/convert.py`.
 
+`src/tensorfold/families/kolibri1/vendor/kolibri1.py` is the unmodified `kolibri1.py` of
+[velaia/Kolibri-1-MLX-4bit](https://huggingface.co/velaia/Kolibri-1-MLX-4bit) (revision 3f5adf3), the MLX port
+proposed to mlx-lm in ml-explore/mlx-lm#1945, itself ported from Aleph Alpha's
+[aleph-alpha-inference](https://github.com/Aleph-Alpha/aleph-alpha-inference) vLLM plugin, Apache License 2.0.
+See [the license text](LICENSES/Apache-2.0.txt).
+
 TensorFold ships no model weights. The `z-lab/Qwen3.8-27B-DFlash2` model card states Apache-2.0.
 The optional `incoai/GLM-5.3-Flash-DFlash2` model card states CC BY-NC-ND 4.0, for non-commercial use
 without derivatives. Each checkpoint keeps its own license.

@@ -1,6 +1,3 @@
-# Vendored unchanged from velaia/Kolibri-1-MLX-4bit (kolibri1.py, the file proposed upstream in ml-explore/mlx-lm#1945),
-# itself ported from the Apache-2.0 vLLM plugin aleph_alpha_inference/kolibri1.py. TensorFold registers it as
-# mlx_lm.models.kolibri1 until mlx-lm ships the architecture.
 # SPDX-License-Identifier: Apache-2.0
 """MLX port of Aleph Alpha's Kolibri 1 (model_type "kolibri1").
 

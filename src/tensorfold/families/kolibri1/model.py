@@ -16,9 +16,9 @@ from tensorfold.families.gemma4.model import Gemma4
 def register() -> None:
     """The vendored architecture as ``mlx_lm.models.kolibri1``, the module mlx_lm's loader imports by model type."""
 
-    from tensorfold.families.kolibri1 import mlx_kolibri1
+    from tensorfold.families.kolibri1.vendor import kolibri1
 
-    sys.modules["mlx_lm.models.kolibri1"] = mlx_kolibri1
+    sys.modules["mlx_lm.models.kolibri1"] = kolibri1
 
 
 class Kolibri1:
