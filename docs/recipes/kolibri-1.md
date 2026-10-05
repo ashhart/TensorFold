@@ -34,15 +34,15 @@ Server, `--no-thinking`, `tools/bench_openai.py` (512 tokens, 5 reps), median de
 | gpu-chat-no-think | 1.0 | 106.7 | 115.8 |
 
 Reasoning repeats itself, so context copies land more often with thinking on. localeval, thinking on, 100 problems
-each, one request at a time (measured with 16-row windows, before the cap below):
+each, one request at a time:
 
 | | mlx-lm forward | Row kernels | Change |
 | --- | --- | --- | --- |
 | GSM8K score | 0.97 | 0.97 | |
 | IFEval score | 0.92 | 0.93 | noise |
-| GSM8K decode | 99.0 tok/s | 120.4 tok/s | +22% |
-| IFEval decode | 101.5 tok/s | 131.8 tok/s | +30% |
-| Drafted tokens accepted | | 80,610 of 104,562 | 77% |
+| GSM8K decode | 99.0 tok/s | 122.7 tok/s | +24% |
+| IFEval decode | 101.5 tok/s | 131.0 tok/s | +29% |
+| Drafted tokens accepted | | 78,352 of 100,721 | 78% |
 
 Prefill is mlx-lm's forward on both paths: 2,048 cold tokens in 0.58-0.62 s, 8,192 in 2.35-2.65 s, 65,536 in about
 33.5 s.
