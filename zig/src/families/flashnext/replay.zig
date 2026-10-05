@@ -1983,6 +1983,7 @@ pub const Prompt = struct {
     gu64: mtl.Pipeline,
     gu32: mtl.Pipeline,
     fused_gu: bool = true, // the experts' gate and up products and activation in one pass (same bits)
+    expert_bm: usize = 0, // expert tile rows (0: by the average rows an expert)
     mtp_w: ?[3][3]Buf = null, // the MTP head's attention projection, fce, fch in MLX layout (pack_mtp_mlx.safetensors)
     tall_tiles: bool = true, // 128-row tiles (a dequantized weight block serves twice the rows; the same sums)
     router_mm: mtl.Pipeline,
@@ -2059,6 +2060,7 @@ pub const Prompt = struct {
         }
         p.ple_kv = .{ try r.load("ple.kv.mw"), try r.load("ple.kv.ms"), try r.load("ple.kv.mb") };
         p.mtp_w = null;
+        p.expert_bm = 0;
         if (r.indexFile(try std.fmt.allocPrintSentinel(r.arena, "{s}/pack_mtp_mlx.safetensors", .{dir}, 0))) |_| {
             var w: [3][3]Buf = undefined;
             for ([_][]const u8{ "mtp.att.proj", "mtp.fce", "mtp.fch" }, 0..) |name, i| {
@@ -2122,7 +2124,7 @@ pub const Prompt = struct {
     pub fn gather(p: *Prompt, x: Buf, w: []const Buf, k: usize, n: usize, pairs: usize, y: Buf) void {
         if (p.skip & 1 != 0) return;
         // tiles of 32, 64 or 128 rows as experts average 32 and 128 rows (128: FZ prompt chunks of thousands of rows)
-        const bm: usize = if (p.tall_tiles and pairs >= 512 * 128) 128 else if (pairs >= 512 * 32) 64 else 32;
+        const bm: usize = if (p.expert_bm != 0) p.expert_bm else if (p.tall_tiles and pairs >= 512 * 128) 128 else if (pairs >= 512 * 32) 64 else 32;
         p.bind(if (bm == 128) p.gather128 else if (bm == 64) p.gather64 else p.gather32, &.{ x, w[0], w[1], w[2], p.b.off });
         const prm = [4]i32{ @intCast(pairs), @intCast(n), @intCast(k), 512 };
         p.r.enc.setBytes(std.mem.asBytes(&prm), 5);
@@ -2134,7 +2136,7 @@ pub const Prompt = struct {
     /// a[pairs, n] = act(x[slot] Wg_e^T, x[slot] Wu_e^T) over the sorted slots in one pass (gather's tiles and sums).
     pub fn gatherGU(p: *Prompt, x: Buf, wg: []const Buf, wu: []const Buf, k: usize, n: usize, pairs: usize, y: Buf) void {
         if (p.skip & 1 != 0) return;
-        const bm: usize = if (pairs >= 512 * 32) 64 else 32;
+        const bm: usize = if (p.expert_bm == 32 or p.expert_bm == 64) p.expert_bm else if (pairs >= 512 * 32) 64 else 32;
         p.bind(if (bm == 64) p.gu64 else p.gu32, &.{ x, wg[0], wg[1], wg[2], wu[0], wu[1], wu[2], p.b.off });
         const prm = [4]i32{ @intCast(pairs), @intCast(n), @intCast(k), 512 };
         p.r.enc.setBytes(std.mem.asBytes(&prm), 8);

@@ -89,9 +89,12 @@ pub const Engine = struct {
 
     /// The checkpoint in `model_dir` with the recorded kernels and packs in `dump_dir` (tools/zig/flashnext_dump.py).
     pub fn load(gpa: Allocator, model_dir: []const u8, dump_dir: []const u8) !*Engine {
-        const e = try gpa.create(Engine);
+        const e = try gpa.create(Engine); // undefined memory: every defaulted field is set here
         errdefer gpa.destroy(e);
         e.gpa = gpa;
+        e.copy = true;
+        e.copy_min = 3;
+        e.copy_long = 6;
         e.arena_state = std.heap.ArenaAllocator.init(gpa);
         errdefer e.arena_state.deinit();
         const arena = e.arena_state.allocator();
