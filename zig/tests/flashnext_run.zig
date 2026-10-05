@@ -58,6 +58,32 @@ const glue_source =
     \\  }
     \\  if (lane == 0) out[row] = at;
     \\}
+    \\// x [R, 4 * 2560] = e [R, 2560] broadcast over the streams + hs [4R, 2560] (MLX's bf16 add)
+    \\kernel void fz_bcast_add(device const bfloat* e [[buffer(0)]], device const bfloat* hs [[buffer(1)]],
+    \\    device bfloat* x [[buffer(2)]], constant uint& n [[buffer(3)]], uint i [[thread_position_in_grid]]) {
+    \\  if (i >= n) return;
+    \\  x[i] = bfloat(float(e[(i / 10240) * 2560 + i % 2560]) + float(hs[i]));
+    \\}
+    \\kernel void fz_argmax_ids(device const bfloat* logits [[buffer(0)]], device uint* out [[buffer(1)]],
+    \\    constant uint& n [[buffer(2)]], device const uint* ids [[buffer(3)]], uint t [[thread_index_in_threadgroup]],
+    \\    uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
+    \\  float best = -INFINITY; uint at = 0xffffffffu;
+    \\  for (uint i = t; i < n; i += 1024) { const float v = float(logits[i]); if (v > best) { best = v; at = i; } }
+    \\  for (ushort o = 16; o > 0; o >>= 1) {
+    \\    const float ob = simd_shuffle_xor(best, o); const uint oa = simd_shuffle_xor(at, o);
+    \\    if (ob > best || (ob == best && oa < at)) { best = ob; at = oa; }
+    \\  }
+    \\  threadgroup float vb[32]; threadgroup uint va[32];
+    \\  if (lane == 0) { vb[sg] = best; va[sg] = at; }
+    \\  threadgroup_barrier(mem_flags::mem_threadgroup);
+    \\  if (sg != 0) return;
+    \\  best = vb[lane]; at = va[lane];
+    \\  for (ushort o = 16; o > 0; o >>= 1) {
+    \\    const float ob = simd_shuffle_xor(best, o); const uint oa = simd_shuffle_xor(at, o);
+    \\    if (ob > best || (ob == best && oa < at)) { best = ob; at = oa; }
+    \\  }
+    \\  if (lane == 0) out[0] = ids[at];
+    \\}
 ;
 
 fn readAll(fd: std.c.fd_t, dest: []u8, at: usize) !void {
@@ -82,6 +108,8 @@ const Run = struct {
     enc: mtl.ComputeEncoder = undefined,
     kv_pipe: mtl.Pipeline = undefined,
     argmax_pipe: mtl.Pipeline = undefined,
+    add_pipe: mtl.Pipeline = undefined,
+    argids_pipe: mtl.Pipeline = undefined,
 
     fn buffer(r: *Run, len: usize) !mtl.Buffer {
         const n = @max(len, 64);
@@ -169,6 +197,8 @@ const Run = struct {
         const glue = try mtl.Library.fromSource(r.device, glue_source, mtl.CompileOptions.mlx());
         r.kv_pipe = try mtl.Pipeline.init(r.device, glue, "fz_kv_write", false);
         r.argmax_pipe = try mtl.Pipeline.init(r.device, glue, "fz_argmax", false);
+        r.add_pipe = try mtl.Pipeline.init(r.device, glue, "fz_bcast_add", false);
+        r.argids_pipe = try mtl.Pipeline.init(r.device, glue, "fz_argmax_ids", false);
     }
 
     fn strings(a: std.mem.Allocator, v: std.json.Value) ![][]const u8 {
@@ -331,6 +361,52 @@ fn i32Buf(r: *Run, vals: []const i32) !Buf {
     return .{ .b = b };
 }
 
+/// The MTP head: its decoder layer and mixer, the input projections, the cut head, its own attention cache.
+const Mtp = struct {
+    ahc: Hc,
+    mhc: Hc,
+    mix: Hc,
+    proj: Lane,
+    out: Lane,
+    fce: Lane,
+    fch: Lane,
+    draft: Lane,
+    qn: Buf,
+    kn: Buf,
+    iqn: Buf,
+    enorm: Buf,
+    hnorm: Buf,
+    router: Buf,
+    ids: Buf,
+    ids_n: usize,
+    ex: [18]Buf,
+    keys: Buf,
+    vals: Buf,
+    raw: Buf,
+    pos: usize = 0,
+    drafted: usize = 0,
+    h: [2]Buf,
+    emb: Buf,
+    en: Buf,
+    e: Buf,
+    hn: Buf,
+    hs: Buf,
+    logits: Buf,
+    pick: Buf,
+    rows: Buf,
+    rows1: Buf,
+    md: Buf,
+    md4: Buf,
+    md1: Buf,
+    ids8: Buf,
+    pos8: Buf,
+    nk8: Buf,
+    kvmeta: Buf,
+    n_add: Buf,
+    n_ids: Buf,
+    last: Buf = undefined, // the last call's output streams, row by row
+};
+
 const Model = struct {
     r: *Run,
     layers: [LAYERS]Layer,
@@ -343,6 +419,8 @@ const Model = struct {
     state: usize = 0, // the DeltaNet buffer pair holding the state
     state_row: usize = 0, // its row
     gpu_seconds: f64 = 0,
+    mtp: Mtp = undefined,
+    last: Buf = undefined, // the last window's streams before the final mixer
 
     fn reset(m: *Model) void {
         m.pos = 0;
@@ -475,6 +553,7 @@ const Model = struct {
         }
         try m.grouped(t.h[cur], t.h[1 - cur]);
         cur = 1 - cur;
+        m.last = t.h[cur];
         try m.hcProject(t.h[cur], m.mix, "qa_hc_down@mix", "qa_hc_up@mix", t.inj_a);
         try m.lane(t.mixed, D, m.head, "lane_qmm_bytes_grouped@head", t.logits);
         r.enc.setPipeline(r.argmax_pipe);
@@ -491,6 +570,116 @@ const Model = struct {
         }
         m.gpu_seconds += cb.gpuSeconds();
         @memcpy(picks[0..rows], t.picks.b.slice(u32, rows));
+    }
+
+    /// The MTP head on `rows` rows: each row's next token and the streams it follows (target or head output, row
+    /// by row from `streams`); returns the draft after the last row (the cut head's argmax through its ids).
+    fn mtpRun(m: *Model, nexts: []const u32, streams: Buf) !u32 {
+        const r = m.r;
+        const t = &m.t;
+        const h = &m.mtp;
+        const rows = nexts.len;
+        h.pos -= h.drafted;
+        h.drafted = 0;
+        h.rows.b.slice(i32, 1)[0] = @intCast(rows);
+        h.md.b.slice(i32, 2)[0] = @intCast(rows);
+        h.md4.b.slice(i32, 2)[0] = @intCast(4 * rows);
+        h.md4.b.slice(i32, 2)[1] = @intCast(16 * ((4 * rows + 15) / 16)); // rows padded to whole 16-row tiles
+        const ids = h.ids8.b.slice(u32, 8);
+        const pos8 = h.pos8.b.slice(i32, 8);
+        const nk8 = h.nk8.b.slice(i32, 8);
+        for (0..8) |i| {
+            ids[i] = if (i < rows) nexts[i] else 0;
+            pos8[i] = if (i < rows) @intCast(h.pos + i) else 0;
+            nk8[i] = if (i < rows) @intCast(h.pos + i + 1) else 0;
+        }
+        const kvm = h.kvmeta.b.slice(u32, 3);
+        kvm[0], kvm[1], kvm[2] = .{ @intCast(h.pos), CAP, @intCast(rows) };
+        h.n_add.b.slice(u32, 1)[0] = @intCast(rows * WIDE);
+        const cb = r.queue.commandBuffer();
+        r.enc = cb.compute(.concurrent);
+        r.rows = rows;
+        try r.call("mtp:qa_embed_rows@embed", &.{ h.ids8, m.embed[0], m.embed[1], m.embed[2] }, &.{h.emb});
+        try r.call("mtp:q4_rms_rows@mtp.enorm", &.{ h.emb, h.enorm, t.eps }, &.{h.en});
+        try r.call("mtp:lane_qmm_xsum#[2560]", &.{ h.en, h.md }, &.{t.xs});
+        try r.call("mtp:lane_qmm_bytes_grouped@mtp.fce", &.{ h.en, t.xs, h.fce.wq, h.fce.sbt, h.md }, &.{h.e});
+        try r.call("mtp:q4_rms_rows@mtp.hnorm", &.{ streams, h.hnorm, t.eps }, &.{h.hn});
+        try r.call("mtp:lane_qmm_xsum#[4R, 2560]", &.{ h.hn, h.md4 }, &.{t.xs});
+        try r.call("mtp:lane_qmm_bytes_grouped@mtp.fch", &.{ h.hn, t.xs, h.fch.wq, h.fch.sbt, h.md4 }, &.{h.hs});
+        r.enc.setPipeline(r.add_pipe);
+        for ([_]Buf{ h.e, h.hs, h.h[0], h.n_add }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
+        r.enc.dispatchThreads(mtl.Size.of(rows * WIDE, 1, 1), mtl.Size.of(256, 1, 1));
+        r.enc.barrier();
+        try r.call("mtp:q4_hc_norm_none#[10240]", &.{h.h[0]}, &.{ h.h[1], t.ssp });
+        const down = [_][]const u8{ "mtp:qa_hc_down@mtp.ahc", "mtp:qa_hc_down@mtp.mhc", "mtp:qa_hc_down@mtp.mix" };
+        const up = [_][]const u8{ "mtp:qa_hc_up@mtp.ahc", "mtp:qa_hc_up@mtp.mhc", "mtp:qa_hc_up@mtp.mix" };
+        try m.mtpProject(h.h[1], h.ahc, down[0], up[0], t.inj_a);
+        try r.call("mtp:lane_qmm_xsum#[2560]", &.{ t.mixed, h.md }, &.{t.xs});
+        try r.call("mtp:lane_qmm_bytes_grouped@mtp.att.proj", &.{ t.mixed, t.xs, h.proj.wq, h.proj.sbt, h.md }, &.{t.p});
+        try r.call("mtp:q4_attn_prep@mtp.att", &.{ t.p, h.pos8, h.qn, h.kn, h.iqn, t.eps, t.log2base }, &.{ t.q, t.kout, t.iq });
+        r.enc.setPipeline(r.kv_pipe);
+        for ([_]Buf{ t.kout, t.p, h.keys, h.vals, h.raw, h.kvmeta }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
+        r.enc.dispatchThreads(mtl.Size.of(512 * rows, 1, 1), mtl.Size.of(256, 1, 1));
+        r.enc.barrier();
+        try r.call("mtp:q4_attn_parts#[24, 256]", &.{ t.q, h.keys, h.vals, t.ids81, h.nk8, t.zero8, t.scale }, &.{ t.po, t.pm });
+        try r.call("mtp:q4_attn_merge_gate#[24, 16, 256]", &.{ t.po, t.pm, t.p }, &.{t.aout});
+        try r.call("mtp:lane_qmm_xsum#[6144]", &.{ t.aout, h.md }, &.{t.xs});
+        try r.call("mtp:lane_qmm_bytes_grouped@mtp.att.o", &.{ t.aout, t.xs, h.out.wq, h.out.sbt, h.md }, &.{t.branch});
+        try r.call("mtp:q4_hc_norm_plain#[10240]", &.{ h.h[1], t.inj_a, t.branch }, &.{ h.h[0], t.ssp });
+        try m.mtpProject(h.h[0], h.mhc, down[1], up[1], t.inj_m);
+        try r.call("mtp:q4_router_float@mtp.moe", &.{ t.mixed, h.router, h.rows }, &.{t.lg});
+        const e = h.ex;
+        try r.call("mtp:qa_expert_gateup@mtp.moe.gate", &.{ t.mixed, t.lg, e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8], e[9], e[10], e[11] }, &.{ t.act, t.pick, t.wts });
+        try r.call("mtp:qa_expert_down_y@mtp.moe.down", &.{ t.act, t.pick, e[12], e[13], e[14], e[15], e[16], e[17], h.rows }, &.{t.ydown});
+        try r.call("mtp:q4_hc_norm_grouped#[10240]", &.{ h.h[0], t.inj_m, t.ydown, t.wts, t.lg }, &.{ h.h[1], t.ssp });
+        h.last = .{ .b = h.h[1].b, .off = (rows - 1) * WIDE * 2 };
+        try m.mtpProject(h.h[1], h.mix, down[2], up[2], t.inj_a);
+        r.rows = 1;
+        const x: Buf = .{ .b = t.mixed.b, .off = (rows - 1) * D * 2 };
+        try r.call("mtp:lane_qmm_xsum#[2560]", &.{ x, h.md1 }, &.{t.xs});
+        try r.call("mtp:lane_qmm_bytes_grouped@mtp.draft", &.{ x, t.xs, h.draft.wq, h.draft.sbt, h.md1 }, &.{h.logits});
+        r.enc.setPipeline(r.argids_pipe);
+        for ([_]Buf{ h.logits, h.pick, h.n_ids, h.ids }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
+        r.enc.dispatchThreads(mtl.Size.of(1024, 1, 1), mtl.Size.of(1024, 1, 1));
+        r.enc.end();
+        cb.commit();
+        cb.wait();
+        if (cb.failure()) |msg| {
+            std.log.err("command buffer failed: {s}", .{msg});
+            return error.GpuFailed;
+        }
+        m.gpu_seconds += cb.gpuSeconds();
+        h.pos += rows;
+        return h.pick.b.slice(u32, 1)[0];
+    }
+
+    fn mtpProject(m: *Model, hn: Buf, hc: Hc, down: []const u8, up: []const u8, inj: Buf) !void {
+        const t = &m.t;
+        const h = &m.mtp;
+        try m.r.call(down, &.{ hn, t.ssp, hc.scale, hc.dw, hc.ds, hc.db, t.eps, h.rows }, &.{t.part});
+        try m.r.call(up, &.{ hn, t.ssp, hc.scale, t.part, hc.uw, hc.us, hc.ub, t.eps, h.rows }, &.{ t.mixed, inj });
+    }
+
+    /// Absorb `nexts.len` rows (chunks of up to MAXR) from `streams`; returns the draft after the last row.
+    fn mtpAbsorb(m: *Model, nexts: []const u32, streams: Buf) !u32 {
+        var at: usize = 0;
+        var d: u32 = 0;
+        while (at < nexts.len) {
+            const n = @min(MAXR, nexts.len - at);
+            d = try m.mtpRun(nexts[at .. at + n], .{ .b = streams.b, .off = streams.off + at * WIDE * 2 });
+            at += n;
+        }
+        return d;
+    }
+
+    /// One chained draft after `draft`, from the head's last output row; its cache entry is trimmed next absorb.
+    fn mtpChain(m: *Model, draft: u32) !u32 {
+        const prev = m.mtp.last;
+        const rows_before = m.mtp.drafted;
+        m.mtp.drafted = 0;
+        const d = try m.mtpRun(&.{draft}, prev);
+        m.mtp.drafted = rows_before + 1;
+        return d;
     }
 
     /// Keep the window's first `keep` rows: the DeltaNet state of row keep-1, the n-gram history and conv tail.
@@ -652,6 +841,59 @@ pub fn main(init: std.process.Init) !void {
         .kvmeta = try i32Buf(&r, &.{ 0, CAP, 1 }),
         .vocab = try i32Buf(&r, &.{VOCAB}),
     };
+    {
+        const ids = try r.load("mtp.draft_ids");
+        var ex: [18]Buf = undefined;
+        const projs = [_][]const u8{ "switch_mlp.gate_proj", "switch_mlp.up_proj", "shared_expert.gate_proj", "shared_expert.up_proj", "switch_mlp.down_proj", "shared_expert.down_proj" };
+        for (projs, 0..) |proj, j| {
+            for ([_][]const u8{ "weight", "scales", "biases" }, 0..) |suffix, k| {
+                ex[j * 3 + k] = try r.loadf("language_model.mtp.layers.0.mlp.{s}.{s}", .{ proj, suffix });
+            }
+        }
+        m.mtp = .{
+            .ahc = try hcOf(&r, "mtp.ahc", .{}),
+            .mhc = try hcOf(&r, "mtp.mhc", .{}),
+            .mix = try hcOf(&r, "mtp.mix", .{}),
+            .proj = try laneOf(&r, "mtp.att.proj", .{}),
+            .out = try laneOf(&r, "mtp.att.o", .{}),
+            .fce = try laneOf(&r, "mtp.fce", .{}),
+            .fch = try laneOf(&r, "mtp.fch", .{}),
+            .draft = try laneOf(&r, "mtp.draft", .{}),
+            .qn = try r.load("mtp.att.qn"),
+            .kn = try r.load("mtp.att.kn"),
+            .iqn = try r.load("mtp.att.iqn"),
+            .enorm = try r.load("mtp.enorm.scale"),
+            .hnorm = try r.load("mtp.hnorm.scale"),
+            .router = try r.load("mtp.moe.router"),
+            .ids = ids,
+            .ids_n = (try r.entry("mtp.draft_ids")).len / 4,
+            .ex = ex,
+            .keys = .{ .b = try r.buffer(2 * CAP * 256 * 2) },
+            .vals = .{ .b = try r.buffer(2 * CAP * 256 * 2) },
+            .raw = .{ .b = try r.buffer(CAP * 128 * 2) },
+            .h = .{ try B.of(&r, MAXR * WIDE * 2), try B.of(&r, MAXR * WIDE * 2) },
+            .emb = try B.of(&r, MAXR * D * 2),
+            .en = try B.of(&r, MAXR * D * 2),
+            .e = try B.of(&r, MAXR * D * 2),
+            .hn = try B.of(&r, MAXR * WIDE * 2),
+            .hs = try B.of(&r, MAXR * WIDE * 2),
+            .logits = try B.of(&r, 80000 * 2),
+            .pick = try B.of(&r, 16),
+            .rows = try i32Buf(&r, &.{1}),
+            .rows1 = try i32Buf(&r, &.{1}),
+            .md = try i32Buf(&r, &.{ 1, 16, 0, 0, 0, 0, 0, 0 }),
+            .md4 = try i32Buf(&r, &.{ 4, 16, 0, 0, 0, 0, 0, 0 }),
+            .md1 = try i32Buf(&r, &.{ 1, 16, 0, 0, 0, 0, 0, 0 }),
+            .ids8 = try i32Buf(&r, &(@as([8]i32, @splat(0)))),
+            .pos8 = try i32Buf(&r, &(@as([8]i32, @splat(0)))),
+            .nk8 = try i32Buf(&r, &(@as([8]i32, @splat(0)))),
+            .kvmeta = try i32Buf(&r, &.{ 0, CAP, 1 }),
+            .n_add = try i32Buf(&r, &.{0}),
+            .n_ids = undefined,
+        };
+        m.mtp.n_ids = try i32Buf(&r, &.{@intCast(m.mtp.ids_n)});
+        if (m.mtp.ids_n * 2 > 80000 * 2) return error.DraftVocab;
+    }
     try r.shapes.put(arena, "Kc_shape", (try i32Buf(&r, &.{ 1, 2, CAP, 256 })).b);
     try r.shapes.put(arena, "IDS_shape", (try i32Buf(&r, &.{ 8, 1 })).b);
     const t2 = mtl.clock.seconds();
@@ -709,6 +951,87 @@ pub fn main(init: std.process.Init) !void {
         m.keepRows(tokens[0..win.len], @intCast(o.get("keep").?.integer));
     }
     std.debug.print("drafted windows: {d} rounds, {d}/{d} rows equal to Python's\n", .{ rounds.len, total_rows - bad, total_rows });
+
+    // 4. the MTP head against the Python engine's drafts (absorb windows of 1-8 rows, then a chain)
+    {
+        const mref = ref.object.get("mtp").?.object;
+        var seq: std.ArrayList(u32) = .empty;
+        for (prompt) |x| try seq.append(gpa, @intCast(x.integer));
+        for (want[0..16]) |x| try seq.append(gpa, @intCast(x.integer));
+        const all = try r.buffer(seq.items.len * WIDE * 2);
+        m.reset();
+        for (seq.items, 0..) |tok, i| {
+            try m.window(&.{tok}, &pick);
+            m.keepRows(&.{tok}, 1);
+            @memcpy(all.contents()[i * WIDE * 2 .. (i + 1) * WIDE * 2], m.last.b.contents()[0 .. WIDE * 2]);
+        }
+        m.mtp.pos = 0;
+        m.mtp.drafted = 0;
+        var ok: usize = 0;
+        var n: usize = 0;
+        var d: u32 = 0;
+        for (mref.get("absorb").?.array.items) |a| {
+            const start: usize = @intCast(a.object.get("start").?.integer);
+            const nx = a.object.get("next").?.array.items;
+            var nexts: [MAXR]u32 = undefined;
+            for (nx, 0..) |x, i| nexts[i] = @intCast(x.integer);
+            d = try m.mtpRun(nexts[0..nx.len], .{ .b = all, .off = start * WIDE * 2 });
+            n += 1;
+            if (d == @as(u32, @intCast(a.object.get("draft").?.integer))) ok += 1 else std.debug.print("absorb of {d} rows: draft {d}, Python {d}\n", .{ nx.len, d, a.object.get("draft").?.integer });
+        }
+        for (mref.get("chain").?.array.items) |x| {
+            d = try m.mtpChain(d);
+            n += 1;
+            if (d == @as(u32, @intCast(x.integer))) ok += 1 else std.debug.print("chained draft {d}, Python {d}\n", .{ d, x.integer });
+        }
+        std.debug.print("MTP drafts equal to Python's: {d}/{d}\n", .{ ok, n });
+    }
+
+    // 5. one stream with MTP chains of a fixed depth: tokens against the one-row reference, lanes landed, tok/s
+    for ([_]usize{ 1, 2, 3, 4, 6 }) |depth| {
+        m.reset();
+        m.mtp.pos = 0;
+        m.mtp.drafted = 0;
+        const all = try r.buffer(prompt.len * WIDE * 2);
+        var ptoks: std.ArrayList(u32) = .empty;
+        for (prompt, 0..) |x, i| {
+            const tok: u32 = @intCast(x.integer);
+            try ptoks.append(gpa, tok);
+            try m.window(&.{tok}, &pick);
+            m.keepRows(&.{tok}, 1);
+            @memcpy(all.contents()[i * WIDE * 2 .. (i + 1) * WIDE * 2], m.last.b.contents()[0 .. WIDE * 2]);
+        }
+        var out: std.ArrayList(u32) = .empty;
+        try out.append(gpa, pick[0]);
+        const s0 = mtl.clock.seconds();
+        var nexts: std.ArrayList(u32) = .empty;
+        try nexts.appendSlice(gpa, ptoks.items[1..]);
+        try nexts.append(gpa, pick[0]);
+        var drafts: [MAXR]u32 = undefined;
+        drafts[0] = try m.mtpAbsorb(nexts.items, .{ .b = all });
+        for (1..depth) |j| drafts[j] = try m.mtpChain(drafts[j - 1]);
+        var n_rounds: usize = 0;
+        var landed: usize = 0;
+        while (out.items.len < want.len) {
+            var win: [MAXR]u32 = undefined;
+            win[0] = out.items[out.items.len - 1];
+            @memcpy(win[1 .. depth + 1], drafts[0..depth]);
+            try m.window(win[0 .. depth + 1], &pick);
+            var keep: usize = 1;
+            while (keep <= depth and win[keep] == pick[keep - 1]) keep += 1;
+            try out.appendSlice(gpa, pick[0..keep]);
+            n_rounds += 1;
+            landed += keep - 1;
+            m.keepRows(win[0 .. depth + 1], keep);
+            drafts[0] = try m.mtpAbsorb(pick[0..keep], m.last);
+            for (1..depth) |j| drafts[j] = try m.mtpChain(drafts[j - 1]);
+        }
+        const wall = mtl.clock.seconds() - s0;
+        var eq: usize = 0;
+        while (eq < want.len and out.items[eq] == @as(u32, @intCast(want[eq].integer))) eq += 1;
+        std.debug.print("depth {d}: {d}/{d} tokens equal; {d} rounds, {d:.2} tokens a round, {d:.2} of {d} drafts landing; {d:.1} tok/s\n", .{ depth, eq, want.len, n_rounds, @as(f64, @floatFromInt(out.items.len - 1)) / @as(f64, @floatFromInt(n_rounds)), @as(f64, @floatFromInt(landed)) / @as(f64, @floatFromInt(n_rounds)), depth, @as(f64, @floatFromInt(out.items.len - 1)) / wall });
+        if (eq < want.len) bad += 1;
+    }
 
     // 3. each window size's cost
     for ([_]usize{ 1, 2, 3, 4, 6, 8 }) |rows| {

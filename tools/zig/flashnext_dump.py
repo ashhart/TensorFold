@@ -18,7 +18,7 @@ from metal_source import PREAMBLE, Arg, kernel_text  # noqa: E402
 KERNELS: dict[str, dict] = {}
 CALLS: list[dict] = []
 ROLE: dict[int, str] = {}           # id of a persistent prepared array -> its role name
-FIX = {"on": False, "blobs": [], "offset": 0, "rows": 1}
+FIX = {"on": False, "blobs": [], "offset": 0, "rows": 1, "phase": ""}
 _orig = mx.fast.metal_kernel
 
 
@@ -36,7 +36,7 @@ def metal_kernel(name, input_names, output_names, source, header="", ensure_row_
         outs = k(*args, **kw)
         if FIX["on"]:
             ins = kw.get("inputs", args[0] if args else [])
-            entry = {"kernel": name, "rows": FIX["rows"], "grid": list(kw["grid"]), "threadgroup": list(kw["threadgroup"]),
+            entry = {"kernel": name, "rows": FIX["rows"], "phase": FIX["phase"], "grid": list(kw["grid"]), "threadgroup": list(kw["threadgroup"]),
                      "template": [[t[0], t[1] if isinstance(t[1], (bool, int)) else str(t[1])]
                                   for t in kw.get("template", [])],
                      "inputs": [], "outputs": []}
@@ -132,6 +132,29 @@ def build_pack(rt) -> tuple[dict[str, mx.array], dict[str, int]]:
             for s, (w, sc, b) in enumerate(zip(fused.ple_tables.weights, fused.ple_tables.scales,
                                                fused.ple_tables.biases)):
                 ROLE[id(w)], ROLE[id(sc)], ROLE[id(b)] = f"ck:ple.w{s}", f"ck:ple.s{s}", f"ck:ple.b{s}"
+    if rt.mtp is not None:                      # the MTP head: its layer, mixer, input projections and cut head
+        head, entry = rt.mtp, rt.mtp_fused.layers[0]
+        put_hc("mtp.ahc", entry["attn_hc"])
+        put_hc("mtp.mhc", entry["mlp_hc"])
+        proj, qs, ks, iqs, pool, a = entry["attn"]
+        put_lane("mtp.att.proj", proj)
+        put_lane("mtp.att.o", a.o_proj)
+        for nm, v in (("qn", qs), ("kn", ks), ("iqn", iqs), ("pool", pool)):
+            put(f"mtp.att.{nm}", v)
+        moe, router = entry["moe"]
+        put("mtp.moe.router", router)
+        sw, se = moe.switch_mlp, moe.shared_expert
+        for nm, lin in (("gate", sw.gate_proj), ("up", sw.up_proj), ("down", sw.down_proj),
+                        ("sgate", se.gate_proj), ("sup", se.up_proj), ("sdown", se.down_proj)):
+            ROLE[id(lin.weight)], ROLE[id(lin.scales)], ROLE[id(lin.biases)] = (
+                f"ck:mtp.moe.{nm}.w", f"ck:mtp.moe.{nm}.s", f"ck:mtp.moe.{nm}.b")
+        put_hc("mtp.mix", rt.mtp_fused.mixer)
+        put_lane("mtp.fce", head.fc_embedding)
+        put_lane("mtp.fch", head.fc_hidden)
+        put("mtp.enorm.scale", rt._mtp_scales[0])
+        put("mtp.hnorm.scale", rt._mtp_scales[1])
+        put_lane("mtp.draft", rt._draft_head)
+        put("mtp.draft_ids", rt._draft_ids)
     emb = rt.model.model.embed_tokens
     ROLE[id(emb.weight)], ROLE[id(emb.scales)], ROLE[id(emb.biases)] = "ck:embed.w", "ck:embed.s", "ck:embed.b"
     return {k: v for k, v in pack.items() if not k.startswith("ck:")}, tiles
@@ -164,7 +187,8 @@ def main() -> None:
     from tensorfold.families.qwen4_exp.runtime import load
     from tensorfold.server.text import render_prompt_ids
 
-    rt, tok = load(args.model, drafts=0)
+    rt, tok = load(args.model, drafts=3)
+    from tensorfold.families.qwen4_exp.mtp_cache import MTPCache
     prompt = [int(t) for t in render_prompt_ids(tok, [{"role": "user", "content": args.prompt}],
                                                 enable_thinking=False)]
     cache = rt.model.make_cache()
@@ -176,6 +200,9 @@ def main() -> None:
     nxt = 0
     for t in prompt:
         nxt = step(t)
+    warm = MTPCache()                        # one MTP step and draw, so the head's lane weights are tiled too
+    m0, _ = rt._mtp_step([nxt], rt.fused.last_streams[-1:], warm)
+    mx.eval(rt._draft_draw(m0, None, [len(prompt)]))
     pack, tiles = build_pack(rt)            # after a forward: every lane weight is tiled
     made, fixture_input = [nxt], -1
     for g in range(args.tokens - 1):
@@ -209,6 +236,30 @@ def main() -> None:
         rounds.append({"rows": rows, "window": window, "picks": picks, "keep": keep})
         r += 1
     assert got[:len(made)] == made, "drafted windows differ from one-row steps"
+    # the MTP head: absorb windows of 1..8 rows (prompt rows, then generated ones) and a chain of drafts
+    cache, mtp_cache, streams = rt.model.make_cache(), MTPCache(), []
+    seq = prompt + made[:16]
+    for t in seq:
+        step(t)
+        streams.append(rt.fused.last_streams[-1:])
+    mtp_ref, at = {"absorb": [], "chain": []}, 0
+    FIX["phase"] = "mtp:"
+    for rows in (1, 2, 3, 4, 5, 6, 7, 8):
+        nexts = seq[at + 1:at + 1 + rows]
+        FIX["on"], FIX["rows"] = True, rows
+        mixed, out_streams = rt._absorb(mx.concatenate(streams[at:at + rows]), nexts, mtp_cache)
+        d = int(rt._draft_draw(mixed, None, [at + rows + 1]).item())
+        FIX["on"], FIX["rows"] = False, 1
+        mtp_ref["absorb"].append({"start": at, "rows": rows, "next": nexts, "draft": d})
+        at += rows
+    for j in range(6):
+        FIX["on"] = j == 0
+        mixed, out_streams = rt._mtp_step([d], out_streams, mtp_cache)
+        mtp_cache.drafted += 1
+        d = int(rt._draft_draw(mixed, None, [at + 2 + j]).item())
+        FIX["on"] = False
+        mtp_ref["chain"].append(d)
+    FIX["phase"] = ""
     mx.save_safetensors(str(out / "pack.safetensors"), pack)
     (out / "fixtures.bin").write_bytes(b"".join(FIX["blobs"]))
     variants, sites = {}, {}
@@ -223,12 +274,13 @@ def main() -> None:
             variants[fname] = {"kernel": c["kernel"], "file": f"kernels/{c['kernel']}.metal", "inputs": k["inputs"], "outputs": k["outputs"],
                                "meta": sorted({m for n in k["inputs"] for m in (n + "_shape", n + "_strides")
                                                if m in k["source"]})}
-        c["site"] = site = site_of(c) + (f"|{c['rows']}" if c["rows"] > 1 else "")
-        sites.setdefault(site, {"function": fname, "grid": c["grid"], "threadgroup": c["threadgroup"]})
+        c["site"] = site = c["phase"] + site_of(c) + (f"|{c['rows']}" if c["rows"] > 1 else "")
+        found = sites.setdefault(site, {"function": fname, "grid": c["grid"], "threadgroup": c["threadgroup"]})
+        assert found == {"function": fname, "grid": c["grid"], "threadgroup": c["threadgroup"]}, f"two launches share {site}"
     cfg = rt.model.args
     ple = next(l.ple for l in rt.model.layers if "ple" in l)
     e = ple.ple_embedding
-    ref = {"prompt": prompt, "tokens": made, "rounds": rounds, "fixture_step": args.fixture_step, "fixture_input": fixture_input,
+    ref = {"prompt": prompt, "tokens": made, "rounds": rounds, "mtp": mtp_ref, "fixture_step": args.fixture_step, "fixture_input": fixture_input,
            "lane_tiles": tiles, "ple": {"n": int(e.n), "context": int(e.context), "per": int(e.per_ngram),
                                         "heads": int(e.heads), "eos": int(e.eos), "sizes": e.head_sizes.tolist(),
                                         "offsets": e.head_offsets.tolist(),
