@@ -466,11 +466,19 @@ def stage(w: Weights, b: Buffers, windows: Sequence[tuple[State, Sequence[int]]]
     for layer in w.layers:
         if layer.ple is not None:
             p = layer.ple
+            batches = []
             for (st, tokens), (_, a0, _) in zip(windows, segs):
                 toks = np.asarray(tokens, dtype=np.int64)
                 ids = p.ngram.ids(st.ple_history, toks)
                 st.ple_last = (st.ple_history, toks)
-                lookups.append((p, ids, a0 * (ids.size // len(toks))))
+                if w.x3 is not None:
+                    lookups.append((p, ids, a0 * (ids.size // len(toks))))
+                else:
+                    batches.append(ids)
+            if w.x3 is None:
+                # optimisme, issue #368: batch already independently hashed windows per layer.
+                ids = batches[0] if len(batches) == 1 else np.concatenate(batches, axis=0)
+                lookups.append((p, ids, 0))
     # the table reads before the wait, which ends once the GPU has run the previous step: their faults overlap it
     ahead = [p.table.gather(ids) for p, ids, _ in lookups] if w.x3 is None and stage_ahead() else None
     b.staged.synchronize()               # the previous step's copies out of the pinned buffers are done
