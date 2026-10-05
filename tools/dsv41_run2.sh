@@ -27,6 +27,10 @@ if [ -z "${TF_DSV41_PREPARED+x}" ]; then
     TF_DSV41_PREPARED=
   fi
 fi
+# expandable segments, as the compose server runs: without them the prepared-weights load leaves ~4.7 GiB reserved but
+# unusable (a 64K teacher-forced document then OOMs under the allocator cap). The caller's PYTORCH_CUDA_ALLOC_CONF
+# wins; set and empty: torch's default allocator.
+PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF-expandable_segments:True}
 # the OOM guard (notes/dsv41/DEV.md): a tag naming this run's processes; a watcher on each node that kills only them
 # below TF_MEMWATCH_GIB (3; 0: no watcher) of MemAvailable and ends with the run; the in-process allocator cap
 # (tools/dsv41_memguard.py: TF_MEM_CAP_GIB, TF_MEM_RESERVE_GIB, TF_MEM_SLACK_GIB, TF_MEM_MIN_START_GIB)

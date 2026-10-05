@@ -117,6 +117,14 @@ Three layers, defaults keeping >= 3 GiB available:
    `~/tensorfold/memwatch.log` that run2.sh prints. It exits with the run (and run2.sh stops it on exit or Ctrl-C,
    killing a rank of the run still there 15 s after the other ended).
 
+**Expandable segments by default**: `dsv41_run2.sh` runs both ranks with
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, as the compose server does, unless the caller sets
+`PYTORCH_CUDA_ALLOC_CONF` (set and empty: torch's default allocator). The guard's math is unchanged: the cap bounds
+torch's reserved bytes in either mode (with expandable segments a tensor reserves in 20 MiB pages, 1 GiB -> 1040 MiB,
+and an allocation past the cap still raises `OutOfMemoryError`; checked in tf-dev at a 4 GiB cap), and the slack
+covers the same allocations outside the allocator. 2026-10-05: the quick tier passes with the same 7 fingerprints as
+with `PYTORCH_CUDA_ALLOC_CONF=` (lowest MemAvailable during the tier 9.9 GiB on both nodes, cap 110.7 GiB).
+
 `docker update --memory` on tf-dev is not used: GB10 GPU allocations are not charged to the container's cgroup
 (2026-10-05: tf-dev's `memory.current` 6.9 GB, `anon` 2.2 GB, while its rank held 108,893 MiB per nvidia-smi), so it
 would bound only host-side memory and could OOM-kill a run on page cache.
@@ -129,7 +137,7 @@ markdown corpus, all three code windows, and the first L tokens of each `--tf-pr
 attention and the shared-tile indexer):
 
     for kv in fp4 fp8 bf16; do for rows in "" "--tf-rows 32"; do
-      PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True TF_MEM_SLACK_GIB=4 TF_DSV41_KV=$kv tools/dsv41_run2.sh \
+      TF_MEM_SLACK_GIB=4 TF_DSV41_KV=$kv tools/dsv41_run2.sh \
         --cap 70000 --slots 1 --graph --tf-compare 8192,32768,65536 --tf-docs wide \
         --tf-prose /tf/out/prose/pg155.txt,/tf/out/prose/pg145.txt $rows --out /tf/out/tf-$kv${rows:+-rows}.pt
     done; done
@@ -138,7 +146,8 @@ attention and the shared-tile indexer):
 The prose texts are Project Gutenberg #155 (The Moonstone) and #145 (Middlemarch), copied to `~/tensorfold/out/prose/`
 on aiai (the header and footer are cut). 26 documents (9 at 8K and 32K, 8 at 64K), 2,047 scored positions each.
 Without `expandable_segments` the prepared-weights load leaves ~4.7 GiB reserved but unusable, and a 64K document
-then either OOMs under a lower allocator cap or crosses the 3 GiB floor (the watcher kills it); the server sets it.
+then either OOMs under a lower allocator cap or crosses the 3 GiB floor (the watcher kills it); the server and
+`dsv41_run2.sh` (the OOM guard, below) set it.
 
 Paired MMLU against the compose server (`tools/dsv41_mmlu.py`: 40 seeded questions from each of the 57 subjects, 0-shot,
 thinking off, greedy, the first standalone A-D letter; exact McNemar on the discordant pairs):
