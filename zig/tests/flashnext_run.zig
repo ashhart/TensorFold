@@ -84,6 +84,31 @@ const glue_source =
     \\  }
     \\  if (lane == 0) out[0] = ids[at];
     \\}
+    \\// NGramEmbedding.ids for a window: pm = history (2), eos, rows, multipliers (3), head sizes (16), offsets (16)
+    \\kernel void fz_ple_ids(device const uint* tok [[buffer(0)]], device const long* pm [[buffer(1)]],
+    \\    device uint* out [[buffer(2)]], uint i [[thread_position_in_grid]]) {
+    \\  const uint rows = uint(pm[3]), row = i / 16, hh = i % 16;
+    \\  if (row >= rows) return;
+    \\  long seq[10];
+    \\  seq[0] = pm[0]; seq[1] = pm[1];
+    \\  for (uint q = 0; q <= row; q++) seq[2 + q] = long(tok[q]);
+    \\  const long eos = pm[2];
+    \\  const uint at = 2 + row;
+    \\  long before = -1;
+    \\  for (uint q = 0; q < at; q++) if (seq[q] == eos) before = long(q);
+    \\  const long in_seg = long(at) - (before + 1);
+    \\  ulong mixed = 0;
+    \\  const uint ng = hh < 8 ? 2 : 3;
+    \\  for (uint q = 0; q < ng; q++) {
+    \\    const long sh = in_seg >= long(q) ? seq[at - q] : eos;
+    \\    const ulong term = ulong(sh) * ulong(pm[4 + q]);
+    \\    mixed = q == 0 ? term : (mixed ^ term);
+    \\  }
+    \\  const long size = pm[7 + hh];
+    \\  long mod = as_type<long>(mixed) % size;
+    \\  if (mod < 0) mod += size;
+    \\  out[row * 16 + hh] = uint(mod + pm[23 + hh]);
+    \\}
 ;
 
 fn readAll(fd: std.c.fd_t, dest: []u8, at: usize) !void {
@@ -110,6 +135,7 @@ const Run = struct {
     argmax_pipe: mtl.Pipeline = undefined,
     add_pipe: mtl.Pipeline = undefined,
     argids_pipe: mtl.Pipeline = undefined,
+    pleids_pipe: mtl.Pipeline = undefined,
 
     fn buffer(r: *Run, len: usize) !mtl.Buffer {
         const n = @max(len, 64);
@@ -199,6 +225,7 @@ const Run = struct {
         r.argmax_pipe = try mtl.Pipeline.init(r.device, glue, "fz_argmax", false);
         r.add_pipe = try mtl.Pipeline.init(r.device, glue, "fz_bcast_add", false);
         r.argids_pipe = try mtl.Pipeline.init(r.device, glue, "fz_argmax_ids", false);
+        r.pleids_pipe = try mtl.Pipeline.init(r.device, glue, "fz_ple_ids", false);
     }
 
     fn strings(a: std.mem.Allocator, v: std.json.Value) ![][]const u8 {
@@ -345,6 +372,7 @@ const Tmp = struct {
     scale: Buf,
     log2base: Buf,
     ple_ids: Buf,
+    ple_meta: Buf,
     kvmeta: Buf,
     vocab: Buf,
 };
@@ -360,6 +388,9 @@ fn i32Buf(r: *Run, vals: []const i32) !Buf {
     @memcpy(b.slice(i32, vals.len), vals);
     return .{ .b = b };
 }
+
+/// One MTP call's per-row values (every call in a command buffer reads its own).
+const Slot = struct { rows: Buf, md: Buf, md4: Buf, ids8: Buf, pos8: Buf, nk8: Buf, kvmeta: Buf, n_add: Buf };
 
 /// The MTP head: its decoder layer and mixer, the input projections, the cut head, its own attention cache.
 const Mtp = struct {
@@ -393,17 +424,9 @@ const Mtp = struct {
     hs: Buf,
     logits: Buf,
     pick: Buf,
-    rows: Buf,
-    rows1: Buf,
-    md: Buf,
-    md4: Buf,
     md1: Buf,
-    ids8: Buf,
-    pos8: Buf,
-    nk8: Buf,
-    kvmeta: Buf,
-    n_add: Buf,
     n_ids: Buf,
+    slots: [16]Slot,
     last: Buf = undefined, // the last call's output streams, row by row
 };
 
@@ -477,29 +500,72 @@ const Model = struct {
         }
     }
 
-    /// One forward over `tokens` (a window of up to MAXR rows from the cache's position): each row's argmax.
-    fn window(m: *Model, tokens: []const u32, picks: []u32) !void {
-        const r = m.r;
+    /// A window's per-row values from the cache position (rows, matmul dims, positions, key counts, kv rows).
+    fn windowMeta(m: *Model, rows: usize) void {
         const t = &m.t;
-        const rows = tokens.len;
-        r.rows = rows;
         t.rows.b.slice(i32, 1)[0] = @intCast(rows);
         t.mdims.b.slice(i32, 2)[0] = @intCast(rows);
-        const ids = t.ids8.b.slice(u32, 8);
         const pos8 = t.pos8.b.slice(i32, 8);
         const nk8 = t.nk8.b.slice(i32, 8);
         for (0..8) |i| {
-            ids[i] = if (i < rows) tokens[i] else 0;
             pos8[i] = if (i < rows) @intCast(m.pos + i) else 0;
             nk8[i] = if (i < rows) @intCast(m.pos + i + 1) else 0;
         }
         const kvm = t.kvmeta.b.slice(u32, 3);
         kvm[0], kvm[2] = .{ @intCast(m.pos), @intCast(rows) };
+    }
+
+    /// One forward over `tokens` (a window of up to MAXR rows from the cache's position): each row's argmax.
+    fn window(m: *Model, tokens: []const u32, picks: []u32) !void {
+        const r = m.r;
+        const t = &m.t;
+        const rows = tokens.len;
+        m.windowMeta(rows);
+        const ids = t.ids8.b.slice(u32, 8);
+        for (0..8) |i| ids[i] = if (i < rows) tokens[i] else 0;
         m.pleIds(tokens);
         const cb = r.queue.commandBuffer();
         r.enc = cb.compute(.concurrent);
+        try m.windowEncode(rows, t.ids8);
+        try m.finish(cb);
+        @memcpy(picks[0..rows], t.picks.b.slice(u32, rows));
+    }
+
+    fn finish(m: *Model, cb: mtl.CommandBuffer) !void {
+        m.r.enc.end();
+        cb.commit();
+        cb.wait();
+        if (cb.failure()) |msg| {
+            std.log.err("command buffer failed: {s}", .{msg});
+            return error.GpuFailed;
+        }
+        m.gpu_seconds += cb.gpuSeconds();
+    }
+
+    /// The n-gram ids of the window in `ids` hashed on the GPU (the window's drafts never reach the host).
+    fn pleIdsGpu(m: *Model, rows: usize, ids: Buf) void {
+        const r = m.r;
+        const p = &m.ple;
+        const pm = m.t.ple_meta.b.slice(i64, 39);
+        pm[0], pm[1], pm[2], pm[3] = .{ p.hist[0], p.hist[1], p.eos, @intCast(rows) };
+        for (0..3) |k| pm[4 + k] = p.mult[k];
+        for (0..16) |k| {
+            pm[7 + k] = p.sizes[k];
+            pm[23 + k] = p.offsets[k];
+        }
+        r.enc.setPipeline(r.pleids_pipe);
+        for ([_]Buf{ ids, m.t.ple_meta, m.t.ple_ids }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
+        r.enc.dispatchThreads(mtl.Size.of(16 * rows, 1, 1), mtl.Size.of(16 * rows, 1, 1));
+        r.enc.barrier();
+    }
+
+    /// Encode the window's forward (tokens read from `ids`, n-gram ids already in t.ple_ids) and its argmax.
+    fn windowEncode(m: *Model, rows: usize, ids: Buf) !void {
+        const r = m.r;
+        const t = &m.t;
+        r.rows = rows;
         var cur: usize = 0;
-        try r.call("qa_embed_rows@embed", &.{ t.ids8, m.embed[0], m.embed[1], m.embed[2] }, &.{t.h[0]});
+        try r.call("qa_embed_rows@embed", &.{ ids, m.embed[0], m.embed[1], m.embed[2] }, &.{t.h[0]});
         var pending: enum { none, grouped } = .none;
         for (0..LAYERS) |i| {
             const L = &m.layers[i];
@@ -561,103 +627,97 @@ const Model = struct {
         r.enc.setBuffer(t.picks.b, 0, 1);
         r.enc.setBuffer(t.vocab.b, 0, 2);
         r.enc.dispatchThreads(mtl.Size.of(1024 * rows, 1, 1), mtl.Size.of(1024, 1, 1));
-        r.enc.end();
-        cb.commit();
-        cb.wait();
-        if (cb.failure()) |msg| {
-            std.log.err("command buffer failed: {s}", .{msg});
-            return error.GpuFailed;
-        }
-        m.gpu_seconds += cb.gpuSeconds();
-        @memcpy(picks[0..rows], t.picks.b.slice(u32, rows));
+        r.enc.barrier();
     }
 
     /// The MTP head on `rows` rows: each row's next token and the streams it follows (target or head output, row
     /// by row from `streams`); returns the draft after the last row (the cut head's argmax through its ids).
     fn mtpRun(m: *Model, nexts: []const u32, streams: Buf) !u32 {
         const r = m.r;
-        const t = &m.t;
         const h = &m.mtp;
         const rows = nexts.len;
         h.pos -= h.drafted;
         h.drafted = 0;
-        h.rows.b.slice(i32, 1)[0] = @intCast(rows);
-        h.md.b.slice(i32, 2)[0] = @intCast(rows);
-        h.md4.b.slice(i32, 2)[0] = @intCast(4 * rows);
-        h.md4.b.slice(i32, 2)[1] = @intCast(16 * ((4 * rows + 15) / 16)); // rows padded to whole 16-row tiles
-        const ids = h.ids8.b.slice(u32, 8);
-        const pos8 = h.pos8.b.slice(i32, 8);
-        const nk8 = h.nk8.b.slice(i32, 8);
+        const ids = h.slots[0].ids8.b.slice(u32, 8);
+        for (0..8) |i| ids[i] = if (i < rows) nexts[i] else 0;
+        const cb = r.queue.commandBuffer();
+        r.enc = cb.compute(.concurrent);
+        try m.mtpEncode(0, rows, h.slots[0].ids8, streams, h.pick);
+        try m.finish(cb);
+        h.pos += rows;
+        return h.pick.b.slice(u32, 1)[0];
+    }
+
+    /// Encode the MTP head at its position on `rows` rows (tokens from `ids`), its draft written to `out`; meta in
+    /// `slot` (each call in one command buffer has its own).
+    fn mtpEncode(m: *Model, slot: usize, rows: usize, ids: Buf, streams: Buf, out: Buf) !void {
+        const r = m.r;
+        const t = &m.t;
+        const h = &m.mtp;
+        const sl = &h.slots[slot];
+        sl.rows.b.slice(i32, 1)[0] = @intCast(rows);
+        sl.md.b.slice(i32, 2)[0] = @intCast(rows);
+        sl.md4.b.slice(i32, 2)[0] = @intCast(4 * rows);
+        sl.md4.b.slice(i32, 2)[1] = @intCast(16 * ((4 * rows + 15) / 16)); // rows padded to whole 16-row tiles
+        const pos8 = sl.pos8.b.slice(i32, 8);
+        const nk8 = sl.nk8.b.slice(i32, 8);
         for (0..8) |i| {
-            ids[i] = if (i < rows) nexts[i] else 0;
             pos8[i] = if (i < rows) @intCast(h.pos + i) else 0;
             nk8[i] = if (i < rows) @intCast(h.pos + i + 1) else 0;
         }
-        const kvm = h.kvmeta.b.slice(u32, 3);
+        const kvm = sl.kvmeta.b.slice(u32, 3);
         kvm[0], kvm[1], kvm[2] = .{ @intCast(h.pos), CAP, @intCast(rows) };
-        h.n_add.b.slice(u32, 1)[0] = @intCast(rows * WIDE);
-        const cb = r.queue.commandBuffer();
-        r.enc = cb.compute(.concurrent);
+        sl.n_add.b.slice(u32, 1)[0] = @intCast(rows * WIDE);
         r.rows = rows;
-        try r.call("mtp:qa_embed_rows@embed", &.{ h.ids8, m.embed[0], m.embed[1], m.embed[2] }, &.{h.emb});
+        try r.call("mtp:qa_embed_rows@embed", &.{ ids, m.embed[0], m.embed[1], m.embed[2] }, &.{h.emb});
         try r.call("mtp:q4_rms_rows@mtp.enorm", &.{ h.emb, h.enorm, t.eps }, &.{h.en});
-        try r.call("mtp:lane_qmm_xsum#[2560]", &.{ h.en, h.md }, &.{t.xs});
-        try r.call("mtp:lane_qmm_bytes_grouped@mtp.fce", &.{ h.en, t.xs, h.fce.wq, h.fce.sbt, h.md }, &.{h.e});
+        try r.call("mtp:lane_qmm_xsum#[2560]", &.{ h.en, sl.md }, &.{t.xs});
+        try r.call("mtp:lane_qmm_bytes_grouped@mtp.fce", &.{ h.en, t.xs, h.fce.wq, h.fce.sbt, sl.md }, &.{h.e});
         try r.call("mtp:q4_rms_rows@mtp.hnorm", &.{ streams, h.hnorm, t.eps }, &.{h.hn});
-        try r.call("mtp:lane_qmm_xsum#[4R, 2560]", &.{ h.hn, h.md4 }, &.{t.xs});
-        try r.call("mtp:lane_qmm_bytes_grouped@mtp.fch", &.{ h.hn, t.xs, h.fch.wq, h.fch.sbt, h.md4 }, &.{h.hs});
+        try r.call("mtp:lane_qmm_xsum#[4R, 2560]", &.{ h.hn, sl.md4 }, &.{t.xs});
+        try r.call("mtp:lane_qmm_bytes_grouped@mtp.fch", &.{ h.hn, t.xs, h.fch.wq, h.fch.sbt, sl.md4 }, &.{h.hs});
         r.enc.setPipeline(r.add_pipe);
-        for ([_]Buf{ h.e, h.hs, h.h[0], h.n_add }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
+        for ([_]Buf{ h.e, h.hs, h.h[0], sl.n_add }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
         r.enc.dispatchThreads(mtl.Size.of(rows * WIDE, 1, 1), mtl.Size.of(256, 1, 1));
         r.enc.barrier();
         try r.call("mtp:q4_hc_norm_none#[10240]", &.{h.h[0]}, &.{ h.h[1], t.ssp });
         const down = [_][]const u8{ "mtp:qa_hc_down@mtp.ahc", "mtp:qa_hc_down@mtp.mhc", "mtp:qa_hc_down@mtp.mix" };
         const up = [_][]const u8{ "mtp:qa_hc_up@mtp.ahc", "mtp:qa_hc_up@mtp.mhc", "mtp:qa_hc_up@mtp.mix" };
-        try m.mtpProject(h.h[1], h.ahc, down[0], up[0], t.inj_a);
-        try r.call("mtp:lane_qmm_xsum#[2560]", &.{ t.mixed, h.md }, &.{t.xs});
-        try r.call("mtp:lane_qmm_bytes_grouped@mtp.att.proj", &.{ t.mixed, t.xs, h.proj.wq, h.proj.sbt, h.md }, &.{t.p});
-        try r.call("mtp:q4_attn_prep@mtp.att", &.{ t.p, h.pos8, h.qn, h.kn, h.iqn, t.eps, t.log2base }, &.{ t.q, t.kout, t.iq });
+        try m.mtpProject(h.h[1], h.ahc, down[0], up[0], t.inj_a, sl.rows);
+        try r.call("mtp:lane_qmm_xsum#[2560]", &.{ t.mixed, sl.md }, &.{t.xs});
+        try r.call("mtp:lane_qmm_bytes_grouped@mtp.att.proj", &.{ t.mixed, t.xs, h.proj.wq, h.proj.sbt, sl.md }, &.{t.p});
+        try r.call("mtp:q4_attn_prep@mtp.att", &.{ t.p, sl.pos8, h.qn, h.kn, h.iqn, t.eps, t.log2base }, &.{ t.q, t.kout, t.iq });
         r.enc.setPipeline(r.kv_pipe);
-        for ([_]Buf{ t.kout, t.p, h.keys, h.vals, h.raw, h.kvmeta }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
+        for ([_]Buf{ t.kout, t.p, h.keys, h.vals, h.raw, sl.kvmeta }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
         r.enc.dispatchThreads(mtl.Size.of(512 * rows, 1, 1), mtl.Size.of(256, 1, 1));
         r.enc.barrier();
-        try r.call("mtp:q4_attn_parts#[24, 256]", &.{ t.q, h.keys, h.vals, t.ids81, h.nk8, t.zero8, t.scale }, &.{ t.po, t.pm });
+        try r.call("mtp:q4_attn_parts#[24, 256]", &.{ t.q, h.keys, h.vals, t.ids81, sl.nk8, t.zero8, t.scale }, &.{ t.po, t.pm });
         try r.call("mtp:q4_attn_merge_gate#[24, 16, 256]", &.{ t.po, t.pm, t.p }, &.{t.aout});
-        try r.call("mtp:lane_qmm_xsum#[6144]", &.{ t.aout, h.md }, &.{t.xs});
-        try r.call("mtp:lane_qmm_bytes_grouped@mtp.att.o", &.{ t.aout, t.xs, h.out.wq, h.out.sbt, h.md }, &.{t.branch});
+        try r.call("mtp:lane_qmm_xsum#[6144]", &.{ t.aout, sl.md }, &.{t.xs});
+        try r.call("mtp:lane_qmm_bytes_grouped@mtp.att.o", &.{ t.aout, t.xs, h.out.wq, h.out.sbt, sl.md }, &.{t.branch});
         try r.call("mtp:q4_hc_norm_plain#[10240]", &.{ h.h[1], t.inj_a, t.branch }, &.{ h.h[0], t.ssp });
-        try m.mtpProject(h.h[0], h.mhc, down[1], up[1], t.inj_m);
-        try r.call("mtp:q4_router_float@mtp.moe", &.{ t.mixed, h.router, h.rows }, &.{t.lg});
+        try m.mtpProject(h.h[0], h.mhc, down[1], up[1], t.inj_m, sl.rows);
+        try r.call("mtp:q4_router_float@mtp.moe", &.{ t.mixed, h.router, sl.rows }, &.{t.lg});
         const e = h.ex;
         try r.call("mtp:qa_expert_gateup@mtp.moe.gate", &.{ t.mixed, t.lg, e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8], e[9], e[10], e[11] }, &.{ t.act, t.pick, t.wts });
-        try r.call("mtp:qa_expert_down_y@mtp.moe.down", &.{ t.act, t.pick, e[12], e[13], e[14], e[15], e[16], e[17], h.rows }, &.{t.ydown});
+        try r.call("mtp:qa_expert_down_y@mtp.moe.down", &.{ t.act, t.pick, e[12], e[13], e[14], e[15], e[16], e[17], sl.rows }, &.{t.ydown});
         try r.call("mtp:q4_hc_norm_grouped#[10240]", &.{ h.h[0], t.inj_m, t.ydown, t.wts, t.lg }, &.{ h.h[1], t.ssp });
         h.last = .{ .b = h.h[1].b, .off = (rows - 1) * WIDE * 2 };
-        try m.mtpProject(h.h[1], h.mix, down[2], up[2], t.inj_a);
+        try m.mtpProject(h.h[1], h.mix, down[2], up[2], t.inj_a, sl.rows);
         r.rows = 1;
         const x: Buf = .{ .b = t.mixed.b, .off = (rows - 1) * D * 2 };
         try r.call("mtp:lane_qmm_xsum#[2560]", &.{ x, h.md1 }, &.{t.xs});
         try r.call("mtp:lane_qmm_bytes_grouped@mtp.draft", &.{ x, t.xs, h.draft.wq, h.draft.sbt, h.md1 }, &.{h.logits});
         r.enc.setPipeline(r.argids_pipe);
-        for ([_]Buf{ h.logits, h.pick, h.n_ids, h.ids }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
+        for ([_]Buf{ h.logits, out, h.n_ids, h.ids }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
         r.enc.dispatchThreads(mtl.Size.of(1024, 1, 1), mtl.Size.of(1024, 1, 1));
-        r.enc.end();
-        cb.commit();
-        cb.wait();
-        if (cb.failure()) |msg| {
-            std.log.err("command buffer failed: {s}", .{msg});
-            return error.GpuFailed;
-        }
-        m.gpu_seconds += cb.gpuSeconds();
-        h.pos += rows;
-        return h.pick.b.slice(u32, 1)[0];
+        r.enc.barrier();
     }
 
-    fn mtpProject(m: *Model, hn: Buf, hc: Hc, down: []const u8, up: []const u8, inj: Buf) !void {
+    fn mtpProject(m: *Model, hn: Buf, hc: Hc, down: []const u8, up: []const u8, inj: Buf, rows: Buf) !void {
         const t = &m.t;
-        const h = &m.mtp;
-        try m.r.call(down, &.{ hn, t.ssp, hc.scale, hc.dw, hc.ds, hc.db, t.eps, h.rows }, &.{t.part});
-        try m.r.call(up, &.{ hn, t.ssp, hc.scale, t.part, hc.uw, hc.us, hc.ub, t.eps, h.rows }, &.{ t.mixed, inj });
+        try m.r.call(down, &.{ hn, t.ssp, hc.scale, hc.dw, hc.ds, hc.db, t.eps, rows }, &.{t.part});
+        try m.r.call(up, &.{ hn, t.ssp, hc.scale, t.part, hc.uw, hc.us, hc.ub, t.eps, rows }, &.{ t.mixed, inj });
     }
 
     /// Absorb `nexts.len` rows (chunks of up to MAXR) from `streams`; returns the draft after the last row.
@@ -838,6 +898,7 @@ pub fn main(init: std.process.Init) !void {
         .scale = try f32Buf(&r, @floatCast(ref.object.get("attention_scale").?.float)),
         .log2base = try f32Buf(&r, 23.253496170043945),
         .ple_ids = try i32Buf(&r, &(@as([16 * MAXR]i32, @splat(0)))),
+        .ple_meta = try B.of(&r, 39 * 8),
         .kvmeta = try i32Buf(&r, &.{ 0, CAP, 1 }),
         .vocab = try i32Buf(&r, &.{VOCAB}),
     };
@@ -879,17 +940,19 @@ pub fn main(init: std.process.Init) !void {
             .hs = try B.of(&r, MAXR * WIDE * 2),
             .logits = try B.of(&r, 80000 * 2),
             .pick = try B.of(&r, 16),
+            .md1 = try i32Buf(&r, &.{ 1, 16, 0, 0, 0, 0, 0, 0 }),
+            .n_ids = undefined,
+            .slots = undefined,
+        };
+        for (&m.mtp.slots) |*sl| sl.* = .{
             .rows = try i32Buf(&r, &.{1}),
-            .rows1 = try i32Buf(&r, &.{1}),
             .md = try i32Buf(&r, &.{ 1, 16, 0, 0, 0, 0, 0, 0 }),
             .md4 = try i32Buf(&r, &.{ 4, 16, 0, 0, 0, 0, 0, 0 }),
-            .md1 = try i32Buf(&r, &.{ 1, 16, 0, 0, 0, 0, 0, 0 }),
             .ids8 = try i32Buf(&r, &(@as([8]i32, @splat(0)))),
             .pos8 = try i32Buf(&r, &(@as([8]i32, @splat(0)))),
             .nk8 = try i32Buf(&r, &(@as([8]i32, @splat(0)))),
             .kvmeta = try i32Buf(&r, &.{ 0, CAP, 1 }),
             .n_add = try i32Buf(&r, &.{0}),
-            .n_ids = undefined,
         };
         m.mtp.n_ids = try i32Buf(&r, &.{@intCast(m.mtp.ids_n)});
         if (m.mtp.ids_n * 2 > 80000 * 2) return error.DraftVocab;
@@ -1030,6 +1093,82 @@ pub fn main(init: std.process.Init) !void {
         var eq: usize = 0;
         while (eq < want.len and out.items[eq] == @as(u32, @intCast(want[eq].integer))) eq += 1;
         std.debug.print("depth {d}: {d}/{d} tokens equal; {d} rounds, {d:.2} tokens a round, {d:.2} of {d} drafts landing; {d:.1} tok/s\n", .{ depth, eq, want.len, n_rounds, @as(f64, @floatFromInt(out.items.len - 1)) / @as(f64, @floatFromInt(n_rounds)), @as(f64, @floatFromInt(landed)) / @as(f64, @floatFromInt(n_rounds)), depth, @as(f64, @floatFromInt(out.items.len - 1)) / wall });
+        if (eq < want.len) bad += 1;
+    }
+
+    // 6. one command buffer a round: the head absorbs the kept rows and chains its drafts into the next window's
+    //    token slots on the GPU, the window hashes its n-grams on the GPU, and the host reads the picks once
+    const wids: Buf = .{ .b = try r.buffer(64) };
+    for ([_]usize{ 2, 3, 4 }) |depth| {
+        m.reset();
+        m.mtp.pos = 0;
+        m.mtp.drafted = 0;
+        const all = try r.buffer(prompt.len * WIDE * 2);
+        var nexts: std.ArrayList(u32) = .empty;
+        for (prompt, 0..) |x, i| {
+            const tok: u32 = @intCast(x.integer);
+            try m.window(&.{tok}, &pick);
+            m.keepRows(&.{tok}, 1);
+            @memcpy(all.contents()[i * WIDE * 2 .. (i + 1) * WIDE * 2], m.last.b.contents()[0 .. WIDE * 2]);
+            if (i > 0) try nexts.append(gpa, tok);
+        }
+        try nexts.append(gpa, pick[0]);
+        var out: std.ArrayList(u32) = .empty;
+        try out.append(gpa, pick[0]);
+        const w = wids.b.slice(u32, 16);
+        var absorb_rows: []const u32 = nexts.items;
+        var absorb_from: Buf = .{ .b = all };
+        var n_rounds: usize = 0;
+        var landed: usize = 0;
+        const s0 = mtl.clock.seconds();
+        m.gpu_seconds = 0;
+        while (out.items.len < want.len) {
+            w[0] = out.items[out.items.len - 1];
+            const cb = r.queue.commandBuffer();
+            r.enc = cb.compute(.concurrent);
+            // the head: absorb the kept rows (chunks of up to MAXR), its draft into slot 1, then chain into 2..depth
+            m.mtp.pos -= m.mtp.drafted;
+            m.mtp.drafted = 0;
+            var at: usize = 0;
+            var slot: usize = 0;
+            while (at < absorb_rows.len) : (slot += 1) {
+                const n = @min(MAXR, absorb_rows.len - at);
+                const sl = &m.mtp.slots[slot];
+                const ids = sl.ids8.b.slice(u32, 8);
+                for (0..8) |i| ids[i] = if (i < n) absorb_rows[at + i] else 0;
+                try m.mtpEncode(slot, n, sl.ids8, .{ .b = absorb_from.b, .off = absorb_from.off + at * WIDE * 2 }, .{ .b = wids.b, .off = 4 });
+                m.mtp.pos += n;
+                at += n;
+            }
+            for (1..depth) |j| {
+                try m.mtpEncode(slot, 1, .{ .b = wids.b, .off = 4 * j }, m.mtp.last, .{ .b = wids.b, .off = 4 * (j + 1) });
+                m.mtp.pos += 1;
+                m.mtp.drafted += 1;
+                slot += 1;
+            }
+            // the target window [pending, drafts]
+            m.windowMeta(depth + 1);
+            m.pleIdsGpu(depth + 1, wids);
+            try m.windowEncode(depth + 1, wids);
+            try m.finish(cb);
+            const picks = m.t.picks.b.slice(u32, depth + 1);
+            var keep: usize = 1;
+            while (keep <= depth and w[keep] == picks[keep - 1]) keep += 1;
+            try out.appendSlice(gpa, picks[0..keep]);
+            n_rounds += 1;
+            landed += keep - 1;
+            var win: [MAXR]u32 = undefined;
+            @memcpy(win[0 .. depth + 1], w[0 .. depth + 1]);
+            m.keepRows(win[0 .. depth + 1], keep);
+            @memcpy(pick[0..keep], picks[0..keep]);
+            absorb_rows = pick[0..keep];
+            absorb_from = m.last;
+        }
+        const wall = mtl.clock.seconds() - s0;
+        var eq: usize = 0;
+        while (eq < want.len and out.items[eq] == @as(u32, @intCast(want[eq].integer))) eq += 1;
+        const made: f64 = @floatFromInt(out.items.len - 1);
+        std.debug.print("one buffer a round, depth {d}: {d}/{d} tokens equal; {d:.2} tokens a round, {d:.2} of {d} drafts landing; {d:.1} tok/s (GPU busy {d:.0}%)\n", .{ depth, eq, want.len, made / @as(f64, @floatFromInt(n_rounds)), @as(f64, @floatFromInt(landed)) / @as(f64, @floatFromInt(n_rounds)), depth, made / wall, 100 * m.gpu_seconds / wall });
         if (eq < want.len) bad += 1;
     }
 
