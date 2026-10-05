@@ -275,6 +275,16 @@ copy none of it into this Apache-2.0 tree.
       0-1% / ~11 W idle, outputs and latency unchanged
 - [x] Server MemAvailable after warm-up was 2.8-2.9 GiB: TF_DSV41_RESERVE_GIB 2.5 -> 3 (3.86 / 3.91 GiB; pool 6.52M -> 6.41M)
 - [ ] Old `tf-dev-old-*` containers on both nodes can go (keep the `tf-dev-snapshot:*` images: tf-dev runs on them)
+- [ ] Global top-k indices rebuilt every compressed layer in the multi-stream path (`serial.py` ~1389: idx + the
+      stream's entry base, ~3 small ops a layer): build once per (index source, kv source) or pass the base into
+      `K.mqa` as `sbase` (idea: vLLM #57659); ~50-100 us a step, outputs unchanged
+- [ ] First-start PP8192 dip still seen with zero Triton compiles (1473-1523, then 1830-1856 a minute later): cause open
+- [ ] Server MemAvailable 2.7-2.9 GiB under load (3.8 idle) with RESERVE 3: decide whether the 3 GiB floor applies
+      under load
+- [ ] 16 clients fp4 122.6 vs fp8 128.0 (~4%): uninvestigated
+- [ ] Triton cache in the serve volume never evicts (98 entries, 42 MB) and is root-owned under ~/.cache
+- [ ] Review test gaps: shared-tile many-stream test never mixes visible bounds within a run at capacities 4096/4100;
+      suite2.sh baseline copy handles only `--suite-baseline PATH` under /tf/out
 
 ## Ops notes
 
