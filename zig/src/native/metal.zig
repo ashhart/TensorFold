@@ -1,4 +1,5 @@
-//! The engines a native server opens on Metal: Nemotron 4-bit (MLX affine, groups of 64) on the lane core.
+//! The engines a native server opens on Metal: Nemotron 4-bit (MLX affine, groups of 64) on the lane core, and Flash
+//! Next 6-bit (groups of 32) on the replay engine, one reply at a time (its kernels and packs in TF_FLASHNEXT_DUMP).
 const std = @import("std");
 const mtl = @import("metal");
 const api = @import("engine_api");
@@ -6,9 +7,10 @@ const tf = @import("tensorfold");
 const lanes = tf.lanes;
 const nemotron = tf.nemotron;
 const Allocator = std.mem.Allocator;
+const flashnext = @import("flashnext_host.zig");
 
 pub const backends: []const []const u8 = &.{"metal"};
-pub const families: []const api.Family = &.{.{ .model_type = "nemotron_h", .formats = &.{"mlx-q4g64"} }};
+pub const families: []const api.Family = &.{ .{ .model_type = "nemotron_h", .formats = &.{"mlx-q4g64"} }, .{ .model_type = "qwen4_exp", .formats = &.{"mlx-q6g32"} } };
 
 /// The chip class gate entries name ("apple-m5" for an Apple M5 Max); null without an Apple GPU.
 pub fn chip(a: Allocator) ?[]const u8 {
@@ -78,6 +80,7 @@ const Host = struct {
 
 /// The engine for `o.dir`, or null with `problem` set when no Metal engine reads the checkpoint.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (std.mem.eql(u8, o.model_type, "qwen4_exp")) return openFlashNext(a, gpa, io, o, problem);
     if (!std.mem.eql(u8, o.model_type, "nemotron_h")) {
         problem.* = try std.fmt.allocPrint(a, "the native engine has no backend for {s} checkpoints yet; serve with --engine python", .{o.model_type});
         return null;
@@ -121,6 +124,27 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (h.metal.head != null) h.host.lone = .{ .ctx = h, .run = Host.lone };
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
+}
+
+/// Flash Next on the replay engine: the recorded kernels and packs from tools/zig/flashnext_dump.py in TF_FLASHNEXT_DUMP.
+fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    const dump = std.mem.span(std.c.getenv("TF_FLASHNEXT_DUMP") orelse {
+        problem.* = "the native Flash Next engine needs TF_FLASHNEXT_DUMP: a folder from tools/zig/flashnext_dump.py";
+        return null;
+    });
+    const native = modelContext(a, io, o.dir);
+    const window: i64 = o.context orelse native;
+    if (window < 0 or (native > 0 and window > native)) {
+        problem.* = try std.fmt.allocPrint(a, "--context {d} exceeds this model's {d}-token window", .{ window, native });
+        return null;
+    }
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const h = flashnext.open(gpa, io, o.dir, dump, window) catch |e| {
+        problem.* = try std.fmt.allocPrint(a, "the native Flash Next engine cannot load {s} with {s} ({s})", .{ o.dir, dump, @errorName(e) });
+        return null;
+    };
+    return .{ .engine = h.engine(), .close = flashnext.close, .ctx = h };
 }
 
 test "chip classes from Metal device names" {

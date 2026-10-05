@@ -6,6 +6,8 @@ pub const npy = @import("core/npy.zig");
 pub const ids_json = @import("core/ids_json.zig");
 pub const lanes = @import("lanes");
 pub const nemotron = @import("families/nemotron/nemotron.zig");
+pub const flashnext_replay = @import("families/flashnext/replay.zig");
+pub const flashnext_engine = @import("families/flashnext/engine.zig");
 
 test {
     std.testing.refAllDecls(@This());
