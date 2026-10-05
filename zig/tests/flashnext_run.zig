@@ -310,6 +310,8 @@ const Run = struct {
     dense_target: bool = false,
     skip: u32 = 0,
     split: bool = false,
+    gdn_step: bool = false,
+    hc_mma: bool = false,
     event: mtl.SharedEvent = undefined,
     event_value: u64 = 0,
     dense8_pipe: mtl.Pipeline = undefined,
@@ -486,9 +488,14 @@ const Run = struct {
     }
 
     fn call(r: *Run, role: []const u8, ins: []const Buf, outs: []const Buf) !void {
+        return r.callAs(role, r.rows, ins, outs);
+    }
+
+    /// `role` launched as recorded at `as_rows` rows (its kernel reads the row count at run time).
+    fn callAs(r: *Run, role: []const u8, as_rows: usize, ins: []const Buf, outs: []const Buf) !void {
         if (r.skip & class(role) != 0) return;
         var key: [96]u8 = undefined;
-        const name = try std.fmt.bufPrint(&key, "{s}|{d}", .{ role, r.rows });
+        const name = try std.fmt.bufPrint(&key, "{s}|{d}", .{ role, as_rows });
         const s = r.roles.get(name) orelse {
             std.log.err("no launch site {s}", .{name});
             return error.NoSite;
@@ -711,8 +718,9 @@ const Model = struct {
 
     fn hcProject(m: *Model, hn: Buf, hc: Hc, down: []const u8, up: []const u8, inj: Buf) !void {
         const t = &m.t;
-        try m.r.call(down, &.{ hn, t.ssp, hc.scale, hc.dw, hc.ds, hc.db, t.eps, t.rows }, &.{t.part});
-        try m.r.call(up, &.{ hn, t.ssp, hc.scale, t.part, hc.uw, hc.us, hc.ub, t.eps, t.rows }, &.{ t.mixed, inj });
+        const as_rows = if (m.r.hc_mma and m.r.rows > 1) 8 else m.r.rows;
+        try m.r.callAs(down, as_rows, &.{ hn, t.ssp, hc.scale, hc.dw, hc.ds, hc.db, t.eps, t.rows }, &.{t.part});
+        try m.r.callAs(up, as_rows, &.{ hn, t.ssp, hc.scale, t.part, hc.uw, hc.us, hc.ub, t.eps, t.rows }, &.{ t.mixed, inj });
     }
 
     fn grouped(m: *Model, h: Buf, out: Buf) !void {
@@ -842,7 +850,7 @@ const Model = struct {
                 const a = m.state;
                 const cs_in: Buf = .{ .b = L.cs[a].b, .off = m.state_row * CS_ROW };
                 const so_in: Buf = .{ .b = L.so[a].b, .off = m.state_row * SO_ROW };
-                try r.call("q4_gdn@gdn", &.{ t.p, cs_in, so_in, L.conv, L.alog, L.dt, L.norm, t.eps, t.rows }, &.{ t.gout, L.cs[1 - a], L.so[1 - a] });
+                try r.callAs("q4_gdn@gdn", if (r.gdn_step and rows > 1) 8 else rows, &.{ t.p, cs_in, so_in, L.conv, L.alog, L.dt, L.norm, t.eps, t.rows }, &.{ t.gout, L.cs[1 - a], L.so[1 - a] });
                 try m.lane(t.gout, 6144, L.out, "lane_qmm_bytes_grouped@gdn.out", t.branch);
             } else {
                 try m.lane(t.mixed, D, L.proj, "lane_qmm_bytes_grouped@att.proj", t.p);
@@ -1024,6 +1032,8 @@ pub fn main(init: std.process.Init) !void {
     r.serial = std.c.getenv("FZ_SERIAL") != null;
     r.xnew = std.c.getenv("FZ_XNEW") != null;
     r.split = std.c.getenv("FZ_SPLIT") != null;
+    r.gdn_step = std.c.getenv("FZ_GDN_STEP") != null;
+    r.hc_mma = std.c.getenv("FZ_HC_MMA") != null;
     r.event = try device.sharedEvent();
     r.dense = r.xnew and std.c.getenv("FZ_DENSE") != null;
     r.dense_target = r.dense and std.c.getenv("FZ_DENSE_TARGET") != null;
