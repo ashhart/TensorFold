@@ -20,9 +20,11 @@ pub const nccl = @import("nccl.zig");
 pub const triton = @import("triton.zig");
 pub const aot = @import("aot.zig");
 pub const kernels = @import("kernels.zig");
+pub const segments = @import("segments.zig");
 
 test {
     _ = launch;
     _ = abi;
     _ = aot;
+    _ = segments;
 }

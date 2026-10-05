@@ -13,6 +13,9 @@ const Dump = @import("cuda_dump.zig").Dump;
 
 const Delta = enum { none, dense, moe };
 
+/// A prompt chunk between blocks: rows, position, residual stream, the delta its next norm adds, next Mamba and attention.
+pub const Walk = struct { rows: usize, pos: usize, x: u64 = 0, delta: Delta = .none, mj: usize = 0, aj: usize = 0 };
+
 pub const Forward = struct {
     c: Config,
     w: *const weights.Weights,
@@ -145,57 +148,98 @@ pub const Forward = struct {
 
     /// Engine.prefill_chunk: `rows` tokens in p_ids at positions pos..; commits them and samples the next token.
     pub fn chunk(f: *const Forward, rows: usize, pos: usize) !void {
+        var w: Walk = .{ .rows = rows, .pos = pos };
+        try f.chunkBegin(&w);
+        for (0..f.w.blocks.len) |i| {
+            try f.chunkPre(&w, i);
+            try f.chunkMixer(&w, i);
+            try f.chunkPost(&w, i);
+        }
+        try f.chunkFinish(&w);
+    }
+
+    /// A chunk's embedding, from p_ids.
+    pub fn chunkBegin(f: *const Forward, w: *Walk) !void {
+        const b = f.b;
+        try f.tri.embed(b.p_ids, f.w.embed.w, f.w.embed.s, f.w.embed.b, b.emb, w.rows, f.c.hidden);
+        w.x = b.emb;
+    }
+
+    /// Block i up to its mixer: the norm, then the Mamba input projection or attention's q, k and v.
+    pub fn chunkPre(f: *const Forward, w: *Walk, i: usize) !void {
+        const blk = f.w.blocks[i];
+        const b = f.b;
+        try f.norm(&w.x, w.delta, blk.norm, w.rows, false);
+        switch (blk.kind) {
+            .mamba => try f.ops.prefillDense(b.y, blk.mamba.in_proj, b.proj, w.rows),
+            .attention => {
+                try f.ops.prefillDense(b.y, blk.attn.qkv, b.qkv, w.rows);
+                try f.ops.fill32(b.p_meta, @intCast(w.pos), 4);
+            },
+            .moe => {},
+        }
+    }
+
+    /// Block i's mixer, all it reads of earlier rows: Mamba conv and scan (states), or cache write and attention (keys).
+    pub fn chunkMixer(f: *const Forward, w: *Walk, i: usize) !void {
         const c = f.c;
         const b = f.b;
         const o = f.ops;
-        const t = f.tri;
-        const ms = f.mshape(state.max_rows);
-        const at = f.ashape();
-        const qd = c.heads * c.head_dim;
-        try t.embed(b.p_ids, f.w.embed.w, f.w.embed.s, f.w.embed.b, b.emb, rows, c.hidden);
-        var x = b.emb;
-        var delta: Delta = .none;
-        var mj: usize = 0;
-        var aj: usize = 0;
-        for (f.w.blocks) |blk| {
-            try f.norm(&x, delta, blk.norm, rows, false);
-            switch (blk.kind) {
-                .mamba => {
-                    const m = blk.mamba;
-                    const ssm = b.ssm + @as(u64, mj) * c.mamba_heads * c.mamba_head_dim * c.state * 4;
-                    const base = b.conv_base + @as(u64, mj) * 3 * c.convDim() * 2;
-                    try o.prefillDense(b.y, m.in_proj, b.proj, rows);
-                    try t.convRows(b.proj, base, b.p_xc, m.conv_w, m.conv_b, rows, ms);
-                    try o.scanRows(b.proj, b.p_xc, ssm, m.a, m.d, m.dt_bias, b.sy, rows, c.projDim(), c.mamba_heads, c.mamba_head_dim, c.convDim(), c.groups, c.dt_min, c.dt_max);
-                    try t.groupRmsnorm(b.sy, m.gnorm, b.g, b.gxs, rows, c.inner(), c.groups, c.eps);
-                    try o.prefillDense(b.g, m.out_proj, b.delta, rows);
-                    delta = .dense;
-                    mj += 1;
-                },
-                .attention => {
-                    const a = blk.attn;
-                    const kc = f.cache(b.k_cache, aj);
-                    const vc = f.cache(b.v_cache, aj);
-                    try o.prefillDense(b.y, a.qkv, b.qkv, rows);
-                    try o.fill32(b.p_meta, @intCast(pos), 4);
-                    try t.kvWrite(b.qkv, kc, vc, b.p_meta, rows, at);
-                    try o.torch().copyRows(b.qkv, c.qkvDim() * 2, b.q, qd * 2, qd * 2, rows);
-                    const scale: f32 = @floatCast(std.math.pow(f64, @floatFromInt(c.head_dim), -0.5));
-                    try o.prefillAttention(b.q, kc, vc, b.att, pos, rows, c.heads, c.kv_heads, scale);
-                    try o.prefillDense(b.att, a.o, b.delta, rows);
-                    delta = .dense;
-                    aj += 1;
-                },
-                .moe => {
-                    try f.experts(blk.moe, rows, true);
-                    delta = .moe;
-                },
-            }
+        switch (f.w.blocks[i].kind) {
+            .mamba => {
+                const m = f.w.blocks[i].mamba;
+                const ssm = b.ssm + @as(u64, w.mj) * c.mamba_heads * c.mamba_head_dim * c.state * 4;
+                const base = b.conv_base + @as(u64, w.mj) * 3 * c.convDim() * 2;
+                try f.tri.convRows(b.proj, base, b.p_xc, m.conv_w, m.conv_b, w.rows, f.mshape(state.max_rows));
+                try o.scanRows(b.proj, b.p_xc, ssm, m.a, m.d, m.dt_bias, b.sy, w.rows, c.projDim(), c.mamba_heads, c.mamba_head_dim, c.convDim(), c.groups, c.dt_min, c.dt_max);
+            },
+            .attention => {
+                const kc = f.cache(b.k_cache, w.aj);
+                const vc = f.cache(b.v_cache, w.aj);
+                const qd = c.heads * c.head_dim;
+                try f.tri.kvWrite(b.qkv, kc, vc, b.p_meta, w.rows, f.ashape());
+                try o.torch().copyRows(b.qkv, c.qkvDim() * 2, b.q, qd * 2, qd * 2, w.rows);
+                const scale: f32 = @floatCast(std.math.pow(f64, @floatFromInt(c.head_dim), -0.5));
+                try o.prefillAttention(b.q, kc, vc, b.att, w.pos, w.rows, c.heads, c.kv_heads, scale);
+            },
+            .moe => {},
         }
-        try f.norm(&x, delta, f.w.norm_f, rows, false);
+    }
+
+    /// Block i after its mixer: Mamba gate norm and out projection, attention's out projection, or the experts.
+    pub fn chunkPost(f: *const Forward, w: *Walk, i: usize) !void {
+        const c = f.c;
+        const b = f.b;
+        const blk = f.w.blocks[i];
+        switch (blk.kind) {
+            .mamba => {
+                try f.tri.groupRmsnorm(b.sy, blk.mamba.gnorm, b.g, b.gxs, w.rows, c.inner(), c.groups, c.eps);
+                try f.ops.prefillDense(b.g, blk.mamba.out_proj, b.delta, w.rows);
+                w.delta = .dense;
+                w.mj += 1;
+            },
+            .attention => {
+                try f.ops.prefillDense(b.att, blk.attn.o, b.delta, w.rows);
+                w.delta = .dense;
+                w.aj += 1;
+            },
+            .moe => {
+                try f.experts(blk.moe, w.rows, true);
+                w.delta = .moe;
+            },
+        }
+    }
+
+    /// The chunk's last norm, its rows' hidden states for the MTP head, and the token after its last row.
+    pub fn chunkFinish(f: *const Forward, w: *Walk) !void {
+        const c = f.c;
+        const b = f.b;
+        const o = f.ops;
+        const rows = w.rows;
+        try f.norm(&w.x, w.delta, f.w.norm_f, rows, false);
         try o.copy(b.p_hidden, b.y, @as(usize, rows) * c.hidden * 2);
         try o.prefillDense(b.y + @as(u64, rows - 1) * c.hidden * 2, f.w.head, b.p_logits, 1);
-        try o.fill32(b.p_meta, @intCast(pos + rows - 1), 4); // sample_last: the chunk's last row is at pos + rows - 1
+        try o.fill32(b.p_meta, @intCast(w.pos + rows - 1), 4); // sample_last: the chunk's last row is at pos + rows - 1
         try f.sample(b.p_logits, 1, b.p_meta, b.p_sampled);
         if (f.dump) |d| try d.tail(f.ops, b.p_logits, b.p_sampled, 1, c.vocab);
     }

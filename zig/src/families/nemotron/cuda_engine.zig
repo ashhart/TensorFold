@@ -10,6 +10,7 @@ const Forward = @import("cuda_forward.zig").Forward;
 const Dump = @import("cuda_dump.zig").Dump;
 const Head = @import("cuda_mtp.zig").Head;
 const sampler = @import("cuda_sampler.zig");
+const segs = @import("cuda_segments.zig");
 
 /// nemotron_h.cuda.CONTEXT: prompt plus reply tokens when --context is not given, as `tensorfold serve` sizes it.
 pub const default_context = 16384;
@@ -19,6 +20,7 @@ pub const Options = struct {
     mtp: bool = true,
     graphs: bool = true,
     sampling: ?sampler.Sampling = null, // the rule the graphs compile in; null or temperature 0 decodes greedily
+    segments: usize = 1, // whole prompt chunks a call runs as staggered segments (1: one chunk at a time)
 };
 
 /// Serial rounds a host keeps queued ahead of the one it reads.
@@ -58,6 +60,8 @@ pub const Engine = struct {
     bound: *state.Seq = undefined, // the sequence the calls act on
     head: ?*Head = null,
     load_seconds: f64 = 0,
+    segments: usize = 1, // Options.segments
+    seg: ?segs.Segments = null, // their streams and scratch, made at load (or when setSegments asks for more)
 
     /// Loads the checkpoint into the Python engine's layouts and sizes the caches (the engine lives on the heap).
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, model_dir: []const u8, triton_dir: []const u8, opts: Options) !*Engine {
@@ -66,6 +70,8 @@ pub const Engine = struct {
         errdefer gpa.destroy(e);
         e.* = .{ .gpa = gpa, .io = io, .ctx = ctx, .stream = undefined, .k = undefined, .w = undefined, .b = undefined, .c = undefined, .max_len = 0, .pinned = undefined, .history = undefined };
         e.c = try Config.read(gpa, io, model_dir);
+        if (opts.segments < 1 or opts.segments > segs.MAX) return error.BadSegments;
+        e.segments = opts.segments;
         const slots = (opts.context orelse default_context) + state.max_rows;
         e.max_len = (slots + state.chunk_keys - 1) / state.chunk_keys * state.chunk_keys;
         e.stream = try cuda.Stream.init(ctx.d, true);
@@ -81,9 +87,11 @@ pub const Engine = struct {
         errdefer e.w.deinit();
         e.b = try state.Buffers.init(ctx.d, e.c, e.max_len, e.nch);
         errdefer e.b.deinit();
+        if (e.segments > 1) e.seg = try segs.Segments.init(e, e.segments);
+        errdefer if (e.seg) |*s| s.deinit();
         e.own = state.Seq.view(&e.b);
         e.bound = &e.own;
-        e.pinned = try cuda.HostBuffer.alloc(ctx.d, (pin_prompt + state.prefill_rows) * 4);
+        e.pinned = try cuda.HostBuffer.alloc(ctx.d, (pin_prompt + segs.MAX * state.prefill_rows) * 4);
         errdefer e.pinned.free();
         e.history = try cuda.HostBuffer.allocMapped(ctx.d, (@as(usize, e.max_len) + state.max_rows) * 4);
         errdefer e.history.free();
@@ -135,6 +143,7 @@ pub const Engine = struct {
         e.stream.synchronize() catch {};
         if (e.serial) |*g| g.deinit();
         for (&e.windows) |*g| if (g.*) |*x| x.deinit();
+        if (e.seg) |*s| s.deinit();
         for (&e.done) |*ev| ev.deinit();
         e.copied.deinit();
         e.sampled_ready.deinit();
@@ -211,18 +220,29 @@ pub const Engine = struct {
         e.prev_keep = 0;
     }
 
-    /// decode.prefill: a fresh state, the prompt in chunks of 2048 rows (each absorbed by the head); the first token.
+    /// decode.prefill: a fresh state, the prompt in 2048-row chunks (absorbed by the head, in segments if set); the token.
     pub fn prefill(e: *Engine, prompt: []const u32, dump: ?*Dump, head: ?*Head) !u32 {
         if (prompt.len == 0) return error.EmptyPrompt;
         if (prompt.len + state.max_rows > e.max_len) return error.ContextFull;
         try e.reset();
         if (head) |h| try h.reset();
+        if (e.segments > 1 and dump == null and prompt.len > state.prefill_rows) {
+            try segs.prefill(e, try e.segmentSet(), prompt, head, e.segments);
+        } else try e.serialChunks(prompt, dump, head);
+        const host = e.pinned.slice(u32)[pin_sampled..][0..1];
+        try e.ops().download(std.mem.sliceAsBytes(host), e.b.p_sampled);
+        try e.stream.synchronize();
+        return host[0];
+    }
+
+    /// The prompt's chunks one after another on the engine's stream.
+    fn serialChunks(e: *Engine, prompt: []const u32, dump: ?*Dump, head: ?*Head) !void {
         const f = e.forward(dump);
         var s: usize = 0;
         while (s < prompt.len) : (s += state.prefill_rows) {
             const chunk = prompt[s..@min(prompt.len, s + state.prefill_rows)];
             try e.copied.synchronize();
-            const host = e.pinned.slice(u32)[pin_prompt..][0..chunk.len];
+            const host = e.promptHost(chunk.len);
             @memcpy(host, chunk);
             try e.ops().upload(e.b.p_ids, std.mem.sliceAsBytes(host));
             try e.copied.record(e.stream);
@@ -231,10 +251,30 @@ pub const Engine = struct {
             const known = @min(chunk.len, prompt.len - 1 - s);
             if (head) |h| if (known > 0) try h.absorb(e.b.p_hidden, prompt[s + 1 ..][0..known]);
         }
-        const host = e.pinned.slice(u32)[pin_sampled..][0..1];
-        try e.ops().download(std.mem.sliceAsBytes(host), e.b.p_sampled);
-        try e.stream.synchronize();
-        return host[0];
+    }
+
+    /// Whole chunks a prompt call runs as staggered segments from here on; their streams and scratch are made now.
+    pub fn setSegments(e: *Engine, n: usize) !void {
+        if (n < 1 or n > segs.MAX) return error.BadSegments;
+        e.segments = n;
+        if (n > 1) _ = try e.segmentSet();
+    }
+
+    /// Pinned words for `n` prompt ids on their way up (free once `copied` has completed).
+    pub fn promptHost(e: *Engine, n: usize) []u32 {
+        return e.pinned.slice(u32)[pin_prompt..][0..n];
+    }
+
+    /// The segments' streams and scratch for calls of e.segments, remade when a call needs more of them.
+    fn segmentSet(e: *Engine) !*segs.Segments {
+        if (e.seg) |*s| {
+            if (s.n >= e.segments) return s;
+            try e.stream.synchronize();
+            s.deinit();
+            e.seg = null;
+        }
+        e.seg = try segs.Segments.init(e, e.segments);
+        return &e.seg.?;
     }
 
     /// Engine.forward: a window of `rows` rows at pos whose first `ids.len` inputs come from the host (drafts are on the device).

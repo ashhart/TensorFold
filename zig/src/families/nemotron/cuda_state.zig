@@ -36,6 +36,31 @@ fn seqSizes(c: Config, max_len: usize) [seq_fields.len]usize {
     return .{ kv, kv, nm * c.mamba_heads * c.mamba_head_dim * c.state * 4, nm * 3 * cd * 2, nm * 2 * W * cd * 2, nm * 2 * W * cd * 2, nm * 2 * W * c.mamba_heads * 4, 16, W * 4, W * c.hidden * 2, W * 4, 8, 32 };
 }
 
+const scratch_count = 38;
+
+/// Scratch windows and chunks share on one stream: window logits, chunk io, activations, expert plan, keyed sampler.
+fn scratchSizes(c: Config, nch: usize) [scratch_count]usize {
+    const R: usize = prefill_rows;
+    const W: usize = max_rows;
+    const D: usize = c.hidden;
+    const ns: usize = c.slots();
+    const qd: usize = c.heads * c.head_dim;
+    const cd: usize = c.convDim();
+    const xd: usize = c.inner();
+    const pairs = R * ns;
+    const items = kern.maxItems(@intCast(pairs), c.experts + 2, 16);
+    return .{
+        W * c.vocab * 2,  16,                   R * 4,              R * D * 2,       c.vocab * 2,    16,
+        R * D * 2,        R * D * 2,            R * D * 2,          R * D * 2,       R * D / 64 * 4, R * D * 2,
+        R * c.projDim() * 2, R * cd * 2,         R * xd * 2,         R * xd * 2,      R * xd / 64 * 4, R * c.qkvDim() * 2,
+        R * qd * 2,       R * qd * 2,           R * qd / 64 * 4,    W * nch * qd * 4, W * nch * c.heads * 4,
+        W * nch * c.heads * 4, 6 * R * c.experts * 4, R * ns * 4,  R * ns * 4,      pairs * 4, items * 12,
+        8,                pairs * 4,            (pairs + 1023) / 1024 * (c.experts + 2) * 4, pairs * c.expert_width * 2,
+        pairs * D * 4,    W * c.vocab * 4,      W * sampler.max_candidates * 4, W * sampler.max_candidates * 8,
+        torch_ops.topkScratchBytes(W, c.vocab),
+    };
+}
+
 /// One sequence: its own buffers (seq_fields, then its MTP head's) and where it stands while another is bound.
 pub const Seq = struct {
     arena: ?Arena, // null: the engine's own buffers
@@ -133,45 +158,47 @@ pub const Buffers = struct {
     topk: u64,
 
     /// Sizes every buffer for `max_len` cache rows and `nch` attention chunk partials a row; the own sequence's first.
-    pub fn init(d: *const cuda.Driver, c: Config, max_len: usize, nch_: usize) !Buffers {
-        const R: usize = prefill_rows;
-        const W: usize = max_rows;
-        const D: usize = c.hidden;
-        const ns: usize = c.slots();
-        const nch: usize = nch_;
-        const qd: usize = c.heads * c.head_dim;
-        const cd: usize = c.convDim();
-        const xd: usize = c.inner();
-        const pairs = R * ns;
-        const items = kern.maxItems(@intCast(pairs), c.experts + 2, 16);
+    pub fn init(d: *const cuda.Driver, c: Config, max_len: usize, nch: usize) !Buffers {
         const own = seqSizes(c, max_len);
-        const scratch = [_]usize{
-            W * c.vocab * 2,  16,                   R * 4,              R * D * 2,       c.vocab * 2,    16,
-            R * D * 2,        R * D * 2,            R * D * 2,          R * D * 2,       R * D / 64 * 4, R * D * 2,
-            R * c.projDim() * 2, R * cd * 2,         R * xd * 2,         R * xd * 2,      R * xd / 64 * 4, R * c.qkvDim() * 2,
-            R * qd * 2,       R * qd * 2,           R * qd / 64 * 4,    W * nch * qd * 4, W * nch * c.heads * 4,
-            W * nch * c.heads * 4, 6 * R * c.experts * 4, R * ns * 4,  R * ns * 4,      pairs * 4, items * 12,
-            8,                pairs * 4,            (pairs + 1023) / 1024 * (c.experts + 2) * 4, pairs * c.expert_width * 2,
-            pairs * D * 4,    W * c.vocab * 4,      W * sampler.max_candidates * 4, W * sampler.max_candidates * 8,
-            torch_ops.topkScratchBytes(W, c.vocab),
-        };
+        const scratch = scratchSizes(c, nch);
         var total: usize = 0;
-        for (own) |s| total += s + 256;
-        for (scratch) |s| total += s + 256;
+        for (own) |n| total += n + 256;
+        for (scratch) |n| total += n + 256;
         var a: Arena = .{ .buf = try cuda.DeviceBuffer.alloc(d, total) };
         errdefer a.buf.free();
         var b: Buffers = undefined;
         b.state_bytes = own[0..7].*;
         inline for (seq_fields, own) |name, n| @field(b, name) = a.take(n);
-        const fields = [_]*u64{
+        for (b.scratchPtrs(), scratch) |f, n| f.* = a.take(n);
+        b.arena = a;
+        return b;
+    }
+
+    /// Its own scratch for another prompt segment, sharing `b`'s caches and state (follow); deinit frees the scratch.
+    pub fn sibling(b: *const Buffers, d: *const cuda.Driver, c: Config, nch: usize) !Buffers {
+        const scratch = scratchSizes(c, nch);
+        var total: usize = 0;
+        for (scratch) |n| total += n + 256;
+        var s: Buffers = b.*;
+        s.arena = .{ .buf = try cuda.DeviceBuffer.alloc(d, total) };
+        for (s.scratchPtrs(), scratch) |f, n| f.* = s.arena.take(n);
+        return s;
+    }
+
+    /// A sibling takes `b`'s sequence buffers (they move when the engine binds another sequence).
+    pub fn follow(s: *Buffers, b: *const Buffers) void {
+        inline for (seq_fields) |name| @field(s, name) = @field(b, name);
+        s.state_bytes = b.state_bytes;
+    }
+
+    /// Every scratch field, in scratchSizes' order.
+    fn scratchPtrs(b: *Buffers) [scratch_count]*u64 {
+        return .{
             &b.logits, &b.p_meta, &b.p_ids, &b.p_hidden, &b.p_logits, &b.p_sampled, &b.emb,   &b.h[0],  &b.h[1],  &b.y,
             &b.xs,     &b.delta,  &b.proj,  &b.p_xc,     &b.sy,       &b.g,         &b.gxs,   &b.qkv,   &b.q,     &b.att,
             &b.axs,    &b.po,     &b.pm,    &b.pl,       &b.part,     &b.pick,      &b.wts,   &b.plan.members, &b.plan.items,
             &b.plan.counts, &b.plan.rank, &b.plan.hist, &b.act, &b.ymoe, &b.flog, &b.vals, &b.cols, &b.topk,
         };
-        for (fields, scratch) |f, n| f.* = a.take(n);
-        b.arena = a;
-        return b;
     }
 
     pub fn deinit(b: *Buffers) void {
@@ -180,7 +207,7 @@ pub const Buffers = struct {
     }
 
     /// The caches and recurrent state as one device range (they are the arena's first buffers).
-    fn stateBytes(b: *const Buffers) usize {
+    pub fn stateBytes(b: *const Buffers) usize {
         return b.dt + b.state_bytes[6] - b.k_cache;
     }
 

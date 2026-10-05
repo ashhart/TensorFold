@@ -6,6 +6,7 @@ pub const weights = @import("cuda_weights.zig");
 pub const kernels = @import("cuda_kernels.zig");
 pub const state = @import("cuda_state.zig");
 pub const Forward = @import("cuda_forward.zig").Forward;
+pub const Walk = @import("cuda_forward.zig").Walk;
 pub const Dump = @import("cuda_dump.zig").Dump;
 pub const engine = @import("cuda_engine.zig");
 pub const Engine = engine.Engine;

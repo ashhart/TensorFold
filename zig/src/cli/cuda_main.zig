@@ -7,12 +7,17 @@ const core = @import("core");
 const lanes = @import("lanes");
 const checks = @import("cuda_checks.zig");
 const lanes_cli = @import("cuda_lanes.zig");
+const segments_cli = @import("cuda_segments.zig");
 const decode = nemotron.decode;
 
 const usage =
     \\usage: tensorfold run MODEL --tokens ID,ID,... [--max-tokens N] [--no-drafts] [--report PATH] [--kernels DIR]
     \\         [--temperature T] [--top-k K] [--top-p P] [--min-p M] [--seed S]   (temperature 0: greedy)
     \\         [--context N] [--ignore-eos] [--eager] [--costs MS1,...,MS16,LEVEL]
+    \\         [--tokens-file PATH] [--segments N]   (N whole 2048-row prompt chunks a call as staggered segments,
+    \\         1-4; default TF_CUDA_SEGMENTS, else 1)
+    \\       tensorfold segments MODEL IDS_FILE... [--counts 1,2,3,4] [--repeat N] [--max-tokens N] [--profile]
+    \\                (each prompt prefilled at every segment count, interleaved: state hashes, prompt and decode speed)
     \\       tensorfold check-weights MODEL DIGESTS.json [--kernels DIR]
     \\       tensorfold teacher MODEL TEACHER.json [--dump DIR] [--kernels DIR]
     \\       tensorfold prefill MODEL PROMPTS.json NAME [--dump DIR] [--kernels DIR]
@@ -72,6 +77,21 @@ pub fn main(init: std.process.Init) !u8 {
         } else if (std.mem.eql(u8, a, "--costs")) {
             opts.costs = try parseFloats(gpa, value);
             i += 1;
+        } else if (std.mem.eql(u8, a, "--tokens-file")) {
+            gpa.free(opts.tokens);
+            opts.tokens = try segments_cli.readIds(gpa, init.io, value);
+            i += 1;
+        } else if (std.mem.eql(u8, a, "--segments")) {
+            opts.segments = try std.fmt.parseInt(usize, value, 10);
+            i += 1;
+        } else if (std.mem.eql(u8, a, "--counts")) {
+            opts.counts = try parseCounts(value);
+            i += 1;
+        } else if (std.mem.eql(u8, a, "--repeat")) {
+            opts.repeat = try std.fmt.parseInt(usize, value, 10);
+            i += 1;
+        } else if (std.mem.eql(u8, a, "--profile")) {
+            opts.profile = true;
         } else if (std.mem.eql(u8, a, "--context")) {
             opts.context = try std.fmt.parseInt(u32, value, 10);
             i += 1;
@@ -97,17 +117,25 @@ pub fn main(init: std.process.Init) !u8 {
     var ctx = try cuda.Context.init(&driver, 0);
     defer ctx.deinit();
     const cmd = args[1];
-    const decoding = std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "lanes");
+    const bench = std.mem.eql(u8, cmd, "segments");
+    const decoding = std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "lanes") or bench;
     const mtp = std.mem.eql(u8, cmd, "check-weights") or std.mem.eql(u8, cmd, "rounds") or std.mem.eql(u8, cmd, "check-draws") or (decoding and opts.drafts);
-    const graphs = opts.graphs and (std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "rounds"));
+    const graphs = opts.graphs and (std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "rounds") or bench);
     const sampling: ?lanes.Sampling = if (std.mem.eql(u8, cmd, "run") and opts.sampling.temperature > 0) opts.sampling else null;
-    const engine = try nemotron.Engine.init(gpa, init.io, &ctx, opts.model, kernels, .{ .context = opts.context, .mtp = mtp, .graphs = graphs, .sampling = sampling });
+    const segments = opts.segments orelse if (init.environ_map.get("TF_CUDA_SEGMENTS")) |v| try std.fmt.parseInt(usize, v, 10) else 1;
+    const engine = try nemotron.Engine.init(gpa, init.io, &ctx, opts.model, kernels, .{ .context = opts.context, .mtp = mtp, .graphs = graphs, .sampling = sampling, .segments = segments });
     defer engine.deinit();
     const rest = positional.items;
     if (std.mem.eql(u8, cmd, "run")) return run(gpa, init.io, engine, opts);
     if (std.mem.eql(u8, cmd, "lanes") and rest.len == 1) {
         const s: ?lanes.Sampling = if (opts.sampling.temperature > 0) opts.sampling else null;
         return lanes_cli.run(gpa, init.io, engine, opts.model, .{ .prompts = rest[0], .max_tokens = @intCast(opts.max_tokens), .sampling = s, .drafts = opts.drafts, .solo = opts.solo, .report = opts.report });
+    }
+    if (bench and rest.len >= 1) {
+        var drafter: ?nemotron.Drafter = if (opts.drafts) try nemotron.Drafter.init(gpa, init.io, engine, opts.model, opts.graphs, opts.costs) else null;
+        defer if (drafter) |*d| d.deinit();
+        const counts = opts.counts.items[0..opts.counts.len];
+        return segments_cli.run(gpa, init.io, engine, if (drafter) |*d| d else null, .{ .files = rest, .counts = counts, .repeat = opts.repeat, .max_tokens = opts.max_tokens, .stop_eos = opts.stop_eos, .profile = opts.profile, .report = opts.report });
     }
     if (std.mem.eql(u8, cmd, "check-weights") and rest.len == 1) return checks.weights(gpa, init.io, engine, rest[0]);
     if (std.mem.eql(u8, cmd, "teacher") and rest.len == 1) return checks.teacher(gpa, init.io, engine, rest[0], opts.dump);
@@ -132,7 +160,25 @@ const Options = struct {
     graphs: bool = true,
     solo: bool = false,
     costs: ?[]f64 = null,
+    segments: ?usize = null,
+    counts: Counts = .{ .items = .{ 1, 2, 3, 4 }, .len = 4 },
+    repeat: usize = 3,
+    profile: bool = false,
 };
+
+/// Segment counts for `segments`, one to four of them.
+const Counts = struct { items: [4]usize, len: usize };
+
+fn parseCounts(text: []const u8) !Counts {
+    var c: Counts = .{ .items = undefined, .len = 0 };
+    var it = std.mem.tokenizeAny(u8, text, ", ");
+    while (it.next()) |t| {
+        if (c.len == c.items.len) return error.TooManyCounts;
+        c.items[c.len] = try std.fmt.parseInt(usize, t, 10);
+        c.len += 1;
+    }
+    return c;
+}
 
 fn parseFloats(gpa: std.mem.Allocator, text: []const u8) ![]f64 {
     var out: std.ArrayList(f64) = .empty;
@@ -169,7 +215,7 @@ fn run(gpa: std.mem.Allocator, io: std.Io, e: *nemotron.Engine, o: Options) !u8 
     const hex = std.fmt.bytesToHex(digest, .lower);
     const steps = @max(1, res.tokens.len - 1);
     const ms = res.decode_seconds * 1e3 / @as(f64, @floatFromInt(steps));
-    std.debug.print("tokens {d} sha {s} prefill {d:.4}s decode {d:.4}s {d:.3} ms/token rounds {d} accepted {d}\n", .{ res.tokens.len, hex[0..12], res.prefill_seconds, res.decode_seconds, ms, res.rounds, res.accepted });
+    std.debug.print("tokens {d} sha {s} prefill {d:.4}s decode {d:.4}s {d:.3} ms/token rounds {d} accepted {d} segments {d}\n", .{ res.tokens.len, hex[0..12], res.prefill_seconds, res.decode_seconds, ms, res.rounds, res.accepted, e.segments });
     if (o.report) |path| {
         const report = .{
             .engine = "zig-cuda",
@@ -187,6 +233,7 @@ fn run(gpa: std.mem.Allocator, io: std.Io, e: *nemotron.Engine, o: Options) !u8 
             .graphs = o.graphs,
             .load_seconds = e.load_seconds,
             .max_len = e.max_len,
+            .segments = e.segments,
         };
         const json = try std.json.Stringify.valueAlloc(gpa, report, .{});
         defer gpa.free(json);
