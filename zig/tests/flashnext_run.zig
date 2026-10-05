@@ -1589,6 +1589,22 @@ const Model = struct {
     }
 };
 
+/// Drafts a round from recent landing: 6 while drafts land (code-like text), 3 otherwise (prose).
+const DepthRule = struct {
+    rate: f64 = 0.6, // moving average of drafts landed over drafts offered
+    depth: usize = 3,
+
+    fn pick(self: *const DepthRule) usize {
+        return self.depth;
+    }
+
+    fn update(self: *DepthRule, depth: usize, landed: usize) void {
+        self.rate = 0.7 * self.rate + 0.3 * @as(f64, @floatFromInt(landed)) / @as(f64, @floatFromInt(depth));
+        if (self.depth == 3 and self.rate > 0.8) self.depth = 6;
+        if (self.depth == 6 and self.rate < 0.65) self.depth = 3;
+    }
+};
+
 /// Copy lanes: the longest suffix of `hist` (`min`..8 tokens) seen earlier; the tokens after its latest earlier
 /// occurrence go into `out`. Returns how many (0 when nothing matches).
 fn copyDrafts(hist: []const u32, min: usize, out: []u32) usize {
@@ -2214,8 +2230,8 @@ pub fn main(init: std.process.Init) !void {
     // 6. one command buffer a round: the head absorbs the kept rows and chains its drafts into the next window's
     //    token slots on the GPU, the window hashes its n-grams on the GPU, and the host reads the picks once
     const wids: Buf = .{ .b = try r.buffer(64) };
-    const adapt_story = [_][3]usize{ .{ 3, 3, 0 }, .{ 1, 4, 1 }, .{ 1, 5, 1 }, .{ 2, 5, 1 }, .{ 2, 5, 2 }, .{ 1, 6, 2 } };
-    const adapt_own = [_][3]usize{ .{ 3, 3, 0 }, .{ 4, 4, 0 }, .{ 5, 5, 0 }, .{ 6, 6, 0 }, .{ 7, 7, 0 }, .{ 2, 7, 1 }, .{ 2, 7, 2 }, .{ 3, 7, 2 } };
+    const adapt_story = [_][3]usize{ .{ 3, 3, 0 }, .{ 0, 7, 9 } };
+    const adapt_own = [_][3]usize{ .{ 3, 3, 0 }, .{ 6, 6, 0 }, .{ 0, 7, 9 } };
     const adapt: []const [3]usize = if (own_prompt) &adapt_own else &adapt_story;
     const copy_min: usize = if (std.c.getenv("FZ_COPY_MIN")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 3;
     var hist: std.ArrayList(u32) = .empty;
@@ -2226,22 +2242,33 @@ pub fn main(init: std.process.Init) !void {
         const use_copy = r.copy and run6 == 1;
         var copy_rounds: usize = 0;
         var copy_landed: usize = 0;
-        var depth: usize = cfg_a[0];
+        const ruled = cfg_a[2] == 9;
+        var rule: DepthRule = .{};
+        var depth: usize = if (ruled) rule.pick() else cfg_a[0];
         m.reset();
         m.mtp.pos = 0;
         m.mtp.drafted = 0;
         const all = try r.buffer(prompt.len * WIDE * 2);
         var nexts: std.ArrayList(u32) = .empty;
-        for (prompt, 0..) |x, i| {
-            const tok: u32 = @intCast(x.integer);
-            try m.window(&.{tok}, &pick);
-            m.keepRows(&.{tok}, 1);
-            @memcpy(all.contents()[i * WIDE * 2 .. (i + 1) * WIDE * 2], m.last.b.contents()[0 .. WIDE * 2]);
-            if (i > 0) try nexts.append(gpa, tok);
+        const p0 = mtl.clock.seconds();
+        var at_p: usize = 0;
+        var last_n: usize = 1;
+        while (at_p < prompt.len) { // the prompt in windows of up to MAXR rows (each row's bits equal a one-row step)
+            const n: usize = @min(MAXR, prompt.len - at_p);
+            var toks: [MAXR]u32 = undefined;
+            for (0..n) |i| toks[i] = @intCast(prompt[at_p + i].integer);
+            try m.window(toks[0..n], &pick);
+            m.keepRows(toks[0..n], n);
+            @memcpy(all.contents()[at_p * WIDE * 2 .. (at_p + n) * WIDE * 2], m.last.b.contents()[m.last.off .. m.last.off + n * WIDE * 2]);
+            for (0..n) |i| if (at_p + i > 0) try nexts.append(gpa, toks[i]);
+            at_p += n;
+            last_n = n;
         }
-        try nexts.append(gpa, pick[0]);
+        const prefill_s = mtl.clock.seconds() - p0;
+        const first = pick[last_n - 1];
+        try nexts.append(gpa, first);
         var out: std.ArrayList(u32) = .empty;
-        try out.append(gpa, pick[0]);
+        try out.append(gpa, first);
         const w = wids.b.slice(u32, 16);
         var absorb_rows: []const u32 = nexts.items;
         var absorb_from: Buf = .{ .b = all };
@@ -2318,13 +2345,17 @@ pub fn main(init: std.process.Init) !void {
             @memcpy(pick[0..keep], picks[0..keep]);
             absorb_rows = pick[0..keep];
             absorb_from = m.last;
-            if (cfg_a[0] != cfg_a[1]) depth = @max(cfg_a[0], @min(cfg_a[1], keep - 1 + cfg_a[2]));
+            if (ruled) {
+                rule.update(d, keep - 1);
+                depth = rule.pick();
+            } else if (cfg_a[0] != cfg_a[1]) depth = @max(cfg_a[0], @min(cfg_a[1], keep - 1 + cfg_a[2]));
         }
         const wall = mtl.clock.seconds() - s0;
         var eq: usize = 0;
         while (eq < want.len and out.items[eq] == (if (r.xnew) ref_tokens[eq] else @as(u32, @intCast(want[eq].integer)))) eq += 1;
         const made: f64 = @floatFromInt(out.items.len - 1);
         std.debug.print("one buffer a round, depth {d}-{d} (+{d}){s}: {d}/{d} tokens equal; {d:.2} tokens a round, {d:.2} drafts landing; {d:.1} tok/s (GPU busy {d:.0}%)\n", .{ cfg_a[0], cfg_a[1], cfg_a[2], if (use_copy) " + copy lanes" else "", eq, want.len, made / @as(f64, @floatFromInt(n_rounds)), @as(f64, @floatFromInt(landed)) / @as(f64, @floatFromInt(n_rounds)), made / wall, 100 * m.gpu_seconds / wall });
+        std.debug.print("  prompt {d} tokens in {d:.2} s ({d:.0} tok/s){s}\n", .{ prompt.len, prefill_s, @as(f64, @floatFromInt(prompt.len)) / prefill_s, if (ruled) ", drafts chosen each round by the depth rule" else "" });
         if (use_copy) std.debug.print("  copy rounds {d} of {d}, {d:.2} copied lanes landing a copy round\n", .{ copy_rounds, n_rounds, @as(f64, @floatFromInt(copy_landed)) / @as(f64, @floatFromInt(@max(copy_rounds, 1))) });
         if (eq < want.len) bad += 1;
     }
