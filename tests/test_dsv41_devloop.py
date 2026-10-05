@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -120,6 +121,36 @@ def test_baseline_judges_tf_compare_on_the_same_documents_and_warns_on_slow_deco
     assert same.status == "PASS" and "1 documents" in same.summary
     assert worse.status == "FAIL" and "32768/golden NLL 1.0000->1.0200" in worse.summary
     assert slow.status == "WARN" and fine.status == "INFO"
+
+
+def test_tf_documents_base_keeps_the_earlier_set_and_wide_adds_windows_and_books():
+    R = tool("dsv41_serial_run")
+    golden, prose, code = list(range(1000, 1040)), list(range(2000, 2030)), list(range(3000, 3090))
+    books = [list(range(5000, 5100)), list(range(6000, 6064))]
+    short = R.tf_documents(16, golden, prose, code, books)
+    assert list(short) == ["golden", "md", "code0", "code1"]
+    assert short["golden"] == golden[:16] and short["md"] == prose[:16] and short["code1"] == code[30:46]
+    longer = R.tf_documents(48, golden, prose, code, books)                 # past the golden: no golden, 3 code
+    assert list(longer) == ["md", "code0", "code1", "code2"]
+    assert longer["md"] == prose + golden[:18] and longer["code2"] == code[60:] + code[:18]
+    wide = R.tf_documents(48, golden, prose, code, books, "wide")
+    assert list(wide) == ["md", "md1", "md2", "code0", "code1", "code2", "prose0", "prose1"]
+    assert wide["md1"] == prose[10:] + prose[:10] + golden[:18] and wide["md2"] == prose[20:] + prose[:20] + golden[:18]
+    assert wide["prose1"] == books[1][:48] and all(len(d) == 48 for d in wide.values())
+    assert {k: v for k, v in wide.items() if k in longer} == longer          # base documents unchanged in wide
+    assert len(R.tf_documents(16, golden, prose, code, books, "wide")) == 9
+    with pytest.raises(ValueError, match="text 1 has 64 tokens"):
+        R.tf_documents(80, golden, prose, code, books, "wide")
+    text = "header\n*** START OF THE PROJECT GUTENBERG EBOOK X ***\n\nChapter 1\nIt was.\n*** END OF THE PROJECT\nlicense"
+    assert R.gutenberg_body(text) == "Chapter 1\nIt was.\n"
+    assert R.gutenberg_body("plain text") == "plain text\n"
+    assert R.gutenberg_body(text.replace("\n", "\r\n")) == "Chapter 1\nIt was.\n"
+    ap = R.build_parser()
+    t = SU.BY_NAME["tf-compare"]
+    assert R.match_test(ap, ap.parse_args(BASE + t.argv()), {}) == "tf-compare"
+    a = ap.parse_args(BASE + t.argv() + ["--tf-docs", "wide", "--tf-prose", "a.txt,b.txt"])
+    assert (a.tf_docs, a.tf_prose) == ("wide", "a.txt,b.txt")
+    assert R.match_test(ap, a, {}) is None                                  # another document set: not the suite's
 
 
 def test_prove_compares_fingerprints(tmp_path):
@@ -382,3 +413,12 @@ def test_prove_fails_a_fresh_run_without_a_result():
     r = SU.Result("multi-test", "PASS", {"a": 1})
     lines, ok = SU.prove(SU.line(r), [SU.line(r), "Traceback (most recent call last):\n"])
     assert not ok and any("no [result] line" in s for s in lines)
+
+
+def test_tf_compare_clusters_the_standard_error_by_document():
+    C = tool("dsv41_tf_compare")
+    mean, se = C.clustered([[1.0, 1.0], [3.0, 3.0]])
+    assert mean == 2.0 and math.isclose(se, 1.0)                 # two documents: the SE of their two means
+    mean, se = C.clustered([[0.0, 2.0, 0.0, 2.0], [0.0, 2.0, 0.0, 2.0]])
+    assert mean == 1.0 and se == 0.0                             # identical documents: no spread between them
+    assert math.isnan(C.clustered([[1.0, 2.0]])[1])

@@ -98,6 +98,11 @@ def build_parser() -> argparse.ArgumentParser:
                     "NLL / top-k to --out (tools/dsv41_tf_compare.py compares two runs)")
     ap.add_argument("--tf-score", type=int, default=None, help="--tf-compare: positions scored a document (default: "
                     "one prompt chunk, serial.MAX_ROWS)")
+    ap.add_argument("--tf-docs", choices=("base", "wide"), default="base", help="--tf-compare: the documents of each "
+                    "length: base (the golden, markdown, two or three code windows) or wide (base, two more markdown "
+                    "windows, all three code windows and the first L tokens of each --tf-prose text; tf_documents)")
+    ap.add_argument("--tf-prose", default="", help="--tf-compare --tf-docs wide: comma list of plain-text files "
+                    "(rank 0 reads them; a Project Gutenberg header / footer is cut)")
     ap.add_argument("--tf-rows", type=int, default=0, help="--tf-compare: score them in calls of this many rows (<= 32: "
                     "the decode / verify attention path) instead of one prompt chunk")
     ap.add_argument("--needle", default="", help="comma lengths: a magic number at --needle-depths of repo code filler, "
@@ -385,6 +390,43 @@ def mode_views_test(eng, nccl, args, env) -> SU.Result:
                      (f", differ {differ}" if differ else ""))
 
 
+def gutenberg_body(text: str) -> str:
+    """A Project Gutenberg file's text between its START and END markers (the whole text when it has none), with
+    Unix line ends."""
+
+    text = text.replace("\r\n", "\n")
+    a, b = text.find("*** START OF"), text.find("*** END OF")
+    if a >= 0:
+        text = text[text.find("\n", a) + 1:b if b > a else len(text)]
+    return text.strip() + "\n"
+
+
+def tf_documents(L: int, golden: list[int], prose: list[int], code: list[int], books: list[list[int]],
+                 kind: str = "base") -> dict[str, list[int]]:
+    """--tf-compare's documents of length L, by name. base: the golden (when it is that long), the markdown
+    corpus then the golden, and code windows starting at 0 and 1/3 of the code corpus (and 2/3 when the golden is
+    too short): the documents every earlier tf-compare result was taken on. wide adds markdown windows starting at
+    1/3 and 2/3 of the markdown corpus (wrapping to its start, then the golden), all three code windows, and the first L tokens of each book (prose{k})."""
+
+    docs = {}
+    if L <= len(golden):
+        docs["golden"] = golden[:L]
+    docs["md"] = (prose + golden)[:L]
+    if kind == "wide":
+        for j in (1, 2):
+            a = j * len(prose) // 3
+            docs[f"md{j}"] = (prose[a:] + prose[:a] + golden)[:L]
+    for j in range(3 if L > len(golden) or kind == "wide" else 2):
+        a = j * len(code) // 3
+        docs[f"code{j}"] = (code[a:] + code)[:L]
+    if kind == "wide":
+        for k, b in enumerate(books):
+            if len(b) < L:
+                raise ValueError(f"--tf-prose text {k} has {len(b)} tokens, fewer than {L}")
+            docs[f"prose{k}"] = b[:L]
+    return docs
+
+
 def mode_quality(eng, nccl, args, env) -> SU.Result:
     """Quality across KV formats: documents both ranks build (--tf-compare, --needle)."""
 
@@ -414,6 +456,8 @@ def mode_quality(eng, nccl, args, env) -> SU.Result:
     code = from_rank0(corpus("src/**/*.py") if args.rank == 0 else [])
     prose = from_rank0(corpus("**/*.md") if args.rank == 0 else [])
     golden = golden_ids()
+    books = [from_rank0(tok.encode(gutenberg_body(Path(f).read_text(errors="ignore")), add_special_tokens=False).ids
+                        if args.rank == 0 else []) for f in args.tf_prose.split(",") if f]
 
     def doc_hash(ids):
         return int.from_bytes(hashlib.sha256(json.dumps(ids).encode()).digest()[:7], "little")
@@ -432,13 +476,7 @@ def mode_quality(eng, nccl, args, env) -> SU.Result:
         print(f"[quality] repo code {len(code)} tokens, markdown {len(prose)}, golden {len(golden)}", flush=True)
     with torch.no_grad():
         for L in [int(v) for v in args.tf_compare.split(",") if v]:
-            docs = {}
-            if L <= len(golden):
-                docs["golden"] = golden[:L]
-            docs["md"] = (prose + golden)[:L]
-            for j in range(3 if L > len(golden) else 2):
-                a = j * len(code) // 3
-                docs[f"code{j}"] = (code[a:] + code)[:L]
+            docs = tf_documents(L, golden, prose, code, books, args.tf_docs)
             for name, doc in docs.items():
                 assert len(doc) == L, (name, len(doc))
                 same_on_both(doc)

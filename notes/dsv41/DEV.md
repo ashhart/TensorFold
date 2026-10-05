@@ -121,6 +121,37 @@ Three layers, defaults keeping >= 3 GiB available:
 (2026-10-05: tf-dev's `memory.current` 6.9 GB, `anon` 2.2 GB, while its rank held 108,893 MiB per nvidia-smi), so it
 would bound only host-side memory and could OOM-kill a run on page cache.
 
+## Quality across KV formats
+
+Teacher-forced over a wider document set (`--tf-docs wide`: the base set plus markdown windows at 1/3 and 2/3 of the
+markdown corpus, all three code windows, and the first L tokens of each `--tf-prose` text; `tf_documents` in
+`dsv41_serial_run.py`), once per format, each in prompt chunks and in 32-row calls (`--tf-rows 32`: the decode / verify
+attention and the shared-tile indexer):
+
+    for kv in fp4 fp8 bf16; do for rows in "" "--tf-rows 32"; do
+      PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True TF_MEM_SLACK_GIB=4 TF_DSV41_KV=$kv tools/dsv41_run2.sh \
+        --cap 70000 --slots 1 --graph --tf-compare 8192,32768,65536 --tf-docs wide \
+        --tf-prose /tf/out/prose/pg155.txt,/tf/out/prose/pg145.txt $rows --out /tf/out/tf-$kv${rows:+-rows}.pt
+    done; done
+    python3 tools/dsv41_tf_compare.py tf-bf16.pt tf-fp4.pt tf-fp8.pt    # per document, clustered SEs per length
+
+The prose texts are Project Gutenberg #155 (The Moonstone) and #145 (Middlemarch), copied to `~/tensorfold/out/prose/`
+on aiai (the header and footer are cut). 26 documents (9 at 8K and 32K, 8 at 64K), 2,047 scored positions each.
+Without `expandable_segments` the prepared-weights load leaves ~4.7 GiB reserved but unusable, and a 64K document
+then either OOMs under a lower allocator cap or crosses the 3 GiB floor (the watcher kills it); the server sets it.
+
+Paired MMLU against the compose server (`tools/dsv41_mmlu.py`: 40 seeded questions from each of the 57 subjects, 0-shot,
+thinking off, greedy, the first standalone A-D letter; exact McNemar on the discordant pairs):
+
+    python3 tools/dsv41_mmlu.py sample --test mmlu_test.jsonl --per-subject 40 --seed 0 --out sample.jsonl
+    TF_API_KEY=... python3 tools/dsv41_mmlu.py run --sample sample.jsonl --out fp4.jsonl     # then the other format
+    python3 tools/dsv41_mmlu.py compare fp8.jsonl fp4.jsonl --labels fp8,fp4
+
+Measured 2026-10-05 (f2fe699): teacher-forced top-1 agreement with bf16 fp4 96.75% / 96.80% (chunks / rows), fp8
+97.69% / 97.68%, the same format through the two paths 98.25% (bf16), 97.62% (fp4); dNLL fp4 +0.0012 / +0.0008
+(document-clustered SE 0.0005 / 0.0008), fp8 +0.0000; no document beyond 3 SD. MMLU (2,280 questions) fp4 85.75%,
+fp8 86.23%, McNemar b=25 c=14 p=0.11; fp4 starts reasoning instead of a letter more often (17 vs 3 questions).
+
 ## Serving the current source from the compose deployment
 
 `make hot` in `deploy/dsv41-tp2` (see its README) serves `SRC`'s current `src/` without `make image`; `make cold`
