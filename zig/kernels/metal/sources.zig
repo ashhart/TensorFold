@@ -21,6 +21,9 @@ pub const nemotron_head = @embedFile("nemotron_head.metal");
 /// The NAX helpers the prefill files include (`#include "../nax.h"`, inlined before compiling).
 pub const nax = @embedFile("nax.h");
 
+/// Flash Next 6-bit (group 32) prompt projections on the tensor units: dense and sorted-expert gather.
+pub const flashnext_qmm6 = @embedFile("prefill/qmm6_nax.metal");
+
 /// A source file of MLX-exact kernels: compiled as one library, its kernels found by name.
 pub const File = struct { name: []const u8, text: []const u8 };
 
