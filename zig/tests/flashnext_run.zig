@@ -130,6 +130,8 @@ const Run = struct {
     shapes: std.StringHashMapUnmanaged(mtl.Buffer) = .empty,
     loaded: usize = 0,
     rows: usize = 1,
+    fused_xsum: bool = false,
+    serial: bool = false,
     enc: mtl.ComputeEncoder = undefined,
     kv_pipe: mtl.Pipeline = undefined,
     argmax_pipe: mtl.Pipeline = undefined,
@@ -271,7 +273,7 @@ const Run = struct {
             at += 1;
         }
         r.enc.dispatchThreads(s.grid, s.tg);
-        r.enc.barrier();
+        if (!r.serial) r.enc.barrier();
     }
 };
 
@@ -458,7 +460,7 @@ const Model = struct {
     }
 
     fn lane(m: *Model, x: Buf, k: usize, l: Lane, role: []const u8, y: Buf) !void {
-        try m.r.call(if (k == D) "lane_qmm_xsum#[2560]" else "lane_qmm_xsum#[6144]", &.{ x, m.t.mdims }, &.{m.t.xs});
+        if (!m.r.fused_xsum) try m.r.call(if (k == D) "lane_qmm_xsum#[2560]" else "lane_qmm_xsum#[6144]", &.{ x, m.t.mdims }, &.{m.t.xs});
         try m.r.call(role, &.{ x, m.t.xs, l.wq, l.sbt, m.t.mdims }, &.{y});
     }
 
@@ -525,7 +527,7 @@ const Model = struct {
         for (0..8) |i| ids[i] = if (i < rows) tokens[i] else 0;
         m.pleIds(tokens);
         const cb = r.queue.commandBuffer();
-        r.enc = cb.compute(.concurrent);
+        r.enc = cb.compute(if (r.serial) .serial else .concurrent);
         try m.windowEncode(rows, t.ids8);
         try m.finish(cb);
         @memcpy(picks[0..rows], t.picks.b.slice(u32, rows));
@@ -556,7 +558,7 @@ const Model = struct {
         r.enc.setPipeline(r.pleids_pipe);
         for ([_]Buf{ ids, m.t.ple_meta, m.t.ple_ids }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
         r.enc.dispatchThreads(mtl.Size.of(16 * rows, 1, 1), mtl.Size.of(16 * rows, 1, 1));
-        r.enc.barrier();
+        if (!r.serial) r.enc.barrier();
     }
 
     /// Encode the window's forward (tokens read from `ids`, n-gram ids already in t.ple_ids) and its argmax.
@@ -603,7 +605,7 @@ const Model = struct {
                 r.enc.setPipeline(r.kv_pipe);
                 for ([_]Buf{ t.kout, t.p, L.keys, L.vals, L.raw, t.kvmeta }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
                 r.enc.dispatchThreads(mtl.Size.of(512 * rows, 1, 1), mtl.Size.of(256, 1, 1));
-                r.enc.barrier();
+                if (!r.serial) r.enc.barrier();
                 try r.call("q4_attn_parts#[24, 256]", &.{ t.q, L.keys, L.vals, t.ids81, t.nk8, t.zero8, t.scale }, &.{ t.po, t.pm });
                 try r.call("q4_attn_merge_gate#[24, 16, 256]", &.{ t.po, t.pm, t.p }, &.{t.aout});
                 try m.lane(t.aout, 6144, L.out, "lane_qmm_bytes_grouped@att.o", t.branch);
@@ -627,7 +629,7 @@ const Model = struct {
         r.enc.setBuffer(t.picks.b, 0, 1);
         r.enc.setBuffer(t.vocab.b, 0, 2);
         r.enc.dispatchThreads(mtl.Size.of(1024 * rows, 1, 1), mtl.Size.of(1024, 1, 1));
-        r.enc.barrier();
+        if (!r.serial) r.enc.barrier();
     }
 
     /// The MTP head on `rows` rows: each row's next token and the streams it follows (target or head output, row
@@ -641,7 +643,7 @@ const Model = struct {
         const ids = h.slots[0].ids8.b.slice(u32, 8);
         for (0..8) |i| ids[i] = if (i < rows) nexts[i] else 0;
         const cb = r.queue.commandBuffer();
-        r.enc = cb.compute(.concurrent);
+        r.enc = cb.compute(if (r.serial) .serial else .concurrent);
         try m.mtpEncode(0, rows, h.slots[0].ids8, streams, h.pick);
         try m.finish(cb);
         h.pos += rows;
@@ -671,29 +673,29 @@ const Model = struct {
         r.rows = rows;
         try r.call("mtp:qa_embed_rows@embed", &.{ ids, m.embed[0], m.embed[1], m.embed[2] }, &.{h.emb});
         try r.call("mtp:q4_rms_rows@mtp.enorm", &.{ h.emb, h.enorm, t.eps }, &.{h.en});
-        try r.call("mtp:lane_qmm_xsum#[2560]", &.{ h.en, sl.md }, &.{t.xs});
+        if (!r.fused_xsum) try r.call("mtp:lane_qmm_xsum#[2560]", &.{ h.en, sl.md }, &.{t.xs});
         try r.call("mtp:lane_qmm_bytes_grouped@mtp.fce", &.{ h.en, t.xs, h.fce.wq, h.fce.sbt, sl.md }, &.{h.e});
         try r.call("mtp:q4_rms_rows@mtp.hnorm", &.{ streams, h.hnorm, t.eps }, &.{h.hn});
-        try r.call("mtp:lane_qmm_xsum#[4R, 2560]", &.{ h.hn, sl.md4 }, &.{t.xs});
+        if (!r.fused_xsum) try r.call("mtp:lane_qmm_xsum#[4R, 2560]", &.{ h.hn, sl.md4 }, &.{t.xs});
         try r.call("mtp:lane_qmm_bytes_grouped@mtp.fch", &.{ h.hn, t.xs, h.fch.wq, h.fch.sbt, sl.md4 }, &.{h.hs});
         r.enc.setPipeline(r.add_pipe);
         for ([_]Buf{ h.e, h.hs, h.h[0], sl.n_add }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
         r.enc.dispatchThreads(mtl.Size.of(rows * WIDE, 1, 1), mtl.Size.of(256, 1, 1));
-        r.enc.barrier();
+        if (!r.serial) r.enc.barrier();
         try r.call("mtp:q4_hc_norm_none#[10240]", &.{h.h[0]}, &.{ h.h[1], t.ssp });
         const down = [_][]const u8{ "mtp:qa_hc_down@mtp.ahc", "mtp:qa_hc_down@mtp.mhc", "mtp:qa_hc_down@mtp.mix" };
         const up = [_][]const u8{ "mtp:qa_hc_up@mtp.ahc", "mtp:qa_hc_up@mtp.mhc", "mtp:qa_hc_up@mtp.mix" };
         try m.mtpProject(h.h[1], h.ahc, down[0], up[0], t.inj_a, sl.rows);
-        try r.call("mtp:lane_qmm_xsum#[2560]", &.{ t.mixed, sl.md }, &.{t.xs});
+        if (!r.fused_xsum) try r.call("mtp:lane_qmm_xsum#[2560]", &.{ t.mixed, sl.md }, &.{t.xs});
         try r.call("mtp:lane_qmm_bytes_grouped@mtp.att.proj", &.{ t.mixed, t.xs, h.proj.wq, h.proj.sbt, sl.md }, &.{t.p});
         try r.call("mtp:q4_attn_prep@mtp.att", &.{ t.p, sl.pos8, h.qn, h.kn, h.iqn, t.eps, t.log2base }, &.{ t.q, t.kout, t.iq });
         r.enc.setPipeline(r.kv_pipe);
         for ([_]Buf{ t.kout, t.p, h.keys, h.vals, h.raw, sl.kvmeta }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
         r.enc.dispatchThreads(mtl.Size.of(512 * rows, 1, 1), mtl.Size.of(256, 1, 1));
-        r.enc.barrier();
+        if (!r.serial) r.enc.barrier();
         try r.call("mtp:q4_attn_parts#[24, 256]", &.{ t.q, h.keys, h.vals, t.ids81, sl.nk8, t.zero8, t.scale }, &.{ t.po, t.pm });
         try r.call("mtp:q4_attn_merge_gate#[24, 16, 256]", &.{ t.po, t.pm, t.p }, &.{t.aout});
-        try r.call("mtp:lane_qmm_xsum#[6144]", &.{ t.aout, sl.md }, &.{t.xs});
+        if (!r.fused_xsum) try r.call("mtp:lane_qmm_xsum#[6144]", &.{ t.aout, sl.md }, &.{t.xs});
         try r.call("mtp:lane_qmm_bytes_grouped@mtp.att.o", &.{ t.aout, t.xs, h.out.wq, h.out.sbt, sl.md }, &.{t.branch});
         try r.call("mtp:q4_hc_norm_plain#[10240]", &.{ h.h[1], t.inj_a, t.branch }, &.{ h.h[0], t.ssp });
         try m.mtpProject(h.h[0], h.mhc, down[1], up[1], t.inj_m, sl.rows);
@@ -706,12 +708,12 @@ const Model = struct {
         try m.mtpProject(h.h[1], h.mix, down[2], up[2], t.inj_a, sl.rows);
         r.rows = 1;
         const x: Buf = .{ .b = t.mixed.b, .off = (rows - 1) * D * 2 };
-        try r.call("mtp:lane_qmm_xsum#[2560]", &.{ x, h.md1 }, &.{t.xs});
+        if (!r.fused_xsum) try r.call("mtp:lane_qmm_xsum#[2560]", &.{ x, h.md1 }, &.{t.xs});
         try r.call("mtp:lane_qmm_bytes_grouped@mtp.draft", &.{ x, t.xs, h.draft.wq, h.draft.sbt, h.md1 }, &.{h.logits});
         r.enc.setPipeline(r.argids_pipe);
         for ([_]Buf{ h.logits, out, h.n_ids, h.ids }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
         r.enc.dispatchThreads(mtl.Size.of(1024, 1, 1), mtl.Size.of(1024, 1, 1));
-        r.enc.barrier();
+        if (!r.serial) r.enc.barrier();
     }
 
     fn mtpProject(m: *Model, hn: Buf, hc: Hc, down: []const u8, up: []const u8, inj: Buf, rows: Buf) !void {
@@ -775,6 +777,8 @@ pub fn main(init: std.process.Init) !void {
     const arena = arena_state.allocator();
     const device = try mtl.Device.init();
     var r = Run{ .arena = arena, .device = device, .queue = try device.queue() };
+    r.fused_xsum = std.c.getenv("FZ_FUSED_XSUM") != null;
+    r.serial = std.c.getenv("FZ_SERIAL") != null;
     const t0 = mtl.clock.seconds();
     try r.compile(args[2]);
     const t1 = mtl.clock.seconds();
@@ -1125,7 +1129,7 @@ pub fn main(init: std.process.Init) !void {
         while (out.items.len < want.len) {
             w[0] = out.items[out.items.len - 1];
             const cb = r.queue.commandBuffer();
-            r.enc = cb.compute(.concurrent);
+            r.enc = cb.compute(if (r.serial) .serial else .concurrent);
             // the head: absorb the kept rows (chunks of up to MAXR), its draft into slot 1, then chain into 2..depth
             m.mtp.pos -= m.mtp.drafted;
             m.mtp.drafted = 0;
