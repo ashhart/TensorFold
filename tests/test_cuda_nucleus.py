@@ -69,6 +69,7 @@ def test_rows_past_the_candidates_read_whole_shards_and_still_agree(monkeypatch)
     flat[1, ::7] = 0.5
     reads = []
     real = cs._shares
+    monkeypatch.setattr(cs, "_keyed", lambda *a: None)                # the host rule, not the device draw
     monkeypatch.setattr(cs, "_shares", lambda *a: reads.append(a[3]) or real(*a))
     for top_p, min_p in ((0.95, 0.0), (1.0, 0.0), (1.0, 0.3), (0.5, 0.2)):
         s = Sampling(5, 1.0, 0, top_p, min_p)

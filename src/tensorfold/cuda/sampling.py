@@ -14,6 +14,8 @@ from tensorfold.engine.exact_sampling import MARGIN, Sampling, _mix, choose_rows
 MASS = 2.0 ** 40        # a token's share of the mass in fixed point: shard sums are exact, so ranks agree bit for bit
 NUCLEUS = 1024          # candidates a rank reads for a top_k-off draw; a row they don't cover reads whole shards
 SLACK = 2.0 ** -30      # relative bound far above any gap between device and host float64 logs (a few ulps)
+DIGITS = (13, 13, 13, 13, 12)   # bits of the 64-bit (value, id) order each radix pass of the top_p cut resolves
+TMAX = 2.0 ** 800       # up to this temperature float32 logits order and tie exactly as their float64 scaled values
 
 
 def sample_rows(logits: torch.Tensor, positions: Sequence[int], sampling: Sampling | None) -> list[int]:
@@ -120,9 +122,7 @@ def nucleus_rows(logits: torch.Tensor, positions: Sequence[int], sampling: Sampl
     peak = logits.float().amax(dim=-1).double() / t             # scaled's row maxima: dividing by t is monotone
     top = _stacked(gather, peak).max(dim=0).values             # every rank's maxima
     mass = torch.floor(torch.exp(scaled - top[:, None]) * MASS).to(torch.int64)
-    drawn = None
-    if not 0.0 < sampling.top_p < 1.0:          # no cut: the kept set is {v >= floor}, scored on the device
-        drawn = _keyed(gather, scaled, top, mass, positions, sampling, offset, id_map)
+    drawn = _keyed(gather, logits, scaled, top, mass, positions, sampling, offset, id_map)
     if drawn is None:
         got = _shares(gather, scaled, mass, NUCLEUS, offset, id_map)
         drawn = _draw(got, positions, sampling)
@@ -191,12 +191,18 @@ def _draw(got, positions, s: Sampling) -> list[tuple[int, float]] | None:
     return drawn
 
 
-def _keyed(gather, scaled, top, mass, positions, s: Sampling, offset, id_map) -> list[tuple[int, float]] | None:
-    """No top_p cut: ``_draw``'s keyed argmax over {v >= floor}, each rank's best device score rescored on the host.
+def _keyed(gather, logits, scaled, top, mass, positions, s: Sampling, offset, id_map) -> list[tuple[int, float]] | None:
+    """``_draw``'s keyed argmax over the top_p nucleus and {v >= floor}, each rank's best device score rescored.
 
     A rank's other tokens score on the host at most its runner-up's device score plus the device-host gap, so a host
     best above each such bound plus ``SLACK`` is the whole-shard draw; otherwise None (``_draw`` decides)."""
 
+    cut = None
+    if 0.0 < s.top_p < 1.0:
+        t = max(float(s.temperature), 1e-6)
+        if t > TMAX:
+            return None
+        cut = _cut(gather, logits, t, mass, s.top_p, offset, id_map)
     floor = top + s.min_log
     if scaled.is_cuda:
         from .keyed_draw import best_two
@@ -205,9 +211,9 @@ def _keyed(gather, scaled, top, mass, positions, s: Sampling, offset, id_map) ->
             key = _mix(np.uint64(s.seed & 0xFFFFFFFFFFFFFFFF) + np.uint64(0x9E3779B97F4A7C15))
             keys = _mix(key ^ (np.asarray(positions).astype(np.uint64) * np.uint64(0xD1B54A32D192ED03)))
         keys = torch.from_numpy(keys.view(np.int64)).to(scaled.device)
-        f, i = best_two(scaled, keys, floor, int(offset), id_map)
+        f, i = best_two(scaled, keys, floor, int(offset), id_map, cut)
     else:
-        f, i = _best_two(scaled, positions, s, floor, offset, id_map)
+        f, i = _best_two(scaled, positions, s, floor, offset, id_map, cut)
     packed = torch.cat([f.view(torch.int64), i[:, 1:], mass.gather(1, i[:, :1]), mass.sum(dim=-1, keepdim=True)], 1)
     both = _stacked(gather, packed).cpu().numpy()
     first_np, second_np, vals_np = (np.ascontiguousarray(both[:, :, c]).view(np.float64) for c in range(3))
@@ -231,7 +237,63 @@ def _keyed(gather, scaled, top, mass, positions, s: Sampling, offset, id_map) ->
     return drawn
 
 
-def _best_two(scaled, positions, s: Sampling, floor, offset, id_map) -> tuple[torch.Tensor, torch.Tensor]:
+def _cut(gather, logits, t, mass, top_p, offset, id_map) -> tuple[torch.Tensor, torch.Tensor]:
+    """Each row's last nucleus token (its scaled value, its id): a radix select over every rank's exact int64 mass."""
+
+    rows, width = logits.shape
+    ids = id_map[:width].to(torch.int64) if id_map is not None else \
+        torch.arange(offset, offset + width, device=logits.device)
+    count, pick = _count, _pick
+    if logits.is_cuda:
+        from . import keyed_draw
+
+        count, pick = keyed_draw.count, keyed_draw.pick
+    part = torch.zeros(rows, dtype=torch.int64, device=logits.device)     # the boundary key's bits so far
+    below = torch.zeros_like(part)                                        # every rank's mass before them
+    need, shift = None, 64
+    for digit in DIGITS:
+        shift -= digit
+        hist = _stacked(gather, count(logits, ids, mass, part, shift, digit))
+        if need is None:                                                  # the first pass counts every token
+            need = torch.tensor([math.ceil(Fraction(top_p) * total) for total in hist.sum(dim=(0, 2)).tolist()],
+                                dtype=torch.int64, device=logits.device)
+        part, below = pick(hist, need, below, part, shift, digit)
+    value = -1 - (part >> 32)
+    value = (value ^ ((value >> 31) & 0x7FFFFFFF)).to(torch.int32).view(torch.float32).double() / t
+    return value, part & 0xFFFFFFFF
+
+
+def _order(logits, ids) -> torch.Tensor:
+    """Each token's int64 key, ascending in the order (-v, id): float32 logits order and tie as their scaled values."""
+
+    x = logits.float()
+    bits = torch.where(x == 0, 0.0, x).view(torch.int32).to(torch.int64)  # -0 ties +0, as in scaled
+    return (-1 - (bits ^ ((bits >> 31) & 0x7FFFFFFF))) * 2 ** 32 + ids
+
+
+def _count(logits, ids, mass, part, shift, digit) -> torch.Tensor:
+    """int64 [rows, 2**digit]: the mass of the keys matching ``part`` above ``shift + digit``, by their next digit."""
+
+    key = _order(logits, ids)
+    if shift + digit == 64:                                               # the top digit is signed
+        return torch.zeros((key.shape[0], 1 << digit), dtype=torch.int64).scatter_add_(
+            1, (key >> shift) + (1 << digit - 1), mass)
+    weight = torch.where((key >> shift + digit) == (part >> shift + digit)[:, None], mass, 0)
+    return torch.zeros((key.shape[0], 1 << digit), dtype=torch.int64).scatter_add_(
+        1, (key >> shift) & (1 << digit) - 1, weight)
+
+
+def _pick(hist, need, below, part, shift, digit) -> tuple[torch.Tensor, torch.Tensor]:
+    """Every rank's ``_count`` summed: the first digit whose running mass reaches ``need``, appended to ``part``."""
+
+    hist = hist.sum(dim=0)
+    run = below[:, None] + hist.cumsum(dim=1)
+    pick = (run < need[:, None]).sum(dim=1, keepdim=True)
+    below = (run - hist).gather(1, pick)[:, 0]
+    return part + (pick[:, 0] - (1 << digit - 1 if shift + digit == 64 else 0)) * 2 ** shift, below
+
+
+def _best_two(scaled, positions, s: Sampling, floor, offset, id_map, cut=None) -> tuple[torch.Tensor, torch.Tensor]:
     """``keyed_draw.best_two`` for host tensors, from the host's own uniforms."""
 
     rows, width = scaled.shape
@@ -239,6 +301,9 @@ def _best_two(scaled, positions, s: Sampling, floor, offset, id_map) -> tuple[to
     u = uniform_rows(s.seed, np.asarray(positions), np.broadcast_to(ids.numpy(), (rows, width)))
     score = scaled - torch.log(-torch.log(torch.from_numpy(u)))
     score.masked_fill_(scaled < floor[:, None], -math.inf)
+    if cut is not None:                                       # the order (-v, id) up to each row's last kept token
+        last, at = cut[0][:, None], cut[1][:, None]
+        score.masked_fill_(~((scaled > last) | ((scaled == last) & (ids <= at))), -math.inf)
     best, cols = torch.topk(score, min(2, width), dim=-1)
     if width == 1:                                            # no runner-up
         best = torch.cat([best, torch.full_like(best, -math.inf)], dim=1)
