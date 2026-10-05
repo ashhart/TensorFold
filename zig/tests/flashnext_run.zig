@@ -171,6 +171,13 @@ const glue_source =
     \\  threadgroup_barrier(mem_flags::mem_threadgroup);
     \\  for (uint i = t; i < n; i += 128) s[i] = tmp[(i % d.x) * d.y + i / d.x];
     \\}
+    \\// FZ_PREFETCH: read a weight buffer into the cache while a latency-bound launch runs beside it.
+    \\[[kernel]] void fz_touch(const device uint4* w [[buffer(0)]], device uint* sink [[buffer(1)]], constant uint& n [[buffer(2)]],
+    \\    uint i [[thread_position_in_grid]], uint gs [[threads_per_grid]]) {
+    \\  uint acc = 0;
+    \\  for (uint k = i; k < n; k += gs) { const uint4 v = w[k]; acc ^= v.x ^ v.y ^ v.z ^ v.w; }
+    \\  if (acc == 0x9e3779b9u) sink[0] = acc;
+    \\}
 ;
 
 
@@ -337,6 +344,119 @@ const xnew_source =
     \\    uint tgi [[threadgroup_position_in_grid]]) {
     \\  threadgroup float part[16][8][32];
     \\  fz_dense_body<16>(X, W, SB, Y, dims, sgi, lane, tgi, part);
+    \\}
+    \\// FZ_XSX=1: fz_xgu and fz_xdown with each input group's sum computed once a threadgroup (fz_group's order) and the
+    \\// inputs converted once for gate and up; simdgroup 0 routes while the rest sum. Bits equal fz_xgu / fz_xdown.
+    \\inline float fz_qdot(thread const float* q, thread const float4* xv) {
+    \\  float qx = 0.0f;
+    \\  #pragma unroll
+    \\  for (int i = 0; i < 8; i++) qx += q[4 * i] * xv[i].x + q[4 * i + 1] * xv[i].y + q[4 * i + 2] * xv[i].z + q[4 * i + 3] * xv[i].w;
+    \\  return qx;
+    \\}
+    \\inline float fz_xsum32(const device bfloat* x) {
+    \\  const device bfloat4* x4 = (const device bfloat4*)x;
+    \\  float sx = 0.0f;
+    \\  #pragma unroll
+    \\  for (int i = 0; i < 8; i++) { const float4 v = float4(x4[i]); sx += v.x + v.y + v.z + v.w; }
+    \\  return sx;
+    \\}
+    \\[[kernel]] void fz_xgu_sx(const device bfloat* X [[buffer(0)]], const device float* LOGITS [[buffer(1)]],
+    \\    const device uint* GW [[buffer(2)]], const device bfloat* GS [[buffer(3)]], const device bfloat* GB [[buffer(4)]],
+    \\    const device uint* UW [[buffer(5)]], const device bfloat* US [[buffer(6)]], const device bfloat* UB [[buffer(7)]],
+    \\    const device uint* SGW [[buffer(8)]], const device bfloat* SGS [[buffer(9)]], const device bfloat* SGB [[buffer(10)]],
+    \\    const device uint* SUW [[buffer(11)]], const device bfloat* SUS [[buffer(12)]], const device bfloat* SUB [[buffer(13)]],
+    \\    device bfloat* ACT [[buffer(14)]], device uint* PICK [[buffer(15)]], device float* WTS [[buffer(16)]],
+    \\    uint sgi [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    \\    uint3 tg [[threadgroup_position_in_grid]]) {
+    \\  constexpr int K = 2560, N = 640, TOPK = 10, NE = 512, NL = 513, SLOTS = TOPK + 1, WPR = K * 6 / 32, KG = K / 32;
+    \\  const int p = int(tg.z);
+    \\  const int r = p / SLOTS, slot = p % SLOTS;
+    \\  const bool shared = slot == TOPK;
+    \\  threadgroup float sxs[KG];
+    \\  threadgroup uint pick_e;
+    \\  if (sgi == 0) {
+    \\    float picked[TOPK];
+    \\    const uint e0 = shared ? 0u : uint(simd_topk<NE>(LOGITS + r * NL, slot, lane, picked));
+    \\    if (lane == 0) {
+    \\      pick_e = e0;
+    \\      if (!shared && tg.y == 0) {
+    \\        PICK[r * TOPK + slot] = e0;
+    \\        if (slot == TOPK - 1) {
+    \\          float total = 0.0f;
+    \\          float ex[TOPK];
+    \\          for (int kk = 0; kk < TOPK; kk++) { ex[kk] = metal::exp(picked[kk] - picked[0]); total += ex[kk]; }
+    \\          for (int kk = 0; kk < TOPK; kk++) WTS[r * TOPK + kk] = float(bfloat(ex[kk] / total));
+    \\        }
+    \\      }
+    \\    }
+    \\  } else {
+    \\    const int g = int(sgi - 1) * 32 + int(lane);
+    \\    if (g < KG) sxs[g] = fz_xsum32(X + r * K + g * 32);
+    \\  }
+    \\  threadgroup_barrier(mem_flags::mem_threadgroup);
+    \\  const size_t e = size_t(pick_e);
+    \\  const int row = int(tg.y) * 8 + int(sgi) * 2 + int(lane >> 4);
+    \\  const int part = int(lane & 15);
+    \\  const size_t wrow = (shared ? 0 : e * N * WPR) + size_t(row) * WPR + part * 30;
+    \\  const size_t grow = (shared ? 0 : e * N * KG) + size_t(row) * KG + part * 5;
+    \\  const device uint* gw = (shared ? SGW : GW) + wrow;
+    \\  const device uint* uw = (shared ? SUW : UW) + wrow;
+    \\  const device bfloat* gs = (shared ? SGS : GS) + grow;
+    \\  const device bfloat* gb = (shared ? SGB : GB) + grow;
+    \\  const device bfloat* us = (shared ? SUS : US) + grow;
+    \\  const device bfloat* ub = (shared ? SUB : UB) + grow;
+    \\  const device bfloat4* x4 = (const device bfloat4*)(X + r * K + part * 160);
+    \\  float ag = 0.0f, au = 0.0f;
+    \\  for (int j = 0; j < 5; j++) {
+    \\    float4 xv[8];
+    \\    #pragma unroll
+    \\    for (int i = 0; i < 8; i++) xv[i] = float4(x4[j * 8 + i]);
+    \\    float q[32];
+    \\    fz_codes6(gw + j * 6, q);
+    \\    const float qg = fz_qdot(q, xv);
+    \\    fz_codes6(uw + j * 6, q);
+    \\    const float qu = fz_qdot(q, xv);
+    \\    const float sx = sxs[part * 5 + j];
+    \\    ag += float(gs[j]) * qg + float(gb[j]) * sx;
+    \\    au += float(us[j]) * qu + float(ub[j]) * sx;
+    \\  }
+    \\  for (ushort o = 8; o > 0; o >>= 1) { ag += simd_shuffle_xor(ag, o); au += simd_shuffle_xor(au, o); }
+    \\  if (part == 0) ACT[p * N + row] = bfloat(bsilu(float(bfloat(ag))) * float(bfloat(au)));
+    \\}
+    \\[[kernel]] void fz_xdown_sx(const device bfloat* ACT [[buffer(0)]], const device uint* PICK [[buffer(1)]],
+    \\    const device uint* DW [[buffer(2)]], const device bfloat* DS [[buffer(3)]], const device bfloat* DB [[buffer(4)]],
+    \\    const device uint* SDW [[buffer(5)]], const device bfloat* SDS [[buffer(6)]], const device bfloat* SDB [[buffer(7)]],
+    \\    const constant int* rows [[buffer(8)]], device bfloat* Y [[buffer(9)]],
+    \\    uint sgi [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    \\    uint3 tg [[threadgroup_position_in_grid]]) {
+    \\  constexpr int NI = 640, D = 2560, TOPK = 10, SLOTS = TOPK + 1, WPR = NI * 6 / 32, KG = NI / 32;
+    \\  const int pair = int(tg.z);
+    \\  if (pair >= rows[0] * SLOTS) return;
+    \\  threadgroup float sxs[KG];
+    \\  if (sgi == 0 && lane < uint(KG)) sxs[lane] = fz_xsum32(ACT + pair * NI + int(lane) * 32);
+    \\  threadgroup_barrier(mem_flags::mem_threadgroup);
+    \\  const int r = pair / SLOTS, k = pair % SLOTS;
+    \\  const bool shared = k == TOPK;
+    \\  const size_t e = shared ? 0 : size_t(PICK[r * TOPK + k]);
+    \\  const int d = int(tg.y) * 32 + int(sgi) * 8 + int(lane >> 2);
+    \\  const int part = int(lane & 3);
+    \\  const device uint* w = (shared ? SDW : DW + e * D * WPR) + size_t(d) * WPR + part * 30;
+    \\  const size_t g0 = (shared ? 0 : e * D * KG) + size_t(d) * KG + part * 5;
+    \\  const device bfloat* sc = (shared ? SDS : DS) + g0;
+    \\  const device bfloat* bi = (shared ? SDB : DB) + g0;
+    \\  const device bfloat4* x4 = (const device bfloat4*)(ACT + pair * NI + part * 160);
+    \\  float acc = 0.0f;
+    \\  for (int j = 0; j < 5; j++) {
+    \\    float4 xv[8];
+    \\    #pragma unroll
+    \\    for (int i = 0; i < 8; i++) xv[i] = float4(x4[j * 8 + i]);
+    \\    float q[32];
+    \\    fz_codes6(w + j * 6, q);
+    \\    acc += float(sc[j]) * fz_qdot(q, xv) + float(bi[j]) * sxs[part * 5 + j];
+    \\  }
+    \\  acc += simd_shuffle_xor(acc, 1);
+    \\  acc += simd_shuffle_xor(acc, 2);
+    \\  if (part == 0) Y[pair * D + d] = bfloat(acc);
     \\}
     \\// Experts in one launch (FZ_XFUSED=1): threadgroup (slice s, pair) runs fz_xgu's sums for intermediate rows
     \\// [160 s, 160 s + 160) and fz_xdown's lane-s sums over those rows for every output; the pair's last slice adds
@@ -636,6 +756,12 @@ const Run = struct {
     gskip: u32 = 0,
     xpack: bool = false,
     xfused: bool = false,
+    xsx: bool = false,
+    xgu_sx_pipe: mtl.Pipeline = undefined,
+    xdown_sx_pipe: mtl.Pipeline = undefined,
+    prefetch: bool = false,
+    touch_pipe: mtl.Pipeline = undefined,
+    sink: Buf = undefined,
     xfused_pipe: mtl.Pipeline = undefined,
     xpart: Buf = undefined,
     xdone: Buf = undefined,
@@ -740,6 +866,8 @@ const Run = struct {
         r.accept_pipe = try mtl.Pipeline.init(r.device, glue, "fz_accept", false);
         r.repack_w = try mtl.Pipeline.init(r.device, glue, "fz_repack_w", false);
         r.repack_s = try mtl.Pipeline.init(r.device, glue, "fz_repack_s", false);
+        r.touch_pipe = try mtl.Pipeline.init(r.device, glue, "fz_touch", false);
+        r.sink = .{ .b = try r.buffer(64) };
         if (r.xnew) { // the recorded gate/up kernel's header (simd_topk, bsilu) with the full-width expert kernels after it
             var hit: ?[]const u8 = null;
             var it = plan.object.get("variants").?.object.iterator();
@@ -759,6 +887,8 @@ const Run = struct {
             r.dense16_pipe = try mtl.Pipeline.init(r.device, lib, "fz_dense16", false);
             r.route_pipe = try mtl.Pipeline.init(r.device, lib, "fz_route", false);
             r.xfused_pipe = try mtl.Pipeline.init(r.device, lib, "fz_xfused", false);
+            r.xgu_sx_pipe = try mtl.Pipeline.init(r.device, lib, "fz_xgu_sx", false);
+            r.xdown_sx_pipe = try mtl.Pipeline.init(r.device, lib, "fz_xdown_sx", false);
             r.xpart = .{ .b = try r.buffer(MAXR * 11 * 4 * D * 4) };
             r.xdone = .{ .b = try r.buffer(MAXR * 11 * 4) };
             r.ggu_pipe = try mtl.Pipeline.init(r.device, lib, "fz_ggu", false);
@@ -808,6 +938,17 @@ const Run = struct {
             std.log.err("repack failed: {s}", .{msg});
             return error.GpuFailed;
         }
+    }
+
+    /// FZ_PREFETCH: stream `b` into the cache beside the next launch (no barrier between them).
+    fn touch(r: *Run, b: Buf) void {
+        if (!r.prefetch) return;
+        const n: u32 = @intCast((b.b.length() - b.off) / 16);
+        r.enc.setPipeline(r.touch_pipe);
+        r.enc.setBuffer(b.b, b.off, 0);
+        r.enc.setBuffer(r.sink.b, 0, 1);
+        r.enc.setBytes(std.mem.asBytes(&n), 2);
+        r.enc.dispatchThreads(mtl.Size.of(256 * 64, 1, 1), mtl.Size.of(256, 1, 1));
     }
 
     /// fz_copy_kept: `layers` copies of `n` words from row (keep + base) of src (row and layer strides in words).
@@ -879,12 +1020,12 @@ const Run = struct {
             return;
         }
         const pairs = r.rows * 11;
-        r.enc.setPipeline(r.xgu_pipe);
+        r.enc.setPipeline(if (r.xsx) r.xgu_sx_pipe else r.xgu_pipe);
         const gu = [_]Buf{ x, lg, e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8], e[9], e[10], e[11], act, pick, wts };
         for (gu, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
         r.enc.dispatchThreads(mtl.Size.of(128, 80, pairs), mtl.Size.of(128, 1, 1));
         if (!r.serial) r.enc.barrier();
-        r.enc.setPipeline(r.xdown_pipe);
+        r.enc.setPipeline(if (r.xsx) r.xdown_sx_pipe else r.xdown_pipe);
         const dn = [_]Buf{ act, pick, e[12], e[13], e[14], e[15], e[16], e[17], rows_buf, y };
         for (dn, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
         r.enc.dispatchThreads(mtl.Size.of(128, 80, pairs), mtl.Size.of(128, 1, 1));
@@ -1268,10 +1409,14 @@ const Model = struct {
                 const a = m.state;
                 const cs_in: Buf = .{ .b = L.cs[a].b, .off = L.cs[a].off + m.state_row * CS_ROW };
                 const so_in: Buf = .{ .b = L.so[a].b, .off = L.so[a].off + m.state_row * SO_ROW };
+                r.touch(L.out.wq);
+                r.touch(L.out.sbt);
                 try r.callAs("q4_gdn@gdn", if (r.gdn_step and rows > 1) 8 else rows, &.{ t.p, cs_in, so_in, L.conv, L.alog, L.dt, L.norm, t.eps, t.rows }, &.{ t.gout, L.cs[1 - a], L.so[1 - a] });
                 try m.lane(t.gout, 6144, L.out, "lane_qmm_bytes_grouped@gdn.out", t.branch);
             } else {
                 try m.lane(t.mixed, D, L.proj, "lane_qmm_bytes_grouped@att.proj", t.p);
+                r.touch(L.out.wq);
+                r.touch(L.out.sbt);
                 try r.call("q4_attn_prep@att", &.{ t.p, t.pos8, L.qn, L.kn, L.iqn, t.eps, t.log2base }, &.{ t.q, t.kout, t.iq });
                 if (r.skip & (1 << 5) == 0) {
                     r.enc.setPipeline(r.kv_pipe);
@@ -1285,6 +1430,7 @@ const Model = struct {
             }
             try r.call("q4_hc_norm_plain#[10240]", &.{ t.h[cur], t.inj_a, t.branch }, &.{ t.h[1 - cur], t.ssp });
             cur = 1 - cur;
+            r.touch(L.router);
             try m.hcProject(t.h[cur], L.mhc, "qa_hc_down@mhc", "qa_hc_up@mhc", t.inj_m);
             try r.call("q4_router_float@moe", &.{ t.mixed, L.router, t.rows }, &.{t.lg});
             try r.experts("qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown);
@@ -1476,6 +1622,8 @@ pub fn main(init: std.process.Init) !void {
     r.xpack = r.xnew and std.c.getenv("FZ_XPACK") != null;
     r.grouped = r.xnew and !r.xpack and std.c.getenv("FZ_GROUPED") != null;
     r.xfused = r.xnew and !r.xpack and !r.grouped and std.c.getenv("FZ_XFUSED") != null;
+    r.xsx = r.xnew and std.c.getenv("FZ_XSX") != null;
+    r.prefetch = !r.serial and std.c.getenv("FZ_PREFETCH") != null;
     const t0 = mtl.clock.seconds();
     try r.compile(args[2]);
     const t1 = mtl.clock.seconds();
@@ -1775,11 +1923,11 @@ pub fn main(init: std.process.Init) !void {
         for (1..MAXR + 1) |rows| {
             var toks: [MAXR]u32 = undefined;
             for (0..rows) |i| toks[i] = @intCast(want0[i].integer);
-            const g0, const f0 = .{ r.grouped, r.xfused };
-            r.grouped, r.xfused = .{ false, false };
+            const g0, const f0, const x0 = .{ r.grouped, r.xfused, r.xsx };
+            r.grouped, r.xfused, r.xsx = .{ false, false, false };
             try m.window(toks[0..rows], &pk);
             @memcpy(keep[0 .. rows * VOCAB], m.t.logits.b.slice(u16, rows * VOCAB));
-            r.grouped, r.xfused = .{ g0, f0 };
+            r.grouped, r.xfused, r.xsx = .{ g0, f0, x0 };
             try m.window(toks[0..rows], &pk);
             const now = m.t.logits.b.slice(u16, rows * VOCAB);
             var diff: usize = 0;
