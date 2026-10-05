@@ -82,6 +82,18 @@ request. `structured --suites schemas,tools` needs `TF_DSV41_TOOL_GRAMMAR=requir
 - `PARALLEL=8 CONTEXT=131072`: 6.9 GiB left after warm-up, 3.0 GiB of kept prompt states;
   8 clients 85 tok/s aggregate, concurrent replies identical to sequential ones
 
+## JIT caches (2026-10-06)
+
+Triton keeps compiled kernels in `~/.triton/cache` and the driver its PTX JIT output in `~/.nv/ComputeCache` by
+default: inside the container layer, which every `make up` / `make restart` recreates (`--force-recreate`), so each
+start compiled ~84 Triton kernels during graph capture and warm-up, and ~12 more mid-serving (the prompt indexer's
+`_index_scores_seg_rows` specializations on the first 8K and 100K prompts: the first PP8192 trial 1390-1550 tok/s
+instead of ~1650). The image now sets `TRITON_CACHE_DIR=/root/.cache/triton` and `CUDA_CACHE_PATH=/root/.cache/nv-compute`
+(the `CACHE_DIR` volume): `make prebuild` reports the count, and every later container, a new image's included, loads
+them. A kernel compiles once per source and specialization (a changed kernel compiles on the first start that runs it).
+Measured: boot 87 s -> 44 s (decode graphs 22.9 -> 11.2 s, warm-up 12.5 -> 3.7 s; calibration 24 s on a new
+revision, 2 s cached), `make restart` 108 -> 71 s to serving.
+
 ## Updating
 
 Sync the new source to `SRC` on the head, then `make image && make restart`. The image tag is a hash of the

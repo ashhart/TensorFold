@@ -13,3 +13,13 @@ rowread.reader()
 rdma._ext()
 rdma.proxy()                          # the RoCE host proxy (gcc + libibverbs), the default transport
 print("extensions ready", flush=True)
+
+import os
+from pathlib import Path
+
+tc = os.environ.get("TRITON_CACHE_DIR")
+if tc:                                # the image keeps Triton's kernels in the cache volume (Dockerfile)
+    n = sum(1 for _ in Path(tc).iterdir()) if Path(tc).is_dir() else 0
+    print(f"Triton cache {tc}: {n} kernels compiled by earlier starts", flush=True)
+else:
+    print("Triton cache: TRITON_CACHE_DIR unset (an image before it was set: kernels compile at every start)", flush=True)

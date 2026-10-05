@@ -105,14 +105,17 @@ image: stage sync
 
 # compile the CUDA extensions into CACHE_DIR before any model is loaded: compiling beside a loaded model (a few GiB
 # free) can push a GB10 into the OOM killer. Refuses while a server holds the GPU; a no-op when the cache is warm.
+# Triton kernels and the driver's PTX JIT cache live in CACHE_DIR too (TRITON_CACHE_DIR, CUDA_CACHE_PATH in the
+# Dockerfile): a kernel compiles once per source and specialization, on the first start that runs it, and every
+# later container (a new image's included) loads it from there instead of compiling it again at boot and mid-serving.
 prebuild:
 	@test -n "$(CACHE_DIR)" || { echo "❌ CACHE_DIR is not set in .env"; exit 1; }
 	@run="docker run --rm --gpus all -v $(CACHE_DIR):/root/.cache -v $(DIR)/prebuild.py:/prebuild.py:ro $(HOT_MOUNT)$(IMAGE_NAME):latest python /prebuild.py"; \
 	if docker ps --format '{{.Names}}' | grep -qE '^tensorfold-dsv41-serve|$(VLLM_NAMES)'; then \
 	  echo "prebuild: a server holds the GPU here, skipped (run make prebuild after make down)"; exit 0; fi; \
 	echo "compiling CUDA extensions on the head and $(WORKER) (minutes on a new image)"; \
-	( $$run 2>&1 | grep -E "extensions ready|Error|error" | tail -3 ) & h=$$!; \
-	( ssh $(WORKER) "$$run" 2>&1 | grep -E "extensions ready|Error|error" | tail -3 ) & w=$$!; \
+	( $$run 2>&1 | grep -E "extensions ready|Triton cache|Error|error" | tail -3 ) & h=$$!; \
+	( ssh $(WORKER) "$$run" 2>&1 | grep -E "extensions ready|Triton cache|Error|error" | tail -3 ) & w=$$!; \
 	wait $$h; wait $$w
 
 # each rank's built weights into PREPARED_DIR on its node (fastboot): a start then reads them in ~15 s instead of
@@ -189,7 +192,7 @@ BIG_FREE = awk '/Normal/{s=0; for (i=14; i<=NF; i++) s += $$i * 2^(i-5) / 262144
 BIG_FREE_SSH = awk '/Normal/{s=0; for (i=14; i<=NF; i++) s += \$$i * 2^(i-5) / 262144; printf \"%.0f\", s}' /proc/buddyinfo
 
 memwait:
-	@sudo -n sysctl -q vm.drop_caches=3; ssh $(WORKER) 'sudo -n sysctl -q vm.drop_caches=3'; \
+	@sync; sudo -n sysctl -q vm.drop_caches=3; ssh $(WORKER) 'sync; sudo -n sysctl -q vm.drop_caches=3'; \
 	sudo -n sysctl -q vm.compact_memory=1; ssh $(WORKER) 'sudo -n sysctl -q vm.compact_memory=1'; \
 	echo "free memory in blocks of >= 2 MiB after compaction: head $$($(BIG_FREE)) GiB, $(WORKER) $$(ssh $(WORKER) "$(BIG_FREE_SSH)") GiB"; \
 	end=$$(( $$(date +%s) + $(MEM_READY_WAIT) )); \
