@@ -1,4 +1,4 @@
-"""Row-exact 5/6/8-bit code arithmetic in groups of 64 or 128; the scalar twin is checked equal per shape."""
+"""Row-exact 4/5/6/8-bit code arithmetic in groups of 64 or 128; the scalar twin is checked equal per shape."""
 
 from __future__ import annotations
 
@@ -11,6 +11,8 @@ from tensorfold.kernels import threads
 from tensorfold.kernels.qwen.dense.v1 import simd_qmm
 
 BITS = (5, 6, 8)
+# widths the kernels read when asked by name (4-bit too, for groups of 128 that simd_qmm does not read)
+CODE_BITS = (4, 5, 6, 8)
 GROUP = 64
 fallback: set[tuple[int, int, int, int]] = set()  # (n, k, bits, group) whose twin differs from the matrix kernel
 
@@ -36,7 +38,7 @@ _MMA = r"""
   const int fm = (qid & 4) + ((int(lane) / 2) % 4);
   const int fn = (qid & 2) * 2 + (int(lane) % 2) * 2;
   const int R = X_shape[0];
-  constexpr int G = K / 64, SG = K / GS, WPR = K * B / 32, LW = B == 8 ? 4 : 3;
+  constexpr int G = K / 64, SG = K / GS, WPR = K * B / 32, LW = B == 8 ? 4 : (B == 4 ? 2 : 3);
   const float one = ONE[0];
   const int nb = int(threadgroup_position_in_grid.x) * (8 * NT);
   const int rb = int(threadgroup_position_in_grid.y) * (8 * RT);
@@ -264,6 +266,15 @@ def fits(weight: mx.array, scales: mx.array, biases: mx.array, group_size: int, 
     return weight.ndim == 2 and n % 8 == 0 and k % group_size == 0 and (n, k, bits, group_size) not in fallback
 
 
+def reads(weight: mx.array, scales: mx.array, biases: mx.array, group_size: int, bits: int) -> bool:
+    """Whether qmm reads this weight: 4/5/6/8-bit codes in groups of 64 or 128, bf16 scales, outputs in eights."""
+
+    if bits not in CODE_BITS or group_size not in (64, 128) or scales.dtype != mx.bfloat16 or biases.dtype != mx.bfloat16:
+        return False
+    n, k = int(weight.shape[0]), int(weight.shape[1]) * 32 // bits
+    return weight.ndim == 2 and n % 8 == 0 and k % group_size == 0
+
+
 def _launch(kind: str, rows: int, n: int, dims: int, bits: int, group: int,
             most: int = simd_qmm.MMA_SGS) -> tuple:
     s = simd_qmm.splits(n, dims)
@@ -341,4 +352,4 @@ def check(weight: mx.array, scales: mx.array, biases: mx.array, bits: int, group
         for r, m in calls)
 
 
-__all__ = ["BITS", "GROUP", "check", "fallback", "fits", "qmm"]
+__all__ = ["BITS", "CODE_BITS", "GROUP", "check", "fallback", "fits", "qmm", "reads"]
