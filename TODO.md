@@ -236,7 +236,12 @@ copy none of it into this Apache-2.0 tree.
 - [ ] Slow first start after `make image` (C1 81, PP 1029, 100K 1276 on the first fp4 start; no compaction stalls):
       cause unknown
 - [ ] Review-flagged test gaps: indexer equality test only at n_keys 2900; mqa_fp4 R=1 masking
-- [ ] FP4 quality checks not run: paired MMLU, tool-call eval, 24+ prompts
+- [x] FP4 quality (188bcdf, notes/dsv41/DEV.md): teacher-forced 26 docs top-1 vs bf16 fp4 96.75% / fp8 97.69% (sig.),
+      dNLL +0.0012; MMLU 2280 paired fp4 85.75 / fp8 86.23 (p 0.11; gap = 16-token budget overruns); tool-eval
+      111 / 117 of 138 (4 scenarios, sign p 0.125)
+- [ ] Tool-eval fp4 vs fp8: 2-3 repeats each to settle the 6-point gap
+- [ ] Dev runs: expandable segments on by default in `dsv41_run2.sh` (64K teacher-forced needed it)
+- [ ] Draft PR #342: description predates FP4, the CUDA kernels, the dev loop and the doorbell
 - [ ] Serial decode >= 40 tok/s (now ~37.8; see Phase 3)
 - [ ] Copy drafts in concurrent rounds
 - [ ] RoCE two rails
