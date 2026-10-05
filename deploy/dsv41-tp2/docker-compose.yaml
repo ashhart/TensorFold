@@ -41,6 +41,8 @@ services:
       TF_DSV41_KV: ${TF_DSV41_KV:-}
       # fp4: decode attention in CUDA (mqa_fp4.cu); 0 runs the Triton kernel
       TF_DSV41_CUDA_MQA: ${TF_DSV41_CUDA_MQA:-}
+      # fp4: decode / verify indexer decodes each key tile once for all rows (bit-identical); 0: a row each
+      TF_DSV41_SHARED_IK: ${TF_DSV41_SHARED_IK:-}
       TF_DSV41_FIXED_GIB: ${TF_DSV41_FIXED_GIB:-}
       TF_DSV41_ENGRAM_DIR: /models/${ENGRAM:-dsv41/DeepSeek-V4.1-Flash-engram}
       # /health: 503 when the engine is fatal (ranks out of step) or one engine call runs past TF_STALL_S (watchdog.sh)

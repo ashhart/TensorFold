@@ -645,10 +645,91 @@ def _index_scores(IQ, WTS, KEYS, POS, OUT, n_keys, ratio, KBASE, KS, HI: tl.cons
     tl.store(OUT + r * n_keys + sidx, score, mask=sidx < n_keys)
 
 
+# FP4 keys, decode / verify rows (TF_DSV41_SHARED_IK, default on): a program owns a key tile, decodes it once and
+# scores every row of its row group against it (_index_scores_tile) instead of each row decoding every visible key
+# for itself (the unpack is ALU-bound), and skips the tiles past a row's visible keys (_index_scores scores zero
+# keys there). Bit-identical to _index_scores (per row the same dot, the same fp32 order); 0: _index_scores as
+# before. FP8 / bf16 keys and prompt chunks keep _index_scores.
+SHARED_IK = __import__("os").environ.get("TF_DSV41_SHARED_IK", "1") != "0"
+SHARED_IK_PROGRAMS = int(__import__("os").environ.get("TF_DSV41_SHARED_IK_PROGRAMS") or 192)   # grid target
+
+
+@triton.jit(do_not_specialize=["RB"])
+def _index_scores_tile(IQ, WTS, KEYS, POS, OUT, n_keys, ratio, KBASE, KS, R, RB, HI: tl.constexpr,
+                       DI: tl.constexpr, BS: tl.constexpr, RP: tl.constexpr, HAS_BASE: tl.constexpr,
+                       SINGLE: tl.constexpr = False):
+    """_index_scores over MXFP4 keys, a key tile of BS a program: rows [g * RB, g * RB + RB) of the call scored
+    against it, the tile decoded once per stream (key base) among those rows. Per row exactly _index_scores' math
+    (its q, the same [HI, BS] dot, ReLU * weight summed over heads, -inf where not visible). The tile is decoded up
+    to the furthest visible key of the group's rows of that stream: a key past this row's bound scores in its own
+    column only, which the visible mask sets to -inf as before (a key past n_keys is never stored). A row whose
+    visible keys end before the tile writes -inf there and decodes nothing. SINGLE (RB == 1): straight-line, the
+    row's own bound (a loop-carried tile costs ~25% when every row has its own)."""
+
+    sb = tl.program_id(0)
+    if SINGLE:
+        r = tl.program_id(1)
+        n_vis = (tl.load(POS + r) + 1) // ratio
+        sidx = sb * BS + tl.arange(0, BS)
+        if sb * BS < tl.minimum(n_keys, n_vis):
+            h = tl.arange(0, HI)
+            d = tl.arange(0, DI)
+            kbase = tl.load(KBASE + r).to(tl.int64) if HAS_BASE else 0
+            live = (sidx < n_keys) & (sidx < n_vis)
+            k = _fp4_rows(KEYS, KS, (kbase + sidx)[:, None].to(tl.int64), live[:, None], d, DI, 32,
+                          False).to(tl.bfloat16)
+            q = tl.load(IQ + (r * HI + h[:, None]) * DI + d[None, :])
+            dots = tl.dot(q, tl.trans(k)).to(tl.float32)
+            w = tl.load(WTS + r * HI + h)
+            score = tl.sum(w[:, None] * tl.maximum(dots, 0.0), axis=0)
+            score = tl.where(sidx < n_vis, score, float("-inf"))
+        else:
+            score = tl.full((BS,), float("-inf"), tl.float32)
+        tl.store(OUT + r * n_keys + sidx, score, mask=sidx < n_keys)
+        return
+    r0 = tl.program_id(1) * RB
+    r1 = tl.minimum(r0 + RB, R)
+    h = tl.arange(0, HI)
+    d = tl.arange(0, DI)
+    s0 = sb * BS
+    sidx = s0 + tl.arange(0, BS)
+    rr = tl.arange(0, RP)
+    inr = (rr >= r0) & (rr < r1)
+    nv_all = (tl.load(POS + rr, mask=inr, other=0) + 1) // ratio
+    if HAS_BASE:
+        kb_all = tl.load(KBASE + rr, mask=inr, other=0).to(tl.int64)
+    else:
+        kb_all = tl.zeros((RP,), dtype=tl.int64)
+    cur = tl.full((), -1, tl.int64)                          # the stream whose tile k holds
+    k = tl.zeros((BS, DI), dtype=tl.bfloat16)
+    for r in range(r0, r1):
+        n_vis = (tl.load(POS + r) + 1) // ratio
+        if HAS_BASE:
+            kbase = tl.load(KBASE + r).to(tl.int64)
+        else:
+            kbase = tl.full((), 0, tl.int64)
+        if s0 < tl.minimum(n_keys, n_vis):
+            if kbase != cur:
+                far = tl.max(tl.where(inr & (kb_all == kbase), nv_all, 0), axis=0)
+                live = (sidx < n_keys) & (sidx < far)
+                k = _fp4_rows(KEYS, KS, (kbase + sidx)[:, None], live[:, None], d, DI, 32, False).to(tl.bfloat16)
+                cur = kbase
+            q = tl.load(IQ + (r * HI + h[:, None]) * DI + d[None, :])
+            dots = tl.dot(q, tl.trans(k)).to(tl.float32)             # [HI, BS]
+            w = tl.load(WTS + r * HI + h)
+            score = tl.sum(w[:, None] * tl.maximum(dots, 0.0), axis=0)
+            score = tl.where(sidx < n_vis, score, float("-inf"))
+        else:
+            score = tl.full((BS,), float("-inf"), tl.float32)
+        tl.store(OUT + r * n_keys + sidx, score, mask=sidx < n_keys)
+
+
 def index_scores(iq: torch.Tensor, wts: torch.Tensor, keys: torch.Tensor, pos: torch.Tensor, ratio: int,
-                 kbase: torch.Tensor | None = None, n_keys: int | None = None) -> torch.Tensor:
+                 kbase: torch.Tensor | None = None, n_keys: int | None = None, shared: bool | None = None) -> torch.Tensor:
     """fp32 [R, S] indexer scores over every compressed entry, -inf where not yet visible. ``kbase`` (decode rows of
-    several streams): each row's first key in ``keys``, its stream's ``n_keys`` following."""
+    several streams): each row's first key in ``keys``, its stream's ``n_keys`` following. ``shared`` (FP4 keys;
+    default: SHARED_IK for decode rows, those with ``kbase``): _index_scores_tile, else _index_scores (the same
+    scores either way; prompt chunks keep _index_scores, whose shapes vary)."""
 
     R, HI, DI = iq.shape
     S = keys.shape[0] if n_keys is None else n_keys
@@ -656,6 +737,16 @@ def index_scores(iq: torch.Tensor, wts: torch.Tensor, keys: torch.Tensor, pos: t
     BS = 64
     fp8, q4 = isinstance(keys, Fp8Rows), isinstance(keys, Fp4Rows)
     kq, ks = (keys.q, keys.s) if fp8 or q4 else (keys, pos)
+    nblk = triton.cdiv(S, BS)
+    RB = triton.cdiv(R, min(R, max(1, triton.cdiv(SHARED_IK_PROGRAMS, nblk))))   # rows a tile program scores
+    if shared is None:                    # decode / verify rows (graph widths, warmed with their graphs)
+        shared = SHARED_IK and kbase is not None
+    if q4 and shared:
+        _index_scores_tile[(nblk, triton.cdiv(R, RB))](iq.contiguous(), wts.contiguous(), kq, pos, scores, S, ratio,
+                                                       kbase if kbase is not None else pos, ks, R, RB, HI=HI, DI=DI,
+                                                       BS=BS, RP=triton.next_power_of_2(R),
+                                                       HAS_BASE=kbase is not None, SINGLE=RB == 1, num_warps=4)
+        return scores
     _index_scores[(R, triton.cdiv(S, BS))](iq.contiguous(), wts.contiguous(), kq, pos, scores, S, ratio,
                                            kbase if kbase is not None else pos, ks, HI=HI, DI=DI, BS=BS,
                                            HAS_BASE=kbase is not None, FP8=fp8, num_warps=4, **({"FP4": True} if q4 else {}))
