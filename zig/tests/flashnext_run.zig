@@ -111,6 +111,113 @@ const glue_source =
     \\}
 ;
 
+
+/// Routed and shared experts at full width (FZ_XNEW=1): a 6-bit group read as six aligned words, 16 lanes a gate/up
+/// row (5 groups each) and 4 lanes a down row, 4 simdgroups a threadgroup; routing (top-k, weights) unchanged.
+const xnew_source =
+    \\inline void fz_codes6(const device uint* w, thread float* q) {
+    \\  const uint2 a = *(const device uint2*)(w), b = *(const device uint2*)(w + 2), c = *(const device uint2*)(w + 4);
+    \\  const ulong lo = ulong(a.x) | (ulong(a.y) << 32), mid = ulong(b.x) | (ulong(b.y) << 32), hi = ulong(c.x) | (ulong(c.y) << 32);
+    \\  #pragma unroll
+    \\  for (int i = 0; i < 32; i++) {
+    \\    const int bit = 6 * i;
+    \\    uint v;
+    \\    if (bit + 6 <= 64) v = uint(lo >> bit) & 63u;
+    \\    else if (bit < 64) v = (uint(lo >> bit) | uint(mid << (64 - bit))) & 63u;
+    \\    else if (bit + 6 <= 128) v = uint(mid >> (bit - 64)) & 63u;
+    \\    else if (bit < 128) v = (uint(mid >> (bit - 64)) | uint(hi << (128 - bit))) & 63u;
+    \\    else v = uint(hi >> (bit - 128)) & 63u;
+    \\    q[i] = float(v);
+    \\  }
+    \\}
+    \\inline void fz_group(const device uint* w, const device bfloat* x, thread float& qx, thread float& sx) {
+    \\  float q[32];
+    \\  fz_codes6(w, q);
+    \\  const device bfloat4* x4 = (const device bfloat4*)x;
+    \\  qx = 0.0f; sx = 0.0f;
+    \\  #pragma unroll
+    \\  for (int i = 0; i < 8; i++) {
+    \\    const float4 v = float4(x4[i]);
+    \\    qx += q[4 * i] * v.x + q[4 * i + 1] * v.y + q[4 * i + 2] * v.z + q[4 * i + 3] * v.w;
+    \\    sx += v.x + v.y + v.z + v.w;
+    \\  }
+    \\}
+    \\[[kernel]] void fz_xgu(const device bfloat* X [[buffer(0)]], const device float* LOGITS [[buffer(1)]],
+    \\    const device uint* GW [[buffer(2)]], const device bfloat* GS [[buffer(3)]], const device bfloat* GB [[buffer(4)]],
+    \\    const device uint* UW [[buffer(5)]], const device bfloat* US [[buffer(6)]], const device bfloat* UB [[buffer(7)]],
+    \\    const device uint* SGW [[buffer(8)]], const device bfloat* SGS [[buffer(9)]], const device bfloat* SGB [[buffer(10)]],
+    \\    const device uint* SUW [[buffer(11)]], const device bfloat* SUS [[buffer(12)]], const device bfloat* SUB [[buffer(13)]],
+    \\    device bfloat* ACT [[buffer(14)]], device uint* PICK [[buffer(15)]], device float* WTS [[buffer(16)]],
+    \\    uint sgi [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    \\    uint3 tg [[threadgroup_position_in_grid]]) {
+    \\  constexpr int K = 2560, N = 640, TOPK = 10, NE = 512, NL = 513, SLOTS = TOPK + 1, WPR = K * 6 / 32, KG = K / 32;
+    \\  const int p = int(tg.z);
+    \\  const int r = p / SLOTS, slot = p % SLOTS;
+    \\  const bool shared = slot == TOPK;
+    \\  float picked[TOPK];
+    \\  const size_t e = shared ? 0 : size_t(simd_topk<NE>(LOGITS + r * NL, slot, lane, picked));
+    \\  if (!shared && tg.y == 0 && sgi == 0 && lane == 0) {
+    \\    PICK[r * TOPK + slot] = uint32_t(e);
+    \\    if (slot == TOPK - 1) {
+    \\      float total = 0.0f;
+    \\      float ex[TOPK];
+    \\      for (int kk = 0; kk < TOPK; kk++) { ex[kk] = metal::exp(picked[kk] - picked[0]); total += ex[kk]; }
+    \\      for (int kk = 0; kk < TOPK; kk++) WTS[r * TOPK + kk] = float(bfloat(ex[kk] / total));
+    \\    }
+    \\  }
+    \\  const int row = int(tg.y) * 8 + int(sgi) * 2 + int(lane >> 4);
+    \\  const int part = int(lane & 15);
+    \\  const size_t wrow = (shared ? 0 : e * N * WPR) + size_t(row) * WPR + part * 30;
+    \\  const size_t grow = (shared ? 0 : e * N * KG) + size_t(row) * KG + part * 5;
+    \\  const device uint* gw = (shared ? SGW : GW) + wrow;
+    \\  const device uint* uw = (shared ? SUW : UW) + wrow;
+    \\  const device bfloat* gs = (shared ? SGS : GS) + grow;
+    \\  const device bfloat* gb = (shared ? SGB : GB) + grow;
+    \\  const device bfloat* us = (shared ? SUS : US) + grow;
+    \\  const device bfloat* ub = (shared ? SUB : UB) + grow;
+    \\  const device bfloat* x = X + r * K + part * 160;
+    \\  float ag = 0.0f, au = 0.0f;
+    \\  for (int j = 0; j < 5; j++) {
+    \\    float qg, qu, sx, sx2;
+    \\    fz_group(gw + j * 6, x + j * 32, qg, sx);
+    \\    fz_group(uw + j * 6, x + j * 32, qu, sx2);
+    \\    ag += float(gs[j]) * qg + float(gb[j]) * sx;
+    \\    au += float(us[j]) * qu + float(ub[j]) * sx;
+    \\  }
+    \\  for (ushort o = 8; o > 0; o >>= 1) { ag += simd_shuffle_xor(ag, o); au += simd_shuffle_xor(au, o); }
+    \\  if (part == 0) ACT[p * N + row] = bfloat(bsilu(float(bfloat(ag))) * float(bfloat(au)));
+    \\}
+    \\[[kernel]] void fz_xdown(const device bfloat* ACT [[buffer(0)]], const device uint* PICK [[buffer(1)]],
+    \\    const device uint* DW [[buffer(2)]], const device bfloat* DS [[buffer(3)]], const device bfloat* DB [[buffer(4)]],
+    \\    const device uint* SDW [[buffer(5)]], const device bfloat* SDS [[buffer(6)]], const device bfloat* SDB [[buffer(7)]],
+    \\    const constant int* rows [[buffer(8)]], device bfloat* Y [[buffer(9)]],
+    \\    uint sgi [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    \\    uint3 tg [[threadgroup_position_in_grid]]) {
+    \\  constexpr int NI = 640, D = 2560, TOPK = 10, SLOTS = TOPK + 1, WPR = NI * 6 / 32, KG = NI / 32;
+    \\  const int pair = int(tg.z);
+    \\  if (pair >= rows[0] * SLOTS) return;
+    \\  const int r = pair / SLOTS, k = pair % SLOTS;
+    \\  const bool shared = k == TOPK;
+    \\  const size_t e = shared ? 0 : size_t(PICK[r * TOPK + k]);
+    \\  const int d = int(tg.y) * 32 + int(sgi) * 8 + int(lane >> 2);
+    \\  const int part = int(lane & 3);
+    \\  const device uint* w = (shared ? SDW : DW + e * D * WPR) + size_t(d) * WPR + part * 30;
+    \\  const size_t g0 = (shared ? 0 : e * D * KG) + size_t(d) * KG + part * 5;
+    \\  const device bfloat* sc = (shared ? SDS : DS) + g0;
+    \\  const device bfloat* bi = (shared ? SDB : DB) + g0;
+    \\  const device bfloat* x = ACT + (r * SLOTS + k) * NI + part * 160;
+    \\  float acc = 0.0f;
+    \\  for (int j = 0; j < 5; j++) {
+    \\    float qx, sx;
+    \\    fz_group(w + j * 6, x + j * 32, qx, sx);
+    \\    acc += float(sc[j]) * qx + float(bi[j]) * sx;
+    \\  }
+    \\  acc += simd_shuffle_xor(acc, 1);
+    \\  acc += simd_shuffle_xor(acc, 2);
+    \\  if (part == 0) Y[(r * SLOTS + k) * D + d] = bfloat(acc);
+    \\}
+;
+
 fn readAll(fd: std.c.fd_t, dest: []u8, at: usize) !void {
     var done: usize = 0;
     while (done < dest.len) {
@@ -138,6 +245,9 @@ const Run = struct {
     add_pipe: mtl.Pipeline = undefined,
     argids_pipe: mtl.Pipeline = undefined,
     pleids_pipe: mtl.Pipeline = undefined,
+    xnew: bool = false,
+    xgu_pipe: mtl.Pipeline = undefined,
+    xdown_pipe: mtl.Pipeline = undefined,
 
     fn buffer(r: *Run, len: usize) !mtl.Buffer {
         const n = @max(len, 64);
@@ -228,6 +338,21 @@ const Run = struct {
         r.add_pipe = try mtl.Pipeline.init(r.device, glue, "fz_bcast_add", false);
         r.argids_pipe = try mtl.Pipeline.init(r.device, glue, "fz_argmax_ids", false);
         r.pleids_pipe = try mtl.Pipeline.init(r.device, glue, "fz_ple_ids", false);
+        if (r.xnew) { // the recorded gate/up kernel's header (simd_topk, bsilu) with the full-width expert kernels after it
+            var hit: ?[]const u8 = null;
+            var it = plan.object.get("variants").?.object.iterator();
+            while (it.next()) |kv| if (std.mem.indexOf(u8, kv.key_ptr.*, "qa_expert_gateup") != null) {
+                hit = kv.value_ptr.object.get("file").?.string;
+            };
+            const fp = try std.fmt.allocPrintSentinel(r.arena, "{s}/{s}", .{ dir, hit orelse return error.NoGateup }, 0);
+            const ff = try mtl.MappedFile.open(fp);
+            const text = ff.bytes[0..ff.size];
+            const cut = std.mem.indexOf(u8, text, "[[kernel]]") orelse return error.NoKernel;
+            const full = try std.mem.concat(r.arena, u8, &.{ text[0..cut], xnew_source });
+            const lib = try mtl.Library.fromSource(r.device, full, mtl.CompileOptions.mlx());
+            r.xgu_pipe = try mtl.Pipeline.init(r.device, lib, "fz_xgu", false);
+            r.xdown_pipe = try mtl.Pipeline.init(r.device, lib, "fz_xdown", false);
+        }
     }
 
     fn strings(a: std.mem.Allocator, v: std.json.Value) ![][]const u8 {
@@ -239,6 +364,27 @@ const Run = struct {
     fn size3(v: std.json.Value) mtl.Size {
         const a = v.array.items;
         return mtl.Size.of(@intCast(a[0].integer), @intCast(a[1].integer), @intCast(a[2].integer));
+    }
+
+
+    /// The MoE's routed and shared experts for `rows` rows: gate/up (with routing) then down.
+    fn experts(r: *Run, gu_role: []const u8, down_role: []const u8, x: Buf, lg: Buf, e: [18]Buf, act: Buf, pick: Buf, wts: Buf, rows_buf: Buf, y: Buf) !void {
+        if (!r.xnew) {
+            try r.call(gu_role, &.{ x, lg, e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8], e[9], e[10], e[11] }, &.{ act, pick, wts });
+            try r.call(down_role, &.{ act, pick, e[12], e[13], e[14], e[15], e[16], e[17], rows_buf }, &.{y});
+            return;
+        }
+        const pairs = r.rows * 11;
+        r.enc.setPipeline(r.xgu_pipe);
+        const gu = [_]Buf{ x, lg, e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8], e[9], e[10], e[11], act, pick, wts };
+        for (gu, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
+        r.enc.dispatchThreads(mtl.Size.of(128, 80, pairs), mtl.Size.of(128, 1, 1));
+        if (!r.serial) r.enc.barrier();
+        r.enc.setPipeline(r.xdown_pipe);
+        const dn = [_]Buf{ act, pick, e[12], e[13], e[14], e[15], e[16], e[17], rows_buf, y };
+        for (dn, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
+        r.enc.dispatchThreads(mtl.Size.of(128, 80, pairs), mtl.Size.of(128, 1, 1));
+        if (!r.serial) r.enc.barrier();
     }
 
     /// One launch of `role` at the current row count, inputs and outputs in the variant's order.
@@ -614,9 +760,7 @@ const Model = struct {
             cur = 1 - cur;
             try m.hcProject(t.h[cur], L.mhc, "qa_hc_down@mhc", "qa_hc_up@mhc", t.inj_m);
             try r.call("q4_router_float@moe", &.{ t.mixed, L.router, t.rows }, &.{t.lg});
-            const e = L.ex;
-            try r.call("qa_expert_gateup@moe.gate", &.{ t.mixed, t.lg, e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8], e[9], e[10], e[11] }, &.{ t.act, t.pick, t.wts });
-            try r.call("qa_expert_down_y@moe.down", &.{ t.act, t.pick, e[12], e[13], e[14], e[15], e[16], e[17], t.rows }, &.{t.ydown});
+            try r.experts("qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown);
             pending = .grouped;
         }
         try m.grouped(t.h[cur], t.h[1 - cur]);
@@ -700,9 +844,7 @@ const Model = struct {
         try r.call("mtp:q4_hc_norm_plain#[10240]", &.{ h.h[1], t.inj_a, t.branch }, &.{ h.h[0], t.ssp });
         try m.mtpProject(h.h[0], h.mhc, down[1], up[1], t.inj_m, sl.rows);
         try r.call("mtp:q4_router_float@mtp.moe", &.{ t.mixed, h.router, sl.rows }, &.{t.lg});
-        const e = h.ex;
-        try r.call("mtp:qa_expert_gateup@mtp.moe.gate", &.{ t.mixed, t.lg, e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8], e[9], e[10], e[11] }, &.{ t.act, t.pick, t.wts });
-        try r.call("mtp:qa_expert_down_y@mtp.moe.down", &.{ t.act, t.pick, e[12], e[13], e[14], e[15], e[16], e[17], sl.rows }, &.{t.ydown});
+        try r.experts("mtp:qa_expert_gateup@mtp.moe.gate", "mtp:qa_expert_down_y@mtp.moe.down", t.mixed, t.lg, h.ex, t.act, t.pick, t.wts, sl.rows, t.ydown);
         try r.call("mtp:q4_hc_norm_grouped#[10240]", &.{ h.h[0], t.inj_m, t.ydown, t.wts, t.lg }, &.{ h.h[1], t.ssp });
         h.last = .{ .b = h.h[1].b, .off = (rows - 1) * WIDE * 2 };
         try m.mtpProject(h.h[1], h.mix, down[2], up[2], t.inj_a, sl.rows);
@@ -779,6 +921,7 @@ pub fn main(init: std.process.Init) !void {
     var r = Run{ .arena = arena, .device = device, .queue = try device.queue() };
     r.fused_xsum = std.c.getenv("FZ_FUSED_XSUM") != null;
     r.serial = std.c.getenv("FZ_SERIAL") != null;
+    r.xnew = std.c.getenv("FZ_XNEW") != null;
     const t0 = mtl.clock.seconds();
     try r.compile(args[2]);
     const t1 = mtl.clock.seconds();
@@ -1019,6 +1162,7 @@ pub fn main(init: std.process.Init) !void {
     }
     std.debug.print("drafted windows: {d} rounds, {d}/{d} rows equal to Python's\n", .{ rounds.len, total_rows - bad, total_rows });
 
+    const ref_tokens: []const u32 = got.items;
     // 4. the MTP head against the Python engine's drafts (absorb windows of 1-8 rows, then a chain)
     {
         const mref = ref.object.get("mtp").?.object;
@@ -1095,7 +1239,7 @@ pub fn main(init: std.process.Init) !void {
         }
         const wall = mtl.clock.seconds() - s0;
         var eq: usize = 0;
-        while (eq < want.len and out.items[eq] == @as(u32, @intCast(want[eq].integer))) eq += 1;
+        while (eq < want.len and out.items[eq] == (if (r.xnew) ref_tokens[eq] else @as(u32, @intCast(want[eq].integer)))) eq += 1;
         std.debug.print("depth {d}: {d}/{d} tokens equal; {d} rounds, {d:.2} tokens a round, {d:.2} of {d} drafts landing; {d:.1} tok/s\n", .{ depth, eq, want.len, n_rounds, @as(f64, @floatFromInt(out.items.len - 1)) / @as(f64, @floatFromInt(n_rounds)), @as(f64, @floatFromInt(landed)) / @as(f64, @floatFromInt(n_rounds)), depth, @as(f64, @floatFromInt(out.items.len - 1)) / wall });
         if (eq < want.len) bad += 1;
     }
@@ -1170,7 +1314,7 @@ pub fn main(init: std.process.Init) !void {
         }
         const wall = mtl.clock.seconds() - s0;
         var eq: usize = 0;
-        while (eq < want.len and out.items[eq] == @as(u32, @intCast(want[eq].integer))) eq += 1;
+        while (eq < want.len and out.items[eq] == (if (r.xnew) ref_tokens[eq] else @as(u32, @intCast(want[eq].integer)))) eq += 1;
         const made: f64 = @floatFromInt(out.items.len - 1);
         std.debug.print("one buffer a round, depth {d}: {d}/{d} tokens equal; {d:.2} tokens a round, {d:.2} of {d} drafts landing; {d:.1} tok/s (GPU busy {d:.0}%)\n", .{ depth, eq, want.len, made / @as(f64, @floatFromInt(n_rounds)), @as(f64, @floatFromInt(landed)) / @as(f64, @floatFromInt(n_rounds)), depth, made / wall, 100 * m.gpu_seconds / wall });
         if (eq < want.len) bad += 1;
