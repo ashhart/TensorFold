@@ -59,6 +59,19 @@ fingerprint covers the deterministic outputs only (tokens, logits diffs, view ha
 runs the tier, then every test again in its own process, and `python3 tools/dsv41_suite.py prove` checks that each
 fresh run printed the suite's fingerprint (`out/suite-<stamp>/prove.txt`).
 
+### Measured (2026-10-05, merged dsv41-cuda)
+
+| what | wall |
+|---|---|
+| quick tier as one-load suites (`q` + `fp8`, prepared folders) | **168 s** end to end (2 processes; weights 22-24 s each) |
+| the same 7 tests as fresh invocations, prepared folders | 370 s (48-62 s each) |
+| the same 7 tests as fresh invocations from the checkpoint (the old loop) | 499 s (62-81 s each; weights ~41 s with a warm page cache, ~82 s cold) |
+| quick tier as one-load suites from the checkpoint (`TF_DSV41_PREPARED=`) | 202 s |
+
+`TF_SUITE_PROVE=1 tools/dsv41_suite2.sh quick`: every fingerprint equal in the suite and in a fresh process (7/7), and
+equal from the prepared folders and from the checkpoint. chunk-prefill's fingerprint holds the whole prefill's
+last-row logits (sha256 of the bytes), the others the decoded tokens / view hashes.
+
 ## Prepared weights in dev runs
 
 The compose server's `make prepare` writes each rank's built weights to `PREPARED_DIR`
@@ -76,7 +89,8 @@ The compose server's `make prepare` writes each rank's built weights to `PREPARE
 
 A key miss is not an error: the run builds from the checkpoint as before and says why (`key differs (code)`). Nothing in
 a dev run writes a folder: aiai's disk holds one (79 GB free beside a 99 GB folder on 2026-10-05), and `make prepare`
-prunes the old one first. To recreate tf-dev with the mount (once a node, both nodes):
+prunes the old one first. tf-dev on aiai and aiai2 was recreated with the mount on 2026-10-05 (old containers kept stopped as
+`tf-dev-old-<stamp>`, their layers as `tf-dev-snapshot:<stamp>`). To recreate tf-dev with the mount (once a node, both nodes):
 
     python3 tools/dsv41_tfdev_recreate.py aiai            # dry run: docker inspect saved to out/, commands printed
     python3 tools/dsv41_tfdev_recreate.py aiai --apply    # commit, rename + stop the old one, run the new one, check
