@@ -1,0 +1,222 @@
+"""Write what the Zig Flash Next family runs from the Python engine: kernels, launch sites, a prepared-weight pack,
+reference tokens from one-row steps, and per-call fixtures of one step. Run with TF_FLASH_PLE_KERNELS=1."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+import mlx.core as mx
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from metal_source import PREAMBLE, Arg, kernel_text  # noqa: E402
+
+KERNELS: dict[str, dict] = {}
+CALLS: list[dict] = []
+ROLE: dict[int, str] = {}           # id of a persistent prepared array -> its role name
+FIX = {"on": False, "blobs": [], "offset": 0}
+_orig = mx.fast.metal_kernel
+
+
+def _dtype(a: mx.array) -> str:
+    return str(a.dtype).replace("mlx.core.", "")
+
+
+def metal_kernel(name, input_names, output_names, source, header="", ensure_row_contiguous=True,
+                 atomic_outputs=False):
+    k = _orig(name=name, input_names=input_names, output_names=output_names, source=source, header=header,
+              ensure_row_contiguous=ensure_row_contiguous, atomic_outputs=atomic_outputs)
+    KERNELS[name] = {"inputs": list(input_names), "outputs": list(output_names), "source": source, "header": header}
+
+    def call(*args, **kw):
+        outs = k(*args, **kw)
+        if FIX["on"]:
+            ins = kw.get("inputs", args[0] if args else [])
+            entry = {"kernel": name, "grid": list(kw["grid"]), "threadgroup": list(kw["threadgroup"]),
+                     "template": [[t[0], t[1] if isinstance(t[1], (bool, int)) else str(t[1])]
+                                  for t in kw.get("template", [])],
+                     "inputs": [], "outputs": []}
+            for a in ins:
+                d = {"dtype": _dtype(a), "shape": list(a.shape), "size": int(a.size)}
+                if id(a) in ROLE:
+                    d["role"] = ROLE[id(a)]
+                elif a.size <= 64:
+                    d["value"] = a.tolist()
+                entry["inputs"].append(d)
+            mx.eval(*outs)
+            for o in outs:
+                d = {"dtype": _dtype(o), "shape": list(o.shape), "size": int(o.size)}
+                if o.size <= 1 << 16:
+                    raw = np.array(o.view(mx.uint8)).tobytes()
+                    d["at"], d["bytes"] = FIX["offset"], len(raw)
+                    FIX["blobs"].append(raw)
+                    FIX["offset"] += len(raw)
+                entry["outputs"].append(d)
+            CALLS.append(entry)
+        return outs
+
+    return call
+
+
+mx.fast.metal_kernel = metal_kernel
+
+
+
+def lane(decode, linear) -> tuple[mx.array, mx.array, int]:
+    hit = decode._lane[id(linear)]
+    return hit[1], hit[2], int(hit[3])
+
+
+def build_pack(rt) -> tuple[dict[str, mx.array], dict[str, int]]:
+    from tensorfold.families.qwen4_exp import decode
+
+    fused, pack, tiles = rt.fused, {}, {}
+
+    def put(name, a):
+        pack[name] = a
+        ROLE[id(a)] = name
+
+    def put_lane(name, linear):
+        wq, sbt, nt = lane(decode, linear)
+        put(name + ".wq", wq)
+        put(name + ".sbt", sbt)
+        tiles[name] = nt
+
+    def put_hc(name, hc):
+        put(name + ".scale", hc.scale)
+        for part, q in (("down", hc.down), ("up", hc.up)):
+            put(f"{name}.{part}.w", q.weight)
+            put(f"{name}.{part}.s", q.scales)
+            put(f"{name}.{part}.b", q.biases)
+
+    put("eps", fused.eps)
+    for i, (layer, entry) in enumerate(zip(rt.model.layers, fused.layers)):
+        put_hc(f"L{i}.ahc", entry["attn_hc"])
+        put_hc(f"L{i}.mhc", entry["mlp_hc"])
+        if layer.is_linear:
+            proj, conv_w, g = entry["gdn"]
+            put_lane(f"L{i}.gdn.in", proj)
+            put_lane(f"L{i}.gdn.out", g.out_proj)
+            put(f"L{i}.gdn.conv", conv_w)
+            put(f"L{i}.gdn.alog", g.A_log)
+            put(f"L{i}.gdn.dt", g.dt_bias)
+            put(f"L{i}.gdn.norm", g.norm.weight)
+        else:
+            proj, qs, ks, iqs, pool, a = entry["attn"]
+            put_lane(f"L{i}.att.proj", proj)
+            put_lane(f"L{i}.att.o", a.o_proj)
+            for nm, v in (("qn", qs), ("kn", ks), ("iqn", iqs), ("pool", pool)):
+                put(f"L{i}.att.{nm}", v)
+        moe, router = entry["moe"]
+        put(f"L{i}.moe.router", router)
+        sw, se = moe.switch_mlp, moe.shared_expert
+        for nm, lin in (("gate", sw.gate_proj), ("up", sw.up_proj), ("down", sw.down_proj),
+                        ("sgate", se.gate_proj), ("sup", se.up_proj), ("sdown", se.down_proj)):
+            ROLE[id(lin.weight)], ROLE[id(lin.scales)], ROLE[id(lin.biases)] = (
+                f"ck:L{i}.moe.{nm}.w", f"ck:L{i}.moe.{nm}.s", f"ck:L{i}.moe.{nm}.b")
+    put_hc("mix", fused.mixer)
+    put_lane("head", rt.model.lm_head)
+    for i, layer in enumerate(rt.model.layers):
+        if "ple" in layer:
+            kv, ks, qs, cs, cw = fused.ple_parts[id(layer.ple)]
+            put_lane("ple.kv", kv)
+            put("ple.ks", ks)
+            put("ple.qs", qs)
+            put("ple.cs", cs)
+            put("ple.conv", cw)
+            put("ple.starts", fused.ple_tables.starts)
+            for s, (w, sc, b) in enumerate(zip(fused.ple_tables.weights, fused.ple_tables.scales,
+                                               fused.ple_tables.biases)):
+                ROLE[id(w)], ROLE[id(sc)], ROLE[id(b)] = f"ck:ple.w{s}", f"ck:ple.s{s}", f"ck:ple.b{s}"
+    emb = rt.model.model.embed_tokens
+    ROLE[id(emb.weight)], ROLE[id(emb.scales)], ROLE[id(emb.biases)] = "ck:embed.w", "ck:embed.s", "ck:embed.b"
+    return {k: v for k, v in pack.items() if not k.startswith("ck:")}, tiles
+
+
+def site_of(entry: dict) -> str:
+    """A launch site: the kernel family and the role stem of its first weight (layer dropped), else its input shape."""
+
+    base = entry["kernel"].rsplit("_", 1)[0]
+    for d in entry["inputs"]:
+        if "role" in d:
+            stem = d["role"].split(":", 1)[-1].rsplit(".", 1)[0]
+            stem = ".".join(p for p in stem.split(".") if not (p.startswith("L") and p[1:].isdigit()))
+            return f"{base}@{stem}"
+    return f"{base}#{entry['inputs'][0]['shape']}"
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("model", type=Path)
+    ap.add_argument("out", type=Path)
+    ap.add_argument("--prompt", default="Write a story about a lighthouse keeper.")
+    ap.add_argument("--tokens", type=int, default=64)
+    ap.add_argument("--fixture-step", type=int, default=3)
+    args = ap.parse_args()
+    assert os.environ.get("TF_FLASH_PLE_KERNELS") == "1", "run with TF_FLASH_PLE_KERNELS=1"
+    out = args.out
+    (out / "kernels").mkdir(parents=True, exist_ok=True)
+    from tensorfold.families.qwen4_exp.runtime import load
+    from tensorfold.server.text import render_prompt_ids
+
+    rt, tok = load(args.model, drafts=0)
+    prompt = [int(t) for t in render_prompt_ids(tok, [{"role": "user", "content": args.prompt}],
+                                                enable_thinking=False)]
+    cache = rt.model.make_cache()
+
+    def step(t: int) -> int:
+        logits = rt.head(rt.model.hidden(np.array([[t]], dtype=np.int64), cache))
+        return int(mx.argmax(logits[0, -1]).item())
+
+    nxt = 0
+    for t in prompt:
+        nxt = step(t)
+    pack, tiles = build_pack(rt)            # after a forward: every lane weight is tiled
+    made, fixture_input = [nxt], -1
+    for g in range(args.tokens - 1):
+        FIX["on"] = g == args.fixture_step
+        if FIX["on"]:
+            fixture_input = made[-1]
+        made.append(step(made[-1]))
+        FIX["on"] = False
+    mx.save_safetensors(str(out / "pack.safetensors"), pack)
+    (out / "fixtures.bin").write_bytes(b"".join(FIX["blobs"]))
+    variants, sites = {}, {}
+    for c in CALLS:
+        k = KERNELS[c["kernel"]]
+        ins = [Arg(n, d["dtype"], d["size"], len(d["shape"])) for n, d in zip(k["inputs"], c["inputs"])]
+        outs = [Arg(n, d["dtype"], d["size"], len(d["shape"])) for n, d in zip(k["outputs"], c["outputs"])]
+        fname, text = kernel_text(c["kernel"], ins, outs, k["source"], k["header"], c["template"])
+        c["function"] = fname
+        if fname not in variants:
+            (out / "kernels" / f"{c['kernel']}.metal").write_text(PREAMBLE + text)
+            variants[fname] = {"kernel": c["kernel"], "file": f"kernels/{c['kernel']}.metal", "inputs": k["inputs"], "outputs": k["outputs"],
+                               "meta": sorted({m for n in k["inputs"] for m in (n + "_shape", n + "_strides")
+                                               if m in k["source"]})}
+        c["site"] = site = site_of(c)
+        sites.setdefault(site, {"function": fname, "grid": c["grid"], "threadgroup": c["threadgroup"]})
+    cfg = rt.model.args
+    ple = next(l.ple for l in rt.model.layers if "ple" in l)
+    e = ple.ple_embedding
+    ref = {"prompt": prompt, "tokens": made, "fixture_step": args.fixture_step, "fixture_input": fixture_input,
+           "lane_tiles": tiles, "ple": {"n": int(e.n), "context": int(e.context), "per": int(e.per_ngram),
+                                        "heads": int(e.heads), "eos": int(e.eos), "sizes": e.head_sizes.tolist(),
+                                        "offsets": e.head_offsets.tolist(),
+                                        "multipliers": [int(m) for m in e.multipliers],
+                                        "starts": list(map(int, e.shard_starts)), "tail": int(ple.tail),
+                                        "dilation": int(ple.dilation), "layer": next(
+                                            i for i, l in enumerate(rt.model.layers) if "ple" in l)},
+           "attention_scale": float(next(l.self_attn.scale for l in rt.model.layers if not l.is_linear)),
+           "eps": float(cfg.rms_norm_eps)}
+    (out / "ref.json").write_text(json.dumps(ref, indent=1))
+    (out / "plan.json").write_text(json.dumps({"variants": variants, "sites": sites, "calls": CALLS}, indent=1))
+    print(f"prompt {len(prompt)} tokens, {len(made)} made, {len(CALLS)} calls, {len(variants)} variants, "
+          f"{len(sites)} sites, pack {len(pack)} tensors, fixtures {FIX['offset']} bytes")
+
+
+if __name__ == "__main__":
+    main()

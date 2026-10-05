@@ -82,6 +82,8 @@ def first(a: mx.array) -> mx.array:
 _checked: set[tuple[int, int, int]] = set()
 # "lane": lane_qmm. "rows": per-row kernels. "simd": 4-bit groups of 32. "matrix": every width before M5.
 DENSE = os.environ.get("TF_FLASH_DENSE") or ("lane" if tensor_units() else "rows")
+# TF_FLASH_PLE_KERNELS=1: the PLE gate and conv through their kernels on every chip (the Zig engine's path)
+PLE_KERNELS = os.environ.get("TF_FLASH_PLE_KERNELS") == "1"
 _lane: dict[int, tuple[mx.array, mx.array, mx.array, int]] = {}   # id(linear) -> weight, tiled copy, scales, tile
 
 
@@ -443,7 +445,7 @@ class FusedDecode:
     def _ple_gate(self, ple: Any, emb: mx.array, h: mx.array) -> tuple[mx.array, mx.array]:
         """(gated, conv-normed) rows [R, S*D]: before M5 two kernels, otherwise the reference ops."""
 
-        parts = self.ple_parts.get(id(ple)) if DENSE == "rows" else None
+        parts = self.ple_parts.get(id(ple)) if DENSE == "rows" or PLE_KERNELS else None
         if parts is not None:
             kv, key_scale, query_scale, conv_scale, _ = parts
             return embed.ple_gate(project(emb, kv), h, key_scale, query_scale, conv_scale, self.eps,
@@ -461,7 +463,7 @@ class FusedDecode:
     def _ple_conv(self, ple: Any, conv_in: mx.array, gated: mx.array, h: mx.array) -> mx.array:
         """h + gated + SiLU(conv) for the rows after conv_in's tail [1, T + R, S*D]."""
 
-        parts = self.ple_parts.get(id(ple)) if DENSE == "rows" else None
+        parts = self.ple_parts.get(id(ple)) if DENSE == "rows" or PLE_KERNELS else None
         if parts is not None:
             return embed.ple_conv(first(conv_in), parts[-1], gated, h, streams=ple.streams, dilation=ple.dilation)
         return h + (gated + first(nn.silu(ple.conv1d(conv_in))))
