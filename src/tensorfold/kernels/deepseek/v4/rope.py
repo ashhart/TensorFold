@@ -30,7 +30,14 @@ _SOURCE = r"""
   const int base = int(lane) * PER;
   if (base + PER > D - PE) {
     const float pos = float(POS[r]);
-    for (int i = 0; i < PER; i += 2) {
+    // the tail's a*c - b*s / a*s + b*c must round each product separately, exactly as
+    // MLX's ops do: FMA contraction here hits bf16 tie-points a few times per 100k
+    // elements and broke bit-exactness (layer 5, token 6, 1-ulp scale, amplifying
+    // through every later layer). The norm path above keeps its own bits: contract off
+    // only inside this block.
+    {
+#pragma clang fp contract(off)
+      for (int i = 0; i < PER; i += 2) {
       const int d = base + i;
       if (d >= D - PE) {
         const float th = pos * INV[(d - (D - PE)) / 2];
@@ -40,6 +47,7 @@ _SOURCE = r"""
         v[i] = a * c - b * s;
         v[i + 1] = a * s + b * c;
       }
+    }
     }
   }
   device bfloat* o = OUT + size_t(n) * D + lane * PER;

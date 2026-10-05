@@ -30,7 +30,15 @@ def _arrays_in(value: Any) -> list[Any]:
 def cache_arrays(cache: list[Any]) -> list[Any]:
     """Every array a cache list holds (a KV cache nothing was written to yet has none)."""
 
-    return [a for item in cache if getattr(item, "keys", 0) is not None for a in _arrays_in(item.state)]
+    held: list[Any] = []
+    for item in cache:
+        if hasattr(item, "keys"):
+            if item.keys is None:            # a KV cache nothing was written to yet holds no arrays
+                continue
+        elif not hasattr(item, "state"):     # a tail entry without arrays (an engram history's ids)
+            continue
+        held.extend(_arrays_in(item.state))
+    return held
 
 
 def cache_contents(item: Any) -> list[Any]:

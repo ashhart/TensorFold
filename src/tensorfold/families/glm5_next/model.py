@@ -34,6 +34,18 @@ class HC:
             mixes = K.matmul_rows(z, self.fn, transposed=False)
         else:
             mixes = per_row(lambda r: r @ self.fn.T, z, rows_exact)
+        if rows > 1 and rows_exact and not K.metal():
+            # CPU rms_norm / Sinkhorn ops are not row-invariant (a batched slab's reductions
+            # round differently than one row's); a decode window takes the boundary one row a
+            # call so its rows keep their one-row bits (the Metal kernels are per-row already)
+            ones = [K.hc_split(x[r:r + 1],
+                               mx.fast.rms_norm(x[r:r + 1].astype(mx.float32).reshape(1, -1), None,
+                                                self.cfg.rms_norm_eps) @ self.fn.T,
+                               self.scale, self.base, hc=self.cfg.hc_mult,
+                               iters=self.cfg.hc_sinkhorn_iters, eps=self.cfg.hc_eps)
+                    for r in range(rows)]
+            return (mx.concatenate([o[0] for o in ones]), mx.concatenate([o[1] for o in ones]),
+                    mx.concatenate([o[2] for o in ones]))
         return K.hc_split(x, mixes, self.scale, self.base, hc=self.cfg.hc_mult, iters=self.cfg.hc_sinkhorn_iters,
                           eps=self.cfg.hc_eps)
 
