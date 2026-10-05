@@ -77,6 +77,31 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("{d} of {d} sources compiled\n", .{ files.items.len - failed, files.items.len });
         std.process.exit(if (failed == 0) 0 else 1);
     }
+    if (std.c.getenv("FZ_MMA_PEAK") != null) { // the tensor units' rate on register fragments: 16x32x16 ops a second
+        const asrc = try std.mem.replaceOwned(u8, arena, ks.flashnext_attn, "#include \"../nax.h\"", ks.nax);
+        const alib = try mtl.Library.fromSource(device, asrc, mtl.CompileOptions.mlx());
+        const pipe = try mtl.Pipeline.init(device, alib, "tf_mma_peak", false);
+        const queue = try device.queue();
+        const x = try device.buffer(64 * 64 * 2, opts);
+        @memset(x.contents()[0 .. 64 * 64 * 2], 0);
+        const y = try device.buffer(4 * 4 * 65536, opts);
+        const iters: i32 = 4096;
+        for ([_]usize{ 1024, 4096, 16384 }) |groups| {
+            const cb = queue.commandBuffer();
+            const enc = cb.compute(.serial);
+            enc.setPipeline(pipe);
+            enc.setBuffer(x, 0, 0);
+            enc.setBytes(std.mem.asBytes(&iters), 1);
+            enc.setBuffer(y, 0, 2);
+            enc.dispatchThreads(mtl.Size.of(groups * 128, 1, 1), mtl.Size.of(128, 1, 1));
+            enc.end();
+            cb.commit();
+            cb.wait();
+            const flops = @as(f64, @floatFromInt(groups * 4)) * @as(f64, @floatFromInt(iters)) * 4.0 * (16.0 * 32.0 * 16.0 * 2.0);
+            std.debug.print("tensor-op peak, {d} threadgroups of 4 simdgroups: {d:.1} TFLOPS ({d:.2} ms)\n", .{ groups, flops / cb.gpuSeconds() / 1e12, cb.gpuSeconds() * 1e3 });
+        }
+        return;
+    }
     if (std.c.getenv("FZ_ENGINE") != null) { // the served engine: its own load, warm-up and reply, on FZ_REF's prompt
         const fx = @import("tensorfold").flashnext_engine;
         const rp = std.mem.span(std.c.getenv("FZ_REF") orelse return error.NoRef);
@@ -540,7 +565,7 @@ pub fn main(init: std.process.Init) !void {
             var best: [2]f64 = .{ 1e9, 1e9 };
             const ab: []const u8 = if (std.c.getenv("FZ_AB")) |v| std.mem.span(v) else "attn";
             for (0..2) |arm| { // arm 0 the old kernels, arm 1 the new: FZ_AB attn (default), scan or tiles
-                if (std.mem.eql(u8, ab, "scan")) pr.scan4 = arm == 1 else if (std.mem.eql(u8, ab, "tiles")) pr.tall_tiles = arm == 1 else if (std.mem.eql(u8, ab, "gu")) pr.fused_gu = arm == 1 else if (std.mem.eql(u8, ab, "bm32")) pr.expert_bm = if (arm == 1) 32 else 0 else pr.fast_attn = arm == 1;
+                if (std.mem.eql(u8, ab, "scan")) pr.scan4 = arm == 1 else if (std.mem.eql(u8, ab, "tiles")) pr.tall_tiles = arm == 1 else if (std.mem.eql(u8, ab, "gu")) pr.fused_gu = arm == 1 else if (std.mem.eql(u8, ab, "bm32")) pr.expert_bm = if (arm == 1) 32 else 0 else if (std.mem.eql(u8, ab, "scan8")) pr.scan8 = arm == 1 else pr.fast_attn = arm == 1;
                 for (0..3) |run| {
                     m.reset();
                     const c0 = mtl.clock.seconds();

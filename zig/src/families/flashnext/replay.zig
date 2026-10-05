@@ -1990,7 +1990,8 @@ pub const Prompt = struct {
     attn256: mtl.Pipeline,
     splitk: mtl.Pipeline,
     parts_sum: mtl.Pipeline,
-    pl: [15]mtl.Pipeline, // normed, act, mix, router, route, offsets, sort, gather rows, act2, scatter, copy, DeltaNet pre/scan/post, scan4
+    pl: [16]mtl.Pipeline, // normed, act, mix, router, route, offsets, sort, gather rows, act2, scatter, copy, DeltaNet pre/scan/post, scan4, scan8
+    scan8: bool = true, // scan4 with a state row over 16 lanes, 8 rows a simdgroup
     scan4: bool = true, // the DeltaNet recurrence with four state rows a simdgroup and both reductions at once
     gdn: Variant,
     gdn_grid: mtl.Size,
@@ -2014,6 +2015,7 @@ pub const Prompt = struct {
         p.step = PMAX;
         p.fast_attn = true;
         p.scan4 = true;
+        p.scan8 = true;
         p.tall_tiles = false; // measured: no faster than 64-row tiles (same bits)
         p.fused_gu = true;
         const asrc = try std.mem.replaceOwned(u8, r.arena, ks.flashnext_attn, "#include \"../nax.h\"", ks.nax);
@@ -2034,7 +2036,7 @@ pub const Prompt = struct {
         p.splitk = try mtl.Pipeline.init(r.device, qlib, "tf_qmm6_splitk_nax", false);
         p.parts_sum = try mtl.Pipeline.init(r.device, qlib, "tf_parts_sum", false);
         const glib = try mtl.Library.fromSource(r.device, try std.mem.concat(r.arena, u8, &.{ header, ks.flashnext_prompt }), mtl.CompileOptions.mlx());
-        const names = [_][:0]const u8{ "pf_hc_normed", "pf_hc_act", "pf_hc_mix", "pf_router", "pf_route", "pf_offsets", "pf_sort", "pf_gather_rows", "pf_act", "pf_scatter_y", "pf_copy", "pf_gdn_pre", "pf_gdn_scan", "pf_gdn_post", "pf_gdn_scan4" };
+        const names = [_][:0]const u8{ "pf_hc_normed", "pf_hc_act", "pf_hc_mix", "pf_router", "pf_route", "pf_offsets", "pf_sort", "pf_gather_rows", "pf_act", "pf_scatter_y", "pf_copy", "pf_gdn_pre", "pf_gdn_scan", "pf_gdn_post", "pf_gdn_scan4", "pf_gdn_scan8" };
         for (names, 0..) |n, i| p.pl[i] = try mtl.Pipeline.init(r.device, glib, n, false);
         // DeltaNet at the chunk's rows, storing only the last row's recurrent state (in row 0)
         const gs = r.roles.get("q4_gdn@gdn|8") orelse return error.NoSite;
@@ -2441,11 +2443,16 @@ pub const Prompt = struct {
                     for ([_]Buf{ b.qn, b.kn, b.v, b.gg, b.beta, L.cs[1 - a] }, 6..) |bb, j| r.enc.setBuffer(bb.b, bb.off, j);
                     r.enc.dispatchThreads(mtl.Size.of(80 * 128, rows, 1), mtl.Size.of(128, 1, 1));
                     p.barrier();
-                    p.bind(p.pl[if (p.scan4) 14 else 12], &.{ b.qn, b.kn, b.v, b.gg, b.beta, so_in });
+                    const scan: usize = if (p.scan4 and p.scan8) 15 else if (p.scan4) 14 else 12;
+                    p.bind(p.pl[scan], &.{ b.qn, b.kn, b.v, b.gg, b.beta, so_in });
                     r.enc.setBytes(std.mem.asBytes(&ri), 6);
                     r.enc.setBuffer(b.ys.b, b.ys.off, 7);
                     r.enc.setBuffer(L.so[1 - a].b, L.so[1 - a].off, 8);
-                    if (p.scan4) r.enc.dispatchThreads(mtl.Size.of(48 * 4 * 256, 1, 1), mtl.Size.of(256, 1, 1)) else r.enc.dispatchThreads(mtl.Size.of(48 * 4 * 1024, 1, 1), mtl.Size.of(1024, 1, 1));
+                    switch (scan) {
+                        15 => r.enc.dispatchThreads(mtl.Size.of(48 * 2 * 256, 1, 1), mtl.Size.of(256, 1, 1)),
+                        14 => r.enc.dispatchThreads(mtl.Size.of(48 * 4 * 256, 1, 1), mtl.Size.of(256, 1, 1)),
+                        else => r.enc.dispatchThreads(mtl.Size.of(48 * 4 * 1024, 1, 1), mtl.Size.of(1024, 1, 1)),
+                    }
                     p.barrier();
                     p.bind(p.pl[13], &.{ b.ys, b.p, L.norm, t.eps, b.gout });
                     r.enc.dispatchThreads(mtl.Size.of(48 * 128, rows, 1), mtl.Size.of(128, 1, 1));

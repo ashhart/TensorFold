@@ -187,3 +187,26 @@ inline float bsig(float x) { return float(bfloat(1.0f / (1.0f + metal::exp(-x)))
     }
   }
 }
+
+// Peak probe: each simdgroup runs `iters` dependent-free 16x32x16 tensor ops on register fragments (4 independent
+// accumulator pairs), then writes one value so the work is kept. P: iters.
+[[kernel]] void tf_mma_peak(const device bfloat* X [[buffer(0)]], constant int& iters [[buffer(1)]],
+    device float* Y [[buffer(2)]], uint lane [[thread_index_in_simdgroup]], uint gid [[threadgroup_position_in_grid]],
+    uint sg [[simdgroup_index_in_threadgroup]]) {
+  const short2 home = frag_home(ushort(lane));
+  frag<bfloat> a, b0, b1;
+  frag_get(a, X, 64, 0, 0, home);
+  frag_get(b0, X, 64, 16, 0, home);
+  frag_get(b1, X, 64, 32, 0, home);
+  frag<float> c[8];
+  for (short i = 0; i < 8; i++) c[i] = frag<float>(0);
+  for (int it = 0; it < iters; it++) {
+    mma_16x32<false, true>(c[0], c[1], a, b0, b1);
+    mma_16x32<false, true>(c[2], c[3], a, b1, b0);
+    mma_16x32<false, true>(c[4], c[5], a, b0, b0);
+    mma_16x32<false, true>(c[6], c[7], a, b1, b1);
+  }
+  float s = 0.0f;
+  for (short i = 0; i < 8; i++) for (short e = 0; e < 8; e++) s += c[i][e];
+  if (lane == 0) Y[gid * 4 + sg] = s;
+}
