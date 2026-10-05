@@ -19,6 +19,18 @@ OUT=out/suite-$STAMP
 mkdir -p "$OUT"
 SHOW='^\[(result|suite|baseline|rank 1\] \[suite)|memory guard|weights loaded|prepared folder|memwatch|Error|error'
 rc=0
+# both ranks read --suite-baseline: a baseline under /tf/out exists on aiai only (the suite JSONs land there), so copy
+# it to aiai2 first (rank 1 died on the missing file and rank 0 then waited in a collective)
+prev=""
+for a in "$@"; do
+  if [ "$prev" = --suite-baseline ]; then
+    case "$a" in /tf/out/*) f=${a#/tf/out/}
+      ssh aiai "cat tensorfold/out/$f" | ssh aiai2 "docker exec -i tf-dev sh -c 'mkdir -p /tf/out && cat > /tf/out/$f'" \
+        || { echo "cannot copy the baseline $a to aiai2"; exit 1; };;
+    esac
+  fi
+  prev=$a
+done
 for g in $GROUPS_; do
   envs=$($S env "$g" | tr '\n' ' ')
   echo "=== group $g: $($S flags "$g")${envs:+ ($envs)}"
