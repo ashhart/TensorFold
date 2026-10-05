@@ -3,6 +3,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
+const segments = @import("../../core/segments.zig");
 
 pub const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
@@ -1981,6 +1982,8 @@ pub const Prompt = struct {
     qmm6_128: mtl.Pipeline,
     gather128: mtl.Pipeline,
     gu64: mtl.Pipeline,
+    seg_queue: ?mtl.Queue = null, // a later staggered segment's queue (made at first use)
+    last: Buf = undefined, // the last chunk's streams before the final mixer (each segment's own)
     gu32: mtl.Pipeline,
     fused_gu: bool = true, // the experts' gate and up products and activation in one pass (same bits)
     expert_bm: usize = 0, // expert tile rows (0: by the average rows an expert)
@@ -2070,13 +2073,32 @@ pub const Prompt = struct {
             }
             p.mtp_w = w;
         } else |_| {}
+        p.b = try buffers(r);
+        p.sel = try Select.init(r, PMAX);
+        p.seg_queue = null;
+        p.last = p.b.h[0];
+        return p;
+    }
+
+    /// Another staggered segment's prompt: the same kernels and weights, its own buffers, selection and queue.
+    pub fn sibling(p: *const Prompt) !Prompt {
+        var s = p.*;
+        s.b = try buffers(p.r);
+        s.sel = try Select.init(p.r, PMAX);
+        s.seg_queue = null;
+        s.last = s.b.h[0];
+        return s;
+    }
+
+    /// A prompt's own buffers for chunks of up to PMAX rows (each staggered segment has its own set).
+    pub fn buffers(r: *Run) !@FieldType(Prompt, "b") {
         const B = struct {
             fn of(rr: *Run, n: usize) !Buf {
                 return .{ .b = try rr.buffer(n) };
             }
         };
         const R = PMAX;
-        p.b = .{
+        return .{
             .ids = try B.of(r, R * 4), .pids = try B.of(r, R * 16 * 4), .h = .{ try B.of(r, R * WIDE * 2), try B.of(r, R * WIDE * 2) },
             .ssp = try B.of(r, R * 10 * 4 * 4), .normed = try B.of(r, R * WIDE * 2), .dn = try B.of(r, R * 324 * 2),
             .hact = try B.of(r, R * 320 * 2), .inj_a = try B.of(r, R * 4 * 2), .inj_m = try B.of(r, R * 4 * 2),
@@ -2096,8 +2118,6 @@ pub const Prompt = struct {
             .v = try B.of(r, R * 48 * 128 * 4), .gg = try B.of(r, R * 48 * 4), .beta = try B.of(r, R * 48 * 4), .ys = try B.of(r, R * 6144 * 4),
             .mids = try B.of(r, R * 4), .n_add = try B.of(r, 16),
         };
-        p.sel = try Select.init(r, PMAX);
-        return p;
     }
 
     pub fn barrier(p: *Prompt) void {
@@ -2360,171 +2380,282 @@ pub const Prompt = struct {
     }
 
     /// One prompt chunk from the model's position: caches, DeltaNet states, the n-gram tail and history move past it.
-    /// Returns the greedy token after it; m.last holds the chunk's streams before the final mixer.
+    /// Returns the greedy token after it; m.last and p.last hold the chunk's streams before the final mixer.
     pub fn chunk(p: *Prompt, m: *Model, gpa: std.mem.Allocator, tokens: []const u32) !u32 {
+        return chunkN(&.{p}, m, gpa, tokens);
+    }
+
+    /// One staggered segment of a chunk: its prompt, rows and first position; the DeltaNet state slot and row it reads
+    /// and the slot it writes (row 0); its stream index and the hyper-connection write still pending.
+    const Seg = struct {
+        p: *Prompt,
+        rows: usize,
+        pos: usize,
+        ra: usize,
+        rr: usize,
+        wa: usize,
+        cur: usize,
+        pending: bool,
+    };
+
+    /// A chunk's host inputs at position `pos`: token ids, positions, the cache meta, the n-gram ids after `hist`.
+    fn prep(p: *Prompt, m: *Model, gpa: std.mem.Allocator, tokens: []const u32, pos: usize, hist: [2]i64) !void {
+        const b = &p.b;
+        const rows = tokens.len;
+        @memcpy(b.ids.b.slice(u32, rows), tokens);
+        for (0..rows) |i| {
+            b.pos.b.slice(i32, PMAX)[i] = @intCast(pos + i);
+            b.nk.b.slice(i32, PMAX)[i] = @intCast(pos + i + 1);
+        }
+        const kvm = b.kvmeta.b.slice(u32, 3);
+        kvm[0], kvm[1], kvm[2] = .{ @intCast(pos), CAP, @intCast(rows) };
+        b.rows.b.slice(i32, 1)[0] = @intCast(rows);
+        const pp = &m.ple;
+        const seq = try gpa.alloc(i64, 2 + rows);
+        defer gpa.free(seq);
+        seq[0], seq[1] = .{ hist[0], hist[1] };
+        for (tokens, 0..) |tok, i| seq[2 + i] = tok;
+        const out = b.pids.b.slice(u32, 16 * PMAX);
+        var last_eos: i64 = -1;
+        if (seq[0] == pp.eos) last_eos = 0;
+        if (seq[1] == pp.eos) last_eos = 1;
+        for (0..rows) |row| {
+            const at = 2 + row;
+            const in_seg = @as(i64, @intCast(at)) - (last_eos + 1);
+            var sh: [3]i64 = undefined;
+            for (0..3) |s2| sh[s2] = if (in_seg >= @as(i64, @intCast(s2))) seq[at - s2] else pp.eos;
+            for (2..4) |ng| {
+                var mixed: i64 = sh[0] *% pp.mult[0];
+                for (1..ng) |q2| mixed ^= sh[q2] *% pp.mult[q2];
+                for (0..8) |k| {
+                    const hh = (ng - 2) * 8 + k;
+                    out[row * 16 + hh] = @intCast(@mod(mixed, pp.sizes[hh]) + pp.offsets[hh]);
+                }
+            }
+            if (seq[at] == pp.eos) last_eos = @intCast(at);
+        }
+    }
+
+    /// A segment's layer i up to its mixer: the pending expert write (or the n-gram block at layer 1) and the attention
+    /// hyper-connection.
+    fn segPre(s: *Seg, m: *Model, i: usize) !void {
+        const p = s.p;
         const r = p.r;
         const b = &p.b;
         const t = &m.t;
-        const rows = tokens.len;
-        if (rows == 0 or rows > PMAX) return error.ChunkSize;
-        @memcpy(b.ids.b.slice(u32, rows), tokens);
-        for (0..rows) |i| {
-            b.pos.b.slice(i32, PMAX)[i] = @intCast(m.pos + i);
-            b.nk.b.slice(i32, PMAX)[i] = @intCast(m.pos + i + 1);
-        }
-        const kvm = b.kvmeta.b.slice(u32, 3);
-        kvm[0], kvm[1], kvm[2] = .{ @intCast(m.pos), CAP, @intCast(rows) };
-        b.rows.b.slice(i32, 1)[0] = @intCast(rows);
-        { // the n-gram ids after the history (NGramEmbedding.ids)
+        const rows = s.rows;
+        const L = &m.layers[i];
+        if (i == 1) {
+            if (s.pending) try r.callRows("q4_hc_norm_grouped#[10240]", rows, &.{ b.h[s.cur], b.inj_m, b.ydown, b.wts, b.lg }, &.{ b.h[1 - s.cur], b.ssp }, null);
+            if (s.pending) s.cur = 1 - s.cur;
+            s.pending = false;
             const pp = &m.ple;
-            const seq = try gpa.alloc(i64, 2 + rows);
-            defer gpa.free(seq);
-            seq[0], seq[1] = .{ pp.hist[0], pp.hist[1] };
-            for (tokens, 0..) |tok, i| seq[2 + i] = tok;
-            const out = b.pids.b.slice(u32, 16 * PMAX);
-            var last_eos: i64 = -1;
-            if (seq[0] == pp.eos) last_eos = 0;
-            if (seq[1] == pp.eos) last_eos = 1;
-            for (0..rows) |row| {
-                const at = 2 + row;
-                const in_seg = @as(i64, @intCast(at)) - (last_eos + 1);
-                var sh: [3]i64 = undefined;
-                for (0..3) |s2| sh[s2] = if (in_seg >= @as(i64, @intCast(s2))) seq[at - s2] else pp.eos;
-                for (2..4) |ng| {
-                    var mixed: i64 = sh[0] *% pp.mult[0];
-                    for (1..ng) |q2| mixed ^= sh[q2] *% pp.mult[q2];
-                    for (0..8) |k| {
-                        const hh = (ng - 2) * 8 + k;
-                        out[row * 16 + hh] = @intCast(@mod(mixed, pp.sizes[hh]) + pp.offsets[hh]);
-                    }
+            var tabs: [2 + 3 * GROUPS]Buf = undefined;
+            tabs[0] = b.pids;
+            tabs[1] = pp.starts;
+            for (0..3 * GROUPS) |j| tabs[2 + j] = pp.tables[j];
+            try r.callRows("qa_ple_lookup@ple", rows, &tabs, &.{b.emb}, null);
+            p.qmm(b.emb, p.ple_kv, D, 12800, rows, b.kvp, 0);
+            try r.callRows("q4_ple_gate@ple", rows, &.{ b.kvp, b.h[s.cur], pp.ks, pp.qs, pp.cs, t.eps }, &.{ b.gated, .{ .b = b.cin.b, .off = PLE_TAIL * WIDE * 2 } }, null);
+            try r.callRows("q4_ple_conv@ple", rows, &.{ b.cin, pp.conv, b.gated, b.h[s.cur] }, &.{b.hout}, null);
+            try r.callRows("q4_hc_norm_none#[10240]", rows, &.{b.hout}, &.{ b.h[1 - s.cur], b.ssp }, null);
+        } else if (!s.pending) {
+            try r.callRows("q4_hc_norm_none#[10240]", rows, &.{b.h[s.cur]}, &.{ b.h[1 - s.cur], b.ssp }, null);
+        } else {
+            try r.callRows("q4_hc_norm_grouped#[10240]", rows, &.{ b.h[s.cur], b.inj_m, b.ydown, b.wts, b.lg }, &.{ b.h[1 - s.cur], b.ssp }, null);
+        }
+        s.cur = 1 - s.cur;
+        p.hc(m, b.h[s.cur], L.ahc, rows, b.inj_a);
+    }
+
+    /// A segment's layer-i mixer, DeltaNet or attention, at the segment's position and state slots.
+    fn segMixer(s: *Seg, m: *Model, i: usize) !void {
+        const p = s.p;
+        const r = p.r;
+        const b = &p.b;
+        const t = &m.t;
+        const rows = s.rows;
+        const L = &m.layers[i];
+        if (L.linear) {
+            p.qmm(b.mixed, p.proj[i], D, 16480, rows, b.p, 0);
+            const cs_in: Buf = .{ .b = L.cs[s.ra].b, .off = L.cs[s.ra].off + s.rr * CS_ROW };
+            const so_in: Buf = .{ .b = L.so[s.ra].b, .off = L.so[s.ra].off + s.rr * SO_ROW };
+            if (p.skip & 2 == 0) {
+                const ri: i32 = @intCast(rows);
+                p.bind(p.pl[11], &.{ b.p, cs_in, L.conv, L.alog, L.dt });
+                r.enc.setBytes(std.mem.asBytes(&ri), 5);
+                for ([_]Buf{ b.qn, b.kn, b.v, b.gg, b.beta, L.cs[s.wa] }, 6..) |bb, j| r.enc.setBuffer(bb.b, bb.off, j);
+                r.enc.dispatchThreads(mtl.Size.of(80 * 128, rows, 1), mtl.Size.of(128, 1, 1));
+                p.barrier();
+                const scan: usize = if (p.scan4 and p.scan8) 15 else if (p.scan4) 14 else 12;
+                p.bind(p.pl[scan], &.{ b.qn, b.kn, b.v, b.gg, b.beta, so_in });
+                r.enc.setBytes(std.mem.asBytes(&ri), 6);
+                r.enc.setBuffer(b.ys.b, b.ys.off, 7);
+                r.enc.setBuffer(L.so[s.wa].b, L.so[s.wa].off, 8);
+                switch (scan) {
+                    15 => r.enc.dispatchThreads(mtl.Size.of(48 * 2 * 256, 1, 1), mtl.Size.of(256, 1, 1)),
+                    14 => r.enc.dispatchThreads(mtl.Size.of(48 * 4 * 256, 1, 1), mtl.Size.of(256, 1, 1)),
+                    else => r.enc.dispatchThreads(mtl.Size.of(48 * 4 * 1024, 1, 1), mtl.Size.of(1024, 1, 1)),
                 }
-                if (seq[at] == pp.eos) last_eos = @intCast(at);
+                p.barrier();
+                p.bind(p.pl[13], &.{ b.ys, b.p, L.norm, t.eps, b.gout });
+                r.enc.dispatchThreads(mtl.Size.of(48 * 128, rows, 1), mtl.Size.of(128, 1, 1));
+                p.barrier();
             }
+            p.qmm(b.gout, p.out[i], 6144, D, rows, b.branch, 0);
+        } else {
+            p.qmm(b.mixed, p.proj[i], D, 13952, rows, b.p, 0);
+            try r.callRows("q4_attn_prep@att", rows, &.{ b.p, b.pos, L.qn, L.kn, L.iqn, t.eps, t.log2base }, &.{ b.q, b.kout, b.iq }, null);
+            p.bind(r.kv_pipe, &.{ b.kout, b.p, L.keys, L.vals, L.raw, b.kvmeta });
+            r.enc.dispatchThreads(mtl.Size.of(512 * rows, 1, 1), mtl.Size.of(256, 1, 1));
+            p.barrier();
+            const sparse = p.sel != null and p.sel.?.meta(s.pos, rows);
+            if (sparse and p.skip & 1024 != 0) {
+                // timing knock-out: no attention for chunks with rows past the dense range
+            } else if (p.fast_attn and p.sel != null and p.skip & 4 == 0) {
+                var sl = &p.sel.?;
+                if (sparse) {
+                    sl.nax_scores = p.scores_nax;
+                    defer sl.nax_scores = null;
+                    try sl.encode(r, L, b.iq, t.eps, t.log2base, s.pos, rows);
+                }
+                p.bind(p.sattn, &.{ b.q, L.keys, L.vals, sl.keys, sl.counts, sl.sparse, b.p, t.scale });
+                const cap: i32 = CAP;
+                r.enc.setBytes(std.mem.asBytes(&cap), 8);
+                r.enc.setBuffer(b.aout.b, b.aout.off, 9);
+                r.enc.dispatchThreads(mtl.Size.of(rows * 128, 2, 1), mtl.Size.of(128, 1, 1));
+                p.barrier();
+            } else if (sparse) {
+                var sl = &p.sel.?;
+                try sl.encode(r, L, b.iq, t.eps, t.log2base, s.pos, rows);
+                const dense_ids = r.shapes.get("IDS_shape").?;
+                try r.shapes.put(r.arena, "IDS_shape", sl.ids_shape);
+                try r.callRows("q4_attn_parts#[24, 256]", rows, &.{ b.q, L.keys, L.vals, sl.keys, sl.counts, sl.sparse, t.scale }, &.{ b.po, b.pm }, null);
+                try r.shapes.put(r.arena, "IDS_shape", dense_ids);
+                try r.callRows("q4_attn_merge_gate#[24, 16, 256]", rows, &.{ b.po, b.pm, b.p }, &.{b.aout}, null);
+            } else if (p.skip & 4 == 0) {
+                p.bind(p.attn256, &.{ b.q, L.keys, L.vals, b.p });
+                const ap = [4]i32{ @intCast(rows), @intCast(s.pos + rows), @intCast(s.pos), CAP };
+                r.enc.setBytes(std.mem.asBytes(&ap), 4);
+                r.enc.setBuffer(t.scale.b, t.scale.off, 5);
+                r.enc.setBuffer(b.aout.b, b.aout.off, 6);
+                r.enc.dispatchThreads(mtl.Size.of(((rows + 63) / 64) * 128, 24, 1), mtl.Size.of(128, 1, 1));
+                p.barrier();
+            }
+            p.qmm(b.aout, p.out[i], 6144, D, rows, b.branch, 0);
+        }
+    }
+
+    /// A segment's layer i after its mixer: the branch write, the MLP hyper-connection and the experts.
+    fn segPost(s: *Seg, m: *Model, i: usize) !void {
+        const p = s.p;
+        const b = &p.b;
+        const L = &m.layers[i];
+        try p.r.callRows("q4_hc_norm_plain#[10240]", s.rows, &.{ b.h[s.cur], b.inj_a, b.branch }, &.{ b.h[1 - s.cur], b.ssp }, null);
+        s.cur = 1 - s.cur;
+        p.hc(m, b.h[s.cur], L.mhc, s.rows, b.inj_m);
+        p.moe(L, s.rows);
+        s.pending = true;
+    }
+
+    /// Flash Next's hooks for core/segments.zig: a segment's embedding, layer parts and final streams, encoded into its
+    /// lane's encoder. Layer 1 waits ahead of the n-gram block, which reads the segment before's last gate rows.
+    const Hooks = struct {
+        m: *Model,
+        segs: []Seg,
+
+        fn at(h: *Hooks, l: *const segments.Lane) *Seg {
+            const s = &h.segs[l.k];
+            s.p.r.enc = l.enc;
+            return s;
+        }
+        pub fn begin(h: *Hooks, l: *segments.Lane) !void {
+            const s = h.at(l);
+            const b = &s.p.b;
+            const m = h.m;
+            try s.p.r.callRows("qa_embed_rows@embed", s.rows, &.{ b.ids, m.embed[0], m.embed[1], m.embed[2] }, &.{b.h[0]}, null);
+        }
+        pub fn wait(_: *Hooks, i: usize) segments.Wait {
+            return if (i == 1) .pre else .mixer;
+        }
+        pub fn handoff(h: *Hooks, l: *segments.Lane, i: usize) !void {
+            if (i != 1) return;
+            const s = h.at(l);
+            const prev = &h.segs[l.k - 1];
+            s.p.copyWords(.{ .b = prev.p.b.cin.b, .off = prev.p.b.cin.off + prev.rows * WIDE * 2 }, s.p.b.cin, PLE_TAIL * WIDE * 2 / 4);
+        }
+        pub fn pre(h: *Hooks, l: *segments.Lane, i: usize) !void {
+            try segPre(h.at(l), h.m, i);
+        }
+        pub fn mixer(h: *Hooks, l: *segments.Lane, i: usize) !void {
+            try segMixer(h.at(l), h.m, i);
+        }
+        pub fn post(h: *Hooks, l: *segments.Lane, i: usize) !void {
+            try segPost(h.at(l), h.m, i);
+        }
+        /// Every segment's final streams (the MTP head's prompt keys read them); the head on the last one's last row.
+        pub fn finish(h: *Hooks, l: *segments.Lane) !void {
+            const s = h.at(l);
+            const p = s.p;
+            const r = p.r;
+            const b = &p.b;
+            const m = h.m;
+            const t = &m.t;
+            try r.callRows("q4_hc_norm_grouped#[10240]", s.rows, &.{ b.h[s.cur], b.inj_m, b.ydown, b.wts, b.lg }, &.{ b.h[1 - s.cur], b.ssp }, null);
+            s.cur = 1 - s.cur;
+            p.last = b.h[s.cur];
+            if (l.k + 1 < h.segs.len) return;
+            m.last = p.last;
+            p.hc(m, b.h[s.cur], m.mix, s.rows, b.inj_a);
+            r.rows = 1;
+            t.mdims.b.slice(i32, 2)[0] = 1;
+            try m.lane(.{ .b = b.mixed.b, .off = b.mixed.off + (s.rows - 1) * D * 2 }, D, m.head, "lane_qmm_bytes_grouped@head", t.logits);
+            r.enc.setPipeline(r.argmax_pipe);
+            r.enc.setBuffer(t.logits.b, 0, 0);
+            r.enc.setBuffer(t.picks.b, 0, 1);
+            r.enc.setBuffer(t.vocab.b, 0, 2);
+            r.enc.dispatchThreads(mtl.Size.of(1024, 1, 1), mtl.Size.of(1024, 1, 1));
+        }
+    };
+
+    /// A chunk as one to segments.MAX staggered segments, one queue each (core/segments.zig): segment k runs each
+    /// layer's mixer after segment k-1's, so one segment's scan and glue run beside another's matrix work. Each
+    /// segment does what a serial chunk of its rows does, so the output equals chunk calls in order. ps[0] is this
+    /// prompt, on the run's queue; the others are siblings. Returns the greedy token after the chunk.
+    pub fn chunkN(ps: []const *Prompt, m: *Model, gpa: std.mem.Allocator, tokens: []const u32) !u32 {
+        const N = ps.len;
+        if (N == 0 or N > segments.MAX) return error.Segments;
+        const r = ps[0].r;
+        const n = tokens.len;
+        if (n < N or n > N * PMAX) return error.ChunkSize;
+        const a = m.state;
+        var queues: [segments.MAX]mtl.Queue = undefined;
+        var segs: [segments.MAX]Seg = undefined;
+        for (0..N) |k| {
+            const at = segments.start(n, N, k);
+            const rows = segments.rows(n, N, k);
+            var hist = m.ple.hist; // the two tokens before the segment
+            for (tokens[at - @min(at, 2) .. at]) |tok| hist = .{ hist[1], tok };
+            try ps[k].prep(m, gpa, tokens[at .. at + rows], m.pos + at, hist);
+            queues[k] = if (k == 0) r.queue else ps[k].seg_queue orelse blk: {
+                const q = try r.device.queue();
+                ps[k].seg_queue = q;
+                break :blk q;
+            };
+            const ra = if (k % 2 == 0) a else 1 - a; // DeltaNet slots alternate as serial chunks would
+            segs[k] = .{ .p = ps[k], .rows = rows, .pos = m.pos + at, .ra = ra, .rr = if (k == 0) m.state_row else 0, .wa = 1 - ra, .cur = 0, .pending = false };
         }
         const cin_old = m.ple.cin.b.contents()[m.ple.cin.off..];
-        @memcpy(b.cin.b.contents()[0 .. PLE_TAIL * WIDE * 2], cin_old[0 .. PLE_TAIL * WIDE * 2]);
-        const cb = r.queue.commandBuffer();
-        r.enc = cb.compute(if (r.serial) .serial else .concurrent);
-        try r.callRows("qa_embed_rows@embed", rows, &.{ b.ids, m.embed[0], m.embed[1], m.embed[2] }, &.{b.h[0]}, null);
-        var cur: usize = 0;
-        var pending = false;
-        const a = m.state;
-        for (0..LAYERS) |i| {
-            const L = &m.layers[i];
-            if (i == 1) {
-                if (pending) try r.callRows("q4_hc_norm_grouped#[10240]", rows, &.{ b.h[cur], b.inj_m, b.ydown, b.wts, b.lg }, &.{ b.h[1 - cur], b.ssp }, null);
-                if (pending) cur = 1 - cur;
-                pending = false;
-                const pp = &m.ple;
-                var tabs: [2 + 3 * GROUPS]Buf = undefined;
-                tabs[0] = b.pids;
-                tabs[1] = pp.starts;
-                for (0..3 * GROUPS) |j| tabs[2 + j] = pp.tables[j];
-                try r.callRows("qa_ple_lookup@ple", rows, &tabs, &.{b.emb}, null);
-                p.qmm(b.emb, p.ple_kv, D, 12800, rows, b.kvp, 0);
-                try r.callRows("q4_ple_gate@ple", rows, &.{ b.kvp, b.h[cur], pp.ks, pp.qs, pp.cs, t.eps }, &.{ b.gated, .{ .b = b.cin.b, .off = PLE_TAIL * WIDE * 2 } }, null);
-                try r.callRows("q4_ple_conv@ple", rows, &.{ b.cin, pp.conv, b.gated, b.h[cur] }, &.{b.hout}, null);
-                try r.callRows("q4_hc_norm_none#[10240]", rows, &.{b.hout}, &.{ b.h[1 - cur], b.ssp }, null);
-            } else if (!pending) {
-                try r.callRows("q4_hc_norm_none#[10240]", rows, &.{b.h[cur]}, &.{ b.h[1 - cur], b.ssp }, null);
-            } else {
-                try r.callRows("q4_hc_norm_grouped#[10240]", rows, &.{ b.h[cur], b.inj_m, b.ydown, b.wts, b.lg }, &.{ b.h[1 - cur], b.ssp }, null);
-            }
-            cur = 1 - cur;
-            p.hc(m, b.h[cur], L.ahc, rows, b.inj_a);
-            if (L.linear) {
-                p.qmm(b.mixed, p.proj[i], D, 16480, rows, b.p, 0);
-                const cs_in: Buf = .{ .b = L.cs[a].b, .off = L.cs[a].off + m.state_row * CS_ROW };
-                const so_in: Buf = .{ .b = L.so[a].b, .off = L.so[a].off + m.state_row * SO_ROW };
-                if (p.skip & 2 == 0) { // conv, norms and gates of every row; the recurrence; the gated norm of every row
-                    const ri: i32 = @intCast(rows);
-                    p.bind(p.pl[11], &.{ b.p, cs_in, L.conv, L.alog, L.dt });
-                    r.enc.setBytes(std.mem.asBytes(&ri), 5);
-                    for ([_]Buf{ b.qn, b.kn, b.v, b.gg, b.beta, L.cs[1 - a] }, 6..) |bb, j| r.enc.setBuffer(bb.b, bb.off, j);
-                    r.enc.dispatchThreads(mtl.Size.of(80 * 128, rows, 1), mtl.Size.of(128, 1, 1));
-                    p.barrier();
-                    const scan: usize = if (p.scan4 and p.scan8) 15 else if (p.scan4) 14 else 12;
-                    p.bind(p.pl[scan], &.{ b.qn, b.kn, b.v, b.gg, b.beta, so_in });
-                    r.enc.setBytes(std.mem.asBytes(&ri), 6);
-                    r.enc.setBuffer(b.ys.b, b.ys.off, 7);
-                    r.enc.setBuffer(L.so[1 - a].b, L.so[1 - a].off, 8);
-                    switch (scan) {
-                        15 => r.enc.dispatchThreads(mtl.Size.of(48 * 2 * 256, 1, 1), mtl.Size.of(256, 1, 1)),
-                        14 => r.enc.dispatchThreads(mtl.Size.of(48 * 4 * 256, 1, 1), mtl.Size.of(256, 1, 1)),
-                        else => r.enc.dispatchThreads(mtl.Size.of(48 * 4 * 1024, 1, 1), mtl.Size.of(1024, 1, 1)),
-                    }
-                    p.barrier();
-                    p.bind(p.pl[13], &.{ b.ys, b.p, L.norm, t.eps, b.gout });
-                    r.enc.dispatchThreads(mtl.Size.of(48 * 128, rows, 1), mtl.Size.of(128, 1, 1));
-                    p.barrier();
-                }
-                p.qmm(b.gout, p.out[i], 6144, D, rows, b.branch, 0);
-            } else {
-                p.qmm(b.mixed, p.proj[i], D, 13952, rows, b.p, 0);
-                try r.callRows("q4_attn_prep@att", rows, &.{ b.p, b.pos, L.qn, L.kn, L.iqn, t.eps, t.log2base }, &.{ b.q, b.kout, b.iq }, null);
-                p.bind(r.kv_pipe, &.{ b.kout, b.p, L.keys, L.vals, L.raw, b.kvmeta });
-                r.enc.dispatchThreads(mtl.Size.of(512 * rows, 1, 1), mtl.Size.of(256, 1, 1));
-                p.barrier();
-                const sparse = p.sel != null and p.sel.?.meta(m.pos, rows);
-                if (sparse and p.skip & 1024 != 0) {
-                    // timing knock-out: no attention for chunks with rows past the dense range
-                } else if (p.fast_attn and p.sel != null and p.skip & 4 == 0) { // every row on the tensor units
-                    var sl = &p.sel.?;
-                    if (sparse) {
-                        sl.nax_scores = p.scores_nax;
-                        defer sl.nax_scores = null;
-                        try sl.encode(r, L, b.iq, t.eps, t.log2base, m.pos, rows);
-                    }
-                    p.bind(p.sattn, &.{ b.q, L.keys, L.vals, sl.keys, sl.counts, sl.sparse, b.p, t.scale });
-                    const cap: i32 = CAP;
-                    r.enc.setBytes(std.mem.asBytes(&cap), 8);
-                    r.enc.setBuffer(b.aout.b, b.aout.off, 9);
-                    r.enc.dispatchThreads(mtl.Size.of(rows * 128, 2, 1), mtl.Size.of(128, 1, 1));
-                    p.barrier();
-                } else if (sparse) { // rows past the dense range: each row's selected blocks and tail (the decode's kernels)
-                    var sl = &p.sel.?;
-                    try sl.encode(r, L, b.iq, t.eps, t.log2base, m.pos, rows);
-                    const dense_ids = r.shapes.get("IDS_shape").?;
-                    try r.shapes.put(r.arena, "IDS_shape", sl.ids_shape);
-                    try r.callRows("q4_attn_parts#[24, 256]", rows, &.{ b.q, L.keys, L.vals, sl.keys, sl.counts, sl.sparse, t.scale }, &.{ b.po, b.pm }, null);
-                    try r.shapes.put(r.arena, "IDS_shape", dense_ids);
-                    try r.callRows("q4_attn_merge_gate#[24, 16, 256]", rows, &.{ b.po, b.pm, b.p }, &.{b.aout}, null);
-                } else if (p.skip & 4 == 0) { // causal attention over the cache and the chunk, gated on the way out
-                    p.bind(p.attn256, &.{ b.q, L.keys, L.vals, b.p });
-                    const ap = [4]i32{ @intCast(rows), @intCast(m.pos + rows), @intCast(m.pos), CAP };
-                    r.enc.setBytes(std.mem.asBytes(&ap), 4);
-                    r.enc.setBuffer(t.scale.b, t.scale.off, 5);
-                    r.enc.setBuffer(b.aout.b, b.aout.off, 6);
-                    r.enc.dispatchThreads(mtl.Size.of(((rows + 63) / 64) * 128, 24, 1), mtl.Size.of(128, 1, 1));
-                    p.barrier();
-                }
-                p.qmm(b.aout, p.out[i], 6144, D, rows, b.branch, 0);
-            }
-            try r.callRows("q4_hc_norm_plain#[10240]", rows, &.{ b.h[cur], b.inj_a, b.branch }, &.{ b.h[1 - cur], b.ssp }, null);
-            cur = 1 - cur;
-            p.hc(m, b.h[cur], L.mhc, rows, b.inj_m);
-            p.moe(L, rows);
-            pending = true;
-        }
-        try r.callRows("q4_hc_norm_grouped#[10240]", rows, &.{ b.h[cur], b.inj_m, b.ydown, b.wts, b.lg }, &.{ b.h[1 - cur], b.ssp }, null);
-        cur = 1 - cur;
-        m.last = b.h[cur];
-        p.hc(m, b.h[cur], m.mix, rows, b.inj_a);
-        r.rows = 1;
-        t.mdims.b.slice(i32, 2)[0] = 1;
-        try m.lane(.{ .b = b.mixed.b, .off = b.mixed.off + (rows - 1) * D * 2 }, D, m.head, "lane_qmm_bytes_grouped@head", t.logits);
-        r.enc.setPipeline(r.argmax_pipe);
-        r.enc.setBuffer(t.logits.b, 0, 0);
-        r.enc.setBuffer(t.picks.b, 0, 1);
-        r.enc.setBuffer(t.vocab.b, 0, 2);
-        r.enc.dispatchThreads(mtl.Size.of(1024, 1, 1), mtl.Size.of(1024, 1, 1));
-        try m.finish(cb);
-        m.state = 1 - a;
+        @memcpy(ps[0].b.cin.b.contents()[0 .. PLE_TAIL * WIDE * 2], cin_old[0 .. PLE_TAIL * WIDE * 2]);
+        var hooks: Hooks = .{ .m = m, .segs = segs[0..N] };
+        m.gpu_seconds += try segments.run(r.device, queues[0..N], LAYERS, if (r.serial) .serial else .concurrent, &hooks);
+        const sl = &segs[N - 1];
+        m.state = if (N % 2 == 0) a else 1 - a; // each segment flipped it once
         m.state_row = 0;
-        m.pos += rows;
-        @memcpy(cin_old[0 .. PLE_TAIL * WIDE * 2], b.cin.b.contents()[rows * WIDE * 2 .. (rows + PLE_TAIL) * WIDE * 2]);
+        m.pos += n;
+        @memcpy(cin_old[0 .. PLE_TAIL * WIDE * 2], sl.p.b.cin.b.contents()[sl.rows * WIDE * 2 .. (sl.rows + PLE_TAIL) * WIDE * 2]);
         for (tokens) |tok| m.ple.hist = .{ m.ple.hist[1], tok };
-        return t.picks.b.slice(u32, 1)[0];
+        return m.t.picks.b.slice(u32, 1)[0];
     }
 
     /// The MTP head's keys and values for prompt rows start .. start + n from their streams (n rows of `streams`)

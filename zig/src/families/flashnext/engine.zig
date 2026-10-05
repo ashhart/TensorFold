@@ -3,6 +3,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const fz = @import("replay.zig");
+const segments = @import("../../core/segments.zig");
 const Allocator = std.mem.Allocator;
 
 const D = fz.D;
@@ -37,6 +38,9 @@ const jsonInt = fz.jsonInt;
 const RING = 512;
 /// Positions a reply keeps free past its last token: two rounds in flight.
 pub const MARGIN = 2 * MAXR;
+/// Prompt chunks run as two staggered segments once each gets this many rows (core/segments.zig). Measured on the
+/// M5 Ultra, two segments against one chunk: 2k rows a segment -7%, 3k level, 4k +1.6%, 8k +9%.
+pub const SEG_MIN = 4096;
 
 pub const Reason = enum { stop, length, cancelled };
 
@@ -68,6 +72,8 @@ pub const Engine = struct {
     r: *Run,
     m: *Model,
     pr: *Prompt,
+    pr2: *Prompt, // the second staggered segment's buffers, selection and queue
+    segments: bool = true, // prompt chunks as two staggered segments (false: one serial chunk at a time)
     g_cs: mtl.Buffer,
     g_so: mtl.Buffer,
     o_cs: mtl.Buffer,
@@ -95,6 +101,7 @@ pub const Engine = struct {
         e.copy = true;
         e.copy_min = 3;
         e.copy_long = 6;
+        e.segments = true;
         e.arena_state = std.heap.ArenaAllocator.init(gpa);
         errdefer e.arena_state.deinit();
         const arena = e.arena_state.allocator();
@@ -299,6 +306,8 @@ pub const Engine = struct {
         e.m = m;
         e.pr = try arena.create(Prompt);
         e.pr.* = try Prompt.init(r, dump_dir, r.xnew_header);
+        e.pr2 = try arena.create(Prompt);
+        e.pr2.* = try e.pr.sibling();
         try e.rounds();
         e.tsel = try GSelect.init(r, 0);
         e.msel = try GSelect.init(r, 0);
@@ -400,14 +409,20 @@ pub const Engine = struct {
         var pick: u32 = 0;
         var at: usize = 0;
         var last_n: usize = 1;
+        const ps = [2]*Prompt{ e.pr, e.pr2 };
         while (at < prompt.len) {
             if (out.cancelled(out.ctx)) return .{ .reason = .cancelled };
-            const n = @min(e.pr.step, prompt.len - at);
-            pick = try e.pr.chunk(m, e.gpa, prompt[at .. at + n]);
-            const k = if (at + n < prompt.len) n else n - 1;
-            try e.pr.mtpKeys(m, at, prompt[at + 1 .. at + 1 + k], m.last);
-            at += n;
-            last_n = n;
+            const left = prompt.len - at;
+            const c: segments.Call = if (e.segments) segments.next(left, e.pr.step, SEG_MIN) else .{ .rows = @min(e.pr.step, left), .parts = 1 };
+            pick = try Prompt.chunkN(ps[0..c.parts], m, e.gpa, prompt[at .. at + c.rows]);
+            for (ps[0..c.parts], 0..) |p, k| { // the MTP head's keys for each segment's rows, from its streams
+                const s = at + segments.start(c.rows, c.parts, k);
+                const n = segments.rows(c.rows, c.parts, k);
+                const nexts = if (s + n < prompt.len) n else n - 1;
+                try p.mtpKeys(m, s, prompt[s + 1 .. s + 1 + nexts], p.last);
+                last_n = n;
+            }
+            at += c.rows;
         }
         out.prefilled(out.ctx);
         var res: Result = .{ .reason = .length };

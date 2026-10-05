@@ -4,7 +4,8 @@
 const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
-const fz = @import("tensorfold").flashnext_replay;
+const tf = @import("tensorfold");
+const fz = tf.flashnext_replay;
 
 const opts = fz.opts;
 const D = fz.D;
@@ -44,6 +45,17 @@ const copyDrafts = fz.copyDrafts;
 const PMAX = fz.PMAX;
 const Prompt = fz.Prompt;
 const jsonInt = fz.jsonInt;
+
+fn armName(seg_ab: bool, arm: usize) []const u8 {
+    if (seg_ab) return if (arm == 1) "segments on " else "segments off";
+    return if (arm == 1) "copy on " else "copy off";
+}
+
+/// FZ_PROMPT_N: only the prompt's first n tokens (all when unset).
+fn promptCut() !usize {
+    const v = std.c.getenv("FZ_PROMPT_N") orelse return std.math.maxInt(usize);
+    return std.fmt.parseInt(usize, std.mem.span(v), 10);
+}
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
@@ -107,7 +119,8 @@ pub fn main(init: std.process.Init) !void {
         const rp = std.mem.span(std.c.getenv("FZ_REF") orelse return error.NoRef);
         const rf = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}", .{rp}, 0));
         const rj = try std.json.parseFromSliceLeaky(std.json.Value, arena, rf.bytes[0..rf.size], .{});
-        const items = rj.object.get("prompt").?.array.items;
+        const all_items = rj.object.get("prompt").?.array.items;
+        const items = all_items[0..@min(all_items.len, try promptCut())];
         const toks = try arena.alloc(u32, items.len);
         for (items, 0..) |x, i| toks[i] = @intCast(x.integer);
         const e = try fx.Engine.load(gpa, args[1], args[2]);
@@ -129,8 +142,9 @@ pub fn main(init: std.process.Init) !void {
         };
         const n_out: usize = if (std.c.getenv("FZ_N")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 256;
         var replies: [2][]u32 = undefined;
-        for (0..2) |arm| { // copy drafts off, then on
-            e.copy = arm == 1;
+        const seg_ab = std.c.getenv("FZ_AB") != null and std.mem.eql(u8, std.mem.span(std.c.getenv("FZ_AB").?), "seg");
+        for (0..2) |arm| { // copy drafts off, then on (FZ_AB=seg: staggered prompt segments off, then on)
+            if (seg_ab) e.segments = arm == 1 else e.copy = arm == 1;
             var sh: Show = .{ .a = arena };
             _ = try e.generate(toks, 8, &.{}, null, .{ .ctx = &sh, .prefilled = Show.prefilled, .tokens = Show.tokens, .cancelled = Show.cancelled });
             sh = .{ .a = arena };
@@ -153,7 +167,7 @@ pub fn main(init: std.process.Init) !void {
             const res = try e.generate(toks, n_out, &.{}, null, .{ .ctx = &tm, .prefilled = Timed.prefilled, .tokens = Timed.tokens, .cancelled = Show.cancelled });
             const wall = mtl.clock.seconds() - s0;
             const made: f64 = @floatFromInt(sh.got.items.len - 1);
-            std.debug.print("copy {s}: {d} tokens; prompt {d:.2} s; decode {d:.1} tok/s; {d:.2} tokens a round ({d} rounds, {d} copied rounds landing {d:.2})\n", .{ if (arm == 1) "on " else "off", sh.got.items.len, first_at, made / (wall - first_at), made / @as(f64, @floatFromInt(@max(res.rounds, 1))), res.rounds, res.copy_rounds, @as(f64, @floatFromInt(res.copy_accepted)) / @as(f64, @floatFromInt(@max(res.copy_rounds, 1))) });
+            std.debug.print("{s}: {d} tokens; prompt {d:.2} s; decode {d:.1} tok/s; {d:.2} tokens a round ({d} rounds, {d} copied rounds landing {d:.2})\n", .{ armName(seg_ab, arm), sh.got.items.len, first_at, made / (wall - first_at), made / @as(f64, @floatFromInt(@max(res.rounds, 1))), res.rounds, res.copy_rounds, @as(f64, @floatFromInt(res.copy_accepted)) / @as(f64, @floatFromInt(@max(res.copy_rounds, 1))) });
             replies[arm] = sh.got.items;
             if (arm == 1) for (res.copy_by_len, 0..) |cl, n| if (cl[0] > 0) std.debug.print("    match {d}: {d} rounds, {d:.2} landed\n", .{ n, cl[0], @as(f64, @floatFromInt(cl[1])) / @as(f64, @floatFromInt(cl[0])) });
         }
@@ -180,7 +194,7 @@ pub fn main(init: std.process.Init) !void {
         for (replies, 0..) |rep_toks, arm| {
             var same: usize = 0;
             while (same < @min(rep_toks.len, refr.items.len) and rep_toks[same] == refr.items[same]) same += 1;
-            std.debug.print("copy {s}: {d}/{d} tokens equal to the one-row reference\n", .{ if (arm == 1) "on " else "off", same, n_out });
+            std.debug.print("{s}: {d}/{d} tokens equal to the one-row reference\n", .{ armName(seg_ab, arm), same, n_out });
         }
         return;
     }
@@ -553,28 +567,53 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     if (std.c.getenv("FZ_PREFILL") != null) { // the prompt path against the exact 8-row windows, then one-row decode
-        const pr_items = ref.object.get("prompt").?.array.items;
+        const all_items = ref.object.get("prompt").?.array.items;
+        const pr_items = all_items[0..@min(all_items.len, try promptCut())]; // FZ_PROMPT_N: the prompt's first n tokens
         const toks = try gpa.alloc(u32, pr_items.len);
         defer gpa.free(toks);
         for (pr_items, 0..) |x, i| toks[i] = @intCast(x.integer);
         if (std.c.getenv("FZ_SATTN_CHECK") != null) { // prompt attention: the decode's kernels vs the tensor units
             var pr = try Prompt.init(&r, args[2], r.xnew_header);
             if (std.c.getenv("FZ_STEP")) |v| pr.step = try std.fmt.parseInt(usize, std.mem.span(v), 10);
+            const ab0: []const u8 = if (std.c.getenv("FZ_AB")) |v| std.mem.span(v) else "attn";
+            const seg2 = std.mem.eql(u8, ab0, "seg2");
+            // seg2: one chunk at a time against staggered segments (core/segments.zig): FZ_SEGS=2 (default) the
+            // engine's rule (two segments of at least FZ_SEG_MIN rows), 1 one segment, 3-4 that many of up to a chunk
+            const nseg: usize = if (std.c.getenv("FZ_SEGS")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 2;
+            const seg_min: usize = if (std.c.getenv("FZ_SEG_MIN")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 1;
+            var extra: [3]Prompt = undefined;
+            var ps: [4]*Prompt = undefined;
+            ps[0] = &pr;
+            if (seg2) for (1..nseg) |k| {
+                extra[k - 1] = try pr.sibling();
+                ps[k] = &extra[k - 1];
+            };
             var outs: [2][48]u32 = undefined;
             const logits: [2][]u16 = .{ try gpa.alloc(u16, VOCAB), try gpa.alloc(u16, VOCAB) };
             var best: [2]f64 = .{ 1e9, 1e9 };
             const ab: []const u8 = if (std.c.getenv("FZ_AB")) |v| std.mem.span(v) else "attn";
             for (0..2) |arm| { // arm 0 the old kernels, arm 1 the new: FZ_AB attn (default), scan or tiles
-                if (std.mem.eql(u8, ab, "scan")) pr.scan4 = arm == 1 else if (std.mem.eql(u8, ab, "tiles")) pr.tall_tiles = arm == 1 else if (std.mem.eql(u8, ab, "gu")) pr.fused_gu = arm == 1 else if (std.mem.eql(u8, ab, "bm32")) pr.expert_bm = if (arm == 1) 32 else 0 else if (std.mem.eql(u8, ab, "scan8")) pr.scan8 = arm == 1 else pr.fast_attn = arm == 1;
+                if (std.mem.eql(u8, ab, "scan")) pr.scan4 = arm == 1 else if (std.mem.eql(u8, ab, "tiles")) pr.tall_tiles = arm == 1 else if (std.mem.eql(u8, ab, "gu")) pr.fused_gu = arm == 1 else if (std.mem.eql(u8, ab, "bm32")) pr.expert_bm = if (arm == 1) 32 else 0 else if (std.mem.eql(u8, ab, "scan8")) pr.scan8 = arm == 1 else if (std.mem.eql(u8, ab, "seg2")) {} else pr.fast_attn = arm == 1;
                 for (0..3) |run| {
                     m.reset();
                     const c0 = mtl.clock.seconds();
                     var at: usize = 0;
                     var first: u32 = 0;
                     while (at < toks.len) {
-                        const n: usize = @min(pr.step, toks.len - at);
-                        first = try pr.chunk(m, gpa, toks[at .. at + n]);
-                        at += n;
+                        const left = toks.len - at;
+                        if (seg2 and arm == 1) {
+                            const c: tf.segments.Call = switch (nseg) {
+                                1 => .{ .rows = @min(pr.step, left), .parts = 1 },
+                                2 => tf.segments.next(left, pr.step, seg_min),
+                                else => .{ .rows = @min(nseg * pr.step, left), .parts = (@min(nseg * pr.step, left) + pr.step - 1) / pr.step },
+                            };
+                            first = try Prompt.chunkN(ps[0..c.parts], m, gpa, toks[at .. at + c.rows]);
+                            at += c.rows;
+                        } else {
+                            const n = @min(pr.step, left);
+                            first = try pr.chunk(m, gpa, toks[at .. at + n]);
+                            at += n;
+                        }
                     }
                     best[arm] = @min(best[arm], mtl.clock.seconds() - c0);
                     if (run > 0) continue;
