@@ -321,6 +321,22 @@ fn kdaChunk(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, ki: usiz
     e.dispatchGroups(size(M, H, 1), size(32, 1, 1));
 }
 
+/// Every row's 64 heads' latent outputs (`att` [M, 64, 512]) to values (`vals` [M, 64 * 256]) on the tensor units: each
+/// head's value half of kv_b as one of a batch of dense products (the decode's qmv arithmetic, core/affine_mm.zig).
+fn unabsorb(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts.Mla, M: u32) void {
+    const c = x.c;
+    const H = c.mla_heads;
+    const K = c.kv_lora;
+    const per = c.nope + c.v_dim; // kv_b's rows a head: its key half, then its value half
+    var q = w.kv_b;
+    q.w = q.w.at(@as(usize, c.nope) * K / 2);
+    q.s = q.s.at(@as(usize, c.nope) * (K / 64) * 2);
+    q.b = q.b.at(@as(usize, c.nope) * (K / 64) * 2);
+    q.n = c.v_dim;
+    affine_mm.rowSums(e, p.mm.mm_bf16, 64, p.att, p.sums, M * H, K);
+    affine_mm.denseBatch(e, p.mm.mm_bf16, p.att, p.sums, q, p.vals, M, H, .{ .x_row = @intCast(H * K), .y_row = @intCast(H * c.v_dim), .sums_row = @intCast(H), .x_batch = @intCast(K), .y_batch = @intCast(c.v_dim), .sums_batch = 1, .w_batch = @intCast(per) });
+}
+
 /// Each (row, slot) pair's place in expert order.
 fn inverse(p: *const Prompt, e: mtl.ComputeEncoder, n: u32) void {
     e.setPipeline(p.k.get("custom_kernel_tf_sort_inverse_uint32_t_int32_t_uint32_t"));
@@ -367,7 +383,7 @@ fn mla(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: usize, w:
             e.dispatchGroups(size(c.mla_heads / 16, M, 1), size(128, 1, 1));
         } else fwd.attendIndexed(x, e, mi, p.ql, p.indices, p.att, M, pos + M);
     }
-    if (fwd.on(x, "mla_unabs")) fwd.unabsorb(x, e, w, p.att, p.vals, M);
+    if (fwd.on(x, "mla_unabs")) unabsorb(p, x, e, w, M);
     if (fwd.on(x, "mla_out")) qmm(p, e, p.vals, w.o_proj, p.streams.branch, M);
 }
 
