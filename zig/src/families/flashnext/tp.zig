@@ -248,6 +248,7 @@ pub const Tp2 = struct {
     stats: bool = false, // TF_TP_STATS: the host's time from a job's post to its serve, every 4096 jobs
     held_ns: u64 = 0,
     held_max: u64 = 0,
+    held_kind: [4][2]u64 = @splat(.{ 0, 0 }), // by job kind: total ticks, jobs
 
     /// Connect to the peer named in the settings file and start the host's service thread.
     pub fn init(gpa: std.mem.Allocator, device: mtl.Device, settings_path: []const u8) !*Tp2 {
@@ -550,10 +551,14 @@ pub const Tp2 = struct {
                 const held = std.c.mach_absolute_time() - seen; // ticks: 41.67 ns each on Apple silicon
                 t.held_ns += held;
                 t.held_max = @max(t.held_max, held);
+                t.held_kind[@intFromEnum(job.kind)][0] += held;
+                t.held_kind[@intFromEnum(job.kind)][1] += 1;
                 if (seq % 4096 == 0) {
                     std.debug.print("TP rank{d} jobs to {d}: host held {d:.1} us a job, max {d:.1} us\n", .{ t.rank, seq, @as(f64, @floatFromInt(t.held_ns)) / 4096.0 / 24.0, @as(f64, @floatFromInt(t.held_max)) / 24.0 });
+                    for (t.held_kind, 0..) |hk, kk| if (hk[1] > 0) std.debug.print("TP rank{d}   {s}: {d:.1} us a job ({d} jobs)\n", .{ t.rank, @tagName(@as(@TypeOf(job.kind), @enumFromInt(kk))), @as(f64, @floatFromInt(hk[0])) / @as(f64, @floatFromInt(hk[1])) / 24.0, hk[1] });
                     t.held_ns = 0;
                     t.held_max = 0;
+                    t.held_kind = @splat(.{ 0, 0 });
                 }
             }
             seq += 1;
