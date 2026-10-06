@@ -189,11 +189,7 @@ pub const Engine = struct {
                 L.conv = try r.loadf("L{d}.gdn.conv", .{i});
                 L.alog = try r.loadf("L{d}.gdn.alog", .{i});
                 L.dt = try r.loadf("L{d}.gdn.dt", .{i});
-                L.norm = try r.loadf("L{d}.gdn.norm", .{i});
-                for (0..2) |j| {
-                    L.cs[j] = .{ .b = try r.buffer(MAXR * CS_ROW) };
-                    L.so[j] = .{ .b = try r.buffer(MAXR * SO_ROW) };
-                }
+                L.norm = try r.loadf("L{d}.gdn.norm", .{i}); // its state views (L.cs, L.so) come from rounds()
             } else {
                 L.proj = try laneOf(r, "L{d}.att.proj", .{i});
                 L.out = try laneOf(r, "L{d}.att.o", .{i});
@@ -829,3 +825,10 @@ pub const Engine = struct {
         gpa.destroy(e);
     }
 };
+
+test "load sets no DeltaNet state view before rounds() points them at the round buffers" {
+    const src = @embedFile("engine.zig");
+    const at = std.mem.indexOf(u8, src, "pub fn loadWith(").?;
+    const body = src[at..std.mem.indexOfPos(u8, src, at, "try e.rounds();").?];
+    try std.testing.expect(std.mem.indexOf(u8, body, ".cs[") == null and std.mem.indexOf(u8, body, ".so[") == null);
+}
