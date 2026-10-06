@@ -281,7 +281,7 @@ pub const Host = struct {
         h.saved.clearRetainingCapacity();
         defer if (h.cache) |*store| store.report(r.prompt.len, job.cached, store.counts.kept - kept0);
         defer if (h.eng.r.tp != null) for (plan.marks) |mk| if (std.mem.indexOfScalar(u32, h.saved.items, mk) == null) {
-            h.eng.peer_drops.append(h.gpa, fx.keyOf(r.prompt[0..mk])) catch {}; // rank 1 kept it, this Mac didn't
+            h.eng.peer_drops.append(h.gpa, fx.keyOf(r.prompt[0 .. mk + 1])) catch {}; // rank 1 kept it, this Mac didn't
         };
         const res = h.eng.generateFrom(r.prompt, plan.from, plan.marks, r.max_tokens, r.eos, depth, out) catch |e| retry: {
             if (e == error.PeerNotResumed) { // rank 1 lacks this state: both Macs read the prompt from the start
@@ -316,7 +316,8 @@ const Snaps = struct {
         const h: *Host = @ptrCast(@alignCast(ptr));
         const k = try h.gpa.create(Kept);
         errdefer h.gpa.destroy(k);
-        k.* = .{ .st = try snap.save(h.eng, h.gpa, at), .key = fx.keyOf(h.prompt[0..at]) };
+        k.* = .{ .st = try snap.save(h.eng, h.gpa, at), .key = fx.keyOf(h.prompt[0 .. at + 1]) };
+        if (std.mem.indexOfScalar(u64, h.eng.peer_drops.items, k.key)) |i| _ = h.eng.peer_drops.swapRemove(i); // rank 1's copy is this new one
         h.saved.append(h.gpa, at) catch {};
         return k;
     }

@@ -40,7 +40,8 @@ const RING = 512;
 /// Positions a reply keeps free past its last token: two rounds in flight.
 pub const MARGIN = 2 * MAXR;
 
-/// A kept prompt state's name on both Macs of speed-up mode: the hash of the prompt tokens before it.
+/// A kept prompt state's name on both Macs of speed-up mode: the hash of the tokens through its lookahead token
+/// (the state at `at` also holds the MTP keys made with token `at`, so callers pass prompt[0 .. at + 1]).
 pub fn keyOf(tokens: []const u32) u64 {
     return std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(tokens));
 }
@@ -738,7 +739,7 @@ pub const Engine = struct {
         }
         const from = head[12];
         const ok = from == 0 or blk: {
-            const st = e.peer_kept.get(keyOf(prompt[0..from])) orelse break :blk false;
+            const st = e.peer_kept.get(keyOf(prompt[0 .. from + 1])) orelse break :blk false;
             snapshot.restore(e, st) catch break :blk false;
             break :blk true;
         };
@@ -758,7 +759,7 @@ pub const Engine = struct {
         fn marked(ctx: *anyopaque, at: usize) void {
             const k: *Keep = @ptrCast(@alignCast(ctx));
             const st = snapshot.save(k.e, k.e.gpa, at) catch |err| return std.log.warn("speed-up rank 1: no state kept at {d}: {s}", .{ at, @errorName(err) });
-            const old = k.e.peer_kept.fetchPut(k.e.gpa, keyOf(k.prompt[0..at]), st) catch return snapshot.drop(k.e.gpa, st);
+            const old = k.e.peer_kept.fetchPut(k.e.gpa, keyOf(k.prompt[0 .. at + 1]), st) catch return snapshot.drop(k.e.gpa, st);
             if (old) |kv| snapshot.drop(k.e.gpa, kv.value);
         }
     };
