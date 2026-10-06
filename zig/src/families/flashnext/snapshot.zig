@@ -12,8 +12,16 @@ const KEY_ROW = 256 * 2; // a key or value row of one head (bf16)
 const RAW_ROW = 128 * 2; // an indexer key row (bf16)
 const TAIL = fz.PLE_TAIL * fz.WIDE * 2; // the n-gram conv tail's rows
 
-/// One kept state: its bytes, its position and the n-gram history there.
-pub const State = struct { buf: mtl.Buffer, at: usize, hist: [2]i64, bytes: usize };
+/// Where a state's DeltaNet rows live: the prompt pass's slot pair, the one layout snapshots are taken in today.
+pub const Layout = enum { slots };
+
+/// One kept state: its bytes, its position, the n-gram history there and the layout that wrote it.
+pub const State = struct { buf: mtl.Buffer, at: usize, hist: [2]i64, bytes: usize, layout: Layout };
+
+/// The layout the engine's prompt pass keeps DeltaNet states in (a decode path with in-place states adds its own).
+fn layoutOf(_: *const Engine) Layout {
+    return .slots;
+}
 
 const Part = struct { live: fz.Buf, len: usize };
 const MAX_PARTS = 36 * 2 + 13 * 5 + 1;
@@ -76,12 +84,13 @@ pub fn save(e: *Engine, gpa: std.mem.Allocator, at: usize) !*State {
     errdefer buf.deinit();
     try copy(e, buf, at, true);
     const st = try gpa.create(State);
-    st.* = .{ .buf = buf, .at = at, .hist = e.m.ple.hist, .bytes = n };
+    st.* = .{ .buf = buf, .at = at, .hist = e.m.ple.hist, .bytes = n, .layout = layoutOf(e) };
     return st;
 }
 
 /// The live state becomes `st`'s: the next prompt chunk starts at its position (generateFrom with from = st.at).
 pub fn restore(e: *Engine, st: *const State) !void {
+    if (st.layout != layoutOf(e)) return error.SnapshotLayout; // the store drops it and the pass starts at 0
     const m = e.m;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
