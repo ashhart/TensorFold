@@ -3141,7 +3141,7 @@ pub const Prompt = struct {
         const at = segments.start(n, 2, k);
         const rows = segments.rows(n, 2, k);
         const rows0 = segments.rows(n, 2, 0);
-        tp.call += 1;
+        tp.call +%= 1;
         const pr: Pair = .{ .tp = tp, .call = tp.call, .k = k, .pos0 = m.pos, .rows0 = rows0, .a = a };
         var hist = m.ple.hist;
         for (tokens[at - @min(at, 2) .. at]) |tok| hist = .{ hist[1], tok };

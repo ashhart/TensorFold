@@ -465,7 +465,7 @@ pub const Tp2 = struct {
 
     /// Where the next reduce's partial goes (fp32, rows x 2560): the host sends it from there.
     pub fn partNext(t: *const Tp2) struct { b: mtl.Buffer, off: usize } {
-        return .{ .b = t.wbuf, .off = sendR(t.xseq + 1) };
+        return .{ .b = t.wbuf, .off = sendR(t.xseq +% 1) };
     }
 
     /// After a split projection wrote this rank's partial into `part`: post, wait for the host to swap partials with
@@ -575,7 +575,7 @@ pub const Tp2 = struct {
     /// The host waits until the window's word at `off` reaches `value`.
     pub fn hostWait(t: *Tp2, off: usize, value: u64) void {
         if (t.trace) std.debug.print("TP rank{d} host waits for word {d} >= {d} (now {d})\n", .{ t.rank, off, value, @atomicLoad(u64, t.word64(off), .acquire) });
-        while (@atomicLoad(u64, t.word64(off), .acquire) < value) std.atomic.spinLoopHint();
+        while (!reached(@truncate(@atomicLoad(u64, t.word64(off), .acquire)), @truncate(value))) std.atomic.spinLoopHint(); // call counts wrap
         if (t.trace) std.debug.print("TP rank{d} word {d} reached {d}\n", .{ t.rank, off, value });
     }
 
@@ -708,5 +708,31 @@ test "the host service follows the GPU's posts across the 27-bit post wrap and t
                 std.atomic.spinLoopHint();
             }
         }
+    }
+}
+
+test "partNext and hostWait across the 32-bit wrap: the next exchange's slot, and a wait for a call past the wrap" {
+    const win = try std.heap.page_allocator.alloc(u8, WINDOW);
+    defer std.heap.page_allocator.free(win);
+    var t: Tp2 = .{ .rank = 0, .peer = 1, .ep = undefined, .rd = undefined, .win = win, .wbuf = undefined, .post = undefined, .wait = undefined, .branch_pipe = undefined, .argmax_pipe = undefined, .pick_pipe = undefined, .merge_pipe = undefined, .plain_pipe = undefined, .one = undefined, .pick_tmp = undefined, .ids_pipe = undefined, .jobs = &.{} };
+    for ([_]u32{ 0xFFFF_FFFE, 0xFFFF_FFFF, 0 }) |x| { // partNext names the slot `plain` sends the next partial from
+        t.xseq = x;
+        const at = t.partNext().off;
+        t.xseq +%= 1;
+        try std.testing.expectEqual(sendR(t.xseq), at);
+    }
+    const Peer = struct { // the peer's message landing a call's flag, a little later
+        fn land(w: *u64, v: u64) void {
+            const ts: std.c.timespec = .{ .sec = 0, .nsec = 20_000_000 };
+            _ = std.c.nanosleep(&ts, null);
+            @atomicStore(u64, w, v, .release);
+        }
+    };
+    @atomicStore(u64, t.word64(BACK_FLAG), 0xFFFF_FFFE, .release);
+    for ([_]u64{ 0xFFFF_FFFF, 0, 1 }) |call| { // tp.call's flags just before and after its wrap
+        const th = try std.Thread.spawn(.{}, Peer.land, .{ t.word64(BACK_FLAG), call });
+        t.hostWait(BACK_FLAG, call);
+        try std.testing.expectEqual(call, @atomicLoad(u64, t.word64(BACK_FLAG), .acquire)); // it waited for the landing
+        th.join();
     }
 }
