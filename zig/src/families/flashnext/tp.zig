@@ -56,7 +56,7 @@ pub const TAIL_FLAG = LAYER_FLAG + LAYERS * 8;
 pub const BACK_FLAG = TAIL_FLAG + 8;
 pub const MTP_FLAG = BACK_FLAG + 8;
 const REQ_FLAG = MTP_FLAG + 8; // served: the last request rank 0 has written
-const CTRL_FLAG = REQ_FLAG + 8; // served: rank 0's decision at each step both ranks take: (step << 1) | quit
+const CTRL_FLAG = REQ_FLAG + 8; // rank 0's decision at each step both ranks take: (step << 6) | (next depth << 1) | quit
 const HOST = 0;
 const GPU = 1024;
 const GAVE_UP = 2048;
@@ -452,16 +452,16 @@ pub const Tp2 = struct {
     }
 
     /// A step both ranks take in the same order (a prompt chunk, the first token, a round): rank 0's decision to stop there (a stop string, a cancel) reaches rank 1, so both end on the same step. Rank 1 waits for it.
-    pub fn agree(t: *Tp2, quit: bool) !bool {
+    pub fn agree(t: *Tp2, quit: bool, depth: u32) !struct { quit: bool, depth: u32 } {
         t.ctrl += 1;
         if (t.rank == 0) {
-            try t.rd.signal(t.peer, CTRL_FLAG, (t.ctrl << 1) | @intFromBool(quit));
-            return quit;
+            try t.rd.signal(t.peer, CTRL_FLAG, (t.ctrl << 6) | (@as(u64, depth & 31) << 1) | @intFromBool(quit));
+            return .{ .quit = quit, .depth = depth };
         }
         const t0 = std.c.mach_absolute_time();
         while (true) {
             const v = @atomicLoad(u64, t.word64(CTRL_FLAG), .acquire);
-            if (v >> 1 >= t.ctrl) return quit or (v >> 1 == t.ctrl and v & 1 != 0);
+            if (v >> 6 >= t.ctrl) return .{ .quit = quit or (v >> 6 == t.ctrl and v & 1 != 0), .depth = @intCast((v >> 1) & 31) };
             if (std.c.mach_absolute_time() - t0 > 240_000_000) return error.TpPeerSilent; // 10 s
             std.atomic.spinLoopHint();
         }

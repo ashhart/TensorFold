@@ -481,6 +481,7 @@ pub const Engine = struct {
         var head_rate: f64 = 0.6;
         const fixed = depth;
         const depth0 = fixed orelse rule.pick();
+        var next_depth: usize = depth0; // the rule's drafts for the next round to encode (rank 0's in speed-up mode)
         const w = e.wids.b.slice(u32, 16);
         w[0] = pick;
         if (depth0 > 0) { // the head: the last prompt row with the first token, then its chain
@@ -572,7 +573,7 @@ pub const Engine = struct {
             // the widest windows only while copies land; the head's own chains stop at 6 drafts
             const copying = e.copy and copy_rate + 0.05 >= head_rate and copy_rate > 0.7;
             const cap: usize = if (copying) MAXR - 1 else 6;
-            const wn = (if (fixed) |d| d else @min(rule.pick(), cap)) + 1;
+            const wn = (if (fixed) |d| d else @min(next_depth, cap)) + 1;
             widths[(round + 1) % 4] = wn;
             const cfg = [4]u32{ @intCast(wr), @intCast(wn), CAP, 0 };
             r.enc.setPipeline(r.accept_pipe);
@@ -631,10 +632,12 @@ pub const Engine = struct {
             if (take > 0 and out.tokens(out.ctx, got[0..take])) stop = true;
             emitted += take;
             const cancel = !stop and emitted < max_tokens and out.cancelled(out.ctx);
-            const quit = e.agree(stop or emitted >= max_tokens or cancel) catch |err| {
+            const ag = e.agreeRound(stop or emitted >= max_tokens or cancel, rule.pick()) catch |err| {
                 failed = err;
                 break;
             };
+            next_depth = ag.depth;
+            const quit = ag.quit;
             if (quit) {
                 res.reason = if (stop) .stop else if (emitted >= max_tokens) .length else .cancelled;
                 break;
@@ -651,7 +654,14 @@ pub const Engine = struct {
 
     /// Speed-up mode: whether to stop at a step both ranks take (rank 0 decides, rank 1 follows); alone, `quit`.
     fn agree(e: *Engine, quit: bool) !bool {
-        return if (e.r.tp) |tp| tp.agree(quit) else quit;
+        return if (e.r.tp) |tp| (try tp.agree(quit, 0)).quit else quit;
+    }
+
+    /// A round's stop decision and the next round's drafts: rank 0's for both Macs (each Mac's own timings differ).
+    fn agreeRound(e: *Engine, quit: bool, depth: usize) !struct { quit: bool, depth: usize } {
+        const tp = e.r.tp orelse return .{ .quit = quit, .depth = depth };
+        const a = try tp.agree(quit, @intCast(depth));
+        return .{ .quit = a.quit, .depth = a.depth };
     }
 
     /// Speed-up mode's rank 1: it runs rank 0's requests (follow) and serves none of its own.

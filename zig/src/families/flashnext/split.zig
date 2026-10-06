@@ -1,30 +1,9 @@
-//! Speed-up mode's split projections on one Mac's GPU: fp32 partials over input groups, recorded lane kernels over a tile map, the DeltaNet step over half the heads.
+//! Speed-up mode's split projections on one Mac's GPU: recorded lane kernels over a tile map (fp32 partials over an input-group range), the DeltaNet step over half the heads.
 const std = @import("std");
 const mtl = @import("metal");
 const replay = @import("replay.zig");
 const Run = replay.Run;
 const Buf = replay.Buf;
-const Lane = replay.Lane;
-
-/// TP: y[rows, n] (fp32) = x[rows, k] W^T over input groups [g0, g0 + gn) only: one rank's partial.
-pub fn densePart(r: *Run, x: Buf, k: usize, l: Lane, rows: usize, y: Buf, g0: usize, gn: usize) void {
-    const n = l.wq.b.length() * 4 / (3 * k);
-    const narrow = n <= 4096;
-    var at: usize = 0;
-    while (at < rows) : (at += 8) {
-        const rr = @min(8, rows - at);
-        const dims = [4]u32{ @intCast(rr), @intCast(n), @intCast(k), @intCast(g0 | gn << 16) };
-        r.enc.setPipeline(if (narrow) r.densep16_pipe else r.densep8_pipe);
-        r.enc.setBuffer(x.b, x.off + at * k * 2, 0);
-        r.enc.setBuffer(l.wq.b, l.wq.off, 1);
-        r.enc.setBuffer(l.sbt.b, l.sbt.off, 2);
-        r.enc.setBuffer(y.b, y.off + at * n * 4, 3);
-        r.enc.setBytes(std.mem.asBytes(&dims), 4);
-        const sk: usize = if (narrow) 16 else 8;
-        r.enc.dispatchThreads(mtl.Size.of(32 * sk * (n / 32), 1, 1), mtl.Size.of(32 * sk, 1, 1));
-        if (!r.serial) r.enc.barrier();
-    }
-}
 
 /// TP: a recorded lane projection over this Mac's output tiles only, in one dispatch: a copy of the kernel whose tile index goes through `ranges` ({first tile, count} pairs), with `sk` K slices; `groups` ({first, count}) cuts the sum to those input groups and writes fp32 partials. The recorded SK and no group cut keep its sums.
 pub fn laneTiles(r: *Run, role: []const u8, ins: []const Buf, y: Buf, ranges: []const [2]usize, sk: usize, groups: ?[2]usize) !void {

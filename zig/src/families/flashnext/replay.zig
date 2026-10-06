@@ -398,55 +398,6 @@ const xnew_source =
     \\  threadgroup float part[16][8][32];
     \\  fz_dense_body<16>(X, W, SB, Y, dims, sgi, lane, tgi, part);
     \\}
-    \\// TP: fz_dense over input groups [G0, G0 + GN) only (dims.w = G0 | GN << 16), fp32 out: one rank's partial of a
-    \\// projection whose inputs are split across two Macs; the two partials add in rank order and round once.
-    \\template <int SK>
-    \\inline void fz_densep_body(const device bfloat* X, const device uint* W, const device bfloat* SB, device float* Y,
-    \\    constant uint4& dims, uint sgi, uint lane, uint tgi, threadgroup float (*part)[8][32]) {
-    \\  const int R = int(dims.x), N = int(dims.y), K = int(dims.z), KG = K / 32;
-    \\  const int G0 = int(dims.w & 0xffffu), GN = int(dims.w >> 16);
-    \\  const int t = int(tgi), n = t * 32 + int(lane);
-    \\  const int g0 = G0 + int(sgi) * (GN / SK), g1 = g0 + GN / SK;
-    \\  float acc[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-    \\  for (int g = g0; g < g1; g++) {
-    \\    float q[32];
-    \\    fz_codes6(W + (size_t(t * KG + g) * 32 + lane) * 6, q);
-    \\    const device bfloat* sb = SB + (size_t(g) * N + n) * 2;
-    \\    const float sc = float(sb[0]), bi = float(sb[1]);
-    \\    #pragma unroll
-    \\    for (int r = 0; r < 8; r++) {
-    \\      if (r < R) {
-    \\        float qx, sx;
-    \\        fz_dot32(q, X + size_t(r) * K + g * 32, qx, sx);
-    \\        acc[r] += sc * qx + bi * sx;
-    \\      }
-    \\    }
-    \\  }
-    \\  #pragma unroll
-    \\  for (int r = 0; r < 8; r++) part[sgi][r][lane] = acc[r];
-    \\  threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\  if (sgi == 0) {
-    \\    for (int r = 0; r < R; r++) {
-    \\      float v = 0.0f;
-    \\      for (int k = 0; k < SK; k++) v += part[k][r][lane];
-    \\      Y[size_t(r) * N + n] = v;
-    \\    }
-    \\  }
-    \\}
-    \\[[kernel]] void fz_densep8(const device bfloat* X [[buffer(0)]], const device uint* W [[buffer(1)]],
-    \\    const device bfloat* SB [[buffer(2)]], device float* Y [[buffer(3)]], constant uint4& dims [[buffer(4)]],
-    \\    uint sgi [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
-    \\    uint tgi [[threadgroup_position_in_grid]]) {
-    \\  threadgroup float part[8][8][32];
-    \\  fz_densep_body<8>(X, W, SB, Y, dims, sgi, lane, tgi, part);
-    \\}
-    \\[[kernel]] void fz_densep16(const device bfloat* X [[buffer(0)]], const device uint* W [[buffer(1)]],
-    \\    const device bfloat* SB [[buffer(2)]], device float* Y [[buffer(3)]], constant uint4& dims [[buffer(4)]],
-    \\    uint sgi [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
-    \\    uint tgi [[threadgroup_position_in_grid]]) {
-    \\  threadgroup float part[16][8][32];
-    \\  fz_densep_body<16>(X, W, SB, Y, dims, sgi, lane, tgi, part);
-    \\}
     \\// FZ_XSX=1: fz_xgu and fz_xdown with each input group's sum computed once a threadgroup (fz_group's order) and the
     \\// inputs converted once for gate and up; simdgroup 0 routes while the rest sum. Bits equal fz_xgu / fz_xdown.
     \\inline float fz_qdot(thread const float* q, thread const float4* xv) {
@@ -876,8 +827,6 @@ pub const Run = struct {
     gdown_pipe: mtl.Pipeline = undefined,
     ul: Buf = undefined,
     dense16_pipe: mtl.Pipeline = undefined,
-    densep8_pipe: mtl.Pipeline = undefined, // TP: fp32 partials over an input-group range
-    densep16_pipe: mtl.Pipeline = undefined,
     tp_gdn: std.AutoHashMapUnmanaged(*Variant, mtl.Pipeline) = .empty, // TP: DeltaNet steps from value head 24
     tp_lane: std.AutoHashMapUnmanaged(u64, mtl.Pipeline) = .empty, // TP: recorded lane kernels over tile maps
     xnew_header: []const u8 = "",
@@ -1005,8 +954,6 @@ pub const Run = struct {
             r.xdown_pipe = try mtl.Pipeline.init(r.device, lib, "fz_xdown", false);
             r.dense8_pipe = try mtl.Pipeline.init(r.device, lib, "fz_dense8", false);
             r.dense16_pipe = try mtl.Pipeline.init(r.device, lib, "fz_dense16", false);
-            r.densep8_pipe = try mtl.Pipeline.init(r.device, lib, "fz_densep8", false);
-            r.densep16_pipe = try mtl.Pipeline.init(r.device, lib, "fz_densep16", false);
             r.route_pipe = try mtl.Pipeline.init(r.device, lib, "fz_route", false);
             r.xfused_pipe = try mtl.Pipeline.init(r.device, lib, "fz_xfused", false);
             r.xgu_sx_pipe = try mtl.Pipeline.init(r.device, lib, "fz_xgu_sx", false);
@@ -1766,7 +1713,7 @@ pub const Model = struct {
                 try split.gdnHeads(r, "q4_gdn@gdn", if (r.gdn_step and rows > 1) 8 else rows, &.{ t.p, cs_in, so_in, L.conv, L.alog, L.dt, L.norm, t.eps, t.rows }, &.{ t.gout, L.cs[1 - a], L.so[1 - a] }, tp.rank);
                 const pn = tp.partNext();
                 const part: Buf = .{ .b = pn.b, .off = pn.off };
-                if (rows < 4) split.densePart(r, t.gout, 6144, L.out, rows, part, 96 * k0, 96) else try split.laneTiles(r, "lane_qmm_bytes_grouped@gdn.out", &.{ t.gout, t.xs, L.out.wq, L.out.sbt, t.mdims }, part, &.{.{ 0, 80 }}, 8, .{ 96 * k0, 96 });
+                try split.laneTiles(r, "lane_qmm_bytes_grouped@gdn.out", &.{ t.gout, t.xs, L.out.wq, L.out.sbt, t.mdims }, part, &.{.{ 0, 80 }}, 8, .{ 96 * k0, 96 }); // one kernel at every width: drafted == plain
                 tp.reduce(r.enc, t.branch, t.rows, rows);
             } else if (L.linear) {
                 try m.lane(t.mixed, D, L.proj, "lane_qmm_bytes_grouped@gdn.in", t.p);
