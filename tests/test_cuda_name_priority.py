@@ -107,6 +107,16 @@ def test_serve_options_accepts_a_valid_id(tmp_path):
     assert _check_serve_options(args, family, "cuda") is None
 
 
+def test_serve_options_takes_the_served_name_of_a_relative_model_path(tmp_path, monkeypatch):
+    family = SimpleNamespace(title="Test family", package=SimpleNamespace(cuda_engine=lambda *a, **k: None),
+                             model_type="test")
+    model = tmp_path / "my-model"
+    model.mkdir()
+    monkeypatch.chdir(model)
+    args = SimpleNamespace(name="", alias=[], model=".", name_priority=["my-model=background"])
+    assert _check_serve_options(args, family, "cuda") is None
+
+
 def test_serve_hands_the_background_ids_to_the_cuda_app(tmp_path, monkeypatch):
     from tensorfold.cuda import server
 

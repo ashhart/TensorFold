@@ -16,7 +16,7 @@ def _served_name(args: argparse.Namespace) -> str:
     from tensorfold import hub
 
     model = str(args.model).rstrip("/")
-    return model.split("/")[-1] if hub.is_repo_id(str(args.model)) else Path(model).name
+    return model.split("/")[-1] if hub.is_repo_id(str(args.model)) else Path(model).expanduser().resolve().name
 
 
 def name_priority(args: argparse.Namespace) -> dict[str, str]:

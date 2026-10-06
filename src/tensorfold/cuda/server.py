@@ -487,8 +487,7 @@ class App:
         shaped = prepared.grammar is not None or prepared.think_budget > 0
         think_end = self.tok.token_to_id("</think>") if chat and thinking and shaped else None
         budget = self._think_budget(prepared, think_end)
-        # priority "background": the request's own field, else --name-priority's default for the id it asked for
-        # (a request's own priority wins over the default); a session-title request is background either way
+        # background: the request's own priority, else --name-priority's default for its id; title requests always
         by_name = "priority" not in body and self.reply_model(body) in getattr(self, "background_ids", ())
         background = body.get("priority") == "background" or by_name or (chat and is_title_request(body.get("messages"), tools))
         concurrent = getattr(self.engine, "concurrent", False)
