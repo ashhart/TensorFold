@@ -50,6 +50,7 @@ pub const Server = struct {
     config: Config,
     keys: ?*auth.Store,
     late_system: []const u8 = "system",
+    needs_user_after_tool: bool = false,
     markers: reply_text.Markers = reply_text.think_markers,
     chunks: chunk_plan.Plan = .{},
     effort_levels: []const []const u8 = &.{},
@@ -73,6 +74,7 @@ pub const Server = struct {
         if (text.tokenId(reply_text.channel_markers.close) != null) srv.markers = reply_text.channel_markers;
         srv.effort_levels = try fields.effortLevels(a, text.templateSource());
         srv.late_system = try lateSystem(a, text);
+        srv.needs_user_after_tool = needsUserAfterTool(text.templateSource());
         if (text.tokenId("</think>")) |end| {
             const lead = try text.encode(a, "\n", false);
             const trail = try text.encode(a, "\n\n", false);
@@ -273,4 +275,11 @@ fn lateSystem(a: Allocator, text: model_text.Text) ![]const u8 {
     var problem: []const u8 = "";
     const rendered = text.render(a, probe, .{ .add_generation_prompt = false }, &problem) catch return "user";
     return if (std.mem.indexOf(u8, rendered, probe_text) != null) "system" else "user";
+}
+
+/// ``needs_user_after_tool``: the template demands a user query (Qwen's raises "No user query found" when the
+/// conversation has none), which a conversation whose user turn became tool results no longer has; such a
+/// template gains a user turn after a trailing tool message. Templates without the raise are untouched.
+fn needsUserAfterTool(source: []const u8) bool {
+    return std.mem.indexOf(u8, source, "No user query found") != null;
 }

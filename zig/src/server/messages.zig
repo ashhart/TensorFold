@@ -22,7 +22,8 @@ fn withField(cx: *Cx, o: *const json.Object, key: []const u8, value: Value) !*js
 }
 
 /// ``normalize_messages`` (text only): leading system and developer text merged, later ones as ``late_system``.
-pub fn normalize(cx: *Cx, messages: ?Value, late_system: []const u8) errors.Refused!Value {
+/// A template that needs a user query gains one user turn after a trailing tool run (``needs_user_after_tool``).
+pub fn normalize(cx: *Cx, messages: ?Value, late_system: []const u8, needs_user_after_tool: bool) errors.Refused!Value {
     const list = messages orelse return cx.refuse("messages must be a non-empty list");
     if (list != .array or list.array.len == 0) return cx.refuse("messages must be a non-empty list");
     var out: std.ArrayList(Value) = .empty;
@@ -68,6 +69,33 @@ pub fn normalize(cx: *Cx, messages: ?Value, late_system: []const u8) errors.Refu
         const first = try withField(cx, instructions.items[0], "role", .{ .string = "system" });
         try first.put(cx.a, "content", .{ .string = joined.items });
         try out.insert(cx.a, 0, .{ .object = first });
+    }
+    // A template that demands a user query (it raises "No user query found" when none exists) refuses a
+    // conversation whose user turn became tool results. By the template's own test a query is a user message
+    // whose trimmed text is not wholly a "<tool_response>...</tool_response>" block; only a conversation with
+    // none gains one placeholder user turn after its last tool run, the tool messages themselves unchanged.
+    if (needs_user_after_tool) {
+        var has_query = false;
+        var last_tool: ?usize = null;
+        for (out.items, 0..) |m, i| {
+            const role = m.get("role");
+            if (role == null or role.? != .string) continue;
+            if (std.mem.eql(u8, role.?.string, "user")) {
+                const content = m.get("content");
+                const text = if (content != null and content.? == .string) content.?.string else "";
+                const trimmed = std.mem.trim(u8, text, " \t\n\r\x0b\x0c");
+                if (!(std.mem.startsWith(u8, trimmed, "<tool_response>") and std.mem.endsWith(u8, trimmed, "</tool_response>"))) has_query = true;
+            } else if (std.mem.eql(u8, role.?.string, "tool")) {
+                last_tool = i;
+            }
+        }
+        if (!has_query) {
+            const at = if (last_tool) |i| i + 1 else out.items.len;
+            const turn = try json.newObject(cx.a);
+            try turn.put(cx.a, "role", .{ .string = "user" });
+            try turn.put(cx.a, "content", .{ .string = "(tool results above)" });
+            try out.insert(cx.a, at, .{ .object = turn });
+        }
     }
     return .{ .array = out.items };
 }
@@ -131,4 +159,67 @@ pub fn isTitleRequest(messages: Value, has_tools: bool) bool {
     const text = first.get("content") orelse return false;
     if (size >= 4096 or text != .string) return false;
     return std.ascii.findIgnoreCase(text.string, "title") != null;
+}
+
+test "a conversation with a user query stays byte-identical under the rule" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cx: Cx = .{ .a = arena.allocator() };
+    const messages = (try json.parse(cx.a,
+        \\[{"role": "user", "content": "run it"}, {"role": "assistant", "content": "", "tool_calls": [{"id": "t1", "type": "function", "function": {"name": "f", "arguments": {}}}]}, {"role": "tool", "tool_call_id": "t1", "content": "42 rows"}, {"role": "assistant", "content": "", "tool_calls": [{"id": "t2", "type": "function", "function": {"name": "g", "arguments": {}}}]}, {"role": "tool", "tool_call_id": "t2", "content": "ok"}, {"role": "assistant", "content": "done"}]
+    )).ok;
+    const out = try normalize(&cx, messages, "system", true);
+    // byte-identical: the same messages, in order, nothing gained
+    try std.testing.expectEqualStrings(try json.stringify(cx.a, messages, .{ .ascii = false }), try json.stringify(cx.a, out, .{ .ascii = false }));
+}
+
+test "a conversation with no user query gains one placeholder turn after its last tool run" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cx: Cx = .{ .a = arena.allocator() };
+    const messages = (try json.parse(cx.a,
+        \\[{"role": "assistant", "content": "", "tool_calls": [{"id": "t1", "type": "function", "function": {"name": "f", "arguments": {}}}]}, {"role": "tool", "tool_call_id": "t1", "content": "42 rows"}, {"role": "tool", "tool_call_id": "t2", "content": "ok"}]
+    )).ok;
+    const out = try normalize(&cx, messages, "system", true);
+    try std.testing.expectEqual(@as(usize, 4), out.array.len);
+    try std.testing.expectEqualStrings("tool", out.array[1].get("role").?.string);
+    try std.testing.expectEqualStrings("42 rows", out.array[1].get("content").?.string); // the tool messages unchanged
+    try std.testing.expectEqualStrings("tool", out.array[2].get("role").?.string);
+    try std.testing.expectEqualStrings("ok", out.array[2].get("content").?.string);
+    try std.testing.expectEqualStrings("user", out.array[3].get("role").?.string);
+    try std.testing.expectEqualStrings("(tool results above)", out.array[3].get("content").?.string);
+}
+
+test "a user message whose content is wholly a tool block does not count as a query" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cx: Cx = .{ .a = arena.allocator() };
+    const user = try json.newObject(cx.a);
+    try user.put(cx.a, "role", .{ .string = "user" });
+    try user.put(cx.a, "content", .{ .string = "<tool_response>\ngot 42 rows\n</tool_response>" });
+    const assistant = try json.newObject(cx.a);
+    try assistant.put(cx.a, "role", .{ .string = "assistant" });
+    try assistant.put(cx.a, "content", .{ .string = "" });
+    const tool = try json.newObject(cx.a);
+    try tool.put(cx.a, "role", .{ .string = "tool" });
+    try tool.put(cx.a, "tool_call_id", .{ .string = "t1" });
+    try tool.put(cx.a, "content", .{ .string = "done" });
+    const messages: Value = .{ .array = try cx.a.dupe(Value, &.{ .{ .object = user }, .{ .object = assistant }, .{ .object = tool } }) };
+    const out = try normalize(&cx, messages, "system", true);
+    try std.testing.expectEqual(@as(usize, 4), out.array.len);
+    try std.testing.expectEqualStrings("user", out.array[3].get("role").?.string);
+    try std.testing.expectEqualStrings("(tool results above)", out.array[3].get("content").?.string);
+}
+
+test "a conversation keeps its shape when the template does not need the rule" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cx: Cx = .{ .a = arena.allocator() };
+    const messages = (try json.parse(cx.a,
+        \\[{"role": "assistant", "content": "", "tool_calls": [{"id": "t1", "type": "function", "function": {"name": "f", "arguments": {}}}]}, {"role": "tool", "tool_call_id": "t1", "content": "42 rows"}]
+    )).ok;
+    const out = try normalize(&cx, messages, "system", false);
+    try std.testing.expectEqual(@as(usize, 2), out.array.len);
+    try std.testing.expectEqualStrings("assistant", out.array[0].get("role").?.string);
+    try std.testing.expectEqualStrings("tool", out.array[1].get("role").?.string);
 }
