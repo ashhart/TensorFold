@@ -61,6 +61,8 @@ pub const flashnext_gdn = @embedFile("decode/fn_gdn.metal");
 pub const glm = @import("glm/kernels.zig");
 /// GLM-5.3-Flash's glue: MLX's arithmetic where the Python family calls MLX ops; selection, argmax, small steps.
 pub const glm_glue = @embedFile("glm_glue.metal");
+/// GLM-5.3-Flash's latent attention for rows that read every key: 64 heads as one matrix on the tensor units.
+pub const glm_attn = @embedFile("glm_attn.metal");
 /// MLX's precise row softmax and its embedding and RMS kernels, as the replicas in ops/ write them.
 pub const ops_softmax = @embedFile("ops/softmax.metal");
 pub const ops_embed_norm = @embedFile("ops/embed_norm.metal");

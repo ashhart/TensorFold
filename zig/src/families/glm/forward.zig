@@ -215,33 +215,24 @@ pub fn unabsorb(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Mla, att: Re
     e.dispatchGroups(size(1, c.v_dim / 4, rows * c.mla_heads), size(32, 1, 1));
 }
 
-/// One query row's 64 heads over keys [0, n): MLX's fallback for 64 heads on one latent (gemv, precise softmax,
-/// gemv_t), the scores and probabilities bf16 [heads, n].
-fn attendDense(x: *const Ctx, e: mtl.ComputeEncoder, keys: Ref, q: Ref, scores: Ref, probs: Ref, out: Ref, n: u32) void {
+/// One query row's 64 heads over keys [0, n), as MLX's unfused attention runs them: the heads folded into one 64-row
+/// matrix against the latent keys (scores, a precise softmax, values), bf16 [heads, n] scores and probabilities.
+pub fn attendDense(x: *const Ctx, e: mtl.ComputeEncoder, keys: Ref, q: Ref, scores: Ref, probs: Ref, out: Ref, n: u32) void {
     const k = x.k;
     const H = x.c.mla_heads;
-    const RANK = x.c.kv_lora;
-    // MLX 0.32's gemv tiling for in 512, out n: (BM 1, BN 8, TM 1) below 4, (1, 8, 4) to 32, (4, 1, 4) beyond
-    const pipe, const per, const threads = if (n < 4) .{ k.gemv_scores_lt4, @as(u32, 1), @as(u32, 256) } else if (n <= 32) .{ k.gemv_scores_le32, @as(u32, 4), @as(u32, 256) } else .{ k.gemv_scores, @as(u32, 16), @as(u32, 128) };
-    e.setPipeline(pipe);
-    bind(e, 0, .{q});
-    shape(e, 1, .{ H, RANK });
-    bind(e, 2, .{keys});
-    shape(e, 3, .{ n, RANK });
-    bind(e, 4, .{scores});
-    e.dispatchThreads(size((n + per - 1) / per * threads, 1, H), size(threads, 1, 1));
+    e.setPipeline(k.latent_scores);
+    bind(e, 0, .{ q, keys, scores });
+    e.setValue([2]i32{ @intCast(n), @intFromBool(n < 256) }, 3); // fewer than 256 keys: the 512 dims in two halves
+    e.dispatchGroups(size((n + 31) / 32, 1, 1), size(128, 1, 1));
     e.setPipeline(k.softmax);
     bind(e, 0, .{scores});
     shape(e, 1, .{n});
     bind(e, 2, .{probs});
     e.dispatchGroups(size(H, 1, 1), size(((n + 3) / 4 + 31) / 32 * 32, 1, 1));
-    e.setPipeline(k.gemv_t_values);
-    bind(e, 0, .{probs});
-    shape(e, 1, .{ H, n });
-    bind(e, 2, .{keys});
-    shape(e, 3, .{ n, RANK });
-    bind(e, 4, .{out});
-    e.dispatchThreads(size(RANK / 64 * 128, 1, H), size(128, 1, 1));
+    e.setPipeline(k.latent_values);
+    bind(e, 0, .{ probs, keys, out });
+    e.setValue([2]i32{ @intCast(n), if (n > 1024) 1024 else 0 }, 3); // past 1,024 keys: the first 1,024 apart
+    e.dispatchGroups(size(x.c.kv_lora / 32, 1, 1), size(128, 1, 1));
 }
 
 /// Rows [first, rows) past index_topk keys: fp32 block scores, the best blocks in block order plus the tail,

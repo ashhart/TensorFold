@@ -3,6 +3,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
+const frags = @import("../../core/frags.zig");
 
 pub const max_rows = 16;
 
@@ -55,6 +56,8 @@ pub const Kernels = struct {
     dense_indices: mtl.Pipeline,
     softmax: mtl.Pipeline,
     embed: mtl.Pipeline,
+    latent_scores: mtl.Pipeline,
+    latent_values: mtl.Pipeline,
 
     pub fn deinit(k: *Kernels) void {
         const info = @typeInfo(Kernels).@"struct";
@@ -141,7 +144,7 @@ fn kernelOf(comptime key: []const u8) sources.glm.Kernel {
 pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const k = try gpa.create(Kernels);
     errdefer gpa.destroy(k);
-    var jobs: [generated.len + 3]Job = undefined;
+    var jobs: [generated.len + 4]Job = undefined;
     inline for (generated, 0..) |g, i| {
         const src = comptime kernelOf(g.key);
         const FT = @FieldType(Kernels, g.field);
@@ -159,6 +162,10 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     jobs[generated.len] = .{ .device = device, .source = sources.glm_glue, .names = &glue_names, .out = &glue_out };
     jobs[generated.len + 1] = .{ .device = device, .source = sources.ops_softmax, .names = &.{"tf_softmax_bf16"}, .out = @as(*[1]mtl.Pipeline, &k.softmax) };
     jobs[generated.len + 2] = .{ .device = device, .source = sources.ops_embed_norm, .names = &.{"tf_embed_b4_g64"}, .out = @as(*[1]mtl.Pipeline, &k.embed) };
+    const attn_src = try frags.source(device, gpa, sources.glm_attn);
+    defer gpa.free(attn_src);
+    var attn_out: [2]mtl.Pipeline = undefined;
+    jobs[generated.len + 3] = .{ .device = device, .source = attn_src, .names = &.{ "glm_latent_scores", "glm_latent_values" }, .out = &attn_out };
     var next = std.atomic.Value(usize).init(0);
     const Worker = struct {
         fn run(all: []Job, counter: *std.atomic.Value(usize)) void {
@@ -175,5 +182,7 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     for (threads) |t| if (t) |th| th.join();
     for (jobs) |j| if (j.failed) return error.KernelCompile;
     inline for (glue, 0..) |g, i| @field(k, g.field) = glue_out[i];
+    k.latent_scores = attn_out[0];
+    k.latent_values = attn_out[1];
     return k;
 }
