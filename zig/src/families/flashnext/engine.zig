@@ -124,6 +124,11 @@ pub const Engine = struct {
         r.event = try device.sharedEvent();
         try r.compile(dump_dir);
         r.sel = try Select.init(r, MAXR);
+        r.lane_new = std.c.getenv("FZ_LANE") != null; // fz_lane and fz_gdn on the target (the recorded bits)
+        if (std.c.getenv("FZ_GDN")) |v| {
+            r.gdn_pipe = try fz.gdn_step.compile(r, false);
+            if (v[0] == '2') r.gdn_kept = try fz.gdn_step.compile(r, true); // GPU-side rounds keep one state a layer
+        }
         const index_file = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/model.safetensors.index.json", .{model_dir}, 0));
         const index = try std.json.parseFromSliceLeaky(std.json.Value, arena, index_file.bytes[0..index_file.size], .{});
         var files: std.StringHashMapUnmanaged(void) = .empty;
@@ -343,6 +348,7 @@ pub const Engine = struct {
             L.so[1] = .{ .b = e.o_so, .off = gi * MAXR * SO_ROW };
             gi += 1;
         };
+        if (r.gdn_kept != null) m.recs = .{ .{ .b = try r.buffer(n_lin * fz.gdn_step.RECORD) }, .{ .b = try r.buffer(n_lin * fz.gdn_step.RECORD) } };
         e.cins = .{ m.ple.cin, .{ .b = try r.buffer((PLE_TAIL + MAXR) * WIDE * 2) } };
         r.ar = .{ .b = try r.buffer(4 * fz.AR_WORDS) };
         e.ring = try r.buffer(fz.RING_WORDS * 4 * RING);
@@ -392,9 +398,9 @@ pub const Engine = struct {
         m.mtp.slots = e.gpu_slots;
     }
 
-    fn statesCopy(e: *Engine) void { // the kept row of every DeltaNet layer's window output into its state
+    fn statesCopy(e: *Engine, states: bool) void { // the kept row of every DeltaNet layer's window output into its state
         const r = e.r;
-        r.copyKept(.{ .b = e.o_so }, .{ .b = e.g_so }, SO_ROW / 4, SO_ROW / 4, MAXR * SO_ROW / 4, SO_ROW / 4, 36, -1);
+        if (states) r.copyKept(.{ .b = e.o_so }, .{ .b = e.g_so }, SO_ROW / 4, SO_ROW / 4, MAXR * SO_ROW / 4, SO_ROW / 4, 36, -1);
         r.copyKept(.{ .b = e.o_cs }, .{ .b = e.g_cs }, CS_ROW / 4, CS_ROW / 4, MAXR * CS_ROW / 4, CS_ROW / 4, 36, -1);
     }
 
@@ -470,7 +476,7 @@ pub const Engine = struct {
             ar[0] = 1;
             const cb = r.queue.commandBuffer();
             r.enc = cb.compute(.serial);
-            e.statesCopy();
+            e.statesCopy(true);
             try m.finish(cb);
             m.state = 0;
             m.state_row = 0;
@@ -542,7 +548,7 @@ pub const Engine = struct {
             m.t.mdims = e.mdims_w[wr];
             if (round > 0) {
                 const wp = widths[(round - 1) % 4];
-                e.statesCopy();
+                e.statesCopy(r.gdn_kept == null); // kept states replay the kept rows themselves
                 r.copyKept(e.cins[(round - 1) % 2], e.cins[round % 2], PLE_TAIL * WIDE / 2, WIDE / 2, 0, 0, 1, 0);
                 if (wr > 1) {
                     try m.mtpEncode(MAXR - 1 + wp, wp, m.t.picks, m.last, .{ .b = e.wids.b, .off = 4 });
@@ -560,6 +566,7 @@ pub const Engine = struct {
                 }
             }
             m.ple.cin = e.cins[round % 2];
+            m.rec_slot = round % 2;
             m.pleIdsGpu(wr, e.wids);
             w_sum += wr;
             const ub = (@as(usize, @intCast(T)) + w_sum) / 4 + 2;

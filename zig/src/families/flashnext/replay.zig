@@ -5,7 +5,9 @@ const mtl = @import("metal");
 const ks = @import("kernel_sources");
 const segments = @import("../../core/segments.zig");
 const tpm = @import("tp.zig");
-const split = @import("split.zig");
+pub const split = @import("split.zig");
+pub const dense = @import("dense.zig");
+pub const gdn_step = @import("gdn.zig");
 pub const Tp2 = tpm.Tp2;
 pub const frags = @import("../../core/frags.zig");
 
@@ -23,7 +25,15 @@ const HEAD_TILES = VOCAB / 32; // the vocabulary head's 32-column tiles
 pub const CS_ROW = 3 * WIDE * 2; // a DeltaNet conv state row (bytes)
 pub const SO_ROW = 48 * 128 * 128 * 4; // a DeltaNet recurrent state row (bytes)
 
-pub const Buf = struct { b: mtl.Buffer, off: usize = 0 };
+pub const Buf = struct {
+    b: mtl.Buffer,
+    off: usize = 0,
+
+    /// The same buffer `bytes` further on.
+    pub fn at(x: Buf, bytes: usize) Buf {
+        return .{ .b = x.b, .off = x.off + bytes };
+    }
+};
 pub const Entry = struct { fd: std.c.fd_t, at: usize, len: usize };
 pub const Variant = struct { inputs: [][]const u8, outputs: [][]const u8, meta: [][]const u8, pipe: mtl.Pipeline, file: []const u8 = "", name: []const u8 = "" };
 pub const Site = struct { v: *Variant, grid: mtl.Size, tg: mtl.Size };
@@ -822,6 +832,7 @@ pub const Run = struct {
     gpu_round: bool = false,
     ar: Buf = undefined,
     probe: ?Buf = null,
+    lg_probe: ?Buf = null, // FZ_DBENCH: every layer's router logits, MAXR * 513 floats a layer
     xnew: bool = false,
     xgu_pipe: mtl.Pipeline = undefined,
     xdown_pipe: mtl.Pipeline = undefined,
@@ -858,6 +869,12 @@ pub const Run = struct {
     dense16_pipe: mtl.Pipeline = undefined,
     tp_gdn: std.AutoHashMapUnmanaged(*Variant, mtl.Pipeline) = .empty, // TP: DeltaNet steps from value head 24
     tp_lane: std.AutoHashMapUnmanaged(u64, mtl.Pipeline) = .empty, // TP: recorded lane kernels over tile maps
+    lane_new: bool = false, // the target's lane projections on fz_lane (dense.zig): the recorded bits, weights read ahead
+    lane_pf: usize = 1, // groups a simdgroup reads ahead in fz_lane
+    lane_pipes: std.AutoHashMapUnmanaged(u64, mtl.Pipeline) = .empty,
+    lane_shape: std.AutoHashMapUnmanaged(*Variant, [3]usize) = .empty, // recorded lane kernels' N, K, SK
+    gdn_pipe: ?mtl.Pipeline = null, // the DeltaNet window step on fz_gdn (gdn.zig) when set
+    gdn_kept: ?mtl.Pipeline = null, // GPU-side rounds: fz_gdn keeping one state a layer, kept rows replayed (gdn.zig)
     xnew_header: []const u8 = "",
     tp: ?*Tp2 = null, // TP=2 across two Macs (tp.zig): the target layers' experts split by id, outputs exchanged
     tp_layer: bool = false, // the experts being encoded are a target layer's (the MTP head keeps all of its own)
@@ -1605,6 +1622,8 @@ pub const Model = struct {
     gpu_seconds: f64 = 0,
     mtp: Mtp = undefined,
     last: Buf = undefined, // the last window's streams before the final mixer
+    recs: ?[2]Buf = null, // GPU-side rounds with r.gdn_kept: each window's DeltaNet replay records, by round parity
+    rec_slot: usize = 0, // the record this window writes (the other holds the previous window's)
 
     pub fn reset(m: *Model) void {
         m.pos = 0;
@@ -1621,8 +1640,14 @@ pub const Model = struct {
         m.mtp.pooled_n = 0;
     }
 
+    /// The replay records when this window keeps one DeltaNet state a layer (GPU-side rounds with r.gdn_kept).
+    pub fn keptState(m: *const Model) ?[2]Buf {
+        return if (m.r.gpu_round and m.r.gdn_kept != null) m.recs else null;
+    }
+
     pub fn lane(m: *Model, x: Buf, k: usize, l: Lane, role: []const u8, y: Buf) !void {
         if (m.r.dense_target) return m.r.denseRows(x, k, l, m.r.rows, y);
+        if (m.r.lane_new) return dense.lane(m.r, role, x, l, m.t.mdims, y);
         if (!m.r.fused_xsum) try m.r.call(if (k == D) "lane_qmm_xsum#[2560]" else "lane_qmm_xsum#[6144]", &.{ x, m.t.mdims }, &.{m.t.xs});
         try m.r.call(role, &.{ x, m.t.xs, l.wq, l.sbt, m.t.mdims }, &.{y});
     }
@@ -1786,7 +1811,10 @@ pub const Model = struct {
                 const a = m.state;
                 const cs_in: Buf = .{ .b = L.cs[a].b, .off = L.cs[a].off + m.state_row * CS_ROW };
                 const so_in: Buf = .{ .b = L.so[a].b, .off = L.so[a].off + m.state_row * SO_ROW };
-                try split.gdnHeads(r, "q4_gdn@gdn", if (r.gdn_step and rows > 1) 8 else rows, &.{ t.p, cs_in, so_in, L.conv, L.alog, L.dt, L.norm, t.eps, t.rows }, &.{ t.gout, L.cs[1 - a], L.so[1 - a] }, tp.rank);
+                if (m.keptState()) |recs| {
+                    const li = i - i / 4;
+                    gdn_step.stepKept(r, r.gdn_kept.?, &.{ t.p, cs_in, so_in, L.conv, L.alog, L.dt, L.norm, t.eps, t.rows }, &.{ t.gout, L.cs[1 - a] }, recs[1 - m.rec_slot].at(li * gdn_step.RECORD), recs[m.rec_slot].at(li * gdn_step.RECORD), r.ar, 24 * tp.rank, 24);
+                } else try split.gdnHeads(r, "q4_gdn@gdn", if (r.gdn_step and rows > 1) 8 else rows, &.{ t.p, cs_in, so_in, L.conv, L.alog, L.dt, L.norm, t.eps, t.rows }, &.{ t.gout, L.cs[1 - a], L.so[1 - a] }, tp.rank);
                 const pn = tp.partNext();
                 const part: Buf = .{ .b = pn.b, .off = pn.off };
                 try split.laneTiles(r, "lane_qmm_bytes_grouped@gdn.out", &.{ t.gout, t.xs, L.out.wq, L.out.sbt, t.mdims }, part, &.{.{ 0, 80 }}, 8, .{ 96 * k0, 96 }); // one kernel at every width: drafted == plain
@@ -1801,7 +1829,12 @@ pub const Model = struct {
                 const so_in: Buf = .{ .b = L.so[a].b, .off = L.so[a].off + m.state_row * SO_ROW };
                 r.touch(L.out.wq);
                 r.touch(L.out.sbt);
-                try r.callAs("q4_gdn@gdn", if (r.gdn_step and rows > 1) 8 else rows, &.{ t.p, cs_in, so_in, L.conv, L.alog, L.dt, L.norm, t.eps, t.rows }, &.{ t.gout, L.cs[1 - a], L.so[1 - a] });
+                const gins = [_]Buf{ t.p, cs_in, so_in, L.conv, L.alog, L.dt, L.norm, t.eps, t.rows };
+                const gouts = [_]Buf{ t.gout, L.cs[1 - a], L.so[1 - a] };
+                if (m.keptState()) |recs| {
+                    const li = i - i / 4;
+                    gdn_step.stepKept(r, r.gdn_kept.?, &gins, gouts[0..2], recs[1 - m.rec_slot].at(li * gdn_step.RECORD), recs[m.rec_slot].at(li * gdn_step.RECORD), r.ar, 0, 48);
+                } else if (r.gdn_pipe) |pipe| gdn_step.step(r, pipe, &gins, &gouts, 0, 48) else try r.callAs("q4_gdn@gdn", if (r.gdn_step and rows > 1) 8 else rows, &gins, &gouts);
                 try m.lane(t.gout, 6144, L.out, "lane_qmm_bytes_grouped@gdn.out", t.branch);
             } else {
                 try m.lane(t.mixed, D, L.proj, "lane_qmm_bytes_grouped@att.proj", t.p);
@@ -1855,6 +1888,7 @@ pub const Model = struct {
             r.tp_layer = false;
             if (r.tp) |tp| if (r.skip & TP_CLASS == 0) tp.exchange(r.enc, t.ydown, t.wts, t.lg, rows);
             if (r.probe) |pb| r.copyKept(t.pick, .{ .b = pb.b, .off = pb.off + i * MAXR * 10 * 4 }, rows * 10, 0, 0, 0, 1, -1);
+            if (r.lg_probe) |pb| r.copyKept(t.lg, pb.at(i * MAXR * 513 * 4), rows * 513, 0, 0, 0, 1, 0);
             pending = .grouped;
         }
         try m.grouped(t.h[cur], t.h[1 - cur]);

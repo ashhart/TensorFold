@@ -48,6 +48,7 @@ const jsonInt = fz.jsonInt;
 
 fn armName(seg_ab: bool, arm: usize) []const u8 {
     if (seg_ab) return if (arm == 1) "segments on " else "segments off";
+    if (std.c.getenv("FZ_AB") != null and std.mem.eql(u8, std.mem.span(std.c.getenv("FZ_AB").?), "fz")) return if (arm == 1) "fz kernels" else "recorded  ";
     return if (arm == 1) "copy on " else "copy off";
 }
 
@@ -95,6 +96,7 @@ pub fn main(init: std.process.Init) !void {
         }
         std.process.exit(if (failed == 0) 0 else 1);
     }
+    if (std.c.getenv("FZ_OPORDER") != null) return @import("flashnext_bench.zig").opOrder(device); // no model loaded
     if (std.c.getenv("FZ_MMA_PEAK") != null) { // the tensor units' rate on register fragments: 16x32x16 ops a second
         const alib = try mtl.Library.fromSource(device, try fz.frags.source(device, arena, ks.flashnext_attn), mtl.CompileOptions.mlx());
         const pipe = try mtl.Pipeline.init(device, alib, "tf_mma_peak", false);
@@ -156,8 +158,15 @@ pub fn main(init: std.process.Init) !void {
                 try depths.append(arena, if (n == 0) null else n);
             }
         } else try depths.append(arena, if (std.c.getenv("FZ_DEPTH")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else null);
+        // FZ_AB=fz (with FZ_LANE=1 FZ_GDN=2): the recorded dense and DeltaNet kernels, then fz_lane, fz_gdn and kept states
+        const fz_ab = std.c.getenv("FZ_AB") != null and std.mem.eql(u8, std.mem.span(std.c.getenv("FZ_AB").?), "fz");
+        const fz_on = .{ e.r.lane_new, e.r.gdn_pipe, e.r.gdn_kept };
         for (depths.items) |depth| for (0..2) |arm| { // copy drafts off, then on (FZ_AB=seg: staggered prompt segments off, then on)
-            if (seg_ab) e.segments = arm == 1 else e.copy = arm == 1;
+            if (seg_ab) e.segments = arm == 1 else if (fz_ab) {
+                e.r.lane_new = arm == 1 and fz_on[0];
+                e.r.gdn_pipe = if (arm == 1) fz_on[1] else null;
+                e.r.gdn_kept = if (arm == 1) fz_on[2] else null;
+            } else e.copy = arm == 1;
             var sh: Show = .{ .a = arena };
             _ = try e.generate(toks, 8, &.{}, null, .{ .ctx = &sh, .prefilled = Show.prefilled, .tokens = Show.tokens, .cancelled = Show.cancelled });
             sh = .{ .a = arena };
@@ -232,6 +241,8 @@ pub fn main(init: std.process.Init) !void {
     const t0 = mtl.clock.seconds();
     try r.compile(args[2]);
     r.sel = try Select.init(&r, MAXR);
+    r.lane_new = r.xnew and std.c.getenv("FZ_LANE") != null; // fz_lane and fz_gdn on the target (same bits)
+    if (r.xnew and std.c.getenv("FZ_GDN") != null) r.gdn_pipe = try fz.gdn_step.compile(&r, false);
     const t1 = mtl.clock.seconds();
 
     const index_file = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/model.safetensors.index.json", .{args[1]}, 0));
@@ -425,6 +436,11 @@ pub fn main(init: std.process.Init) !void {
     const t2 = mtl.clock.seconds();
     std.debug.print("compiled in {d:.2} s, loaded {d:.1} GB in {d:.1} s\n", .{ t1 - t0, @as(f64, @floatFromInt(r.loaded)) / 1e9, t2 - t1 });
 
+    if (std.c.getenv("FZ_DBENCH") != null) { // dense classes and DeltaNet timed by rows (flashnext_bench.zig)
+        var toks: [MAXR]u32 = undefined;
+        for (0..MAXR) |i| toks[i] = @intCast(ref.object.get("prompt").?.array.items[i].integer);
+        return @import("flashnext_bench.zig").run(&r, m, &toks, gpa, arena);
+    }
     if (std.c.getenv("FZ_PROFILE") != null) {
         if (std.c.getenv("TF_FLASHNEXT_TP")) |path| r.tp = try fz.Tp2.init(arena, r.device, std.mem.span(path));
         const names = [_][]const u8{ "none", "hc", "dense", "experts", "router", "gdn", "attn", "ple", "head", "tp" };
@@ -433,6 +449,22 @@ pub fn main(init: std.process.Init) !void {
         var pk: [MAXR]u32 = undefined;
         m.reset();
         for (0..3) |_| try m.window(toks[0..1], &pk);
+        if (std.c.getenv("FZ_PROFILE_AB") != null) { // in-model A/B, interleaved: recorded, fz_lane, fz_gdn, both
+            const gpipe = try fz.gdn_step.compile(&r, false);
+            const arms = [_][2]bool{ .{ false, false }, .{ true, false }, .{ false, true }, .{ true, true } };
+            for ([_]usize{ 1, 2, 4, 6, 8, 16 }) |rows| {
+                var ms: [4]f64 = @splat(0);
+                for (0..5) |_| for (arms, 0..) |arm, a| {
+                    r.lane_new = arm[0];
+                    r.gdn_pipe = if (arm[1]) gpipe else null;
+                    m.gpu_seconds = 0;
+                    for (0..20) |_| try m.window(toks[0..rows], &pk);
+                    ms[a] += m.gpu_seconds * 1e3 / 100;
+                };
+                std.debug.print("rows {d:2}: window ms recorded {d:6.3}, fz_lane {d:6.3}, fz_gdn {d:6.3}, both {d:6.3}\n", .{ rows, ms[0], ms[1], ms[2], ms[3] });
+            }
+            return;
+        }
         for ([_]usize{ 1, 4, 8 }) |rows| {
             var base: f64 = 0;
             for (names, 0..) |name, c| {

@@ -8,6 +8,10 @@ const Buf = replay.Buf;
 /// TP: a recorded lane projection over this Mac's output tiles only, in one dispatch: a copy of the kernel whose tile index goes through `ranges` ({first tile, count} pairs), with `sk` K slices; `groups` ({first, count}) cuts the sum to those input groups and writes fp32 partials. The recorded SK and no group cut keep its sums.
 pub fn laneTiles(r: *Run, role: []const u8, ins: []const Buf, y: Buf, ranges: []const [2]usize, sk: usize, groups: ?[2]usize) !void {
     if (r.skip & Run.class(role) != 0) return;
+    if (r.lane_new) { // fz_lane over the same tiles and K slices: the same sums
+        const s = try replay.dense.recorded(r, role);
+        return replay.dense.project(r, .{ .n = s.n, .k = s.k, .sk = sk, .ranges = ranges, .groups = groups, .pf = r.lane_pf }, ins[0], .{ .wq = ins[2], .sbt = ins[3] }, ins[4], y);
+    }
     var key: [96]u8 = undefined;
     const s = r.roles.get(try std.fmt.bufPrint(&key, "{s}|{d}", .{ role, r.rows })) orelse return error.NoSite;
     var h = std.hash.Wyhash.init(@intFromPtr(s.v));
@@ -59,6 +63,7 @@ fn swap(a: std.mem.Allocator, text: []const u8, from: []const u8, to: []const u8
 /// TP: the recorded DeltaNet step over value heads [24 rank, 24 rank + 24) only (rank 1 runs a copy of the kernel whose head index starts at 24); every other index the kernel derives from the head, at the full layout.
 pub fn gdnHeads(r: *Run, role: []const u8, as_rows: usize, ins: []const Buf, outs: []const Buf, rank: u32) !void {
     if (r.skip & Run.class(role) != 0) return;
+    if (r.gdn_pipe) |pipe| return replay.gdn_step.step(r, pipe, ins, outs, 24 * rank, 24);
     var key: [96]u8 = undefined;
     const s = r.roles.get(try std.fmt.bufPrint(&key, "{s}|{d}", .{ role, as_rows })) orelse return error.NoSite;
     var v = s.v.*;

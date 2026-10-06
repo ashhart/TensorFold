@@ -51,3 +51,8 @@ pub const prefill = [_]File{
     .{ .name = "route", .text = @embedFile("ops/route.metal") },
     .{ .name = "qmv", .text = @embedFile("ops/qmv.metal") },
 };
+
+/// Flash Next decode: the lane projection (lane_qmm's sums, the next group read ahead) for the target's dense rows.
+pub const flashnext_lane = @embedFile("decode/fn_lane.metal");
+/// Flash Next decode: the DeltaNet window step with every row's independent work at once.
+pub const flashnext_gdn = @embedFile("decode/fn_gdn.metal");
