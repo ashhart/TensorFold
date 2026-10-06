@@ -54,16 +54,28 @@ pub const Pool = struct {
         p.caps[slot] = cap;
     }
 
-    /// While nothing waits: a free buffer for the next state (the last one's size and `more` bytes), its pages faulted in now.
-    pub fn ready(p: *Pool, device: mtl.Device, more: usize) void {
-        if (p.last == 0) return;
+    /// While nothing waits: a free buffer for the next state (the last one's size and `more` bytes), its pages faulted in
+    /// 64 MiB at a time until `waiting` says a request waits (the rest fault in on the save's copy); the bytes it took.
+    pub fn ready(p: *Pool, device: mtl.Device, more: usize, waiting: Waiting) Readied {
+        if (p.last == 0) return .{};
         const n = p.last + more;
-        for (p.bufs, p.caps) |b, cap| if (b != null and cap >= n) return;
+        for (p.bufs, p.caps) |b, cap| if (b != null and cap >= n) return .{};
         const cap = capacity(n);
-        const buf = device.buffer(cap, fz.opts) catch return;
-        @memset(buf.contents()[0..cap], 0);
+        const buf = device.buffer(cap, fz.opts) catch return .{};
+        const mem = buf.contents()[0..cap];
+        var done: usize = 0;
+        while (done < cap and !waiting.check(waiting.ctx)) {
+            const end = @min(cap, done + (64 << 20));
+            @memset(mem[done..end], 0);
+            done = end;
+        }
         p.give(buf, cap);
+        return .{ .cap = cap, .touched = done };
     }
+
+    /// What readying gives way to: a request waiting for the engine (rank 1: rank 0's next request).
+    pub const Waiting = struct { ctx: *anyopaque, check: *const fn (*anyopaque) bool };
+    pub const Readied = struct { cap: usize = 0, touched: usize = 0 };
 
     pub fn deinit(p: *Pool) void {
         for (&p.bufs) |*b| if (b.*) |x| {

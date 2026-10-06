@@ -506,6 +506,11 @@ pub const Tp2 = struct {
         }
     }
 
+    /// Served, rank 1, between requests: whether rank 0 has written one this Mac has not taken (or the wait is ending).
+    pub fn requestWaiting(t: *const Tp2) bool {
+        return t.quitting.load(.acquire) or @atomicLoad(u64, t.word64(REQ_FLAG), .acquire) > t.req;
+    }
+
     /// Served, rank 1: wait for rank 0's next request; its 64-byte head and the window's prompt tokens after it; null once `quitting` ends the wait.
     pub fn waitRequest(t: *Tp2) ?struct { head: *const [64]u8, tokens: [*]const u32 } {
         t.req += 1;

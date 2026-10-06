@@ -780,7 +780,16 @@ pub const Engine = struct {
 
     /// Served speed-up mode, rank 1: run rank 0's requests as they come, the replies thrown away, until rank 0's empty request (its engine closing).
     pub fn follow(e: *Engine) !void {
-        while (try e.followOne()) e.snap_pool.ready(e.r.device, NEXT_TURN);
+        while (try e.followOne()) {
+            const t0 = std.c.mach_absolute_time();
+            const got = e.snap_pool.ready(e.r.device, NEXT_TURN, .{ .ctx = e.r.tp.?, .check = requestWaiting });
+            if (got.cap > 0) std.log.info("speed-up rank 1: readied {d} of {d} MiB for the next save in {d:.1} ms", .{ got.touched >> 20, got.cap >> 20, @as(f64, @floatFromInt(std.c.mach_absolute_time() - t0)) * 125 / 3 / 1e6 });
+        }
+    }
+
+    fn requestWaiting(ctx: *anyopaque) bool {
+        const tp: *fz.Tp2 = @ptrCast(@alignCast(ctx));
+        return tp.requestWaiting();
     }
 
     fn followOne(e: *Engine) !bool {

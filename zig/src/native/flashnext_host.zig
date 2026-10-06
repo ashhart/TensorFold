@@ -14,6 +14,7 @@ const Job = struct {
     request: *const api.Request,
     sink: api.Sink,
     emitted: std.ArrayList(u32) = .empty,
+    queued: i96 = 0, // submitted: the wait before `began` is the engine finishing what it was doing
     began: i96 = 0,
     prefill_sent: bool = false,
     prefilled: ?i96 = null,
@@ -91,7 +92,7 @@ pub const Host = struct {
     fn submitFn(ctx: *anyopaque, id: api.Id, request: *const api.Request, sink: api.Sink) api.SubmitError!void {
         const h = self(ctx);
         const job = h.gpa.create(Job) catch return error.Busy;
-        job.* = .{ .id = id, .request = request, .sink = sink };
+        job.* = .{ .id = id, .request = request, .sink = sink, .queued = h.now() };
         h.lock();
         defer h.unlock();
         if (h.closing) {
@@ -207,9 +208,19 @@ pub const Host = struct {
             h.live_generated = 0;
             const idle = h.queued.items.len == 0;
             h.unlock();
-            if (idle and h.cache != null) h.eng.snap_pool.ready(h.eng.r.device, fx.NEXT_TURN); // the next turn's save finds its pages touched
-
+            if (idle and h.cache != null) { // the next turn's save finds its pages touched, unless a request comes first
+                const t0 = h.now();
+                const got = h.eng.snap_pool.ready(h.eng.r.device, fx.NEXT_TURN, .{ .ctx = h, .check = waiting });
+                if (got.cap > 0) std.log.info("prompt cache: readied {d} of {d} MiB for the next save in {d:.1} ms", .{ got.touched >> 20, got.cap >> 20, ms(h.now() - t0) });
+            }
         }
+    }
+
+    fn waiting(ctx: *anyopaque) bool {
+        const h = self(ctx);
+        h.lock();
+        defer h.unlock();
+        return h.queued.items.len > 0 or h.closing;
     }
 
     /// The reply's callbacks from the engine's rounds.
@@ -299,7 +310,7 @@ pub const Host = struct {
         };
         job.restore_ns = h.now() - t_begin;
         job.cached = plan.from;
-        defer if (h.cache != null) if (job.prefilled) |done| std.log.info("prompt pass: {d} -> {d} tokens in {d:.1} ms (lookup and restore {d:.1} ms, peer handoff {d:.1} ms, keeps {d:.1} ms)", .{ job.cached, r.prompt.len, ms(done - job.began), ms(job.restore_ns), ms(h.eng.handoff_ns), ms(job.keep_ns) });
+        defer if (h.cache != null) if (job.prefilled) |done| std.log.info("prompt pass: {d} -> {d} tokens in {d:.1} ms (waited {d:.1} ms; lookup and restore {d:.1} ms, peer handoff {d:.1} ms, keeps {d:.1} ms)", .{ job.cached, r.prompt.len, ms(done - job.began), ms(job.began - job.queued), ms(job.restore_ns), ms(h.eng.handoff_ns), ms(job.keep_ns) });
         h.prompt = r.prompt;
         h.saved.clearRetainingCapacity();
         defer if (h.cache) |*store| store.report(r.prompt.len, job.cached, store.counts.kept - kept0);
