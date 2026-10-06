@@ -12,7 +12,7 @@ const Kw = methods.Kw;
 const Ctx = eval.Ctx;
 const bind = methods.bind;
 
-pub const implemented = [_][]const u8{ "default", "d", "length", "count", "string", "trim", "upper", "lower", "safe", "tojson", "items", "dictsort", "join", "list", "map", "first", "last", "unique", "reverse", "sort", "select", "reject", "selectattr", "rejectattr", "indent", "replace", "escape", "e" };
+pub const implemented = [_][]const u8{ "default", "d", "length", "count", "string", "trim", "upper", "lower", "capitalize", "safe", "tojson", "items", "dictsort", "join", "list", "map", "first", "last", "unique", "reverse", "sort", "select", "reject", "selectattr", "rejectattr", "indent", "replace", "escape", "e" };
 const jinja_filters = [_][]const u8{ "abs", "attr", "batch", "capitalize", "center", "count", "d", "default", "dictsort", "e", "escape", "filesizeformat", "first", "float", "forceescape", "format", "groupby", "indent", "int", "items", "join", "last", "length", "list", "lower", "map", "max", "min", "pprint", "random", "reject", "rejectattr", "replace", "reverse", "round", "safe", "select", "selectattr", "slice", "sort", "string", "striptags", "sum", "title", "tojson", "trim", "truncate", "unique", "upper", "urlencode", "urlize", "wordcount", "wordwrap", "xmlattr" };
 pub const tests = [_][]const u8{ "odd", "even", "divisibleby", "defined", "undefined", "filter", "test", "none", "boolean", "false", "true", "integer", "float", "string", "mapping", "number", "sequence", "iterable", "callable", "sameas", "escaped", "in", "==", "eq", "equalto", "!=", "ne", ">", "gt", "greaterthan", ">=", "ge", "<", "lt", "lessthan", "<=", "le" };
 const jinja_tests = tests ++ [_][]const u8{ "lower", "upper" };
@@ -165,6 +165,7 @@ pub fn filter(c: *Ctx, name: []const u8, value: Value, pos: []const Value, kw: [
     }
     if (eq(u8, name, "upper")) return methods.upperStr(rt, try softStr(c, value));
     if (eq(u8, name, "lower")) return methods.lowerStr(rt, try softStr(c, value));
+    if (eq(u8, name, "capitalize")) return methods.capitalizeStr(rt, try softStr(c, value));
     if (eq(u8, name, "safe")) return .{ .str = .{ .s = (try softStr(c, value)).s, .safe = true } };
     if (eq(u8, name, "escape") or eq(u8, name, "e")) return eval.escape(c, value);
     if (eq(u8, name, "tojson")) {

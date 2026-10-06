@@ -236,6 +236,10 @@ pub fn upperStr(rt: *Rt, s: v.Str) Error!Value {
     return caseMap(rt, s, true);
 }
 
+pub fn capitalizeStr(rt: *Rt, s: v.Str) Error!Value {
+    return .{ .str = .{ .s = try uni.capitalize(rt.a, s.s), .safe = s.safe } };
+}
+
 pub fn strip(rt: *Rt, s: v.Str, chars: ?Value) Error!Value {
     return .{ .str = .{ .s = try stripChars(rt, s.s, chars, true, true), .safe = s.safe } };
 }
@@ -276,6 +280,10 @@ fn strMethod(rt: *Rt, s: v.Str, name: []const u8, pos: []const Value, kw: []cons
     if (eq(u8, name, "lower") or eq(u8, name, "upper")) {
         _ = try bind(rt, "lower", &.{}, 0, pos, kw);
         return caseMap(rt, s, name[0] == 'u');
+    }
+    if (eq(u8, name, "capitalize")) {
+        _ = try bind(rt, "capitalize", &.{}, 0, pos, kw);
+        return capitalizeStr(rt, s);
     }
     if (eq(u8, name, "removeprefix") or eq(u8, name, "removesuffix")) {
         const b = try bind(rt, "removeprefix", &.{"affix"}, 1, pos, kw);

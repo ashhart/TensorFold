@@ -104,6 +104,53 @@ pub fn upper(a: Allocator, s: []const u8) CaseError![]u8 {
     return convert(a, s, &data.upper, &data.upper_special, false);
 }
 
+/// Python str.capitalize(): the first code point in titlecase, the rest as lower() leaves them (Final_Sigma included).
+pub fn capitalize(a: Allocator, s: []const u8) CaseError![]u8 {
+    if (s.len == 0) return a.dupe(u8, s);
+    var i: usize = 0;
+    const cp = next(s, &i);
+    const low = try lower(a, s);
+    defer a.free(low);
+    const first = try lower(a, s[0..i]); // lower(s) starts with it: Final_Sigma needs a cased letter before
+    defer a.free(first);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(a);
+    var buf: [3]u21 = undefined;
+    for (buf[0..title(cp, &buf)]) |m| try encode(&out, a, m);
+    try out.appendSlice(a, low[first.len..]);
+    return out.toOwnedSlice(a);
+}
+
+/// SpecialCasing's titlecase mappings that differ from the uppercase ones.
+const title_special = [_][4]u21{
+    .{ 0x00DF, 'S', 's', 0 },            .{ 0xFB00, 'F', 'f', 0 },            .{ 0xFB01, 'F', 'i', 0 },            .{ 0xFB02, 'F', 'l', 0 },
+    .{ 0xFB03, 'F', 'f', 'i' },          .{ 0xFB04, 'F', 'f', 'l' },          .{ 0xFB05, 'S', 't', 0 },            .{ 0xFB06, 'S', 't', 0 },
+    .{ 0x0587, 0x0535, 0x0582, 0 },      .{ 0xFB13, 0x0544, 0x0576, 0 },      .{ 0xFB14, 0x0544, 0x0565, 0 },      .{ 0xFB15, 0x0544, 0x056B, 0 },
+    .{ 0xFB16, 0x054E, 0x0576, 0 },      .{ 0xFB17, 0x0544, 0x056D, 0 },      .{ 0x1FB2, 0x1FBA, 0x0345, 0 },      .{ 0x1FB4, 0x0386, 0x0345, 0 },
+    .{ 0x1FC2, 0x1FCA, 0x0345, 0 },      .{ 0x1FC4, 0x0389, 0x0345, 0 },      .{ 0x1FF2, 0x1FFA, 0x0345, 0 },      .{ 0x1FF4, 0x038F, 0x0345, 0 },
+    .{ 0x1FB7, 0x0391, 0x0342, 0x0345 }, .{ 0x1FC7, 0x0397, 0x0342, 0x0345 }, .{ 0x1FF7, 0x03A9, 0x0342, 0x0345 },
+};
+
+/// A code point's titlecase: UnicodeData's and SpecialCasing's where they differ from uppercase, else the uppercase.
+fn title(cp: u21, out: *[3]u21) usize {
+    for (title_special) |row| if (row[0] == cp) {
+        var n: usize = 0;
+        while (n < 3 and row[n + 1] != 0) : (n += 1) out[n] = row[n + 1];
+        return n;
+    };
+    out[0] = switch (cp) {
+        0x01C4...0x01C6 => 0x01C5,
+        0x01C7...0x01C9 => 0x01C8,
+        0x01CA...0x01CC => 0x01CB,
+        0x01F1...0x01F3 => 0x01F2,
+        0x1F80...0x1F87, 0x1F90...0x1F97, 0x1FA0...0x1FA7 => cp + 8,
+        0x1FB3, 0x1FC3, 0x1FF3 => cp + 9,
+        0x10D0...0x10FA, 0x10FD...0x10FF, 0x1F88...0x1F8F, 0x1F98...0x1F9F, 0x1FA8...0x1FAF, 0x1FBC, 0x1FCC, 0x1FFC => cp,
+        else => return mapped(&data.upper, &data.upper_special, cp, out),
+    };
+    return 1;
+}
+
 fn convert(a: Allocator, s: []const u8, runs: []const [4]i32, special: []const [4]u21, to_lower: bool) CaseError![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(a);
@@ -125,6 +172,15 @@ fn convert(a: Allocator, s: []const u8, runs: []const [4]i32, special: []const [
         for (buf[0..mapped(runs, special, cp, &buf)]) |m| try encode(&out, a, m);
     }
     return out.toOwnedSlice(a);
+}
+
+test "capitalize as Python's str.capitalize" {
+    const a = std.testing.allocator;
+    for ([_][2][]const u8{ .{ "high", "High" }, .{ "hELLO wORLD", "Hello world" }, .{ "", "" }, .{ "\u{1C6}emal", "\u{1C5}emal" }, .{ "\u{DF}x", "Ssx" }, .{ "\u{FB01}N", "Fin" }, .{ "\u{391}\u{3A3}", "\u{391}\u{3C2}" }, .{ "\u{10D0}\u{10D1}", "\u{10D0}\u{10D1}" }, .{ "\u{1F80}A", "\u{1F88}a" }, .{ "\u{1FB7}", "\u{391}\u{342}\u{345}" } }) |pair| {
+        const got = try capitalize(a, pair[0]);
+        defer a.free(got);
+        try std.testing.expectEqualStrings(pair[1], got);
+    }
 }
 
 test "python whitespace, printability and case tables" {
