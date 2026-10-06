@@ -308,7 +308,7 @@ def test_a_short_last_chunk_with_image_rows_runs_the_fused_kernels_at_the_images
 
 @metal
 def test_an_image_stream_drafts_with_the_mtp_head_to_its_serial_reply():
-    """MTP drafts on an image prompt (an oracle draws, every third wrong) equal serial and shared runs."""
+    """MTP drafts on an image prompt (an oracle draws, every third wrong) equal serial, shared and resumed runs."""
 
     from tensorfold.engine.lane_engine import LaneEngine, LaneStream
     from tensorfold.engine.prefill_plan import PrefillPlan
@@ -340,21 +340,23 @@ def test_an_image_stream_drafts_with_the_mtp_head_to_its_serial_reply():
         attached = []
 
         class Tower:
-            def encode(self, prepared):
-                return SimpleNamespace(token_ids=tuple(tokens), inputs_embeds=embeddings[None], rope_delta=delta)
+            def encode(self, prepared, start=0):
+                return SimpleNamespace(token_ids=tuple(tokens), inputs_embeds=embeddings[None, start:],
+                                       rope_delta=delta, first_row=start)
 
         runtime.vision = Tower()
         prepared = SimpleNamespace(token_ids=tuple(tokens), position_ids=table[:, None])
         encode = runtime.encode_vision
-        runtime.encode_vision = lambda p, cache: (attached.append(cache), encode(p, cache))[1]
+        runtime.encode_vision = lambda p, cache, *start: (attached.append(cache), encode(p, cache, *start))[1]
 
-        def run(*specs):
+        def run(*specs, cache=None, cached=0, at=()):
             engine = LaneEngine(runtime)
             engine.prefill_plan = PrefillPlan(36)                    # chunks [0, 36) and [36, 44)
             streams = [LaneStream(stream_id=f"s{i}", prompt_ids=list(ids), max_new_tokens=24, prompt_data=data,
                                   drafts=drafts) for i, (ids, data, drafts) in enumerate(specs)]
             for stream in streams:
-                engine.add_stream(stream)
+                engine.add_stream(stream, cache=None if cache is None else LaneEngine.copy_single_cache(cache),
+                                  cached_tokens=cached, checkpoints_at=at)
             while engine.active_count:
                 engine.step()
             return streams
@@ -372,14 +374,80 @@ def test_an_image_stream_drafts_with_the_mtp_head_to_its_serial_reply():
             return mx.array(picks, dtype=mx.uint32)
 
         runtime._draft_draw = oracle
-        drafted, = run((tokens, prepared, True))
+        drafted, = run((tokens, prepared, True), at=(36,))
+        (_, inside), = drafted.history_checkpoints                     # rows 0..35, the image's first ten in it
+        resumed, = run((tokens, prepared, True), cache=inside, cached=36)
         text = [int(t) for t in np.random.default_rng(7).integers(10, 128, size=30)]
         shared, _ = run((tokens, prepared, True), (text, None, True))
         assert len(reply) == 24 and 0 < drafted.accepted < drafted.drafted         # drafts kept and rolled back
-        assert drafted.emitted == reply == shared.emitted
+        assert drafted.emitted == reply == shared.emitted == resumed.emitted
         heads = [c[-1] for c in attached if isinstance(c[-1], MTPCache)]
         assert heads and all(h.vision_positions is not None and h.vision_rope_delta == delta for h in heads)
     finally:
         mx.set_default_device(previous)
 
 
+@metal
+def test_a_resumed_image_prompt_equals_its_fresh_prefill(monkeypatch):
+    """Resumed before, inside and after the image, and text from its text prefix: each equals a fresh prefill."""
+
+    from tensorfold.engine.lane_engine import LaneEngine, LaneStream
+    from tensorfold.engine.prefill_plan import PrefillPlan
+    from tensorfold.families.qwen4_exp.runtime import FlashNext
+    from tests.test_qwen4_exp_prefill import tiny_model
+
+    previous = mx.default_device()
+    mx.set_default_device(mx.gpu)
+    try:
+        monkeypatch.setattr(FlashNext, "check_windows", lambda self: (4, {1: 1.0, 4: 2.0}))
+        model = tiny_model(vocab_size=128, moe_intermediate_size=512, shared_expert_intermediate_size=512,
+                           indexer_budget=32, rope_parameters={"rope_theta": 10000, "partial_rotary_factor": 0.25,
+                                                               "mrope_section": [11, 11, 10]})
+        runtime = FlashNext(model, drafts=0)
+        rng = np.random.default_rng(8)
+        tokens = [int(t) for t in rng.integers(10, 128, size=44)]
+        tokens[18:34] = [7] * 16
+        features = rows_for(model, np.array(tokens))[18:34]
+        encoded_from = []
+
+        def image_prompt(ids):
+            table, delta = image_table(len(ids), 18, 4)
+            rows = model.model.embed_tokens(mx.array(ids, dtype=mx.int32))
+            rows[18:34] = features
+            return SimpleNamespace(token_ids=tuple(ids), position_ids=table[:, None], rows=rows, delta=delta)
+
+        class Tower:
+            def encode(self, prepared, start=0):
+                encoded_from.append(start)
+                return SimpleNamespace(token_ids=prepared.token_ids, inputs_embeds=prepared.rows[None, start:],
+                                       rope_delta=prepared.delta, first_row=start)
+
+        runtime.vision = Tower()
+
+        def run(ids, data=None, cache=None, cached=0, at=(), new=12):
+            engine = LaneEngine(runtime)
+            engine.prefill_plan = PrefillPlan(8)                     # chunks start every 8 rows
+            stream = LaneStream(stream_id="s", prompt_ids=list(ids), max_new_tokens=new, prompt_data=data)
+            engine.add_stream(stream, cache=None if cache is None else LaneEngine.copy_single_cache(cache),
+                              cached_tokens=cached, checkpoints_at=at)
+            while engine.active_count:
+                engine.step()
+            return stream
+
+        first = run(tokens, image_prompt(tokens), at=(8, 24, 40))
+        stored = {len(t): c for t, c in first.history_checkpoints}
+        assert sorted(stored) == [8, 24, 40] and len(first.emitted) == 12
+        for at in (8, 24):
+            resumed = run(tokens, image_prompt(tokens), stored[at], at)
+            assert resumed.emitted == first.emitted, at
+        assert encoded_from[-2:] == [8, 24]
+        follow = [*tokens, *first.emitted, *[int(t) for t in rng.integers(10, 128, size=4)]]
+        fresh = run(follow, image_prompt(follow))
+        resumed = run(follow, image_prompt(follow), stored[40], 40)
+        assert resumed.emitted == fresh.emitted and encoded_from[-1] == 40      # its image wholly in the prefix
+        text = [*tokens[:8], *[int(t) for t in rng.integers(10, 128, size=24)]]
+        fresh = run(text)
+        resumed = run(text, None, stored[8], 8)
+        assert resumed.emitted == fresh.emitted
+    finally:
+        mx.set_default_device(previous)

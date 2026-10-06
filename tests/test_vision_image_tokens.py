@@ -62,12 +62,17 @@ def test_out_of_range_budgets_refuse(tokens):
         serve_options.check(_args(vision_image_tokens=tokens), NS(model_type="qwen3_5", package=NS()), "cuda")
 
 
-def test_the_budget_needs_vision_and_cuda():
+def test_the_budget_needs_vision_and_a_qwen_tower(monkeypatch):
+    import tensorfold.vision.config as vision_config
+
+    monkeypatch.setattr(vision_config, "validate_vision_config", lambda config, family: None)
     family = NS(model_type="qwen3_5", package=NS())
     with pytest.raises(ValueError, match="needs --vision"):
         serve_options.check(NS(**{**vars(_args(vision_image_tokens=8192)), "vision": False}), family, "cuda")
-    with pytest.raises(ValueError, match="CUDA Qwen image budget"):
-        serve_options.check(_args(vision_image_tokens=8192), family, "mlx")
+    for model_type in ("qwen3_5", "qwen4_exp"):           # on a Mac the Qwen towers encode an image at a time
+        serve_options.check(_args(vision_image_tokens=8192), NS(model_type=model_type, package=NS()), "mlx")
+    with pytest.raises(ValueError, match="GLM tower on MLX"):
+        serve_options.check(_args(vision_image_tokens=8192), NS(model_type="glm5_next", package=NS()), "mlx")
 
 
 def test_a_cuda_request_carries_the_servers_budget_to_the_frontend():

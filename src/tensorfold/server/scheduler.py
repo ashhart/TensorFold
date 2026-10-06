@@ -57,9 +57,17 @@ class ChatJob:
     call_gate: Any = None                   # tool_choice "required": the answer opens a tool call (LaneStream)
     constraint: Any = None                  # response_format's grammar (engine.grammar.Constraint), or None
     vision: Any = None
+    # an image prompt's prefix-store ids where its family resumes image prompts (None: it keeps no prefix)
+    cache_ids: list[int] | None = None
     # a decision: prefill ends at these labels' last-row logits and joins no round (empty: a chat)
     label_ids: tuple[int, ...] = ()
     scored: tuple[list[float], float] | None = None
+
+    @property
+    def store_ids(self) -> list[int] | None:
+        """The ids the prefix store keys this prompt by (a text prompt's own); None: it keeps nothing there."""
+
+        return self.prompt_ids if self.vision is None else self.cache_ids
 
 
 class _JobQueue(queue.PriorityQueue):
@@ -539,15 +547,15 @@ class Scheduler(PromptFill):
     def _keep_checkpoints(self, job: ChatJob, shared_at: set[int]) -> None:
         """Store the prefixes the job's prefill kept (system blocks pinned and saved to disk), once."""
 
-        stream = job.stream
-        if stream is None or job.vision is not None:
+        stream, key = job.stream, job.store_ids
+        if stream is None or key is None:
             return
         kept, stream.history_checkpoints = stream.history_checkpoints, []
         for tokens, snapshot in kept if self.checkpoints is not None else ():
             shared = len(tokens) in shared_at
-            self.checkpoints.insert(tokens, snapshot, last_prompt=job.prompt_ids, pinned=shared)
+            self.checkpoints.insert(key[:len(tokens)], snapshot, last_prompt=key, pinned=shared)
             if self.snapshot_dir is not None and shared:
-                self._persist(tokens, snapshot)
+                self._persist(key[:len(tokens)], snapshot)
 
     def _persist(self, tokens: list[int], cache: list[Any]) -> None:
         """Write a system-block snapshot to disk once, so a restart does not lose it."""
@@ -571,10 +579,11 @@ class Scheduler(PromptFill):
         if stream is not None and getattr(stream, "error", None) is not None and job.error is None:
             job.error = stream.error                  # its grammar failed: this request alone answers with the error
         retained = self.engine.finished_caches.pop(job.job_id, None)
-        if retained is not None and self.checkpoints is not None and job.vision is None:
+        key = job.store_ids
+        if retained is not None and self.checkpoints is not None and key is not None:
             tokens, cache = retained
-            if len(tokens) > len(job.prompt_ids):
-                self.checkpoints.insert(tokens, cache, last_prompt=job.prompt_ids)
+            if len(tokens) > len(job.prompt_ids):            # the reply's ids after the prompt's key
+                self.checkpoints.insert(key + tokens[len(job.prompt_ids):], cache, last_prompt=key)
         if stream is not None and stream in self.engine.streams:
             self.engine.streams.remove(stream)
         self.completed += 1

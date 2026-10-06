@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -10,7 +11,7 @@ from typing import Any, Callable
 
 
 from .qwen_checkpoint import load_vision_weights, quantization_predicate, vision_tensors
-from .qwen_processing import PreparedVisionPrompt, QwenImageProcessor
+from .qwen_processing import PreparedVisionPrompt, QwenImageProcessor, fingerprint
 
 
 @dataclass(frozen=True)
@@ -21,9 +22,20 @@ class EncodedVisionPrompt:
     rope_delta: int
     image_spans: tuple[tuple[int, int], ...]
     image_hashes: tuple[str, ...]
+    first_row: int = 0          # inputs_embeds holds rows [first_row, len(token_ids)): a stored prefix has the rest
 
 
 MODEL_TYPES = ("qwen3_5", "qwen4_exp")      # Qwen3.5/3.8 dense, and Flash Next (Qwen3-VL's tower in both)
+
+
+def _version(package: str) -> str:
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version(package)
+    except PackageNotFoundError:
+        return ""
+TOKENS_PER_IMAGE = 4096                     # one image's visual tokens, whatever budget a request's images share
 
 
 def _runtime(model_type: str = "qwen3_5"):
@@ -80,7 +92,8 @@ class QwenVisionFrontend(QwenImageProcessor):
         prepared = QwenImageProcessor.from_directory(path)
         mx, nn, VisionConfig, VisionModel = _runtime(config["model_type"])
         tower = VisionModel(VisionConfig.from_dict(config["vision_config"]))
-        weights = tower.sanitize(load_vision_weights(tensors, mx))
+        contents = hashlib.sha256()
+        weights = tower.sanitize(load_vision_weights(dict(sorted(tensors.items())), mx, contents))
         if any(name.endswith(".scales") for name in weights):
             nn.quantize(tower, class_predicate=quantization_predicate(config, weights))
         tower.load_weights(list(weights.items()), strict=True)
@@ -89,17 +102,23 @@ class QwenVisionFrontend(QwenImageProcessor):
             tower.blocks = _evaluated_blocks(tower.blocks, mx, nn)
         tower.eval()
         front = cls(config, embed_tokens, tower, prepared.processor, prepared.tokenizer, mx, allow_urls)
+        front.key_seed = fingerprint(prepared.key_seed.hex(), _version("mlx-vlm"), contents.hexdigest())
         front.workspace_bytes = front.measure_workspace()
         return front
 
-    def measure_workspace(self, max_visual_tokens: int = 4096) -> int:
-        """The tower's peak workspace on the largest request admitted: four images sharing the visual-token budget."""
+    def prepare(self, *args, **kwargs) -> PreparedVisionPrompt:
+        """Each image at most TOKENS_PER_IMAGE tokens however large the shared budget (images encode one at a time)."""
+        kwargs.setdefault("max_image_tokens", TOKENS_PER_IMAGE)
+        return super().prepare(*args, **kwargs)
+
+    def measure_workspace(self, max_visual_tokens: int = TOKENS_PER_IMAGE) -> int:
+        """The tower's peak workspace on the largest image admitted: images encode one at a time."""
         mx, vision = self.mx, self.config["vision_config"]
         merge = int(vision["spatial_merge_size"])
-        side = max(1, math.isqrt(max_visual_tokens // 4)) * merge
+        side = max(1, math.isqrt(max_visual_tokens)) * merge
         width = int(vision.get("in_channels", 3)) * int(vision["temporal_patch_size"]) * int(vision["patch_size"]) ** 2
-        pixels = mx.zeros((4 * side * side, width), dtype=self.tower.patch_embed.proj.weight.dtype)
-        grid = mx.array([[1, side, side]] * 4, dtype=mx.int32)
+        pixels = mx.zeros((side * side, width), dtype=self.tower.patch_embed.proj.weight.dtype)
+        grid = mx.array([[1, side, side]], dtype=mx.int32)
         mx.eval(pixels)
         mx.synchronize()
         mx.clear_cache()
@@ -112,18 +131,26 @@ class QwenVisionFrontend(QwenImageProcessor):
         mx.clear_cache()
         return max(0, peak)
 
-    def encode(self, prepared: PreparedVisionPrompt) -> EncodedVisionPrompt:
-        """Replace image token embeddings on the model worker and leave the target language model untouched."""
+    def encode(self, prepared: PreparedVisionPrompt, start: int = 0) -> EncodedVisionPrompt:
+        """Input rows from ``start`` on, image rows replaced by their features; images encode one at a time."""
         mx = self.mx
-        tokens = mx.array([prepared.token_ids], dtype=mx.int32)
+        tokens = mx.array([prepared.token_ids[start:]], dtype=mx.int32)
         embeddings = self.embed_tokens(tokens)
-        pixels = mx.array(prepared.pixel_values).astype(self.tower.patch_embed.proj.weight.dtype)
-        features, deepstack = self.tower(pixels, mx.array(prepared.image_grid_thw, dtype=mx.int32))
-        if deepstack is not None and len(deepstack):
-            raise ValueError("The loaded vision tower requires unsupported deepstack language inputs")
-        if features.ndim != 2 or features.shape != (prepared.visual_tokens, embeddings.shape[-1]):
-            raise ValueError("Vision features do not match the image token count or target embedding width")
-        rows = [row for start, end in prepared.image_spans for row in range(start, end)]
-        embeddings[0, mx.array(rows, dtype=mx.int32)] = features.astype(embeddings.dtype)
+        dtype = self.tower.patch_embed.proj.weight.dtype
+        at = 0
+        for (begin, end), grid in zip(prepared.image_spans, prepared.image_grid_thw):
+            patches = math.prod(int(n) for n in grid)
+            at += patches
+            if end <= start:
+                continue
+            pixels = mx.array(prepared.pixel_values[at - patches:at]).astype(dtype)
+            features, deepstack = self.tower(pixels, mx.array([[int(n) for n in grid]], dtype=mx.int32))
+            if deepstack is not None and len(deepstack):
+                raise ValueError("The loaded vision tower requires unsupported deepstack language inputs")
+            if features.ndim != 2 or features.shape != (end - begin, embeddings.shape[-1]):
+                raise ValueError("Vision features do not match the image token count or target embedding width")
+            first = max(begin, start)
+            rows = mx.arange(first - start, end - start, dtype=mx.int32)
+            embeddings[0, rows] = features[first - begin:].astype(embeddings.dtype)
         return EncodedVisionPrompt(prepared.token_ids, embeddings, mx.array(prepared.position_ids, dtype=mx.int32),
-                                   prepared.rope_delta, prepared.image_spans, prepared.image_hashes)
+                                   prepared.rope_delta, prepared.image_spans, prepared.image_hashes, int(start))

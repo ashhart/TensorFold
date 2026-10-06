@@ -163,7 +163,7 @@ def load(model_dir: Path, *, lane_kernels: str = "auto", drafter: str = "", draf
 
         family.vision = QwenVisionFrontend.load(Path(model_dir), family.core.embed_tokens, allow_urls=vision_urls)
         print(f"[tensorfold] image encoder: {family.vision.workspace_bytes / 1024**3:.2f} GiB workspace measured at "
-              "the largest image request (four images, 4,096 image tokens)", flush=True)
+              "the largest image (4,096 image tokens; images encode one at a time)", flush=True)
         config = read_config(model_dir).get("text_config", {})
         sections = config.get("rope_parameters", {}).get("mrope_section", [11, 11, 10])
         install_rotary(family.core, sections)

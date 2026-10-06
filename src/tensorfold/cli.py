@@ -508,6 +508,7 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
         decode_share=0.25 if args.decode_share is None else float(args.decode_share),
         grow_checkpoints=args.prompt_cache_gib is None,
         vision_max_images=getattr(args, "vision_max_images", None),
+        vision_image_tokens=getattr(args, "vision_image_tokens", None),
     )
     if app.context_fitted:
         print(f"[tensorfold] context window {app.context_window:,} tokens: the most one request can use in the "

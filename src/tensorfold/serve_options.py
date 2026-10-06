@@ -24,8 +24,8 @@ def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any =
             raise ValueError("--vision-image-tokens is a number of tokens from 1 to 65,536")
         if not getattr(args, "vision", False):
             raise ValueError("--vision-image-tokens needs --vision")
-        if backend != "cuda":
-            raise ValueError("--vision-image-tokens sets the CUDA Qwen image budget; the MLX towers size their "
+        if backend != "cuda" and family.model_type not in ("qwen3_5", "qwen4_exp"):
+            raise ValueError("--vision-image-tokens sets a Qwen image budget; the GLM tower on MLX sizes its "
                              "workspace for 4,096 visual tokens")
     if getattr(args, "vision_offload", False):
         if not getattr(args, "vision", False):

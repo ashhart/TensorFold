@@ -103,11 +103,13 @@ the images. Remove older image content from the submitted history, start a new c
 the server with a larger count limit. The server does not discard images automatically.
 
 A request's images share 4,096 visual tokens, so a higher count makes each image smaller: eight images get about
-512 tokens each. On CUDA Qwen checkpoints (Qwen3.5/3.8 dense and Flash Next), `--vision-image-tokens N` raises
-that shared budget, up to 65,536, while each image keeps at most 4,096, so one image is sized as before. The tower
-encodes runs of whole images of at most 16,384 patches, the scratch one full-size image already needs; a request
-that fits one run is encoded in one call, as before. The byte and pixel limits still apply, and the longer prompt
-counts against the context window.
+512 tokens each. On Qwen checkpoints (Qwen3.5/3.8 dense and Flash Next, on CUDA and on a Mac),
+`--vision-image-tokens N` raises that shared budget, up to 65,536, while each image keeps at most 4,096, so one
+image is sized as before. On CUDA the tower encodes runs of whole images of at most 16,384 patches, the scratch one
+full-size image already needs; a request that fits one run is encoded in one call, as before. On a Mac it encodes
+one image at a time. The byte and pixel limits still apply, and the longer prompt counts against the context window.
+An image keeps its size while the request's images times 4,096 fit the budget, so an agent that resends its
+screenshots each turn wants a budget of 4,096 for each screenshot it keeps in its history.
 
 ```bash
 tensorfold serve Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP --parallel 2 --vision \
@@ -124,9 +126,12 @@ That budget is shared across the images; a higher count can reduce the detail av
 Those expanded tokens count toward prompt usage and the context window before model execution.
 The available memory budget may impose a smaller practical image or context limit.
 
-Image requests currently start with a fresh KV cache and do not write reusable prompt checkpoints.
-This prevents identical image-placeholder token IDs from reusing another image's state; ordinary text requests retain their prefix caching.
-Multi-turn image conversations work when the request includes the original image content parts, but image-prefix reuse and persisted image KV are not implemented.
+Flash Next on a Mac keeps image prompts in the prefix cache like text: each placeholder is stored under an id drawn
+from its image's pixels, size and preprocessing, so a later turn that resends the same images resumes after them and
+another image never matches. Those prefixes are saved with the conversation snapshots, on disk under
+`--snapshot-dir`, like text ones. Other families and the CUDA engines start each image request with a fresh KV cache
+and write no reusable prompt checkpoints for it; ordinary text requests keep their prefix caching.
+Multi-turn image conversations work when the request includes the original image content parts.
 For Qwen, each image request carries its own multimodal rotary positions and continuation offset, including during concurrent lane rounds. GLM uses its native KDA/NoPE attention state.
 
 ## Verification

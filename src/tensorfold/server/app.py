@@ -96,13 +96,18 @@ class ChatApp(RequestOptions, PromptBlocks, DecisionRequests):
         decode_share: float = 0.25,
         grow_checkpoints: bool = False,
         vision_max_images: int | None = None,
+        vision_image_tokens: int | None = None,
     ) -> None:
         # three candidate entries per conversation (history boundary, stable prefix, reply end)
         if checkpoint_slots is None:
             checkpoint_slots = max(3 * int(lanes), 8)
         self._model = model
         self.vision = getattr(model, "vision", None)
-        self.image_limits = DEFAULT_LIMITS if vision_max_images is None else ImageLimits(max_images=vision_max_images)
+        # image prompts keyed by their images in the prefix store (a family whose image prompts resume)
+        self.image_resume = self.vision is not None and bool(getattr(model, "image_resume", False))
+        limits = {key: value for key, value in (("max_images", vision_max_images),
+                                                ("max_visual_tokens", vision_image_tokens)) if value is not None}
+        self.image_limits = ImageLimits(**limits) if limits else DEFAULT_LIMITS
         self.served_name = served_name
         self.model_ids = served_model_ids(served_name, model_aliases)
         self.max_batch_size = int(lanes)
@@ -314,7 +319,9 @@ class ChatApp(RequestOptions, PromptBlocks, DecisionRequests):
                     "tokens, including chat template and thinking tokens."
                 )
             limit = min(limit, room)
-        system_len = 0 if prompt is not None or rendered.vision is not None else self.system_prefix_len(messages, tools, prompt_ids, thinking=thinking)
+        keyed = rendered.vision is None or self.image_resume          # its prefixes can be stored and resumed
+        system_len = 0 if prompt is not None or not keyed else self.system_prefix_len(messages, tools, prompt_ids,
+                                                                                    thinking=thinking)
         spec = self._resolve_sampling(fields, temperature, prompt_ids)
         drafts = self.use_proposer and fields.get("draft", True) is not False
         shaped = thinking and any(fields.get(k) is not None for k in grammar.FIELDS)
@@ -337,6 +344,7 @@ class ChatApp(RequestOptions, PromptBlocks, DecisionRequests):
                 cancellation=cancellation, call_gate=self._call_gate(fields, prompt_ids, tools),
                 constraint=grammar.request_constraint(self, fields, think_end if think_end >= 0 else None),
                 vision=rendered.vision,
+                cache_ids=self._image_key(rendered.vision),
             )
             budget = int(fields.get("thinking_budget") or self.thinking_budget) if thinking else 0
             if budget > 0:
@@ -520,6 +528,12 @@ class ChatApp(RequestOptions, PromptBlocks, DecisionRequests):
             flush=True,
         )
         return reply
+
+    def _image_key(self, prepared: Any) -> list[int] | None:
+        """An image prompt's prefix-store ids where its family resumes image prompts; None keeps it out."""
+
+        keyed = getattr(self.vision, "prefix_key", None)
+        return keyed(prepared) if prepared is not None and self.image_resume and keyed is not None else None
 
     def _round_profile(self, stream: Any) -> str:
         """Mean ms per round of this stream's last rounds."""

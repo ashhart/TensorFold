@@ -50,23 +50,32 @@ class PromptFill:
             if memory is not None:
                 getattr(self.engine, "release_rounds", lambda: None)()     # no stream live: rows are nobody's (#95)
                 filling.held = memory.begin(len(job.prompt_ids), self._reserved(int(job.max_tokens)),
-                                            admit=self.checkpoints is None or job.vision is not None)
-                if job.vision is not None:
-                    memory.require_workspace(self.engine.model.vision.estimate_workspace_bytes(job.vision))
+                                            admit=self.checkpoints is None or job.store_ids is None)
             # checkpoints sit at the prompt's chunk starts: a shared prefix is kept at the start at or before its end
             starts = filling.starts = self.engine.prompt_chunks(job.prompt_ids)
             filling.shared_at = {starts.floor(n) for n in job.shared_prefix_lens} - {0}
-            if self.checkpoints is not None and job.vision is None:
-                self._read_disk_block(job.prompt_ids, lambda n: n in starts)
-                entry = self.checkpoints.peek(job.prompt_ids, usable=lambda n: n in starts)
+            entry = None
+            if self.checkpoints is not None and job.store_ids is not None:
+                self._read_disk_block(job.store_ids, lambda n: n in starts)
+                entry = self.checkpoints.peek(job.store_ids, usable=lambda n: n in starts)
                 if memory is not None:
                     memory.require(current_cache=None if entry is None else entry.cache, keep=entry)
                 filling.left -= 0 if entry is None else len(entry.tokens)
+            if memory is not None and job.vision is not None:      # the images past the prefix it resumes from
+                memory.require_workspace(self._image_workspace(job, 0 if entry is None else len(entry.tokens)),
+                                         current_cache=None if entry is None else entry.cache, keep=entry)
         except Exception as exc:  # noqa: BLE001 - reported to the waiting request, as a failed prefill is
             self._end_fill(filling, exc)
             return None
         self._fills.append(filling)
         return filling
+
+    def _image_workspace(self, job: Any, start: int) -> int:
+        """Encoder workspace for an image prompt's rows from ``start`` on."""
+
+        vision = self.engine.model.vision
+        estimate = vision.estimate_workspace_bytes
+        return estimate(job.vision, start) if start else estimate(job.vision)
 
     def _start_fill(self, filling: Filling) -> None:
         """Its first chunk: the longest stored prefix now (another prompt may have stored it), then its stream."""
@@ -76,27 +85,31 @@ class PromptFill:
         cached = 0
         last_prompt: list[int] | None = None
         checkpoints_at: list[int] = []
-        if self.checkpoints is not None and job.vision is None:
+        key = job.store_ids                              # an image prompt's: each placeholder keyed by its image
+        if self.checkpoints is not None and key is not None:
             usable = lambda n: n in starts
-            entry = self.checkpoints.peek(job.prompt_ids, usable=usable)
+            entry = self.checkpoints.peek(key, usable=usable)
             take = False
             memory = self.prompt_memory
             if memory is not None:
                 # Keep the resumed prefix through admission; use its stored arrays as the working cache if copying cannot fit.
                 memory.require(current_cache=None if entry is None else entry.cache, keep=entry)
-                take = entry is not None and not memory.fits_now()
-            hit = self.checkpoints.match(job.prompt_ids, usable=usable, take=take)
+                images = self._image_workspace(job, len(entry.tokens)) if entry and job.vision is not None else 0
+                take = entry is not None and not memory.fits_now(images)
+            hit = self.checkpoints.match(key, usable=usable, take=take)
             entry = None        # held through the prefill, a stored prefix evicted for this prompt's copy stays
             if hit is not None:
                 cached, cache, last_prompt = hit
                 if filling.held is not None:
                     filling.held.cache = cache            # its working cache until the first chunk grows it
                 if self.disk_blocks is not None and cached in shared_at:
-                    self.disk_blocks.touch(job.prompt_ids[:cached])
+                    self.disk_blocks.touch(key[:cached])
             filling.left = len(job.prompt_ids) - cached
-            chosen = choose_checkpoints(job.history_len, cached, last_prompt, job.prompt_ids)
+            chosen = choose_checkpoints(job.history_len, cached, last_prompt, key)
             checkpoints_at = sorted(at for at in {*(starts.floor(n) for n in chosen), *shared_at}
                                     if cached < at < len(job.prompt_ids))
+            if memory is not None and job.vision is not None:      # as it resumes now: its prefix may have gone
+                memory.require_workspace(self._image_workspace(job, cached), current_cache=cache)
         proposer = job.proposer
         if proposer is None and job.drafts and self.proposer_factory is not None:
             proposer = self.proposer_factory()
@@ -116,7 +129,7 @@ class PromptFill:
             call_gate=job.call_gate,
             constraint=job.constraint,
             prompt_data=job.vision,
-            retain=job.vision is None,
+            retain=job.store_ids is not None,
         )
         if job.label_ids:
             stream.label_ids = tuple(job.label_ids)     # the prefill stops at these logits and draws nothing

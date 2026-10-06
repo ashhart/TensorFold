@@ -9,13 +9,20 @@ that carries its vision tower, such as `TensorFold/Qwen3.8-Flash-Next-MLX-4bit-M
 tensorfold serve TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP --vision
 ```
 
-The tower (27 bf16 blocks, under 1 GiB) loads beside the language model and shares its embeddings; the startup
-line names the workspace it measured. A request's images share the 4,096 visual-token budget; video,
-`--vision-image-tokens` and `--vision-offload` stay CUDA-only.
+The tower (27 bf16 blocks, under 1 GiB) loads beside the language model and shares its embeddings; images encode one
+at a time, and the startup line names the workspace measured for the largest. A request's images share the 4,096
+visual-token budget, which `--vision-image-tokens` raises; video and `--vision-offload` stay CUDA-only.
 Image rows replace the embeddings in every hyperconnection stream, and the n-gram tables hash the placeholder ids,
 as on CUDA. Each image prompt's three rotary axes travel with its cache: prompt chunks, the indexer's pooled blocks,
 decode rounds, streams sharing a round and the MTP head all read them, and text after the prompt continues at its
-position plus the image offset. Image prompts prefill from the start and are never kept in the prefix cache.
+position plus the image offset. Image prompts are kept in the prefix cache under ids drawn from their images, so an
+agent that resends a screenshot every turn resumes after it, as a text conversation does. Such an agent keeps each
+screenshot at full size with a budget of 4,096 tokens for each one in its history:
+
+```bash
+tensorfold serve TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP --vision --vision-max-images 16 \
+  --vision-image-tokens 65536
+```
 
 ## On CUDA
 

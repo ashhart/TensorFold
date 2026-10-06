@@ -386,6 +386,6 @@ TBD [release-0.3.5].
 
 ## Image input
 
-Use `--vision` on a Mac, or on one CUDA GPU with `--parallel` of at least two. Image requests always prefill fresh;
-text prefix caching remains available. See the [image recipe](flash-next-vision.md) for tower weights, memory admission, EXL3
-sidecar conversion and verification.
+Use `--vision` on a Mac, or on one CUDA GPU with `--parallel` of at least two. On a Mac image prompts resume from
+the prefix cache as text does; on CUDA they always prefill fresh, and text prefix caching remains available. See the
+[image recipe](flash-next-vision.md) for tower weights, memory admission, EXL3 sidecar conversion and verification.

@@ -50,6 +50,13 @@ def attach_positions(caches, positions, delta: int) -> None:
             cache.vision_positions, cache.vision_rope_delta = table, int(delta)
 
 
+def detach_positions(caches) -> None:
+    """A stored prefix taken up again starts without the positions its image prompt left on it."""
+    for cache in caches:
+        cache.__dict__.pop('vision_positions', None)
+        cache.__dict__.pop('vision_rope_delta', None)
+
+
 def row_positions(cache, start: int, count: int, *, step: int = 1):
     """Rows start, start + step, ... at their three rotary axes [3, count]: the prompt's table, then row + delta."""
     table = getattr(cache, 'vision_positions', None)

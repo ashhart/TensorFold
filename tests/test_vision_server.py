@@ -374,14 +374,14 @@ def test_scheduler_text_jobs_keep_checkpoint_reuse_and_storage():
 def test_scheduler_admits_image_memory_before_starting_prefill():
     admitted, workspace = [], []
     memory = NS(begin=lambda *args, admit: admitted.append(admit), end=lambda: None,
-                require_workspace=lambda count: workspace.append(count))
+                require_workspace=lambda count, **held: workspace.append(count))
     scheduler, calls, _ = scheduler_fixture(memory)
     scheduler._start_job(ChatJob("image", [1, 2, 3, 4], 2, 0, vision=object()))
     assert calls and admitted == [True] and workspace == [4096]
 
 
 def test_scheduler_workspace_refusal_never_starts_image_prefill():
-    def refuse(count):
+    def refuse(count, **held):
         raise RequestError("image workspace does not fit")
 
     ended = []

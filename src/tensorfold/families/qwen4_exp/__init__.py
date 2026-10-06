@@ -143,7 +143,7 @@ def load(model_dir: Path, *, mtp_drafts: int | None = None, ple_on_ssd: bool = F
         runtime.vision = QwenVisionFrontend.load(Path(model_dir), runtime.model.model.embed_tokens,
                                                  allow_urls=vision_urls)
         print(f"[tensorfold] image encoder: {runtime.vision.workspace_bytes / 1024**3:.2f} GiB workspace measured at "
-              "the largest image request (four images, 4,096 image tokens)", flush=True)
+              "the largest image (4,096 image tokens; images encode one at a time)", flush=True)
     return runtime, tokenizer
 
 

@@ -153,15 +153,19 @@ class FamilyPrefill:
         if not prompt:
             raise ValueError(f"{stream.stream_id}: empty prompt")
         prepared = getattr(stream, "prompt_data", None)
-        # an image prompt never resumes, so it needs no cut at message starts: its chunks are the step grid alone
-        chunks = self.prompt_chunks(prompt) if prepared is None else PromptChunks(
+        # an image prompt is cut and resumed as text where its family keys it by its images, else the step grid alone
+        resumes = prepared is None or getattr(self.model, "image_resume", False)
+        chunks = self.prompt_chunks(prompt) if resumes else PromptChunks(
             None, len(prompt), step=getattr(self.prefill_plan, "step", None) or self.prefill_step)
         work, start = self._family_start(cache, cached_tokens, chunks)
         if prepared is not None:
-            if start or cache is not None:
-                raise ValueError("image prompts require a fresh cache")
-            prepared = self.model.encode_vision(prepared, work)
-            checkpoints_at = ()
+            if not resumes:
+                if start or cache is not None:
+                    raise ValueError("image prompts require a fresh cache")
+                prepared = self.model.encode_vision(prepared, work)
+                checkpoints_at = ()
+            else:
+                prepared = self.model.encode_vision(prepared, work, start)
         cached_tokens = start
         whole: list[Any] = [start]         # this prompt's own progress: other prompts' forwards run between its own
         stream.history_checkpoints = []
@@ -174,7 +178,8 @@ class FamilyPrefill:
                     continue
                 if fed:
                     yield
-                yield from self._family_feed_steps(prompt, work, chunks.between(start, boundary), wide=True,
+                # an image prompt's rows before a checkpoint take its encoded input rows too
+                yield from self._family_feed_steps(prompt, work, chunks.between(start, boundary), prepared, wide=True,
                                                    widths=stream.prefill_widths, raised=stream.prefill_raised,
                                                    whole=whole)
                 fed = True
@@ -192,7 +197,7 @@ class FamilyPrefill:
         except BaseException:
             at = whole[0]                              # stopped between chunks: keep the progress, a taken prefix too
             kept = [len(tokens) for tokens, _ in stream.history_checkpoints]
-            if prepared is None and at is not None and at in chunks and at not in kept:
+            if resumes and at is not None and at in chunks and at not in kept:
                 stream.history_checkpoints.append((list(prompt[:at]), drop_spares(self.copy_single_cache(work))))
             raise
         if getattr(stream, "label_ids", ()):                 # a decision: the last row, then no round

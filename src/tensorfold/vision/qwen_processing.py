@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -43,6 +44,29 @@ def continued(prepared: PreparedVisionPrompt, tokens: Sequence[int], config: dic
         raise ValueError("a continued image prompt may add text only")
     positions.setflags(write=False)
     return replace(prepared, token_ids=tokens, position_ids=positions, rope_delta=delta)
+
+
+ROW_BITS = 16                       # bits of an image row's place in its prefix-store id
+
+
+def fingerprint(*parts: Any) -> bytes:
+    """A digest of what turns an image into its rows: processor settings, tower configuration, library versions."""
+    return hashlib.sha256(json.dumps(parts, sort_keys=True, default=str).encode()).digest()
+
+
+def prefix_key(prepared: PreparedVisionPrompt, seed: bytes = b"") -> list[int] | None:
+    """Prefix-store ids: an image row's is negative, from 128 bits of its image, grid and ``seed``, and its row."""
+    if prepared.video_spans:
+        return None
+    key = [int(t) for t in prepared.token_ids]
+    for (begin, end), digest, grid in zip(prepared.image_spans, prepared.image_hashes, prepared.image_grid_thw):
+        if end - begin > 1 << ROW_BITS:
+            return None
+        named = seed + f"{digest}:{int(grid[0])}x{int(grid[1])}x{int(grid[2])}".encode()
+        image = int.from_bytes(hashlib.sha256(named).digest()[:16], "big") << ROW_BITS
+        for row in range(begin, end):
+            key[row] = -1 - (image | (row - begin))
+    return key
 
 
 def image_positions(tokens: Sequence[int], grids: Sequence[Sequence[int]], config: dict):
@@ -148,6 +172,8 @@ def _processor_runtime():
 class QwenImageProcessor:
     """A local CPU image processor and tokenizer with no backend imports or model calls."""
 
+    key_seed = b""                  # ``fingerprint`` of the preprocessing, in each image's prefix-store id
+
     def __init__(self, config: dict, processor: Any, tokenizer: Any):
         self.config, self.processor, self.tokenizer = config, processor, tokenizer
         self.image_token = tokenizer.convert_ids_to_tokens(int(config["image_token_id"]))
@@ -173,10 +199,18 @@ class QwenImageProcessor:
         if config.get("model_type") not in ("qwen3_5", "qwen4_exp") or not config.get("vision_config"):
             raise ValueError("Image preprocessing currently supports Qwen3.5/3.8 dense and Flash Next multimodal "
                              "checkpoints only")
+        from importlib.metadata import version
+
         AutoTokenizer, ImageProcessor = _processor_runtime()
         tokenizer = AutoTokenizer.from_pretrained(str(path), local_files_only=True, trust_remote_code=False)
-        processor = ImageProcessor(**_processor_options(path, config["vision_config"]))
-        return cls(config, processor, tokenizer)
+        options = _processor_options(path, config["vision_config"])
+        front = cls(config, ImageProcessor(**options), tokenizer)
+        front.key_seed = fingerprint(options, config["vision_config"], version("transformers"))
+        return front
+
+    def prefix_key(self, prepared: PreparedVisionPrompt) -> list[int] | None:
+        """``prepared``'s prefix-store ids under this frontend's preprocessing."""
+        return prefix_key(prepared, self.key_seed)
 
     def prepare(self, rendered_prompt: str, images: Sequence[Any], *, videos: Sequence[Any] = (),
                 max_visual_tokens: int = 4096, max_prompt_tokens: int | None = None,
@@ -251,6 +285,20 @@ class QwenImageProcessor:
                                     tuple(image.content_hash for image in images), video_pixels, video_grid, frames,
                                     tuple(video.content_hash for video in videos))
 
+    def history_len(self, rendered_history: str, prepared: PreparedVisionPrompt) -> int:
+        """Where the history rendered without a generation prompt ends inside ``prepared`` (0: not a prefix)."""
+        counts = [end - begin for begin, end in prepared.image_spans]
+        if prepared.video_spans or rendered_history.count(self.image_token) != len(counts):
+            return 0
+        pieces = rendered_history.split(self.image_token)
+        expanded = pieces[0] + "".join(self.image_token * n + piece for n, piece in zip(counts, pieces[1:]))
+        history = [int(t) for t in self.tokenizer(expanded, add_special_tokens=False,
+                                                   return_attention_mask=False)["input_ids"]]
+        prompt = list(prepared.token_ids)
+        if 0 < len(history) < len(prompt) and prompt[:len(history)] == history:
+            return len(history)
+        return len(prompt) - 1 if len(prompt) > 1 and history == prompt else 0
+
     def video_size(self, frames: int, height: int, width: int) -> tuple[int, int]:
         """A video's frame size for the tower: Qwen3-VL's ``smart_resize`` with its per-frame cap (at most 768 tokens a
         frame group, at least ~134), the whole video within ``TENSORFOLD_VIDEO_TOKENS`` (16,384) tokens."""
@@ -302,12 +350,14 @@ class QwenImageProcessor:
         x = x.reshape(gt, temporal, channels, gh // merge, merge, p, gw // merge, merge, p)
         x = x.transpose(0, 3, 6, 4, 7, 2, 1, 5, 8)
         return np.ascontiguousarray(x.reshape(gt * gh * gw, channels * temporal * p * p)), np.asarray([gt, gh, gw])
-    def estimate_workspace_bytes(self, prepared: PreparedVisionPrompt) -> int:
-        """The tower's measured workspace (unmeasured: every layer's activations at once) plus this request's arrays."""
+    def estimate_workspace_bytes(self, prepared: PreparedVisionPrompt, start: int = 0) -> int:
+        """The tower's workspace (measured, else every layer's activations) and the arrays of rows from ``start``."""
         vision = self.config["vision_config"]
-        patches = int(prepared.pixel_values.shape[0])
+        encoded = any(end > start for _, end in prepared.image_spans)     # images wholly before start: in the prefix
+        patches = int(prepared.pixel_values.shape[0]) if encoded else 0
         hidden, intermediate = int(vision["hidden_size"]), int(vision["intermediate_size"])
-        queued = int(getattr(self, "workspace_bytes", 0) or 0) or (
-            patches * (12 * hidden + 4 * intermediate) * 4 * int(vision["depth"]))
-        embeddings = len(prepared.token_ids) * int(vision["out_hidden_size"]) * 8
-        return int(2 * prepared.pixel_values.nbytes + queued + embeddings + prepared.position_ids.nbytes)
+        queued = (int(getattr(self, "workspace_bytes", 0) or 0) or (
+            patches * (12 * hidden + 4 * intermediate) * 4 * int(vision["depth"]))) if encoded else 0
+        embeddings = (len(prepared.token_ids) - int(start)) * int(vision["out_hidden_size"]) * 8
+        pixels = 2 * prepared.pixel_values.nbytes if encoded else 0
+        return int(pixels + queued + embeddings + prepared.position_ids.nbytes)

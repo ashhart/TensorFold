@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
 import struct
@@ -12,7 +13,8 @@ import pytest
 
 from tensorfold.vision import qwen_mlx, qwen_processing
 from tensorfold.vision.qwen_checkpoint import load_vision_weights, quantization_predicate, vision_tensors
-from tensorfold.vision.qwen_processing import QwenImageProcessor, _processor_options, image_positions
+from tensorfold.vision.qwen_processing import (PreparedVisionPrompt, QwenImageProcessor, _processor_options,
+                                               image_positions)
 
 
 CONFIG = {"model_type": "qwen3_5", "image_token_id": 10, "video_token_id": 11,
@@ -230,10 +232,10 @@ def test_load_instantiates_only_tower_and_local_tokenizer(tmp_path, monkeypatch)
     loaded = next(e for e in events if isinstance(e, tuple) and e[0] == "weights")
     assert set(loaded[1]) == {"blocks.0.weight", "blocks.0.scales"} and loaded[2] is True
     assert ("quantize", {"bits": 8, "group_size": 32, "mode": "affine"}) in events
-    # the workspace is measured once, on four images sharing the 4,096 visual tokens
+    # the workspace is measured once, on the largest image: images encode one at a time
     probe = [e for e in events if isinstance(e, tuple) and e[0] == "probe"]
     merge = CONFIG["vision_config"]["spatial_merge_size"]
-    assert len(probe) == 1 and probe[0][2] == [[1, 32 * merge, 32 * merge]] * 4
+    assert len(probe) == 1 and probe[0][2] == [[1, 64 * merge, 64 * merge]]
     assert frontend.workspace_bytes == 3 * 1024**2
 
 
@@ -309,5 +311,94 @@ def test_a_flash_next_tower_loads_and_runs_block_by_block_with_the_same_bits(tmp
         features, deepstack = front.tower(pixels, grid)
         assert features.shape == (16, 48) and not deepstack
         assert bool(mx.array_equal(features, reference(pixels, grid)[0]).item())
+    finally:
+        mx.set_default_device(previous)
+
+
+def test_prefix_keys_name_each_image_by_its_content_size_and_preprocessing():
+    """Placeholders become ids no token has, the same for the same image, size and preprocessing; text keeps its ids."""
+    from tensorfold.vision.qwen_processing import prefix_key
+
+    front = QwenImageProcessor(CONFIG, ImageProcessor(), Tokenizer())
+    one = front.prepare("a<start><image><end>b", [image("cat")])
+    key = front.prefix_key(one)
+    assert len(key) == len(one.token_ids) and key[:2] == [97, 8] and key[6:] == [9, 98]
+    assert all(k < 0 for k in key[2:6]) and len(set(key[2:6])) == 4
+    assert front.prefix_key(front.prepare("a<start><image><end>b", [image("cat")])) == key
+    other = front.prefix_key(front.prepare("a<start><image><end>b", [image("dog")]))
+    assert other[:2] == key[:2] and other[2] != key[2]                     # a different image differs at once
+    assert prefix_key(replace(one, image_grid_thw=np.array([[1, 2, 8]])))[2] != prefix_key(one)[2]   # another size
+    assert prefix_key(one, b"other preprocessing")[2] != prefix_key(one)[2]
+    assert prefix_key(replace(one, video_spans=((0, 1),))) is None
+
+
+def test_prefix_keys_keep_images_apart_that_40_bits_could_not():
+    """Two images whose ids would collide if an image's id kept only 40 bits of its hash."""
+    from tensorfold.vision.images import ImageInput
+    from tensorfold.vision.qwen_processing import prefix_key
+
+    keys = []
+    for n in (42784, 2710599):
+        digest = ImageInput(2, 1, n.to_bytes(6, "big")).content_hash
+        prepared = PreparedVisionPrompt((8, 10, 9), np.zeros((4, 1)), np.array([[1, 2, 2]]),
+                                        np.zeros((3, 1, 3)), 0, ((1, 2),), (digest,))
+        keys.append(prefix_key(prepared))
+    assert keys[0][1] != keys[1][1]
+
+
+def test_an_image_keeps_its_size_and_key_when_another_joins_within_the_budget():
+    class Sized(ImageProcessor):
+        def __call__(self, *, images, max_pixels, **kwargs):
+            side = 2 * max(1, int((max_pixels // 32**2) ** 0.5))         # merged tokens fill the cap
+            return {"pixel_values": np.zeros((side * side, 1536), np.float32),
+                    "image_grid_thw": np.array([[1, side, side]])}
+
+    front = QwenImageProcessor(CONFIG, Sized(), Tokenizer())
+    alone = front.prepare("<start><image><end>", [image("a")], max_visual_tokens=32, max_image_tokens=16)
+    joined = front.prepare("<start><image><end><start><image><end>", [image("a"), image("b")],
+                           max_visual_tokens=32, max_image_tokens=16)
+    shared = front.prepare("<start><image><end><start><image><end>", [image("a"), image("b")],
+                           max_visual_tokens=16, max_image_tokens=16)
+    assert alone.image_grid_thw[0].tolist() == joined.image_grid_thw[0].tolist() == [1, 8, 8]
+    assert front.prefix_key(joined)[:18] == front.prefix_key(alone)[:18]     # the first image's rows and its end
+    assert shared.image_grid_thw[0].tolist() == [1, 4, 4]                    # past the budget, each image shrinks
+
+
+def test_history_len_is_where_the_history_ends_inside_the_image_prompt():
+    front = QwenImageProcessor(CONFIG, ImageProcessor(), Tokenizer())
+    prepared = front.prepare("a<start><image><end>bQ", [image()])
+    assert front.history_len("a<start><image><end>b", prepared) == 8       # its images expanded as the prompt's
+    assert front.history_len("a<start><image><end>bQ", prepared) == 9 - 1   # no generation suffix: one short
+    assert front.history_len("x<start><image><end>b", prepared) == 0       # not a prefix
+    assert front.history_len("a<start><end>b", prepared) == 0              # another image count
+
+
+def test_the_key_seed_names_the_towers_weights_not_only_their_layout(tmp_path, monkeypatch):
+    mx = pytest.importorskip("mlx.core")
+    pytest.importorskip("mlx_vlm.models.qwen4_exp")
+    from mlx.utils import tree_flatten
+
+    previous = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        vision = {"depth": 1, "hidden_size": 32, "intermediate_size": 64, "num_heads": 2, "out_hidden_size": 48,
+                  "patch_size": 16, "temporal_patch_size": 2, "spatial_merge_size": 2, "in_channels": 3,
+                  "num_position_embeddings": 64, "deepstack_visual_indexes": []}
+        _, _, VisionConfig, VisionModel = qwen_mlx._runtime("qwen4_exp")
+        names = [k for k, _ in tree_flatten(VisionModel(VisionConfig.from_dict(vision)).parameters())]
+        shapes = dict(tree_flatten(VisionModel(VisionConfig.from_dict(vision)).parameters()))
+        monkeypatch.setattr(qwen_processing, "_processor_runtime",
+                            lambda: (SimpleNamespace(from_pretrained=lambda *a, **k: Tokenizer()), ImageProcessor))
+        seeds = []
+        for name, scale in (("a", 0.05), ("b", 0.05), ("c", 0.06)):     # the same weights twice, then other values
+            directory = tmp_path / name
+            directory.mkdir()
+            (directory / "config.json").write_text(json.dumps({**CONFIG, "model_type": "qwen4_exp",
+                                                               "vision_config": vision, "quantization": {}}))
+            mx.random.seed(0)
+            mx.save_safetensors(str(directory / "model.safetensors"),
+                                {f"vision_tower.{k}": scale * mx.random.normal(shapes[k].shape) for k in names})
+            seeds.append(qwen_mlx.QwenVisionFrontend.load(directory, lambda t: mx.zeros((*t.shape, 48))).key_seed)
+        assert seeds[0] == seeds[1] != seeds[2]
     finally:
         mx.set_default_device(previous)

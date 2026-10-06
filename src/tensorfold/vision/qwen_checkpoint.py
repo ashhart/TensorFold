@@ -74,8 +74,8 @@ def vision_tensors(model_dir: Path, *, weights_path: Path | None = None) -> dict
     return result
 
 
-def load_vision_weights(tensors: dict[str, tuple[Path, dict, int]], mx: Any) -> dict[str, Any]:
-    """Read selected byte ranges rather than materializing the language tensors in mixed shards."""
+def load_vision_weights(tensors: dict[str, tuple[Path, dict, int]], mx: Any, digest: Any = None) -> dict[str, Any]:
+    """Read selected byte ranges rather than the language tensors of mixed shards, each also into ``digest``."""
     weights = {}
     for name, (path, item, begin) in tensors.items():
         dtype = item.get("dtype")
@@ -96,6 +96,9 @@ def load_vision_weights(tensors: dict[str, tuple[Path, dict, int]], mx: Any) -> 
             raw = stream.read(end - start)
         if len(raw) != end - start:
             raise ValueError(f"Incomplete vision tensor: {name}")
+        if digest is not None:
+            digest.update(f"{name}:{dtype}:{shape}\0".encode())
+            digest.update(raw)
         array = mx.array(np.frombuffer(raw, dtype=dt).reshape(shape).copy())
         weights[name] = array.view(mx.bfloat16) if dtype == "BF16" else array
     return weights

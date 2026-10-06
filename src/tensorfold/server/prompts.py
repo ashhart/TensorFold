@@ -40,7 +40,8 @@ def image_slot():
     return IMAGE_SLOTS
 
 
-def prepare_images(frontend, messages, render, *, context_limit=None, limits: ImageLimits = DEFAULT_LIMITS):
+def prepare_images(frontend, messages, render, *, context_limit=None, limits: ImageLimits = DEFAULT_LIMITS,
+                   render_history=None):
     from tensorfold.vision.images import ImageInputError, ImageSource, load_images, split_images
 
     if frontend is None:
@@ -66,7 +67,10 @@ def prepare_images(frontend, messages, render, *, context_limit=None, limits: Im
         raise refusal(str(exc)) from exc                # an image prompt past the window: context_length_exceeded
     finally:
         slot.release()
-    return RenderedPrompt(list(prepared.token_ids), vision=prepared)
+    history_len = 0
+    if render_history is not None and hasattr(frontend, 'history_len'):
+        history_len = frontend.history_len(render_history(template), prepared)    # where the next turn resumes
+    return RenderedPrompt(list(prepared.token_ids), history_len, vision=prepared)
 
 
 def prepare_prompt(app, messages, tools, thinking, prompt, fields):
@@ -84,8 +88,8 @@ def prepare_prompt(app, messages, tools, thinking, prompt, fields):
                                                                  allow_images=True))
     effort = app.effort_for(fields.get('reasoning_effort'))
 
-    def render(template):
-        kwargs = dict(add_generation_prompt=True, tokenize=False, enable_thinking=thinking)
+    def render(template, generation=True):
+        kwargs = dict(add_generation_prompt=generation, tokenize=False, enable_thinking=thinking)
         if tools:
             kwargs['tools'] = tools
         if thinking and effort:
@@ -93,5 +97,7 @@ def prepare_prompt(app, messages, tools, thinking, prompt, fields):
         with app.tokenizer_lock:
             return app.tokenizer.apply_chat_template(template, **kwargs)
 
+    # a family whose image prompts resume keeps a checkpoint where the conversation's history ends, as for text
+    history = (lambda template: render(template, False)) if getattr(app, 'image_resume', False) else None
     return prepare_images(getattr(app, 'vision', None), messages, render, context_limit=app.context_window or None,
-                          limits=getattr(app, 'image_limits', DEFAULT_LIMITS))
+                          limits=getattr(app, 'image_limits', DEFAULT_LIMITS), render_history=history)
