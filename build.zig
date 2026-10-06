@@ -300,6 +300,18 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         b.step(p.name, p.about).dependOn(&b.addInstallArtifact(exe, .{}).step);
     }
 
+    // The core row projection (chips without tensor units) on synthetic matrices; runs on any Mac's GPU
+    const row_mod = b.createModule(.{ .root_source_file = b.path("zig/src/core/row_projection.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources } } });
+    const row_check = b.addExecutable(.{ .name = "tf-row-check", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/row_projection_check.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "row_projection", .module = row_mod } },
+    }) });
+    b.step("tf-row-check", "The core row projection on synthetic 4-bit matrices: widths bit-equal, a CPU reference, indexed experts").dependOn(&b.addInstallArtifact(row_check, .{}).step);
+    test_step.?.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = row_mod })).step);
+
     _ = nativeServer(b, target, optimize, metal, engine, lanes, build_options, test_step);
 
     const cluster_metal = b.createModule(.{
