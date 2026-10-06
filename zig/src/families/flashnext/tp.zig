@@ -36,7 +36,8 @@ const SENDA = SENDR + 2 * (PAGE + PART); // this rank's head argmax a row (value
 const RECVA = SENDA + 4 * PAGE; // the peer's, alternating by parity
 const REQ_TOKENS = 262144; // a served request's prompt tokens at most (the engine's context)
 const REQ = RECVA + 2 * PAGE; // served: rank 0's request for rank 1 (a 64-byte head, then the prompt)
-const WINDOW = REQ + pages(64 + 4 * REQ_TOKENS);
+pub const MARK = REQ + pages(64 + 4 * REQ_TOKENS); // a mark a pair chunk passed: its DeltaNet states (a DN_SLOT a layer), then its n-gram tail
+const WINDOW = MARK + 36 * DN_SLOT + pages(9 * WIDE * 2);
 
 fn sendX(x: u32) usize {
     return SENDX + (x % 2) * (PAGE + SLOT) + PAGE;
@@ -58,6 +59,8 @@ pub const MTP_FLAG = BACK_FLAG + 8;
 const REQ_FLAG = MTP_FLAG + 8; // served: the last request rank 0 has written
 const CTRL_FLAG = REQ_FLAG + 8; // rank 0's decision at each step both ranks take: (step << 6) | (next depth << 1) | quit
 const ACK_FLAG = CTRL_FLAG + 8; // served: rank 1's answer to a request's resume, (request << 1) | restored
+pub const MARK_FLAG = ACK_FLAG + 8; // a passed mark's states have landed in MARK: the exchange's sequence
+pub const MARK_READY = MARK_FLAG + 8; // the receiver's MARK is free for that sequence
 const GPU = 1024;
 const GAVE_UP = 2048;
 
@@ -258,6 +261,7 @@ pub const Tp2 = struct {
     seq: u32 = 0, // the last sequence this Mac's GPU posts (its own count: prefill sends are rank 0's alone)
     xseq: u32 = 0, // decode exchanges so far, the same count on both Macs: their slots' parity and flag values
     call: u32 = 0, // prefill chunks split so far (both ranks count the same): their flags' values
+    mark_seq: u64 = 0, // marks exchanged after pair chunks (both ranks count the same)
     jobs: []Job,
     queued: std.atomic.Value(u32) = .init(0), // jobs written: the service reads a job only below this
     thread: ?std.Thread = null,
@@ -479,6 +483,11 @@ pub const Tp2 = struct {
         var h64: [64]u8 = @splat(0);
         @memcpy(h64[0..head.len], head);
         try t.rd.write2Signal(t.peer, REQ, &h64, std.mem.sliceAsBytes(prompt), REQ_FLAG, t.req);
+    }
+
+    /// After a pair chunk: this Mac's MARK is free for the peer's states of mark exchange `seq`.
+    pub fn markReady(t: *Tp2, seq: u64) !void {
+        try t.rd.signal(t.peer, MARK_READY, seq);
     }
 
     /// Served, rank 1: tell rank 0 whether this request's resume state is in place (rank 0 waits before its prompt pass).

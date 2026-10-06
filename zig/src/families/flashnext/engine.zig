@@ -486,10 +486,21 @@ pub const Engine = struct {
         while (at < prompt.len) {
             if (try e.agree(out.cancelled(out.ctx))) return .{ .reason = .cancelled };
             const to_mark = (if (mi < marks.len) marks[mi] else prompt.len) - at;
-            if (r.tp) |tp| { // speed-up mode: the chunk's rows split across the two Macs (ending at marks)
-                const call = segments.next(to_mark, e.pr.step, PAIR_MIN);
+            if (r.tp) |tp| { // speed-up mode: the call's rows split across the two Macs, running on past up to MARKS marks
+                const pair_taps = e.mark_taps and m.marks != null;
+                var call = segments.next(if (pair_taps) prompt.len - at else to_mark, e.pr.step, PAIR_MIN);
+                var passed: [fz.MARKS]u32 = undefined;
+                var n_passed: usize = 0;
+                while (call.parts == 2 and pair_taps and mi + n_passed < marks.len and marks[mi + n_passed] < at + call.rows) : (n_passed += 1) {
+                    if (n_passed == fz.MARKS) {
+                        call = segments.next(marks[mi + n_passed] - at, e.pr.step, PAIR_MIN);
+                        break;
+                    }
+                    passed[n_passed] = @intCast(marks[mi + n_passed] - at);
+                }
                 if (call.parts == 2) {
-                    pick = try Prompt.chunkPair(e.pr, m, e.gpa, prompt[at .. at + call.rows], tp);
+                    const hist0 = m.ple.hist;
+                    pick = try Prompt.chunkPair(e.pr, m, e.gpa, prompt[at .. at + call.rows], tp, passed[0..n_passed]);
                     var span: [2][2]usize = undefined; // each Mac's segment: first position, rows with an MTP key
                     for (0..2) |k| {
                         const s = at + segments.start(call.rows, 2, k);
@@ -500,6 +511,14 @@ pub const Engine = struct {
                     try e.pr.mtpKeys(m, mine[0], prompt[mine[0] + 1 .. mine[0] + 1 + mine[1]], e.pr.last);
                     try e.pr.pairMtp(m, tp, mine, span[1 - tp.rank]);
                     last_n = 1; // m.last points at the last row
+                    for (passed[0..n_passed], 0..) |row, j| { // both Macs hold each passed mark's states now (pairMarks)
+                        var hist = hist0;
+                        for (prompt[at + row - @min(row, 2) .. at + row]) |tok| hist = .{ hist[1], tok };
+                        e.passed = .{ .at = at + row, .slot = j, .tail = m.marks.?.tail_at(j), .hist = hist };
+                        defer e.passed = null;
+                        if (out.marked) |f| f(out.ctx, at + row);
+                    }
+                    mi += n_passed;
                     at += call.rows;
                     if (mi < marks.len and at == marks[mi]) { // a pair chunk can end on a mark too
                         if (out.marked) |f| f(out.ctx, at);

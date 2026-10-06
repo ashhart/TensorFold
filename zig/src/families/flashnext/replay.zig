@@ -1778,13 +1778,17 @@ pub const Mtp = struct {
 /// Marks a prompt call can take its DeltaNet states at without ending there.
 pub const MARKS = 4;
 
-/// Each DeltaNet layer's conv windows and states at up to MARKS rows of one prompt call: [linear layer][mark][row].
+/// Each DeltaNet layer's conv windows and states at up to MARKS rows of one prompt call: [linear layer][mark][row]; and each mark's n-gram tail.
 pub const Marks = struct {
     cs: Buf,
     so: Buf,
+    tails: Buf, // [mark][PLE_TAIL rows]: where speed-up mode's pair chunks leave each mark's n-gram tail on both Macs
 
     pub fn init(r: *Run, linear: usize) !Marks {
-        return .{ .cs = .{ .b = try r.buffer(linear * MARKS * CS_ROW) }, .so = .{ .b = try r.buffer(linear * MARKS * SO_ROW) } };
+        return .{ .cs = .{ .b = try r.buffer(linear * MARKS * CS_ROW) }, .so = .{ .b = try r.buffer(linear * MARKS * SO_ROW) }, .tails = .{ .b = try r.buffer(MARKS * PLE_TAIL * WIDE * 2) } };
+    }
+    pub fn tail_at(k: Marks, mark: usize) Buf {
+        return .{ .b = k.tails.b, .off = k.tails.off + mark * PLE_TAIL * WIDE * 2 };
     }
     pub fn cs_at(k: Marks, li: usize, mark: usize) Buf {
         return .{ .b = k.cs.b, .off = k.cs.off + (li * MARKS + mark) * CS_ROW };
@@ -3154,10 +3158,11 @@ pub const Prompt = struct {
     }
 
     /// Speed-up mode's prefill: a chunk's rows split across two Macs (tp.zig). This Mac runs its segment (rank 0 the first half, rank 1 the second, a layer behind); rank 0 hands each layer's state or new keys to rank 1, then rank 1 hands its final state, keys, n-gram tail, last row and first token back. Each segment does a serial chunk's arithmetic, so both Macs end with one Mac's bits. Returns the greedy token after the chunk; m.last points at the last row's streams.
-    pub fn chunkPair(p: *Prompt, m: *Model, gpa: std.mem.Allocator, tokens: []const u32, tp: *Tp2) !u32 {
+    pub fn chunkPair(p: *Prompt, m: *Model, gpa: std.mem.Allocator, tokens: []const u32, tp: *Tp2, marks: []const u32) !u32 {
         const r = p.r;
         const n = tokens.len;
         if (n < 2 or n > 2 * PMAX) return error.ChunkSize;
+        if (marks.len > MARKS or (marks.len > 0 and m.marks == null)) return error.Marks;
         const k: usize = tp.rank;
         const a = m.state;
         const at = segments.start(n, 2, k);
@@ -3170,6 +3175,9 @@ pub const Prompt = struct {
         try p.prep(m, gpa, tokens[at .. at + rows], m.pos + at, hist);
         const ra = if (k == 0) a else 1 - a;
         var segs = [1]Seg{.{ .p = p, .rows = rows, .pos = m.pos + at, .ra = ra, .rr = if (k == 0) m.state_row else 0, .wa = 1 - ra, .cur = 0, .pending = false }};
+        for (marks, 0..) |mk, j| if (mk > at and mk <= at + rows) {
+            segs[0].mk[j] = @intCast(mk - at);
+        };
         const cin_old = m.ple.cin.b.contents()[m.ple.cin.off..];
         if (k == 0) @memcpy(p.b.cin.b.contents()[0 .. PLE_TAIL * WIDE * 2], cin_old[0 .. PLE_TAIL * WIDE * 2]);
         var hooks: Hooks = .{ .m = m, .segs = &segs, .pair = &pr };
@@ -3229,11 +3237,48 @@ pub const Prompt = struct {
             pick = std.mem.readInt(u32, tp.bytes(tpm.LAST + WIDE * 2)[0..4], .little);
             m.last = .{ .b = w, .off = tpm.LAST };
         }
+        try p.pairMarks(m, tp, gpa, marks, rows0, at);
         m.state = a; // two segments: each flipped it once
         m.state_row = 0;
         m.pos += n;
         for (tokens) |tok| m.ple.hist = .{ m.ple.hist[1], tok };
         return pick;
+    }
+
+    /// After a pair chunk: each passed mark's states and n-gram tail, from the Mac whose rows hold it into the other's slot (MARK, freed first).
+    fn pairMarks(p: *Prompt, m: *Model, tp: *Tp2, gpa: std.mem.Allocator, marks: []const u32, rows0: usize, at: usize) !void {
+        const mk = m.marks orelse return;
+        const tail_bytes = PLE_TAIL * WIDE * 2;
+        for (marks, 0..) |row, j| {
+            tp.mark_seq += 1;
+            const seq = tp.mark_seq;
+            const owner: u32 = if (row <= rows0) 0 else 1;
+            if (owner == tp.rank) {
+                const tail = p.b.cin.b.contents()[p.b.cin.off + (row - at) * WIDE * 2 ..][0..tail_bytes];
+                @memcpy(mk.tails.b.contents()[mk.tail_at(j).off..][0..tail_bytes], tail);
+                var ws: std.ArrayList(tpm.Write) = .empty;
+                defer ws.deinit(gpa);
+                for (0..36) |li| {
+                    try ws.append(gpa, .{ .src = bytesOf(mk.cs_at(li, j)), .len = CS_ROW, .dst = tpm.MARK + li * tpm.DN_SLOT });
+                    try ws.append(gpa, .{ .src = bytesOf(mk.so_at(li, j)), .len = SO_ROW, .dst = tpm.MARK + li * tpm.DN_SLOT + CS_ROW });
+                }
+                try ws.append(gpa, .{ .src = tail.ptr, .len = tail_bytes, .dst = tpm.MARK + 36 * tpm.DN_SLOT });
+                tp.hostWait(tpm.MARK_READY, seq);
+                try tp.sendNow(ws.items, tpm.MARK_FLAG, seq);
+            } else {
+                try tp.markReady(seq);
+                tp.hostWait(tpm.MARK_FLAG, seq);
+                const w = tp.window();
+                const cb = p.r.queue.commandBuffer();
+                p.r.enc = cb.compute(if (p.r.serial) .serial else .concurrent);
+                for (0..36) |li| {
+                    p.copyWords(.{ .b = w, .off = tpm.MARK + li * tpm.DN_SLOT }, mk.cs_at(li, j), CS_ROW / 4);
+                    p.copyWords(.{ .b = w, .off = tpm.MARK + li * tpm.DN_SLOT + CS_ROW }, mk.so_at(li, j), SO_ROW / 4);
+                }
+                p.copyWords(.{ .b = w, .off = tpm.MARK + 36 * tpm.DN_SLOT }, mk.tail_at(j), tail_bytes / 4);
+                try m.finish(cb);
+            }
+        }
     }
 
     /// Speed-up mode: once each Mac has written the MTP head's prompt keys for its segment's rows (`mine`: first position, rows), each sends them to the other and copies the other's (`theirs`) into place.
