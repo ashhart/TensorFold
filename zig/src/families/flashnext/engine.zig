@@ -66,6 +66,8 @@ pub const Out = struct {
     tokens: *const fn (ctx: *anyopaque, toks: []const u32) bool,
     /// Checked between chunks and rounds.
     cancelled: *const fn (ctx: *anyopaque) bool,
+    /// The prompt pass stands at one of generateFrom's marks (a chunk end): the prompt cache keeps its state here.
+    marked: ?*const fn (ctx: *anyopaque, at: usize) void = null,
 };
 
 pub const Engine = struct {
@@ -411,10 +413,17 @@ pub const Engine = struct {
 
     /// One greedy reply. `depth` fixes the drafts a round (0: no drafts, one token a round); null: the depth rule.
     pub fn generate(e: *Engine, prompt: []const u32, max_tokens: usize, eos: []const u32, depth: ?usize, out: Out) !Result {
+        return e.generateFrom(prompt, 0, &.{}, max_tokens, eos, depth, out);
+    }
+
+    /// `generate` after snapshot.restore put `from` tokens in the model, the pass cut at each mark for out.marked.
+    pub fn generateFrom(e: *Engine, prompt: []const u32, from: usize, marks: []const u32, max_tokens: usize, eos: []const u32, depth: ?usize, out: Out) !Result {
         const r = e.r;
         const m = e.m;
         if (prompt.len == 0) return error.EmptyPrompt;
         if (prompt.len + max_tokens + MARGIN > CAP) return error.ContextFull;
+        if (from >= prompt.len or (from > 0 and (m.pos != from or r.tp != null))) return error.NotResumed;
+        for (marks, 0..) |mk, i| if (mk <= from or mk >= prompt.len or (i > 0 and mk <= marks[i - 1]) or r.tp != null) return error.Marks;
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         if (r.tp) |tp| if (tp.rank == 0) { // served speed-up mode: rank 1 runs the same request (follow)
@@ -428,16 +437,17 @@ pub const Engine = struct {
         };
         e.hostMode();
         defer e.hostMode();
-        m.reset();
+        if (from == 0) m.reset();
         m.mtp.pos = 0;
         m.mtp.drafted = 0;
         var pick: u32 = 0;
-        var at: usize = 0;
+        var at: usize = from;
         var last_n: usize = 1;
+        var mi: usize = 0; // the next mark
         const ps = [2]*Prompt{ e.pr, e.pr2 };
         while (at < prompt.len) {
             if (try e.agree(out.cancelled(out.ctx))) return .{ .reason = .cancelled };
-            const left = prompt.len - at;
+            const left = (if (mi < marks.len) marks[mi] else prompt.len) - at;
             if (r.tp) |tp| { // speed-up mode: the chunk's rows split across the two Macs
                 const call = segments.next(left, e.pr.step, PAIR_MIN);
                 if (call.parts == 2) {
@@ -466,6 +476,10 @@ pub const Engine = struct {
                 last_n = n;
             }
             at += c.rows;
+            if (mi < marks.len and at == marks[mi]) {
+                if (out.marked) |f| f(out.ctx, at);
+                mi += 1;
+            }
         }
         out.prefilled(out.ctx);
         var res: Result = .{ .reason = .length };

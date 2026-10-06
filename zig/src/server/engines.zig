@@ -21,5 +21,6 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, dir: []const u8, model_typ
         .lanes = cli.parallel(args.parallel) orelse 8,
         .drafts = !args.no_drafts,
         .speed_up = args.speed_up,
+        .prompt_cache_gib = args.prompt_cache_gib,
     }, problem);
 }

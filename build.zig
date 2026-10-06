@@ -130,6 +130,15 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     // the engine seam's own tests (lane_host.zig), as zig/tests/server/zig_test.sh runs them
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api })).step);
     b.step("test-native", "The Metal engines module's host-side tests").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engines })).step);
+    const reuse = b.addExecutable(.{ .name = "tf-flashnext-reuse", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/flashnext_reuse.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api } },
+    }) });
+    b.installArtifact(reuse);
+    b.step("tf-flashnext-reuse", "Flash Next prompt reuse against fresh prompt passes: replies at every depth and kept states' bytes").dependOn(&b.addInstallArtifact(reuse, .{}).step);
 }
 
 /// macOS: the metallib, the Metal runtime's test programs and the engine over Metal.

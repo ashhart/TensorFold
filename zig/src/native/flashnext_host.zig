@@ -5,6 +5,8 @@ const mtl = @import("metal");
 const api = @import("engine_api");
 const tf = @import("tensorfold");
 const fx = tf.flashnext_engine;
+const snap = tf.flashnext_snapshot;
+const pc = api.prompt_cache;
 const Allocator = std.mem.Allocator;
 
 const Job = struct {
@@ -15,6 +17,7 @@ const Job = struct {
     began: i96 = 0,
     prefill_sent: bool = false,
     prefilled: ?i96 = null,
+    cached: u32 = 0, // prompt tokens restored from the prompt cache
 };
 
 pub const Host = struct {
@@ -34,6 +37,7 @@ pub const Host = struct {
     prefill_rate: f64 = 0,
     prefill_at: i96 = 0,
     live_generated: u64 = 0,
+    cache: ?pc.Store = null, // kept prompt states (engine thread only); null: no reuse (speed-up mode, a zero budget)
 
     const Mark = struct { at: i96, tokens: u64 };
     const window_ns: i96 = 2 * std.time.ns_per_s;
@@ -205,12 +209,17 @@ pub const Host = struct {
             const h = c.h;
             const done = h.now();
             h.lock();
-            if (done > c.job.began) h.prefill_rate = @as(f64, @floatFromInt(c.job.request.prompt.len)) / (@as(f64, @floatFromInt(done - c.job.began)) / 1e9);
+            if (done > c.job.began) h.prefill_rate = @as(f64, @floatFromInt(c.job.request.prompt.len - c.job.cached)) / (@as(f64, @floatFromInt(done - c.job.began)) / 1e9);
             h.prefill_at = done;
             c.job.prefilled = done;
             h.unlock();
             c.job.prefill_sent = true;
-            emit(c.job, .{ .prefilled = 0 });
+            emit(c.job, .{ .prefilled = c.job.cached });
+        }
+
+        fn marked(ctx: *anyopaque, at: usize) void {
+            const c: *Ctx = @ptrCast(@alignCast(ctx));
+            if (c.h.cache) |*store| store.keep(c.job.request.prompt, @intCast(at), null);
         }
 
         fn tokens(ctx: *anyopaque, toks: []const u32) bool {
@@ -256,9 +265,16 @@ pub const Host = struct {
             return h.finish(job, .failed, .{}, "speed-up mode: this Mac runs rank 0's requests; send requests to rank 0");
         }
         var c: Ctx = .{ .h = h, .job = job };
-        const out: fx.Out = .{ .ctx = &c, .prefilled = Ctx.prefilled, .tokens = Ctx.tokens, .cancelled = Ctx.cancelled };
+        const out: fx.Out = .{ .ctx = &c, .prefilled = Ctx.prefilled, .tokens = Ctx.tokens, .cancelled = Ctx.cancelled, .marked = Ctx.marked };
         const depth: ?usize = if (r.drafts) null else 0;
-        const res = h.eng.generate(r.prompt, r.max_tokens, r.eos, depth, out) catch |e| {
+        var arena: std.heap.ArenaAllocator = .init(h.gpa);
+        defer arena.deinit();
+        var plan: pc.Plan = .{};
+        if (h.cache) |*store| if (r.prompt.len + r.max_tokens + fx.MARGIN <= tf.flashnext_replay.CAP) {
+            plan = store.begin(arena.allocator(), r.prompt, r.history_len, r.shared_prefixes, &.{}, null) catch .{};
+        };
+        job.cached = plan.from;
+        const res = h.eng.generateFrom(r.prompt, plan.from, plan.marks, r.max_tokens, r.eos, depth, out) catch |e| {
             if (!job.prefill_sent) emit(job, .{ .prefilled = 0 });
             return h.finish(job, .failed, .{}, @errorName(e));
         };
@@ -272,8 +288,35 @@ pub const Host = struct {
     }
 };
 
-/// The engine for a Flash Next checkpoint: the replay engine on the kernels and packs in `dump`, warmed, served; `speed_up` names this Mac's speed-up mode settings (tp.zig).
-pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: []const u8, window: i64, speed_up: ?[]const u8) !*Host {
+/// The prompt cache's copies of the engine's state (snapshot.zig), on the engine's thread.
+const Snaps = struct {
+    fn bytes(_: *anyopaque, at: u32) u64 {
+        return snap.bytes(at);
+    }
+    fn save(ptr: *anyopaque, _: ?*anyopaque, at: u32) anyerror!pc.Saved {
+        const h: *Host = @ptrCast(@alignCast(ptr));
+        return try snap.save(h.eng, h.gpa, at);
+    }
+    fn restore(ptr: *anyopaque, _: ?*anyopaque, saved: pc.Saved) anyerror!void {
+        const h: *Host = @ptrCast(@alignCast(ptr));
+        try snap.restore(h.eng, @ptrCast(@alignCast(saved)));
+    }
+    fn drop(ptr: *anyopaque, saved: pc.Saved) void {
+        const h: *Host = @ptrCast(@alignCast(ptr));
+        snap.drop(h.gpa, @ptrCast(@alignCast(saved)));
+    }
+};
+
+/// The prompt cache's budget: `gib`, else the working set left past the engine less 8 GiB, at most 16 GiB.
+fn cacheBudget(eng: *fx.Engine, gib: ?f64) u64 {
+    if (gib) |g| return if (g > 0) @intFromFloat(g * (1 << 30)) else 0;
+    const dev = eng.r.device;
+    const spare = dev.maxWorkingSet() -| dev.allocated() -| (8 << 30);
+    return @min(spare, 16 << 30);
+}
+
+/// The engine for a Flash Next checkpoint: the replay engine on the kernels and packs in `dump`, warmed, served; `speed_up` names this Mac's speed-up mode settings (tp.zig); `cache_gib` the prompt cache's budget (null: what memory leaves).
+pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: []const u8, window: i64, speed_up: ?[]const u8, cache_gib: ?f64) !*Host {
     const eng = try fx.Engine.loadWith(gpa, dir, dump, speed_up);
     errdefer eng.deinit();
     try eng.warm();
@@ -282,6 +325,9 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: []const u8, windo
     errdefer gpa.destroy(h);
     const limit: i64 = tf.flashnext_replay.CAP - fx.MARGIN;
     h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .info_ = .{ .name = "flashnext-zig", .lanes = 1, .context_window = @intCast(if (window > 0) @min(window, limit) else limit) } };
+    const budget = cacheBudget(eng, cache_gib);
+    if (eng.r.tp == null and budget > 0) h.cache = pc.Store.init(gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, .{ .lookahead = 1 }, budget);
+    std.log.info("prompt cache: {d:.1} GiB for kept prompt states{s}", .{ @as(f64, @floatFromInt(if (h.cache != null) budget else 0)) / (1 << 30), if (eng.r.tp != null) " (off in speed-up mode)" else "" });
     try h.start();
     return h;
 }
@@ -297,6 +343,7 @@ pub fn close(ctx: *anyopaque) void {
         h.eng.stopFollowing();
         th.join();
     }
+    if (h.cache) |*store| store.deinit();
     h.eng.deinit();
     h.gpa.destroy(h);
 }

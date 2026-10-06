@@ -68,6 +68,11 @@ pub const Device = struct {
         return objc.msg(u64, self.id, "recommendedMaxWorkingSetSize", .{});
     }
 
+    /// Bytes of every buffer and texture this device holds now.
+    pub fn allocated(self: Device) u64 {
+        return objc.msg(u64, self.id, "currentAllocatedSize", .{});
+    }
+
     pub fn responds(self: Device, comptime selector: [:0]const u8) bool {
         return objc.msg(bool, self.id, "respondsToSelector:", .{objc.sel(selector)});
     }

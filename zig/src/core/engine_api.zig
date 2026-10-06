@@ -123,7 +123,7 @@ pub const Info = struct {
 pub const Family = struct { model_type: []const u8, formats: []const []const u8 };
 
 /// What a server asks of the engine it opens: the checkpoint, and the serve flags an engine reads.
-pub const Open = struct { dir: []const u8, model_type: []const u8, context: ?i64 = null, lanes: u32 = 8, drafts: bool = true, speed_up: ?[]const u8 = null };
+pub const Open = struct { dir: []const u8, model_type: []const u8, context: ?i64 = null, lanes: u32 = 8, drafts: bool = true, speed_up: ?[]const u8 = null, prompt_cache_gib: ?f64 = null };
 
 /// An opened engine; ``close`` stops its thread and frees its backend.
 pub const Opened = struct { engine: Engine, close: *const fn (ctx: *anyopaque) void, ctx: *anyopaque };
@@ -195,6 +195,10 @@ pub const LoneHooks = struct {
 /// The lane core served to the HTTP threads (lane_host.zig).
 pub const LaneHost = @import("lane_host.zig").LaneHost;
 
+/// Exact prompt reuse between requests, for any family (prompt_cache.zig).
+pub const prompt_cache = @import("prompt_cache.zig");
+
 test {
     _ = @import("lane_host.zig");
+    _ = prompt_cache;
 }
