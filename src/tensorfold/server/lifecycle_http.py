@@ -105,6 +105,15 @@ def post(handler: Any, app: Any, handle: Callable[[], None]) -> None:
     if admin(handler, app):
         return
     lifecycle = getattr(app, "lifecycle", None)
+    if lifecycle is not None:
+        from tensorfold.server import anthropic, responses, token_routes
+
+        path = handler.path.split("?", 1)[0].rstrip("/")
+        if not (path.endswith(("/completions", "/decisions")) or path in token_routes.ROUTES
+                or anthropic.route(path) or responses.route(path) == ""):
+            handler.close_connection = True
+            _send(handler, 404, {"error": {"message": "unknown path"}})
+            return
     try:
         with lifecycle.admit() if lifecycle is not None else nullcontext():
             handle()

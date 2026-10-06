@@ -116,6 +116,35 @@ def test_snapshot_failure_refuses_sleep_without_stopping_runtime(checkpoint, tmp
     adapter.close()
 
 
+@pytest.mark.parametrize("source", ["target", "drafter"])
+@pytest.mark.parametrize("location", ["root", "child", "hidden", "symlink"])
+def test_cache_inside_checkpoint_is_refused_before_creating_storage(checkpoint, tmp_path, cuda, monkeypatch,
+                                                                   source, location):
+    from tensorfold.cuda.sleep import CudaSleep
+
+    draft = tmp_path / "draft"
+    draft.mkdir()
+    (draft / "config.json").write_bytes(b"draft config")
+    (draft / "model.safetensors").write_bytes(b"draft weights")
+    app, adapter, refs, calls = setup(checkpoint, cuda, monkeypatch, drafter=draft)
+    monkeypatch.setattr(sys.modules["torch"], "__version__", "test", raising=False)
+    monkeypatch.setattr(sys.modules["torch"], "version", SimpleNamespace(cuda="test"), raising=False)
+    monkeypatch.setattr(sys.modules["torch"].cuda, "get_device_capability", lambda: (9, 0), raising=False)
+    monkeypatch.setattr(adapter.runtime, "prefix_codec", lambda: object())
+    root = checkpoint if source == "target" else draft
+    cache_dir = root if location == "root" else root / (".cache" if location == "hidden" else "cache")
+    if location == "symlink":
+        link = tmp_path / "cache-link"
+        link.symlink_to(root, target_is_directory=True)
+        cache_dir = link / "cache"
+    before = set(tmp_path.rglob("*"))
+    with pytest.raises(ValueError, match="sleep cache.*outside.*checkpoint"):
+        CudaSleep(app, adapter.factory, checkpoint, adapter.options, runtime=adapter.runtime,
+                  identity=adapter.identity, cache_dir=cache_dir)
+    assert set(tmp_path.rglob("*")) == before
+    assert app.engine is refs[-1]() and not cuda and not calls
+
+
 def test_saved_cache_survives_teardown_and_is_loaded_only_on_matching_request(checkpoint, tmp_path, cuda, monkeypatch):
     app, adapter, codec, refs = cache_setup(checkpoint, tmp_path, cuda, monkeypatch)
     app.lifecycle.sleep()

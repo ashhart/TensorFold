@@ -173,6 +173,23 @@ def test_api_auth_still_gates_disabled_and_unknown_controls(app):
         assert not app.transitions
 
 
+@pytest.mark.parametrize("path", ["/unknown", "/unknown/?unused=1"])
+@pytest.mark.parametrize("framing", ["Content-Length: 1", "Transfer-Encoding: chunked"])
+def test_unauthenticated_unknown_post_cannot_hold_sleep_admission(app, path, framing):
+    from tensorfold.server.authentication import KeyStore
+
+    app.auth = KeyStore(["test-inference-secret"])
+    with serving(app) as server, socket.create_connection(("127.0.0.1", server.server_port), timeout=1) as client:
+        client.sendall(f"POST {path} HTTP/1.1\r\nHost: x\r\n{framing}\r\n\r\n".encode())
+        response = http.client.HTTPResponse(client)
+        response.begin()
+        assert response.status == 404 and response.getheader("Connection") == "close"
+        response.read()
+        assert app.lifecycle.snapshot()["active_requests"] == 0
+        assert call(server, "/sleep")[1]["is_sleeping"]
+        assert app.transitions == ["sleep"]
+
+
 def test_empty_configured_secret_never_authenticates(app):
     app.sleep_token = ""
     with serving(app) as server:

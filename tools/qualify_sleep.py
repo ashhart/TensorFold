@@ -38,6 +38,8 @@ def qualify(args, model_dir, cache_dir=None):
 
     family = detect(model_dir)
     options = engine_options(args, family)
+    if not options["no_drafts"] and args.tokens < 2:
+        raise ValueError("draft qualification requires at least two output tokens")
 
     import torch
     import tensorfold
@@ -99,6 +101,9 @@ def qualify(args, model_dir, cache_dir=None):
             concurrent = list(pool.map(lambda offset: generate(not options["no_drafts"] or args.preserve_cache, offset),
                                        range(args.parallel)))
         assert [r["tokens"] for r in serial] == [r["tokens"] for r in concurrent], "serial/concurrent tokens differ"
+        if not options["no_drafts"]:
+            assert any(r["stats"].get("drafted", 0) > 0 for r in concurrent), \
+                "requested drafting produced no proposals; increase --tokens or use a prompt that exercises drafts"
         return dict(serial=serial, concurrent=concurrent)
 
     report = dict(synthetic=args.synthetic, model_type=family.model_type,
@@ -126,7 +131,7 @@ def qualify(args, model_dir, cache_dir=None):
             asleep = memory()
             saved_cache = adapter.cache_snapshot()
             assert old() is None, "old engine is retained"
-            assert asleep["allocated_bytes"] < loaded["allocated_bytes"], "CUDA allocations were not released"
+            assert asleep["allocated_bytes"] == asleep["reserved_bytes"] == 0, "CUDA allocations survived sleep"
             start = time.perf_counter()
             lifecycle.wake_up()
             wake_s = time.perf_counter() - start
@@ -138,7 +143,6 @@ def qualify(args, model_dir, cache_dir=None):
             assert frontend == (id(app), id(app.tok), id(app.template)), "frontend was replaced"
             cycle = dict(loaded=loaded, asleep=asleep, awake=memory(), sleep_s=sleep_s, wake_s=wake_s, after=after)
             if args.preserve_cache:
-                assert asleep["allocated_bytes"] == asleep["reserved_bytes"] == 0, "cache tensors survived sleep"
                 assert [r["stats"]["cached"] for r in after["concurrent"]] == expected_cached, "prefix reuse lost"
                 assert adapter.cache_snapshot()["loaded_prefixes"] == args.parallel, "prefix was not restored"
                 assert adapter.cache_snapshot()["load_failures"] == 0, "prefix restore failed"

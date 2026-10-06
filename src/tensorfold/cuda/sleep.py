@@ -92,6 +92,9 @@ class CudaSleep:
         self._pending = None
         self.prefixes = None
         if cache_dir is not None:
+            cache_dir = Path(cache_dir).resolve()
+            if any(cache_dir.is_relative_to(root) for root in self.identity.paths):
+                raise ValueError("sleep cache directory must be outside target and drafter checkpoints")
             import torch
 
             import tensorfold
@@ -103,7 +106,7 @@ class CudaSleep:
                          "capability": torch.cuda.get_device_capability(), "settings": self.settings,
                          "math": self.math, "checkpoints": sorted(self.identity.manifest.items())}
             key = hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()
-            self.prefixes = PrefixStore(Path(cache_dir), key, runtime.prefix_codec())
+            self.prefixes = PrefixStore(cache_dir, key, runtime.prefix_codec())
 
     def verify_identity(self) -> None:
         self.identity.verify()
