@@ -27,6 +27,7 @@ pub const Ctx = struct {
     fused_route: bool = true, // the core route (two launches); false: the Python family's cast, router and top-k
     hc_mode: u8 = 0, // 0: the family's expand, mix and split; 1: its expand, then core/hc.zig's mix and split; 2: one launch
     draft_vocab: u32 = 154880, // the MTP head's tokens: the vocabulary's first this many
+    m_row: u32 = 0, // the MTP head's logits row in m_logits (a rank log keeps each depth's in its own row)
 };
 
 /// Single launches (or tight groups) for a profile that times each alone.

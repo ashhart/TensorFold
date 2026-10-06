@@ -35,7 +35,7 @@ pub fn run(x: *fwd.Ctx, e: mtl.ComputeEncoder, h: Ref, next: Ref, rows: u32, pos
     add(x, e, sc.m_out, sc.branch, sc.m_x, rows * D);
     const out = picks orelse return; // the rows absorbed into the head's cache only, no draft
     fwd.rms(x, e, sc.m_x, m.norm, sc.m_hn, rows, D, D, D, c.eps);
-    fwd.headOver(x, e, sc.m_hn.at(@as(usize, rows - 1) * D * 2), sc.m_logits, out, 1, x.draft_vocab);
+    fwd.headOver(x, e, sc.m_hn.at(@as(usize, rows - 1) * D * 2), sc.m_logits.at(@as(usize, x.m_row) * c.vocab * 2), out, 1, x.draft_vocab);
 }
 
 /// One chained draft from `h` (a row of the head's previous output, m_x) and the draft before it (`token`, u32).

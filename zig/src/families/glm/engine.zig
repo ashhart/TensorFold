@@ -29,6 +29,9 @@ pub const Result = struct {
     gap_seconds: f64 = 0, // the GPU idle between consecutive rounds
     copy_rounds: u64 = 0, // rounds whose drafts were copied from earlier in the history, and their drafts kept
     copy_accepted: u64 = 0,
+    // GLM_RANKS=1, MTP rounds by drafts kept (m): [m][0] every draft kept; [m][1..3] the draft after them missed and
+    // the target's token was the head's 2nd, 3rd, or 4th-or-later choice there
+    draft_ranks: [st.max_rows][4]u32 = @splat(@splat(0)),
 };
 
 /// What a reply reports while it runs (called on the engine's thread).
@@ -70,6 +73,7 @@ pub const Engine = struct {
     margins: ?*std.ArrayList(f32) = null, // each emitted token's top-two logit margin (its row's logits), for a path comparison
     chunk_rows: u32 = prompt_mod.max_rows, // a prompt chunk's rows at most (GLM_CHUNK: smaller, to check chunk-size invariance)
     copy_min: u32 = 0, // copy drafts (GLM_COPY=N): a round copies what followed the reply's last N+ tokens earlier (0: off)
+    rank_log: bool = false, // GLM_RANKS=1: each MTP depth's logits kept, and the target's rank in them where drafts miss
     ep_arena: std.heap.ArenaAllocator, // the link settings, alive as long as the link
     residency: ?mtl.ResidencySet = null,
     load_seconds: f64 = 0,
@@ -105,6 +109,7 @@ pub const Engine = struct {
         e.margins = null;
         e.chunk_rows = prompt_mod.max_rows;
         e.copy_min = if (std.c.getenv("GLM_COPY")) |v| std.math.clamp(std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0, 0, 8) else 0;
+        e.rank_log = if (std.c.getenv("GLM_RANKS")) |v| v[0] == '1' else false;
         if (std.c.getenv("GLM_CHUNK")) |v| e.chunk_rows = std.math.clamp(std.fmt.parseInt(u32, std.mem.span(v), 10) catch prompt_mod.max_rows, st.max_rows + 1, prompt_mod.max_rows);
         e.ep_arena = .init(gpa);
         errdefer e.ep_arena.deinit();
@@ -325,6 +330,21 @@ pub const Engine = struct {
         enc.setBuffer(dst.buf, dst.off, 1);
         enc.setValue(D / 2, 2);
         enc.dispatchThreads(mtl.Size.of(D / 2, 1, 1), mtl.Size.of(256, 1, 1));
+    }
+
+    /// Where `t` falls among MTP depth m + 1's choices (its logits row m): 1 for the 2nd, 2 the 3rd, 3 later or none.
+    fn rankAt(e: *const Engine, m: usize, t: u32) usize {
+        if (t >= e.draft_vocab) return 3;
+        const v: [*]const u16 = @ptrCast(@alignCast(e.sc.m_logits.addr()));
+        const row = v[m * e.c.vocab ..][0..e.draft_vocab];
+        const lt: f32 = @bitCast(@as(u32, row[t]) << 16);
+        var above: usize = 0; // choices before t: higher logits, or equal ones at lower ids
+        for (row, 0..) |h, i| {
+            const f: f32 = @bitCast(@as(u32, h) << 16);
+            if (i != t and (f > lt or (f == lt and i < t))) above += 1;
+            if (above >= 3) return 3;
+        }
+        return @max(above, 1); // the draft holds the first place even when t ties it
     }
 
     /// The top two logits' difference in row `row` of the last head's logits (bf16).
@@ -696,8 +716,10 @@ pub const Engine = struct {
                 const base = e.s.mtp_pos + keep;
                 if (copied == 0) for (1..d) |j| {
                     const h = if (j == 1) e.sc.m_x.at(@as(usize, keep - 1) * D * 2) else e.sc.m_x;
+                    if (e.rank_log) x.m_row = @intCast(j);
                     mtp.chain(&x, b.enc, h, e.sc.ids.at(j * 4), base + @as(u32, @intCast(j)) - 1, e.sc.ids.at((j + 1) * 4));
                 };
+                x.m_row = 0;
                 e.s.mtp_pos = base;
             }
             const R = if (copied > 0) copied + 1 else d + 1;
@@ -715,6 +737,10 @@ pub const Engine = struct {
             res.rounds += 1;
             res.drafted += R - 1;
             res.accepted += keep - 1;
+            if (e.rank_log and copied == 0 and d > 0) {
+                const m = keep - 1;
+                res.draft_ranks[m][if (m == d) 0 else e.rankAt(m, picks[m])] += 1;
+            }
             if (copied > 0) {
                 res.copy_rounds += 1;
                 res.copy_accepted += keep - 1;
