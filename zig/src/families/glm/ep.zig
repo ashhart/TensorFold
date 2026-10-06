@@ -1,5 +1,6 @@
 //! Expert parallel over two Macs (MCDMA): each holds half of every MoE layer's routed experts. A MoE call's own (row, slot)
 //! outputs are packed and sent while the GPU runs the shared expert; the peer's land in their rows; both combine all.
+//! Served, rank 0 hands rank 1 each request and its decision at every step both take (a stop, a cancel).
 const std = @import("std");
 const mtl = @import("metal");
 const fabric = @import("fabric");
@@ -24,11 +25,16 @@ const SEND = RECV + 2 * SLOT;
 const FLAGS = SEND + 2 * (PAGE + SLOT);
 const FLAG = FLAGS; // u64: the last exchange whose peer entries have landed
 const HELLO = FLAGS + 8;
+const CTRL = FLAGS + 16; // u64 by parity: rank 0's decision at each step both Macs take, (step << 1) | quit
+const REQ_FLAG = FLAGS + 32; // u64: the last request rank 0 has written
 const SYNC = FLAGS + PAGE;
 const POSTED = SYNC; // u32: the last exchange the GPU has packed
 const COUNT = SYNC + 64; // u32 by parity: each exchange's packed entries
 const GAVE_UP = SYNC + 128; // u32: GPU waits that gave up (nonzero: the run is invalid)
-pub const WINDOW = SYNC + PAGE;
+const REQ = SYNC + PAGE; // served: rank 0's request for rank 1, a 64-byte head and then the prompt's tokens
+pub const REQ_TOKENS = 262144;
+const MAX_EOS = 11;
+pub const WINDOW = REQ + std.mem.alignForward(usize, 64 + 4 * REQ_TOKENS, PAGE);
 
 fn recvAt(x: u32) usize {
     return RECV + (x % 2) * SLOT;
@@ -130,9 +136,13 @@ pub const Ep = struct {
     post_pipe: mtl.Pipeline,
     unpack_pipe: mtl.Pipeline,
     x: u32 = 0, // exchanges encoded so far, the same count on both Macs
+    ctrl: u64 = 0, // steps agreed so far, the same count on both Macs
+    req: u64 = 0, // requests handed over so far
+    eos: [MAX_EOS]u32 = undefined, // rank 1: the request's end tokens, copied out of the window
     thread: ?std.Thread = null,
     stop: std.atomic.Value(bool) = .init(false),
     failed: std.atomic.Value(bool) = .init(false),
+    quitting: std.atomic.Value(bool) = .init(false), // served rank 1: end the wait for rank 0's next request
 
     /// Connect to the peer in `s` (this Mac holds routed experts `own`), then start the host's sending thread.
     pub fn init(gpa: std.mem.Allocator, device: mtl.Device, s: Settings, own: [2]u32) !*Ep {
@@ -235,6 +245,60 @@ pub const Ep = struct {
         enc.dispatchGroups(mtl.Size.of(1, rows * TOPK, 1), mtl.Size.of(256, 1, 1));
     }
 
+    /// A step both Macs take in the same order (a prompt window, the first token, a round): rank 0's decision to stop
+    /// there reaches rank 1, so both end on the same step. Rank 1 waits for it. Rank 0 runs at most two steps ahead
+    /// (a step's exchanges need rank 1; only a new request's first step follows a step without any), so two words.
+    pub fn agree(t: *Ep, quit: bool) !bool {
+        t.ctrl += 1;
+        const word = CTRL + 8 * (t.ctrl % 2);
+        if (t.rank == 0) {
+            try t.rd.signal(t.peer, word, (t.ctrl << 1) | @intFromBool(quit));
+            return quit;
+        }
+        const t0 = std.c.mach_absolute_time();
+        while (true) {
+            const v = @atomicLoad(u64, t.word64(word), .acquire);
+            if (v >> 1 == t.ctrl) return v & 1 != 0;
+            if (v >> 1 > t.ctrl) return error.EpOutOfStep;
+            if (std.c.mach_absolute_time() - t0 > 240_000_000) return error.EpPeerSilent; // 10 s
+            std.atomic.spinLoopHint();
+        }
+    }
+
+    pub const Request = struct { max_tokens: usize, depth: usize, eos: []const u32, prompt: []const u32 };
+
+    /// Served, rank 0: hand rank 1 the next request in one message.
+    pub fn sendRequest(t: *Ep, r: Request) !void {
+        if (r.prompt.len > REQ_TOKENS or r.eos.len > MAX_EOS) return error.EpRequestTooLarge;
+        var head: [16]u32 = @splat(0);
+        head[0] = @intCast(@min(r.max_tokens, std.math.maxInt(u32)));
+        head[1] = @intCast(r.depth);
+        head[2] = @intCast(r.prompt.len);
+        head[3] = @intCast(r.eos.len);
+        @memcpy(head[4..][0..r.eos.len], r.eos);
+        t.req += 1;
+        try t.rd.write2Signal(t.peer, REQ, std.mem.sliceAsBytes(&head), std.mem.sliceAsBytes(r.prompt), REQ_FLAG, t.req);
+    }
+
+    /// Served, rank 1: rank 0's next request (its tokens in the window until the next one), or null once `quitting`.
+    pub fn waitRequest(t: *Ep) ?Request {
+        t.req += 1;
+        var spins: usize = 0;
+        while (@atomicLoad(u64, t.word64(REQ_FLAG), .acquire) < t.req) {
+            if (t.quitting.load(.acquire)) return null;
+            spins += 1;
+            if (spins > 100_000) { // idle: back off
+                const ts: std.c.timespec = .{ .sec = 0, .nsec = 50_000 };
+                _ = std.c.nanosleep(&ts, null);
+            } else std.atomic.spinLoopHint();
+        }
+        const head: [*]const u32 = @ptrCast(@alignCast(t.win.ptr + REQ));
+        const tokens: [*]const u32 = @ptrCast(@alignCast(t.win.ptr + REQ + 64));
+        const n_eos = @min(head[3], MAX_EOS);
+        @memcpy(t.eos[0..n_eos], head[4..][0..n_eos]); // the next request may land before this one's last step
+        return .{ .max_tokens = head[0], .depth = head[1], .eos = t.eos[0..n_eos], .prompt = tokens[0..@min(head[2], REQ_TOKENS)] };
+    }
+
     fn word32(t: *const Ep, off: usize) *u32 {
         return @ptrCast(@alignCast(t.win.ptr + off));
     }
@@ -296,7 +360,8 @@ test "the window's regions tile without overlap, slots by parity, a page of room
     try std.testing.expect(recvAt(1) + SLOT <= SEND and recvAt(2) == RECV);
     try std.testing.expect(sendAt(1) - PAGE >= sendAt(2) + SLOT and sendAt(2) == SEND + PAGE);
     try std.testing.expect(sendAt(1) + SLOT <= FLAGS and HELLO + 8 <= SYNC);
-    try std.testing.expect(GAVE_UP + 4 <= WINDOW and COUNT + 8 <= GAVE_UP);
+    try std.testing.expect(GAVE_UP + 4 <= REQ and COUNT + 8 <= GAVE_UP and REQ_FLAG + 8 <= SYNC and CTRL + 16 <= REQ_FLAG);
+    try std.testing.expect(REQ + 64 + 4 * REQ_TOKENS <= WINDOW and 4 + MAX_EOS <= 16);
     try std.testing.expectEqual(@as(usize, 4096), D);
     try std.testing.expect(COUNTS + 8 <= LISTS);
 }

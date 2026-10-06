@@ -1,5 +1,5 @@
 //! GLM-5.3-Flash behind the native server: one greedy reply at a time on the GLM engine; the engine's thread owns
-//! the GPU and requests wait in arrival order (foreground first).
+//! the GPU and requests wait in arrival order (foreground first). Speed-up mode: rank 0 serves, rank 1 follows it.
 const std = @import("std");
 const mtl = @import("metal");
 const api = @import("engine_api");
@@ -32,6 +32,7 @@ pub const Host = struct {
     running: ?*Job = null,
     closing: bool = false,
     thread: ?std.Thread = null,
+    follower: ?std.Thread = null, // speed-up mode's rank 1: the thread running rank 0's requests
     decoded: std.ArrayList(Mark) = .empty,
     prefill_rate: f64 = 0,
     prefill_at: i96 = 0,
@@ -251,9 +252,18 @@ pub const Host = struct {
             emit(job, .{ .prefilled = 0 });
             return h.finish(job, .failed, .{}, "the native GLM-5.3-Flash engine decodes greedily only: send temperature 0");
         };
+        if (h.eng.followsPeer()) {
+            emit(job, .{ .prefilled = 0 });
+            return h.finish(job, .failed, .{}, "speed-up mode: this Mac runs rank 0's requests; send requests to rank 0");
+        }
         var c: Ctx = .{ .h = h, .job = job };
         const out: ge.Out = .{ .ctx = &c, .prefilled = Ctx.prefilled, .tokens = Ctx.tokens, .cancelled = Ctx.cancelled };
-        const res = h.eng.generate(r.prompt, r.max_tokens, r.eos, if (r.drafts) DEPTH else 0, out) catch |e| {
+        const depth: usize = if (r.drafts) DEPTH else 0;
+        if (h.eng.ep) |ep| ep.sendRequest(.{ .max_tokens = r.max_tokens, .depth = depth, .eos = r.eos, .prompt = r.prompt }) catch |e| {
+            emit(job, .{ .prefilled = 0 });
+            return h.finish(job, .failed, .{}, @errorName(e));
+        };
+        const res = h.eng.generate(r.prompt, r.max_tokens, r.eos, depth, out) catch |e| {
             if (!job.prefill_sent) emit(job, .{ .prefilled = 0 });
             return h.finish(job, .failed, .{}, @errorName(e));
         };
@@ -267,33 +277,35 @@ pub const Host = struct {
     }
 };
 
-fn quiet(_: *anyopaque) void {}
-fn quietTokens(_: *anyopaque, _: []const u32) bool {
-    return false;
-}
-fn never(_: *anyopaque) bool {
-    return false;
-}
-
-/// The engine for a GLM-5.3-Flash checkpoint with caches for `window` tokens, warmed with a short reply, served.
-pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32) !*Host {
-    const eng = try ge.Engine.load(gpa, dir, window + 64);
+/// The engine for a GLM-5.3-Flash checkpoint with caches for `window` tokens, warmed with a short reply (both Macs in
+/// speed-up mode, whose settings `speed_up` names), served.
+pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: ?[]const u8) !*Host {
+    const eng = try ge.Engine.loadWith(gpa, dir, window + 64, speed_up);
     errdefer eng.deinit();
     var toks: [96]u32 = undefined;
     for (&toks, 0..) |*t, i| t.* = @intCast(1000 + i);
     var dummy: u8 = 0;
-    _ = try eng.generate(&toks, 16, &.{}, DEPTH, .{ .ctx = &dummy, .prefilled = quiet, .tokens = quietTokens, .cancelled = never });
+    _ = try eng.generate(&toks, 16, &.{}, DEPTH, .{ .ctx = &dummy, .prefilled = ge.Quiet.prefilled, .tokens = ge.Quiet.tokens, .cancelled = ge.Quiet.cancelled });
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     h.* = .{ .gpa = gpa, .io = io, .eng = eng, .info_ = .{ .name = "glm-zig", .lanes = 1, .context_window = window } };
-    std.log.info("GLM-5.3-Flash loaded in {d:.1} s ({d:.1} GB of weights), context {d} tokens", .{ eng.load_seconds, @as(f64, @floatFromInt(eng.w.bytes)) / 1e9, window });
+    if (eng.followsPeer()) h.follower = try std.Thread.spawn(.{ .stack_size = 16 << 20 }, follow, .{eng});
+    std.log.info("GLM-5.3-Flash loaded in {d:.1} s ({d:.1} GB of weights{s}), context {d} tokens", .{ eng.load_seconds, @as(f64, @floatFromInt(eng.w.bytes)) / 1e9, if (eng.ep == null) "" else if (eng.followsPeer()) ", speed-up rank 1" else ", speed-up rank 0", window });
     try h.start();
     return h;
+}
+
+fn follow(eng: *ge.Engine) void {
+    eng.follow() catch |err| std.log.err("speed-up mode: following rank 0 ended: {s}", .{@errorName(err)});
 }
 
 pub fn close(ctx: *anyopaque) void {
     const h: *Host = @ptrCast(@alignCast(ctx));
     h.stop();
+    if (h.follower) |th| { // rank 1: its wait for rank 0's next request ends, then the thread
+        h.eng.stopFollowing();
+        th.join();
+    }
     h.eng.deinit();
     h.gpa.destroy(h);
 }

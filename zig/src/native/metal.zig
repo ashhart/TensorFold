@@ -160,10 +160,6 @@ test {
 const glm_window: i64 = 131072;
 
 fn openGlm(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
-    if (o.speed_up != null) {
-        problem.* = "the native GLM-5.3-Flash engine has no speed-up mode yet";
-        return null;
-    }
     const native = modelContext(a, io, o.dir);
     const window: i64 = o.context orelse @min(glm_window, if (native > 0) native else glm_window);
     if (window <= 0 or (native > 0 and window > native)) {
@@ -172,7 +168,7 @@ fn openGlm(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]co
     }
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const h = glm.open(gpa, io, o.dir, @intCast(window)) catch |e| {
+    const h = glm.open(gpa, io, o.dir, @intCast(window), o.speed_up) catch |e| {
         problem.* = try std.fmt.allocPrint(a, "the native GLM-5.3-Flash engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
         return null;
     };

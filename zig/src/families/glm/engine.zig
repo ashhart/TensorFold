@@ -34,6 +34,17 @@ pub const Out = struct {
     cancelled: *const fn (ctx: *anyopaque) bool,
 };
 
+/// The outputs of a reply nobody reads (a warm-up, rank 1's half of rank 0's).
+pub const Quiet = struct {
+    pub fn prefilled(_: *anyopaque) void {}
+    pub fn tokens(_: *anyopaque, _: []const u32) bool {
+        return false;
+    }
+    pub fn cancelled(_: *anyopaque) bool {
+        return false;
+    }
+};
+
 pub const Engine = struct {
     gpa: std.mem.Allocator,
     device: mtl.Device,
@@ -56,6 +67,11 @@ pub const Engine = struct {
     /// The checkpoint in `dir` with caches for `cap` tokens; GLM_LAYERS=N: only the first N layers, the MTP layer and the head;
     /// GLM_EP=settings.json: half the routed experts, the other half on the peer named there.
     pub fn load(gpa: std.mem.Allocator, dir: []const u8, cap: u32) !*Engine {
+        return loadWith(gpa, dir, cap, if (std.c.getenv("GLM_EP")) |v| std.mem.span(v) else null);
+    }
+
+    /// `load` with expert parallel over the link in `ep_path` (this Mac's settings), or on one Mac when null.
+    pub fn loadWith(gpa: std.mem.Allocator, dir: []const u8, cap: u32, ep_path: ?[]const u8) !*Engine {
         const e = try gpa.create(Engine); // undefined memory: every field is set below
         errdefer gpa.destroy(e);
         const pool = mtl.objc.Pool.push();
@@ -77,8 +93,8 @@ pub const Engine = struct {
         defer f.deinit();
         e.c = try cfg.parse(gpa, f.bytes[0..f.size]);
         if (std.c.getenv("GLM_LAYERS")) |v| try cfg.subset(&e.c, std.fmt.parseInt(u32, std.mem.span(v), 10) catch return error.BadLayerCount);
-        const link: ?ep_mod.Settings = if (std.c.getenv("GLM_EP")) |ep_path| blk: {
-            const sf = try mtl.MappedFile.open(ep_path);
+        const link: ?ep_mod.Settings = if (ep_path) |sp| blk: {
+            const sf = try mtl.MappedFile.open(try e.ep_arena.allocator().dupeSentinel(u8, sp, 0));
             defer sf.deinit();
             const s = try ep_mod.readSettings(e.ep_arena.allocator(), sf.bytes[0..sf.size]);
             try cfg.split(&e.c, s.rank, 2);
@@ -169,6 +185,32 @@ pub const Engine = struct {
 
     pub fn hasMtp(e: *const Engine) bool {
         return e.w.mtp != null;
+    }
+
+    /// Expert parallel's rank 1: it runs rank 0's requests (`follow`), never its own.
+    pub fn followsPeer(e: *const Engine) bool {
+        return if (e.ep) |ep| ep.rank == 1 else false;
+    }
+
+    /// Rank 1: each request rank 0 hands over, in step with it, until `stopFollowing`.
+    pub fn follow(e: *Engine) !void {
+        const ep = e.ep orelse return;
+        var dummy: u8 = 0;
+        const quiet: Out = .{ .ctx = &dummy, .prefilled = Quiet.prefilled, .tokens = Quiet.tokens, .cancelled = Quiet.cancelled };
+        while (ep.waitRequest()) |r| _ = e.generate(r.prompt, r.max_tokens, r.eos, r.depth, quiet) catch |err| switch (err) {
+            error.ContextFull, error.EmptyPrompt => continue, // refused before its first step, on rank 0 too
+            else => return err,
+        };
+    }
+
+    pub fn stopFollowing(e: *Engine) void {
+        if (e.ep) |ep| ep.quitting.store(true, .release);
+    }
+
+    /// This Mac's decision to stop at a step; with a peer, rank 0's decision, the one both Macs take.
+    fn agree(e: *Engine, quit: bool) !bool {
+        const ep = e.ep orelse return quit;
+        return ep.agree(quit);
     }
 
     fn ctx(e: *Engine) fwd.Ctx {
@@ -262,7 +304,7 @@ pub const Engine = struct {
         var at: u32 = 0;
         var last_n: u32 = 1;
         while (at < P) {
-            if (out.cancelled(out.ctx)) return .{ .reason = .cancelled };
+            if (try e.agree(out.cancelled(out.ctx))) return .{ .reason = .cancelled };
             const chunk = e.pr != null and P - at > st.max_rows;
             const n = @min(@as(u32, if (chunk) prompt_mod.max_rows else st.max_rows), P - at);
             const last = at + n == P;
@@ -303,7 +345,7 @@ pub const Engine = struct {
         var res: Result = .{ .reason = .length, .prompt_seconds = @as(f64, @floatFromInt(t_prompt - t_start)) / 24e6 };
         var tok = u32s(e.sc.picks, 1)[0];
         res.generated = 1;
-        if (out.tokens(out.ctx, &.{tok}) or std.mem.indexOfScalar(u32, eos, tok) != null) {
+        if (try e.agree(out.tokens(out.ctx, &.{tok}) or std.mem.indexOfScalar(u32, eos, tok) != null)) {
             res.reason = .stop;
             return res;
         }
@@ -359,16 +401,11 @@ pub const Engine = struct {
             tok = picks[keep - 1];
             window = R;
             h0 = 0;
-            if (stop) {
-                res.reason = .stop;
+            const quit: ?Reason = if (stop) .stop else if (emitted >= max_tokens) .length else if (out.cancelled(out.ctx)) .cancelled else if (e.s.pos + R + 1 > e.s.cap) .length else null;
+            if (try e.agree(quit != null)) {
+                res.reason = quit orelse .cancelled; // rank 1: rank 0's reason (a stop string, a cancel) is its own
                 break;
             }
-            if (emitted >= max_tokens) break;
-            if (out.cancelled(out.ctx)) {
-                res.reason = .cancelled;
-                break;
-            }
-            if (e.s.pos + R + 1 > e.s.cap) break;
         }
         res.decode_seconds = @as(f64, @floatFromInt(std.c.mach_absolute_time() - t_prompt)) / 24e6;
         return res;
