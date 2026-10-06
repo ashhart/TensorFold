@@ -3,6 +3,10 @@ const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
 const frags = @import("../../core/frags.zig");
+const moe_route = @import("../../core/moe_route.zig");
+
+/// The route's shape (config.zig refuses other checkpoints).
+pub const route_shape: moe_route.Shape = .{ .hidden = 4096, .experts = 288, .topk = 8 };
 
 pub const max_rows = 16;
 
@@ -57,6 +61,8 @@ pub const Kernels = struct {
     embed: mtl.Pipeline,
     latent_scores: mtl.Pipeline,
     latent_values: mtl.Pipeline,
+    route_logits: mtl.Pipeline,
+    route_select: mtl.Pipeline,
 
     pub fn deinit(k: *Kernels) void {
         const info = @typeInfo(Kernels).@"struct";
@@ -143,7 +149,7 @@ fn kernelOf(comptime key: []const u8) sources.glm.Kernel {
 pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const k = try gpa.create(Kernels);
     errdefer gpa.destroy(k);
-    var jobs: [generated.len + 4]Job = undefined;
+    var jobs: [generated.len + 5]Job = undefined;
     inline for (generated, 0..) |g, i| {
         const src = comptime kernelOf(g.key);
         const FT = @FieldType(Kernels, g.field);
@@ -165,6 +171,10 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     defer gpa.free(attn_src);
     var attn_out: [2]mtl.Pipeline = undefined;
     jobs[generated.len + 3] = .{ .device = device, .source = attn_src, .names = &.{ "glm_latent_scores", "glm_latent_values" }, .out = &attn_out };
+    const route_src = try moe_route.source(gpa, route_shape);
+    defer gpa.free(route_src);
+    var route_out: [2]mtl.Pipeline = undefined;
+    jobs[generated.len + 4] = .{ .device = device, .source = route_src, .names = &moe_route.names, .out = &route_out };
     var next = std.atomic.Value(usize).init(0);
     const Worker = struct {
         fn run(all: []Job, counter: *std.atomic.Value(usize)) void {
@@ -183,5 +193,7 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     inline for (glue, 0..) |g, i| @field(k, g.field) = glue_out[i];
     k.latent_scores = attn_out[0];
     k.latent_values = attn_out[1];
+    k.route_logits = route_out[0];
+    k.route_select = route_out[1];
     return k;
 }

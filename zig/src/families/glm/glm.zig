@@ -14,4 +14,5 @@ test {
     _ = state;
     _ = ep;
     _ = @import("ep_control.zig");
+    _ = @import("../../core/moe_route.zig");
 }

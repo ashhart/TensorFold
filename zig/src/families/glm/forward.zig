@@ -6,6 +6,8 @@ const wts = @import("weights.zig");
 const st = @import("state.zig");
 const Kernels = @import("kernels.zig").Kernels;
 const Ep = @import("ep.zig").Ep;
+const moe_route = @import("../../core/moe_route.zig");
+const route_shape = @import("kernels.zig").route_shape;
 const Ref = wts.Ref;
 
 pub const Ctx = struct {
@@ -20,6 +22,7 @@ pub const Ctx = struct {
     ep: ?*Ep = null, // expert parallel: this Mac computes its routed experts' picks and swaps them with the peer's
     skip: u32 = 0, // a profile's knock-outs: launch classes left out (Class bits)
     pskip: u32 = 0, // a profile's knock-outs by launch (Part bits)
+    fused_route: bool = true, // the core route (two launches); false: the Python family's cast, router and top-k
 };
 
 /// Single launches (or tight groups) for a profile that times each alone.
@@ -330,8 +333,9 @@ pub fn moe(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
     const top = c.topk;
     const s = x.skip;
     if (x.ep) |ep| {
+        if (s & Class.exchange == 0 and on(x, "x_locpost")) ep.begin();
         if (s & Class.route == 0) route(x, e, w, x_in, rows);
-        if (s & Class.exchange == 0 and on(x, "x_locpost")) ep.localize(e, sc.pick, sc.uids, sc.umem, sc.ucount, rows);
+        if (!x.fused_route and s & Class.exchange == 0 and on(x, "x_locpost")) ep.localize(e, sc.pick, sc.uids, sc.umem, sc.ucount, rows);
         if (s & Class.routed == 0) experts(x, e, w, x_in, rows, 2, ep.group());
         if (s & Class.exchange == 0) ep.send(e, sc.ye, rows, on(x, "x_pack"), on(x, "x_locpost"));
         if (s & Class.shared == 0) experts(x, e, w, x_in, rows, 1, .{ sc.none, sc.none, sc.none });
@@ -354,6 +358,14 @@ fn route(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, row
     const c = x.c;
     const k = x.k;
     const sc = x.sc;
+    if (x.fused_route) {
+        if (on(x, "r_router")) moe_route.logits(e, k.route_logits, route_shape, x_in, w.router, sc.logits_r, rows);
+        if (!on(x, "r_topk")) return;
+        if (x.ep) |ep| return moe_route.select(e, k.route_select, sc.logits_r, w.bias, c.routed_scale, rows, c.own, ep.outputs(sc.pick, sc.wts));
+        const rl = sc.rl;
+        const T: usize = c.topk * st.max_rows * 4;
+        return moe_route.select(e, k.route_select, sc.logits_r, w.bias, c.routed_scale, rows, .{ 0, c.experts }, .{ .pick = sc.pick, .wts = sc.wts, .ids = sc.uids, .members = sc.umem, .count = sc.ucount, .mine = rl, .theirs = rl.at(T), .counts = rl.at(2 * T), .word = rl.at(2 * T + 64) });
+    }
     if (on(x, "r_cast")) {
         e.setPipeline(k.cast_f32);
         bind(e, 0, .{ x_in, sc.xf });

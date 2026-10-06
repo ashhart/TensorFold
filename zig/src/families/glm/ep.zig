@@ -215,15 +215,24 @@ pub const Ep = struct {
         return .{ t.list(L_IDS), t.list(L_MEM), t.list(L_COUNT) };
     }
 
-    /// The next exchange: from the route's picks and unique experts, this Mac's experts with local ids and the picks each Mac computes.
-    pub fn localize(t: *Ep, enc: mtl.ComputeEncoder, pick: Ref, uids: Ref, umem: Ref, ucount: Ref, rows: u32) void {
+    /// The next exchange (both Macs count every MoE call the same).
+    pub fn begin(t: *Ep) void {
         t.x += 1;
+    }
+
+    /// The Python family's route's lists localized (the core route's selection makes them itself).
+    pub fn localize(t: *Ep, enc: mtl.ComputeEncoder, pick: Ref, uids: Ref, umem: Ref, ucount: Ref, rows: u32) void {
         enc.setPipeline(t.localize_pipe);
         for ([_]Ref{ pick, uids, umem, ucount }, 0..) |r, i| enc.setBuffer(r.buf, r.off, i);
         enc.setValue([4]i32{ @intCast(rows), @intCast(t.own[0]), @intCast(t.own[1]), 0 }, 4);
         for ([_]usize{ L_IDS, L_MEM, L_COUNT, MINE, THEIRS, COUNTS }, 5..) |off, i| enc.setBuffer(t.lists, off, i);
         enc.setBuffer(t.wbuf, COUNT + 4 * @as(usize, @intCast(t.x % 2)), 11);
         enc.dispatchThreads(mtl.Size.of(MAXP, 1, 1), mtl.Size.of(MAXP, 1, 1));
+    }
+
+    /// Where the route's selection puts this exchange's lists and this Mac's count (core/moe_route.zig).
+    pub fn outputs(t: *const Ep, pick: Ref, wts: Ref) struct { pick: Ref, wts: Ref, ids: Ref, members: Ref, count: Ref, mine: Ref, theirs: Ref, counts: Ref, word: Ref } {
+        return .{ .pick = pick, .wts = wts, .ids = t.list(L_IDS), .members = t.list(L_MEM), .count = t.list(L_COUNT), .mine = t.list(MINE), .theirs = t.list(THEIRS), .counts = t.list(COUNTS), .word = .{ .buf = t.wbuf, .off = COUNT + 4 * @as(usize, @intCast(t.x % 2)) } };
     }
 
     /// After this Mac's routed outputs are in `ye` [rows * TOPK, D]: pack them and post; the host sends them.
