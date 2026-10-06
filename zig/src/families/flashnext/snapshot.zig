@@ -1,4 +1,4 @@
-//! Flash Next's prompt states for the prompt cache: cache rows, DeltaNet states and the n-gram tail at a chunk end.
+//! Flash Next's prompt states for the prompt cache: cache rows, DeltaNet states and the n-gram tail at a mark.
 const std = @import("std");
 const mtl = @import("metal");
 const fz = @import("replay.zig");
@@ -31,19 +31,26 @@ pub fn bytes(at: usize) usize {
     return 36 * (CS_ROW + SO_ROW) + 13 * at * (4 * KEY_ROW + RAW_ROW) + TAIL;
 }
 
-/// The state's pieces in one fixed order: DeltaNet states, each attention layer's rows [0, at), the MTP head's, the tail.
-fn parts(m: *fz.Model, at: usize, out: *[MAX_PARTS]Part) usize {
+/// The pieces in one order: DeltaNet states (from Engine.Passed past a mark), each attention layer's rows [0, at), the head's, the tail.
+fn parts(m: *fz.Model, at: usize, passed: ?Engine.Passed, out: *[MAX_PARTS]Part) usize {
     var n: usize = 0;
+    var li: usize = 0;
     for (&m.layers) |*L| if (L.linear) {
-        out[n] = .{ .live = .{ .b = L.cs[m.state].b, .off = L.cs[m.state].off + m.state_row * CS_ROW }, .len = CS_ROW };
-        out[n + 1] = .{ .live = .{ .b = L.so[m.state].b, .off = L.so[m.state].off + m.state_row * SO_ROW }, .len = SO_ROW };
+        if (passed) |ps| {
+            out[n] = .{ .live = m.marks.?.cs_at(li, ps.slot), .len = CS_ROW };
+            out[n + 1] = .{ .live = m.marks.?.so_at(li, ps.slot), .len = SO_ROW };
+        } else {
+            out[n] = .{ .live = .{ .b = L.cs[m.state].b, .off = L.cs[m.state].off + m.state_row * CS_ROW }, .len = CS_ROW };
+            out[n + 1] = .{ .live = .{ .b = L.so[m.state].b, .off = L.so[m.state].off + m.state_row * SO_ROW }, .len = SO_ROW };
+        }
         n += 2;
+        li += 1;
     };
     for (&m.layers) |*L| if (!L.linear) {
         n += rows(L.keys, L.vals, L.raw, at, out[n..]);
     };
     n += rows(m.mtp.keys, m.mtp.vals, m.mtp.raw, at, out[n..]);
-    out[n] = .{ .live = .{ .b = m.ple.cin.b, .off = m.ple.cin.off }, .len = TAIL };
+    out[n] = .{ .live = if (passed) |ps| ps.tail else .{ .b = m.ple.cin.b, .off = m.ple.cin.off }, .len = TAIL };
     return n + 1;
 }
 
@@ -57,10 +64,10 @@ fn rows(keys: fz.Buf, vals: fz.Buf, raw: fz.Buf, at: usize, out: []Part) usize {
 }
 
 /// Copies each part between the live buffers and `buf` (to_buf: save) on the engine's queue, and waits.
-fn copy(e: *Engine, buf: mtl.Buffer, at: usize, to_buf: bool) !void {
+fn copy(e: *Engine, buf: mtl.Buffer, at: usize, to_buf: bool, passed: ?Engine.Passed) !void {
     const r = e.r;
     var list: [MAX_PARTS]Part = undefined;
-    const n = parts(e.m, at, &list);
+    const n = parts(e.m, at, passed, &list);
     const cb = r.queue.commandBuffer();
     r.enc = cb.compute(.serial);
     var off: usize = 0;
@@ -74,17 +81,18 @@ fn copy(e: *Engine, buf: mtl.Buffer, at: usize, to_buf: bool) !void {
     if (off != bytes(at)) return error.SnapshotSize;
 }
 
-/// The live state after `at` prompt tokens into a new buffer; the prompt pass must stand exactly at `at`.
+/// The live state after `at` prompt tokens into a new buffer; the prompt pass stands at `at`, or its last call passed it.
 pub fn save(e: *Engine, gpa: std.mem.Allocator, at: usize) !*State {
-    if (e.m.pos != at or at == 0) return error.NotAtMark;
+    const passed: ?Engine.Passed = if (e.passed) |ps| (if (ps.at == at) ps else null) else null;
+    if (at == 0 or (passed == null and e.m.pos != at)) return error.NotAtMark;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const n = bytes(at);
     const buf = try e.r.device.buffer(n, fz.opts);
     errdefer buf.deinit();
-    try copy(e, buf, at, true);
+    try copy(e, buf, at, true, passed);
     const st = try gpa.create(State);
-    st.* = .{ .buf = buf, .at = at, .hist = e.m.ple.hist, .bytes = n, .layout = layoutOf(e) };
+    st.* = .{ .buf = buf, .at = at, .hist = if (passed) |ps| ps.hist else e.m.ple.hist, .bytes = n, .layout = layoutOf(e) };
     return st;
 }
 
@@ -96,7 +104,7 @@ pub fn restore(e: *Engine, st: *const State) !void {
     defer pool.pop();
     e.hostMode();
     m.reset(); // a clean model if a copy fails; indexer blocks pool again from the restored keys (same kernel, same bits)
-    try copy(e, st.buf, st.at, false);
+    try copy(e, st.buf, st.at, false, null);
     m.pos = st.at;
     m.ple.hist = st.hist;
 }

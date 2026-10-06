@@ -1775,6 +1775,32 @@ pub const Mtp = struct {
     gsel: ?GSelect = null, // its block selection in GPU-side rounds
 };
 
+/// Marks a prompt call can take its DeltaNet states at without ending there.
+pub const MARKS = 4;
+
+/// Each DeltaNet layer's conv windows and states at up to MARKS rows of one prompt call: [linear layer][mark][row].
+pub const Marks = struct {
+    cs: Buf,
+    so: Buf,
+
+    pub fn init(r: *Run, linear: usize) !Marks {
+        return .{ .cs = .{ .b = try r.buffer(linear * MARKS * CS_ROW) }, .so = .{ .b = try r.buffer(linear * MARKS * SO_ROW) } };
+    }
+    pub fn cs_at(k: Marks, li: usize, mark: usize) Buf {
+        return .{ .b = k.cs.b, .off = k.cs.off + (li * MARKS + mark) * CS_ROW };
+    }
+    pub fn so_at(k: Marks, li: usize, mark: usize) Buf {
+        return .{ .b = k.so.b, .off = k.so.off + (li * MARKS + mark) * SO_ROW };
+    }
+};
+
+/// A layer's index among the DeltaNet layers.
+pub fn linearIndex(m: *const Model, i: usize) usize {
+    var li: usize = 0;
+    for (m.layers[0..i]) |*L| li += @intFromBool(L.linear);
+    return li;
+}
+
 pub const Model = struct {
     r: *Run,
     layers: [LAYERS]Layer,
@@ -1791,6 +1817,7 @@ pub const Model = struct {
     last: Buf = undefined, // the last window's streams before the final mixer
     recs: ?[2]Buf = null, // GPU-side rounds with r.gdn_kept: each window's DeltaNet replay records, by round parity
     rec_slot: usize = 0, // the record this window writes (the other holds the previous window's)
+    marks: ?Marks = null, // DeltaNet states at marks inside a prompt chunk, as a chunk ending there would leave them
 
     pub fn reset(m: *Model) void {
         m.pos = 0;
@@ -2701,12 +2728,14 @@ pub const Prompt = struct {
                             p.bind(p.pl[11], &.{ b.p, L0.cs[0], L0.conv, L0.alog, L0.dt });
                             r.enc.setBytes(std.mem.asBytes(&ri), 5);
                             for ([_]Buf{ b.qn, b.kn, b.v, b.gg, b.beta, L0.cs[1] }, 6..) |bb, j| r.enc.setBuffer(bb.b, bb.off, j);
+                            p.bindMarks(m, @splat(0), 0, 12, 13, false);
                             r.enc.dispatchThreads(mtl.Size.of(80 * 128, rows, 1), mtl.Size.of(128, 1, 1));
                         } else if (which == 10) {
                             p.bind(p.pl[if (p.scan4) 14 else 12], &.{ b.qn, b.kn, b.v, b.gg, b.beta, L0.so[0] });
                             r.enc.setBytes(std.mem.asBytes(&ri), 6);
                             r.enc.setBuffer(b.ys.b, b.ys.off, 7);
                             r.enc.setBuffer(L0.so[1].b, L0.so[1].off, 8);
+                            p.bindMarks(m, @splat(0), 0, 9, 10, true);
                             if (p.scan4) r.enc.dispatchThreads(mtl.Size.of(48 * 4 * 256, 1, 1), mtl.Size.of(256, 1, 1)) else r.enc.dispatchThreads(mtl.Size.of(48 * 4 * 1024, 1, 1), mtl.Size.of(1024, 1, 1));
                         } else {
                             p.bind(p.pl[13], &.{ b.ys, b.p, L0.norm, m.t.eps, b.gout });
@@ -2765,7 +2794,17 @@ pub const Prompt = struct {
         wa: usize,
         cur: usize,
         pending: bool,
+        mk: [MARKS]i32 = @splat(0), // segment rows after which the DeltaNet layers write their states to m.marks (0: none)
     };
+
+    /// The DeltaNet pre and scan kernels' mark arguments: the segment's mark rows and layer `li`'s slots (any buffer when unmarked).
+    fn bindMarks(p: *Prompt, m: *const Model, mk: [MARKS]i32, li: usize, rows_at: usize, buf_at: usize, scan: bool) void {
+        const r = p.r;
+        r.enc.setBytes(std.mem.asBytes(&mk), rows_at);
+        const fallback = m.layers[0].cs[0];
+        const b = if (m.marks) |k| (if (scan) k.so_at(li, 0) else k.cs_at(li, 0)) else fallback;
+        r.enc.setBuffer(b.b, b.off, buf_at);
+    }
 
     /// A chunk's host inputs at position `pos`: token ids, positions, the cache meta, the n-gram ids after `hist`.
     fn prep(p: *Prompt, m: *Model, gpa: std.mem.Allocator, tokens: []const u32, pos: usize, hist: [2]i64) !void {
@@ -2851,9 +2890,11 @@ pub const Prompt = struct {
             const so_in: Buf = .{ .b = L.so[s.ra].b, .off = L.so[s.ra].off + s.rr * SO_ROW };
             if (p.skip & 2 == 0) {
                 const ri: i32 = @intCast(rows);
+                const li = linearIndex(m, i);
                 p.bind(p.pl[11], &.{ b.p, cs_in, L.conv, L.alog, L.dt });
                 r.enc.setBytes(std.mem.asBytes(&ri), 5);
                 for ([_]Buf{ b.qn, b.kn, b.v, b.gg, b.beta, L.cs[s.wa] }, 6..) |bb, j| r.enc.setBuffer(bb.b, bb.off, j);
+                p.bindMarks(m, s.mk, li, 12, 13, false);
                 r.enc.dispatchThreads(mtl.Size.of(80 * 128, rows, 1), mtl.Size.of(128, 1, 1));
                 p.barrier();
                 const scan: usize = if (p.scan4 and p.scan8) 15 else if (p.scan4) 14 else 12;
@@ -2861,6 +2902,7 @@ pub const Prompt = struct {
                 r.enc.setBytes(std.mem.asBytes(&ri), 6);
                 r.enc.setBuffer(b.ys.b, b.ys.off, 7);
                 r.enc.setBuffer(L.so[s.wa].b, L.so[s.wa].off, 8);
+                p.bindMarks(m, s.mk, li, 9, 10, true);
                 switch (scan) {
                     15 => r.enc.dispatchThreads(mtl.Size.of(48 * 2 * 256, 1, 1), mtl.Size.of(256, 1, 1)),
                     14 => r.enc.dispatchThreads(mtl.Size.of(48 * 4 * 256, 1, 1), mtl.Size.of(256, 1, 1)),
@@ -3060,7 +3102,20 @@ pub const Prompt = struct {
     /// segment does what a serial chunk of its rows does, so the output equals chunk calls in order. ps[0] is this
     /// prompt, on the run's queue; the others are siblings. Returns the greedy token after the chunk.
     pub fn chunkN(ps: []const *Prompt, m: *Model, gpa: std.mem.Allocator, tokens: []const u32) !u32 {
+        return chunkMarked(ps, m, gpa, tokens, &.{});
+    }
+
+    /// The segment and its prompt buffers' row that a mark `at` rows into a chunk of `n` rows falls in (its last row before the mark).
+    pub fn markSeg(ps: []const *Prompt, n: usize, at: usize) struct { p: *Prompt, row: usize } {
+        var k: usize = 0;
+        while (k + 1 < ps.len and at > segments.start(n, ps.len, k + 1)) k += 1;
+        return .{ .p = ps[k], .row = at - segments.start(n, ps.len, k) };
+    }
+
+    /// chunkN, with each DeltaNet layer also writing its state after each of `marks` rows (ascending, 1..n) to m.marks.
+    pub fn chunkMarked(ps: []const *Prompt, m: *Model, gpa: std.mem.Allocator, tokens: []const u32, marks: []const u32) !u32 {
         const N = ps.len;
+        if (marks.len > MARKS or (marks.len > 0 and m.marks == null)) return error.Marks;
         if (N == 0 or N > segments.MAX) return error.Segments;
         const r = ps[0].r;
         const n = tokens.len;
@@ -3081,6 +3136,9 @@ pub const Prompt = struct {
             };
             const ra = if (k % 2 == 0) a else 1 - a; // DeltaNet slots alternate as serial chunks would
             segs[k] = .{ .p = ps[k], .rows = rows, .pos = m.pos + at, .ra = ra, .rr = if (k == 0) m.state_row else 0, .wa = 1 - ra, .cur = 0, .pending = false };
+            for (marks, 0..) |mk, j| if (mk > at and mk <= at + rows) {
+                segs[k].mk[j] = @intCast(mk - at);
+            };
         }
         const cin_old = m.ple.cin.b.contents()[m.ple.cin.off..];
         @memcpy(ps[0].b.cin.b.contents()[0 .. PLE_TAIL * WIDE * 2], cin_old[0 .. PLE_TAIL * WIDE * 2]);

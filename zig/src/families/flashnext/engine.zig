@@ -78,6 +78,9 @@ pub const Out = struct {
 };
 
 pub const Engine = struct {
+    /// A mark a prompt call ran past: its DeltaNet states in m.marks' slot, and the n-gram tail rows and history there.
+    pub const Passed = struct { at: usize, slot: usize, tail: Buf, hist: [2]i64 };
+
     gpa: Allocator,
     arena_state: std.heap.ArenaAllocator,
     r: *Run,
@@ -95,6 +98,8 @@ pub const Engine = struct {
     copy: bool = true, // copy drafts from the history when a long enough match exists
     copy_min: u32 = 3,
     copy_long: u32 = 6, // shorter matches copy only when the head's first draft agrees
+    mark_taps: bool = true, // a prompt call writes the DeltaNet states at marks inside it (false: calls end at marks)
+    passed: ?Passed = null, // the mark a prompt call ran past, while the prompt cache keeps the state there
     peer_drops: std.ArrayList(u64) = .empty, // speed-up rank 0: kept states rank 1 drops with the next request
     peer_kept: std.AutoHashMapUnmanaged(u64, *snapshot.State) = .empty, // speed-up rank 1: its halves of rank 0's kept states
     // while copies land worse than the head's drafts, only 8-token matches the head agrees with are copied
@@ -120,6 +125,8 @@ pub const Engine = struct {
         e.copy_min = 3;
         e.copy_long = 6;
         e.segments = true;
+        e.mark_taps = true;
+        e.passed = null;
         e.peer_drops = .empty;
         e.peer_kept = .empty;
         e.arena_state = std.heap.ArenaAllocator.init(gpa);
@@ -363,6 +370,7 @@ pub const Engine = struct {
             gi += 1;
         };
         if (r.gdn_kept != null) m.recs = .{ .{ .b = try r.buffer(n_lin * fz.gdn_step.RECORD) }, .{ .b = try r.buffer(n_lin * fz.gdn_step.RECORD) } };
+        m.marks = try fz.Marks.init(r, n_lin);
         e.cins = .{ m.ple.cin, .{ .b = try r.buffer((PLE_TAIL + MAXR) * WIDE * 2) } };
         r.ar = .{ .b = try r.buffer(4 * fz.AR_WORDS) };
         e.ring = try r.buffer(fz.RING_WORDS * 4 * RING);
@@ -418,6 +426,11 @@ pub const Engine = struct {
         r.copyKept(.{ .b = e.o_cs }, .{ .b = e.g_cs }, CS_ROW / 4, CS_ROW / 4, MAXR * CS_ROW / 4, CS_ROW / 4, 36, -1);
     }
 
+    /// A prompt call of up to `left` rows: one chunk, as two staggered segments once each gets SEG_MIN rows.
+    fn chunkCall(e: *const Engine, left: usize) segments.Call {
+        return if (e.segments) segments.next(left, e.pr.step, SEG_MIN) else .{ .rows = @min(e.pr.step, left), .parts = 1 };
+    }
+
     fn isEos(eos: []const u32, tok: u32) bool {
         return std.mem.indexOfScalar(u32, eos, tok) != null;
     }
@@ -468,9 +481,9 @@ pub const Engine = struct {
         const ps = [2]*Prompt{ e.pr, e.pr2 };
         while (at < prompt.len) {
             if (try e.agree(out.cancelled(out.ctx))) return .{ .reason = .cancelled };
-            const left = (if (mi < marks.len) marks[mi] else prompt.len) - at;
-            if (r.tp) |tp| { // speed-up mode: the chunk's rows split across the two Macs
-                const call = segments.next(left, e.pr.step, PAIR_MIN);
+            const to_mark = (if (mi < marks.len) marks[mi] else prompt.len) - at;
+            if (r.tp) |tp| { // speed-up mode: the chunk's rows split across the two Macs (ending at marks)
+                const call = segments.next(to_mark, e.pr.step, PAIR_MIN);
                 if (call.parts == 2) {
                     pick = try Prompt.chunkPair(e.pr, m, e.gpa, prompt[at .. at + call.rows], tp);
                     var span: [2][2]usize = undefined; // each Mac's segment: first position, rows with an MTP key
@@ -491,8 +504,21 @@ pub const Engine = struct {
                     continue;
                 }
             }
-            const c: segments.Call = if (e.segments) segments.next(left, e.pr.step, SEG_MIN) else .{ .rows = @min(e.pr.step, left), .parts = 1 };
-            pick = try Prompt.chunkN(ps[0..c.parts], m, e.gpa, prompt[at .. at + c.rows]);
+            // a call runs on past marks and writes the DeltaNet states there (up to MARKS); more marks end it at the next
+            const taps = e.mark_taps and m.marks != null;
+            const left = if (taps) prompt.len - at else to_mark;
+            var c: segments.Call = e.chunkCall(left);
+            var inside: [fz.MARKS]u32 = undefined;
+            var n_in: usize = 0;
+            while (taps and mi + n_in < marks.len and marks[mi + n_in] < at + c.rows) : (n_in += 1) {
+                if (n_in == fz.MARKS) {
+                    c = e.chunkCall(marks[mi + n_in] - at);
+                    break;
+                }
+                inside[n_in] = @intCast(marks[mi + n_in] - at);
+            }
+            const hist0 = m.ple.hist; // the two tokens before the call: the n-gram history at a passed mark follows from them
+            pick = try Prompt.chunkMarked(ps[0..c.parts], m, e.gpa, prompt[at .. at + c.rows], inside[0..n_in]);
             for (ps[0..c.parts], 0..) |p, k| { // the MTP head's keys for each segment's rows, from its streams
                 const s = at + segments.start(c.rows, c.parts, k);
                 const n = segments.rows(c.rows, c.parts, k);
@@ -500,6 +526,15 @@ pub const Engine = struct {
                 try p.mtpKeys(m, s, prompt[s + 1 .. s + 1 + nexts], p.last);
                 last_n = n;
             }
+            for (inside[0..n_in], 0..) |row, j| { // the passed marks: the cache keeps each from where the call left it
+                const seg = Prompt.markSeg(ps[0..c.parts], c.rows, row);
+                var hist = hist0;
+                for (prompt[at + row - @min(row, 2) .. at + row]) |tok| hist = .{ hist[1], tok };
+                e.passed = .{ .at = at + row, .slot = j, .tail = .{ .b = seg.p.b.cin.b, .off = seg.p.b.cin.off + seg.row * WIDE * 2 }, .hist = hist };
+                defer e.passed = null;
+                if (out.marked) |f| f(out.ctx, at + row);
+            }
+            mi += n_in;
             at += c.rows;
             if (mi < marks.len and at == marks[mi]) {
                 if (out.marked) |f| f(out.ctx, at);

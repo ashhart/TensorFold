@@ -178,28 +178,33 @@ pub fn main(init: std.process.Init) !void {
     if (failures > 0) std.process.exit(1);
 }
 
-/// The state at the turn's history: a resumed pass's (from the store's best entry) against a fresh pass's, byte for byte.
+/// The state at the turn's history three ways, byte for byte: a fresh pass whose call ends there, a fresh pass whose call runs past it, a resumed one.
 fn stateCheck(e: *fx.Engine, a: Allocator, store: *pc.Store, turn: Turn, failures: *usize) !void {
     const entry = store.find(turn.prompt[0..turn.history], &.{}) orelse return; // nothing to resume before the history
-    var states: [2]?*snap.State = .{ null, null };
-    var pooled: [2]Pooled = .{ .{}, .{} };
-    for (0..2) |arm| {
+    var states: [3]?*snap.State = .{ null, null, null };
+    var pooled: [3]Pooled = .{ .{}, .{}, .{} };
+    defer for (states) |s| if (s) |st| snap.drop(a, st);
+    defer e.mark_taps = true;
+    for (0..3) |arm| {
+        e.mark_taps = arm != 0;
         var from: usize = 0;
-        if (arm == 1) {
+        if (arm == 2) {
             try snap.restore(e, @ptrCast(@alignCast(entry.saved)));
             from = entry.at;
         }
         var r: Run = .{ .a = a, .copy_at = &states[arm], .pooled_at = &pooled[arm], .e = e };
         _ = try e.generateFrom(turn.prompt, from, &.{turn.history}, 2, &.{}, 0, r.out());
     }
-    defer for (states) |s| if (s) |st| snap.drop(a, st);
     const x = states[0] orelse return error.NoState;
-    const y = states[1] orelse return error.NoState;
     const n = snap.bytes(turn.history);
-    const bx = x.buf.contents()[0..n];
-    const by = y.buf.contents()[0..n];
-    const diff = std.mem.indexOfDiff(u8, bx, by);
-    const pooled_same = std.mem.eql(usize, &pooled[0].counts, &pooled[1].counts) and pooled[0].hash == pooled[1].hash;
-    if (diff != null or x.hist[0] != y.hist[0] or x.hist[1] != y.hist[1] or !pooled_same) failures.* += 1;
-    std.debug.print("  state at {d} ({d} MiB), resumed from {d} vs fresh: {s}; pooled keys ({d} blocks a layer) {s}\n", .{ turn.history, n >> 20, entry.at, if (diff) |d| try std.fmt.allocPrint(a, "DIFF at byte {d}", .{d}) else "SAME", pooled[0].counts[0], if (pooled_same) "SAME" else "DIFF" });
+    var verdicts: [2][]const u8 = undefined;
+    for (states[1..], pooled[1..], 0..) |s, pl, k| {
+        const y = s orelse return error.NoState;
+        const diff = std.mem.indexOfDiff(u8, x.buf.contents()[0..n], y.buf.contents()[0..n]);
+        const pooled_same = std.mem.eql(usize, &pooled[0].counts, &pl.counts) and pooled[0].hash == pl.hash;
+        const same = diff == null and x.hist[0] == y.hist[0] and x.hist[1] == y.hist[1] and pooled_same;
+        if (!same) failures.* += 1;
+        verdicts[k] = if (same) "SAME" else if (diff) |d| try std.fmt.allocPrint(a, "DIFF at byte {d}", .{d}) else "DIFF (history or pooled keys)";
+    }
+    std.debug.print("  state at {d} ({d} MiB, pooled keys {d} blocks a layer) against a call ending there: run past {s}; resumed from {d} {s}\n", .{ turn.history, n >> 20, pooled[0].counts[0], verdicts[0], entry.at, verdicts[1] });
 }

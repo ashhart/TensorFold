@@ -140,7 +140,8 @@ inline float pf_softplus(float x) { return x > 20.0f ? x : pf_log1p(metal::exp(x
     const device bfloat* CW [[buffer(2)]], const device bfloat* ALOG [[buffer(3)]], const device bfloat* DT [[buffer(4)]],
     const constant int& R [[buffer(5)]], device float* QN [[buffer(6)]], device float* KN [[buffer(7)]],
     device float* V [[buffer(8)]], device float* G [[buffer(9)]], device float* BETA [[buffer(10)]],
-    device bfloat* CSO [[buffer(11)]], uint t [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]],
+    device bfloat* CSO [[buffer(11)]], const constant int4& MK [[buffer(12)]], device bfloat* CST [[buffer(13)]],
+    uint t [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]], uint3 tg [[threadgroup_position_in_grid]]) {
   constexpr int NK = 16, NV = 48, DK = 128, DV = 128, TAPS = 4;
   constexpr int C = 2 * NK * DK + NV * DV;
@@ -162,6 +163,12 @@ inline float pf_softplus(float x) { return x > 20.0f ? x : pf_log1p(metal::exp(x
       CSO[j * C + c] = at < TAPS - 1 ? CS[at * C + c] : P[size_t(at - (TAPS - 1)) * PW + c];
     }
   }
+  for (int m = 0; m < 4; m++) // a mark after row r: the conv window there, as a chunk ending at it would leave it
+    if (MK[m] == r + 1)
+      for (int j = 0; j < TAPS - 1; j++) {
+        const int at = r + 1 + j;
+        CST[(m * (TAPS - 1) + j) * C + c] = at < TAPS - 1 ? CS[at * C + c] : P[size_t(at - (TAPS - 1)) * PW + c];
+      }
   if (group >= 32) {
     const int hv = group - 32;
     V[(size_t(r) * NV + hv) * DV + t] = act;
@@ -196,7 +203,8 @@ inline float pf_softplus(float x) { return x > 20.0f ? x : pf_log1p(metal::exp(x
 [[kernel]] void pf_gdn_scan(const device float* QN [[buffer(0)]], const device float* KN [[buffer(1)]],
     const device float* V [[buffer(2)]], const device float* G [[buffer(3)]], const device float* BETA [[buffer(4)]],
     const device float* SIN [[buffer(5)]], const constant int& R [[buffer(6)]], device float* YS [[buffer(7)]],
-    device float* SO [[buffer(8)]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    device float* SO [[buffer(8)]], const constant int4& MK [[buffer(9)]], device float* ST [[buffer(10)]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
     uint3 tg [[threadgroup_position_in_grid]]) {
   constexpr int NK = 16, NV = 48, DK = 128, DV = 128;
   const int hv = int(tg.x) / 4, hk = hv / (NV / NK), dv = (int(tg.x) % 4) * 32 + int(sg);
@@ -235,6 +243,9 @@ inline float pf_softplus(float x) { return x > 20.0f ? x : pf_log1p(metal::exp(x
     }
     out = simd_sum(out);
     if (lane == 0) YS[(size_t(r) * NV + hv) * DV + dv] = float(bfloat(out));
+    for (int m = 0; m < 4; m++)
+      if (MK[m] == r + 1)
+        for (int i = 0; i < 4; i++) ST[size_t(m) * NV * DV * DK + (size_t(hv) * DV + dv) * DK + lane * 4 + i] = state[i];
   }
   for (int i = 0; i < 4; i++) SO[(size_t(hv) * DV + dv) * DK + lane * 4 + i] = state[i];
 }
@@ -246,7 +257,8 @@ inline float pf_softplus(float x) { return x > 20.0f ? x : pf_log1p(metal::exp(x
 [[kernel]] void pf_gdn_scan4(const device float* QN [[buffer(0)]], const device float* KN [[buffer(1)]],
     const device float* V [[buffer(2)]], const device float* G [[buffer(3)]], const device float* BETA [[buffer(4)]],
     const device float* SIN [[buffer(5)]], const constant int& R [[buffer(6)]], device float* YS [[buffer(7)]],
-    device float* SO [[buffer(8)]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    device float* SO [[buffer(8)]], const constant int4& MK [[buffer(9)]], device float* ST [[buffer(10)]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
     uint3 tg [[threadgroup_position_in_grid]]) {
   constexpr int NK = 16, NV = 48, DK = 128, DV = 128, NR = 4;
   const int hv = int(tg.x) / 4, hk = hv / (NV / NK), dv0 = (int(tg.x) % 4) * 32 + int(sg) * NR;
@@ -294,6 +306,10 @@ inline float pf_softplus(float x) { return x > 20.0f ? x : pf_log1p(metal::exp(x
       for (int c = 0; c < 4; c++) S[i][c] = fma(delta, k[c], g * S[i][c]);
       if (lane == 0) YS[(size_t(r) * NV + hv) * DV + dv0 + i] = float(bfloat(fma(delta, kq, g * sq[i])));
     }
+    for (int m = 0; m < 4; m++)
+      if (MK[m] == r + 1)
+        for (int i = 0; i < NR; i++)
+          for (int c = 0; c < 4; c++) ST[size_t(m) * NV * DV * DK + (size_t(hv) * DV + dv0 + i) * DK + lane * 4 + c] = S[i][c];
   }
   for (int i = 0; i < NR; i++)
     for (int c = 0; c < 4; c++) SO[(size_t(hv) * DV + dv0 + i) * DK + lane * 4 + c] = S[i][c];
@@ -305,7 +321,8 @@ inline float pf_softplus(float x) { return x > 20.0f ? x : pf_log1p(metal::exp(x
 [[kernel]] void pf_gdn_scan8(const device float* QN [[buffer(0)]], const device float* KN [[buffer(1)]],
     const device float* V [[buffer(2)]], const device float* G [[buffer(3)]], const device float* BETA [[buffer(4)]],
     const device float* SIN [[buffer(5)]], const constant int& R [[buffer(6)]], device float* YS [[buffer(7)]],
-    device float* SO [[buffer(8)]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    device float* SO [[buffer(8)]], const constant int4& MK [[buffer(9)]], device float* ST [[buffer(10)]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
     uint3 tg [[threadgroup_position_in_grid]]) {
   constexpr int NK = 16, NV = 48, DK = 128, DV = 128, NR = 4;
   const int hv = int(tg.x) / 2, hk = hv / (NV / NK), hl = int(lane) / 16, l16 = int(lane) % 16;
@@ -358,6 +375,10 @@ inline float pf_softplus(float x) { return x > 20.0f ? x : pf_log1p(metal::exp(x
       for (int c = 0; c < 8; c++) S[i][c] = fma(delta, k[c], g * S[i][c]);
       if (l16 == 0) YS[(size_t(r) * NV + hv) * DV + dv0 + 2 * i] = float(bfloat(fma(delta, kq, g * sq[i])));
     }
+    for (int m = 0; m < 4; m++)
+      if (MK[m] == r + 1)
+        for (int i = 0; i < NR; i++)
+          for (int c = 0; c < 8; c++) ST[size_t(m) * NV * DV * DK + (size_t(hv) * DV + dv0 + 2 * i) * DK + l16 * 8 + c] = S[i][c];
   }
   for (int i = 0; i < NR; i++)
     for (int c = 0; c < 8; c++) SO[(size_t(hv) * DV + dv0 + 2 * i) * DK + l16 * 8 + c] = S[i][c];
