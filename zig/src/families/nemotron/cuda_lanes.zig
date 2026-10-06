@@ -14,13 +14,15 @@ const be = lanes.backend;
 /// First tokens a handle names (the prompt's draw is on the host once prefill returns).
 const ring = 1024;
 
-const Lane = struct { seq: *state.Seq, pending_rows: ?usize = null };
+/// A stream's sequence; `own` is the engine's, whose buffers the graphs were captured on (one stream at a time).
+const Lane = struct { seq: *state.Seq, own: bool = false, pending_rows: ?usize = null };
 
 pub const Cuda = struct {
     gpa: std.mem.Allocator,
     e: *Engine,
     head: ?*Head,
     lanes: std.AutoHashMapUnmanaged(*const lanes.Stream, Lane) = .empty,
+    own_free: bool = true, // no stream holds the engine's own sequence
     drawn: [ring]u32 = undefined,
     next: u64 = 0,
     pinned: cuda.HostBuffer, // a window's held drafts read back
@@ -34,7 +36,7 @@ pub const Cuda = struct {
 
     pub fn deinit(self: *Cuda) void {
         var it = self.lanes.valueIterator();
-        while (it.next()) |l| self.e.freeSeq(l.seq);
+        while (it.next()) |l| if (!l.own) self.e.freeSeq(l.seq);
         self.lanes.deinit(self.gpa);
         self.pinned.free();
     }
@@ -123,11 +125,14 @@ pub const Cuda = struct {
         const ids = s.prompt();
         if (ids.len == 0 or ids.len + s.max_new + state.max_rows > e.max_len) return error.PromptTooLong;
         const gop = try self.lanes.getOrPut(self.gpa, s);
-        if (gop.found_existing) e.freeSeq(gop.value_ptr.seq);
-        gop.value_ptr.* = .{ .seq = e.newSeq() catch |err| {
+        if (gop.found_existing) self.drop(gop.value_ptr.*);
+        // the engine's own sequence while it is free: its rounds replay the captured graphs
+        const own = self.own_free and e.serial != null;
+        gop.value_ptr.* = .{ .own = own, .seq = if (own) &e.own else e.newSeq() catch |err| {
             self.lanes.removeByPtr(gop.key_ptr);
             return err;
         } };
+        if (own) self.own_free = false;
         e.bind(gop.value_ptr.seq);
         try e.setSampling(s.sampling);
         const first = try e.prefillWith(ids, null, self.head, .{ .ptr = s, .check = cancelled });
@@ -208,6 +213,10 @@ pub const Cuda = struct {
         const self = of(ptr);
         const kv = self.lanes.fetchRemove(s) orelse return;
         self.e.stream.synchronize() catch {};
-        self.e.freeSeq(kv.value.seq);
+        self.drop(kv.value);
+    }
+
+    fn drop(self: *Cuda, l: Lane) void {
+        if (l.own) self.own_free = true else self.e.freeSeq(l.seq);
     }
 };

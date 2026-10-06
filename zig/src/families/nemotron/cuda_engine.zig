@@ -60,6 +60,7 @@ pub const Engine = struct {
     history_dev: u64 = 0,
     serial: ?cuda.graph.Exec = null,
     windows: [state.max_rows + 1]?cuda.graph.Exec = @splat(null),
+    graph_sampled: bool = false, // the graphs draw by the own sequence's rule (sample.cu), not torch.argmax
     done: [lookahead]cuda.Event = undefined,
     copied: cuda.Event = undefined, // the last window's uploads have read the pinned words
     sampled_ready: cuda.Event = undefined,
@@ -120,6 +121,7 @@ pub const Engine = struct {
 
     /// The serial round (window plus feed) and, for drafted rounds, a verify window of each row count, each one graph.
     fn capture(e: *Engine, windows: bool) !void {
+        e.graph_sampled = e.sampling != null;
         try e.reset();
         try e.stream.synchronize();
         e.serial = try e.record(1, true);
@@ -213,9 +215,9 @@ pub const Engine = struct {
         e.bound = s;
     }
 
-    /// Captured graphs hold the own sequence's buffers.
+    /// Captured graphs fit the bound sequence: they hold the own sequence's buffers and draw as it draws.
     pub fn graphsBound(e: *const Engine) bool {
-        return e.bound == &e.own;
+        return e.bound == &e.own and (e.sampling != null) == e.graph_sampled;
     }
 
     pub fn ops(e: *const Engine) kern.Ops {
