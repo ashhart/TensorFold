@@ -119,6 +119,8 @@ pub const Engine = struct {
         e.copy_min = 3;
         e.copy_long = 6;
         e.segments = true;
+        e.peer_drops = .empty;
+        e.peer_kept = .empty;
         e.arena_state = std.heap.ArenaAllocator.init(gpa);
         errdefer e.arena_state.deinit();
         const arena = e.arena_state.allocator();
