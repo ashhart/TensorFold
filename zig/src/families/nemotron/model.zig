@@ -8,6 +8,7 @@ const cfg = @import("config.zig");
 const wts = @import("weights.zig");
 const kern = @import("kernels.zig");
 const pk = @import("prefill_kernels.zig");
+const frags = @import("../../core/frags.zig");
 
 pub const Model = struct {
     allocator: std.mem.Allocator,
@@ -63,6 +64,7 @@ pub const Model = struct {
         m.kernels = try compiled;
         errdefer m.kernels.deinit();
         m.prefill = try wide;
+        try frags.check(m.device, m.queue, allocator);
         m.load_seconds = mtl.clock.seconds() - started;
         return m;
     }

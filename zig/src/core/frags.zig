@@ -7,6 +7,7 @@ const ks = @import("kernel_sources");
 pub fn source(device: mtl.Device, a: std.mem.Allocator, text: []const u8) ![]u8 {
     const src = try std.mem.replaceOwned(u8, a, text, "#include \"../nax.h\"", ks.nax);
     if (device.tensorUnits()) return src;
+    defer a.free(src);
     return std.mem.concat(a, u8, &.{ "#define TF_SIMD_FRAGS 1\n", src });
 }
 
@@ -40,7 +41,9 @@ fn value(i: usize, salt: usize) f32 {
 
 /// nax.h's layout checked on this GPU, A B^T and A E against the host's sums: error.FragLayout when it is wrong.
 pub fn check(device: mtl.Device, queue: mtl.Queue, a: std.mem.Allocator) !void {
-    const lib = try mtl.Library.fromSource(device, try source(device, a, check_source), mtl.CompileOptions.mlx());
+    const text = try source(device, a, check_source);
+    defer a.free(text);
+    const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
     defer lib.deinit();
     const pipe = try mtl.Pipeline.init(device, lib, "tf_frag_check", false);
     defer pipe.deinit();

@@ -18,6 +18,20 @@ inline void gemm_step(thread frag<float> (&acc)[2][2], const device T* A, const 
     for (short j = 0; j < 2; j++) {
       const int ar = TA ? kk + 16 * j : 16 * i, ac = TA ? 16 * i : kk + 16 * j;
       const int br = TB ? 16 * j : kk + 16 * i, bc = TB ? kk + 16 * i : 16 * j;
+#ifdef TF_SIMD_FRAGS
+      // simdgroup matrices: a transposed operand loads with its stored rows on the column pattern
+      if (BOUND) {
+        if (TA) frag_get_t_in(a[i][j], A, lda, ar, ac, home, kk + kn, rows);
+        else frag_get_in(a[i][j], A, lda, ar, ac, home, rows, kk + kn);
+        if (TB) frag_get_t_in(b[i][j], B, ldb, br, bc, home, cols, kk + kn);
+        else frag_get_in(b[i][j], B, ldb, br, bc, home, kk + kn, cols);
+      } else {
+        if (TA) frag_get_t(a[i][j], A, lda, ar, ac, home);
+        else frag_get(a[i][j], A, lda, ar, ac, home);
+        if (TB) frag_get_t(b[i][j], B, ldb, br, bc, home);
+        else frag_get(b[i][j], B, ldb, br, bc, home);
+      }
+#else
       if (BOUND) {
         frag_get_in(a[i][j], A, lda, ar, ac, home, TA ? kk + kn : rows, TA ? rows : kk + kn);
         frag_get_in(b[i][j], B, ldb, br, bc, home, TB ? cols : kk + kn, TB ? kk + kn : cols);
@@ -25,6 +39,7 @@ inline void gemm_step(thread frag<float> (&acc)[2][2], const device T* A, const 
         frag_get(a[i][j], A, lda, ar, ac, home);
         frag_get(b[i][j], B, ldb, br, bc, home);
       }
+#endif
     }
   }
   TF_UNROLL

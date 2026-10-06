@@ -69,11 +69,11 @@ inline void attention_nax(const device T* Q, const device T* K, const device T* 
         frag_get(q, Q, qs, 0, 16 * d, home);
       }
       if (!AK && last_k) {
-        frag_get_in(k0, K, ks, 0, 16 * d, home, k_rows, kAnyCols);
-        frag_get_in(k1, K, ks, 16, 16 * d, home, k_rows, kAnyCols);
+        frag_get_t_in(k0, K, ks, 0, 16 * d, home, k_rows, kAnyCols);
+        frag_get_t_in(k1, K, ks, 16, 16 * d, home, k_rows, kAnyCols);
       } else {
-        frag_get(k0, K, ks, 0, 16 * d, home);
-        frag_get(k1, K, ks, 16, 16 * d, home);
+        frag_get_t(k0, K, ks, 0, 16 * d, home);
+        frag_get_t(k1, K, ks, 16, 16 * d, home);
       }
       mma_16x32<false, true>(s[0], s[1], q, k0, k1);
     }
@@ -89,7 +89,7 @@ inline void attention_nax(const device T* Q, const device T* K, const device T* 
       for (short f = 0; f < 2; f++) {
         TF_UNROLL
         for (short e = 0; e < 8; e++) {
-          s[f][e] = (16 * f + home.x + (e & 3)) < k_rows ? s[f][e] : kMasked;
+          s[f][e] = (16 * f + home.x + TF_COL(e)) < k_rows ? s[f][e] : kMasked;
         }
       }
     }
@@ -99,7 +99,7 @@ inline void attention_nax(const device T* Q, const device T* K, const device T* 
       for (short f = 0; f < 2; f++) {
         TF_UNROLL
         for (short e = 0; e < 8; e++) {
-          s[f][e] = (r0 + (e >> 2) * 8) < (c0 + 16 * f + (e & 3)) ? kMasked : s[f][e];
+          s[f][e] = (r0 + (e >> 2) * 8) < (c0 + 16 * f + TF_COL(e)) ? kMasked : s[f][e];
         }
       }
     }

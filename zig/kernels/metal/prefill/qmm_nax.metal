@@ -43,7 +43,7 @@ inline void qmm_k_loop(thread frag<float> (&acc)[TM][2], const device T* x, int 
         for (short i = 0; i < 2; i++) {
           TF_UNROLL
           for (short j = 0; j < 2; j++) {
-            frag_get(b[j][i], (const threadgroup T*)tile, PAD, tn + 16 * i, kk + 16 * j, home);
+            frag_get_t(b[j][i], (const threadgroup T*)tile, PAD, tn + 16 * i, kk + 16 * j, home);
           }
         }
         TF_UNROLL

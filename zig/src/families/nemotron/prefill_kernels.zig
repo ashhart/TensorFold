@@ -2,6 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
+const frags = @import("../../core/frags.zig");
 
 pub const Kernels = struct {
     gpa: std.mem.Allocator,
@@ -21,13 +22,6 @@ pub const Kernels = struct {
         self.pipelines.deinit(self.gpa);
     }
 };
-
-/// `text` with its local `#include "../nax.h"` replaced by the header, as the prefill tools compile it.
-fn inlined(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
-    const line = "#include \"../nax.h\"";
-    const at = std.mem.indexOf(u8, text, line) orelse return gpa.dupe(u8, text);
-    return std.mem.concat(gpa, u8, &.{ text[0..at], sources.nax, text[at + line.len ..] });
-}
 
 /// Every `[[kernel]] void NAME(` in a source.
 fn names(gpa: std.mem.Allocator, text: []const u8) ![][]const u8 {
@@ -56,7 +50,7 @@ const Job = struct {
     fn run(job: *Job) void {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
-        const text = inlined(job.gpa, job.file.text) catch {
+        const text = frags.source(job.device, job.gpa, job.file.text) catch {
             job.failed = true;
             return;
         };

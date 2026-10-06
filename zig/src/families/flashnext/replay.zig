@@ -7,7 +7,7 @@ const segments = @import("../../core/segments.zig");
 const tpm = @import("tp.zig");
 const split = @import("split.zig");
 pub const Tp2 = tpm.Tp2;
-pub const frags = @import("frags.zig");
+pub const frags = @import("../../core/frags.zig");
 
 pub const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
