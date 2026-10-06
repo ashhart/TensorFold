@@ -38,6 +38,8 @@ pub const Kernels = struct {
     moe_gateup_2: mtl.Pipeline,
     moe_down_2: mtl.Pipeline,
     moe_combine: mtl.Pipeline,
+    moe_gateup_2h: mtl.Pipeline, // expert parallel by rows: half of every expert's gate/up rows
+    moe_down_2h: mtl.Pipeline, // and its down inputs, fp32 partials
     sparse_attention: mtl.Pipeline,
     cast_f32: mtl.Pipeline,
     rms: mtl.Pipeline,
@@ -104,6 +106,8 @@ const generated = [_]struct { key: []const u8, field: []const u8 }{
     .{ .key = "moe_gateup_2", .field = "moe_gateup_2" },
     .{ .key = "moe_down_2", .field = "moe_down_2" },
     .{ .key = "moe_combine", .field = "moe_combine" },
+    .{ .key = "moe_gateup_2h", .field = "moe_gateup_2h" },
+    .{ .key = "moe_down_2h", .field = "moe_down_2h" },
     .{ .key = "sparse_attention", .field = "sparse_attention" },
 };
 
@@ -145,6 +149,7 @@ const Job = struct {
 };
 
 fn kernelOf(comptime key: []const u8) sources.glm.Kernel {
+    @setEvalBranchQuota(20000);
     for (sources.glm.all) |k| if (comptime std.mem.eql(u8, k.key, key)) return k;
     @compileError("no generated GLM kernel " ++ key);
 }

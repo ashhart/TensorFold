@@ -147,6 +147,23 @@ def specs() -> list[Spec]:
               [Arg("Y", bf, big, 3)],
               [("K", EXPERT), ("N", HIDDEN), ("RPS", 4), ("TOPK", TOP_K), ("MAXR", MAX_ROWS), ("MAXU", MAXU),
                ("PART", part), ("SB", 4), ("SV", 16), ("SLB", 8)])
+    # expert parallel by rows: each Mac half of every routed expert (gate/up rows, down's inputs), fp32 down partials
+    plain("moe_gateup_2h", "tf_glm5_fused_moe_gateup", M._MOE_GATEUP, F._HEADER,
+          [Arg("X", bf, big, 2), Arg("GW", u32, big, 3), Arg("GS", bf, big, 3), Arg("GB", bf, big, 3),
+           Arg("UW", u32, big, 3), Arg("US", bf, big, 3), Arg("UB", bf, big, 3), Arg("SGU", u32, big, 2),
+           Arg("SGUS", bf, big, 2), Arg("SGUB", bf, big, 2), *group, Arg("LIM", f32, one)],
+          [Arg("ACT", bf, big, 3)],
+          [("K", HIDDEN), ("N", EXPERT // 2), ("RPS", 4), ("TOPK", TOP_K), ("MAXR", MAX_ROWS), ("MAXU", MAXU),
+           ("PART", 2), ("SB", 4), ("SV", 16), ("SLB", 8)])
+    down_partial = M._MOE_DOWN.replace("Y[(size_t(r) * SLOTS + slot) * N + row0 + j] = bfloat(v);",
+                                       "Y[(size_t(r) * SLOTS + slot) * N + row0 + j] = v;")
+    assert down_partial != M._MOE_DOWN
+    plain("moe_down_2h", "tf_glm5_fused_moe_down_partial", down_partial, F._HEADER,
+          [Arg("ACT", bf, big, 3), Arg("DW", u32, big, 3), Arg("DS", bf, big, 3), Arg("DB", bf, big, 3),
+           Arg("SDW", u32, big, 2), Arg("SDS", bf, big, 2), Arg("SDB", bf, big, 2), *group],
+          [Arg("Y", f32, big, 3)],
+          [("K", EXPERT // 2), ("N", HIDDEN), ("RPS", 4), ("TOPK", TOP_K), ("MAXR", MAX_ROWS), ("MAXU", MAXU),
+           ("PART", 2), ("SB", 4), ("SV", 16), ("SLB", 8)])
     plain("moe_combine", "tf_glm5_fused_moe_combine_split", M._MOE_COMBINE_SPLIT, F._HEADER,
           [Arg("YS", bf, big, 2), Arg("Y", bf, big, 3), Arg("WTS", f32, big, 2)], [Arg("OUT", bf, big, 2)],
           [("D", HIDDEN), ("TOPK", TOP_K)])

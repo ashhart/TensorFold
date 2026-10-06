@@ -344,6 +344,15 @@ pub fn moe(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
     const sc = x.sc;
     const top = c.topk;
     const s = x.skip;
+    if (x.ep) |ep| if (c.byRows()) { // every expert's half on each Mac: both compute every pick, then swap their sums
+        if (s & Class.exchange == 0 and on(x, "x_locpost")) ep.begin();
+        if (s & Class.route == 0) route(x, e, w, x_in, rows);
+        if (s & Class.routed == 0) halfExperts(x, e, w, x_in, rows);
+        if (s & Class.exchange == 0) ep.sendRows(e, sc.yp, sc.wts, rows);
+        if (s & Class.shared == 0) experts(x, e, w, x_in, rows, 1, .{ sc.none, sc.none, sc.none });
+        if (s & Class.combine == 0) ep.receiveRows(e, sc.ys, sc.branch, rows);
+        return;
+    };
     if (x.ep) |ep| {
         if (s & Class.exchange == 0 and on(x, "x_locpost")) ep.begin();
         if (s & Class.route == 0) route(x, e, w, x_in, rows);
@@ -373,7 +382,7 @@ fn route(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, row
     if (x.fused_route) {
         if (on(x, "r_router")) moe_route.logits(e, k.route_logits, route_shape, x_in, w.router, sc.logits_r, rows);
         if (!on(x, "r_topk")) return;
-        if (x.ep) |ep| return moe_route.select(e, k.route_select, sc.logits_r, w.bias, c.routed_scale, rows, c.own, ep.outputs(sc.pick, sc.wts));
+        if (x.ep) |ep| if (!c.byRows()) return moe_route.select(e, k.route_select, sc.logits_r, w.bias, c.routed_scale, rows, c.own, ep.outputs(sc.pick, sc.wts));
         const rl = sc.rl;
         const T: usize = c.topk * st.max_rows * 4;
         return moe_route.select(e, k.route_select, sc.logits_r, w.bias, c.routed_scale, rows, .{ 0, c.experts }, .{ .pick = sc.pick, .wts = sc.wts, .ids = sc.uids, .members = sc.umem, .count = sc.ucount, .mine = rl, .theirs = rl.at(T), .counts = rl.at(2 * T), .word = rl.at(2 * T + 64) });
@@ -415,6 +424,31 @@ fn experts(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
     bind(e, 0, .{act});
     shape(e, 1, .{ rows, slots, N });
     bind(e, 2, .{ w.down.w, w.down.s, w.down.b, w.sh_down.w, w.sh_down.s, w.sh_down.b, group[0], group[1], group[2], if (part == 1) sc.ys else sc.ye });
+    e.dispatchThreads(size(32 * rows, D / 4, zs), size(32 * rows, 1, 1));
+}
+
+/// By rows: every routed pick's half (this Mac's intermediate rows), down's fp32 partials into `yp`.
+fn halfExperts(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, rows: u32) void {
+    const c = x.c;
+    const k = x.k;
+    const sc = x.sc;
+    const D = c.hidden;
+    const N: u32 = c.inter[1] - c.inter[0];
+    const zs: u32 = rows * c.topk;
+    if (on(x, "e_gateup")) {
+        e.setPipeline(k.moe_gateup_2h);
+        bind(e, 0, .{x_in});
+        shape(e, 1, .{ rows, D });
+        bind(e, 2, .{ w.gate.w, w.gate.s, w.gate.b, w.up.w, w.up.s, w.up.b, w.sh_gate_up.w, w.sh_gate_up.s, w.sh_gate_up.b, sc.uids, sc.umem, sc.ucount });
+        e.setValue(c.swiglu_limit, 14);
+        bind(e, 15, .{sc.act});
+        e.dispatchThreads(size(32 * rows, N / 4, zs), size(32 * rows, 1, 1));
+    }
+    if (!on(x, "e_down")) return;
+    e.setPipeline(k.moe_down_2h);
+    bind(e, 0, .{sc.act});
+    shape(e, 1, .{ rows, c.topk, N });
+    bind(e, 2, .{ w.down.w, w.down.s, w.down.b, w.sh_down.w, w.sh_down.s, w.sh_down.b, sc.uids, sc.umem, sc.ucount, sc.yp });
     e.dispatchThreads(size(32 * rows, D / 4, zs), size(32 * rows, 1, 1));
 }
 

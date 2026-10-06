@@ -15,6 +15,7 @@ pub const Config = struct {
     dense_inter: u32 = 12288,
     experts: u32 = 288,
     own: [2]u32 = .{ 0, 288 }, // routed experts [lo, hi) this Mac holds: all, or its half in expert-parallel mode
+    inter: [2]u32 = .{ 0, 2048 }, // each routed expert's intermediate rows [lo, hi) this Mac holds (half by rows)
     topk: u32 = 8,
     moe_inter: u32 = 2048,
     routed_scale: f32 = 2.5,
@@ -43,6 +44,11 @@ pub const Config = struct {
 
     pub fn kind(c: *const Config, i: u32) Kind {
         return if (c.mla.isSet(i)) .mla else .kda;
+    }
+
+    /// Expert parallel by rows: this Mac holds part of every routed expert's intermediate rows.
+    pub fn byRows(c: *const Config) bool {
+        return c.inter[1] - c.inter[0] != c.moe_inter;
     }
 
     pub fn isMoe(c: *const Config, i: u32) bool {
@@ -129,6 +135,7 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8) !Config {
     c.dense_inter = @intCast(try int(t, "intermediate_size"));
     c.experts = @intCast(try int(t, "n_routed_experts"));
     c.own = .{ 0, c.experts };
+    c.inter = .{ 0, c.moe_inter };
     c.topk = @intCast(try int(t, "num_experts_per_tok"));
     c.moe_inter = @intCast(try int(t, "moe_intermediate_size"));
     c.routed_scale = @floatCast(try float(t, "routed_scaling_factor"));
@@ -182,6 +189,14 @@ pub fn subset(c: *Config, n: u32) !void {
     c.run = n;
 }
 
+/// Expert parallel by rows over `ranks` Macs: rank r holds every routed expert's intermediate rows [r n, (r + 1) n).
+pub fn splitRows(c: *Config, rank: u32, ranks: u32) !void {
+    if (ranks == 0 or rank >= ranks or c.moe_inter % (64 * ranks) != 0) return error.BadExpertSplit;
+    const n = c.moe_inter / ranks;
+    c.own = .{ 0, c.experts };
+    c.inter = .{ rank * n, (rank + 1) * n };
+}
+
 /// Expert parallel over `ranks` Macs: rank r holds routed experts [r * experts / ranks, (r + 1) * experts / ranks).
 pub fn split(c: *Config, rank: u32, ranks: u32) !void {
     if (ranks == 0 or rank >= ranks or c.experts % ranks != 0) return error.BadExpertSplit;
@@ -210,6 +225,15 @@ test "a layer subset keeps the MTP layer's place and refuses an empty or oversiz
     try std.testing.expectEqual(@as(u32, 45), c.layers);
     try std.testing.expectError(error.BadLayerCount, subset(&c, 0));
     try std.testing.expectError(error.BadLayerCount, subset(&c, 46));
+}
+
+test "by rows, two ranks hold every expert's halves" {
+    var c = Config{};
+    try splitRows(&c, 1, 2);
+    try std.testing.expectEqual([2]u32{ 0, 288 }, c.own);
+    try std.testing.expectEqual([2]u32{ 1024, 2048 }, c.inter);
+    try std.testing.expect(c.byRows());
+    try std.testing.expect(!(Config{}).byRows());
 }
 
 test "two ranks hold the routed experts' halves" {

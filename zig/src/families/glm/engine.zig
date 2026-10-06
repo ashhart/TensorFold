@@ -110,7 +110,8 @@ pub const Engine = struct {
             const sf = try mtl.MappedFile.open(try e.ep_arena.allocator().dupeSentinel(u8, sp, 0));
             defer sf.deinit();
             const s = try ep_mod.readSettings(e.ep_arena.allocator(), sf.bytes[0..sf.size]);
-            try cfg.split(&e.c, s.rank, 2);
+            const by_rows = if (std.c.getenv("GLM_EP_SPLIT")) |v| std.mem.eql(u8, std.mem.span(v), "rows") else false;
+            if (by_rows) try cfg.splitRows(&e.c, s.rank, 2) else try cfg.split(&e.c, s.rank, 2);
             break :blk s;
         } else null;
         e.k = try kernels.load(gpa, e.device);
@@ -145,7 +146,12 @@ pub const Engine = struct {
             gpa.destroy(e.w);
         }
         try e.prepare();
-        if (link) |s| e.ep = try ep_mod.Ep.init(gpa, e.device, s, .{ .layers = e.c.layers, .run = e.c.run, .mtp = @intFromBool(e.w.mtp != null), .experts = e.c.experts, .own_lo = e.c.own[0], .own_hi = e.c.own[1], .cap = cap, .model = model });
+        if (link) |s| {
+            const rows = e.c.byRows();
+            var me: ep_mod.Identity = .{ .layers = e.c.layers, .run = e.c.run, .mtp = @intFromBool(e.w.mtp != null), .experts = if (rows) e.c.moe_inter else e.c.experts, .own_lo = if (rows) e.c.inter[0] else e.c.own[0], .own_hi = if (rows) e.c.inter[1] else e.c.own[1], .cap = cap, .model = model };
+            me.rest[0] = @intFromBool(rows);
+            e.ep = try ep_mod.Ep.init(gpa, e.device, s, me);
+        }
         // opt-in: wiring 181 GB leaves macOS nothing to reclaim if another model shares the Mac (Flash Next runs without)
         if (std.c.getenv("GLM_RESIDENCY") == null) {} else if (e.device.residencySet(e.w.buffers.items.len + e.arena.buffers.items.len)) |set| {
             for (e.w.buffers.items) |b| set.add(b);

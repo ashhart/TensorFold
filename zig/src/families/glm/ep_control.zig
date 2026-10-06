@@ -35,7 +35,7 @@ pub const Identity = extern struct {
 
     pub fn compatible(a: Identity, b: Identity) bool {
         const same = a.magic == b.magic and a.version == b.version and a.layers == b.layers and a.run == b.run and
-            a.mtp == b.mtp and a.experts == b.experts and a.cap == b.cap and a.model == b.model;
+            a.mtp == b.mtp and a.experts == b.experts and a.cap == b.cap and a.model == b.model and std.mem.eql(u8, &a.rest, &b.rest);
         const tile = (a.own_lo == 0 and a.own_hi == b.own_lo and b.own_hi == a.experts) or
             (b.own_lo == 0 and b.own_hi == a.own_lo and a.own_hi == a.experts);
         return same and tile and a.own_lo < a.own_hi and b.own_lo < b.own_hi;

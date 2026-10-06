@@ -77,10 +77,10 @@ const Src = struct { shard: u32, off: u64, len: u64, dtype: st.DType, shape: [st
 
 const Copy = struct { shard: u32, off: u64, len: u64, dst: [*]u8 };
 
-const Fix = enum { hc_pack, router_pack, conv, to_f32, transpose_bf16 };
+const Fix = enum { hc_pack, router_pack, conv, to_f32, transpose_bf16, cols };
 
 /// A tensor read whole into host memory and rewritten into its place (small: mixes, router, conv taps, norms).
-const Transform = struct { src: Src, dst: [*]u8, fix: Fix, extra: [3]?Src = .{ null, null, null } };
+const Transform = struct { src: Src, dst: [*]u8, fix: Fix, extra: [3]?Src = .{ null, null, null }, arg: [3]usize = .{ 0, 0, 0 } };
 
 const Loader = struct {
     gpa: std.mem.Allocator,
@@ -187,10 +187,15 @@ const Loader = struct {
         return out;
     }
 
-    /// This Mac's routed experts' `proj` stacked [own experts, n, k]: expert e at e - own[0].
-    fn experts(l: *Loader, i: usize, proj: []const u8, n: usize, k: usize) !Q4 {
+    /// This Mac's routed experts' `proj` stacked [own experts, n, k] (expert e at e - own[0]) from the stored [n_all, k_all]:
+    /// by rows, gate and up keep rows `inter` (`rows`), down keeps input columns `inter` (`cols`).
+    fn experts(l: *Loader, i: usize, proj: []const u8, n_all: usize, k_all: usize, part: enum { whole, rows, cols }) !Q4 {
         const lo = l.c.own[0];
         const e = l.c.own[1] - lo;
+        const in_lo: usize = l.c.inter[0];
+        const in_n: usize = l.c.inter[1] - l.c.inter[0];
+        const n = if (part == .rows) in_n else n_all;
+        const k = if (part == .cols) in_n else k_all;
         const out: Q4 = .{ .w = l.take(e * Q4.wBytes(n, k)), .s = l.take(e * Q4.sBytes(n, k)), .b = l.take(e * Q4.sBytes(n, k)), .n = @intCast(n), .k = @intCast(k) };
         for (0..e) |x| {
             const comps = [_][]const u8{ "weight", "scales", "biases" };
@@ -198,8 +203,13 @@ const Loader = struct {
             for (comps, dsts, 0..) |comp, dst, j| {
                 const s = try l.src(prefix ++ "layers.{d}.mlp.experts.{d}.{s}.{s}", .{ i, lo + x, proj, comp });
                 var name: [200]u8 = undefined;
-                try expect(s, try std.fmt.bufPrint(&name, "experts.{d}.{d}.{s}.{s}", .{ i, x, proj, comp }), if (j == 0) .u32 else .bf16, &.{ n, if (j == 0) k / 8 else k / 64 });
-                try l.copyTo(s, dst);
+                try expect(s, try std.fmt.bufPrint(&name, "experts.{d}.{d}.{s}.{s}", .{ i, x, proj, comp }), if (j == 0) .u32 else .bf16, &.{ n_all, if (j == 0) k_all / 8 else k_all / 64 });
+                const row_all: usize = if (j == 0) k_all / 2 else k_all / 64 * 2; // a stored row's bytes
+                switch (part) {
+                    .whole => try l.copyTo(s, dst),
+                    .rows => try l.copyTo(.{ .shard = s.shard, .off = s.off + in_lo * row_all, .len = in_n * row_all, .dtype = s.dtype, .shape = s.shape, .rank = s.rank }, dst),
+                    .cols => if (!l.dry) try l.transforms.append(l.gpa, .{ .src = s, .dst = dst.addr(), .fix = .cols, .arg = .{ row_all, if (j == 0) in_lo / 2 else in_lo / 64 * 2, if (j == 0) in_n / 2 else in_n / 64 * 2 } }),
+                }
             }
         }
         return out;
@@ -287,7 +297,8 @@ const Loader = struct {
     fn expertBytes(l: *Loader) usize {
         const c = l.c;
         const D: usize = c.hidden;
-        const per = 2 * (Q4.wBytes(c.moe_inter, D) + 2 * Q4.sBytes(c.moe_inter, D)) + Q4.wBytes(D, c.moe_inter) + 2 * Q4.sBytes(D, c.moe_inter);
+        const m: usize = c.inter[1] - c.inter[0];
+        const per = 2 * (Q4.wBytes(m, D) + 2 * Q4.sBytes(m, D)) + Q4.wBytes(D, m) + 2 * Q4.sBytes(D, m);
         return (c.own[1] - c.own[0]) * per + 9 * 256;
     }
 
@@ -329,9 +340,10 @@ const Loader = struct {
                 .down = undefined,
             };
             try l.begin(l.expertBytes());
-            moe.gate = try l.experts(i, "gate_proj", c.moe_inter, D);
-            moe.up = try l.experts(i, "up_proj", c.moe_inter, D);
-            moe.down = try l.experts(i, "down_proj", D, c.moe_inter);
+            const by_rows = c.byRows();
+            moe.gate = try l.experts(i, "gate_proj", c.moe_inter, D, if (by_rows) .rows else .whole);
+            moe.up = try l.experts(i, "up_proj", c.moe_inter, D, if (by_rows) .rows else .whole);
+            moe.down = try l.experts(i, "down_proj", D, c.moe_inter, if (by_rows) .cols else .whole);
             out.mlp = .{ .moe = moe };
         } else {
             out.mlp = .{ .dense = .{
@@ -430,7 +442,25 @@ fn runCopies(l: *Loader, threads: usize) !void {
     pool.run();
     for (workers) |t| if (t) |th| th.join();
     if (pool.failed.load(.acquire)) return error.ShortRead;
-    for (l.transforms.items) |t| try transform(l, fds, t);
+    // the transforms on the same threads (each reads its own tensors whole)
+    const Tx = struct {
+        l: *Loader,
+        fds: []std.c.fd_t,
+        next: std.atomic.Value(usize) = .init(0),
+        failed: std.atomic.Value(bool) = .init(false),
+        fn run(x: *@This()) void {
+            while (true) {
+                const i = x.next.fetchAdd(1, .monotonic);
+                if (i >= x.l.transforms.items.len) return;
+                transform(x.l, x.fds, x.l.transforms.items[i]) catch x.failed.store(true, .release);
+            }
+        }
+    };
+    var tx: Tx = .{ .l = l, .fds = fds };
+    for (workers) |*t| t.* = std.Thread.spawn(.{}, Tx.run, .{&tx}) catch null;
+    tx.run();
+    for (workers) |t| if (t) |th| th.join();
+    if (tx.failed.load(.acquire)) return error.TransformFailed;
 }
 
 fn transform(l: *Loader, fds: []std.c.fd_t, t: Transform) !void {
@@ -479,6 +509,10 @@ fn transform(l: *Loader, fds: []std.c.fd_t, t: Transform) !void {
         .to_f32 => {
             const out: [*]f32 = @ptrCast(@alignCast(t.dst));
             for (in16, 0..) |x, i| out[i] = @bitCast(@as(u32, x) << 16);
+        },
+        .cols => { // each stored row's bytes [arg 1, arg 1 + arg 2) of its arg 0
+            const rows = t.src.len / t.arg[0];
+            for (0..rows) |rr| @memcpy(t.dst[rr * t.arg[2] ..][0..t.arg[2]], raw[rr * t.arg[0] + t.arg[1] ..][0..t.arg[2]]);
         },
         .transpose_bf16 => { // [r][c] -> [c][r]
             const out: [*]u16 = @ptrCast(@alignCast(t.dst));
