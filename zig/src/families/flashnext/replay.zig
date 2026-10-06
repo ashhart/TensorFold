@@ -123,6 +123,15 @@ const glue_source =
     \\  const uint row = uint(ar[0] + base);
     \\  dst[gid.y * p.w + gid.x] = src[gid.y * p.z + row * p.y + gid.x];
     \\}
+    \\// The MTP head's kept row (keep[0] - 1) of its attention output, streams and inject gates into row 0, in place
+    \\kernel void fz_mtp_take(device bfloat* aout [[buffer(0)]], device bfloat* h [[buffer(1)]], device bfloat* inj [[buffer(2)]],
+    \\    device const int* keep [[buffer(3)]], uint i [[thread_position_in_grid]]) {
+    \\  const int k = keep[0] - 1;
+    \\  if (k <= 0) return;
+    \\  if (i < 6144) aout[i] = aout[k * 6144 + i];
+    \\  h[i] = h[k * 10240 + i];
+    \\  if (i < 4) inj[i] = inj[k * 4 + i];
+    \\}
     \\// The round's verdict on the GPU: drafts kept, the emitted tokens to the ring, the next window's pending token,
     \\// positions and n-gram history; ar = keep, target length, round, then the meta blocks the next round reads:
     \\// the window's positions [4, 20), key counts [20, 36), cache meta [36, 39); the head's absorb [40, 56), [56, 72),
@@ -809,6 +818,7 @@ pub const Run = struct {
     copy_pipe: mtl.Pipeline = undefined,
     accept_pipe: mtl.Pipeline = undefined,
     lookup_pipe: mtl.Pipeline = undefined,
+    take_pipe: mtl.Pipeline = undefined,
     gpu_round: bool = false,
     ar: Buf = undefined,
     probe: ?Buf = null,
@@ -949,6 +959,7 @@ pub const Run = struct {
         r.copy_pipe = try mtl.Pipeline.init(r.device, glue, "fz_copy_kept", false);
         r.accept_pipe = try mtl.Pipeline.init(r.device, glue, "fz_accept", false);
         r.lookup_pipe = try mtl.Pipeline.init(r.device, glue, "fz_lookup", false);
+        r.take_pipe = try mtl.Pipeline.init(r.device, glue, "fz_mtp_take", false);
         r.repack_w = try mtl.Pipeline.init(r.device, glue, "fz_repack_w", false);
         r.repack_s = try mtl.Pipeline.init(r.device, glue, "fz_repack_s", false);
         r.touch_pipe = try mtl.Pipeline.init(r.device, glue, "fz_touch", false);
@@ -1573,9 +1584,7 @@ pub const Mtp = struct {
     md1: Buf,
     n_ids: Buf,
     slots: [2 * MAXR]Slot, // 0: host calls; GPU-side rounds: chained draft j at j, an absorb of n rows at MAXR - 1 + n
-    mixsel: Buf = undefined,
-    hsel: Buf = undefined,
-    last: Buf = undefined, // the last call's output streams, row by row
+    last: Buf = undefined, // the last call's output streams (its kept row)
     pool: Buf = undefined, // its indexer's block pooling (the head's layer is a sparse-attention layer)
     pooled: Buf = undefined,
     pooled_n: usize = 0,
@@ -1975,23 +1984,24 @@ pub const Model = struct {
             try r.shapes.put(r.arena, "IDS_shape", dense_ids);
         } else try r.call("mtp:q4_attn_parts#[24, 256]", &.{ t.q, h.keys, h.vals, t.ids81, sl.nk8, t.zero8, t.scale }, &.{ t.po, t.pm });
         try r.call("mtp:q4_attn_merge_gate#[24, 16, 256]", &.{ t.po, t.pm, t.p }, &.{t.aout});
-        if (!r.fused_xsum) try r.call("mtp:lane_qmm_xsum#[6144]", &.{ t.aout, sl.md }, &.{t.xs});
-        if (r.dense) r.denseRows(t.aout, 6144, h.out, rows, t.branch) else try r.call("mtp:lane_qmm_bytes_grouped@mtp.att.o", &.{ t.aout, t.xs, h.out.wq, h.out.sbt, sl.md }, &.{t.branch});
-        try r.call("mtp:q4_hc_norm_plain#[10240]", &.{ h.h[1], t.inj_a, t.branch }, &.{ h.h[0], t.ssp });
-        try m.mtpProject(h.h[0], h.mhc, down[1], up[1], t.inj_m, sl.rows);
-        try r.router("mtp:q4_router_float@mtp.moe", t.mixed, h.router, sl.rows, t.lg, rows);
-        try r.experts("mtp:qa_expert_gateup@mtp.moe.gate", "mtp:qa_expert_down_y@mtp.moe.down", t.mixed, t.lg, h.ex, t.act, t.pick, t.wts, sl.rows, t.ydown);
-        try r.call("mtp:q4_hc_norm_grouped#[10240]", &.{ h.h[0], t.inj_m, t.ydown, t.wts, t.lg }, &.{ h.h[1], t.ssp });
-        h.last = .{ .b = h.h[1].b, .off = (rows - 1) * WIDE * 2 };
-        try m.mtpProject(h.h[1], h.mix, down[2], up[2], t.inj_a, sl.rows);
-        var x: Buf = .{ .b = t.mixed.b, .off = (rows - 1) * D * 2 };
-        if (r.gpu_round and rows > 1) { // the kept row's mix and streams, chosen on the GPU
-            r.copyKept(t.mixed, h.mixsel, D / 2, D / 2, 0, 0, 1, -1);
-            r.copyKept(h.h[1], h.hsel, WIDE / 2, WIDE / 2, 0, 0, 1, -1);
-            x = h.mixsel;
-            h.last = h.hsel;
+        if (rows > 1) { // only the kept row goes on: the host's last row, or the row the GPU's verdict kept, into row 0
+            const keep: Buf = if (r.gpu_round) r.ar else sl.rows;
+            r.enc.setPipeline(r.take_pipe);
+            for ([_]Buf{ t.aout, h.h[1], t.inj_a, keep }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
+            r.enc.dispatchThreads(mtl.Size.of(WIDE, 1, 1), mtl.Size.of(256, 1, 1));
+            if (!r.serial) r.enc.barrier();
         }
         r.rows = 1;
+        if (!r.fused_xsum) try r.call("mtp:lane_qmm_xsum#[6144]", &.{ t.aout, h.md1 }, &.{t.xs});
+        if (r.dense) r.denseRows(t.aout, 6144, h.out, 1, t.branch) else try r.call("mtp:lane_qmm_bytes_grouped@mtp.att.o", &.{ t.aout, t.xs, h.out.wq, h.out.sbt, h.md1 }, &.{t.branch});
+        try r.call("mtp:q4_hc_norm_plain#[10240]", &.{ h.h[1], t.inj_a, t.branch }, &.{ h.h[0], t.ssp });
+        try m.mtpProject(h.h[0], h.mhc, down[1], up[1], t.inj_m, h.md1);
+        try r.router("mtp:q4_router_float@mtp.moe", t.mixed, h.router, h.md1, t.lg, 1);
+        try r.experts("mtp:qa_expert_gateup@mtp.moe.gate", "mtp:qa_expert_down_y@mtp.moe.down", t.mixed, t.lg, h.ex, t.act, t.pick, t.wts, h.md1, t.ydown);
+        try r.call("mtp:q4_hc_norm_grouped#[10240]", &.{ h.h[0], t.inj_m, t.ydown, t.wts, t.lg }, &.{ h.h[1], t.ssp });
+        h.last = h.h[1];
+        try m.mtpProject(h.h[1], h.mix, down[2], up[2], t.inj_a, h.md1);
+        const x = t.mixed;
         if (!r.fused_xsum) try r.call("mtp:lane_qmm_xsum#[2560]", &.{ x, h.md1 }, &.{t.xs});
         if (r.tp != null and r.dense) { // TP: this Mac's half of the draft vocabulary's tiles, then one exact argmax swap
             const tp = r.tp.?;

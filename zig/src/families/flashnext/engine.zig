@@ -348,8 +348,6 @@ pub const Engine = struct {
         e.ring = try r.buffer(fz.RING_WORDS * 4 * RING);
         e.hist = try r.buffer((CAP + 64) * 4);
         e.wids = .{ .b = try r.buffer(64) };
-        m.mtp.mixsel = .{ .b = try r.buffer(D * 2) };
-        m.mtp.hsel = .{ .b = try r.buffer(WIDE * 2) };
         for (1..MAXR + 1) |n| {
             e.rows_w[n] = try i32Buf(r, &.{@intCast(n)});
             e.mdims_w[n] = try i32Buf(r, &.{ @intCast(n), 16, 0, 0, 0, 0, 0, 0 });
@@ -548,10 +546,7 @@ pub const Engine = struct {
                 r.copyKept(e.cins[(round - 1) % 2], e.cins[round % 2], PLE_TAIL * WIDE / 2, WIDE / 2, 0, 0, 1, 0);
                 if (wr > 1) {
                     try m.mtpEncode(MAXR - 1 + wp, wp, m.t.picks, m.last, .{ .b = e.wids.b, .off = 4 });
-                    for (1..wr - 1) |j| {
-                        const streams = if (j == 1) m.mtp.hsel else Buf{ .b = m.mtp.h[1].b, .off = 0 };
-                        try m.mtpEncode(j, 1, .{ .b = e.wids.b, .off = 4 * j }, streams, .{ .b = e.wids.b, .off = 4 * (j + 1) });
-                    }
+                    for (1..wr - 1) |j| try m.mtpEncode(j, 1, .{ .b = e.wids.b, .off = 4 * j }, m.mtp.h[1], .{ .b = e.wids.b, .off = 4 * (j + 1) });
                     if (e.copy) { // copied drafts replace the head's when the history repeats its last tokens
                         r.enc.setPipeline(r.lookup_pipe);
                         r.enc.setBuffer(e.hist, 0, 0);

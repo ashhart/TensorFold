@@ -1314,8 +1314,6 @@ pub fn main(init: std.process.Init) !void {
         r.ar = .{ .b = try r.buffer(4 * fz.AR_WORDS) };
         const ring = try r.buffer(fz.RING_WORDS * 4 * 512);
         const g_hist = try r.buffer((CAP + 64) * 4);
-        m.mtp.mixsel = .{ .b = try r.buffer(D * 2) };
-        m.mtp.hsel = .{ .b = try r.buffer(WIDE * 2) };
         const ar = r.ar.b.slice(i32, fz.AR_WORDS);
         const Copy = struct { // the kept row of every DeltaNet layer's window output into its state
             fn states(rr: *Run, gcs: mtl.Buffer, gso: mtl.Buffer, ocs: mtl.Buffer, oso: mtl.Buffer) void {
@@ -1456,10 +1454,7 @@ pub fn main(init: std.process.Init) !void {
                 Copy.states(&r, g_cs, g_so, o_cs, o_so);
                 r.copyKept(cins[(round - 1) % 2], cins[round % 2], PLE_TAIL * WIDE / 2, WIDE / 2, 0, 0, 1, 0);
                 try m.mtpEncode(MAXR - 1 + wp, wp, m.t.picks, m.last, .{ .b = wids.b, .off = 4 });
-                for (1..wr - 1) |j| {
-                    const streams = if (j == 1) m.mtp.hsel else Buf{ .b = m.mtp.h[1].b, .off = 0 };
-                    try m.mtpEncode(j, 1, .{ .b = wids.b, .off = 4 * j }, streams, .{ .b = wids.b, .off = 4 * (j + 1) });
-                }
+                for (1..wr - 1) |j| try m.mtpEncode(j, 1, .{ .b = wids.b, .off = 4 * j }, m.mtp.h[1], .{ .b = wids.b, .off = 4 * (j + 1) });
             }
             m.ple.cin = cins[round % 2];
             m.pleIdsGpu(wr, wids);
