@@ -367,22 +367,28 @@ def compare(rows_path: str, fresh_path: str) -> int:
 
 
 def ranks(r0_path: str, r1_path: str) -> int:
-    """Rank 0's done lines and rank 1's reply lines in request order (rank 1 also logs rank 0's engine warm-up first)."""
-    done = re.compile(r"\] done \S+ prompt=(\d+) .*? tokens=(\d+) sha=([0-9a-f]+)")
-    mine = re.compile(r"speed-up rank 1: resumed at \d+ of (\d+) .*?reply (\d+) tokens, sha ([0-9a-f]+)")
-    a = [m.groups() for m in map(done.search, open(r0_path, errors="replace")) if m]
-    b = [m.groups() for m in map(mine.search, open(r1_path, errors="replace")) if m]
-    while b and len(b) > len(a) and b[0][0] != (a[0][0] if a else None):
+    """Rank 0's done and ended lines against rank 1's reply lines, in request order (rank 1 also logs rank 0's engine
+    warm-up first); a reply rank 0 ended early (a client that left) is checked by its prompt only."""
+    line0 = re.compile(r"\] (?:done \S+ prompt=(\d+) .*? tokens=(\d+) sha=([0-9a-f]+)|ended \S+ reason=.*? prompt=(\d+) tokens=(\d+))")
+    line1 = re.compile(r"speed-up rank 1: resumed at \d+ of (\d+) .*?reply (\d+) tokens, sha ([0-9a-f]+)")
+    a = []
+    for m in map(line0.search, open(r0_path, errors="replace")):
+        if m:
+            a.append((m[1], m[2], m[3]) if m[1] else (m[4], None, None))
+    b = [m.groups() for m in map(line1.search, open(r1_path, errors="replace")) if m]
+    while b and len(b) > len(a) and (not a or b[0][0] != a[0][0]):
         b = b[1:]  # the engine warm-up: no server request on rank 0
     bad = 0
     for k, (x, y) in enumerate(zip(a, b)):
-        if x != y:
+        same = x[0] == y[0] and (x[2] is None or (x[1], x[2]) == (y[1], y[2]))
+        if not same:
             bad += 1
             print(f"request {k}: rank 0 prompt {x[0]} tokens {x[1]} sha {x[2]}; rank 1 prompt {y[0]} tokens {y[1]} sha {y[2]}")
     if len(a) != len(b):
         bad += 1
         print(f"{len(a)} replies on rank 0, {len(b)} on rank 1")
-    print(f"{'PASS' if bad == 0 else 'FAIL'}: {min(len(a), len(b)) - bad}/{len(a)} replies equal on both ranks")
+    ended = sum(1 for x in a if x[2] is None)
+    print(f"{'PASS' if bad == 0 else 'FAIL'}: {min(len(a), len(b)) - bad}/{len(a)} replies equal on both ranks ({ended} ended early, prompt only)")
     return 1 if bad else 0
 
 
