@@ -300,3 +300,50 @@ pub const Policy = struct {
         return std.mem.concat(a, u8, &.{ head, f.finish() });
     }
 };
+
+test "a streamed call its end token left open completes as its closing markup completes it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"parameters\":{\"properties\":{\"n\":{\"type\":\"integer\"}}}}}]")).ok.array;
+    const open = "<tool_call>\n<function=lookup>\n<parameter=q>\nfast cars\n</parameter>\n<parameter=n>\n5\n</parameter>\n";
+    const sent = try sentArguments(a, try streamed(a, tools, &.{open}));
+    const ended = try streamed(a, tools, &.{ open, try std.mem.concat(a, u8, &.{ open, try closeCall(a, open, tools) }) });
+    const marked = try streamed(a, tools, &.{ open, open ++ "</function>\n</tool_call>" });
+    // the arguments sent before the end, closed by closedJson, are the ones the client ends with
+    try std.testing.expectEqualStrings((try tool_params.closedJson(a, sent)).?, try sentArguments(a, ended));
+    try std.testing.expectEqual(marked.len, ended.len);
+    for (marked[1..], ended[1..]) |x, y| try std.testing.expectEqualStrings(try json.stringify(a, x, .{}), try json.stringify(a, y, .{}));
+}
+
+test "a streamed call cut inside a value stays open" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]")).ok.array;
+    const open = "<tool_call>\n<function=lookup>\n<parameter=q>\nfast cars and more";
+    try std.testing.expectEqualStrings("", try closeCall(a, open, tools));
+    // its opening delta went out and cannot be taken back; what it sent does not close under closedJson
+    const sent = try sentArguments(a, try streamed(a, tools, &.{open}));
+    try std.testing.expectEqualStrings("{\"q\":\"fast c", sent);
+    try std.testing.expect((try tool_params.closedJson(a, sent)) == null);
+}
+
+const closeCall = @import("tool_parse.zig").closeCall;
+
+/// The deltas one streamer sends while the reply grows through ``texts``.
+fn streamed(a: Allocator, tools: []const Value, texts: []const []const u8) Allocator.Error![]Value {
+    var s = try Streamer.init(a, tools);
+    var out: std.ArrayList(Value) = .empty;
+    for (texts) |t| try s.feed(t, &out);
+    return out.items;
+}
+
+/// The arguments a client joins from streamed deltas.
+fn sentArguments(a: Allocator, deltas: []const Value) Allocator.Error![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for (deltas) |d| for (d.get("tool_calls").?.array) |one| {
+        try out.appendSlice(a, one.get("function").?.get("arguments").?.string);
+    };
+    return out.items;
+}

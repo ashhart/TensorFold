@@ -6,6 +6,7 @@ const errors = @import("errors.zig");
 const fields_mod = @import("fields.zig");
 const reply_text = @import("reply_text.zig");
 const tool_stream = @import("tool_stream.zig");
+const tool_parse = @import("tool_parse.zig");
 const prompt_mod = @import("prompt.zig");
 const log = @import("log.zig");
 const ids = @import("ids.zig");
@@ -285,6 +286,14 @@ const Generation = struct {
         return !g.ignore_eos and std.mem.indexOfScalar(u32, g.srv.eos, t) != null;
     }
 
+    /// What closes a call the model's end token left open (``tool_parse.closeCall``); nothing when a stop string, the
+    /// length or ``ignore_eos`` ended the reply instead.
+    fn closeCall(g: *const Generation, text: []const u8) Allocator.Error![]const u8 {
+        const t = g.collected.items;
+        if (g.tools.len == 0 or t.len == 0 or !g.eos(t[t.len - 1])) return "";
+        return tool_parse.closeCall(g.a, text, g.tools);
+    }
+
     /// The engine's stop check, here: the newest tokens' text holds a stop string.
     fn stopHit(g: *Generation) Allocator.Error!bool {
         if (g.stops.strings.len == 0) return false;
@@ -418,7 +427,10 @@ const Generation = struct {
         const finished_ns = nowNs(g.srv.io);
         const content_tokens = if (g.ignore_eos) g.collected.items else reply_text.stripTrailing(g.collected.items, g.srv.eos);
         const raw = try g.srv.text.decode(a, content_tokens);
-        const text = g.stops.visible(raw, false);
+        const visible = g.stops.visible(raw, false);
+        // closed before the think split, so a call ending an unclosed think block is the answer
+        const close = try g.closeCall(visible);
+        const text = if (close.len > 0) try std.mem.concat(a, u8, &.{ visible, close }) else visible;
         var content: []const u8 = text;
         var reasoning: ?[]const u8 = null;
         if (g.thinking) {
@@ -438,6 +450,12 @@ const Generation = struct {
             const shown = if (g.calls != null) try reply_text.hideToolCalls(a, content, true) else content;
             const sent = g.streamed.text.items;
             if (std.mem.startsWith(u8, shown, sent) and shown.len > sent.len) try g.emit(sink, .{ .string = shown[sent.len..] });
+            if (g.calls) |*c| if (close.len > 0) {
+                // the streamer reads the closers as markup the model wrote, so the call ends with the same deltas
+                var out: std.ArrayList(Value) = .empty;
+                try c.feed(if (g.thinking) content else text, &out);
+                for (out.items) |d| try g.emit(sink, d);
+            };
         }
         const prefilled = m.prefilled_ns;
         const total = seconds(finished_ns - submitted);

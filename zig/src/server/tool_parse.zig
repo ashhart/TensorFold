@@ -145,6 +145,31 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
     return .{ .content = strip(residue.items), .calls = if (calls.items.len > 0) calls.items else null };
 }
 
+/// What closes the call ``text`` ends inside (the model's end token came before its ``</tool_call>``) when it then
+/// parses whole; empty when ``text`` ends outside a call or the call would not, so its markup stays the reply's text.
+pub fn closeCall(a: Allocator, text: []const u8, tools: []const Value) Allocator.Error![]const u8 {
+    var pos: usize = 0;
+    // the opener ``envelopes`` leaves without a closer, so the one appended pairs with it
+    const start = while (findCI(text, "<tool_call>", pos)) |s| {
+        pos = (findCI(text, "</tool_call>", s + 11) orelse break s) + 12;
+    } else return "";
+    const block = text[start + 11 ..];
+    const tail = try argumentsClose(a, strip(block));
+    const closed = try std.mem.concat(a, u8, &.{ "<tool_call>", block, tail, "</tool_call>" });
+    // the strict reading: one whole call to an offered tool, nothing but its markup
+    if ((try parse(a, closed, tools, 1)).calls == null) return "";
+    return std.mem.concat(a, u8, &.{ tail, "</tool_call>" });
+}
+
+/// What a call's arguments lack to close: XML's ``</function>``, JSON's open arrays and objects (``closedJson``); never
+/// a value's end, so a call cut inside a value stays open.
+fn argumentsClose(a: Allocator, body: []const u8) Allocator.Error![]const u8 {
+    if (std.ascii.startsWithIgnoreCase(body, "<function=")) return if (std.ascii.endsWithIgnoreCase(body, "</function>")) "" else "</function>";
+    if (body.len == 0 or (body[0] != '{' and body[0] != '[')) return "";
+    const closed = try tool_params.closedJson(a, body) orelse return "";
+    return closed[body.len..];
+}
+
 /// ``_openai_tool_call``: the offered spelling of the name, arguments as compact JSON.
 fn openaiCall(a: Allocator, c: Call, known: *const std.StringArrayHashMapUnmanaged([]const u8)) Allocator.Error!Value {
     const name = known.get(try std.ascii.allocLowerString(a, c.name)).?;
@@ -524,4 +549,64 @@ test "families" {
     const kept = try parse(a, "hi <tool_call>{\"name\":\"other\"}</tool_call>", tools, null);
     try std.testing.expect(kept.calls == null);
     try std.testing.expectEqualStrings("hi <tool_call>{\"name\":\"other\"}</tool_call>", kept.content);
+}
+
+test "a call the end token left open closes when it parses whole" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"parameters\":{\"properties\":{\"n\":{\"type\":\"integer\"}}}}}]")).ok.array;
+    const cases = [_][4][]const u8{ // the reply, what closes it, the call's arguments, the content left
+        .{ "Looking.<tool_call>\n{\"name\":\"lookup\",\"arguments\":{\"q\":\"x\"}}\n", "</tool_call>", "{\"q\":\"x\"}", "Looking." },
+        .{ "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":[\"x\"", "]}}</tool_call>", "{\"q\":[\"x\"]}", "" },
+        .{ "<tool_call>\n<function=lookup>\n<parameter=n>\n5\n</parameter>\n", "</function></tool_call>", "{\"n\":5}", "" },
+        .{ "<tool_call>\n<function=lookup>\n", "</function></tool_call>", "{}", "" },
+        .{ "<tool_call>\n<function=lookup>\n<parameter=n>\n5\n</parameter>\n</function>\n", "</tool_call>", "{\"n\":5}", "" },
+        .{ "<tool_call>lookup<arg_key>n</arg_key><arg_value>7</arg_value>", "</tool_call>", "{\"n\":7}", "" },
+        .{ "<tool_call>{\"name\":\"lookup\"}</tool_call>\n<tool_call>{\"name\":\"lookup\",\"arguments\":{\"n\":2}", "}</tool_call>", "{\"n\":2}", "" },
+        .{ "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":\"<tool_call>\"}", "}</tool_call>", "{\"q\":\"<tool_call>\"}", "" },
+    };
+    for (cases) |c| {
+        const close = try closeCall(a, c[0], tools);
+        try std.testing.expectEqualStrings(c[1], close);
+        const r = try parse(a, try std.mem.concat(a, u8, &.{ c[0], close }), tools, null);
+        try std.testing.expectEqualStrings(c[2], r.calls.?[r.calls.?.len - 1].get("function").?.get("arguments").?.string);
+        try std.testing.expectEqualStrings(c[3], r.content);
+    }
+}
+
+test "a call left open that would not parse whole stays the reply's text" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"parameters\":{\"properties\":{\"n\":{\"type\":\"integer\"}}}}}]")).ok.array;
+    const replies = [_][]const u8{
+        "Trying.<tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":\"fast ca", // inside a string
+        "Trying.<tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":", // a key without its value
+        "Trying.<tool_call>\n<function=lookup>\n<parameter=q>\nfast ca", // inside a parameter
+        "Trying.<tool_call>\n<function=lookup>\n<parameter=n>\n5\n", // before its </parameter>
+        "Trying.<tool_call>{\"name\":\"other\",\"arguments\":{}}", // a tool not offered
+        "Trying.<tool_call>lookup<arg_key>n</arg_key><arg_value>7", // a GLM value left open
+        "Trying.<tool_call>", // nothing written
+        "Trying <tool_call> tags.<tool_call>{\"name\":\"lookup\"}", // an earlier opener would take the closer
+    };
+    for (replies) |text| {
+        try std.testing.expectEqualStrings("", try closeCall(a, text, tools));
+        const r = try parse(a, text, tools, null);
+        try std.testing.expect(r.calls == null);
+        try std.testing.expectEqualStrings(text, r.content);
+    }
+}
+
+test "replies that end outside a call close nothing" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]")).ok.array;
+    const replies = [_][]const u8{
+        "Done.",
+        "<tool_call>{\"name\":\"lookup\"}</tool_call>",
+        "<tool_call>\n<function=lookup>\n</function>\n</tool_call> Done.",
+    };
+    for (replies) |text| try std.testing.expectEqualStrings("", try closeCall(a, text, tools));
 }
