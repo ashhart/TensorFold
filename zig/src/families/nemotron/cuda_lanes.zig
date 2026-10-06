@@ -8,6 +8,7 @@ const Head = @import("cuda_mtp.zig").Head;
 const state = @import("cuda_state.zig");
 const config = @import("config.zig");
 const costs = @import("cuda_costs.zig");
+const sampler = @import("cuda_sampler.zig");
 
 const be = lanes.backend;
 
@@ -122,6 +123,10 @@ pub const Cuda = struct {
         const e = self.e;
         const ids = s.prompt();
         if (ids.len == 0 or ids.len + s.max_new + state.max_rows > e.max_len) return error.PromptTooLong;
+        if (try sampler.check(s.sampling)) |x| {
+            // a rule the capture never compiled would fail inside a round, taking every stream with it
+            if (!e.k.draws(sampler.target(x).?) or (self.head != null and s.drafts and !e.k.draws(sampler.draft(x)))) return error.SamplingNotCaptured;
+        }
         const gop = try self.lanes.getOrPut(self.gpa, s);
         if (gop.found_existing) e.freeSeq(gop.value_ptr.seq);
         gop.value_ptr.* = .{ .seq = e.newSeq() catch |err| {

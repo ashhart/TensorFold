@@ -188,6 +188,13 @@ pub const Engine = struct {
         return s;
     }
 
+    /// The device bytes newSeq allocates.
+    pub fn seqBytes(e: *const Engine) usize {
+        var head: [4]usize = undefined;
+        if (e.head) |h| head = h.seqSizes();
+        return state.Seq.bytes(e.c, e.max_len, if (e.head != null) &head else &.{});
+    }
+
     pub fn freeSeq(e: *Engine, s: *state.Seq) void {
         if (e.bound == s) e.bind(&e.own);
         s.deinit();

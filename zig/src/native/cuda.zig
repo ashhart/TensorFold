@@ -1,5 +1,6 @@
 //! The engines a native server opens on CUDA. Each family in `registry` brings its own lane backend (its `open`); this
-//! file only owns the device, the round loop and the lane host, so a family adds itself here without server code.
+//! file only owns the device, the memory plan, the round loop and the lane host, so a family adds itself here without
+//! server code.
 const std = @import("std");
 const cuda = @import("cuda");
 const api = @import("engine_api");
@@ -7,7 +8,8 @@ const lanes = @import("lanes");
 const nemotron = @import("nemotron");
 const Allocator = std.mem.Allocator;
 
-/// The CUDA families: namespaces with `model_type`, `formats`, `default_context`, `prefill_step` and `open`.
+/// The CUDA families: namespaces with `model_type`, `formats`, `default_context`, `max_segments`, `prompt_rows`, `open`
+/// and `explain` (a request the family refuses, in words).
 const registry = .{nemotron.native};
 
 pub const backends: []const []const u8 = &.{"cuda"};
@@ -18,23 +20,40 @@ pub const families: []const api.Family = blk: {
     break :blk &final;
 };
 
-/// The chip class gate entries name ("nvidia-sm121" for a GB10); null without a CUDA device.
+const gib: f64 = 1 << 30;
+
+/// The chip class gate entries name ("sm_121" for a GB10) of the device TF_CUDA_DEVICE picks; null without one.
 pub fn chip(a: Allocator) ?[]const u8 {
+    const ordinal = envNumber(getenv("TF_CUDA_DEVICE")) catch return null;
     var driver = cuda.Driver.open() catch return null;
     defer driver.close();
-    var ctx = cuda.Context.init(&driver, deviceOrdinal()) catch return null;
-    defer ctx.deinit();
-    return chipClass(a, ctx.capability() catch return null);
+    if (ordinal orelse 0 >= driver.deviceCount() catch return null) return null;
+    return chipClass(a, driver.capability(@intCast(ordinal orelse 0)) catch return null);
 }
 
 fn chipClass(a: Allocator, capability: u32) ?[]const u8 {
-    return std.fmt.allocPrint(a, "nvidia-sm{d}", .{capability}) catch null;
+    return std.fmt.allocPrint(a, "sm_{d}", .{capability}) catch null;
 }
 
-/// The GPU ordinal TF_CUDA_DEVICE picks, as `tensorfold run` reads it; unset or empty means 0.
-fn deviceOrdinal() c_int {
-    const value = std.mem.span(std.c.getenv("TF_CUDA_DEVICE") orelse return 0);
-    return std.fmt.parseInt(c_int, value, 10) catch 0;
+fn getenv(name: [:0]const u8) ?[]const u8 {
+    return std.mem.span(std.c.getenv(name) orelse return null);
+}
+
+/// A variable's whole number: null when unset or empty, an error for anything else that is not one.
+fn envNumber(text: ?[]const u8) error{Invalid}!?u32 {
+    const t = std.mem.trim(u8, text orelse return null, " ");
+    if (t.len == 0) return null;
+    return std.fmt.parseInt(u32, t, 10) catch error.Invalid;
+}
+
+/// The flag's value, else the variable's, else `default`; `problem` names a variable that is not a whole number.
+fn setting(a: Allocator, flag: ?u32, name: [:0]const u8, default: u32, problem: *[]const u8) !?u32 {
+    if (flag) |v| return v;
+    const v = envNumber(getenv(name)) catch {
+        problem.* = try std.fmt.allocPrint(a, "{s}={s}: a whole number", .{ name, getenv(name).? });
+        return null;
+    };
+    return v orelse default;
 }
 
 /// The model's window (config.json's max_position_embeddings, text_config's first), 0 when it names none.
@@ -48,21 +67,132 @@ fn modelContext(a: Allocator, io: std.Io, dir: []const u8) i64 {
     return if (limit == .integer and limit.integer > 0) limit.integer else 0;
 }
 
+/// Prompt plus reply tokens a request may use: --context (0: the model's window), else the family default within it.
+fn contextWindow(requested: ?i64, native: i64, default: i64) error{ Negative, NoNative, PastNative }!i64 {
+    const r = requested orelse return if (native > 0) @min(default, native) else default;
+    if (r < 0) return error.Negative;
+    if (r == 0) return if (native > 0) native else error.NoNative;
+    if (native > 0 and r > native) return error.PastNative;
+    return r;
+}
+
 /// The kernel set: TENSORFOLD_CUDA_KERNELS, else share/tensorfold/cuda/sm<capability> beside the binary.
 fn kernelDir(a: Allocator, io: std.Io, capability: u32) ![]const u8 {
-    if (std.c.getenv("TENSORFOLD_CUDA_KERNELS")) |dir| return a.dupe(u8, std.mem.span(dir));
+    if (getenv("TENSORFOLD_CUDA_KERNELS")) |dir| return a.dupe(u8, dir);
     const exe = try std.process.executableDirPathAlloc(io, a);
     return std.fs.path.join(a, &.{ exe, "..", "share", "tensorfold", "cuda", try std.fmt.allocPrint(a, "sm{d}", .{capability}) });
+}
+
+/// The bytes of the checkpoint's safetensors files: what its weights need on the device, near enough to refuse early.
+fn weightBytes(io: std.Io, dir: []const u8) u64 {
+    var d = std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch return 0;
+    defer d.close(io);
+    var total: u64 = 0;
+    var it = d.iterate();
+    while (it.next(io) catch null) |e| {
+        if (!std.mem.endsWith(u8, e.name, ".safetensors")) continue;
+        const st = d.statFile(io, e.name, .{}) catch continue;
+        total += st.size;
+    }
+    return total;
+}
+
+/// What /proc/meminfo says: MemTotal and MemAvailable in bytes (the page cache counts as available).
+const MemInfo = struct { total: u64, available: u64 };
+
+fn meminfo(text: []const u8) ?MemInfo {
+    var total: ?u64 = null;
+    var available: ?u64 = null;
+    var rows = std.mem.tokenizeScalar(u8, text, '\n');
+    while (rows.next()) |row| {
+        var words = std.mem.tokenizeAny(u8, row, ": \t");
+        const key = words.next() orelse continue;
+        const kib = std.fmt.parseInt(u64, words.next() orelse continue, 10) catch continue;
+        if (std.mem.eql(u8, key, "MemTotal")) total = kib * 1024 else if (std.mem.eql(u8, key, "MemAvailable")) available = kib * 1024;
+    }
+    return .{ .total = total orelse return null, .available = available orelse return null };
+}
+
+/// The memory a CUDA engine may take: a discrete card's free memory, or on a GPU that shares the host's memory (GB10)
+/// the host's available memory, both less a reserve, under TENSORFOLD_CUDA_MEMORY_LIMIT_GB.
+const Pool = struct {
+    free: u64,
+    total: u64,
+    reserve: u64,
+    limit: ?u64,
+    unified: bool,
+
+    /// Bytes the engine may still allocate on top of `held`.
+    fn room(p: Pool, held: u64) u64 {
+        const left = p.free -| p.reserve;
+        return if (p.limit) |cap| @min(left, cap -| held) else left;
+    }
+};
+
+/// TENSORFOLD_MEMORY_RESERVE_GIB (2 GiB up to the pool's size), else a tenth of the pool and at least 4 GiB.
+fn reserveBytes(text: ?[]const u8, total: u64) error{Invalid}!u64 {
+    const t = std.mem.trim(u8, text orelse "", " ");
+    if (t.len == 0) return @max(4 << 30, total / 10);
+    const g = std.fmt.parseFloat(f64, t) catch return error.Invalid;
+    if (!(g >= 2) or g * gib > @as(f64, @floatFromInt(total))) return error.Invalid;
+    return @intFromFloat(g * gib);
+}
+
+/// TENSORFOLD_CUDA_MEMORY_LIMIT_GB in bytes; null when unset.
+fn limitBytes(text: ?[]const u8) error{Invalid}!?u64 {
+    const t = std.mem.trim(u8, text orelse return null, " ");
+    if (t.len == 0) return null;
+    const g = std.fmt.parseFloat(f64, t) catch return error.Invalid;
+    if (!(g > 0) or !std.math.isFinite(g)) return error.Invalid;
+    return @intFromFloat(g * gib);
+}
+
+/// The pool now, read on the thread whose context is current; `problem` names a bad variable.
+fn pool(a: Allocator, io: std.Io, ctx: *const cuda.Context, problem: *[]const u8) !?Pool {
+    const unified = (try ctx.attribute(.integrated)) != 0;
+    const card = try ctx.memInfo();
+    var free: u64 = card.free;
+    var total: u64 = card.total;
+    if (unified) {
+        const text = std.Io.Dir.cwd().readFileAlloc(io, "/proc/meminfo", a, .limited(1 << 20)) catch "";
+        if (meminfo(text)) |m| {
+            free = m.available;
+            total = m.total;
+        }
+    }
+    const reserve = reserveBytes(getenv("TENSORFOLD_MEMORY_RESERVE_GIB"), total) catch {
+        problem.* = try std.fmt.allocPrint(a, "TENSORFOLD_MEMORY_RESERVE_GIB={s}: a number of GiB from 2 to the memory's size", .{getenv("TENSORFOLD_MEMORY_RESERVE_GIB").?});
+        return null;
+    };
+    const limit = limitBytes(getenv("TENSORFOLD_CUDA_MEMORY_LIMIT_GB")) catch {
+        problem.* = try std.fmt.allocPrint(a, "TENSORFOLD_CUDA_MEMORY_LIMIT_GB={s}: a positive number of GiB", .{getenv("TENSORFOLD_CUDA_MEMORY_LIMIT_GB").?});
+        return null;
+    };
+    return .{ .free = free, .total = total, .reserve = reserve, .limit = limit, .unified = unified };
+}
+
+/// Streams the room fits, as many as asked when they all fit; an error when none does, or a fixed --parallel doesn't.
+fn admit(room: u64, stream: u64, asked: u32, fixed: bool) error{ NoStream, TooMany }!u32 {
+    const fits = if (stream == 0) asked else std.math.cast(u32, room / stream) orelse std.math.maxInt(u32);
+    if (fits == 0) return error.NoStream;
+    if (fits >= asked) return asked;
+    return if (fixed) error.TooMany else fits;
+}
+
+fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
+    const u = cuda.usage(reset_peak);
+    return .{ .active = u.device, .cache = 0, .peak = u.peak };
 }
 
 /// The context a lane thread needs current: the lane host steps rounds on its own thread, CUDA binds per thread.
 threadlocal var bound: ?*const cuda.Context = null;
 
+const Gpu = struct { driver: cuda.Driver, ctx: cuda.Context };
+
 /// One loaded model behind the lane host: everything the engine thread reads lives here.
 const Host = struct {
     gpa: Allocator,
-    driver: cuda.Driver,
-    ctx: cuda.Context,
+    gpu: ?*Gpu, // null in host tests: no context to bind
     family: *anyopaque,
     release: *const fn (*anyopaque) void,
     inner: lanes.backend.Backend,
@@ -71,26 +201,44 @@ const Host = struct {
     clock: lanes.backend.WallClock,
     core: lanes.Engine,
     host: api.LaneHost,
+    startup: []u8 = &.{},
 
     fn close(p: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(p));
         h.host.stop();
         h.core.deinit();
         h.cfg.deinit(h.gpa);
-        h.ctx.makeCurrent() catch {};
+        if (h.gpu) |g| g.ctx.makeCurrent() catch {};
         h.release(h.family);
-        h.ctx.deinit();
-        h.driver.close();
+        if (h.gpu) |g| {
+            g.ctx.deinit();
+            g.driver.close();
+            h.gpa.destroy(g);
+        }
+        h.gpa.free(h.startup);
         h.gpa.destroy(h);
     }
 
     fn bind(p: *anyopaque) *Host {
         const h: *Host = @ptrCast(@alignCast(p));
-        if (bound != &h.ctx) {
-            h.ctx.makeCurrent() catch |e| std.log.err("cuCtxSetCurrent on the lane thread: {s}", .{@errorName(e)});
-            bound = &h.ctx;
-        }
+        if (h.gpu) |g| if (bound != &g.ctx) {
+            g.ctx.makeCurrent() catch |e| std.log.err("cuCtxSetCurrent on the lane thread: {s}", .{@errorName(e)});
+            bound = &g.ctx;
+        };
         return h;
+    }
+
+    /// The round loop and the lane host over the family's backend, its thread started.
+    fn serve(h: *Host, io: std.Io, facts: lanes.Model, rows: u32, info: api.Info, explain: ?api.Explain) !void {
+        h.cfg = try lanes.Config.init(h.gpa, facts, rows, rows - 1);
+        errdefer h.cfg.deinit(h.gpa);
+        h.clock = .{ .io = io };
+        h.core = lanes.Engine.init(h.gpa, &h.cfg, h.backend(), h.clock.clock());
+        errdefer h.core.deinit();
+        h.host = api.LaneHost.init(h.gpa, io, &h.core, info);
+        h.host.memory = if (h.gpu != null) .{ .read = readMemory } else null;
+        h.host.explain = explain;
+        try h.host.start();
     }
 
     /// The family's backend, each call made with the context current on the calling thread.
@@ -185,49 +333,215 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
 
 fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const native = modelContext(a, io, o.dir);
-    const window: i64 = o.context orelse @min(F.default_context, if (native > 0) native else F.default_context);
-    if (window <= 0 or (native > 0 and window > native)) {
-        problem.* = try std.fmt.allocPrint(a, "--context {d} exceeds this model's {d}-token window", .{ window, native });
+    const window = contextWindow(o.context, native, F.default_context) catch |e| {
+        problem.* = switch (e) {
+            error.Negative => try std.fmt.allocPrint(a, "--context {d}: a token count, or 0 for the model's window", .{o.context.?}),
+            error.NoNative => "--context 0 asks for the model's window, and its config.json names none: give a token count",
+            error.PastNative => try std.fmt.allocPrint(a, "--context {d} exceeds this model's {d}-token window", .{ o.context.?, native }),
+        };
+        return null;
+    };
+    const device = try setting(a, o.device, "TF_CUDA_DEVICE", 0, problem) orelse return null;
+    const segments = try setting(a, o.segments, "TF_CUDA_SEGMENTS", 1, problem) orelse return null;
+    if (segments < 1 or segments > F.max_segments) {
+        const named = if (o.segments != null) "--segments " else "TF_CUDA_SEGMENTS=";
+        problem.* = try std.fmt.allocPrint(a, "{s}{d}: whole prompt chunks a call, 1 to {d}", .{ named, segments, F.max_segments });
         return null;
     }
-    const h = try gpa.create(Host);
-    errdefer gpa.destroy(h);
-    h.gpa = gpa;
-    h.driver = cuda.Driver.open() catch |e| {
+    const g = try gpa.create(Gpu);
+    var opened = false;
+    defer if (!opened) gpa.destroy(g);
+    g.driver = cuda.Driver.open() catch |e| {
         problem.* = try std.fmt.allocPrint(a, "no CUDA driver ({s})", .{@errorName(e)});
         return null;
     };
-    errdefer h.driver.close();
-    h.ctx = try cuda.Context.init(&h.driver, deviceOrdinal());
-    errdefer h.ctx.deinit();
-    bound = &h.ctx;
-    const kernels = try kernelDir(a, io, try h.ctx.capability());
-    const loaded = F.open(gpa, io, &h.ctx, o.dir, kernels, .{ .context = @intCast(window), .drafts = o.drafts }) catch |e| {
+    defer if (!opened) g.driver.close();
+    const count = try g.driver.deviceCount();
+    if (device >= count) {
+        const named = if (o.device != null) "--device " else "TF_CUDA_DEVICE=";
+        problem.* = try std.fmt.allocPrint(a, "{s}{d}: this machine has {d} CUDA device{s} (0 to {d})", .{ named, device, count, if (count == 1) "" else "s", @max(count, 1) - 1 });
+        return null;
+    }
+    g.ctx = try cuda.Context.init(&g.driver, @intCast(device));
+    defer if (!opened) g.ctx.deinit();
+    bound = &g.ctx;
+    const capability = try g.ctx.capability();
+    var name_buf: [256]u8 = undefined;
+    const name = g.ctx.name(&name_buf) catch "GPU";
+    const kernels = try kernelDir(a, io, capability);
+    std.Io.Dir.cwd().access(io, try std.fs.path.join(a, &.{ kernels, "aot.json" }), .{}) catch {
+        problem.* = try std.fmt.allocPrint(a, "no CUDA kernel set for sm_{d} at {s}: set TENSORFOLD_CUDA_KERNELS to a folder from aot_pack.py", .{ capability, kernels });
+        return null;
+    };
+    const before = try pool(a, io, &g.ctx, problem) orelse return null;
+    const weights = weightBytes(io, o.dir);
+    const held0 = cuda.usage(false).device;
+    if (weights > before.room(held0)) {
+        problem.* = try std.fmt.allocPrint(a, "the checkpoint's {d:.1} GiB of weights do not fit the {d:.1} GiB the CUDA memory budget grants ({d:.1} GiB free less a {d:.1} GiB reserve{s}); free device memory or adjust TENSORFOLD_MEMORY_RESERVE_GIB / TENSORFOLD_CUDA_MEMORY_LIMIT_GB", .{ toGib(weights), toGib(before.room(held0)), toGib(before.free), toGib(before.reserve), if (before.limit != null) ", under TENSORFOLD_CUDA_MEMORY_LIMIT_GB" else "" });
+        return null;
+    }
+    const loaded = F.open(gpa, io, &g.ctx, o.dir, kernels, .{ .context = @intCast(window), .drafts = o.drafts, .segments = segments }) catch |e| {
         problem.* = try std.fmt.allocPrint(a, "the native CUDA engine cannot load {s} with kernels {s} ({s})", .{ o.dir, kernels, @errorName(e) });
         return null;
     };
-    h.family = loaded.ctx;
-    h.release = loaded.deinit;
-    errdefer h.release(h.family);
-    h.inner = loaded.backend;
-    h.cfg = try lanes.Config.init(gpa, loaded.facts, loaded.rows, loaded.rows - 1);
-    errdefer h.cfg.deinit(gpa);
-    h.clock = .{ .io = io };
-    h.core = lanes.Engine.init(gpa, &h.cfg, h.backend(), h.clock.clock());
-    errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(window), .prefill_step = F.prefill_step });
-    try h.host.start();
+    defer if (!opened) loaded.deinit(loaded.ctx);
+    const model = cuda.usage(false).device - held0;
+    const after = try pool(a, io, &g.ctx, problem) orelse return null;
+    const room = after.room(model);
+    const streams = admit(room, loaded.stream_bytes, o.lanes, o.lanes_fixed) catch |e| {
+        problem.* = switch (e) {
+            error.NoStream => try std.fmt.allocPrint(a, "the CUDA memory budget fits no stream: one at a {d}-token window takes {d:.2} GiB, and {d:.2} GiB is left after the model's {d:.2} GiB and the {d:.1} GiB reserve; lower --context, or free device memory", .{ window, toGib(loaded.stream_bytes), toGib(room), toGib(model), toGib(after.reserve) }),
+            error.TooMany => try std.fmt.allocPrint(a, "--parallel {d} needs {d:.2} GiB for its streams at a {d}-token window, and the CUDA memory budget leaves {d:.2} GiB: serve --parallel {d}, or lower --context", .{ o.lanes, toGib(loaded.stream_bytes * o.lanes), window, toGib(room), room / loaded.stream_bytes }),
+        };
+        return null;
+    };
+    const h = try gpa.create(Host);
+    errdefer gpa.destroy(h);
+    h.* = .{ .gpa = gpa, .gpu = g, .family = loaded.ctx, .release = loaded.deinit, .inner = loaded.backend, .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined };
+    h.startup = try std.fmt.allocPrint(gpa, "CUDA sm_{d} device {d} ({s}{s}): model {d:.2} GiB; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window, of {d:.1} GiB left after a {d:.1} GiB reserve; prompts in {d}-row chunks{s}", .{
+        capability, device, name, if (after.unified) ", memory shared with the host" else "", toGib(model), streams, if (streams == 1) "" else "s", toGib(loaded.stream_bytes), window, toGib(room), toGib(after.reserve), F.prompt_rows, if (segments > 1) try std.fmt.allocPrint(a, ", {d} staggered segments a call", .{segments}) else "",
+    });
+    errdefer gpa.free(h.startup);
+    // the family cuts its own prompt grid from position 0, as `tensorfold run` does: prefill_step 0
+    try h.serve(io, loaded.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(window), .startup = h.startup }, .{ .ctx = loaded.ctx, .text = F.explain });
+    opened = true;
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }
 
-test "chip classes name the compute capability" {
+fn toGib(bytes: u64) f64 {
+    return @as(f64, @floatFromInt(bytes)) / gib;
+}
+
+test "chip classes name the compute capability as gate entries do" {
     const a = std.testing.allocator;
     const name = chipClass(a, 121).?;
     defer a.free(name);
-    try std.testing.expectEqualStrings("nvidia-sm121", name);
+    try std.testing.expectEqualStrings("sm_121", name);
 }
 
 test "every registered family is listed for capabilities" {
     try std.testing.expectEqual(@as(usize, registry.len), families.len);
     try std.testing.expectEqualStrings("nemotron_h", families[0].model_type);
+}
+
+test "variables: unset or empty means the default, anything but a whole number is refused" {
+    try std.testing.expectEqual(@as(?u32, null), try envNumber(null));
+    try std.testing.expectEqual(@as(?u32, null), try envNumber(""));
+    try std.testing.expectEqual(@as(?u32, 3), try envNumber(" 3"));
+    try std.testing.expectError(error.Invalid, envNumber("one"));
+    try std.testing.expectError(error.Invalid, envNumber("-1"));
+}
+
+test "context windows: the family default inside the model's, 0 for the model's, never past it" {
+    try std.testing.expectEqual(@as(i64, 16384), try contextWindow(null, 262144, 16384));
+    try std.testing.expectEqual(@as(i64, 4096), try contextWindow(null, 4096, 16384));
+    try std.testing.expectEqual(@as(i64, 262144), try contextWindow(0, 262144, 16384));
+    try std.testing.expectEqual(@as(i64, 65536), try contextWindow(65536, 262144, 16384));
+    try std.testing.expectError(error.PastNative, contextWindow(300000, 262144, 16384));
+    try std.testing.expectError(error.Negative, contextWindow(-5, 262144, 16384));
+    try std.testing.expectError(error.NoNative, contextWindow(0, 0, 16384));
+}
+
+test "the memory plan: reserve, cap, and admission that fails closed" {
+    const g: u64 = 1 << 30;
+    try std.testing.expectEqual(4 * g, try reserveBytes(null, 24 * g)); // at least 4 GiB
+    try std.testing.expectEqual(12 * g, try reserveBytes("", 120 * g)); // a tenth
+    try std.testing.expectEqual(3 * g, try reserveBytes("3", 120 * g));
+    try std.testing.expectError(error.Invalid, reserveBytes("1", 120 * g));
+    try std.testing.expectError(error.Invalid, reserveBytes("200", 120 * g));
+    try std.testing.expectEqual(@as(?u64, null), try limitBytes(null));
+    try std.testing.expectEqual(@as(?u64, 40 * g), try limitBytes("40"));
+    try std.testing.expectError(error.Invalid, limitBytes("0"));
+    const p: Pool = .{ .free = 70 * g, .total = 96 * g, .reserve = 10 * g, .limit = null, .unified = false };
+    try std.testing.expectEqual(60 * g, p.room(20 * g));
+    const capped: Pool = .{ .free = 70 * g, .total = 96 * g, .reserve = 10 * g, .limit = 30 * g, .unified = false };
+    try std.testing.expectEqual(10 * g, capped.room(20 * g)); // the cap less what the engine holds
+    try std.testing.expectEqual(@as(u32, 8), try admit(60 * g, g, 8, false));
+    try std.testing.expectEqual(@as(u32, 5), try admit(5 * g + 1, g, 8, false)); // auto serves what fits
+    try std.testing.expectError(error.TooMany, admit(5 * g, g, 8, true)); // a fixed --parallel refuses
+    try std.testing.expectError(error.NoStream, admit(g - 1, g, 8, false));
+}
+
+test "meminfo: total and available in bytes" {
+    const m = meminfo("MemTotal:       131072 kB\nMemFree:          1024 kB\nMemAvailable:    65536 kB\n").?;
+    try std.testing.expectEqual(@as(u64, 131072 * 1024), m.total);
+    try std.testing.expectEqual(@as(u64, 65536 * 1024), m.available);
+    try std.testing.expect(meminfo("MemTotal: 5 kB\n") == null);
+}
+
+test "a cancel during a long prompt stops it, and the next request's reply is unchanged (#291)" {
+    const gpa = std.testing.allocator;
+    var target: lanes.fake.Fake = .{ .gpa = gpa, .prefill_chunks = 10 };
+    defer target.deinit();
+    const Nothing = struct {
+        fn release(_: *anyopaque) void {}
+    };
+    const h = try gpa.create(Host);
+    defer gpa.destroy(h);
+    h.* = .{ .gpa = gpa, .gpu = null, .family = &target, .release = Nothing.release, .inner = target.backend(), .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined };
+    try h.serve(std.testing.io, .{ .exact_width = 8, .mtp = true, .speculate = true, .drafts = 7, .hidden_rows = true }, 8, .{ .lanes = 2 }, null);
+    defer {
+        h.host.stop();
+        h.core.deinit();
+        h.cfg.deinit(gpa);
+    }
+    const e = h.host.engine();
+    try std.testing.expect(e.memory(false) == null); // no device to count
+    const Box = struct {
+        mutex: std.Io.Mutex = .init,
+        tokens: std.ArrayList(u32) = .empty,
+        done: ?api.Reason = null,
+        fn event(ctx: *anyopaque, _: api.Id, ev: *const api.Event) void {
+            const b: *@This() = @ptrCast(@alignCast(ctx));
+            b.mutex.lockUncancelable(std.testing.io);
+            defer b.mutex.unlock(std.testing.io);
+            switch (ev.*) {
+                .tokens => |t| b.tokens.appendSlice(gpa, t) catch {},
+                .finished => |f| b.done = f.reason,
+                else => {},
+            }
+        }
+        fn wait(b: *@This()) api.Reason {
+            while (true) {
+                b.mutex.lockUncancelable(std.testing.io);
+                const d = b.done;
+                b.mutex.unlock(std.testing.io);
+                if (d) |r| return r;
+                std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+            }
+        }
+    };
+    const Breaker = struct {
+        engine: api.Engine,
+        id: api.Id,
+        fn call(ctx: *anyopaque, _: *lanes.Stream, chunk: usize) void {
+            const c: *@This() = @ptrCast(@alignCast(ctx));
+            if (chunk == 2 and c.id != 0) c.engine.cancel(c.id);
+        }
+    };
+    const prompt = [_]u32{ 8, 6, 7, 5, 3, 0, 9, 2, 1, 4 };
+    const request: api.Request = .{ .prompt = &prompt, .max_tokens = 40 };
+    var breaker: Breaker = .{ .engine = e, .id = 1 };
+    target.prefill_hook = Breaker.call;
+    target.prefill_hook_ctx = &breaker;
+    var broken: Box = .{};
+    defer broken.tokens.deinit(gpa);
+    try e.submit(1, &request, .{ .ctx = &broken, .event = Box.event });
+    try std.testing.expectEqual(api.Reason.cancelled, broken.wait());
+    try std.testing.expect(target.prefill_count <= 3); // stopped at the next chunk, not after all ten
+    try std.testing.expectEqual(@as(usize, 0), target.lanes.count()); // its lane released
+    try std.testing.expectEqual(@as(usize, 0), broken.tokens.items.len);
+    breaker.id = 0;
+    var restored: Box = .{};
+    defer restored.tokens.deinit(gpa);
+    try e.submit(2, &request, .{ .ctx = &restored, .event = Box.event });
+    try std.testing.expectEqual(api.Reason.length, restored.wait());
+    var history: std.ArrayList(u32) = .empty;
+    defer history.deinit(gpa);
+    try history.appendSlice(gpa, &prompt);
+    for (restored.tokens.items) |t| {
+        try std.testing.expectEqual(lanes.fake.next(history.items, null, history.items.len), t);
+        try history.append(gpa, t);
+    }
+    try std.testing.expectEqual(@as(usize, 40), restored.tokens.items.len);
 }

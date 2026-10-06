@@ -117,6 +117,35 @@ pub const Kernels = struct {
         k.triton.deinit();
         for (&k.mods) |*m| m.unload();
     }
+
+    /// The target's sampled rules the captured set holds (greedy and the head's draws aside), at most `out.len`.
+    pub fn sampledRules(k: *const Kernels, out: []@import("cuda_triton.zig").Keyed) usize {
+        var n: usize = 0;
+        for (k.triton.variants) |v| {
+            if (!std.mem.eql(u8, v.spec.@"fn", "_keyed")) continue;
+            const m = v.spec.consts.map;
+            const get = struct {
+                fn f(map: @TypeOf(m), name: []const u8) i64 {
+                    return (map.get(name) orelse return -1).int orelse -1;
+                }
+            }.f;
+            if (get(m, "GREEDY") != 0 or get(m, "CONF_T") != 0 or get(m, "K") < 1) continue;
+            const r: @import("cuda_triton.zig").Keyed = .{ .k = @intCast(get(m, "K")), .cut = get(m, "CUT") == 1, .minp = get(m, "MINP") == 1 };
+            for (out[0..n]) |x| {
+                if (std.meta.eql(x, r)) break;
+            } else if (n < out.len) {
+                out[n] = r;
+                n += 1;
+            }
+        }
+        return n;
+    }
+
+    /// Whether the captured set draws keyed rule `r` (its top_k, top-p cut, min-p cut, and a draft's share at T).
+    pub fn draws(k: *const Kernels, r: @import("cuda_triton.zig").Keyed) bool {
+        const c = cuda.aot.ci;
+        return k.triton.compiled("_keyed", &.{ c("K", @intCast(r.k)), c("CUT", @intFromBool(r.cut)), c("GREEDY", @intFromBool(r.greedy)), c("MINP", @intFromBool(r.minp)), c("CONF_T", @intFromBool(r.conf_t)) });
+    }
 };
 
 /// qmm.split_k: K slices fixed by the weight's shape, never by the row count.

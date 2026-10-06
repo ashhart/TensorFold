@@ -73,13 +73,18 @@ pub const Seq = struct {
     head_pos: usize = 0,
     sampling: ?sampler.Sampling = null,
 
+    /// The device bytes one sequence takes: its buffers for `max_len` cache rows and a head's `head` buffers.
+    pub fn bytes(c: Config, max_len: usize, head: []const usize) usize {
+        var total: usize = 0;
+        for (seqSizes(c, max_len)) |n| total += n + 256;
+        for (head) |n| total += n + 256;
+        return total;
+    }
+
     /// Buffers for `max_len` cache rows and a head's `head` buffers, zeroed on `stream` (the legacy stream would race it).
     pub fn init(d: *const cuda.Driver, c: Config, max_len: usize, head: []const usize, stream: cuda.Stream) !Seq {
         const sizes = seqSizes(c, max_len);
-        var total: usize = 0;
-        for (sizes) |n| total += n + 256;
-        for (head) |n| total += n + 256;
-        var a: Arena = .{ .buf = try cuda.DeviceBuffer.alloc(d, total) };
+        var a: Arena = .{ .buf = try cuda.DeviceBuffer.alloc(d, bytes(c, max_len, head)) };
         errdefer a.buf.free();
         try a.buf.fill8(0, stream.handle);
         var s: Seq = .{ .arena = null, .ptr = undefined };

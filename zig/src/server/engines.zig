@@ -19,7 +19,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, dir: []const u8, model_typ
         .model_type = model_type,
         .context = args.context,
         .lanes = cli.parallel(args.parallel) orelse 8,
+        .lanes_fixed = cli.parallelFixed(args.parallel),
         .drafts = !args.no_drafts,
         .speed_up = args.speed_up,
+        .device = args.device,
+        .segments = args.segments,
     }, problem);
 }
