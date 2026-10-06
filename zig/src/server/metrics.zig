@@ -91,11 +91,14 @@ pub const Metrics = struct {
         var status: api.Status = .{};
         var streams: [512]u32 = undefined;
         engine.status(&status, &streams);
-        m.mutex.lockUncancelable(io);
-        const snap = m.*;
-        const requests = try m.gpa.dupe(@TypeOf(m.requests.items[0]), m.requests.items);
+        var snap: Metrics = undefined;
+        const requests = blk: {
+            m.mutex.lockUncancelable(io);
+            defer m.mutex.unlock(io);
+            snap = m.*;
+            break :blk try m.gpa.dupe(@TypeOf(m.requests.items[0]), m.requests.items);
+        };
         defer m.gpa.free(requests);
-        m.mutex.unlock(io);
         std.mem.sort(@TypeOf(requests[0]), requests, {}, struct {
             fn less(_: void, x: @TypeOf(requests[0]), y: @TypeOf(requests[0])) bool {
                 const o = std.mem.order(u8, x.key, y.key);
@@ -250,4 +253,34 @@ test "render exposes live counters, rounds, prefill and TPOT without cache famil
     try std.testing.expect(std.mem.indexOf(u8, body, "tensorfold:request_prefill_seconds_sum 0.25") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "tensorfold:request_time_per_output_token_seconds_sum 1") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "prompt_tokens_cached_total") == null);
+}
+
+test "metrics snapshot allocation failure releases the mutex" {
+    const io = std.testing.io;
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const gpa = failing.allocator();
+    var m: Metrics = .{ .gpa = gpa };
+    defer {
+        for (m.requests.items) |r| gpa.free(r.key);
+        m.requests.deinit(gpa);
+    }
+    m.httpRequest(io, "client", 200);
+    try std.testing.expectEqual(@as(usize, 1), m.requests.items.len);
+    var stub: RenderStub = .{};
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, m.render(io, &out.writer, stub.engine(), 4096));
+    const available = m.mutex.tryLock();
+    // No other thread uses m: either tryLock acquired it, or render retained it.
+    // Release before asserting so the unfixed regression terminates without blocking.
+    m.mutex.unlock(io);
+    try std.testing.expect(available);
+    try std.testing.expect(failing.has_induced_failure);
+    failing.fail_index = std.math.maxInt(usize);
+    m.httpRequest(io, "client", 200);
+    m.note(io, 10, 3, 0, 0, 2, 1.0, null, null, 0.25, null);
+    try m.render(io, &out.writer, stub.engine(), 4096);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "requests_total{key=\"client\",status=\"200\"} 2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "prompt_tokens_total 10") != null);
 }
