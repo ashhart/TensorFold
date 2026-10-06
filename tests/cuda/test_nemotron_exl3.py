@@ -174,15 +174,26 @@ def test_nemotron_weight_loader_selects_exl3_without_rewriting_weights(tmp_path,
     assert calls == [(tmp_path, "cpu")]
 
 
+def _calibrated_model():
+    import os
+    from pathlib import Path
+
+    raw = os.environ.get("TENSORFOLD_NEMOTRON_EXL3_MODEL")
+    if not raw:
+        pytest.skip("set TENSORFOLD_NEMOTRON_EXL3_MODEL for real checkpoint tests")
+    assert raw is not None
+    model = Path(raw).expanduser()
+    if not (model / "model.safetensors.index.json").is_file():
+        pytest.fail(f"indexed calibrated checkpoint missing at {model}")
+    return model
+
+
 @pytest.mark.skipif(not __import__("torch").cuda.is_available(), reason="CUDA only")
 def test_nemotron_calibrated_exl3_checkpoint_loads_on_one_gpu():
-    from pathlib import Path
     import torch
     from tensorfold.families.nemotron_h.cuda import weights
 
-    model = Path("/home/neo/ai/exl3/nvidia-NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/quants/4.00bpw-hq-cal")
-    if not (model / "model.safetensors.index.json").is_file():
-        pytest.skip("local calibrated checkpoint unavailable")
+    model = _calibrated_model()
     loaded = weights.load(model, mtp=False)
     assert len(loaded.blocks) == loaded.config.pattern.count("M") + loaded.config.pattern.count("*") + loaded.config.pattern.count("E")
     assert loaded.config.pattern.count("E") == 23
@@ -237,14 +248,11 @@ def test_nemotron_exl3_engine_routes_and_adds_one_shared_expert():
 
 @pytest.mark.skipif(not __import__("torch").cuda.is_available(), reason="CUDA only")
 def test_nemotron_calibrated_exl3_prefill_produces_a_token():
-    from pathlib import Path
     import torch
     from tensorfold.families.nemotron_h.cuda.engine import Engine
     from tensorfold.families.nemotron_h.cuda.weights import load
 
-    model = Path("/home/neo/ai/exl3/nvidia-NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/quants/4.00bpw-hq-cal")
-    if not (model / "model.safetensors.index.json").is_file():
-        pytest.skip("local calibrated checkpoint unavailable")
+    model = _calibrated_model()
     weights = load(model, mtp=False)
     engine = Engine(weights, max_len=512, graphs=False, prefill_rows=32)
     engine.set_sampling(None)

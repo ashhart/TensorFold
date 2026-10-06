@@ -1,6 +1,7 @@
 """Gateless ReLU² EXL3 routed experts: synthetic and local Nemotron-H checkpoint tensors on CUDA."""
 
 import math
+import os
 from pathlib import Path
 
 import pytest
@@ -132,10 +133,14 @@ def test_real_quant_tensors_agree_with_exllamav3_reconstruction():
     """Actual calibrated 4bpw layer, logical 1856 / stored 1920, EXL3 decode by ExLlamaV3."""
     from tensorfold.cuda.exl3 import experts
 
-    root = Path("/home/neo/ai/exl3/nvidia-NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/quants/4.00bpw-hq-cal")
+    raw = os.environ.get("TENSORFOLD_NEMOTRON_EXL3_MODEL")
+    if not raw:
+        pytest.skip("set TENSORFOLD_NEMOTRON_EXL3_MODEL for real checkpoint test")
+    assert raw is not None
+    root = Path(raw).expanduser()
     files = sorted(root.glob("*.safetensors"))
     if not files:
-        pytest.skip(f"local calibrated Nemotron-H EXL3 checkpoint absent: {root}")
+        pytest.fail(f"calibrated Nemotron-H EXL3 checkpoint absent: {root}")
     safe_open = pytest.importorskip("safetensors").safe_open
     exllamav3_ext = pytest.importorskip("exllamav3.ext").exllamav3_ext
     prefix = "backbone.layers.1.mixer.experts"

@@ -57,6 +57,10 @@ long requests. Both backends use the same public draft list below.
 
 ## CUDA EXL3 (single-GPU serial path)
 
+For the pinned BF16 source, non-mutating config adapter, exact self-calibration
+and conversion commands, implementation notes, test gates, and authenticated
+launch/smoke commands, see the [calibrated EXL3 reproduction recipe](nemotron-3.5-exl3-calibrated.md).
+
 The EXL3 loader reads packed projections and plain tensors across safetensors shards, trims padded
 projections to logical widths, assembles attention Q/K/V in order, and evaluates Nemotron's gateless
 ReLU² routed and shared experts. Routed expert outputs are computed per selected slot; the shared
