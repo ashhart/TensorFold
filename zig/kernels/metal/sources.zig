@@ -63,6 +63,8 @@ pub const glm = @import("glm/kernels.zig");
 pub const glm_glue = @embedFile("glm_glue.metal");
 /// GLM-5.3-Flash's latent attention for rows that read every key: 64 heads as one matrix on the tensor units.
 pub const glm_attn = @embedFile("glm_attn.metal");
+/// A prompt chunk's KDA layer in three passes, appended to the generated kda_rows source (its helpers).
+pub const glm_kda_prompt = @embedFile("glm_kda_prompt.metal");
 /// A MoE layer's route in two launches (core/moe_route.zig): router logits, then the top-k and the expert groups.
 pub const core_moe_route = @embedFile("core/moe_route.metal");
 pub const core_affine_mm = @embedFile("core/affine_mm.metal");

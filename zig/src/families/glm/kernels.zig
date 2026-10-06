@@ -73,6 +73,9 @@ pub const Kernels = struct {
     hc_expand: mtl.Pipeline, // the one-launch boundary (core/hc.zig), with the pending branch
     hc_first: mtl.Pipeline, // and without
     hc_mix_split: mtl.Pipeline, // the mix and, by the last threadgroup of a row, the split (after the family's expand)
+    kda_pre: mtl.Pipeline, // a prompt chunk's KDA layer in three passes (glm_kda_prompt.metal): gates, conv, norms
+    kda_scan: mtl.Pipeline, // the recurrence alone
+    kda_post: mtl.Pipeline, // the output norm and gate
     mm_bf16: affine_mm.Pipes, // prompt chunks' 4-bit g64 matmuls on the tensor units (core/affine_mm.zig): dense, gathers
     mm_f32: affine_mm.Pipes, // and with fp32 out: expert parallel by rows' down partials
 
@@ -164,7 +167,7 @@ fn kernelOf(comptime key: []const u8) sources.glm.Kernel {
 pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const k = try gpa.create(Kernels);
     errdefer gpa.destroy(k);
-    var jobs: [generated.len + 9]Job = undefined;
+    var jobs: [generated.len + 10]Job = undefined;
     inline for (generated, 0..) |g, i| {
         const src = comptime kernelOf(g.key);
         const FT = @FieldType(Kernels, g.field);
@@ -204,6 +207,10 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     defer gpa.free(m32_src);
     jobs[generated.len + 7] = .{ .device = device, .source = m16_src, .names = &affine_mm.names, .out = &k.mm_bf16 };
     jobs[generated.len + 8] = .{ .device = device, .source = m32_src, .names = &affine_mm.names, .out = &k.mm_f32 };
+    const kda_src = try std.mem.concat(gpa, u8, &.{ comptime kernelOf("kda_rows").source, sources.glm_kda_prompt });
+    defer gpa.free(kda_src);
+    var kda_out: [3]mtl.Pipeline = undefined;
+    jobs[generated.len + 9] = .{ .device = device, .source = kda_src, .names = &.{ "glm_kda_pre", "glm_kda_scan", "glm_kda_post" }, .out = &kda_out };
     var next = std.atomic.Value(usize).init(0);
     const Worker = struct {
         fn run(all: []Job, counter: *std.atomic.Value(usize)) void {
@@ -228,5 +235,8 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     k.hc_expand = hc_out[0];
     k.hc_first = hc_out[1];
     k.hc_mix_split = hc_out[2];
+    k.kda_pre = kda_out[0];
+    k.kda_scan = kda_out[1];
+    k.kda_post = kda_out[2];
     return k;
 }

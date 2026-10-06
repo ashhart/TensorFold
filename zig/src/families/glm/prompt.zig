@@ -282,6 +282,43 @@ fn route(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const w
     inverse(p, e, n);
 }
 
+/// KDA layer `ki`'s step over a chunk's M rows of `proj` into `y` in three passes (glm_kda_prompt.metal): the fused
+/// step's bits, with only the recurrence in sequence. Its parts live in the MoE's fp32 buffer, idle during attention.
+fn kdaChunk(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, ki: usize, w: *const wts.Kda, M: u32) void {
+    const c = x.c;
+    const k = x.k;
+    const L = &x.s.kda[ki];
+    const cur = L.cur;
+    const H = c.kda_heads;
+    const plane = @as(usize, M) * c.kdaWidth() * 2; // [M, heads * dim] bf16
+    const q = p.yf;
+    const kk = q.at(plane);
+    const v = kk.at(plane);
+    const gate = v.at(plane);
+    const sy = gate.at(plane);
+    const g = sy.at(plane); // fp32
+    const beta = g.at(2 * plane);
+    std.debug.assert(6 * plane + @as(usize, M) * H * 4 <= @as(usize, max_rows) * c.topk * c.hidden * 4);
+    e.setPipeline(k.kda_pre);
+    bind(e, 0, .{p.proj});
+    fwd.shape(e, 1, .{ M, c.kdaProj() });
+    bind(e, 2, .{ L.cs[cur], w.conv_w, w.f_b.w, w.f_b.s, w.f_b.b, w.g_b.w, w.g_b.s, w.g_b.b, w.a, w.dt_bias });
+    e.setValue(c.lower_bound, 12);
+    bind(e, 13, .{ q, kk, v, g, gate, beta });
+    e.dispatchGroups(size(M, H, 1), size(32, 32, 1));
+    e.setPipeline(k.kda_scan);
+    bind(e, 0, .{ q, kk, v, g, beta, L.st[cur], L.st[1 - cur], sy });
+    e.setValue(@as(i32, @intCast(M)), 8);
+    e.dispatchGroups(size(32, H, 1), size(32, 1, 1));
+    e.setPipeline(k.kda_post);
+    bind(e, 0, .{ sy, gate, w.o_norm });
+    e.setValue(c.eps, 3);
+    bind(e, 4, .{ p.y, p.proj });
+    fwd.shape(e, 6, .{ M, c.kdaProj() });
+    bind(e, 7, .{ L.cs[cur], L.cs[1 - cur] });
+    e.dispatchGroups(size(M, H, 1), size(32, 1, 1));
+}
+
 /// Each (row, slot) pair's place in expert order.
 fn inverse(p: *const Prompt, e: mtl.ComputeEncoder, n: u32) void {
     e.setPipeline(p.k.get("custom_kernel_tf_sort_inverse_uint32_t_int32_t_uint32_t"));
@@ -341,7 +378,7 @@ pub fn backbone(p: *const Prompt, x: *fwd.Ctx, e: mtl.ComputeEncoder, ids: Ref, 
             .kda => |*a| {
                 if (s & Class.kda == 0) {
                     qmm(p, e, ss.normed, a.in_proj, p.proj, M);
-                    fwd.kdaStep(x, e, ki, a, p.proj, M, p.y);
+                    kdaChunk(p, x, e, ki, a, M);
                     qmm(p, e, p.y, a.o_proj, ss.branch, M);
                 }
                 ki += 1;
