@@ -11,7 +11,7 @@ const segments_cli = @import("cuda_segments.zig");
 const decode = nemotron.decode;
 
 const usage =
-    \\usage: tensorfold run MODEL --tokens ID,ID,... [--max-tokens N] [--no-drafts] [--report PATH] [--kernels DIR]
+    \\usage: tensorfold run MODEL --tokens ID,ID,... [--max-tokens N] [--no-drafts] [--report PATH] [--kernels DIR] [--device N]
     \\         [--temperature T] [--top-k K] [--top-p P] [--min-p M] [--seed S]   (temperature 0: greedy)
     \\         [--context N] [--ignore-eos] [--eager] [--costs MS1,...,MS16,LEVEL]
     \\         [--tokens-file PATH] [--segments N]   (N whole 2048-row prompt chunks a call as staggered segments,
@@ -71,6 +71,9 @@ pub fn main(init: std.process.Init) !u8 {
         } else if (std.mem.eql(u8, a, "--kernels")) {
             opts.kernels = value;
             i += 1;
+        } else if (std.mem.eql(u8, a, "--device")) {
+            opts.device = try std.fmt.parseInt(u32, value, 10);
+            i += 1;
         } else if (std.mem.eql(u8, a, "--dump")) {
             opts.dump = value;
             i += 1;
@@ -114,7 +117,8 @@ pub fn main(init: std.process.Init) !u8 {
     };
     var driver = try cuda.Driver.open();
     defer driver.close();
-    var ctx = try cuda.Context.init(&driver, 0);
+    const device = try deviceOrdinal(opts.device, init.environ_map.get("TF_CUDA_DEVICE"));
+    var ctx = try cuda.Context.init(&driver, @intCast(device));
     defer ctx.deinit();
     const cmd = args[1];
     const bench = std.mem.eql(u8, cmd, "segments");
@@ -154,6 +158,7 @@ const Options = struct {
     drafts: bool = true,
     report: ?[]const u8 = null,
     kernels: ?[]const u8 = null,
+    device: ?u32 = null,
     dump: ?[]const u8 = null,
     context: ?usize = null,
     stop_eos: bool = true,
@@ -178,6 +183,14 @@ fn parseCounts(text: []const u8) !Counts {
         c.len += 1;
     }
     return c;
+}
+
+/// The GPU ordinal `--device` or `TF_CUDA_DEVICE` picks before an engine loads (PR #354); nothing set means 0.
+fn deviceOrdinal(flag: ?u32, env: ?[]const u8) !u32 {
+    if (flag) |d| return d;
+    const value = env orelse return 0;
+    if (value.len == 0) return 0;
+    return std.fmt.parseInt(u32, value, 10);
 }
 
 fn parseFloats(gpa: std.mem.Allocator, text: []const u8) ![]f64 {
@@ -240,4 +253,13 @@ fn run(gpa: std.mem.Allocator, io: std.Io, e: *nemotron.Engine, o: Options) !u8 
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = json });
     }
     return 0;
+}
+
+test "the device ordinal comes from --device, then TF_CUDA_DEVICE, else 0" {
+    try std.testing.expectEqual(@as(u32, 1), try deviceOrdinal(1, null));
+    try std.testing.expectEqual(@as(u32, 1), try deviceOrdinal(1, "7")); // the flag wins
+    try std.testing.expectEqual(@as(u32, 3), try deviceOrdinal(null, "3"));
+    try std.testing.expectEqual(@as(u32, 0), try deviceOrdinal(null, null));
+    try std.testing.expectEqual(@as(u32, 0), try deviceOrdinal(null, ""));
+    try std.testing.expectError(error.Overflow, deviceOrdinal(null, "4294967296"));
 }

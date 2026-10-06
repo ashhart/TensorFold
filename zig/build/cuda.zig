@@ -106,6 +106,12 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, step: *std.Build.S
     const cuda = runtime(b, host, .debug, &.{});
     const mods = family(b, host, .debug, cuda, draft_ids);
     for ([_]*std.Build.Module{ cuda, mods.core, mods.lanes, mods.nemotron, stagger(b, host, .debug) }) |m| step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
+    const cli = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cuda_main.zig"), .target = host, .optimize = .debug, .link_libc = true });
+    cli.addImport("cuda", cuda);
+    cli.addImport("core", mods.core);
+    cli.addImport("lanes", mods.lanes);
+    cli.addImport("nemotron", mods.nemotron);
+    step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cli })).step);
 }
 
 /// nvcc -fatbin with torch's flags, the kernel's own and one -gencode per SASS target, as the Python build passes them.
