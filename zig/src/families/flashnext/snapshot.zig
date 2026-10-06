@@ -95,7 +95,7 @@ pub const Pool = struct {
         const n = p.last + more;
         for (p.bufs, p.caps) |b, cap| if (b != null and cap >= n) return .{};
         const cap = p.size(n);
-        if (cap > room) return .{};
+        if (cap > room or waiting.check(waiting.ctx)) return .{};
         const buf = device.buffer(cap, fz.opts) catch return .{};
         const mem = buf.contents()[0..cap];
         var done: usize = 0;
