@@ -293,7 +293,7 @@ pub fn backbone(p: *const Prompt, x: *fwd.Ctx, e: mtl.ComputeEncoder, ids: Ref, 
     var pending = false;
     var ki: usize = 0;
     var mi: usize = 0;
-    for (0..c.layers) |li| {
+    for (0..c.run) |li| {
         const L = &x.w.layers[li];
         const hcs = L.hc.?;
         fwd.boundary(x, e, M, pending, hcs[0], L.in_norm);

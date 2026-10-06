@@ -3,7 +3,8 @@
 //! tf-glm-run MODEL_DIR PROMPTS_JSON ({"prompts": [{"name": ..., "ids": [...], "expect": [...]}]})
 //! GLM_DEPTHS (default "0,3"), GLM_MAX (64), GLM_CAP (prompt + reply room, default 8192), GLM_RUNS (1),
 //! GLM_OUT (write each prompt's first-depth reply as JSON), GLM_VS (compare replies with a GLM_OUT file),
-//! GLM_CANCEL_TEST (cancel a reply mid-prompt, then the next fresh reply must equal the plain one).
+//! GLM_CANCEL_TEST (cancel a reply mid-prompt, then the next fresh reply must equal the plain one),
+//! GLM_LAYERS (the first N layers only, with the MTP layer and head), GLM_REF_STRICT (a reference difference fails).
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -67,7 +68,8 @@ pub fn main(init: std.process.Init) !void {
     const doc = try std.json.parseFromSliceLeaky(std.json.Value, arena, pf.bytes[0..pf.size], .{});
     const e = try glm.engine.Engine.load(gpa, args[1], cap);
     defer e.deinit();
-    std.debug.print("loaded in {d:.1} s: {d:.1} GB of weights, MTP head {s}\n", .{ e.load_seconds, @as(f64, @floatFromInt(e.w.bytes)) / 1e9, if (e.hasMtp()) "yes" else "no" });
+    std.debug.print("loaded in {d:.1} s: {d} of {d} layers, {d:.1} GB of weights, MTP head {s}\n", .{ e.load_seconds, e.c.run, e.c.layers, @as(f64, @floatFromInt(e.w.bytes)) / 1e9, if (e.hasMtp()) "yes" else "no" });
+    const strict = std.c.getenv("GLM_REF_STRICT") != null;
     const eos = e.c.eos[0..e.c.eos_n];
     if (std.c.getenv("GLM_CAPTURE")) |path| { // the first prompt's first window, sublayer by sublayer (glm_ref.py --capture)
         const first = doc.object.get("prompts").?.array.items[0];
@@ -111,6 +113,7 @@ pub fn main(init: std.process.Init) !void {
             }
             if (expect) |want| {
                 if (firstDiff(want[0..@min(want.len, toks.len)], toks[0..@min(want.len, toks.len)])) |at| {
+                    if (strict) failures += 1;
                     std.debug.print("  reference: first difference at token {d} of {d}\n", .{ at, @min(want.len, toks.len) });
                 } else std.debug.print("  reference: {d} of {d} tokens equal\n", .{ @min(want.len, toks.len), want.len });
             }
@@ -134,7 +137,7 @@ pub fn main(init: std.process.Init) !void {
         if (std.c.fwrite(saved.items.ptr, 1, saved.items.len, file) != saved.items.len) return error.WriteFailed;
     }
     if (failures > 0) {
-        std.debug.print("{d} drafted replies differ from the plain ones\n", .{failures});
+        std.debug.print("{d} replies differ from the plain ones{s}\n", .{ failures, if (strict) " or the references" else "" });
         std.process.exit(1);
     }
 }

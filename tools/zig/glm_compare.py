@@ -1,11 +1,14 @@
-"""Compare tf-glm-run's capture (GLM_CAPTURE, raw bf16) with glm_ref.py's (--capture, safetensors), array by array.
+"""Compare tf-glm-run's capture (GLM_CAPTURE, raw bf16) with glm_ref.py's (--capture, safetensors), array by array;
+or two glm_ref.py captures on the arrays they share (a layer subset's against the whole model's).
 
   python3 -B tools/zig/glm_compare.py REF.safetensors ZIG.bin
+  python3 -B tools/zig/glm_compare.py REF.safetensors OTHER.safetensors
 """
 
 from __future__ import annotations
 
 import json
+import re
 import struct
 import sys
 
@@ -30,13 +33,33 @@ def as_f32(bits: np.ndarray) -> np.ndarray:
     return (bits.astype(np.uint32) << 16).view(np.float32)
 
 
+def shared(a: dict[str, np.ndarray], b: dict[str, np.ndarray]) -> int:
+    """The layer arrays two Python captures share: equal bits, or the first that differs."""
+
+    names = [k for k in a if k in b and (k == "embed" or re.match(r"l\d+\.", k))]
+    names.sort(key=lambda k: (-1, "") if k == "embed" else (int(k[1:k.index(".")]), k))
+    for name in names:
+        same = int((a[name] == b[name]).sum())
+        print(f"{name:16s} {same}/{a[name].size} equal")
+        if same != a[name].size:
+            print(f"first differing array: {name}")
+            return 1
+    print(f"all {len(names)} shared arrays bit-identical")
+    return 0
+
+
 def main() -> int:
     ref = read_safetensors(sys.argv[1])
+    if sys.argv[2].endswith(".safetensors"):
+        return shared(ref, read_safetensors(sys.argv[2]))
     zig = np.fromfile(sys.argv[2], dtype=np.uint16)
     rows, dim = ref["embed"].shape
     layers = sum(1 for k in ref if k.endswith(".attn_in"))
     order = ["embed"] + [f"l{i}.{s}" for i in range(layers) for s in ("attn_in", "attn_out", "mlp_in", "mlp_out")]
     order += ["final", "logits"]
+    if sum(ref[name].size for name in order) != zig.size:
+        print(f"the captures differ in size: {layers} layers in the reference, {zig.size} values from Zig")
+        return 2
     at = 0
     first_bad = None
     for name in order:

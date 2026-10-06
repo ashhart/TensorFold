@@ -51,7 +51,7 @@ pub const Engine = struct {
     residency: ?mtl.ResidencySet = null,
     load_seconds: f64 = 0,
 
-    /// The checkpoint in `dir` with caches for `cap` tokens (prompt, reply and a round's window).
+    /// The checkpoint in `dir` with caches for `cap` tokens; GLM_LAYERS=N: only the first N layers, the MTP layer and the head.
     pub fn load(gpa: std.mem.Allocator, dir: []const u8, cap: u32) !*Engine {
         const e = try gpa.create(Engine); // undefined memory: every field is set below
         errdefer gpa.destroy(e);
@@ -69,6 +69,7 @@ pub const Engine = struct {
         const f = try mtl.MappedFile.open(path);
         defer f.deinit();
         e.c = try cfg.parse(gpa, f.bytes[0..f.size]);
+        if (std.c.getenv("GLM_LAYERS")) |v| try cfg.subset(&e.c, std.fmt.parseInt(u32, std.mem.span(v), 10) catch return error.BadLayerCount);
         e.k = try kernels.load(gpa, e.device);
         errdefer {
             e.k.deinit();
@@ -112,7 +113,7 @@ pub const Engine = struct {
     fn prepare(e: *Engine) !void {
         const cb = e.queue.commandBuffer();
         const enc = cb.compute(.serial);
-        for (0..e.c.layers) |li| switch (e.w.layers[li].attn) {
+        for (0..e.c.run) |li| switch (e.w.layers[li].attn) {
             .kda => |*a| {
                 enc.setPipeline(e.k.exp_f32);
                 enc.setBuffer(a.a_log.buf, a.a_log.off, 0);
@@ -208,7 +209,7 @@ pub const Engine = struct {
         e.s.reset();
         @memcpy(u32s(e.prompt_ids, n), prompt[0..n]);
         const plane = @as(usize, n) * c.hidden * 2;
-        const bytes = plane * (2 + 4 * @as(usize, c.layers)) + @as(usize, n) * c.vocab * 2;
+        const bytes = plane * (2 + 4 * @as(usize, c.run)) + @as(usize, n) * c.vocab * 2;
         const dump = try e.arena.buffer(bytes);
         var x = e.ctx();
         x.dump = dump;

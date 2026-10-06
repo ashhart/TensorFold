@@ -350,7 +350,7 @@ pub fn backbone(x: *Ctx, e: mtl.ComputeEncoder, ids: Ref, rows: u32, pos: u32) v
     var pending = false;
     var ki: usize = 0;
     var mi: usize = 0;
-    for (0..c.layers) |li| {
+    for (0..c.run) |li| {
         const L = &x.w.layers[li];
         const hcs = L.hc.?;
         boundary(x, e, rows, pending, hcs[0], L.in_norm);
@@ -397,7 +397,7 @@ pub fn head(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, logits: Ref, picks: R
 /// from the round's entry state when some were rejected), then make the result current.
 pub fn keepKda(x: *Ctx, e: mtl.ComputeEncoder, rows: u32, keep: u32) void {
     var ki: usize = 0;
-    for (0..x.c.layers) |li| {
+    for (0..x.c.run) |li| {
         const a = switch (x.w.layers[li].attn) {
             .kda => |*a| a,
             .mla => continue,

@@ -3,6 +3,7 @@ decode path (calls of 16 rows or fewer, every row its one-row bits), greedy repl
 sublayer's input and output for a prompt's first window.
 
   python -B tools/zig/glm_ref.py MODEL_DIR OUT_JSON [--max 64] [--long 2100 4096] [--capture CAP.safetensors] [--text F]
+                                 [--layers N]   (the first N layers only, as tf-glm-run's GLM_LAYERS=N)
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ def main() -> int:
     ap.add_argument("--long", type=int, nargs="*", default=[])
     ap.add_argument("--capture", default="")
     ap.add_argument("--text", default=str(Path(__file__).resolve().parents[2] / "README.md"))
+    ap.add_argument("--layers", type=int, default=0, help="load and run only the first N layers (0: all)")
     args = ap.parse_args()
     import mlx.core as mx
 
@@ -51,9 +53,9 @@ def main() -> int:
     info = mx.device_info() if hasattr(mx, "device_info") else mx.metal.device_info()
     mx.set_wired_limit(int(info["max_recommended_working_set_size"]))
     t0 = time.time()
-    model = glm.load_backbone(Path(args.model))
+    model = glm.load_backbone(Path(args.model), layers=args.layers or None)
     tokenizer = GlmTokenizer(load_tokenizer(Path(args.model), eos_token_ids=model.args.eos_token_id))
-    print(f"loaded in {time.time() - t0:.1f} s", flush=True)
+    print(f"loaded {len(model.layers)} layers in {time.time() - t0:.1f} s", flush=True)
     eos = set(model.args.eos_token_id)
     prompts = []
     for name, text in PROMPTS:
@@ -85,7 +87,7 @@ def main() -> int:
         print("  " + repr(tokenizer.decode(reply)[:300]), flush=True)
         out.append({"name": name, "ids": ids, "expect": reply, "first_top5": top,
                     "first_logits_top5": [float(first[i].item()) for i in top]})
-    Path(args.out).write_text(json.dumps({"prompts": out}))
+    Path(args.out).write_text(json.dumps({"layers": len(model.layers), "prompts": out}))
     if args.capture:
         capture(model, prompts[0][1][:WINDOW], args.capture)
     return 0

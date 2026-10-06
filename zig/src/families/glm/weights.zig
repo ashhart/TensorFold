@@ -488,8 +488,7 @@ fn transform(l: *Loader, fds: []std.c.fd_t, t: Transform) !void {
     }
 }
 
-/// The weights of the checkpoint in `dir` for config `c` (the MTP layer when it is stored); `dry`: plan and check
-/// every tensor's name, dtype and shape without allocating or reading.
+/// The first `c.run` layers, the MTP layer (when stored) and the head; `dry`: check names, dtypes and shapes, read nothing.
 pub fn load(gpa: std.mem.Allocator, device: mtl.Device, dir: []const u8, c: *const cfg.Config, threads: usize, dry: bool) !*Weights {
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
@@ -510,10 +509,11 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, dir: []const u8, c: *con
     w.embed = try l.q4(D, prefix ++ "embed_tokens", &.{""}, &.{V}, .{});
     w.head = try l.q4(D, "lm_head", &.{""}, &.{V}, .{});
     w.norm = try l.plain(prefix ++ "norm.weight", .{}, .bf16, &.{D});
-    const total: usize = c.layers + @as(usize, if (c.mtp > 0 and l.names.contains(prefix ++ "layers.45.eh_proj.weight")) 1 else 0);
-    for (0..total) |i| w.layers[i] = try l.layer(i);
+    for (0..c.run) |i| w.layers[i] = try l.layer(i);
+    const has_mtp = c.mtp > 0 and l.names.contains(prefix ++ "layers.45.eh_proj.weight");
+    if (has_mtp) w.layers[c.layers] = try l.layer(c.layers);
     if (dry) {
-        std.debug.print("glm plan: {d} layers, {d:.2} GB in buffers, every tensor's name, dtype and shape checked\n", .{ total, @as(f64, @floatFromInt(w.bytes)) / 1e9 });
+        std.debug.print("glm plan: {d} of {d} layers{s}, {d:.2} GB in buffers, every tensor's name, dtype and shape checked\n", .{ c.run, c.layers, if (has_mtp) " and the MTP layer" else "", @as(f64, @floatFromInt(w.bytes)) / 1e9 });
         return w;
     }
     try runCopies(&l, threads);

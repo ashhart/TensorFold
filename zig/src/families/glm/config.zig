@@ -8,6 +8,7 @@ pub const Kind = enum { kda, mla };
 pub const Config = struct {
     hidden: u32 = 4096,
     layers: u32 = 45,
+    run: u32 = 45, // backbone layers loaded and run: all, or the first few for a check that must fit (GLM_LAYERS)
     vocab: u32 = 154880,
     eps: f32 = 1e-5,
     dense_layers: u32 = 3,
@@ -120,6 +121,7 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8) !Config {
     const want = c;
     c.hidden = @intCast(try int(t, "hidden_size"));
     c.layers = @intCast(try int(t, "num_hidden_layers"));
+    c.run = c.layers;
     c.vocab = @intCast(try int(t, "vocab_size"));
     c.eps = @floatCast(try float(t, "rms_norm_eps"));
     c.dense_layers = @intCast(try int(t, "first_k_dense_replace"));
@@ -172,6 +174,12 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8) !Config {
     return c;
 }
 
+/// The first `n` backbone layers only (the MTP layer stays): a check whose weights must fit where the whole model does not.
+pub fn subset(c: *Config, n: u32) !void {
+    if (n == 0 or n > c.layers) return error.BadLayerCount;
+    c.run = n;
+}
+
 test "GLM-5.3-Flash's layer kinds: 34 KDA and 11 MLA in the backbone, the MTP layer MLA" {
     const c = Config{};
     try std.testing.expectEqual(@as(u32, 34), c.countKind(.kda));
@@ -184,4 +192,13 @@ test "GLM-5.3-Flash's layer kinds: 34 KDA and 11 MLA in the backbone, the MTP la
     try std.testing.expectEqual(@as(u32, 2208), c.xProj());
     try std.testing.expectEqual(@as(u32, 20480), c.qrProj());
     try std.testing.expectEqual(@as(u32, 10), c.kindIndex(43));
+}
+
+test "a layer subset keeps the MTP layer's place and refuses an empty or oversized count" {
+    var c = Config{};
+    try subset(&c, 8);
+    try std.testing.expectEqual(@as(u32, 8), c.run);
+    try std.testing.expectEqual(@as(u32, 45), c.layers);
+    try std.testing.expectError(error.BadLayerCount, subset(&c, 0));
+    try std.testing.expectError(error.BadLayerCount, subset(&c, 46));
 }
