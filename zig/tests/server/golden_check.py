@@ -27,7 +27,7 @@ sys.path[:0] = [str(HERE), str(ROOT / "src")]
 import corpus  # noqa: E402
 import parity  # noqa: E402
 from fake_text import FakeTokenizer  # noqa: E402
-from wire import exchange, normal, request  # noqa: E402
+from wire import exchange, framed, normal, request  # noqa: E402
 
 FIXTURES = HERE / "fixtures"
 GOLDEN = HERE / "golden"
@@ -156,10 +156,15 @@ def check_run(run: Run, port: int, cases: list[tuple[str, str, list[Any], dict[s
             run.result.append({"group": group, "name": name, "verdict": "no-golden"})
             continue
         golden = want["replies"]
-        if got["closed"] == want["closed"] and golden == replies:
+        framing = [f"reply {i}: zig Content-Length does not match its body"
+                   for i, r in enumerate(got["replies"])
+                   if not framed(r) and not r["status"].startswith("HTTP/1.1 501")]
+        if got["closed"] == want["closed"] and golden == replies and not framing:
             run.result.append({"group": group, "name": name, "verdict": "equal"})
             continue
-        where = [] if got["closed"] == want["closed"] else [f"closed: golden {want['closed']}, zig {got['closed']}"]
+        where = list(framing)
+        if got["closed"] != want["closed"]:
+            where.append(f"closed: golden {want['closed']}, zig {got['closed']}")
         if len(want["replies"]) != len(got["replies"]):
             where.append(f"reply count: golden {len(want['replies'])}, zig {len(got['replies'])}")
         for i, (a, b) in enumerate(zip(golden, replies)):
