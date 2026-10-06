@@ -18,4 +18,5 @@ test {
     _ = @import("families/nemotron/weights.zig");
     _ = @import("families/nemotron/kernels.zig");
     _ = @import("families/flashnext/tp_settings.zig"); // speed-up settings read without a typed JSON parse
+    _ = @import("families/flashnext/tp.zig"); // the speed-up window's layout
 }

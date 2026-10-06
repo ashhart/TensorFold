@@ -59,7 +59,7 @@ pub const MTP_FLAG = BACK_FLAG + 8;
 const REQ_FLAG = MTP_FLAG + 8; // served: the last request rank 0 has written
 const CTRL_FLAG = REQ_FLAG + 8; // rank 0's decision at each step both ranks take: (step << 6) | (next depth << 1) | quit
 const ACK_FLAG = CTRL_FLAG + 8; // served: rank 1's answer to a request's resume, (request << 1) | restored
-pub const MARK_FLAG = ACK_FLAG + 8; // a passed mark's states have landed in MARK: the exchange's sequence
+pub const MARK_FLAG = FLAGS + 512; // a passed mark's states have landed in MARK (ACK_FLAG + 8 stays free for the link probe)
 pub const MARK_READY = MARK_FLAG + 8; // the receiver's MARK is free for that sequence
 const GPU = 1024;
 const GAVE_UP = 2048;
@@ -68,6 +68,23 @@ const GAVE_UP = 2048;
 pub fn layerSlot(i: usize) usize {
     const att = i / 4; // attention layers before i (3, 7, ... below it)
     return PREFILL + (i - att) * DN_SLOT + att * ATT_SLOT;
+}
+
+test "control words are distinct and inside the flag page" {
+    var words: [LAYERS + 12]usize = undefined;
+    var n: usize = 0;
+    for ([_]usize{ FLAG, HELLO, TAIL_FLAG, BACK_FLAG, MTP_FLAG, REQ_FLAG, CTRL_FLAG, ACK_FLAG, ACK_FLAG + 8, MARK_FLAG, MARK_READY }) |w| {
+        words[n] = w;
+        n += 1;
+    }
+    for (0..LAYERS) |i| {
+        words[n] = LAYER_FLAG + 8 * i;
+        n += 1;
+    }
+    for (words[0..n], 0..) |w, i| {
+        try std.testing.expect(w >= FLAGS and w + 8 <= FLAGS + PAGE and w % 8 == 0);
+        for (words[0..i]) |o| try std.testing.expect(o != w);
+    }
 }
 
 test "prefill slots tile the region without overlap" {
