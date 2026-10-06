@@ -19,7 +19,21 @@ pub const Ctx = struct {
     dump_at: usize = 0,
     ep: ?*Ep = null, // expert parallel: this Mac computes its routed experts' picks and swaps them with the peer's
     skip: u32 = 0, // a profile's knock-outs: launch classes left out (Class bits)
+    pskip: u32 = 0, // a profile's knock-outs by launch (Part bits)
 };
+
+/// Single launches (or tight groups) for a profile that times each alone.
+pub const Part = struct {
+    pub const names = [_][]const u8{ "hc_expand", "hc_mix", "hc_split", "kda_in", "kda_step", "kda_out", "mla_proj", "mla_cache", "mla_absorb", "mla_attn", "mla_unabs", "mla_out", "r_cast", "r_router", "r_topk", "x_locpost", "x_pack", "x_unpack", "e_gateup", "e_down", "s_gateup", "s_down", "combine", "dense", "head_qmv", "head_argmax" };
+    pub fn bit(comptime name: []const u8) u32 {
+        inline for (names, 0..) |n, i| if (comptime std.mem.eql(u8, n, name)) return @as(u32, 1) << i;
+        @compileError("no part " ++ name);
+    }
+};
+
+fn on(x: *const Ctx, comptime part: []const u8) bool {
+    return x.pskip & Part.bit(part) == 0;
+}
 
 /// Launch classes for a profile's knock-outs.
 pub const Class = struct {
@@ -115,16 +129,21 @@ pub fn embedRows(x: *const Ctx, e: mtl.ComputeEncoder, ids: Ref, out: Ref, rows:
 pub fn boundary(x: *Ctx, e: mtl.ComputeEncoder, rows: u32, pending: bool, hc: ?wts.Hc, norm: ?Ref) void {
     const sc = x.sc;
     const k = x.k;
-    e.setPipeline(if (pending and hc != null) k.hc_expand_11 else if (pending) k.hc_expand_10 else k.hc_expand_01);
-    bind(e, 0, .{ sc.x[x.xi], sc.branch, sc.post, sc.comb });
-    e.setValue(x.c.eps, 4);
-    bind(e, 5, .{ sc.x[1 - x.xi], sc.inv, sc.z });
-    e.dispatchThreads(size(1024 * rows, 1, 1), size(1024, 1, 1));
+    if (on(x, "hc_expand")) {
+        e.setPipeline(if (pending and hc != null) k.hc_expand_11 else if (pending) k.hc_expand_10 else k.hc_expand_01);
+        bind(e, 0, .{ sc.x[x.xi], sc.branch, sc.post, sc.comb });
+        e.setValue(x.c.eps, 4);
+        bind(e, 5, .{ sc.x[1 - x.xi], sc.inv, sc.z });
+        e.dispatchThreads(size(1024 * rows, 1, 1), size(1024, 1, 1));
+    }
     if (pending) x.xi = 1 - x.xi;
     const h = hc orelse return;
-    e.setPipeline(k.hc_mix);
-    bind(e, 0, .{ sc.x[x.xi], sc.inv, h.fnp, sc.mixes });
-    e.dispatchThreads(size(6 * 256, rows, 1), size(256, 1, 1));
+    if (on(x, "hc_mix")) {
+        e.setPipeline(k.hc_mix);
+        bind(e, 0, .{ sc.x[x.xi], sc.inv, h.fnp, sc.mixes });
+        e.dispatchThreads(size(6 * 256, rows, 1), size(256, 1, 1));
+    }
+    if (!on(x, "hc_split")) return;
     e.setPipeline(k.hc_split_norm);
     bind(e, 0, .{ sc.x[x.xi], sc.mixes, h.scale, h.base, norm.? });
     e.setValue(x.c.eps, 5);
@@ -136,9 +155,9 @@ pub fn boundary(x: *Ctx, e: mtl.ComputeEncoder, rows: u32, pending: bool, hc: ?w
 fn kda(x: *Ctx, e: mtl.ComputeEncoder, ki: usize, w: *const wts.Kda, rows: u32) void {
     const sc = x.sc;
     const L = &x.s.kda[ki];
-    qmv(x, e, x.k.qmv_kda_in, sc.normed, w.in_proj, L.proj, rows);
-    kdaStep(x, e, ki, w, L.proj, rows, sc.y);
-    qmv(x, e, x.k.qmv_kda_out, sc.y, w.o_proj, sc.branch, rows);
+    if (on(x, "kda_in")) qmv(x, e, x.k.qmv_kda_in, sc.normed, w.in_proj, L.proj, rows);
+    if (on(x, "kda_step")) kdaStep(x, e, ki, w, L.proj, rows, sc.y);
+    if (on(x, "kda_out")) qmv(x, e, x.k.qmv_kda_out, sc.y, w.o_proj, sc.branch, rows);
 }
 
 /// The fused KDA step over `rows` of stacked projections `proj`: state and conv window from slot cur to the other.
@@ -164,23 +183,29 @@ pub fn mla(x: *Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.Mla, x_in: R
     const C = &x.s.mla[mi];
     const H = c.mla_heads;
     const RANK = c.kv_lora;
-    qmv(x, e, k.qmv_x, x_in, w.x_proj, sc.xp, rows);
-    rms(x, e, sc.xp, w.q_norm, sc.qr, rows, c.q_lora, c.xProj(), c.q_lora, c.eps);
-    qmv(x, e, k.qmv_qr, sc.qr, w.qr_proj, sc.qp, rows);
-    mlaCache(x, e, mi, w, x_in, sc.xp, c.xProj(), sc.iw, rows, pos);
-    absorb(x, e, w, sc.qp, sc.ql, rows);
+    if (on(x, "mla_proj")) {
+        qmv(x, e, k.qmv_x, x_in, w.x_proj, sc.xp, rows);
+        rms(x, e, sc.xp, w.q_norm, sc.qr, rows, c.q_lora, c.xProj(), c.q_lora, c.eps);
+        qmv(x, e, k.qmv_qr, sc.qr, w.qr_proj, sc.qp, rows);
+    }
+    if (on(x, "mla_cache")) mlaCache(x, e, mi, w, x_in, sc.xp, c.xProj(), sc.iw, rows, pos);
     var dense: u32 = 0; // rows whose keys all fit index_topk attend every key (MLX's unfused attention)
     while (dense < rows and pos + dense + 1 <= c.i_topk) dense += 1;
-    if (dense > 0) scale(x, e, sc.ql, sc.qls, dense * H, RANK, RANK, RANK, 1.0 / 16.0);
-    for (0..dense) |ri| {
-        const r: u32 = @intCast(ri);
-        const n = pos + r + 1;
-        const plane = @as(usize, H) * c.i_topk * 2;
-        attendDense(x, e, C.keys, sc.qls.at(@as(usize, r) * H * RANK * 2), sc.scores.at(r * plane), sc.probs.at(r * plane), sc.att.at(@as(usize, r) * H * RANK * 2), n);
+    if (on(x, "mla_absorb")) {
+        absorb(x, e, w, sc.qp, sc.ql, rows);
+        if (dense > 0) scale(x, e, sc.ql, sc.qls, dense * H, RANK, RANK, RANK, 1.0 / 16.0);
     }
-    if (dense < rows) attendSparse(x, e, mi, rows, pos, dense);
-    unabsorb(x, e, w, sc.att, sc.vals, rows);
-    qmv(x, e, k.qmv_mla_out, sc.vals, w.o_proj, sc.branch, rows);
+    if (on(x, "mla_attn")) {
+        for (0..dense) |ri| {
+            const r: u32 = @intCast(ri);
+            const n = pos + r + 1;
+            const plane = @as(usize, H) * c.i_topk * 2;
+            attendDense(x, e, C.keys, sc.qls.at(@as(usize, r) * H * RANK * 2), sc.scores.at(r * plane), sc.probs.at(r * plane), sc.att.at(@as(usize, r) * H * RANK * 2), n);
+        }
+        if (dense < rows) attendSparse(x, e, mi, rows, pos, dense);
+    }
+    if (on(x, "mla_unabs")) unabsorb(x, e, w, sc.att, sc.vals, rows);
+    if (on(x, "mla_out")) qmv(x, e, k.qmv_mla_out, sc.vals, w.o_proj, sc.branch, rows);
 }
 
 /// Rows' latent keys, indexer keys and gates into MLA cache `mi` at pos.., their indexer weights into `iw`, the blocks they complete.
@@ -285,6 +310,7 @@ pub fn attendIndexed(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, ql: Ref, i
 }
 
 fn denseMlp(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Dense, x_in: Ref, rows: u32) void {
+    if (!on(x, "dense")) return;
     const c = x.c;
     const sc = x.sc;
     qmv(x, e, x.k.qmv_dense_gu, x_in, w.gate_up, sc.gu, rows);
@@ -305,17 +331,17 @@ pub fn moe(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
     const s = x.skip;
     if (x.ep) |ep| {
         if (s & Class.route == 0) route(x, e, w, x_in, rows);
-        if (s & Class.exchange == 0) ep.localize(e, sc.pick, sc.uids, sc.umem, sc.ucount, rows);
+        if (s & Class.exchange == 0 and on(x, "x_locpost")) ep.localize(e, sc.pick, sc.uids, sc.umem, sc.ucount, rows);
         if (s & Class.routed == 0) experts(x, e, w, x_in, rows, 2, ep.group());
-        if (s & Class.exchange == 0) ep.send(e, sc.ye, rows);
+        if (s & Class.exchange == 0) ep.send(e, sc.ye, rows, on(x, "x_pack"), on(x, "x_locpost"));
         if (s & Class.shared == 0) experts(x, e, w, x_in, rows, 1, .{ sc.none, sc.none, sc.none });
-        if (s & Class.exchange == 0) ep.receive(e, sc.ye, rows);
+        if (s & Class.exchange == 0 and on(x, "x_unpack")) ep.receive(e, sc.ye, rows);
     } else {
         if (s & Class.shared == 0) experts(x, e, w, x_in, rows, 1, .{ sc.none, sc.none, sc.none });
         if (s & Class.route == 0) route(x, e, w, x_in, rows);
         if (s & Class.routed == 0) experts(x, e, w, x_in, rows, 2, .{ sc.uids, sc.umem, sc.ucount });
     }
-    if (s & Class.combine != 0) return;
+    if (s & Class.combine != 0 or !on(x, "combine")) return;
     e.setPipeline(k.moe_combine);
     bind(e, 0, .{ sc.ys, sc.ye, sc.wts });
     shape(e, 3, .{ rows, top });
@@ -328,13 +354,18 @@ fn route(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, row
     const c = x.c;
     const k = x.k;
     const sc = x.sc;
-    e.setPipeline(k.cast_f32);
-    bind(e, 0, .{ x_in, sc.xf });
-    e.setValue(rows * c.hidden, 2);
-    e.dispatchThreads(size(rows * c.hidden, 1, 1), size(256, 1, 1));
-    e.setPipeline(k.router[rows - 1]);
-    bind(e, 0, .{ sc.xf, w.router, sc.logits_r });
-    e.dispatchThreads(size(1024 * c.experts / 16, 1, 1), size(1024, 1, 1));
+    if (on(x, "r_cast")) {
+        e.setPipeline(k.cast_f32);
+        bind(e, 0, .{ x_in, sc.xf });
+        e.setValue(rows * c.hidden, 2);
+        e.dispatchThreads(size(rows * c.hidden, 1, 1), size(256, 1, 1));
+    }
+    if (on(x, "r_router")) {
+        e.setPipeline(k.router[rows - 1]);
+        bind(e, 0, .{ sc.xf, w.router, sc.logits_r });
+        e.dispatchThreads(size(1024 * c.experts / 16, 1, 1), size(1024, 1, 1));
+    }
+    if (!on(x, "r_topk")) return;
     e.setPipeline(k.moe_route);
     bind(e, 0, .{sc.logits_r});
     shape(e, 1, .{ rows, c.experts });
@@ -354,6 +385,20 @@ fn experts(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
     const zs: u32 = if (part == 1) 1 else rows * c.topk;
     const slots: u32 = if (part == 1) 1 else c.topk;
     const act = if (part == 1) sc.acts else sc.act;
+    if (if (part == 1) on(x, "s_gateup") else on(x, "e_gateup")) gateUp(x, e, w, x_in, rows, part, group, zs, act);
+    if (!(if (part == 1) on(x, "s_down") else on(x, "e_down"))) return;
+    e.setPipeline(if (part == 1) k.moe_down_1 else k.moe_down_2);
+    bind(e, 0, .{act});
+    shape(e, 1, .{ rows, slots, N });
+    bind(e, 2, .{ w.down.w, w.down.s, w.down.b, w.sh_down.w, w.sh_down.s, w.sh_down.b, group[0], group[1], group[2], if (part == 1) sc.ys else sc.ye });
+    e.dispatchThreads(size(32 * rows, D / 4, zs), size(32 * rows, 1, 1));
+}
+
+fn gateUp(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, rows: u32, part: u32, group: [3]Ref, zs: u32, act: Ref) void {
+    const c = x.c;
+    const k = x.k;
+    const D = c.hidden;
+    const N = c.moe_inter;
     e.setPipeline(if (part == 1) k.moe_gateup_1 else k.moe_gateup_2);
     bind(e, 0, .{x_in});
     shape(e, 1, .{ rows, D });
@@ -361,11 +406,6 @@ fn experts(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
     e.setValue(c.swiglu_limit, 14);
     bind(e, 15, .{act});
     e.dispatchThreads(size(32 * rows, N / 4, zs), size(32 * rows, 1, 1));
-    e.setPipeline(if (part == 1) k.moe_down_1 else k.moe_down_2);
-    bind(e, 0, .{act});
-    shape(e, 1, .{ rows, slots, N });
-    bind(e, 2, .{ w.down.w, w.down.s, w.down.b, w.sh_down.w, w.sh_down.s, w.sh_down.b, group[0], group[1], group[2], if (part == 1) sc.ys else sc.ye });
-    e.dispatchThreads(size(32 * rows, D / 4, zs), size(32 * rows, 1, 1));
 }
 
 /// The backbone over the window (its tokens in `ids`) at positions pos..: final-normed rows into `hidden`.

@@ -227,13 +227,16 @@ pub const Ep = struct {
     }
 
     /// After this Mac's routed outputs are in `ye` [rows * TOPK, D]: pack them and post; the host sends them.
-    pub fn send(t: *Ep, enc: mtl.ComputeEncoder, ye: Ref, rows: u32) void {
-        enc.setPipeline(t.pack_pipe);
-        enc.setBuffer(ye.buf, ye.off, 0);
-        enc.setBuffer(t.lists, MINE, 1);
-        enc.setBuffer(t.lists, COUNTS, 2);
-        enc.setBuffer(t.wbuf, sendAt(t.x), 3);
-        enc.dispatchGroups(mtl.Size.of(1, rows * TOPK, 1), mtl.Size.of(256, 1, 1));
+    pub fn send(t: *Ep, enc: mtl.ComputeEncoder, ye: Ref, rows: u32, pack: bool, post: bool) void {
+        if (pack) {
+            enc.setPipeline(t.pack_pipe);
+            enc.setBuffer(ye.buf, ye.off, 0);
+            enc.setBuffer(t.lists, MINE, 1);
+            enc.setBuffer(t.lists, COUNTS, 2);
+            enc.setBuffer(t.wbuf, sendAt(t.x), 3);
+            enc.dispatchGroups(mtl.Size.of(1, rows * TOPK, 1), mtl.Size.of(256, 1, 1));
+        }
+        if (!post) return;
         enc.setPipeline(t.post_pipe);
         enc.setBuffer(t.wbuf, POSTED, 0);
         enc.setValue(@as(u32, @truncate(t.x)), 1);
