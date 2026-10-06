@@ -3,6 +3,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const lanes = @import("lanes");
+const core = @import("core");
 const Engine = @import("cuda_engine.zig").Engine;
 const Head = @import("cuda_mtp.zig").Head;
 const state = @import("cuda_state.zig");
@@ -29,6 +30,7 @@ pub const Cuda = struct {
     costs: [state.max_rows]lanes.config.Cost = undefined,
     cost_count: usize = 0,
     mtp_ms: f64 = 0,
+    measured: ?core.draft_depth.Costs = null, // a lone stream's depth rule prices its rounds by these
 
     pub fn init(gpa: std.mem.Allocator, e: *Engine, head: ?*Head) !Cuda {
         return .{ .gpa = gpa, .e = e, .head = head, .pinned = try cuda.HostBuffer.alloc(e.ctx.d, state.max_rows * 4) };
@@ -83,6 +85,19 @@ pub const Cuda = struct {
             self.cost_count += 1;
         }
         self.mtp_ms = c.level;
+        self.measured = c;
+    }
+
+    /// A lone driver's hand-over: the head absorbs the last `kept` rows; the stream stands as a lane round leaves it.
+    pub fn handOver(self: *Cuda, s: *lanes.Stream, kept: usize) !void {
+        const l = self.lanes.getPtr(s) orelse return error.UnknownStream;
+        l.pending_rows = null;
+        if (self.head) |h| {
+            try h.begin(kept);
+            try h.launch(0);
+        }
+        s.cache_len = self.e.pos;
+        s.pending = s.context.items[s.context.items.len - 1];
     }
 
     /// The stream's lane, bound, with a verify whose rows all stayed committed (the round loop keeps only on drops).

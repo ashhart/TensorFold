@@ -6,6 +6,7 @@ const engine = @import("cuda_engine.zig");
 const state = @import("cuda_state.zig");
 const Head = @import("cuda_mtp.zig").Head;
 const Lanes = @import("cuda_lanes.zig").Cuda;
+const lone = @import("cuda_lone.zig");
 
 pub const model_type = "nemotron_h";
 pub const formats: []const []const u8 = &.{"mlx-q4g64"};
@@ -14,6 +15,9 @@ pub const max_segments: u32 = @import("cuda_segments.zig").MAX;
 pub const prompt_rows: u32 = state.prefill_rows;
 
 pub const Options = struct { context: usize, drafts: bool, segments: usize = 1 };
+
+/// A lone greedy drafted stream's own driver: decodes it until it finishes (false) or `yield` hands it over (true).
+pub const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool) anyerror!bool;
 
 /// What the native server drives: the lane backend, the facts its round loop reads, and how to free it.
 pub const Loaded = struct {
@@ -24,6 +28,7 @@ pub const Loaded = struct {
     stream_bytes: usize,
     ctx: *anyopaque,
     deinit: *const fn (*anyopaque) void,
+    lone: ?LoneRun = null, // called with `ctx`; null: every stream in the lane core
 };
 
 const Owned = struct { gpa: std.mem.Allocator, e: *engine.Engine, head: ?*Head, lanes: Lanes };
@@ -47,7 +52,13 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .stream_bytes = e.seqBytes(),
         .ctx = own,
         .deinit = release,
+        .lone = if (head != null) loneRun else null,
     };
+}
+
+fn loneRun(p: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool) anyerror!bool {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    return lone.run(own.gpa, &own.lanes, s, .{ .ctx = hooks, .committed = committed, .yield = yield });
 }
 
 /// A request this engine refuses, in words; null: none of its own.
