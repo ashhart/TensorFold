@@ -3,7 +3,22 @@ const std = @import("std");
 const builtin = @import("builtin");
 const abi = @import("verbs_abi.zig");
 
-pub const Error = error{ LibraryUnavailable, MissingSymbol, NoDeviceList, NoSuchDevice, VerbsFailed };
+pub const Error = error{ LibraryUnavailable, MissingSymbol, NoDeviceList, NoSuchDevice, VerbsFailed, BadDeviceList, NoUsableGid };
+pub const max_links = 8;
+
+/// Physical devices in bond order; a duplicate or empty component cannot name an independent link.
+pub fn deviceParts(a: std.mem.Allocator, text: []const u8) (Error || std.mem.Allocator.Error)![]const []const u8 {
+    var parts: std.ArrayList([]const u8) = .empty;
+    defer parts.deinit(a);
+    var it = std.mem.splitScalar(u8, text, '+');
+    while (it.next()) |part| {
+        if (part.len == 0 or part.len >= 64 or parts.items.len == max_links) return error.BadDeviceList;
+        for (part) |c| if (c <= ' ' or c == 127) return error.BadDeviceList;
+        for (parts.items) |old| if (std.mem.eql(u8, old, part)) return error.BadDeviceList;
+        try parts.append(a, part);
+    }
+    return parts.toOwnedSlice(a);
+}
 
 /// macOS 26.2 and later ship librdma (Thunderbolt RDMA, and MCDMA's provider when installed); Linux has rdma-core.
 pub const default_path: [:0]const u8 = if (builtin.os.tag == .macos) "/usr/lib/librdma.dylib" else "libibverbs.so.1";
@@ -104,6 +119,23 @@ pub const Verbs = struct {
         return g;
     }
 
+    /// A nonzero GID from this data device's table, preferring IPv6 link-local independently of the meeting IP.
+    pub fn usableGid(v: *const Verbs, ctx: Ctx, num: u8) Error!struct { index: u32, value: abi.Gid } {
+        const p = try v.port(ctx, num);
+        var first: ?struct { index: u32, value: abi.Gid } = null;
+        var i: u32 = 0;
+        while (i < @as(u32, @intCast(@max(0, @min(p.gid_tbl_len, 256))))) : (i += 1) {
+            const g = v.gid(ctx, num, i) catch continue;
+            var nonzero = false;
+            for (g.raw) |b| nonzero = nonzero or b != 0;
+            if (!nonzero) continue;
+            if (first == null) first = .{ .index = i, .value = g };
+            if (g.raw[0] == 0xfe and g.raw[1] & 0xc0 == 0x80) return .{ .index = i, .value = g };
+        }
+        if (first) |f| return .{ .index = f.index, .value = f.value };
+        return error.NoUsableGid;
+    }
+
     /// The GID's type (0 IB, 1 RoCE v1, 2 RoCE v2), or null when the library cannot say.
     pub fn gidType(v: *const Verbs, ctx: Ctx, num: u8, index: u32) ?u32 {
         const f = v.gid_ex orelse return null;
@@ -116,6 +148,51 @@ pub const Verbs = struct {
         return std.mem.span(v.api.ibv_wc_status_str(status));
     }
 };
+
+test "bond device lists accept N distinct devices and reject malformed or oversized lists" {
+    const a = std.testing.allocator;
+    const parts = try deviceParts(a, "rdma_en4+rdma_en3+rdma_en2+rdma_en13");
+    defer a.free(parts);
+    try std.testing.expectEqual(@as(usize, 4), parts.len);
+    for ([_][]const u8{ "", "a+", "+a", "a++b", "a+a", "a+ b", "a+b+c+d+e+f+g+h+i" }) |bad|
+        try std.testing.expectError(error.BadDeviceList, deviceParts(a, bad));
+}
+
+test "a data-device GID scan skips zero entries and prefers link-local over an IP meeting address" {
+    const Probe = struct {
+        fn port(_: Ctx, _: u8, p: *abi.PortAttr) callconv(.c) c_int {
+            p.* = std.mem.zeroes(abi.PortAttr);
+            p.gid_tbl_len = 3;
+            return 0;
+        }
+        fn gid(_: Ctx, _: u8, index: c_int, g: *abi.Gid) callconv(.c) c_int {
+            g.* = .{ .raw = @splat(0) };
+            if (index == 1) {
+                g.raw[10] = 255;
+                g.raw[11] = 255;
+                g.raw[15] = 2;
+            }
+            if (index == 2) {
+                g.raw[0] = 0xfe;
+                g.raw[1] = 0x80;
+                g.raw[15] = 3;
+            }
+            return 0;
+        }
+        fn zero(_: Ctx, _: u8, _: c_int, g: *abi.Gid) callconv(.c) c_int {
+            g.* = .{ .raw = @splat(0) };
+            return 0;
+        }
+    };
+    var v: Verbs = undefined;
+    v.api.ibv_query_port = Probe.port;
+    v.api.ibv_query_gid = Probe.gid;
+    const selected = try v.usableGid(@ptrFromInt(4096), 1);
+    try std.testing.expectEqual(@as(u32, 2), selected.index);
+    try std.testing.expectEqual(@as(u8, 0xfe), selected.value.raw[0]);
+    v.api.ibv_query_gid = Probe.zero;
+    try std.testing.expectError(error.NoUsableGid, v.usableGid(@ptrFromInt(4096), 1));
+}
 
 test "verbs smoke: open the device list and close it (TF_FABRIC_VERBS=1)" {
     const flag = std.c.getenv("TF_FABRIC_VERBS") orelse return error.SkipZigTest;

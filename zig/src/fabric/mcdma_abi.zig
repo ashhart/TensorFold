@@ -22,12 +22,16 @@ pub const Api = struct {
 
 /// Optional symbols: a write and its signal as one message (libraries that have it).
 pub const WriteSignal = *const fn (*Peer, u64, u64, u64, u64, u64) callconv(.c) c_int;
+pub const ConnectLinks = *const fn (*Context, [*:0]const u8, [*]const u16, [*]const u16, c_uint, [*:0]const u8, u64, *?*Peer) callconv(.c) c_int;
+pub const MaxLinks = *const fn () callconv(.c) c_uint;
 pub const ws_room: usize = 64;
 
 pub const Library = struct {
     handle: std.DynLib,
     api: Api,
     write_signal: ?WriteSignal = null,
+    connect_links: ?ConnectLinks = null,
+    max_links: ?MaxLinks = null,
 
     /// No install-path or loader-search fallback; the caller supplies the inspected user-directory library.
     pub fn open(path: [:0]const u8) Error!Library {
@@ -39,7 +43,7 @@ pub const Library = struct {
             @field(api, name) = handle.lookup(@FieldType(Api, name), "mcdma_fabric_" ++ name) orelse return error.MissingSymbol;
         }
         if (api.abi() != 1) return error.WrongAbi;
-        return .{ .handle = handle, .api = api, .write_signal = handle.lookup(WriteSignal, "mcdma_fabric_write_signal") };
+        return .{ .handle = handle, .api = api, .write_signal = handle.lookup(WriteSignal, "mcdma_fabric_write_signal"), .connect_links = handle.lookup(ConnectLinks, "mcdma_fabric_connect_links"), .max_links = handle.lookup(MaxLinks, "mcdma_fabric_max_links") };
     }
 
     pub fn close(self: *Library) void {

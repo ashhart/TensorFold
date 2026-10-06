@@ -3,13 +3,43 @@ const std = @import("std");
 const abi = @import("mcdma_abi.zig");
 const rma = @import("rdma.zig");
 const words = @import("words.zig");
+const verbs = @import("verbs.zig");
 
 pub const alignment = 16384;
 pub const max_ranks = 64;
-pub const Error = abi.Error || std.mem.Allocator.Error || error{ InvalidConfig, OpenFailed, ConnectFailed, UnsupportedLink, WindowMismatch, ThreadFailed };
+pub const Error = abi.Error || std.mem.Allocator.Error || error{ InvalidConfig, OpenFailed, ConnectFailed, UnsupportedLink, WindowMismatch, ThreadFailed, NeedNLinkLibrary };
 
-pub const Link = struct { peer: u32, device: [:0]const u8, via: [:0]const u8, port: u16, peer_port: u16 = 0, name: [:0]const u8, gid: c_int = 1 };
+pub const Link = struct { peer: u32, device: [:0]const u8, via: [:0]const u8, port: u16, peer_port: u16 = 0, name: [:0]const u8, gid: c_int = 1, ports: []const u16 = &.{}, peer_ports: []const u16 = &.{} };
 pub const Config = struct { rank: u32, ranks: u32, window_bytes: usize, staging_bytes: usize, links: []const Link, timeout_ns: u64 = 10 * std.time.ns_per_s, connect_timeout_ns: u64 = 300 * std.time.ns_per_s };
+
+/// Validate physical member counts before opening a device or allocating its registered window.
+fn memberCount(gpa: std.mem.Allocator, link: Link) Error!usize {
+    const devices = verbs.deviceParts(gpa, link.device) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidConfig,
+    };
+    defer gpa.free(devices);
+    if (link.gid < -1) return error.InvalidConfig;
+    var vias = std.mem.splitScalar(u8, link.via, '+');
+    var count: usize = 0;
+    while (vias.next()) |via| {
+        if (via.len == 0) return error.InvalidConfig;
+        for (via) |c| if (c <= ' ' or c == 127) return error.InvalidConfig;
+        count += 1;
+    }
+    if (count != 1 and count != devices.len) return error.InvalidConfig;
+    for ([_][]const u16{ link.ports, link.peer_ports }) |ports| {
+        if (ports.len == 0) continue;
+        if (ports.len != devices.len) return error.InvalidConfig;
+        for (ports, 0..) |port, i| {
+            if (port == 0) return error.InvalidConfig;
+            for (ports[0..i]) |old| if (port == old) return error.InvalidConfig;
+        }
+    }
+    if ((link.ports.len == 0 and (link.port == 0 or @as(usize, link.port) + devices.len > 65536)) or
+        (link.peer_ports.len == 0 and link.peer_port > 0 and @as(usize, link.peer_port) + devices.len > 65536)) return error.InvalidConfig;
+    return devices.len;
+}
 
 const Lock = struct {
     held: std.atomic.Value(bool) = .init(false),
@@ -50,6 +80,7 @@ pub const Endpoint = struct {
         for (config.links, 0..) |link, i| {
             if (link.peer >= config.ranks or link.peer == config.rank or link.port == 0 or link.device.len == 0 or link.via.len == 0 or link.name.len == 0 or link.name.len > 20) return error.InvalidConfig;
             for (config.links[0..i]) |old| if (old.peer == link.peer or std.mem.eql(u8, old.device, link.device)) return error.InvalidConfig;
+            _ = try memberCount(gpa, link);
         }
         const stage = std.math.mul(usize, config.ranks, config.staging_bytes) catch return error.InvalidConfig;
         const bytes = std.math.add(usize, config.window_bytes, stage) catch return error.InvalidConfig;
@@ -57,6 +88,11 @@ pub const Endpoint = struct {
         errdefer gpa.destroy(self);
         self.* = .{ .gpa = gpa, .library = try abi.Library.open(library_path), .config = config, .memory = undefined, .ports = undefined };
         errdefer self.library.close();
+        for (config.links) |link| {
+            const n = try memberCount(gpa, link);
+            const supported: usize = if (self.library.max_links) |f| f() else 2;
+            if (n > supported or ((link.ports.len > 0 or link.peer_ports.len > 0) and self.library.connect_links == null)) return error.NeedNLinkLibrary;
+        }
         self.memory = try gpa.alignedAlloc(u8, .fromByteUnits(alignment), bytes);
         errdefer gpa.free(self.memory);
         @memset(self.memory, 0);
@@ -90,7 +126,16 @@ pub const Endpoint = struct {
     fn connect(self: *Endpoint, i: usize) void {
         const port = &self.ports[i];
         const spec = port.spec;
-        port.status = self.library.api.connect(port.context.?, spec.via.ptr, spec.port, spec.peer_port, spec.name.ptr, self.config.connect_timeout_ns, &port.peer);
+        if (spec.ports.len > 0 or spec.peer_ports.len > 0) {
+            var local: [verbs.max_links]u16 = undefined;
+            var peer: [verbs.max_links]u16 = undefined;
+            const n = std.mem.count(u8, spec.device, "+") + 1;
+            for (0..n) |k| {
+                local[k] = if (spec.ports.len > 0) spec.ports[k] else @intCast(@as(usize, spec.port) + k);
+                peer[k] = if (spec.peer_ports.len > 0) spec.peer_ports[k] else if (spec.peer_port > 0) @intCast(@as(usize, spec.peer_port) + k) else local[k];
+            }
+            port.status = self.library.connect_links.?(port.context.?, spec.via.ptr, &local, &peer, @intCast(n), spec.name.ptr, self.config.connect_timeout_ns, &port.peer);
+        } else port.status = self.library.api.connect(port.context.?, spec.via.ptr, spec.port, spec.peer_port, spec.name.ptr, self.config.connect_timeout_ns, &port.peer);
     }
 
     fn closePorts(self: *Endpoint) void {
@@ -308,3 +353,22 @@ pub const Endpoint = struct {
 };
 
 pub const Region = Endpoint;
+
+test "N-link direct configurations reject invalid ports and vias before opening verbs" {
+    var link: Link = .{ .peer = 1, .device = "a+b+c+d", .via = "en4/192.0.2.2", .port = 7400, .name = "pair", .gid = -1 };
+    try std.testing.expectEqual(@as(usize, 4), try memberCount(std.testing.allocator, link));
+    link.ports = &.{ 7400, 7410, 7420, 7430 };
+    link.peer_ports = &.{ 7500, 7510, 7520, 7530 };
+    try std.testing.expectEqual(@as(usize, 4), try memberCount(std.testing.allocator, link));
+    link.peer_ports = &.{ 7500, 7500, 7520, 7530 };
+    try std.testing.expectError(error.InvalidConfig, memberCount(std.testing.allocator, link));
+    link.peer_ports = &.{ 7500, 7510, 0, 7530 };
+    try std.testing.expectError(error.InvalidConfig, memberCount(std.testing.allocator, link));
+    link.peer_ports = &.{};
+    link.ports = &.{};
+    link.port = 65534;
+    try std.testing.expectError(error.InvalidConfig, memberCount(std.testing.allocator, link));
+    link.port = 7400;
+    link.via = "en3+en4";
+    try std.testing.expectError(error.InvalidConfig, memberCount(std.testing.allocator, link));
+}
