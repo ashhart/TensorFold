@@ -1,5 +1,4 @@
-//! GLM-5.3-Flash on Metal: one greedy reply at a time. The prompt runs in windows of up to 16 rows on the decode
-//! kernels (every row its one-row bits), then rounds verify a window of the last token and the MTP head's drafts.
+//! GLM-5.3-Flash on Metal: one greedy reply at a time, the prompt in 16-row windows or tensor-unit chunks, then drafted rounds.
 const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
@@ -64,8 +63,7 @@ pub const Engine = struct {
     residency: ?mtl.ResidencySet = null,
     load_seconds: f64 = 0,
 
-    /// The checkpoint in `dir` with caches for `cap` tokens; GLM_LAYERS=N: only the first N layers, the MTP layer and the head;
-    /// GLM_EP=settings.json: half the routed experts, the other half on the peer named there.
+    /// The checkpoint in `dir`, caches for `cap` tokens; GLM_LAYERS=N: the first N layers only; GLM_EP=settings: half the experts.
     pub fn load(gpa: std.mem.Allocator, dir: []const u8, cap: u32) !*Engine {
         return loadWith(gpa, dir, cap, if (std.c.getenv("GLM_EP")) |v| std.mem.span(v) else null);
     }
@@ -259,8 +257,7 @@ pub const Engine = struct {
         return @as([*]u32, @ptrCast(@alignCast(r.addr())))[0..n];
     }
 
-    /// The first window of `prompt` from a fresh state with every sublayer's input and output captured, then its
-    /// logits: raw bf16 in glm_ref.py's order (embed; per layer attn in/out, mlp in/out; final; logits).
+    /// The first window of `prompt`: each sublayer's input and output, then the logits, raw bf16 in glm_ref.py's order.
     pub fn capture(e: *Engine, prompt: []const u32, path: []const u8) !void {
         const c = &e.c;
         const pool = mtl.objc.Pool.push();
@@ -285,8 +282,7 @@ pub const Engine = struct {
         std.debug.print("captured {d} rows ({d} bytes) in {s}\n", .{ n, bytes, path });
     }
 
-    /// Every call of a plain reply's forward with each sublayer captured (glm_ref.py --trace): the prompt's 16-row
-    /// windows, then `steps` one-row steps feeding `reply`'s tokens; each call's rows in glm_ref.py's order, appended.
+    /// Each call of a plain reply (prompt windows, then `steps` rows of `reply`), sublayer by sublayer: glm_ref.py --trace's twin.
     pub fn trace(e: *Engine, prompt: []const u32, reply: []const u32, steps: usize, path: []const u8) !void {
         const c = &e.c;
         const pool = mtl.objc.Pool.push();
@@ -321,8 +317,7 @@ pub const Engine = struct {
         std.debug.print("traced {d} calls ({d} prompt rows, {d} steps) in {s}\n", .{ calls, P, total - P, path });
     }
 
-    /// Teacher-forced agreement with a reference reply: the prompt in 16-row windows, then one-row steps feeding the
-    /// reference's tokens; how many of the greedy picks (first token included) equal the reference's, and the first that differs.
+    /// Teacher-forced agreement: the greedy picks with `reply`'s tokens fed back; how many equal them, the first that differs.
     pub fn forced(e: *Engine, prompt: []const u32, reply: []const u32) !struct { same: usize, first: ?usize } {
         const c = &e.c;
         const pool = mtl.objc.Pool.push();

@@ -1,5 +1,4 @@
-//! The MTP draft head (layer 45): enorm(embed(next)) | hnorm(h) -> eh_proj, then a plain MLA + MoE block, then
-//! shared_head.norm and the LM head. Rows enter its own latent cache at the backbone positions they follow.
+//! The MTP draft head (layer 45): enorm(embed(next)) | hnorm(h), eh_proj, a plain MLA + MoE block, its norm and the LM head.
 const std = @import("std");
 const mtl = @import("metal");
 const fwd = @import("forward.zig");
@@ -15,8 +14,7 @@ fn add(x: *const fwd.Ctx, e: mtl.ComputeEncoder, a: Ref, b: Ref, out: Ref, n: u3
     e.dispatchThreads(mtl.Size.of(n, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
-/// `rows` rows of h (final-normed backbone rows, or the head's own output rows when chaining) with the tokens after
-/// them (`next`, u32) at head positions pos..: the head's output rows into m_x (pre-norm), drafts into `picks`.
+/// `rows` rows of h with their next tokens at head positions pos..: output rows into m_x (pre-norm), drafts into `picks`.
 pub fn run(x: *fwd.Ctx, e: mtl.ComputeEncoder, h: Ref, next: Ref, rows: u32, pos: u32, picks: Ref) void {
     const c = x.c;
     const sc = x.sc;

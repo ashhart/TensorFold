@@ -1,5 +1,4 @@
-// GLM-5.3-Flash's latent attention for a row that reads all its keys: the 64 query heads as one 64-row matrix against
-// the layer's single latent head (each key read once for every head), on the tensor units.
+// GLM-5.3-Flash latent attention for rows reading all keys: the 64 query heads as one matrix against the one latent head.
 #include <metal_stdlib>
 using namespace metal;
 #include "../nax.h"
@@ -10,8 +9,7 @@ inline void glm_join(thread frag<float>& c, thread const frag<float>& d) {
   c = (frag<float>(0.0f) + c) + d;
 }
 
-// S [64, n] = Q [64, 512] K^T for q pre-scaled. Simdgroup g owns heads 16 g .. 16 g + 15, a threadgroup 32 keys. The
-// 512 dims go in 16-wide steps; with arg.y set (fewer than 256 keys) the two halves sum apart and are joined in fp32.
+// S [64, n] = Q K^T in 16-wide steps (simdgroup g: heads 16 g.., a threadgroup 32 keys); arg.y: two 256-dim halves joined.
 [[kernel]] void glm_latent_scores(const device bfloat* q [[buffer(0)]], const device bfloat* keys [[buffer(1)]],
                                   device bfloat* s [[buffer(2)]], constant int2& arg [[buffer(3)]],
                                   uint3 tg [[threadgroup_position_in_grid]], uint g [[simdgroup_index_in_threadgroup]],
@@ -53,9 +51,7 @@ inline void glm_values_run(thread frag<float>& c0, thread frag<float>& c1, const
   }
 }
 
-// O [64, 512] = P [64, n] K [n, 512] (the probabilities against the same latent keys). Simdgroup g owns heads 16 g ..,
-// a threadgroup 32 of the 512 dims. With arg.y > 0 (more than 1,024 keys) keys [0, arg.y) and the rest sum apart,
-// joined in fp32.
+// O [64, 512] = P K in 16-wide steps (simdgroup g: heads 16 g.., a threadgroup 32 dims); arg.y > 0: keys [0, arg.y) apart.
 [[kernel]] void glm_latent_values(const device bfloat* p [[buffer(0)]], const device bfloat* keys [[buffer(1)]],
                                   device bfloat* o [[buffer(2)]], constant int2& arg [[buffer(3)]],
                                   uint3 tg [[threadgroup_position_in_grid]], uint g [[simdgroup_index_in_threadgroup]],

@@ -1,6 +1,4 @@
-//! Expert parallel over two Macs (MCDMA): each holds half of every MoE layer's routed experts. A MoE call's own (row, slot)
-//! outputs are packed and sent while the GPU runs the shared expert; the peer's land in their rows; both combine all.
-//! Served, rank 0 hands rank 1 each request and its decision at every step both take (a stop, a cancel).
+//! Expert parallel over two Macs (MCDMA): half the routed experts each, a MoE call's (row, slot) outputs swapped, all combined on both.
 const std = @import("std");
 const mtl = @import("metal");
 const fabric = @import("fabric");
@@ -18,8 +16,7 @@ const ENTRY = D * 2; // one pick's routed output, bf16
 const PAGE = 16384;
 const SLOT = MAXP * ENTRY; // one exchange's entries at most
 
-// The window, the same on both Macs: the peer's entries (two slots by parity), this Mac's (a page of room before each
-// for the library's head), the flags the peer sets, the words the GPU posts.
+// The window (the same on both Macs): the peer's entries and ours by parity (a page before each send), flags, GPU words.
 const RECV = 0;
 const SEND = RECV + 2 * SLOT;
 const FLAGS = SEND + 2 * (PAGE + SLOT);
@@ -250,9 +247,7 @@ pub const Ep = struct {
         enc.dispatchGroups(mtl.Size.of(1, rows * TOPK, 1), mtl.Size.of(256, 1, 1));
     }
 
-    /// A step both Macs take in the same order (a prompt window, the first token, a round): rank 0's decision to stop
-    /// there reaches rank 1, so both end on the same step. Rank 1 waits for it. Rank 0 runs at most two steps ahead
-    /// (a step's exchanges need rank 1; only a new request's first step follows a step without any), so two words.
+    /// Rank 0's stop decision at a step both take reaches rank 1, which waits; two parity words (rank 0 runs at most two ahead).
     pub fn agree(t: *Ep, quit: bool) !bool {
         t.ctrl += 1;
         const word = CTRL + 8 * (t.ctrl % 2);
@@ -312,8 +307,7 @@ pub const Ep = struct {
         return @ptrCast(@alignCast(t.win.ptr + off));
     }
 
-    /// Each exchange in order, once the GPU posts it: its packed entries to the peer's slot, then the peer's flag. Ten
-    /// seconds without the peer's answer to the last one fails the link; a failed link lands every flag (the GPU never hangs).
+    /// Each posted exchange's entries to the peer, then its flag; 10 s without an answer fails the link and lands every flag.
     fn service(t: *Ep) void {
         const posted = t.word32(POSTED);
         const flag = t.word64(FLAG);
