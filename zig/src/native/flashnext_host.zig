@@ -203,7 +203,10 @@ pub const Host = struct {
             h.lock();
             h.running = null;
             h.live_generated = 0;
+            const idle = h.queued.items.len == 0;
             h.unlock();
+            if (idle and h.cache != null) h.eng.snap_pool.ready(h.eng.r.device, fx.NEXT_TURN); // the next turn's save finds its pages touched
+
         }
     }
 

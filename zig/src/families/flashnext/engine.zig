@@ -39,6 +39,8 @@ const jsonInt = fz.jsonInt;
 const RING = 512;
 /// Positions a reply keeps free past its last token: two rounds in flight.
 pub const MARGIN = 2 * MAXR;
+/// Bytes a conversation's next kept state usually adds (about 4k tokens of reply and tool output): the pool readies that much more.
+pub const NEXT_TURN = 4096 * 13 * 2304;
 
 /// A kept prompt state's name on both Macs of speed-up mode: the hash of the tokens through its lookahead token
 /// (the state at `at` also holds the MTP keys made with token `at`, so callers pass prompt[0 .. at + 1]).
@@ -99,6 +101,7 @@ pub const Engine = struct {
     copy_min: u32 = 3,
     copy_long: u32 = 6, // shorter matches copy only when the head's first draft agrees
     mark_taps: bool = true, // a prompt call writes the DeltaNet states at marks inside it (false: calls end at marks)
+    snap_pool: snapshot.Pool = .{}, // kept states' buffers, reused and readied ahead
     passed: ?Passed = null, // the mark a prompt call ran past, while the prompt cache keeps the state there
     peer_drops: std.ArrayList(u64) = .empty, // speed-up rank 0: kept states rank 1 drops with the next request
     peer_kept: std.AutoHashMapUnmanaged(u64, *snapshot.State) = .empty, // speed-up rank 1: its halves of rank 0's kept states
@@ -127,6 +130,7 @@ pub const Engine = struct {
         e.segments = true;
         e.mark_taps = true;
         e.passed = null;
+        e.snap_pool = .{};
         e.peer_drops = .empty;
         e.peer_kept = .empty;
         e.arena_state = std.heap.ArenaAllocator.init(gpa);
@@ -753,7 +757,7 @@ pub const Engine = struct {
 
     /// Served speed-up mode, rank 1: run rank 0's requests as they come, the replies thrown away, until rank 0's empty request (its engine closing).
     pub fn follow(e: *Engine) !void {
-        while (try e.followOne()) {}
+        while (try e.followOne()) e.snap_pool.ready(e.r.device, NEXT_TURN);
     }
 
     fn followOne(e: *Engine) !bool {
@@ -838,6 +842,7 @@ pub const Engine = struct {
         var kept = e.peer_kept.valueIterator();
         while (kept.next()) |st| snapshot.drop(gpa, st.*);
         e.peer_kept.deinit(gpa);
+        e.snap_pool.deinit();
         e.peer_drops.deinit(gpa);
         e.arena_state.deinit();
         gpa.destroy(e);

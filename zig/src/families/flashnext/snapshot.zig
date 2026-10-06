@@ -15,8 +15,63 @@ const TAIL = fz.PLE_TAIL * fz.WIDE * 2; // the n-gram conv tail's rows
 /// Where a state's DeltaNet rows live: the prompt pass's slot pair, the one layout snapshots are taken in today.
 pub const Layout = enum { slots };
 
-/// One kept state: its bytes, its position, the n-gram history there and the layout that wrote it.
-pub const State = struct { buf: mtl.Buffer, at: usize, hist: [2]i64, bytes: usize, layout: Layout };
+/// One kept state: its bytes, its position, the n-gram history there, the layout that wrote it, its buffer's size and pool.
+pub const State = struct { buf: mtl.Buffer, at: usize, hist: [2]i64, bytes: usize, layout: Layout, cap: usize = 0, pool: ?*Pool = null };
+
+/// A buffer's size for a state of `n` bytes: an eighth more, in 32 MiB steps, so the same conversation's next state fits it.
+pub fn capacity(n: usize) usize {
+    return std.mem.alignForward(usize, n + n / 8, 32 << 20);
+}
+
+/// Kept states' buffers: a dropped one waits for the next save, and one is readied ahead (its pages touched) while the engine idles.
+pub const Pool = struct {
+    bufs: [2]?mtl.Buffer = .{ null, null },
+    caps: [2]usize = .{ 0, 0 },
+    last: usize = 0, // the bytes of the last state saved: the next is about this, a turn or so longer
+
+    /// The smallest free buffer that holds `n` bytes without wasting half again, else a new one.
+    fn take(p: *Pool, device: mtl.Device, n: usize) !struct { buf: mtl.Buffer, cap: usize } {
+        var best: ?usize = null;
+        for (p.bufs, p.caps, 0..) |b, cap, i| if (b != null and cap >= n and cap <= capacity(n) + capacity(n) / 2 and (best == null or cap < p.caps[best.?])) {
+            best = i;
+        };
+        if (best) |i| {
+            defer p.bufs[i] = null;
+            return .{ .buf = p.bufs[i].?, .cap = p.caps[i] };
+        }
+        const cap = capacity(n);
+        return .{ .buf = try device.buffer(cap, fz.opts), .cap = cap };
+    }
+
+    /// A buffer back: into a free slot, else in place of a smaller one, else freed.
+    fn give(p: *Pool, buf: mtl.Buffer, cap: usize) void {
+        const slot: usize = if (p.bufs[0] == null) 0 else if (p.bufs[1] == null) 1 else if (p.caps[0] <= p.caps[1]) 0 else 1;
+        if (p.bufs[slot]) |old| {
+            if (p.caps[slot] >= cap) return buf.deinit();
+            old.deinit();
+        }
+        p.bufs[slot] = buf;
+        p.caps[slot] = cap;
+    }
+
+    /// While nothing waits: a free buffer for the next state (the last one's size and `more` bytes), its pages faulted in now.
+    pub fn ready(p: *Pool, device: mtl.Device, more: usize) void {
+        if (p.last == 0) return;
+        const n = p.last + more;
+        for (p.bufs, p.caps) |b, cap| if (b != null and cap >= n) return;
+        const cap = capacity(n);
+        const buf = device.buffer(cap, fz.opts) catch return;
+        @memset(buf.contents()[0..cap], 0);
+        p.give(buf, cap);
+    }
+
+    pub fn deinit(p: *Pool) void {
+        for (&p.bufs) |*b| if (b.*) |x| {
+            x.deinit();
+            b.* = null;
+        };
+    }
+};
 
 /// The layout the engine's prompt pass keeps DeltaNet states in (a decode path with in-place states adds its own).
 fn layoutOf(_: *const Engine) Layout {
@@ -88,11 +143,12 @@ pub fn save(e: *Engine, gpa: std.mem.Allocator, at: usize) !*State {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const n = bytes(at);
-    const buf = try e.r.device.buffer(n, fz.opts);
-    errdefer buf.deinit();
-    try copy(e, buf, at, true, passed);
+    const got = try e.snap_pool.take(e.r.device, n);
+    errdefer e.snap_pool.give(got.buf, got.cap);
+    try copy(e, got.buf, at, true, passed);
     const st = try gpa.create(State);
-    st.* = .{ .buf = buf, .at = at, .hist = if (passed) |ps| ps.hist else e.m.ple.hist, .bytes = n, .layout = layoutOf(e) };
+    st.* = .{ .buf = got.buf, .at = at, .hist = if (passed) |ps| ps.hist else e.m.ple.hist, .bytes = n, .layout = layoutOf(e), .cap = got.cap, .pool = &e.snap_pool };
+    e.snap_pool.last = n;
     return st;
 }
 
@@ -110,7 +166,7 @@ pub fn restore(e: *Engine, st: *const State) !void {
 }
 
 pub fn drop(gpa: std.mem.Allocator, st: *State) void {
-    st.buf.deinit();
+    if (st.pool) |p| p.give(st.buf, st.cap) else st.buf.deinit();
     gpa.destroy(st);
 }
 

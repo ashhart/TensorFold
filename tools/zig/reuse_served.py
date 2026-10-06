@@ -18,7 +18,9 @@ USAGE = """modes:
   compare ROWS.jsonl OUT           token_sha equal, drafted == "draft": false, resumed first tokens sooner than fresh
   evict BASE MODEL ROWS.jsonl GIB  a budget that holds one conversation: alternating ones evict, a big one is refused
   cold BASE MODEL PROMPTS.json OUT cold prompts 2k-64k (built once through /v1/tokenize): time to first token
-  pp OUT...                        cold medians by length, each run against the first"""
+  pp OUT...                        cold medians by length, each run against the first
+  ids BASE MODEL OUT.json TOKENS   a chat prompt's ids as the server renders it, for the engine gates
+  warm BASE MODEL OUT.json         an agent's short turns (--turns, --new-tokens, --max-tokens): cached tokens and TTFT a turn"""
 TOOLS = [
     {"type": "function", "function": {"name": name, "description": about, "parameters": {
         "type": "object", "properties": {p: {"type": "string", "description": d} for p, d in params},
@@ -98,6 +100,7 @@ class Conv:
         self.messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         self.turn = 0
         self.history = 0  # the rendered history's length after the last turn: where the next turn resumes
+        self.kept = False  # whether the last turn's prompt was long enough to keep its history
 
     def body(self, model: str, max_tokens: int, plain: bool) -> dict:
         b = {"model": model, "messages": json.loads(json.dumps(self.messages)), "max_tokens": max_tokens,
@@ -121,10 +124,33 @@ class Conv:
             self.messages.append({"role": "tool", "tool_call_id": c.get("id", f"call_{k}"), "content": tool_text[1]})
 
 
+def fits(cached, allowed) -> bool:
+    """A cached count against a list of positions, or a {"min", "max"} range (planned families floor marks to chunk starts)."""
+    if allowed is None:
+        return True
+    if isinstance(allowed, dict):
+        return cached is not None and allowed["min"] <= cached <= allowed["max"]
+    return cached in allowed
+
+
 class Recorder:
-    def __init__(self, client: Client, out: str, max_tokens: int) -> None:
-        self.c, self.out, self.max_tokens = client, open(out, "w"), max_tokens
+    def __init__(self, client: Client, out: str, max_tokens: int, planned: bool = False, min_prompt: int = 4096) -> None:
+        self.c, self.out, self.max_tokens, self.planned, self.min_prompt = client, open(out, "w"), max_tokens, planned, min_prompt
         self.i, self.failures = 0, 0
+
+    def prev(self, conv: "Conv") -> list[int] | dict:
+        """A follow-up's resume: the last turn's history if that prompt kept it, else nothing."""
+        return self.hist(conv.history) if conv.kept else [0]
+
+    def hist(self, history: int) -> list[int] | dict:
+        """A resume at a rendered history: exactly there, or for planned families at the chunk start it floors to."""
+        return {"min": max(1, history - 8192), "max": history} if self.planned else [history]
+
+    def cuts(self, cuts: list[int], miss: bool) -> list[int] | dict:
+        """A system cut's expectation: the cuts themselves, or for planned families any start at or below the last."""
+        if not self.planned:
+            return ([0] if miss else []) + cuts
+        return {"min": 0 if miss else 1, "max": max(cuts) if cuts else 0}
 
     def system_cuts(self, conv: Conv, prompt: list[int]) -> list[int]:
         """The server's shared-prefix marks: the system block's length, and 512 and 2048 before it (each 512+)."""
@@ -138,7 +164,7 @@ class Recorder:
 
     def row(self, conv: Conv, arm: str, body: dict, got: dict, allowed: list[int] | None, history: int, group: str = "") -> None:
         cached = got.get("cached")
-        ok = "error" not in got and (allowed is None or cached in allowed)
+        ok = "error" not in got and fits(cached, allowed)
         self.failures += 0 if ok else 1
         r = {"i": self.i, "conv": conv.name, "turn": conv.turn + 1, "arm": arm, "group": group, "body": body,
              "history": history, "allowed": allowed, "got": {k: v for k, v in got.items() if k not in ("content", "reasoning", "calls")},
@@ -146,7 +172,7 @@ class Recorder:
         self.out.write(json.dumps(r) + "\n")
         self.out.flush()
         print(f"{self.i:3d} {conv.name:>4} t{conv.turn + 1} {arm:<7} prompt {got.get('prompt')} history {history} "
-              f"cached {cached} (allowed {allowed if allowed is None or len(allowed) < 6 else str(allowed[:5]) + '...'}) "
+              f"cached {cached} (allowed {allowed if not isinstance(allowed, list) or len(allowed) < 6 else str(allowed[:5]) + '...'}) "
               f"ttft {got.get('ttft') or 0:.2f}s sha {got.get('sha')} {got.get('finish')} {'ok' if ok else 'FAIL ' + str(got.get('error', ''))}",
               flush=True)
         self.i += 1
@@ -160,8 +186,10 @@ class Recorder:
         self.row(conv, "drafted", body, got, allowed, history)
         if plain:
             pb = conv.body(self.c.model, self.max_tokens, True)
-            self.row(conv, "plain", pb, self.c.chat(pb), plain_allowed or [history], history)
+            kept = len(prompt) >= self.min_prompt
+            self.row(conv, "plain", pb, self.c.chat(pb), plain_allowed or (self.hist(history) if kept else [0]), history)
         conv.history = history
+        conv.kept = len(prompt) >= self.min_prompt
         conv.extend(got, tool_text)
         conv.turn += 1
         return {"prompt": prompt, "history": history}
@@ -177,7 +205,7 @@ def scenarios(rec: Recorder, texts: Texts, turns: int, cancel_after: float) -> N
     cuts_a = rec.system_cuts(s1, first["prompt"])
     print(f"system cuts {cuts_a}", flush=True)
     for _ in range(turns - 1):
-        rec.turn(s1, [s1.history], tool())
+        rec.turn(s1, rec.prev(s1), tool())
     # 2: an earlier request with another system prompt, then two conversations on S1's system prompt, alternating
     x = Conv("X", "You translate technical prose into plain English.\n\n" + texts.get(2, 9_000)[1], "Rewrite the module summary above for a beginner.", None, True, False)
     rec.turn(x, [0], tool(), plain=False)
@@ -185,25 +213,25 @@ def scenarios(rec: Recorder, texts: Texts, turns: int, cancel_after: float) -> N
     b = Conv("B", sys_a, "List every public function below with a one-line summary.\n\n" + texts.get(12, 3_000)[1], TOOLS, True, False)
     for k in range(3):
         for conv in (a, b):
-            rec.turn(conv, cuts_a if k == 0 else [conv.history], tool())
+            rec.turn(conv, rec.cuts(cuts_a, False) if k == 0 else rec.prev(conv), tool())
     # 3: S1's transcript with its first user message edited mid-way: nothing past the edit resumes
     ed = Conv("E", sys_a, "", TOOLS, True, True)
     ed.messages = json.loads(json.dumps(s1.messages))
     u = ed.messages[1]["content"]
     ed.messages[1]["content"] = u[: len(u) // 2] + " (edited) " + u[len(u) // 2:]
-    rec.turn(ed, [0] + cuts_a, tool())
+    rec.turn(ed, rec.cuts(cuts_a, True), tool())
     # 4: thinking off
     t = Conv("T", "You answer briefly.\n\n" + texts.get(13, 6_000)[1], "Summarize the code above in three sentences.", None, False, False)
     for k in range(2):
-        rec.turn(t, [0] if k == 0 else [t.history], tool())
+        rec.turn(t, [0] if k == 0 else rec.prev(t), tool())
     # 5: a request cancelled in prefill, sent again (resumes only a mark kept whole before the cancel), then its next turn
     sys_c = "You audit code for security problems.\n\n" + texts.get(14, 40_000)[1]
     c = Conv("C", sys_c, "Audit the file above and list concrete issues with line references.", TOOLS, True, True)
     body = c.body(rec.c.model, rec.max_tokens, False)
     rec.row(c, "cancel", body, rec.c.cancel(body, cancel_after), None, 0)
     prompt = rec.c.tokens(c.messages, c.tools, c.thinking, True)
-    rec.turn(c, [0] + rec.system_cuts(c, prompt), tool())
-    rec.turn(c, [c.history], tool())
+    rec.turn(c, rec.cuts(rec.system_cuts(c, prompt), True), tool())
+    rec.turn(c, rec.prev(c), tool())
     # 6: two requests at once: each waits its turn and resumes its own conversation
     pair = [(conv, conv.body(rec.c.model, rec.max_tokens, False)) for conv in (a, b)]
     hist = [len(rec.c.tokens(conv.messages, conv.tools, conv.thinking, False)) for conv, _ in pair]
@@ -214,7 +242,7 @@ def scenarios(rec: Recorder, texts: Texts, turns: int, cancel_after: float) -> N
     for th in threads:
         th.join()
     for j, (conv, body) in enumerate(pair):
-        rec.row(conv, "drafted", body, got[j], [conv.history], hist[j], group="concurrent")
+        rec.row(conv, "drafted", body, got[j], rec.prev(conv), hist[j], group="concurrent")
 
 
 def evict(client: Client, out: str, budget_gib: float, texts: Texts, max_tokens: int) -> int:
@@ -227,10 +255,10 @@ def evict(client: Client, out: str, budget_gib: float, texts: Texts, max_tokens:
     rec.turn(q, [0], tool(1), plain=False)  # Q1's state evicts P1's
     rec.turn(p, [0], tool(2), plain=False)  # P1's state is gone: a miss, never the evicted position; P2's evicts Q1's
     rec.turn(q, [0], tool(3), plain=False)  # likewise Q1's: Q2's state evicts P2's
-    rec.turn(q, [q.history], tool(4), plain=False)  # the survivor: Q3 resumes Q2's state
+    rec.turn(q, rec.prev(q), tool(4), plain=False)  # the survivor: Q3 resumes Q2's state
     r = Conv("R", "You are agent R.", "Summarize these files.\n\n" + body(40, 160_000), None, True, False)
     rec.turn(r, [0], tool(5), plain_allowed=[0])  # its state passes the budget: refused, so its resend misses too
-    rec.turn(q, [q.history], tool(6), plain=False)  # the refusal evicted nothing: Q4 resumes Q3's state
+    rec.turn(q, rec.prev(q), tool(6), plain=False)  # the refusal evicted nothing: Q4 resumes Q3's state
     print(f"budget {budget_gib} GiB: the server log's prompt cache lines show kept, evicted and refused", flush=True)
     return rec.failures
 
@@ -321,6 +349,42 @@ def cold_prompts(client: Client, path: str, root: str) -> list[dict]:
     return items
 
 
+def ids(client: Client, out_path: str, length: int, root: str) -> int:
+    """A chat prompt of at most `length` tokens as the server renders it, saved as {"prompt": ids} for the engine gates."""
+    text = "".join(open(os.path.join(root, n), encoding="utf-8", errors="replace").read() for n in sorted(os.listdir(root)) if n.endswith(".py"))
+    msgs = lambda chars: [{"role": "user", "content": "Explain what this code does, section by section.\n\n" + text[:chars]}]
+    lo, hi = 0, 6 * length
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if len(client.tokens(msgs(mid), None, True, True)) <= length:
+            lo = mid
+        else:
+            hi = mid - 1
+    toks = client.tokens(msgs(lo), None, True, True)
+    json.dump({"prompt": toks}, open(out_path, "w"))
+    print(f"{out_path}: {len(toks)} tokens", flush=True)
+    return 0
+
+
+def warm(client: Client, out_path: str, root: str, turns: int, new_tokens: int, max_tokens: int) -> int:
+    """An agent's short turns as an agent harness sends them (thinking off, ~new_tokens of tool output a turn): each turn's cached tokens and first token."""
+    texts = Texts(root)
+    system = "You are a careful coding agent working in a Python repository. Read before you edit, keep changes small.\n\n" + texts.get(0, 22_000)[1]
+    conv = Conv("W", system, "Task: find why the parser below rejects nested groups.\n\n" + texts.get(1, 4_000)[1], TOOLS, False, True)
+    rows = []
+    for k in range(turns):
+        body = conv.body(client.model, max_tokens, False)
+        got = client.chat(body)
+        rows.append({"turn": k + 1, "body": body, "got": {key: v for key, v in got.items() if key not in ("content", "reasoning", "calls")}})
+        print(f"turn {k + 1:2d}: prompt {got.get('prompt')} cached {got.get('cached')} new {(got.get('prompt') or 0) - (got.get('cached') or 0)} "
+              f"ttft {got.get('ttft') or 0:.3f} s wall {got.get('wall') or 0:.2f} s sha {got.get('sha')}", flush=True)
+        name, text = texts.get(5 + k, 40_000)
+        conv.extend(got, (name, text[: 4 * new_tokens]))
+        conv.turn += 1
+    json.dump(rows, open(out_path, "w"))
+    return 0
+
+
 def cold(client: Client, prompts_path: str, out_path: str, root: str) -> int:
     """Time to first streamed token for each cold prompt (2 reply tokens, thinking off), the first a warm-up."""
     rows = []
@@ -362,12 +426,15 @@ def pp(paths: list[str]) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(epilog=USAGE, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("mode", choices=["record", "replay", "compare", "evict", "cold", "pp"])
+    ap.add_argument("mode", choices=["record", "replay", "compare", "evict", "cold", "pp", "ids", "warm"])
     ap.add_argument("args", nargs="+")
     ap.add_argument("--max-tokens", type=int, default=160)
     ap.add_argument("--turns", type=int, default=9)
     ap.add_argument("--text", default=os.path.dirname(os.__file__))
     ap.add_argument("--cancel-after", type=float, default=4.0)
+    ap.add_argument("--planned", action="store_true", help="the family keeps states only at chunk starts (Nemotron)")
+    ap.add_argument("--min-prompt", type=int, default=4096, help="the server keeps nothing for shorter prompts (Rules.min_prompt)")
+    ap.add_argument("--new-tokens", type=int, default=200, help="warm: tool output tokens a turn adds")
     o = ap.parse_args()
     if o.mode == "compare":
         return compare(*o.args)
@@ -376,11 +443,15 @@ def main() -> int:
     client = Client(o.args[0], o.args[1])
     if o.mode == "replay":
         return replay(client, o.args[2], o.args[3])
+    if o.mode == "warm":
+        return warm(client, o.args[2], o.text, o.turns, o.new_tokens, o.max_tokens)
+    if o.mode == "ids":
+        return ids(client, o.args[2], int(o.args[3]), o.text)
     if o.mode == "cold":
         return cold(client, o.args[2], o.args[3], o.text)
     if o.mode == "evict":
         return 1 if evict(client, o.args[2], float(o.args[3]), Texts(o.text), o.max_tokens) else 0
-    rec = Recorder(client, o.args[2], o.max_tokens)
+    rec = Recorder(client, o.args[2], o.max_tokens, o.planned, o.min_prompt)
     scenarios(rec, Texts(o.text), o.turns, o.cancel_after)
     print(f"record: {rec.i} requests, {rec.failures} not cached as planned", flush=True)
     return 1 if rec.failures else 0
