@@ -2,6 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
+const simd_attention = @import("simd_attention.zig");
 
 pub const glue_names = [_][:0]const u8{ "tf_embed_q4", "tf_rms_mlx", "tf_argmax_bf16", "tf_kv_write", "tf_attn_q", "tf_attn_out", "tf_copy_rows", "tf_copy_u32", "tf_coop_combine" };
 
@@ -143,6 +144,14 @@ pub fn load(allocator: std.mem.Allocator, device: mtl.Device) !Kernels {
         names[i] = kernel.function;
         jobs[i] = .{ .device = device, .source = kernel.source, .names = names[i .. i + 1], .out = k.pipelines[i .. i + 1] };
     }
+    var rewritten: [sources.nemotron.all.len]?[]u8 = @splat(null);
+    defer for (rewritten) |r| if (r) |text| allocator.free(text);
+    if (!device.tensorUnits()) inline for (sources.nemotron.all, 0..) |kernel, i| {
+        if (comptime std.mem.startsWith(u8, kernel.key, "attn_partial")) {
+            rewritten[i] = try simd_attention.rewrite(allocator, kernel.source);
+            jobs[i].source = rewritten[i].?;
+        }
+    };
     const n = sources.nemotron.all.len;
     jobs[n] = .{ .device = device, .source = sources.nemotron_glue, .names = &glue_names, .out = k.pipelines[n .. n + glue_names.len] };
     const gp = n + glue_names.len;

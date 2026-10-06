@@ -9,6 +9,7 @@ const wts = @import("weights.zig");
 const kern = @import("kernels.zig");
 const pk = @import("prefill_kernels.zig");
 const frags = @import("../../core/frags.zig");
+const simd_attention = @import("simd_attention.zig");
 
 pub const Model = struct {
     allocator: std.mem.Allocator,
@@ -65,6 +66,7 @@ pub const Model = struct {
         errdefer m.kernels.deinit();
         m.prefill = try wide;
         try frags.check(m.device, m.queue, allocator);
+        if (!m.device.tensorUnits()) try simd_attention.check(m.device, m.queue);
         m.load_seconds = mtl.clock.seconds() - started;
         return m;
     }

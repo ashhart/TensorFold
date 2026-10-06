@@ -13,4 +13,5 @@ pub const flashnext_engine = @import("families/flashnext/engine.zig");
 test {
     std.testing.refAllDecls(@This());
     _ = @import("families/nemotron/prefill_kernels.zig"); // Compile the prompt-chunk sources in tests.
+    _ = @import("families/nemotron/simd_attention.zig"); // The pre-M5 attention rewrite finds its lines.
 }
