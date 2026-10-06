@@ -310,7 +310,7 @@ pub const Host = struct {
         };
         job.restore_ns = h.now() - t_begin;
         job.cached = plan.from;
-        defer if (h.cache != null) if (job.prefilled) |done| std.log.info("prompt pass: {d} -> {d} tokens in {d:.1} ms (waited {d:.1} ms; lookup and restore {d:.1} ms, peer handoff {d:.1} ms, keeps {d:.1} ms)", .{ job.cached, r.prompt.len, ms(done - job.began), ms(job.began - job.queued), ms(job.restore_ns), ms(h.eng.handoff_ns), ms(job.keep_ns) });
+        defer if (job.prefilled) |done| std.log.info("prompt pass: {d} -> {d} tokens in {d:.1} ms (waited {d:.1} ms; lookup and restore {d:.1} ms, peer handoff {d:.1} ms, keeps {d:.1} ms)", .{ job.cached, r.prompt.len, ms(done - job.began), ms(job.began - job.queued), ms(job.restore_ns), ms(h.eng.handoff_ns), ms(job.keep_ns) });
         h.prompt = r.prompt;
         h.saved.clearRetainingCapacity();
         defer if (h.cache) |*store| store.report(r.prompt.len, job.cached, store.counts.kept - kept0);
