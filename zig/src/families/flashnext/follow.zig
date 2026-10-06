@@ -106,10 +106,10 @@ const Reply = struct {
     }
 };
 
-/// This Mac's state at `at`, kept under the name rank 0 gives the same tokens, inside the budget (else refused); free buffers then trimmed.
+/// This Mac's state at `at`, kept under the name rank 0 gives the same tokens unless it passes the budget by more than SLACK; free buffers then trimmed.
 fn keep(e: *Engine, prompt: []const u32, at: usize) void {
     const size = e.snap_pool.size(snapshot.bytes(at));
-    if (!admits(e.peer_budget, e.peer_held, size)) return std.log.warn("speed-up rank 1: kept nothing at {d}: {d} MiB held and {d} MiB more pass the {d} MiB budget", .{ at, e.peer_held >> 20, size >> 20, e.peer_budget >> 20 });
+    if (!admits(e.peer_budget, e.peer_held, size)) return std.log.warn("speed-up rank 1: kept nothing at {d}: {d} MiB held and {d} MiB more pass the {d} MiB budget and its slack", .{ at, e.peer_held >> 20, size >> 20, e.peer_budget >> 20 });
     const st = snapshot.save(e, e.gpa, at) catch |err| return std.log.warn("speed-up rank 1: no state kept at {d}: {s}", .{ at, @errorName(err) });
     const old = e.peer_kept.fetchPut(e.gpa, engine.keyOf(prompt[0 .. at + 1]), st) catch return snapshot.drop(e.gpa, st);
     e.peer_held += st.cap;
@@ -117,9 +117,12 @@ fn keep(e: *Engine, prompt: []const u32, at: usize) void {
     e.snap_pool.trim(e.peer_budget -| e.peer_held);
 }
 
-/// Whether a new state of `size` bytes fits beside `held` (rank 0 makes room before the request, so this refuses only past it).
+/// How far rank 1's buffers may run past the budget: it holds rank 0's states, but its pool hands some of them larger buffers.
+const SLACK: u64 = 1 << 30;
+
+/// Whether a new state of `size` bytes fits beside `held` (rank 0 makes room before the request; this stops only a runaway).
 fn admits(budget: u64, held: u64, size: u64) bool {
-    return held + size <= budget;
+    return budget > 0 and held + size <= budget + SLACK;
 }
 
 fn drop(e: *Engine, st: *snapshot.State) void {
@@ -136,9 +139,9 @@ test "rank 1's reply hash is the server's token_sha" {
     try std.testing.expectEqualStrings(&std.fmt.bytesToHex(want[0..6].*, .lower), &r.sha());
 }
 
-test "rank 1 keeps a state only inside its budget" {
-    try std.testing.expect(admits(1 << 30, 600 << 20, 400 << 20));
-    try std.testing.expect(admits(1 << 30, 600 << 20, 424 << 20));
-    try std.testing.expect(!admits(1 << 30, 600 << 20, 425 << 20));
+test "rank 1 keeps rank 0's states up to the budget and its slack, and nothing without a budget" {
+    try std.testing.expect(admits(4 << 30, 3808 << 20, 352 << 20)); // the pair's 6,855-token state: rank 0 kept it at 4,064 MiB
+    try std.testing.expect(admits(1 << 30, 600 << 20, 1448 << 20));
+    try std.testing.expect(!admits(1 << 30, 600 << 20, 1449 << 20));
     try std.testing.expect(!admits(0, 0, 1));
 }
