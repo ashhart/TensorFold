@@ -255,16 +255,23 @@ pub const Host = struct {
         }
     };
 
+    /// What a reply finishes with: h.finish frees the job and lets the server free its request, so serve calls it last.
+    const Fin = struct { reason: api.Reason = .failed, stats: api.Stats = .{}, message: []const u8 = "" };
+
     fn serve(h: *Host, job: *Job) void {
+        var fin: Fin = .{};
+        defer h.finish(job, fin.reason, fin.stats, fin.message); // after every defer below: they read the job and its request
         const r = job.request;
         job.began = h.now();
         if (r.sampling) |s| if (s.temperature > 0) {
             emit(job, .{ .prefilled = 0 });
-            return h.finish(job, .failed, .{}, "the native Flash Next engine decodes greedily only: send temperature 0");
+            fin.message = "the native Flash Next engine decodes greedily only: send temperature 0";
+            return;
         };
         if (h.eng.followsPeer()) {
             emit(job, .{ .prefilled = 0 });
-            return h.finish(job, .failed, .{}, "speed-up mode: this Mac runs rank 0's requests; send requests to rank 0");
+            fin.message = "speed-up mode: this Mac runs rank 0's requests; send requests to rank 0";
+            return;
         }
         var c: Ctx = .{ .h = h, .job = job };
         const out: fx.Out = .{ .ctx = &c, .prefilled = Ctx.prefilled, .tokens = Ctx.tokens, .cancelled = Ctx.cancelled, .marked = Ctx.marked };
@@ -289,19 +296,21 @@ pub const Host = struct {
                 job.cached = 0;
                 break :retry h.eng.generateFrom(r.prompt, 0, plan.marks, r.max_tokens, r.eos, depth, out) catch |e2| {
                     if (!job.prefill_sent) emit(job, .{ .prefilled = 0 });
-                    return h.finish(job, .failed, .{}, @errorName(e2));
+                    fin.message = @errorName(e2);
+                    return;
                 };
             }
             if (!job.prefill_sent) emit(job, .{ .prefilled = 0 });
-            return h.finish(job, .failed, .{}, @errorName(e));
+            fin.message = @errorName(e);
+            return;
         };
         if (!job.prefill_sent) emit(job, .{ .prefilled = 0 });
-        const reason: api.Reason = switch (res.reason) {
+        fin.reason = switch (res.reason) {
             .stop => .stop,
             .length => .length,
             .cancelled => .cancelled,
         };
-        h.finish(job, reason, .{ .rounds = res.rounds, .drafted = res.drafted, .accepted = res.accepted, .min_rows = res.min_rows, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null }, "");
+        fin.stats = .{ .rounds = res.rounds, .drafted = res.drafted, .accepted = res.accepted, .min_rows = res.min_rows, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null };
     }
 };
 
