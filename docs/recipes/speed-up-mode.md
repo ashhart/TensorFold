@@ -65,8 +65,8 @@ sooner and left decode unchanged, since decode's exchanges are small.
 
 ## Starting it
 
-Start both servers, rank 1 first or within five minutes of each other; each waits for the other before it loads
-on:
+Start both servers with the same model, dump and flags (a flag that changes decoding, such as `--no-drafts`, goes on
+both), rank 1 first or within five minutes of each other; each waits for the other before it loads on:
 
 ```bash
 TF_FLASHNEXT_DUMP=/path/to/dump tensorfold-native serve /path/to/Qwen3.8-Flash-Next-6bit --speed-up rank1.json --no-thinking
