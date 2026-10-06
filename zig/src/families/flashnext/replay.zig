@@ -3,6 +3,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
+const roles_gen = @import("roles_gen.zig");
 const segments = @import("../../core/segments.zig");
 const tpm = @import("tp.zig");
 const mark_slots = @import("marks.zig");
@@ -36,7 +37,7 @@ pub const Buf = struct {
     }
 };
 pub const Entry = struct { fd: std.c.fd_t, at: usize, len: usize };
-pub const Variant = struct { inputs: [][]const u8, outputs: [][]const u8, meta: [][]const u8, pipe: mtl.Pipeline, file: []const u8 = "", name: []const u8 = "" };
+pub const Variant = struct { inputs: [][]const u8, outputs: [][]const u8, meta: [][]const u8, pipe: mtl.Pipeline, file: []const u8 = "", name: []const u8 = "", text: []const u8 = "" };
 pub const Site = struct { v: *Variant, grid: mtl.Size, tg: mtl.Size };
 
 const glue_source =
@@ -247,7 +248,6 @@ const glue_source =
     \\  if (acc == 0x9e3779b9u) sink[0] = acc;
     \\}
 ;
-
 
 /// Routed and shared experts at full width (FZ_XNEW=1): a 6-bit group read as six aligned words, 16 lanes a gate/up
 /// row (5 groups each) and 4 lanes a down row, 4 simdgroups a threadgroup; routing (top-k, weights) unchanged.
@@ -1035,6 +1035,45 @@ pub const Run = struct {
         return .{ .b = b };
     }
 
+    /// The checked-in kernels and role table (tools/zig/flashnext_checked.py, roles_gen.zig): serve with no dump.
+    /// Every variant compiles from the embedded recorded source, the lane ones from their no-tensor-unit texts.
+    pub fn compileChecked(r: *Run) !void {
+        const lanes = !r.device.tensorUnits();
+        for (&roles_gen.entries) |*e| {
+            const gop = try r.roles.getOrPut(r.arena, e.site);
+            if (gop.found_existing) return error.DuplicateSite;
+            const v = r.variants.get(e.function) orelse blk: {
+                var name = e.file;
+                if (lanes) if (std.mem.indexOf(u8, e.file, "lane_qmm_bytes_grouped") != null) {
+                    const at = std.mem.indexOf(u8, e.file, ".metal") orelse return error.NoSource;
+                    name = try std.fmt.allocPrint(r.arena, "{s}-lanes{s}", .{ e.file[0..at], e.file[at..] });
+                };
+                const src: []const u8 = for (ks.flashnext_gen.sources) |s| {
+                    if (std.mem.eql(u8, s.name, name)) break s.text;
+                } else return error.NoSource;
+                const lib = try mtl.Library.fromSource(r.device, src, mtl.CompileOptions.mlx());
+                const nv = try r.arena.create(Variant);
+                nv.* = .{ .inputs = try r.arena.dupe([]const u8, e.inputs), .outputs = try r.arena.dupe([]const u8, e.outputs), .meta = try r.arena.dupe([]const u8, e.meta), .pipe = try mtl.Pipeline.init(r.device, lib, e.function, false), .file = name, .name = e.function, .text = src };
+                try r.variants.put(r.arena, nv.name, nv);
+                break :blk nv;
+            };
+            gop.value_ptr.* = .{ .v = v, .grid = mtl.Size.of(e.grid[0], e.grid[1], e.grid[2]), .tg = mtl.Size.of(e.tg[0], e.tg[1], e.tg[2]) };
+        }
+        try r.compileGlue();
+        if (r.xnew) { // the checked-in gate/up kernel's header (simd_topk, bsilu) with the full-width expert kernels after it
+            var text: ?[]const u8 = null;
+            for (&roles_gen.entries) |*e| if (std.mem.indexOf(u8, e.file, "qa_expert_gateup") != null) {
+                text = (r.variants.get(e.function) orelse return error.NoGateup).text;
+            };
+            try r.compileXnew(text orelse return error.NoGateup);
+        }
+        if (r.hc_up) r.compileHc() catch |err| { // the checked-in row kernels then
+            std.log.warn("fz_hc_up off: {s}", .{@errorName(err)});
+            r.hc_up = false;
+        };
+    }
+
+    /// The dump path: every variant and role from the recorded plan, then the shared pipelines.
     pub fn compile(r: *Run, dir: []const u8) !void {
         const path = try std.fmt.allocPrintSentinel(r.arena, "{s}/plan.json", .{dir}, 0);
         const f = try mtl.MappedFile.open(path);
@@ -1054,6 +1093,25 @@ pub const Run = struct {
             const o = kv.value_ptr.object;
             try r.roles.put(r.arena, kv.key_ptr.*, .{ .v = r.variants.get(o.get("function").?.string).?, .grid = size3(o.get("grid").?), .tg = size3(o.get("threadgroup").?) });
         }
+        try r.compileGlue();
+        if (r.xnew) { // the recorded gate/up kernel's header (simd_topk, bsilu) with the full-width expert kernels after it
+            var hit: ?[]const u8 = null;
+            var it = plan.object.get("variants").?.object.iterator();
+            while (it.next()) |kv| if (std.mem.indexOf(u8, kv.key_ptr.*, "qa_expert_gateup") != null) {
+                hit = kv.value_ptr.object.get("file").?.string;
+            };
+            const fp = try std.fmt.allocPrintSentinel(r.arena, "{s}/{s}", .{ dir, hit orelse return error.NoGateup }, 0);
+            const ff = try mtl.MappedFile.open(fp);
+            try r.compileXnew(ff.bytes[0..ff.size]);
+        }
+        if (r.hc_up) r.compileHc() catch |err| { // the recorded kernels then
+            std.log.warn("fz_hc_up off: {s}", .{@errorName(err)});
+            r.hc_up = false;
+        };
+    }
+
+    /// The glue and select pipelines both compile paths share.
+    fn compileGlue(r: *Run) !void {
         const glue = try mtl.Library.fromSource(r.device, glue_source, mtl.CompileOptions.mlx());
         r.kv_pipe = try mtl.Pipeline.init(r.device, glue, "fz_kv_write", false);
         r.argmax_pipe = try mtl.Pipeline.init(r.device, glue, "fz_argmax", false);
@@ -1071,39 +1129,29 @@ pub const Run = struct {
         r.sel_meta_pipe = try mtl.Pipeline.init(r.device, slib, "fz_sel_meta", false);
         r.pool_abs_pipe = try mtl.Pipeline.init(r.device, slib, "fz_idx_pool_abs", false);
         r.sink = .{ .b = try r.buffer(64) };
-        if (r.xnew) { // the recorded gate/up kernel's header (simd_topk, bsilu) with the full-width expert kernels after it
-            var hit: ?[]const u8 = null;
-            var it = plan.object.get("variants").?.object.iterator();
-            while (it.next()) |kv| if (std.mem.indexOf(u8, kv.key_ptr.*, "qa_expert_gateup") != null) {
-                hit = kv.value_ptr.object.get("file").?.string;
-            };
-            const fp = try std.fmt.allocPrintSentinel(r.arena, "{s}/{s}", .{ dir, hit orelse return error.NoGateup }, 0);
-            const ff = try mtl.MappedFile.open(fp);
-            const text = ff.bytes[0..ff.size];
-            const cut = std.mem.indexOf(u8, text, "[[kernel]]") orelse return error.NoKernel;
-            const define: []const u8 = if (r.xpack) "#define FZ_PACKED 1\n" else "#define FZ_PACKED 0\n";
-            const full = try std.mem.concat(r.arena, u8, &.{ define, text[0..cut], xnew_source });
-            r.xnew_header = try std.mem.concat(r.arena, u8, &.{ define, text[0..cut] });
-            const lib = try mtl.Library.fromSource(r.device, full, mtl.CompileOptions.mlx());
-            r.xgu_pipe = try mtl.Pipeline.init(r.device, lib, "fz_xgu", false);
-            r.xdown_pipe = try mtl.Pipeline.init(r.device, lib, "fz_xdown", false);
-            r.dense8_pipe = try mtl.Pipeline.init(r.device, lib, "fz_dense8", false);
-            r.dense16_pipe = try mtl.Pipeline.init(r.device, lib, "fz_dense16", false);
-            r.route_pipe = try mtl.Pipeline.init(r.device, lib, "fz_route", false);
-            r.router_pipe = try mtl.Pipeline.init(r.device, lib, "fz_router", false);
-            r.xfused_pipe = try mtl.Pipeline.init(r.device, lib, "fz_xfused", false);
-            r.xgu_sx_pipe = try mtl.Pipeline.init(r.device, lib, "fz_xgu_sx", false);
-            r.xdown_sx_pipe = try mtl.Pipeline.init(r.device, lib, "fz_xdown_sx", false);
-            r.xpart = .{ .b = try r.buffer(MAXR * 11 * 4 * D * 4) };
-            r.xdone = .{ .b = try r.buffer(MAXR * 11 * 4) };
-            r.ggu_pipe = try mtl.Pipeline.init(r.device, lib, "fz_ggu", false);
-            r.gdown_pipe = try mtl.Pipeline.init(r.device, lib, "fz_gdown", false);
-            r.ul = .{ .b = try r.buffer((1 + 2 * 320 + 320 * 32) * 4) };
-        }
-        if (r.hc_up) r.compileHc() catch |err| { // the recorded kernels then
-            std.log.warn("fz_hc_up off: {s}", .{@errorName(err)});
-            r.hc_up = false;
-        };
+    }
+
+    /// fz_xgu and friends after the gate/up kernel's header (simd_topk, bsilu): the recorded or checked-in text.
+    fn compileXnew(r: *Run, text: []const u8) !void {
+        const cut = std.mem.indexOf(u8, text, "[[kernel]]") orelse return error.NoKernel;
+        const define: []const u8 = if (r.xpack) "#define FZ_PACKED 1\n" else "#define FZ_PACKED 0\n";
+        const full = try std.mem.concat(r.arena, u8, &.{ define, text[0..cut], xnew_source });
+        r.xnew_header = try std.mem.concat(r.arena, u8, &.{ define, text[0..cut] });
+        const lib = try mtl.Library.fromSource(r.device, full, mtl.CompileOptions.mlx());
+        r.xgu_pipe = try mtl.Pipeline.init(r.device, lib, "fz_xgu", false);
+        r.xdown_pipe = try mtl.Pipeline.init(r.device, lib, "fz_xdown", false);
+        r.dense8_pipe = try mtl.Pipeline.init(r.device, lib, "fz_dense8", false);
+        r.dense16_pipe = try mtl.Pipeline.init(r.device, lib, "fz_dense16", false);
+        r.route_pipe = try mtl.Pipeline.init(r.device, lib, "fz_route", false);
+        r.router_pipe = try mtl.Pipeline.init(r.device, lib, "fz_router", false);
+        r.xfused_pipe = try mtl.Pipeline.init(r.device, lib, "fz_xfused", false);
+        r.xgu_sx_pipe = try mtl.Pipeline.init(r.device, lib, "fz_xgu_sx", false);
+        r.xdown_sx_pipe = try mtl.Pipeline.init(r.device, lib, "fz_xdown_sx", false);
+        r.xpart = .{ .b = try r.buffer(MAXR * 11 * 4 * D * 4) };
+        r.xdone = .{ .b = try r.buffer(MAXR * 11 * 4) };
+        r.ggu_pipe = try mtl.Pipeline.init(r.device, lib, "fz_ggu", false);
+        r.gdown_pipe = try mtl.Pipeline.init(r.device, lib, "fz_gdown", false);
+        r.ul = .{ .b = try r.buffer((1 + 2 * 320 + 320 * 32) * 4) };
     }
 
     /// fz_hc_up after the recorded qa_hc_down_row header, refused unless every recorded qa_hc_up variant has the
@@ -1115,11 +1163,11 @@ pub const Run = struct {
         while (it.next()) |kv| {
             const name = kv.key_ptr.*;
             if (std.mem.indexOf(u8, name, "qa_hc_down_row") != null) {
-                const text = try fileText(a, kv.value_ptr.*.file);
+                const text = try variantText(a, kv.value_ptr.*);
                 header = text[0 .. std.mem.indexOf(u8, text, "[[max_total_threads_per_threadgroup") orelse return error.NoKernel];
             }
             if (std.mem.indexOf(u8, name, "qa_hc_up_") == null) continue;
-            const text = try fileText(a, kv.value_ptr.*.file);
+            const text = try variantText(a, kv.value_ptr.*);
             for ([_][]const u8{ "int S = 4;", "int D = 2560;", "int BITS = 6;", "int GS = 32;", "int LOW = 320;", "int KS = 10;" }) |c|
                 if (std.mem.indexOf(u8, text, c) == null) return error.HcConstants;
         }
@@ -1128,8 +1176,10 @@ pub const Run = struct {
         r.hc_up_pipe = try mtl.Pipeline.init(r.device, lib, "fz_hc_up", false);
     }
 
-    fn fileText(a: std.mem.Allocator, path: []const u8) ![]const u8 {
-        const f = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(a, "{s}", .{path}, 0));
+    /// A variant's source: the embedded text when the run is checked-in, else its recorded file.
+    fn variantText(a: std.mem.Allocator, v: *const Variant) ![]const u8 {
+        if (v.text.len != 0) return v.text;
+        const f = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(a, "{s}", .{v.file}, 0));
         return f.bytes[0..f.size];
     }
 
@@ -1158,9 +1208,6 @@ pub const Run = struct {
         const a = v.array.items;
         return mtl.Size.of(@intCast(a[0].integer), @intCast(a[1].integer), @intCast(a[2].integer));
     }
-
-
-
 
     /// FZ_XPACK: an expert set's rows (gate, up, shared gate, shared up, down, shared down) to the packed layout.
     pub fn repack(r: *Run, ex: []Buf) !void {
@@ -1406,7 +1453,6 @@ pub const Run = struct {
     }
 };
 
-
 /// Past 512 complete 4-key blocks the attention reads each row's 512 best blocks and its tail: the recorded pool,
 /// scores and selection kernels (dispatched at any context), with per-row metadata from the host.
 /// GPU-side rounds: a ring entry's words (keep, source, match length, up to 17 tokens), the arena's history length.
@@ -1479,11 +1525,21 @@ pub const Select = struct {
             }
         };
         return .{
-            .pool = found[0].?, .scores = found[1].?, .select = found[2].?,
-            .start = try B.of(r, 16), .starts = try B.of(r, CATCH * 256), .sc = try B.of(r, rows_max * (CAP / 4) * 4), .keys = try B.of(r, rows_max * KW * 4),
-            .complete = try B.of(r, rows_max * 4), .ends = try B.of(r, rows_max * 4), .counts = try B.of(r, rows_max * 4),
+            .pool = found[0].?,
+            .scores = found[1].?,
+            .select = found[2].?,
+            .start = try B.of(r, 16),
+            .starts = try B.of(r, CATCH * 256),
+            .sc = try B.of(r, rows_max * (CAP / 4) * 4),
+            .keys = try B.of(r, rows_max * KW * 4),
+            .complete = try B.of(r, rows_max * 4),
+            .ends = try B.of(r, rows_max * 4),
+            .counts = try B.of(r, rows_max * 4),
             .sparse = try B.of(r, rows_max * 4),
-            .pooled_shape = try r.buffer(16), .q_shape = try r.buffer(16), .sc_shape = try r.buffer(16), .ids_shape = try r.buffer(16),
+            .pooled_shape = try r.buffer(16),
+            .q_shape = try r.buffer(16),
+            .sc_shape = try r.buffer(16),
+            .ids_shape = try r.buffer(16),
         };
     }
 
@@ -1563,7 +1619,6 @@ pub const Select = struct {
     }
 };
 
-
 /// Block selection in GPU-side rounds: fz_sel_meta writes each round's rows, pooling range and pooled count; the pool
 /// runs at absolute blocks (up to POOL_BLOCKS a round); scores cover an upper bound of the pooled blocks the host keeps.
 /// fz_sel_meta's layout: complete, ends, counts, sparse (MAXR each), then start, count, pooled.
@@ -1588,9 +1643,13 @@ pub const GSelect = struct {
 
     pub fn init(r: *Run, pooled: usize) !GSelect {
         var g: GSelect = .{
-            .sel = .{ .b = try r.buffer(128 * 4) }, .sc = .{ .b = try r.buffer(MAXR * (CAP / 4) * 4) },
-            .keys = .{ .b = try r.buffer(MAXR * KW * 4) }, .pooled_shape = try r.buffer(16), .q_shape = undefined,
-            .sc_shape = try r.buffer(16), .ids_shape = undefined,
+            .sel = .{ .b = try r.buffer(128 * 4) },
+            .sc = .{ .b = try r.buffer(MAXR * (CAP / 4) * 4) },
+            .keys = .{ .b = try r.buffer(MAXR * KW * 4) },
+            .pooled_shape = try r.buffer(16),
+            .q_shape = undefined,
+            .sc_shape = try r.buffer(16),
+            .ids_shape = undefined,
         };
         g.sel.b.slice(i32, 128)[SEL_POOLED] = @intCast(pooled);
         for (0..MAXR + 1) |w| {
@@ -2346,7 +2405,6 @@ pub fn copyDrafts(hist: []const u32, min: usize, out: []u32) usize {
     return 0;
 }
 
-
 /// Prompt chunks of up to PMAX rows: projections on the 6-bit tensor-unit kernels, experts sorted by expert and
 /// gathered, the decode's row kernels at the chunk's rows, and DeltaNet storing only its last row's state.
 pub const PMAX = 8192; // the prompt buffers' rows; `step` cuts the chunks
@@ -2474,24 +2532,62 @@ pub const Prompt = struct {
         };
         const R = PMAX;
         return .{
-            .ids = try B.of(r, R * 4), .pids = try B.of(r, R * 16 * 4), .h = .{ try B.of(r, R * WIDE * 2), try B.of(r, R * WIDE * 2) },
-            .ssp = try B.of(r, R * 10 * 4 * 4), .normed = try B.of(r, R * WIDE * 2), .dn = try B.of(r, R * 324 * 2),
-            .hact = try B.of(r, R * 320 * 2), .inj_a = try B.of(r, R * 4 * 2), .inj_m = try B.of(r, R * 4 * 2),
-            .up = try B.of(r, R * WIDE * 2), .mixed = try B.of(r, R * D * 2), .p = try B.of(r, R * 16480 * 2),
-            .gout = try B.of(r, R * 6144 * 2), .branch = try B.of(r, R * D * 2), .cso = try B.of(r, CS_ROW),
-            .q = try B.of(r, R * 24 * 256 * 2), .kout = try B.of(r, R * 2 * 256 * 2), .iq = try B.of(r, R * 4 * 128 * 2),
-            .po = try B.of(r, 64), .pm = try B.of(r, 64), .aout = try B.of(r, R * 6144 * 2),
-            .pos = try B.of(r, R * 4), .nk = try B.of(r, R * 4), .zeros = try B.of(r, R * 4), .kvmeta = try B.of(r, 16),
-            .lg = try B.of(r, R * 513 * 4), .pick = try B.of(r, R * 10 * 4), .wts = try B.of(r, R * 10 * 4),
-            .cnt = try B.of(r, 512 * 4), .off = try B.of(r, 513 * 4), .cur = try B.of(r, 512 * 4), .row_of = try B.of(r, R * 10 * 4),
-            .xs = try B.of(r, R * 10 * D * 2), .g = try B.of(r, R * 10 * 640 * 2), .u = try B.of(r, R * 10 * 640 * 2),
-            .a = try B.of(r, R * 10 * 640 * 2), .ds = try B.of(r, R * 10 * D * 2), .sg = try B.of(r, R * 640 * 2),
-            .su = try B.of(r, R * 640 * 2), .sa = try B.of(r, R * 640 * 2), .ydown = try B.of(r, R * 11 * D * 2),
-            .emb = try B.of(r, R * D * 2), .kvp = try B.of(r, R * 12800 * 2), .gated = try B.of(r, R * WIDE * 2),
-            .hout = try B.of(r, R * WIDE * 2), .cin = try B.of(r, (PLE_TAIL + R) * WIDE * 2), .rows = try B.of(r, 16),
-            .part = try B.of(r, 8 * R * 324 * 4), .qn = try B.of(r, R * 16 * 128 * 4), .kn = try B.of(r, R * 16 * 128 * 4),
-            .v = try B.of(r, R * 48 * 128 * 4), .gg = try B.of(r, R * 48 * 4), .beta = try B.of(r, R * 48 * 4), .ys = try B.of(r, R * 6144 * 4),
-            .mids = try B.of(r, R * 4), .n_add = try B.of(r, 16),
+            .ids = try B.of(r, R * 4),
+            .pids = try B.of(r, R * 16 * 4),
+            .h = .{ try B.of(r, R * WIDE * 2), try B.of(r, R * WIDE * 2) },
+            .ssp = try B.of(r, R * 10 * 4 * 4),
+            .normed = try B.of(r, R * WIDE * 2),
+            .dn = try B.of(r, R * 324 * 2),
+            .hact = try B.of(r, R * 320 * 2),
+            .inj_a = try B.of(r, R * 4 * 2),
+            .inj_m = try B.of(r, R * 4 * 2),
+            .up = try B.of(r, R * WIDE * 2),
+            .mixed = try B.of(r, R * D * 2),
+            .p = try B.of(r, R * 16480 * 2),
+            .gout = try B.of(r, R * 6144 * 2),
+            .branch = try B.of(r, R * D * 2),
+            .cso = try B.of(r, CS_ROW),
+            .q = try B.of(r, R * 24 * 256 * 2),
+            .kout = try B.of(r, R * 2 * 256 * 2),
+            .iq = try B.of(r, R * 4 * 128 * 2),
+            .po = try B.of(r, 64),
+            .pm = try B.of(r, 64),
+            .aout = try B.of(r, R * 6144 * 2),
+            .pos = try B.of(r, R * 4),
+            .nk = try B.of(r, R * 4),
+            .zeros = try B.of(r, R * 4),
+            .kvmeta = try B.of(r, 16),
+            .lg = try B.of(r, R * 513 * 4),
+            .pick = try B.of(r, R * 10 * 4),
+            .wts = try B.of(r, R * 10 * 4),
+            .cnt = try B.of(r, 512 * 4),
+            .off = try B.of(r, 513 * 4),
+            .cur = try B.of(r, 512 * 4),
+            .row_of = try B.of(r, R * 10 * 4),
+            .xs = try B.of(r, R * 10 * D * 2),
+            .g = try B.of(r, R * 10 * 640 * 2),
+            .u = try B.of(r, R * 10 * 640 * 2),
+            .a = try B.of(r, R * 10 * 640 * 2),
+            .ds = try B.of(r, R * 10 * D * 2),
+            .sg = try B.of(r, R * 640 * 2),
+            .su = try B.of(r, R * 640 * 2),
+            .sa = try B.of(r, R * 640 * 2),
+            .ydown = try B.of(r, R * 11 * D * 2),
+            .emb = try B.of(r, R * D * 2),
+            .kvp = try B.of(r, R * 12800 * 2),
+            .gated = try B.of(r, R * WIDE * 2),
+            .hout = try B.of(r, R * WIDE * 2),
+            .cin = try B.of(r, (PLE_TAIL + R) * WIDE * 2),
+            .rows = try B.of(r, 16),
+            .part = try B.of(r, 8 * R * 324 * 4),
+            .qn = try B.of(r, R * 16 * 128 * 4),
+            .kn = try B.of(r, R * 16 * 128 * 4),
+            .v = try B.of(r, R * 48 * 128 * 4),
+            .gg = try B.of(r, R * 48 * 4),
+            .beta = try B.of(r, R * 48 * 4),
+            .ys = try B.of(r, R * 6144 * 4),
+            .mids = try B.of(r, R * 4),
+            .n_add = try B.of(r, 16),
         };
     }
 
@@ -2603,17 +2699,17 @@ pub const Prompt = struct {
         r.enc.dispatchThreads(if (p.skip & 64 == 0) mtl.Size.of(((513 + 63) / 64) * 128, (rows + 63) / 64, 1) else mtl.Size.of(1, 1, 1), mtl.Size.of(if (p.skip & 64 == 0) 128 else 1, 1, 1));
         p.barrier();
         if (p.skip & 128 == 0) {
-        p.bind(p.pl[4], &.{ b.lg, b.pick, b.wts, b.cnt });
-        r.enc.dispatchThreads(mtl.Size.of(32, rows, 1), mtl.Size.of(32, 1, 1));
-        p.barrier();
-        p.bind(p.pl[5], &.{ b.cnt, b.off, b.cur });
-        r.enc.dispatchThreads(mtl.Size.of(512, 1, 1), mtl.Size.of(512, 1, 1));
-        p.barrier();
-        p.bind(p.pl[6], &.{ b.pick, b.cur, b.row_of });
-        const np: i32 = @intCast(pairs);
-        r.enc.setBytes(std.mem.asBytes(&np), 3);
-        r.enc.dispatchThreads(mtl.Size.of(pairs, 1, 1), mtl.Size.of(256, 1, 1));
-        p.barrier();
+            p.bind(p.pl[4], &.{ b.lg, b.pick, b.wts, b.cnt });
+            r.enc.dispatchThreads(mtl.Size.of(32, rows, 1), mtl.Size.of(32, 1, 1));
+            p.barrier();
+            p.bind(p.pl[5], &.{ b.cnt, b.off, b.cur });
+            r.enc.dispatchThreads(mtl.Size.of(512, 1, 1), mtl.Size.of(512, 1, 1));
+            p.barrier();
+            p.bind(p.pl[6], &.{ b.pick, b.cur, b.row_of });
+            const np: i32 = @intCast(pairs);
+            r.enc.setBytes(std.mem.asBytes(&np), 3);
+            r.enc.dispatchThreads(mtl.Size.of(pairs, 1, 1), mtl.Size.of(256, 1, 1));
+            p.barrier();
         }
         if (p.skip & 256 == 0) {
             p.bind(p.pl[7], &.{ b.mixed, b.row_of, b.xs });

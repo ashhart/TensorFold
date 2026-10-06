@@ -299,3 +299,74 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
     };
     return c;
 }
+
+/// The served PLE layer's reference values, the five ref.json fields serve reads (the first PLE layer's
+/// embedding: the first eos id, the 16 prime table sizes with their offsets, the 3 hash multipliers).
+pub const PleRef = struct { eos: i64, multipliers: [3]i64, sizes: [16]i64, offsets: [16]i64 };
+
+const mask64: u64 = (1 << 64) - 1;
+const golden: u64 = 0x9E3779B97F4A7C15;
+const mix1: u64 = 0xBF58476D1CE4E5B9;
+const mix2: u64 = 0x94D049BB133111EB;
+const prime_gap: u64 = 10007;
+
+fn splitmix64(value: u64) u64 {
+    var v = value +% golden;
+    v = (v ^ (v >> 30)) *% mix1;
+    v = (v ^ (v >> 27)) *% mix2;
+    return v ^ (v >> 31);
+}
+
+fn isPrime(value: u64) bool {
+    if (value < 2) return false;
+    if (value % 2 == 0) return value == 2;
+    var divisor: u64 = 3;
+    while (divisor * divisor <= value) : (divisor += 2) {
+        if (value % divisor == 0) return false;
+    }
+    return true;
+}
+
+fn nthPrimeAfter(start: u64, count: u64) u64 {
+    var prime = start;
+    var left = count;
+    while (left > 0) {
+        prime += 1;
+        while (!isPrime(prime)) prime += 1;
+        left -= 1;
+    }
+    return prime;
+}
+
+/// The first PLE layer's embedding values derived from the config: 16 prime table sizes (the k-th prime past
+/// `ngram_vocab_size_base - 1` per head) with running offsets, and the seed-splitmix multipliers (model.py's
+/// NGramEmbedding at ple_index 0, the first PLE layer's index in ple_layer_ids).
+pub fn pleRef(c: *const Config) !PleRef {
+    const heads = try c.ngramHeadCount();
+    if (heads != 16 or c.ngram != 3) return error.UnsupportedFlashPleRef; // the engine's arrays are 16 and 3
+    var sizes: [16]i64 = undefined;
+    var offsets: [16]i64 = undefined;
+    var total: u64 = 0;
+    for (0..16) |head| {
+        const size = nthPrimeAfter(c.ngram_vocab - 1, head + 1);
+        sizes[head] = @intCast(size);
+        offsets[head] = @intCast(total);
+        total += size;
+    }
+    const half = @max(1, ((@as(u64, 1) << 63) - 1) / @max(c.vocab, 1) / 2);
+    var multipliers: [3]i64 = undefined;
+    for (0..3) |i| {
+        multipliers[i] = @intCast(2 * (splitmix64(c.seed +% golden * (i + 1)) % half) + 1);
+    }
+    // the PLE layer's eos is the text config's eos_token_id (model_layers.py), not the root generation one
+    const eos: i64 = blk: {
+        const v = c.text.get("eos_token_id") orelse break :blk 0;
+        if (v == .array) {
+            if (v.array.items.len == 0) break :blk 0;
+            break :blk @intCast(try integer(v.array.items[0]));
+        }
+        if (v == .integer) break :blk @intCast(try integer(v));
+        break :blk 0;
+    };
+    return .{ .eos = eos, .multipliers = multipliers, .sizes = sizes, .offsets = offsets };
+}

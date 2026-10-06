@@ -193,3 +193,83 @@ test "affine bit group and dimension admission refuses unsupported geometry" {
     try std.testing.expectError(error.InvalidAffineWidth, spec.words(48));
     try std.testing.expectError(error.Overflow, spec.words(std.math.maxInt(usize) - 31));
 }
+
+test "the PLE reference values derive from the pinned config as the Python embedding does" {
+    const bytes = @embedFile("fixtures/config.json");
+    var c = try family.config.parse(std.testing.allocator, bytes);
+    defer c.deinit();
+    const ref = try family.config.pleRef(&c);
+    try std.testing.expectEqual(@as(i64, 248044), ref.eos);
+    try std.testing.expectEqualSlices(i64, &.{ 23703573157769, 20109073645365, 8052911324071 }, &ref.multipliers);
+    try std.testing.expectEqualSlices(i64, &.{
+        20000003, 20000023, 20000033, 20000047, 20000059, 20000063, 20000069, 20000077,
+        20000081, 20000093, 20000107, 20000147, 20000153, 20000159, 20000161, 20000171,
+    }, &ref.sizes);
+    try std.testing.expectEqualSlices(i64, &.{
+        0,         20000003,  40000026,  60000059,  80000106,  100000165, 120000228, 140000297,
+        160000374, 180000455, 200000548, 220000655, 240000802, 260000955, 280001114, 300001275,
+    }, &ref.offsets);
+    const scale = 1.0 / std.math.sqrt(@as(f64, @floatFromInt(c.head_dim)));
+    try std.testing.expectEqual(@as(f64, 0.0625), scale);
+}
+
+test "the checked-in role table resolves every width serve asks for, with its source checked in" {
+    const table = @import("roles_gen.zig");
+    const sources = @import("../../../kernels/metal/flashnext/sources_gen.zig");
+    try std.testing.expect(table.entries.len > 0);
+    // every entry's file and function must exist in the embedded sources, with the kernel inside it
+    for (table.entries) |e| {
+        var found = false;
+        for (sources.sources) |s| {
+            if (std.mem.eql(u8, s.name, e.file)) {
+                found = true;
+                try std.testing.expect(std.mem.indexOf(u8, s.text, e.function) != null);
+            }
+        }
+        try std.testing.expect(found);
+    }
+    // the widths serve asks for: the stems callRows and callAs launch, at 1..16, 7, 9 and 10-16 included
+    const stems = [_][]const u8{
+        "qa_embed_rows@embed",             "qa_ple_lookup@ple",                "q4_ple_gate@ple",
+        "q4_ple_conv@ple",                 "q4_hc_norm_none#[10240]",          "q4_hc_norm_plain#[10240]",
+        "q4_hc_norm_grouped#[10240]",      "qa_hc_down@ahc",                   "qa_hc_up@ahc",
+        "qa_hc_down@mhc",                  "qa_hc_up@mhc",                     "qa_hc_down@mix",
+        "qa_hc_up@mix",                    "lane_qmm_bytes_grouped@gdn.in",    "lane_qmm_bytes_grouped@gdn.out",
+        "lane_qmm_bytes_grouped@att.proj", "lane_qmm_bytes_grouped@att.o",     "lane_qmm_bytes_grouped@ple.kv",
+        "lane_qmm_bytes_grouped@head",     "q4_gdn@gdn",                       "q4_attn_prep@att",
+        "q4_attn_parts#[24, 256]",         "q4_attn_merge_gate#[24, 16, 256]", "q4_router_float@moe",
+        "mtp:qa_embed_rows@embed",         "mtp:q4_attn_prep@mtp.att",         "mtp:q4_router_float@mtp.moe",
+    };
+    for (stems) |stem| {
+        var site_buf: [128]u8 = undefined;
+        for (1..17) |w| {
+            const site = try std.fmt.bufPrint(&site_buf, "{s}|{d}", .{ stem, w });
+            var hit = false;
+            for (table.entries) |e| {
+                if (std.mem.eql(u8, e.site, site)) hit = true;
+            }
+            try std.testing.expect(hit);
+        }
+    }
+}
+
+test "the checked-in lane sources have a no-tensor-unit twin with the same kernel names" {
+    const sources = @import("../../../kernels/metal/flashnext/sources_gen.zig");
+    for (sources.sources) |s| {
+        if (std.mem.indexOf(u8, s.name, "lane_qmm_bytes_grouped") == null) continue;
+        if (std.mem.endsWith(u8, s.name, "-lanes.metal")) continue;
+        var twin: [128]u8 = undefined;
+        const at = std.mem.indexOf(u8, s.name, ".metal").?;
+        const lanes_name = try std.fmt.bufPrint(&twin, "{s}-lanes{s}", .{ s.name[0..at], s.name[at..] });
+        var found = false;
+        for (sources.sources) |t| {
+            if (std.mem.eql(u8, t.name, lanes_name)) {
+                found = true;
+                // the rewrites keep every kernel's name and the constexpr shape block
+                try std.testing.expect(std.mem.indexOf(u8, t.text, "constexpr int N = ") != null);
+                try std.testing.expect(std.mem.indexOf(u8, t.text, "colok[f][0]") != null);
+            }
+        }
+        try std.testing.expect(found);
+    }
+}

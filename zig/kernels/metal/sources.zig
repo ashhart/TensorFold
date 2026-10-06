@@ -56,3 +56,6 @@ pub const prefill = [_]File{
 pub const flashnext_lane = @embedFile("decode/fn_lane.metal");
 /// Flash Next decode: the DeltaNet window step with every row's independent work at once.
 pub const flashnext_gdn = @embedFile("decode/fn_gdn.metal");
+
+/// The Flash Next checked-in kernels' embedded texts (flashnext_checked.py).
+pub const flashnext_gen = @import("flashnext/sources_gen.zig");

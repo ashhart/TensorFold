@@ -415,8 +415,8 @@ fn cacheBudget(eng: *fx.Engine, gib: ?f64, over: bool, a: Allocator, why: *[]con
 }
 
 /// The engine for a Flash Next checkpoint: the replay engine on the kernels and packs in `dump`, warmed, served; `speed_up` names this Mac's speed-up mode settings (tp.zig); `cache_gib` the prompt cache's budget (null: what 70% of RAM leaves; `over_cap` lets a larger one through); on error.CacheOverCap `why` (in `a`) says why.
-pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: []const u8, window: i64, speed_up: ?[]const u8, cache_gib: ?f64, over_cap: bool, a: Allocator, why: *[]const u8) !*Host {
-    const eng = try fx.Engine.loadWith(gpa, dir, dump, speed_up);
+pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, window: i64, speed_up: ?[]const u8, cache_gib: ?f64, over_cap: bool, a: Allocator, why: *[]const u8) !*Host {
+    const eng = try fx.Engine.loadWith(gpa, io, dir, dump, speed_up);
     errdefer eng.deinit();
     eng.warm() catch |err| {
         std.log.err("flash next: warm-up failed: {s}", .{@errorName(err)});

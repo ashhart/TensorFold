@@ -185,7 +185,7 @@ pub fn main(init: std.process.Init) !void {
         const items = all_items[0..@min(all_items.len, try promptCut())];
         const toks = try arena.alloc(u32, items.len);
         for (items, 0..) |x, i| toks[i] = @intCast(x.integer);
-        const e = try fx.Engine.load(gpa, args[1], args[2]);
+        const e = try fx.Engine.load(gpa, init.io, args[1], args[2]);
         if (std.c.getenv("FZ_COPY_MIN")) |v| e.copy_min = try std.fmt.parseInt(u32, std.mem.span(v), 10);
         if (std.c.getenv("FZ_COPY_LONG")) |v| e.copy_long = try std.fmt.parseInt(u32, std.mem.span(v), 10);
         if (std.c.getenv("FZ_ENGINE_WARM") != null) try e.warm();
@@ -1687,4 +1687,3 @@ pub fn main(init: std.process.Init) !void {
     }
     if (same != want.len or bad != 0) std.process.exit(1);
 }
-
