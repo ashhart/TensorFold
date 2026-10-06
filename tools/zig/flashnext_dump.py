@@ -66,6 +66,46 @@ mx.fast.metal_kernel = metal_kernel
 
 
 
+# Simdgroup-matrix layout: a lane's columns fn + {0, 1, 8, 9} a block, results at r * 8 + f * 4 + j; same sums.
+SIMD_LANES = (
+    ("  const short fn = ((qid & 2) | (lane & 1)) * 4;\n",
+     "  const short fn = ((lane & 8) >> 1) | ((lane & 1) << 1);   // simdgroup matrices: columns fn + {0, 1, 8, 9}\n"),
+    ("  const device uint4* sbv = (const device uint4*)SBt;\n  bool colok[NF];\n"
+     "  for (int f = 0; f < NF; f++) colok[f] = n0 + f * 16 + fn < N;\n",
+     "  const device uint2* sbv = (const device uint2*)SBt;\n  bool colok[NF][2];\n"
+     "  for (int f = 0; f < NF; f++) for (int h = 0; h < 2; h++) colok[f][h] = n0 + f * 16 + fn + 8 * h < N;\n"),
+    ("      const uint4 q = colok[f] ? sbv[(g * N + n0 + f * 16 + fn) / 4] : uint4(0);\n",
+     "      const uint4 q = uint4(colok[f][0] ? sbv[(g * N + n0 + f * 16 + fn) / 2] : uint2(0),\n"
+     "                            colok[f][1] ? sbv[(g * N + n0 + f * 16 + fn + 8) / 2] : uint2(0));\n"),
+    ("C[t][i] = fma(s[f][j], P[t * NF * 8 + i], fma(bb[f][j], r ? xs1 : xs0, C[t][i]));",
+     "C[t][i] = fma(s[f][j], P[t * NF * 8 + r * 8 + f * 4 + j], fma(bb[f][j], r ? xs1 : xs0, C[t][i]));"),
+    ("          if (m < M && nn < N)\n"
+     "            for (int j = 0; j < 4; j++) Y[m * N + nn + j] = static_cast<bfloat>(C[t][f * 8 + r * 4 + j]);\n",
+     "          if (m < M)\n            for (int j = 0; j < 4; j++)\n"
+     "              if (colok[f][j >> 1])\n"
+     "                Y[m * N + nn + (j & 1) + 8 * (j >> 1)] = static_cast<bfloat>(C[t][f * 8 + r * 4 + j]);\n"),
+)
+
+
+def simd_lane_source(source: str) -> str:
+    """A widening lane kernel reading the op's results in the simdgroup-matrix layout (GPUs before M5)."""
+
+    for old, new in SIMD_LANES:
+        assert source.count(old) == 1, f"lane kernel changed: {old[:60]!r}"
+        source = source.replace(old, new)
+    return source
+
+
+def simd_lanes() -> None:
+    """Before M5: the lane path the Zig engine replays, its widening kernels in the simdgroup-matrix layout."""
+
+    from tensorfold.kernels.qwen.dense.v1 import lane_widen
+
+    os.environ["TF_FLASH_DENSE"] = "lane"
+    for name in ("NIBBLES", "BYTES", "NIBBLES_GROUPED", "BYTES_GROUPED"):
+        setattr(lane_widen, name, simd_lane_source(getattr(lane_widen, name)))
+
+
 def lane(decode, linear) -> tuple[mx.array, mx.array, int]:
     hit = decode._lane[id(linear)]
     return hit[1], hit[2], int(hit[3])
@@ -196,6 +236,9 @@ def main() -> None:
                     help="the MTP head's draft ids: default (the shipped list), cjk (it and every CJK id) or a file")
     args = ap.parse_args()
     assert os.environ.get("TF_FLASH_PLE_KERNELS") == "1", "run with TF_FLASH_PLE_KERNELS=1"
+    from tensorfold.kernels.device import tensor_units
+    if not tensor_units():
+        simd_lanes()
     out = args.out
     (out / "kernels").mkdir(parents=True, exist_ok=True)
     from tensorfold.families.qwen4_exp.runtime import load
