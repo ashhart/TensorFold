@@ -221,7 +221,7 @@ pub const Fake = struct {
         _ = taps;
         const l = self(ptr).lane(s);
         if (start + count > l.history.items.len) return error.RowsNotHeld;
-        return .{ .buffer = @intFromPtr(l.history.items.ptr), .offset = start * 4, .rows = count, .row_bytes = 4 };
+        return .{ .buffer = @intFromPtr(l.history.items.ptr), .offset = start * 4, .rows = count, .row_bytes = 4, .space = .host, .dtype = .u32 };
     }
 
     fn release(ptr: *anyopaque, s: *Stream) void {

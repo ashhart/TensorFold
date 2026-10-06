@@ -1,8 +1,27 @@
-//! A drafter outside the target family (EAGLE-3, a DFlash block, a family's MTP head loaded on its own): it reads the
-//! target's tapped states (backend.Features) and holds drafts for a stream's next round. drafted.zig puts one in front of
+//! A drafter outside the target family (EAGLE-3, a DFlash block, an MTP head loaded on its own): it reads the
+//! target's tapped states (backend.Features) and holds drafts for streams' next rounds. drafted.zig puts one in front of
 //! any target backend that exposes `features`; the target verifies every draft, so the drafter decides speed, never output.
+//! Every call takes a round's streams together, so a GPU drafter can run them as one batch and read them back once.
 const Stream = @import("stream.zig").Stream;
 const Features = @import("backend.zig").Features;
+
+/// What the round loop's depth rule needs from the drafter itself (not from the target, whose own head may not exist).
+pub const Facts = struct {
+    depth: u32, // drafts a round at most
+    step_ms: f64, // one more draft's cost (timed at load); the rule prices a round as forward(rows) + step_ms x drafts
+    prior: []const f64 = &.{}, // acceptance by depth until a stream has its own
+    plain_guard: bool = true, // plain rounds compete with drafted depths (the rule may choose no drafts)
+    batched: bool = false, // hold() runs a shared round's streams as one batch
+};
+
+/// A stream's target rows [start, start + features.rows) and the token after each (the drafter replaces what it held
+/// at or past `start`, so a rollback is the next absorb's `start`).
+pub const Absorb = struct { stream: *Stream, features: Features, start: u64, follow: []const u32 };
+
+/// Draft `depth` tokens after `pending` (the token after the stream's last kept row), the first landing at `position`.
+/// The drafter may have absorbed fewer rows than `position - 1` (a prompt restored by prompt reuse has no states): it
+/// still holds `depth` tokens, and the target's verify rejects what does not land.
+pub const Hold = struct { stream: *Stream, pending: u32, position: u64, depth: u32 };
 
 pub const Drafter = struct {
     ptr: *anyopaque,
@@ -11,39 +30,34 @@ pub const Drafter = struct {
     pub const VTable = struct {
         /// The target's layers the drafter reads, in the order its features concatenate them.
         taps: *const fn (ptr: *anyopaque) []const u32,
-        /// Drafts a round at most.
-        depth: *const fn (ptr: *anyopaque) u32,
+        facts: *const fn (ptr: *anyopaque) Facts,
         /// A new stream: its own caches, empty.
         open: *const fn (ptr: *anyopaque, s: *Stream) anyerror!void,
-        /// The states of cache rows [start, start + f.rows) and the token after each; rows at or past `start` the drafter
-        /// held before are replaced (a rollback is the next absorb's `start`). A stream's first absorb may start past 0:
-        /// a prompt restored from the prompt cache has no states, and the drafter drafts without those rows.
-        absorb: *const fn (ptr: *anyopaque, s: *Stream, f: Features, start: u64, follow: []const u32) anyerror!void,
-        /// Draft `depth` tokens after the last absorbed row's follow token, the first landing at `position`.
-        hold: *const fn (ptr: *anyopaque, s: *Stream, position: u64, depth: u32) anyerror!void,
-        /// The held drafts on the host; how many.
-        held: *const fn (ptr: *anyopaque, s: *Stream, out: []u32) anyerror!usize,
-        /// The stream left the rounds.
+        absorb: *const fn (ptr: *anyopaque, items: []const Absorb) anyerror!void,
+        hold: *const fn (ptr: *anyopaque, items: []const Hold) anyerror!void,
+        /// Each stream's held drafts on the host: out[i] gets streams[i]'s first out[i].len (error if it holds fewer).
+        held: *const fn (ptr: *anyopaque, streams: []const *Stream, out: []const []u32) anyerror!void,
+        /// The stream left the rounds (only called for an opened stream).
         release: *const fn (ptr: *anyopaque, s: *Stream) void,
     };
 
     pub fn taps(d: Drafter) []const u32 {
         return d.vtable.taps(d.ptr);
     }
-    pub fn depth(d: Drafter) u32 {
-        return d.vtable.depth(d.ptr);
+    pub fn facts(d: Drafter) Facts {
+        return d.vtable.facts(d.ptr);
     }
     pub fn open(d: Drafter, s: *Stream) !void {
         return d.vtable.open(d.ptr, s);
     }
-    pub fn absorb(d: Drafter, s: *Stream, f: Features, start: u64, follow: []const u32) !void {
-        return d.vtable.absorb(d.ptr, s, f, start, follow);
+    pub fn absorb(d: Drafter, items: []const Absorb) !void {
+        return d.vtable.absorb(d.ptr, items);
     }
-    pub fn hold(d: Drafter, s: *Stream, position: u64, n: u32) !void {
-        return d.vtable.hold(d.ptr, s, position, n);
+    pub fn hold(d: Drafter, items: []const Hold) !void {
+        return d.vtable.hold(d.ptr, items);
     }
-    pub fn held(d: Drafter, s: *Stream, out: []u32) !usize {
-        return d.vtable.held(d.ptr, s, out);
+    pub fn held(d: Drafter, streams: []const *Stream, out: []const []u32) !void {
+        return d.vtable.held(d.ptr, streams, out);
     }
     pub fn release(d: Drafter, s: *Stream) void {
         d.vtable.release(d.ptr, s);

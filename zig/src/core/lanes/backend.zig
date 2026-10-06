@@ -28,9 +28,24 @@ pub const Alternative = struct { tokens: [4]u32, probs: [4]f64 };
 /// A window's results: each row's drawn token and the held drafts the forward verified (host drafts echo back).
 pub const Verified = struct { sampled: []u32, drafts: []u32 };
 
-/// A target's tapped states for rows of a stream's cache (drafter.zig reads them): `rows` rows of `row_bytes` each from
-/// `offset` in `buffer` (a device pointer on CUDA, a host pointer on the fake), the layers in the drafter's `taps` order.
-pub const Features = struct { buffer: u64, offset: u64 = 0, rows: u32, row_bytes: u32 };
+/// A target's tapped states for rows of a stream's cache, handed to an external drafter (drafter.zig).
+/// Layout: `rows` packed rows of `row_bytes` from `offset` in `buffer`, row-major; a row is the drafter's taps in its
+/// `taps` order, each the target's hidden width of `dtype`. Where: `space` (a host pointer, or a device pointer on
+/// `device`: the drafter must run on that device). Ready: when `ready` is 0 the producing work is complete; otherwise it
+/// names the backend's completion handle (a CUDA event) the consumer waits on before reading. Valid: until the target's
+/// next prefill, verify, keep or release of that stream; the drafter copies what it keeps.
+pub const Features = struct {
+    pub const Space = enum { host, device };
+    pub const Dtype = enum { bf16, f16, f32, u32 };
+    buffer: u64,
+    offset: u64 = 0,
+    rows: u32,
+    row_bytes: u32,
+    space: Space,
+    device: i32 = 0,
+    dtype: Dtype,
+    ready: u64 = 0,
+};
 
 /// Absorb a stream's kept rows into its draft head and hold `depth` drafts for its next round.
 pub const DraftRequest = struct {
