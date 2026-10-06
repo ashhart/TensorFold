@@ -201,7 +201,7 @@ pub fn run(srv: *Server, cx: *Cx, input: Input, sink: ?Sink, gone: anytype) Fail
         preparing = false;
     }
     var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .sink = sink, .thinking = thinking or reply_text.isChannel(srv.markers), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools };
-    defer srv.noteRequest(rendered.ids.len, gen.collected.items.len, box.stats.drafted, box.stats.accepted, received, gen.first_ns);
+    defer srv.noteRequest(rendered.ids.len, gen.collected.items.len, box.stats.drafted, box.stats.accepted, box.stats.rounds, received, gen.first_ns, gen.last_ns, box.stats.prefill_seconds);
     errdefer if (!gen.engine_done) gen.cancel(); // the engine writes to the mailbox until it says finished
     if (sink != null and input.tools.len > 0) gen.calls = try tool_stream.Streamer.init(a, input.tools);
     try gen.loop(gone);
@@ -257,6 +257,7 @@ const Generation = struct {
     streamed_reasoning: Shown = .{},
     streaming_done: bool = false,
     first_ns: ?i96 = null,
+    last_ns: ?i96 = null,
     reason: ?[]const u8 = null, // the server ended the reply (a stop string, the length) before the engine said so
     engine_done: bool = false,
     consumed: usize = 0,
@@ -291,7 +292,9 @@ const Generation = struct {
             } else if (g.collected.items.len >= g.max_tokens) g.reason = "length";
         }
         if (landed == 0) return;
-        if (g.first_ns == null) g.first_ns = nowNs(g.srv.io);
+        const arrived = nowNs(g.srv.io);
+        if (g.first_ns == null) g.first_ns = arrived;
+        g.last_ns = arrived;
         const sink = g.sink orelse return;
         if (g.streaming_done) return;
         var fresh: std.ArrayList(u32) = .empty;
@@ -428,7 +431,7 @@ const Generation = struct {
         try runtime.put(a, "engine", .{ .string = g.srv.info.name });
         try runtime.put(a, "tokens_per_second", .{ .float = if (decode_s > 0) @as(f64, @floatFromInt(decode_tokens)) / decode_s else 0 });
         try runtime.put(a, "seconds", .{ .float = @max(0, total) });
-        try runtime.put(a, "prefill_seconds", if (prefilled) |p| .{ .float = @max(0, seconds(p - submitted)) } else .null);
+        try runtime.put(a, "prefill_seconds", if (m.stats.prefill_seconds) |p| .{ .float = p } else .null);
         const widths = try a.alloc(Value, m.widths.len);
         for (m.widths, widths) |w, *slot| slot.* = try json.intValue(a, w);
         try runtime.put(a, "prefill_widths", .{ .array = widths });

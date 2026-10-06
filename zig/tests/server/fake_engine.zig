@@ -78,9 +78,11 @@ pub const ScriptEngine = struct {
         const script = e.scriptFor(a, r.prompt);
         const cached: u32 = if (script.object.get("cached")) |c| @intCast(c.integer) else 0;
         const delay: i64 = if (script.object.get("delay_ms")) |d| d.integer else 0;
+        const prefill_start = std.Io.Clock.awake.now(e.io).toNanoseconds();
         sink.event(sink.ctx, id, &.{ .prefilled = cached });
         var emitted: std.ArrayList(u32) = .empty;
-        var stats: api.Stats = .{};
+        const prefill_done = std.Io.Clock.awake.now(e.io).toNanoseconds();
+        var stats: api.Stats = .{ .prefill_seconds = @as(f64, @floatFromInt(@max(0, prefill_done - prefill_start))) / 1e9 };
         var reason: api.Reason = .stop;
         var done = false;
         for (script.object.get("chunks").?.array.items) |chunk| {

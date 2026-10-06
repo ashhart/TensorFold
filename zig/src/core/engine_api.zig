@@ -82,6 +82,8 @@ pub const Stats = struct {
     prefill_raised: []const bool = &.{},
     /// The loop period that ended or interrupted the think block, if any.
     loop_period: ?u32 = null,
+    /// Prompt prefill duration measured by the engine host, in seconds.
+    prefill_seconds: ?f64 = null,
     /// The drafter's own counters as a JSON object, or empty.
     telemetry_json: []const u8 = "",
 };
@@ -139,6 +141,8 @@ pub const Status = struct {
     warming: bool = false,
     /// Live streams written to the caller's buffer: tokens each holds.
     streams: usize = 0,
+    /// Generated tokens held by live streams, excluding their prompts.
+    generation_tokens: u64 = 0,
 };
 
 pub const SubmitError = error{ Closed, Busy };

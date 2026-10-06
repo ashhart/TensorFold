@@ -167,9 +167,10 @@ pub const Server = struct {
     }
 
     /// Counts one finished request for /metrics.
-    pub fn noteRequest(srv: *Server, prompt_len: usize, generated: usize, drafted: u64, accepted: u64, received: i96, first: ?i96) void {
+    pub fn noteRequest(srv: *Server, prompt_len: usize, generated: usize, drafted: u64, accepted: u64, rounds: u64, received: i96, first: ?i96, last: ?i96, prefill: ?f64) void {
         const now = clock.nowNs(srv.io);
-        srv.metrics.note(srv.io, prompt_len, generated, drafted, accepted, @max(0, clock.seconds(now - received)), if (first) |f| clock.seconds(f - received) else null, if (first) |f| @max(0, clock.seconds(now - f)) else null);
+        const tpot = srv.metrics.tpotValue(first, last, generated);
+        srv.metrics.note(srv.io, prompt_len, generated, drafted, accepted, rounds, @max(0, clock.seconds(now - received)), if (first) |f| clock.seconds(f - received) else null, if (first) |f| @max(0, clock.seconds(now - f)) else null, prefill, tpot);
     }
 
     /// Accepts connections until ``stop`` is set, each on its own thread.

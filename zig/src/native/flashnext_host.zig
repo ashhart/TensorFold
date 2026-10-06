@@ -14,6 +14,7 @@ const Job = struct {
     emitted: std.ArrayList(u32) = .empty,
     began: i96 = 0,
     prefill_sent: bool = false,
+    prefilled: ?i96 = null,
 };
 
 pub const Host = struct {
@@ -32,6 +33,7 @@ pub const Host = struct {
     decoded: std.ArrayList(Mark) = .empty, // tokens each round landed, for the 2 s decode rate
     prefill_rate: f64 = 0,
     prefill_at: i96 = 0,
+    live_generated: u64 = 0,
 
     const Mark = struct { at: i96, tokens: u64 };
     const window_ns: i96 = 2 * std.time.ns_per_s;
@@ -122,8 +124,10 @@ pub const Host = struct {
             if (m.at >= t - window_ns) tokens += m.tokens;
         }
         var n: usize = 0;
+        var generation_tokens: u64 = 0;
         if (h.running) |job| if (stream_tokens.len > 0) {
             stream_tokens[0] = @intCast(job.request.prompt.len + job.emitted.items.len);
+            generation_tokens = h.live_generated;
             n = 1;
         };
         out.* = .{
@@ -133,6 +137,7 @@ pub const Host = struct {
             .prefill_tokens_per_second = if (t - h.prefill_at <= window_ns) h.prefill_rate else 0,
             .preemptions = 0,
             .streams = n,
+            .generation_tokens = generation_tokens,
         };
     }
 
@@ -185,6 +190,7 @@ pub const Host = struct {
             h.serve(job);
             h.lock();
             h.running = null;
+            h.live_generated = 0;
             h.unlock();
         }
     }
@@ -201,6 +207,7 @@ pub const Host = struct {
             h.lock();
             if (done > c.job.began) h.prefill_rate = @as(f64, @floatFromInt(c.job.request.prompt.len)) / (@as(f64, @floatFromInt(done - c.job.began)) / 1e9);
             h.prefill_at = done;
+            c.job.prefilled = done;
             h.unlock();
             c.job.prefill_sent = true;
             emit(c.job, .{ .prefilled = 0 });
@@ -220,6 +227,9 @@ pub const Host = struct {
                 };
             }
             emit(job, .{ .tokens = toks[0..n] });
+            c.h.lock();
+            c.h.live_generated = @intCast(job.emitted.items.len);
+            c.h.unlock();
             c.h.noteDecoded(n);
             return matched;
         }
@@ -258,7 +268,7 @@ pub const Host = struct {
             .length => .length,
             .cancelled => .cancelled,
         };
-        h.finish(job, reason, .{ .rounds = res.rounds, .drafted = res.drafted, .accepted = res.accepted, .min_rows = res.min_rows }, "");
+        h.finish(job, reason, .{ .rounds = res.rounds, .drafted = res.drafted, .accepted = res.accepted, .min_rows = res.min_rows, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@max(0, done - job.began))) / 1e9 else null }, "");
     }
 };
 

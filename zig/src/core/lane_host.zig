@@ -32,6 +32,7 @@ pub const LaneHost = struct {
     prefill_rate: f64 = 0,
     prefill_at: i96 = 0,
     live_tokens: std.ArrayList(u32) = .empty,
+    live_generated: u64 = 0,
     lone: ?api.Lone = null, // the backend's driver for a lone greedy stream; null: every stream in the lane core
     lone_job: ?*Job = null, // the job that driver holds now
 
@@ -48,6 +49,7 @@ pub const LaneHost = struct {
         started: bool = false,
         prefill_sent: bool = false, // a lone driver's prefilled event went out
         began: i96 = 0,
+        prefilled: ?i96 = null,
     };
 
     pub fn init(gpa: Allocator, io: std.Io, core: *lanes.Engine, info_: Info) LaneHost {
@@ -135,6 +137,7 @@ pub const LaneHost = struct {
             .prefill_tokens_per_second = if (now - h.prefill_at <= window_ns) h.prefill_rate else 0,
             .preemptions = 0,
             .streams = n,
+            .generation_tokens = h.live_generated,
         };
     }
 
@@ -172,7 +175,7 @@ pub const LaneHost = struct {
 
     fn finish(h: *LaneHost, job: *Job, reason: Reason, message: []const u8) void {
         const s = &job.stream;
-        const stats: Stats = if (job.started) .{ .rounds = s.rounds, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows, .loop_period = s.loop_period } else .{};
+        const stats: Stats = if (job.started) .{ .rounds = s.rounds, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows, .loop_period = s.loop_period, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@max(0, done - job.began))) / 1e9 else null } else .{};
         emit(job, .{ .finished = .{ .reason = reason, .stats = stats, .message = message } });
         if (job.started) {
             s.deinit(h.gpa);
@@ -267,6 +270,7 @@ pub const LaneHost = struct {
         };
         job.started = true;
         const began = std.Io.Clock.awake.now(h.io).toNanoseconds();
+        job.began = began;
         if (h.loneFits(job)) return h.runLone(job, began);
         h.core.addStream(&job.stream) catch |e| return h.drop(job, @errorName(e));
         h.prefilled(job, began);
@@ -279,6 +283,7 @@ pub const LaneHost = struct {
         h.lock();
         if (done > began) h.prefill_rate = @as(f64, @floatFromInt(job.request.prompt.len)) / (@as(f64, @floatFromInt(done - began)) / 1e9);
         h.prefill_at = done;
+        job.prefilled = done;
         h.unlock();
         emit(job, .{ .prefilled = 0 });
     }
@@ -306,6 +311,7 @@ pub const LaneHost = struct {
                     host.prefilled(j, j.began);
                 }
                 host.send(j);
+                host.noteLive();
             }
             fn yield(ctx: *anyopaque) bool {
                 const host: *LaneHost = @ptrCast(@alignCast(ctx));
@@ -353,7 +359,11 @@ pub const LaneHost = struct {
         h.lock();
         defer h.unlock();
         h.live_tokens.clearRetainingCapacity();
-        for (h.admitted.items) |job| if (job.started) h.live_tokens.append(h.gpa, @intCast(job.stream.context.items.len)) catch {};
+        h.live_generated = 0;
+        for (h.admitted.items) |job| if (job.started) {
+            h.live_tokens.append(h.gpa, @intCast(job.stream.context.items.len)) catch {};
+            h.live_generated += @intCast(job.stream.emitted().len);
+        };
     }
 
     fn run(h: *LaneHost) void {

@@ -31,6 +31,10 @@ EXPECTED = {
     ("errors", "stream-structured"): "structured output: Python's test app has no grammar compiler, the Zig engine reports none",
     ("anthropic", "refuse-format"): "structured output: Python's test app has no grammar compiler, the Zig engine reports none",
     ("framing", "decisions"): "/v1/decisions scores labels in the engine; the Zig engine has no scoring yet, so the route is unknown",
+    ("cancel", "metrics-after"): "#367/#407's families (TPOT, live tokens, decode rounds, prefill time) are Zig-only; the Python server is frozen",
+    ("metrics-open", "metrics"): "the same #367/#407 Zig-only families",
+    ("metrics-open", "v1-metrics"): "the same #367/#407 Zig-only families",
+    ("keys", "metrics-counted"): "the same #367/#407 Zig-only families",
 }
 
 
