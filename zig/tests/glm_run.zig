@@ -8,7 +8,9 @@
 //! GLM_EP (expert parallel: this Mac's link settings; run the same command on both Macs),
 //! GLM_TRACE=NAME:STEPS:PATH (every call of NAME's plain reply, sublayer by sublayer, feeding its expected tokens),
 //! GLM_FORCED (each prompt's teacher-forced agreement with its expected tokens, before the replies),
-//! GLM_PROFILE=D,D (after the replies: a knock-out profile of a round at each depth, GLM_PROFILE_REPS times).
+//! GLM_PROFILE=D,D (after the replies: a knock-out profile of a round at each depth, GLM_PROFILE_REPS times),
+//! GLM_LOGITS=PREFIX (write each prompt's last-row logits, bf16, to PREFIX.NAME.bf16 at its first depth's first run),
+//! GLM_LOGITS_VS=PREFIX (compare them with such a file: the largest difference against the bf16 step at the top logit).
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -19,8 +21,13 @@ const Collect = struct {
     toks: std.ArrayList(u32) = .empty,
     cancel_at: usize = std.math.maxInt(usize), // the cancel check that answers true (0 = the first)
     checks: usize = 0,
+    logits_from: []const u16 = &.{}, // the engine's logits row, copied into `logits` once the prompt is done
+    logits: []u16 = &.{},
 
-    fn prefilled(_: *anyopaque) void {}
+    fn prefilled(ctx: *anyopaque) void {
+        const c: *Collect = @ptrCast(@alignCast(ctx));
+        if (c.logits_from.len > 0) c.logits = c.gpa.dupe(u16, c.logits_from) catch &.{};
+    }
     fn tokens(ctx: *anyopaque, t: []const u32) bool {
         const c: *Collect = @ptrCast(@alignCast(ctx));
         c.toks.appendSlice(c.gpa, t) catch {};
@@ -44,6 +51,38 @@ fn hash(t: []const u32) u64 {
 fn firstDiff(a: []const u32, b: []const u32) ?usize {
     for (0..@min(a.len, b.len)) |i| if (a[i] != b[i]) return i;
     return if (a.len == b.len) null else @min(a.len, b.len);
+}
+
+fn bf16(h: u16) f64 {
+    return @as(f32, @bitCast(@as(u32, h) << 16));
+}
+
+/// The last-row logits against another run's (`path`): the largest difference, the top logit and bf16's step there.
+fn compareLogits(gpa: std.mem.Allocator, ours: []const u16, path: [:0]const u8) !void {
+    const f = mtl.MappedFile.open(path) catch {
+        std.debug.print("  logits vs GLM_LOGITS_VS: no file {s}\n", .{path});
+        return;
+    };
+    defer f.deinit();
+    if (f.size != ours.len * 2) return error.LogitsSize;
+    const theirs = try gpa.dupe(u16, @as([*]const u16, @ptrCast(@alignCast(f.bytes)))[0..ours.len]);
+    defer gpa.free(theirs);
+    var worst: f64 = 0;
+    var at: usize = 0;
+    var top: f64 = 0;
+    var arg = [2]usize{ 0, 0 };
+    for (ours, theirs, 0..) |a, b, i| {
+        const d = @abs(bf16(a) - bf16(b));
+        if (d > worst) {
+            worst = d;
+            at = i;
+        }
+        top = @max(top, @abs(bf16(b)));
+        if (bf16(a) > bf16(ours[arg[0]])) arg[0] = i;
+        if (bf16(b) > bf16(theirs[arg[1]])) arg[1] = i;
+    }
+    const step = std.math.pow(f64, 2, @floor(std.math.log2(@max(top, 1e-30))) - 7);
+    std.debug.print("  logits vs GLM_LOGITS_VS: max |diff| {d:.4} at token {d} ({d:.4} vs {d:.4}), {d:.2} bf16 steps at the top logit {d:.3}; argmax {d} vs {d}\n", .{ worst, at, bf16(ours[at]), bf16(theirs[at]), worst / step, top, arg[0], arg[1] });
 }
 
 fn ints(gpa: std.mem.Allocator, v: std.json.Value) ![]u32 {
@@ -109,6 +148,9 @@ pub fn main(init: std.process.Init) !void {
         for (depths.items) |d| for (0..runs) |run| {
             var col: Collect = .{ .gpa = gpa };
             defer col.toks.deinit(gpa);
+            defer gpa.free(col.logits);
+            const want_logits = run == 0 and d == depths.items[0] and (std.c.getenv("GLM_LOGITS") != null or std.c.getenv("GLM_LOGITS_VS") != null);
+            if (want_logits) col.logits_from = @as([*]const u16, @ptrCast(@alignCast(e.sc.logits.addr())))[0..e.c.vocab];
             const r = try e.generate(ids, max, eos, d, .{ .ctx = &col, .prefilled = Collect.prefilled, .tokens = Collect.tokens, .cancelled = Collect.cancelled });
             const toks = col.toks.items;
             const tps = @as(f64, @floatFromInt(toks.len -| 1)) / @max(r.decode_seconds, 1e-9);
@@ -128,6 +170,14 @@ pub fn main(init: std.process.Init) !void {
                     std.debug.print("  vs GLM_VS: first token {s}, first difference at token {d} of {d}\n", .{ if (at == 0) "DIFFERS" else "equal", at, @min(want.len, toks.len) });
                 } else std.debug.print("  vs GLM_VS: all {d} tokens equal\n", .{toks.len});
             };
+            if (want_logits and col.logits.len == 0) return error.NoLogits;
+            if (want_logits) if (std.c.getenv("GLM_LOGITS")) |prefix| {
+                const path = try std.fmt.allocPrintSentinel(arena, "{s}.{s}.bf16", .{ prefix, name }, 0);
+                const file = std.c.fopen(path, "wb") orelse return error.OpenFailed;
+                defer _ = std.c.fclose(file);
+                if (std.c.fwrite(std.mem.sliceAsBytes(col.logits).ptr, 2, col.logits.len, file) != col.logits.len) return error.WriteFailed;
+            };
+            if (want_logits) if (std.c.getenv("GLM_LOGITS_VS")) |prefix| try compareLogits(gpa, col.logits, try std.fmt.allocPrintSentinel(arena, "{s}.{s}.bf16", .{ prefix, name }, 0));
             if (run == 0 and d == depths.items[0]) {
                 if (saved.items.len > 1) try saved.append(arena, ',');
                 try saved.print(arena, "\"{s}\":[", .{name});

@@ -137,7 +137,7 @@ pub const Engine = struct {
         e.sc = both.scratch;
         e.prompt_ids = try e.arena.buffer(@as(usize, cap) * 4);
         const chunked = if (std.c.getenv("GLM_PROMPT")) |v| v[0] != '0' else true;
-        if (chunked and link == null) e.pr = try prompt_mod.init(gpa, &e.arena, e.device, &e.c, &e.sc, cap);
+        if (chunked and (link == null or e.c.byRows())) e.pr = try prompt_mod.init(gpa, &e.arena, e.device, &e.c, &e.sc, cap);
         errdefer if (e.pr) |*p| p.deinit();
         const limit = loadLimit();
         if (plan_bytes + e.arena.bytes > limit) { // refused before any weight is read: the floor's one-Mac limit

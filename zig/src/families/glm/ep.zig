@@ -17,7 +17,9 @@ const MAXR = 16;
 const MAXP = MAXR * TOPK; // a window's picks (row * TOPK + slot) at most
 const ENTRY = D * 2; // one pick's routed output, bf16
 const PAGE = 16384;
-const SLOT = MAXP * ENTRY; // one exchange's entries at most
+/// A prompt chunk's rows at most: by rows, each row's fp32 routed sum (16 KB) goes in one exchange (64 MB at 4,096).
+pub const PROMPT_ROWS = 4096;
+const SLOT = @max(MAXP * ENTRY, PROMPT_ROWS * D * 4); // one exchange's entries at most
 
 // The window (the same on both Macs): the peer's entries and ours by parity (a page before each send), flags, GPU words.
 const RECV = 0;
@@ -112,6 +114,18 @@ const source =
     \\  for (int k = 1; k < TOPK; k++) acc = ep_mul_add(acc, WTS[r * TOPK + k], y[size_t(k) * 4096]);
     \\  OUT[size_t(r) * 4096 + d] = acc;
     \\}
+    \\// the same sums from a prompt chunk's partials in expert order (SORTED [rows * TOPK, 4096] fp32): each pick's at INV
+    \\kernel void ep_rcombine_sorted(const device float* SORTED [[buffer(0)]], const device uint* INV [[buffer(1)]],
+    \\    const device float* WTS [[buffer(2)]], constant int& rows [[buffer(3)]], device float* OUT [[buffer(4)]],
+    \\    device atomic_uint* CNT [[buffer(5)]], uint gid [[thread_position_in_grid]]) {
+    \\  const int r = int(gid) / 4096, d = int(gid) % 4096;
+    \\  if (gid == 0) atomic_store_explicit(CNT, uint(rows * 2), memory_order_relaxed);
+    \\  if (r >= rows) return;
+    \\  const device uint* at = INV + r * TOPK;
+    \\  float acc = WTS[r * TOPK] * SORTED[size_t(at[0]) * 4096 + d];
+    \\  for (int k = 1; k < TOPK; k++) acc = ep_mul_add(acc, WTS[r * TOPK + k], SORTED[size_t(at[k]) * 4096 + d]);
+    \\  OUT[size_t(r) * 4096 + d] = acc;
+    \\}
     \\// by rows: wait for the peer's sums of exchange x; each row's branch is the two Macs' sums added in rank order,
     \\// rounded, plus the shared expert (the combine's last step)
     \\kernel void ep_rfinal(device atomic_uint* flag [[buffer(0)]], constant uint& x [[buffer(1)]],
@@ -173,6 +187,7 @@ pub const Ep = struct {
     unpack_pipe: mtl.Pipeline,
     rcombine_pipe: mtl.Pipeline,
     rfinal_pipe: mtl.Pipeline,
+    rsorted_pipe: mtl.Pipeline,
     x: u64 = 0, // exchanges encoded so far, the same count on both Macs (the GPU sees the low 32 bits)
     ctl: control.Control, // identities, requests and stop decisions
     thread: ?std.Thread = null,
@@ -203,14 +218,14 @@ pub const Ep = struct {
         errdefer lists.deinit();
         const lib_m = try mtl.Library.fromSource(device, source, mtl.CompileOptions.mlx());
         defer lib_m.deinit();
-        var pipes: [6]mtl.Pipeline = undefined;
+        var pipes: [7]mtl.Pipeline = undefined;
         var made: usize = 0;
         errdefer for (pipes[0..made]) |pp| pp.deinit();
-        for ([_][]const u8{ "ep_localize", "ep_pack", "ep_post", "ep_unpack", "ep_rcombine", "ep_rfinal" }) |name| {
+        for ([_][]const u8{ "ep_localize", "ep_pack", "ep_post", "ep_unpack", "ep_rcombine", "ep_rfinal", "ep_rcombine_sorted" }) |name| {
             pipes[made] = try mtl.Pipeline.init(device, lib_m, name, false);
             made += 1;
         }
-        t.* = .{ .rank = s.rank, .peer = 1 - s.rank, .own = .{ me.own_lo, me.own_hi }, .link = link, .rd = rd, .win = win, .wbuf = wbuf, .lists = lists, .localize_pipe = pipes[0], .pack_pipe = pipes[1], .post_pipe = pipes[2], .unpack_pipe = pipes[3], .rcombine_pipe = pipes[4], .rfinal_pipe = pipes[5], .ctl = undefined };
+        t.* = .{ .rank = s.rank, .peer = 1 - s.rank, .own = .{ me.own_lo, me.own_hi }, .link = link, .rd = rd, .win = win, .wbuf = wbuf, .lists = lists, .localize_pipe = pipes[0], .pack_pipe = pipes[1], .post_pipe = pipes[2], .unpack_pipe = pipes[3], .rcombine_pipe = pipes[4], .rfinal_pipe = pipes[5], .rsorted_pipe = pipes[6], .ctl = undefined };
         t.ctl = try control.Control.init(gpa, rd, CONTROL, &t.failed);
         errdefer t.ctl.deinit(gpa);
         _ = try t.ctl.hello(me); // both Macs up, running the same thing, before the first exchange
@@ -232,7 +247,7 @@ pub const Ep = struct {
             std.log.info("expert parallel rank {d}: {d} exchanges, {d:.1} us a send; the peer's entries landed {d:.1} us after our post on average ({d} times, {d} before it); entries a exchange: ours {d:.2}, theirs {d:.2}, |difference| {d:.2}; {d} GPU waits gave up", .{ t.rank, t.sent, @as(f64, @floatFromInt(t.held_ticks)) / n / 24.0, @as(f64, @floatFromInt(t.st.late_ticks)) / late / 24.0, t.st.late, t.st.early, @as(f64, @floatFromInt(t.st.mine)) / n, @as(f64, @floatFromInt(t.st.theirs)) / n, @as(f64, @floatFromInt(t.st.imbalance)) / n, t.gaveUp() });
         }
         t.ctl.deinit(gpa);
-        for ([_]mtl.Pipeline{ t.localize_pipe, t.pack_pipe, t.post_pipe, t.unpack_pipe, t.rcombine_pipe, t.rfinal_pipe }) |pp| pp.deinit();
+        for ([_]mtl.Pipeline{ t.localize_pipe, t.pack_pipe, t.post_pipe, t.unpack_pipe, t.rcombine_pipe, t.rfinal_pipe, t.rsorted_pipe }) |pp| pp.deinit();
         t.lists.deinit();
         t.wbuf.deinit();
         t.link.deinit();
@@ -302,6 +317,20 @@ pub const Ep = struct {
         t.send(enc, yp, rows, false, true);
     }
 
+    /// By rows, a prompt chunk: the same sums from fp32 partials in expert order (`sorted`, each pick's row at `inverse`).
+    pub fn sendRowsSorted(t: *Ep, enc: mtl.ComputeEncoder, sorted: Ref, inverse: Ref, wts: Ref, rows: u32) void {
+        std.debug.assert(rows <= PROMPT_ROWS);
+        enc.setPipeline(t.rsorted_pipe);
+        enc.setBuffer(sorted.buf, sorted.off, 0);
+        enc.setBuffer(inverse.buf, inverse.off, 1);
+        enc.setBuffer(wts.buf, wts.off, 2);
+        enc.setValue(@as(i32, @intCast(rows)), 3);
+        enc.setBuffer(t.wbuf, sendAt(t.x), 4);
+        enc.setBuffer(t.wbuf, COUNT + 4 * @as(usize, @intCast(t.x % 2)), 5);
+        enc.dispatchThreads(mtl.Size.of(rows * 4096, 1, 1), mtl.Size.of(256, 1, 1));
+        t.send(enc, sorted, rows, false, true);
+    }
+
     /// By rows: once the peer's sums land, each row's branch: both sums in rank order, rounded, plus the shared `ys`.
     pub fn receiveRows(t: *Ep, enc: mtl.ComputeEncoder, ys: Ref, out: Ref, rows: u32) void {
         enc.setPipeline(t.rfinal_pipe);
@@ -369,8 +398,8 @@ pub const Ep = struct {
             t.st.posted(x, seen, @intCast(n), theirs);
             t.st.watch(@atomicLoad(u64, flag, .acquire), x);
             if (t.trace) std.debug.print("EP rank{d} exchange {d}: {d} entries\n", .{ t.rank, x, n });
-            if (t.failed.load(.acquire) or n > MAXP) {
-                if (n > MAXP) t.fail(x, error.BadCount);
+            if (t.failed.load(.acquire) or n * ENTRY > SLOT) {
+                if (n * ENTRY > SLOT) t.fail(x, error.BadCount);
                 t.land(x);
             } else t.link.writeSignalFrom(t.peer, sendAt(x), recvAt(x), n * ENTRY, FLAG, x) catch |err| {
                 t.fail(x, err);

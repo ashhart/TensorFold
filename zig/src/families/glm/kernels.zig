@@ -5,6 +5,7 @@ const sources = @import("kernel_sources");
 const frags = @import("../../core/frags.zig");
 const moe_route = @import("../../core/moe_route.zig");
 const hc = @import("../../core/hc.zig");
+const expert_gather = @import("../../core/expert_gather.zig");
 
 /// The route's shape (config.zig refuses other checkpoints).
 pub const route_shape: moe_route.Shape = .{ .hidden = 4096, .experts = 288, .topk = 8 };
@@ -72,6 +73,8 @@ pub const Kernels = struct {
     hc_expand: mtl.Pipeline, // the one-launch boundary (core/hc.zig), with the pending branch
     hc_first: mtl.Pipeline, // and without
     hc_mix_split: mtl.Pipeline, // the mix and, by the last threadgroup of a row, the split (after the family's expand)
+    gather_bf16: [2]mtl.Pipeline, // prompt chunks' sorted-expert gathers (core/expert_gather.zig, 4-bit g64), by tile height
+    gather_f32: [2]mtl.Pipeline, // and with fp32 out: expert parallel by rows' down partials
 
     pub fn deinit(k: *Kernels) void {
         const info = @typeInfo(Kernels).@"struct";
@@ -161,7 +164,7 @@ fn kernelOf(comptime key: []const u8) sources.glm.Kernel {
 pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const k = try gpa.create(Kernels);
     errdefer gpa.destroy(k);
-    var jobs: [generated.len + 7]Job = undefined;
+    var jobs: [generated.len + 9]Job = undefined;
     inline for (generated, 0..) |g, i| {
         const src = comptime kernelOf(g.key);
         const FT = @FieldType(Kernels, g.field);
@@ -195,6 +198,12 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     var igate_out: [1]mtl.Pipeline = undefined;
     jobs[generated.len + 6] = .{ .device = device, .source = igate_src, .names = &.{moe_route.names[0]}, .out = &igate_out };
     jobs[generated.len + 5] = .{ .device = device, .source = hc_src, .names = &hc.names, .out = &hc_out };
+    const g16_src = try expert_gather.source(device, gpa, .{});
+    defer gpa.free(g16_src);
+    const g32_src = try expert_gather.source(device, gpa, .{ .out_f32 = true });
+    defer gpa.free(g32_src);
+    jobs[generated.len + 7] = .{ .device = device, .source = g16_src, .names = &expert_gather.names, .out = &k.gather_bf16 };
+    jobs[generated.len + 8] = .{ .device = device, .source = g32_src, .names = &expert_gather.names, .out = &k.gather_f32 };
     var next = std.atomic.Value(usize).init(0);
     const Worker = struct {
         fn run(all: []Job, counter: *std.atomic.Value(usize)) void {

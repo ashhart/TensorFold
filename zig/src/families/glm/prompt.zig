@@ -6,11 +6,16 @@ const wts = @import("weights.zig");
 const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const pk = @import("../nemotron/prefill_kernels.zig");
+const ep_mod = @import("ep.zig");
+const expert_gather = @import("../../core/expert_gather.zig");
 const Ref = wts.Ref;
 const bind = fwd.bind;
 const size = fwd.size;
 
 pub const max_rows = 4096;
+comptime {
+    std.debug.assert(max_rows <= ep_mod.PROMPT_ROWS); // a chunk's routed sums fit one exchange
+}
 /// Sparse rows whose block scores one selection pass holds.
 const select_rows = 256;
 
@@ -51,6 +56,7 @@ pub const Prompt = struct {
     act: Ref,
     ye: Ref,
     yp: Ref,
+    yf: Ref, // fp32 [rows * topk, hidden]: by rows, the down partials in expert order (ye and yp are its halves)
     sgu: Ref,
     sact: Ref,
     ys: Ref,
@@ -118,8 +124,9 @@ pub fn init(gpa: std.mem.Allocator, arena: *st.Arena, device: mtl.Device, c: *co
     p.g = try big.of(arena, n * c.moe_inter * 2);
     p.u = try big.of(arena, n * c.moe_inter * 2);
     p.act = try big.of(arena, n * c.moe_inter * 2);
-    p.ye = try big.of(arena, n * D * 2);
-    p.yp = try big.of(arena, n * D * 2);
+    p.yf = try big.of(arena, n * D * 4);
+    p.ye = p.yf;
+    p.yp = p.yf.at(n * D * 2);
     p.sgu = try big.of(arena, R * 2 * c.moe_inter * 2);
     p.sact = try big.of(arena, R * c.moe_inter * 2);
     p.ys = try big.of(arena, R * D * 2);
@@ -179,17 +186,25 @@ fn add(x: *const fwd.Ctx, e: mtl.ComputeEncoder, a: Ref, b: Ref, out: Ref, n: u3
     e.dispatchThreads(size(n, 1, 1), size(256, 1, 1));
 }
 
-/// The MoE block on M rows: shared expert, decode routing, (row, slot) pairs sorted by expert, gathered gate/up/down, the combine.
-fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, M: u32) void {
+/// The shared expert on M rows into `ys`.
+fn shared(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, M: u32) void {
+    qmm(p, e, x_in, w.sh_gate_up, p.sgu, M);
+    swiglu(x, e, p.sgu, p.sact, M, x.c.moe_inter);
+    qmm(p, e, p.sact, w.sh_down, p.ys, M);
+}
+
+/// The MoE block on M rows: shared expert, decode routing, (row, slot) pairs sorted by expert, gathered gate/up/down, the
+/// combine. By rows (`ep`, every expert's intermediate rows halved over two Macs): this Mac's half of every pick on the
+/// tensor units (core/expert_gather.zig), down's fp32 partials summed a row in slot order and swapped with the peer, the
+/// shared expert while they travel, then both sums in rank order, rounded, plus the shared expert (the decode rows path).
+fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, M: u32, ep: ?*ep_mod.Ep) void {
     const c = x.c;
     const k = x.k;
     const D = c.hidden;
     const E = c.experts;
     const n = M * c.topk;
     const out = p.streams.branch;
-    qmm(p, e, x_in, w.sh_gate_up, p.sgu, M);
-    swiglu(x, e, p.sgu, p.sact, M, c.moe_inter);
-    qmm(p, e, p.sact, w.sh_down, p.ys, M);
+    if (ep) |t| t.begin() else shared(p, x, e, w, x_in, M);
     e.setPipeline(k.cast_f32);
     bind(e, 0, .{ x_in, p.xf });
     e.setValue(M * D, 2);
@@ -228,6 +243,22 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
     params(e, 2, .{ n, D, c.topk });
     bind(e, 3, .{p.xs});
     run(e, .{ D, n, 1 }, .{ 256, 1, 1 });
+    if (ep) |t| {
+        const half = w.gate.n;
+        expert_gather.run(e, k.gather_bf16, p.xs, w.gate, p.offsets, p.g, n, E);
+        expert_gather.run(e, k.gather_bf16, p.xs, w.up, p.offsets, p.u, n, E);
+        e.setPipeline(k.act2);
+        bind(e, 0, .{ p.g, p.u, p.act });
+        e.setValue(c.swiglu_limit, 3);
+        e.setValue(n * half, 4);
+        e.dispatchThreads(size(n * half, 1, 1), size(256, 1, 1));
+        expert_gather.run(e, k.gather_f32, p.act, w.down, p.offsets, p.yf, n, E);
+        inverse(p, e, n);
+        t.sendRowsSorted(e, p.yf, p.inverse, p.wts, M);
+        shared(p, x, e, w, x_in, M);
+        t.receiveRows(e, p.ys, out, M);
+        return;
+    }
     gather(p, e, p.xs, w.gate, p.offsets, p.g, n, E);
     gather(p, e, p.xs, w.up, p.offsets, p.u, n, E);
     e.setPipeline(k.act2);
@@ -236,11 +267,7 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
     e.setValue(n * c.moe_inter, 4);
     e.dispatchThreads(size(n * c.moe_inter, 1, 1), size(256, 1, 1));
     gather(p, e, p.act, w.down, p.offsets, p.ye, n, E);
-    e.setPipeline(p.k.get("custom_kernel_tf_sort_inverse_uint32_t_int32_t_uint32_t"));
-    bind(e, 0, .{p.order});
-    params(e, 1, .{n});
-    bind(e, 2, .{p.inverse});
-    run(e, .{ n, 1, 1 }, .{ 256, 1, 1 });
+    inverse(p, e, n);
     e.setPipeline(p.k.get("custom_kernel_tf_rows_take_bfloat16_t_uint32_t_int32_t_bfloat16_t"));
     bind(e, 0, .{ p.ye, p.inverse });
     params(e, 2, .{ n, D, 1 });
@@ -251,6 +278,15 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
     fwd.shape(e, 3, .{ M, c.topk });
     bind(e, 4, .{out});
     e.dispatchThreads(size(M * D, 1, 1), size(256, 1, 1));
+}
+
+/// Each (row, slot) pair's place in expert order.
+fn inverse(p: *const Prompt, e: mtl.ComputeEncoder, n: u32) void {
+    e.setPipeline(p.k.get("custom_kernel_tf_sort_inverse_uint32_t_int32_t_uint32_t"));
+    bind(e, 0, .{p.order});
+    params(e, 1, .{n});
+    bind(e, 2, .{p.inverse});
+    run(e, .{ n, 1, 1 }, .{ 256, 1, 1 });
 }
 
 /// MLA layer `mi` on M rows at pos..: tensor-unit projections, the decode cache writes, each row's key list in the sparse kernel.
@@ -313,7 +349,7 @@ pub fn backbone(p: *const Prompt, x: *fwd.Ctx, e: mtl.ComputeEncoder, ids: Ref, 
                 swiglu(x, e, p.gu, p.actd, M, c.dense_inter);
                 qmm(p, e, p.actd, d.down, ss.branch, M);
             },
-            .moe => |*m| moe(p, x, e, m, ss.normed, M),
+            .moe => |*m| moe(p, x, e, m, ss.normed, M, if (c.byRows()) x.ep else null),
         }
         pending = true;
     }
@@ -339,6 +375,6 @@ pub fn mtp(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, h: Ref, n
     mla(p, x, e, c.countKind(.mla), &L.attn.mla, p.m_xn, M, pos);
     add(x, e, p.m_x, p.streams.branch, p.m_out, M * D);
     fwd.rms(x, e, p.m_out, L.post_norm, p.m_xn, M, D, D, D, c.eps);
-    moe(p, x, e, &L.mlp.moe, p.m_xn, M);
+    moe(p, x, e, &L.mlp.moe, p.m_xn, M, null); // the MTP layer's experts are whole on every Mac
     add(x, e, p.m_out, p.streams.branch, p.m_x, M * D);
 }
