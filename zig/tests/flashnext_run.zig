@@ -58,6 +58,61 @@ fn promptCut() !usize {
     return std.fmt.parseInt(usize, std.mem.span(v), 10);
 }
 
+/// FZ_CATCH_CHECK: catchUp's layers in one command buffer against each layer alone, then one shared slot (the control).
+fn catchCheck(r: *Run, arena: std.mem.Allocator) !void {
+    const upto = 1300;
+    const m = try arena.create(Model);
+    m.r = r;
+    m.gpu_seconds = 0;
+    m.t.eps = try f32Buf(r, 1e-6);
+    m.t.log2base = try f32Buf(r, std.math.log2(10_000_000.0));
+    const raw: Buf = .{ .b = try r.buffer(4 * upto * 256) };
+    var rng = std.Random.DefaultPrng.init(7);
+    for (raw.b.slice(u16, 4 * upto * 128)) |*v| v.* = @truncate(@as(u32, @bitCast(rng.random().float(f32) * 2 - 1)) >> 16);
+    const w: Buf = .{ .b = try r.buffer(128 * 4) };
+    for (w.b.slice(f32, 128), 0..) |*v, i| v.* = 1 + @as(f32, @floatFromInt(i)) / 256;
+    var firsts: [fz.CATCH]usize = undefined;
+    for (0..fz.CATCH) |k| firsts[k] = if (k + 1 < fz.CATCH) 600 + 31 * k else 0; // the head last, from block 0
+    var outs: [3][fz.CATCH]Buf = undefined; // arms: each layer alone (the reference), one command buffer, one shared slot
+    for (&outs) |*o| for (o) |*b| {
+        b.* = .{ .b = try r.buffer(upto * 256) };
+    };
+    var differ: [3]usize = .{ 0, 0, 0 };
+    for (0..3) |arm| {
+        var k: usize = 0;
+        for (&m.layers, 0..) |*L, i| {
+            L.linear = i % 4 != 3;
+            if (L.linear) continue;
+            L.raw, L.pool, L.pooled, L.pooled_n = .{ raw, w, outs[arm][k], firsts[k] };
+            k += 1;
+        }
+        m.mtp.raw, m.mtp.pool, m.mtp.pooled, m.mtp.pooled_n = .{ raw, w, outs[arm][k], firsts[k] };
+        var cb = r.queue.commandBuffer();
+        r.enc = cb.compute(if (r.serial) .serial else .concurrent);
+        switch (arm) {
+            0 => for (0..fz.CATCH) |j| {
+                if (j + 1 < fz.CATCH) try r.sel.?.catchLayer(r, &m.layers[4 * j + 3], m.t.eps, m.t.log2base, upto, 0) else try r.sel.?.catchLayer(r, &m.mtp, m.t.eps, m.t.log2base, upto, 0);
+                try m.finish(cb);
+                cb = r.queue.commandBuffer();
+                r.enc = cb.compute(if (r.serial) .serial else .concurrent);
+            },
+            1 => try r.sel.?.catchUp(r, m, upto),
+            else => {
+                for (&m.layers) |*L| if (!L.linear) try r.sel.?.catchLayer(r, L, m.t.eps, m.t.log2base, upto, 0);
+                try r.sel.?.catchLayer(r, &m.mtp, m.t.eps, m.t.log2base, upto, 0);
+            },
+        }
+        try m.finish(cb);
+        if (arm == 0) continue;
+        for (0..fz.CATCH) |j| {
+            const span = outs[arm][j].b.contents()[firsts[j] * 256 .. upto * 256];
+            if (!std.mem.eql(u8, span, outs[0][j].b.contents()[firsts[j] * 256 .. upto * 256])) differ[arm] += 1;
+        }
+    }
+    std.debug.print("catch-up: {d} layers in one command buffer, {d} differ from each layer alone; the control's one shared slot: {d} differ\n", .{ fz.CATCH, differ[1], differ[2] });
+    if (differ[1] != 0 or differ[2] == 0) return error.CatchUpCheck;
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -242,6 +297,7 @@ pub fn main(init: std.process.Init) !void {
     const t0 = mtl.clock.seconds();
     try r.compile(args[2]);
     r.sel = try Select.init(&r, MAXR);
+    if (std.c.getenv("FZ_CATCH_CHECK") != null) return catchCheck(&r, arena);
     r.lane_new = r.xnew and std.c.getenv("FZ_LANE") != null; // fz_lane and fz_gdn on the target (same bits)
     if (r.xnew and std.c.getenv("FZ_GDN") != null) r.gdn_pipe = try fz.gdn_step.compile(&r, false);
     const t1 = mtl.clock.seconds();
@@ -1509,8 +1565,7 @@ pub fn main(init: std.process.Init) !void {
         if (r.sel != null and prompt.len + want.len + 8 > 4 * TOP) { // long context: selection on the GPU
             const cb0 = r.queue.commandBuffer();
             r.enc = cb0.compute(if (r.serial) .serial else .concurrent);
-            for (&m.layers) |*L| if (!L.linear) try r.sel.?.catchUp(&r, L, m.t.eps, m.t.log2base, m.pos / 4);
-            try r.sel.?.catchUp(&r, &m.mtp, m.t.eps, m.t.log2base, m.pos / 4); // the head's absorbed rows
+            try r.sel.?.catchUp(&r, m, m.pos / 4); // the target's layers and the head's absorbed rows
             try m.finish(cb0);
             r.gsel = try GSelect.init(&r, m.pos / 4);
             m.mtp.gsel = try GSelect.init(&r, m.pos / 4);

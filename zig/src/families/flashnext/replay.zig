@@ -1422,11 +1422,28 @@ pub const AR_CHAIN_STRIDE = 36;
 
 pub const TOP = 512;
 pub const KW = 4 * TOP + 3;
+/// catchUp's first-block slots: the target's attention layers, then the head.
+pub const CATCH = LAYERS / 4 + 1;
+
+/// Slot k's first block into `words` (CATCH slots of 64 words, 256 bytes apart); its byte offset.
+pub fn catchSlot(words: []i32, k: usize, first: usize) usize {
+    words[k * 64] = @intCast(first);
+    return k * 256;
+}
+
+test "catch-up slots: every layer's dispatch reads its own first block after the later layers' writes" {
+    var words: [CATCH * 64]i32 = undefined;
+    var at: [CATCH]usize = undefined;
+    for (0..CATCH) |k| at[k] = catchSlot(&words, k, if (k + 1 < CATCH) 648 + k else 0); // pair rank 0: the head pooled none
+    for (0..CATCH) |k| try std.testing.expectEqual(@as(i32, if (k + 1 < CATCH) @intCast(648 + k) else 0), words[at[k] / 4]);
+}
+
 pub const Select = struct {
     pool: *Variant,
     scores: *Variant,
     select: *Variant,
-    start: Buf,
+    start: Buf, // encode's first block, read at run time: one window a command buffer
+    starts: Buf, // catchUp's, one slot a layer (CATCH): one command buffer catches up every layer
     sc: Buf,
     keys: Buf,
     complete: Buf,
@@ -1456,7 +1473,7 @@ pub const Select = struct {
         };
         return .{
             .pool = found[0].?, .scores = found[1].?, .select = found[2].?,
-            .start = try B.of(r, 16), .sc = try B.of(r, rows_max * (CAP / 4) * 4), .keys = try B.of(r, rows_max * KW * 4),
+            .start = try B.of(r, 16), .starts = try B.of(r, CATCH * 256), .sc = try B.of(r, rows_max * (CAP / 4) * 4), .keys = try B.of(r, rows_max * KW * 4),
             .complete = try B.of(r, rows_max * 4), .ends = try B.of(r, rows_max * 4), .counts = try B.of(r, rows_max * 4),
             .sparse = try B.of(r, rows_max * 4),
             .pooled_shape = try r.buffer(16), .q_shape = try r.buffer(16), .sc_shape = try r.buffer(16), .ids_shape = try r.buffer(16),
@@ -1482,11 +1499,21 @@ pub const Select = struct {
         return any;
     }
 
-    /// Pool every complete block below `upto` the layer has not pooled (before GPU-side rounds take over).
-    pub fn catchUp(s: *Select, r: *Run, L: anytype, eps: Buf, log2base: Buf, upto: usize) !void {
+    /// Before GPU-side rounds: pool each attention layer's and the head's blocks below `upto`, each from its own slot.
+    pub fn catchUp(s: *Select, r: *Run, m: *Model, upto: usize) !void {
+        var k: usize = 0;
+        for (&m.layers) |*L| if (!L.linear) {
+            try s.catchLayer(r, L, m.t.eps, m.t.log2base, upto, k);
+            k += 1;
+        };
+        try s.catchLayer(r, &m.mtp, m.t.eps, m.t.log2base, upto, k);
+    }
+
+    /// One layer's catch-up, its first block in slot k (the GPU reads it when it runs the dispatch).
+    pub fn catchLayer(s: *Select, r: *Run, L: anytype, eps: Buf, log2base: Buf, upto: usize, k: usize) !void {
         if (upto <= L.pooled_n) return;
-        s.start.b.slice(i32, 1)[0] = @intCast(L.pooled_n);
-        try r.bindV(s.pool, &.{ L.raw, s.start, L.pool, eps, log2base }, &.{.{ .b = L.pooled.b, .off = L.pooled.off + L.pooled_n * 128 * 2 }});
+        const at = catchSlot(s.starts.b.slice(i32, CATCH * 64), k, L.pooled_n);
+        try r.bindV(s.pool, &.{ L.raw, .{ .b = s.starts.b, .off = at }, L.pool, eps, log2base }, &.{.{ .b = L.pooled.b, .off = L.pooled.off + L.pooled_n * 128 * 2 }});
         r.enc.dispatchThreads(mtl.Size.of(128, upto - L.pooled_n, 1), mtl.Size.of(128, 1, 1));
         if (!r.serial) r.enc.barrier();
         L.pooled_n = upto;

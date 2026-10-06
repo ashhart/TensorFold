@@ -540,8 +540,7 @@ pub const Engine = struct {
         if (long) { // selection on the GPU: every complete block the target and the head hold, pooled
             const cb = r.queue.commandBuffer();
             r.enc = cb.compute(.serial);
-            for (&m.layers) |*L| if (!L.linear) try r.sel.?.catchUp(r, L, m.t.eps, m.t.log2base, m.pos / 4);
-            try r.sel.?.catchUp(r, &m.mtp, m.t.eps, m.t.log2base, m.pos / 4);
+            try r.sel.?.catchUp(r, m, m.pos / 4);
             try m.finish(cb);
             e.tsel.sel.b.slice(i32, 128)[fz.SEL_POOLED] = @intCast(m.pos / 4);
             e.msel.sel.b.slice(i32, 128)[fz.SEL_POOLED] = @intCast(m.pos / 4);
