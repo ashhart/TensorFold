@@ -6,8 +6,10 @@ const tf = @import("tensorfold");
 const ge = tf.glm.engine;
 const Allocator = std.mem.Allocator;
 
-/// Draft depth of a drafted request (the MTP head's chain a round).
-const DEPTH = 3;
+/// Draft depth of a drafted request (the MTP head's chain a round): the pair's best on prose and code.
+const DEPTH = 2;
+/// Copy drafts by default (GLM_COPY overrides): a round copies what followed the reply's last 3+ tokens earlier.
+const COPY_MIN = 3;
 
 const Job = struct {
     id: api.Id,
@@ -286,6 +288,7 @@ pub const Host = struct {
 pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: ?[]const u8) !*Host {
     const eng = try ge.Engine.loadWith(gpa, dir, window + 64, speed_up);
     errdefer eng.deinit();
+    if (std.c.getenv("GLM_COPY") == null) eng.copy_min = COPY_MIN;
     var toks: [96]u32 = undefined;
     for (&toks, 0..) |*t, i| t.* = @intCast(1000 + i);
     var dummy: u8 = 0;
