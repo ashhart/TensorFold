@@ -268,7 +268,7 @@ pub const Host = struct {
             .length => .length,
             .cancelled => .cancelled,
         };
-        h.finish(job, reason, .{ .rounds = res.rounds, .drafted = res.drafted, .accepted = res.accepted, .min_rows = res.min_rows, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@max(0, done - job.began))) / 1e9 else null }, "");
+        h.finish(job, reason, .{ .rounds = res.rounds, .drafted = res.drafted, .accepted = res.accepted, .min_rows = res.min_rows, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null }, "");
     }
 };
 

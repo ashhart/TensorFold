@@ -184,7 +184,7 @@ pub const LaneHost = struct {
 
     fn finish(h: *LaneHost, job: *Job, reason: Reason, message: []const u8) void {
         const s = &job.stream;
-        const stats: Stats = if (job.started) .{ .rounds = s.rounds, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows, .loop_period = s.loop_period, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@max(0, done - job.began))) / 1e9 else null } else .{};
+        const stats: Stats = if (job.started) .{ .rounds = s.rounds, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows, .loop_period = s.loop_period, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null } else .{};
         emit(job, .{ .finished = .{ .reason = reason, .stats = stats, .message = message } });
         if (job.started) {
             s.deinit(h.gpa);

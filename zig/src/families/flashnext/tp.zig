@@ -76,7 +76,8 @@ test "prefill slots tile the region without overlap" {
     try std.testing.expectEqual(TAIL, end);
 }
 
-pub const Settings = struct { rank: u32, library: []const u8, links: []const fabric.mcdma.Link };
+pub const Settings = settings.Settings;
+const settings = @import("tp_settings.zig");
 
 const source =
     \\#include <metal_stdlib>
@@ -254,7 +255,7 @@ pub const Tp2 = struct {
     /// Connect to the peer named in the settings file and start the host's service thread.
     pub fn init(gpa: std.mem.Allocator, device: mtl.Device, settings_path: []const u8) !*Tp2 {
         const f = try mtl.MappedFile.open(try gpa.dupeSentinel(u8, settings_path, 0));
-        const s = try std.json.parseFromSliceLeaky(Settings, gpa, f.bytes[0..f.size], .{ .allocate = .alloc_always });
+        const s = try settings.read(gpa, f.bytes[0..f.size]);
         if (s.rank > 1 or s.links.len != 1) return error.TpTwoRanksOneLink;
         const lib = try gpa.dupeSentinel(u8, s.library, 0);
         const ep = try fabric.mcdma.Endpoint.create(gpa, lib, .{ .rank = s.rank, .ranks = 2, .window_bytes = WINDOW, .staging_bytes = 32 << 20, .links = s.links, .timeout_ns = 60 * std.time.ns_per_s, .connect_timeout_ns = 300 * std.time.ns_per_s });
