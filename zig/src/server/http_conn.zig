@@ -47,6 +47,7 @@ pub const Conn = struct {
     counted: bool = false,
     hook: ?StatusHook = null,
     broken: bool = false,
+    quiet_log: bool = false,
 
     pub fn init(gpa: Allocator, fd: posix.socket_t, peer: []const u8) !Conn {
         return .{ .fd = fd, .peer = peer, .gpa = gpa, .buf = try gpa.alloc(u8, 2 * max_line + 8192) };
@@ -272,7 +273,7 @@ pub const Conn = struct {
     /// Python's ``send_response`` head: status line, Server and Date (nothing for HTTP/0.9).
     pub fn startResponse(c: *Conn, code: u16, phrase: ?[]const u8) Allocator.Error!void {
         c.out.clearRetainingCapacity();
-        log.request(c, code);
+        if (c.quiet_log) c.quiet_log = false else log.request(c, code);
         if (code >= 200 and !c.counted) {
             c.counted = true;
             if (c.hook) |h| h.call(h.ctx, c, code);
@@ -413,8 +414,8 @@ pub fn httpDate(buf: []u8) []const u8 {
     const days = [_][]const u8{ "Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed" };
     const months = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
     return std.fmt.bufPrint(buf, "{s}, {d:0>2} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
-        days[@intCast(day.day % 7)], md.day_index + 1, months[@intFromEnum(md.month) - 1], yd.year,
-        secs.getHoursIntoDay(), secs.getMinutesIntoHour(), secs.getSecondsIntoMinute(),
+        days[@intCast(day.day % 7)], md.day_index + 1,          months[@backingInt(md.month) - 1], yd.year,
+        secs.getHoursIntoDay(),      secs.getMinutesIntoHour(), secs.getSecondsIntoMinute(),
     }) catch "";
 }
 

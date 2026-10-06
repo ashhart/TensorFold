@@ -70,6 +70,8 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
                             help="most thinking tokens before the server closes the think block (0: no limit)")
     generation.add_argument("--loop-guard", action="store_true",
                             help="stop a short exact cycle inside a thinking block (native engine only)")
+    generation.add_argument("--dashboard", action="store_true",
+                            help="serve the native engine's local live dashboard")
 
     speed = serve.add_argument_group("drafting and caches")
     speed.add_argument("--no-drafts", action="store_true",

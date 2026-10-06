@@ -28,7 +28,7 @@ pub fn sendValue(conn: *Conn, a: Allocator, code: u16, payload: json.Value) void
     conn.sendJson(code, body);
 }
 
-fn unknown(conn: *Conn, a: Allocator) void {
+pub fn unknown(conn: *Conn, a: Allocator) void {
     const message = std.fmt.allocPrint(a, "unknown path {s}", .{conn.requestPath(a)}) catch return;
     const body = std.fmt.allocPrint(a, "{{\"error\": {{\"message\": {s}}}}}", .{json.quote(a, message, .{}) catch return}) catch return;
     conn.sendJson(404, body);
@@ -38,6 +38,8 @@ fn get(srv: *Server, conn: *Conn, a: Allocator) void {
     const route = auth.routePath(conn.path);
     if (responses.route(route)) |rid| if (rid.len > 0) return responses.get(srv, conn, a, rid);
     if (std.mem.eql(u8, route, "/metrics") or std.mem.eql(u8, route, "/v1/metrics")) return status.metrics(srv, conn, a);
+    if (std.mem.eql(u8, route, "/dashboard")) return status.dashboard(srv, conn, a);
+    if (std.mem.eql(u8, route, "/stats")) return status.stats(srv, conn, a);
     if (route.len == 0 or std.mem.eql(u8, route, "/health")) return status.health(srv, conn, a) catch {};
     if (std.mem.endsWith(u8, route, "/models")) return status.models(srv, conn, a) catch {};
     unknown(conn, a);

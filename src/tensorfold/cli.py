@@ -249,8 +249,8 @@ def _backend(choice: str, family: Any) -> str:
 def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context: int | None = None) -> int:
     """Serve with the family's CUDA engine (``cuda_engine``) behind ``tensorfold.cuda.server``."""
 
-    if args.loop_guard:
-        raise ValueError("--loop-guard requires the native engine")
+    if args.loop_guard or args.dashboard:
+        raise ValueError("--loop-guard and --dashboard require the native engine")
 
     from tensorfold import hub
 
@@ -428,8 +428,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: int,
                required_files: Any, memory_limit: int, fraction: float = MEMORY_FRACTION) -> int:
-    if args.loop_guard:
-        raise ValueError("--loop-guard requires the native engine")
+    if args.loop_guard or args.dashboard:
+        raise ValueError("--loop-guard and --dashboard require the native engine")
     import mlx.core as mx
     from tensorfold import families, hub
     from tensorfold.engine.lane_engine import LaneEngine

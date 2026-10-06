@@ -305,6 +305,9 @@ The readings vLLM also has are repeated under its names (`num_requests_running`,
 and `preemptions_total` (background work that gave up a lane to a later request) are published where the
 server counts those events, and never at a fabricated zero.
 
+The native `--dashboard` flag adds a self-contained `/dashboard` page and its `/stats` JSON snapshot; both routes
+return 404 when the flag is off, and the page polls once per second without adding access-log noise.
+
 ## The Responses API
 
 `POST /v1/responses` takes OpenAI's Responses request and runs it as the equivalent chat completion, through the

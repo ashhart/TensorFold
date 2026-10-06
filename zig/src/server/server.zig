@@ -31,6 +31,7 @@ pub const Config = struct {
     reasoning_effort: ?[]const u8 = null,
     thinking_budget: i64 = 0,
     loop_guard: bool = false,
+    dashboard: bool = false,
     /// Sampling when a request names none (generation_config.json and the serve flags), or null for greedy.
     default_sampling: ?Value = null,
     use_drafts: bool = true,

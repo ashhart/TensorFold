@@ -31,4 +31,5 @@ test {
     _ = @import("listener.zig");
     _ = @import("hub.zig");
     _ = @import("chunk_plan.zig");
+    _ = @import("status_routes.zig");
 }

@@ -32,6 +32,7 @@ pub const flags = [_]Flag{
     .{ .name = "--api-key", .kind = .append, .native = true },
     .{ .name = "--api-key-file", .native = true },
     .{ .name = "--metrics-open", .kind = .store_true, .native = true },
+    .{ .name = "--dashboard", .kind = .store_true, .native = true },
     .{ .name = "--vision", .kind = .store_true },
     .{ .name = "--vision-urls", .kind = .store_true },
     .{ .name = "--vision-offload", .kind = .store_true },
@@ -91,6 +92,7 @@ pub const Args = struct {
     api_key: []const []const u8 = &.{},
     api_key_file: ?[]const u8 = null,
     metrics_open: bool = false,
+    dashboard: bool = false,
     context: ?i64 = null,
     speed_up: ?[]const u8 = null, // speed-up mode: this Mac's settings for the two-Mac link (Flash Next)
     max_tokens: i64 = 4096,
@@ -179,7 +181,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         const p = try int(u, a, name, v);
         if (p < 0 or p > 65535) return fail(u, a, "argument --port: invalid port: '{s}'", .{v});
         out.port = @intCast(p);
-    } else if (is(name, "--name")) out.name = v else if (is(name, "--alias")) try alias.append(a, v) else if (is(name, "--api-key")) try keys.append(a, v) else if (is(name, "--api-key-file")) out.api_key_file = v else if (is(name, "--metrics-open")) out.metrics_open = true else if (is(name, "--context")) out.context = try int(u, a, name, v) else if (is(name, "--speed-up")) out.speed_up = v else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--parallel")) out.parallel = v else if (is(name, "--backend")) out.backend = v;
+    } else if (is(name, "--name")) out.name = v else if (is(name, "--alias")) try alias.append(a, v) else if (is(name, "--api-key")) try keys.append(a, v) else if (is(name, "--api-key-file")) out.api_key_file = v else if (is(name, "--metrics-open")) out.metrics_open = true else if (is(name, "--dashboard")) out.dashboard = true else if (is(name, "--context")) out.context = try int(u, a, name, v) else if (is(name, "--speed-up")) out.speed_up = v else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--parallel")) out.parallel = v else if (is(name, "--backend")) out.backend = v;
 }
 
 /// ``--parallel``: "auto" is up to 8 requests at once; a number caps it.

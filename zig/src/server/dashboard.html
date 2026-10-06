@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TensorFold Dashboard</title>
+<style>
+:root{color-scheme:dark;--bg:#10141d;--panel:#181f2c;--ink:#eef2f7;--muted:#9ba8ba;--accent:#7dd3fc}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px system-ui,sans-serif}
+main{max-width:960px;margin:0 auto;padding:32px 20px}h1{font-size:28px;margin:0 0 8px}p{color:var(--muted)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-top:24px}.card{background:var(--panel);border:1px solid #283447;border-radius:14px;padding:18px}.label{color:var(--muted);font-size:13px}.value{font-size:28px;margin-top:8px;color:var(--accent)}
+</style>
+</head>
+<body><main><h1>TensorFold Dashboard</h1><p>Live server activity, refreshed once per second.</p><section class="grid" id="stats"></section></main>
+<script>
+const fields=[['running','Running'],['waiting','Waiting'],['generation_tokens_running','Tokens in flight'],['generation_tokens_total','Tokens finished'],['decode_tokens_per_second','Decode tokens/s'],['prefill_tokens_per_second','Prefill tokens/s'],['decode_rounds_total','Decode rounds']];
+function show(data){const memory=data.memory||{};const values={...data};const cards=fields.map(([k,label])=>'<article class="card"><div class="label">'+label+'</div><div class="value">'+(values[k]??0)+'</div></article>');if(memory.peak!=null)cards.push('<article class="card"><div class="label">Peak memory</div><div class="value">'+memory.peak+'</div></article>');document.querySelector('#stats').innerHTML=cards.join('')}
+async function poll(){try{const r=await fetch('/stats?poll=1');if(r.ok)show(await r.json())}catch(_){}}poll();setInterval(poll,1000)
+</script></body></html>

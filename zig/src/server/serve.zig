@@ -117,6 +117,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .use_drafts = !args.no_drafts,
         .seed_salt = salt,
         .request_log = env(s, "TENSORFOLD_REQUEST_LOG"),
+        .dashboard = args.dashboard,
     };
     const srv = server_mod.Server.init(gpa, io, s.engine, s.text, config, if (store.enabled()) &store else null) catch {
         std.debug.print("tensorfold: the server could not start\n", .{});
