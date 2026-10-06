@@ -502,6 +502,7 @@ pub const Engine = struct {
         const ps = [2]*Prompt{ e.pr, e.pr2 };
         var late: [fz.MARKS]Passed = undefined; // the last call's passed marks, kept once the first token is out
         var n_late: usize = 0;
+        var late_pair: ?struct { rows: [fz.MARKS]u32, n: usize, rows0: usize, start: usize } = null; // their crossing (speed-up)
         var calls: CallLog = .{};
         while (at < prompt.len) {
             if (try e.agree(out.cancelled(out.ctx))) return .{ .reason = .cancelled };
@@ -532,6 +533,11 @@ pub const Engine = struct {
                     const mine = span[tp.rank];
                     try e.pr.mtpKeys(m, mine[0], prompt[mine[0] + 1 .. mine[0] + 1 + mine[1]], e.pr.last);
                     try e.pr.pairMtp(m, tp, mine, span[1 - tp.rank]);
+                    const rows0 = segments.rows(call.rows, 2, 0);
+                    const start = segments.start(call.rows, 2, tp.rank);
+                    if (at + call.rows == prompt.len and n_passed > 0) { // the prompt's last call: its marks cross after the first token
+                        late_pair = .{ .rows = passed, .n = n_passed, .rows0 = rows0, .start = start };
+                    } else try e.pr.pairMarks(m, tp, e.gpa, passed[0..n_passed], rows0, start);
                     last_n = 1; // m.last points at the last row
                     for (passed[0..n_passed], 0..) |row, j| { // both Macs hold each passed mark's states now (pairMarks)
                         var hist = hist0;
@@ -595,6 +601,7 @@ pub const Engine = struct {
         out.prefilled(out.ctx);
         var res: Result = .{ .reason = .length };
         const first_stop = out.tokens(out.ctx, &.{pick}) or isEos(eos, pick);
+        if (late_pair) |lp| try e.pr.pairMarks(m, r.tp.?, e.gpa, lp.rows[0..lp.n], lp.rows0, lp.start);
         for (late[0..n_late]) |p| e.keepPassed(p, out); // after the first token: the slots, rows and tail stay put till the rounds
         if (e.call_log) calls.log(if (r.tp) |tp| tp.rank else 0);
         if (try e.agree(first_stop)) return .{ .reason = .stop };

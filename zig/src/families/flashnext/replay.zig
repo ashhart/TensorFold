@@ -3237,7 +3237,6 @@ pub const Prompt = struct {
             pick = std.mem.readInt(u32, tp.bytes(tpm.LAST + WIDE * 2)[0..4], .little);
             m.last = .{ .b = w, .off = tpm.LAST };
         }
-        try p.pairMarks(m, tp, gpa, marks, rows0, at);
         m.state = a; // two segments: each flipped it once
         m.state_row = 0;
         m.pos += n;
@@ -3245,8 +3244,10 @@ pub const Prompt = struct {
         return pick;
     }
 
-    /// After a pair chunk: each passed mark's states and n-gram tail, from the Mac whose rows hold it into the other's slot (MARK, freed first).
-    fn pairMarks(p: *Prompt, m: *Model, tp: *Tp2, gpa: std.mem.Allocator, marks: []const u32, rows0: usize, at: usize) !void {
+    /// After a pair chunk (its caller's choice when: the prompt's last call's wait for the first token): each passed mark's
+    /// states and n-gram tail, from the Mac whose rows hold it into the other's slot (MARK, freed first). `marks` are rows
+    /// of the call, `rows0` rank 0's rows, `at` this Mac's first row; this Mac's prompt buffers still hold the call.
+    pub fn pairMarks(p: *Prompt, m: *Model, tp: *Tp2, gpa: std.mem.Allocator, marks: []const u32, rows0: usize, at: usize) !void {
         const mk = m.marks orelse return;
         const tail_bytes = PLE_TAIL * WIDE * 2;
         for (marks, 0..) |row, j| {
