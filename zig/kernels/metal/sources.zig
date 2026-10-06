@@ -56,3 +56,11 @@ pub const prefill = [_]File{
 pub const flashnext_lane = @embedFile("decode/fn_lane.metal");
 /// Flash Next decode: the DeltaNet window step with every row's independent work at once.
 pub const flashnext_gdn = @embedFile("decode/fn_gdn.metal");
+
+/// GLM-5.3-Flash's decode kernels from our Python family (tools/zig/gen_glm_kernels.py).
+pub const glm = @import("glm/kernels.zig");
+/// GLM-5.3-Flash's glue: MLX's arithmetic where the Python family calls MLX ops; selection, argmax, small steps.
+pub const glm_glue = @embedFile("glm_glue.metal");
+/// MLX's precise row softmax and its embedding and RMS kernels, as the replicas in ops/ write them.
+pub const ops_softmax = @embedFile("ops/softmax.metal");
+pub const ops_embed_norm = @embedFile("ops/embed_norm.metal");

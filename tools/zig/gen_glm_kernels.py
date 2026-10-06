@@ -1,0 +1,214 @@
+"""Write GLM-5.3-Flash's decode kernels as mx.fast.metal_kernel builds them for the Python family's calls."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import py_kernels  # noqa: E402
+from metal_source import PREAMBLE, Arg, _template_value, function_name, kernel_text, strip_comments  # noqa: E402
+
+ROOT = py_kernels.ROOT
+OUT = ROOT / "zig/kernels/metal/glm"
+NAMES = OUT / "kernels.zig"
+
+# GLM-5.3-Flash (TensorFold/GLM-5.3-Flash-MLX-4bit-MTP)
+HIDDEN, VOCAB, EXPERTS, TOP_K, EXPERT, DENSE = 4096, 154880, 288, 8, 2048, 12288
+KDA_HEADS, KDA_DIM, TAPS = 64, 128, 4
+KDA_WIDTH = KDA_HEADS * KDA_DIM
+KDA_PROJ = 3 * KDA_WIDTH + 2 * KDA_DIM + KDA_HEADS
+MLA_HEADS, NOPE, RANK, Q_LORA, I_HEADS, I_DIM = 64, 256, 512, 1536, 32, 128
+X_PROJ = Q_LORA + RANK + I_DIM + I_HEADS
+QR_PROJ = MLA_HEADS * NOPE + I_HEADS * I_DIM
+TOPK_KEYS = 2048 + 3                      # index_topk keys plus the always-selected tail of a partial block
+MAX_ROWS = 16                             # the widest decode window
+MAXU = MAX_ROWS * TOP_K                   # the shared expert's slot in the MoE kernels (never a routed one)
+# (K, N) of every dense 4-bit projection a decode row runs through qmv_rows (KDA out = the MTP's eh_proj shape)
+PROJECTIONS = ((HIDDEN, KDA_PROJ), (KDA_WIDTH, HIDDEN), (HIDDEN, X_PROJ), (Q_LORA, QR_PROJ),
+               (MLA_HEADS * NOPE, HIDDEN), (HIDDEN, 2 * DENSE), (DENSE, HIDDEN), (HIDDEN, VOCAB))
+# MLX 0.32's one-row gemv / gemv_t tilings (kernels.gemv_params) at the shapes decode reaches
+GEMV_T = {"igate": (1, 2, 8, 4, 4, 4), "values": (1, 4, 8, 4, 4, 4)}
+GEMV = {"scores_lt4": (1, 8, 1, 32, 1, 4), "scores_le32": (1, 8, 1, 32, 4, 4), "scores": (4, 1, 1, 32, 4, 4)}
+
+
+# MLX's preamble gives bfloat its math overloads (bf16_math.h): our kernels call abs and exp on bfloat
+BF16_MATH = """#ifndef METAL_FUNC
+#define METAL_FUNC inline __attribute__((__always_inline__))
+#endif
+namespace metal {
+METAL_FUNC bfloat16_t abs(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_fabs(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); }
+METAL_FUNC bfloat16_t exp(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_exp(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); }
+namespace fast {
+METAL_FUNC bfloat16_t abs(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_fabs(static_cast<float>(x), __METAL_FAST_MATH__)); }
+METAL_FUNC bfloat16_t exp(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_exp(static_cast<float>(x), __METAL_FAST_MATH__)); }
+}
+namespace precise {
+METAL_FUNC bfloat16_t abs(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_fabs(static_cast<float>(x), __METAL_PRECISE_MATH__)); }
+METAL_FUNC bfloat16_t exp(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_exp(static_cast<float>(x), __METAL_PRECISE_MATH__)); }
+}
+}
+"""
+
+
+@dataclass
+class Spec:
+    key: str
+    name: str
+    source: str
+    inputs: list[Arg]
+    outputs: list[Arg]
+    header: str = ""
+    template: list = field(default_factory=list)
+    extra: list = field(default_factory=list)   # more template instantiations of the same function
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()[:10]
+
+
+def specs() -> list[Spec]:
+    K = py_kernels.load("kernels.glm.flash.v1.kernels")
+    F = py_kernels.load("kernels.glm.flash.v1.fused")
+    H = py_kernels.load("kernels.glm.flash.v1.hc")
+    KD = py_kernels.load("kernels.glm.flash.v1.kda")
+    M = py_kernels.load("kernels.glm.flash.v1.moe")
+    SA = py_kernels.load("kernels.glm.flash.v1.sparse_attention")
+    assert F.SQ_FMA == 0 and KD.TY == 32 and H.HC_MIX_U == 8 and M.ROUTER_TG == 1024 and M.SPLIT_SHARED == 1
+
+    bf, f32, u32, i32 = "bfloat16", "float32", "uint32", "int32"
+    big = 64
+    one = 1
+    out: list[Spec] = []
+
+    def plain(key: str, base: str, body: str, header: str, inputs: list[Arg], outputs: list[Arg], template: list,
+              extra: list | None = None) -> None:
+        out.append(Spec(key, f"{base}_{_digest(header + body)}", body, inputs, outputs, header, template, extra or []))
+
+    qmv_in = [Arg("X", bf, big, 2), Arg("W", u32, big, 2), Arg("S", bf, big, 2), Arg("B", bf, big, 2)]
+    for k, n in PROJECTIONS:
+        plain(f"qmv_{k}_{n}", "tf_glm5_qmv_rows64", K._QMV_ROWS, K._HEADER, qmv_in, [Arg("OUT", bf, big, 2)],
+              [("K", k), ("N", n), ("RPS", 4)])
+    for key, (bm, bn, sm, sn, tm, tn) in GEMV_T.items():
+        plain(f"gemv_t_{key}", "tf_glm5_gemv_t_rows", K._GEMV_T_ROWS, "", [Arg("X", bf, big, 2), Arg("M", bf, big, 2)],
+              [Arg("OUT", bf, big, 2)], [("T", bf), ("BM", bm), ("BN", bn), ("SM", sm), ("SN", sn), ("TM", tm),
+                                         ("TN", tn)])
+    for key, (bm, bn, sm, sn, tm, tn) in GEMV.items():
+        plain(f"gemv_{key}", "tf_glm5_gemv_rows", K._GEMV_ROWS, "", [Arg("X", bf, big, 2), Arg("M", bf, big, 2)],
+              [Arg("OUT", bf, big, 2)], [("T", bf), ("BM", bm), ("BN", bn), ("SM", sm), ("SN", sn), ("TM", tm),
+                                         ("TN", tn)])
+
+    hc_ex_in = [Arg("XOLD", bf, big, 3), Arg("BRANCH", bf, big, 2), Arg("POST", f32, big, 2), Arg("COMB", f32, big, 3),
+                Arg("EPS", f32, one)]
+    for expand, split in ((1, 1), (0, 1), (1, 0)):
+        plain(f"hc_expand_{expand}{split}", "tf_glm5_fused_hc_expand", H._HC_EXPAND, F._HEADER, hc_ex_in,
+              [Arg("XNEW", bf, big, 3), Arg("INV", f32, big), Arg("Z", f32, big, 2)],
+              [("D", HIDDEN), ("EXPAND", expand), ("SPLIT", split), ("ZOUT", 0), ("SQ_FMA", F.SQ_FMA)])
+    plain("hc_mix", "tf_glm5_fused_hc_mix_packed", H._HC_MIX_PACKED, F._HEADER,
+          [Arg("X", bf, big, 3), Arg("INV", f32, big), Arg("FNP", bf, big, 6)], [Arg("MIXES", f32, big, 2)],
+          [("D", HIDDEN), ("U", H.HC_MIX_U)])
+    plain("hc_split_norm", "tf_glm5_fused_hc_split_norm", H._HC_SPLIT_NORM, F._HEADER,
+          [Arg("X", bf, big, 3), Arg("MIXES", f32, big, 2), Arg("SCALE", f32, 3), Arg("BASEV", f32, 24),
+           Arg("NORMW", bf, big), Arg("EPS", f32, one)],
+          [Arg("NORMED", bf, big, 2), Arg("POST_OUT", f32, big, 2), Arg("COMB_OUT", f32, big, 3)],
+          [("D", HIDDEN), ("SQ_FMA", F.SQ_FMA), ("ITERS", 20), ("HC_EPS_INT", 1000)])
+
+    plain("kda_rows", "tf_glm5_kda_rows", KD._SOURCE, KD._HEADER,
+          [Arg("P", bf, big, 2), Arg("CS", bf, big, 2), Arg("CW", f32, big, 2), Arg("FBW", u32, big, 2),
+           Arg("FBS", bf, big, 2), Arg("FBB", bf, big, 2), Arg("GBW", u32, big, 2), Arg("GBS", bf, big, 2),
+           Arg("GBB", bf, big, 2), Arg("A", f32, big), Arg("DTB", f32, big), Arg("ST", f32, big, 4),
+           Arg("ONW", f32, big), Arg("LB", f32, one), Arg("EPS", f32, one)],
+          [Arg("Y", bf, big, 2), Arg("ST_OUT", f32, big, 4), Arg("CS_OUT", bf, big, 2)],
+          [("H", KDA_HEADS), ("D", KDA_DIM), ("TAPS", TAPS), ("TY", KD.TY), ("FB", 4), ("GB", 4)])
+
+    def router(rr: int) -> list:
+        return [("K", HIDDEN), ("NE", EXPERTS), ("RR", rr), ("C", 8 if rr <= 4 else 4), ("NT", M.ROUTER_TG)]
+
+    plain("router", "tf_glm5_fused_router_tg", M._ROUTER_TG, F._HEADER, [Arg("X", f32, big, 2), Arg("RP", bf, big, 5)],
+          [Arg("OUT", f32, big, 2)], router(1), [router(rr) for rr in range(2, MAX_ROWS + 1)])
+    plain("moe_route", "tf_glm5_fused_moe_route", M._MOE_ROUTE, F._HEADER,
+          [Arg("LOGITS", f32, big, 2), Arg("BIAS", f32, big), Arg("SCALE", f32, one)],
+          [Arg("PICK", i32, big, 2), Arg("WTS", f32, big, 2), Arg("UIDS", i32, big), Arg("UMEM", i32, big, 2),
+           Arg("UCOUNT", i32, 8)],
+          [("NE", EXPERTS), ("TOPK", TOP_K), ("MAXR", MAX_ROWS), ("NT", max(32 * MAX_ROWS, -(-EXPERTS // 32) * 32))])
+    group = [Arg("UIDS", i32, big), Arg("UMEM", i32, big, 2), Arg("UCOUNT", i32, 8)]
+    for part in (1, 2):
+        plain(f"moe_gateup_{part}", "tf_glm5_fused_moe_gateup", M._MOE_GATEUP, F._HEADER,
+              [Arg("X", bf, big, 2), Arg("GW", u32, big, 3), Arg("GS", bf, big, 3), Arg("GB", bf, big, 3),
+               Arg("UW", u32, big, 3), Arg("US", bf, big, 3), Arg("UB", bf, big, 3), Arg("SGU", u32, big, 2),
+               Arg("SGUS", bf, big, 2), Arg("SGUB", bf, big, 2), *group, Arg("LIM", f32, one)],
+              [Arg("ACT", bf, big, 3)],
+              [("K", HIDDEN), ("N", EXPERT), ("RPS", 4), ("TOPK", TOP_K), ("MAXR", MAX_ROWS), ("MAXU", MAXU),
+               ("PART", part), ("SB", 4), ("SV", 16), ("SLB", 8)])
+        plain(f"moe_down_{part}", "tf_glm5_fused_moe_down", M._MOE_DOWN, F._HEADER,
+              [Arg("ACT", bf, big, 3), Arg("DW", u32, big, 3), Arg("DS", bf, big, 3), Arg("DB", bf, big, 3),
+               Arg("SDW", u32, big, 2), Arg("SDS", bf, big, 2), Arg("SDB", bf, big, 2), *group],
+              [Arg("Y", bf, big, 3)],
+              [("K", EXPERT), ("N", HIDDEN), ("RPS", 4), ("TOPK", TOP_K), ("MAXR", MAX_ROWS), ("MAXU", MAXU),
+               ("PART", part), ("SB", 4), ("SV", 16), ("SLB", 8)])
+    plain("moe_combine", "tf_glm5_fused_moe_combine_split", M._MOE_COMBINE_SPLIT, F._HEADER,
+          [Arg("YS", bf, big, 2), Arg("Y", bf, big, 3), Arg("WTS", f32, big, 2)], [Arg("OUT", bf, big, 2)],
+          [("D", HIDDEN), ("TOPK", TOP_K)])
+
+    out.append(Spec("sparse_attention", f"tf_glm5_indexed_sparse_attention_{_digest(SA._SOURCE)}", SA._SOURCE,
+                    [Arg("queries", bf, big, 3), Arg("keys", bf, big, 2), Arg("indices", i32, big, 2),
+                     Arg("scale", f32, one), Arg("meta", i32, one)],
+                    [Arg("out", bf, big, 3)], "", [("QK_DIM", RANK), ("TOPK", TOPK_KEYS), ("HEADS", MLA_HEADS)]))
+    return out
+
+
+def rendered(spec: Spec) -> tuple[str, str]:
+    """(function name, file text) for a spec; extra instantiations get their own host names."""
+
+    fname, text = kernel_text(spec.name, spec.inputs, spec.outputs, spec.source, spec.header, spec.template)
+    for template in spec.extra:
+        host = function_name(spec.name, spec.inputs, spec.outputs, template)
+        args = fname + "<" + ", ".join(_template_value(v) for _, v in template) + ">"
+        text += f'template [[host_name("{host}")]] [[kernel]] decltype({args}) {args};\n'
+    return fname, ("// Generated by tools/zig/gen_glm_kernels.py from our Python kernels; do not edit.\n" + PREAMBLE
+                   + BF16_MATH + strip_comments(text))
+
+
+def names_zig(entries: list[tuple[Spec, str]]) -> str:
+    lines = ["//! Generated by tools/zig/gen_glm_kernels.py: each kernel's function names and source; do not edit.",
+             "", "pub const Kernel = struct { key: []const u8, functions: []const [:0]const u8, source: []const u8 };",
+             "", "pub const all = [_]Kernel{"]
+    for spec, fname in entries:
+        names = [fname] + [function_name(spec.name, spec.inputs, spec.outputs, t) for t in spec.extra]
+        listed = ", ".join(f'"{n}"' for n in names)
+        lines.append(f'    .{{ .key = "{spec.key}", .functions = &.{{ {listed} }}, .source = @embedFile("{spec.key}.metal") }},')
+    lines += ["};", ""]
+    return "\n".join(lines)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--check", action="store_true", help="fail if the written files are stale")
+    args = ap.parse_args()
+    py_kernels._stand_in()                     # the sources only: never import MLX here
+    entries = [(s, *rendered(s)) for s in specs()]
+    files = {OUT / f"{s.key}.metal": text for s, _, text in entries}
+    files[NAMES] = names_zig([(s, f) for s, f, _ in entries])
+    stale = 0
+    for path, text in files.items():
+        if args.check:
+            if not path.is_file() or path.read_text() != text:
+                print(f"stale: {path.relative_to(ROOT)}")
+                stale += 1
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+    if args.check:
+        extra = sorted(p for p in OUT.glob("*.metal") if p not in files)
+        for path in extra:
+            print(f"not generated: {path.relative_to(ROOT)}")
+        return 1 if stale or extra else 0
+    print(f"wrote {len(entries)} kernels to {OUT.relative_to(ROOT)} and {NAMES.relative_to(ROOT)}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
