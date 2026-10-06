@@ -4,6 +4,8 @@ sublayer's input and output for a prompt's first window.
 
   python -B tools/zig/glm_ref.py MODEL_DIR OUT_JSON [--max 64] [--long 2100 4096] [--capture CAP.safetensors] [--text F]
                                  [--layers N]   (the first N layers only, as tf-glm-run's GLM_LAYERS=N)
+                                 [--trace NAME STEPS TRACE.safetensors]   (every call's sublayers: the prompt's
+                                 windows, then STEPS one-row steps feeding NAME's reply; tf-glm-run's GLM_TRACE)
 """
 
 from __future__ import annotations
@@ -43,6 +45,7 @@ def main() -> int:
     ap.add_argument("--capture", default="")
     ap.add_argument("--text", default=str(Path(__file__).resolve().parents[2] / "README.md"))
     ap.add_argument("--layers", type=int, default=0, help="load and run only the first N layers (0: all)")
+    ap.add_argument("--trace", nargs=3, metavar=("NAME", "STEPS", "PATH"), default=None)
     args = ap.parse_args()
     import mlx.core as mx
 
@@ -90,7 +93,28 @@ def main() -> int:
     Path(args.out).write_text(json.dumps({"layers": len(model.layers), "prompts": out}))
     if args.capture:
         capture(model, prompts[0][1][:WINDOW], args.capture)
+    if args.trace:
+        name, steps, path = args.trace[0], int(args.trace[1]), args.trace[2]
+        row = next(r for r in out if r["name"] == name)
+        trace(model, row["ids"], row["expect"], steps, path)
     return 0
+
+
+def trace(model, ids: list[int], reply: list[int], steps: int, path: str) -> None:
+    """Every call of a reply's forward, sublayer by sublayer (keys c{call}.{array}): the prompt's windows, then
+    `steps` one-row steps feeding the reply's tokens, the cache carried between calls as the reply carries it."""
+
+    import mlx.core as mx
+
+    cache = model.make_cache()
+    calls = [ids[at:at + WINDOW] for at in range(0, len(ids), WINDOW)] + [[t] for t in reply[:steps]]
+    found = {}
+    for c, tokens in enumerate(calls):
+        for key, value in sublayers(model, cache, tokens).items():
+            found[f"c{c}.{key}"] = value
+        mx.eval(list(found.values()))
+    mx.save_safetensors(path, {k: mx.contiguous(v) for k, v in found.items()})
+    print(f"traced {len(calls)} calls ({len(ids)} prompt rows, {min(steps, len(reply))} steps) in {path}", flush=True)
 
 
 def capture(model, tokens: list[int], path: str) -> None:
@@ -98,7 +122,16 @@ def capture(model, tokens: list[int], path: str) -> None:
 
     import mlx.core as mx
 
-    cache = model.make_cache()
+    found = sublayers(model, model.make_cache(), tokens)
+    mx.save_safetensors(path, {k: mx.contiguous(v) for k, v in found.items()})
+    print(f"captured {len(found)} arrays for {len(tokens)} rows in {path}", flush=True)
+
+
+def sublayers(model, cache, tokens: list[int]) -> dict:
+    """One call's rows through the layers with `cache` (advanced): embed, each sublayer's input and output, final, logits."""
+
+    import mlx.core as mx
+
     ids = mx.array(tokens, dtype=mx.uint32)
     rows = int(ids.shape[0])
     h = model.embed_tokens(ids)
@@ -118,8 +151,7 @@ def capture(model, tokens: list[int], path: str) -> None:
         mx.eval(x, *pending)
     found["final"] = model.final_norm(model.boundary(x, pending, None, None, True)[0])
     found["logits"] = model.head(found["final"])
-    mx.save_safetensors(path, {k: mx.contiguous(v) for k, v in found.items()})
-    print(f"captured {len(found)} arrays for {rows} rows in {path}", flush=True)
+    return found
 
 
 if __name__ == "__main__":

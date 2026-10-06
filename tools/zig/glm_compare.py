@@ -3,6 +3,7 @@ or two glm_ref.py captures on the arrays they share (a layer subset's against th
 
   python3 -B tools/zig/glm_compare.py REF.safetensors ZIG.bin
   python3 -B tools/zig/glm_compare.py REF.safetensors OTHER.safetensors
+  python3 -B tools/zig/glm_compare.py --trace REF.safetensors ZIG.bin   (glm_ref.py --trace and GLM_TRACE: call by call)
 """
 
 from __future__ import annotations
@@ -48,7 +49,47 @@ def shared(a: dict[str, np.ndarray], b: dict[str, np.ndarray]) -> int:
     return 0
 
 
+def order_of(names, prefix: str = "") -> list[str]:
+    layers = sum(1 for k in names if k.startswith(prefix) and k.endswith(".attn_in"))
+    body = [f"l{i}.{s}" for i in range(layers) for s in ("attn_in", "attn_out", "mlp_in", "mlp_out")]
+    return [prefix + n for n in ["embed", *body, "final", "logits"]]
+
+
+def trace(ref: dict[str, np.ndarray], zig: np.ndarray) -> int:
+    """Call by call: each call's first differing array (ulps, count), the first call that differs in detail."""
+
+    calls = sorted({int(k[1:k.index(".")]) for k in ref if re.match(r"c\d+\.", k)})
+    at, first = 0, None
+    for c in calls:
+        names = order_of(ref, f"c{c}.")
+        rows = ref[names[0]].shape[0]
+        bad = []
+        for name in names:
+            want = ref[name].reshape(rows, -1)
+            if at + want.size > zig.size:
+                print(f"call {c}: the Zig trace ends early")
+                return 2
+            got = zig[at:at + want.size].reshape(want.shape)
+            at += want.size
+            same = int((got == want).sum())
+            if same != want.size:
+                ulps = np.abs(got.astype(np.int64) - want.astype(np.int64))
+                bad.append(f"{name[len(f'c{c}.'):]} {same}/{want.size} equal, max ulps {int(ulps.max())}")
+        line = f"call {c:3d} ({rows:2d} rows): " + ("every array bit-identical" if not bad else f"first difference {bad[0]}; {len(bad)} arrays differ")
+        print(line)
+        if bad and first is None:
+            first = c
+            for b in bad[:12]:
+                print(f"    {b}")
+    if at != zig.size:
+        print(f"the Zig trace has {zig.size - at} values beyond the reference's calls")
+    print(f"first differing call: {first}" if first is not None else "every call bit-identical")
+    return 0 if first is None else 1
+
+
 def main() -> int:
+    if sys.argv[1] == "--trace":
+        return trace(read_safetensors(sys.argv[2]), np.fromfile(sys.argv[3], dtype=np.uint16))
     ref = read_safetensors(sys.argv[1])
     if sys.argv[2].endswith(".safetensors"):
         return shared(ref, read_safetensors(sys.argv[2]))

@@ -285,6 +285,42 @@ pub const Engine = struct {
         std.debug.print("captured {d} rows ({d} bytes) in {s}\n", .{ n, bytes, path });
     }
 
+    /// Every call of a plain reply's forward with each sublayer captured (glm_ref.py --trace): the prompt's 16-row
+    /// windows, then `steps` one-row steps feeding `reply`'s tokens; each call's rows in glm_ref.py's order, appended.
+    pub fn trace(e: *Engine, prompt: []const u32, reply: []const u32, steps: usize, path: []const u8) !void {
+        const c = &e.c;
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        const P: u32 = @intCast(prompt.len);
+        const total: u32 = P + @as(u32, @intCast(@min(steps, reply.len)));
+        if (total + 1 > e.s.cap) return error.ContextFull;
+        e.sync();
+        e.s.reset();
+        @memcpy(u32s(e.prompt_ids, P), prompt);
+        @memcpy(u32s(e.prompt_ids.at(@as(usize, P) * 4), total - P), reply[0 .. total - P]);
+        const most = @as(usize, st.max_rows) * c.hidden * 2 * (2 + 4 * @as(usize, c.run)) + @as(usize, st.max_rows) * c.vocab * 2;
+        const dump = try e.arena.buffer(most);
+        const file = std.c.fopen(try std.fmt.allocPrintSentinel(e.gpa, "{s}", .{path}, 0), "wb") orelse return error.OpenFailed;
+        defer _ = std.c.fclose(file);
+        var x = e.ctx();
+        var at: u32 = 0;
+        var calls: usize = 0;
+        while (at < total) : (calls += 1) {
+            const n: u32 = if (at < P) @min(st.max_rows, P - at) else 1;
+            x.dump = dump;
+            x.dump_at = 0;
+            const b = e.begin();
+            fwd.backbone(&x, b.enc, e.prompt_ids.at(@as(usize, at) * 4), n, at);
+            fwd.head(&x, b.enc, e.sc.hidden, dump.at(x.dump_at), e.sc.picks, n);
+            try e.finish(b.cb, b.enc);
+            fwd.flipKda(&x);
+            const bytes = x.dump_at + @as(usize, n) * c.vocab * 2;
+            if (std.c.fwrite(dump.addr(), 1, bytes, file) != bytes) return error.WriteFailed;
+            at += n;
+        }
+        std.debug.print("traced {d} calls ({d} prompt rows, {d} steps) in {s}\n", .{ calls, P, total - P, path });
+    }
+
     /// One greedy reply. `depth` drafts a round (0: one token a round, the reference drafted replies must equal).
     pub fn generate(e: *Engine, prompt: []const u32, max_tokens: usize, eos: []const u32, depth: usize, out: Out) !Result {
         const c = &e.c;

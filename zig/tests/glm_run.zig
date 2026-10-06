@@ -5,7 +5,8 @@
 //! GLM_OUT (write each prompt's first-depth reply as JSON), GLM_VS (compare replies with a GLM_OUT file),
 //! GLM_CANCEL_TEST (cancel a reply mid-prompt, then the next fresh reply must equal the plain one),
 //! GLM_LAYERS (the first N layers only, with the MTP layer and head), GLM_REF_STRICT (a reference difference fails),
-//! GLM_EP (expert parallel: this Mac's link settings; run the same command on both Macs).
+//! GLM_EP (expert parallel: this Mac's link settings; run the same command on both Macs),
+//! GLM_TRACE=NAME:STEPS:PATH (every call of NAME's plain reply, sublayer by sublayer, feeding its expected tokens).
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -75,6 +76,15 @@ pub fn main(init: std.process.Init) !void {
     if (std.c.getenv("GLM_CAPTURE")) |path| { // the first prompt's first window, sublayer by sublayer (glm_ref.py --capture)
         const first = doc.object.get("prompts").?.array.items[0];
         try e.capture(try ints(arena, first.object.get("ids").?), std.mem.span(path));
+    }
+    if (std.c.getenv("GLM_TRACE")) |spec| { // NAME:STEPS:PATH, glm_ref.py --trace NAME STEPS PATH's twin
+        var parts = std.mem.splitScalar(u8, std.mem.span(spec), ':');
+        const want = parts.next() orelse return error.BadTrace;
+        const steps = try std.fmt.parseInt(usize, parts.next() orelse return error.BadTrace, 10);
+        const out_path = parts.rest();
+        for (doc.object.get("prompts").?.array.items) |p| if (std.mem.eql(u8, p.object.get("name").?.string, want)) {
+            try e.trace(try ints(arena, p.object.get("ids").?), try ints(arena, p.object.get("expect").?), steps, out_path);
+        };
     }
     var failures: usize = 0;
     const vs: ?std.json.Value = if (std.c.getenv("GLM_VS")) |path| blk: {
