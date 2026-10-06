@@ -29,6 +29,8 @@ pub const Rules = struct {
     planned: bool = false,
     /// A mark other than the history's is kept only this far from every other mark and the resume point.
     min_gap: u32 = 256,
+    /// Shorter prompts keep nothing: below it a mark's extra prompt call costs more than a later turn's reuse saves.
+    min_prompt: u32 = 4096,
 };
 
 pub const Entry = struct {
@@ -139,6 +141,7 @@ pub const Store = struct {
 
     /// Where a pass from `from` keeps states: the history, then min_gap apart the stable prefix and shared blocks.
     pub fn marks(s: *const Store, a: Allocator, prompt: []const u32, from: u32, history_len: u32, shared: []const u32, starts: []const u32, previous: []const u32) ![]const u32 {
+        if (prompt.len < s.rules.min_prompt) return &.{};
         var out: std.ArrayList(u32) = .empty;
         var want: std.ArrayList(u32) = .empty;
         defer want.deinit(a);
@@ -322,7 +325,7 @@ test "a growing conversation resumes each turn where the last one's history ende
     defer arena.deinit();
     const a = arena.allocator();
     var f: Fake = .{ .gpa = gpa };
-    var s = Store.init(gpa, f.snapshots(), .{ .lookahead = 1 }, 1 << 20);
+    var s = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .min_prompt = 0 }, 1 << 20);
     defer s.deinit();
     const t1 = [_]u32{ 1, 2, 3, 4, 5, 9, 9 }; // history 5, then a two-token generation prompt
     var p = try s.begin(a, &t1, 5, &.{}, &.{}, null);
@@ -348,7 +351,7 @@ test "an entry keys its lookahead tokens: a prompt that differs right after the 
     defer arena.deinit();
     const a = arena.allocator();
     var f: Fake = .{ .gpa = gpa };
-    var s = Store.init(gpa, f.snapshots(), .{ .lookahead = 1 }, 1 << 20);
+    var s = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .min_prompt = 0 }, 1 << 20);
     defer s.deinit();
     const t1 = [_]u32{ 1, 2, 3, 4, 5, 9 };
     _ = f.pass(&s, &t1, try s.begin(a, &t1, 4, &.{}, &.{}, null)); // keeps [1 2 3 4] + 5
@@ -363,7 +366,7 @@ test "planned families resume and keep only at the request's chunk starts" {
     defer arena.deinit();
     const a = arena.allocator();
     var f: Fake = .{ .gpa = gpa };
-    var s = Store.init(gpa, f.snapshots(), .{ .planned = true }, 1 << 20);
+    var s = Store.init(gpa, f.snapshots(), .{ .planned = true, .min_prompt = 0 }, 1 << 20);
     defer s.deinit();
     const t1 = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8 };
     const p = try s.begin(a, &t1, 7, &.{}, &.{ 4, 6 }, null);
@@ -379,7 +382,7 @@ test "eviction frees a conversation's superseded state first, then the oldest; a
     defer arena.deinit();
     const a = arena.allocator();
     var f: Fake = .{ .gpa = gpa };
-    var s = Store.init(gpa, f.snapshots(), .{}, 330); // fake bytes: 100 + at
+    var s = Store.init(gpa, f.snapshots(), .{ .min_prompt = 0 }, 330); // fake bytes: 100 + at
     defer s.deinit();
     const other = [_]u32{ 5, 5, 5, 5 };
     _ = f.pass(&s, &other, try s.begin(a, &other, 3, &.{}, &.{}, null)); // 103 bytes
@@ -407,7 +410,7 @@ test "a failed copy keeps nothing and a failed restore prefills from the start" 
     defer arena.deinit();
     const a = arena.allocator();
     var f: Fake = .{ .gpa = gpa, .fail_save = true };
-    var s = Store.init(gpa, f.snapshots(), .{}, 1 << 20);
+    var s = Store.init(gpa, f.snapshots(), .{ .min_prompt = 0 }, 1 << 20);
     defer s.deinit();
     const t1 = [_]u32{ 1, 2, 3, 4, 5, 6 };
     _ = f.pass(&s, &t1, try s.begin(a, &t1, 4, &.{}, &.{}, null));
@@ -430,7 +433,7 @@ test "marks: the stable prefix with the last prompt and shared blocks, past the 
     defer arena.deinit();
     const a = arena.allocator();
     var f: Fake = .{ .gpa = gpa };
-    var s = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .min_gap = 2 }, 1 << 20);
+    var s = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .min_gap = 2, .min_prompt = 0 }, 1 << 20);
     defer s.deinit();
     const prompt = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
     const prev = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 0, 0 };
@@ -438,4 +441,25 @@ test "marks: the stable prefix with the last prompt and shared blocks, past the 
     try std.testing.expectEqualSlices(u32, &.{10}, try s.marks(a, &prompt, 7, 10, &.{3}, &.{}, &prev));
     try std.testing.expectEqualSlices(u32, &.{}, try s.marks(a, &prompt, 0, 0, &.{}, &.{}, &.{})); // a raw prompt keeps nothing
     try std.testing.expectEqualSlices(u32, &.{10}, try s.marks(a, &prompt, 0, 10, &.{9}, &.{}, &.{})); // a block next to the history
+}
+
+test "prompts under min_prompt keep nothing (their extra prompt call would cost more than reuse saves), longer ones keep as before" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{ .gpa = gpa };
+    var s = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .min_prompt = 8 }, 1 << 20);
+    defer s.deinit();
+    const short = [_]u32{ 1, 2, 3, 4, 5, 9, 9 }; // 7 tokens, history 5
+    const p = try s.begin(a, &short, 5, &.{}, &.{}, null);
+    try std.testing.expectEqualSlices(u32, &.{}, p.marks);
+    try std.testing.expectEqual(fresh(&short), f.pass(&s, &short, p));
+    try std.testing.expectEqual(@as(usize, 0), s.entries.items.len);
+    const long = [_]u32{ 1, 2, 3, 4, 5, 9, 7, 7, 9, 9 }; // 10 tokens: the next turn keeps its history, resuming nothing
+    const q = try s.begin(a, &long, 8, &.{}, &.{}, null);
+    try std.testing.expectEqual(@as(u32, 0), q.from);
+    try std.testing.expectEqualSlices(u32, &.{8}, q.marks);
+    try std.testing.expectEqual(fresh(&long), f.pass(&s, &long, q));
+    try std.testing.expectEqual(@as(u32, 8), s.find(&.{ 1, 2, 3, 4, 5, 9, 7, 7, 9, 9, 4 }, &.{}).?.at);
 }

@@ -135,7 +135,7 @@ pub fn main(init: std.process.Init) !void {
     for (args[3..]) |path| {
         const t = try loadTokens(a, path);
         const third = t.len / 3;
-        var store = pc.Store.init(gpa, fam.snapshots(), .{ .lookahead = 1 }, 64 << 30);
+        var store = pc.Store.init(gpa, fam.snapshots(), .{ .lookahead = 1, .min_prompt = 0 }, 64 << 30); // every turn keeps, short ones too
         defer store.deinit();
         std.debug.print("== {s}: {d} tokens\n", .{ path, t.len });
         // a later turn: a turn's prompt, its reply, more text, and the same last 3 tokens (the generation prompt)

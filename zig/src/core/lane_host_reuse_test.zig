@@ -34,7 +34,7 @@ test "a lane host resumes a conversation from its kept prompt state and reports 
             f.drop(saved);
         }
     };
-    var store = pc.Store.init(gpa, .{ .ptr = &target, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, .{ .min_gap = 4 }, 1 << 20);
+    var store = pc.Store.init(gpa, .{ .ptr = &target, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, .{ .min_gap = 4, .min_prompt = 0 }, 1 << 20);
     defer store.deinit();
     var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
     host.cache = &store;
@@ -133,7 +133,7 @@ test "a turn's mark evicting the state it resumed from: the hit is reported firs
         }
     };
     var snaps: Snaps = .{ .f = &target };
-    var store = pc.Store.init(gpa, .{ .ptr = &snaps, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, .{ .min_gap = 4 }, 150);
+    var store = pc.Store.init(gpa, .{ .ptr = &snaps, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, .{ .min_gap = 4, .min_prompt = 0 }, 150);
     defer store.deinit();
     snaps.store = &store;
     var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
