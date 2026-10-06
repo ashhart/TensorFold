@@ -24,7 +24,7 @@ pub const Ctx = struct {
     skip: u32 = 0, // a profile's knock-outs: launch classes left out (Class bits)
     pskip: u32 = 0, // a profile's knock-outs by launch (Part bits)
     fused_route: bool = true, // the core route (two launches); false: the Python family's cast, router and top-k
-    fused_hc: bool = true, // the one-launch boundary (core/hc.zig); false: the family's expand, mix and split
+    hc_mode: u8 = 1, // 0: the family's expand, mix and split; 1: its expand, then core/hc.zig's mix and split; 2: one launch
 };
 
 /// Single launches (or tight groups) for a profile that times each alone.
@@ -134,7 +134,7 @@ pub fn embedRows(x: *const Ctx, e: mtl.ComputeEncoder, ids: Ref, out: Ref, rows:
 pub fn boundary(x: *Ctx, e: mtl.ComputeEncoder, rows: u32, pending: bool, hc: ?wts.Hc, norm: ?Ref) void {
     const sc = x.sc;
     const k = x.k;
-    if (x.fused_hc and hc != null) {
+    if (x.hc_mode == 2 and hc != null) {
         const h = hc.?;
         if (on(x, "hc_mix")) hc_core.boundary(e, .{ k.hc_expand, k.hc_first }, pending, rows, x.c.eps, .{ .x_old = sc.x[x.xi], .branch = sc.branch, .post = sc.post, .comb = sc.comb, .fn_packed = h.fnp, .scale = h.scale, .base = h.base, .norm = norm.?, .x_new = sc.x[1 - x.xi], .mixes = sc.mixes, .normed = sc.normed, .count = sc.hcc });
         if (pending) x.xi = 1 - x.xi;
@@ -149,6 +149,10 @@ pub fn boundary(x: *Ctx, e: mtl.ComputeEncoder, rows: u32, pending: bool, hc: ?w
     }
     if (pending) x.xi = 1 - x.xi;
     const h = hc orelse return;
+    if (x.hc_mode == 1) {
+        if (on(x, "hc_mix")) hc_core.mixSplit(e, k.hc_mix_split, rows, x.c.eps, .{ .x = sc.x[x.xi], .inv = sc.inv, .fn_packed = h.fnp, .scale = h.scale, .base = h.base, .norm = norm.?, .mixes = sc.mixes, .normed = sc.normed, .post = sc.post, .comb = sc.comb, .count = sc.hcc });
+        return;
+    }
     if (on(x, "hc_mix")) {
         e.setPipeline(k.hc_mix);
         bind(e, 0, .{ sc.x[x.xi], sc.inv, h.fnp, sc.mixes });

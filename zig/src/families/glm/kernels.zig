@@ -66,6 +66,7 @@ pub const Kernels = struct {
     route_select: mtl.Pipeline,
     hc_expand: mtl.Pipeline, // the one-launch boundary (core/hc.zig), with the pending branch
     hc_first: mtl.Pipeline, // and without
+    hc_mix_split: mtl.Pipeline, // the mix and, by the last threadgroup of a row, the split (after the family's expand)
 
     pub fn deinit(k: *Kernels) void {
         const info = @typeInfo(Kernels).@"struct";
@@ -178,9 +179,9 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     defer gpa.free(route_src);
     var route_out: [2]mtl.Pipeline = undefined;
     jobs[generated.len + 4] = .{ .device = device, .source = route_src, .names = &moe_route.names, .out = &route_out };
-    const hc_src = try hc.source(gpa, .{ .width = 4096, .sinkhorn = 20, .eps_e9 = 1000, .unroll = 2 });
+    const hc_src = try hc.source(gpa, .{ .width = 4096, .sinkhorn = 20, .eps_e9 = 1000 });
     defer gpa.free(hc_src);
-    var hc_out: [2]mtl.Pipeline = undefined;
+    var hc_out: [3]mtl.Pipeline = undefined;
     jobs[generated.len + 5] = .{ .device = device, .source = hc_src, .names = &hc.names, .out = &hc_out };
     var next = std.atomic.Value(usize).init(0);
     const Worker = struct {
@@ -204,5 +205,6 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     k.route_select = route_out[1];
     k.hc_expand = hc_out[0];
     k.hc_first = hc_out[1];
+    k.hc_mix_split = hc_out[2];
     return k;
 }

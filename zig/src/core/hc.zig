@@ -11,7 +11,7 @@ pub fn source(a: std.mem.Allocator, s: Shape) ![]u8 {
     return std.fmt.allocPrint(a, "#define TF_D {d}\n#define TF_ITERS {d}\n#define TF_HC_EPS_INT {d}\n#define TF_U {d}\n#define TF_SQ_FMA {d}\n{s}", .{ s.width, s.sinkhorn, s.eps_e9, s.unroll, @intFromBool(s.sq_fma), ks.core_hc_boundary });
 }
 
-pub const names = [2][:0]const u8{ "tf_hc_boundary_expand", "tf_hc_boundary_first" };
+pub const names = [3][:0]const u8{ "tf_hc_boundary_expand", "tf_hc_boundary_first", "tf_hc_mix_split" };
 
 fn bind(e: mtl.ComputeEncoder, i: usize, r: anytype) void {
     e.setBuffer(r.buf, r.off, i);
@@ -25,6 +25,16 @@ pub fn boundary(e: mtl.ComputeEncoder, pipes: [2]mtl.Pipeline, expand: bool, row
     inline for (.{ b.x_old, b.branch, b.post, b.comb, b.fn_packed, b.scale, b.base, b.norm }, 0..) |r, i| bind(e, i, r);
     e.setValue(eps, 8);
     inline for (.{ b.x_new, b.mixes, b.normed, b.post, b.comb, b.count }, 9..) |r, i| bind(e, i, r);
+    e.dispatchGroups(mtl.Size.of(6, rows, 1), mtl.Size.of(256, 1, 1));
+}
+
+/// After the expand (the streams in `x`, their inverse norm in `inv`): the mix and, by the last threadgroup of a row,
+/// the split and norm (`mixes` and `count` as in `boundary`).
+pub fn mixSplit(e: mtl.ComputeEncoder, pipe: mtl.Pipeline, rows: u32, eps: f32, b: anytype) void {
+    e.setPipeline(pipe);
+    inline for (.{ b.x, b.inv, b.fn_packed, b.scale, b.base, b.norm }, 0..) |r, i| bind(e, i, r);
+    e.setValue(eps, 6);
+    inline for (.{ b.mixes, b.normed, b.post, b.comb, b.count }, 7..) |r, i| bind(e, i, r);
     e.dispatchGroups(mtl.Size.of(6, rows, 1), mtl.Size.of(256, 1, 1));
 }
 
