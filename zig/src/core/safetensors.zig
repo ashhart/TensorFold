@@ -101,6 +101,7 @@ pub const Tensor = struct {
 
 /// A file mapped read-only with its header indexed.
 pub const File = struct {
+    path: [:0]const u8,
     file: Io.File,
     map: Io.File.MemoryMap,
     data: usize,
@@ -119,7 +120,8 @@ pub const File = struct {
         var arena = std.heap.ArenaAllocator.init(gpa);
         errdefer arena.deinit();
         const names = try parseHeader(arena.allocator(), map.memory[8..][0..header_len], len - 8 - header_len);
-        return .{ .file = file, .map = map, .data = 8 + header_len, .names = names, .arena = arena };
+        const own = try arena.allocator().dupeSentinel(u8, path, 0);
+        return .{ .path = own, .file = file, .map = map, .data = 8 + header_len, .names = names, .arena = arena };
     }
 
     pub fn close(self: *File, io: Io) void {
