@@ -1177,7 +1177,7 @@ pub const Run = struct {
     }
 
     /// A variant's source: the embedded text when the run is checked-in, else its recorded file.
-    fn variantText(a: std.mem.Allocator, v: *const Variant) ![]const u8 {
+    pub fn variantText(a: std.mem.Allocator, v: *const Variant) ![]const u8 {
         if (v.text.len != 0) return v.text;
         const f = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(a, "{s}", .{v.file}, 0));
         return f.bytes[0..f.size];

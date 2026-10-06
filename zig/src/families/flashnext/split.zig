@@ -20,8 +20,7 @@ pub fn laneTiles(r: *Run, role: []const u8, ins: []const Buf, y: Buf, ranges: []
     if (groups) |g| h.update(std.mem.asBytes(&g));
     var v = s.v.*;
     v.pipe = r.tp_lane.get(h.final()) orelse blk: {
-        const f = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(r.arena, "{s}", .{s.v.file}, 0));
-        var text: []const u8 = f.bytes[0..f.size];
+        var text: []const u8 = try Run.variantText(r.arena, s.v);
         const a = r.arena;
         const sk_at = std.mem.indexOf(u8, text, "constexpr int SK = ") orelse return error.LanePatch;
         const sk_end = sk_at + (std.mem.indexOfScalar(u8, text[sk_at..], ';') orelse return error.LanePatch);
@@ -68,9 +67,8 @@ pub fn gdnHeads(r: *Run, role: []const u8, as_rows: usize, ins: []const Buf, out
     const s = r.roles.get(try std.fmt.bufPrint(&key, "{s}|{d}", .{ role, as_rows })) orelse return error.NoSite;
     var v = s.v.*;
     if (rank == 1) v.pipe = r.tp_gdn.get(s.v) orelse blk: {
-        const f = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(r.arena, "{s}", .{s.v.file}, 0));
         const from = "const int hv = int(threadgroup_position_in_grid.x);";
-        const text = f.bytes[0..f.size];
+        const text = try Run.variantText(r.arena, s.v);
         if (std.mem.count(u8, text, from) != 1) return error.GdnPatch;
         const patched = try std.mem.replaceOwned(u8, r.arena, text, from, "const int hv = int(threadgroup_position_in_grid.x) + 24;");
         const lib = try mtl.Library.fromSource(r.device, patched, mtl.CompileOptions.mlx());

@@ -293,9 +293,7 @@ test {
     _ = @import("pack_source_test.zig");
 }
 
-/// Whether a pack cache folder is complete for a no-dump load: `pack.safetensors` present and matching the
-/// checkpoint's identity, and `pack_mlx.safetensors` beside it (Prompt.init requires it). A cache interrupted
-/// between the two writes, or built from another checkpoint, is not ready and the loader rebuilds.
+/// Whether a pack cache folder is complete for a no-dump load: both packs present, non-empty, with headers matching the checkpoint's identity; anything else rebuilds.
 pub fn packsReady(gpa: std.mem.Allocator, io: Io, cache_dir: []const u8, identity: []const u8) !bool {
     const pack_path = try std.fmt.allocPrintSentinel(gpa, "{s}/pack.safetensors", .{cache_dir}, 0);
     defer gpa.free(pack_path);
@@ -314,6 +312,14 @@ pub fn packsReady(gpa: std.mem.Allocator, io: Io, cache_dir: []const u8, identit
     const mlx_path = try std.fmt.allocPrintSentinel(gpa, "{s}/pack_mlx.safetensors", .{cache_dir}, 0);
     defer gpa.free(mlx_path);
     const mlx = Io.Dir.cwd().openFile(io, mlx_path, .{}) catch return false;
-    mlx.close(io);
+    defer mlx.close(io);
+    const mlx_stat = try mlx.stat(io);
+    if (mlx_stat.size < 8) return false;
+    const mlx_head = try gpa.alloc(u8, @intCast(mlx_stat.size));
+    defer gpa.free(mlx_head);
+    var mlx_buf: [4096]u8 = undefined;
+    var mlx_reader = mlx.reader(io, &mlx_buf);
+    try mlx_reader.interface.readSliceAll(mlx_head);
+    checkSourceMapped(gpa, mlx_head, identity, mlx_path) catch return false;
     return true;
 }

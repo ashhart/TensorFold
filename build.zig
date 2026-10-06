@@ -86,11 +86,6 @@ pub fn build(b: *std.Build) void {
         else => {},
     }
     cuda_build.hostTests(b, draft_ids, test_step);
-    const flash_host = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/flashnext_host.zig"), .target = target, .optimize = optimize, .link_libc = true }) });
-    b.step("compile-flashnext-host", "Compile FlashNext CPU metadata contracts without running them").dependOn(&flash_host.step);
-    const flash_host_run = b.addRunArtifact(flash_host);
-    b.step("test-flashnext-host", "Run FlashNext CPU metadata contracts without Metal").dependOn(&flash_host_run.step);
-    test_step.dependOn(&flash_host_run.step);
 }
 
 /// `zig build native -Dcpu=apple_m1`: tensorfold-native with the Metal engines for the Python package's bundle (a native M5 build traps on M1-M4).
@@ -245,6 +240,18 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .link_libc = true,
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "nemotron_draft_ids", .module = draft_ids }, .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric } },
     });
+    // FlashNext's CPU contracts, with the family module's imports so the replay graph type-checks
+    const flash_host = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/flashnext_host.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "nemotron_draft_ids", .module = draft_ids }, .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric } },
+    }) });
+    b.step("compile-flashnext-host", "Compile FlashNext CPU metadata contracts without running them").dependOn(&flash_host.step);
+    const flash_host_run = b.addRunArtifact(flash_host);
+    b.step("test-flashnext-host", "Run FlashNext CPU metadata contracts without Metal").dependOn(&flash_host_run.step);
+    test_step.dependOn(&flash_host_run.step);
     const engine_programs = [_]struct { name: []const u8, path: []const u8, about: []const u8, c_source: ?[]const u8 = null }{
         .{ .name = "tensorfold", .path = "zig/src/main.zig", .about = "The native engine's command line" },
         .{ .name = "tf-nemotron-fixtures", .path = "zig/tests/nemotron_fixtures.zig", .about = "Nemotron kernels against the Python engine's captured ops" },

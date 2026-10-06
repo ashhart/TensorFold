@@ -1,5 +1,6 @@
 //! Host-only contracts exercise strict text configuration, affine six-bit packing and borrowed-view shapes.
 const std = @import("std");
+const posix = std.posix;
 const family = @import("flashnext.zig");
 const st = @import("../../core/safetensors.zig");
 
@@ -215,7 +216,7 @@ test "the PLE reference values derive from the pinned config as the Python embed
 
 test "the checked-in role table resolves every width serve asks for, with its source checked in" {
     const table = @import("roles_gen.zig");
-    const sources = @import("../../../kernels/metal/flashnext/sources_gen.zig");
+    const sources = @import("kernel_sources").flashnext_gen;
     try std.testing.expect(table.entries.len > 0);
     // every entry's file and function must exist in the embedded sources, with the kernel inside it
     for (table.entries) |e| {
@@ -270,7 +271,7 @@ test "the checked-in role table resolves every width serve asks for, with its so
 }
 
 test "the checked-in lane sources have a no-tensor-unit twin with the same kernel names" {
-    const sources = @import("../../../kernels/metal/flashnext/sources_gen.zig");
+    const sources = @import("kernel_sources").flashnext_gen;
     for (sources.sources) |s| {
         if (std.mem.indexOf(u8, s.name, "lane_qmm_bytes_grouped") == null) continue;
         if (std.mem.endsWith(u8, s.name, "-lanes.metal")) continue;
@@ -288,4 +289,40 @@ test "the checked-in lane sources have a no-tensor-unit twin with the same kerne
         }
         try std.testing.expect(found);
     }
+}
+
+test "the prompt's checked-in text resolves and patches from another working directory" {
+    // Prompt.init needs Metal, so this walks its exact file resolution instead: every checked-in variant resolves through Run.variantText and the gdn patch applies, with the process in a directory that holds none of the kernel files, so a bare-name open cannot pass.
+    const replay = @import("replay.zig");
+    const table = @import("roles_gen.zig");
+    const sources = @import("kernel_sources").flashnext_gen;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_fd = std.c.open(".", .{}); // O_RDONLY via the flags struct's default
+    defer _ = std.c.close(old_fd);
+    const tmpz = try std.fmt.allocPrintSentinel(std.testing.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path}, 0);
+    defer std.testing.allocator.free(tmpz);
+    try std.testing.expect(std.c.chdir(tmpz) == 0);
+    defer _ = std.c.fchdir(old_fd);
+    for (table.entries, 0..) |e, ei| {
+        var text: []const u8 = "";
+        for (sources.sources) |s| {
+            if (std.mem.eql(u8, s.name, e.file)) text = s.text;
+        }
+        try std.testing.expect(text.len != 0);
+        const v = replay.Variant{ .inputs = &.{}, .outputs = &.{}, .meta = &.{}, .pipe = undefined, .file = e.file, .name = e.function, .text = text };
+        const got = try replay.Run.variantText(std.testing.allocator, &v);
+        if (ei == 0) std.debug.print("T3 got {d} bytes\n", .{got.len});
+        try std.testing.expectEqualStrings(text, got);
+    }
+    // the gdn site Prompt.init patches carries the patch string exactly once in the resolved text
+    const gs = for (table.entries) |e| {
+        if (std.mem.eql(u8, e.site, "q4_gdn@gdn|8")) break e;
+    } else return error.NoSite;
+    const from = "SO[((size_t(r) * NV + hv)";
+    var count: usize = 0;
+    for (sources.sources) |s| {
+        if (std.mem.eql(u8, s.name, gs.file)) count = std.mem.count(u8, s.text, from);
+    }
+    try std.testing.expectEqual(@as(usize, 1), count);
 }

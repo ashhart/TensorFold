@@ -152,6 +152,10 @@ test "the no-dump pack cache is ready only complete and matching, resolved from 
     // a cache interrupted between the two pack writes: not ready, the loader rebuilds
     try tmp.dir.deleteFile(io, "cache/pack_mlx.safetensors");
     try std.testing.expect(!try pio.packsReady(a, io, cache_dir, identity));
+    // an empty pack_mlx.safetensors is as bad as a missing one: Prompt.init would index nothing
+    try tmp.dir.writeFile(io, .{ .sub_path = "cache/pack_mlx.safetensors", .data = "" });
+    try std.testing.expect(!try pio.packsReady(a, io, cache_dir, identity));
+    try tmp.dir.deleteFile(io, "cache/pack_mlx.safetensors");
     // a pack built before the checkpoint changed: not ready
     _ = try pack.build(a, io, model_dir, cache_dir, null);
     const image = try tmp.dir.readFileAlloc(io, "model.safetensors", a, .limited(1 << 30));
