@@ -49,6 +49,7 @@ pub const Engine = struct {
     io: std.Io,
     ctx: *const cuda.Context,
     stream: cuda.Stream,
+    side: @import("cuda_forward.zig").Side = undefined, // the decode MoE's shared expert runs here
     k: kern.Kernels,
     w: weights.Weights,
     b: state.Buffers,
@@ -89,6 +90,12 @@ pub const Engine = struct {
         e.max_len = (slots + state.chunk_keys - 1) / state.chunk_keys * state.chunk_keys;
         e.stream = try cuda.Stream.init(ctx.d, true);
         errdefer e.stream.deinit();
+        e.side = .{ .s = try cuda.Stream.init(ctx.d, true), .fork = try cuda.Event.init(ctx.d, false), .join = try cuda.Event.init(ctx.d, false) };
+        errdefer {
+            e.side.s.deinit();
+            e.side.fork.deinit();
+            e.side.join.deinit();
+        }
         e.k = try kern.Kernels.load(gpa, io, ctx, triton_dir);
         errdefer e.k.deinit();
         const chunks = e.max_len / state.chunk_keys;
@@ -100,6 +107,7 @@ pub const Engine = struct {
         errdefer e.w.deinit();
         e.b = try state.Buffers.init(ctx.d, e.c, e.max_len, e.nch);
         errdefer e.b.deinit();
+        try e.b.initShared(e.ops(), e.c);
         if (e.segments > 1) e.seg = try segs.Segments.init(e, e.segments);
         errdefer if (e.seg) |*s| s.deinit();
         e.own = state.Seq.view(&e.b);
@@ -166,6 +174,9 @@ pub const Engine = struct {
         e.b.deinit();
         e.w.deinit();
         e.k.deinit();
+        e.side.s.deinit();
+        e.side.fork.deinit();
+        e.side.join.deinit();
         e.stream.deinit();
         e.gpa.destroy(e);
     }
@@ -227,6 +238,7 @@ pub const Engine = struct {
     pub fn forward(e: *const Engine, dump: ?*Dump) Forward {
         var f = Forward.init(e.c, &e.w, &e.b, e.ops(), e.max_len, e.nch, e.sampling != null);
         f.dump = dump;
+        if (dump == null and e.c.experts <= 128 and e.c.slots() <= 8) f.side = e.side; // tf_plan_routed's bounds
         return f;
     }
 

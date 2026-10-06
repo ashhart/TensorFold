@@ -6,6 +6,7 @@ const nemotron = @import("nemotron");
 const core = @import("core");
 const lanes = @import("lanes");
 const checks = @import("cuda_checks.zig");
+const kernel_checks = @import("cuda_kernel_checks.zig");
 const lanes_cli = @import("cuda_lanes.zig");
 const segments_cli = @import("cuda_segments.zig");
 const decode = nemotron.decode;
@@ -23,6 +24,7 @@ const usage =
     \\       tensorfold prefill MODEL PROMPTS.json NAME [--dump DIR] [--kernels DIR]
     \\       tensorfold rounds MODEL --tokens ID,... [--max-tokens N]   (GPU ms a serial and a window graph round)
     \\       tensorfold check-draws MODEL FIXTURES_DIR   (MTP draws against the lane fixtures)
+    \\       tensorfold check-kernels MODEL   (lane_gemv and the forked MoE against the kernels they replace, real weights)
     \\       tensorfold widths MODEL --tokens ID,... [--max-tokens N] [--eager] [sampling as run]
     \\                (every verify width 1-16 against serial decoding, a wrong draft every third window)
     \\       tensorfold lanes MODEL PROMPTS.json [--solo] [--max-tokens N] [--no-drafts] [sampling as run] [--report PATH]
@@ -125,7 +127,7 @@ pub fn main(init: std.process.Init) !u8 {
     const cmd = args[1];
     const bench = std.mem.eql(u8, cmd, "segments");
     const decoding = std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "lanes") or bench;
-    const mtp = std.mem.eql(u8, cmd, "check-weights") or std.mem.eql(u8, cmd, "rounds") or std.mem.eql(u8, cmd, "check-draws") or std.mem.eql(u8, cmd, "widths") or (decoding and opts.drafts);
+    const mtp = std.mem.eql(u8, cmd, "check-weights") or std.mem.eql(u8, cmd, "rounds") or std.mem.eql(u8, cmd, "check-draws") or std.mem.eql(u8, cmd, "widths") or std.mem.eql(u8, cmd, "check-kernels") or (decoding and opts.drafts);
     const widths = std.mem.eql(u8, cmd, "widths");
     const graphs = opts.graphs and (std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "rounds") or bench or widths);
     const sampling: ?lanes.Sampling = if ((std.mem.eql(u8, cmd, "run") or widths) and opts.sampling.temperature > 0) opts.sampling else null;
@@ -150,6 +152,10 @@ pub fn main(init: std.process.Init) !u8 {
     if (std.mem.eql(u8, cmd, "rounds")) return checks.rounds(engine, opts.tokens, opts.max_tokens);
     if (widths) return checks.widths(gpa, engine, opts.tokens, opts.max_tokens);
     if (std.mem.eql(u8, cmd, "check-draws") and rest.len == 1) return checks.draws(gpa, init.io, engine, rest[0]);
+    if (std.mem.eql(u8, cmd, "check-kernels")) {
+        try engine.reset();
+        return kernel_checks.check(gpa, engine);
+    }
     std.debug.print("{s}", .{usage});
     return 2;
 }

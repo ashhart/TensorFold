@@ -11,6 +11,9 @@ const Dump = @import("cuda_dump.zig").Dump;
 
 const Delta = enum { none, dense, moe };
 
+/// A second stream the shared expert runs on while the routed experts are chosen; fork and join are events.
+pub const Side = struct { s: cuda.Stream, fork: cuda.Event, join: cuda.Event };
+
 /// A prompt chunk between blocks: rows, position, residual stream, the delta its next norm adds, next Mamba and attention.
 pub const Walk = struct { rows: usize, pos: usize, x: u64 = 0, delta: Delta = .none, mj: usize = 0, aj: usize = 0 };
 
@@ -24,6 +27,7 @@ pub const Forward = struct {
     nch: usize,
     sampled: bool, // the target draws by the bound sequence's rule (sample.cu); false: torch.argmax
     dump: ?*Dump = null,
+    side: ?Side = null, // decode MoE layers run the shared expert here (null: one stream)
 
     pub fn init(c: Config, w: *const weights.Weights, b: *const state.Buffers, ops: kern.Ops, max_len: usize, nch: usize, sampled: bool) Forward {
         return .{ .c = c, .w = w, .b = b, .ops = ops, .tri = .{ .set = &ops.k.triton, .s = ops.s }, .max_len = max_len, .nch = nch, .sampled = sampled };
@@ -126,6 +130,7 @@ pub const Forward = struct {
         const o = f.ops;
         const ex = m.experts;
         const pairs = rows * c.slots();
+        if (!prompt) if (f.side) |sd| return f.forked(m, rows, sd);
         try f.tri.route(b.y, m.router, m.bias, b.part, b.pick, b.wts, rows, c.hidden, c.experts, c.top_k, c.routed_scaling, c.norm_topk);
         const tile: usize = if (prompt) 64 else 16;
         try o.plan(b.pick, pairs, ex.count, tile, b.plan);
@@ -137,6 +142,27 @@ pub const Forward = struct {
             try o.experts(true, b.y, c.hidden, c.slots(), ex.up, ex.dims / 64, ex.width / 32, b.plan, b.act, ex.width, items * (ex.width / 32));
             try o.experts(false, b.act, ex.width, 0, ex.down, ex.width / 64, ex.dims / 32, b.plan, b.ymoe, ex.dims, items * (ex.dims / 32));
         }
+    }
+
+    /// The decode MoE with its shared halves on the side stream: their pairs are fixed, so they need no routing.
+    fn forked(f: *const Forward, m: weights.MoE, rows: usize, sd: Side) !void {
+        const c = f.c;
+        const b = f.b;
+        const o = f.ops;
+        const ex = m.experts;
+        const so: kern.Ops = .{ .k = o.k, .s = sd.s };
+        try sd.fork.record(o.s);
+        try sd.s.wait(sd.fork);
+        const sp = b.sharedPlan(rows);
+        try so.experts(true, b.y, c.hidden, c.slots(), ex.up, ex.dims / 64, ex.width / 32, sp, b.act, ex.width, 2 * (ex.width / 32));
+        try so.experts(false, b.act, ex.width, 0, ex.down, ex.width / 64, ex.dims / 32, sp, b.ymoe, ex.dims, 2 * (ex.dims / 32));
+        try sd.join.record(sd.s);
+        try f.tri.route(b.y, m.router, m.bias, b.part, b.pick, b.wts, rows, c.hidden, c.experts, c.top_k, c.routed_scaling, c.norm_topk);
+        try o.planRouted(b.pick, rows, c.slots(), c.top_k, c.experts, 16, b.plan);
+        const items = kern.maxItems(rows * c.top_k, c.experts, 16);
+        try o.experts(true, b.y, c.hidden, c.slots(), ex.up, ex.dims / 64, ex.width / 32, b.plan, b.act, ex.width, items * (ex.width / 32));
+        try o.experts(false, b.act, ex.width, 0, ex.down, ex.width / 64, ex.dims / 32, b.plan, b.ymoe, ex.dims, items * (ex.dims / 32));
+        try o.s.wait(sd.join);
     }
 
     /// Engine.prefill_chunk: `rows` tokens in p_ids at positions pos..; commits them and samples the next token.
