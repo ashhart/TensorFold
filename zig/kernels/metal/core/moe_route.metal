@@ -7,33 +7,39 @@ using namespace metal;
 constant constexpr int ITERS = TF_K / 32;
 constant constexpr int PER = (TF_E + 31) / 32;
 
-// Logits [rows, E] = x W^T, a threadgroup a 4-expert block q (its 32 KB of packed bf16 weights staged in two halves).
-// Lane thrM * 4 + c of simdgroup s takes row 4 s + c: its sums over k = 32 it + 4 thrM + tm in order, then the tree over thrM.
+// Logits [rows, E] = x W^T. A threadgroup takes a 4-expert block q (tg.x) for four rows (tg.y): the block's packed bf16
+// weights and the rows' x staged a quarter of K at a time. Lane thrM * 4 + c of simdgroup 0 takes row 4 tg.y + c: its
+// sums over k = 32 it + 4 thrM + tm in order, then the tree over thrM (the one-row kernel's order).
 [[kernel]] void tf_route_logits(const device bfloat* X [[buffer(0)]], const device uint4* RP [[buffer(1)]],
                                 constant int& rows [[buffer(2)]], device float* OUT [[buffer(3)]],
-                                uint q [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]],
+                                uint2 tg [[threadgroup_position_in_grid]], uint2 tpos [[thread_position_in_threadgroup]],
                                 uint lane [[thread_index_in_simdgroup]], uint s [[simdgroup_index_in_threadgroup]]) {
-  constexpr int HALF = ITERS / 2;
-  threadgroup uint4 w[8 * HALF * 2];
+  constexpr int QI = ITERS / 4; // iterations a quarter
+  const uint t = tpos.x;
+  threadgroup uint4 w[8 * QI * 2];
+  threadgroup bfloat xs[4][32 * QI];
+  const int q = int(tg.x), r0 = int(tg.y) * 4;
   const device uint4* src = RP + size_t(q) * 8 * ITERS * 2;
   const int thrM = int(lane) / 4, c = int(lane) % 4;
-  const int r = int(s) * 4 + c;
-  const bool active = int(s) * 4 < rows;
-  const device bfloat* x = X + size_t(min(r, rows - 1)) * TF_K;
+  const int r = r0 + c;
   float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-  for (int part = 0; part < 2; part++) {
+  for (int part = 0; part < 4; part++) {
     if (part > 0) threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (int i = int(t); i < 8 * HALF * 2; i += 256) { // (m, it in this half, h) of the block's (m, it, h) layout
-      const int m = i / (HALF * 2), rest = i % (HALF * 2);
-      w[i] = src[(m * ITERS + part * HALF) * 2 + rest];
+    for (int i = int(t); i < 8 * QI * 2; i += 256) { // (m, it in this quarter, h) of the block's (m, it, h) layout
+      const int m = i / (QI * 2), rest = i % (QI * 2);
+      w[i] = src[(m * ITERS + part * QI) * 2 + rest];
+    }
+    for (int i = int(t); i < 4 * 32 * QI / 4; i += 256) { // four bf16 of a row's quarter a thread
+      const int rr = i / (8 * QI), k = (i % (8 * QI)) * 4;
+      const device bfloat* xr = X + size_t(min(r0 + rr, rows - 1)) * TF_K + part * 32 * QI + k;
+      xs[rr][k] = xr[0]; xs[rr][k + 1] = xr[1]; xs[rr][k + 2] = xr[2]; xs[rr][k + 3] = xr[3];
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (!active) continue;
-    for (int hi = 0; hi < HALF; hi++) {
-      const int it = part * HALF + hi;
+    if (s != 0) continue;
+    for (int hi = 0; hi < QI; hi++) {
       float inter[4][4];
       for (int h = 0; h < 2; h++) {
-        const uint4 v = w[(thrM * HALF + hi) * 2 + h];
+        const uint4 v = w[(thrM * QI + hi) * 2 + h];
         const uint words[4] = {v.x, v.y, v.z, v.w};
         for (int j = 0; j < 4; j++) {
           const int e = h * 8 + j * 2;
@@ -41,14 +47,14 @@ constant constexpr int PER = (TF_E + 31) / 32;
           inter[(e + 1) / 4][(e + 1) % 4] = as_type<float>(words[j] & 0xffff0000u);
         }
       }
-      const int bm = 4 * thrM + 32 * it;
+      const int bm = 4 * thrM + 32 * hi;
       float vc[4];
-      for (int tm = 0; tm < 4; tm++) vc[tm] = float(x[bm + tm]);
+      for (int tm = 0; tm < 4; tm++) vc[tm] = float(xs[c][bm + tm]);
       for (int tm = 0; tm < 4; tm++)
         for (int tn = 0; tn < 4; tn++) acc[tn] += vc[tm] * inter[tm][tn];
     }
   }
-  if (!active) return;
+  if (s != 0) return;
   for (int tn = 0; tn < 4; tn++) {
     float v = acc[tn];
     for (ushort sm = 4; sm >= 1; sm >>= 1) v += simd_shuffle_down(v, 4 * sm);

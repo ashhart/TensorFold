@@ -25,7 +25,7 @@ pub fn logits(e: mtl.ComputeEncoder, pipe: mtl.Pipeline, s: Shape, x: anytype, p
     bind(e, 1, packed_router);
     e.setValue(@as(i32, @intCast(rows)), 2);
     bind(e, 3, out);
-    e.dispatchGroups(mtl.Size.of(s.experts / 4, 1, 1), mtl.Size.of(256, 1, 1));
+    e.dispatchGroups(mtl.Size.of(s.experts / 4, (rows + 3) / 4, 1), mtl.Size.of(256, 1, 1));
 }
 
 pub const Args = extern struct { rows: i32, lo: i32, hi: i32, scale: f32 };
