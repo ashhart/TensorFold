@@ -11,7 +11,9 @@
 //! GLM_PROFILE=D,D (after the replies: a knock-out profile of a round at each depth, GLM_PROFILE_REPS times),
 //! GLM_LOGITS=PREFIX (write each prompt's last-row logits, bf16, to PREFIX.NAME.bf16 at its first depth's first run),
 //! GLM_LOGITS_VS=PREFIX (compare them with such a file: the largest difference against the bf16 step at the top logit),
-//! GLM_PROMPT_PROFILE=REPS (after the replies: each prompt's first chunk by class, each left out or alone).
+//! GLM_PROMPT_PROFILE=REPS (after the replies: each prompt's first chunk by class, each left out or alone),
+//! GLM_TRACE_LAST=PREFIX (each prompt's last row at every capture point, bf16, to PREFIX.NAME.trace: embedding, then
+//! each layer's attention input and output and MLP input and output, then the final norm).
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -24,10 +26,13 @@ const Collect = struct {
     checks: usize = 0,
     logits_from: []const u16 = &.{}, // the engine's logits row, copied into `logits` once the prompt is done
     logits: []u16 = &.{},
+    trace_from: []const u8 = &.{}, // the engine's last-row trace, copied into `trace` likewise
+    trace: []u8 = &.{},
 
     fn prefilled(ctx: *anyopaque) void {
         const c: *Collect = @ptrCast(@alignCast(ctx));
         if (c.logits_from.len > 0) c.logits = c.gpa.dupe(u16, c.logits_from) catch &.{};
+        if (c.trace_from.len > 0) c.trace = c.gpa.dupe(u8, c.trace_from) catch &.{};
     }
     fn tokens(ctx: *anyopaque, t: []const u32) bool {
         const c: *Collect = @ptrCast(@alignCast(ctx));
@@ -139,6 +144,9 @@ pub fn main(init: std.process.Init) !void {
         const f = try mtl.MappedFile.open(path);
         break :blk try std.json.parseFromSliceLeaky(std.json.Value, arena, f.bytes[0..f.size], .{});
     } else null;
+    const trace_prefix: ?[*:0]const u8 = std.c.getenv("GLM_TRACE_LAST");
+    const trace_bytes = (2 + 4 * @as(usize, e.c.run)) * e.c.hidden * 2;
+    if (trace_prefix != null) e.trace_last = try e.arena.buffer(trace_bytes);
     var saved: std.ArrayList(u8) = .empty;
     try saved.appendSlice(arena, "{");
     for (doc.object.get("prompts").?.array.items) |p| {
@@ -150,6 +158,8 @@ pub fn main(init: std.process.Init) !void {
             var col: Collect = .{ .gpa = gpa };
             defer col.toks.deinit(gpa);
             defer gpa.free(col.logits);
+            defer gpa.free(col.trace);
+            if (trace_prefix != null and run == 0 and d == depths.items[0]) col.trace_from = e.trace_last.?.addr()[0..trace_bytes];
             const want_logits = run == 0 and d == depths.items[0] and (std.c.getenv("GLM_LOGITS") != null or std.c.getenv("GLM_LOGITS_VS") != null);
             if (want_logits) col.logits_from = @as([*]const u16, @ptrCast(@alignCast(e.sc.logits.addr())))[0..e.c.vocab];
             const r = try e.generate(ids, max, eos, d, .{ .ctx = &col, .prefilled = Collect.prefilled, .tokens = Collect.tokens, .cancelled = Collect.cancelled });
@@ -171,6 +181,12 @@ pub fn main(init: std.process.Init) !void {
                     std.debug.print("  vs GLM_VS: first token {s}, first difference at token {d} of {d}\n", .{ if (at == 0) "DIFFERS" else "equal", at, @min(want.len, toks.len) });
                 } else std.debug.print("  vs GLM_VS: all {d} tokens equal\n", .{toks.len});
             };
+            if (col.trace.len > 0) {
+                const path = try std.fmt.allocPrintSentinel(arena, "{s}.{s}.trace", .{ std.mem.span(trace_prefix.?), name }, 0);
+                const file = std.c.fopen(path, "wb") orelse return error.OpenFailed;
+                defer _ = std.c.fclose(file);
+                if (std.c.fwrite(col.trace.ptr, 1, col.trace.len, file) != col.trace.len) return error.WriteFailed;
+            }
             if (want_logits and col.logits.len == 0) return error.NoLogits;
             if (want_logits) if (std.c.getenv("GLM_LOGITS")) |prefix| {
                 const path = try std.fmt.allocPrintSentinel(arena, "{s}.{s}.bf16", .{ prefix, name }, 0);

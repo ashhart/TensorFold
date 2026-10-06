@@ -62,6 +62,7 @@ pub const Engine = struct {
     prompt_ids: Ref,
     pr: ?prompt_mod.Prompt, // prompt chunks on the tensor units (null: every prompt row in 16-row decode windows)
     ep: ?*ep_mod.Ep, // expert parallel with a peer Mac (GLM_EP names this Mac's link settings)
+    trace_last: ?Ref = null, // a prompt's last row at every capture point (each layer's sublayers), for a path comparison
     ep_arena: std.heap.ArenaAllocator, // the link settings, alive as long as the link
     residency: ?mtl.ResidencySet = null,
     load_seconds: f64 = 0,
@@ -93,6 +94,7 @@ pub const Engine = struct {
         e.committed = 0;
         e.ep = null;
         e.pr = null;
+        e.trace_last = null;
         e.ep_arena = .init(gpa);
         errdefer e.ep_arena.deinit();
         e.device = try mtl.Device.init();
@@ -514,6 +516,12 @@ pub const Engine = struct {
             const last = at + n == P;
             const absorb = if (last) n - 1 else n;
             const b = e.begin();
+            if (last and e.trace_last != null) {
+                x.dump = e.trace_last;
+                x.dump_at = 0;
+                x.dump_row = n - 1;
+            }
+            defer x.dump = null;
             if (chunk) {
                 const pr = &e.pr.?;
                 var px = x;

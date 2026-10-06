@@ -344,6 +344,8 @@ pub fn backbone(p: *const Prompt, x: *fwd.Ctx, e: mtl.ComputeEncoder, ids: Ref, 
     const s = x.skip; // classes a profile leaves out
     const Class = fwd.Class;
     if (s & Class.ends == 0) fwd.embed(x, e, ids, M);
+    const plane = @as(usize, M) * c.hidden * 2; // a trace's capture points: the decode backbone's
+    fwd.snap(x, e, ss.h, plane);
     var pending = false;
     var ki: usize = 0;
     var mi: usize = 0;
@@ -351,6 +353,7 @@ pub fn backbone(p: *const Prompt, x: *fwd.Ctx, e: mtl.ComputeEncoder, ids: Ref, 
         const L = &x.w.layers[li];
         const hcs = L.hc.?;
         if (s & Class.hc == 0) fwd.boundary(x, e, M, pending, hcs[0], L.in_norm);
+        fwd.snap(x, e, ss.normed, plane);
         switch (L.attn) {
             .kda => |*a| {
                 if (s & Class.kda == 0) {
@@ -365,7 +368,9 @@ pub fn backbone(p: *const Prompt, x: *fwd.Ctx, e: mtl.ComputeEncoder, ids: Ref, 
                 mi += 1;
             },
         }
+        fwd.snap(x, e, ss.branch, plane);
         if (s & Class.hc == 0) fwd.boundary(x, e, M, true, hcs[1], L.post_norm);
+        fwd.snap(x, e, ss.normed, plane);
         switch (L.mlp) {
             .dense => |*d| if (s & Class.dense == 0) {
                 qmm(p, e, ss.normed, d.gate_up, p.gu, M);
@@ -374,6 +379,7 @@ pub fn backbone(p: *const Prompt, x: *fwd.Ctx, e: mtl.ComputeEncoder, ids: Ref, 
             },
             .moe => |*m| moe(p, x, e, m, ss.normed, M, if (c.byRows()) x.ep else null),
         }
+        fwd.snap(x, e, ss.branch, plane);
         pending = true;
     }
     if (s & Class.hc == 0) fwd.boundary(x, e, M, true, null, null);
@@ -383,6 +389,7 @@ pub fn backbone(p: *const Prompt, x: *fwd.Ctx, e: mtl.ComputeEncoder, ids: Ref, 
     e.setValue([2]u32{ c.hidden, M }, 2);
     e.dispatchThreads(size(c.hidden, M, 1), size(256, 1, 1));
     fwd.rms(x, e, ss.raw, x.w.norm, ss.hidden, M, c.hidden, c.hidden, c.hidden, c.eps);
+    fwd.snap(x, e, ss.hidden, plane);
 }
 
 /// The MTP head over M prompt rows (`h` with their next tokens) at head positions pos..: the rows enter its cache only.

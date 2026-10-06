@@ -20,6 +20,7 @@ pub const Ctx = struct {
     xi: u1 = 0, // which stream buffer holds the streams now
     dump: ?Ref = null, // a capture: each sublayer's input and output appended here (glm_ref.py's order)
     dump_at: usize = 0,
+    dump_row: ?u32 = null, // a one-row trace: each capture point appends only this row
     ep: ?*Ep = null, // expert parallel: this Mac computes its routed experts' picks and swaps them with the peer's
     skip: u32 = 0, // a profile's knock-outs: launch classes left out (Class bits)
     pskip: u32 = 0, // a profile's knock-outs by launch (Part bits)
@@ -59,11 +60,14 @@ pub const Class = struct {
 };
 
 /// Append `bytes` of `src` to the capture (a u32 copy).
-pub fn snap(x: *Ctx, e: mtl.ComputeEncoder, src: Ref, bytes: usize) void {
+pub fn snap(x: *Ctx, e: mtl.ComputeEncoder, src: Ref, plane: usize) void {
     const d = x.dump orelse return;
+    const row_bytes = @as(usize, x.c.hidden) * 2; // every capture point is a [rows, hidden] bf16 plane
+    const from = if (x.dump_row) |r| src.at(r * row_bytes) else src;
+    const bytes = if (x.dump_row != null) row_bytes else plane;
     const n: u32 = @intCast(bytes / 4);
     e.setPipeline(x.k.copy_u32);
-    bind(e, 0, .{ src, d.at(x.dump_at) });
+    bind(e, 0, .{ from, d.at(x.dump_at) });
     e.setValue(n, 2);
     e.dispatchThreads(size(n, 1, 1), size(256, 1, 1));
     x.dump_at += bytes;
