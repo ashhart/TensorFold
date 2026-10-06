@@ -77,7 +77,7 @@ pub const Metrics = struct {
             return;
         };
         const owned = m.gpa.dupe(u8, key) catch return;
-        m.requests.append(m.gpa, .{ .key = owned, .status = status, .count = 1 }) catch {};
+        m.requests.append(m.gpa, .{ .key = owned, .status = status, .count = 1 }) catch m.gpa.free(owned);
     }
 
     pub fn disconnected(m: *Metrics, io: std.Io) void {
@@ -283,4 +283,30 @@ test "metrics snapshot allocation failure releases the mutex" {
     try m.render(io, &out.writer, stub.engine(), 4096);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "requests_total{key=\"client\",status=\"200\"} 2") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "prompt_tokens_total 10") != null);
+}
+
+test "request counter append failure frees its label" {
+    var bytes: [1024]u8 = undefined;
+    var buffer = std.heap.FixedBufferAllocator.init(&bytes);
+    var failing = std.testing.FailingAllocator.init(buffer.allocator(), .{ .fail_index = 1 });
+    const gpa = failing.allocator();
+    var m: Metrics = .{ .gpa = gpa };
+    defer {
+        for (m.requests.items) |r| gpa.free(r.key);
+        m.requests.deinit(gpa);
+    }
+    m.httpRequest(std.testing.io, "client", 200);
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 6), failing.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), m.requests.items.len);
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+
+    failing.fail_index = std.math.maxInt(usize);
+    m.httpRequest(std.testing.io, "client", 200);
+    try std.testing.expectEqual(@as(usize, 1), m.requests.items.len);
+    try std.testing.expectEqualStrings("client", m.requests.items[0].key);
+    const allocations = failing.allocations;
+    m.httpRequest(std.testing.io, "client", 200);
+    try std.testing.expectEqual(@as(u64, 2), m.requests.items[0].count);
+    try std.testing.expectEqual(allocations, failing.allocations);
 }
