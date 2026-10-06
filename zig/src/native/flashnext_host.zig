@@ -210,7 +210,7 @@ pub const Host = struct {
             h.unlock();
             if (idle and h.cache != null) { // the next turn's save finds its pages touched, unless a request comes first
                 const t0 = h.now();
-                const got = h.eng.snap_pool.ready(h.eng.r.device, fx.NEXT_TURN, .{ .ctx = h, .check = waiting });
+                const got = h.eng.snap_pool.ready(h.eng.r.device, fx.NEXT_TURN, .{ .ctx = h, .check = waiting }, h.cache.?.room());
                 if (got.cap > 0) std.log.info("prompt cache: readied {d} of {d} MiB for the next save in {d:.1} ms", .{ got.touched >> 20, got.cap >> 20, ms(h.now() - t0) });
             }
         }
@@ -348,7 +348,23 @@ fn ms(ns: i96) f64 {
 /// The prompt cache's copies of the engine's state (snapshot.zig), on the engine's thread.
 const Snaps = struct {
     fn bytes(_: *anyopaque, at: u32) u64 {
-        return snap.bytes(at);
+        return snap.capacity(snap.bytes(at)); // a new buffer's size; a free one in the pool may take the state instead
+    }
+    fn charged(_: *anyopaque, saved: pc.Saved) u64 {
+        const k: *Kept = @ptrCast(@alignCast(saved));
+        return k.st.cap;
+    }
+    fn spare(ptr: *anyopaque) u64 {
+        const h: *Host = @ptrCast(@alignCast(ptr));
+        return h.eng.snap_pool.spare();
+    }
+    fn trim(ptr: *anyopaque, room: u64) void {
+        const h: *Host = @ptrCast(@alignCast(ptr));
+        h.eng.snap_pool.trim(room);
+    }
+    fn reuses(ptr: *anyopaque, at: u32) bool {
+        const h: *Host = @ptrCast(@alignCast(ptr));
+        return h.eng.snap_pool.fits(snap.bytes(at));
     }
     /// A kept state and its name on both Macs (speed-up mode's rank 1 keeps its own under the same name).
     const Kept = struct { st: *snap.State, key: u64 };
@@ -390,13 +406,14 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: []const u8, windo
         std.log.err("flash next: warm-up failed: {s}", .{@errorName(err)});
         return err;
     };
+    const budget = cacheBudget(eng, cache_gib);
+    eng.peer_budget = budget; // rank 1: its kept states and free buffers stay inside the same budget
     const follower: ?std.Thread = if (eng.followsPeer()) try std.Thread.spawn(.{}, follow, .{eng}) else null; // rank 1
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     const limit: i64 = tf.flashnext_replay.CAP - fx.MARGIN;
     h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .info_ = .{ .name = "flashnext-zig", .lanes = 1, .context_window = @intCast(if (window > 0) @min(window, limit) else limit) } };
-    const budget = cacheBudget(eng, cache_gib);
-    if (!eng.followsPeer() and budget > 0) h.cache = pc.Store.init(gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, .{ .lookahead = 1 }, budget);
+    if (!eng.followsPeer() and budget > 0) h.cache = pc.Store.init(gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .charged = Snaps.charged, .spare = Snaps.spare, .trim = Snaps.trim, .reuses = Snaps.reuses } }, .{ .lookahead = 1 }, budget);
     std.log.info("prompt cache: {d:.1} GiB for kept prompt states{s}", .{ @as(f64, @floatFromInt(if (h.cache != null) budget else 0)) / (1 << 30), if (eng.followsPeer()) " (rank 1 keeps its halves of rank 0's)" else if (eng.r.tp != null) " (rank 1 mirrors them)" else "" });
     try h.start();
     return h;

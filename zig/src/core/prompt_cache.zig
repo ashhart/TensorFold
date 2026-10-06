@@ -11,13 +11,21 @@ pub const Snapshots = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        /// Bytes `save` takes at `at` tokens (checked against the budget before any copy).
+        /// The most new storage `save` takes at `at` tokens (checked against the budget before any copy).
         bytes: *const fn (ptr: *anyopaque, at: u32) u64,
         /// Copy the live state after `at` prompt tokens into new storage; `owner` is the lane core's stream (null: one stream).
         save: *const fn (ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!Saved,
         /// Make the live state `saved`'s: the next prompt chunk starts at its position.
         restore: *const fn (ptr: *anyopaque, owner: ?*anyopaque, saved: Saved) anyerror!void,
         drop: *const fn (ptr: *anyopaque, saved: Saved) void,
+        /// The storage a kept state holds: new storage up to `bytes`, or the spare storage it took (null: `bytes`).
+        charged: ?*const fn (ptr: *anyopaque, saved: Saved) u64 = null,
+        /// Free storage the family keeps for later saves, inside the budget (null: none).
+        spare: ?*const fn (ptr: *anyopaque) u64 = null,
+        /// Free spare storage until at most `room` bytes stay spare.
+        trim: ?*const fn (ptr: *anyopaque, room: u64) void = null,
+        /// Whether a save at `at` would take spare storage (no new storage).
+        reuses: ?*const fn (ptr: *anyopaque, at: u32) bool = null,
     };
 };
 
@@ -82,6 +90,16 @@ pub const Store = struct {
         const e = s.entries.orderedRemove(i);
         s.held -= e.bytes;
         s.free(e);
+    }
+
+    /// The family's free storage kept for later saves.
+    pub fn spare(s: *const Store) u64 {
+        return if (s.family.vtable.spare) |f| f(s.family.ptr) else 0;
+    }
+
+    /// What the budget leaves past the kept states and the spare storage: a family readies storage only inside it.
+    pub fn room(s: *const Store) u64 {
+        return s.budget -| s.held -| s.spare();
     }
 
     /// Whether a state at `at` may start or end a prompt pass: anywhere, or a chunk start for planned families.
@@ -196,10 +214,18 @@ pub const Store = struct {
             note("kept nothing at {d} tokens: {d} MiB passes the {d} MiB budget", .{ at, bytes >> 20, s.budget >> 20 });
             return false;
         }
-        while (s.held + bytes > s.budget) {
-            s.remove(s.victim());
+        while (s.entries.items.len > 0) { // room: spare storage this save can take, else new storage inside the budget
+            if (s.family.vtable.reuses) |f| if (f(s.family.ptr, at)) break;
+            const free_ = s.spare();
+            if (s.held + free_ + bytes <= s.budget) break;
+            if (free_ > 0) {
+                if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| s.held -| bytes); // spare that cannot take this state goes before any state
+                if (s.spare() < free_) continue;
+            }
+            s.remove(s.victim()); // its storage may come back spare and take this state
             s.counts.evicted += 1;
         }
+        if (s.entries.items.len == 0) if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| bytes);
         const e = s.gpa.create(Entry) catch return s.fail(at, error.OutOfMemory);
         const tokens = s.gpa.dupe(u32, prompt[0..n]) catch {
             s.gpa.destroy(e);
@@ -216,20 +242,22 @@ pub const Store = struct {
             s.gpa.destroy(e);
             return s.fail(at, err);
         };
-        e.* = .{ .tokens = tokens, .at = at, .saved = saved, .bytes = bytes, .born = @intCast(prompt.len), .used = s.clock, .last = last };
+        const charged = if (s.family.vtable.charged) |f| f(s.family.ptr, saved) else bytes;
+        e.* = .{ .tokens = tokens, .at = at, .saved = saved, .bytes = charged, .born = @intCast(prompt.len), .used = s.clock, .last = last };
         s.entries.append(s.gpa, e) catch {
             s.free(e);
             return s.fail(at, error.OutOfMemory);
         };
-        s.held += bytes;
+        s.held += charged;
         s.counts.kept += 1;
+        if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| s.held); // spare storage only inside what the budget leaves
         return true;
     }
 
     /// One log line after a prompt pass: where it resumed, how many states it kept, and what the store holds.
     pub fn report(s: *const Store, prompt: usize, from: u32, kept: u64) void {
         if (@import("builtin").is_test) return;
-        std.log.info("prompt cache: {d} tokens, resumed at {d}, kept {d}; {d} states, {d} of {d} MiB (hits {d}, misses {d}, evicted {d}, refused {d}, failed {d})", .{ prompt, from, kept, s.entries.items.len, s.held >> 20, s.budget >> 20, s.counts.hits, s.counts.misses, s.counts.evicted, s.counts.refused, s.counts.failed });
+        std.log.info("prompt cache: {d} tokens, resumed at {d}, kept {d}; {d} states, {d} MiB and {d} MiB spare of {d} MiB (hits {d}, misses {d}, evicted {d}, refused {d}, failed {d})", .{ prompt, from, kept, s.entries.items.len, s.held >> 20, s.spare() >> 20, s.budget >> 20, s.counts.hits, s.counts.misses, s.counts.evicted, s.counts.refused, s.counts.failed });
     }
 
     fn fail(s: *Store, at: u32, err: anyerror) bool {
@@ -279,11 +307,41 @@ const Fake = struct {
     fail_save: bool = false,
     fail_restore: bool = false,
     live: usize = 0,
+    spare_bytes: u64 = 0,
 
     const State = struct { at: u32, sum: u64 };
 
     fn snapshots(f: *Fake) Snapshots {
         return .{ .ptr = f, .vtable = &.{ .bytes = bytesFn, .save = saveFn, .restore = restoreFn, .drop = dropFn } };
+    }
+    /// A pool-like family: a kept state holds 10 bytes under `bytes`, and a dropped one's storage stays spare.
+    fn pooled(f: *Fake) Snapshots {
+        return .{ .ptr = f, .vtable = &.{ .bytes = bytesFn, .save = savePooledFn, .restore = restoreFn, .drop = dropSpareFn, .charged = chargedFn, .spare = spareFn, .trim = trimFn, .reuses = reusesFn } };
+    }
+    fn reusesFn(ptr: *anyopaque, at: u32) bool {
+        return of(ptr).spare_bytes >= 90 + at;
+    }
+    fn savePooledFn(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!Saved {
+        const st = try saveFn(ptr, owner, at);
+        const f = of(ptr);
+        if (f.spare_bytes >= 90 + at) f.spare_bytes -= 90 + at; // the spare storage took it
+        return st;
+    }
+    fn chargedFn(_: *anyopaque, saved: Saved) u64 {
+        const st: *State = @ptrCast(@alignCast(saved));
+        return 90 + st.at;
+    }
+    fn dropSpareFn(ptr: *anyopaque, saved: Saved) void {
+        const st: *State = @ptrCast(@alignCast(saved));
+        of(ptr).spare_bytes += 90 + st.at;
+        dropFn(ptr, saved);
+    }
+    fn spareFn(ptr: *anyopaque) u64 {
+        return of(ptr).spare_bytes;
+    }
+    fn trimFn(ptr: *anyopaque, room_: u64) void {
+        const f = of(ptr);
+        f.spare_bytes = @min(f.spare_bytes, room_);
     }
     fn of(ptr: *anyopaque) *Fake {
         return @ptrCast(@alignCast(ptr));
@@ -315,7 +373,7 @@ const Fake = struct {
 
     /// A prompt pass from `plan.from`, keeping at each mark; returns the sum a fresh pass would give.
     fn pass(f: *Fake, s: *Store, prompt: []const u32, plan: Plan) u64 {
-        if (plan.from == 0) f.* = .{ .gpa = f.gpa, .fail_save = f.fail_save, .fail_restore = f.fail_restore, .live = f.live };
+        if (plan.from == 0) f.* = .{ .gpa = f.gpa, .fail_save = f.fail_save, .fail_restore = f.fail_restore, .live = f.live, .spare_bytes = f.spare_bytes };
         var mi: usize = 0;
         for (prompt[plan.from..]) |t| {
             f.sum = f.sum *% 31 +% t;
@@ -478,4 +536,31 @@ test "prompts under min_prompt keep nothing (their extra prompt call would cost 
     try std.testing.expectEqualSlices(u32, &.{8}, q.marks);
     try std.testing.expectEqual(fresh(&long), f.pass(&s, &long, q));
     try std.testing.expectEqual(@as(u32, 8), s.find(&.{ 1, 2, 3, 4, 5, 9, 7, 7, 9, 9, 4 }, &.{}).?.at);
+}
+
+test "kept states charge their real storage, a save takes spare storage first, and spare stays inside the budget" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{ .gpa = gpa };
+    var s = Store.init(gpa, f.pooled(), .{ .min_prompt = 0 }, 330); // new storage 100 + at, a kept state 90 + at
+    defer s.deinit();
+    const t1 = [_]u32{ 1, 2, 3, 4, 5, 6 };
+    _ = f.pass(&s, &t1, try s.begin(a, &t1, 4, &.{}, &.{}, null));
+    try std.testing.expectEqual(@as(u64, 94), s.held);
+    f.spare_bytes = 120; // a buffer readied while idle
+    try std.testing.expectEqual(@as(u64, 116), s.room());
+    const other = [_]u32{ 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5 };
+    _ = f.pass(&s, &other, try s.begin(a, &other, 10, &.{}, &.{}, null)); // takes the readied buffer: nothing evicted
+    try std.testing.expectEqual(@as(u64, 194), s.held);
+    try std.testing.expectEqual(@as(u64, 20), s.spare());
+    try std.testing.expectEqual(@as(u64, 0), s.counts.evicted);
+    var t2: [102]u32 = undefined;
+    for (&t2, 1..) |*t, i| t.* = @intCast(i);
+    _ = f.pass(&s, &t2, try s.begin(a, &t2, 101, &.{}, &.{}, null)); // resumes t1's; 201 new: the spare shrinks, then `other` goes
+    try std.testing.expectEqual(@as(u64, 1), s.counts.evicted);
+    try std.testing.expectEqual(@as(u64, 94 + 191), s.held);
+    try std.testing.expect(s.held + s.spare() <= s.budget);
+    try std.testing.expectEqual(s.entries.items.len, f.live);
 }

@@ -7,6 +7,8 @@ const segments = @import("../../core/segments.zig");
 const snapshot = @import("snapshot.zig");
 const CallLog = @import("call_log.zig").CallLog;
 const tp_settings = @import("tp_settings.zig");
+const follow_mod = @import("follow.zig");
+const marks_mod = @import("marks.zig");
 const Allocator = std.mem.Allocator;
 
 const D = fz.D;
@@ -44,8 +46,7 @@ pub const MARGIN = 2 * MAXR;
 /// Bytes a conversation's next kept state usually adds (about 4k tokens of reply and tool output): the pool readies that much more.
 pub const NEXT_TURN = 4096 * 13 * 2304;
 
-/// A kept prompt state's name on both Macs of speed-up mode: the hash of the tokens through its lookahead token
-/// (the state at `at` also holds the MTP keys made with token `at`, so callers pass prompt[0 .. at + 1]).
+/// A kept state's name on both Macs: the hash of its tokens through the lookahead token (callers pass prompt[0 .. at + 1]).
 pub fn keyOf(tokens: []const u32) u64 {
     return std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(tokens));
 }
@@ -110,6 +111,8 @@ pub const Engine = struct {
     passed: ?Passed = null, // the mark a prompt call ran past, while the prompt cache keeps the state there
     peer_drops: std.ArrayList(u64) = .empty, // speed-up rank 0: kept states rank 1 drops with the next request
     peer_kept: std.AutoHashMapUnmanaged(u64, *snapshot.State) = .empty, // speed-up rank 1: its halves of rank 0's kept states
+    peer_budget: u64 = 0, // speed-up rank 1: the budget its kept states' buffers and free ones stay inside
+    peer_held: u64 = 0, // speed-up rank 1: its kept states' buffers
     // while copies land worse than the head's drafts, only 8-token matches the head agrees with are copied
     wids: Buf,
     rows_w: [MAXR + 1]Buf,
@@ -141,6 +144,8 @@ pub const Engine = struct {
         e.handoff_ns = 0;
         e.peer_drops = .empty;
         e.peer_kept = .empty;
+        e.peer_budget = 0;
+        e.peer_held = 0;
         e.arena_state = std.heap.ArenaAllocator.init(gpa);
         errdefer e.arena_state.deinit();
         const arena = e.arena_state.allocator();
@@ -443,13 +448,6 @@ pub const Engine = struct {
         return if (e.segments) segments.next(left, e.pr.step, SEG_MIN) else .{ .rows = @min(e.pr.step, left), .parts = 1 };
     }
 
-    /// The prompt cache keeps the state at a mark a call ran past (snapshot.save reads it through e.passed).
-    fn keepPassed(e: *Engine, p: Passed, out: Out) void {
-        e.passed = p;
-        defer e.passed = null;
-        if (out.marked) |f| f(out.ctx, p.at);
-    }
-
     fn isEos(eos: []const u32, tok: u32) bool {
         return std.mem.indexOfScalar(u32, eos, tok) != null;
     }
@@ -499,28 +497,22 @@ pub const Engine = struct {
         var pick: u32 = 0;
         var at: usize = from;
         var last_n: usize = 1;
-        var mi: usize = 0; // the next mark
+        var dr: marks_mod.Driver = .{ .marks = marks };
         const ps = [2]*Prompt{ e.pr, e.pr2 };
-        var late: [fz.MARKS]Passed = undefined; // the last call's passed marks, kept once the first token is out
-        var n_late: usize = 0;
-        var late_pair: ?struct { rows: [fz.MARKS]u32, n: usize, rows0: usize, start: usize } = null; // their crossing (speed-up)
         var calls: CallLog = .{};
         while (at < prompt.len) {
             if (try e.agree(out.cancelled(out.ctx))) return .{ .reason = .cancelled };
-            const to_mark = (if (mi < marks.len) marks[mi] else prompt.len) - at;
             const t_call = std.c.mach_absolute_time();
             const g_call = m.gpu_seconds;
             if (r.tp) |tp| { // speed-up mode: the call's rows split across the two Macs, running on past up to MARKS marks
                 const pair_taps = e.mark_taps and m.marks != null;
-                var call = segments.next(if (pair_taps) prompt.len - at else to_mark, e.pr.step, e.pair_min);
+                var call = segments.next(if (pair_taps) prompt.len - at else dr.toNext(at, prompt.len), e.pr.step, e.pair_min);
                 var passed: [fz.MARKS]u32 = undefined;
                 var n_passed: usize = 0;
-                while (call.parts == 2 and pair_taps and mi + n_passed < marks.len and marks[mi + n_passed] < at + call.rows) : (n_passed += 1) {
-                    if (n_passed == fz.MARKS) {
-                        call = segments.next(marks[mi + n_passed] - at, e.pr.step, e.pair_min);
-                        break;
-                    }
-                    passed[n_passed] = @intCast(marks[mi + n_passed] - at);
+                if (call.parts == 2 and pair_taps) {
+                    const in_ = dr.inside(at, call.rows, &passed);
+                    n_passed = in_.n;
+                    if (in_.cut) |cut| call = segments.next(cut, e.pr.step, e.pair_min);
                 }
                 if (call.parts == 2) {
                     const hist0 = m.ple.hist;
@@ -534,43 +526,27 @@ pub const Engine = struct {
                     const mine = span[tp.rank];
                     try e.pr.mtpKeys(m, mine[0], prompt[mine[0] + 1 .. mine[0] + 1 + mine[1]], e.pr.last);
                     try e.pr.pairMtp(m, tp, mine, span[1 - tp.rank]);
-                    const rows0 = segments.rows(call.rows, 2, 0);
-                    const start = segments.start(call.rows, 2, tp.rank);
-                    if (at + call.rows == prompt.len and n_passed > 0) { // the prompt's last call: its marks cross after the first token
-                        late_pair = .{ .rows = passed, .n = n_passed, .rows0 = rows0, .start = start };
-                    } else try e.pr.pairMarks(m, tp, e.gpa, passed[0..n_passed], rows0, start);
+                    const last_call = at + call.rows == prompt.len;
+                    try dr.cross(e, passed[0..n_passed], segments.rows(call.rows, 2, 0), segments.start(call.rows, 2, tp.rank), last_call);
                     last_n = 1; // m.last points at the last row
-                    for (passed[0..n_passed], 0..) |row, j| { // both Macs hold each passed mark's states now (pairMarks)
-                        var hist = hist0;
-                        for (prompt[at + row - @min(row, 2) .. at + row]) |tok| hist = .{ hist[1], tok };
-                        const p: Passed = .{ .at = at + row, .slot = j, .tail = m.marks.?.tail_at(j), .hist = hist };
-                        if (at + call.rows == prompt.len) {
-                            late[n_late] = p;
-                            n_late += 1;
-                        } else e.keepPassed(p, out);
+                    for (passed[0..n_passed], 0..) |row, j| { // both Macs hold each passed mark's states once it crosses
+                        dr.passed(e, out, .{ .at = at + row, .slot = j, .tail = m.marks.?.tail_at(j), .hist = marks_mod.histAt(hist0, prompt, at, row) }, last_call);
                     }
                     calls.note(call.rows, 2, t_call, g_call, m.gpu_seconds);
-                    mi += n_passed;
                     at += call.rows;
-                    if (mi < marks.len and at == marks[mi]) { // a pair chunk can end on a mark too
-                        if (out.marked) |f| f(out.ctx, at);
-                        mi += 1;
-                    }
+                    dr.after(out, at, n_passed); // a pair chunk can end on a mark too
                     continue;
                 }
             }
             // a call runs on past marks and writes the DeltaNet states there (up to MARKS); more marks end it at the next
             const taps = e.mark_taps and m.marks != null;
-            const left = if (taps) prompt.len - at else to_mark;
-            var c: segments.Call = e.chunkCall(left);
+            var c: segments.Call = e.chunkCall(if (taps) prompt.len - at else dr.toNext(at, prompt.len));
             var inside: [fz.MARKS]u32 = undefined;
             var n_in: usize = 0;
-            while (taps and mi + n_in < marks.len and marks[mi + n_in] < at + c.rows) : (n_in += 1) {
-                if (n_in == fz.MARKS) {
-                    c = e.chunkCall(marks[mi + n_in] - at);
-                    break;
-                }
-                inside[n_in] = @intCast(marks[mi + n_in] - at);
+            if (taps) {
+                const in_ = dr.inside(at, c.rows, &inside);
+                n_in = in_.n;
+                if (in_.cut) |cut| c = e.chunkCall(cut);
             }
             const hist0 = m.ple.hist; // the two tokens before the call: the n-gram history at a passed mark follows from them
             pick = try Prompt.chunkMarked(ps[0..c.parts], m, e.gpa, prompt[at .. at + c.rows], inside[0..n_in]);
@@ -582,28 +558,17 @@ pub const Engine = struct {
                 last_n = n;
             }
             for (inside[0..n_in], 0..) |row, j| { // the passed marks: the cache keeps each from where the call left it
-                const seg = Prompt.markSeg(ps[0..c.parts], c.rows, row);
-                var hist = hist0;
-                for (prompt[at + row - @min(row, 2) .. at + row]) |tok| hist = .{ hist[1], tok };
-                const p: Passed = .{ .at = at + row, .slot = j, .tail = .{ .b = seg.p.b.cin.b, .off = seg.p.b.cin.off + seg.row * WIDE * 2 }, .hist = hist };
-                if (at + c.rows == prompt.len) {
-                    late[n_late] = p;
-                    n_late += 1;
-                } else e.keepPassed(p, out);
+                const seg = marks_mod.markSeg(ps[0..c.parts], c.rows, row);
+                dr.passed(e, out, .{ .at = at + row, .slot = j, .tail = .{ .b = seg.p.b.cin.b, .off = seg.p.b.cin.off + seg.row * WIDE * 2 }, .hist = marks_mod.histAt(hist0, prompt, at, row) }, at + c.rows == prompt.len);
             }
             calls.note(c.rows, c.parts, t_call, g_call, m.gpu_seconds);
-            mi += n_in;
             at += c.rows;
-            if (mi < marks.len and at == marks[mi]) {
-                if (out.marked) |f| f(out.ctx, at);
-                mi += 1;
-            }
+            dr.after(out, at, n_in);
         }
         out.prefilled(out.ctx);
         var res: Result = .{ .reason = .length };
         const first_stop = out.tokens(out.ctx, &.{pick}) or isEos(eos, pick);
-        if (late_pair) |lp| try e.pr.pairMarks(m, r.tp.?, e.gpa, lp.rows[0..lp.n], lp.rows0, lp.start);
-        for (late[0..n_late]) |p| e.keepPassed(p, out); // after the first token: the slots, rows and tail stay put till the rounds
+        try dr.flush(e, out); // after the first token: the slots, rows and tail stay put till the rounds
         if (e.call_log) calls.log(if (r.tp) |tp| tp.rank else 0);
         if (try e.agree(first_stop)) return .{ .reason = .stop };
         if (max_tokens <= 1) return res;
@@ -813,79 +778,15 @@ pub const Engine = struct {
         if (e.r.tp) |tp| tp.quitting.store(true, .release);
     }
 
-    /// Served speed-up mode, rank 1: run rank 0's requests as they come, the replies thrown away, until rank 0's empty request (its engine closing).
+    /// Served speed-up mode, rank 1: rank 0's requests in step until its empty request (follow.zig).
     pub fn follow(e: *Engine) !void {
-        while (try e.followOne()) {
-            const t0 = std.c.mach_absolute_time();
-            const got = e.snap_pool.ready(e.r.device, NEXT_TURN, .{ .ctx = e.r.tp.?, .check = requestWaiting });
-            if (got.cap > 0) std.log.info("speed-up rank 1: readied {d} of {d} MiB for the next save in {d:.1} ms", .{ got.touched >> 20, got.cap >> 20, @as(f64, @floatFromInt(std.c.mach_absolute_time() - t0)) * 125 / 3 / 1e6 });
-        }
+        return follow_mod.run(e);
     }
 
-    fn requestWaiting(ctx: *anyopaque) bool {
-        const tp: *fz.Tp2 = @ptrCast(@alignCast(ctx));
-        return tp.requestWaiting();
-    }
-
-    fn followOne(e: *Engine) !bool {
-        return try e.followWith(null) != null;
-    }
-
-    /// Rank 1: rank 0's next request, its reply into `out` (null: dropped, states kept); null once rank 0 closes.
+    /// Rank 1: rank 0's next request, its reply into `out` (null: hashed and logged, this Mac's states kept); null once rank 0 closes (follow.zig).
     pub fn followWith(e: *Engine, out: ?Out) !?Result {
-        const tp = e.r.tp orelse return error.NotSpeedUpMode;
-        const req = tp.waitRequest() orelse return null;
-        var head: [16]u32 = undefined;
-        @memcpy(std.mem.asBytes(&head), req.head[0..64]);
-        if (head[0] == 0) return null;
-        const n = head[0];
-        const words = try e.gpa.dupe(u32, req.tokens[0 .. n + head[13] + 2 * head[14]]); // rank 0 may write its next request meanwhile
-        defer e.gpa.free(words);
-        const prompt = words[0..n];
-        const marks = words[n..][0..head[13]];
-        for (0..head[14]) |i| { // states rank 0's prompt cache let go
-            const w = words[n + head[13] + 2 * i ..][0..2];
-            if (e.peer_kept.fetchRemove(@as(u64, w[0]) | @as(u64, w[1]) << 32)) |kv| snapshot.drop(e.gpa, kv.value);
-        }
-        const from = head[12];
-        if (head[15] == 0) return error.TpProtocol; // rank 0 sends its positive pair minimum with every request
-        e.pair_min = head[15];
-        const t0 = std.c.mach_absolute_time();
-        const ok = from == 0 or blk: {
-            const st = e.peer_kept.get(keyOf(prompt[0 .. from + 1])) orelse break :blk false;
-            snapshot.restore(e, st) catch break :blk false;
-            break :blk true;
-        };
-        const restore_ms = @as(f64, @floatFromInt(std.c.mach_absolute_time() - t0)) * 125 / 3 / 1e6;
-        try tp.ackRequest(ok);
-        if (!ok) return .{ .reason = .cancelled }; // rank 0 runs the request again from the start
-        const eos = try e.gpa.dupe(u32, head[4 .. 4 + head[2]]);
-        defer e.gpa.free(eos);
-        var keep: Keep = .{ .e = e, .prompt = prompt };
-        const o: Out = out orelse .{ .ctx = &keep, .prefilled = Quiet.prefilled, .tokens = Quiet.tokens, .cancelled = Quiet.cancelled, .marked = Keep.marked };
-        const res = try e.generateFrom(prompt, from, marks, head[1], eos, if (head[3] == std.math.maxInt(u32)) null else head[3], o);
-        if (out == null) std.log.info("speed-up rank 1: resumed at {d} of {d} (restore {d:.1} ms), kept {d} marks ({d:.1} ms)", .{ from, n, restore_ms, keep.n, keep.ns / 1e6 });
-        return res;
+        return follow_mod.one(e, out);
     }
-
-    /// Speed-up rank 1 at a mark: its own state there, kept under the name rank 0 gives the same tokens.
-    const Keep = struct {
-        e: *Engine,
-        prompt: []const u32,
-        n: usize = 0,
-        ns: f64 = 0,
-        fn marked(ctx: *anyopaque, at: usize) void {
-            const k: *Keep = @ptrCast(@alignCast(ctx));
-            const t0 = std.c.mach_absolute_time();
-            defer {
-                k.n += 1;
-                k.ns += @as(f64, @floatFromInt(std.c.mach_absolute_time() - t0)) * 125 / 3;
-            }
-            const st = snapshot.save(k.e, k.e.gpa, at) catch |err| return std.log.warn("speed-up rank 1: no state kept at {d}: {s}", .{ at, @errorName(err) });
-            const old = k.e.peer_kept.fetchPut(k.e.gpa, keyOf(k.prompt[0 .. at + 1]), st) catch return snapshot.drop(k.e.gpa, st);
-            if (old) |kv| snapshot.drop(k.e.gpa, kv.value);
-        }
-    };
 
     const Quiet = struct {
         fn prefilled(_: *anyopaque) void {}
@@ -901,7 +802,7 @@ pub const Engine = struct {
     /// the first request. In speed-up mode rank 1 runs rank 0's warm-up request instead.
     pub fn warm(e: *Engine) !void {
         if (e.r.tp) |tp| if (tp.rank == 1) {
-            _ = try e.followOne();
+            _ = try follow_mod.one(e, null);
             return;
         };
         var toks: [96]u32 = undefined;

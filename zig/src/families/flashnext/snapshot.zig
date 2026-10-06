@@ -29,13 +29,42 @@ pub const Pool = struct {
     caps: [2]usize = .{ 0, 0 },
     last: usize = 0, // the bytes of the last state saved: the next is about this, a turn or so longer
 
-    /// The smallest free buffer that holds `n` bytes without wasting half again, else a new one.
-    fn take(p: *Pool, device: mtl.Device, n: usize) !struct { buf: mtl.Buffer, cap: usize } {
+    /// The smallest free buffer that holds `n` bytes without wasting half again.
+    fn fitting(p: *const Pool, n: usize) ?usize {
         var best: ?usize = null;
         for (p.bufs, p.caps, 0..) |b, cap, i| if (b != null and cap >= n and cap <= capacity(n) + capacity(n) / 2 and (best == null or cap < p.caps[best.?])) {
             best = i;
         };
-        if (best) |i| {
+        return best;
+    }
+
+    /// Whether a state of `n` bytes would take a free buffer (no new storage).
+    pub fn fits(p: *const Pool, n: usize) bool {
+        return p.fitting(n) != null;
+    }
+
+    /// The free buffers' bytes.
+    pub fn spare(p: *const Pool) usize {
+        var n: usize = 0;
+        for (p.bufs, p.caps) |b, cap| if (b != null) {
+            n += cap;
+        };
+        return n;
+    }
+
+    /// Free buffers go, the largest first, until at most `room` bytes stay free.
+    pub fn trim(p: *Pool, room: usize) void {
+        while (p.spare() > room) {
+            const i: usize = if (p.bufs[0] == null) 1 else if (p.bufs[1] == null) 0 else if (p.caps[0] >= p.caps[1]) 0 else 1;
+            p.bufs[i].?.deinit();
+            p.bufs[i] = null;
+            p.caps[i] = 0;
+        }
+    }
+
+    /// A free buffer that holds `n` bytes, else a new one.
+    fn take(p: *Pool, device: mtl.Device, n: usize) !struct { buf: mtl.Buffer, cap: usize } {
+        if (p.fitting(n)) |i| {
             defer p.bufs[i] = null;
             return .{ .buf = p.bufs[i].?, .cap = p.caps[i] };
         }
@@ -54,13 +83,13 @@ pub const Pool = struct {
         p.caps[slot] = cap;
     }
 
-    /// While nothing waits: a free buffer for the next state (the last one's size and `more` bytes), its pages faulted in
-    /// 64 MiB at a time until `waiting` says a request waits (the rest fault in on the save's copy); the bytes it took.
-    pub fn ready(p: *Pool, device: mtl.Device, more: usize, waiting: Waiting) Readied {
+    /// Idle: a free buffer for the next state (the last one's and `more` bytes) inside `room`, paged in until a request waits.
+    pub fn ready(p: *Pool, device: mtl.Device, more: usize, waiting: Waiting, room: usize) Readied {
         if (p.last == 0) return .{};
         const n = p.last + more;
         for (p.bufs, p.caps) |b, cap| if (b != null and cap >= n) return .{};
         const cap = capacity(n);
+        if (cap > room) return .{};
         const buf = device.buffer(cap, fz.opts) catch return .{};
         const mem = buf.contents()[0..cap];
         var done: usize = 0;
