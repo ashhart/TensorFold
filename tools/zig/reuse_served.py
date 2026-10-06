@@ -22,7 +22,8 @@ USAGE = """modes:
   pp OUT...                        cold medians by length, each run against the first
   ids BASE MODEL OUT.json TOKENS   a chat prompt's ids as the server renders it, for the engine gates
   warm BASE MODEL OUT.json         an agent's short turns (--turns, --new-tokens, --max-tokens): cached tokens and TTFT a turn
-  ranks R0.log R1.log              speed-up mode: each reply's token SHA on rank 0 (done lines) equals rank 1's (its reply lines)"""
+  ranks R0.log R1.log              speed-up mode: each reply's token SHA on rank 0 (done lines) equals rank 1's (its reply lines)
+  split BASE MODEL ROWS.jsonl      speed-up mode: a system cut one row before, at and after a pair call's split, each resumed by another conversation"""
 TOOLS = [
     {"type": "function", "function": {"name": name, "description": about, "parameters": {
         "type": "object", "properties": {p: {"type": "string", "description": d} for p, d in params},
@@ -247,6 +248,42 @@ def scenarios(rec: Recorder, texts: Texts, turns: int, cancel_after: float) -> N
         rec.row(conv, "drafted", body, got[j], rec.prev(conv), hist[j], group="concurrent")
 
 
+def split(client: Client, out: str, texts: Texts, max_tokens: int) -> int:
+    """System cuts one row before, at and after a fresh pair call's split (rank 0 holds rows up to ceil(L/2)), each resumed by a second conversation."""
+    rec = Recorder(client, out, max_tokens)
+    for k, delta in enumerate((-1, 0, 1)):
+        user = f"Case {k}. Read the file below and say what it does.\n\n" + texts.get(50 + k, 14_000)[1]
+        probe = Conv("probe", "You are agent Z.", user, None, False, False)
+        prompt = client.tokens(probe.messages, None, False, True)
+        tail = len(prompt) - rec.system_cuts(probe, prompt)[-1] if rec.system_cuts(probe, prompt) else None
+        if tail is None:  # the probe's system block is under 512 tokens: measure it from a longer one
+            probe.messages[0]["content"] = "You are agent Z.\n\n" + texts.get(60, 4_000)[1]
+            prompt = client.tokens(probe.messages, None, False, True)
+            tail = len(prompt) - rec.system_cuts(probe, prompt)[-1]
+        want = next(sz for sz in range(tail - 4, tail + 8) if sz - delta == (sz + tail + 1) // 2)  # S - ceil((S + tail) / 2) == delta
+        text = texts.get(70 + k, 200_000)[1]
+        lo, hi = 0, len(text)
+        while lo < hi:  # the most characters whose system block stays within `want` tokens
+            mid = (lo + hi + 1) // 2
+            c = Conv("probe", "You are agent P.\n\n" + text[:mid], user, None, False, False)
+            cut = rec.system_cuts(c, client.tokens(c.messages, None, False, True))
+            if cut and cut[-1] <= want:
+                lo = mid
+            else:
+                hi = mid - 1
+        sysp = "You are agent P.\n\n" + text[:lo]
+        p = Conv(f"P{k}", sysp, user, None, False, False)
+        prompt = client.tokens(p.messages, None, False, True)
+        cut = rec.system_cuts(p, prompt)
+        print(f"split case {delta:+d}: prompt {len(prompt)}, split at {(len(prompt) + 1) // 2}, cuts {cut} (want {want})", flush=True)
+        rec.turn(p, [0], texts.get(80 + k, 4_000), plain=False)
+        q = Conv(f"Q{k}", sysp, user.replace(f"Case {k}.", f"Case {k}, again."), None, False, False)
+        rec.turn(q, [cut[-1]] if cut else [0], texts.get(90 + k, 4_000))
+        rec.turn(p, rec.prev(p), texts.get(100 + k, 4_000), plain=False)
+    print("split: the server log's pass lines show where each pair call crossed its marks", flush=True)
+    return rec.failures
+
+
 def evict(client: Client, out: str, budget_gib: float, texts: Texts, max_tokens: int) -> int:
     """At 1 GiB one 15k-31k-token state fits and two do not: conversations take turns evicting, a 40k-token state is refused."""
     rec = Recorder(client, out, max_tokens)
@@ -448,7 +485,7 @@ def pp(paths: list[str]) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(epilog=USAGE, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("mode", choices=["record", "replay", "compare", "evict", "cold", "pp", "ids", "warm", "ranks"])
+    ap.add_argument("mode", choices=["record", "replay", "compare", "evict", "cold", "pp", "ids", "warm", "ranks", "split"])
     ap.add_argument("args", nargs="+")
     ap.add_argument("--max-tokens", type=int, default=160)
     ap.add_argument("--turns", type=int, default=9)
@@ -473,6 +510,8 @@ def main() -> int:
         return ids(client, o.args[2], int(o.args[3]), o.text)
     if o.mode == "cold":
         return cold(client, o.args[2], o.args[3], o.text)
+    if o.mode == "split":
+        return 1 if split(client, o.args[2], Texts(o.text), o.max_tokens) else 0
     if o.mode == "evict":
         return 1 if evict(client, o.args[2], float(o.args[3]), Texts(o.text), o.max_tokens) else 0
     rec = Recorder(client, o.args[2], o.max_tokens, o.planned, o.min_prompt)
