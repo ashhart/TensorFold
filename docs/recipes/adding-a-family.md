@@ -1,5 +1,8 @@
 # Adding an MLX family
 
+This guide covers the Python engine, frozen at 0.6.5. New families go on the Zig engine: see
+[adding a Zig family](adding-a-zig-family.md).
+
 Create `src/tensorfold/families/<name>/`. The CLI discovers packages by `MODEL_TYPES`, matching
 `config.json` or its `text_config`. Keep backend imports inside the loader so discovery does not load a model.
 
