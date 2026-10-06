@@ -39,6 +39,7 @@ EXPECTED = {
     ("tools", "bad_tool-stream"): "a call to a tool the request did not offer goes out under its own name (PR #415); Python keeps the old rule",
     ("tools", "bad_tool-single"): "a call to a tool the request did not offer goes out under its own name (PR #415); Python keeps the old rule",
     ("tools", "bad_tool-single-stream"): "a call to a tool the request did not offer goes out under its own name (PR #415); Python keeps the old rule",
+    ("errors", "stream-context"): "a refused streamed request answers 400 before its stream opens (#388); Python answers 200 and an error event",
 }
 
 

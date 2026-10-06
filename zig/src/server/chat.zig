@@ -117,8 +117,22 @@ fn flag(f: Value, key: []const u8) ?bool {
     return v.truthy();
 }
 
-/// The reply to ``input``; ``sink`` hears the stream (null: not streamed). ``gone`` says the client left.
-pub fn run(srv: *Server, cx: *Cx, input: Input, sink: ?Sink, gone: anytype) Failure!Reply {
+/// A request rendered and checked but not submitted; it holds the preparing count until generate or release.
+pub const Prepared = struct {
+    input: Input,
+    request: api.Request,
+    prompt_len: usize,
+    received: i96,
+    thinking: bool,
+    effort: ?[]const u8,
+    sampled: bool, // a sampling config, which the reply labels "exact"; greedy otherwise
+    drafts: bool,
+    stops: fields_mod.Stops,
+    preparing: bool,
+};
+
+/// Render ``input`` and run every check that can refuse it, before anything reaches the client or the engine.
+pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepared {
     const a = cx.a;
     const io = srv.io;
     const received = nowNs(io);
@@ -128,11 +142,9 @@ pub fn run(srv: *Server, cx: *Cx, input: Input, sink: ?Sink, gone: anytype) Fail
     const priority = f.get("priority");
     const background = prompt_mod.isTitle(input.messages, input.tools.len > 0) or
         (priority != null and priority.? == .string and std.mem.eql(u8, priority.?.string, "background"));
-    var preparing = !background;
+    const preparing = !background;
     if (preparing) _ = srv.preparing.fetchAdd(1, .acq_rel);
-    defer if (preparing) {
-        _ = srv.preparing.fetchSub(1, .acq_rel);
-    };
+    errdefer release(srv, preparing);
     if (gone.check()) return error.Cancelled;
     var thinking = flag(f, "enable_thinking") orelse srv.config.enable_thinking;
     if (input.prompt != null) thinking = false;
@@ -179,7 +191,22 @@ pub fn run(srv: *Server, cx: *Cx, input: Input, sink: ?Sink, gone: anytype) Fail
             request.think_end = srv.think_close_end;
         }
     }
-    if (background) {
+    return .{ .input = input, .request = request, .prompt_len = rendered.ids.len, .received = received, .thinking = thinking, .effort = effort, .sampled = sampling != null, .drafts = drafts, .stops = stops_opt, .preparing = preparing };
+}
+
+/// Submit a prepared request and collect its reply; ``sink`` hears the stream (null: not streamed).
+pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: anytype) Failure!Reply {
+    const a = cx.a;
+    const io = srv.io;
+    var request = prepared.request;
+    const input = prepared.input;
+    const received = prepared.received;
+    const thinking = prepared.thinking;
+    const effort = prepared.effort;
+    const stops_opt = prepared.stops;
+    var preparing = prepared.preparing;
+    defer release(srv, preparing);
+    if (request.background) {
         while (true) {
             const now = nowNs(io);
             const waiting = now < received + 150 * std.time.ns_per_ms or (srv.preparing.load(.acquire) > 0 and now < received + 2 * std.time.ns_per_s);
@@ -199,19 +226,17 @@ pub fn run(srv: *Server, cx: *Cx, input: Input, sink: ?Sink, gone: anytype) Fail
         error.Busy => cx.fail(.capacity, "the engine is busy; retry shortly", .{}),
         error.Closed => cx.fail(.other, "the scheduler is closed", .{}),
     };
-    if (preparing) {
-        _ = srv.preparing.fetchSub(1, .acq_rel);
-        preparing = false;
-    }
+    release(srv, preparing); // a background request waits only while a foreground one prepares
+    preparing = false;
     var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .sink = sink, .thinking = thinking or reply_text.isChannel(srv.markers), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools };
-    defer srv.noteRequest(rendered.ids.len, gen.collected.items.len, box.stats.drafted, box.stats.accepted, box.stats.rounds, received, gen.first_ns, gen.last_ns, box.stats.prefill_seconds);
+    defer srv.noteRequest(prepared.prompt_len, gen.collected.items.len, box.stats.drafted, box.stats.accepted, box.stats.rounds, received, gen.first_ns, gen.last_ns, box.stats.prefill_seconds);
     errdefer if (!gen.engine_done) gen.cancel(); // the engine writes to the mailbox until it says finished
     const result: Failure!Reply = blk: {
         if (sink != null and input.tools.len > 0) gen.calls = tool_stream.Streamer.init(a, input.tools) catch |e| break :blk e;
         gen.loop(gone) catch |e| break :blk e;
-        break :blk gen.finish(cx, rendered.ids.len, received, submitted, thinking, effort, sampling != null, drafts);
+        break :blk gen.finish(cx, prepared.prompt_len, received, submitted, thinking, effort, prepared.sampled, prepared.drafts);
     };
-    if (result) |_| {} else |e| logEnded(input.id, e, cx.message, rendered.ids.len, gen.collected.items.len, seconds(nowNs(io) - received));
+    if (result) |_| {} else |e| logEnded(input.id, e, cx.message, prepared.prompt_len, gen.collected.items.len, seconds(nowNs(io) - received));
     return result;
 }
 
@@ -224,6 +249,16 @@ fn logEnded(id: []const u8, e: Failure, message: []const u8, prompt: usize, toke
     };
     var buf: [1024]u8 = undefined;
     log.line("{s}", .{log.ended(&buf, id, why, prompt, tokens, after)});
+}
+
+/// The reply to ``input``; ``sink`` hears the stream (null: not streamed). ``gone`` says the client left.
+pub fn run(srv: *Server, cx: *Cx, input: Input, sink: ?Sink, gone: anytype) Failure!Reply {
+    return generate(srv, cx, try prepare(srv, cx, input, gone), sink, gone);
+}
+
+/// Give back a foreground request's preparing count: at its submit, or when it is never generated.
+pub fn release(srv: *Server, preparing: bool) void {
+    if (preparing) _ = srv.preparing.fetchSub(1, .acq_rel);
 }
 
 /// The text a stream has sent: Python's ``streamed = visible``, grown by its delta while it only grows.

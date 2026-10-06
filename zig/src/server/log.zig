@@ -31,7 +31,7 @@ fn writeOut(bytes: []const u8) void {
 
 /// One ``[tensorfold] ...`` line.
 pub fn line(comptime fmt: []const u8, args: anytype) void {
-    if (quiet) return;
+    if (quiet or @import("builtin").is_test) return; // a test's stdout is the build runner's channel
     var buf: [8192]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
     w.print("[tensorfold] " ++ fmt ++ "\n", args) catch {

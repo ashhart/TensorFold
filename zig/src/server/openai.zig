@@ -313,19 +313,24 @@ const Run = struct {
         r.out.vt.reply(r.out.ctx, if (kind_ok) 400 else 500, wrapError(a, body) catch return);
     }
 
-    fn whole(r: *Run, gone: Gone, field: []const u8) void {
-        const a = r.a;
-        var cx: Cx = .{ .a = a };
-        var reply = chat.run(r.srv, &cx, r.plan.input, null, gone) catch |e| switch (e) {
-            error.Cancelled => return,
-            error.OutOfMemory => return r.fail(&.{ .a = a, .kind = .server, .message = "out of memory" }, field),
-            error.Failed => return r.fail(&.{ .a = a, .kind = .server, .message = "the reply failed" }, field),
+    /// A reply that ended before anything was sent: a refusal's 400, a failure's 500, nothing when the client left.
+    fn unsent(r: *Run, cx: *Cx, e: chat.Failure, field: []const u8) void {
+        switch (e) {
+            error.Cancelled => {},
+            error.OutOfMemory => r.fail(&.{ .a = r.a, .kind = .server, .message = "out of memory" }, field),
+            error.Failed => r.fail(&.{ .a = r.a, .kind = .server, .message = "the reply failed" }, field),
             error.Refused => {
                 if (cx.kind == .other) cx.kind = .server;
                 if (cx.kind != .server) logRefused(r.id, cx.message); // a 500 is a failure, not a refusal
-                return r.fail(&cx, field);
+                r.fail(cx, field);
             },
-        };
+        }
+    }
+
+    fn whole(r: *Run, gone: Gone, field: []const u8) void {
+        const a = r.a;
+        var cx: Cx = .{ .a = a };
+        var reply = chat.run(r.srv, &cx, r.plan.input, null, gone) catch |e| return r.unsent(&cx, e, field);
         const calls = r.attachCalls(&reply) catch return;
         const o = json.newObject(a) catch return;
         r.wholeBody(o, &reply, calls) catch return;
@@ -413,12 +418,17 @@ const Run = struct {
 
     fn stream(r: *Run, gone: Gone, field: []const u8) void {
         const a = r.a;
-        r.out.vt.open(r.out.ctx) catch return;
         const tools = r.plan.input.tools.len > 0;
+        var cx: Cx = .{ .a = a };
+        // every refusal comes before the stream opens, so it gets the same 400 as a whole reply
+        const prepared = chat.prepare(r.srv, &cx, r.plan.input, gone) catch |e| return r.unsent(&cx, e, field);
+        var handed = false; // generate gives the preparing count back from here on
+        defer if (!handed) chat.release(r.srv, prepared.preparing);
+        r.out.vt.open(r.out.ctx) catch return;
         if (!tools and r.is_chat) r.emit(r.chunk(roleDelta(a) catch return, null) catch return) catch return;
         var sink_state: StreamSink = .{ .run = r, .tools = tools };
-        var cx: Cx = .{ .a = a };
-        var reply = chat.run(r.srv, &cx, r.plan.input, .{ .ctx = &sink_state, .call = StreamSink.call }, gone) catch |e| {
+        handed = true;
+        var reply = chat.generate(r.srv, &cx, prepared, .{ .ctx = &sink_state, .call = StreamSink.call }, gone) catch |e| {
             switch (e) {
                 error.Cancelled => return,
                 error.Refused => if (cx.kind != .other and cx.kind != .server) {
