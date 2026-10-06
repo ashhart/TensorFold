@@ -353,7 +353,7 @@ const xnew_source =
     \\inline void fz_dense_body(const device bfloat* X, const device uint* W, const device bfloat* SB, device bfloat* Y,
     \\    constant uint4& dims, uint sgi, uint lane, uint tgi, threadgroup float (*part)[8][32]) {
     \\  const int R = int(dims.x), N = int(dims.y), K = int(dims.z), KG = K / 32;
-    \\  const int t = int(tgi), n = t * 32 + int(lane);
+    \\  const int t = int(tgi) + int(dims.w), n = t * 32 + int(lane); // dims.w: the first output tile
     \\  const int g0 = int(sgi) * (KG / SK), g1 = g0 + KG / SK;
     \\  float acc[8] = {0, 0, 0, 0, 0, 0, 0, 0};
     \\  for (int g = g0; g < g1; g++) {
@@ -1054,6 +1054,23 @@ pub const Run = struct {
         if (!r.serial) r.enc.barrier();
     }
     /// y = x W for `rows` rows of K inputs through fz_dense (blocks of 8 rows; 16 K-slices for narrow outputs).
+    /// One row's dense projection over output tiles [t0, t0 + tn) only (32 outputs a tile), in the full layout.
+    pub fn denseTiles(r: *Run, x: Buf, k: usize, l: Lane, y: Buf, t0: usize, tn: usize) void {
+        if (tn == 0) return;
+        const n = l.wq.b.length() * 4 / (3 * k);
+        const narrow = n <= 4096;
+        const dims = [4]u32{ 1, @intCast(n), @intCast(k), @intCast(t0) };
+        r.enc.setPipeline(if (narrow) r.dense16_pipe else r.dense8_pipe);
+        r.enc.setBuffer(x.b, x.off, 0);
+        r.enc.setBuffer(l.wq.b, l.wq.off, 1);
+        r.enc.setBuffer(l.sbt.b, l.sbt.off, 2);
+        r.enc.setBuffer(y.b, y.off, 3);
+        r.enc.setBytes(std.mem.asBytes(&dims), 4);
+        const sk: usize = if (narrow) 16 else 8;
+        r.enc.dispatchThreads(mtl.Size.of(32 * sk * tn, 1, 1), mtl.Size.of(32 * sk, 1, 1));
+        if (!r.serial) r.enc.barrier();
+    }
+
     pub fn denseRows(r: *Run, x: Buf, k: usize, l: Lane, rows: usize, y: Buf) void {
         const n = l.wq.b.length() * 4 / (3 * k);
         const narrow = n <= 4096;
@@ -1976,6 +1993,20 @@ pub const Model = struct {
         }
         r.rows = 1;
         if (!r.fused_xsum) try r.call("mtp:lane_qmm_xsum#[2560]", &.{ x, h.md1 }, &.{t.xs});
+        if (r.tp != null and r.dense) { // TP: this Mac's half of the draft vocabulary's tiles, then one exact argmax swap
+            const tp = r.tp.?;
+            const n = h.draft.wq.b.length() * 4 / (3 * D);
+            const tiles = n / 32;
+            const half = (tiles + 1) / 2;
+            const t0: usize = if (tp.rank == 0) 0 else half;
+            const tn: usize = if (tp.rank == 0) half else tiles - half;
+            r.denseTiles(x, D, h.draft, h.logits, t0, tn);
+            const lo = @min(t0 * 32, h.ids_n);
+            const hi = @min((t0 + tn) * 32, h.ids_n);
+            tp.argmax(r.enc, h.logits, n, lo, hi - lo, Buf{ .b = tp.pick_tmp }, Buf{ .b = tp.one }, 1);
+            tp.mapIds(r.enc, h.ids, out);
+            return;
+        }
         if (r.dense) r.denseRows(x, D, h.draft, 1, h.logits) else try r.call("mtp:lane_qmm_bytes_grouped@mtp.draft", &.{ x, t.xs, h.draft.wq, h.draft.sbt, h.md1 }, &.{h.logits});
         r.enc.setPipeline(r.argids_pipe);
         for ([_]Buf{ h.logits, out, h.n_ids, h.ids }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);

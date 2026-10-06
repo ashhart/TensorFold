@@ -135,6 +135,11 @@ const source =
     \\    picks[r] = (vp > vm || (vp == vm && ap < am)) ? ap : am;
     \\  }
     \\}
+    \\// the MTP head's merged draft pick (an index into its draft list) as a token id
+    \\kernel void tp_ids(const device uint* pick [[buffer(0)]], const device uint* ids [[buffer(1)]],
+    \\                   device uint* out [[buffer(2)]]) {
+    \\  out[0] = ids[pick[0]];
+    \\}
     \\// one thread polls until the 32-bit word reaches `value`; a give-up is counted, never silent
     \\kernel void tp_wait(device atomic_uint* word [[buffer(0)]], constant uint& value [[buffer(1)]],
     \\                    device atomic_uint* sync [[buffer(2)]]) {
@@ -228,6 +233,8 @@ pub const Tp2 = struct {
     fused: bool = true, // post and wait in one launch (TF_TP_FUSED=0: two)
     sum_pipe: mtl.Pipeline,
     one: mtl.Buffer, // a rows word holding 1, for posts that carry no rows
+    pick_tmp: mtl.Buffer, // the MTP head's merged draft index
+    ids_pipe: mtl.Pipeline,
     seq: u32 = 0, // the last sequence this Mac's GPU posts (its own count: prefill sends are rank 0's alone)
     xseq: u32 = 0, // decode exchanges so far, the same count on both Macs: their slots' parity and flag values
     call: u32 = 0, // prefill chunks split so far (both ranks count the same): their flags' values
@@ -272,6 +279,8 @@ pub const Tp2 = struct {
             .post_wait = try mtl.Pipeline.init(device, lib_m, "tp_post_wait", false),
             .sum_pipe = try mtl.Pipeline.init(device, lib_m, "tp_sum", false),
             .one = try device.buffer(16, opts),
+            .pick_tmp = try device.buffer(16, opts),
+            .ids_pipe = try mtl.Pipeline.init(device, lib_m, "tp_ids", false),
             .jobs = try gpa.alloc(Job, JOBS),
         };
         t.one.slice(i32, 1)[0] = 1;
@@ -386,6 +395,15 @@ pub const Tp2 = struct {
         enc.setBuffer(t.wbuf, sendA(x), 3);
         enc.setBuffer(t.wbuf, RECVA + (x % 2) * PAGE, 4);
         enc.setBuffer(picks.b, picks.off, 5);
+        enc.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
+    }
+
+    /// After `argmax` over the MTP head's draft logits into `pick_tmp`: the merged pick's token id into `out`.
+    pub fn mapIds(t: *Tp2, enc: mtl.ComputeEncoder, ids: anytype, out: anytype) void {
+        enc.setPipeline(t.ids_pipe);
+        enc.setBuffer(t.pick_tmp, 0, 0);
+        enc.setBuffer(ids.b, ids.off, 1);
+        enc.setBuffer(out.b, out.off, 2);
         enc.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
     }
 
