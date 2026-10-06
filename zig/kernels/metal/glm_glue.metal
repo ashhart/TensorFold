@@ -308,9 +308,10 @@ kernel void glm_argmax(const device bfloat* logits [[buffer(0)]], device uint* o
   if (lane == 0) out[row] = at;
 }
 
-// Block scores of one row in fp32 (no bf16 rounding between steps): sum_h w_h relu(q_h . pool_b), heads in order.
+// Rows' block scores in fp32 (no bf16 rounding between steps): sum_h w_h relu(q_h . pool_b), heads in order. Row r
+// sits at position p0 + r and scores its (p0 + r + 1) / 4 whole blocks.
 struct GlmScoreArgs {
-  uint blocks, q_stride, w_stride, s_stride;
+  uint p0, q_stride, w_stride, s_stride;
 };
 
 kernel void glm_index_scores(const device bfloat* iq [[buffer(0)]], const device bfloat* iw [[buffer(1)]],
@@ -320,13 +321,15 @@ kernel void glm_index_scores(const device bfloat* iq [[buffer(0)]], const device
   constexpr int HI = 32, DI = 128, SGS = 8;
   const uint row = tg.y;
   const uint blk = tg.x * SGS + sg;
+  const uint blocks = (a.p0 + row + 1) / 4;
+  if (tg.x * SGS >= blocks) return;
   threadgroup float qs[HI * DI];
   threadgroup float ws[HI];
   const device bfloat* q = iq + size_t(row) * a.q_stride;
   for (uint i = sg * 32 + lane; i < HI * DI; i += SGS * 32) qs[i] = float(q[i]);
   if (sg == 0) ws[lane] = float(iw[size_t(row) * a.w_stride + lane]);
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (blk >= a.blocks) return;
+  if (blk >= blocks) return;
   float k[4];
   for (int j = 0; j < 4; j++) k[j] = float(pool[size_t(blk) * DI + lane * 4 + j]);
   float total = 0.0f;
@@ -339,10 +342,10 @@ kernel void glm_index_scores(const device bfloat* iq [[buffer(0)]], const device
   if (lane == 0) scores[size_t(row) * a.s_stride + blk] = total;
 }
 
-// One row's key list for sparse attention: its TOP best blocks (ties: lower block first) as 4 keys each in block
-// order, then the tail keys of its partial block, -1 to `width`. 1024 threads: a radix select on the scores' keys.
+// Row r's key list (position p0 + r) for sparse attention: its TOP best blocks (ties: lower block first) as 4 keys
+// each in block order, then the tail keys of its partial block, -1 to `width`. 1024 threads: a radix select.
 struct GlmSelectArgs {
-  uint blocks, top, position, width, s_stride, i_stride;
+  uint p0, top, width, s_stride, i_stride;
 };
 
 // Exclusive prefix sum over a 1024-thread threadgroup (32 simdgroups), `part` 32 slots of scratch.
@@ -364,10 +367,11 @@ inline uint glm_order_key(float v) {
 }
 
 kernel void glm_index_select(const device float* scores [[buffer(0)]], device int* indices [[buffer(1)]],
-                             constant GlmSelectArgs* all [[buffer(2)]], uint row [[threadgroup_position_in_grid]],
+                             constant GlmSelectArgs& g [[buffer(2)]], uint row [[threadgroup_position_in_grid]],
                              uint t [[thread_position_in_threadgroup]]) {
   constexpr uint NT = 1024;
-  const GlmSelectArgs a = all[row];
+  struct { uint blocks, top, position, width, s_stride, i_stride; } a = {
+      (g.p0 + row + 1) / 4, g.top, g.p0 + row, g.width, g.s_stride, g.i_stride};
   const device float* s = scores + size_t(row) * a.s_stride;
   device int* out = indices + size_t(row) * a.i_stride;
   threadgroup atomic_uint hist[256];
@@ -458,4 +462,76 @@ kernel void glm_streams(const device bfloat* h [[buffer(0)]], device bfloat* x [
 kernel void glm_copy_u32(const device uint* src [[buffer(0)]], device uint* dst [[buffer(1)]],
                          constant uint& n [[buffer(2)]], uint i [[thread_position_in_grid]]) {
   if (i < n) dst[i] = src[i];
+}
+
+// The prompt's routing: row r's top TOPK experts by sigmoid + bias and their weights, the decode route's arithmetic
+// (moe_route's per-row loop), one simdgroup a row.
+template <typename U>
+inline U glm_sigmoid_precise(U x) {
+  U e = static_cast<U>(metal::precise::exp(metal::abs(x)));
+  U y = static_cast<U>(1) / (static_cast<U>(1) + e);
+  return (x < 0) ? y : (static_cast<U>(1) - y);
+}
+
+kernel void glm_route_rows(const device float* LOGITS [[buffer(0)]], const device float* BIAS [[buffer(1)]],
+                           constant float& SCALE [[buffer(2)]], device uint* PICK [[buffer(3)]],
+                           device float* WTS [[buffer(4)]], constant uint& rows [[buffer(5)]],
+                           uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+  constexpr int NE = 288, TOPK = 8, PER = (NE + 31) / 32;
+  const int r = int(gid / 32);
+  if (r >= int(rows)) return;
+  float c[PER], sc[PER];
+  for (int j = 0; j < PER; j++) {
+    const int id = j * 32 + int(lane);
+    if (id < NE) {
+      sc[j] = glm_sigmoid_precise(LOGITS[r * NE + id]);
+      c[j] = sc[j] + BIAS[id];
+    } else {
+      sc[j] = 0.0f; c[j] = -INFINITY;
+    }
+  }
+  float w[TOPK];
+  for (int k = 0; k < TOPK; k++) {
+    float best = -INFINITY, bsc = 0.0f;
+    int bid = NE;
+    for (int j = 0; j < PER; j++) {
+      const int id = j * 32 + int(lane);
+      if (id < NE && (c[j] > best || (c[j] == best && id < bid))) { best = c[j]; bid = id; bsc = sc[j]; }
+    }
+    for (int off = 16; off > 0; off /= 2) {
+      const float ob = simd_shuffle_xor(best, off);
+      const int oi = simd_shuffle_xor(bid, off);
+      const float os = simd_shuffle_xor(bsc, off);
+      if (ob > best || (ob == best && oi < bid)) { best = ob; bid = oi; bsc = os; }
+    }
+    w[k] = bsc;
+    if (int(lane) == bid % 32) c[bid / 32] = -INFINITY;
+    if (lane == 0) PICK[r * TOPK + k] = uint(bid);
+  }
+  if (lane == 0) {
+    float total = w[0];
+    for (int k = 1; k < TOPK; k++) total = total + w[k];
+    for (int k = 0; k < TOPK; k++) WTS[r * TOPK + k] = (w[k] / total) * SCALE;
+  }
+}
+
+// The routed experts' activation for sorted pairs: the MoE kernel's SwiGLU on separate gate and up rows.
+kernel void glm_act2(const device bfloat* G [[buffer(0)]], const device bfloat* U [[buffer(1)]],
+                     device bfloat* ACT [[buffer(2)]], constant float& limit [[buffer(3)]],
+                     constant uint& count [[buffer(4)]], uint i [[thread_position_in_grid]]) {
+  if (i >= count) return;
+  const float lim = float(bfloat(limit));
+  const bfloat gt = bfloat(metal::min(float(G[i]), lim));
+  const bfloat up = bfloat(metal::min(metal::max(float(U[i]), -lim), lim));
+  const bfloat sl = gt * sigmoid_fast(gt);
+  ACT[i] = sl * up;
+}
+
+// Key lists of rows that read every key (positions p0 + r with at most `dense` keys): 0 .. position, then -1.
+kernel void glm_dense_indices(device int* indices [[buffer(0)]], constant uint4& a [[buffer(1)]],
+                              uint2 p [[thread_position_in_grid]]) {
+  const uint width = a.x, p0 = a.y, rows = a.z;
+  if (p.x >= width || p.y >= rows) return;
+  const uint position = p0 + p.y;
+  indices[size_t(p.y) * width + p.x] = p.x <= position ? int(p.x) : -1;
 }

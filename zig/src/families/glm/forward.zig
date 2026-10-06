@@ -31,8 +31,8 @@ fn snap(x: *Ctx, e: mtl.ComputeEncoder, src: Ref, bytes: usize) void {
 }
 
 const Rows = extern struct { rows: i32, width: i32, x_stride: i32, y_stride: i32, eps: f32 };
-const ScoreArgs = extern struct { blocks: u32, q_stride: u32, w_stride: u32, s_stride: u32 };
-pub const SelectArgs = extern struct { blocks: u32, top: u32, position: u32, width: u32, s_stride: u32, i_stride: u32 };
+const ScoreArgs = extern struct { p0: u32, q_stride: u32, w_stride: u32, s_stride: u32 };
+const SelectArgs = extern struct { p0: u32, top: u32, width: u32, s_stride: u32, i_stride: u32 };
 
 fn bind(e: mtl.ComputeEncoder, first: usize, refs: anytype) void {
     inline for (refs, 0..) |r, i| e.setBuffer(r.buf, r.off, first + i);
@@ -226,33 +226,36 @@ fn attendDense(x: *const Ctx, e: mtl.ComputeEncoder, keys: Ref, q: Ref, scores: 
 /// then the sparse kernel over those keys (Python's indexed attention).
 fn attendSparse(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, rows: u32, pos: u32, first: u32) void {
     const c = x.c;
-    const k = x.k;
     const sc = x.sc;
-    const C = &x.s.mla[mi];
-    const s_stride = x.s.cap / c.kpool + 1;
-    const width = c.keyWidth();
-    var sel: [st.max_rows]SelectArgs = undefined; // inline: per-call data must not be shared inside a command buffer
-    for (first..rows) |ri| {
-        const r: u32 = @intCast(ri);
-        const j = r - first;
-        const p = pos + r;
-        const blocks = (p + 1) / c.kpool;
-        e.setPipeline(k.index_scores);
-        bind(e, 0, .{ sc.qp.at((@as(usize, r) * c.qrProj() + c.mla_heads * c.nope) * 2), sc.iw.at(@as(usize, r) * c.i_heads * 2), C.pool, sc.sscore.at(@as(usize, j) * s_stride * 4) });
-        e.setValue(ScoreArgs{ .blocks = blocks, .q_stride = 0, .w_stride = 0, .s_stride = s_stride }, 4);
-        e.dispatchGroups(size((blocks + 7) / 8, 1, 1), size(256, 1, 1));
-        sel[j] = .{ .blocks = blocks, .top = c.i_topk / c.kpool, .position = p, .width = width, .s_stride = s_stride, .i_stride = width };
-    }
     const n = rows - first;
+    selectKeys(x, e, mi, sc.qp.at((@as(usize, first) * c.qrProj() + c.mla_heads * c.nope) * 2), c.qrProj(), sc.iw.at(@as(usize, first) * c.i_heads * 2), sc.sscore, sc.indices, n, pos + first);
+    attendIndexed(x, e, mi, sc.ql.at(@as(usize, first) * c.mla_heads * c.kv_lora * 2), sc.indices, sc.att.at(@as(usize, first) * c.mla_heads * c.kv_lora * 2), n, pos + rows);
+}
+
+/// Key lists for `n` rows at positions p0.. past index_topk keys (indexer queries `iq` a row `q_stride` apart).
+pub fn selectKeys(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, iq: Ref, q_stride: u32, iw: Ref, scores: Ref, indices: Ref, n: u32, p0: u32) void {
+    const c = x.c;
+    const k = x.k;
+    const s_stride = x.s.cap / c.kpool + 1;
+    const most = (p0 + n) / c.kpool; // the last row's blocks
+    e.setPipeline(k.index_scores);
+    bind(e, 0, .{ iq, iw, x.s.mla[mi].pool, scores });
+    e.setValue(ScoreArgs{ .p0 = p0, .q_stride = q_stride, .w_stride = c.i_heads, .s_stride = s_stride }, 4);
+    e.dispatchGroups(size((most + 7) / 8, n, 1), size(256, 1, 1));
     e.setPipeline(k.index_select);
-    bind(e, 0, .{ sc.sscore, sc.indices });
-    e.setBytes(std.mem.sliceAsBytes(sel[0..n]), 2);
+    bind(e, 0, .{ scores, indices });
+    e.setValue(SelectArgs{ .p0 = p0, .top = c.i_topk / c.kpool, .width = c.keyWidth(), .s_stride = s_stride, .i_stride = c.keyWidth() }, 2);
     e.dispatchGroups(size(n, 1, 1), size(1024, 1, 1));
-    e.setPipeline(k.sparse_attention);
-    bind(e, 0, .{ sc.ql.at(@as(usize, first) * c.mla_heads * c.kv_lora * 2), C.keys, sc.indices });
+}
+
+/// The sparse kernel for `n` rows' 64 heads over their listed keys (`key_length` keys written so far).
+pub fn attendIndexed(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, ql: Ref, indices: Ref, out: Ref, n: u32, key_length: u32) void {
+    const c = x.c;
+    e.setPipeline(x.k.sparse_attention);
+    bind(e, 0, .{ ql, x.s.mla[mi].keys, indices });
     e.setValue(@as(f32, 1.0 / 16.0), 3);
-    e.setValue(@as(i32, @intCast(pos + rows)), 4);
-    bind(e, 5, .{sc.att.at(@as(usize, first) * c.mla_heads * c.kv_lora * 2)});
+    e.setValue(@as(i32, @intCast(key_length)), 4);
+    bind(e, 5, .{out});
     e.dispatchThreads(size(1024, n * c.mla_heads, 1), size(1024, 1, 1));
 }
 

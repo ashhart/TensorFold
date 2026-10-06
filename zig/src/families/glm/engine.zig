@@ -89,7 +89,8 @@ pub const Engine = struct {
         e.sc = both.scratch;
         e.prompt_ids = try e.arena.buffer(@as(usize, cap) * 4);
         try e.prepare();
-        if (e.device.residencySet(e.w.buffers.items.len + e.arena.buffers.items.len)) |set| {
+        // opt-in: wiring 181 GB leaves macOS nothing to reclaim if another model shares the Mac (Flash Next runs without)
+        if (std.c.getenv("GLM_RESIDENCY") == null) {} else if (e.device.residencySet(e.w.buffers.items.len + e.arena.buffers.items.len)) |set| {
             for (e.w.buffers.items) |b| set.add(b);
             for (e.arena.buffers.items) |b| set.add(b);
             set.commit();
