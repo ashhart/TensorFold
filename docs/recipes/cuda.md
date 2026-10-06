@@ -68,8 +68,9 @@ memory the display controller reserves, which MemAvailable never counts. The nat
 DRM dumb buffer from `/dev/dri/card0` (`TF_DRM_CARD` picks another card) and registers it with
 CUDA. It is 1,792 MiB unless `TF_CUDA_CARVEOUT_MIB` says otherwise. Each sequence's key and value
 planes go there while the carveout holds both, and the rest stays in device memory. The recurrent
-state stays out, because every round reads and writes all of it. This memory has about half the
-bandwidth of ordinary memory, so expect a small decode cost. The output bits don't change. It needs
+state stays out, because every round reads and writes all of it. Copies into and out of this memory
+run at about half the speed of ordinary memory and kernels reading it keep about 90%, so expect a small
+decode cost. Placement leaves the arithmetic alone, so the output should not change. It needs
 `nvidia_drm modeset=1`, access to the card's device node (`--device /dev/dri/card0` in a
 container) and no display in use. It is off by default. `tf-cuda-test carveout [MiB] [card]`
 checks a machine: round trips from the host and from a kernel, and copy and read bandwidth. It

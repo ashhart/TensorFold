@@ -6,8 +6,12 @@ const check = @import("check.zig");
 const Gpu = check.Gpu;
 const expect = check.expect;
 
-/// `carveout [MiB]`: SKIP when the card cannot be opened; FAIL when it opens but the driver refuses a step.
+/// `carveout [MiB] [card]`: SKIP on a discrete GPU or when the card cannot be opened; FAIL when a step is refused.
 pub fn run(gpu: Gpu, card: [:0]const u8, mib: usize) !void {
+    if (try gpu.ctx.attribute(.integrated) == 0) {
+        std.debug.print("SKIP carveout: not an integrated GPU (the carveout is GB10's display memory)\n", .{});
+        return;
+    }
     const before = try memAvailable(gpu.io);
     var c = cuda.Carveout.open(gpu.d, card, mib << 20) catch |err| switch (err) {
         error.CardUnavailable => {
