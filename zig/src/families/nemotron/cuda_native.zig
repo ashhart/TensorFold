@@ -1,5 +1,4 @@
-//! Nemotron for the native server on CUDA: the engine, its MTP head and the lane backend, loaded as `tensorfold lanes`
-//! loads them. native/cuda.zig drives what `open` returns; nothing here knows the server.
+//! Nemotron's CUDA engine, MTP head and lane backend behind the native family interface.
 const std = @import("std");
 const cuda = @import("cuda");
 const lanes = @import("lanes");

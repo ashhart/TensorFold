@@ -1,15 +1,14 @@
-//! The engines a native server opens on CUDA. Each family in `registry` brings its own lane backend (its `open`); this
-//! file only owns the device, the memory plan, the round loop and the lane host, so a family adds itself here without
-//! server code.
+//! CUDA family registration, device setup, memory admission and the native lane host.
 const std = @import("std");
 const cuda = @import("cuda");
 const api = @import("engine_api");
 const lanes = @import("lanes");
 const nemotron = @import("nemotron");
 const Allocator = std.mem.Allocator;
+const budget = @import("cuda_memory.zig");
+const Pool = budget.Pool;
 
-/// The CUDA families: namespaces with `model_type`, `formats`, `default_context`, `max_segments`, `prompt_rows`, `open`
-/// and `explain` (a request the family refuses, in words).
+/// CUDA families provide metadata, open their lane backend and explain their refusals.
 const registry = .{nemotron.native};
 
 pub const backends: []const []const u8 = &.{"cuda"};
@@ -97,86 +96,26 @@ fn weightBytes(io: std.Io, dir: []const u8) u64 {
     return total;
 }
 
-/// What /proc/meminfo says: MemTotal and MemAvailable in bytes (the page cache counts as available).
-const MemInfo = struct { total: u64, available: u64 };
-
-fn meminfo(text: []const u8) ?MemInfo {
-    var total: ?u64 = null;
-    var available: ?u64 = null;
-    var rows = std.mem.tokenizeScalar(u8, text, '\n');
-    while (rows.next()) |row| {
-        var words = std.mem.tokenizeAny(u8, row, ": \t");
-        const key = words.next() orelse continue;
-        const kib = std.fmt.parseInt(u64, words.next() orelse continue, 10) catch continue;
-        if (std.mem.eql(u8, key, "MemTotal")) total = kib * 1024 else if (std.mem.eql(u8, key, "MemAvailable")) available = kib * 1024;
-    }
-    return .{ .total = total orelse return null, .available = available orelse return null };
-}
-
-/// The memory a CUDA engine may take: a discrete card's free memory, or on a GPU that shares the host's memory (GB10)
-/// the host's available memory, both less a reserve, under TENSORFOLD_CUDA_MEMORY_LIMIT_GB.
-const Pool = struct {
-    free: u64,
-    total: u64,
-    reserve: u64,
-    limit: ?u64,
-    unified: bool,
-
-    /// Bytes the engine may still allocate on top of `held`.
-    fn room(p: Pool, held: u64) u64 {
-        const left = p.free -| p.reserve;
-        return if (p.limit) |cap| @min(left, cap -| held) else left;
-    }
-};
-
-/// TENSORFOLD_MEMORY_RESERVE_GIB (2 GiB up to the pool's size), else a tenth of the pool and at least 4 GiB.
-fn reserveBytes(text: ?[]const u8, total: u64) error{Invalid}!u64 {
-    const t = std.mem.trim(u8, text orelse "", " ");
-    if (t.len == 0) return @max(4 << 30, total / 10);
-    const g = std.fmt.parseFloat(f64, t) catch return error.Invalid;
-    if (!(g >= 2) or g * gib > @as(f64, @floatFromInt(total))) return error.Invalid;
-    return @intFromFloat(g * gib);
-}
-
-/// TENSORFOLD_CUDA_MEMORY_LIMIT_GB in bytes; null when unset.
-fn limitBytes(text: ?[]const u8) error{Invalid}!?u64 {
-    const t = std.mem.trim(u8, text orelse return null, " ");
-    if (t.len == 0) return null;
-    const g = std.fmt.parseFloat(f64, t) catch return error.Invalid;
-    if (!(g > 0) or !std.math.isFinite(g)) return error.Invalid;
-    return @intFromFloat(g * gib);
-}
-
 /// The pool now, read on the thread whose context is current; `problem` names a bad variable.
 fn pool(a: Allocator, io: std.Io, ctx: *const cuda.Context, problem: *[]const u8) !?Pool {
     const unified = (try ctx.attribute(.integrated)) != 0;
     const card = try ctx.memInfo();
-    var free: u64 = card.free;
-    var total: u64 = card.total;
-    if (unified) {
-        const text = std.Io.Dir.cwd().readFileAlloc(io, "/proc/meminfo", a, .limited(1 << 20)) catch "";
-        if (meminfo(text)) |m| {
-            free = m.available;
-            total = m.total;
-        }
-    }
-    const reserve = reserveBytes(getenv("TENSORFOLD_MEMORY_RESERVE_GIB"), total) catch {
+    const text = if (unified) std.Io.Dir.cwd().readFileAlloc(io, "/proc/meminfo", a, .limited(1 << 20)) catch null else null;
+    const available = budget.counts(unified, .{ .total = card.total, .available = card.free }, text) catch {
+        problem.* = "cannot read or parse /proc/meminfo's MemTotal and MemAvailable; refusing CUDA unified-memory admission";
+        return null;
+    };
+    const free = available.available;
+    const total = available.total;
+    const reserve = budget.reserveBytes(getenv("TENSORFOLD_MEMORY_RESERVE_GIB"), total) catch {
         problem.* = try std.fmt.allocPrint(a, "TENSORFOLD_MEMORY_RESERVE_GIB={s}: a number of GiB from 2 to the memory's size", .{getenv("TENSORFOLD_MEMORY_RESERVE_GIB").?});
         return null;
     };
-    const limit = limitBytes(getenv("TENSORFOLD_CUDA_MEMORY_LIMIT_GB")) catch {
-        problem.* = try std.fmt.allocPrint(a, "TENSORFOLD_CUDA_MEMORY_LIMIT_GB={s}: a positive number of GiB", .{getenv("TENSORFOLD_CUDA_MEMORY_LIMIT_GB").?});
+    const limit = budget.limitBytes(getenv("TENSORFOLD_CUDA_MEMORY_LIMIT_GB")) catch {
+        problem.* = try std.fmt.allocPrint(a, "TENSORFOLD_CUDA_MEMORY_LIMIT_GB={s}: a positive number of GiB whose byte count fits in a 64-bit size", .{getenv("TENSORFOLD_CUDA_MEMORY_LIMIT_GB").?});
         return null;
     };
     return .{ .free = free, .total = total, .reserve = reserve, .limit = limit, .unified = unified };
-}
-
-/// Streams the room fits, as many as asked when they all fit; an error when none does, or a fixed --parallel doesn't.
-fn admit(room: u64, stream: u64, asked: u32, fixed: bool) error{ NoStream, TooMany }!u32 {
-    const fits = if (stream == 0) asked else std.math.cast(u32, room / stream) orelse std.math.maxInt(u32);
-    if (fits == 0) return error.NoStream;
-    if (fits >= asked) return asked;
-    return if (fixed) error.TooMany else fits;
 }
 
 fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
@@ -388,7 +327,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     const model = cuda.usage(false).device - held0;
     const after = try pool(a, io, &g.ctx, problem) orelse return null;
     const room = after.room(model);
-    const streams = admit(room, loaded.stream_bytes, o.lanes, o.lanes_fixed) catch |e| {
+    const streams = budget.admit(room, loaded.stream_bytes, o.lanes, o.lanes_fixed) catch |e| {
         problem.* = switch (e) {
             error.NoStream => try std.fmt.allocPrint(a, "the CUDA memory budget fits no stream: one at a {d}-token window takes {d:.2} GiB, and {d:.2} GiB is left after the model's {d:.2} GiB and the {d:.1} GiB reserve; lower --context, or free device memory", .{ window, toGib(loaded.stream_bytes), toGib(room), toGib(model), toGib(after.reserve) }),
             error.TooMany => try std.fmt.allocPrint(a, "--parallel {d} needs {d:.2} GiB for its streams at a {d}-token window, and the CUDA memory budget leaves {d:.2} GiB: serve --parallel {d}, or lower --context", .{ o.lanes, toGib(loaded.stream_bytes * o.lanes), window, toGib(room), room / loaded.stream_bytes }),
@@ -440,33 +379,6 @@ test "context windows: the family default inside the model's, 0 for the model's,
     try std.testing.expectError(error.PastNative, contextWindow(300000, 262144, 16384));
     try std.testing.expectError(error.Negative, contextWindow(-5, 262144, 16384));
     try std.testing.expectError(error.NoNative, contextWindow(0, 0, 16384));
-}
-
-test "the memory plan: reserve, cap, and admission that fails closed" {
-    const g: u64 = 1 << 30;
-    try std.testing.expectEqual(4 * g, try reserveBytes(null, 24 * g)); // at least 4 GiB
-    try std.testing.expectEqual(12 * g, try reserveBytes("", 120 * g)); // a tenth
-    try std.testing.expectEqual(3 * g, try reserveBytes("3", 120 * g));
-    try std.testing.expectError(error.Invalid, reserveBytes("1", 120 * g));
-    try std.testing.expectError(error.Invalid, reserveBytes("200", 120 * g));
-    try std.testing.expectEqual(@as(?u64, null), try limitBytes(null));
-    try std.testing.expectEqual(@as(?u64, 40 * g), try limitBytes("40"));
-    try std.testing.expectError(error.Invalid, limitBytes("0"));
-    const p: Pool = .{ .free = 70 * g, .total = 96 * g, .reserve = 10 * g, .limit = null, .unified = false };
-    try std.testing.expectEqual(60 * g, p.room(20 * g));
-    const capped: Pool = .{ .free = 70 * g, .total = 96 * g, .reserve = 10 * g, .limit = 30 * g, .unified = false };
-    try std.testing.expectEqual(10 * g, capped.room(20 * g)); // the cap less what the engine holds
-    try std.testing.expectEqual(@as(u32, 8), try admit(60 * g, g, 8, false));
-    try std.testing.expectEqual(@as(u32, 5), try admit(5 * g + 1, g, 8, false)); // auto serves what fits
-    try std.testing.expectError(error.TooMany, admit(5 * g, g, 8, true)); // a fixed --parallel refuses
-    try std.testing.expectError(error.NoStream, admit(g - 1, g, 8, false));
-}
-
-test "meminfo: total and available in bytes" {
-    const m = meminfo("MemTotal:       131072 kB\nMemFree:          1024 kB\nMemAvailable:    65536 kB\n").?;
-    try std.testing.expectEqual(@as(u64, 131072 * 1024), m.total);
-    try std.testing.expectEqual(@as(u64, 65536 * 1024), m.available);
-    try std.testing.expect(meminfo("MemTotal: 5 kB\n") == null);
 }
 
 test "a cancel during a long prompt stops it, and the next request's reply is unchanged (#291)" {
