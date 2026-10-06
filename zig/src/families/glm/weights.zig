@@ -1,5 +1,4 @@
-//! GLM-5.3-Flash's weights in the Python family's layout: projections of one input stacked by rows, routed experts
-//! stacked by expert, HC mixes and the router repacked, KDA constants in fp32. Read with parallel uncached preads.
+//! GLM-5.3-Flash's weights in the Python family's layout (stacked projections and experts, repacked mixes), read by parallel preads.
 const std = @import("std");
 const mtl = @import("metal");
 const st = @import("../../core/safetensors.zig");

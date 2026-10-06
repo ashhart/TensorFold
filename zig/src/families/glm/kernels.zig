@@ -1,5 +1,4 @@
-//! GLM-5.3-Flash's pipelines, compiled at run time with MLX's custom-kernel options: the Python family's kernels
-//! (generated, one library each as MLX builds them), our glue, and the MLX replicas for softmax and embedding.
+//! GLM-5.3-Flash's pipelines, compiled at run time: the Python family's kernels (generated), our glue and latent attention.
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");

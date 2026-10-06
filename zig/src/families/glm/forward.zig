@@ -1,5 +1,4 @@
-//! A window of 1-16 rows at consecutive positions through GLM-5.3-Flash on one serial encoder, each op in the Python
-//! family's decode arithmetic: HC boundaries, KDA or MLA, dense MLP or MoE, the final norm, the LM head and argmax.
+//! A window of 1-16 consecutive rows through GLM-5.3-Flash on one serial encoder, each op in the Python family's decode arithmetic.
 const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
@@ -94,8 +93,7 @@ pub fn embedRows(x: *const Ctx, e: mtl.ComputeEncoder, ids: Ref, out: Ref, rows:
     e.dispatchThreads(size(x.c.hidden / 2, rows, 1), size(256, 1, 1));
 }
 
-/// A block boundary (model.boundary): the pending branch written back into the streams, then the next block's
-/// mix, Sinkhorn split and RMSNorm into `normed`, `post` and `comb` (no `hc`: the write-back only).
+/// A block boundary: the pending branch into the streams, then (with `hc`) the next block's mix, split and norm.
 pub fn boundary(x: *Ctx, e: mtl.ComputeEncoder, rows: u32, pending: bool, hc: ?wts.Hc, norm: ?Ref) void {
     const sc = x.sc;
     const k = x.k;
@@ -116,8 +114,7 @@ pub fn boundary(x: *Ctx, e: mtl.ComputeEncoder, rows: u32, pending: bool, hc: ?w
     e.dispatchThreads(size(1024 * rows, 1, 1), size(1024, 1, 1));
 }
 
-/// KDA layer `ki` (its index among KDA layers) on `normed`: the stacked projection kept for a replay, the fused step
-/// from the state at `cur` into the other slot, the out-projection into `branch`.
+/// KDA layer `ki` on `normed`: the stacked projection (kept for a replay), the fused step into the other slot, the out-projection.
 fn kda(x: *Ctx, e: mtl.ComputeEncoder, ki: usize, w: *const wts.Kda, rows: u32) void {
     const sc = x.sc;
     const L = &x.s.kda[ki];
@@ -168,8 +165,7 @@ pub fn mla(x: *Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.Mla, x_in: R
     qmv(x, e, k.qmv_mla_out, sc.vals, w.o_proj, sc.branch, rows);
 }
 
-/// Rows' latent keys, indexer keys and gates into MLA cache `mi` at positions pos.., their indexer head weights into
-/// `iw`, and the pooled blocks they complete (`xp`: the x_proj rows, `xp_stride` apart).
+/// Rows' latent keys, indexer keys and gates into MLA cache `mi` at pos.., their indexer weights into `iw`, the blocks they complete.
 pub fn mlaCache(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.Mla, x_in: Ref, xp: Ref, xp_stride: u32, iw: Ref, rows: u32, pos: u32) void {
     const c = x.c;
     const k = x.k;
@@ -215,8 +211,7 @@ pub fn unabsorb(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Mla, att: Re
     e.dispatchGroups(size(1, c.v_dim / 4, rows * c.mla_heads), size(32, 1, 1));
 }
 
-/// One query row's 64 heads over keys [0, n), as MLX's unfused attention runs them: the heads folded into one 64-row
-/// matrix against the latent keys (scores, a precise softmax, values), bf16 [heads, n] scores and probabilities.
+/// One row's 64 heads over keys [0, n) as one 64-row matrix against the latent keys: scores, a precise softmax, values.
 pub fn attendDense(x: *const Ctx, e: mtl.ComputeEncoder, keys: Ref, q: Ref, scores: Ref, probs: Ref, out: Ref, n: u32) void {
     const k = x.k;
     const H = x.c.mla_heads;
@@ -235,8 +230,7 @@ pub fn attendDense(x: *const Ctx, e: mtl.ComputeEncoder, keys: Ref, q: Ref, scor
     e.dispatchGroups(size(x.c.kv_lora / 32, 1, 1), size(128, 1, 1));
 }
 
-/// Rows [first, rows) past index_topk keys: fp32 block scores, the best blocks in block order plus the tail,
-/// then the sparse kernel over those keys (Python's indexed attention).
+/// Rows [first, rows) past index_topk keys: fp32 block scores, the best blocks in block order plus the tail, the sparse kernel.
 fn attendSparse(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, rows: u32, pos: u32, first: u32) void {
     const c = x.c;
     const sc = x.sc;
@@ -283,8 +277,7 @@ fn denseMlp(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Dense, x_in: Ref
     qmv(x, e, x.k.qmv_dense_down, sc.actd, w.down, sc.branch, rows);
 }
 
-/// The MoE block (moe.moe_rows): the shared expert, the router and route, routed gate/up and down, the combine.
-/// Expert parallel: the route, this Mac's routed experts, their outputs sent, the shared expert, the peer's received.
+/// The MoE block (shared expert, route, routed experts, combine); expert parallel: this Mac's experts, sent, the peer's received.
 pub fn moe(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, rows: u32) void {
     std.debug.assert(rows <= st.max_rows);
     const c = x.c;
@@ -408,8 +401,7 @@ pub fn head(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, logits: Ref, picks: R
     e.dispatchGroups(size(rows, 1, 1), size(1024, 1, 1));
 }
 
-/// After a window's rows are judged: keep its first `keep` of `rows` in every KDA layer (a replay of the kept rows
-/// from the round's entry state when some were rejected), then make the result current.
+/// A judged window's first `keep` of `rows` in every KDA layer (replayed from the round's entry state when some were rejected).
 pub fn keepKda(x: *Ctx, e: mtl.ComputeEncoder, rows: u32, keep: u32) void {
     var ki: usize = 0;
     for (0..x.c.run) |li| {

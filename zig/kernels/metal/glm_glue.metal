@@ -115,9 +115,7 @@ kernel void glm_layer_norm(const device bfloat* x [[buffer(0)]], const device bf
   }
 }
 
-// MLX's affine_qvm (4-bit, groups of 64): the absorb q_nope [b, 256] @ W_k[h] [256, 512] with h = b % HEADS, the
-// key rows of kv_b (head h's rows h * 512 + k), queries q_stride apart a row. A simdgroup 32 output columns, lane =
-// input row, 32 inputs a block.
+// The absorb q_nope [b, 256] @ W_k[h] [256, 512] (h = b % HEADS, kv_b's key rows) in affine_qvm's 4-bit sum order.
 kernel void glm_absorb(const device uint32_t* w [[buffer(0)]], const device bfloat* scales [[buffer(1)]],
                        const device bfloat* biases [[buffer(2)]], const device bfloat* x [[buffer(3)]],
                        device bfloat* y [[buffer(4)]], constant uint& q_stride [[buffer(5)]],
@@ -154,8 +152,7 @@ kernel void glm_absorb(const device uint32_t* w [[buffer(0)]], const device bflo
     for (int k = 0; k < 32; k++) yp[k] = static_cast<bfloat>(result[k]);
 }
 
-// MLX's qmv_fast (4-bit, groups of 64) batched by head: the unabsorb latent [b, 512] -> values [b, 256] with the
-// value rows of kv_b (head h's rows h * 512 + 256 + n). A simdgroup 4 outputs (the qmv_rows sums).
+// The unabsorb latent [b, 512] -> values [b, 256] (kv_b's value rows) in qmv_fast's 4-bit sum order, batched by head.
 inline float glm_load16(const device bfloat* x, thread float* xt) {
   float sum = 0.0f;
   for (int i = 0; i < 16; i += 4) {
@@ -308,8 +305,7 @@ kernel void glm_argmax(const device bfloat* logits [[buffer(0)]], device uint* o
   if (lane == 0) out[row] = at;
 }
 
-// Rows' block scores in fp32 (no bf16 rounding between steps): sum_h w_h relu(q_h . pool_b), heads in order. Row r
-// sits at position p0 + r and scores its (p0 + r + 1) / 4 whole blocks.
+// Row r's (position p0 + r) fp32 block scores over its whole blocks: sum over heads in order of w_h relu(q_h . pool_b).
 struct GlmScoreArgs {
   uint p0, q_stride, w_stride, s_stride;
 };
@@ -342,8 +338,7 @@ kernel void glm_index_scores(const device bfloat* iq [[buffer(0)]], const device
   if (lane == 0) scores[size_t(row) * a.s_stride + blk] = total;
 }
 
-// Row r's key list (position p0 + r) for sparse attention: its TOP best blocks (ties: lower block first) as 4 keys
-// each in block order, then the tail keys of its partial block, -1 to `width`. 1024 threads: a radix select.
+// Row r's key list: its TOP best blocks (ties: lower block) as keys in block order, its tail, -1 to `width` (a radix select).
 struct GlmSelectArgs {
   uint p0, top, width, s_stride, i_stride;
 };
@@ -464,8 +459,7 @@ kernel void glm_copy_u32(const device uint* src [[buffer(0)]], device uint* dst 
   if (i < n) dst[i] = src[i];
 }
 
-// The prompt's routing: row r's top TOPK experts by sigmoid + bias and their weights, the decode route's arithmetic
-// (moe_route's per-row loop), one simdgroup a row.
+// The prompt's routing: each row's top experts and weights in the decode route's arithmetic, one simdgroup a row.
 template <typename U>
 inline U glm_sigmoid_precise(U x) {
   U e = static_cast<U>(metal::precise::exp(metal::abs(x)));

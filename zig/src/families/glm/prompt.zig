@@ -1,5 +1,4 @@
-//! Prompt chunks of up to `max_rows` rows: projections and routed experts on the M5 tensor units (MLX's NAX qmm and
-//! sorted-expert gather), every other op the decode path's row kernels over all the chunk's rows.
+//! Prompt chunks of up to `max_rows` rows: projections and routed experts on the M5 tensor units, the rest on the row kernels.
 const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
@@ -180,8 +179,7 @@ fn add(x: *const fwd.Ctx, e: mtl.ComputeEncoder, a: Ref, b: Ref, out: Ref, n: u3
     e.dispatchThreads(size(n, 1, 1), size(256, 1, 1));
 }
 
-/// The MoE block on M rows: the shared expert, routing (the decode router 16 rows at a time, the decode route's
-/// arithmetic), a stable sort of (row, slot) pairs by expert, gathered gate/up/down, then the decode combine.
+/// The MoE block on M rows: shared expert, decode routing, (row, slot) pairs sorted by expert, gathered gate/up/down, the combine.
 fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, M: u32) void {
     const c = x.c;
     const k = x.k;
@@ -255,8 +253,7 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
     e.dispatchThreads(size(M * D, 1, 1), size(256, 1, 1));
 }
 
-/// MLA layer `mi` on M rows at positions pos..: tensor-unit projections, the decode path's cache writes, absorb and
-/// unabsorb, and every row through the sparse kernel over its key list (all keys up to index_topk, else selected).
+/// MLA layer `mi` on M rows at pos..: tensor-unit projections, the decode cache writes, each row's key list in the sparse kernel.
 fn mla(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.Mla, x_in: Ref, M: u32, pos: u32) void {
     const c = x.c;
     const XP: u32 = @intCast(std.mem.alignForward(usize, c.xProj(), 64));
@@ -328,8 +325,7 @@ pub fn backbone(p: *const Prompt, x: *fwd.Ctx, e: mtl.ComputeEncoder, ids: Ref, 
     fwd.rms(x, e, ss.raw, x.w.norm, ss.hidden, M, c.hidden, c.hidden, c.hidden, c.eps);
 }
 
-/// The MTP head over M prompt rows (final-normed `h`, the tokens after them in `next`) at head positions pos..: the
-/// rows enter its cache; the drafts come later, from the decode path.
+/// The MTP head over M prompt rows (`h` with their next tokens) at head positions pos..: the rows enter its cache only.
 pub fn mtp(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, h: Ref, next: Ref, M: u32, pos: u32) void {
     const c = x.c;
     const D = c.hidden;

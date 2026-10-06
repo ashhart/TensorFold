@@ -1,5 +1,4 @@
-//! GLM-5.3-Flash behind the native server: one greedy reply at a time on the GLM engine; the engine's thread owns
-//! the GPU and requests wait in arrival order (foreground first). Speed-up mode: rank 0 serves, rank 1 follows it.
+//! GLM-5.3-Flash behind the native server: one greedy reply at a time, in arrival order; speed-up mode: rank 0 serves, rank 1 follows.
 const std = @import("std");
 const mtl = @import("metal");
 const api = @import("engine_api");
@@ -277,8 +276,7 @@ pub const Host = struct {
     }
 };
 
-/// The engine for a GLM-5.3-Flash checkpoint with caches for `window` tokens, warmed with a short reply (both Macs in
-/// speed-up mode, whose settings `speed_up` names), served.
+/// The engine for a GLM-5.3-Flash checkpoint, `window` tokens of cache, warmed and served (speed-up settings in `speed_up`).
 pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: ?[]const u8) !*Host {
     const eng = try ge.Engine.loadWith(gpa, dir, window + 64, speed_up);
     errdefer eng.deinit();

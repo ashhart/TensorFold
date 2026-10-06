@@ -1,5 +1,4 @@
-//! A sequence's state and a window's scratch: KDA states and conv windows (a round's entry and its result), the MLA
-//! layers' latent keys, indexer keys, gates and pooled blocks (the MTP head's last), and every buffer a window uses.
+//! A sequence's state (KDA states by slot, MLA caches, the MTP head's last) and a window's scratch.
 const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
