@@ -9,6 +9,7 @@ const mtp = @import("mtp.zig");
 const prompt_mod = @import("prompt.zig");
 const kernels = @import("kernels.zig");
 const ep_mod = @import("ep.zig");
+const affine_mm = @import("../../core/affine_mm.zig");
 const Ref = wts.Ref;
 
 pub const Reason = enum { stop, length, cancelled };
@@ -451,6 +452,43 @@ pub const Engine = struct {
             std.debug.print("profile {d} rows{s}: {s:<10} {d:7.3} ms (min {d:.3}, max {d:.3}){s}", .{ R, if (only) " only" else "", name, med, times[0], times[reps - 1], if (mask == 0 or only or mask == 0xffff_ffff) "\n" else "" });
             if (mask != 0 and !only and mask != 0xffff_ffff) std.debug.print("  class {d:6.3} ms {d:5.1}%\n", .{ full - med, 100 * (full - med) / full });
         }
+    }
+
+    /// The chunk path's matmul against the decode's row kernel on up to 16 prompt rows through layer 0's KDA
+    /// in-projection (the real input: embedded, through the first boundary): the share of bf16 outputs that differ.
+    pub fn checkMatmul(e: *Engine, prompt: []const u32) !void {
+        const pr = &(e.pr orelse return error.NoPromptPath);
+        const rows: u32 = @intCast(@min(prompt.len, st.max_rows));
+        const L = &e.w.layers[0];
+        const a = switch (L.attn) {
+            .kda => |*a| a,
+            .mla => return error.NotKda,
+        };
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        e.sync();
+        e.s.reset();
+        @memcpy(u32s(e.prompt_ids, rows), prompt[0..rows]);
+        const N = a.in_proj.n;
+        const out = try e.arena.buffer(@as(usize, rows) * N * 2);
+        var x = e.ctx();
+        const b = e.begin();
+        fwd.embed(&x, b.enc, e.prompt_ids, rows);
+        fwd.boundary(&x, b.enc, rows, false, L.hc.?[0], L.in_norm);
+        fwd.qmv(&x, b.enc, e.k.qmv_kda_in, e.sc.normed, a.in_proj, out, rows);
+        affine_mm.rowSums(b.enc, e.k.mm_bf16, 64, e.sc.normed, pr.sums, rows, a.in_proj.k);
+        affine_mm.dense(b.enc, e.k.mm_bf16, e.sc.normed, pr.sums, a.in_proj, pr.proj, rows);
+        try e.finish(b.cb, b.enc);
+        const want: [*]const u16 = @ptrCast(@alignCast(out.addr()));
+        const got: [*]const u16 = @ptrCast(@alignCast(pr.proj.addr()));
+        var differ: usize = 0;
+        var worst: u32 = 0;
+        for (0..@as(usize, rows) * N) |i| if (want[i] != got[i]) {
+            differ += 1;
+            const d = @as(i32, @as(i16, @bitCast(want[i]))) - @as(i32, @as(i16, @bitCast(got[i])));
+            worst = @max(worst, @abs(d));
+        };
+        std.debug.print("matmul check (layer 0 KDA in-projection, {d} rows x {d}): {d} of {d} bf16 outputs differ ({d:.3}%), at most {d} steps\n", .{ rows, N, differ, @as(usize, rows) * N, 100 * @as(f64, @floatFromInt(differ)) / @as(f64, @floatFromInt(@as(usize, rows) * N)), worst });
     }
 
     /// A prompt chunk's GPU time by class on the first rows of `prompt` (up to a chunk; median of `reps` after a warm run):

@@ -87,12 +87,26 @@ const source =
     \\  if (theirs) THEIRS[o2 + b2] = i;
     \\  if (t == 0) { LCOUNT[0] = n0; COUNTS[0] = n1; COUNTS[1] = n2; atomic_store_explicit(CNT, uint(n1), memory_order_relaxed); }
     \\}
+    \\// A send slot is reused every second exchange: before exchange x writes it, the peer's exchange x - 1 must have
+    \\// landed here. The peer posts x - 1 only after our x - 2 (the slot's last use) reached it, so the link is done reading
+    \\// the slot. Thread 0 of each threadgroup waits; a give-up is counted, never silent.
+    \\inline void ep_slot_free(device atomic_uint* flag, uint x, device atomic_uint* gave_up, uint t) {
+    \\  if (t == 0) {
+    \\    uint polls = 0;
+    \\    while (int(atomic_load_explicit(flag, memory_order_relaxed) - (x - 1u)) < 0) {
+    \\      if (++polls > 400000000u) { atomic_fetch_add_explicit(gave_up, 1u, memory_order_relaxed); break; }
+    \\    }
+    \\  }
+    \\  threadgroup_barrier(mem_flags::mem_device);
+    \\}
     \\// this Mac's picks' outputs (Y [picks, 4096] bf16) packed in MINE order for the peer; a threadgroup a pick
     \\kernel void ep_pack(const device uint* Y [[buffer(0)]], const device int* MINE [[buffer(1)]],
-    \\    const device int* COUNTS [[buffer(2)]], device uint* OUT [[buffer(3)]], uint3 tg [[threadgroup_position_in_grid]],
+    \\    const device int* COUNTS [[buffer(2)]], device uint* OUT [[buffer(3)]], device atomic_uint* flag [[buffer(4)]],
+    \\    constant uint& x [[buffer(5)]], device atomic_uint* gave_up [[buffer(6)]], uint3 tg [[threadgroup_position_in_grid]],
     \\    uint3 tpos [[thread_position_in_threadgroup]]) {
     \\  const int i = int(tg.y);
     \\  const uint t = tpos.x;
+    \\  ep_slot_free(flag, x, gave_up, t);
     \\  if (i >= COUNTS[0]) return;
     \\  const device uint* src = Y + size_t(MINE[i]) * WORDS;
     \\  device uint* dst = OUT + size_t(i) * WORDS;
@@ -105,7 +119,9 @@ const source =
     \\#pragma clang fp contract(on)
     \\kernel void ep_rcombine(const device float* YP [[buffer(0)]], const device float* WTS [[buffer(1)]],
     \\    constant int& rows [[buffer(2)]], device float* OUT [[buffer(3)]], device atomic_uint* CNT [[buffer(4)]],
-    \\    uint gid [[thread_position_in_grid]]) {
+    \\    device atomic_uint* flag [[buffer(5)]], constant uint& x [[buffer(6)]], device atomic_uint* gave_up [[buffer(7)]],
+    \\    uint gid [[thread_position_in_grid]], uint t [[thread_index_in_threadgroup]]) {
+    \\  ep_slot_free(flag, x, gave_up, t);
     \\  const int r = int(gid) / 4096, d = int(gid) % 4096;
     \\  if (gid == 0) atomic_store_explicit(CNT, uint(rows * 2), memory_order_relaxed);
     \\  if (r >= rows) return;
@@ -117,7 +133,10 @@ const source =
     \\// the same sums from a prompt chunk's partials in expert order (SORTED [rows * TOPK, 4096] fp32): each pick's at INV
     \\kernel void ep_rcombine_sorted(const device float* SORTED [[buffer(0)]], const device uint* INV [[buffer(1)]],
     \\    const device float* WTS [[buffer(2)]], constant int& rows [[buffer(3)]], device float* OUT [[buffer(4)]],
-    \\    device atomic_uint* CNT [[buffer(5)]], uint gid [[thread_position_in_grid]]) {
+    \\    device atomic_uint* CNT [[buffer(5)]], device atomic_uint* flag [[buffer(6)]], constant uint& x [[buffer(7)]],
+    \\    device atomic_uint* gave_up [[buffer(8)]], uint gid [[thread_position_in_grid]],
+    \\    uint t [[thread_index_in_threadgroup]]) {
+    \\  ep_slot_free(flag, x, gave_up, t);
     \\  const int r = int(gid) / 4096, d = int(gid) % 4096;
     \\  if (gid == 0) atomic_store_explicit(CNT, uint(rows * 2), memory_order_relaxed);
     \\  if (r >= rows) return;
@@ -194,6 +213,7 @@ pub const Ep = struct {
     stop: std.atomic.Value(bool) = .init(false),
     failed: std.atomic.Value(bool) = .init(false),
     trace: bool = false, // GLM_EP_TRACE: log every exchange the host sends
+    delay_ns: u64 = 0, // GLM_EP_DELAY_US: hold every send this long (a slow link, for the slot guard's stress test)
     sent: u64 = 0, // exchanges the host has sent
     held_ticks: u64 = 0, // their time from the GPU's post to the send returning
     st: Stats = .{}, // when the peer's entries land against our post, and how the picks split
@@ -230,6 +250,7 @@ pub const Ep = struct {
         errdefer t.ctl.deinit(gpa);
         _ = try t.ctl.hello(me); // both Macs up, running the same thing, before the first exchange
         t.trace = std.c.getenv("GLM_EP_TRACE") != null;
+        if (std.c.getenv("GLM_EP_DELAY_US")) |v| t.delay_ns = 1000 * (std.fmt.parseInt(u64, std.mem.span(v), 10) catch 0);
         t.thread = try std.Thread.spawn(.{}, service, .{t});
         std.log.info("expert parallel: rank {d} of 2 holds experts {d}-{d}, connected", .{ t.rank, me.own_lo, me.own_hi - 1 });
         return t;
@@ -296,6 +317,7 @@ pub const Ep = struct {
             enc.setBuffer(t.lists, MINE, 1);
             enc.setBuffer(t.lists, COUNTS, 2);
             enc.setBuffer(t.wbuf, sendAt(t.x), 3);
+            t.slotGuard(enc, 4);
             enc.dispatchGroups(mtl.Size.of(1, rows * TOPK, 1), mtl.Size.of(256, 1, 1));
         }
         if (!post) return;
@@ -313,8 +335,16 @@ pub const Ep = struct {
         enc.setValue(@as(i32, @intCast(rows)), 2);
         enc.setBuffer(t.wbuf, sendAt(t.x), 3);
         enc.setBuffer(t.wbuf, COUNT + 4 * @as(usize, @intCast(t.x % 2)), 4);
+        t.slotGuard(enc, 5);
         enc.dispatchThreads(mtl.Size.of(rows * 4096, 1, 1), mtl.Size.of(256, 1, 1));
         t.send(enc, yp, rows, false, true);
+    }
+
+    /// The send slot guard's operands (ep_slot_free) from buffer index `first`: the flag, this exchange, the give-up count.
+    fn slotGuard(t: *const Ep, enc: mtl.ComputeEncoder, first: usize) void {
+        enc.setBuffer(t.wbuf, FLAG, first);
+        enc.setValue(@as(u32, @truncate(t.x)), first + 1);
+        enc.setBuffer(t.wbuf, GAVE_UP, first + 2);
     }
 
     /// By rows, a prompt chunk: the same sums from fp32 partials in expert order (`sorted`, each pick's row at `inverse`).
@@ -327,6 +357,7 @@ pub const Ep = struct {
         enc.setValue(@as(i32, @intCast(rows)), 3);
         enc.setBuffer(t.wbuf, sendAt(t.x), 4);
         enc.setBuffer(t.wbuf, COUNT + 4 * @as(usize, @intCast(t.x % 2)), 5);
+        t.slotGuard(enc, 6);
         enc.dispatchThreads(mtl.Size.of(rows * 4096, 1, 1), mtl.Size.of(256, 1, 1));
         t.send(enc, sorted, rows, false, true);
     }
@@ -398,6 +429,10 @@ pub const Ep = struct {
             t.st.posted(x, seen, @intCast(n), theirs);
             t.st.watch(@atomicLoad(u64, flag, .acquire), x);
             if (t.trace) std.debug.print("EP rank{d} exchange {d}: {d} entries\n", .{ t.rank, x, n });
+            if (t.delay_ns > 0) {
+                const ts: std.c.timespec = .{ .sec = @intCast(t.delay_ns / std.time.ns_per_s), .nsec = @intCast(t.delay_ns % std.time.ns_per_s) };
+                _ = std.c.nanosleep(&ts, null);
+            }
             if (t.failed.load(.acquire) or n * ENTRY > SLOT) {
                 if (n * ENTRY > SLOT) t.fail(x, error.BadCount);
                 t.land(x);

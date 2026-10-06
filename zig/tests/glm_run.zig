@@ -227,6 +227,7 @@ pub fn main(init: std.process.Init) !void {
         const parts = std.c.getenv("GLM_PROFILE_PARTS") != null; // by launch instead of by class
         while (pit.next()) |dv| try e.profile(try std.fmt.parseInt(u32, dv, 10), reps, only, parts);
     }
+    if (std.c.getenv("GLM_MM_CHECK") != null) try e.checkMatmul(try ints(arena, doc.object.get("prompts").?.array.items[0].object.get("ids").?));
     if (std.c.getenv("GLM_PROMPT_PROFILE")) |v| { // each prompt's first chunk by class (GLM_PROFILE_ONLY: each alone)
         const reps = try std.fmt.parseInt(usize, std.mem.span(v), 10);
         for (doc.object.get("prompts").?.array.items) |p| try e.profilePrompt(try ints(arena, p.object.get("ids").?), reps, std.c.getenv("GLM_PROFILE_ONLY") != null);
