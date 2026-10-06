@@ -4,6 +4,9 @@
 #include <metal_stdlib>
 using namespace metal;
 
+#ifndef TF_OUT_T
+#define TF_OUT_T float
+#endif
 constant constexpr int ITERS = TF_K / 32;
 constant constexpr int PER = (TF_E + 31) / 32;
 
@@ -11,7 +14,7 @@ constant constexpr int PER = (TF_E + 31) / 32;
 // weights and the rows' x staged a quarter of K at a time. Lane thrM * 4 + c of simdgroup 0 takes row 4 tg.y + c: its
 // sums over k = 32 it + 4 thrM + tm in order, then the tree over thrM (the one-row kernel's order).
 [[kernel]] void tf_route_logits(const device bfloat* X [[buffer(0)]], const device uint4* RP [[buffer(1)]],
-                                constant int& rows [[buffer(2)]], device float* OUT [[buffer(3)]],
+                                constant int& rows [[buffer(2)]], device TF_OUT_T* OUT [[buffer(3)]],
                                 uint2 tg [[threadgroup_position_in_grid]], uint2 tpos [[thread_position_in_threadgroup]],
                                 uint lane [[thread_index_in_simdgroup]], uint s [[simdgroup_index_in_threadgroup]]) {
   constexpr int QI = ITERS / 4; // iterations a quarter
@@ -58,7 +61,7 @@ constant constexpr int PER = (TF_E + 31) / 32;
   for (int tn = 0; tn < 4; tn++) {
     float v = acc[tn];
     for (ushort sm = 4; sm >= 1; sm >>= 1) v += simd_shuffle_down(v, 4 * sm);
-    if (thrM == 0 && r < rows) OUT[size_t(r) * TF_E + 4 * q + tn] = v;
+    if (thrM == 0 && r < rows) OUT[size_t(r) * TF_E + 4 * q + tn] = static_cast<TF_OUT_T>(v);
   }
 }
 

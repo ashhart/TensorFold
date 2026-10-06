@@ -235,13 +235,7 @@ pub fn mlaCache(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.M
     bind(e, 0, .{ xp.at((c.q_lora + RANK) * 2), w.k_norm_w, w.k_norm_b, C.ik.at(@as(usize, pos) * c.i_dim * 2) });
     e.setValue(Rows{ .rows = @intCast(rows), .width = @intCast(c.i_dim), .x_stride = @intCast(xp_stride), .y_stride = @intCast(c.i_dim), .eps = 1e-6 }, 4);
     e.dispatchGroups(size(rows, 1, 1), size(32, 1, 1));
-    e.setPipeline(k.gemv_t_igate);
-    bind(e, 0, .{x_in});
-    shape(e, 1, .{ rows, c.hidden });
-    bind(e, 2, .{w.igate});
-    shape(e, 3, .{ c.hidden, c.i_dim });
-    bind(e, 4, .{C.ig.at(@as(usize, pos) * c.i_dim * 2)});
-    e.dispatchThreads(size(4 * 64, 1, rows), size(64, 1, 1));
+    moe_route.logits(e, k.igate_logits, @import("kernels.zig").igate_shape, x_in, w.igate, C.ig.at(@as(usize, pos) * c.i_dim * 2), rows); // MLX's gemv_t sums, more threadgroups
     scale(x, e, xp.at((c.q_lora + RANK + c.i_dim) * 2), iw, rows, c.i_heads, xp_stride, c.i_heads, 1.0 / 64.0);
     const first = pos / c.kpool;
     const last = (pos + rows) / c.kpool;

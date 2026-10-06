@@ -38,7 +38,7 @@ pub const Hc = struct { fnp: Ref, base: Ref, scale: Ref };
 
 pub const Kda = struct { in_proj: Q4, f_b: Q4, g_b: Q4, o_proj: Q4, conv_w: Ref, a_log: Ref, a: Ref, dt_bias: Ref, o_norm: Ref };
 
-pub const Mla = struct { x_proj: Q4, qr_proj: Q4, kv_b: Q4, o_proj: Q4, q_norm: Ref, kv_norm: Ref, k_norm_w: Ref, k_norm_b: Ref, ape: Ref, igate: Ref };
+pub const Mla = struct { x_proj: Q4, qr_proj: Q4, kv_b: Q4, o_proj: Q4, q_norm: Ref, kv_norm: Ref, k_norm_w: Ref, k_norm_b: Ref, ape: Ref, igate: Ref }; // igate packed as a router
 
 pub const Dense = struct { gate_up: Q4, down: Q4 };
 
@@ -269,7 +269,7 @@ const Loader = struct {
             .k_norm_w = try l.plain(a ++ "indexer.k_norm.weight", .{i}, .bf16, &.{c.i_dim}),
             .k_norm_b = try l.plain(a ++ "indexer.k_norm.bias", .{i}, .bf16, &.{c.i_dim}),
             .ape = try l.plain(a ++ "indexer.index_kpool_compress_ape", .{i}, .bf16, &.{ c.kpool, c.i_dim }),
-            .igate = try l.fixed(gate, gate.len, .transpose_bf16),
+            .igate = try l.fixed(gate, gate.len, .router_pack), // core/moe_route.zig's layout: the gate is the same gemv_t
         };
     }
 

@@ -8,6 +8,8 @@ const hc = @import("../../core/hc.zig");
 
 /// The route's shape (config.zig refuses other checkpoints).
 pub const route_shape: moe_route.Shape = .{ .hidden = 4096, .experts = 288, .topk = 8 };
+/// The MLA indexer's key gate as the same gemv_t (x [rows, 4096] times the packed [128, 4096] gate, bf16 out).
+pub const igate_shape: moe_route.Shape = .{ .hidden = 4096, .experts = 128, .topk = 8, .out_bf16 = true };
 
 pub const max_rows = 16;
 
@@ -66,6 +68,7 @@ pub const Kernels = struct {
     latent_values: mtl.Pipeline,
     route_logits: mtl.Pipeline,
     route_select: mtl.Pipeline,
+    igate_logits: mtl.Pipeline,
     hc_expand: mtl.Pipeline, // the one-launch boundary (core/hc.zig), with the pending branch
     hc_first: mtl.Pipeline, // and without
     hc_mix_split: mtl.Pipeline, // the mix and, by the last threadgroup of a row, the split (after the family's expand)
@@ -158,7 +161,7 @@ fn kernelOf(comptime key: []const u8) sources.glm.Kernel {
 pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const k = try gpa.create(Kernels);
     errdefer gpa.destroy(k);
-    var jobs: [generated.len + 6]Job = undefined;
+    var jobs: [generated.len + 7]Job = undefined;
     inline for (generated, 0..) |g, i| {
         const src = comptime kernelOf(g.key);
         const FT = @FieldType(Kernels, g.field);
@@ -187,6 +190,10 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const hc_src = try hc.source(gpa, .{ .width = 4096, .sinkhorn = 20, .eps_e9 = 1000 });
     defer gpa.free(hc_src);
     var hc_out: [3]mtl.Pipeline = undefined;
+    const igate_src = try moe_route.source(gpa, igate_shape);
+    defer gpa.free(igate_src);
+    var igate_out: [1]mtl.Pipeline = undefined;
+    jobs[generated.len + 6] = .{ .device = device, .source = igate_src, .names = &.{moe_route.names[0]}, .out = &igate_out };
     jobs[generated.len + 5] = .{ .device = device, .source = hc_src, .names = &hc.names, .out = &hc_out };
     var next = std.atomic.Value(usize).init(0);
     const Worker = struct {
@@ -208,6 +215,7 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     k.latent_values = attn_out[1];
     k.route_logits = route_out[0];
     k.route_select = route_out[1];
+    k.igate_logits = igate_out[0];
     k.hc_expand = hc_out[0];
     k.hc_first = hc_out[1];
     k.hc_mix_split = hc_out[2];
