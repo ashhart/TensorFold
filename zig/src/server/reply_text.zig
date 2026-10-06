@@ -209,6 +209,11 @@ pub fn pyStrip(s: []const u8) []const u8 {
     return s[start..end];
 }
 
+/// ``str.lstrip()``: the leading whitespace off.
+pub fn pyLstrip(s: []const u8) []const u8 {
+    return s[@intFromPtr(pyStrip(s).ptr) - @intFromPtr(s.ptr) ..];
+}
+
 /// ``str.rstrip()``: the trailing whitespace off.
 pub fn pyRstrip(s: []const u8) []const u8 {
     const stripped = pyStrip(s);

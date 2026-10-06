@@ -299,7 +299,43 @@ pub const Policy = struct {
         const head = try f.feed(a, s);
         return std.mem.concat(a, u8, &.{ head, f.finish() });
     }
+
+    /// ``parsed_content``: a parsed reply's content, the whole envelopes the parser left as text kept and the rest
+    /// filtered, so an unclosed envelope stays hidden.
+    pub fn parsedContent(p: *const Policy, a: Allocator, s: []const u8) Allocator.Error![]const u8 {
+        if (!p.single) return s;
+        var out: std.ArrayList(u8) = .empty;
+        var cursor: usize = 0;
+        while (try wholeEnvelope(a, s, cursor)) |e| : (cursor = e.end) {
+            try out.appendSlice(a, try p.content(a, s[cursor..e.start]));
+            try out.appendSlice(a, s[e.start..e.end]);
+        }
+        try out.appendSlice(a, try p.content(a, s[cursor..]));
+        return out.items;
+    }
+
+    /// What the filter held back that the reply keeps as text (a malformed call): ``final`` past the prose ``sent``.
+    pub fn kept(p: *const Policy, final: []const u8, sent: []const u8) ?[]const u8 {
+        if (!p.single) return null;
+        const shown = reply_text.pyLstrip(sent); // the parsed content starts stripped
+        if (!std.mem.startsWith(u8, final, shown)) return null;
+        const rest = final[shown.len..];
+        return if (reply_text.pyStrip(rest).len > 0) rest else null;
+    }
 };
+
+/// The first whole envelope from ``from`` (``<((?:NAME:)?tool_call)>.*?</\1>``, any case).
+fn wholeEnvelope(a: Allocator, s: []const u8, from: usize) Allocator.Error!?struct { start: usize, end: usize } {
+    var at = from;
+    while (std.mem.indexOfScalarPos(u8, s, at, '<')) |start| : (at = start + 1) {
+        const close = std.mem.indexOfScalarPos(u8, s, start, '>') orelse return null;
+        if (!callTag(s[start + 1 .. close])) continue;
+        const closer = try std.mem.concat(a, u8, &.{ "</", s[start + 1 .. close], ">" });
+        const end = std.ascii.findIgnoreCasePos(s, close + 1, closer) orelse continue;
+        return .{ .start = start, .end = end + closer.len };
+    }
+    return null;
+}
 
 test "a streamed call its end token left open completes as its closing markup completes it" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -308,7 +344,7 @@ test "a streamed call its end token left open completes as its closing markup co
     const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"parameters\":{\"properties\":{\"n\":{\"type\":\"integer\"}}}}}]")).ok.array;
     const open = "<tool_call>\n<function=lookup>\n<parameter=q>\nfast cars\n</parameter>\n<parameter=n>\n5\n</parameter>\n";
     const sent = try sentArguments(a, try streamed(a, tools, &.{open}));
-    const ended = try streamed(a, tools, &.{ open, try std.mem.concat(a, u8, &.{ open, try closeCall(a, open, tools) }) });
+    const ended = try streamed(a, tools, &.{ open, try std.mem.concat(a, u8, &.{ open, try tool_parse.closeCall(a, open, tools) }) });
     const marked = try streamed(a, tools, &.{ open, open ++ "</function>\n</tool_call>" });
     // the arguments sent before the end, closed by closedJson, are the ones the client ends with
     try std.testing.expectEqualStrings((try tool_params.closedJson(a, sent)).?, try sentArguments(a, ended));
@@ -322,14 +358,33 @@ test "a streamed call cut inside a value stays open" {
     const a = arena.allocator();
     const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]")).ok.array;
     const open = "<tool_call>\n<function=lookup>\n<parameter=q>\nfast cars and more";
-    try std.testing.expectEqualStrings("", try closeCall(a, open, tools));
+    try std.testing.expectEqualStrings("", try tool_parse.closeCall(a, open, tools));
     // its opening delta went out and cannot be taken back; what it sent does not close under closedJson
     const sent = try sentArguments(a, try streamed(a, tools, &.{open}));
     try std.testing.expectEqualStrings("{\"q\":\"fast c", sent);
     try std.testing.expect((try tool_params.closedJson(a, sent)) == null);
 }
 
-const closeCall = @import("tool_parse.zig").closeCall;
+test "a single-call reply keeps a malformed call as text and still hides an unclosed one" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]")).ok.array;
+    const single: Policy = .{ .single = true };
+    const text = "Launching. <tool_call><function=launch><parameter=when>now</function></tool_call>";
+    // what attachCalls makes of the reply: the parse, then the policy's content
+    const r = try tool_parse.parse(a, text, tools, single.maxCalls());
+    try std.testing.expect(r.calls == null);
+    try std.testing.expectEqualStrings(text, try single.parsedContent(a, r.content));
+    try std.testing.expectEqualStrings("Launching. ", try single.parsedContent(a, "Launching. <tool_call>{\"name\""));
+    // a stream that sent the prose before the block ends with the block
+    try std.testing.expectEqualStrings(text["Launching. ".len..], single.kept(text, "\nLaunching. ").?);
+    try std.testing.expect(single.kept("Launching.", "Launching. ") == null);
+    const parallel: Policy = .{};
+    try std.testing.expect(parallel.kept(text, "Launching. ") == null);
+}
+
+const tool_parse = @import("tool_parse.zig");
 
 /// The deltas one streamer sends while the reply grows through ``texts``.
 fn streamed(a: Allocator, tools: []const Value, texts: []const []const u8) Allocator.Error![]Value {

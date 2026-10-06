@@ -35,6 +35,10 @@ EXPECTED = {
     ("metrics-open", "metrics"): "the same #367/#407 Zig-only families",
     ("metrics-open", "v1-metrics"): "the same #367/#407 Zig-only families",
     ("keys", "metrics-counted"): "the same #367/#407 Zig-only families",
+    ("tools", "bad_tool"): "a call to a tool the request did not offer goes out under its own name (PR #415); Python keeps the old rule",
+    ("tools", "bad_tool-stream"): "a call to a tool the request did not offer goes out under its own name (PR #415); Python keeps the old rule",
+    ("tools", "bad_tool-single"): "a call to a tool the request did not offer goes out under its own name (PR #415); Python keeps the old rule",
+    ("tools", "bad_tool-single-stream"): "a call to a tool the request did not offer goes out under its own name (PR #415); Python keeps the old rule",
 }
 
 

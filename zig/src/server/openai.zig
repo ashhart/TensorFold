@@ -238,6 +238,7 @@ const Run = struct {
     id: []const u8,
     created: i64,
     streamed_prose: bool = false,
+    prose_sent: std.ArrayList(u8) = .empty, // the content a tool stream sent
 
     fn chunk(r: *Run, delta: ?Value, finish: ?[]const u8) Allocator.Error!Value {
         const a = r.a;
@@ -296,10 +297,10 @@ const Run = struct {
         if (tools.len == 0) return null;
         const parsed = try tool_parse.parse(r.a, reply.content, tools, r.plan.policy.maxCalls());
         const calls = parsed.calls orelse {
-            if (r.plan.policy.single) reply.content = try r.plan.policy.content(r.a, parsed.content);
+            if (r.plan.policy.single) reply.content = try r.plan.policy.parsedContent(r.a, parsed.content);
             return null;
         };
-        reply.content = try r.plan.policy.content(r.a, parsed.content);
+        reply.content = try r.plan.policy.parsedContent(r.a, parsed.content);
         reply.finish_reason = "tool_calls";
         if (r.plan.policy.single) reply.tool_calls_streamed = false;
         return if (r.plan.policy.single and calls.len > 1) calls[0..1] else calls;
@@ -373,6 +374,7 @@ const Run = struct {
             const filtered = r.policyDelta(delta) catch return error.Closed;
             const d = filtered orelse return;
             try r.prose();
+            r.prose_sent.appendSlice(r.a, if (d == .string) d.string else d.strField("content") orelse "") catch return error.Closed;
             return r.emit(r.chunk(d, null) catch return error.Closed);
         }
     };
@@ -442,6 +444,7 @@ const Run = struct {
             const tail = r.plan.policy.flush();
             if (tail.len > 0) {
                 r.prose() catch return;
+                r.prose_sent.appendSlice(a, tail) catch return;
                 r.emit(r.chunk(.{ .string = tail }, null) catch return) catch return;
             }
             if (calls != null and !reply.tool_calls_streamed) {
@@ -450,6 +453,8 @@ const Run = struct {
                 for (deltas) |d| r.emit(r.chunk(d, null) catch return) catch return;
             } else if (reply.content.len > 0 and !r.streamed_prose) {
                 r.emit(r.chunk(.{ .string = reply.content }, null) catch return) catch return;
+            } else if (r.plan.policy.kept(reply.content, r.prose_sent.items)) |rest| {
+                r.emit(r.chunk(.{ .string = rest }, null) catch return) catch return;
             }
         }
         const last = r.chunk(.{ .string = "" }, if (reply.finish_reason.len > 0) reply.finish_reason else "length") catch return;
