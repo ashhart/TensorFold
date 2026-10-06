@@ -36,6 +36,7 @@ pub const Host = struct {
     decoded: std.ArrayList(Mark) = .empty, // tokens each round landed, for the 2 s decode rate
     prefill_rate: f64 = 0,
     prefill_at: i96 = 0,
+    live_prompt: u64 = 0, // the running reply's prompt tokens, for status (which never reads the job: finish frees it)
     live_generated: u64 = 0,
     cache: ?pc.Store = null, // kept prompt states (engine thread only); null: no reuse (rank 1, a zero budget)
     prompt: []const u32 = &.{}, // the request in the engine (speed-up mode names kept states by its tokens)
@@ -131,11 +132,11 @@ pub const Host = struct {
         }
         var n: usize = 0;
         var generation_tokens: u64 = 0;
-        if (h.running) |job| if (stream_tokens.len > 0) {
-            stream_tokens[0] = @intCast(job.request.prompt.len + job.emitted.items.len);
+        if (h.running != null and stream_tokens.len > 0) {
+            stream_tokens[0] = @intCast(h.live_prompt + h.live_generated);
             generation_tokens = h.live_generated;
             n = 1;
-        };
+        }
         out.* = .{
             .running = @intFromBool(h.running != null),
             .waiting = @intCast(h.queued.items.len),
@@ -156,6 +157,9 @@ pub const Host = struct {
     }
 
     fn finish(h: *Host, job: *Job, reason: api.Reason, stats: api.Stats, message: []const u8) void {
+        h.lock();
+        if (h.running == job) h.running = null; // before finished is out: status must not see a job about to be freed
+        h.unlock();
         emit(job, .{ .finished = .{ .reason = reason, .stats = stats, .message = message } });
         job.emitted.deinit(h.gpa);
         h.gpa.destroy(job);
@@ -191,6 +195,8 @@ pub const Host = struct {
             }
             const job = h.queued.orderedRemove(0);
             h.running = job;
+            h.live_prompt = job.request.prompt.len;
+            h.live_generated = 0;
             h.cancels.clearRetainingCapacity(); // a cancel for an id no longer queued or running
             h.unlock();
             h.serve(job);
@@ -387,4 +393,44 @@ pub fn close(ctx: *anyopaque) void {
     h.saved.deinit(h.gpa);
     h.eng.deinit();
     h.gpa.destroy(h);
+}
+
+test "status after a reply finishes reads no freed job" {
+    const gpa = std.testing.allocator;
+    var h: Host = .{ .gpa = gpa, .io = std.testing.io, .eng = undefined, .info_ = undefined };
+    defer h.decoded.deinit(gpa);
+    const Reader = struct { // the server's status poll, here inside the finished event and after it
+        h: *Host,
+        running: u32 = 9,
+        fn event(ctx: *anyopaque, _: api.Id, e: *const api.Event) void {
+            const r: *@This() = @ptrCast(@alignCast(ctx));
+            var st: api.Status = .{};
+            var toks: [2]u32 = .{ 0, 0 };
+            if (e.* == .finished) {
+                Host.statusFn(r.h, &st, &toks);
+                r.running = st.running;
+            }
+        }
+    };
+    var reader: Reader = .{ .h = &h };
+    const prompt = [_]u32{ 1, 2, 3 };
+    const request: api.Request = .{ .prompt = &prompt, .max_tokens = 4 };
+    const job = try gpa.create(Job);
+    job.* = .{ .id = 1, .request = &request, .sink = .{ .ctx = &reader, .event = Reader.event } };
+    try job.emitted.append(gpa, 7);
+    h.lock();
+    h.running = job; // as run() holds it while serve runs
+    h.live_prompt = prompt.len;
+    h.live_generated = 1;
+    h.unlock();
+    var st: api.Status = .{};
+    var toks: [2]u32 = .{ 0, 0 };
+    Host.statusFn(&h, &st, &toks);
+    try std.testing.expectEqual(@as(u32, 1), st.running);
+    try std.testing.expectEqual(@as(u32, 4), toks[0]);
+    h.finish(job, .stop, .{}, ""); // serve's completion: the job is freed, serve has not returned
+    try std.testing.expectEqual(@as(u32, 0), reader.running);
+    Host.statusFn(&h, &st, &toks); // a poll before run() clears its own pointer
+    try std.testing.expectEqual(@as(u32, 0), st.running);
+    try std.testing.expectEqual(@as(usize, 0), st.streams);
 }

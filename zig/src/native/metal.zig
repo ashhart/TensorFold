@@ -147,6 +147,10 @@ fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
     return .{ .engine = h.engine(), .close = flashnext.close, .ctx = h };
 }
 
+test {
+    _ = flashnext;
+}
+
 test "chip classes from Metal device names" {
     try std.testing.expectEqual(@as(?u32, 5), generation("Apple M5 Max"));
     try std.testing.expectEqual(@as(?u32, 12), generation("Apple M12"));
