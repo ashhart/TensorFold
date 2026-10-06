@@ -44,6 +44,7 @@ const Run = struct {
     store: ?*pc.Store = null,
     prompt: []const u32 = &.{},
     copy_at: ?*?*snap.State = null,
+    pooled_at: ?*Pooled = null,
     e: ?*fx.Engine = null,
 
     fn prefilled(_: *anyopaque) void {}
@@ -59,6 +60,7 @@ const Run = struct {
         const r: *Run = @ptrCast(@alignCast(ctx));
         if (r.store) |s| s.keep(r.prompt, @intCast(at), null);
         if (r.copy_at) |slot| slot.* = snap.save(r.e.?, r.a, at) catch null;
+        if (r.pooled_at) |p| p.* = Pooled.of(r.e.?.m);
     }
     fn out(r: *Run) fx.Out {
         return .{ .ctx = r, .prefilled = prefilled, .tokens = tokens, .cancelled = cancelled, .marked = marked };
@@ -86,6 +88,27 @@ fn fresh(e: *fx.Engine, a: Allocator, prompt: []const u32, n: usize, depth: ?usi
 }
 
 const Turn = struct { prompt: []u32, history: u32 };
+
+/// The indexer's pooled block keys, rebuilt after a restore rather than copied: counts and a hash of every layer's.
+const Pooled = struct {
+    counts: [13]usize = @splat(0),
+    hash: u64 = 0,
+
+    fn of(m: *tf.flashnext_replay.Model) Pooled {
+        var out: Pooled = .{};
+        var h = std.hash.Wyhash.init(0);
+        var k: usize = 0;
+        for (&m.layers) |*L| if (!L.linear) {
+            out.counts[k] = L.pooled_n;
+            h.update(L.pooled.b.contents()[L.pooled.off..][0 .. L.pooled_n * 128 * 2]);
+            k += 1;
+        };
+        out.counts[k] = m.mtp.pooled_n;
+        h.update(m.mtp.pooled.b.contents()[m.mtp.pooled.off..][0 .. m.mtp.pooled_n * 128 * 2]);
+        out.hash = h.final();
+        return out;
+    }
+};
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
@@ -159,13 +182,14 @@ pub fn main(init: std.process.Init) !void {
 fn stateCheck(e: *fx.Engine, a: Allocator, store: *pc.Store, turn: Turn, failures: *usize) !void {
     const entry = store.find(turn.prompt[0..turn.history], &.{}) orelse return; // nothing to resume before the history
     var states: [2]?*snap.State = .{ null, null };
+    var pooled: [2]Pooled = .{ .{}, .{} };
     for (0..2) |arm| {
         var from: usize = 0;
         if (arm == 1) {
             try snap.restore(e, @ptrCast(@alignCast(entry.saved)));
             from = entry.at;
         }
-        var r: Run = .{ .a = a, .copy_at = &states[arm], .e = e };
+        var r: Run = .{ .a = a, .copy_at = &states[arm], .pooled_at = &pooled[arm], .e = e };
         _ = try e.generateFrom(turn.prompt, from, &.{turn.history}, 2, &.{}, 0, r.out());
     }
     defer for (states) |s| if (s) |st| snap.drop(a, st);
@@ -175,6 +199,7 @@ fn stateCheck(e: *fx.Engine, a: Allocator, store: *pc.Store, turn: Turn, failure
     const bx = x.buf.contents()[0..n];
     const by = y.buf.contents()[0..n];
     const diff = std.mem.indexOfDiff(u8, bx, by);
-    if (diff != null or x.hist[0] != y.hist[0] or x.hist[1] != y.hist[1]) failures.* += 1;
-    std.debug.print("  state at {d} ({d} MiB), resumed from {d} vs fresh: {s}\n", .{ turn.history, n >> 20, entry.at, if (diff) |d| try std.fmt.allocPrint(a, "DIFF at byte {d}", .{d}) else "SAME" });
+    const pooled_same = std.mem.eql(usize, &pooled[0].counts, &pooled[1].counts) and pooled[0].hash == pooled[1].hash;
+    if (diff != null or x.hist[0] != y.hist[0] or x.hist[1] != y.hist[1] or !pooled_same) failures.* += 1;
+    std.debug.print("  state at {d} ({d} MiB), resumed from {d} vs fresh: {s}; pooled keys ({d} blocks a layer) {s}\n", .{ turn.history, n >> 20, entry.at, if (diff) |d| try std.fmt.allocPrint(a, "DIFF at byte {d}", .{d}) else "SAME", pooled[0].counts[0], if (pooled_same) "SAME" else "DIFF" });
 }
