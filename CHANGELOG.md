@@ -3,6 +3,14 @@
 `tensorfold update` prints the sections below that are newer than the version you had. Each release's page on
 GitHub has the full notes and the measurements behind them.
 
+## 0.6.6 (6 Oct 2026)
+
+- **`--name-priority ID=background` on the CUDA server.** A request that names that served id (`--name` or an
+  `--alias`) and sends no `priority` of its own is served as `priority: "background"`, so it yields to foreground
+  requests. A request's own `priority` always wins. This suits clients that can choose a model id but cannot add a
+  field to the request, such as batch extractors. On one DGX Spark, a foreground request behind four background ones
+  got its first token in 0.2 s instead of 21 s, with replies unchanged (#445). Thanks to @philip-pentatonic.
+
 ## 0.6.5 (3 Oct 2026)
 
 - **Qwen3.6-35B-A3B drafts with its own MTP layer on Macs,** as on CUDA. Chains of up to four drafts are verified in
