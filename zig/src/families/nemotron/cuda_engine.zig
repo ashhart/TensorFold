@@ -7,6 +7,7 @@ const kern = @import("cuda_kernels.zig");
 const weights = @import("cuda_weights.zig");
 const state = @import("cuda_state.zig");
 const Forward = @import("cuda_forward.zig").Forward;
+const Seg = @import("cuda_forward.zig").Seg;
 const Dump = @import("cuda_dump.zig").Dump;
 const Head = @import("cuda_mtp.zig").Head;
 const head_fields = @import("cuda_mtp.zig").seq_fields;
@@ -38,11 +39,18 @@ pub const Cancel = struct {
 /// Serial rounds a host keeps queued ahead of the one it reads.
 pub const lookahead = 4;
 
-// pinned words: the window's meta row, its ids, its sampled ids, then a prompt chunk's ids
+/// Streams a shared window holds at most (their rows together at most state.max_rows).
+pub const max_streams = 8;
+
+// pinned words: the window's meta row, its ids, its sampled ids, a prompt chunk's ids, then 64 a shared window's stream
 const pin_meta = 0;
 const pin_ids = 4;
 const pin_sampled = 32;
 const pin_prompt = 64;
+const pin_shared = pin_prompt + segs.MAX * state.prefill_rows;
+
+/// One stream's part of a shared window: its sequence, the ids its first rows take from the host, and its rows.
+pub const Shared = struct { seq: *state.Seq, ids: []const u32, rows: usize };
 
 pub const Engine = struct {
     gpa: std.mem.Allocator,
@@ -111,7 +119,7 @@ pub const Engine = struct {
         errdefer if (e.seg) |*s| s.deinit();
         e.own = state.Seq.view(&e.b);
         e.bound = &e.own;
-        e.pinned = try cuda.HostBuffer.alloc(ctx.d, (pin_prompt + segs.MAX * state.prefill_rows) * 4);
+        e.pinned = try cuda.HostBuffer.alloc(ctx.d, (pin_shared + max_streams * 64) * 4);
         errdefer e.pinned.free();
         e.history = try cuda.HostBuffer.allocMapped(ctx.d, (@as(usize, e.max_len) + state.max_rows) * 4);
         errdefer e.history.free();
@@ -336,6 +344,49 @@ pub const Engine = struct {
         try e.sampled_ready.record(e.stream);
         e.parity ^= 1;
         e.rows = rows;
+    }
+
+    /// Several streams' windows in one forward (eager): each stream's rows read its own caches, state and rule.
+    pub fn verifyShared(e: *Engine, parts: []const Shared) !void {
+        if (parts.len < 1 or parts.len > max_streams) return error.BadWindow;
+        var total: usize = 0;
+        for (parts) |p| {
+            if (p.rows < 1 or p.ids.len < 1 or p.ids.len > p.rows) return error.BadWindow;
+            total += p.rows;
+        }
+        if (total > state.max_rows) return error.WindowTooWide;
+        try e.copied.synchronize();
+        const host = e.pinned.slice(u32)[pin_shared..][0 .. max_streams * 64];
+        var views: [max_streams]state.Buffers = undefined;
+        var parts_f: [max_streams]Seg = undefined;
+        var row0: usize = 0;
+        for (parts, 0..) |p, k| {
+            e.bind(p.seq);
+            if (e.pos + p.rows > e.max_len) return error.ContextFull;
+            const slot = host[k * 64 ..][0..64];
+            slot[0..4].* = e.metaRow();
+            @memcpy(slot[4..][0..p.ids.len], p.ids);
+            try e.ops().upload(e.b.ids, std.mem.sliceAsBytes(slot[4..][0..p.ids.len]));
+            try e.ops().upload(e.b.meta, std.mem.sliceAsBytes(slot[0..4]));
+            views[k] = e.b; // the bound sequence's own fields beside the shared scratch
+            parts_f[k] = .{ .b = &views[k], .row0 = row0, .rows = p.rows, .sampled = e.sampling != null };
+            row0 += p.rows;
+        }
+        try e.copied.record(e.stream);
+        try e.forward(null).windowSegs(parts_f[0..parts.len]);
+        for (parts, 0..) |p, k| try e.ops().download(std.mem.sliceAsBytes(host[k * 64 + 32 ..][0..p.rows]), views[k].sampled);
+        try e.sampled_ready.record(e.stream);
+        for (parts) |p| {
+            e.bind(p.seq);
+            e.parity ^= 1;
+            e.rows = p.rows;
+        }
+    }
+
+    /// Part k's drawn ids from the last shared window (row r: the token at its position + r + 1).
+    pub fn sharedTokens(e: *Engine, k: usize, rows: usize) ![]const u32 {
+        try e.sampled_ready.synchronize();
+        return e.pinned.slice(u32)[pin_shared + k * 64 + 32 ..][0..rows];
     }
 
     /// The window's meta row as the kernels read it: position, buffer parity, previous keep, a spare word.

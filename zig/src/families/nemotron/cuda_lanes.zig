@@ -4,7 +4,8 @@ const std = @import("std");
 const cuda = @import("cuda");
 const lanes = @import("lanes");
 const core = @import("core");
-const Engine = @import("cuda_engine.zig").Engine;
+const engine = @import("cuda_engine.zig");
+const Engine = engine.Engine;
 const Head = @import("cuda_mtp.zig").Head;
 const state = @import("cuda_state.zig");
 const config = @import("config.zig");
@@ -26,14 +27,14 @@ pub const Cuda = struct {
     own_free: bool = true, // no stream holds the engine's own sequence
     drawn: [ring]u32 = undefined,
     next: u64 = 0,
-    pinned: cuda.HostBuffer, // a window's held drafts read back
+    pinned: cuda.HostBuffer, // each window's held drafts read back (state.max_rows words a stream)
     costs: [state.max_rows]lanes.config.Cost = undefined,
     cost_count: usize = 0,
     mtp_ms: f64 = 0,
     measured: ?core.draft_depth.Costs = null, // a lone stream's depth rule prices its rounds by these
 
     pub fn init(gpa: std.mem.Allocator, e: *Engine, head: ?*Head) !Cuda {
-        return .{ .gpa = gpa, .e = e, .head = head, .pinned = try cuda.HostBuffer.alloc(e.ctx.d, state.max_rows * 4) };
+        return .{ .gpa = gpa, .e = e, .head = head, .pinned = try cuda.HostBuffer.alloc(e.ctx.d, engine.max_streams * state.max_rows * 4) };
     }
 
     pub fn deinit(self: *Cuda) void {
@@ -69,8 +70,9 @@ pub const Cuda = struct {
             .drafts = @import("cuda_mtp.zig").max_chain,
             .window_costs = self.costs[0..self.cost_count],
             .mtp_step_ms = self.mtp_ms,
+            .hidden_rows = drafting, // several streams' windows share a forward (Engine.verifyShared)
             .batch_rows = state.max_rows,
-            .max_streams = 1,
+            .max_streams = if (drafting) engine.max_streams else 1,
         };
     }
 
@@ -100,11 +102,11 @@ pub const Cuda = struct {
         s.pending = s.context.items[s.context.items.len - 1];
     }
 
-    /// The stream's lane, bound, with a verify whose rows all stayed committed (the round loop keeps only on drops).
-    fn bindLane(self: *Cuda, s: *const lanes.Stream) !*Lane {
+    /// The stream's lane, bound, its last window committed to `kept` rows (a shared round drafts before it keeps), else all.
+    fn bindLane(self: *Cuda, s: *const lanes.Stream, kept: ?usize) !*Lane {
         const l = self.lanes.getPtr(s) orelse return error.UnknownStream;
         self.e.bind(l.seq);
-        if (l.pending_rows) |rows| try self.e.commit(rows);
+        if (l.pending_rows) |rows| try self.e.commit(kept orelse rows);
         l.pending_rows = null;
         return l;
     }
@@ -177,13 +179,13 @@ pub const Cuda = struct {
         return self.drawn[handle % ring];
     }
 
-    /// The stream's window: its pending token, then its held drafts (on the device) or the host's, each row keyed at its position.
+    /// Each stream's window: its pending token, then its held drafts (device) or the host's, each row keyed at its position.
     fn verifyFn(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
         const self = of(ptr);
-        if (windows.len != 1) return error.SharedRoundsNotBuilt;
+        if (windows.len > 1) return self.verifyShared(windows, out);
         const w = windows[0];
         if (w.parents != null) return error.TreesNotBuilt;
-        const l = try self.bindLane(w.stream);
+        const l = try self.bindLane(w.stream, null);
         const e = self.e;
         const rows = w.rows();
         if (rows > state.max_rows) return error.WindowTooWide;
@@ -200,14 +202,42 @@ pub const Cuda = struct {
         l.pending_rows = rows;
     }
 
+    /// Several windows in one forward (Engine.verifyShared), each stream's rows on its own sequence.
+    fn verifyShared(self: *Cuda, windows: []const be.Window, out: []be.Verified) !void {
+        const e = self.e;
+        if (windows.len > engine.max_streams) return error.WindowTooWide;
+        var parts: [engine.max_streams]engine.Shared = undefined;
+        var ids: [engine.max_streams][state.max_rows]u32 = undefined;
+        for (windows, 0..) |w, k| {
+            if (w.parents != null) return error.TreesNotBuilt;
+            const l = try self.bindLane(w.stream, null);
+            for (w.positions, 0..) |p, r| if (p != e.pos + 1 + r) return error.PositionMismatch;
+            ids[k][0] = w.pending;
+            @memcpy(ids[k][1..][0..w.tokens.len], w.tokens);
+            parts[k] = .{ .seq = l.seq, .ids = ids[k][0 .. 1 + w.tokens.len], .rows = w.rows() };
+        }
+        try e.verifyShared(parts[0..windows.len]);
+        const held = self.pinned.slice(u32);
+        for (windows, 0..) |w, k| if (w.held > 0) {
+            e.bind(parts[k].seq);
+            try e.ops().download(std.mem.sliceAsBytes(held[k * state.max_rows ..][0 .. w.rows() - 1]), e.b.ids + 4);
+        };
+        try e.stream.synchronize();
+        for (windows, out, 0..) |w, *o, k| {
+            @memcpy(o.sampled, try e.sharedTokens(k, w.rows()));
+            @memcpy(o.drafts, if (w.held > 0) held[k * state.max_rows ..][0 .. w.rows() - 1] else w.tokens);
+            self.lanes.getPtr(w.stream).?.pending_rows = w.rows();
+        }
+    }
+
+    /// Each window keeps its path's rows (a shared round's draft requests may have committed them already).
     fn keepFn(ptr: *anyopaque, windows: []const be.Window, paths: []const []const u32) anyerror!void {
         const self = of(ptr);
-        if (windows.len != 1 or paths[0].len == 0) return error.SharedRoundsNotBuilt;
-        for (paths[0], 0..) |r, i| if (r != i) return error.TreesNotBuilt;
-        const l = self.lanes.getPtr(windows[0].stream) orelse return error.UnknownStream;
-        self.e.bind(l.seq);
-        l.pending_rows = null;
-        try self.e.commit(paths[0].len);
+        for (windows, paths) |w, path| {
+            if (path.len == 0) return error.EmptyPath;
+            for (path, 0..) |r, i| if (r != i) return error.TreesNotBuilt;
+            _ = try self.bindLane(w.stream, path.len);
+        }
     }
 
     /// The head absorbs the kept rows with the token after each (after a prompt: its last row and first token), then drafts `depth`.
@@ -215,7 +245,7 @@ pub const Cuda = struct {
         const self = of(ptr);
         const h = self.head orelse return error.NoDraftHead;
         for (requests) |r| {
-            _ = try self.bindLane(r.stream);
+            _ = try self.bindLane(r.stream, if (r.rows) |path| path.len else null);
             if (r.position != self.e.pos + 1) return error.PositionMismatch;
             if (r.rows) |rows| {
                 for (rows, 0..) |row, i| if (row != i) return error.TreesNotBuilt;
