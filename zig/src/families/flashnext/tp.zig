@@ -1,11 +1,4 @@
-//! Speed-up mode for Flash Next: two Macs with the whole model each, half the work each, over MCDMA.
-//! Decode: each rank computes the routed experts it owns (rank 0 the first 256, rank 1 the rest) and both the shared
-//! one; after each target layer's experts the GPU sums its routed slots (fp32, slot order) and posts a sequence; the
-//! host sends the sum to the peer and serves the sequence once the peer's has landed; the next layer's combine adds
-//! the two in rank order (an fp32 reorder of one Mac's slot sum, the same on both ranks). DeltaNet layers split their
-//! heads the same way: each rank's out-projection partial, exchanged and added in rank order.
-//! Prefill: a chunk's rows split across the two Macs (replay.zig `chunkPair`); the host sends each layer's handoff into
-//! the peer's slot for that layer and signals the layer's flag, which the peer's GPU waits for.
+//! Speed-up mode for Flash Next: two Macs with the whole model each, half the work each, over MCDMA. Decode: each rank computes the routed experts it owns (rank 0 the first 256, rank 1 the rest) and both the shared one; after each target layer's experts the GPU sums its routed slots (fp32, slot order) and posts a sequence; the host sends the sum to the peer and serves the sequence once the peer's has landed; the next layer's combine adds the two in rank order (an fp32 reorder of one Mac's slot sum, the same on both ranks). DeltaNet layers split their heads the same way: each rank's out-projection partial, exchanged and added in rank order. Prefill: a chunk's rows split across the two Macs (replay.zig `chunkPair`); the host sends each layer's handoff into the peer's slot for that layer and signals the layer's flag, which the peer's GPU waits for.
 const std = @import("std");
 const mtl = @import("metal");
 const fabric = @import("fabric");
@@ -23,8 +16,7 @@ fn pages(n: usize) usize {
     return (n + PAGE - 1) / PAGE * PAGE;
 }
 
-/// The window, the same on both ranks: decode slots (alternating by sequence parity), then a slot a layer for prefill
-/// handoffs, the n-gram tail, the last row's streams and first token, the MTP head's keys; flags; the sync words.
+/// The window, the same on both ranks: decode slots (alternating by sequence parity), then a slot a layer for prefill handoffs, the n-gram tail, the last row's streams and first token, the MTP head's keys; flags; the sync words.
 const SLOT = MAXR * 11 * D * 2; // one layer's expert outputs at the widest window (bf16): 55 pages
 pub const DN_SLOT = pages(CS_ROW + SO_ROW); // a DeltaNet layer: conv state row, then recurrent state row
 pub const ATT_SLOT = 4 * PMAX * 512 + PMAX * 256; // an attention layer: keys of both heads, values of both, raw keys
@@ -336,8 +328,7 @@ pub const Tp2 = struct {
         enc.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
     }
 
-    /// After a target layer's experts (`y` its slots, the peer's zero), on the serial encoder: sum this rank's routed
-    /// slots into the send buffer, post, wait for the host to swap sums with the peer; `combine` then adds them.
+    /// After a target layer's experts (`y` its slots, the peer's zero), on the serial encoder: sum this rank's routed slots into the send buffer, post, wait for the host to swap sums with the peer; `combine` then adds them.
     pub fn exchange(t: *Tp2, enc: mtl.ComputeEncoder, y: anytype, wts: anytype, rows_buf: anytype, rows: usize) void {
         t.xseq += 1;
         const x = t.xseq;
@@ -365,8 +356,7 @@ pub const Tp2 = struct {
         enc.dispatchThreads(mtl.Size.of(D, rows, 1), mtl.Size.of(256, 1, 1));
     }
 
-    /// The head's picks from this rank's vocab columns [lo, lo + n) of `logits` (rows x vocab, bf16) and the peer's:
-    /// each half's argmax, swapped, merged (the larger value, the lower index on a tie: one Mac's argmax exactly).
+    /// The head's picks from this rank's vocab columns [lo, lo + n) of `logits` (rows x vocab, bf16) and the peer's: each half's argmax, swapped, merged (the larger value, the lower index on a tie: one Mac's argmax exactly).
     pub fn argmax(t: *Tp2, enc: mtl.ComputeEncoder, logits: anytype, vocab: usize, lo: usize, n: usize, picks: anytype, rows_buf: anytype, rows: usize) void {
         t.xseq += 1;
         const x = t.xseq;
@@ -406,8 +396,7 @@ pub const Tp2 = struct {
         return .{ .b = t.wbuf, .off = sendR(t.xseq + 1) };
     }
 
-    /// After a split projection wrote this rank's partial into `part`: post, wait for the host to swap partials
-    /// with the peer, then `out` (bf16, rows x 2560) = rank 0's partial + rank 1's, rounded once.
+    /// After a split projection wrote this rank's partial into `part`: post, wait for the host to swap partials with the peer, then `out` (bf16, rows x 2560) = rank 0's partial + rank 1's, rounded once.
     pub fn reduce(t: *Tp2, enc: mtl.ComputeEncoder, out: anytype, rows_buf: anytype, rows: usize) void {
         t.xseq += 1;
         const x = t.xseq;
@@ -422,8 +411,7 @@ pub const Tp2 = struct {
         enc.dispatchThreads(mtl.Size.of(rows * D, 1, 1), mtl.Size.of(256, 1, 1));
     }
 
-    /// On the serial encoder, after the work that wrote the sources: once the GPU gets here the host copies `writes`
-    /// into the peer's window and stores `value` at its `flag`; the GPU does not wait.
+    /// On the serial encoder, after the work that wrote the sources: once the GPU gets here the host copies `writes` into the peer's window and stores `value` at its `flag`; the GPU does not wait.
     pub fn send(t: *Tp2, enc: mtl.ComputeEncoder, writes: []const Write, flag: usize, value: u64) void {
         var job: Job = .{ .kind = .send, .n = writes.len, .flag = flag, .value = value };
         @memcpy(job.writes[0..writes.len], writes);
@@ -448,8 +436,7 @@ pub const Tp2 = struct {
         try t.rd.write2Signal(t.peer, REQ, &h64, std.mem.sliceAsBytes(prompt), REQ_FLAG, t.req);
     }
 
-    /// Served, rank 1: wait for rank 0's next request; its 64-byte head and the window's prompt tokens after it; null
-    /// once `quitting` ends the wait.
+    /// Served, rank 1: wait for rank 0's next request; its 64-byte head and the window's prompt tokens after it; null once `quitting` ends the wait.
     pub fn waitRequest(t: *Tp2) ?struct { head: *const [64]u8, tokens: [*]const u32 } {
         t.req += 1;
         var spins: usize = 0;
@@ -464,8 +451,7 @@ pub const Tp2 = struct {
         return .{ .head = @ptrCast(t.win.ptr + REQ), .tokens = @ptrCast(@alignCast(t.win.ptr + REQ + 64)) };
     }
 
-    /// A step both ranks take in the same order (a prompt chunk, the first token, a round): rank 0's decision to
-    /// stop there (a stop string, a cancel) reaches rank 1, so both end on the same step. Rank 1 waits for it.
+    /// A step both ranks take in the same order (a prompt chunk, the first token, a round): rank 0's decision to stop there (a stop string, a cancel) reaches rank 1, so both end on the same step. Rank 1 waits for it.
     pub fn agree(t: *Tp2, quit: bool) !bool {
         t.ctrl += 1;
         if (t.rank == 0) {
@@ -504,8 +490,7 @@ pub const Tp2 = struct {
         return @ptrCast(@alignCast(t.win.ptr + off));
     }
 
-    /// Each sequence in order, once the GPU posts it: a decode exchange (send this rank's packed slots, wait for the
-    /// peer's, serve the GPU) or a prefill send (its writes, then its flag).
+    /// Each sequence in order, once the GPU posts it: a decode exchange (send this rank's packed slots, wait for the peer's, serve the GPU) or a prefill send (its writes, then its flag).
     fn service(t: *Tp2) void {
         const posted = t.word32(SYNC + GPU * 4);
         const served = t.word32(SYNC + HOST * 4);
@@ -551,11 +536,11 @@ pub const Tp2 = struct {
                 const held = std.c.mach_absolute_time() - seen; // ticks: 41.67 ns each on Apple silicon
                 t.held_ns += held;
                 t.held_max = @max(t.held_max, held);
-                t.held_kind[@intFromEnum(job.kind)][0] += held;
-                t.held_kind[@intFromEnum(job.kind)][1] += 1;
+                t.held_kind[@backingInt(job.kind)][0] += held;
+                t.held_kind[@backingInt(job.kind)][1] += 1;
                 if (seq % 4096 == 0) {
                     std.debug.print("TP rank{d} jobs to {d}: host held {d:.1} us a job, max {d:.1} us\n", .{ t.rank, seq, @as(f64, @floatFromInt(t.held_ns)) / 4096.0 / 24.0, @as(f64, @floatFromInt(t.held_max)) / 24.0 });
-                    for (t.held_kind, 0..) |hk, kk| if (hk[1] > 0) std.debug.print("TP rank{d}   {s}: {d:.1} us a job ({d} jobs)\n", .{ t.rank, @tagName(@as(@TypeOf(job.kind), @enumFromInt(kk))), @as(f64, @floatFromInt(hk[0])) / @as(f64, @floatFromInt(hk[1])) / 24.0, hk[1] });
+                    for (t.held_kind, 0..) |hk, kk| if (hk[1] > 0) std.debug.print("TP rank{d}   {s}: {d:.1} us a job ({d} jobs)\n", .{ t.rank, @tagName(@as(@TypeOf(job.kind), @fromBackingInt(@intCast(kk)))), @as(f64, @floatFromInt(hk[0])) / @as(f64, @floatFromInt(hk[1])) / 24.0, hk[1] });
                     t.held_ns = 0;
                     t.held_max = 0;
                     t.held_kind = @splat(.{ 0, 0 });

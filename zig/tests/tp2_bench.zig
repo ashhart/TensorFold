@@ -1,8 +1,4 @@
-//! TP=2's exchange as the GPU sees it, between two Macs over MCDMA. Each layer the GPU writes its partial rows into the
-//! registered window and posts the layer's sequence; the host sends them to the peer as one write-and-signal, waits for
-//! the peer's, and serves the sequence; a one-thread GPU wait spins until then, and both ranks sum the two partials in
-//! rank order. Arms: tp2 (the exchange), local (the host serves at once: the GPU-host handoff alone), none (no handoff).
-//!   tf-tp2-bench SETTINGS.json   (rank, library, links, layers, rounds, rows)
+//! TP=2's exchange as the GPU sees it, between two Macs over MCDMA. Each layer the GPU writes its partial rows into the registered window and posts the layer's sequence; the host sends them to the peer as one write-and-signal, waits for the peer's, and serves the sequence; a one-thread GPU wait spins until then, and both ranks sum the two partials in rank order. Arms: tp2 (the exchange), local (the host serves at once: the GPU-host handoff alone), none (no handoff). tf-tp2-bench SETTINGS.json   (rank, library, links, layers, rounds, rows)
 const std = @import("std");
 const mtl = @import("metal");
 const fabric = @import("fabric");

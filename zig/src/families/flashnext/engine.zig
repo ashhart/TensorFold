@@ -100,8 +100,7 @@ pub const Engine = struct {
         return loadWith(gpa, model_dir, dump_dir, null);
     }
 
-    /// `load`, in speed-up mode when `speed_up` (or TF_FLASHNEXT_TP) names this Mac's settings: rank, MCDMA library
-    /// and the link to the other Mac (tp.zig).
+    /// `load`, in speed-up mode when `speed_up` (or TF_FLASHNEXT_TP) names this Mac's settings: rank, MCDMA library and the link to the other Mac (tp.zig).
     pub fn loadWith(gpa: Allocator, model_dir: []const u8, dump_dir: []const u8, speed_up: ?[]const u8) !*Engine {
         const e = try gpa.create(Engine); // undefined memory: every defaulted field is set here
         errdefer gpa.destroy(e);
@@ -665,8 +664,7 @@ pub const Engine = struct {
         if (e.r.tp) |tp| tp.quitting.store(true, .release);
     }
 
-    /// Served speed-up mode, rank 1: run rank 0's requests as they come, the replies thrown away, until rank 0's
-    /// empty request (its engine closing).
+    /// Served speed-up mode, rank 1: run rank 0's requests as they come, the replies thrown away, until rank 0's empty request (its engine closing).
     pub fn follow(e: *Engine) !void {
         while (try e.followOne()) {}
     }

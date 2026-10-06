@@ -262,8 +262,7 @@ pub const Host = struct {
     }
 };
 
-/// The engine for a Flash Next checkpoint: the replay engine on the kernels and packs in `dump`, warmed, served.
-/// `speed_up`: this Mac's settings for speed-up mode (two Macs, the same model, half the work each; tp.zig).
+/// The engine for a Flash Next checkpoint: the replay engine on the kernels and packs in `dump`, warmed, served; `speed_up` names this Mac's speed-up mode settings (tp.zig).
 pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: []const u8, window: i64, speed_up: ?[]const u8) !*Host {
     const eng = try fx.Engine.loadWith(gpa, dir, dump, speed_up);
     errdefer eng.deinit();

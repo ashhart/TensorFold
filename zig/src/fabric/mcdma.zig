@@ -107,10 +107,9 @@ pub const Endpoint = struct {
         self.gpa.destroy(self);
     }
 
-    /// Send `len` bytes already in this rank's window at `local` to the peer's window at `offset`, then store `value`
-    /// at its `flag`, in one message and without staging. The library uses the room just before `local` for its head;
-    /// the caller leaves the bytes unchanged until the peer has them (a reply from the peer that needed them is proof).
+    /// Send `len` bytes already in this rank's window at `local` to the peer's window at `offset`, then store `value` at its `flag`, in one message and without staging. The library uses the room just before `local` for its head; the caller leaves the bytes unchanged until the peer has them (a reply from the peer that needed them is proof).
     pub fn writeSignalFrom(self: *Endpoint, peer: u32, local: usize, offset: usize, len: usize, flag: usize, value: u64) rma.Error!void {
+        if (len == 0) return signal(self, peer, flag, value); // the library takes a zero-length write-and-signal as a dead peer
         if (local < abi.ws_room or !self.in(local - abi.ws_room, len + abi.ws_room) or !self.in(offset, len) or !self.in(flag, 8)) return error.OutOfBounds;
         if (flag % 8 != 0) return error.Unaligned;
         const port = try self.portFor(peer);
@@ -249,6 +248,7 @@ pub const Endpoint = struct {
         const self = of(ptr);
         const total = head.len + body.len;
         const room = abi.ws_room;
+        if (total == 0) return signal(ptr, peer, flag, value); // the library takes a zero-length write-and-signal as a dead peer
         if (peer == self.config.rank or total + room > self.config.staging_bytes) {
             try write2(ptr, peer, offset, head, body);
             return signal(ptr, peer, flag, value);
