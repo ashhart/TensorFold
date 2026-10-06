@@ -1,5 +1,4 @@
-//! Is a GPU-wide barrier inside one persistent dispatch cheaper than a dependent relaunch? N phases of a small
-//! dependent step (each reads what the previous phase wrote), as N serial dispatches and as one persistent dispatch.
+//! Does a GPU-wide barrier inside one dispatch beat a dependent relaunch? N dependent phases, as N serial dispatches vs one persistent dispatch.
 const std = @import("std");
 const mtl = @import("metal");
 

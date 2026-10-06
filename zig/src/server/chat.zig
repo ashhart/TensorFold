@@ -321,8 +321,7 @@ const Generation = struct {
         return !g.ignore_eos and std.mem.indexOfScalar(u32, g.srv.eos, t) != null;
     }
 
-    /// What closes a call the model's end token left open (``tool_parse.closeCall``); nothing when a stop string, the
-    /// length or ``ignore_eos`` ended the reply instead.
+    /// What closes a call the model's end token left open (``tool_parse.closeCall``); nothing when a stop string, the length or ``ignore_eos`` ended the reply instead.
     fn closeCall(g: *const Generation, text: []const u8) Allocator.Error![]const u8 {
         const t = g.collected.items;
         if (g.tools.len == 0 or t.len == 0 or !g.eos(t[t.len - 1])) return "";

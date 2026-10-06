@@ -1,8 +1,4 @@
-//! Staggered prompt segments, for any family: one prompt chunk split into segments, each on its own Metal queue.
-//! Segment k runs each layer's mixer after segment k-1's (an MTLEvent between the queues) and the rest of its layer
-//! beside the other segments, so one segment's scans and glue overlap another's matrix work. Each segment does what a
-//! serial chunk of its rows does, so the output equals the chunks run in order. Measured on Flash Next 6-bit (M5
-//! Ultra): two segments +9% at 8k-64k, three +2%, four time out.
+//! Staggered prompt segments, for any family: each segment on its own queue does what a serial chunk of its rows does, so the output equals the chunks run in order.
 const std = @import("std");
 const mtl = @import("metal");
 const Fence = @import("fence.zig").Fence;
@@ -27,12 +23,7 @@ pub const start = stagger.start;
 pub const Call = stagger.Call;
 pub const next = stagger.next;
 
-/// Runs one chunk's segments, segment k on queues[k], over `layers` layers, through the family's hooks on `fam`:
-///   begin(lane), pre(lane, i), mixer(lane, i), post(lane, i), finish(lane): the segment's work into lane.enc;
-///   wait(i) Wait: where layer i waits for the segment before; handoff(lane, i): right after that wait.
-/// Hooks leave the encoder open and commit nothing; what segment k+1 reads of segment k's must be written by k's
-/// mixer or earlier. Commits every segment and waits for all, failed or not; returns the longest segment's GPU seconds.
-/// One queue is a serial chunk.
+/// Hooks leave the encoder open and commit nothing; what segment k+1 reads of segment k must be written by k's mixer or earlier.
 pub fn run(device: mtl.Device, queues: []const mtl.Queue, layers: usize, mode: mtl.DispatchType, fam: anytype) !f64 {
     const n = queues.len;
     if (n == 0 or n > MAX) return error.Segments;
@@ -55,8 +46,7 @@ pub fn run(device: mtl.Device, queues: []const mtl.Queue, layers: usize, mode: m
         evs: []const mtl.Event,
         mode: mtl.DispatchType,
 
-        /// Ends the lane's encoder, waits for (or signals) `value` between its command buffer's encoders, and opens
-        /// the next encoder behind the fence.
+        /// Ends the lane's encoder, waits for (or signals) `value` between its encoders, and opens the next behind the fence.
         fn sync(x: *const @This(), l: *Lane, ev: mtl.Event, value: u64, wait_: bool) void {
             l.fence.update(l.enc);
             l.enc.end();

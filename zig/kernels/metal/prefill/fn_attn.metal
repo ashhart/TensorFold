@@ -1,5 +1,4 @@
-// Flash Next prompt rows' sparse attention on the tensor units: the indexer's block scores for a chunk's rows, and
-// each row's attention over its selected blocks and tail (or every key while the context is short).
+// Flash Next prompt rows' sparse attention on the tensor units: the indexer's block scores, then each row's attention over its selected blocks and tail (or every key while the context is short).
 #include "../nax.h"
 using namespace tfp;
 
@@ -26,9 +25,7 @@ inline float bsig(float x) { return float(bfloat(1.0f / (1.0f + metal::exp(-x)))
 
 }  // namespace tfa
 
-// SC[r][b] = (relu(q_0 . k_b) + relu(q_1 . k_b) + relu(q_2 . k_b) + relu(q_3 . k_b)) / sqrt(128), fp32, for every row
-// r < rows and block b < nb (the caller reads only each row's complete blocks). IQ [rows, 4, 128] bf16, POOLED [nb, 128]
-// bf16. A threadgroup of 4 simdgroups: 32 rows x 64 blocks, a simdgroup 16 rows x 32 blocks. P: rows, nb.
+// SC[r][b] = sum of relu(q_h . k_b) over the four query heads, in fp32, then / sqrt(128); the caller reads only each row's complete blocks.
 [[kernel]] void tf_idx_scores_nax(const device bfloat* IQ [[buffer(0)]], const device bfloat* POOLED [[buffer(1)]],
     constant int2& P [[buffer(2)]], device float* SC [[buffer(3)]], uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]], uint3 tg [[threadgroup_position_in_grid]]) {
@@ -64,12 +61,7 @@ inline float bsig(float x) { return float(bfloat(1.0f / (1.0f + metal::exp(-x)))
   }
 }
 
-// Row r's attention for key head g: the 12 query heads that read it are the 16-row operand (4 zero rows); the row's
-// keys (NK[r]: with SPARSE[r] the ids IDS[r], its selected blocks then its tail; else keys 0 .. NK[r] - 1) in blocks
-// of 32, each block's keys read once for the 12 heads. Simdgroup s owns dims 64 s .. 64 s + 63: its partial scores
-// go through threadgroup memory and every simdgroup adds the four in order, so all four keep the same fp32 online
-// softmax; it accumulates its dims of the output. The gate bf16(bf16(o) * bsig(gate)) on the way out.
-// P: cache rows (the keys' row stride per head).
+// Row r's attention for key head g: the 12 query heads that read it are the 16-row operand (4 zero rows), its keys in blocks of 32 read once for all 12; all four simdgroups sum the four dim-partials in identical order, so each keeps the same fp32 online softmax; the gate bf16(bf16(o) * bsig(gate)) on the way out. P: cache rows (the keys' row stride per head).
 [[kernel]] void tf_sattn_nax(const device bfloat* Q [[buffer(0)]], const device bfloat* K [[buffer(1)]],
     const device bfloat* V [[buffer(2)]], const device int* IDS [[buffer(3)]], const device int* NK [[buffer(4)]],
     const device int* SPARSE [[buffer(5)]], const device bfloat* GP [[buffer(6)]], const device float* F [[buffer(7)]],
@@ -203,8 +195,7 @@ inline float bsig(float x) { return float(bfloat(1.0f / (1.0f + metal::exp(-x)))
   }
 }
 
-// Peak probe: each simdgroup runs `iters` dependent-free 16x32x16 tensor ops on register fragments (4 independent
-// accumulator pairs), then writes one value so the work is kept. P: iters.
+// Peak probe: `iters` dependent-free 16x32x16 tensor ops on register fragments (4 independent accumulator pairs), then one write so the work is kept. P: iters.
 [[kernel]] void tf_mma_peak(const device bfloat* X [[buffer(0)]], constant int& iters [[buffer(1)]],
     device float* Y [[buffer(2)]], uint lane [[thread_index_in_simdgroup]], uint gid [[threadgroup_position_in_grid]],
     uint sg [[simdgroup_index_in_threadgroup]]) {

@@ -1,5 +1,4 @@
-// 6-bit (group 32) projections of prompt chunks on the tensor units: MLX-layout weights [N, K*6/32 words], one group's
-// 32 weights dequantized a thread a step into bf16, 16x32 tensor-op MMAs with fp32 sums; dense and sorted-expert gather.
+// 6-bit (group 32) projections on the tensor units: MLX-layout weights dequantized a thread a step into bf16, 16x32 tensor-op MMAs with fp32 sums; dense and sorted-expert gather.
 #include <metal_stdlib>
 using namespace metal;
 typedef bfloat bfloat16_t;
@@ -45,9 +44,7 @@ inline void dequant6r(uint2 a, uint2 c, uint2 d, T scale, T bias, threadgroup O*
   }
 }
 
-// x (TM 16-row fragments, ld K) times a 6-bit [64 rows, K] block, 64 deep a step: thread t dequantizes row t / 2's
-// group t % 2 of the step (wq, scales, biases point at the thread's first group); the next step's words and scale load
-// while this step's MMAs run.
+// x (TM 16-row fragments, ld K) times a 6-bit [64 rows, K] block, 64 deep a step, with the next step's word and scale loads under this step's MMAs; thread t dequantizes row t / 2's group t % 2.
 template <typename T, int TM>
 inline void k_loop6(thread frag<float> (&acc)[TM][2], const device T* x, int K, int ldx, int live, bool inside,
                     const device uint* wq, const device T* scales, const device T* biases, threadgroup T* tile,
@@ -111,8 +108,7 @@ inline void k_loop6(thread frag<float> (&acc)[TM][2], const device T* x, int K, 
   threadgroup_barrier(mem_flags::mem_threadgroup);
 }
 
-// x times the gate's and the up projection's same 64 weight rows at once: each step's two tiles are dequantized side
-// by side (thread t: row t / 2's group t % 2 of each), every x fragment feeds both products (k_loop6's sums, twice).
+// Gate and up at once: both 64-row weight tiles are dequantized side by side and every x fragment feeds both products (k_loop6's sums, twice).
 template <typename T, int TM>
 inline void k_loop6x2(thread frag<float> (&ag)[TM][2], thread frag<float> (&au)[TM][2], const device T* x, int K,
                       int live, bool inside, const device uint* wg, const device T* sg, const device T* bg,
@@ -272,8 +268,7 @@ inline bool expert_tile(const device int32_t* offsets, int experts, int total, i
 
 }  // namespace tfq6
 
-// y = x W^T for 6-bit g32 W [N, K]: BM x 64 output tiles, 4 simdgroups of BM/2 x 32 (each dequantized weight block
-// serves BM rows). P: K N M and y's row stride (0: N).
+// y = x W^T for 6-bit g32 W [N, K]: BM x 64 output tiles, 4 simdgroups of BM/2 x 32 (each dequantized weight block serves BM rows). P: K N M and y's row stride (0: N).
 template <int BM>
 inline void qmm6_t(const device uint* W, const device bfloat16_t* S, const device bfloat16_t* B,
                    const device bfloat16_t* X, const device int* P, device bfloat16_t* Y, threadgroup bfloat16_t* tile,
@@ -336,8 +331,7 @@ inline void gather6(const device bfloat16_t* X, const device uint* W, const devi
     tfq6::store<bfloat16_t, SM / 16>(acc, Y + long(row + tm) * N + col + tn, N, live, N - (col + tn), frag_home(ushort(lane)));
 }
 
-// The experts' gate and up products and their activation in one pass: y[r] = act(x[r] Wg_e^T, x[r] Wu_e^T) for rows
-// sorted by expert, BM-row tiles within an expert (gather6's tiles). P: M N K experts.
+// Experts' gate and up products and activation in one pass: y[r] = act(x[r] Wg_e^T, x[r] Wu_e^T), rounded as the unfused act6 does, for rows sorted by expert. P: M N K experts.
 template <int BM>
 inline void gather_gu6(const device bfloat16_t* X, const device uint* WG, const device bfloat16_t* SG,
                        const device bfloat16_t* BG, const device uint* WU, const device bfloat16_t* SU,
@@ -508,9 +502,7 @@ inline void k_loop_bf16(thread frag<float> (&acc)[TM][2], const device T* x, int
   Y[i] = bfloat16_t(total);
 }
 
-// Flash Next's causal prompt-chunk attention on the tensor units: 64 query rows of one head a threadgroup (16 a
-// simdgroup), 32-key blocks of the cache, head size 256, 12 query heads a key head, fp32 online softmax; the output
-// gate bf16(bf16(o) * bsig(gate)) on the way out. P: rows, keys (position + rows), position, cache rows.
+// Flash Next's causal prompt-chunk attention on the tensor units: 64 query rows a threadgroup, 32-key cache blocks, head size 256, 12 query heads a key head, fp32 online softmax; gate bf16(bf16(o) * bsig(gate)) on the way out. P: rows, keys (position + rows), position, cache rows.
 constant constexpr float a_masked = -3.402823466e+38f;
 inline float a_bsig(float x) { return float(bfloat(1.0f / (1.0f + metal::exp(-x)))); }
 template <bool MAX>

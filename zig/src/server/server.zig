@@ -277,9 +277,7 @@ fn lateSystem(a: Allocator, text: model_text.Text) ![]const u8 {
     return if (std.mem.indexOf(u8, rendered, probe_text) != null) "system" else "user";
 }
 
-/// ``needs_user_after_tool``: the template demands a user query (Qwen's raises "No user query found" when the
-/// conversation has none), which a conversation whose user turn became tool results no longer has; such a
-/// template gains a user turn after a trailing tool message. Templates without the raise are untouched.
+/// ``needs_user_after_tool``: the template raises "No user query found" when the conversation has no user query, which a conversation whose user turn became tool results no longer has; such templates gain a user turn after a trailing tool message.
 fn needsUserAfterTool(source: []const u8) bool {
     return std.mem.indexOf(u8, source, "No user query found") != null;
 }

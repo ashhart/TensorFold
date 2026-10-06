@@ -300,8 +300,7 @@ pub const Policy = struct {
         return std.mem.concat(a, u8, &.{ head, f.finish() });
     }
 
-    /// ``parsed_content``: a parsed reply's content, the whole envelopes the parser left as text kept and the rest
-    /// filtered, so an unclosed envelope stays hidden.
+    /// ``parsed_content``: a parsed reply's content, whole envelopes the parser left as text kept and the rest filtered, so an unclosed envelope stays hidden.
     pub fn parsedContent(p: *const Policy, a: Allocator, s: []const u8) Allocator.Error![]const u8 {
         if (!p.single) return s;
         var out: std.ArrayList(u8) = .empty;

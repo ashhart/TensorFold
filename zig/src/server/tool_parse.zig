@@ -145,8 +145,7 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
     return .{ .content = strip(residue.items), .calls = if (calls.items.len > 0) calls.items else null };
 }
 
-/// What closes the call ``text`` ends inside (the model's end token came before its ``</tool_call>``) when it then
-/// parses whole; empty when ``text`` ends outside a call or the call would not, so its markup stays the reply's text.
+/// What closes the call ``text`` ends inside (the model's end token came before its ``
 pub fn closeCall(a: Allocator, text: []const u8, tools: []const Value) Allocator.Error![]const u8 {
     var pos: usize = 0;
     // the opener ``envelopes`` leaves without a closer, so the one appended pairs with it
@@ -161,8 +160,7 @@ pub fn closeCall(a: Allocator, text: []const u8, tools: []const Value) Allocator
     return std.mem.concat(a, u8, &.{ tail, "</tool_call>" });
 }
 
-/// What a call's arguments lack to close: XML's ``</function>``, JSON's open arrays and objects (``closedJson``); never
-/// a value's end, so a call cut inside a value stays open.
+/// What a call's arguments lack to close: XML's ``
 fn argumentsClose(a: Allocator, body: []const u8) Allocator.Error![]const u8 {
     if (std.ascii.startsWithIgnoreCase(body, "<function=")) return if (std.ascii.endsWithIgnoreCase(body, "</function>")) "" else "</function>";
     if (body.len == 0 or (body[0] != '{' and body[0] != '[')) return "";
@@ -170,8 +168,7 @@ fn argumentsClose(a: Allocator, body: []const u8) Allocator.Error![]const u8 {
     return closed[body.len..];
 }
 
-/// ``call_name``: the offered tool's spelling; else the name itself when it is 1 to 64 of ``[A-Za-z0-9_-]`` and the
-/// arguments a finite object (a tool the request did not offer is the client's to refuse); else null.
+/// ``call_name``: the offered tool's spelling; else the name itself when it is 1 to 64 of ``[A-Za-z0-9_-]`` and the arguments a finite object (an unoffered tool is the client's to refuse); else null.
 fn callName(a: Allocator, c: Call, known: *const std.StringArrayHashMapUnmanaged([]const u8)) Allocator.Error!?[]const u8 {
     const name = strip(c.name);
     if (known.get(try std.ascii.allocLowerString(a, name))) |offered| return offered;

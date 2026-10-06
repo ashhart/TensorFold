@@ -21,8 +21,7 @@ fn withField(cx: *Cx, o: *const json.Object, key: []const u8, value: Value) !*js
     return copy;
 }
 
-/// ``normalize_messages`` (text only): leading system and developer text merged, later ones as ``late_system``.
-/// A template that needs a user query gains one user turn after a trailing tool run (``needs_user_after_tool``).
+/// ``normalize_messages`` (text only): leading system and developer text merged, later ones as ``late_system``; a template that needs a user query gains one user turn after a trailing tool run.
 pub fn normalize(cx: *Cx, messages: ?Value, late_system: []const u8, needs_user_after_tool: bool) errors.Refused!Value {
     const list = messages orelse return cx.refuse("messages must be a non-empty list");
     if (list != .array or list.array.len == 0) return cx.refuse("messages must be a non-empty list");
@@ -70,10 +69,7 @@ pub fn normalize(cx: *Cx, messages: ?Value, late_system: []const u8, needs_user_
         try first.put(cx.a, "content", .{ .string = joined.items });
         try out.insert(cx.a, 0, .{ .object = first });
     }
-    // A template that demands a user query (it raises "No user query found" when none exists) refuses a
-    // conversation whose user turn became tool results. By the template's own test a query is a user message
-    // whose trimmed text is not wholly a "<tool_response>...</tool_response>" block; only a conversation with
-    // none gains one placeholder user turn after its last tool run, the tool messages themselves unchanged.
+    // A template that demands a user query (it raises "No user query found") refuses a conversation whose user turn became tool results; by the template's test a user turn wholly inside a <|im_start|> block is no query, so only a conversation without one gains a placeholder user turn after its last tool run.
     if (needs_user_after_tool) {
         var has_query = false;
         var last_tool: ?usize = null;

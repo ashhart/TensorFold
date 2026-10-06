@@ -35,9 +35,7 @@ pub fn stopping() bool {
 /// The hard limit macOS reads as unlimited.
 const rlim_infinity: u64 = std.c.RLIM.INFINITY;
 
-/// The targets to try, in order: the hard limit when it is finite; when it reads as unlimited, the PR's fallbacks,
-/// 65536 then 10240, first that works (PR #294). The soft limit is never set to unlimited: anything that loops over
-/// every possible descriptor would do absurd work. `out` holds the list; the caller gives room for two.
+/// The targets to try, in order: the hard limit when finite, else the fallbacks 65536 then 10240, first that works; never an unlimited soft limit, since a loop over every descriptor would do absurd work.
 fn fillTargets(max: u64, out: *[2]u64) []const u64 {
     if (max != rlim_infinity) {
         out[0] = max;
@@ -48,9 +46,7 @@ fn fillTargets(max: u64, out: *[2]u64) []const u64 {
     return out;
 }
 
-/// Raises the soft open-file limit toward the hard limit, so idle keep-alive connections cannot exhaust a default
-/// 1024 (PR #294). Best effort: a failure keeps the current limits, and an unlimited soft limit, or one already at
-/// every target, does nothing. Returns the old and new soft limits, or null when nothing changed; the caller logs.
+/// Best-effort raise of the soft open-file limit so idle keep-alives cannot exhaust a default 1024; a failure keeps the current limits, and null (caller logs) means nothing moved.
 fn raiseOpenFileLimit() ?[2]u64 {
     const limit = posix.getrlimit(.NOFILE) catch return null;
     const cur: u64 = @intCast(limit.cur);
