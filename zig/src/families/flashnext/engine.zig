@@ -195,6 +195,7 @@ pub const Engine = struct {
             m.ple.sizes[k] = jsonInt(ple_ref.get("sizes").?.array.items[k]);
             m.ple.offsets[k] = jsonInt(ple_ref.get("offsets").?.array.items[k]);
         }
+        r.ngram = @import("index.zig").ngramSpelling(index.object.get("weight_map").?.object);
         for (0..GROUPS) |g| {
             m.ple.tables[3 * g + 0] = try r.group(16 * g, 16, "weight");
             m.ple.tables[3 * g + 1] = try r.group(16 * g, 16, "scales");

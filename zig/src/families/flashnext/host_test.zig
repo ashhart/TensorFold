@@ -53,15 +53,34 @@ test "public index admits every configured text MTP and PLE tensor name without 
     try std.testing.expectEqual(@as(usize, 3747), inventory.tensor_names);
     try std.testing.expectEqual(@as(usize, 30), inventory.shards);
     try std.testing.expect(inventory.required_names > 3300 and !inventory.headers_verified);
+    const dotted = try std.mem.replaceOwned(u8, a, bytes, "ngram_embedding.shard_", "ngram_embedding.shards.");
+    defer a.free(dotted);
+    try std.testing.expectEqual(inventory, try family.index.admit(a, dotted, &c));
     for ([_]struct { old: []const u8, replacement: []const u8, err: anyerror }{
         .{ .old = "\"language_model.lm_head.weight\"", .replacement = "\"missing.weight\"", .err = error.MissingFlashTensor },
         .{ .old = "\"language_model.model.layers.0.linear_attn.in_proj_qkv.scales\"", .replacement = "\"missing.scales\"", .err = error.IncompleteFlashAffine },
         .{ .old = "model-00001-of-00030.safetensors", .replacement = "../model-00001-of-00030.safetensors", .err = error.UnsafeFlashShard },
+        .{ .old = "ngram_embedding.shard_0.", .replacement = "ngram_embedding.shards.0.", .err = error.MissingFlashTensor },
     }) |change| {
         const altered = try std.mem.replaceOwned(u8, a, bytes, change.old, change.replacement);
         defer a.free(altered);
         try std.testing.expectError(change.err, family.index.admit(a, altered, &c));
     }
+}
+
+fn spellingOf(a: std.mem.Allocator, bytes: []const u8) ![]const u8 {
+    const p = try std.json.parseFromSlice(std.json.Value, a, bytes, .{});
+    defer p.deinit();
+    return family.index.ngramSpelling(p.value.object.get("weight_map").?.object);
+}
+
+test "n-gram tables load under the spelling their index lists" {
+    const a = std.testing.allocator;
+    const bytes = @embedFile("fixtures/index.json");
+    try std.testing.expectEqualStrings("shard_", try spellingOf(a, bytes));
+    const dotted = try std.mem.replaceOwned(u8, a, bytes, "ngram_embedding.shard_", "ngram_embedding.shards.");
+    defer a.free(dotted);
+    try std.testing.expectEqualStrings("shards.", try spellingOf(a, dotted));
 }
 
 const toy =

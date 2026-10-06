@@ -52,14 +52,20 @@ const Check = struct {
         }
     }
 
-    fn ple(c: *Check, stem: []const u8, shards: usize) !void {
+    fn ple(c: *Check, stem: []const u8, shards: usize, spelling: []const u8) !void {
         for ([_][]const u8{ "conv1d.weight", "norm_conv.weight", "norm_key.weight", "norm_query.weight", "ple_embedding.layer_multipliers", "ple_embedding.ngram_heads_offsets", "ple_embedding.ngram_heads_vocab_sizes" }) |suffix| try c.part(stem, suffix);
         try c.proj(stem, "key_proj");
         try c.proj(stem, "value_proj");
         var buf: [256]u8 = undefined;
-        for (0..shards) |i| try c.proj(stem, try std.fmt.bufPrint(&buf, "ple_embedding.ngram_embedding.shard_{d}", .{i}));
+        for (0..shards) |i| try c.proj(stem, try std.fmt.bufPrint(&buf, "ple_embedding.ngram_embedding.{s}{d}", .{ spelling, i }));
     }
 };
+
+/// The index's spelling of its n-gram table shards, `shard_N` when a `shard_0` is listed, else oMLX's `shards.N`.
+pub fn ngramSpelling(map: std.json.ObjectMap) []const u8 {
+    for (map.keys()) |name| if (std.mem.endsWith(u8, name, ".ngram_embedding.shard_0.weight")) return "shard_";
+    return "shards.";
+}
 
 pub const Inventory = struct { tensor_names: usize, required_names: usize, shards: usize, headers_verified: bool = false };
 
@@ -78,6 +84,7 @@ pub fn admit(gpa: std.mem.Allocator, bytes: []const u8, config: *const Config) !
         try files.put(gpa, file.string, {});
     }
     var c = Check{ .map = map.object };
+    const spelling = ngramSpelling(map.object); // every shard is checked under this one, so an index mixing the two is refused
     try c.matrix("language_model.model.embed_tokens");
     try c.matrix("language_model.lm_head");
     try c.hc("language_model.model.hyper_connection_mixer", false);
@@ -87,7 +94,7 @@ pub fn admit(gpa: std.mem.Allocator, bytes: []const u8, config: *const Config) !
         try c.layer(layer, try config.kind(i));
         if (config.ple[i]) {
             var buf: [160]u8 = undefined;
-            try c.ple(try std.fmt.bufPrint(&buf, "{s}.ple", .{layer}), config.ngram_shards);
+            try c.ple(try std.fmt.bufPrint(&buf, "{s}.ple", .{layer}), config.ngram_shards, spelling);
         }
     }
     if (config.mtp.layers > 0) {

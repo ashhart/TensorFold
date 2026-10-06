@@ -836,6 +836,7 @@ pub const Run = struct {
     gsel: ?GSelect = null, // the same in GPU-side rounds
     sel_meta_pipe: mtl.Pipeline = undefined,
     pool_abs_pipe: mtl.Pipeline = undefined,
+    ngram: []const u8 = "shard_", // how the checkpoint spells its n-gram table shards (index.ngramSpelling)
 
     pub fn buffer(r: *Run, len: usize) !mtl.Buffer {
         const n = @max(len, 64);
@@ -888,12 +889,12 @@ pub const Run = struct {
     pub fn group(r: *Run, first: usize, count: usize, suffix: []const u8) !Buf {
         var total: usize = 0;
         var name: [160]u8 = undefined;
-        const fmt = "language_model.model.layers.1.ple.ple_embedding.ngram_embedding.shard_{d}.{s}";
-        for (first..first + count) |s| total += (try r.entry(try std.fmt.bufPrint(&name, fmt, .{ s, suffix }))).len;
+        const fmt = "language_model.model.layers.1.ple.ple_embedding.ngram_embedding.{s}{d}.{s}";
+        for (first..first + count) |s| total += (try r.entry(try std.fmt.bufPrint(&name, fmt, .{ r.ngram, s, suffix }))).len;
         const b = try r.device.buffer(total, opts);
         var at: usize = 0;
         for (first..first + count) |s| {
-            const e = try r.entry(try std.fmt.bufPrint(&name, fmt, .{ s, suffix }));
+            const e = try r.entry(try std.fmt.bufPrint(&name, fmt, .{ r.ngram, s, suffix }));
             try readAll(e.fd, b.contents()[at .. at + e.len], e.at);
             at += e.len;
         }
