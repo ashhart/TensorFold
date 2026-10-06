@@ -102,6 +102,7 @@ pub const Engine = struct {
     copy_long: u32 = 6, // shorter matches copy only when the head's first draft agrees
     mark_taps: bool = true, // a prompt call writes the DeltaNet states at marks inside it (false: calls end at marks)
     snap_pool: snapshot.Pool = .{}, // kept states' buffers, reused and readied ahead
+    handoff_ns: i96 = 0, // speed-up rank 0: the last request's handoff to rank 1 and its resume answer
     passed: ?Passed = null, // the mark a prompt call ran past, while the prompt cache keeps the state there
     peer_drops: std.ArrayList(u64) = .empty, // speed-up rank 0: kept states rank 1 drops with the next request
     peer_kept: std.AutoHashMapUnmanaged(u64, *snapshot.State) = .empty, // speed-up rank 1: its halves of rank 0's kept states
@@ -131,6 +132,7 @@ pub const Engine = struct {
         e.mark_taps = true;
         e.passed = null;
         e.snap_pool = .{};
+        e.handoff_ns = 0;
         e.peer_drops = .empty;
         e.peer_kept = .empty;
         e.arena_state = std.heap.ArenaAllocator.init(gpa);
@@ -469,6 +471,8 @@ pub const Engine = struct {
             @memcpy(words[0..prompt.len], prompt);
             @memcpy(words[prompt.len..][0..marks.len], marks);
             for (e.peer_drops.items, 0..) |k, i| words[prompt.len + marks.len + 2 * i ..][0..2].* = .{ @truncate(k), @truncate(k >> 32) };
+            const t0 = std.c.mach_absolute_time();
+            defer e.handoff_ns = @intCast((std.c.mach_absolute_time() - t0) * 125 / 3); // mach ticks are 125/3 ns on Apple silicon
             try tp.sendRequest(std.mem.asBytes(&head), words);
             e.peer_drops.clearRetainingCapacity();
             if (!try tp.waitAck()) return error.PeerNotResumed;
@@ -800,26 +804,37 @@ pub const Engine = struct {
             if (e.peer_kept.fetchRemove(@as(u64, w[0]) | @as(u64, w[1]) << 32)) |kv| snapshot.drop(e.gpa, kv.value);
         }
         const from = head[12];
+        const t0 = std.c.mach_absolute_time();
         const ok = from == 0 or blk: {
             const st = e.peer_kept.get(keyOf(prompt[0 .. from + 1])) orelse break :blk false;
             snapshot.restore(e, st) catch break :blk false;
             break :blk true;
         };
+        const restore_ms = @as(f64, @floatFromInt(std.c.mach_absolute_time() - t0)) * 125 / 3 / 1e6;
         try tp.ackRequest(ok);
         if (!ok) return .{ .reason = .cancelled }; // rank 0 runs the request again from the start
         const eos = try e.gpa.dupe(u32, head[4 .. 4 + head[2]]);
         defer e.gpa.free(eos);
         var keep: Keep = .{ .e = e, .prompt = prompt };
         const o: Out = out orelse .{ .ctx = &keep, .prefilled = Quiet.prefilled, .tokens = Quiet.tokens, .cancelled = Quiet.cancelled, .marked = Keep.marked };
-        return try e.generateFrom(prompt, from, marks, head[1], eos, if (head[3] == std.math.maxInt(u32)) null else head[3], o);
+        const res = try e.generateFrom(prompt, from, marks, head[1], eos, if (head[3] == std.math.maxInt(u32)) null else head[3], o);
+        if (out == null) std.log.info("speed-up rank 1: resumed at {d} of {d} (restore {d:.1} ms), kept {d} marks ({d:.1} ms)", .{ from, n, restore_ms, keep.n, keep.ns / 1e6 });
+        return res;
     }
 
     /// Speed-up rank 1 at a mark: its own state there, kept under the name rank 0 gives the same tokens.
     const Keep = struct {
         e: *Engine,
         prompt: []const u32,
+        n: usize = 0,
+        ns: f64 = 0,
         fn marked(ctx: *anyopaque, at: usize) void {
             const k: *Keep = @ptrCast(@alignCast(ctx));
+            const t0 = std.c.mach_absolute_time();
+            defer {
+                k.n += 1;
+                k.ns += @as(f64, @floatFromInt(std.c.mach_absolute_time() - t0)) * 125 / 3;
+            }
             const st = snapshot.save(k.e, k.e.gpa, at) catch |err| return std.log.warn("speed-up rank 1: no state kept at {d}: {s}", .{ at, @errorName(err) });
             const old = k.e.peer_kept.fetchPut(k.e.gpa, keyOf(k.prompt[0 .. at + 1]), st) catch return snapshot.drop(k.e.gpa, st);
             if (old) |kv| snapshot.drop(k.e.gpa, kv.value);

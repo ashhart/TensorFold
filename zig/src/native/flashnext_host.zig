@@ -18,6 +18,8 @@ const Job = struct {
     prefill_sent: bool = false,
     prefilled: ?i96 = null,
     cached: u32 = 0, // prompt tokens restored from the prompt cache
+    restore_ns: i96 = 0, // the cache's lookup and restore before the prompt pass
+    keep_ns: i96 = 0, // the cache's saves at the pass's marks
 };
 
 pub const Host = struct {
@@ -230,7 +232,9 @@ pub const Host = struct {
 
         fn marked(ctx: *anyopaque, at: usize) void {
             const c: *Ctx = @ptrCast(@alignCast(ctx));
+            const t0 = c.h.now();
             if (c.h.cache) |*store| store.keep(c.job.request.prompt, @intCast(at), null);
+            c.job.keep_ns += c.h.now() - t0;
         }
 
         fn tokens(ctx: *anyopaque, toks: []const u32) bool {
@@ -289,10 +293,13 @@ pub const Host = struct {
         defer arena.deinit();
         var plan: pc.Plan = .{};
         const kept0 = if (h.cache) |*store| store.counts.kept else 0;
+        const t_begin = h.now();
         if (h.cache) |*store| if (r.prompt.len + r.max_tokens + fx.MARGIN <= tf.flashnext_replay.CAP) {
             plan = store.begin(arena.allocator(), r.prompt, r.history_len, r.shared_prefixes, &.{}, null) catch .{};
         };
+        job.restore_ns = h.now() - t_begin;
         job.cached = plan.from;
+        defer if (h.cache != null) if (job.prefilled) |done| std.log.info("prompt pass: {d} -> {d} tokens in {d:.1} ms (lookup and restore {d:.1} ms, peer handoff {d:.1} ms, keeps {d:.1} ms)", .{ job.cached, r.prompt.len, ms(done - job.began), ms(job.restore_ns), ms(h.eng.handoff_ns), ms(job.keep_ns) });
         h.prompt = r.prompt;
         h.saved.clearRetainingCapacity();
         defer if (h.cache) |*store| store.report(r.prompt.len, job.cached, store.counts.kept - kept0);
@@ -322,6 +329,10 @@ pub const Host = struct {
         fin.stats = .{ .rounds = res.rounds, .drafted = res.drafted, .accepted = res.accepted, .min_rows = res.min_rows, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null };
     }
 };
+
+fn ms(ns: i96) f64 {
+    return @as(f64, @floatFromInt(ns)) / 1e6;
+}
 
 /// The prompt cache's copies of the engine's state (snapshot.zig), on the engine's thread.
 const Snaps = struct {
