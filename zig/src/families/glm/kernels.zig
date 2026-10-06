@@ -178,7 +178,7 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     defer gpa.free(route_src);
     var route_out: [2]mtl.Pipeline = undefined;
     jobs[generated.len + 4] = .{ .device = device, .source = route_src, .names = &moe_route.names, .out = &route_out };
-    const hc_src = try hc.source(gpa, .{ .width = 4096, .sinkhorn = 20, .eps_e9 = 1000 });
+    const hc_src = try hc.source(gpa, .{ .width = 4096, .sinkhorn = 20, .eps_e9 = 1000, .unroll = 2 });
     defer gpa.free(hc_src);
     var hc_out: [2]mtl.Pipeline = undefined;
     jobs[generated.len + 5] = .{ .device = device, .source = hc_src, .names = &hc.names, .out = &hc_out };

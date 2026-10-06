@@ -34,34 +34,39 @@ inline void tf_hc_boundary(const device bfloat* XOLD, const device bfloat* BRANC
                            threadgroup float* pre_s, threadgroup uint* last_s) {
   device const bfloat* xo = XOLD + size_t(r) * F;
   device bfloat* xn = XNEW + size_t(r) * F;
-  // expand: virtual thread T = t + 256 j does the 1024-thread kernel's thread T; its values stay in registers, since
-  // thread t's elements 4 t + i + 1024 (j + 4 k) are the ones it mixes and, in the last threadgroup, collapses
+  // expand: thread t takes the 1024-thread kernel's threads T = t + 256 j, whose elements 4 t + i + 1024 (j + 4 s)
+  // are the ones it mixes and, in the last threadgroup, collapses: they stay in registers (xr[j + 4 s][i])
   float xr[16][4];
-  TF_UNROLL for (int j = 0; j < 4; j++) {
-    const int T = int(t) + 256 * j;
-    float ss = 0.0f;
-    TF_UNROLL for (int k = 0; k < F / 4096; ++k) {
+  if (EXPAND) {
+    float post[S], comb[S][S];
+    TF_UNROLL for (int s = 0; s < S; s++) post[s] = POST[r * S + s];
+    TF_UNROLL for (int a = 0; a < S; a++) TF_UNROLL for (int s = 0; s < S; s++) comb[a][s] = COMB[r * S * S + a * S + s];
+    TF_UNROLL for (int j = 0; j < 4; j++) {
       TF_UNROLL for (int i = 0; i < 4; ++i) {
-        const int f = T * 4 + 4096 * k + i;
-        float v;
-        if (EXPAND) {
-          const int s = f / D, d = f - s * D;
-          const float y = POST[r * S + s] * float(BRANCH[size_t(r) * D + d]);
-          const device float* c = COMB + r * S * S;
-          float mm = c[0 * S + s] * float(xo[0 * D + d]);
-          mm = fma(c[1 * S + s], float(xo[1 * D + d]), mm);
-          mm = fma(c[2 * S + s], float(xo[2 * D + d]), mm);
-          mm = fma(c[3 * S + s], float(xo[3 * D + d]), mm);
+        const int d = 4 * int(t) + 1024 * j + i;
+        const float b = float(BRANCH[size_t(r) * D + d]);
+        const float o0 = float(xo[d]), o1 = float(xo[D + d]), o2 = float(xo[2 * D + d]), o3 = float(xo[3 * D + d]);
+        TF_UNROLL for (int s = 0; s < S; s++) {
+          const float y = post[s] * b;
+          float mm = comb[0][s] * o0;
+          mm = fma(comb[1][s], o1, mm);
+          mm = fma(comb[2][s], o2, mm);
+          mm = fma(comb[3][s], o3, mm);
           const bfloat nb = bfloat(tf_add_nc(y, mm));
-          if (og == 0) xn[f] = nb;
-          v = float(nb);
-        } else {
-          v = float(xo[f]);
+          if (og == 0) xn[s * D + d] = nb;
+          xr[j + 4 * s][i] = float(nb);
         }
-        xr[j + 4 * k][i] = v;
-        ss = tf_sq_acc<TF_SQ_FMA>(ss, v);
       }
     }
+  } else {
+    TF_UNROLL for (int j = 0; j < 4; j++)
+      TF_UNROLL for (int s = 0; s < S; s++)
+        TF_UNROLL for (int i = 0; i < 4; ++i) xr[j + 4 * s][i] = float(xo[s * D + 4 * int(t) + 1024 * j + i]);
+  }
+  TF_UNROLL for (int j = 0; j < 4; j++) { // each virtual thread's sum in its order: streams, then its four elements
+    float ss = 0.0f;
+    TF_UNROLL for (int k = 0; k < F / 4096; ++k)
+      TF_UNROLL for (int i = 0; i < 4; ++i) ss = tf_sq_acc<TF_SQ_FMA>(ss, xr[j + 4 * k][i]);
     ss = simd_sum(ss);
     if (lane == 0) red[8 * j + int(sg)] = ss;
   }
