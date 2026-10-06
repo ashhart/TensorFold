@@ -6,6 +6,7 @@ const fz = @import("replay.zig");
 const segments = @import("../../core/segments.zig");
 const snapshot = @import("snapshot.zig");
 const CallLog = @import("call_log.zig").CallLog;
+const tp_settings = @import("tp_settings.zig");
 const Allocator = std.mem.Allocator;
 
 const D = fz.D;
@@ -52,7 +53,7 @@ pub fn keyOf(tokens: []const u32) u64 {
 /// M5 Ultra, two segments against one chunk: 2k rows a segment -7%, 3k level, 4k +1.6%, 8k +9%.
 pub const SEG_MIN = 4096;
 /// Speed-up mode splits a prompt chunk across the two Macs once each gets this many rows.
-pub const PAIR_MIN = 256;
+pub const PAIR_MIN: u32 = 256;
 
 pub const Reason = enum { stop, length, cancelled };
 
@@ -102,7 +103,7 @@ pub const Engine = struct {
     copy_min: u32 = 3,
     copy_long: u32 = 6, // shorter matches copy only when the head's first draft agrees
     mark_taps: bool = true, // a prompt call writes the DeltaNet states at marks inside it (false: calls end at marks)
-    pair_min: usize = PAIR_MIN, // speed-up mode's pair chunks: rows each Mac takes at least (FZ_PAIR_MIN to measure others)
+    pair_min: u32 = PAIR_MIN, // speed-up mode's pair chunks: rows each Mac takes at least (FZ_PAIR_MIN; rank 1 takes rank 0's)
     call_log: bool = false, // FZ_CALL_LOG: one line a prompt pass with each call's rows, wall and GPU time
     snap_pool: snapshot.Pool = .{}, // kept states' buffers, reused and readied ahead
     handoff_ns: i96 = 0, // speed-up rank 0: the last request's handoff to rank 1 and its resume answer
@@ -133,7 +134,7 @@ pub const Engine = struct {
         e.copy_long = 6;
         e.segments = true;
         e.mark_taps = true;
-        e.pair_min = if (std.c.getenv("FZ_PAIR_MIN")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch PAIR_MIN else PAIR_MIN;
+        e.pair_min = tp_settings.pairMin(if (std.c.getenv("FZ_PAIR_MIN")) |v| std.mem.span(v) else null, PAIR_MIN); // rank 1 takes rank 0's
         e.call_log = std.c.getenv("FZ_CALL_LOG") != null;
         e.passed = null;
         e.snap_pool = .{};
@@ -847,7 +848,8 @@ pub const Engine = struct {
             if (e.peer_kept.fetchRemove(@as(u64, w[0]) | @as(u64, w[1]) << 32)) |kv| snapshot.drop(e.gpa, kv.value);
         }
         const from = head[12];
-        if (head[15] != 0) e.pair_min = head[15];
+        if (head[15] == 0) return error.TpProtocol; // rank 0 sends its positive pair minimum with every request
+        e.pair_min = head[15];
         const t0 = std.c.mach_absolute_time();
         const ok = from == 0 or blk: {
             const st = e.peer_kept.get(keyOf(prompt[0 .. from + 1])) orelse break :blk false;

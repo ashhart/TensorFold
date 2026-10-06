@@ -1,6 +1,7 @@
 //! Speed-up mode's settings file: this rank, the MCDMA library and the link to the peer.
 const std = @import("std");
 const fabric = @import("fabric");
+const stagger = @import("../../core/stagger.zig");
 
 pub const Settings = struct { rank: u32, library: []const u8, links: []const fabric.mcdma.Link };
 
@@ -17,6 +18,12 @@ pub fn read(gpa: std.mem.Allocator, bytes: []const u8) !Settings {
         l.* = .{ .peer = try int(u32, o, "peer", null), .device = try text(gpa, o, "device"), .via = try text(gpa, o, "via"), .port = try int(u16, o, "port", null), .peer_port = try int(u16, o, "peer_port", 0), .name = try text(gpa, o, "name"), .gid = try int(c_int, o, "gid", 1) };
     }
     return .{ .rank = try int(u32, root.object, "rank", null), .library = try text(gpa, root.object, "library"), .links = links };
+}
+
+/// Rows each Mac takes before a prompt call splits across the pair (FZ_PAIR_MIN): positive and a u32 (the request head's word), else `default`.
+pub fn pairMin(env: ?[]const u8, default: u32) u32 {
+    const v = std.fmt.parseInt(u32, env orelse return default, 10) catch return default;
+    return if (v > 0) v else default;
 }
 
 fn int(comptime T: type, o: std.json.ObjectMap, key: []const u8, default: ?T) !T {
@@ -45,4 +52,16 @@ test "speed-up settings read through JSON values, with the link defaults" {
     try std.testing.expectEqual(@as(u16, 0), s.links[0].peer_port);
     try std.testing.expectEqual(@as(c_int, 1), s.links[0].gid);
     try std.testing.expectError(error.BadTpSettings, read(arena.allocator(), "{\"rank\":1.5,\"library\":\"x\",\"links\":[]}"));
+}
+
+test "a pair minimum is positive and fits the request head" {
+    try std.testing.expectEqual(@as(u32, 256), pairMin(null, 256));
+    try std.testing.expectEqual(@as(u32, 256), pairMin("0", 256));
+    try std.testing.expectEqual(@as(u32, 256), pairMin("-1", 256));
+    try std.testing.expectEqual(@as(u32, 256), pairMin("4294967296", 256));
+    try std.testing.expectEqual(@as(u32, 4294967295), pairMin("4294967295", 256));
+    try std.testing.expectEqual(@as(u32, 128), pairMin("128", 256));
+    try std.testing.expectEqual(@as(usize, 2), stagger.next(96, 2048, 0).parts); // zero would split the 96-token warm-up
+    try std.testing.expectEqual(@as(usize, 1), stagger.next(96, 2048, pairMin("0", 256)).parts);
+    try std.testing.expectEqual(@as(usize, 1), stagger.next(96, 2048, pairMin("4294967295", 256)).parts);
 }
