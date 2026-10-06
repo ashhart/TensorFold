@@ -132,3 +132,90 @@ test "sparse attention on the tensor units: the row kernel's values within bf16 
     std.debug.print("sparse attention on the tensor units: {d:.2}% of outputs equal the row kernel's, at most {d:.2} bf16 steps apart\n", .{ share * 100, worst });
     try std.testing.expect(share > 0.99 and worst <= 2);
 }
+
+test "the MLA absorb on the tensor units: the row kernel's values within bf16 rounding" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const queue = try device.queue();
+    defer queue.deinit();
+    const a = std.testing.allocator;
+    const NOPE = 256;
+    const LATENT = 512;
+    const PER_HEAD = 512;
+    const M = 70; // a partial tile
+    const QS = H * NOPE + 64; // the q projection's row pitch (the nope parts first)
+    const glue = try mtl.Library.fromSource(device, sources.glm_glue, mtl.CompileOptions.mlx());
+    defer glue.deinit();
+    const row_pipe = try mtl.Pipeline.init(device, glue, "glm_absorb", false);
+    defer row_pipe.deinit();
+    const nax_src = try frags.source(device, a, sources.glm_absorb_nax);
+    defer a.free(nax_src);
+    const lib_nax = try mtl.Library.fromSource(device, nax_src, mtl.CompileOptions.mlx());
+    defer lib_nax.deinit();
+    const nax_pipe = try mtl.Pipeline.init(device, lib_nax, "glm_absorb_nax", false);
+    defer nax_pipe.deinit();
+    const opts = mtl.ResourceOptions.shared;
+    const WR = H * PER_HEAD;
+    const bufs = [_]mtl.Buffer{ try device.buffer(WR * LATENT / 2, opts), try device.buffer(WR * (LATENT / 64) * 2, opts), try device.buffer(WR * (LATENT / 64) * 2, opts), try device.buffer(M * QS * 2, opts), try device.buffer(M * H * LATENT * 2, opts), try device.buffer(M * H * LATENT * 2, opts) };
+    defer for (bufs) |b| b.deinit();
+    var prng = std.Random.DefaultPrng.init(3);
+    const rnd = prng.random();
+    const wb = bufs[0].slice(u8, WR * LATENT / 2);
+    rnd.bytes(wb);
+    const sc = bufs[1].slice(u16, WR * (LATENT / 64));
+    const bi = bufs[2].slice(u16, WR * (LATENT / 64));
+    for (sc, bi) |*s, *b| {
+        s.* = bf16((rnd.float(f32) + 0.5) / 32);
+        b.* = bf16(-(rnd.float(f32) + 0.5) * 0.25);
+    }
+    const qp = bufs[3].slice(u16, M * QS);
+    for (qp) |*v| v.* = bf16(rnd.float(f32) * 4 - 2);
+    const cb = queue.commandBuffer();
+    const enc = cb.compute(.serial);
+    enc.setPipeline(row_pipe);
+    for (bufs[0..5], 0..) |b, i| enc.setBuffer(b, 0, i);
+    enc.setValue(@as(u32, QS), 5);
+    enc.dispatchGroups(mtl.Size.of(1, LATENT / 64, M * H), mtl.Size.of(64, 1, 1));
+    enc.setPipeline(nax_pipe);
+    for (bufs[0..4], 0..) |b, i| enc.setBuffer(b, 0, i);
+    enc.setBuffer(bufs[5], 0, 4);
+    enc.setValue([2]i32{ M, QS }, 5);
+    enc.dispatchGroups(mtl.Size.of(LATENT / 64, (M + 63) / 64, H), mtl.Size.of(128, 1, 1));
+    enc.end();
+    cb.commit();
+    cb.wait();
+    try std.testing.expect(cb.failure() == null);
+    const row_out = bufs[4].slice(u16, M * H * LATENT);
+    const nax_out = bufs[5].slice(u16, M * H * LATENT);
+    var same: usize = 0;
+    var worst: f64 = 0;
+    for (0..M) |r| for (0..H) |h| {
+        var big: f64 = 0;
+        var outs: [LATENT]f64 = undefined;
+        for (0..LATENT) |j| {
+            var o: f64 = 0;
+            for (0..NOPE) |i| {
+                const wrow = h * PER_HEAD + i;
+                const qv: u32 = (wb[wrow * (LATENT / 2) + j / 2] >> @intCast(4 * (j % 2))) & 15;
+                const g = wrow * (LATENT / 64) + j / 64;
+                const w: f64 = @as(f32, f32of(sc[g]) * @as(f32, @floatFromInt(qv)) + f32of(bi[g])); // the fp32 weight
+                o += w * f32of(qp[r * QS + h * NOPE + i]);
+            }
+            outs[j] = o;
+            big = @max(big, @abs(o));
+        }
+        for (0..LATENT) |j| {
+            const i = (r * H + h) * LATENT + j;
+            const got: f64 = f32of(nax_out[i]);
+            const theirs: f64 = f32of(row_out[i]);
+            const floor = big / 65536.0;
+            try std.testing.expect(@abs(got - outs[j]) <= @max(@abs(outs[j]) / 128.0, floor));
+            if (nax_out[i] == row_out[i]) same += 1 else worst = @max(worst, @abs(got - theirs) / @max(@max(@abs(got), @abs(theirs)) / 128.0, floor));
+        }
+    };
+    const share = @as(f64, @floatFromInt(same)) / @as(f64, @floatFromInt(M * H * LATENT));
+    std.debug.print("absorb on the tensor units: {d:.2}% of outputs equal the row kernel's, at most {d:.2} bf16 steps apart\n", .{ share * 100, worst });
+    try std.testing.expect(share > 0.99 and worst <= 2);
+}

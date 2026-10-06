@@ -357,7 +357,12 @@ fn mla(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: usize, w:
         qmm(p, e, p.qr, w.qr_proj, p.qp, M);
     }
     if (fwd.on(x, "mla_cache")) fwd.mlaCache(x, e, mi, w, x_in, p.xp, XP, p.iw, M, pos);
-    if (fwd.on(x, "mla_absorb")) fwd.absorb(x, e, w, p.qp, p.ql, M);
+    if (fwd.on(x, "mla_absorb")) {
+        e.setPipeline(x.k.absorb_nax); // the row kernel's qvm with each weight's fp32 value in three bf16 parts
+        bind(e, 0, .{ w.kv_b.w, w.kv_b.s, w.kv_b.b, p.qp, p.ql });
+        e.setValue([2]i32{ @intCast(M), @intCast(c.qrProj()) }, 5);
+        e.dispatchGroups(size(c.kv_lora / 64, (M + 63) / 64, c.mla_heads), size(128, 1, 1));
+    }
     var dense: u32 = 0;
     while (dense < M and pos + dense + 1 <= c.i_topk) dense += 1;
     if (fwd.on(x, "mla_select")) {
