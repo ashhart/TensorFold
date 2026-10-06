@@ -13,30 +13,24 @@ the same server build on one of the Macs:
 
 | Prompt | Time to first token, two Macs / one | Decode, two Macs / one (tok/s) |
 | --- | --- | --- |
-| 1k code | 0.27 s / 0.34 s | 207 / 159 |
-| 1k edit | 0.31 s / 0.38 s | 348 / 286 |
-| 1k chat | 0.25 s / 0.34 s | 170 / 144 |
-| 8k code | 1.30 s / 2.05 s | 168 / 154 |
-| 8k edit | 1.21 s / 2.02 s | 328 / 280 |
-| 8k chat | 1.12 s / 1.91 s | 181 / 140 |
-| 32k code | 4.06 s / 6.95 s | 189 / 163 |
-| 32k chat | 4.00 s / 6.86 s | 168 / 137 |
+| 1k code | 0.25 s / 0.34 s | 220 / 164 |
+| 1k edit | 0.30 s / 0.37 s | 374 / 299 |
+| 1k chat | 0.27 s / 0.34 s | 166 / 148 |
+| 8k code | 1.27 s / 2.12 s | 189 / 157 |
+| 8k edit | 1.22 s / 2.08 s | 356 / 290 |
+| 8k chat | 1.12 s / 1.91 s | 189 / 144 |
+| 32k code | 4.07 s / 7.08 s | 196 / 169 |
+| 32k edit | 4.09 s / 7.10 s | 359 / 293 |
+| 32k chat | 4.00 s / 6.89 s | 178 / 141 |
 
 Prompts run 1.6 to 1.7 times as fast from 8k tokens (about 8,000 tokens a second at 32k). Decode gains less, 1.1
-to 1.3 times, because each layer exchanges two partial results between the Macs (about 15 microseconds each over
-one cable) and the draft head runs on both.
+to 1.3 times: each layer still exchanges results between the Macs, and the draft head and the window's fixed
+per-layer work run on both.
 
-Both Macs produce the same reply token for token, at every draft depth. A reply can differ from one Mac's in rare tokens: the two halves
-of a projection are added in a different order, at the same fp32 precision. Prompt splitting gives one Mac's bits
-exactly.
-
-## What you need
-
-- Two Apple silicon Macs with enough memory for the whole model on each (the 6-bit checkpoint and the replay
-  engine's dump, about 180 GB at peak on each), and the same checkpoint and dump on both.
-- A Thunderbolt 5 cable between them with RDMA enabled, and MCDMA's fabric library (`libmcdma-fabric.dylib`) built
-  on both.
-- Greedy decoding (temperature 0), as the Flash Next replay engine requires.
+Both Macs produce the same reply token for token, at every draft depth. The experts give one Mac's bits: each Mac
+runs every expert for half of a window's rows and they swap the results. A reply can still differ from one Mac's in
+rare tokens: the two halves of the DeltaNet output projection are added in a different order, at the same fp32
+precision. Prompt splitting gives one Mac's bits exactly.
 
 ## Settings
 
@@ -57,6 +51,17 @@ On the other Mac (rank 1), the same with `"rank": 1`, `"peer": 0` and the first 
 
 `device` is the Thunderbolt RDMA device, `via` the interface and the other Mac's IPv4 address on that cable (an
 IPv6 link-local address works too), and `port` a UDP port both ends reserve for meeting.
+
+With two Thunderbolt cables between the Macs, MCDMA can bond them as one link (its dual-pipe build): join the two
+devices and the two `via` entries with `+`, in the same order on both Macs, and keep the next port free as well:
+
+```json
+{"rank": 0, "library": "/path/to/libmcdma-fabric.dylib",
+ "links": [{"peer": 1, "device": "rdma_en4+rdma_en3", "via": "en4/192.0.2.2+en3/192.0.2.6", "port": 7490, "name": "speedup"}]}
+```
+
+On two M5 Ultras the bond doubles bulk throughput (96 against 53 Gbit/s); in speed-up mode it brought prompts 2 to 4%
+sooner and left decode unchanged, since decode's exchanges are small.
 
 ## Starting it
 
