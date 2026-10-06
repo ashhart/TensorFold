@@ -11,6 +11,8 @@ constant constexpr int F = S * D;
 constant constexpr int MIX = (2 + S) * S;
 constant constexpr int GROUPS = MIX / 4; // mix threadgroups a row
 
+#define TF_UNROLL _Pragma("clang loop unroll(full)")
+
 #pragma clang fp contract(off)
 template <int FMA>
 inline float tf_sq_acc(float acc, float v) { return FMA ? fma(v, v, acc) : v * v + acc; }
@@ -32,13 +34,14 @@ inline void tf_hc_boundary(const device bfloat* XOLD, const device bfloat* BRANC
                            threadgroup float* pre_s, threadgroup uint* last_s) {
   device const bfloat* xo = XOLD + size_t(r) * F;
   device bfloat* xn = XNEW + size_t(r) * F;
-  device const bfloat* xs = EXPAND ? (device const bfloat*)xn : xo;
-  // expand: virtual thread T = t + 256 j does the 1024-thread kernel's thread T
-  for (int j = 0; j < 4; j++) {
+  // expand: virtual thread T = t + 256 j does the 1024-thread kernel's thread T; its values stay in registers, since
+  // thread t's elements 4 t + i + 1024 (j + 4 k) are the ones it mixes and, in the last threadgroup, collapses
+  float xr[16][4];
+  TF_UNROLL for (int j = 0; j < 4; j++) {
     const int T = int(t) + 256 * j;
     float ss = 0.0f;
-    for (int k = 0; k < F / 4096; ++k) {
-      for (int i = 0; i < 4; ++i) {
+    TF_UNROLL for (int k = 0; k < F / 4096; ++k) {
+      TF_UNROLL for (int i = 0; i < 4; ++i) {
         const int f = T * 4 + 4096 * k + i;
         float v;
         if (EXPAND) {
@@ -50,57 +53,57 @@ inline void tf_hc_boundary(const device bfloat* XOLD, const device bfloat* BRANC
           mm = fma(c[2 * S + s], float(xo[2 * D + d]), mm);
           mm = fma(c[3 * S + s], float(xo[3 * D + d]), mm);
           const bfloat nb = bfloat(tf_add_nc(y, mm));
-          xn[f] = nb;
+          if (og == 0) xn[f] = nb;
           v = float(nb);
         } else {
           v = float(xo[f]);
         }
+        xr[j + 4 * k][i] = v;
         ss = tf_sq_acc<TF_SQ_FMA>(ss, v);
       }
     }
     ss = simd_sum(ss);
     if (lane == 0) red[8 * j + int(sg)] = ss;
   }
-  threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
   if (sg == 0) {
     const float a = simd_sum(red[lane]);
     if (lane == 0) inv_s[0] = metal::precise::rsqrt(a / float(F) + eps);
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  // mix: this threadgroup's four outputs (hc_mix_packed's sums)
+  // mix: this threadgroup's four outputs (hc_mix_packed's sums), the lane's elements from registers
   {
     constexpr int ITERS = F / 1024;
     const float inv = inv_s[0];
     const device uint4* w = (const device uint4*)(FNP + ((size_t(og) * 8 + sg) * 32 + lane) * ITERS * 16);
-    const int bn0 = (32 * int(sg) + int(lane)) * 4;
     float res[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    for (int i0 = 0; i0 < ITERS; i0 += TF_U) {
+    TF_UNROLL for (int i0 = 0; i0 < ITERS; i0 += TF_U) {
       uint4 raw[TF_U][2];
       float xv[TF_U][4];
-      for (int u = 0; u < TF_U; u++) {
+      TF_UNROLL for (int u = 0; u < TF_U; u++) {
         raw[u][0] = w[(i0 + u) * 2]; raw[u][1] = w[(i0 + u) * 2 + 1];
-        for (int tn = 0; tn < 4; tn++) xv[u][tn] = float(xs[bn0 + 1024 * (i0 + u) + tn]);
+        TF_UNROLL for (int tn = 0; tn < 4; tn++) xv[u][tn] = xr[i0 + u][tn];
       }
-      for (int u = 0; u < TF_U; u++) {
+      TF_UNROLL for (int u = 0; u < TF_U; u++) {
         float vc[4];
-        for (int tn = 0; tn < 4; tn++) vc[tn] = xv[u][tn] * inv;
+        TF_UNROLL for (int tn = 0; tn < 4; tn++) vc[tn] = xv[u][tn] * inv;
         float inter[4][4];
-        for (int h = 0; h < 2; h++) {
+        TF_UNROLL for (int h = 0; h < 2; h++) {
           const uint4 v = raw[u][h];
           const uint words[4] = {v.x, v.y, v.z, v.w};
-          for (int q = 0; q < 4; q++) {
+          TF_UNROLL for (int q = 0; q < 4; q++) {
             const int e = h * 8 + q * 2;
             inter[e / 4][e % 4] = as_type<float>(words[q] << 16);
             inter[(e + 1) / 4][(e + 1) % 4] = as_type<float>(words[q] & 0xffff0000u);
           }
         }
-        for (int tm = 0; tm < 4; tm++)
-          for (int tn = 0; tn < 4; tn++) res[tm] += inter[tm][tn] * vc[tn];
+        TF_UNROLL for (int tm = 0; tm < 4; tm++)
+          TF_UNROLL for (int tn = 0; tn < 4; tn++) res[tm] += inter[tm][tn] * vc[tn];
       }
     }
-    for (int tm = 0; tm < 4; tm++)
+    TF_UNROLL for (int tm = 0; tm < 4; tm++)
       for (ushort sn = 16; sn >= 1; sn >>= 1) res[tm] += simd_shuffle_down(res[tm], sn);
-    if (lane == 0) for (int tm = 0; tm < 4; tm++) part[sg][tm] = res[tm];
+    if (lane == 0) TF_UNROLL for (int tm = 0; tm < 4; tm++) part[sg][tm] = res[tm];
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (sg == 0 && lane < 4) {
       float a = part[0][lane];
@@ -150,13 +153,10 @@ inline void tf_hc_boundary(const device bfloat* XOLD, const device bfloat* BRANC
   threadgroup_barrier(mem_flags::mem_threadgroup);
   const float p0 = pre_s[0], p1 = pre_s[1], p2 = pre_s[2], p3 = pre_s[3];
   float xc[4][4];
-  for (int j = 0; j < 4; j++) {
-    const int T = int(t) + 256 * j;
+  TF_UNROLL for (int j = 0; j < 4; j++) {
     float acc = 0.0f;
-    for (int i = 0; i < 4; ++i) {
-      const int d = T * 4 + i;
-      const float res = fma(p0, float(xs[d]), fma(p1, float(xs[D + d]),
-                            fma(p2, float(xs[2 * D + d]), p3 * float(xs[3 * D + d]))));
+    TF_UNROLL for (int i = 0; i < 4; ++i) {
+      const float res = fma(p0, xr[j][i], fma(p1, xr[j + 4][i], fma(p2, xr[j + 8][i], p3 * xr[j + 12][i])));
       xc[j][i] = float(bfloat(res));
       acc = tf_sq_acc<TF_SQ_FMA>(acc, xc[j][i]);
     }
