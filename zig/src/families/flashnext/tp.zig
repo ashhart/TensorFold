@@ -87,15 +87,6 @@ const source =
     \\                    const constant int* rows [[buffer(2)]]) {
     \\  atomic_store_explicit(&sync[1024], (seq << 5) | uint(rows[0]), memory_order_relaxed);
     \\}
-    \\// post then poll in one launch: the host sees the post while this thread polls for its serve
-    \\kernel void tp_post_wait(device atomic_uint* sync [[buffer(0)]], constant uint& seq [[buffer(1)]],
-    \\                         const constant int* rows [[buffer(2)]]) {
-    \\  atomic_store_explicit(&sync[1024], (seq << 5) | uint(rows[0]), memory_order_relaxed);
-    \\  uint polls = 0;
-    \\  while (int(atomic_load_explicit(&sync[0], memory_order_relaxed) - seq) < 0) {
-    \\    if (++polls > 400000000u) { atomic_fetch_add_explicit(&sync[2048], 1u, memory_order_relaxed); return; }
-    \\  }
-    \\}
     \\// a row's argmax over this rank's vocab columns [lo, lo + n) of the full-width logits: (value, index), the
     \\// larger value and on a tie the lower index, as fz_argmax
     \\kernel void tp_argmax_part(device const bfloat* logits [[buffer(0)]], device uint* out [[buffer(1)]],
@@ -149,12 +140,52 @@ const source =
     \\    if (++polls > 400000000u) { atomic_fetch_add_explicit(&sync[2048], 1u, memory_order_relaxed); return; }
     \\  }
     \\}
-    \\// the two ranks' fp32 partials added in rank order and rounded once
-    \\kernel void tp_sum(const device float* mine [[buffer(0)]], const device float* peer [[buffer(1)]],
-    \\                   device bfloat* out [[buffer(2)]], const constant int* rows [[buffer(3)]],
-    \\                   constant uint& rank [[buffer(4)]], uint i [[thread_position_in_grid]]) {
-    \\  if (i >= uint(rows[0]) * 2560u) return;
-    \\  out[i] = bfloat(rank == 0u ? mine[i] + peer[i] : peer[i] + mine[i]);
+    \\// post `seq` (every threadgroup stores the same word), then a threadgroup's first thread polls for its serve
+    \\inline void tp_post_poll(device atomic_uint* sync, uint seq, int rows, bool poll, uint t) {
+    \\  if (t != 0) return;
+    \\  atomic_store_explicit(&sync[1024], (seq << 5) | uint(rows), memory_order_relaxed);
+    \\  if (!poll) return;
+    \\  uint polls = 0;
+    \\  while (int(atomic_load_explicit(&sync[0], memory_order_relaxed) - seq) < 0) {
+    \\    if (++polls > 400000000u) { atomic_fetch_add_explicit(&sync[2048], 1u, memory_order_relaxed); return; }
+    \\  }
+    \\}
+    \\// a stream update of row r at dims j * 256 + t from its branch, and each stream's partial sum of squares over those
+    \\// dims: q4_hc_norm_plain's and q4_hc_norm_grouped's arithmetic
+    \\inline void tp_update(const device bfloat* H, const device bfloat* INJ, float branch, device bfloat* HN, device float* SSP,
+    \\    int j, int r, uint t, uint g, uint lane, threadgroup float (*part)[4]) {
+    \\  constexpr int S = 4, D = 2560, W = S * D, NT = D / 256;
+    \\  const int d = j * 256 + int(t);
+    \\  float ss[S];
+    \\  for (int s = 0; s < S; s++) {
+    \\    const int e = s * D + d;
+    \\    float hv = float(H[r * W + e]);
+    \\    hv = float(bfloat(hv + float(bfloat(branch * float(INJ[r * S + s])))));
+    \\    HN[r * W + e] = bfloat(hv);
+    \\    ss[s] = simd_sum(hv * hv);
+    \\  }
+    \\  if (lane == 0) for (int s = 0; s < S; s++) part[g][s] = ss[s];
+    \\  threadgroup_barrier(mem_flags::mem_threadgroup);
+    \\  if (t < S) {
+    \\    float total = 0.0f;
+    \\    for (int k = 0; k < 8; k++) total += part[k][t];
+    \\    SSP[(r * NT + j) * S + t] = total;
+    \\  }
+    \\}
+    \\// post, wait for the peer's partial, then q4_hc_norm_plain's update with the branch from the two ranks' fp32
+    \\// partials added in rank order and rounded once; the peer's words read as atomics (written by the host mid-buffer)
+    \\kernel void tp_plain(device atomic_uint* sync [[buffer(0)]], constant uint& seq [[buffer(1)]],
+    \\    const constant int* rows [[buffer(2)]], const device float* MINE [[buffer(3)]], device atomic_uint* PEER [[buffer(4)]],
+    \\    constant uint& rank [[buffer(5)]], const device bfloat* H [[buffer(6)]], const device bfloat* INJ [[buffer(7)]],
+    \\    device bfloat* HN [[buffer(8)]], device float* SSP [[buffer(9)]],
+    \\    uint g [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    \\    uint3 tpos [[thread_position_in_threadgroup]], uint3 tg [[threadgroup_position_in_grid]]) {
+    \\  const int j = int(tg.x), r = int(tg.y), i = r * 2560 + j * 256 + int(tpos.x);
+    \\  tp_post_poll(sync, seq, rows[0], true, tpos.x);
+    \\  threadgroup_barrier(mem_flags::mem_device);
+    \\  const float mine = MINE[i], peer = as_type<float>(atomic_load_explicit(&PEER[i], memory_order_relaxed));
+    \\  threadgroup float part[8][4];
+    \\  tp_update(H, INJ, float(bfloat(rank == 0u ? mine + peer : peer + mine)), HN, SSP, j, r, tpos.x, g, lane, part);
     \\}
     \\// this rank's rows [own.x, own.y) of the MoE branch, as q4_hc_norm_grouped makes it on one Mac (the routed slots
     \\// summed in slot order, fp32; the gated shared expert; one bf16 rounding each): what the peer's streams take
@@ -170,34 +201,26 @@ const source =
     \\  const float shared = float(bfloat(float(Y[(r * (TOPK + 1) + TOPK) * D + d]) * tp_bsig(float(bfloat(LG[r * NL + NL - 1])))));
     \\  OUT[(r - int(own.x)) * D + d] = bfloat(float(bfloat(routed)) + shared);
     \\}
-    \\// q4_hc_norm_grouped's stream update with each row's branch from the rank that made it (rows [split.x, split.y)
-    \\// this rank's, in MINE; the rest the peer's, from split.z, in THEIRS): the same bits as one Mac
-    \\kernel void tp_hcupdate(const device bfloat* H [[buffer(0)]], const device bfloat* INJ [[buffer(1)]],
-    \\    const device bfloat* MINE [[buffer(2)]], const device bfloat* THEIRS [[buffer(3)]], constant uint4& split [[buffer(4)]],
-    \\    device bfloat* HN [[buffer(5)]], device float* SSP [[buffer(6)]],
+    \\// post, then q4_hc_norm_grouped's stream update with each row's branch from the rank that made it (rows
+    \\// [split.x, split.y) this rank's, in MINE, at once; the rest the peer's, from split.z, in THEIRS, once served)
+    \\kernel void tp_merge(device atomic_uint* sync [[buffer(0)]], constant uint& seq [[buffer(1)]],
+    \\    const constant int* rows [[buffer(2)]], const device bfloat* H [[buffer(3)]], const device bfloat* INJ [[buffer(4)]],
+    \\    const device bfloat* MINE [[buffer(5)]], device atomic_uint* THEIRS [[buffer(6)]], constant uint4& split [[buffer(7)]],
+    \\    device bfloat* HN [[buffer(8)]], device float* SSP [[buffer(9)]],
     \\    uint g [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
     \\    uint3 tpos [[thread_position_in_threadgroup]], uint3 tg [[threadgroup_position_in_grid]]) {
-    \\  constexpr int S = 4, D = 2560, W = S * D, NT = D / 256;
-    \\  const uint t = tpos.x;
-    \\  const int j = int(tg.x), r = int(tg.y), d = j * 256 + int(t);
-    \\  threadgroup float part[8][S];
-    \\  float ss[S];
+    \\  const int j = int(tg.x), r = int(tg.y), d = j * 256 + int(tpos.x);
     \\  const bool mine = uint(r) >= split.x && uint(r) < split.y;
-    \\  const float branch = float(mine ? MINE[(r - int(split.x)) * D + d] : THEIRS[(r - int(split.z)) * D + d]);
-    \\  for (int s = 0; s < S; s++) {
-    \\    const int e = s * D + d;
-    \\    float hv = float(H[r * W + e]);
-    \\    hv = float(bfloat(hv + float(bfloat(branch * float(INJ[r * S + s])))));
-    \\    HN[r * W + e] = bfloat(hv);
-    \\    ss[s] = simd_sum(hv * hv);
+    \\  tp_post_poll(sync, seq, rows[0], !mine, tpos.x);
+    \\  threadgroup_barrier(mem_flags::mem_device);
+    \\  float branch;
+    \\  if (mine) branch = float(MINE[(r - int(split.x)) * 2560 + d]);
+    \\  else {
+    \\    const uint at = uint(r - int(split.z)) * 2560u + uint(d);
+    \\    branch = float(as_type<bfloat2>(atomic_load_explicit(&THEIRS[at >> 1], memory_order_relaxed))[at & 1]);
     \\  }
-    \\  if (lane == 0) for (int s = 0; s < S; s++) part[g][s] = ss[s];
-    \\  threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\  if (t < S) {
-    \\    float total = 0.0f;
-    \\    for (int k = 0; k < 8; k++) total += part[k][t];
-    \\    SSP[(r * NT + j) * S + t] = total;
-    \\  }
+    \\  threadgroup float part[8][4];
+    \\  tp_update(H, INJ, branch, HN, SSP, j, r, tpos.x, g, lane, part);
     \\}
 ;
 
@@ -226,13 +249,12 @@ pub const Tp2 = struct {
     branch_pipe: mtl.Pipeline,
     argmax_pipe: mtl.Pipeline,
     pick_pipe: mtl.Pipeline,
-    hcupdate_pipe: mtl.Pipeline,
+    merge_pipe: mtl.Pipeline,
+    plain_pipe: mtl.Pipeline,
     last_x: u32 = 0, // the last expert exchange: where the next combine finds both partials
+    last_seq: u32 = 0, // and the sequence it posts
     req: u64 = 0, // served requests so far, the same on both ranks
     ctrl: u64 = 0, // stop decisions so far, the same on both ranks
-    post_wait: mtl.Pipeline,
-    fused: bool = true, // post and wait in one launch (TF_TP_FUSED=0: two)
-    sum_pipe: mtl.Pipeline,
     one: mtl.Buffer, // a rows word holding 1, for posts that carry no rows
     pick_tmp: mtl.Buffer, // the MTP head's merged draft index
     ids_pipe: mtl.Pipeline,
@@ -276,9 +298,8 @@ pub const Tp2 = struct {
             .branch_pipe = try mtl.Pipeline.init(device, lib_m, "tp_branch", false),
             .argmax_pipe = try mtl.Pipeline.init(device, lib_m, "tp_argmax_part", false),
             .pick_pipe = try mtl.Pipeline.init(device, lib_m, "tp_pick", false),
-            .hcupdate_pipe = try mtl.Pipeline.init(device, lib_m, "tp_hcupdate", false),
-            .post_wait = try mtl.Pipeline.init(device, lib_m, "tp_post_wait", false),
-            .sum_pipe = try mtl.Pipeline.init(device, lib_m, "tp_sum", false),
+            .merge_pipe = try mtl.Pipeline.init(device, lib_m, "tp_merge", false),
+            .plain_pipe = try mtl.Pipeline.init(device, lib_m, "tp_plain", false),
             .one = try device.buffer(16, opts),
             .pick_tmp = try device.buffer(16, opts),
             .ids_pipe = try mtl.Pipeline.init(device, lib_m, "tp_ids", false),
@@ -288,7 +309,6 @@ pub const Tp2 = struct {
         t.trace = std.c.getenv("TF_TP_TRACE") != null;
         t.local = std.c.getenv("TF_TP_LOCAL") != null;
         t.stats = std.c.getenv("TF_TP_STATS") != null;
-        t.fused = if (std.c.getenv("TF_TP_FUSED")) |v| !std.mem.eql(u8, std.mem.span(v), "0") else true;
         // both ranks up before the first round: a word each way
         try rd.signal(t.peer, HELLO, 1);
         while (@atomicLoad(u64, t.word64(HELLO), .acquire) < 1) std.atomic.spinLoopHint();
@@ -343,12 +363,12 @@ pub const Tp2 = struct {
     }
 
     /// After a target layer's experts for this rank's rows (`ownRows`), on the serial encoder: their MoE branch (bf16)
-    /// into the send buffer, post, wait for the host to swap branches with the peer; `combine` then updates every row.
-    pub fn exchange(t: *Tp2, enc: mtl.ComputeEncoder, y: anytype, wts: anytype, lg: anytype, rows_buf: anytype, rows: usize) void {
+    /// into the send buffer; `combine` posts it and updates every row.
+    pub fn exchange(t: *Tp2, enc: mtl.ComputeEncoder, y: anytype, wts: anytype, lg: anytype, rows: usize) void {
         t.xseq += 1;
         const x = t.xseq;
         t.last_x = x;
-        const seq = t.queue(.{ .kind = .exchange, .value = x });
+        t.last_seq = t.queue(.{ .kind = .exchange, .value = x });
         const own = t.ownRows(rows);
         if (own[1] > own[0]) {
             const own2 = [2]u32{ @intCast(own[0]), @intCast(own[1]) };
@@ -358,23 +378,25 @@ pub const Tp2 = struct {
             enc.setBytes(std.mem.asBytes(&own2), 4);
             enc.dispatchThreads(mtl.Size.of(D, own[1] - own[0], 1), mtl.Size.of(256, 1, 1));
         }
-        t.postWait(enc, seq, rows_buf.b, rows_buf.off);
     }
 
-    /// The last exchange's MoE branches into the streams (q4_hc_norm_grouped's job): this rank's rows from its send
-    /// buffer, the peer's from where they landed.
-    pub fn combine(t: *Tp2, enc: mtl.ComputeEncoder, h: anytype, inj: anytype, out: anytype, ssp: anytype, rows: usize) void {
+    /// The last exchange posted, and its MoE branches into the streams (q4_hc_norm_grouped's job): this rank's rows
+    /// from its send buffer at once, the peer's from where they land, once served.
+    pub fn combine(t: *Tp2, enc: mtl.ComputeEncoder, h: anytype, inj: anytype, out: anytype, ssp: anytype, rows_buf: anytype, rows: usize) void {
         const own = t.ownRows(rows);
         const peer_lo: usize = if (t.rank == 0) own[1] else 0;
         const split = [4]u32{ @intCast(own[0]), @intCast(own[1]), @intCast(peer_lo), 0 };
-        enc.setPipeline(t.hcupdate_pipe);
-        enc.setBuffer(h.b, h.off, 0);
-        enc.setBuffer(inj.b, inj.off, 1);
-        enc.setBuffer(t.wbuf, sendX(t.last_x), 2);
-        enc.setBuffer(t.wbuf, DECODE + (t.last_x % 2) * SLOT, 3);
-        enc.setBytes(std.mem.asBytes(&split), 4);
-        enc.setBuffer(out.b, out.off, 5);
-        enc.setBuffer(ssp.b, ssp.off, 6);
+        enc.setPipeline(t.merge_pipe);
+        enc.setBuffer(t.wbuf, SYNC, 0);
+        enc.setBytes(std.mem.asBytes(&t.last_seq), 1);
+        enc.setBuffer(rows_buf.b, rows_buf.off, 2);
+        enc.setBuffer(h.b, h.off, 3);
+        enc.setBuffer(inj.b, inj.off, 4);
+        enc.setBuffer(t.wbuf, sendX(t.last_x), 5);
+        enc.setBuffer(t.wbuf, DECODE + (t.last_x % 2) * SLOT, 6);
+        enc.setBytes(std.mem.asBytes(&split), 7);
+        enc.setBuffer(out.b, out.off, 8);
+        enc.setBuffer(ssp.b, ssp.off, 9);
         enc.dispatchThreads(mtl.Size.of(D, rows, 1), mtl.Size.of(256, 1, 1));
     }
 
@@ -408,38 +430,30 @@ pub const Tp2 = struct {
         enc.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
     }
 
-    /// Post `seq` and wait for its serve: one launch, or two with TF_TP_FUSED=0.
-    fn postWait(t: *Tp2, enc: mtl.ComputeEncoder, seq: u32, rows_buf: mtl.Buffer, rows_off: usize) void {
-        if (!t.fused) {
-            t.encodePost(enc, seq, rows_buf, rows_off);
-            t.waitWord(enc, SYNC + HOST * 4, seq);
-            return;
-        }
-        enc.setPipeline(t.post_wait);
-        enc.setBuffer(t.wbuf, SYNC, 0);
-        enc.setBytes(std.mem.asBytes(&seq), 1);
-        enc.setBuffer(rows_buf, rows_off, 2);
-        enc.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
-    }
-
     /// Where the next reduce's partial goes (fp32, rows x 2560): the host sends it from there.
     pub fn partNext(t: *const Tp2) struct { b: mtl.Buffer, off: usize } {
         return .{ .b = t.wbuf, .off = sendR(t.xseq + 1) };
     }
 
-    /// After a split projection wrote this rank's partial into `part`: post, wait for the host to swap partials with the peer, then `out` (bf16, rows x 2560) = rank 0's partial + rank 1's, rounded once.
-    pub fn reduce(t: *Tp2, enc: mtl.ComputeEncoder, out: anytype, rows_buf: anytype, rows: usize) void {
+    /// After a split projection wrote this rank's partial into `part`: post, wait for the host to swap partials with
+    /// the peer, then q4_hc_norm_plain's stream update of `h` into `out` and `ssp` with the branch rank 0's partial +
+    /// rank 1's, rounded once (bf16, rows x 2560).
+    pub fn plain(t: *Tp2, enc: mtl.ComputeEncoder, h: anytype, inj: anytype, out: anytype, ssp: anytype, rows_buf: anytype, rows: usize) void {
         t.xseq += 1;
         const x = t.xseq;
         const seq = t.queue(.{ .kind = .reduce, .value = x });
-        t.postWait(enc, seq, rows_buf.b, rows_buf.off);
-        enc.setPipeline(t.sum_pipe);
-        enc.setBuffer(t.wbuf, sendR(x), 0);
-        enc.setBuffer(t.wbuf, REDUCE + (x % 2) * PART, 1);
-        enc.setBuffer(out.b, out.off, 2);
-        enc.setBuffer(rows_buf.b, rows_buf.off, 3);
-        enc.setBytes(std.mem.asBytes(&t.rank), 4);
-        enc.dispatchThreads(mtl.Size.of(rows * D, 1, 1), mtl.Size.of(256, 1, 1));
+        enc.setPipeline(t.plain_pipe);
+        enc.setBuffer(t.wbuf, SYNC, 0);
+        enc.setBytes(std.mem.asBytes(&seq), 1);
+        enc.setBuffer(rows_buf.b, rows_buf.off, 2);
+        enc.setBuffer(t.wbuf, sendR(x), 3);
+        enc.setBuffer(t.wbuf, REDUCE + (x % 2) * PART, 4);
+        enc.setBytes(std.mem.asBytes(&t.rank), 5);
+        enc.setBuffer(h.b, h.off, 6);
+        enc.setBuffer(inj.b, inj.off, 7);
+        enc.setBuffer(out.b, out.off, 8);
+        enc.setBuffer(ssp.b, ssp.off, 9);
+        enc.dispatchThreads(mtl.Size.of(D, rows, 1), mtl.Size.of(256, 1, 1));
     }
 
     /// On the serial encoder, after the work that wrote the sources: once the GPU gets here the host copies `writes` into the peer's window and stores `value` at its `flag`; the GPU does not wait.

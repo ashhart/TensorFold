@@ -1636,7 +1636,7 @@ pub const Model = struct {
 
     pub fn grouped(m: *Model, h: Buf, out: Buf) !void {
         const t = &m.t;
-        if (m.r.tp) |tp| return if (m.r.skip & TP_CLASS == 0) tp.combine(m.r.enc, h, t.inj_m, out, t.ssp, m.r.rows); // TP: each rank's rows' branches
+        if (m.r.tp) |tp| return if (m.r.skip & TP_CLASS == 0) tp.combine(m.r.enc, h, t.inj_m, out, t.ssp, t.rows, m.r.rows); // TP: each rank's rows' branches
         try m.r.call("q4_hc_norm_grouped#[10240]", &.{ h, t.inj_m, t.ydown, t.wts, t.lg }, &.{ out, t.ssp });
     }
 
@@ -1775,6 +1775,7 @@ pub const Model = struct {
             }
             cur = 1 - cur;
             try m.hcProject(t.h[cur], L.ahc, "qa_hc_down@ahc", "qa_hc_up@ahc", t.inj_a);
+            var plain = false; // speed-up mode's DeltaNet exchange made the stream update
             if (L.linear and r.tp != null) { // TP: this Mac's 8 key heads and 24 value heads, then one partial-sum exchange
                 const tp = r.tp.?;
                 const k0: usize = tp.rank;
@@ -1789,7 +1790,10 @@ pub const Model = struct {
                 const pn = tp.partNext();
                 const part: Buf = .{ .b = pn.b, .off = pn.off };
                 try split.laneTiles(r, "lane_qmm_bytes_grouped@gdn.out", &.{ t.gout, t.xs, L.out.wq, L.out.sbt, t.mdims }, part, &.{.{ 0, 80 }}, 8, .{ 96 * k0, 96 }); // one kernel at every width: drafted == plain
-                if (r.skip & TP_CLASS == 0) tp.reduce(r.enc, t.branch, t.rows, rows);
+                if (r.skip & TP_CLASS == 0) { // the partials' sum and the stream update in the exchange's launch
+                    tp.plain(r.enc, t.h[cur], t.inj_a, t.h[1 - cur], t.ssp, t.rows, rows);
+                    plain = true;
+                }
             } else if (L.linear) {
                 try m.lane(t.mixed, D, L.proj, "lane_qmm_bytes_grouped@gdn.in", t.p);
                 const a = m.state;
@@ -1841,7 +1845,7 @@ pub const Model = struct {
                 try r.call("q4_attn_merge_gate#[24, 16, 256]", &.{ t.po, t.pm, t.p }, &.{t.aout});
                 try m.lane(t.aout, 6144, L.out, "lane_qmm_bytes_grouped@att.o", t.branch);
             }
-            try r.call("q4_hc_norm_plain#[10240]", &.{ t.h[cur], t.inj_a, t.branch }, &.{ t.h[1 - cur], t.ssp });
+            if (!plain) try r.call("q4_hc_norm_plain#[10240]", &.{ t.h[cur], t.inj_a, t.branch }, &.{ t.h[1 - cur], t.ssp });
             cur = 1 - cur;
             r.touch(L.router);
             try m.hcProject(t.h[cur], L.mhc, "qa_hc_down@mhc", "qa_hc_up@mhc", t.inj_m);
@@ -1849,7 +1853,7 @@ pub const Model = struct {
             r.tp_layer = true;
             try r.experts("qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown);
             r.tp_layer = false;
-            if (r.tp) |tp| if (r.skip & TP_CLASS == 0) tp.exchange(r.enc, t.ydown, t.wts, t.lg, t.rows, rows);
+            if (r.tp) |tp| if (r.skip & TP_CLASS == 0) tp.exchange(r.enc, t.ydown, t.wts, t.lg, rows);
             if (r.probe) |pb| r.copyKept(t.pick, .{ .b = pb.b, .off = pb.off + i * MAXR * 10 * 4 }, rows * 10, 0, 0, 0, 1, -1);
             pending = .grouped;
         }
