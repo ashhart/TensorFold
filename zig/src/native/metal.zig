@@ -140,8 +140,9 @@ fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
     }
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const h = flashnext.open(gpa, io, o.dir, dump, window, o.speed_up, o.prompt_cache_gib) catch |e| {
-        problem.* = try std.fmt.allocPrint(a, "the native Flash Next engine cannot load {s} with {s} ({s})", .{ o.dir, dump, @errorName(e) });
+    var why: []const u8 = "";
+    const h = flashnext.open(gpa, io, o.dir, dump, window, o.speed_up, o.prompt_cache_gib, o.prompt_cache_over_cap, a, &why) catch |e| {
+        problem.* = if (e == error.CacheOverCap) why else try std.fmt.allocPrint(a, "the native Flash Next engine cannot load {s} with {s} ({s})", .{ o.dir, dump, @errorName(e) });
         return null;
     };
     return .{ .engine = h.engine(), .close = flashnext.close, .ctx = h };
@@ -149,6 +150,7 @@ fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
 
 test {
     _ = flashnext;
+    _ = @import("cache_fit.zig");
 }
 
 test "chip classes from Metal device names" {

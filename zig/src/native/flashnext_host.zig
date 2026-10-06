@@ -7,6 +7,7 @@ const tf = @import("tensorfold");
 const fx = tf.flashnext_engine;
 const snap = tf.flashnext_snapshot;
 const pc = api.prompt_cache;
+const cache_fit = @import("cache_fit.zig");
 const Allocator = std.mem.Allocator;
 
 const Job = struct {
@@ -392,23 +393,36 @@ const Snaps = struct {
     }
 };
 
-/// The prompt cache's budget: `gib`, else the working set left past the engine less 8 GiB, at most 16 GiB.
-fn cacheBudget(eng: *fx.Engine, gib: ?f64) u64 {
-    if (gib) |g| return if (g > 0) std.math.lossyCast(u64, g * (1 << 30)) else 0; // the CLI refuses what a u64 cannot hold
-    const dev = eng.r.device;
-    const spare = dev.maxWorkingSet() -| dev.allocated() -| (8 << 30);
-    return @min(spare, 16 << 30);
+/// The prompt cache's budget (cache_fit.zig): what 70% of RAM leaves past this server once loaded, or `gib` when that fits
+/// (larger: refused, `why` says so, unless `over`); without an OS reading, `gib` or the Metal working set's spare.
+fn cacheBudget(eng: *fx.Engine, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) !u64 {
+    const rank = if (eng.followsPeer()) " (rank 1 keeps its halves of rank 0's)" else if (eng.r.tp != null) " (rank 1 mirrors them)" else "";
+    const ram = cache_fit.ram() orelse 0;
+    const ready = cache_fit.footprint() orelse 0;
+    if (ram == 0 or ready == 0) {
+        const dev = eng.r.device;
+        const b = if (gib) |g| (if (g > 0) std.math.lossyCast(u64, g * cache_fit.GiB) else 0) else @min(dev.maxWorkingSet() -| dev.allocated() -| (8 << 30), 16 << 30);
+        std.log.info("prompt cache: {d:.1} GiB for kept prompt states{s} (no memory reading)", .{ cache_fit.gibs(b), rank });
+        return b;
+    }
+    const f = cache_fit.fit(ram, ready, gib, over) catch |e| {
+        const left = (cache_fit.fit(ram, ready, null, false) catch unreachable).room; // without a given budget it never refuses
+        why.* = try std.fmt.allocPrint(a, "--prompt-cache-gib {d} would take this server past 70% of this Mac's memory: it holds {d:.1} GiB once loaded, 70% of {d:.0} GiB is {d:.1} GiB, and {d} GiB stays free for prompt buffers, so {d:.1} GiB is left for kept prompt states. Leave --prompt-cache-gib out to use that, pass a smaller one, or add --prompt-cache-over-cap to keep {d} GiB anyway.", .{ gib.?, cache_fit.gibs(ready), cache_fit.gibs(ram), cache_fit.gibs(ram / 100 * cache_fit.SHARE_PERCENT), cache_fit.MARGIN >> 30, cache_fit.gibs(left), gib.? });
+        return e;
+    };
+    std.log.info("prompt cache: {d:.1} GiB from {d:.1} GiB free under the 70% cap ({d:.1} GiB in use once loaded, {d:.0} GiB of RAM, {d} GiB kept for prompt buffers){s}{s}", .{ cache_fit.gibs(f.budget), cache_fit.gibs(f.room), cache_fit.gibs(ready), cache_fit.gibs(ram), cache_fit.MARGIN >> 30, if (f.budget > f.room) ", past the cap by --prompt-cache-over-cap" else "", rank });
+    return f.budget;
 }
 
-/// The engine for a Flash Next checkpoint: the replay engine on the kernels and packs in `dump`, warmed, served; `speed_up` names this Mac's speed-up mode settings (tp.zig); `cache_gib` the prompt cache's budget (null: what memory leaves).
-pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: []const u8, window: i64, speed_up: ?[]const u8, cache_gib: ?f64) !*Host {
+/// The engine for a Flash Next checkpoint: the replay engine on the kernels and packs in `dump`, warmed, served; `speed_up` names this Mac's speed-up mode settings (tp.zig); `cache_gib` the prompt cache's budget (null: what 70% of RAM leaves; `over_cap` lets a larger one through); on error.CacheOverCap `why` (in `a`) says why.
+pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: []const u8, window: i64, speed_up: ?[]const u8, cache_gib: ?f64, over_cap: bool, a: Allocator, why: *[]const u8) !*Host {
     const eng = try fx.Engine.loadWith(gpa, dir, dump, speed_up);
     errdefer eng.deinit();
     eng.warm() catch |err| {
         std.log.err("flash next: warm-up failed: {s}", .{@errorName(err)});
         return err;
     };
-    const budget = cacheBudget(eng, cache_gib);
+    const budget = try cacheBudget(eng, cache_gib, over_cap, a, why);
     eng.peer_budget = budget; // rank 1: its kept states and free buffers stay inside the same budget
     eng.snap_pool.max = budget;
     const follower: ?std.Thread = if (eng.followsPeer()) try std.Thread.spawn(.{}, follow, .{eng}) else null; // rank 1
@@ -417,7 +431,6 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: []const u8, windo
     const limit: i64 = tf.flashnext_replay.CAP - fx.MARGIN;
     h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .info_ = .{ .name = "flashnext-zig", .lanes = 1, .context_window = @intCast(if (window > 0) @min(window, limit) else limit) } };
     if (!eng.followsPeer() and budget > 0) h.cache = pc.Store.init(gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .charged = Snaps.charged, .spare = Snaps.spare, .trim = Snaps.trim, .reuses = Snaps.reuses } }, .{ .lookahead = 1 }, budget);
-    std.log.info("prompt cache: {d:.1} GiB for kept prompt states{s}", .{ @as(f64, @floatFromInt(if (h.cache != null) budget else 0)) / (1 << 30), if (eng.followsPeer()) " (rank 1 keeps its halves of rank 0's)" else if (eng.r.tp != null) " (rank 1 mirrors them)" else "" });
     try h.start();
     return h;
 }

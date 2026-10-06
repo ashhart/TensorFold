@@ -22,5 +22,6 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, dir: []const u8, model_typ
         .drafts = !args.no_drafts,
         .speed_up = args.speed_up,
         .prompt_cache_gib = args.prompt_cache_gib,
+        .prompt_cache_over_cap = args.prompt_cache_over_cap,
     }, problem);
 }

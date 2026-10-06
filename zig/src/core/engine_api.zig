@@ -123,7 +123,7 @@ pub const Info = struct {
 pub const Family = struct { model_type: []const u8, formats: []const []const u8 };
 
 /// What a server asks of the engine it opens: the checkpoint, and the serve flags an engine reads.
-pub const Open = struct { dir: []const u8, model_type: []const u8, context: ?i64 = null, lanes: u32 = 8, drafts: bool = true, speed_up: ?[]const u8 = null, prompt_cache_gib: ?f64 = null };
+pub const Open = struct { dir: []const u8, model_type: []const u8, context: ?i64 = null, lanes: u32 = 8, drafts: bool = true, speed_up: ?[]const u8 = null, prompt_cache_gib: ?f64 = null, prompt_cache_over_cap: bool = false };
 
 /// An opened engine; ``close`` stops its thread and frees its backend.
 pub const Opened = struct { engine: Engine, close: *const fn (ctx: *anyopaque) void, ctx: *anyopaque };
