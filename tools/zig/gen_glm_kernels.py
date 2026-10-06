@@ -35,20 +35,18 @@ GEMV_T = {"igate": (1, 2, 8, 4, 4, 4), "values": (1, 4, 8, 4, 4, 4)}
 GEMV = {"scores_lt4": (1, 8, 1, 32, 1, 4), "scores_le32": (1, 8, 1, 32, 4, 4), "scores": (4, 1, 1, 32, 4, 4)}
 
 
-# MLX's preamble gives bfloat its math overloads (bf16_math.h): our kernels call abs and exp on bfloat
-BF16_MATH = """#ifndef METAL_FUNC
-#define METAL_FUNC inline __attribute__((__always_inline__))
-#endif
-namespace metal {
-METAL_FUNC bfloat16_t abs(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_fabs(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); }
-METAL_FUNC bfloat16_t exp(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_exp(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); }
+# bfloat overloads for the two math calls the family's kernels make on bfloat outside MLX (MLX's own headers supply
+# them there): the float function in each math mode, rounded back to bfloat
+BF16_MATH = """namespace metal {
+inline bfloat16_t abs(bfloat16_t v) { return bfloat16_t(abs(float(v))); }
+inline bfloat16_t exp(bfloat16_t v) { return bfloat16_t(exp(float(v))); }
 namespace fast {
-METAL_FUNC bfloat16_t abs(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_fabs(static_cast<float>(x), __METAL_FAST_MATH__)); }
-METAL_FUNC bfloat16_t exp(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_exp(static_cast<float>(x), __METAL_FAST_MATH__)); }
+inline bfloat16_t abs(bfloat16_t v) { return bfloat16_t(metal::fast::abs(float(v))); }
+inline bfloat16_t exp(bfloat16_t v) { return bfloat16_t(metal::fast::exp(float(v))); }
 }
 namespace precise {
-METAL_FUNC bfloat16_t abs(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_fabs(static_cast<float>(x), __METAL_PRECISE_MATH__)); }
-METAL_FUNC bfloat16_t exp(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_exp(static_cast<float>(x), __METAL_PRECISE_MATH__)); }
+inline bfloat16_t abs(bfloat16_t v) { return bfloat16_t(metal::precise::abs(float(v))); }
+inline bfloat16_t exp(bfloat16_t v) { return bfloat16_t(metal::precise::exp(float(v))); }
 }
 }
 """

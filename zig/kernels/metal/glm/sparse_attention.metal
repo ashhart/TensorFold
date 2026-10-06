@@ -3,19 +3,16 @@
 using namespace metal;
 typedef bfloat bfloat16_t;
 typedef half float16_t;
-#ifndef METAL_FUNC
-#define METAL_FUNC inline __attribute__((__always_inline__))
-#endif
 namespace metal {
-METAL_FUNC bfloat16_t abs(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_fabs(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); }
-METAL_FUNC bfloat16_t exp(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_exp(static_cast<float>(x), __METAL_MAYBE_FAST_MATH__)); }
+inline bfloat16_t abs(bfloat16_t v) { return bfloat16_t(abs(float(v))); }
+inline bfloat16_t exp(bfloat16_t v) { return bfloat16_t(exp(float(v))); }
 namespace fast {
-METAL_FUNC bfloat16_t abs(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_fabs(static_cast<float>(x), __METAL_FAST_MATH__)); }
-METAL_FUNC bfloat16_t exp(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_exp(static_cast<float>(x), __METAL_FAST_MATH__)); }
+inline bfloat16_t abs(bfloat16_t v) { return bfloat16_t(metal::fast::abs(float(v))); }
+inline bfloat16_t exp(bfloat16_t v) { return bfloat16_t(metal::fast::exp(float(v))); }
 }
 namespace precise {
-METAL_FUNC bfloat16_t abs(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_fabs(static_cast<float>(x), __METAL_PRECISE_MATH__)); }
-METAL_FUNC bfloat16_t exp(bfloat16_t x) { return static_cast<bfloat16_t>(__metal_exp(static_cast<float>(x), __METAL_PRECISE_MATH__)); }
+inline bfloat16_t abs(bfloat16_t v) { return bfloat16_t(metal::precise::abs(float(v))); }
+inline bfloat16_t exp(bfloat16_t v) { return bfloat16_t(metal::precise::exp(float(v))); }
 }
 }
 template <int QK_DIM, int TOPK, int HEADS>
