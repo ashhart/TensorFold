@@ -185,15 +185,16 @@ const Loader = struct {
         return out;
     }
 
-    /// Routed experts' `proj` stacked [experts, n, k].
+    /// This Mac's routed experts' `proj` stacked [own experts, n, k]: expert e at e - own[0].
     fn experts(l: *Loader, i: usize, proj: []const u8, n: usize, k: usize) !Q4 {
-        const e = l.c.experts;
+        const lo = l.c.own[0];
+        const e = l.c.own[1] - lo;
         const out: Q4 = .{ .w = l.take(e * Q4.wBytes(n, k)), .s = l.take(e * Q4.sBytes(n, k)), .b = l.take(e * Q4.sBytes(n, k)), .n = @intCast(n), .k = @intCast(k) };
         for (0..e) |x| {
             const comps = [_][]const u8{ "weight", "scales", "biases" };
             const dsts = [_]Ref{ out.w.at(x * Q4.wBytes(n, k)), out.s.at(x * Q4.sBytes(n, k)), out.b.at(x * Q4.sBytes(n, k)) };
             for (comps, dsts, 0..) |comp, dst, j| {
-                const s = try l.src(prefix ++ "layers.{d}.mlp.experts.{d}.{s}.{s}", .{ i, x, proj, comp });
+                const s = try l.src(prefix ++ "layers.{d}.mlp.experts.{d}.{s}.{s}", .{ i, lo + x, proj, comp });
                 var name: [200]u8 = undefined;
                 try expect(s, try std.fmt.bufPrint(&name, "experts.{d}.{d}.{s}.{s}", .{ i, x, proj, comp }), if (j == 0) .u32 else .bf16, &.{ n, if (j == 0) k / 8 else k / 64 });
                 try l.copyTo(s, dst);
@@ -285,7 +286,7 @@ const Loader = struct {
         const c = l.c;
         const D: usize = c.hidden;
         const per = 2 * (Q4.wBytes(c.moe_inter, D) + 2 * Q4.sBytes(c.moe_inter, D)) + Q4.wBytes(D, c.moe_inter) + 2 * Q4.sBytes(D, c.moe_inter);
-        return c.experts * per + 9 * 256;
+        return (c.own[1] - c.own[0]) * per + 9 * 256;
     }
 
     fn layer(l: *Loader, i: usize) !Layer {

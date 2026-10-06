@@ -4,7 +4,8 @@
 //! GLM_DEPTHS (default "0,3"), GLM_MAX (64), GLM_CAP (prompt + reply room, default 8192), GLM_RUNS (1),
 //! GLM_OUT (write each prompt's first-depth reply as JSON), GLM_VS (compare replies with a GLM_OUT file),
 //! GLM_CANCEL_TEST (cancel a reply mid-prompt, then the next fresh reply must equal the plain one),
-//! GLM_LAYERS (the first N layers only, with the MTP layer and head), GLM_REF_STRICT (a reference difference fails).
+//! GLM_LAYERS (the first N layers only, with the MTP layer and head), GLM_REF_STRICT (a reference difference fails),
+//! GLM_EP (expert parallel: this Mac's link settings; run the same command on both Macs).
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -68,7 +69,7 @@ pub fn main(init: std.process.Init) !void {
     const doc = try std.json.parseFromSliceLeaky(std.json.Value, arena, pf.bytes[0..pf.size], .{});
     const e = try glm.engine.Engine.load(gpa, args[1], cap);
     defer e.deinit();
-    std.debug.print("loaded in {d:.1} s: {d} of {d} layers, {d:.1} GB of weights, MTP head {s}\n", .{ e.load_seconds, e.c.run, e.c.layers, @as(f64, @floatFromInt(e.w.bytes)) / 1e9, if (e.hasMtp()) "yes" else "no" });
+    std.debug.print("loaded in {d:.1} s: {d} of {d} layers, routed experts {d}-{d}, {d:.1} GB of weights, MTP head {s}\n", .{ e.load_seconds, e.c.run, e.c.layers, e.c.own[0], e.c.own[1] - 1, @as(f64, @floatFromInt(e.w.bytes)) / 1e9, if (e.hasMtp()) "yes" else "no" });
     const strict = std.c.getenv("GLM_REF_STRICT") != null;
     const eos = e.c.eos[0..e.c.eos_n];
     if (std.c.getenv("GLM_CAPTURE")) |path| { // the first prompt's first window, sublayer by sublayer (glm_ref.py --capture)

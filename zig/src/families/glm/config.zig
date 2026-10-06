@@ -14,6 +14,7 @@ pub const Config = struct {
     dense_layers: u32 = 3,
     dense_inter: u32 = 12288,
     experts: u32 = 288,
+    own: [2]u32 = .{ 0, 288 }, // routed experts [lo, hi) this Mac holds: all, or its half in expert-parallel mode
     topk: u32 = 8,
     moe_inter: u32 = 2048,
     routed_scale: f32 = 2.5,
@@ -127,6 +128,7 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8) !Config {
     c.dense_layers = @intCast(try int(t, "first_k_dense_replace"));
     c.dense_inter = @intCast(try int(t, "intermediate_size"));
     c.experts = @intCast(try int(t, "n_routed_experts"));
+    c.own = .{ 0, c.experts };
     c.topk = @intCast(try int(t, "num_experts_per_tok"));
     c.moe_inter = @intCast(try int(t, "moe_intermediate_size"));
     c.routed_scale = @floatCast(try float(t, "routed_scaling_factor"));
@@ -180,6 +182,13 @@ pub fn subset(c: *Config, n: u32) !void {
     c.run = n;
 }
 
+/// Expert parallel over `ranks` Macs: rank r holds routed experts [r * experts / ranks, (r + 1) * experts / ranks).
+pub fn split(c: *Config, rank: u32, ranks: u32) !void {
+    if (ranks == 0 or rank >= ranks or c.experts % ranks != 0) return error.BadExpertSplit;
+    const per = c.experts / ranks;
+    c.own = .{ rank * per, (rank + 1) * per };
+}
+
 test "GLM-5.3-Flash's layer kinds: 34 KDA and 11 MLA in the backbone, the MTP layer MLA" {
     const c = Config{};
     try std.testing.expectEqual(@as(u32, 34), c.countKind(.kda));
@@ -201,4 +210,14 @@ test "a layer subset keeps the MTP layer's place and refuses an empty or oversiz
     try std.testing.expectEqual(@as(u32, 45), c.layers);
     try std.testing.expectError(error.BadLayerCount, subset(&c, 0));
     try std.testing.expectError(error.BadLayerCount, subset(&c, 46));
+}
+
+test "two ranks hold the routed experts' halves" {
+    var c = Config{};
+    try split(&c, 0, 2);
+    try std.testing.expectEqual([2]u32{ 0, 144 }, c.own);
+    try split(&c, 1, 2);
+    try std.testing.expectEqual([2]u32{ 144, 288 }, c.own);
+    try std.testing.expectError(error.BadExpertSplit, split(&c, 2, 2));
+    try std.testing.expectError(error.BadExpertSplit, split(&c, 0, 5));
 }

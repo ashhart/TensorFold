@@ -9,6 +9,7 @@ const fwd = @import("forward.zig");
 const mtp = @import("mtp.zig");
 const prompt_mod = @import("prompt.zig");
 const kernels = @import("kernels.zig");
+const ep_mod = @import("ep.zig");
 const Ref = wts.Ref;
 
 pub const Reason = enum { stop, length, cancelled };
@@ -46,12 +47,14 @@ pub const Engine = struct {
     s: st.State,
     sc: st.Scratch,
     prompt_ids: Ref,
-    pr: prompt_mod.Prompt,
-    chunked: bool, // prompt chunks on the tensor units (GLM_PROMPT=0: every prompt row in 16-row decode windows)
+    pr: ?prompt_mod.Prompt, // prompt chunks on the tensor units (null: every prompt row in 16-row decode windows)
+    ep: ?*ep_mod.Ep, // expert parallel with a peer Mac (GLM_EP names this Mac's link settings)
+    ep_arena: std.heap.ArenaAllocator, // the link settings, alive as long as the link
     residency: ?mtl.ResidencySet = null,
     load_seconds: f64 = 0,
 
-    /// The checkpoint in `dir` with caches for `cap` tokens; GLM_LAYERS=N: only the first N layers, the MTP layer and the head.
+    /// The checkpoint in `dir` with caches for `cap` tokens; GLM_LAYERS=N: only the first N layers, the MTP layer and the head;
+    /// GLM_EP=settings.json: half the routed experts, the other half on the peer named there.
     pub fn load(gpa: std.mem.Allocator, dir: []const u8, cap: u32) !*Engine {
         const e = try gpa.create(Engine); // undefined memory: every field is set below
         errdefer gpa.destroy(e);
@@ -61,6 +64,10 @@ pub const Engine = struct {
         e.gpa = gpa;
         e.ev = 0;
         e.residency = null;
+        e.ep = null;
+        e.pr = null;
+        e.ep_arena = .init(gpa);
+        errdefer e.ep_arena.deinit();
         e.device = try mtl.Device.init();
         e.queue = try e.device.queue();
         e.event = try e.device.sharedEvent();
@@ -70,6 +77,13 @@ pub const Engine = struct {
         defer f.deinit();
         e.c = try cfg.parse(gpa, f.bytes[0..f.size]);
         if (std.c.getenv("GLM_LAYERS")) |v| try cfg.subset(&e.c, std.fmt.parseInt(u32, std.mem.span(v), 10) catch return error.BadLayerCount);
+        const link: ?ep_mod.Settings = if (std.c.getenv("GLM_EP")) |ep_path| blk: {
+            const sf = try mtl.MappedFile.open(ep_path);
+            defer sf.deinit();
+            const s = try ep_mod.readSettings(e.ep_arena.allocator(), sf.bytes[0..sf.size]);
+            try cfg.split(&e.c, s.rank, 2);
+            break :blk s;
+        } else null;
         e.k = try kernels.load(gpa, e.device);
         errdefer {
             e.k.deinit();
@@ -92,10 +106,11 @@ pub const Engine = struct {
         e.s = both.state;
         e.sc = both.scratch;
         e.prompt_ids = try e.arena.buffer(@as(usize, cap) * 4);
-        e.pr = try prompt_mod.init(gpa, &e.arena, e.device, &e.c, &e.sc, cap);
-        errdefer e.pr.deinit();
-        e.chunked = if (std.c.getenv("GLM_PROMPT")) |v| v[0] != '0' else true;
+        const chunked = if (std.c.getenv("GLM_PROMPT")) |v| v[0] != '0' else true;
+        if (chunked and link == null) e.pr = try prompt_mod.init(gpa, &e.arena, e.device, &e.c, &e.sc, cap);
+        errdefer if (e.pr) |*p| p.deinit();
         try e.prepare();
+        if (link) |s| e.ep = try ep_mod.Ep.init(gpa, e.device, s, e.c.own);
         // opt-in: wiring 181 GB leaves macOS nothing to reclaim if another model shares the Mac (Flash Next runs without)
         if (std.c.getenv("GLM_RESIDENCY") == null) {} else if (e.device.residencySet(e.w.buffers.items.len + e.arena.buffers.items.len)) |set| {
             for (e.w.buffers.items) |b| set.add(b);
@@ -138,7 +153,9 @@ pub const Engine = struct {
             e.queue.removeResidencySet(set);
             set.deinit();
         }
-        e.pr.deinit();
+        if (e.ep) |ep| ep.deinit(gpa);
+        e.ep_arena.deinit();
+        if (e.pr) |*p| p.deinit();
         e.arena.deinit();
         e.w.deinit();
         gpa.destroy(e.w);
@@ -155,7 +172,7 @@ pub const Engine = struct {
     }
 
     fn ctx(e: *Engine) fwd.Ctx {
-        return .{ .k = e.k, .c = &e.c, .w = e.w, .s = &e.s, .sc = &e.sc };
+        return .{ .k = e.k, .c = &e.c, .w = e.w, .s = &e.s, .sc = &e.sc, .ep = e.ep };
     }
 
     /// A command buffer ordered after the last one this engine committed.
@@ -175,8 +192,10 @@ pub const Engine = struct {
         if (cb.failure()) |msg| {
             e.event.set(e.ev); // a failed buffer may never signal: the next one must not wait on it
             std.log.err("glm: command buffer failed: {s}", .{msg});
+            if (e.ep) |ep| ep.failed.store(true, .release); // its exchanges are out of step with the peer's
             return error.GpuFailed;
         }
+        if (e.ep) |ep| if (ep.failed.load(.acquire) or ep.gaveUp() > 0) return error.EpLinkFailed;
     }
 
     /// Wait until every command buffer this engine committed has completed (before the host touches shared state).
@@ -244,23 +263,24 @@ pub const Engine = struct {
         var last_n: u32 = 1;
         while (at < P) {
             if (out.cancelled(out.ctx)) return .{ .reason = .cancelled };
-            const chunk = e.chunked and P - at > st.max_rows;
+            const chunk = e.pr != null and P - at > st.max_rows;
             const n = @min(@as(u32, if (chunk) prompt_mod.max_rows else st.max_rows), P - at);
             const last = at + n == P;
             const absorb = if (last) n - 1 else n;
             const b = e.begin();
             if (chunk) {
+                const pr = &e.pr.?;
                 var px = x;
-                px.sc = &e.pr.streams;
-                prompt_mod.backbone(&e.pr, &px, b.enc, e.prompt_ids.at(@as(usize, at) * 4), n, at);
+                px.sc = &pr.streams;
+                prompt_mod.backbone(pr, &px, b.enc, e.prompt_ids.at(@as(usize, at) * 4), n, at);
                 fwd.flipKda(&x);
-                const hidden = e.pr.streams.hidden;
+                const hidden = pr.streams.hidden;
                 if (last) { // the last row into the decode scratch: the head's first token, the MTP head's first row
                     copyRow(&x, b.enc, hidden.at(@as(usize, n - 1) * D * 2), e.sc.hidden, D);
                     fwd.head(&x, b.enc, e.sc.hidden, e.sc.logits, e.sc.picks, 1);
                 }
                 if (d > 0 and absorb > 0) {
-                    prompt_mod.mtp(&e.pr, &px, b.enc, hidden, e.prompt_ids.at(@as(usize, at + 1) * 4), absorb, at);
+                    prompt_mod.mtp(pr, &px, b.enc, hidden, e.prompt_ids.at(@as(usize, at + 1) * 4), absorb, at);
                     e.s.mtp_pos = at + absorb;
                 }
                 last_n = 1;
