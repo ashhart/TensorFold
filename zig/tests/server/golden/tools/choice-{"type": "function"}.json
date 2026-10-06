@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 400 Bad Request",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "77"
+    ]
+   ],
+   "body": "{\"error\": {\"message\": \"tool_choice function must include a function object\"}}",
+   "interim": ""
+  }
+ ]
+}

@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 404 Not Found",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "49"
+    ]
+   ],
+   "body": "{\"error\": {\"message\": \"unknown path /caf\\u00e9\"}}",
+   "interim": ""
+  }
+ ]
+}

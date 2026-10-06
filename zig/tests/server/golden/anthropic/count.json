@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 200 OK",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "21"
+    ]
+   ],
+   "body": "{\"input_tokens\": 183}",
+   "interim": ""
+  }
+ ]
+}

@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 400 Bad Request",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "153"
+    ]
+   ],
+   "body": "{\"error\": {\"message\": \"response_format cannot be combined with tool_choice \\\"required\\\" or a named function: send one\", \"type\": \"invalid_request_error\"}}",
+   "interim": ""
+  }
+ ]
+}

@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 200 OK",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "<len>"
+    ]
+   ],
+   "body": "{\"id\": \"<id1>\", \"object\": \"chat.completion\", \"created\": <ts>, \"model\": \"fake-model\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"The answer is fast.\", \"reasoning_content\": \"Let me think\"}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 40, \"completion_tokens\": 11, \"total_tokens\": 51, \"prompt_tokens_details\": {\"cached_tokens\": 3}, \"completion_tokens_details\": {\"reasoning_tokens\": 4}}, \"exact_mode\": \"exact\", \"tensorfold\": {\"enable_thinking\": true, \"reasoning_effort\": \"medium\", \"engine\": \"lanes\", \"tokens_per_second\": <t>, \"seconds\": <t>, \"prefill_seconds\": <t>, \"prefill_widths\": [], \"prefill_raised\": [], \"time_to_first_token\": <t>, \"sampling\": \"greedy\", \"drafts\": true, \"token_sha\": \"dfc656da95c3\", \"min_rows\": 1}, \"speculative\": {\"rounds\": 6, \"drafted\": 5, \"accepted\": 5, \"acceptance_rate\": 1.0, \"tokens_per_round\": 1.8333333333333333}}",
+   "interim": ""
+  }
+ ]
+}

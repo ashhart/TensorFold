@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 200 OK",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "<len>"
+    ]
+   ],
+   "body": "{\"id\": \"<id1>\", \"object\": \"chat.completion\", \"created\": <ts>, \"model\": \"fake-model\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": \"\", \"reasoning_content\": \"<|channel|>analysis<|message|>Let me think<|end|><|channel|>final<|message|>The answer<|return|>\"}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 28, \"completion_tokens\": 13, \"total_tokens\": 41, \"prompt_tokens_details\": {\"cached_tokens\": 0}, \"completion_tokens_details\": {\"reasoning_tokens\": 13}}, \"exact_mode\": \"exact\", \"tensorfold\": {\"enable_thinking\": true, \"reasoning_effort\": null, \"engine\": \"lanes\", \"tokens_per_second\": <t>, \"seconds\": <t>, \"prefill_seconds\": <t>, \"prefill_widths\": [], \"prefill_raised\": [], \"time_to_first_token\": <t>, \"sampling\": \"greedy\", \"drafts\": true, \"token_sha\": \"22e6d02a10c4\", \"min_rows\": 1}, \"speculative\": {\"rounds\": 4, \"drafted\": 9, \"accepted\": 9, \"acceptance_rate\": 1.0, \"tokens_per_round\": 3.25}}",
+   "interim": ""
+  }
+ ]
+}

@@ -1,0 +1,11 @@
+{
+ "closed": "closed",
+ "replies": [
+  {
+   "status": "",
+   "headers": [],
+   "body": "{\"status\": \"ok\", \"model\": \"fake-model\", \"model_ids\": [\"fake-model\", \"fake-alias\"], \"max_batch_size\": 4, \"warming\": false, \"memory\": {\"active\": 0, \"cache\": 0, \"peak\": 0}, \"live\": {\"connections\": 0, \"waiting\": 0, \"decode_tokens_per_second\": 0.0, \"prefill_tokens_per_second\": 0.0}}",
+   "interim": ""
+  }
+ ]
+}

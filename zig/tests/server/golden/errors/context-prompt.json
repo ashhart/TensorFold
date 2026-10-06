@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 400 Bad Request",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "310"
+    ]
+   ],
+   "body": "{\"error\": {\"message\": \"This server's maximum context length is 1024 tokens, but the rendered prompt has 1110 tokens and leaves no room for a reply, which exceeds the context window. Compact or shorten the conversation.\", \"type\": \"invalid_request_error\", \"param\": \"messages\", \"code\": \"context_length_exceeded\"}}",
+   "interim": ""
+  }
+ ]
+}

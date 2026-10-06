@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 200 OK",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "385"
+    ]
+   ],
+   "body": "{\"id\": \"<id1>\", \"type\": \"message\", \"role\": \"assistant\", \"model\": \"fake-model\", \"content\": [{\"type\": \"text\", \"text\": \"Hello world \"}], \"stop_reason\": \"stop_sequence\", \"stop_sequence\": \"STOP\", \"usage\": {\"input_tokens\": 29, \"output_tokens\": 9, \"cache_creation_input_tokens\": 0, \"cache_read_input_tokens\": 0, \"output_tokens_details\": {\"thinking_tokens\": 0}}}",
+   "interim": ""
+  }
+ ]
+}

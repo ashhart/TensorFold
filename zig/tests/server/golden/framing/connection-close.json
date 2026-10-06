@@ -1,0 +1,24 @@
+{
+ "closed": "closed",
+ "replies": [
+  {
+   "status": "HTTP/1.1 200 OK",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "208"
+    ],
+    [
+     "Connection",
+     "close"
+    ]
+   ],
+   "body": "{\"object\": \"list\", \"data\": [{\"id\": \"fake-model\", \"object\": \"model\", \"created\": <ts>, \"owned_by\": \"tensorfold\"}, {\"id\": \"fake-alias\", \"object\": \"model\", \"created\": <ts>, \"owned_by\": \"tensorfold\"}]}",
+   "interim": ""
+  }
+ ]
+}

@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 200 OK",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "<len>"
+    ]
+   ],
+   "body": "{\"id\": \"<id1>\", \"object\": \"response\", \"created_at\": <ts>, \"status\": \"completed\", \"error\": null, \"incomplete_details\": null, \"model\": \"fake-model\", \"output\": [{\"id\": \"<id2>\", \"type\": \"reasoning\", \"summary\": [], \"content\": [{\"type\": \"reasoning_text\", \"text\": \"Hello world!\"}], \"status\": \"completed\"}, {\"id\": \"<id3>\", \"type\": \"message\", \"role\": \"assistant\", \"status\": \"completed\", \"content\": [{\"type\": \"output_text\", \"text\": \"\", \"annotations\": [], \"logprobs\": []}]}], \"usage\": {\"input_tokens\": 77, \"input_tokens_details\": {\"cached_tokens\": 0}, \"output_tokens\": 4, \"output_tokens_details\": {\"reasoning_tokens\": 4}, \"total_tokens\": 81}, \"instructions\": null, \"max_output_tokens\": null, \"metadata\": {}, \"parallel_tool_calls\": true, \"previous_response_id\": null, \"reasoning\": {\"effort\": null, \"summary\": null}, \"store\": true, \"temperature\": null, \"text\": {\"format\": {\"type\": \"text\"}}, \"tool_choice\": \"auto\", \"tools\": [], \"top_p\": null, \"truncation\": \"disabled\", \"user\": null, \"background\": false, \"completed_at\": <ts>, \"tensorfold\": {\"enable_thinking\": true, \"reasoning_effort\": null, \"engine\": \"lanes\", \"tokens_per_second\": <t>, \"seconds\": <t>, \"prefill_seconds\": <t>, \"prefill_widths\": [], \"prefill_raised\": [], \"time_to_first_token\": <t>, \"sampling\": \"greedy\", \"drafts\": true, \"token_sha\": \"ab74875c663e\", \"min_rows\": 1}}",
+   "interim": ""
+  }
+ ]
+}

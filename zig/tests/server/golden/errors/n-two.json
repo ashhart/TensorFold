@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 400 Bad Request",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "106"
+    ]
+   ],
+   "body": "{\"error\": {\"message\": \"n must be 1; multiple choices are not supported\", \"type\": \"invalid_request_error\"}}",
+   "interim": ""
+  }
+ ]
+}

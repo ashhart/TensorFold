@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 400 Bad Request",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "79"
+    ]
+   ],
+   "body": "{\"error\": {\"message\": \"tools must be a list\", \"type\": \"invalid_request_error\"}}",
+   "interim": ""
+  }
+ ]
+}

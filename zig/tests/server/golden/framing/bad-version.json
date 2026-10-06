@@ -1,0 +1,11 @@
+{
+ "closed": "closed",
+ "replies": [
+  {
+   "status": "",
+   "headers": [],
+   "body": "<!DOCTYPE HTML>\n<html lang=\"en\">\n    <head>\n        <meta charset=\"utf-8\">\n        <style type=\"text/css\">\n            :root {\n                color-scheme: light dark;\n            }\n        </style>\n        <title>Error response</title>\n    </head>\n    <body>\n        <h1>Error response</h1>\n        <p>Error code: 400</p>\n        <p>Message: Bad request version ('HTTX/1.1').</p>\n        <p>Error code explanation: 400 - Bad request syntax or unsupported method.</p>\n    </body>\n</html>\n",
+   "interim": ""
+  }
+ ]
+}

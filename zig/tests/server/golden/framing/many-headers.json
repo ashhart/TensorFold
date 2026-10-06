@@ -1,0 +1,24 @@
+{
+ "closed": "closed",
+ "replies": [
+  {
+   "status": "HTTP/1.1 431 Too many headers",
+   "headers": [
+    [
+     "Connection",
+     "close"
+    ],
+    [
+     "Content-Type",
+     "text/html;charset=utf-8"
+    ],
+    [
+     "Content-Length",
+     "458"
+    ]
+   ],
+   "body": "<!DOCTYPE HTML>\n<html lang=\"en\">\n    <head>\n        <meta charset=\"utf-8\">\n        <style type=\"text/css\">\n            :root {\n                color-scheme: light dark;\n            }\n        </style>\n        <title>Error response</title>\n    </head>\n    <body>\n        <h1>Error response</h1>\n        <p>Error code: 431</p>\n        <p>Message: Too many headers.</p>\n        <p>Error code explanation: 431 - got more than 100 headers.</p>\n    </body>\n</html>\n",
+   "interim": ""
+  }
+ ]
+}

@@ -1,0 +1,11 @@
+{
+ "closed": "closed",
+ "replies": [
+  {
+   "status": "",
+   "headers": [],
+   "body": "<!DOCTYPE HTML>\n<html lang=\"en\">\n    <head>\n        <meta charset=\"utf-8\">\n        <style type=\"text/css\">\n            :root {\n                color-scheme: light dark;\n            }\n        </style>\n        <title>Error response</title>\n    </head>\n    <body>\n        <h1>Error response</h1>\n        <p>Error code: 505</p>\n        <p>Message: Invalid HTTP version (2.0).</p>\n        <p>Error code explanation: 505 - Cannot fulfill request.</p>\n    </body>\n</html>\n",
+   "interim": ""
+  }
+ ]
+}

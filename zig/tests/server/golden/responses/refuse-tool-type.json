@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 400 Bad Request",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "170"
+    ]
+   ],
+   "body": "{\"error\": {\"message\": \"tools of type 'web_search' are not supported: this server runs function tools only\", \"type\": \"invalid_request_error\", \"param\": null, \"code\": null}}",
+   "interim": ""
+  }
+ ]
+}

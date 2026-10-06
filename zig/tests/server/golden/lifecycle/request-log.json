@@ -1,0 +1,179 @@
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=default"}], "stream": false}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=default"}], "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}], "stream": false}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}], "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=think"}], "stream": false}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=think"}], "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=split_utf8"}], "stream": false}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=split_utf8"}], "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=harmony"}], "stream": false}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=harmony"}], "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=long"}], "stream": false}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=long"}], "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=no_end"}], "stream": false}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=no_end"}], "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=json_answer"}], "stream": false}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=json_answer"}], "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=think"}], "chat_template_kwargs": {"enable_thinking": false}}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=think"}], "stream": true, "chat_template_kwargs": {"enable_thinking": false}}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=harmony"}], "chat_template_kwargs": {"enable_thinking": false}}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=harmony"}], "stream": true, "chat_template_kwargs": {"enable_thinking": false}}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=default"}], "chat_template_kwargs": {"enable_thinking": false}}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=default"}], "stream": true, "chat_template_kwargs": {"enable_thinking": false}}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=think"}], "reasoning_effort": "none"}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=think"}], "reasoning_effort": "low"}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=think"}], "reasoning_effort": "high"}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=think"}], "reasoning_effort": "max"}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=think"}], "reasoning_effort": "medium"}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=think"}], "reasoning_effort": "bogus"}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=think"}], "chat_template_kwargs": {"thinking": {"type": "disabled"}}}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=think"}], "chat_template_kwargs": {"reasoning_effort": "low"}}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=think_long"}], "max_tokens": 4}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=think_long"}], "max_tokens": 4, "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=stop_words"}], "stop": ["wor"]}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=stop_words"}], "stop": ["wor"], "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=stop_words"}], "stop": "STOP"}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=stop_words"}], "stop": "STOP", "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=stop_words"}], "stop": ["zzz", "STOP"]}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=stop_words"}], "stop": ["zzz", "STOP"], "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=stop_words"}], "stop": ["ld STO"]}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=stop_words"}], "stop": ["ld STO"], "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=stop_words"}], "stop": ["worldx"]}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=stop_words"}], "stop": ["worldx"], "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=think"}], "stop": ["think"]}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=eos_mid"}], "ignore_eos": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=eos_mid"}], "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}], "stream": true, "stream_options": {"include_usage": true}}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=long"}], "max_tokens": 3}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=long"}], "max_completion_tokens": 2}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=long"}], "max_tokens": 0}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=long"}], "max_tokens": 5}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}], "temperature": 0.7, "top_k": 5}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}], "temperature": 1.0, "seed": -3, "draft": false}
+{"model": "fake-alias", "messages": [{"role": "user", "content": "Hi @script=plain"}]}
+{"model": "other", "messages": [{"role": "user", "content": "Hi @script=plain"}]}
+{"messages": [{"role": "system", "content": "Write a title"}, {"role": "user", "content": "x @script=plain"}]}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=qwen_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "stream": false}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=qwen_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=qwen_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "parallel_tool_calls": false}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=qwen_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "parallel_tool_calls": false, "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=qwen_tool_think"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "stream": false}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=qwen_tool_think"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=qwen_tool_think"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "parallel_tool_calls": false}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=qwen_tool_think"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "parallel_tool_calls": false, "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=xml_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "stream": false}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=xml_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=xml_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "parallel_tool_calls": false}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=xml_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "parallel_tool_calls": false, "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=two_tools"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "stream": false}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=two_tools"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=two_tools"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "parallel_tool_calls": false}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=two_tools"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "parallel_tool_calls": false, "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=glm_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "stream": false}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=glm_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=glm_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "parallel_tool_calls": false}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=glm_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "parallel_tool_calls": false, "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=gemma_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "stream": false}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=gemma_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=gemma_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "parallel_tool_calls": false}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=gemma_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "parallel_tool_calls": false, "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=dsml_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "stream": false}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=dsml_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=dsml_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "parallel_tool_calls": false}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=dsml_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "parallel_tool_calls": false, "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=bare_json"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "stream": false}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=bare_json"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=bare_json"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "parallel_tool_calls": false}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=bare_json"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "parallel_tool_calls": false, "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=bad_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "stream": false}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=bad_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=bad_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "parallel_tool_calls": false}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=bad_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "parallel_tool_calls": false, "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "stream": false}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "parallel_tool_calls": false}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "parallel_tool_calls": false, "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=qwen_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "tool_choice": "auto"}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=qwen_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "tool_choice": "none"}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=qwen_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "tool_choice": "required"}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=qwen_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "tool_choice": {"type": "function", "function": {"name": "lookup"}}}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=qwen_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "tool_choice": {"type": "function", "function": {"name": "nope"}}}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=qwen_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "tool_choice": {"type": "function"}}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}], "tool_choice": "required"}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}], "tools": {"a": 1}}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}], "tools": [{"type": "function", "function": {}}]}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "parallel_tool_calls": "yes"}
+{"messages": [{"role": "user", "content": "find it"}, {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "lookup", "arguments": "{\"query\": \"x\"}"}}]}, {"role": "tool", "tool_call_id": "call_1", "content": "found"}, {"role": "user", "content": "go @script=plain"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}]}
+{"messages": [{"role": "user", "content": "find it"}, {"role": "assistant", "content": "", "tool_calls": [{"id": "c", "type": "function", "function": {"name": "lookup", "arguments": "not json"}}]}, {"role": "user", "content": "go @script=plain"}]}
+{}
+{"model": "x"}
+{"messages": []}
+{"messages": [{"role": "robot", "content": "x"}]}
+{"messages": [{"role": "user", "content": 5}]}
+{"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "<redacted>"}}]}]}
+{"messages": ["hi"]}
+{"messages": [{"role": "user", "content": [{"type": "text", "text": 1}]}]}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=json_answer"}], "response_format": {"type": "json_object"}}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}], "response_format": {"type": "bogus"}}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}], "response_format": {"type": "text"}}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}], "response_format": "json"}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}], "response_format": {"type": "json_schema", "json_schema": {}}}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}], "guided_choice": []}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}], "guided_json": "{bad"}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}], "structured_outputs": {"xml": 1}}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}], "tools": [{"type": "function", "function": {"name": "lookup", "description": "Search", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}], "tool_choice": "required", "response_format": {"type": "json_object"}}
+{"messages": [{"role": "user", "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}]}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}], "max_tokens": 2000}
+{"messages": [{"role": "system", "content": "A"}, {"role": "developer", "content": "B"}, {"role": "user", "content": "x @script=plain"}, {"role": "system", "content": "late"}]}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}], "max_tokens": 2000, "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}], "response_format": {"type": "json_object"}, "stream": true}
+{"prompt": "Once @script=plain"}
+{"prompt": [79, 110, 99, 101, 32, 64, 115, 99, 114, 105, 112, 116, 61, 116, 104, 105, 110, 107]}
+{"prompt": [5, 99999]}
+{"prompt": [true, 1]}
+{"prompt": ["a", "b @script=plain"]}
+{"prompt": null}
+{}
+{"messages": [{"role": "user", "content": "Hi @script=think"}]}
+{"prompt": 12}
+{"prompt": [["x"], "y @script=default"]}
+{"prompt": "x @script=long", "max_tokens": 2}
+{"prompt": "Once @script=plain", "stream": true}
+{"messages": [{"role": "user", "content": "Hi @script=think"}], "stream": true}
+{"prompt": "Once @script=plain", "stream": true, "stream_options": {"include_usage": true}}
+{"prompt": "x @script=think", "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=think"}]}
+{"stream": true, "messages": [{"role": "user", "content": "Hi @script=think"}]}
+{"messages": [{"role": "user", "content": "Hi @script=qwen_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}]}
+{"stream": true, "messages": [{"role": "user", "content": "Hi @script=xml_tool"}], "tools": [{"type": "function", "function": {"name": "lookup"}}]}
+{"messages": [{"role": "user", "content": "Hi @script=long"}], "max_tokens": 2}
+{"temperature": 0.0, "messages": [{"role": "system", "content": "Be brief"}, {"role": "user", "content": [{"type": "text", "text": "x @script=plain"}]}]}
+{"messages": [{"role": "user", "content": "find"}, {"role": "assistant", "content": "", "reasoning_content": "hmm", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}]}, {"role": "tool", "tool_call_id": "c1", "content": "done @script=plain"}]}
+{"messages": [{"role": "user", "content": "x @script=qwen_tool"}], "tools": [{"type": "function", "function": {"name": "lookup"}}], "tool_choice": "auto"}
+{"messages": [{"role": "user", "content": "one @script=plain"}]}
+{"messages": [{"role": "user", "content": "one @script=plain"}, {"role": "assistant", "content": [{"type": "text", "text": ""}], "reasoning_content": "Hello world!"}, {"role": "user", "content": "two @script=think"}]}
+{"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "<redacted>"}}]}]}
+{"model": "fake-model", "messages": [{"role": "user", "content": [{"type": "text", "text": "Hi @script=think"}]}], "max_tokens": 64, "chat_template_kwargs": {"enable_thinking": false}, "reasoning_effort": "none"}
+{"model": "fake-model", "messages": [{"role": "user", "content": [{"type": "text", "text": "Hi @script=think"}]}], "max_tokens": 64, "stream": true, "chat_template_kwargs": {"enable_thinking": false}, "reasoning_effort": "none"}
+{"model": "fake-model", "messages": [{"role": "user", "content": [{"type": "text", "text": "Hi @script=think"}]}], "max_tokens": 64, "chat_template_kwargs": {"enable_thinking": true}, "thinking_budget": 32}
+{"model": "fake-model", "messages": [{"role": "user", "content": [{"type": "text", "text": "Hi @script=think"}]}], "max_tokens": 64, "stream": true, "chat_template_kwargs": {"enable_thinking": true}}
+{"model": "fake-model", "messages": [{"role": "system", "content": "Be kind"}, {"role": "user", "content": [{"type": "text", "text": "Hi @script=plain"}]}], "max_tokens": 64, "chat_template_kwargs": {"enable_thinking": false}, "reasoning_effort": "none"}
+{"model": "fake-model", "messages": [{"role": "user", "content": [{"type": "text", "text": "Hi @script=qwen_tool"}]}], "max_tokens": 64, "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}, "description": "Search"}}], "chat_template_kwargs": {"enable_thinking": false}, "reasoning_effort": "none"}
+{"model": "fake-model", "messages": [{"role": "user", "content": [{"type": "text", "text": "Hi @script=xml_tool"}]}], "max_tokens": 64, "stream": true, "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}, "description": "Search"}}], "chat_template_kwargs": {"enable_thinking": false}, "reasoning_effort": "none"}
+{"model": "fake-model", "messages": [{"role": "user", "content": [{"type": "text", "text": "Hi @script=qwen_tool_think"}]}], "max_tokens": 64, "stream": true, "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}, "description": "Search"}}], "chat_template_kwargs": {"enable_thinking": true}, "thinking_budget": 8}
+{"model": "fake-model", "messages": [{"role": "user", "content": [{"type": "text", "text": "Hi @script=stop_words"}]}], "max_tokens": 64, "stop": ["STOP"], "chat_template_kwargs": {"enable_thinking": false}, "reasoning_effort": "none"}
+{"model": "fake-model", "messages": [{"role": "user", "content": [{"type": "text", "text": "Hi @script=stop_words"}]}], "max_tokens": 64, "stream": true, "stop": ["STOP"], "chat_template_kwargs": {"enable_thinking": false}, "reasoning_effort": "none"}
+{"model": "fake-model", "messages": [{"role": "user", "content": [{"type": "text", "text": "Hi @script=long"}]}], "max_tokens": 2, "stream": true, "chat_template_kwargs": {"enable_thinking": false}, "reasoning_effort": "none"}
+{"model": "fake-model", "messages": [{"role": "user", "content": [{"type": "text", "text": "find"}]}, {"role": "assistant", "content": "", "tool_calls": [{"id": "t1", "type": "function", "function": {"name": "lookup", "arguments": "{\"query\": \"\u00e9\"}"}}], "reasoning_content": "hmm"}, {"role": "tool", "tool_call_id": "t1", "content": "Tool error: ok"}, {"role": "user", "content": [{"type": "text", "text": "go @script=plain"}]}], "max_tokens": 64, "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}, "description": "Search"}}], "tool_choice": "required", "parallel_tool_calls": false, "chat_template_kwargs": {"enable_thinking": false}, "reasoning_effort": "none"}
+{"model": "fake-model", "messages": [{"role": "user", "content": [{"type": "text", "text": "a"}]}, {"role": "system", "content": [{"type": "text", "text": "b"}]}, {"role": "assistant", "content": [{"type": "text", "text": "c"}]}], "max_tokens": 64, "chat_template_kwargs": {"enable_thinking": false}, "reasoning_effort": "none"}
+{"model": "fake-model", "messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "<redacted>"}}]}], "max_tokens": 64, "chat_template_kwargs": {"enable_thinking": false}, "reasoning_effort": "none"}
+{"model": "fake-model", "messages": [{"role": "user", "content": [{"type": "text", "text": "Hi @script=think"}]}], "max_tokens": 64, "response_format": {"type": "json_schema", "json_schema": {"name": "response", "schema": {}, "strict": true}}, "chat_template_kwargs": {"enable_thinking": false}, "reasoning_effort": "none"}
+{}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}]}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}], "stream": true}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}]}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}]}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}]}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}]}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}]}
+{"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=slow"}], "stream": true}

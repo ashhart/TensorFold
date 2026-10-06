@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 404 Not Found",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "49"
+    ]
+   ],
+   "body": "{\"error\": {\"message\": \"unknown path /v1/health\"}}",
+   "interim": ""
+  }
+ ]
+}

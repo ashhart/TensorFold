@@ -1,0 +1,24 @@
+{
+ "closed": "closed",
+ "replies": [
+  {
+   "status": "HTTP/1.1 200 OK",
+   "headers": [
+    [
+     "Content-Type",
+     "text/event-stream"
+    ],
+    [
+     "Cache-Control",
+     "no-cache"
+    ],
+    [
+     "Connection",
+     "close"
+    ]
+   ],
+   "body": "data: {\"id\": \"<id1>\", \"object\": \"chat.completion.chunk\", \"created\": <ts>, \"model\": \"fake-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"<id1>\", \"object\": \"chat.completion.chunk\", \"created\": <ts>, \"model\": \"fake-model\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning_content\": \"Hello\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"<id1>\", \"object\": \"chat.completion.chunk\", \"created\": <ts>, \"model\": \"fake-model\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning_content\": \" \"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"<id1>\", \"object\": \"chat.completion.chunk\", \"created\": <ts>, \"model\": \"fake-model\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning_content\": \"world STOP\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"<id1>\", \"object\": \"chat.completion.chunk\", \"created\": <ts>, \"model\": \"fake-model\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning_content\": \" there\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"<id1>\", \"object\": \"chat.completion.chunk\", \"created\": <ts>, \"model\": \"fake-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"exact_mode\": \"exact\", \"tensorfold\": {\"enable_thinking\": true, \"reasoning_effort\": null, \"engine\": \"lanes\", \"tokens_per_second\": <t>, \"seconds\": <t>, \"prefill_seconds\": <t>, \"prefill_widths\": [], \"prefill_raised\": [], \"time_to_first_token\": <t>, \"sampling\": \"greedy\", \"drafts\": true, \"token_sha\": \"b3b632068ba8\", \"min_rows\": 1}, \"speculative\": {\"rounds\": 6, \"drafted\": 5, \"accepted\": 5, \"acceptance_rate\": 1.0, \"tokens_per_round\": 1.8333333333333333}, \"usage\": {\"prompt_tokens\": 31, \"completion_tokens\": 11, \"total_tokens\": 42, \"prompt_tokens_details\": {\"cached_tokens\": 0}, \"completion_tokens_details\": {\"reasoning_tokens\": 11}}}\n\ndata: [DONE]\n\n",
+   "interim": ""
+  }
+ ]
+}

@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 400 Bad Request",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "118"
+    ]
+   ],
+   "body": "{\"error\": {\"message\": \"guided_choice must be a non-empty list of non-empty strings\", \"type\": \"invalid_request_error\"}}",
+   "interim": ""
+  }
+ ]
+}

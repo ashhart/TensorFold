@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 400 Bad Request",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "124"
+    ]
+   ],
+   "body": "{\"type\": \"error\", \"error\": {\"type\": \"invalid_request_error\", \"message\": \"tool_choice.type must be auto, none, any or tool\"}}",
+   "interim": ""
+  }
+ ]
+}

@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 400 Bad Request",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "139"
+    ]
+   ],
+   "body": "{\"error\": {\"message\": \"input must be a string or a non-empty list of items\", \"type\": \"invalid_request_error\", \"param\": null, \"code\": null}}",
+   "interim": ""
+  }
+ ]
+}

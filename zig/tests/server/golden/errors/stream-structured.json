@@ -1,0 +1,24 @@
+{
+ "closed": "closed",
+ "replies": [
+  {
+   "status": "HTTP/1.1 200 OK",
+   "headers": [
+    [
+     "Content-Type",
+     "text/event-stream"
+    ],
+    [
+     "Cache-Control",
+     "no-cache"
+    ],
+    [
+     "Connection",
+     "close"
+    ]
+   ],
+   "body": "data: {\"id\": \"<id1>\", \"object\": \"chat.completion.chunk\", \"created\": <ts>, \"model\": \"fake-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"error\": {\"message\": \"structured output needs the checkpoint's config.json vocab_size\", \"type\": \"invalid_request_error\"}}\n\ndata: [DONE]\n\n",
+   "interim": ""
+  }
+ ]
+}

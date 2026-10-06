@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 400 Bad Request",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "107"
+    ]
+   ],
+   "body": "{\"type\": \"error\", \"error\": {\"type\": \"invalid_request_error\", \"message\": \"model must be a nonempty string\"}}",
+   "interim": ""
+  }
+ ]
+}

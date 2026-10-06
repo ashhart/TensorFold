@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 200 OK",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "71"
+    ]
+   ],
+   "body": "{\"count\": 5, \"max_model_len\": 1024, \"tokens\": [284, 285, 32, 195, 169]}",
+   "interim": ""
+  }
+ ]
+}

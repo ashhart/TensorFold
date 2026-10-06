@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 200 OK",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "<len>"
+    ]
+   ],
+   "body": "{\"id\": \"<id1>\", \"object\": \"response\", \"created_at\": <ts>, \"status\": \"incomplete\", \"error\": null, \"incomplete_details\": {\"reason\": \"max_output_tokens\"}, \"model\": \"fake-model\", \"output\": [{\"id\": \"<id2>\", \"type\": \"reasoning\", \"summary\": [], \"content\": [{\"type\": \"reasoning_text\", \"text\": \"Hello world\"}], \"status\": \"incomplete\"}], \"usage\": {\"input_tokens\": 25, \"input_tokens_details\": {\"cached_tokens\": 0}, \"output_tokens\": 2, \"output_tokens_details\": {\"reasoning_tokens\": 2}, \"total_tokens\": 27}, \"instructions\": null, \"max_output_tokens\": 2, \"metadata\": {}, \"parallel_tool_calls\": true, \"previous_response_id\": null, \"reasoning\": {\"effort\": null, \"summary\": null}, \"store\": true, \"temperature\": null, \"text\": {\"format\": {\"type\": \"text\"}}, \"tool_choice\": \"auto\", \"tools\": [], \"top_p\": null, \"truncation\": \"disabled\", \"user\": null, \"background\": false, \"tensorfold\": {\"enable_thinking\": true, \"reasoning_effort\": null, \"engine\": \"lanes\", \"tokens_per_second\": <t>, \"seconds\": <t>, \"prefill_seconds\": <t>, \"prefill_widths\": [], \"prefill_raised\": [], \"time_to_first_token\": <t>, \"sampling\": \"greedy\", \"drafts\": true, \"token_sha\": \"be29a1492e97\", \"min_rows\": 1}}",
+   "interim": ""
+  }
+ ]
+}

@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 200 OK",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "446"
+    ]
+   ],
+   "body": "{\"id\": \"<id1>\", \"type\": \"message\", \"role\": \"assistant\", \"model\": \"fake-model\", \"content\": [{\"type\": \"tool_use\", \"id\": \"<id2>\", \"name\": \"lookup\", \"input\": {\"query\": \"speed\"}}], \"stop_reason\": \"tool_use\", \"stop_sequence\": null, \"usage\": {\"input_tokens\": 184, \"output_tokens\": 19, \"cache_creation_input_tokens\": 0, \"cache_read_input_tokens\": 0, \"output_tokens_details\": {\"thinking_tokens\": 0}}}",
+   "interim": ""
+  }
+ ]
+}

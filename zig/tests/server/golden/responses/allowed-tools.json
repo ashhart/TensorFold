@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 200 OK",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "<len>"
+    ]
+   ],
+   "body": "{\"id\": \"<id1>\", \"object\": \"response\", \"created_at\": <ts>, \"status\": \"completed\", \"error\": null, \"incomplete_details\": null, \"model\": \"fake-model\", \"output\": [{\"id\": \"<id2>\", \"type\": \"function_call\", \"call_id\": \"<id3>\", \"name\": \"lookup\", \"arguments\": \"{\\\"query\\\":\\\"speed\\\"}\", \"status\": \"completed\"}], \"usage\": {\"input_tokens\": 76, \"input_tokens_details\": {\"cached_tokens\": 0}, \"output_tokens\": 19, \"output_tokens_details\": {\"reasoning_tokens\": 19}, \"total_tokens\": 95}, \"instructions\": null, \"max_output_tokens\": null, \"metadata\": {}, \"parallel_tool_calls\": true, \"previous_response_id\": null, \"reasoning\": {\"effort\": null, \"summary\": null}, \"store\": true, \"temperature\": null, \"text\": {\"format\": {\"type\": \"text\"}}, \"tool_choice\": {\"type\": \"allowed_tools\", \"mode\": \"auto\", \"tools\": [{\"type\": \"function\", \"name\": \"lookup\"}]}, \"tools\": [{\"type\": \"function\", \"name\": \"lookup\"}, {\"type\": \"function\", \"name\": \"other\"}], \"top_p\": null, \"truncation\": \"disabled\", \"user\": null, \"background\": false, \"completed_at\": <ts>, \"tensorfold\": {\"enable_thinking\": true, \"reasoning_effort\": null, \"engine\": \"lanes\", \"tokens_per_second\": <t>, \"seconds\": <t>, \"prefill_seconds\": <t>, \"prefill_widths\": [], \"prefill_raised\": [], \"time_to_first_token\": <t>, \"sampling\": \"greedy\", \"drafts\": true, \"token_sha\": \"5df56393221d\", \"min_rows\": 1}}",
+   "interim": ""
+  }
+ ]
+}

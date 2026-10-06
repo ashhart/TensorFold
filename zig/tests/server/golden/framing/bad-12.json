@@ -1,0 +1,24 @@
+{
+ "closed": "closed",
+ "replies": [
+  {
+   "status": "HTTP/1.1 400 Bad Request",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "83"
+    ],
+    [
+     "Connection",
+     "close"
+    ]
+   ],
+   "body": "{\"error\": {\"message\": \"invalid chunk terminator\", \"type\": \"invalid_request_error\"}}",
+   "interim": ""
+  }
+ ]
+}

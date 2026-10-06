@@ -1,0 +1,24 @@
+{
+ "closed": "closed",
+ "replies": [
+  {
+   "status": "HTTP/1.1 200 OK",
+   "headers": [
+    [
+     "Content-Type",
+     "text/event-stream"
+    ],
+    [
+     "Cache-Control",
+     "no-cache"
+    ],
+    [
+     "Connection",
+     "close"
+    ]
+   ],
+   "body": "data: {\"id\": \"<id1>\", \"object\": \"chat.completion.chunk\", \"created\": <ts>, \"model\": \"fake-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"<id1>\", \"object\": \"chat.completion.chunk\", \"created\": <ts>, \"model\": \"fake-model\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning_content\": \"Hello world\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"<id1>\", \"object\": \"chat.completion.chunk\", \"created\": <ts>, \"model\": \"fake-model\", \"choices\": [{\"index\": 0, \"delta\": {\"reasoning_content\": \"!\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"<id1>\", \"object\": \"chat.completion.chunk\", \"created\": <ts>, \"model\": \"fake-model\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}], \"exact_mode\": \"exact\", \"tensorfold\": {\"enable_thinking\": true, \"reasoning_effort\": null, \"engine\": \"lanes\", \"tokens_per_second\": <t>, \"seconds\": <t>, \"prefill_seconds\": <t>, \"prefill_widths\": [], \"prefill_raised\": [], \"time_to_first_token\": <t>, \"sampling\": \"greedy\", \"drafts\": true, \"token_sha\": \"ab74875c663e\", \"min_rows\": 1}, \"speculative\": {\"rounds\": 3, \"drafted\": 1, \"accepted\": 1, \"acceptance_rate\": 1.0, \"tokens_per_round\": 1.3333333333333333}, \"usage\": {\"prompt_tokens\": 182, \"completion_tokens\": 4, \"total_tokens\": 186, \"prompt_tokens_details\": {\"cached_tokens\": 0}, \"completion_tokens_details\": {\"reasoning_tokens\": 4}}}\n\ndata: [DONE]\n\n",
+   "interim": ""
+  }
+ ]
+}

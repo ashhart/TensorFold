@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 400 Bad Request",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "63"
+    ]
+   ],
+   "body": "{\"error\": {\"message\": \"tools[0] must include a function name\"}}",
+   "interim": ""
+  }
+ ]
+}

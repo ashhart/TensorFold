@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 400 Bad Request",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "97"
+    ]
+   ],
+   "body": "{\"error\": {\"message\": \"'utf-8' codec can't decode byte 0xff in position 14: invalid start byte\"}}",
+   "interim": ""
+  }
+ ]
+}

@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 200 OK",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "<len>"
+    ]
+   ],
+   "body": "{\"id\": \"<id1>\", \"object\": \"chat.completion\", \"created\": <ts>, \"model\": \"fake-model\", \"choices\": [{\"index\": 0, \"message\": {\"role\": \"assistant\", \"content\": null, \"reasoning_content\": \"Let me think\", \"tool_calls\": [{\"id\": \"<id2>\", \"type\": \"function\", \"function\": {\"name\": \"lookup\", \"arguments\": \"{\\\"query\\\":\\\"speed\\\"}\"}}]}, \"finish_reason\": \"tool_calls\"}], \"usage\": {\"prompt_tokens\": 189, \"completion_tokens\": 28, \"total_tokens\": 217, \"prompt_tokens_details\": {\"cached_tokens\": 0}, \"completion_tokens_details\": {\"reasoning_tokens\": 4}}, \"exact_mode\": \"exact\", \"tensorfold\": {\"enable_thinking\": true, \"reasoning_effort\": null, \"engine\": \"lanes\", \"tokens_per_second\": <t>, \"seconds\": <t>, \"prefill_seconds\": <t>, \"prefill_widths\": [], \"prefill_raised\": [], \"time_to_first_token\": <t>, \"sampling\": \"greedy\", \"drafts\": true, \"token_sha\": \"bd125a742237\", \"min_rows\": 1}, \"speculative\": {\"rounds\": 4, \"drafted\": 24, \"accepted\": 24, \"acceptance_rate\": 1.0, \"tokens_per_round\": 7.0}}",
+   "interim": ""
+  }
+ ]
+}

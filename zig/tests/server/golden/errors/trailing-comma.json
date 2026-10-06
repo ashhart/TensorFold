@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 400 Bad Request",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "95"
+    ]
+   ],
+   "body": "{\"error\": {\"message\": \"Illegal trailing comma before end of object: line 1 column 8 (char 7)\"}}",
+   "interim": ""
+  }
+ ]
+}

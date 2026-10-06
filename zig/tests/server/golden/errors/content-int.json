@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 400 Bad Request",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "113"
+    ]
+   ],
+   "body": "{\"error\": {\"message\": \"message content must be text or an array of text parts\", \"type\": \"invalid_request_error\"}}",
+   "interim": ""
+  }
+ ]
+}

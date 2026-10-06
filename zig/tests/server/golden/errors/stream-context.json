@@ -1,0 +1,24 @@
+{
+ "closed": "closed",
+ "replies": [
+  {
+   "status": "HTTP/1.1 200 OK",
+   "headers": [
+    [
+     "Content-Type",
+     "text/event-stream"
+    ],
+    [
+     "Cache-Control",
+     "no-cache"
+    ],
+    [
+     "Connection",
+     "close"
+    ]
+   ],
+   "body": "data: {\"id\": \"<id1>\", \"object\": \"chat.completion.chunk\", \"created\": <ts>, \"model\": \"fake-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\"}, \"finish_reason\": null}]}\n\ndata: {\"error\": {\"message\": \"This server's maximum context length is 1024 tokens, but the rendered prompt has 26 tokens and requests 2000 reply tokens, which exceeds the context window. Reduce the prompt to at most 0 prompt tokens or request at most 998 reply tokens, including chat template and thinking tokens.\", \"type\": \"invalid_request_error\", \"param\": \"messages\", \"code\": \"context_length_exceeded\"}}\n\ndata: [DONE]\n\n",
+   "interim": ""
+  }
+ ]
+}

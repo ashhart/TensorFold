@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 400 Bad Request",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "205"
+    ]
+   ],
+   "body": "{\"error\": {\"message\": \"input items of type 'bogus' are not supported: send messages, function_call, function_call_output and reasoning items\", \"type\": \"invalid_request_error\", \"param\": null, \"code\": null}}",
+   "interim": ""
+  }
+ ]
+}
