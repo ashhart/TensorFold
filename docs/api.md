@@ -15,6 +15,9 @@ All `/v1/*`, tokenization, metrics and their inference aliases require a key; `-
 routes. `/health` remains open and returns only `{"status":"ok"}` when keys are configured.
 With no keys, the existing open routes and health details stay unchanged; a non-loopback bind prints a warning.
 
+The native server raises its soft open-file limit before listening when the platform permits it. If `accept`
+runs out of descriptors, it logs one guidance line per burst and keeps a short retry backoff.
+
 Replace the key file atomically to rotate keys. Its modification time is checked at most once a second; SIGHUP
 requests an immediate reload. An empty, unreadable or malformed replacement closes authenticated routes until a
 valid file returns. Request logs and `tensorfold:requests_total` use labels, never keys or digests.
@@ -30,6 +33,8 @@ Prefer a restricted file over command-line keys, which can appear in the operati
 | `GET /v1/models` | Served model ID and any configured aliases (both servers) |
 | `GET /health` | Server health and available status information |
 | `GET /metrics`, `GET /v1/metrics` | Prometheus text: requests, KV occupancy, drafts and latency (both servers) |
+| `GET /dashboard` | Native live dashboard page when `--dashboard` is enabled |
+| `GET /stats` | Native JSON dashboard snapshot when `--dashboard` is enabled |
 | `POST /v1/chat/completions` | Text chat, optional image input, tools and reasoning; streamed or non-streamed |
 | `POST /v1/completions` | Raw text without a chat template, or token IDs |
 | `POST /v1/messages` | Anthropic Messages: text, supported images, function tools and thinking; JSON or SSE |
@@ -156,7 +161,13 @@ integers, numbers and nulls, streamed or not. Strings preserve text and whitespa
 remain strings for the client to validate. Union types and schema references are not resolved by this conversion.
 
 A reply that is not a call returns as content, never an error: prose, JSON that names no offered tool
-(a structured answer), and malformed or unoffered `<tool_call>` blocks, which keep their text.
+(a structured answer), and malformed tool blocks, which keep their text. A well-formed call to a tool the
+request did not offer is returned as a tool call under its valid name, so the client can report the unknown
+tool and the model can correct itself.
+
+When a model end token arrives inside a whole tool call before its closing markup, the server closes the
+markup and returns the call. A partial value, missing key value, empty block, or unoffered call that cannot
+parse as one complete call remains content.
 
 With `parallel_tool_calls: false`, the server buffers tool deltas until it can return the first valid
 completed call. Prose and reasoning can still stream. Usage counts the entire decoded reply, including
@@ -227,7 +238,8 @@ decodes on from the reply, as for a required tool call.
 The native `--loop-guard` flag is off by default and watches only an open think block. It closes a repeated exact
 cycle of at most eight tokens after 256 predecessor matches, when the detected region starts at least 64 reply tokens
 in; the reply continues after the forced close, and reports `runtime.loop: {"period": N}` plus `loop=period:N` in the
-server log. The native engine refuses the flag on backends that do not enforce it.
+server log. The native engine refuses the flag on backends that do not enforce it, and prints that refusal as
+a startup error.
 
 ## Context and errors
 
@@ -263,11 +275,26 @@ GPU's memory can freeze the host, so lower it only with room to spare.
 
 `choices[0].message.content` holds the answer. Reasoning uses `reasoning_content`, or
 `delta.reasoning_content` while streaming. Tools use `tool_calls` and `finish_reason: "tool_calls"`.
+When a template supplies no think opener, a reply-written leading `<think>` tag is removed from
+`reasoning_content`; the streamed and finished forms use the same split.
 Every reply's usage, streamed ones included, carries its prompt, completion and total tokens,
-`prompt_tokens_details.cached_tokens` (the prompt tokens found in the prefix cache) and
+`prompt_tokens_details.cached_tokens` (the prompt tokens found in a backend's prefix cache; native Zig reports
+zero until its prompt cache is enabled) and
 `completion_tokens_details.reasoning_tokens` (the thinking tokens, through the closing think marker); timing details
 depend on the backend.
 TensorFold also reports generation statistics such as decode rate, time to first token and draft acceptance.
+
+Native JSON replies also carry a `tensorfold` runtime block with `engine`, `enable_thinking`,
+`reasoning_effort`, `tokens_per_second`, `seconds`, `time_to_first_token`, `prefill_seconds`,
+`prefill_widths`, `prefill_raised`, `sampling`, `drafts`, `token_sha`, and the draft counters
+`rounds`, `drafted`, `accepted`, `acceptance_rate`, and `tokens_per_round`. A loop-guarded reply adds
+`runtime.loop.period`; these fields describe the native reply and are absent
+from Python replies that do not provide them.
+
+The native server's finish log names the client reply ID. Completed requests report `prompt`, `cached`,
+`thinking`, `effort`, `tokens`, `sha`, `finish`, `rounds`, and draft acceptance; a refused request reports
+`refused <id>` and its message, while a submitted request that ends before a reply reports `ended <id>` with
+`reason=client-left` or an error plus `prompt`, `tokens`, and elapsed time.
 
 On CUDA, `GET /health` also carries counters a poller can difference into rates: `busy`, `requests_running`,
 `requests_total`, `completion_tokens_total` (the running replies' tokens included as they stream), and totals that

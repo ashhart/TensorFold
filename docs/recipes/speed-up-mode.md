@@ -26,7 +26,7 @@ Prompts run 1.6 to 1.7 times as fast from 8k tokens (about 8,000 tokens a second
 to 1.3 times, because each layer exchanges two partial results between the Macs (about 15 microseconds each over
 one cable) and the draft head runs on both.
 
-Both Macs produce the same reply token for token. A reply can differ from one Mac's in rare tokens: the two halves
+Both Macs produce the same reply token for token, at every draft depth. A reply can differ from one Mac's in rare tokens: the two halves
 of a projection are added in a different order, at the same fp32 precision. Prompt splitting gives one Mac's bits
 exactly.
 

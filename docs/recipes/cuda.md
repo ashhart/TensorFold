@@ -55,6 +55,18 @@ format ([prompt precision](#prompt-precision)):
   back at FP8's precision. Flash Next's, GLM's and Nemotron's MLX 4-bit prompts were already bf16, so nothing
   changes for them.
 
+## Native prompt controls
+
+The native `tensorfold run` command accepts `--device N` to choose a CUDA ordinal. If
+the flag is absent, it uses `TF_CUDA_DEVICE`, then device 0. `--segments N` enables
+staggered prompt work for 1 through 4 whole 2,048-row chunks; without the flag it
+uses `TF_CUDA_SEGMENTS`, then 1. The `tensorfold segments` command compares the
+available segment counts and can profile the serial chunk parts.
+
+CUDA capture and packing use the repository's Triton manifest tool. It records
+Triton and extension launches, maps them to cached kernels and metadata, and
+checks the packed manifest on CPU before a CUDA run.
+
 ## Arithmetic and state
 
 Each engine defines its own serial reference. A verify row uses the same group order, K split and

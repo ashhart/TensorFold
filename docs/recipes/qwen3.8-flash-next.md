@@ -41,6 +41,9 @@ stacked DeltaNet projections and sorted expert rows. It submits bounded groups o
 workspace. Compatible prefill matmul kernels check against MLX; unsupported paths use MLX's kernels.
 `TF_FLASH_PREFILL=0` selects the reference prefill path for comparison.
 
+Flash Next checkpoints may name the n-gram tables `shard_N` or `shards.N`.
+All shards in one index must use the same spelling; the loader accepts either spelling.
+
 Prefill and decode can round differently. The chunk planner uses detected assistant-message starts and
 the second message when at least 256 tokens follow the previous chunk start, otherwise cutting after
 the chunk chosen at startup: the largest of 8,192 (with tensor units), 4,096 and 2,048 tokens whose
@@ -339,6 +342,11 @@ families refuse `--kv-dtype` before any download.
 default is 0.70, for one stream and for concurrent rounds. Only Flash Next's CUDA engine has this rule, so the MLX path and the other families refuse it.
 
 ## Draft vocabulary provenance
+
+The Flash Next dump tool accepts `--draft-vocab default` for the shipped list,
+`--draft-vocab cjk` for the opt-in CJK list, or a custom vocabulary file. The
+default remains unchanged; the selected list must be a whole number of 64-ID tiles
+and cannot exceed the model vocabulary.
 
 Both backends read the public list in `src/tensorfold/families/qwen4_exp/cuda/draft_vocab.txt`.
 It contains 79,591 sorted IDs; MLX pads it with the lowest unused IDs to a multiple of 64 at load.

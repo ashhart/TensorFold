@@ -113,11 +113,14 @@ between MLX and CUDA, different quantizations, or different tensor-parallel rank
 | `--vision-image-tokens N` | With `--vision`, the visual tokens a request's images share (default 4,096, up to 65,536); each image keeps at most 4,096 | CUDA Qwen |
 | `--alias` | Additional model IDs | Both |
 | `--context N` | Prompt plus reply capacity | Both |
+| `--speed-up SETTINGS` | Native Flash Next two-Mac mode; the settings file selects the rank and link | Native |
 | `--max-tokens N` | Default reply limit, 4096 | Both |
 | `--temperature`, `--top-p`, `--top-k`, `--min-p` | Sampling defaults; temperature zero is greedy | Both |
 | `--thinking`, `--no-thinking` | Template thinking toggle | Both |
 | `--reasoning-effort` | Template effort when a request sets none; default: the template's own | Both |
 | `--thinking-budget N` | Token-count limit inside reasoning | Both |
+| `--loop-guard` | Close a short repeated think cycle; off by default | Native engines that enforce it |
+| `--dashboard` | Serve the live `/dashboard` page and `/stats` snapshot; off by default | Native |
 | `--backend auto`, `mlx`, `cuda` | Select backend; auto uses MLX on macOS | Both |
 | `--parallel N` | MLX `auto` admits up to 8 within budget; CUDA `auto` is 1, explicit N enables supported shared rounds | Both |
 | `--no-drafts` | Decode serially | Both |
@@ -141,6 +144,10 @@ between MLX and CUDA, different quantizations, or different tensor-parallel rank
 
 The default sampling settings come from `generation_config.json`. Requests can override sampling and reply
 length. CUDA does not implement the MLX-only options above. See [API fields](docs/api.md) for request scope.
+
+For the native CUDA `tensorfold run` command, `--device N` selects the CUDA ordinal, then `TF_CUDA_DEVICE`,
+then device 0; `--segments N` staggers 1 through 4 whole 2,048-row prompt chunks, defaulting to
+`TF_CUDA_SEGMENTS` and then 1. `tensorfold segments` compares the selected segment counts.
 
 In a terminal, `tensorfold serve` keeps one live throughput line under its log; it is off when output is
 redirected, and `TENSORFOLD_NO_LIVE=1` turns it off.
