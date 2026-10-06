@@ -153,6 +153,24 @@ inline void am_k_loop(thread frag<float> (&acc)[TM][2], const device bfloat* x, 
   threadgroup_barrier(mem_flags::mem_threadgroup);
 }
 
+// A simdgroup's TM x 2 fragments to rows dst[i] of y (ld N), rows below live only: rows put back in another order.
+template <int TM>
+inline void am_scatter(thread const frag<float> (&acc)[TM][2], device TF_OUT_T* y, const device int32_t* dst, int N,
+                       int col, int live, short2 home) {
+  TF_UNROLL
+  for (short i = 0; i < TM; i++) {
+    TF_UNROLL
+    for (short e = 0; e < 8; e++) {
+      const int r = 16 * i + home.y + (e >> 2) * 8;
+      if (r < live) {
+        device TF_OUT_T* yr = y + long(dst[r]) * N + col + home.x + TF_COL(e);
+        yr[0] = TF_OUT_T(acc[i][0][e]);
+        yr[16] = TF_OUT_T(acc[i][1][e]);
+      }
+    }
+  }
+}
+
 template <int TM>
 inline void am_store(thread const frag<float> (&acc)[TM][2], device TF_OUT_T* out, int N, int live, short2 home) {
   TF_UNROLL
@@ -195,7 +213,7 @@ template <int BM>
 inline void am_block(const device bfloat* x, int ldx, const device float* xs, int ldxs, int row, int rows, int M, int K,
                      int ldy, int col, long wrow0, const device uint32_t* w, const device bfloat* scales,
                      const device bfloat* biases, device TF_OUT_T* y, threadgroup bfloat* tile, threadgroup float* sb,
-                     uint sg, uint lane) {
+                     uint sg, uint lane, const device int32_t* dst = nullptr) {
   constexpr int SM = BM / 2;
   constexpr int TM = SM / 16;
   const int t = int(sg) * 32 + int(lane);
@@ -207,7 +225,11 @@ inline void am_block(const device bfloat* x, int ldx, const device float* xs, in
   am_k_loop<TM>(acc, x + long(row + tm) * ldx, ldx, K, live, row + tm + SM <= M, xs + long(row + tm) * ldxs, ldxs,
                 (const device uchar*)w + wrow * (K * TF_BITS / 8) + HALF_BYTES * (t % 2),
                 scales + wrow * (K / TF_GROUP) + g0, biases + wrow * (K / TF_GROUP) + g0, tile, sb, tn, uint(t), home);
-  am_store<TM>(acc, y + long(row + tm) * ldy + col + tn, ldy, live, home);
+  if (dst != nullptr) {
+    if (live > 0) am_scatter<TM>(acc, y, dst + row + tm, ldy, col + tn, live, home);
+  } else {
+    am_store<TM>(acc, y + long(row + tm) * ldy + col + tn, ldy, live, home);
+  }
 }
 
 // y [rows, n] = x [rows, k] W^T, n a multiple of 64 (the weights' rows padded to it): 64x64 tiles, a batch of them
@@ -243,3 +265,23 @@ inline void am_block(const device bfloat* x, int ldx, const device float* xs, in
   }
 TF_GATHER(32)
 TF_GATHER(64)
+
+// The gathers with each sorted row's output put back at row DST[row] (e.g. the (row, slot) pairs' own order).
+#define TF_GATHER_SCATTER(BM)                                                                                           \
+  [[kernel]] void tf_affine_gather_scatter_##BM(                                                                        \
+      const device bfloat* X [[buffer(0)]], const device uint32_t* W [[buffer(1)]],                                    \
+      const device bfloat* S [[buffer(2)]], const device bfloat* B [[buffer(3)]],                                      \
+      const device float* XS [[buffer(4)]], constant MmArgs& a [[buffer(5)]], device TF_OUT_T* Y [[buffer(6)]],       \
+      const device int32_t* OFFS [[buffer(7)]], const device int32_t* DST [[buffer(8)]],                              \
+      uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],                            \
+      uint3 tg [[threadgroup_position_in_grid]]) {                                                                     \
+    threadgroup bfloat tile[64 * PAD];                                                                                 \
+    threadgroup float sb[NG * 128];                                                                                    \
+    int expert, row, rows;                                                                                             \
+    if (!am_tile<BM>(OFFS, a.experts, a.rows, int(tg.y), lane, expert, row, rows)) return;                            \
+    const int col = int(tg.x) * 64;                                                                                    \
+    am_block<BM>(X, a.k, XS, a.k / TF_GROUP, row, rows, a.rows, a.k, a.n, col, long(expert) * a.n + col, W, S, B, Y,   \
+                 tile, sb, sg, lane, DST);                                                                             \
+  }
+TF_GATHER_SCATTER(32)
+TF_GATHER_SCATTER(64)

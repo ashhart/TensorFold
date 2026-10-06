@@ -219,11 +219,11 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
     } else if (s & Class.shared == 0) shared(p, x, e, w, x_in, M);
     if (s & Class.route == 0) route(p, x, e, w, x_in, M);
     if (ep) |t| {
-        if (s & Class.routed == 0) {
+        if (s & Class.routed == 0) { // down's fp32 partials put back in (row, slot) order for the decode's combine
             gateUp(p, x, e, w, n);
-            gather(p, e, p.act, w.down, p.offsets, p.yf, n, E, true);
+            affine_mm.gatherTo(e, p.mm.mm_f32, p.act, p.sums, w.down, p.offsets, p.yf, p.order, n, E);
         }
-        if (s & Class.exchange == 0) t.sendRowsSorted(e, p.yf, p.inverse, p.wts, M);
+        if (s & Class.exchange == 0) t.sendRows(e, p.yf, p.wts, M);
         if (s & Class.shared == 0) shared(p, x, e, w, x_in, M);
         if (s & Class.combine == 0) t.receiveRows(e, p.ys, out, M);
         return;
