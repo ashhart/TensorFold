@@ -5,8 +5,6 @@ const cuda = @import("cuda");
 const Config = @import("config.zig").Config;
 const kern = @import("cuda_kernels.zig");
 const Tri = @import("cuda_triton.zig").Tri;
-const Keyed = @import("cuda_triton.zig").Keyed;
-const sampler = @import("cuda_sampler.zig");
 const weights = @import("cuda_weights.zig");
 const state = @import("cuda_state.zig");
 const Dump = @import("cuda_dump.zig").Dump;
@@ -24,23 +22,18 @@ pub const Forward = struct {
     tri: Tri,
     max_len: usize,
     nch: usize,
-    keyed: ?Keyed, // the target's draw: null is torch.argmax
+    sampled: bool, // the target draws by the bound sequence's rule (sample.cu); false: torch.argmax
     dump: ?*Dump = null,
 
-    pub fn init(c: Config, w: *const weights.Weights, b: *const state.Buffers, ops: kern.Ops, max_len: usize, nch: usize, keyed: ?Keyed) Forward {
-        return .{ .c = c, .w = w, .b = b, .ops = ops, .tri = .{ .set = &ops.k.triton, .s = ops.s }, .max_len = max_len, .nch = nch, .keyed = keyed };
+    pub fn init(c: Config, w: *const weights.Weights, b: *const state.Buffers, ops: kern.Ops, max_len: usize, nch: usize, sampled: bool) Forward {
+        return .{ .c = c, .w = w, .b = b, .ops = ops, .tri = .{ .set = &ops.k.triton, .s = ops.s }, .max_len = max_len, .nch = nch, .sampled = sampled };
     }
 
-    /// sampler.sample: rows of logits draw their next tokens into `out`, row r at position META[0] + r + 1.
+    /// Rows of logits draw their next tokens into `out`, row r at position META[0] + r + 1.
     fn sample(f: *const Forward, logits: u64, rows: usize, meta: u64, out: u64) !void {
-        const b = f.b;
-        const t = f.ops.torch();
         const v = f.c.vocab;
-        const k = f.keyed orelse return t.argmax(logits, v, v, out, rows);
-        const n = sampler.count(k.k, v);
-        try t.toF32(logits, b.flog, rows * v);
-        try t.topk(b.flog, v, rows, n, b.vals, b.cols, b.topk);
-        try f.tri.keyed(b.vals, b.cols, meta, out, b.seed, b.fp, null, 0, rows, n, k);
+        if (!f.sampled) return f.ops.torch().argmax(logits, v, v, out, rows);
+        try f.ops.draw(logits, v, f.b.rule, meta, 0, out, rows, null, null);
     }
 
     fn mshape(f: *const Forward, rmax: usize) Tri.Shape {

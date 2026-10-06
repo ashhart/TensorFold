@@ -9,6 +9,7 @@ const state = @import("cuda_state.zig");
 const Forward = @import("cuda_forward.zig").Forward;
 const Dump = @import("cuda_dump.zig").Dump;
 const Head = @import("cuda_mtp.zig").Head;
+const head_fields = @import("cuda_mtp.zig").seq_fields;
 const sampler = @import("cuda_sampler.zig");
 const segs = @import("cuda_segments.zig");
 
@@ -167,22 +168,19 @@ pub const Engine = struct {
         e.gpa.destroy(e);
     }
 
-    /// The bound sequence's sampling: its seed and fp, and its head's DraftParams (null or temperature 0: greedy).
+    /// The bound sequence's sampling: its rule on the device, which the target and the head draw by (null: greedy).
     pub fn setSampling(e: *Engine, s: ?sampler.Sampling) !void {
-        e.sampling = try sampler.check(s);
+        e.sampling = sampler.check(s);
         const x = e.sampling orelse return;
-        const seed = sampler.seed(x);
-        const fp = sampler.targetFp(x);
-        try e.ops().upload(e.b.seed, std.mem.asBytes(&seed));
-        try e.ops().upload(e.b.fp, std.mem.asBytes(&fp));
-        if (e.head) |h| try h.setSampling(x);
+        const r = sampler.rule(x);
+        try e.ops().upload(e.b.rule, std.mem.asBytes(&r));
     }
 
     /// A zeroed sequence for another stream (its own caches, state, head caches and settings).
     pub fn newSeq(e: *Engine) !*state.Seq {
         const s = try e.gpa.create(state.Seq);
         errdefer e.gpa.destroy(s);
-        var head: [4]usize = undefined;
+        var head: [head_fields.len]usize = undefined;
         if (e.head) |h| head = h.seqSizes();
         s.* = try state.Seq.init(e.ctx.d, e.c, e.max_len, if (e.head != null) &head else &.{}, e.stream);
         return s;
@@ -190,7 +188,7 @@ pub const Engine = struct {
 
     /// The device bytes newSeq allocates.
     pub fn seqBytes(e: *const Engine) usize {
-        var head: [4]usize = undefined;
+        var head: [head_fields.len]usize = undefined;
         if (e.head) |h| head = h.seqSizes();
         return state.Seq.bytes(e.c, e.max_len, if (e.head != null) &head else &.{});
     }
@@ -225,7 +223,7 @@ pub const Engine = struct {
     }
 
     pub fn forward(e: *const Engine, dump: ?*Dump) Forward {
-        var f = Forward.init(e.c, &e.w, &e.b, e.ops(), e.max_len, e.nch, sampler.target(e.sampling));
+        var f = Forward.init(e.c, &e.w, &e.b, e.ops(), e.max_len, e.nch, e.sampling != null);
         f.dump = dump;
         return f;
     }

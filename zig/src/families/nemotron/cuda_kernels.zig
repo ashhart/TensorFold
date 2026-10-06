@@ -45,7 +45,7 @@ pub const Plan = struct { members: u64, items: u64, counts: u64, rank: u64, hist
 
 pub const Kernels = struct {
     d: *const cuda.Driver,
-    mods: [14]cuda.Module,
+    mods: [15]cuda.Module,
     triton: cuda.aot.Set,
     group: cuda.Function,
     prefill_mm: cuda.Function,
@@ -63,6 +63,8 @@ pub const Kernels = struct {
     pack_dense: cuda.Function,
     transpose16: cuda.Function,
     serial_feed: cuda.Function,
+    draw: cuda.Function,
+    draw_ids: cuda.Function,
     torch: torch_ops.Functions,
     expert_blocks: [2]usize, // resident blocks the decode expert kernels fill: per SM times SMs
     gb10: bool,
@@ -74,7 +76,7 @@ pub const Kernels = struct {
         var k: Kernels = undefined;
         k.d = d;
         const kk = cuda.kernels;
-        const images = [_][]const u8{ kk.qmm_group, kk.qmm_prefill, kk.experts, kk.experts_prefill, kk.experts_pack, kk.prefill_attention, kk.scan_rows, kk.nemotron_ops, kk.torch_argmax, kk.torch_topk, kk.torch_pointwise, kk.torch_indexing, kk.torch_movement, kk.torch_nemotron_constants };
+        const images = [_][]const u8{ kk.qmm_group, kk.qmm_prefill, kk.experts, kk.experts_prefill, kk.experts_pack, kk.prefill_attention, kk.scan_rows, kk.nemotron_ops, kk.torch_argmax, kk.torch_topk, kk.torch_pointwise, kk.torch_indexing, kk.torch_movement, kk.torch_nemotron_constants, kk.sample };
         var loaded: usize = 0;
         errdefer for (k.mods[0..loaded]) |*m| m.unload();
         for (images, 0..) |img, i| {
@@ -98,6 +100,8 @@ pub const Kernels = struct {
         k.transpose16 = try k.mods[7].function("tf_transpose_pad16");
         k.serial_feed = try k.mods[7].function("tf_serial_feed");
         k.torch = try torch_ops.Functions.resolve(k.mods[8..14]);
+        k.draw = try k.mods[14].function("tf_draw");
+        k.draw_ids = try k.mods[14].function("tf_draw_ids");
         k.triton = try cuda.aot.Set.load(gpa, io, d, ctx.device, triton_dir);
         errdefer k.triton.deinit();
         try k.group.allowDynamicShared(group_smem);
@@ -118,34 +122,6 @@ pub const Kernels = struct {
         for (&k.mods) |*m| m.unload();
     }
 
-    /// The target's sampled rules the captured set holds (greedy and the head's draws aside), at most `out.len`.
-    pub fn sampledRules(k: *const Kernels, out: []@import("cuda_triton.zig").Keyed) usize {
-        var n: usize = 0;
-        for (k.triton.variants) |v| {
-            if (!std.mem.eql(u8, v.spec.@"fn", "_keyed")) continue;
-            const m = v.spec.consts.map;
-            const get = struct {
-                fn f(map: @TypeOf(m), name: []const u8) i64 {
-                    return (map.get(name) orelse return -1).int orelse -1;
-                }
-            }.f;
-            if (get(m, "GREEDY") != 0 or get(m, "CONF_T") != 0 or get(m, "K") < 1) continue;
-            const r: @import("cuda_triton.zig").Keyed = .{ .k = @intCast(get(m, "K")), .cut = get(m, "CUT") == 1, .minp = get(m, "MINP") == 1 };
-            for (out[0..n]) |x| {
-                if (std.meta.eql(x, r)) break;
-            } else if (n < out.len) {
-                out[n] = r;
-                n += 1;
-            }
-        }
-        return n;
-    }
-
-    /// Whether the captured set draws keyed rule `r` (its top_k, top-p cut, min-p cut, and a draft's share at T).
-    pub fn draws(k: *const Kernels, r: @import("cuda_triton.zig").Keyed) bool {
-        const c = cuda.aot.ci;
-        return k.triton.compiled("_keyed", &.{ c("K", @intCast(r.k)), c("CUT", @intFromBool(r.cut)), c("GREEDY", @intFromBool(r.greedy)), c("MINP", @intFromBool(r.minp)), c("CONF_T", @intFromBool(r.conf_t)) });
-    }
 };
 
 /// qmm.split_k: K slices fixed by the weight's shape, never by the row count.
@@ -182,6 +158,20 @@ pub const Ops = struct {
     /// The torch-op replacements on this stream.
     pub fn torch(o: Ops) torch_ops.Torch {
         return .{ .f = &o.k.torch, .s = o.s };
+    }
+
+    /// sample.cu: row r of bf16 logits drawn at position meta[0] + r + 1 + offset, columns as `ids` token ids if given.
+    pub fn draw(o: Ops, logits: u64, vocab: usize, rule: u64, meta: u64, offset: usize, out: u64, rows: usize, ids: ?u64, prob: ?u64) !void {
+        var a: cuda.Args = .{};
+        a.add(logits);
+        a.add(@as(u32, @intCast(vocab)));
+        a.add(rule);
+        a.add(meta);
+        a.add(@as(i32, @intCast(offset)));
+        a.add(out);
+        if (ids) |x| a.add(x);
+        a.add(prob orelse 0);
+        try o.go(if (ids != null) o.k.draw_ids else o.k.draw, .{ rows, 1, 1 }, 1024, 0, &a);
     }
 
     /// qmm.matmul on sm_12x: x (rows, k) bf16 with group sums xs -> out (rows, n) bf16, through qmm_group's tile 2.
