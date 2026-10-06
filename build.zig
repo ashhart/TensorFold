@@ -115,6 +115,10 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     }) });
     const install = b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = .{ .custom = "native/bin" } } });
     b.step("native", "tensorfold-native with the Metal engines into zig-out/native/bin (bundles: -Dcpu=apple_m1)").dependOn(&install.step);
+    // libSystem's memcpy, not compiler-rt's: a quad-float or 128-bit helper links compiler-rt, whose weak memcpy then wins
+    const libc_mem = b.addSystemCommand(&.{ "sh", "-c", "nm -m \"$0\" | grep -q 'external _memcpy (from libSystem)' || { echo 'tensorfold-native links its own memcpy: find the typed std.json int parse or 128-bit float conversion that pulled in compiler-rt'; exit 1; }" });
+    libc_mem.addArtifactArg(exe);
+    test_step.dependOn(&libc_mem.step);
     const server_tests = b.createModule(.{
         .root_source_file = b.path("zig/src/server/root.zig"),
         .target = target,
