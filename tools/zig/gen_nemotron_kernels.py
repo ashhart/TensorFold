@@ -25,7 +25,7 @@ Q_HEADS, KV_HEADS, ATT_DIM, VOCAB = 32, 2, 128, 131072
 QKV = (Q_HEADS + 2 * KV_HEADS) * ATT_DIM
 NORM_THREADS = 896
 # (key, N, K) of every lane-tiled 64-wide projection; out_proj and o_proj share a shape and so a kernel
-DRAFT_IDS = Path(__file__).resolve().parents[2] / "src/tensorfold/families/nemotron_h/draft_ids.txt"
+DRAFT_IDS = Path(__file__).resolve().parents[2] / "zig/src/families/nemotron/draft_ids.txt"
 DRAFT_VOCAB = len(DRAFT_IDS.read_text().split())  # the MTP head's draft vocabulary, as long as its list
 PROJECTIONS = (("in", PROJ, HIDDEN), ("out", HIDDEN, XD), ("down", HIDDEN, SHARED), ("qkv", QKV, HIDDEN),
                ("head", VOCAB, HIDDEN), ("eh", HIDDEN, 2 * HIDDEN), ("draft", DRAFT_VOCAB, HIDDEN),

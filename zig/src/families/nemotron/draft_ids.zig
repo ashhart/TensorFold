@@ -15,7 +15,7 @@ pub fn parse(gpa: std.mem.Allocator, text: []const u8, vocab: usize) ![]u32 {
     return ids.toOwnedSlice(gpa);
 }
 
-/// The list the Python package ships (draft_ids.txt), embedded at build time.
+/// The draft vocabulary (draft_ids.txt beside this file), embedded at build time.
 pub fn load(gpa: std.mem.Allocator, vocab: usize) ![]u32 {
     return parse(gpa, @import("nemotron_draft_ids").text, vocab);
 }
