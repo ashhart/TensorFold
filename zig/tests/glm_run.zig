@@ -177,6 +177,7 @@ pub fn main(init: std.process.Init) !void {
             if (r.rounds > 0) {
                 const rn: f64 = @floatFromInt(r.rounds);
                 std.debug.print("  a round: {d:.2} ms wall, {d:.2} ms GPU, {d:.2} ms encoding, {d:.2} ms GPU idle between rounds; {d:.2} tokens\n", .{ r.decode_seconds * 1e3 / rn, r.gpu_seconds * 1e3 / rn, r.encode_seconds * 1e3 / rn, r.gap_seconds * 1e3 / @max(rn - 1, 1), @as(f64, @floatFromInt(toks.len -| 1)) / rn });
+                if (r.copy_rounds > 0) std.debug.print("  copy drafts: {d} rounds, {d} drafts kept ({d:.2} a copy round)\n", .{ r.copy_rounds, r.copy_accepted, @as(f64, @floatFromInt(r.copy_accepted)) / @as(f64, @floatFromInt(r.copy_rounds)) });
             }
             if (plain == null) plain = try arena.dupe(u32, toks) else if (firstDiff(plain.?, toks)) |at| {
                 failures += 1;
