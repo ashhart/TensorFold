@@ -28,7 +28,8 @@ test "HIP copies fills and mixed-width kernel arguments on real GPU" {
     defer pinned_src.free();
     var pinned_dst = try HostBuffer.alloc(&r, b.len);
     defer pinned_dst.free();
-    @memcpy(pinned_src.bytes, std.mem.asBytes(&pattern));
+    // Different from device contents: a no-op async upload must fail this check.
+    @memset(pinned_src.bytes, 0x3c);
     @memset(pinned_dst.bytes, 0);
     try b.uploadAsync(0, pinned_src, stream);
     try b.downloadAsync(0, pinned_dst, stream);
