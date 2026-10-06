@@ -608,6 +608,7 @@ pub const Engine = struct {
             if (wd > 1) {
                 const frac = @as(f64, @floatFromInt(keep - 1)) / @as(f64, @floatFromInt(wd - 1));
                 if (rg[slot + 1] != 0) copy_rate = 0.8 * copy_rate + 0.2 * frac else head_rate = 0.8 * head_rate + 0.2 * frac;
+                if (rg[slot + 1] == 0 and wd == MAXR) copy_rate *= 0.8; // a full window that found no copy: copies stopped landing
             }
             if (rg[slot + 1] != 0) {
                 res.copy_rounds += 1;
