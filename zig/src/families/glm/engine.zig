@@ -164,17 +164,24 @@ pub const Engine = struct {
         return .{ .cb = cb, .enc = cb.compute(.serial) };
     }
 
-    fn finish(e: *Engine, cb: mtl.CommandBuffer, enc: mtl.ComputeEncoder, wait: bool) !void {
+    /// Commit and wait: no work of this engine is in flight once it returns, whatever the caller does next.
+    fn finish(e: *Engine, cb: mtl.CommandBuffer, enc: mtl.ComputeEncoder) !void {
         enc.end();
         e.ev += 1;
         cb.signal(e.event, e.ev);
         cb.commit();
-        if (!wait) return;
         cb.wait();
         if (cb.failure()) |msg| {
+            e.event.set(e.ev); // a failed buffer may never signal: the next one must not wait on it
             std.log.err("glm: command buffer failed: {s}", .{msg});
             return error.GpuFailed;
         }
+    }
+
+    /// Wait until every command buffer this engine committed has completed (before the host touches shared state).
+    pub fn sync(e: *Engine) void {
+        if (e.event.value() >= e.ev) return;
+        if (!e.event.wait(e.ev, 120_000)) std.log.err("glm: the GPU did not finish within 120 s", .{});
     }
 
     /// One bf16 row of `D` values from `src` to `dst`.
@@ -197,6 +204,7 @@ pub const Engine = struct {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const n: u32 = @intCast(@min(prompt.len, st.max_rows));
+        e.sync();
         e.s.reset();
         @memcpy(u32s(e.prompt_ids, n), prompt[0..n]);
         const plane = @as(usize, n) * c.hidden * 2;
@@ -207,7 +215,7 @@ pub const Engine = struct {
         const b = e.begin();
         fwd.backbone(&x, b.enc, e.prompt_ids, n, 0);
         fwd.head(&x, b.enc, e.sc.hidden, dump.at(x.dump_at), e.sc.picks, n);
-        try e.finish(b.cb, b.enc, true);
+        try e.finish(b.cb, b.enc);
         fwd.flipKda(&x);
         const file = std.c.fopen(try std.fmt.allocPrintSentinel(e.gpa, "{s}", .{path}, 0), "wb") orelse return error.OpenFailed;
         defer _ = std.c.fclose(file);
@@ -225,6 +233,7 @@ pub const Engine = struct {
         if (prompt.len + max_tokens + d + 1 > e.s.cap) return error.ContextFull;
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
+        e.sync();
         e.s.reset();
         @memcpy(u32s(e.prompt_ids, prompt.len), prompt);
         var x = e.ctx();
@@ -264,7 +273,7 @@ pub const Engine = struct {
                 }
                 last_n = n;
             }
-            try e.finish(b.cb, b.enc, last);
+            try e.finish(b.cb, b.enc);
             at += n;
         }
         e.s.pos = P;
@@ -305,7 +314,7 @@ pub const Engine = struct {
             const R = d + 1;
             fwd.backbone(&x, b.enc, e.sc.ids, R, e.s.pos);
             fwd.head(&x, b.enc, e.sc.hidden, e.sc.logits, e.sc.picks, R);
-            try e.finish(b.cb, b.enc, true);
+            try e.finish(b.cb, b.enc);
             const picks = u32s(e.sc.picks, R);
             const drafts = u32s(e.sc.ids, R);
             keep = 1;

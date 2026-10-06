@@ -1,7 +1,9 @@
 //! GLM-5.3-Flash replies on the native engine: each prompt's greedy reply at every draft depth, its hash, the first
 //! difference from depth 0 and from the prompt's reference tokens, and the speeds.
 //! tf-glm-run MODEL_DIR PROMPTS_JSON ({"prompts": [{"name": ..., "ids": [...], "expect": [...]}]})
-//! GLM_DEPTHS (default "0,3"), GLM_MAX (64), GLM_CAP (prompt + reply room, default 8192), GLM_RUNS (1).
+//! GLM_DEPTHS (default "0,3"), GLM_MAX (64), GLM_CAP (prompt + reply room, default 8192), GLM_RUNS (1),
+//! GLM_OUT (write each prompt's first-depth reply as JSON), GLM_VS (compare replies with a GLM_OUT file),
+//! GLM_CANCEL_TEST (cancel a reply mid-prompt, then the next fresh reply must equal the plain one).
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -10,6 +12,8 @@ const glm = tf.glm;
 const Collect = struct {
     gpa: std.mem.Allocator,
     toks: std.ArrayList(u32) = .empty,
+    cancel_at: usize = std.math.maxInt(usize), // the cancel check that answers true (0 = the first)
+    checks: usize = 0,
 
     fn prefilled(_: *anyopaque) void {}
     fn tokens(ctx: *anyopaque, t: []const u32) bool {
@@ -17,8 +21,10 @@ const Collect = struct {
         c.toks.appendSlice(c.gpa, t) catch {};
         return false;
     }
-    fn cancelled(_: *anyopaque) bool {
-        return false;
+    fn cancelled(ctx: *anyopaque) bool {
+        const c: *Collect = @ptrCast(@alignCast(ctx));
+        c.checks += 1;
+        return c.checks > c.cancel_at;
     }
 };
 
@@ -68,6 +74,12 @@ pub fn main(init: std.process.Init) !void {
         try e.capture(try ints(arena, first.object.get("ids").?), std.mem.span(path));
     }
     var failures: usize = 0;
+    const vs: ?std.json.Value = if (std.c.getenv("GLM_VS")) |path| blk: {
+        const f = try mtl.MappedFile.open(path);
+        break :blk try std.json.parseFromSliceLeaky(std.json.Value, arena, f.bytes[0..f.size], .{});
+    } else null;
+    var saved: std.ArrayList(u8) = .empty;
+    try saved.appendSlice(arena, "{");
     for (doc.object.get("prompts").?.array.items) |p| {
         const name = p.object.get("name").?.string;
         const ids = try ints(arena, p.object.get("ids").?);
@@ -85,12 +97,41 @@ pub fn main(init: std.process.Init) !void {
                 failures += 1;
                 std.debug.print("  DIFFERS from depth {d} at token {d}\n", .{ depths.items[0], at });
             } else std.debug.print("  equal to depth {d}\n", .{depths.items[0]});
+            if (vs) |other| if (other.object.get(name)) |theirs| {
+                const want = try ints(arena, theirs);
+                if (firstDiff(want, toks)) |at| {
+                    std.debug.print("  vs GLM_VS: first token {s}, first difference at token {d} of {d}\n", .{ if (at == 0) "DIFFERS" else "equal", at, @min(want.len, toks.len) });
+                } else std.debug.print("  vs GLM_VS: all {d} tokens equal\n", .{toks.len});
+            };
+            if (run == 0 and d == depths.items[0]) {
+                if (saved.items.len > 1) try saved.append(arena, ',');
+                try saved.print(arena, "\"{s}\":[", .{name});
+                for (toks, 0..) |t, i| try saved.print(arena, "{s}{d}", .{ if (i > 0) "," else "", t });
+                try saved.append(arena, ']');
+            }
             if (expect) |want| {
                 if (firstDiff(want[0..@min(want.len, toks.len)], toks[0..@min(want.len, toks.len)])) |at| {
                     std.debug.print("  reference: first difference at token {d} of {d}\n", .{ at, @min(want.len, toks.len) });
                 } else std.debug.print("  reference: {d} of {d} tokens equal\n", .{ @min(want.len, toks.len), want.len });
             }
         };
+        if (std.c.getenv("GLM_CANCEL_TEST") != null) { // a reply cancelled after its first prompt window, then a fresh one
+            var cut: Collect = .{ .gpa = gpa, .cancel_at = 1 };
+            defer cut.toks.deinit(gpa);
+            const rc = try e.generate(ids, max, eos, depths.items[0], .{ .ctx = &cut, .prefilled = Collect.prefilled, .tokens = Collect.tokens, .cancelled = Collect.cancelled });
+            var again: Collect = .{ .gpa = gpa };
+            defer again.toks.deinit(gpa);
+            _ = try e.generate(ids, max, eos, depths.items[0], .{ .ctx = &again, .prefilled = Collect.prefilled, .tokens = Collect.tokens, .cancelled = Collect.cancelled });
+            const same = firstDiff(plain.?, again.toks.items) == null;
+            if (!same) failures += 1;
+            std.debug.print("  cancel test: cancelled reply ended {t} after {d} tokens; the next fresh reply {s} the plain one\n", .{ rc.reason, cut.toks.items.len, if (same) "equals" else "DIFFERS from" });
+        }
+    }
+    try saved.append(arena, '}');
+    if (std.c.getenv("GLM_OUT")) |path| {
+        const file = std.c.fopen(path, "wb") orelse return error.OpenFailed;
+        defer _ = std.c.fclose(file);
+        if (std.c.fwrite(saved.items.ptr, 1, saved.items.len, file) != saved.items.len) return error.WriteFailed;
     }
     if (failures > 0) {
         std.debug.print("{d} drafted replies differ from the plain ones\n", .{failures});
