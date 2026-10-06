@@ -191,5 +191,5 @@ fn flat(comptime i: usize) usize {
 
 test "the scratch sizes line up with its fields" {
     const n = @typeInfo(Scratch).@"struct".field_names.len;
-    try std.testing.expectEqual(@as(usize, 51), n);
+    try std.testing.expectEqual(@as(usize, 52), n);
 }
