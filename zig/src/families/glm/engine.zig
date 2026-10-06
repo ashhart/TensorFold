@@ -451,6 +451,44 @@ pub const Engine = struct {
         }
     }
 
+    /// A prompt chunk's GPU time by class on the first rows of `prompt` (up to a chunk; median of `reps` after a warm run):
+    /// the whole chunk, then each class left out (alone with `only`). Both Macs of a pair run it together.
+    pub fn profilePrompt(e: *Engine, prompt: []const u32, reps: usize, only: bool) !void {
+        const pr = &(e.pr orelse return error.NoPromptPath);
+        const C = fwd.Class;
+        const rows: u32 = @intCast(@min(prompt.len, prompt_mod.max_rows));
+        if (rows + 1 > e.s.cap) return error.ContextFull;
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        e.sync();
+        @memcpy(u32s(e.prompt_ids, rows), prompt[0..rows]);
+        const classes = [_]u32{ C.hc, C.kda, C.mla, C.dense, C.route, C.routed, C.shared, C.exchange, C.combine, C.ends };
+        var all: u32 = 0;
+        for (classes) |m| all |= m;
+        const times = try e.gpa.alloc(f64, reps);
+        defer e.gpa.free(times);
+        var full: f64 = 0;
+        for (0..classes.len + 3) |mi| {
+            const mask: u32 = if (mi == 0 or mi == classes.len + 2) 0 else if (mi == classes.len + 1) all else classes[mi - 1];
+            var x = e.ctx();
+            x.sc = &pr.streams;
+            x.skip = if (mask == all) all else if (only and mask != 0) all & ~mask else mask;
+            for (0..reps + 1) |rep| {
+                e.s.reset();
+                const b = e.begin();
+                prompt_mod.backbone(pr, &x, b.enc, e.prompt_ids, rows, 0);
+                try e.finish(b.cb, b.enc);
+                if (rep > 0) times[rep - 1] = (e.gpu[1] - e.gpu[0]) * 1e3;
+            }
+            std.mem.sort(f64, times, {}, std.sort.asc(f64));
+            const med = times[reps / 2];
+            if (mi == 0) full = med;
+            const name = if (mask == 0) (if (mi == 0) "full" else "full again") else if (mask == all) "none" else fwd.Class.names[@ctz(mask)];
+            std.debug.print("prompt profile {d} rows{s}: {s:<10} {d:9.2} ms (min {d:.2}, max {d:.2}){s}", .{ rows, if (only) " only" else "", name, med, times[0], times[reps - 1], if (mask == 0 or only or mask == all) "\n" else "" });
+            if (mask != 0 and !only and mask != all) std.debug.print("  class {d:8.2} ms {d:5.1}%\n", .{ full - med, 100 * (full - med) / full });
+        }
+    }
+
     /// One greedy reply. `depth` drafts a round (0: one token a round, the reference drafted replies must equal).
     pub fn generate(e: *Engine, prompt: []const u32, max_tokens: usize, eos: []const u32, depth: usize, out: Out) !Result {
         const c = &e.c;

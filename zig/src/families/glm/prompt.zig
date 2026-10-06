@@ -204,7 +204,60 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
     const E = c.experts;
     const n = M * c.topk;
     const out = p.streams.branch;
-    if (ep) |t| t.begin() else shared(p, x, e, w, x_in, M);
+    const s = x.skip; // classes a profile leaves out
+    const Class = fwd.Class;
+    if (ep) |t| {
+        if (s & Class.exchange == 0) t.begin();
+    } else if (s & Class.shared == 0) shared(p, x, e, w, x_in, M);
+    if (s & Class.route == 0) route(p, x, e, w, x_in, M);
+    if (ep) |t| {
+        if (s & Class.routed == 0) {
+            const half = w.gate.n;
+            expert_gather.run(e, k.gather_bf16, p.xs, w.gate, p.offsets, p.g, n, E);
+            expert_gather.run(e, k.gather_bf16, p.xs, w.up, p.offsets, p.u, n, E);
+            e.setPipeline(k.act2);
+            bind(e, 0, .{ p.g, p.u, p.act });
+            e.setValue(c.swiglu_limit, 3);
+            e.setValue(n * half, 4);
+            e.dispatchThreads(size(n * half, 1, 1), size(256, 1, 1));
+            expert_gather.run(e, k.gather_f32, p.act, w.down, p.offsets, p.yf, n, E);
+        }
+        if (s & Class.exchange == 0) t.sendRowsSorted(e, p.yf, p.inverse, p.wts, M);
+        if (s & Class.shared == 0) shared(p, x, e, w, x_in, M);
+        if (s & Class.combine == 0) t.receiveRows(e, p.ys, out, M);
+        return;
+    }
+    if (s & Class.routed == 0) {
+        gather(p, e, p.xs, w.gate, p.offsets, p.g, n, E);
+        gather(p, e, p.xs, w.up, p.offsets, p.u, n, E);
+        e.setPipeline(k.act2);
+        bind(e, 0, .{ p.g, p.u, p.act });
+        e.setValue(c.swiglu_limit, 3);
+        e.setValue(n * c.moe_inter, 4);
+        e.dispatchThreads(size(n * c.moe_inter, 1, 1), size(256, 1, 1));
+        gather(p, e, p.act, w.down, p.offsets, p.ye, n, E);
+    }
+    if (s & Class.combine != 0) return;
+    e.setPipeline(p.k.get("custom_kernel_tf_rows_take_bfloat16_t_uint32_t_int32_t_bfloat16_t"));
+    bind(e, 0, .{ p.ye, p.inverse });
+    params(e, 2, .{ n, D, 1 });
+    bind(e, 3, .{p.yp});
+    run(e, .{ D, n, 1 }, .{ 256, 1, 1 });
+    e.setPipeline(k.moe_combine);
+    bind(e, 0, .{ p.ys, p.yp, p.wts });
+    fwd.shape(e, 3, .{ M, c.topk });
+    bind(e, 4, .{out});
+    e.dispatchThreads(size(M * D, 1, 1), size(256, 1, 1));
+}
+
+/// The route on M rows: the decode's router and top-k, (row, slot) pairs sorted by expert, their rows taken in that
+/// order into `xs`, and each pair's place in it (`inverse`).
+fn route(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, M: u32) void {
+    const c = x.c;
+    const k = x.k;
+    const D = c.hidden;
+    const E = c.experts;
+    const n = M * c.topk;
     e.setPipeline(k.cast_f32);
     bind(e, 0, .{ x_in, p.xf });
     e.setValue(M * D, 2);
@@ -243,41 +296,7 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
     params(e, 2, .{ n, D, c.topk });
     bind(e, 3, .{p.xs});
     run(e, .{ D, n, 1 }, .{ 256, 1, 1 });
-    if (ep) |t| {
-        const half = w.gate.n;
-        expert_gather.run(e, k.gather_bf16, p.xs, w.gate, p.offsets, p.g, n, E);
-        expert_gather.run(e, k.gather_bf16, p.xs, w.up, p.offsets, p.u, n, E);
-        e.setPipeline(k.act2);
-        bind(e, 0, .{ p.g, p.u, p.act });
-        e.setValue(c.swiglu_limit, 3);
-        e.setValue(n * half, 4);
-        e.dispatchThreads(size(n * half, 1, 1), size(256, 1, 1));
-        expert_gather.run(e, k.gather_f32, p.act, w.down, p.offsets, p.yf, n, E);
-        inverse(p, e, n);
-        t.sendRowsSorted(e, p.yf, p.inverse, p.wts, M);
-        shared(p, x, e, w, x_in, M);
-        t.receiveRows(e, p.ys, out, M);
-        return;
-    }
-    gather(p, e, p.xs, w.gate, p.offsets, p.g, n, E);
-    gather(p, e, p.xs, w.up, p.offsets, p.u, n, E);
-    e.setPipeline(k.act2);
-    bind(e, 0, .{ p.g, p.u, p.act });
-    e.setValue(c.swiglu_limit, 3);
-    e.setValue(n * c.moe_inter, 4);
-    e.dispatchThreads(size(n * c.moe_inter, 1, 1), size(256, 1, 1));
-    gather(p, e, p.act, w.down, p.offsets, p.ye, n, E);
     inverse(p, e, n);
-    e.setPipeline(p.k.get("custom_kernel_tf_rows_take_bfloat16_t_uint32_t_int32_t_bfloat16_t"));
-    bind(e, 0, .{ p.ye, p.inverse });
-    params(e, 2, .{ n, D, 1 });
-    bind(e, 3, .{p.yp});
-    run(e, .{ D, n, 1 }, .{ 256, 1, 1 });
-    e.setPipeline(k.moe_combine);
-    bind(e, 0, .{ p.ys, p.yp, p.wts });
-    fwd.shape(e, 3, .{ M, c.topk });
-    bind(e, 4, .{out});
-    e.dispatchThreads(size(M * D, 1, 1), size(256, 1, 1));
 }
 
 /// Each (row, slot) pair's place in expert order.
@@ -322,29 +341,33 @@ pub fn backbone(p: *const Prompt, x: *fwd.Ctx, e: mtl.ComputeEncoder, ids: Ref, 
     const c = x.c;
     const ss = &p.streams;
     std.debug.assert(x.sc == ss and M <= max_rows);
-    fwd.embed(x, e, ids, M);
+    const s = x.skip; // classes a profile leaves out
+    const Class = fwd.Class;
+    if (s & Class.ends == 0) fwd.embed(x, e, ids, M);
     var pending = false;
     var ki: usize = 0;
     var mi: usize = 0;
     for (0..c.run) |li| {
         const L = &x.w.layers[li];
         const hcs = L.hc.?;
-        fwd.boundary(x, e, M, pending, hcs[0], L.in_norm);
+        if (s & Class.hc == 0) fwd.boundary(x, e, M, pending, hcs[0], L.in_norm);
         switch (L.attn) {
             .kda => |*a| {
-                qmm(p, e, ss.normed, a.in_proj, p.proj, M);
-                fwd.kdaStep(x, e, ki, a, p.proj, M, p.y);
-                qmm(p, e, p.y, a.o_proj, ss.branch, M);
+                if (s & Class.kda == 0) {
+                    qmm(p, e, ss.normed, a.in_proj, p.proj, M);
+                    fwd.kdaStep(x, e, ki, a, p.proj, M, p.y);
+                    qmm(p, e, p.y, a.o_proj, ss.branch, M);
+                }
                 ki += 1;
             },
             .mla => |*a| {
-                mla(p, x, e, mi, a, ss.normed, M, pos);
+                if (s & Class.mla == 0) mla(p, x, e, mi, a, ss.normed, M, pos);
                 mi += 1;
             },
         }
-        fwd.boundary(x, e, M, true, hcs[1], L.post_norm);
+        if (s & Class.hc == 0) fwd.boundary(x, e, M, true, hcs[1], L.post_norm);
         switch (L.mlp) {
-            .dense => |*d| {
+            .dense => |*d| if (s & Class.dense == 0) {
                 qmm(p, e, ss.normed, d.gate_up, p.gu, M);
                 swiglu(x, e, p.gu, p.actd, M, c.dense_inter);
                 qmm(p, e, p.actd, d.down, ss.branch, M);
@@ -353,7 +376,8 @@ pub fn backbone(p: *const Prompt, x: *fwd.Ctx, e: mtl.ComputeEncoder, ids: Ref, 
         }
         pending = true;
     }
-    fwd.boundary(x, e, M, true, null, null);
+    if (s & Class.hc == 0) fwd.boundary(x, e, M, true, null, null);
+    if (s & Class.ends != 0) return;
     e.setPipeline(x.k.stream_mean);
     bind(e, 0, .{ ss.x[x.xi], ss.raw });
     e.setValue([2]u32{ c.hidden, M }, 2);

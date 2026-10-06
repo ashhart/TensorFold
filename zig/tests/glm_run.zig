@@ -10,7 +10,8 @@
 //! GLM_FORCED (each prompt's teacher-forced agreement with its expected tokens, before the replies),
 //! GLM_PROFILE=D,D (after the replies: a knock-out profile of a round at each depth, GLM_PROFILE_REPS times),
 //! GLM_LOGITS=PREFIX (write each prompt's last-row logits, bf16, to PREFIX.NAME.bf16 at its first depth's first run),
-//! GLM_LOGITS_VS=PREFIX (compare them with such a file: the largest difference against the bf16 step at the top logit).
+//! GLM_LOGITS_VS=PREFIX (compare them with such a file: the largest difference against the bf16 step at the top logit),
+//! GLM_PROMPT_PROFILE=REPS (after the replies: each prompt's first chunk by class, each left out or alone).
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -209,6 +210,10 @@ pub fn main(init: std.process.Init) !void {
         const only = std.c.getenv("GLM_PROFILE_ONLY") != null; // each class alone instead of each left out
         const parts = std.c.getenv("GLM_PROFILE_PARTS") != null; // by launch instead of by class
         while (pit.next()) |dv| try e.profile(try std.fmt.parseInt(u32, dv, 10), reps, only, parts);
+    }
+    if (std.c.getenv("GLM_PROMPT_PROFILE")) |v| { // each prompt's first chunk by class (GLM_PROFILE_ONLY: each alone)
+        const reps = try std.fmt.parseInt(usize, std.mem.span(v), 10);
+        for (doc.object.get("prompts").?.array.items) |p| try e.profilePrompt(try ints(arena, p.object.get("ids").?), reps, std.c.getenv("GLM_PROFILE_ONLY") != null);
     }
     try saved.append(arena, '}');
     if (std.c.getenv("GLM_OUT")) |path| {
