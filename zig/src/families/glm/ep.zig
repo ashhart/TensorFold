@@ -143,6 +143,9 @@ pub const Ep = struct {
     stop: std.atomic.Value(bool) = .init(false),
     failed: std.atomic.Value(bool) = .init(false),
     quitting: std.atomic.Value(bool) = .init(false), // served rank 1: end the wait for rank 0's next request
+    trace: bool = false, // GLM_EP_TRACE: log every exchange the host sends
+    sent: u64 = 0, // exchanges the host has sent
+    held_ticks: u64 = 0, // their time from the GPU's post to the send returning
 
     /// Connect to the peer in `s` (this Mac holds routed experts `own`), then start the host's sending thread.
     pub fn init(gpa: std.mem.Allocator, device: mtl.Device, s: Settings, own: [2]u32) !*Ep {
@@ -177,6 +180,7 @@ pub const Ep = struct {
             if (std.c.mach_absolute_time() - t0 > 7_200_000_000) return error.EpPeerSilent; // 300 s
             std.atomic.spinLoopHint();
         }
+        t.trace = std.c.getenv("GLM_EP_TRACE") != null;
         t.thread = try std.Thread.spawn(.{}, service, .{t});
         std.log.info("expert parallel: rank {d} of 2 holds experts {d}-{d}, connected", .{ t.rank, own[0], own[1] - 1 });
         return t;
@@ -187,6 +191,7 @@ pub const Ep = struct {
         t.rd.flush() catch {};
         t.stop.store(true, .release);
         if (t.thread) |th| th.join();
+        if (t.sent > 0) std.log.info("expert parallel rank {d}: {d} exchanges, {d:.1} us a send, {d} GPU waits gave up", .{ t.rank, t.sent, @as(f64, @floatFromInt(t.held_ticks)) / @as(f64, @floatFromInt(t.sent)) / 24.0, t.gaveUp() });
         t.lists.deinit();
         t.wbuf.deinit();
         t.link.deinit();
@@ -329,7 +334,9 @@ pub const Ep = struct {
                     _ = std.c.nanosleep(&ts, null);
                 } else std.atomic.spinLoopHint();
             }
+            const seen = std.c.mach_absolute_time();
             const n: usize = @atomicLoad(u32, t.word32(COUNT + 4 * (x % 2)), .acquire);
+            if (t.trace) std.debug.print("EP rank{d} exchange {d}: {d} entries\n", .{ t.rank, x, n });
             if (t.failed.load(.acquire) or n > MAXP) {
                 if (n > MAXP) t.fail(x, error.BadCount);
                 t.land(x);
@@ -339,6 +346,8 @@ pub const Ep = struct {
             };
             want = x;
             want_at = std.c.mach_absolute_time();
+            t.sent += 1;
+            t.held_ticks += want_at - seen;
             x +%= 1;
         }
     }
