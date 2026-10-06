@@ -11,8 +11,9 @@ because the two halves of one projection are added in a different order at the s
 ## What you need
 
 - Two Apple silicon Macs, each with enough memory for the whole model. Flash Next 6-bit is 158 GB of weights. On our
-  two M5 Ultra Mac Studios, 256 GB each, each Mac's server took 175 GB once loaded, and up to 184 GB with prompts of
-  up to 38k tokens and an 8 GiB prompt cache. A 192 GB Mac is too small.
+  two M5 Ultra Mac Studios, 256 GB each, each Mac's server takes 172 GB once loaded. Keep each server at or under 70%
+  of its Mac's memory, 179 GB on a 256 GB Mac, so macOS and everything else keep theirs. The server sizes its prompt
+  cache to fit under that line, about 5 GiB on these Macs. A 192 GB Mac is too small.
 - A Thunderbolt 5 cable straight from one Mac to the other.
 - macOS 26.2 or later, which ships Thunderbolt RDMA. Ours run macOS 27.0.
 - Xcode with its Metal toolchain, Zig 0.17.0, and Python 3.11 or later for the one-time dump below.
@@ -106,7 +107,7 @@ Both Macs run the same command with their own settings file. Start rank 1 first,
 ```bash
 FZ_LANE=1 FZ_GDN=2 MCDMA_FABRIC_QOS=1 TF_FLASHNEXT_DUMP=$HOME/fn-dump \
   zig-out/native/bin/tensorfold-native serve ~/models/flash-next-6bit --name flash-next \
-  --speed-up rank1.json --prompt-cache-gib 8 --temperature 0 --dashboard
+  --speed-up rank1.json --temperature 0 --dashboard
 ```
 
 On rank 0, pass `--speed-up rank0.json` instead, and `--host 0.0.0.0` if other machines will connect, with `--api-key`
@@ -115,9 +116,11 @@ in that case.
 - `FZ_LANE=1 FZ_GDN=2` turn on the faster decode kernels. Replies are the same with or without them, and the speeds
   below were measured with them on.
 - `MCDMA_FABRIC_QOS=1` is MCDMA's setting for its progress threads, which our runs used.
-- `--prompt-cache-gib 8` keeps conversation states between requests, so the next turn of a chat reads only its new
-  tokens. Rank 0's cache decides and rank 1 keeps its halves under the same names. The states take up to about that
-  much memory on each Mac. `0` turns it off.
+- The prompt cache keeps conversation states between requests, so the next turn of a chat reads only its new tokens.
+  Rank 0's cache decides and rank 1 keeps its halves under the same names. By default each Mac gives it what 70% of
+  its memory leaves past the loaded server, less 2 GiB for prompt buffers, and logs that at start, for example
+  `prompt cache: 5.2 GiB from 5.2 GiB free under the 70% cap`. `--prompt-cache-gib N` sets a smaller size and `0`
+  turns it off. A larger size is refused with the numbers, unless you add `--prompt-cache-over-cap`.
 - `--temperature 0` matches the engine, which decodes Flash Next greedily and refuses requests with a higher
   temperature.
 - `--dashboard` serves a live page at `/dashboard`.
@@ -148,8 +151,9 @@ These were measured on our machines. They aren't a promise for yours.
 
 - One reply at a time. Requests queue, so several clients share one stream's speed. Running several streams in each
   round is in progress.
-- With the prompt cache on, a cold prompt pays a little for the states it keeps. A 9.9k-token prompt's first token took
-  1.34 s with the cache on and 1.30 s with it off.
+- A cold prompt costs the same with the prompt cache on or off: 8k to 64k-token prompts' first tokens came within
+  2.2% of each other on our Macs. A follow-up turn that adds about 280 tokens to an 8-10k-token conversation got its
+  first token in 0.19-0.20 s.
 - The first prompt of a new size compiles some kernels. A 9.9k-token prompt took 3.6 s the first time and 1.3 s after.
 - When you stop rank 0, stop rank 1 too. It stops following but keeps running, and keeps a CPU core busy, until you end
   it. If a request fails partway or the link drops, restart both servers.

@@ -57,7 +57,7 @@ zig-out/native/bin/tensorfold-native serve ~/models/nemotron-lightning --name ne
 
 Then point any OpenAI-compatible client at `http://127.0.0.1:8090/v1`. Add `--parallel 32` for up to 32 sessions at once. `--no-drafts` turns the lanes off, which is the reference for any exactness check.
 
-Flash Next is the same `serve` command on a qwen4_exp checkpoint in mlx-q6g32. Set `TF_FLASHNEXT_DUMP` to the dump folder; [the speed-up mode guide](docs/speed-up-mode.md) shows how to make one. The host has one lane, so `--parallel` does not run two Flash Next replies at once. `--prompt-cache-gib` sets the memory kept for earlier prompts' states, and `0` turns that off.
+Flash Next is the same `serve` command on a qwen4_exp checkpoint in mlx-q6g32. Set `TF_FLASHNEXT_DUMP` to the dump folder; [the speed-up mode guide](docs/speed-up-mode.md) shows how to make one. The host has one lane, so `--parallel` does not run two Flash Next replies at once. The memory kept for earlier prompts' states defaults to what 70% of RAM leaves past the loaded server, less 2 GiB; `--prompt-cache-gib` sets less, and `0` turns it off.
 
 To serve Flash Next from two Macs at once, each holding the whole model, see [speed-up mode](docs/speed-up-mode.md).
 
