@@ -49,6 +49,7 @@ pub const Entry = struct {
     born: u32, // the length of the prompt that kept it: a later turn's is longer
     used: u64, // the store's clock at its last keep or resume
     last: []u32, // the last prompt that kept or resumed it
+    shared: bool = false, // kept at a shared system block's cut: other conversations resume it, so its own never supersedes it
 };
 
 pub const Counts = struct { hits: u64 = 0, misses: u64 = 0, kept: u64 = 0, evicted: u64 = 0, refused: u64 = 0, failed: u64 = 0 };
@@ -68,6 +69,9 @@ pub const Store = struct {
     clock: u64 = 0,
     entries: std.ArrayList(*Entry) = .empty,
     counts: Counts = .{},
+    shared_keys: std.ArrayList(u64) = .empty, // the tokens of recently planned shared cuts, hashed (at most SHARED_KEYS)
+
+    const SHARED_KEYS = 64;
 
     pub fn init(gpa: Allocator, family: Snapshots, rules: Rules, budget: u64) Store {
         return .{ .gpa = gpa, .family = family, .rules = rules, .budget = budget };
@@ -76,6 +80,7 @@ pub const Store = struct {
     pub fn deinit(s: *Store) void {
         for (s.entries.items) |e| s.free(e);
         s.entries.deinit(s.gpa);
+        s.shared_keys.deinit(s.gpa);
         s.held = 0;
     }
 
@@ -135,11 +140,25 @@ pub const Store = struct {
 
     /// begin without the restore, for backends that restore inside their own prompt pass and then call `resumed`.
     pub fn lookup(s: *Store, a: Allocator, prompt: []const u32, history_len: u32, shared: []const u32, starts: []const u32) !Lookup {
-        const e = s.find(prompt, starts) orelse {
-            s.counts.misses += 1;
-            return .{ .marks = try s.fitting(a, try s.marks(a, prompt, 0, history_len, shared, starts, &.{})) };
-        };
-        return .{ .entry = e, .marks = try s.fitting(a, try s.marks(a, prompt, e.at, history_len, shared, starts, e.last)) };
+        const e = s.find(prompt, starts);
+        if (e == null) s.counts.misses += 1;
+        const marks_ = try s.fitting(a, try s.marks(a, prompt, if (e) |x| x.at else 0, history_len, shared, starts, if (e) |x| x.last else &.{}));
+        for (shared) |w| { // the shared cuts this pass keeps: their states serve other conversations too
+            const at = if (s.rules.planned) floorStart(starts, w) else w;
+            if (std.mem.indexOfScalar(u32, marks_, at) != null) s.noteShared(prompt[0 .. at + s.rules.lookahead]);
+        }
+        return .{ .entry = e, .marks = marks_ };
+    }
+
+    fn sharedKey(tokens: []const u32) u64 {
+        return std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(tokens));
+    }
+
+    fn noteShared(s: *Store, tokens: []const u32) void {
+        const k = sharedKey(tokens);
+        if (std.mem.indexOfScalar(u64, s.shared_keys.items, k) != null) return;
+        if (s.shared_keys.items.len == SHARED_KEYS) _ = s.shared_keys.orderedRemove(0);
+        s.shared_keys.append(s.gpa, k) catch {};
     }
 
     /// The marks whose state the budget can hold (a new slice in `a`); the rest are refused now, so no pass, nor a peer, copies them.
@@ -204,8 +223,10 @@ pub const Store = struct {
         const n = @as(usize, at) + s.rules.lookahead;
         if (at == 0 or n > prompt.len) return false;
         s.clock += 1;
+        const shared = std.mem.indexOfScalar(u64, s.shared_keys.items, sharedKey(prompt[0..n])) != null;
         for (s.entries.items) |e| if (e.at == at and std.mem.eql(u32, e.tokens, prompt[0..n])) {
             e.used = s.clock; // the same state again: no copy
+            e.shared = e.shared or shared;
             return true;
         };
         const bytes = s.family.vtable.bytes(s.family.ptr, at);
@@ -243,7 +264,7 @@ pub const Store = struct {
             return s.fail(at, err);
         };
         const charged = if (s.family.vtable.charged) |f| f(s.family.ptr, saved) else bytes;
-        e.* = .{ .tokens = tokens, .at = at, .saved = saved, .bytes = charged, .born = @intCast(prompt.len), .used = s.clock, .last = last };
+        e.* = .{ .tokens = tokens, .at = at, .saved = saved, .bytes = charged, .born = @intCast(prompt.len), .used = s.clock, .last = last, .shared = shared };
         s.entries.append(s.gpa, e) catch {
             s.free(e);
             return s.fail(at, error.OutOfMemory);
@@ -266,10 +287,11 @@ pub const Store = struct {
         return false;
     }
 
-    /// The entry to free first: one a later-born entry extends (that conversation moved on), oldest first; else the oldest.
+    /// The entry to free first: one a later-born entry extends (its conversation moved on; never a shared cut), oldest first; else the oldest.
     fn victim(s: *const Store) usize {
         var best: ?usize = null;
         for (s.entries.items, 0..) |e, i| {
+            if (e.shared) continue; // a shared cut is evicted only as the least recently used
             const moved_on = for (s.entries.items) |o| {
                 if (o != e and o.born > e.born and o.tokens.len > e.tokens.len and std.mem.eql(u32, o.tokens[0..e.tokens.len], e.tokens)) break true;
             } else false;
@@ -563,4 +585,36 @@ test "kept states charge their real storage, a save takes spare storage first, a
     try std.testing.expectEqual(@as(u64, 94 + 191), s.held);
     try std.testing.expect(s.held + s.spare() <= s.budget);
     try std.testing.expectEqual(s.entries.items.len, f.live);
+}
+
+test "a shared system cut outlives its own conversation's turns: a second conversation resumes it after cold prompts fill the budget" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{ .gpa = gpa };
+    var s = Store.init(gpa, f.snapshots(), .{ .min_prompt = 0, .min_gap = 1 }, 600); // bytes 100 + at
+    defer s.deinit();
+    var c1: [30]u32 = @splat(9);
+    var c2: [30]u32 = @splat(8);
+    for ([_][]u32{ &c1, &c2 }) |c| { // cold prompts first
+        _ = f.pass(&s, c, try s.begin(a, c, 29, &.{}, &.{}, null));
+        try std.testing.expect(s.held <= s.budget);
+    }
+    var conv: [45]u32 = undefined;
+    for (&conv, 1..) |*t, i| t.* = @intCast(i); // a 20-token system block, then the turns
+    for ([_]u32{ 25, 35, 45 }, [_]u32{ 24, 34, 44 }) |len, history| {
+        _ = f.pass(&s, conv[0..len], try s.begin(a, conv[0..len], history, &.{20}, &.{}, null));
+        try std.testing.expect(s.held <= s.budget);
+    }
+    var c3: [60]u32 = @splat(7);
+    _ = f.pass(&s, &c3, try s.begin(a, &c3, 59, &.{}, &.{}, null));
+    try std.testing.expect(s.held <= s.budget);
+    var other: [25]u32 = undefined;
+    @memcpy(other[0..20], conv[0..20]);
+    for (other[20..], 0..) |*t, i| t.* = @intCast(90 + i);
+    const plan = try s.begin(a, &other, 24, &.{20}, &.{}, null);
+    try std.testing.expectEqual(@as(u32, 20), plan.from); // the cut survived the first conversation's turns
+    try std.testing.expectEqual(fresh(&other), f.pass(&s, &other, plan));
+    try std.testing.expect(s.held <= s.budget);
 }
