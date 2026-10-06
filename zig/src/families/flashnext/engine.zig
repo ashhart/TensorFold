@@ -482,7 +482,7 @@ pub const Engine = struct {
             m.state = 0;
             m.state_row = 0;
         }
-        var rule: DepthRule = .{};
+        var rule: DepthRule = .{ .pair = r.tp != null };
         var copy_rate: f64 = 0.6; // drafts landed over offered: copied rounds, the head's rounds
         var head_rate: f64 = 0.6;
         const fixed = depth;
