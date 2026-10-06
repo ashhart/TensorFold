@@ -11,6 +11,7 @@ from tensorfold.kernels.gemma.v1.attention import Rows, attend
 from tensorfold.kernels.gemma.v1.decode import inverse_frequencies
 from tensorfold.kernels.gemma.v1.glue import attn_tail, qkv_prep
 from tensorfold.kernels.gemma.v1.matmul import Projection
+from tensorfold.kernels.glm.flash.v1.kernels import matmul_rows
 from tensorfold.kernels.inputs import ints
 from tensorfold.kernels.kolibri.v1.moe import check_q4, expert_down, expert_gateup, route
 
@@ -18,9 +19,10 @@ from tensorfold.kernels.kolibri.v1.moe import check_q4, expert_down, expert_gate
 class RowDecode:
     """Kolibri 1's MLX 4-bit checkpoints decoded through Gemma 4's row kernels and row-independent MLX ops.
 
-    Projections are rows.qmv (or the lane matmul), attention Gemma's kernel over the ring and growing caches; the
-    bf16 router, sigmoid routing, norms and the shared expert's SwiGLU are MLX ops whose rows don't see each other
-    (checked at load). The 8-bit head runs a row at a time: MLX's batched kernel gives a row other bits.
+    Projections are rows.qmv (or the lane matmul), attention Gemma's kernel over the ring and growing caches, the bf16
+    router GLM's gemv rows (MLX's one-row bits for any row count); sigmoid routing, norms and the shared expert's SwiGLU
+    are MLX ops whose rows don't see each other (checked at load). The 8-bit head runs a row at a time: MLX's batched
+    kernel gives a row other bits.
     """
 
     # layers per slice handed to the GPU while the rest of the forward is built
@@ -142,7 +144,8 @@ class RowDecode:
             def back(out: mx.array, h: mx.array) -> tuple[mx.array, mx.array]:
                 # hn = h + post_attn_norm(o), n = post_attention_layernorm(hn)
                 hn, n, _, _ = attn_tail(h, o(out), layer.post_attn_norm.weight, w_post, w_post, w_post, self.eps)
-                ids, weights = route((n @ router.T).astype(mx.float32), bias, top_k)
+                # MLX's one-row gemv bits for every row: ``n @ router.T`` picks its kernel by the row count
+                ids, weights = route(matmul_rows(n, router, transposed=False).astype(mx.float32), bias, top_k)
                 routed = expert_down(expert_gateup(n, ids, top_k, experts.gate_proj, experts.up_proj), ids, weights,
                                      top_k, experts.down_proj)
                 gate, up = gate_up.split(gate_up(n))

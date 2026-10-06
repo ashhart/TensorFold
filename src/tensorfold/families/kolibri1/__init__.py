@@ -11,9 +11,9 @@ LANES = True
 MODELS = ("velaia/Kolibri-1-MLX-4bit",)
 KERNEL_PACKAGE = "tensorfold.kernels.kolibri.v1"
 KERNEL_VERSION = "v1"
-# the decode runs Gemma 4's attention, glue and expert kernels and their matmuls
+# the decode runs Gemma 4's attention, glue and expert kernels and their matmuls, and GLM's gemv rows for the router
 KERNEL_DEPENDENCIES = ("tensorfold.kernels.gemma.v1", "tensorfold.kernels.qwen.dense.v1.lane_qmm",
-                       "tensorfold.kernels.nemotron.lightning.v1.rows")
+                       "tensorfold.kernels.nemotron.lightning.v1.rows", "tensorfold.kernels.glm.flash.v1.kernels")
 
 
 def check(model_dir: str | Path) -> None:

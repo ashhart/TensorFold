@@ -275,11 +275,29 @@ def test_the_row_decode_follows_the_reference_forward(model):
     del ids
 
 
-def test_load_checks_find_every_width_exact_and_streams_go_one_a_forward(model):
+def test_load_checks_find_every_width_exact_and_streams_shared(model):
     family = Kolibri1(model)
-    assert family.exact_width == family.fused_rows
+    assert family.exact_width == family.fused_rows and family.max_streams > 1 and family.streams_exact
     engine = LaneEngine(family, max_rows=16, max_draft=15)
-    assert not engine.family_streams and engine.batch_streams == 1
+    assert engine.family_streams and engine.batch_streams == family.max_streams
+
+
+def test_one_row_a_step_shares_no_forward(model):
+    family = Kolibri1(model, backend=None)
+    assert not family.streams_exact and family.max_streams == 1
+
+
+def test_the_router_gives_every_row_its_one_row_bits():
+    """At Kolibri 1's router shape (2,560 -> 384) MLX's bf16 matmul gives a row among 6, 15 or 32 other bits than
+    alone, so a row among others could route to other experts (#434); the router's gemv rows give each its own."""
+
+    from tensorfold.kernels.glm.flash.v1.kernels import matmul_rows
+
+    router = (mx.random.normal((384, 2560), key=mx.random.key(1)) * 0.05).astype(mx.bfloat16)
+    x = (mx.random.normal((32, 2560), key=mx.random.key(3)) * 4).astype(mx.bfloat16)
+    alone = mx.concatenate([x[r:r + 1] @ router.T for r in range(32)])
+    for rows in (1, 2, 6, 15, 16, 32):
+        assert same(matmul_rows(x[:rows], router, transposed=False), alone[:rows]), rows
 
 
 def test_a_shared_forward_gives_each_stream_its_own_bits(model):
