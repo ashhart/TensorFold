@@ -13,6 +13,15 @@ tar -xzf "$archive" -C "$scratch/unpacked"
 root="$scratch/unpacked/$(basename "$archive" .tar.gz)"
 (cd "$root"; $checker -c SHA256SUMS)
 [ -f "$root/LICENSE" ] && [ -f "$root/NOTICE" ]
+[ -f "$root/LICENSES/MIT.txt" ] && [ -f "$root/THIRD_PARTY_NOTICES.md" ]
+[ -f "$root/LICENSES/Apache-2.0.txt" ] && [ -f "$root/LICENSES/MiaAI-Lab-MIT.txt" ]
+if [ "$(uname -s)" = Darwin ]; then
+    nm -m "$root/bin/tensorfold-native" > "$scratch/memcpy-symbols.txt"
+    grep -q 'external _memcpy (from libSystem)' "$scratch/memcpy-symbols.txt" || {
+        echo 'tensorfold-native does not import memcpy from libSystem' >&2
+        exit 1
+    }
+fi
 cd "$scratch/empty"
 actual=$(env -i PATH=/usr/bin:/bin HOME="$scratch/home" "$root/bin/tensorfold-native" --version)
 [ "$actual" = "tensorfold-native $version" ]

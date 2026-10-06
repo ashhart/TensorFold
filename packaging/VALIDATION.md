@@ -26,3 +26,13 @@ Runtime dependency inspection at this pin found no direct Python-package or repo
 Model/config/tokenizer/template/weight files, Flash Next capture assets, CUDA Triton captures, speed-up settings and
 the separately built MCDMA library remain runtime inputs; `RUNTIME.md` records their lookup paths.
 The embedded-source Nemotron Metal engine at this pin does not load an adjacent coop metallib.
+
+## Packaging corrections, 6 October 2026
+
+Each invocation now stages in a fresh `mktemp` directory. `zig build test-dist-package` passed full capture to smaller
+capture to no capture with the same version, platform and archive output, without retaining an old cubin or SM directory.
+The regression against the original `f4ae084b4` script failed at the stale-cubin assertion, using an argument adapter only.
+`LICENSES/` and `THIRD_PARTY_NOTICES.md` are now shipped, included in SHA256SUMS and included in the Zig package paths.
+The macOS `dist-smoke` check runs `nm -m` on the unpacked release binary and requires libSystem's memcpy import.
+The updated fixture dist-smoke passed, all three archives built and their legal files and hashes were checked.
+No GPU, model, download, install, tap change or push occurred.

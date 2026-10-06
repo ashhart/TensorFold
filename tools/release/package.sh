@@ -7,20 +7,28 @@ binary=$3
 license=$4
 notice=$5
 runtime=$6
-output=$7
+license_dir=$7
+third_party=$8
+output=$9
 name="tensorfold-$version-$platform"
-stage="$output/../staging/$name"
-mkdir -p "$stage/bin" "$stage/lib"
+mkdir -p "$output"
+# Each invocation owns a fresh stage, including reruns of the same version/platform.
+staging=$(mktemp -d "$output/../tensorfold-stage.XXXXXX")
+stage="$staging/$name"
+mkdir -p "$stage/bin" "$stage/lib" "$stage/LICENSES"
 cp "$binary" "$stage/bin/tensorfold-native"
 chmod 755 "$stage/bin/tensorfold-native"
 cp "$license" "$stage/LICENSE"
 cp "$notice" "$stage/NOTICE"
+cp -R "$license_dir/." "$stage/LICENSES/"
+cp "$third_party" "$stage/THIRD_PARTY_NOTICES.md"
 cp "$runtime" "$stage/RUNTIME.md"
 printf '%s\n' "$version" > "$stage/VERSION"
-if [ "$#" -eq 8 ]; then
-    [ -z "$(find "$8" -type l -print)" ] || { echo 'CUDA capture input must not contain symlinks' >&2; exit 1; }
+if [ "$#" -eq 10 ]; then
+    capture=${10}
+    [ -z "$(find "$capture" -type l -print)" ] || { echo 'CUDA capture input must not contain symlinks' >&2; exit 1; }
     found=0
-    for sm_dir in "$8"/sm[0-9]*; do
+    for sm_dir in "$capture"/sm[0-9]*; do
         [ -d "$sm_dir" ] || continue
         sm=$(basename "$sm_dir")
         case "${sm#sm}" in ''|*[!0-9]*) echo "invalid CUDA capture directory: $sm" >&2; exit 1 ;; esac
@@ -46,7 +54,7 @@ sha() {
 }
 # Hash every shipped file; keep relative paths so checks survive relocation.
 (cd "$stage"; find . -type f ! -name SHA256SUMS | LC_ALL=C sort | while IFS= read -r file; do sha "$file"; done) > "$stage/SHA256SUMS"
-COPYFILE_DISABLE=1 tar -czf "$output/$name.tar.gz" -C "$output/../staging" "$name"
+COPYFILE_DISABLE=1 tar -czf "$output/$name.tar.gz" -C "$staging" "$name"
 (cd "$output"; sha "$name.tar.gz") > "$output/$name.tar.gz.sha256"
 # Install only the final archive and checksum, never the staging tree.
-# Staging lives beside the declared archives output in the build cache.
+# Fresh stages stay in the build cache for inspection.

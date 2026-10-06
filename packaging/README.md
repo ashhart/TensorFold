@@ -26,7 +26,7 @@ tensorfold-MAJOR.MINOR.PATCH-linux-aarch64.tar.gz.sha256
 ```
 
 Each archive has one named top-level directory containing `bin/tensorfold-native`, `lib/`, `LICENSE`, `NOTICE`,
-`VERSION`, `RUNTIME.md` and `SHA256SUMS`. Metal sources and the Nemotron draft vocabulary are embedded at this
+`VERSION`, `RUNTIME.md`, `LICENSES/`, `THIRD_PARTY_NOTICES.md` and `SHA256SUMS`. Metal sources and the Nemotron draft vocabulary are embedded at this
 revision, so no adjacent metallib is needed. The packaging does not include test programs, source, build caches,
 Python packages or model weights. There is no Python dependency in the packaging or smoke scripts.
 
@@ -105,6 +105,18 @@ Run only the command matching the machine. The script verifies the archive and e
 a fresh directory and executes version and help from a different empty working directory with a clean environment.
 It needs neither the checkout nor a model, Python, the NVIDIA driver or a GPU. It retains its temporary receipt.
 The script itself can be copied anywhere and run without the checkout.
+On macOS it also checks the unpacked binary with `nm -m` and requires `memcpy` to import from libSystem.
+All NOTICE-referenced license files are bundled and hashed.
+
+Each packaging invocation uses a fresh unique stage, so rerunning a version cannot retain captures from a previous
+larger input set. Stages stay in the build cache for inspection. The CPU regression runs full capture, smaller capture
+and no capture against the same version/platform/output, checking exact archive members and hashes:
+
+```sh
+zig build test-dist-package
+```
+
+This development test uses Python's standard library; the release packager and smoke script remain POSIX shell.
 
 ## Homebrew draft
 

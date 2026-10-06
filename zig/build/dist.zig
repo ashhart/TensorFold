@@ -16,6 +16,10 @@ pub fn validVersion(v: []const u8) bool {
 }
 
 pub fn targets(b: *std.Build, ids: *std.Build.Module, options: *std.Build.Step.Options, version: ?[]const u8) void {
+    const package_tests = b.addSystemCommand(&.{"python3"});
+    package_tests.addFileArg(b.path("tools/release/test_package.py"));
+    package_tests.has_side_effects = true;
+    b.step("test-dist-package", "CPU regression for repeated same-version archives and bundled notices").dependOn(&package_tests.step);
     const step = b.step("dist", "Package macOS arm64 (M1 CPU) and Linux x86_64/aarch64 CUDA servers");
     const smoke = b.step("dist-smoke", "Build archives and smoke the host-compatible archive without a checkout");
     smoke.dependOn(step);
@@ -71,6 +75,8 @@ pub fn targets(b: *std.Build, ids: *std.Build.Module, options: *std.Build.Step.O
         pack.addFileArg(b.path("LICENSE"));
         pack.addFileArg(b.path("NOTICE"));
         pack.addFileArg(b.path("packaging/RUNTIME.md"));
+        pack.addDirectoryArg(b.path("LICENSES"));
+        pack.addFileArg(b.path("THIRD_PARTY_NOTICES.md"));
         const archives = pack.addOutputDirectoryArg("archives");
         if (aot != null and p.query.os_tag == .linux and !host_only) pack.addDirectoryArg(b.graph.cwdRelativePath(aot.?));
         step.dependOn(&b.addInstallDirectory(.{ .source_dir = archives, .install_dir = .prefix, .install_subdir = "dist" }).step);

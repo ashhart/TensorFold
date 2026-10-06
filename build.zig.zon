@@ -13,5 +13,7 @@
         "packaging",
         "LICENSE",
         "NOTICE",
+        "LICENSES",
+        "THIRD_PARTY_NOTICES.md",
     },
 }
