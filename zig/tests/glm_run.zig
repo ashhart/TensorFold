@@ -6,7 +6,8 @@
 //! GLM_CANCEL_TEST (cancel a reply mid-prompt, then the next fresh reply must equal the plain one),
 //! GLM_LAYERS (the first N layers only, with the MTP layer and head), GLM_REF_STRICT (a reference difference fails),
 //! GLM_EP (expert parallel: this Mac's link settings; run the same command on both Macs),
-//! GLM_TRACE=NAME:STEPS:PATH (every call of NAME's plain reply, sublayer by sublayer, feeding its expected tokens).
+//! GLM_TRACE=NAME:STEPS:PATH (every call of NAME's plain reply, sublayer by sublayer, feeding its expected tokens),
+//! GLM_FORCED (each prompt's teacher-forced agreement with its expected tokens, before the replies).
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -86,6 +87,12 @@ pub fn main(init: std.process.Init) !void {
             try e.trace(try ints(arena, p.object.get("ids").?), try ints(arena, p.object.get("expect").?), steps, out_path);
         };
     }
+    if (std.c.getenv("GLM_FORCED") != null) for (doc.object.get("prompts").?.array.items) |p| {
+        const want = try ints(arena, p.object.get("expect") orelse continue);
+        const r = try e.forced(try ints(arena, p.object.get("ids").?), want);
+        std.debug.print("{s} forced: {d} of {d} picks equal the reference's", .{ p.object.get("name").?.string, r.same, want.len });
+        if (r.first) |i| std.debug.print(", first differs at {d}\n", .{i}) else std.debug.print("\n", .{});
+    };
     var failures: usize = 0;
     const vs: ?std.json.Value = if (std.c.getenv("GLM_VS")) |path| blk: {
         const f = try mtl.MappedFile.open(path);

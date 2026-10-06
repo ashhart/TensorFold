@@ -321,6 +321,40 @@ pub const Engine = struct {
         std.debug.print("traced {d} calls ({d} prompt rows, {d} steps) in {s}\n", .{ calls, P, total - P, path });
     }
 
+    /// Teacher-forced agreement with a reference reply: the prompt in 16-row windows, then one-row steps feeding the
+    /// reference's tokens; how many of the greedy picks (first token included) equal the reference's, and the first that differs.
+    pub fn forced(e: *Engine, prompt: []const u32, reply: []const u32) !struct { same: usize, first: ?usize } {
+        const c = &e.c;
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        const P: u32 = @intCast(prompt.len);
+        if (reply.len == 0) return .{ .same = 0, .first = null };
+        const total: u32 = P + @as(u32, @intCast(reply.len - 1));
+        if (total + 1 > e.s.cap) return error.ContextFull;
+        e.sync();
+        e.s.reset();
+        @memcpy(u32s(e.prompt_ids, P), prompt);
+        @memcpy(u32s(e.prompt_ids.at(@as(usize, P) * 4), total - P), reply[0 .. total - P]);
+        var x = e.ctx();
+        var at: u32 = 0;
+        var same: usize = 0;
+        var first: ?usize = null;
+        while (at < total) {
+            const n: u32 = if (at < P) @min(st.max_rows, P - at) else 1;
+            const b = e.begin();
+            fwd.backbone(&x, b.enc, e.prompt_ids.at(@as(usize, at) * 4), n, at);
+            fwd.head(&x, b.enc, e.sc.hidden.at(@as(usize, n - 1) * c.hidden * 2), e.sc.logits, e.sc.picks, 1);
+            try e.finish(b.cb, b.enc);
+            fwd.flipKda(&x);
+            at += n;
+            if (at >= P) { // this call's last row predicts reply[at - P]
+                const i = at - P;
+                if (u32s(e.sc.picks, 1)[0] == reply[i]) same += 1 else if (first == null) first = i;
+            }
+        }
+        return .{ .same = same, .first = first };
+    }
+
     /// One greedy reply. `depth` drafts a round (0: one token a round, the reference drafted replies must equal).
     pub fn generate(e: *Engine, prompt: []const u32, max_tokens: usize, eos: []const u32, depth: usize, out: Out) !Result {
         const c = &e.c;
