@@ -96,11 +96,20 @@ fn weightBytes(io: std.Io, dir: []const u8) u64 {
     return total;
 }
 
+/// A /proc file's text, streamed: procfs reports size 0, and a positional read (readFileAlloc) stops there.
+fn procText(a: Allocator, io: std.Io, path: []const u8) ?[]u8 {
+    var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
+    defer file.close(io);
+    var buf: [4096]u8 = undefined;
+    var r = file.readerStreaming(io, &buf);
+    return r.interface.allocRemaining(a, .limited(1 << 20)) catch null;
+}
+
 /// The pool now, read on the thread whose context is current; `problem` names a bad variable.
 fn pool(a: Allocator, io: std.Io, ctx: *const cuda.Context, problem: *[]const u8) !?Pool {
     const unified = (try ctx.attribute(.integrated)) != 0;
     const card = try ctx.memInfo();
-    const text = if (unified) std.Io.Dir.cwd().readFileAlloc(io, "/proc/meminfo", a, .limited(1 << 20)) catch null else null;
+    const text = if (unified) procText(a, io, "/proc/meminfo") else null;
     const available = budget.counts(unified, .{ .total = card.total, .available = card.free }, text) catch {
         problem.* = "cannot read or parse /proc/meminfo's MemTotal and MemAvailable; refusing CUDA unified-memory admission";
         return null;
@@ -349,6 +358,14 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
 
 fn toGib(bytes: u64) f64 {
     return @as(f64, @floatFromInt(bytes)) / gib;
+}
+
+test "this host's /proc/meminfo reads whole and parses (Linux)" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const text = procText(a, std.testing.io, "/proc/meminfo") orelse return error.Unreadable;
+    defer a.free(text);
+    try std.testing.expect(budget.meminfo(text) != null);
 }
 
 test "chip classes name the compute capability as gate entries do" {
