@@ -114,7 +114,7 @@ pub const Engine = struct {
             const sf = try mtl.MappedFile.open(try e.ep_arena.allocator().dupeSentinel(u8, sp, 0));
             defer sf.deinit();
             const s = try ep_mod.readSettings(e.ep_arena.allocator(), sf.bytes[0..sf.size]);
-            const by_rows = if (std.c.getenv("GLM_EP_SPLIT")) |v| std.mem.eql(u8, std.mem.span(v), "rows") else false;
+            const by_rows = if (std.c.getenv("GLM_EP_SPLIT")) |v| !std.mem.eql(u8, std.mem.span(v), "experts") else true;
             if (by_rows) try cfg.splitRows(&e.c, s.rank, 2) else try cfg.split(&e.c, s.rank, 2);
             break :blk s;
         } else null;
