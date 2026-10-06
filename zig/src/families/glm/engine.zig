@@ -64,6 +64,7 @@ pub const Engine = struct {
     pr: ?prompt_mod.Prompt, // prompt chunks on the tensor units (null: every prompt row in 16-row decode windows)
     ep: ?*ep_mod.Ep, // expert parallel with a peer Mac (GLM_EP names this Mac's link settings)
     trace_last: ?Ref = null, // a prompt's last row at every capture point (each layer's sublayers), for a path comparison
+    margins: ?*std.ArrayList(f32) = null, // each emitted token's top-two logit margin (its row's logits), for a path comparison
     ep_arena: std.heap.ArenaAllocator, // the link settings, alive as long as the link
     residency: ?mtl.ResidencySet = null,
     load_seconds: f64 = 0,
@@ -96,6 +97,7 @@ pub const Engine = struct {
         e.ep = null;
         e.pr = null;
         e.trace_last = null;
+        e.margins = null;
         e.ep_arena = .init(gpa);
         errdefer e.ep_arena.deinit();
         e.device = try mtl.Device.init();
@@ -307,6 +309,20 @@ pub const Engine = struct {
         enc.setBuffer(dst.buf, dst.off, 1);
         enc.setValue(D / 2, 2);
         enc.dispatchThreads(mtl.Size.of(D / 2, 1, 1), mtl.Size.of(256, 1, 1));
+    }
+
+    /// The top two logits' difference in row `row` of the last head's logits (bf16).
+    fn margin(e: *const Engine, row: u32) f32 {
+        const v: [*]const u16 = @ptrCast(@alignCast(e.sc.logits.addr()));
+        var top = [2]f32{ -std.math.inf(f32), -std.math.inf(f32) };
+        for (v[@as(usize, row) * e.c.vocab ..][0..e.c.vocab]) |h| {
+            const f: f32 = @bitCast(@as(u32, h) << 16);
+            if (f > top[0]) {
+                top[1] = top[0];
+                top[0] = f;
+            } else if (f > top[1]) top[1] = f;
+        }
+        return top[0] - top[1];
     }
 
     fn u32s(r: Ref, n: usize) []u32 {
@@ -594,6 +610,7 @@ pub const Engine = struct {
         out.prefilled(out.ctx);
         var res: Result = .{ .reason = .length, .prompt_seconds = @as(f64, @floatFromInt(t_prompt - t_start)) / 24e6 };
         var tok = u32s(e.sc.picks, 1)[0];
+        if (e.margins) |m| try m.append(e.gpa, e.margin(0));
         res.generated = 1;
         if (try e.agree(out.tokens(out.ctx, &.{tok}) or std.mem.indexOfScalar(u32, eos, tok) != null)) {
             res.reason = .stop;
@@ -650,6 +667,7 @@ pub const Engine = struct {
                     break;
                 }
             }
+            if (e.margins) |m| for (0..take) |j| try m.append(e.gpa, e.margin(@intCast(j)));
             if (take > 0 and out.tokens(out.ctx, picks[0..take])) stop = true;
             emitted += take;
             res.generated = emitted;

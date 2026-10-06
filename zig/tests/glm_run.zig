@@ -12,6 +12,8 @@
 //! GLM_LOGITS=PREFIX (write each prompt's last-row logits, bf16, to PREFIX.NAME.bf16 at its first depth's first run),
 //! GLM_LOGITS_VS=PREFIX (compare them with such a file: the largest difference against the bf16 step at the top logit),
 //! GLM_PROMPT_PROFILE=REPS (after the replies: each prompt's first chunk by class, each left out or alone),
+//! GLM_MARGINS=PREFIX (each emitted token's top-two logit margin, f32, to PREFIX.NAME.margins), GLM_MARGINS_VS=PREFIX
+//! (at the first token that differs from GLM_VS's reply, both runs' margins there),
 //! GLM_TRACE_LAST=PREFIX (each prompt's last row at every capture point, bf16, to PREFIX.NAME.trace: embedding, then
 //! each layer's attention input and output and MLP input and output, then the final norm).
 const std = @import("std");
@@ -160,6 +162,11 @@ pub fn main(init: std.process.Init) !void {
             defer gpa.free(col.logits);
             defer gpa.free(col.trace);
             if (trace_prefix != null and run == 0 and d == depths.items[0]) col.trace_from = e.trace_last.?.addr()[0..trace_bytes];
+            var margins: std.ArrayList(f32) = .empty;
+            defer margins.deinit(gpa);
+            const want_margins = run == 0 and d == depths.items[0] and (std.c.getenv("GLM_MARGINS") != null or std.c.getenv("GLM_MARGINS_VS") != null);
+            e.margins = if (want_margins) &margins else null;
+            defer e.margins = null;
             const want_logits = run == 0 and d == depths.items[0] and (std.c.getenv("GLM_LOGITS") != null or std.c.getenv("GLM_LOGITS_VS") != null);
             if (want_logits) col.logits_from = @as([*]const u16, @ptrCast(@alignCast(e.sc.logits.addr())))[0..e.c.vocab];
             const r = try e.generate(ids, max, eos, d, .{ .ctx = &col, .prefilled = Collect.prefilled, .tokens = Collect.tokens, .cancelled = Collect.cancelled });
@@ -175,10 +182,26 @@ pub fn main(init: std.process.Init) !void {
                 failures += 1;
                 std.debug.print("  DIFFERS from depth {d} at token {d}\n", .{ depths.items[0], at });
             } else std.debug.print("  equal to depth {d}\n", .{depths.items[0]});
+            if (want_margins) if (std.c.getenv("GLM_MARGINS")) |prefix| {
+                const path = try std.fmt.allocPrintSentinel(arena, "{s}.{s}.margins", .{ prefix, name }, 0);
+                const file = std.c.fopen(path, "wb") orelse return error.OpenFailed;
+                defer _ = std.c.fclose(file);
+                if (std.c.fwrite(std.mem.sliceAsBytes(margins.items).ptr, 4, margins.items.len, file) != margins.items.len) return error.WriteFailed;
+            };
             if (vs) |other| if (other.object.get(name)) |theirs| {
                 const want = try ints(arena, theirs);
                 if (firstDiff(want, toks)) |at| {
                     std.debug.print("  vs GLM_VS: first token {s}, first difference at token {d} of {d}\n", .{ if (at == 0) "DIFFERS" else "equal", at, @min(want.len, toks.len) });
+                    if (want_margins) if (std.c.getenv("GLM_MARGINS_VS")) |prefix| {
+                        const path = try std.fmt.allocPrintSentinel(arena, "{s}.{s}.margins", .{ prefix, name }, 0);
+                        if (mtl.MappedFile.open(path)) |f| {
+                            defer f.deinit();
+                            const th: []const f32 = @as([*]const f32, @ptrCast(@alignCast(f.bytes)))[0 .. f.size / 4];
+                            const sorted = try arena.dupe(f32, th[0..@min(th.len, at)]);
+                            std.mem.sort(f32, sorted, {}, std.sort.asc(f32));
+                            std.debug.print("  top-two margin at token {d}: here {d:.4}, GLM_VS run {d:.4} (its tokens {d} vs {d}); GLM_VS run's margins before it: median {d:.3}, smallest {d:.4}\n", .{ at, if (at < margins.items.len) margins.items[at] else -1, if (at < th.len) th[at] else -1, toks[at], want[at], if (sorted.len > 0) sorted[sorted.len / 2] else -1, if (sorted.len > 0) sorted[0] else -1 });
+                        } else |_| std.debug.print("  no margins file {s}\n", .{path});
+                    };
                 } else std.debug.print("  vs GLM_VS: all {d} tokens equal\n", .{toks.len});
             };
             if (col.trace.len > 0) {
