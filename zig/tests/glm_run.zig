@@ -253,7 +253,7 @@ pub fn main(init: std.process.Init) !void {
     if (std.c.getenv("GLM_MM_CHECK") != null) try e.checkMatmul(try ints(arena, doc.object.get("prompts").?.array.items[0].object.get("ids").?));
     if (std.c.getenv("GLM_PROMPT_PROFILE")) |v| { // each prompt's first chunk by class (GLM_PROFILE_ONLY: each alone)
         const reps = try std.fmt.parseInt(usize, std.mem.span(v), 10);
-        for (doc.object.get("prompts").?.array.items) |p| try e.profilePrompt(try ints(arena, p.object.get("ids").?), reps, std.c.getenv("GLM_PROFILE_ONLY") != null);
+        for (doc.object.get("prompts").?.array.items) |p| try e.profilePrompt(try ints(arena, p.object.get("ids").?), reps, std.c.getenv("GLM_PROFILE_ONLY") != null, std.c.getenv("GLM_PROFILE_PARTS") != null);
     }
     try saved.append(arena, '}');
     if (std.c.getenv("GLM_OUT")) |path| {

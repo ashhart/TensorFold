@@ -512,7 +512,7 @@ pub const Engine = struct {
 
     /// A prompt chunk's GPU time by class on the first rows of `prompt` (up to a chunk; median of `reps` after a warm run):
     /// the whole chunk, then each class left out (alone with `only`). Both Macs of a pair run it together.
-    pub fn profilePrompt(e: *Engine, prompt: []const u32, reps: usize, only: bool) !void {
+    pub fn profilePrompt(e: *Engine, prompt: []const u32, reps: usize, only: bool, parts: bool) !void {
         const pr = &(e.pr orelse return error.NoPromptPath);
         const C = fwd.Class;
         const rows: u32 = @intCast(@min(prompt.len, prompt_mod.max_rows));
@@ -521,7 +521,8 @@ pub const Engine = struct {
         defer pool.pop();
         e.sync();
         @memcpy(u32s(e.prompt_ids, rows), prompt[0..rows]);
-        const classes = [_]u32{ C.hc, C.kda, C.mla, C.dense, C.route, C.routed, C.shared, C.exchange, C.combine, C.ends };
+        const P = fwd.Part;
+        const classes = if (parts) [_]u32{ P.bit("mla_proj"), P.bit("mla_cache"), P.bit("mla_absorb"), P.bit("mla_select"), P.bit("mla_attn"), P.bit("mla_unabs"), P.bit("mla_out"), 0, 0, 0 } else [_]u32{ C.hc, C.kda, C.mla, C.dense, C.route, C.routed, C.shared, C.exchange, C.combine, C.ends };
         var all: u32 = 0;
         for (classes) |m| all |= m;
         const times = try e.gpa.alloc(f64, reps);
@@ -529,9 +530,11 @@ pub const Engine = struct {
         var full: f64 = 0;
         for (0..classes.len + 3) |mi| {
             const mask: u32 = if (mi == 0 or mi == classes.len + 2) 0 else if (mi == classes.len + 1) all else classes[mi - 1];
+            if (mask == 0 and mi > 0 and mi <= classes.len) continue;
             var x = e.ctx();
             x.sc = &pr.streams;
-            x.skip = if (mask == all) all else if (only and mask != 0) all & ~mask else mask;
+            const m = if (mask == all) all else if (only and mask != 0) all & ~mask else mask;
+            if (parts) x.pskip = m else x.skip = m;
             for (0..reps + 1) |rep| {
                 e.s.reset();
                 const b = e.begin();
@@ -542,7 +545,7 @@ pub const Engine = struct {
             std.mem.sort(f64, times, {}, std.sort.asc(f64));
             const med = times[reps / 2];
             if (mi == 0) full = med;
-            const name = if (mask == 0) (if (mi == 0) "full" else "full again") else if (mask == all) "none" else fwd.Class.names[@ctz(mask)];
+            const name = if (mask == 0) (if (mi == 0) "full" else "full again") else if (mask == all) "none" else if (parts) fwd.Part.names[@ctz(mask)] else fwd.Class.names[@ctz(mask)];
             std.debug.print("prompt profile {d} rows{s}: {s:<10} {d:9.2} ms (min {d:.2}, max {d:.2}){s}", .{ rows, if (only) " only" else "", name, med, times[0], times[reps - 1], if (mask == 0 or only or mask == all) "\n" else "" });
             if (mask != 0 and !only and mask != all) std.debug.print("  class {d:8.2} ms {d:5.1}%\n", .{ full - med, 100 * (full - med) / full });
         }

@@ -67,6 +67,7 @@ pub const Prompt = struct {
     m_xn: Ref,
     m_out: Ref,
     sums: Ref, // fp32 group sums of a matmul's rows (affine_mm's bias operand)
+    sparse_nax: bool, // the sparse MLA attention on the tensor units (GLM_SPARSE_NAX=0: the row kernel)
 
     pub fn deinit(p: *Prompt) void {
         p.k.deinit();
@@ -83,6 +84,7 @@ pub fn init(gpa: std.mem.Allocator, arena: *st.Arena, device: mtl.Device, c: *co
     p.k = try pk.load(gpa, device);
     errdefer p.k.deinit();
     p.mm = engine_kernels;
+    p.sparse_nax = if (std.c.getenv("GLM_SPARSE_NAX")) |v| v[0] != '0' else true;
     p.streams = decode.*;
     const big = struct {
         fn of(a: *st.Arena, bytes: usize) !Ref {
@@ -333,27 +335,40 @@ fn mla(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: usize, w:
     const c = x.c;
     const XP: u32 = @intCast(std.mem.alignForward(usize, c.xProj(), 64));
     const width = c.keyWidth();
-    qmm(p, e, x_in, w.x_proj, p.xp, M);
-    fwd.rms(x, e, p.xp, w.q_norm, p.qr, M, c.q_lora, XP, c.q_lora, c.eps);
-    qmm(p, e, p.qr, w.qr_proj, p.qp, M);
-    fwd.mlaCache(x, e, mi, w, x_in, p.xp, XP, p.iw, M, pos);
-    fwd.absorb(x, e, w, p.qp, p.ql, M);
+    if (fwd.on(x, "mla_proj")) {
+        qmm(p, e, x_in, w.x_proj, p.xp, M);
+        fwd.rms(x, e, p.xp, w.q_norm, p.qr, M, c.q_lora, XP, c.q_lora, c.eps);
+        qmm(p, e, p.qr, w.qr_proj, p.qp, M);
+    }
+    if (fwd.on(x, "mla_cache")) fwd.mlaCache(x, e, mi, w, x_in, p.xp, XP, p.iw, M, pos);
+    if (fwd.on(x, "mla_absorb")) fwd.absorb(x, e, w, p.qp, p.ql, M);
     var dense: u32 = 0;
     while (dense < M and pos + dense + 1 <= c.i_topk) dense += 1;
-    if (dense > 0) {
-        e.setPipeline(x.k.dense_indices);
-        bind(e, 0, .{p.indices});
-        e.setValue([4]u32{ width, pos, dense, 0 }, 1);
-        e.dispatchThreads(size(width, dense, 1), size(256, 1, 1));
+    if (fwd.on(x, "mla_select")) {
+        if (dense > 0) {
+            e.setPipeline(x.k.dense_indices);
+            bind(e, 0, .{p.indices});
+            e.setValue([4]u32{ width, pos, dense, 0 }, 1);
+            e.dispatchThreads(size(width, dense, 1), size(256, 1, 1));
+        }
+        var r0 = dense;
+        while (r0 < M) : (r0 += select_rows) {
+            const sb = @min(select_rows, M - r0);
+            fwd.selectKeys(x, e, mi, p.qp.at((@as(usize, r0) * c.qrProj() + c.mla_heads * c.nope) * 2), c.qrProj(), p.iw.at(@as(usize, r0) * c.i_heads * 2), p.sscore, p.indices.at(@as(usize, r0) * width * 4), sb, pos + r0);
+        }
     }
-    var r0 = dense;
-    while (r0 < M) : (r0 += select_rows) {
-        const sb = @min(select_rows, M - r0);
-        fwd.selectKeys(x, e, mi, p.qp.at((@as(usize, r0) * c.qrProj() + c.mla_heads * c.nope) * 2), c.qrProj(), p.iw.at(@as(usize, r0) * c.i_heads * 2), p.sscore, p.indices.at(@as(usize, r0) * width * 4), sb, pos + r0);
+    if (fwd.on(x, "mla_attn")) {
+        if (p.sparse_nax) {
+            e.setPipeline(x.k.sparse_nax);
+            bind(e, 0, .{ p.ql, x.s.mla[mi].keys, p.indices });
+            e.setValue(@as(f32, 1.0 / 16.0), 3);
+            e.setValue([4]i32{ @intCast(width), @intCast(pos + M), 0, 0 }, 4);
+            bind(e, 5, .{p.att});
+            e.dispatchGroups(size(c.mla_heads / 16, M, 1), size(128, 1, 1));
+        } else fwd.attendIndexed(x, e, mi, p.ql, p.indices, p.att, M, pos + M);
     }
-    fwd.attendIndexed(x, e, mi, p.ql, p.indices, p.att, M, pos + M);
-    fwd.unabsorb(x, e, w, p.att, p.vals, M);
-    qmm(p, e, p.vals, w.o_proj, p.streams.branch, M);
+    if (fwd.on(x, "mla_unabs")) fwd.unabsorb(x, e, w, p.att, p.vals, M);
+    if (fwd.on(x, "mla_out")) qmm(p, e, p.vals, w.o_proj, p.streams.branch, M);
 }
 
 /// The backbone over a chunk (tokens in `ids`) at positions pos..: final-normed rows into `streams.hidden`.
