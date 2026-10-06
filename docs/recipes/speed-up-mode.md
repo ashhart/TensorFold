@@ -4,7 +4,8 @@ Speed-up mode runs Qwen3.8 Flash Next 6-bit on two Macs joined by Thunderbolt. E
 and does half the work of every request: prompts split their rows between the Macs, and each decode round splits
 its DeltaNet heads, routed experts and vocabulary head. One Mac serves the HTTP API and the other runs every
 request beside it. It needs the native Zig server (`tensorfold-native`) with the Flash Next replay engine, and
-MCDMA for the Thunderbolt link.
+MCDMA for the Thunderbolt link. [The speed-up mode guide](../speed-up-mode.md) walks through the setup step by step,
+with this build's speeds.
 
 ## What it gives
 
@@ -37,7 +38,7 @@ precision. Prompt splitting gives one Mac's bits exactly.
 - Two Apple silicon Macs with enough memory for the whole model on each (the 6-bit checkpoint and the replay
   engine's dump, about 175 GB at peak on each), and the same checkpoint and dump on both.
 - A Thunderbolt 5 cable between them with RDMA enabled, and MCDMA's fabric library (`libmcdma-fabric.dylib`) built
-  on each Mac from MCDMA's `feat/thunderbolt-fabric` branch, which carries its Thunderbolt links.
+  on each Mac from MCDMA's `main` branch, which carries its Thunderbolt links.
 - Greedy decoding (temperature 0), as the Flash Next replay engine requires.
 
 ## Settings
