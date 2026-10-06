@@ -22,9 +22,9 @@ supported, and the server refuses a GPU below 8.9 at startup.
 ## Image input
 
 Install the vision extra, `python -m pip install 'tensorfold[vision] @ git+https://github.com/ashhart/TensorFold.git'`,
-and start a supported GLM-5.3-Flash or Qwen3.5/3.8 dense checkpoint with `--vision` to accept image and text content
-parts through the same lane engine; Flash Next CUDA also accepts images with `--vision --parallel 2` or more.
-GLM-5.3-Flash images run on MLX; dense Qwen's run on MLX and CUDA. See
+and start a supported GLM-5.3-Flash, Qwen3.5/3.8 dense or Flash Next checkpoint with `--vision` to accept image and text
+content parts through the same lane engine (Flash Next on CUDA with `--parallel 2` or more).
+GLM-5.3-Flash images run on MLX; Qwen's run on MLX and CUDA. See
 [image input](docs/vision.md) for the API, checkpoint requirements, cache behavior and qualification status.
 
 ## Models
@@ -108,7 +108,7 @@ between MLX and CUDA, different quantizations, or different tensor-parallel rank
 | --- | --- | --- |
 | `--host`, `--port` | Listen address, default `127.0.0.1:8080` | Both |
 | `--name` | Model ID advertised to clients | Both |
-| `--vision` | Opt-in GLM-5.3-Flash, Qwen3.5/3.8 dense and Flash Next image input | MLX; dense Qwen also CUDA; Flash Next CUDA with `--parallel >=2` |
+| `--vision` | Opt-in GLM-5.3-Flash, Qwen3.5/3.8 dense and Flash Next image input | MLX; Qwen also CUDA (Flash Next with `--parallel >=2`) |
 | `--vision-max-images N` | With `--vision`, images across the full request history (default 4); other image limits still apply | Both |
 | `--vision-image-tokens N` | With `--vision`, the visual tokens a request's images share (default 4,096, up to 65,536); each image keeps at most 4,096 | CUDA Qwen |
 | `--alias` | Additional model IDs | Both |

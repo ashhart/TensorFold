@@ -1,4 +1,4 @@
-"""A Qwen dense vision tower shares the existing target embeddings and keeps preprocessing on the CPU."""
+"""A Qwen vision tower (dense or Flash Next) shares the target's embeddings and keeps preprocessing on the CPU."""
 
 from __future__ import annotations
 
@@ -23,15 +23,37 @@ class EncodedVisionPrompt:
     image_hashes: tuple[str, ...]
 
 
-def _runtime():
+MODEL_TYPES = ("qwen3_5", "qwen4_exp")      # Qwen3.5/3.8 dense, and Flash Next (Qwen3-VL's tower in both)
+
+
+def _runtime(model_type: str = "qwen3_5"):
+    import importlib
+
     try:
         import mlx.core as mx
         import mlx.nn as nn
-        from mlx_vlm.models.qwen3_5.config import VisionConfig
-        from mlx_vlm.models.qwen3_5.vision import VisionModel
+
+        VisionConfig = importlib.import_module(f"mlx_vlm.models.{model_type}.config").VisionConfig
+        VisionModel = importlib.import_module(f"mlx_vlm.models.{model_type}.vision").VisionModel
     except ImportError as error:
         raise ValueError("Qwen image support requires the optional vision dependencies: pip install 'tensorfold[vision]'") from error
     return mx, nn, VisionConfig, VisionModel
+
+
+def _evaluated_blocks(blocks: list, mx: Any, nn: Any) -> list:
+    """Each block's output evaluated before the next is built: large MLX command buffers would hold every block's."""
+
+    class Evaluated(nn.Module):
+        def __init__(self, inner: Any) -> None:
+            super().__init__()
+            self.inner = inner
+
+        def __call__(self, *args: Any, **kwargs: Any) -> Any:
+            out = self.inner(*args, **kwargs)
+            mx.eval(out)
+            return out
+
+    return [Evaluated(block) for block in blocks]
 
 
 class QwenVisionFrontend(QwenImageProcessor):
@@ -49,20 +71,23 @@ class QwenVisionFrontend(QwenImageProcessor):
         if not path.is_dir():
             raise ValueError("Vision loading requires a local checkpoint directory")
         config = json.loads((path / "config.json").read_text())
-        if config.get("model_type") != "qwen3_5" or not config.get("vision_config"):
-            raise ValueError("The image frontend currently supports Qwen3.5/3.8 dense multimodal checkpoints only")
+        if config.get("model_type") not in MODEL_TYPES or not config.get("vision_config"):
+            raise ValueError("The image frontend currently supports Qwen3.5/3.8 dense and Flash Next multimodal "
+                             "checkpoints only")
         if config["vision_config"].get("deepstack_visual_indexes"):
-            raise ValueError("Deepstack vision checkpoints are not supported by the Qwen dense image frontend")
+            raise ValueError("Deepstack vision checkpoints are not supported by the Qwen image frontend")
         tensors = vision_tensors(path)
         prepared = QwenImageProcessor.from_directory(path)
-        mx, nn, VisionConfig, VisionModel = _runtime()
+        mx, nn, VisionConfig, VisionModel = _runtime(config["model_type"])
         tower = VisionModel(VisionConfig.from_dict(config["vision_config"]))
         weights = tower.sanitize(load_vision_weights(tensors, mx))
         if any(name.endswith(".scales") for name in weights):
             nn.quantize(tower, class_predicate=quantization_predicate(config, weights))
         tower.load_weights(list(weights.items()), strict=True)
-        tower.eval()
         mx.eval(tower.parameters())
+        if isinstance(getattr(tower, "blocks", None), list):
+            tower.blocks = _evaluated_blocks(tower.blocks, mx, nn)
+        tower.eval()
         front = cls(config, embed_tokens, tower, prepared.processor, prepared.tokenizer, mx, allow_urls)
         front.workspace_bytes = front.measure_workspace()
         return front

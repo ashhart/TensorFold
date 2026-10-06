@@ -128,7 +128,7 @@ def block_scores(ix: Any, query: mx.array, raw: mx.array, cache: Any, past: int)
         return ix.block_scores(query, raw, cache, past)
     blocks = (past + int(query.shape[1])) // ix.ratio
     pooled = ix.pool(raw, cache, blocks)[0].astype(mx.float32).T
-    q = ix.rotated(query, past)[0].astype(mx.float32)
+    q = ix.rotated(query, past, cache)[0].astype(mx.float32)
     root = consts.get(("root", ix.dims))
     if root is None:
         root = consts[("root", ix.dims)] = mx.array(math.sqrt(ix.dims), dtype=mx.float32)

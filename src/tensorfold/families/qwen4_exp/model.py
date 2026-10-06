@@ -262,18 +262,22 @@ class Qwen4Exp(nn.Module):
     def make_cache(self) -> list[Any]:
         return [LinearCache() if layer.is_linear else AttentionCache() for layer in self.layers]
 
-    def hidden(self, inputs: Any, cache: list[Any]) -> mx.array:
-        """The mixed hidden state [B, L, D] after the last layer."""
+    def hidden(self, inputs: Any, cache: list[Any], embeddings: mx.array | None = None) -> mx.array:
+        """The mixed hidden state [B, L, D] after the last layer; ``embeddings`` [L, D]: a chunk's own input rows."""
 
         tokens = np.asarray(inputs, dtype=np.int64)
         if tokens.ndim == 1:
             tokens = tokens[None]
+        if embeddings is not None and (tokens.shape[0] != 1 or tuple(embeddings.shape[:1]) != (tokens.shape[1],)):
+            raise ValueError("hidden: input rows must match one chunk's tokens")
         fused = self.__dict__.get("fused")
         if fused is not None and tokens.shape[0] == 1 and tokens.shape[1] <= self.fused_rows:
+            if embeddings is not None:
+                return fused.run(mx.tile(embeddings, (1, self.args.hc_count)), tokens, cache)
             return fused(tokens, cache)
         if fused is not None and tokens.shape[0] == 1 and prefill_mm.fast_prefill():
-            return prefill_hc.hidden(self, tokens, cache)           # a prompt chunk through the prefill path
-        h = self.model.embed_tokens(mx.array(tokens.astype(np.int32)))
+            return prefill_hc.hidden(self, tokens, cache, embeddings)   # a prompt chunk through the prefill path
+        h = self.model.embed_tokens(mx.array(tokens.astype(np.int32))) if embeddings is None else embeddings[None]
         h = mx.tile(h, (1, 1, self.args.hc_count))
         queued = None
         for i, (layer, layer_cache) in enumerate(zip(self.layers, cache)):

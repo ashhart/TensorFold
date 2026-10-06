@@ -220,7 +220,7 @@ def test_load_instantiates_only_tower_and_local_tokenizer(tmp_path, monkeypatch)
                          reset_peak_memory=lambda: memory.update(peak=memory["active"]),
                          get_peak_memory=lambda: memory["peak"])
     runtime = (mx, SimpleNamespace(quantize=quantize), SimpleNamespace(from_dict=lambda value: value), Tower)
-    monkeypatch.setattr(qwen_mlx, "_runtime", lambda: runtime)
+    monkeypatch.setattr(qwen_mlx, "_runtime", lambda *_: runtime)
     monkeypatch.setattr(qwen_processing, "_processor_runtime",
                         lambda: (SimpleNamespace(from_pretrained=tokenizer), ImageProcessor))
     embed = object()
@@ -276,3 +276,38 @@ def test_a_continued_image_prompt_extends_positions_as_a_fresh_prepare_would():
     assert grown.pixel_values is prepared.pixel_values and grown.image_spans == prepared.image_spans
     with pytest.raises(ValueError, match="start with"):
         continued(prepared, (5, *prepared.token_ids), CONFIG)
+
+
+def test_a_flash_next_tower_loads_and_runs_block_by_block_with_the_same_bits(tmp_path, monkeypatch):
+    """A small Flash Next tower loads from checkpoint names and runs block by block with the same bits."""
+
+    mx = pytest.importorskip("mlx.core")
+    pytest.importorskip("mlx_vlm.models.qwen4_exp")
+    from mlx.utils import tree_flatten
+
+    previous = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        vision = {"depth": 2, "hidden_size": 32, "intermediate_size": 64, "num_heads": 2, "out_hidden_size": 48,
+                  "patch_size": 16, "temporal_patch_size": 2, "spatial_merge_size": 2, "in_channels": 3,
+                  "num_position_embeddings": 64, "deepstack_visual_indexes": []}
+        config = {**CONFIG, "model_type": "qwen4_exp", "vision_config": vision, "quantization": {}}
+        (tmp_path / "config.json").write_text(json.dumps(config))
+        _, _, VisionConfig, VisionModel = qwen_mlx._runtime("qwen4_exp")
+        mx.random.seed(0)
+        reference = VisionModel(VisionConfig.from_dict(vision))
+        params = {f"vision_tower.{k}": 0.05 * mx.random.normal(v.shape)
+                  for k, v in tree_flatten(reference.parameters())}
+        mx.save_safetensors(str(tmp_path / "model.safetensors"), params)
+        reference.load_weights([(k[len("vision_tower."):], v) for k, v in params.items()])
+        monkeypatch.setattr(qwen_processing, "_processor_runtime",
+                            lambda: (SimpleNamespace(from_pretrained=lambda *a, **k: Tokenizer()), ImageProcessor))
+        front = qwen_mlx.QwenVisionFrontend.load(tmp_path, lambda t: mx.zeros((*t.shape, 48)))
+        assert all(type(block).__name__ == "Evaluated" for block in front.tower.blocks)
+        pixels = mx.random.normal((64, 3 * 2 * 16 * 16))
+        grid = mx.array([[1, 8, 8]], dtype=mx.int32)
+        features, deepstack = front.tower(pixels, grid)
+        assert features.shape == (16, 48) and not deepstack
+        assert bool(mx.array_equal(features, reference(pixels, grid)[0]).item())
+    finally:
+        mx.set_default_device(previous)

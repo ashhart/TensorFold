@@ -82,13 +82,13 @@ def hyper_connection(hc: Any, h: mx.array, pending: tuple[mx.array, mx.array] | 
 QUEUE_LAYERS = 2                    # layers a slice; MLX holds a queued slice's buffers, so this bounds memory
 
 
-def hidden(model: Any, tokens: np.ndarray, cache: list[Any]) -> mx.array:
-    """Qwen4Exp.hidden for a prompt chunk (batch 1); the same graph and bits however it is sliced."""
+def hidden(model: Any, tokens: np.ndarray, cache: list[Any], embeddings: mx.array | None = None) -> mx.array:
+    """Qwen4Exp.hidden for a prompt chunk (batch 1), the same bits however sliced; ``embeddings``: its input rows."""
 
     fused = model.__dict__["fused"]
     streams = model.args.hc_count
     eps = fused.eps
-    h = model.model.embed_tokens(mx.array(tokens.astype(np.int32)))[0]
+    h = model.model.embed_tokens(mx.array(tokens.astype(np.int32)))[0] if embeddings is None else embeddings
     h = mx.tile(h, (1, streams))                                        # [L, S*D]
     pending = None
     queued = None

@@ -89,6 +89,15 @@ _IDX_POOL = r"""
 _IDX_POOL_REL = _IDX_POOL.replace("const device bfloat* src = RAW + size_t(4 * b) * DI + d;",
                                   "const device bfloat* src = RAW + size_t(4 * j) * DI + d;")
 
+# CUDA's rope_axis: a frequency's angle at the row's position on its axis (t, h or w); three equal give the text bits
+_AXIS = "const int ax = (i % 3 == 1 && i < 3 * S1) ? 1 : ((i % 3 == 2 && i < 3 * S2) ? 2 : 0);\n    "
+_ATTN_PREP3 = _ATTN_PREP.replace("const float angle = float(POS[r]) * freq;",
+                                 _AXIS + "const float angle = float(POS3[r * 3 + ax]) * freq;")
+_IDX_POOL3 = _IDX_POOL.replace("const float angle = float(4 * b) * freq;",
+                               _AXIS + "const float angle = float(BPOS3[j * 3 + ax]) * freq;")
+_IDX_POOL3_REL = _IDX_POOL_REL.replace("const float angle = float(4 * b) * freq;",
+                                       _AXIS + "const float angle = float(BPOS3[j * 3 + ax]) * freq;")
+
 _IDX_SCORES = r"""
   // Simdgroup s of threadgroup (x, y) scores blocks (8 x + s) BB .. + BB - 1 for rows RB y .. RB y + RB - 1, each
   // block's keys read once for those rows: block b's score for row r is the sum over the HI indexer heads (in order)
@@ -209,31 +218,46 @@ _ATTN_MERGE_GATE = _ATTN_MERGE.replace(
 
 def attn_prep(projected: mx.array, positions: mx.array, q_norm: mx.array, k_norm: mx.array, index_norm: mx.array,
               eps: mx.array, *, q_heads: int, kv_heads: int, head_dim: int, index_heads: int, index_dim: int,
-              rotary_dim: int, base: float) -> tuple[mx.array, mx.array, mx.array]:
-    """Normalize and rotate projected q/k/indexer q using int32 row positions and (1 + w) norm scales."""
+              rotary_dim: int, base: float,
+              sections: Sequence[int] | None = None) -> tuple[mx.array, mx.array, mx.array]:
+    """Normalize and rotate projected q/k/indexer q at int32 row positions ([R, 3] axes with ``sections``)."""
 
     rows, width = projected.shape
-    run = kernel("q4_attn_prep", _ATTN_PREP, ["P", "POS", "QW", "KW", "IW", "eps", "LOG2BASE"],
+    template = [("NQ", q_heads), ("NKV", kv_heads), ("HD", head_dim), ("RD", rotary_dim), ("PW", width),
+                ("NI", index_heads), ("IHD", index_dim)]
+    if sections is None:
+        run = kernel("q4_attn_prep", _ATTN_PREP, ["P", "POS", "QW", "KW", "IW", "eps", "LOG2BASE"],
                      ["Q", "Kout", "IQ"])
+    else:
+        run = kernel("q4_attn_prep3", _ATTN_PREP3, ["P", "POS3", "QW", "KW", "IW", "eps", "LOG2BASE"],
+                     ["Q", "Kout", "IQ"])
+        template += [("S1", int(sections[1])), ("S2", int(sections[2]))]
     return tuple(run(inputs=[projected, padded(positions), q_norm, k_norm, index_norm, eps, log2(base)],
-                        template=[("NQ", q_heads), ("NKV", kv_heads), ("HD", head_dim), ("RD", rotary_dim),
-                                  ("PW", width), ("NI", index_heads), ("IHD", index_dim)],
+                        template=template,
                         grid=(head_dim, q_heads + kv_heads + index_heads, rows), threadgroup=(head_dim, 1, 1),
                         output_shapes=[(rows, q_heads, head_dim), (rows, kv_heads, head_dim),
                                        (rows, index_heads, index_dim)],
                         output_dtypes=[mx.bfloat16, mx.bfloat16, mx.bfloat16]))
 
 def index_pool(raw: mx.array, start: int, stop: int, norm: mx.array, eps: mx.array, *, rotary_dim: int,
-               base: float, relative: bool = False) -> mx.array:
-    """Pooled keys [stop - start, DI] of blocks [start, stop) from raw keys; ``relative``: raw row 0 is key 4 start."""
+               base: float, relative: bool = False, positions: mx.array | None = None,
+               sections: Sequence[int] | None = None) -> mx.array:
+    """Pooled keys [stop - start, DI] of blocks [start, stop); ``relative``: raw row 0 is key 4 start."""
 
     dims = int(raw.shape[-1])
-    if relative:
+    template = [("DI", dims), ("RD", rotary_dim)]
+    inputs = [raw, mx.array([start], dtype=mx.int32), norm, eps, log2(base)]
+    if sections is not None:
+        name, source = ("q4_idx_pool3_rel", _IDX_POOL3_REL) if relative else ("q4_idx_pool3", _IDX_POOL3)
+        run = kernel(name, source, ["RAW", "START", "W", "eps", "LOG2BASE", "BPOS3"], ["OUT"])
+        inputs.append(padded(positions))
+        template += [("S1", int(sections[1])), ("S2", int(sections[2]))]
+    elif relative:
         run = kernel("q4_idx_pool_rel", _IDX_POOL_REL, ["RAW", "START", "W", "eps", "LOG2BASE"], ["OUT"])
     else:
         run = kernel("q4_idx_pool", _IDX_POOL, ["RAW", "START", "W", "eps", "LOG2BASE"], ["OUT"])
-    return run(inputs=[raw, mx.array([start], dtype=mx.int32), norm, eps, log2(base)],
-                  template=[("DI", dims), ("RD", rotary_dim)],
+    return run(inputs=inputs,
+                  template=template,
                   grid=(dims, stop - start, 1), threadgroup=(dims, 1, 1),
                   output_shapes=[(stop - start, dims)], output_dtypes=[mx.bfloat16])[0]
 

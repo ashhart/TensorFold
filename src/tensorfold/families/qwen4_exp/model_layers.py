@@ -13,6 +13,7 @@ from mlx_lm.models.gated_delta import gated_delta_update
 from mlx_lm.models.switch_layers import SwitchGLU
 
 from tensorfold.kernels.qwen.flash_next.v1 import prefill, prefill_mm
+from tensorfold.vision.rotary import multimodal_rope, row_positions
 
 
 @dataclass
@@ -55,6 +56,7 @@ class Config:
     ple_eos: int
     group_size: int
     bits: int
+    mrope_section: tuple[int, int, int] = (11, 11, 10)   # an image prompt's rotary frequencies on its t, h, w axes
 
     @classmethod
     def from_dict(cls, config: dict[str, Any]) -> "Config":
@@ -107,6 +109,7 @@ class Config:
             ple_eos=int(eos[0] if isinstance(eos, list) else eos) if eos is not None else 0,
             group_size=int(quant.get("group_size", 32)),
             bits=int(quant.get("bits", 4)),
+            mrope_section=tuple(int(n) for n in rope.get("mrope_section", (11, 11, 10))),
         )
 
 
@@ -328,6 +331,7 @@ class Indexer(nn.Module):
         self.top_blocks = cfg.indexer_budget // cfg.indexer_compress_ratio
         self.rotary_dim = cfg.rotary_dim
         self.base = cfg.rope_theta
+        self.sections = cfg.mrope_section
         self.index_qk_proj = nn.Linear(cfg.hidden_size, (self.heads + 1) * self.dims, bias=False)
         self.q_layernorm = CenteredRMSNorm(self.dims, cfg.rms_norm_eps)
         self.k_layernorm = CenteredRMSNorm(self.dims, cfg.rms_norm_eps)
@@ -337,13 +341,16 @@ class Indexer(nn.Module):
         qk = prefill_mm.linear(self.index_qk_proj, x).reshape(batch, length, self.heads + 1, self.dims)
         return qk[:, :, : self.heads], qk[:, :, self.heads]
 
-    def _pool(self, raw: mx.array, start: int, stop: int) -> mx.array:
+    def _pool(self, raw: mx.array, start: int, stop: int, cache: Any = None) -> mx.array:
         """Mean of each block's raw keys, normalized, rotated to the block's first position."""
 
         batch = raw.shape[0]
         blocks = raw[:, start * self.ratio: stop * self.ratio].reshape(batch, stop - start, self.ratio, self.dims)
         pooled = mx.mean(blocks.astype(mx.float32), axis=-2).astype(raw.dtype)
         pooled = self.k_layernorm(pooled)
+        positions = row_positions(cache, start * self.ratio, stop - start, step=self.ratio)
+        if positions is not None:                       # an image prompt's cache: each block's first row's positions
+            return multimodal_rope(pooled[:, None], self.rotary_dim, self.base, positions, self.sections)[:, 0]
         return mx.fast.rope(pooled[:, None], self.rotary_dim, traditional=False, base=self.base,
                             scale=float(self.ratio), offset=start)[:, 0]
 
@@ -352,14 +359,17 @@ class Indexer(nn.Module):
 
         done = 0 if cache.pooled is None else cache.pooled.shape[1]
         if blocks > done:
-            fresh = self._pool(raw, done, blocks)
+            fresh = self._pool(raw, done, blocks, cache)
             cache.pooled = fresh if cache.pooled is None else mx.concatenate([cache.pooled, fresh], axis=1)
         return cache.pooled[:, :blocks]
 
-    def rotated(self, query: mx.array, past: int) -> mx.array:
-        """Normed, rotated queries [B, heads, L, dims]."""
+    def rotated(self, query: mx.array, past: int, cache: Any = None) -> mx.array:
+        """Normed, rotated queries [B, heads, L, dims] (an image prompt's cache: at its rows' positions)."""
 
         q = self.q_layernorm(query).transpose(0, 2, 1, 3)
+        positions = row_positions(cache, past, q.shape[2])
+        if positions is not None:
+            return multimodal_rope(q, self.rotary_dim, self.base, positions, self.sections)
         return mx.fast.rope(q, self.rotary_dim, traditional=False, base=self.base, scale=1.0, offset=past)
 
     def block_scores(self, query: mx.array, raw: mx.array, cache: AttentionCache, past: int) -> mx.array:
@@ -367,7 +377,7 @@ class Indexer(nn.Module):
 
         blocks = (past + query.shape[1]) // self.ratio
         pooled = self.pool(raw, cache, blocks)[0].astype(mx.float32).T
-        q = self.rotated(query, past)[0].astype(mx.float32)
+        q = self.rotated(query, past, cache)[0].astype(mx.float32)
         scores = mx.maximum(q[0] @ pooled, 0)
         for h in range(1, self.heads):
             scores = scores + mx.maximum(q[h] @ pooled, 0)
@@ -382,7 +392,7 @@ class Indexer(nn.Module):
         if blocks <= self.top_blocks:
             return None
         pooled = self.pool(raw, cache, blocks)
-        q = self.rotated(query, past)
+        q = self.rotated(query, past, cache)
         # float32 scores: which blocks win is a discrete choice and rounding flips the ones at the cut
         scores = q.astype(mx.float32) @ pooled.astype(mx.float32)[:, None].transpose(0, 1, 3, 2)
         scores = mx.sum(mx.maximum(scores, 0), axis=1) / math.sqrt(self.dims)          # [B, L, blocks]
@@ -412,7 +422,7 @@ class SparseAttention(nn.Module):
         super().__init__()
         self.heads, self.kv_heads, self.dims = cfg.num_attention_heads, cfg.num_key_value_heads, cfg.head_dim
         self.scale = self.dims ** -0.5
-        self.rotary_dim, self.base = cfg.rotary_dim, cfg.rope_theta
+        self.rotary_dim, self.base, self.sections = cfg.rotary_dim, cfg.rope_theta, cfg.mrope_section
         d = cfg.hidden_size
         self.q_proj = nn.Linear(d, self.heads * self.dims * 2, bias=False)
         self.k_proj = nn.Linear(d, self.kv_heads * self.dims, bias=False)
@@ -432,8 +442,13 @@ class SparseAttention(nn.Module):
         queries = self.q_norm(queries).transpose(0, 2, 1, 3)
         keys = self.k_norm(linear(self.k_proj, x).reshape(batch, length, self.kv_heads, self.dims)).transpose(0, 2, 1, 3)
         values = linear(self.v_proj, x).reshape(batch, length, self.kv_heads, self.dims).transpose(0, 2, 1, 3)
-        queries = mx.fast.rope(queries, self.rotary_dim, traditional=False, base=self.base, scale=1.0, offset=past)
-        keys = mx.fast.rope(keys, self.rotary_dim, traditional=False, base=self.base, scale=1.0, offset=past)
+        positions = row_positions(cache, past, length)
+        if positions is not None:                       # an image prompt's cache: its rows' three rotary axes
+            queries = multimodal_rope(queries, self.rotary_dim, self.base, positions, self.sections)
+            keys = multimodal_rope(keys, self.rotary_dim, self.base, positions, self.sections)
+        else:
+            queries = mx.fast.rope(queries, self.rotary_dim, traditional=False, base=self.base, scale=1.0, offset=past)
+            keys = mx.fast.rope(keys, self.rotary_dim, traditional=False, base=self.base, scale=1.0, offset=past)
         index_query, index_key = self.indexer.project(x)
         keys, values, raw = cache.update(keys, values, index_key)
         if self.__dict__.get("kernel_select") and batch == 1 and prefill.through_kernels(self, past + length):

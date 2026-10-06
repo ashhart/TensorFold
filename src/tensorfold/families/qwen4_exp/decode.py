@@ -12,6 +12,8 @@ import numpy as np
 from tensorfold.families.qwen3_5 import tensor_units
 from tensorfold.kernels.qwen.dense.v1 import lane_qmm, simd_qmm
 from tensorfold.kernels.qwen.flash_next.v1 import attention, base, embed, experts, gdn, hc, ngram, rows
+from tensorfold.kernels.inputs import ints
+from tensorfold.vision.rotary import row_positions
 
 
 class _Split:
@@ -316,10 +318,12 @@ class FusedDecode:
         index_heads, index_dims = cfg.indexer_n_heads, cfg.indexer_head_dim
         past = cache.offset
         p = project(x, proj)
-        positions = self._positions(past, rows)
+        three = row_positions(cache, past, rows)              # an image prompt's cache: three axes a row
+        positions = self._positions(past, rows) if three is None else ints(three.T.reshape(-1))
         q, k, iq = attention.attn_prep(p, positions, q_scale, k_scale, iq_scale, self.eps, q_heads=heads,
                                kv_heads=kv_heads, head_dim=dims, index_heads=index_heads, index_dim=index_dims,
-                               rotary_dim=cfg.rotary_dim, base=cfg.rope_theta)
+                               rotary_dim=cfg.rotary_dim, base=cfg.rope_theta,
+                               sections=None if three is None else cfg.mrope_section)
         at = heads * 2 * dims
         v = p[:, at + kv_heads * dims: at + 2 * kv_heads * dims].reshape(rows, kv_heads, dims)
         raw_key = p[:, at + 2 * kv_heads * dims + index_heads * index_dims:]
@@ -346,15 +350,26 @@ class FusedDecode:
         cfg = self.cfg
         done = 0 if cache.pooled is None else int(cache.pooled.shape[1])
         if complete[-1] > done:
+            axes = self._block_axes(cache, done, complete[-1])
             if raw is None:                             # a chained draft's block: raw keys read from its first row
                 rows = cache.side_index_rows(cfg.indexer_compress_ratio * done)
                 fresh = attention.index_pool(first(rows), done, complete[-1], pool_scale, self.eps,
-                                             rotary_dim=cfg.rotary_dim, base=cfg.rope_theta, relative=True)[None]
+                                             rotary_dim=cfg.rotary_dim, base=cfg.rope_theta, relative=True,
+                                             **axes)[None]
             else:
                 fresh = attention.index_pool(first(raw), done, complete[-1], pool_scale, self.eps,
-                                             rotary_dim=cfg.rotary_dim, base=cfg.rope_theta)[None]
+                                             rotary_dim=cfg.rotary_dim, base=cfg.rope_theta, **axes)[None]
             cache.pooled = fresh if cache.pooled is None else mx.concatenate([cache.pooled, fresh], axis=1)
         return attention.index_select(iq, first(cache.pooled), complete, ends, top=top)
+
+    def _block_axes(self, cache: Any, start: int, stop: int) -> dict[str, Any]:
+        """index_pool's arguments for an image prompt's cache: blocks [start, stop) at their first rows' three axes."""
+
+        ratio = self.cfg.indexer_compress_ratio
+        three = row_positions(cache, ratio * start, stop - start, step=ratio)
+        if three is None:
+            return {}
+        return {"positions": ints(three.T.reshape(-1)), "sections": self.cfg.mrope_section}
 
     def _moe(self, index: int, x: mx.array, h: mx.array, inject: mx.array) -> tuple[mx.array, Any]:
         """The MoE: the streams and the grouped write-back the next hyper-connection's hc_norm applies."""
@@ -537,10 +552,19 @@ class FusedDecode:
         heads, kv_heads, dims = cfg.num_attention_heads, cfg.num_key_value_heads, cfg.head_dim
         index_heads, index_dims = cfg.indexer_n_heads, cfg.indexer_head_dim
         p = project(x, proj)
-        positions = mx.array([c.offset + r for c, (s, e) in zip(caches, spans) for r in range(e - s)], dtype=mx.int32)
+        threes = [row_positions(c, c.offset, e - s) for c, (s, e) in zip(caches, spans)]
+        sections = None
+        if all(t is None for t in threes):
+            positions = mx.array([c.offset + r for c, (s, e) in zip(caches, spans) for r in range(e - s)],
+                                 dtype=mx.int32)
+        else:                   # an image prompt's stream among them: every row at three axes (text: three equal)
+            sections = cfg.mrope_section
+            positions = ints(np.concatenate([np.repeat(np.arange(c.offset, c.offset + e - s)[None], 3, axis=0)
+                                             if t is None else t
+                                             for t, c, (s, e) in zip(threes, caches, spans)], axis=1).T.reshape(-1))
         q, k, iq = attention.attn_prep(p, positions, q_scale, k_scale, iq_scale, self.eps, q_heads=heads,
                                kv_heads=kv_heads, head_dim=dims, index_heads=index_heads, index_dim=index_dims,
-                               rotary_dim=cfg.rotary_dim, base=cfg.rope_theta)
+                               rotary_dim=cfg.rotary_dim, base=cfg.rope_theta, sections=sections)
         at = heads * 2 * dims
         v = p[:, at + kv_heads * dims: at + 2 * kv_heads * dims].reshape(total, kv_heads, dims)
         raw_key = p[:, at + 2 * kv_heads * dims + index_heads * index_dims:]
@@ -556,7 +580,8 @@ class FusedDecode:
                 done = 0 if c.pooled is None else int(c.pooled.shape[1])
                 if complete[-1] > done:
                     fresh = attention.index_pool(first(raw), done, complete[-1], pool_scale, self.eps,
-                                         rotary_dim=cfg.rotary_dim, base=cfg.rope_theta)[None]
+                                         rotary_dim=cfg.rotary_dim, base=cfg.rope_theta,
+                                         **self._block_axes(c, done, complete[-1]))[None]
                     c.pooled = fresh if c.pooled is None else mx.concatenate([c.pooled, fresh], axis=1)
             row_sparse = [cc > top for cc in complete]
             counts += [ratio * top + end - ratio * cc if sp else end for end, cc, sp in zip(ends, complete, row_sparse)]

@@ -1,9 +1,9 @@
 # Image input
 
-The opt-in `--vision` flag accepts image and text content parts through the existing OpenAI-compatible chat API. It supports GLM-5.3-Flash on MLX and Qwen3.5/3.8 dense checkpoints on MLX and CUDA. Image features enter the existing model's prompt prefill; generated text still uses that family's normal decoder and speculative path.
+The opt-in `--vision` flag accepts image and text content parts through the existing OpenAI-compatible chat API. It supports GLM-5.3-Flash on MLX, Qwen3.5/3.8 dense checkpoints on MLX and CUDA, and Qwen3.8 Flash Next on MLX and CUDA. Image features enter the existing model's prompt prefill; generated text still uses that family's normal decoder and speculative path.
 The checkpoint must contain its vision tower, tokenizer, processor files and vision configuration; text-only conversions cannot recover image support from a flag. GLM-5.3-Flash uses its own GLM5-Next image processor and tower while sharing TensorFold's already-loaded language model and MTP head.
 Video, audio and image generation are not supported by this adapter.
-Qwen3.8 Flash Next supports images on one CUDA GPU with `--parallel` of at least two; see the
+Qwen3.8 Flash Next supports images on a Mac and on one CUDA GPU with `--parallel` of at least two; see the
 [Flash Next image recipe](recipes/flash-next-vision.md), including offline reconstruction of an EXL3 vision sidecar.
 
 ## Start a server

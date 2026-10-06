@@ -131,11 +131,20 @@ def weight_bytes(model_dir: Path, ple_on_ssd: bool = False) -> int:
 
 
 def load(model_dir: Path, *, mtp_drafts: int | None = None, ple_on_ssd: bool = False,
-         ssd_experts: float | None = None, **_: Any) -> tuple[Any, Any]:
+         ssd_experts: float | None = None, vision: bool = False, vision_urls: bool = False,
+         **_: Any) -> tuple[Any, Any]:
     from tensorfold.families.qwen4_exp.runtime import load as load_runtime
 
     drafts = mtp_drafts if has_mtp(Path(model_dir)) else 0
-    return load_runtime(Path(model_dir), drafts=drafts, ple_on_ssd=ple_on_ssd, ssd_experts=ssd_experts)
+    runtime, tokenizer = load_runtime(Path(model_dir), drafts=drafts, ple_on_ssd=ple_on_ssd, ssd_experts=ssd_experts)
+    if vision:
+        from tensorfold.vision.qwen_mlx import QwenVisionFrontend
+
+        runtime.vision = QwenVisionFrontend.load(Path(model_dir), runtime.model.model.embed_tokens,
+                                                 allow_urls=vision_urls)
+        print(f"[tensorfold] image encoder: {runtime.vision.workspace_bytes / 1024**3:.2f} GiB workspace measured at "
+              "the largest image request (four images, 4,096 image tokens)", flush=True)
+    return runtime, tokenizer
 
 
 def engine_settings(model: Any) -> dict[str, Any]:

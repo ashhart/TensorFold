@@ -1,4 +1,23 @@
-# Flash Next CUDA images
+# Flash Next images
+
+## On a Mac
+
+Install the image extra (`pip install 'tensorfold[vision]'`, which brings mlx-vlm) and serve a Flash Next MLX checkpoint
+that carries its vision tower, such as `TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP`:
+
+```bash
+tensorfold serve TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP --vision
+```
+
+The tower (27 bf16 blocks, under 1 GiB) loads beside the language model and shares its embeddings; the startup
+line names the workspace it measured. A request's images share the 4,096 visual-token budget; video,
+`--vision-image-tokens` and `--vision-offload` stay CUDA-only.
+Image rows replace the embeddings in every hyperconnection stream, and the n-gram tables hash the placeholder ids,
+as on CUDA. Each image prompt's three rotary axes travel with its cache: prompt chunks, the indexer's pooled blocks,
+decode rounds, streams sharing a round and the MTP head all read them, and text after the prompt continues at its
+position plus the image offset. Image prompts prefill from the start and are never kept in the prefix cache.
+
+## On CUDA
 
 Run a complete local Flash Next checkpoint with `--vision --parallel 2` (or more), on one CUDA GPU.
 This port supports images, including multiple images within the existing 4096 visual-token budget; video and

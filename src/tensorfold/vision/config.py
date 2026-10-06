@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 
-FAMILIES = ('qwen3_5', 'qwen4_exp', 'glm5_next')     # the Qwen3.5/3.8 dense models, and Flash Next (same tower) on CUDA
+FAMILIES = ('qwen3_5', 'qwen4_exp', 'glm5_next')     # the Qwen3.5/3.8 dense models, Flash Next (same tower), GLM
 
 
 def validate_vision_config(config, family):

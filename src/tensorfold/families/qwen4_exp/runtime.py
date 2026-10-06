@@ -22,6 +22,7 @@ class FlashNext(MTPDrafts):
     gpu_sampling = True
     # the engine fills a prompt a chunk a forward: a pass holds every chunk's layer temporaries (+44-60 GiB served)
     prompt_pass = False
+    vision = None            # the image tower (``QwenVisionFrontend``) with --vision
 
     def __init__(self, model: Any, head: Any | None = None, *, drafts: int = 1) -> None:
         self.model = model
@@ -194,6 +195,26 @@ class FlashNext(MTPDrafts):
             self.prefill_key  # refuse a changed prefill mode before reading or updating a keyed cache
         out = self.model.hidden(tokens, cache[: self.layer_count])
         fused = self.fused is not None and tokens.shape[0] == 1 and tokens.shape[1] <= self.fused_rows
+        self._streams = self.fused.last_streams if fused else self.model.__dict__["last_streams"]
+        return out
+
+    def encode_vision(self, prepared: Any, cache: list[Any]) -> Any:
+        """Encode an image prompt's images; its rotary positions go on every attention cache (the MTP head's too)."""
+
+        if self.vision is None:
+            raise ValueError("image inputs require starting this server with --vision")
+        from tensorfold.vision.rotary import attach_positions
+
+        encoded = self.vision.encode(prepared)
+        attach_positions(cache, prepared.position_ids, encoded.rope_delta)
+        return encoded
+
+    def prefill_vision(self, inputs: Any, cache: list[Any], encoded: Any, begin: int, end: int) -> mx.array:
+        """Prompt rows [begin, end) from their encoded input rows; the n-gram tables still hash the token ids."""
+
+        tokens = np.array([encoded.token_ids[begin:end]], dtype=np.int64)
+        out = self.model.hidden(tokens, cache[: self.layer_count], embeddings=encoded.inputs_embeds[0, begin:end])
+        fused = self.fused is not None and tokens.shape[1] <= self.fused_rows
         self._streams = self.fused.last_streams if fused else self.model.__dict__["last_streams"]
         return out
 

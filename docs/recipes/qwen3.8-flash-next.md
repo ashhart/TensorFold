@@ -384,8 +384,8 @@ resumed prompts across sparse-attention transitions and template changes, as wel
 serial output. Decode, cold/resumed latency, concurrent throughput and peak memory are
 TBD [release-0.3.5].
 
-## Image input on CUDA
+## Image input
 
-Use `--vision` on one CUDA GPU with `--parallel` of at least two. Image requests always prefill fresh; text prefix
-caching remains available. See the [image recipe](flash-next-vision.md) for tower weights, memory admission, EXL3
+Use `--vision` on a Mac, or on one CUDA GPU with `--parallel` of at least two. Image requests always prefill fresh;
+text prefix caching remains available. See the [image recipe](flash-next-vision.md) for tower weights, memory admission, EXL3
 sidecar conversion and verification.
