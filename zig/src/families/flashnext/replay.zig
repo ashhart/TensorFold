@@ -2255,7 +2255,7 @@ pub const DepthRule = struct {
     pub fn update(self: *DepthRule, depth: usize, landed: usize) void {
         self.rate = 0.7 * self.rate + 0.3 * @as(f64, @floatFromInt(landed)) / @as(f64, @floatFromInt(depth));
         if (self.pair) {
-            if (self.depth == 3 and self.rate > 0.9) self.depth = 7 else if (self.depth == 7 and self.rate < 0.75) self.depth = 3;
+            if (self.depth == 3 and self.rate > 0.95) self.depth = 7 else if (self.depth == 7 and self.rate < 0.8) self.depth = 3;
             return;
         }
         if (self.depth == 3 and self.rate > 0.8) {
