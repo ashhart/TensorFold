@@ -2476,10 +2476,10 @@ pub const Prompt = struct {
         for (names, 0..) |n, i| p.pl[i] = try mtl.Pipeline.init(r.device, glib, n, false);
         // DeltaNet at the chunk's rows, storing only the last row's recurrent state (in row 0)
         const gs = r.roles.get("q4_gdn@gdn|8") orelse return error.NoSite;
-        const f = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(r.arena, "{s}", .{gs.v.file}, 0));
+        const f = try Run.variantText(r.arena, gs.v); // the embedded text when the run is checked-in, else the recorded file
         const from = "SO[((size_t(r) * NV + hv)";
-        if (std.mem.count(u8, f.bytes[0..f.size], from) != 1) return error.GdnPatch;
-        const patched = try std.mem.replaceOwned(u8, r.arena, f.bytes[0..f.size], from, "if (r == R - 1) SO[((size_t(0) * NV + hv)");
+        if (std.mem.count(u8, f, from) != 1) return error.GdnPatch;
+        const patched = try std.mem.replaceOwned(u8, r.arena, f, from, "if (r == R - 1) SO[((size_t(0) * NV + hv)");
         const dlib = try mtl.Library.fromSource(r.device, patched, mtl.CompileOptions.mlx());
         p.gdn = gs.v.*;
         p.gdn.pipe = try mtl.Pipeline.init(r.device, dlib, try std.fmt.allocPrintSentinel(r.arena, "{s}", .{gs.v.name}, 0), false);

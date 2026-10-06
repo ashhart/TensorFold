@@ -132,3 +132,33 @@ test "the identity string does not depend on the shard list's order" {
     try std.testing.expect(std.mem.indexOf(u8, s1, "shard model-00001.safetensors 10 ") != null);
     try std.testing.expect(std.mem.indexOf(u8, s1, "shard model-00002.safetensors 20 ") != null);
 }
+
+test "the no-dump pack cache is ready only complete and matching, resolved from any working directory" {
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try fixture.writeCheckpoint(tmp, a);
+    try tmp.dir.createDirPath(io, "cache");
+    const model_dir = try fixture.tmpPath(a, tmp, ".");
+    const cache_dir = try fixture.tmpPath(a, tmp, "cache");
+    const identity = try pio.sourceIdentity(a, io, model_dir);
+    // an empty cache: not ready, the loader builds
+    try std.testing.expect(!try pio.packsReady(a, io, cache_dir, identity));
+    // a real build into the cache: ready
+    _ = try pack.build(a, io, model_dir, cache_dir, null);
+    try std.testing.expect(try pio.packsReady(a, io, cache_dir, identity));
+    // a cache interrupted between the two pack writes: not ready, the loader rebuilds
+    try tmp.dir.deleteFile(io, "cache/pack_mlx.safetensors");
+    try std.testing.expect(!try pio.packsReady(a, io, cache_dir, identity));
+    // a pack built before the checkpoint changed: not ready
+    _ = try pack.build(a, io, model_dir, cache_dir, null);
+    const image = try tmp.dir.readFileAlloc(io, "model.safetensors", a, .limited(1 << 30));
+    const grown = try a.alloc(u8, image.len + 1);
+    @memcpy(grown[0..image.len], image);
+    grown[image.len] = 'x';
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = grown });
+    const changed = try pio.sourceIdentity(a, io, model_dir);
+    try std.testing.expect(!try pio.packsReady(a, io, cache_dir, changed));
+}

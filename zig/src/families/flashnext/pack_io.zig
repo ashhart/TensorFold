@@ -292,3 +292,28 @@ pub fn compareFile(gpa: std.mem.Allocator, io: Io, built_path: []const u8, refer
 test {
     _ = @import("pack_source_test.zig");
 }
+
+/// Whether a pack cache folder is complete for a no-dump load: `pack.safetensors` present and matching the
+/// checkpoint's identity, and `pack_mlx.safetensors` beside it (Prompt.init requires it). A cache interrupted
+/// between the two writes, or built from another checkpoint, is not ready and the loader rebuilds.
+pub fn packsReady(gpa: std.mem.Allocator, io: Io, cache_dir: []const u8, identity: []const u8) !bool {
+    const pack_path = try std.fmt.allocPrintSentinel(gpa, "{s}/pack.safetensors", .{cache_dir}, 0);
+    defer gpa.free(pack_path);
+    {
+        const mapped = Io.Dir.cwd().openFile(io, pack_path, .{}) catch return false;
+        defer mapped.close(io);
+        const stat = try mapped.stat(io);
+        if (stat.size < 8) return false;
+        const head = try gpa.alloc(u8, @intCast(stat.size));
+        defer gpa.free(head);
+        var buf: [4096]u8 = undefined;
+        var reader = mapped.reader(io, &buf);
+        try reader.interface.readSliceAll(head);
+        checkSourceMapped(gpa, head, identity, pack_path) catch return false;
+    }
+    const mlx_path = try std.fmt.allocPrintSentinel(gpa, "{s}/pack_mlx.safetensors", .{cache_dir}, 0);
+    defer gpa.free(mlx_path);
+    const mlx = Io.Dir.cwd().openFile(io, mlx_path, .{}) catch return false;
+    mlx.close(io);
+    return true;
+}

@@ -894,13 +894,8 @@ fn ensurePacks(gpa: Allocator, io: std.Io, model_dir: []const u8, cache_dir: []c
         error.PathAlreadyExists => {},
         else => return err,
     };
-    const pack_path = try std.fmt.allocPrintSentinel(gpa, "{s}/pack.safetensors", .{cache_dir}, 0);
-    defer gpa.free(pack_path);
-    if (mtl.MappedFile.open(pack_path)) |mapped| {
-        defer mapped.deinit();
-        if (pack_io.checkSourceMapped(gpa, mapped.bytes[0..mapped.size], identity, pack_path)) |_| {
-            return;
-        } else |_| {}
+    if (pack_io.packsReady(gpa, io, cache_dir, identity)) |ready| {
+        if (ready) return;
     } else |_| {}
     const vocab_path = try std.fmt.allocPrintSentinel(gpa, "{s}/draft_vocab.txt", .{cache_dir}, 0);
     defer gpa.free(vocab_path);

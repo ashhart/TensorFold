@@ -252,6 +252,21 @@ test "the checked-in role table resolves every width serve asks for, with its so
         }
         try std.testing.expect(hit);
     }
+    // every entry's file is a bare name in the embedded sources: the checked-in run never opens a recorded
+    // path, so load works from any working directory
+    for (table.entries) |e| {
+        try std.testing.expect(std.mem.indexOfScalar(u8, e.file, '/') == null);
+    }
+    // Prompt.init patches the checked-in q4_gdn@gdn|8 text in place: its file must be one of the embeds
+    for (table.entries) |e| {
+        if (std.mem.eql(u8, e.site, "q4_gdn@gdn|8")) {
+            var found = false;
+            for (sources.sources) |s| {
+                if (std.mem.eql(u8, s.name, e.file)) found = true;
+            }
+            try std.testing.expect(found);
+        }
+    }
 }
 
 test "the checked-in lane sources have a no-tensor-unit twin with the same kernel names" {
