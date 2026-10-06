@@ -55,8 +55,11 @@ pub const Checkpoint = struct {
         const data_len: usize = @as(usize, @intCast(end)) - data_start;
 
         const buffer = try device.buffer(@max(data_len, 16), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-        try readParallel(fd, buffer.contents()[0..data_len], data_start);
-        try self.shards.append(self.allocator, .{ .buffer = buffer, .bytes = data_len });
+        {
+            errdefer buffer.deinit();
+            try readParallel(fd, buffer.contents()[0..data_len], data_start);
+            try self.shards.append(self.allocator, .{ .buffer = buffer, .bytes = data_len });
+        }
         try self.index(buffer, header, data_len, prefix);
     }
 
