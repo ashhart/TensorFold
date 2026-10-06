@@ -52,7 +52,7 @@ pub fn main(init: std.process.Init) !u8 {
     };
     var problem: []const u8 = "";
     const dir = try hub.resolve(a, io, init.environ_map, args.model, &problem) orelse return fail(problem);
-    const text = hf_text.HfText.load(gpa, io, dir, &problem) catch return fail(problem);
+    const text = hf_text.HfText.load(gpa, io, dir, a, &problem) catch |e| return fail(if (problem.len > 0) problem else @errorName(e));
     defer text.deinit();
     const model_type = modelType(a, io, dir);
     const opened = try engines.open(a, gpa, io, dir, model_type, args, &problem) orelse return fail(problem);

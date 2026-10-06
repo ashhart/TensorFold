@@ -20,15 +20,15 @@ pub const HfText = struct {
     prefix: []const u32 = &.{}, // the post-processor's tokens before a text (add_special_tokens)
     suffix: []const u32 = &.{},
 
-    /// Loads ``dir``'s tokenizer.json, chat template, special tokens and end-of-sequence ids.
-    pub fn load(gpa: Allocator, io: std.Io, dir: []const u8, problem: *[]const u8) !*HfText {
+    /// Loads ``dir``'s tokenizer.json, chat template, special tokens and end-of-sequence ids; a failure's reason in `problem` (from `pa`).
+    pub fn load(gpa: Allocator, io: std.Io, dir: []const u8, pa: Allocator, problem: *[]const u8) !*HfText {
         const t = try gpa.create(HfText);
         errdefer gpa.destroy(t);
         t.* = .{ .gpa = gpa, .arena = .init(gpa), .tok = undefined };
         errdefer t.arena.deinit();
         const a = t.arena.allocator();
         t.tok = tokenizer.loadTokenizer(io, gpa, dir) catch |e| {
-            problem.* = try std.fmt.allocPrint(a, "cannot read {s}/tokenizer.json ({s})", .{ dir, @errorName(e) });
+            problem.* = try std.fmt.allocPrint(pa, "cannot read {s}/tokenizer.json ({s})", .{ dir, @errorName(e) });
             return error.Load;
         };
         const config = readJson(io, a, dir, "tokenizer_config.json");
@@ -40,7 +40,7 @@ pub const HfText = struct {
         if (t.source.len > 0) {
             var diag: template.Diag = .{};
             t.compiled = template.compile(gpa, t.source, &diag) catch |e| {
-                problem.* = try std.fmt.allocPrint(a, "the chat template does not compile: {s} ({s})", .{ diag.msg, @errorName(e) });
+                problem.* = try std.fmt.allocPrint(pa, "the chat template does not compile: {s} ({s})", .{ diag.msg, @errorName(e) });
                 return error.Load;
             };
         }
