@@ -106,10 +106,12 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, e: *nemotron.Engine, drafter: ?*n
             a.rounds = res.rounds;
             a.accepted = res.accepted;
         }
-        const base = arms[0];
         for (arms) |*a| {
             a.median_s = median(a.prefill_s);
             a.prompt_tok_s = @as(f64, @floatFromInt(ids.len)) / a.median_s;
+        }
+        const base = arms[0];
+        for (arms) |*a| {
             a.same = a.steady and base.steady and a.digest.?.eql(base.digest.?);
             a.reply_same = std.mem.eql(u8, &a.reply_sha, &base.reply_sha) and a.rounds == base.rounds and a.accepted == base.accepted;
             all_exact = all_exact and a.same and a.reply_same;
