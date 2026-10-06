@@ -133,6 +133,6 @@ test "unified admission refuses missing or malformed host memory" {
 test "memory limit refuses an oversized finite value and the rounded u64 boundary" {
     try std.testing.expectError(error.Invalid, limitBytes("1e300"));
     try std.testing.expectError(error.Invalid, limitBytes("17179869184"));
-    try std.testing.expectError(error.Invalid, limitBytes("17179869183.999999"));
+    try std.testing.expectError(error.Invalid, limitBytes("17179869183.9999995")); // parses to 2^34: 2^64 bytes
     try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64) - 2047), try limitBytes("17179869183.9999980926513671875"));
 }
