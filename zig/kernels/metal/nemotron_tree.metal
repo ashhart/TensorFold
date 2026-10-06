@@ -156,6 +156,7 @@ template <int G, int D, int CK, int TK, int MAXD>
   const uint cb = threadgroup_position_in_grid.y;
   const uint node = threadgroup_position_in_grid.z;
   const int P = dims[0], PT = dims[1], NCA = dims[2], NCB = dims[3], NT = dims[4];
+  if (int(cb) >= NCB) return;  // a grid past the dims' tail chunks: those would store over the next head's
   const int RPA = 16 * NT;
   const int nmax = P + depths[node] + 1;
   const short qid = lane >> 2;

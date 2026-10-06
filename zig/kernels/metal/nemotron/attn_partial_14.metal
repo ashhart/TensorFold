@@ -6,7 +6,7 @@ typedef half float16_t;
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 using namespace mpp::tensor_ops;
 template <int G, int D, int SG, int CK, int TK>
-[[kernel]] void custom_kernel_lane_attention_partial_direct_128_a55ddf28d5198806__16_128_14_512_64_bfloat16_t_bfloat16_t_bfloat16_t_floatc_int32_tc_float_float_float(
+[[kernel]] void custom_kernel_lane_attention_partial_direct_128_6cccc478a7f93fb5__16_128_14_512_64_bfloat16_t_bfloat16_t_bfloat16_t_floatc_int32_tc_float_float_float(
   const device bfloat16_t* Qp [[buffer(0)]],
   const device bfloat16_t* K [[buffer(1)]],
   const constant int64_t* K_strides [[buffer(2)]],
@@ -27,6 +27,7 @@ template <int G, int D, int SG, int CK, int TK>
   const uint hk = threadgroup_position_in_grid.x;
   const uint c = threadgroup_position_in_grid.y;
   const int L = dims[0], NCH = dims[1], NQ = dims[2], SGA = dims[4];
+  if (int(c) >= NCH) return;
   const int RP = 16 * SGA;
   const short qid = lane >> 2;
   const short fm = (qid & 4) | ((lane >> 1) & 3);
@@ -100,4 +101,4 @@ template <int G, int D, int SG, int CK, int TK>
 
 }
 
-template [[host_name("custom_kernel_lane_attention_partial_direct_128_a55ddf28d5198806__16_128_14_512_64_bfloat16_t_bfloat16_t_bfloat16_t_floatc_int32_tc_float_float_float")]] [[kernel]] decltype(custom_kernel_lane_attention_partial_direct_128_a55ddf28d5198806__16_128_14_512_64_bfloat16_t_bfloat16_t_bfloat16_t_floatc_int32_tc_float_float_float<16, 128, 14, 512, 64>) custom_kernel_lane_attention_partial_direct_128_a55ddf28d5198806__16_128_14_512_64_bfloat16_t_bfloat16_t_bfloat16_t_floatc_int32_tc_float_float_float<16, 128, 14, 512, 64>;
+template [[host_name("custom_kernel_lane_attention_partial_direct_128_6cccc478a7f93fb5__16_128_14_512_64_bfloat16_t_bfloat16_t_bfloat16_t_floatc_int32_tc_float_float_float")]] [[kernel]] decltype(custom_kernel_lane_attention_partial_direct_128_6cccc478a7f93fb5__16_128_14_512_64_bfloat16_t_bfloat16_t_bfloat16_t_floatc_int32_tc_float_float_float<16, 128, 14, 512, 64>) custom_kernel_lane_attention_partial_direct_128_6cccc478a7f93fb5__16_128_14_512_64_bfloat16_t_bfloat16_t_bfloat16_t_floatc_int32_tc_float_float_float<16, 128, 14, 512, 64>;

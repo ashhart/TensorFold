@@ -75,6 +75,16 @@ def _split(body: str) -> str:
         "  }\n")
 
 
+def _chunk_guard(body: str) -> str:
+    """The partial with threadgroups past the dims' chunk count returning first: they'd store over the next head's."""
+
+    line = "const int L = dims[0], NCH = dims[1], NQ = dims[2], SGA = dims[4];"
+    assert body.count(line) == 1
+    i = body.index(line)
+    end = body.index("\n", i)
+    return body[:end + 1] + "  if (int(c) >= NCH) return;\n" + body[end + 1:]
+
+
 def specs() -> list[Spec]:
     lq = py_kernels.load("kernels.qwen.dense.v1.lane_qmm")
     la = py_kernels.load("kernels.qwen.dense.v1.lane_attention")
@@ -173,7 +183,7 @@ def specs() -> list[Spec]:
         out.append(Spec(key, f"tf_gpu_sample{'_ids' if ids else ''}_{_sha(header + source)}", source, ins,
                         [Arg("TOK", u32, 8)], header))
 
-    partial = la._PARTIAL_DIRECT_128 if la.DIRECT_P else la._PARTIAL_128
+    partial = _chunk_guard(la._PARTIAL_DIRECT_128 if la.DIRECT_P else la._PARTIAL_128)
     pname = "partial_direct_128" if la.DIRECT_P else "partial_128"
     for sg in ATTENTION_SG:
         out.append(Spec(f"attn_partial_{sg}", f"lane_attention_{pname}_{_sha(la._HEADER + partial)}", partial,
