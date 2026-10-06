@@ -5,6 +5,25 @@ const abi = @import("abi.zig");
 const Driver = @import("driver.zig").Driver;
 const Error = @import("driver.zig").Error;
 
+/// Bytes this process holds in DeviceBuffers and HostBuffers, and the device peak since the last reset.
+pub const Usage = struct { device: u64, host: u64, peak: u64 };
+
+var device_bytes: std.atomic.Value(u64) = .init(0);
+var host_bytes: std.atomic.Value(u64) = .init(0);
+var peak_bytes: std.atomic.Value(u64) = .init(0);
+
+/// The counts now; `reset_peak` starts a new peak at the current device bytes. Safe from any thread.
+pub fn usage(reset_peak: bool) Usage {
+    const now = device_bytes.load(.monotonic);
+    if (reset_peak) peak_bytes.store(now, .monotonic);
+    return .{ .device = now, .host = host_bytes.load(.monotonic), .peak = @max(now, peak_bytes.load(.monotonic)) };
+}
+
+fn held(counter: *std.atomic.Value(u64), n: usize) void {
+    const now = counter.fetchAdd(n, .monotonic) + n;
+    if (counter == &device_bytes) _ = peak_bytes.fetchMax(now, .monotonic);
+}
+
 pub const DeviceBuffer = struct {
     d: *const Driver,
     ptr: abi.DevicePtr,
@@ -14,6 +33,7 @@ pub const DeviceBuffer = struct {
     pub fn alloc(d: *const Driver, len: usize) Error!DeviceBuffer {
         var p: abi.DevicePtr = 0;
         if (len > 0) try d.check(d.api.cuMemAlloc_v2(&p, len), "cuMemAlloc");
+        held(&device_bytes, len);
         return .{ .d = d, .ptr = p, .len = len };
     }
 
@@ -27,6 +47,7 @@ pub const DeviceBuffer = struct {
 
     pub fn free(self: *DeviceBuffer) void {
         if (self.ptr != 0) _ = self.d.api.cuMemFree_v2(self.ptr);
+        _ = device_bytes.fetchSub(self.len, .monotonic);
         self.* = undefined;
     }
 
@@ -122,12 +143,14 @@ pub const HostBuffer = struct {
         if (len == 0) return error.Invalid;
         var p: ?*anyopaque = null;
         try d.check(d.api.cuMemHostAlloc(&p, len, flags), "cuMemHostAlloc");
+        held(&host_bytes, len);
         const base: [*]align(16) u8 = @ptrCast(@alignCast(p.?));
         return .{ .d = d, .bytes = base[0..len] };
     }
 
     pub fn free(self: *HostBuffer) void {
         _ = self.d.api.cuMemFreeHost(self.bytes.ptr);
+        _ = host_bytes.fetchSub(self.bytes.len, .monotonic);
         self.* = undefined;
     }
 
@@ -135,3 +158,16 @@ pub const HostBuffer = struct {
         return std.mem.bytesAsSlice(T, self.bytes[0 .. self.bytes.len / @sizeOf(T) * @sizeOf(T)]);
     }
 };
+
+test "usage counts held bytes and the device peak" {
+    const before = usage(true);
+    held(&device_bytes, 1000);
+    held(&host_bytes, 24);
+    _ = device_bytes.fetchSub(1000, .monotonic);
+    const after = usage(false);
+    try std.testing.expectEqual(before.device, after.device);
+    try std.testing.expectEqual(before.host + 24, after.host);
+    try std.testing.expectEqual(before.device + 1000, after.peak);
+    try std.testing.expectEqual(before.device, usage(true).peak);
+    _ = host_bytes.fetchSub(24, .monotonic);
+}

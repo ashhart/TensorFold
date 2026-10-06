@@ -114,6 +114,18 @@ pub const Set = struct {
         return error.MissingTritonVariant;
     }
 
+    /// Whether some variant of `function` was compiled with these constexprs (any argument specialization).
+    pub fn compiled(self: *const Set, function: []const u8, consts: []const Const) bool {
+        for (self.variants) |v| {
+            if (!std.mem.eql(u8, v.spec.@"fn", function)) continue;
+            for (consts) |c| {
+                const got = v.spec.consts.map.get(c.name) orelse break;
+                if (got.int == null or c.int == null or got.int.? != c.int.?) break;
+            } else return true;
+        }
+        return false;
+    }
+
     /// The smallest value of constexpr `name` at or above `at_least` among `function`'s variants.
     pub fn smallestConst(self: *const Set, function: []const u8, name: []const u8, at_least: i64) ?i64 {
         var best: ?i64 = null;
