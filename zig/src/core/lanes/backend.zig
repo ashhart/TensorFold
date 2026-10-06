@@ -74,7 +74,7 @@ pub const Backend = struct {
         /// The head's best tokens and probabilities at each level it drafted for the stream (waits for the drafts).
         alternatives: ?*const fn (ptr: *anyopaque, s: *Stream, out: []Alternative) anyerror!usize = null,
         /// The tapped states of cache rows [start, start + count) for an external drafter (drafter.zig): valid for the prompt's
-        /// rows after prefill and the last verify's rows until the next verify; null when the target exposes none.
+        /// rows the prefill computed (from `s.cached`) and the last verify's rows until the next verify; null when the target exposes none.
         features: ?*const fn (ptr: *anyopaque, s: *Stream, taps: []const u32, start: u64, count: u32) anyerror!Features = null,
         /// The stream left the rounds: free its caches and held drafts.
         release: *const fn (ptr: *anyopaque, s: *Stream) void,

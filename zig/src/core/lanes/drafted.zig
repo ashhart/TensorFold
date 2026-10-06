@@ -42,15 +42,17 @@ pub const Drafted = struct {
         return @ptrCast(@alignCast(ptr));
     }
 
-    /// The target's prompt pass; the drafter absorbs every prompt row but the last (its follow token is not drawn yet).
+    /// The target's prompt pass; the drafter absorbs the rows the pass computed (after a restored prefix, `s.cached`),
+    /// every one but the last (its follow token is not drawn yet).
     fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
         const x = self(ptr);
         try x.target.prefill(s);
         try x.drafter.open(s);
         const ids = s.prompt();
-        if (ids.len < 2) return;
-        const n: u32 = @intCast(ids.len - 1);
-        try x.drafter.absorb(s, try x.target.features(s, x.drafter.taps(), 0, n), 0, ids[1..]);
+        const from: usize = s.cached;
+        if (ids.len < from + 2) return;
+        const n: u32 = @intCast(ids.len - 1 - from);
+        try x.drafter.absorb(s, try x.target.features(s, x.drafter.taps(), from, n), from, ids[from + 1 ..]);
     }
 
     fn first(ptr: *anyopaque, s: *Stream, position: u64) anyerror!u64 {

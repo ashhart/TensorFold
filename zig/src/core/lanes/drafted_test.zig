@@ -19,6 +19,7 @@ const gpa = std.testing.allocator;
 const FakeDrafter = struct {
     lanes: std.AutoHashMapUnmanaged(*sm.Stream, Lane) = .empty,
     absorbed: u64 = 0,
+    first_start: ?u64 = null, // where the last opened stream's first absorb started
 
     const Lane = struct { history: std.ArrayList(u32) = .empty, pending: u32 = 0, held: std.ArrayList(u32) = .empty };
     const taps_ = [_]u32{ 44, 47, 49 };
@@ -55,14 +56,17 @@ const FakeDrafter = struct {
         const got = try x.lanes.getOrPut(gpa, s);
         if (got.found_existing) free(got.value_ptr);
         got.value_ptr.* = .{};
+        x.first_start = null;
     }
 
     fn absorb(ptr: *anyopaque, s: *sm.Stream, f: be.Features, start: u64, follow: []const u32) anyerror!void {
         const x = self(ptr);
         const l = x.lanes.getPtr(s) orelse return error.UnknownStream;
-        if (start > l.history.items.len) return error.Gap;
+        if (start > l.history.items.len and l.history.items.len > 0) return error.Gap;
         if (f.row_bytes != 4 or follow.len != f.rows) return error.Shape;
         const rows: [*]const u32 = @ptrFromInt(f.buffer + f.offset);
+        if (l.history.items.len == 0 and x.first_start == null) x.first_start = start;
+        while (l.history.items.len < start) try l.history.append(gpa, fake.vocab + 1); // restored rows: never seen
         l.history.shrinkRetainingCapacity(start);
         try l.history.appendSlice(gpa, rows[0..f.rows]);
         // the token after each row is the next row's
@@ -104,8 +108,8 @@ const FakeDrafter = struct {
     }
 };
 
-const Case = struct { prompt: []const u32, max_new: u32 = 40, sampling: ?Sampling = null, drafts: bool = true };
-const Out = struct { tokens: [][]u32, drafted: u64, accepted: u64, absorbed: u64 };
+const Case = struct { prompt: []const u32, max_new: u32 = 40, sampling: ?Sampling = null, drafts: bool = true, restored: u32 = 0 };
+const Out = struct { tokens: [][]u32, drafted: u64, accepted: u64, absorbed: u64, first_start: ?u64, cached: u32 };
 
 fn run(cases: []const Case, external: bool) !Out {
     var costs: [16]Cost = undefined;
@@ -126,9 +130,21 @@ fn run(cases: []const Case, external: bool) !Out {
     defer gpa.free(streams);
     const proposers = try gpa.alloc(SuffixLookup, cases.len);
     defer gpa.free(proposers);
-    for (cases, streams, proposers) |c, *s, *p| {
+    const kept = try gpa.alloc(?*anyopaque, cases.len);
+    defer gpa.free(kept);
+    defer for (kept) |k| if (k) |saved| target.drop(saved);
+    for (cases, streams, proposers, kept) |c, *s, *p, *k| {
+        k.* = null;
+        if (c.restored > 0) { // the prompt's first `restored` tokens as a kept state, saved by an earlier pass
+            var early = try sm.Stream.init(gpa, .{ .id = "early", .prompt = c.prompt[0..c.restored], .max_new = 1, .eos = &.{96} });
+            defer early.deinit(gpa);
+            const b = target.backend();
+            try b.prefill(&early);
+            k.* = try target.save(&early, c.restored);
+            b.release(&early);
+        }
         p.* = try SuffixLookup.init(gpa, .{ .min_match = 4 });
-        s.* = try sm.Stream.init(gpa, .{ .id = "s", .prompt = c.prompt, .max_new = c.max_new, .eos = &.{96}, .sampling = c.sampling, .drafts = c.drafts, .proposer = p.proposer() });
+        s.* = try sm.Stream.init(gpa, .{ .id = "s", .prompt = c.prompt, .max_new = c.max_new, .eos = &.{96}, .sampling = c.sampling, .drafts = c.drafts, .proposer = p.proposer(), .reuse = .{ .saved = k.*, .at = c.restored } });
     }
     defer for (streams, proposers) |*s, *p| {
         s.deinit(gpa);
@@ -136,7 +152,7 @@ fn run(cases: []const Case, external: bool) !Out {
     };
     for (streams) |*s| try engine.addStream(s);
     while (engine.activeCount() > 0) try engine.step();
-    var out: Out = .{ .tokens = try gpa.alloc([]u32, cases.len), .drafted = 0, .accepted = 0, .absorbed = head.absorbed };
+    var out: Out = .{ .tokens = try gpa.alloc([]u32, cases.len), .drafted = 0, .accepted = 0, .absorbed = head.absorbed, .first_start = head.first_start, .cached = streams[0].cached };
     for (out.tokens, streams) |*o, *s| {
         o.* = try gpa.dupe(u32, s.emitted());
         out.drafted += s.drafted;
@@ -190,4 +206,17 @@ test "a target without features cannot take an external drafter" {
     try b.prefill(&s);
     defer b.release(&s);
     try std.testing.expectError(error.NoFeatures, b.features(&s, &.{49}, 0, 1));
+}
+
+test "a prompt restored from a kept state: the drafter starts at the restored row, the output is the one-token decode" {
+    const long = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9, 3, 2, 3, 8, 4 };
+    for ([_]?Sampling{ null, .{ .seed = 3, .temperature = 0.8, .top_k = 0, .top_p = 0.95 } }) |s| {
+        const drafted = try run(&.{.{ .prompt = &long, .sampling = s, .restored = 12 }}, true);
+        defer freeOut(drafted);
+        const plain = try run(&.{.{ .prompt = &long, .sampling = s, .drafts = false }}, false);
+        defer freeOut(plain);
+        try std.testing.expectEqual(@as(u32, 12), drafted.cached);
+        try std.testing.expectEqual(@as(?u64, 12), drafted.first_start);
+        try std.testing.expectEqualSlices(u32, plain.tokens[0], drafted.tokens[0]);
+    }
 }

@@ -16,7 +16,8 @@ pub const Drafter = struct {
         /// A new stream: its own caches, empty.
         open: *const fn (ptr: *anyopaque, s: *Stream) anyerror!void,
         /// The states of cache rows [start, start + f.rows) and the token after each; rows at or past `start` the drafter
-        /// held before are replaced (a rollback is the next absorb's `start`).
+        /// held before are replaced (a rollback is the next absorb's `start`). A stream's first absorb may start past 0:
+        /// a prompt restored from the prompt cache has no states, and the drafter drafts without those rows.
         absorb: *const fn (ptr: *anyopaque, s: *Stream, f: Features, start: u64, follow: []const u32) anyerror!void,
         /// Draft `depth` tokens after the last absorbed row's follow token, the first landing at `position`.
         hold: *const fn (ptr: *anyopaque, s: *Stream, position: u64, depth: u32) anyerror!void,
