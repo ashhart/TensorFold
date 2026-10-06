@@ -88,3 +88,16 @@ test "empty buffers and rejected spans do not call HIP" {
     try std.testing.expectError(error.Invalid, b.upload(0, &.{1}));
     try std.testing.expectError(error.Invalid, HostBuffer.alloc(&r, 0));
 }
+
+test "async copies reject foreign owners and out-of-range bytes before HIP" {
+    const r: runtime.Runtime = undefined;
+    var bytes = [_]u8{1};
+    const b = DeviceBuffer{ .r = &r, .ptr = @ptrFromInt(16), .len = 1 };
+    const host = HostBuffer{ .r = &r, .bytes = &bytes };
+    const foreign = HostBuffer{ .r = @ptrFromInt(32), .bytes = &bytes };
+    const stream = @import("stream.zig").Stream{ .r = &r, .handle = null };
+    try std.testing.expectError(error.Invalid, b.uploadAsync(0, foreign, stream));
+    try std.testing.expectError(error.Invalid, b.downloadAsync(0, foreign, stream));
+    try std.testing.expectError(error.Invalid, b.uploadAsync(1, host, stream));
+    try std.testing.expectError(error.Invalid, b.downloadAsync(1, host, stream));
+}
