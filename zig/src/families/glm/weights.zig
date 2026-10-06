@@ -190,8 +190,9 @@ const Loader = struct {
     /// This Mac's routed experts' `proj` stacked [own experts, n, k] (expert e at e - own[0]) from the stored [n_all, k_all]:
     /// by rows, gate and up keep rows `inter` (`rows`), down keeps input columns `inter` (`cols`).
     fn experts(l: *Loader, i: usize, proj: []const u8, n_all: usize, k_all: usize, part: enum { whole, rows, cols }) !Q4 {
-        const lo = l.c.own[0];
-        const e = l.c.own[1] - lo;
+        const every = i == l.c.layers; // the MTP layer: every expert whole on every Mac (its drafts need no exchange)
+        const lo = if (every) 0 else l.c.own[0];
+        const e = (if (every) l.c.experts else l.c.own[1]) - lo;
         const in_lo: usize = l.c.inter[0];
         const in_n: usize = l.c.inter[1] - l.c.inter[0];
         const n = if (part == .rows) in_n else n_all;
@@ -294,12 +295,13 @@ const Loader = struct {
         return n;
     }
 
-    fn expertBytes(l: *Loader) usize {
+    fn expertBytes(l: *Loader, i: usize) usize {
         const c = l.c;
         const D: usize = c.hidden;
-        const m: usize = c.inter[1] - c.inter[0];
+        const every = i == c.layers;
+        const m: usize = if (every) c.moe_inter else c.inter[1] - c.inter[0];
         const per = 2 * (Q4.wBytes(m, D) + 2 * Q4.sBytes(m, D)) + Q4.wBytes(D, m) + 2 * Q4.sBytes(D, m);
-        return (c.own[1] - c.own[0]) * per + 9 * 256;
+        return (if (every) c.experts else c.own[1] - c.own[0]) * per + 9 * 256;
     }
 
     fn layer(l: *Loader, i: usize) !Layer {
@@ -339,8 +341,8 @@ const Loader = struct {
                 .up = undefined,
                 .down = undefined,
             };
-            try l.begin(l.expertBytes());
-            const by_rows = c.byRows();
+            try l.begin(l.expertBytes(i));
+            const by_rows = c.byRows() and i != c.layers;
             moe.gate = try l.experts(i, "gate_proj", c.moe_inter, D, if (by_rows) .rows else .whole);
             moe.up = try l.experts(i, "up_proj", c.moe_inter, D, if (by_rows) .rows else .whole);
             moe.down = try l.experts(i, "down_proj", D, c.moe_inter, if (by_rows) .cols else .whole);

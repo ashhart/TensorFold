@@ -25,6 +25,7 @@ pub const Ctx = struct {
     pskip: u32 = 0, // a profile's knock-outs by launch (Part bits)
     fused_route: bool = true, // the core route (two launches); false: the Python family's cast, router and top-k
     hc_mode: u8 = 0, // 0: the family's expand, mix and split; 1: its expand, then core/hc.zig's mix and split; 2: one launch
+    draft_vocab: u32 = 154880, // the MTP head's tokens: the vocabulary's first this many
 };
 
 /// Single launches (or tight groups) for a profile that times each alone.
@@ -515,11 +516,18 @@ pub fn backbone(x: *Ctx, e: mtl.ComputeEncoder, ids: Ref, rows: u32, pos: u32) v
 
 /// LM head logits and argmax for `rows` rows of `in` into `logits` and `picks` (u32).
 pub fn head(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, logits: Ref, picks: Ref, rows: u32) void {
+    headOver(x, e, in, logits, picks, rows, x.c.vocab);
+}
+
+/// `head` over the vocabulary's first `vocab` tokens (the MTP head's draft vocabulary: the most frequent BPE merges).
+pub fn headOver(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, logits: Ref, picks: Ref, rows: u32, vocab: u32) void {
     if (x.skip & Class.head != 0) return;
-    qmv(x, e, x.k.qmv_head, in, x.w.head, logits, rows);
+    var q = x.w.head;
+    q.n = vocab;
+    qmv(x, e, x.k.qmv_head, in, q, logits, rows);
     e.setPipeline(x.k.argmax);
     bind(e, 0, .{ logits, picks });
-    e.setValue(x.c.vocab, 2);
+    e.setValue(vocab, 2);
     e.dispatchGroups(size(rows, 1, 1), size(1024, 1, 1));
 }
 

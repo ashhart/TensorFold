@@ -68,6 +68,7 @@ pub const Engine = struct {
     gpu: [2]f64 = .{ 0, 0 }, // the last command buffer's GPU start and end (host seconds)
     fused_route: bool = true, // GLM_ROUTE=0: the Python family's cast, router and top-k launches
     hc_mode: u8 = 0, // GLM_HC: 0 the family's three boundary launches, 1 expand + core mix-split, 2 core one launch
+    draft_vocab: u32 = 154880, // GLM_DRAFT_VOCAB: the MTP head drafts from the vocabulary's first this many tokens
     committed: u64 = 0, // when the last command buffer was committed (mach ticks)
 
     /// The checkpoint in `dir`, caches for `cap` tokens; GLM_LAYERS=N: the first N layers only; GLM_EP=settings: half the experts.
@@ -88,6 +89,7 @@ pub const Engine = struct {
         e.gpu = .{ 0, 0 };
         e.fused_route = if (std.c.getenv("GLM_ROUTE")) |v| v[0] != '0' else true;
         e.hc_mode = if (std.c.getenv("GLM_HC")) |v| v[0] - '0' else 0;
+        e.draft_vocab = if (std.c.getenv("GLM_DRAFT_VOCAB")) |v| std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0 else 0;
         e.committed = 0;
         e.ep = null;
         e.pr = null;
@@ -104,6 +106,8 @@ pub const Engine = struct {
         const f = try mtl.MappedFile.open(path);
         defer f.deinit();
         e.c = try cfg.parse(gpa, f.bytes[0..f.size]);
+        if (e.draft_vocab == 0 or e.draft_vocab > e.c.vocab) e.draft_vocab = e.c.vocab;
+        e.draft_vocab -= e.draft_vocab % 4; // the head's kernel takes four rows a simdgroup
         const model = try modelHash(gpa, dir, f.bytes[0..f.size]);
         if (std.c.getenv("GLM_LAYERS")) |v| try cfg.subset(&e.c, std.fmt.parseInt(u32, std.mem.span(v), 10) catch return error.BadLayerCount);
         const link: ?ep_mod.Settings = if (ep_path) |sp| blk: {
@@ -259,7 +263,7 @@ pub const Engine = struct {
     }
 
     fn ctx(e: *Engine) fwd.Ctx {
-        return .{ .k = e.k, .c = &e.c, .w = e.w, .s = &e.s, .sc = &e.sc, .ep = e.ep, .fused_route = e.fused_route, .hc_mode = e.hc_mode };
+        return .{ .k = e.k, .c = &e.c, .w = e.w, .s = &e.s, .sc = &e.sc, .ep = e.ep, .fused_route = e.fused_route, .hc_mode = e.hc_mode, .draft_vocab = e.draft_vocab };
     }
 
     /// A command buffer ordered after the last one this engine committed.

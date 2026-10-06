@@ -29,10 +29,12 @@ pub fn run(x: *fwd.Ctx, e: mtl.ComputeEncoder, h: Ref, next: Ref, rows: u32, pos
     fwd.mla(x, e, c.countKind(.mla), &L.attn.mla, sc.m_xn, rows, pos);
     add(x, e, sc.m_x, sc.branch, sc.m_out, rows * D);
     fwd.rms(x, e, sc.m_out, L.post_norm, sc.m_xn, rows, D, D, D, c.eps);
-    fwd.moe(x, e, &L.mlp.moe, sc.m_xn, rows);
+    var local = x.*; // every Mac holds the MTP layer's experts whole: its MoE is one Mac's, with no exchange
+    local.ep = null;
+    fwd.moe(&local, e, &L.mlp.moe, sc.m_xn, rows);
     add(x, e, sc.m_out, sc.branch, sc.m_x, rows * D);
     fwd.rms(x, e, sc.m_x, m.norm, sc.m_hn, rows, D, D, D, c.eps);
-    fwd.head(x, e, sc.m_hn.at(@as(usize, rows - 1) * D * 2), sc.m_logits, picks, 1);
+    fwd.headOver(x, e, sc.m_hn.at(@as(usize, rows - 1) * D * 2), sc.m_logits, picks, 1, x.draft_vocab);
 }
 
 /// One chained draft from `h` (a row of the head's previous output, m_x) and the draft before it (`token`, u32).
