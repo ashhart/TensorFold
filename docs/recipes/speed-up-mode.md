@@ -9,21 +9,22 @@ MCDMA for the Thunderbolt link.
 ## What it gives
 
 Measured on two M5 Ultra Macs (256 GB each) over one Thunderbolt 5 cable, greedy, 256-token replies, against
-the same server on one of the Macs:
+the same server build on one of the Macs:
 
 | Prompt | Time to first token, two Macs / one | Decode, two Macs / one (tok/s) |
 | --- | --- | --- |
-| 1k code | 0.27 s / 0.34 s | 208 / 161 |
-| 1k edit | 0.29 s / 0.34 s | 352 / 319 |
+| 1k code | 0.27 s / 0.34 s | 207 / 159 |
+| 1k edit | 0.31 s / 0.38 s | 348 / 286 |
 | 1k chat | 0.25 s / 0.34 s | 170 / 144 |
-| 8k code | 1.30 s / 2.16 s | 168 / 155 |
-| 8k edit | 1.20 s / 2.16 s | 330 / 300 |
-| 8k chat | 1.15 s / 2.10 s | 181 / 134 |
-| 32k chat | 3.96 s / 7.58 s | 168 / 145 |
+| 8k code | 1.30 s / 2.05 s | 168 / 154 |
+| 8k edit | 1.21 s / 2.02 s | 328 / 280 |
+| 8k chat | 1.12 s / 1.91 s | 181 / 140 |
+| 32k code | 4.06 s / 6.95 s | 189 / 163 |
+| 32k chat | 4.00 s / 6.86 s | 168 / 137 |
 
-Prompts run 1.7 to 1.9 times as fast (about 8,000 tokens a second at 32k). Decode gains less, 1.1 to 1.35
-times, because each layer exchanges two partial results between the Macs (about 15 microseconds each over one
-cable) and the draft head runs on both.
+Prompts run 1.6 to 1.7 times as fast from 8k tokens (about 8,000 tokens a second at 32k). Decode gains less, 1.1
+to 1.3 times, because each layer exchanges two partial results between the Macs (about 15 microseconds each over
+one cable) and the draft head runs on both.
 
 Both Macs produce the same reply token for token. A reply can differ from one Mac's in rare tokens: the two halves
 of a projection are added in a different order, at the same fp32 precision. Prompt splitting gives one Mac's bits
