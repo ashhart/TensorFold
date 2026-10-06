@@ -141,6 +141,8 @@ const Strict = struct {
     inner: be.Backend,
     snaps: std.AutoHashMapUnmanaged(*sm.Stream, Snap) = .empty,
     refused: u32 = 0,
+    taps: [8]u32 = undefined,
+    tap_count: usize = 0, // the layers it keeps, told before any forward
 
     const Snap = struct { start: u64 = 0, rows: std.ArrayList(u32) = .empty, valid: usize = 0 };
     const poison: u32 = 0xdead;
@@ -152,7 +154,7 @@ const Strict = struct {
     }
 
     fn backend(x: *Strict) be.Backend {
-        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draftNone, .features = features, .release = release } };
+        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draftNone, .prepare_features = prepare, .features = features, .release = release } };
     }
 
     fn self(ptr: *anyopaque) *Strict {
@@ -213,13 +215,20 @@ const Strict = struct {
         }
     }
 
+    fn prepare(ptr: *anyopaque, taps: []const u32) anyerror!void {
+        const x = self(ptr);
+        if (x.snaps.count() > 0) return error.PreparedAfterForward;
+        @memcpy(x.taps[0..taps.len], taps);
+        x.tap_count = taps.len;
+    }
+
     fn draftNone(_: *anyopaque, _: []const be.DraftRequest) anyerror!void {
         return error.TargetDraftCalled;
     }
 
     fn features(ptr: *anyopaque, s: *sm.Stream, taps: []const u32, start: u64, count: u32) anyerror!be.Features {
-        _ = taps;
         const x = self(ptr);
+        if (!std.mem.eql(u32, taps, x.taps[0..x.tap_count])) return error.TapsNotPrepared;
         const sn = x.snaps.getPtr(s) orelse return error.UnknownStream;
         if (start < sn.start or start + count > sn.start + sn.valid) {
             x.refused += 1;
@@ -262,7 +271,7 @@ fn run(cases: []const Case, mode: Mode, batched: bool) !Out {
     var head: FakeDrafter = .{ .facts_ = .{ .depth = 6, .step_ms = 0.5, .batched = batched } };
     var strict: Strict = .{ .inner = target.backend() };
     defer strict.deinit();
-    var wrapped: Drafted = .{ .gpa = gpa, .target = strict.backend(), .drafter = head.drafter() };
+    var wrapped = try Drafted.init(gpa, strict.backend(), head.drafter());
     defer wrapped.deinit();
     var cfg = try Config.init(gpa, if (mode == .wrapped) wrapped.facts(base()) else base(), 16, 15);
     defer cfg.deinit(gpa);
@@ -431,11 +440,13 @@ test "the strict target holds only what Features promises: a keep drops the reje
     var strict: Strict = .{ .inner = target.backend() };
     defer strict.deinit();
     const b = strict.backend();
+    try b.vtable.prepare_features.?(b.ptr, &.{49});
     var s = try sm.Stream.init(gpa, .{ .id = "s", .prompt = &p1, .max_new = 8, .eos = &.{96} });
     defer s.deinit(gpa);
     try b.prefill(&s);
     defer b.release(&s);
     _ = try b.features(&s, &.{49}, 0, p1.len);
+    try std.testing.expectError(error.TapsNotPrepared, b.features(&s, &.{ 44, 49 }, 0, 1));
     const t = try b.read(try b.first(&s, p1.len));
     const drafts = [_]u32{ 1, 2, 3 };
     const positions = [_]u64{ p1.len + 1, p1.len + 2, p1.len + 3, p1.len + 4 };
@@ -449,4 +460,50 @@ test "the strict target holds only what Features promises: a keep drops the reje
     try b.keep(&w, &.{&.{ 0, 1 }});
     _ = try b.features(&s, &.{49}, p1.len, 2); // the kept rows stay after the keep
     try std.testing.expectError(error.RowsNotHeld, b.features(&s, &.{49}, p1.len, 3));
+}
+
+test "a copy round after a whole restore does not leave fillers in place of the drafter's first real drafts" {
+    var target: fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var strict: Strict = .{ .inner = target.backend() };
+    defer strict.deinit();
+    var head: FakeDrafter = .{};
+    defer head.deinit();
+    var wrapped = try Drafted.init(gpa, strict.backend(), head.drafter());
+    defer wrapped.deinit();
+    const b = wrapped.backend();
+    // the whole prompt as a kept state
+    var early = try sm.Stream.init(gpa, .{ .id = "early", .prompt = &long, .max_new = 1, .eos = &.{96} });
+    defer early.deinit(gpa);
+    try target.backend().prefill(&early);
+    const saved = try target.save(&early, long.len);
+    defer target.drop(saved);
+    target.backend().release(&early);
+    var s = try sm.Stream.init(gpa, .{ .id = "s", .prompt = &long, .max_new = 32, .eos = &.{96}, .reuse = .{ .saved = saved, .at = long.len } });
+    defer s.deinit(gpa);
+    try b.prefill(&s);
+    defer b.release(&s);
+    const n: u64 = long.len;
+    const t = try b.read(try b.first(&s, n));
+    // the head is asked for 3 drafts but has no row: fillers
+    try b.draft(&.{.{ .stream = &s, .follow = &.{}, .first = .{ .value = t }, .rows = null, .start = n, .position = n + 1, .depth = 3 }});
+    // the round loop takes a copy proposal instead: the fillers are never asked for
+    const copy = [_]u32{ 7, 8 };
+    var drawn: [3]u32 = undefined;
+    var echo: [2]u32 = undefined;
+    const w1 = [_]be.Window{.{ .stream = &s, .pending = t, .held = 0, .tokens = &copy, .parents = null, .positions = &.{ n + 1, n + 2, n + 3 } }};
+    var o1 = [_]be.Verified{.{ .sampled = &drawn, .drafts = &echo }};
+    try b.verify(&w1, &o1);
+    try b.keep(&w1, &.{&.{ 0, 1 }});
+    // the next request has real rows: the drafter holds real drafts
+    try b.draft(&.{.{ .stream = &s, .follow = &.{ copy[0], drawn[1] }, .rows = &.{ 0, 1 }, .start = n, .position = n + 3, .depth = 3 }});
+    try std.testing.expectEqual(@as(u32, 1), head.holds);
+    var drawn2: [4]u32 = undefined;
+    var echo2: [3]u32 = undefined;
+    const w2 = [_]be.Window{.{ .stream = &s, .pending = drawn[1], .held = 3, .tokens = &.{}, .parents = null, .positions = &.{ n + 3, n + 4, n + 5, n + 6 } }};
+    var o2 = [_]be.Verified{.{ .sampled = &drawn2, .drafts = &echo2 }};
+    try b.verify(&w2, &o2);
+    // the verify read the drafter (not stale fillers) and the target saw its drafts
+    try std.testing.expectEqual(@as(u32, 1), head.helds);
+    try std.testing.expectEqualSlices(u32, head.lanes.getPtr(&s).?.held.items[0..3], &echo2);
 }

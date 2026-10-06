@@ -29,6 +29,13 @@ pub const Drafted = struct {
     holds: std.ArrayList(dr.Hold) = .empty,
     firsts: std.ArrayList(u32) = .empty,
 
+    /// The wrapper, with the target told the drafter's taps before any forward (a target keeps only those layers'
+    /// states; one without `prepare_features` must have been built with them).
+    pub fn init(gpa: Allocator, target: be.Backend, drafter: dr.Drafter) !Drafted {
+        if (target.vtable.prepare_features) |prep| try prep(target.ptr, drafter.taps());
+        return .{ .gpa = gpa, .target = target, .drafter = drafter };
+    }
+
     pub fn deinit(x: *Drafted) void {
         x.lanes.deinit(x.gpa);
         x.windows.deinit(x.gpa);
@@ -150,6 +157,7 @@ pub const Drafted = struct {
         for (requests, x.firsts.items) |r, *tok| {
             if (r.lanes != null) return error.TreesNotBuilt;
             const lane = x.lanes.getPtr(r.stream) orelse return error.NotDrafting;
+            lane.filler = 0; // a new request supersedes fillers a copy round left unused
             var pending: u32 = undefined;
             if (r.rows) |rows| {
                 for (rows, 0..) |row, i| if (row != i) return error.TreesNotBuilt;

@@ -91,8 +91,12 @@ pub const Backend = struct {
         tree: ?*const fn (ptr: *anyopaque, s: *Stream, gpa: std.mem.Allocator) anyerror!?Held = null,
         /// The head's best tokens and probabilities at each level it drafted for the stream (waits for the drafts).
         alternatives: ?*const fn (ptr: *anyopaque, s: *Stream, out: []Alternative) anyerror!usize = null,
+        /// The layers an external drafter reads, told once before any forward (drafted.zig's init): the target keeps those
+        /// layers' states and no others. Null: the target was built with its taps.
+        prepare_features: ?*const fn (ptr: *anyopaque, taps: []const u32) anyerror!void = null,
         /// The tapped states of cache rows [start, start + count) for an external drafter (drafter.zig), within the rows
-        /// `Features` says the target still holds; null when the target exposes none.
+        /// `Features` says the target still holds; `taps` must be the set the target was prepared with (it cannot pick
+        /// layers after the forward). Null when the target exposes none.
         features: ?*const fn (ptr: *anyopaque, s: *Stream, taps: []const u32, start: u64, count: u32) anyerror!Features = null,
         /// The stream left the rounds: free its caches and held drafts.
         release: *const fn (ptr: *anyopaque, s: *Stream) void,
