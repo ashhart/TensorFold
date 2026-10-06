@@ -160,6 +160,16 @@ def build_pack(rt) -> tuple[dict[str, mx.array], dict[str, int]]:
     return {k: v for k, v in pack.items() if not k.startswith("ck:")}, tiles
 
 
+def cut_draft_head(rt, choice: str) -> None:
+    """The MTP head cut to another list's ids: "cjk" (shipped beside the default list) or a file of ids."""
+
+    from tensorfold.families.qwen4_exp.draft_head import VOCAB_FILE, cut_head, draft_ids
+
+    ids = draft_ids(VOCAB_FILE.with_name("draft_vocab_cjk.txt") if choice == "cjk" else Path(choice))
+    assert int(ids[-1]) < rt.model.args.vocab_size, f"{choice}: an id past the vocabulary"
+    rt._draft_ids, rt._draft_head = mx.array(ids), cut_head(rt.model.lm_head, ids)
+
+
 def site_of(entry: dict) -> str:
     """A launch site: the kernel family and the role stem of its first weight (layer dropped), else its input shape."""
 
@@ -182,6 +192,8 @@ def main() -> None:
     ap.add_argument("--fixture-step", type=int, default=3)
     ap.add_argument("--windows", default="2,3,4,6,8")
     ap.add_argument("--absorb", type=int, default=8, help="the MTP head's absorb windows: 1 .. this many rows")
+    ap.add_argument("--draft-vocab", default="default",
+                    help="the MTP head's draft ids: default (the shipped list), cjk (it and every CJK id) or a file")
     args = ap.parse_args()
     assert os.environ.get("TF_FLASH_PLE_KERNELS") == "1", "run with TF_FLASH_PLE_KERNELS=1"
     out = args.out
@@ -190,6 +202,8 @@ def main() -> None:
     from tensorfold.server.text import render_prompt_ids
 
     rt, tok = load(args.model, drafts=3)
+    if args.draft_vocab != "default":               # before the first draft draw tiles the head
+        cut_draft_head(rt, args.draft_vocab)
     from tensorfold.families.qwen4_exp.mtp_cache import MTPCache
     text = args.prompt_file.read_text() if args.prompt_file else args.prompt
     prompt = [int(t) for t in render_prompt_ids(tok, [{"role": "user", "content": text}],

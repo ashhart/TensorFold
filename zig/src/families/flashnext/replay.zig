@@ -1473,6 +1473,21 @@ pub fn i32Buf(r: *Run, vals: []const i32) !Buf {
 /// One MTP call's per-row values (every call in a command buffer reads its own).
 pub const Slot = struct { rows: Buf, md: Buf, md4: Buf, ids8: Buf, pos8: Buf, nk8: Buf, kvmeta: Buf, n_add: Buf };
 
+/// How many token ids the MTP head scores, from the pack's `mtp.draft_ids` bytes, refused unless whole 64-row tiles up to the vocabulary.
+pub fn draftCount(bytes: usize) !usize {
+    const n = bytes / 4;
+    if (n == 0 or n % 64 != 0 or n > VOCAB) return error.DraftVocab;
+    return n;
+}
+
+test "the MTP head takes any draft list of whole 64-row tiles up to the vocabulary" {
+    try std.testing.expectEqual(@as(usize, 79_616), try draftCount(79_616 * 4)); // the shipped list, padded to 64
+    try std.testing.expectEqual(@as(usize, 135_040), try draftCount(135_040 * 4)); // it and every CJK id
+    try std.testing.expectError(error.DraftVocab, draftCount(79_591 * 4));
+    try std.testing.expectError(error.DraftVocab, draftCount((VOCAB + 64) * 4));
+    try std.testing.expectError(error.DraftVocab, draftCount(0));
+}
+
 /// The MTP head: its decoder layer and mixer, the input projections, the cut head, its own attention cache.
 pub const Mtp = struct {
     ahc: Hc,

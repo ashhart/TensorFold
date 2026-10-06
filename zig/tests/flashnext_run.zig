@@ -358,6 +358,7 @@ pub fn main(init: std.process.Init) !void {
         .vocab = try i32Buf(&r, &.{VOCAB}),
     };
     {
+        const ids_n = try fz.draftCount((try r.entry("mtp.draft_ids")).len);
         const ids = try r.load("mtp.draft_ids");
         var ex: [18]Buf = undefined;
         const projs = [_][]const u8{ "switch_mlp.gate_proj", "switch_mlp.up_proj", "shared_expert.gate_proj", "shared_expert.up_proj", "switch_mlp.down_proj", "shared_expert.down_proj" };
@@ -383,7 +384,7 @@ pub fn main(init: std.process.Init) !void {
             .hnorm = try r.load("mtp.hnorm.scale"),
             .router = try r.load("mtp.moe.router"),
             .ids = ids,
-            .ids_n = (try r.entry("mtp.draft_ids")).len / 4,
+            .ids_n = ids_n,
             .ex = ex,
             .keys = .{ .b = try r.buffer(2 * CAP * 256 * 2) },
             .vals = .{ .b = try r.buffer(2 * CAP * 256 * 2) },
@@ -396,7 +397,7 @@ pub fn main(init: std.process.Init) !void {
             .e = try B.of(&r, MAXR * D * 2),
             .hn = try B.of(&r, MAXR * WIDE * 2),
             .hs = try B.of(&r, MAXR * WIDE * 2),
-            .logits = try B.of(&r, 80000 * 2),
+            .logits = try B.of(&r, ids_n * 2),
             .pick = try B.of(&r, 16),
             .md1 = try i32Buf(&r, &.{ 1, 16, 0, 0, 0, 0, 0, 0 }),
             .n_ids = undefined,
@@ -413,7 +414,6 @@ pub fn main(init: std.process.Init) !void {
             .n_add = try i32Buf(&r, &.{0}),
         };
         m.mtp.n_ids = try i32Buf(&r, &.{@intCast(m.mtp.ids_n)});
-        if (m.mtp.ids_n * 2 > 80000 * 2) return error.DraftVocab;
     }
     try r.shapes.put(arena, "Kc_shape", (try i32Buf(&r, &.{ 1, 2, CAP, 256 })).b);
     try r.shapes.put(arena, "IDS_shape", (try i32Buf(&r, &.{ MAXR, 1 })).b);
