@@ -60,8 +60,8 @@ devices and the two `via` entries with `+`, in the same order on both Macs, and 
  "links": [{"peer": 1, "device": "rdma_en4+rdma_en3", "via": "en4/192.0.2.2+en3/192.0.2.6", "port": 7490, "name": "speedup"}]}
 ```
 
-On two M5 Ultras the bond doubles bulk throughput (96 against 53 Gbit/s); in speed-up mode it brought prompts 2 to 4%
-sooner and left decode unchanged, since decode's exchanges are small.
+On two M5 Ultras the bond nearly doubles bulk throughput (96 against 53 Gbit/s); in speed-up mode it brings the first
+token about 2% sooner (up to 4% at 8k) and decode under 1% faster, since decode's exchanges are small.
 
 ## Starting it
 
