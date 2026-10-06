@@ -29,14 +29,16 @@ to 1.3 times: each layer still exchanges results between the Macs, and the draft
 per-layer work run on both.
 
 Both Macs produce the same reply token for token, at every draft depth. The experts give one Mac's bits: each Mac
-runs every expert for half of a window's rows and they swap the results. A reply can still differ from one Mac's in
-rare tokens: the two halves of the DeltaNet output projection are added in a different order, at the same fp32
-precision. Prompt splitting gives one Mac's bits exactly.
+runs every expert for half of a window's rows and they swap the results. A reply can still differ from one Mac's.
+The two halves of the DeltaNet output projection are added in a different order, at the same fp32 precision.
+Prompt splitting gives one Mac's bits exactly.
 
 ## What you need
 
-- Two Apple silicon Macs with enough memory for the whole model on each (the 6-bit checkpoint and the replay
-  engine's dump, about 175 GB at peak on each), and the same checkpoint and dump on both.
+- Two Apple silicon Macs, each with enough memory for the whole model. Flash Next 6-bit is 158 GB of weights, and
+  each server takes 172 GB once loaded. Keep each server at or under 70% of its Mac's memory, 179 GiB on a 256 GB
+  Mac. The server sizes its prompt cache to fit under that line, about 5 GiB on these Macs. A 192 GB Mac is too
+  small. Put the same checkpoint and dump on both.
 - A Thunderbolt 5 cable between them with RDMA enabled, and MCDMA's fabric library (`libmcdma-fabric.dylib`) built
   on each Mac from MCDMA's `main` branch, which carries its Thunderbolt links.
 - Greedy decoding (temperature 0), as the Flash Next replay engine requires.
@@ -78,11 +80,15 @@ Start both servers with the same model, dump and flags (a flag that changes deco
 both), rank 1 first or within five minutes of each other; each waits for the other before it loads on:
 
 ```bash
-TF_FLASHNEXT_DUMP=/path/to/dump tensorfold-native serve /path/to/Qwen3.8-Flash-Next-6bit --speed-up rank1.json --no-thinking
+FZ_LANE=1 FZ_GDN=2 MCDMA_FABRIC_QOS=1 TF_FLASHNEXT_DUMP=$HOME/fn-dump \
+  zig-out/native/bin/tensorfold-native serve ~/models/flash-next-6bit --name flash-next \
+  --speed-up rank1.json --temperature 0 --no-thinking --dashboard
 ```
 
 ```bash
-TF_FLASHNEXT_DUMP=/path/to/dump tensorfold-native serve /path/to/Qwen3.8-Flash-Next-6bit --speed-up rank0.json --no-thinking
+FZ_LANE=1 FZ_GDN=2 MCDMA_FABRIC_QOS=1 TF_FLASHNEXT_DUMP=$HOME/fn-dump \
+  zig-out/native/bin/tensorfold-native serve ~/models/flash-next-6bit --name flash-next \
+  --speed-up rank0.json --temperature 0 --no-thinking --dashboard
 ```
 
 Send requests to rank 0. Rank 1 refuses requests of its own and runs rank 0's as they come; a stop string or a

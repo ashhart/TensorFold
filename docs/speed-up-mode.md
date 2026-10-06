@@ -12,7 +12,7 @@ because the two halves of one projection are added in a different order at the s
 
 - Two Apple silicon Macs, each with enough memory for the whole model. Flash Next 6-bit is 158 GB of weights. On our
   two M5 Ultra Mac Studios, 256 GB each, each Mac's server takes 172 GB once loaded. Keep each server at or under 70%
-  of its Mac's memory, 179 GB on a 256 GB Mac, so macOS and everything else keep theirs. The server sizes its prompt
+  of its Mac's memory, 179 GiB on a 256 GB Mac, so macOS and everything else keep theirs. The server sizes its prompt
   cache to fit under that line, about 5 GiB on these Macs. A 192 GB Mac is too small.
 - A Thunderbolt 5 cable straight from one Mac to the other.
 - macOS 26.2 or later, which ships Thunderbolt RDMA. Ours run macOS 27.0.
@@ -54,7 +54,8 @@ The Zig engine replays kernels recorded from TensorFold's Python engine, so it n
 and copy the folder, about 6.4 GB, to the same path on the other. The recorder loads the model through the Python
 engine, so it needs Python 3.11 or later and this checkout's Python package with MLX 0.32.2 or 0.32.3, as pinned in
 `pyproject.toml`. It also needs more memory than serving does: the Python engine passed 190 GB on our Macs, so make
-the dump on a Mac with 256 GB. From the checkout:
+the dump on a Mac with 256 GB. From the checkout, write `prompt.txt` first. It is any request of about 4,000 tokens.
+A long prompt makes the recorder include the long-context kernels. Ours asked for type hints in a Python file.
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
@@ -69,8 +70,7 @@ python tools/zig/flashnext_fuse_xsum.py ~/fn-dump-raw ~/fn-dump
 python tools/zig/flashnext_export_mtp.py $M ~/fn-dump/pack_mtp_mlx.safetensors
 ```
 
-`prompt.txt` is any request of about 4,000 tokens. A long prompt makes the recorder include the long-context kernels.
-Ours asked for type hints in a Python file. The server uses `~/fn-dump`.
+The server uses `~/fn-dump`.
 
 ### 4. Set up MCDMA
 
@@ -107,7 +107,7 @@ Both Macs run the same command with their own settings file. Start rank 1 first,
 ```bash
 FZ_LANE=1 FZ_GDN=2 MCDMA_FABRIC_QOS=1 TF_FLASHNEXT_DUMP=$HOME/fn-dump \
   zig-out/native/bin/tensorfold-native serve ~/models/flash-next-6bit --name flash-next \
-  --speed-up rank1.json --temperature 0 --dashboard
+  --speed-up rank1.json --temperature 0 --no-thinking --dashboard
 ```
 
 On rank 0, pass `--speed-up rank0.json` instead, and `--host 0.0.0.0` if other machines will connect, with `--api-key`
@@ -140,11 +140,11 @@ replies, decode in tokens a second:
 | Prompt | 1k tokens | 8k tokens |
 | --- | --- | --- |
 | Chat | 184 | 203.5 |
-| Code | 253 | 209 |
-| Edit a file | 402 | 375 |
+| Code | 253.1 | 209.1 |
+| Edit a file | 401.6 | 375.3 |
 
 Edits are fastest because the reply copies long runs from the prompt. The first token came 0.25-0.34 s after a 1k prompt
-and 1.22-1.26 s after an 8k one. Cold prompts ran at 7.1k tokens a second at 20k tokens, 7.4k at 39k and 7.6k at 81k.
+and 1.22-1.26 s after an 8k one. Cold prompts ran at 7.1k tokens a second at 20.5k tokens, 7.4k at 39.4k and 7.6k at 80.7k.
 These were measured on our machines. They aren't a promise for yours.
 
 ## Known limits
@@ -152,8 +152,8 @@ These were measured on our machines. They aren't a promise for yours.
 - One reply at a time. Requests queue, so several clients share one stream's speed. Running several streams in each
   round is in progress.
 - A cold prompt costs the same with the prompt cache on or off: 8k to 64k-token prompts' first tokens came within
-  2.2% of each other on our Macs. A follow-up turn that adds about 280 tokens to an 8-10k-token conversation got its
-  first token in 0.19-0.20 s.
+  2.2% of each other on our Macs. A follow-up turn that adds about 280 tokens to a 7-10k-token conversation got its
+  first token in 0.187-0.202 s.
 - The first prompt of a new size compiles some kernels. A 9.9k-token prompt took 3.6 s the first time and 1.3 s after.
 - When you stop rank 0, stop rank 1 too. It stops following but keeps running, and keeps a CPU core busy, until you end
   it. If a request fails partway or the link drops, restart both servers.
