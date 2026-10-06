@@ -16,6 +16,8 @@ const usage =
     \\usage: tensorfold run MODEL --tokens ID,ID,... [--max-tokens N] [--no-drafts] [--report PATH] [--kernels DIR] [--device N]
     \\         [--temperature T] [--top-k K] [--top-p P] [--min-p M] [--seed S]   (temperature 0: greedy)
     \\         [--context N] [--ignore-eos] [--eager] [--costs MS1,...,MS16,LEVEL]
+    \\         [--carveout]   (KV caches in GB10's display memory first; also TF_CUDA_CARVEOUT=1,
+    \\         sized by TF_CUDA_CARVEOUT_MIB (default 1792), card TF_DRM_CARD (default /dev/dri/card0))
     \\         [--tokens-file PATH] [--segments N]   (N whole 2048-row prompt chunks a call as staggered segments,
     \\         1-4; default TF_CUDA_SEGMENTS, else 1)
     \\       tensorfold segments MODEL IDS_FILE... [--counts 1,2,3,4] [--repeat N] [--max-tokens N] [--profile]
@@ -116,6 +118,8 @@ pub fn main(init: std.process.Init) !u8 {
             opts.stop_eos = false;
         } else if (std.mem.eql(u8, a, "--eager")) {
             opts.graphs = false;
+        } else if (std.mem.eql(u8, a, "--carveout")) {
+            opts.carveout = true;
         } else if (std.mem.startsWith(u8, a, "--")) {
             std.debug.print("unknown option {s}\n{s}", .{ a, usage });
             return 2;
@@ -130,6 +134,18 @@ pub fn main(init: std.process.Init) !u8 {
     const device = try deviceOrdinal(opts.device, init.environ_map.get("TF_CUDA_DEVICE"));
     var ctx = try cuda.Context.init(&driver, @intCast(device));
     defer ctx.deinit();
+    const env = init.environ_map;
+    var carve: ?cuda.Carveout = null;
+    if (try cuda.carveout.requested(opts.carveout, env.get("TF_CUDA_CARVEOUT"), env.get("TF_CUDA_CARVEOUT_MIB"))) |bytes| {
+        const card = try init.arena.allocator().dupeSentinel(u8, env.get("TF_DRM_CARD") orelse cuda.carveout.default_card, 0);
+        carve = cuda.Carveout.open(&driver, card, bytes) catch |err| {
+            std.log.err("display carveout of {d} MiB from {s}: {t} (needs nvidia_drm modeset=1, the card's device node and no display in use)", .{ bytes >> 20, card, err });
+            return err;
+        };
+        const io_flag = if (carve.?.flags & cuda.abi.host_register_iomemory != 0) "|IOMEMORY" else "";
+        std.debug.print("display carveout: {d} MiB from {s}, registered DEVICEMAP{s}\n", .{ bytes >> 20, card, io_flag });
+    }
+    defer if (carve) |*c| c.close();
     const cmd = args[1];
     const bench = std.mem.eql(u8, cmd, "segments");
     const decoding = std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "lanes") or bench;
@@ -138,8 +154,12 @@ pub fn main(init: std.process.Init) !u8 {
     const graphs = opts.graphs and (std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "rounds") or bench or widths);
     const sampling: ?lanes.Sampling = if ((std.mem.eql(u8, cmd, "run") or widths) and opts.sampling.temperature > 0) opts.sampling else null;
     const segments = opts.segments orelse if (init.environ_map.get("TF_CUDA_SEGMENTS")) |v| try std.fmt.parseInt(usize, v, 10) else 1;
-    const engine = try nemotron.Engine.init(gpa, init.io, &ctx, opts.model, kernels, .{ .context = opts.context, .mtp = mtp, .graphs = graphs, .sampling = sampling, .segments = segments });
+    const engine = try nemotron.Engine.init(gpa, init.io, &ctx, opts.model, kernels, .{ .context = opts.context, .mtp = mtp, .graphs = graphs, .sampling = sampling, .segments = segments, .carveout = if (carve) |*c| c else null });
     defer engine.deinit();
+    if (carve) |*c| {
+        const free = (try ctx.memInfo()).free;
+        std.debug.print("cache room: {d} MiB free on the device + {d} MiB left in the carveout; own KV planes carved {d} MiB\n", .{ free >> 20, c.freeBytes() >> 20, engine.b.carvedBytes() >> 20 });
+    }
     const rest = positional.items;
     if (std.mem.eql(u8, cmd, "run")) return run(gpa, init.io, engine, opts);
     if (std.mem.eql(u8, cmd, "lanes") and rest.len == 1) {
@@ -190,6 +210,7 @@ const Options = struct {
     repeat: usize = 3,
     streams: usize = 4,
     profile: bool = false,
+    carveout: bool = false,
 };
 
 /// Segment counts for `segments`, one to four of them.
@@ -268,6 +289,7 @@ fn run(gpa: std.mem.Allocator, io: std.Io, e: *nemotron.Engine, o: Options) !u8 
             .load_seconds = e.load_seconds,
             .max_len = e.max_len,
             .segments = e.segments,
+            .carved_bytes = e.b.carvedBytes(),
         };
         const json = try std.json.Stringify.valueAlloc(gpa, report, .{});
         defer gpa.free(json);

@@ -63,6 +63,18 @@ staggered prompt work for 1 through 4 whole 2,048-row chunks; without the flag i
 uses `TF_CUDA_SEGMENTS`, then 1. The `tensorfold segments` command compares the
 available segment counts and can profile the serial chunk parts.
 
+On a DGX Spark (GB10), `--carveout` (or `TF_CUDA_CARVEOUT=1`) puts Nemotron's KV caches in the
+memory the display controller reserves, which MemAvailable never counts. The native engine maps a
+DRM dumb buffer from `/dev/dri/card0` (`TF_DRM_CARD` picks another card) and registers it with
+CUDA. It is 1,792 MiB unless `TF_CUDA_CARVEOUT_MIB` says otherwise. Each sequence's key and value
+planes go there while the carveout holds both, and the rest stays in device memory. The recurrent
+state stays out, because every round reads and writes all of it. This memory has about half the
+bandwidth of ordinary memory, so expect a small decode cost. The output bits don't change. It needs
+`nvidia_drm modeset=1`, access to the card's device node (`--device /dev/dri/card0` in a
+container) and no display in use. It is off by default. `tf-cuda-test carveout [MiB] [card]`
+checks a machine: round trips from the host and from a kernel, and copy and read bandwidth. It
+skips when it can't open the card. The idea comes from coolbho3k's DeepSeek-v4.1-Flash-2x-DGX-Spark.
+
 CUDA capture and packing use the repository's Triton manifest tool. It records
 Triton and extension launches, maps them to cached kernels and metadata, and
 checks the packed manifest on CPU before a CUDA run.

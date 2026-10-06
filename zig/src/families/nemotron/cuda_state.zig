@@ -24,7 +24,37 @@ const Arena = struct {
     }
 };
 
-/// A sequence's own Buffers fields: caches and state (the first seven, one range), window io and its sampled rule.
+/// A sequence's KV planes in the display carveout, given back when the sequence goes.
+pub const Carved = struct {
+    carve: *cuda.Carveout,
+    kv: [2]cuda.DeviceBuffer,
+
+    /// Both KV planes of `n` bytes each from `carve`, or null when it is off or cannot hold both.
+    fn take(carve: ?*cuda.Carveout, n: usize) !?Carved {
+        const cv = carve orelse return null;
+        const k = (try cv.take(n)) orelse return null;
+        errdefer cv.give(k);
+        const v = (try cv.take(n)) orelse {
+            cv.give(k);
+            return null;
+        };
+        return .{ .carve = cv, .kv = .{ k, v } };
+    }
+
+    fn give(x: Carved) void {
+        x.carve.give(x.kv[1]);
+        x.carve.give(x.kv[0]);
+    }
+
+    /// Arena bytes for `sizes` with the carved planes left out.
+    fn arenaBytes(x: ?Carved, sizes: []const usize) usize {
+        var total: usize = 0;
+        for (sizes, 0..) |n, i| total += if (x != null and i < 2) 0 else n + 256;
+        return total;
+    }
+};
+
+/// A sequence's own Buffers fields: cache and state planes (the first seven), window io and its sampled rule.
 pub const seq_fields = [_][]const u8{ "k_cache", "v_cache", "ssm", "conv_base", "raw", "xc", "dt", "meta", "ids", "hidden", "sampled", "rule" };
 
 fn seqSizes(c: Config, max_len: usize) [seq_fields.len]usize {
@@ -63,6 +93,7 @@ fn scratchSizes(c: Config, nch: usize) [scratch_count]usize {
 /// One sequence: its own buffers (seq_fields, then its MTP head's) and where it stands while another is bound.
 pub const Seq = struct {
     arena: ?Arena, // null: the engine's own buffers
+    carved: ?Carved = null,
     ptr: [seq_fields.len]u64,
     head: [3]u64 = @splat(0), // the MTP head's seq_fields (cuda_mtp.zig)
     pos: usize = 0,
@@ -80,14 +111,18 @@ pub const Seq = struct {
         return total;
     }
 
-    /// Cache and head buffers are zeroed on their owning stream.
-    pub fn init(d: *const cuda.Driver, c: Config, max_len: usize, head: []const usize, stream: cuda.Stream) !Seq {
+    /// Cache and head buffers are zeroed on their owning stream; the KV pair goes to `carve` while it holds both.
+    pub fn init(d: *const cuda.Driver, c: Config, max_len: usize, head: []const usize, stream: cuda.Stream, carve: ?*cuda.Carveout) !Seq {
         const sizes = seqSizes(c, max_len);
-        var a: Arena = .{ .buf = try cuda.DeviceBuffer.alloc(d, bytes(c, max_len, head)) };
+        const carved = try Carved.take(carve, sizes[0]);
+        errdefer if (carved) |x| x.give();
+        var total = Carved.arenaBytes(carved, &sizes);
+        for (head) |n| total += n + 256;
+        var a: Arena = .{ .buf = try cuda.DeviceBuffer.alloc(d, total) };
         errdefer a.buf.free();
         try a.buf.fill8(0, stream.handle);
-        var s: Seq = .{ .arena = null, .ptr = undefined };
-        for (&s.ptr, sizes) |*p, n| p.* = a.take(n);
+        var s: Seq = .{ .arena = null, .ptr = undefined, .carved = carved };
+        for (&s.ptr, sizes, 0..) |*p, n, i| p.* = if (carved != null and i < 2) carved.?.kv[i].ptr else a.take(n);
         for (s.head[0..head.len], head) |*p, n| p.* = a.take(n);
         s.arena = a;
         return s;
@@ -102,12 +137,14 @@ pub const Seq = struct {
 
     pub fn deinit(s: *Seq) void {
         if (s.arena) |*a| a.buf.free();
+        if (s.carved) |x| x.give();
         s.* = undefined;
     }
 };
 
 pub const Buffers = struct {
     arena: Arena,
+    carved: ?Carved, // the own sequence's KV planes, when the display carveout holds them
     // sequence state (Engine.STATE in the Python engine)
     k_cache: u64,
     v_cache: u64,
@@ -157,17 +194,19 @@ pub const Buffers = struct {
     shared: u64, // the shared expert's fixed plans: 32 members, then (items, counts) for 1..16 rows
 
     /// Sizes every buffer for `max_len` cache rows and `nch` attention chunk partials a row; the own sequence's first.
-    pub fn init(d: *const cuda.Driver, c: Config, max_len: usize, nch: usize) !Buffers {
+    pub fn init(d: *const cuda.Driver, c: Config, max_len: usize, nch: usize, carve: ?*cuda.Carveout) !Buffers {
         const own = seqSizes(c, max_len);
         const scratch = scratchSizes(c, nch);
-        var total: usize = 0;
-        for (own) |n| total += n + 256;
+        const carved = try Carved.take(carve, own[0]);
+        errdefer if (carved) |x| x.give();
+        var total = Carved.arenaBytes(carved, &own);
         for (scratch) |n| total += n + 256;
         var a: Arena = .{ .buf = try cuda.DeviceBuffer.alloc(d, total) };
         errdefer a.buf.free();
         var b: Buffers = undefined;
+        b.carved = carved;
         b.state_bytes = own[0..7].*;
-        inline for (seq_fields, own) |name, n| @field(b, name) = a.take(n);
+        inline for (seq_fields, own, 0..) |name, n, i| @field(b, name) = if (carved != null and i < 2) carved.?.kv[i].ptr else a.take(n);
         for (b.scratchPtrs(), scratch) |f, n| f.* = a.take(n);
         b.arena = a;
         return b;
@@ -179,6 +218,7 @@ pub const Buffers = struct {
         var total: usize = 0;
         for (scratch) |n| total += n + 256;
         var s: Buffers = b.*;
+        s.carved = null; // the owner gives its planes back
         s.arena = .{ .buf = try cuda.DeviceBuffer.alloc(d, total) };
         for (s.scratchPtrs(), scratch) |f, n| f.* = s.arena.take(n);
         return s;
@@ -224,28 +264,49 @@ pub const Buffers = struct {
 
     pub fn deinit(b: *Buffers) void {
         b.arena.buf.free();
+        if (b.carved) |x| x.give();
         b.* = undefined;
     }
 
-    /// The caches and recurrent state as one device range (they are the arena's first buffers).
-    pub fn stateBytes(b: *const Buffers) usize {
-        return b.dt + b.state_bytes[6] - b.k_cache;
+    /// The cache and state planes' addresses, in seq_fields' order (the KV pair may live in the carveout).
+    pub fn planes(b: *const Buffers) [7]u64 {
+        return .{ b.k_cache, b.v_cache, b.ssm, b.conv_base, b.raw, b.xc, b.dt };
     }
 
-    /// Engine.snapshot: a device copy of every cache and state buffer.
+    /// Bytes of every cache and state plane together.
+    pub fn stateBytes(b: *const Buffers) usize {
+        var total: usize = 0;
+        for (b.state_bytes) |n| total += n;
+        return total;
+    }
+
+    /// Engine.snapshot: a device copy of every cache and state plane, packed.
     pub fn snapshot(b: *const Buffers, ops: kern.Ops) !cuda.DeviceBuffer {
-        const copy = try cuda.DeviceBuffer.alloc(ops.k.d, b.stateBytes());
-        try ops.copy(copy.ptr, b.k_cache, b.stateBytes());
+        var copy = try cuda.DeviceBuffer.alloc(ops.k.d, b.stateBytes());
+        errdefer copy.free();
+        var at: usize = 0;
+        for (b.planes(), b.state_bytes) |p, n| {
+            try ops.copy(copy.ptr + at, p, n);
+            at += n;
+        }
         return copy;
     }
 
     pub fn restore(b: *const Buffers, ops: kern.Ops, saved: cuda.DeviceBuffer) !void {
-        try ops.copy(b.k_cache, saved.ptr, b.stateBytes());
+        var at: usize = 0;
+        for (b.planes(), b.state_bytes) |p, n| {
+            try ops.copy(p, saved.ptr + at, n);
+            at += n;
+        }
     }
 
     /// Engine.reset: every cache and state buffer zeroed, as a fresh request starts.
     pub fn reset(b: *const Buffers, ops: kern.Ops) !void {
-        const ptrs = [_]u64{ b.k_cache, b.v_cache, b.ssm, b.conv_base, b.raw, b.xc, b.dt };
-        for (ptrs, b.state_bytes) |p, n| try ops.fill32(p, 0, n / 4);
+        for (b.planes(), b.state_bytes) |p, n| try ops.fill32(p, 0, n / 4);
+    }
+
+    /// Bytes of the own sequence's planes in the display carveout.
+    pub fn carvedBytes(b: *const Buffers) usize {
+        return if (b.carved) |x| x.kv[0].len + x.kv[1].len else 0;
     }
 };
