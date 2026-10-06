@@ -76,6 +76,7 @@ pub fn prefill(e: *Engine, s: *Segments, prompt: []const u32, head: ?*Head, part
     var last_rows: usize = 0;
     while (at < prompt.len) {
         if (Cancel.now(cancel)) return error.Cancelled;
+        try e.beforeChunk();
         const c = segs.chunked(prompt.len - at, R, parts);
         var seg: [MAX]Seg = undefined;
         try e.copied.synchronize();
