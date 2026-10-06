@@ -60,8 +60,7 @@ pub const Engine = struct {
     history: cuda.HostBuffer, // mapped: a serial round's kernel writes its token here, by position
     history_dev: u64 = 0,
     serial: ?cuda.graph.Exec = null,
-    windows: [state.max_rows + 1]?cuda.graph.Exec = @splat(null),
-    graph_sampled: bool = false, // the graphs draw by the own sequence's rule (sample.cu), not torch.argmax
+    windows: [2][state.max_rows + 1]?cuda.graph.Exec = @splat(@splat(null)), // [greedy, sampled]: argmax or sample.cu
     done: [lookahead]cuda.Event = undefined,
     copied: cuda.Event = undefined, // the last window's uploads have read the pinned words
     sampled_ready: cuda.Event = undefined,
@@ -129,13 +128,16 @@ pub const Engine = struct {
 
     /// The serial round (window plus feed) and, for drafted rounds, a verify window of each row count, each one graph.
     fn capture(e: *Engine, windows: bool) !void {
-        e.graph_sampled = e.sampling != null;
         try e.reset();
         try e.stream.synchronize();
         e.serial = try e.record(1, true);
-        if (windows) for (1..state.max_rows + 1) |r| {
-            e.windows[r] = try e.record(@intCast(r), false);
-        };
+        if (windows) try e.captureWindows();
+    }
+
+    /// The verify windows of the bound sequence's draw mode (greedy or sampled), each one graph.
+    pub fn captureWindows(e: *Engine) !void {
+        const set = &e.windows[@intFromBool(e.sampling != null)];
+        for (1..state.max_rows + 1) |r| set[r] = try e.record(@intCast(r), false);
     }
 
     fn record(e: *Engine, rows: usize, feed: bool) !cuda.graph.Exec {
@@ -164,7 +166,7 @@ pub const Engine = struct {
     pub fn deinit(e: *Engine) void {
         e.stream.synchronize() catch {};
         if (e.serial) |*g| g.deinit();
-        for (&e.windows) |*g| if (g.*) |*x| x.deinit();
+        for (&e.windows) |*set| for (set) |*g| if (g.*) |*x| x.deinit();
         if (e.seg) |*s| s.deinit();
         for (&e.done) |*ev| ev.deinit();
         e.copied.deinit();
@@ -226,9 +228,9 @@ pub const Engine = struct {
         e.bound = s;
     }
 
-    /// Captured graphs fit the bound sequence: they hold the own sequence's buffers and draw as it draws.
+    /// Captured graphs hold the own sequence's buffers; each set draws in one mode, picked by the bound sequence's.
     pub fn graphsBound(e: *const Engine) bool {
-        return e.bound == &e.own and (e.sampling != null) == e.graph_sampled;
+        return e.bound == &e.own;
     }
 
     pub fn ops(e: *const Engine) kern.Ops {
@@ -324,8 +326,9 @@ pub const Engine = struct {
         try e.ops().upload(e.b.ids, std.mem.sliceAsBytes(host[pin_ids..][0..ids.len]));
         try e.ops().upload(e.b.meta, std.mem.sliceAsBytes(host[pin_meta..][0..4]));
         try e.copied.record(e.stream);
-        if (dump == null and e.windows[rows] != null and e.graphsBound()) {
-            try e.windows[rows].?.launchOn(e.stream);
+        const graph = e.windows[@intFromBool(e.sampling != null)][rows];
+        if (dump == null and graph != null and e.graphsBound()) {
+            try graph.?.launchOn(e.stream);
         } else {
             try e.forward(dump).window(rows);
             try e.ops().download(std.mem.sliceAsBytes(host[pin_sampled..][0..rows]), e.b.sampled);

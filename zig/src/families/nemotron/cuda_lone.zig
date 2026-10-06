@@ -1,4 +1,4 @@
-//! A lone greedy drafted stream decoded as `tensorfold run` decodes: the confidence depth rule, copies, the graphs.
+//! A lone drafted stream decoded as `tensorfold run` decodes: the confidence depth rule, copies, the graphs.
 
 const std = @import("std");
 const lanes = @import("lanes");
@@ -15,7 +15,7 @@ pub const Hooks = struct {
 /// Prefill `s` and decode it until it finishes (false) or `hooks.yield` hands it to the lane core (true).
 pub fn run(gpa: std.mem.Allocator, b: *Cuda, s: *lanes.Stream, hooks: Hooks) !bool {
     const h = b.head orelse return error.NoDraftHead;
-    if (s.sampling != null or !s.drafts) return error.GreedyDraftsOnly;
+    if (!s.drafts) return error.DraftedOnly;
     const costs = b.measured orelse return error.CostsNotMeasured;
     const be = b.backend();
     _ = try be.opening(gpa, s); // the prompt pass, its first token committed; a cancel or failure releases the stream

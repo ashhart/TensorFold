@@ -16,7 +16,7 @@ pub const prompt_rows: u32 = state.prefill_rows;
 
 pub const Options = struct { context: usize, drafts: bool, segments: usize = 1 };
 
-/// A lone greedy drafted stream's own driver: decodes it until it finishes (false) or `yield` hands it over (true).
+/// A lone drafted stream's own driver: decodes it until it finishes (false) or `yield` hands it over (true).
 pub const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool) anyerror!bool;
 
 /// What the native server drives: the lane backend, the facts its round loop reads, and how to free it.
@@ -33,13 +33,19 @@ pub const Loaded = struct {
 
 const Owned = struct { gpa: std.mem.Allocator, e: *engine.Engine, head: ?*Head, lanes: Lanes };
 
-/// The engine with greedy graphs on its own sequence (a stream holding it replays them) and the head when drafting.
+/// The engine with graphs on its own sequence in both draw modes (a stream holding it replays them), the head if drafting.
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: []const u8, o: Options) !Loaded {
     const e = try engine.Engine.init(gpa, io, ctx, dir, kernels, .{ .context = o.context, .mtp = o.drafts, .graphs = true, .sampling = null, .segments = o.segments });
     errdefer e.deinit();
     const head: ?*Head = if (o.drafts) try Head.init(e) else null;
     errdefer if (head) |h| h.deinit();
     if (head) |h| try h.capture();
+    if (!o.drafts) try e.captureWindows(); // the one-row window: Engine.init captures windows only when drafting
+    // the sampled mode's sets: a placeholder rule now, each stream's own uploaded at its prefill
+    try e.setSampling(.{ .seed = 0, .temperature = 1.0 });
+    try e.captureWindows();
+    if (head) |h| try h.capture();
+    try e.setSampling(null);
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
     own.* = .{ .gpa = gpa, .e = e, .head = head, .lanes = try Lanes.init(gpa, e, head) };

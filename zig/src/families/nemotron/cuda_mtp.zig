@@ -21,8 +21,8 @@ pub const Head = struct {
     copied: cuda.Event,
     ready: [max_chain]cuda.Event,
     absorb_graphs: [state.max_rows + 1]?cuda.graph.Exec = @splat(null),
-    first_graphs: [state.max_rows + 1]?cuda.graph.Exec = @splat(null),
-    chain_graphs: [max_chain + 1]?cuda.graph.Exec = @splat(null),
+    first_graphs: [2][state.max_rows + 1]?cuda.graph.Exec = @splat(@splat(null)), // [greedy, sampled] draws
+    chain_graphs: [2][max_chain + 1]?cuda.graph.Exec = @splat(@splat(null)),
     k_cache: u64,
     v_cache: u64,
     meta: u64,
@@ -84,7 +84,7 @@ pub const Head = struct {
     pub fn deinit(h: *Head) void {
         h.e.stream.synchronize() catch {};
         h.e.head = null;
-        for ([_][]?cuda.graph.Exec{ &h.absorb_graphs, &h.first_graphs, &h.chain_graphs }) |set| for (set) |*g| if (g.*) |*x| x.deinit();
+        for ([_][]?cuda.graph.Exec{ &h.absorb_graphs, &h.first_graphs[0], &h.first_graphs[1], &h.chain_graphs[0], &h.chain_graphs[1] }) |set| for (set) |*g| if (g.*) |*x| x.deinit();
         for (&h.ready) |*r| r.deinit();
         h.copied.deinit();
         h.pinned.free();
@@ -186,14 +186,15 @@ pub const Head = struct {
         try e.forward(null).tri.keyed(h.vals, h.cand, h.meta + 4, e.b.ids + j * 4, h.fp, h.fp, h.probs + (j - 1) * 4, j - 1, 1, count, k);
     }
 
-    /// MTPHead.capture: levels 0 and 1 at every kept-row count, later levels at one row, each one graph.
+    /// MTPHead.capture: levels 0 and 1 at every kept-row count, later levels at one row, in the bound draw mode.
     pub fn capture(h: *Head) !void {
         const s = h.e.stream;
+        const m = @intFromBool(h.e.sampling != null);
         for (1..state.max_rows + 1) |k| {
-            h.absorb_graphs[k] = try record(s, h, @intCast(k), 0);
-            h.first_graphs[k] = try record(s, h, @intCast(k), 1);
+            if (h.absorb_graphs[k] == null) h.absorb_graphs[k] = try record(s, h, @intCast(k), 0);
+            h.first_graphs[m][k] = try record(s, h, @intCast(k), 1);
         }
-        for (2..max_chain + 1) |j| h.chain_graphs[j] = try record(s, h, 1, @intCast(j));
+        for (2..max_chain + 1) |j| h.chain_graphs[m][j] = try record(s, h, 1, @intCast(j));
     }
 
     fn record(s: cuda.Stream, h: *Head, rows: usize, j: usize) !cuda.graph.Exec {
@@ -227,7 +228,8 @@ pub const Head = struct {
 
     /// MTPHead.level: queue level j of this round (0: absorb only) into the engine's ids[j].
     pub fn launch(h: *Head, j: usize) !void {
-        const g = if (!h.e.graphsBound()) null else if (j == 0) h.absorb_graphs[h.keep] else if (j == 1) h.first_graphs[h.keep] else h.chain_graphs[j];
+        const m = @intFromBool(h.e.sampling != null);
+        const g = if (!h.e.graphsBound()) null else if (j == 0) h.absorb_graphs[h.keep] else if (j == 1) h.first_graphs[m][h.keep] else h.chain_graphs[m][j];
         if (g) |x| try x.launchOn(h.e.stream) else try h.level(if (j <= 1) h.keep else 1, j);
         if (j > 0) {
             try h.ready[j - 1].record(h.e.stream);

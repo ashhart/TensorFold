@@ -301,10 +301,11 @@ pub const LaneHost = struct {
         emit(job, .{ .prefilled = 0 });
     }
 
-    /// A greedy drafted request alone in the engine, with nothing waiting: the backend's own driver takes it.
+    /// A drafted request alone in the engine, with nothing waiting: the backend's own driver takes it (sampled if it can).
     fn loneFits(h: *LaneHost, job: *Job) bool {
         const r = job.request;
-        if (h.lone == null or r.sampling != null or !r.drafts or r.think_budget > 0 or r.loop_guard or r.call != null or r.structure != null) return false;
+        const lone = h.lone orelse return false;
+        if ((r.sampling != null and !lone.sampled) or !r.drafts or r.think_budget > 0 or r.loop_guard or r.call != null or r.structure != null) return false;
         h.lock();
         defer h.unlock();
         return h.admitted.items.len == 1 and h.queued.items.len == 0 and h.cancels.items.len == 0 and h.core.activeCount() == 0;

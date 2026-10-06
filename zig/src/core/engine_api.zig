@@ -207,6 +207,7 @@ pub const Engine = struct {
 /// A backend's own driver for a lone greedy stream (the GPU round), which LaneHost runs while the stream is alone.
 pub const Lone = struct {
     ctx: *anyopaque,
+    sampled: bool = false, // it drives sampled streams too
     /// Prefills `s` and decodes it until it finishes (false) or `hooks.yield` hands it to the lane core (true).
     run: *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: LoneHooks) anyerror!bool,
 };

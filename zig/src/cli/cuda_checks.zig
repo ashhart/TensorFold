@@ -116,7 +116,7 @@ pub fn rounds(e: *nemotron.Engine, prompt: []const u32, n: usize) !u8 {
     for ([_]bool{ true, false, true, false }) |serial| {
         const first = try e.prefill(prompt, null, null);
         try e.upload(first);
-        const g = if (serial) e.serial.? else e.windows[1].?;
+        const g = if (serial) e.serial.? else e.windows[@intFromBool(e.sampling != null)][1].?;
         try a.record(e.stream);
         for (0..n) |_| try g.launchOn(e.stream);
         try b.record(e.stream);

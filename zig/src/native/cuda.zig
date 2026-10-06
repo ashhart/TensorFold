@@ -153,7 +153,7 @@ const Host = struct {
     core: lanes.Engine,
     host: api.LaneHost,
     startup: []u8 = &.{},
-    lone: ?LoneRun = null, // the family's driver for a lone greedy drafted stream, called with `family`
+    lone: ?LoneRun = null, // the family's driver for a lone drafted stream, called with `family`
 
     fn close(p: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(p));
@@ -190,7 +190,7 @@ const Host = struct {
         h.host = api.LaneHost.init(h.gpa, io, &h.core, info);
         h.host.memory = if (h.gpu != null) .{ .read = readMemory } else null;
         h.host.explain = explain;
-        if (h.lone != null) h.host.lone = .{ .ctx = h, .run = loneRun };
+        if (h.lone != null) h.host.lone = .{ .ctx = h, .run = loneRun, .sampled = true };
         try h.host.start();
     }
 
