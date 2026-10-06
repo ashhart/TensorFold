@@ -121,6 +121,7 @@ pub const Engine = struct {
         r.serial = true;
         r.xnew = true;
         r.dense = true;
+        r.hc_up = true;
         r.event = try device.sharedEvent();
         try r.compile(dump_dir);
         r.sel = try Select.init(r, MAXR);

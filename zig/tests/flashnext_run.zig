@@ -229,6 +229,7 @@ pub fn main(init: std.process.Init) !void {
     r.split = std.c.getenv("FZ_SPLIT") != null;
     r.gdn_step = std.c.getenv("FZ_GDN_STEP") != null;
     r.hc_mma = std.c.getenv("FZ_HC_MMA") != null;
+    r.hc_up = std.c.getenv("FZ_HC_UP") != null or std.c.getenv("FZ_HCCHECK") != null;
     r.event = try device.sharedEvent();
     r.dense = r.xnew and std.c.getenv("FZ_DENSE") != null;
     r.dense_target = r.dense and std.c.getenv("FZ_DENSE_TARGET") != null;
@@ -443,6 +444,11 @@ pub fn main(init: std.process.Init) !void {
     }
     if (std.c.getenv("FZ_PROFILE") != null) {
         if (std.c.getenv("TF_FLASHNEXT_TP")) |path| r.tp = try fz.Tp2.init(arena, r.device, std.mem.span(path));
+        var hcskips: std.ArrayList(u32) = .empty; // FZ_HCSKIP=1,2,4: the profile again under each hc knock-out
+        if (std.c.getenv("FZ_HCSKIP")) |v| {
+            var it = std.mem.tokenizeScalar(u8, std.mem.span(v), ',');
+            while (it.next()) |x| try hcskips.append(arena, try std.fmt.parseInt(u32, x, 10));
+        } else try hcskips.append(arena, 0);
         const names = [_][]const u8{ "none", "hc", "dense", "experts", "router", "gdn", "attn", "ple", "head", "tp" };
         var toks: [MAXR]u32 = undefined;
         for (0..MAXR) |i| toks[i] = @intCast(ref.object.get("prompt").?.array.items[i].integer);
@@ -465,7 +471,19 @@ pub fn main(init: std.process.Init) !void {
             }
             return;
         }
-        for ([_]usize{ 1, 4, 8 }) |rows| {
+        var ups: std.ArrayList(bool) = .empty; // FZ_HC_UP=0,1: the profile with the recorded up projection, then fz_hc_up
+        if (std.c.getenv("FZ_HC_UP")) |v| {
+            var it = std.mem.tokenizeScalar(u8, std.mem.span(v), ',');
+            while (it.next()) |x| try ups.append(arena, !std.mem.eql(u8, x, "0"));
+        } else try ups.append(arena, false);
+        var prow: std.ArrayList(usize) = .empty; // FZ_PROFILE_ROWS=2,3: the windows' widths (default 1, 4, 8)
+        if (std.c.getenv("FZ_PROFILE_ROWS")) |v| {
+            var it = std.mem.tokenizeScalar(u8, std.mem.span(v), ',');
+            while (it.next()) |x| try prow.append(arena, try std.fmt.parseInt(usize, x, 10));
+        } else try prow.appendSlice(arena, &.{ 1, 4, 8 });
+        for (ups.items) |up| for (hcskips.items) |hs| for (prow.items) |rows| {
+            r.hc_up = up;
+            r.hcskip = hs;
             var base: f64 = 0;
             for (names, 0..) |name, c| {
                 const only = std.c.getenv("FZ_PROFILE_ONLY") != null; // every class but this one knocked out
@@ -474,9 +492,10 @@ pub fn main(init: std.process.Init) !void {
                 for (0..20) |_| try m.window(toks[0..rows], &pk);
                 const ms = m.gpu_seconds * 1e3 / 20;
                 if (c == 0) base = ms;
-                std.debug.print("rows {d}: without {s:8} {d:6.2} ms GPU  ({d:5.2} ms)\n", .{ rows, name, ms, base - ms });
+                std.debug.print("hc_up {d} hcskip {d} rows {d}: without {s:8} {d:6.2} ms GPU  ({d:5.2} ms)\n", .{ @intFromBool(up), hs, rows, name, ms, base - ms });
             }
-        }
+        };
+        r.hcskip = 0;
         r.skip = 0;
         for ([_]usize{ 1, 4, 8 }) |rows| { // the MTP head: a chain step (one row) and a window's catch-up
             m.gpu_seconds = 0;
@@ -562,6 +581,45 @@ pub fn main(init: std.process.Init) !void {
             m.t = ta;
             std.debug.print("{d} lanes: one group {d:.2} ms, two groups in a row {d:.2} ms ({d:.2}x), two groups at once {d:.2} ms ({d:.2}x)\n", .{ rows, wall[0], wall[1], wall[1] / wall[0], wall[2], wall[2] / wall[0] });
         }
+        return;
+    }
+    if (std.c.getenv("FZ_HCCHECK") != null) { // fz_hc_up against the recorded up projection: every row's logits and streams, bit for bit
+        const want0 = ref.object.get("tokens").?.array.items;
+        const pr = ref.object.get("prompt").?.array.items;
+        var pk: [MAXR]u32 = undefined;
+        m.reset();
+        for (pr) |x| {
+            try m.window(&.{@intCast(x.integer)}, &pk);
+            m.keepRows(&.{@intCast(x.integer)}, 1);
+        }
+        const keep = try gpa.alloc(u8, MAXR * VOCAB * 2);
+        defer gpa.free(keep);
+        const keep_h = try gpa.alloc(u8, MAXR * WIDE * 2);
+        defer gpa.free(keep_h);
+        const Diff = struct {
+            fn of(a: []const u8, b: Buf, n: usize) usize {
+                var d: usize = 0;
+                const c = b.b.contents()[b.off .. b.off + 2 * n];
+                for (0..n) |i| d += @intFromBool(a[2 * i] != c[2 * i] or a[2 * i + 1] != c[2 * i + 1]);
+                return d;
+            }
+        };
+        var toks: [MAXR]u32 = undefined;
+        for (0..MAXR) |i| toks[i] = @intCast(want0[i].integer);
+        var bad: usize = 0;
+        for (1..MAXR + 1) |rows| {
+            r.hc_up = false;
+            try m.window(toks[0..rows], &pk);
+            @memcpy(keep[0 .. rows * VOCAB * 2], m.t.logits.b.contents()[0 .. rows * VOCAB * 2]);
+            @memcpy(keep_h[0 .. rows * WIDE * 2], m.last.b.contents()[m.last.off .. m.last.off + rows * WIDE * 2]);
+            r.hc_up = true;
+            try m.window(toks[0..rows], &pk);
+            const dl = Diff.of(keep, m.t.logits, rows * VOCAB);
+            const dh = Diff.of(keep_h, m.last, rows * WIDE);
+            std.debug.print("rows {d}: {d} of {d} logits and {d} of {d} stream values differ\n", .{ rows, dl, rows * VOCAB, dh, rows * WIDE });
+            bad += dl + dh;
+        }
+        std.debug.print("hc check: {s}\n", .{if (bad == 0) "bit-identical" else "DIFFERENT"});
         return;
     }
     if (std.c.getenv("FZ_GCHECK") != null) { // grouped or fused experts against fz_xgu/fz_xdown: every row's logits, bit for bit
@@ -1565,3 +1623,4 @@ pub fn main(init: std.process.Init) !void {
     }
     if (same != want.len or bad != 0) std.process.exit(1);
 }
+

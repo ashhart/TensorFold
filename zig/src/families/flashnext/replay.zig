@@ -798,6 +798,87 @@ const xnew_source =
     \\}
 ;
 
+/// The hyper-connection's up projection for windows of 3-8 rows (`Run.hc_up`), compiled after the recorded
+/// qa_hc_down_row header: qa_hc_up's one-row sums (thread (group, output): one group's product sum; each output's
+/// chain over the groups; the sigmoid times the normed stream; the streams' sum) for 4 rows and 16 dims of every
+/// stream a threadgroup, each thread's codes read once for its rows. Each threadgroup adds the down projection's
+/// split partials for its rows, as the recorded tiles do, but there are half as many threadgroups and no serial MMA
+/// loop. The same bits.
+const hc_up_source =
+    \\inline void fz_codes6w(thread const uint* w, thread float* q) {
+    \\  for (int m = 0; m < 4; m++) {
+    \\    const int bit = 48 * m, word = bit >> 5, shift = bit & 31;
+    \\    const ulong v = ((ulong(w[word + 1]) << 32) | ulong(w[word])) >> shift;
+    \\    for (int i = 0; i < 8; i++) q[8 * m + i] = float(uint(v >> (6 * i)) & 63u);
+    \\  }
+    \\}
+    \\[[max_total_threads_per_threadgroup(640)]]
+    \\[[kernel]] void fz_hc_up(const device bfloat* HN [[buffer(0)]], const device float* SSP [[buffer(1)]],
+    \\    const device float* NW [[buffer(2)]], const device float* PART [[buffer(3)]], const device uint* QW [[buffer(4)]],
+    \\    const device bfloat* QS [[buffer(5)]], const device bfloat* QB [[buffer(6)]], const constant float* eps [[buffer(7)]],
+    \\    const constant int* rows [[buffer(8)]], device bfloat* MIXED [[buffer(9)]], device bfloat* INJOUT [[buffer(10)]],
+    \\    constant uint& NDR [[buffer(11)]], uint3 thread_position_in_threadgroup [[thread_position_in_threadgroup]],
+    \\    uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]]) {
+    \\  constexpr int S = 4, D = 2560, LOW = 320, BITS = 6, GS = 32, KS = 10, GL = LOW / 32, DW = 16, RT = 4;
+    \\  constexpr int W = S * D, NO = S * DW, NT = GL * NO;
+    \\  const int ND = int(NDR);
+    \\  const int t = int(thread_position_in_threadgroup.x);
+    \\  const int R = rows[0];
+    \\  const int d0 = int(threadgroup_position_in_grid.x) * DW;
+    \\  const int rb = int(threadgroup_position_in_grid.y) * RT;
+    \\  const int nr = min(RT, R - rb);
+    \\  threadgroup float act[RT][LOW];
+    \\  threadgroup float vs[RT][GL];
+    \\  threadgroup float ps[GL][NO][RT];
+    \\  threadgroup float prod[S][DW][RT];
+    \\  const int g = t / NO, n = t % NO;
+    \\  const int o = (n / DW) * D + d0 + n % DW;
+    \\  uint w6[6];
+    \\  for (int i = 0; i < 6; i++) w6[i] = QW[size_t(o) * (LOW * BITS / 32) + g * BITS + i];
+    \\  for (int i = t; i < nr * ND; i += NT) {
+    \\    const int r = i / ND, cc = i % ND;
+    \\    float v = 0.0f;
+    \\    for (int k = 0; k < KS; k++) v += PART[(size_t(k) * R + rb + r) * ND + cc];
+    \\    const float v4 = float(bfloat(float(bfloat(v)) / float(S)));
+    \\    if (cc < LOW) act[r][cc] = bsilu(v4);
+    \\    else if (threadgroup_position_in_grid.x == 0) INJOUT[(rb + r) * S + (cc - LOW)] = bfloat(2.0f * bsig(v4));
+    \\  }
+    \\  threadgroup_barrier(mem_flags::mem_threadgroup);
+    \\  if (t < nr * GL) vs[t / GL][t % GL] = scalar_sum(&act[t / GL][32 * (t % GL)]);
+    \\  {
+    \\    float q[32];
+    \\    fz_codes6w(w6, q);
+    \\    float p[RT];
+    \\    for (int r = 0; r < RT; r++) p[r] = 0.0f;
+    \\    for (int st = 0; st < 4; st++)
+    \\      for (int k = 0; k < 8; k++) {
+    \\        const int i = 8 * (k / 2) + 2 * st + k % 2;
+    \\        for (int r = 0; r < RT; r++) p[r] = fma(q[i], act[r][32 * g + i], p[r]);
+    \\      }
+    \\    for (int r = 0; r < RT; r++) ps[g][n][r] = p[r];
+    \\  }
+    \\  threadgroup_barrier(mem_flags::mem_threadgroup);
+    \\  if (t < NO * nr) {
+    \\    const int n2 = t % NO, r = t / NO, s = n2 / DW, o2 = s * D + d0 + n2 % DW;
+    \\    float acc = 0.0f;
+    \\    for (int gg = 0; gg < GL; gg++)
+    \\      acc = fma(float(QB[size_t(o2) * (LOW / GS) + gg * 32 / GS]), vs[r][gg],
+    \\                fma(float(QS[size_t(o2) * (LOW / GS) + gg * 32 / GS]), ps[gg][n2][r], acc));
+    \\    const float normed = float(bfloat((float(HN[size_t(rb + r) * W + o2]) * stream_rinv(SSP, rb + r, s, D / 256, S, D, eps[0]))
+    \\                                      * NW[o2]));
+    \\    prod[s][n2 % DW][r] = float(bfloat(bsig(float(bfloat(acc))) * normed));
+    \\  }
+    \\  threadgroup_barrier(mem_flags::mem_threadgroup);
+    \\  if (t < DW * nr) {
+    \\    const int d = t % DW, r = t / DW;
+    \\    float total = 0.0f;
+    \\    for (int k = 0; k < S; k++) total += prod[k][d][r];
+    \\    MIXED[size_t(rb + r) * D + d0 + d] = bfloat(total / float(S));
+    \\  }
+    \\}
+    \\
+;
+
 pub fn readAll(fd: std.c.fd_t, dest: []u8, at: usize) !void {
     var done: usize = 0;
     while (done < dest.len) {
@@ -839,6 +920,9 @@ pub const Run = struct {
     dense: bool = false,
     dense_target: bool = false,
     skip: u32 = 0,
+    hcskip: u32 = 0, // FZ_HCSKIP: hyper-connection knock-outs by kernel (1 norms, 2 downs, 4 ups)
+    hc_up: bool = false, // fz_hc_up for the hyper-connection's up projection at 3-8 rows (the recorded kernels' bits)
+    hc_up_pipe: mtl.Pipeline = undefined,
     split: bool = false,
     gdn_step: bool = false,
     hc_mma: bool = false,
@@ -1013,6 +1097,49 @@ pub const Run = struct {
             r.gdown_pipe = try mtl.Pipeline.init(r.device, lib, "fz_gdown", false);
             r.ul = .{ .b = try r.buffer((1 + 2 * 320 + 320 * 32) * 4) };
         }
+        if (r.hc_up) try r.compileHc();
+    }
+
+    /// fz_hc_up after the recorded qa_hc_down_row header, refused unless every recorded qa_hc_up variant has the
+    /// constants it takes.
+    fn compileHc(r: *Run) !void {
+        const a = r.arena;
+        var header: ?[]const u8 = null;
+        var it = r.variants.iterator();
+        while (it.next()) |kv| {
+            const name = kv.key_ptr.*;
+            if (std.mem.indexOf(u8, name, "qa_hc_down_row") != null) {
+                const text = try fileText(a, kv.value_ptr.*.file);
+                header = text[0 .. std.mem.indexOf(u8, text, "[[max_total_threads_per_threadgroup") orelse return error.NoKernel];
+            }
+            if (std.mem.indexOf(u8, name, "qa_hc_up_") == null) continue;
+            const text = try fileText(a, kv.value_ptr.*.file);
+            for ([_][]const u8{ "int S = 4;", "int D = 2560;", "int BITS = 6;", "int GS = 32;", "int LOW = 320;", "int KS = 10;" }) |c|
+                if (std.mem.indexOf(u8, text, c) == null) return error.HcConstants;
+        }
+        const src = try std.mem.concat(a, u8, &.{ header orelse return error.NoHcHeader, hc_up_source });
+        const lib = try mtl.Library.fromSource(r.device, src, mtl.CompileOptions.mlx());
+        r.hc_up_pipe = try mtl.Pipeline.init(r.device, lib, "fz_hc_up", false);
+    }
+
+    fn fileText(a: std.mem.Allocator, path: []const u8) ![]const u8 {
+        const f = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(a, "{s}", .{path}, 0));
+        return f.bytes[0..f.size];
+    }
+
+    /// A hyper-connection's down then up projection at `as_rows` from normed streams `hn` (sums of squares in `ssp`):
+    /// the mixed rows and inject gates; with `hc_up` the up projection of 3-8 rows on fz_hc_up (the same bits).
+    pub fn hcProject(r: *Run, down: []const u8, up: []const u8, as_rows: usize, hn: Buf, ssp: Buf, hc: Hc, eps: Buf, rows: Buf, part: Buf, mixed: Buf, inj: Buf) !void {
+        try r.callAs(down, as_rows, &.{ hn, ssp, hc.scale, hc.dw, hc.ds, hc.db, eps, rows }, &.{part});
+        const ins = [_]Buf{ hn, ssp, hc.scale, part, hc.uw, hc.us, hc.ub, eps, rows };
+        if (!r.hc_up or as_rows < 3 or as_rows > 8) return r.callAs(up, as_rows, &ins, &.{ mixed, inj });
+        if (r.skip & class(up) != 0 or r.hcskip & 4 != 0) return;
+        const nd: u32 = @intCast(hc.dw.b.length() / (WIDE * 6 / 8));
+        r.enc.setPipeline(r.hc_up_pipe);
+        for (ins ++ [_]Buf{ mixed, inj }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
+        r.enc.setBytes(std.mem.asBytes(&nd), 11);
+        r.enc.dispatchThreads(mtl.Size.of(D / 16 * 640, (as_rows + 3) / 4, 1), mtl.Size.of(640, 1, 1));
+        if (!r.serial) r.enc.barrier();
     }
 
     pub fn strings(a: std.mem.Allocator, v: std.json.Value) ![][]const u8 {
@@ -1236,6 +1363,9 @@ pub const Run = struct {
     /// `role` launched as recorded at `as_rows` rows (its kernel reads the row count at run time).
     pub fn callAs(r: *Run, role: []const u8, as_rows: usize, ins: []const Buf, outs: []const Buf) !void {
         if (r.skip & class(role) != 0) return;
+        if (r.hcskip != 0) for ([_][]const u8{ "hc_norm", "hc_down", "hc_up" }, 0..) |n, i| {
+            if (r.hcskip & (@as(u32, 1) << @intCast(i)) != 0 and std.mem.indexOf(u8, role, n) != null) return;
+        };
         var key: [96]u8 = undefined;
         const name = try std.fmt.bufPrint(&key, "{s}|{d}", .{ role, as_rows });
         const s = r.roles.get(name) orelse {
@@ -1655,8 +1785,7 @@ pub const Model = struct {
     pub fn hcProject(m: *Model, hn: Buf, hc: Hc, down: []const u8, up: []const u8, inj: Buf) !void {
         const t = &m.t;
         const as_rows = if (m.r.hc_mma and m.r.rows > 1) 8 else m.r.rows;
-        try m.r.callAs(down, as_rows, &.{ hn, t.ssp, hc.scale, hc.dw, hc.ds, hc.db, t.eps, t.rows }, &.{t.part});
-        try m.r.callAs(up, as_rows, &.{ hn, t.ssp, hc.scale, t.part, hc.uw, hc.us, hc.ub, t.eps, t.rows }, &.{ t.mixed, inj });
+        try m.r.hcProject(down, up, as_rows, hn, t.ssp, hc, t.eps, t.rows, t.part, t.mixed, inj);
     }
 
     pub fn grouped(m: *Model, h: Buf, out: Buf) !void {
