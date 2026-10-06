@@ -228,28 +228,29 @@ test "the checked-in role table resolves every width serve asks for, with its so
         }
         try std.testing.expect(found);
     }
-    // the widths serve asks for: the stems callRows and callAs launch, at 1..16, 7, 9 and 10-16 included
-    const stems = [_][]const u8{
-        "qa_embed_rows@embed",             "qa_ple_lookup@ple",                "q4_ple_gate@ple",
-        "q4_ple_conv@ple",                 "q4_hc_norm_none#[10240]",          "q4_hc_norm_plain#[10240]",
-        "q4_hc_norm_grouped#[10240]",      "qa_hc_down@ahc",                   "qa_hc_up@ahc",
-        "qa_hc_down@mhc",                  "qa_hc_up@mhc",                     "qa_hc_down@mix",
-        "qa_hc_up@mix",                    "lane_qmm_bytes_grouped@gdn.in",    "lane_qmm_bytes_grouped@gdn.out",
-        "lane_qmm_bytes_grouped@att.proj", "lane_qmm_bytes_grouped@att.o",     "lane_qmm_bytes_grouped@ple.kv",
-        "lane_qmm_bytes_grouped@head",     "q4_gdn@gdn",                       "q4_attn_prep@att",
-        "q4_attn_parts#[24, 256]",         "q4_attn_merge_gate#[24, 16, 256]", "q4_router_float@moe",
-        "mtp:qa_embed_rows@embed",         "mtp:q4_attn_prep@mtp.att",         "mtp:q4_router_float@mtp.moe",
-    };
-    for (stems) |stem| {
-        var site_buf: [128]u8 = undefined;
-        for (1..17) |w| {
-            const site = try std.fmt.bufPrint(&site_buf, "{s}|{d}", .{ stem, w });
-            var hit = false;
-            for (table.entries) |e| {
-                if (std.mem.eql(u8, e.site, site)) hit = true;
-            }
-            try std.testing.expect(hit);
+    // every stem the table carries resolves at every width serve asks for, 7, 9 and 10-16 included
+    var stems: std.StringArrayHashMapUnmanaged([16]bool) = .empty;
+    defer stems.deinit(std.testing.allocator);
+    for (table.entries) |e| {
+        const at = std.mem.lastIndexOf(u8, e.site, "|") orelse return error.BadSite;
+        const w = try std.fmt.parseInt(u16, e.site[at + 1 ..], 10);
+        if (w == 0 or w > 16) return error.BadWidth;
+        const gop = try stems.getOrPut(std.testing.allocator, e.site[0..at]);
+        if (!gop.found_existing) gop.value_ptr.* = @splat(false);
+        gop.value_ptr.*[w - 1] = true;
+    }
+    for (stems.values()) |set| {
+        for (0..16) |w| try std.testing.expect(set[w]);
+    }
+    // the indexer trio's kernels are in the table, so Select.init finds its variants and long-context block
+    // selection works without a dump: its launches bind the trio directly, with run-time grids and shapes
+    const trio = [_][]const u8{ "q4_idx_pool_", "q4_idx_scores_", "q4_idx_select_" };
+    for (trio) |t| {
+        var hit = false;
+        for (table.entries) |e| {
+            if (std.mem.indexOf(u8, e.function, t) != null) hit = true;
         }
+        try std.testing.expect(hit);
     }
 }
 

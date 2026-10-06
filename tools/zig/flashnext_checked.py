@@ -78,25 +78,37 @@ def main() -> int:
         v["outputs"] = var["outputs"]
         v["meta"] = var["meta"]
 
-    # fill widths the dump did not record: the engine's callRows rule, the axis that grows from |1 to |2.
-    # Only stems with a recorded (|1, |2) pair of the same function scale; context-shaped sites (the indexer's
-    # pooled counts) and single-width stems stay at their recorded widths, as the dump path behaves today.
+    # fill widths the dump did not record, per function group: the engine's callRows rule, the axis that grows
+    # between the group's two smallest widths. Roles with a single recorded width fill as a constant. The indexer
+    # trio's roles are never launched (the select path binds its kernels directly with run-time grids), so their
+    # fills exist so every role resolves; the trio's variants are what give Select.init its kernels at any context.
     stems: dict[str, dict[int, dict]] = {}
     for k, v in roles.items():
         stem, _, rows = k.rpartition("|")
         stems.setdefault(stem, {})[int(rows)] = v
     for stem, at in stems.items():
-        if not (1 in at and 2 in at and at[1]["function"] == at[2]["function"]):
-            continue
-        for w in range(1, args.maxw + 1):
-            if w in at:
+        groups: dict[str, dict[int, dict]] = {}
+        for w, v in at.items():
+            groups.setdefault(v["function"], {})[w] = v
+        for gw in groups.values():
+            ws = sorted(gw)
+            if len(ws) < 2:
+                # a single recorded width: the other widths take it as a constant (the kernel reads its true
+                # shape at run time; the trio's roles are never launched through the table anyway)
+                only = gw[ws[0]]
+                for w in range(1, args.maxw + 1):
+                    if w not in at:
+                        at[w] = {**only, "derived": True}
                 continue
-            grid = list(at[1]["grid"])
-            for axis in (0, 1, 2):
-                if at[2]["grid"][axis] != at[1]["grid"][axis]:
-                    grid[axis] = at[1]["grid"][axis] * w
-                    break
-            at[w] = {**at[1], "grid": grid, "derived": True}
+            w0, w1 = ws[0], ws[1]
+            axis = next((a for a in (0, 1, 2) if gw[w1]["grid"][a] != gw[w0]["grid"][a]), None)
+            for w in range(1, args.maxw + 1):
+                if w in at:
+                    continue
+                grid = list(gw[w0]["grid"])
+                if axis is not None:
+                    grid[axis] = gw[w0]["grid"][axis] * w // w0
+                at[w] = {**gw[w0], "grid": grid, "derived": True}
 
     # the checked-in sources: every recorded kernel file, verbatim, plus the no-tensor-unit lane variants
     out_k = args.repo / "zig" / "kernels" / "metal" / "flashnext"
