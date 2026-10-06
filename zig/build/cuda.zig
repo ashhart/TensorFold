@@ -100,7 +100,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     b.installArtifact(b.addExecutable(.{ .name = "tf-cuda-test", .root_module = runner }));
 }
 
-/// Host unit tests of the CUDA runtime, the backend-neutral core and the CUDA family (no GPU), on any host.
+/// Host unit tests of the CUDA runtime, the backend-neutral core, the lane core and the CUDA family (no GPU), on any host.
 pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, step: *std.Build.Step) void {
     const host = b.graph.host;
     const cuda = runtime(b, host, .debug, &.{});

@@ -9,6 +9,7 @@ const layers = @import("layers.zig");
 const tree = @import("tree.zig");
 const encoder = @import("encoder.zig");
 const Sampling = @import("lanes").sampling.Sampling;
+const fullVocabulary = @import("lanes").gpu_full.fullVocabulary;
 
 const Buffer = mtl.Buffer;
 pub const Enc = encoder.Enc;
@@ -212,12 +213,12 @@ pub const Forward = struct {
                 e.bytes(@as(u32, @intFromBool(map != null)), 4);
                 e.run(.{ 1024 * rows, 1, 1 }, .{ 1024, 1, 1 });
             },
-            .sampled => |d| self.sample(e, rows, logits_off, map, d, out, out_off),
+            .sampled => |d| self.sample(e, rows, vocab, logits_off, map, d, out, out_off),
         }
     }
 
-    /// tf_gpu_sample over `rows` rows: one 1024-thread threadgroup a row, settings as gpu_sampling.sample_rows packs them.
-    fn sample(self: Forward, e: *Enc, rows: usize, logits_off: usize, map: ?Buffer, d: Sampled, out: Buffer, out_off: usize) void {
+    /// tf_gpu_sample over `rows` rows (tf_sample_full past its 1,024 candidates): a 1024-thread threadgroup a row.
+    fn sample(self: Forward, e: *Enc, rows: usize, vocab: usize, logits_off: usize, map: ?Buffer, d: Sampled, out: Buffer, out_off: usize) void {
         var seeds: [2 * st.max_rows]u32 = @splat(0);
         var positions: [st.max_rows]u32 = @splat(0);
         var cfgs: [4 * st.max_rows]f32 = @splat(0);
@@ -234,13 +235,20 @@ pub const Forward = struct {
             caps[r] = t.top_k;
         }
         const n = @max(rows, 8);
-        e.pipe(if (map != null) self.k.get("sample_ids") else self.k.get("sample"));
+        const whole = fullVocabulary(t);
+        if (whole) {
+            e.pipe(if (map != null) self.k.get("tf_sample_full_ids") else self.k.get("tf_sample_full"));
+        } else e.pipe(if (map != null) self.k.get("sample_ids") else self.k.get("sample"));
         e.buf(self.s.logits, logits_off, 0);
         e.e.setBytes(std.mem.sliceAsBytes(seeds[0 .. 2 * n]), 1);
         e.e.setBytes(std.mem.sliceAsBytes(positions[0..n]), 2);
         e.e.setBytes(std.mem.sliceAsBytes(cfgs[0 .. 4 * n]), 3);
         e.e.setBytes(std.mem.sliceAsBytes(caps[0..n]), 4);
-        if (map) |m| {
+        if (whole) {
+            e.buf(out, out_off, 5);
+            e.buf(map orelse out, 0, 6);
+            e.bytes(@as(u32, @intCast(vocab)), 7);
+        } else if (map) |m| {
             e.buf(m, 0, 5);
             e.buf(out, out_off, 6);
         } else e.buf(out, out_off, 5);

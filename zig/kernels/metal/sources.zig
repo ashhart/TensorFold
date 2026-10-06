@@ -18,6 +18,9 @@ pub const nemotron_round = @embedFile("nemotron_round.metal");
 /// The MTP head's one-row kernels fused (bit-identical to the kernels they replace).
 pub const nemotron_head = @embedFile("nemotron_head.metal");
 
+/// Keyed draws over the whole vocabulary where tf_gpu_sample would keep only its 1,024 candidates.
+pub const nemotron_sample = @embedFile("nemotron_sample.metal");
+
 /// The NAX helpers the prefill files include (`#include "../nax.h"`, inlined before compiling).
 pub const nax = @embedFile("nax.h");
 

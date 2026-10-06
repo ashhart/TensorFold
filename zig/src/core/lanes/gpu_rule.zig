@@ -28,9 +28,10 @@ pub fn argmax(values: []const f32) u32 {
     return @intCast(best);
 }
 
-const Cand = struct { v: f32, i: u32 };
+pub const Cand = struct { v: f32, i: u32 };
 
-fn better(_: void, a: Cand, b: Cand) bool {
+/// The kernel's candidate order: value descending, then id ascending.
+pub fn better(_: void, a: Cand, b: Cand) bool {
     const ka = key(a.v);
     const kb = key(b.v);
     return ka > kb or (ka == kb and a.i < b.i);
@@ -97,6 +98,11 @@ pub fn sample(gpa: Allocator, logits: []const f32, s: ?Sampling, position: u32, 
 fn threadSum(all: []const Cand, m: f32) f32 {
     var lanes: [1024]f32 = @splat(0.0);
     for (all, 0..) |c, i| lanes[i % 1024] += @exp(c.v - m);
+    return lanesSum(&lanes);
+}
+
+/// 1024 threads' partial sums reduced as the kernels reduce them: a 32-lane butterfly, then simdgroups in order.
+pub fn lanesSum(lanes: *const [1024]f32) f32 {
     var z: f32 = 0.0;
     for (0..32) |g| {
         var simd: [32]f32 = lanes[g * 32 ..][0..32].*;

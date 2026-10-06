@@ -10,6 +10,7 @@ pub const fill = @import("fill.zig");
 pub const shape = @import("shape.zig");
 pub const plan_lanes = @import("plan_lanes.zig");
 pub const gpu_rule = @import("gpu_rule.zig");
+pub const gpu_full = @import("gpu_full.zig");
 pub const depth = @import("depth.zig");
 pub const config = @import("config.zig");
 pub const stream = @import("stream.zig");
@@ -30,4 +31,5 @@ pub const SuffixLookup = proposer.SuffixLookup;
 test {
     std.testing.refAllDecls(@This());
     _ = @import("engine_test.zig");
+    _ = @import("gpu_full_test.zig");
 }

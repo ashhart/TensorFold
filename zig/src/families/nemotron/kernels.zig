@@ -15,6 +15,9 @@ pub const round_names = [_][:0]const u8{ "tf_round_args", "tf_round_accept", "tf
 /// The MTP head's fused one-row kernels (nemotron_head.metal).
 pub const head_names = [_][:0]const u8{ "tf_head_prep", "tf_head_norm" };
 
+/// Keyed draws over the whole vocabulary, for rows whose top_k is off or above tf_gpu_sample's 1,024 (nemotron_sample.metal).
+pub const sample_names = [_][:0]const u8{ "tf_sample_full", "tf_sample_full_ids" };
+
 /// Routed experts taking an expert's member rows two or four at a time (nemotron_experts.metal).
 pub const rows_names = [_][:0]const u8{ "tf_xup_rows2", "tf_xdown_rows2", "tf_xup_rows4", "tf_xdown_rows4" };
 
@@ -53,7 +56,7 @@ fn geoSource(comptime key: []const u8, comptime which: []const u8, comptime head
 const geo_up = geoSource("expert_up", "up", "2688, 1856, 64", ", 6");
 const geo_down = geoSource("expert_down", "down", "1856, 2688, 64", "");
 
-pub const total = sources.nemotron.all.len + glue_names.len + geo_names.len + rows_names.len + tree_names.len + round_names.len + head_names.len;
+pub const total = sources.nemotron.all.len + glue_names.len + geo_names.len + rows_names.len + tree_names.len + round_names.len + head_names.len + sample_names.len;
 
 /// A pipeline index's kernel key (generated) or function name (glue).
 pub fn keyOf(i: usize) []const u8 {
@@ -66,7 +69,9 @@ pub fn keyOf(i: usize) []const u8 {
     const t = r - rows_names.len;
     if (t < tree_names.len) return tree_names[t];
     const u = t - tree_names.len;
-    return if (u < round_names.len) round_names[u] else head_names[u - round_names.len];
+    if (u < round_names.len) return round_names[u];
+    const h = u - round_names.len;
+    return if (h < head_names.len) head_names[h] else sample_names[h - head_names.len];
 }
 
 pub const Kernels = struct {
@@ -106,6 +111,7 @@ fn index(comptime key: []const u8) usize {
     inline for (tree_names, 0..) |n, i| if (comptime std.mem.eql(u8, n, key)) return sources.nemotron.all.len + glue_names.len + geo_names.len + rows_names.len + i;
     inline for (round_names, 0..) |n, i| if (comptime std.mem.eql(u8, n, key)) return sources.nemotron.all.len + glue_names.len + geo_names.len + rows_names.len + tree_names.len + i;
     inline for (head_names, 0..) |n, i| if (comptime std.mem.eql(u8, n, key)) return sources.nemotron.all.len + glue_names.len + geo_names.len + rows_names.len + tree_names.len + round_names.len + i;
+    inline for (sample_names, 0..) |n, i| if (comptime std.mem.eql(u8, n, key)) return total - sample_names.len + i;
     @compileError("no Nemotron kernel " ++ key);
 }
 
@@ -136,7 +142,7 @@ fn compile(job: *Job) void {
 /// Compile every source (one library each, as MLX does) on worker threads.
 pub fn load(allocator: std.mem.Allocator, device: mtl.Device) !Kernels {
     var k = Kernels{};
-    const jobs = try allocator.alloc(Job, sources.nemotron.all.len + 7);
+    const jobs = try allocator.alloc(Job, sources.nemotron.all.len + 8);
     defer allocator.free(jobs);
     const names = try allocator.alloc([:0]const u8, sources.nemotron.all.len);
     defer allocator.free(names);
@@ -163,7 +169,9 @@ pub fn load(allocator: std.mem.Allocator, device: mtl.Device) !Kernels {
     jobs[n + 4] = .{ .device = device, .source = sources.nemotron_tree, .names = &tree_names, .out = k.pipelines[tp .. tp + tree_names.len] };
     const rp = tp + tree_names.len;
     jobs[n + 5] = .{ .device = device, .source = sources.nemotron_round, .names = &round_names, .out = k.pipelines[rp .. rp + round_names.len] };
-    jobs[n + 6] = .{ .device = device, .source = sources.nemotron_head, .names = &head_names, .out = k.pipelines[rp + round_names.len ..] };
+    const hp = rp + round_names.len;
+    jobs[n + 6] = .{ .device = device, .source = sources.nemotron_head, .names = &head_names, .out = k.pipelines[hp .. hp + head_names.len] };
+    jobs[n + 7] = .{ .device = device, .source = sources.nemotron_sample, .names = &sample_names, .out = k.pipelines[hp + head_names.len ..] };
 
     const workers = 10;
     var next = std.atomic.Value(usize).init(0);
@@ -182,4 +190,18 @@ pub fn load(allocator: std.mem.Allocator, device: mtl.Device) !Kernels {
     for (threads) |t| if (t) |th| th.join();
     for (jobs) |j| if (j.failed) return error.KernelCompile;
     return k;
+}
+
+test "the full-vocabulary sampler compiles at this macOS's Metal language with 1,024 threads a row" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const lib = try mtl.Library.fromSource(device, sources.nemotron_sample, mtl.CompileOptions.mlx());
+    defer lib.deinit();
+    for (sample_names) |name| {
+        const p = try mtl.Pipeline.init(device, lib, name, false);
+        defer p.deinit();
+        try std.testing.expect(p.maxThreads() >= 1024);
+    }
 }
