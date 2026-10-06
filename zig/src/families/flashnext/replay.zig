@@ -1612,7 +1612,7 @@ pub const Model = struct {
 
     pub fn grouped(m: *Model, h: Buf, out: Buf) !void {
         const t = &m.t;
-        if (m.r.tp) |tp| return tp.combine(m.r.enc, h, t.inj_m, t.ydown, t.lg, out, t.ssp, m.r.rows); // TP: the two ranks' sums
+        if (m.r.tp) |tp| return if (m.r.skip & TP_CLASS == 0) tp.combine(m.r.enc, h, t.inj_m, t.ydown, t.lg, out, t.ssp, m.r.rows); // TP: the two ranks' sums
         try m.r.call("q4_hc_norm_grouped#[10240]", &.{ h, t.inj_m, t.ydown, t.wts, t.lg }, &.{ out, t.ssp });
     }
 
@@ -1765,7 +1765,7 @@ pub const Model = struct {
                 const pn = tp.partNext();
                 const part: Buf = .{ .b = pn.b, .off = pn.off };
                 try split.laneTiles(r, "lane_qmm_bytes_grouped@gdn.out", &.{ t.gout, t.xs, L.out.wq, L.out.sbt, t.mdims }, part, &.{.{ 0, 80 }}, 8, .{ 96 * k0, 96 }); // one kernel at every width: drafted == plain
-                tp.reduce(r.enc, t.branch, t.rows, rows);
+                if (r.skip & TP_CLASS == 0) tp.reduce(r.enc, t.branch, t.rows, rows);
             } else if (L.linear) {
                 try m.lane(t.mixed, D, L.proj, "lane_qmm_bytes_grouped@gdn.in", t.p);
                 const a = m.state;
@@ -1825,7 +1825,7 @@ pub const Model = struct {
             r.tp_layer = true;
             try r.experts("qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown);
             r.tp_layer = false;
-            if (r.tp) |tp| tp.exchange(r.enc, t.ydown, t.wts, t.rows, rows);
+            if (r.tp) |tp| if (r.skip & TP_CLASS == 0) tp.exchange(r.enc, t.ydown, t.wts, t.rows, rows);
             if (r.probe) |pb| r.copyKept(t.pick, .{ .b = pb.b, .off = pb.off + i * MAXR * 10 * 4 }, rows * 10, 0, 0, 0, 1, -1);
             pending = .grouped;
         }
@@ -1837,7 +1837,7 @@ pub const Model = struct {
             const half = HEAD_TILES / 2;
             if (!r.fused_xsum) try r.call("lane_qmm_xsum#[2560]", &.{ t.mixed, t.mdims }, &.{t.xs});
             try split.laneTiles(r, "lane_qmm_bytes_grouped@head", &.{ t.mixed, t.xs, m.head.wq, m.head.sbt, t.mdims }, t.logits, &.{.{ half * tp.rank, half }}, 1, null);
-            tp.argmax(r.enc, t.logits, HEAD_TILES * 32, half * 32 * tp.rank, half * 32, t.picks, t.rows, rows);
+            if (r.skip & TP_CLASS == 0) tp.argmax(r.enc, t.logits, HEAD_TILES * 32, half * 32 * tp.rank, half * 32, t.picks, t.rows, rows);
             return;
         }
         try m.lane(t.mixed, D, m.head, "lane_qmm_bytes_grouped@head", t.logits);
@@ -2029,6 +2029,9 @@ pub const Model = struct {
 
 /// Drafts a round from recent landing: 3 (prose), 6 while drafts land (code-like text), the widest window while
 /// nearly all land (copied text).
+/// FZ_PROFILE's knock-out bit for speed-up mode's exchanges: the bit after `Run.class`'s eight.
+pub const TP_CLASS: u32 = 1 << 8;
+
 pub const DepthRule = struct {
     rate: f64 = 0.6, // moving average of drafts landed over drafts offered
     depth: usize = 3,

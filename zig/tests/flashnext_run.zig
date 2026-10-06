@@ -427,7 +427,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (std.c.getenv("FZ_PROFILE") != null) {
         if (std.c.getenv("TF_FLASHNEXT_TP")) |path| r.tp = try fz.Tp2.init(arena, r.device, std.mem.span(path));
-        const names = [_][]const u8{ "none", "hc", "dense", "experts", "router", "gdn", "attn", "ple", "head" };
+        const names = [_][]const u8{ "none", "hc", "dense", "experts", "router", "gdn", "attn", "ple", "head", "tp" };
         var toks: [MAXR]u32 = undefined;
         for (0..MAXR) |i| toks[i] = @intCast(ref.object.get("prompt").?.array.items[i].integer);
         var pk: [MAXR]u32 = undefined;
@@ -436,7 +436,8 @@ pub fn main(init: std.process.Init) !void {
         for ([_]usize{ 1, 4, 8 }) |rows| {
             var base: f64 = 0;
             for (names, 0..) |name, c| {
-                r.skip = if (c == 0) 0 else @as(u32, 1) << @intCast(c - 1);
+                const only = std.c.getenv("FZ_PROFILE_ONLY") != null; // every class but this one knocked out
+                r.skip = if (c == 0) (if (only) 0x1ff else 0) else if (only) 0x1ff & ~(@as(u32, 1) << @intCast(c - 1)) else @as(u32, 1) << @intCast(c - 1);
                 m.gpu_seconds = 0;
                 for (0..20) |_| try m.window(toks[0..rows], &pk);
                 const ms = m.gpu_seconds * 1e3 / 20;
