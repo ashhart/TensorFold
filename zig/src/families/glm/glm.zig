@@ -17,4 +17,5 @@ test {
     _ = @import("../../core/moe_route.zig");
     _ = @import("../../core/hc.zig");
     _ = @import("../../core/affine_mm.zig");
+    _ = @import("attn_check.zig");
 }
