@@ -184,7 +184,7 @@ pub const Engine = struct {
         errdefer e.gpa.destroy(s);
         var head: [4]usize = undefined;
         if (e.head) |h| head = h.seqSizes();
-        s.* = try state.Seq.init(e.ctx.d, e.c, e.max_len, if (e.head != null) &head else &.{});
+        s.* = try state.Seq.init(e.ctx.d, e.c, e.max_len, if (e.head != null) &head else &.{}, e.stream);
         return s;
     }
 

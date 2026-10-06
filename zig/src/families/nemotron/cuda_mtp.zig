@@ -71,7 +71,7 @@ pub const Head = struct {
             f.* = h.buf.ptr + at;
             at += std.mem.alignForward(usize, s, 256);
         }
-        try h.buf.fill8(0, null);
+        try h.buf.fill8(0, e.stream.handle); // on the engine's stream: the legacy one would race its first uploads
         if (e.sampling) |x| try h.setSampling(x);
         e.head = h;
         inline for (seq_fields, &e.own.head) |name, *ptr| ptr.* = @field(h, name);
