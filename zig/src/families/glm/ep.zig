@@ -216,6 +216,8 @@ pub const Ep = struct {
     delay_ns: u64 = 0, // GLM_EP_DELAY_US: hold every prompt-chunk send (over 1 MiB) this long: a slow link, for stress runs
     sent: u64 = 0, // exchanges the host has sent
     held_ticks: u64 = 0, // their time from the GPU's post to the send returning
+    big_sent: u64 = 0, // prompt-chunk exchanges (over 1 MiB) sent, and their time likewise
+    big_held_ticks: u64 = 0,
     st: Stats = .{}, // when the peer's entries land against our post, and how the picks split
 
     /// Connect to the peer in `s`, refuse it unless it runs the same model with the other half of the experts (`me`).
@@ -265,6 +267,7 @@ pub const Ep = struct {
         if (t.sent > 0) {
             const n: f64 = @floatFromInt(t.sent);
             const late: f64 = @floatFromInt(@max(t.st.late, 1));
+            if (t.st.big_n > 0) std.log.info("expert parallel rank {d}: {d} prompt-chunk exchanges, {d:.0} us a send, the peer's sums landed {d:.0} us after our post on average", .{ t.rank, t.st.big_n, @as(f64, @floatFromInt(t.big_held_ticks)) / @as(f64, @floatFromInt(@max(t.big_sent, 1))) / 24.0, @as(f64, @floatFromInt(t.st.big_ticks)) / @as(f64, @floatFromInt(t.st.big_n)) / 24.0 });
             std.log.info("expert parallel rank {d}: {d} exchanges, {d:.1} us a send; the peer's entries landed {d:.1} us after our post on average ({d} times, {d} before it); entries a exchange: ours {d:.2}, theirs {d:.2}, |difference| {d:.2}; {d} GPU waits gave up", .{ t.rank, t.sent, @as(f64, @floatFromInt(t.held_ticks)) / n / 24.0, @as(f64, @floatFromInt(t.st.late_ticks)) / late / 24.0, t.st.late, t.st.early, @as(f64, @floatFromInt(t.st.mine)) / n, @as(f64, @floatFromInt(t.st.theirs)) / n, @as(f64, @floatFromInt(t.st.imbalance)) / n, t.gaveUp() });
         }
         t.ctl.deinit(gpa);
@@ -445,6 +448,10 @@ pub const Ep = struct {
             waiting = true;
             t.sent += 1;
             t.held_ticks += want_at - seen;
+            if (n * ENTRY > 1 << 20) {
+                t.big_sent += 1;
+                t.big_held_ticks += want_at - seen;
+            }
             x += 1;
         }
     }
@@ -467,9 +474,13 @@ pub const Ep = struct {
         mine: u64 = 0,
         theirs: u64 = 0,
         imbalance: u64 = 0,
+        big: [64]bool = @splat(false), // a prompt chunk's exchange (over 1 MiB)
+        big_n: u64 = 0,
+        big_ticks: u64 = 0, // their landing after our post (0 when the peer's came first)
 
         fn posted(s: *Stats, x: u64, at: u64, mine: u32, theirs: u32) void {
             s.post_t[x % 64] = at;
+            s.big[x % 64] = @as(usize, mine) * ENTRY > 1 << 20;
             s.mine += mine;
             s.theirs += theirs;
             s.imbalance += if (mine > theirs) mine - theirs else theirs - mine;
@@ -491,6 +502,10 @@ pub const Ep = struct {
                     s.late += 1;
                     s.late_ticks += f - p;
                 } else s.early += 1;
+                if (s.big[s.done % 64]) {
+                    s.big_n += 1;
+                    s.big_ticks += if (f >= p) f - p else 0;
+                }
             }
         }
     };

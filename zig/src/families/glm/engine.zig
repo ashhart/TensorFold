@@ -173,6 +173,14 @@ pub const Engine = struct {
             e.queue.addResidencySet(set);
             e.residency = set;
         } else |_| {}
+        // a process's first prompt pays ~0.8 s once (the first chunk and exchanges at their sizes); pay it here, on
+        // every rank of a pair at the same step (GLM_NO_WARMUP: skip)
+        if (e.pr != null and cap >= 128 and std.c.getenv("GLM_NO_WARMUP") == null) {
+            var ids: [64]u32 = undefined;
+            for (&ids, 0..) |*t, i| t.* = @intCast(1000 + i);
+            var quiet: Quiet = .{};
+            _ = try e.generate(&ids, 2, &.{}, 0, .{ .ctx = &quiet, .prefilled = Quiet.prefilled, .tokens = Quiet.tokens, .cancelled = Quiet.cancelled });
+        }
         e.load_seconds = @as(f64, @floatFromInt(std.c.mach_absolute_time() - t0)) / 24e6;
         return e;
     }
