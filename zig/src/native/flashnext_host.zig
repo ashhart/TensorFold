@@ -233,7 +233,7 @@ pub const Host = struct {
         fn marked(ctx: *anyopaque, at: usize) void {
             const c: *Ctx = @ptrCast(@alignCast(ctx));
             const t0 = c.h.now();
-            if (c.h.cache) |*store| store.keep(c.job.request.prompt, @intCast(at), null);
+            if (c.h.cache) |*store| if (store.keep(c.job.request.prompt, @intCast(at), null)) c.h.saved.append(c.h.gpa, @intCast(at)) catch {}; // held here: rank 1 keeps its copy
             c.job.keep_ns += c.h.now() - t0;
         }
 
@@ -347,7 +347,6 @@ const Snaps = struct {
         errdefer h.gpa.destroy(k);
         k.* = .{ .st = try snap.save(h.eng, h.gpa, at), .key = fx.keyOf(h.prompt[0 .. at + 1]) };
         if (std.mem.indexOfScalar(u64, h.eng.peer_drops.items, k.key)) |i| _ = h.eng.peer_drops.swapRemove(i); // rank 1's copy is this new one
-        h.saved.append(h.gpa, at) catch {};
         return k;
     }
     fn restore(ptr: *anyopaque, _: ?*anyopaque, saved: pc.Saved) anyerror!void {

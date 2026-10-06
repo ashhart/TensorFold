@@ -119,9 +119,23 @@ pub const Store = struct {
     pub fn lookup(s: *Store, a: Allocator, prompt: []const u32, history_len: u32, shared: []const u32, starts: []const u32) !Lookup {
         const e = s.find(prompt, starts) orelse {
             s.counts.misses += 1;
-            return .{ .marks = try s.marks(a, prompt, 0, history_len, shared, starts, &.{}) };
+            return .{ .marks = try s.fitting(a, try s.marks(a, prompt, 0, history_len, shared, starts, &.{})) };
         };
-        return .{ .entry = e, .marks = try s.marks(a, prompt, e.at, history_len, shared, starts, e.last) };
+        return .{ .entry = e, .marks = try s.fitting(a, try s.marks(a, prompt, e.at, history_len, shared, starts, e.last)) };
+    }
+
+    /// The marks whose state the budget can hold (a new slice in `a`); the rest are refused now, so no pass, nor a peer, copies them.
+    fn fitting(s: *Store, a: Allocator, marks_: []const u32) ![]const u32 {
+        defer a.free(marks_);
+        var out: std.ArrayList(u32) = .empty;
+        for (marks_) |at| {
+            const bytes = s.family.vtable.bytes(s.family.ptr, at);
+            if (bytes <= s.budget) try out.append(a, at) else {
+                s.counts.refused += 1;
+                note("kept nothing at {d} tokens: {d} MiB passes the {d} MiB budget", .{ at, bytes >> 20, s.budget >> 20 });
+            }
+        }
+        return out.toOwnedSlice(a);
     }
 
     /// A looked-up entry's restore went through (it is now the prompt's), or failed (dropped: the pass ran from 0).
@@ -168,19 +182,19 @@ pub const Store = struct {
     }
 
     /// The prompt pass stands at `at`: keep its state for `prompt`, evicting to fit; refused (counted) past the budget.
-    pub fn keep(s: *Store, prompt: []const u32, at: u32, owner: ?*anyopaque) void {
+    pub fn keep(s: *Store, prompt: []const u32, at: u32, owner: ?*anyopaque) bool {
         const n = @as(usize, at) + s.rules.lookahead;
-        if (at == 0 or n > prompt.len) return;
+        if (at == 0 or n > prompt.len) return false;
         s.clock += 1;
         for (s.entries.items) |e| if (e.at == at and std.mem.eql(u32, e.tokens, prompt[0..n])) {
             e.used = s.clock; // the same state again: no copy
-            return;
+            return true;
         };
         const bytes = s.family.vtable.bytes(s.family.ptr, at);
         if (bytes > s.budget) {
             s.counts.refused += 1;
             note("kept nothing at {d} tokens: {d} MiB passes the {d} MiB budget", .{ at, bytes >> 20, s.budget >> 20 });
-            return;
+            return false;
         }
         while (s.held + bytes > s.budget) {
             s.remove(s.victim());
@@ -209,6 +223,7 @@ pub const Store = struct {
         };
         s.held += bytes;
         s.counts.kept += 1;
+        return true;
     }
 
     /// One log line after a prompt pass: where it resumed, how many states it kept, and what the store holds.
@@ -217,9 +232,10 @@ pub const Store = struct {
         std.log.info("prompt cache: {d} tokens, resumed at {d}, kept {d}; {d} states, {d} of {d} MiB (hits {d}, misses {d}, evicted {d}, refused {d}, failed {d})", .{ prompt, from, kept, s.entries.items.len, s.held >> 20, s.budget >> 20, s.counts.hits, s.counts.misses, s.counts.evicted, s.counts.refused, s.counts.failed });
     }
 
-    fn fail(s: *Store, at: u32, err: anyerror) void {
-        s.counts.failed += 1;
+    fn fail(s: *Store, at: u32, err: anyerror) bool {
+        defer s.counts.failed += 1;
         note("keeping {d} tokens failed ({s}); a later turn prefills them", .{ at, @errorName(err) });
+        return false;
     }
 
     /// The entry to free first: one a later-born entry extends (that conversation moved on), oldest first; else the oldest.
@@ -305,7 +321,7 @@ const Fake = struct {
             f.sum = f.sum *% 31 +% t;
             f.at += 1;
             if (mi < plan.marks.len and plan.marks[mi] == f.at) {
-                s.keep(prompt, f.at, null);
+                _ = s.keep(prompt, f.at, null);
                 mi += 1;
             }
         }

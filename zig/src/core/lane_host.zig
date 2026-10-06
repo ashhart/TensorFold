@@ -61,7 +61,7 @@ pub const LaneHost = struct {
         fn kept(ptr: *anyopaque, s: *lanes.Stream, at: u32) void {
             const job: *Job = @ptrCast(@alignCast(ptr));
             job.reported(); // before a keep can evict the entry the pass restored
-            if (job.host.cache) |store| store.keep(job.request.prompt, at, s);
+            if (job.host.cache) |store| _ = store.keep(job.request.prompt, at, s);
         }
 
         /// The pass started from its kept state, or its copy failed (the entry goes); a pass that never got there: neither.
