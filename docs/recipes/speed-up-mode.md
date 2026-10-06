@@ -32,6 +32,14 @@ runs every expert for half of a window's rows and they swap the results. A reply
 rare tokens: the two halves of the DeltaNet output projection are added in a different order, at the same fp32
 precision. Prompt splitting gives one Mac's bits exactly.
 
+## What you need
+
+- Two Apple silicon Macs with enough memory for the whole model on each (the 6-bit checkpoint and the replay
+  engine's dump, about 175 GB at peak on each), and the same checkpoint and dump on both.
+- A Thunderbolt 5 cable between them with RDMA enabled, and MCDMA's fabric library (`libmcdma-fabric.dylib`) built
+  on each Mac from MCDMA's `feat/thunderbolt-fabric` branch, which carries its Thunderbolt links.
+- Greedy decoding (temperature 0), as the Flash Next replay engine requires.
+
 ## Settings
 
 Each Mac gets a small JSON file naming its rank, the MCDMA library and the link to the other Mac. On the Mac that
