@@ -231,7 +231,7 @@ pub const Tp2 = struct {
     req: u64 = 0, // served requests so far, the same on both ranks
     ctrl: u64 = 0, // stop decisions so far, the same on both ranks
     post_wait: mtl.Pipeline,
-    fused: bool = false, // TF_TP_FUSED: post and wait in one launch
+    fused: bool = true, // post and wait in one launch (TF_TP_FUSED=0: two)
     sum_pipe: mtl.Pipeline,
     one: mtl.Buffer, // a rows word holding 1, for posts that carry no rows
     seq: u32 = 0, // the last sequence this Mac's GPU posts (its own count: prefill sends are rank 0's alone)
@@ -284,7 +284,7 @@ pub const Tp2 = struct {
         t.trace = std.c.getenv("TF_TP_TRACE") != null;
         t.local = std.c.getenv("TF_TP_LOCAL") != null;
         t.stats = std.c.getenv("TF_TP_STATS") != null;
-        t.fused = std.c.getenv("TF_TP_FUSED") != null;
+        t.fused = if (std.c.getenv("TF_TP_FUSED")) |v| !std.mem.eql(u8, std.mem.span(v), "0") else true;
         // both ranks up before the first round: a word each way
         try rd.signal(t.peer, HELLO, 1);
         while (@atomicLoad(u64, t.word64(HELLO), .acquire) < 1) std.atomic.spinLoopHint();
@@ -387,7 +387,7 @@ pub const Tp2 = struct {
         enc.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
     }
 
-    /// Post `seq` and wait for its serve: one launch (TF_TP_FUSED) or two.
+    /// Post `seq` and wait for its serve: one launch, or two with TF_TP_FUSED=0.
     fn postWait(t: *Tp2, enc: mtl.ComputeEncoder, seq: u32, rows_buf: mtl.Buffer, rows_off: usize) void {
         if (!t.fused) {
             t.encodePost(enc, seq, rows_buf, rows_off);
