@@ -10,6 +10,7 @@ const prompt_mod = @import("prompt.zig");
 const kernels = @import("kernels.zig");
 const ep_mod = @import("ep.zig");
 const affine_mm = @import("../../core/affine_mm.zig");
+const CopyIndex = @import("../../core/copy_index.zig").CopyIndex;
 const Ref = wts.Ref;
 
 pub const Reason = enum { stop, length, cancelled };
@@ -326,28 +327,6 @@ pub const Engine = struct {
         enc.dispatchThreads(mtl.Size.of(D / 2, 1, 1), mtl.Size.of(256, 1, 1));
     }
 
-    /// The longest earlier match (up to 8 tokens; the latest of equal length) of the history's last tokens: its
-    /// length, and where the tokens that followed it start.
-    const Match = struct { n: usize, at: usize };
-
-    fn copyMatch(h: []const u32) Match {
-        const L = h.len;
-        var best: Match = .{ .n = 0, .at = 0 };
-        if (L < 2) return best;
-        var p = L - 1;
-        while (p > 0) {
-            p -= 1;
-            if (h[p] != h[L - 1]) continue;
-            var n: usize = 1;
-            while (n < 8 and p >= n and h[p - n] == h[L - 1 - n]) n += 1;
-            if (n > best.n) {
-                best = .{ .n = n, .at = p + 1 };
-                if (n == 8) break;
-            }
-        }
-        return best;
-    }
-
     /// The top two logits' difference in row `row` of the last head's logits (bf16).
     fn margin(e: *const Engine, row: u32) f32 {
         const v: [*]const u16 = @ptrCast(@alignCast(e.sc.logits.addr()));
@@ -658,8 +637,8 @@ pub const Engine = struct {
         }
         if (max_tokens <= 1) return res;
         var emitted: usize = 1;
-        var hist: std.ArrayList(u32) = .empty; // the prompt and the reply so far: copy drafts' source
-        defer hist.deinit(e.gpa);
+        var hist: ?CopyIndex = null; // the prompt and the reply so far: copy drafts' source
+        defer if (hist) |*h| h.deinit();
         // the window a copy round takes: the most expected tokens per ms, when that beats an MTP round. Copied tokens
         // land as a run with chance (ck + n) / (ck + n + cr + 1) each: kept and copy rounds cut short so far, and a
         // prior of the match's length n to one; a round costs ~12.9 ms plus ~3.5 ms a copied row on the pair (an MTP
@@ -668,8 +647,8 @@ pub const Engine = struct {
         var cr: f64 = 0;
         var mk: f64 = @floatFromInt(d);
         if (e.copy_min > 0 and d > 0) {
-            try hist.appendSlice(e.gpa, prompt);
-            try hist.append(e.gpa, tok);
+            hist = try CopyIndex.init(e.gpa, prompt);
+            try hist.?.extend(&.{tok});
         }
         var h0: u32 = last_n - 1; // the rows of `hidden` the MTP head takes next, and how many
         var keep: u32 = 1;
@@ -688,11 +667,11 @@ pub const Engine = struct {
             ids[0] = tok;
             // copy drafts: what followed the reply's last tokens earlier, when they match at least copy_min deep
             var copied: u32 = 0;
-            if (hist.items.len > 0) {
-                const m = copyMatch(hist.items);
+            if (hist) |*h| {
+                const m = h.longest(8);
                 if (m.n >= e.copy_min) {
                     const room = e.s.cap - (e.s.pos + 2);
-                    const avail: usize = @min(hist.items.len - m.at, st.max_rows - 1, room);
+                    const avail: usize = @min(h.ctx.items.len - m.at, st.max_rows - 1, room);
                     const n: f64 = @floatFromInt(m.n);
                     const a = (ck + n) / (ck + n + cr + 1);
                     var best = (1 + mk) / (12.9 + 4.3 * @as(f64, @floatFromInt(d))); // an MTP round's tokens a ms
@@ -708,7 +687,7 @@ pub const Engine = struct {
                         }
                     }
                     if (copied < 2) copied = 0; // a one-token copy is no better than the head's draft
-                    if (copied > 0) @memcpy(ids[1 .. 1 + copied], hist.items[m.at .. m.at + copied]);
+                    if (copied > 0) @memcpy(ids[1 .. 1 + copied], h.ctx.items[m.at .. m.at + copied]);
                 }
             }
             if (d > 0) {
@@ -753,7 +732,7 @@ pub const Engine = struct {
             }
             if (e.margins) |m| for (0..take) |j| try m.append(e.gpa, e.margin(@intCast(j)));
             if (take > 0 and out.tokens(out.ctx, picks[0..take])) stop = true;
-            if (hist.items.len > 0) try hist.appendSlice(e.gpa, picks[0..take]);
+            if (hist) |*h| try h.extend(picks[0..take]);
             emitted += take;
             res.generated = emitted;
             e.s.pos += keep;
