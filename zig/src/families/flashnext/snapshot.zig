@@ -28,6 +28,12 @@ pub const Pool = struct {
     bufs: [2]?mtl.Buffer = .{ null, null },
     caps: [2]usize = .{ 0, 0 },
     last: usize = 0, // the bytes of the last state saved: the next is about this, a turn or so longer
+    max: usize = std.math.maxInt(usize), // the prompt cache's budget: a buffer pads a state only up to it
+
+    /// A new buffer's size for a state of `n` bytes: its capacity, but no more than the budget when the state itself fits.
+    pub fn size(p: *const Pool, n: usize) usize {
+        return if (n <= p.max) @min(capacity(n), p.max) else capacity(n);
+    }
 
     /// The smallest free buffer that holds `n` bytes without wasting half again.
     fn fitting(p: *const Pool, n: usize) ?usize {
@@ -68,7 +74,7 @@ pub const Pool = struct {
             defer p.bufs[i] = null;
             return .{ .buf = p.bufs[i].?, .cap = p.caps[i] };
         }
-        const cap = capacity(n);
+        const cap = p.size(n);
         return .{ .buf = try device.buffer(cap, fz.opts), .cap = cap };
     }
 
@@ -88,7 +94,7 @@ pub const Pool = struct {
         if (p.last == 0) return .{};
         const n = p.last + more;
         for (p.bufs, p.caps) |b, cap| if (b != null and cap >= n) return .{};
-        const cap = capacity(n);
+        const cap = p.size(n);
         if (cap > room) return .{};
         const buf = device.buffer(cap, fz.opts) catch return .{};
         const mem = buf.contents()[0..cap];
@@ -214,4 +220,11 @@ pub fn drop(gpa: std.mem.Allocator, st: *State) void {
 test "a state's parts add up to its bytes" {
     try std.testing.expectEqual(@as(usize, 36 * (CS_ROW + SO_ROW) + 184_320), bytes(0));
     try std.testing.expectEqual(@as(usize, 13 * 2304), bytes(1) - bytes(0));
+}
+
+test "a new buffer pads a state an eighth, in 32 MiB steps, but never past the budget a state fits" {
+    const p: Pool = .{ .max = 1 << 30 };
+    try std.testing.expectEqual(@as(usize, 704 << 20), p.size(600 << 20));
+    try std.testing.expectEqual(@as(usize, 1 << 30), p.size(1000 << 20));
+    try std.testing.expectEqual(capacity(1100 << 20), p.size(1100 << 20));
 }

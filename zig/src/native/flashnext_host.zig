@@ -347,8 +347,9 @@ fn ms(ns: i96) f64 {
 
 /// The prompt cache's copies of the engine's state (snapshot.zig), on the engine's thread.
 const Snaps = struct {
-    fn bytes(_: *anyopaque, at: u32) u64 {
-        return snap.capacity(snap.bytes(at)); // a new buffer's size; a free one in the pool may take the state instead
+    fn bytes(ptr: *anyopaque, at: u32) u64 {
+        const h: *Host = @ptrCast(@alignCast(ptr));
+        return h.eng.snap_pool.size(snap.bytes(at)); // a new buffer's size; a free one in the pool may take the state instead
     }
     fn charged(_: *anyopaque, saved: pc.Saved) u64 {
         const k: *Kept = @ptrCast(@alignCast(saved));
@@ -408,6 +409,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: []const u8, windo
     };
     const budget = cacheBudget(eng, cache_gib);
     eng.peer_budget = budget; // rank 1: its kept states and free buffers stay inside the same budget
+    eng.snap_pool.max = budget;
     const follower: ?std.Thread = if (eng.followsPeer()) try std.Thread.spawn(.{}, follow, .{eng}) else null; // rank 1
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
