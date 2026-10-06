@@ -1,0 +1,188 @@
+//! x W^T for affine-quantized W on the tensor units, dense or over rows sorted by expert (kernels/metal/core/affine_mm.metal),
+//! with the row kernels' arithmetic: exact integer codes in the MMAs, each group's fp32 sums scaled, its bias against the
+//! row's group sum (taken as the row kernels take it). bf16 out, or fp32 partial sums for another pass to add.
+const std = @import("std");
+const mtl = @import("metal");
+const ks = @import("kernel_sources");
+const frags = @import("frags.zig");
+
+/// The weights' bits (4 or 8) and group (32 or 64), and the output's type.
+pub const Format = struct { bits: u8 = 4, group: u16 = 64, out_f32: bool = false };
+
+/// The kernel source for `f` (nax.h inlined for this GPU).
+pub fn source(device: mtl.Device, a: std.mem.Allocator, f: Format) ![]u8 {
+    if ((f.bits != 4 and f.bits != 8) or (f.group != 32 and f.group != 64)) return error.UnsupportedFormat;
+    const body = try frags.source(device, a, ks.core_affine_mm);
+    defer a.free(body);
+    return std.fmt.allocPrint(a, "#define TF_BITS {d}\n#define TF_GROUP {d}\n#define TF_OUT_T {s}\n{s}", .{ f.bits, f.group, if (f.out_f32) "float" else "bfloat", body });
+}
+
+/// The entry points: the row sums, the dense matmul, and the gathers by tile height (32 rows: few rows an expert).
+pub const names = [4][:0]const u8{ "tf_affine_row_sums", "tf_affine_mm", "tf_affine_gather_32", "tf_affine_gather_64" };
+
+/// A format's pipelines, in `names` order.
+pub const Pipes = [4]mtl.Pipeline;
+
+pub const Args = extern struct { rows: i32, n: i32, k: i32, experts: i32 };
+
+fn bind(e: mtl.ComputeEncoder, i: usize, r: anytype) void {
+    e.setBuffer(r.buf, r.off, i);
+}
+
+/// Each row's sum over each group of x [rows, k] into `sums` (fp32 [rows, k / group]): the bias's operand.
+pub fn rowSums(e: mtl.ComputeEncoder, p: Pipes, group: u32, x: anytype, sums: anytype, rows: u32, k: u32) void {
+    e.setPipeline(p[0]);
+    bind(e, 0, x);
+    e.setValue(Args{ .rows = @intCast(rows), .n = 0, .k = @intCast(k), .experts = 0 }, 5);
+    bind(e, 6, sums);
+    e.dispatchThreads(mtl.Size.of(k / group, rows, 1), mtl.Size.of(@min(k / group, 64), 1, 1));
+}
+
+/// y [rows, n] = x [rows, q.k] W^T with x's group sums `sums`; n is q.n rounded up to 64 (the weights' padded rows,
+/// y's row pitch).
+pub fn dense(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: anytype, y: anytype, rows: u32) void {
+    const n = std.mem.alignForward(u32, q.n, 64);
+    e.setPipeline(p[1]);
+    bind(e, 0, x);
+    bind(e, 1, q.w);
+    bind(e, 2, q.s);
+    bind(e, 3, q.b);
+    bind(e, 4, sums);
+    e.setValue(Args{ .rows = @intCast(rows), .n = @intCast(n), .k = @intCast(q.k), .experts = 0 }, 5);
+    bind(e, 6, y);
+    e.dispatchGroups(mtl.Size.of(n / 64, (rows + 63) / 64, 1), mtl.Size.of(32, 2, 2));
+}
+
+/// y [rows, q.n] = x [rows, q.k] times each row's expert's W^T, the rows sorted by expert with `offsets` [experts] (each
+/// expert's first row) and group sums `sums`; `q` is [experts, n, k] (w, s, b, n, k) and n a multiple of 64.
+pub fn gather(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: anytype, offsets: anytype, y: anytype, rows: u32, experts: u32) void {
+    std.debug.assert(q.n % 64 == 0 and q.k % 64 == 0);
+    const bm: u32 = if (rows / experts < 64) 32 else 64;
+    e.setPipeline(p[if (bm == 64) 3 else 2]);
+    bind(e, 0, x);
+    bind(e, 1, q.w);
+    bind(e, 2, q.s);
+    bind(e, 3, q.b);
+    bind(e, 4, sums);
+    e.setValue(Args{ .rows = @intCast(rows), .n = @intCast(q.n), .k = @intCast(q.k), .experts = @intCast(experts) }, 5);
+    bind(e, 6, y);
+    bind(e, 7, offsets);
+    const tiles = @min(rows, (rows + bm - 1) / bm + experts - 1); // each expert's last tile may be partial
+    e.dispatchGroups(mtl.Size.of(q.n / 64, tiles, 1), mtl.Size.of(32, 2, 2));
+}
+
+fn bf16(v: f32) u16 { // round to nearest even
+    const u: u32 = @bitCast(v);
+    return @intCast((u + 0x7fff + ((u >> 16) & 1)) >> 16);
+}
+
+fn f32of(h: u16) f32 {
+    return @bitCast(@as(u32, h) << 16);
+}
+
+test "dense and gathered, each format, against the row kernels' arithmetic on the host" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const queue = try device.queue();
+    defer queue.deinit();
+    const a = std.testing.allocator;
+    const E = 3;
+    const N = 128;
+    const K = 256;
+    const counts = [E]u32{ 37, 0, 70 }; // an empty expert and partial tiles; densely, 107 rows (a partial tile)
+    const R = counts[0] + counts[1] + counts[2];
+    var prng = std.Random.DefaultPrng.init(7);
+    const rnd = prng.random();
+    for ([_][2]usize{ .{ 4, 64 }, .{ 4, 32 }, .{ 8, 64 }, .{ 8, 32 } }) |fmt| {
+        const bits = fmt[0];
+        const group = fmt[1];
+        const w_bytes = E * N * K * bits / 8;
+        const s_n = E * N * K / group;
+        const opts = mtl.ResourceOptions.shared;
+        const bufs = [_]mtl.Buffer{ try device.buffer(R * K * 2, opts), try device.buffer(w_bytes, opts), try device.buffer(s_n * 2, opts), try device.buffer(s_n * 2, opts), try device.buffer(E * 4, opts), try device.buffer(4 * R * N * 4, opts), try device.buffer(R * (K / group) * 4, opts) };
+        defer for (bufs) |b| b.deinit();
+        const x = bufs[0].slice(u16, R * K);
+        for (x) |*v| v.* = bf16(rnd.float(f32) * 2 - 1);
+        const wb = bufs[1].slice(u8, w_bytes);
+        rnd.bytes(wb);
+        const sc = bufs[2].slice(u16, s_n);
+        const bi = bufs[3].slice(u16, s_n);
+        for (sc, bi) |*s, *b| {
+            s.* = bf16((rnd.float(f32) + 0.5) / 64);
+            b.* = bf16(-(rnd.float(f32) + 0.5) * 0.15);
+        }
+        const offs = bufs[4].slice(i32, E);
+        var first: i32 = 0;
+        for (offs, counts) |*o, c| {
+            o.* = first;
+            first += @intCast(c);
+        }
+        var pipes: [2]Pipes = undefined;
+        for (0..2) |o| {
+            const src = try source(device, a, .{ .bits = @intCast(bits), .group = @intCast(group), .out_f32 = o == 1 });
+            defer a.free(src);
+            const lib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
+            defer lib.deinit();
+            for (names, 0..) |n, i| pipes[o][i] = try mtl.Pipeline.init(device, lib, n, false);
+        }
+        defer for (pipes) |pp| for (pp) |p| p.deinit();
+        const xr = .{ .buf = bufs[0], .off = @as(usize, 0) };
+        const sums = .{ .buf = bufs[6], .off = @as(usize, 0) };
+        const q = .{ .w = .{ .buf = bufs[1], .off = @as(usize, 0) }, .s = .{ .buf = bufs[2], .off = @as(usize, 0) }, .b = .{ .buf = bufs[3], .off = @as(usize, 0) }, .n = @as(u32, N), .k = @as(u32, K) };
+        const out = [4]struct { buf: mtl.Buffer, off: usize }{ .{ .buf = bufs[5], .off = 0 }, .{ .buf = bufs[5], .off = R * N * 4 }, .{ .buf = bufs[5], .off = 2 * R * N * 4 }, .{ .buf = bufs[5], .off = 3 * R * N * 4 } };
+        const cb = queue.commandBuffer();
+        const enc = cb.compute(.serial);
+        rowSums(enc, pipes[0], @intCast(group), xr, sums, R, K);
+        gather(enc, pipes[0], xr, sums, q, .{ .buf = bufs[4], .off = @as(usize, 0) }, out[0], R, E); // bf16
+        gather(enc, pipes[1], xr, sums, q, .{ .buf = bufs[4], .off = @as(usize, 0) }, out[1], R, E); // fp32
+        dense(enc, pipes[0], xr, sums, q, out[2], R); // expert 0's weights for every row, bf16
+        dense(enc, pipes[1], xr, sums, q, out[3], R); // fp32
+        enc.end();
+        cb.commit();
+        cb.wait();
+        try std.testing.expect(cb.failure() == null);
+        const all = bufs[5].contents();
+        const g16: [*]const u16 = @ptrCast(@alignCast(all));
+        const g32: [*]const f32 = @ptrCast(@alignCast(all + R * N * 4));
+        const d16: [*]const u16 = @ptrCast(@alignCast(all + 2 * R * N * 4));
+        const d32: [*]const f32 = @ptrCast(@alignCast(all + 3 * R * N * 4));
+        var r: usize = 0;
+        for (counts, 0..) |c, ex| for (0..c) |_| {
+            for ([2]usize{ ex, 0 }, 0..) |use, pass| for (0..N) |n| {
+                const row = use * N + n;
+                var sum: f64 = 0;
+                var mag: f64 = 0;
+                for (0..K / group) |g| {
+                    var dot: f64 = 0;
+                    var dmag: f64 = 0;
+                    var xs: f32 = 0;
+                    var i: usize = 0;
+                    while (i < group) : (i += if (bits == 4) 4 else 1) {
+                        const at = r * K + g * group + i;
+                        if (bits == 4) {
+                            const chain = f32of(bf16(f32of(bf16(f32of(bf16(f32of(x[at]) + f32of(x[at + 1]))) + f32of(x[at + 2]))) + f32of(x[at + 3])));
+                            xs += chain;
+                        } else xs += f32of(x[at]);
+                    }
+                    for (0..group) |j| {
+                        const k = g * group + j;
+                        const qv: u32 = if (bits == 4) (wb[(row * K + k) / 2] >> @intCast(4 * (k % 2))) & 15 else wb[row * K + k];
+                        dot += @as(f64, @floatFromInt(qv)) * f32of(x[r * K + k]);
+                        dmag += @abs(@as(f64, @floatFromInt(qv)) * f32of(x[r * K + k]));
+                    }
+                    const sg = row * (K / group) + g;
+                    const term = @as(f64, f32of(sc[sg])) * dot + @as(f64, f32of(bi[sg])) * xs;
+                    sum += term;
+                    mag += @as(f64, f32of(sc[sg])) * dmag + @abs(@as(f64, f32of(bi[sg])) * xs);
+                }
+                const got = if (pass == 0) g32[r * N + n] else d32[r * N + n];
+                const got16 = if (pass == 0) g16[r * N + n] else d16[r * N + n];
+                try std.testing.expect(@abs(got - sum) <= 4e-6 * mag + 1e-30); // fp32 order only
+                try std.testing.expectEqual(bf16(got), got16);
+            };
+            r += 1;
+        };
+    }
+}

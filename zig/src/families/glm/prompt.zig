@@ -1,4 +1,5 @@
-//! Prompt chunks of up to `max_rows` rows: projections and routed experts on the M5 tensor units, the rest on the row kernels.
+//! Prompt chunks of up to `max_rows` rows: projections and routed experts on the M5 tensor units (core/affine_mm.zig: the
+//! row kernels' arithmetic, so a chunk's rows match the decode path's but for fp32 order), the rest on the row kernels.
 const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
@@ -7,7 +8,8 @@ const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const pk = @import("../nemotron/prefill_kernels.zig");
 const ep_mod = @import("ep.zig");
-const expert_gather = @import("../../core/expert_gather.zig");
+const affine_mm = @import("../../core/affine_mm.zig");
+const Kernels = @import("kernels.zig").Kernels;
 const Ref = wts.Ref;
 const bind = fwd.bind;
 const size = fwd.size;
@@ -19,15 +21,11 @@ comptime {
 /// Sparse rows whose block scores one selection pass holds.
 const select_rows = 256;
 
-const qmm_name = "custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t";
-const gather_names = [2][]const u8{
-    "custom_kernel_tf_gather_qmm_rhs_nax_bf16_32_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_int32_t_int32_t_bfloat16_t",
-    "custom_kernel_tf_gather_qmm_rhs_nax_bf16_64_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_int32_t_int32_t_bfloat16_t",
-};
 
 /// The chunk's buffers beyond the decode scratch's (whose stream fields `streams` points at prompt-sized ones).
 pub const Prompt = struct {
     k: pk.Kernels,
+    mm: *const Kernels, // the engine's: core/affine_mm.zig's pipelines among them
     streams: st.Scratch, // the decode scratch with x, h, normed, branch, post, comb, inv, mixes, raw, hidden resized
     proj: Ref,
     y: Ref,
@@ -67,6 +65,7 @@ pub const Prompt = struct {
     m_x: Ref,
     m_xn: Ref,
     m_out: Ref,
+    sums: Ref, // fp32 group sums of a matmul's rows (affine_mm's bias operand)
 
     pub fn deinit(p: *Prompt) void {
         p.k.deinit();
@@ -74,7 +73,7 @@ pub const Prompt = struct {
 };
 
 /// The chunk buffers for `cap`-token caches (selection passes read cap / 4 block scores a row).
-pub fn init(gpa: std.mem.Allocator, arena: *st.Arena, device: mtl.Device, c: *const cfg.Config, decode: *const st.Scratch, cap: u32) !Prompt {
+pub fn init(gpa: std.mem.Allocator, arena: *st.Arena, device: mtl.Device, c: *const cfg.Config, decode: *const st.Scratch, kernels: *const Kernels, cap: u32) !Prompt {
     const R: usize = max_rows;
     const D: usize = c.hidden;
     const n: usize = R * c.topk;
@@ -82,6 +81,7 @@ pub fn init(gpa: std.mem.Allocator, arena: *st.Arena, device: mtl.Device, c: *co
     var p: Prompt = undefined;
     p.k = try pk.load(gpa, device);
     errdefer p.k.deinit();
+    p.mm = kernels;
     p.streams = decode.*;
     const big = struct {
         fn of(a: *st.Arena, bytes: usize) !Ref {
@@ -137,6 +137,7 @@ pub fn init(gpa: std.mem.Allocator, arena: *st.Arena, device: mtl.Device, c: *co
     p.m_x = try big.of(arena, R * D * 2);
     p.m_xn = try big.of(arena, R * D * 2);
     p.m_out = try big.of(arena, R * D * 2);
+    p.sums = try big.of(arena, @max(R * 16384, n * D) / 64 * 4); // the widest dense K (MLA's out-projection), or a gather's
     return p;
 }
 
@@ -152,24 +153,29 @@ fn run(e: mtl.ComputeEncoder, grid: [3]usize, group: [3]usize) void {
     e.dispatchThreads(size(grid[0], grid[1], grid[2]), size(@min(group[0], grid[0]), @min(group[1], grid[1]), @min(group[2], grid[2])));
 }
 
-/// y [M, N] = x [M, K] W^T for a 4-bit matrix (affine_qmm_t_nax, 64x64 tiles; N rounded up to its padded rows).
+/// y [M, N] = x [M, K] W^T for a 4-bit matrix (64x64 tiles; N rounded up to the weights' padded rows, y's row pitch).
 fn qmm(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, q: wts.Q4, y: Ref, M: u32) void {
-    const N = std.mem.alignForward(u32, q.n, 64);
-    e.setPipeline(p.k.get(qmm_name));
-    bind(e, 0, .{ q.w, q.s, q.b, x });
-    params(e, 4, .{ q.k, N, M });
-    bind(e, 5, .{y});
-    run(e, .{ N / 64 * 32, (M + 63) / 64 * 2, 2 }, .{ 32, 2, 2 });
+    affine_mm.rowSums(e, p.mm.mm_bf16, 64, x, p.sums, M, q.k);
+    affine_mm.dense(e, p.mm.mm_bf16, x, p.sums, q, y, M);
 }
 
-/// Rows sorted by expert times their expert's 4-bit W^T (affine_gather_qmm_rhs_nax) from `offsets`.
-fn gather(p: *const Prompt, e: mtl.ComputeEncoder, xs: Ref, q: wts.Q4, offsets: Ref, y: Ref, n: u32, experts: u32) void {
-    const bm: u32 = if (n / experts < 64) 32 else 64;
-    e.setPipeline(p.k.get(gather_names[@intFromBool(bm == 64)]));
-    bind(e, 0, .{ xs, q.w, q.s, q.b, offsets });
-    params(e, 5, .{ n, q.n, q.k, experts });
-    bind(e, 6, .{y});
-    run(e, .{ (q.n + 63) / 64 * 32, @min(n, (n + bm - 1) / bm + experts - 1) * 2, 2 }, .{ 32, 2, 2 });
+/// n rows sorted by expert (`offsets`) times their expert's 4-bit W^T, the rows' group sums already in `sums`.
+fn gather(p: *const Prompt, e: mtl.ComputeEncoder, xs: Ref, q: wts.Q4, offsets: Ref, y: Ref, n: u32, experts: u32, f32_out: bool) void {
+    affine_mm.gather(e, if (f32_out) p.mm.mm_f32 else p.mm.mm_bf16, xs, p.sums, q, offsets, y, n, experts);
+}
+
+/// The routed experts' gate, up and activation on the sorted rows `xs` into `act` ([n, gate.n]).
+fn gateUp(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, n: u32) void {
+    const E = x.c.experts;
+    affine_mm.rowSums(e, p.mm.mm_bf16, 64, p.xs, p.sums, n, w.gate.k);
+    gather(p, e, p.xs, w.gate, p.offsets, p.g, n, E, false);
+    gather(p, e, p.xs, w.up, p.offsets, p.u, n, E, false);
+    e.setPipeline(x.k.act2);
+    bind(e, 0, .{ p.g, p.u, p.act });
+    e.setValue(x.c.swiglu_limit, 3);
+    e.setValue(n * w.gate.n, 4);
+    e.dispatchThreads(size(n * w.gate.n, 1, 1), size(256, 1, 1));
+    affine_mm.rowSums(e, p.mm.mm_bf16, 64, p.act, p.sums, n, w.down.k);
 }
 
 fn swiglu(x: *const fwd.Ctx, e: mtl.ComputeEncoder, gu: Ref, act: Ref, rows: u32, width: u32) void {
@@ -212,15 +218,8 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
     if (s & Class.route == 0) route(p, x, e, w, x_in, M);
     if (ep) |t| {
         if (s & Class.routed == 0) {
-            const half = w.gate.n;
-            expert_gather.run(e, k.gather_bf16, p.xs, w.gate, p.offsets, p.g, n, E);
-            expert_gather.run(e, k.gather_bf16, p.xs, w.up, p.offsets, p.u, n, E);
-            e.setPipeline(k.act2);
-            bind(e, 0, .{ p.g, p.u, p.act });
-            e.setValue(c.swiglu_limit, 3);
-            e.setValue(n * half, 4);
-            e.dispatchThreads(size(n * half, 1, 1), size(256, 1, 1));
-            expert_gather.run(e, k.gather_f32, p.act, w.down, p.offsets, p.yf, n, E);
+            gateUp(p, x, e, w, n);
+            gather(p, e, p.act, w.down, p.offsets, p.yf, n, E, true);
         }
         if (s & Class.exchange == 0) t.sendRowsSorted(e, p.yf, p.inverse, p.wts, M);
         if (s & Class.shared == 0) shared(p, x, e, w, x_in, M);
@@ -228,14 +227,8 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
         return;
     }
     if (s & Class.routed == 0) {
-        gather(p, e, p.xs, w.gate, p.offsets, p.g, n, E);
-        gather(p, e, p.xs, w.up, p.offsets, p.u, n, E);
-        e.setPipeline(k.act2);
-        bind(e, 0, .{ p.g, p.u, p.act });
-        e.setValue(c.swiglu_limit, 3);
-        e.setValue(n * c.moe_inter, 4);
-        e.dispatchThreads(size(n * c.moe_inter, 1, 1), size(256, 1, 1));
-        gather(p, e, p.act, w.down, p.offsets, p.ye, n, E);
+        gateUp(p, x, e, w, n);
+        gather(p, e, p.act, w.down, p.offsets, p.ye, n, E, false);
     }
     if (s & Class.combine != 0) return;
     e.setPipeline(p.k.get("custom_kernel_tf_rows_take_bfloat16_t_uint32_t_int32_t_bfloat16_t"));
