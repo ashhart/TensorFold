@@ -169,7 +169,9 @@ pub fn load(allocator: std.mem.Allocator, device: mtl.Device) !Kernels {
     const xp = gp + geo_names.len;
     jobs[n + 3] = .{ .device = device, .source = sources.nemotron_experts, .names = &rows_names, .out = k.pipelines[xp .. xp + rows_names.len] };
     const tp = xp + rows_names.len;
-    jobs[n + 4] = .{ .device = device, .source = sources.nemotron_tree, .names = &tree_names, .out = k.pipelines[tp .. tp + tree_names.len] };
+    // before the M5 the tree tail reads its tensor-op results in the simdgroup-matrix layout, as the rewritten attention does
+    const tree_source = if (device.tensorUnits()) sources.nemotron_tree else "#define TF_SIMD_LAYOUT 1\n" ++ sources.nemotron_tree;
+    jobs[n + 4] = .{ .device = device, .source = tree_source, .names = &tree_names, .out = k.pipelines[tp .. tp + tree_names.len] };
     const rp = tp + tree_names.len;
     jobs[n + 5] = .{ .device = device, .source = sources.nemotron_round, .names = &round_names, .out = k.pipelines[rp .. rp + round_names.len] };
     const hp = rp + round_names.len;

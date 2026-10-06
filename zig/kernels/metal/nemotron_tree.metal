@@ -131,6 +131,21 @@ template <int H, int DH, int NG, int DS, int XD, int PROJ, int DTOFF, int SSZ>
   }
 }
 
+// A lane's 16 x n tensor-op results by layout (TF_SIMD_LAYOUT before the M5, as simd_attention.zig checks): rows, columns.
+#ifdef TF_SIMD_LAYOUT
+#define TT_FN(lane) short((((lane) & 8) >> 1) | (((lane) & 1) << 1))
+#define TT_COL(i, n) (((i) & 1) + 8 * (((i) >> 1) % ((n) / 8)))
+#define TT_HI(i, n) (((i) & ((n) / 4)) != 0)
+#define TT_HALF(hh, i) (((i) & 1) | ((4 * (hh) + (((i) >> 1) & 3)) << 1) | (((i) & 8) << 1))
+#define TT_Y(b, k, hi) ((hi) * (TK / 4) + (b) * 4 + (k))
+#else
+#define TT_FN(lane) short(((((lane) >> 2) & 2) | ((lane) & 1)) * 4)
+#define TT_COL(i, n) (((i) >> 3) * 16 + ((i) & 3))
+#define TT_HI(i, n) (((i) & 4) != 0)
+#define TT_HALF(hh, i) ((hh) * 16 + (i))
+#define TT_Y(b, k, hi) ((b) * 8 + (hi) * 4 + (k))
+#endif
+
 // A node's keys past the shared pass, gathered by logical position (dims: P, PT, NCA, NCB, NT): its one-row step's sums.
 template <int G, int D, int CK, int TK, int MAXD>
 [[kernel]] void tf_tree_tail(
@@ -159,9 +174,8 @@ template <int G, int D, int CK, int TK, int MAXD>
   if (int(cb) >= NCB) return;  // a grid past the dims' tail chunks: those would store over the next head's
   const int RPA = 16 * NT;
   const int nmax = P + depths[node] + 1;
-  const short qid = lane >> 2;
-  const short fm = (qid & 4) | ((lane >> 1) & 3);
-  const short fn = ((qid & 2) | (lane & 1)) * 4;
+  const short fm = ((lane >> 2) & 4) | ((lane >> 1) & 3);
+  const short fn = TT_FN(lane);
   const int n0 = nmax, n1 = nmax;
   threadgroup half myP[16 * TK];
   threadgroup bfloat KV[TK * D];
@@ -177,7 +191,7 @@ template <int G, int D, int CK, int TK, int MAXD>
   matmul2d<dS, execution_simdgroup> opS;
   matmul2d<dO, execution_simdgroup> opO;
   auto Olo = opO.template get_destination_cooperative_tensor<decltype(tP), decltype(tVh), float>();
-  for (int i = 0; i < 64; i++) Olo[i] = 0.0f;
+  for (int i = 0; i < D / 2; i++) Olo[i] = 0.0f;
   float m0 = -INFINITY, m1 = -INFINITY, l0 = 0.0f, l1 = 0.0f;
   const int c0 = PT / CK;
   const int c = c0 + int(cb);
@@ -185,11 +199,7 @@ template <int G, int D, int CK, int TK, int MAXD>
   const int kend = min((c + 1) * CK, nmax);
   if (cb == 0 && PT > c0 * CK) {
     const int64_t baseA = ((int64_t)hk * NCA + c0) * RPA + node * 16;
-    for (int q = 0; q < 16; q++) {
-      const int row = fm + (q & 1) * 8;
-      const device float* src = POA + (baseA + row) * D + (q >> 1) * 16 + fn;
-      for (int j = 0; j < 4; j++) Olo[4 * q + j] = src[j];
-    }
+    for (int i = 0; i < D / 2; i++) Olo[i] = POA[(baseA + fm + (TT_HI(i, D) ? 8 : 0)) * D + fn + TT_COL(i, D)];
     m0 = PMA[baseA + fm]; l0 = PLA[baseA + fm];
     m1 = PMA[baseA + fm + 8]; l1 = PLA[baseA + fm + 8];
   }
@@ -206,37 +216,33 @@ template <int G, int D, int CK, int TK, int MAXD>
       threadgroup_barrier(mem_flags::mem_threadgroup);
       auto S = opS.template get_destination_cooperative_tensor<decltype(tQ), decltype(tK32), float>();
       opS.run(tQ, tK32, S);
-      for (int i = 0; i < 16; i++) sraw[hh * 16 + i] = S[i];
+      for (int i = 0; i < 16; i++) sraw[TT_HALF(hh, i)] = S[i];
     }
     float s[TK / 2];
     for (int i = 0; i < TK / 2; i++) {
-      const int key = kt + (i >> 3) * 16 + fn + (i & 3);
-      s[i] = key < ((i & 4) ? n1 : n0) ? sraw[i] * scale[0] : -INFINITY;
+      const int key = kt + fn + TT_COL(i, TK);
+      s[i] = key < (TT_HI(i, TK) ? n1 : n0) ? sraw[i] * scale[0] : -INFINITY;
     }
     float x0 = -INFINITY, x1 = -INFINITY;
-    for (int i = 0; i < TK / 2; i++) { if (i & 4) x1 = max(x1, s[i]); else x0 = max(x0, s[i]); }
+    for (int i = 0; i < TK / 2; i++) { if (TT_HI(i, TK)) x1 = max(x1, s[i]); else x0 = max(x0, s[i]); }
     x0 = max(x0, simd_shuffle_xor(x0, 1)); x0 = max(x0, simd_shuffle_xor(x0, 8));
     x1 = max(x1, simd_shuffle_xor(x1, 1)); x1 = max(x1, simd_shuffle_xor(x1, 8));
     const float nm0 = max(m0, x0), nm1 = max(m1, x1);
     const float f0 = (x0 == -INFINITY) ? 1.0f : fast::exp(m0 - nm0);
     const float f1 = (x1 == -INFINITY) ? 1.0f : fast::exp(m1 - nm1);
     float p[TK / 2];
-    for (int i = 0; i < TK / 2; i++) p[i] = (s[i] == -INFINITY) ? 0.0f : fast::exp(s[i] - ((i & 4) ? nm1 : nm0));
+    for (int i = 0; i < TK / 2; i++) p[i] = (s[i] == -INFINITY) ? 0.0f : fast::exp(s[i] - (TT_HI(i, TK) ? nm1 : nm0));
     float y0 = 0.0f, y1 = 0.0f;
     for (int bb = 0; bb < TK / 16; bb++) {
-      y0 += (p[bb * 8] + p[bb * 8 + 1]) + (p[bb * 8 + 2] + p[bb * 8 + 3]);
-      y1 += (p[bb * 8 + 4] + p[bb * 8 + 5]) + (p[bb * 8 + 6] + p[bb * 8 + 7]);
+      y0 += (p[TT_Y(bb, 0, 0)] + p[TT_Y(bb, 1, 0)]) + (p[TT_Y(bb, 2, 0)] + p[TT_Y(bb, 3, 0)]);
+      y1 += (p[TT_Y(bb, 0, 1)] + p[TT_Y(bb, 1, 1)]) + (p[TT_Y(bb, 2, 1)] + p[TT_Y(bb, 3, 1)]);
     }
     y0 += simd_shuffle_xor(y0, 1); y0 += simd_shuffle_xor(y0, 8);
     y1 += simd_shuffle_xor(y1, 1); y1 += simd_shuffle_xor(y1, 8);
     if (x0 != -INFINITY) { l0 = l0 * f0 + y0; m0 = nm0; }
     if (x1 != -INFINITY) { l1 = l1 * f1 + y1; m1 = nm1; }
-    for (int ff = 0; ff < TK / 16; ff++)
-      for (int i = 0; i < 4; i++) {
-        myP[fm * TK + ff * 16 + fn + i] = half(p[ff * 8 + i]);
-        myP[(fm + 8) * TK + ff * 16 + fn + i] = half(p[ff * 8 + 4 + i]);
-      }
-    for (int i = 0; i < 64; i++) { const float fct = (i & 4) ? f1 : f0; Olo[i] *= fct; }
+    for (int i = 0; i < TK / 2; i++) myP[(fm + (TT_HI(i, TK) ? 8 : 0)) * TK + fn + TT_COL(i, TK)] = half(p[i]);
+    for (int i = 0; i < D / 2; i++) { const float fct = TT_HI(i, D) ? f1 : f0; Olo[i] *= fct; }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint e = lane; e < TK * D / 8; e += 32) {
       const int row = int(e) / (D / 8), col = (int(e) % (D / 8)) * 8;
@@ -248,10 +254,7 @@ template <int G, int D, int CK, int TK, int MAXD>
     opO.run(tP, tVh, Olo);
   }
   const int64_t base = (((int64_t)hk * NCB + cb) * NT + node) * 16;
-  for (int q = 0; q < 16; q++) {
-    device float* dst = PO + (base + fm + (q & 1) * 8) * D + (q >> 1) * 16 + fn;
-    *(device float4*)dst = float4(Olo[4 * q], Olo[4 * q + 1], Olo[4 * q + 2], Olo[4 * q + 3]);
-  }
+  for (int i = 0; i < D / 2; i++) PO[(base + fm + (TT_HI(i, D) ? 8 : 0)) * D + fn + TT_COL(i, D)] = Olo[i];
   if ((lane & 9) == 0) {
     PM[base + fm] = m0; PL[base + fm] = l0;
     PM[base + fm + 8] = m1; PL[base + fm + 8] = l1;

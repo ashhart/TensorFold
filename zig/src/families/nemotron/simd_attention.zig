@@ -35,7 +35,7 @@ pub fn rewrite(a: std.mem.Allocator, source: []const u8) ![]u8 {
     return text;
 }
 
-/// The attention's score (16 x 64) and output (16 x 128) results, each element where the rewrite reads it.
+/// The attention's score (16 x 64) and output (16 x 128) results, and the tree tail's (16 x 32, threadgroup operands).
 const check_source =
     \\#include <metal_stdlib>
     \\#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
@@ -64,6 +64,21 @@ const check_source =
     \\  }
     \\  for (int i = 0; i < D / 2; i++) {
     \\    auto at = O.get_multidimensional_index(i);
+    \\    ok = ok && at[1] == fm + ((i & (D / 4)) ? 8 : 0) && at[0] == fn + (i & 1) + 8 * ((i >> 1) % (D / 8));
+    \\  }
+    \\  threadgroup bfloat KV[TK * D];
+    \\  tensor<threadgroup bfloat, dextents<int32_t, 2>, tensor_inline> tK32(KV, dextents<int32_t, 2>(D, 32));
+    \\  tensor<threadgroup bfloat, dextents<int32_t, 2>, tensor_inline> tVh(KV, dextents<int32_t, 2>(D, TK));
+    \\  constexpr auto dS32 = matmul2d_descriptor(16, 32, D, false, true, false, matmul2d_descriptor::mode::multiply);
+    \\  matmul2d<dS32, execution_simdgroup> opS32;
+    \\  auto S32 = opS32.template get_destination_cooperative_tensor<decltype(tQ), decltype(tK32), float>();
+    \\  for (int i = 0; i < 16; i++) {
+    \\    auto at = S32.get_multidimensional_index(i);
+    \\    ok = ok && at[1] == fm + ((i & 8) ? 8 : 0) && at[0] == fn + (i & 1) + 8 * ((i >> 1) % 4);
+    \\  }
+    \\  auto Ot = opO.template get_destination_cooperative_tensor<decltype(tP), decltype(tVh), float>();
+    \\  for (int i = 0; i < D / 2; i++) {
+    \\    auto at = Ot.get_multidimensional_index(i);
     \\    ok = ok && at[1] == fm + ((i & (D / 4)) ? 8 : 0) && at[0] == fn + (i & 1) + 8 * ((i >> 1) % (D / 8));
     \\  }
     \\  OK[lane] = ok ? 1 : 0;
