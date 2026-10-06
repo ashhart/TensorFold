@@ -1,10 +1,4 @@
-"""Compare tf-glm-run's capture (GLM_CAPTURE, raw bf16) with glm_ref.py's (--capture, safetensors), array by array;
-or two glm_ref.py captures on the arrays they share (a layer subset's against the whole model's).
-
-  python3 -B tools/zig/glm_compare.py REF.safetensors ZIG.bin
-  python3 -B tools/zig/glm_compare.py REF.safetensors OTHER.safetensors
-  python3 -B tools/zig/glm_compare.py --trace REF.safetensors ZIG.bin   (glm_ref.py --trace and GLM_TRACE: call by call)
-"""
+"""Compare a tf-glm-run capture (raw bf16) with glm_ref.py's (safetensors) array by array, or two glm_ref.py captures (--trace: call by call)."""
 
 from __future__ import annotations
 

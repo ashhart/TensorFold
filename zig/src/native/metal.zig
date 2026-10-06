@@ -1,6 +1,4 @@
-//! The engines a native server opens on Metal: Nemotron 4-bit (MLX affine, groups of 64) on the lane core, Flash
-//! Next 6-bit (groups of 32) on the replay engine (its kernels and packs in TF_FLASHNEXT_DUMP), and GLM-5.3-Flash
-//! 4-bit (groups of 64) on its own engine; the last two one reply at a time.
+//! The engines a native server opens on Metal: Nemotron on the lane core, Flash Next on its replay engine, GLM-5.3-Flash on its own.
 const std = @import("std");
 const mtl = @import("metal");
 const api = @import("engine_api");

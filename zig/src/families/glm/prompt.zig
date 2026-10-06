@@ -1,5 +1,4 @@
-//! Prompt chunks of up to `max_rows` rows: projections and routed experts on the M5 tensor units (core/affine_mm.zig: the
-//! row kernels' arithmetic, so a chunk's rows match the decode path's but for fp32 order), the rest on the row kernels.
+//! Prompt chunks: matmuls on the M5 tensor units at the row kernels' arithmetic (core/affine_mm.zig), the rest on the row kernels.
 const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
@@ -22,7 +21,6 @@ comptime {
 }
 /// Sparse rows whose block scores one selection pass holds.
 const select_rows = 256;
-
 
 /// The chunk's buffers beyond the decode scratch's (whose stream fields `streams` points at prompt-sized ones).
 pub const Prompt = struct {
@@ -201,10 +199,7 @@ fn shared(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const 
     qmm(p, e, p.sact, w.sh_down, p.ys, M);
 }
 
-/// The MoE block on M rows: shared expert, decode routing, (row, slot) pairs sorted by expert, gathered gate/up/down, the
-/// combine. By rows (`ep`, every expert's intermediate rows halved over two Macs): this Mac's half of every pick on the
-/// tensor units (core/expert_gather.zig), down's fp32 partials summed a row in slot order and swapped with the peer, the
-/// shared expert while they travel, then both sums in rank order, rounded, plus the shared expert (the decode rows path).
+/// The MoE block on M rows: shared expert, route, experts gathered by expert; by rows, this Mac's halves summed in slot order and swapped.
 fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, M: u32, ep: ?*ep_mod.Ep) void {
     const c = x.c;
     const k = x.k;
@@ -245,8 +240,7 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
     e.dispatchThreads(size(M * D, 1, 1), size(256, 1, 1));
 }
 
-/// The route on M rows: the decode's router and top-k, (row, slot) pairs sorted by expert, their rows taken in that
-/// order into `xs`, and each pair's place in it (`inverse`).
+/// The route on M rows: the decode's router and top-k, pairs sorted by expert, their rows gathered into `xs`, each pair's `inverse`.
 fn route(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, M: u32) void {
     const c = x.c;
     const k = x.k;
@@ -284,8 +278,7 @@ fn route(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const w
     inverse(p, e, n);
 }
 
-/// KDA layer `ki`'s step over a chunk's M rows of `proj` into `y` in three passes (glm_kda_prompt.metal): the fused
-/// step's bits, with only the recurrence in sequence. Its parts live in the MoE's fp32 buffer, idle during attention.
+/// KDA layer `ki` over a chunk in three passes (glm_kda_prompt.metal): the fused step's bits, only the recurrence in sequence.
 fn kdaChunk(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, ki: usize, w: *const wts.Kda, M: u32) void {
     const c = x.c;
     const k = x.k;
@@ -321,8 +314,7 @@ fn kdaChunk(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, ki: usiz
     e.dispatchGroups(size(M, H, 1), size(32, 1, 1));
 }
 
-/// Every row's 64 heads' latent outputs (`att` [M, 64, 512]) to values (`vals` [M, 64 * 256]) on the tensor units: each
-/// head's value half of kv_b as one of a batch of dense products (the decode's qmv arithmetic, core/affine_mm.zig).
+/// Every row's 64 heads' latent outputs to values on the tensor units: each head's value half of kv_b, one dense product of a batch.
 fn unabsorb(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts.Mla, M: u32) void {
     const c = x.c;
     const H = c.mla_heads;

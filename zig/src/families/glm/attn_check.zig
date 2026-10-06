@@ -1,5 +1,4 @@
-//! The prompt chunk's sparse attention on the tensor units (glm_sparse_nax.metal) against the row kernel it replaces and
-//! an fp64 host reference: dense, sparse, nearly empty and empty key lists, diffuse and peaked scores.
+//! The prompt chunk's tensor-unit sparse attention against the row kernel and an fp64 host, over dense, sparse and empty key lists.
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");

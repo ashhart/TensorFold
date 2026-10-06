@@ -1,5 +1,4 @@
-//! decode.CopyIndex: copy drafts' search over a context. Each token's positions, latest last; `longest` finds the
-//! longest earlier match of the context's last tokens, `chain` the longest continuation of an earlier copy of the last 8.
+//! decode.CopyIndex: copy drafts' search over a context, by each token's positions (longest match, or the 8-token chain).
 
 const std = @import("std");
 

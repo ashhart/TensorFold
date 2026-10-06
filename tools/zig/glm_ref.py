@@ -1,12 +1,4 @@
-"""GLM-5.3-Flash references from the Python family (a dev-time oracle for tf-glm-run): prompts through the row-exact
-decode path (calls of 16 rows or fewer, every row its one-row bits), greedy replies one token a call, and each
-sublayer's input and output for a prompt's first window.
-
-  python -B tools/zig/glm_ref.py MODEL_DIR OUT_JSON [--max 64] [--long 2100 4096] [--capture CAP.safetensors] [--text F]
-                                 [--layers N]   (the first N layers only, as tf-glm-run's GLM_LAYERS=N)
-                                 [--trace NAME STEPS TRACE.safetensors]   (every call's sublayers: the prompt's
-                                 windows, then STEPS one-row steps feeding NAME's reply; tf-glm-run's GLM_TRACE)
-"""
+"""GLM-5.3-Flash references from the Python family for tf-glm-run (dev-time oracle): row-exact prompts, greedy replies, sublayer captures."""
 
 from __future__ import annotations
 
@@ -101,8 +93,7 @@ def main() -> int:
 
 
 def trace(model, ids: list[int], reply: list[int], steps: int, path: str) -> None:
-    """Every call of a reply's forward, sublayer by sublayer (keys c{call}.{array}): the prompt's windows, then
-    `steps` one-row steps feeding the reply's tokens, the cache carried between calls as the reply carries it."""
+    """Every call of a reply's forward, sublayer by sublayer (keys c{call}.{array}): the prompt's windows, then `steps` one-row steps."""
 
     import mlx.core as mx
 

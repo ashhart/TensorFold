@@ -1,6 +1,4 @@
-// A MoE layer's route in two launches for 1-16 rows: router logits (each 4-expert block's weights staged once, every
-// row's sums in the one-row kernel's order), then the top-k and the expert groups this Mac computes.
-// Defines: TF_K (hidden), TF_E (experts, a multiple of 4), TF_TOPK, TF_MAXR (rows at most, <= 16).
+// A MoE layer's route for 1-16 rows: router logits in the one-row kernel's order, then the top-k and this Mac's expert groups.
 #include <metal_stdlib>
 using namespace metal;
 
@@ -10,9 +8,7 @@ using namespace metal;
 constant constexpr int ITERS = TF_K / 32;
 constant constexpr int PER = (TF_E + 31) / 32;
 
-// Logits [rows, E] = x W^T. A threadgroup takes a 4-expert block q (tg.x) for four rows (tg.y): the block's packed bf16
-// weights and the rows' x staged a quarter of K at a time. Lane thrM * 4 + c of simdgroup 0 takes row 4 tg.y + c: its
-// sums over k = 32 it + 4 thrM + tm in order, then the tree over thrM (the one-row kernel's order).
+// Logits [rows, E] = x W^T: a 4-expert block (tg.x) for four rows (tg.y), staged a quarter of K at a time, summed in the one-row order.
 [[kernel]] void tf_route_logits(const device bfloat* X [[buffer(0)]], const device uint4* RP [[buffer(1)]],
                                 constant int& rows [[buffer(2)]], device TF_OUT_T* OUT [[buffer(3)]],
                                 uint2 tg [[threadgroup_position_in_grid]], uint2 tpos [[thread_position_in_threadgroup]],
@@ -77,9 +73,7 @@ struct RouteArgs {
   float scale;
 };
 
-// One threadgroup of 512: each row's top TF_TOPK experts by sigmoid + bias (ties to the lower id) and their normalized,
-// scaled weights; then the experts in [lo, hi) the window picked (ascending, ids from lo) with their picks, and the picks
-// this Mac and the peer compute (ascending), with this Mac's count also in `cnt` (the link's word).
+// One threadgroup of 512: each row's top-k by sigmoid + bias (ties to the lower id) and weights, then this Mac's groups and pick lists.
 [[kernel]] void tf_route_select(const device float* LOGITS [[buffer(0)]], const device float* BIAS [[buffer(1)]],
                                 constant RouteArgs& a [[buffer(2)]], device int* PICK [[buffer(3)]],
                                 device float* WTS [[buffer(4)]], device int* LIDS [[buffer(5)]],

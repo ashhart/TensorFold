@@ -322,8 +322,7 @@ pub const Ep = struct {
         enc.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
     }
 
-    /// By rows: this Mac's routed sums (`yp`'s fp32 partials [rows, TOPK, 4096] weighted by `wts`) into the send slot,
-    /// then the post: a decode window's or a prompt chunk's (up to PROMPT_ROWS rows).
+    /// By rows: this Mac's routed sums (`yp` partials weighted by `wts`) into the send slot, then the post (a window or a prompt chunk).
     pub fn sendRows(t: *Ep, enc: mtl.ComputeEncoder, yp: Ref, wts: Ref, rows: u32) void {
         std.debug.assert(rows <= PROMPT_ROWS);
         enc.setPipeline(t.rcombine_pipe);

@@ -1,14 +1,10 @@
-// x W^T for affine-quantized W (MLX's layout) on the tensor units, dense or over rows sorted by expert, with the row
-// kernels' arithmetic: the MMAs take the integer codes exactly (bf16 holds 0..255), each group's fp32 sums get the
-// group's scale, and its bias meets the row's sum over the group (tf_affine_row_sums: at 4 bits added four at a time
-// in bf16, as the row kernels add them). No weight is rounded, so the sums differ from the row kernels' only in fp32
-// order. A 64-column block a threadgroup (4 simdgroups); dense tiles of 64 rows, expert tiles of BM rows of one expert.
-// Defines: TF_BITS (4 or 8), TF_GROUP (32 or 64), TF_OUT_T (bfloat, or float: partial sums another pass adds).
+// x W^T for MLX affine W on the tensor units: exact codes in the MMAs, fp32 group sums scaled, bias times the row kernels' group sums.
 #include <metal_stdlib>
 using namespace metal;
 #include "../nax.h"
 using namespace tfp;
 
+// Defines: TF_BITS (4 or 8), TF_GROUP (32 or 64), TF_OUT_T (bfloat, or float for partial sums another pass adds).
 #ifndef TF_OUT_T
 #define TF_OUT_T bfloat
 #endif
@@ -21,14 +17,12 @@ struct MmArgs {
   int rows, n, k, experts; // rows (sorted by expert for a gather), outputs a row, depth, experts (gather)
 };
 
-// A dense matmul's pitches, and its batch's offsets (tg.z): rows of x and y apart, rows of the group sums apart, and
-// each batch's start in x and y (elements), in the sums (rows) and in the weights (rows).
+// A dense matmul's pitches, and each batch's start in x, y (elements), the sums and the weights (rows).
 struct MmStrides {
   int x_row, y_row, sums_row, x_batch, y_batch, sums_batch, w_batch, pad;
 };
 
-// Each row's sum over each group [rows, k / TF_GROUP], as the row kernels take it: at 4 bits in chains of four, each
-// add rounded to bf16, the chains added in fp32.
+// Each row's sum over each group as the row kernels take it: at 4 bits chains of four bf16 adds, the chains added in fp32.
 [[kernel]] void tf_affine_row_sums(const device bfloat* X [[buffer(0)]], constant MmArgs& a [[buffer(5)]],
                                    device float* XS [[buffer(6)]], uint2 gid [[thread_position_in_grid]]) {
   const int g = int(gid.x), r = int(gid.y), groups = a.k / TF_GROUP;
@@ -65,8 +59,7 @@ inline void am_codes(const device uchar* w, threadgroup bfloat* out) {
 #endif
 }
 
-// x (TM 16-row fragments, ld K; `live` rows) times a [64 rows, K] code block: thread t holds half of weight row t / 2
-// each step; each group's sums go into `acc` with the group's scale (sb), and its bias times the row sums `xs`.
+// x (TM 16-row fragments, `live` rows) times a [64, K] code block; each group's sums scaled (sb) plus its bias times `xs`.
 template <int TM>
 inline void am_k_loop(thread frag<float> (&acc)[TM][2], const device bfloat* x, int ldx, int K, int live, bool inside,
                       const device float* xs, int ldxs, const device uchar* wq, const device bfloat* scales,
@@ -232,8 +225,7 @@ inline void am_block(const device bfloat* x, int ldx, const device float* xs, in
   }
 }
 
-// y [rows, n] = x [rows, k] W^T, n a multiple of 64 (the weights' rows padded to it): 64x64 tiles, a batch of them
-// along tg.z (each with its own x, y, sums and weight rows: MmStrides).
+// y [rows, n] = x [rows, k] W^T, n a multiple of 64: 64x64 tiles, a batch along tg.z (MmStrides).
 [[kernel]] void tf_affine_mm(const device bfloat* X [[buffer(0)]], const device uint32_t* W [[buffer(1)]],
                              const device bfloat* S [[buffer(2)]], const device bfloat* B [[buffer(3)]],
                              const device float* XS [[buffer(4)]], constant MmArgs& a [[buffer(5)]],

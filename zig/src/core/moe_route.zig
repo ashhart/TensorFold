@@ -30,8 +30,7 @@ pub fn logits(e: mtl.ComputeEncoder, pipe: mtl.Pipeline, s: Shape, x: anytype, p
 
 pub const Args = extern struct { rows: i32, lo: i32, hi: i32, scale: f32 };
 
-/// Where the selection writes: each pick's expert and weight, this Mac's experts [lo, hi) the window picked (ids from
-/// lo, their member picks, their count), the picks this Mac and the peer compute, both counts, and the count's word.
+/// Where the selection writes: picks and weights, this Mac's picked experts with their members, both Macs' pick lists, counts, word.
 pub fn Outputs(comptime B: type) type {
     return struct { pick: B, wts: B, ids: B, members: B, count: B, mine: B, theirs: B, counts: B, word: B };
 }

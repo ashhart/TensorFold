@@ -187,8 +187,7 @@ const Loader = struct {
         return out;
     }
 
-    /// This Mac's routed experts' `proj` stacked [own experts, n, k] (expert e at e - own[0]) from the stored [n_all, k_all]:
-    /// by rows, gate and up keep rows `inter` (`rows`), down keeps input columns `inter` (`cols`).
+    /// This Mac's routed experts' `proj` stacked [own, n, k]; by rows, gate/up keep rows `inter` and down keeps input columns `inter`.
     fn experts(l: *Loader, i: usize, proj: []const u8, n_all: usize, k_all: usize, part: enum { whole, rows, cols }) !Q4 {
         const every = i == l.c.layers; // the MTP layer: every expert whole on every Mac (its drafts need no exchange)
         const lo = if (every) 0 else l.c.own[0];

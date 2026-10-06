@@ -1,8 +1,4 @@
-// GLM's MLA absorb for a prompt chunk on the tensor units: each row's 64 heads of q_nope [256] times their head's key
-// half of kv_b [256, 512] (4-bit, groups of 64 along the 512 outputs) into the latent [64, 512]. The row kernel (affine
-// qvm) multiplies each query value by the fp32 weight s q + b; here each weight's fp32 value goes in as three bf16
-// parts that add up to it exactly, so every product is exact and every sum fp32: the row kernel's precision in another
-// order. A threadgroup takes a head, 64 rows and 64 outputs; its 4 simdgroups 32 x 32 each, 32 deep a step.
+// GLM's MLA absorb for prompt chunks on the tensor units: each fp32 weight as three exact bf16 parts, so every product is exact.
 #include <metal_stdlib>
 using namespace metal;
 #include "../nax.h"
@@ -11,8 +7,7 @@ using namespace tfp;
 constant constexpr int HEADS = 64, NOPE = 256, LATENT = 512, PER_HEAD = 512; // kv_b rows a head: key half, value half
 constant constexpr int PAD = 64 + 8;
 
-// ql [rows, 64, 512] = q_nope (in qp: row r's head h at r * q_stride + h * 256) times W_k[h]. Grid: (512 / 64 columns,
-// rows / 64, 64 heads) threadgroups of 4 simdgroups.
+// ql [rows, 64, 512] = q_nope (row r's head h at r * q_stride + h * 256) times W_k[h]; grid (8 columns, rows / 64, 64 heads).
 [[kernel]] void glm_absorb_nax(const device uint32_t* W [[buffer(0)]], const device bfloat* S [[buffer(1)]],
                                const device bfloat* B [[buffer(2)]], const device bfloat* qp [[buffer(3)]],
                                device bfloat* ql [[buffer(4)]], constant int2& a [[buffer(5)]],

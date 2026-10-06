@@ -125,7 +125,6 @@ pub const Scratch = struct {
     m_logits: Ref,
     m_picks: Ref,
     rl: Ref, // one Mac's route lists: the picks it computes, the peer's (none), their counts and the count's word
-    hcc: Ref, // u32 a row: the boundary's threadgroups that have mixed (the last one splits; reset to 0)
     yp: Ref, // fp32 [rows * topk, D]: expert parallel by rows, each pick's down partial
 };
 
@@ -157,17 +156,17 @@ pub fn init(arena: *Arena, c: *const cfg.Config, cap: u32) !struct { state: Stat
     const H: usize = c.mla_heads;
     const V: usize = c.vocab;
     const sizes = [_]usize{
-        R * 4,              R * 4,                   R * 4 * D * 2,          R * 4 * D * 2,           R * D * 2,
-        R * D * 2,          R * D * 2,               R * 4 * 4,              R * 16 * 4,              R * 4,
-        R * 24 * 4,         64,                      R * c.kdaWidth() * 2,   R * c.xProj() * 2,       R * c.q_lora * 2,
-        R * c.qrProj() * 2, R * H * c.kv_lora * 2,   R * H * c.kv_lora * 2,  R * H * c.i_topk * 2,    R * H * c.i_topk * 2,
-        R * H * c.kv_lora * 2, R * H * c.v_dim * 2,  R * c.i_heads * 2,      R * (cap / c.kpool + 1) * 4, R * c.keyWidth() * 4,
-        R * 6 * 4,          R * D * 4,               R * c.experts * 4,      R * c.topk * 4,          R * c.topk * 4,
-        R * c.topk * 4 + 64, R * c.topk * R * 4,     64,                     64,                      R * c.moe_inter * 2,
-        R * D * 2,          R * c.topk * c.moe_inter * 2, R * c.topk * D * 2, R * 2 * c.dense_inter * 2, R * c.dense_inter * 2,
-        R * D * 2,          R * D * 2,               R * V * 2,              R * 4,                   R * D * 2,
-        R * 2 * D * 2,      R * D * 2,               R * D * 2,              R * D * 2,               R * D * 2,
-        R * V * 2,          R * 4,                   R * c.topk * 4 * 2 + 256, R * 4,             R * c.topk * D * 4,
+        R * 4,                 R * 4,                        R * 4 * D * 2,            R * 4 * D * 2,               R * D * 2,
+        R * D * 2,             R * D * 2,                    R * 4 * 4,                R * 16 * 4,                  R * 4,
+        R * 24 * 4,            64,                           R * c.kdaWidth() * 2,     R * c.xProj() * 2,           R * c.q_lora * 2,
+        R * c.qrProj() * 2,    R * H * c.kv_lora * 2,        R * H * c.kv_lora * 2,    R * H * c.i_topk * 2,        R * H * c.i_topk * 2,
+        R * H * c.kv_lora * 2, R * H * c.v_dim * 2,          R * c.i_heads * 2,        R * (cap / c.kpool + 1) * 4, R * c.keyWidth() * 4,
+        R * 6 * 4,             R * D * 4,                    R * c.experts * 4,        R * c.topk * 4,              R * c.topk * 4,
+        R * c.topk * 4 + 64,   R * c.topk * R * 4,           64,                       64,                          R * c.moe_inter * 2,
+        R * D * 2,             R * c.topk * c.moe_inter * 2, R * c.topk * D * 2,       R * 2 * c.dense_inter * 2,   R * c.dense_inter * 2,
+        R * D * 2,             R * D * 2,                    R * V * 2,                R * 4,                       R * D * 2,
+        R * 2 * D * 2,         R * D * 2,                    R * D * 2,                R * D * 2,                   R * D * 2,
+        R * V * 2,             R * 4,                        R * c.topk * 4 * 2 + 256, R * c.topk * D * 4,
     };
     var total: usize = 0;
     for (sizes) |n| total += std.mem.alignForward(usize, n, 256);
@@ -193,5 +192,5 @@ fn flat(comptime i: usize) usize {
 
 test "the scratch sizes line up with its fields" {
     const n = @typeInfo(Scratch).@"struct".field_names.len;
-    try std.testing.expectEqual(@as(usize, 54), n);
+    try std.testing.expectEqual(@as(usize, 53), n);
 }

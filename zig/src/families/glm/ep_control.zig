@@ -109,8 +109,7 @@ pub const Control = struct {
         return peer.*;
     }
 
-    /// A step both Macs take in order: rank 0's decision to stop there, which rank 1 reads and acknowledges; rank 0
-    /// reuses a parity word only once rank 1 has read the step before.
+    /// A step both Macs take in order: rank 0's stop decision, read and acknowledged by rank 1 before its parity word is reused.
     pub fn agree(c: *Control, quit: bool) !bool {
         c.step += 1;
         const at = CTRL + 8 * (c.step % 2);

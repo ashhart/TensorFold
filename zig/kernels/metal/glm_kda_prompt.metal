@@ -1,9 +1,5 @@
 
-// ---- a prompt chunk's KDA layer in three passes (appended to kda_rows' source: its helpers and constants) ----
-// Each value is the fused step's (kda_rows) bits: the same expressions in the same order, split where the step is
-// parallel. glm_kda_pre: a row's gates, short convolution and norms, every row and head at once; glm_kda_scan: the
-// recurrence alone, a simdgroup for each four state rows of a head (they never meet); glm_kda_post: the output norm and
-// gate, every row and head at once, and the next chunk's convolution window.
+// A prompt chunk's KDA layer in three passes (appended to kda_rows' source): the fused step's bits, only the recurrence in sequence.
 
 template <int H, int D, int TAPS, int TY, int FB, int GB>
 [[kernel]] void glm_kda_pre(const device bfloat16_t* P [[buffer(0)]], const constant int* P_shape [[buffer(1)]],

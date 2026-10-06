@@ -1,9 +1,4 @@
-// GLM's absorbed MLA over each row's listed keys on the tensor units (a prompt chunk's sparse attention). A threadgroup
-// takes a row and 16 of its 64 heads, so the row's keys are read once for 16 heads; each of its 4 simdgroups takes 128
-// of the 512 latent dims. Scores are fp32 sums of exact bf16 products (a simdgroup's 128 dims, then the four partial
-// sums added in order); the softmax runs online in fp32 as the row kernel's does (fast exp, -FLT_MAX for no key); the
-// probabilities enter the value MMAs as three bf16 parts that add up to the fp32 value exactly, so every product is
-// exact and every sum fp32: the row kernel's precision in another order.
+// GLM's sparse MLA for prompt chunks on the tensor units: exact bf16 products, fp32 sums, probabilities in three bf16 parts (exact).
 #include <metal_stdlib>
 using namespace metal;
 #include "../nax.h"
@@ -34,8 +29,7 @@ inline float row_sum(float v) {
   return v + simd_shuffle_xor(v, ushort(8));
 }
 
-// out [rows, 64, 512] for queries `ql` [rows, 64, 512] over each row's `width` listed keys of `keys` [*, 512] (a list
-// entry outside [0, key_length) is no key). Grid: (4 head groups, rows) threadgroups of 4 simdgroups.
+// out [rows, 64, 512] over each row's `width` listed keys (an entry outside [0, key_length) is no key); grid (4 head groups, rows).
 [[kernel]] void glm_sparse_nax(const device bfloat* ql [[buffer(0)]], const device bfloat* keys [[buffer(1)]],
                                const device int32_t* indices [[buffer(2)]], constant float& scale [[buffer(3)]],
                                constant int4& meta [[buffer(4)]], device bfloat* out [[buffer(5)]],

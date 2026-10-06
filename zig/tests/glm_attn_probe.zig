@@ -1,9 +1,12 @@
 //! GLM-5.3-Flash's dense latent attention (forward.attendDense) on given inputs, for a bit check against a reference.
-//! tf-glm-attn-probe IN OUT. IN: u32 cases, then a case: u32 n, q [64, 512] bf16 (scaled), keys [n, 512] bf16.
-//! OUT: a case's scores [64, n], probabilities [64, n] and outputs [64, 512], bf16.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
+
+const usage =
+    \\tf-glm-attn-probe IN OUT. IN: u32 cases, then a case: u32 n, q [64, 512] bf16 (scaled), keys [n, 512] bf16.
+    \\OUT: a case's scores [64, n], probabilities [64, n] and outputs [64, 512], bf16.
+;
 const glm = tf.glm;
 
 pub fn main(init: std.process.Init) !void {
@@ -11,7 +14,7 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
     if (args.len != 3) {
-        std.debug.print("usage: tf-glm-attn-probe IN OUT\n", .{});
+        std.debug.print("usage: {s}\n", .{usage});
         std.process.exit(2);
     }
     const pool = mtl.objc.Pool.push();

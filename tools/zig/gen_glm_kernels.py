@@ -35,8 +35,7 @@ GEMV_T = {"igate": (1, 2, 8, 4, 4, 4), "values": (1, 4, 8, 4, 4, 4)}
 GEMV = {"scores_lt4": (1, 8, 1, 32, 1, 4), "scores_le32": (1, 8, 1, 32, 4, 4), "scores": (4, 1, 1, 32, 4, 4)}
 
 
-# bfloat overloads for the two math calls the family's kernels make on bfloat outside MLX (MLX's own headers supply
-# them there): the float function in each math mode, rounded back to bfloat
+# bfloat abs/exp overloads for the family's kernels outside MLX: the float function in each math mode, rounded back to bfloat
 BF16_MATH = """namespace metal {
 inline bfloat16_t abs(bfloat16_t v) { return bfloat16_t(abs(float(v))); }
 inline bfloat16_t exp(bfloat16_t v) { return bfloat16_t(exp(float(v))); }

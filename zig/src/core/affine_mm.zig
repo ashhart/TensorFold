@@ -1,6 +1,4 @@
-//! x W^T for affine-quantized W on the tensor units, dense or over rows sorted by expert (kernels/metal/core/affine_mm.metal),
-//! with the row kernels' arithmetic: exact integer codes in the MMAs, each group's fp32 sums scaled, its bias against the
-//! row's group sum (taken as the row kernels take it). bf16 out, or fp32 partial sums for another pass to add.
+//! x W^T for affine-quantized W on the tensor units, dense or by expert, at the row kernels' arithmetic (exact codes, fp32 group sums).
 const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
@@ -17,8 +15,7 @@ pub fn source(device: mtl.Device, a: std.mem.Allocator, f: Format) ![]u8 {
     return std.fmt.allocPrint(a, "#define TF_BITS {d}\n#define TF_GROUP {d}\n#define TF_OUT_T {s}\n{s}", .{ f.bits, f.group, if (f.out_f32) "float" else "bfloat", body });
 }
 
-/// The entry points: the row sums, the dense matmul, the gathers by tile height (32 rows: few rows an expert), and the
-/// gathers that put each row's output back in another order.
+/// The entry points: row sums, the dense matmul, gathers by tile height, and gathers that put each row's output in another order.
 pub const names = [6][:0]const u8{ "tf_affine_row_sums", "tf_affine_mm", "tf_affine_gather_32", "tf_affine_gather_64", "tf_affine_gather_scatter_32", "tf_affine_gather_scatter_64" };
 
 /// A format's pipelines, in `names` order.
@@ -26,9 +23,7 @@ pub const Pipes = [6]mtl.Pipeline;
 
 pub const Args = extern struct { rows: i32, n: i32, k: i32, experts: i32 };
 
-/// A dense matmul's pitches and batch (in elements; the sums' in rows): x rows `x_row` apart, y rows `y_row`, the group
-/// sums' rows `sums_row`; batch b's x at b * x_batch, y at b * y_batch, sums at row b * sums_batch, weights at row b *
-/// w_batch. The default is one plain [rows, k] x [k, n] product.
+/// A dense matmul's pitches and batch offsets, in elements (the sums' in rows); the default is one plain [rows, k] x [k, n] product.
 pub const Strides = extern struct { x_row: i32 = 0, y_row: i32 = 0, sums_row: i32 = 1, x_batch: i32 = 0, y_batch: i32 = 0, sums_batch: i32 = 0, w_batch: i32 = 0, pad: i32 = 0 };
 
 fn bind(e: mtl.ComputeEncoder, i: usize, r: anytype) void {
@@ -44,15 +39,13 @@ pub fn rowSums(e: mtl.ComputeEncoder, p: Pipes, group: u32, x: anytype, sums: an
     e.dispatchThreads(mtl.Size.of(k / group, rows, 1), mtl.Size.of(@min(k / group, 64), 1, 1));
 }
 
-/// y [rows, n] = x [rows, q.k] W^T with x's group sums `sums`; n is q.n rounded up to 64 (the weights' padded rows,
-/// y's row pitch).
+/// y [rows, n] = x [rows, q.k] W^T with x's group sums `sums`; n is q.n rounded up to 64 (the padded weight rows, y's pitch).
 pub fn dense(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: anytype, y: anytype, rows: u32) void {
     const n = std.mem.alignForward(u32, q.n, 64);
     denseBatch(e, p, x, sums, q, y, rows, 1, .{ .x_row = @intCast(q.k), .y_row = @intCast(n) });
 }
 
-/// `batch` dense products at once, each y [rows, q.n] = x [rows, q.k] W_b^T over its own rows of the weights (`s`;
-/// q.n a multiple of 64): e.g. each head's slice of a per-head projection.
+/// `batch` dense products at once, each over its own rows of the weights (`s`; q.n a multiple of 64), e.g. a per-head projection.
 pub fn denseBatch(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: anytype, y: anytype, rows: u32, batch: u32, s: Strides) void {
     const n = std.mem.alignForward(u32, q.n, 64);
     e.setPipeline(p[1]);
@@ -67,8 +60,7 @@ pub fn denseBatch(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q:
     e.dispatchGroups(mtl.Size.of(n / 64, (rows + 63) / 64, batch), mtl.Size.of(32, 2, 2));
 }
 
-/// y [rows, q.n] = x [rows, q.k] times each row's expert's W^T, the rows sorted by expert with `offsets` [experts] (each
-/// expert's first row) and group sums `sums`; `q` is [experts, n, k] (w, s, b, n, k) and n a multiple of 64.
+/// y [rows, q.n] = x times each row's expert's W^T, rows sorted by expert with `offsets` (each expert's first row); q is [experts, n, k].
 pub fn gather(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: anytype, offsets: anytype, y: anytype, rows: u32, experts: u32) void {
     gatherTo(e, p, x, sums, q, offsets, y, null, rows, experts);
 }

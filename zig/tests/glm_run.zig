@@ -1,25 +1,29 @@
-//! GLM-5.3-Flash replies on the native engine: each prompt's greedy reply at every draft depth, its hash, the first
-//! difference from depth 0 and from the prompt's reference tokens, and the speeds.
-//! tf-glm-run MODEL_DIR PROMPTS_JSON ({"prompts": [{"name": ..., "ids": [...], "expect": [...]}]})
-//! GLM_DEPTHS (default "0,3"), GLM_MAX (64), GLM_CAP (prompt + reply room, default 8192), GLM_RUNS (1),
-//! GLM_OUT (write each prompt's first-depth reply as JSON), GLM_VS (compare replies with a GLM_OUT file),
-//! GLM_CANCEL_TEST (cancel a reply mid-prompt, then the next fresh reply must equal the plain one),
-//! GLM_LAYERS (the first N layers only, with the MTP layer and head), GLM_REF_STRICT (a reference difference fails),
-//! GLM_EP (expert parallel: this Mac's link settings; run the same command on both Macs),
-//! GLM_TRACE=NAME:STEPS:PATH (every call of NAME's plain reply, sublayer by sublayer, feeding its expected tokens),
-//! GLM_FORCED (each prompt's teacher-forced agreement with its expected tokens, before the replies),
-//! GLM_PROFILE=D,D (after the replies: a knock-out profile of a round at each depth, GLM_PROFILE_REPS times),
-//! GLM_LOGITS=PREFIX (write each prompt's last-row logits, bf16, to PREFIX.NAME.bf16 at its first depth's first run),
-//! GLM_LOGITS_VS=PREFIX (compare them with such a file: the largest difference against the bf16 step at the top logit),
-//! GLM_PROMPT_PROFILE=REPS (after the replies: each prompt's first chunk by class, each left out or alone),
-//! GLM_MARGINS=PREFIX (each emitted token's top-two logit margin, f32, to PREFIX.NAME.margins), GLM_MARGINS_VS=PREFIX
-//! (at the first token that differs from GLM_VS's reply, both runs' margins there),
-//! GLM_TRACE_LAST=PREFIX (each prompt's last row at every capture point, bf16, to PREFIX.NAME.trace: embedding, then
-//! each layer's attention input and output and MLP input and output, then the final norm).
+//! GLM-5.3-Flash replies on the native engine at each draft depth: hashes, first differences from depth 0 and the reference, speeds.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
 const glm = tf.glm;
+
+const usage =
+    \\tf-glm-run MODEL_DIR PROMPTS_JSON ({"prompts": [{"name": ..., "ids": [...], "expect": [...]}]})
+    \\GLM_DEPTHS (default "0,3"), GLM_MAX (64), GLM_CAP (prompt + reply room, default 8192), GLM_RUNS (1),
+    \\GLM_OUT (write each prompt's first-depth reply as JSON), GLM_VS (compare replies with a GLM_OUT file),
+    \\GLM_CANCEL_TEST (cancel a reply mid-prompt, then the next fresh reply must equal the plain one),
+    \\GLM_LAYERS (the first N layers only, with the MTP layer and head), GLM_REF_STRICT (a reference difference fails),
+    \\GLM_EP (expert parallel: this Mac's link settings; run the same command on both Macs),
+    \\GLM_TRACE=NAME:STEPS:PATH (every call of NAME's plain reply, sublayer by sublayer, feeding its expected tokens),
+    \\GLM_FORCED (each prompt's teacher-forced agreement with its expected tokens, before the replies),
+    \\GLM_PROFILE=D,D (after the replies: a knock-out profile of a round at each depth, GLM_PROFILE_REPS times),
+    \\GLM_LOGITS=PREFIX (write each prompt's last-row logits, bf16, to PREFIX.NAME.bf16 at its first depth's first run),
+    \\GLM_LOGITS_VS=PREFIX (compare them with such a file: the largest difference against the bf16 step at the top logit),
+    \\GLM_PROMPT_PROFILE=REPS (after the replies: each prompt's first chunk by class, each left out or alone),
+    \\GLM_MARGINS=PREFIX (each emitted token's top-two logit margin, f32, to PREFIX.NAME.margins), GLM_MARGINS_VS=PREFIX
+    \\(at the first token that differs from GLM_VS's reply, both runs' margins there),
+    \\GLM_TRACE_LAST=PREFIX (each prompt's last row at every capture point, bf16, to PREFIX.NAME.trace: embedding, then
+    \\each layer's attention input and output and MLP input and output, then the final norm),
+    \\GLM_PROMPT=0 (prompts in 16-row decode windows), GLM_CHUNK=N (prompt chunks of N rows), GLM_COPY=N (copy drafts from
+    \\N-token matches), GLM_RANKS=1 (where missed drafts' targets fell among the MTP head's choices).
+;
 
 const Collect = struct {
     gpa: std.mem.Allocator,
@@ -104,7 +108,7 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
     if (args.len < 3) {
-        std.debug.print("usage: tf-glm-run MODEL_DIR PROMPTS_JSON\n", .{});
+        std.debug.print("usage: {s}\n", .{usage});
         std.process.exit(2);
     }
     const pool = mtl.objc.Pool.push();

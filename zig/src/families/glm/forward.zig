@@ -7,7 +7,6 @@ const st = @import("state.zig");
 const Kernels = @import("kernels.zig").Kernels;
 const Ep = @import("ep.zig").Ep;
 const moe_route = @import("../../core/moe_route.zig");
-const hc_core = @import("../../core/hc.zig");
 const route_shape = @import("kernels.zig").route_shape;
 const Ref = wts.Ref;
 
@@ -25,7 +24,6 @@ pub const Ctx = struct {
     skip: u32 = 0, // a profile's knock-outs: launch classes left out (Class bits)
     pskip: u32 = 0, // a profile's knock-outs by launch (Part bits)
     fused_route: bool = true, // the core route (two launches); false: the Python family's cast, router and top-k
-    hc_mode: u8 = 0, // 0: the family's expand, mix and split; 1: its expand, then core/hc.zig's mix and split; 2: one launch
     draft_vocab: u32 = 154880, // the MTP head's tokens: the vocabulary's first this many
     m_row: u32 = 0, // the MTP head's logits row in m_logits (a rank log keeps each depth's in its own row)
 };
@@ -140,12 +138,6 @@ pub fn embedRows(x: *const Ctx, e: mtl.ComputeEncoder, ids: Ref, out: Ref, rows:
 pub fn boundary(x: *Ctx, e: mtl.ComputeEncoder, rows: u32, pending: bool, hc: ?wts.Hc, norm: ?Ref) void {
     const sc = x.sc;
     const k = x.k;
-    if (x.hc_mode == 2 and hc != null) {
-        const h = hc.?;
-        if (on(x, "hc_mix")) hc_core.boundary(e, .{ k.hc_expand, k.hc_first }, pending, rows, x.c.eps, .{ .x_old = sc.x[x.xi], .branch = sc.branch, .post = sc.post, .comb = sc.comb, .fn_packed = h.fnp, .scale = h.scale, .base = h.base, .norm = norm.?, .x_new = sc.x[1 - x.xi], .mixes = sc.mixes, .normed = sc.normed, .count = sc.hcc });
-        if (pending) x.xi = 1 - x.xi;
-        return;
-    }
     if (on(x, "hc_expand")) {
         e.setPipeline(if (pending and hc != null) k.hc_expand_11 else if (pending) k.hc_expand_10 else k.hc_expand_01);
         bind(e, 0, .{ sc.x[x.xi], sc.branch, sc.post, sc.comb });
@@ -155,10 +147,6 @@ pub fn boundary(x: *Ctx, e: mtl.ComputeEncoder, rows: u32, pending: bool, hc: ?w
     }
     if (pending) x.xi = 1 - x.xi;
     const h = hc orelse return;
-    if (x.hc_mode == 1) {
-        if (on(x, "hc_mix")) hc_core.mixSplit(e, k.hc_mix_split, rows, x.c.eps, .{ .x = sc.x[x.xi], .inv = sc.inv, .fn_packed = h.fnp, .scale = h.scale, .base = h.base, .norm = norm.?, .mixes = sc.mixes, .normed = sc.normed, .post = sc.post, .comb = sc.comb, .count = sc.hcc });
-        return;
-    }
     if (on(x, "hc_mix")) {
         e.setPipeline(k.hc_mix);
         bind(e, 0, .{ sc.x[x.xi], sc.inv, h.fnp, sc.mixes });
