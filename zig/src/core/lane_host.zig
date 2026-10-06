@@ -55,10 +55,12 @@ pub const LaneHost = struct {
         prefilled: ?i96 = null,
         entry: ?*pc.Entry = null, // the kept state the backend restores, until its prompt pass reports
         marks: []const u32 = &.{}, // where the pass keeps states (gpa-owned)
+        kept0: u64 = 0, // the store's kept count when the job looked it up
 
         /// The backend's prompt pass stands at a mark: the cache keeps the stream's state there.
         fn kept(ptr: *anyopaque, s: *lanes.Stream, at: u32) void {
             const job: *Job = @ptrCast(@alignCast(ptr));
+            job.reported(); // before a keep can evict the entry the pass restored
             if (job.host.cache) |store| store.keep(job.request.prompt, at, s);
         }
 
@@ -68,6 +70,7 @@ pub const LaneHost = struct {
             job.entry = null;
             const store = job.host.cache orelse return;
             if (!job.started) return;
+            job.stream.reuse.saved = null; // the backend restores before its first chunk; a later keep may free it
             if (job.stream.reuse_failed) store.resumed(e, job.request.prompt, false) else if (job.stream.cached == e.at) store.resumed(e, job.request.prompt, true);
         }
     };
@@ -280,8 +283,10 @@ pub const LaneHost = struct {
         h.unlock();
         const r = job.request;
         var reuse: lanes.stream.Reuse = .{};
+        // the entry stays alive until the backend restores it: nothing keeps between here and this stream's own pass
         if (h.cache) |store| if (store.lookup(h.gpa, r.prompt, r.history_len, r.shared_prefixes, r.chunks)) |l| {
             job.entry = l.entry;
+            job.kept0 = store.counts.kept;
             job.marks = l.marks;
             reuse = .{ .saved = if (l.entry) |e| e.saved else null, .at = if (l.entry) |e| e.at else 0, .marks = l.marks, .hook = .{ .ptr = job, .at = Job.kept } };
         } else |_| {};
@@ -324,6 +329,7 @@ pub const LaneHost = struct {
         job.prefilled = done;
         h.unlock();
         job.reported();
+        if (h.cache) |store| store.report(job.request.prompt.len, job.stream.cached, store.counts.kept - job.kept0);
         emit(job, .{ .prefilled = job.stream.cached });
     }
 
