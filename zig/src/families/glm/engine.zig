@@ -391,7 +391,7 @@ pub const Engine = struct {
 
     /// Knock-out profile: a decode round of `depth` drafts at the current position (after a reply), replayed `reps`
     /// times with each launch class left out in turn; the median GPU time of each, and what each class costs.
-    pub fn profile(e: *Engine, depth: u32, reps: usize) !void {
+    pub fn profile(e: *Engine, depth: u32, reps: usize, only: bool) !void {
         const c = &e.c;
         const D = c.hidden;
         const d: u32 = if (e.w.mtp == null) 0 else @min(depth, st.max_rows - 1);
@@ -410,12 +410,13 @@ pub const Engine = struct {
         const times = try e.gpa.alloc(f64, reps);
         defer e.gpa.free(times);
         var full: f64 = 0;
+        const all: u32 = (@as(u32, 1) << @intCast(fwd.Class.names.len)) - 1;
         for (masks, 0..) |mask, mi| {
             var x = e.ctx();
-            x.skip = mask;
+            x.skip = if (only and mask != 0) all & ~mask else mask;
             for (0..reps + 1) |rep| {
                 const b = e.begin();
-                if (d > 0 and mask & fwd.Class.mtp == 0) {
+                if (d > 0 and x.skip & fwd.Class.mtp == 0) {
                     mtp.run(&x, b.enc, e.sc.hidden, e.sc.picks, R, e.s.mtp_pos, e.sc.ids.at(4));
                     for (1..d) |j| mtp.chain(&x, b.enc, if (j == 1) e.sc.m_x.at(@as(usize, R - 1) * D * 2) else e.sc.m_x, e.sc.ids.at(j * 4), e.s.mtp_pos + R + @as(u32, @intCast(j)) - 1, e.sc.ids.at((j + 1) * 4));
                 }
@@ -428,8 +429,8 @@ pub const Engine = struct {
             const med = times[reps / 2];
             if (mi == 0) full = med;
             const name = if (mask == 0) (if (mi == 0) "full" else "full again") else fwd.Class.names[@ctz(mask)];
-            std.debug.print("profile {d} rows: {s:<10} {d:7.3} ms (min {d:.3}, max {d:.3}){s}", .{ R, name, med, times[0], times[reps - 1], if (mask == 0) "\n" else "" });
-            if (mask != 0) std.debug.print("  class {d:6.3} ms {d:5.1}%\n", .{ full - med, 100 * (full - med) / full });
+            std.debug.print("profile {d} rows{s}: {s:<10} {d:7.3} ms (min {d:.3}, max {d:.3}){s}", .{ R, if (only) " only" else "", name, med, times[0], times[reps - 1], if (mask == 0 or only) "\n" else "" });
+            if (mask != 0 and !only) std.debug.print("  class {d:6.3} ms {d:5.1}%\n", .{ full - med, 100 * (full - med) / full });
         }
     }
 

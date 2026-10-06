@@ -156,7 +156,8 @@ pub fn main(init: std.process.Init) !void {
     if (std.c.getenv("GLM_PROFILE")) |spec| {
         const reps = try std.fmt.parseInt(usize, env("GLM_PROFILE_REPS", "12"), 10);
         var pit = std.mem.tokenizeScalar(u8, std.mem.span(spec), ',');
-        while (pit.next()) |dv| try e.profile(try std.fmt.parseInt(u32, dv, 10), reps);
+        const only = std.c.getenv("GLM_PROFILE_ONLY") != null; // each class alone instead of each left out
+        while (pit.next()) |dv| try e.profile(try std.fmt.parseInt(u32, dv, 10), reps, only);
     }
     try saved.append(arena, '}');
     if (std.c.getenv("GLM_OUT")) |path| {
