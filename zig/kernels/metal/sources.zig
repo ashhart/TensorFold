@@ -65,6 +65,8 @@ pub const glm_glue = @embedFile("glm_glue.metal");
 pub const glm_attn = @embedFile("glm_attn.metal");
 /// A MoE layer's route in two launches (core/moe_route.zig): router logits, then the top-k and the expert groups.
 pub const core_moe_route = @embedFile("core/moe_route.metal");
+/// A hyper-connection block boundary in one launch (core/hc.zig).
+pub const core_hc_boundary = @embedFile("core/hc_boundary.metal");
 /// MLX's precise row softmax and its embedding and RMS kernels, as the replicas in ops/ write them.
 pub const ops_softmax = @embedFile("ops/softmax.metal");
 pub const ops_embed_norm = @embedFile("ops/embed_norm.metal");

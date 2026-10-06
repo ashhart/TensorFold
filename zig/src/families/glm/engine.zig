@@ -67,6 +67,7 @@ pub const Engine = struct {
     load_seconds: f64 = 0,
     gpu: [2]f64 = .{ 0, 0 }, // the last command buffer's GPU start and end (host seconds)
     fused_route: bool = true, // GLM_ROUTE=0: the Python family's cast, router and top-k launches
+    fused_hc: bool = true, // GLM_HC=0: the family's three boundary launches
     committed: u64 = 0, // when the last command buffer was committed (mach ticks)
 
     /// The checkpoint in `dir`, caches for `cap` tokens; GLM_LAYERS=N: the first N layers only; GLM_EP=settings: half the experts.
@@ -86,6 +87,7 @@ pub const Engine = struct {
         e.residency = null;
         e.gpu = .{ 0, 0 };
         e.fused_route = if (std.c.getenv("GLM_ROUTE")) |v| v[0] != '0' else true;
+        e.fused_hc = if (std.c.getenv("GLM_HC")) |v| v[0] != '0' else true;
         e.committed = 0;
         e.ep = null;
         e.pr = null;
@@ -251,7 +253,7 @@ pub const Engine = struct {
     }
 
     fn ctx(e: *Engine) fwd.Ctx {
-        return .{ .k = e.k, .c = &e.c, .w = e.w, .s = &e.s, .sc = &e.sc, .ep = e.ep, .fused_route = e.fused_route };
+        return .{ .k = e.k, .c = &e.c, .w = e.w, .s = &e.s, .sc = &e.sc, .ep = e.ep, .fused_route = e.fused_route, .fused_hc = e.fused_hc };
     }
 
     /// A command buffer ordered after the last one this engine committed.
