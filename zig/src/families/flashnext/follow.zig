@@ -36,10 +36,6 @@ pub fn one(e: *Engine, out: ?engine.Out) !?engine.Result {
     defer e.gpa.free(words);
     const prompt = words[0..n];
     const marks = words[n..][0..head[13]];
-    for (0..head[14]) |i| { // states rank 0's prompt cache let go
-        const w = words[n + head[13] + 2 * i ..][0..2];
-        if (e.peer_kept.fetchRemove(@as(u64, w[0]) | @as(u64, w[1]) << 32)) |kv| drop(e, kv.value);
-    }
     const from = head[12];
     if (head[15] == 0) return error.TpProtocol; // rank 0 sends its positive pair minimum with every request
     e.pair_min = head[15];
@@ -51,6 +47,10 @@ pub fn one(e: *Engine, out: ?engine.Out) !?engine.Result {
     };
     const restore_ms = msSince(t0);
     try tp.ackRequest(ok);
+    for (0..head[14]) |i| { // states rank 0's prompt cache let go (after the restore: rank 0 may let go the one this request resumed)
+        const w = words[n + head[13] + 2 * i ..][0..2];
+        if (e.peer_kept.fetchRemove(@as(u64, w[0]) | @as(u64, w[1]) << 32)) |kv| drop(e, kv.value);
+    }
     if (!ok) return .{ .reason = .cancelled }; // rank 0 runs the request again from the start
     const eos = try e.gpa.dupe(u32, head[4 .. 4 + head[2]]);
     defer e.gpa.free(eos);
@@ -106,13 +106,20 @@ const Reply = struct {
     }
 };
 
-/// This Mac's state at `at`, kept under the name rank 0 gives the same tokens; free buffers then trimmed to the budget.
+/// This Mac's state at `at`, kept under the name rank 0 gives the same tokens, inside the budget (else refused); free buffers then trimmed.
 fn keep(e: *Engine, prompt: []const u32, at: usize) void {
+    const size = e.snap_pool.size(snapshot.bytes(at));
+    if (!admits(e.peer_budget, e.peer_held, size)) return std.log.warn("speed-up rank 1: kept nothing at {d}: {d} MiB held and {d} MiB more pass the {d} MiB budget", .{ at, e.peer_held >> 20, size >> 20, e.peer_budget >> 20 });
     const st = snapshot.save(e, e.gpa, at) catch |err| return std.log.warn("speed-up rank 1: no state kept at {d}: {s}", .{ at, @errorName(err) });
     const old = e.peer_kept.fetchPut(e.gpa, engine.keyOf(prompt[0 .. at + 1]), st) catch return snapshot.drop(e.gpa, st);
     e.peer_held += st.cap;
     if (old) |kv| drop(e, kv.value);
     e.snap_pool.trim(e.peer_budget -| e.peer_held);
+}
+
+/// Whether a new state of `size` bytes fits beside `held` (rank 0 makes room before the request, so this refuses only past it).
+fn admits(budget: u64, held: u64, size: u64) bool {
+    return held + size <= budget;
 }
 
 fn drop(e: *Engine, st: *snapshot.State) void {
@@ -127,4 +134,11 @@ test "rank 1's reply hash is the server's token_sha" {
     var want: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash("1,22,333", &want, .{});
     try std.testing.expectEqualStrings(&std.fmt.bytesToHex(want[0..6].*, .lower), &r.sha());
+}
+
+test "rank 1 keeps a state only inside its budget" {
+    try std.testing.expect(admits(1 << 30, 600 << 20, 400 << 20));
+    try std.testing.expect(admits(1 << 30, 600 << 20, 424 << 20));
+    try std.testing.expect(!admits(1 << 30, 600 << 20, 425 << 20));
+    try std.testing.expect(!admits(0, 0, 1));
 }

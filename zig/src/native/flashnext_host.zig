@@ -320,6 +320,7 @@ pub const Host = struct {
         const res = h.eng.generateFrom(r.prompt, plan.from, plan.marks, r.max_tokens, r.eos, depth, out) catch |e| retry: {
             if (e == error.PeerNotResumed) { // rank 1 lacks this state: both Macs read the prompt from the start
                 std.log.warn("speed-up mode: rank 1 could not resume at {d}; reading the prompt from the start", .{plan.from});
+                if (h.cache) |*store| store.forget(r.prompt, plan.from); // so later prompts do not ask rank 1 for it again
                 job.cached = 0;
                 break :retry h.eng.generateFrom(r.prompt, 0, plan.marks, r.max_tokens, r.eos, depth, out) catch |e2| {
                     if (!job.prefill_sent) emit(job, .{ .prefilled = 0 });
