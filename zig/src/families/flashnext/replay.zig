@@ -1097,7 +1097,10 @@ pub const Run = struct {
             r.gdown_pipe = try mtl.Pipeline.init(r.device, lib, "fz_gdown", false);
             r.ul = .{ .b = try r.buffer((1 + 2 * 320 + 320 * 32) * 4) };
         }
-        if (r.hc_up) try r.compileHc();
+        if (r.hc_up) r.compileHc() catch |err| { // the recorded kernels then
+            std.log.warn("fz_hc_up off: {s}", .{@errorName(err)});
+            r.hc_up = false;
+        };
     }
 
     /// fz_hc_up after the recorded qa_hc_down_row header, refused unless every recorded qa_hc_up variant has the

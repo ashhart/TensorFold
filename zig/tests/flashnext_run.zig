@@ -229,7 +229,7 @@ pub fn main(init: std.process.Init) !void {
     r.split = std.c.getenv("FZ_SPLIT") != null;
     r.gdn_step = std.c.getenv("FZ_GDN_STEP") != null;
     r.hc_mma = std.c.getenv("FZ_HC_MMA") != null;
-    r.hc_up = std.c.getenv("FZ_HC_UP") != null or std.c.getenv("FZ_HCCHECK") != null;
+    r.hc_up = std.c.getenv("FZ_HCCHECK") != null or if (std.c.getenv("FZ_HC_UP")) |v| !std.mem.eql(u8, std.mem.span(v), "0") else false;
     r.event = try device.sharedEvent();
     r.dense = r.xnew and std.c.getenv("FZ_DENSE") != null;
     r.dense_target = r.dense and std.c.getenv("FZ_DENSE_TARGET") != null;
