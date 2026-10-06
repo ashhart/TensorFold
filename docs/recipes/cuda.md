@@ -4,7 +4,7 @@ CUDA families read supported checkpoints through PyTorch loaders and execute fam
 CUDA kernels. Use the [runbook](../../RUNBOOK.md#nvidia-gpus) for the container and two-rank setup.
 
 Native Windows is experimental, one GPU a process and not yet run on Windows hardware: see the
-[runbook](../../RUNBOOK.md#win-nvidia).
+[runbook](../../RUNBOOK.md#windows-with-an-nvidia-card).
 
 | Family | CUDA execution |
 | --- | --- |
@@ -87,16 +87,16 @@ CUDA graphs replay the same kernels using stable buffers; changing capture shape
 
 ## Shared kernels and prefill
 
-`tensorfold/cuda/kernels/qmm.py` packs 4-bit weights for the shared CUDA matmul. Its decode kernel fixes
+`src/tensorfold/cuda/kernels/qmm.py` packs 4-bit weights for the shared CUDA matmul. Its decode kernel fixes
 the K split by weight shape, while the prompt kernel (`qmm_prefill.cu`) rounds each weight once to bf16 and adds
 every product over K in one fp32 chain, the arithmetic of MLX's prompt matmul. NVFP4, FP8 and MXFP8 weights take
-`nvfp4/prompt.cu`, where each weight is exact in bf16. Prompts run in chunks of up to 4,096 tokens with bf16
+`src/tensorfold/cuda/nvfp4/prompt.cu`, where each weight is exact in bf16. Prompts run in chunks of up to 4,096 tokens with bf16
 activations, as decode does. A row's bits never depend on its chunk or the kernel's tile, so a resumed prompt
 equals a fresh one; they differ from decode's, so the engines retain prompt-end states and prefill replies
 again on a follow-up.
 
-`tensorfold/cuda/kernels/gdn.py` and `attention.py` support several streams in one call. Each stream
-supplies its own tree, cache offsets and accepted path. `tensorfold/cuda/experts.py` groups routed
+`src/tensorfold/cuda/kernels/gdn.py` and `attention.py` support several streams in one call. Each stream
+supplies its own tree, cache offsets and accepted path. `src/tensorfold/cuda/experts.py` groups routed
 row/expert pairs so the MLX 4-bit formats of Flash Next, GLM and Nemotron share expert kernels, with
 separate prefill and decode forms. A shared call must preserve each row's arithmetic and each stream's cache.
 

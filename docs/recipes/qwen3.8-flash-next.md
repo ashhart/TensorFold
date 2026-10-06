@@ -97,7 +97,7 @@ scale in block order and applies the tensor's scale once; the K split depends on
 windows keep serial decoding's bits. Prompts run the MXFP8 linears on bf16 rows and the stored bytes, each byte
 times its power of two exact in bf16 and one fp32 sum over the inputs (`--prefill-fp8`: the FP8 prompt matmul).
 Tests check the kernels against an fp64 reference built by an independent numpy dequantizer
-(`tensorfold/cuda/nvfp4/format.py`). Both exports store their RMSNorm weights centred (gamma - 1), and the loader
+(`src/tensorfold/cuda/nvfp4/format.py`). Both exports store their RMSNorm weights centred (gamma - 1), and the loader
 tells centred from uncentred norms by their stored values. An n-gram table's shards must share one layout, or the
 load stops.
 
@@ -151,8 +151,8 @@ A pack maps its n-gram table from its own file and runs on one GPU: `--tp 2` and
 checkpoint, and an EXL3 pack refuses both.
 
 - Dense projections (attention, DeltaNet, the MTP head's fc layers, the head) run on the row-invariant EXL3
-  linear (`cuda/exl3/linear.py`). Routed experts and the shared expert (as expert 512 of the same table) run on
-  the grouped EXL3 expert kernel (`cuda/exl3/experts.py`), each expert matrix at its own width. The fp32 router,
+  linear (`src/tensorfold/cuda/exl3/linear.py`). Routed experts and the shared expert (as expert 512 of the same table) run on
+  the grouped EXL3 expert kernel (`src/tensorfold/cuda/exl3/experts.py`), each expert matrix at its own width. The fp32 router,
   its top-k with id tie-break, and the write-back in slot order are the MLX path's.
 - The tensors a pack leaves unquantized (hyper-connection down / inject / up, DeltaNet `in_proj_a/b`, the n-gram
   key and value) run on an fp16 Triton matmul whose tiles and K split depend only on the shape. No cuBLAS.

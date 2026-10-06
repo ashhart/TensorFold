@@ -61,7 +61,7 @@ The server runs about 0.6 ms a token slower than a short in-process loop: back-t
 hot (12.05 ms rested against 12.64 ms after a 2,500-token run, same short context), and the step grows with
 context (12.6 to 14.3 ms over 2,500 tokens, the sliding-window caches filling to 1,024 keys).
 
-The pieces (`kernels/gemma/v1/kernels.py`), per layer:
+The pieces (`src/tensorfold/kernels/gemma/v1/`), per layer:
 
 - q, k (and v on sliding layers) stacked into one quantized matmul; `qkv_norm` applies the three head norms
   in one kernel. RoPE, the cache update and attention stay mlx_lm's.

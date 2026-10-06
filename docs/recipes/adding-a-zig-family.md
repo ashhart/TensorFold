@@ -34,10 +34,10 @@ engine, to be exact quickly, and the GPU-side wins stayed inside one family:
 
 Some of the host side already lives in core, but so far each piece serves one family, or two:
 - the lane round loop, the depth rule and copy proposals (`zig/src/core/lanes`) are Nemotron's;
-- prompt reuse (`core/prompt_cache.zig`) is Flash Next's;
-- staggered segments (`core/segments.zig`, and `cuda/segments.zig` on CUDA) serve Flash Next on Metal and Nemotron
+- prompt reuse (`zig/src/core/prompt_cache.zig`) is Flash Next's;
+- staggered segments (`zig/src/core/segments.zig`, and `zig/src/cuda/segments.zig` on CUDA) serve Flash Next on Metal and Nemotron
   on CUDA;
-- every host returns the HTTP contract in `core/engine_api.zig`, and `core/lane_host.zig` serves Nemotron on Metal
+- every host returns the HTTP contract in `zig/src/core/engine_api.zig`, and `zig/src/core/lane_host.zig` serves Nemotron on Metal
   and CUDA. Flash Next has its own host and serves one reply at a time.
 
 The GPU side is barely shared yet, and that costs time. In the GLM-5.3 port each extra row in a window cost about
@@ -48,7 +48,7 @@ every row.
 
 1. Lane kernels by format.
    - Formats: affine 4-, 6- and 8-bit at the checkpoint's group size, and bf16. They run on M5 tensor units and in the
-     M1-M4 layout (`core/frags.zig`).
+     M1-M4 layout (`zig/src/core/frags.zig`).
    - Ops: dense projections; the expert gather (gate and up fused, then down); the router with its top-k and this Mac's
      expert lists; the head with its argmax; norms.
    - Each kernel reads a weight once per window and keeps every row's own sums, so a row's bits are the same at any
@@ -59,8 +59,7 @@ every row.
    - A depth rule set from measured tokens per ms for each model.
 3. The prompt path (steps 10-15).
 4. Several Macs.
-   - Tensor and expert parallel over [MCDMA](https://github.com/ashhart/MCDMA), with exchanges inside the command
-     buffer.
+   - Tensor and expert parallel over the MCDMA fabric, with exchanges inside the command buffer.
    - Experts split by rows, so both Macs do equal work for every pick.
 5. Serving (steps 16-17), and the exactness suite.
 
@@ -72,9 +71,9 @@ lane kernels go in, check against the engine's own plain output (step 4).
 
 | Piece | Shared now | Family copies or gaps |
 | --- | --- | --- |
-| Lane kernels | `kernels/metal/ops/qmv.metal` (affine 4-, 6- and 8-bit row matmuls, MLX's arithmetic) and `core/frags.zig` (the prompt layout on M1-M4) | Flash Next: `decode/fn_lane.metal` (6-bit, groups of 32, tensor ops, up to 16 rows). Kimi K3: MXFP4 experts and bf16 projections. Nemotron: generated per-shape kernels |
-| GPU-side rounds | the host loop, depth rule and copy proposer in `core/lanes`, used by Nemotron | Flash Next: its own host loop, plus `fz_accept`, the ring and event chaining (`replay.zig`). Nemotron on Metal: `gpu_round.zig` for a lone stream. Kimi K3: none |
-| Several Macs | the MCDMA fabric (`zig/src/fabric`) | Flash Next: `flashnext/tp.zig` splits rows and holds the whole model on each Mac. Kimi K3: `kimi_k3/parallel.zig` is a split plan with no link yet |
+| Lane kernels | `zig/kernels/metal/ops/qmv.metal` (affine 4-, 6- and 8-bit row matmuls, MLX's arithmetic) and `zig/src/core/frags.zig` (the prompt layout on M1-M4) | Flash Next: `zig/kernels/metal/decode/fn_lane.metal` (6-bit, groups of 32, tensor ops, up to 16 rows). Kimi K3: MXFP4 experts and bf16 projections. Nemotron: generated per-shape kernels |
+| GPU-side rounds | the host loop, depth rule and copy proposer in `zig/src/core/lanes`, used by Nemotron | Flash Next: its own host loop, plus `fz_accept`, the ring and event chaining (`zig/src/families/flashnext/replay.zig`). Nemotron on Metal: `zig/src/families/nemotron/gpu_round.zig` for a lone stream. Kimi K3: none |
+| Several Macs | the MCDMA fabric (`zig/src/fabric`) | Flash Next: `zig/src/families/flashnext/tp.zig` splits rows and holds the whole model on each Mac. Kimi K3: `zig/src/families/kimi_k3/parallel.zig` is a split plan with no link yet |
 | Prompt path | segments; the prompt cache, used by Flash Next only | per-family prompt kernels |
 | Serving | `engine_api` for every host; `lane_host` for Nemotron | Flash Next: its own host, one reply at a time |
 

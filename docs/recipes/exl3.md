@@ -5,14 +5,14 @@ ExLlamaV3's trellis quantization (EXL3) is what the community's best 4-bit and l
 GLM-5.3-Flash. TensorFold reads all of it with one module, so a family's engine does not need its own EXL3
 kernel:
 
-- `src/tensorfold/cuda/exl3/format.py` — the format, per-tensor metadata out of the safetensors headers, and a
+- `src/tensorfold/cuda/exl3/format.py`: the format, per-tensor metadata out of the safetensors headers, and a
   numpy reference decoder;
-- `src/tensorfold/cuda/exl3/decode.cuh` — header-only device functions that decode a 16x16 tile of any codebook
+- `src/tensorfold/cuda/exl3/decode.cuh`: header-only device functions that decode a 16x16 tile of any codebook
   and width straight into the B fragments of two `mma.m16n8k16`;
-- `src/tensorfold/cuda/exl3/linear.py`, `linear.cu` — a row-invariant linear layer for 1 to 128 rows;
-- `python -m tensorfold.cuda.exl3.inspect MODEL_DIR` — what a checkpoint holds, from its headers alone.
+- `src/tensorfold/cuda/exl3/linear.py`, `linear.cu`: a row-invariant linear layer for 1 to 128 rows;
+- `python -m tensorfold.cuda.exl3.inspect MODEL_DIR`: what a checkpoint holds, from its headers alone.
 
-The GLM-5.3-Flash engine keeps its own tuned `families/glm5_next/cuda/exl3.py` (4-bit `mcg`, routed experts
+The GLM-5.3-Flash engine keeps its own tuned `src/tensorfold/families/glm5_next/cuda/exl3.py` (4-bit `mcg`, routed experts
 only); it stays as it is.
 
 ## What a family has to say
@@ -101,11 +101,11 @@ y = ((((x * suh) @ H_K) @ W_q) @ H_N) * svh + bias        H = the 128x128 Hadama
 `rot_in` rotates the input once per call (fp16 out, as ExLlamaV3 does), `linear` decodes each k tile straight
 into tensor-core fragments and multiplies in fp32. Rows are independent by construction: the k ranges of warps
 and of K splits depend only on (K, N) (`plan(k, n)`), every sum runs in a fixed order, and `mma.m16n8k16` keeps
-its rows independent — which is the verify path's contract (`docs/recipes/cuda.md`).
+its rows independent, which is the verify path's contract (`docs/recipes/cuda.md`).
 
 ## Prompts
 
-Prompt chunks take their own arithmetic, as the MLX 4-bit path's prompt matmul does (`cuda/exl3/prefill.py`): the
+Prompt chunks take their own arithmetic, as the MLX 4-bit path's prompt matmul does (`src/tensorfold/cuda/exl3/prefill.py`): the
 input rotation is decode's, W_q is decoded once a chunk into fp16, a fixed-tile fp16 GEMM with fp32 accumulation
 multiplies it, and its epilogue rotates each 128-column block (the accumulator's bf16 high and low halves times
 H) before `svh` and the bias. Tiles depend on the shape alone, so a row's bits never depend on its chunk and a

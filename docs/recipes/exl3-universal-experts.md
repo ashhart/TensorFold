@@ -1,14 +1,14 @@
-# Universal EXL3 routed experts on CUDA (`tensorfold/cuda/exl3/experts.*`)
+# Universal EXL3 routed experts on CUDA (`src/tensorfold/cuda/exl3/experts.*`)
 
 One grouped trellis GEMV launch per projection runs a whole MoE layer's routed experts, where every expert
 matrix may have its own bit width (1 to 8 bits, half-bit widths included, e.g. 3.5) and the layer uses any of
-the three EXL3 codebooks (`3inst`, `mcg`, `mul1`) — mixed freely inside one layer, as MiMo-V2.6-Flash's
+the three EXL3 codebooks (`3inst`, `mcg`, `mul1`), mixed freely inside one layer, as MiMo-V2.6-Flash's
 2.50bpw pack and SAGE packs are, or uniform. It is the structure of GLM-5.3's own expert kernel
-(`families/glm5_next/cuda/exl3.cu`, the [EXL3 recipe](exl3.md)) generalized off the 4-bit-`mcg` case.
+(`src/tensorfold/families/glm5_next/cuda/exl3.cu`, the [EXL3 recipe](exl3.md)) generalized off the 4-bit-`mcg` case.
 The accompanying [EXL3 weights](exl3.md) recipe has the format and the dense linear layer.
 
 Measured on MiMo-V2.6-Flash-RL-EXL3 `2.50bpw` (`mul1`, experts at 2/3/4/5 bits), one DGX Spark (GB10),
-exclusive GPU, `tools/mimo_exl3_bench.py`, medians of 5 reps x 30 iters x 2 sets, SM clock 2405-2489 MHz
+exclusive GPU, medians of 5 reps x 30 iters x 2 sets, SM clock 2405-2489 MHz
 during the run. GB/s is over the distinct experts' trellis bytes actually read (gate + up + down) per call.
 
 | Layer (widths) | Rows | this kernel | CUDA graph | ExLlamaV3 `exl3_moe_mixedk` | ExLlamaV3 `exl3_moe_coop` |
@@ -61,7 +61,7 @@ epilogue, the combine, and with weights the epilogue and the combine fused into 
   {1..8, 1.5..7.5} (`tests/cuda/test_exl3_experts.py`).
 * On GLM-5.3-shaped synthetic 4-bit `mcg` data (D=1024, I=1024, E=288, R in 1,2,3,4,8,16) the full
   routed pipeline (group + rotations + both GEMVs + both epilogues + combine) is `torch.equal` to GLM's
-  `families/glm5_next` `exl3_mm.routed` — same tile settings, same accumulation order. This is a
+  `src/tensorfold/families/glm5_next` `exl3_mm.routed`, same tile settings, same accumulation order. This is a
   synthetic layer: no GLM-5.3-Flash EXL3 checkpoint was available where the kernel was developed.
 * Row invariance per [the CUDA recipe book](cuda.md): verified synthetically for mixed 2/3/4-bit `mul1`
   layers over windows of 1, 2, 3, 16, 17, 64 and 128 rows, and on MiMo-V2.6-Flash's real expert tensors
@@ -80,8 +80,8 @@ cuBLAS, no Triton), so a runtime that already holds EXL3 modules could use it wi
 1. a small kernel that expands a per-expert histogram into `uids/ucount/members` on the device (its
    per-expert entry points already build such a histogram for their mixed dispatch);
 2. scratch: `P = rows * slots` fp32 `y`/`z`, a `rows * slots` int32 pick table, and `[mats, SK, P, N]`
-   fp32 accumulators — a few MiB for a 256-expert top-8 layer at 8 rows;
+   fp32 accumulators, a few MiB for a 256-expert top-8 layer at 8 rows;
 3. no weight preparation: the trellis stays where it is, with a per-expert K2 and `suh`/`svh`;
-4. epilogue and combine launches of its own — or the fused `down_combine` here, which is one launch;
+4. epilogue and combine launches of its own, or the fused `down_combine` here, which is one launch;
 5. the same verification the tests above use: `dequant` against `reconstruct` over all codebooks and
    widths, row invariance, and a float64 reference.

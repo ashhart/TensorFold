@@ -33,7 +33,7 @@ the memory budget.
 ## Model interface
 
 `load` returns a model with `lane_family = True` and a tokenizer. The complete model protocol is in
-`engine/lane_family.py`.
+`src/tensorfold/engine/lane_family.py`.
 
 | Member | Contract |
 | --- | --- |
