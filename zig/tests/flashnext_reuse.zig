@@ -60,7 +60,7 @@ const Run = struct {
         const r: *Run = @ptrCast(@alignCast(ctx));
         if (r.store) |s| s.keep(r.prompt, @intCast(at), null);
         if (r.copy_at) |slot| slot.* = snap.save(r.e.?, r.a, at) catch null;
-        if (r.pooled_at) |p| p.* = Pooled.of(r.e.?.m);
+        if (r.pooled_at) |p| p.* = Pooled.of(r.e.?.m, at);
     }
     fn out(r: *Run) fx.Out {
         return .{ .ctx = r, .prefilled = prefilled, .tokens = tokens, .cancelled = cancelled, .marked = marked };
@@ -89,22 +89,23 @@ fn fresh(e: *fx.Engine, a: Allocator, prompt: []const u32, n: usize, depth: ?usi
 
 const Turn = struct { prompt: []u32, history: u32 };
 
-/// The indexer's pooled block keys, rebuilt after a restore rather than copied: counts and a hash of every layer's.
+/// The indexer's pooled block keys before a mark, rebuilt after a restore rather than copied: counts and a hash of every layer's.
 const Pooled = struct {
     counts: [13]usize = @splat(0),
     hash: u64 = 0,
 
-    fn of(m: *tf.flashnext_replay.Model) Pooled {
+    /// Blocks wholly before `at` (a call that ran past the mark may have pooled more).
+    fn of(m: *tf.flashnext_replay.Model, at: usize) Pooled {
         var out: Pooled = .{};
         var h = std.hash.Wyhash.init(0);
         var k: usize = 0;
         for (&m.layers) |*L| if (!L.linear) {
-            out.counts[k] = L.pooled_n;
-            h.update(L.pooled.b.contents()[L.pooled.off..][0 .. L.pooled_n * 128 * 2]);
+            out.counts[k] = @min(L.pooled_n, at / 4);
+            h.update(L.pooled.b.contents()[L.pooled.off..][0 .. out.counts[k] * 128 * 2]);
             k += 1;
         };
-        out.counts[k] = m.mtp.pooled_n;
-        h.update(m.mtp.pooled.b.contents()[m.mtp.pooled.off..][0 .. m.mtp.pooled_n * 128 * 2]);
+        out.counts[k] = @min(m.mtp.pooled_n, at / 4);
+        h.update(m.mtp.pooled.b.contents()[m.mtp.pooled.off..][0 .. out.counts[k] * 128 * 2]);
         out.hash = h.final();
         return out;
     }
