@@ -50,6 +50,7 @@ pub const Head = struct {
             .k = k,
             .weights = weights,
             .pool = pool,
+            .fused = k.rows == null,
         };
     }
 

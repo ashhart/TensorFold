@@ -2,6 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const ckpt = @import("../../core/checkpoint_metal.zig");
+const row = @import("../../core/row_projection.zig");
 const cfg = @import("config.zig");
 
 const Tensor = ckpt.Tensor;
@@ -16,6 +17,7 @@ pub const Linear = struct {
     sbt: mtl.Buffer,
     n: usize,
     k: usize,
+    rows: ?row.Weights = null, // the checkpoint's row layout, read by the core's row kernels without tensor units
 };
 
 pub const Mamba = struct {
@@ -92,6 +94,7 @@ const Builder = struct {
     w: *Weights,
     jobs: std.ArrayList(Tile) = .empty,
     why: cfg.Why = .{},
+    rows: bool = false, // also keep each projection's row layout (chips without tensor units)
 
     fn buffer(self: *Builder, bytes: usize) !mtl.Buffer {
         const b = try self.device.buffer(@max(bytes, 16), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
@@ -134,14 +137,15 @@ const Builder = struct {
         for (parts) |p| n += p[0].shape[0];
         const words = parts[0][0].shape[1];
         const k = words * 8;
-        const lin = Linear{ .w = try self.buffer(n * words * 4), .sbt = try self.buffer(k / 64 * n * 4), .n = n, .k = k };
-        var row: usize = 0;
+        var lin = Linear{ .w = try self.buffer(n * words * 4), .sbt = try self.buffer(k / 64 * n * 4), .n = n, .k = k };
+        var row0: usize = 0;
         for (parts) |p| {
             if (p[0].dtype != .u32 or p[0].shape[1] != words or p[1].shape[1] != k / 64) return error.BadLinear;
-            try self.jobs.append(self.allocator, .{ .src = p, .dst = lin, .row0 = row });
-            row += p[0].shape[0];
+            try self.jobs.append(self.allocator, .{ .src = p, .dst = lin, .row0 = row0 });
+            row0 += p[0].shape[0];
         }
         if (n % 64 != 0) return error.BadLinear;
+        if (self.rows) lin.rows = if (parts.len == 1) rowRefs(parts[0], n, k) else try self.packRows(parts, null, n, k);
         try self.w.linears.put(self.allocator, try std.fmt.allocPrint(self.allocator, fmt, args), lin);
         return lin;
     }
@@ -150,11 +154,39 @@ const Builder = struct {
     fn picked(self: *Builder, src: [3]Tensor, pick: []const u32) !Linear {
         const words = src[0].shape[1];
         const n = pick.len;
-        const lin = Linear{ .w = try self.buffer(n * words * 4), .sbt = try self.buffer(words / 8 * n * 4), .n = n, .k = words * 8 };
+        var lin = Linear{ .w = try self.buffer(n * words * 4), .sbt = try self.buffer(words / 8 * n * 4), .n = n, .k = words * 8 };
         if (n % 64 != 0) return error.BadLinear;
         for (pick) |r| if (r >= src[0].shape[0]) return error.BadDraftIds;
         try self.jobs.append(self.allocator, .{ .src = src, .dst = lin, .row0 = 0, .pick = pick });
+        if (self.rows) lin.rows = try self.packRows(&.{src}, pick, n, words * 8);
         return lin;
+    }
+
+    /// The checkpoint's own rows: a single linear read in place.
+    fn rowRefs(p: [3]Tensor, n: usize, k: usize) row.Weights {
+        return .{ .w = p[0].buffer, .w_off = p[0].offset, .scales = p[1].buffer, .s_off = p[1].offset, .biases = p[2].buffer, .b_off = p[2].offset, .n = n, .k = k };
+    }
+
+    /// Stacked linears' rows (or the rows `pick` of one) copied into packed row-layout buffers.
+    fn packRows(self: *Builder, parts: []const [3]Tensor, pick: ?[]const u32, n: usize, k: usize) !row.Weights {
+        const words = k / 8;
+        const groups = k / 64;
+        const out = row.Weights{ .w = try self.buffer(n * words * 4), .scales = try self.buffer(n * groups * 2), .biases = try self.buffer(n * groups * 2), .n = n, .k = k };
+        const w = out.w.slice(u32, n * words);
+        const sc = out.scales.slice(u16, n * groups);
+        const bi = out.biases.slice(u16, n * groups);
+        var at: usize = 0;
+        for (parts) |p| {
+            const rows = if (pick) |x| x.len else p[0].shape[0];
+            for (0..rows) |i| {
+                const r = if (pick) |x| x[i] else i;
+                @memcpy(w[at * words ..][0..words], p[0].host(u32)[r * words ..][0..words]);
+                @memcpy(sc[at * groups ..][0..groups], p[1].host(u16)[r * groups ..][0..groups]);
+                @memcpy(bi[at * groups ..][0..groups], p[2].host(u16)[r * groups ..][0..groups]);
+                at += 1;
+            }
+        }
+        return out;
     }
 
     fn moe(self: *Builder, comptime prefix: []const u8, args: anytype) !Moe {
@@ -320,7 +352,7 @@ fn runTiles(jobs: []const Tile) void {
 pub fn load(allocator: std.mem.Allocator, device: mtl.Device, ck: *const ckpt.Checkpoint, c: cfg.Config, draft_ids: ?[]const u32) !Weights {
     var w = Weights{ .allocator = allocator, .embed = undefined, .norm_f = undefined, .head = undefined };
     errdefer w.deinit();
-    var b = Builder{ .allocator = allocator, .device = device, .ck = ck, .c = &c, .w = &w };
+    var b = Builder{ .allocator = allocator, .device = device, .ck = ck, .c = &c, .w = &w, .rows = !device.tensorUnits() };
     defer b.jobs.deinit(allocator);
     b.fill(draft_ids) catch |e| {
         if (b.why.len > 0) std.log.err("{s}", .{b.why.text()});

@@ -256,6 +256,7 @@ fn expertGeo(f: Forward, j: usize, g: usize) mtl.Pipeline {
 /// The shared expert's up projection + relu2 + the down projection's input sums (lane_fused.up_relu2).
 fn upRelu2(f: Forward, e: *Enc, lin: wts.Linear, rows: usize) void {
     const s = f.s;
+    if (f.rowCall(e, lin, s.x, 0, s.sh_act, 0, rows, true)) return;
     const sk = fwd.splitK(lin.n, lin.k);
     const mpr = Forward.mp(rows);
     const block = if (mpr <= 32) mpr else 32;

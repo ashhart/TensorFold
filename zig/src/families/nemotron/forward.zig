@@ -10,6 +10,7 @@ const tree = @import("tree.zig");
 const encoder = @import("encoder.zig");
 const Sampling = @import("lanes").sampling.Sampling;
 const fullVocabulary = @import("lanes").gpu_full.fullVocabulary;
+const row = @import("../../core/row_projection.zig");
 
 const Buffer = mtl.Buffer;
 pub const Enc = encoder.Enc;
@@ -66,6 +67,7 @@ pub const Forward = struct {
 
     /// lane_qmm's coop kernel for this projection shape and row count (key: in, out, down, qkv, head, eh, draft).
     pub fn coop(self: Forward, e: *Enc, comptime key: []const u8, lin: wts.Linear, x: Buffer, x_off: usize, xs: Buffer, y: Buffer, rows: usize) void {
+        if (self.rowCall(e, lin, x, x_off, y, 0, rows, false)) return;
         const m = mp(rows);
         const block = if (m <= 32) m else 32;
         const tmr = block / 16;
@@ -84,6 +86,22 @@ pub const Forward = struct {
         e.bytes(mdims(rows), 4);
         e.buf(y, 0, 5);
         e.run(.{ lin.n / 64 * 64 * sk, (m + block - 1) / block, 1 }, .{ 64 * sk, 1, 1 });
+    }
+
+    /// The core's row kernels on a chip without tensor units (the projection in its row layout); false on the tensor path.
+    pub fn rowCall(self: Forward, e: *Enc, lin: wts.Linear, x: Buffer, x_off: usize, y: Buffer, y_off: usize, rows: usize, relu2: bool) bool {
+        const w = lin.rows orelse return false;
+        const p = &(self.k.rows orelse return false);
+        const c = row.call(p, w, rows, relu2) catch unreachable;
+        e.pipe(c.pipeline);
+        e.buf(x, x_off, 0);
+        e.buf(w.w, w.w_off, 1);
+        e.buf(w.scales, w.s_off, 2);
+        e.buf(w.biases, w.b_off, 3);
+        e.bytes(c.dims, 4);
+        e.buf(y, y_off, 5);
+        e.run(.{ c.groups * c.threads, 1, 1 }, .{ c.threads, 1, 1 });
+        return true;
     }
 
     /// The same coop math with each K slice its own threadgroup (more threadgroups than cores), summed in slice order.

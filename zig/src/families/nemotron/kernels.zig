@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
 const simd_attention = @import("simd_attention.zig");
+const row = @import("../../core/row_projection.zig");
 
 pub const glue_names = [_][:0]const u8{ "tf_embed_q4", "tf_rms_mlx", "tf_argmax_bf16", "tf_kv_write", "tf_attn_q", "tf_attn_out", "tf_copy_rows", "tf_copy_u32", "tf_coop_combine" };
 
@@ -76,6 +77,7 @@ pub fn keyOf(i: usize) []const u8 {
 
 pub const Kernels = struct {
     pipelines: [total]mtl.Pipeline = undefined,
+    rows: ?row.Pipelines = null, // the core's row projections, on chips without tensor units
 
     /// The pipeline of a generated kernel (by its generator key) or a glue kernel (by function name).
     pub fn get(self: *const Kernels, comptime key: []const u8) mtl.Pipeline {
@@ -100,6 +102,7 @@ pub const Kernels = struct {
 
     pub fn deinit(self: *Kernels) void {
         for (&self.pipelines) |p| p.deinit();
+        if (self.rows) |*r| r.deinit();
     }
 };
 
@@ -189,6 +192,7 @@ pub fn load(allocator: std.mem.Allocator, device: mtl.Device) !Kernels {
     Worker.run(jobs, &next);
     for (threads) |t| if (t) |th| th.join();
     for (jobs) |j| if (j.failed) return error.KernelCompile;
+    if (!device.tensorUnits()) k.rows = try row.Pipelines.load(device);
     return k;
 }
 

@@ -5,6 +5,7 @@ pub const nemotron = @import("nemotron/kernels.zig");
 
 /// Our glue kernels around them: embedding, MLX's RMS arithmetic, argmax, layout moves.
 pub const nemotron_glue = @embedFile("nemotron_glue.metal");
+pub const core_row_projection = @embedFile("core/row_projection.metal");
 
 /// Routed experts with an expert's member rows two or four at a time (each row's sums unchanged).
 pub const nemotron_experts = @embedFile("nemotron_experts.metal");
