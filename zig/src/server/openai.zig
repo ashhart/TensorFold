@@ -203,15 +203,24 @@ fn promptText(srv: *Server, cx: *Cx, p: Value) errors.Refused![]const u8 {
 /// The chat or completion reply to ``raw`` (already decoded), written to ``out``.
 pub fn run(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool, raw: Value) void {
     const field: []const u8 = if (is_chat) "messages" else "prompt";
+    const id = ids.make(a, if (is_chat) "chatcmpl-" else "cmpl-", 32) catch return;
     var cx: Cx = .{ .a = a };
-    const p = plan(srv, &cx, is_chat, raw) catch |e| {
+    var p = plan(srv, &cx, is_chat, raw) catch |e| {
         if (e == error.OutOfMemory) cx.message = "out of memory";
+        logRefused(id, cx.message);
         const body = (if (cx.kind == .other) errorOther(a, cx.message) else errorBody(a, &cx, field)) catch return;
         out.vt.reply(out.ctx, cx.status(), wrapError(a, body) catch return);
         return;
     };
-    var r: Run = .{ .srv = srv, .a = a, .out = out, .is_chat = is_chat, .plan = p, .id = (ids.make(a, if (is_chat) "chatcmpl-" else "cmpl-", 32) catch return), .created = std.Io.Clock.real.now(srv.io).toSeconds() };
+    p.input.id = id;
+    var r: Run = .{ .srv = srv, .a = a, .out = out, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds() };
     if (p.stream) r.stream(gone, field) else r.whole(gone, field);
+}
+
+/// Why a request got an error reply, logged before it: its access line shows only the status.
+fn logRefused(id: []const u8, message: []const u8) void {
+    var buf: [1400]u8 = undefined;
+    log.line("{s}", .{log.refused(&buf, id, message)});
 }
 
 fn errorOther(a: Allocator, message: []const u8) Allocator.Error!Value {
@@ -312,6 +321,7 @@ const Run = struct {
             error.Failed => return r.fail(&.{ .a = a, .kind = .server, .message = "the reply failed" }, field),
             error.Refused => {
                 if (cx.kind == .other) cx.kind = .server;
+                if (cx.kind != .server) logRefused(r.id, cx.message); // a 500 is a failure, not a refusal
                 return r.fail(&cx, field);
             },
         };
@@ -410,6 +420,7 @@ const Run = struct {
             switch (e) {
                 error.Cancelled => return,
                 error.Refused => if (cx.kind != .other and cx.kind != .server) {
+                    logRefused(r.id, cx.message);
                     const body = errorBody(a, &cx, field) catch return;
                     r.emit(wrapError(a, body) catch return) catch return;
                     r.out.vt.event(r.out.ctx, null) catch {};
