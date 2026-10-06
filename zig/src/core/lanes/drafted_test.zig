@@ -79,7 +79,7 @@ const FakeDrafter = struct {
         for (items) |it| {
             const l = x.lanes.getPtr(it.stream) orelse return error.UnknownStream;
             const f = it.features;
-            if (f.space != .host or f.dtype != .u32 or f.row_bytes != 4 or it.follow.len != f.rows) return error.Shape;
+            if (f.space != .host or f.dtype != .u32 or f.row_bytes != 4 or it.follow.len != f.rows or f.ready != .none) return error.Shape;
             const rows: [*]const u32 = @ptrFromInt(f.buffer + f.offset);
             if (x.first_start == null) x.first_start = it.start;
             while (l.history.items.len < it.start) try l.history.append(gpa, unseen);
@@ -96,11 +96,12 @@ const FakeDrafter = struct {
         x.widest_hold = @max(x.widest_hold, items.len);
         for (items) |it| {
             const l = x.lanes.getPtr(it.stream) orelse return error.UnknownStream;
-            if (l.history.items.len + 1 > it.position) return error.PositionMismatch;
+            // the row before `pending` must be one it absorbed (hold's contract): no drafting from nothing
+            if (l.history.items.len + 1 != it.position) return error.PositionMismatch;
+            if (l.history.items[l.history.items.len - 1] == unseen) return error.NoRowToDraftFrom;
             var guess: std.ArrayList(u32) = .empty;
             defer guess.deinit(gpa);
             try guess.appendSlice(gpa, l.history.items);
-            while (guess.items.len + 1 < it.position) try guess.append(gpa, unseen);
             try guess.append(gpa, it.pending);
             l.held.clearRetainingCapacity();
             for (0..it.depth) |j| {
@@ -133,6 +134,110 @@ const FakeDrafter = struct {
     }
 };
 
+/// The fake target with features held as a real target holds them: its own copy of the prompt rows after a prefill,
+/// of a verify's rows after it, only the retained rows after a keep (the rest overwritten), nothing after a one-token
+/// round. A request outside that (Features' contract) fails, which the token-history fake could not notice.
+const Strict = struct {
+    inner: be.Backend,
+    snaps: std.AutoHashMapUnmanaged(*sm.Stream, Snap) = .empty,
+    refused: u32 = 0,
+
+    const Snap = struct { start: u64 = 0, rows: std.ArrayList(u32) = .empty, valid: usize = 0 };
+    const poison: u32 = 0xdead;
+
+    fn deinit(x: *Strict) void {
+        var it = x.snaps.valueIterator();
+        while (it.next()) |v| v.rows.deinit(gpa);
+        x.snaps.deinit(gpa);
+    }
+
+    fn backend(x: *Strict) be.Backend {
+        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draftNone, .features = features, .release = release } };
+    }
+
+    fn self(ptr: *anyopaque) *Strict {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    fn snap(x: *Strict, s: *sm.Stream) !*Snap {
+        const got = try x.snaps.getOrPut(gpa, s);
+        if (!got.found_existing) got.value_ptr.* = .{};
+        return got.value_ptr;
+    }
+
+    fn prefill(ptr: *anyopaque, s: *sm.Stream) anyerror!void {
+        const x = self(ptr);
+        try x.inner.prefill(s);
+        const sn = try x.snap(s);
+        sn.start = s.cached;
+        sn.rows.clearRetainingCapacity();
+        try sn.rows.appendSlice(gpa, s.prompt()[s.cached..]);
+        sn.valid = sn.rows.items.len;
+    }
+
+    fn first(ptr: *anyopaque, s: *sm.Stream, position: u64) anyerror!u64 {
+        return self(ptr).inner.first(s, position);
+    }
+
+    fn queue(ptr: *anyopaque, s: *sm.Stream, feed: be.Feed, position: u64) anyerror!u64 {
+        const x = self(ptr);
+        (try x.snap(s)).valid = 0;
+        return x.inner.queue(s, feed, position);
+    }
+
+    fn read(ptr: *anyopaque, handle: u64) anyerror!u32 {
+        return self(ptr).inner.read(handle);
+    }
+
+    fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
+        const x = self(ptr);
+        try x.inner.verify(windows, out);
+        for (windows) |w| {
+            if (w.held != 0) return error.HeldReachedTarget; // Drafted hands host tokens
+            const sn = try x.snap(w.stream);
+            sn.start = w.positions[0] - 1;
+            sn.rows.clearRetainingCapacity();
+            try sn.rows.append(gpa, w.pending);
+            try sn.rows.appendSlice(gpa, w.tokens);
+            sn.valid = sn.rows.items.len;
+        }
+    }
+
+    fn keep(ptr: *anyopaque, windows: []const be.Window, paths: []const []const u32) anyerror!void {
+        const x = self(ptr);
+        try x.inner.keep(windows, paths);
+        for (windows, paths) |w, path| {
+            const sn = try x.snap(w.stream);
+            sn.valid = @min(sn.valid, path.len);
+            @memset(sn.rows.items[sn.valid..], poison);
+        }
+    }
+
+    fn draftNone(_: *anyopaque, _: []const be.DraftRequest) anyerror!void {
+        return error.TargetDraftCalled;
+    }
+
+    fn features(ptr: *anyopaque, s: *sm.Stream, taps: []const u32, start: u64, count: u32) anyerror!be.Features {
+        _ = taps;
+        const x = self(ptr);
+        const sn = x.snaps.getPtr(s) orelse return error.UnknownStream;
+        if (start < sn.start or start + count > sn.start + sn.valid) {
+            x.refused += 1;
+            return error.RowsNotHeld;
+        }
+        return .{ .buffer = @intFromPtr(sn.rows.items.ptr), .offset = (start - sn.start) * 4, .rows = count, .row_bytes = 4, .space = .host, .dtype = .u32 };
+    }
+
+    fn release(ptr: *anyopaque, s: *sm.Stream) void {
+        const x = self(ptr);
+        x.inner.release(s);
+        if (x.snaps.fetchRemove(s)) |kv| {
+            var v = kv.value;
+            v.rows.deinit(gpa);
+        }
+    }
+};
+
 const Mode = enum { plain, wrapped };
 const Case = struct { prompt: []const u32, max_new: u32 = 40, sampling: ?Sampling = null, drafts: bool = true, restored: u32 = 0 };
 const Out = struct {
@@ -155,7 +260,9 @@ fn run(cases: []const Case, mode: Mode, batched: bool) !Out {
     var target: fake.Fake = .{ .gpa = gpa };
     defer target.deinit();
     var head: FakeDrafter = .{ .facts_ = .{ .depth = 6, .step_ms = 0.5, .batched = batched } };
-    var wrapped: Drafted = .{ .gpa = gpa, .target = target.backend(), .drafter = head.drafter() };
+    var strict: Strict = .{ .inner = target.backend() };
+    defer strict.deinit();
+    var wrapped: Drafted = .{ .gpa = gpa, .target = strict.backend(), .drafter = head.drafter() };
     defer wrapped.deinit();
     var cfg = try Config.init(gpa, if (mode == .wrapped) wrapped.facts(base()) else base(), 16, 15);
     defer cfg.deinit(gpa);
@@ -311,9 +418,35 @@ test "every failure around the prompt pass cleans up once" {
         try std.testing.expect(std.meta.isError(got));
         try std.testing.expectEqual(@as(u32, 0), target.lanes.count()); // the target released exactly where it should
         try std.testing.expectEqual(@as(u32, 0), head.lanes.count());
-        try std.testing.expectEqual(@as(usize, 0), wrapped.opened.count());
+        try std.testing.expectEqual(@as(usize, 0), wrapped.lanes.count());
         // the drafter is released only if it opened the stream, and then once
         const want: u32 = if (which == .absorb or which == .features) 1 else 0;
         try std.testing.expectEqual(want, head.releases);
     }
+}
+
+test "the strict target holds only what Features promises: a keep drops the rejected rows" {
+    var target: fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var strict: Strict = .{ .inner = target.backend() };
+    defer strict.deinit();
+    const b = strict.backend();
+    var s = try sm.Stream.init(gpa, .{ .id = "s", .prompt = &p1, .max_new = 8, .eos = &.{96} });
+    defer s.deinit(gpa);
+    try b.prefill(&s);
+    defer b.release(&s);
+    _ = try b.features(&s, &.{49}, 0, p1.len);
+    const t = try b.read(try b.first(&s, p1.len));
+    const drafts = [_]u32{ 1, 2, 3 };
+    const positions = [_]u64{ p1.len + 1, p1.len + 2, p1.len + 3, p1.len + 4 };
+    const w = [_]be.Window{.{ .stream = &s, .pending = t, .held = 0, .tokens = &drafts, .parents = null, .positions = &positions }};
+    var drawn: [4]u32 = undefined;
+    var echo: [3]u32 = undefined;
+    var out = [_]be.Verified{.{ .sampled = &drawn, .drafts = &echo }};
+    try b.verify(&w, &out);
+    try std.testing.expectError(error.RowsNotHeld, b.features(&s, &.{49}, 0, 1)); // the prompt rows are gone
+    _ = try b.features(&s, &.{49}, p1.len, 4); // the verify's rows, all held until a keep
+    try b.keep(&w, &.{&.{ 0, 1 }});
+    _ = try b.features(&s, &.{49}, p1.len, 2); // the kept rows stay after the keep
+    try std.testing.expectError(error.RowsNotHeld, b.features(&s, &.{49}, p1.len, 3));
 }

@@ -31,12 +31,15 @@ pub const Verified = struct { sampled: []u32, drafts: []u32 };
 /// A target's tapped states for rows of a stream's cache, handed to an external drafter (drafter.zig).
 /// Layout: `rows` packed rows of `row_bytes` from `offset` in `buffer`, row-major; a row is the drafter's taps in its
 /// `taps` order, each the target's hidden width of `dtype`. Where: `space` (a host pointer, or a device pointer on
-/// `device`: the drafter must run on that device). Ready: when `ready` is 0 the producing work is complete; otherwise it
-/// names the backend's completion handle (a CUDA event) the consumer waits on before reading. Valid: until the target's
-/// next prefill, verify, keep or release of that stream; the drafter copies what it keeps.
+/// `device`: the drafter must run on that device). Ready: `ready` is .none when the producing work is complete, else the
+/// fence the consumer waits on before reading (its kind names the backend that recorded it).
+/// Which rows, and for how long: the prompt rows the last prefill computed, until the stream's first verify; then the
+/// last verify's rows, and after a keep only the rows it retained, until the next verify, prefill or release of that
+/// stream. A keep does not drop the retained rows: the round loop drafts after it. The drafter copies what it keeps.
 pub const Features = struct {
     pub const Space = enum { host, device };
     pub const Dtype = enum { bf16, f16, f32, u32 };
+    pub const Fence = union(enum) { none, cuda_event: u64, metal_event: u64 };
     buffer: u64,
     offset: u64 = 0,
     rows: u32,
@@ -44,7 +47,7 @@ pub const Features = struct {
     space: Space,
     device: i32 = 0,
     dtype: Dtype,
-    ready: u64 = 0,
+    ready: Fence = .none,
 };
 
 /// Absorb a stream's kept rows into its draft head and hold `depth` drafts for its next round.
@@ -88,8 +91,8 @@ pub const Backend = struct {
         tree: ?*const fn (ptr: *anyopaque, s: *Stream, gpa: std.mem.Allocator) anyerror!?Held = null,
         /// The head's best tokens and probabilities at each level it drafted for the stream (waits for the drafts).
         alternatives: ?*const fn (ptr: *anyopaque, s: *Stream, out: []Alternative) anyerror!usize = null,
-        /// The tapped states of cache rows [start, start + count) for an external drafter (drafter.zig): valid for the prompt's
-        /// rows the prefill computed (from `s.cached`) and the last verify's rows until the next verify; null when the target exposes none.
+        /// The tapped states of cache rows [start, start + count) for an external drafter (drafter.zig), within the rows
+        /// `Features` says the target still holds; null when the target exposes none.
         features: ?*const fn (ptr: *anyopaque, s: *Stream, taps: []const u32, start: u64, count: u32) anyerror!Features = null,
         /// The stream left the rounds: free its caches and held drafts.
         release: *const fn (ptr: *anyopaque, s: *Stream) void,

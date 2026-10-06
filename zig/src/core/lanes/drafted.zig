@@ -9,18 +9,35 @@ const Model = @import("config.zig").Model;
 const Stream = @import("stream.zig").Stream;
 const dr = @import("drafter.zig");
 
+/// What the wrapper knows of a drafting stream.
+const Lane = struct {
+    rows: bool = false, // the drafter has absorbed the row before the next draft (it can draft)
+    filler: u32 = 0, // drafts the next verify takes as fillers instead (a prompt restored whole: no row to draft from)
+};
+
 pub const Drafted = struct {
     gpa: Allocator,
     target: be.Backend,
     drafter: dr.Drafter,
-    opened: std.AutoHashMapUnmanaged(*Stream, void) = .empty, // streams the drafter has state for
+    lanes: std.AutoHashMapUnmanaged(*Stream, Lane) = .empty, // streams the drafter has opened
+    // scratch kept between rounds, so a steady round allocates nothing
     windows: std.ArrayList(be.Window) = .empty, // the last verify's windows, held drafts swapped for host tokens
     tokens: std.ArrayList(u32) = .empty, // their drafts, back to back
+    streams: std.ArrayList(*Stream) = .empty,
+    outs: std.ArrayList([]u32) = .empty,
+    absorbs: std.ArrayList(dr.Absorb) = .empty,
+    holds: std.ArrayList(dr.Hold) = .empty,
+    firsts: std.ArrayList(u32) = .empty,
 
     pub fn deinit(x: *Drafted) void {
-        x.opened.deinit(x.gpa);
+        x.lanes.deinit(x.gpa);
         x.windows.deinit(x.gpa);
         x.tokens.deinit(x.gpa);
+        x.streams.deinit(x.gpa);
+        x.outs.deinit(x.gpa);
+        x.absorbs.deinit(x.gpa);
+        x.holds.deinit(x.gpa);
+        x.firsts.deinit(x.gpa);
     }
 
     pub fn backend(x: *Drafted) be.Backend {
@@ -57,8 +74,9 @@ pub const Drafted = struct {
         try x.target.prefill(s);
         if (!s.drafts) return;
         errdefer x.dropStream(s);
+        try x.lanes.ensureUnusedCapacity(x.gpa, 1); // before open: a stream opened is always one the wrapper releases
         try x.drafter.open(s);
-        try x.opened.put(x.gpa, s, {});
+        x.lanes.putAssumeCapacity(s, .{});
         const ids = s.prompt();
         const from: usize = s.cached;
         if (ids.len < from + 2) return;
@@ -79,7 +97,8 @@ pub const Drafted = struct {
         return self(ptr).target.read(handle);
     }
 
-    /// Held drafts go to the target as host tokens, every drafting stream's read back in one call.
+    /// Held drafts go to the target as host tokens, every drafting stream's read back in one call (fillers: the pending
+    /// token repeated, which the target rejects).
     fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
         const x = self(ptr);
         x.windows.clearRetainingCapacity();
@@ -89,27 +108,27 @@ pub const Drafted = struct {
             if (w.held > 0 and w.tokens.len != 0) return error.MixedDrafts;
             total += w.held;
         }
-        if (total > 0) {
-            try x.tokens.resize(x.gpa, total);
-            const streams = try x.gpa.alloc(*Stream, windows.len);
-            defer x.gpa.free(streams);
-            const outs = try x.gpa.alloc([]u32, windows.len);
-            defer x.gpa.free(outs);
-            var n: usize = 0;
-            var at: usize = 0;
-            for (windows, x.windows.items) |w, *v| {
-                if (w.held == 0) continue;
-                if (!x.opened.contains(w.stream)) return error.NotDrafting;
-                const slot = x.tokens.items[at..][0..w.held];
-                at += w.held;
-                streams[n] = w.stream;
-                outs[n] = slot;
-                n += 1;
-                v.tokens = slot;
-                v.held = 0;
+        if (total == 0) return x.target.verify(x.windows.items, out);
+        try x.tokens.resize(x.gpa, total);
+        x.streams.clearRetainingCapacity();
+        x.outs.clearRetainingCapacity();
+        var at: usize = 0;
+        for (windows, x.windows.items) |w, *v| {
+            if (w.held == 0) continue;
+            const lane = x.lanes.getPtr(w.stream) orelse return error.NotDrafting;
+            const slot = x.tokens.items[at..][0..w.held];
+            at += w.held;
+            v.tokens = slot;
+            v.held = 0;
+            if (lane.filler > 0) {
+                @memset(slot, w.pending);
+                lane.filler = 0;
+                continue;
             }
-            try x.drafter.held(streams[0..n], outs[0..n]);
+            try x.streams.append(x.gpa, w.stream);
+            try x.outs.append(x.gpa, slot);
         }
+        if (x.streams.items.len > 0) try x.drafter.held(x.streams.items, x.outs.items);
         return x.target.verify(x.windows.items, out);
     }
 
@@ -122,25 +141,23 @@ pub const Drafted = struct {
     }
 
     /// One absorb for every request's kept rows (a chain's prefix; after a prompt, its last row if the pass computed it),
-    /// then one hold for every request that wants drafts.
+    /// then one hold for every request that wants drafts and has the row to draft from.
     fn draft(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
         const x = self(ptr);
-        var absorbs: std.ArrayList(dr.Absorb) = .empty;
-        defer absorbs.deinit(x.gpa);
-        var holds: std.ArrayList(dr.Hold) = .empty;
-        defer holds.deinit(x.gpa);
-        const firsts = try x.gpa.alloc(u32, requests.len);
-        defer x.gpa.free(firsts);
-        for (requests, firsts) |r, *tok| {
+        x.absorbs.clearRetainingCapacity();
+        x.holds.clearRetainingCapacity();
+        try x.firsts.resize(x.gpa, requests.len);
+        for (requests, x.firsts.items) |r, *tok| {
             if (r.lanes != null) return error.TreesNotBuilt;
-            if (!x.opened.contains(r.stream)) return error.NotDrafting;
+            const lane = x.lanes.getPtr(r.stream) orelse return error.NotDrafting;
             var pending: u32 = undefined;
             if (r.rows) |rows| {
                 for (rows, 0..) |row, i| if (row != i) return error.TreesNotBuilt;
                 const n: u32 = @intCast(rows.len);
                 const f = try x.target.features(r.stream, x.drafter.taps(), r.start, n);
-                try absorbs.append(x.gpa, .{ .stream = r.stream, .features = f, .start = r.start, .follow = r.follow[0..rows.len] });
+                try x.absorbs.append(x.gpa, .{ .stream = r.stream, .features = f, .start = r.start, .follow = r.follow[0..rows.len] });
                 pending = r.follow[rows.len - 1];
+                lane.rows = true;
             } else {
                 const feed = r.first orelse return error.NoFirstToken;
                 tok.* = switch (feed) {
@@ -151,17 +168,23 @@ pub const Drafted = struct {
                 const last = r.stream.prompt_len - 1;
                 if (r.stream.cached <= last) { // the pass computed the prompt's last row (not restored whole)
                     const f = try x.target.features(r.stream, x.drafter.taps(), last, 1);
-                    try absorbs.append(x.gpa, .{ .stream = r.stream, .features = f, .start = last, .follow = @as(*const [1]u32, tok) });
+                    try x.absorbs.append(x.gpa, .{ .stream = r.stream, .features = f, .start = last, .follow = @as(*const [1]u32, tok) });
+                    lane.rows = true;
                 }
             }
-            if (r.depth > 0) try holds.append(x.gpa, .{ .stream = r.stream, .pending = pending, .position = r.position, .depth = r.depth });
+            if (r.depth == 0) continue;
+            if (!lane.rows) { // nothing to draft from yet: fillers this round, the drafter from the next
+                lane.filler = r.depth;
+                continue;
+            }
+            try x.holds.append(x.gpa, .{ .stream = r.stream, .pending = pending, .position = r.position, .depth = r.depth });
         }
-        if (absorbs.items.len > 0) try x.drafter.absorb(absorbs.items);
-        if (holds.items.len > 0) try x.drafter.hold(holds.items);
+        if (x.absorbs.items.len > 0) try x.drafter.absorb(x.absorbs.items);
+        if (x.holds.items.len > 0) try x.drafter.hold(x.holds.items);
     }
 
     fn dropStream(x: *Drafted, s: *Stream) void {
-        if (x.opened.remove(s)) x.drafter.release(s);
+        if (x.lanes.remove(s)) x.drafter.release(s);
         x.target.release(s);
     }
 

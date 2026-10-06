@@ -19,8 +19,8 @@ pub const Facts = struct {
 pub const Absorb = struct { stream: *Stream, features: Features, start: u64, follow: []const u32 };
 
 /// Draft `depth` tokens after `pending` (the token after the stream's last kept row), the first landing at `position`.
-/// The drafter may have absorbed fewer rows than `position - 1` (a prompt restored by prompt reuse has no states): it
-/// still holds `depth` tokens, and the target's verify rejects what does not land.
+/// Asked only once the drafter has absorbed the row before `pending` (row `position - 2`); rows before its first absorb
+/// may be missing (a prefix restored by prompt reuse has no states), never the last one.
 pub const Hold = struct { stream: *Stream, pending: u32, position: u64, depth: u32 };
 
 pub const Drafter = struct {
