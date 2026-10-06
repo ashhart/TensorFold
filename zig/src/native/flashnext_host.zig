@@ -263,8 +263,9 @@ pub const Host = struct {
 };
 
 /// The engine for a Flash Next checkpoint: the replay engine on the kernels and packs in `dump`, warmed, served.
-pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: []const u8, window: i64) !*Host {
-    const eng = try fx.Engine.load(gpa, dir, dump);
+/// `speed_up`: this Mac's settings for speed-up mode (two Macs, the same model, half the work each; tp.zig).
+pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: []const u8, window: i64, speed_up: ?[]const u8) !*Host {
+    const eng = try fx.Engine.loadWith(gpa, dir, dump, speed_up);
     errdefer eng.deinit();
     try eng.warm();
     const follower: ?std.Thread = if (eng.followsPeer()) try std.Thread.spawn(.{}, follow, .{eng}) else null; // rank 1

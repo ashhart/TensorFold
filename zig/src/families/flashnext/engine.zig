@@ -97,6 +97,12 @@ pub const Engine = struct {
 
     /// The checkpoint in `model_dir` with the recorded kernels and packs in `dump_dir` (tools/zig/flashnext_dump.py).
     pub fn load(gpa: Allocator, model_dir: []const u8, dump_dir: []const u8) !*Engine {
+        return loadWith(gpa, model_dir, dump_dir, null);
+    }
+
+    /// `load`, in speed-up mode when `speed_up` (or TF_FLASHNEXT_TP) names this Mac's settings: rank, MCDMA library
+    /// and the link to the other Mac (tp.zig).
+    pub fn loadWith(gpa: Allocator, model_dir: []const u8, dump_dir: []const u8, speed_up: ?[]const u8) !*Engine {
         const e = try gpa.create(Engine); // undefined memory: every defaulted field is set here
         errdefer gpa.destroy(e);
         e.gpa = gpa;
@@ -313,8 +319,9 @@ pub const Engine = struct {
         try e.rounds();
         e.tsel = try GSelect.init(r, 0);
         e.msel = try GSelect.init(r, 0);
-        // TF_FLASHNEXT_TP: TP=2 with the peer named there (tp.zig); both ranks then run the same replies in lockstep
-        if (std.c.getenv("TF_FLASHNEXT_TP")) |path| r.tp = try fz.Tp2.init(arena, r.device, std.mem.span(path));
+        // speed-up mode: TP=2 with the peer the settings name (tp.zig); both ranks then run the same replies in lockstep
+        const tp_path: ?[]const u8 = speed_up orelse if (std.c.getenv("TF_FLASHNEXT_TP")) |p| std.mem.span(p) else null;
+        if (tp_path) |path| r.tp = try fz.Tp2.init(arena, r.device, path);
         return e;
     }
 

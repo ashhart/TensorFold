@@ -140,7 +140,7 @@ fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
     }
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const h = flashnext.open(gpa, io, o.dir, dump, window) catch |e| {
+    const h = flashnext.open(gpa, io, o.dir, dump, window, o.speed_up) catch |e| {
         problem.* = try std.fmt.allocPrint(a, "the native Flash Next engine cannot load {s} with {s} ({s})", .{ o.dir, dump, @errorName(e) });
         return null;
     };
