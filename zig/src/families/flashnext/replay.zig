@@ -269,8 +269,9 @@ const xnew_source =
     \\    uint sgi [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
     \\    uint3 tg [[threadgroup_position_in_grid]]) {
     \\  constexpr int K = 2560, N = 640, TOPK = 10, NE = 512, NL = 513, SLOTS = TOPK + 1, WPR = K * 6 / 32, KG = K / 32;
-    \\  const int p = int(tg.z);
+    \\  const int p = int(tg.z) + int(OWN.x) * SLOTS; // TP: this rank's rows [OWN.x, OWN.y) only
     \\  const int r = p / SLOTS, slot = p % SLOTS;
+    \\  if (uint(r) >= OWN.y) return;
     \\  const bool shared = slot == TOPK;
     \\  float picked[TOPK];
     \\  const size_t e = shared ? 0 : size_t(simd_topk<NE>(LOGITS + r * NL, slot, lane, picked));
@@ -283,7 +284,6 @@ const xnew_source =
     \\      for (int kk = 0; kk < TOPK; kk++) WTS[r * TOPK + kk] = float(bfloat(ex[kk] / total));
     \\    }
     \\  }
-    \\  if (shared ? OWN.z == 0 : (uint(e) < OWN.x || uint(e) >= OWN.y)) return; // TP: another rank's expert
     \\  const int row = int(tg.y) * 8 + int(sgi) * 2 + int(lane >> 4);
     \\  const int part = int(lane & 15);
     \\  constexpr int GJ = FZ_PACKED ? 96 : 6, SJ = FZ_PACKED ? 16 : 1; // a lane's group stride: words, scales
@@ -314,17 +314,13 @@ const xnew_source =
     \\    uint sgi [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
     \\    uint3 tg [[threadgroup_position_in_grid]]) {
     \\  constexpr int NI = 640, D = 2560, TOPK = 10, SLOTS = TOPK + 1, WPR = NI * 6 / 32, KG = NI / 32;
-    \\  const int pair = int(tg.z);
-    \\  if (pair >= rows[0] * SLOTS) return;
+    \\  const int pair = int(tg.z) + int(OWN.x) * SLOTS; // TP: this rank's rows [OWN.x, OWN.y) only
+    \\  if (pair >= rows[0] * SLOTS || pair >= int(OWN.y) * SLOTS) return;
     \\  const int r = pair / SLOTS, k = pair % SLOTS;
     \\  const bool shared = k == TOPK;
     \\  const size_t e = shared ? 0 : size_t(PICK[r * TOPK + k]);
     \\  const int d = int(tg.y) * 32 + int(sgi) * 8 + int(lane >> 2);
     \\  const int part = int(lane & 3);
-    \\  if (shared ? OWN.z == 0 : (uint(e) < OWN.x || uint(e) >= OWN.y)) { // TP: another rank's expert, zero here
-    \\    if (part == 0) Y[(r * SLOTS + k) * D + d] = bfloat(0.0f);
-    \\    return;
-    \\  }
     \\  constexpr int GJ = FZ_PACKED ? 24 : 6, SJ = FZ_PACKED ? 4 : 1;
     \\  const device uint* w = (shared ? SDW : DW + e * D * WPR) + size_t(d) * WPR + part * (FZ_PACKED ? 6 : 30);
     \\  const size_t g0 = (shared ? 0 : e * D * KG) + size_t(d) * KG + part * (FZ_PACKED ? 1 : 5);
@@ -1124,8 +1120,10 @@ pub const Run = struct {
             if (!r.serial) r.enc.barrier();
             return;
         }
-        const pairs = r.rows * 11;
-        const own = if (r.tp != null and r.tp_layer) r.tp.?.own() else [4]u32{ 0, 512, 1, 0 };
+        const rows_own = if (r.tp != null and r.tp_layer) r.tp.?.ownRows(r.rows) else [2]usize{ 0, r.rows };
+        if (rows_own[1] == rows_own[0]) return; // TP: a one-row window's experts are rank 0's
+        const own = [4]u32{ @intCast(rows_own[0]), @intCast(rows_own[1]), 0, 0 };
+        const pairs = (rows_own[1] - rows_own[0]) * 11;
         if (r.tp != null and r.tp_layer and r.xsx) return error.TpNeedsPlainExperts;
         r.enc.setPipeline(if (r.xsx) r.xgu_sx_pipe else r.xgu_pipe);
         const gu = [_]Buf{ x, lg, e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8], e[9], e[10], e[11], act, pick, wts };
@@ -1612,7 +1610,7 @@ pub const Model = struct {
 
     pub fn grouped(m: *Model, h: Buf, out: Buf) !void {
         const t = &m.t;
-        if (m.r.tp) |tp| return if (m.r.skip & TP_CLASS == 0) tp.combine(m.r.enc, h, t.inj_m, t.ydown, t.lg, out, t.ssp, m.r.rows); // TP: the two ranks' sums
+        if (m.r.tp) |tp| return if (m.r.skip & TP_CLASS == 0) tp.combine(m.r.enc, h, t.inj_m, out, t.ssp, m.r.rows); // TP: each rank's rows' branches
         try m.r.call("q4_hc_norm_grouped#[10240]", &.{ h, t.inj_m, t.ydown, t.wts, t.lg }, &.{ out, t.ssp });
     }
 
@@ -1825,7 +1823,7 @@ pub const Model = struct {
             r.tp_layer = true;
             try r.experts("qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown);
             r.tp_layer = false;
-            if (r.tp) |tp| if (r.skip & TP_CLASS == 0) tp.exchange(r.enc, t.ydown, t.wts, t.rows, rows);
+            if (r.tp) |tp| if (r.skip & TP_CLASS == 0) tp.exchange(r.enc, t.ydown, t.wts, t.lg, t.rows, rows);
             if (r.probe) |pb| r.copyKept(t.pick, .{ .b = pb.b, .off = pb.off + i * MAXR * 10 * 4 }, rows * 10, 0, 0, 0, 1, -1);
             pending = .grouped;
         }
