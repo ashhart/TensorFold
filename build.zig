@@ -116,7 +116,7 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     const server_tests = b.createModule(.{
         .root_source_file = b.path("zig/src/server/root.zig"),
         .target = target,
-        .optimize = optimize,
+        .optimize = .Debug, // the server's unit tests run with safety checks, as zig_test.sh builds them
         .link_libc = true,
         .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template } },
     });

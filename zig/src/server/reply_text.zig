@@ -5,6 +5,8 @@ const Allocator = std.mem.Allocator;
 pub const Markers = struct { open: []const u8, close: []const u8 };
 /// Qwen's prompt opens the think block; Gemma 4's reply opens its thought channel.
 pub const think_markers: Markers = .{ .open = "", .close = "</think>" };
+/// The opener a reply writes itself when its template leaves the think block to it (Kolibri 1's does).
+const think_open = "<think>";
 pub const channel_markers: Markers = .{ .open = "<|channel>thought", .close = "<channel|>" };
 /// (opener, closer) of a tool call's markup: Qwen's, Gemma 4's, DeepSeek-V4's DSML block.
 pub const calls = [_][2][]const u8{
@@ -64,7 +66,13 @@ pub fn splitThinking(a: Allocator, full: []const u8, finished: bool, m: Markers)
         }
         return .{ .reasoning = "", .answer = text };
     }
-    if (m.open.len > 0) text = trimNewlines(text[m.open.len..]);
+    if (m.open.len > 0) {
+        text = trimNewlines(text[m.open.len..]);
+    } else if (std.mem.startsWith(u8, text, think_open)) {
+        text = trimNewlines(text[think_open.len..]);
+    } else if (!finished and std.mem.startsWith(u8, think_open, text)) {
+        return .{ .reasoning = "", .answer = "" }; // held while the reply may still be writing that opener
+    }
     if (find(text, m.close)) |end| return .{ .reasoning = text[0..end], .answer = trimNewlines(text[end + m.close.len ..]) };
     var call: ?usize = null;
     for (calls) |c| if (find(text, c[0])) |at| {
@@ -308,4 +316,22 @@ test "splits and holds" {
     try std.testing.expectEqualStrings("ab", stops.visible("abEN", true));
     try std.testing.expectEqualStrings("x", pyStrip(" \u{3000}x\u{a0}\n"));
     try std.testing.expectEqualStrings("lo", afterChars("h\u{e9}lo", 2));
+}
+
+test "a reply that writes its own think opener keeps the tag out of its reasoning" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const reply = "<think>\nPlan.\n</think>\n\nDone.";
+    var sent: []const u8 = "";
+    for (1..reply.len + 1) |n| {
+        const s = try splitThinking(a, reply[0..n], false, think_markers);
+        try std.testing.expect(std.mem.indexOfScalar(u8, s.reasoning, '<') == null and std.mem.startsWith(u8, s.reasoning, sent));
+        sent = s.reasoning;
+    }
+    for ([_][]const u8{ reply, "Plan.\n</think>\n\nDone." }) |text| {
+        const s = try splitThinking(a, text, true, think_markers);
+        try std.testing.expectEqualStrings("Plan.\n", s.reasoning);
+        try std.testing.expectEqualStrings("Done.", s.answer);
+    }
 }
