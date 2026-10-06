@@ -50,6 +50,9 @@ pub const Kernels = struct {
     exp_f32: mtl.Pipeline,
     streams: mtl.Pipeline,
     copy_u32: mtl.Pipeline,
+    route_rows: mtl.Pipeline,
+    act2: mtl.Pipeline,
+    dense_indices: mtl.Pipeline,
     softmax: mtl.Pipeline,
     embed: mtl.Pipeline,
 
@@ -101,6 +104,8 @@ const glue = [_]struct { name: [:0]const u8, field: []const u8 }{
     .{ .name = "glm_argmax", .field = "argmax" },             .{ .name = "glm_index_scores", .field = "index_scores" },
     .{ .name = "glm_index_select", .field = "index_select" }, .{ .name = "glm_exp_f32", .field = "exp_f32" },
     .{ .name = "glm_streams", .field = "streams" },         .{ .name = "glm_copy_u32", .field = "copy_u32" },
+    .{ .name = "glm_route_rows", .field = "route_rows" },   .{ .name = "glm_act2", .field = "act2" },
+    .{ .name = "glm_dense_indices", .field = "dense_indices" },
 };
 
 const Job = struct {

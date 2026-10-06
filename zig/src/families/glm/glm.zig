@@ -5,6 +5,7 @@ pub const kernels = @import("kernels.zig");
 pub const state = @import("state.zig");
 pub const forward = @import("forward.zig");
 pub const mtp = @import("mtp.zig");
+pub const prompt = @import("prompt.zig");
 pub const engine = @import("engine.zig");
 
 test {

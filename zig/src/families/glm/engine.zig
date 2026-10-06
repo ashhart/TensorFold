@@ -7,6 +7,7 @@ const wts = @import("weights.zig");
 const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const mtp = @import("mtp.zig");
+const prompt_mod = @import("prompt.zig");
 const kernels = @import("kernels.zig");
 const Ref = wts.Ref;
 
@@ -45,6 +46,8 @@ pub const Engine = struct {
     s: st.State,
     sc: st.Scratch,
     prompt_ids: Ref,
+    pr: prompt_mod.Prompt,
+    chunked: bool, // prompt chunks on the tensor units (GLM_PROMPT=0: every prompt row in 16-row decode windows)
     residency: ?mtl.ResidencySet = null,
     load_seconds: f64 = 0,
 
@@ -88,6 +91,9 @@ pub const Engine = struct {
         e.s = both.state;
         e.sc = both.scratch;
         e.prompt_ids = try e.arena.buffer(@as(usize, cap) * 4);
+        e.pr = try prompt_mod.init(gpa, &e.arena, e.device, &e.c, &e.sc, cap);
+        errdefer e.pr.deinit();
+        e.chunked = if (std.c.getenv("GLM_PROMPT")) |v| v[0] != '0' else true;
         try e.prepare();
         // opt-in: wiring 181 GB leaves macOS nothing to reclaim if another model shares the Mac (Flash Next runs without)
         if (std.c.getenv("GLM_RESIDENCY") == null) {} else if (e.device.residencySet(e.w.buffers.items.len + e.arena.buffers.items.len)) |set| {
@@ -131,6 +137,7 @@ pub const Engine = struct {
             e.queue.removeResidencySet(set);
             set.deinit();
         }
+        e.pr.deinit();
         e.arena.deinit();
         e.w.deinit();
         gpa.destroy(e.w);
@@ -168,6 +175,15 @@ pub const Engine = struct {
             std.log.err("glm: command buffer failed: {s}", .{msg});
             return error.GpuFailed;
         }
+    }
+
+    /// One bf16 row of `D` values from `src` to `dst`.
+    fn copyRow(x: *const fwd.Ctx, enc: mtl.ComputeEncoder, src: Ref, dst: Ref, D: u32) void {
+        enc.setPipeline(x.k.copy_u32);
+        enc.setBuffer(src.buf, src.off, 0);
+        enc.setBuffer(dst.buf, dst.off, 1);
+        enc.setValue(D / 2, 2);
+        enc.dispatchThreads(mtl.Size.of(D / 2, 1, 1), mtl.Size.of(256, 1, 1));
     }
 
     fn u32s(r: Ref, n: usize) []u32 {
@@ -218,20 +234,38 @@ pub const Engine = struct {
         var last_n: u32 = 1;
         while (at < P) {
             if (out.cancelled(out.ctx)) return .{ .reason = .cancelled };
-            const n = @min(@as(u32, st.max_rows), P - at);
-            const b = e.begin();
-            fwd.backbone(&x, b.enc, e.prompt_ids.at(@as(usize, at) * 4), n, at);
-            fwd.flipKda(&x);
+            const chunk = e.chunked and P - at > st.max_rows;
+            const n = @min(@as(u32, if (chunk) prompt_mod.max_rows else st.max_rows), P - at);
             const last = at + n == P;
-            if (last) fwd.head(&x, b.enc, e.sc.hidden.at(@as(usize, n - 1) * D * 2), e.sc.logits, e.sc.picks, 1);
             const absorb = if (last) n - 1 else n;
-            if (d > 0 and absorb > 0) {
-                mtp.run(&x, b.enc, e.sc.hidden, e.prompt_ids.at(@as(usize, at + 1) * 4), absorb, at, e.sc.m_picks);
-                e.s.mtp_pos = at + absorb;
+            const b = e.begin();
+            if (chunk) {
+                var px = x;
+                px.sc = &e.pr.streams;
+                prompt_mod.backbone(&e.pr, &px, b.enc, e.prompt_ids.at(@as(usize, at) * 4), n, at);
+                fwd.flipKda(&x);
+                const hidden = e.pr.streams.hidden;
+                if (last) { // the last row into the decode scratch: the head's first token, the MTP head's first row
+                    copyRow(&x, b.enc, hidden.at(@as(usize, n - 1) * D * 2), e.sc.hidden, D);
+                    fwd.head(&x, b.enc, e.sc.hidden, e.sc.logits, e.sc.picks, 1);
+                }
+                if (d > 0 and absorb > 0) {
+                    prompt_mod.mtp(&e.pr, &px, b.enc, hidden, e.prompt_ids.at(@as(usize, at + 1) * 4), absorb, at);
+                    e.s.mtp_pos = at + absorb;
+                }
+                last_n = 1;
+            } else {
+                fwd.backbone(&x, b.enc, e.prompt_ids.at(@as(usize, at) * 4), n, at);
+                fwd.flipKda(&x);
+                if (last) fwd.head(&x, b.enc, e.sc.hidden.at(@as(usize, n - 1) * D * 2), e.sc.logits, e.sc.picks, 1);
+                if (d > 0 and absorb > 0) {
+                    mtp.run(&x, b.enc, e.sc.hidden, e.prompt_ids.at(@as(usize, at + 1) * 4), absorb, at, e.sc.m_picks);
+                    e.s.mtp_pos = at + absorb;
+                }
+                last_n = n;
             }
             try e.finish(b.cb, b.enc, last);
             at += n;
-            last_n = n;
         }
         e.s.pos = P;
         const t_prompt = std.c.mach_absolute_time();

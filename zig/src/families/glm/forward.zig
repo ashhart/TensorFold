@@ -20,7 +20,7 @@ pub const Ctx = struct {
 };
 
 /// Append `bytes` of `src` to the capture (a u32 copy).
-fn snap(x: *Ctx, e: mtl.ComputeEncoder, src: Ref, bytes: usize) void {
+pub fn snap(x: *Ctx, e: mtl.ComputeEncoder, src: Ref, bytes: usize) void {
     const d = x.dump orelse return;
     const n: u32 = @intCast(bytes / 4);
     e.setPipeline(x.k.copy_u32);
@@ -30,21 +30,21 @@ fn snap(x: *Ctx, e: mtl.ComputeEncoder, src: Ref, bytes: usize) void {
     x.dump_at += bytes;
 }
 
-const Rows = extern struct { rows: i32, width: i32, x_stride: i32, y_stride: i32, eps: f32 };
+pub const Rows = extern struct { rows: i32, width: i32, x_stride: i32, y_stride: i32, eps: f32 };
 const ScoreArgs = extern struct { p0: u32, q_stride: u32, w_stride: u32, s_stride: u32 };
 const SelectArgs = extern struct { p0: u32, top: u32, width: u32, s_stride: u32, i_stride: u32 };
 
-fn bind(e: mtl.ComputeEncoder, first: usize, refs: anytype) void {
+pub fn bind(e: mtl.ComputeEncoder, first: usize, refs: anytype) void {
     inline for (refs, 0..) |r, i| e.setBuffer(r.buf, r.off, first + i);
 }
 
-fn shape(e: mtl.ComputeEncoder, index: usize, dims: anytype) void {
+pub fn shape(e: mtl.ComputeEncoder, index: usize, dims: anytype) void {
     var v: [dims.len]i32 = undefined;
     inline for (dims, 0..) |d, i| v[i] = @intCast(d);
     e.setBytes(std.mem.asBytes(&v), index);
 }
 
-fn size(w: usize, h: usize, d: usize) mtl.Size {
+pub fn size(w: usize, h: usize, d: usize) mtl.Size {
     return mtl.Size.of(w, h, d);
 }
 
@@ -64,7 +64,7 @@ pub fn rms(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, w: Ref, out: Ref, rows
     e.dispatchGroups(size(rows, 1, 1), size(((width + 3) / 4 + 31) / 32 * 32, 1, 1));
 }
 
-fn scale(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, out: Ref, rows: u32, width: u32, x_stride: u32, y_stride: u32, factor: f32) void {
+pub fn scale(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, out: Ref, rows: u32, width: u32, x_stride: u32, y_stride: u32, factor: f32) void {
     e.setPipeline(x.k.scale);
     bind(e, 0, .{ in, out });
     e.setValue(Rows{ .rows = @intCast(rows), .width = @intCast(width), .x_stride = @intCast(x_stride), .y_stride = @intCast(y_stride), .eps = factor }, 2);
@@ -94,7 +94,7 @@ pub fn embedRows(x: *const Ctx, e: mtl.ComputeEncoder, ids: Ref, out: Ref, rows:
 
 /// A block boundary (model.boundary): the pending branch written back into the streams, then the next block's
 /// mix, Sinkhorn split and RMSNorm into `normed`, `post` and `comb` (no `hc`: the write-back only).
-fn boundary(x: *Ctx, e: mtl.ComputeEncoder, rows: u32, pending: bool, hc: ?wts.Hc, norm: ?Ref) void {
+pub fn boundary(x: *Ctx, e: mtl.ComputeEncoder, rows: u32, pending: bool, hc: ?wts.Hc, norm: ?Ref) void {
     const sc = x.sc;
     const k = x.k;
     e.setPipeline(if (pending and hc != null) k.hc_expand_11 else if (pending) k.hc_expand_10 else k.hc_expand_01);
@@ -120,17 +120,17 @@ fn kda(x: *Ctx, e: mtl.ComputeEncoder, ki: usize, w: *const wts.Kda, rows: u32) 
     const sc = x.sc;
     const L = &x.s.kda[ki];
     qmv(x, e, x.k.qmv_kda_in, sc.normed, w.in_proj, L.proj, rows);
-    kdaStep(x, e, ki, w, rows, sc.y);
+    kdaStep(x, e, ki, w, L.proj, rows, sc.y);
     qmv(x, e, x.k.qmv_kda_out, sc.y, w.o_proj, sc.branch, rows);
 }
 
-/// The fused KDA step over `rows` of the layer's kept projections: state and conv window from slot cur to the other.
-pub fn kdaStep(x: *const Ctx, e: mtl.ComputeEncoder, ki: usize, w: *const wts.Kda, rows: u32, y: Ref) void {
+/// The fused KDA step over `rows` of stacked projections `proj`: state and conv window from slot cur to the other.
+pub fn kdaStep(x: *const Ctx, e: mtl.ComputeEncoder, ki: usize, w: *const wts.Kda, proj: Ref, rows: u32, y: Ref) void {
     const c = x.c;
     const L = &x.s.kda[ki];
     const cur = L.cur;
     e.setPipeline(x.k.kda_rows);
-    bind(e, 0, .{L.proj});
+    bind(e, 0, .{proj});
     shape(e, 1, .{ rows, c.kdaProj() });
     bind(e, 2, .{ L.cs[cur], w.conv_w, w.f_b.w, w.f_b.s, w.f_b.b, w.g_b.w, w.g_b.s, w.g_b.b, w.a, w.dt_bias, L.st[cur], w.o_norm });
     e.setValue(c.lower_bound, 14);
@@ -145,38 +145,13 @@ pub fn mla(x: *Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.Mla, x_in: R
     const k = x.k;
     const sc = x.sc;
     const C = &x.s.mla[mi];
-    const XP = c.xProj();
-    const QR = c.qrProj();
     const H = c.mla_heads;
     const RANK = c.kv_lora;
     qmv(x, e, k.qmv_x, x_in, w.x_proj, sc.xp, rows);
-    rms(x, e, sc.xp, w.q_norm, sc.qr, rows, c.q_lora, XP, c.q_lora, c.eps);
+    rms(x, e, sc.xp, w.q_norm, sc.qr, rows, c.q_lora, c.xProj(), c.q_lora, c.eps);
     qmv(x, e, k.qmv_qr, sc.qr, w.qr_proj, sc.qp, rows);
-    rms(x, e, sc.xp.at(c.q_lora * 2), w.kv_norm, C.keys.at(@as(usize, pos) * RANK * 2), rows, RANK, XP, RANK, c.eps);
-    e.setPipeline(k.layer_norm);
-    bind(e, 0, .{ sc.xp.at((c.q_lora + RANK) * 2), w.k_norm_w, w.k_norm_b, C.ik.at(@as(usize, pos) * c.i_dim * 2) });
-    e.setValue(Rows{ .rows = @intCast(rows), .width = @intCast(c.i_dim), .x_stride = @intCast(XP), .y_stride = @intCast(c.i_dim), .eps = 1e-6 }, 4);
-    e.dispatchGroups(size(rows, 1, 1), size(32, 1, 1));
-    e.setPipeline(k.gemv_t_igate);
-    bind(e, 0, .{x_in});
-    shape(e, 1, .{ rows, c.hidden });
-    bind(e, 2, .{w.igate});
-    shape(e, 3, .{ c.hidden, c.i_dim });
-    bind(e, 4, .{C.ig.at(@as(usize, pos) * c.i_dim * 2)});
-    e.dispatchThreads(size(4 * 64, 1, rows), size(64, 1, 1));
-    scale(x, e, sc.xp.at((c.q_lora + RANK + c.i_dim) * 2), sc.iw, rows, c.i_heads, XP, c.i_heads, 1.0 / 64.0);
-    const first = pos / c.kpool;
-    const last = (pos + rows) / c.kpool;
-    if (last > first) {
-        e.setPipeline(k.pool);
-        bind(e, 0, .{ C.ik, C.ig, w.ape, C.pool });
-        e.setValue([2]u32{ first, last - first }, 4);
-        e.dispatchThreads(size(c.i_dim, last - first, 1), size(c.i_dim, 1, 1));
-    }
-    e.setPipeline(k.absorb);
-    bind(e, 0, .{ w.kv_b.w, w.kv_b.s, w.kv_b.b, sc.qp, sc.ql });
-    e.setValue(QR, 5);
-    e.dispatchGroups(size(1, RANK / 64, rows * H), size(64, 1, 1));
+    mlaCache(x, e, mi, w, x_in, sc.xp, c.xProj(), sc.iw, rows, pos);
+    absorb(x, e, w, sc.qp, sc.ql, rows);
     var dense: u32 = 0; // rows whose keys all fit index_topk attend every key (MLX's unfused attention)
     while (dense < rows and pos + dense + 1 <= c.i_topk) dense += 1;
     if (dense > 0) scale(x, e, sc.ql, sc.qls, dense * H, RANK, RANK, RANK, 1.0 / 16.0);
@@ -187,10 +162,55 @@ pub fn mla(x: *Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.Mla, x_in: R
         attendDense(x, e, C.keys, sc.qls.at(@as(usize, r) * H * RANK * 2), sc.scores.at(r * plane), sc.probs.at(r * plane), sc.att.at(@as(usize, r) * H * RANK * 2), n);
     }
     if (dense < rows) attendSparse(x, e, mi, rows, pos, dense);
-    e.setPipeline(k.unabsorb);
-    bind(e, 0, .{ w.kv_b.w, w.kv_b.s, w.kv_b.b, sc.att, sc.vals });
-    e.dispatchGroups(size(1, c.v_dim / 4, rows * H), size(32, 1, 1));
+    unabsorb(x, e, w, sc.att, sc.vals, rows);
     qmv(x, e, k.qmv_mla_out, sc.vals, w.o_proj, sc.branch, rows);
+}
+
+/// Rows' latent keys, indexer keys and gates into MLA cache `mi` at positions pos.., their indexer head weights into
+/// `iw`, and the pooled blocks they complete (`xp`: the x_proj rows, `xp_stride` apart).
+pub fn mlaCache(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.Mla, x_in: Ref, xp: Ref, xp_stride: u32, iw: Ref, rows: u32, pos: u32) void {
+    const c = x.c;
+    const k = x.k;
+    const C = &x.s.mla[mi];
+    const RANK = c.kv_lora;
+    rms(x, e, xp.at(c.q_lora * 2), w.kv_norm, C.keys.at(@as(usize, pos) * RANK * 2), rows, RANK, xp_stride, RANK, c.eps);
+    e.setPipeline(k.layer_norm);
+    bind(e, 0, .{ xp.at((c.q_lora + RANK) * 2), w.k_norm_w, w.k_norm_b, C.ik.at(@as(usize, pos) * c.i_dim * 2) });
+    e.setValue(Rows{ .rows = @intCast(rows), .width = @intCast(c.i_dim), .x_stride = @intCast(xp_stride), .y_stride = @intCast(c.i_dim), .eps = 1e-6 }, 4);
+    e.dispatchGroups(size(rows, 1, 1), size(32, 1, 1));
+    e.setPipeline(k.gemv_t_igate);
+    bind(e, 0, .{x_in});
+    shape(e, 1, .{ rows, c.hidden });
+    bind(e, 2, .{w.igate});
+    shape(e, 3, .{ c.hidden, c.i_dim });
+    bind(e, 4, .{C.ig.at(@as(usize, pos) * c.i_dim * 2)});
+    e.dispatchThreads(size(4 * 64, 1, rows), size(64, 1, 1));
+    scale(x, e, xp.at((c.q_lora + RANK + c.i_dim) * 2), iw, rows, c.i_heads, xp_stride, c.i_heads, 1.0 / 64.0);
+    const first = pos / c.kpool;
+    const last = (pos + rows) / c.kpool;
+    if (last > first) {
+        e.setPipeline(k.pool);
+        bind(e, 0, .{ C.ik, C.ig, w.ape, C.pool });
+        e.setValue([2]u32{ first, last - first }, 4);
+        e.dispatchThreads(size(c.i_dim, last - first, 1), size(c.i_dim, 1, 1));
+    }
+}
+
+/// Every row's 64 heads of q_nope (in `qp`, a row qrProj apart) into the latent: MLX's qvm on kv_b's key half.
+pub fn absorb(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Mla, qp: Ref, ql: Ref, rows: u32) void {
+    const c = x.c;
+    e.setPipeline(x.k.absorb);
+    bind(e, 0, .{ w.kv_b.w, w.kv_b.s, w.kv_b.b, qp, ql });
+    e.setValue(c.qrProj(), 5);
+    e.dispatchGroups(size(1, c.kv_lora / 64, rows * c.mla_heads), size(64, 1, 1));
+}
+
+/// Every row's 64 heads' latent outputs to values [rows, heads * v]: MLX's batched qmv_fast on kv_b's value half.
+pub fn unabsorb(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Mla, att: Ref, vals: Ref, rows: u32) void {
+    const c = x.c;
+    e.setPipeline(x.k.unabsorb);
+    bind(e, 0, .{ w.kv_b.w, w.kv_b.s, w.kv_b.b, att, vals });
+    e.dispatchGroups(size(1, c.v_dim / 4, rows * c.mla_heads), size(32, 1, 1));
 }
 
 /// One query row's 64 heads over keys [0, n): MLX's fallback for 64 heads on one latent (gemv, precise softmax,
@@ -272,6 +292,7 @@ fn denseMlp(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Dense, x_in: Ref
 
 /// The MoE block (moe.moe_rows): the shared expert, the router and route, routed gate/up and down, the combine.
 pub fn moe(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, rows: u32) void {
+    std.debug.assert(rows <= st.max_rows);
     const c = x.c;
     const k = x.k;
     const sc = x.sc;
@@ -381,7 +402,7 @@ pub fn keepKda(x: *Ctx, e: mtl.ComputeEncoder, rows: u32, keep: u32) void {
             .kda => |*a| a,
             .mla => continue,
         };
-        if (keep < rows) kdaStep(x, e, ki, a, keep, x.sc.y);
+        if (keep < rows) kdaStep(x, e, ki, a, x.s.kda[ki].proj, keep, x.sc.y);
         ki += 1;
     }
 }

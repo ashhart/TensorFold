@@ -155,9 +155,15 @@ const Loader = struct {
 
     /// 4-bit projections that read one input, stacked by rows in order; each part checked [n_i, k].
     fn q4(l: *Loader, k: usize, comptime fmt: []const u8, parts: []const []const u8, ns: []const usize, args: anytype) !Q4 {
+        return l.q4Pad(k, fmt, parts, ns, 1, args);
+    }
+
+    /// `q4` with room for rows up to a multiple of `pad` (the prompt's tensor-unit tiles are 64 rows; never read).
+    fn q4Pad(l: *Loader, k: usize, comptime fmt: []const u8, parts: []const []const u8, ns: []const usize, pad: usize, args: anytype) !Q4 {
         var n: usize = 0;
         for (ns) |x| n += x;
-        const out: Q4 = .{ .w = l.take(Q4.wBytes(n, k)), .s = l.take(Q4.sBytes(n, k)), .b = l.take(Q4.sBytes(n, k)), .n = @intCast(n), .k = @intCast(k) };
+        const room = std.mem.alignForward(usize, n, pad);
+        const out: Q4 = .{ .w = l.take(Q4.wBytes(room, k)), .s = l.take(Q4.sBytes(room, k)), .b = l.take(Q4.sBytes(room, k)), .n = @intCast(n), .k = @intCast(k) };
         var row: usize = 0;
         for (parts, ns) |p, rows| {
             const comps = [_][]const u8{ "weight", "scales", "biases" };
@@ -240,7 +246,7 @@ const Loader = struct {
         const gate = try l.src(a ++ "indexer.index_kpool_compress_gate", .{i});
         try expect(gate, "index_kpool_compress_gate", .bf16, &.{ c.i_dim, D });
         return .{
-            .x_proj = try l.q4(D, a, &.{ "q_a_proj", "kv_a_proj_with_mqa", "indexer.wk", "indexer.weights_proj" }, &.{ c.q_lora, c.kv_lora, c.i_dim, c.i_heads }, .{i}),
+            .x_proj = try l.q4Pad(D, a, &.{ "q_a_proj", "kv_a_proj_with_mqa", "indexer.wk", "indexer.weights_proj" }, &.{ c.q_lora, c.kv_lora, c.i_dim, c.i_heads }, 64, .{i}),
             .qr_proj = try l.q4(c.q_lora, a, &.{ "q_b_proj", "indexer.wq_b" }, &.{ c.mla_heads * c.nope, c.i_heads * c.i_dim }, .{i}),
             .kv_b = try l.q4(c.kv_lora, a, &.{"kv_b_proj"}, &.{c.mla_heads * (c.nope + c.v_dim)}, .{i}),
             .o_proj = try l.q4(c.mla_heads * c.v_dim, a, &.{"o_proj"}, &.{D}, .{i}),
@@ -266,7 +272,7 @@ const Loader = struct {
         n += 2 * (24 * 4 * D * 2 + 1024) + 2 * (D * 2 + 256);
         switch (c.kind(@intCast(i))) {
             .kda => n += q.b(c.kdaProj(), D) + 2 * q.b(c.kdaWidth(), c.kda_dim) + q.b(D, c.kdaWidth()) + 3 * c.kdaWidth() * c.conv * 4 + 8 * 1024 + c.kdaWidth() * 4,
-            .mla => n += q.b(c.xProj(), D) + q.b(c.qrProj(), c.q_lora) + q.b(c.mla_heads * (c.nope + c.v_dim), c.kv_lora) + q.b(D, c.mla_heads * c.v_dim) + 16 * 1024 + c.i_dim * D * 2,
+            .mla => n += q.b(std.mem.alignForward(usize, c.xProj(), 64), D) + q.b(c.qrProj(), c.q_lora) + q.b(c.mla_heads * (c.nope + c.v_dim), c.kv_lora) + q.b(D, c.mla_heads * c.v_dim) + 16 * 1024 + c.i_dim * D * 2,
         }
         if (c.isMoe(@intCast(i))) {
             n += c.experts * D * 2 + c.experts * 4 + q.b(2 * c.moe_inter, D) + q.b(D, c.moe_inter) + 2048;
