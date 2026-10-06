@@ -94,7 +94,7 @@ pub const Engine = struct {
     segments: usize = 1, // Options.segments
     seg: ?segs.Segments = null, // their streams and scratch, made at load (or when setSegments asks for more)
     carve: ?*cuda.Carveout = null, // Options.carveout; it outlives the engine
-    heat_gate: heat.Gate = .{}, // off unless both TF_GLM_HEAT_HIGH and TF_GLM_HEAT_LOW are set
+    heat_gate: heat.Gate = .{}, // off unless TF_HEAT_HIGH and TF_HEAT_LOW are set; TF_GLM_HEAT_HIGH and TF_GLM_HEAT_LOW are aliases
 
     /// Loads the checkpoint into the Python engine's layouts and sizes the caches; `triton_dir` null: our own glue.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, model_dir: []const u8, triton_dir: ?[]const u8, opts: Options) !*Engine {

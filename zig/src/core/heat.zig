@@ -8,20 +8,33 @@ pub const Bands = struct { high_c: f64, low_c: f64 };
 pub const Gate = struct {
     bands: ?Bands = null,
     waited_s: f64 = 0,
+    /// Set after the first unreadable zone, so later chunks skip the read and the log.
+    no_zone: bool = false,
     root: []const u8 = default_root,
 
     /// Both env values absent: no wait and no thermal read. One absent, or low above high: error.
+    /// The names are TF_HEAT_HIGH, TF_HEAT_LOW, and TF_HEAT_ROOT. TF_GLM_HEAT_HIGH, TF_GLM_HEAT_LOW, and TF_GLM_HEAT_ROOT are aliases.
     pub fn fromEnv() !Gate {
-        const root = envSpan("TF_GLM_HEAT_ROOT") orelse default_root;
-        return .{ .bands = try bandsFrom(envSpan("TF_GLM_HEAT_HIGH"), envSpan("TF_GLM_HEAT_LOW")), .root = root };
+        const root = envSpan("TF_HEAT_ROOT") orelse envSpan("TF_GLM_HEAT_ROOT") orelse default_root;
+        const high = envSpan("TF_HEAT_HIGH") orelse envSpan("TF_GLM_HEAT_HIGH");
+        const low = envSpan("TF_HEAT_LOW") orelse envSpan("TF_GLM_HEAT_LOW");
+        return .{ .bands = try bandsFrom(high, low), .root = root };
     }
 
     /// `read` returns the gathered maximum in celsius. `sleep_fn` stands in for the 2 s pause.
     pub fn waitUntil(g: *Gate, read: *const fn (*anyopaque) anyerror!f64, sleep_fn: *const fn (*anyopaque) void, ctx: *anyopaque) !void {
         const bands = g.bands orelse return;
+        if (g.no_zone) return;
         var waiting = false;
         while (true) {
-            const max_c = try read(ctx);
+            const max_c = read(ctx) catch |err| {
+                if (err == error.NoZone) {
+                    g.no_zone = true;
+                    noteNoZone(g.root);
+                    return;
+                }
+                return err;
+            };
             if (allow(bands, max_c, waiting)) return;
             waiting = true;
             sleep_fn(ctx);
@@ -37,7 +50,7 @@ pub const Gate = struct {
             io: std.Io,
             fn read(ptr: *anyopaque) !f64 {
                 const c: *@This() = @ptrCast(@alignCast(ptr));
-                var dir = try std.Io.Dir.cwd().openDir(c.io, c.gate.root, .{ .iterate = true });
+                var dir = std.Io.Dir.cwd().openDir(c.io, c.gate.root, .{ .iterate = true }) catch return error.NoZone;
                 defer dir.close(c.io);
                 return gatheredMax(&.{try hottest(c.io, dir)});
             }
@@ -105,6 +118,15 @@ pub fn note(seconds_: f64) void {
     std.log.info("heat_wait_s {d:.1}", .{seconds_});
 }
 
+/// Test builds count the warning. A real process logs it.
+var no_zone_notes: u32 = 0;
+
+fn noteNoZone(root: []const u8) void {
+    no_zone_notes += 1;
+    if (@import("builtin").is_test) return;
+    std.log.warn("no readable thermal zone under {s}; running without a heat wait", .{root});
+}
+
 fn envSpan(name: [*:0]const u8) ?[]const u8 {
     const p = std.c.getenv(name) orelse return null;
     const s = std.mem.span(p);
@@ -160,6 +182,84 @@ test "the chunk runs under the high band, and a hot reading waits until the low 
         }
     }.read, Script.sleep, &cool);
     try std.testing.expectEqual(@as(f64, 0), off.waited_s);
+}
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: i32) i32;
+extern "c" fn unsetenv(name: [*:0]const u8) i32;
+
+fn putEnv(name: [*:0]const u8, value: ?[*:0]const u8) void {
+    if (value) |v| {
+        _ = setenv(name, v, 1);
+    } else _ = unsetenv(name);
+}
+
+test "TF_HEAT names win and TF_GLM_HEAT names remain aliases" {
+    const keys = [_][*:0]const u8{ "TF_HEAT_HIGH", "TF_HEAT_LOW", "TF_HEAT_ROOT", "TF_GLM_HEAT_HIGH", "TF_GLM_HEAT_LOW", "TF_GLM_HEAT_ROOT" };
+    defer for (keys) |k| putEnv(k, null);
+    for (keys) |k| putEnv(k, null);
+
+    putEnv("TF_GLM_HEAT_HIGH", "92");
+    putEnv("TF_GLM_HEAT_LOW", "88");
+    putEnv("TF_GLM_HEAT_ROOT", "alias-root");
+    const alias = try Gate.fromEnv();
+    try std.testing.expectEqual(@as(f64, 92), alias.bands.?.high_c);
+    try std.testing.expectEqual(@as(f64, 88), alias.bands.?.low_c);
+    try std.testing.expectEqualStrings("alias-root", alias.root);
+
+    putEnv("TF_HEAT_HIGH", "70");
+    putEnv("TF_HEAT_LOW", "60");
+    putEnv("TF_HEAT_ROOT", "core-root");
+    const both = try Gate.fromEnv();
+    try std.testing.expectEqual(@as(f64, 70), both.bands.?.high_c);
+    try std.testing.expectEqual(@as(f64, 60), both.bands.?.low_c);
+    try std.testing.expectEqualStrings("core-root", both.root);
+
+    for (keys) |k| putEnv(k, null);
+    putEnv("TF_HEAT_HIGH", "71");
+    putEnv("TF_HEAT_LOW", "61");
+    const core = try Gate.fromEnv();
+    try std.testing.expectEqual(@as(f64, 71), core.bands.?.high_c);
+    try std.testing.expectEqual(@as(f64, 61), core.bands.?.low_c);
+    try std.testing.expectEqualStrings(default_root, core.root);
+}
+
+test "no readable zone logs once and the chunk runs" {
+    const Probe = struct {
+        reads: u32 = 0,
+        sleeps: u32 = 0,
+        fn read(ptr: *anyopaque) !f64 {
+            const p: *@This() = @ptrCast(@alignCast(ptr));
+            p.reads += 1;
+            return error.NoZone;
+        }
+        fn sleep(ptr: *anyopaque) void {
+            @as(*@This(), @ptrCast(@alignCast(ptr))).sleeps += 1;
+        }
+    };
+    no_zone_notes = 0;
+    var probe = Probe{};
+    var gate = Gate{ .bands = .{ .high_c = 92, .low_c = 88 }, .root = "missing-thermal" };
+    try gate.waitUntil(Probe.read, Probe.sleep, &probe);
+    try gate.waitUntil(Probe.read, Probe.sleep, &probe);
+    try std.testing.expect(gate.no_zone);
+    try std.testing.expectEqual(@as(u32, 1), probe.reads);
+    try std.testing.expectEqual(@as(u32, 0), probe.sleeps);
+    try std.testing.expectEqual(@as(f64, 0), gate.waited_s);
+    try std.testing.expectEqual(@as(u32, 1), no_zone_notes);
+
+    const io = std.testing.io;
+    const notes = no_zone_notes;
+    var missing = Gate{ .bands = .{ .high_c = 92, .low_c = 88 }, .root = "no/such/thermal/root" };
+    try missing.beforePromptChunk(io);
+    try std.testing.expectEqual(notes + 1, no_zone_notes);
+    try missing.beforePromptChunk(io);
+    try std.testing.expectEqual(notes + 1, no_zone_notes);
+    try std.testing.expect(missing.no_zone);
+    try std.testing.expectEqual(@as(f64, 0), missing.waited_s);
+
+    var empty = std.testing.tmpDir(.{ .iterate = true });
+    defer empty.cleanup();
+    try std.testing.expectError(error.NoZone, hottest(io, empty.dir));
 }
 
 test "hottest zone is the maximum millidegree reading" {
