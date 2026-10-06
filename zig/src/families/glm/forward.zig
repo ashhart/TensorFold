@@ -347,7 +347,7 @@ pub fn moe(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
         if (s & Class.exchange == 0 and on(x, "x_locpost")) ep.begin();
         if (s & Class.route == 0) route(x, e, w, x_in, rows);
         if (s & Class.routed == 0) halfExperts(x, e, w, x_in, rows);
-        if (s & Class.exchange == 0) ep.sendRows(e, sc.yp, sc.wts, rows);
+        if (s & Class.exchange == 0 and on(x, "x_locpost")) ep.sendRows(e, sc.yp, sc.wts, rows); // with its begin
         if (s & Class.shared == 0) experts(x, e, w, x_in, rows, 1, .{ sc.none, sc.none, sc.none });
         if (s & Class.combine == 0) ep.receiveRows(e, sc.ys, sc.branch, rows);
         return;
@@ -357,7 +357,7 @@ pub fn moe(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
         if (s & Class.route == 0) route(x, e, w, x_in, rows);
         if (!x.fused_route and s & Class.exchange == 0 and on(x, "x_locpost")) ep.localize(e, sc.pick, sc.uids, sc.umem, sc.ucount, rows);
         if (s & Class.routed == 0) experts(x, e, w, x_in, rows, 2, ep.group());
-        if (s & Class.exchange == 0) ep.send(e, sc.ye, rows, on(x, "x_pack"), on(x, "x_locpost"));
+        if (s & Class.exchange == 0) ep.send(e, sc.ye, rows, on(x, "x_pack") and on(x, "x_locpost"), on(x, "x_locpost"));
         if (s & Class.shared == 0) experts(x, e, w, x_in, rows, 1, .{ sc.none, sc.none, sc.none });
         if (s & Class.exchange == 0 and on(x, "x_unpack")) ep.receive(e, sc.ye, rows);
     } else {
