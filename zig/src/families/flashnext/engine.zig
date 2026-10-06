@@ -574,10 +574,9 @@ pub const Engine = struct {
             if (r.gsel) |*g| g.nb_ub = ub;
             if (m.mtp.gsel) |*g| g.nb_ub = ub;
             try m.windowEncode(wr, e.wids);
-            // the widest windows only while copies land; the head's own chains stop at 6 drafts
-            const copying = e.copy and copy_rate + 0.05 >= head_rate and copy_rate > 0.7;
-            const cap: usize = if (copying) MAXR - 1 else 6;
-            const wn = (if (fixed) |d| d else @min(next_depth, cap)) + 1;
+            // the widest windows while copies land whole; otherwise the head's rule
+            const copying = e.copy and copy_rate + 0.05 >= head_rate and copy_rate > 0.9;
+            const wn = (if (fixed) |d| d else if (copying) MAXR - 1 else next_depth) + 1;
             widths[(round + 1) % 4] = wn;
             const cfg = [4]u32{ @intCast(wr), @intCast(wn), CAP, 0 };
             r.enc.setPipeline(r.accept_pipe);
@@ -617,7 +616,7 @@ pub const Engine = struct {
                 res.copy_by_len[n][0] += 1;
                 res.copy_by_len[n][1] += keep - 1;
             }
-            if (fixed == null and wd > 1) rule.update(wd - 1, keep - 1);
+            if (fixed == null and wd > 1 and rg[slot + 1] == 0) rule.update(wd - 1, keep - 1);
             res.rounds += 1;
             res.drafted += wd - 1;
             res.accepted += keep - 1;

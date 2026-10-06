@@ -2242,19 +2242,23 @@ pub const Model = struct {
 pub const TP_CLASS: u32 = 1 << 8;
 
 pub const DepthRule = struct {
-    rate: f64 = 0.6, // moving average of drafts landed over drafts offered
+    rate: f64 = 0.6, // moving average of the head's drafts landed over drafts offered
     depth: usize = 3,
 
     pub fn pick(self: *const DepthRule) usize {
         return self.depth;
     }
 
+    /// A head round's drafts and how many landed: 3, 6 or 8 drafts (copied rounds set their own width).
     pub fn update(self: *DepthRule, depth: usize, landed: usize) void {
         self.rate = 0.7 * self.rate + 0.3 * @as(f64, @floatFromInt(landed)) / @as(f64, @floatFromInt(depth));
-        if (self.depth == 3 and self.rate > 0.8) self.depth = 6;
-        if (self.depth == 6 and self.rate > 0.92) self.depth = MAXR - 1;
-        if (self.depth == MAXR - 1 and self.rate < 0.85) self.depth = 6;
-        if (self.depth == 6 and self.rate < 0.65) self.depth = 3;
+        if (self.depth == 3 and self.rate > 0.8) {
+            self.depth = 6;
+        } else if (self.depth == 6 and self.rate > 0.74) {
+            self.depth = 8;
+        } else if (self.depth == 8 and self.rate < 0.62) {
+            self.depth = 6;
+        } else if (self.depth == 6 and self.rate < 0.65) self.depth = 3;
     }
 };
 
