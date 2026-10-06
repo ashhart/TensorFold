@@ -84,8 +84,10 @@ const Builder = struct {
     allocator: std.mem.Allocator,
     device: mtl.Device,
     ck: *const ckpt.Checkpoint,
+    c: *const cfg.Config,
     w: *Weights,
     jobs: std.ArrayList(Tile) = .empty,
+    why: cfg.Why = .{},
 
     fn buffer(self: *Builder, bytes: usize) !mtl.Buffer {
         const b = try self.device.buffer(@max(bytes, 16), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
@@ -96,6 +98,16 @@ const Builder = struct {
     fn get(self: *Builder, comptime fmt: []const u8, args: anytype) !Tensor {
         var name: [160]u8 = undefined;
         return self.ck.get(try std.fmt.bufPrint(&name, fmt, args));
+    }
+
+    /// A tensor the kernels read as stored (norms, the router), refused unless it has this dtype and shape.
+    fn typed(self: *Builder, comptime fmt: []const u8, args: anytype, dtype: ckpt.DType, shape: []const usize) !Tensor {
+        var name: [160]u8 = undefined;
+        const full = try std.fmt.bufPrint(&name, fmt, args);
+        const t = try self.ck.get(full);
+        if (t.dtype == dtype and t.rank == shape.len and std.mem.eql(usize, t.shape[0..t.rank], shape)) return t;
+        self.why.set("{s} is {t} {any}; the Metal kernels read it as {t} {any}", .{ full, t.dtype, t.shape[0..t.rank], dtype, shape });
+        return error.UnexpectedTensor;
     }
 
     /// fp32 copy of a bf16 vector (or an fp32 one as is).
@@ -142,9 +154,10 @@ const Builder = struct {
     }
 
     fn moe(self: *Builder, comptime prefix: []const u8, args: anytype) !Moe {
+        const c = self.c;
         return .{
-            .gate = try self.get(prefix ++ ".gate.weight", args),
-            .gate_bias = try self.get(prefix ++ ".gate.e_score_correction_bias", args),
+            .gate = try self.typed(prefix ++ ".gate.weight", args, .bf16, &.{ c.experts, c.hidden }),
+            .gate_bias = try self.typed(prefix ++ ".gate.e_score_correction_bias", args, .f32, &.{c.experts}),
             .fc1 = try self.quantized(prefix ++ ".switch_mlp.fc1", args),
             .fc2 = try self.quantized(prefix ++ ".switch_mlp.fc2", args),
             .shared_up = try self.linear(prefix ++ ".shared_experts.up_proj", args, &.{try self.quantized(prefix ++ ".shared_experts.up_proj", args)}),
@@ -167,21 +180,23 @@ const Builder = struct {
     fn mtpHead(self: *Builder, draft_ids: []const u32) !Mtp {
         const ids = try self.buffer(draft_ids.len * 4);
         @memcpy(ids.slice(u32, draft_ids.len), draft_ids);
+        const d: []const usize = &.{self.c.hidden};
         return .{
-            .enorm = try self.get("mtp.layers.0.enorm.weight", .{}),
-            .hnorm = try self.get("mtp.layers.0.hnorm.weight", .{}),
+            .enorm = try self.typed("mtp.layers.0.enorm.weight", .{}, .bf16, d),
+            .hnorm = try self.typed("mtp.layers.0.hnorm.weight", .{}, .bf16, d),
             .eh = try self.linear("mtp.layers.0.eh_proj", .{}, &.{try self.quantized("mtp.layers.0.eh_proj", .{})}),
-            .norm = try self.get("mtp.layers.0.norm.weight", .{}),
+            .norm = try self.typed("mtp.layers.0.norm.weight", .{}, .bf16, d),
             .attention = try self.attention("mtp.layers.0.mixer", "mtp.fused.qkv", .{}),
-            .norm2 = try self.get("mtp.layers.1.norm.weight", .{}),
+            .norm2 = try self.typed("mtp.layers.1.norm.weight", .{}, .bf16, d),
             .moe = try self.moe("mtp.layers.1.mixer", .{}),
-            .final = try self.get("mtp.layers.1.final_layernorm.weight", .{}),
+            .final = try self.typed("mtp.layers.1.final_layernorm.weight", .{}, .bf16, d),
             .draft = try self.picked(try self.quantized("lm_head", .{}), draft_ids),
             .ids = ids,
             .vocab = draft_ids.len,
         };
     }
 
+    /// A 4-bit matrix's words, scales and biases, refused unless u32 and bf16: the kernels copy the raw bits as bf16.
     fn quantized(self: *Builder, comptime fmt: []const u8, args: anytype) ![3]Tensor {
         var name: [160]u8 = undefined;
         const base = try std.fmt.bufPrint(&name, fmt, args);
@@ -190,7 +205,40 @@ const Builder = struct {
             var full: [192]u8 = undefined;
             out[i] = try self.ck.get(try std.fmt.bufPrint(&full, "{s}.{s}", .{ base, part }));
         }
+        if (out[0].dtype != .u32 or out[1].dtype != .bf16 or out[2].dtype != .bf16) {
+            self.why.set("{s} has {t} weight, {t} scales and {t} biases; the Metal kernels read u32 words with bf16 scales and biases", .{ base, out[0].dtype, out[1].dtype, out[2].dtype });
+            return error.UnsupportedQuantization;
+        }
         return out;
+    }
+
+    /// Every tensor the kernels read, checked, with the projections queued for tiling.
+    fn fill(b: *Builder, draft_ids: ?[]const u32) !void {
+        const c = b.c;
+        const w = b.w;
+        w.norm_f = try b.typed("backbone.norm_f.weight", .{}, .bf16, &.{c.hidden});
+        w.embed = try b.quantized("backbone.embeddings", .{});
+        for (0..c.layers) |i| {
+            w.norms[i] = try b.typed("backbone.layers.{d}.norm.weight", .{i}, .bf16, &.{c.hidden});
+            w.layers[i] = switch (c.kinds[i]) {
+                .mamba => .{ .mamba = .{
+                    .in_proj = try b.linear("backbone.layers.{d}.mixer.in_proj", .{i}, &.{try b.quantized("backbone.layers.{d}.mixer.in_proj", .{i})}),
+                    .out_proj = try b.linear("backbone.layers.{d}.mixer.out_proj", .{i}, &.{try b.quantized("backbone.layers.{d}.mixer.out_proj", .{i})}),
+                    .conv_w = try convWeight(b, try b.get("backbone.layers.{d}.mixer.conv1d.weight", .{i}), c.*),
+                    .conv_b = try b.f32vec(try b.get("backbone.layers.{d}.mixer.conv1d.bias", .{i})),
+                    .a_log = try b.f32vec(try b.get("backbone.layers.{d}.mixer.A_log", .{i})),
+                    .d_skip = try b.f32vec(try b.get("backbone.layers.{d}.mixer.D", .{i})),
+                    .dt_bias = try b.f32vec(try b.get("backbone.layers.{d}.mixer.dt_bias", .{i})),
+                    .norm = try b.typed("backbone.layers.{d}.mixer.norm.weight", .{i}, .bf16, &.{c.inner()}),
+                } },
+                .moe => .{ .moe = try b.moe("backbone.layers.{d}.mixer", .{i}) },
+                .attention => .{ .attention = try b.attention("backbone.layers.{d}.mixer", "fused.qkv.{d}", .{i}) },
+            };
+        }
+        w.head = try b.linear("lm_head", .{}, &.{try b.quantized("lm_head", .{})});
+        if (draft_ids) |ids| {
+            if (b.ck.has("mtp.layers.0.eh_proj.weight")) w.mtp = try b.mtpHead(ids);
+        }
     }
 };
 
@@ -245,38 +293,14 @@ fn runTiles(jobs: []const Tile) void {
 
 /// The model's weights; with `draft_ids` and the checkpoint's mtp.* tensors, the MTP head too.
 pub fn load(allocator: std.mem.Allocator, device: mtl.Device, ck: *const ckpt.Checkpoint, c: cfg.Config, draft_ids: ?[]const u32) !Weights {
-    var w = Weights{
-        .allocator = allocator,
-        .embed = undefined,
-        .norm_f = try ck.get("backbone.norm_f.weight"),
-        .head = undefined,
-    };
+    var w = Weights{ .allocator = allocator, .embed = undefined, .norm_f = undefined, .head = undefined };
     errdefer w.deinit();
-    var b = Builder{ .allocator = allocator, .device = device, .ck = ck, .w = &w };
+    var b = Builder{ .allocator = allocator, .device = device, .ck = ck, .c = &c, .w = &w };
     defer b.jobs.deinit(allocator);
-    w.embed = try b.quantized("backbone.embeddings", .{});
-    for (0..c.layers) |i| {
-        w.norms[i] = try b.get("backbone.layers.{d}.norm.weight", .{i});
-        w.layers[i] = switch (c.kinds[i]) {
-            .mamba => .{ .mamba = .{
-                .in_proj = try b.linear("backbone.layers.{d}.mixer.in_proj", .{i}, &.{try b.quantized("backbone.layers.{d}.mixer.in_proj", .{i})}),
-                .out_proj = try b.linear("backbone.layers.{d}.mixer.out_proj", .{i}, &.{try b.quantized("backbone.layers.{d}.mixer.out_proj", .{i})}),
-                .conv_w = try convWeight(&b, try b.get("backbone.layers.{d}.mixer.conv1d.weight", .{i}), c),
-                .conv_b = try b.f32vec(try b.get("backbone.layers.{d}.mixer.conv1d.bias", .{i})),
-                .a_log = try b.f32vec(try b.get("backbone.layers.{d}.mixer.A_log", .{i})),
-                .d_skip = try b.f32vec(try b.get("backbone.layers.{d}.mixer.D", .{i})),
-                .dt_bias = try b.f32vec(try b.get("backbone.layers.{d}.mixer.dt_bias", .{i})),
-                .norm = try b.get("backbone.layers.{d}.mixer.norm.weight", .{i}),
-            } },
-            .moe => .{ .moe = try b.moe("backbone.layers.{d}.mixer", .{i}) },
-            .attention => .{ .attention = try b.attention("backbone.layers.{d}.mixer", "fused.qkv.{d}", .{i}) },
-        };
-        if (c.kinds[i] == .moe and w.layers[i].moe.gate_bias.dtype != .f32) return error.BadDType;
-    }
-    w.head = try b.linear("lm_head", .{}, &.{try b.quantized("lm_head", .{})});
-    if (draft_ids) |ids| {
-        if (ck.has("mtp.layers.0.eh_proj.weight")) w.mtp = try b.mtpHead(ids);
-    }
+    b.fill(draft_ids) catch |e| {
+        if (b.why.len > 0) std.log.err("{s}", .{b.why.text()});
+        return e;
+    };
     runTiles(b.jobs.items);
     return w;
 }
@@ -293,4 +317,90 @@ fn convWeight(b: *Builder, t: Tensor, c: cfg.Config) !mtl.Buffer {
         dst[k * cd + ch] = @bitCast(@as(u32, src[ch * kc + k]) << 16);
     };
     return out;
+}
+
+/// One tensor of a fake safetensors header.
+const Fake = struct { name: []const u8, dtype: []const u8 = "BF16", shape: []const usize };
+
+/// A checkpoint indexed from a fake header naming `tensors` back to back (the checks read headers, never data).
+fn fakeCheckpoint(a: std.mem.Allocator, tensors: []const Fake) !ckpt.Checkpoint {
+    var json: std.ArrayList(u8) = .empty;
+    defer json.deinit(a);
+    try json.appendSlice(a, "{\"__metadata__\": {\"format\": \"mlx\"}");
+    var at: usize = 0;
+    for (tensors) |t| {
+        var bytes = (ckpt.DType.parse(t.dtype) orelse return error.UnsupportedDType).size();
+        try json.print(a, ", \"{s}\": {{\"dtype\": \"{s}\", \"shape\": [", .{ t.name, t.dtype });
+        for (t.shape, 0..) |d, i| {
+            bytes *= d;
+            try json.print(a, "{s}{d}", .{ if (i > 0) ", " else "", d });
+        }
+        try json.print(a, "], \"data_offsets\": [{d}, {d}]}}", .{ at, at + bytes });
+        at += bytes;
+    }
+    try json.append(a, '}');
+    var ck = ckpt.Checkpoint.init(a);
+    errdefer ck.deinit();
+    try ck.index(undefined, json.items, at, "");
+    return ck;
+}
+
+/// A one-layer MoE model: hidden 64, vocab 128, 4 experts of width 64.
+fn tinyMoe() cfg.Config {
+    var c = cfg.Config{ .hidden = 64, .vocab = 128, .layers = 1, .mamba_heads = 2, .mamba_head_dim = 32, .groups = 1, .state = 16, .conv_kernel = 4, .heads = 2, .kv_heads = 1, .head_dim = 32, .experts = 4, .top_k = 2, .expert_width = 64, .shared_width = 128, .routed_scaling = 1.0, .eps = 1e-5 };
+    c.kinds[0] = .moe;
+    return c;
+}
+
+/// The tensors `fill` reads for tinyMoe before its first buffer, with `swap` in place of its namesake.
+fn tinyTensors(swap: Fake) [13]Fake {
+    var out = [_]Fake{
+        .{ .name = "backbone.norm_f.weight", .shape = &.{64} },
+        .{ .name = "backbone.embeddings.weight", .dtype = "U32", .shape = &.{ 128, 8 } },
+        .{ .name = "backbone.embeddings.scales", .shape = &.{ 128, 1 } },
+        .{ .name = "backbone.embeddings.biases", .shape = &.{ 128, 1 } },
+        .{ .name = "backbone.layers.0.norm.weight", .shape = &.{64} },
+        .{ .name = "backbone.layers.0.mixer.gate.weight", .shape = &.{ 4, 64 } },
+        .{ .name = "backbone.layers.0.mixer.gate.e_score_correction_bias", .dtype = "F32", .shape = &.{4} },
+        .{ .name = "backbone.layers.0.mixer.switch_mlp.fc1.weight", .dtype = "U32", .shape = &.{ 4, 64, 8 } },
+        .{ .name = "backbone.layers.0.mixer.switch_mlp.fc1.scales", .shape = &.{ 4, 64, 1 } },
+        .{ .name = "backbone.layers.0.mixer.switch_mlp.fc1.biases", .shape = &.{ 4, 64, 1 } },
+        .{ .name = "backbone.layers.0.mixer.switch_mlp.fc2.weight", .dtype = "U32", .shape = &.{ 4, 64, 8 } },
+        .{ .name = "backbone.layers.0.mixer.switch_mlp.fc2.scales", .shape = &.{ 4, 64, 1 } },
+        .{ .name = "backbone.layers.0.mixer.switch_mlp.fc2.biases", .shape = &.{ 4, 64, 1 } },
+    };
+    for (&out) |*t| if (std.mem.eql(u8, t.name, swap.name)) {
+        t.* = swap;
+    };
+    return out;
+}
+
+/// fill() on tinyMoe with `swap` must fail with `err`, its reason naming every one of `words`.
+fn expectRefused(swap: Fake, err: anyerror, words: []const []const u8) !void {
+    const a = std.testing.allocator;
+    const tensors = tinyTensors(swap);
+    var ck = try fakeCheckpoint(a, &tensors);
+    defer ck.deinit();
+    const c = tinyMoe();
+    var w = Weights{ .allocator = a, .embed = undefined, .norm_f = undefined, .head = undefined };
+    defer w.deinit();
+    var b = Builder{ .allocator = a, .device = undefined, .ck = &ck, .c = &c, .w = &w };
+    defer b.jobs.deinit(a);
+    try std.testing.expectError(err, b.fill(null));
+    for (words) |word| if (std.mem.indexOf(u8, b.why.text(), word) == null) {
+        std.debug.print("refusal \"{s}\" does not name \"{s}\"\n", .{ b.why.text(), word });
+        return error.TestUnexpectedResult;
+    };
+}
+
+test "the Metal loader refuses scale, bias and norm dtypes its kernels do not read" {
+    const fc2 = "backbone.layers.0.mixer.switch_mlp.fc2";
+    try expectRefused(.{ .name = "backbone.embeddings.scales", .dtype = "F16", .shape = &.{ 128, 1 } }, error.UnsupportedQuantization, &.{ "backbone.embeddings", "f16 scales" });
+    try expectRefused(.{ .name = "backbone.layers.0.mixer.switch_mlp.fc1.biases", .dtype = "F32", .shape = &.{ 4, 64, 1 } }, error.UnsupportedQuantization, &.{ "switch_mlp.fc1", "f32 biases" });
+    try expectRefused(.{ .name = fc2 ++ ".scales", .dtype = "F16", .shape = &.{ 4, 64, 1 } }, error.UnsupportedQuantization, &.{ fc2, "f16 scales" });
+    try expectRefused(.{ .name = fc2 ++ ".weight", .dtype = "I32", .shape = &.{ 4, 64, 8 } }, error.UnsupportedQuantization, &.{ fc2, "i32 weight" });
+    try expectRefused(.{ .name = "backbone.norm_f.weight", .dtype = "F16", .shape = &.{64} }, error.UnexpectedTensor, &.{ "backbone.norm_f.weight", "f16" });
+    try expectRefused(.{ .name = "backbone.layers.0.norm.weight", .dtype = "F32", .shape = &.{64} }, error.UnexpectedTensor, &.{ "layers.0.norm.weight", "f32" });
+    try expectRefused(.{ .name = "backbone.layers.0.mixer.gate.weight", .dtype = "F16", .shape = &.{ 4, 64 } }, error.UnexpectedTensor, &.{ "gate.weight", "f16" });
+    try expectRefused(.{ .name = "backbone.layers.0.mixer.gate.e_score_correction_bias", .shape = &.{4} }, error.UnexpectedTensor, &.{ "e_score_correction_bias", "bf16" });
 }

@@ -57,7 +57,11 @@ pub const Checkpoint = struct {
         const buffer = try device.buffer(@max(data_len, 16), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         try readParallel(fd, buffer.contents()[0..data_len], data_start);
         try self.shards.append(self.allocator, .{ .buffer = buffer, .bytes = data_len });
+        try self.index(buffer, header, data_len, prefix);
+    }
 
+    /// Name the tensors a safetensors `header` places in `buffer`, its data region of `data_len` bytes.
+    pub fn index(self: *Checkpoint, buffer: mtl.Buffer, header: []const u8, data_len: usize, prefix: []const u8) !void {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const entries = try st.parseHeader(arena.allocator(), header, data_len);

@@ -8,6 +8,23 @@ pub const max_layers = 64;
 /// The MTP head's acceptance at depth 1, 2, ... given the ones before it, until a stream has its own (model.py draft_prior).
 pub const draft_prior = [_]f64{ 0.8, 0.72, 0.68, 0.62, 0.58, 0.55, 0.5, 0.5 };
 
+/// Why a check refused the checkpoint, kept for the caller's log line (tests read it instead).
+pub const Why = struct {
+    buf: [320]u8 = undefined,
+    len: usize = 0,
+
+    /// Keep the reason, cut short if it is long.
+    pub fn set(self: *Why, comptime fmt: []const u8, args: anytype) void {
+        var w: std.Io.Writer = .fixed(&self.buf);
+        w.print(fmt, args) catch {};
+        self.len = w.end;
+    }
+
+    pub fn text(self: *const Why) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
+
 pub const Config = struct {
     hidden: usize,
     vocab: usize,
