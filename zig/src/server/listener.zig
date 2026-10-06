@@ -2,7 +2,11 @@
 const std = @import("std");
 const posix = std.posix;
 const net = std.Io.net;
+const log = @import("log.zig");
 const Threaded = std.Io.Threaded;
+
+/// The run has said once that accepts ran out of descriptors; a successful accept arms it again.
+var nofile_logged = std.atomic.Value(bool).init(false);
 
 pub const Listener = struct {
     fd: posix.socket_t,
@@ -46,10 +50,17 @@ pub const Listener = struct {
             var storage: Threaded.PosixAddress = undefined;
             var len: posix.socklen_t = @sizeOf(Threaded.PosixAddress);
             const rc = posix.system.accept(l.fd, &storage.any, &len);
-            switch (posix.errno(rc)) {
-                .SUCCESS => return .{ .fd = @intCast(rc), .peer = Threaded.addressFromPosix(&storage) },
+            const e = posix.errno(rc);
+            switch (e) {
+                .SUCCESS => {
+                    nofile_logged.store(false, .release);
+                    return .{ .fd = @intCast(rc), .peer = Threaded.addressFromPosix(&storage) };
+                },
                 .INTR, .AGAIN, .CONNABORTED, .MFILE, .NFILE, .NOBUFS, .NOMEM => {
-                    if (posix.errno(rc) != .INTR) std.Io.sleep(@import("log.zig").io(), .fromMilliseconds(10), .awake) catch {};
+                    if (e != .INTR) {
+                        if (firstNofile(e)) log.line("out of file descriptors ({s}): new connections wait until open ones close; raise the open-file limit (ulimit -n)", .{@tagName(e)});
+                        std.Io.sleep(log.io(), .fromMilliseconds(10), .awake) catch {};
+                    }
                     continue;
                 },
                 else => return null,
@@ -62,6 +73,20 @@ pub const Listener = struct {
         _ = posix.system.close(l.fd);
     }
 };
+
+/// Whether this failure is the burst's first descriptor exhaustion (EMFILE, ENFILE): one log line per burst.
+fn firstNofile(e: posix.E) bool {
+    return (e == .MFILE or e == .NFILE) and !nofile_logged.swap(true, .acq_rel);
+}
+
+test "the descriptor log fires once per burst" {
+    defer nofile_logged.store(false, .release);
+    try std.testing.expect(firstNofile(.MFILE));
+    try std.testing.expect(!firstNofile(.NFILE));
+    try std.testing.expect(!firstNofile(.AGAIN));
+    nofile_logged.store(false, .release); // what a successful accept does
+    try std.testing.expect(firstNofile(.NFILE));
+}
 
 /// The peer's address as Python's ``client_address[0]`` prints it.
 pub fn peerText(buf: []u8, peer: net.IpAddress) []const u8 {
