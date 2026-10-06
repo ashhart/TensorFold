@@ -22,6 +22,9 @@ pub const Result = struct {
     prompt_seconds: f64 = 0,
     decode_seconds: f64 = 0,
     generated: u64 = 0,
+    gpu_seconds: f64 = 0, // the rounds' GPU time (each command buffer's start to end)
+    encode_seconds: f64 = 0, // the host's time from a round's first encode to its commit
+    gap_seconds: f64 = 0, // the GPU idle between consecutive rounds
 };
 
 /// What a reply reports while it runs (called on the engine's thread).
@@ -62,6 +65,8 @@ pub const Engine = struct {
     ep_arena: std.heap.ArenaAllocator, // the link settings, alive as long as the link
     residency: ?mtl.ResidencySet = null,
     load_seconds: f64 = 0,
+    gpu: [2]f64 = .{ 0, 0 }, // the last command buffer's GPU start and end (host seconds)
+    committed: u64 = 0, // when the last command buffer was committed (mach ticks)
 
     /// The checkpoint in `dir`, caches for `cap` tokens; GLM_LAYERS=N: the first N layers only; GLM_EP=settings: half the experts.
     pub fn load(gpa: std.mem.Allocator, dir: []const u8, cap: u32) !*Engine {
@@ -78,6 +83,8 @@ pub const Engine = struct {
         e.gpa = gpa;
         e.ev = 0;
         e.residency = null;
+        e.gpu = .{ 0, 0 };
+        e.committed = 0;
         e.ep = null;
         e.pr = null;
         e.ep_arena = .init(gpa);
@@ -258,7 +265,9 @@ pub const Engine = struct {
         e.ev += 1;
         cb.signal(e.event, e.ev);
         cb.commit();
+        e.committed = std.c.mach_absolute_time();
         cb.wait();
+        e.gpu = .{ cb.gpuStart(), cb.gpuEnd() };
         if (cb.failure()) |msg| {
             e.event.set(e.ev); // a failed buffer may never signal: the next one must not wait on it
             std.log.err("glm: command buffer failed: {s}", .{msg});
@@ -380,6 +389,50 @@ pub const Engine = struct {
         return .{ .same = same, .first = first };
     }
 
+    /// Knock-out profile: a decode round of `depth` drafts at the current position (after a reply), replayed `reps`
+    /// times with each launch class left out in turn; the median GPU time of each, and what each class costs.
+    pub fn profile(e: *Engine, depth: u32, reps: usize) !void {
+        const c = &e.c;
+        const D = c.hidden;
+        const d: u32 = if (e.w.mtp == null) 0 else @min(depth, st.max_rows - 1);
+        const R = d + 1;
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        if (e.s.pos + R + 1 > e.s.cap) return error.ContextFull;
+        e.sync();
+        const ids = u32s(e.sc.ids, R);
+        for (ids, 0..) |*t, i| t.* = @intCast(1000 + 37 * i);
+        const masks = [_]u32{0} ++ blk: {
+            var m: [fwd.Class.names.len]u32 = undefined;
+            for (&m, 0..) |*v, i| v.* = @as(u32, 1) << @intCast(i);
+            break :blk m;
+        } ++ [_]u32{0};
+        const times = try e.gpa.alloc(f64, reps);
+        defer e.gpa.free(times);
+        var full: f64 = 0;
+        for (masks, 0..) |mask, mi| {
+            var x = e.ctx();
+            x.skip = mask;
+            for (0..reps + 1) |rep| {
+                const b = e.begin();
+                if (d > 0 and mask & fwd.Class.mtp == 0) {
+                    mtp.run(&x, b.enc, e.sc.hidden, e.sc.picks, R, e.s.mtp_pos, e.sc.ids.at(4));
+                    for (1..d) |j| mtp.chain(&x, b.enc, if (j == 1) e.sc.m_x.at(@as(usize, R - 1) * D * 2) else e.sc.m_x, e.sc.ids.at(j * 4), e.s.mtp_pos + R + @as(u32, @intCast(j)) - 1, e.sc.ids.at((j + 1) * 4));
+                }
+                fwd.backbone(&x, b.enc, e.sc.ids, R, e.s.pos);
+                fwd.head(&x, b.enc, e.sc.hidden, e.sc.logits, e.sc.picks, R);
+                try e.finish(b.cb, b.enc);
+                if (rep > 0) times[rep - 1] = (e.gpu[1] - e.gpu[0]) * 1e3; // the first run warms the class's state
+            }
+            std.mem.sort(f64, times, {}, std.sort.asc(f64));
+            const med = times[reps / 2];
+            if (mi == 0) full = med;
+            const name = if (mask == 0) (if (mi == 0) "full" else "full again") else fwd.Class.names[@ctz(mask)];
+            std.debug.print("profile {d} rows: {s:<10} {d:7.3} ms (min {d:.3}, max {d:.3}){s}", .{ R, name, med, times[0], times[reps - 1], if (mask == 0) "\n" else "" });
+            if (mask != 0) std.debug.print("  class {d:6.3} ms {d:5.1}%\n", .{ full - med, 100 * (full - med) / full });
+        }
+    }
+
     /// One greedy reply. `depth` drafts a round (0: one token a round, the reference drafted replies must equal).
     pub fn generate(e: *Engine, prompt: []const u32, max_tokens: usize, eos: []const u32, depth: usize, out: Out) !Result {
         const c = &e.c;
@@ -451,7 +504,9 @@ pub const Engine = struct {
         var window: u32 = 0; // the last forward's rows (0: the prompt's)
         res.min_rows = d + 1;
         u32s(e.sc.next, 1)[0] = tok;
+        var last_end: f64 = 0;
         while (true) {
+            const t_enc = std.c.mach_absolute_time();
             const b = e.begin();
             if (window > 0) { // the last window's kept rows (the prompt's windows kept all theirs)
                 fwd.keepKda(&x, b.enc, window, keep);
@@ -473,6 +528,10 @@ pub const Engine = struct {
             fwd.backbone(&x, b.enc, e.sc.ids, R, e.s.pos);
             fwd.head(&x, b.enc, e.sc.hidden, e.sc.logits, e.sc.picks, R);
             try e.finish(b.cb, b.enc);
+            res.encode_seconds += @as(f64, @floatFromInt(e.committed - t_enc)) / 24e6;
+            res.gpu_seconds += e.gpu[1] - e.gpu[0];
+            if (last_end > 0) res.gap_seconds += e.gpu[0] - last_end;
+            last_end = e.gpu[1];
             const picks = u32s(e.sc.picks, R);
             const drafts = u32s(e.sc.ids, R);
             keep = 1;

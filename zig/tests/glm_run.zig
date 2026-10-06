@@ -7,7 +7,8 @@
 //! GLM_LAYERS (the first N layers only, with the MTP layer and head), GLM_REF_STRICT (a reference difference fails),
 //! GLM_EP (expert parallel: this Mac's link settings; run the same command on both Macs),
 //! GLM_TRACE=NAME:STEPS:PATH (every call of NAME's plain reply, sublayer by sublayer, feeding its expected tokens),
-//! GLM_FORCED (each prompt's teacher-forced agreement with its expected tokens, before the replies).
+//! GLM_FORCED (each prompt's teacher-forced agreement with its expected tokens, before the replies),
+//! GLM_PROFILE=D,D (after the replies: a knock-out profile of a round at each depth, GLM_PROFILE_REPS times).
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -113,6 +114,10 @@ pub fn main(init: std.process.Init) !void {
             const tps = @as(f64, @floatFromInt(toks.len -| 1)) / @max(r.decode_seconds, 1e-9);
             std.debug.print("{s} depth {d} run {d}: {d} prompt tokens in {d:.2} s ({d:.0} tok/s), {d} tokens at {d:.1} tok/s, {d} rounds, {d}/{d} drafts kept, hash {x:0>16}\n", .{ name, d, run, ids.len, r.prompt_seconds, @as(f64, @floatFromInt(ids.len)) / @max(r.prompt_seconds, 1e-9), toks.len, tps, r.rounds, r.accepted, r.drafted, hash(toks) });
             std.debug.print("  tokens: {any}\n", .{toks[0..@min(toks.len, 48)]});
+            if (r.rounds > 0) {
+                const rn: f64 = @floatFromInt(r.rounds);
+                std.debug.print("  a round: {d:.2} ms wall, {d:.2} ms GPU, {d:.2} ms encoding, {d:.2} ms GPU idle between rounds; {d:.2} tokens\n", .{ r.decode_seconds * 1e3 / rn, r.gpu_seconds * 1e3 / rn, r.encode_seconds * 1e3 / rn, r.gap_seconds * 1e3 / @max(rn - 1, 1), @as(f64, @floatFromInt(toks.len -| 1)) / rn });
+            }
             if (plain == null) plain = try arena.dupe(u32, toks) else if (firstDiff(plain.?, toks)) |at| {
                 failures += 1;
                 std.debug.print("  DIFFERS from depth {d} at token {d}\n", .{ depths.items[0], at });
@@ -147,6 +152,11 @@ pub fn main(init: std.process.Init) !void {
             if (!same) failures += 1;
             std.debug.print("  cancel test: cancelled reply ended {t} after {d} tokens; the next fresh reply {s} the plain one\n", .{ rc.reason, cut.toks.items.len, if (same) "equals" else "DIFFERS from" });
         }
+    }
+    if (std.c.getenv("GLM_PROFILE")) |spec| {
+        const reps = try std.fmt.parseInt(usize, env("GLM_PROFILE_REPS", "12"), 10);
+        var pit = std.mem.tokenizeScalar(u8, std.mem.span(spec), ',');
+        while (pit.next()) |dv| try e.profile(try std.fmt.parseInt(u32, dv, 10), reps);
     }
     try saved.append(arena, '}');
     if (std.c.getenv("GLM_OUT")) |path| {

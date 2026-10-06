@@ -18,6 +18,24 @@ pub const Ctx = struct {
     dump: ?Ref = null, // a capture: each sublayer's input and output appended here (glm_ref.py's order)
     dump_at: usize = 0,
     ep: ?*Ep = null, // expert parallel: this Mac computes its routed experts' picks and swaps them with the peer's
+    skip: u32 = 0, // a profile's knock-outs: launch classes left out (Class bits)
+};
+
+/// Launch classes for a profile's knock-outs.
+pub const Class = struct {
+    pub const hc: u32 = 1 << 0;
+    pub const kda: u32 = 1 << 1;
+    pub const mla: u32 = 1 << 2;
+    pub const dense: u32 = 1 << 3;
+    pub const route: u32 = 1 << 4;
+    pub const routed: u32 = 1 << 5;
+    pub const shared: u32 = 1 << 6;
+    pub const exchange: u32 = 1 << 7;
+    pub const combine: u32 = 1 << 8;
+    pub const head: u32 = 1 << 9;
+    pub const mtp: u32 = 1 << 10;
+    pub const ends: u32 = 1 << 11; // embedding, final mean and norm
+    pub const names = [_][]const u8{ "hc", "kda", "mla", "dense", "route", "routed", "shared", "exchange", "combine", "head", "mtp", "ends" };
 };
 
 /// Append `bytes` of `src` to the capture (a u32 copy).
@@ -284,18 +302,20 @@ pub fn moe(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
     const k = x.k;
     const sc = x.sc;
     const top = c.topk;
+    const s = x.skip;
     if (x.ep) |ep| {
-        route(x, e, w, x_in, rows);
-        ep.localize(e, sc.pick, sc.uids, sc.umem, sc.ucount, rows);
-        experts(x, e, w, x_in, rows, 2, ep.group());
-        ep.send(e, sc.ye, rows);
-        experts(x, e, w, x_in, rows, 1, .{ sc.none, sc.none, sc.none });
-        ep.receive(e, sc.ye, rows);
+        if (s & Class.route == 0) route(x, e, w, x_in, rows);
+        if (s & Class.exchange == 0) ep.localize(e, sc.pick, sc.uids, sc.umem, sc.ucount, rows);
+        if (s & Class.routed == 0) experts(x, e, w, x_in, rows, 2, ep.group());
+        if (s & Class.exchange == 0) ep.send(e, sc.ye, rows);
+        if (s & Class.shared == 0) experts(x, e, w, x_in, rows, 1, .{ sc.none, sc.none, sc.none });
+        if (s & Class.exchange == 0) ep.receive(e, sc.ye, rows);
     } else {
-        experts(x, e, w, x_in, rows, 1, .{ sc.none, sc.none, sc.none });
-        route(x, e, w, x_in, rows);
-        experts(x, e, w, x_in, rows, 2, .{ sc.uids, sc.umem, sc.ucount });
+        if (s & Class.shared == 0) experts(x, e, w, x_in, rows, 1, .{ sc.none, sc.none, sc.none });
+        if (s & Class.route == 0) route(x, e, w, x_in, rows);
+        if (s & Class.routed == 0) experts(x, e, w, x_in, rows, 2, .{ sc.uids, sc.umem, sc.ucount });
     }
+    if (s & Class.combine != 0) return;
     e.setPipeline(k.moe_combine);
     bind(e, 0, .{ sc.ys, sc.ye, sc.wts });
     shape(e, 3, .{ rows, top });
@@ -352,7 +372,8 @@ fn experts(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
 pub fn backbone(x: *Ctx, e: mtl.ComputeEncoder, ids: Ref, rows: u32, pos: u32) void {
     const c = x.c;
     const sc = x.sc;
-    embed(x, e, ids, rows);
+    const k = x.skip;
+    if (k & Class.ends == 0) embed(x, e, ids, rows);
     const plane = @as(usize, rows) * c.hidden * 2;
     snap(x, e, sc.h, plane);
     var pending = false;
@@ -361,39 +382,42 @@ pub fn backbone(x: *Ctx, e: mtl.ComputeEncoder, ids: Ref, rows: u32, pos: u32) v
     for (0..c.run) |li| {
         const L = &x.w.layers[li];
         const hcs = L.hc.?;
-        boundary(x, e, rows, pending, hcs[0], L.in_norm);
+        if (k & Class.hc == 0) boundary(x, e, rows, pending, hcs[0], L.in_norm);
         snap(x, e, sc.normed, plane);
         switch (L.attn) {
             .kda => |*a| {
-                kda(x, e, ki, a, rows);
+                if (k & Class.kda == 0) kda(x, e, ki, a, rows);
                 ki += 1;
             },
             .mla => |*a| {
-                mla(x, e, mi, a, sc.normed, rows, pos);
+                if (k & Class.mla == 0) mla(x, e, mi, a, sc.normed, rows, pos);
                 mi += 1;
             },
         }
         snap(x, e, sc.branch, plane);
-        boundary(x, e, rows, true, hcs[1], L.post_norm);
+        if (k & Class.hc == 0) boundary(x, e, rows, true, hcs[1], L.post_norm);
         snap(x, e, sc.normed, plane);
         switch (L.mlp) {
-            .dense => |*d| denseMlp(x, e, d, sc.normed, rows),
+            .dense => |*d| if (k & Class.dense == 0) denseMlp(x, e, d, sc.normed, rows),
             .moe => |*m| moe(x, e, m, sc.normed, rows),
         }
         snap(x, e, sc.branch, plane);
         pending = true;
     }
-    boundary(x, e, rows, true, null, null);
-    e.setPipeline(x.k.stream_mean);
-    bind(e, 0, .{ sc.x[x.xi], sc.raw });
-    e.setValue([2]u32{ c.hidden, rows }, 2);
-    e.dispatchThreads(size(c.hidden, rows, 1), size(256, 1, 1));
-    rms(x, e, sc.raw, x.w.norm, sc.hidden, rows, c.hidden, c.hidden, c.hidden, c.eps);
+    if (k & Class.hc == 0) boundary(x, e, rows, true, null, null);
+    if (k & Class.ends == 0) {
+        e.setPipeline(x.k.stream_mean);
+        bind(e, 0, .{ sc.x[x.xi], sc.raw });
+        e.setValue([2]u32{ c.hidden, rows }, 2);
+        e.dispatchThreads(size(c.hidden, rows, 1), size(256, 1, 1));
+        rms(x, e, sc.raw, x.w.norm, sc.hidden, rows, c.hidden, c.hidden, c.hidden, c.eps);
+    }
     snap(x, e, sc.hidden, plane);
 }
 
 /// LM head logits and argmax for `rows` rows of `in` into `logits` and `picks` (u32).
 pub fn head(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, logits: Ref, picks: Ref, rows: u32) void {
+    if (x.skip & Class.head != 0) return;
     qmv(x, e, x.k.qmv_head, in, x.w.head, logits, rows);
     e.setPipeline(x.k.argmax);
     bind(e, 0, .{ logits, picks });

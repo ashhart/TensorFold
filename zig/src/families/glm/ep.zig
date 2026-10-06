@@ -143,6 +143,7 @@ pub const Ep = struct {
     trace: bool = false, // GLM_EP_TRACE: log every exchange the host sends
     sent: u64 = 0, // exchanges the host has sent
     held_ticks: u64 = 0, // their time from the GPU's post to the send returning
+    st: Stats = .{}, // when the peer's entries land against our post, and how the picks split
 
     /// Connect to the peer in `s`, refuse it unless it runs the same model with the other half of the experts (`me`).
     pub fn init(gpa: std.mem.Allocator, device: mtl.Device, s: Settings, me: Identity) !*Ep {
@@ -187,7 +188,11 @@ pub const Ep = struct {
         t.rd.flush() catch {};
         t.stop.store(true, .release);
         if (t.thread) |th| th.join();
-        if (t.sent > 0) std.log.info("expert parallel rank {d}: {d} exchanges, {d:.1} us a send, {d} GPU waits gave up", .{ t.rank, t.sent, @as(f64, @floatFromInt(t.held_ticks)) / @as(f64, @floatFromInt(t.sent)) / 24.0, t.gaveUp() });
+        if (t.sent > 0) {
+            const n: f64 = @floatFromInt(t.sent);
+            const late: f64 = @floatFromInt(@max(t.st.late, 1));
+            std.log.info("expert parallel rank {d}: {d} exchanges, {d:.1} us a send; the peer's entries landed {d:.1} us after our post on average ({d} times, {d} before it); entries a exchange: ours {d:.2}, theirs {d:.2}, |difference| {d:.2}; {d} GPU waits gave up", .{ t.rank, t.sent, @as(f64, @floatFromInt(t.held_ticks)) / n / 24.0, @as(f64, @floatFromInt(t.st.late_ticks)) / late / 24.0, t.st.late, t.st.early, @as(f64, @floatFromInt(t.st.mine)) / n, @as(f64, @floatFromInt(t.st.theirs)) / n, @as(f64, @floatFromInt(t.st.imbalance)) / n, t.gaveUp() });
+        }
         t.ctl.deinit(gpa);
         for ([_]mtl.Pipeline{ t.localize_pipe, t.pack_pipe, t.post_pipe, t.unpack_pipe }) |pp| pp.deinit();
         t.lists.deinit();
@@ -267,6 +272,7 @@ pub const Ep = struct {
         while (true) {
             var spins: usize = 0;
             while (!reached(@atomicLoad(u32, posted, .acquire), x)) {
+                t.st.watch(@atomicLoad(u64, flag, .acquire), x - 1);
                 if (t.stop.load(.acquire)) return;
                 if (waiting and @atomicLoad(u64, flag, .acquire) >= want) waiting = false;
                 if (waiting and !t.failed.load(.acquire) and std.c.mach_absolute_time() - want_at > 240_000_000) {
@@ -282,6 +288,9 @@ pub const Ep = struct {
             }
             const seen = std.c.mach_absolute_time();
             const n: usize = @atomicLoad(u32, t.word32(COUNT + 4 * @as(usize, @intCast(x % 2))), .acquire);
+            const theirs: u32 = @bitCast(@as([*]const i32, @ptrCast(@alignCast(t.lists.contents() + COUNTS)))[1]);
+            t.st.posted(x, seen, @intCast(n), theirs);
+            t.st.watch(@atomicLoad(u64, flag, .acquire), x);
             if (t.trace) std.debug.print("EP rank{d} exchange {d}: {d} entries\n", .{ t.rank, x, n });
             if (t.failed.load(.acquire) or n > MAXP) {
                 if (n > MAXP) t.fail(x, error.BadCount);
@@ -304,6 +313,46 @@ pub const Ep = struct {
         const flag = t.word64(FLAG);
         if (@atomicLoad(u64, flag, .acquire) < x) @atomicStore(u64, flag, x, .release);
     }
+
+    /// The host's view of each exchange: when the GPU posted it and when the peer's entries landed (64 in flight).
+    const Stats = struct {
+        post_t: [64]u64 = @splat(0),
+        flag_t: [64]u64 = @splat(0),
+        flag_seen: u64 = 0,
+        done: u64 = 0,
+        late: u64 = 0,
+        late_ticks: u64 = 0,
+        early: u64 = 0,
+        mine: u64 = 0,
+        theirs: u64 = 0,
+        imbalance: u64 = 0,
+
+        fn posted(s: *Stats, x: u64, at: u64, mine: u32, theirs: u32) void {
+            s.post_t[x % 64] = at;
+            s.mine += mine;
+            s.theirs += theirs;
+            s.imbalance += if (mine > theirs) mine - theirs else theirs - mine;
+        }
+
+        /// The flag's new value seen now; every exchange up to `upto` whose post and landing are both known is counted.
+        fn watch(s: *Stats, flag: u64, upto: u64) void {
+            if (flag > s.flag_seen) {
+                const now = std.c.mach_absolute_time();
+                var v = s.flag_seen + 1;
+                while (v <= flag) : (v += 1) s.flag_t[v % 64] = now;
+                s.flag_seen = flag;
+            }
+            while (s.done < @min(upto, s.flag_seen)) {
+                s.done += 1;
+                const p = s.post_t[s.done % 64];
+                const f = s.flag_t[s.done % 64];
+                if (f >= p) {
+                    s.late += 1;
+                    s.late_ticks += f - p;
+                } else s.early += 1;
+            }
+        }
+    };
 
     fn fail(t: *Ep, x: u64, err: anyerror) void {
         std.log.err("expert parallel rank {d}: exchange {d} failed: {s}", .{ t.rank, x, @errorName(err) });
