@@ -213,7 +213,7 @@ pub const Ep = struct {
     stop: std.atomic.Value(bool) = .init(false),
     failed: std.atomic.Value(bool) = .init(false),
     trace: bool = false, // GLM_EP_TRACE: log every exchange the host sends
-    delay_ns: u64 = 0, // GLM_EP_DELAY_US: hold every send this long (a slow link, for the slot guard's stress test)
+    delay_ns: u64 = 0, // GLM_EP_DELAY_US: hold every prompt-chunk send (over 1 MiB) this long: a slow link, for stress runs
     sent: u64 = 0, // exchanges the host has sent
     held_ticks: u64 = 0, // their time from the GPU's post to the send returning
     st: Stats = .{}, // when the peer's entries land against our post, and how the picks split
@@ -429,7 +429,7 @@ pub const Ep = struct {
             t.st.posted(x, seen, @intCast(n), theirs);
             t.st.watch(@atomicLoad(u64, flag, .acquire), x);
             if (t.trace) std.debug.print("EP rank{d} exchange {d}: {d} entries\n", .{ t.rank, x, n });
-            if (t.delay_ns > 0) {
+            if (t.delay_ns > 0 and n * ENTRY > 1 << 20) {
                 const ts: std.c.timespec = .{ .sec = @intCast(t.delay_ns / std.time.ns_per_s), .nsec = @intCast(t.delay_ns % std.time.ns_per_s) };
                 _ = std.c.nanosleep(&ts, null);
             }
