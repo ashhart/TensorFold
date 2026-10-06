@@ -65,6 +65,7 @@ pub const Engine = struct {
     ep: ?*ep_mod.Ep, // expert parallel with a peer Mac (GLM_EP names this Mac's link settings)
     trace_last: ?Ref = null, // a prompt's last row at every capture point (each layer's sublayers), for a path comparison
     margins: ?*std.ArrayList(f32) = null, // each emitted token's top-two logit margin (its row's logits), for a path comparison
+    chunk_rows: u32 = prompt_mod.max_rows, // a prompt chunk's rows at most (GLM_CHUNK: smaller, to check chunk-size invariance)
     ep_arena: std.heap.ArenaAllocator, // the link settings, alive as long as the link
     residency: ?mtl.ResidencySet = null,
     load_seconds: f64 = 0,
@@ -98,6 +99,8 @@ pub const Engine = struct {
         e.pr = null;
         e.trace_last = null;
         e.margins = null;
+        e.chunk_rows = prompt_mod.max_rows;
+        if (std.c.getenv("GLM_CHUNK")) |v| e.chunk_rows = std.math.clamp(std.fmt.parseInt(u32, std.mem.span(v), 10) catch prompt_mod.max_rows, st.max_rows + 1, prompt_mod.max_rows);
         e.ep_arena = .init(gpa);
         errdefer e.ep_arena.deinit();
         e.device = try mtl.Device.init();
@@ -566,7 +569,7 @@ pub const Engine = struct {
         while (at < P) {
             if (try e.agree(out.cancelled(out.ctx))) return .{ .reason = .cancelled };
             const chunk = e.pr != null and P - at > st.max_rows;
-            const n = @min(@as(u32, if (chunk) prompt_mod.max_rows else st.max_rows), P - at);
+            const n = @min(@as(u32, if (chunk) e.chunk_rows else st.max_rows), P - at);
             const last = at + n == P;
             const absorb = if (last) n - 1 else n;
             const b = e.begin();
