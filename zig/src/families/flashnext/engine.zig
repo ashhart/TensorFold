@@ -5,6 +5,7 @@ const mtl = @import("metal");
 const fz = @import("replay.zig");
 const segments = @import("../../core/segments.zig");
 const snapshot = @import("snapshot.zig");
+const CallLog = @import("call_log.zig").CallLog;
 const Allocator = std.mem.Allocator;
 
 const D = fz.D;
@@ -101,6 +102,8 @@ pub const Engine = struct {
     copy_min: u32 = 3,
     copy_long: u32 = 6, // shorter matches copy only when the head's first draft agrees
     mark_taps: bool = true, // a prompt call writes the DeltaNet states at marks inside it (false: calls end at marks)
+    pair_min: usize = PAIR_MIN, // speed-up mode's pair chunks: rows each Mac takes at least (FZ_PAIR_MIN to measure others)
+    call_log: bool = false, // FZ_CALL_LOG: one line a prompt pass with each call's rows, wall and GPU time
     snap_pool: snapshot.Pool = .{}, // kept states' buffers, reused and readied ahead
     handoff_ns: i96 = 0, // speed-up rank 0: the last request's handoff to rank 1 and its resume answer
     passed: ?Passed = null, // the mark a prompt call ran past, while the prompt cache keeps the state there
@@ -130,6 +133,8 @@ pub const Engine = struct {
         e.copy_long = 6;
         e.segments = true;
         e.mark_taps = true;
+        e.pair_min = if (std.c.getenv("FZ_PAIR_MIN")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch PAIR_MIN else PAIR_MIN;
+        e.call_log = std.c.getenv("FZ_CALL_LOG") != null;
         e.passed = null;
         e.snap_pool = .{};
         e.handoff_ns = 0;
@@ -437,6 +442,13 @@ pub const Engine = struct {
         return if (e.segments) segments.next(left, e.pr.step, SEG_MIN) else .{ .rows = @min(e.pr.step, left), .parts = 1 };
     }
 
+    /// The prompt cache keeps the state at a mark a call ran past (snapshot.save reads it through e.passed).
+    fn keepPassed(e: *Engine, p: Passed, out: Out) void {
+        e.passed = p;
+        defer e.passed = null;
+        if (out.marked) |f| f(out.ctx, p.at);
+    }
+
     fn isEos(eos: []const u32, tok: u32) bool {
         return std.mem.indexOfScalar(u32, eos, tok) != null;
     }
@@ -466,6 +478,7 @@ pub const Engine = struct {
             head[12] = @intCast(from); // rank 1 restores its own state at the same tokens
             head[13] = @intCast(marks.len); // the marks, then the dropped states' keys, follow the prompt
             head[14] = @intCast(e.peer_drops.items.len);
+            head[15] = @intCast(e.pair_min); // rank 1 splits its calls the same way
             const words = try e.gpa.alloc(u32, prompt.len + marks.len + 2 * e.peer_drops.items.len);
             defer e.gpa.free(words);
             @memcpy(words[0..prompt.len], prompt);
@@ -487,17 +500,22 @@ pub const Engine = struct {
         var last_n: usize = 1;
         var mi: usize = 0; // the next mark
         const ps = [2]*Prompt{ e.pr, e.pr2 };
+        var late: [fz.MARKS]Passed = undefined; // the last call's passed marks, kept once the first token is out
+        var n_late: usize = 0;
+        var calls: CallLog = .{};
         while (at < prompt.len) {
             if (try e.agree(out.cancelled(out.ctx))) return .{ .reason = .cancelled };
             const to_mark = (if (mi < marks.len) marks[mi] else prompt.len) - at;
+            const t_call = std.c.mach_absolute_time();
+            const g_call = m.gpu_seconds;
             if (r.tp) |tp| { // speed-up mode: the call's rows split across the two Macs, running on past up to MARKS marks
                 const pair_taps = e.mark_taps and m.marks != null;
-                var call = segments.next(if (pair_taps) prompt.len - at else to_mark, e.pr.step, PAIR_MIN);
+                var call = segments.next(if (pair_taps) prompt.len - at else to_mark, e.pr.step, e.pair_min);
                 var passed: [fz.MARKS]u32 = undefined;
                 var n_passed: usize = 0;
                 while (call.parts == 2 and pair_taps and mi + n_passed < marks.len and marks[mi + n_passed] < at + call.rows) : (n_passed += 1) {
                     if (n_passed == fz.MARKS) {
-                        call = segments.next(marks[mi + n_passed] - at, e.pr.step, PAIR_MIN);
+                        call = segments.next(marks[mi + n_passed] - at, e.pr.step, e.pair_min);
                         break;
                     }
                     passed[n_passed] = @intCast(marks[mi + n_passed] - at);
@@ -518,10 +536,13 @@ pub const Engine = struct {
                     for (passed[0..n_passed], 0..) |row, j| { // both Macs hold each passed mark's states now (pairMarks)
                         var hist = hist0;
                         for (prompt[at + row - @min(row, 2) .. at + row]) |tok| hist = .{ hist[1], tok };
-                        e.passed = .{ .at = at + row, .slot = j, .tail = m.marks.?.tail_at(j), .hist = hist };
-                        defer e.passed = null;
-                        if (out.marked) |f| f(out.ctx, at + row);
+                        const p: Passed = .{ .at = at + row, .slot = j, .tail = m.marks.?.tail_at(j), .hist = hist };
+                        if (at + call.rows == prompt.len) {
+                            late[n_late] = p;
+                            n_late += 1;
+                        } else e.keepPassed(p, out);
                     }
+                    calls.note(call.rows, 2, t_call, g_call, m.gpu_seconds);
                     mi += n_passed;
                     at += call.rows;
                     if (mi < marks.len and at == marks[mi]) { // a pair chunk can end on a mark too
@@ -557,10 +578,13 @@ pub const Engine = struct {
                 const seg = Prompt.markSeg(ps[0..c.parts], c.rows, row);
                 var hist = hist0;
                 for (prompt[at + row - @min(row, 2) .. at + row]) |tok| hist = .{ hist[1], tok };
-                e.passed = .{ .at = at + row, .slot = j, .tail = .{ .b = seg.p.b.cin.b, .off = seg.p.b.cin.off + seg.row * WIDE * 2 }, .hist = hist };
-                defer e.passed = null;
-                if (out.marked) |f| f(out.ctx, at + row);
+                const p: Passed = .{ .at = at + row, .slot = j, .tail = .{ .b = seg.p.b.cin.b, .off = seg.p.b.cin.off + seg.row * WIDE * 2 }, .hist = hist };
+                if (at + c.rows == prompt.len) {
+                    late[n_late] = p;
+                    n_late += 1;
+                } else e.keepPassed(p, out);
             }
+            calls.note(c.rows, c.parts, t_call, g_call, m.gpu_seconds);
             mi += n_in;
             at += c.rows;
             if (mi < marks.len and at == marks[mi]) {
@@ -570,7 +594,10 @@ pub const Engine = struct {
         }
         out.prefilled(out.ctx);
         var res: Result = .{ .reason = .length };
-        if (try e.agree(out.tokens(out.ctx, &.{pick}) or isEos(eos, pick))) return .{ .reason = .stop };
+        const first_stop = out.tokens(out.ctx, &.{pick}) or isEos(eos, pick);
+        for (late[0..n_late]) |p| e.keepPassed(p, out); // after the first token: the slots, rows and tail stay put till the rounds
+        if (e.call_log) calls.log(if (r.tp) |tp| tp.rank else 0);
+        if (try e.agree(first_stop)) return .{ .reason = .stop };
         if (max_tokens <= 1) return res;
         var emitted: usize = 1;
         const ar = r.ar.b.slice(i32, fz.AR_WORDS);
@@ -813,6 +840,7 @@ pub const Engine = struct {
             if (e.peer_kept.fetchRemove(@as(u64, w[0]) | @as(u64, w[1]) << 32)) |kv| snapshot.drop(e.gpa, kv.value);
         }
         const from = head[12];
+        if (head[15] != 0) e.pair_min = head[15];
         const t0 = std.c.mach_absolute_time();
         const ok = from == 0 or blk: {
             const st = e.peer_kept.get(keyOf(prompt[0 .. from + 1])) orelse break :blk false;
