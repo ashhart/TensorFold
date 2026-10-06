@@ -52,6 +52,18 @@ pub const Device = struct {
         return objc.utf8(objc.msg(Id, self.id, "name", .{}));
     }
 
+    /// The N of the GPU's applegpu_gN architecture (M1 is 13, M5 17), 0 when it names none.
+    pub fn generation(self: Device) u32 {
+        if (!self.responds("architecture")) return 0;
+        const arch = objc.msg(?Id, self.id, "architecture", .{}) orelse return 0;
+        return generationOf(std.mem.span(objc.utf8(objc.msg(Id, arch, "name", .{}))));
+    }
+
+    /// Metal 4 tensor units (applegpu_g17, the M5, and later).
+    pub fn tensorUnits(self: Device) bool {
+        return self.generation() >= 17;
+    }
+
     pub fn maxWorkingSet(self: Device) u64 {
         return objc.msg(u64, self.id, "recommendedMaxWorkingSetSize", .{});
     }
@@ -98,6 +110,23 @@ pub const Device = struct {
         } };
     }
 };
+
+/// The N of an "applegpu_gN..." architecture name ("applegpu_g15d": 15), 0 for any other.
+pub fn generationOf(arch: []const u8) u32 {
+    const prefix = "applegpu_g";
+    if (!std.mem.startsWith(u8, arch, prefix)) return 0;
+    var end: usize = prefix.len;
+    while (end < arch.len and std.ascii.isDigit(arch[end])) end += 1;
+    return std.fmt.parseInt(u32, arch[prefix.len..end], 10) catch 0;
+}
+
+test "GPU generations from architecture names" {
+    try std.testing.expectEqual(@as(u32, 15), generationOf("applegpu_g15d"));
+    try std.testing.expectEqual(@as(u32, 17), generationOf("applegpu_g17s"));
+    try std.testing.expectEqual(@as(u32, 13), generationOf("applegpu_g13g"));
+    try std.testing.expectEqual(@as(u32, 0), generationOf("air64_v27"));
+    try std.testing.expectEqual(@as(u32, 0), generationOf("applegpu_g"));
+}
 
 /// A read-only file mapped at a page boundary, its length rounded up to whole pages (the tail reads zero).
 pub const MappedFile = struct {

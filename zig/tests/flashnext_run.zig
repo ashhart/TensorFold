@@ -76,6 +76,8 @@ pub fn main(init: std.process.Init) !void {
         try files.appendSlice(gpa, &ks.prefill);
         try files.append(gpa, .{ .name = "qmm6_nax", .text = ks.flashnext_qmm6 });
         try files.append(gpa, .{ .name = "fn_attn", .text = ks.flashnext_attn });
+        try files.append(gpa, .{ .name = "qmm6_nax (simdgroup fragments)", .text = "#define TF_SIMD_FRAGS 1\n" ++ ks.flashnext_qmm6 });
+        try files.append(gpa, .{ .name = "fn_attn (simdgroup fragments)", .text = "#define TF_SIMD_FRAGS 1\n" ++ ks.flashnext_attn });
         for (files.items) |f| {
             const text = try std.mem.replaceOwned(u8, gpa, f.text, "#include \"../nax.h\"", ks.nax);
             defer gpa.free(text);
@@ -87,11 +89,14 @@ pub fn main(init: std.process.Init) !void {
             }
         }
         std.debug.print("{d} of {d} sources compiled\n", .{ files.items.len - failed, files.items.len });
+        if (fz.frags.check(device, try device.queue(), arena)) |_| std.debug.print("fragment layout checked ({s})\n", .{if (device.tensorUnits()) "tensor units" else "simdgroup matrices"}) else |e| {
+            failed += 1;
+            std.debug.print("FAILED fragment check: {s}\n", .{@errorName(e)});
+        }
         std.process.exit(if (failed == 0) 0 else 1);
     }
     if (std.c.getenv("FZ_MMA_PEAK") != null) { // the tensor units' rate on register fragments: 16x32x16 ops a second
-        const asrc = try std.mem.replaceOwned(u8, arena, ks.flashnext_attn, "#include \"../nax.h\"", ks.nax);
-        const alib = try mtl.Library.fromSource(device, asrc, mtl.CompileOptions.mlx());
+        const alib = try mtl.Library.fromSource(device, try fz.frags.source(device, arena, ks.flashnext_attn), mtl.CompileOptions.mlx());
         const pipe = try mtl.Pipeline.init(device, alib, "tf_mma_peak", false);
         const queue = try device.queue();
         const x = try device.buffer(64 * 64 * 2, opts);
@@ -767,8 +772,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     if (std.c.getenv("FZ_QMM6") != null) { // 6-bit tensor-unit projections for prompt chunks: checked and timed
-        const src = try std.mem.replaceOwned(u8, arena, ks.flashnext_qmm6, "#include \"../nax.h\"", ks.nax);
-        const lib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
+        const lib = try mtl.Library.fromSource(device, try fz.frags.source(device, arena, ks.flashnext_qmm6), mtl.CompileOptions.mlx());
         const qmm_pipe = try mtl.Pipeline.init(device, lib, "tf_qmm6_t_nax", false);
         const off_pipe = try mtl.Pipeline.init(device, lib, "tf_expert_offsets6", false);
         const g64_pipe = try mtl.Pipeline.init(device, lib, "tf_gather_qmm6_nax_64", false);

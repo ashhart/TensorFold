@@ -45,8 +45,8 @@ inline float bsig(float x) { return float(bfloat(1.0f / (1.0f + metal::exp(-x)))
     for (short d = 0; d < DI / 16; d++) {
       frag<bfloat> q, k0, k1;
       frag_get_in(q, IQ + h * DI, HI * DI, r0, 16 * d, home, rows, DI);
-      frag_get_in(k0, POOLED, DI, b0, 16 * d, home, nb, DI);
-      frag_get_in(k1, POOLED, DI, b0 + 16, 16 * d, home, nb, DI);
+      frag_get_t_in(k0, POOLED, DI, b0, 16 * d, home, nb, DI);
+      frag_get_t_in(k1, POOLED, DI, b0 + 16, 16 * d, home, nb, DI);
       mma_16x32<false, true>(s[0], s[1], q, k0, k1);
     }
     TF_UNROLL
@@ -105,6 +105,15 @@ inline float bsig(float x) { return float(bfloat(1.0f / (1.0f + metal::exp(-x)))
       const int j = j0 + 16 * (i >> 1) + home.y + 8 * (i & 1);
       key[i] = j < n ? (sparse ? ids[j] : j) : 0;
     }
+#ifdef TF_SIMD_FRAGS
+    // simdgroup matrices: q . k reads the lane's keys home.x + TF_COL(i) of each half (p . v keeps key[])
+    int kq[8];
+    TF_UNROLL
+    for (short i = 0; i < 8; i++) {
+      const int j = j0 + 16 * (i >> 2) + home.x + TF_COL(i & 3);
+      kq[i] = j < n ? (sparse ? ids[j] : j) : 0;
+    }
+#endif
     // this simdgroup's dims of q . k for the 32 keys
     frag<float> s[2] = {frag<float>(0), frag<float>(0)};
     TF_UNROLL
@@ -112,9 +121,15 @@ inline float bsig(float x) { return float(bfloat(1.0f / (1.0f + metal::exp(-x)))
       frag<bfloat> k0, k1;
       TF_UNROLL
       for (short e = 0; e < 8; e++) {
+#ifdef TF_SIMD_FRAGS
+        const int c = 16 * d + home.y + (e >> 2) * 8;
+        k0[e] = Kh[long(kq[e & 3]) * D + c];
+        k1[e] = Kh[long(kq[4 + (e & 3)]) * D + c];
+#else
         const int c = 16 * d + home.x + (e & 3);
         k0[e] = Kh[long(key[(e >> 2)]) * D + c];
         k1[e] = Kh[long(key[2 + (e >> 2)]) * D + c];
+#endif
       }
       mma_16x32<false, true>(s[0], s[1], q[d], k0, k1);
     }
@@ -122,16 +137,16 @@ inline float bsig(float x) { return float(bfloat(1.0f / (1.0f + metal::exp(-x)))
     TF_UNROLL
     for (short f = 0; f < 2; f++) {
       TF_UNROLL
-      for (short e = 0; e < 8; e++) part[sg][(home.y + (e >> 2) * 8) * BK + 16 * f + home.x + (e & 3)] = s[f][e];
+      for (short e = 0; e < 8; e++) part[sg][(home.y + (e >> 2) * 8) * BK + 16 * f + home.x + TF_COL(e)] = s[f][e];
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     TF_UNROLL
     for (short f = 0; f < 2; f++) {
       TF_UNROLL
       for (short e = 0; e < 8; e++) {
-        const int at = (home.y + (e >> 2) * 8) * BK + 16 * f + home.x + (e & 3);
+        const int at = (home.y + (e >> 2) * 8) * BK + 16 * f + home.x + TF_COL(e);
         const float v = ((part[0][at] + part[1][at]) + part[2][at]) + part[3][at];
-        const int j = j0 + 16 * f + home.x + (e & 3);
+        const int j = j0 + 16 * f + home.x + TF_COL(e);
         s[f][e] = j < n ? v * scale2 : masked;
       }
     }
@@ -164,7 +179,7 @@ inline float bsig(float x) { return float(bfloat(1.0f / (1.0f + metal::exp(-x)))
         TF_UNROLL
         for (short e = 0; e < 8; e++) {
           const long row = long(key[2 * k + (e >> 2)]) * D;
-          const int c = 16 * d + home.x + (e & 3);
+          const int c = 16 * d + home.x + TF_COL(e);
           v0[e] = Vh[row + c];
           v1[e] = Vh[row + c + 16];
         }
@@ -177,7 +192,7 @@ inline float bsig(float x) { return float(bfloat(1.0f / (1.0f + metal::exp(-x)))
   for (short i = 0; i < DS / 16; i++) {
     TF_UNROLL
     for (short e = 0; e < 8; e++) {
-      const int head = home.y + (e >> 2) * 8, col = DS * int(sg) + 16 * i + home.x + (e & 3);
+      const int head = home.y + (e >> 2) * 8, col = DS * int(sg) + 16 * i + home.x + TF_COL(e);
       if (head < GQA) {
         const int h = GQA * g + head;
         const float o = float(bfloat(acc[i][e] * inv[e >> 2]));

@@ -83,7 +83,7 @@ inline void k_loop6(thread frag<float> (&acc)[TM][2], const device T* x, int K, 
         for (short i = 0; i < 2; i++) {
           TF_UNROLL
           for (short j = 0; j < 2; j++) {
-            frag_get(b[j][i], (const threadgroup T*)tile, PAD, tn + 16 * i, kk + 16 * j, home);
+            frag_get_t(b[j][i], (const threadgroup T*)tile, PAD, tn + 16 * i, kk + 16 * j, home);
           }
         }
         TF_UNROLL
@@ -162,8 +162,8 @@ inline void k_loop6x2(thread frag<float> (&ag)[TM][2], thread frag<float> (&au)[
         for (short i = 0; i < 2; i++) {
           TF_UNROLL
           for (short j = 0; j < 2; j++) {
-            frag_get(b[j][i], (const threadgroup T*)tg_, PAD, tn + 16 * i, kk + 16 * j, home);
-            frag_get(c[j][i], (const threadgroup T*)tu, PAD, tn + 16 * i, kk + 16 * j, home);
+            frag_get_t(b[j][i], (const threadgroup T*)tg_, PAD, tn + 16 * i, kk + 16 * j, home);
+            frag_get_t(c[j][i], (const threadgroup T*)tu, PAD, tn + 16 * i, kk + 16 * j, home);
           }
         }
         TF_UNROLL
@@ -433,7 +433,7 @@ inline void k_loop_bf16(thread frag<float> (&acc)[TM][2], const device T* x, int
         for (short i = 0; i < 2; i++) {
           TF_UNROLL
           for (short j = 0; j < 2; j++) {
-            frag_get(b[j][i], (const threadgroup T*)tile, PAD, tn + 16 * i, kk + 16 * j, home);
+            frag_get_t(b[j][i], (const threadgroup T*)tile, PAD, tn + 16 * i, kk + 16 * j, home);
           }
         }
         TF_UNROLL
@@ -552,8 +552,8 @@ inline void a_fold(thread const frag<float>& f, thread float (&r)[2]) {
     for (short d = 0; d < D / 16; d++) {
       frag<bfloat16_t> q, ka, kb2;
       frag_get(q, Qp, H * D, 0, 16 * d, home);
-      frag_get(ka, Kp + long(k0) * D, D, 0, 16 * d, home);
-      frag_get(kb2, Kp + long(k0) * D, D, 16, 16 * d, home);
+      frag_get_t(ka, Kp + long(k0) * D, D, 0, 16 * d, home);
+      frag_get_t(kb2, Kp + long(k0) * D, D, 16, 16 * d, home);
       mma_16x32<false, true>(s[0], s[1], q, ka, kb2);
     }
     const int r0 = qoff + q0 + tm + home.y;
@@ -561,7 +561,7 @@ inline void a_fold(thread const frag<float>& f, thread float (&r)[2]) {
     for (short f = 0; f < 2; f++) {
       TF_UNROLL
       for (short e = 0; e < 8; e++) {
-        const int col = k0 + 16 * f + home.x + (e & 3), row = r0 + (e >> 2) * 8;
+        const int col = k0 + 16 * f + home.x + TF_COL(e), row = r0 + (e >> 2) * 8;
         s[f][e] = (col >= kL || col > row) ? a_masked : s[f][e] * scale2;
       }
     }
@@ -603,7 +603,7 @@ inline void a_fold(thread const frag<float>& f, thread float (&r)[2]) {
   for (short i = 0; i < D / 16; i++) {
     TF_UNROLL
     for (short e = 0; e < 8; e++) {
-      const int row = q0 + tm + home.y + (e >> 2) * 8, col = 16 * i + home.x + (e & 3);
+      const int row = q0 + tm + home.y + (e >> 2) * 8, col = 16 * i + home.x + TF_COL(e);
       if (row < qL) {
         const float o = float(bfloat(acc[i][e] * inv[e >> 2]));
         const float g = float(GP[long(row) * PW + h * 2 * D + D + col]);

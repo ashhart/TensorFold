@@ -7,6 +7,7 @@ const segments = @import("../../core/segments.zig");
 const tpm = @import("tp.zig");
 const split = @import("split.zig");
 pub const Tp2 = tpm.Tp2;
+pub const frags = @import("frags.zig");
 
 pub const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
@@ -2082,12 +2083,10 @@ pub const Prompt = struct {
         p.scan8 = true;
         p.tall_tiles = false; // measured: no faster than 64-row tiles (same bits)
         p.fused_gu = true;
-        const asrc = try std.mem.replaceOwned(u8, r.arena, ks.flashnext_attn, "#include \"../nax.h\"", ks.nax);
-        const alib = try mtl.Library.fromSource(r.device, asrc, mtl.CompileOptions.mlx());
+        const alib = try mtl.Library.fromSource(r.device, try frags.source(r.device, r.arena, ks.flashnext_attn), mtl.CompileOptions.mlx());
         p.sattn = try mtl.Pipeline.init(r.device, alib, "tf_sattn_nax", false);
         p.scores_nax = try mtl.Pipeline.init(r.device, alib, "tf_idx_scores_nax", false);
-        const qsrc = try std.mem.replaceOwned(u8, r.arena, ks.flashnext_qmm6, "#include \"../nax.h\"", ks.nax);
-        const qlib = try mtl.Library.fromSource(r.device, qsrc, mtl.CompileOptions.mlx());
+        const qlib = try mtl.Library.fromSource(r.device, try frags.source(r.device, r.arena, ks.flashnext_qmm6), mtl.CompileOptions.mlx());
         p.qmm6 = try mtl.Pipeline.init(r.device, qlib, "tf_qmm6_t_nax", false);
         p.gather64 = try mtl.Pipeline.init(r.device, qlib, "tf_gather_qmm6_nax_64", false);
         p.gather32 = try mtl.Pipeline.init(r.device, qlib, "tf_gather_qmm6_nax_32", false);
@@ -2099,6 +2098,7 @@ pub const Prompt = struct {
         p.attn256 = try mtl.Pipeline.init(r.device, qlib, "tf_attn256_nax", false);
         p.splitk = try mtl.Pipeline.init(r.device, qlib, "tf_qmm6_splitk_nax", false);
         p.parts_sum = try mtl.Pipeline.init(r.device, qlib, "tf_parts_sum", false);
+        try frags.check(r.device, r.queue, r.arena);
         const glib = try mtl.Library.fromSource(r.device, try std.mem.concat(r.arena, u8, &.{ header, ks.flashnext_prompt }), mtl.CompileOptions.mlx());
         const names = [_][:0]const u8{ "pf_hc_normed", "pf_hc_act", "pf_hc_mix", "pf_router", "pf_route", "pf_offsets", "pf_sort", "pf_gather_rows", "pf_act", "pf_scatter_y", "pf_copy", "pf_gdn_pre", "pf_gdn_scan", "pf_gdn_post", "pf_gdn_scan4", "pf_gdn_scan8" };
         for (names, 0..) |n, i| p.pl[i] = try mtl.Pipeline.init(r.device, glib, n, false);
