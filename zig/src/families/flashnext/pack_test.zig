@@ -87,7 +87,7 @@ const config_json =
 
 /// The synthetic checkpoint: two layers (gdn then attention, PLE on the attention layer), the mixer, the head and
 /// the MTP layer. Every quantized K is 32 (kw 6, one scale column) so stacks land on the 32-row lane width.
-fn writeCheckpoint(tmp: std.testing.TmpDir, a: std.mem.Allocator) !void {
+pub fn writeCheckpoint(tmp: std.testing.TmpDir, a: std.mem.Allocator) !void {
     var list: std.ArrayList(Spec) = .empty;
     for (0..2) |i| {
         const stem = try std.fmt.allocPrint(a, "language_model.model.layers.{d}", .{i});
@@ -208,7 +208,7 @@ fn writeCheckpoint(tmp: std.testing.TmpDir, a: std.mem.Allocator) !void {
     try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = config_json });
 }
 
-fn tmpPath(a: std.mem.Allocator, tmp: std.testing.TmpDir, comptime name: []const u8) ![]u8 {
+pub fn tmpPath(a: std.mem.Allocator, tmp: std.testing.TmpDir, comptime name: []const u8) ![]u8 {
     // std.testing.tmpDir parents the dir at <cwd>/.zig-cache/tmp
     const cwd = try std.process.currentPathAlloc(io, a);
     defer a.free(cwd);
@@ -288,7 +288,7 @@ test "pack scales lay scale and bias pairs group-major over the row-concatenated
     try std.testing.expectEqual(@as(u16, 111), words[15]);
 }
 
-test "centered scale widens bf16 in f32 with the loader's two-step order" {
+test "centered scale subtracts one only when the checkpoint stores gamma around one" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
@@ -310,18 +310,21 @@ test "centered scale widens bf16 in f32 with the loader's two-step order" {
     defer a.free(dir);
     var ck = try @import("../../core/checkpoint.zig").Checkpoint.openModel(a, io, dir);
     defer ck.close();
+    // stored around one: the loader runs fp32(w) - 1.0 at load (model.py:416-420) and decode.py:221 adds
+    // 1.0 to that f32 value, so the pack holds the two-step round trip: 1.25, 0.5 and 1.0 unchanged here
     const around_one = try pack.centeredScale(a, &ck, "w", true);
     defer a.free(around_one);
     const one_words = std.mem.bytesAsSlice(u32, around_one);
-    try std.testing.expectEqual(f32_two_and_a_quarter, one_words[0]); // 1.0 + 1.25
-    try std.testing.expectEqual(@as(u32, 0x3FC00000), one_words[1]); // 1.0 + 0.5
-    try std.testing.expectEqual(@as(u32, 0x40000000), one_words[2]); // 1.0 + 1.0
+    try std.testing.expectEqual(@as(u32, 0x3FA00000), one_words[0]); // 1.0 + (1.25 - 1.0)
+    try std.testing.expectEqual(@as(u32, 0x3F000000), one_words[1]); // 1.0 + (0.5 - 1.0)
+    try std.testing.expectEqual(@as(u32, 0x3F800000), one_words[2]); // 1.0 + (1.0 - 1.0)
+    // stored around zero: the -1 step does not run, so the pack holds 1.0 + fp32(w) directly
     const around_zero = try pack.centeredScale(a, &ck, "w", false);
     defer a.free(around_zero);
     const zero_words = std.mem.bytesAsSlice(u32, around_zero);
-    try std.testing.expectEqual(@as(u32, 0x3FA00000), zero_words[0]); // (1.25 - 1.0) + 1.0
-    try std.testing.expectEqual(@as(u32, 0x3F000000), zero_words[1]); // (0.5 - 1.0) + 1.0 = 0.5
-    try std.testing.expectEqual(@as(u32, 0x3F800000), zero_words[2]);
+    try std.testing.expectEqual(f32_two_and_a_quarter, zero_words[0]); // 1.0 + 1.25
+    try std.testing.expectEqual(@as(u32, 0x3FC00000), zero_words[1]); // 1.0 + 0.5
+    try std.testing.expectEqual(@as(u32, 0x40000000), zero_words[2]); // 1.0 + 1.0
 }
 
 test "norm storage detection reads every layer's hc norm mean and refuses an ambiguous checkpoint" {
@@ -383,6 +386,35 @@ test "norm storage detection reads every layer's hc norm mean and refuses an amb
             try std.testing.expectError(error.AmbiguousNormStorage, pack.normsAroundOne(&ck, &cfg, 32));
         }
     }
+    // model.py:353 returns false before reading anything when there are fewer than 8 anchors
+    {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const config = try std.fmt.allocPrint(a,
+            \\{{"model_type": "qwen4_exp", "hidden_size": 32, "num_attention_heads": 2, "vocab_size": 128,
+            \\  "num_hidden_layers": 2, "rms_norm_eps": 1e-6, "num_key_value_heads": 1, "linear_num_key_heads": 1,
+            \\  "linear_key_head_dim": 8, "linear_num_value_heads": 1, "linear_value_head_dim": 32,
+            \\  "linear_conv_kernel_dim": 4, "num_experts": 4, "num_experts_per_tok": 1, "moe_intermediate_size": 16,
+            \\  "shared_expert_intermediate_size": 16, "hc_count": 1, "hc_lowrank": 32,
+            \\  "layer_types": ["full_attention", "full_attention"],
+            \\  "quantization": {{"bits": 6, "group_size": 32, "quant_method": "mlx"}}}}
+        , .{});
+        try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = config });
+        var header: std.Io.Writer.Allocating = .init(a);
+        try header.writer.writeAll("{\"w\":{\"dtype\":\"BF16\",\"shape\":[4],\"data_offsets\":[0,8]}}");
+        const head_bytes = header.written();
+        var image = try a.alloc(u8, 8 + head_bytes.len + 8);
+        std.mem.writeInt(u64, image[0..8], head_bytes.len, .little);
+        @memcpy(image[8..][0..head_bytes.len], head_bytes);
+        @memset(image[8 + head_bytes.len ..], 0);
+        try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = image });
+        const dir = try tmpPath(a, tmp, ".");
+        var cfg = try @import("config.zig").Config.read(a, io, dir);
+        defer cfg.deinit();
+        var ck = try @import("../../core/checkpoint.zig").Checkpoint.openModel(a, io, dir);
+        defer ck.close();
+        try std.testing.expectEqual(false, try pack.normsAroundOne(&ck, &cfg, 32));
+    }
 }
 
 test "draft id list sorts, pads to 64 with the smallest unlisted ids and refuses past-vocab ids" {
@@ -430,7 +462,7 @@ test "the full build writes the three packs byte for byte against hand-computed 
     try std.testing.expectEqual(@as(usize, 63), report.decode_tensors);
     try std.testing.expectEqual(@as(usize, 15), report.mlx_tensors);
     try std.testing.expectEqual(@as(usize, 9), report.mtp_mlx_tensors);
-    try std.testing.expect(report.norms_around_one); // fewer than 8 layers stores around one by convention
+    try std.testing.expect(!report.norms_around_one); // model.py:353: fewer than 8 anchors stores around zero
 
     const pack_path = try tmpPath(a, tmp, "out/pack.safetensors");
     defer a.free(pack_path);
@@ -439,7 +471,7 @@ test "the full build writes the three packs byte for byte against hand-computed 
     try expectTensor(&file, "eps", .f32, &.{1});
     try std.testing.expectEqual(f32_eps, std.mem.bytesAsSlice(u32, tensorBytes(&file, "eps"))[0]);
     try expectTensor(&file, "L0.ahc.scale", .f32, &.{32});
-    for (std.mem.bytesAsSlice(u32, tensorBytes(&file, "L0.ahc.scale"))) |w| try std.testing.expectEqual(f32_two_and_a_quarter, w);
+    for (std.mem.bytesAsSlice(u32, tensorBytes(&file, "L0.ahc.scale"))) |w| try std.testing.expectEqual(f32_two_and_a_quarter, w); // 1.0 + 1.25, the around-zero branch
     // down stack: input_mix_weight_down (base 3,000,000) then block_inject (base 3,100,000), pure byte concat
     try expectTensor(&file, "L0.ahc.down.w", .u32, &.{ 64, 6 });
     const down = std.mem.bytesAsSlice(u32, tensorBytes(&file, "L0.ahc.down.w"));

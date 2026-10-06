@@ -9,6 +9,7 @@ const CallLog = @import("call_log.zig").CallLog;
 const tp_settings = @import("tp_settings.zig");
 const follow_mod = @import("follow.zig");
 const marks_mod = @import("marks.zig");
+const pack_io = @import("pack_io.zig");
 const Allocator = std.mem.Allocator;
 
 const D = fz.D;
@@ -174,6 +175,19 @@ pub const Engine = struct {
         while (wit.next()) |kv| try files.put(arena, kv.value_ptr.string, {});
         var fit = files.keyIterator();
         while (fit.next()) |name| try r.indexFile(try std.fmt.allocPrintSentinel(arena, "{s}/{s}", .{ model_dir, name.* }, 0));
+        // the pack must name the checkpoint beside it: one built from another checkpoint refuses here
+        var shard_ids: std.ArrayList(pack_io.ShardId) = .empty;
+        var sit = files.keyIterator();
+        while (sit.next()) |name| {
+            const shard = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/{s}", .{ model_dir, name.* }, 0));
+            if (shard.size < 8) return error.BadSafetensors;
+            const shard_header: usize = @intCast(std.mem.readInt(u64, shard.bytes[0..8], .little));
+            if (shard_header > shard.size - 8) return error.BadSafetensors;
+            try shard_ids.append(arena, .{ .name = name.*, .size = shard.size, .header_sha256 = pack_io.hashBytes(shard.bytes[8..][0..shard_header]) });
+        }
+        const identity = try pack_io.identityString(arena, pack_io.hashBytes(index_file.bytes[0..index_file.size]), shard_ids.items);
+        const pack_file = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/pack.safetensors", .{dump_dir}, 0));
+        try pack_io.checkSourceMapped(arena, pack_file.bytes[0..pack_file.size], identity);
         try r.indexFile(try std.fmt.allocPrintSentinel(arena, "{s}/pack.safetensors", .{dump_dir}, 0));
         const ref_file = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/ref.json", .{dump_dir}, 0));
         const ref = try std.json.parseFromSliceLeaky(std.json.Value, arena, ref_file.bytes[0..ref_file.size], .{});

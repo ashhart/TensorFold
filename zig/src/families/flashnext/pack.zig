@@ -7,6 +7,7 @@ const ckpt = @import("../../core/checkpoint.zig");
 const affine = @import("affine.zig");
 const config_mod = @import("config.zig");
 const index_mod = @import("index.zig");
+const pio = @import("pack_io.zig");
 
 pub const Report = struct {
     decode_tensors: usize = 0,
@@ -16,66 +17,7 @@ pub const Report = struct {
     draft_ids: usize = 0,
 };
 
-/// One output file's tensors, memory-resident until written (the largest, head.wq, is 476 MB at the shipped size);
-/// `put` takes ownership of `bytes`, freed on deinit.
-const Out = struct {
-    gpa: std.mem.Allocator,
-    arena: std.heap.ArenaAllocator,
-    names: std.ArrayList([]const u8) = .empty,
-    dtypes: std.ArrayList([]const u8) = .empty,
-    shapes: std.ArrayList([]const usize) = .empty,
-    blobs: std.ArrayList([]const u8) = .empty,
-
-    fn init(gpa: std.mem.Allocator) Out {
-        return .{ .gpa = gpa, .arena = std.heap.ArenaAllocator.init(gpa) };
-    }
-
-    fn deinit(out: *Out) void {
-        for (out.blobs.items) |b| out.gpa.free(b);
-        out.blobs.deinit(out.gpa);
-        out.names.deinit(out.gpa);
-        out.dtypes.deinit(out.gpa);
-        out.shapes.deinit(out.gpa);
-        out.arena.deinit();
-        out.* = undefined;
-    }
-
-    fn put(out: *Out, name: []const u8, dtype: []const u8, shape: []const usize, bytes: []u8) !void {
-        const a = out.arena.allocator();
-        try out.names.append(out.gpa, try a.dupe(u8, name));
-        try out.dtypes.append(out.gpa, dtype);
-        const shape_copy = try a.alloc(usize, shape.len);
-        @memcpy(shape_copy, shape);
-        try out.shapes.append(out.gpa, shape_copy);
-        try out.blobs.append(out.gpa, bytes);
-    }
-
-    fn write(out: *const Out, gpa: std.mem.Allocator, io: Io, path: []const u8) !void {
-        var header: std.Io.Writer.Allocating = .init(gpa);
-        defer header.deinit();
-        try header.writer.writeAll("{");
-        var at: usize = 0;
-        for (out.names.items, out.dtypes.items, out.shapes.items, out.blobs.items, 0..) |name, dtype, shape, bytes, i| {
-            try header.writer.print("{s}\"{s}\":{{\"dtype\":\"{s}\",\"shape\":[", .{ if (i == 0) "" else ",", name, dtype });
-            for (shape, 0..) |d, j| try header.writer.print("{s}{d}", .{ if (j == 0) "" else ",", d });
-            try header.writer.print("],\"data_offsets\":[{d},{d}]}}", .{ at, at + bytes.len });
-            at += bytes.len;
-        }
-        try header.writer.writeAll("}");
-        const head = header.written();
-        var file = try Io.Dir.cwd().createFile(io, path, .{});
-        defer file.close(io);
-        var wbuf: [64 << 10]u8 = undefined;
-        var fw = file.writerStreaming(io, &wbuf);
-        const w = &fw.interface;
-        var len: [8]u8 = undefined;
-        std.mem.writeInt(u64, &len, head.len, .little);
-        try w.writeAll(&len);
-        try w.writeAll(head);
-        for (out.blobs.items) |bytes| try w.writeAll(bytes);
-        try w.flush();
-    }
-};
+const Out = pio.Out;
 
 /// Which of a quantized linear's three tensors.
 const Part = enum { weight, scales, biases };
@@ -107,6 +49,7 @@ fn qlinear(ck: *ckpt.Checkpoint, cfg: *const config_mod.Config, path: []const u8
     const b = try ck.get(try std.fmt.bufPrint(&buf, "{s}.biases", .{path}));
     if (w.dtype != .u32 or w.rank != 2) return error.UnexpectedTensor;
     if (s.dtype != .bf16 or s.rank != 2 or b.dtype != .bf16 or b.rank != 2) return error.UnexpectedTensor;
+    if (spec.group == 128) return error.Group128NotPacked; // the pack never carries group 128; the halve-to-64 widen is unimplemented
     const rows = w.dim(0);
     const kw = w.dim(1);
     if (rows != s.dim(0) or rows != b.dim(0)) return error.UnexpectedTensor;
@@ -193,8 +136,9 @@ fn bf16ToF32(bits: u16) f32 {
     return @bitCast(@as(u32, bits) << 16);
 }
 
-/// A centered norm's scale: 1.0 + f32(w), reproducing the loader's f32(w) - 1.0 when the checkpoint stores gamma
-/// around zero (model.py:416-420, decode.py:221); the two steps stay f32 so the round trip is bit-exact.
+/// A centered norm's scale: decode.py:221 always computes 1.0 + f32(w) over the loaded weight, and the loader runs
+/// f32(w) - 1.0 first only when the checkpoint stores gamma (model.py:416-420, norms_stored_around_one true); the
+/// two steps stay f32 so the round trip is bit-exact inside [0.5, 2].
 pub fn centeredScale(gpa: std.mem.Allocator, ck: *ckpt.Checkpoint, path: []const u8, around_one: bool) ![]u8 {
     const t = try ck.get(path);
     if (t.dtype != .bf16) return error.UnexpectedTensor;
@@ -204,7 +148,7 @@ pub fn centeredScale(gpa: std.mem.Allocator, ck: *ckpt.Checkpoint, path: []const
     const out32 = std.mem.bytesAsSlice(u32, out);
     for (in16, 0..) |bits, i| {
         var v: f32 = bf16ToF32(bits);
-        if (!around_one) v = v - 1.0; // the loader's stored form, which the pack adds one back to
+        if (around_one) v = v - 1.0; // the loader's stored form, which decode.py adds one back to
         out32[i] = @bitCast(@as(f32, 1.0) + v);
     }
     return out;
@@ -213,7 +157,7 @@ pub fn centeredScale(gpa: std.mem.Allocator, ck: *ckpt.Checkpoint, path: []const
 /// Whether the checkpoint stores gamma or gamma - 1, decided from the attn hc_norm means exactly as the Python
 /// loader decides it (model.py:348-360); an ambiguous checkpoint is refused, never guessed.
 pub fn normsAroundOne(ck: *ckpt.Checkpoint, cfg: *const config_mod.Config, wide: usize) !bool {
-    if (cfg.layers < 8) return true;
+    if (cfg.layers < 8) return false; // model.py:353: fewer than 8 anchors decides nothing and stores around zero
     var means: std.ArrayList(f64) = .empty;
     defer means.deinit(ck.gpa);
     for (0..cfg.layers) |i| {
@@ -343,6 +287,7 @@ pub fn draftIdList(gpa: std.mem.Allocator, io: Io, path: []const u8, vocab: usiz
     defer extra.deinit(gpa);
     var candidate: u32 = 0;
     while ((listed.count() + extra.items.len) % 64 != 0) {
+        if (candidate >= vocab) return error.DraftVocabExhausted; // a pad past the vocabulary would gather past lm_head
         if (!listed.contains(candidate)) try extra.append(gpa, candidate);
         candidate += 1;
     }
@@ -380,7 +325,10 @@ fn putDraftHead(out: *Out, gpa: std.mem.Allocator, a: std.mem.Allocator, name: [
         @memcpy(b16[r * kg ..][0..kg], src_b16[id * kg ..][0..kg]);
     }
     const gathered = [_]Q{.{ .w = .{ .dtype = .u32, .rank = 2, .shape = .{ rows, kw, 0, 0 }, .bytes = wq }, .s = .{ .dtype = .bf16, .rank = 2, .shape = .{ rows, kg, 0, 0 }, .bytes = s }, .b = .{ .dtype = .bf16, .rank = 2, .shape = .{ rows, kg, 0, 0 }, .bytes = b }, .rows = rows, .k = lm_head.k, .kw = kw, .spec = lm_head.spec }};
-    try putLane(out, gpa, name, gathered[0..]);
+    try putLane(out, gpa, name, gathered[0..]); // putLane copies the bytes, so the gathered buffers free here
+    gpa.free(wq);
+    gpa.free(s);
+    gpa.free(b);
     _ = a;
 }
 
@@ -397,6 +345,17 @@ pub fn build(gpa: std.mem.Allocator, io: Io, model_dir: []const u8, out_dir: []c
     const wide = try cfg.wide();
     var report: Report = .{};
     report.norms_around_one = try normsAroundOne(&ck, &cfg, wide);
+    // the checkpoint's index drives the shard spelling, the source identity and the recorded shard list
+    const index_path = try std.fs.path.join(gpa, &.{ model_dir, "model.safetensors.index.json" });
+    defer gpa.free(index_path);
+    const index_text = try Io.Dir.cwd().readFileAlloc(io, index_path, gpa, .limited(1 << 26));
+    defer gpa.free(index_text);
+    var parsed_index = try std.json.parseFromSlice(std.json.Value, gpa, index_text, .{});
+    defer parsed_index.deinit();
+    const weight_map = parsed_index.value.object.get("weight_map").?.object;
+    const spelling = index_mod.ngramSpelling(weight_map);
+    const identity = try pio.sourceIdentity(gpa, io, model_dir);
+    defer gpa.free(identity);
 
     // pack.safetensors: the decode layout, tensor for tensor as build_pack emits it.
     var decode = Out.init(gpa);
@@ -465,13 +424,6 @@ pub fn build(gpa: std.mem.Allocator, io: Io, model_dir: []const u8, out_dir: []c
             try decode.put(try std.fmt.allocPrint(a, "ple.{s}", .{pack_name}), "F32", &.{wide}, scale);
         }
         try putConvSlice(&decode, gpa, &ck, "ple.conv", try std.fmt.allocPrint(a, "{s}.ple.conv1d.weight", .{stem}), true);
-        const index_path = try std.fs.path.join(gpa, &.{ model_dir, "model.safetensors.index.json" });
-        defer gpa.free(index_path);
-        const index_text = try Io.Dir.cwd().readFileAlloc(io, index_path, gpa, .limited(1 << 26));
-        defer gpa.free(index_text);
-        const parsed = try std.json.parseFromSlice(std.json.Value, gpa, index_text, .{});
-        defer parsed.deinit();
-        const spelling = index_mod.ngramSpelling(parsed.value.object.get("weight_map").?.object);
         const starts = try pleStarts(gpa, &ck, &cfg, pl, spelling);
         try decode.put("ple.starts", "U32", &.{8}, starts);
     }
@@ -482,7 +434,7 @@ pub fn build(gpa: std.mem.Allocator, io: Io, model_dir: []const u8, out_dir: []c
         try decode.put("mtp.draft_ids", "U32", &.{ids.len}, std.mem.sliceAsBytes(ids));
     }
     report.decode_tensors = decode.names.items.len;
-    try decode.write(gpa, io, try std.fs.path.join(a, &.{ out_dir, "pack.safetensors" }));
+    try decode.write(gpa, io, try std.fs.path.join(a, &.{ out_dir, "pack.safetensors" }), identity);
 
     // pack_mlx.safetensors: the prompt path's projections in the checkpoint's own MLX layout.
     var mlx = Out.init(gpa);
@@ -502,7 +454,7 @@ pub fn build(gpa: std.mem.Allocator, io: Io, model_dir: []const u8, out_dir: []c
         try putMlxProjection(&mlx, gpa, a, &ck, &cfg, "ple.kv", &.{ "ple.key_proj", "ple.value_proj" }, stem);
     }
     report.mlx_tensors = mlx.names.items.len;
-    try mlx.write(gpa, io, try std.fs.path.join(a, &.{ out_dir, "pack_mlx.safetensors" }));
+    try mlx.write(gpa, io, try std.fs.path.join(a, &.{ out_dir, "pack_mlx.safetensors" }), identity);
 
     // pack_mtp_mlx.safetensors: the MTP head's prompt projections, independent of the draft vocabulary.
     if (cfg.mtp.layers > 0) {
@@ -513,7 +465,7 @@ pub fn build(gpa: std.mem.Allocator, io: Io, model_dir: []const u8, out_dir: []c
         try putMlxProjection(&mtp_mlx, gpa, a, &ck, &cfg, "mtp.fce", &.{"fc_embedding"}, "language_model.mtp");
         try putMlxProjection(&mtp_mlx, gpa, a, &ck, &cfg, "mtp.fch", &.{"fc_hidden"}, "language_model.mtp");
         report.mtp_mlx_tensors = mtp_mlx.names.items.len;
-        try mtp_mlx.write(gpa, io, try std.fs.path.join(a, &.{ out_dir, "pack_mtp_mlx.safetensors" }));
+        try mtp_mlx.write(gpa, io, try std.fs.path.join(a, &.{ out_dir, "pack_mtp_mlx.safetensors" }), identity);
     }
     return report;
 }
@@ -569,48 +521,7 @@ fn putMtp(out: *Out, gpa: std.mem.Allocator, a: std.mem.Allocator, ck: *ckpt.Che
     try putDraftHead(out, gpa, a, "mtp.draft", head, ids);
 }
 
-/// Compare one built pack with a reference dump's file: dtype, shape and every byte; a line per differing tensor.
-pub fn compareFile(gpa: std.mem.Allocator, io: Io, built_path: []const u8, reference_path: []const u8, writer: *std.Io.Writer) !bool {
-    var built = try st.File.open(gpa, io, built_path);
-    defer built.close(io);
-    var reference = try st.File.open(gpa, io, reference_path);
-    defer reference.close(io);
-    var identical: usize = 0;
-    var differ: usize = 0;
-    var it = built.names.iterator();
-    while (it.next()) |e| {
-        const name = e.key_ptr.*;
-        const mine = e.value_ptr.*;
-        const theirs = reference.names.get(name) orelse {
-            try writer.print("DIFF {s}: not in the reference\n", .{name});
-            differ += 1;
-            continue;
-        };
-        if (mine.dtype != theirs.dtype or mine.rank != theirs.rank or !std.mem.eql(usize, mine.shape[0..mine.rank], theirs.shape[0..theirs.rank])) {
-            try writer.print("DIFF {s}: header differs\n", .{name});
-            differ += 1;
-            continue;
-        }
-        const x = built.map.memory[built.data + mine.begin .. built.data + mine.end];
-        const y = reference.map.memory[reference.data + theirs.begin .. reference.data + theirs.end];
-        if (!std.mem.eql(u8, x, y)) {
-            var at: usize = 0;
-            while (at < x.len and x[at] == y[at]) at += 1;
-            try writer.print("DIFF {s}: first differing byte {d} of {d}\n", .{ name, at, x.len });
-            differ += 1;
-            continue;
-        }
-        identical += 1;
-    }
-    var it2 = reference.names.iterator();
-    while (it2.next()) |e| {
-        if (built.names.contains(e.key_ptr.*)) continue;
-        try writer.print("DIFF {s}: missing from the build\n", .{e.key_ptr.*});
-        differ += 1;
-    }
-    try writer.print("{s}: {d} identical, {d} differ\n", .{ std.fs.path.basename(built_path), identical, differ });
-    return differ == 0;
-}
+pub const compareFile = pio.compareFile;
 
 test {
     _ = @import("pack_test.zig");
