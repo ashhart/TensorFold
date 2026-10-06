@@ -145,6 +145,43 @@ pub fn build(b: *std.Build) void {
     }
     dist_build.targets(b, draft_ids, build_options, release_version);
     cuda_build.hostTests(b, draft_ids, test_step);
+    const hip_fixtures = b.addOptions();
+    for ([_][]const u8{ "success", "failed", "missing" }) |kind| {
+        const fixture_module = b.createModule(.{ .target = b.graph.host, .link_libc = true });
+        fixture_module.addCSourceFile(.{
+            .file = b.path("zig/tests/hip_mock.c"),
+            .flags = if (std.mem.eql(u8, kind, "missing")) &.{ "-DOMIT_INIT", "-DINIT_RESULT=0" } else if (std.mem.eql(u8, kind, "failed")) &.{"-DINIT_RESULT=1"} else &.{"-DINIT_RESULT=0"},
+        });
+        const fixture = b.addLibrary(.{ .name = b.fmt("hip-mock-{s}", .{kind}), .linkage = .dynamic, .root_module = fixture_module });
+        hip_fixtures.addOptionPath(kind, fixture.getEmittedBin());
+    }
+    const hip_test_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/hip/admission_tests.zig"),
+        .target = b.graph.host,
+        .link_libc = true,
+    });
+    hip_test_module.addOptions("hip_fixtures", hip_fixtures);
+    const hip_tests = b.addTest(.{ .root_module = hip_test_module });
+    const run_hip_tests = b.addRunArtifact(hip_tests);
+    test_step.dependOn(&run_hip_tests.step);
+    b.step("hip-host-test", "HIP admission tests without GPU work").dependOn(&run_hip_tests.step);
+    const hipcc = b.option([]const u8, "hipcc", "HIP compiler for model-free tests") orelse "hipcc";
+    const hip_arch = b.option([]const u8, "hip-arch", "Exact GPU architecture for the probe code object") orelse "gfx1151";
+    if (!std.mem.eql(u8, hip_arch, "gfx1150") and !std.mem.eql(u8, hip_arch, "gfx1151") and !std.mem.eql(u8, hip_arch, "gfx1201"))
+        @panic("unsupported HIP probe architecture");
+    const hip_compile = b.addSystemCommand(&.{ hipcc, "--genco", b.fmt("--offload-arch={s}", .{hip_arch}), "-O2", "-ffp-contract=off" });
+    hip_compile.addFileArg(b.path("zig/kernels/hip/runtime_tests.hip"));
+    hip_compile.addArg("-o");
+    const hip_object = hip_compile.addOutputFileArg("hip-runtime-probe.hsaco");
+    const hip_files = b.addWriteFiles();
+    _ = hip_files.addCopyFile(hip_object, "probe.hsaco");
+    const hip_probe = b.createModule(.{ .root_source_file = hip_files.add("probe.zig", b.fmt("pub const arch = \"{s}\";\npub const bytes align(8) = @embedFile(\"probe.hsaco\").*;\n", .{hip_arch})) });
+    const hip_gpu_module = b.createModule(.{ .root_source_file = b.path("zig/src/hip/runtime_tests.zig"), .target = target, .link_libc = true });
+    hip_gpu_module.addCSourceFile(.{ .file = b.path("zig/src/hip/device_arch.c"), .flags = &.{"-D__HIP_PLATFORM_AMD__"} });
+    hip_gpu_module.addImport("hip_probe", hip_probe);
+    const hip_gpu_test = b.addTest(.{ .root_module = hip_gpu_module });
+    b.step("hip-gpu-build", "Compile HIP runtime tests without running GPU work").dependOn(&hip_gpu_test.step);
+    b.step("hip-gpu-test", "Real HIP copies, fills and architecture-selected module launches").dependOn(&b.addRunArtifact(hip_gpu_test).step);
 }
 
 /// `zig build native -Dcpu=apple_m1`: tensorfold-native with the Metal engines for the Python package's bundle (a native M5 build traps on M1-M4).
