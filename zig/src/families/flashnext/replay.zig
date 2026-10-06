@@ -760,6 +760,27 @@ const xnew_source =
     \\    }
     \\  }
     \\}
+    \\// The router's 513 logits a row, one simdgroup a (row, expert): each lane's fma chain (8-input runs 256 apart) and
+    \\// the simd sum as the recorded q4_router_float, so the bits are its bits; its rows run in parallel, not in turn.
+    \\[[kernel]] void fz_router(const device bfloat* X [[buffer(0)]], const device bfloat* GW [[buffer(1)]],
+    \\    const constant int* rows [[buffer(2)]], device float* OUT [[buffer(3)]],
+    \\    uint sgi [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    \\    uint3 tg [[threadgroup_position_in_grid]]) {
+    \\  constexpr int D = 2560, NE = 513;
+    \\  const int g = int(tg.x) * 8 + int(sgi);
+    \\  const int r = g / NE, e = g % NE;
+    \\  if (r >= rows[0]) return;
+    \\  const device bfloat* w = GW + size_t(e) * D;
+    \\  const device bfloat* xr = X + r * D;
+    \\  float a = 0.0f;
+    \\  for (int c = 8 * int(lane); c < D; c += 256) {
+    \\    float wv[8];
+    \\    for (int j = 0; j < 8; j++) wv[j] = float(w[c + j]);
+    \\    for (int j = 0; j < 8; j++) a = fma(float(xr[c + j]), wv[j], a);
+    \\  }
+    \\  const float total = simd_sum(a);
+    \\  if (lane == 0) OUT[r * NE + e] = total;
+    \\}
 ;
 
 pub fn readAll(fd: std.c.fd_t, dest: []u8, at: usize) !void {
@@ -824,6 +845,7 @@ pub const Run = struct {
     repack_w: mtl.Pipeline = undefined,
     repack_s: mtl.Pipeline = undefined,
     route_pipe: mtl.Pipeline = undefined,
+    router_pipe: mtl.Pipeline = undefined,
     ggu_pipe: mtl.Pipeline = undefined,
     gdown_pipe: mtl.Pipeline = undefined,
     ul: Buf = undefined,
@@ -957,6 +979,7 @@ pub const Run = struct {
             r.dense8_pipe = try mtl.Pipeline.init(r.device, lib, "fz_dense8", false);
             r.dense16_pipe = try mtl.Pipeline.init(r.device, lib, "fz_dense16", false);
             r.route_pipe = try mtl.Pipeline.init(r.device, lib, "fz_route", false);
+            r.router_pipe = try mtl.Pipeline.init(r.device, lib, "fz_router", false);
             r.xfused_pipe = try mtl.Pipeline.init(r.device, lib, "fz_xfused", false);
             r.xgu_sx_pipe = try mtl.Pipeline.init(r.device, lib, "fz_xgu_sx", false);
             r.xdown_sx_pipe = try mtl.Pipeline.init(r.device, lib, "fz_xdown_sx", false);
@@ -1053,6 +1076,17 @@ pub const Run = struct {
             if (!r.serial) r.enc.barrier();
         }
     }
+    /// The router's logits for up to `rows` rows (the count itself read from `rows_buf`): fz_router, the recorded kernel's
+    /// bits with its rows in parallel, under FZ_XNEW; the recorded launch otherwise.
+    pub fn router(r: *Run, role: []const u8, x: Buf, w: Buf, rows_buf: Buf, out: Buf, rows: usize) !void {
+        if (!r.xnew) return r.call(role, &.{ x, w, rows_buf }, &.{out});
+        if (r.skip & class(role) != 0) return;
+        r.enc.setPipeline(r.router_pipe);
+        for ([_]Buf{ x, w, rows_buf, out }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
+        r.enc.dispatchGroups(mtl.Size.of((rows * 513 + 7) / 8, 1, 1), mtl.Size.of(256, 1, 1));
+        if (!r.serial) r.enc.barrier();
+    }
+
     /// The MoE's routed and shared experts for `rows` rows: gate/up (with routing) then down.
     pub fn experts(r: *Run, gu_role: []const u8, down_role: []const u8, x: Buf, lg: Buf, e: [18]Buf, act: Buf, pick: Buf, wts: Buf, rows_buf: Buf, y: Buf) !void {
         if (r.skip & (1 << 2) != 0) return;
@@ -1787,7 +1821,7 @@ pub const Model = struct {
             cur = 1 - cur;
             r.touch(L.router);
             try m.hcProject(t.h[cur], L.mhc, "qa_hc_down@mhc", "qa_hc_up@mhc", t.inj_m);
-            try r.call("q4_router_float@moe", &.{ t.mixed, L.router, t.rows }, &.{t.lg});
+            try r.router("q4_router_float@moe", t.mixed, L.router, t.rows, t.lg, rows);
             r.tp_layer = true;
             try r.experts("qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown);
             r.tp_layer = false;
@@ -1930,7 +1964,7 @@ pub const Model = struct {
         if (r.dense) r.denseRows(t.aout, 6144, h.out, rows, t.branch) else try r.call("mtp:lane_qmm_bytes_grouped@mtp.att.o", &.{ t.aout, t.xs, h.out.wq, h.out.sbt, sl.md }, &.{t.branch});
         try r.call("mtp:q4_hc_norm_plain#[10240]", &.{ h.h[1], t.inj_a, t.branch }, &.{ h.h[0], t.ssp });
         try m.mtpProject(h.h[0], h.mhc, down[1], up[1], t.inj_m, sl.rows);
-        try r.call("mtp:q4_router_float@mtp.moe", &.{ t.mixed, h.router, sl.rows }, &.{t.lg});
+        try r.router("mtp:q4_router_float@mtp.moe", t.mixed, h.router, sl.rows, t.lg, rows);
         try r.experts("mtp:qa_expert_gateup@mtp.moe.gate", "mtp:qa_expert_down_y@mtp.moe.down", t.mixed, t.lg, h.ex, t.act, t.pick, t.wts, sl.rows, t.ydown);
         try r.call("mtp:q4_hc_norm_grouped#[10240]", &.{ h.h[0], t.inj_m, t.ydown, t.wts, t.lg }, &.{ h.h[1], t.ssp });
         h.last = .{ .b = h.h[1].b, .off = (rows - 1) * WIDE * 2 };
