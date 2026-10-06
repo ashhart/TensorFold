@@ -200,5 +200,6 @@ pub const prompt_cache = @import("prompt_cache.zig");
 
 test {
     _ = @import("lane_host.zig");
+    _ = @import("lane_host_reuse_test.zig");
     _ = prompt_cache;
 }

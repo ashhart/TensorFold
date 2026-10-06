@@ -46,6 +46,9 @@ pub const Counts = struct { hits: u64 = 0, misses: u64 = 0, kept: u64 = 0, evict
 /// Where a prompt pass starts and where it stops to keep its state (marks sorted, in `a`).
 pub const Plan = struct { from: u32 = 0, marks: []const u32 = &.{} };
 
+/// The entry a backend restores itself (null: the pass starts at 0) and the pass's marks.
+pub const Lookup = struct { entry: ?*Entry = null, marks: []const u32 = &.{} };
+
 pub const Store = struct {
     gpa: Allocator,
     family: Snapshots,
@@ -99,26 +102,39 @@ pub const Store = struct {
 
     /// Before a prompt pass: restore the longest state `prompt` resumes (from 0: none or a failed copy) and plan its marks.
     pub fn begin(s: *Store, a: Allocator, prompt: []const u32, history_len: u32, shared: []const u32, starts: []const u32, owner: ?*anyopaque) !Plan {
-        var plan: Plan = .{};
-        var previous: []const u32 = &.{};
-        if (s.find(prompt, starts)) |e| {
-            if (s.family.vtable.restore(s.family.ptr, owner, e.saved)) |_| {
-                s.clock += 1;
-                e.used = s.clock;
-                s.counts.hits += 1;
-                plan.from = e.at;
-                previous = try a.dupe(u32, e.last);
-                const last = try s.gpa.dupe(u32, prompt);
-                s.gpa.free(e.last);
-                e.last = last;
-            } else |err| {
-                note("restoring {d} tokens failed ({s}); prefilling from the start", .{ e.at, @errorName(err) });
-                s.counts.failed += 1;
-                s.remove(std.mem.indexOfScalar(*Entry, s.entries.items, e).?);
-            }
-        } else s.counts.misses += 1;
-        plan.marks = try s.marks(a, prompt, plan.from, history_len, shared, starts, previous);
-        return plan;
+        const l = try s.lookup(a, prompt, history_len, shared, starts);
+        const e = l.entry orelse return .{ .marks = l.marks };
+        const ok = if (s.family.vtable.restore(s.family.ptr, owner, e.saved)) |_| true else |err| blk: {
+            note("restoring {d} tokens failed ({s}); prefilling from the start", .{ e.at, @errorName(err) });
+            break :blk false;
+        };
+        const from = if (ok) e.at else 0;
+        s.resumed(e, prompt, ok);
+        return .{ .from = from, .marks = l.marks };
+    }
+
+    /// begin without the restore, for backends that restore inside their own prompt pass and then call `resumed`.
+    pub fn lookup(s: *Store, a: Allocator, prompt: []const u32, history_len: u32, shared: []const u32, starts: []const u32) !Lookup {
+        const e = s.find(prompt, starts) orelse {
+            s.counts.misses += 1;
+            return .{ .marks = try s.marks(a, prompt, 0, history_len, shared, starts, &.{}) };
+        };
+        return .{ .entry = e, .marks = try s.marks(a, prompt, e.at, history_len, shared, starts, e.last) };
+    }
+
+    /// A looked-up entry's restore went through (it is now the prompt's), or failed (dropped: the pass ran from 0).
+    pub fn resumed(s: *Store, e: *Entry, prompt: []const u32, ok: bool) void {
+        const i = std.mem.indexOfScalar(*Entry, s.entries.items, e) orelse return;
+        if (!ok) {
+            s.counts.failed += 1;
+            return s.remove(i);
+        }
+        s.clock += 1;
+        e.used = s.clock;
+        s.counts.hits += 1;
+        const last = s.gpa.dupe(u32, prompt) catch return;
+        s.gpa.free(e.last);
+        e.last = last;
     }
 
     /// Where a pass from `from` keeps states: the history, then min_gap apart the stable prefix and shared blocks.
@@ -145,7 +161,7 @@ pub const Store = struct {
             if (std.mem.indexOfScalar(u32, out.items, at) == null) try out.append(a, at);
         }
         std.mem.sort(u32, out.items, {}, std.sort.asc(u32));
-        return out.items;
+        return out.toOwnedSlice(a);
     }
 
     /// The prompt pass stands at `at`: keep its state for `prompt`, evicting to fit; refused (counted) past the budget.

@@ -2,6 +2,7 @@
 const std = @import("std");
 const lanes = @import("lanes");
 const api = @import("engine_api.zig");
+const pc = @import("prompt_cache.zig");
 const Allocator = std.mem.Allocator;
 const Id = api.Id;
 const Request = api.Request;
@@ -35,6 +36,7 @@ pub const LaneHost = struct {
     live_generated: u64 = 0,
     lone: ?api.Lone = null, // the backend's driver for a lone greedy stream; null: every stream in the lane core
     lone_job: ?*Job = null, // the job that driver holds now
+    cache: ?*pc.Store = null, // kept prompt states (engine thread only); the backend restores and saves them
 
     const Mark = struct { at: i96, tokens: u64 };
     const window_ns: i96 = 2 * std.time.ns_per_s;
@@ -51,6 +53,23 @@ pub const LaneHost = struct {
         prefill_sent: bool = false, // a lone driver's prefilled event went out
         began: i96 = 0,
         prefilled: ?i96 = null,
+        entry: ?*pc.Entry = null, // the kept state the backend restores, until its prompt pass reports
+        marks: []const u32 = &.{}, // where the pass keeps states (gpa-owned)
+
+        /// The backend's prompt pass stands at a mark: the cache keeps the stream's state there.
+        fn kept(ptr: *anyopaque, s: *lanes.Stream, at: u32) void {
+            const job: *Job = @ptrCast(@alignCast(ptr));
+            if (job.host.cache) |store| store.keep(job.request.prompt, at, s);
+        }
+
+        /// The pass started from its kept state, or its copy failed (the entry goes); a pass that never got there: neither.
+        fn reported(job: *Job) void {
+            const e = job.entry orelse return;
+            job.entry = null;
+            const store = job.host.cache orelse return;
+            if (!job.started) return;
+            if (job.stream.reuse_failed) store.resumed(e, job.request.prompt, false) else if (job.stream.cached == e.at) store.resumed(e, job.request.prompt, true);
+        }
     };
 
     pub fn init(gpa: Allocator, io: std.Io, core: *lanes.Engine, info_: Info) LaneHost {
@@ -183,6 +202,8 @@ pub const LaneHost = struct {
     }
 
     fn finish(h: *LaneHost, job: *Job, reason: Reason, message: []const u8) void {
+        job.reported();
+        h.gpa.free(job.marks);
         const s = &job.stream;
         const stats: Stats = if (job.started) .{ .rounds = s.rounds, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows, .loop_period = s.loop_period, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null } else .{};
         emit(job, .{ .finished = .{ .reason = reason, .stats = stats, .message = message } });
@@ -258,6 +279,12 @@ pub const LaneHost = struct {
         };
         h.unlock();
         const r = job.request;
+        var reuse: lanes.stream.Reuse = .{};
+        if (h.cache) |store| if (store.lookup(h.gpa, r.prompt, r.history_len, r.shared_prefixes, r.chunks)) |l| {
+            job.entry = l.entry;
+            job.marks = l.marks;
+            reuse = .{ .saved = if (l.entry) |e| e.saved else null, .at = if (l.entry) |e| e.at else 0, .marks = l.marks, .hook = .{ .ptr = job, .at = Job.kept } };
+        } else |_| {};
         job.proposer = lanes.SuffixLookup.init(h.gpa, .{ .min_match = h.min_match }) catch return h.drop(job, "the drafter could not start");
         job.stream = lanes.Stream.init(h.gpa, .{
             .id = "request",
@@ -274,6 +301,7 @@ pub const LaneHost = struct {
             .think_end = if (r.think_end) |t| t else -1,
             .loop_guard = r.loop_guard,
             .chunks = r.chunks,
+            .reuse = reuse,
         }) catch {
             job.proposer.deinit();
             return h.drop(job, "out of memory");
@@ -291,11 +319,12 @@ pub const LaneHost = struct {
     fn prefilled(h: *LaneHost, job: *Job, began: i96) void {
         const done = std.Io.Clock.awake.now(h.io).toNanoseconds();
         h.lock();
-        if (done > began) h.prefill_rate = @as(f64, @floatFromInt(job.request.prompt.len)) / (@as(f64, @floatFromInt(done - began)) / 1e9);
+        if (done > began) h.prefill_rate = @as(f64, @floatFromInt(job.request.prompt.len - job.stream.cached)) / (@as(f64, @floatFromInt(done - began)) / 1e9);
         h.prefill_at = done;
         job.prefilled = done;
         h.unlock();
-        emit(job, .{ .prefilled = 0 });
+        job.reported();
+        emit(job, .{ .prefilled = job.stream.cached });
     }
 
     /// A greedy drafted request alone in the engine, with nothing waiting: the backend's own driver takes it.

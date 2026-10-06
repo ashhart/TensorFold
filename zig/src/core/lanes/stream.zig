@@ -74,6 +74,20 @@ pub const CancelCheck = struct {
     check: *const fn (ptr: *anyopaque) bool,
 };
 
+/// A kept prompt state the backend restores before its prompt pass (core/prompt_cache.zig), and where it keeps new ones.
+pub const Reuse = struct {
+    saved: ?*anyopaque = null, // the backend's copy of the state after `at` prompt tokens (null: start at 0)
+    at: u32 = 0,
+    marks: []const u32 = &.{}, // ascending: the pass cuts a chunk at each and calls `hook` there
+    hook: ?MarkHook = null,
+};
+
+/// Called between prompt chunks, the pass standing at `at` (the GPU done with the chunk that ends there).
+pub const MarkHook = struct {
+    ptr: *anyopaque,
+    at: *const fn (ptr: *anyopaque, s: *Stream, at: u32) void,
+};
+
 /// Drafts the backend holds for the stream's next round; a tree keeps its tokens and parents on the host.
 pub const Held = struct {
     count: u32,
@@ -97,6 +111,7 @@ pub const Spec = struct {
     think_open: ?bool = null, // null: open when a budget is set (the server's rule)
     loop_guard: bool = false,
     chunks: []const u32 = &.{}, // where prefill chunks start after 0 (Python's PrefillPlan); empty: the backend's step
+    reuse: Reuse = .{},
 };
 
 pub const Stream = struct {
@@ -116,6 +131,9 @@ pub const Stream = struct {
     loop_guard: bool,
     loop_period: ?u32 = null,
     chunks: []const u32,
+    reuse: Reuse = .{},
+    cached: u32 = 0, // prompt tokens the backend restored from `reuse` (its prompt pass started there)
+    reuse_failed: bool = false, // the backend's restore of `reuse` failed: it prefilled from 0
     context: std.ArrayList(u32) = .empty,
     pending: ?u32 = null,
     force: std.ArrayList(u32) = .empty,
@@ -165,6 +183,7 @@ pub const Stream = struct {
             .think_open = spec.think_open orelse (spec.think_budget > 0 or (spec.loop_guard and spec.think_end >= 0)),
             .loop_guard = spec.loop_guard,
             .chunks = spec.chunks,
+            .reuse = spec.reuse,
         };
         try s.context.appendSlice(gpa, spec.prompt);
         return s;
