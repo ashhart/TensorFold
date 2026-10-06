@@ -10,12 +10,15 @@ import time
 import urllib.parse
 import urllib.request
 
+COLD = (1024, 2048, 8192, 16384, 32768, 65536)  # cold prompt lengths: a warm-up, then the PP rule's
 PROBE = chr(0x2063) + "probe"  # the server's system-prefix probe (prompt.zig systemPrefixLen)
 USAGE = """modes:
   record BASE MODEL ROWS.jsonl     every scenario on a server with the prompt cache on; cached tokens checked per reply
   replay BASE MODEL ROWS.jsonl OUT the same bodies, in order, on a server started with --prompt-cache-gib 0
   compare ROWS.jsonl OUT           token_sha equal, drafted == "draft": false, resumed first tokens sooner than fresh
-  evict BASE MODEL ROWS.jsonl GIB  a budget that holds one conversation: alternating ones evict, a big one is refused"""
+  evict BASE MODEL ROWS.jsonl GIB  a budget that holds one conversation: alternating ones evict, a big one is refused
+  cold BASE MODEL PROMPTS.json OUT cold prompts 2k-64k (built once through /v1/tokenize): time to first token
+  pp OUT...                        cold medians by length, each run against the first"""
 TOOLS = [
     {"type": "function", "function": {"name": name, "description": about, "parameters": {
         "type": "object", "properties": {p: {"type": "string", "description": d} for p, d in params},
@@ -296,9 +299,70 @@ def compare(rows_path: str, fresh_path: str) -> int:
     return 1 if bad or split else 0
 
 
+def cold_prompts(client: Client, path: str, root: str) -> list[dict]:
+    """Single-message prompts of fixed token lengths, a unique first line each so nothing resumes (prefill_cold.py's)."""
+    if os.path.exists(path):
+        return json.load(open(path))
+    text = "".join(open(os.path.join(root, n), encoding="utf-8", errors="replace").read() for n in sorted(os.listdir(root)) if n.endswith(".py"))
+    items = []
+    for length in COLD:
+        for rep in range(1 if length == 1024 else 3):
+            start = (rep * 1_000_003 + length * 7) % (len(text) - 6 * length)
+            msgs = lambda chars: [{"role": "user", "content": f"Request {length}-{rep}.\n" + text[start:start + chars] + "\nSay in one sentence what the code above does."}]
+            lo, hi = 0, 6 * length
+            while lo < hi:  # the most characters that stay within the length
+                mid = (lo + hi + 1) // 2
+                if len(client.tokens(msgs(mid), None, False, True)) <= length:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            items.append({"length": length, "rep": rep, "messages": msgs(lo)})
+    json.dump(items, open(path, "w"))
+    return items
+
+
+def cold(client: Client, prompts_path: str, out_path: str, root: str) -> int:
+    """Time to first streamed token for each cold prompt (2 reply tokens, thinking off), the first a warm-up."""
+    rows = []
+    for it in cold_prompts(client, prompts_path, root):
+        body = {"model": client.model, "messages": it["messages"], "max_tokens": 2, "temperature": 0, "stream": True,
+                "stream_options": {"include_usage": True}, "chat_template_kwargs": {"enable_thinking": False}}
+        req = urllib.request.Request(client.base + "/v1/chat/completions", data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+        sent, first, usage = time.perf_counter(), None, {}
+        with urllib.request.urlopen(req, timeout=7200) as resp:
+            for raw in resp:
+                line = raw.decode().strip()
+                if not line.startswith("data:") or line == "data: [DONE]":
+                    continue
+                chunk = json.loads(line[5:])
+                for c in chunk.get("choices") or []:
+                    d = c.get("delta") or {}
+                    if first is None and (d.get("content") or d.get("reasoning_content")):
+                        first = time.perf_counter()
+                usage = chunk.get("usage") or usage
+        rows.append({"length": it["length"], "rep": it["rep"], "ttft": (first or time.perf_counter()) - sent,
+                     "prompt": usage.get("prompt_tokens"), "cached": (usage.get("prompt_tokens_details") or {}).get("cached_tokens")})
+        print(json.dumps(rows[-1]), flush=True)
+    json.dump(rows, open(out_path, "w"))
+    return 0
+
+
+def pp(paths: list[str]) -> int:
+    """Median cold TTFT and prompt tok/s by length for each run, and each run against the first."""
+    runs = [json.load(open(p)) for p in paths]
+    for length in COLD[1:]:
+        med = []
+        for rows in runs:
+            ts = sorted(r["ttft"] for r in rows if r["length"] == length)
+            med.append((ts[len(ts) // 2], [r["prompt"] for r in rows if r["length"] == length][0]))
+        cells = "  ".join(f"{t:7.3f} s {n / t:7.1f} tok/s" + (f" ({100 * (t / med[0][0] - 1):+5.1f}%)" if k else "") for k, (t, n) in enumerate(med))
+        print(f"{length:6d}: {cells}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(epilog=USAGE, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("mode", choices=["record", "replay", "compare", "evict"])
+    ap.add_argument("mode", choices=["record", "replay", "compare", "evict", "cold", "pp"])
     ap.add_argument("args", nargs="+")
     ap.add_argument("--max-tokens", type=int, default=160)
     ap.add_argument("--turns", type=int, default=9)
@@ -307,9 +371,13 @@ def main() -> int:
     o = ap.parse_args()
     if o.mode == "compare":
         return compare(*o.args)
+    if o.mode == "pp":
+        return pp(o.args)
     client = Client(o.args[0], o.args[1])
     if o.mode == "replay":
         return replay(client, o.args[2], o.args[3])
+    if o.mode == "cold":
+        return cold(client, o.args[2], o.args[3], o.text)
     if o.mode == "evict":
         return 1 if evict(client, o.args[2], float(o.args[3]), Texts(o.text), o.max_tokens) else 0
     rec = Recorder(client, o.args[2], o.max_tokens)
