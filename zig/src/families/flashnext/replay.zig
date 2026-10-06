@@ -1558,9 +1558,16 @@ pub const Select = struct {
 
 
 /// Block selection in GPU-side rounds: fz_sel_meta writes each round's rows, pooling range and pooled count; the pool
-/// runs at absolute blocks (up to 3 a round); scores cover an upper bound of the pooled blocks the host keeps.
+/// runs at absolute blocks (up to POOL_BLOCKS a round); scores cover an upper bound of the pooled blocks the host keeps.
 /// fz_sel_meta's layout: complete, ends, counts, sparse (MAXR each), then start, count, pooled.
 pub const SEL_POOLED = 4 * MAXR + 2;
+/// Blocks one round's pool can owe: a window of up to MAXR rows completes at most this many.
+pub const POOL_BLOCKS = (MAXR + 3) / 4;
+
+test "a round's pool covers every block its window completes, a copied window's 16 rows too" {
+    for (0..64) |tn| for (1..MAXR + 1) |w| try std.testing.expect((tn + w) / 4 - tn / 4 <= POOL_BLOCKS);
+    try std.testing.expectEqual(@as(usize, 4), (5 + MAXR) / 4 - 5 / 4);
+}
 
 pub const GSelect = struct {
     sel: Buf, // complete[16] ends[16] counts[16] sparse[16] start count pooled
@@ -2011,7 +2018,7 @@ pub const Model = struct {
                     const sl = &r.sel.?;
                     r.enc.setPipeline(r.pool_abs_pipe);
                     for ([_]Buf{ L.raw, g.sel, L.pool, t.eps, t.log2base, L.pooled }, 0..) |bb, j| r.enc.setBuffer(bb.b, bb.off, j);
-                    r.enc.dispatchThreads(mtl.Size.of(128, 3, 1), mtl.Size.of(128, 1, 1));
+                    r.enc.dispatchThreads(mtl.Size.of(128, POOL_BLOCKS, 1), mtl.Size.of(128, 1, 1));
                     if (!r.serial) r.enc.barrier();
                     try r.shapes.put(r.arena, "POOLED_shape", g.pooled_shape);
                     try r.shapes.put(r.arena, "Q_shape", g.q_shape[rows]);
@@ -2157,7 +2164,7 @@ pub const Model = struct {
             if (!r.serial) r.enc.barrier();
             r.enc.setPipeline(r.pool_abs_pipe);
             for ([_]Buf{ h.raw, g.sel, h.pool, t.eps, t.log2base, h.pooled }, 0..) |bb, j| r.enc.setBuffer(bb.b, bb.off, j);
-            r.enc.dispatchThreads(mtl.Size.of(128, 3, 1), mtl.Size.of(128, 1, 1));
+            r.enc.dispatchThreads(mtl.Size.of(128, POOL_BLOCKS, 1), mtl.Size.of(128, 1, 1));
             if (!r.serial) r.enc.barrier();
             try r.shapes.put(r.arena, "POOLED_shape", g.pooled_shape);
             try r.shapes.put(r.arena, "Q_shape", g.q_shape[rows]);
