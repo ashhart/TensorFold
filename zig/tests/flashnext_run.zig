@@ -205,10 +205,14 @@ pub fn main(init: std.process.Init) !void {
         const n_out: usize = if (std.c.getenv("FZ_N")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 256;
         var replies: [2][]u32 = undefined;
         const seg_ab = std.c.getenv("FZ_AB") != null and std.mem.eql(u8, std.mem.span(std.c.getenv("FZ_AB").?), "seg");
-        var depths: std.ArrayList(?usize) = .empty; // FZ_DEPTHS=3,5,7: each depth's arms in turn (0: the depth rule)
+        var depths: std.ArrayList(?usize) = .empty; // FZ_DEPTHS=3,5,7: each depth's arms in turn (0: the depth rule, p: plain)
         if (std.c.getenv("FZ_DEPTHS")) |v| {
             var it = std.mem.tokenizeScalar(u8, std.mem.span(v), ',');
             while (it.next()) |d| {
+                if (std.mem.eql(u8, d, "p")) {
+                    try depths.append(arena, 0);
+                    continue;
+                }
                 const n = try std.fmt.parseInt(usize, d, 10);
                 try depths.append(arena, if (n == 0) null else n);
             }
@@ -217,13 +221,17 @@ pub fn main(init: std.process.Init) !void {
         const fz_ab = std.c.getenv("FZ_AB") != null and std.mem.eql(u8, std.mem.span(std.c.getenv("FZ_AB").?), "fz");
         const fz_on = .{ e.r.lane_new, e.r.gdn_pipe, e.r.gdn_kept };
         for (depths.items) |depth| for (0..2) |arm| { // copy drafts off, then on (FZ_AB=seg: staggered prompt segments off, then on)
+            const plain = depth != null and depth.? == 0; // one token a round: one arm (copies need drafts)
+            if (plain and arm == 1) continue;
+            const name = if (plain) "plain   " else armName(seg_ab, arm);
             if (seg_ab) e.segments = arm == 1 else if (fz_ab) {
                 e.r.lane_new = arm == 1 and fz_on[0];
                 e.r.gdn_pipe = if (arm == 1) fz_on[1] else null;
                 e.r.gdn_kept = if (arm == 1) fz_on[2] else null;
             } else e.copy = arm == 1;
             var sh: Show = .{ .a = arena };
-            _ = try e.generate(toks, 8, &.{}, null, .{ .ctx = &sh, .prefilled = Show.prefilled, .tokens = Show.tokens, .cancelled = Show.cancelled });
+            const warm: fx.Out = .{ .ctx = &sh, .prefilled = Show.prefilled, .tokens = Show.tokens, .cancelled = Show.cancelled };
+            _ = if (e.followsPeer()) try e.followWith(warm) else try e.generate(toks, 8, &.{}, null, warm); // speed-up rank 1 runs rank 0's requests
             sh = .{ .a = arena };
             var first_at: f64 = 0;
             const Timed = struct {
@@ -241,12 +249,13 @@ pub fn main(init: std.process.Init) !void {
             };
             const s0 = mtl.clock.seconds();
             var tm: Timed = .{ .sh = &sh, .t0 = s0, .first = &first_at };
-            const res = try e.generate(toks, n_out, &.{}, depth, .{ .ctx = &tm, .prefilled = Timed.prefilled, .tokens = Timed.tokens, .cancelled = Show.cancelled });
+            const timed: fx.Out = .{ .ctx = &tm, .prefilled = Timed.prefilled, .tokens = Timed.tokens, .cancelled = Show.cancelled };
+            const res = (if (e.followsPeer()) try e.followWith(timed) else try e.generate(toks, n_out, &.{}, depth, timed)) orelse return error.PeerClosed;
             const wall = mtl.clock.seconds() - s0;
             const made: f64 = @floatFromInt(sh.got.items.len - 1);
-            std.debug.print("{s} depth {d}: {d} tokens; prompt {d:.2} s; decode {d:.1} tok/s; {d:.2} tokens a round ({d} rounds, {d} copied rounds landing {d:.2})\n", .{ armName(seg_ab, arm), depth orelse 0, sh.got.items.len, first_at, made / (wall - first_at), made / @as(f64, @floatFromInt(@max(res.rounds, 1))), res.rounds, res.copy_rounds, @as(f64, @floatFromInt(res.copy_accepted)) / @as(f64, @floatFromInt(@max(res.copy_rounds, 1))) });
+            std.debug.print("{s} depth {d}: {d} tokens; prompt {d:.2} s; decode {d:.1} tok/s; {d:.2} tokens a round ({d} rounds, {d} copied rounds landing {d:.2})\n", .{ name, depth orelse 0, sh.got.items.len, first_at, made / (wall - first_at), made / @as(f64, @floatFromInt(@max(res.rounds, 1))), res.rounds, res.copy_rounds, @as(f64, @floatFromInt(res.copy_accepted)) / @as(f64, @floatFromInt(@max(res.copy_rounds, 1))) });
             replies[arm] = sh.got.items;
-            std.debug.print("{s}: reply hash {x:0>16}\n", .{ armName(seg_ab, arm), std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sh.got.items)) });
+            std.debug.print("{s}: reply hash {x:0>16}\n", .{ name, std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sh.got.items)) });
             if (arm == 1) for (res.copy_by_len, 0..) |cl, n| if (cl[0] > 0) std.debug.print("    match {d}: {d} rounds, {d:.2} landed\n", .{ n, cl[0], @as(f64, @floatFromInt(cl[1])) / @as(f64, @floatFromInt(cl[0])) });
         };
         if (std.c.getenv("FZ_NO_REF") != null) return; // the reply hashes are the check (two Macs against one)

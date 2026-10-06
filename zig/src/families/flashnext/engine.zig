@@ -722,11 +722,16 @@ pub const Engine = struct {
     }
 
     fn followOne(e: *Engine) !bool {
+        return try e.followWith(null) != null;
+    }
+
+    /// Rank 1: rank 0's next request, its reply into `out` (null: dropped, states kept); null once rank 0 closes.
+    pub fn followWith(e: *Engine, out: ?Out) !?Result {
         const tp = e.r.tp orelse return error.NotSpeedUpMode;
-        const req = tp.waitRequest() orelse return false;
+        const req = tp.waitRequest() orelse return null;
         var head: [16]u32 = undefined;
         @memcpy(std.mem.asBytes(&head), req.head[0..64]);
-        if (head[0] == 0) return false;
+        if (head[0] == 0) return null;
         const n = head[0];
         const words = try e.gpa.dupe(u32, req.tokens[0 .. n + head[13] + 2 * head[14]]); // rank 0 may write its next request meanwhile
         defer e.gpa.free(words);
@@ -743,12 +748,12 @@ pub const Engine = struct {
             break :blk true;
         };
         try tp.ackRequest(ok);
-        if (!ok) return true; // rank 0 runs the request again from the start
+        if (!ok) return .{ .reason = .cancelled }; // rank 0 runs the request again from the start
         const eos = try e.gpa.dupe(u32, head[4 .. 4 + head[2]]);
         defer e.gpa.free(eos);
         var keep: Keep = .{ .e = e, .prompt = prompt };
-        _ = try e.generateFrom(prompt, from, marks, head[1], eos, if (head[3] == std.math.maxInt(u32)) null else head[3], .{ .ctx = &keep, .prefilled = Quiet.prefilled, .tokens = Quiet.tokens, .cancelled = Quiet.cancelled, .marked = Keep.marked });
-        return true;
+        const o: Out = out orelse .{ .ctx = &keep, .prefilled = Quiet.prefilled, .tokens = Quiet.tokens, .cancelled = Quiet.cancelled, .marked = Keep.marked };
+        return try e.generateFrom(prompt, from, marks, head[1], eos, if (head[3] == std.math.maxInt(u32)) null else head[3], o);
     }
 
     /// Speed-up rank 1 at a mark: its own state there, kept under the name rank 0 gives the same tokens.
