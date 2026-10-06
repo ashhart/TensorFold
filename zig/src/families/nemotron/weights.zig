@@ -6,6 +6,10 @@ const cfg = @import("config.zig");
 
 const Tensor = ckpt.Tensor;
 
+/// The width the Metal kernels read every matrix at: 4-bit codes with a scale and a bias for each 64.
+const kernel_bits = 4;
+const kernel_group = 64;
+
 /// A 4-bit projection in lane_qmm's 64-wide tiles: weight [N/64][K/64][64 x 8 words], SBt [K/64][N][scale, bias].
 pub const Linear = struct {
     w: mtl.Buffer,
@@ -158,21 +162,24 @@ const Builder = struct {
         return .{
             .gate = try self.typed(prefix ++ ".gate.weight", args, .bf16, &.{ c.experts, c.hidden }),
             .gate_bias = try self.typed(prefix ++ ".gate.e_score_correction_bias", args, .f32, &.{c.experts}),
-            .fc1 = try self.quantized(prefix ++ ".switch_mlp.fc1", args),
-            .fc2 = try self.quantized(prefix ++ ".switch_mlp.fc2", args),
-            .shared_up = try self.linear(prefix ++ ".shared_experts.up_proj", args, &.{try self.quantized(prefix ++ ".shared_experts.up_proj", args)}),
-            .shared_down = try self.linear(prefix ++ ".shared_experts.down_proj", args, &.{try self.quantized(prefix ++ ".shared_experts.down_proj", args)}),
+            .fc1 = try self.quantized(prefix ++ ".switch_mlp.fc1", args, &.{ c.experts, c.expert_width, c.hidden }),
+            .fc2 = try self.quantized(prefix ++ ".switch_mlp.fc2", args, &.{ c.experts, c.hidden, c.expert_width }),
+            .shared_up = try self.linear(prefix ++ ".shared_experts.up_proj", args, &.{try self.quantized(prefix ++ ".shared_experts.up_proj", args, &.{ c.shared_width, c.hidden })}),
+            .shared_down = try self.linear(prefix ++ ".shared_experts.down_proj", args, &.{try self.quantized(prefix ++ ".shared_experts.down_proj", args, &.{ c.hidden, c.shared_width })}),
         };
     }
 
     fn attention(self: *Builder, comptime prefix: []const u8, comptime fused: []const u8, args: anytype) !Attention {
+        const c = self.c;
+        const q = c.heads * c.head_dim;
+        const kv = c.kv_heads * c.head_dim;
         return .{
             .qkv = try self.linear(fused, args, &.{
-                try self.quantized(prefix ++ ".q_proj", args),
-                try self.quantized(prefix ++ ".k_proj", args),
-                try self.quantized(prefix ++ ".v_proj", args),
+                try self.quantized(prefix ++ ".q_proj", args, &.{ q, c.hidden }),
+                try self.quantized(prefix ++ ".k_proj", args, &.{ kv, c.hidden }),
+                try self.quantized(prefix ++ ".v_proj", args, &.{ kv, c.hidden }),
             }),
-            .o_proj = try self.linear(prefix ++ ".o_proj", args, &.{try self.quantized(prefix ++ ".o_proj", args)}),
+            .o_proj = try self.linear(prefix ++ ".o_proj", args, &.{try self.quantized(prefix ++ ".o_proj", args, &.{ c.hidden, q })}),
         };
     }
 
@@ -184,20 +191,20 @@ const Builder = struct {
         return .{
             .enorm = try self.typed("mtp.layers.0.enorm.weight", .{}, .bf16, d),
             .hnorm = try self.typed("mtp.layers.0.hnorm.weight", .{}, .bf16, d),
-            .eh = try self.linear("mtp.layers.0.eh_proj", .{}, &.{try self.quantized("mtp.layers.0.eh_proj", .{})}),
+            .eh = try self.linear("mtp.layers.0.eh_proj", .{}, &.{try self.quantized("mtp.layers.0.eh_proj", .{}, &.{ self.c.hidden, 2 * self.c.hidden })}),
             .norm = try self.typed("mtp.layers.0.norm.weight", .{}, .bf16, d),
             .attention = try self.attention("mtp.layers.0.mixer", "mtp.fused.qkv", .{}),
             .norm2 = try self.typed("mtp.layers.1.norm.weight", .{}, .bf16, d),
             .moe = try self.moe("mtp.layers.1.mixer", .{}),
             .final = try self.typed("mtp.layers.1.final_layernorm.weight", .{}, .bf16, d),
-            .draft = try self.picked(try self.quantized("lm_head", .{}), draft_ids),
+            .draft = try self.picked(try self.quantized("lm_head", .{}, &.{ self.c.vocab, self.c.hidden }), draft_ids),
             .ids = ids,
             .vocab = draft_ids.len,
         };
     }
 
-    /// A 4-bit matrix's words, scales and biases, refused unless u32 and bf16: the kernels copy the raw bits as bf16.
-    fn quantized(self: *Builder, comptime fmt: []const u8, args: anytype) ![3]Tensor {
+    /// A matrix [.., n, k] as `dims` give it, refused unless u32 words and bf16 scales and biases at the kernels' width.
+    fn quantized(self: *Builder, comptime fmt: []const u8, args: anytype, dims: []const usize) ![3]Tensor {
         var name: [160]u8 = undefined;
         const base = try std.fmt.bufPrint(&name, fmt, args);
         var out: [3]Tensor = undefined;
@@ -209,7 +216,25 @@ const Builder = struct {
             self.why.set("{s} has {t} weight, {t} scales and {t} biases; the Metal kernels read u32 words with bf16 scales and biases", .{ base, out[0].dtype, out[1].dtype, out[2].dtype });
             return error.UnsupportedQuantization;
         }
+        try self.width(base, out, dims);
         return out;
+    }
+
+    /// Refuse a matrix whose words or scales do not hold `dims` at the kernels' width (another bits or group size).
+    fn width(self: *Builder, base: []const u8, t: [3]Tensor, dims: []const usize) !void {
+        const last = dims.len - 1;
+        const k = dims[last];
+        var rows = true;
+        for (t) |x| rows = rows and x.rank == dims.len and std.mem.eql(usize, x.shape[0..last], dims[0..last]);
+        const words = t[0].shape[last];
+        const groups = t[1].shape[last];
+        if (rows and t[2].shape[last] == groups and words * 32 == k * kernel_bits and groups * kernel_group == k) return;
+        if (rows and t[2].shape[last] == groups and words * 32 % k == 0 and groups > 0 and k % groups == 0) {
+            self.why.set("{s} is {d}-bit in groups of {d}; the Metal kernels read {d}-bit in groups of {d}", .{ base, words * 32 / k, k / groups, kernel_bits, kernel_group });
+        } else {
+            self.why.set("{s} has {any} words, {any} scales and {any} biases; the Metal kernels read {any} at {d}-bit in groups of {d}", .{ base, t[0].shape[0..t[0].rank], t[1].shape[0..t[1].rank], t[2].shape[0..t[2].rank], dims, kernel_bits, kernel_group });
+        }
+        return error.MixedQuantization;
     }
 
     /// Every tensor the kernels read, checked, with the projections queued for tiling.
@@ -217,13 +242,13 @@ const Builder = struct {
         const c = b.c;
         const w = b.w;
         w.norm_f = try b.typed("backbone.norm_f.weight", .{}, .bf16, &.{c.hidden});
-        w.embed = try b.quantized("backbone.embeddings", .{});
+        w.embed = try b.quantized("backbone.embeddings", .{}, &.{ c.vocab, c.hidden });
         for (0..c.layers) |i| {
             w.norms[i] = try b.typed("backbone.layers.{d}.norm.weight", .{i}, .bf16, &.{c.hidden});
             w.layers[i] = switch (c.kinds[i]) {
                 .mamba => .{ .mamba = .{
-                    .in_proj = try b.linear("backbone.layers.{d}.mixer.in_proj", .{i}, &.{try b.quantized("backbone.layers.{d}.mixer.in_proj", .{i})}),
-                    .out_proj = try b.linear("backbone.layers.{d}.mixer.out_proj", .{i}, &.{try b.quantized("backbone.layers.{d}.mixer.out_proj", .{i})}),
+                    .in_proj = try b.linear("backbone.layers.{d}.mixer.in_proj", .{i}, &.{try b.quantized("backbone.layers.{d}.mixer.in_proj", .{i}, &.{ c.projDim(), c.hidden })}),
+                    .out_proj = try b.linear("backbone.layers.{d}.mixer.out_proj", .{i}, &.{try b.quantized("backbone.layers.{d}.mixer.out_proj", .{i}, &.{ c.hidden, c.inner() })}),
                     .conv_w = try convWeight(b, try b.get("backbone.layers.{d}.mixer.conv1d.weight", .{i}), c.*),
                     .conv_b = try b.f32vec(try b.get("backbone.layers.{d}.mixer.conv1d.bias", .{i})),
                     .a_log = try b.f32vec(try b.get("backbone.layers.{d}.mixer.A_log", .{i})),
@@ -235,7 +260,7 @@ const Builder = struct {
                 .attention => .{ .attention = try b.attention("backbone.layers.{d}.mixer", "fused.qkv.{d}", .{i}) },
             };
         }
-        w.head = try b.linear("lm_head", .{}, &.{try b.quantized("lm_head", .{})});
+        w.head = try b.linear("lm_head", .{}, &.{try b.quantized("lm_head", .{}, &.{ c.vocab, c.hidden })});
         if (draft_ids) |ids| {
             if (b.ck.has("mtp.layers.0.eh_proj.weight")) w.mtp = try b.mtpHead(ids);
         }
@@ -352,9 +377,9 @@ fn tinyMoe() cfg.Config {
     return c;
 }
 
-/// The tensors `fill` reads for tinyMoe before its first buffer, with `swap` in place of its namesake.
-fn tinyTensors(swap: Fake) [13]Fake {
-    var out = [_]Fake{
+/// The tensors `fill` reads for tinyMoe before its first buffer, each of `swaps` in place of its namesake or added.
+fn tinyTensors(swaps: []const Fake, out: *[24]Fake) []const Fake {
+    const base = [_]Fake{
         .{ .name = "backbone.norm_f.weight", .shape = &.{64} },
         .{ .name = "backbone.embeddings.weight", .dtype = "U32", .shape = &.{ 128, 8 } },
         .{ .name = "backbone.embeddings.scales", .shape = &.{ 128, 1 } },
@@ -369,17 +394,25 @@ fn tinyTensors(swap: Fake) [13]Fake {
         .{ .name = "backbone.layers.0.mixer.switch_mlp.fc2.scales", .shape = &.{ 4, 64, 1 } },
         .{ .name = "backbone.layers.0.mixer.switch_mlp.fc2.biases", .shape = &.{ 4, 64, 1 } },
     };
-    for (&out) |*t| if (std.mem.eql(u8, t.name, swap.name)) {
-        t.* = swap;
-    };
-    return out;
+    @memcpy(out[0..base.len], &base);
+    var n: usize = base.len;
+    for (swaps) |swap| {
+        const at = for (out[0..n], 0..) |t, i| {
+            if (std.mem.eql(u8, t.name, swap.name)) break i;
+        } else blk: {
+            n += 1;
+            break :blk n - 1;
+        };
+        out[at] = swap;
+    }
+    return out[0..n];
 }
 
-/// fill() on tinyMoe with `swap` must fail with `err`, its reason naming every one of `words`.
-fn expectRefused(swap: Fake, err: anyerror, words: []const []const u8) !void {
+/// fill() on tinyMoe with `swaps` must fail with `err`, its reason naming every one of `words`.
+fn expectRefused(swaps: []const Fake, err: anyerror, words: []const []const u8) !void {
     const a = std.testing.allocator;
-    const tensors = tinyTensors(swap);
-    var ck = try fakeCheckpoint(a, &tensors);
+    var buf: [24]Fake = undefined;
+    var ck = try fakeCheckpoint(a, tinyTensors(swaps, &buf));
     defer ck.deinit();
     const c = tinyMoe();
     var w = Weights{ .allocator = a, .embed = undefined, .norm_f = undefined, .head = undefined };
@@ -395,12 +428,30 @@ fn expectRefused(swap: Fake, err: anyerror, words: []const []const u8) !void {
 
 test "the Metal loader refuses scale, bias and norm dtypes its kernels do not read" {
     const fc2 = "backbone.layers.0.mixer.switch_mlp.fc2";
-    try expectRefused(.{ .name = "backbone.embeddings.scales", .dtype = "F16", .shape = &.{ 128, 1 } }, error.UnsupportedQuantization, &.{ "backbone.embeddings", "f16 scales" });
-    try expectRefused(.{ .name = "backbone.layers.0.mixer.switch_mlp.fc1.biases", .dtype = "F32", .shape = &.{ 4, 64, 1 } }, error.UnsupportedQuantization, &.{ "switch_mlp.fc1", "f32 biases" });
-    try expectRefused(.{ .name = fc2 ++ ".scales", .dtype = "F16", .shape = &.{ 4, 64, 1 } }, error.UnsupportedQuantization, &.{ fc2, "f16 scales" });
-    try expectRefused(.{ .name = fc2 ++ ".weight", .dtype = "I32", .shape = &.{ 4, 64, 8 } }, error.UnsupportedQuantization, &.{ fc2, "i32 weight" });
-    try expectRefused(.{ .name = "backbone.norm_f.weight", .dtype = "F16", .shape = &.{64} }, error.UnexpectedTensor, &.{ "backbone.norm_f.weight", "f16" });
-    try expectRefused(.{ .name = "backbone.layers.0.norm.weight", .dtype = "F32", .shape = &.{64} }, error.UnexpectedTensor, &.{ "layers.0.norm.weight", "f32" });
-    try expectRefused(.{ .name = "backbone.layers.0.mixer.gate.weight", .dtype = "F16", .shape = &.{ 4, 64 } }, error.UnexpectedTensor, &.{ "gate.weight", "f16" });
-    try expectRefused(.{ .name = "backbone.layers.0.mixer.gate.e_score_correction_bias", .shape = &.{4} }, error.UnexpectedTensor, &.{ "e_score_correction_bias", "bf16" });
+    try expectRefused(&.{.{ .name = "backbone.embeddings.scales", .dtype = "F16", .shape = &.{ 128, 1 } }}, error.UnsupportedQuantization, &.{ "backbone.embeddings", "f16 scales" });
+    try expectRefused(&.{.{ .name = "backbone.layers.0.mixer.switch_mlp.fc1.biases", .dtype = "F32", .shape = &.{ 4, 64, 1 } }}, error.UnsupportedQuantization, &.{ "switch_mlp.fc1", "f32 biases" });
+    try expectRefused(&.{.{ .name = fc2 ++ ".scales", .dtype = "F16", .shape = &.{ 4, 64, 1 } }}, error.UnsupportedQuantization, &.{ fc2, "f16 scales" });
+    try expectRefused(&.{.{ .name = fc2 ++ ".weight", .dtype = "I32", .shape = &.{ 4, 64, 8 } }}, error.UnsupportedQuantization, &.{ fc2, "i32 weight" });
+    try expectRefused(&.{.{ .name = "backbone.norm_f.weight", .dtype = "F16", .shape = &.{64} }}, error.UnexpectedTensor, &.{ "backbone.norm_f.weight", "f16" });
+    try expectRefused(&.{.{ .name = "backbone.layers.0.norm.weight", .dtype = "F32", .shape = &.{64} }}, error.UnexpectedTensor, &.{ "layers.0.norm.weight", "f32" });
+    try expectRefused(&.{.{ .name = "backbone.layers.0.mixer.gate.weight", .dtype = "F16", .shape = &.{ 4, 64 } }}, error.UnexpectedTensor, &.{ "gate.weight", "f16" });
+    try expectRefused(&.{.{ .name = "backbone.layers.0.mixer.gate.e_score_correction_bias", .shape = &.{4} }}, error.UnexpectedTensor, &.{ "e_score_correction_bias", "bf16" });
+}
+
+test "the Metal loader refuses matrices at another width than its kernels read" {
+    const fc1 = "backbone.layers.0.mixer.switch_mlp.fc1";
+    const up = "backbone.layers.0.mixer.shared_experts.up_proj";
+    try expectRefused(&.{.{ .name = "backbone.embeddings.weight", .dtype = "U32", .shape = &.{ 128, 12 } }}, error.MixedQuantization, &.{ "backbone.embeddings", "6-bit in groups of 64" });
+    try expectRefused(&.{
+        .{ .name = fc1 ++ ".weight", .dtype = "U32", .shape = &.{ 4, 64, 16 } },
+        .{ .name = fc1 ++ ".scales", .shape = &.{ 4, 64, 2 } },
+        .{ .name = fc1 ++ ".biases", .shape = &.{ 4, 64, 2 } },
+    }, error.MixedQuantization, &.{ fc1, "8-bit in groups of 32" });
+    try expectRefused(&.{.{ .name = fc1 ++ ".biases", .shape = &.{ 4, 64, 2 } }}, error.MixedQuantization, &.{ fc1, "words" });
+    try expectRefused(&.{.{ .name = "backbone.layers.0.mixer.switch_mlp.fc2.weight", .dtype = "U32", .shape = &.{ 3, 64, 8 } }}, error.MixedQuantization, &.{ "switch_mlp.fc2", "{ 4, 64, 64 }" });
+    try expectRefused(&.{
+        .{ .name = up ++ ".weight", .dtype = "U32", .shape = &.{ 128, 16 } },
+        .{ .name = up ++ ".scales", .shape = &.{ 128, 2 } },
+        .{ .name = up ++ ".biases", .shape = &.{ 128, 2 } },
+    }, error.MixedQuantization, &.{ up, "8-bit in groups of 32" });
 }

@@ -90,7 +90,11 @@ pub const Config = struct {
         defer gpa.free(path);
         const text = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 22));
         defer gpa.free(text);
-        return parse(gpa, text);
+        var why: Why = .{};
+        return parse(gpa, text, &why) catch |e| {
+            if (why.len > 0) std.log.err("{s}: {s}", .{ path, why.text() });
+            return e;
+        };
     }
 };
 
@@ -121,7 +125,85 @@ fn kindOf(name: []const u8) !Kind {
     return error.UnsupportedBlock;
 }
 
-pub fn parse(allocator: std.mem.Allocator, text: []const u8) !Config {
+/// The quantization block as MLX reads it: "quantization", else the "quantization_config" that mirrors it.
+fn quantBlock(o: std.json.ObjectMap) ?std.json.ObjectMap {
+    for ([_][]const u8{ "quantization", "quantization_config" }) |key| {
+        if (o.get(key)) |v| if (v == .object and v.object.count() > 0) return v.object;
+    }
+    return null;
+}
+
+/// A quantization block's own fields; every other key names a module.
+fn blockField(key: []const u8) bool {
+    for ([_][]const u8{ "bits", "group_size", "mode", "quant_method" }) |f| if (std.mem.eql(u8, key, f)) return true;
+    return false;
+}
+
+/// MLX's affine mode, the one an entry has when it names none.
+fn affine(o: std.json.ObjectMap) bool {
+    const m = o.get("mode") orelse return true;
+    return m == .null or (m == .string and (m.string.len == 0 or std.ascii.eqlIgnoreCase(m.string, "affine")));
+}
+
+/// A positive integer field, `default` when absent or null, 0 when unreadable.
+fn width(o: std.json.ObjectMap, key: []const u8, default: usize) usize {
+    const v = o.get(key) orelse return default;
+    return switch (v) {
+        .null => default,
+        .integer => |i| if (i > 0) @intCast(i) else 0,
+        else => 0,
+    };
+}
+
+/// The checkpoint's bits and group size; a per-module entry at any other width is refused, as the kernels read one.
+fn quantization(c: *Config, o: std.json.ObjectMap, why: *Why) !void {
+    const q = quantBlock(o) orelse {
+        why.set("config.json declares no quantization; the native Nemotron kernels read MLX affine checkpoints", .{});
+        return error.UnsupportedQuantization;
+    };
+    if (q.get("quant_method")) |m| if (!(m == .null or (m == .string and (std.ascii.eqlIgnoreCase(m.string, "mlx") or std.ascii.eqlIgnoreCase(m.string, "affine"))))) {
+        why.set("config.json's quant_method is {f}; the native Nemotron kernels read MLX affine checkpoints", .{std.json.fmt(m, .{})});
+        return error.UnsupportedQuantization;
+    };
+    if (!affine(q)) {
+        why.set("config.json quantizes in mode {f}; the native Nemotron kernels read MLX affine checkpoints", .{std.json.fmt(q.get("mode").?, .{})});
+        return error.UnsupportedQuantization;
+    }
+    c.bits = width(q, "bits", 0);
+    c.group_size = width(q, "group_size", 64);
+    if (c.bits == 0 or c.group_size == 0) {
+        why.set("config.json's quantization has no readable bits or group_size", .{});
+        return error.UnsupportedQuantization;
+    }
+    var it = q.iterator();
+    while (it.next()) |e| if (!blockField(e.key_ptr.*)) try module(c.*, e.key_ptr.*, e.value_ptr.*, why);
+}
+
+/// A per-module entry as nn.quantize reads it: true, or a dict at the checkpoint's width, passes; anything else is refused.
+fn module(c: Config, path: []const u8, v: std.json.Value, why: *Why) !void {
+    switch (v) {
+        .bool => |on| if (on) return,
+        .object => |m| if (m.count() > 0) {
+            // a dict's missing bits or group_size take to_quantized's affine defaults, not the top level's
+            const bits = width(m, "bits", 4);
+            const group = width(m, "group_size", 64);
+            if (affine(m) and bits == c.bits and group == c.group_size) return;
+            if (!affine(m) or bits == 0 or group == 0) {
+                why.set("config.json quantizes {s} as {f}; the native Nemotron kernels read every matrix at {d}-bit in groups of {d}", .{ path, std.json.fmt(v, .{}), c.bits, c.group_size });
+            } else {
+                why.set("config.json quantizes {s} at {d}-bit in groups of {d}; the native Nemotron kernels read every matrix at the checkpoint's {d}-bit in groups of {d}", .{ path, bits, group, c.bits, c.group_size });
+            }
+            return error.MixedQuantization;
+        },
+        .null => {},
+        else => return,
+    }
+    why.set("config.json leaves {s} unquantized; the native Nemotron kernels read every matrix at {d}-bit in groups of {d}", .{ path, c.bits, c.group_size });
+    return error.MixedQuantization;
+}
+
+/// config.json's text; a refusal's reason goes to `why`.
+pub fn parse(allocator: std.mem.Allocator, text: []const u8, why: *Why) !Config {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, text, .{});
     defer parsed.deinit();
     const o = parsed.value.object;
@@ -174,10 +256,7 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8) !Config {
         c.dt_min = @floatCast(try number(v.array.items[0]));
         c.dt_max = @floatCast(try number(v.array.items[1]));
     };
-    if (o.get("quantization")) |q| {
-        c.group_size = @intCast(q.object.get("group_size").?.integer);
-        c.bits = @intCast(q.object.get("bits").?.integer);
-    }
+    try quantization(&c, o, why);
     return c;
 }
 
@@ -193,16 +272,59 @@ pub fn checkShapes(c: Config) !void {
     }
 }
 
+const lightning =
+    \\{"model_type": "nemotron_h", "hidden_size": 2688, "vocab_size": 131072, "mamba_num_heads": 64,
+    \\ "mamba_head_dim": 64, "n_groups": 8, "ssm_state_size": 128, "conv_kernel": 4, "num_attention_heads": 32,
+    \\ "num_key_value_heads": 2, "head_dim": 128, "n_routed_experts": 128, "num_experts_per_tok": 6,
+    \\ "moe_intermediate_size": 1856, "moe_shared_expert_intermediate_size": 3712, "routed_scaling_factor": 2.5,
+    \\ "layer_norm_epsilon": 1e-05, "eos_token_id": [2, 11], "layers_block_type": ["mamba", "moe", "attention"],
+    \\ "quantization": {"group_size": 64, "bits": 4}}
+;
+
+/// The Lightning config with its quantization block's text replaced by `block`.
+fn withQuantization(block: []const u8) ![]u8 {
+    return std.mem.replaceOwned(u8, std.testing.allocator, lightning, "\"quantization\": {\"group_size\": 64, \"bits\": 4}", block);
+}
+
+/// parse() must refuse the Lightning config with quantization `block`, its reason naming each of `words`.
+fn expectRefused(block: []const u8, err: anyerror, words: []const []const u8) !void {
+    const text = try withQuantization(block);
+    defer std.testing.allocator.free(text);
+    var why: Why = .{};
+    try std.testing.expectError(err, parse(std.testing.allocator, text, &why));
+    for (words) |word| if (std.mem.indexOf(u8, why.text(), word) == null) {
+        std.debug.print("refusal \"{s}\" does not name \"{s}\"\n", .{ why.text(), word });
+        return error.TestUnexpectedResult;
+    };
+}
+
+test "per-module quantization entries read as MLX reads them, any other width refused" {
+    const fc1 = "backbone.layers.1.mixer.switch_mlp.fc1";
+    for ([_][]const u8{
+        "\"quantization\": {\"group_size\": 64, \"bits\": 4, \"mode\": \"affine\", \"lm_head\": true}",
+        "\"quantization\": {\"bits\": 4, \"" ++ fc1 ++ "\": {\"group_size\": 64, \"bits\": 4}, \"lm_head\": {\"mode\": \"affine\"}}",
+        "\"quantization_config\": {\"group_size\": 64, \"bits\": 4, \"quant_method\": \"mlx\", \"oq_note\": \"metadata\"}",
+    }) |block| {
+        const text = try withQuantization(block);
+        defer std.testing.allocator.free(text);
+        var why: Why = .{};
+        try checkShapes(try parse(std.testing.allocator, text, &why));
+    }
+    try expectRefused("\"quantization\": {\"group_size\": 64, \"bits\": 4, \"" ++ fc1 ++ "\": {\"group_size\": 64, \"bits\": 8}}", error.MixedQuantization, &.{ fc1, "8-bit in groups of 64" });
+    try expectRefused("\"quantization\": {\"group_size\": 64, \"bits\": 4, \"backbone.embeddings\": {\"bits\": 6}}", error.MixedQuantization, &.{ "backbone.embeddings", "6-bit" });
+    try expectRefused("\"quantization\": {\"group_size\": 64, \"bits\": 4, \"lm_head\": {\"group_size\": 32}}", error.MixedQuantization, &.{ "lm_head", "4-bit in groups of 32" });
+    try expectRefused("\"quantization\": {\"group_size\": 64, \"bits\": 4, \"lm_head\": false}", error.MixedQuantization, &.{ "lm_head", "unquantized" });
+    try expectRefused("\"quantization\": {\"group_size\": 64, \"bits\": 4, \"lm_head\": {}}", error.MixedQuantization, &.{ "lm_head", "unquantized" });
+    try expectRefused("\"quantization\": {\"group_size\": 64, \"bits\": 4, \"lm_head\": {\"mode\": \"mxfp8\"}}", error.MixedQuantization, &.{ "lm_head", "mxfp8" });
+    try expectRefused("\"quantization\": {\"group_size\": 32, \"bits\": 4, \"mode\": \"mxfp4\"}", error.UnsupportedQuantization, &.{"mxfp4"});
+    try expectRefused("\"quantization_config\": {\"quant_method\": \"fp8\", \"weight_block_size\": [128, 128]}", error.UnsupportedQuantization, &.{"fp8"});
+    try expectRefused("\"quantization\": {\"group_size\": 64}", error.UnsupportedQuantization, &.{"bits"});
+    try expectRefused("\"tie_word_embeddings\": false", error.UnsupportedQuantization, &.{"no quantization"});
+}
+
 test "parse the Lightning config" {
-    const text =
-        \\{"model_type": "nemotron_h", "hidden_size": 2688, "vocab_size": 131072, "mamba_num_heads": 64,
-        \\ "mamba_head_dim": 64, "n_groups": 8, "ssm_state_size": 128, "conv_kernel": 4, "num_attention_heads": 32,
-        \\ "num_key_value_heads": 2, "head_dim": 128, "n_routed_experts": 128, "num_experts_per_tok": 6,
-        \\ "moe_intermediate_size": 1856, "moe_shared_expert_intermediate_size": 3712, "routed_scaling_factor": 2.5,
-        \\ "layer_norm_epsilon": 1e-05, "eos_token_id": [2, 11], "layers_block_type": ["mamba", "moe", "attention"],
-        \\ "quantization": {"group_size": 64, "bits": 4}}
-    ;
-    const c = try parse(std.testing.allocator, text);
+    var why: Why = .{};
+    const c = try parse(std.testing.allocator, lightning, &why);
     try std.testing.expectEqual(@as(usize, 3), c.layers);
     try std.testing.expectEqual(Kind.attention, c.kinds[2]);
     try std.testing.expectEqual(@as(usize, 10304), c.projDim());
