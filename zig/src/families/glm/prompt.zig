@@ -9,7 +9,9 @@ const fwd = @import("forward.zig");
 const pk = @import("../nemotron/prefill_kernels.zig");
 const ep_mod = @import("ep.zig");
 const affine_mm = @import("../../core/affine_mm.zig");
-const Kernels = @import("kernels.zig").Kernels;
+const kernels = @import("kernels.zig");
+const Kernels = kernels.Kernels;
+const moe_route = @import("../../core/moe_route.zig");
 const Ref = wts.Ref;
 const bind = fwd.bind;
 const size = fwd.size;
@@ -38,7 +40,6 @@ pub const Prompt = struct {
     iw: Ref,
     indices: Ref,
     sscore: Ref,
-    xf: Ref,
     logits_r: Ref,
     pick: Ref,
     wts: Ref,
@@ -73,7 +74,7 @@ pub const Prompt = struct {
 };
 
 /// The chunk buffers for `cap`-token caches (selection passes read cap / 4 block scores a row).
-pub fn init(gpa: std.mem.Allocator, arena: *st.Arena, device: mtl.Device, c: *const cfg.Config, decode: *const st.Scratch, kernels: *const Kernels, cap: u32) !Prompt {
+pub fn init(gpa: std.mem.Allocator, arena: *st.Arena, device: mtl.Device, c: *const cfg.Config, decode: *const st.Scratch, engine_kernels: *const Kernels, cap: u32) !Prompt {
     const R: usize = max_rows;
     const D: usize = c.hidden;
     const n: usize = R * c.topk;
@@ -81,7 +82,7 @@ pub fn init(gpa: std.mem.Allocator, arena: *st.Arena, device: mtl.Device, c: *co
     var p: Prompt = undefined;
     p.k = try pk.load(gpa, device);
     errdefer p.k.deinit();
-    p.mm = kernels;
+    p.mm = engine_kernels;
     p.streams = decode.*;
     const big = struct {
         fn of(a: *st.Arena, bytes: usize) !Ref {
@@ -110,7 +111,6 @@ pub fn init(gpa: std.mem.Allocator, arena: *st.Arena, device: mtl.Device, c: *co
     p.iw = try big.of(arena, R * c.i_heads * 2);
     p.indices = try big.of(arena, R * c.keyWidth() * 4);
     p.sscore = try big.of(arena, select_rows * (@as(usize, cap) / c.kpool + 1) * 4);
-    p.xf = try big.of(arena, R * D * 4);
     p.logits_r = try big.of(arena, R * c.experts * 4);
     p.pick = try big.of(arena, n * 4);
     p.wts = try big.of(arena, n * 4);
@@ -251,17 +251,7 @@ fn route(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const w
     const D = c.hidden;
     const E = c.experts;
     const n = M * c.topk;
-    e.setPipeline(k.cast_f32);
-    bind(e, 0, .{ x_in, p.xf });
-    e.setValue(M * D, 2);
-    e.dispatchThreads(size(M * D, 1, 1), size(256, 1, 1));
-    var r0: u32 = 0;
-    while (r0 < M) : (r0 += st.max_rows) {
-        const rr = @min(st.max_rows, M - r0);
-        e.setPipeline(k.router[rr - 1]);
-        bind(e, 0, .{ p.xf.at(@as(usize, r0) * D * 4), w.router, p.logits_r.at(@as(usize, r0) * E * 4) });
-        e.dispatchThreads(size(1024 * E / 16, 1, 1), size(1024, 1, 1));
-    }
+    moe_route.logits(e, k.route_logits, kernels.route_shape, x_in, w.router, p.logits_r, M); // the decode's bits, any rows
     e.setPipeline(k.route_rows);
     bind(e, 0, .{ p.logits_r, w.bias });
     e.setValue(c.routed_scale, 2);
