@@ -88,6 +88,13 @@ pub const ShardId = struct {
     header_sha256: [32]u8,
 };
 
+/// A mapped shard's bytes with its true file size (a mapped region can round up to the page).
+pub const MappedShard = struct {
+    name: []const u8,
+    size: u64,
+    bytes: []const u8,
+};
+
 pub fn hashBytes(bytes: []const u8) [32]u8 {
     var h: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &h, .{});
@@ -126,24 +133,44 @@ fn headerLen(memory: []const u8) !usize {
     return hl;
 }
 
+/// The identity's canonical text from an index file's bytes and each shard's mapped bytes: the one assembly both
+/// the builder and the engine go through, so their copies cannot drift.
+pub fn identityFromMapped(gpa: std.mem.Allocator, index_bytes: ?[]const u8, shards: []const MappedShard) ![]u8 {
+    var ids: std.ArrayList(ShardId) = .empty;
+    defer ids.deinit(gpa);
+    for (shards) |s| {
+        if (s.size < 8) return error.BadSafetensors;
+        const size: usize = @intCast(s.size);
+        if (s.bytes.len < size) return error.BadSafetensors;
+        const hl = try headerLen(s.bytes[0..size]);
+        try ids.append(gpa, .{ .name = s.name, .size = s.size, .header_sha256 = hashBytes(s.bytes[8..][0..hl]) });
+    }
+    return identityString(gpa, if (index_bytes) |b| hashBytes(b) else null, ids.items);
+}
+
 /// The identity of the checkpoint at model_dir: the index file's hash plus each weight_map shard's size and header
-/// hash. A checkpoint without an index records no index hash and no shards.
+/// hash. A checkpoint without an index records no index hash and no shards. Every mapping stays alive until the
+/// identity text exists, then unmaps.
 pub fn sourceIdentity(gpa: std.mem.Allocator, io: Io, model_dir: []const u8) ![]u8 {
-    var shards: std.ArrayList(ShardId) = .empty;
+    const Open = struct { file: Io.File, map: Io.File.MemoryMap };
+    var shards: std.ArrayList(MappedShard) = .empty;
     defer shards.deinit(gpa);
-    var index_sha: ?[32]u8 = null;
+    var maps: std.ArrayList(Open) = .empty;
+    errdefer for (maps.items) |*m| {
+        m.map.destroy(io);
+        m.file.close(io);
+    };
     const index_path = try std.fs.path.join(gpa, &.{ model_dir, "model.safetensors.index.json" });
     defer gpa.free(index_path);
     var mapped = mapFile(io, index_path) catch |e| switch (e) {
-        error.FileNotFound => return identityString(gpa, null, shards.items),
+        error.FileNotFound => return identityFromMapped(gpa, null, shards.items),
         else => return e,
     };
     defer mapped.map.destroy(io);
     defer mapped.file.close(io);
-    index_sha = hashBytes(mapped.map.memory);
     var parsed = try std.json.parseFromSlice(std.json.Value, gpa, mapped.map.memory, .{});
     defer parsed.deinit();
-    const weight_map = parsed.value.object.get("weight_map") orelse return identityString(gpa, index_sha, shards.items);
+    const weight_map = parsed.value.object.get("weight_map") orelse return identityFromMapped(gpa, null, shards.items);
     var names: std.ArrayList([]const u8) = .empty;
     defer {
         for (names.items) |n| gpa.free(n);
@@ -161,13 +188,17 @@ pub fn sourceIdentity(gpa: std.mem.Allocator, io: Io, model_dir: []const u8) ![]
     for (names.items) |name| {
         const p = try std.fs.path.join(gpa, &.{ model_dir, name });
         defer gpa.free(p);
-        var shard = try mapFile(io, p);
-        defer shard.map.destroy(io);
-        defer shard.file.close(io);
-        const hl = try headerLen(shard.map.memory);
-        try shards.append(gpa, .{ .name = name, .size = shard.len, .header_sha256 = hashBytes(shard.map.memory[8..][0..hl]) });
+        const shard = try mapFile(io, p);
+        try maps.append(gpa, .{ .file = shard.file, .map = shard.map });
+        try shards.append(gpa, .{ .name = name, .size = shard.len, .bytes = shard.map.memory });
     }
-    return identityString(gpa, index_sha, shards.items);
+    const out = try identityFromMapped(gpa, mapped.map.memory, shards.items);
+    for (maps.items) |*m| {
+        m.map.destroy(io);
+        m.file.close(io);
+    }
+    maps.clearRetainingCapacity();
+    return out;
 }
 
 fn recordedSource(gpa: std.mem.Allocator, header_json: []const u8) ![]u8 {

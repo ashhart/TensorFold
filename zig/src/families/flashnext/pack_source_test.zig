@@ -83,6 +83,38 @@ test "the reader loads a pack with no recorded source and refuses a mismatching 
     try std.testing.expectError(error.PackSourceMismatch, pio.checkSource(a, io, try fixture.tmpPath(a, tmp, "marked.safetensors"), model_dir));
 }
 
+test "the io and mapped identity paths produce the same text" {
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try fixture.writeCheckpoint(tmp, a);
+    const model_dir = try fixture.tmpPath(a, tmp, ".");
+    const through_io = try pio.sourceIdentity(a, io, model_dir);
+    // the engine's path: mapped bytes for the index and every weight_map shard
+    const index_bytes = try tmp.dir.readFileAlloc(io, "model.safetensors.index.json", a, .limited(1 << 30));
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, index_bytes, .{});
+    defer parsed.deinit();
+    var shards: std.ArrayList(pio.MappedShard) = .empty;
+    var seen: std.ArrayList([]const u8) = .empty;
+    var it = parsed.value.object.get("weight_map").?.object.iterator();
+    while (it.next()) |kv| {
+        var dup = false;
+        for (seen.items) |n| if (std.mem.eql(u8, n, kv.value_ptr.string)) {
+            dup = true;
+            break;
+        };
+        if (dup) continue;
+        try seen.append(a, kv.value_ptr.string);
+        const bytes = try tmp.dir.readFileAlloc(io, kv.value_ptr.string, a, .limited(1 << 30));
+        try shards.append(a, .{ .name = kv.value_ptr.string, .size = bytes.len, .bytes = bytes });
+    }
+    const through_maps = try pio.identityFromMapped(a, index_bytes, shards.items);
+    try std.testing.expectEqualStrings(through_io, through_maps);
+    try std.testing.expect(std.mem.startsWith(u8, through_maps, "index "));
+}
+
 test "the identity string does not depend on the shard list's order" {
     const a = gpa;
     const h1 = pio.hashBytes("a");

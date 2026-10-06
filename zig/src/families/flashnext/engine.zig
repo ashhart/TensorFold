@@ -175,21 +175,33 @@ pub const Engine = struct {
         while (wit.next()) |kv| try files.put(arena, kv.value_ptr.string, {});
         var fit = files.keyIterator();
         while (fit.next()) |name| try r.indexFile(try std.fmt.allocPrintSentinel(arena, "{s}/{s}", .{ model_dir, name.* }, 0));
-        // the pack must name the checkpoint beside it: one built from another checkpoint refuses here
-        var shard_ids: std.ArrayList(pack_io.ShardId) = .empty;
-        var sit = files.keyIterator();
-        while (sit.next()) |name| {
-            const shard = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/{s}", .{ model_dir, name.* }, 0));
-            if (shard.size < 8) return error.BadSafetensors;
-            const shard_header: usize = @intCast(std.mem.readInt(u64, shard.bytes[0..8], .little));
-            if (shard_header > shard.size - 8) return error.BadSafetensors;
-            try shard_ids.append(arena, .{ .name = name.*, .size = shard.size, .header_sha256 = pack_io.hashBytes(shard.bytes[8..][0..shard_header]) });
-        }
-        const identity = try pack_io.identityString(arena, pack_io.hashBytes(index_file.bytes[0..index_file.size]), shard_ids.items);
+        // the pack must name the checkpoint beside it: one built from another checkpoint refuses here; every
+        // mapping unmaps as soon as the identity text exists, so a refused or failed load leaves nothing mapped
+        const identity = blk: {
+            var maps: std.ArrayList(mtl.MappedFile) = .empty;
+            errdefer for (maps.items) |*m| m.deinit();
+            var mapped_shards: std.ArrayList(pack_io.MappedShard) = .empty;
+            var sit = files.keyIterator();
+            while (sit.next()) |name| {
+                const shard = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/{s}", .{ model_dir, name.* }, 0));
+                try maps.append(arena, shard);
+                try mapped_shards.append(arena, .{ .name = name.*, .size = shard.size, .bytes = shard.bytes[0..shard.size] });
+            }
+            const index_mapped = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/model.safetensors.index.json", .{model_dir}, 0));
+            try maps.append(arena, index_mapped);
+            const id = try pack_io.identityFromMapped(arena, index_mapped.bytes[0..index_mapped.size], mapped_shards.items);
+            for (maps.items) |*m| m.deinit();
+            maps.clearRetainingCapacity();
+            break :blk id;
+        };
         const pack_path = try std.fmt.allocPrintSentinel(arena, "{s}/pack.safetensors", .{dump_dir}, 0);
-        const pack_file = try mtl.MappedFile.open(pack_path);
-        try pack_io.checkSourceMapped(arena, pack_file.bytes[0..pack_file.size], identity, pack_path);
-        try r.indexFile(try std.fmt.allocPrintSentinel(arena, "{s}/pack.safetensors", .{dump_dir}, 0));
+        {
+            const pack_file = try mtl.MappedFile.open(pack_path);
+            errdefer pack_file.deinit();
+            try pack_io.checkSourceMapped(arena, pack_file.bytes[0..pack_file.size], identity, pack_path);
+            pack_file.deinit();
+        }
+        try r.indexFile(pack_path);
         const ref_file = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/ref.json", .{dump_dir}, 0));
         const ref = try std.json.parseFromSliceLeaky(std.json.Value, arena, ref_file.bytes[0..ref_file.size], .{});
         const ple_ref = ref.object.get("ple").?.object;
