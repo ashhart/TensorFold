@@ -24,7 +24,7 @@ pub const Ctx = struct {
     skip: u32 = 0, // a profile's knock-outs: launch classes left out (Class bits)
     pskip: u32 = 0, // a profile's knock-outs by launch (Part bits)
     fused_route: bool = true, // the core route (two launches); false: the Python family's cast, router and top-k
-    hc_mode: u8 = 1, // 0: the family's expand, mix and split; 1: its expand, then core/hc.zig's mix and split; 2: one launch
+    hc_mode: u8 = 0, // 0: the family's expand, mix and split; 1: its expand, then core/hc.zig's mix and split; 2: one launch
 };
 
 /// Single launches (or tight groups) for a profile that times each alone.

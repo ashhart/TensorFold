@@ -67,7 +67,7 @@ pub const Engine = struct {
     load_seconds: f64 = 0,
     gpu: [2]f64 = .{ 0, 0 }, // the last command buffer's GPU start and end (host seconds)
     fused_route: bool = true, // GLM_ROUTE=0: the Python family's cast, router and top-k launches
-    hc_mode: u8 = 1, // GLM_HC: 0 the family's three boundary launches, 1 expand + core mix-split, 2 core one launch
+    hc_mode: u8 = 0, // GLM_HC: 0 the family's three boundary launches, 1 expand + core mix-split, 2 core one launch
     committed: u64 = 0, // when the last command buffer was committed (mach ticks)
 
     /// The checkpoint in `dir`, caches for `cap` tokens; GLM_LAYERS=N: the first N layers only; GLM_EP=settings: half the experts.
@@ -87,7 +87,7 @@ pub const Engine = struct {
         e.residency = null;
         e.gpu = .{ 0, 0 };
         e.fused_route = if (std.c.getenv("GLM_ROUTE")) |v| v[0] != '0' else true;
-        e.hc_mode = if (std.c.getenv("GLM_HC")) |v| v[0] - '0' else 1;
+        e.hc_mode = if (std.c.getenv("GLM_HC")) |v| v[0] - '0' else 0;
         e.committed = 0;
         e.ep = null;
         e.pr = null;
