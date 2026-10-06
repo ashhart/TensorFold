@@ -492,7 +492,7 @@ pub const Tp2 = struct {
         while (true) {
             const v = @atomicLoad(u64, t.word64(ACK_FLAG), .acquire);
             if (v >> 1 >= t.req) return v >> 1 == t.req and v & 1 != 0;
-            if (std.c.mach_absolute_time() - t0 > 240_000_000) return error.TpPeerSilent; // 10 s
+            if (std.c.mach_absolute_time() - t0 > 7_200_000_000) return error.TpPeerSilent; // 300 s: rank 1 may still be loading
             std.atomic.spinLoopHint();
         }
     }

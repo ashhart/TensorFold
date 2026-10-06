@@ -346,7 +346,10 @@ fn cacheBudget(eng: *fx.Engine, gib: ?f64) u64 {
 pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: []const u8, window: i64, speed_up: ?[]const u8, cache_gib: ?f64) !*Host {
     const eng = try fx.Engine.loadWith(gpa, dir, dump, speed_up);
     errdefer eng.deinit();
-    try eng.warm();
+    eng.warm() catch |err| {
+        std.log.err("flash next: warm-up failed: {s}", .{@errorName(err)});
+        return err;
+    };
     const follower: ?std.Thread = if (eng.followsPeer()) try std.Thread.spawn(.{}, follow, .{eng}) else null; // rank 1
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
