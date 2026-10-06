@@ -83,13 +83,17 @@ pub const Engine = struct {
         e.ep_arena = .init(gpa);
         errdefer e.ep_arena.deinit();
         e.device = try mtl.Device.init();
+        errdefer e.device.deinit();
         e.queue = try e.device.queue();
+        errdefer e.queue.deinit();
         e.event = try e.device.sharedEvent();
+        errdefer e.event.deinit();
         const path = try std.fmt.allocPrintSentinel(gpa, "{s}/config.json", .{dir}, 0);
         defer gpa.free(path);
         const f = try mtl.MappedFile.open(path);
         defer f.deinit();
         e.c = try cfg.parse(gpa, f.bytes[0..f.size]);
+        const model = try modelHash(gpa, dir, f.bytes[0..f.size]);
         if (std.c.getenv("GLM_LAYERS")) |v| try cfg.subset(&e.c, std.fmt.parseInt(u32, std.mem.span(v), 10) catch return error.BadLayerCount);
         const link: ?ep_mod.Settings = if (ep_path) |sp| blk: {
             const sf = try mtl.MappedFile.open(try e.ep_arena.allocator().dupeSentinel(u8, sp, 0));
@@ -103,17 +107,13 @@ pub const Engine = struct {
             e.k.deinit();
             gpa.destroy(e.k);
         }
-        if (std.c.getenv("GLM_DRY") != null) { // the weights' plan and checks only, then stop
+        const plan_bytes = blk: { // the weights' plan from the headers: names, dtypes, shapes and bytes, nothing read
             const plan = try wts.load(gpa, e.device, dir, &e.c, 16, true);
-            plan.deinit();
-            gpa.destroy(plan);
-            return error.DryRun;
-        }
-        e.w = try wts.load(gpa, e.device, dir, &e.c, 16, false);
-        errdefer {
-            e.w.deinit();
-            gpa.destroy(e.w);
-        }
+            defer gpa.destroy(plan);
+            defer plan.deinit();
+            break :blk plan.bytes;
+        };
+        if (std.c.getenv("GLM_DRY") != null) return error.DryRun;
         e.arena = .{ .device = e.device, .gpa = gpa };
         errdefer e.arena.deinit();
         const both = try st.init(&e.arena, &e.c, cap);
@@ -123,8 +123,18 @@ pub const Engine = struct {
         const chunked = if (std.c.getenv("GLM_PROMPT")) |v| v[0] != '0' else true;
         if (chunked and link == null) e.pr = try prompt_mod.init(gpa, &e.arena, e.device, &e.c, &e.sc, cap);
         errdefer if (e.pr) |*p| p.deinit();
+        const limit = loadLimit();
+        if (plan_bytes + e.arena.bytes > limit) { // refused before any weight is read: the floor's one-Mac limit
+            std.log.err("glm: {d:.1} GB of weights and {d:.1} GB of caches pass this Mac's {d:.1} GB load limit (70% of RAM); load a layer subset or the expert-parallel pair", .{ @as(f64, @floatFromInt(plan_bytes)) / 1e9, @as(f64, @floatFromInt(e.arena.bytes)) / 1e9, @as(f64, @floatFromInt(limit)) / 1e9 });
+            return error.OverMemoryLimit;
+        }
+        e.w = try wts.load(gpa, e.device, dir, &e.c, 16, false);
+        errdefer {
+            e.w.deinit();
+            gpa.destroy(e.w);
+        }
         try e.prepare();
-        if (link) |s| e.ep = try ep_mod.Ep.init(gpa, e.device, s, e.c.own);
+        if (link) |s| e.ep = try ep_mod.Ep.init(gpa, e.device, s, .{ .layers = e.c.layers, .run = e.c.run, .mtp = @intFromBool(e.w.mtp != null), .experts = e.c.experts, .own_lo = e.c.own[0], .own_hi = e.c.own[1], .cap = cap, .model = model });
         // opt-in: wiring 181 GB leaves macOS nothing to reclaim if another model shares the Mac (Flash Next runs without)
         if (std.c.getenv("GLM_RESIDENCY") == null) {} else if (e.device.residencySet(e.w.buffers.items.len + e.arena.buffers.items.len)) |set| {
             for (e.w.buffers.items) |b| set.add(b);
@@ -136,6 +146,26 @@ pub const Engine = struct {
         } else |_| {}
         e.load_seconds = @as(f64, @floatFromInt(std.c.mach_absolute_time() - t0)) / 24e6;
         return e;
+    }
+
+    /// The checkpoint's identity for a peer: its config and weight index, hashed.
+    fn modelHash(gpa: std.mem.Allocator, dir: []const u8, config: []const u8) !u64 {
+        const path = try std.fmt.allocPrintSentinel(gpa, "{s}/model.safetensors.index.json", .{dir}, 0);
+        defer gpa.free(path);
+        const f = try mtl.MappedFile.open(path);
+        defer f.deinit();
+        var h = std.hash.Wyhash.init(0x474c4d);
+        h.update(config);
+        h.update(f.bytes[0..f.size]);
+        return h.final();
+    }
+
+    /// The most this Mac may load: 70% of its RAM in GiB, read as GB (the floor's 179 GB on a 256 GiB Mac, the strict reading).
+    fn loadLimit() usize {
+        var mem: u64 = 0;
+        var len: usize = @sizeOf(u64);
+        if (std.c.sysctlbyname("hw.memsize", &mem, &len, null, 0) != 0 or mem == 0) return 0;
+        return @intFromFloat(@as(f64, @floatFromInt(mem)) / (1 << 30) * 0.7 * 1e9);
     }
 
     /// The KDA decay rates A = exp(A_log) with MLX's Exp, on the GPU.
@@ -195,20 +225,20 @@ pub const Engine = struct {
         const ep = e.ep orelse return;
         var dummy: u8 = 0;
         const quiet: Out = .{ .ctx = &dummy, .prefilled = Quiet.prefilled, .tokens = Quiet.tokens, .cancelled = Quiet.cancelled };
-        while (ep.waitRequest()) |r| _ = e.generate(r.prompt, r.max_tokens, r.eos, r.depth, quiet) catch |err| switch (err) {
+        while (try ep.ctl.waitRequest()) |r| _ = e.generate(r.prompt, r.max_tokens, r.eos, r.depth, quiet) catch |err| switch (err) {
             error.ContextFull, error.EmptyPrompt => continue, // refused before its first step, on rank 0 too
             else => return err,
         };
     }
 
     pub fn stopFollowing(e: *Engine) void {
-        if (e.ep) |ep| ep.quitting.store(true, .release);
+        if (e.ep) |ep| ep.ctl.stop.store(true, .release);
     }
 
     /// This Mac's decision to stop at a step; with a peer, rank 0's decision, the one both Macs take.
     fn agree(e: *Engine, quit: bool) !bool {
         const ep = e.ep orelse return quit;
-        return ep.agree(quit);
+        return ep.ctl.agree(quit);
     }
 
     fn ctx(e: *Engine) fwd.Ctx {

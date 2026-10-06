@@ -3,10 +3,13 @@ const std = @import("std");
 const mtl = @import("metal");
 const fabric = @import("fabric");
 const settings = @import("../flashnext/tp_settings.zig");
+const control = @import("ep_control.zig");
 const Ref = @import("weights.zig").Ref;
 
 pub const Settings = settings.Settings;
 pub const readSettings = settings.read;
+pub const Identity = control.Identity;
+pub const Request = control.Request;
 
 const D = 4096;
 const TOPK = 8;
@@ -21,24 +24,24 @@ const RECV = 0;
 const SEND = RECV + 2 * SLOT;
 const FLAGS = SEND + 2 * (PAGE + SLOT);
 const FLAG = FLAGS; // u64: the last exchange whose peer entries have landed
-const HELLO = FLAGS + 8;
-const CTRL = FLAGS + 16; // u64 by parity: rank 0's decision at each step both Macs take, (step << 1) | quit
-const REQ_FLAG = FLAGS + 32; // u64: the last request rank 0 has written
 const SYNC = FLAGS + PAGE;
-const POSTED = SYNC; // u32: the last exchange the GPU has packed
+const POSTED = SYNC; // u32: the last exchange the GPU has packed (its low 32 bits)
 const COUNT = SYNC + 64; // u32 by parity: each exchange's packed entries
 const GAVE_UP = SYNC + 128; // u32: GPU waits that gave up (nonzero: the run is invalid)
-const REQ = SYNC + PAGE; // served: rank 0's request for rank 1, a 64-byte head and then the prompt's tokens
-pub const REQ_TOKENS = 262144;
-const MAX_EOS = 11;
-pub const WINDOW = REQ + std.mem.alignForward(usize, 64 + 4 * REQ_TOKENS, PAGE);
+const CONTROL = SYNC + PAGE; // the control protocol's region (ep_control.zig)
+pub const WINDOW = CONTROL + control.BYTES;
 
-fn recvAt(x: u32) usize {
-    return RECV + (x % 2) * SLOT;
+fn recvAt(x: u64) usize {
+    return RECV + @as(usize, @intCast(x % 2)) * SLOT;
 }
 
-fn sendAt(x: u32) usize {
-    return SEND + (x % 2) * (PAGE + SLOT) + PAGE;
+fn sendAt(x: u64) usize {
+    return SEND + @as(usize, @intCast(x % 2)) * (PAGE + SLOT) + PAGE;
+}
+
+/// Whether the GPU's posted word (an exchange's low 32 bits) has reached exchange x, across the 32-bit wrap.
+fn reached(posted: u32, x: u64) bool {
+    return @as(i32, @bitCast(posted -% @as(u32, @truncate(x)))) >= 0;
 }
 
 // The lists one exchange keeps (i32): this Mac's unique experts with local ids and their members, the picks each Mac computes.
@@ -132,63 +135,61 @@ pub const Ep = struct {
     pack_pipe: mtl.Pipeline,
     post_pipe: mtl.Pipeline,
     unpack_pipe: mtl.Pipeline,
-    x: u32 = 0, // exchanges encoded so far, the same count on both Macs
-    ctrl: u64 = 0, // steps agreed so far, the same count on both Macs
-    req: u64 = 0, // requests handed over so far
-    eos: [MAX_EOS]u32 = undefined, // rank 1: the request's end tokens, copied out of the window
+    x: u64 = 0, // exchanges encoded so far, the same count on both Macs (the GPU sees the low 32 bits)
+    ctl: control.Control, // identities, requests and stop decisions
     thread: ?std.Thread = null,
     stop: std.atomic.Value(bool) = .init(false),
     failed: std.atomic.Value(bool) = .init(false),
-    quitting: std.atomic.Value(bool) = .init(false), // served rank 1: end the wait for rank 0's next request
     trace: bool = false, // GLM_EP_TRACE: log every exchange the host sends
     sent: u64 = 0, // exchanges the host has sent
     held_ticks: u64 = 0, // their time from the GPU's post to the send returning
 
-    /// Connect to the peer in `s` (this Mac holds routed experts `own`), then start the host's sending thread.
-    pub fn init(gpa: std.mem.Allocator, device: mtl.Device, s: Settings, own: [2]u32) !*Ep {
+    /// Connect to the peer in `s`, refuse it unless it runs the same model with the other half of the experts (`me`).
+    pub fn init(gpa: std.mem.Allocator, device: mtl.Device, s: Settings, me: Identity) !*Ep {
         if (s.rank > 1 or s.links.len != 1) return error.EpTwoRanksOneLink;
-        const lib = try gpa.dupeSentinel(u8, s.library, 0);
-        const link = try fabric.mcdma.Endpoint.create(gpa, lib, .{ .rank = s.rank, .ranks = 2, .window_bytes = WINDOW, .staging_bytes = 4 << 20, .links = s.links, .timeout_ns = 60 * std.time.ns_per_s, .connect_timeout_ns = 300 * std.time.ns_per_s });
+        const link = blk: {
+            const lib = try gpa.dupeSentinel(u8, s.library, 0);
+            defer gpa.free(lib);
+            break :blk try fabric.mcdma.Endpoint.create(gpa, lib, .{ .rank = s.rank, .ranks = 2, .window_bytes = WINDOW, .staging_bytes = 4 << 20, .links = s.links, .timeout_ns = 60 * std.time.ns_per_s, .connect_timeout_ns = 300 * std.time.ns_per_s });
+        };
         errdefer link.deinit();
         const rd = link.rdma();
         const win = rd.window(); // zeroed before the link connected: a fast peer's first words may be here already
         const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
-        const lib_m = try mtl.Library.fromSource(device, source, mtl.CompileOptions.mlx());
         const t = try gpa.create(Ep);
         errdefer gpa.destroy(t);
-        t.* = .{
-            .rank = s.rank,
-            .peer = 1 - s.rank,
-            .own = own,
-            .link = link,
-            .rd = rd,
-            .win = win,
-            .wbuf = try device.bufferNoCopy(win.ptr, win.len, opts),
-            .lists = try device.buffer(LISTS, opts),
-            .localize_pipe = try mtl.Pipeline.init(device, lib_m, "ep_localize", false),
-            .pack_pipe = try mtl.Pipeline.init(device, lib_m, "ep_pack", false),
-            .post_pipe = try mtl.Pipeline.init(device, lib_m, "ep_post", false),
-            .unpack_pipe = try mtl.Pipeline.init(device, lib_m, "ep_unpack", false),
-        };
-        // both Macs up before the first exchange: a word each way
-        try rd.signal(t.peer, HELLO, 1);
-        const t0 = std.c.mach_absolute_time();
-        while (@atomicLoad(u64, t.word64(HELLO), .acquire) < 1) {
-            if (std.c.mach_absolute_time() - t0 > 7_200_000_000) return error.EpPeerSilent; // 300 s
-            std.atomic.spinLoopHint();
+        const wbuf = try device.bufferNoCopy(win.ptr, win.len, opts);
+        errdefer wbuf.deinit();
+        const lists = try device.buffer(LISTS, opts);
+        errdefer lists.deinit();
+        const lib_m = try mtl.Library.fromSource(device, source, mtl.CompileOptions.mlx());
+        defer lib_m.deinit();
+        var pipes: [4]mtl.Pipeline = undefined;
+        var made: usize = 0;
+        errdefer for (pipes[0..made]) |pp| pp.deinit();
+        for ([_][]const u8{ "ep_localize", "ep_pack", "ep_post", "ep_unpack" }) |name| {
+            pipes[made] = try mtl.Pipeline.init(device, lib_m, name, false);
+            made += 1;
         }
+        t.* = .{ .rank = s.rank, .peer = 1 - s.rank, .own = .{ me.own_lo, me.own_hi }, .link = link, .rd = rd, .win = win, .wbuf = wbuf, .lists = lists, .localize_pipe = pipes[0], .pack_pipe = pipes[1], .post_pipe = pipes[2], .unpack_pipe = pipes[3], .ctl = undefined };
+        t.ctl = try control.Control.init(gpa, rd, CONTROL, &t.failed);
+        errdefer t.ctl.deinit(gpa);
+        _ = try t.ctl.hello(me); // both Macs up, running the same thing, before the first exchange
         t.trace = std.c.getenv("GLM_EP_TRACE") != null;
         t.thread = try std.Thread.spawn(.{}, service, .{t});
-        std.log.info("expert parallel: rank {d} of 2 holds experts {d}-{d}, connected", .{ t.rank, own[0], own[1] - 1 });
+        std.log.info("expert parallel: rank {d} of 2 holds experts {d}-{d}, connected", .{ t.rank, me.own_lo, me.own_hi - 1 });
         return t;
     }
 
-    /// Stop the sending thread and close the link (no GPU work may still use the window).
+    /// Say goodbye (rank 0), stop the sending thread and close the link (no GPU work may still use the window).
     pub fn deinit(t: *Ep, gpa: std.mem.Allocator) void {
+        t.ctl.bye();
         t.rd.flush() catch {};
         t.stop.store(true, .release);
         if (t.thread) |th| th.join();
         if (t.sent > 0) std.log.info("expert parallel rank {d}: {d} exchanges, {d:.1} us a send, {d} GPU waits gave up", .{ t.rank, t.sent, @as(f64, @floatFromInt(t.held_ticks)) / @as(f64, @floatFromInt(t.sent)) / 24.0, t.gaveUp() });
+        t.ctl.deinit(gpa);
+        for ([_]mtl.Pipeline{ t.localize_pipe, t.pack_pipe, t.post_pipe, t.unpack_pipe }) |pp| pp.deinit();
         t.lists.deinit();
         t.wbuf.deinit();
         t.link.deinit();
@@ -216,7 +217,7 @@ pub const Ep = struct {
         for ([_]Ref{ pick, uids, umem, ucount }, 0..) |r, i| enc.setBuffer(r.buf, r.off, i);
         enc.setValue([4]i32{ @intCast(rows), @intCast(t.own[0]), @intCast(t.own[1]), 0 }, 4);
         for ([_]usize{ L_IDS, L_MEM, L_COUNT, MINE, THEIRS, COUNTS }, 5..) |off, i| enc.setBuffer(t.lists, off, i);
-        enc.setBuffer(t.wbuf, COUNT + 4 * (t.x % 2), 11);
+        enc.setBuffer(t.wbuf, COUNT + 4 * @as(usize, @intCast(t.x % 2)), 11);
         enc.dispatchThreads(mtl.Size.of(MAXP, 1, 1), mtl.Size.of(MAXP, 1, 1));
     }
 
@@ -230,7 +231,7 @@ pub const Ep = struct {
         enc.dispatchGroups(mtl.Size.of(1, rows * TOPK, 1), mtl.Size.of(256, 1, 1));
         enc.setPipeline(t.post_pipe);
         enc.setBuffer(t.wbuf, POSTED, 0);
-        enc.setValue(t.x, 1);
+        enc.setValue(@as(u32, @truncate(t.x)), 1);
         enc.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
     }
 
@@ -238,65 +239,13 @@ pub const Ep = struct {
     pub fn receive(t: *Ep, enc: mtl.ComputeEncoder, ye: Ref, rows: u32) void {
         enc.setPipeline(t.unpack_pipe);
         enc.setBuffer(t.wbuf, FLAG, 0);
-        enc.setValue(t.x, 1);
+        enc.setValue(@as(u32, @truncate(t.x)), 1);
         enc.setBuffer(t.wbuf, GAVE_UP, 2);
         enc.setBuffer(t.wbuf, recvAt(t.x), 3);
         enc.setBuffer(t.lists, THEIRS, 4);
         enc.setBuffer(t.lists, COUNTS, 5);
         enc.setBuffer(ye.buf, ye.off, 6);
         enc.dispatchGroups(mtl.Size.of(1, rows * TOPK, 1), mtl.Size.of(256, 1, 1));
-    }
-
-    /// Rank 0's stop decision at a step both take reaches rank 1, which waits; two parity words (rank 0 runs at most two ahead).
-    pub fn agree(t: *Ep, quit: bool) !bool {
-        t.ctrl += 1;
-        const word = CTRL + 8 * (t.ctrl % 2);
-        if (t.rank == 0) {
-            try t.rd.signal(t.peer, word, (t.ctrl << 1) | @intFromBool(quit));
-            return quit;
-        }
-        const t0 = std.c.mach_absolute_time();
-        while (true) {
-            const v = @atomicLoad(u64, t.word64(word), .acquire);
-            if (v >> 1 == t.ctrl) return v & 1 != 0;
-            if (v >> 1 > t.ctrl) return error.EpOutOfStep;
-            if (std.c.mach_absolute_time() - t0 > 240_000_000) return error.EpPeerSilent; // 10 s
-            std.atomic.spinLoopHint();
-        }
-    }
-
-    pub const Request = struct { max_tokens: usize, depth: usize, eos: []const u32, prompt: []const u32 };
-
-    /// Served, rank 0: hand rank 1 the next request in one message.
-    pub fn sendRequest(t: *Ep, r: Request) !void {
-        if (r.prompt.len > REQ_TOKENS or r.eos.len > MAX_EOS) return error.EpRequestTooLarge;
-        var head: [16]u32 = @splat(0);
-        head[0] = @intCast(@min(r.max_tokens, std.math.maxInt(u32)));
-        head[1] = @intCast(r.depth);
-        head[2] = @intCast(r.prompt.len);
-        head[3] = @intCast(r.eos.len);
-        @memcpy(head[4..][0..r.eos.len], r.eos);
-        t.req += 1;
-        try t.rd.write2Signal(t.peer, REQ, std.mem.sliceAsBytes(&head), std.mem.sliceAsBytes(r.prompt), REQ_FLAG, t.req);
-    }
-
-    /// Served, rank 1: rank 0's next request (its tokens in the window until the next one), or null once `quitting`.
-    pub fn waitRequest(t: *Ep) ?Request {
-        t.req += 1;
-        var spins: usize = 0;
-        while (@atomicLoad(u64, t.word64(REQ_FLAG), .acquire) < t.req) {
-            if (t.quitting.load(.acquire)) return null;
-            spins += 1;
-            if (spins > 100_000) { // idle: back off
-                const ts: std.c.timespec = .{ .sec = 0, .nsec = 50_000 };
-                _ = std.c.nanosleep(&ts, null);
-            } else std.atomic.spinLoopHint();
-        }
-        const head: [*]const u32 = @ptrCast(@alignCast(t.win.ptr + REQ));
-        const tokens: [*]const u32 = @ptrCast(@alignCast(t.win.ptr + REQ + 64));
-        const n_eos = @min(head[3], MAX_EOS);
-        @memcpy(t.eos[0..n_eos], head[4..][0..n_eos]); // the next request may land before this one's last step
-        return .{ .max_tokens = head[0], .depth = head[1], .eos = t.eos[0..n_eos], .prompt = tokens[0..@min(head[2], REQ_TOKENS)] };
     }
 
     fn word32(t: *const Ep, off: usize) *u32 {
@@ -311,16 +260,19 @@ pub const Ep = struct {
     fn service(t: *Ep) void {
         const posted = t.word32(POSTED);
         const flag = t.word64(FLAG);
-        var x: u32 = 1;
+        var x: u64 = 1;
+        var waiting = false; // an exchange sent whose peer entries have not landed yet
         var want: u64 = 0;
         var want_at: u64 = 0;
         while (true) {
             var spins: usize = 0;
-            while (@as(i32, @bitCast(@atomicLoad(u32, posted, .acquire) -% x)) < 0) {
+            while (!reached(@atomicLoad(u32, posted, .acquire), x)) {
                 if (t.stop.load(.acquire)) return;
-                if (want > 0 and @atomicLoad(u64, flag, .acquire) < want and !t.failed.load(.acquire) and std.c.mach_absolute_time() - want_at > 240_000_000) {
-                    t.fail(x, error.PeerSilent);
+                if (waiting and @atomicLoad(u64, flag, .acquire) >= want) waiting = false;
+                if (waiting and !t.failed.load(.acquire) and std.c.mach_absolute_time() - want_at > 240_000_000) {
+                    t.fail(want, error.PeerSilent);
                     t.land(want);
+                    waiting = false;
                 }
                 spins += 1;
                 if (spins > 1_000_000) { // idle: back off
@@ -329,7 +281,7 @@ pub const Ep = struct {
                 } else std.atomic.spinLoopHint();
             }
             const seen = std.c.mach_absolute_time();
-            const n: usize = @atomicLoad(u32, t.word32(COUNT + 4 * (x % 2)), .acquire);
+            const n: usize = @atomicLoad(u32, t.word32(COUNT + 4 * @as(usize, @intCast(x % 2))), .acquire);
             if (t.trace) std.debug.print("EP rank{d} exchange {d}: {d} entries\n", .{ t.rank, x, n });
             if (t.failed.load(.acquire) or n > MAXP) {
                 if (n > MAXP) t.fail(x, error.BadCount);
@@ -340,9 +292,10 @@ pub const Ep = struct {
             };
             want = x;
             want_at = std.c.mach_absolute_time();
+            waiting = true;
             t.sent += 1;
             t.held_ticks += want_at - seen;
-            x +%= 1;
+            x += 1;
         }
     }
 
@@ -352,7 +305,7 @@ pub const Ep = struct {
         if (@atomicLoad(u64, flag, .acquire) < x) @atomicStore(u64, flag, x, .release);
     }
 
-    fn fail(t: *Ep, x: u32, err: anyerror) void {
+    fn fail(t: *Ep, x: u64, err: anyerror) void {
         std.log.err("expert parallel rank {d}: exchange {d} failed: {s}", .{ t.rank, x, @errorName(err) });
         t.failed.store(true, .release);
     }
@@ -362,9 +315,16 @@ test "the window's regions tile without overlap, slots by parity, a page of room
     try std.testing.expectEqual(@as(usize, 0), WINDOW % fabric.mcdma.alignment);
     try std.testing.expect(recvAt(1) + SLOT <= SEND and recvAt(2) == RECV);
     try std.testing.expect(sendAt(1) - PAGE >= sendAt(2) + SLOT and sendAt(2) == SEND + PAGE);
-    try std.testing.expect(sendAt(1) + SLOT <= FLAGS and HELLO + 8 <= SYNC);
-    try std.testing.expect(GAVE_UP + 4 <= REQ and COUNT + 8 <= GAVE_UP and REQ_FLAG + 8 <= SYNC and CTRL + 16 <= REQ_FLAG);
-    try std.testing.expect(REQ + 64 + 4 * REQ_TOKENS <= WINDOW and 4 + MAX_EOS <= 16);
+    try std.testing.expect(sendAt(1) + SLOT <= FLAGS and FLAG + 8 <= SYNC);
+    try std.testing.expect(GAVE_UP + 4 <= CONTROL and COUNT + 8 <= GAVE_UP and CONTROL % PAGE == 0);
     try std.testing.expectEqual(@as(usize, 4096), D);
     try std.testing.expect(COUNTS + 8 <= LISTS);
+}
+
+test "the posted word reaches an exchange across the 32-bit wrap" {
+    try std.testing.expect(reached(5, 5) and reached(6, 5) and !reached(4, 5));
+    const top: u64 = 0xffff_fffe;
+    try std.testing.expect(reached(0xffff_fffe, top) and !reached(0xffff_fffd, top));
+    try std.testing.expect(reached(0, top + 2) and reached(1, top + 2) and !reached(0xffff_ffff, top + 2)); // 2^32 posts as 0
+    try std.testing.expect(reached(3, (1 << 33) + 3) and !reached(2, (1 << 33) + 3));
 }

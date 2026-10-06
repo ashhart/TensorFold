@@ -13,4 +13,5 @@ test {
     _ = config;
     _ = state;
     _ = ep;
+    _ = @import("ep_control.zig");
 }

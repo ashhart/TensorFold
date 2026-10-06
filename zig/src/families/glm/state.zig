@@ -14,10 +14,15 @@ pub const Arena = struct {
     device: mtl.Device,
     gpa: std.mem.Allocator,
     buffers: std.ArrayList(mtl.Buffer) = .empty,
+    bytes: usize = 0,
 
     pub fn buffer(a: *Arena, len: usize) !Ref {
         const b = try a.device.buffer(@max(len, 16), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-        try a.buffers.append(a.gpa, b);
+        a.buffers.append(a.gpa, b) catch |err| {
+            b.deinit();
+            return err;
+        };
+        a.bytes += @max(len, 16);
         @memset(b.contents()[0..@max(len, 16)], 0);
         return .{ .buf = b };
     }

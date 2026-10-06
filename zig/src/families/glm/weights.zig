@@ -117,7 +117,10 @@ const Loader = struct {
     /// A new buffer of `len` bytes that the next `take`s fill.
     fn begin(l: *Loader, len: usize) !void {
         const b: ?mtl.Buffer = if (l.dry) null else try l.device.buffer(@max(len, 16), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-        if (b) |x| try l.w.buffers.append(l.gpa, x);
+        if (b) |x| l.w.buffers.append(l.gpa, x) catch |err| {
+            x.deinit();
+            return err;
+        };
         l.cur = b;
         l.cur_len = len;
         l.cur_at = 0;
