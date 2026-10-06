@@ -110,6 +110,10 @@ pub const Cuda = struct {
         return @ptrCast(@alignCast(ptr));
     }
 
+    fn cancelled(ptr: *anyopaque) bool {
+        return @as(*lanes.Stream, @ptrCast(@alignCast(ptr))).isCancelled();
+    }
+
     // -- the vtable ---------------------------------------------------------------------------------------------
 
     /// A new sequence for the stream, its sampling, then its prompt in chunks; the head absorbs every row but the last.
@@ -126,7 +130,7 @@ pub const Cuda = struct {
         } };
         e.bind(gop.value_ptr.seq);
         try e.setSampling(s.sampling);
-        const first = try e.prefill(ids, null, self.head);
+        const first = try e.prefillWith(ids, null, self.head, .{ .ptr = s, .check = cancelled });
         // the head's first draft reads the prompt's last row (its hidden row waits where a window's would)
         const last = (ids.len - 1) % state.prefill_rows;
         try e.ops().copy(e.b.hidden, e.b.p_hidden + last * @as(u64, e.c.hidden) * 2, e.c.hidden * 2);

@@ -97,6 +97,15 @@ pub const Backend = struct {
     pub fn release(b: Backend, s: *Stream) void {
         b.vtable.release(b.ptr, s);
     }
+
+    /// A driver of its own starts a stream: the prompt pass and its first token, committed; a cancel or failure releases it.
+    pub fn opening(b: Backend, gpa: std.mem.Allocator, s: *Stream) !u32 {
+        errdefer b.release(s);
+        try b.prefill(s);
+        const token = try b.read(try b.first(s, s.prompt_len));
+        _ = try s.commit(gpa, &.{token});
+        return token;
+    }
 };
 
 /// Where the round loop reads time: the depth rule's costs and a shared round's overhead.

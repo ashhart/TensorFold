@@ -40,6 +40,7 @@ pub const LaneHost = struct {
     const window_ns: i96 = 2 * std.time.ns_per_s;
 
     const Job = struct {
+        host: *LaneHost,
         id: Id,
         request: *const Request,
         sink: Sink,
@@ -92,7 +93,7 @@ pub const LaneHost = struct {
     fn submitFn(ctx: *anyopaque, id: Id, request: *const Request, sink: Sink) SubmitError!void {
         const h = self(ctx);
         const job = h.gpa.create(Job) catch return error.Busy;
-        job.* = .{ .id = id, .request = request, .sink = sink };
+        job.* = .{ .host = h, .id = id, .request = request, .sink = sink };
         h.mutex.lockUncancelable(h.io);
         defer h.mutex.unlock(h.io);
         if (h.closing) {
@@ -147,6 +148,14 @@ pub const LaneHost = struct {
 
     fn emit(job: *Job, event: Event) void {
         job.sink.event(job.sink.ctx, job.id, &event);
+    }
+
+    /// A job's cancel hook for its prompt pass: its id is in `cancels`, or the host is closing (read under the lock).
+    fn cancelled(ctx: *anyopaque) bool {
+        const job: *Job = @ptrCast(@alignCast(ctx));
+        job.host.lock();
+        defer job.host.unlock();
+        return job.host.closing or std.mem.indexOfScalar(Id, job.host.cancels.items, job.id) != null;
     }
 
     /// Hands a stream the tokens its rounds committed since the last delivery.
@@ -259,6 +268,7 @@ pub const LaneHost = struct {
             .drafts = r.drafts,
             .proposer = job.proposer.proposer(),
             .stop_check = if (r.stop) |s| .{ .ptr = s.ctx, .check = s.check } else null,
+            .cancel_check = .{ .ptr = job, .check = cancelled },
             .think_budget = r.think_budget,
             .think_close = r.think_close,
             .think_end = if (r.think_end) |t| t else -1,
@@ -272,7 +282,7 @@ pub const LaneHost = struct {
         const began = std.Io.Clock.awake.now(h.io).toNanoseconds();
         job.began = began;
         if (h.loneFits(job)) return h.runLone(job, began);
-        h.core.addStream(&job.stream) catch |e| return h.drop(job, @errorName(e));
+        h.core.addStream(&job.stream) catch |e| return if (e == error.Cancelled) h.cancel(job) else h.drop(job, @errorName(e));
         h.prefilled(job, began);
         if (h.deliver(job)) h.remove(job);
         return true;
@@ -326,7 +336,7 @@ pub const LaneHost = struct {
         const handed = paused catch |e| {
             if (!job.prefill_sent) emit(job, .{ .prefilled = 0 });
             h.remove(job);
-            h.finish(job, .failed, @errorName(e));
+            h.finish(job, if (e == error.Cancelled) .cancelled else .failed, if (e == error.Cancelled) "" else @errorName(e));
             return true;
         };
         if (!job.prefill_sent) h.prefilled(job, began);
@@ -343,6 +353,13 @@ pub const LaneHost = struct {
         h.remove(job);
         if (job.started and !job.stream.finished) h.core.discard(&job.stream);
         h.finish(job, .failed, message);
+        return true;
+    }
+
+    /// A job cancelled in its prompt pass, its lane already released.
+    fn cancel(h: *LaneHost, job: *Job) bool {
+        h.remove(job);
+        h.finish(job, .cancelled, "");
         return true;
     }
 
@@ -481,4 +498,49 @@ test "a lane host serves the core's own tokens, in order, and cancels between ro
     try e.submit(2, &long, .{ .ctx = &gone, .event = Box.event });
     e.cancel(2);
     try std.testing.expectEqual(Reason.cancelled, gone.wait());
+
+    const CancelPrefill = struct {
+        engine: Engine,
+        id: Id,
+        at: usize,
+
+        fn call(ctx: *anyopaque, _: *lanes.Stream, chunk: usize) void {
+            const c: *@This() = @ptrCast(@alignCast(ctx));
+            if (chunk == c.at) c.engine.cancel(c.id);
+        }
+    };
+    const chunked_prompt = [_]u32{ 8, 6, 7, 5, 3, 0, 9, 2, 1, 4 };
+    var chunked: Box = .{};
+    defer chunked.tokens.deinit(gpa);
+    var prefill_cancel = CancelPrefill{ .engine = e, .id = 3, .at = 2 };
+    target.prefill_chunks = 10;
+    target.prefill_count = 0;
+    target.prefill_hook = CancelPrefill.call;
+    target.prefill_hook_ctx = &prefill_cancel;
+    const chunked_request: Request = .{ .prompt = &chunked_prompt, .max_tokens = 1 };
+    try e.submit(3, &chunked_request, .{ .ctx = &chunked, .event = Box.event });
+    try std.testing.expectEqual(Reason.cancelled, chunked.wait());
+    try std.testing.expect(target.prefill_count <= 3);
+    try std.testing.expectEqual(@as(usize, 0), target.lanes.count()); // its lane released
+
+    // the lone driver's prompt pass (gpu_round.run starts with Backend.opening), cancelled the same way
+    const Lone = struct {
+        be: lanes.backend.Backend,
+
+        fn run(ctx: *anyopaque, s: *lanes.Stream, _: api.LoneHooks) anyerror!bool {
+            const l: *@This() = @ptrCast(@alignCast(ctx));
+            _ = try l.be.opening(gpa, s);
+            return error.NotCancelled;
+        }
+    };
+    var lone: Box = .{};
+    defer lone.tokens.deinit(gpa);
+    var lone_driver = Lone{ .be = target.backend() };
+    host.lone = .{ .ctx = &lone_driver, .run = Lone.run };
+    prefill_cancel.id = 4;
+    target.prefill_count = 0;
+    try e.submit(4, &chunked_request, .{ .ctx = &lone, .event = Box.event });
+    try std.testing.expectEqual(Reason.cancelled, lone.wait());
+    try std.testing.expect(target.prefill_count <= 3);
+    try std.testing.expectEqual(@as(usize, 0), target.lanes.count());
 }

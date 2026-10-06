@@ -27,7 +27,6 @@ pub const max_lanes = 64;
 /// Prompt chunks this short take the decode kernels, longer ones the prefill kernels (Python's fused_rows).
 pub const fused_rows = 16;
 
-
 pub const Kind = timing.Kind;
 
 const Flight = struct { end: u64, cb: mtl.CommandBuffer, kind: Kind };
@@ -236,6 +235,7 @@ pub const Metal = struct {
         const self: *Metal = @ptrCast(@alignCast(ptr));
         const ids = s.prompt();
         if (ids.len == 0 or ids.len + s.max_new + max_window > self.o.capacity) return error.PromptTooLong;
+        if (s.isCancelled()) return error.Cancelled;
         const rows_needed = @min(self.o.capacity, ids.len + s.max_new + max_lanes + 1); // the reply and a widest window past it
         try self.drain();
         if (self.caches.get(s)) |old| {
@@ -251,47 +251,52 @@ pub const Metal = struct {
         const Chunks = struct {
             n: usize,
             c: *st.Cache,
-            starts: []const u32, // chunk starts after 0 (empty: every `chunk` rows)
+            at: usize,
+            rows: usize,
             fn encode(j: @This(), b: *Metal, e: *fwd.Enc) !void {
                 const d = b.m.config.hidden * 2;
-                var at: usize = 0;
-                var k: usize = 0;
-                while (at < j.n) {
-                    while (k < j.starts.len and j.starts[k] <= at) k += 1;
-                    const end = if (k < j.starts.len) @min(j.starts[k], j.n) else j.n;
-                    const rows = @min(b.o.chunk, end - at);
-                    const fresh = try b.pool.take();
-                    var out = b.scratch.x; // the chunk's final-normed rows
-                    if (rows <= fused_rows) {
-                        const segs = [_]fwd.Seg{.{ .rows = rows, .cache = j.c, .store = .full, .slot = @intCast(fresh) }};
-                        b.forward().body(e, &segs, b.prompt, at * 4);
-                    } else {
-                        const w = &b.wide.?;
-                        w.chunk(e, b.forward(), j.c, b.prompt, at * 4, rows, fresh);
-                        out = w.s.x;
-                    }
-                    j.c.advance(&b.pool, rows, fresh);
-                    // the head's cache takes each row whose next token the prompt holds, as many rows a call as a window
-                    const absorbed = @min(at + rows, j.n - 1) - at;
-                    if (b.head) |*h| {
-                        var r: usize = 0;
-                        while (r < absorbed) : (r += max_window) h.absorb(e, j.c, @min(max_window, absorbed - r), out, r * d, b.prompt, (at + 1 + r) * 4);
-                    }
-                    j.c.start = 0;
-                    j.c.rows = rows;
-                    if (rows > fused_rows) {
-                        // the last row where the first draw and the head read it
-                        e.pipe(b.m.kernels.get("tf_copy_rows"));
-                        e.buf(out, (rows - 1) * d, 0);
-                        e.buf(b.scratch.x, 0, 1);
-                        e.run(.{ d / 2, 1, 1 }, .{ 256, 1, 1 });
-                        j.c.rows = 1;
-                    }
-                    at += rows;
+                const rows = j.rows;
+                const fresh = try b.pool.take();
+                var out = b.scratch.x; // the chunk's final-normed rows
+                if (rows <= fused_rows) {
+                    const segs = [_]fwd.Seg{.{ .rows = rows, .cache = j.c, .store = .full, .slot = @intCast(fresh) }};
+                    b.forward().body(e, &segs, b.prompt, j.at * 4);
+                } else {
+                    const w = &b.wide.?;
+                    w.chunk(e, b.forward(), j.c, b.prompt, j.at * 4, rows, fresh);
+                    out = w.s.x;
+                }
+                j.c.advance(&b.pool, rows, fresh);
+                // the head's cache takes each row whose next token the prompt holds, as many rows a call as a window
+                const absorbed = @min(j.at + rows, j.n - 1) - j.at;
+                if (b.head) |*h| {
+                    var r: usize = 0;
+                    while (r < absorbed) : (r += max_window) h.absorb(e, j.c, @min(max_window, absorbed - r), out, r * d, b.prompt, (j.at + 1 + r) * 4);
+                }
+                j.c.start = 0;
+                j.c.rows = rows;
+                if (rows > fused_rows) {
+                    // the last row where the first draw and the head read it
+                    e.pipe(b.m.kernels.get("tf_copy_rows"));
+                    e.buf(out, (rows - 1) * d, 0);
+                    e.buf(b.scratch.x, 0, 1);
+                    e.run(.{ d / 2, 1, 1 }, .{ 256, 1, 1 });
+                    j.c.rows = 1;
                 }
             }
         };
-        try self.submit(.prefill, self.next, Chunks{ .n = ids.len, .c = c, .starts = s.chunks });
+        // a command buffer a chunk, each committed before the one ahead of it is waited on, so the GPU keeps a chunk queued
+        var at: usize = 0;
+        var k: usize = 0;
+        while (at < ids.len) {
+            while (k < s.chunks.len and s.chunks[k] <= at) k += 1;
+            const end = if (k < s.chunks.len) @min(s.chunks[k], ids.len) else ids.len;
+            const rows = @min(self.o.chunk, end - at);
+            if (s.isCancelled()) return error.Cancelled; // release() waits for the chunk still in flight
+            try self.submit(.prefill, self.next, Chunks{ .n = ids.len, .c = c, .at = at, .rows = rows });
+            while (self.flights.items.len > 1) try self.land();
+            at += rows;
+        }
     }
 
     fn firstFn(ptr: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {

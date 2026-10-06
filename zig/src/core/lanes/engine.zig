@@ -79,7 +79,14 @@ pub const Engine = struct {
     pub fn addStream(e: *Engine, s: *Stream) !void {
         _ = e.arena.reset(.retain_capacity);
         try trail.event(e, &.{ f("ev", str("add")), f("stream", str(s.id)) });
-        try e.backend.prefill(s);
+        e.backend.prefill(s) catch |err| {
+            if (err == error.Cancelled) e.backend.release(s); // the host finishes a cancelled stream without the core
+            return err;
+        };
+        if (s.isCancelled()) { // cancelled in its last chunk: no first token
+            e.backend.release(s);
+            return error.Cancelled;
+        }
         s.context.shrinkRetainingCapacity(s.prompt_len);
         s.pending = null;
         s.cache_len = s.prompt_len;

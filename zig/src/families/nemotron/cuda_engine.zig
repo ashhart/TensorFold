@@ -23,6 +23,17 @@ pub const Options = struct {
     segments: usize = 1, // whole prompt chunks a call runs as staggered segments (1: one chunk at a time)
 };
 
+/// Asked before each prompt chunk (or segmented call): true stops the prompt with error.Cancelled.
+pub const Cancel = struct {
+    ptr: *anyopaque,
+    check: *const fn (ptr: *anyopaque) bool,
+
+    pub fn now(c: ?Cancel) bool {
+        const x = c orelse return false;
+        return x.check(x.ptr);
+    }
+};
+
 /// Serial rounds a host keeps queued ahead of the one it reads.
 pub const lookahead = 4;
 
@@ -222,13 +233,18 @@ pub const Engine = struct {
 
     /// decode.prefill: a fresh state, the prompt in 2048-row chunks (absorbed by the head, in segments if set); the token.
     pub fn prefill(e: *Engine, prompt: []const u32, dump: ?*Dump, head: ?*Head) !u32 {
+        return e.prefillWith(prompt, dump, head, null);
+    }
+
+    /// prefill, stopping with error.Cancelled at the next chunk boundary once `cancel` says so.
+    pub fn prefillWith(e: *Engine, prompt: []const u32, dump: ?*Dump, head: ?*Head, cancel: ?Cancel) !u32 {
         if (prompt.len == 0) return error.EmptyPrompt;
         if (prompt.len + state.max_rows > e.max_len) return error.ContextFull;
         try e.reset();
         if (head) |h| try h.reset();
         if (e.segments > 1 and dump == null and prompt.len > state.prefill_rows) {
-            try segs.prefill(e, try e.segmentSet(), prompt, head, e.segments);
-        } else try e.serialChunks(prompt, dump, head);
+            try segs.prefill(e, try e.segmentSet(), prompt, head, e.segments, cancel);
+        } else try e.serialChunks(prompt, dump, head, cancel);
         const host = e.pinned.slice(u32)[pin_sampled..][0..1];
         try e.ops().download(std.mem.sliceAsBytes(host), e.b.p_sampled);
         try e.stream.synchronize();
@@ -236,10 +252,11 @@ pub const Engine = struct {
     }
 
     /// The prompt's chunks one after another on the engine's stream.
-    fn serialChunks(e: *Engine, prompt: []const u32, dump: ?*Dump, head: ?*Head) !void {
+    fn serialChunks(e: *Engine, prompt: []const u32, dump: ?*Dump, head: ?*Head, cancel: ?Cancel) !void {
         const f = e.forward(dump);
         var s: usize = 0;
         while (s < prompt.len) : (s += state.prefill_rows) {
+            if (Cancel.now(cancel)) return error.Cancelled;
             const chunk = prompt[s..@min(prompt.len, s + state.prefill_rows)];
             try e.copied.synchronize();
             const host = e.promptHost(chunk.len);

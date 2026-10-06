@@ -123,6 +123,8 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template } },
     });
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests })).step);
+    // the engine seam's own tests (lane_host.zig), as zig/tests/server/zig_test.sh runs them
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api })).step);
     b.step("test-native", "The Metal engines module's host-side tests").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engines })).step);
 }
 

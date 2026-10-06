@@ -34,6 +34,10 @@ pub const Fake = struct {
     probe_prompt: usize = 0,
     pattern: []const u32 = &.{ 11, 12, 13 },
     answer_cycles: bool = false,
+    prefill_chunks: usize = 0,
+    prefill_count: usize = 0,
+    prefill_hook: ?*const fn (ctx: *anyopaque, s: *Stream, chunk: usize) void = null,
+    prefill_hook_ctx: ?*anyopaque = null,
 
     pub fn deinit(x: *Fake) void {
         var it = x.lanes.valueIterator();
@@ -96,6 +100,12 @@ pub const Fake = struct {
         const got = try x.lanes.getOrPut(x.gpa, s);
         if (got.found_existing) freeLane(x.gpa, got.value_ptr);
         got.value_ptr.* = .{};
+        const chunks = if (x.prefill_chunks == 0) 1 else x.prefill_chunks;
+        for (0..chunks) |chunk| {
+            x.prefill_count += 1;
+            if (x.prefill_hook) |hook| hook(x.prefill_hook_ctx.?, s, chunk);
+            if (s.isCancelled()) return error.Cancelled;
+        }
         try got.value_ptr.history.appendSlice(x.gpa, s.prompt());
     }
 

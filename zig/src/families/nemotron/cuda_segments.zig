@@ -7,6 +7,7 @@ const state = @import("cuda_state.zig");
 const sampler = @import("cuda_sampler.zig");
 const fwd = @import("cuda_forward.zig");
 const Engine = @import("cuda_engine.zig").Engine;
+const Cancel = @import("cuda_engine.zig").Cancel;
 const Head = @import("cuda_mtp.zig").Head;
 
 const segs = cuda.segments;
@@ -61,8 +62,8 @@ const Hooks = struct {
     }
 };
 
-/// The prompt from a reset state, `parts` chunks a call; leaves the head and the engine's prompt buffers as serial does.
-pub fn prefill(e: *Engine, s: *Segments, prompt: []const u32, head: ?*Head, parts: usize) !void {
+/// The prompt from a reset state, `parts` chunks a call (`cancel` asked between calls); leaves the head and prompt buffers as serial does.
+pub fn prefill(e: *Engine, s: *Segments, prompt: []const u32, head: ?*Head, parts: usize, cancel: ?Cancel) !void {
     if (parts < 2 or parts > s.n) return error.Segments;
     const R = state.prefill_rows;
     var bufs: [MAX]*state.Buffers = undefined;
@@ -75,6 +76,7 @@ pub fn prefill(e: *Engine, s: *Segments, prompt: []const u32, head: ?*Head, part
     var last: usize = 0;
     var last_rows: usize = 0;
     while (at < prompt.len) {
+        if (Cancel.now(cancel)) return error.Cancelled;
         const c = segs.chunked(prompt.len - at, R, parts);
         var seg: [MAX]Seg = undefined;
         try e.copied.synchronize();

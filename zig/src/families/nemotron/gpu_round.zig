@@ -330,13 +330,11 @@ pub fn run(gpa: std.mem.Allocator, b: *Metal, s: *lanes.Stream, o: Options, hook
     if (o.depth < 1 or o.depth + 1 > backend.max_window or o.depth > st.max_levels) return error.WindowTooWide;
     const be = b.backend();
     const t0 = mtl.clock.seconds();
-    try be.prefill(s);
-    const first = try be.read(try be.first(s, s.prompt_len));
-    var out = Result{};
-    _ = try s.commit(gpa, &.{first});
-    hooks.note();
+    const first = try be.opening(gpa, s); // a prompt pass that stops (a cancel) or fails releases the stream
     var handed = false;
     defer if (!handed) be.release(s);
+    var out = Result{};
+    hooks.note();
     const t1 = mtl.clock.seconds();
     out.prefill_s = t1 - t0;
     if (s.finished) return out;
