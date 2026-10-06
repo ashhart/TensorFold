@@ -1432,6 +1432,10 @@ pub fn catchSlot(words: []i32, k: usize, first: usize) usize {
     return k * 256;
 }
 
+test {
+    _ = tpm; // tp.zig's tests: the window layout and the host service's wraps
+}
+
 test "catch-up slots: every layer's dispatch reads its own first block after the later layers' writes" {
     var words: [CATCH * 64]i32 = undefined;
     var at: [CATCH]usize = undefined;
