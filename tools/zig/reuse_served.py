@@ -4,6 +4,7 @@ import argparse
 import http.client
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -20,7 +21,8 @@ USAGE = """modes:
   cold BASE MODEL PROMPTS.json OUT cold prompts 2k-64k (built once through /v1/tokenize): time to first token
   pp OUT...                        cold medians by length, each run against the first
   ids BASE MODEL OUT.json TOKENS   a chat prompt's ids as the server renders it, for the engine gates
-  warm BASE MODEL OUT.json         an agent's short turns (--turns, --new-tokens, --max-tokens): cached tokens and TTFT a turn"""
+  warm BASE MODEL OUT.json         an agent's short turns (--turns, --new-tokens, --max-tokens): cached tokens and TTFT a turn
+  ranks R0.log R1.log              speed-up mode: each reply's token SHA on rank 0 (done lines) equals rank 1's (its reply lines)"""
 TOOLS = [
     {"type": "function", "function": {"name": name, "description": about, "parameters": {
         "type": "object", "properties": {p: {"type": "string", "description": d} for p, d in params},
@@ -327,6 +329,26 @@ def compare(rows_path: str, fresh_path: str) -> int:
     return 1 if bad or split else 0
 
 
+def ranks(r0_path: str, r1_path: str) -> int:
+    """Rank 0's done lines and rank 1's reply lines in request order (rank 1 also logs rank 0's engine warm-up first)."""
+    done = re.compile(r"\] done \S+ prompt=(\d+) .*? tokens=(\d+) sha=([0-9a-f]+)")
+    mine = re.compile(r"speed-up rank 1: resumed at \d+ of (\d+) .*?reply (\d+) tokens, sha ([0-9a-f]+)")
+    a = [m.groups() for m in map(done.search, open(r0_path, errors="replace")) if m]
+    b = [m.groups() for m in map(mine.search, open(r1_path, errors="replace")) if m]
+    while b and len(b) > len(a) and b[0][0] != (a[0][0] if a else None):
+        b = b[1:]  # the engine warm-up: no server request on rank 0
+    bad = 0
+    for k, (x, y) in enumerate(zip(a, b)):
+        if x != y:
+            bad += 1
+            print(f"request {k}: rank 0 prompt {x[0]} tokens {x[1]} sha {x[2]}; rank 1 prompt {y[0]} tokens {y[1]} sha {y[2]}")
+    if len(a) != len(b):
+        bad += 1
+        print(f"{len(a)} replies on rank 0, {len(b)} on rank 1")
+    print(f"{'PASS' if bad == 0 else 'FAIL'}: {min(len(a), len(b)) - bad}/{len(a)} replies equal on both ranks")
+    return 1 if bad else 0
+
+
 def cold_prompts(client: Client, path: str, root: str) -> list[dict]:
     """Single-message prompts of fixed token lengths, a unique first line each so nothing resumes (prefill_cold.py's)."""
     if os.path.exists(path):
@@ -426,7 +448,7 @@ def pp(paths: list[str]) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(epilog=USAGE, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("mode", choices=["record", "replay", "compare", "evict", "cold", "pp", "ids", "warm"])
+    ap.add_argument("mode", choices=["record", "replay", "compare", "evict", "cold", "pp", "ids", "warm", "ranks"])
     ap.add_argument("args", nargs="+")
     ap.add_argument("--max-tokens", type=int, default=160)
     ap.add_argument("--turns", type=int, default=9)
@@ -440,6 +462,8 @@ def main() -> int:
         return compare(*o.args)
     if o.mode == "pp":
         return pp(o.args)
+    if o.mode == "ranks":
+        return ranks(*o.args)
     client = Client(o.args[0], o.args[1])
     if o.mode == "replay":
         return replay(client, o.args[2], o.args[3])
