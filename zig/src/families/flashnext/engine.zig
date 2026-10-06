@@ -4,6 +4,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const fz = @import("replay.zig");
 const segments = @import("../../core/segments.zig");
+const snapshot = @import("snapshot.zig");
 const Allocator = std.mem.Allocator;
 
 const D = fz.D;
@@ -38,6 +39,11 @@ const jsonInt = fz.jsonInt;
 const RING = 512;
 /// Positions a reply keeps free past its last token: two rounds in flight.
 pub const MARGIN = 2 * MAXR;
+
+/// A kept prompt state's name on both Macs of speed-up mode: the hash of the prompt tokens before it.
+pub fn keyOf(tokens: []const u32) u64 {
+    return std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(tokens));
+}
 /// Prompt chunks run as two staggered segments once each gets this many rows (core/segments.zig). Measured on the
 /// M5 Ultra, two segments against one chunk: 2k rows a segment -7%, 3k level, 4k +1.6%, 8k +9%.
 pub const SEG_MIN = 4096;
@@ -88,6 +94,8 @@ pub const Engine = struct {
     copy: bool = true, // copy drafts from the history when a long enough match exists
     copy_min: u32 = 3,
     copy_long: u32 = 6, // shorter matches copy only when the head's first draft agrees
+    peer_drops: std.ArrayList(u64) = .empty, // speed-up rank 0: kept states rank 1 drops with the next request
+    peer_kept: std.AutoHashMapUnmanaged(u64, *snapshot.State) = .empty, // speed-up rank 1: its halves of rank 0's kept states
     // while copies land worse than the head's drafts, only 8-token matches the head agrees with are copied
     wids: Buf,
     rows_w: [MAXR + 1]Buf,
@@ -422,18 +430,28 @@ pub const Engine = struct {
         const m = e.m;
         if (prompt.len == 0) return error.EmptyPrompt;
         if (prompt.len + max_tokens + MARGIN > CAP) return error.ContextFull;
-        if (from >= prompt.len or (from > 0 and (m.pos != from or r.tp != null))) return error.NotResumed;
-        for (marks, 0..) |mk, i| if (mk <= from or mk >= prompt.len or (i > 0 and mk <= marks[i - 1]) or r.tp != null) return error.Marks;
+        if (from >= prompt.len or (from > 0 and m.pos != from)) return error.NotResumed;
+        for (marks, 0..) |mk, i| if (mk <= from or mk >= prompt.len or (i > 0 and mk <= marks[i - 1])) return error.Marks;
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         if (r.tp) |tp| if (tp.rank == 0) { // served speed-up mode: rank 1 runs the same request (follow)
-            var head: [12]u32 = @splat(0);
+            var head: [16]u32 = @splat(0);
             head[0] = @intCast(prompt.len);
             head[1] = @intCast(@min(max_tokens, std.math.maxInt(u32)));
             head[2] = @intCast(@min(eos.len, 8));
             head[3] = if (depth) |d| @intCast(d) else std.math.maxInt(u32);
             for (eos[0..head[2]], 0..) |t, i| head[4 + i] = t;
-            try tp.sendRequest(std.mem.asBytes(&head), prompt);
+            head[12] = @intCast(from); // rank 1 restores its own state at the same tokens
+            head[13] = @intCast(marks.len); // the marks, then the dropped states' keys, follow the prompt
+            head[14] = @intCast(e.peer_drops.items.len);
+            const words = try e.gpa.alloc(u32, prompt.len + marks.len + 2 * e.peer_drops.items.len);
+            defer e.gpa.free(words);
+            @memcpy(words[0..prompt.len], prompt);
+            @memcpy(words[prompt.len..][0..marks.len], marks);
+            for (e.peer_drops.items, 0..) |k, i| words[prompt.len + marks.len + 2 * i ..][0..2].* = .{ @truncate(k), @truncate(k >> 32) };
+            try tp.sendRequest(std.mem.asBytes(&head), words);
+            e.peer_drops.clearRetainingCapacity();
+            if (!try tp.waitAck()) return error.PeerNotResumed;
         };
         e.hostMode();
         defer e.hostMode();
@@ -700,17 +718,44 @@ pub const Engine = struct {
     fn followOne(e: *Engine) !bool {
         const tp = e.r.tp orelse return error.NotSpeedUpMode;
         const req = tp.waitRequest() orelse return false;
-        var head: [12]u32 = undefined;
-        @memcpy(std.mem.asBytes(&head), req.head[0..48]);
+        var head: [16]u32 = undefined;
+        @memcpy(std.mem.asBytes(&head), req.head[0..64]);
         if (head[0] == 0) return false;
-        const prompt = try e.gpa.dupe(u32, req.tokens[0..head[0]]); // rank 0 may write its next request meanwhile
-        defer e.gpa.free(prompt);
+        const n = head[0];
+        const words = try e.gpa.dupe(u32, req.tokens[0 .. n + head[13] + 2 * head[14]]); // rank 0 may write its next request meanwhile
+        defer e.gpa.free(words);
+        const prompt = words[0..n];
+        const marks = words[n..][0..head[13]];
+        for (0..head[14]) |i| { // states rank 0's prompt cache let go
+            const w = words[n + head[13] + 2 * i ..][0..2];
+            if (e.peer_kept.fetchRemove(@as(u64, w[0]) | @as(u64, w[1]) << 32)) |kv| snapshot.drop(e.gpa, kv.value);
+        }
+        const from = head[12];
+        const ok = from == 0 or blk: {
+            const st = e.peer_kept.get(keyOf(prompt[0..from])) orelse break :blk false;
+            snapshot.restore(e, st) catch break :blk false;
+            break :blk true;
+        };
+        try tp.ackRequest(ok);
+        if (!ok) return true; // rank 0 runs the request again from the start
         const eos = try e.gpa.dupe(u32, head[4 .. 4 + head[2]]);
         defer e.gpa.free(eos);
-        var dummy: u8 = 0;
-        _ = try e.generate(prompt, head[1], eos, if (head[3] == std.math.maxInt(u32)) null else head[3], .{ .ctx = &dummy, .prefilled = Quiet.prefilled, .tokens = Quiet.tokens, .cancelled = Quiet.cancelled });
+        var keep: Keep = .{ .e = e, .prompt = prompt };
+        _ = try e.generateFrom(prompt, from, marks, head[1], eos, if (head[3] == std.math.maxInt(u32)) null else head[3], .{ .ctx = &keep, .prefilled = Quiet.prefilled, .tokens = Quiet.tokens, .cancelled = Quiet.cancelled, .marked = Keep.marked });
         return true;
     }
+
+    /// Speed-up rank 1 at a mark: its own state there, kept under the name rank 0 gives the same tokens.
+    const Keep = struct {
+        e: *Engine,
+        prompt: []const u32,
+        fn marked(ctx: *anyopaque, at: usize) void {
+            const k: *Keep = @ptrCast(@alignCast(ctx));
+            const st = snapshot.save(k.e, k.e.gpa, at) catch |err| return std.log.warn("speed-up rank 1: no state kept at {d}: {s}", .{ at, @errorName(err) });
+            const old = k.e.peer_kept.fetchPut(k.e.gpa, keyOf(k.prompt[0..at]), st) catch return snapshot.drop(k.e.gpa, st);
+            if (old) |kv| snapshot.drop(k.e.gpa, kv.value);
+        }
+    };
 
     const Quiet = struct {
         fn prefilled(_: *anyopaque) void {}
@@ -744,6 +789,10 @@ pub const Engine = struct {
             tp.deinit();
         }
         const gpa = e.gpa;
+        var kept = e.peer_kept.valueIterator();
+        while (kept.next()) |st| snapshot.drop(gpa, st.*);
+        e.peer_kept.deinit(gpa);
+        e.peer_drops.deinit(gpa);
         e.arena_state.deinit();
         gpa.destroy(e);
     }

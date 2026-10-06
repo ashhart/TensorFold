@@ -57,6 +57,7 @@ pub const BACK_FLAG = TAIL_FLAG + 8;
 pub const MTP_FLAG = BACK_FLAG + 8;
 const REQ_FLAG = MTP_FLAG + 8; // served: the last request rank 0 has written
 const CTRL_FLAG = REQ_FLAG + 8; // rank 0's decision at each step both ranks take: (step << 6) | (next depth << 1) | quit
+const ACK_FLAG = CTRL_FLAG + 8; // served: rank 1's answer to a request's resume, (request << 1) | restored
 const GPU = 1024;
 const GAVE_UP = 2048;
 
@@ -478,6 +479,22 @@ pub const Tp2 = struct {
         var h64: [64]u8 = @splat(0);
         @memcpy(h64[0..head.len], head);
         try t.rd.write2Signal(t.peer, REQ, &h64, std.mem.sliceAsBytes(prompt), REQ_FLAG, t.req);
+    }
+
+    /// Served, rank 1: tell rank 0 whether this request's resume state is in place (rank 0 waits before its prompt pass).
+    pub fn ackRequest(t: *Tp2, ok: bool) !void {
+        try t.rd.signal(t.peer, ACK_FLAG, (t.req << 1) | @intFromBool(ok));
+    }
+
+    /// Served, rank 0: rank 1's answer for the request just sent: true when it restored the same resume state.
+    pub fn waitAck(t: *Tp2) !bool {
+        const t0 = std.c.mach_absolute_time();
+        while (true) {
+            const v = @atomicLoad(u64, t.word64(ACK_FLAG), .acquire);
+            if (v >> 1 >= t.req) return v >> 1 == t.req and v & 1 != 0;
+            if (std.c.mach_absolute_time() - t0 > 240_000_000) return error.TpPeerSilent; // 10 s
+            std.atomic.spinLoopHint();
+        }
     }
 
     /// Served, rank 1: wait for rank 0's next request; its 64-byte head and the window's prompt tokens after it; null once `quitting` ends the wait.

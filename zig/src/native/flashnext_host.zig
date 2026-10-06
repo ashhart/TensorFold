@@ -37,7 +37,9 @@ pub const Host = struct {
     prefill_rate: f64 = 0,
     prefill_at: i96 = 0,
     live_generated: u64 = 0,
-    cache: ?pc.Store = null, // kept prompt states (engine thread only); null: no reuse (speed-up mode, a zero budget)
+    cache: ?pc.Store = null, // kept prompt states (engine thread only); null: no reuse (rank 1, a zero budget)
+    prompt: []const u32 = &.{}, // the request in the engine (speed-up mode names kept states by its tokens)
+    saved: std.ArrayList(u32) = .empty, // this request's marks the cache kept (speed-up: rank 1 drops the others)
 
     const Mark = struct { at: i96, tokens: u64 };
     const window_ns: i96 = 2 * std.time.ns_per_s;
@@ -275,8 +277,21 @@ pub const Host = struct {
             plan = store.begin(arena.allocator(), r.prompt, r.history_len, r.shared_prefixes, &.{}, null) catch .{};
         };
         job.cached = plan.from;
-        defer if (h.cache) |*store| store.report(r.prompt.len, plan.from, store.counts.kept - kept0);
-        const res = h.eng.generateFrom(r.prompt, plan.from, plan.marks, r.max_tokens, r.eos, depth, out) catch |e| {
+        h.prompt = r.prompt;
+        h.saved.clearRetainingCapacity();
+        defer if (h.cache) |*store| store.report(r.prompt.len, job.cached, store.counts.kept - kept0);
+        defer if (h.eng.r.tp != null) for (plan.marks) |mk| if (std.mem.indexOfScalar(u32, h.saved.items, mk) == null) {
+            h.eng.peer_drops.append(h.gpa, fx.keyOf(r.prompt[0..mk])) catch {}; // rank 1 kept it, this Mac didn't
+        };
+        const res = h.eng.generateFrom(r.prompt, plan.from, plan.marks, r.max_tokens, r.eos, depth, out) catch |e| retry: {
+            if (e == error.PeerNotResumed) { // rank 1 lacks this state: both Macs read the prompt from the start
+                std.log.warn("speed-up mode: rank 1 could not resume at {d}; reading the prompt from the start", .{plan.from});
+                job.cached = 0;
+                break :retry h.eng.generateFrom(r.prompt, 0, plan.marks, r.max_tokens, r.eos, depth, out) catch |e2| {
+                    if (!job.prefill_sent) emit(job, .{ .prefilled = 0 });
+                    return h.finish(job, .failed, .{}, @errorName(e2));
+                };
+            }
             if (!job.prefill_sent) emit(job, .{ .prefilled = 0 });
             return h.finish(job, .failed, .{}, @errorName(e));
         };
@@ -295,17 +310,27 @@ const Snaps = struct {
     fn bytes(_: *anyopaque, at: u32) u64 {
         return snap.bytes(at);
     }
+    /// A kept state and its name on both Macs (speed-up mode's rank 1 keeps its own under the same name).
+    const Kept = struct { st: *snap.State, key: u64 };
     fn save(ptr: *anyopaque, _: ?*anyopaque, at: u32) anyerror!pc.Saved {
         const h: *Host = @ptrCast(@alignCast(ptr));
-        return try snap.save(h.eng, h.gpa, at);
+        const k = try h.gpa.create(Kept);
+        errdefer h.gpa.destroy(k);
+        k.* = .{ .st = try snap.save(h.eng, h.gpa, at), .key = fx.keyOf(h.prompt[0..at]) };
+        h.saved.append(h.gpa, at) catch {};
+        return k;
     }
     fn restore(ptr: *anyopaque, _: ?*anyopaque, saved: pc.Saved) anyerror!void {
         const h: *Host = @ptrCast(@alignCast(ptr));
-        try snap.restore(h.eng, @ptrCast(@alignCast(saved)));
+        const k: *Kept = @ptrCast(@alignCast(saved));
+        try snap.restore(h.eng, k.st);
     }
     fn drop(ptr: *anyopaque, saved: pc.Saved) void {
         const h: *Host = @ptrCast(@alignCast(ptr));
-        snap.drop(h.gpa, @ptrCast(@alignCast(saved)));
+        const k: *Kept = @ptrCast(@alignCast(saved));
+        if (h.eng.r.tp != null) h.eng.peer_drops.append(h.gpa, k.key) catch {};
+        snap.drop(h.gpa, k.st);
+        h.gpa.destroy(k);
     }
 };
 
@@ -328,8 +353,8 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: []const u8, windo
     const limit: i64 = tf.flashnext_replay.CAP - fx.MARGIN;
     h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .info_ = .{ .name = "flashnext-zig", .lanes = 1, .context_window = @intCast(if (window > 0) @min(window, limit) else limit) } };
     const budget = cacheBudget(eng, cache_gib);
-    if (eng.r.tp == null and budget > 0) h.cache = pc.Store.init(gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, .{ .lookahead = 1 }, budget);
-    std.log.info("prompt cache: {d:.1} GiB for kept prompt states{s}", .{ @as(f64, @floatFromInt(if (h.cache != null) budget else 0)) / (1 << 30), if (eng.r.tp != null) " (off in speed-up mode)" else "" });
+    if (!eng.followsPeer() and budget > 0) h.cache = pc.Store.init(gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, .{ .lookahead = 1 }, budget);
+    std.log.info("prompt cache: {d:.1} GiB for kept prompt states{s}", .{ @as(f64, @floatFromInt(if (h.cache != null) budget else 0)) / (1 << 30), if (eng.followsPeer()) " (rank 1 keeps its halves of rank 0's)" else if (eng.r.tp != null) " (rank 1 mirrors them)" else "" });
     try h.start();
     return h;
 }
@@ -346,6 +371,7 @@ pub fn close(ctx: *anyopaque) void {
         th.join();
     }
     if (h.cache) |*store| store.deinit();
+    h.saved.deinit(h.gpa);
     h.eng.deinit();
     h.gpa.destroy(h);
 }
