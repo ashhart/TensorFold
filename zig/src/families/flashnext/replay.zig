@@ -1006,6 +1006,7 @@ pub const Run = struct {
     pub fn load(r: *Run, name: []const u8) !Buf {
         const e = try r.entry(name);
         const b = try r.device.buffer(@max(e.len, 64), opts);
+        errdefer b.deinit();
         try readAll(e.fd, b.contents()[0..e.len], e.at);
         r.loaded += e.len;
         return .{ .b = b };
@@ -1023,6 +1024,7 @@ pub const Run = struct {
         const fmt = "language_model.model.layers.1.ple.ple_embedding.ngram_embedding.{s}{d}.{s}";
         for (first..first + count) |s| total += (try r.entry(try std.fmt.bufPrint(&name, fmt, .{ r.ngram, s, suffix }))).len;
         const b = try r.device.buffer(total, opts);
+        errdefer b.deinit();
         var at: usize = 0;
         for (first..first + count) |s| {
             const e = try r.entry(try std.fmt.bufPrint(&name, fmt, .{ r.ngram, s, suffix }));
