@@ -124,7 +124,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     };
     defer srv.deinit();
     if (args.loop_guard and !srv.info.loop_guard) {
-        log.line("tensorfold: --loop-guard is not supported by this native engine", .{});
+        std.debug.print("tensorfold: --loop-guard is not supported by this native engine\n", .{});
         return 2;
     }
     if (raiseOpenFileLimit()) |r| log.line("open-file limit raised: soft {d} -> {d}", .{ r[0], r[1] });
