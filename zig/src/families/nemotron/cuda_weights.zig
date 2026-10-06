@@ -7,6 +7,7 @@ const Config = @import("config.zig").Config;
 const Kind = @import("config.zig").Kind;
 const kern = @import("cuda_kernels.zig");
 const draft_ids = @import("draft_ids.zig");
+const Source = @import("cuda_source.zig").Source;
 
 pub const QLinear = kern.QLinear;
 pub const Experts = kern.Experts;
@@ -53,6 +54,7 @@ const Loader = struct {
     gpa: std.mem.Allocator,
     ops: kern.Ops,
     w: *Weights,
+    src: *Source,
     scratch: cuda.DeviceBuffer,
     host: std.ArrayList(u8) = .empty,
 
@@ -66,6 +68,7 @@ const Loader = struct {
     /// Device scratch of at least `bytes`; growing waits for the stream so pending packs keep their inputs.
     fn tmp(L: *Loader, bytes: usize) !u64 {
         if (L.scratch.len < bytes) {
+            try L.src.flush();
             try L.ops.s.synchronize();
             L.scratch.free();
             L.scratch = try cuda.DeviceBuffer.alloc(L.ops.k.d, bytes);
@@ -75,6 +78,7 @@ const Loader = struct {
 
     /// The host staging buffer, once the stream has read its last contents.
     fn staging(L: *Loader, bytes: usize) ![]u8 {
+        try L.src.flush();
         try L.ops.s.synchronize();
         try L.host.resize(L.gpa, bytes);
         return L.host.items;
@@ -82,7 +86,7 @@ const Loader = struct {
 
     fn raw(L: *Loader, name: []const u8, t: Tensor) !u64 {
         const ptr = try L.alloc(name, t.bytes.len);
-        try L.ops.upload(ptr, t.bytes);
+        try L.src.upload(ptr, t.bytes);
         return ptr;
     }
 
@@ -91,7 +95,8 @@ const Loader = struct {
         if (t.dtype != .bf16) return error.UnexpectedTensor;
         const n = t.bytes.len / 2;
         const out = std.mem.bytesAsSlice(u32, try L.staging(n * 4));
-        for (out, 0..) |*o, i| o.* = @as(u32, std.mem.readInt(u16, t.bytes[2 * i ..][0..2], .little)) << 16;
+        const in = try L.src.view(t.bytes);
+        for (out, 0..) |*o, i| o.* = @as(u32, std.mem.readInt(u16, in[2 * i ..][0..2], .little)) << 16;
         return L.host.items;
     }
 
@@ -118,7 +123,7 @@ const Loader = struct {
         const base = try L.tmp(sizes[0] + sizes[1] + sizes[2]);
         var at = [3]usize{ 0, sizes[0], sizes[0] + sizes[1] };
         for (parts) |pt| for (0..3) |j| {
-            try L.ops.upload(base + at[j], pt[j].bytes);
+            try L.src.upload(base + at[j], pt[j].bytes);
             at[j] += pt[j].bytes.len;
         };
         var buf: [128]u8 = undefined;
@@ -131,6 +136,7 @@ const Loader = struct {
             .npad = npad,
         };
         const total: u64 = @as(u64, npad / 64) * kg * 512;
+        try L.src.flush();
         var a: cuda.Args = .{};
         a.add(base);
         for ([_]usize{ n, k / 8, kg }) |v| a.add(@as(c_int, @intCast(v)));
@@ -174,23 +180,24 @@ const Loader = struct {
         const kg = k / 64;
         const sizes = [3]usize{ @as(usize, e) * n * (k / 8) * 4, @as(usize, e) * n * kg * 2, @as(usize, e) * n * kg * 2 };
         const base = try L.tmp(sizes[0] + sizes[1] + sizes[2]);
-        var at: usize = 0;
+        const at = [3]usize{ 0, sizes[0], sizes[0] + sizes[1] };
         for (0..3) |j| {
             if (routed[j].bytes.len + shared[j].bytes.len != sizes[j]) return error.UnexpectedTensor;
-            try L.ops.upload(base + at, routed[j].bytes);
-            if (split) {
-                const row = shared[j].bytes.len / n;
-                const half = row / 2;
-                const host = try L.staging(shared[j].bytes.len);
-                for (0..2) |h| for (0..n) |r| @memcpy(host[(h * n + r) * half ..][0..half], shared[j].bytes[r * row + h * half ..][0..half]);
-                try L.ops.upload(base + at + routed[j].bytes.len, host);
-            } else {
-                try L.ops.upload(base + at + routed[j].bytes.len, shared[j].bytes);
-            }
-            at += sizes[j];
+            try L.src.upload(base + at[j], routed[j].bytes);
+            if (!split) try L.src.upload(base + at[j] + routed[j].bytes.len, shared[j].bytes);
         }
+        // the output's allocation runs while the reads queued above go on
         const nb = n / 32;
         const ptr = try L.alloc(name, @as(usize, e) * nb * kg * 288 * 4);
+        if (split) for (0..3) |j| {
+            const row = shared[j].bytes.len / n;
+            const half = row / 2;
+            const host = try L.staging(shared[j].bytes.len);
+            const in = try L.src.view(shared[j].bytes);
+            for (0..2) |h| for (0..n) |r| @memcpy(host[(h * n + r) * half ..][0..half], in[r * row + h * half ..][0..half]);
+            try L.ops.upload(base + at[j] + routed[j].bytes.len, host);
+        };
+        try L.src.flush();
         var a: cuda.Args = .{};
         for ([_]u64{ base, base + sizes[0], base + sizes[0] + sizes[1], ptr }) |v| a.add(v);
         for ([_]usize{ n, k / 8, kg, nb }) |v| a.add(@as(c_int, @intCast(v)));
@@ -208,8 +215,9 @@ const Loader = struct {
         if (conv.rank != 3 or conv.dim(1) != 4 or conv.dim(2) != 1 or conv.dtype != .bf16) return error.UnexpectedTensor;
         const ch = conv.dim(0);
         const taps = std.mem.bytesAsSlice(u32, try L.staging(ch * 4 * 4));
+        const in = try L.src.view(conv.bytes);
         for (0..ch) |c| for (0..4) |t| {
-            taps[t * ch + c] = @as(u32, std.mem.readInt(u16, conv.bytes[(c * 4 + t) * 2 ..][0..2], .little)) << 16;
+            taps[t * ch + c] = @as(u32, std.mem.readInt(u16, in[(c * 4 + t) * 2 ..][0..2], .little)) << 16;
         };
         m.conv_w = try L.alloc(try join(&a, name, ".conv_w"), L.host.items.len);
         try L.ops.upload(m.conv_w, L.host.items);
@@ -265,14 +273,18 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, ops: kern.Ops, dir: []const u8, 
     if (c.group_size != 64 or c.bits != 4) return error.UnsupportedQuantization;
     var w: Weights = .{ .gpa = gpa, .config = c };
     errdefer w.deinit();
-    var L: Loader = .{ .gpa = gpa, .ops = ops, .w = &w, .scratch = try cuda.DeviceBuffer.alloc(ops.k.d, 1 << 20) };
+    var src = try Source.init(gpa, ops);
+    defer src.deinit();
+    var L: Loader = .{ .gpa = gpa, .ops = ops, .w = &w, .src = &src, .scratch = try cuda.DeviceBuffer.alloc(ops.k.d, 1 << 20) };
     defer {
+        src.flush() catch {};
         ops.s.synchronize() catch {};
         L.scratch.free();
         L.host.deinit(gpa);
     }
     var ck = try core.Checkpoint.openModel(gpa, io, dir);
     defer ck.close();
+    try src.add(&ck);
     w.blocks = try gpa.alloc(Block, c.layers);
     for (c.kinds[0..c.layers], 0..) |kind, i| {
         var nm: [128]u8 = undefined;
@@ -301,6 +313,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, ops: kern.Ops, dir: []const u8, 
     w.head = try L.dense(&ck, "head", &.{"lm_head"});
     if (ck.unused() != 0) return error.UnusedCheckpointTensors;
     if (with_mtp) try loadMtp(gpa, io, &L, &ck, dir, c);
+    try src.flush();
     try ops.s.synchronize();
     return w;
 }
@@ -309,6 +322,7 @@ fn loadMtp(gpa: std.mem.Allocator, io: std.Io, L: *Loader, main: *core.Checkpoin
     var ck: core.Checkpoint = .{ .gpa = gpa, .io = io };
     defer ck.close();
     try ck.add(dir, mtp_file);
+    try L.src.add(&ck);
     L.w.mtp = .{
         .enorm = try L.raw("mtp.enorm", try ck.get("layers.0.enorm.weight")),
         .hnorm = try L.raw("mtp.hnorm", try ck.get("layers.0.hnorm.weight")),
@@ -330,7 +344,10 @@ fn loadMtp(gpa: std.mem.Allocator, io: std.Io, L: *Loader, main: *core.Checkpoin
     var at: usize = 0;
     for (&parts) |*t| {
         const row = t.bytes.len / t.dim(0);
-        for (ids, 0..) |id, r| @memcpy(host[at + r * row ..][0..row], t.bytes[id * row ..][0..row]);
+        const whole = try gpa.alloc(u8, t.bytes.len);
+        defer gpa.free(whole);
+        try L.src.read(whole, t.bytes);
+        for (ids, 0..) |id, r| @memcpy(host[at + r * row ..][0..row], whole[id * row ..][0..row]);
         t.shape[0] = ids.len;
         t.bytes = host[at..][0 .. ids.len * row];
         at += ids.len * row;
