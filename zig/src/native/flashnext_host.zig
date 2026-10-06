@@ -270,10 +270,12 @@ pub const Host = struct {
         var arena: std.heap.ArenaAllocator = .init(h.gpa);
         defer arena.deinit();
         var plan: pc.Plan = .{};
+        const kept0 = if (h.cache) |*store| store.counts.kept else 0;
         if (h.cache) |*store| if (r.prompt.len + r.max_tokens + fx.MARGIN <= tf.flashnext_replay.CAP) {
             plan = store.begin(arena.allocator(), r.prompt, r.history_len, r.shared_prefixes, &.{}, null) catch .{};
         };
         job.cached = plan.from;
+        defer if (h.cache) |*store| store.report(r.prompt.len, plan.from, store.counts.kept - kept0);
         const res = h.eng.generateFrom(r.prompt, plan.from, plan.marks, r.max_tokens, r.eos, depth, out) catch |e| {
             if (!job.prefill_sent) emit(job, .{ .prefilled = 0 });
             return h.finish(job, .failed, .{}, @errorName(e));
@@ -309,7 +311,7 @@ const Snaps = struct {
 
 /// The prompt cache's budget: `gib`, else the working set left past the engine less 8 GiB, at most 16 GiB.
 fn cacheBudget(eng: *fx.Engine, gib: ?f64) u64 {
-    if (gib) |g| return if (g > 0) @intFromFloat(g * (1 << 30)) else 0;
+    if (gib) |g| return if (g > 0) std.math.lossyCast(u64, g * (1 << 30)) else 0; // the CLI refuses what a u64 cannot hold
     const dev = eng.r.device;
     const spare = dev.maxWorkingSet() -| dev.allocated() -| (8 << 30);
     return @min(spare, 16 << 30);

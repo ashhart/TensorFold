@@ -208,6 +208,12 @@ pub const Store = struct {
         s.counts.kept += 1;
     }
 
+    /// One log line after a prompt pass: where it resumed, how many states it kept, and what the store holds.
+    pub fn report(s: *const Store, prompt: usize, from: u32, kept: u64) void {
+        if (@import("builtin").is_test) return;
+        std.log.info("prompt cache: {d} tokens, resumed at {d}, kept {d}; {d} states, {d} of {d} MiB (hits {d}, misses {d}, evicted {d}, refused {d}, failed {d})", .{ prompt, from, kept, s.entries.items.len, s.held >> 20, s.budget >> 20, s.counts.hits, s.counts.misses, s.counts.evicted, s.counts.refused, s.counts.failed });
+    }
+
     fn fail(s: *Store, at: u32, err: anyerror) void {
         s.counts.failed += 1;
         note("keeping {d} tokens failed ({s}); a later turn prefills them", .{ at, @errorName(err) });
