@@ -483,6 +483,10 @@ pub const Engine = struct {
                     try e.pr.pairMtp(m, tp, mine, span[1 - tp.rank]);
                     last_n = 1; // m.last points at the last row
                     at += call.rows;
+                    if (mi < marks.len and at == marks[mi]) { // a pair chunk can end on a mark too
+                        if (out.marked) |f| f(out.ctx, at);
+                        mi += 1;
+                    }
                     continue;
                 }
             }
