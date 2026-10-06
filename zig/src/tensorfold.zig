@@ -10,6 +10,7 @@ pub const nemotron = @import("families/nemotron/nemotron.zig");
 pub const flashnext_replay = @import("families/flashnext/replay.zig");
 pub const flashnext_engine = @import("families/flashnext/engine.zig");
 pub const flashnext_snapshot = @import("families/flashnext/snapshot.zig");
+pub const flashnext_pack = @import("families/flashnext/pack.zig");
 
 test {
     std.testing.refAllDecls(@This());
