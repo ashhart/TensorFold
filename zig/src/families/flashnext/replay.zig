@@ -2166,7 +2166,7 @@ pub const Prompt = struct {
             .up = try B.of(r, R * WIDE * 2), .mixed = try B.of(r, R * D * 2), .p = try B.of(r, R * 16480 * 2),
             .gout = try B.of(r, R * 6144 * 2), .branch = try B.of(r, R * D * 2), .cso = try B.of(r, CS_ROW),
             .q = try B.of(r, R * 24 * 256 * 2), .kout = try B.of(r, R * 2 * 256 * 2), .iq = try B.of(r, R * 4 * 128 * 2),
-            .po = try B.of(r, R * 24 * 16 * 256 * 4), .pm = try B.of(r, R * 24 * 16 * 2 * 4), .aout = try B.of(r, R * 6144 * 2),
+            .po = try B.of(r, 64), .pm = try B.of(r, 64), .aout = try B.of(r, R * 6144 * 2),
             .pos = try B.of(r, R * 4), .nk = try B.of(r, R * 4), .zeros = try B.of(r, R * 4), .kvmeta = try B.of(r, 16),
             .lg = try B.of(r, R * 513 * 4), .pick = try B.of(r, R * 10 * 4), .wts = try B.of(r, R * 10 * 4),
             .cnt = try B.of(r, 512 * 4), .off = try B.of(r, 513 * 4), .cur = try B.of(r, 512 * 4), .row_of = try B.of(r, R * 10 * 4),
@@ -2183,6 +2183,13 @@ pub const Prompt = struct {
 
     pub fn barrier(p: *Prompt) void {
         if (!p.r.serial) p.r.enc.barrier();
+    }
+
+    /// The decode kernels' attention partials (3.2 GB at PMAX rows), made at first use: the tensor-op path never reads them.
+    fn partials(p: *Prompt) !void {
+        if (p.b.po.b.length() >= PMAX * 24 * 16 * 256 * 4) return;
+        p.b.po = .{ .b = try p.r.buffer(PMAX * 24 * 16 * 256 * 4) };
+        p.b.pm = .{ .b = try p.r.buffer(PMAX * 24 * 16 * 2 * 4) };
     }
 
     pub fn bind(p: *Prompt, pipe: mtl.Pipeline, bufs: []const Buf) void {
@@ -2589,6 +2596,7 @@ pub const Prompt = struct {
             } else if (sparse) {
                 var sl = &p.sel.?;
                 try sl.encode(r, L, b.iq, t.eps, t.log2base, s.pos, rows);
+                try p.partials();
                 const dense_ids = r.shapes.get("IDS_shape").?;
                 try r.shapes.put(r.arena, "IDS_shape", sl.ids_shape);
                 try r.callRows("q4_attn_parts#[24, 256]", rows, &.{ b.q, L.keys, L.vals, sl.keys, sl.counts, sl.sparse, t.scale }, &.{ b.po, b.pm }, null);
