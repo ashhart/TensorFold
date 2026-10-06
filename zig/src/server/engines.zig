@@ -9,7 +9,7 @@ pub const Opened = api.Opened;
 
 /// What ``capabilities --json`` reports: this release, the chip here, and what the built-in backend serves.
 pub fn capabilities(a: Allocator) cli.Engines {
-    return .{ .version = "0.6.5", .chip = if (native.families.len > 0) native.chip(a) else null, .backends = native.backends, .families = native.families };
+    return .{ .version = @import("build_options").version, .chip = if (native.families.len > 0) native.chip(a) else null, .backends = native.backends, .families = native.families };
 }
 
 /// The engine for the checkpoint in ``dir``, or null with ``problem`` set.

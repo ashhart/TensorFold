@@ -15,6 +15,21 @@ pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
     const a = init.arena.allocator();
     const argv = try init.minimal.args.toSlice(a);
+    // These commands must work without a model, driver, GPU or checkout.
+    if (argv.len == 2 and std.mem.eql(u8, argv[1], "--version")) {
+        try std.Io.File.stdout().writeStreamingAll(io, "tensorfold-native " ++ @import("build_options").version ++ "\n");
+        return 0;
+    }
+    if (argv.len == 2 and (std.mem.eql(u8, argv[1], "--help") or std.mem.eql(u8, argv[1], "-h"))) {
+        try std.Io.File.stdout().writeStreamingAll(io, "usage: tensorfold-native --version | capabilities --json | serve MODEL [flags]\n" ++ usage_line);
+        return 0;
+    }
+    if (argv.len >= 3 and std.mem.eql(u8, argv[1], "serve")) {
+        for (argv[2..]) |arg| if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            try std.Io.File.stdout().writeStreamingAll(io, usage_line);
+            return 0;
+        };
+    }
     log.init(io, false);
     if (argv.len == 3 and std.mem.eql(u8, argv[1], "capabilities") and std.mem.eql(u8, argv[2], "--json")) {
         var out: std.Io.Writer.Allocating = .init(a);

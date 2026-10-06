@@ -9,5 +9,9 @@
         "build.zig.zon",
         ".zig-version",
         "zig",
+        "tools/release",
+        "packaging",
+        "LICENSE",
+        "NOTICE",
     },
 }

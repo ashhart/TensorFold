@@ -1,0 +1,26 @@
+# Draft for the tensorfold tap. Substitute the owner-approved version and
+# macOS archive SHA-256, then review in the tap before publishing.
+class Tensorfold < Formula
+  desc "Native TensorFold inference server for Apple Silicon"
+  homepage "https://github.com/ashhart/TensorFold"
+  url "https://github.com/ashhart/TensorFold/releases/download/v@VERSION@/tensorfold-@VERSION@-macos-arm64.tar.gz"
+  version "@VERSION@"
+  sha256 "@MACOS_ARM64_SHA256@"
+  license "Apache-2.0"
+
+  depends_on arch: :arm64
+  depends_on macos: :ventura
+
+  def install
+    # Preserve the executable-relative runtime layout. Future lib/ and share/
+    # files stay beside bin/ in libexec, and the public command is a symlink.
+    libexec.install Dir["*"]
+    bin.install_symlink libexec/"bin/tensorfold-native" => "tensorfold-native"
+    bin.install_symlink libexec/"bin/tensorfold-native" => "tensorfold"
+  end
+
+  test do
+    assert_equal "tensorfold-native #{version}", shell_output("#{bin}/tensorfold-native --version").strip
+    assert_match "serve MODEL", shell_output("#{bin}/tensorfold-native --help")
+  end
+end
