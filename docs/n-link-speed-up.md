@@ -29,5 +29,5 @@ port overflow, empty members and conflicting device/via plural and singular fiel
 
 The existing `tp.zig` path passes the parsed logical link through unchanged to the MCDMA endpoint. Tensor partitioning
 and its flags do not depend on the number of physical members. An inactive or missing member refuses initialization;
-a member failing later fails the entire logical peer. The lead must qualify prompt first-token time and decode with
-token equality before making any performance claim for this build.
+a member failing later fails the entire logical peer. Qualify prompt first-token time and decode with token equality
+before making any performance claim for this build.
