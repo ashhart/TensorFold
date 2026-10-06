@@ -19,6 +19,7 @@ An existing download at that revision can be used directly. The native binary se
 `http://127.0.0.1:8090/v1`; decoding and tokenization run in Zig. This preview recipe invokes the native
 binary directly. It does not add a release gate for Python's automatic engine selection.
 The Python packed Qwen decoder's tied-head limitation is separate from this native implementation.
+Normal generation stops on both the model's end IDs and the tokenizer's chat-ending token; `ignore_eos: true` disables those stops for fixed-length throughput checks.
 
 The loader requires the 2B geometry, MLX affine 4-bit weights in groups of 64, bf16 scales and biases,
 and tied embeddings. The packed input embedding and output projection share the same checkpoint buffer.

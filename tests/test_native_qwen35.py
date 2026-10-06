@@ -131,6 +131,13 @@ def test_native_qwen_server_turns_and_concurrent_sampling(tmp_path):
                 request(body)
             assert caught.value.code == 400
         assert request(bodies[0])["tensorfold"]["token_sha"] == solo[0]["tensorfold"]["token_sha"]
+        normal = dict(model="bench", messages=[{"role": "user", "content": "Reply with exactly one word: amber."}],
+                      max_tokens=64, temperature=0, chat_template_kwargs={"enable_thinking": False})
+        reply = request(normal)
+        assert reply["choices"][0]["finish_reason"] == "stop"
+        assert "<|im_end|>" not in reply["choices"][0]["message"]["content"]
+        repeated = request(dict(normal, draft=False))
+        assert repeated["tensorfold"]["token_sha"] == reply["tensorfold"]["token_sha"]
     finally:
         process.terminate()
         try:
