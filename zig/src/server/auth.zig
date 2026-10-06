@@ -1,6 +1,7 @@
 //! API keys held as SHA-256 digests with labels; a restricted key file reread on change or SIGHUP.
 const std = @import("std");
 const posix = std.posix;
+const builtin = @import("builtin");
 const log = @import("log.zig");
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -77,8 +78,7 @@ pub const Store = struct {
         defer s.gpa.free(pathz);
         const fd = posix.openatZ(posix.AT.FDCWD, pathz, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true, .NONBLOCK = true }, 0) catch return error.Unsafe;
         defer _ = posix.system.close(fd);
-        var st: posix.Stat = undefined;
-        if (posix.errno(posix.system.fstat(fd, &st)) != .SUCCESS) return error.Unsafe;
+        const st = meta(fd, null) orelse return error.Unsafe;
         if ((st.mode & posix.S.IFMT) != posix.S.IFREG or st.mode & 0o044 != 0) {
             problem.* = "API key file must be a regular file unreadable by other users; use chmod 600";
             return error.Invalid;
@@ -130,15 +130,14 @@ pub const Store = struct {
         if (s.file_arena) |*old| old.deinit();
         s.file_arena = arena;
         s.file = keys.items;
-        s.stamp = .{ st.dev, st.ino, std.math.lossyCast(i128, st.mtime().nsec) + @as(i128, st.mtime().sec) * std.time.ns_per_s, st.size, st.mode };
+        s.stamp = .{ st.dev, st.ino, st.mtime_ns, st.size, st.mode };
     }
 
     fn statStamp(s: *Store) ?[5]i128 {
         const pathz = s.gpa.dupeSentinel(u8, s.path.?, 0) catch return null;
         defer s.gpa.free(pathz);
-        var st: posix.Stat = undefined;
-        if (posix.errno(posix.system.stat(pathz, &st)) != .SUCCESS) return null;
-        return .{ st.dev, st.ino, std.math.lossyCast(i128, st.mtime().nsec) + @as(i128, st.mtime().sec) * std.time.ns_per_s, st.size, st.mode };
+        const st = meta(-1, pathz) orelse return null;
+        return .{ st.dev, st.ino, st.mtime_ns, st.size, st.mode };
     }
 
     /// Rereads the key file when SIGHUP asked or, at most once a second, when its stamp changed.
@@ -259,4 +258,25 @@ test "gates and digests" {
     try std.testing.expect(gated("/alternative/chat/completions", false));
     try std.testing.expect(digest("has space") == null);
     try std.testing.expect(loopback("127.0.0.1") and loopback("::1") and !loopback("0.0.0.0"));
+}
+
+/// A file's type and permission bits, size, identity and mtime: statx on Linux (its libc has no stat), stat elsewhere.
+const Meta = struct { mode: u32, size: u64, dev: u64, ino: u64, mtime_ns: i128 };
+
+/// `path` at the working directory, or the open `fd` itself when `path` is null.
+fn meta(fd: posix.fd_t, path: ?[*:0]const u8) ?Meta {
+    if (builtin.os.tag == .linux) {
+        const linux = std.os.linux;
+        var sx: linux.Statx = undefined;
+        const want: linux.STATX = .{ .TYPE = true, .MODE = true, .INO = true, .SIZE = true, .MTIME = true };
+        const rc = if (path) |p| std.c.statx(posix.AT.FDCWD, p, 0, want, &sx) else std.c.statx(fd, "", 0x1000, want, &sx); // AT_EMPTY_PATH
+        if (rc != 0) return null;
+        const dev = (@as(u64, sx.dev_major) << 32) | sx.dev_minor;
+        return .{ .mode = sx.mode, .size = sx.size, .dev = dev, .ino = sx.ino, .mtime_ns = @as(i128, sx.mtime.sec) * std.time.ns_per_s + sx.mtime.nsec };
+    }
+    var st: posix.Stat = undefined;
+    const rc = if (path) |p| posix.system.stat(p, &st) else posix.system.fstat(fd, &st);
+    if (posix.errno(rc) != .SUCCESS) return null;
+    const t = st.mtime();
+    return .{ .mode = @intCast(st.mode), .size = @intCast(st.size), .dev = @intCast(st.dev), .ino = @intCast(st.ino), .mtime_ns = std.math.lossyCast(i128, t.nsec) + @as(i128, t.sec) * std.time.ns_per_s };
 }
