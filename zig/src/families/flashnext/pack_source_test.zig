@@ -30,7 +30,7 @@ test "the reader accepts a pack whose identity matches the checkpoint beside it"
     // the mapped-bytes form the engine uses agrees
     const image = try tmp.dir.readFileAlloc(io, "out/pack.safetensors", a, .limited(1 << 30));
     const identity = try pio.sourceIdentity(a, io, model_dir);
-    try pio.checkSourceMapped(a, image, identity);
+    try pio.checkSourceMapped(a, image, identity, "pack.safetensors");
 }
 
 test "the reader refuses a pack whose checkpoint changed after the build" {
@@ -51,12 +51,13 @@ test "the reader refuses a pack whose checkpoint changed after the build" {
     try std.testing.expectError(error.PackSourceMismatch, pio.checkSource(a, io, pack_path, model_dir));
 }
 
-test "the reader refuses a pack with no recorded source" {
+test "the reader loads a pack with no recorded source and refuses a mismatching one" {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const a = arena_state.allocator();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    // every dump the Python tool makes has no __metadata__, so an unmarked pack loads with a warning
     var header: std.Io.Writer.Allocating = .init(a);
     try header.writer.writeAll("{\"w\":{\"dtype\":\"U32\",\"shape\":[1,1],\"data_offsets\":[0,4]}}");
     const head_bytes = header.written();
@@ -68,7 +69,18 @@ test "the reader refuses a pack with no recorded source" {
     try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = "{}" });
     const pack_path = try fixture.tmpPath(a, tmp, "pack.safetensors");
     const model_dir = try fixture.tmpPath(a, tmp, ".");
-    try std.testing.expectError(error.PackHasNoSource, pio.checkSource(a, io, pack_path, model_dir));
+    try pio.checkSource(a, io, pack_path, model_dir);
+    // the mapped-bytes form agrees, whatever identity the checkpoint claims
+    const read = try tmp.dir.readFileAlloc(io, "pack.safetensors", a, .limited(1 << 30));
+    try pio.checkSourceMapped(a, read, "index absent\n", "pack.safetensors");
+    // a pack whose recorded source names another checkpoint still refuses
+    const marked_json = try std.fmt.allocPrint(a, "{{\"__metadata__\":{{\"tf_source\":\"index {s}\"}},\"w\":{{\"dtype\":\"U32\",\"shape\":[1,1],\"data_offsets\":[0,4]}}}}", .{"0000000000000000000000000000000000000000000000000000000000000000"});
+    const marked = try a.alloc(u8, 8 + marked_json.len + 4);
+    std.mem.writeInt(u64, marked[0..8], marked_json.len, .little);
+    @memcpy(marked[8..][0..marked_json.len], marked_json);
+    @memset(marked[8 + marked_json.len ..], 0);
+    try tmp.dir.writeFile(io, .{ .sub_path = "marked.safetensors", .data = marked });
+    try std.testing.expectError(error.PackSourceMismatch, pio.checkSource(a, io, try fixture.tmpPath(a, tmp, "marked.safetensors"), model_dir));
 }
 
 test "the identity string does not depend on the shard list's order" {

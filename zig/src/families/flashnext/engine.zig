@@ -186,8 +186,9 @@ pub const Engine = struct {
             try shard_ids.append(arena, .{ .name = name.*, .size = shard.size, .header_sha256 = pack_io.hashBytes(shard.bytes[8..][0..shard_header]) });
         }
         const identity = try pack_io.identityString(arena, pack_io.hashBytes(index_file.bytes[0..index_file.size]), shard_ids.items);
-        const pack_file = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/pack.safetensors", .{dump_dir}, 0));
-        try pack_io.checkSourceMapped(arena, pack_file.bytes[0..pack_file.size], identity);
+        const pack_path = try std.fmt.allocPrintSentinel(arena, "{s}/pack.safetensors", .{dump_dir}, 0);
+        const pack_file = try mtl.MappedFile.open(pack_path);
+        try pack_io.checkSourceMapped(arena, pack_file.bytes[0..pack_file.size], identity, pack_path);
         try r.indexFile(try std.fmt.allocPrintSentinel(arena, "{s}/pack.safetensors", .{dump_dir}, 0));
         const ref_file = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/ref.json", .{dump_dir}, 0));
         const ref = try std.json.parseFromSliceLeaky(std.json.Value, arena, ref_file.bytes[0..ref_file.size], .{});

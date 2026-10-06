@@ -179,24 +179,38 @@ fn recordedSource(gpa: std.mem.Allocator, header_json: []const u8) ![]u8 {
     return gpa.dupe(u8, source.string);
 }
 
-/// Refuses a pack whose recorded identity does not match the checkpoint folder it is loaded beside.
+/// Refuses a pack whose recorded identity does not match the checkpoint folder it is loaded beside; a pack with
+/// no recorded source (every dump made by the Python tool) loads with one warning naming the pack.
 pub fn checkSource(gpa: std.mem.Allocator, io: Io, pack_path: []const u8, model_dir: []const u8) !void {
     var mapped = try mapFile(io, pack_path);
     defer mapped.map.destroy(io);
     defer mapped.file.close(io);
     const hl = try headerLen(mapped.map.memory);
-    const recorded = try recordedSource(gpa, mapped.map.memory[8..][0..hl]);
+    const recorded = recordedSource(gpa, mapped.map.memory[8..][0..hl]) catch |e| switch (e) {
+        error.PackHasNoSource => {
+            std.log.warn("pack {s} has no recorded source; skipping the identity check", .{pack_path});
+            return;
+        },
+        else => return e,
+    };
     defer gpa.free(recorded);
     const identity = try sourceIdentity(gpa, io, model_dir);
     defer gpa.free(identity);
     if (!std.mem.eql(u8, recorded, identity)) return error.PackSourceMismatch;
 }
 
-/// The same refusal for a reader that already holds the pack's mapped bytes (the engine's MappedFile).
-pub fn checkSourceMapped(gpa: std.mem.Allocator, pack_bytes: []const u8, identity: []const u8) !void {
+/// The same refusal for a reader that already holds the pack's mapped bytes (the engine's MappedFile); `name`
+/// labels the pack in the unmarked warning.
+pub fn checkSourceMapped(gpa: std.mem.Allocator, pack_bytes: []const u8, identity: []const u8, name: []const u8) !void {
     if (pack_bytes.len < 8) return error.BadSafetensors;
     const hl = try headerLen(pack_bytes);
-    const recorded = try recordedSource(gpa, pack_bytes[8..][0..hl]);
+    const recorded = recordedSource(gpa, pack_bytes[8..][0..hl]) catch |e| switch (e) {
+        error.PackHasNoSource => {
+            std.log.warn("pack {s} has no recorded source; skipping the identity check", .{name});
+            return;
+        },
+        else => return e,
+    };
     defer gpa.free(recorded);
     if (!std.mem.eql(u8, recorded, identity)) return error.PackSourceMismatch;
 }
