@@ -15,7 +15,7 @@ pub const ScriptEngine = struct {
     active: u32 = 0,
 
     pub fn engine(e: *ScriptEngine) api.Engine {
-        return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
+        return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory, .score = score } };
     }
 
     fn self(ctx: *anyopaque) *ScriptEngine {
@@ -28,6 +28,12 @@ pub const ScriptEngine = struct {
 
     fn memory(_: *anyopaque, _: bool) ?api.Memory {
         return .{};
+    }
+
+    /// The parity engine has no weights, so every label logit is zero.
+    fn score(_: *anyopaque, _: []const u32, _: []const u32, logits: []f64) error{Failed}!f64 {
+        for (logits) |*logit| logit.* = 0;
+        return 0;
     }
 
     fn status(ctx: *anyopaque, out: *api.Status, _: []u32) void {

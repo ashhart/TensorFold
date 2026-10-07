@@ -36,4 +36,6 @@ test {
     _ = @import("log.zig");
     _ = @import("messages.zig");
     _ = @import("stream_preflight_test.zig");
+    _ = @import("decisions.zig");
+    _ = @import("decisions_test.zig");
 }

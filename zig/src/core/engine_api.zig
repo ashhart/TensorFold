@@ -159,6 +159,8 @@ pub const Engine = struct {
         status: *const fn (ctx: *anyopaque, out: *Status, stream_tokens: []u32) void,
         /// Device memory in bytes, the peak since the last reset; null when the backend keeps no count.
         memory: *const fn (ctx: *anyopaque, reset_peak: bool) ?Memory,
+        /// One logit per label, and the vocabulary logsumexp. Null until a family scores decisions.
+        score: ?*const fn (ctx: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64) error{Failed}!f64 = null,
     };
 
     pub fn info(e: Engine) Info {
@@ -175,6 +177,12 @@ pub const Engine = struct {
     }
     pub fn memory(e: Engine, reset_peak: bool) ?Memory {
         return e.vtable.memory(e.ctx, reset_peak);
+    }
+
+    /// The decision hook, or Unsupported when this engine does not score.
+    pub fn score(e: Engine, prompt: []const u32, labels: []const u32, logits: []f64) error{ Failed, Unsupported }!f64 {
+        const f = e.vtable.score orelse return error.Unsupported;
+        return f(e.ctx, prompt, labels, logits);
     }
 };
 
