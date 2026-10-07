@@ -136,6 +136,12 @@ fn bf16ToF32(bits: u16) f32 {
     return @bitCast(@as(u32, bits) << 16);
 }
 
+/// f32 bits to bf16 bits, round-half-even: the cast MLX's bf16 store does. Infinities and NaNs keep their top half.
+fn f32ToBf16(bits: u32) u16 {
+    const rounded: u32 = bits +% 0x7FFF +% (bits >> 16 & 1);
+    return @intCast(rounded >> 16);
+}
+
 /// A centered norm's scale: decode.py:221 always computes 1.0 + f32(w) over the loaded weight, and the loader runs
 /// f32(w) - 1.0 first only when the checkpoint stores gamma (model.py:416-420, norms_stored_around_one true); the
 /// two steps stay f32 so the round trip is bit-exact inside [0.5, 2].
@@ -445,16 +451,17 @@ pub fn build(gpa: std.mem.Allocator, io: Io, model_dir: []const u8, out_dir: []c
             try putLane(&decode, gpa, try std.fmt.allocPrint(a, "L{d}.gdn.out", .{i}), out_members[0..]);
             try putConvSlice(&decode, gpa, &ck, try std.fmt.allocPrint(a, "L{d}.gdn.conv", .{i}), try std.fmt.allocPrint(a, "{s}.linear_attn.conv1d.weight", .{stem}), false);
             const alog = try ck.get(try std.fmt.allocPrint(a, "{s}.linear_attn.A_log", .{stem}));
-            if (alog.rank != 1 or (alog.dtype != .f32 and alog.dtype != .bf16)) return error.UnexpectedTensor;
-            // the kernel binds floats: a bf16 A_log widens losslessly
-            const alog32 = try gpa.alloc(u8, alog.dim(0) * 4);
-            if (alog.dtype == .f32) @memcpy(alog32, alog.bytes) else for (0..alog.dim(0)) |j| std.mem.writeInt(u32, alog32[j * 4 ..][0..4], @bitCast(bf16ToF32(std.mem.readInt(u16, alog.bytes[j * 2 ..][0..2], .little))), .little);
-            try decode.put(try std.fmt.allocPrint(a, "L{d}.gdn.alog", .{i}), "F32", &.{alog.dim(0)}, alog32);
+            if (alog.rank != 1 or (alog.dtype != .bf16 and alog.dtype != .f32)) return error.UnexpectedTensor;
+            // the gdn kernels bind ALOG and DT as bfloat16_t*, so the pack carries bf16 rows: byte-copied when
+            // the checkpoint stores bf16, rounded from f32 otherwise
+            const alog16 = try gpa.alloc(u8, alog.dim(0) * 2);
+            if (alog.dtype == .bf16) @memcpy(alog16, alog.bytes) else for (0..alog.dim(0)) |j| std.mem.writeInt(u16, alog16[j * 2 ..][0..2], f32ToBf16(std.mem.readInt(u32, alog.bytes[j * 4 ..][0..4], .little)), .little);
+            try decode.put(try std.fmt.allocPrint(a, "L{d}.gdn.alog", .{i}), "BF16", &.{alog.dim(0)}, alog16);
             const dt = try ck.get(try std.fmt.allocPrint(a, "{s}.linear_attn.dt_bias", .{stem}));
-            if (dt.rank != 1 or (dt.dtype != .f32 and dt.dtype != .bf16)) return error.UnexpectedTensor;
-            const dt32 = try gpa.alloc(u8, dt.dim(0) * 4);
-            if (dt.dtype == .f32) @memcpy(dt32, dt.bytes) else for (0..dt.dim(0)) |j| std.mem.writeInt(u32, dt32[j * 4 ..][0..4], @bitCast(bf16ToF32(std.mem.readInt(u16, dt.bytes[j * 2 ..][0..2], .little))), .little);
-            try decode.put(try std.fmt.allocPrint(a, "L{d}.gdn.dt", .{i}), "F32", &.{dt.dim(0)}, dt32);
+            if (dt.rank != 1 or (dt.dtype != .bf16 and dt.dtype != .f32)) return error.UnexpectedTensor;
+            const dt16 = try gpa.alloc(u8, dt.dim(0) * 2);
+            if (dt.dtype == .bf16) @memcpy(dt16, dt.bytes) else for (0..dt.dim(0)) |j| std.mem.writeInt(u16, dt16[j * 2 ..][0..2], f32ToBf16(std.mem.readInt(u32, dt.bytes[j * 4 ..][0..4], .little)), .little);
+            try decode.put(try std.fmt.allocPrint(a, "L{d}.gdn.dt", .{i}), "BF16", &.{dt.dim(0)}, dt16);
             const norm = try ck.get(try std.fmt.allocPrint(a, "{s}.linear_attn.norm.weight", .{stem}));
             if (norm.dtype != .bf16 or norm.rank != 1) return error.UnexpectedTensor;
             try decode.put(try std.fmt.allocPrint(a, "L{d}.gdn.norm", .{i}), "BF16", &.{norm.dim(0)}, try gpa.dupe(u8, norm.bytes));

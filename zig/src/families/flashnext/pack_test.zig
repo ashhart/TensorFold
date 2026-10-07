@@ -117,10 +117,10 @@ pub fn writeCheckpoint(tmp: std.testing.TmpDir, a: std.mem.Allocator) !void {
         @memset(conv, bf16_half);
         try list.append(a, .{ .name = try std.fmt.allocPrint(a, "{s}.conv1d.weight", .{stem}), .dtype = "BF16", .shape = &.{ 32, 4, 1 }, .bytes = std.mem.sliceAsBytes(conv) });
         const alog = try a.alloc(u32, 8);
-        for (alog, 0..) |*v, i| v.* = 9_000_000 + @as(u32, @intCast(i));
+        for (alog, 0..) |*v, i| v.* = @bitCast(@as(f32, @floatFromInt(2 + i))); // 2.0..9.0, exact in bf16
         try list.append(a, .{ .name = try std.fmt.allocPrint(a, "{s}.A_log", .{stem}), .dtype = "F32", .shape = &.{8}, .bytes = std.mem.sliceAsBytes(alog) });
         const dt = try a.alloc(u32, 8);
-        for (dt, 0..) |*v, i| v.* = 9_100_000 + @as(u32, @intCast(i));
+        for (dt, 0..) |*v, i| v.* = @bitCast(1.5 + @as(f32, @floatFromInt(i))); // 1.5..8.5, exact in bf16
         try list.append(a, .{ .name = try std.fmt.allocPrint(a, "{s}.dt_bias", .{stem}), .dtype = "F32", .shape = &.{8}, .bytes = std.mem.sliceAsBytes(dt) });
         const norm = try a.alloc(u16, 32);
         @memset(norm, bf16_one);
@@ -509,8 +509,15 @@ test "the full build writes the three packs byte for byte against hand-computed 
     try std.testing.expectEqual(@as(u16, 0x3F00), in_sbt[30 * 2]); // a's scale
     try expectTensor(&file, "L0.gdn.conv", .bf16, &.{ 32, 4 });
     try std.testing.expectEqual(@as(u16, bf16_half), std.mem.bytesAsSlice(u16, tensorBytes(&file, "L0.gdn.conv"))[0]);
-    try expectTensor(&file, "L0.gdn.alog", .f32, &.{8});
-    try std.testing.expectEqual(@as(u32, 9_000_000), std.mem.bytesAsSlice(u32, tensorBytes(&file, "L0.gdn.alog"))[0]);
+    try expectTensor(&file, "L0.gdn.alog", .bf16, &.{8});
+    const alog_bits = std.mem.bytesAsSlice(u16, tensorBytes(&file, "L0.gdn.alog"));
+    try std.testing.expectEqual(@as(u16, 0x4000), alog_bits[0]); // 2.0, rounded from the f32 store
+    try std.testing.expectEqual(@as(u16, 0x4040), alog_bits[1]); // 3.0
+    try std.testing.expectEqual(@as(u16, 0x4110), alog_bits[7]); // 9.0
+    try expectTensor(&file, "L0.gdn.dt", .bf16, &.{8});
+    const dt_bits = std.mem.bytesAsSlice(u16, tensorBytes(&file, "L0.gdn.dt"));
+    try std.testing.expectEqual(@as(u16, 0x3FC0), dt_bits[0]); // 1.5
+    try std.testing.expectEqual(@as(u16, 0x4108), dt_bits[7]); // 8.5
     try expectTensor(&file, "L0.gdn.norm", .bf16, &.{32});
     // attention stack: q(32) k(8) v(8) index_qk(48) rows over three 32-row tiles, identity per group of one
     try expectTensor(&file, "L1.att.proj.wq", .u32, &.{ 96, 6 });
