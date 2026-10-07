@@ -13,10 +13,26 @@ COMMENT = {".zig": re.compile(r"^\s*//"), ".metal": re.compile(r"^\s*//"), ".cu"
 BLOCK = re.compile(r"/\*")
 DOCSTRING = re.compile(r'^\s*(?:[rubf]{0,2})("""|\'\'\')')
 GENERATED = ("unicode_data.zig",)
+HEX_METAL = re.compile(r"_[0-9a-f]{16}\.metal$")
+# Generator outputs are skipped entirely. unicode_data.zig stays exempt from the length check only.
+GENERATOR_OUTPUT = (
+    "zig/src/families/flashnext/roles_gen.zig",
+    "zig/kernels/metal/flashnext/sources_gen.zig",
+)
+
+
+def generator_output(path: Path) -> bool:
+    """A Flash Next file a generator writes. The generator script itself stays checked."""
+    rel = path.relative_to(ROOT).as_posix()
+    if rel in GENERATOR_OUTPUT:
+        return True
+    return rel.startswith("zig/kernels/metal/flashnext/") and HEX_METAL.search(path.name) is not None
 
 
 def problems(path: Path) -> list[str]:
     """Every rule break in one file, as 'path:line: reason'."""
+    if generator_output(path):
+        return []
     lines = path.read_text(errors="replace").splitlines()
     rel, found = path.relative_to(ROOT), []
     if len(lines) > MAX_LINES and path.name not in GENERATED:
