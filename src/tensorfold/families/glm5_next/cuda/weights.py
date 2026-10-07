@@ -255,18 +255,17 @@ class Weights:
         return total
 
 
-def load(model_dir: str | Path, *, rank: int, device: str = "cuda", mtp: bool = True) -> Weights:
-    """One of two ranks from a checkpoint or rank folder, MTP included unless ``mtp`` is False, with its head half."""
+def load(model_dir: str | Path, *, rank: int, device: str = "cuda", mtp: bool = True, world: int = 2) -> Weights:
+    """One of world ranks from a checkpoint or rank folder, MTP included unless mtp is False."""
 
     from .split import RankReader
 
-    world = 2
     cfg = Config.read(model_dir)
     if cfg.quant not in ("mlx", "exl3"):
         raise ValueError(f"GLM-5.3-Flash's CUDA engine reads MLX 4-bit or EXL3 checkpoints, not {cfg.quant}")
     exl3 = cfg.quant == "exl3"
     dev = torch.device(device)
-    rd = RankReader(model_dir, rank)
+    rd = RankReader(model_dir, rank, ranks=world)
     HL = cfg.heads // world
     LL = cfg.lin_heads // world
 

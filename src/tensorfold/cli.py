@@ -243,10 +243,12 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
 
     from tensorfold import hub
 
-    if args.tp == 2 and not args.master:
-        raise ValueError("--tp 2 needs --master: rank 0's address on the link between the two machines")
+    if args.tp > 1 and not args.master:
+        raise ValueError("--tp 2/4 needs --master: rank 0's address on the link between the ranks")
     if args.tp == 1 and args.rank != 0:
-        raise ValueError("--rank 1 needs --tp 2")
+        raise ValueError("--rank 1 needs --tp 2 or 4")
+    if args.tp == 4 and args.rank not in (0, 1, 2, 3):
+        raise ValueError("--tp 4 needs --rank 0..3")
     started = time.perf_counter()
     drafter = "" if args.no_drafts else _drafter(family, args.drafter, "cuda")
     options: dict[str, Any] = {"drafter": drafter, "tp": int(args.tp), "rank": int(args.rank), "master": args.master,
@@ -270,7 +272,7 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
     if getattr(args, "checkpoint_slots", None) is not None and getattr(family.package, "CUDA_CHECKPOINT_SLOTS", False):
         options["checkpoint_slots"] = int(args.checkpoint_slots)
     served = args.name or (args.model.rstrip("/").split("/")[-1] if hub.is_repo_id(args.model) else model_dir.name)
-    where = f", rank {args.rank} of 2" if args.tp == 2 else ""
+    where = f", rank {args.rank} of {args.tp}" if args.tp > 1 else ""
     print(f"[tensorfold] loading {served}: {family.title} ({family.model_type}) on CUDA{where}", flush=True)
     from tensorfold.cuda import precision, prompt_precision
 
@@ -288,8 +290,8 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
         raise ValueError("--prefill-fp8: this checkpoint's prompt matmuls have no FP8 kernel (EXL3 packs, MLX formats "
                          "other than Qwen's 4-bit g64, Flash Next without MXFP8 layers); drop the flag")
     stacks.arm()            # its warmup may have loaded a compiler that took USR1
-    if args.tp == 2 and args.rank == 1:
-        print(f"[tensorfold] rank 1 ready in {time.perf_counter() - started:.1f}s, following rank 0", flush=True)
+    if args.tp > 1 and args.rank != 0:
+        print(f"[tensorfold] rank {args.rank} ready in {time.perf_counter() - started:.1f}s, following rank 0", flush=True)
         engine.follow()
         return 0
     from tensorfold.cuda.server import App, serve

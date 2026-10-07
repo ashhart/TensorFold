@@ -71,53 +71,53 @@ def read_header(path: str | Path) -> tuple[dict, int]:
     return header, 8 + n
 
 
-def split_bytes(raw: np.ndarray, shape: list[int], itemsize: int, kind: str, rank: int) -> tuple[np.ndarray, list[int]]:
-    """A tensor's bytes -> rank's part of them and its shape."""
+def split_bytes(raw: np.ndarray, shape: list[int], itemsize: int, kind: str, rank: int, ranks: int = 2) -> tuple[np.ndarray, list[int]]:
+    """A tensor's bytes -> rank's part of them and its shape (ranks: 2 or 4)."""
 
     if kind == "rep":
         return raw, list(shape)
     if kind == "row":
         rows = shape[0]
-        if rows % 2:
-            raise ValueError(f"row split of odd leading dim {shape}")
+        if rows % ranks:
+            raise ValueError(f"row split of leading dim {shape} not divisible by {ranks}")
         per = raw.size // rows
-        half = rows // 2
-        return raw[rank * half * per:(rank + 1) * half * per], [half] + list(shape[1:])
+        chunk = rows // ranks
+        return raw[rank * chunk * per:(rank + 1) * chunk * per], [chunk] + list(shape[1:])
     if kind == "col":
-        if len(shape) != 2 or shape[1] % 2:
-            raise ValueError(f"column split needs an even 2-D shape, got {shape}")
+        if len(shape) != 2 or shape[1] % ranks:
+            raise ValueError(f"column split needs a 2-D shape divisible by {ranks}, got {shape}")
         view = raw.reshape(shape[0], shape[1] * itemsize)
-        half = shape[1] // 2
-        part = np.ascontiguousarray(view[:, rank * half * itemsize:(rank + 1) * half * itemsize])
-        return part.reshape(-1), [shape[0], half]
+        chunk = shape[1] // ranks
+        part = np.ascontiguousarray(view[:, rank * chunk * itemsize:(rank + 1) * chunk * itemsize])
+        return part.reshape(-1), [shape[0], chunk]
     if kind == "dim1":                                   # the second axis of a 2-D or higher tensor
-        if len(shape) < 2 or shape[1] % 2:
-            raise ValueError(f"split of the second axis needs an even second dim, got {shape}")
+        if len(shape) < 2 or shape[1] % ranks:
+            raise ValueError(f"split of the second axis needs a second dim divisible by {ranks}, got {shape}")
         inner = int(np.prod(shape[2:])) * itemsize
         view = raw.reshape(shape[0], shape[1] * inner)
-        half = shape[1] // 2
-        part = np.ascontiguousarray(view[:, rank * half * inner:(rank + 1) * half * inner])
-        return part.reshape(-1), [shape[0], half] + list(shape[2:])
+        chunk = shape[1] // ranks
+        part = np.ascontiguousarray(view[:, rank * chunk * inner:(rank + 1) * chunk * inner])
+        return part.reshape(-1), [shape[0], chunk] + list(shape[2:])
     raise ValueError(kind)
 
 
-def split_device(raw, shape: list[int], itemsize: int, kind: str, rank: int):
-    """``split_bytes`` for a uint8 tensor on the GPU: the rank's part (a new contiguous tensor) and its shape."""
+def split_device(raw, shape: list[int], itemsize: int, kind: str, rank: int, ranks: int = 2):
+    """split_bytes for a uint8 tensor on the GPU: the rank's part (a new contiguous tensor) and its shape."""
 
     if kind == "rep":
         return raw.clone(), list(shape)
     if kind == "row":
-        if shape[0] % 2:
-            raise ValueError(f"row split of odd leading dim {shape}")
-        per, half = raw.numel() // shape[0], shape[0] // 2
-        return raw[rank * half * per:(rank + 1) * half * per].clone(), [half] + list(shape[1:])
+        if shape[0] % ranks:
+            raise ValueError(f"row split of leading dim {shape} not divisible by {ranks}")
+        per, chunk = raw.numel() // shape[0], shape[0] // ranks
+        return raw[rank * chunk * per:(rank + 1) * chunk * per].clone(), [chunk] + list(shape[1:])
     if kind in ("col", "dim1"):
-        if len(shape) < 2 or shape[1] % 2 or (kind == "col" and len(shape) != 2):
-            raise ValueError(f"{kind} split needs an even second dim, got {shape}")
+        if len(shape) < 2 or shape[1] % ranks or (kind == "col" and len(shape) != 2):
+            raise ValueError(f"{kind} split needs a second dim divisible by {ranks}, got {shape}")
         inner = int(np.prod(shape[2:])) * itemsize
-        half = shape[1] // 2
-        part = raw.view(shape[0], shape[1] * inner)[:, rank * half * inner:(rank + 1) * half * inner]
-        return part.contiguous().reshape(-1), [shape[0], half] + list(shape[2:])
+        chunk = shape[1] // ranks
+        part = raw.view(shape[0], shape[1] * inner)[:, rank * chunk * inner:(rank + 1) * chunk * inner]
+        return part.contiguous().reshape(-1), [shape[0], chunk] + list(shape[2:])
     raise ValueError(kind)
 
 
@@ -136,10 +136,10 @@ def rank_files(model_dir: str | Path, rank: int) -> list[Path]:
 class RankReader:
     """Read stored-dtype CPU tensors for one rank from the full checkpoint or its pre-split folder."""
 
-    def __init__(self, model_dir: str | Path, rank: int) -> None:
+    def __init__(self, model_dir: str | Path, rank: int, ranks: int = 2) -> None:
         from tensorfold.cuda.direct_read import ReadAhead, Reader, SafeTensors
 
-        self.dir, self.rank = Path(model_dir), rank
+        self.dir, self.rank, self.ranks = Path(model_dir), rank, ranks
         self.io = Reader()                                # O_DIRECT reads where the file system allows them
         self.reads = ReadAhead(self.io, READERS, RUN, GAP)
         mine, other = rank_files(self.dir, rank), rank_files(self.dir, 1 - rank)
@@ -196,9 +196,10 @@ class RankReader:
             raise KeyError(f"{name} is not used by the engine")
         a, b = info["data_offsets"]
         shape = list(info["shape"])
-        if kind == "row" and shape and shape[0] % 2 == 0:   # the rank's rows are one run: read only those
-            per = (b - a) // shape[0] * (shape[0] // 2)
-            a, b, kind, shape = a + self.rank * per, a + (self.rank + 1) * per, "rep", [shape[0] // 2] + shape[1:]
+        if kind == "row" and shape and shape[0] % self.ranks == 0:   # the rank's rows are one run: read only those
+            chunk = shape[0] // self.ranks
+            per = (b - a) // shape[0] * chunk
+            a, b, kind, shape = a + self.rank * per, a + (self.rank + 1) * per, "rep", [chunk] + shape[1:]
         return file, base + a, base + b, kind, shape, info["dtype"]
 
     def _tensor(self, raw: np.ndarray, span: tuple, own: bool):
@@ -207,7 +208,7 @@ class RankReader:
         import torch
 
         _, _, _, kind, shape, dtype = span
-        data, shape = split_bytes(raw, shape, DTYPE_BYTES[dtype], kind, self.rank)
+        data, shape = split_bytes(raw, shape, DTYPE_BYTES[dtype], kind, self.rank, self.ranks)
         if own and np.may_share_memory(data, raw):
             data = data.copy()
         return torch.from_numpy(data).view(torch_dtype(dtype)).reshape(shape)
@@ -224,7 +225,7 @@ class RankReader:
         if not raw.is_cuda:
             return self._tensor(raw.numpy(), span, own=True)
         _, _, _, kind, shape, dtype = span
-        data, shape = split_device(raw, shape, DTYPE_BYTES[dtype], kind, self.rank)
+        data, shape = split_device(raw, shape, DTYPE_BYTES[dtype], kind, self.rank, self.ranks)
         return data.view(torch_dtype(dtype)).reshape(shape)
 
 def write(path: str, tensors: list[tuple[str, str, list[int], np.ndarray]], metadata: dict | None) -> None:
@@ -246,7 +247,7 @@ def write(path: str, tensors: list[tuple[str, str, list[int], np.ndarray]], meta
     os.replace(tmp, path)
 
 
-def split_file(src: str | Path, out: str | Path, rank: int) -> dict:
+def split_file(src: str | Path, out: str | Path, rank: int, ranks: int = 2) -> dict:
     """One checkpoint file -> OUT/<stem>.rank<R>.safetensors with the rank's part of every tensor it keeps."""
 
     header, base = read_header(src)
@@ -263,7 +264,7 @@ def split_file(src: str | Path, out: str | Path, rank: int) -> dict:
             continue
         a, b = info["data_offsets"]
         itemsize = DTYPE_BYTES[info["dtype"]]
-        data, shape = split_bytes(mm[base + a:base + b], info["shape"], itemsize, kind, rank)
+        data, shape = split_bytes(mm[base + a:base + b], info["shape"], itemsize, kind, rank, ranks)
         if int(np.prod(shape)) * itemsize != data.size:
             raise ValueError(f"{name}: {shape} does not match {data.size} bytes")
         part.append((name, info["dtype"], shape, data))
@@ -276,7 +277,8 @@ def split_file(src: str | Path, out: str | Path, rank: int) -> dict:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("model_dir", type=Path, help="the checkpoint (e.g. the snapshot `tensorfold pull` downloaded)")
-    p.add_argument("--rank", type=int, choices=(0, 1), required=True, help="the rank this machine serves")
+    p.add_argument("--rank", type=int, choices=(0, 1, 2, 3), required=True, help="the rank this machine serves")
+    p.add_argument("--ranks", type=int, choices=(2, 4), default=2, help="total ranks the weights split over")
     p.add_argument("out", type=Path, help="the folder to write (then: tensorfold serve OUT --tp 2 --rank R ...)")
     args = p.parse_args(argv)
     files = sorted(args.model_dir.glob("model-*.safetensors"))
@@ -290,7 +292,7 @@ def main(argv: list[str] | None = None) -> int:
         stem = src.name.replace(".safetensors", "")
         if (args.out / f"{stem}.rank{args.rank}.safetensors").exists():
             continue
-        print(src.name, split_file(src, args.out, args.rank), flush=True)
+        print(src.name, split_file(src, args.out, args.rank, args.ranks), flush=True)
     print(f"rank {args.rank}'s share of {len(files)} files in {args.out}", flush=True)
     return 0
 
