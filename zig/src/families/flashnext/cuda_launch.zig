@@ -11,6 +11,7 @@ pub const gdn = @import("cuda_gdn.zig");
 pub const mlp = @import("cuda_mlp.zig");
 pub const moe = @import("cuda_moe.zig");
 pub const attn = @import("cuda_attn.zig");
+pub const ple = @import("cuda_ple.zig");
 
 const p = aot.ptr;
 
@@ -180,6 +181,17 @@ pub const Tri = struct {
         }, &.{ ci("D", dims), ci("S", streams), ci("MODE", mode), ci("TOPK", topk), ci("SLOTS", slots), ci("BLOCK", 256), ci("WORLD", world) });
     }
 
+    /// glue.ple_embed: gathered n-gram rows, MLX 4-bit group 32. `scale` is a constexpr.
+    pub fn pleEmbed(t: Tri, weight: u64, scales: u64, biases: u64, out: u64, xs: u64, rows: usize, heads: usize, dh: usize, scale: f32) !void {
+        try t.run("_ple_embed", .{ u(rows), u(heads), 1 }, &.{
+            p("W", "*i32", weight),
+            p("S", "*bf16", scales),
+            p("B", "*bf16", biases),
+            p("OUT", "*bf16", out),
+            p("XS", "*fp32", xs),
+        }, &.{ ci("HEADS", heads), ci("DH", dh), aot.cf("SCALE", scale) });
+    }
+
     /// moe.router for one decode row. M folds to a constexpr. 513 rows: the experts, then the shared gate.
     pub fn router(t: Tri, x: u64, w: u64, out: u64, x_stride: usize) !void {
         try t.run("_router", .{ 1, cdiv(513, 32), 1 }, &.{
@@ -209,6 +221,7 @@ test {
     _ = mlp;
     _ = moe;
     _ = attn;
+    _ = ple;
 }
 
 test "embed grid is one program per row and per group of 32" {
