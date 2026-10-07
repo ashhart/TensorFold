@@ -250,10 +250,17 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
         s.count = max(1, min(s.count, room))
         if any(x.waiting for x in self.streams.values()):
             raise NoRoom("streams already wait for memory; a new request waits until one finishes")
-        if self.w.comm is not None and any(x is not None for x in (s.constraint, s.vision, s.probabilities)):
+        if self.w.comm is not None and any(x is not None for x in (s.constraint, s.probabilities)):
             raise ValueError("concurrent Flash Next on two ranks serves text without grammars or logprobs")
         t0 = time.perf_counter()
         if self.w.comm is not None:
+            if s.vision is not None and self.link is not None and not hasattr(s.vision, "features"):
+                # rank 0 encodes the images before rank 1 hears of the request: an image the tower refuses
+                # (too large, a video without its frontend) fails here and no message reaches rank 1; a request
+                # admitted again after waiting for memory keeps the features it already has
+                if self.vision is None:
+                    raise ValueError("image inputs require starting this server with --vision")
+                s.vision = self.vision.encode(s.vision, s.prompt)
             st, resume, s.cached = self._prepare_admission(s, told)
         else:
             st, resume, s.cached = self._slot_for(list(s.prompt), s.draft and s.vision is None)

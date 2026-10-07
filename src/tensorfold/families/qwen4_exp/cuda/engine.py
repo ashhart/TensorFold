@@ -72,8 +72,8 @@ class FlashNextEngine:
         if (exl3 or quant_method(read_config(model_dir)) == "modelopt") and tp != 1:
             raise ValueError(f"{'EXL3 packs' if exl3 else 'NVFP4 checkpoints'} of Flash Next run on one GPU: drop --tp "
                              "2, or serve the MLX checkpoint (TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP) on two")
-        if vision and (streams < 2 or tp != 1):
-            raise ValueError("image input on Flash Next runs on one GPU with --parallel 2 or more")
+        if vision and streams < 2:
+            raise ValueError("image input on Flash Next needs --parallel 2 or more (on one GPU or on two ranks)")
         if exl3 and ple_on_ssd:
             raise ValueError("--ple-on-ssd reads the MLX checkpoint's n-gram tables; an EXL3 pack maps its own table "
                              "from its file, so drop --ple-on-ssd")
@@ -136,7 +136,7 @@ class FlashNextEngine:
                   f"planned peak {peak:.2f} GiB at the admitted window", flush=True)
         self.max_len = self.capacity_plan["cache_slots"]
         if tp == 2:
-            self._same_settings(torch, ids)
+            self._same_settings(torch, ids, vision)
         build_kernels(exl3=exl3, nvfp4=not exl3 and quant_method(read_config(model_dir)) == "modelopt",
                       solo=streams == 1 or (graphs and mtp))
         from concurrent.futures import wait
@@ -165,7 +165,7 @@ class FlashNextEngine:
         from tensorfold.cuda.markers import resume_points
 
         self.points = resume_points(model_dir)          # a prompt's message starts to keep states at, or None
-        if vision:
+        if vision and rank == 0:
             from tensorfold.vision.qwen_cuda import QwenCudaVision
 
             self.vision = QwenCudaVision(model_dir, torch.device("cuda", 0),
@@ -173,7 +173,12 @@ class FlashNextEngine:
             torch.cuda.empty_cache()
             print(f"[tensorfold] vision: image{' and video' if self.vision.videos else ''} input, a "
                   f"{self.vision.weight_bytes / 2**30:.2f} GiB tower with {vision_workspace() / 2**30:.2f} GiB of "
-                  f"workspace reserved{'; https URLs allowed' if vision_urls else ''}", flush=True)
+                  f"workspace reserved{'; https URLs allowed' if vision_urls else ''}"
+                  f"{'; rank 1 receives each request\'s image features from this rank' if tp == 2 else ''}",
+                  flush=True)
+        elif vision:                                   # rank 1: no tower; rank 0's features arrive with each admission
+            print("[tensorfold] vision: image input on two ranks; this rank attaches the features rank 0 encodes",
+                  flush=True)
         # ``streams`` > 1: up to that many requests decoded together, every stream's chain in one forward
         self.concurrent = streams > 1
         self.refuses_structured_output = (
@@ -264,7 +269,7 @@ class FlashNextEngine:
               f"decode graphs captured; idle prompt pieces {self.prefill_rows} rows; "
               f"prompt kernels warmed in {warm_s:.1f}s", flush=True)
 
-    def _same_settings(self, torch, ids) -> None:
+    def _same_settings(self, torch, ids, vision: bool = False) -> None:
         """Both ranks must decode with the same rule, context, draft vocabulary and KV cache, or they would fall out of step: refuse to start otherwise."""
 
         from .kvcache import BITS_OF
@@ -273,14 +278,15 @@ class FlashNextEngine:
         mine = torch.tensor([self.depth, round(self.confidence * 1e6), self.max_len, self.streams,
                              int(self.graphs_enabled),
                              len(ids) if ids is not None else -1, total, BITS_OF[self.kv_dtype],
-                             self.prefill_rows, int(prompt_precision.fp8())], dtype=torch.int64, device="cuda")
+                             self.prefill_rows, int(bool(vision)), int(prompt_precision.fp8())],
+                            dtype=torch.int64, device="cuda")
         both = torch.empty((2 * mine.numel(),), dtype=torch.int64, device="cuda")
         self.comm.all_gather(mine, both)
         both = both.view(2, -1).cpu()
         prompt_precision.same_on_ranks(int(both[0, -1]), int(both[1, -1]))
         if not torch.equal(both[0], both[1]):
             raise RuntimeError(f"the two ranks were started with different settings (drafts, confidence, context, "
-                               f"parallel streams, graphs, draft vocabulary, KV cache, prompt rows): "
+                               f"parallel streams, graphs, draft vocabulary, KV cache, prompt rows, --vision): "
                                f"rank 0 {both[0].tolist()}, rank 1 {both[1].tolist()}")
 
     def _key(self, n: int) -> str:

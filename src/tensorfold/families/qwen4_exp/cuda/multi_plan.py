@@ -19,6 +19,7 @@ class Shadow:
     def __init__(self, st, index: int, actions: list) -> None:
         self.source, self.index, self.actions = st, index, actions
         self.capacity, self.limit, self.pos, self.mtp_len = st.capacity, st.limit, st.pos, st.mtp_len
+        self.images = getattr(st, "image_positions", None) is not None     # an image prompt's rotary positions
 
     def cache_bytes(self, rows=None):
         return self.source.cache_bytes(self.capacity if rows is None else rows)
@@ -86,7 +87,8 @@ def layout(p) -> dict:
 
 def admission(dec, s) -> dict:
     p = view(dec)
-    st, resume, cached = p._slot_for(list(s.prompt), s.draft)
+    text = getattr(s, "vision", None) is None            # image prompts reuse no kept prefix (as on one GPU)
+    st, resume, cached = p._slot_for(list(s.prompt), s.draft and text)
     source = next((st.index for ids, st, snap, _ in p.kept
                    if resume is not None and snap is resume["state"] and ids == list(s.prompt[:cached])), None)
     error = None
@@ -96,7 +98,7 @@ def admission(dec, s) -> dict:
         else:
             p._remember(list(s.prompt[:cached]), st, resume["state"], resume["tail"])
         error = f"a {len(s.prompt)}-token prompt waits for memory until a live stream finishes"
-    markers = p.points(s.prompt) if s.draft and p.points is not None else []
+    markers = p.points(s.prompt) if s.draft and text and p.points is not None else []   # image prompts keep none
     points = sorted({n for n in markers if cached + MIN_GAP <= n < entry_end(s.prompt)})
     return {**layout(p), "slot": st.index, "cached": cached, "resume_slot": source, "error": error, "points": points}
 
@@ -107,7 +109,7 @@ def round_plan(dec) -> dict:
     live = [s for s in p.streams.values() if not s.done and not s.waiting]
     solo = None
     if (p.solo_on and not ended and not p.filling and len(p.streams) == 1
-            and len(live) == 1 and live[0].draft and live[0].constraint is None):
+            and len(live) == 1 and live[0].draft and live[0].constraint is None and not live[0].st.images):
         s = live[0]
         if s.st is not p.solo.st:
             p._move_to_solo(s)

@@ -24,13 +24,20 @@ def rope_axis(pos, ROPE, DELTA, length, index, MODE: tl.constexpr, S1: tl.conste
 
 
 def begin(engine, stream, tower) -> None:
-    """Encode an image request on its admitted slot before the normal prompt passes."""
+    """Encode an image request on its admitted slot before the normal prompt passes.
 
-    if stream.vision is not None:
+    On two ranks the stream already carries the features rank 0 encoded (``multi_tp._share_vision``): both ranks
+    attach the same tensors, and rank 1 needs no tower."""
+
+    if stream.vision is None:
+        return
+    encoded = stream.vision if hasattr(stream.vision, "features") else None
+    if encoded is None:
         if tower is None:
             raise ValueError("image inputs require starting this server with --vision")
-        attach(engine.st, tower.encode(stream.vision, stream.prompt), len(stream.prompt))
-        stream.vision = None
+        encoded = tower.encode(stream.vision, stream.prompt)
+    attach(engine.st, encoded, len(stream.prompt))
+    stream.vision = None
 
 
 def attach(st, encoded, length: int) -> None:
