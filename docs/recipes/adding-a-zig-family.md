@@ -59,7 +59,7 @@ every row.
    - A depth rule set from measured tokens per ms for each model.
 3. The prompt path (steps 10-15).
 4. Several Macs.
-   - Tensor and expert parallel over the MCDMA fabric, with exchanges inside the command buffer.
+   - Tensor and expert parallel over [MCDMA](https://github.com/ashhart/MCDMA), with exchanges inside the command buffer.
    - Experts split by rows, so both Macs do equal work for every pick.
 5. Serving (steps 16-17), and the exactness suite.
 
