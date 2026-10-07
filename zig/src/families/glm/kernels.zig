@@ -18,6 +18,7 @@ pub const hc_shape: hc.Shape = .{ .width = 4096, .sinkhorn = 20, .eps_e9 = 1000 
 pub const max_rows = 16;
 
 pub const Kernels = struct {
+    source_hash: u64, // every compiled source, hashed: part of a learned prompt state's identity
     qmv_kda_in: mtl.Pipeline,
     qmv_kda_out: mtl.Pipeline, // also the MTP's eh_proj (K 8192, N 4096)
     qmv_x: mtl.Pipeline,
@@ -95,7 +96,7 @@ pub const Kernels = struct {
     pub fn deinit(k: *Kernels) void {
         const info = @typeInfo(Kernels).@"struct";
         inline for (info.field_names, info.field_types) |name, T| {
-            if (T == mtl.Pipeline) @field(k, name).deinit() else for (&@field(k, name)) |*p| p.deinit();
+            if (T == mtl.Pipeline) @field(k, name).deinit() else if (T != u64) for (&@field(k, name)) |*p| p.deinit();
         }
     }
 };
@@ -245,6 +246,9 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const absorb_tp_src = try frags.source(device, gpa, absorb_tp_raw);
     defer gpa.free(absorb_tp_src);
     jobs[generated.len + 13] = .{ .device = device, .source = absorb_tp_src, .names = &.{"glm_absorb_nax"}, .out = @as(*[1]mtl.Pipeline, &k.absorb_nax_tp) };
+    var sources_seen = std.hash.Wyhash.init(0x6b);
+    for (jobs) |j| sources_seen.update(j.source);
+    k.source_hash = sources_seen.final();
     var next = std.atomic.Value(usize).init(0);
     const Worker = struct {
         fn run(all: []Job, counter: *std.atomic.Value(usize)) void {

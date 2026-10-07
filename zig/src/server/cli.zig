@@ -92,6 +92,7 @@ pub const flags = [_]Flag{
     // the native server's own: shared prompt states (a harness) kept on disk for later sessions and servers
     .{ .name = "--learn", .kind = .store_true, .native = true },
     .{ .name = "--learn-dir", .native = true },
+    .{ .name = "--learn-gib", .native = true },
 };
 
 /// The variables this binary honours as the Python engine does, then the CUDA build's.
@@ -114,6 +115,7 @@ pub const Args = struct {
     prompt_cache_over_cap: bool = false, // a --prompt-cache-gib past that is kept, not refused
     learn: bool = false, // keep shared prompt states on disk (--learn-dir: where; it implies --learn)
     learn_dir: ?[]const u8 = null,
+    learn_gib: f64 = 32, // disk for learned states, every model and build together
     max_tokens: i64 = 4096,
     temperature: ?f64 = null,
     top_p: ?f64 = null,
@@ -218,6 +220,9 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
     } else if (is(name, "--name")) out.name = v else if (is(name, "--alias")) try alias.append(a, v) else if (is(name, "--api-key")) try keys.append(a, v) else if (is(name, "--api-key-file")) out.api_key_file = v else if (is(name, "--metrics-open")) out.metrics_open = true else if (is(name, "--dashboard")) out.dashboard = true else if (is(name, "--context")) out.context = try int(u, a, name, v) else if (is(name, "--speed-up")) out.speed_up = v else if (is(name, "--prompt-cache-gib")) out.prompt_cache_gib = try gib(u, a, name, v) else if (is(name, "--prompt-cache-over-cap")) out.prompt_cache_over_cap = true else if (is(name, "--learn")) out.learn = true else if (is(name, "--learn-dir")) {
         out.learn = true;
         out.learn_dir = v;
+    } else if (is(name, "--learn-gib")) {
+        out.learn = true;
+        out.learn_gib = try gib(u, a, name, v);
     } else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--compact-at")) {
         if (std.mem.eql(u8, v, "auto")) out.compact_auto = true else {
             const f = try float(u, a, name, v);
@@ -313,6 +318,8 @@ test "parse and capabilities share the table" {
     try std.testing.expect((try parse(a, &.{ "m", "--learn" }, &u)).learn);
     const dir = try parse(a, &.{ "m", "--learn-dir", "/x/y" }, &u);
     try std.testing.expect(dir.learn and std.mem.eql(u8, "/x/y", dir.learn_dir.?));
+    const capped = try parse(a, &.{ "m", "--learn-gib", "8" }, &u);
+    try std.testing.expect(capped.learn and capped.learn_gib == 8);
     for ([_][]const u8{ "1e300", "inf", "nan", "-1", "17179869184" }) |bad| try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--prompt-cache-gib", bad }, &u));
     var out: std.Io.Writer.Allocating = .init(a);
     try capabilities(&out.writer, .{ .version = "0.6.5" });

@@ -31,6 +31,8 @@ pub const Snapshots = struct {
         write: ?*const fn (ptr: *anyopaque, saved: Saved, dir: [:0]const u8, key: u64) anyerror!void = null,
         /// Learned state `key` of `at` tokens, read back from its files under `dir` into new storage.
         read: ?*const fn (ptr: *anyopaque, dir: [:0]const u8, key: u64, at: u32) anyerror!Saved = null,
+        /// Learned state `key`'s files under `dir` removed (the cap needs room, or they no longer read back).
+        forget: ?*const fn (ptr: *anyopaque, dir: [:0]const u8, key: u64) void = null,
     };
 };
 
@@ -308,10 +310,17 @@ pub const Store = struct {
         const im = s.imprint orelse return;
         const write = s.family.vtable.write orelse return;
         const key = imprint.Imprint.keyOf(e.tokens);
-        if (im.has(key)) return;
+        if (im.has(key) or e.bytes > im.cap) return;
+        while (!im.fits(e.bytes)) s.unlearn(im, im.victim() orelse return); // the least recently used go first
         write(s.family.ptr, e.saved, im.dir, key) catch |err| return note("learning {d} tokens failed ({s})", .{ e.at, @errorName(err) });
-        im.add(key, e.at, e.tokens, starts) catch |err| return note("learning {d} tokens failed ({s})", .{ e.at, @errorName(err) });
+        im.add(key, e.at, e.tokens, starts, e.bytes) catch |err| return note("learning {d} tokens failed ({s})", .{ e.at, @errorName(err) });
         if (!@import("builtin").is_test) std.log.info("prompt cache: learned {d} tokens to disk", .{e.at});
+    }
+
+    /// Learned state `key` forgotten: its files (the family's), then its index record.
+    fn unlearn(s: *Store, im: *imprint.Imprint, key: u64) void {
+        if (s.family.vtable.forget) |f| f(s.family.ptr, im.dir, key);
+        im.remove(key) catch |err| note("forgetting a learned state failed ({s})", .{@errorName(err)});
     }
 
     /// A learned state on disk longer than `have`, read back as a shared entry; else `have` (none, or reading failed).
@@ -329,10 +338,13 @@ pub const Store = struct {
         e.* = .{ .tokens = &.{}, .at = m.at, .saved = undefined, .bytes = bytes, .born = @intCast(prompt.len), .used = s.clock, .last = &.{}, .shared = true };
         e.tokens = s.gpa.dupe(u32, m.tokens) catch return s.drop(e, have, false);
         e.last = s.gpa.dupe(u32, prompt) catch return s.drop(e, have, false);
-        e.saved = read(s.family.ptr, im.dir, m.key, m.at) catch |err| {
-            note("reading the learned {d} tokens failed ({s})", .{ m.at, @errorName(err) });
+        const key = m.key;
+        e.saved = read(s.family.ptr, im.dir, key, m.at) catch |err| {
+            note("reading the learned {d} tokens failed ({s}); forgotten, a later pass learns them again", .{ e.at, @errorName(err) });
+            s.unlearn(im, key);
             return s.drop(e, have, false);
         };
+        im.touch(key);
         s.entries.append(s.gpa, e) catch return s.drop(e, have, true);
         s.held += bytes;
         if (!@import("builtin").is_test) std.log.info("prompt cache: read {d} learned tokens from disk", .{m.at});

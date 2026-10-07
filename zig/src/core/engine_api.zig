@@ -138,6 +138,8 @@ pub const Open = struct {
     prompt_cache_over_cap: bool = false,
     /// --learn: where shared prompt states are kept on disk for later sessions and servers (null: off).
     learn: ?[]const u8 = null,
+    /// --learn-gib: what learned states may take on disk, every model and build together.
+    learn_gib: f64 = 32,
     /// --device and --segments (CUDA); null: the backend's environment fallback, then its default.
     device: ?u32 = null,
     segments: ?u32 = null,

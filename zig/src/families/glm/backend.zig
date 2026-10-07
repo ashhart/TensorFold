@@ -152,6 +152,14 @@ pub const Backend = struct {
         return snap;
     }
 
+    /// --learn: learned state `key`'s file here and, on a pair, rank 1's half removed.
+    pub fn snapForget(ptr: *anyopaque, dir: [:0]const u8, key: u64) void {
+        const b = self(ptr);
+        mirror.send(b.sl.e, .forget, &.{ @truncate(key), @truncate(key >> 32) }) catch |err| std.log.err("glm: the peer kept a forgotten learned state: {s}", .{@errorName(err)});
+        var buf: [1100]u8 = undefined;
+        _ = std.c.unlink(snapshot.path(&buf, dir, key, 0) catch return);
+    }
+
     pub fn snapRestore(_: *anyopaque, _: ?*anyopaque, _: *anyopaque) anyerror!void {
         return error.BackendRestores; // the prompt pass restores, before its first chunk
     }

@@ -97,6 +97,24 @@ pub const Slots = struct {
         try sl.copySnap(slot, snap, false);
     }
 
+    /// A fixed prompt's state through slot 0, hashed: two builds agree only when their prompt passes give equal bits.
+    pub fn probe(sl: *Slots) !u64 {
+        var toks: [4096 + 40 + 7]u32 = undefined; // a full chunk past the sparse index's reach, a middle one, a short one
+        for (&toks, 0..) |*t, i| t.* = @intCast(1000 + i * 7919 % 50000);
+        const len: u32 = @intCast(@min(toks.len, sl.e.s.cap -| (st.max_rows + 2)));
+        try sl.begin(0, toks[0..len], true);
+        defer sl.release(0);
+        var at: u32 = 0;
+        for ([_]u32{ 4096, 4136, len }) |end| while (at < @min(end, len)) {
+            const n = sl.chunkRows(at, @min(end, len));
+            try sl.chunk(0, at, n);
+            at += n;
+        };
+        const snap = try sl.save(0, at, 0);
+        defer sl.drop(snap.id);
+        return std.hash.Wyhash.hash(0x70, snap.buf.contents()[0..snap.bytes]);
+    }
+
     /// Snapshot `id` to its learned-state file, once the copy into it has finished.
     pub fn writeSnap(sl: *Slots, id: u32, file: [:0]const u8) !void {
         const snap = sl.snaps.get(id) orelse return error.SnapshotOutOfStep;

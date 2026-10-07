@@ -2,6 +2,7 @@
 const std = @import("std");
 const pc = @import("prompt_cache.zig");
 const imprint = @import("prompt_imprint.zig");
+const rmTree = @import("prompt_imprint_test.zig").rmTree;
 const Snapshots = pc.Snapshots;
 const Saved = pc.Saved;
 const Store = pc.Store;
@@ -39,7 +40,11 @@ const Fake = struct {
     }
     /// With learned states on disk: a state's position and sum in one file.
     fn learned(f: *Fake) Snapshots {
-        return .{ .ptr = f, .vtable = &.{ .bytes = bytesFn, .save = saveFn, .restore = restoreFn, .drop = dropFn, .write = writeFn, .read = readFn } };
+        return .{ .ptr = f, .vtable = &.{ .bytes = bytesFn, .save = saveFn, .restore = restoreFn, .drop = dropFn, .write = writeFn, .read = readFn, .forget = forgetFn } };
+    }
+    fn forgetFn(_: *anyopaque, dir: [:0]const u8, key: u64) void {
+        var path: [512]u8 = undefined;
+        _ = std.c.unlink(file(&path, dir, key) catch return);
     }
     fn file(buf: []u8, dir: []const u8, key: u64) ![:0]const u8 {
         return std.fmt.bufPrintSentinel(buf, "{s}/{x:0>16}.bin", .{ dir, key }, 0);
@@ -408,18 +413,10 @@ test "a learned harness state outlives its store: a fresh session on a new one r
     const rules: pc.Rules = .{ .lookahead = 1, .min_prompt = 0, .min_gap = 1 };
     const harness = [_]u32{ 7, 7, 7, 7, 7, 7 }; // shared by every session: a state at 5 reads it all (lookahead 1)
     const key = imprint.Imprint.keyOf(&harness);
-    defer {
-        var path: [512]u8 = undefined;
-        for ([_][]const u8{ "/0000000000000003/index", "/0000000000000003", "" }) |tail| {
-            const z = std.fmt.bufPrintSentinel(&path, "{s}{s}", .{ root, tail }, 0) catch continue;
-            if (std.c.unlink(z) != 0) _ = std.c.rmdir(z);
-        }
-    }
+    defer rmTree(root);
     {
-        var im = try imprint.Imprint.open(gpa, root, 3);
+        var im = try imprint.Imprint.open(gpa, root, 3, 1 << 30);
         defer im.deinit();
-        var path: [512]u8 = undefined;
-        defer _ = std.c.unlink(Fake.file(&path, im.dir, key) catch unreachable);
         {
             var f: Fake = .{ .gpa = gpa };
             var s = Store.init(gpa, f.learned(), rules, 1 << 20);
@@ -429,7 +426,7 @@ test "a learned harness state outlives its store: a fresh session on a new one r
             try std.testing.expectEqual(fresh(&first), f.pass(&s, &first, try s.begin(a, &first, 8, &.{5}, &.{}, null)));
             try std.testing.expect(im.has(key));
         }
-        var again = try imprint.Imprint.open(gpa, root, 3); // a new server reads the index back
+        var again = try imprint.Imprint.open(gpa, root, 3, 1 << 30); // a new server reads the index back
         defer again.deinit();
         var f: Fake = .{ .gpa = gpa };
         var s = Store.init(gpa, f.learned(), rules, 1 << 20);
@@ -440,4 +437,41 @@ test "a learned harness state outlives its store: a fresh session on a new one r
         try std.testing.expectEqual(@as(u32, 5), p.from);
         try std.testing.expectEqual(fresh(&second), f.pass(&s, &second, p));
     }
+}
+
+test "past the learned-state cap the least recently used state is forgotten, and a file that no longer reads is too" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var root_buf: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, "/tmp/tf-learn-cap-{d}", .{std.c.getpid()});
+    defer rmTree(root);
+    const rules: pc.Rules = .{ .lookahead = 1, .min_prompt = 0, .min_gap = 1 };
+    const one = [_]u32{ 7, 7, 7, 7, 7, 7 };
+    const two = [_]u32{ 8, 8, 8, 8, 8, 8 };
+    var im = try imprint.Imprint.open(gpa, root, 3, 150); // a state at 5 is 105 bytes: one fits
+    defer im.deinit();
+    var f: Fake = .{ .gpa = gpa };
+    var s = Store.init(gpa, f.learned(), rules, 1 << 20);
+    defer s.deinit();
+    s.imprint = &im;
+    const p1 = one ++ [_]u32{ 1, 9 };
+    try std.testing.expectEqual(fresh(&p1), f.pass(&s, &p1, try s.begin(a, &p1, 7, &.{5}, &.{}, null)));
+    const p2 = two ++ [_]u32{ 1, 9 };
+    try std.testing.expectEqual(fresh(&p2), f.pass(&s, &p2, try s.begin(a, &p2, 7, &.{5}, &.{}, null)));
+    try std.testing.expect(im.has(imprint.Imprint.keyOf(&two)) and !im.has(imprint.Imprint.keyOf(&one)));
+    var path: [512]u8 = undefined;
+    try std.testing.expect(std.c.unlink(try Fake.file(&path, im.dir, imprint.Imprint.keyOf(&one))) != 0); // its file went too
+    _ = std.c.unlink(try Fake.file(&path, im.dir, imprint.Imprint.keyOf(&two))); // a file lost behind the store's back
+    var g: Fake = .{ .gpa = gpa };
+    var t = Store.init(gpa, g.learned(), rules, 1 << 20);
+    defer t.deinit();
+    t.imprint = &im;
+    const p3 = two ++ [_]u32{ 2, 9 };
+    const plan = try t.begin(a, &p3, 7, &.{5}, &.{}, null);
+    try std.testing.expectEqual(@as(u32, 0), plan.from); // the read failed: a fresh pass, and the state is forgotten
+    try std.testing.expect(!im.has(imprint.Imprint.keyOf(&two)));
+    try std.testing.expectEqual(fresh(&p3), g.pass(&t, &p3, plan));
+    try std.testing.expect(im.has(imprint.Imprint.keyOf(&two))); // learned again by that pass
 }

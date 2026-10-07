@@ -9,7 +9,7 @@ const Slots = slots_mod.Slots;
 const Win = slots_mod.Win;
 const Draft = slots_mod.Draft;
 
-pub const Kind = enum(u32) { begin = 1, chunk, window, keep, draft, release, save, restore, drop, persist, load };
+pub const Kind = enum(u32) { begin = 1, chunk, window, keep, draft, release, save, restore, drop, persist, load, forget };
 
 /// Rank 0 of a pair sends the command; one Mac sends nothing.
 pub fn send(e: *Engine, kind: Kind, words: []const u32) !void {
@@ -86,7 +86,7 @@ pub fn follow(e: *Engine, sl: *Slots) !void {
 pub fn apply(sl: *Slots, kind: u32, w: []const u32, wins: []Win, drafts: []Draft) !void {
     const k = std.enums.fromInt(Kind, kind) orelse return error.CommandOutOfStep;
     const need: usize = switch (k) {
-        .begin, .keep, .restore => 2,
+        .begin, .keep, .restore, .forget => 2,
         .chunk, .window, .save, .persist => 3,
         .load => 4,
         .draft, .release, .drop => 1,
@@ -116,7 +116,14 @@ pub fn apply(sl: *Slots, kind: u32, w: []const u32, wins: []Win, drafts: []Draft
             };
             try sl.e.ep.?.ctl.reply(true);
         },
+        .forget => forgetHalf(sl, @as(u64, w[0]) | @as(u64, w[1]) << 32),
     }
+}
+
+/// Rank 1's half of a forgotten learned state removed (no reply: rank 0 goes on).
+fn forgetHalf(sl: *Slots, key: u64) void {
+    var buf: [1100]u8 = undefined;
+    _ = std.c.unlink(snapshot.path(&buf, sl.learned orelse return, key, 1) catch return);
 }
 
 /// Rank 1's half of a learned state (--learn): snapshot w[0] written to its file, or read back from it as w[0].

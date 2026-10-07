@@ -62,19 +62,21 @@ fn cacheBudget(eng: *const ge.Engine, gib: ?f64) u64 {
     return if (limit > used) @min(want, limit - used) else 0;
 }
 
-/// Learned states under `root` for this checkpoint, build, chip and split (each its own directory).
-fn learnedStates(gpa: Allocator, io: std.Io, eng: *const ge.Engine, root: []const u8) !api.prompt_imprint.Imprint {
-    var h = std.hash.Wyhash.init(0x61);
-    const build = try api.prompt_imprint.buildHash(io);
-    for ([_]u64{ eng.model_hash, build, eng.c.tp, eng.chunk_rows, @intFromBool(eng.ep != null) }) |x| h.update(std.mem.asBytes(&x));
+/// Learned states under `root` by checkpoint, split, chip, OS build, kernel sources and a probe's prompt-pass bits.
+fn learnedStates(gpa: Allocator, eng: *const ge.Engine, sl: *glm.slots.Slots, root: []const u8, cap: u64) !api.prompt_imprint.Imprint {
+    var h = std.hash.Wyhash.init(0x62);
+    const probe = try sl.probe(); // both Macs of a pair run it in step: its prompt pass exchanges with the peer
+    for ([_]u64{ eng.model_hash, eng.c.tp, eng.chunk_rows, @intFromBool(eng.ep != null), eng.k.source_hash, probe }) |x| h.update(std.mem.asBytes(&x));
+    var os: [64]u8 = undefined;
+    h.update(api.prompt_imprint.osBuild(&os));
     h.update(std.mem.span(eng.device.name()));
-    const m = try api.prompt_imprint.Imprint.open(gpa, root, h.final());
-    std.log.info("glm: learned prompt states in {s} ({d} known)", .{ m.dir, m.metas.items.len });
+    const m = try api.prompt_imprint.Imprint.open(gpa, root, h.final(), cap);
+    std.log.info("glm: learned prompt states in {s} ({d} known, {d} of {d} MiB)", .{ m.dir, m.metas.items.len, m.total() >> 20, cap >> 20 });
     return m;
 }
 
 /// A GLM-5.3-Flash checkpoint served: `window` tokens of cache a stream, warmed first (the pair: `speed_up`).
-pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: ?[]const u8, streams: u32, fixed: bool, cache_gib: ?f64, learn: ?[]const u8) !*Host {
+pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: ?[]const u8, streams: u32, fixed: bool, cache_gib: ?f64, learn: ?[]const u8, learn_cap: u64) !*Host {
     const eng = try ge.Engine.loadWith(gpa, dir, window + 64, speed_up, learn != null);
     errdefer eng.deinit();
     var toks: [96]u32 = undefined;
@@ -102,12 +104,12 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     const budget = cacheBudget(eng, cache_gib);
     if (!eng.followsPeer() and budget > 0) {
         const B = glm.backend.Backend;
-        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = &h.back, .vtable = &.{ .bytes = B.snapBytes, .save = B.snapSave, .restore = B.snapRestore, .drop = B.snapDrop, .write = B.snapWrite, .read = B.snapRead } }, .{ .lookahead = 1, .planned = true }, budget);
+        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = &h.back, .vtable = &.{ .bytes = B.snapBytes, .save = B.snapSave, .restore = B.snapRestore, .drop = B.snapDrop, .write = B.snapWrite, .read = B.snapRead, .forget = B.snapForget } }, .{ .lookahead = 1, .planned = true }, budget);
         h.host.cache = &h.cache.?;
     }
     errdefer if (h.cache) |*store| store.deinit();
     if (learn) |root| {
-        h.learned = try learnedStates(gpa, io, eng, root);
+        h.learned = try learnedStates(gpa, eng, &h.slots, root, learn_cap);
         h.slots.learned = h.learned.?.dir;
         if (h.cache) |*store| store.imprint = &h.learned.?;
     }
