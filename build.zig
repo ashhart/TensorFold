@@ -138,15 +138,7 @@ pub fn build(b: *std.Build) void {
 }
 
 /// `zig build native -Dcpu=apple_m1`: tensorfold-native with the Metal engines for the Python package's bundle (a native M5 build traps on M1-M4).
-fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module, build_options: *std.Build.Step.Options, test_step: ?*std.Build.Step) *std.Build.Step.Compile {
-    const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
-    const engines = b.createModule(.{
-        .root_source_file = b.path("zig/src/native/metal.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "engine_api", .module = api }, .{ .name = "tensorfold", .module = engine } },
-    });
+fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, engine: *std.Build.Module, api: *std.Build.Module, engines: *std.Build.Module, build_options: *std.Build.Step.Options, test_step: ?*std.Build.Step) *std.Build.Step.Compile {
     // the HTTP side keeps its safety checks; the engine below it runs at `optimize`
     const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
     const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
@@ -233,6 +225,16 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     const mods = metalEngineModules(b, target, optimize, draft_ids);
     const metal = mods.metal;
     const kernels_mod = embedded(b, lib, "tensorfold.metallib");
+
+    // The engines registry: the families this platform's binaries serve; the CLI reads it for models/info/pull.
+    const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = mods.lanes }} });
+    const engines = b.createModule(.{
+        .root_source_file = b.path("zig/src/native/metal.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "engine_api", .module = api }, .{ .name = "tensorfold", .module = mods.engine } },
+    });
 
     const programs = [_]struct { name: []const u8, path: []const u8, about: []const u8 }{
         .{ .name = "tf-metal-tests", .path = "zig/tests/gpu_tests.zig", .about = "GPU runtime tests" },
@@ -356,7 +358,7 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
             .target = target,
             .optimize = optimize,
             .link_libc = true,
-            .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "cluster", .module = cluster }, .{ .name = "kernel_sources", .module = sources } },
+            .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "cluster", .module = cluster }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "native_engines", .module = engines } },
         });
         if (p.c_source) |file| {
             mod.addCSourceFile(.{ .file = b.path(file), .flags = &.{"-std=c11"} });
@@ -378,7 +380,19 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     b.step("tf-row-check", "The core row projection on synthetic 4-bit matrices: widths bit-equal, a CPU reference, indexed experts").dependOn(&b.addInstallArtifact(row_check, .{}).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = row_mod })).step);
 
-    _ = nativeServer(b, target, optimize, metal, engine, lanes, build_options, test_step);
+    // The checkpoint CLI: models, info and pull, against a synthetic cache and a fake hub.
+    const cli_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/cli/tests.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "native_engines", .module = engines }},
+    }) });
+    const run_cli_tests = b.addRunArtifact(cli_tests);
+    test_step.dependOn(&run_cli_tests.step);
+    b.step("test-cli", "The checkpoint CLI's host tests").dependOn(&run_cli_tests.step);
+
+    _ = nativeServer(b, target, optimize, metal, engine, api, engines, build_options, test_step);
 
     const cluster_metal = b.createModule(.{
         .root_source_file = b.path("zig/src/cluster/metal_sink.zig"),
@@ -479,7 +493,9 @@ pub fn distMetalServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_id
     m.metal.addSystemFrameworkPath(b.graph.cwdRelativePath(b.pathJoin(&.{ sdk, "System/Library/Frameworks" })));
     m.metal.addLibraryPath(b.graph.cwdRelativePath(b.pathJoin(&.{ sdk, "usr/lib" })));
     m.metal.addSystemIncludePath(b.graph.cwdRelativePath(b.pathJoin(&.{ sdk, "usr/include" })));
-    return nativeServer(b, target, .fast, m.metal, m.engine, m.lanes, build_options, null);
+    const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = .fast, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = m.lanes }} });
+    const engines = b.createModule(.{ .root_source_file = b.path("zig/src/native/metal.zig"), .target = target, .optimize = .fast, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = m.metal }, .{ .name = "engine_api", .module = api }, .{ .name = "tensorfold", .module = m.engine } } });
+    return nativeServer(b, target, .fast, m.metal, m.engine, api, engines, build_options, null);
 }
 
 test {
