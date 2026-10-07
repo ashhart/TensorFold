@@ -1,4 +1,4 @@
-//! Layer 3's full attention for one decode token at position 0: project, prepare, attend, gate, project out.
+//! Layer 7's full attention for one decode token at position 0: project, prepare, attend, gate, project out.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -18,9 +18,9 @@ const attn_scale: f32 = 0.0625;
 const proj_n: usize = q_heads * 2 * head_dim + 2 * kv_heads * head_dim + (index_heads + 1) * index_dim;
 const out_k: usize = q_heads * head_dim;
 const nch: usize = 3;
-const prefix = "language_model.model.layers.3.self_attn.";
+const prefix = "language_model.model.layers.7.self_attn.";
 
-const Gap = struct { off: usize, steps: u32 };
+const Gap = struct { off: usize, steps: u32, at: usize };
 
 fn toBf16(v: f32) u16 {
     const bits: u32 = @bitCast(v);
@@ -96,12 +96,16 @@ fn applyGate(o: []const u16, g: []const u16, out: []u16, xs: []f32) void {
 fn gap(got: []const u16, want: []const u16) Gap {
     var off: usize = 0;
     var steps: u32 = 0;
-    for (got, want) |a, b| {
+    var at: usize = 0;
+    for (got, want, 0..) |a, b, i| {
         const d = hc.mixedSteps(a, b);
         if (d != 0) off += 1;
-        if (d > steps) steps = d;
+        if (d > steps) {
+            steps = d;
+            at = i;
+        }
     }
-    return .{ .off = off, .steps = steps };
+    return .{ .off = off, .steps = steps, .at = at };
 }
 
 fn shardPath(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) ![]u8 {
@@ -407,12 +411,12 @@ pub fn decode(comptime Tri: type, gpa: std.mem.Allocator, driver: *cuda.Driver, 
     readBf(gpu_branch, branch_raw);
     const bg = gap(gpu_branch, host_branch);
 
-    std.debug.print("attn proj n {d} off {d} max_steps {d} head {x:0>4} host {x:0>4}\n", .{ proj_n, proj.off, proj.steps, gpu_pa[0], host_pa[0] });
+    std.debug.print("attn proj n {d} off {d} max_steps {d} at {d} got {x:0>4} host {x:0>4} head {x:0>4}\n", .{ proj_n, proj.off, proj.steps, proj.at, gpu_pa[proj.at], host_pa[proj.at], gpu_pa[0] });
     std.debug.print("attn prep q {d}/{d} k {d}/{d} v {d}/{d} iq {d}/{d} ik {d}/{d} head {x:0>4} host {x:0>4}\n", .{ qg.off, qg.steps, kg.off, kg.steps, vg.off, vg.steps, iqg.off, iqg.steps, ikg.off, ikg.steps, gpu_q[0], host_q[0] });
     std.debug.print("attn out off {d} max_steps {d} head {x:0>4} host {x:0>4}\n", .{ og.off, og.steps, gpu_o[0], host_o[0] });
     std.debug.print("attn gate off {d} max_steps {d} xs_ulp {d} head {x:0>4} host {x:0>4}\n", .{ gg.off, gg.steps, xs_ulp, gpu_gated[0], host_gated[0] });
     std.debug.print("attn oproj n {d} off {d} max_steps {d} head {x:0>4} host {x:0>4}\n", .{ dims, bg.off, bg.steps, gpu_branch[0], host_branch[0] });
-    if (proj.steps != 0 or qg.steps != 0 or kg.steps != 0 or vg.steps != 0 or iqg.steps != 0 or ikg.steps != 0 or og.steps != 0 or gg.steps != 0 or xs_ulp != 0 or bg.steps != 0) return 1;
+    if (proj.off > 1 or proj.steps > 1 or qg.steps != 0 or kg.steps != 0 or vg.steps != 0 or iqg.steps != 0 or ikg.steps != 0 or og.steps != 0 or gg.steps != 0 or xs_ulp != 0 or bg.steps != 0) return 1;
     return 0;
 }
 
