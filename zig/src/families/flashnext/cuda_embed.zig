@@ -17,7 +17,7 @@ fn tensorAt(obj: std.json.ObjectMap, data: []const u8, name: []const u8, dtype: 
     const got = core.safetensors.DType.parse(o.get("dtype").?.string) orelse return error.UnsupportedDType;
     if (got != dtype) return error.UnexpectedTensor;
     const shape = o.get("shape").?.array.items;
-    if (shape.len == 0 or shape.len > 2) return error.UnexpectedTensor;
+    if (shape.len == 0 or shape.len > 4) return error.UnexpectedTensor;
     const offs = o.get("data_offsets").?.array.items;
     const begin: usize = @intCast(offs[0].integer);
     const end: usize = @intCast(offs[1].integer);
@@ -61,7 +61,7 @@ pub const Mapped = struct {
         return .{ .io = io, .file = file, .map = map, .weight = triple.weight, .scales = triple.scales, .biases = triple.biases };
     }
 
-    /// One named tensor in this shard. Rank 1 or 2.
+    /// One named tensor in this shard. Rank 1 to 4.
     pub fn lookup(self: *const Mapped, gpa: std.mem.Allocator, name: []const u8, dtype: core.safetensors.DType) !Tensor {
         const header_len: usize = @intCast(std.mem.readInt(u64, self.map.memory[0..8], .little));
         const parsed = try std.json.parseFromSlice(std.json.Value, gpa, self.map.memory[8..][0..header_len], .{});

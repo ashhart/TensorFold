@@ -379,5 +379,6 @@ fn runProj(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Stream, m
         if (dist > max_steps) max_steps = dist;
     }
     std.debug.print("proj n {d} off {d} max_steps {d} head {x:0>4} host {x:0>4}\n", .{ n, off, max_steps, std.mem.readInt(u16, got_bytes[0..2], .little), host[0] });
-    return max_steps;
+    if (max_steps != 0) return max_steps;
+    return flash.gdn.memory(gpa, driver, stream, mapped, out_b, got_bytes);
 }
