@@ -9,6 +9,7 @@ pub const hc = @import("cuda_hc.zig");
 pub const qmm = @import("cuda_qmm.zig");
 pub const gdn = @import("cuda_gdn.zig");
 pub const mlp = @import("cuda_mlp.zig");
+pub const moe = @import("cuda_moe.zig");
 
 const p = aot.ptr;
 
@@ -113,6 +114,26 @@ pub const Tri = struct {
             int("RS", rs),
         }, &.{ ci("D", dims), ci("S", streams), ci("MODE", mode), ci("TOPK", topk), ci("SLOTS", slots), ci("BLOCK", 256), ci("WORLD", world) });
     }
+
+    /// moe.router for one decode row. M folds to a constexpr. 513 rows: the experts, then the shared gate.
+    pub fn router(t: Tri, x: u64, w: u64, out: u64, x_stride: usize) !void {
+        try t.run("_router", .{ 1, cdiv(513, 32), 1 }, &.{
+            p("X", "*bf16", x),
+            p("W", "*bf16", w),
+            p("OUT", "*fp32", out),
+            int("M", 1),
+            int("x_stride", x_stride),
+        }, &.{ ci("D", 2560), ci("NE", 513), ci("BM", 16), ci("BLOCK_E", 32), ci("BK", 256) });
+    }
+
+    /// moe._topk_rows: one program, the row's 10 experts and the shared expert.
+    pub fn topkRows(t: Tri, logits: u64, pick: u64, wts: u64) !void {
+        try t.run("_topk_rows", .{ 1, 1, 1 }, &.{
+            p("L", "*fp32", logits),
+            p("PICK", "*i32", pick),
+            p("WTS", "*fp32", wts),
+        }, &.{ ci("NE", 512), ci("NL", 513), ci("TOPK", 10), ci("SLOTS", 11), ci("BLOCK", 1024), ci("SLOTP", 16) });
+    }
 };
 
 test {
@@ -121,6 +142,7 @@ test {
     _ = qmm;
     _ = gdn;
     _ = mlp;
+    _ = moe;
 }
 
 test "embed grid is one program per row and per group of 32" {

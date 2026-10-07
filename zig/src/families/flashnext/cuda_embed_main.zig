@@ -382,5 +382,7 @@ fn runProj(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Stream, m
     if (max_steps != 0) return max_steps;
     const slices = try flash.gdn.memory(gpa, driver, stream, mapped, out_b, got_bytes) orelse return 1;
     defer gpa.free(slices);
-    return flash.mlp.connect(flash.Tri, gpa, driver, stream, mapped, tri, h, inj, hidden, slices);
+    const wrote = try flash.mlp.connect(flash.Tri, gpa, driver, stream, mapped, tri, h, inj, hidden, slices);
+    if (wrote != 0) return wrote;
+    return flash.moe.experts(flash.Tri, gpa, driver, stream, mapped, tri, mixed.ptr);
 }
