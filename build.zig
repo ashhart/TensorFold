@@ -145,6 +145,26 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     test_step.?.dependOn(&b.addRunArtifact(tool_parse_tests).step);
     // the engine seam's own tests (lane_host.zig), as zig/tests/server/zig_test.sh runs them
     test_step.?.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api })).step);
+    // the frozen server parity goldens, checked by Zig driving fake_serve
+    const fake_serve = b.addExecutable(.{ .name = "fake_serve", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/server/fake_serve.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "server", .module = server_tests }, .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template } },
+    }) });
+    const golden_check = b.addExecutable(.{ .name = "golden_check", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/server/golden_check.zig"),
+        .target = target,
+        .optimize = .Debug,
+    }) });
+    const golden_run = b.addRunArtifact(golden_check);
+    golden_run.addArtifactArg(fake_serve);
+    golden_run.addFileArg(b.path("zig/tests/server/golden/cases.json"));
+    golden_run.addDirectoryArg(b.path("zig/tests/server/golden"));
+    golden_run.addDirectoryArg(b.path("zig/tests/server/fixtures"));
+    golden_run.setCwd(b.path("."));
+    b.step("test-golden", "The frozen server parity goldens checked by a Zig step driving fake_serve").dependOn(&golden_run.step);
     b.step("test-native", "The Metal engines module's host-side tests").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engines })).step);
     const reuse = b.addExecutable(.{ .name = "tf-flashnext-reuse", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/flashnext_reuse.zig"),
