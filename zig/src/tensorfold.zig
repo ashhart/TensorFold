@@ -12,6 +12,7 @@ pub const flashnext_replay = @import("families/flashnext/replay.zig");
 pub const flashnext_engine = @import("families/flashnext/engine.zig");
 pub const flashnext_snapshot = @import("families/flashnext/snapshot.zig");
 pub const glm = @import("families/glm/glm.zig");
+pub const qwen35 = @import("families/qwen3_5/qwen3_5.zig");
 
 test {
     std.testing.refAllDecls(@This());
@@ -23,4 +24,6 @@ test {
     _ = @import("families/flashnext/follow.zig"); // rank 1's reply hash
     _ = @import("families/flashnext/marks.zig"); // a call's marks
     _ = @import("families/glm/glm.zig");
+    _ = @import("families/qwen3_5/config.zig");
+    _ = @import("families/qwen3_5/backend.zig");
 }

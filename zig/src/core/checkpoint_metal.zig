@@ -38,6 +38,11 @@ pub const Checkpoint = struct {
 
     /// Read `path`'s tensors, each named `prefix ++ name`.
     pub fn addFile(self: *Checkpoint, device: mtl.Device, path: [:0]const u8, prefix: []const u8) !void {
+        return self.addFileSelected(device, path, prefix, null);
+    }
+
+    /// Load only `selected`'s tensor namespace and its contiguous data region; names retain the caller's prefix.
+    pub fn addFileSelected(self: *Checkpoint, device: mtl.Device, path: [:0]const u8, prefix: []const u8, selected: ?[]const u8) !void {
         const fd = std.c.open(path, .{ .ACCMODE = .RDONLY });
         if (fd < 0) {
             std.log.err("cannot open {s}", .{path});
@@ -54,13 +59,34 @@ pub const Checkpoint = struct {
         const data_start = 8 + header_len;
         const data_len: usize = @as(usize, @intCast(end)) - data_start;
 
-        const buffer = try device.buffer(@max(data_len, 16), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-        {
-            errdefer buffer.deinit();
-            try readParallel(fd, buffer.contents()[0..data_len], data_start);
-            try self.shards.append(self.allocator, .{ .buffer = buffer, .bytes = data_len });
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const entries = try st.parseHeaderPrefix(arena.allocator(), header, data_len, selected);
+        if (entries.count() == 0) return;
+        var begin: usize = if (selected == null) 0 else data_len;
+        var limit: usize = if (selected == null) data_len else 0;
+        for (entries.values()) |e| {
+            begin = @min(begin, e.begin);
+            limit = @max(limit, e.end);
         }
-        try self.index(buffer, header, data_len, prefix);
+        const bytes = limit - begin;
+        const buffer = try device.buffer(@max(bytes, 16), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+        var transferred = false;
+        errdefer if (!transferred) buffer.deinit();
+        try readParallel(fd, buffer.contents()[0..bytes], data_start + begin);
+        try self.shards.append(self.allocator, .{ .buffer = buffer, .bytes = bytes });
+        transferred = true;
+        var it = entries.iterator();
+        while (it.next()) |entry| {
+            const e = entry.value_ptr.*;
+            var t = Tensor{ .buffer = buffer, .offset = e.begin - begin, .bytes = e.end - e.begin, .dtype = e.dtype, .rank = e.rank };
+            for (0..e.rank) |i| t.shape[i] = e.shape[i];
+            const name = try std.mem.concat(self.allocator, u8, &.{ prefix, entry.key_ptr.* });
+            errdefer self.allocator.free(name);
+            const slot = try self.tensors.getOrPut(self.allocator, name);
+            if (slot.found_existing) return error.DuplicateTensor;
+            slot.value_ptr.* = t;
+        }
     }
 
     /// Name the tensors a safetensors `header` places in `buffer`, its data region of `data_len` bytes.
@@ -137,4 +163,42 @@ fn readParallel(fd: std.c.fd_t, dest: []u8, at: usize) !void {
     }
     for (threads) |t| if (t) |th| th.join();
     for (parts) |p| if (p.failed) return error.ShortRead;
+}
+
+test "full and selected checkpoint views retain data, ownership and relative offsets" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const header =
+        \\{"padding":{"dtype":"U8","shape":[4],"data_offsets":[0,4]},
+        \\ "text.weight":{"dtype":"U32","shape":[2,3],"data_offsets":[4,28]},
+        \\ "text.scales":{"dtype":"BF16","shape":[1],"data_offsets":[28,30]}}
+    ;
+    var data: [8 + header.len + 30]u8 = undefined;
+    std.mem.writeInt(u64, data[0..8], header.len, .little);
+    @memcpy(data[8..][0..header.len], header);
+    for (data[8 + header.len ..], 0..) |*b, i| b.* = @intCast(i);
+    try tmp.dir.writeFile(io, .{ .sub_path = "fixture.safetensors", .data = &data });
+    const path = try std.fmt.allocPrintSentinel(gpa, ".zig-cache/tmp/{s}/fixture.safetensors", .{tmp.sub_path}, 0);
+    defer gpa.free(path);
+    var full = Checkpoint.init(gpa);
+    defer full.deinit();
+    try full.addFile(device, path, "");
+    var selected = Checkpoint.init(gpa);
+    defer selected.deinit();
+    try selected.addFileSelected(device, path, "", "text.");
+    try std.testing.expectEqual(@as(usize, 30), full.residentBytes());
+    try std.testing.expectEqual(@as(usize, 26), selected.residentBytes());
+    const a = try full.get("text.weight");
+    const b = try selected.get("text.weight");
+    try std.testing.expectEqual(@as(usize, 4), a.offset);
+    try std.testing.expectEqual(@as(usize, 0), b.offset);
+    try std.testing.expectEqualSlices(u32, a.host(u32), b.host(u32));
+    try std.testing.expectEqualSlices(u16, (try full.get("text.scales")).host(u16), (try selected.get("text.scales")).host(u16));
+    try std.testing.expect(!selected.has("padding"));
+    try std.testing.expectError(error.DuplicateTensor, selected.addFileSelected(device, path, "", "text."));
+    try selected.addFileSelected(device, path, "", "absent.");
 }

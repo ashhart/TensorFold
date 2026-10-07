@@ -1,4 +1,4 @@
-//! The engines a native server opens on Metal: Nemotron on the lane core, Flash Next on its replay engine, GLM-5.3-Flash on its own.
+//! The engines a native server opens on Metal: Nemotron and Qwen3.5-2B on the lane core, Flash Next on its replay engine, GLM-5.3-Flash on its own.
 const std = @import("std");
 const mtl = @import("metal");
 const api = @import("engine_api");
@@ -10,7 +10,12 @@ const flashnext = @import("flashnext_host.zig");
 const glm = @import("glm_host.zig");
 
 pub const backends: []const []const u8 = &.{"metal"};
-pub const families: []const api.Family = &.{ .{ .model_type = "nemotron_h", .formats = &.{"mlx-q4g64"} }, .{ .model_type = "qwen4_exp", .formats = &.{"mlx-q6g32"} }, .{ .model_type = "glm5_next", .formats = &.{"mlx-q4g64"} } };
+pub const families: []const api.Family = &.{
+    .{ .model_type = "nemotron_h", .formats = &.{"mlx-q4g64"} },
+    .{ .model_type = "qwen4_exp", .formats = &.{"mlx-q6g32"} },
+    .{ .model_type = "glm5_next", .formats = &.{"mlx-q4g64"} },
+    .{ .model_type = "qwen3_5", .formats = &.{"mlx-q4g64"} },
+};
 
 /// The chip class gate entries name ("apple-m5" for an Apple M5 Max); null without an Apple GPU.
 pub fn chip(a: Allocator) ?[]const u8 {
@@ -82,6 +87,7 @@ const Host = struct {
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     if (std.mem.eql(u8, o.model_type, "qwen4_exp")) return openFlashNext(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "glm5_next")) return openGlm(a, gpa, io, o, problem);
+    if (std.mem.eql(u8, o.model_type, "qwen3_5")) return @import("qwen35.zig").open(a, gpa, io, o, problem);
     if (!std.mem.eql(u8, o.model_type, "nemotron_h")) {
         problem.* = try std.fmt.allocPrint(a, "the native engine has no backend for {s} checkpoints yet; serve with --engine python", .{o.model_type});
         return null;

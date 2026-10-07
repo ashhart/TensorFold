@@ -3,6 +3,9 @@
 /// Nemotron's generated kernels (tools/zig/gen_nemotron_kernels.py).
 pub const nemotron = @import("nemotron/kernels.zig");
 
+pub const qwen35 = @import("qwen3_5/kernels.zig");
+pub const qwen35_layout = @embedFile("qwen3_5/layout.metal");
+
 /// Our glue kernels around them: embedding, MLX's RMS arithmetic, argmax, layout moves.
 pub const nemotron_glue = @embedFile("nemotron_glue.metal");
 pub const core_row_projection = @embedFile("core/row_projection.metal");

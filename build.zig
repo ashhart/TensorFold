@@ -270,6 +270,9 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     const sources = mods.sources;
     const engine = mods.engine;
     const engine_programs = [_]struct { name: []const u8, path: []const u8, about: []const u8, c_source: ?[]const u8 = null }{
+        .{ .name = "tf-qwen35-check", .path = "zig/tests/qwen35_check.zig", .about = "Qwen3.5-2B checkpoint and native operations" },
+        .{ .name = "tf-qwen35-forward", .path = "zig/tests/qwen35_forward.zig", .about = "Qwen3.5-2B native teacher-forced logits" },
+        .{ .name = "tf-qwen35-exact", .path = "zig/tests/qwen35_exact.zig", .about = "Qwen3.5-2B forward and committed-state exactness" },
         .{ .name = "tensorfold", .path = "zig/src/main.zig", .about = "The native engine's command line" },
         .{ .name = "tf-nemotron-fixtures", .path = "zig/tests/nemotron_fixtures.zig", .about = "Nemotron kernels against the Python engine's captured ops" },
         .{ .name = "tf-nemotron-bench", .path = "zig/tests/nemotron_bench.zig", .about = "One-row projection kernels timed by tile count" },
@@ -368,6 +371,8 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     const check_step = b.step("check-generated", "Fail if zig/kernels/metal's generated sources are stale");
     check_step.dependOn(&gen_check.step);
     check_step.dependOn(&gen_all.step);
+    const gen_qwen = b.addSystemCommand(&.{ "python3", "-B", "tools/zig/gen_qwen35_kernels.py", "--check" });
+    check_step.dependOn(&gen_qwen.step);
 
     // Host-only unit tests: no GPU work.
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = metal })).step);

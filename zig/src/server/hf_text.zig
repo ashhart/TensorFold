@@ -115,7 +115,7 @@ pub const HfText = struct {
         return .{ .object = out };
     }
 
-    /// config.json's eos_token_id (one or a list), else the tokenizer's eos_token.
+    /// Model end ids plus the tokenizer's chat end, when both are declared.
     fn eosIds(t: *HfText, a: Allocator, model_config: std.json.Value, config: std.json.Value) ![]const u32 {
         var out: std.ArrayList(u32) = .empty;
         if (model_config == .object) {
@@ -127,7 +127,7 @@ pub const HfText = struct {
                     .array => |list| for (list.items) |x| if (x == .integer) try out.append(a, @intCast(x.integer)),
                     else => {},
                 }
-                if (out.items.len > 0) return out.items;
+                if (out.items.len > 0) break;
             }
         }
         if (config == .object) if (config.object.get("eos_token")) |e| {
@@ -136,7 +136,7 @@ pub const HfText = struct {
                 .object => |o| if (o.get("content")) |c| (if (c == .string) c.string else "") else "",
                 else => "",
             };
-            if (t.tok.specialTokenId(piece)) |id| try out.append(a, id);
+            if (t.tok.specialTokenId(piece)) |id| if (std.mem.indexOfScalar(u32, out.items, id) == null) try out.append(a, id);
         };
         return out.items;
     }
@@ -271,6 +271,23 @@ pub const HfText = struct {
         return out;
     }
 };
+
+test "model EOS does not hide a different tokenizer chat end" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var t: HfText = undefined;
+    t.tok.vocab = std.StringHashMap(u32).init(a);
+    try t.tok.vocab.put("<|im_end|>", 248046);
+    const model = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"text_config\":{\"eos_token_id\":248044}}", .{});
+    const config = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"eos_token\":\"<|im_end|>\"}", .{});
+    try std.testing.expectEqualSlices(u32, &.{ 248044, 248046 }, try t.eosIds(a, model, config));
+    const same = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"eos_token_id\":[248046]}", .{});
+    try std.testing.expectEqualSlices(u32, &.{248046}, try t.eosIds(a, same, config));
+    const added = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"eos_token\":{\"content\":\"<|im_end|>\"}}", .{});
+    try std.testing.expectEqualSlices(u32, &.{ 248044, 248046 }, try t.eosIds(a, model, added));
+    try std.testing.expectEqualSlices(u32, &.{248046}, try t.eosIds(a, .null, config));
+}
 
 /// Our JSON value as std.json's, ints exact (past i64 as number strings) and keys in order.
 pub fn toStd(a: Allocator, v: Value) Allocator.Error!std.json.Value {

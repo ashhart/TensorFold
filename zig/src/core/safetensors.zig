@@ -53,11 +53,17 @@ pub const Header = std.StringArrayHashMapUnmanaged(Entry);
 
 /// The header's entries (names live in `arena`); an entry past `data_len` bytes or of the wrong size is refused.
 pub fn parseHeader(arena: std.mem.Allocator, json: []const u8, data_len: usize) !Header {
+    return parseHeaderPrefix(arena, json, data_len, null);
+}
+
+/// Select one tensor namespace before interpreting shapes, so a text engine need not admit a vision tower's layouts.
+pub fn parseHeaderPrefix(arena: std.mem.Allocator, json: []const u8, data_len: usize, prefix: ?[]const u8) !Header {
     const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, json, .{});
     var out: Header = .empty;
     var it = parsed.object.iterator();
     while (it.next()) |kv| {
         if (std.mem.eql(u8, kv.key_ptr.*, "__metadata__")) continue;
+        if (prefix) |p| if (!std.mem.startsWith(u8, kv.key_ptr.*, p)) continue;
         const o = kv.value_ptr.object;
         const dtype = DType.parse(o.get("dtype").?.string) orelse return error.UnsupportedDType;
         const shape = o.get("shape").?.array.items;
@@ -146,4 +152,20 @@ test "header entries" {
     try std.testing.expectEqual(@as(usize, 2), h.count());
     try std.testing.expectEqual(DType.bf16, h.get("a.scales").?.dtype);
     try std.testing.expectError(error.BadSafetensors, parseHeader(arena.allocator(), json, 20));
+}
+
+test "namespace selection admits text without interpreting vision layouts" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const json =
+        \\{"vision.weight":{"dtype":"BF16","shape":[1,1,1,1,1],"data_offsets":[0,2]},
+        \\ "text.weight":{"dtype":"U32","shape":[2,3],"data_offsets":[2,26]}}
+    ;
+    try std.testing.expectError(error.RankTooHigh, parseHeader(arena.allocator(), json, 26));
+    const h = try parseHeaderPrefix(arena.allocator(), json, 26, "text.");
+    try std.testing.expectEqual(@as(usize, 1), h.count());
+    try std.testing.expectEqual(@as(usize, 2), h.get("text.weight").?.begin);
+    try std.testing.expectError(error.BadSafetensors, parseHeaderPrefix(arena.allocator(), json, 25, "text."));
+    const empty = try parseHeaderPrefix(arena.allocator(), json, 26, "missing.");
+    try std.testing.expectEqual(@as(usize, 0), empty.count());
 }
