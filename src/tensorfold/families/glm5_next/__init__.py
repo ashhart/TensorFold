@@ -89,7 +89,7 @@ def check(model_dir: str | Path) -> None:
                   f"one)", flush=True)
         return
     print("[tensorfold] GLM-5.3-Flash runs on two NVIDIA GPUs with 128 GB each (two DGX Sparks): pull it on both "
-          "and serve with --tp 2 on both (docs/recipes/glm-5.3-flash.md)", flush=True)
+          "and serve with --tp 2 (or a 4-rank build) on both (docs/recipes/glm-5.3-flash.md)", flush=True)
 
 
 def has_mtp(model_dir: str | Path) -> bool:
@@ -206,11 +206,11 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
                 master_port: int = 29551, no_drafts: bool = False, mtp_drafts: int | None = None, **options: Any):
     """Build the two-rank engine with adaptive drafting, reusable prompt state, or serial decoding when drafts are disabled."""
 
-    if int(tp) != 2:
+    if int(tp) not in (2, 4):
         raise ValueError("GLM-5.3-Flash needs two GPUs, one per machine: run the same `tensorfold serve` command "
-                         "with --tp 2 --rank R --master ADDRESS on both (rank 1 first)")
+                         "with --tp 2/4 --rank R --master ADDRESS on both (non-zero ranks first)")
     if not master:
-        raise ValueError("--tp 2 needs --master: rank 0's address on the link between the two machines")
+        raise ValueError("--tp 2/4 needs --master: rank 0's address on the link between the ranks")
     from .cuda.engine import DEFAULT_POLICY, DFLASH_POLICY, GlmEngine
 
     if mtp_drafts is None:
@@ -222,7 +222,7 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
     return GlmEngine(Path(model_dir), rank=int(rank), master=master, port=int(master_port), policy=policy,
                      drafter=Path(drafter) if drafter and not no_drafts else None,
                      context=options.get("context"), context_explicit=options.get("context_explicit"),
-                     serial_only=bool(no_drafts))
+                     serial_only=bool(no_drafts), world=int(tp))
 
 
 def __getattr__(name: str) -> Any:
