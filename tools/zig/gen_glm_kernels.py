@@ -32,9 +32,9 @@ MAXU = MAX_ROWS * TOP_K                   # the shared expert's slot in the MoE 
 # (K, N) of every dense 4-bit projection a decode row runs through qmv_rows (KDA out = the MTP's eh_proj shape)
 PROJECTIONS = ((HIDDEN, KDA_PROJ), (KDA_WIDTH, HIDDEN), (HIDDEN, X_PROJ), (Q_LORA, QR_PROJ),
                (MLA_HEADS * NOPE, HIDDEN), (HIDDEN, 2 * DENSE), (DENSE, HIDDEN), (HIDDEN, VOCAB), (HIDDEN, KDA_PROJ_TP),
-               (HIDDEN, VOCAB // 2), (Q_LORA, QR_PROJ_TP))
+               (HIDDEN, VOCAB // 2), (Q_LORA, QR_PROJ_TP), (HIDDEN, DENSE))
 # TP2's row-split projections: one Mac's input columns, fp32 partials the pair sums in rank order
-PARTIALS = ((KDA_WIDTH // 2, HIDDEN), (MLA_HEADS // 2 * NOPE, HIDDEN))
+PARTIALS = ((KDA_WIDTH // 2, HIDDEN), (MLA_HEADS // 2 * NOPE, HIDDEN), (DENSE // 2, HIDDEN))
 # MLX 0.32's one-row gemv / gemv_t tilings (kernels.gemv_params) at the shapes decode reaches
 GEMV_T = {"igate": (1, 2, 8, 4, 4, 4), "values": (1, 4, 8, 4, 4, 4)}
 GEMV = {"scores_lt4": (1, 8, 1, 32, 1, 4), "scores_le32": (1, 8, 1, 32, 4, 4), "scores": (4, 1, 1, 32, 4, 4)}

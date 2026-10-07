@@ -374,12 +374,14 @@ fn denseMlp(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Dense, x_in: Ref
     if (!on(x, "dense")) return;
     const c = x.c;
     const sc = x.sc;
-    qmv(x, e, x.k.qmv_dense_gu, x_in, w.gate_up, sc.gu, rows);
+    qmv(x, e, if (c.tp > 1) x.k.qmv_dense_gu_tp else x.k.qmv_dense_gu, x_in, w.gate_up, sc.gu, rows);
     e.setPipeline(x.k.swiglu);
     bind(e, 0, .{ sc.gu, sc.actd });
     e.setValue(Rows{ .rows = @intCast(rows), .width = @intCast(c.dense_inter), .x_stride = @intCast(2 * c.dense_inter), .y_stride = @intCast(c.dense_inter), .eps = c.swiglu_limit }, 2);
     e.dispatchThreads(size(c.dense_inter, rows, 1), size(256, 1, 1));
-    qmv(x, e, x.k.qmv_dense_down, sc.actd, w.down, sc.branch, rows);
+    if (c.tp == 1) return qmv(x, e, x.k.qmv_dense_down, sc.actd, w.down, sc.branch, rows);
+    qmv(x, e, x.k.qmvp_dense_down, sc.actd, w.down, sc.yp, rows); // TP2: this Mac's half, summed with the peer's
+    x.ep.?.reduce(e, sc.yp, sc.branch, rows);
 }
 
 /// The backbone over the window (its tokens in `ids`) at positions pos..: final-normed rows into `hidden`.

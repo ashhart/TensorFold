@@ -390,9 +390,11 @@ const Loader = struct {
             moe.down = try l.experts(i, "down_proj", D, c.moe_inter, if (by_rows) .cols else .whole);
             out.mlp = .{ .moe = moe };
         } else {
+            const n: usize = c.dense_inter; // this Mac's rows; TP2: rank r's half [r n, (r + 1) n)
+            const lo = c.tp_rank * n;
             out.mlp = .{ .dense = .{
-                .gate_up = try l.q4(D, m, &.{ "gate_proj", "up_proj" }, &.{ c.dense_inter, c.dense_inter }, .{i}),
-                .down = try l.q4(c.dense_inter, m, &.{"down_proj"}, &.{D}, .{i}),
+                .gate_up = try l.q4Rows(D, m, &.{ "gate_proj", "up_proj" }, &.{ lo, lo }, &.{ n, n }, &.{ n * c.tp, n * c.tp }, 1, .{i}),
+                .down = if (c.tp == 1) try l.q4(n, m, &.{"down_proj"}, &.{D}, .{i}) else try l.q4Cols(m ++ "down_proj", .{i}, D, n * c.tp, lo, n),
             } };
         }
         return out;

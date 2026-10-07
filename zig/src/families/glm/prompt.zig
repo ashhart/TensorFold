@@ -438,7 +438,10 @@ pub fn backbone(p: *const Prompt, x: *fwd.Ctx, e: mtl.ComputeEncoder, ids: Ref, 
             .dense => |*d| if (s & Class.dense == 0) {
                 qmm(p, e, ss.normed, d.gate_up, p.gu, M);
                 swiglu(x, e, p.gu, p.actd, M, c.dense_inter);
-                qmm(p, e, p.actd, d.down, ss.branch, M);
+                if (c.tp > 1) { // TP2: this Mac's half, summed with the peer's
+                    qmmF32(p, e, p.actd, d.down, p.yf, M);
+                    x.ep.?.reduce(e, p.yf, ss.branch, M);
+                } else qmm(p, e, p.actd, d.down, ss.branch, M);
             },
             .moe => |*m| moe(p, x, e, m, ss.normed, M, if (c.byRows()) x.ep else null),
         }

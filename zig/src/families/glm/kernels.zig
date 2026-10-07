@@ -32,6 +32,8 @@ pub const Kernels = struct {
     qmv_qr_tp: mtl.Pipeline, // TP2: q_b's rows of one Mac's MLA heads, the indexer's queries whole
     qmvp_mla_out: mtl.Pipeline, // TP2: the MLA out-projection over one Mac's heads, fp32 partials
     sparse_attention_tp: mtl.Pipeline, // TP2: the sparse kernel over one Mac's 32 heads
+    qmv_dense_gu_tp: mtl.Pipeline, // TP2: the dense MLP's gate and up rows of one Mac's half
+    qmvp_dense_down: mtl.Pipeline, // TP2: its down projection over that half, fp32 partials
     gemv_t_igate: mtl.Pipeline,
     gemv_t_values: mtl.Pipeline,
     gemv_scores_lt4: mtl.Pipeline,
@@ -114,6 +116,8 @@ const generated = [_]struct { key: []const u8, field: []const u8 }{
     .{ .key = "qmv_1536_12288", .field = "qmv_qr_tp" },
     .{ .key = "qmvp_8192_4096", .field = "qmvp_mla_out" },
     .{ .key = "sparse_attention_tp", .field = "sparse_attention_tp" },
+    .{ .key = "qmv_4096_12288", .field = "qmv_dense_gu_tp" },
+    .{ .key = "qmvp_6144_4096", .field = "qmvp_dense_down" },
     .{ .key = "gemv_t_igate", .field = "gemv_t_igate" },
     .{ .key = "gemv_t_values", .field = "gemv_t_values" },
     .{ .key = "gemv_scores_lt4", .field = "gemv_scores_lt4" },

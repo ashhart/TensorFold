@@ -12,7 +12,7 @@ pub const Config = struct {
     vocab: u32 = 154880,
     eps: f32 = 1e-5,
     dense_layers: u32 = 3,
-    dense_inter: u32 = 12288,
+    dense_inter: u32 = 12288, // this Mac's dense MLP rows: all, or its half in TP2
     experts: u32 = 288,
     own: [2]u32 = .{ 0, 288 }, // routed experts [lo, hi) this Mac holds: all, or its half in expert-parallel mode
     inter: [2]u32 = .{ 0, 2048 }, // each routed expert's intermediate rows [lo, hi) this Mac holds (half by rows)
@@ -205,11 +205,13 @@ pub fn splitRows(c: *Config, rank: u32, ranks: u32) !void {
     c.inter = .{ rank * n, (rank + 1) * n };
 }
 
-/// Tensor parallel over `ranks` Macs: rank r runs KDA and MLA heads [r h, (r + 1) h) of every layer, h = heads / ranks.
+/// Tensor parallel over `ranks` Macs: rank r runs its share of every layer's KDA and MLA heads and dense MLP rows.
 pub fn splitHeads(c: *Config, rank: u32, ranks: u32) !void {
-    if (ranks == 0 or rank >= ranks or c.kda_heads % ranks != 0 or c.mla_heads % ranks != 0 or c.tp != 1) return error.BadHeadSplit;
+    if (ranks == 0 or rank >= ranks or c.tp != 1) return error.BadHeadSplit;
+    if (c.kda_heads % ranks != 0 or c.mla_heads % ranks != 0 or c.dense_inter % (64 * ranks) != 0) return error.BadHeadSplit;
     c.kda_heads /= ranks;
     c.mla_heads /= ranks;
+    c.dense_inter /= ranks;
     c.tp = ranks;
     c.tp_rank = rank;
 }
