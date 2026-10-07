@@ -43,9 +43,9 @@ def arch_flags(need: tuple[int, int] = MIN_CAPABILITY, arch_specific: bool = Fal
 
     major, minor = torch.cuda.get_device_capability()
     if (major, minor) < need:
-        hint = (" — Ampere W4A16/EXL3 is available with TENSORFOLD_MIN_CAPABILITY=8.0 (FP8 and NVFP4 stay refused)"
-                if MIN_CAPABILITY >= UPSTREAM_FLOOR else "") if why == "FP8 MMA" else ""
         why = "thread-block clusters" if need >= CLUSTERS else "FP8 MMA"
+        hint = ("; Ampere W4A16/EXL3 is available with TENSORFOLD_MIN_CAPABILITY=8.0 (FP8 and NVFP4 stay refused)"
+                if MIN_CAPABILITY >= UPSTREAM_FLOOR else "") if why == "FP8 MMA" else ""
         raise RuntimeError(f"TensorFold's CUDA kernels need compute capability {need[0]}.{need[1]} or newer ({why}"
                            f"{' for these weights' if need > MIN_CAPABILITY else ''}); this GPU "
                            f"({torch.cuda.get_device_name()}) is {major}.{minor}{hint}")

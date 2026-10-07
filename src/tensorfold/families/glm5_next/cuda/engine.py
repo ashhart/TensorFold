@@ -115,7 +115,7 @@ class GlmEngine:
 
         import torch
 
-        from tensorfold.cuda.comm import NCCL
+        from tensorfold.cuda.comm import open_comm
         from .decode import Engine
         from .weights import Config, load
         from .split import rule
@@ -129,8 +129,8 @@ class GlmEngine:
         self.rank = rank
         self.policy = "0" if serial_only else policy
         self.serial_only = serial_only
-        world_ranks = getattr(comm, "world", None) if comm is not None else world
-        self.comm = comm if comm is not None else NCCL(rank, world_ranks, master, port)
+        world_ranks = getattr(comm, "world", world) if comm is not None else world
+        self.comm = comm if comm is not None else open_comm(rank, world_ranks, master, port)
         self.world = world_ranks
         self.comm.barrier()
         cfg = Config.read(model_dir)
@@ -143,7 +143,6 @@ class GlmEngine:
         weights_estimate = split_weights(rule, self.world)
         if not self.mtp_on:
             weights_estimate = without_mtp(weights_estimate, cfg.layers)
-        print(f"[tf-debug] engine world={self.world} rank={rank}", flush=True)
         self.capacity_plan = admit(model_dir, context if explicit else cfg.dense_limit, explicit, torch,
                                    lambda text: mla_geometry(text, self.world, MAX_ROWS, minimum_slots=DENSE_CAPACITY,
                                                              latent=LATENT, mtp=self.mtp_on),
@@ -271,7 +270,7 @@ class GlmEngine:
                 back()
         names = list(best)
         mine = torch.tensor([best[n] for n in names], dtype=torch.float32, device="cuda")
-        world = self.comm.world
+        world = self.world
         got = torch.empty((world * mine.numel(),), dtype=torch.float32, device="cuda")
         self.comm.all_gather(mine, got)
         per = got.view(world, -1)
@@ -293,7 +292,7 @@ class GlmEngine:
     def _gather_ints(self, values: list[int]) -> list[list[int]]:
         torch = self.torch
         mine = torch.tensor(values, dtype=torch.int32, device="cuda")
-        world = self.comm.world
+        world = self.world
         got = torch.empty((world * len(values),), dtype=torch.int32, device="cuda")
         self.comm.all_gather(mine, got)
         return [got[i * len(values):(i + 1) * len(values)].tolist() for i in range(world)]
@@ -330,7 +329,7 @@ class GlmEngine:
 
         torch = self.torch
         n = torch.tensor([len(values) if self.rank == 0 else 0], dtype=torch.int32, device="cuda")
-        world = self.comm.world
+        world = self.world
         got = torch.empty((world,), dtype=torch.int32, device="cuda")
         self.comm.all_gather(n, got)
         count = int(got[0].item())
@@ -557,7 +556,7 @@ class GlmEngine:
     def _gather_floats(self, values: list[float]) -> list[list[float]]:
         torch = self.torch
         mine = torch.tensor(values, dtype=torch.float32, device="cuda")
-        world = self.comm.world
+        world = self.world
         got = torch.empty((world * len(values),), dtype=torch.float32, device="cuda")
         self.comm.all_gather(mine, got)
         width = len(values)

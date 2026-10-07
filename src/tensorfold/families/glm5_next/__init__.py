@@ -17,6 +17,7 @@ KERNEL_DEPENDENCIES = ("tensorfold.kernels.qwen.flash_next.v1.prefill_mm",)
 KERNEL_VERSION = "v1"
 # the storage formats each engine reads: MLX affine on a Mac; that or EXL3 routed experts on CUDA
 QUANT_METHODS = {"mlx": ("mlx",), "cuda": ("mlx", "exl3")}
+CUDA_TP4 = True                    # --tp 4: the CUDA engine splits over four ranks
 # the EXL3 variant the CUDA kernels read (4-bit trellis, the "mcg" codebook, routed experts only)
 EXL3_VARIANT = {"bits": 4, "codebook": "mcg", "scope": "glm53_routed_experts_only"}
 # buffers of 200 ops and 200 MB, so a prompt chunk's memory frees as it runs; no TF32: row kernels repeat fp32

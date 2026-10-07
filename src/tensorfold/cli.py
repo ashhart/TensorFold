@@ -247,8 +247,10 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
         raise ValueError("--tp 2/4 needs --master: rank 0's address on the link between the ranks")
     if args.tp == 1 and args.rank != 0:
         raise ValueError("--rank 1 needs --tp 2 or 4")
-    if args.tp == 4 and args.rank not in (0, 1, 2, 3):
-        raise ValueError("--tp 4 needs --rank 0..3")
+    if args.rank >= args.tp:
+        raise ValueError(f"--rank {args.rank} needs --tp {args.rank + 1} or more")
+    if args.tp == 4 and not getattr(family.package, "CUDA_TP4", False):
+        raise ValueError(f"--tp 4: {family.title} runs on one or two GPUs on CUDA")
     started = time.perf_counter()
     drafter = "" if args.no_drafts else _drafter(family, args.drafter, "cuda")
     options: dict[str, Any] = {"drafter": drafter, "tp": int(args.tp), "rank": int(args.rank), "master": args.master,

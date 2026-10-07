@@ -169,10 +169,11 @@ class FlashNextEngine:
             self.vision = QwenCudaVision(model_dir, torch.device("cuda", 0),
                                          allow_urls=vision_urls)
             torch.cuda.empty_cache()
+            ranks = "; rank 1 receives each request's image features from this rank" if tp == 2 else ""
             print(f"[tensorfold] vision: image{' and video' if self.vision.videos else ''} input, a "
                   f"{self.vision.weight_bytes / 2**30:.2f} GiB tower with {vision_workspace() / 2**30:.2f} GiB of "
                   f"workspace reserved{'; https URLs allowed' if vision_urls else ''}"
-                  f"{'; rank 1 receives each request\'s image features from this rank' if tp == 2 else ''}",
+                  f"{ranks}",
                   flush=True)
         elif vision:                                   # rank 1: no tower; rank 0's features arrive with each admission
             print("[tensorfold] vision: image input on two ranks; this rank attaches the features rank 0 encodes",
