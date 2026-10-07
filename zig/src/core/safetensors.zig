@@ -136,6 +136,9 @@ pub const File = struct {
     arena: std.heap.ArenaAllocator,
 
     pub fn open(gpa: std.mem.Allocator, io: Io, path: []const u8) !File {
+        return openPrefix(gpa, io, path, null);
+    }
+    pub fn openPrefix(gpa: std.mem.Allocator, io: Io, path: []const u8, prefix: ?[]const u8) !File {
         var file = try Io.Dir.cwd().openFile(io, path, .{});
         errdefer file.close(io);
         const len: usize = @intCast(try file.length(io));
@@ -146,7 +149,7 @@ pub const File = struct {
         if (header_len > len - 8) return error.BadSafetensors;
         var arena = std.heap.ArenaAllocator.init(gpa);
         errdefer arena.deinit();
-        const names = try parseHeader(arena.allocator(), map.memory[8..][0..header_len], len - 8 - header_len);
+        const names = try parseHeaderPrefix(arena.allocator(), map.memory[8..][0..header_len], len - 8 - header_len, prefix);
         return .{ .file = file, .map = map, .data = 8 + header_len, .names = names, .arena = arena };
     }
 
@@ -211,4 +214,18 @@ test "a header that breaks the format, or whose byte count overflows, is refused
         "{\"t\": {\"dtype\": \"U8\", \"shape\": [1], \"data_offsets\": [\"0\", \"1\"]}}",
     };
     for (bad) |json| try std.testing.expectError(error.BadSafetensors, parseHeader(arena.allocator(), json, 16));
+}
+
+test "text namespace filtering skips a vision rank-five entry without hiding invalid text" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const json =
+        \\{"vision.patch.weight":{"dtype":"BF16","shape":[1,1,1,1,1],"data_offsets":[0,2]},
+        \\ "language_model.lm_head.weight":{"dtype":"U32","shape":[2,3],"data_offsets":[2,26]}}
+    ;
+    try std.testing.expectError(error.RankTooHigh, parseHeader(arena.allocator(), json, 26));
+    const h = try parseHeaderPrefix(arena.allocator(), json, 26, "language_model.");
+    try std.testing.expectEqual(@as(usize, 1), h.count());
+    try std.testing.expect(h.contains("language_model.lm_head.weight"));
+    try std.testing.expectError(error.BadSafetensors, parseHeaderPrefix(arena.allocator(), json, 25, "language_model."));
 }

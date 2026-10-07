@@ -1,5 +1,6 @@
 //! Host-only contracts exercise strict text configuration, affine six-bit packing and borrowed-view shapes.
 const std = @import("std");
+const posix = std.posix;
 const family = @import("flashnext.zig");
 const st = @import("../../core/safetensors.zig");
 
@@ -192,4 +193,135 @@ test "affine bit group and dimension admission refuses unsupported geometry" {
     const spec = try family.affine.Spec.init(6, 32);
     try std.testing.expectError(error.InvalidAffineWidth, spec.words(48));
     try std.testing.expectError(error.Overflow, spec.words(std.math.maxInt(usize) - 31));
+}
+
+test "the PLE reference values derive from the pinned config as the Python embedding does" {
+    const bytes = @embedFile("fixtures/config.json");
+    var c = try family.config.parse(std.testing.allocator, bytes);
+    defer c.deinit();
+    const ref = try family.config.pleRef(&c);
+    try std.testing.expectEqual(@as(i64, 248044), ref.eos);
+    try std.testing.expectEqualSlices(i64, &.{ 23703573157769, 20109073645365, 8052911324071 }, &ref.multipliers);
+    try std.testing.expectEqualSlices(i64, &.{
+        20000003, 20000023, 20000033, 20000047, 20000059, 20000063, 20000069, 20000077,
+        20000081, 20000093, 20000107, 20000147, 20000153, 20000159, 20000161, 20000171,
+    }, &ref.sizes);
+    try std.testing.expectEqualSlices(i64, &.{
+        0,         20000003,  40000026,  60000059,  80000106,  100000165, 120000228, 140000297,
+        160000374, 180000455, 200000548, 220000655, 240000802, 260000955, 280001114, 300001275,
+    }, &ref.offsets);
+    const scale = 1.0 / std.math.sqrt(@as(f64, @floatFromInt(c.head_dim)));
+    try std.testing.expectEqual(@as(f64, 0.0625), scale);
+}
+
+test "the checked-in role table resolves every width serve asks for, with its source checked in" {
+    const table = @import("roles_gen.zig");
+    const sources = @import("kernel_sources").flashnext_gen;
+    try std.testing.expect(table.entries.len > 0);
+    // every entry's file and function must exist in the embedded sources, with the kernel inside it
+    for (table.entries) |e| {
+        var found = false;
+        for (sources.sources) |s| {
+            if (std.mem.eql(u8, s.name, e.file)) {
+                found = true;
+                try std.testing.expect(std.mem.indexOf(u8, s.text, e.function) != null);
+            }
+        }
+        try std.testing.expect(found);
+    }
+    // every stem the table carries resolves at every width serve asks for, 7, 9 and 10-16 included
+    var stems: std.StringArrayHashMapUnmanaged([16]bool) = .empty;
+    defer stems.deinit(std.testing.allocator);
+    for (table.entries) |e| {
+        const at = std.mem.lastIndexOf(u8, e.site, "|") orelse return error.BadSite;
+        const w = try std.fmt.parseInt(u16, e.site[at + 1 ..], 10);
+        if (w == 0 or w > 16) return error.BadWidth;
+        const gop = try stems.getOrPut(std.testing.allocator, e.site[0..at]);
+        if (!gop.found_existing) gop.value_ptr.* = @splat(false);
+        gop.value_ptr.*[w - 1] = true;
+    }
+    for (stems.values()) |set| {
+        for (0..16) |w| try std.testing.expect(set[w]);
+    }
+    // the indexer trio's kernels are in the table, so Select.init finds its variants and long-context block
+    // selection works without a dump: its launches bind the trio directly, with run-time grids and shapes
+    const trio = [_][]const u8{ "q4_idx_pool_", "q4_idx_scores_", "q4_idx_select_" };
+    for (trio) |t| {
+        var hit = false;
+        for (table.entries) |e| {
+            if (std.mem.indexOf(u8, e.function, t) != null) hit = true;
+        }
+        try std.testing.expect(hit);
+    }
+    // every entry's file is a bare name in the embedded sources: the checked-in run never opens a recorded
+    // path, so load works from any working directory
+    for (table.entries) |e| {
+        try std.testing.expect(std.mem.indexOfScalar(u8, e.file, '/') == null);
+    }
+    // Prompt.init patches the checked-in q4_gdn@gdn|8 text in place: its file must be one of the embeds
+    for (table.entries) |e| {
+        if (std.mem.eql(u8, e.site, "q4_gdn@gdn|8")) {
+            var found = false;
+            for (sources.sources) |s| {
+                if (std.mem.eql(u8, s.name, e.file)) found = true;
+            }
+            try std.testing.expect(found);
+        }
+    }
+}
+
+test "the checked-in lane sources have a no-tensor-unit twin with the same kernel names" {
+    const sources = @import("kernel_sources").flashnext_gen;
+    for (sources.sources) |s| {
+        if (std.mem.indexOf(u8, s.name, "lane_qmm_bytes_grouped") == null) continue;
+        if (std.mem.endsWith(u8, s.name, "-lanes.metal")) continue;
+        var twin: [128]u8 = undefined;
+        const at = std.mem.indexOf(u8, s.name, ".metal").?;
+        const lanes_name = try std.fmt.bufPrint(&twin, "{s}-lanes{s}", .{ s.name[0..at], s.name[at..] });
+        var found = false;
+        for (sources.sources) |t| {
+            if (std.mem.eql(u8, t.name, lanes_name)) {
+                found = true;
+                // the rewrites keep every kernel's name and the constexpr shape block
+                try std.testing.expect(std.mem.indexOf(u8, t.text, "constexpr int N = ") != null);
+                try std.testing.expect(std.mem.indexOf(u8, t.text, "colok[f][0]") != null);
+            }
+        }
+        try std.testing.expect(found);
+    }
+}
+
+test "the prompt's checked-in text resolves and patches from another working directory" {
+    // Prompt.init needs Metal, so this walks its exact file resolution instead: every checked-in variant resolves through Run.variantText and the gdn patch applies, with the process in a directory that holds none of the kernel files, so a bare-name open cannot pass.
+    const replay = @import("replay.zig");
+    const table = @import("roles_gen.zig");
+    const sources = @import("kernel_sources").flashnext_gen;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_fd = std.c.open(".", .{}); // O_RDONLY via the flags struct's default
+    defer _ = std.c.close(old_fd);
+    const tmpz = try std.fmt.allocPrintSentinel(std.testing.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path}, 0);
+    defer std.testing.allocator.free(tmpz);
+    try std.testing.expect(std.c.chdir(tmpz) == 0);
+    defer _ = std.c.fchdir(old_fd);
+    for (table.entries) |e| {
+        var text: []const u8 = "";
+        for (sources.sources) |s| {
+            if (std.mem.eql(u8, s.name, e.file)) text = s.text;
+        }
+        try std.testing.expect(text.len != 0);
+        const v = replay.Variant{ .inputs = &.{}, .outputs = &.{}, .meta = &.{}, .pipe = undefined, .file = e.file, .name = e.function, .text = text };
+        const got = try replay.Run.variantText(std.testing.allocator, &v);
+        try std.testing.expectEqualStrings(text, got);
+    }
+    // the gdn site Prompt.init patches carries the patch string exactly once in the resolved text
+    const gs = for (table.entries) |e| {
+        if (std.mem.eql(u8, e.site, "q4_gdn@gdn|8")) break e;
+    } else return error.NoSite;
+    const from = "SO[((size_t(r) * NV + hv)";
+    var count: usize = 0;
+    for (sources.sources) |s| {
+        if (std.mem.eql(u8, s.name, gs.file)) count = std.mem.count(u8, s.text, from);
+    }
+    try std.testing.expectEqual(@as(usize, 1), count);
 }

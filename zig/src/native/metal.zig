@@ -133,12 +133,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }
 
-/// Flash Next on the replay engine: the recorded kernels and packs from tools/zig/flashnext_dump.py in TF_FLASHNEXT_DUMP.
+/// Flash Next on the replay engine: the recorded kernels and packs from tools/zig/flashnext_dump.py in
+/// TF_FLASHNEXT_DUMP, or with it unset the checked-in kernels and packs built beside the checkpoint.
 fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
-    const dump = std.mem.span(std.c.getenv("TF_FLASHNEXT_DUMP") orelse {
-        problem.* = "the native Flash Next engine needs TF_FLASHNEXT_DUMP: a folder from tools/zig/flashnext_dump.py";
-        return null;
-    });
+    const dump: ?[]const u8 = if (std.c.getenv("TF_FLASHNEXT_DUMP")) |d| std.mem.span(d) else null;
     const native = modelContext(a, io, o.dir);
     const window: i64 = o.context orelse native;
     if (window < 0 or (native > 0 and window > native)) {
@@ -149,7 +147,7 @@ fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
     defer pool.pop();
     var why: []const u8 = "";
     const h = flashnext.open(gpa, io, o.dir, dump, window, o.speed_up, o.prompt_cache_gib, o.prompt_cache_over_cap, a, &why) catch |e| {
-        problem.* = if (e == error.CacheOverCap) why else try std.fmt.allocPrint(a, "the native Flash Next engine cannot load {s} with {s} ({s})", .{ o.dir, dump, @errorName(e) });
+        problem.* = if (e == error.CacheOverCap) why else try std.fmt.allocPrint(a, "the native Flash Next engine cannot load {s} with {s} ({s})", .{ o.dir, dump orelse "(none: the checked-in kernels)", @errorName(e) });
         return null;
     };
     return .{ .engine = h.engine(), .close = flashnext.close, .ctx = h };

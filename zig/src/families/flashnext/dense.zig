@@ -54,10 +54,9 @@ pub fn recorded(r: *Run, role: []const u8) !struct { n: usize, k: usize, sk: usi
     var key: [96]u8 = undefined;
     const s = r.roles.get(try std.fmt.bufPrint(&key, "{s}|1", .{role})) orelse return error.NoSite;
     if (r.lane_shape.get(s.v)) |v| return .{ .n = v[0], .k = v[1], .sk = v[2] };
-    const f = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(r.arena, "{s}", .{s.v.file}, 0));
+    const text = try Run.variantText(r.arena, s.v);
     var v: [3]usize = undefined;
     for ([_][]const u8{ "constexpr int N = ", "constexpr int K = ", "constexpr int SK = " }, 0..) |name, i| {
-        const text = f.bytes[0..f.size];
         const at = (std.mem.indexOf(u8, text, name) orelse return error.LanePatch) + name.len;
         const end = at + (std.mem.indexOfScalar(u8, text[at..], ';') orelse return error.LanePatch);
         v[i] = try std.fmt.parseInt(usize, text[at..end], 10);

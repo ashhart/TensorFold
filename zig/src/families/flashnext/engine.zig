@@ -3,12 +3,16 @@
 const std = @import("std");
 const mtl = @import("metal");
 const fz = @import("replay.zig");
+const config = @import("config.zig");
 const segments = @import("../../core/segments.zig");
 const snapshot = @import("snapshot.zig");
 const CallLog = @import("call_log.zig").CallLog;
 const tp_settings = @import("tp_settings.zig");
 const follow_mod = @import("follow.zig");
 const marks_mod = @import("marks.zig");
+const pack_io = @import("pack_io.zig");
+const pack = @import("pack.zig");
+const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
 const D = fz.D;
@@ -38,6 +42,10 @@ const laneOf = fz.laneOf;
 const i32Buf = fz.i32Buf;
 const f32Buf = fz.f32Buf;
 const jsonInt = fz.jsonInt;
+
+/// The default draft vocabulary (the Python package's draft_vocab.txt), written into the cache dir for the pack
+/// builder when a checkpoint is served with no dump: the pack's mtp.draft_ids comes from it.
+const default_draft_vocab = @embedFile("draft_vocab_default.txt");
 
 /// Rounds the token ring holds (fz_accept writes round & 511).
 const RING = 512;
@@ -122,13 +130,14 @@ pub const Engine = struct {
     tsel: GSelect,
     msel: GSelect,
 
-    /// The checkpoint in `model_dir` with the recorded kernels and packs in `dump_dir` (tools/zig/flashnext_dump.py).
-    pub fn load(gpa: Allocator, model_dir: []const u8, dump_dir: []const u8) !*Engine {
-        return loadWith(gpa, model_dir, dump_dir, null);
+    /// The checkpoint in `model_dir` with the recorded kernels and packs in `dump_dir` (tools/zig/flashnext_dump.py),
+    /// or, with `dump_dir` null, the checked-in kernels and packs built into the cache beside the checkpoint.
+    pub fn load(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_dir: ?[]const u8) !*Engine {
+        return loadWith(gpa, io, model_dir, dump_dir, null);
     }
 
     /// `load`, in speed-up mode when `speed_up` (or TF_FLASHNEXT_TP) names this Mac's settings: rank, MCDMA library and the link to the other Mac (tp.zig).
-    pub fn loadWith(gpa: Allocator, model_dir: []const u8, dump_dir: []const u8, speed_up: ?[]const u8) !*Engine {
+    pub fn loadWith(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_dir: ?[]const u8, speed_up: ?[]const u8) !*Engine {
         const e = try gpa.create(Engine); // undefined memory: every defaulted field is set here
         errdefer gpa.destroy(e);
         e.gpa = gpa;
@@ -160,7 +169,7 @@ pub const Engine = struct {
         r.dense = true;
         r.hc_up = true;
         r.event = try device.sharedEvent();
-        try r.compile(dump_dir);
+        if (dump_dir) |d| try r.compile(d) else try r.compileChecked();
         r.sel = try Select.init(r, MAXR);
         r.lane_new = std.c.getenv("FZ_LANE") != null; // fz_lane and fz_gdn on the target (the recorded bits)
         if (std.c.getenv("FZ_GDN")) |v| {
@@ -174,10 +183,62 @@ pub const Engine = struct {
         while (wit.next()) |kv| try files.put(arena, kv.value_ptr.string, {});
         var fit = files.keyIterator();
         while (fit.next()) |name| try r.indexFile(try std.fmt.allocPrintSentinel(arena, "{s}/{s}", .{ model_dir, name.* }, 0));
-        try r.indexFile(try std.fmt.allocPrintSentinel(arena, "{s}/pack.safetensors", .{dump_dir}, 0));
-        const ref_file = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/ref.json", .{dump_dir}, 0));
-        const ref = try std.json.parseFromSliceLeaky(std.json.Value, arena, ref_file.bytes[0..ref_file.size], .{});
-        const ple_ref = ref.object.get("ple").?.object;
+        // the pack must name the checkpoint beside it: one built from another checkpoint refuses here; every
+        // mapping unmaps as soon as the identity text exists, so a refused or failed load leaves nothing mapped
+        const identity = blk: {
+            var maps: std.ArrayList(mtl.MappedFile) = .empty;
+            errdefer for (maps.items) |*m| m.deinit();
+            var mapped_shards: std.ArrayList(pack_io.MappedShard) = .empty;
+            var sit = files.keyIterator();
+            while (sit.next()) |name| {
+                const shard = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/{s}", .{ model_dir, name.* }, 0));
+                try maps.append(arena, shard);
+                try mapped_shards.append(arena, .{ .name = name.*, .size = shard.size, .bytes = shard.bytes[0..shard.size] });
+            }
+            const index_mapped = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/model.safetensors.index.json", .{model_dir}, 0));
+            try maps.append(arena, index_mapped);
+            const id = try pack_io.identityFromMapped(arena, index_mapped.bytes[0..index_mapped.size], mapped_shards.items);
+            for (maps.items) |*m| m.deinit();
+            maps.clearRetainingCapacity();
+            break :blk id;
+        };
+        const pack_dir = dump_dir orelse try std.fmt.allocPrintSentinel(arena, "{s}/zig-pack", .{model_dir}, 0);
+        if (dump_dir == null) try ensurePacks(gpa, io, model_dir, pack_dir, identity);
+        const pack_path = try std.fmt.allocPrintSentinel(arena, "{s}/pack.safetensors", .{pack_dir}, 0);
+        {
+            const pack_file = try mtl.MappedFile.open(pack_path);
+            errdefer pack_file.deinit();
+            try pack_io.checkSourceMapped(arena, pack_file.bytes[0..pack_file.size], identity, pack_path);
+            pack_file.deinit();
+        }
+        try r.indexFile(pack_path);
+        // the reference values: the dump's ref.json, or derived from the checkpoint's config (config.pleRef)
+        var ple_values: config.PleRef = undefined;
+        var attention_scale: f64 = undefined;
+        if (dump_dir) |d| {
+            const ref_file = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/ref.json", .{d}, 0));
+            const ref = try std.json.parseFromSliceLeaky(std.json.Value, arena, ref_file.bytes[0..ref_file.size], .{});
+            const ple_ref = ref.object.get("ple").?.object;
+            ple_values = .{
+                .eos = jsonInt(ple_ref.get("eos").?),
+                .multipliers = .{
+                    jsonInt(ple_ref.get("multipliers").?.array.items[0]),
+                    jsonInt(ple_ref.get("multipliers").?.array.items[1]),
+                    jsonInt(ple_ref.get("multipliers").?.array.items[2]),
+                },
+                .sizes = undefined,
+                .offsets = undefined,
+            };
+            for (0..16) |k| {
+                ple_values.sizes[k] = jsonInt(ple_ref.get("sizes").?.array.items[k]);
+                ple_values.offsets[k] = jsonInt(ple_ref.get("offsets").?.array.items[k]);
+            }
+            attention_scale = ref.object.get("attention_scale").?.float;
+        } else {
+            var cfg = try config.Config.read(arena, io, model_dir);
+            ple_values = try config.pleRef(&cfg);
+            attention_scale = 1.0 / std.math.sqrt(@as(f64, @floatFromInt(cfg.head_dim)));
+        }
         const m = try arena.create(Model);
         m.* = .{ .r = r, .layers = undefined, .mix = undefined, .head = undefined, .embed = undefined, .ple = undefined, .t = undefined };
         for (0..LAYERS) |i| {
@@ -224,15 +285,15 @@ pub const Engine = struct {
             .tables = undefined,
             .cin = .{ .b = try r.buffer((PLE_TAIL + MAXR) * WIDE * 2) },
             .hist = undefined,
-            .eos = jsonInt(ple_ref.get("eos").?),
+            .eos = ple_values.eos,
             .mult = undefined,
             .sizes = undefined,
             .offsets = undefined,
         };
-        for (0..3) |k| m.ple.mult[k] = jsonInt(ple_ref.get("multipliers").?.array.items[k]);
+        for (0..3) |k| m.ple.mult[k] = ple_values.multipliers[k];
         for (0..16) |k| {
-            m.ple.sizes[k] = jsonInt(ple_ref.get("sizes").?.array.items[k]);
-            m.ple.offsets[k] = jsonInt(ple_ref.get("offsets").?.array.items[k]);
+            m.ple.sizes[k] = ple_values.sizes[k];
+            m.ple.offsets[k] = ple_values.offsets[k];
         }
         r.ngram = @import("index.zig").ngramSpelling(index.object.get("weight_map").?.object);
         for (0..GROUPS) |g| {
@@ -281,7 +342,7 @@ pub const Engine = struct {
             .nk8 = try i32Buf(r, &(@as([MAXR]i32, @splat(0)))),
             .zero8 = try i32Buf(r, &(@as([MAXR]i32, @splat(0)))),
             .ids81 = try i32Buf(r, &(@as([MAXR]i32, @splat(0)))),
-            .scale = try f32Buf(r, @floatCast(ref.object.get("attention_scale").?.float)),
+            .scale = try f32Buf(r, @floatCast(attention_scale)),
             .log2base = try f32Buf(r, 23.253496170043945),
             .ple_ids = try i32Buf(r, &(@as([16 * MAXR]i32, @splat(0)))),
             .ple_meta = try B.of(r, 39 * 8),
@@ -352,7 +413,7 @@ pub const Engine = struct {
         e.r = r;
         e.m = m;
         e.pr = try arena.create(Prompt);
-        e.pr.* = try Prompt.init(r, dump_dir, r.xnew_header);
+        e.pr.* = try Prompt.init(r, pack_dir, r.xnew_header);
         e.pr2 = try arena.create(Prompt);
         e.pr2.* = try e.pr.sibling();
         try e.rounds();
@@ -825,6 +886,29 @@ pub const Engine = struct {
         gpa.destroy(e);
     }
 };
+
+/// The pack cache beside the checkpoint: `{model_dir}/zig-pack`, built once by pack.build with the default draft
+/// vocabulary, rebuilt when its recorded source no longer matches the checkpoint's identity.
+fn ensurePacks(gpa: Allocator, io: std.Io, model_dir: []const u8, cache_dir: []const u8, identity: []const u8) !void {
+    Io.Dir.cwd().createDir(io, cache_dir, .default_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    if (pack_io.packsReady(gpa, io, cache_dir, identity)) |ready| {
+        if (ready) return;
+    } else |_| {}
+    const vocab_path = try std.fmt.allocPrintSentinel(gpa, "{s}/draft_vocab.txt", .{cache_dir}, 0);
+    defer gpa.free(vocab_path);
+    {
+        var file = try Io.Dir.cwd().createFile(io, vocab_path, .{});
+        defer file.close(io);
+        var wbuf: [64 << 10]u8 = undefined;
+        var fw = file.writerStreaming(io, &wbuf);
+        try fw.interface.writeAll(default_draft_vocab);
+        try fw.interface.flush();
+    }
+    _ = try pack.build(gpa, io, model_dir, cache_dir, vocab_path);
+}
 
 test "load sets no DeltaNet state view before rounds() points them at the round buffers" {
     const src = @embedFile("engine.zig");
