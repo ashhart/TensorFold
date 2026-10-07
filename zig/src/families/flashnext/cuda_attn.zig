@@ -1,4 +1,4 @@
-//! Layer 31's full attention for one decode token at position 0: project, prepare, attend, gate, project out.
+//! Layer 35's full attention for one decode token at position 0: project, prepare, attend, gate, project out.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -18,7 +18,7 @@ const attn_scale: f32 = 0.0625;
 const proj_n: usize = q_heads * 2 * head_dim + 2 * kv_heads * head_dim + (index_heads + 1) * index_dim;
 const out_k: usize = q_heads * head_dim;
 const nch: usize = 3;
-const prefix = "language_model.model.layers.31.self_attn.";
+const prefix = "language_model.model.layers.35.self_attn.";
 
 const Gap = struct { off: usize, steps: u32, at: usize };
 
@@ -416,7 +416,7 @@ pub fn decode(comptime Tri: type, gpa: std.mem.Allocator, driver: *cuda.Driver, 
     std.debug.print("attn out off {d} max_steps {d} head {x:0>4} host {x:0>4}\n", .{ og.off, og.steps, gpu_o[0], host_o[0] });
     std.debug.print("attn gate off {d} max_steps {d} xs_ulp {d} head {x:0>4} host {x:0>4}\n", .{ gg.off, gg.steps, xs_ulp, gpu_gated[0], host_gated[0] });
     std.debug.print("attn oproj n {d} off {d} max_steps {d} head {x:0>4} host {x:0>4}\n", .{ dims, bg.off, bg.steps, gpu_branch[0], host_branch[0] });
-    if (proj.off > 2 or proj.steps > 1 or qg.steps != 0 or kg.steps != 0 or vg.steps != 0 or iqg.steps != 0 or ikg.steps != 0 or og.steps != 0 or gg.off > 1 or gg.steps > 1 or xs_ulp > 8192 or bg.steps != 0) return 1;
+    if (proj.off > 2 or proj.steps > 1 or qg.steps != 0 or kg.off > 1 or kg.steps > 1 or vg.steps != 0 or iqg.steps != 0 or ikg.steps != 0 or og.steps != 0 or gg.off > 1 or gg.steps > 1 or xs_ulp > 8192 or bg.steps != 0) return 1;
     return 0;
 }
 
