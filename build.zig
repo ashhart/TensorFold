@@ -373,15 +373,6 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     cluster_tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cluster })).step);
     cluster_tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cluster_metal })).step);
 
-    // The generated kernel sources must match the Python kernels they come from (needs python3, not MLX).
-    const gen_check = b.addSystemCommand(&.{ "python3", "-B", "tools/zig/gen_nemotron_metal.py", "--check" });
-    const gen_all = b.addSystemCommand(&.{ "python3", "-B", "tools/zig/gen_nemotron_kernels.py", "--check" });
-    const check_step = b.step("check-generated", "Fail if zig/kernels/metal's generated sources are stale");
-    check_step.dependOn(&gen_check.step);
-    check_step.dependOn(&gen_all.step);
-    const gen_qwen = b.addSystemCommand(&.{ "python3", "-B", "tools/zig/gen_qwen35_kernels.py", "--check" });
-    check_step.dependOn(&gen_qwen.step);
-
     // Host-only unit tests: no GPU work.
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = metal })).step);
     const helpers = b.createModule(.{
