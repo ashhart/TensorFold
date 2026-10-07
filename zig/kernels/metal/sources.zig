@@ -25,7 +25,7 @@ pub const nemotron_sample = @embedFile("nemotron_sample.metal");
 pub const nax = @embedFile("nax.h");
 
 /// Flash Next 6-bit (group 32) prompt projections on the tensor units: dense and sorted-expert gather.
-pub const flashnext_qmm6 = @embedFile("prefill/qmm6_nax.metal");
+pub const flashnext_qmm6 = @embedFile("prefill/qmm6_nax.metal") ++ @embedFile("prefill/qmm6_nax_b.metal");
 /// Flash Next prompt-chunk glue: hyper-connection pieces, router rows, top-k, the expert sort, gathers and scatters.
 pub const flashnext_prompt = @embedFile("prefill/fn_prompt.metal");
 /// Flash Next block selection in GPU-side rounds: per-row metadata from the arena and pooling at absolute blocks.
