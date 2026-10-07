@@ -72,8 +72,6 @@ class FlashNextEngine:
         if (exl3 or quant_method(read_config(model_dir)) == "modelopt") and tp != 1:
             raise ValueError(f"{'EXL3 packs' if exl3 else 'NVFP4 checkpoints'} of Flash Next run on one GPU: drop --tp "
                              "2, or serve the MLX checkpoint (TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP) on two")
-        if vision and streams < 2:
-            raise ValueError("image input on Flash Next needs --parallel 2 or more (on one GPU or on two ranks)")
         if exl3 and ple_on_ssd:
             raise ValueError("--ple-on-ssd reads the MLX checkpoint's n-gram tables; an EXL3 pack maps its own table "
                              "from its file, so drop --ple-on-ssd")
@@ -302,13 +300,13 @@ class FlashNextEngine:
             self.comm.store.set(self._key(self.served), json.dumps({"stop": True}))
 
     def _share(self, prompt: list[int], max_tokens: int, sampling, draft: bool, cached: int, constraint=None,
-               stop_eos: bool = True) -> tuple:
+               stop_eos: bool = True, images: dict | None = None) -> tuple:
         from tensorfold.engine.grammar import pack
 
         points = getattr(self, "points", None)
         body = {"prompt": prompt, "max_tokens": max_tokens, "draft": bool(draft), "cached": int(cached),
-                "points": list(points(prompt)) if draft and points is not None else [],
-                "stop_eos": bool(stop_eos),
+                "points": list(points(prompt)) if draft and points is not None and images is None else [],
+                "stop_eos": bool(stop_eos), "images": images,       # an image prompt's rows, offset and feature shape
                 "sampling": None if sampling is None else [int(sampling.seed), float(sampling.temperature),
                                                            int(sampling.top_k), float(sampling.top_p),
                                                            float(sampling.min_p)],
@@ -344,7 +342,7 @@ class FlashNextEngine:
         s = body["sampling"]
         return (body["prompt"], body["max_tokens"], None if s is None else Sampling(*s),
                 body["draft"], body["cached"], body.get("grammar") or [], body.get("stop_eos", True),
-                body.get("points", []))
+                body.get("images"), body.get("points", []))      # the points stay last (older followers)
 
     @property
     def context_window(self) -> int:
@@ -384,7 +382,7 @@ class FlashNextEngine:
         return self.tp == 1
 
     def _serial(self, prompt: list[int], max_tokens: int, sampling, on_tokens, constraint=None,
-                stop_eos: bool = True, probabilities=None) -> dict[str, Any]:
+                stop_eos: bool = True, probabilities=None, vision=None) -> dict[str, Any]:
         """One token a round from a fresh prefill in the serial engine's own state (no drafts, no kept states)."""
 
         import torch
@@ -394,7 +392,8 @@ class FlashNextEngine:
         if self.serial is None:
             self.serial = self.e.twin()
         t0 = time.perf_counter()
-        first = prefill(self.serial, prompt, sampling, mtp=False, constraint=constraint, probabilities=probabilities)
+        first = prefill(self.serial, prompt, sampling, mtp=False, constraint=constraint, probabilities=probabilities,
+                        vision=vision)
         torch.cuda.synchronize()
         stats: dict[str, Any] = {"prefill_s": round(time.perf_counter() - t0, 4), "cached": 0, "drafts": False}
         if (on_tokens is not None and on_tokens([first])) or (stop_eos and first in self.eos) or max_tokens <= 1:
@@ -405,12 +404,14 @@ class FlashNextEngine:
         return stats
 
     def _decode(self, prompt: list[int], max_tokens: int, sampling, on_tokens, hit, constraint=None,
-                stop_eos: bool = True, probabilities=None, points=None) -> dict[str, Any]:
+                stop_eos: bool = True, probabilities=None, points=None, vision=None) -> dict[str, Any]:
         import torch
 
         from .decode import entry_end, mtp_decode, prefill, serial_decode
 
         t0 = time.perf_counter()
+        if vision is not None:
+            hit = None                                  # an image prompt prefills from its start
         self._start_from(hit)
         from tensorfold.cuda.markers import MIN_GAP
 
@@ -421,10 +422,15 @@ class FlashNextEngine:
         stops = [p for p in points if cached + MIN_GAP <= p < end]
         def keep(p, snap, tail):
             self._remember(list(prompt[:p]), {"state": snap, "tail": tail})
-        first = prefill(self.e, prompt, sampling, resume=hit[1] if hit else None, constraint=constraint,
-                        probabilities=probabilities, keep_at=end, stops=stops, keep=keep)
-        # the state one token before the prompt's end, so the same prompt or a next turn resumes from it
-        self._remember(list(prompt[:end]), self.e.kept)
+        if vision is not None:
+            # image rows and positions on the state; no kept snapshot (text only), the rounds run eagerly
+            # (Engine.forward: the captured graphs know no image positions), as the concurrent decoder does
+            first = prefill(self.e, prompt, sampling, constraint=constraint, probabilities=probabilities, vision=vision)
+        else:
+            first = prefill(self.e, prompt, sampling, resume=hit[1] if hit else None, constraint=constraint,
+                            probabilities=probabilities, keep_at=end, stops=stops, keep=keep)
+            # the state one token before the prompt's end, so the same prompt or a next turn resumes from it
+            self._remember(list(prompt[:end]), self.e.kept)
         torch.cuda.synchronize()
         stats: dict[str, Any] = {"prefill_s": round(time.perf_counter() - t0, 4), "cached": len(hit[0]) if hit else 0,
                                  "drafts": True}
@@ -467,18 +473,27 @@ class FlashNextEngine:
                                          **grammar, **({"background": True} if background else {}),
                                          probabilities=probabilities,
                                          **({"vision": vision} if vision is not None else {}))
-        hit = self._resume(prompt) if draft else None
+        hit = self._resume(prompt) if draft and vision is None else None
         points = None
+        # the serial engine's image prompts: rank 0 encodes before the request is shared (a refused image fails
+        # here alone), and after sharing sends the features to rank 1, which attaches the same tensors
+        encoded = self.vision.encode(vision, prompt) if vision is not None else None
         if self.tp == 2:                     # rank 0 decodes exactly what it hands rank 1
-            prompt, max_tokens, sampling, draft, _, _, stop_eos, points = self._share(
-                prompt, max_tokens, sampling, draft, len(hit[0]) if hit else 0, constraint, stop_eos)
+            from .vision_ranks import describe, exchange
+
+            prompt, max_tokens, sampling, draft, _, _, stop_eos, images, points = self._share(
+                prompt, max_tokens, sampling, draft, len(hit[0]) if hit else 0, constraint, stop_eos,
+                images=describe(encoded))
             self.served += 1
+            if images is not None:
+                encoded = exchange(self.comm, 0, len(prompt), images, encoded, hidden=int(self.w.cfg.hidden))
             emit = on_tokens
             on_tokens = lambda new: (emit(new), False)[1]       # noqa: E731  both ranks decode to the end
         if not draft:
-            return self._serial(prompt, max_tokens, sampling, on_tokens, constraint, stop_eos, probabilities=probabilities)
+            return self._serial(prompt, max_tokens, sampling, on_tokens, constraint, stop_eos,
+                                probabilities=probabilities, vision=encoded)
         return self._decode(prompt, max_tokens, sampling, on_tokens, hit, constraint, stop_eos,
-                            probabilities=probabilities, points=points)
+                            probabilities=probabilities, points=points, vision=encoded)
 
     def score_labels(self, prompt_ids, label_ids) -> tuple[list[float], float]:
         """Score the prompt's final row in a fresh state without adding a kept decision prefix."""
@@ -543,7 +558,9 @@ class FlashNextEngine:
             request = self._receive()
             if request is None:
                 return
-            prompt, max_tokens, sampling, draft, cached, packed, stop_eos, points = request
+            prompt, max_tokens, sampling, draft, cached, packed, stop_eos = request[:7]
+            # eight fields from a leader without image support, nine with the image description before the points
+            images, points = (None, request[7]) if len(request) == 8 else request[7:9]
             constraint = None
             if packed:                                      # the request's grammar, compiled here as on rank 0
                 from tensorfold.engine import grammar
@@ -557,9 +574,15 @@ class FlashNextEngine:
                 if hit is None:
                     raise RuntimeError(f"rank 1 has no kept state for the {cached} tokens rank 0 resumes from")
             try:
+                encoded = None
+                if images is not None:                      # rank 0's image features, attached as it attaches them
+                    from .vision_ranks import exchange
+
+                    encoded = exchange(self.comm, 1, len(prompt), images, hidden=int(self.w.cfg.hidden))
                 if draft:
-                    self._decode(prompt, max_tokens, sampling, None, hit, constraint, stop_eos, points=points)
+                    self._decode(prompt, max_tokens, sampling, None, hit, constraint, stop_eos, points=points,
+                                 vision=encoded)
                 else:
-                    self._serial(prompt, max_tokens, sampling, None, constraint, stop_eos)
+                    self._serial(prompt, max_tokens, sampling, None, constraint, stop_eos, vision=encoded)
             except ValueError as exc:                       # rank 0 raised at the same point on the same input
                 print(f"[tensorfold] request {self.served} failed on both ranks: {exc}", flush=True)

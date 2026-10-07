@@ -202,27 +202,14 @@ class TwoRanks:
         before any round collective). Rank 1 attaches them exactly as rank 0 does, so every layer sees identical
         hidden states for the image rows; it has no tower of its own."""
 
-        from tensorfold.cuda.comm import exchange
-        from tensorfold.vision.qwen_cuda import EncodedVision
+        from .vision_ranks import exchange
 
-        rows, delta, shape = images["rows"], int(images["delta"]), tuple(int(n) for n in images["shape"])
-        length = len(s.prompt)
-        if (len(shape) != 2 or shape[0] != len(rows) or shape[1] != int(self.w.cfg.hidden) or not rows
-                or sorted(set(rows)) != list(rows) or rows[0] < 0 or rows[-1] >= length):
-            raise OutOfStep("the image rows rank 0 encoded do not fit the prompt it admitted")
-        device = torch.device("cuda", 0)
-        if self.link is not None:                   # rank 0: the tensors it encoded, as the follower expects them
-            encoded = s.vision
-            features = encoded.features.to(dtype=torch.bfloat16).contiguous()
-            positions = encoded.positions.to(dtype=torch.int32).contiguous()
-            if tuple(features.shape) != shape or tuple(positions.shape) != (3, length):
-                raise OutOfStep("the image features rank 0 encoded do not match what it told rank 1")
-            exchange(self.w.comm, [features, positions], [features.new_empty((0,)), positions.new_empty((0,))], 1)
-            return EncodedVision(tuple(rows), features, positions, delta)
-        features = torch.empty(shape, dtype=torch.bfloat16, device=device)
-        positions = torch.empty((3, length), dtype=torch.int32, device=device)
-        exchange(self.w.comm, [features.new_empty((0,)), positions.new_empty((0,))], [features, positions], 0)
-        return EncodedVision(tuple(rows), features, positions, delta)
+        leader = self.link is not None
+        try:
+            return exchange(self.w.comm, 0 if leader else 1, len(s.prompt), images, s.vision if leader else None,
+                            hidden=int(self.w.cfg.hidden))
+        except ValueError as exc:
+            raise OutOfStep(str(exc)) from exc
 
     def _prepare_round(self, told):
         from .multi_plan import apply, ready, round_plan

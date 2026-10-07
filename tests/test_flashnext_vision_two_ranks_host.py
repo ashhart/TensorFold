@@ -170,3 +170,100 @@ def test_image_prompts_reuse_no_prefix_keep_no_points_and_stay_off_the_graph_slo
     assert round_plan(d)['solo'] is None                           # the graph slot's captures know no image rows
     live.st.image_positions = None
     assert round_plan(d)['solo'] == 0
+
+
+# --- the serial engine (no --parallel): image prompts on one GPU and on two ranks ---
+
+def test_serial_request_message_carries_the_image_description_and_keeps_no_points():
+    pytest.importorskip('torch')
+    from tensorfold.families.qwen4_exp.cuda.engine import FlashNextEngine
+
+    class Store:
+        def __init__(self):
+            self.kv = {}
+
+        def set(self, key, value):
+            self.kv[key] = value
+
+    e = object.__new__(FlashNextEngine)
+    e.comm, e.served, e.points = SimpleNamespace(store=Store()), 3, lambda prompt: [2, 4]
+    text = e._share([1, 2, 3, 4, 5], 8, None, True, 0)
+    assert text[7] is None and text[-1] == [2, 4] and len(text) == 9    # the points stay the last field
+    images = {'rows': [1, 2], 'delta': -1, 'shape': [2, 2560]}
+    shared = e._share([1, 2, 3, 4, 5], 8, None, True, 0, images=images)
+    assert shared[7] == images and shared[-1] == []           # an image prompt keeps no prompt states
+    assert json.loads(e.comm.store.kv['tensorfold/flashnext/request/3'])['images'] == images
+    assert FlashNextEngine._unpack(json.dumps({'prompt': [1], 'max_tokens': 1, 'draft': True, 'cached': 0,
+                                               'sampling': None}))[7] is None    # an older leader's message
+    follower = object.__new__(FlashNextEngine)
+    follower.served, follower.cache, follower.multi, follower.points = 0, [], None, None
+    requests = iter([([1, 2, 3], 4, None, True, 0, [], True, [2]),                # eight fields: no images
+                     ([1, 2, 3], 4, None, True, 0, [], True, None, [2]), None])    # nine: images before points
+    follower._receive = lambda: next(requests)
+    seen = []
+    follower._decode = lambda *args, **kwargs: seen.append((kwargs['points'], kwargs['vision']))
+    follower.follow()
+    assert seen == [([2], None), ([2], None)] and follower.served == 2
+
+
+def test_describe_and_exchange_validate_the_same_description_on_both_ranks():
+    torch = pytest.importorskip('torch')
+    from tensorfold.families.qwen4_exp.cuda import vision_ranks
+
+    encoded = SimpleNamespace(rows=(1, 2), rope_delta=-1, features=torch.zeros((2, 16)),
+                              positions=torch.zeros((3, 4), dtype=torch.int32))
+    images = vision_ranks.describe(encoded)
+    assert images == {'rows': [1, 2], 'delta': -1, 'shape': [2, 16]} and vision_ranks.describe(None) is None
+    for bad in ({**images, 'rows': [2, 1]}, {**images, 'rows': [1, 4]}, {**images, 'shape': [3, 16]},
+                {**images, 'shape': [2, 8]}):
+        with pytest.raises(ValueError, match='do not fit'):
+            vision_ranks.exchange(None, 1, 4, bad, hidden=16)
+    with pytest.raises(ValueError, match='has not encoded'):
+        vision_ranks.exchange(None, 0, 4, images, None, hidden=16)
+    moved = []
+    comm = SimpleNamespace(rank=0, world=2, exchange=lambda sends, recvs, peer: moved.append((len(sends), peer)))
+    out = vision_ranks.exchange(comm, 0, 4, images, encoded, hidden=16)
+    assert moved == [(2, 1)] and out.rows == (1, 2) and out.rope_delta == -1
+    assert out.features.dtype == torch.bfloat16 and tuple(out.positions.shape) == (3, 4)
+
+
+def test_serial_engine_decodes_an_image_state_eagerly_and_keeps_no_snapshot(monkeypatch):
+    pytest.importorskip('torch')
+    from tensorfold.families.qwen4_exp.cuda import decode, engine as engine_module
+    from tensorfold.families.qwen4_exp.cuda.engine import FlashNextEngine
+
+    calls = []
+    eng = object.__new__(decode.Engine)
+    eng.w, eng.st, eng.buf, eng.mbuf = object(), SimpleNamespace(image_positions=None), object(), object()
+    eng.graphs = SimpleNamespace(forward=lambda tokens: calls.append('graph'),
+                                 mtp_forward=lambda nxt, streams: calls.append('graph-mtp'))
+    monkeypatch.setattr(decode, 'forward', lambda w, st, b, tokens: calls.append('eager'))
+    monkeypatch.setattr(decode, 'mtp_forward', lambda w, st, b, nxt, streams: calls.append('eager-mtp'))
+    eng.forward([1])
+    eng.mtp_forward([1], None)
+    eng.st.image_positions = object()
+    eng.forward([1])
+    eng.mtp_forward([1], None)
+    assert calls == ['graph', 'graph-mtp', 'eager', 'eager-mtp']
+
+    seen = {}
+
+    def prefill(e, prompt, sampling, **kwargs):
+        seen.update(kwargs)
+        return 7
+
+    monkeypatch.setattr(decode, 'prefill', prefill)
+    monkeypatch.setattr(engine_module.time, 'perf_counter', lambda: 0.0)
+    import torch
+    monkeypatch.setattr(torch.cuda, 'synchronize', lambda: None)
+    fe = object.__new__(FlashNextEngine)
+    fe.e, fe.cache, fe.eos, fe.depth, fe.points = SimpleNamespace(kept={'state': 's', 'tail': None}), [([1], {})], (), 3, None
+    kept = ([1], {'state': 'old'})
+    fe.cache = [kept]
+    stats = fe._decode([1, 2, 3], 1, None, lambda new: True, kept, vision=SimpleNamespace(rows=(1,)))
+    assert seen == {'constraint': None, 'probabilities': None, 'vision': seen['vision']}
+    assert fe.cache == [] and stats['cached'] == 0            # from the start, nothing kept, nothing resumed
+    seen.clear()
+    fe.cache = [kept]
+    fe._decode([1, 2, 3], 1, None, lambda new: True, kept)
+    assert 'vision' not in seen and seen['resume'] == {'state': 'old'} and fe.cache[-1][0] == [1, 2]

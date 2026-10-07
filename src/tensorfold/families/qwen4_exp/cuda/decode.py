@@ -194,7 +194,7 @@ class Engine:
     def forward(self, tokens: Sequence[int]) -> torch.Tensor:
         """A decode step's forward (a CUDA graph when enabled): logits [R, V]."""
 
-        if self.graphs is not None:
+        if self.graphs is not None and self.st.image_positions is None:    # graphs are captured for text rows
             return self.graphs.forward(tokens)
         return forward(self.w, self.st, self.buf, tokens)
 
@@ -245,7 +245,7 @@ class Engine:
         return int(tok), float(np.exp(float(got[hit[0]]) - float(got[k]))) if len(hit) else 0.0
 
     def mtp_forward(self, next_tokens: Sequence[int], streams: torch.Tensor) -> torch.Tensor:
-        if self.graphs is not None:
+        if self.graphs is not None and self.st.image_positions is None:
             return self.graphs.mtp_forward(next_tokens, streams)
         return mtp_forward(self.w, self.st, self.mbuf, next_tokens, streams)
 
