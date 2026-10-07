@@ -21,6 +21,7 @@ from .decode import (PREFILL_ROWS, WARM_TAIL, Engine, _gathered_fits, choose_gat
                      entry_end, prefill_begin, tp_sample_rows)
 from . import attn_multi, gdn_multi, image_rows, prefixes
 from .forward import commit, compute, compute_mixed, converges, stage
+from .lookup import build_lookup, env_spec
 from .mtp import mtp_compute, mtp_stage
 from .state import Buffers, State
 from .multi_solo import Alone, solo
@@ -67,6 +68,9 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
         self.pbuf = Buffers(w, prefill_rows + (rows if self.converged else 0), capacity, prefill=True)
         self.gdn = gdn_multi.Scratch(w, rows)            # every stream's DeltaNet rows, one launch a step
         self.held: dict[int, list[int]] = {}             # stream id -> last round's kept rows, folded in next round
+        self.lookups: dict[int, object] = {}             # stream id -> its prompt-lookup arm (TF_EXL3_LOOKUP), or none
+        self.back: dict[int, list] = {}                  # stream id -> rows a lookup round deferred, absorbed with the next MTP round
+        self.arm: dict[int, tuple] = {}                  # stream id -> (arm, rows, steps, backlog) of the drafts now pending
         # slots start small and grow with their stream's context, up to the window, while the gate has room
         self.free = [State(w, min(capacity, FIRST), depth + 1, kv_dtype, limit=capacity) for _ in range(slots)]
         self.slots = list(self.free)
@@ -399,7 +403,7 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
                     s.error = exc
             last = s.error is not None or len(s.out) + len(new) >= s.count or end in self._ends(s)
             kept.append((s, a0, rows[:len(path)], new, last))
-        self._draft_all([(s, a0, keep) for s, a0, keep, _, last in kept if s.draft and not last])
+        self._draft_all([(s, a0, keep, new) for s, a0, keep, new, last in kept if s.draft and not last])
         for s, _, _, new, _ in kept:
             if s.error is not None:
                 s.done = True
@@ -415,44 +419,95 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
         return failed + done + ended
 
     def _draft_all(self, streams: list) -> None:
-        """Every drafting stream absorbs its kept rows and chains drafts, all streams in one step a depth."""
+        """Every drafting stream absorbs its kept rows and chains drafts, all streams in one step a depth.
 
-        for s, _, _ in streams:
+        A stream whose prompt suffix matches drafts from the prompt (``TF_EXL3_LOOKUP``) and defers its rows; they
+        are absorbed, with the rows just kept, in the next MTP round, so the MTP cache never skips a position.
+        """
+
+        for s, _, keep, _ in streams:                    # price the drafts this round verified by the arm that made them
+            info = self.arm.pop(s.sid, None)
+            if info is not None:
+                lk = self.lookups.get(s.sid)
+                if lk is not None:
+                    lk.record(info[0], info[1], info[2], info[3], len(keep))
+                    s.lookup_drafted, s.lookup_accepted = lk.drafted, lk.accepted
             s.drafts = []
-        room = {s.sid: min(self.depth, s.count - len(s.out) - len(keep)) for s, _, keep in streams}
-        todo = [(s, a0, keep) for s, a0, keep in streams if room[s.sid] > 0 and self.mbuf is not None]
+        room = {s.sid: min(self.depth, s.count - len(s.out) - len(keep)) for s, _, keep, _ in streams}
+        todo = [(s, a0, keep, new) for s, a0, keep, new in streams if room[s.sid] > 0 and self.mbuf is not None]
         if not todo:
             return
-        for s, _, _ in todo:
+        for s, _, _, _ in todo:
             st = s.st
             if st.mtp_drafted:
                 st.set_mtp_len(st.mtp_len - st.mtp_drafted)
                 st.mtp_drafted = 0
-        windows = [(s.st, keep, self.buf.streams[a0:a0 + len(keep)]) for s, a0, keep in todo]
-        segs = mtp_stage(self.w, self.mbuf, windows)
-        logits = self._mtp(segs)
-        for (s, _, keep), (st, a0, a1) in zip(todo, segs):
-            st.set_mtp_len(st.mtp_len + len(keep))
-        active = [(s, a1 - 1) for s, (_, _, a1) in zip([t[0] for t in todo], segs)]
+        spec = env_spec() if self.w.comm is None else None
+        mtp = []
+        for s, a0, keep, new in todo:
+            look = self.lookups.get(s.sid)
+            if look is None and spec is not None:
+                look = build_lookup(s.prompt, self.depth + 1, spec, eos=self.eos, stop_eos=s.stop_eos)
+                if look is not None:
+                    self.lookups[s.sid] = look
+            drafts = list(look.plan([*s.out, *new], room[s.sid])) if look is not None else []
+            back = self.back.get(s.sid, [])
+            full = sum(len(t) for _, t in back) >= self.depth + 1
+            if drafts and not full:                      # lookup arm: draft from the prompt, defer this round's rows
+                s.drafts = drafts
+                back.append((self.buf.streams[a0:a0 + len(keep)].clone(), list(keep)))
+                self.back[s.sid] = back
+                self.arm[s.sid] = ("l", 1 + len(drafts), 0, 0)
+            else:                                        # MTP arm: absorb the deferred rows and the rows just kept
+                mtp.append((s, a0, keep, look))
+        if not mtp:
+            return
+        rows, toks = {}, {}
+        for s, a0, keep, _ in mtp:
+            entries = [*self.back.pop(s.sid, []), (self.buf.streams[a0:a0 + len(keep)], list(keep))]
+            rows[s.sid] = entries[0][0] if len(entries) == 1 else torch.cat([t for t, _ in entries])
+            toks[s.sid] = [x for _, t in entries for x in t]
+        budget, seeds = self.mbuf.rows, {}
+        off = {s.sid: 0 for s, _, _, _ in mtp}
+        while any(off[s.sid] < len(toks[s.sid]) for s, _, _, _ in mtp):
+            chunk, used = [], 0
+            for s, _, _, _ in mtp:
+                left = len(toks[s.sid]) - off[s.sid]
+                if left <= 0 or used >= budget:
+                    continue
+                take = min(left, budget - used)
+                at = off[s.sid]
+                chunk.append((s, toks[s.sid][at:at + take], rows[s.sid][at:at + take]))
+                off[s.sid] = at + take
+                used += take
+            segs = mtp_stage(self.w, self.mbuf, [(s.st, tk, ten) for s, tk, ten in chunk])
+            logits = self._mtp(segs)
+            for i, ((s, tk, _), (st, a0, a1)) in enumerate(zip(chunk, segs)):
+                st.set_mtp_len(st.mtp_len + len(tk))
+                if off[s.sid] >= len(toks[s.sid]):       # the chain starts from the last row this stream absorbed
+                    seeds[s.sid] = (logits[i].clone(), self.mbuf.streams[a1 - 1:a1].clone())
+        active = [(s, seeds[s.sid][1]) for s, _, _, _ in mtp]
+        logits = torch.stack([seeds[s.sid][0] for s, _, _, _ in mtp])
         for j in range(self.depth):
             picks = self._picks(logits, [s.st.pos + 1 + j for s, _ in active], [s.sampling for s, _ in active])
             nxt = []
-            for (s, row), (d, p) in zip(active, picks):
+            for (s, sr), (d, p) in zip(active, picks):
                 low = self.confidence > 0 and p < self.confidence
                 if low and j > 0:
                     continue
                 s.drafts.append(d)
                 if not low and j + 1 < room[s.sid]:
-                    nxt.append((s, row, d))
+                    nxt.append((s, sr, d))
             if not nxt:
-                return
-            windows = [(s.st, [d], self.mbuf.streams[row:row + 1]) for s, row, d in nxt]
-            segs = mtp_stage(self.w, self.mbuf, windows)
+                break
+            segs = mtp_stage(self.w, self.mbuf, [(s.st, [d], sr) for s, sr, d in nxt])
             logits = self._mtp(segs)
             for s, _, _ in nxt:
                 s.st.set_mtp_len(s.st.mtp_len + 1)
                 s.st.mtp_drafted += 1
-            active = [(s, a0) for (s, _, _), (_, a0, _) in zip(nxt, segs)]
+            active = [(s, self.mbuf.streams[a0:a0 + 1]) for (s, _, _), (_, a0, _) in zip(nxt, segs)]
+        for s, _, _, _ in mtp:                           # price these drafts for the next round's record
+            self.arm[s.sid] = ("m", 1 + len(s.drafts), 1 + len(s.drafts), len(toks[s.sid]))
 
     def _mtp(self, segs: list) -> torch.Tensor:
         """An MTP step over every drafting stream, its attention one launch a kernel for all of them."""
@@ -513,6 +568,9 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
             self.link.send(["finish", [s.sid for s in done]])
         for s in done:
             self.held.pop(s.sid, None)
+            self.arm.pop(s.sid, None)
+            self.lookups.pop(s.sid, None)
+            self.back.pop(s.sid, None)
             self.streams.pop(s.sid, None)
             if not any(k[1] is s.st for k in self.kept) and all(f is not s.st for f in self.free):
                 self._shrink(s.st)
@@ -526,6 +584,9 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
         for s in live:
             self.streams.pop(s.sid, None)
             self.held.pop(s.sid, None)
+            self.arm.pop(s.sid, None)
+            self.lookups.pop(s.sid, None)
+            self.back.pop(s.sid, None)
             self._drop_kept(s.st)
             self._shrink(s.st)
             self.free.append(s.st)

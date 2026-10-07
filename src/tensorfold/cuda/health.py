@@ -10,7 +10,8 @@ from typing import Any
 from tensorfold.server import metrics
 
 STATS = {"prefill_s": "prefill_seconds_total", "decode_s": "decode_seconds_total", "cached": "cached_tokens_total",
-         "rounds": "rounds_total", "drafted": "drafted_total", "accepted": "accepted_total"}
+         "rounds": "rounds_total", "drafted": "drafted_total", "accepted": "accepted_total",
+         "lookup_drafted": "lookup_drafted_total", "lookup_accepted": "lookup_accepted_total"}
 _MADE = threading.Lock()
 
 
@@ -72,6 +73,7 @@ class Health:
             decode = (ended - request.first) if request.first is not None else None
         metrics.note(getattr(self, "app", None), prompt=request.prompt, generation=len(request.out),
                      drafted=_stat(stats, "drafted"), accepted=_stat(stats, "accepted"),
+                     lookup_drafted=_stat(stats, "lookup_drafted"), lookup_accepted=_stat(stats, "lookup_accepted"),
                      latency=max(0.0, ended - request.started),
                      ttft=(request.first - request.started) if request.first is not None else None,
                      decode=None if decode is None else max(0.0, float(decode)))

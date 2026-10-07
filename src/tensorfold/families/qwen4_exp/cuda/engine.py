@@ -403,6 +403,7 @@ class FlashNextEngine:
         import torch
 
         from .decode import entry_end, mtp_decode, prefill, serial_decode
+        from .lookup import build_lookup, env_spec
 
         t0 = time.perf_counter()
         self._start_from(hit)
@@ -425,9 +426,13 @@ class FlashNextEngine:
         if (on_tokens is not None and on_tokens([first])) or (stop_eos and first in self.eos) or max_tokens <= 1:
             return stats
         if self.depth > 0:
+            lookup = build_lookup(prompt, self.e.rows, env_spec(), eos=self.eos, stop_eos=stop_eos)
             res = mtp_decode(self.e, first, max_tokens, sampling, depth=self.depth, confidence=self.confidence,
-                             stop_eos=stop_eos, on_tokens=on_tokens, constraint=constraint, probabilities=probabilities)
+                             stop_eos=stop_eos, on_tokens=on_tokens, constraint=constraint, probabilities=probabilities,
+                             lookup=lookup)
             stats.update(drafted=res.drafted, accepted=res.accepted, min_rows=min(res.widths, default=0))
+            if lookup is not None:
+                stats.update(lookup_drafted=res.lookup_drafted, lookup_accepted=res.lookup_accepted)
         else:
             res = serial_decode(self.e, first, max_tokens, sampling, stop_eos=stop_eos, on_tokens=on_tokens,
                                 constraint=constraint, probabilities=probabilities)

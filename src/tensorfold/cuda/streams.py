@@ -39,6 +39,8 @@ class Stream:
     min_rows: int = 0
     drafted: int = 0                                      # drafted rows its rounds verified, and the ones kept
     accepted: int = 0
+    lookup_drafted: int = 0                               # lookup-arm drafts its rounds verified, and the ones kept
+    lookup_accepted: int = 0
     cached: int = 0
     prefill_s: float = 0.0
     started: float = 0.0
@@ -69,11 +71,13 @@ class Stream:
     def stats(self) -> dict:
         own = {"prefill_s": round(self.prefill_s, 4), "decode_s": round(max(self.finished - self.started, 0.0), 4),
                "rounds": self.rounds, "drafts": self.draft, "cached": self.cached, "min_rows": self.min_rows,
-               "drafted": self.drafted, "accepted": self.accepted}
+               "drafted": self.drafted, "accepted": self.accepted,
+               "lookup_drafted": self.lookup_drafted, "lookup_accepted": self.lookup_accepted}
         if self.carry is None:
             return own
         both = {k: round(self.carry[k] + own[k], 4) for k in ("prefill_s", "decode_s")}
-        both.update({k: self.carry[k] + own[k] for k in ("rounds", "drafted", "accepted")})
+        both.update({k: self.carry.get(k, 0) + own[k]
+                     for k in ("rounds", "drafted", "accepted", "lookup_drafted", "lookup_accepted")})
         rows = [r for r in (self.carry["min_rows"], own["min_rows"]) if r]
         return {**own, **both, "cached": self.carry["cached"], "min_rows": min(rows, default=0)}
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Sequence
@@ -20,6 +22,8 @@ from . import image_rows
 from .state import CAND, Buffers, State
 from .mtp import mtp_forward
 from .weights import Weights
+
+_COST_LOG = os.environ.get("TF_EXL3_COST_LOG", "")   # P7.1.2 cost calibration: append per-round timings here
 
 
 def sample_mapped(logits: torch.Tensor, positions: Sequence[int], sampling: Sampling | None,
@@ -408,6 +412,8 @@ class DecodeResult:
     keeps: list[int] = field(default_factory=list)      # tokens each round kept
     committed: list[int] = field(default_factory=list)  # the tokens now in the caches (all but the pending one)
     widths: list[int] = field(default_factory=list)     # rows each round verified
+    lookup_drafted: int = 0                             # lookup-draft arm: tokens drafted / accepted (P7)
+    lookup_accepted: int = 0
 
     @property
     def tokens_per_second(self) -> float:
@@ -443,9 +449,13 @@ def serial_decode(e: Engine, pending: int, count: int, sampling: Sampling | None
 @torch.no_grad()
 def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *, depth: int = DEPTH,
                confidence: float = CONFIDENCE, stop_eos: bool = False, on_tokens=None, constraint=None,
-               probabilities=None) -> DecodeResult:
-    """Verify pending and drafted tokens from the prefill state, commit rows before the first mismatched draft, and call ``on_tokens(new)`` with kept tokens after pending, stopping on True."""
+               probabilities=None, lookup: "Lookup | None" = None) -> DecodeResult:
+    """Verify pending and drafted tokens from the prefill state, commit rows before the first mismatched draft, and call ``on_tokens(new)`` with kept tokens after pending, stopping on True. ``lookup`` (P7, ``lookup.py``): a prompt-lookup drafter whose rounds replace the MTP head's, byte-exactly; None keeps the MTP-only path unchanged."""
 
+    if lookup is not None:
+        return _mtp_lookup_decode(e, pending, count, sampling, depth=depth, confidence=confidence,
+                                  stop_eos=stop_eos, on_tokens=on_tokens, constraint=constraint,
+                                  probabilities=probabilities, lookup=lookup)
     w, st, b = e.w, e.st, e.buf
     out = [pending]
     rounds = drafted = accepted = 0
@@ -500,3 +510,102 @@ def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *
         absorb(e, b.streams[:unabsorbed[0]], unabsorbed[1])
     committed = out[:st.pos - pos0]
     return DecodeResult(out[:count], seconds, rounds, drafted, accepted, keeps, committed, widths)
+
+
+@torch.no_grad()
+def _mtp_lookup_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *, depth: int,
+                       confidence: float, stop_eos: bool, on_tokens, constraint, probabilities,
+                       lookup) -> DecodeResult:
+    """``mtp_decode`` with a prompt-lookup draft arm (P7). A round whose history repeats a span drafts its
+    continuation (``lookup.plan``); the other rounds draft with the MTP head. Kept rows are held in a backlog and
+    absorbed into the MTP cache together, so a lookup round leaves the cache as a run of the MTP head would. The
+    verify window, keyed sampler and commit are the MTP path's, so the reply is byte-identical to serial decoding."""
+
+    w, st, b = e.w, e.st, e.buf
+    out = [pending]
+    rounds = drafted = accepted = 0
+    keeps: list[int] = []
+    widths: list[int] = []
+    pos0 = st.pos
+    rows = e.rows                                       # the MTP buffer holds at most this many rows per absorb
+    m_rows = torch.empty((2 * rows, e.last_streams.shape[-1]), dtype=e.last_streams.dtype, device=e.last_streams.device)
+    m_rows[:1].copy_(e.last_streams)
+    m_next: list[int] = [pending]
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    while len(out) < count and not (stop_eos and out[-1] in w.cfg.eos):
+        room = count - len(out)
+        t_mtp = 0.0
+        look = lookup.plan(out, room)
+        if look:
+            drafts, arm, steps_m, backlog_m = look, "l", 0, 0
+        else:
+            arm = "m"
+            backlog_m = len(m_next)
+            n = min(depth, room)
+            if n > 0 and m_next:
+                if _COST_LOG:
+                    torch.cuda.synchronize()
+                    _m = time.perf_counter()
+                drafts = draft(e, m_rows[:len(m_next)], m_next, st.pos + 1, n, sampling, confidence)
+                if _COST_LOG:
+                    torch.cuda.synchronize()
+                    t_mtp = (time.perf_counter() - _m) * 1000.0
+                steps_m = 1 + st.mtp_drafted
+                m_next = []
+            else:
+                drafts, steps_m = [], 1
+        tokens = [out[-1]] + drafts
+        window = constraint.window(tokens, list(range(-1, len(tokens) - 1))) if constraint is not None else None
+        if window is not None:                           # the drafts no accepted path can hold are cut first
+            tokens, drafts = window.tokens, window.tokens[1:]
+        R = len(tokens)
+        if _COST_LOG:
+            torch.cuda.synchronize()
+            _f = time.perf_counter()
+        logits = e.forward(tokens)
+        if _COST_LOG:
+            torch.cuda.synchronize()
+            t_fwd = (time.perf_counter() - _f) * 1000.0
+        if window is not None:
+            constraint.mask(logits[:R], window, w.meta.get("vocab_offset", 0))
+        sampled = e.sample(logits[:R], [st.pos + 1 + r for r in range(R)], sampling, gathered=window is None)
+        keep = 1
+        for i, d in enumerate(drafts):
+            if sampled[i] != d or (stop_eos and sampled[i] in w.cfg.eos):
+                break
+            keep += 1
+        if probabilities is not None:
+            n = min(keep, count - len(out))
+            capture(logits[:n], sampled[:n], list(range(st.pos + 1, st.pos + 1 + n)), probabilities)
+        commit(w, st, b, R, keep)
+        rounds += 1
+        drafted += len(drafts)
+        accepted += keep - 1
+        keeps.append(keep)
+        widths.append(R)
+        lookup.record(arm, R, steps_m, backlog_m, keep)
+        if _COST_LOG:
+            with open(_COST_LOG, "a") as fh:
+                fh.write(json.dumps({"arm": arm, "rows": R, "steps": steps_m, "backlog": backlog_m,
+                                     "keep": keep, "fwd_ms": t_fwd, "mtp_ms": t_mtp}) + "\n")
+        m_rows[len(m_next):len(m_next) + keep].copy_(b.streams[:keep])
+        m_next.extend(sampled[:keep])
+        if len(m_next) > rows:                          # the MTP cache takes a leading chunk; the rest waits
+            drop = len(m_next) - rows
+            absorb(e, m_rows[:drop], m_next[:drop])
+            m_rows[:rows].copy_(m_rows[drop:drop + rows].clone())
+            m_next = m_next[drop:]
+        new = sampled[:keep][:max(0, count - len(out))]
+        if constraint is not None:
+            constraint.advance(sampled[:keep])
+        out.extend(sampled[:keep])
+        if on_tokens is not None and new and on_tokens(new):
+            break
+    torch.cuda.synchronize()
+    seconds = time.perf_counter() - start
+    if m_next:                              # the MTP cache takes the kept rows: it then covers the sequence
+        absorb(e, m_rows[:len(m_next)], m_next)
+    committed = out[:st.pos - pos0]
+    return DecodeResult(out[:count], seconds, rounds, drafted, accepted, keeps, committed, widths,
+                        lookup.drafted, lookup.accepted)

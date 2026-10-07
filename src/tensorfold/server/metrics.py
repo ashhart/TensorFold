@@ -55,18 +55,23 @@ class Metrics:
         self.generation = 0
         self.drafted = 0
         self.accepted = 0
+        self.lookup_drafted = 0
+        self.lookup_accepted = 0
         self.latency = Histogram()
         self.ttft = Histogram()
         self.decode = Histogram()
         self.http_requests: dict[tuple[str, int], int] = {}
 
     def add(self, *, prompt: int, generation: int, drafted: int, accepted: int,
-            latency: float | None, ttft: float | None, decode: float | None = None) -> None:
+            latency: float | None, ttft: float | None, decode: float | None = None,
+            lookup_drafted: int = 0, lookup_accepted: int = 0) -> None:
         with self.lock:
             self.prompt += int(prompt)
             self.generation += int(generation)
             self.drafted += int(drafted)
             self.accepted += int(accepted)
+            self.lookup_drafted += int(lookup_drafted)
+            self.lookup_accepted += int(lookup_accepted)
             if latency is not None:
                 self.latency.observe(latency)
             if ttft is not None:
@@ -86,13 +91,15 @@ def of(app: Any) -> Metrics:
 
 
 def note(app: Any, *, prompt: int = 0, generation: int = 0, drafted: int = 0, accepted: int = 0,
-         latency: float | None = None, ttft: float | None = None, decode: float | None = None) -> None:
+         latency: float | None = None, ttft: float | None = None, decode: float | None = None,
+         lookup_drafted: int = 0, lookup_accepted: int = 0) -> None:
     """Fold one finished request. A missing app is a no-op."""
 
     if app is None:
         return
     of(app).add(prompt=prompt, generation=generation, drafted=drafted, accepted=accepted,
-                latency=latency, ttft=ttft, decode=decode)
+                latency=latency, ttft=ttft, decode=decode,
+                lookup_drafted=lookup_drafted, lookup_accepted=lookup_accepted)
 
 
 def http_request(app: Any, key: str, status: int) -> None:
@@ -158,6 +165,7 @@ def render(app: Any) -> str:
     with metrics.lock:
         prompt, generation = metrics.prompt, metrics.generation
         drafted, accepted = metrics.drafted, metrics.accepted
+        lookup_drafted, lookup_accepted = metrics.lookup_drafted, metrics.lookup_accepted
         latency, ttft, decode = metrics.latency.copy(), metrics.ttft.copy(), metrics.decode.copy()
         requests = dict(metrics.http_requests)
     running, waiting = _requests(app)
@@ -182,6 +190,12 @@ def render(app: Any) -> str:
             [f"{PREFIX}mtp_drafted_total {drafted}"])
     _family(lines, "mtp_accepted_total", "counter", "Draft tokens kept on finished requests.",
             [f"{PREFIX}mtp_accepted_total {accepted}"])
+    _family(lines, "lookup_drafted_total", "counter",
+            "Prompt-lookup draft tokens verified on finished requests (lookup arm).",
+            [f"{PREFIX}lookup_drafted_total {lookup_drafted}"])
+    _family(lines, "lookup_accepted_total", "counter",
+            "Prompt-lookup draft tokens kept on finished requests (lookup arm).",
+            [f"{PREFIX}lookup_accepted_total {lookup_accepted}"])
     _histogram(lines, "request_latency_seconds", "Seconds from arrival to the reply leaving.", latency)
     _histogram(lines, "time_to_first_token_seconds", "Seconds from arrival to the first generated token.", ttft)
     _histogram(lines, "request_decode_seconds",
