@@ -276,6 +276,14 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     const flash_host_run = b.addRunArtifact(flash_host);
     b.step("test-flashnext-host", "Run FlashNext CPU metadata contracts without Metal").dependOn(&flash_host_run.step);
     test_step.dependOn(&flash_host_run.step);
+    // Pack builder cases that do not need the replay graph.
+    const pack_cases = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/flashnext_pack_cases.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    }) });
+    test_step.dependOn(&b.addRunArtifact(pack_cases).step);
     const engine_programs = [_]struct { name: []const u8, path: []const u8, about: []const u8, c_source: ?[]const u8 = null }{
         .{ .name = "tf-qwen35-check", .path = "zig/tests/qwen35_check.zig", .about = "Qwen3.5-2B checkpoint and native operations" },
         .{ .name = "tf-qwen35-forward", .path = "zig/tests/qwen35_forward.zig", .about = "Qwen3.5-2B native teacher-forced logits" },
