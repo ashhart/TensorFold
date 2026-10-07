@@ -295,5 +295,89 @@ fn runDown(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Stream, s
     }
     std.debug.print("upmix dims {d} off {d} max_steps {d} head {x:0>4} host {x:0>4}\n", .{ dims, mixed_off, max_steps, std.mem.readInt(u16, mixed_bytes[0..2], .little), host_mixed[0] });
     if (max_steps > 2) return 1;
+    const proj_steps = try runProj(gpa, driver, stream, mapped, mixed_b, xsm_b);
+    if (proj_steps != 0) return 1;
     return mismatch;
+}
+
+const proj_names = [_][]const u8{ "in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a" };
+const proj_rows = [_]usize{ 10240, 6144, 48, 48 };
+
+fn runProj(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Stream, mapped: *const embed.Mapped, mixed: cuda.DeviceBuffer, xs: cuda.DeviceBuffer) !u32 {
+    const prefix = "language_model.model.layers.0.linear_attn.";
+    const k8: usize = 320;
+    const kg: usize = 80;
+    var name: [160]u8 = undefined;
+    var n: usize = 0;
+    var words_len: usize = 0;
+    var scale_len: usize = 0;
+    var ws: [4]core.safetensors.Tensor = undefined;
+    var ss: [4]core.safetensors.Tensor = undefined;
+    var bs: [4]core.safetensors.Tensor = undefined;
+    for (proj_names, proj_rows, 0..) |part, rows, i| {
+        ws[i] = try mapped.lookup(gpa, try std.fmt.bufPrint(&name, "{s}{s}.weight", .{ prefix, part }), .u32);
+        ss[i] = try mapped.lookup(gpa, try std.fmt.bufPrint(&name, "{s}{s}.scales", .{ prefix, part }), .bf16);
+        bs[i] = try mapped.lookup(gpa, try std.fmt.bufPrint(&name, "{s}{s}.biases", .{ prefix, part }), .bf16);
+        if (ws[i].dim(0) != rows or ws[i].dim(1) != k8 or ss[i].dim(0) != rows or ss[i].dim(1) != kg) return error.UnexpectedTensor;
+        n += rows;
+        words_len += ws[i].bytes.len;
+        scale_len += ss[i].bytes.len;
+    }
+    if (n != 16480) return error.UnexpectedTensor;
+    const k = k8 * 8;
+    const row = try gpa.alloc(u16, k);
+    defer gpa.free(row);
+    const words = try gpa.alloc(u8, words_len);
+    defer gpa.free(words);
+    const scales = try gpa.alloc(u8, scale_len);
+    defer gpa.free(scales);
+    const biases = try gpa.alloc(u8, scale_len);
+    defer gpa.free(biases);
+    var wo: usize = 0;
+    var so: usize = 0;
+    for (ws, ss, bs) |w, s, b| {
+        @memcpy(words[wo..][0..w.bytes.len], w.bytes);
+        wo += w.bytes.len;
+        @memcpy(scales[so..][0..s.bytes.len], s.bytes);
+        @memcpy(biases[so..][0..b.bytes.len], b.bytes);
+        so += s.bytes.len;
+    }
+    var lane = try flash.qmm.pack(gpa, words, scales, biases, n, k8);
+    defer lane.deinit(gpa);
+    var w_b = try cuda.DeviceBuffer.fromHost(driver, lane.weight);
+    defer w_b.free();
+    var s_b = try cuda.DeviceBuffer.fromHost(driver, lane.scales);
+    defer s_b.free();
+    var b_b = try cuda.DeviceBuffer.fromHost(driver, lane.biases);
+    defer b_b.free();
+    var out_b = try cuda.DeviceBuffer.alloc(driver, n * 2);
+    defer out_b.free();
+    try flash.qmm.matmul(driver, stream.*, mixed.ptr, xs.ptr, w_b.ptr, s_b.ptr, b_b.ptr, out_b.ptr, 1, n, k);
+    const row_bytes = try gpa.alloc(u8, k * 2);
+    defer gpa.free(row_bytes);
+    const xs_bytes = try gpa.alloc(u8, kg * 4);
+    defer gpa.free(xs_bytes);
+    const got_bytes = try gpa.alloc(u8, n * 2);
+    defer gpa.free(got_bytes);
+    try stream.synchronize();
+    try mixed.download(0, row_bytes);
+    try xs.download(0, xs_bytes);
+    try out_b.download(0, got_bytes);
+    for (row, 0..) |*o, i| o.* = std.mem.readInt(u16, row_bytes[2 * i ..][0..2], .little);
+    const xs_f = try gpa.alloc(f32, kg);
+    defer gpa.free(xs_f);
+    for (xs_f, 0..) |*o, i| o.* = @bitCast(std.mem.readInt(u32, xs_bytes[4 * i ..][0..4], .little));
+    const host = try gpa.alloc(u16, n);
+    defer gpa.free(host);
+    try flash.qmm.dotRow(row, xs_f, words, scales, biases, n, k, host);
+    var off: usize = 0;
+    var max_steps: u32 = 0;
+    for (host, 0..) |want, i| {
+        const got = std.mem.readInt(u16, got_bytes[2 * i ..][0..2], .little);
+        const dist = flash.hc.mixedSteps(got, want);
+        if (dist != 0) off += 1;
+        if (dist > max_steps) max_steps = dist;
+    }
+    std.debug.print("proj n {d} off {d} max_steps {d} head {x:0>4} host {x:0>4}\n", .{ n, off, max_steps, std.mem.readInt(u16, got_bytes[0..2], .little), host[0] });
+    return max_steps;
 }

@@ -15,6 +15,7 @@ pub const available = options.with_kernels;
 pub const gdn: []const u8 = if (available) &Blob("fatbin_gdn").bytes else &.{};
 pub const probe: []const u8 = if (available) &Blob("fatbin_probe").bytes else &.{};
 pub const qmm_group: []const u8 = if (available) &Blob("fatbin_qmm_group").bytes else &.{};
+pub const qmm: []const u8 = if (available) &Blob("fatbin_qmm").bytes else &.{};
 pub const qmm_prefill: []const u8 = if (available) &Blob("fatbin_qmm_prefill").bytes else &.{};
 pub const experts: []const u8 = if (available) &Blob("fatbin_experts").bytes else &.{};
 pub const experts_prefill: []const u8 = if (available) &Blob("fatbin_experts_prefill").bytes else &.{};
