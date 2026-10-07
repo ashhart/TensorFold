@@ -13,6 +13,7 @@ pub const moe = @import("cuda_moe.zig");
 pub const attn = @import("cuda_attn.zig");
 pub const ple = @import("cuda_ple.zig");
 pub const mix = @import("cuda_mix.zig");
+pub const prompt = @import("cuda_prompt.zig");
 
 const p = aot.ptr;
 
@@ -193,6 +194,36 @@ pub const Tri = struct {
         }, &.{ ci("HEADS", heads), ci("DH", dh), aot.cf("SCALE", scale) });
     }
 
+    /// glue.ple_gate: one program per row.
+    pub fn pleGate(t: Tri, keys: u64, vals: u64, h: u64, norm_key: u64, norm_query: u64, gated: u64, pss: u64, eps: f32, rows: usize, dims: usize, streams: usize) !void {
+        try t.run("_ple_gate", .{ u(rows), 1, 1 }, &.{
+            p("KEYS", "*bf16", keys),
+            p("VALS", "*bf16", vals),
+            p("H", "*bf16", h),
+            p("NK", "*fp32", norm_key),
+            p("NQ", "*fp32", norm_query),
+            p("GATED", "*bf16", gated),
+            p("PSS", "*fp32", pss),
+            aot.float("eps", eps),
+        }, &.{ ci("D", dims), ci("S", streams), ci("BLOCK", 512) });
+    }
+
+    /// glue.ple_conv. R folds to a constexpr when it is 1.
+    pub fn pleConv(t: Tri, gated: u64, pss: u64, norm_conv: u64, tail: u64, conv_w: u64, h: u64, hout: u64, nrow: u64, eps: f32, rows: usize, dims: usize, streams: usize, taps: usize, dilation: usize) !void {
+        try t.run("_ple_conv", .{ u(rows), u(streams * dims / 512), 1 }, &.{
+            p("GATED", "*bf16", gated),
+            p("PSS", "*fp32", pss),
+            p("NC", "*fp32", norm_conv),
+            p("TAIL", "*bf16", tail),
+            p("CW", "*bf16", conv_w),
+            p("H", "*bf16", h),
+            p("HOUT", "*bf16", hout),
+            p("NROW", "*bf16", nrow),
+            aot.float("eps", eps),
+            int("R", rows),
+        }, &.{ ci("D", dims), ci("S", streams), ci("TAPS", taps), ci("DIL", dilation), ci("BLOCK", 512) });
+    }
+
     /// moe.router for one decode row. M folds to a constexpr. 513 rows: the experts, then the shared gate.
     pub fn router(t: Tri, x: u64, w: u64, out: u64, x_stride: usize) !void {
         try t.run("_router", .{ 1, cdiv(513, 32), 1 }, &.{
@@ -224,6 +255,7 @@ test {
     _ = attn;
     _ = ple;
     _ = mix;
+    _ = prompt;
 }
 
 test "embed grid is one program per row and per group of 32" {

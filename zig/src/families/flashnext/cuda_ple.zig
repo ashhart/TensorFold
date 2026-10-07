@@ -348,6 +348,80 @@ fn readSpec(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !NgramSpec {
     };
 }
 
+/// The text config's eos id, which a fresh n-gram window repeats.
+pub fn eosOf(gpa: std.mem.Allocator, io: std.Io, model_dir: []const u8) !i64 {
+    const cfg = try readSpec(gpa, io, model_dir);
+    return cfg.eos;
+}
+
+/// Host dequant of one token's sixteen n-gram rows. `history` is the previous n - 1 ids.
+pub fn embedding(gpa: std.mem.Allocator, io: std.Io, model_dir: []const u8, history: []const i64, token: u32, out: []u16, xs: []f32) !void {
+    const cfg = try readSpec(gpa, io, model_dir);
+    const hash = try Hash.init(.{
+        .vocab = cfg.vocab,
+        .ngram = cfg.ngram,
+        .per = cfg.per,
+        .base = cfg.base,
+        .divisor = cfg.divisor,
+        .shards = cfg.shards,
+        .seed = cfg.seed,
+        .eos = cfg.eos,
+        .ple_dim = cfg.ple_dim,
+        .ple_index = cfg.ple_index,
+    });
+    if (history.len != hash.n - 1 or out.len != hash.heads * hash.dh or xs.len != out.len / 32) return error.UnexpectedTensor;
+    var ids: [max_heads]i64 = undefined;
+    try lastIds(hash, history, @intCast(token), ids[0..hash.heads]);
+    const index_path = try std.fs.path.join(gpa, &.{ model_dir, "model.safetensors.index.json" });
+    defer gpa.free(index_path);
+    const text = try std.Io.Dir.cwd().readFileAlloc(io, index_path, gpa, .limited(1 << 26));
+    defer gpa.free(text);
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
+    defer parsed.deinit();
+    const wm = parsed.value.object.get("weight_map").?.object;
+    const scale = try tableScale(gpa, io, model_dir, wm);
+    const heads = hash.heads;
+    const dh = hash.dh;
+    const words = try gpa.alloc(u8, heads * (dh / 8) * 4);
+    defer gpa.free(words);
+    const scales = try gpa.alloc(u8, heads * (dh / 32) * 2);
+    defer gpa.free(scales);
+    const biases = try gpa.alloc(u8, scales.len);
+    defer gpa.free(biases);
+    var opened: [max_heads]Open = undefined;
+    var nopen: usize = 0;
+    defer for (opened[0..nopen]) |*o| o.close(gpa);
+    var key: [180]u8 = undefined;
+    for (0..heads) |h| {
+        const loc = try hash.locate(ids[h]);
+        var nested = false;
+        const mapped = if (wm.get(try weightName(&key, loc.shard, false))) |v|
+            v.string
+        else blk: {
+            nested = true;
+            break :blk (wm.get(try weightName(&key, loc.shard, true)) orelse return error.MissingTensor).string;
+        };
+        const path = try std.fs.path.join(gpa, &.{ model_dir, mapped });
+        defer gpa.free(path);
+        const file = findOpen(opened[0..nopen], path) orelse file: {
+            opened[nopen] = try Open.load(gpa, io, path);
+            nopen += 1;
+            break :file &opened[nopen - 1];
+        };
+        const wb = (dh / 8) * 4;
+        const gb = (dh / 32) * 2;
+        try copyRow(file, loc.shard, nested, loc.local, dh, words[h * wb ..][0..wb], scales[h * gb ..][0..gb], biases[h * gb ..][0..gb]);
+    }
+    for (0..heads) |h| try embed.dequant(words, scales, biases, dh, h, out[h * dh ..][0..dh]);
+    if (scale != 1) {
+        for (out) |*v| {
+            const f: f32 = @bitCast(@as(u32, v.*) << 16);
+            v.* = toBf16(f * scale);
+        }
+    }
+    sumGroups(out, xs);
+}
+
 /// One decode token. `ple_layer_ids` `[2]` is this layer. Returns 0 when the gathered rows match the host dequant.
 pub fn table(comptime Tri: type, gpa: std.mem.Allocator, io: std.Io, model_dir: []const u8, driver: *cuda.Driver, stream: *cuda.Stream, tri: Tri, token: u32) !u32 {
     const cfg = try readSpec(gpa, io, model_dir);
