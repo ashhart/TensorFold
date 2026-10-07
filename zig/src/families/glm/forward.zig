@@ -207,24 +207,42 @@ pub fn kdaStep(x: *const Ctx, e: mtl.ComputeEncoder, ki: usize, w: *const wts.Kd
 
 /// MLA layer `mi` (its index among MLA caches) for rows at positions pos.. on `x_in`, into `branch`.
 pub fn mla(x: *Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.Mla, x_in: Ref, rows: u32, pos: u32) void {
+    mlaKeys(x, e, mi, w, x_in, rows, pos);
+    mlaAttend(x, e, mi, w, rows, pos);
+}
+
+/// The rows' x_proj into `xp` and each segment's key, indexer and pool writes into its cache (and `iw`).
+pub fn mlaKeys(x: *Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.Mla, x_in: Ref, rows: u32, pos: u32) void {
+    const c = x.c;
+    const sc = x.sc;
+    var one: [1]Seg = undefined;
+    if (on(x, "mla_proj")) qmv(x, e, x.k.qmv_x, x_in, w.x_proj, sc.xp, rows);
+    if (on(x, "mla_cache")) for (segments(x, rows, pos, &one)) |g| {
+        const y = withState(x, g);
+        mlaCache(&y, e, mi, w, x_in.at(@as(usize, g.row0) * c.hidden * 2), sc.xp.at(@as(usize, g.row0) * c.xProj() * 2), c.xProj(), sc.iw.at(@as(usize, g.row0) * c.i_heads * 2), g.rows, g.pos);
+    };
+}
+
+/// The rows' queries (from `xp`), their attention over each segment's cache as written, unabsorb and o_proj into `branch`.
+pub fn mlaAttend(x: *Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.Mla, rows: u32, pos: u32) void {
     const c = x.c;
     const k = x.k;
     const sc = x.sc;
     var one: [1]Seg = undefined;
-    const segs = segments(x, rows, pos, &one);
     if (on(x, "mla_proj")) {
-        qmv(x, e, k.qmv_x, x_in, w.x_proj, sc.xp, rows);
         rms(x, e, sc.xp, w.q_norm, sc.qr, rows, c.q_lora, c.xProj(), c.q_lora, c.eps);
         qmv(x, e, k.qmv_qr, sc.qr, w.qr_proj, sc.qp, rows);
     }
-    if (on(x, "mla_cache")) for (segs) |g| {
-        const y = withState(x, g);
-        mlaCache(&y, e, mi, w, x_in.at(@as(usize, g.row0) * c.hidden * 2), sc.xp.at(@as(usize, g.row0) * c.xProj() * 2), c.xProj(), sc.iw.at(@as(usize, g.row0) * c.i_heads * 2), g.rows, g.pos);
-    };
     if (on(x, "mla_absorb")) absorb(x, e, w, sc.qp, sc.ql, rows);
-    for (segs) |g| attend(&withState(x, g), e, mi, g);
+    for (segments(x, rows, pos, &one)) |g| attend(&withState(x, g), e, mi, g);
     if (on(x, "mla_unabs")) unabsorb(x, e, w, sc.att, sc.vals, rows);
     if (on(x, "mla_out")) qmv(x, e, k.qmv_mla_out, sc.vals, w.o_proj, sc.branch, rows);
+}
+
+/// Rows' indexer weights from their x_proj outputs (a row `xp_stride` apart), into `iw`.
+pub fn indexWeights(x: *const Ctx, e: mtl.ComputeEncoder, xp: Ref, xp_stride: u32, iw: Ref, rows: u32) void {
+    const c = x.c;
+    scale(x, e, xp.at((c.q_lora + c.kv_lora + c.i_dim) * 2), iw, rows, c.i_heads, xp_stride, c.i_heads, 1.0 / 64.0);
 }
 
 /// One stream's rows over its own cache: rows whose keys all fit index_topk attend every key (MLX's unfused attention).
@@ -258,7 +276,7 @@ pub fn mlaCache(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.M
     e.setValue(Rows{ .rows = @intCast(rows), .width = @intCast(c.i_dim), .x_stride = @intCast(xp_stride), .y_stride = @intCast(c.i_dim), .eps = 1e-6 }, 4);
     e.dispatchGroups(size(rows, 1, 1), size(32, 1, 1));
     moe_route.logits(e, k.igate_logits, @import("kernels.zig").igate_shape, x_in, w.igate, C.ig.at(@as(usize, pos) * c.i_dim * 2), rows); // MLX's gemv_t sums, more threadgroups
-    scale(x, e, xp.at((c.q_lora + RANK + c.i_dim) * 2), iw, rows, c.i_heads, xp_stride, c.i_heads, 1.0 / 64.0);
+    indexWeights(x, e, xp, xp_stride, iw, rows);
     const first = pos / c.kpool;
     const last = (pos + rows) / c.kpool;
     if (last > first) {

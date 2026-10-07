@@ -45,6 +45,7 @@ pub const Backend = struct {
             .mtp = b.sl.e.hasMtp(),
             .speculate = true,
             .speculate_early = false,
+            .plain_guard = true, // a shared round's draft row costs about what a plain row does: draft where it wins
             .drafts = 4,
             .window_costs = &window_costs,
             .mtp_step_ms = 1.3,

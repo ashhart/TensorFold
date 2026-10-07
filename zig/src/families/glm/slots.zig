@@ -33,7 +33,7 @@ pub const Slots = struct {
     slots: []Slot,
     rows: Ref, // bf16 [max_rows, hidden]: the rows every stream's head absorbs, gathered
     ids: Ref, // u32 [max_rows]: their next tokens
-    lasts: Ref, // bf16 [max_rows, hidden]: each drafting stream's last absorbed row, its first chained input
+    lasts: Ref, // bf16 [max_rows, hidden]: each drafting stream's last absorbed row (m_x), gathered
     picks: Ref, // u32 [max_rows]: a draft level's picks, a stream each
     open: ?Open = null, // keeps and drafts encode here; the next window commits them with its forward
     windows: u64 = 0,
@@ -153,7 +153,7 @@ pub const Slots = struct {
             fwd.backbone(&x, b.enc, ids, n, at);
             fwd.flipKda(&x);
             if (last) Engine.copyRow(&x, b.enc, e.sc.hidden.at(@as(usize, n - 1) * D * 2), slot.last, D);
-            if (slot.mtp and absorb > 0) mtp.run(&x, b.enc, e.sc.hidden, next, absorb, at, null);
+            if (slot.mtp and absorb > 0) mtp.absorb(&x, b.enc, e.sc.hidden, next, absorb, at);
         }
         if (slot.mtp and absorb > 0) slot.s.mtp_pos = at + absorb;
         if (last) fwd.head(&x, b.enc, slot.last, e.sc.logits, e.sc.picks, 1);
@@ -261,19 +261,26 @@ pub const Slots = struct {
         }
         x.s = segs[0].s;
         x.segs = segs[0..reqs.len];
-        mtp.layer(&x, enc, sl.rows, sl.ids, row, 0);
+        mtp.absorb(&x, enc, sl.rows, sl.ids, row, 0); // every row's cache entries; only last rows go on to draft
         var drafting: u32 = 0;
+        var lasts: [st.max_rows]fwd.Seg = undefined;
         for (order[0..reqs.len], segs[0..reqs.len], 0..) |k, g, i| {
             const slot = &sl.slots[reqs[k].slot];
             slot.s.mtp_pos += g.rows;
             slot.held_n = reqs[k].depth;
             if (reqs[k].depth == 0) continue;
-            copyWords(&x, enc, e.sc.m_x.at((g.row0 + g.rows - 1) * D * 2), sl.lasts.at(i * D * 2), @intCast(D / 2));
+            const at = (g.row0 + g.rows - 1) * D * 2;
+            copyWords(&x, enc, e.sc.m_x.at(at), sl.lasts.at(i * D * 2), @intCast(D / 2));
+            copyWords(&x, enc, e.sc.m_xn.at(at), sl.rows.at(i * D * 2), @intCast(D / 2));
+            lasts[i] = .{ .s = &slot.s, .row0 = @intCast(i), .rows = 1, .pos = slot.s.mtp_pos - 1 };
             drafting += 1;
         }
         if (drafting == 0) return;
+        x.s = lasts[0].s;
+        x.segs = lasts[0..drafting];
+        mtp.finish(&x, enc, sl.lasts, sl.rows, drafting, 0, true);
         const y = e.ctx();
-        mtp.drafts(&y, enc, sl.lasts, drafting, sl.picks);
+        mtp.drafts(&y, enc, e.sc.m_x, drafting, sl.picks);
         sl.hold(enc, order[0..drafting], reqs, 0);
         var level: u32 = 1;
         while (true) : (level += 1) {
@@ -285,7 +292,7 @@ pub const Slots = struct {
             if (n == 0) break;
             x.s = segs[0].s;
             x.segs = segs[0..n];
-            mtp.layer(&x, enc, if (level == 1) sl.lasts else e.sc.m_x, sl.picks, n, 0);
+            mtp.layer(&x, enc, e.sc.m_x, sl.picks, n, 0); // the level before's outputs, a prefix
             mtp.drafts(&y, enc, e.sc.m_x, n, sl.picks);
             sl.hold(enc, order[0..n], reqs, level);
         }

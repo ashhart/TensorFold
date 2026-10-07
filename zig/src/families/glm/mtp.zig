@@ -23,6 +23,12 @@ pub fn run(x: *fwd.Ctx, e: mtl.ComputeEncoder, h: Ref, next: Ref, rows: u32, pos
 
 /// The head's block over `rows` rows of h and their next tokens (positions pos.., or each segment's): m_x, pre-norm.
 pub fn layer(x: *fwd.Ctx, e: mtl.ComputeEncoder, h: Ref, next: Ref, rows: u32, pos: u32) void {
+    absorb(x, e, h, next, rows, pos);
+    finish(x, e, x.sc.m_x, x.sc.m_xn, rows, pos, false);
+}
+
+/// The rows' entries in the head's cache: embed, norms and eh_proj into m_x, its norm into m_xn, then the key writes.
+pub fn absorb(x: *fwd.Ctx, e: mtl.ComputeEncoder, h: Ref, next: Ref, rows: u32, pos: u32) void {
     const c = x.c;
     const sc = x.sc;
     const D = c.hidden;
@@ -33,8 +39,22 @@ pub fn layer(x: *fwd.Ctx, e: mtl.ComputeEncoder, h: Ref, next: Ref, rows: u32, p
     fwd.rms(x, e, h, m.hnorm, sc.m_eh.at(@as(usize, D) * 2), rows, D, D, 2 * D, c.eps);
     fwd.qmv(x, e, x.k.qmv_kda_out, sc.m_eh, m.eh_proj, sc.m_x, rows);
     fwd.rms(x, e, sc.m_x, L.in_norm, sc.m_xn, rows, D, D, D, c.eps);
-    fwd.mla(x, e, c.countKind(.mla), &L.attn.mla, sc.m_xn, rows, pos);
-    add(x, e, sc.m_x, sc.branch, sc.m_out, rows * D);
+    fwd.mlaKeys(x, e, c.countKind(.mla), &L.attn.mla, sc.m_xn, rows, pos);
+}
+
+/// The rest of the block for absorbed rows (`res`: m_x's, `normed`: m_xn's; `gathered`: their x_proj again): m_x.
+pub fn finish(x: *fwd.Ctx, e: mtl.ComputeEncoder, res: Ref, normed: Ref, rows: u32, pos: u32, gathered: bool) void {
+    const c = x.c;
+    const sc = x.sc;
+    const D = c.hidden;
+    const L = &x.w.layers[c.layers];
+    const mi = c.countKind(.mla);
+    if (gathered) { // the rows' queries and indexer weights, as the absorb computed them where the rows were
+        fwd.qmv(x, e, x.k.qmv_x, normed, L.attn.mla.x_proj, sc.xp, rows);
+        fwd.indexWeights(x, e, sc.xp, c.xProj(), sc.iw, rows);
+    }
+    fwd.mlaAttend(x, e, mi, &L.attn.mla, rows, pos);
+    add(x, e, res, sc.branch, sc.m_out, rows * D);
     fwd.rms(x, e, sc.m_out, L.post_norm, sc.m_xn, rows, D, D, D, c.eps);
     var local = x.*; // every Mac holds the MTP layer's experts whole: its MoE is one Mac's, with no exchange
     local.ep = null;
