@@ -9,8 +9,8 @@ const state = @import("cuda_state.zig");
 const Engine = @import("cuda_engine.zig").Engine;
 
 pub const max_chain = 15; // drafts a window holds beside the pending token
-/// What a sequence keeps of the head between rounds: its caches, DraftParams' fp and its drafts' confidences.
-const seq_fields = [_][]const u8{ "k_cache", "v_cache", "fp", "probs" };
+/// What a sequence keeps of the head between rounds: its caches and its drafts' confidences.
+pub const seq_fields = [_][]const u8{ "k_cache", "v_cache", "probs" };
 const host_drafts = 32; // pinned layout: meta at 0, drafts at 32, confidences at 64 (int32 words)
 const host_probs = 64;
 
@@ -21,8 +21,8 @@ pub const Head = struct {
     copied: cuda.Event,
     ready: [max_chain]cuda.Event,
     absorb_graphs: [state.max_rows + 1]?cuda.graph.Exec = @splat(null),
-    first_graphs: [state.max_rows + 1]?cuda.graph.Exec = @splat(null),
-    chain_graphs: [max_chain + 1]?cuda.graph.Exec = @splat(null),
+    first_graphs: [2][state.max_rows + 1]?cuda.graph.Exec = @splat(@splat(null)), // [greedy, sampled] draws
+    chain_graphs: [2][max_chain + 1]?cuda.graph.Exec = @splat(@splat(null)),
     k_cache: u64,
     v_cache: u64,
     meta: u64,
@@ -43,7 +43,7 @@ pub const Head = struct {
     vals: u64,
     cols: u64,
     cand: u64,
-    fp: u64, // DraftParams.fp (the seed is the target's)
+    fp: u64, // zeros: the greedy _keyed's SEED and FP
     atok: u64,
     topk: u64,
     invalid: u64, // the id lookup's error word: topk's columns are the table's, so it stays zero
@@ -71,8 +71,7 @@ pub const Head = struct {
             f.* = h.buf.ptr + at;
             at += std.mem.alignForward(usize, s, 256);
         }
-        try h.buf.fill8(0, null);
-        if (e.sampling) |x| try h.setSampling(x);
+        try h.buf.fill8(0, e.stream.handle); // on the engine's stream: the legacy one would race its first uploads
         e.head = h;
         inline for (seq_fields, &e.own.head) |name, *ptr| ptr.* = @field(h, name);
         h.pinned = try cuda.HostBuffer.alloc(e.ctx.d, (128 + state.prefill_rows) * 4);
@@ -85,7 +84,7 @@ pub const Head = struct {
     pub fn deinit(h: *Head) void {
         h.e.stream.synchronize() catch {};
         h.e.head = null;
-        for ([_][]?cuda.graph.Exec{ &h.absorb_graphs, &h.first_graphs, &h.chain_graphs }) |set| for (set) |*g| if (g.*) |*x| x.deinit();
+        for ([_][]?cuda.graph.Exec{ &h.absorb_graphs, &h.first_graphs[0], &h.first_graphs[1], &h.chain_graphs[0], &h.chain_graphs[1] }) |set| for (set) |*g| if (g.*) |*x| x.deinit();
         for (&h.ready) |*r| r.deinit();
         h.copied.deinit();
         h.pinned.free();
@@ -108,19 +107,13 @@ pub const Head = struct {
 
     /// Each seq_fields buffer's bytes.
     pub fn seqSizes(h: *const Head) [seq_fields.len]usize {
-        return .{ h.kvBytes(), h.kvBytes(), 32, max_chain * 4 };
+        return .{ h.kvBytes(), h.kvBytes(), max_chain * 4 };
     }
 
     /// The engine bound sequence `s`: its head buffers and position.
     pub fn bindSeq(h: *Head, s: *const state.Seq) void {
         inline for (seq_fields, s.head) |name, ptr| @field(h, name) = ptr;
         h.pos = s.head_pos;
-    }
-
-    /// DraftParams.set for a sampled request.
-    pub fn setSampling(h: *Head, x: sampler.Sampling) !void {
-        const fp = sampler.draftFp(x);
-        try h.e.ops().upload(h.fp, std.mem.asBytes(&fp));
     }
 
     fn kvBytes(h: *const Head) usize {
@@ -178,27 +171,30 @@ pub const Head = struct {
         try o.download(std.mem.sliceAsBytes(h.pinned.slice(u32)[host_probs + j - 1 ..][0..1]), h.probs + (j - 1) * 4);
     }
 
-    /// sampler.keyed for level j's draft: the top head columns of logits.float() in torch's order, mapped to token ids, then _keyed.
+    /// Level j's draft: sampled by the stream's rule over the draft ids (sample.cu), else the greedy _keyed over the top 28.
     fn sample(h: *Head, j: usize) !void {
         const e = h.e;
         const n = e.w.draft_count;
-        const k = sampler.draft(e.sampling);
+        if (e.sampling != null) return e.ops().draw(h.logits, n, e.b.rule, h.meta + 4, j - 1, e.b.ids + j * 4, 1, e.w.draft_ids, h.probs + (j - 1) * 4);
+        const k = sampler.greedy_draft;
         const count = sampler.count(k.k, n);
         const t = e.ops().torch();
         try t.toF32(h.logits, h.flog, n);
         try t.topk(h.flog, n, 1, count, h.vals, h.cols, h.topk);
         try t.lookup(e.w.draft_ids, n, h.cols, h.cand, count, h.invalid);
-        try e.forward(null).tri.keyed(h.vals, h.cand, h.meta + 4, e.b.ids + j * 4, e.b.seed, h.fp, h.probs + (j - 1) * 4, j - 1, 1, count, k);
+        // GREEDY loads SEED and FP but reads neither: the head's zeroed fp serves as both
+        try e.forward(null).tri.keyed(h.vals, h.cand, h.meta + 4, e.b.ids + j * 4, h.fp, h.fp, h.probs + (j - 1) * 4, j - 1, 1, count, k);
     }
 
-    /// MTPHead.capture: levels 0 and 1 at every kept-row count, later levels at one row, each one graph.
+    /// MTPHead.capture: levels 0 and 1 at every kept-row count, later levels at one row, in the bound draw mode.
     pub fn capture(h: *Head) !void {
         const s = h.e.stream;
+        const m = @intFromBool(h.e.sampling != null);
         for (1..state.max_rows + 1) |k| {
-            h.absorb_graphs[k] = try record(s, h, @intCast(k), 0);
-            h.first_graphs[k] = try record(s, h, @intCast(k), 1);
+            if (h.absorb_graphs[k] == null) h.absorb_graphs[k] = try record(s, h, @intCast(k), 0);
+            h.first_graphs[m][k] = try record(s, h, @intCast(k), 1);
         }
-        for (2..max_chain + 1) |j| h.chain_graphs[j] = try record(s, h, 1, @intCast(j));
+        for (2..max_chain + 1) |j| h.chain_graphs[m][j] = try record(s, h, 1, @intCast(j));
     }
 
     fn record(s: cuda.Stream, h: *Head, rows: usize, j: usize) !cuda.graph.Exec {
@@ -232,7 +228,8 @@ pub const Head = struct {
 
     /// MTPHead.level: queue level j of this round (0: absorb only) into the engine's ids[j].
     pub fn launch(h: *Head, j: usize) !void {
-        const g = if (!h.e.graphsBound()) null else if (j == 0) h.absorb_graphs[h.keep] else if (j == 1) h.first_graphs[h.keep] else h.chain_graphs[j];
+        const m = @intFromBool(h.e.sampling != null);
+        const g = if (!h.e.graphsBound()) null else if (j == 0) h.absorb_graphs[h.keep] else if (j == 1) h.first_graphs[m][h.keep] else h.chain_graphs[m][j];
         if (g) |x| try x.launchOn(h.e.stream) else try h.level(if (j <= 1) h.keep else 1, j);
         if (j > 0) {
             try h.ready[j - 1].record(h.e.stream);

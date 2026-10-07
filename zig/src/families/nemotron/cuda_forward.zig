@@ -5,15 +5,19 @@ const cuda = @import("cuda");
 const Config = @import("config.zig").Config;
 const kern = @import("cuda_kernels.zig");
 const Tri = @import("cuda_triton.zig").Tri;
-const Keyed = @import("cuda_triton.zig").Keyed;
-const sampler = @import("cuda_sampler.zig");
 const weights = @import("cuda_weights.zig");
 const state = @import("cuda_state.zig");
 const Dump = @import("cuda_dump.zig").Dump;
 
 const Delta = enum { none, dense, moe };
 
-/// A prompt chunk between blocks: rows, position, residual stream, the delta its next norm adds, next Mamba and attention.
+/// A second stream the shared expert runs on while the routed experts are chosen; fork and join are events.
+pub const Side = struct { s: cuda.Stream, fork: cuda.Event, join: cuda.Event };
+
+/// A verify window supplies its stream buffers and starting row.
+pub const Seg = struct { b: *const state.Buffers, row0: usize, rows: usize, sampled: bool };
+
+/// A prompt chunk carries rows, position, residual delta and mixer positions between blocks.
 pub const Walk = struct { rows: usize, pos: usize, x: u64 = 0, delta: Delta = .none, mj: usize = 0, aj: usize = 0 };
 
 pub const Forward = struct {
@@ -24,23 +28,19 @@ pub const Forward = struct {
     tri: Tri,
     max_len: usize,
     nch: usize,
-    keyed: ?Keyed, // the target's draw: null is torch.argmax
+    sampled: bool, // the target draws by the bound sequence's rule (sample.cu); false: torch.argmax
     dump: ?*Dump = null,
+    side: ?Side = null, // decode MoE layers run the shared expert here (null: one stream)
 
-    pub fn init(c: Config, w: *const weights.Weights, b: *const state.Buffers, ops: kern.Ops, max_len: usize, nch: usize, keyed: ?Keyed) Forward {
-        return .{ .c = c, .w = w, .b = b, .ops = ops, .tri = .{ .set = &ops.k.triton, .s = ops.s }, .max_len = max_len, .nch = nch, .keyed = keyed };
+    pub fn init(c: Config, w: *const weights.Weights, b: *const state.Buffers, ops: kern.Ops, max_len: usize, nch: usize, sampled: bool) Forward {
+        return .{ .c = c, .w = w, .b = b, .ops = ops, .tri = .{ .set = &ops.k.triton, .s = ops.s }, .max_len = max_len, .nch = nch, .sampled = sampled };
     }
 
-    /// sampler.sample: rows of logits draw their next tokens into `out`, row r at position META[0] + r + 1.
-    fn sample(f: *const Forward, logits: u64, rows: usize, meta: u64, out: u64) !void {
-        const b = f.b;
-        const t = f.ops.torch();
+    /// Rows of logits draw their next tokens into `out`, row r at position META[0] + r + 1, by `rule` when sampled.
+    fn sample(f: *const Forward, logits: u64, rows: usize, meta: u64, out: u64, sampled: bool, rule: u64) !void {
         const v = f.c.vocab;
-        const k = f.keyed orelse return t.argmax(logits, v, v, out, rows);
-        const n = sampler.count(k.k, v);
-        try t.toF32(logits, b.flog, rows * v);
-        try t.topk(b.flog, v, rows, n, b.vals, b.cols, b.topk);
-        try f.tri.keyed(b.vals, b.cols, meta, out, b.seed, b.fp, null, 0, rows, n, k);
+        if (!sampled) return f.ops.torch().argmax(logits, v, v, out, rows);
+        try f.ops.draw(logits, v, rule, meta, 0, out, rows, null, null);
     }
 
     fn mshape(f: *const Forward, rmax: usize) Tri.Shape {
@@ -72,13 +72,22 @@ pub const Forward = struct {
 
     /// Engine._forward: rows tokens at meta's position; every row samples its next token into `sampled`.
     pub fn window(f: *const Forward, rows: usize) !void {
+        try f.windowSegs(&.{.{ .b = f.b, .row0 = 0, .rows = rows, .sampled = f.sampled }});
+    }
+
+    /// Shared matmuls, norms and experts retain each stream's mixer state.
+    pub fn windowSegs(f: *const Forward, segs: []const Seg) !void {
         const c = f.c;
         const b = f.b;
         const o = f.ops;
         const t = f.tri;
         const ms = f.mshape(state.max_rows);
         const at = f.ashape();
-        try t.embed(b.ids, f.w.embed.w, f.w.embed.s, f.w.embed.b, b.emb, rows, c.hidden);
+        const D: u64 = c.hidden;
+        var rows: usize = 0;
+        for (segs) |s| rows += s.rows;
+        if (rows > state.max_rows) return error.WindowTooWide;
+        for (segs) |s| try t.embed(s.b.ids, f.w.embed.w, f.w.embed.s, f.w.embed.b, b.emb + s.row0 * D * 2, s.rows, c.hidden);
         var x = b.emb;
         var delta: Delta = .none;
         var mj: usize = 0;
@@ -89,14 +98,18 @@ pub const Forward = struct {
                 .mamba => {
                     const m = blk.mamba;
                     const W: u64 = state.max_rows;
-                    const raw = b.raw + mj * 2 * W * c.convDim() * 2;
-                    const xc = b.xc + mj * 2 * W * c.convDim() * 2;
-                    const dt = b.dt + mj * 2 * W * c.mamba_heads * 4;
-                    const ssm = b.ssm + @as(u64, mj) * c.mamba_heads * c.mamba_head_dim * c.state * 4;
-                    const base = b.conv_base + @as(u64, mj) * 3 * c.convDim() * 2;
                     try o.dense(b.y, b.xs, m.in_proj, b.proj, rows);
-                    try t.conv(b.proj, base, raw, xc, m.conv_w, m.conv_b, b.meta, rows, ms);
-                    try t.scan(b.proj, xc, dt, ssm, m.a, m.d, m.dt_bias, b.meta, b.sy, rows, c.dt_min, c.dt_max, ms);
+                    for (segs) |s| {
+                        const sb = s.b;
+                        const raw = sb.raw + mj * 2 * W * c.convDim() * 2;
+                        const xc = sb.xc + mj * 2 * W * c.convDim() * 2;
+                        const dt = sb.dt + mj * 2 * W * c.mamba_heads * 4;
+                        const ssm = sb.ssm + @as(u64, mj) * c.mamba_heads * c.mamba_head_dim * c.state * 4;
+                        const base = sb.conv_base + @as(u64, mj) * 3 * c.convDim() * 2;
+                        const proj = b.proj + s.row0 * c.projDim() * 2;
+                        try t.conv(proj, base, raw, xc, m.conv_w, m.conv_b, sb.meta, s.rows, ms);
+                        try t.scan(proj, xc, dt, ssm, m.a, m.d, m.dt_bias, sb.meta, b.sy + s.row0 * c.inner() * 2, s.rows, c.dt_min, c.dt_max, ms);
+                    }
                     try t.groupRmsnorm(b.sy, m.gnorm, b.g, b.gxs, rows, c.inner(), c.groups, c.eps);
                     try o.dense(b.g, b.gxs, m.out_proj, b.delta, rows);
                     delta = .dense;
@@ -104,11 +117,16 @@ pub const Forward = struct {
                 },
                 .attention => {
                     const a = blk.attn;
-                    const kc = f.cache(b.k_cache, aj);
-                    const vc = f.cache(b.v_cache, aj);
+                    const qd: u64 = c.heads * c.head_dim;
                     try o.dense(b.y, b.xs, a.qkv, b.qkv, rows);
-                    try t.kvWrite(b.qkv, kc, vc, b.meta, rows, at);
-                    try t.attention(b.qkv, kc, vc, b.meta, b.po, b.pm, b.pl, b.att, b.axs, rows, at);
+                    for (segs) |s| {
+                        const kc = f.cache(s.b.k_cache, aj);
+                        const vc = f.cache(s.b.v_cache, aj);
+                        const qkv = b.qkv + s.row0 * c.qkvDim() * 2;
+                        const r0: u64 = s.row0;
+                        try t.kvWrite(qkv, kc, vc, s.b.meta, s.rows, at);
+                        try t.attention(qkv, kc, vc, s.b.meta, b.po + r0 * f.nch * qd * 4, b.pm + r0 * f.nch * c.heads * 4, b.pl + r0 * f.nch * c.heads * 4, b.att + r0 * qd * 2, b.axs + r0 * (qd / 64) * 4, s.rows, at);
+                    }
                     try o.dense(b.att, b.axs, a.o, b.delta, rows);
                     delta = .dense;
                     aj += 1;
@@ -120,9 +138,9 @@ pub const Forward = struct {
             }
         }
         try f.norm(&x, delta, f.w.norm_f, rows, true);
-        try o.copy(b.hidden, b.y, @as(usize, rows) * c.hidden * 2);
+        for (segs) |s| try o.copy(s.b.hidden, b.y + s.row0 * D * 2, s.rows * c.hidden * 2);
         try o.dense(b.y, b.xs, f.w.head, b.logits, rows);
-        try f.sample(b.logits, rows, b.meta, b.sampled);
+        for (segs) |s| try f.sample(b.logits + s.row0 * @as(u64, c.vocab) * 2, s.rows, s.b.meta, s.b.sampled, s.sampled, s.b.rule);
         if (f.dump) |d| try d.tail(f.ops, b.logits, b.sampled, rows, c.vocab);
     }
 
@@ -133,6 +151,7 @@ pub const Forward = struct {
         const o = f.ops;
         const ex = m.experts;
         const pairs = rows * c.slots();
+        if (!prompt) if (f.side) |sd| return f.forked(m, rows, sd);
         try f.tri.route(b.y, m.router, m.bias, b.part, b.pick, b.wts, rows, c.hidden, c.experts, c.top_k, c.routed_scaling, c.norm_topk);
         const tile: usize = if (prompt) 64 else 16;
         try o.plan(b.pick, pairs, ex.count, tile, b.plan);
@@ -144,6 +163,27 @@ pub const Forward = struct {
             try o.experts(true, b.y, c.hidden, c.slots(), ex.up, ex.dims / 64, ex.width / 32, b.plan, b.act, ex.width, items * (ex.width / 32));
             try o.experts(false, b.act, ex.width, 0, ex.down, ex.width / 64, ex.dims / 32, b.plan, b.ymoe, ex.dims, items * (ex.dims / 32));
         }
+    }
+
+    /// The decode MoE with its shared halves on the side stream: their pairs are fixed, so they need no routing.
+    fn forked(f: *const Forward, m: weights.MoE, rows: usize, sd: Side) !void {
+        const c = f.c;
+        const b = f.b;
+        const o = f.ops;
+        const ex = m.experts;
+        const so: kern.Ops = .{ .k = o.k, .s = sd.s };
+        try sd.fork.record(o.s);
+        try sd.s.wait(sd.fork);
+        const sp = b.sharedPlan(rows);
+        try so.experts(true, b.y, c.hidden, c.slots(), ex.up, ex.dims / 64, ex.width / 32, sp, b.act, ex.width, 2 * (ex.width / 32));
+        try so.experts(false, b.act, ex.width, 0, ex.down, ex.width / 64, ex.dims / 32, sp, b.ymoe, ex.dims, 2 * (ex.dims / 32));
+        try sd.join.record(sd.s);
+        try f.tri.route(b.y, m.router, m.bias, b.part, b.pick, b.wts, rows, c.hidden, c.experts, c.top_k, c.routed_scaling, c.norm_topk);
+        try o.planRouted(b.pick, rows, c.slots(), c.top_k, c.experts, 16, b.plan);
+        const items = kern.maxItems(rows * c.top_k, c.experts, 16);
+        try o.experts(true, b.y, c.hidden, c.slots(), ex.up, ex.dims / 64, ex.width / 32, b.plan, b.act, ex.width, items * (ex.width / 32));
+        try o.experts(false, b.act, ex.width, 0, ex.down, ex.width / 64, ex.dims / 32, b.plan, b.ymoe, ex.dims, items * (ex.dims / 32));
+        try o.s.wait(sd.join);
     }
 
     /// Engine.prefill_chunk: `rows` tokens in p_ids at positions pos..; commits them and samples the next token.
@@ -180,7 +220,7 @@ pub const Forward = struct {
         }
     }
 
-    /// Block i's mixer, all it reads of earlier rows: Mamba conv and scan (states), or cache write and attention (keys).
+    /// A block mixer reads its Mamba state or attention cache from earlier rows.
     pub fn chunkMixer(f: *const Forward, w: *Walk, i: usize) !void {
         const c = f.c;
         const b = f.b;
@@ -240,7 +280,7 @@ pub const Forward = struct {
         try o.copy(b.p_hidden, b.y, @as(usize, rows) * c.hidden * 2);
         try o.prefillDense(b.y + @as(u64, rows - 1) * c.hidden * 2, f.w.head, b.p_logits, 1);
         try o.fill32(b.p_meta, @intCast(w.pos + rows - 1), 4); // sample_last: the chunk's last row is at pos + rows - 1
-        try f.sample(b.p_logits, 1, b.p_meta, b.p_sampled);
+        try f.sample(b.p_logits, 1, b.p_meta, b.p_sampled, f.sampled, b.rule);
         if (f.dump) |d| try d.tail(f.ops, b.p_logits, b.p_sampled, 1, c.vocab);
     }
 };

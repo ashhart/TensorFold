@@ -39,6 +39,8 @@ pub const LaneHost = struct {
     lone: ?api.Lone = null, // the backend's driver for a lone greedy stream; null: every stream in the lane core
     lone_job: ?*Job = null, // the job that driver holds now
     cache: ?*pc.Store = null, // kept prompt states (engine thread only); the backend restores and saves them
+    memory: ?api.MemorySource = null, // the backend's memory counts; null: Engine.memory reports none
+    explain: ?api.Explain = null, // the backend's words for a request it refuses; null: the error's name
 
     const Mark = struct { at: i96, tokens: u64 };
     const window_ns: i96 = 2 * std.time.ns_per_s;
@@ -66,7 +68,7 @@ pub const LaneHost = struct {
             if (job.host.cache) |store| _ = store.keep(job.request.prompt, at, s);
         }
 
-        /// The pass started from its kept state, or its copy failed (the entry goes); a pass that never got there: neither.
+        /// Report a restored prefix or its failed copy; an untouched prefix remains kept.
         fn reported(job: *Job) void {
             const e = job.entry orelse return;
             job.entry = null;
@@ -171,8 +173,9 @@ pub const LaneHost = struct {
         };
     }
 
-    fn memoryFn(_: *anyopaque, _: bool) ?Memory {
-        return null;
+    fn memoryFn(ctx: *anyopaque, reset_peak: bool) ?Memory {
+        const source = self(ctx).memory orelse return null;
+        return source.read(source.ctx, reset_peak);
     }
 
     fn emit(job: *Job, event: Event) void {
@@ -322,7 +325,7 @@ pub const LaneHost = struct {
         const began = std.Io.Clock.awake.now(h.io).toNanoseconds();
         job.began = began;
         if (h.loneFits(job)) return h.runLone(job, began);
-        h.core.addStream(&job.stream) catch |e| return if (e == error.Cancelled) h.cancel(job) else h.drop(job, @errorName(e));
+        h.core.addStream(&job.stream) catch |e| return if (e == error.Cancelled) h.cancel(job) else h.drop(job, h.words(e));
         h.prefilled(job, began);
         if (h.deliver(job)) h.remove(job);
         return true;
@@ -340,16 +343,17 @@ pub const LaneHost = struct {
         emit(job, .{ .prefilled = job.stream.cached });
     }
 
-    /// A greedy drafted request alone in the engine, with nothing waiting: the backend's own driver takes it.
+    /// An idle backend driver takes a lone drafted request, including sampling when supported.
     fn loneFits(h: *LaneHost, job: *Job) bool {
         const r = job.request;
-        if (h.lone == null or r.sampling != null or !r.drafts or r.think_budget > 0 or r.loop_guard or r.call != null or r.structure != null) return false;
+        const lone = h.lone orelse return false;
+        if ((r.sampling != null and !lone.sampled) or !r.drafts or r.think_budget > 0 or r.loop_guard or r.call != null or r.structure != null) return false;
         h.lock();
         defer h.unlock();
         return h.admitted.items.len == 1 and h.queued.items.len == 0 and h.cancels.items.len == 0 and h.core.activeCount() == 0;
     }
 
-    /// The lone driver's rounds, its tokens sent as they land; a request arriving or a cancel hands the stream to the lane core.
+    /// Send lone-driver tokens as they land; arrivals and cancellation return its stream to the lane core.
     fn runLone(h: *LaneHost, job: *Job, began: i96) bool {
         h.lone_job = job;
         job.delivered = 0;
@@ -378,7 +382,7 @@ pub const LaneHost = struct {
         const handed = paused catch |e| {
             if (!job.prefill_sent) emit(job, .{ .prefilled = 0 });
             h.remove(job);
-            h.finish(job, if (e == error.Cancelled) .cancelled else .failed, if (e == error.Cancelled) "" else @errorName(e));
+            h.finish(job, if (e == error.Cancelled) .cancelled else .failed, if (e == error.Cancelled) "" else h.words(e));
             return true;
         };
         if (!job.prefill_sent) h.prefilled(job, began);
@@ -389,6 +393,11 @@ pub const LaneHost = struct {
         }
         if (h.deliver(job)) h.remove(job);
         return true;
+    }
+
+    fn words(h: *const LaneHost, e: anyerror) []const u8 {
+        const x = h.explain orelse return @errorName(e);
+        return x.text(x.ctx, e) orelse @errorName(e);
     }
 
     fn drop(h: *LaneHost, job: *Job, message: []const u8) bool {
@@ -586,3 +595,5 @@ test "a lane host serves the core's own tokens, in order, and cancels between ro
     try std.testing.expect(target.prefill_count <= 3);
     try std.testing.expectEqual(@as(usize, 0), target.lanes.count());
 }
+
+test { _ = @import("lane_host_test.zig"); }

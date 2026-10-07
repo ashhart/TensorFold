@@ -280,3 +280,28 @@ fn meta(fd: posix.fd_t, path: ?[*:0]const u8) ?Meta {
     const t = st.mtime();
     return .{ .mode = @intCast(st.mode), .size = @intCast(st.size), .dev = @intCast(st.dev), .ino = @intCast(st.ino), .mtime_ns = std.math.lossyCast(i128, t.nsec) + @as(i128, t.sec) * std.time.ns_per_s };
 }
+
+test "the key file: refused while others can read it, read at 0600, reread after an edit" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "keys", .data = "ops: sk-one\n" });
+    const path = try std.fmt.allocPrintSentinel(a, ".zig-cache/tmp/{s}/keys", .{tmp.sub_path}, 0);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.fchmodat(posix.AT.FDCWD, path, 0o644, 0));
+    var problem: []const u8 = "";
+    try std.testing.expectError(error.KeyFile, Store.init(a, &.{}, "", path, false, &problem));
+    try std.testing.expect(std.mem.indexOf(u8, problem, "chmod 600") != null);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.fchmodat(posix.AT.FDCWD, path, 0o600, 0));
+    var s = try Store.init(a, &.{}, "", path, false, &problem);
+    try std.testing.expectEqualStrings("ops", s.match(a, "Bearer sk-one", null).?);
+    const seen = meta(-1, path).?;
+    try std.testing.expectEqual(@as(u64, 12), seen.size);
+    try std.testing.expectEqual(@as(u32, 0o600), seen.mode & 0o777);
+    try tmp.dir.writeFile(io, .{ .sub_path = "keys", .data = "ops: sk-one\nci: sk-two\n" });
+    try std.testing.expect(!std.mem.eql(i128, &s.stamp, &s.statStamp().?));
+    s.checked_ns = null;
+    try std.testing.expectEqualStrings("ci", s.match(a, null, "sk-two").?);
+}

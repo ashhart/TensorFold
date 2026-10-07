@@ -19,14 +19,18 @@ const sym = struct {
     const pack_experts = "_ZN15tf_experts_pack11pack_kernelILi2EEEvPKjPKtS4_Pjiiii";
     const pattn = "_ZN20tf_prefill_attention12pattn_kernelILi128ELi8ELi8ELi8EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiif";
     const scan_rows = "_ZN12tf_scan_rows11scan_kernelEPK13__nv_bfloat16S2_PfPKfS5_S5_PS0_iiiiiiiiff";
+    const gemv = "_ZN12tf_lane_gemv11gemv_kernelILi64ELi64ELi8EEEvPK13__nv_bfloat16PKfNS_4PartEiii";
 };
 
 /// qmm_group.cu's Part and Parts, passed by value: four projections at most, one used here.
 pub const Part = extern struct { w: u64, scales: u64, biases: u64, out: u64, n: c_int, npad: c_int, sk: c_int, tiles: c_int, first: c_int };
 pub const Parts = extern struct { p: [4]Part, count: c_int };
 
+/// lane_gemv.cu's Part: one projection whose column tiles the CTAs share out.
+pub const GemvPart = extern struct { w: u64, scales: u64, biases: u64, out: u64, n: c_int, npad: c_int, sk: c_int, tiles: c_int };
+
 comptime {
-    std.debug.assert(@sizeOf(Part) == 56 and @sizeOf(Parts) == 232);
+    std.debug.assert(@sizeOf(Part) == 56 and @sizeOf(Parts) == 232 and @sizeOf(GemvPart) == 48);
 }
 
 pub const group_smem: u32 = 35328; // LaneTile<64, 16, 64, 1, 4, 8>::SMEM
@@ -45,9 +49,10 @@ pub const Plan = struct { members: u64, items: u64, counts: u64, rank: u64, hist
 
 pub const Kernels = struct {
     d: *const cuda.Driver,
-    mods: [14]cuda.Module,
+    mods: [16]cuda.Module,
     triton: cuda.aot.Set,
     group: cuda.Function,
+    gemv: cuda.Function,
     prefill_mm: cuda.Function,
     expert_up: cuda.Function,
     expert_down: cuda.Function,
@@ -63,8 +68,12 @@ pub const Kernels = struct {
     pack_dense: cuda.Function,
     transpose16: cuda.Function,
     serial_feed: cuda.Function,
+    plan_routed: cuda.Function,
+    draw: cuda.Function,
+    draw_ids: cuda.Function,
     torch: torch_ops.Functions,
     expert_blocks: [2]usize, // resident blocks the decode expert kernels fill: per SM times SMs
+    gemv_blocks: usize, // resident lane_gemv CTAs: per SM times SMs
     gb10: bool,
 
     /// Loads every module; `triton_dir` holds the captured aot.json and cubins for this GPU.
@@ -74,7 +83,7 @@ pub const Kernels = struct {
         var k: Kernels = undefined;
         k.d = d;
         const kk = cuda.kernels;
-        const images = [_][]const u8{ kk.qmm_group, kk.qmm_prefill, kk.experts, kk.experts_prefill, kk.experts_pack, kk.prefill_attention, kk.scan_rows, kk.nemotron_ops, kk.torch_argmax, kk.torch_topk, kk.torch_pointwise, kk.torch_indexing, kk.torch_movement, kk.torch_nemotron_constants };
+        const images = [_][]const u8{ kk.qmm_group, kk.qmm_prefill, kk.experts, kk.experts_prefill, kk.experts_pack, kk.prefill_attention, kk.scan_rows, kk.nemotron_ops, kk.torch_argmax, kk.torch_topk, kk.torch_pointwise, kk.torch_indexing, kk.torch_movement, kk.torch_nemotron_constants, kk.sample, kk.lane_gemv };
         var loaded: usize = 0;
         errdefer for (k.mods[0..loaded]) |*m| m.unload();
         for (images, 0..) |img, i| {
@@ -97,16 +106,22 @@ pub const Kernels = struct {
         k.pack_dense = try k.mods[7].function("tf_pack_dense");
         k.transpose16 = try k.mods[7].function("tf_transpose_pad16");
         k.serial_feed = try k.mods[7].function("tf_serial_feed");
+        k.plan_routed = try k.mods[7].function("tf_plan_routed");
+        k.gemv = try k.mods[15].function(sym.gemv);
         k.torch = try torch_ops.Functions.resolve(k.mods[8..14]);
+        k.draw = try k.mods[14].function("tf_draw");
+        k.draw_ids = try k.mods[14].function("tf_draw_ids");
         k.triton = try cuda.aot.Set.load(gpa, io, d, ctx.device, triton_dir);
         errdefer k.triton.deinit();
         try k.group.allowDynamicShared(group_smem);
+        try k.gemv.allowDynamicShared(group_smem);
         try k.prefill_mm.allowDynamicShared(prefill_mm_smem);
         try k.pre_up.allowDynamicShared(pre_experts_smem);
         try k.pre_down.allowDynamicShared(pre_experts_smem);
         try k.pattn.allowDynamicShared(pattn_smem);
         const sms: usize = @intCast(try ctx.attribute(.multiprocessor_count));
         k.expert_blocks = .{ @max(1, try k.expert_up.occupancy(128, 0)) * sms, @max(1, try k.expert_down.occupancy(128, 0)) * sms };
+        k.gemv_blocks = @max(1, try k.gemv.occupancy(128, group_smem)) * sms;
         const major = try ctx.attribute(.compute_capability_major);
         const minor = try ctx.attribute(.compute_capability_minor);
         k.gb10 = major == 12 and minor == 1;
@@ -155,10 +170,41 @@ pub const Ops = struct {
         return .{ .f = &o.k.torch, .s = o.s };
     }
 
-    /// qmm.matmul on sm_12x: x (rows, k) bf16 with group sums xs -> out (rows, n) bf16, through qmm_group's tile 2.
+    /// sample.cu: row r of bf16 logits drawn at position meta[0] + r + 1 + offset, columns as `ids` token ids if given.
+    pub fn draw(o: Ops, logits: u64, vocab: usize, rule: u64, meta: u64, offset: usize, out: u64, rows: usize, ids: ?u64, prob: ?u64) !void {
+        var a: cuda.Args = .{};
+        a.add(logits);
+        a.add(@as(u32, @intCast(vocab)));
+        a.add(rule);
+        a.add(meta);
+        a.add(@as(i32, @intCast(offset)));
+        a.add(out);
+        if (ids) |x| a.add(x);
+        a.add(prob orelse 0);
+        try o.go(if (ids != null) o.k.draw_ids else o.k.draw, .{ rows, 1, 1 }, 1024, 0, &a);
+    }
+
+    /// qmm.matmul on sm_12x: x (rows, k) bf16 with group sums xs -> out (rows, n) bf16, qmm_group's tile-2 bits.
     pub fn dense(o: Ops, x: u64, xs: u64, q: QLinear, out: u64, rows: usize) !void {
         if (rows > 16) return error.WindowTooWide;
         const sk = splitK(q.n, q.k);
+        return if (sk > 1) o.gemv(x, xs, q, out, rows, sk) else o.cluster(x, xs, q, out, rows, sk);
+    }
+
+    /// lane_gemv: every K slice of a column tile in one CTA, summed in slice order, CTAs looping over the tiles.
+    pub fn gemv(o: Ops, x: u64, xs: u64, q: QLinear, out: u64, rows: usize, sk: usize) !void {
+        const tiles = (q.n + 63) / 64;
+        var a: cuda.Args = .{};
+        a.add(x);
+        a.add(xs);
+        a.add(GemvPart{ .w = q.w, .scales = q.s, .biases = q.b, .out = out, .n = int(q.n), .npad = int(q.npad), .sk = int(sk), .tiles = int(tiles) });
+        for ([_]usize{ rows, q.k, q.k }) |v| a.add(int(v));
+        const cfg: cuda.Config = .{ .grid = .{ .x = u(@min(tiles, o.k.gemv_blocks)) }, .block = .{ .x = 128 }, .shared = group_smem, .pdl = o.k.gb10 };
+        try cuda.launch.launch(o.k.gemv, cfg, o.s, &a);
+    }
+
+    /// qmm_group's tile 2: a cluster of `sk` CTAs a column tile, its K slices summed over distributed shared memory.
+    pub fn cluster(o: Ops, x: u64, xs: u64, q: QLinear, out: u64, rows: usize, sk: usize) !void {
         const tiles = (q.n + 63) / 64;
         var parts: Parts = std.mem.zeroes(Parts);
         parts.count = 1;
@@ -231,6 +277,16 @@ pub const Ops = struct {
         a.add(int(n));
         a.add(@as(f32, 0.0));
         return a;
+    }
+
+    /// experts.route's plan over the routed slots alone (rows <= 16, experts <= 128): the shared halves run apart.
+    pub fn planRouted(o: Ops, picks: u64, rows: usize, slots: usize, routed: usize, count: usize, tile: usize, p: Plan) !void {
+        if (rows > 16 or slots > 8 or count > 128) return error.PlanTooWide;
+        var a: cuda.Args = .{};
+        a.add(picks);
+        for ([_]usize{ rows, slots, routed, count, tile }) |v| a.add(int(v));
+        for ([_]u64{ p.members, p.items, p.counts }) |v| a.add(v);
+        try o.go(o.k.plan_routed, .{ 1, 1, 1 }, 128, 0, &a);
     }
 
     /// experts.run (decode form): `up` takes token rows (relu^2, bf16 out), else pair rows (fp32 out).

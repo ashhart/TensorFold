@@ -70,4 +70,15 @@ pub const Driver = struct {
         try self.check(self.api.cuDeviceGetCount(&n), "cuDeviceGetCount");
         return n;
     }
+
+    /// Device `ordinal`'s compute capability as 10 * major + minor, read without making a context.
+    pub fn capability(self: *const Driver, ordinal: c_int) Error!u32 {
+        var dev: abi.Device = 0;
+        try self.check(self.api.cuDeviceGet(&dev, ordinal), "cuDeviceGet");
+        var major: c_int = 0;
+        var minor: c_int = 0;
+        try self.check(self.api.cuDeviceGetAttribute(&major, .compute_capability_major, dev), "cuDeviceGetAttribute");
+        try self.check(self.api.cuDeviceGetAttribute(&minor, .compute_capability_minor, dev), "cuDeviceGetAttribute");
+        return @intCast(10 * major + minor);
+    }
 };

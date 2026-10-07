@@ -126,6 +126,10 @@ pub const Metrics = struct {
         try gauge(w, "decode_rounds_total", "counter", "Decode rounds used by finished requests.", snap.rounds);
         try histogram(w, "request_prefill_seconds", "Seconds a finished request's prompt pass took.", snap.prefill);
         if (footprint()) |bytes| try gauge(w, "process_footprint_bytes", "gauge", "This process's physical footprint as the OS counts it, Metal buffers included; only where the platform reports one (macOS).", bytes);
+        if (engine.memory(false)) |mem| {
+            try gauge(w, "device_memory_bytes", "gauge", "Device memory the engine holds now: weights, caches and live streams; only where the backend counts it (CUDA).", mem.active);
+            try gauge(w, "device_memory_peak_bytes", "gauge", "The most device memory the engine has held since start or the last /health?reset_peak=1.", mem.peak);
+        }
         try gauge(w, "num_requests_running", "gauge", "Requests in prefill or decode. A mirror of tensorfold:requests_running.", status.running);
         try gauge(w, "num_requests_waiting", "gauge", "Requests queued or held until a lane is free. A mirror of tensorfold:requests_waiting.", status.waiting);
         try family(w, "kv_cache_usage_perc", "gauge", "A stream's cache occupancy under vLLM's name; same streams and ratios as tensorfold:kv_cache_usage_ratio.");
@@ -229,10 +233,12 @@ const RenderStub = struct {
         const s: *@This() = @ptrCast(@alignCast(ctx));
         out.* = s.status_value;
     }
-    pub fn memory(_: *anyopaque, _: bool) ?api.Memory {
-        return null;
+    pub fn memory(ctx: *anyopaque, _: bool) ?api.Memory {
+        const s: *@This() = @ptrCast(@alignCast(ctx));
+        return s.memory_value;
     }
     status_value: api.Status = .{ .running = 1, .waiting = 2, .generation_tokens = 3 },
+    memory_value: ?api.Memory = null,
 
     pub fn engine(s: *@This()) api.Engine {
         return .{ .ctx = s, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
@@ -253,6 +259,13 @@ test "render exposes live counters, rounds, prefill and TPOT without cache famil
     try std.testing.expect(std.mem.indexOf(u8, body, "tensorfold:request_prefill_seconds_sum 0.25") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "tensorfold:request_time_per_output_token_seconds_sum 1") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "prompt_tokens_cached_total") == null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "device_memory_bytes") == null); // unknown memory: no gauge
+    stub.memory_value = .{ .active = 7 << 30, .peak = 8 << 30 };
+    var known: std.Io.Writer.Allocating = .init(gpa);
+    defer known.deinit();
+    try m.render(std.testing.io, &known.writer, stub.engine(), 4096);
+    try std.testing.expect(std.mem.indexOf(u8, known.written(), "tensorfold:device_memory_bytes 7516192768\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, known.written(), "tensorfold:device_memory_peak_bytes 8589934592\n") != null);
 }
 
 test "metrics snapshot allocation failure releases the mutex" {

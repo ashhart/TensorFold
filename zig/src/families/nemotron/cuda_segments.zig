@@ -4,7 +4,6 @@ const std = @import("std");
 const cuda = @import("cuda");
 const kern = @import("cuda_kernels.zig");
 const state = @import("cuda_state.zig");
-const sampler = @import("cuda_sampler.zig");
 const fwd = @import("cuda_forward.zig");
 const Engine = @import("cuda_engine.zig").Engine;
 const Cancel = @import("cuda_engine.zig").Cancel;
@@ -86,7 +85,7 @@ pub fn prefill(e: *Engine, s: *Segments, prompt: []const u32, head: ?*Head, part
             const rows = segs.chunkRows(c.rows, R, k);
             try e.ops().upload(bufs[k].p_ids, std.mem.sliceAsBytes(host[k * R ..][0..rows]));
             const ops: kern.Ops = .{ .k = &e.k, .s = s.runner.stream(e.stream, k) };
-            const f = fwd.Forward.init(e.c, &e.w, bufs[k], ops, e.max_len, e.nch, sampler.target(e.sampling));
+            const f = fwd.Forward.init(e.c, &e.w, bufs[k], ops, e.max_len, e.nch, e.sampling != null);
             seg[k] = .{ .f = f, .walk = .{ .rows = rows, .pos = e.pos + k * R } };
         }
         try e.copied.record(e.stream);

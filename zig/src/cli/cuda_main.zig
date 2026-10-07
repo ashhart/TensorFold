@@ -6,6 +6,8 @@ const nemotron = @import("nemotron");
 const core = @import("core");
 const lanes = @import("lanes");
 const checks = @import("cuda_checks.zig");
+const kernel_checks = @import("cuda_kernel_checks.zig");
+const shared_checks = @import("cuda_shared_checks.zig");
 const lanes_cli = @import("cuda_lanes.zig");
 const segments_cli = @import("cuda_segments.zig");
 const decode = nemotron.decode;
@@ -23,6 +25,11 @@ const usage =
     \\       tensorfold prefill MODEL PROMPTS.json NAME [--dump DIR] [--kernels DIR]
     \\       tensorfold rounds MODEL --tokens ID,... [--max-tokens N]   (GPU ms a serial and a window graph round)
     \\       tensorfold check-draws MODEL FIXTURES_DIR   (MTP draws against the lane fixtures)
+    \\       tensorfold shared-widths MODEL PROMPTS.json --streams N [--max-tokens N] [sampling as run]
+    \\                (N streams' continuations as shared windows of varying splits against serial, 2 <= N <= 8)
+    \\       tensorfold check-kernels MODEL   (lane_gemv and the forked MoE against the kernels they replace, real weights)
+    \\       tensorfold widths MODEL --tokens ID,... [--max-tokens N] [--eager] [sampling as run]
+    \\                (every verify width 1-16 against serial decoding, a wrong draft every third window)
     \\       tensorfold lanes MODEL PROMPTS.json [--solo] [--max-tokens N] [--no-drafts] [sampling as run] [--report PATH]
     \\                (every prompt through the lane core at once, or one at a time with --solo)
     \\
@@ -90,6 +97,9 @@ pub fn main(init: std.process.Init) !u8 {
         } else if (std.mem.eql(u8, a, "--counts")) {
             opts.counts = try parseCounts(value);
             i += 1;
+        } else if (std.mem.eql(u8, a, "--streams")) {
+            opts.streams = try std.fmt.parseInt(usize, value, 10);
+            i += 1;
         } else if (std.mem.eql(u8, a, "--repeat")) {
             opts.repeat = try std.fmt.parseInt(usize, value, 10);
             i += 1;
@@ -123,9 +133,10 @@ pub fn main(init: std.process.Init) !u8 {
     const cmd = args[1];
     const bench = std.mem.eql(u8, cmd, "segments");
     const decoding = std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "lanes") or bench;
-    const mtp = std.mem.eql(u8, cmd, "check-weights") or std.mem.eql(u8, cmd, "rounds") or std.mem.eql(u8, cmd, "check-draws") or (decoding and opts.drafts);
-    const graphs = opts.graphs and (std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "rounds") or bench);
-    const sampling: ?lanes.Sampling = if (std.mem.eql(u8, cmd, "run") and opts.sampling.temperature > 0) opts.sampling else null;
+    const mtp = std.mem.eql(u8, cmd, "check-weights") or std.mem.eql(u8, cmd, "rounds") or std.mem.eql(u8, cmd, "check-draws") or std.mem.eql(u8, cmd, "widths") or std.mem.eql(u8, cmd, "check-kernels") or (decoding and opts.drafts);
+    const widths = std.mem.eql(u8, cmd, "widths");
+    const graphs = opts.graphs and (std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "rounds") or bench or widths);
+    const sampling: ?lanes.Sampling = if ((std.mem.eql(u8, cmd, "run") or widths) and opts.sampling.temperature > 0) opts.sampling else null;
     const segments = opts.segments orelse if (init.environ_map.get("TF_CUDA_SEGMENTS")) |v| try std.fmt.parseInt(usize, v, 10) else 1;
     const engine = try nemotron.Engine.init(gpa, init.io, &ctx, opts.model, kernels, .{ .context = opts.context, .mtp = mtp, .graphs = graphs, .sampling = sampling, .segments = segments });
     defer engine.deinit();
@@ -145,7 +156,16 @@ pub fn main(init: std.process.Init) !u8 {
     if (std.mem.eql(u8, cmd, "teacher") and rest.len == 1) return checks.teacher(gpa, init.io, engine, rest[0], opts.dump);
     if (std.mem.eql(u8, cmd, "prefill") and rest.len == 2) return checks.prefill(gpa, init.io, engine, rest[0], rest[1], opts.dump);
     if (std.mem.eql(u8, cmd, "rounds")) return checks.rounds(engine, opts.tokens, opts.max_tokens);
+    if (widths) return checks.widths(gpa, engine, opts.tokens, opts.max_tokens);
     if (std.mem.eql(u8, cmd, "check-draws") and rest.len == 1) return checks.draws(gpa, init.io, engine, rest[0]);
+    if (std.mem.eql(u8, cmd, "shared-widths") and rest.len == 1) {
+        const s: ?lanes.Sampling = if (opts.sampling.temperature > 0) opts.sampling else null;
+        return shared_checks.widths(gpa, init.io, engine, rest[0], opts.streams, opts.max_tokens, s);
+    }
+    if (std.mem.eql(u8, cmd, "check-kernels")) {
+        try engine.reset();
+        return kernel_checks.check(gpa, engine);
+    }
     std.debug.print("{s}", .{usage});
     return 2;
 }
@@ -168,6 +188,7 @@ const Options = struct {
     segments: ?usize = null,
     counts: Counts = .{ .items = .{ 1, 2, 3, 4 }, .len = 4 },
     repeat: usize = 3,
+    streams: usize = 4,
     profile: bool = false,
 };
 
