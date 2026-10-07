@@ -3,6 +3,7 @@ const driver = @import("driver.zig");
 const fixtures = @import("hip_fixtures");
 
 test {
+    _ = @import("affine.zig");
     _ = @import("args.zig");
     _ = @import("code_object.zig");
     _ = @import("abi.zig");

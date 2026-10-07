@@ -186,6 +186,21 @@ pub fn build(b: *std.Build) void {
     const hip_gpu_test = b.addTest(.{ .root_module = hip_gpu_module });
     b.step("hip-gpu-build", "Compile HIP runtime tests without running GPU work").dependOn(&hip_gpu_test.step);
     b.step("hip-gpu-test", "Real HIP copies, fills and architecture-selected module launches").dependOn(&b.addRunArtifact(hip_gpu_test).step);
+    const affine_compile = b.addSystemCommand(&.{ hipcc, "--genco", b.fmt("--offload-arch={s}", .{hip_arch}), "-O2", "-ffp-contract=off" });
+    affine_compile.addFileArg(b.path("zig/kernels/hip/affine.hip"));
+    affine_compile.addArg("-o");
+    const affine_image = affine_compile.addOutputFileArg("affine.hsaco");
+    const affine_files = b.addWriteFiles();
+    _ = affine_files.addCopyFile(affine_image, "affine.hsaco");
+    _ = affine_files.addCopyFile(b.path("zig/tests/hip_affine_g64.hex"), "golden.hex");
+    const affine_data = b.createModule(.{ .root_source_file = affine_files.add("data.zig", b.fmt("pub const arch = \"{s}\";\npub const image align(8) = @embedFile(\"affine.hsaco\").*;\npub const hex = @embedFile(\"golden.hex\");\n", .{hip_arch})) });
+    const affine_module = b.createModule(.{ .root_source_file = b.path("zig/src/hip/affine_gpu_test.zig"), .target = target, .link_libc = true });
+    affine_module.addIncludePath(.{ .cwd_relative = hip_include });
+    affine_module.addImport("affine_data", affine_data);
+    affine_module.addCSourceFile(.{ .file = b.path("zig/src/hip/device_arch.c"), .flags = &.{"-D__HIP_PLATFORM_AMD__"} });
+    const affine_test = b.addTest(.{ .root_module = affine_module });
+    b.step("hip-affine-build", "Compile affine golden GPU test without executing").dependOn(&affine_test.step);
+    b.step("hip-affine-test", "Run exact affine golden GPU regression").dependOn(&b.addRunArtifact(affine_test).step);
 }
 
 /// `zig build native -Dcpu=apple_m1`: tensorfold-native with the Metal engines for the Python package's bundle (a native M5 build traps on M1-M4).
