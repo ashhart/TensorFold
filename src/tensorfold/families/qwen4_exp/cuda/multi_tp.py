@@ -108,7 +108,8 @@ class OutOfStep(RuntimeError):
 def shape(dec) -> list:
     """The logical state both ranks must share; cache contents are checked when a prefix is selected."""
 
-    return [dec.next_id, [[s.capacity, s.limit, s.pos, s.mtp_len, list(s.cur), s.kv_dtype] for s in dec.slots],
+    return [dec.next_id, [[s.capacity, s.limit, s.pos, s.mtp_len, list(s.cur), s.kv_dtype,
+                           getattr(s, "image_positions", None) is not None] for s in dec.slots],
             [[s.sid, dec._index(s.st), len(s.out), s.out[-1] if s.out else None, list(s.drafts),
               bool(s.done), bool(s.waiting), s.background, s.draft, s.stop_eos, s.count, _pack(s.sampling)]
              for s in [*dec.streams.values(), *dec.filling]],
@@ -168,11 +169,17 @@ class TwoRanks:
         resume = next(({"state": k[2], "tail": k[3]} for k in self.kept
                        if self._index(k[1]) == source and len(k[0]) == cached and s.prompt[:cached] == k[0]), None)
         valid = 0 <= slot < len(self.slots) and (cached == 0 or resume is not None)
+        # an image prompt: rank 0 holds the features it encoded, rank 1 the metadata rank 0 sent; both agree on
+        # the rows, the decode offset and the feature shape before the tensors cross (``_share_vision``)
+        vision = getattr(s, "vision", None)
+        images = None if vision is None else vision if isinstance(vision, dict) else {
+            "rows": [int(r) for r in vision.rows], "delta": int(vision.rope_delta),
+            "shape": [int(n) for n in vision.features.shape]}
         if self.link is not None:
             self.link.send(["admit", self.next_id, list(s.prompt), s.count, _pack(s.sampling), bool(s.draft),
-                            bool(s.stop_eos), bool(s.background), plan])
+                            bool(s.stop_eos), bool(s.background), plan, images])
         valid, fits = self._agree("admission", [shape(self), plan, list(s.prompt), s.count, _pack(s.sampling),
-                                               bool(s.draft), bool(s.stop_eos), bool(s.background)],
+                                               bool(s.draft), bool(s.stop_eos), bool(s.background), images],
                                   (valid, ready(self, plan)))
         if not valid:
             raise OutOfStep("the agreed prefix is not available on both ranks")
@@ -180,11 +187,29 @@ class TwoRanks:
             if not self.streams and not self.filling:
                 raise ValueError("the prompt cannot fit available memory; shorten it or lower the server context")
             raise NoRoom("the proposed prompt cache growth does not fit on both ranks")
+        if images is not None:                       # both ranks reach this point or neither does
+            s.vision = self._share_vision(s, images)
         apply(self, plan)
         if plan["error"]:
             raise NoRoom(plan["error"])
         s.stops = list(plan["points"])
         return self.slots[slot], resume, cached
+
+    def _share_vision(self, s, images: dict):
+        """Rank 0 sends the image features and rotary positions it encoded; rank 1 receives the same tensors.
+
+        Point to point over the model communicator, inside the admission's lockstep (after the agreed plan,
+        before any round collective). Rank 1 attaches them exactly as rank 0 does, so every layer sees identical
+        hidden states for the image rows; it has no tower of its own."""
+
+        from .vision_ranks import exchange
+
+        leader = self.link is not None
+        try:
+            return exchange(self.w.comm, 0 if leader else 1, len(s.prompt), images, s.vision if leader else None,
+                            hidden=int(self.w.cfg.hidden))
+        except ValueError as exc:
+            raise OutOfStep(str(exc)) from exc
 
     def _prepare_round(self, told):
         from .multi_plan import apply, ready, round_plan
@@ -212,9 +237,10 @@ class TwoRanks:
             if op is None or op[0] == "stop":
                 return
             if op[0] == "admit":
-                sid, prompt, count, smp, drafted, stop, background, plan = op[1:]
+                sid, prompt, count, smp, drafted, stop, background, plan = op[1:9]
                 s = Stream(prompt, count, _unpack(smp), draft=drafted, stop_eos=stop)
                 s.background = background
+                s.vision = op[9] if len(op) > 9 else None    # an image prompt's rows, delta and feature shape
                 try:
                     self.admit(s, told=plan)
                 except (ValueError, NoRoom, OutOfStep) as exc:
