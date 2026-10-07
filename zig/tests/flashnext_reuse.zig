@@ -58,7 +58,7 @@ const Run = struct {
     }
     fn marked(ctx: *anyopaque, at: usize) void {
         const r: *Run = @ptrCast(@alignCast(ctx));
-        if (r.store) |s| _ = s.keep(r.prompt, @intCast(at), null);
+        if (r.store) |s| _ = s.keep(r.prompt, @intCast(at), null, &.{});
         if (r.copy_at) |slot| slot.* = snap.save(r.e.?, r.a, at) catch null;
         if (r.pooled_at) |p| p.* = Pooled.of(r.e.?.m, at);
     }

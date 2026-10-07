@@ -78,10 +78,7 @@ const Fix = load_fix.Fix;
 const Transform = load_fix.Transform;
 const readAll = load_fix.readAll;
 
-
 const Copy = struct { shard: u32, off: u64, len: u64, dst: [*]u8 };
-
-
 
 const Loader = struct {
     gpa: std.mem.Allocator,
@@ -444,7 +441,6 @@ const Loader = struct {
     }
 };
 
-
 const Pool = struct {
     fds: []std.c.fd_t,
     jobs: []const Copy,
@@ -500,7 +496,6 @@ fn runCopies(l: *Loader, threads: usize) !void {
     for (workers) |t| if (t) |th| th.join();
     if (tx.failed.load(.acquire)) return error.TransformFailed;
 }
-
 
 /// The first `c.run` layers, the MTP layer (when stored) and the head; `dry`: check names, dtypes and shapes, read nothing.
 pub fn load(gpa: std.mem.Allocator, device: mtl.Device, dir: []const u8, c: *const cfg.Config, threads: usize, dry: bool) !*Weights {

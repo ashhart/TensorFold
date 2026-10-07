@@ -11,6 +11,7 @@ const CTRL_ACK = 24; // u64, at rank 0: the last step rank 1 has read
 const REQ_FLAG = 32; // u64, at rank 1: rank 0's last request
 const REQ_ACK = 40; // u64, at rank 0: the last request rank 1 has copied out
 const BYE = 48; // u64, at rank 1: rank 0 has closed
+const REPLY = 56; // u64, at rank 0: rank 1's result of the last command, (command << 1) | ok
 const IDENT = 64; // the peer's Identity
 const REQ = PAGE; // the request: a 64-byte head, then the prompt's tokens
 pub const REQ_TOKENS = 262144;
@@ -168,6 +169,18 @@ pub const Control = struct {
         };
         try c.rd.signal(c.peer, c.base + REQ_ACK, c.req);
         return out;
+    }
+
+    /// Rank 1: the result of the command just taken (a learned state written or read), for rank 0's `waitReply`.
+    pub fn reply(c: *Control, ok: bool) !void {
+        try c.rd.signal(c.peer, c.base + REPLY, (c.req << 1) | @intFromBool(ok));
+    }
+
+    /// Rank 0: whether rank 1 carried out the last command sent.
+    pub fn waitReply(c: *Control) !bool {
+        const v = try c.reach(REPLY, c.req << 1, true) orelse return error.EpClosed;
+        if (v >> 1 != c.req) return error.EpOutOfStep;
+        return v & 1 != 0;
     }
 
     /// Rank 1: rank 0's next request; null once closed; a command in its place is refused.

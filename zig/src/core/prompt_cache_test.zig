@@ -1,6 +1,7 @@
 //! The prompt cache's tests: a fake family whose state is a running sum, so a resumed pass equals a fresh one exactly when it should.
 const std = @import("std");
 const pc = @import("prompt_cache.zig");
+const imprint = @import("prompt_imprint.zig");
 const Snapshots = pc.Snapshots;
 const Saved = pc.Saved;
 const Store = pc.Store;
@@ -35,6 +36,32 @@ const Fake = struct {
 
     fn snapshots(f: *Fake) Snapshots {
         return .{ .ptr = f, .vtable = &.{ .bytes = bytesFn, .save = saveFn, .restore = restoreFn, .drop = dropFn } };
+    }
+    /// With learned states on disk: a state's position and sum in one file.
+    fn learned(f: *Fake) Snapshots {
+        return .{ .ptr = f, .vtable = &.{ .bytes = bytesFn, .save = saveFn, .restore = restoreFn, .drop = dropFn, .write = writeFn, .read = readFn } };
+    }
+    fn file(buf: []u8, dir: []const u8, key: u64) ![:0]const u8 {
+        return std.fmt.bufPrintSentinel(buf, "{s}/{x:0>16}.bin", .{ dir, key }, 0);
+    }
+    fn writeFn(_: *anyopaque, saved: Saved, dir: [:0]const u8, key: u64) anyerror!void {
+        var path: [512]u8 = undefined;
+        const fd = std.c.open(try file(&path, dir, key), .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
+        if (fd < 0) return error.WriteFailed;
+        defer _ = std.c.close(fd);
+        try imprint.writeAll(fd, std.mem.asBytes(@as(*State, @ptrCast(@alignCast(saved)))));
+    }
+    fn readFn(ptr: *anyopaque, dir: [:0]const u8, key: u64, at: u32) anyerror!Saved {
+        const f = of(ptr);
+        var path: [512]u8 = undefined;
+        const fd = std.c.open(try file(&path, dir, key), .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+        if (fd < 0) return error.ReadFailed;
+        defer _ = std.c.close(fd);
+        const st = try f.gpa.create(State);
+        errdefer f.gpa.destroy(st);
+        if (!imprint.readAt(fd, std.mem.asBytes(st), 0) or st.at != at) return error.ReadFailed;
+        f.live += 1;
+        return st;
     }
     /// A pool-like family: a kept state holds 10 bytes under `bytes`, and a dropped one's storage stays spare.
     fn pooled(f: *Fake) Snapshots {
@@ -112,7 +139,7 @@ const Fake = struct {
             f.sum = f.sum *% 31 +% t;
             f.at += 1;
             if (mi < plan.marks.len and plan.marks[mi] == f.at) {
-                _ = s.keep(prompt, f.at, null);
+                _ = s.keep(prompt, f.at, null, &.{});
                 mi += 1;
             }
         }
@@ -369,4 +396,48 @@ test "a state a peer cannot resume is forgotten: the next prompt misses instead 
     try std.testing.expectEqual(@as(u64, 1), s.counts.failed);
     try std.testing.expectEqual(@as(?*pc.Entry, null), s.find(&t2, &.{}));
     try std.testing.expectEqual(s.entries.items.len, f.live);
+}
+
+test "a learned harness state outlives its store: a fresh session on a new one resumes it from disk, equal to a fresh pass" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var root_buf: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, "/tmp/tf-learn-test-{d}", .{std.c.getpid()});
+    const rules: pc.Rules = .{ .lookahead = 1, .min_prompt = 0, .min_gap = 1 };
+    const harness = [_]u32{ 7, 7, 7, 7, 7, 7 }; // shared by every session: a state at 5 reads it all (lookahead 1)
+    const key = imprint.Imprint.keyOf(&harness);
+    defer {
+        var path: [512]u8 = undefined;
+        for ([_][]const u8{ "/0000000000000003/index", "/0000000000000003", "" }) |tail| {
+            const z = std.fmt.bufPrintSentinel(&path, "{s}{s}", .{ root, tail }, 0) catch continue;
+            if (std.c.unlink(z) != 0) _ = std.c.rmdir(z);
+        }
+    }
+    {
+        var im = try imprint.Imprint.open(gpa, root, 3);
+        defer im.deinit();
+        var path: [512]u8 = undefined;
+        defer _ = std.c.unlink(Fake.file(&path, im.dir, key) catch unreachable);
+        {
+            var f: Fake = .{ .gpa = gpa };
+            var s = Store.init(gpa, f.learned(), rules, 1 << 20);
+            defer s.deinit();
+            s.imprint = &im;
+            const first = harness ++ [_]u32{ 1, 2, 9 };
+            try std.testing.expectEqual(fresh(&first), f.pass(&s, &first, try s.begin(a, &first, 8, &.{5}, &.{}, null)));
+            try std.testing.expect(im.has(key));
+        }
+        var again = try imprint.Imprint.open(gpa, root, 3); // a new server reads the index back
+        defer again.deinit();
+        var f: Fake = .{ .gpa = gpa };
+        var s = Store.init(gpa, f.learned(), rules, 1 << 20);
+        defer s.deinit();
+        s.imprint = &again;
+        const second = harness ++ [_]u32{ 3, 4, 9 };
+        const p = try s.begin(a, &second, 8, &.{5}, &.{}, null);
+        try std.testing.expectEqual(@as(u32, 5), p.from);
+        try std.testing.expectEqual(fresh(&second), f.pass(&s, &second, p));
+    }
 }

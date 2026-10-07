@@ -120,6 +120,38 @@ pub const Backend = struct {
         return try b.sl.save(i, at, id);
     }
 
+    /// --learn: a kept state to its file here and, on a pair, rank 1's half there; an error unless both are written.
+    pub fn snapWrite(ptr: *anyopaque, saved: *anyopaque, dir: [:0]const u8, key: u64) anyerror!void {
+        const b = self(ptr);
+        const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
+        var buf: [1100]u8 = undefined;
+        const file = try snapshot.path(&buf, dir, key, 0);
+        try mirror.send(b.sl.e, .persist, &.{ snap.id, @truncate(key), @truncate(key >> 32) });
+        const own = b.sl.writeSnap(snap.id, file);
+        if (b.sl.e.ep) |ep| if (!try ep.ctl.waitReply()) return error.PeerLearnFailed;
+        return own;
+    }
+
+    /// --learn: learned state `key` read back here and, on a pair, rank 1's half there; an error unless both are.
+    pub fn snapRead(ptr: *anyopaque, dir: [:0]const u8, key: u64, at: u32) anyerror!*anyopaque {
+        const b = self(ptr);
+        var buf: [1100]u8 = undefined;
+        const file = try snapshot.path(&buf, dir, key, 0);
+        const id = b.sl.next_snap;
+        try mirror.send(b.sl.e, .load, &.{ id, @truncate(key), @truncate(key >> 32), at });
+        const own = b.sl.readSnap(id, at, file);
+        const peer = if (b.sl.e.ep) |ep| try ep.ctl.waitReply() else true;
+        const snap = own catch |err| {
+            if (b.sl.e.ep != null and peer) try mirror.send(b.sl.e, .drop, &.{id}); // rank 1's half goes too
+            return err;
+        };
+        if (!peer) {
+            b.sl.drop(id);
+            return error.PeerLearnFailed;
+        }
+        return snap;
+    }
+
     pub fn snapRestore(_: *anyopaque, _: ?*anyopaque, _: *anyopaque) anyerror!void {
         return error.BackendRestores; // the prompt pass restores, before its first chunk
     }

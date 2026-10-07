@@ -21,6 +21,7 @@ pub const Host = struct {
     core: lanes.Engine,
     host: api.LaneHost,
     cache: ?api.prompt_cache.Store = null, // rank 0's kept prompt states (rank 1 holds copies by id)
+    learned: ?api.prompt_imprint.Imprint = null, // --learn: shared states on disk (rank 1 keeps its halves there)
     warm: mtl.keepalive.Target,
     follower: ?std.Thread = null, // speed-up mode's rank 1: the thread replaying rank 0's slot commands
 
@@ -61,9 +62,20 @@ fn cacheBudget(eng: *const ge.Engine, gib: ?f64) u64 {
     return if (limit > used) @min(want, limit - used) else 0;
 }
 
+/// Learned states under `root` for this checkpoint, build, chip and split (each its own directory).
+fn learnedStates(gpa: Allocator, io: std.Io, eng: *const ge.Engine, root: []const u8) !api.prompt_imprint.Imprint {
+    var h = std.hash.Wyhash.init(0x61);
+    const build = try api.prompt_imprint.buildHash(io);
+    for ([_]u64{ eng.model_hash, build, eng.c.tp, eng.chunk_rows, @intFromBool(eng.ep != null) }) |x| h.update(std.mem.asBytes(&x));
+    h.update(std.mem.span(eng.device.name()));
+    const m = try api.prompt_imprint.Imprint.open(gpa, root, h.final());
+    std.log.info("glm: learned prompt states in {s} ({d} known)", .{ m.dir, m.metas.items.len });
+    return m;
+}
+
 /// A GLM-5.3-Flash checkpoint served: `window` tokens of cache a stream, warmed first (the pair: `speed_up`).
-pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: ?[]const u8, streams: u32, fixed: bool, cache_gib: ?f64) !*Host {
-    const eng = try ge.Engine.loadWith(gpa, dir, window + 64, speed_up);
+pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: ?[]const u8, streams: u32, fixed: bool, cache_gib: ?f64, learn: ?[]const u8) !*Host {
+    const eng = try ge.Engine.loadWith(gpa, dir, window + 64, speed_up, learn != null);
     errdefer eng.deinit();
     var toks: [96]u32 = undefined;
     for (&toks, 0..) |*t, i| t.* = @intCast(1000 + i);
@@ -74,6 +86,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     h.gpa = gpa;
     h.eng = eng;
     h.follower = null;
+    h.learned = null;
     h.slots = try glm.slots.Slots.init(gpa, eng, try fit(eng, streams, fixed));
     errdefer h.slots.deinit(gpa);
     const n: u32 = @intCast(h.slots.slots.len);
@@ -89,9 +102,16 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     const budget = cacheBudget(eng, cache_gib);
     if (!eng.followsPeer() and budget > 0) {
         const B = glm.backend.Backend;
-        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = &h.back, .vtable = &.{ .bytes = B.snapBytes, .save = B.snapSave, .restore = B.snapRestore, .drop = B.snapDrop } }, .{ .lookahead = 1, .planned = true }, budget);
+        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = &h.back, .vtable = &.{ .bytes = B.snapBytes, .save = B.snapSave, .restore = B.snapRestore, .drop = B.snapDrop, .write = B.snapWrite, .read = B.snapRead } }, .{ .lookahead = 1, .planned = true }, budget);
         h.host.cache = &h.cache.?;
     }
+    errdefer if (h.cache) |*store| store.deinit();
+    if (learn) |root| {
+        h.learned = try learnedStates(gpa, io, eng, root);
+        h.slots.learned = h.learned.?.dir;
+        if (h.cache) |*store| store.imprint = &h.learned.?;
+    }
+    errdefer if (h.learned) |*m| m.deinit();
     h.host.explain = .{ .text = words };
     h.warm = eng.keepalive_target;
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
@@ -119,6 +139,7 @@ pub fn close(ctx: *anyopaque) void {
     h.cfg.deinit(h.gpa);
     h.back.deinit();
     h.slots.deinit(h.gpa);
+    if (h.learned) |*m| m.deinit();
     h.eng.deinit();
     h.gpa.destroy(h);
 }

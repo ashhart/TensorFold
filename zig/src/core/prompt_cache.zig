@@ -1,6 +1,7 @@
 //! Exact prompt reuse for any family and backend: states kept at prompt-pass chunk ends, found by their tokens.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const imprint = @import("prompt_imprint.zig");
 
 /// A family's copy of one state.
 pub const Saved = *anyopaque;
@@ -26,6 +27,10 @@ pub const Snapshots = struct {
         trim: ?*const fn (ptr: *anyopaque, room: u64) void = null,
         /// Whether a save at `at` would take spare storage (no new storage).
         reuses: ?*const fn (ptr: *anyopaque, at: u32) bool = null,
+        /// Write `saved` as learned state `key`, in files of the family's own under `dir` (null: nothing kept on disk).
+        write: ?*const fn (ptr: *anyopaque, saved: Saved, dir: [:0]const u8, key: u64) anyerror!void = null,
+        /// Learned state `key` of `at` tokens, read back from its files under `dir` into new storage.
+        read: ?*const fn (ptr: *anyopaque, dir: [:0]const u8, key: u64, at: u32) anyerror!Saved = null,
     };
 };
 
@@ -70,6 +75,7 @@ pub const Store = struct {
     entries: std.ArrayList(*Entry) = .empty,
     counts: Counts = .{},
     shared_keys: std.ArrayList(u64) = .empty, // the tokens of recently planned shared cuts, hashed (at most SHARED_KEYS)
+    imprint: ?*imprint.Imprint = null, // --learn: shared cuts' states on disk, read back by later sessions and servers
 
     const SHARED_KEYS = 64;
 
@@ -141,7 +147,7 @@ pub const Store = struct {
 
     /// begin without the restore, for backends that restore inside their own prompt pass and then call `resumed`.
     pub fn lookup(s: *Store, a: Allocator, prompt: []const u32, history_len: u32, shared: []const u32, starts: []const u32) !Lookup {
-        const e = s.find(prompt, starts);
+        const e = s.recall(prompt, starts, s.find(prompt, starts));
         if (e == null) s.counts.misses += 1;
         const marks_ = try s.fitting(a, try s.marks(a, prompt, if (e) |x| x.at else 0, history_len, shared, starts, if (e) |x| x.last else &.{}));
         for (shared) |w| { // the shared cuts this pass keeps: their states serve other conversations too
@@ -240,7 +246,7 @@ pub const Store = struct {
     }
 
     /// The prompt pass stands at `at`: keep its state for `prompt`, evicting to fit; refused (counted) past the budget.
-    pub fn keep(s: *Store, prompt: []const u32, at: u32, owner: ?*anyopaque) bool {
+    pub fn keep(s: *Store, prompt: []const u32, at: u32, owner: ?*anyopaque, starts: []const u32) bool {
         const n = @as(usize, at) + s.rules.lookahead;
         if (at == 0 or n > prompt.len) return false;
         s.clock += 1;
@@ -292,8 +298,54 @@ pub const Store = struct {
         };
         s.held += charged;
         s.counts.kept += 1;
+        if (shared) s.learn(e, starts);
         if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| s.held); // spare storage only inside what the budget leaves
         return true;
+    }
+
+    /// A shared cut's state written to disk once (--learn): later sessions read it back, after a restart too.
+    fn learn(s: *Store, e: *const Entry, starts: []const u32) void {
+        const im = s.imprint orelse return;
+        const write = s.family.vtable.write orelse return;
+        const key = imprint.Imprint.keyOf(e.tokens);
+        if (im.has(key)) return;
+        write(s.family.ptr, e.saved, im.dir, key) catch |err| return note("learning {d} tokens failed ({s})", .{ e.at, @errorName(err) });
+        im.add(key, e.at, e.tokens, starts) catch |err| return note("learning {d} tokens failed ({s})", .{ e.at, @errorName(err) });
+        if (!@import("builtin").is_test) std.log.info("prompt cache: learned {d} tokens to disk", .{e.at});
+    }
+
+    /// A learned state on disk longer than `have`, read back as a shared entry; else `have` (none, or reading failed).
+    fn recall(s: *Store, prompt: []const u32, starts: []const u32, have: ?*Entry) ?*Entry {
+        const im = s.imprint orelse return have;
+        const read = s.family.vtable.read orelse return have;
+        const m = im.best(prompt, starts, s.rules.planned, if (have) |x| x.at else 0) orelse return have;
+        const bytes = s.family.vtable.bytes(s.family.ptr, m.at);
+        while (bytes <= s.budget and s.held + s.spare() + bytes > s.budget) {
+            s.remove(s.victimBut(have, prompt) orelse return have);
+            s.counts.evicted += 1;
+        }
+        if (bytes > s.budget) return have;
+        const e = s.gpa.create(Entry) catch return have;
+        e.* = .{ .tokens = &.{}, .at = m.at, .saved = undefined, .bytes = bytes, .born = @intCast(prompt.len), .used = s.clock, .last = &.{}, .shared = true };
+        e.tokens = s.gpa.dupe(u32, m.tokens) catch return s.drop(e, have, false);
+        e.last = s.gpa.dupe(u32, prompt) catch return s.drop(e, have, false);
+        e.saved = read(s.family.ptr, im.dir, m.key, m.at) catch |err| {
+            note("reading the learned {d} tokens failed ({s})", .{ m.at, @errorName(err) });
+            return s.drop(e, have, false);
+        };
+        s.entries.append(s.gpa, e) catch return s.drop(e, have, true);
+        s.held += bytes;
+        if (!@import("builtin").is_test) std.log.info("prompt cache: read {d} learned tokens from disk", .{m.at});
+        return e;
+    }
+
+    /// A half-made recalled entry undone (`saved` once read); the lookup goes on with `have`.
+    fn drop(s: *Store, e: *Entry, have: ?*Entry, saved: bool) ?*Entry {
+        if (saved) s.family.vtable.drop(s.family.ptr, e.saved);
+        s.gpa.free(e.tokens);
+        s.gpa.free(e.last);
+        s.gpa.destroy(e);
+        return have;
     }
 
     /// One log line after a prompt pass: where it resumed, how many states it kept, and what the store holds.

@@ -35,6 +35,7 @@ pub const Slots = struct {
     slots: []Slot,
     snaps: std.AutoHashMapUnmanaged(u32, *snapshot.Snap) = .empty, // kept prompt states by id (a pair's ranks agree)
     next_snap: u32 = 1,
+    learned: ?[:0]const u8 = null, // --learn: this Mac's learned-state directory (rank 1 names its files in it)
     rows: Ref, // bf16 [max_rows, hidden]: the rows every stream's head absorbs, gathered
     ids: Ref, // u32 [max_rows]: their next tokens
     lasts: Ref, // bf16 [max_rows, hidden]: each drafting stream's last absorbed row (m_x), gathered
@@ -94,6 +95,28 @@ pub const Slots = struct {
         const snap = sl.snaps.get(id) orelse return error.SnapshotOutOfStep;
         if (slot.s.pos != 0 or snap.at >= slot.prompt_len) return error.SnapshotOutOfStep;
         try sl.copySnap(slot, snap, false);
+    }
+
+    /// Snapshot `id` to its learned-state file, once the copy into it has finished.
+    pub fn writeSnap(sl: *Slots, id: u32, file: [:0]const u8) !void {
+        const snap = sl.snaps.get(id) orelse return error.SnapshotOutOfStep;
+        try sl.flush();
+        try snapshot.writeFile(snap, file);
+    }
+
+    /// A learned state of `at` tokens read from `file` as snapshot `id`.
+    pub fn readSnap(sl: *Slots, id: u32, at: u32, file: [:0]const u8) !*snapshot.Snap {
+        if (id == 0 or sl.snaps.contains(id)) return error.SnapshotOutOfStep;
+        const n = snapshot.bytes(&sl.e.c, at);
+        const buf = try sl.e.device.buffer(n, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+        errdefer buf.deinit();
+        const snap = try sl.gpa.create(snapshot.Snap);
+        errdefer sl.gpa.destroy(snap);
+        snap.* = .{ .id = id, .at = at, .buf = buf, .bytes = n };
+        try snapshot.readFile(snap, file);
+        try sl.snaps.put(sl.gpa, id, snap);
+        sl.next_snap = @max(sl.next_snap, id + 1);
+        return snap;
     }
 
     /// Forget snapshot `id`.

@@ -3,18 +3,19 @@ const std = @import("std");
 const eng = @import("engine.zig");
 const slots_mod = @import("slots.zig");
 const st = @import("state.zig");
+const snapshot = @import("snapshot.zig");
 const Engine = eng.Engine;
 const Slots = slots_mod.Slots;
 const Win = slots_mod.Win;
 const Draft = slots_mod.Draft;
 
-pub const Kind = enum(u32) { begin = 1, chunk, window, keep, draft, release, save, restore, drop };
+pub const Kind = enum(u32) { begin = 1, chunk, window, keep, draft, release, save, restore, drop, persist, load };
 
 /// Rank 0 of a pair sends the command; one Mac sends nothing.
 pub fn send(e: *Engine, kind: Kind, words: []const u32) !void {
     const ep = e.ep orelse return;
     if (ep.rank != 0) return error.FollowsPeer;
-    try ep.ctl.sendCommand(@intFromEnum(kind), words);
+    try ep.ctl.sendCommand(@backingInt(kind), words);
 }
 
 /// A window command: rank 0's last window digest, then each window's slot, pending token, held count and host drafts.
@@ -86,7 +87,8 @@ pub fn apply(sl: *Slots, kind: u32, w: []const u32, wins: []Win, drafts: []Draft
     const k = std.enums.fromInt(Kind, kind) orelse return error.CommandOutOfStep;
     const need: usize = switch (k) {
         .begin, .keep, .restore => 2,
-        .chunk, .window, .save => 3,
+        .chunk, .window, .save, .persist => 3,
+        .load => 4,
         .draft, .release, .drop => 1,
     };
     if (w.len < need) return error.CommandOutOfStep;
@@ -107,7 +109,22 @@ pub fn apply(sl: *Slots, kind: u32, w: []const u32, wins: []Win, drafts: []Draft
         .save => _ = try sl.save(w[1], w[2], w[0]),
         .restore => try sl.restore(w[0], w[1]),
         .drop => sl.drop(w[0]),
+        .persist, .load => {
+            learned(sl, k, w) catch |err| { // replied as failed: rank 0 forgets the state and the pair stays in step
+                std.log.warn("speed-up mode: this Mac's half of a learned state failed ({s})", .{@errorName(err)});
+                return sl.e.ep.?.ctl.reply(false);
+            };
+            try sl.e.ep.?.ctl.reply(true);
+        },
     }
+}
+
+/// Rank 1's half of a learned state (--learn): snapshot w[0] written to its file, or read back from it as w[0].
+fn learned(sl: *Slots, k: Kind, w: []const u32) !void {
+    var buf: [1100]u8 = undefined;
+    const file = try snapshot.path(&buf, sl.learned orelse return error.NotLearning, @as(u64, w[1]) | @as(u64, w[2]) << 32, 1);
+    if (k == .persist) return sl.writeSnap(w[0], file);
+    _ = try sl.readSnap(w[0], w[3], file);
 }
 
 test "draft commands carry every stream's head request" {

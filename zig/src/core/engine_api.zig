@@ -136,6 +136,8 @@ pub const Open = struct {
     speed_up: ?[]const u8 = null,
     prompt_cache_gib: ?f64 = null,
     prompt_cache_over_cap: bool = false,
+    /// --learn: where shared prompt states are kept on disk for later sessions and servers (null: off).
+    learn: ?[]const u8 = null,
     /// --device and --segments (CUDA); null: the backend's environment fallback, then its default.
     device: ?u32 = null,
     segments: ?u32 = null,
@@ -242,6 +244,9 @@ pub const LaneHost = @import("lane_host.zig").LaneHost;
 /// Exact prompt reuse between requests, for any family (prompt_cache.zig).
 pub const prompt_cache = @import("prompt_cache.zig");
 
+/// Learned prompt-cache states on disk (prompt_imprint.zig).
+pub const prompt_imprint = @import("prompt_imprint.zig");
+
 /// The idle keepalive's ticker and target contract.
 pub const keepalive = @import("keepalive.zig");
 
@@ -249,5 +254,6 @@ test {
     _ = @import("lane_host.zig");
     _ = @import("lane_host_reuse_test.zig");
     _ = @import("prompt_cache.zig");
+    _ = @import("prompt_imprint.zig");
     _ = @import("keepalive.zig");
 }
