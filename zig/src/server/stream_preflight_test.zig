@@ -80,6 +80,31 @@ const HiEngine = struct {
     }
 };
 
+/// Two tool calls byte by byte, with a newline between them that the whole reply does not show.
+const CallEngine = struct {
+    const reply = "<tool_call>\n{\"name\": \"lookup\", \"arguments\": {\"q\": \"a\"}}\n</tool_call>\n" ++
+        "<tool_call>\n{\"name\": \"lookup\", \"arguments\": {\"q\": \"b\"}}\n</tool_call>";
+    const ids = blk: {
+        var out: [reply.len]u32 = undefined;
+        for (reply, &out) |byte, *id| id.* = byte;
+        break :blk out;
+    };
+
+    fn engine(e: *@This()) api.Engine {
+        return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = HiEngine.cancel, .status = HiEngine.status, .memory = HiEngine.memory } };
+    }
+
+    fn info(_: *anyopaque) api.Info {
+        return .{ .context_window = 4096 };
+    }
+
+    fn submit(_: *anyopaque, id: api.Id, _: *const api.Request, sink: api.Sink) api.SubmitError!void {
+        sink.event(sink.ctx, id, &.{ .prefilled = 0 });
+        for (0..ids.len) |i| sink.event(sink.ctx, id, &.{ .tokens = ids[i..][0..1] });
+        sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .stop } });
+    }
+};
+
 /// What the route's output saw: a whole reply's status, error code and sampling label, or a stream and its first role.
 const Seen = struct {
     gone_at_open: bool = false, // the client is gone when the stream opens
@@ -90,6 +115,20 @@ const Seen = struct {
     context_code: bool = false,
     label: ?enum { exact, greedy } = null,
     preparing: i64 = 0,
+    text: [64]u8 = undefined, // the streamed delta content, or the whole reply's message content
+    text_len: usize = 0,
+    calls: usize = 0, // the tool calls the stream started, or the whole reply's tool calls
+
+    fn content(c: *const Seen) []const u8 {
+        return c.text[0..c.text_len];
+    }
+
+    fn keep(c: *Seen, part: json.Value) void {
+        if (part != .string) return;
+        const n = @min(part.string.len, c.text.len - c.text_len);
+        @memcpy(c.text[c.text_len..][0..n], part.string[0..n]);
+        c.text_len += n;
+    }
 
     fn out(c: *Seen) openai.Out {
         return .{ .ctx = c, .vt = &.{ .open = open, .event = event, .reply = reply } };
@@ -110,6 +149,12 @@ const Seen = struct {
             c.context_code = code == .string and std.mem.eql(u8, code.string, "context_length_exceeded");
             return;
         }
+        if (p.get("choices")) |ch| if (ch == .array and ch.array.len > 0) if (ch.array[0].get("delta")) |d| {
+            if (d.get("content")) |t| c.keep(t);
+            if (d.get("tool_calls")) |t| if (t == .array) for (t.array) |call| {
+                if (call.get("id") != null) c.calls += 1;
+            };
+        };
         if (c.events != 1) return;
         const choices = p.get("choices") orelse return;
         if (choices != .array or choices.array.len == 0) return;
@@ -122,6 +167,12 @@ const Seen = struct {
         c.status = status;
         if (payload.get("tensorfold")) |t| if (t.get("sampling")) |l| if (l == .string) {
             c.label = if (std.mem.eql(u8, l.string, "exact")) .exact else if (std.mem.eql(u8, l.string, "greedy")) .greedy else null;
+        };
+        if (payload.get("choices")) |ch| if (ch == .array and ch.array.len > 0) if (ch.array[0].get("message")) |m| {
+            if (m.get("content")) |t| c.keep(t);
+            if (m.get("tool_calls")) |t| if (t == .array) {
+                c.calls += t.array.len;
+            };
         };
         const code = (payload.get("error") orelse return).get("code") orelse return;
         c.context_code = code == .string and std.mem.eql(u8, code.string, "context_length_exceeded");
@@ -143,9 +194,13 @@ fn send(route: Route, body: []const u8) !Seen {
 }
 
 fn sendTo(route: Route, body: []const u8, start: Seen) !Seen {
-    var text: TestText = .{};
     var backend: HiEngine = .{};
-    var srv = try server.Server.init(std.testing.allocator, std.testing.io, backend.engine(), text.text(), .{
+    return sendWith(backend.engine(), route, body, start);
+}
+
+fn sendWith(engine: api.Engine, route: Route, body: []const u8, start: Seen) !Seen {
+    var text: TestText = .{};
+    var srv = try server.Server.init(std.testing.allocator, std.testing.io, engine, text.text(), .{
         .served_name = "test-model",
         .model_ids = &.{"test-model"},
         .enable_thinking = false,
@@ -218,4 +273,32 @@ test "a reply labels a greedy request greedy and a sampled one exact" {
     const sampled = try send(.chat, "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"max_tokens\":2,\"temperature\":0.7,\"seed\":1}");
     try std.testing.expectEqual(.exact, sampled.label.?);
     try std.testing.expectEqual(@as(i64, 0), sampled.preparing);
+}
+
+/// A two-call reply on `route`, whole and streamed: the stream sends no text that the whole reply does not show.
+fn expectToolStreamLikeWhole(route: Route, comptime fields: []const u8) !void {
+    var backend: CallEngine = .{};
+    const whole = try sendWith(backend.engine(), route, "{" ++ fields ++ ",\"stream\":false}", .{});
+    const streamed = try sendWith(backend.engine(), route, "{" ++ fields ++ ",\"stream\":true}", .{});
+    try std.testing.expectEqual(@as(?u16, 200), whole.status);
+    try std.testing.expectEqual(@as(usize, 2), whole.calls);
+    try std.testing.expectEqual(@as(usize, 2), streamed.calls);
+    try std.testing.expectEqualStrings(whole.content(), streamed.content());
+}
+
+const tool_head = "\"model\":\"test-model\",\"max_tokens\":200,";
+
+test "a streamed chat tool reply sends no whitespace that the whole reply does not show" {
+    try expectToolStreamLikeWhole(.chat, tool_head ++ "\"messages\":[{\"role\":\"user\",\"content\":\"x\"}]," ++
+        "\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"parameters\":{\"type\":\"object\"}}}]");
+}
+
+test "a streamed Messages tool reply sends no whitespace that the whole reply does not show" {
+    try expectToolStreamLikeWhole(.messages, tool_head ++ "\"messages\":[{\"role\":\"user\",\"content\":\"x\"}]," ++
+        "\"tools\":[{\"name\":\"lookup\",\"input_schema\":{\"type\":\"object\"}}]");
+}
+
+test "a streamed Responses tool reply sends no whitespace that the whole reply does not show" {
+    try expectToolStreamLikeWhole(.responses, tool_head ++ "\"input\":\"x\"," ++
+        "\"tools\":[{\"type\":\"function\",\"name\":\"lookup\",\"parameters\":{\"type\":\"object\"}}]");
 }
