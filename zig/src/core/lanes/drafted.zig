@@ -64,6 +64,11 @@ pub const Drafted = struct {
         return m;
     }
 
+    /// Device bytes an admitted stream takes: the target's own and the drafter's for the same stream.
+    pub fn streamBytes(x: *const Drafted, target: usize) usize {
+        return target + x.drafter.facts().stream_bytes;
+    }
+
     fn self(ptr: *anyopaque) *Drafted {
         return @ptrCast(@alignCast(ptr));
     }

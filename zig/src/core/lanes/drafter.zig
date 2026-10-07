@@ -9,6 +9,7 @@ pub const Facts = struct {
     prior: []const f64 = &.{}, // acceptance by depth until a stream has its own
     plain_guard: bool = true, // plain rounds compete with drafted depths (the rule may choose no drafts)
     batched: bool = false, // hold() runs a shared round's streams as one batch
+    stream_bytes: usize = 0, // device bytes each opened stream holds (its caches), for memory admission
 };
 
 /// Target rows [start, start + features.rows) and the token after each; rows at or past `start` replace what was held.
