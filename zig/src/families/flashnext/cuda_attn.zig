@@ -1,4 +1,4 @@
-//! Layer 43's full attention for one decode token at position 0: project, prepare, attend, gate, project out.
+//! Layer 47's full attention for one decode token at position 0: project, prepare, attend, gate, project out.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -18,7 +18,7 @@ const attn_scale: f32 = 0.0625;
 const proj_n: usize = q_heads * 2 * head_dim + 2 * kv_heads * head_dim + (index_heads + 1) * index_dim;
 const out_k: usize = q_heads * head_dim;
 const nch: usize = 3;
-const prefix = "language_model.model.layers.43.self_attn.";
+const prefix = "language_model.model.layers.47.self_attn.";
 
 const Gap = struct { off: usize, steps: u32, at: usize };
 
