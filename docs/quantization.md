@@ -8,7 +8,7 @@ tensorfold info ./model-8bit
 tensorfold serve ./model-8bit
 ```
 
-The `quants` branch extends the Qwen3.5/3.8 dense family to MLX affine weights at 2, 3, 4, 5, 6 and 8 bits, with group sizes 32, 64 and 128.
+This build extends the Qwen3.5/3.8 dense family to MLX affine weights at 2, 3, 4, 5, 6 and 8 bits, with group sizes 32, 64 and 128.
 It keeps packed words, scales and biases at their stored precision, including mixed layer formats.
 It does not convert a checkpoint during loading.
 Choose an 8-bit checkpoint made from the original model when you want its 8-bit quality.
