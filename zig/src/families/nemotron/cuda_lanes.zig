@@ -6,6 +6,7 @@ const lanes = @import("lanes");
 const core = @import("core");
 const engine = @import("cuda_engine.zig");
 const Engine = engine.Engine;
+const reuse = @import("cuda_reuse.zig");
 const Head = @import("cuda_mtp.zig").Head;
 const state = @import("cuda_state.zig");
 const config = @import("config.zig");
@@ -133,6 +134,12 @@ pub const Cuda = struct {
         return @as(*lanes.Stream, @ptrCast(@alignCast(ptr))).isCancelled();
     }
 
+    /// The prompt pass stands at a keep: the lane host copies the GPU state there.
+    fn keptAt(ctx: *anyopaque, at: u32) void {
+        const s: *lanes.Stream = @ptrCast(@alignCast(ctx));
+        if (s.reuse.hook) |k| k.at(k.ptr, s, at);
+    }
+
     // -- the vtable ---------------------------------------------------------------------------------------------
 
     /// A new sequence for the stream, its sampling, then its prompt in chunks; the head absorbs every row but the last.
@@ -152,9 +159,18 @@ pub const Cuda = struct {
         if (own) self.own_free = false;
         e.bind(gop.value_ptr.seq);
         try e.setSampling(s.sampling);
-        const first = try e.prefillWith(ids, null, self.head, .{ .ptr = s, .check = cancelled });
+        var from: usize = 0;
+        if (s.reuse.saved) |saved| {
+            var target: reuse.Target = .{ .e = e, .head = self.head };
+            if (reuse.restore(&target, null, saved)) {
+                from = s.reuse.at;
+                s.cached = s.reuse.at;
+            } else |_| s.reuse_failed = true;
+        }
+        const keep: ?engine.Keep = if (s.reuse.marks.len == 0) null else .{ .at = s.reuse.marks, .ctx = s, .call = keptAt };
+        const first = try e.prefillFrom(ids, from, null, self.head, .{ .ptr = s, .check = cancelled }, keep);
         // the head's first draft reads the prompt's last row (its hidden row waits where a window's would)
-        const last = (ids.len - 1) % state.prefill_rows;
+        const last = engine.lastChunkRows(ids.len, from, s.reuse.marks) - 1;
         try e.ops().copy(e.b.hidden, e.b.p_hidden + last * @as(u64, e.c.hidden) * 2, e.c.hidden * 2);
         _ = self.take(first);
     }

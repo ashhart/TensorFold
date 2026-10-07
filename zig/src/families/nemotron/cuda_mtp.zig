@@ -92,11 +92,15 @@ pub const Head = struct {
         h.e.gpa.destroy(h);
     }
 
+    /// Bytes a snapshot of the head's KV cache takes.
+    pub fn snapshotBytes(h: *const Head) usize {
+        return h.v_cache - h.k_cache + h.kvBytes();
+    }
+
     /// MTPHead.snapshot: the head's KV cache (its position is the caller's to keep).
     pub fn snapshot(h: *Head) !cuda.DeviceBuffer {
-        const bytes = h.v_cache - h.k_cache + h.kvBytes();
-        const copy = try cuda.DeviceBuffer.alloc(h.e.ctx.d, bytes);
-        try h.e.ops().copy(copy.ptr, h.k_cache, bytes);
+        const copy = try cuda.DeviceBuffer.alloc(h.e.ctx.d, h.snapshotBytes());
+        try h.e.ops().copy(copy.ptr, h.k_cache, copy.len);
         return copy;
     }
 
