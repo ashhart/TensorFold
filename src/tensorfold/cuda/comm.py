@@ -77,6 +77,18 @@ class NCCL:
         self.comm = ctypes.c_void_p()
         torch.cuda.current_device()
         self._check(self.lib.ncclCommInitRank(ctypes.byref(self.comm), world, uid, rank))
+        self.shm = None
+        if os.environ.get("TF_SHM_AG", "") == "1" and world == 4:
+            try:
+                from .shm_allgather import ShmAllGather
+                self.shm = ShmAllGather(rank, world, self.store)
+            except Exception as exc:
+                if rank == 0:
+                    print(f"[tensorfold] shm all-gather unavailable ({exc}); staying on NCCL", flush=True)
+                self.shm = None
+            else:
+                if rank == 0:
+                    print("[tensorfold] shm all-gather enabled (host-staged one-shot)", flush=True)
 
     def _check(self, code: int) -> None:
         if code != 0:
@@ -87,6 +99,12 @@ class NCCL:
 
         if recv.numel() != send.numel() * self.world or send.dtype != recv.dtype:
             raise ValueError("all_gather: recv must hold world x send of the same dtype")
+        if self.shm is not None:
+            try:
+                self.shm.all_gather(send, recv)
+                return
+            except ValueError:
+                pass                      # size/dtype outside the shm path: NCCL
         stream = torch.cuda.current_stream().cuda_stream
         self._check(self.lib.ncclAllGather(send.data_ptr(), recv.data_ptr(), send.numel(), _DTYPES[send.dtype],
                                            self.comm, stream))
