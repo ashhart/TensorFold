@@ -502,7 +502,7 @@ pub fn build(gpa: std.mem.Allocator, io: Io, model_dir: []const u8, out_dir: []c
         const ids = try draftIdList(gpa, io, vocab_path, cfg.vocab);
         report.draft_ids = ids.len;
         try putMtp(&decode, gpa, a, &ck, &cfg, ids, &report, wide);
-        try decode.put("mtp.draft_ids", "U32", &.{ids.len}, std.mem.sliceAsBytes(ids));
+        try decode.put("mtp.draft_ids", "U32", &.{ids.len}, ids);
     }
     report.decode_tensors = decode.names.items.len;
     try decode.write(gpa, io, try std.fs.path.join(a, &.{ out_dir, "pack.safetensors" }), identity);

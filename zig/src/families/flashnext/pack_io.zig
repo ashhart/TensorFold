@@ -5,7 +5,8 @@ const Io = std.Io;
 const st = @import("../../core/safetensors.zig");
 
 /// One output file's tensors, memory-resident until written (the largest, head.wq, is 476 MB at the shipped size);
-/// `put` takes ownership of `bytes`, freed on deinit.
+/// `put` takes ownership of `bytes`, freed on deinit. Blobs keep the allocation's own alignment: a typed slice
+/// may be passed directly and is freed the way it was allocated, not as plain bytes.
 pub const Out = struct {
     gpa: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
@@ -13,13 +14,15 @@ pub const Out = struct {
     dtypes: std.ArrayList([]const u8) = .empty,
     shapes: std.ArrayList([]const usize) = .empty,
     blobs: std.ArrayList([]const u8) = .empty,
+    blob_aligns: std.ArrayList(std.mem.Alignment) = .empty,
 
     pub fn init(gpa: std.mem.Allocator) Out {
         return .{ .gpa = gpa, .arena = std.heap.ArenaAllocator.init(gpa) };
     }
 
     pub fn deinit(out: *Out) void {
-        for (out.blobs.items) |b| out.gpa.free(b);
+        for (out.blobs.items, out.blob_aligns.items) |b, al| out.gpa.rawFree(@constCast(b), al, @returnAddress());
+        out.blob_aligns.deinit(out.gpa);
         out.blobs.deinit(out.gpa);
         out.names.deinit(out.gpa);
         out.dtypes.deinit(out.gpa);
@@ -28,14 +31,15 @@ pub const Out = struct {
         out.* = undefined;
     }
 
-    pub fn put(out: *Out, name: []const u8, dtype: []const u8, shape: []const usize, bytes: []u8) !void {
+    pub fn put(out: *Out, name: []const u8, dtype: []const u8, shape: []const usize, bytes: anytype) !void {
         const a = out.arena.allocator();
         try out.names.append(out.gpa, try a.dupe(u8, name));
         try out.dtypes.append(out.gpa, dtype);
         const shape_copy = try a.alloc(usize, shape.len);
         @memcpy(shape_copy, shape);
         try out.shapes.append(out.gpa, shape_copy);
-        try out.blobs.append(out.gpa, bytes);
+        try out.blobs.append(out.gpa, std.mem.sliceAsBytes(bytes));
+        try out.blob_aligns.append(out.gpa, comptime std.mem.Alignment.fromByteUnits(@alignOf(std.meta.Child(@TypeOf(bytes)))));
     }
 
     /// Writes the file with `source` recorded under __metadata__ so a reader can refuse a pack from another checkpoint.
@@ -288,6 +292,20 @@ pub fn compareFile(gpa: std.mem.Allocator, io: Io, built_path: []const u8, refer
     }
     try writer.print("{s}: {d} identical, {d} differ\n", .{ std.fs.path.basename(built_path), identical, differ });
     return differ == 0;
+}
+
+test "deinit frees a typed blob at its allocation's alignment" {
+    // mtp.draft_ids: a u32 allocation joined the blobs as plain bytes once and the testing allocator panicked
+    // on the free; the recorded per-blob alignment keeps that from coming back.
+    const t = std.testing.allocator;
+    var out = Out.init(t);
+    const ids = try t.alloc(u32, 8);
+    @memset(ids, 7);
+    try out.put("ids", "U32", &.{8}, ids);
+    const bytes = try t.alloc(u8, 5);
+    @memset(bytes, 0);
+    try out.put("plain", "U8", &.{5}, bytes);
+    out.deinit();
 }
 
 test {
