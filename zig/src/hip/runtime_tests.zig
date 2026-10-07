@@ -3,6 +3,7 @@ const std = @import("std");
 const Runtime = @import("runtime.zig").Runtime;
 const Context = @import("context.zig").Context;
 const Stream = @import("stream.zig").Stream;
+const Event = @import("stream.zig").Event;
 const DeviceBuffer = @import("memory.zig").DeviceBuffer;
 const HostBuffer = @import("memory.zig").HostBuffer;
 const Module = @import("module.zig").Module;
@@ -70,4 +71,78 @@ test "HIP copies fills and mixed-width kernel arguments on real GPU" {
     try stream.synchronize();
     try b.download(0, std.mem.asBytes(&got));
     for (got, 0..) |v, i| try std.testing.expectEqual(@as(u32, @intCast(i + 20)), v);
+}
+
+test "an event orders a second stream after the first and times it; queries see unfinished work" {
+    var r = try Runtime.open();
+    defer r.close();
+    var ctx = try Context.init(&r, 0);
+    defer ctx.deinit();
+    var arch_buffer: [256]u8 = undefined;
+    const arch = try @import("device_arch.zig").query(&r, 0, &arch_buffer);
+    const images = [_]@import("code_object.zig").Image{.{ .arch = codeobject.arch, .bytes = &codeobject.bytes }};
+    var m = try Module.loadForArchitecture(&r, &images, arch);
+    defer m.unload();
+    const delay = try m.function("tf_hip_delay_write");
+    var writer = try Stream.init(&r);
+    defer writer.deinit();
+    var reader = try Stream.init(&r);
+    defer reader.deinit();
+    var b = try DeviceBuffer.alloc(&r, @sizeOf(u32));
+    defer b.free();
+    try b.fill8(0);
+    try ctx.synchronize();
+    var host = try HostBuffer.alloc(&r, @sizeOf(u32));
+    defer host.free();
+    @memset(host.bytes, 0xff);
+    var start = try Event.init(&r, true);
+    defer start.deinit();
+    var end = try Event.init(&r, true);
+    defer end.deinit();
+    try start.record(writer);
+    var args: launch.Args = .{};
+    try args.add(b.ptr);
+    try args.add(@as(u32, 0xc0ffee));
+    try args.add(@as(u32, 8000));
+    try launch.launch(delay, .{ .grid = .{ .x = 1 }, .block = .{ .x = 64 } }, writer, &args);
+    try end.record(writer);
+    // Enough GPU work is queued that neither query may claim it finished.
+    try std.testing.expect(!try end.done());
+    try std.testing.expect(!try writer.done());
+    try reader.wait(end);
+    try b.downloadAsync(0, host, reader);
+    try reader.synchronize();
+    // Without the wait the reader's copy can run first and return the 0 fill.
+    try std.testing.expectEqual(@as(u32, 0xc0ffee), std.mem.bytesToValue(u32, host.bytes[0..4]));
+    try std.testing.expect(try end.done());
+    try std.testing.expect(try writer.done());
+    try std.testing.expect(try Event.elapsedMs(start, end) > 1.0);
+}
+
+test "memory info reports the device" {
+    var r = try Runtime.open();
+    defer r.close();
+    var ctx = try Context.init(&r, 0);
+    defer ctx.deinit();
+    const first = try ctx.memInfo();
+    try std.testing.expect(first.total >= 1 << 30);
+    try std.testing.expectEqual(first.total, (try ctx.memInfo()).total);
+}
+
+test "memory info sees a new allocation" {
+    var r = try Runtime.open();
+    defer r.close();
+    var ctx = try Context.init(&r, 0);
+    defer ctx.deinit();
+    const before = try ctx.memInfo();
+    const len = 64 << 20;
+    // A device another process has filled cannot show the drop; report a skip, never a pass.
+    if (before.free < 2 * len) return error.SkipZigTest;
+    var b = try DeviceBuffer.alloc(&r, len);
+    defer b.free();
+    try b.fill8(1);
+    try ctx.synchronize();
+    const after = try ctx.memInfo();
+    try std.testing.expectEqual(before.total, after.total);
+    try std.testing.expect(after.free + len <= before.free);
 }
