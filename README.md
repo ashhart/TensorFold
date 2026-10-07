@@ -59,7 +59,7 @@ Every accepted draft must equal the token the same native engine would produce w
 A resumed request must equal fresh execution, and each concurrent stream must equal its solo run.
 The comparison fixes the checkpoint, backend, settings and runtime.
 Different quantizations and different backends can produce different outputs.
-Flash Next and GLM currently run one active reply per engine; Nemotron and the 2B model use shared lane rounds.
+Flash Next runs one active reply per engine; Nemotron, GLM and the 2B model use shared lane rounds.
 
 ## Models on disk
 
@@ -109,8 +109,10 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--no-drafts` | Produce the plain reference through the same engine. |
 | `--keep-warm SECONDS` | Keep the Metal GPU active while idle for this long after a request, default 900; zero disables it. |
 | `--parallel N` | Admit up to N requests where the engine shares lanes; `auto` is the default. |
-| `--prompt-cache-gib GIB` | Flash Next retained-prefix budget; zero disables retention. |
+| `--prompt-cache-gib GIB` | Flash Next and GLM retained-prefix budget; zero disables retention. |
 | `--prompt-cache-over-cap` | Permit an explicit Flash Next prefix budget above its default allowance. |
+| `--learn` | Keep shared prompt prefixes, such as a system prompt and its tools, on disk so new conversations resume them after a restart. GLM only for now. |
+| `--learn-dir DIR` | Where `--learn` keeps them, `~/.cache/tensorfold/learned` by default; implies `--learn`. |
 | `--snapshot-dir none` | Keep prefix state in memory; `none` is the supported value. |
 | `--max-snapshots 0` | Disable disk snapshots at startup; `0` is the supported value. |
 | `--compact-at auto\|FRACTION` | Turn on context compaction (below). `auto` compacts when the prompt and reply would pass the window minus a reserve. |

@@ -2,6 +2,14 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## Unreleased
+
+- GLM-5.3-Flash serves several requests at once on its two Macs. Eight concurrent requests decode at 199 tokens a second in total, against 100 in 1.0.1, and each stream equals its solo run.
+- GLM's two Macs split the attention heads, the dense layers and the vocab head as well as the experts. One stream decodes at 91 tokens a second plain, from 83, and drafted replies at 128 to 157, from 110 to 125. A fresh 7,300-token prompt reaches its first token in 4.4 seconds instead of 6.5.
+- GLM keeps prompt states between requests. A resumed prompt equals a fresh one token for token, and a 7,300-token conversation resumes in 0.18 seconds.
+- A new conversation that starts with the same system prompt and tools resumes all of that shared prefix: its first token came in 0.06 seconds after a 4,700-token system prompt.
+- `--learn` keeps those shared prefixes on disk. After a restart, the first new conversation on a known system prompt reached its first token in 0.64 seconds instead of 4.43. GLM only for now.
+
 ## 1.0.1
 
 - The shipped binary has `tensorfold models`, `tensorfold info MODEL` and `tensorfold pull REPO`. In 1.0.0 they were built into the development CLI only, so a Homebrew install didn't have them.
