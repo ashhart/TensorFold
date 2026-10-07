@@ -123,17 +123,46 @@ const Job = struct {
     source: []const u8,
     names: []const [:0]const u8,
     out: []mtl.Pipeline,
+    /// The prebuilt metallib's library: set for the packed sources when the runtime compiler refuses
+    /// uint4b_format (#451). The loader owns it; the jobs only read it.
+    prebuilt: ?mtl.Library = null,
     failed: bool = false,
 };
+
+/// The packed kernels' tensor-inline construct: the macOS 26.3 runtime compiler refuses `uint4b_format`
+/// (#451), the offline compiler accepts it, and one probe at load tells the two apart.
+const probe_source =
+    \\#include <metal_stdlib>
+    \\using namespace metal;
+    \\kernel void tf_uint4b_probe(device uchar* out [[buffer(0)]], uint i [[thread_position_in_grid]]) {
+    \\  tensor<device uint4b_format, dextents<int32_t, 2>, tensor_inline> w((device uchar*)out, dextents<int32_t, 2>(4, 8));
+    \\  if (i > 8) out[i] = out[i] + 1;
+    \\}
+;
+
+/// Whether this runtime compiler accepts the packed kernels' sources: one probe, compiled now.
+pub fn tensorInlineOk(device: mtl.Device) bool {
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    var lib = mtl.Library.fromSource(device, probe_source, mtl.CompileOptions.mlx()) catch return false;
+    lib.deinit();
+    return true;
+}
+
+/// Whether a source is one of the packed kernels the prebuilt metallib carries.
+fn usesPacked(source: []const u8) bool {
+    return std.mem.indexOf(u8, source, "uint4b_format") != null;
+}
 
 fn compile(job: *Job) void {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const lib = mtl.Library.fromSource(job.device, job.source, mtl.CompileOptions.mlx()) catch {
+    const owned = job.prebuilt == null;
+    const lib = job.prebuilt orelse (mtl.Library.fromSource(job.device, job.source, mtl.CompileOptions.mlx()) catch {
         job.failed = true;
         return;
-    };
-    defer lib.deinit();
+    });
+    defer if (owned) lib.deinit();
     for (job.names, job.out) |name, *p| {
         p.* = mtl.Pipeline.init(job.device, lib, name, false) catch {
             job.failed = true;
@@ -142,16 +171,24 @@ fn compile(job: *Job) void {
     }
 }
 
-/// Compile every source (one library each, as MLX does) on worker threads.
+/// Compile every source (one library each, as MLX does) on worker threads; a runtime compiler that refuses
+/// uint4b_format serves the packed kernels from the metallib built ahead of time (#451).
 pub fn load(allocator: std.mem.Allocator, device: mtl.Device) !Kernels {
     var k = Kernels{};
+    var prebuilt: ?mtl.Library = null;
+    defer if (prebuilt) |*l| l.deinit();
+    if (!tensorInlineOk(device)) {
+        if (sources.packed_metallib.len == 0) return error.PrebuiltMetallibMissing;
+        prebuilt = mtl.Library.fromBytes(device, sources.packed_metallib) catch |e| return e;
+        std.log.info("packed kernels from the prebuilt metallib: this runtime compiler refuses uint4b_format", .{});
+    }
     const jobs = try allocator.alloc(Job, sources.nemotron.all.len + 8);
     defer allocator.free(jobs);
     const names = try allocator.alloc([:0]const u8, sources.nemotron.all.len);
     defer allocator.free(names);
     inline for (sources.nemotron.all, 0..) |kernel, i| {
         names[i] = kernel.function;
-        jobs[i] = .{ .device = device, .source = kernel.source, .names = names[i .. i + 1], .out = k.pipelines[i .. i + 1] };
+        jobs[i] = .{ .device = device, .source = kernel.source, .names = names[i .. i + 1], .out = k.pipelines[i .. i + 1], .prebuilt = if (usesPacked(kernel.source)) prebuilt else null };
     }
     var rewritten: [sources.nemotron.all.len]?[]u8 = @splat(null);
     defer for (rewritten) |r| if (r) |text| allocator.free(text);
@@ -209,5 +246,38 @@ test "the full-vocabulary sampler compiles at this macOS's Metal language with 1
         const p = try mtl.Pipeline.init(device, lib, name, false);
         defer p.deinit();
         try std.testing.expect(p.maxThreads() >= 1024);
+    }
+}
+
+test "the packed selection flags exactly the generated sources with uint4b_format" {
+    var packed_count: usize = 0;
+    for (sources.nemotron.all) |kernel| {
+        if (usesPacked(kernel.source)) {
+            packed_count += 1;
+            try std.testing.expect(std.mem.startsWith(u8, kernel.key, "coop") or std.mem.startsWith(u8, kernel.key, "up_relu2"));
+        } else try std.testing.expect(!std.mem.startsWith(u8, kernel.key, "coop") and !std.mem.startsWith(u8, kernel.key, "up_relu2"));
+    }
+    try std.testing.expect(packed_count >= 30); // the generator's coop and up_relu2 families
+}
+
+test "the probe accepts this runtime compiler, or the prebuilt metallib is present" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    if (tensorInlineOk(device)) return; // the sources compile: no fallback needed here
+    try std.testing.expect(sources.packed_metallib.len > 0); // else load fails with PrebuiltMetallibMissing
+}
+
+test "the prebuilt metallib carries every packed kernel function" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    if (sources.packed_metallib.len == 0) return error.SkipZigTest;
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    var lib = try mtl.Library.fromBytes(device, sources.packed_metallib);
+    defer lib.deinit();
+    for (sources.nemotron.all) |kernel| {
+        if (!usesPacked(kernel.source)) continue;
+        const id = try lib.function(kernel.function);
+        mtl.objc.release(id);
     }
 }

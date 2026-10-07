@@ -23,6 +23,47 @@ const generated = kernels[1..];
 const kimi_dir = "zig/kernels/metal/kimi";
 const kimi_kernels = [_][]const u8{ "dense.metal", "dense_mma.metal", "norms.metal", "experts.metal", "kda.metal", "mla.metal", "synth.metal" };
 
+/// Nemotron's packed kernels (generated, they use uint4b_format): one metallib built ahead of time for the
+/// runtime compilers that refuse the type (macOS 26.3, #451). Keep in step with tools/zig/gen_nemotron_kernels.py.
+const nemotron_packed = [_][]const u8{
+    "zig/kernels/metal/nemotron/coop_down_1_0.metal",
+    "zig/kernels/metal/nemotron/coop_down_2_0.metal",
+    "zig/kernels/metal/nemotron/coop_down_2_1.metal",
+    "zig/kernels/metal/nemotron/coop_draft_1_0.metal",
+    "zig/kernels/metal/nemotron/coop_draft_2_0.metal",
+    "zig/kernels/metal/nemotron/coop_draft_2_1.metal",
+    "zig/kernels/metal/nemotron/coop_eh_1_0.metal",
+    "zig/kernels/metal/nemotron/coop_eh_1_0_sk.metal",
+    "zig/kernels/metal/nemotron/coop_eh_2_0.metal",
+    "zig/kernels/metal/nemotron/coop_eh_2_0_sk.metal",
+    "zig/kernels/metal/nemotron/coop_eh_2_1.metal",
+    "zig/kernels/metal/nemotron/coop_eh_2_1_sk.metal",
+    "zig/kernels/metal/nemotron/coop_head_1_0.metal",
+    "zig/kernels/metal/nemotron/coop_head_2_0.metal",
+    "zig/kernels/metal/nemotron/coop_head_2_1.metal",
+    "zig/kernels/metal/nemotron/coop_in_1_0.metal",
+    "zig/kernels/metal/nemotron/coop_in_1_0_sk.metal",
+    "zig/kernels/metal/nemotron/coop_in_2_0.metal",
+    "zig/kernels/metal/nemotron/coop_in_2_0_sk.metal",
+    "zig/kernels/metal/nemotron/coop_in_2_1.metal",
+    "zig/kernels/metal/nemotron/coop_in_2_1_sk.metal",
+    "zig/kernels/metal/nemotron/coop_out_1_0.metal",
+    "zig/kernels/metal/nemotron/coop_out_1_0_sk.metal",
+    "zig/kernels/metal/nemotron/coop_out_2_0.metal",
+    "zig/kernels/metal/nemotron/coop_out_2_0_sk.metal",
+    "zig/kernels/metal/nemotron/coop_out_2_1.metal",
+    "zig/kernels/metal/nemotron/coop_out_2_1_sk.metal",
+    "zig/kernels/metal/nemotron/coop_qkv_1_0.metal",
+    "zig/kernels/metal/nemotron/coop_qkv_2_0.metal",
+    "zig/kernels/metal/nemotron/coop_qkv_2_1.metal",
+    "zig/kernels/metal/nemotron/coop_up_1_0.metal",
+    "zig/kernels/metal/nemotron/coop_up_2_0.metal",
+    "zig/kernels/metal/nemotron/coop_up_2_1.metal",
+    "zig/kernels/metal/nemotron/up_relu2_1_0.metal",
+    "zig/kernels/metal/nemotron/up_relu2_2_0.metal",
+    "zig/kernels/metal/nemotron/up_relu2_2_1.metal",
+};
+
 /// MLX's language version for mx.fast.metal_kernel on this macOS: 4.1 from 27, 4.0 on 26, 3.2 on 15, else 3.1.
 fn mlxMetalStd(b: *std.Build) []const u8 {
     const os = b.graph.host.result.os;
@@ -263,6 +304,11 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     });
     // The engine: kernel sources compiled at run time (MLX's options), the families, the lane core.
     const sources = mods.sources;
+    // Nemotron's packed kernels, compiled offline and embedded: the runtime fallback when this macOS's
+    // compiler refuses uint4b_format (#451).
+    const packed_lib = metallib(b, "nemotron_packed", &nemotron_packed, &mlx_flags);
+    b.getInstallStep().dependOn(&b.addInstallFile(packed_lib, "lib/nemotron_packed.metallib").step);
+    sources.addImport("nemotron_packed_metallib", embedded(b, packed_lib, "nemotron_packed.metallib"));
     const engine = mods.engine;
     // FlashNext's CPU contracts, with the family module's imports so the replay graph type-checks
     const flash_host = b.addTest(.{ .root_module = b.createModule(.{
