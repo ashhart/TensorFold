@@ -128,7 +128,7 @@ pub fn main(init: std.process.Init) !void {
         const k = try std.fmt.parseInt(usize, d, 10);
         try depths.append(a, if (k == 0) null else k);
     }
-    const e = try fx.Engine.load(gpa, args[1], args[2]);
+    const e = try fx.Engine.load(gpa, init.io, args[1], args[2]);
     defer e.deinit();
     try e.warm();
     var fam: Family = .{ .e = e, .gpa = gpa };
