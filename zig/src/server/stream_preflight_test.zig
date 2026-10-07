@@ -1,4 +1,4 @@
-//! A streamed request the server refuses answers 400 before its stream opens, on every route; a valid one opens as before.
+//! A streamed context-window refusal is an error event, and every other refusal is a 400 before the stream opens.
 const std = @import("std");
 const api = @import("engine_api");
 const server = @import("root.zig");
@@ -104,8 +104,13 @@ const Seen = struct {
     fn event(ctx: *anyopaque, payload: ?json.Value) error{Closed}!void {
         const c: *Seen = @ptrCast(@alignCast(ctx));
         c.events += 1;
-        if (c.events != 1) return;
         const p = payload orelse return;
+        if (p.get("error")) |err| {
+            const code = err.get("code") orelse return;
+            c.context_code = code == .string and std.mem.eql(u8, code.string, "context_length_exceeded");
+            return;
+        }
+        if (c.events != 1) return;
         const choices = p.get("choices") orelse return;
         if (choices != .array or choices.array.len == 0) return;
         const role = (choices.array[0].get("delta") orelse return).get("role") orelse return;
@@ -164,29 +169,30 @@ fn sendTo(route: Route, body: []const u8, start: Seen) !Seen {
     return seen;
 }
 
-fn expectRefusedBeforeOpen(seen: Seen) !void {
-    try std.testing.expectEqual(@as(?u16, 400), seen.status);
+fn expectContextInStream(seen: Seen, role: bool) !void {
+    try std.testing.expect(seen.opened);
+    try std.testing.expectEqual(role, seen.role_first);
     try std.testing.expect(seen.context_code);
-    try std.testing.expect(!seen.opened);
-    try std.testing.expectEqual(@as(usize, 0), seen.events);
+    try std.testing.expectEqual(@as(?u16, null), seen.status);
+    try std.testing.expect(seen.events >= 2);
     try std.testing.expectEqual(@as(i64, 0), seen.preparing);
 }
 
-test "a streamed chat over the window answers 400 context_length_exceeded before the stream opens" {
-    try expectRefusedBeforeOpen(try send(.chat, "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"stream\":true,\"max_tokens\":100}"));
+test "a streamed chat over the window reports context_length_exceeded after the role chunk" {
+    try expectContextInStream(try send(.chat, "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"stream\":true,\"max_tokens\":100}"), true);
 }
 
-test "a streamed chat with tools over the window answers 400 before the stream opens" {
-    try expectRefusedBeforeOpen(try send(.chat, "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"stream\":true,\"max_tokens\":100," ++
-        "\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}}]}"));
+test "a streamed chat with tools over the window reports the context error with no role chunk" {
+    try expectContextInStream(try send(.chat, "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"stream\":true,\"max_tokens\":100," ++
+        "\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}}]}"), false);
 }
 
-test "a streamed Messages request over the window answers 400 before message_start" {
-    try expectRefusedBeforeOpen(try send(.messages, "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"stream\":true,\"max_tokens\":100}"));
+test "a streamed Messages request over the window reports the context error in the stream" {
+    try expectContextInStream(try send(.messages, "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"stream\":true,\"max_tokens\":100}"), true);
 }
 
-test "a streamed Responses request over the window answers 400 before response.created" {
-    try expectRefusedBeforeOpen(try send(.responses, "{\"model\":\"test-model\",\"input\":\"x\",\"stream\":true,\"max_output_tokens\":100}"));
+test "a streamed Responses request over the window reports the context error in the stream" {
+    try expectContextInStream(try send(.responses, "{\"model\":\"test-model\",\"input\":\"x\",\"stream\":true,\"max_output_tokens\":100}"), true);
 }
 
 test "a valid streamed chat still opens with the role chunk and gives the preparing count back" {
