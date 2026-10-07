@@ -1,4 +1,4 @@
-//! The core row projection on synthetic 4- and 8-bit matrices: every width equals one row, a CPU reference, indexed experts.
+//! The core row projection on synthetic 2-, 4- and 8-bit matrices: every width equals one row, a CPU reference, indexed experts.
 const std = @import("std");
 const mtl = @import("metal");
 const row = @import("row_projection");
@@ -147,7 +147,7 @@ pub fn main(_: std.process.Init) !void {
     defer p.deinit();
     var checked: usize = 0;
     var bits: usize = 0;
-    for ([_]Case{ .{ .n = 64, .k = 128, .experts = 3, .rows = 9, .repeat = 3 }, .{ .n = 128, .k = 2688, .experts = 2, .rows = 8, .repeat = 2 }, .{ .n = 16, .k = 576, .experts = 4, .rows = 7, .repeat = 1 }, .{ .n = 64, .k = 128, .experts = 3, .rows = 9, .repeat = 3, .bits = 8 }, .{ .n = 128, .k = 2688, .experts = 2, .rows = 8, .repeat = 2, .bits = 8 }, .{ .n = 64, .k = 128, .experts = 3, .rows = 9, .repeat = 3, .sum = .bf16 }, .{ .n = 128, .k = 2688, .experts = 2, .rows = 8, .repeat = 2, .bits = 8, .sum = .bf16 } }) |c| {
+    for ([_]Case{ .{ .n = 64, .k = 128, .experts = 3, .rows = 9, .repeat = 3 }, .{ .n = 128, .k = 2688, .experts = 2, .rows = 8, .repeat = 2 }, .{ .n = 16, .k = 576, .experts = 4, .rows = 7, .repeat = 1 }, .{ .n = 64, .k = 128, .experts = 3, .rows = 9, .repeat = 3, .bits = 8 }, .{ .n = 128, .k = 2688, .experts = 2, .rows = 8, .repeat = 2, .bits = 8 }, .{ .n = 64, .k = 128, .experts = 3, .rows = 9, .repeat = 3, .sum = .bf16 }, .{ .n = 128, .k = 2688, .experts = 2, .rows = 8, .repeat = 2, .bits = 8, .sum = .bf16 }, .{ .n = 64, .k = 128, .experts = 3, .rows = 9, .repeat = 3, .bits = 2 }, .{ .n = 128, .k = 2688, .experts = 2, .rows = 8, .repeat = 2, .bits = 2 } }) |c| {
         const s = try Synth.init(device, c, 7 + c.n);
         defer s.deinit();
         const groups = c.k / 64;

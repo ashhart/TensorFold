@@ -1,4 +1,4 @@
-// Affine 4- and 8-bit row projections for chips without tensor units: RPS columns a simdgroup, MB rows a weight read, each row its own fp32 sums.
+// Affine 2-, 4- and 8-bit row projections for chips without tensor units: RPS columns a simdgroup, MB rows a weight read, each row its own fp32 sums.
 #include <metal_stdlib>
 using namespace metal;
 
@@ -23,7 +23,10 @@ template <int MB, int BITS>
 inline void tf_rp_qdot16(const device uint8_t* w, const thread float (*xt)[16], float scale, float bias,
                          const thread float* sum, thread float* out) {
   float q[16];
-  if (BITS == 4) {
+  if (BITS == 2) {
+    const uint v = *(const device uint*)w;
+    for (int i = 0; i < 16; i++) q[i] = float((v >> (2 * i)) & 3u);
+  } else if (BITS == 4) {
     const device uint16_t* ws = (const device uint16_t*)w;
     for (int i = 0; i < 4; i++) {
       const int v = ws[i];
@@ -152,6 +155,14 @@ template <int RPS, int SG, bool RELU2, int BITS, bool BF16SUM>
     for (int j = 0; j < RPS; j++) out[j] = tf_rp_out<RELU2>(acc[0][j]);
 }
 
+template [[host_name("tf_row_projection_q2_f32")]] [[kernel]] decltype(tf_row_projection<4, 2, 2, false, 2, false>) tf_row_projection<4, 2, 2, false, 2, false>;
+template [[host_name("tf_row_projection_indexed_q2_f32")]] [[kernel]] decltype(tf_row_projection_indexed<4, 2, false, 2, false>) tf_row_projection_indexed<4, 2, false, 2, false>;
+template [[host_name("tf_row_projection_relu2_q2_f32")]] [[kernel]] decltype(tf_row_projection<4, 2, 2, true, 2, false>) tf_row_projection<4, 2, 2, true, 2, false>;
+template [[host_name("tf_row_projection_indexed_relu2_q2_f32")]] [[kernel]] decltype(tf_row_projection_indexed<4, 2, true, 2, false>) tf_row_projection_indexed<4, 2, true, 2, false>;
+template [[host_name("tf_row_projection_q2_bf16")]] [[kernel]] decltype(tf_row_projection<4, 2, 2, false, 2, true>) tf_row_projection<4, 2, 2, false, 2, true>;
+template [[host_name("tf_row_projection_indexed_q2_bf16")]] [[kernel]] decltype(tf_row_projection_indexed<4, 2, false, 2, true>) tf_row_projection_indexed<4, 2, false, 2, true>;
+template [[host_name("tf_row_projection_relu2_q2_bf16")]] [[kernel]] decltype(tf_row_projection<4, 2, 2, true, 2, true>) tf_row_projection<4, 2, 2, true, 2, true>;
+template [[host_name("tf_row_projection_indexed_relu2_q2_bf16")]] [[kernel]] decltype(tf_row_projection_indexed<4, 2, true, 2, true>) tf_row_projection_indexed<4, 2, true, 2, true>;
 template [[host_name("tf_row_projection_q4_f32")]] [[kernel]] decltype(tf_row_projection<4, 2, 2, false, 4, false>) tf_row_projection<4, 2, 2, false, 4, false>;
 template [[host_name("tf_row_projection_indexed_q4_f32")]] [[kernel]] decltype(tf_row_projection_indexed<4, 2, false, 4, false>) tf_row_projection_indexed<4, 2, false, 4, false>;
 template [[host_name("tf_row_projection_relu2_q4_f32")]] [[kernel]] decltype(tf_row_projection<4, 2, 2, true, 4, false>) tf_row_projection<4, 2, 2, true, 4, false>;
