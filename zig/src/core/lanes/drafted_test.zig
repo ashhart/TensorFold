@@ -1,7 +1,4 @@
-//! An external drafter in front of the fake target: drafted == one-token rounds (greedy, sampled, shared), the drafter
-//! sees the rows it should (its drafts land, which a position or follow mistake would make chance), drafts off never
-//! reach it, every failure cleans up once, a restored prompt (part or whole) still decodes exactly, the depth rule reads
-//! the drafter's own facts, and a shared round reaches the drafter as one batch.
+//! An external drafter in front of the fake target: drafted rounds equal one-token rounds, and the wrapper's contract holds.
 const std = @import("std");
 const Config = @import("config.zig").Config;
 const Model = @import("config.zig").Model;
@@ -134,9 +131,7 @@ const FakeDrafter = struct {
     }
 };
 
-/// The fake target with features held as a real target holds them: its own copy of the prompt rows after a prefill,
-/// of a verify's rows after it, only the retained rows after a keep (the rest overwritten), nothing after a one-token
-/// round. A request outside that (Features' contract) fails, which the token-history fake could not notice.
+/// The fake target holding features as `Features` promises (a keep overwrites what it drops), refusing anything else.
 const Strict = struct {
     inner: be.Backend,
     snaps: std.AutoHashMapUnmanaged(*sm.Stream, Snap) = .empty,

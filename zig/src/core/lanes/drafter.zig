@@ -1,7 +1,4 @@
-//! A drafter outside the target family (EAGLE-3, a DFlash block, an MTP head loaded on its own): it reads the
-//! target's tapped states (backend.Features) and holds drafts for streams' next rounds. drafted.zig puts one in front of
-//! any target backend that exposes `features`; the target verifies every draft, so the drafter decides speed, never output.
-//! Every call takes a round's streams together, so a GPU drafter can run them as one batch and read them back once.
+//! A drafter outside the target family that reads the target's tapped states; every call takes a round's streams together.
 const Stream = @import("stream.zig").Stream;
 const Features = @import("backend.zig").Features;
 
@@ -14,13 +11,10 @@ pub const Facts = struct {
     batched: bool = false, // hold() runs a shared round's streams as one batch
 };
 
-/// A stream's target rows [start, start + features.rows) and the token after each (the drafter replaces what it held
-/// at or past `start`, so a rollback is the next absorb's `start`).
+/// Target rows [start, start + features.rows) and the token after each; rows at or past `start` replace what was held.
 pub const Absorb = struct { stream: *Stream, features: Features, start: u64, follow: []const u32 };
 
-/// Draft `depth` tokens after `pending` (the token after the stream's last kept row), the first landing at `position`.
-/// Asked only once the drafter has absorbed the row before `pending` (row `position - 2`); rows before its first absorb
-/// may be missing (a prefix restored by prompt reuse has no states), never the last one.
+/// Draft `depth` tokens after `pending`, the first at `position`; asked only once row `position - 2` was absorbed.
 pub const Hold = struct { stream: *Stream, pending: u32, position: u64, depth: u32 };
 
 pub const Drafter = struct {

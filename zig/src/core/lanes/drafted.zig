@@ -1,7 +1,4 @@
-//! A target backend with an external drafter in front: the round loop sees one Backend. The target runs prefill, verify
-//! and keep as before; its `draft` is never called. A drafting stream's drafter absorbs the prompt rows the target
-//! computed, then each round's kept rows (from the target's `features`), and holds drafts the next verify takes as host
-//! tokens. A stream with drafts off never reaches the drafter, so `"draft": false` stays the target alone.
+//! A target backend with an external drafter in front, one Backend; deinit releases no stream, so callers release first.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const be = @import("backend.zig");
@@ -29,8 +26,7 @@ pub const Drafted = struct {
     holds: std.ArrayList(dr.Hold) = .empty,
     firsts: std.ArrayList(u32) = .empty,
 
-    /// The wrapper, with the target told the drafter's taps before any forward (a target keeps only those layers'
-    /// states; one without `prepare_features` must have been built with them).
+    /// The wrapper, with the target told the drafter's taps before any forward.
     pub fn init(gpa: Allocator, target: be.Backend, drafter: dr.Drafter) !Drafted {
         if (target.vtable.prepare_features) |prep| try prep(target.ptr, drafter.taps());
         return .{ .gpa = gpa, .target = target, .drafter = drafter };
@@ -51,8 +47,7 @@ pub const Drafted = struct {
         return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release } };
     }
 
-    /// The target's facts with the drafter's own scheduling: its depth, step cost, prior, plain guard and batching (a
-    /// target without a head of its own has nothing to lend there). Chains drafted late from each round's kept rows.
+    /// The target's facts with the drafter's depth, step cost, prior, plain guard and batching; chains drafted late.
     pub fn facts(x: *const Drafted, target: Model) Model {
         const d = x.drafter.facts();
         var m = target;
@@ -73,9 +68,7 @@ pub const Drafted = struct {
         return @ptrCast(@alignCast(ptr));
     }
 
-    /// The target's prompt pass; a drafting stream's drafter absorbs the rows the pass computed (from `s.cached`) but
-    /// the last (its follow token is not drawn yet). A failure after the target's pass releases both here: the core
-    /// releases only a cancelled pass (and then the drafter was never opened).
+    /// The target's prompt pass, then the drafter absorbs its computed rows but the last; a later failure releases both.
     fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
         const x = self(ptr);
         try x.target.prefill(s);
@@ -104,8 +97,7 @@ pub const Drafted = struct {
         return self(ptr).target.read(handle);
     }
 
-    /// Held drafts go to the target as host tokens, every drafting stream's read back in one call (fillers: the pending
-    /// token repeated, which the target rejects).
+    /// Held drafts reach the target as host tokens, all streams read back in one call (fillers: the pending token).
     fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
         const x = self(ptr);
         x.windows.clearRetainingCapacity();
@@ -147,8 +139,7 @@ pub const Drafted = struct {
         return x.target.keep(x.windows.items, paths);
     }
 
-    /// One absorb for every request's kept rows (a chain's prefix; after a prompt, its last row if the pass computed it),
-    /// then one hold for every request that wants drafts and has the row to draft from.
+    /// One absorb for every request's kept rows, then one hold for every request that wants drafts and can draft.
     fn draft(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
         const x = self(ptr);
         x.absorbs.clearRetainingCapacity();

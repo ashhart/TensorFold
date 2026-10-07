@@ -28,26 +28,19 @@ pub const Alternative = struct { tokens: [4]u32, probs: [4]f64 };
 /// A window's results: each row's drawn token and the held drafts the forward verified (host drafts echo back).
 pub const Verified = struct { sampled: []u32, drafts: []u32 };
 
-/// A target's tapped states for rows of a stream's cache, handed to an external drafter (drafter.zig).
-/// Layout: `rows` packed rows of `row_bytes` from `offset` in `buffer`, row-major; a row is the drafter's taps in its
-/// `taps` order, each the target's hidden width of `dtype`. Where: `space` (a host pointer, or a device pointer on
-/// `device`: the drafter must run on that device). Ready: `ready` is .none when the producing work is complete, else the
-/// fence the consumer waits on before reading (its kind names the backend that recorded it).
-/// Which rows, and for how long: the prompt rows the last prefill computed, until the stream's first verify; then the
-/// last verify's rows, and after a keep only the rows it retained, until the next verify, prefill or release of that
-/// stream. A keep does not drop the retained rows: the round loop drafts after it. The drafter copies what it keeps.
+/// Tapped cache rows for a drafter: the prompt's until the first verify, then each verify's kept rows until the next.
 pub const Features = struct {
     pub const Space = enum { host, device };
     pub const Dtype = enum { bf16, f16, f32, u32 };
     pub const Fence = union(enum) { none, cuda_event: u64, metal_event: u64 };
-    buffer: u64,
-    offset: u64 = 0,
-    rows: u32,
-    row_bytes: u32,
+    buffer: u64, // a host pointer, or a device pointer on `device`
+    offset: u64 = 0, // bytes into `buffer` where the first row starts
+    rows: u32, // packed rows, row-major
+    row_bytes: u32, // a row is the drafter's taps in its `taps` order, each the hidden width of `dtype`
     space: Space,
-    device: i32 = 0,
+    device: i32 = 0, // the drafter must run on this device
     dtype: Dtype,
-    ready: Fence = .none,
+    ready: Fence = .none, // .none: written; else the fence to wait on before reading, kind naming the backend
 };
 
 /// Absorb a stream's kept rows into its draft head and hold `depth` drafts for its next round.
@@ -91,12 +84,9 @@ pub const Backend = struct {
         tree: ?*const fn (ptr: *anyopaque, s: *Stream, gpa: std.mem.Allocator) anyerror!?Held = null,
         /// The head's best tokens and probabilities at each level it drafted for the stream (waits for the drafts).
         alternatives: ?*const fn (ptr: *anyopaque, s: *Stream, out: []Alternative) anyerror!usize = null,
-        /// The layers an external drafter reads, told once before any forward (drafted.zig's init): the target keeps those
-        /// layers' states and no others. Null: the target was built with its taps.
+        /// The drafter's layers, told once before any forward so the target keeps only those (null: built with them).
         prepare_features: ?*const fn (ptr: *anyopaque, taps: []const u32) anyerror!void = null,
-        /// The tapped states of cache rows [start, start + count) for an external drafter (drafter.zig), within the rows
-        /// `Features` says the target still holds; `taps` must be the set the target was prepared with (it cannot pick
-        /// layers after the forward). Null when the target exposes none.
+        /// Cache rows [start, start + count) of the prepared taps, within what `Features` says is held (null: none).
         features: ?*const fn (ptr: *anyopaque, s: *Stream, taps: []const u32, start: u64, count: u32) anyerror!Features = null,
         /// The stream left the rounds: free its caches and held drafts.
         release: *const fn (ptr: *anyopaque, s: *Stream) void,
