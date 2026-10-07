@@ -28,6 +28,16 @@ pub const Context = struct {
         try runtime.check(self.r.api.hipDeviceSynchronize());
     }
 
+    pub const MemInfo = struct { free: usize, total: usize };
+
+    /// Free and total bytes on the current device, as the driver reports them.
+    pub fn memInfo(self: Context) runtime.Error!MemInfo {
+        var m: MemInfo = .{ .free = 0, .total = 0 };
+        try runtime.check(self.r.api.hipMemGetInfo(&m.free, &m.total));
+        if (m.total == 0 or m.free > m.total) return error.Invalid;
+        return m;
+    }
+
     pub fn deinit(self: *Context) void {
         _ = self.r.api.hipDeviceSynchronize();
         _ = self.r.api.hipDevicePrimaryCtxRelease(self.device);
@@ -83,4 +93,33 @@ test "failed context selection releases the primary-context retain" {
     try std.testing.expectError(error.Invalid, Context.init(&r, -1));
     try std.testing.expectError(error.HipFailed, Context.init(&r, 0));
     try std.testing.expectEqual(@as(usize, 1), Mock.released);
+}
+
+test "memory info passes driver counts through and refuses impossible ones" {
+    const Mock = struct {
+        var free: usize = 0;
+        var total: usize = 0;
+        var result: c_int = 0;
+        fn info(f: *usize, t: *usize) callconv(.c) c_int {
+            f.* = free;
+            t.* = total;
+            return result;
+        }
+    };
+    var r: runtime.Runtime = undefined;
+    r.api.hipMemGetInfo = Mock.info;
+    const ctx = Context{ .r = &r, .device = 0, .handle = null };
+    Mock.free = 3 << 20;
+    Mock.total = 32 << 30;
+    const m = try ctx.memInfo();
+    try std.testing.expectEqual(@as(usize, 3 << 20), m.free);
+    try std.testing.expectEqual(@as(usize, 32 << 30), m.total);
+    Mock.free = Mock.total + 1;
+    try std.testing.expectError(error.Invalid, ctx.memInfo());
+    Mock.total = 0;
+    Mock.free = 0;
+    try std.testing.expectError(error.Invalid, ctx.memInfo());
+    Mock.total = 1;
+    Mock.result = 1;
+    try std.testing.expectError(error.HipFailed, ctx.memInfo());
 }
