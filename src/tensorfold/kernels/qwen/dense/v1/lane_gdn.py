@@ -7,6 +7,8 @@ from typing import Any
 import mlx.core as mx
 import mlx.nn as nn
 
+from tensorfold.kernels import capability
+
 F32 = mx.float32
 HIST = mx.bfloat16  # stored keys and deltas; the recurrence itself runs in float32
 
@@ -189,7 +191,7 @@ def _tn_array(t: int, n: int) -> mx.array:
 
 def _step_kernel_kh():
     global _STEP_KERNEL_KH
-    if _STEP_KERNEL_KH is None and mx.metal.is_available():
+    if _STEP_KERNEL_KH is None and capability.custom_kernels():
         _STEP_KERNEL_KH = mx.fast.metal_kernel(
             name="tensorfold_lane_gdn_step_kh",
             input_names=["q", "k", "v", "log_g", "beta", "s0kq", "log_prev", "k_hist", "d_hist",
@@ -219,7 +221,7 @@ def _gates(a_log: mx.array, dt_bias: mx.array, a: mx.array, b: mx.array) -> tupl
 
 def _step_kernel():
     global _STEP_KERNEL
-    if _STEP_KERNEL is None and mx.metal.is_available():
+    if _STEP_KERNEL is None and capability.custom_kernels():
         _STEP_KERNEL = mx.fast.metal_kernel(
             name="tensorfold_lane_gdn_step",
             input_names=["q", "k", "v", "log_g", "beta", "s0kq", "log_prev", "k_hist", "d_hist",

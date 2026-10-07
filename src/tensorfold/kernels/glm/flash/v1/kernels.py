@@ -7,6 +7,8 @@ from typing import Any
 
 import mlx.core as mx
 
+from tensorfold.kernels import capability
+
 from tensorfold.kernels import inputs
 from tensorfold.kernels.glm.flash.v1 import widths as W
 
@@ -348,7 +350,7 @@ _kernels: dict[str, Any] = {}
 
 
 def metal() -> bool:
-    return mx.default_device() == mx.gpu and mx.metal.is_available()
+    return capability.custom_kernels() and mx.default_device() == mx.gpu
 
 
 def _kernel(name: str, source: str, inputs: list[str], outputs: list[str], header: str = "") -> Any:

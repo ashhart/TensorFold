@@ -7,6 +7,8 @@ from typing import Any
 
 import mlx.core as mx
 
+from tensorfold.kernels import capability
+
 # MLX's sigmoid, transcribed (#2105): instantiated on the type the eager op used, with the precise exp.
 _HEADER = r"""
 // f_b / g_b for one output: MLX 0.32.2's one-row qmv_quad at 4 or 8 bits (the caller does the quad_sum)
@@ -282,7 +284,7 @@ TY = 32
 
 
 def metal() -> bool:
-    return mx.default_device() == mx.gpu and mx.metal.is_available()
+    return capability.custom_kernels() and mx.default_device() == mx.gpu
 
 
 def _kernel() -> Any:

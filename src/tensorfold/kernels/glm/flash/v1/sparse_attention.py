@@ -7,6 +7,8 @@ from typing import Any
 
 import mlx.core as mx
 
+from tensorfold.kernels import capability
+
 _SOURCE = r"""
   const uint gid = threadgroup_position_in_grid.y;          // row * HEADS + head
   const uint simd_gid = simdgroup_index_in_threadgroup;
@@ -79,7 +81,7 @@ _kernel_obj: dict[str, Any] = {}
 
 
 def metal() -> bool:
-    return mx.default_device() == mx.gpu and mx.metal.is_available()
+    return capability.custom_kernels() and mx.default_device() == mx.gpu
 
 
 def _kernel() -> Any:
