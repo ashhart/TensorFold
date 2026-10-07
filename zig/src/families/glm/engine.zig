@@ -75,6 +75,8 @@ pub const Engine = struct {
     rank_log: bool = false, // GLM_RANKS=1: each MTP depth's logits kept, and the target's rank in them where drafts miss
     ep_arena: std.heap.ArenaAllocator, // the link settings, alive as long as the link
     residency: ?mtl.ResidencySet = null,
+    keepalive_sets: [1]mtl.ResidencySet = undefined, // the residency set, for the idle keepalive's commit
+    keepalive_target: mtl.keepalive.Target = undefined, // the engine's queue, set at load for the server's ticker
     load_seconds: f64 = 0,
     gpu: [2]f64 = .{ 0, 0 }, // the last command buffer's GPU start and end (host seconds)
     fused_route: bool = true, // GLM_ROUTE=0: the Python family's cast, router and top-k launches
@@ -180,6 +182,9 @@ pub const Engine = struct {
             e.queue.addResidencySet(set);
             e.residency = set;
         } else |_| {}
+        // every Metal engine offers its queue to the idle keepalive; the sets list only when the model is resident
+        if (e.residency) |set| e.keepalive_sets[0] = set;
+        e.keepalive_target = .{ .queue = e.queue, .sets = if (e.residency != null) &e.keepalive_sets else &.{} };
         // a process's first prompt pays a one-time cost: every rank of a pair pays it here at the same step (GLM_NO_WARMUP: skip)
         if (e.pr != null and cap >= 128 and std.c.getenv("GLM_NO_WARMUP") == null) {
             var ids: [64]u32 = undefined;

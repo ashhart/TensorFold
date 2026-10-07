@@ -57,6 +57,7 @@ const Host = struct {
     gpa: Allocator,
     m: *nemotron.Model,
     metal: *nemotron.backend.Metal,
+    warm: mtl.keepalive.Target = undefined, // the model's queue, for the lane host's idle ticker
     cfg: lanes.Config,
     clock: nemotron.timing.RoundClock,
     core: lanes.Engine,
@@ -129,6 +130,8 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(@max(window, 0)), .prefill_step = step });
     h.round = .{ .depth = 8 };
     if (h.metal.head != null) h.host.lone = .{ .ctx = h, .run = Host.lone };
+    h.warm = .{ .queue = h.m.queue };
+    h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }

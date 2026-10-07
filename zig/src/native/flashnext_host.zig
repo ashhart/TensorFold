@@ -28,6 +28,7 @@ pub const Host = struct {
     gpa: Allocator,
     io: std.Io,
     eng: *fx.Engine,
+    warm: mtl.keepalive.Target = undefined, // the engine's queue, for the server's idle ticker
     info_: api.Info,
     mutex: std.Io.Mutex = .init,
     wake: std.Io.Condition = .init,
@@ -67,7 +68,13 @@ pub const Host = struct {
     }
 
     pub fn engine(h: *Host) api.Engine {
-        return .{ .ctx = h, .vtable = &.{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = statusFn, .memory = memoryFn } };
+        return .{ .ctx = h, .vtable = &.{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = statusFn, .memory = memoryFn, .keepalive = keepaliveFn } };
+    }
+
+    /// The engine's queue as a keepalive target: the ticker commits a tiny buffer on it while idle.
+    fn keepaliveFn(ctx: *anyopaque) ?api.keepalive.Target {
+        const h: *Host = @ptrCast(@alignCast(ctx));
+        return .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     }
 
     fn self(ctx: *anyopaque) *Host {
@@ -430,6 +437,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: []const u8, windo
     errdefer gpa.destroy(h);
     const limit: i64 = tf.flashnext_replay.CAP - fx.MARGIN;
     h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .info_ = .{ .name = "flashnext-zig", .lanes = 1, .context_window = @intCast(if (window > 0) @min(window, limit) else limit) } };
+    h.warm = .{ .queue = eng.r.queue };
     if (!eng.followsPeer() and budget > 0) h.cache = pc.Store.init(gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .charged = Snaps.charged, .spare = Snaps.spare, .trim = Snaps.trim, .reuses = Snaps.reuses } }, .{ .lookahead = 1 }, budget);
     try h.start();
     return h;

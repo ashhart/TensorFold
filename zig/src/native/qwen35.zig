@@ -10,6 +10,7 @@ const Host = struct {
     gpa: std.mem.Allocator,
     model: *q.Model,
     metal: *q.backend.Metal,
+    warm: mtl.keepalive.Target = undefined, // the model's queue, for the lane host's idle ticker
     config: lanes.Config,
     clock: lanes.backend.WallClock,
     core: lanes.Engine,
@@ -53,6 +54,8 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.core = lanes.Engine.init(gpa, &h.config, h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(window), .prefill_step = chunk });
+    h.warm = .{ .queue = h.metal.model.queue };
+    h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }

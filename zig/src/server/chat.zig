@@ -222,6 +222,8 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     defer box.deinit();
     const id = srv.next_id.fetchAdd(1, .monotonic);
     const submitted = nowNs(io);
+    if (srv.keepalive) |k| k.begin(); // the GPU is busy: the idle ticker holds its commits
+    defer if (srv.keepalive) |k| k.end();
     srv.engine.submit(id, &request, .{ .ctx = &box, .event = Mailbox.onEvent }) catch |e| return switch (e) {
         error.Busy => cx.fail(.capacity, "the engine is busy; retry shortly", .{}),
         error.Closed => cx.fail(.other, "the scheduler is closed", .{}),
