@@ -22,6 +22,7 @@ pub const nccl = @import("nccl.zig");
 pub const triton = @import("triton.zig");
 pub const aot = @import("aot.zig");
 pub const kernels = @import("kernels.zig");
+pub const fp8 = @import("fp8.zig");
 pub const segments = @import("segments.zig");
 
 test {
@@ -30,4 +31,5 @@ test {
     _ = abi;
     _ = aot;
     _ = segments;
+    _ = @import("fp8.zig");
 }

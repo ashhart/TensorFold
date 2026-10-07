@@ -8,6 +8,7 @@ const bench = @import("bench.zig");
 const oracle_tests = @import("oracle_tests.zig");
 const libs_tests = @import("libs_tests.zig");
 const sample_tests = @import("sample_tests.zig");
+const fp8_tests = @import("fp8_tests.zig");
 
 const usage =
     \\usage: tf-cuda-test <command>
@@ -25,6 +26,7 @@ const usage =
     \\  gdn-tree <dir>            tree_kernel bits against the Python oracle's fixture
     \\  triton <dir>              a Triton cubin's bits against the Python oracle's fixture
     \\  sample                    sample.cu's keyed draws against the Metal rule's host references (synthetic rows)
+    \\  fp8-lane <dir>            block-FP8 projections against the Python lane matmul's bytes (oracle/fp8_lane.py)
     \\
 ;
 
@@ -74,6 +76,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "gdn-replay")) return oracle_tests.gdnReplay(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "gdn-tree")) return oracle_tests.gdnTree(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "triton")) return oracle_tests.tritonKernel(gpu, try arg(rest, 0));
+    if (std.mem.eql(u8, cmd, "fp8-lane")) return fp8_tests.lane(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "sample")) return sample_tests.draws(gpu);
     std.debug.print("{s}", .{usage});
     return error.UnknownCommand;
@@ -84,9 +87,9 @@ fn info(gpu: check.Gpu) !void {
     const name = try gpu.ctx.name(&name_buf);
     const mem = try gpu.ctx.memInfo();
     std.debug.print("RESULT driver CUDA {d}, device {s}, sm_{d}, {d} SMs, {d} MiB total, {d} MiB free, kernels embedded {}\n", .{
-        try gpu.d.version(),                                 name,
-        try gpu.ctx.capability(),                            try gpu.ctx.attribute(.multiprocessor_count),
-        mem.total >> 20,                                     mem.free >> 20,
+        try gpu.d.version(),      name,
+        try gpu.ctx.capability(), try gpu.ctx.attribute(.multiprocessor_count),
+        mem.total >> 20,          mem.free >> 20,
         cuda.kernels.available,
     });
 }
