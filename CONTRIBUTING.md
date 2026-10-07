@@ -1,124 +1,107 @@
 # Contributing to TensorFold
 
-Thank you for wanting to make TensorFold faster. This page says what a pull request needs to land in the next
-release, and what happens to it after you open it. A small pull request with its measurements attached lands
-fastest.
+TensorFold's main line is the Zig engine and server.
+Python 0.6.6 is maintained on `python-0.6`; Python clients and references under `tools` are development tools.
+Start from the release branch named in the issue, and keep one change per pull request.
+Open an issue before a new model family, backend or arithmetic change so we can agree on its gate.
 
-## Before you write code
+## Build and host tests
 
-- Read the pinned issue "Landing next" and the open pull requests. Work that is integrated for the next release is
-  listed there before it reaches `main`, so you don't build it twice.
-- Open an issue first for a large change: a new backend, a GPU generation, a model family, or anything that changes
-  the arithmetic a model runs. We will say what it needs to land before you spend the time.
-- Keep one change to a pull request. A fix and an unrelated speed-up land separately. In a stack of dependent pull
-  requests, say which one each sits on.
+Use the exact Zig version in `.zig-version`, currently 0.17.0.
+Metal builds need Xcode's macOS SDK and Metal toolchain.
 
-## What every change must keep
-
-1. **Lanes.** Every model decodes through the shared lane rounds, where one forward verifies the drafted tokens
-   together. No serial path, no feature that works only with drafts off, no second batcher beside the engine.
-2. **Exact output.** A drafted reply equals the same engine's `"draft": false` reply, token for token. A resumed
-   prompt equals a fresh one, and each concurrent stream equals its solo run. The README's "Exact decoding" section
-   has the contract.
-3. **No precision traded for speed.** No lower-precision activations or sums, no skipped keys, no pruned tokens. A
-   reorder, or another kernel at equal or better precision, is fine. Say which sums change and that the bits change.
-   A precision mode that a checkpoint format defines is a separate conversation, so open an issue.
-4. **Prompt processing no slower.** Measure cold prompts against the last release for any change that touches
-   prefill, a kernel, the engine, a family or the server.
-5. **Every platform it touches.** That is Metal on Apple Silicon from M1 to M5, and CUDA. Say which you ran and
-   which you could not.
-6. **Lean code.** One job to a module, files under about 600 lines, and one-line comments and docstrings that say
-   what the code can't. Measurements, history and benchmark tables belong in the pull request, not in the source.
-
-## The receipt
-
-Paste these into the pull request. We rerun what we can, and a complete receipt lets a small change land on review
-without waiting for a machine. A change to documentation alone needs no receipt.
-
-- **Environment.** The TensorFold version or commit, the MLX or PyTorch version, the machine and GPU, the checkpoint
-  and its revision.
-- **Exactness.** Drafted against serial, and concurrent against solo, by token hash:
-
-  ```
-  python3 tools/bench_concurrent.py http://127.0.0.1:8080 MODEL --alone --serial
-  ```
-
-  For a server change, also send one request twice, the second with `"draft": false`, and compare `token_sha`.
-- **Decode speed**, before and after, on the same machine in the same session:
-
-  ```
-  python3 tools/bench_openai.py http://127.0.0.1:8080 MODEL
-  ```
-
-- **Prompt speed**, before and after. The tool builds cold prompts of 2k, 8k, 16k, 32k and 64k tokens:
-
-  ```
-  python3 tools/prefill_cold.py build MODEL_DIR prompts.json
-  python3 tools/prefill_cold.py run http://127.0.0.1:8080 MODEL prompts.json out.json
-  ```
-
-- **Tests** you ran, with the pass, fail and skip counts.
-- **What you did not run**, and why. We need this as much as the rest.
-
-When the difference is a few percent, alternate the runs: before, after, after, before. One run each way cannot tell
-a 2% change from a warm machine.
-
-## Running the tests
-
-TensorFold needs Python 3.11 or newer.
-
-```
-python -m pip install -e '.[test,tui]'
-python -m pytest -q tests
+```sh
+zig build native -Dcpu=apple_m1 -Dversion=1.0.0
+zig build test test-golden -Dcpu=apple_m1
 ```
 
-On a Mac that is the host suite. The CUDA tests are `tests/cuda` and `tests/test_cuda_*.py`. Those that need PyTorch
-or a GPU skip without one.
+`native` writes `zig-out/native/bin/tensorfold-native`.
+The `apple_m1` CPU target keeps the macOS binary compatible with M1 through M5.
+`test` runs host checks; `test-golden` compares the frozen server corpus and records known differences separately.
+Neither host result substitutes for an actual model/device gate.
 
-A new test skips cleanly where its dependency is missing. Use `pytest.importorskip`, so the suite still collects on
-a machine without PyTorch or without MLX.
+Linux release builds use the CUDA backend and qualified GPU kernel assets.
+[Packaging](packaging/README.md) lists the flat fatbin set and optional captured CUDA files required by `dist`.
+Compile success alone does not qualify a GPU or checkpoint.
 
-A test should fail before your change and pass after it. Say so in the pull request.
+## Exactness and precision
 
-## Commits and identity
+A draft is accepted only when it equals the same engine's plain token.
+Keep shared lane verification, caches and per-stream state in the core; add model operators and weight handling in the family.
+A new family does not add another scheduler beside the engine.
 
-- Your commits keep your authorship. We record every author under a GitHub noreply address, such as
-  `12345+yourlogin@users.noreply.github.com`, so no personal email lands in the history. "Keep my email addresses
-  private" in your GitHub email settings does this for you.
-- No AI tool attribution lines, and no co-author trailers for tools. We remove them when we land a commit.
-- No personal data, machine names, internal hosts or local paths in code, tests, fixtures or commit messages.
-- A data file built from text, such as an n-gram table, comes from public text only. Name the corpus in the pull
-  request.
+Verify these contracts at the same checkpoint, backend, runtime and settings:
 
-## How a pull request lands
+- Drafted output equals `"draft": false` output, token for token.
+- A supported resumed path equals a fresh execution of the full prompt.
+- Each concurrently requested reply equals its solo run, including engines that queue requests.
+- Prompt chunks and decode use the required row arithmetic, with recurrent state, KV and final logits checked at seams.
+- Cancellation, reset and partial acceptance leave the next request's state valid.
 
-We review it, port it onto the release branch ourselves and run it through the release checks. We do not ask you to
-rebase. If `main` has moved, we carry your commits forward.
+Keep the checkpoint's activation precision and the required accumulation precision.
+A changed reduction order needs an independent FP64 reference for each affected projection class, with native error no worse than the current reference.
+Compare prompt and decode references separately on identical input rows.
+Report worst per-column differences as well as aggregate error; an average must not hide a worse column.
+For model fidelity, use teacher-forced histories and record all top-token differences and margins.
+A documented one-step tie policy applies only to the same two contenders with both margins within that policy.
 
-Your change lands on `main` as your own commit, under your name, inside a release. We then close the pull request
-with a comment that links the release and says what we changed on our side, if anything. GitHub may show the pull
-request as closed and not merged, because the commit that lands is a port of yours. It still carries your name, and
-you appear in the repository's contributors.
+## Performance receipts
 
-Our changes on top of yours, such as a style pass or an extra test, go in separate commits under our name.
+Measure before and after on the same machine, using the same checkpoint, public prompt IDs and settings.
+Name the commit/version, GPU, OS, checkpoint revision, runtime libraries and request parameters.
+Record pass, fail and skip counts and explain any unrun platform or feature.
 
-When a pull request overlaps work that is already integrated, we close it with a note that says where the work lives
-and credits what your report or measurements added. That is not a rejection, and the "Landing next" issue exists to
-make it rare.
+For served decode, the existing standard-library client needs Python 3.11 or newer:
 
-## What we can check ourselves
+```sh
+python3 tools/bench_openai.py http://127.0.0.1:8080 local-model \
+  --tokens 256 --reps 3 --temperatures 0 --label candidate --output decode.json
+python3 tools/bench_concurrent.py http://127.0.0.1:8080 local-model \
+  --tokens 256 --reps 3 --temperatures 0 --levels 1,4 --alone --serial --output concurrent.json
+```
 
-We test on an M3 Ultra, an M5 Max, one DGX Spark and two together, and an RTX PRO 6000. A change for other hardware
-needs a complete receipt, because we cannot rerun it, and it takes longer to land. Keep such a change in its own
-files where you can, so it cannot affect the paths we do test.
+The server in these commands is the native binary.
+The clients measure requests; Python is not part of native inference or the native build.
+Include ordinary greedy prose and code in the measured prompts.
+For cold prefill, attach exact 2k, 8k, 32k and 64k token arrays, request bodies, timings and cached-token counts.
+Disable supported prefix retention with `--prompt-cache-gib 0` and use fresh KV state for each measurement.
+Record 64k, 128k and the native window separately where the model/platform admits them.
+Compare against the previous release and the applicable standard server, such as `mlx_lm` or `vLLM`.
+When a difference is only a few percent, alternate before/after runs to separate it from temperature and load changes.
 
-## Reporting a bug
+Memory receipts include peak physical process footprint and device/pinned allocations where the backend reports them.
+State the hardware RAM class and context; a budget on a larger host is not a measurement on a smaller machine.
+Use a single model process per test machine, the existing GPU lock and admission guard, and record load/cleanup boundaries.
+Never raise a shared machine's limits to get a test through without its owner's authorization.
 
-Open an issue with the TensorFold version, the machine, the checkpoint and its revision, the exact command, the
-startup lines the server printed, and what you expected against what happened. A request that reproduces it is worth
-more than a description.
+## Lean code and review
 
-## License
+Each module has one job, source files stay at or below 600 lines, and comments/docstrings are single lines of at most 120 columns.
+Measurements and history belong in a receipt or recipe, not source comments.
+The lean checker must add zero problems over the branch's pinned baseline:
 
-TensorFold is Apache-2.0. A contribution you submit is under that license, as its section 5 says. Model weights keep
-their own licenses.
+```sh
+python3 tools/zig/lean_check.py
+```
+
+Attach the baseline count and identify inherited findings instead of claiming a nonzero checker exit is clean.
+Write tests that demonstrate a real failure and its correction; keep the failing receipt when changing arithmetic or lifecycle behavior.
+Run the host suite and the device/model checks for every affected platform.
+We review a candidate, preserve its authorship and run the release gates before landing it.
+
+## Public identity and privacy
+
+Use your approved public Git identity and GitHub noreply address.
+Keep every contributor's authorship through a port or merge; tool co-author trailers do not belong in the history.
+Keep private emails, machine names, local user paths, addresses, keys and confidential data out of source, fixtures and receipts intended for publication.
+Examples use fictional identities and reserved documentation addresses.
+Inspect the complete publication tree, outgoing history and packaged artifacts before uploading them.
+A clean diff or a passing test suite does not replace that review.
+
+## Bug reports and license
+
+Include the native version, model revision, GPU/OS, exact command, startup error and a public request that reproduces the problem.
+A token mismatch report should include both drafted and plain token hashes at the same settings.
+
+TensorFold is Apache-2.0; a contribution follows that license.
+Model weights keep their own licenses, and the archive retains the project's required third-party notices.
