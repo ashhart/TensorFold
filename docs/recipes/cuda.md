@@ -75,7 +75,23 @@ decode cost. Placement leaves the arithmetic alone, so the output should not cha
 `nvidia_drm modeset=1`, access to the card's device node (`--device /dev/dri/card0` in a
 container) and no display in use. It is off by default. `tf-cuda-test carveout [MiB] [card]`
 checks a machine: round trips from the host and from a kernel, and copy and read bandwidth. It
-skips when it can't open the card. The idea comes from coolbho3k's DeepSeek-v4.1-Flash-2x-DGX-Spark.
+skips on a GPU that is not integrated and when it can't open the card. The idea comes from coolbho3k's
+DeepSeek-v4.1-Flash-2x-DGX-Spark.
+
+Preparing a DGX Spark for the carveout:
+
+1. Kernel mode setting: `sudo cat /sys/module/nvidia_drm/parameters/modeset` must print `Y`. DGX OS's
+   driver package sets it in `/etc/modprobe.d/nvidia-graphics-drivers-kms.conf`. If it prints `N`, remove
+   any `modeset=0` line under `/etc/modprobe.d/`, add `options nvidia_drm modeset=1 fbdev=0` to a file
+   there, run `sudo update-initramfs -u` and reboot. The receipts ran with `fbdev=0`; `fbdev=1` is untested.
+2. No display: every connector in `cat /sys/class/drm/card*-*/status` reads `disconnected`, and no desktop
+   session holds the card (`systemctl get-default` prints `multi-user.target`; otherwise
+   `sudo systemctl set-default multi-user.target` and reboot). A running desktop would lose this memory.
+3. Access to the card: `/dev/dri/card0` belongs to the `video` group. Add the user with
+   `sudo usermod -aG video $USER` and log in again, or pass `--device /dev/dri/card0` to a container.
+   `ls -l /dev/dri/by-path/` shows which card node belongs to the GPU.
+4. Check: `tf-cuda-test carveout` prints PASS for both round trips and the bandwidth lines. A failing step
+   is named in the error, for example `CardUnavailable` when the node can't be opened.
 
 CUDA capture and packing use the repository's Triton manifest tool. It records
 Triton and extension launches, maps them to cached kernels and metadata, and
