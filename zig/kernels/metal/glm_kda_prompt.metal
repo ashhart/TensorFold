@@ -217,3 +217,7 @@ template <int H, int D, int TAPS, int TY, int FB, int GB>
 template [[host_name("glm_kda_pre")]] [[kernel]] decltype(glm_kda_pre<64, 128, 4, 32, 4, 4>) glm_kda_pre<64, 128, 4, 32, 4, 4>;
 template [[host_name("glm_kda_scan")]] [[kernel]] decltype(glm_kda_scan<64, 128, 4, 32, 4, 4>) glm_kda_scan<64, 128, 4, 32, 4, 4>;
 template [[host_name("glm_kda_post")]] [[kernel]] decltype(glm_kda_post<64, 128, 4, 32, 4, 4>) glm_kda_post<64, 128, 4, 32, 4, 4>;
+// TP2: one Mac's 32 heads
+template [[host_name("glm_kda_pre_tp")]] [[kernel]] decltype(glm_kda_pre<32, 128, 4, 32, 4, 4>) glm_kda_pre<32, 128, 4, 32, 4, 4>;
+template [[host_name("glm_kda_scan_tp")]] [[kernel]] decltype(glm_kda_scan<32, 128, 4, 32, 4, 4>) glm_kda_scan<32, 128, 4, 32, 4, 4>;
+template [[host_name("glm_kda_post_tp")]] [[kernel]] decltype(glm_kda_post<32, 128, 4, 32, 4, 4>) glm_kda_post<32, 128, 4, 32, 4, 4>;

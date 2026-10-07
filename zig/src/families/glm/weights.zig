@@ -72,15 +72,16 @@ pub const Weights = struct {
 
 const prefix = "model.language_model.";
 
-/// One tensor's bytes on disk.
-const Src = struct { shard: u32, off: u64, len: u64, dtype: st.DType, shape: [st.max_rank]usize, rank: u8 };
+const load_fix = @import("weights_fix.zig");
+const Src = load_fix.Src;
+const Fix = load_fix.Fix;
+const Transform = load_fix.Transform;
+const readAll = load_fix.readAll;
+
 
 const Copy = struct { shard: u32, off: u64, len: u64, dst: [*]u8 };
 
-const Fix = enum { hc_pack, router_pack, conv, to_f32, transpose_bf16, cols };
 
-/// A tensor read whole into host memory and rewritten into its place (small: mixes, router, conv taps, norms).
-const Transform = struct { src: Src, dst: [*]u8, fix: Fix, extra: [3]?Src = .{ null, null, null }, arg: [3]usize = .{ 0, 0, 0 } };
 
 const Loader = struct {
     gpa: std.mem.Allocator,
@@ -157,17 +158,18 @@ const Loader = struct {
 
     /// 4-bit projections that read one input, stacked by rows in order; each part checked [n_i, k].
     fn q4(l: *Loader, k: usize, comptime fmt: []const u8, parts: []const []const u8, ns: []const usize, args: anytype) !Q4 {
-        return l.q4Pad(k, fmt, parts, ns, 1, args);
+        const zeros: [8]usize = @splat(0);
+        return l.q4Rows(k, fmt, parts, zeros[0..parts.len], ns, ns, 1, args);
     }
 
-    /// `q4` with room for rows up to a multiple of `pad` (the prompt's tensor-unit tiles are 64 rows; never read).
-    fn q4Pad(l: *Loader, k: usize, comptime fmt: []const u8, parts: []const []const u8, ns: []const usize, pad: usize, args: anytype) !Q4 {
+    /// 4-bit rows [lo, lo + n) of each part stored [all, k], stacked; room for `pad`-row tiles.
+    fn q4Rows(l: *Loader, k: usize, comptime fmt: []const u8, parts: []const []const u8, los: []const usize, ns: []const usize, alls: []const usize, pad: usize, args: anytype) !Q4 {
         var n: usize = 0;
         for (ns) |x| n += x;
         const room = std.mem.alignForward(usize, n, pad);
         const out: Q4 = .{ .w = l.take(Q4.wBytes(room, k)), .s = l.take(Q4.sBytes(room, k)), .b = l.take(Q4.sBytes(room, k)), .n = @intCast(n), .k = @intCast(k) };
         var row: usize = 0;
-        for (parts, ns) |p, rows| {
+        for (parts, los, ns, alls) |p, lo, rows, all| {
             const comps = [_][]const u8{ "weight", "scales", "biases" };
             const dsts = [_]Ref{ out.w.at(Q4.wBytes(row, k)), out.s.at(Q4.sBytes(row, k)), out.b.at(Q4.sBytes(row, k)) };
             for (comps, dsts, 0..) |comp, dst, j| {
@@ -179,12 +181,41 @@ const Loader = struct {
                     std.log.err("glm: the checkpoint has no tensor {s}", .{nm});
                     return error.MissingTensor;
                 };
-                try expect(s, nm, if (j == 0) .u32 else .bf16, &.{ rows, if (j == 0) k / 8 else k / 64 });
-                try l.copyTo(s, dst);
+                try expect(s, nm, if (j == 0) .u32 else .bf16, &.{ all, if (j == 0) k / 8 else k / 64 });
+                const row_bytes: usize = if (j == 0) k / 2 else k / 64 * 2;
+                try l.copyTo(.{ .shard = s.shard, .off = s.off + lo * row_bytes, .len = rows * row_bytes, .dtype = s.dtype, .shape = s.shape, .rank = s.rank }, dst);
             }
             row += rows;
         }
         return out;
+    }
+
+    /// One 4-bit matrix stored [n, k_all]: its input columns [lo, lo + k) (TP2: o_proj over one Mac's heads).
+    fn q4Cols(l: *Loader, comptime fmt: []const u8, args: anytype, n: usize, k_all: usize, lo: usize, k: usize) !Q4 {
+        const out: Q4 = .{ .w = l.take(Q4.wBytes(n, k)), .s = l.take(Q4.sBytes(n, k)), .b = l.take(Q4.sBytes(n, k)), .n = @intCast(n), .k = @intCast(k) };
+        const comps = [_][]const u8{ "weight", "scales", "biases" };
+        for (comps, [_]Ref{ out.w, out.s, out.b }, 0..) |comp, dst, j| {
+            var name: [200]u8 = undefined;
+            const base = try std.fmt.bufPrint(&name, fmt, args);
+            var full: [240]u8 = undefined;
+            const nm = try std.fmt.bufPrint(&full, "{s}.{s}", .{ base, comp });
+            const s = l.names.get(nm) orelse return error.MissingTensor;
+            try expect(s, nm, if (j == 0) .u32 else .bf16, &.{ n, if (j == 0) k_all / 8 else k_all / 64 });
+            const row_all: usize = if (j == 0) k_all / 2 else k_all / 64 * 2;
+            const span: [2]usize = if (j == 0) .{ lo / 2, k / 2 } else .{ lo / 64 * 2, k / 64 * 2 };
+            if (!l.dry) try l.transforms.append(l.gpa, .{ .src = s, .dst = dst.addr(), .fix = .cols, .arg = .{ row_all, span[0], span[1] } });
+        }
+        return out;
+    }
+
+    /// Elements [lo, lo + n) of a vector stored with `all` elements of `size` bytes (TP2: one Mac's heads).
+    fn plainRange(l: *Loader, comptime fmt: []const u8, args: anytype, dtype: st.DType, all: usize, lo: usize, n: usize, size: usize) !Ref {
+        const s = try l.src(fmt, args);
+        var name: [200]u8 = undefined;
+        try expect(s, try std.fmt.bufPrint(&name, fmt, args), dtype, &.{all});
+        const r = l.take(n * size);
+        try l.copyTo(.{ .shard = s.shard, .off = s.off + lo * size, .len = n * size, .dtype = s.dtype, .shape = s.shape, .rank = s.rank }, r);
+        return r;
     }
 
     /// This Mac's routed experts' `proj` stacked [own, n, k]; by rows, gate/up keep rows `inter` and down keeps input columns `inter`.
@@ -229,25 +260,34 @@ const Loader = struct {
     fn kda(l: *Loader, i: usize) !Kda {
         const c = l.c;
         const D: usize = c.hidden;
-        const W: usize = c.kdaWidth();
+        const W: usize = c.kdaWidth(); // this Mac's heads' channels
+        const H: usize = c.kda_heads;
         const dk: usize = c.kda_dim;
+        const h0: usize = c.tp_rank * H; // TP2: this Mac's first head (0 on one Mac)
+        const ch0 = h0 * dk;
+        const Wa = W * c.tp; // every head's channels, as stored
+        const Ha = H * c.tp;
         const a = prefix ++ "layers.{d}.self_attn.";
         const conv_q = try l.src(a ++ "q_conv1d.weight", .{i});
-        try expect(conv_q, "q_conv1d", .bf16, &.{ W, 1, c.conv });
+        try expect(conv_q, "q_conv1d", .bf16, &.{ Wa, 1, c.conv });
         const conv = try l.fixed(conv_q, 3 * W * c.conv * 4, .conv);
         const extra: [3]?Src = .{ try l.src(a ++ "k_conv1d.weight", .{i}), try l.src(a ++ "v_conv1d.weight", .{i}), null };
-        if (!l.dry) l.transforms.items[l.transforms.items.len - 1].extra = extra;
+        if (!l.dry) {
+            const t = &l.transforms.items[l.transforms.items.len - 1];
+            t.extra = extra;
+            t.arg = .{ ch0, W, 0 };
+        }
         const o_norm = try l.src(a ++ "o_norm.weight", .{i});
         try expect(o_norm, "o_norm", .bf16, &.{dk});
         return .{
-            .in_proj = try l.q4(D, a, &.{ "q_proj", "k_proj", "v_proj", "f_a_proj", "g_a_proj", "b_proj" }, &.{ W, W, W, dk, dk, c.kda_heads }, .{i}),
-            .f_b = try l.q4(dk, a, &.{"f_b_proj"}, &.{W}, .{i}),
-            .g_b = try l.q4(dk, a, &.{"g_b_proj"}, &.{W}, .{i}),
-            .o_proj = try l.q4(W, a, &.{"o_proj"}, &.{D}, .{i}),
+            .in_proj = try l.q4Rows(D, a, &.{ "q_proj", "k_proj", "v_proj", "f_a_proj", "g_a_proj", "b_proj" }, &.{ ch0, ch0, ch0, 0, 0, h0 }, &.{ W, W, W, dk, dk, H }, &.{ Wa, Wa, Wa, dk, dk, Ha }, 64, .{i}),
+            .f_b = try l.q4Rows(dk, a, &.{"f_b_proj"}, &.{ch0}, &.{W}, &.{Wa}, 1, .{i}),
+            .g_b = try l.q4Rows(dk, a, &.{"g_b_proj"}, &.{ch0}, &.{W}, &.{Wa}, 1, .{i}),
+            .o_proj = if (c.tp == 1) try l.q4(W, a, &.{"o_proj"}, &.{D}, .{i}) else try l.q4Cols(a ++ "o_proj", .{i}, D, Wa, ch0, W),
             .conv_w = conv,
-            .a_log = try l.plain(a ++ "A_log", .{i}, .f32, &.{c.kda_heads}),
-            .a = l.take(c.kda_heads * 4),
-            .dt_bias = try l.plain(a ++ "dt_bias", .{i}, .f32, &.{W}),
+            .a_log = try l.plainRange(a ++ "A_log", .{i}, .f32, Ha, h0, H, 4),
+            .a = l.take(H * 4),
+            .dt_bias = try l.plainRange(a ++ "dt_bias", .{i}, .f32, Wa, ch0, W, 4),
             .o_norm = try l.fixed(o_norm, dk * 4, .to_f32),
         };
     }
@@ -256,13 +296,16 @@ const Loader = struct {
         const c = l.c;
         const D: usize = c.hidden;
         const a = prefix ++ "layers.{d}.self_attn.";
+        const H: usize = c.mla_heads; // this Mac's heads
+        const h0: usize = c.tp_rank * H; // TP2: its first head (0 on one Mac)
+        const Ha = H * c.tp; // every head, as stored
         const gate = try l.src(a ++ "indexer.index_kpool_compress_gate", .{i});
         try expect(gate, "index_kpool_compress_gate", .bf16, &.{ c.i_dim, D });
         return .{
-            .x_proj = try l.q4Pad(D, a, &.{ "q_a_proj", "kv_a_proj_with_mqa", "indexer.wk", "indexer.weights_proj" }, &.{ c.q_lora, c.kv_lora, c.i_dim, c.i_heads }, 64, .{i}),
-            .qr_proj = try l.q4(c.q_lora, a, &.{ "q_b_proj", "indexer.wq_b" }, &.{ c.mla_heads * c.nope, c.i_heads * c.i_dim }, .{i}),
-            .kv_b = try l.q4(c.kv_lora, a, &.{"kv_b_proj"}, &.{c.mla_heads * (c.nope + c.v_dim)}, .{i}),
-            .o_proj = try l.q4(c.mla_heads * c.v_dim, a, &.{"o_proj"}, &.{D}, .{i}),
+            .x_proj = try l.q4Rows(D, a, &.{ "q_a_proj", "kv_a_proj_with_mqa", "indexer.wk", "indexer.weights_proj" }, &.{ 0, 0, 0, 0 }, &.{ c.q_lora, c.kv_lora, c.i_dim, c.i_heads }, &.{ c.q_lora, c.kv_lora, c.i_dim, c.i_heads }, 64, .{i}),
+            .qr_proj = try l.q4Rows(c.q_lora, a, &.{ "q_b_proj", "indexer.wq_b" }, &.{ h0 * c.nope, 0 }, &.{ H * c.nope, c.i_heads * c.i_dim }, &.{ Ha * c.nope, c.i_heads * c.i_dim }, 1, .{i}),
+            .kv_b = try l.q4Rows(c.kv_lora, a, &.{"kv_b_proj"}, &.{h0 * (c.nope + c.v_dim)}, &.{H * (c.nope + c.v_dim)}, &.{Ha * (c.nope + c.v_dim)}, 1, .{i}),
+            .o_proj = if (c.tp == 1) try l.q4(H * c.v_dim, a, &.{"o_proj"}, &.{D}, .{i}) else try l.q4Cols(a ++ "o_proj", .{i}, D, Ha * c.v_dim, h0 * c.v_dim, H * c.v_dim),
             .q_norm = try l.plain(a ++ "q_a_layernorm.weight", .{i}, .bf16, &.{c.q_lora}),
             .kv_norm = try l.plain(a ++ "kv_a_layernorm.weight", .{i}, .bf16, &.{c.kv_lora}),
             .k_norm_w = try l.plain(a ++ "indexer.k_norm.weight", .{i}, .bf16, &.{c.i_dim}),
@@ -284,7 +327,7 @@ const Loader = struct {
         };
         n += 2 * (24 * 4 * D * 2 + 1024) + 2 * (D * 2 + 256);
         switch (c.kind(@intCast(i))) {
-            .kda => n += q.b(c.kdaProj(), D) + 2 * q.b(c.kdaWidth(), c.kda_dim) + q.b(D, c.kdaWidth()) + 3 * c.kdaWidth() * c.conv * 4 + 8 * 1024 + c.kdaWidth() * 4,
+            .kda => n += q.b(std.mem.alignForward(usize, c.kdaProj(), 64), D) + 2 * q.b(c.kdaWidth(), c.kda_dim) + q.b(D, c.kdaWidth()) + 3 * c.kdaWidth() * c.conv * 4 + 8 * 1024 + c.kdaWidth() * 4,
             .mla => n += q.b(std.mem.alignForward(usize, c.xProj(), 64), D) + q.b(c.qrProj(), c.q_lora) + q.b(c.mla_heads * (c.nope + c.v_dim), c.kv_lora) + q.b(D, c.mla_heads * c.v_dim) + 16 * 1024 + c.i_dim * D * 2,
         }
         if (c.isMoe(@intCast(i))) {
@@ -399,14 +442,6 @@ const Loader = struct {
     }
 };
 
-fn readAll(fd: std.c.fd_t, dest: []u8, at: u64) !void {
-    var done: usize = 0;
-    while (done < dest.len) {
-        const n = std.c.pread(fd, dest.ptr + done, dest.len - done, @intCast(at + done));
-        if (n <= 0) return error.ShortRead;
-        done += @intCast(n);
-    }
-}
 
 const Pool = struct {
     fds: []std.c.fd_t,
@@ -453,7 +488,7 @@ fn runCopies(l: *Loader, threads: usize) !void {
             while (true) {
                 const i = x.next.fetchAdd(1, .monotonic);
                 if (i >= x.l.transforms.items.len) return;
-                transform(x.l, x.fds, x.l.transforms.items[i]) catch x.failed.store(true, .release);
+                load_fix.transform(x.l.gpa, x.fds, x.l.transforms.items[i]) catch x.failed.store(true, .release);
             }
         }
     };
@@ -464,67 +499,6 @@ fn runCopies(l: *Loader, threads: usize) !void {
     if (tx.failed.load(.acquire)) return error.TransformFailed;
 }
 
-fn transform(l: *Loader, fds: []std.c.fd_t, t: Transform) !void {
-    const raw = try l.gpa.alloc(u8, t.src.len);
-    defer l.gpa.free(raw);
-    try readAll(fds[t.src.shard], raw, t.src.off);
-    const in16: []const u16 = @alignCast(std.mem.bytesAsSlice(u16, raw));
-    switch (t.fix) {
-        .hc_pack => { // [og 6][tm 4][i 16][sgn 8][lane 32][tn 4] -> [og][sgn][lane][i][tm][tn]
-            const out: [*]u16 = @ptrCast(@alignCast(t.dst));
-            var o: usize = 0;
-            for (0..6) |og| for (0..8) |sgn| for (0..32) |lane| for (0..16) |i| for (0..4) |tm| for (0..4) |tn| {
-                out[o] = in16[(og * 4 + tm) * 16384 + i * 1024 + sgn * 128 + lane * 4 + tn];
-                o += 1;
-            };
-        },
-        .router_pack => { // packed[q][thrM][i][tm][tn] = router[4q + tn][32i + 4thrM + tm]
-            const out: [*]u16 = @ptrCast(@alignCast(t.dst));
-            const E = t.src.shape[0];
-            const K = t.src.shape[1];
-            var o: usize = 0;
-            for (0..E / 4) |q| for (0..8) |thr| for (0..K / 32) |i| for (0..4) |tm| for (0..4) |tn| {
-                out[o] = in16[(4 * q + tn) * K + 32 * i + 4 * thr + tm];
-                o += 1;
-            };
-        },
-        .conv => { // [q | k | v][channel][tap] bf16 -> [tap][3 * channels] fp32
-            const out: [*]f32 = @ptrCast(@alignCast(t.dst));
-            const C = t.src.shape[0];
-            const T = t.src.shape[2];
-            const parts = [_]?Src{ t.src, t.extra[0], t.extra[1] };
-            for (parts, 0..) |ps, part| {
-                const p = ps orelse return error.MissingTensor;
-                const buf = if (part == 0) raw else blk: {
-                    const b = try l.gpa.alloc(u8, p.len);
-                    try readAll(fds[p.shard], b, p.off);
-                    break :blk b;
-                };
-                defer if (part != 0) l.gpa.free(buf);
-                const v: []const u16 = @alignCast(std.mem.bytesAsSlice(u16, buf));
-                for (0..C) |ch| for (0..T) |tap| {
-                    out[tap * 3 * C + part * C + ch] = @bitCast(@as(u32, v[ch * T + tap]) << 16);
-                };
-            }
-        },
-        .to_f32 => {
-            const out: [*]f32 = @ptrCast(@alignCast(t.dst));
-            for (in16, 0..) |x, i| out[i] = @bitCast(@as(u32, x) << 16);
-        },
-        .cols => { // each stored row's bytes [arg 1, arg 1 + arg 2) of its arg 0
-            const rows = t.src.len / t.arg[0];
-            for (0..rows) |rr| @memcpy(t.dst[rr * t.arg[2] ..][0..t.arg[2]], raw[rr * t.arg[0] + t.arg[1] ..][0..t.arg[2]]);
-        },
-        .transpose_bf16 => { // [r][c] -> [c][r]
-            const out: [*]u16 = @ptrCast(@alignCast(t.dst));
-            const R = t.src.shape[0];
-            const C = t.src.shape[1];
-            for (0..R) |r| for (0..C) |cc| {
-                out[cc * R + r] = in16[r * C + cc];
-            };
-        },
-    }
-}
 
 /// The first `c.run` layers, the MTP layer (when stored) and the head; `dry`: check names, dtypes and shapes, read nothing.
 pub fn load(gpa: std.mem.Allocator, device: mtl.Device, dir: []const u8, c: *const cfg.Config, threads: usize, dry: bool) !*Weights {
@@ -545,7 +519,8 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, dir: []const u8, c: *con
     const V: usize = c.vocab;
     try l.begin(2 * (Q4.wBytes(V, D) + 2 * Q4.sBytes(V, D)) + D * 2 + 8 * 256);
     w.embed = try l.q4(D, prefix ++ "embed_tokens", &.{""}, &.{V}, .{});
-    w.head = try l.q4(D, "lm_head", &.{""}, &.{V}, .{});
+    const vp = c.vocabPart(); // TP2: this Mac's half of the head's rows
+    w.head = try l.q4Rows(D, "lm_head", &.{""}, &.{vp[0]}, &.{vp[1] - vp[0]}, &.{V}, 1, .{});
     w.norm = try l.plain(prefix ++ "norm.weight", .{}, .bf16, &.{D});
     for (0..c.run) |i| w.layers[i] = try l.layer(i);
     const has_mtp = c.mtp > 0 and l.names.contains(prefix ++ "layers.45.eh_proj.weight");

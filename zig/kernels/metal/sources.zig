@@ -69,6 +69,8 @@ pub const glm_glue = @embedFile("glm_glue.metal");
 pub const glm_attn = @embedFile("glm_attn.metal");
 /// A prompt chunk's KDA layer in three passes, appended to the generated kda_rows source (its helpers).
 pub const glm_kda_prompt = @embedFile("glm_kda_prompt.metal");
+/// GLM-5.3-Flash speed-up mode's exchange kernels (families/glm/ep.zig).
+pub const glm_ep = @embedFile("glm_ep.metal");
 /// A prompt chunk's sparse MLA attention on the tensor units (nax.h inlined at load).
 pub const glm_sparse_nax = @embedFile("glm_sparse_nax.metal");
 /// A prompt chunk's MLA absorb on the tensor units (nax.h inlined at load).

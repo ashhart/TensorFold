@@ -4,7 +4,10 @@ using namespace metal;
 #include "../nax.h"
 using namespace tfp;
 
-constant constexpr int HEADS = 64, NOPE = 256, LATENT = 512, PER_HEAD = 512; // kv_b rows a head: key half, value half
+#ifndef GLM_HEADS // TP2 builds one Mac's 32 heads
+#define GLM_HEADS 64
+#endif
+constant constexpr int HEADS = GLM_HEADS, NOPE = 256, LATENT = 512, PER_HEAD = 512; // kv_b rows a head: key half, value half
 constant constexpr int PAD = 64 + 8;
 
 // ql [rows, 64, 512] = q_nope (row r's head h at r * q_stride + h * 256) times W_k[h]; grid (8 columns, rows / 64, 64 heads).

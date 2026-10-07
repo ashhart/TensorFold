@@ -55,133 +55,7 @@ const THEIRS = MINE + MAXP * 4;
 const COUNTS = THEIRS + MAXP * 4; // [mine, theirs]
 const LISTS = COUNTS + 256;
 
-const source =
-    \\#include <metal_stdlib>
-    \\using namespace metal;
-    \\constant constexpr int TOPK = 8, MAXR = 16, WORDS = 4096 / 2;
-    \\// one threadgroup of 128: the route's unique experts held here ([lo, hi), ascending, local ids, their members),
-    \\// and the window's picks this Mac and the peer compute (ascending), with this exchange's packed count
-    \\kernel void ep_localize(const device int* PICK [[buffer(0)]], const device int* UIDS [[buffer(1)]],
-    \\    const device int* UMEM [[buffer(2)]], const device int* UCOUNT [[buffer(3)]], constant int4& arg [[buffer(4)]],
-    \\    device int* LIDS [[buffer(5)]], device int* LMEM [[buffer(6)]], device int* LCOUNT [[buffer(7)]],
-    \\    device int* MINE [[buffer(8)]], device int* THEIRS [[buffer(9)]], device int* COUNTS [[buffer(10)]],
-    \\    device atomic_uint* CNT [[buffer(11)]], uint t [[thread_position_in_threadgroup]],
-    \\    uint lane [[thread_index_in_simdgroup]], uint g [[simdgroup_index_in_threadgroup]]) {
-    \\  const int rows = arg.x, lo = arg.y, hi = arg.z, i = int(t);
-    \\  const int e = i < UCOUNT[0] ? UIDS[i] : -1;
-    \\  const int held = e >= lo && e < hi ? 1 : 0;
-    \\  const int pe = i < rows * TOPK ? PICK[i] : -1; // pick i's expert
-    \\  const int mine = pe >= lo && pe < hi ? 1 : 0;
-    \\  const int theirs = pe >= 0 && mine == 0 ? 1 : 0;
-    \\  const int b0 = simd_prefix_exclusive_sum(held), b1 = simd_prefix_exclusive_sum(mine), b2 = simd_prefix_exclusive_sum(theirs);
-    \\  threadgroup int part[3][4];
-    \\  if (lane == 31) { part[0][g] = b0 + held; part[1][g] = b1 + mine; part[2][g] = b2 + theirs; }
-    \\  threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\  int o0 = 0, o1 = 0, o2 = 0, n0 = 0, n1 = 0, n2 = 0;
-    \\  for (uint q = 0; q < 4; q++) {
-    \\    if (q < g) { o0 += part[0][q]; o1 += part[1][q]; o2 += part[2][q]; }
-    \\    n0 += part[0][q]; n1 += part[1][q]; n2 += part[2][q];
-    \\  }
-    \\  if (held) { LIDS[o0 + b0] = e - lo; for (int j = 0; j < MAXR; j++) LMEM[(o0 + b0) * MAXR + j] = UMEM[i * MAXR + j]; }
-    \\  if (mine) MINE[o1 + b1] = i;
-    \\  if (theirs) THEIRS[o2 + b2] = i;
-    \\  if (t == 0) { LCOUNT[0] = n0; COUNTS[0] = n1; COUNTS[1] = n2; atomic_store_explicit(CNT, uint(n1), memory_order_relaxed); }
-    \\}
-    \\// A send slot is reused every second exchange: before exchange x writes it, the peer's exchange x - 1 must have
-    \\// landed here. The peer posts x - 1 only after our x - 2 (the slot's last use) reached it, so the link is done reading
-    \\// the slot. Thread 0 of each threadgroup waits; a give-up is counted, never silent, and the slot is left alone
-    \\// (false: the threadgroup stores nothing, and the post that follows sends nothing).
-    \\inline bool ep_slot_free(device atomic_uint* flag, uint x, device atomic_uint* gave_up, uint t, threadgroup uint* ok) {
-    \\  if (t == 0) {
-    \\    uint polls = 0;
-    \\    *ok = 1u;
-    \\    while (int(atomic_load_explicit(flag, memory_order_relaxed) - (x - 1u)) < 0) {
-    \\      if (++polls > 400000000u) { atomic_fetch_add_explicit(gave_up, 1u, memory_order_relaxed); *ok = 0u; break; }
-    \\    }
-    \\    if (atomic_load_explicit(gave_up, memory_order_relaxed) != 0u) *ok = 0u;
-    \\  }
-    \\  threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
-    \\  return *ok != 0u;
-    \\}
-    \\// this Mac's picks' outputs (Y [picks, 4096] bf16) packed in MINE order for the peer; a threadgroup a pick
-    \\kernel void ep_pack(const device uint* Y [[buffer(0)]], const device int* MINE [[buffer(1)]],
-    \\    const device int* COUNTS [[buffer(2)]], device uint* OUT [[buffer(3)]], device atomic_uint* flag [[buffer(4)]],
-    \\    constant uint& x [[buffer(5)]], device atomic_uint* gave_up [[buffer(6)]], uint3 tg [[threadgroup_position_in_grid]],
-    \\    uint3 tpos [[thread_position_in_threadgroup]]) {
-    \\  const int i = int(tg.y);
-    \\  const uint t = tpos.x;
-    \\  threadgroup uint ok;
-    \\  if (!ep_slot_free(flag, x, gave_up, t, &ok)) return;
-    \\  if (i >= COUNTS[0]) return;
-    \\  const device uint* src = Y + size_t(MINE[i]) * WORDS;
-    \\  device uint* dst = OUT + size_t(i) * WORDS;
-    \\  for (uint j = t; j < uint(WORDS); j += 256) dst[j] = src[j];
-    \\}
-    \\// by rows: this Mac's routed sum a row (each slot's fp32 partial weighted in slot order, the combine's arithmetic)
-    \\// into the send slot, and the entries the host sends (two a row) in the count word
-    \\#pragma clang fp contract(off)
-    \\inline float ep_mul_add(float acc, float a, float b) { return a * b + acc; }
-    \\#pragma clang fp contract(on)
-    \\kernel void ep_rcombine(const device float* YP [[buffer(0)]], const device float* WTS [[buffer(1)]],
-    \\    constant int& rows [[buffer(2)]], device float* OUT [[buffer(3)]], device atomic_uint* CNT [[buffer(4)]],
-    \\    device atomic_uint* flag [[buffer(5)]], constant uint& x [[buffer(6)]], device atomic_uint* gave_up [[buffer(7)]],
-    \\    uint gid [[thread_position_in_grid]], uint t [[thread_index_in_threadgroup]]) {
-    \\  threadgroup uint ok;
-    \\  if (!ep_slot_free(flag, x, gave_up, t, &ok)) return;
-    \\  const int r = int(gid) / 4096, d = int(gid) % 4096;
-    \\  if (gid == 0) atomic_store_explicit(CNT, uint(rows * 2), memory_order_relaxed);
-    \\  if (r >= rows) return;
-    \\  const device float* y = YP + size_t(r) * TOPK * 4096 + d;
-    \\  float acc = WTS[r * TOPK] * y[0];
-    \\  for (int k = 1; k < TOPK; k++) acc = ep_mul_add(acc, WTS[r * TOPK + k], y[size_t(k) * 4096]);
-    \\  OUT[size_t(r) * 4096 + d] = acc;
-    \\}
-    \\// by rows: wait for the peer's sums of exchange x; each row's branch is the two Macs' sums added in rank order,
-    \\// rounded, plus the shared expert (the combine's last step)
-    \\kernel void ep_rfinal(device atomic_uint* flag [[buffer(0)]], constant uint& x [[buffer(1)]],
-    \\    device atomic_uint* gave_up [[buffer(2)]], const device float* MINE [[buffer(3)]], device atomic_uint* PEER [[buffer(4)]],
-    \\    constant uint& rank [[buffer(5)]], const device bfloat* YS [[buffer(6)]], device bfloat* OUT [[buffer(7)]],
-    \\    constant int& rows [[buffer(8)]], uint3 tg [[threadgroup_position_in_grid]], uint3 tpos [[thread_position_in_threadgroup]]) {
-    \\  const uint t = tpos.x;
-    \\  if (t == 0) {
-    \\    uint polls = 0;
-    \\    while (int(atomic_load_explicit(flag, memory_order_relaxed) - x) < 0) {
-    \\      if (++polls > 400000000u) { atomic_fetch_add_explicit(gave_up, 1u, memory_order_relaxed); break; }
-    \\    }
-    \\  }
-    \\  threadgroup_barrier(mem_flags::mem_device);
-    \\  const int i = int(tg.x) * 256 + int(t);
-    \\  if (i >= rows * 4096) return;
-    \\  const float mine = MINE[i], peer = as_type<float>(atomic_load_explicit(&PEER[i], memory_order_relaxed));
-    \\  const float total = rank == 0u ? mine + peer : peer + mine;
-    \\  OUT[i] = bfloat(total) + YS[i];
-    \\}
-    \\// exchange x packed: the host sends it once the GPU gets here
-    \\kernel void ep_post(device atomic_uint* posted [[buffer(0)]], constant uint& x [[buffer(1)]],
-    \\    device atomic_uint* gave_up [[buffer(2)]]) {
-    \\  if (atomic_load_explicit(gave_up, memory_order_relaxed) == 0u) atomic_store_explicit(posted, x, memory_order_relaxed);
-    \\}
-    \\// every threadgroup's first thread waits for the peer's exchange x (its flag, stored after its bytes); then the
-    \\// peer's entries (read as atomics: written mid-buffer) into their picks' rows of Y; a give-up is counted, never silent
-    \\kernel void ep_unpack(device atomic_uint* flag [[buffer(0)]], constant uint& x [[buffer(1)]],
-    \\    device atomic_uint* gave_up [[buffer(2)]], device atomic_uint* IN [[buffer(3)]], const device int* THEIRS [[buffer(4)]],
-    \\    const device int* COUNTS [[buffer(5)]], device uint* Y [[buffer(6)]], uint3 tg [[threadgroup_position_in_grid]],
-    \\    uint3 tpos [[thread_position_in_threadgroup]]) {
-    \\  const uint t = tpos.x;
-    \\  if (t == 0) {
-    \\    uint polls = 0;
-    \\    while (int(atomic_load_explicit(flag, memory_order_relaxed) - x) < 0) {
-    \\      if (++polls > 400000000u) { atomic_fetch_add_explicit(gave_up, 1u, memory_order_relaxed); break; }
-    \\    }
-    \\  }
-    \\  threadgroup_barrier(mem_flags::mem_device);
-    \\  const int i = int(tg.y);
-    \\  if (i >= COUNTS[1]) return;
-    \\  device atomic_uint* src = IN + size_t(i) * WORDS;
-    \\  device uint* dst = Y + size_t(THEIRS[i]) * WORDS;
-    \\  for (uint j = t; j < uint(WORDS); j += 256) dst[j] = atomic_load_explicit(&src[j], memory_order_relaxed);
-    \\}
-;
+const source = @import("kernel_sources").glm_ep;
 
 pub const Ep = struct {
     rank: u32,
@@ -198,6 +72,10 @@ pub const Ep = struct {
     unpack_pipe: mtl.Pipeline,
     rcombine_pipe: mtl.Pipeline,
     rfinal_pipe: mtl.Pipeline,
+    rsend_pipe: mtl.Pipeline,
+    rsum_pipe: mtl.Pipeline,
+    amax_send_pipe: mtl.Pipeline,
+    amax_merge_pipe: mtl.Pipeline,
     x: u64 = 0, // exchanges encoded so far, the same count on both Macs (the GPU sees the low 32 bits)
     ctl: control.Control, // identities, requests and stop decisions
     thread: ?std.Thread = null,
@@ -231,14 +109,14 @@ pub const Ep = struct {
         errdefer lists.deinit();
         const lib_m = try mtl.Library.fromSource(device, source, mtl.CompileOptions.mlx());
         defer lib_m.deinit();
-        var pipes: [6]mtl.Pipeline = undefined;
+        var pipes: [10]mtl.Pipeline = undefined;
         var made: usize = 0;
         errdefer for (pipes[0..made]) |pp| pp.deinit();
-        for ([_][]const u8{ "ep_localize", "ep_pack", "ep_post", "ep_unpack", "ep_rcombine", "ep_rfinal" }) |name| {
+        for ([_][]const u8{ "ep_localize", "ep_pack", "ep_post", "ep_unpack", "ep_rcombine", "ep_rfinal", "ep_rsend", "ep_rsum", "ep_amax_send", "ep_amax_merge" }) |name| {
             pipes[made] = try mtl.Pipeline.init(device, lib_m, name, false);
             made += 1;
         }
-        t.* = .{ .rank = s.rank, .peer = 1 - s.rank, .own = .{ me.own_lo, me.own_hi }, .link = link, .rd = rd, .win = win, .wbuf = wbuf, .lists = lists, .localize_pipe = pipes[0], .pack_pipe = pipes[1], .post_pipe = pipes[2], .unpack_pipe = pipes[3], .rcombine_pipe = pipes[4], .rfinal_pipe = pipes[5], .ctl = undefined };
+        t.* = .{ .rank = s.rank, .peer = 1 - s.rank, .own = .{ me.own_lo, me.own_hi }, .link = link, .rd = rd, .win = win, .wbuf = wbuf, .lists = lists, .localize_pipe = pipes[0], .pack_pipe = pipes[1], .post_pipe = pipes[2], .unpack_pipe = pipes[3], .rcombine_pipe = pipes[4], .rfinal_pipe = pipes[5], .rsend_pipe = pipes[6], .rsum_pipe = pipes[7], .amax_send_pipe = pipes[8], .amax_merge_pipe = pipes[9], .ctl = undefined };
         t.ctl = try control.Control.init(gpa, rd, CONTROL, &t.failed);
         errdefer t.ctl.deinit(gpa);
         _ = try t.ctl.hello(me); // both Macs up, running the same thing, before the first exchange
@@ -262,7 +140,7 @@ pub const Ep = struct {
             std.log.info("expert parallel rank {d}: {d} exchanges, {d:.1} us a send; the peer's entries landed {d:.1} us after our post on average ({d} times, {d} before it); entries a exchange: ours {d:.2}, theirs {d:.2}, |difference| {d:.2}; {d} GPU waits gave up", .{ t.rank, t.sent, @as(f64, @floatFromInt(t.held_ticks)) / n / 24.0, @as(f64, @floatFromInt(t.st.late_ticks)) / late / 24.0, t.st.late, t.st.early, @as(f64, @floatFromInt(t.st.mine)) / n, @as(f64, @floatFromInt(t.st.theirs)) / n, @as(f64, @floatFromInt(t.st.imbalance)) / n, t.gaveUp() });
         }
         t.ctl.deinit(gpa);
-        for ([_]mtl.Pipeline{ t.localize_pipe, t.pack_pipe, t.post_pipe, t.unpack_pipe, t.rcombine_pipe, t.rfinal_pipe }) |pp| pp.deinit();
+        for ([_]mtl.Pipeline{ t.localize_pipe, t.pack_pipe, t.post_pipe, t.unpack_pipe, t.rcombine_pipe, t.rfinal_pipe, t.rsend_pipe, t.rsum_pipe, t.amax_send_pipe, t.amax_merge_pipe }) |pp| pp.deinit();
         t.lists.deinit();
         t.wbuf.deinit();
         t.link.deinit();
@@ -356,6 +234,54 @@ pub const Ep = struct {
         enc.setBuffer(out.buf, out.off, 7);
         enc.setValue(@as(i32, @intCast(rows)), 8);
         enc.dispatchGroups(mtl.Size.of(rows * 16, 1, 1), mtl.Size.of(256, 1, 1));
+    }
+
+    /// TP: this Mac's fp32 partials `part` [rows, 4096] and the peer's, added in rank order and rounded into `out`.
+    pub fn reduce(t: *Ep, enc: mtl.ComputeEncoder, part: Ref, out: Ref, rows: u32) void {
+        std.debug.assert(rows <= PROMPT_ROWS);
+        t.begin();
+        enc.setPipeline(t.rsend_pipe);
+        enc.setBuffer(part.buf, part.off, 0);
+        enc.setValue(@as(i32, @intCast(rows)), 1);
+        enc.setBuffer(t.wbuf, sendAt(t.x), 2);
+        enc.setBuffer(t.wbuf, COUNT + 4 * @as(usize, @intCast(t.x % 2)), 3);
+        t.slotGuard(enc, 4);
+        enc.dispatchThreads(mtl.Size.of(rows * 4096, 1, 1), mtl.Size.of(256, 1, 1));
+        t.send(enc, part, rows, false, true);
+        enc.setPipeline(t.rsum_pipe);
+        enc.setBuffer(t.wbuf, FLAG, 0);
+        enc.setValue(@as(u32, @truncate(t.x)), 1);
+        enc.setBuffer(t.wbuf, GAVE_UP, 2);
+        enc.setBuffer(t.wbuf, sendAt(t.x), 3);
+        enc.setBuffer(t.wbuf, recvAt(t.x), 4);
+        enc.setValue(t.rank, 5);
+        enc.setBuffer(out.buf, out.off, 6);
+        enc.setValue(@as(i32, @intCast(rows)), 7);
+        enc.dispatchGroups(mtl.Size.of(rows * 16, 1, 1), mtl.Size.of(256, 1, 1));
+    }
+
+    /// TP: each row's pick from this Mac's vocabulary rows [lo, lo + n) (local picks in `picks`) and the peer's.
+    pub fn argmax(t: *Ep, enc: mtl.ComputeEncoder, logits: Ref, picks: Ref, n: u32, lo: u32, rows: u32) void {
+        std.debug.assert(rows <= 64);
+        t.begin();
+        enc.setPipeline(t.amax_send_pipe);
+        enc.setBuffer(logits.buf, logits.off, 0);
+        enc.setBuffer(picks.buf, picks.off, 1);
+        enc.setValue([4]u32{ rows, n, lo, 0 }, 2);
+        enc.setBuffer(t.wbuf, sendAt(t.x), 3);
+        enc.setBuffer(t.wbuf, COUNT + 4 * @as(usize, @intCast(t.x % 2)), 4);
+        t.slotGuard(enc, 5);
+        enc.dispatchThreads(mtl.Size.of(64, 1, 1), mtl.Size.of(64, 1, 1));
+        t.send(enc, picks, rows, false, true);
+        enc.setPipeline(t.amax_merge_pipe);
+        enc.setBuffer(t.wbuf, FLAG, 0);
+        enc.setValue(@as(u32, @truncate(t.x)), 1);
+        enc.setBuffer(t.wbuf, GAVE_UP, 2);
+        enc.setBuffer(t.wbuf, sendAt(t.x), 3);
+        enc.setBuffer(t.wbuf, recvAt(t.x), 4);
+        enc.setValue(rows, 5);
+        enc.setBuffer(picks.buf, picks.off, 6);
+        enc.dispatchThreads(mtl.Size.of(64, 1, 1), mtl.Size.of(64, 1, 1));
     }
 
     /// Wait for the peer's outputs of this exchange and put them in their picks' rows of `ye`.

@@ -26,6 +26,12 @@ pub const Kernels = struct {
     qmv_dense_gu: mtl.Pipeline,
     qmv_dense_down: mtl.Pipeline,
     qmv_head: mtl.Pipeline,
+    qmv_kda_in_tp: mtl.Pipeline, // TP2: the KDA input projection's rows of one Mac's heads
+    qmvp_kda_out: mtl.Pipeline, // TP2: the KDA out-projection over one Mac's heads, fp32 partials
+    qmv_head_tp: mtl.Pipeline, // TP2: the head's rows of one Mac's half of the vocabulary
+    qmv_qr_tp: mtl.Pipeline, // TP2: q_b's rows of one Mac's MLA heads, the indexer's queries whole
+    qmvp_mla_out: mtl.Pipeline, // TP2: the MLA out-projection over one Mac's heads, fp32 partials
+    sparse_attention_tp: mtl.Pipeline, // TP2: the sparse kernel over one Mac's 32 heads
     gemv_t_igate: mtl.Pipeline,
     gemv_t_values: mtl.Pipeline,
     gemv_scores_lt4: mtl.Pipeline,
@@ -34,6 +40,7 @@ pub const Kernels = struct {
     hc_expand_10: mtl.Pipeline,
     hc_core: [3]mtl.Pipeline, // core/hc.zig: the expand (or the first boundary's read) with partial sums, then the split
     kda_rows: mtl.Pipeline,
+    kda_rows_tp: mtl.Pipeline, // TP2: the fused step over one Mac's 32 heads
     router: [max_rows]mtl.Pipeline, // by window rows (RR = 1 .. 16)
     moe_route: mtl.Pipeline,
     moe_gateup_1: mtl.Pipeline,
@@ -73,8 +80,13 @@ pub const Kernels = struct {
     kda_pre: mtl.Pipeline, // a prompt chunk's KDA layer in three passes (glm_kda_prompt.metal): gates, conv, norms
     kda_scan: mtl.Pipeline, // the recurrence alone
     kda_post: mtl.Pipeline, // the output norm and gate
+    kda_pre_tp: mtl.Pipeline, // TP2: the three passes over one Mac's 32 heads
+    kda_scan_tp: mtl.Pipeline,
+    kda_post_tp: mtl.Pipeline,
     sparse_nax: mtl.Pipeline, // a prompt chunk's sparse MLA attention on the tensor units (glm_sparse_nax.metal)
     absorb_nax: mtl.Pipeline, // and its absorb (glm_absorb_nax.metal)
+    sparse_nax_tp: mtl.Pipeline, // TP2: both over one Mac's 32 heads
+    absorb_nax_tp: mtl.Pipeline,
     mm_bf16: affine_mm.Pipes, // prompt chunks' 4-bit g64 matmuls on the tensor units (core/affine_mm.zig): dense, gathers
     mm_f32: affine_mm.Pipes, // and with fp32 out: expert parallel by rows' down partials
 
@@ -96,6 +108,12 @@ const generated = [_]struct { key: []const u8, field: []const u8 }{
     .{ .key = "qmv_4096_24576", .field = "qmv_dense_gu" },
     .{ .key = "qmv_12288_4096", .field = "qmv_dense_down" },
     .{ .key = "qmv_4096_154880", .field = "qmv_head" },
+    .{ .key = "qmv_4096_12576", .field = "qmv_kda_in_tp" },
+    .{ .key = "qmvp_4096_4096", .field = "qmvp_kda_out" },
+    .{ .key = "qmv_4096_77440", .field = "qmv_head_tp" },
+    .{ .key = "qmv_1536_12288", .field = "qmv_qr_tp" },
+    .{ .key = "qmvp_8192_4096", .field = "qmvp_mla_out" },
+    .{ .key = "sparse_attention_tp", .field = "sparse_attention_tp" },
     .{ .key = "gemv_t_igate", .field = "gemv_t_igate" },
     .{ .key = "gemv_t_values", .field = "gemv_t_values" },
     .{ .key = "gemv_scores_lt4", .field = "gemv_scores_lt4" },
@@ -103,6 +121,7 @@ const generated = [_]struct { key: []const u8, field: []const u8 }{
     .{ .key = "gemv_scores", .field = "gemv_scores" },
     .{ .key = "hc_expand_10", .field = "hc_expand_10" },
     .{ .key = "kda_rows", .field = "kda_rows" },
+    .{ .key = "kda_rows_tp", .field = "kda_rows_tp" },
     .{ .key = "router", .field = "router" },
     .{ .key = "moe_route", .field = "moe_route" },
     .{ .key = "moe_gateup_1", .field = "moe_gateup_1" },
@@ -162,7 +181,7 @@ fn kernelOf(comptime key: []const u8) sources.glm.Kernel {
 pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const k = try gpa.create(Kernels);
     errdefer gpa.destroy(k);
-    var jobs: [generated.len + 12]Job = undefined;
+    var jobs: [generated.len + 14]Job = undefined;
     inline for (generated, 0..) |g, i| {
         const src = comptime kernelOf(g.key);
         const FT = @FieldType(Kernels, g.field);
@@ -200,8 +219,8 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     jobs[generated.len + 7] = .{ .device = device, .source = m32_src, .names = &affine_mm.names, .out = &k.mm_f32 };
     const kda_src = try std.mem.concat(gpa, u8, &.{ comptime kernelOf("kda_rows").source, sources.glm_kda_prompt });
     defer gpa.free(kda_src);
-    var kda_out: [3]mtl.Pipeline = undefined;
-    jobs[generated.len + 8] = .{ .device = device, .source = kda_src, .names = &.{ "glm_kda_pre", "glm_kda_scan", "glm_kda_post" }, .out = &kda_out };
+    var kda_out: [6]mtl.Pipeline = undefined;
+    jobs[generated.len + 8] = .{ .device = device, .source = kda_src, .names = &.{ "glm_kda_pre", "glm_kda_scan", "glm_kda_post", "glm_kda_pre_tp", "glm_kda_scan_tp", "glm_kda_post_tp" }, .out = &kda_out };
     const sparse_src = try frags.source(device, gpa, sources.glm_sparse_nax);
     defer gpa.free(sparse_src);
     jobs[generated.len + 9] = .{ .device = device, .source = sparse_src, .names = &.{"glm_sparse_nax"}, .out = @as(*[1]mtl.Pipeline, &k.sparse_nax) };
@@ -211,6 +230,17 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const hc_src = try hc.source(gpa, hc_shape);
     defer gpa.free(hc_src);
     jobs[generated.len + 11] = .{ .device = device, .source = hc_src, .names = &hc.names, .out = &k.hc_core };
+    const tp_heads = "#define GLM_HEADS 32\n"; // TP2: one Mac's MLA heads
+    const sparse_tp_raw = try std.mem.concat(gpa, u8, &.{ tp_heads, sources.glm_sparse_nax });
+    defer gpa.free(sparse_tp_raw);
+    const sparse_tp_src = try frags.source(device, gpa, sparse_tp_raw);
+    defer gpa.free(sparse_tp_src);
+    jobs[generated.len + 12] = .{ .device = device, .source = sparse_tp_src, .names = &.{"glm_sparse_nax"}, .out = @as(*[1]mtl.Pipeline, &k.sparse_nax_tp) };
+    const absorb_tp_raw = try std.mem.concat(gpa, u8, &.{ tp_heads, sources.glm_absorb_nax });
+    defer gpa.free(absorb_tp_raw);
+    const absorb_tp_src = try frags.source(device, gpa, absorb_tp_raw);
+    defer gpa.free(absorb_tp_src);
+    jobs[generated.len + 13] = .{ .device = device, .source = absorb_tp_src, .names = &.{"glm_absorb_nax"}, .out = @as(*[1]mtl.Pipeline, &k.absorb_nax_tp) };
     var next = std.atomic.Value(usize).init(0);
     const Worker = struct {
         fn run(all: []Job, counter: *std.atomic.Value(usize)) void {
@@ -235,5 +265,8 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     k.kda_pre = kda_out[0];
     k.kda_scan = kda_out[1];
     k.kda_post = kda_out[2];
+    k.kda_pre_tp = kda_out[3];
+    k.kda_scan_tp = kda_out[4];
+    k.kda_post_tp = kda_out[5];
     return k;
 }

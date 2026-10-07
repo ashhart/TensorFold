@@ -71,6 +71,7 @@ pub const Engine = struct {
     trace_last: ?Ref = null, // a prompt's last row at every capture point (each layer's sublayers), for a path comparison
     margins: ?*std.ArrayList(f32) = null, // each emitted token's top-two logit margin (its row's logits), for a path comparison
     chunk_rows: u32 = prompt_mod.max_rows, // a prompt chunk's rows at most (GLM_CHUNK: smaller, to check chunk-size invariance)
+    cut: u32 = 0, // GLM_CUTS=N: a prompt chunk also ends at N (a server's planned start, for its served == CLI check)
     copy_min: u32 = 0, // copy drafts (GLM_COPY=N): a round copies what followed the reply's last N+ tokens earlier (0: off)
     rank_log: bool = false, // GLM_RANKS=1: each MTP depth's logits kept, and the target's rank in them where drafts miss
     ep_arena: std.heap.ArenaAllocator, // the link settings, alive as long as the link
@@ -107,6 +108,7 @@ pub const Engine = struct {
         e.trace_last = null;
         e.margins = null;
         e.chunk_rows = prompt_mod.max_rows;
+        e.cut = if (std.c.getenv("GLM_CUTS")) |v| std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0 else 0;
         e.copy_min = if (std.c.getenv("GLM_COPY")) |v| std.math.clamp(std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0, 0, 8) else 0;
         e.rank_log = if (std.c.getenv("GLM_RANKS")) |v| v[0] == '1' else false;
         if (std.c.getenv("GLM_CHUNK")) |v| e.chunk_rows = std.math.clamp(std.fmt.parseInt(u32, std.mem.span(v), 10) catch prompt_mod.max_rows, st.max_rows + 1, prompt_mod.max_rows);
@@ -133,6 +135,12 @@ pub const Engine = struct {
             const s = try ep_mod.readSettings(e.ep_arena.allocator(), sf.bytes[0..sf.size]);
             const by_rows = if (std.c.getenv("GLM_EP_SPLIT")) |v| !std.mem.eql(u8, std.mem.span(v), "experts") else true;
             if (by_rows) try cfg.splitRows(&e.c, s.rank, 2) else try cfg.split(&e.c, s.rank, 2);
+            const tp = if (std.c.getenv("GLM_TP")) |v| v[0] != '0' else true; // TP2: each Mac half the KDA heads (GLM_TP=0: off)
+            if (by_rows and tp) try cfg.splitHeads(&e.c, s.rank, 2);
+            if (e.c.tp > 1) { // TP2's head halves: the whole vocabulary (its kernel's pitch); no host logits to rank
+                e.draft_vocab = e.c.vocab;
+                e.rank_log = false;
+            }
             break :blk s;
         } else null;
         e.k = try kernels.load(gpa, e.device);
@@ -171,6 +179,7 @@ pub const Engine = struct {
             const rows = e.c.byRows();
             var me: ep_mod.Identity = .{ .layers = e.c.layers, .run = e.c.run, .mtp = @intFromBool(e.w.mtp != null), .experts = if (rows) e.c.moe_inter else e.c.experts, .own_lo = if (rows) e.c.inter[0] else e.c.own[0], .own_hi = if (rows) e.c.inter[1] else e.c.own[1], .cap = cap, .model = model };
             me.rest[0] = @intFromBool(rows);
+            me.rest[1] = @intCast(e.c.tp);
             e.ep = try ep_mod.Ep.init(gpa, e.device, s, me);
         }
         // opt-in: wiring 181 GB leaves macOS nothing to reclaim if another model shares the Mac (Flash Next runs without)
@@ -340,6 +349,7 @@ pub const Engine = struct {
 
     /// The top two logits' difference in row `row` of the last head's logits (bf16).
     fn margin(e: *const Engine, row: u32) f32 {
+        if (e.c.tp > 1) return std.math.nan(f32); // TP2: this Mac holds half of each row's logits
         const v: [*]const u16 = @ptrCast(@alignCast(e.sc.logits.addr()));
         var top = [2]f32{ -std.math.inf(f32), -std.math.inf(f32) };
         for (v[@as(usize, row) * e.c.vocab ..][0..e.c.vocab]) |h| {
@@ -383,8 +393,9 @@ pub const Engine = struct {
         var last_n: u32 = 1;
         while (at < P) {
             if (try e.agree(out.cancelled(out.ctx))) return .{ .reason = .cancelled };
-            const chunk = e.pr != null and P - at > st.max_rows;
-            const n = @min(@as(u32, if (chunk) e.chunk_rows else st.max_rows), P - at);
+            const end = if (e.cut > at and e.cut < P) e.cut else P;
+            const chunk = e.pr != null and end - at > st.max_rows;
+            const n = @min(@as(u32, if (chunk) e.chunk_rows else st.max_rows), end - at);
             const last = at + n == P;
             const absorb = if (last) n - 1 else n;
             const b = e.begin();

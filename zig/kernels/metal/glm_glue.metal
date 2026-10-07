@@ -119,10 +119,10 @@ kernel void glm_layer_norm(const device bfloat* x [[buffer(0)]], const device bf
 kernel void glm_absorb(const device uint32_t* w [[buffer(0)]], const device bfloat* scales [[buffer(1)]],
                        const device bfloat* biases [[buffer(2)]], const device bfloat* x [[buffer(3)]],
                        device bfloat* y [[buffer(4)]], constant uint& q_stride [[buffer(5)]],
-                       uint3 tid [[threadgroup_position_in_grid]], uint simd_gid [[simdgroup_index_in_threadgroup]],
-                       uint simd_lid [[thread_index_in_simdgroup]]) {
-  constexpr int HEADS = 64, K = 256, N = 512, ROWS_PER_HEAD = 512, NW = N / 8, NG = N / 64;
-  const int b = int(tid.z), h = b % HEADS;
+                       constant uint& heads [[buffer(6)]], uint3 tid [[threadgroup_position_in_grid]],
+                       uint simd_gid [[simdgroup_index_in_threadgroup]], uint simd_lid [[thread_index_in_simdgroup]]) {
+  constexpr int K = 256, N = 512, ROWS_PER_HEAD = 512, NW = N / 8, NG = N / 64;
+  const int HEADS = int(heads), b = int(tid.z), h = b % HEADS;
   const int out_col = 32 * (int(tid.y) * 2 + int(simd_gid));
   const device uint32_t* ws = w + size_t(h * ROWS_PER_HEAD) * NW + out_col / 8 + simd_lid * NW;
   const device bfloat* sc = scales + size_t(h * ROWS_PER_HEAD) * NG + out_col / 64 + simd_lid * NG;
@@ -173,10 +173,10 @@ inline float glm_qdot16(const device uint8_t* w, const thread float* xt, float s
 
 kernel void glm_unabsorb(const device uint32_t* W [[buffer(0)]], const device bfloat* S [[buffer(1)]],
                          const device bfloat* B [[buffer(2)]], const device bfloat* X [[buffer(3)]],
-                         device bfloat* OUT [[buffer(4)]], uint3 tg [[threadgroup_position_in_grid]],
-                         uint lane [[thread_index_in_simdgroup]]) {
-  constexpr int HEADS = 64, K = 512, N = 256, RPS = 4, KB = K / 2, KG = K / 64;
-  const int b = int(tg.z), h = b % HEADS;
+                         device bfloat* OUT [[buffer(4)]], constant uint& heads [[buffer(5)]],
+                         uint3 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+  constexpr int K = 512, N = 256, RPS = 4, KB = K / 2, KG = K / 64;
+  const int b = int(tg.z), h = b % int(heads);
   const int row0 = h * 512 + 256 + int(tg.y) * RPS;
   const device uint8_t* w = (const device uint8_t*)W + size_t(row0) * KB + lane * 8;
   const device bfloat* sc = S + size_t(row0) * KG + lane / 4;

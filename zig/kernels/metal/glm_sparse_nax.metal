@@ -4,7 +4,10 @@ using namespace metal;
 #include "../nax.h"
 using namespace tfp;
 
-constant constexpr int HEADS = 64, RANK = 512, GROUP = 16, BLOCK = 32, SLICE = RANK / 4;
+#ifndef GLM_HEADS // TP2 builds one Mac's 32 heads
+#define GLM_HEADS 64
+#endif
+constant constexpr int HEADS = GLM_HEADS, RANK = 512, GROUP = 16, BLOCK = 32, SLICE = RANK / 4;
 constant constexpr float NO_SCORE = -3.4028234663852886e38f;
 
 // A transposed right operand's element e: the row it comes from (here a key) and its column (a latent dim).

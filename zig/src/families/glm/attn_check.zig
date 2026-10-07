@@ -176,6 +176,7 @@ test "the MLA absorb on the tensor units: the row kernel's values within bf16 ro
     enc.setPipeline(row_pipe);
     for (bufs[0..5], 0..) |b, i| enc.setBuffer(b, 0, i);
     enc.setValue(@as(u32, QS), 5);
+    enc.setValue(@as(u32, 64), 6); // every head
     enc.dispatchGroups(mtl.Size.of(1, LATENT / 64, M * H), mtl.Size.of(64, 1, 1));
     enc.setPipeline(nax_pipe);
     for (bufs[0..4], 0..) |b, i| enc.setBuffer(b, 0, i);

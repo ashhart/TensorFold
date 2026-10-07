@@ -101,7 +101,7 @@ pub fn init(gpa: std.mem.Allocator, arena: *st.Arena, device: mtl.Device, c: *co
     p.streams.raw = try big.of(arena, R * D * 2);
     p.streams.hidden = try big.of(arena, R * D * 2);
     const xp_w = std.mem.alignForward(usize, c.xProj(), 64);
-    p.proj = try big.of(arena, R * c.kdaProj() * 2);
+    p.proj = try big.of(arena, R * std.mem.alignForward(usize, c.kdaProj(), 64) * 2); // the matmul's padded pitch
     p.y = try big.of(arena, R * c.kdaWidth() * 2);
     p.xp = try big.of(arena, R * xp_w * 2);
     p.qr = try big.of(arena, R * c.q_lora * 2);
@@ -158,6 +158,12 @@ fn run(e: mtl.ComputeEncoder, grid: [3]usize, group: [3]usize) void {
 fn qmm(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, q: wts.Q4, y: Ref, M: u32) void {
     affine_mm.rowSums(e, p.mm.mm_bf16, 64, x, p.sums, M, q.k);
     affine_mm.dense(e, p.mm.mm_bf16, x, p.sums, q, y, M);
+}
+
+/// `qmm` with fp32 out (TP2: one Mac's partial of a row-split projection).
+fn qmmF32(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, q: wts.Q4, y: Ref, M: u32) void {
+    affine_mm.rowSums(e, p.mm.mm_bf16, 64, x, p.sums, M, q.k);
+    affine_mm.dense(e, p.mm.mm_f32, x, p.sums, q, y, M);
 }
 
 /// n rows sorted by expert (`offsets`) times their expert's 4-bit W^T, the rows' group sums already in `sums`.
@@ -286,6 +292,8 @@ fn kdaChunk(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, ki: usiz
     const L = &x.s.kda[ki];
     const cur = L.cur;
     const H = c.kda_heads;
+    const tp = c.tp > 1; // TP2: this Mac's heads
+    const pitch: u32 = std.mem.alignForward(u32, c.kdaProj(), 64);
     const plane = @as(usize, M) * c.kdaWidth() * 2; // [M, heads * dim] bf16
     const q = p.yf;
     const kk = q.at(plane);
@@ -295,22 +303,22 @@ fn kdaChunk(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, ki: usiz
     const g = sy.at(plane); // fp32
     const beta = g.at(2 * plane);
     std.debug.assert(6 * plane + @as(usize, M) * H * 4 <= @as(usize, max_rows) * c.topk * c.hidden * 4);
-    e.setPipeline(k.kda_pre);
+    e.setPipeline(if (tp) k.kda_pre_tp else k.kda_pre);
     bind(e, 0, .{p.proj});
-    fwd.shape(e, 1, .{ M, c.kdaProj() });
+    fwd.shape(e, 1, .{ M, pitch });
     bind(e, 2, .{ L.cs[cur], w.conv_w, w.f_b.w, w.f_b.s, w.f_b.b, w.g_b.w, w.g_b.s, w.g_b.b, w.a, w.dt_bias });
     e.setValue(c.lower_bound, 12);
     bind(e, 13, .{ q, kk, v, g, gate, beta });
     e.dispatchGroups(size(M, H, 1), size(32, 32, 1));
-    e.setPipeline(k.kda_scan);
+    e.setPipeline(if (tp) k.kda_scan_tp else k.kda_scan);
     bind(e, 0, .{ q, kk, v, g, beta, L.st[cur], L.st[1 - cur], sy });
     e.setValue(@as(i32, @intCast(M)), 8);
     e.dispatchGroups(size(32, H, 1), size(32, 1, 1));
-    e.setPipeline(k.kda_post);
+    e.setPipeline(if (tp) k.kda_post_tp else k.kda_post);
     bind(e, 0, .{ sy, gate, w.o_norm });
     e.setValue(c.eps, 3);
     bind(e, 4, .{ p.y, p.proj });
-    fwd.shape(e, 6, .{ M, c.kdaProj() });
+    fwd.shape(e, 6, .{ M, pitch });
     bind(e, 7, .{ L.cs[cur], L.cs[1 - cur] });
     e.dispatchGroups(size(M, H, 1), size(32, 1, 1));
 }
@@ -351,7 +359,7 @@ fn mla(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: usize, w:
     }
     if (fwd.on(x, "mla_cache")) fwd.mlaCache(x, e, mi, w, x_in, p.xp, XP, p.iw, M, pos);
     if (fwd.on(x, "mla_absorb")) {
-        e.setPipeline(x.k.absorb_nax); // the row kernel's qvm with each weight's fp32 value in three bf16 parts
+        e.setPipeline(if (c.tp > 1) x.k.absorb_nax_tp else x.k.absorb_nax); // the row kernel's qvm, weights in three bf16 parts
         bind(e, 0, .{ w.kv_b.w, w.kv_b.s, w.kv_b.b, p.qp, p.ql });
         e.setValue([2]i32{ @intCast(M), @intCast(c.qrProj()) }, 5);
         e.dispatchGroups(size(c.kv_lora / 64, (M + 63) / 64, c.mla_heads), size(128, 1, 1));
@@ -373,7 +381,7 @@ fn mla(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: usize, w:
     }
     if (fwd.on(x, "mla_attn")) {
         if (p.sparse_nax) {
-            e.setPipeline(x.k.sparse_nax);
+            e.setPipeline(if (c.tp > 1) x.k.sparse_nax_tp else x.k.sparse_nax);
             bind(e, 0, .{ p.ql, x.s.mla[mi].keys, p.indices });
             e.setValue(@as(f32, 1.0 / 16.0), 3);
             e.setValue([4]i32{ @intCast(width), @intCast(pos + M), 0, 0 }, 4);
@@ -382,7 +390,10 @@ fn mla(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: usize, w:
         } else fwd.attendIndexed(x, e, mi, p.ql, p.indices, p.att, M, pos + M);
     }
     if (fwd.on(x, "mla_unabs")) unabsorb(p, x, e, w, M);
-    if (fwd.on(x, "mla_out")) qmm(p, e, p.vals, w.o_proj, p.streams.branch, M);
+    if (!fwd.on(x, "mla_out")) return;
+    if (c.tp == 1) return qmm(p, e, p.vals, w.o_proj, p.streams.branch, M);
+    qmmF32(p, e, p.vals, w.o_proj, p.yf, M); // TP2: this Mac's heads' partial, summed with the peer's
+    x.ep.?.reduce(e, p.yf, p.streams.branch, M);
 }
 
 /// The backbone over a chunk (tokens in `ids`) at positions pos..: final-normed rows into `streams.hidden`.
@@ -408,7 +419,10 @@ pub fn backbone(p: *const Prompt, x: *fwd.Ctx, e: mtl.ComputeEncoder, ids: Ref, 
                 if (s & Class.kda == 0) {
                     qmm(p, e, ss.normed, a.in_proj, p.proj, M);
                     kdaChunk(p, x, e, ki, a, M);
-                    qmm(p, e, p.y, a.o_proj, ss.branch, M);
+                    if (c.tp > 1) { // TP2: this Mac's heads' out-projection partial, summed with the peer's
+                        qmmF32(p, e, p.y, a.o_proj, p.yf, M);
+                        x.ep.?.reduce(e, p.yf, ss.branch, M);
+                    } else qmm(p, e, p.y, a.o_proj, ss.branch, M);
                 }
                 ki += 1;
             },

@@ -24,12 +24,17 @@ KDA_PROJ = 3 * KDA_WIDTH + 2 * KDA_DIM + KDA_HEADS
 MLA_HEADS, NOPE, RANK, Q_LORA, I_HEADS, I_DIM = 64, 256, 512, 1536, 32, 128
 X_PROJ = Q_LORA + RANK + I_DIM + I_HEADS
 QR_PROJ = MLA_HEADS * NOPE + I_HEADS * I_DIM
+KDA_PROJ_TP = KDA_PROJ - KDA_WIDTH * 3 // 2 - KDA_HEADS // 2  # TP2: one Mac's heads' q, k, v and b; f_a and g_a whole
+QR_PROJ_TP = QR_PROJ - MLA_HEADS // 2 * NOPE  # TP2: one Mac's heads' q_b; the indexer's queries whole
 TOPK_KEYS = 2048 + 3                      # index_topk keys plus the always-selected tail of a partial block
 MAX_ROWS = 16                             # the widest decode window
 MAXU = MAX_ROWS * TOP_K                   # the shared expert's slot in the MoE kernels (never a routed one)
 # (K, N) of every dense 4-bit projection a decode row runs through qmv_rows (KDA out = the MTP's eh_proj shape)
 PROJECTIONS = ((HIDDEN, KDA_PROJ), (KDA_WIDTH, HIDDEN), (HIDDEN, X_PROJ), (Q_LORA, QR_PROJ),
-               (MLA_HEADS * NOPE, HIDDEN), (HIDDEN, 2 * DENSE), (DENSE, HIDDEN), (HIDDEN, VOCAB))
+               (MLA_HEADS * NOPE, HIDDEN), (HIDDEN, 2 * DENSE), (DENSE, HIDDEN), (HIDDEN, VOCAB), (HIDDEN, KDA_PROJ_TP),
+               (HIDDEN, VOCAB // 2), (Q_LORA, QR_PROJ_TP))
+# TP2's row-split projections: one Mac's input columns, fp32 partials the pair sums in rank order
+PARTIALS = ((KDA_WIDTH // 2, HIDDEN), (MLA_HEADS // 2 * NOPE, HIDDEN))
 # MLX 0.32's one-row gemv / gemv_t tilings (kernels.gemv_params) at the shapes decode reaches
 GEMV_T = {"igate": (1, 2, 8, 4, 4, 4), "values": (1, 4, 8, 4, 4, 4)}
 GEMV = {"scores_lt4": (1, 8, 1, 32, 1, 4), "scores_le32": (1, 8, 1, 32, 4, 4), "scores": (4, 1, 1, 32, 4, 4)}
@@ -89,6 +94,11 @@ def specs() -> list[Spec]:
     for k, n in PROJECTIONS:
         plain(f"qmv_{k}_{n}", "tf_glm5_qmv_rows64", K._QMV_ROWS, K._HEADER, qmv_in, [Arg("OUT", bf, big, 2)],
               [("K", k), ("N", n), ("RPS", 4)])
+    qmv_partial = K._QMV_ROWS.replace("OUT[r * N + row0 + j] = bfloat(v);", "OUT[r * N + row0 + j] = v;")
+    assert qmv_partial != K._QMV_ROWS
+    for k, n in PARTIALS:
+        plain(f"qmvp_{k}_{n}", "tf_glm5_qmv_rows64_partial", qmv_partial, K._HEADER, qmv_in, [Arg("OUT", f32, big, 2)],
+              [("K", k), ("N", n), ("RPS", 4)])
     for key, (bm, bn, sm, sn, tm, tn) in GEMV_T.items():
         plain(f"gemv_t_{key}", "tf_glm5_gemv_t_rows", K._GEMV_T_ROWS, "", [Arg("X", bf, big, 2), Arg("M", bf, big, 2)],
               [Arg("OUT", bf, big, 2)], [("T", bf), ("BM", bm), ("BN", bn), ("SM", sm), ("SN", sn), ("TM", tm),
@@ -104,13 +114,14 @@ def specs() -> list[Spec]:
           [Arg("XNEW", bf, big, 3), Arg("INV", f32, big), Arg("Z", f32, big, 2)],
           [("D", HIDDEN), ("EXPAND", 1), ("SPLIT", 0), ("ZOUT", 0), ("SQ_FMA", F.SQ_FMA)])
 
-    plain("kda_rows", "tf_glm5_kda_rows", KD._SOURCE, KD._HEADER,
-          [Arg("P", bf, big, 2), Arg("CS", bf, big, 2), Arg("CW", f32, big, 2), Arg("FBW", u32, big, 2),
-           Arg("FBS", bf, big, 2), Arg("FBB", bf, big, 2), Arg("GBW", u32, big, 2), Arg("GBS", bf, big, 2),
-           Arg("GBB", bf, big, 2), Arg("A", f32, big), Arg("DTB", f32, big), Arg("ST", f32, big, 4),
-           Arg("ONW", f32, big), Arg("LB", f32, one), Arg("EPS", f32, one)],
-          [Arg("Y", bf, big, 2), Arg("ST_OUT", f32, big, 4), Arg("CS_OUT", bf, big, 2)],
-          [("H", KDA_HEADS), ("D", KDA_DIM), ("TAPS", TAPS), ("TY", KD.TY), ("FB", 4), ("GB", 4)])
+    for key, heads in (("kda_rows", KDA_HEADS), ("kda_rows_tp", KDA_HEADS // 2)):  # all heads, or one Mac's in TP2
+        plain(key, "tf_glm5_kda_rows", KD._SOURCE, KD._HEADER,
+              [Arg("P", bf, big, 2), Arg("CS", bf, big, 2), Arg("CW", f32, big, 2), Arg("FBW", u32, big, 2),
+               Arg("FBS", bf, big, 2), Arg("FBB", bf, big, 2), Arg("GBW", u32, big, 2), Arg("GBS", bf, big, 2),
+               Arg("GBB", bf, big, 2), Arg("A", f32, big), Arg("DTB", f32, big), Arg("ST", f32, big, 4),
+               Arg("ONW", f32, big), Arg("LB", f32, one), Arg("EPS", f32, one)],
+              [Arg("Y", bf, big, 2), Arg("ST_OUT", f32, big, 4), Arg("CS_OUT", bf, big, 2)],
+              [("H", heads), ("D", KDA_DIM), ("TAPS", TAPS), ("TY", KD.TY), ("FB", 4), ("GB", 4)])
 
     def router(rr: int) -> list:
         return [("K", HIDDEN), ("NE", EXPERTS), ("RR", rr), ("C", 8 if rr <= 4 else 4), ("NT", M.ROUTER_TG)]
@@ -158,10 +169,11 @@ def specs() -> list[Spec]:
           [Arg("YS", bf, big, 2), Arg("Y", bf, big, 3), Arg("WTS", f32, big, 2)], [Arg("OUT", bf, big, 2)],
           [("D", HIDDEN), ("TOPK", TOP_K)])
 
-    out.append(Spec("sparse_attention", f"tf_glm5_indexed_sparse_attention_{_digest(SA._SOURCE)}", SA._SOURCE,
-                    [Arg("queries", bf, big, 3), Arg("keys", bf, big, 2), Arg("indices", i32, big, 2),
-                     Arg("scale", f32, one), Arg("meta", i32, one)],
-                    [Arg("out", bf, big, 3)], "", [("QK_DIM", RANK), ("TOPK", TOPK_KEYS), ("HEADS", MLA_HEADS)]))
+    for key, heads in (("sparse_attention", MLA_HEADS), ("sparse_attention_tp", MLA_HEADS // 2)):  # TP2: one Mac's heads
+        out.append(Spec(key, f"tf_glm5_indexed_sparse_attention_{_digest(SA._SOURCE)}", SA._SOURCE,
+                        [Arg("queries", bf, big, 3), Arg("keys", bf, big, 2), Arg("indices", i32, big, 2),
+                         Arg("scale", f32, one), Arg("meta", i32, one)],
+                        [Arg("out", bf, big, 3)], "", [("QK_DIM", RANK), ("TOPK", TOPK_KEYS), ("HEADS", heads)]))
     return out
 
 

@@ -20,11 +20,11 @@ pub const Config = struct {
     moe_inter: u32 = 2048,
     routed_scale: f32 = 2.5,
     swiglu_limit: f32 = 10.0,
-    kda_heads: u32 = 64,
+    kda_heads: u32 = 64, // this Mac's KDA heads: all, or its share in TP2 (heads [tp_rank kda_heads, ...))
     kda_dim: u32 = 128,
     conv: u32 = 4,
     lower_bound: f32 = -5.0,
-    mla_heads: u32 = 64,
+    mla_heads: u32 = 64, // this Mac's MLA heads: all, or its share in TP2
     nope: u32 = 256,
     v_dim: u32 = 256,
     q_lora: u32 = 1536,
@@ -37,6 +37,8 @@ pub const Config = struct {
     hc_eps: f32 = 1e-6,
     sinkhorn: u32 = 20,
     mtp: u32 = 1,
+    tp: u32 = 1, // tensor parallel: the Macs splitting the attention heads
+    tp_rank: u32 = 0,
     eos: [3]u32 = .{ 154820, 154827, 154829 },
     eos_n: u32 = 3,
     /// Layer i is MLA (sparse attention) when set; KDA otherwise.
@@ -77,6 +79,12 @@ pub const Config = struct {
     /// Keys a sparse row attends: index_topk from whole blocks plus the tail of its partial block.
     pub fn keyWidth(c: *const Config) u32 {
         return c.i_topk + c.kpool - 1;
+    }
+
+    /// The head's rows [lo, hi) this Mac computes: the whole vocabulary, or its half in TP2.
+    pub fn vocabPart(c: *const Config) [2]u32 {
+        const n = c.vocab / c.tp;
+        return .{ c.tp_rank * n, if (c.tp_rank + 1 == c.tp) c.vocab else (c.tp_rank + 1) * n };
     }
 
     pub fn countKind(c: *const Config, k: Kind) u32 {
@@ -197,6 +205,15 @@ pub fn splitRows(c: *Config, rank: u32, ranks: u32) !void {
     c.inter = .{ rank * n, (rank + 1) * n };
 }
 
+/// Tensor parallel over `ranks` Macs: rank r runs KDA and MLA heads [r h, (r + 1) h) of every layer, h = heads / ranks.
+pub fn splitHeads(c: *Config, rank: u32, ranks: u32) !void {
+    if (ranks == 0 or rank >= ranks or c.kda_heads % ranks != 0 or c.mla_heads % ranks != 0 or c.tp != 1) return error.BadHeadSplit;
+    c.kda_heads /= ranks;
+    c.mla_heads /= ranks;
+    c.tp = ranks;
+    c.tp_rank = rank;
+}
+
 /// Expert parallel over `ranks` Macs: rank r holds routed experts [r * experts / ranks, (r + 1) * experts / ranks).
 pub fn split(c: *Config, rank: u32, ranks: u32) !void {
     if (ranks == 0 or rank >= ranks or c.experts % ranks != 0) return error.BadExpertSplit;
@@ -234,6 +251,19 @@ test "by rows, two ranks hold every expert's halves" {
     try std.testing.expectEqual([2]u32{ 1024, 2048 }, c.inter);
     try std.testing.expect(c.byRows());
     try std.testing.expect(!(Config{}).byRows());
+}
+
+test "TP2: each rank runs half the KDA heads; its projection keeps f_a and g_a whole" {
+    var c = Config{};
+    try splitHeads(&c, 1, 2);
+    try std.testing.expectEqual(@as(u32, 32), c.kda_heads);
+    try std.testing.expectEqual(@as(u32, 4096), c.kdaWidth());
+    try std.testing.expectEqual(@as(u32, 12576), c.kdaProj());
+    try std.testing.expectEqual([2]u32{ 77440, 154880 }, c.vocabPart());
+    try std.testing.expectEqual(@as(u32, 12288), c.qrProj());
+    try std.testing.expectError(error.BadHeadSplit, splitHeads(&c, 0, 2));
+    var d = Config{};
+    try std.testing.expectError(error.BadHeadSplit, splitHeads(&d, 2, 2));
 }
 
 test "two ranks hold the routed experts' halves" {
