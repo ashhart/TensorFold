@@ -5,11 +5,15 @@ const sources = @import("kernel_sources");
 const frags = @import("../../core/frags.zig");
 const moe_route = @import("../../core/moe_route.zig");
 const affine_mm = @import("../../core/affine_mm.zig");
+const hc = @import("../../core/hc.zig");
 
 /// The route's shape (config.zig refuses other checkpoints).
 pub const route_shape: moe_route.Shape = .{ .hidden = 4096, .experts = 288, .topk = 8 };
 /// The MLA indexer's key gate as the same gemv_t (x [rows, 4096] times the packed [128, 4096] gate, bf16 out).
 pub const igate_shape: moe_route.Shape = .{ .hidden = 4096, .experts = 128, .topk = 8, .out_bf16 = true };
+
+/// The hyper-connection boundary's shape (config.zig refuses other checkpoints).
+pub const hc_shape: hc.Shape = .{ .width = 4096, .sinkhorn = 20, .eps_e9 = 1000 };
 
 pub const max_rows = 16;
 
@@ -27,11 +31,8 @@ pub const Kernels = struct {
     gemv_scores_lt4: mtl.Pipeline,
     gemv_scores_le32: mtl.Pipeline,
     gemv_scores: mtl.Pipeline,
-    hc_expand_11: mtl.Pipeline,
-    hc_expand_01: mtl.Pipeline,
     hc_expand_10: mtl.Pipeline,
-    hc_mix: mtl.Pipeline,
-    hc_split_norm: mtl.Pipeline,
+    hc_core: [3]mtl.Pipeline, // core/hc.zig: the expand (or the first boundary's read) with partial sums, then the split
     kda_rows: mtl.Pipeline,
     router: [max_rows]mtl.Pipeline, // by window rows (RR = 1 .. 16)
     moe_route: mtl.Pipeline,
@@ -100,11 +101,7 @@ const generated = [_]struct { key: []const u8, field: []const u8 }{
     .{ .key = "gemv_scores_lt4", .field = "gemv_scores_lt4" },
     .{ .key = "gemv_scores_le32", .field = "gemv_scores_le32" },
     .{ .key = "gemv_scores", .field = "gemv_scores" },
-    .{ .key = "hc_expand_11", .field = "hc_expand_11" },
-    .{ .key = "hc_expand_01", .field = "hc_expand_01" },
     .{ .key = "hc_expand_10", .field = "hc_expand_10" },
-    .{ .key = "hc_mix", .field = "hc_mix" },
-    .{ .key = "hc_split_norm", .field = "hc_split_norm" },
     .{ .key = "kda_rows", .field = "kda_rows" },
     .{ .key = "router", .field = "router" },
     .{ .key = "moe_route", .field = "moe_route" },
@@ -165,7 +162,7 @@ fn kernelOf(comptime key: []const u8) sources.glm.Kernel {
 pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const k = try gpa.create(Kernels);
     errdefer gpa.destroy(k);
-    var jobs: [generated.len + 11]Job = undefined;
+    var jobs: [generated.len + 12]Job = undefined;
     inline for (generated, 0..) |g, i| {
         const src = comptime kernelOf(g.key);
         const FT = @FieldType(Kernels, g.field);
@@ -211,6 +208,9 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const absorb_src = try frags.source(device, gpa, sources.glm_absorb_nax);
     defer gpa.free(absorb_src);
     jobs[generated.len + 10] = .{ .device = device, .source = absorb_src, .names = &.{"glm_absorb_nax"}, .out = @as(*[1]mtl.Pipeline, &k.absorb_nax) };
+    const hc_src = try hc.source(gpa, hc_shape);
+    defer gpa.free(hc_src);
+    jobs[generated.len + 11] = .{ .device = device, .source = hc_src, .names = &hc.names, .out = &k.hc_core };
     var next = std.atomic.Value(usize).init(0);
     const Worker = struct {
         fn run(all: []Job, counter: *std.atomic.Value(usize)) void {

@@ -8,6 +8,8 @@ const Kernels = @import("kernels.zig").Kernels;
 const Ep = @import("ep.zig").Ep;
 const moe_route = @import("../../core/moe_route.zig");
 const route_shape = @import("kernels.zig").route_shape;
+const hc_shape = @import("kernels.zig").hc_shape;
+const hc_core = @import("../../core/hc.zig");
 const Ref = wts.Ref;
 
 pub const Ctx = struct {
@@ -30,7 +32,7 @@ pub const Ctx = struct {
 
 /// Single launches (or tight groups) for a profile that times each alone.
 pub const Part = struct {
-    pub const names = [_][]const u8{ "hc_expand", "hc_mix", "hc_split", "kda_in", "kda_step", "kda_out", "mla_proj", "mla_cache", "mla_absorb", "mla_select", "mla_attn", "mla_unabs", "mla_out", "r_cast", "r_router", "r_topk", "x_locpost", "x_pack", "x_unpack", "e_gateup", "e_down", "s_gateup", "s_down", "combine", "dense", "head_qmv", "head_argmax" };
+    pub const names = [_][]const u8{ "hc_expand", "hc_mix", "kda_in", "kda_step", "kda_out", "mla_proj", "mla_cache", "mla_absorb", "mla_select", "mla_attn", "mla_unabs", "mla_out", "r_cast", "r_router", "r_topk", "x_locpost", "x_pack", "x_unpack", "e_gateup", "e_down", "s_gateup", "s_down", "combine", "dense", "head_qmv", "head_argmax" };
     pub fn bit(comptime name: []const u8) u32 {
         inline for (names, 0..) |n, i| if (comptime std.mem.eql(u8, n, name)) return @as(u32, 1) << i;
         @compileError("no part " ++ name);
@@ -134,30 +136,23 @@ pub fn embedRows(x: *const Ctx, e: mtl.ComputeEncoder, ids: Ref, out: Ref, rows:
     e.dispatchThreads(size(x.c.hidden / 2, rows, 1), size(256, 1, 1));
 }
 
-/// A block boundary: the pending branch into the streams, then (with `hc`) the next block's mix, split and norm.
+/// A block boundary: the pending branch into the streams, then (with `hc`) the next block's mix, split and norm (core/hc.zig).
 pub fn boundary(x: *Ctx, e: mtl.ComputeEncoder, rows: u32, pending: bool, hc: ?wts.Hc, norm: ?Ref) void {
     const sc = x.sc;
     const k = x.k;
-    if (on(x, "hc_expand")) {
-        e.setPipeline(if (pending and hc != null) k.hc_expand_11 else if (pending) k.hc_expand_10 else k.hc_expand_01);
-        bind(e, 0, .{ sc.x[x.xi], sc.branch, sc.post, sc.comb });
-        e.setValue(x.c.eps, 4);
-        bind(e, 5, .{ sc.x[1 - x.xi], sc.inv, sc.z });
-        e.dispatchThreads(size(1024 * rows, 1, 1), size(1024, 1, 1));
-    }
+    const h = hc orelse { // the last boundary: the pending branch written into the streams alone
+        if (pending and on(x, "hc_expand")) {
+            e.setPipeline(k.hc_expand_10);
+            bind(e, 0, .{ sc.x[x.xi], sc.branch, sc.post, sc.comb });
+            e.setValue(x.c.eps, 4);
+            bind(e, 5, .{ sc.x[1 - x.xi], sc.inv, sc.z });
+            e.dispatchThreads(size(1024 * rows, 1, 1), size(1024, 1, 1));
+        }
+        if (pending) x.xi = 1 - x.xi;
+        return;
+    };
+    if (on(x, "hc_mix")) hc_core.boundary(e, k.hc_core, hc_shape, pending, rows, x.c.eps, .{ .x_old = sc.x[x.xi], .branch = sc.branch, .post = sc.post, .comb = sc.comb, .fn_packed = h.fnp, .x_new = sc.x[1 - x.xi], .part = sc.mixes, .scale = h.scale, .base = h.base, .norm = norm.?, .normed = sc.normed });
     if (pending) x.xi = 1 - x.xi;
-    const h = hc orelse return;
-    if (on(x, "hc_mix")) {
-        e.setPipeline(k.hc_mix);
-        bind(e, 0, .{ sc.x[x.xi], sc.inv, h.fnp, sc.mixes });
-        e.dispatchThreads(size(6 * 256, rows, 1), size(256, 1, 1));
-    }
-    if (!on(x, "hc_split")) return;
-    e.setPipeline(k.hc_split_norm);
-    bind(e, 0, .{ sc.x[x.xi], sc.mixes, h.scale, h.base, norm.? });
-    e.setValue(x.c.eps, 5);
-    bind(e, 6, .{ sc.normed, sc.post, sc.comb });
-    e.dispatchThreads(size(1024 * rows, 1, 1), size(1024, 1, 1));
 }
 
 /// KDA layer `ki` on `normed`: the stacked projection (kept for a replay), the fused step into the other slot, the out-projection.

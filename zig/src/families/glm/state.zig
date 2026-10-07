@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
 const Ref = @import("weights.zig").Ref;
+const hc = @import("../../core/hc.zig");
 
 pub const max_rows = 16;
 /// MLA caches: the backbone's 11 layers, then the MTP head's.
@@ -81,7 +82,7 @@ pub const Scratch = struct {
     post: Ref,
     comb: Ref,
     inv: Ref,
-    mixes: Ref,
+    mixes: Ref, // fp32 [rows, slices, 25]: each boundary slice's partial mixes and squares
     z: Ref,
     y: Ref, // KDA output [rows, width]
     xp: Ref,
@@ -156,17 +157,17 @@ pub fn init(arena: *Arena, c: *const cfg.Config, cap: u32) !struct { state: Stat
     const H: usize = c.mla_heads;
     const V: usize = c.vocab;
     const sizes = [_]usize{
-        R * 4,                 R * 4,                        R * 4 * D * 2,            R * 4 * D * 2,               R * D * 2,
-        R * D * 2,             R * D * 2,                    R * 4 * 4,                R * 16 * 4,                  R * 4,
-        R * 24 * 4,            64,                           R * c.kdaWidth() * 2,     R * c.xProj() * 2,           R * c.q_lora * 2,
-        R * c.qrProj() * 2,    R * H * c.kv_lora * 2,        R * H * c.kv_lora * 2,    R * H * c.i_topk * 2,        R * H * c.i_topk * 2,
-        R * H * c.kv_lora * 2, R * H * c.v_dim * 2,          R * c.i_heads * 2,        R * (cap / c.kpool + 1) * 4, R * c.keyWidth() * 4,
-        R * 6 * 4,             R * D * 4,                    R * c.experts * 4,        R * c.topk * 4,              R * c.topk * 4,
-        R * c.topk * 4 + 64,   R * c.topk * R * 4,           64,                       64,                          R * c.moe_inter * 2,
-        R * D * 2,             R * c.topk * c.moe_inter * 2, R * c.topk * D * 2,       R * 2 * c.dense_inter * 2,   R * c.dense_inter * 2,
-        R * D * 2,             R * D * 2,                    R * V * 2,                R * 4,                       R * D * 2,
-        R * 2 * D * 2,         R * D * 2,                    R * D * 2,                R * D * 2,                   R * D * 2,
-        R * V * 2,             R * 4,                        R * c.topk * 4 * 2 + 256, R * c.topk * D * 4,
+        R * 4,                                                                   R * 4,                        R * 4 * D * 2,            R * 4 * D * 2,               R * D * 2,
+        R * D * 2,                                                               R * D * 2,                    R * 4 * 4,                R * 16 * 4,                  R * 4,
+        R * hc.partBytes(.{ .width = @intCast(D), .sinkhorn = 0, .eps_e9 = 0 }), 64,                           R * c.kdaWidth() * 2,     R * c.xProj() * 2,           R * c.q_lora * 2,
+        R * c.qrProj() * 2,                                                      R * H * c.kv_lora * 2,        R * H * c.kv_lora * 2,    R * H * c.i_topk * 2,        R * H * c.i_topk * 2,
+        R * H * c.kv_lora * 2,                                                   R * H * c.v_dim * 2,          R * c.i_heads * 2,        R * (cap / c.kpool + 1) * 4, R * c.keyWidth() * 4,
+        R * 6 * 4,                                                               R * D * 4,                    R * c.experts * 4,        R * c.topk * 4,              R * c.topk * 4,
+        R * c.topk * 4 + 64,                                                     R * c.topk * R * 4,           64,                       64,                          R * c.moe_inter * 2,
+        R * D * 2,                                                               R * c.topk * c.moe_inter * 2, R * c.topk * D * 2,       R * 2 * c.dense_inter * 2,   R * c.dense_inter * 2,
+        R * D * 2,                                                               R * D * 2,                    R * V * 2,                R * 4,                       R * D * 2,
+        R * 2 * D * 2,                                                           R * D * 2,                    R * D * 2,                R * D * 2,                   R * D * 2,
+        R * V * 2,                                                               R * 4,                        R * c.topk * 4 * 2 + 256, R * c.topk * D * 4,
     };
     var total: usize = 0;
     for (sizes) |n| total += std.mem.alignForward(usize, n, 256);

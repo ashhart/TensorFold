@@ -8,6 +8,7 @@ const fwd = @import("forward.zig");
 const pk = @import("../nemotron/prefill_kernels.zig");
 const ep_mod = @import("ep.zig");
 const affine_mm = @import("../../core/affine_mm.zig");
+const hc = @import("../../core/hc.zig");
 const kernels = @import("kernels.zig");
 const Kernels = kernels.Kernels;
 const moe_route = @import("../../core/moe_route.zig");
@@ -96,7 +97,7 @@ pub fn init(gpa: std.mem.Allocator, arena: *st.Arena, device: mtl.Device, c: *co
     p.streams.post = try big.of(arena, R * 4 * 4);
     p.streams.comb = try big.of(arena, R * 16 * 4);
     p.streams.inv = try big.of(arena, R * 4);
-    p.streams.mixes = try big.of(arena, R * 24 * 4);
+    p.streams.mixes = try big.of(arena, R * hc.partBytes(.{ .width = @intCast(D), .sinkhorn = 0, .eps_e9 = 0 }));
     p.streams.raw = try big.of(arena, R * D * 2);
     p.streams.hidden = try big.of(arena, R * D * 2);
     const xp_w = std.mem.alignForward(usize, c.xProj(), 64);

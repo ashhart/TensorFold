@@ -100,18 +100,9 @@ def specs() -> list[Spec]:
 
     hc_ex_in = [Arg("XOLD", bf, big, 3), Arg("BRANCH", bf, big, 2), Arg("POST", f32, big, 2), Arg("COMB", f32, big, 3),
                 Arg("EPS", f32, one)]
-    for expand, split in ((1, 1), (0, 1), (1, 0)):
-        plain(f"hc_expand_{expand}{split}", "tf_glm5_fused_hc_expand", H._HC_EXPAND, F._HEADER, hc_ex_in,
-              [Arg("XNEW", bf, big, 3), Arg("INV", f32, big), Arg("Z", f32, big, 2)],
-              [("D", HIDDEN), ("EXPAND", expand), ("SPLIT", split), ("ZOUT", 0), ("SQ_FMA", F.SQ_FMA)])
-    plain("hc_mix", "tf_glm5_fused_hc_mix_packed", H._HC_MIX_PACKED, F._HEADER,
-          [Arg("X", bf, big, 3), Arg("INV", f32, big), Arg("FNP", bf, big, 6)], [Arg("MIXES", f32, big, 2)],
-          [("D", HIDDEN), ("U", H.HC_MIX_U)])
-    plain("hc_split_norm", "tf_glm5_fused_hc_split_norm", H._HC_SPLIT_NORM, F._HEADER,
-          [Arg("X", bf, big, 3), Arg("MIXES", f32, big, 2), Arg("SCALE", f32, 3), Arg("BASEV", f32, 24),
-           Arg("NORMW", bf, big), Arg("EPS", f32, one)],
-          [Arg("NORMED", bf, big, 2), Arg("POST_OUT", f32, big, 2), Arg("COMB_OUT", f32, big, 3)],
-          [("D", HIDDEN), ("SQ_FMA", F.SQ_FMA), ("ITERS", 20), ("HC_EPS_INT", 1000)])
+    plain("hc_expand_10", "tf_glm5_fused_hc_expand", H._HC_EXPAND, F._HEADER, hc_ex_in,
+          [Arg("XNEW", bf, big, 3), Arg("INV", f32, big), Arg("Z", f32, big, 2)],
+          [("D", HIDDEN), ("EXPAND", 1), ("SPLIT", 0), ("ZOUT", 0), ("SQ_FMA", F.SQ_FMA)])
 
     plain("kda_rows", "tf_glm5_kda_rows", KD._SOURCE, KD._HEADER,
           [Arg("P", bf, big, 2), Arg("CS", bf, big, 2), Arg("CW", f32, big, 2), Arg("FBW", u32, big, 2),
