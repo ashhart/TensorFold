@@ -169,8 +169,7 @@ class TwoRanks:
         resume = next(({"state": k[2], "tail": k[3]} for k in self.kept
                        if self._index(k[1]) == source and len(k[0]) == cached and s.prompt[:cached] == k[0]), None)
         valid = 0 <= slot < len(self.slots) and (cached == 0 or resume is not None)
-        # an image prompt: rank 0 holds the features it encoded, rank 1 the metadata rank 0 sent; both agree on
-        # the rows, the decode offset and the feature shape before the tensors cross (``_share_vision``)
+        # an image prompt: both ranks agree on its rows, decode offset and feature shape before the tensors cross
         vision = getattr(s, "vision", None)
         images = None if vision is None else vision if isinstance(vision, dict) else {
             "rows": [int(r) for r in vision.rows], "delta": int(vision.rope_delta),
@@ -196,11 +195,7 @@ class TwoRanks:
         return self.slots[slot], resume, cached
 
     def _share_vision(self, s, images: dict):
-        """Rank 0 sends the image features and rotary positions it encoded; rank 1 receives the same tensors.
-
-        Point to point over the model communicator, inside the admission's lockstep (after the agreed plan,
-        before any round collective). Rank 1 attaches them exactly as rank 0 does, so every layer sees identical
-        hidden states for the image rows; it has no tower of its own."""
+        """Rank 0 sends its image features and positions after the agreed plan, before any round collective."""
 
         from .vision_ranks import exchange
 

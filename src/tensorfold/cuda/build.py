@@ -14,10 +14,7 @@ MIN_CAPABILITY = (8, 9)         # FP8 MMA and e4m3 conversions (Ada); kernels wi
 CLUSTERS = (9, 0)               # extensions built only on thread-block clusters (NVFP4) need Hopper or newer
 
 def _env_floor() -> tuple[int, int]:
-    """TENSORFOLD_MIN_CAPABILITY=8.0 lowers the floor for FP8-free paths (sm_80 POC: W4A16/EXL3 on Ampere).
-
-    Runs at import, before the ``need`` defaults below bind; it can only lower the floor, never raise it.
-    """
+    """TENSORFOLD_MIN_CAPABILITY=8.0 lowers the FP8-free floor at import, before ``need`` binds; never raises it."""
     raw = os.environ.get("TENSORFOLD_MIN_CAPABILITY", "").strip()
     if not raw:
         return MIN_CAPABILITY

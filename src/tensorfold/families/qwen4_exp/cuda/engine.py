@@ -424,8 +424,7 @@ class FlashNextEngine:
         def keep(p, snap, tail):
             self._remember(list(prompt[:p]), {"state": snap, "tail": tail})
         if vision is not None:
-            # image rows and positions on the state; no kept snapshot (text only), the rounds run eagerly
-            # (Engine.forward: the captured graphs know no image positions), as the concurrent decoder does
+            # image prompts prefill eagerly with no kept snapshot: the captured graphs know no image positions
             first = prefill(self.e, prompt, sampling, constraint=constraint, probabilities=probabilities, vision=vision)
         else:
             first = prefill(self.e, prompt, sampling, resume=hit[1] if hit else None, constraint=constraint,
@@ -476,8 +475,7 @@ class FlashNextEngine:
                                          **({"vision": vision} if vision is not None else {}))
         hit = self._resume(prompt) if draft and vision is None else None
         points = None
-        # the serial engine's image prompts: rank 0 encodes before the request is shared (a refused image fails
-        # here alone), and after sharing sends the features to rank 1, which attaches the same tensors
+        # rank 0 encodes before sharing (a refused image fails here alone), then sends rank 1 the same features
         encoded = self.vision.encode(vision, prompt) if vision is not None else None
         if self.tp == 2:                     # rank 0 decodes exactly what it hands rank 1
             from .vision_ranks import describe, exchange

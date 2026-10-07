@@ -1,9 +1,4 @@
-"""Image features on two ranks: rank 0 encodes a request's images once, rank 1 receives the same tensors.
-
-Both ranks must feed identical hidden states into their halves of every layer. Text does that by embedding the
-same ids; images only if both ranks hold the same feature rows, so they are computed once and sent, not recomputed.
-``describe`` is what rank 0 tells rank 1 with the request (JSON), ``exchange`` moves the tensors point to point once
-both ranks agreed to serve it. The concurrent decoder (``multi_tp``) and the serial engine (``engine``) share this."""
+"""Image features on two ranks: rank 0 encodes once and sends, so both feed identical hidden states to every layer."""
 
 from __future__ import annotations
 
@@ -20,9 +15,7 @@ def describe(encoded) -> dict | None:
 
 
 def exchange(comm, rank: int, length: int, images: dict, encoded=None, *, hidden: int):
-    """Rank 0 sends ``encoded``'s bf16 features and int32 positions; rank 1 receives them into tensors of the told shape.
-
-    Both ranks validate the same description against the same prompt length, so a malformed one fails on both."""
+    """Rank 0 sends ``encoded``'s bf16 features and int32 positions; both ranks validate the description first."""
 
     from tensorfold.cuda.comm import exchange as swap
     from tensorfold.vision.qwen_cuda import EncodedVision

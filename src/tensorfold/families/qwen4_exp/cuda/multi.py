@@ -255,9 +255,7 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
         t0 = time.perf_counter()
         if self.w.comm is not None:
             if s.vision is not None and self.link is not None and not hasattr(s.vision, "features"):
-                # rank 0 encodes the images before rank 1 hears of the request: an image the tower refuses
-                # (too large, a video without its frontend) fails here and no message reaches rank 1; a request
-                # admitted again after waiting for memory keeps the features it already has
+                # rank 0 encodes first, so a refused image fails here alone; a readmitted request keeps its features
                 if self.vision is None:
                     raise ValueError("image inputs require starting this server with --vision")
                 s.vision = self.vision.encode(s.vision, s.prompt)
