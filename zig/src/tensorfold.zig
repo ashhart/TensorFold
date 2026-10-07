@@ -6,6 +6,7 @@ pub const npy = @import("core/npy.zig");
 pub const ids_json = @import("core/ids_json.zig");
 pub const lanes = @import("lanes");
 pub const segments = @import("core/segments.zig");
+pub const row_projection = @import("core/row_projection.zig");
 pub const nemotron = @import("families/nemotron/nemotron.zig");
 pub const flashnext_replay = @import("families/flashnext/replay.zig");
 pub const flashnext_engine = @import("families/flashnext/engine.zig");
