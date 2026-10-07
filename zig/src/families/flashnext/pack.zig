@@ -1,5 +1,4 @@
-//! Flash Next's three weight packs built in Zig straight from the MLX checkpoint (work/fn-pack/SPEC.md): byte for byte
-//! what tools/zig/flashnext_dump.py, export_mlx_proj.py and export_mtp_mlx.py write, without a model load.
+//! Flash Next packs built in Zig from the checkpoint match the dump tools byte for byte, with no model load.
 const std = @import("std");
 const Io = std.Io;
 const st = @import("../../core/safetensors.zig");
@@ -142,9 +141,7 @@ fn f32ToBf16(bits: u32) u16 {
     return @intCast(rounded >> 16);
 }
 
-/// A centered norm's scale: decode.py:221 always computes 1.0 + f32(w) over the loaded weight, and the loader runs
-/// f32(w) - 1.0 first only when the checkpoint stores gamma (model.py:416-420, norms_stored_around_one true); the
-/// two steps stay f32 so the round trip is bit-exact inside [0.5, 2].
+/// A centered norm scale is the f32 round trip of decode's 1 + w, after the loader's -1 only when gamma is stored.
 pub fn centeredScale(gpa: std.mem.Allocator, ck: *ckpt.Checkpoint, path: []const u8, around_one: bool) ![]u8 {
     const t = try ck.get(path);
     if (t.dtype != .bf16) return error.UnexpectedTensor;
@@ -160,8 +157,7 @@ pub fn centeredScale(gpa: std.mem.Allocator, ck: *ckpt.Checkpoint, path: []const
     return out;
 }
 
-/// Whether the checkpoint stores gamma or gamma - 1, decided from the attn hc_norm means exactly as the Python
-/// loader decides it (model.py:348-360); an ambiguous checkpoint is refused, never guessed.
+/// Gamma versus gamma - 1 follows the attn hc_norm means, and an ambiguous checkpoint is refused.
 pub fn normsAroundOne(ck: *ckpt.Checkpoint, cfg: *const config_mod.Config, wide: usize) !bool {
     if (cfg.layers < 8) return false; // model.py:353: fewer than 8 anchors decides nothing and stores around zero
     var means: std.ArrayList(f64) = .empty;
@@ -217,8 +213,7 @@ fn putHc(out: *Out, gpa: std.mem.Allocator, a: std.mem.Allocator, ck: *ckpt.Chec
     try out.put(try std.fmt.allocPrint(a, "{s}.up.b", .{name}), "BF16", &.{ up.rows, up.b.dim(1) }, try gpa.dupe(u8, up.part(.biases)));
 }
 
-/// A gate's rows in bf16: stored bf16 directly, or an affine-stored linear dequantized on the host, as MLX
-/// dequantizes on use (code * scale + bias per group, rounded to bf16).
+/// A gate's rows are stored bf16, or an affine linear dequantized on the host as code * scale + bias per group.
 const Dense = struct { bytes: []const u8, rows: usize, cols: usize, owned: bool };
 
 fn denseRows(gpa: std.mem.Allocator, a: std.mem.Allocator, ck: *ckpt.Checkpoint, cfg: *const config_mod.Config, stem: []const u8) !Dense {
@@ -261,8 +256,7 @@ fn denseRows(gpa: std.mem.Allocator, a: std.mem.Allocator, ck: *ckpt.Checkpoint,
     return .{ .bytes = out, .rows = shape.n, .cols = shape.k, .owned = true };
 }
 
-/// A router's rows in bf16: the gate then the shared-expert gate; either may be affine-stored, which the
-/// builder dequantizes (decode.py's _dense_rows over MLX's quantized linears).
+/// A router's rows are the gate then the shared-expert gate, dequantized on the host when affine-stored.
 fn putRouter(out: *Out, gpa: std.mem.Allocator, a: std.mem.Allocator, ck: *ckpt.Checkpoint, cfg: *const config_mod.Config, name: []const u8, gate_stem: []const u8, shared_stem: []const u8) !void {
     const gate = try denseRows(gpa, a, ck, cfg, gate_stem);
     const shared = try denseRows(gpa, a, ck, cfg, shared_stem);
@@ -276,9 +270,7 @@ fn putRouter(out: *Out, gpa: std.mem.Allocator, a: std.mem.Allocator, ck: *ckpt.
     try out.put(name, "BF16", &.{ rows, gate.cols }, bytes);
 }
 
-/// A depthwise conv's weight as the kernel's channel-major [C, W]: MLX spells it [C, W, 1] and the bytes carry
-/// the rows already; a [W, 1, C] spelling transposes to the same rows. Same dtype, or widened to f32 for the
-/// ple gate (decode.py:246, 276).
+/// A depthwise conv weight is channel-major [C, W], transposed from [W, 1, C], and widened to f32 for the ple gate.
 fn putConvSlice(out: *Out, gpa: std.mem.Allocator, ck: *ckpt.Checkpoint, name: []const u8, path: []const u8, widen_f32: bool) !void {
     const t = try ck.get(path);
     if (t.rank != 3 or (t.dtype != .bf16 and t.dtype != .f32)) return error.UnexpectedTensor;
@@ -340,8 +332,7 @@ fn pleStarts(gpa: std.mem.Allocator, ck: *ckpt.Checkpoint, cfg: *const config_mo
     return out;
 }
 
-/// The draft vocabulary file's ids: sorted ascending, padded with the smallest unlisted ids to a multiple of 64
-/// (draft_head.draft_ids); a pad or listed id at or past the vocabulary is refused.
+/// Draft vocabulary ids are sorted and padded to a multiple of 64, and an id past the vocabulary is refused.
 pub fn draftIdList(gpa: std.mem.Allocator, io: Io, path: []const u8, vocab: usize) ![]u32 {
     const text = try Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 26));
     defer gpa.free(text);
@@ -403,8 +394,7 @@ fn putDraftHead(out: *Out, gpa: std.mem.Allocator, a: std.mem.Allocator, name: [
     _ = a;
 }
 
-/// Build the three packs into `out_dir` from the checkpoint at `model_dir`; `draft_vocab` null omits the mtp decode
-/// tensors (the dump tool's drafts-off shape). Every dim comes from config.json and the checkpoint's own headers.
+/// Build the three packs into `out_dir`. A null draft vocab omits the mtp tensors. Dims come from the checkpoint.
 pub fn build(gpa: std.mem.Allocator, io: Io, model_dir: []const u8, out_dir: []const u8, draft_vocab: ?[]const u8) !Report {
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
@@ -452,8 +442,7 @@ pub fn build(gpa: std.mem.Allocator, io: Io, model_dir: []const u8, out_dir: []c
             try putConvSlice(&decode, gpa, &ck, try std.fmt.allocPrint(a, "L{d}.gdn.conv", .{i}), try std.fmt.allocPrint(a, "{s}.linear_attn.conv1d.weight", .{stem}), false);
             const alog = try ck.get(try std.fmt.allocPrint(a, "{s}.linear_attn.A_log", .{stem}));
             if (alog.rank != 1 or (alog.dtype != .bf16 and alog.dtype != .f32)) return error.UnexpectedTensor;
-            // the gdn kernels bind ALOG and DT as bfloat16_t*, so the pack carries bf16 rows: byte-copied when
-            // the checkpoint stores bf16, rounded from f32 otherwise
+            // Gdn ALOG and DT are bf16 in the pack, copied when stored as bf16 and rounded from f32 otherwise.
             const alog16 = try gpa.alloc(u8, alog.dim(0) * 2);
             if (alog.dtype == .bf16) @memcpy(alog16, alog.bytes) else for (0..alog.dim(0)) |j| std.mem.writeInt(u16, alog16[j * 2 ..][0..2], f32ToBf16(std.mem.readInt(u32, alog.bytes[j * 4 ..][0..4], .little)), .little);
             try decode.put(try std.fmt.allocPrint(a, "L{d}.gdn.alog", .{i}), "BF16", &.{alog.dim(0)}, alog16);

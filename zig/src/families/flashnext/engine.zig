@@ -43,8 +43,7 @@ const i32Buf = fz.i32Buf;
 const f32Buf = fz.f32Buf;
 const jsonInt = fz.jsonInt;
 
-/// The default draft vocabulary (the Python package's draft_vocab.txt), written into the cache dir for the pack
-/// builder when a checkpoint is served with no dump: the pack's mtp.draft_ids comes from it.
+/// The embedded default draft vocabulary, written into the cache when a checkpoint is served with no dump.
 const default_draft_vocab = @embedFile("draft_vocab_default.txt");
 
 /// Rounds the token ring holds (fz_accept writes round & 511).
@@ -130,8 +129,7 @@ pub const Engine = struct {
     tsel: GSelect,
     msel: GSelect,
 
-    /// The checkpoint in `model_dir` with the recorded kernels and packs in `dump_dir` (tools/zig/flashnext_dump.py),
-    /// or, with `dump_dir` null, the checked-in kernels and packs built into the cache beside the checkpoint.
+    /// Load `model_dir` from a dump directory, or from the checked-in kernels when `dump_dir` is null.
     pub fn load(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_dir: ?[]const u8) !*Engine {
         return loadWith(gpa, io, model_dir, dump_dir, null);
     }
@@ -183,8 +181,7 @@ pub const Engine = struct {
         while (wit.next()) |kv| try files.put(arena, kv.value_ptr.string, {});
         var fit = files.keyIterator();
         while (fit.next()) |name| try r.indexFile(try std.fmt.allocPrintSentinel(arena, "{s}/{s}", .{ model_dir, name.* }, 0));
-        // the pack must name the checkpoint beside it: one built from another checkpoint refuses here; every
-        // mapping unmaps as soon as the identity text exists, so a refused or failed load leaves nothing mapped
+        // A pack from another checkpoint is refused, and every mapping unmaps once the identity text exists.
         const identity = blk: {
             var maps: std.ArrayList(mtl.MappedFile) = .empty;
             errdefer for (maps.items) |*m| m.deinit();
@@ -887,8 +884,7 @@ pub const Engine = struct {
     }
 };
 
-/// The pack cache beside the checkpoint: `{model_dir}/zig-pack`, built once by pack.build with the default draft
-/// vocabulary, rebuilt when its recorded source no longer matches the checkpoint's identity.
+/// The pack cache beside the checkpoint is built once and rebuilt when its source no longer matches.
 fn ensurePacks(gpa: Allocator, io: std.Io, model_dir: []const u8, cache_dir: []const u8, identity: []const u8) !void {
     Io.Dir.cwd().createDir(io, cache_dir, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},

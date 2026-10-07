@@ -1,5 +1,4 @@
-//! The source-identity checks: a reader accepts a pack built from the checkpoint beside it and refuses one built
-//! from another (or from an older builder without the recorded identity).
+//! A reader accepts a pack from the checkpoint beside it and refuses a different or unmarked pack.
 const std = @import("std");
 const Io = std.Io;
 const pack = @import("pack.zig");

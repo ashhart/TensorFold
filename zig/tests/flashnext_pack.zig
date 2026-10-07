@@ -1,5 +1,4 @@
-//! Flash Next's three weight packs built in Zig straight from a checkpoint folder (work/fn-pack/SPEC.md), then
-//! byte-compared with an existing Python-made dump one tensor at a time.
+//! Flash Next packs built from a checkpoint folder, then compared byte for byte with a Python dump.
 const std = @import("std");
 const tf = @import("tensorfold");
 const pack = tf.flashnext_pack;

@@ -300,8 +300,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
     return c;
 }
 
-/// The served PLE layer's reference values, the five ref.json fields serve reads (the first PLE layer's
-/// embedding: the first eos id, the 16 prime table sizes with their offsets, the 3 hash multipliers).
+/// The served PLE reference is eos, 16 prime table sizes with offsets, and 3 hash multipliers.
 pub const PleRef = struct { eos: i64, multipliers: [3]i64, sizes: [16]i64, offsets: [16]i64 };
 
 const mask64: u64 = (1 << 64) - 1;
@@ -338,9 +337,7 @@ fn nthPrimeAfter(start: u64, count: u64) u64 {
     return prime;
 }
 
-/// The first PLE layer's embedding values derived from the config: 16 prime table sizes (the k-th prime past
-/// `ngram_vocab_size_base - 1` per head) with running offsets, and the seed-splitmix multipliers (model.py's
-/// NGramEmbedding at ple_index 0, the first PLE layer's index in ple_layer_ids).
+/// PLE reference derived from the config: 16 prime table sizes with offsets, and the seed-splitmix multipliers.
 pub fn pleRef(c: *const Config) !PleRef {
     const heads = try c.ngramHeadCount();
     if (heads != 16 or c.ngram != 3) return error.UnsupportedFlashPleRef; // the engine's arrays are 16 and 3

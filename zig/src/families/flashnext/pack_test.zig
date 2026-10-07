@@ -1,5 +1,4 @@
-//! The weight-pack builder against a synthetic checkpoint: every transform class checked against hand-computed
-//! values (tile permutation, scale pairs, centered norms, routers, conv slices, table starts, draft ids, full packs).
+//! The weight-pack builder against a synthetic checkpoint, each transform checked against a hand-computed value.
 const std = @import("std");
 const Io = std.Io;
 const pack = @import("pack.zig");
@@ -46,8 +45,7 @@ fn gateSpecs(list: *std.ArrayList(Spec), a: std.mem.Allocator, stem: []const u8,
     const gate = try a.alloc(u16, 4 * 32);
     for (gate, 0..) |*v, i| v.* = base + @as(u16, @intCast(i % 256));
     try list.append(a, .{ .name = try std.fmt.allocPrint(a, "{s}.mlp.gate.weight", .{stem}), .dtype = "BF16", .shape = &.{ 4, 32 }, .bytes = std.mem.sliceAsBytes(gate) });
-    // The shared gate as the checkpoints store it: a u32-affine linear whose dequantized row joins the router.
-    // Codes 0, 3, a cross-word 63 at code 5, and 3 again at code 12; scale 1.0, bias 0.
+    // The shared gate is a u32-affine linear whose dequantized row joins the router.
     const words = try a.alloc(u32, 6);
     words[0] = 0xC00000C0;
     words[1] = 0x0000000F;
@@ -96,8 +94,7 @@ const config_json =
     \\}
 ;
 
-/// The synthetic checkpoint: two layers (gdn then attention, PLE on the attention layer), the mixer, the head and
-/// the MTP layer. Every quantized K is 32 (kw 6, one scale column) so stacks land on the 32-row lane width.
+/// The synthetic checkpoint is gdn then attention, and every quantized K is 32 so stacks land on the lane width.
 pub fn writeCheckpoint(tmp: std.testing.TmpDir, a: std.mem.Allocator) !void {
     var list: std.ArrayList(Spec) = .empty;
     for (0..2) |i| {
@@ -323,8 +320,7 @@ test "centered scale subtracts one only when the checkpoint stores gamma around 
     defer a.free(dir);
     var ck = try @import("../../core/checkpoint.zig").Checkpoint.openModel(a, io, dir);
     defer ck.close();
-    // stored around one: the loader runs fp32(w) - 1.0 at load (model.py:416-420) and decode.py:221 adds
-    // 1.0 to that f32 value, so the pack holds the two-step round trip: 1.25, 0.5 and 1.0 unchanged here
+    // Stored around one, the pack holds the f32 round trip, so 1.25, 0.5 and 1.0 stay unchanged.
     const around_one = try pack.centeredScale(a, &ck, "w", true);
     defer a.free(around_one);
     const one_words = std.mem.bytesAsSlice(u32, around_one);

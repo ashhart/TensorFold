@@ -243,8 +243,7 @@ test "the checked-in role table resolves every width serve asks for, with its so
     for (stems.values()) |set| {
         for (0..16) |w| try std.testing.expect(set[w]);
     }
-    // the indexer trio's kernels are in the table, so Select.init finds its variants and long-context block
-    // selection works without a dump: its launches bind the trio directly, with run-time grids and shapes
+    // The indexer trio is in the table, so block selection binds those kernels directly when there is no dump.
     const trio = [_][]const u8{ "q4_idx_pool_", "q4_idx_scores_", "q4_idx_select_" };
     for (trio) |t| {
         var hit = false;
@@ -253,8 +252,7 @@ test "the checked-in role table resolves every width serve asks for, with its so
         }
         try std.testing.expect(hit);
     }
-    // every entry's file is a bare name in the embedded sources: the checked-in run never opens a recorded
-    // path, so load works from any working directory
+    // Every checked-in entry names an embedded source, so load never opens a recorded path.
     for (table.entries) |e| {
         try std.testing.expect(std.mem.indexOfScalar(u8, e.file, '/') == null);
     }
@@ -292,7 +290,7 @@ test "the checked-in lane sources have a no-tensor-unit twin with the same kerne
 }
 
 test "the prompt's checked-in text resolves and patches from another working directory" {
-    // Prompt.init needs Metal, so this walks its exact file resolution instead: every checked-in variant resolves through Run.variantText and the gdn patch applies, with the process in a directory that holds none of the kernel files, so a bare-name open cannot pass.
+    // variantText resolves each checked-in file, and the gdn patch applies with no kernel file beside the process.
     const replay = @import("replay.zig");
     const table = @import("roles_gen.zig");
     const sources = @import("kernel_sources").flashnext_gen;

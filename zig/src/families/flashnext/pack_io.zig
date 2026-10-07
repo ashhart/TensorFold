@@ -1,12 +1,9 @@
-//! The packs' bytes on disk: the safetensors writer carrying the source identity, the identity computed over a
-//! checkpoint folder, the reader's refusal of a pack from another checkpoint, and the compare with a reference dump.
+//! Pack bytes on disk carry a source identity, and a reader refuses a pack from another checkpoint.
 const std = @import("std");
 const Io = std.Io;
 const st = @import("../../core/safetensors.zig");
 
-/// One output file's tensors, memory-resident until written (the largest, head.wq, is 476 MB at the shipped size);
-/// `put` takes ownership of `bytes`, freed on deinit. Blobs keep the allocation's own alignment: a typed slice
-/// may be passed directly and is freed the way it was allocated, not as plain bytes.
+/// One file's tensors stay resident until written. put owns the bytes, and each blob keeps its allocation alignment.
 pub const Out = struct {
     gpa: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
@@ -137,8 +134,7 @@ fn headerLen(memory: []const u8) !usize {
     return hl;
 }
 
-/// The identity's canonical text from an index file's bytes and each shard's mapped bytes: the one assembly both
-/// the builder and the engine go through, so their copies cannot drift.
+/// Canonical identity text comes from the index bytes and each shard's mapped bytes, shared by builder and engine.
 pub fn identityFromMapped(gpa: std.mem.Allocator, index_bytes: ?[]const u8, shards: []const MappedShard) ![]u8 {
     var ids: std.ArrayList(ShardId) = .empty;
     defer ids.deinit(gpa);
@@ -152,9 +148,7 @@ pub fn identityFromMapped(gpa: std.mem.Allocator, index_bytes: ?[]const u8, shar
     return identityString(gpa, if (index_bytes) |b| hashBytes(b) else null, ids.items);
 }
 
-/// The identity of the checkpoint at model_dir: the index file's hash plus each weight_map shard's size and header
-/// hash. A checkpoint without an index records no index hash and no shards. Every mapping stays alive until the
-/// identity text exists, then unmaps.
+/// A checkpoint identity is the index hash plus each shard size and header hash, and mappings then unmap.
 pub fn sourceIdentity(gpa: std.mem.Allocator, io: Io, model_dir: []const u8) ![]u8 {
     const Open = struct { file: Io.File, map: Io.File.MemoryMap };
     var shards: std.ArrayList(MappedShard) = .empty;
@@ -215,8 +209,7 @@ fn recordedSource(gpa: std.mem.Allocator, header_json: []const u8) ![]u8 {
     return gpa.dupe(u8, source.string);
 }
 
-/// Refuses a pack whose recorded identity does not match the checkpoint folder it is loaded beside; a pack with
-/// no recorded source (every dump made by the Python tool) loads with one warning naming the pack.
+/// A mismatched pack identity is refused, and a pack with no recorded source loads with one warning.
 pub fn checkSource(gpa: std.mem.Allocator, io: Io, pack_path: []const u8, model_dir: []const u8) !void {
     var mapped = try mapFile(io, pack_path);
     defer mapped.map.destroy(io);
@@ -235,8 +228,7 @@ pub fn checkSource(gpa: std.mem.Allocator, io: Io, pack_path: []const u8, model_
     if (!std.mem.eql(u8, recorded, identity)) return error.PackSourceMismatch;
 }
 
-/// The same refusal for a reader that already holds the pack's mapped bytes (the engine's MappedFile); `name`
-/// labels the pack in the unmarked warning.
+/// The same identity refusal for pack bytes already mapped, with `name` labelling an unmarked pack.
 pub fn checkSourceMapped(gpa: std.mem.Allocator, pack_bytes: []const u8, identity: []const u8, name: []const u8) !void {
     if (pack_bytes.len < 8) return error.BadSafetensors;
     const hl = try headerLen(pack_bytes);
@@ -295,8 +287,7 @@ pub fn compareFile(gpa: std.mem.Allocator, io: Io, built_path: []const u8, refer
 }
 
 test "deinit frees a typed blob at its allocation's alignment" {
-    // mtp.draft_ids: a u32 allocation joined the blobs as plain bytes once and the testing allocator panicked
-    // on the free; the recorded per-blob alignment keeps that from coming back.
+    // Each blob is freed with the alignment it was allocated at.
     const t = std.testing.allocator;
     var out = Out.init(t);
     const ids = try t.alloc(u32, 8);
@@ -312,7 +303,7 @@ test {
     _ = @import("pack_source_test.zig");
 }
 
-/// Whether a pack cache folder is complete for a no-dump load: both packs present, non-empty, with headers matching the checkpoint's identity; anything else rebuilds.
+/// A no-dump pack cache is complete when both packs are non-empty and their headers match the checkpoint.
 pub fn packsReady(gpa: std.mem.Allocator, io: Io, cache_dir: []const u8, identity: []const u8) !bool {
     const pack_path = try std.fmt.allocPrintSentinel(gpa, "{s}/pack.safetensors", .{cache_dir}, 0);
     defer gpa.free(pack_path);
