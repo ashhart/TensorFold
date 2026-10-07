@@ -22,6 +22,9 @@ const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
 
+/// auto compacts near the window. fraction compacts past that share of it.
+pub const CompactAt = union(enum) { auto, fraction: f64 };
+
 pub const Config = struct {
     served_name: []const u8,
     /// The served name first, then aliases, without repeats.
@@ -40,6 +43,12 @@ pub const Config = struct {
     seed_salt: i64 = 0,
     /// TENSORFOLD_REQUEST_LOG: where chat and completion bodies are appended; null: nowhere.
     request_log: ?[]const u8 = null,
+    /// Null keeps every reply identical to a server that has no compaction.
+    compact_at: ?CompactAt = null,
+    /// Tokens of the recent tail kept whole. Null uses min(20000, a quarter of the window).
+    compact_keep: ?u32 = null,
+    /// Directory of the stored note, or null when notes are not stored.
+    compact_memory: ?[]const u8 = null,
     timeouts: http_conn.Timeouts = .{},
 };
 
