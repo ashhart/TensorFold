@@ -166,6 +166,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_hip_tests.step);
     b.step("hip-host-test", "HIP admission tests without GPU work").dependOn(&run_hip_tests.step);
     const hipcc = b.option([]const u8, "hipcc", "HIP compiler for model-free tests") orelse "hipcc";
+    const hipcc_resolved = b.findProgram(.{ .names = &.{hipcc} }) orelse hipcc;
+    const hip_include = b.option([]const u8, "hip-include", "HIP header directory") orelse
+        b.pathResolve(&.{ std.fs.path.dirname(hipcc_resolved) orelse "/opt/rocm/bin", "..", "include" });
     const hip_arch = b.option([]const u8, "hip-arch", "Exact GPU architecture for the probe code object") orelse "gfx1151";
     if (!std.mem.eql(u8, hip_arch, "gfx1150") and !std.mem.eql(u8, hip_arch, "gfx1151") and !std.mem.eql(u8, hip_arch, "gfx1201"))
         @panic("unsupported HIP probe architecture");
@@ -177,6 +180,7 @@ pub fn build(b: *std.Build) void {
     _ = hip_files.addCopyFile(hip_object, "probe.hsaco");
     const hip_probe = b.createModule(.{ .root_source_file = hip_files.add("probe.zig", b.fmt("pub const arch = \"{s}\";\npub const bytes align(8) = @embedFile(\"probe.hsaco\").*;\n", .{hip_arch})) });
     const hip_gpu_module = b.createModule(.{ .root_source_file = b.path("zig/src/hip/runtime_tests.zig"), .target = target, .link_libc = true });
+    hip_gpu_module.addIncludePath(.{ .cwd_relative = hip_include });
     hip_gpu_module.addCSourceFile(.{ .file = b.path("zig/src/hip/device_arch.c"), .flags = &.{"-D__HIP_PLATFORM_AMD__"} });
     hip_gpu_module.addImport("hip_probe", hip_probe);
     const hip_gpu_test = b.addTest(.{ .root_module = hip_gpu_module });
