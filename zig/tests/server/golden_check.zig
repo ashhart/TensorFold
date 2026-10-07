@@ -473,7 +473,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    // the verdicts, in golden_check.py's shape
+    // the verdicts by group, then the total against the frozen answers
     const GroupCounts = struct { name: []const u8, equal: usize = 0, differ: usize = 0, known: usize = 0 };
     var groups: std.ArrayList(GroupCounts) = .empty;
     var failed: usize = 0;

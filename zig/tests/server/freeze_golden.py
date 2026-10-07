@@ -1,10 +1,4 @@
-"""The Python server's parity answers, frozen: one normalized reply set per corpus case under golden/.
-
-Replays parity.main()'s cases against the Python server alone (the fake tokenizer and scripts, no checkpoint,
-nothing beyond this repo and the standard library). Each case's normalized replies and its connection state go
-to golden/<group>/<name>.json; the request log's bytes and the owed SIGTERM exit go under lifecycle/.
-Run from anywhere: `python3 zig/tests/server/freeze_golden.py`.
-"""
+"""The Python server's parity answers frozen as golden files under golden/, one normalized reply set per case."""
 
 from __future__ import annotations
 
