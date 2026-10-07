@@ -1,6 +1,6 @@
 # HIP row projection qualification
 
-`zig build hip-affine-test -Dhip-arch=gfx1151 -Dhipcc=/usr/bin/hipcc`
+`zig build hip-affine-test -Dhip-arch=gfx1151`
 
 This is one four-bit BF16 affine row projection with FP32 sums, group sizes
 32/64, and explicit round-to-nearest-even BF16 output. Each output uses the
@@ -10,28 +10,42 @@ fast-prefill implementation, or a cross-backend bit-equality guarantee.
 The model-free tests check:
 
 - Row-alone versus batches 1/2/4/8/16/17/32, three repeats, across K
-  64/192/512/576 and both group sizes.
+  64/192/512/576/1088 and both group sizes.
 - A separate-stream bounded load, with partial progress observed during the
   foreground sequence and full completion afterward. This is not an
   instruction-overlap or occupancy measurement.
 - A cancellation-sensitive fixed case, expected BF16 `0x3d80`.
-- A SHA-256-pinned fixed-input fixture and all 16 single-bit output mutations.
-  The row kernel must return `0x3fc4`; each mutation must be rejected.
+- Pinned BF16 outputs for all ten matrix shapes (7680 outputs), checked
+  before row-alone/batch comparisons, and a separate fresh-launch float64
+  dequantized dot-product check with relative L2 below 0.0021 per shape.
+- A fixed-input fixture returning `0x3fc4`, plus a cancellation-sensitive
+  K=576 fixtures that distinguish contraction and shuffle order, run alone
+  and in two-row batches, plus exact BF16 halfway values of both parities.
 
-`hip_affine_g64.hex` is the 206-byte little-endian fixture exported from the
-Python affine reference at TensorFold PR #144 commit
-`88417d3da743c9e132a11495712c67316f20f48b`. Its SHA-256 is
+`hip_affine_g64.hex` is a 206-byte little-endian fixture from the Python
+affine reference in TensorFold PR #144. Its decoded SHA-256 is
 `85eaf08cdad842c50068788e5801dc4ab3b78296e18a6f16a790229cbc719f99`.
 The header is five u64 values (M=1,N=1,K=64,bits=4,group=64), followed by
 BF16 X, packed u32 W, BF16 scales/biases, and BF16 output. This fixed case
 also passes the HIP row reduction; it does not establish generic parity
 with the Python implementation.
 
-Measured on gfx1151 with HIP 7.1 and Zig 0.17.0, 7 October 2026:
-28/28 host tests and 22/22 device tests passed. A separate 24-case,
-4032-output comparison against a direct float64 dequantized dot product
-gave per-case relative L2 errors 0.0014415–0.0019564, maximum absolute error
-0.23693, and maximum RMSE 0.033885. These are fixture-specific measurements,
-not a universal error bound. Against Metal `core/row_projection Sum.f32` at
-`7ae6df7c3aa979d60819b210893802f8f6fca059`, two BF16 outputs differed;
-cross-backend bit equality is reported separately from row/batch invariance.
+`hip_affine_matrix.hex` stores little-endian BF16 results in group-size,
+K, row, column order, matching the deterministic inputs in the test.
+`hip_affine_sensitive.hex` uses the same header and payload format as the
+single-output fixture, one record per line, M=2, N=1 and group=64. These are engine
+regression references, not a cross-backend equality requirement.
+The independent NumPy FP32 emulator emits the two references with
+`python3 zig/tests/hip_affine_fixtures.py matrix` and
+`python3 zig/tests/hip_affine_fixtures.py sensitive`; compare stdout with
+the corresponding hex file. The sensitive generator also asserts that
+all 119 alternative shuffle orders, FMA, BF16 sums, pairwise product
+grouping and a split scale/bias epilogue move at least one output.
+`python3 zig/tests/hip_affine_fixtures.py search` reproduces the greedy
+order-coverage search over seeds 1–1000. Fixture generation uses NumPy
+2.4.3; use that version when regenerating Generator-based inputs.
+
+There are four device-test blocks. The runner also includes host/mock
+tests imported by the device-test module; its total is not a count of
+independent GPU checks. Device receipts and arithmetic negative-control
+results belong in the pull request.

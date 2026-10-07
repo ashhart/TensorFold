@@ -4,6 +4,24 @@ const affine = @import("affine.zig");
 const Buffer = @import("memory.zig").DeviceBuffer;
 
 test "row outputs are repeatable and independent of batch width" {
+    try checkMatrix(false);
+}
+
+test "fresh row outputs satisfy independent float64 accuracy bound" {
+    try checkMatrix(true);
+}
+
+fn checkMatrix(comptime accuracy_only: bool) !void {
+    try verifyHash(data.matrix, "9e909e57f9cc0c3cb75635e551c8c0163e6180b18b470766b5ac2d848e2a63f5");
+    var compact: [15360 * 2]u8 = undefined;
+    var used: usize = 0;
+    for (data.matrix) |ch| if (!std.ascii.isWhitespace(ch)) {
+        compact[used] = ch;
+        used += 1;
+    };
+    var pinned: [15360]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&pinned, compact[0..used]);
+    var case_index: usize = 0;
     var r = try @import("runtime.zig").Runtime.open();
     defer r.close();
     var ctx = try @import("context.zig").Context.init(&r, 0);
@@ -23,7 +41,7 @@ test "row outputs are repeatable and independent of batch width" {
     var progress = try Buffer.alloc(&r, 4);
     defer progress.free();
     const load_function = try module.function("affine_test_load");
-    for ([_]usize{ 32, 64 }) |group| for ([_]usize{ 64, 192, 512, 576 }) |k| {
+    for ([_]usize{ 32, 64 }) |group| for ([_]usize{ 64, 192, 512, 576, 1088 }) |k| {
         var shape: affine.Shape = .{ .rows = 32, .outputs = 24, .inputs = k, .bits = 4, .group = group };
         const lengths = try shape.byteLengths();
         var buffers: [5]Buffer = undefined;
@@ -34,10 +52,10 @@ test "row outputs are repeatable and independent of batch width" {
             count += 1;
         }
         var seed: u32 = @intCast(1701 + group + k);
-        var x: [32 * 576]u16 = undefined;
-        var w: [24 * 576 / 8]u32 = undefined;
-        var scales: [24 * 576 / 32]u16 = undefined;
-        var biases: [24 * 576 / 32]u16 = undefined;
+        var x: [32 * 1088]u16 = undefined;
+        var w: [24 * 1088 / 8]u32 = undefined;
+        var scales: [24 * 1088 / 32]u16 = undefined;
+        var biases: [24 * 1088 / 32]u16 = undefined;
         for (x[0 .. 32 * k]) |*v| v.* = randomBf(&seed, 4096);
         for (w[0 .. 24 * k / 8]) |*v| v.* = randomNext(&seed);
         for (scales[0 .. 24 * k / group]) |*v| v.* = randomBf(&seed, 1048576);
@@ -51,7 +69,32 @@ test "row outputs are repeatable and independent of batch width" {
         try stream.synchronize();
         var golden: [32 * 24 * 2]u8 = undefined;
         try buffers[4].download(0, &golden);
-        try std.testing.expectEqual(@as(usize, 0), try affine.mismatchCount(&golden, &golden));
+        // Independent dequantized dot product, not the row kernel's reduction.
+        var error_squared: f64 = 0;
+        var reference_squared: f64 = 0;
+        for (0..32) |row| for (0..24) |col| {
+            var reference: f64 = 0;
+            for (0..k) |i| {
+                const q = (w[col * (k / 8) + i / 8] >> @as(u5, @intCast((i % 8) * 4))) & 15;
+                const g = col * (k / group) + i / group;
+                reference += bf64(x[row * k + i]) *
+                    (bf64(scales[g]) * @as(f64, @floatFromInt(q)) + bf64(biases[g]));
+            }
+            const offset = (row * 24 + col) * 2;
+            const actual = bf64(std.mem.readInt(u16, golden[offset..][0..2], .little));
+            const delta = actual - reference;
+            error_squared += delta * delta;
+            reference_squared += reference * reference;
+        };
+        if (accuracy_only) {
+            // Below BF16 per-add accumulation error on these deterministic inputs;
+            // this is a fixture-level accuracy gate, not a universal error bound.
+            try std.testing.expect(reference_squared > 0);
+            try std.testing.expect(@sqrt(error_squared / reference_squared) < 0.0021);
+            continue;
+        }
+        try std.testing.expectEqual(@as(usize, 0), try affine.mismatchCount(&golden, pinned[case_index * golden.len ..][0..golden.len]));
+        case_index += 1;
         try progress.fill8(0);
         try ctx.synchronize();
         var load_args: @import("args.zig").Args = .{};
@@ -109,9 +152,12 @@ fn randomBf(seed: *u32, divisor: f32) u16 {
     return @truncate((bits +% 0x7fff +% ((bits >> 16) & 1)) >> 16);
 }
 
-// Upstream qwen36_row_seam at 7ae6df7: independently run on Metal,
-// all rows returned BF16 0x3d80 for this cancellation-sensitive input.
-test "row Sum.f32 cancellation matches upstream Metal across row counts" {
+fn bf64(value: u16) f64 {
+    return @as(f32, @bitCast(@as(u32, value) << 16));
+}
+
+// FP32 sums retain the small terms that BF16 per-add rounding loses.
+test "row Sum.f32 cancellation retains small terms across row counts" {
     var r = try @import("runtime.zig").Runtime.open();
     defer r.close();
     var ctx = try @import("context.zig").Context.init(&r, 0);
@@ -151,50 +197,59 @@ test "row Sum.f32 cancellation matches upstream Metal across row counts" {
     }
 }
 
-test "row 4-bit group64 golden output rejects every one-bit mutation" {
-    const hex = std.mem.trim(u8, data.hex, "\r\n ");
-    var bytes: [206]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&bytes, hex);
-    var hash: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(&bytes, &hash, .{});
-    var expected_hash: [32]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&expected_hash, "85eaf08cdad842c50068788e5801dc4ab3b78296e18a6f16a790229cbc719f99");
-    try std.testing.expectEqualSlices(u8, &expected_hash, &hash);
-    var r = try @import("runtime.zig").Runtime.open();
-    defer r.close();
-    var ctx = try @import("context.zig").Context.init(&r, 0);
-    defer ctx.deinit();
-    var stream = try @import("stream.zig").Stream.init(&r);
-    defer stream.deinit();
-    var arch_buffer: [256]u8 = undefined;
-    const arch = try @import("device_arch.zig").query(&r, 0, &arch_buffer);
-    const images = [_]@import("code_object.zig").Image{.{ .arch = data.arch, .bytes = &data.image }};
-    var module = try @import("module.zig").Module.loadForArchitecture(&r, &images, arch);
-    defer module.unload();
-    const shape: affine.Shape = .{ .rows = 1, .outputs = 1, .inputs = 64, .bits = 4, .group = 64 };
-    const lengths = try shape.byteLengths();
-    var buffers: [5]Buffer = undefined;
-    var count: usize = 0;
-    defer for (buffers[0..count]) |*buffer| buffer.free();
-    for (lengths, 0..) |len, i| {
-        buffers[i] = try Buffer.alloc(&r, len);
-        count += 1;
+test "row 4-bit fixed references including arithmetic-sensitive cancellation" {
+    try verifyHash(data.hex, "8752ae3a80ac648ae58eae84c523fc2da5dd7355c4d8551407167822af17c383");
+    try verifyHash(data.sensitive, "3663fc38e4964194413d8213e9fe3d7fbc795df990760ed47b28c06a43cd9b0b");
+    inline for (.{ data.hex, data.sensitive }) |fixture| {
+        var lines = std.mem.splitScalar(u8, std.mem.trim(u8, fixture, "\r\n "), '\n');
+        while (lines.next()) |hex| {
+            var storage: [8192]u8 = undefined;
+            const bytes = try std.fmt.hexToBytes(&storage, hex);
+            var r = try @import("runtime.zig").Runtime.open();
+            defer r.close();
+            var ctx = try @import("context.zig").Context.init(&r, 0);
+            defer ctx.deinit();
+            var stream = try @import("stream.zig").Stream.init(&r);
+            defer stream.deinit();
+            var arch_buffer: [256]u8 = undefined;
+            const arch = try @import("device_arch.zig").query(&r, 0, &arch_buffer);
+            const images = [_]@import("code_object.zig").Image{.{ .arch = data.arch, .bytes = &data.image }};
+            var module = try @import("module.zig").Module.loadForArchitecture(&r, &images, arch);
+            defer module.unload();
+            var shape: affine.Shape = .{ .rows = @intCast(std.mem.readInt(u64, bytes[0..8], .little)), .outputs = 1, .inputs = @intCast(std.mem.readInt(u64, bytes[16..24], .little)), .bits = 4, .group = 64 };
+            const lengths = try shape.byteLengths();
+            var buffers: [5]Buffer = undefined;
+            var count: usize = 0;
+            defer for (buffers[0..count]) |*buffer| buffer.free();
+            for (lengths, 0..) |len, i| {
+                buffers[i] = try Buffer.alloc(&r, len);
+                count += 1;
+            }
+            var offset: usize = 40;
+            for (buffers[0..4], lengths[0..4]) |buffer, len| {
+                try buffer.upload(0, bytes[offset..][0..len]);
+                offset += len;
+            }
+            try buffers[4].fill8(0xff);
+            try ctx.synchronize();
+            try affine.launchRowF32(try module.function("affine_row4_f32"), stream, shape, buffers);
+            try stream.synchronize();
+            var got: [4]u8 = undefined;
+            try buffers[4].download(0, got[0..lengths[4]]);
+            try std.testing.expectEqual(@as(usize, 0), try affine.mismatchCount(got[0..lengths[4]], bytes[offset..]));
+            shape.rows = 1;
+            try affine.launchRowF32(try module.function("affine_row4_f32"), stream, shape, buffers);
+            try stream.synchronize();
+            try buffers[4].download(0, got[0..2]);
+            try std.testing.expectEqual(@as(usize, 0), try affine.mismatchCount(got[0..2], bytes[offset..][0..2]));
+        }
     }
-    var offset: usize = 40;
-    for (buffers[0..4], lengths[0..4]) |buffer, len| {
-        try buffer.upload(0, bytes[offset..][0..len]);
-        offset += len;
-    }
-    try buffers[4].fill8(0xff);
-    try ctx.synchronize();
-    try affine.launchRowF32(try module.function("affine_row4_f32"), stream, shape, buffers);
-    try stream.synchronize();
-    var got: [2]u8 = undefined;
-    try buffers[4].download(0, &got);
-    try std.testing.expectEqual(@as(usize, 0), try affine.mismatchCount(&got, bytes[offset..]));
-    for (0..16) |bit| {
-        var changed = got;
-        changed[bit / 8] ^= @as(u8, 1) << @as(u3, @intCast(bit % 8));
-        try std.testing.expectEqual(@as(usize, 1), try affine.mismatchCount(&changed, bytes[offset..]));
-    }
+}
+
+fn verifyHash(bytes: []const u8, hex: []const u8) !void {
+    var got: [32]u8 = undefined;
+    var expected: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &got, .{});
+    _ = try std.fmt.hexToBytes(&expected, hex);
+    try std.testing.expectEqualSlices(u8, &expected, &got);
 }

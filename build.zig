@@ -193,7 +193,9 @@ pub fn build(b: *std.Build) void {
     const affine_files = b.addWriteFiles();
     _ = affine_files.addCopyFile(affine_image, "affine.hsaco");
     _ = affine_files.addCopyFile(b.path("zig/tests/hip_affine_g64.hex"), "golden.hex");
-    const affine_data = b.createModule(.{ .root_source_file = affine_files.add("data.zig", b.fmt("pub const arch = \"{s}\";\npub const image align(8) = @embedFile(\"affine.hsaco\").*;\npub const hex = @embedFile(\"golden.hex\");\n", .{hip_arch})) });
+    _ = affine_files.addCopyFile(b.path("zig/tests/hip_affine_sensitive.hex"), "sensitive.hex");
+    _ = affine_files.addCopyFile(b.path("zig/tests/hip_affine_matrix.hex"), "matrix.hex");
+    const affine_data = b.createModule(.{ .root_source_file = affine_files.add("data.zig", b.fmt("pub const arch = \"{s}\";\npub const image align(8) = @embedFile(\"affine.hsaco\").*;\npub const hex = @embedFile(\"golden.hex\");\npub const sensitive = @embedFile(\"sensitive.hex\");\npub const matrix = @embedFile(\"matrix.hex\");\n", .{hip_arch})) });
     const affine_module = b.createModule(.{ .root_source_file = b.path("zig/src/hip/affine_gpu_test.zig"), .target = target, .link_libc = true });
     affine_module.addIncludePath(.{ .cwd_relative = hip_include });
     affine_module.addImport("affine_data", affine_data);

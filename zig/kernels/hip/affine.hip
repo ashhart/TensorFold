@@ -33,7 +33,7 @@ __device__ static uint32_t unpack(const uint32_t* words, size_t index, unsigned 
     return value & ((1U << bits) - 1U);
 }
 
-// core/row_projection Sum.f32 at upstream 7ae6df7: 16 inputs per lane,
+// FP32 row projection: 16 inputs per lane,
 // four-product chains, scale/bias applied per lane, then a 32-lane reduction.
 // Reduction-order equivalence to Metal must be measured, not assumed.
 extern "C" __global__ void affine_row4_f32(
