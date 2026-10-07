@@ -54,6 +54,16 @@ pub const Plan = struct {
     }
 };
 
+/// `starts` with `cut` too: a state kept just before a conversation's own text reads only shared tokens.
+pub fn withCut(a: Allocator, starts: []const u32, cut: u32, len: usize, min_chunk: u32) ![]const u32 {
+    if (cut == 0 or cut >= len) return starts;
+    var out: std.ArrayList(u32) = .empty;
+    for (starts) |s| if (@max(s, cut) - @min(s, cut) >= min_chunk) try out.append(a, s); // starts too near the cut go
+    try out.append(a, cut);
+    std.mem.sort(u32, out.items, {}, std.sort.asc(u32));
+    return out.items;
+}
+
 const Role = enum { user, assistant };
 
 /// ``message_markers``: the openers and assistant header the chat template renders, from probe conversations.
@@ -132,6 +142,16 @@ fn common(pieces: []const []const u32) []const u32 {
     for (pieces) |p| n = @min(n, p.len);
     for (0..n) |i| for (pieces) |p| if (p[i] != first[i]) return first[0..i];
     return first[0..n];
+}
+
+test "a harness cut joins the starts, nearer ones go" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualSlices(u32, &.{ 4096, 4648 }, try withCut(a, &.{ 4096, 4650 }, 4648, 4680, 256));
+    try std.testing.expectEqualSlices(u32, &.{ 4096, 4650 }, try withCut(a, &.{ 4096, 4650 }, 0, 4680, 256));
+    try std.testing.expectEqualSlices(u32, &.{ 4096, 4650 }, try withCut(a, &.{ 4096, 4650 }, 4680, 4680, 256));
+    try std.testing.expectEqualSlices(u32, &.{ 600, 4096 }, try withCut(a, &.{4096}, 600, 4680, 256));
 }
 
 test "chunk starts match PrefillPlan.chunks" {
