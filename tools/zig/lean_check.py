@@ -1,4 +1,4 @@
-"""The Zig engine's lean rule: no file over 600 lines, every comment and docstring one line."""
+"""The Zig engine's lean rule: no file over 600 lines, every comment and docstring one line of at most 120 columns."""
 import re
 import sys
 from pathlib import Path
@@ -6,6 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 TREES = ("zig", "tools/zig")
 MAX_LINES = 600
+MAX_COLUMNS = 120
 COMMENT = {".zig": re.compile(r"^\s*//"), ".metal": re.compile(r"^\s*//"), ".cu": re.compile(r"^\s*//"),
            ".cuh": re.compile(r"^\s*//"), ".h": re.compile(r"^\s*//"), ".py": re.compile(r"^\s*#"),
            ".sh": re.compile(r"^\s*#(?!!)")}
@@ -21,16 +22,29 @@ def problems(path: Path) -> list[str]:
     if len(lines) > MAX_LINES and path.name not in GENERATED:
         found.append(f"{rel}: {len(lines)} lines (split past {MAX_LINES})")
     comment = COMMENT[path.suffix]
-    before = ""
+    before, doc_quote = "", None
     for i, line in enumerate(lines):
+        if doc_quote is not None:
+            if len(line) > MAX_COLUMNS:
+                found.append(f"{rel}:{i + 1}: docstring past {MAX_COLUMNS} columns")
+            if doc_quote in line:
+                doc_quote = None
+            continue
         if comment.match(line) and i + 1 < len(lines) and comment.match(lines[i + 1]):
             found.append(f"{rel}:{i + 1}: multi-line comment")
+        if comment.match(line) and len(line) > MAX_COLUMNS:
+            found.append(f"{rel}:{i + 1}: comment past {MAX_COLUMNS} columns")
         if path.suffix != ".py" and BLOCK.search(line):
             found.append(f"{rel}:{i + 1}: block comment")
         m = DOCSTRING.match(line) if path.suffix == ".py" else None
         # a docstring opens a module or follows a def/class line; other triple quotes are data
-        if m and line.count(m.group(1)) == 1 and (not before or before.rstrip().endswith(":")):
-            found.append(f"{rel}:{i + 1}: multi-line docstring")
+        if m and (not before or before.rstrip().endswith(":")):
+            quote = m.group(1)
+            if len(line) > MAX_COLUMNS:
+                found.append(f"{rel}:{i + 1}: docstring past {MAX_COLUMNS} columns")
+            if line.count(quote) == 1:
+                found.append(f"{rel}:{i + 1}: multi-line docstring")
+                doc_quote = quote
         if line.strip() and not comment.match(line):
             before = line
     return found
