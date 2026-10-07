@@ -117,18 +117,46 @@ pub const Info = struct {
     structures: bool = false,
     /// Prompt rows a prefill chunk at most, for the server's chunk starts (0: the engine cuts prompts itself).
     prefill_step: u32 = 0,
+    /// A line the server prints once at startup (the engine's memory plan); empty: none.
+    startup: []const u8 = "",
 };
 
 /// A checkpoint family an engine reads: its config ``model_type`` and weight formats, as gate entries name them.
 pub const Family = struct { model_type: []const u8, formats: []const []const u8 };
 
 /// What a server asks of the engine it opens: the checkpoint, and the serve flags an engine reads.
-pub const Open = struct { dir: []const u8, model_type: []const u8, context: ?i64 = null, lanes: u32 = 8, drafts: bool = true, speed_up: ?[]const u8 = null, prompt_cache_gib: ?f64 = null, prompt_cache_over_cap: bool = false };
+pub const Open = struct {
+    dir: []const u8,
+    model_type: []const u8,
+    context: ?i64 = null,
+    lanes: u32 = 8,
+    /// --parallel named a number: an engine whose memory fits fewer streams refuses instead of serving fewer.
+    lanes_fixed: bool = false,
+    drafts: bool = true,
+    speed_up: ?[]const u8 = null,
+    prompt_cache_gib: ?f64 = null,
+    prompt_cache_over_cap: bool = false,
+    /// --device and --segments (CUDA); null: the backend's environment fallback, then its default.
+    device: ?u32 = null,
+    segments: ?u32 = null,
+};
 
 /// An opened engine; ``close`` stops its thread and frees its backend.
 pub const Opened = struct { engine: Engine, close: *const fn (ctx: *anyopaque) void, ctx: *anyopaque };
 
 pub const Memory = struct { active: u64 = 0, cache: u64 = 0, peak: u64 = 0 };
+
+/// A backend's words for its own refusals (a request it cannot serve); null: the error's name.
+pub const Explain = struct {
+    ctx: ?*anyopaque = null,
+    text: *const fn (ctx: ?*anyopaque, err: anyerror) ?[]const u8,
+};
+
+/// A backend's own memory counts for LaneHost; read from HTTP threads, so it must not touch the GPU.
+pub const MemorySource = struct {
+    ctx: ?*anyopaque = null,
+    read: *const fn (ctx: ?*anyopaque, reset_peak: bool) ?Memory,
+};
 
 pub const Status = struct {
     /// Requests in prefill or decode, and those waiting for a lane.
@@ -188,6 +216,7 @@ pub const Engine = struct {
 /// A backend's own driver for a lone greedy stream (the GPU round), which LaneHost runs while the stream is alone.
 pub const Lone = struct {
     ctx: *anyopaque,
+    sampled: bool = false, // it drives sampled streams too
     /// Prefills `s` and decodes it until it finishes (false) or `hooks.yield` hands it to the lane core (true).
     run: *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: LoneHooks) anyerror!bool,
 };

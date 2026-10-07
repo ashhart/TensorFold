@@ -17,7 +17,7 @@ pub const Options = struct {
 const Done = struct { name: []const u8, tokens: []const u32, sha: []const u8, rounds: u64, drafted: u64, accepted: u64 };
 
 /// The capture's prompts.json: names to token ids, in file order.
-fn readPrompts(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !std.json.Parsed(std.json.ArrayHashMap([]u32)) {
+pub fn readPrompts(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !std.json.Parsed(std.json.ArrayHashMap([]u32)) {
     const text = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 26));
     defer gpa.free(text);
     return std.json.parseFromSlice(std.json.ArrayHashMap([]u32), gpa, text, .{ .allocate = .alloc_always });

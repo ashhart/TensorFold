@@ -138,6 +138,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     const port = lis.port();
     if (s.on_listen) |f| f(port);
     const window = srv.info.context_window;
+    if (srv.info.startup.len > 0) log.line("{s}", .{srv.info.startup});
     const now = std.Io.Clock.awake.now(io).toNanoseconds();
     const loaded = if (s.started > 0) @as(f64, @floatFromInt(now - s.started)) / 1e9 else 0;
     var window_text: [24]u8 = undefined;

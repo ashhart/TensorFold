@@ -23,6 +23,9 @@ pub const Flag = struct {
 
 const backend_values: []const []const u8 = if (builtin.os.tag == .macos) &.{ "auto", "mlx" } else &.{ "auto", "cuda" };
 
+/// The CUDA build's own flags and variables (the Metal build refuses them).
+const cuda_build = builtin.os.tag == .linux;
+
 /// Every Python serve flag (``cli_args.build_parser``), the ones this binary serves marked native.
 pub const flags = [_]Flag{
     .{ .name = "--host", .native = true },
@@ -80,10 +83,14 @@ pub const flags = [_]Flag{
     .{ .name = "--prefill-fp8", .kind = .store_true },
     .{ .name = "--no-prefill-fp8", .kind = .store_true },
     .{ .name = "--precision", .choices = &.{ "checkpoint", "full" } },
+    // the CUDA CLI's own: the GPU ordinal, and whole prompt chunks a call runs as staggered segments
+    .{ .name = "--device", .native = cuda_build },
+    .{ .name = "--segments", .native = cuda_build },
 };
 
-/// The variables this binary honours as the Python engine does.
-pub const env = [_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_NO_LIVE", "TENSORFOLD_SEED_SALT", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_NO_UPDATE_CHECK", "HF_HOME", "HF_HUB_CACHE", "HF_HUB_OFFLINE" };
+/// The variables this binary honours as the Python engine does, then the CUDA build's.
+pub const env = [_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_NO_LIVE", "TENSORFOLD_SEED_SALT", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_NO_UPDATE_CHECK", "HF_HOME", "HF_HUB_CACHE", "HF_HUB_OFFLINE" } ++
+    (if (cuda_build) [_][]const u8{ "TF_CUDA_DEVICE", "TF_CUDA_SEGMENTS", "TENSORFOLD_CUDA_KERNELS", "TENSORFOLD_MEMORY_RESERVE_GIB", "TENSORFOLD_CUDA_MEMORY_LIMIT_GB" } else [_][]const u8{});
 
 pub const Args = struct {
     model: []const u8 = "",
@@ -112,6 +119,8 @@ pub const Args = struct {
     keep_warm: i64 = 900, // seconds the idle keepalive runs after the last request ends (0: off)
     parallel: []const u8 = "auto",
     backend: []const u8 = "auto",
+    device: ?u32 = null,
+    segments: ?u32 = null,
 };
 
 /// A usage error's message (argparse's ``error:`` line); the caller exits 2.
@@ -189,11 +198,23 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
             return std.mem.eql(u8, x, y);
         }
     }.f;
+    if (try cudaFlag(a, out, name, v, u)) return;
     if (is(name, "--host")) out.host = v else if (is(name, "--port")) {
         const p = try int(u, a, name, v);
         if (p < 0 or p > 65535) return fail(u, a, "argument --port: invalid port: '{s}'", .{v});
         out.port = @intCast(p);
     } else if (is(name, "--name")) out.name = v else if (is(name, "--alias")) try alias.append(a, v) else if (is(name, "--api-key")) try keys.append(a, v) else if (is(name, "--api-key-file")) out.api_key_file = v else if (is(name, "--metrics-open")) out.metrics_open = true else if (is(name, "--dashboard")) out.dashboard = true else if (is(name, "--context")) out.context = try int(u, a, name, v) else if (is(name, "--speed-up")) out.speed_up = v else if (is(name, "--prompt-cache-gib")) out.prompt_cache_gib = try gib(u, a, name, v) else if (is(name, "--prompt-cache-over-cap")) out.prompt_cache_over_cap = true else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--parallel")) out.parallel = v else if (is(name, "--backend")) out.backend = v;
+}
+
+/// The CUDA build's --device and --segments; false for any other flag.
+fn cudaFlag(a: Allocator, out: *Args, name: []const u8, v: []const u8, u: *Usage) error{ Usage, OutOfMemory }!bool {
+    if (std.mem.eql(u8, name, "--device")) {
+        out.device = std.math.cast(u32, try int(u, a, name, v)) orelse return fail(u, a, "argument --device: a GPU ordinal from 0: '{s}'", .{v});
+    } else if (std.mem.eql(u8, name, "--segments")) {
+        const n = try int(u, a, name, v);
+        out.segments = if (n >= 1) @intCast(@min(n, std.math.maxInt(u32))) else return fail(u, a, "argument --segments: a count from 1: '{s}'", .{v});
+    } else return false;
+    return true;
 }
 
 /// ``--parallel``: "auto" is up to 8 requests at once; a number caps it.
@@ -202,6 +223,11 @@ pub fn parallel(text: []const u8) ?u32 {
     if (std.ascii.eqlIgnoreCase(t, "auto")) return 8;
     const n = std.fmt.parseInt(i64, t, 10) catch return null;
     return @intCast(@max(1, @min(n, 4096)));
+}
+
+/// ``--parallel`` named a number (an engine that fits fewer refuses), not "auto" (it serves what fits).
+pub fn parallelFixed(text: []const u8) bool {
+    return !std.ascii.eqlIgnoreCase(std.mem.trim(u8, text, " "), "auto") and parallel(text) != null;
 }
 
 /// What ``capabilities --json`` reports about the engine side: its version, chip, backends and families.
@@ -265,4 +291,25 @@ test "parse and capabilities share the table" {
     const doc = out.written();
     try std.testing.expect(std.mem.indexOf(u8, doc, "\"--no-thinking\": {}") != null);
     try std.testing.expect(std.mem.indexOf(u8, doc, "\"--drafter\"") == null);
+}
+
+test "--device and --segments: CUDA builds serve them, values checked" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var u: Usage = .{};
+    if (cuda_build) {
+        const args = try parse(a, &.{ "m", "--device", "1", "--segments=2" }, &u);
+        try std.testing.expectEqual(@as(?u32, 1), args.device);
+        try std.testing.expectEqual(@as(?u32, 2), args.segments);
+    } else try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--device", "1" }, &u));
+    var out: Args = .{};
+    try std.testing.expect(try cudaFlag(a, &out, "--device", "0", &u));
+    try std.testing.expectEqual(@as(?u32, 0), out.device);
+    try std.testing.expectError(error.Usage, cudaFlag(a, &out, "--device", "-1", &u));
+    try std.testing.expectError(error.Usage, cudaFlag(a, &out, "--segments", "0", &u));
+    try std.testing.expect(try cudaFlag(a, &out, "--segments", "4", &u));
+    try std.testing.expectEqual(@as(?u32, 4), out.segments);
+    try std.testing.expect(!try cudaFlag(a, &out, "--port", "1", &u));
+    try std.testing.expect(parallelFixed("3") and !parallelFixed("auto") and !parallelFixed("x"));
 }

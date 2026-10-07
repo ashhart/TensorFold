@@ -47,3 +47,57 @@ extern "C" __global__ void tf_serial_feed(const int* __restrict__ sampled, int* 
     meta[1] = meta[1] ^ 1;
     meta[2] = 1;
 }
+
+namespace {
+
+// Exclusive prefix sum over a 128-thread block (four warps); `total` gets the sum.
+__device__ __forceinline__ int scan128(int v, int* total) {
+    __shared__ int ws[4];
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    int s = v;
+    for (int o = 1; o < 32; o <<= 1) {
+        const int u = __shfl_up_sync(0xffffffffu, s, o);
+        if (lane >= o) s += u;
+    }
+    if (lane == 31) ws[warp] = s;
+    __syncthreads();
+    int before = 0;
+    for (int w = 0; w < warp; ++w) before += ws[w];
+    *total = ws[0] + ws[1] + ws[2] + ws[3];
+    __syncthreads();
+    return before + s - v;
+}
+
+}  // namespace
+
+// Routed slots retain plan_kernel item and member order for experts below E.
+extern "C" __global__ void __launch_bounds__(128) tf_plan_routed(const int* __restrict__ picks, int rows, int slots, int routed,
+                                                                int E, int T, int* __restrict__ members,
+                                                                int* __restrict__ items, int* __restrict__ counts) {
+    __shared__ int pk[16 * 8];
+    const int tid = threadIdx.x, P = rows * slots;
+    for (int p = tid; p < P; p += blockDim.x) pk[p] = p % slots < routed ? picks[p] : -1;
+    __syncthreads();
+    int c = 0;
+    if (tid < E)
+        for (int p = 0; p < P; ++p) c += pk[p] == tid;
+    const int tiles = (c + T - 1) / T;
+    int nmembers, ntiles, nused;
+    const int off = scan128(c, &nmembers);
+    const int ioff = scan128(tiles, &ntiles);
+    scan128(c > 0, &nused);
+    if (tid == 0) {
+        counts[0] = ntiles;
+        counts[1] = nused;
+    }
+    if (tid >= E) return;
+    for (int j = 0; j < tiles; ++j) {
+        int* it = items + 3 * (ioff + j);
+        it[0] = tid;
+        it[1] = off + T * j;
+        it[2] = min(T, c - T * j);
+    }
+    int k = off;
+    for (int p = 0; p < P && k < off + c; ++p)
+        if (pk[p] == tid) members[k++] = p;
+}

@@ -19,6 +19,8 @@ const kernels = [_]Kernel{
     .{ .name = "prefill_attention", .flags = &.{ "-O3", "--fmad=false" } }, // tensorfold_prefill_attention_v1
     .{ .name = "scan_rows", .flags = &.{ "-O3", "--fmad=false" } }, // nemotron_h/cuda/mamba.py
     .{ .name = "nemotron_ops", .flags = &.{"-O3"} }, // ours: Nemotron's layouts and the serial feed
+    .{ .name = "lane_gemv", .flags = &.{"-O3"} }, // ours: qmm_group's arithmetic, a column tile's K slices in one CTA
+    .{ .name = "sample", .flags = &.{ "-O3", "--fmad=false", "--ftz=false" } }, // ours: the Metal engine's keyed draws
     .{ .name = "torch_argmax", .src = "torch_ops/argmax", .flags = torch_ops },
     .{ .name = "torch_topk", .src = "torch_ops/topk", .flags = torch_ops },
     .{ .name = "torch_pointwise", .src = "torch_ops/pointwise", .flags = torch_ops },
@@ -99,6 +101,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     b.installArtifact(b.addExecutable(.{ .name = "tensorfold", .root_module = cli }));
     const runner = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/main.zig"), .target = target, .optimize = optimize, .link_libc = true });
     runner.addImport("cuda", cuda);
+    runner.addImport("lanes", mods.lanes);
     b.installArtifact(b.addExecutable(.{ .name = "tf-cuda-test", .root_module = runner }));
     _ = nativeServer(b, target, optimize, cuda, mods.lanes, mods.nemotron, mods.tokenizer, build_options, true);
 }

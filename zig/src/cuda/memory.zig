@@ -5,6 +5,50 @@ const abi = @import("abi.zig");
 const Driver = @import("driver.zig").Driver;
 const Error = @import("driver.zig").Error;
 
+/// Bytes this process holds in DeviceBuffers and HostBuffers, and the device peak since the last reset.
+pub const Usage = struct { device: u64, host: u64, peak: u64 };
+
+var device_bytes: std.atomic.Value(u64) = .init(0);
+var host_bytes: std.atomic.Value(u64) = .init(0);
+var peak_bytes: std.atomic.Value(u64) = .init(0);
+var counts_mutex: std.atomic.Mutex = .unlocked;
+
+/// The counts now; `reset_peak` starts a new peak at the current device bytes. Safe from any thread.
+pub fn usage(reset_peak: bool) Usage {
+    const NoHook = struct {
+        fn afterRead(_: @This()) void {}
+    };
+    return usageWithHook(reset_peak, NoHook{});
+}
+
+fn usageWithHook(reset_peak: bool, hook: anytype) Usage {
+    lockCounts();
+    defer counts_mutex.unlock();
+    const now = device_bytes.load(.monotonic);
+    hook.afterRead();
+    if (reset_peak) peak_bytes.store(now, .monotonic);
+    return .{ .device = now, .host = host_bytes.load(.monotonic), .peak = @max(now, peak_bytes.load(.monotonic)) };
+}
+
+fn held(counter: *std.atomic.Value(u64), n: usize) void {
+    const device = counter == &device_bytes;
+    if (device) lockCounts();
+    defer if (device) counts_mutex.unlock();
+    const now = counter.fetchAdd(n, .monotonic) + n;
+    if (counter == &device_bytes) _ = peak_bytes.fetchMax(now, .monotonic);
+}
+
+fn freed(counter: *std.atomic.Value(u64), n: usize) void {
+    const device = counter == &device_bytes;
+    if (device) lockCounts();
+    defer if (device) counts_mutex.unlock();
+    _ = counter.fetchSub(n, .monotonic);
+}
+
+fn lockCounts() void {
+    while (!counts_mutex.tryLock()) std.Thread.yield() catch {};
+}
+
 pub const DeviceBuffer = struct {
     d: *const Driver,
     ptr: abi.DevicePtr,
@@ -14,6 +58,7 @@ pub const DeviceBuffer = struct {
     pub fn alloc(d: *const Driver, len: usize) Error!DeviceBuffer {
         var p: abi.DevicePtr = 0;
         if (len > 0) try d.check(d.api.cuMemAlloc_v2(&p, len), "cuMemAlloc");
+        held(&device_bytes, len);
         return .{ .d = d, .ptr = p, .len = len };
     }
 
@@ -27,6 +72,7 @@ pub const DeviceBuffer = struct {
 
     pub fn free(self: *DeviceBuffer) void {
         if (self.ptr != 0) _ = self.d.api.cuMemFree_v2(self.ptr);
+        freed(&device_bytes, self.len);
         self.* = undefined;
     }
 
@@ -122,12 +168,14 @@ pub const HostBuffer = struct {
         if (len == 0) return error.Invalid;
         var p: ?*anyopaque = null;
         try d.check(d.api.cuMemHostAlloc(&p, len, flags), "cuMemHostAlloc");
+        held(&host_bytes, len);
         const base: [*]align(16) u8 = @ptrCast(@alignCast(p.?));
         return .{ .d = d, .bytes = base[0..len] };
     }
 
     pub fn free(self: *HostBuffer) void {
         _ = self.d.api.cuMemFreeHost(self.bytes.ptr);
+        freed(&host_bytes, self.bytes.len);
         self.* = undefined;
     }
 
@@ -135,3 +183,59 @@ pub const HostBuffer = struct {
         return std.mem.bytesAsSlice(T, self.bytes[0 .. self.bytes.len / @sizeOf(T) * @sizeOf(T)]);
     }
 };
+
+test "usage counts held bytes and the device peak" {
+    const before = usage(true);
+    held(&device_bytes, 1000);
+    held(&host_bytes, 24);
+    freed(&device_bytes, 1000);
+    const after = usage(false);
+    try std.testing.expectEqual(before.device, after.device);
+    try std.testing.expectEqual(before.host + 24, after.host);
+    try std.testing.expectEqual(before.device + 1000, after.peak);
+    try std.testing.expectEqual(before.device, usage(true).peak);
+    freed(&host_bytes, 24);
+}
+
+test "peak reset preserves an allocation between its read and store" {
+    const before = usage(true);
+    held(&device_bytes, 100);
+    defer freed(&device_bytes, 100);
+    const Probe = struct {
+        read: std.atomic.Value(bool) = .init(false),
+        attempted: std.atomic.Value(bool) = .init(false),
+        blocked: std.atomic.Value(bool) = .init(false),
+        allocated: std.atomic.Value(bool) = .init(false),
+        finish: std.atomic.Value(bool) = .init(false),
+
+        fn wait(flag: *std.atomic.Value(bool)) void {
+            while (!flag.load(.acquire)) std.Thread.yield() catch {};
+        }
+
+        fn afterRead(probe: *@This()) void {
+            probe.read.store(true, .release);
+            wait(&probe.attempted);
+            if (!probe.blocked.load(.acquire)) wait(&probe.allocated);
+        }
+
+        fn allocate(probe: *@This()) void {
+            wait(&probe.read);
+            const acquired = counts_mutex.tryLock();
+            if (acquired) counts_mutex.unlock();
+            probe.blocked.store(!acquired, .release);
+            probe.attempted.store(true, .release);
+            held(&device_bytes, 300);
+            probe.allocated.store(true, .release);
+            wait(&probe.finish);
+            freed(&device_bytes, 300);
+        }
+    };
+    var probe: Probe = .{};
+    const thread = try std.Thread.spawn(.{}, Probe.allocate, .{&probe});
+    _ = usageWithHook(true, &probe);
+    probe.finish.store(true, .release);
+    thread.join();
+    const after = usage(false);
+    try std.testing.expectEqual(before.device + 100, after.device);
+    try std.testing.expectEqual(before.device + 400, after.peak);
+}

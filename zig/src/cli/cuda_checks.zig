@@ -116,7 +116,7 @@ pub fn rounds(e: *nemotron.Engine, prompt: []const u32, n: usize) !u8 {
     for ([_]bool{ true, false, true, false }) |serial| {
         const first = try e.prefill(prompt, null, null);
         try e.upload(first);
-        const g = if (serial) e.serial.? else e.windows[1].?;
+        const g = if (serial) e.serial.? else e.windows[@intFromBool(e.sampling != null)][1].?;
         try a.record(e.stream);
         for (0..n) |_| try g.launchOn(e.stream);
         try b.record(e.stream);
@@ -140,7 +140,7 @@ fn npy(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, name: []const u8) ![
     return gpa.dupe(u8, all[start..]);
 }
 
-/// The MTP draws of the cudamap lane fixtures: the torch-op topk and the captured _keyed against the recorded draft and confidence.
+/// Compare MTP topk and keyed draws with recorded drafts and confidence.
 pub fn draws(gpa: std.mem.Allocator, io: std.Io, e: *nemotron.Engine, dir: []const u8) !u8 {
     const cases = [_]struct { logits: []const u8, offset: u32, token: []const u8, prob: []const u8 }{
         .{ .logits = "lane/040_dense_out.npy", .offset = 0, .token = "lane/041_sample_after_a3.npy", .prob = "lane/041_sample_after_kprob.npy" },
@@ -162,5 +162,48 @@ pub fn draws(gpa: std.mem.Allocator, io: std.Io, e: *nemotron.Engine, dir: []con
         bad += @intFromBool(!ok);
         std.debug.print("{s} draw at offset {d}: token {d} (oracle {d}), confidence bits {x} (oracle {x})\n", .{ if (ok) "BITEXACT" else "DIFFER", c.offset, got.token, std.mem.readInt(u32, want_tok[0..4], .little), @as(u32, @bitCast(got.prob)), std.mem.readInt(u32, want_prob[0..4], .little) });
     }
+    return if (bad == 0) 0 else 1;
+}
+
+/// Replay serial tokens as drafts at widths 1-16, injecting a wrong token every third window.
+pub fn widths(gpa: std.mem.Allocator, e: *nemotron.Engine, prompt: []const u32, count: usize) !u8 {
+    const rows_max = nemotron.state.max_rows;
+    var ref: std.ArrayList(u32) = .empty;
+    defer ref.deinit(gpa);
+    try ref.append(gpa, try e.prefill(prompt, null, null));
+    while (ref.items.len < count) try ref.append(gpa, try e.step(ref.items[ref.items.len - 1], null));
+    if (try e.prefill(prompt, null, null) != ref.items[0]) return error.FirstTokenDiffers;
+    var rows_seen: [rows_max + 1]usize = @splat(0);
+    var rows_bad: [rows_max + 1]usize = @splat(0);
+    var at: usize = 0;
+    var width: usize = 1;
+    var window: usize = 0;
+    while (at + 1 < ref.items.len) : (window += 1) {
+        const rows = @min(width, ref.items.len - 1 - at); // every row's draw has serial's token to meet
+        var ids: [rows_max]u32 = undefined;
+        @memcpy(ids[0..rows], ref.items[at..][0..rows]);
+        var keep = rows;
+        if (window % 3 == 2 and rows > 2) { // a wrong draft: the rows from it on read a token serial never fed
+            keep = rows / 2;
+            ids[keep] = @intCast((ids[keep] + 1) % e.c.vocab);
+        }
+        try e.verify(ids[0..rows], rows, null);
+        const sampled = try e.tokens();
+        for (0..keep) |r| {
+            rows_seen[rows] += 1;
+            if (sampled[r] != ref.items[at + r + 1]) rows_bad[rows] += 1;
+        }
+        try e.commit(keep);
+        at += keep;
+        width = width % rows_max + 1;
+    }
+    var bad: usize = 0;
+    var seen: usize = 0;
+    for (1..rows_max + 1) |w| {
+        bad += rows_bad[w];
+        seen += rows_seen[w];
+        std.debug.print("width {d}: {d} rows, {d} differ\n", .{ w, rows_seen[w], rows_bad[w] });
+    }
+    std.debug.print("{s} widths 1-{d}: {d} of {d} kept rows equal serial ({d} tokens, {d} windows)\n", .{ if (bad == 0) "PASS" else "FAIL", rows_max, seen - bad, seen, ref.items.len, window });
     return if (bad == 0) 0 else 1;
 }
