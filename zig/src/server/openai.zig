@@ -4,6 +4,7 @@ const json = @import("json.zig");
 const errors = @import("errors.zig");
 const fields = @import("fields.zig");
 const chat = @import("chat.zig");
+const compact = @import("compact.zig");
 const grammar = @import("grammar.zig");
 const messages = @import("messages.zig");
 const tool_specs = @import("tool_specs.zig");
@@ -421,7 +422,12 @@ const Run = struct {
         const tools = r.plan.input.tools.len > 0;
         var cx: Cx = .{ .a = a };
         // every refusal comes before the stream opens, so it gets the same 400 as a whole reply
-        const prepared = chat.prepare(r.srv, &cx, r.plan.input, gone) catch |e| return r.unsent(&cx, e, field);
+        var compaction: ?compact.Stamp = null;
+        const prepared = if (r.srv.config.compact_at == null) chat.prepare(r.srv, &cx, r.plan.input, gone) catch |e| return r.unsent(&cx, e, field) else blk: {
+            const ready = compact.prepare(r.srv, &cx, r.plan.input, gone) catch |e| return r.unsent(&cx, e, field);
+            compaction = ready.stamp;
+            break :blk ready.prepared;
+        };
         var handed = false; // generate gives the preparing count back from here on
         defer if (!handed) chat.release(r.srv, prepared.preparing);
         r.out.vt.open(r.out.ctx) catch return;
@@ -468,6 +474,7 @@ const Run = struct {
             }
         }
         const last = r.chunk(.{ .string = "" }, if (reply.finish_reason.len > 0) reply.finish_reason else "length") catch return;
+        if (compaction) |s| compact.stamp(&cx, &reply, s) catch return;
         r.extras(last.object, &reply) catch return;
         const use = r.usage(&reply) catch return;
         if (!r.plan.separate_usage) last.object.put(a, "usage", use) catch return;

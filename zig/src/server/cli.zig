@@ -52,6 +52,9 @@ pub const flags = [_]Flag{
     .{ .name = "--loop-guard", .kind = .store_true, .native = true },
     .{ .name = "--no-drafts", .kind = .store_true, .native = true },
     .{ .name = "--keep-warm", .native = true },
+    .{ .name = "--compact-at", .native = true },
+    .{ .name = "--compact-keep", .native = true },
+    .{ .name = "--compact-memory", .native = true },
     .{ .name = "--drafter" },
     .{ .name = "--drafter-bits" },
     .{ .name = "--mtp-drafts" },
@@ -110,6 +113,10 @@ pub const Args = struct {
     loop_guard: bool = false,
     no_drafts: bool = false,
     keep_warm: i64 = 900, // seconds the idle keepalive runs after the last request ends (0: off)
+    compact_auto: bool = false,
+    compact_fraction: ?f64 = null,
+    compact_keep: ?u32 = null,
+    compact_memory: ?[]const u8 = null,
     parallel: []const u8 = "auto",
     backend: []const u8 = "auto",
 };
@@ -193,7 +200,17 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         const p = try int(u, a, name, v);
         if (p < 0 or p > 65535) return fail(u, a, "argument --port: invalid port: '{s}'", .{v});
         out.port = @intCast(p);
-    } else if (is(name, "--name")) out.name = v else if (is(name, "--alias")) try alias.append(a, v) else if (is(name, "--api-key")) try keys.append(a, v) else if (is(name, "--api-key-file")) out.api_key_file = v else if (is(name, "--metrics-open")) out.metrics_open = true else if (is(name, "--dashboard")) out.dashboard = true else if (is(name, "--context")) out.context = try int(u, a, name, v) else if (is(name, "--speed-up")) out.speed_up = v else if (is(name, "--prompt-cache-gib")) out.prompt_cache_gib = try gib(u, a, name, v) else if (is(name, "--prompt-cache-over-cap")) out.prompt_cache_over_cap = true else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--parallel")) out.parallel = v else if (is(name, "--backend")) out.backend = v;
+    } else if (is(name, "--name")) out.name = v else if (is(name, "--alias")) try alias.append(a, v) else if (is(name, "--api-key")) try keys.append(a, v) else if (is(name, "--api-key-file")) out.api_key_file = v else if (is(name, "--metrics-open")) out.metrics_open = true else if (is(name, "--dashboard")) out.dashboard = true else if (is(name, "--context")) out.context = try int(u, a, name, v) else if (is(name, "--speed-up")) out.speed_up = v else if (is(name, "--prompt-cache-gib")) out.prompt_cache_gib = try gib(u, a, name, v) else if (is(name, "--prompt-cache-over-cap")) out.prompt_cache_over_cap = true else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--compact-at")) {
+        if (std.mem.eql(u8, v, "auto")) out.compact_auto = true else {
+            const f = try float(u, a, name, v);
+            if (!(f > 0 and f <= 1)) return fail(u, a, "argument --compact-at: expected auto or a fraction in (0, 1]: '{s}'", .{v});
+            out.compact_fraction = f;
+        }
+    } else if (is(name, "--compact-keep")) {
+        const n = try int(u, a, name, v);
+        if (n < 0) return fail(u, a, "argument --compact-keep: expected a token count from 0: '{s}'", .{v});
+        out.compact_keep = @intCast(n);
+    } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--parallel")) out.parallel = v else if (is(name, "--backend")) out.backend = v;
 }
 
 /// ``--parallel``: "auto" is up to 8 requests at once; a number caps it.
@@ -265,4 +282,13 @@ test "parse and capabilities share the table" {
     const doc = out.written();
     try std.testing.expect(std.mem.indexOf(u8, doc, "\"--no-thinking\": {}") != null);
     try std.testing.expect(std.mem.indexOf(u8, doc, "\"--drafter\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, doc, "\"--compact-at\": {}") != null);
+    const on = try parse(a, &.{ "m", "--compact-at", "auto", "--compact-keep", "100", "--compact-memory", "notes" }, &u);
+    try std.testing.expect(on.compact_auto);
+    try std.testing.expectEqual(@as(?u32, 100), on.compact_keep);
+    try std.testing.expectEqualStrings("notes", on.compact_memory.?);
+    try std.testing.expectEqual(@as(?f64, 0.5), (try parse(a, &.{ "m", "--compact-at", "0.5" }, &u)).compact_fraction);
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--compact-at", "0" }, &u));
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--compact-at", "2" }, &u));
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--compact-keep", "-1" }, &u));
 }

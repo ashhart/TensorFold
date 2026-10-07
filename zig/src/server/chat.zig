@@ -255,7 +255,8 @@ fn logEnded(id: []const u8, e: Failure, message: []const u8, prompt: usize, toke
 
 /// The reply to ``input``; ``sink`` hears the stream (null: not streamed). ``gone`` says the client left.
 pub fn run(srv: *Server, cx: *Cx, input: Input, sink: ?Sink, gone: anytype) Failure!Reply {
-    return generate(srv, cx, try prepare(srv, cx, input, gone), sink, gone);
+    if (srv.config.compact_at == null) return generate(srv, cx, try prepare(srv, cx, input, gone), sink, gone);
+    return @import("compact.zig").run(srv, cx, input, sink, gone);
 }
 
 /// Give back a foreground request's preparing count: at its submit, or when it is never generated.
