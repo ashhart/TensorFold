@@ -1,9 +1,7 @@
-//! While no request runs, one thread commits a tiny command buffer on the engine's queue every 400 ms, so
-//! macOS keeps the model wired and the first prompt after a pause does not pay the wire-up again.
+//! While no request runs, a thread commits a tiny command buffer every 400 ms so macOS keeps the model wired.
 const std = @import("std");
 
-/// What one tick does: the Metal target commits a tiny command buffer on the engine's own queue, touching
-/// the residency sets when the engine holds any (metal/keepalive.zig builds the Metal target).
+/// One tick: a tiny command buffer on the engine's own queue, touching its residency sets if it holds any.
 pub const Target = struct {
     ctx: *anyopaque,
     tick: *const fn (ctx: *anyopaque) void,
@@ -77,8 +75,7 @@ pub const Keepalive = struct {
 
 const testing = std.testing;
 
-/// A commit the test gates: each tick parks until the test releases it, which turns the thread's timing
-/// into a deterministic sequence.
+/// A commit the test gates: each tick parks until the test releases it, so the thread's timing is deterministic.
 const Gated = struct {
     commits: std.atomic.Value(u32) = .init(0),
     gate: std.atomic.Value(u32) = .init(0),

@@ -1,5 +1,4 @@
-//! The idle keepalive's Metal target: one tiny command buffer on the engine's own queue, committed while
-//! the model idles, touching the residency sets when the engine holds any.
+//! The idle keepalive's Metal target: one tiny command buffer on the engine's queue, touching its residency sets.
 const std = @import("std");
 const command = @import("command.zig");
 const residency = @import("residency.zig");

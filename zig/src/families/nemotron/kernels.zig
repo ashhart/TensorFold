@@ -16,7 +16,7 @@ pub const round_names = [_][:0]const u8{ "tf_round_args", "tf_round_accept", "tf
 /// The MTP head's fused one-row kernels (nemotron_head.metal).
 pub const head_names = [_][:0]const u8{ "tf_head_prep", "tf_head_norm" };
 
-/// Keyed draws over the whole vocabulary, for rows whose top_k is off or above tf_gpu_sample's 1,024 (nemotron_sample.metal).
+/// Keyed draws over the whole vocabulary for rows whose top_k is off or above tf_gpu_sample's 1,024.
 pub const sample_names = [_][:0]const u8{ "tf_sample_full", "tf_sample_full_ids" };
 
 /// Routed experts taking an expert's member rows two or four at a time (nemotron_experts.metal).
@@ -123,14 +123,12 @@ const Job = struct {
     source: []const u8,
     names: []const [:0]const u8,
     out: []mtl.Pipeline,
-    /// The prebuilt metallib's library: set for the packed sources when the runtime compiler refuses
-    /// uint4b_format (#451). The loader owns it; the jobs only read it.
+    /// The prebuilt metallib for packed sources when the runtime compiler refuses uint4b_format; the loader owns it.
     prebuilt: ?mtl.Library = null,
     failed: bool = false,
 };
 
-/// The packed kernels' tensor-inline construct: the macOS 26.3 runtime compiler refuses `uint4b_format`
-/// (#451), the offline compiler accepts it, and one probe at load tells the two apart.
+/// The packed kernels' tensor-inline construct: macOS 26.3's runtime compiler refuses it, the offline one accepts it.
 const probe_source =
     \\#include <metal_stdlib>
     \\using namespace metal;
@@ -171,8 +169,7 @@ fn compile(job: *Job) void {
     }
 }
 
-/// Compile every source (one library each, as MLX does) on worker threads; a runtime compiler that refuses
-/// uint4b_format serves the packed kernels from the metallib built ahead of time (#451).
+/// Compile every source on worker threads, one library each as MLX does; refused packed kernels use the metallib.
 pub fn load(allocator: std.mem.Allocator, device: mtl.Device) !Kernels {
     var k = Kernels{};
     var prebuilt: ?mtl.Library = null;
@@ -206,7 +203,7 @@ pub fn load(allocator: std.mem.Allocator, device: mtl.Device) !Kernels {
     const xp = gp + geo_names.len;
     jobs[n + 3] = .{ .device = device, .source = sources.nemotron_experts, .names = &rows_names, .out = k.pipelines[xp .. xp + rows_names.len] };
     const tp = xp + rows_names.len;
-    // before the M5 the tree tail reads its tensor-op results in the simdgroup-matrix layout, as the rewritten attention does
+    // before the M5 the tree tail reads tensor-op results in the simdgroup-matrix layout, like the rewritten attention
     const tree_source = if (device.tensorUnits()) sources.nemotron_tree else "#define TF_SIMD_LAYOUT 1\n" ++ sources.nemotron_tree;
     jobs[n + 4] = .{ .device = device, .source = tree_source, .names = &tree_names, .out = k.pipelines[tp .. tp + tree_names.len] };
     const rp = tp + tree_names.len;
