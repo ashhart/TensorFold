@@ -2,10 +2,12 @@
 const std = @import("std");
 const models = @import("models.zig");
 const info = @import("info.zig");
+const pull = @import("pull.zig");
 
 const usage =
     \\usage: tensorfold models
     \\       tensorfold info MODEL
+    \\       tensorfold pull REPO[@REVISION]
     \\
 ;
 
@@ -13,7 +15,7 @@ const usage =
 pub fn wants(args: []const []const u8) bool {
     if (args.len == 0) return false;
     const cmd = args[0];
-    return std.mem.eql(u8, cmd, "models") or std.mem.eql(u8, cmd, "info");
+    return std.mem.eql(u8, cmd, "models") or std.mem.eql(u8, cmd, "info") or std.mem.eql(u8, cmd, "pull");
 }
 
 /// Runs a checkpoint subcommand; `argv` is argv[1..] as in cluster.cli.main.
@@ -34,6 +36,13 @@ pub fn main(init: std.process.Init, argv: []const [:0]const u8) !u8 {
             return 2;
         }
         return models.run(a, init.io, &out.interface, env, null);
+    }
+    if (std.mem.eql(u8, args[0], "pull")) {
+        if (args.len != 2) {
+            try err.interface.writeAll(usage);
+            return 2;
+        }
+        return pull.run(a, init.io, &out.interface, &err.interface, env, null, args[1]);
     }
     if (args.len != 2) {
         try err.interface.writeAll(usage);
