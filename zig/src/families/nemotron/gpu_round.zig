@@ -465,6 +465,7 @@ pub fn run(gpa: std.mem.Allocator, b: *Metal, s: *lanes.Stream, o: Options, hook
         const sib: usize = @intFromBool(o.trees and o.siblings);
         const verify_rows = @max(levels + 1 + sib, if (copy > 0) copy + 1 + sib else 0);
         levels = depth.next();
+        out.by_cap[@min(levels, st.max_levels)] += 1;
         copy = if (o.copy) copies.rows(costs, b.costs.head_ms) else 0;
         const tail = o.copy and o.tail and copies.tails();
         if (log) std.debug.print("queue {d}: verify rows {d}, head levels {d}, copy rows {d}\n", .{ queued, verify_rows, levels, copy });

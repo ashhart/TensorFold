@@ -26,6 +26,7 @@ pub const Result = struct {
     rounds: u64 = 0,
     accepted: u64 = 0,
     by_rows: [st.max_rows + 1]u32 = @splat(0), // rounds by the rows their verify took
+    by_cap: [st.max_levels + 1]u32 = @splat(0), // rounds by the head depth the rule chose for them
     head_kept: [17][17]u32 = @splat(@splat(0)), // head windows by [verify rows][tokens kept] (16+ in the last)
     copied: u64 = 0, // rounds whose window was a copy
     siblings: u64 = 0, // rounds with the head's second choice beside its first draft, and those that kept it
