@@ -12,6 +12,22 @@ from typing import Any
 
 MIN_CAPABILITY = (8, 9)         # FP8 MMA and e4m3 conversions (Ada); kernels with clusters use them from 9.0
 CLUSTERS = (9, 0)               # extensions built only on thread-block clusters (NVFP4) need Hopper or newer
+
+def _env_floor() -> tuple[int, int]:
+    """TENSORFOLD_MIN_CAPABILITY=8.0 lowers the floor for FP8-free paths (sm_80 POC: W4A16/EXL3 on Ampere).
+
+    Runs at import, before the ``need`` defaults below bind; it can only lower the floor, never raise it.
+    """
+    raw = os.environ.get("TENSORFOLD_MIN_CAPABILITY", "").strip()
+    if not raw:
+        return MIN_CAPABILITY
+    major, minor = (int(part) for part in raw.split("."))
+    lowered = (major, minor)
+    return lowered if lowered < MIN_CAPABILITY else MIN_CAPABILITY
+
+
+UPSTREAM_FLOOR = MIN_CAPABILITY   # the stock Ada floor, kept for the refusal hint
+MIN_CAPABILITY = _env_floor()
 FLASHNEXT_FLOOR = (12, 0)       # Flash Next serves CUDA on sm_120/sm_121 cards only; anything below is refused by name
 # stop first: when the lock goes, a waiting start imports whatever module is there without building, even an old one
 HINT = "if no other build is running, a killed build left it: stop this start, delete the lock and start again"
@@ -22,13 +38,17 @@ def arch_flags(need: tuple[int, int] = MIN_CAPABILITY, arch_specific: bool = Fal
     """nvcc flags for this GPU alone (``arch_specific``: its ``a`` target); a GPU under ``need`` is refused by name."""
 
     import torch
+    if arch_specific and need < CLUSTERS:
+        need = CLUSTERS        # the ``a`` target exists only for cluster (NVFP4) builds; no floor may lower it
 
     major, minor = torch.cuda.get_device_capability()
     if (major, minor) < need:
+        hint = (" — Ampere W4A16/EXL3 is available with TENSORFOLD_MIN_CAPABILITY=8.0 (FP8 and NVFP4 stay refused)"
+                if MIN_CAPABILITY >= UPSTREAM_FLOOR else "") if why == "FP8 MMA" else ""
         why = "thread-block clusters" if need >= CLUSTERS else "FP8 MMA"
         raise RuntimeError(f"TensorFold's CUDA kernels need compute capability {need[0]}.{need[1]} or newer ({why}"
                            f"{' for these weights' if need > MIN_CAPABILITY else ''}); this GPU "
-                           f"({torch.cuda.get_device_name()}) is {major}.{minor}")
+                           f"({torch.cuda.get_device_name()}) is {major}.{minor}{hint}")
     a = "a" if arch_specific else ""
     return [f"-gencode=arch=compute_{major}{minor}{a},code=sm_{major}{minor}{a}"]
 
