@@ -4,6 +4,7 @@ const lanes = @import("lanes");
 const st = @import("state.zig");
 const slots_mod = @import("slots.zig");
 const mirror = @import("mirror.zig");
+const snapshot = @import("snapshot.zig");
 const Engine = @import("engine.zig").Engine;
 const be = lanes.backend;
 const Stream = lanes.Stream;
@@ -83,13 +84,51 @@ pub const Backend = struct {
         try b.sl.begin(i, prompt, s.drafts);
         s.cached = 0;
         var at: u32 = 0;
+        if (s.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
+            const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
+            if (snap.at < prompt.len and b.sl.snaps.get(snap.id) == snap) {
+                try mirror.send(e, .restore, &.{ i, snap.id });
+                try b.sl.restore(i, snap.id);
+                at = snap.at;
+                s.cached = at;
+            } else s.reuse_failed = true;
+        }
+        var next: usize = 0; // the planned chunk starts: a resumed pass cuts where a fresh one does
         while (at < prompt.len) {
             if (s.isCancelled()) return error.Cancelled; // the core releases the slot
-            const n = b.sl.chunkRows(i, at);
+            while (next < s.chunks.len and s.chunks[next] <= at) next += 1;
+            const end: u32 = if (next < s.chunks.len) s.chunks[next] else @intCast(prompt.len);
+            const n = b.sl.chunkRows(at, end);
             try mirror.send(e, .chunk, &.{ i, at, n });
             try b.sl.chunk(i, at, n);
             at += n;
+            if (std.mem.indexOfScalar(u32, s.reuse.marks, at) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, at);
         }
+    }
+
+    /// The prompt cache's Snapshots functions: a stream's prompt state, mirrored to the peer by id.
+    pub fn snapBytes(ptr: *anyopaque, at: u32) u64 {
+        return snapshot.bytes(&self(ptr).sl.e.c, at);
+    }
+
+    pub fn snapSave(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
+        const b = self(ptr);
+        const i = try b.slotOf(@ptrCast(@alignCast(owner orelse return error.NoStream)));
+        const id = b.sl.next_snap;
+        if (at != b.sl.slots[i].s.pos or b.sl.slots[i].rows != 0) return error.SnapshotOutOfStep;
+        try mirror.send(b.sl.e, .save, &.{ id, i, at });
+        return try b.sl.save(i, at, id);
+    }
+
+    pub fn snapRestore(_: *anyopaque, _: ?*anyopaque, _: *anyopaque) anyerror!void {
+        return error.BackendRestores; // the prompt pass restores, before its first chunk
+    }
+
+    pub fn snapDrop(ptr: *anyopaque, saved: *anyopaque) void {
+        const b = self(ptr);
+        const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
+        mirror.send(b.sl.e, .drop, &.{snap.id}) catch |err| std.log.err("glm: the peer kept a dropped state: {s}", .{@errorName(err)});
+        b.sl.drop(snap.id);
     }
 
     fn first(ptr: *anyopaque, s: *Stream, position: u64) anyerror!u64 {

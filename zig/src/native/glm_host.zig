@@ -20,6 +20,7 @@ pub const Host = struct {
     wall: lanes.backend.WallClock,
     core: lanes.Engine,
     host: api.LaneHost,
+    cache: ?api.prompt_cache.Store = null, // rank 0's kept prompt states (rank 1 holds copies by id)
     warm: mtl.keepalive.Target,
     follower: ?std.Thread = null, // speed-up mode's rank 1: the thread replaying rank 0's slot commands
 
@@ -52,8 +53,16 @@ fn fit(eng: *const ge.Engine, want: u32, fixed: bool) !u32 {
     return n;
 }
 
+/// Kept prompt states' room: --prompt-cache-gib, else 16 GiB, inside what the 70% load limit leaves.
+fn cacheBudget(eng: *const ge.Engine, gib: ?f64) u64 {
+    const want: u64 = @intFromFloat((gib orelse 16) * (1 << 30));
+    const used = eng.w.bytes + eng.arena.bytes;
+    const limit = ge.Engine.loadLimit();
+    return if (limit > used) @min(want, limit - used) else 0;
+}
+
 /// A GLM-5.3-Flash checkpoint served: `window` tokens of cache a stream, warmed first (the pair: `speed_up`).
-pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: ?[]const u8, streams: u32, fixed: bool) !*Host {
+pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: ?[]const u8, streams: u32, fixed: bool, cache_gib: ?f64) !*Host {
     const eng = try ge.Engine.loadWith(gpa, dir, window + 64, speed_up);
     errdefer eng.deinit();
     var toks: [96]u32 = undefined;
@@ -75,7 +84,14 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     h.wall = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.cfg, h.back.backend(), h.wall.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "glm-zig", .lanes = n, .context_window = window });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "glm-zig", .lanes = n, .context_window = window, .prefill_step = eng.chunk_rows });
+    h.cache = null;
+    const budget = cacheBudget(eng, cache_gib);
+    if (!eng.followsPeer() and budget > 0) {
+        const B = glm.backend.Backend;
+        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = &h.back, .vtable = &.{ .bytes = B.snapBytes, .save = B.snapSave, .restore = B.snapRestore, .drop = B.snapDrop } }, .{ .lookahead = 1, .planned = true }, budget);
+        h.host.cache = &h.cache.?;
+    }
     h.host.explain = .{ .text = words };
     h.warm = eng.keepalive_target;
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
@@ -94,6 +110,7 @@ fn follow(h: *Host) void {
 pub fn close(ctx: *anyopaque) void {
     const h: *Host = @ptrCast(@alignCast(ctx));
     h.host.stop();
+    if (h.cache) |*store| store.deinit();
     if (h.follower) |th| { // rank 1: its wait for rank 0's next command ends, then the thread
         h.eng.stopFollowing();
         th.join();

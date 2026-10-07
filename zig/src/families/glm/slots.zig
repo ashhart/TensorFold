@@ -5,6 +5,7 @@ const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const mtp = @import("mtp.zig");
 const prompt_mod = @import("prompt.zig");
+const snapshot = @import("snapshot.zig");
 const Engine = @import("engine.zig").Engine;
 const Ref = @import("weights.zig").Ref;
 
@@ -29,8 +30,11 @@ pub const Slot = struct {
 };
 
 pub const Slots = struct {
+    gpa: std.mem.Allocator,
     e: *Engine,
     slots: []Slot,
+    snaps: std.AutoHashMapUnmanaged(u32, *snapshot.Snap) = .empty, // kept prompt states by id (a pair's ranks agree)
+    next_snap: u32 = 1,
     rows: Ref, // bf16 [max_rows, hidden]: the rows every stream's head absorbs, gathered
     ids: Ref, // u32 [max_rows]: their next tokens
     lasts: Ref, // bf16 [max_rows, hidden]: each drafting stream's last absorbed row (m_x), gathered
@@ -53,11 +57,59 @@ pub const Slots = struct {
             .last = try e.arena.buffer(@as(usize, e.c.hidden) * 2),
         };
         const plane = @as(usize, st.max_rows) * e.c.hidden * 2;
-        return .{ .e = e, .slots = slots, .log = std.c.getenv("GLM_WINDOWS") != null, .rows = try e.arena.buffer(plane), .ids = try e.arena.buffer(st.max_rows * 4), .lasts = try e.arena.buffer(plane), .picks = try e.arena.buffer(st.max_rows * 4) };
+        return .{ .gpa = gpa, .e = e, .slots = slots, .log = std.c.getenv("GLM_WINDOWS") != null, .rows = try e.arena.buffer(plane), .ids = try e.arena.buffer(st.max_rows * 4), .lasts = try e.arena.buffer(plane), .picks = try e.arena.buffer(st.max_rows * 4) };
     }
 
     pub fn deinit(sl: *Slots, gpa: std.mem.Allocator) void {
+        var it = sl.snaps.valueIterator();
+        while (it.next()) |snap| freeSnap(gpa, snap.*);
+        sl.snaps.deinit(gpa);
         gpa.free(sl.slots);
+    }
+
+    fn freeSnap(gpa: std.mem.Allocator, snap: *snapshot.Snap) void {
+        snap.buf.deinit();
+        gpa.destroy(snap);
+    }
+
+    /// Keep slot `i`'s prompt state at `at` tokens (its pass stands there) as snapshot `id` (0: the next).
+    pub fn save(sl: *Slots, i: u32, at: u32, id: u32) !*snapshot.Snap {
+        const slot = try sl.slotAt(i);
+        if (at == 0 or at != slot.s.pos or slot.rows != 0 or sl.snaps.contains(id)) return error.SnapshotOutOfStep;
+        const n = snapshot.bytes(&sl.e.c, at);
+        const buf = try sl.e.device.buffer(n, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+        errdefer buf.deinit();
+        const snap = try sl.gpa.create(snapshot.Snap);
+        errdefer sl.gpa.destroy(snap);
+        snap.* = .{ .id = if (id != 0) id else sl.next_snap, .at = at, .buf = buf, .bytes = n };
+        try sl.copySnap(slot, snap, true);
+        try sl.snaps.put(sl.gpa, snap.id, snap);
+        sl.next_snap = @max(sl.next_snap, snap.id + 1);
+        return snap;
+    }
+
+    /// Slot `i`, just begun, takes snapshot `id`'s state: its prompt pass goes on from the snapshot's position.
+    pub fn restore(sl: *Slots, i: u32, id: u32) !void {
+        const slot = try sl.slotAt(i);
+        const snap = sl.snaps.get(id) orelse return error.SnapshotOutOfStep;
+        if (slot.s.pos != 0 or snap.at >= slot.prompt_len) return error.SnapshotOutOfStep;
+        try sl.copySnap(slot, snap, false);
+    }
+
+    /// Forget snapshot `id`.
+    pub fn drop(sl: *Slots, id: u32) void {
+        const kv = sl.snaps.fetchRemove(id) orelse return;
+        freeSnap(sl.gpa, kv.value);
+    }
+
+    fn copySnap(sl: *Slots, slot: *Slot, snap: *snapshot.Snap, into: bool) !void {
+        try sl.flush();
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        const x = sl.ctx(slot);
+        const b = sl.e.begin();
+        snapshot.copy(&x, b.enc, &slot.s, .{ .buf = snap.buf }, snap.at, into);
+        try sl.e.finish(b.cb, b.enc);
     }
 
     /// A free slot, or null when every slot holds a stream.
@@ -118,9 +170,9 @@ pub const Slots = struct {
         @memcpy(Engine.u32s(sl.e.prompt_ids, prompt.len), prompt);
     }
 
-    /// The rows the prompt chunk at `at` takes: a tensor-unit chunk, or a window of up to 16 rows (generate's split).
-    pub fn chunkRows(sl: *const Slots, i: u32, at: u32) u32 {
-        const left = sl.slots[i].prompt_len - at;
+    /// The rows the prompt chunk at `at` takes up to `end` (a planned start or the prompt's end): generate's split.
+    pub fn chunkRows(sl: *const Slots, at: u32, end: u32) u32 {
+        const left = end - at;
         const chunked = sl.e.pr != null and left > st.max_rows;
         return @min(if (chunked) sl.e.chunk_rows else st.max_rows, left);
     }
@@ -130,7 +182,7 @@ pub const Slots = struct {
         const e = sl.e;
         const slot = try sl.slotAt(i);
         const P = slot.prompt_len;
-        if (at >= P or n != sl.chunkRows(i, at)) return error.ChunkOutOfStep;
+        if (n == 0 or at != slot.s.pos or at + n > P or n > @max(e.chunk_rows, st.max_rows)) return error.ChunkOutOfStep;
         const D = e.c.hidden;
         const last = at + n == P;
         const absorb = if (last) n - 1 else n;
@@ -141,7 +193,7 @@ pub const Slots = struct {
         const b = e.begin();
         const ids = e.prompt_ids.at(@as(usize, at) * 4);
         const next = e.prompt_ids.at(@as(usize, at + 1) * 4);
-        if (e.pr != null and P - at > st.max_rows) {
+        if (e.pr != null and n > st.max_rows) {
             const pr = &e.pr.?;
             var px = x;
             px.sc = &pr.streams;
@@ -158,7 +210,7 @@ pub const Slots = struct {
         if (slot.mtp and absorb > 0) slot.s.mtp_pos = at + absorb;
         if (last) fwd.head(&x, b.enc, slot.last, e.sc.logits, e.sc.picks, 1);
         try e.finish(b.cb, b.enc);
-        if (last) slot.s.pos = P;
+        slot.s.pos = at + n; // the pass stands here: a snapshot of it is this prefix's state
     }
 
     /// One forward over every window, each stream's rows against its own caches; each row's pick into `picks`.

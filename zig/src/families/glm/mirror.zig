@@ -8,7 +8,7 @@ const Slots = slots_mod.Slots;
 const Win = slots_mod.Win;
 const Draft = slots_mod.Draft;
 
-pub const Kind = enum(u32) { begin = 1, chunk, window, keep, draft, release };
+pub const Kind = enum(u32) { begin = 1, chunk, window, keep, draft, release, save, restore, drop };
 
 /// Rank 0 of a pair sends the command; one Mac sends nothing.
 pub fn send(e: *Engine, kind: Kind, words: []const u32) !void {
@@ -85,9 +85,9 @@ pub fn follow(e: *Engine, sl: *Slots) !void {
 pub fn apply(sl: *Slots, kind: u32, w: []const u32, wins: []Win, drafts: []Draft) !void {
     const k = std.enums.fromInt(Kind, kind) orelse return error.CommandOutOfStep;
     const need: usize = switch (k) {
-        .begin, .keep => 2,
-        .chunk, .window => 3,
-        .draft, .release => 1,
+        .begin, .keep, .restore => 2,
+        .chunk, .window, .save => 3,
+        .draft, .release, .drop => 1,
     };
     if (w.len < need) return error.CommandOutOfStep;
     switch (k) {
@@ -104,6 +104,9 @@ pub fn apply(sl: *Slots, kind: u32, w: []const u32, wins: []Win, drafts: []Draft
         .keep => try sl.keep(w[0], w[1]),
         .draft => try sl.draftAll(drafts[0..try readDrafts(w, drafts)]),
         .release => sl.release(w[0]),
+        .save => _ = try sl.save(w[1], w[2], w[0]),
+        .restore => try sl.restore(w[0], w[1]),
+        .drop => sl.drop(w[0]),
     }
 }
 
