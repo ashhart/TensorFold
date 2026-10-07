@@ -14,6 +14,7 @@ pub const attn = @import("cuda_attn.zig");
 pub const ple = @import("cuda_ple.zig");
 pub const mix = @import("cuda_mix.zig");
 pub const prompt = @import("cuda_prompt.zig");
+pub const native = @import("cuda_lanes.zig").Namespace(Tri);
 
 const p = aot.ptr;
 
@@ -256,6 +257,7 @@ test {
     _ = ple;
     _ = mix;
     _ = prompt;
+    _ = native;
 }
 
 test "embed grid is one program per row and per group of 32" {

@@ -4,13 +4,14 @@ const cuda = @import("cuda");
 const api = @import("engine_api");
 const lanes = @import("lanes");
 const nemotron = @import("nemotron");
+const flashnext = @import("flashnext");
 const Allocator = std.mem.Allocator;
 const budget = @import("cuda_memory.zig");
 const lane_backend = @import("cuda_bound.zig");
 const nemotron_slide = @import("nemotron_slide.zig");
 
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
-const registry = .{nemotron.native};
+const registry = .{ nemotron.native, flashnext.native };
 
 /// Nemotron's prompt-cache copies. A file-level value so the store's pointer stays valid for the process.
 const nemotron_snaps: api.prompt_cache.Snapshots.VTable = .{
@@ -417,6 +418,8 @@ test "chip classes name the compute capability as gate entries do" {
 test "every registered family is listed for capabilities" {
     try std.testing.expectEqual(@as(usize, registry.len), families.len);
     try std.testing.expectEqualStrings("nemotron_h", families[0].model_type);
+    try std.testing.expectEqualStrings("qwen4_exp", families[1].model_type);
+    try std.testing.expectEqualStrings("mlx-q4g32", families[1].formats[0]);
 }
 
 test "variables: unset or empty means the default, anything but a whole number is refused" {
