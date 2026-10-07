@@ -8,56 +8,48 @@ using namespace metal;
 constant constexpr int ITERS = TF_K / 32;
 constant constexpr int PER = (TF_E + 31) / 32;
 
-// Logits [rows, E] = x W^T: a 4-expert block (tg.x) for four rows (tg.y), staged a quarter of K at a time, summed in the one-row order.
+// Logits [rows, E] = x W^T: a 4-expert block (tg.x) for four rows (tg.y); simdgroup s sums k = 32 i + 4 s + tm, lane l taking i = 4 l..4 l + 3, then the eight partials in order.
 [[kernel]] void tf_route_logits(const device bfloat* X [[buffer(0)]], const device uint4* RP [[buffer(1)]],
                                 constant int& rows [[buffer(2)]], device TF_OUT_T* OUT [[buffer(3)]],
                                 uint2 tg [[threadgroup_position_in_grid]], uint2 tpos [[thread_position_in_threadgroup]],
                                 uint lane [[thread_index_in_simdgroup]], uint s [[simdgroup_index_in_threadgroup]]) {
-  constexpr int QI = ITERS / 4; // iterations a quarter
-  const uint t = tpos.x;
-  threadgroup uint4 w[8 * QI * 2];
-  threadgroup bfloat xs[4][32 * QI];
+  threadgroup float part[8][16];
   const int q = int(tg.x), r0 = int(tg.y) * 4;
-  const device uint4* src = RP + size_t(q) * 8 * ITERS * 2;
-  const int thrM = int(lane) / 4, c = int(lane) % 4;
-  const int r = r0 + c;
-  float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-  for (int part = 0; part < 4; part++) {
-    if (part > 0) threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (int i = int(t); i < 8 * QI * 2; i += 256) { // (m, it in this quarter, h) of the block's (m, it, h) layout
-      const int m = i / (QI * 2), rest = i % (QI * 2);
-      w[i] = src[(m * ITERS + part * QI) * 2 + rest];
-    }
-    for (int i = int(t); i < 4 * 32 * QI / 4; i += 256) { // four bf16 of a row's quarter a thread
-      const int rr = i / (8 * QI), k = (i % (8 * QI)) * 4;
-      const device bfloat* xr = X + size_t(min(r0 + rr, rows - 1)) * TF_K + part * 32 * QI + k;
-      xs[rr][k] = xr[0]; xs[rr][k + 1] = xr[1]; xs[rr][k + 2] = xr[2]; xs[rr][k + 3] = xr[3];
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (s != 0) continue;
-    for (int hi = 0; hi < QI; hi++) {
-      float inter[4][4];
-      for (int h = 0; h < 2; h++) {
-        const uint4 v = w[(thrM * QI + hi) * 2 + h];
-        const uint words[4] = {v.x, v.y, v.z, v.w};
-        for (int j = 0; j < 4; j++) {
-          const int e = h * 8 + j * 2;
-          inter[e / 4][e % 4] = as_type<float>(words[j] << 16);
-          inter[(e + 1) / 4][(e + 1) % 4] = as_type<float>(words[j] & 0xffff0000u);
-        }
+  const device uint4* w = RP + ((size_t(q) * 8 + s) * ITERS + 4 * lane) * 2;
+  float acc[4][4]; // [row][expert]
+  for (int c = 0; c < 4; c++)
+    for (int tn = 0; tn < 4; tn++) acc[c][tn] = 0.0f;
+  for (int ii = 0; ii < 4; ii++) {
+    float inter[4][4];
+    for (int h = 0; h < 2; h++) {
+      const uint4 v = w[ii * 2 + h];
+      const uint words[4] = {v.x, v.y, v.z, v.w};
+      for (int j = 0; j < 4; j++) {
+        const int e = h * 8 + j * 2;
+        inter[e / 4][e % 4] = as_type<float>(words[j] << 16);
+        inter[(e + 1) / 4][(e + 1) % 4] = as_type<float>(words[j] & 0xffff0000u);
       }
-      const int bm = 4 * thrM + 32 * hi;
-      float vc[4];
-      for (int tm = 0; tm < 4; tm++) vc[tm] = float(xs[c][bm + tm]);
-      for (int tm = 0; tm < 4; tm++)
-        for (int tn = 0; tn < 4; tn++) acc[tn] += vc[tm] * inter[tm][tn];
+    }
+    const int k = 32 * (4 * int(lane) + ii) + 4 * int(s);
+    for (int c = 0; c < 4; c++) {
+      const device bfloat* x = X + size_t(min(r0 + c, rows - 1)) * TF_K + k;
+      for (int tm = 0; tm < 4; tm++) {
+        const float xv = float(x[tm]);
+        for (int tn = 0; tn < 4; tn++) acc[c][tn] += xv * inter[tm][tn];
+      }
     }
   }
-  if (s != 0) return;
-  for (int tn = 0; tn < 4; tn++) {
-    float v = acc[tn];
-    for (ushort sm = 4; sm >= 1; sm >>= 1) v += simd_shuffle_down(v, 4 * sm);
-    if (thrM == 0 && r < rows) OUT[size_t(r) * TF_E + 4 * q + tn] = static_cast<TF_OUT_T>(v);
+  for (int c = 0; c < 4; c++)
+    for (int tn = 0; tn < 4; tn++) {
+      const float v = simd_sum(acc[c][tn]);
+      if (lane == 0) part[s][c * 4 + tn] = v;
+    }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const int o = int(tpos.x);
+  if (o < 16 && r0 + o / 4 < rows) {
+    float v = part[0][o];
+    for (int k = 1; k < 8; k++) v += part[k][o];
+    OUT[size_t(r0 + o / 4) * TF_E + 4 * q + o % 4] = static_cast<TF_OUT_T>(v);
   }
 }
 
