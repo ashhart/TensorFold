@@ -72,8 +72,6 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
             .err => |m| return sendError(conn, a, m, 400),
         };
         const chat = translate(&cx, body, count) catch return sendError(conn, a, cx.message, cx.status());
-        if (!std.mem.eql(u8, srv.late_system, "system")) for (body.get("messages").?.array) |m| if (m.get("role")) |r| if (r == .string and std.mem.eql(u8, r.string, "system"))
-            return sendError(conn, a, "the model's chat template does not support mid-conversation system messages", 400);
         if (count) {
             const n = countTokens(srv, &cx, chat) catch return sendError(conn, a, cx.message, if (cx.kind == .capacity) 503 else 400);
             const o = json.newObject(a) catch return;
