@@ -6,6 +6,7 @@ const st = @import("state.zig");
 const Engine = eng.Engine;
 const Slots = slots_mod.Slots;
 const Win = slots_mod.Win;
+const Draft = slots_mod.Draft;
 
 pub const Kind = enum(u32) { begin = 1, chunk, window, keep, draft, release };
 
@@ -40,11 +41,35 @@ pub fn readWindows(words: []const u32, out: []Win) !struct { digest: u64, n: usi
     return .{ .digest = @as(u64, words[0]) | @as(u64, words[1]) << 32, .n = n };
 }
 
+/// A draft command: each stream's slot, whether it absorbs the prompt's last row, its depth and its next tokens.
+pub fn draftWords(out: *std.ArrayList(u32), gpa: std.mem.Allocator, reqs: []const Draft) !void {
+    out.clearRetainingCapacity();
+    try out.append(gpa, @intCast(reqs.len));
+    for (reqs) |r| {
+        try out.appendSlice(gpa, &.{ r.slot, @intFromBool(r.prompt), r.depth, @intCast(r.follow.len) });
+        try out.appendSlice(gpa, r.follow);
+    }
+}
+
+/// A draft command's streams into `out` (their tokens point into `words`).
+pub fn readDrafts(words: []const u32, out: []Draft) !usize {
+    if (words.len < 1 or words[0] == 0 or words[0] > out.len) return error.CommandOutOfStep;
+    var at: usize = 1;
+    for (out[0..words[0]]) |*d| {
+        if (at + 4 > words.len or at + 4 + words[at + 3] > words.len) return error.CommandOutOfStep;
+        d.* = .{ .slot = words[at], .prompt = words[at + 1] != 0, .depth = words[at + 2], .follow = words[at + 4 ..][0..words[at + 3]] };
+        at += 4 + words[at + 3];
+    }
+    if (at != words.len) return error.CommandOutOfStep;
+    return words[0];
+}
+
 /// Rank 1: run rank 0's requests and slot commands in order until rank 0 closes or this Mac stops following.
 pub fn follow(e: *Engine, sl: *Slots) !void {
     const ep = e.ep orelse return;
     defer sl.flush() catch {}; // the open command buffer's pool is this thread's
     var wins: [st.max_rows]Win = undefined;
+    var drafts: [st.max_rows]Draft = undefined;
     var dummy: u8 = 0;
     const quiet: eng.Out = .{ .ctx = &dummy, .prefilled = eng.Quiet.prefilled, .tokens = eng.Quiet.tokens, .cancelled = eng.Quiet.cancelled };
     while (try ep.ctl.waitCommand()) |cmd| switch (cmd) {
@@ -52,18 +77,17 @@ pub fn follow(e: *Engine, sl: *Slots) !void {
             error.ContextFull, error.EmptyPrompt => continue, // refused before its first step, on rank 0 too
             else => return err,
         },
-        .lanes => |l| try apply(sl, l.kind, l.words, &wins),
+        .lanes => |l| try apply(sl, l.kind, l.words, &wins, &drafts),
     };
 }
 
 /// One slot command, as rank 0 ran it.
-pub fn apply(sl: *Slots, kind: u32, w: []const u32, wins: []Win) !void {
+pub fn apply(sl: *Slots, kind: u32, w: []const u32, wins: []Win, drafts: []Draft) !void {
     const k = std.enums.fromInt(Kind, kind) orelse return error.CommandOutOfStep;
     const need: usize = switch (k) {
         .begin, .keep => 2,
-        .chunk, .draft => 3,
-        .window => 3,
-        .release => 1,
+        .chunk, .window => 3,
+        .draft, .release => 1,
     };
     if (w.len < need) return error.CommandOutOfStep;
     switch (k) {
@@ -78,9 +102,27 @@ pub fn apply(sl: *Slots, kind: u32, w: []const u32, wins: []Win) !void {
             try sl.window(wins[0..r.n]);
         },
         .keep => try sl.keep(w[0], w[1]),
-        .draft => try sl.draft(w[0], w[1] != 0, w[3..], w[2]),
+        .draft => try sl.draftAll(drafts[0..try readDrafts(w, drafts)]),
         .release => sl.release(w[0]),
     }
+}
+
+test "draft commands carry every stream's head request" {
+    const gpa = std.testing.allocator;
+    var words: std.ArrayList(u32) = .empty;
+    defer words.deinit(gpa);
+    const reqs = [_]Draft{ .{ .slot = 3, .prompt = true, .follow = &.{9}, .depth = 2 }, .{ .slot = 1, .prompt = false, .follow = &.{ 4, 5 }, .depth = 0 } };
+    try draftWords(&words, gpa, &reqs);
+    var back: [st.max_rows]Draft = undefined;
+    const n = try readDrafts(words.items, &back);
+    try std.testing.expectEqual(@as(usize, 2), n);
+    for (reqs, back[0..n]) |a, b| {
+        try std.testing.expectEqual(a.slot, b.slot);
+        try std.testing.expectEqual(a.prompt, b.prompt);
+        try std.testing.expectEqual(a.depth, b.depth);
+        try std.testing.expectEqualSlices(u32, a.follow, b.follow);
+    }
+    try std.testing.expectError(error.CommandOutOfStep, readDrafts(words.items[0 .. words.items.len - 1], &back));
 }
 
 test "window commands carry every window's rows and the digest" {

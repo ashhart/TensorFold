@@ -8,12 +8,15 @@ const Engine = @import("engine.zig").Engine;
 const be = lanes.backend;
 const Stream = lanes.Stream;
 
-/// A forward's ms by rows on the M5 Ultra pair, until the depth rule has timed this server's own rounds.
-const costs = blk: {
+/// One stream's window and a shared forward's rows, ms on the M5 Ultra pair (each stream's extra cost is learned).
+const window_costs = costTable(13.1, 3.5);
+const shared_costs = costTable(8.4 + 3.5, 3.5);
+
+fn costTable(comptime one: f64, comptime row: f64) [st.max_rows]lanes.config.Cost {
     var c: [st.max_rows]lanes.config.Cost = undefined;
-    for (&c, 0..) |*x, i| x.* = .{ .width = i + 1, .ms = 12.9 + 3.5 * @as(f64, @floatFromInt(i)) };
-    break :blk c;
-};
+    for (&c, 0..) |*x, i| x.* = .{ .width = i + 1, .ms = one + row * @as(f64, @floatFromInt(i)) };
+    return c;
+}
 
 pub const Backend = struct {
     gpa: std.mem.Allocator,
@@ -21,11 +24,13 @@ pub const Backend = struct {
     by: std.AutoHashMapUnmanaged(*Stream, u32) = .empty,
     words: std.ArrayList(u32) = .empty, // the next command's words
     wins: std.ArrayList(slots_mod.Win) = .empty,
+    drafts: std.ArrayList(slots_mod.Draft) = .empty,
 
     pub fn deinit(b: *Backend) void {
         b.by.deinit(b.gpa);
         b.words.deinit(b.gpa);
         b.wins.deinit(b.gpa);
+        b.drafts.deinit(b.gpa);
     }
 
     pub fn backend(b: *Backend) be.Backend {
@@ -41,13 +46,13 @@ pub const Backend = struct {
             .speculate = true,
             .speculate_early = false,
             .drafts = 4,
-            .window_costs = &costs,
-            .mtp_step_ms = 0.8,
+            .window_costs = &window_costs,
+            .mtp_step_ms = 1.3,
             .streams_exact = true,
             .hidden_rows = true,
             .batch_rows = st.max_rows,
             .max_streams = @intCast(b.sl.slots.len),
-            .shared_costs = &costs,
+            .shared_costs = &shared_costs,
             .draft_streams = true,
         };
     }
@@ -142,31 +147,28 @@ pub const Backend = struct {
 
     fn draft(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
         const b = self(ptr);
-        for (requests) |r| {
+        var ones: [st.max_rows]u32 = undefined; // a prompt's first token, the one its head absorbs with
+        b.drafts.clearRetainingCapacity();
+        if (requests.len > ones.len) return error.DraftOutOfStep;
+        for (requests, 0..) |r, k| {
             if (r.early or r.lanes != null or r.ranks) return error.TreeDraftsUnsupported;
-            const i = try b.slotOf(r.stream);
-            const slot = &b.sl.slots[i];
-            var one: [1]u32 = undefined;
+            if (r.rows) |path| {
+                if (path.len != r.follow.len) return error.DraftOutOfStep;
+                for (path, 0..) |x, j| if (x != j) return error.TreeDraftsUnsupported;
+            }
             const follow: []const u32 = if (r.first) |f| blk: {
-                one[0] = switch (f) {
+                ones[k] = switch (f) {
                     .handle => |h| @intCast(h),
                     .value => |v| v,
                 };
-                break :blk &one;
+                break :blk ones[k .. k + 1];
             } else r.follow;
-            const prompt = r.rows == null;
-            if (r.rows) |path| {
-                if (path.len != follow.len) return error.DraftOutOfStep;
-                for (path, 0..) |x, k| if (x != k) return error.TreeDraftsUnsupported;
-            }
-            if (!slot.mtp or follow.len == 0 or follow.len > st.max_rows or r.depth >= st.max_rows or (prompt and follow.len != 1)) return error.DraftOutOfStep;
-            if (!prompt and slot.seen != b.sl.windows) return error.DraftOutOfStep;
-            b.words.clearRetainingCapacity();
-            try b.words.appendSlice(b.gpa, &.{ i, @intFromBool(prompt), r.depth });
-            try b.words.appendSlice(b.gpa, follow);
-            try mirror.send(b.sl.e, .draft, b.words.items);
-            try b.sl.draft(i, prompt, follow, r.depth);
+            try b.drafts.append(b.gpa, .{ .slot = try b.slotOf(r.stream), .prompt = r.rows == null, .follow = follow, .depth = r.depth });
         }
+        try b.sl.checkDrafts(b.drafts.items); // before rank 1 hears of them: it must never fail where rank 0 did not
+        try mirror.draftWords(&b.words, b.gpa, b.drafts.items);
+        try mirror.send(b.sl.e, .draft, b.words.items);
+        try b.sl.draftAll(b.drafts.items);
     }
 
     fn release(ptr: *anyopaque, s: *Stream) void {

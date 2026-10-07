@@ -16,6 +16,13 @@ fn add(x: *const fwd.Ctx, e: mtl.ComputeEncoder, a: Ref, b: Ref, out: Ref, n: u3
 
 /// `rows` rows of h with their next tokens at head positions pos..: output rows into m_x (pre-norm), drafts into `picks`.
 pub fn run(x: *fwd.Ctx, e: mtl.ComputeEncoder, h: Ref, next: Ref, rows: u32, pos: u32, picks: ?Ref) void {
+    layer(x, e, h, next, rows, pos);
+    const out = picks orelse return; // the rows absorbed into the head's cache only, no draft
+    drafts(x, e, x.sc.m_x.at(@as(usize, rows - 1) * x.c.hidden * 2), 1, out);
+}
+
+/// The head's block over `rows` rows of h and their next tokens (positions pos.., or each segment's): m_x, pre-norm.
+pub fn layer(x: *fwd.Ctx, e: mtl.ComputeEncoder, h: Ref, next: Ref, rows: u32, pos: u32) void {
     const c = x.c;
     const sc = x.sc;
     const D = c.hidden;
@@ -33,9 +40,14 @@ pub fn run(x: *fwd.Ctx, e: mtl.ComputeEncoder, h: Ref, next: Ref, rows: u32, pos
     local.ep = null;
     fwd.moe(&local, e, &L.mlp.moe, sc.m_xn, rows);
     add(x, e, sc.m_out, sc.branch, sc.m_x, rows * D);
-    const out = picks orelse return; // the rows absorbed into the head's cache only, no draft
-    fwd.rms(x, e, sc.m_x, m.norm, sc.m_hn, rows, D, D, D, c.eps);
-    fwd.headOver(x, e, sc.m_hn.at(@as(usize, rows - 1) * D * 2), sc.m_logits.at(@as(usize, x.m_row) * c.vocab * 2), out, 1, x.draft_vocab);
+}
+
+/// Drafts for `rows` pre-norm head outputs at `out`: the head's norm, then the LM head over the draft vocabulary.
+pub fn drafts(x: *const fwd.Ctx, e: mtl.ComputeEncoder, out: Ref, rows: u32, picks: Ref) void {
+    const c = x.c;
+    const D = c.hidden;
+    fwd.rms(x, e, out, x.w.mtp.?.norm, x.sc.m_hn, rows, D, D, D, c.eps);
+    fwd.headOver(x, e, x.sc.m_hn, x.sc.m_logits.at(@as(usize, x.m_row) * c.vocab * 2), picks, rows, x.draft_vocab);
 }
 
 /// One chained draft from `h` (a row of the head's previous output, m_x) and the draft before it (`token`, u32).
