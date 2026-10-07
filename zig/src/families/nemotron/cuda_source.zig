@@ -123,9 +123,11 @@ pub const Source = struct {
         }
     }
 
-    /// Queues the copy of a read slot; it returns once the slot is read (pageable memory), so the slot is free again.
+    /// cuMemcpyHtoDAsync plus cuStreamSynchronize returns only after the pageable source has been staged.
     fn finish(s: *Source, p: Pending, got: []u8) !void {
-        try s.ops.upload(p.dst, got);
+        if (got.len == 0) return;
+        try s.ops.k.d.check(s.ops.k.d.api.cuMemcpyHtoDAsync_v2(p.dst, got.ptr, got.len, s.ops.s.handle), "cuMemcpyHtoDAsync");
+        try s.ops.s.synchronize();
     }
 
     /// Mapped bytes copied into host memory `out` (its length is theirs).
