@@ -25,15 +25,35 @@ pub const Context = struct {
     }
 
     pub fn synchronize(self: Context) runtime.Error!void {
-        try runtime.check(self.r.api.hipCtxSynchronize());
+        try runtime.check(self.r.api.hipDeviceSynchronize());
     }
 
     pub fn deinit(self: *Context) void {
-        _ = self.r.api.hipCtxSynchronize();
+        _ = self.r.api.hipDeviceSynchronize();
         _ = self.r.api.hipDevicePrimaryCtxRelease(self.device);
         self.* = undefined;
     }
 };
+
+test "context synchronization uses the device API and propagates errors" {
+    const Mock = struct {
+        var calls: usize = 0;
+        var result: c_int = 0;
+        fn synchronize() callconv(.c) c_int {
+            calls += 1;
+            return result;
+        }
+    };
+    var r: runtime.Runtime = undefined;
+    r.api.hipDeviceSynchronize = Mock.synchronize;
+    const ctx = Context{ .r = &r, .device = 0, .handle = null };
+    Mock.calls = 0;
+    Mock.result = 0;
+    try ctx.synchronize();
+    Mock.result = 801;
+    try std.testing.expectError(error.HipFailed, ctx.synchronize());
+    try std.testing.expectEqual(@as(usize, 2), Mock.calls);
+}
 
 test "failed context selection releases the primary-context retain" {
     const Mock = struct {

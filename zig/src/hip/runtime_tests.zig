@@ -14,6 +14,7 @@ test "HIP copies fills and mixed-width kernel arguments on real GPU" {
     defer r.close();
     var ctx = try Context.init(&r, 0);
     defer ctx.deinit();
+    try ctx.synchronize();
     var stream = try Stream.init(&r);
     defer stream.deinit();
     const n = 1025;
@@ -36,6 +37,7 @@ test "HIP copies fills and mixed-width kernel arguments on real GPU" {
     try stream.synchronize();
     try std.testing.expectEqualSlices(u8, pinned_src.bytes, pinned_dst.bytes);
     try b.fill8(0x5a);
+    try ctx.synchronize();
     try b.download(0, std.mem.asBytes(&got));
     for (got) |v| try std.testing.expectEqual(@as(u32, 0x5a5a5a5a), v);
     try std.testing.expectError(error.Invalid, b.upload(b.len, &.{1}));

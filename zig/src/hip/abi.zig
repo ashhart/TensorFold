@@ -16,7 +16,7 @@ pub const Api = struct {
     hipDevicePrimaryCtxRetain: *const fn (*Context, Device) callconv(.c) Result,
     hipDevicePrimaryCtxRelease: *const fn (Device) callconv(.c) Result,
     hipCtxSetCurrent: *const fn (Context) callconv(.c) Result,
-    hipCtxSynchronize: *const fn () callconv(.c) Result,
+    hipDeviceSynchronize: *const fn () callconv(.c) Result,
     hipMalloc: *const fn (*DevicePtr, usize) callconv(.c) Result,
     hipFree: *const fn (DevicePtr) callconv(.c) Result,
     hipHostMalloc: *const fn (*DevicePtr, usize, c_uint) callconv(.c) Result,
