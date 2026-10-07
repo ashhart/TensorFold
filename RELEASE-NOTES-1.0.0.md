@@ -20,13 +20,13 @@ Hardware support is specific to the combinations above. Qwen3.8-27B, Bonsai, Gem
 
 Flash Next builds its native layouts from the checkpoint and uses embedded Metal sources. It no longer needs a Python recording before serving.
 
-The server exposes OpenAI chat and completion routes, Anthropic Messages and token counting, tool calls, streaming responses, tokenization and label decisions. Health, metrics and an optional dashboard expose server status. API-key controls, prompt caching and request cancellation are implemented in the native server.
+The server exposes OpenAI chat and completion routes, Anthropic Messages and token counting, tool calls, streaming responses, tokenization. Health, metrics and an optional dashboard expose server status. The current `/v1/decisions` route returns HTTP 404. API-key controls, prompt caching and request cancellation are implemented in the native server.
 
 Metal engines support configurable idle keepalive through `--keep-warm`. A load-time probe selects a prebuilt packed-kernel library when macOS 26.3's runtime compiler rejects that kernel.
 
 Release archives target macOS arm64 and Linux x86_64/aarch64. They contain `bin/tensorfold-native`, runtime information and license notices. CUDA needs a compatible NVIDIA driver and the qualified kernel assets described in the deployment instructions; paired Metal serving needs its transport and peer configuration. See [README.md](README.md) for installation and [RUNBOOK.md](RUNBOOK.md) for deployment.
 
-The shipped command surface includes `--version`, `--help`, `capabilities --json` and `serve MODEL`. Use `serve MODEL --help` and the capabilities output for supported flags and backends.
+The shipped commands include `--version`, `--help`, `capabilities --json` and `serve MODEL`. Use `serve MODEL --help` and the capabilities output for supported flags and backends.
 
 ## CUDA limits in 1.0.0
 
@@ -34,7 +34,7 @@ The GB10 qualification covers greedy decoding. Sampled requests do not yet honor
 
 ## Moving from Python 0.6
 
-The Python 0.6.6 engine remains on the `python-0.6` branch and the `v0.6.6` tag. Its historical release entries remain in [CHANGELOG.md](CHANGELOG.md). The native release's model table and capabilities define its supported surface; older Python CLI features and model backends are maintained on the Python line.
+The Python 0.6.6 engine remains on the `python-0.6` branch and the `v0.6.6` tag. Its historical release entries remain in [CHANGELOG.md](CHANGELOG.md). The native release's model table and capabilities define its supported options; older Python CLI features and model backends are maintained on the Python line.
 
 TensorFold is Apache-2.0. Earlier code retains the bundled MIT notice, and model weights retain their own licenses; see [LICENSE](LICENSE), [NOTICE](NOTICE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 

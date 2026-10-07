@@ -33,7 +33,7 @@ curl -fsS http://127.0.0.1:8080/v1/chat/completions \
 ## Qualified models
 
 Only these model and platform combinations are admitted to 1.0.0.
-The platform column names the hardware tested for that model, rather than every GPU the binary can detect.
+The platform column names the hardware tested for each model.
 
 | Model | Checkpoint format | Qualified platform |
 | --- | --- | --- |
