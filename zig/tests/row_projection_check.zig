@@ -1,4 +1,4 @@
-//! The core row projection on synthetic 2-, 4- and 8-bit matrices: every width equals one row, a CPU reference, indexed experts.
+//! The core row projection on synthetic 2-, 4-, 6- and 8-bit matrices: every width equals one row, a CPU reference, indexed experts.
 const std = @import("std");
 const mtl = @import("metal");
 const row = @import("row_projection");
@@ -15,6 +15,14 @@ fn fromBf(v: u16) f32 {
 }
 
 const Case = struct { n: usize, k: usize, experts: usize, rows: usize, repeat: usize, bits: u8 = 4, sum: row.Sum = .f32 };
+
+/// Code `i` of a row's bit stream (value i at bits i*bits and up, bytes little-endian; 6-bit: four values in three bytes).
+fn code(bytes: []const u8, bits: u8, i: usize) u32 {
+    const off = i * @as(usize, bits);
+    const lo: u32 = bytes[off / 8];
+    const hi: u32 = if (off / 8 + 1 < bytes.len) bytes[off / 8 + 1] else 0;
+    return ((lo | (hi << 8)) >> @intCast(off % 8)) & ((@as(u32, 1) << @intCast(bits)) - 1);
+}
 
 /// Random words, scales, biases and inputs for `c`, in the row layout; the CPU product in f64.
 const Synth = struct {
@@ -54,8 +62,7 @@ const Synth = struct {
     /// Row m of x against expert e's column n in f64, and the sum of its terms' magnitudes (the error's scale).
     fn reference(self: Synth, c: Case, e: usize, m: usize, n: usize) [2]f64 {
         const groups = c.k / 64;
-        const per_word = 32 / @as(usize, c.bits);
-        const words = self.w.slice(u32, c.experts * c.n * c.k * c.bits / 32);
+        const bytes = self.w.slice(u8, c.experts * c.n * c.k * c.bits / 8);
         const sc = self.s.slice(u16, c.experts * c.n * groups);
         const bi = self.b.slice(u16, c.experts * c.n * groups);
         const x = self.x.slice(u16, c.rows * c.k);
@@ -66,8 +73,7 @@ const Synth = struct {
             var sum: f64 = 0;
             for (0..64) |i| {
                 const kk = g * 64 + i;
-                const word = words[(e * c.n + n) * (c.k / per_word) + kk / per_word];
-                const q: f64 = @floatFromInt((word >> @intCast(@as(usize, c.bits) * (kk % per_word))) & ((@as(u32, 1) << @intCast(c.bits)) - 1));
+                const q: f64 = @floatFromInt(code(bytes[(e * c.n + n) * (c.k * c.bits / 8) ..][0 .. c.k * c.bits / 8], c.bits, kk));
                 const xv: f64 = fromBf(x[m * c.k + kk]);
                 dot += xv * q;
                 sum += xv;
@@ -147,7 +153,7 @@ pub fn main(_: std.process.Init) !void {
     defer p.deinit();
     var checked: usize = 0;
     var bits: usize = 0;
-    for ([_]Case{ .{ .n = 64, .k = 128, .experts = 3, .rows = 9, .repeat = 3 }, .{ .n = 128, .k = 2688, .experts = 2, .rows = 8, .repeat = 2 }, .{ .n = 16, .k = 576, .experts = 4, .rows = 7, .repeat = 1 }, .{ .n = 64, .k = 128, .experts = 3, .rows = 9, .repeat = 3, .bits = 8 }, .{ .n = 128, .k = 2688, .experts = 2, .rows = 8, .repeat = 2, .bits = 8 }, .{ .n = 64, .k = 128, .experts = 3, .rows = 9, .repeat = 3, .sum = .bf16 }, .{ .n = 128, .k = 2688, .experts = 2, .rows = 8, .repeat = 2, .bits = 8, .sum = .bf16 }, .{ .n = 64, .k = 128, .experts = 3, .rows = 9, .repeat = 3, .bits = 2 }, .{ .n = 128, .k = 2688, .experts = 2, .rows = 8, .repeat = 2, .bits = 2 } }) |c| {
+    for ([_]Case{ .{ .n = 64, .k = 128, .experts = 3, .rows = 9, .repeat = 3 }, .{ .n = 128, .k = 2688, .experts = 2, .rows = 8, .repeat = 2 }, .{ .n = 16, .k = 576, .experts = 4, .rows = 7, .repeat = 1 }, .{ .n = 64, .k = 128, .experts = 3, .rows = 9, .repeat = 3, .bits = 8 }, .{ .n = 128, .k = 2688, .experts = 2, .rows = 8, .repeat = 2, .bits = 8 }, .{ .n = 64, .k = 128, .experts = 3, .rows = 9, .repeat = 3, .sum = .bf16 }, .{ .n = 128, .k = 2688, .experts = 2, .rows = 8, .repeat = 2, .bits = 8, .sum = .bf16 }, .{ .n = 64, .k = 128, .experts = 3, .rows = 9, .repeat = 3, .bits = 2 }, .{ .n = 128, .k = 2688, .experts = 2, .rows = 8, .repeat = 2, .bits = 2 }, .{ .n = 64, .k = 128, .experts = 3, .rows = 9, .repeat = 3, .bits = 6 }, .{ .n = 128, .k = 2688, .experts = 2, .rows = 8, .repeat = 2, .bits = 6 }, .{ .n = 64, .k = 576, .experts = 2, .rows = 5, .repeat = 1, .bits = 6, .sum = .bf16 } }) |c| {
         const s = try Synth.init(device, c, 7 + c.n);
         defer s.deinit();
         const groups = c.k / 64;

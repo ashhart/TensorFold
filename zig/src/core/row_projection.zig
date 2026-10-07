@@ -11,7 +11,7 @@ pub const columns = 4;
 pub const groups = 2;
 
 /// The code widths the kernels unpack.
-pub const bit_widths = [_]u8{ 2, 4, 8 };
+pub const bit_widths = [_]u8{ 2, 4, 6, 8 };
 
 /// A group's sum of inputs for the bias term: fp32 in order (the tensor path's xsum), or rounded to bf16 at each add (Nemotron's expert kernels).
 pub const Sum = enum { f32, bf16 };
@@ -119,5 +119,6 @@ test "shapes the row kernels serve" {
     try std.testing.expectError(error.UnsupportedRowShape, (Weights{ .w = undefined, .scales = undefined, .biases = undefined, .n = 2688, .k = 2688, .group = 48 }).validate());
     try (Weights{ .w = undefined, .scales = undefined, .biases = undefined, .n = 256, .k = 2688, .bits = 8 }).validate();
     try (Weights{ .w = undefined, .scales = undefined, .biases = undefined, .n = 256, .k = 2688, .bits = 2 }).validate();
-    try std.testing.expectError(error.UnsupportedRowBits, (Weights{ .w = undefined, .scales = undefined, .biases = undefined, .n = 256, .k = 2688, .bits = 6 }).validate());
+    try (Weights{ .w = undefined, .scales = undefined, .biases = undefined, .n = 256, .k = 2688, .bits = 6 }).validate();
+    try std.testing.expectError(error.UnsupportedRowBits, (Weights{ .w = undefined, .scales = undefined, .biases = undefined, .n = 256, .k = 2688, .bits = 3 }).validate());
 }
