@@ -62,7 +62,7 @@ python3 tools/bench_concurrent.py http://127.0.0.1:8080 local-model \
 
 The server in these commands is the native binary.
 The clients measure requests; Python is not part of native inference or the native build.
-Include ordinary greedy prose and code, rather than only prompts that copy existing text.
+Include ordinary greedy prose and code in the measured prompts.
 For cold prefill, attach exact 2k, 8k, 32k and 64k token arrays, request bodies, timings and cached-token counts.
 Disable supported prefix retention with `--prompt-cache-gib 0` and use fresh KV state for each measurement.
 Record 64k, 128k and the native window separately where the model/platform admits them.
