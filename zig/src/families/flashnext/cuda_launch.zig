@@ -12,6 +12,7 @@ pub const mlp = @import("cuda_mlp.zig");
 pub const moe = @import("cuda_moe.zig");
 pub const attn = @import("cuda_attn.zig");
 pub const ple = @import("cuda_ple.zig");
+pub const mix = @import("cuda_mix.zig");
 
 const p = aot.ptr;
 
@@ -222,6 +223,7 @@ test {
     _ = moe;
     _ = attn;
     _ = ple;
+    _ = mix;
 }
 
 test "embed grid is one program per row and per group of 32" {

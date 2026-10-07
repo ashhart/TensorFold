@@ -119,7 +119,8 @@ pub fn main(init: std.process.Init) !u8 {
     const norm_mismatch = try runDown(gpa, io, args[1], &driver, &stream, &set, &mapped, wide.ptr, pss.ptr, wide_u16, pss_bytes, table.dims, streams, nc);
     if (norm_mismatch != 0) return 1;
     const ngram = try flash.ple.table(flash.Tri, gpa, io, args[1], &driver, &stream, tri, token);
-    return if (ngram == 0) 0 else 1;
+    const scored = try flash.mix.scores(flash.Tri, gpa, io, args[1], &driver, &stream, tri, wide_u16);
+    return if (ngram == 0 and scored == 0) 0 else 1;
 }
 
 fn runDown(gpa: std.mem.Allocator, io: std.Io, model_dir: []const u8, driver: *cuda.Driver, stream: *cuda.Stream, set: *cuda.aot.Set, mapped: *const embed.Mapped, h: u64, pss: u64, wide_u16: []const u16, pss_bytes: []const u8, dims: usize, streams: usize, nc: usize) !usize {
