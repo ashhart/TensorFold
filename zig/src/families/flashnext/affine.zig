@@ -61,6 +61,21 @@ pub fn code6(words: []const u32, index: usize) !u8 {
     return @intCast(value & 63);
 }
 
+/// The packed code at `index` for `spec.bits`-wide codes over little-endian words in `bytes`, which may be unaligned.
+pub fn code(spec: Spec, bytes: []const u8, index: usize) !u8 {
+    const bit = try std.math.mul(usize, index, spec.bits);
+    const at = bit / 32;
+    if ((at + 1) * 4 > bytes.len) return error.PackedCodeOutOfBounds;
+    const shift: u5 = @intCast(bit % 32);
+    var value: u32 = std.mem.readInt(u32, bytes[at * 4 ..][0..4], .little) >> shift;
+    if (shift + spec.bits > 32) {
+        if ((at + 2) * 4 > bytes.len) return error.PackedCodeOutOfBounds;
+        value |= std.mem.readInt(u32, bytes[(at + 1) * 4 ..][0..4], .little) << @as(u5, @intCast(32 - @as(u32, shift)));
+    }
+    const mask: u32 = (@as(u32, 1) << @as(u5, @intCast(spec.bits))) - 1;
+    return @intCast(value & mask);
+}
+
 pub fn setCode6(words: []u32, index: usize, value: u8) !void {
     if (value > 63) return error.PackedCodeOutOfBounds;
     const bit = try std.math.mul(usize, index, 6);

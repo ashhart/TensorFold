@@ -211,41 +211,106 @@ fn putHc(out: *Out, gpa: std.mem.Allocator, a: std.mem.Allocator, ck: *ckpt.Chec
     try out.put(try std.fmt.allocPrint(a, "{s}.up.b", .{name}), "BF16", &.{ up.rows, up.b.dim(1) }, try gpa.dupe(u8, up.part(.biases)));
 }
 
-/// A router's rows in bf16: the gate then the shared-expert gate; the checkpoint's global quantization does not
-/// cover the gates, so a gate stored as words refuses here on its dtype (decode.py's _dense_rows).
-fn putRouter(out: *Out, gpa: std.mem.Allocator, a: std.mem.Allocator, ck: *ckpt.Checkpoint, name: []const u8, gate_stem: []const u8, shared_stem: []const u8) !void {
-    const gate = try ck.get(try std.fmt.allocPrint(a, "{s}.weight", .{gate_stem}));
-    const shared = try ck.get(try std.fmt.allocPrint(a, "{s}.weight", .{shared_stem}));
-    if (gate.dtype != .bf16 or shared.dtype != .bf16 or gate.rank != 2 or shared.rank != 2) return error.DenseRouterNotBf16;
-    if (gate.dim(1) != shared.dim(1)) return error.UnexpectedTensor;
-    const rows = gate.dim(0) + shared.dim(0);
-    const cols = gate.dim(1);
-    const bytes = try gpa.alloc(u8, rows * cols * 2);
-    @memcpy(bytes[0..gate.bytes.len], gate.bytes);
-    @memcpy(bytes[gate.bytes.len..], shared.bytes);
-    try out.put(name, "BF16", &.{ rows, cols }, bytes);
+/// A gate's rows in bf16: stored bf16 directly, or an affine-stored linear dequantized on the host, as MLX
+/// dequantizes on use (code * scale + bias per group, rounded to bf16).
+const Dense = struct { bytes: []const u8, rows: usize, cols: usize, owned: bool };
+
+fn denseRows(gpa: std.mem.Allocator, a: std.mem.Allocator, ck: *ckpt.Checkpoint, cfg: *const config_mod.Config, stem: []const u8) !Dense {
+    const w = try ck.get(try std.fmt.allocPrint(a, "{s}.weight", .{stem}));
+    if (w.dtype == .bf16 and w.rank == 2) return .{ .bytes = w.bytes, .rows = w.dim(0), .cols = w.dim(1), .owned = false };
+    if (w.dtype != .u32 or w.rank != 2) return error.DenseRouterNotBf16;
+    const spec = (try cfg.quantization(stem)) orelse return error.DenseRouterNotBf16;
+    const s = try ck.get(try std.fmt.allocPrint(a, "{s}.scales", .{stem}));
+    const b = try ck.get(try std.fmt.allocPrint(a, "{s}.biases", .{stem}));
+    const we = st.Entry{ .dtype = w.dtype, .rank = w.rank, .shape = w.shape, .begin = 0, .end = w.bytes.len };
+    const se = st.Entry{ .dtype = s.dtype, .rank = s.rank, .shape = s.shape, .begin = 0, .end = s.bytes.len };
+    const be = st.Entry{ .dtype = b.dtype, .rank = b.rank, .shape = b.shape, .begin = 0, .end = b.bytes.len };
+    const shape = try affine.matrix(we, se, be, spec);
+    const es: usize = s.dtype.size();
+    const out = try gpa.alloc(u8, shape.n * shape.k * 2);
+    const words_per_row = shape.words * 4;
+    for (0..shape.n) |r| {
+        const row = w.bytes[r * words_per_row ..][0 .. words_per_row];
+        for (0..shape.k) |c| {
+            const g = c / spec.group;
+            const scale: f32 = switch (s.dtype) {
+                .bf16 => bf16ToF32(std.mem.readInt(u16, s.bytes[(r * shape.groups + g) * es ..][0..2], .little)),
+                .f16 => @floatCast(@as(f16, @bitCast(std.mem.readInt(u16, s.bytes[(r * shape.groups + g) * es ..][0..2], .little)))),
+                .f32 => @bitCast(std.mem.readInt(u32, s.bytes[(r * shape.groups + g) * es ..][0..4], .little)),
+                else => return error.InvalidAffineMetadataPrecision,
+            };
+            const bias: f32 = switch (b.dtype) {
+                .bf16 => bf16ToF32(std.mem.readInt(u16, b.bytes[(r * shape.groups + g) * es ..][0..2], .little)),
+                .f16 => @floatCast(@as(f16, @bitCast(std.mem.readInt(u16, b.bytes[(r * shape.groups + g) * es ..][0..2], .little)))),
+                .f32 => @bitCast(std.mem.readInt(u32, b.bytes[(r * shape.groups + g) * es ..][0..4], .little)),
+                else => return error.InvalidAffineMetadataPrecision,
+            };
+            const v: f32 = @as(f32, @floatFromInt(try affine.code(spec, row, c))) * scale + bias;
+            const bits: u32 = @bitCast(v);
+            const exp = bits & 0x7F800000;
+            const rounded: u32 = if (exp == 0x7F800000) bits else bits + 0x7FFF + ((bits >> 16) & 1);
+            std.mem.writeInt(u16, out[(r * shape.k + c) * 2 ..][0..2], @intCast(rounded >> 16), .little);
+        }
+    }
+    return .{ .bytes = out, .rows = shape.n, .cols = shape.k, .owned = true };
 }
 
-/// A depthwise conv's weight [W, 1, C] as [W, C], same dtype, or widened to f32 for the ple gate (decode.py:246, 276).
+/// A router's rows in bf16: the gate then the shared-expert gate; either may be affine-stored, which the
+/// builder dequantizes (decode.py's _dense_rows over MLX's quantized linears).
+fn putRouter(out: *Out, gpa: std.mem.Allocator, a: std.mem.Allocator, ck: *ckpt.Checkpoint, cfg: *const config_mod.Config, name: []const u8, gate_stem: []const u8, shared_stem: []const u8) !void {
+    const gate = try denseRows(gpa, a, ck, cfg, gate_stem);
+    const shared = try denseRows(gpa, a, ck, cfg, shared_stem);
+    if (gate.cols != shared.cols) return error.UnexpectedTensor;
+    const rows = gate.rows + shared.rows;
+    const bytes = try gpa.alloc(u8, rows * gate.cols * 2);
+    @memcpy(bytes[0..gate.bytes.len], gate.bytes);
+    @memcpy(bytes[gate.bytes.len..], shared.bytes);
+    if (gate.owned) gpa.free(gate.bytes);
+    if (shared.owned) gpa.free(shared.bytes);
+    try out.put(name, "BF16", &.{ rows, gate.cols }, bytes);
+}
+
+/// A depthwise conv's weight as the kernel's channel-major [C, W]: MLX spells it [C, W, 1] and the bytes carry
+/// the rows already; a [W, 1, C] spelling transposes to the same rows. Same dtype, or widened to f32 for the
+/// ple gate (decode.py:246, 276).
 fn putConvSlice(out: *Out, gpa: std.mem.Allocator, ck: *ckpt.Checkpoint, name: []const u8, path: []const u8, widen_f32: bool) !void {
     const t = try ck.get(path);
-    if (t.rank != 3 or t.dim(1) != 1 or (t.dtype != .bf16 and t.dtype != .f32)) return error.UnexpectedTensor;
+    if (t.rank != 3 or (t.dtype != .bf16 and t.dtype != .f32)) return error.UnexpectedTensor;
+    const es: usize = if (t.dtype == .bf16) 2 else 4;
+    if (t.dim(2) == 1) {
+        // [C, W, 1]: channel-major rows as the kernel binds them
+        if (!widen_f32) {
+            try out.put(name, if (t.dtype == .bf16) "BF16" else "F32", &.{ t.dim(0), t.dim(1) }, try gpa.dupe(u8, t.bytes));
+            return;
+        }
+        if (t.dtype != .bf16) return error.UnexpectedTensor;
+        const bytes = try gpa.alloc(u8, t.dim(0) * t.dim(1) * 4);
+        const out32 = std.mem.bytesAsSlice(u32, bytes);
+        for (0..t.dim(0)) |ch| for (0..t.dim(1)) |tap| {
+            out32[ch * t.dim(1) + tap] = @bitCast(bf16ToF32(std.mem.readInt(u16, t.bytes[(ch * t.dim(1) + tap) * 2 ..][0..2], .little)));
+        };
+        try out.put(name, "F32", &.{ t.dim(0), t.dim(1) }, bytes);
+        return;
+    }
+    if (t.dim(1) != 1) return error.UnexpectedTensor;
+    // [W, 1, C]: the same channels in the packed spelling, transposed into channel-major rows
     const w = t.dim(0);
     const c = t.dim(2);
-    const es: usize = if (t.dtype == .bf16) 2 else 4;
     if (!widen_f32) {
-        const row = c * es;
-        const bytes = try gpa.alloc(u8, w * row);
-        for (0..w) |r| @memcpy(bytes[r * row ..][0..row], t.bytes[r * row ..][0..row]);
-        try out.put(name, if (t.dtype == .bf16) "BF16" else "F32", &.{ w, c }, bytes);
+        const bytes = try gpa.alloc(u8, c * w * es);
+        for (0..c) |ch| for (0..w) |tap| {
+            @memcpy(bytes[(ch * w + tap) * es ..][0..es], t.bytes[(tap * c + ch) * es ..][0..es]);
+        };
+        try out.put(name, if (t.dtype == .bf16) "BF16" else "F32", &.{ c, w }, bytes);
         return;
     }
     if (t.dtype != .bf16) return error.UnexpectedTensor;
-    const bytes = try gpa.alloc(u8, w * c * 4);
+    const bytes = try gpa.alloc(u8, c * w * 4);
     const out32 = std.mem.bytesAsSlice(u32, bytes);
-    const in16 = std.mem.bytesAsSlice(u16, t.bytes);
-    for (0..w * c) |i| out32[i] = @bitCast(bf16ToF32(in16[i])); // [W, 1, C] is contiguous over (r, j)
-    try out.put(name, "F32", &.{ w, c }, bytes);
+    for (0..c) |ch| for (0..w) |tap| {
+        out32[ch * w + tap] = @bitCast(bf16ToF32(std.mem.readInt(u16, t.bytes[(tap * c + ch) * 2 ..][0..2], .little)));
+    };
+    try out.put(name, "F32", &.{ c, w }, bytes);
 }
 
 /// The n-gram tables' group starts: 8 groups of ceil(shards/8), each start the rows before it (PleTables, embed.py).
@@ -369,7 +434,7 @@ pub fn build(gpa: std.mem.Allocator, io: Io, model_dir: []const u8, out_dir: []c
         const stem = try std.fmt.bufPrint(&buf, "language_model.model.layers.{d}", .{i});
         try putHc(&decode, gpa, a, &ck, &cfg, try std.fmt.allocPrint(a, "L{d}.ahc", .{i}), try std.fmt.allocPrint(a, "{s}.attn_hyper_connection", .{stem}), true, report.norms_around_one, wide);
         try putHc(&decode, gpa, a, &ck, &cfg, try std.fmt.allocPrint(a, "L{d}.mhc", .{i}), try std.fmt.allocPrint(a, "{s}.mlp_hyper_connection", .{stem}), true, report.norms_around_one, wide);
-        try putRouter(&decode, gpa, a, &ck, try std.fmt.allocPrint(a, "L{d}.moe.router", .{i}), try std.fmt.allocPrint(a, "{s}.mlp.gate", .{stem}), try std.fmt.allocPrint(a, "{s}.mlp.shared_expert_gate", .{stem}));
+        try putRouter(&decode, gpa, a, &ck, &cfg, try std.fmt.allocPrint(a, "L{d}.moe.router", .{i}), try std.fmt.allocPrint(a, "{s}.mlp.gate", .{stem}), try std.fmt.allocPrint(a, "{s}.mlp.shared_expert_gate", .{stem}));
         if ((try cfg.kind(i)) == .linear_attention) {
             var in_members: [4]Q = undefined;
             const in_names = [_][]const u8{ "linear_attn.in_proj_qkv", "linear_attn.in_proj_z", "linear_attn.in_proj_b", "linear_attn.in_proj_a" };
@@ -380,11 +445,16 @@ pub fn build(gpa: std.mem.Allocator, io: Io, model_dir: []const u8, out_dir: []c
             try putLane(&decode, gpa, try std.fmt.allocPrint(a, "L{d}.gdn.out", .{i}), out_members[0..]);
             try putConvSlice(&decode, gpa, &ck, try std.fmt.allocPrint(a, "L{d}.gdn.conv", .{i}), try std.fmt.allocPrint(a, "{s}.linear_attn.conv1d.weight", .{stem}), false);
             const alog = try ck.get(try std.fmt.allocPrint(a, "{s}.linear_attn.A_log", .{stem}));
-            if (alog.dtype != .f32 or alog.rank != 1) return error.UnexpectedTensor;
-            try decode.put(try std.fmt.allocPrint(a, "L{d}.gdn.alog", .{i}), "F32", &.{alog.dim(0)}, try gpa.dupe(u8, alog.bytes));
+            if (alog.rank != 1 or (alog.dtype != .f32 and alog.dtype != .bf16)) return error.UnexpectedTensor;
+            // the kernel binds floats: a bf16 A_log widens losslessly
+            const alog32 = try gpa.alloc(u8, alog.dim(0) * 4);
+            if (alog.dtype == .f32) @memcpy(alog32, alog.bytes) else for (0..alog.dim(0)) |j| std.mem.writeInt(u32, alog32[j * 4 ..][0..4], @bitCast(bf16ToF32(std.mem.readInt(u16, alog.bytes[j * 2 ..][0..2], .little))), .little);
+            try decode.put(try std.fmt.allocPrint(a, "L{d}.gdn.alog", .{i}), "F32", &.{alog.dim(0)}, alog32);
             const dt = try ck.get(try std.fmt.allocPrint(a, "{s}.linear_attn.dt_bias", .{stem}));
-            if (dt.dtype != .f32 or dt.rank != 1) return error.UnexpectedTensor;
-            try decode.put(try std.fmt.allocPrint(a, "L{d}.gdn.dt", .{i}), "F32", &.{dt.dim(0)}, try gpa.dupe(u8, dt.bytes));
+            if (dt.rank != 1 or (dt.dtype != .f32 and dt.dtype != .bf16)) return error.UnexpectedTensor;
+            const dt32 = try gpa.alloc(u8, dt.dim(0) * 4);
+            if (dt.dtype == .f32) @memcpy(dt32, dt.bytes) else for (0..dt.dim(0)) |j| std.mem.writeInt(u32, dt32[j * 4 ..][0..4], @bitCast(bf16ToF32(std.mem.readInt(u16, dt.bytes[j * 2 ..][0..2], .little))), .little);
+            try decode.put(try std.fmt.allocPrint(a, "L{d}.gdn.dt", .{i}), "F32", &.{dt.dim(0)}, dt32);
             const norm = try ck.get(try std.fmt.allocPrint(a, "{s}.linear_attn.norm.weight", .{stem}));
             if (norm.dtype != .bf16 or norm.rank != 1) return error.UnexpectedTensor;
             try decode.put(try std.fmt.allocPrint(a, "L{d}.gdn.norm", .{i}), "BF16", &.{norm.dim(0)}, try gpa.dupe(u8, norm.bytes));
@@ -491,7 +561,7 @@ fn putMtp(out: *Out, gpa: std.mem.Allocator, a: std.mem.Allocator, ck: *ckpt.Che
     const layer_stem = "language_model.mtp.layers.0";
     try putHc(out, gpa, a, ck, cfg, "mtp.ahc", try std.fmt.allocPrint(a, "{s}.attn_hyper_connection", .{layer_stem}), true, report.norms_around_one, wide);
     try putHc(out, gpa, a, ck, cfg, "mtp.mhc", try std.fmt.allocPrint(a, "{s}.mlp_hyper_connection", .{layer_stem}), true, report.norms_around_one, wide);
-    try putRouter(out, gpa, a, ck, "mtp.moe.router", try std.fmt.allocPrint(a, "{s}.mlp.gate", .{layer_stem}), try std.fmt.allocPrint(a, "{s}.mlp.shared_expert_gate", .{layer_stem}));
+    try putRouter(out, gpa, a, ck, cfg, "mtp.moe.router", try std.fmt.allocPrint(a, "{s}.mlp.gate", .{layer_stem}), try std.fmt.allocPrint(a, "{s}.mlp.shared_expert_gate", .{layer_stem}));
     var proj_members: [4]Q = undefined;
     const proj_names = [_][]const u8{ "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.indexer.index_qk_proj" };
     for (proj_names, 0..) |n, j| proj_members[j] = try qlinear(ck, cfg, try std.fmt.allocPrint(a, "{s}.{s}", .{ layer_stem, n }));

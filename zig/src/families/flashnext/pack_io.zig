@@ -156,6 +156,7 @@ pub fn sourceIdentity(gpa: std.mem.Allocator, io: Io, model_dir: []const u8) ![]
     var shards: std.ArrayList(MappedShard) = .empty;
     defer shards.deinit(gpa);
     var maps: std.ArrayList(Open) = .empty;
+    defer maps.deinit(gpa);
     errdefer for (maps.items) |*m| {
         m.map.destroy(io);
         m.file.close(io);

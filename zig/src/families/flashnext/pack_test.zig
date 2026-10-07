@@ -46,9 +46,20 @@ fn gateSpecs(list: *std.ArrayList(Spec), a: std.mem.Allocator, stem: []const u8,
     const gate = try a.alloc(u16, 4 * 32);
     for (gate, 0..) |*v, i| v.* = base + @as(u16, @intCast(i % 256));
     try list.append(a, .{ .name = try std.fmt.allocPrint(a, "{s}.mlp.gate.weight", .{stem}), .dtype = "BF16", .shape = &.{ 4, 32 }, .bytes = std.mem.sliceAsBytes(gate) });
-    const shared = try a.alloc(u16, 32);
-    for (shared, 0..) |*v, i| v.* = base + 0x100 + @as(u16, @intCast(i % 256));
-    try list.append(a, .{ .name = try std.fmt.allocPrint(a, "{s}.mlp.shared_expert_gate.weight", .{stem}), .dtype = "BF16", .shape = &.{ 1, 32 }, .bytes = std.mem.sliceAsBytes(shared) });
+    // The shared gate as the checkpoints store it: a u32-affine linear whose dequantized row joins the router.
+    // Codes 0, 3, a cross-word 63 at code 5, and 3 again at code 12; scale 1.0, bias 0.
+    const words = try a.alloc(u32, 6);
+    words[0] = 0xC00000C0;
+    words[1] = 0x0000000F;
+    words[2] = 0x00000300; // code 12 (bit 72) = 3
+    @memset(words[3..], 0);
+    try list.append(a, .{ .name = try std.fmt.allocPrint(a, "{s}.mlp.shared_expert_gate.weight", .{stem}), .dtype = "U32", .shape = &.{ 1, 6 }, .bytes = std.mem.sliceAsBytes(words) });
+    const one = try a.alloc(u16, 1);
+    one[0] = 0x3F80; // 1.0
+    try list.append(a, .{ .name = try std.fmt.allocPrint(a, "{s}.mlp.shared_expert_gate.scales", .{stem}), .dtype = "BF16", .shape = &.{ 1, 1 }, .bytes = std.mem.sliceAsBytes(one) });
+    const zero = try a.alloc(u16, 1);
+    zero[0] = 0x0000; // 0.0
+    try list.append(a, .{ .name = try std.fmt.allocPrint(a, "{s}.mlp.shared_expert_gate.biases", .{stem}), .dtype = "BF16", .shape = &.{ 1, 1 }, .bytes = std.mem.sliceAsBytes(zero) });
 }
 
 const config_json =
@@ -104,7 +115,7 @@ pub fn writeCheckpoint(tmp: std.testing.TmpDir, a: std.mem.Allocator) !void {
         try qspecs(&list, a, try std.fmt.allocPrint(a, "{s}.out_proj", .{stem}), 32, 1_400_000, 0x3C00, 0x3B00);
         const conv = try a.alloc(u16, 32 * 4);
         @memset(conv, bf16_half);
-        try list.append(a, .{ .name = try std.fmt.allocPrint(a, "{s}.conv1d.weight", .{stem}), .dtype = "BF16", .shape = &.{ 32, 1, 4 }, .bytes = std.mem.sliceAsBytes(conv) });
+        try list.append(a, .{ .name = try std.fmt.allocPrint(a, "{s}.conv1d.weight", .{stem}), .dtype = "BF16", .shape = &.{ 32, 4, 1 }, .bytes = std.mem.sliceAsBytes(conv) });
         const alog = try a.alloc(u32, 8);
         for (alog, 0..) |*v, i| v.* = 9_000_000 + @as(u32, @intCast(i));
         try list.append(a, .{ .name = try std.fmt.allocPrint(a, "{s}.A_log", .{stem}), .dtype = "F32", .shape = &.{8}, .bytes = std.mem.sliceAsBytes(alog) });
@@ -142,7 +153,7 @@ pub fn writeCheckpoint(tmp: std.testing.TmpDir, a: std.mem.Allocator) !void {
         }
         const pconv = try a.alloc(u16, 32 * 4);
         @memset(pconv, bf16_half);
-        try list.append(a, .{ .name = try std.fmt.allocPrint(a, "{s}.conv1d.weight", .{ple}), .dtype = "BF16", .shape = &.{ 32, 1, 4 }, .bytes = std.mem.sliceAsBytes(pconv) });
+        try list.append(a, .{ .name = try std.fmt.allocPrint(a, "{s}.conv1d.weight", .{ple}), .dtype = "BF16", .shape = &.{ 32, 4, 1 }, .bytes = std.mem.sliceAsBytes(pconv) });
         for (0..16) |s| {
             const rows = s + 1;
             const emb = try a.alloc(u16, rows * 4);
@@ -509,11 +520,14 @@ test "the full build writes the three packs byte for byte against hand-computed 
     try std.testing.expectEqual(@as(u32, 5_300_000), proj[48 * 6]);
     try expectTensor(&file, "L1.att.qn", .f32, &.{8});
     try expectTensor(&file, "L1.att.pool", .f32, &.{16});
-    // router rows: the gate then the shared-expert gate
+    // router rows: the gate then the shared-expert gate; the shared row dequantizes code*scale+bias
     try expectTensor(&file, "L0.moe.router", .bf16, &.{ 5, 32 });
     const router = std.mem.bytesAsSlice(u16, tensorBytes(&file, "L0.moe.router"));
     try std.testing.expectEqual(@as(u16, 0x3F80), router[0]);
-    try std.testing.expectEqual(@as(u16, 0x4080), router[4 * 32]); // shared gate's base
+    try std.testing.expectEqual(@as(u16, 0x0000), router[4 * 32]); // code 0
+    try std.testing.expectEqual(@as(u16, 0x4040), router[4 * 32 + 1]); // code 1 = 3.0
+    try std.testing.expectEqual(@as(u16, 0x427C), router[4 * 32 + 5]); // code 5 = 63.0, across words 0 and 1
+    try std.testing.expectEqual(@as(u16, 0x4040), router[4 * 32 + 12]); // code 12 = 3.0, in word 2
     // head: 128 rows over four tiles
     try expectTensor(&file, "head.wq", .u32, &.{ 128, 6 });
     const head = std.mem.bytesAsSlice(u32, tensorBytes(&file, "head.wq"));
