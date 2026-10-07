@@ -40,7 +40,6 @@ test "a call the end token left open closes when it parses whole" {
         .{ "<tool_call>lookup<arg_key>n</arg_key><arg_value>7</arg_value>", "</tool_call>", "{\"n\":7}", "" },
         .{ "<tool_call>{\"name\":\"lookup\"}</tool_call>\n<tool_call>{\"name\":\"lookup\",\"arguments\":{\"n\":2}", "}</tool_call>", "{\"n\":2}", "" },
         .{ "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":\"<tool_call>\"}", "}</tool_call>", "{\"q\":\"<tool_call>\"}", "" },
-        .{ "<tool_call>{\"name\":\"launch\",\"arguments\":{\"when\":\"now\"}", "}</tool_call>", "{\"when\":\"now\"}", "" },
     };
     for (cases) |c| {
         const close = try closeCall(a, c[0], tools);
@@ -87,32 +86,33 @@ test "replies that end outside a call close nothing" {
     for (replies) |text| try std.testing.expectEqualStrings("", try closeCall(a, text, tools));
 }
 
-test "a call to a tool the request did not offer goes out under its own name" {
+test "a call to a tool the request did not declare stays text" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]")).ok.array;
-    const launch = "<tool_call><function=launch><parameter=when>now</parameter></function></tool_call>";
-    const kept = [_][]const u8{
-        "<tool_call>{\"name\": \"launch rocket!\", \"arguments\": {\"when\": \"now\"}}</tool_call>", // no function name
-        "<tool_call>{\"name\": \"launch\", \"arguments\": {\"when\": NaN}}</tool_call>", // arguments not finite
+    const whole = [_][]const u8{
+        "<tool_call><function=launch><parameter=when>now</parameter></function></tool_call>",
+        "<tool_call>{\"name\": \"launch rocket!\", \"arguments\": {\"when\": \"now\"}}</tool_call>",
+        "<tool_call>{\"name\": \"launch\", \"arguments\": {\"when\": NaN}}</tool_call>",
     };
-    for ([_]?usize{ null, 1 }) |max_calls| {
-        const r = try parse(a, launch, tools, max_calls);
-        try std.testing.expectEqual(@as(usize, 1), if (r.calls) |calls| calls.len else 0);
-        try std.testing.expectEqualStrings("launch", r.calls.?[0].get("function").?.get("name").?.string);
-        try std.testing.expectEqualStrings("{\"when\":\"now\"}", r.calls.?[0].get("function").?.get("arguments").?.string);
-        try std.testing.expectEqualStrings("", r.content);
-        // these stay the reply's text in either mode
-        for (kept) |text| {
-            const k = try parse(a, text, tools, max_calls);
-            try std.testing.expect(k.calls == null);
-            try std.testing.expectEqualStrings(text, k.content);
-        }
+    for (whole) |text| {
+        const parallel = try parse(a, text, tools, null);
+        try std.testing.expect(parallel.calls == null);
+        try std.testing.expectEqualStrings(text, parallel.content);
+        const single = try parse(a, text, tools, 1);
+        try std.testing.expect(single.calls == null);
+        try std.testing.expectEqualStrings("", single.content);
     }
-    // a call malformed under the one-call reading stays text too
-    const malformed = "Launching. <tool_call><function=launch><parameter=when>now</function></tool_call>";
-    try std.testing.expectEqualStrings(malformed, (try parse(a, malformed, tools, 1)).content);
+    // an unclosed envelope is not a call in either mode, so the reply keeps it
+    const open = "<tool_call>{\"name\":\"launch\",\"arguments\":{\"when\":\"now\"}";
+    for ([_]?usize{ null, 1 }) |max_calls| {
+        const k = try parse(a, open, tools, max_calls);
+        try std.testing.expect(k.calls == null);
+        try std.testing.expectEqualStrings(open, k.content);
+    }
+    const prose = "Launching. <tool_call><function=launch><parameter=when>now</function></tool_call>";
+    try std.testing.expectEqualStrings("Launching.", (try parse(a, prose, tools, 1)).content);
     // an offered tool keeps its offered spelling; bare JSON naming one not offered stays content
     const offered = try parse(a, "<tool_call>{\"name\":\"LOOKUP\"}</tool_call>", tools, null);
     try std.testing.expectEqualStrings("lookup", offered.calls.?[0].get("function").?.get("name").?.string);

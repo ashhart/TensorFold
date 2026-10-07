@@ -161,6 +161,8 @@ pub const Engine = struct {
         memory: *const fn (ctx: *anyopaque, reset_peak: bool) ?Memory,
         /// The engine's queue as a keepalive target, or null when the backend is not Metal.
         keepalive: ?*const fn (ctx: *anyopaque) ?keepalive.Target = null,
+        /// One logit per label, and the vocabulary logsumexp. Null until a family scores decisions.
+        score: ?*const fn (ctx: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64) error{Failed}!f64 = null,
     };
 
     pub fn info(e: Engine) Info {
@@ -182,6 +184,12 @@ pub const Engine = struct {
     pub fn keepaliveTarget(e: Engine) ?keepalive.Target {
         const f = e.vtable.keepalive orelse return null;
         return f(e.ctx);
+    }
+
+    /// The decision hook, or Unsupported when this engine does not score.
+    pub fn score(e: Engine, prompt: []const u32, labels: []const u32, logits: []f64) error{ Failed, Unsupported }!f64 {
+        const f = e.vtable.score orelse return error.Unsupported;
+        return f(e.ctx, prompt, labels, logits);
     }
 };
 
