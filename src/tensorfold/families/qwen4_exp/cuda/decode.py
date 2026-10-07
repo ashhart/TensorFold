@@ -443,9 +443,8 @@ def serial_decode(e: Engine, pending: int, count: int, sampling: Sampling | None
 @torch.no_grad()
 def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *, depth: int = DEPTH,
                confidence: float = CONFIDENCE, stop_eos: bool = False, on_tokens=None, constraint=None,
-               probabilities=None, copies=None) -> DecodeResult:
-    """Verify pending and drafted tokens from the prefill state, commit rows before the first mismatched draft, and call ``on_tokens(new)`` with kept tokens after pending, stopping on True.
-    ``copies``: a ``CopyIndex`` over the prompt and ``pending``; a round whose context tail repeats earlier text drafts that text's continuation instead of an MTP chain."""
+               probabilities=None, copies=None) -> DecodeResult:  # copies: a CopyIndex over the prompt and pending
+    """Verify pending and drafted tokens from the prefill state, commit rows before the first mismatched draft, and call ``on_tokens(new)`` with kept tokens after pending, stopping on True."""
 
     def propose(streams, next_tokens, n):
         """Copy drafts when the index has a chain (the MTP cache still absorbs the kept rows), else the MTP chain."""

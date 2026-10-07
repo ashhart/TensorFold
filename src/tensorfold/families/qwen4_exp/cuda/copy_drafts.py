@@ -1,10 +1,4 @@
-"""Copy drafts for Flash Next on CUDA: when the reply's last tokens repeat earlier text, draft that text's continuation.
-
-A stream that quotes, edits or refactors its prompt lands far more drafts a round this way than its MTP head does
-(the head stops a chain at its confidence floor; a copied continuation is proposed whole, up to the round's depth),
-and the verify step keeps replies byte-identical either way. ``CopyIndex`` is Nemotron's (``nemotron_h/cuda/decode.py``):
-n-gram starts keep each round O(new). Both ranks hold the same tokens, so both propose the same chain.
-``TENSORFOLD_COPY_DRAFTS=0`` turns copy drafts off."""
+"""Copy drafts for Flash Next on CUDA: a repeated tail drafts its earlier continuation, the same chain on both ranks."""
 
 from __future__ import annotations
 
@@ -15,6 +9,7 @@ COPY_MATCH = 8          # the context's last this many tokens must have appeared
 
 
 def enabled(default: bool = True) -> bool:
+    """TENSORFOLD_COPY_DRAFTS=0 (or off, false, no) turns copy drafts off."""
     value = os.environ.get("TENSORFOLD_COPY_DRAFTS")
     return default if value is None else value.strip().lower() not in ("0", "off", "false", "no")
 
@@ -36,8 +31,7 @@ class CopyIndex:
                 self.starts.setdefault(tuple(self.ctx[s:]), []).append(s)
 
     def chain(self, max_nodes: int) -> list[int]:
-        """Up to ``max_nodes`` tokens that followed the latest earlier copy of the context's tail, or [] (fewer than
-        ``min_match`` would follow, or no copy)."""
+        """Up to ``max_nodes`` tokens after the tail's latest earlier copy; [] without one or under ``min_match``."""
 
         ctx, m = self.ctx, self.m
         if len(ctx) < 2 * m or max_nodes < m:

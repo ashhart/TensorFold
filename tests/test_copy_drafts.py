@@ -1,5 +1,4 @@
-"""Copy drafts for Flash Next on CUDA: the index proposes the continuation of an earlier copy of the context's tail,
-at least ``COPY_MATCH`` tokens of it, never the needle itself, the latest copy first; and the switch reads its env."""
+"""Copy drafts: the latest earlier copy's continuation, at least COPY_MATCH long, never the needle; the env switch."""
 
 import os
 

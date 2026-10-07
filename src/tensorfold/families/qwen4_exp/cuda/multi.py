@@ -425,9 +425,7 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
         return failed + done + ended
 
     def _draft_all(self, streams: list) -> None:
-        """Every drafting stream absorbs its kept rows and chains drafts, all streams in one step a depth.
-        A stream whose context tail repeats earlier text takes that text's continuation as its drafts instead
-        (copy_drafts.py); its kept rows still go into the MTP cache, and it sits out the chain levels."""
+        """Streams absorb kept rows and chain drafts one step a depth; a copying stream still absorbs, then sits out."""
 
         for s, _, _ in streams:
             s.drafts = []
@@ -456,8 +454,7 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
         if len(copying) == len(active):
             return
         for j in range(self.depth):
-            # the first level's picks cover every absorbed stream (the two-rank gather reads them in order);
-            # a copying stream's pick is dropped and it joins no later level
+            # level one picks for every absorbed stream (the two-rank gather reads them in order); copiers drop out
             picks = self._picks(logits, [s.st.pos + 1 + j for s, _ in active], [s.sampling for s, _ in active])
             nxt = []
             for (s, row), (d, p) in zip(active, picks):
