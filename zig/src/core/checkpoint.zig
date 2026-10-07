@@ -60,11 +60,14 @@ pub const Checkpoint = struct {
 
     /// Every shard of `dir`, mapped.
     pub fn openModel(gpa: std.mem.Allocator, io: Io, dir: []const u8) !Checkpoint {
+        return openModelPrefix(gpa, io, dir, null);
+    }
+    pub fn openModelPrefix(gpa: std.mem.Allocator, io: Io, dir: []const u8, prefix: ?[]const u8) !Checkpoint {
         const paths = try shardFiles(gpa, io, dir);
         defer freeShardFiles(gpa, paths);
         var ck: Checkpoint = .{ .gpa = gpa, .io = io };
         errdefer ck.close();
-        for (paths) |p| try ck.files.append(gpa, try st.File.open(gpa, io, p));
+        for (paths) |p| try ck.files.append(gpa, try st.File.openPrefix(gpa, io, p, prefix));
         return ck;
     }
 

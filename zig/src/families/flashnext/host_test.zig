@@ -304,7 +304,7 @@ test "the prompt's checked-in text resolves and patches from another working dir
     defer std.testing.allocator.free(tmpz);
     try std.testing.expect(std.c.chdir(tmpz) == 0);
     defer _ = std.c.fchdir(old_fd);
-    for (table.entries, 0..) |e, ei| {
+    for (table.entries) |e| {
         var text: []const u8 = "";
         for (sources.sources) |s| {
             if (std.mem.eql(u8, s.name, e.file)) text = s.text;
@@ -312,7 +312,6 @@ test "the prompt's checked-in text resolves and patches from another working dir
         try std.testing.expect(text.len != 0);
         const v = replay.Variant{ .inputs = &.{}, .outputs = &.{}, .meta = &.{}, .pipe = undefined, .file = e.file, .name = e.function, .text = text };
         const got = try replay.Run.variantText(std.testing.allocator, &v);
-        if (ei == 0) std.debug.print("T3 got {d} bytes\n", .{got.len});
         try std.testing.expectEqualStrings(text, got);
     }
     // the gdn site Prompt.init patches carries the patch string exactly once in the resolved text

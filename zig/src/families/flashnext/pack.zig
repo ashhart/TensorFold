@@ -340,7 +340,8 @@ pub fn build(gpa: std.mem.Allocator, io: Io, model_dir: []const u8, out_dir: []c
     const a = arena_state.allocator();
     var cfg = try config_mod.Config.read(gpa, io, model_dir);
     defer cfg.deinit();
-    var ck = try ckpt.Checkpoint.openModel(gpa, io, model_dir);
+    // the vision tower's tensors stay unread: a rank-five entry must not stop the no-dump build
+    var ck = try ckpt.Checkpoint.openModelPrefix(gpa, io, model_dir, "language_model.");
     defer ck.close();
     const wide = try cfg.wide();
     var report: Report = .{};

@@ -53,11 +53,17 @@ pub const Header = std.StringArrayHashMapUnmanaged(Entry);
 
 /// The header's entries (names live in `arena`); an entry past `data_len` bytes or of the wrong size is refused.
 pub fn parseHeader(arena: std.mem.Allocator, json: []const u8, data_len: usize) !Header {
+    return parseHeaderPrefix(arena, json, data_len, null);
+}
+
+/// A text-only loader may skip unrelated namespaces before interpreting their rank or dtype.
+pub fn parseHeaderPrefix(arena: std.mem.Allocator, json: []const u8, data_len: usize, prefix: ?[]const u8) !Header {
     const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, json, .{});
     var out: Header = .empty;
     var it = parsed.object.iterator();
     while (it.next()) |kv| {
         if (std.mem.eql(u8, kv.key_ptr.*, "__metadata__")) continue;
+        if (prefix) |wanted| if (!std.mem.startsWith(u8, kv.key_ptr.*, wanted)) continue;
         const o = kv.value_ptr.object;
         const dtype = DType.parse(o.get("dtype").?.string) orelse return error.UnsupportedDType;
         const shape = o.get("shape").?.array.items;
@@ -108,6 +114,9 @@ pub const File = struct {
     arena: std.heap.ArenaAllocator,
 
     pub fn open(gpa: std.mem.Allocator, io: Io, path: []const u8) !File {
+        return openPrefix(gpa, io, path, null);
+    }
+    pub fn openPrefix(gpa: std.mem.Allocator, io: Io, path: []const u8, prefix: ?[]const u8) !File {
         var file = try Io.Dir.cwd().openFile(io, path, .{});
         errdefer file.close(io);
         const len: usize = @intCast(try file.length(io));
@@ -118,7 +127,7 @@ pub const File = struct {
         if (header_len > len - 8) return error.BadSafetensors;
         var arena = std.heap.ArenaAllocator.init(gpa);
         errdefer arena.deinit();
-        const names = try parseHeader(arena.allocator(), map.memory[8..][0..header_len], len - 8 - header_len);
+        const names = try parseHeaderPrefix(arena.allocator(), map.memory[8..][0..header_len], len - 8 - header_len, prefix);
         return .{ .file = file, .map = map, .data = 8 + header_len, .names = names, .arena = arena };
     }
 
@@ -146,4 +155,18 @@ test "header entries" {
     try std.testing.expectEqual(@as(usize, 2), h.count());
     try std.testing.expectEqual(DType.bf16, h.get("a.scales").?.dtype);
     try std.testing.expectError(error.BadSafetensors, parseHeader(arena.allocator(), json, 20));
+}
+
+test "text namespace filtering skips a vision rank-five entry without hiding invalid text" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const json =
+        \\{"vision.patch.weight":{"dtype":"BF16","shape":[1,1,1,1,1],"data_offsets":[0,2]},
+        \\ "language_model.lm_head.weight":{"dtype":"U32","shape":[2,3],"data_offsets":[2,26]}}
+    ;
+    try std.testing.expectError(error.RankTooHigh, parseHeader(arena.allocator(), json, 26));
+    const h = try parseHeaderPrefix(arena.allocator(), json, 26, "language_model.");
+    try std.testing.expectEqual(@as(usize, 1), h.count());
+    try std.testing.expect(h.contains("language_model.lm_head.weight"));
+    try std.testing.expectError(error.BadSafetensors, parseHeaderPrefix(arena.allocator(), json, 25, "language_model."));
 }

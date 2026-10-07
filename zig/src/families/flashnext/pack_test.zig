@@ -151,6 +151,8 @@ pub fn writeCheckpoint(tmp: std.testing.TmpDir, a: std.mem.Allocator) !void {
         }
     }
     try hcSpecs(&list, a, "language_model.model.hyper_connection_mixer", 8_000_000, false, 0x3C00, 0x3400);
+    // the vision tower's rank-five entry: the builder never reads it, and it must not stop the load
+    try list.append(a, .{ .name = "model.visual.patch_embed.proj.weight", .dtype = "BF16", .shape = &.{ 1, 1, 1, 1, 1 }, .bytes = &.{ 0, 0 } });
     try qspecs(&list, a, "language_model.lm_head", 128, 500_000, 0x3C00, 0x3B00);
     const mtp = "language_model.mtp";
     try hcSpecs(&list, a, try std.fmt.allocPrint(a, "{s}.layers.0.attn_hyper_connection", .{mtp}), 13_000_000, true, 0x3C00, 0x3400);
