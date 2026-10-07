@@ -225,6 +225,9 @@ Each model cell needs the fitted context and peak physical process footprint. An
 a larger host is not a measurement on hardware with that RAM size. These are qualification slots,
 not minimum-memory promises. Weights that exceed the MLX budget are refused before loading.
 
+The [memory profiling guide](docs/memory-profiling.md) covers applied working-set limits,
+cold and restarted caches, concurrency and the evidence needed for a RAM recommendation.
+
 The 64 GB row comes from @benwilson's run on a 64 GB M5 Pro with TensorFold 0.3.5.1 and MLX 0.31.2 (#70),
 not from this release. Each cell is the fitted context at the default budget and the process's lifetime peak
 footprint over cold and resumed prompts at that context. The [Qwen3.8-27B recipe](docs/recipes/qwen3.8-27b.md#a-64-gb-m5-pro-on-0351)
