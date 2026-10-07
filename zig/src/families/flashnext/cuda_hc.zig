@@ -247,6 +247,53 @@ pub fn mixedSteps(gpu: u16, host: u16) u32 {
     return bf16Steps(gpu, host);
 }
 
+/// Mode 4's branch: the K slices added in slice order, then one bf16 round.
+pub fn sumSlices(part: []const f32, sk: usize, n: usize, out: []u16) !void {
+    if (sk == 0 or n == 0 or part.len != sk * n or out.len != n) return error.UnexpectedTensor;
+    for (0..n) |i| {
+        var acc = part[i];
+        for (1..sk) |k| acc += part[k * n + i];
+        out[i] = toBf16(acc);
+    }
+}
+
+/// Mode 4's hidden update: one bf16 rounding of hidden + branch * inject, the write-back's fused multiply-add.
+pub fn applyBranch(h: []const u16, branch: []const u16, inj: []const u16, dims: usize, streams: usize, out: []u16) !void {
+    if (dims == 0 or h.len != streams * dims or branch.len != dims or inj.len != streams or out.len != h.len) return error.UnexpectedTensor;
+    for (0..streams) |s| {
+        const gate = promote(inj[s]);
+        for (0..dims) |i| {
+            out[s * dims + i] = toBf16(promote(h[s * dims + i]) + promote(branch[i]) * gate);
+        }
+    }
+}
+
+test "slices add in order and round once" {
+    const part = [_]f32{ 1, 0, 0.5, 0 };
+    var out: [2]u16 = undefined;
+    try sumSlices(&part, 2, 2, &out);
+    try std.testing.expectEqual(toBf16(1.5), out[0]);
+    try std.testing.expectEqual(@as(u16, 0), out[1]);
+}
+
+test "a branch of one times an inject gate of one adds one" {
+    const h = [_]u16{0};
+    const branch = [_]u16{0x3f80};
+    const inj = [_]u16{0x3f80};
+    var out: [1]u16 = undefined;
+    try applyBranch(&h, &branch, &inj, 1, 1, &out);
+    try std.testing.expectEqual(@as(u16, 0x3f80), out[0]);
+}
+
+test "the fused product is rounded once with the hidden value" {
+    const h = [_]u16{0x3b34};
+    const branch = [_]u16{0xbe16};
+    const inj = [_]u16{0x3c9a};
+    var out: [1]u16 = undefined;
+    try applyBranch(&h, &branch, &inj, 1, 1, &out);
+    try std.testing.expectEqual(@as(u16, 0xb6f0), out[0]);
+}
+
 test "a zero activation mixes to a zero hidden value" {
     var act: [32]u16 = @splat(0);
     const xs = [_]f32{0};

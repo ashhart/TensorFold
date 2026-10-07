@@ -149,6 +149,37 @@ pub fn matmul(d: *const cuda.Driver, stream: cuda.Stream, x: u64, xs: u64, weigh
     try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows_t * cols_t) }, .block = .{ .x = threads }, .shared = smem }, stream, &args);
 }
 
+/// The same kernel as `matmul` with one block per K slice. `part` receives the unreduced [sk, m, n] fp32 slices.
+pub fn partials(d: *const cuda.Driver, stream: cuda.Stream, x: u64, xs: u64, weight: u64, scales: u64, biases: u64, out: u64, part: u64, m: usize, n: usize, k: usize, sk: usize) !void {
+    if (!cuda.kernels.available) return error.BuiltWithoutKernels;
+    if (m == 0 or m > 16 or sk == 0 or k == 0 or k % group != 0 or (k / group) % sk != 0) return error.UnexpectedTensor;
+    var module = try cuda.Module.load(d, cuda.kernels.qmm);
+    defer module.unload();
+    const f = try module.function(symbol);
+    try f.allowDynamicShared(smem);
+    const bm: usize = 16;
+    const bn: usize = 64;
+    const rows_t = (m + bm - 1) / bm;
+    const cols_t = (n + bn - 1) / bn;
+    const sweep = @max(@as(usize, 1), @min(rows_t, (12 << 20) / (bm * k * 2)));
+    const npad = (n + 127) / 128 * 128;
+    const ldx = k;
+    var args: cuda.Args = .{};
+    args.add(x);
+    args.add(xs);
+    args.add(weight);
+    args.add(scales);
+    args.add(biases);
+    args.add(out);
+    args.add(part);
+    for ([_]usize{ m, n, k, sk, npad, ldx, sweep }) |v| args.add(@as(c_int, @intCast(v)));
+    try cuda.launch.launch(f, .{
+        .grid = .{ .x = @intCast(rows_t * cols_t), .z = @intCast(sk) },
+        .block = .{ .x = threads },
+        .shared = smem,
+    }, stream, &args);
+}
+
 test "one group's first nibble pair lands in the lane word" {
     var words: [16]u8 = @splat(0);
     std.mem.writeInt(u32, words[0..4], 0x21, .little);

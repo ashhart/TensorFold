@@ -8,6 +8,7 @@ pub const embed = @import("cuda_embed.zig");
 pub const hc = @import("cuda_hc.zig");
 pub const qmm = @import("cuda_qmm.zig");
 pub const gdn = @import("cuda_gdn.zig");
+pub const mlp = @import("cuda_mlp.zig");
 
 const p = aot.ptr;
 
@@ -119,6 +120,7 @@ test {
     _ = hc;
     _ = qmm;
     _ = gdn;
+    _ = mlp;
 }
 
 test "embed grid is one program per row and per group of 32" {

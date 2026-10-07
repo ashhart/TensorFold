@@ -207,8 +207,8 @@ fn f32FromBf16(bytes: []const u8) f32 {
     return promote(std.mem.readInt(u16, bytes[0..2], .little));
 }
 
-/// Layer 0's conv, recurrence and output projection for the projection row already on the device.
-pub fn memory(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Stream, mapped: *const embed.Mapped, proj_dev: cuda.DeviceBuffer, proj_bytes: []const u8) !u32 {
+/// Layer 0's conv, recurrence and output projection. A match also returns the output face's eight unreduced K slices.
+pub fn memory(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Stream, mapped: *const embed.Mapped, proj_dev: cuda.DeviceBuffer, proj_bytes: []const u8) !?[]f32 {
     const prefix = "language_model.model.layers.0.linear_attn.";
     var name: [160]u8 = undefined;
     const conv = try mapped.lookup(gpa, try std.fmt.bufPrint(&name, "{s}conv1d.weight", .{prefix}), .bf16);
@@ -348,8 +348,21 @@ pub fn memory(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Stream
         if (dist > proj_steps) proj_steps = dist;
     }
     std.debug.print("gdn out_proj n {d} off {d} max_steps {d} head {x:0>4} host {x:0>4}\n", .{ 2560, proj_off, proj_steps, std.mem.readInt(u16, branch_bytes[0..2], .little), host_proj[0] });
-    if (out_off != 0 or xs_off != 0 or st_off != 0 or proj_off != 0) return 1;
-    return 0;
+    if (out_off != 0 or xs_off != 0 or st_off != 0 or proj_off != 0) return null;
+    // Eight K slices, left unreduced for the write-back.
+    const sk: usize = 8;
+    const n: usize = 2560;
+    var part_b = try cuda.DeviceBuffer.alloc(driver, sk * n * 4);
+    defer part_b.free();
+    try qmm.partials(driver, stream.*, gout.ptr, gxs.ptr, w_b.ptr, s_b.ptr, b_b.ptr, branch.ptr, part_b.ptr, 1, n, value_dim, sk);
+    const raw = try gpa.alloc(u8, sk * n * 4);
+    defer gpa.free(raw);
+    try stream.synchronize();
+    try part_b.download(0, raw);
+    const slices = try gpa.alloc(f32, sk * n);
+    errdefer gpa.free(slices);
+    for (slices, 0..) |*o, i| o.* = @bitCast(std.mem.readInt(u32, raw[4 * i ..][0..4], .little));
+    return slices;
 }
 
 test "warp sum is the sum of the lanes" {

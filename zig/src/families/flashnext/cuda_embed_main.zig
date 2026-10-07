@@ -295,15 +295,15 @@ fn runDown(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Stream, s
     }
     std.debug.print("upmix dims {d} off {d} max_steps {d} head {x:0>4} host {x:0>4}\n", .{ dims, mixed_off, max_steps, std.mem.readInt(u16, mixed_bytes[0..2], .little), host_mixed[0] });
     if (max_steps > 2) return 1;
-    const proj_steps = try runProj(gpa, driver, stream, mapped, mixed_b, xsm_b);
-    if (proj_steps != 0) return 1;
+    const rest = try runProj(gpa, driver, stream, mapped, mixed_b, xsm_b, tri, h, inj_out.ptr, wide_u16);
+    if (rest != 0) return 1;
     return mismatch;
 }
 
 const proj_names = [_][]const u8{ "in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a" };
 const proj_rows = [_]usize{ 10240, 6144, 48, 48 };
 
-fn runProj(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Stream, mapped: *const embed.Mapped, mixed: cuda.DeviceBuffer, xs: cuda.DeviceBuffer) !u32 {
+fn runProj(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Stream, mapped: *const embed.Mapped, mixed: cuda.DeviceBuffer, xs: cuda.DeviceBuffer, tri: flash.Tri, h: u64, inj: u64, hidden: []const u16) !u32 {
     const prefix = "language_model.model.layers.0.linear_attn.";
     const k8: usize = 320;
     const kg: usize = 80;
@@ -380,5 +380,7 @@ fn runProj(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Stream, m
     }
     std.debug.print("proj n {d} off {d} max_steps {d} head {x:0>4} host {x:0>4}\n", .{ n, off, max_steps, std.mem.readInt(u16, got_bytes[0..2], .little), host[0] });
     if (max_steps != 0) return max_steps;
-    return flash.gdn.memory(gpa, driver, stream, mapped, out_b, got_bytes);
+    const slices = try flash.gdn.memory(gpa, driver, stream, mapped, out_b, got_bytes) orelse return 1;
+    defer gpa.free(slices);
+    return flash.mlp.connect(flash.Tri, gpa, driver, stream, mapped, tri, h, inj, hidden, slices);
 }
