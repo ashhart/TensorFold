@@ -8,8 +8,8 @@ pub const DType = enum(u8) { bf16, f16, f32, f64, i64, i32, i16, i8, u8, u16, u3
 
 pub fn dtypeOf(text: []const u8) ?DType {
     const table = [_]struct { []const u8, DType }{
-        .{ "BF16", .bf16 },  .{ "F16", .f16 },         .{ "F32", .f32 },         .{ "F64", .f64 },         .{ "I64", .i64 },  .{ "I32", .i32 },
-        .{ "I16", .i16 },    .{ "I8", .i8 },           .{ "U8", .u8 },           .{ "U16", .u16 },         .{ "U32", .u32 },  .{ "U64", .u64 },
+        .{ "BF16", .bf16 },       .{ "F16", .f16 },         .{ "F32", .f32 },         .{ "F64", .f64 },      .{ "I64", .i64 }, .{ "I32", .i32 },
+        .{ "I16", .i16 },         .{ "I8", .i8 },           .{ "U8", .u8 },           .{ "U16", .u16 },      .{ "U32", .u32 }, .{ "U64", .u64 },
         .{ "F8_E4M3", .f8_e4m3 }, .{ "F8_E5M2", .f8_e5m2 }, .{ "F8_E8M0", .f8_e8m0 }, .{ "BOOL", .boolean },
     };
     for (table) |row| if (std.mem.eql(u8, text, row[0])) return row[1];

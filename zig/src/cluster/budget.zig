@@ -36,7 +36,7 @@ pub const Need = struct {
     drafter: u64 = 0,
 
     pub fn of(n: *const Need, c: Category) u64 {
-        return n.weights[@intFromEnum(c)];
+        return n.weights[@backingInt(c)];
     }
 
     pub fn weightBytes(n: *const Need) u64 {
@@ -56,7 +56,7 @@ pub fn needs(a: std.mem.Allocator, p: *const Plan, c: checkpoint.Checkpoint, s: 
     @memset(out, .{});
     for (c.tensors, 0..) |t, i| {
         const mtp = if (t.class.layer) |l| l >= s.layers else false;
-        const cat = @intFromEnum(if (mtp) Category.draft else category(t.class.role));
+        const cat = @backingInt(if (mtp) Category.draft else category(t.class.role));
         for (out, 0..) |*n, r| n.weights[cat] += p.bytesOn(t, i, @intCast(r));
     }
     for (out, 0..) |*n, r| {

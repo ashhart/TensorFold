@@ -1,0 +1,17 @@
+name: Zig format
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      # zig fmt --check fails the pull request when Zig formatting drifts.
+      - name: zig fmt
+        run: zig fmt --check build.zig zig

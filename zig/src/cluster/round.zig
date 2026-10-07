@@ -33,7 +33,7 @@ pub const Error = error{ Short, Corrupt, OutOfMemory };
 pub fn encode(a: std.mem.Allocator, c: Command) Error![]u8 {
     const n = 1 + 8 + 12 + c.keeps.len * 8 + c.releases.len * 4 + c.rows.len * 13;
     const out = try a.alloc(u8, n);
-    out[0] = @intFromEnum(c.kind);
+    out[0] = @backingInt(c.kind);
     std.mem.writeInt(u64, out[1..9], c.number, .little);
     std.mem.writeInt(u32, out[9..13], @intCast(c.keeps.len), .little);
     std.mem.writeInt(u32, out[13..17], @intCast(c.releases.len), .little);

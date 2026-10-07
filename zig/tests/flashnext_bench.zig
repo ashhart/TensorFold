@@ -197,9 +197,15 @@ fn differ(a: []const u8, b: []const u8) usize {
 pub fn run(r: *Run, m: *Model, prompt: []const u32, gpa: std.mem.Allocator, arena: std.mem.Allocator) !void {
     const lib = try mtl.Library.fromSource(r.device, stream_source, mtl.CompileOptions.mlx());
     var b: Bench = .{
-        .r = r, .m = m, .stream = try mtl.Pipeline.init(r.device, lib, "fz_stream", false), .sink = .{ .b = try r.buffer(64) },
-        .part = .{ .b = try r.buffer(fz.MAXR * fz.D * 4) }, .gdn_new = try gdn.compile(r, false), .gdn_kept = try gdn.compile(r, true),
-        .rec = .{ .{ .b = try r.buffer(gdn.RECORD) }, .{ .b = try r.buffer(gdn.RECORD) } }, .ar = .{ .b = try r.buffer(64) },
+        .r = r,
+        .m = m,
+        .stream = try mtl.Pipeline.init(r.device, lib, "fz_stream", false),
+        .sink = .{ .b = try r.buffer(64) },
+        .part = .{ .b = try r.buffer(fz.MAXR * fz.D * 4) },
+        .gdn_new = try gdn.compile(r, false),
+        .gdn_kept = try gdn.compile(r, true),
+        .rec = .{ .{ .b = try r.buffer(gdn.RECORD) }, .{ .b = try r.buffer(gdn.RECORD) } },
+        .ar = .{ .b = try r.buffer(64) },
     };
     var pk: [fz.MAXR]u32 = undefined;
     m.reset();

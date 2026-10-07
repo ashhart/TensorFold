@@ -80,5 +80,4 @@ pub const Text = struct {
         const f = t.vtable.special orelse return false;
         return f(t.ctx, id);
     }
-
 };

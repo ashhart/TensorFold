@@ -33,4 +33,3 @@ pub const Depth = struct {
         return d.levels;
     }
 };
-

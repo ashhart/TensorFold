@@ -39,7 +39,7 @@ pub const gdn_symbols = struct {
 
 /// Every instantiation gdn.cu exports; tests resolve each one so a wrong name cannot hide behind an unused path.
 pub const gdn_variants = [_]TreeVariant{
-    tree(0, 8, 4, true), tree(1, 8, 4, false), tree(2, 8, 2, false), tree(2, 4, 4, false),
+    tree(0, 8, 4, true),  tree(1, 8, 4, false), tree(2, 8, 2, false),  tree(2, 4, 4, false),
     tree(4, 2, 4, false), tree(8, 2, 4, false), tree(16, 2, 2, false), tree(32, 2, 1, false),
 };
 
