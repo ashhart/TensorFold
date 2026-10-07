@@ -135,6 +135,9 @@ zig build test test-golden -Dcpu=apple_m1
 
 The server is `zig-out/native/bin/tensorfold-native`.
 Release archives include the native executable, runtime assets and license notices; [packaging](packaging/README.md) describes the qualified CUDA inputs.
+For cache-aware performance receipts, see [observed cache benchmark evidence](docs/cache-benchmarks.md).
+The clients retain server usage and output fingerprints, and verify cold/reused states rather than inferring them.
+
 Read [CONTRIBUTING.md](CONTRIBUTING.md) for exactness, precision and performance gates.
 TensorFold is Apache-2.0; see [LICENSE](LICENSE), [NOTICE](NOTICE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 

@@ -27,6 +27,8 @@ import threading
 import time
 import urllib.request
 
+from bench_evidence import Evidence, token_equal
+
 if sys.version_info < (3, 11):
     sys.exit(f"Python 3.11+ is required (this is {sys.version.split()[0]}); "
              "TensorFold's tools use PEP 604 unions. Try: python3.12 tools/bench_concurrent.py ...")
@@ -46,9 +48,12 @@ def stream(base: str, model: str, item: dict, tokens: int, temperature: float, s
     try:
         return _stream(base, model, item, tokens, temperature, seed, draft, gate)
     except Exception as exc:  # noqa: BLE001 - a failed request is reported, not fatal
-        return {"prompt": item["name"], "seed": seed, "sent": None, "first": None, "last": None, "tokens": 0,
+        if gate is not None:
+            gate.abort()
+        return {"prompt": item["name"], "seed": seed, "sent": None, "first": None, "last": None, "tokens": None,
                 "pieces": [], "ttft_s": None, "decode_tps": None, "token_sha": None,
-                "error": f"{type(exc).__name__}: {exc}"}
+                "error": type(exc).__name__, "complete": False, "prompt_tokens": None,
+                "cached_tokens": None, "cache_state": "unverified", "output_sha256": None}
 
 
 def _stream(base: str, model: str, item: dict, tokens: int, temperature: float, seed: int | None, draft: bool,
@@ -70,35 +75,48 @@ def _stream(base: str, model: str, item: dict, tokens: int, temperature: float, 
         body["prompt"] = item["prompt"]
     req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
     if gate is not None:
-        gate.wait()
+        gate.wait(timeout=30)
     sent = time.perf_counter()
     pieces: list[tuple[float, int]] = []           # (arrival, characters) of every text chunk
     usage: dict = {}
     runtime: dict = {}
+    evidence = Evidence()
+    complete = False
     with urllib.request.urlopen(req, timeout=1800) as resp:
         for raw in resp:
             line = raw.decode().strip()
-            if not line.startswith("data:") or line == "data: [DONE]":
+            if line == "data: [DONE]":
+                complete = True
+                break
+            if not line.startswith("data:"):
                 continue
             chunk = json.loads(line[5:])
+            if "error" in chunk:
+                raise RuntimeError("server_stream_error")
             usage = chunk.get("usage") or usage
             runtime = chunk.get("tensorfold") or runtime
             for choice in chunk.get("choices", []):
+                evidence.add(choice)
                 delta = choice.get("delta") or {}
                 # reasoning counts: its tokens are in completion_tokens, so the clock starts with them
                 piece = choice.get("text") or delta.get("content") or delta.get("reasoning_content") or ""
                 if piece:
                     pieces.append((time.perf_counter(), len(piece)))
-    n = int(usage.get("completion_tokens", 0))
+    observed = evidence.finish(usage, runtime, complete)
+    n = observed["tokens"]
     out = {"prompt": item["name"], "seed": seed, "sent": sent, "first": None, "last": None, "tokens": n,
-           "pieces": pieces, "ttft_s": None, "decode_tps": None, "token_sha": runtime.get("token_sha")}
+           "pieces": pieces, "ttft_s": None, "decode_tps": None, **observed}
+    if not complete:
+        out["error"] = "incomplete_stream"
     if pieces:
         first, last = pieces[0][0], pieces[-1][0]
-        out.update(first=first, last=last, ttft_s=first - sent)
-        if n > 1 and last > first and len(pieces) >= MIN_PIECES:
+        out.update(first=first, last=last, ttft_s=first - sent if complete else None)
+        if complete and n is not None and n > 1 and last > first and len(pieces) >= MIN_PIECES:
             out["decode_tps"] = (n - 1) / (last - first)
         else:
             out["unmeasured"] = True
+    else:
+        out["unmeasured"] = True
     return out
 
 
@@ -109,7 +127,7 @@ def together(base: str, model: str, specs: list[tuple[dict, int | None]], tokens
 
     def run(i: int) -> None:
         if stagger_ms:
-            gate.wait()
+            gate.wait(timeout=30)
             time.sleep(i * stagger_ms / 1e3)
             out[i] = stream(base, model, specs[i][0], tokens, temperature, specs[i][1])
         else:
@@ -186,28 +204,27 @@ def main() -> None:
                 for key, ref in alone.items():
                     serial = stream(args.base, args.model, next(q for q in PROMPTS if q["name"] == key[0]),
                                     args.tokens, temp, key[1], draft=False)
-                    ref["serial_equal"] = (None if serial.get("error") or ref.get("error")
-                                           else serial["token_sha"] == ref["token_sha"])
+                    ref["serial_equal"] = token_equal(serial, ref)
             for n in levels:
                 reps = []
                 for _ in range(args.reps):
                     runs = together(args.base, args.model, specs[:n], args.tokens, temp, args.stagger_ms)
                     rep = aggregates(runs)
                     rep["per_stream_tps"] = [round(r["decode_tps"], 1) for r in runs if r["decode_tps"] is not None]
-                    rep["ttft_s"] = [round(r["ttft_s"] or 0.0, 2) for r in runs]
+                    rep["ttft_s"] = [round(r["ttft_s"], 2) if r["ttft_s"] is not None else None for r in runs]
                     rep["errors"] = [r["error"] for r in runs if r.get("error")]
+                    rep["evidence"] = [{k: r.get(k) for k in ("prompt_tokens", "cached_tokens", "tokens",
+                                       "cache_state", "complete", "token_sha", "output_sha256")} for r in runs]
                     if alone:
                         # None: the request or its solo run failed (not an exactness result)
-                        rep["equal_alone"] = [None if r.get("error") or alone[(r["prompt"], r["seed"])].get("error")
-                                              else alone[(r["prompt"], r["seed"])]["token_sha"] == r["token_sha"]
-                                              for r in runs]
+                        rep["equal_alone"] = [token_equal(alone[(r["prompt"], r["seed"])], r) for r in runs]
                     reps.append(rep)
                 cell = {"prompt": "mixed" if args.mixed or item is None else item["name"], "temperature": temp,
                         "streams": n, "failed": sum(r["failed"] for r in reps),
                         "unmeasured": sum(r["unmeasured"] for r in reps),
                         "aggregate_tps": round(statistics.median(r["aggregate_tps"] for r in reps), 1),
                         "per_stream_tps": round(statistics.median([v for r in reps for v in r["per_stream_tps"]] or [0.0]), 1),
-                        "ttft_s_max": max(max(r["ttft_s"]) for r in reps)}
+                        "ttft_s_max": max((t for r in reps for t in r["ttft_s"] if t is not None), default=None)}
                 if all("steady_tps" in r for r in reps):
                     cell["steady_tps"] = round(statistics.median(r["steady_tps"] for r in reps), 1)
                 if alone:
