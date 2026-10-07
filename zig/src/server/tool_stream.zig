@@ -364,7 +364,7 @@ test "a streamed call cut inside a value stays open" {
     try std.testing.expect((try tool_params.closedJson(a, sent)) == null);
 }
 
-test "a single-call reply keeps a malformed call as text and still hides an unclosed one" {
+test "a one-call reply drops an unoffered call and still hides an unclosed one" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -374,7 +374,8 @@ test "a single-call reply keeps a malformed call as text and still hides an uncl
     // what attachCalls makes of the reply: the parse, then the policy's content
     const r = try tool_parse.parse(a, text, tools, single.maxCalls());
     try std.testing.expect(r.calls == null);
-    try std.testing.expectEqualStrings(text, try single.parsedContent(a, r.content));
+    try std.testing.expectEqualStrings("Launching.", r.content);
+    try std.testing.expectEqualStrings("Launching.", try single.parsedContent(a, r.content));
     try std.testing.expectEqualStrings("Launching. ", try single.parsedContent(a, "Launching. <tool_call>{\"name\""));
     // a stream that sent the prose before the block ends with the block
     try std.testing.expectEqualStrings(text["Launching. ".len..], single.kept(text, "\nLaunching. ").?);

@@ -138,8 +138,8 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
             if ((try callName(a, c, &known)) == null) break false;
         } else true else false;
         if (!good) {
-            // a malformed call stays text in either mode: the reply is content, never an error or a client retry loop
-            try residue.appendSlice(a, text[env.start..env.end]);
+            // a malformed or unoffered call stays text when calls are unlimited, and drops out of a one-call reply
+            if (max_calls == null) try residue.appendSlice(a, text[env.start..env.end]);
             continue;
         }
         for (parsed.?) |c| {
@@ -173,13 +173,10 @@ fn argumentsClose(a: Allocator, body: []const u8) Allocator.Error![]const u8 {
     return closed[body.len..];
 }
 
-/// ``call_name``: the offered tool's spelling; else the name itself when it is 1 to 64 of ``[A-Za-z0-9_-]`` and the arguments a finite object (an unoffered tool is the client's to refuse); else null.
+/// The offered tool's spelling, or null when the request did not declare that name.
 fn callName(a: Allocator, c: Call, known: *const std.StringArrayHashMapUnmanaged([]const u8)) Allocator.Error!?[]const u8 {
     const name = strip(c.name);
-    if (known.get(try std.ascii.allocLowerString(a, name))) |offered| return offered;
-    if (name.len == 0 or name.len > 64 or c.arguments != .object or !tool_params.finite(c.arguments)) return null;
-    for (name) |ch| if (!(std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '-')) return null;
-    return name;
+    return if (known.get(try std.ascii.allocLowerString(a, name))) |offered| offered else null;
 }
 
 /// ``_openai_tool_call``: the call under ``name`` (``callName``), arguments as compact JSON.

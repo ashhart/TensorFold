@@ -1,4 +1,4 @@
-//! The server parity goldens checked by a Zig step (`zig build test-golden`): the frozen corpus through fake_serve, each normalized reply against its golden file, with the framed() check, the lifecycle rows and the 13 known differences.
+//! Frozen server goldens for `zig build test-golden`, with the nine differences that are still known.
 const std = @import("std");
 const posix = std.posix;
 const Io = std.Io;
@@ -17,10 +17,6 @@ const known_diffs = [_]Known{
     .{ .group = "metrics-open", .name = "metrics" },
     .{ .group = "metrics-open", .name = "v1-metrics" },
     .{ .group = "keys", .name = "metrics-counted" },
-    .{ .group = "tools", .name = "bad_tool" },
-    .{ .group = "tools", .name = "bad_tool-stream" },
-    .{ .group = "tools", .name = "bad_tool-single" },
-    .{ .group = "tools", .name = "bad_tool-single-stream" },
     .{ .group = "errors", .name = "stream-context" },
 };
 
@@ -198,7 +194,6 @@ fn parseReply(a: std.mem.Allocator, conn: *Conn, skip_body: bool) !Reply {
     r.body = if (skip_body) "" else if (length) |n| try conn.readExact(a, n) else try conn.readToEof(a);
     return r;
 }
-
 
 const Verdict = enum { equal, differ, no_golden };
 
