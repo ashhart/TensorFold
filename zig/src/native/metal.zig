@@ -136,8 +136,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }
 
-/// Flash Next on the replay engine: the recorded kernels and packs from tools/zig/flashnext_dump.py in
-/// TF_FLASHNEXT_DUMP, or with it unset the checked-in kernels and packs built beside the checkpoint.
+/// Flash Next uses the dump named by TF_FLASHNEXT_DUMP, or the checked-in kernels when that variable is unset.
 fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const dump: ?[]const u8 = if (std.c.getenv("TF_FLASHNEXT_DUMP")) |d| std.mem.span(d) else null;
     const native = modelContext(a, io, o.dir);

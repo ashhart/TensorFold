@@ -1,15 +1,4 @@
-"""Compare two Flash Next pack directories, tensor by tensor, on CPU.
-
-Reads pack.safetensors, pack_mlx.safetensors and pack_mtp_mlx.safetensors from both directories and
-compares every tensor by name, dtype, shape and bytes. For float tensors (BF16, F32, F16) it also
-prints the largest absolute element difference. Exit status is 0 when everything matches, 1 otherwise.
-
-    python3 tools/zig/pack_compare.py BUILT_DIR REFERENCE_DIR
-
-BUILT_DIR is the no-dump cache ({model_dir}/zig-pack), REFERENCE_DIR a recorded dump (for example
-fn-dump). Files missing on either side, tensors missing on either side, and metadata differences are
-reported but only tensor bytes decide the exit status.
-"""
+"""Compare two Flash Next pack directories tensor by tensor. Exit 0 when names, dtypes, shapes and bytes match."""
 from __future__ import annotations
 
 import json

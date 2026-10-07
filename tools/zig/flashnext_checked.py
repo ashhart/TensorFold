@@ -1,13 +1,4 @@
-"""Check in the Flash Next kernels serve launches: the recorded sources, and the role table as generated Zig.
-
-Reads a dump made by tools/zig/flashnext_dump.py (plus flashnext_roles.py's conversion, redone here) and writes:
-  zig/kernels/metal/flashnext/<kernel>.metal          the recorded sources, verbatim (ours: PREAMBLE + our strings)
-  zig/kernels/metal/flashnext/<kernel>-lanes.metal    the same lane kernels as the no-tensor-unit recorder writes them
-  zig/src/families/flashnext/roles_gen.zig            every site as {stem|rows, function, file, inputs, outputs,
-                                                       meta, grid, threadgroup}, widths 1..W filled by the engine's
-                                                       callRows rule where the dump did not record a width
-CPU only: no mlx import, no compile, no launch.
-"""
+"""Write checked-in Flash Next kernel sources and roles_gen.zig from a dump. CPU only, no compile."""
 
 from __future__ import annotations
 
@@ -78,10 +69,7 @@ def main() -> int:
         v["outputs"] = var["outputs"]
         v["meta"] = var["meta"]
 
-    # fill widths the dump did not record, per function group: the engine's callRows rule, the axis that grows
-    # between the group's two smallest widths. Roles with a single recorded width fill as a constant. The indexer
-    # trio's roles are never launched (the select path binds its kernels directly with run-time grids), so their
-    # fills exist so every role resolves; the trio's variants are what give Select.init its kernels at any context.
+    # Unrecorded widths follow callRows. One width fills as a constant. The indexer trio is not launched from the table.
     stems: dict[str, dict[int, dict]] = {}
     for k, v in roles.items():
         stem, _, rows = k.rpartition("|")
@@ -93,8 +81,7 @@ def main() -> int:
         for gw in groups.values():
             ws = sorted(gw)
             if len(ws) < 2:
-                # a single recorded width: the other widths take it as a constant (the kernel reads its true
-                # shape at run time; the trio's roles are never launched through the table anyway)
+                # A single recorded width fills the other widths as a constant.
                 only = gw[ws[0]]
                 for w in range(1, args.maxw + 1):
                     if w not in at:

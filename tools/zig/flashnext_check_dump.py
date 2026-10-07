@@ -1,9 +1,4 @@
-"""Compare the checked-in Flash Next kernels and role table with a recorded dump's.
-
-Every kernel file must be byte equal (the checked-in texts are the dump's recorded sources, and a fresh dump on
-the same chip class records the same ones). Every role the dump recorded must appear in the generated table with
-the same function, grid and threadgroup. Exit 1 on any difference.
-"""
+"""Compare checked-in Flash Next kernels and the role table with a dump. Exit 1 on any difference."""
 
 from __future__ import annotations
 

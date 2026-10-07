@@ -1035,8 +1035,7 @@ pub const Run = struct {
         return .{ .b = b };
     }
 
-    /// The checked-in kernels and role table (tools/zig/flashnext_checked.py, roles_gen.zig): serve with no dump.
-    /// Every variant compiles from the embedded recorded source, the lane ones from their no-tensor-unit texts.
+    /// Checked-in kernels and the role table serve with no dump, each variant compiled from its embedded source.
     pub fn compileChecked(r: *Run) !void {
         const lanes = !r.device.tensorUnits();
         for (&roles_gen.entries) |*e| {
