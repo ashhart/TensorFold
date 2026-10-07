@@ -32,7 +32,7 @@ pub fn main(init: std.process.Init) !u8 {
     for (vocab.object.get("pieces").?.array.items) |p| try pieces.append(a, p.string);
     var fake = FakeText.init(pieces.items);
     var problem: []const u8 = "";
-    const real = if (init.environ_map.get("TF_FAKE_TOKENIZER")) |path| server.hf_text.HfText.load(gpa, io, path, &problem) catch {
+    const real = if (init.environ_map.get("TF_FAKE_TOKENIZER")) |path| server.hf_text.HfText.load(gpa, io, path, a, &problem) catch {
         std.debug.print("tensorfold: {s}\n", .{problem});
         return 1;
     } else null;

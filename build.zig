@@ -311,7 +311,7 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "row_projection", .module = row_mod } },
     }) });
     b.step("tf-row-check", "The core row projection on synthetic 4-bit matrices: widths bit-equal, a CPU reference, indexed experts").dependOn(&b.addInstallArtifact(row_check, .{}).step);
-    test_step.?.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = row_mod })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = row_mod })).step);
 
     _ = nativeServer(b, target, optimize, metal, engine, lanes, build_options, test_step);
 
