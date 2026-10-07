@@ -33,6 +33,8 @@ pub const LaneHost = struct {
     prefill_rate: f64 = 0,
     prefill_at: i96 = 0,
     live_tokens: std.ArrayList(u32) = .empty,
+    /// A Metal engine's keepalive target, set by the family that owns the queue; null keeps the ticker off.
+    keepalive_target: ?api.keepalive.Target = null,
     live_generated: u64 = 0,
     lone: ?api.Lone = null, // the backend's driver for a lone greedy stream; null: every stream in the lane core
     lone_job: ?*Job = null, // the job that driver holds now
@@ -101,7 +103,12 @@ pub const LaneHost = struct {
     }
 
     pub fn engine(h: *LaneHost) Engine {
-        return .{ .ctx = h, .vtable = &.{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = statusFn, .memory = memoryFn } };
+        return .{ .ctx = h, .vtable = &.{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = statusFn, .memory = memoryFn, .keepalive = keepaliveFn } };
+    }
+
+    /// The family's queue as a keepalive target, when it set one.
+    fn keepaliveFn(ctx: *anyopaque) ?api.keepalive.Target {
+        return self(ctx).keepalive_target;
     }
 
     fn self(ctx: *anyopaque) *LaneHost {

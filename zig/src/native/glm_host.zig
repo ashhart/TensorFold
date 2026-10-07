@@ -60,7 +60,13 @@ pub const Host = struct {
     }
 
     pub fn engine(h: *Host) api.Engine {
-        return .{ .ctx = h, .vtable = &.{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = statusFn, .memory = memoryFn } };
+        return .{ .ctx = h, .vtable = &.{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = statusFn, .memory = memoryFn, .keepalive = keepaliveFn } };
+    }
+
+    /// The engine's queue as a keepalive target: the ticker commits a tiny buffer on it while idle.
+    fn keepaliveFn(ctx: *anyopaque) ?api.keepalive.Target {
+        const h: *Host = @ptrCast(@alignCast(ctx));
+        return .{ .ctx = &h.eng.keepalive_target, .tick = mtl.keepalive.Target.tick };
     }
 
     fn self(ctx: *anyopaque) *Host {

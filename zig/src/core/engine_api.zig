@@ -159,6 +159,8 @@ pub const Engine = struct {
         status: *const fn (ctx: *anyopaque, out: *Status, stream_tokens: []u32) void,
         /// Device memory in bytes, the peak since the last reset; null when the backend keeps no count.
         memory: *const fn (ctx: *anyopaque, reset_peak: bool) ?Memory,
+        /// The engine's queue as a keepalive target, or null when the backend is not Metal.
+        keepalive: ?*const fn (ctx: *anyopaque) ?keepalive.Target = null,
     };
 
     pub fn info(e: Engine) Info {
@@ -175,6 +177,11 @@ pub const Engine = struct {
     }
     pub fn memory(e: Engine, reset_peak: bool) ?Memory {
         return e.vtable.memory(e.ctx, reset_peak);
+    }
+    /// The engine's queue as a keepalive target, or null when the backend is not Metal.
+    pub fn keepaliveTarget(e: Engine) ?keepalive.Target {
+        const f = e.vtable.keepalive orelse return null;
+        return f(e.ctx);
     }
 };
 
@@ -198,8 +205,12 @@ pub const LaneHost = @import("lane_host.zig").LaneHost;
 /// Exact prompt reuse between requests, for any family (prompt_cache.zig).
 pub const prompt_cache = @import("prompt_cache.zig");
 
+/// The idle keepalive's ticker and target contract.
+pub const keepalive = @import("keepalive.zig");
+
 test {
     _ = @import("lane_host.zig");
     _ = @import("lane_host_reuse_test.zig");
-    _ = prompt_cache;
+    _ = @import("prompt_cache.zig");
+    _ = @import("keepalive.zig");
 }
