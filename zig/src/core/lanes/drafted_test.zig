@@ -1,4 +1,4 @@
-//! An external drafter in front of the fake target: drafted rounds equal one-token rounds, and the wrapper's contract holds.
+//! An external drafter in front of the fake target: drafted rounds equal one-token rounds, the contract holds.
 const std = @import("std");
 const Config = @import("config.zig").Config;
 const Model = @import("config.zig").Model;
@@ -14,7 +14,7 @@ const Sampling = @import("sampling.zig").Sampling;
 
 const gpa = std.testing.allocator;
 
-/// Rebuilds each stream's history from the target's features and drafts the fake target's next tokens, now and then wrong.
+/// Rebuilds a stream's history from the target's features and drafts its next tokens, now and then wrong.
 const FakeDrafter = struct {
     lanes: std.AutoHashMapUnmanaged(*sm.Stream, Lane) = .empty,
     fail: enum { none, open, absorb } = .none,

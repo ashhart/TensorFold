@@ -1,4 +1,4 @@
-//! A drafter outside the target family that reads the target's tapped states; every call takes a round's streams together.
+//! A drafter outside the target family reading its tapped states; each call takes a round's streams together.
 const Stream = @import("stream.zig").Stream;
 const Features = @import("backend.zig").Features;
 

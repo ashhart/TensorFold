@@ -1,4 +1,4 @@
-//! A target backend with an external drafter in front, one Backend; deinit releases no stream, so callers release first.
+//! A target backend with an external drafter in front; deinit releases no stream, so callers release first.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const be = @import("backend.zig");
@@ -68,7 +68,7 @@ pub const Drafted = struct {
         return @ptrCast(@alignCast(ptr));
     }
 
-    /// The target's prompt pass, then the drafter absorbs its computed rows but the last; a later failure releases both.
+    /// The target's prompt pass, then the drafter absorbs its rows but the last; a later failure releases both.
     fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
         const x = self(ptr);
         try x.target.prefill(s);
