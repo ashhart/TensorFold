@@ -147,7 +147,7 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .target = target,
         .optimize = .ReleaseSafe,
         .link_libc = true,
-        .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "native_engines", .module = engines } },
+        .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "native_engines", .module = engines }, .{ .name = "checkpoint_cli", .module = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cli.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "native_engines", .module = engines }} }) } },
     }) });
     exe.root_module.addOptions("build_options", build_options);
     if (test_step == null) {

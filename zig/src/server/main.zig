@@ -7,6 +7,7 @@ const hub = @import("hub.zig");
 const engines = @import("engines.zig");
 const serve = @import("serve.zig");
 const hf_text = @import("hf_text.zig");
+const checkpoint_cli = @import("checkpoint_cli");
 
 const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--name NAME] [--alias ALIAS] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard] [--context CONTEXT] [--speed-up SETTINGS] [--prompt-cache-gib PROMPT_CACHE_GIB] [--prompt-cache-over-cap] [--max-tokens MAX_TOKENS] [--temperature TEMPERATURE] [--top-p TOP_P] [--top-k TOP_K] [--min-p MIN_P] [--thinking | --no-thinking] [--reasoning-effort {low,medium,high,xhigh}] [--thinking-budget THINKING_BUDGET] [--loop-guard] [--no-drafts] [--compact-at COMPACT_AT] [--compact-keep COMPACT_KEEP] [--compact-memory COMPACT_MEMORY] [--parallel PARALLEL] [--no-update-check] [--backend {auto,mlx,cuda}] [--device DEVICE] [--segments SEGMENTS] model\n";
 
@@ -21,7 +22,7 @@ pub fn main(init: std.process.Init) !u8 {
         return 0;
     }
     if (argv.len == 2 and (std.mem.eql(u8, argv[1], "--help") or std.mem.eql(u8, argv[1], "-h"))) {
-        try std.Io.File.stdout().writeStreamingAll(io, "usage: tensorfold-native --version | capabilities --json | serve MODEL [flags]\n" ++ usage_line);
+        try std.Io.File.stdout().writeStreamingAll(io, "usage: tensorfold-native --version | capabilities --json | models | info MODEL | pull REPO[@REVISION] | serve MODEL [flags]\n" ++ usage_line);
         return 0;
     }
     if (argv.len >= 3 and std.mem.eql(u8, argv[1], "serve")) {
@@ -30,6 +31,8 @@ pub fn main(init: std.process.Init) !u8 {
             return 0;
         };
     }
+    // the checkpoint commands need no model, GPU or driver either
+    if (argv.len >= 2 and checkpoint_cli.wants(@ptrCast(argv[1..]))) return checkpoint_cli.main(init, argv[1..]);
     log.init(io, false);
     if (argv.len == 3 and std.mem.eql(u8, argv[1], "capabilities") and std.mem.eql(u8, argv[2], "--json")) {
         var out: std.Io.Writer.Allocating = .init(a);
@@ -38,7 +41,7 @@ pub fn main(init: std.process.Init) !u8 {
         return 0;
     }
     if (argv.len < 2 or !std.mem.eql(u8, argv[1], "serve")) {
-        std.debug.print("usage: tensorfold-native capabilities --json | serve MODEL [flags]\n", .{});
+        std.debug.print("usage: tensorfold-native capabilities --json | models | info MODEL | pull REPO[@REVISION] | serve MODEL [flags]\n", .{});
         return 2;
     }
     const started = std.Io.Clock.awake.now(io).toNanoseconds();
