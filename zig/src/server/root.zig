@@ -33,6 +33,8 @@ test {
     _ = @import("hub.zig");
     _ = @import("chunk_plan.zig");
     _ = @import("status_routes.zig");
+    _ = @import("memory_routes.zig");
+    _ = @import("process_memory.zig");
     _ = @import("log.zig");
     _ = @import("messages.zig");
     _ = @import("stream_preflight_test.zig");

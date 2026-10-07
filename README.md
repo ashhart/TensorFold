@@ -85,6 +85,9 @@ The same request gives the same compaction and the same reply. With `--compact-m
 
 ## Serve flags
 
+The read-only [`/memory` diagnostics](docs/memory-diagnostics.md) report process footprint and lifetime peak,
+available backend allocation counters, and the applied retained-prefix plan without changing memory policy.
+
 The binary's `capabilities --json` response lists its supported flags and platform-specific values.
 `serve MODEL --help` prints usage without loading a model.
 

@@ -119,6 +119,20 @@ pub const Info = struct {
     prefill_step: u32 = 0,
     /// A line the server prints once at startup (the engine's memory plan); empty: none.
     startup: []const u8 = "",
+    /// The immutable retained-prefix plan applied at startup, not a process memory limit or current cache occupancy.
+    prompt_cache_plan: ?PromptCachePlan = null,
+};
+
+pub const PromptCachePlan = struct {
+    source: enum { physical_footprint, explicit, metal_working_set },
+    budget_bytes: u64,
+    explicit_budget: bool = false,
+    over_cap: ?bool = null,
+    ram_bytes: ?u64 = null,
+    ready_footprint_bytes: ?u64 = null,
+    cap_bytes: ?u64 = null,
+    room_bytes: ?u64 = null,
+    margin_bytes: ?u64 = null,
 };
 
 /// A checkpoint family an engine reads: its config ``model_type`` and weight formats, as gate entries name them.
