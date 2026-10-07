@@ -5,9 +5,14 @@ const ids = @import("ids.zig");
 const reply_text = @import("reply_text.zig");
 const tool_params = @import("tool_params.zig");
 const tool_specs = @import("tool_specs.zig");
+const tool_streaming = @import("tool_streaming.zig");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 const strip = reply_text.pyStrip;
+
+// the streaming half (deltas and the wrapper) is beside this file, in tool_streaming.zig.
+pub const deltas = tool_streaming.deltas;
+pub const wrapCalls = tool_streaming.wrapCalls;
 
 const Error = error{ Invalid, OutOfMemory };
 const Call = struct { name: []const u8, arguments: Value };
@@ -495,158 +500,4 @@ fn dsmlCalls(a: Allocator, block: []const u8) Error![]Call {
     }
     if (calls.items.len == 0 or !allSpace(block[at..])) return error.Invalid;
     return calls.items;
-}
-
-/// ``stream_tool_call_deltas``: each call's opening delta, then its arguments in one more.
-pub fn deltas(a: Allocator, calls: []const Value) Allocator.Error![]Value {
-    var out: std.ArrayList(Value) = .empty;
-    for (calls, 0..) |call, index| {
-        const function = call.get("function") orelse continue;
-        if (function != .object) continue;
-        const head_fn = try json.newObject(a);
-        try head_fn.put(a, "name", .{ .string = if (function.get("name")) |n| (if (n.truthy()) try tool_specs.pyStr(a, n) else "") else "" });
-        try head_fn.put(a, "arguments", .{ .string = "" });
-        const head = try json.newObject(a);
-        try head.put(a, "index", try json.intValue(a, index));
-        const id = call.get("id");
-        try head.put(a, "id", .{ .string = if (id != null and id.?.truthy()) try tool_specs.pyStr(a, id.?) else try std.fmt.allocPrint(a, "call_{d}", .{index}) });
-        const kind = call.get("type");
-        try head.put(a, "type", .{ .string = if (kind != null and kind.?.truthy()) try tool_specs.pyStr(a, kind.?) else "function" });
-        try head.put(a, "function", .{ .object = head_fn });
-        try out.append(a, try wrapCalls(a, .{ .object = head }));
-        const args = function.get("arguments");
-        const text = if (args != null and args.?.truthy()) try tool_specs.pyStr(a, args.?) else "";
-        if (text.len > 0) {
-            const arg_fn = try json.newObject(a);
-            try arg_fn.put(a, "arguments", .{ .string = text });
-            const more = try json.newObject(a);
-            try more.put(a, "index", try json.intValue(a, index));
-            try more.put(a, "function", .{ .object = arg_fn });
-            try out.append(a, try wrapCalls(a, .{ .object = more }));
-        }
-    }
-    return out.items;
-}
-
-/// ``{"tool_calls": [one]}``: one streamed call delta.
-pub fn wrapCalls(a: Allocator, one: Value) Allocator.Error!Value {
-    const list = try a.alloc(Value, 1);
-    list[0] = one;
-    const delta = try json.newObject(a);
-    try delta.put(a, "tool_calls", .{ .array = list });
-    return .{ .object = delta };
-}
-
-test "families" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"parameters\":{\"properties\":{\"n\":{\"type\":\"integer\"}}}}}]")).ok.array;
-    const cases = [_][2][]const u8{
-        .{ "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":\"x\"}}</tool_call>", "{\"q\":\"x\"}" },
-        .{ "<tool_call>\n<function=lookup>\n<parameter=n>\n5\n</parameter>\n</function>\n</tool_call>", "{\"n\":5}" },
-        .{ "<tool_call>lookup<arg_key>n</arg_key><arg_value>7</arg_value></tool_call>", "{\"n\":7}" },
-        .{ "<|tool_call>call:lookup{q:<|\"|>hi, there<|\"|>,n:3}<tool_call|>", "{\"q\":\"hi, there\",\"n\":3}" },
-        .{ "{\"tool\":\"lookup\",\"query\":\"ping\"}", "{\"query\":\"ping\"}" },
-    };
-    for (cases) |c| {
-        const r = try parse(a, c[0], tools, null);
-        try std.testing.expectEqualStrings(c[1], r.calls.?[0].get("function").?.get("arguments").?.string);
-    }
-    const kept = try parse(a, "hi <tool_call>{\"name\":\"other tool\"}</tool_call>", tools, null);
-    try std.testing.expect(kept.calls == null);
-    try std.testing.expectEqualStrings("hi <tool_call>{\"name\":\"other tool\"}</tool_call>", kept.content);
-}
-
-test "a call the end token left open closes when it parses whole" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"parameters\":{\"properties\":{\"n\":{\"type\":\"integer\"}}}}}]")).ok.array;
-    const cases = [_][4][]const u8{ // the reply, what closes it, the call's arguments, the content left
-        .{ "Looking.<tool_call>\n{\"name\":\"lookup\",\"arguments\":{\"q\":\"x\"}}\n", "</tool_call>", "{\"q\":\"x\"}", "Looking." },
-        .{ "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":[\"x\"", "]}}</tool_call>", "{\"q\":[\"x\"]}", "" },
-        .{ "<tool_call>\n<function=lookup>\n<parameter=n>\n5\n</parameter>\n", "</function></tool_call>", "{\"n\":5}", "" },
-        .{ "<tool_call>\n<function=lookup>\n", "</function></tool_call>", "{}", "" },
-        .{ "<tool_call>\n<function=lookup>\n<parameter=n>\n5\n</parameter>\n</function>\n", "</tool_call>", "{\"n\":5}", "" },
-        .{ "<tool_call>lookup<arg_key>n</arg_key><arg_value>7</arg_value>", "</tool_call>", "{\"n\":7}", "" },
-        .{ "<tool_call>{\"name\":\"lookup\"}</tool_call>\n<tool_call>{\"name\":\"lookup\",\"arguments\":{\"n\":2}", "}</tool_call>", "{\"n\":2}", "" },
-        .{ "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":\"<tool_call>\"}", "}</tool_call>", "{\"q\":\"<tool_call>\"}", "" },
-        .{ "<tool_call>{\"name\":\"launch\",\"arguments\":{\"when\":\"now\"}", "}</tool_call>", "{\"when\":\"now\"}", "" },
-    };
-    for (cases) |c| {
-        const close = try closeCall(a, c[0], tools);
-        try std.testing.expectEqualStrings(c[1], close);
-        const r = try parse(a, try std.mem.concat(a, u8, &.{ c[0], close }), tools, null);
-        try std.testing.expectEqualStrings(c[2], r.calls.?[r.calls.?.len - 1].get("function").?.get("arguments").?.string);
-        try std.testing.expectEqualStrings(c[3], r.content);
-    }
-}
-
-test "a call left open that would not parse whole stays the reply's text" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"parameters\":{\"properties\":{\"n\":{\"type\":\"integer\"}}}}}]")).ok.array;
-    const replies = [_][]const u8{
-        "Trying.<tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":\"fast ca", // inside a string
-        "Trying.<tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":", // a key without its value
-        "Trying.<tool_call>\n<function=lookup>\n<parameter=q>\nfast ca", // inside a parameter
-        "Trying.<tool_call>\n<function=lookup>\n<parameter=n>\n5\n", // before its </parameter>
-        "Trying.<tool_call>{\"name\":\"launch rocket!\",\"arguments\":{}}", // no function name
-        "Trying.<tool_call>lookup<arg_key>n</arg_key><arg_value>7", // a GLM value left open
-        "Trying.<tool_call>", // nothing written
-        "Trying <tool_call> tags.<tool_call>{\"name\":\"lookup\"}", // an earlier opener would take the closer
-    };
-    for (replies) |text| {
-        try std.testing.expectEqualStrings("", try closeCall(a, text, tools));
-        const r = try parse(a, text, tools, null);
-        try std.testing.expect(r.calls == null);
-        try std.testing.expectEqualStrings(text, r.content);
-    }
-}
-
-test "replies that end outside a call close nothing" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]")).ok.array;
-    const replies = [_][]const u8{
-        "Done.",
-        "<tool_call>{\"name\":\"lookup\"}</tool_call>",
-        "<tool_call>\n<function=lookup>\n</function>\n</tool_call> Done.",
-    };
-    for (replies) |text| try std.testing.expectEqualStrings("", try closeCall(a, text, tools));
-}
-
-test "a call to a tool the request did not offer goes out under its own name" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]")).ok.array;
-    const launch = "<tool_call><function=launch><parameter=when>now</parameter></function></tool_call>";
-    const kept = [_][]const u8{
-        "<tool_call>{\"name\": \"launch rocket!\", \"arguments\": {\"when\": \"now\"}}</tool_call>", // no function name
-        "<tool_call>{\"name\": \"launch\", \"arguments\": {\"when\": NaN}}</tool_call>", // arguments not finite
-    };
-    for ([_]?usize{ null, 1 }) |max_calls| {
-        const r = try parse(a, launch, tools, max_calls);
-        try std.testing.expectEqual(@as(usize, 1), if (r.calls) |calls| calls.len else 0);
-        try std.testing.expectEqualStrings("launch", r.calls.?[0].get("function").?.get("name").?.string);
-        try std.testing.expectEqualStrings("{\"when\":\"now\"}", r.calls.?[0].get("function").?.get("arguments").?.string);
-        try std.testing.expectEqualStrings("", r.content);
-        // these stay the reply's text in either mode
-        for (kept) |text| {
-            const k = try parse(a, text, tools, max_calls);
-            try std.testing.expect(k.calls == null);
-            try std.testing.expectEqualStrings(text, k.content);
-        }
-    }
-    // a call malformed under the one-call reading stays text too
-    const malformed = "Launching. <tool_call><function=launch><parameter=when>now</function></tool_call>";
-    try std.testing.expectEqualStrings(malformed, (try parse(a, malformed, tools, 1)).content);
-    // an offered tool keeps its offered spelling; bare JSON naming one not offered stays content
-    const offered = try parse(a, "<tool_call>{\"name\":\"LOOKUP\"}</tool_call>", tools, null);
-    try std.testing.expectEqualStrings("lookup", offered.calls.?[0].get("function").?.get("name").?.string);
-    try std.testing.expect((try parse(a, "{\"name\":\"launch\",\"arguments\":{}}", tools, null)).calls == null);
 }
