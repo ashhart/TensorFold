@@ -9,7 +9,7 @@ The release includes these qualified model and hardware combinations:
 | Model | Qualified platform | Serving scope |
 | --- | --- | --- |
 | Nemotron 3.5 Lightning | Apple Metal, M1 through M5 | Native text serving and its draft head |
-| Nemotron 3.5 Lightning | NVIDIA GB10, CUDA | Greedy text serving |
+| Nemotron 3.5 Lightning | NVIDIA GB10, CUDA | Text serving, greedy and sampled |
 | Qwen3.8 Flash Next | Apple Metal, M5 Ultra | Greedy text serving from the checkpoint, without a Python kernel recording |
 | GLM-5.3-Flash | Apple Metal, two M5 Ultra Macs | Paired text serving |
 | Qwen3.5-2B | Apple Metal, M5 Max | Native text serving |
@@ -20,21 +20,29 @@ Hardware support is specific to the combinations above. Qwen3.8-27B, Bonsai, Gem
 
 Flash Next builds its native layouts from the checkpoint and uses embedded Metal sources. It no longer needs a Python recording before serving.
 
-The server exposes OpenAI chat and completion routes, Anthropic Messages and token counting, tool calls, streaming responses, tokenization. Health, metrics and an optional dashboard expose server status. The current `/v1/decisions` route returns HTTP 404. API-key controls, prompt caching and request cancellation are implemented in the native server.
+The server exposes OpenAI chat and completion routes, Anthropic Messages and token counting, tool calls, streaming responses, tokenization. Health, metrics and an optional dashboard expose server status. `/v1/decisions` checks requests the way 0.6.6 does; label scoring for each family follows in 1.0.x. API-key controls, prompt caching and request cancellation are implemented in the native server.
 
 Metal engines support configurable idle keepalive through `--keep-warm`. A load-time probe selects a prebuilt packed-kernel library when macOS 26.3's runtime compiler rejects that kernel.
 
-Release archives target macOS arm64 and Linux x86_64/aarch64. They contain `bin/tensorfold-native`, runtime information and license notices. CUDA needs a compatible NVIDIA driver and the qualified kernel assets described in the deployment instructions; paired Metal serving needs its transport and peer configuration. See [README.md](README.md) for installation and [RUNBOOK.md](RUNBOOK.md) for deployment.
+Release archives target macOS arm64 and Linux aarch64 for the GB10. They contain `bin/tensorfold-native`, runtime information and license notices. CUDA needs a compatible NVIDIA driver and the qualified kernel assets described in the deployment instructions; paired Metal serving needs its transport and peer configuration. See [README.md](README.md) for installation and [RUNBOOK.md](RUNBOOK.md) for deployment.
 
-The shipped commands include `--version`, `--help`, `capabilities --json` and `serve MODEL`. Use `serve MODEL --help` and the capabilities output for supported flags and backends.
+The shipped commands include `--version`, `--help`, `capabilities --json`, `serve MODEL`, and `pull`, `models` and `info` for checkpoints in the Hugging Face cache. Use `serve MODEL --help` and the capabilities output for supported flags and backends.
 
-## CUDA limits in 1.0.0
+## Concurrency
 
-The GB10 qualification covers greedy decoding. Sampled requests do not yet honor their seed, and `top_k: 0` fails on the sampled path. Health and metrics do not yet report CUDA device and pinned-memory usage. These fixes are planned for 1.0.1; they are not part of this release's qualification.
+Nemotron runs concurrent requests in shared rounds on Metal and CUDA, and every stream equals its solo run. On an M5 Max, eight concurrent requests reach 436.7 tok/s together, against 262.8 for one. Flash Next and GLM-5.3 answer one request at a time in 1.0.0; their shared rounds follow in 1.0.x.
+
+## Context compaction
+
+`--compact-at auto|FRACTION` turns on context compaction, which is off by default. A conversation that would overflow is compacted instead of refused. The server keeps the system prompt and the recent turns word for word, turns the older turns into a structured memory note, and updates that note at each later compaction. `--compact-keep` sets how much recent text stays, and `--compact-memory DIR` also keeps each note as a Markdown file. The same request gives the same compaction and the same reply.
+
+## CUDA in 1.0.0
+
+On the GB10, greedy and sampled replies equal the one-token reference, seeds and every sampling rule behave as in 0.6.6, concurrent streams equal their solo runs, and health and metrics report device memory. Decode runs 1.01x to 1.10x the Python 0.6.6 engine on the same Spark. Other NVIDIA GPUs and the other families stay on the Python line for now.
 
 ## Moving from Python 0.6
 
-The Python 0.6.6 engine remains on the `python-0.6` branch and the `v0.6.6` tag. Its historical release entries remain in [CHANGELOG.md](CHANGELOG.md). The native release's model table and capabilities define its supported options; older Python CLI features and model backends are maintained on the Python line.
+The Python 0.6.6 engine remains on the `python-0.6` branch and the `v0.6.6` tag. Its historical release entries remain in [CHANGELOG.md](CHANGELOG.md). The native release's model table and capabilities define its supported options; older Python CLI features and model backends are maintained on the Python line. A `pip install` of 1.0.0 stops with directions instead of replacing a working 0.6.6 install.
 
 TensorFold is Apache-2.0. Earlier code retains the bundled MIT notice, and model weights retain their own licenses; see [LICENSE](LICENSE), [NOTICE](NOTICE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
