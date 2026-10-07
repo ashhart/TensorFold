@@ -209,7 +209,7 @@ pub const Engine = struct {
     }
 
     /// The most this Mac may load: 70% of its RAM in GiB, read as GB (the floor's 179 GB on a 256 GiB Mac, the strict reading).
-    fn loadLimit() usize {
+    pub fn loadLimit() usize {
         var mem: u64 = 0;
         var len: usize = @sizeOf(u64);
         if (std.c.sysctlbyname("hw.memsize", &mem, &len, null, 0) != 0 or mem == 0) return 0;
@@ -263,22 +263,12 @@ pub const Engine = struct {
         return e.w.mtp != null;
     }
 
-    /// Expert parallel's rank 1: it runs rank 0's requests (`follow`), never its own.
+    /// Expert parallel's rank 1: it runs rank 0's requests and slot commands (mirror.follow), never its own.
     pub fn followsPeer(e: *const Engine) bool {
         return if (e.ep) |ep| ep.rank == 1 else false;
     }
 
-    /// Rank 1: each request rank 0 hands over, in step with it, until `stopFollowing`.
-    pub fn follow(e: *Engine) !void {
-        const ep = e.ep orelse return;
-        var dummy: u8 = 0;
-        const quiet: Out = .{ .ctx = &dummy, .prefilled = Quiet.prefilled, .tokens = Quiet.tokens, .cancelled = Quiet.cancelled };
-        while (try ep.ctl.waitRequest()) |r| _ = e.generate(r.prompt, r.max_tokens, r.eos, r.depth, quiet) catch |err| switch (err) {
-            error.ContextFull, error.EmptyPrompt => continue, // refused before its first step, on rank 0 too
-            else => return err,
-        };
-    }
-
+    /// Rank 1's follower (mirror.follow) ends its wait for rank 0's next command.
     pub fn stopFollowing(e: *Engine) void {
         if (e.ep) |ep| ep.ctl.stop.store(true, .release);
     }
@@ -325,7 +315,7 @@ pub const Engine = struct {
     }
 
     /// One bf16 row of `D` values from `src` to `dst`.
-    fn copyRow(x: *const fwd.Ctx, enc: mtl.ComputeEncoder, src: Ref, dst: Ref, D: u32) void {
+    pub fn copyRow(x: *const fwd.Ctx, enc: mtl.ComputeEncoder, src: Ref, dst: Ref, D: u32) void {
         enc.setPipeline(x.k.copy_u32);
         enc.setBuffer(src.buf, src.off, 0);
         enc.setBuffer(dst.buf, dst.off, 1);

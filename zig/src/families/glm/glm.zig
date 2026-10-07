@@ -8,6 +8,9 @@ pub const mtp = @import("mtp.zig");
 pub const prompt = @import("prompt.zig");
 pub const engine = @import("engine.zig");
 pub const ep = @import("ep.zig");
+pub const slots = @import("slots.zig");
+pub const backend = @import("backend.zig");
+pub const mirror = @import("mirror.zig");
 
 test {
     _ = config;
@@ -19,4 +22,5 @@ test {
     _ = @import("../../core/hc.zig");
     _ = @import("../../core/copy_index.zig");
     _ = @import("attn_check.zig");
+    _ = mirror;
 }

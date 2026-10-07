@@ -1,4 +1,4 @@
-//! The engines a native server opens on Metal: Nemotron and Qwen3.5-2B on the lane core, Flash Next on its replay engine, GLM-5.3-Flash on its own.
+//! The engines a native server opens on Metal: Nemotron, Qwen3.5-2B and GLM-5.3-Flash on the lane core, Flash Next on its replay engine.
 const std = @import("std");
 const mtl = @import("metal");
 const api = @import("engine_api");
@@ -172,7 +172,7 @@ fn openGlm(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]co
     }
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const h = glm.open(gpa, io, o.dir, @intCast(window), o.speed_up) catch |e| {
+    const h = glm.open(gpa, io, o.dir, @intCast(window), o.speed_up, o.lanes, o.lanes_fixed) catch |e| {
         problem.* = try std.fmt.allocPrint(a, "the native GLM-5.3-Flash engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
         return null;
     };

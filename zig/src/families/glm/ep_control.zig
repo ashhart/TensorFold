@@ -48,6 +48,9 @@ comptime {
 
 pub const Request = struct { max_tokens: usize, depth: usize, eos: []const u32, prompt: []const u32 };
 
+/// What rank 0 hands over: a request rank 1 runs in step, or a lane command (its kind, never 0, and its words).
+pub const Command = union(enum) { request: Request, lanes: struct { kind: u32, words: []const u32 } };
+
 fn ticks() u64 {
     return std.c.mach_absolute_time(); // 24 MHz on Apple silicon
 }
@@ -138,20 +141,41 @@ pub const Control = struct {
         try c.rd.write2Signal(c.peer, c.base + REQ, std.mem.sliceAsBytes(&head), std.mem.sliceAsBytes(r.prompt), c.base + REQ_FLAG, c.req);
     }
 
-    /// Rank 1: rank 0's next request, copied out and acknowledged; null once closed; a skipped request is refused.
-    pub fn waitRequest(c: *Control) !?Request {
+    /// Rank 0: a lane command (kind > 0) in the request region, once rank 1 has copied out the one before.
+    pub fn sendCommand(c: *Control, kind: u32, words: []const u32) !void {
+        if (kind == 0 or words.len > REQ_TOKENS) return error.EpRequestTooLarge;
+        if (c.req > 0) _ = try c.reach(REQ_ACK, c.req, true) orelse return error.EpClosed;
+        var head: [16]u32 = @splat(0);
+        head[2] = @intCast(words.len);
+        head[15] = kind;
+        c.req += 1;
+        try c.rd.write2Signal(c.peer, c.base + REQ, std.mem.sliceAsBytes(&head), std.mem.sliceAsBytes(words), c.base + REQ_FLAG, c.req);
+    }
+
+    /// Rank 1: rank 0's next request or command, copied out and acked; null once closed; a skipped one is refused.
+    pub fn waitCommand(c: *Control) !?Command {
         const v = try c.reach(REQ_FLAG, c.req + 1, false) orelse return null;
         if (v != c.req + 1) return error.EpOutOfStep;
         c.req = v;
         const head: [*]const u32 = @ptrCast(@alignCast(c.rd.window().ptr + c.base + REQ));
         const tokens: [*]const u32 = @ptrCast(@alignCast(c.rd.window().ptr + c.base + REQ + 64));
-        const n_eos = @min(head[3], MAX_EOS);
         const n = @min(head[2], REQ_TOKENS);
-        @memcpy(c.eos[0..n_eos], head[4..][0..n_eos]);
         @memcpy(c.prompt[0..n], tokens[0..n]);
-        const r: Request = .{ .max_tokens = head[0], .depth = head[1], .eos = c.eos[0..n_eos], .prompt = c.prompt[0..n] };
+        const out: Command = if (head[15] != 0) .{ .lanes = .{ .kind = head[15], .words = c.prompt[0..n] } } else blk: {
+            const n_eos = @min(head[3], MAX_EOS);
+            @memcpy(c.eos[0..n_eos], head[4..][0..n_eos]);
+            break :blk .{ .request = .{ .max_tokens = head[0], .depth = head[1], .eos = c.eos[0..n_eos], .prompt = c.prompt[0..n] } };
+        };
         try c.rd.signal(c.peer, c.base + REQ_ACK, c.req);
-        return r;
+        return out;
+    }
+
+    /// Rank 1: rank 0's next request; null once closed; a command in its place is refused.
+    pub fn waitRequest(c: *Control) !?Request {
+        return switch (try c.waitCommand() orelse return null) {
+            .request => |r| r,
+            .lanes => error.EpOutOfStep,
+        };
     }
 
     /// Rank 0 closing: rank 1's waits end.
@@ -259,6 +283,35 @@ test "early cancels: rank 0 waits for rank 1's acks, nothing is overwritten or s
     try std.testing.expectEqual(@as(?anyerror, null), e0);
     p.c[0].bye();
     try std.testing.expectEqual(@as(?Request, null), try p.c[1].waitRequest()); // the goodbye ends rank 1's wait
+}
+
+test "lane commands and requests arrive in order, each word intact" {
+    const gpa = std.testing.allocator;
+    const p = try Pair.init(gpa);
+    defer p.deinit(gpa);
+    const Rank0 = struct {
+        fn run(c: *Control, out: *?anyerror) void {
+            out.* = null;
+            c.sendCommand(3, &.{ 7, 8, 9 }) catch |e| return set(out, e);
+            c.sendRequest(.{ .max_tokens = 4, .depth = 2, .eos = &.{5}, .prompt = &.{ 1, 2 } }) catch |e| return set(out, e);
+            c.sendCommand(6, &.{}) catch |e| return set(out, e);
+        }
+        fn set(out: *?anyerror, e: anyerror) void {
+            out.* = e;
+        }
+    };
+    var e0: ?anyerror = undefined;
+    const th = try std.Thread.spawn(.{}, Rank0.run, .{ &p.c[0], &e0 });
+    const a = (try p.c[1].waitCommand()).?;
+    try std.testing.expectEqual(@as(u32, 3), a.lanes.kind);
+    try std.testing.expectEqualSlices(u32, &.{ 7, 8, 9 }, a.lanes.words);
+    const r = (try p.c[1].waitCommand()).?;
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, r.request.prompt);
+    try std.testing.expectEqualSlices(u32, &.{5}, r.request.eos);
+    try std.testing.expectError(error.EpOutOfStep, p.c[1].waitRequest()); // a command where a request was due
+    th.join();
+    try std.testing.expectEqual(@as(?anyerror, null), e0);
+    try std.testing.expectError(error.EpRequestTooLarge, p.c[0].sendCommand(0, &.{}));
 }
 
 test "a skipped request or step is refused, and a dead link ends a wait" {

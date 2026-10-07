@@ -129,20 +129,28 @@ pub const Scratch = struct {
     yp: Ref, // fp32 [rows * topk, D]: expert parallel by rows, each pick's down partial
 };
 
-/// The sequence state for `cap` tokens and the scratch for windows of up to 16 rows.
-pub fn init(arena: *Arena, c: *const cfg.Config, cap: u32) !struct { state: State, scratch: Scratch } {
-    const R: usize = max_rows;
-    const D: usize = c.hidden;
+/// The bytes `initState` takes for `cap` tokens (`shared`: with another state's projections).
+pub fn stateBytes(c: *const cfg.Config, cap: u32, shared: bool) usize {
+    const st_bytes: usize = @as(usize, c.kda_heads) * c.kda_dim * c.kda_dim * 4;
+    const cs_bytes: usize = @as(usize, c.conv - 1) * 3 * c.kdaWidth() * 2;
+    const proj_bytes: usize = if (shared) 0 else max_rows * c.kdaProj() * 2;
+    const n_mla = c.countKind(.mla) + @as(u32, if (c.mtp > 0) 1 else 0);
+    const mla: usize = @as(usize, cap) * (c.kv_lora + 2 * c.i_dim) * 2 + @as(usize, cap / c.kpool + 1) * c.i_dim * 2 + 4 * 256;
+    return c.countKind(.kda) * (2 * st_bytes + 2 * cs_bytes + proj_bytes + 5 * 256) + n_mla * mla;
+}
+
+/// One sequence's caches for `cap` tokens; with `share`, its KDA projections are `share`'s (any stream's window rows).
+pub fn initState(arena: *Arena, c: *const cfg.Config, cap: u32, share: ?*const State) !State {
     var s: State = .{ .cap = cap };
     const n_kda = c.countKind(.kda);
     const st_bytes: usize = @as(usize, c.kda_heads) * c.kda_dim * c.kda_dim * 4;
     const cs_bytes: usize = @as(usize, c.conv - 1) * 3 * c.kdaWidth() * 2;
-    const proj_bytes: usize = R * c.kdaProj() * 2;
+    const proj_bytes: usize = if (share == null) max_rows * c.kdaProj() * 2 else 0;
     var kc: Carve = .{ .base = try arena.buffer(n_kda * (2 * st_bytes + 2 * cs_bytes + proj_bytes + 5 * 256)) };
     for (0..n_kda) |i| s.kda[i] = .{
         .st = .{ kc.take(st_bytes), kc.take(st_bytes) },
         .cs = .{ kc.take(cs_bytes), kc.take(cs_bytes) },
-        .proj = kc.take(proj_bytes),
+        .proj = if (share) |o| o.kda[i].proj else kc.take(proj_bytes),
     };
     const n_mla = c.countKind(.mla) + @as(u32, if (c.mtp > 0) 1 else 0);
     for (0..n_mla) |i| {
@@ -154,6 +162,14 @@ pub fn init(arena: *Arena, c: *const cfg.Config, cap: u32) !struct { state: Stat
             .pool = m.take(@as(usize, cap / c.kpool + 1) * c.i_dim * 2),
         };
     }
+    return s;
+}
+
+/// The sequence state for `cap` tokens and the scratch for windows of up to 16 rows.
+pub fn init(arena: *Arena, c: *const cfg.Config, cap: u32) !struct { state: State, scratch: Scratch } {
+    const R: usize = max_rows;
+    const D: usize = c.hidden;
+    const s = try initState(arena, c, cap, null);
     const H: usize = c.mla_heads;
     const V: usize = c.vocab;
     const sizes = [_]usize{

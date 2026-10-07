@@ -28,7 +28,26 @@ pub const Ctx = struct {
     fused_route: bool = true, // the core route (two launches); false: the Python family's cast, router and top-k
     draft_vocab: u32 = 154880, // the MTP head's tokens: the vocabulary's first this many
     m_row: u32 = 0, // the MTP head's logits row in m_logits (a rank log keeps each depth's in its own row)
+    segs: []const Seg = &.{}, // a shared window's streams in row order (empty: every row is `s`'s)
 };
+
+/// One stream's rows in a shared window: its caches, its first row, its rows and the position of the first.
+pub const Seg = struct { s: *st.State, row0: u32, rows: u32, pos: u32 };
+
+/// The window's streams: the context's segments, or every row as `s`'s from `pos`.
+fn segments(x: *const Ctx, rows: u32, pos: u32, one: *[1]Seg) []const Seg {
+    if (x.segs.len > 0) return x.segs;
+    one[0] = .{ .s = x.s, .row0 = 0, .rows = rows, .pos = pos };
+    return one;
+}
+
+/// The context reading segment `g`'s caches.
+fn withState(x: *const Ctx, g: Seg) Ctx {
+    var y = x.*;
+    y.s = g.s;
+    y.segs = &.{};
+    return y;
+}
 
 /// Single launches (or tight groups) for a profile that times each alone.
 pub const Part = struct {
@@ -155,12 +174,19 @@ pub fn boundary(x: *Ctx, e: mtl.ComputeEncoder, rows: u32, pending: bool, hc: ?w
     if (pending) x.xi = 1 - x.xi;
 }
 
-/// KDA layer `ki` on `normed`: the stacked projection (kept for a replay), the fused step into the other slot, the out-projection.
+/// KDA layer `ki` on `normed`: the stacked projection (kept for a replay), each stream's fused step, the out-projection.
 fn kda(x: *Ctx, e: mtl.ComputeEncoder, ki: usize, w: *const wts.Kda, rows: u32) void {
     const sc = x.sc;
-    const L = &x.s.kda[ki];
-    if (on(x, "kda_in")) qmv(x, e, x.k.qmv_kda_in, sc.normed, w.in_proj, L.proj, rows);
-    if (on(x, "kda_step")) kdaStep(x, e, ki, w, L.proj, rows, sc.y);
+    const proj = x.s.kda[ki].proj; // every stream's state shares it: the window's rows
+    if (on(x, "kda_in")) qmv(x, e, x.k.qmv_kda_in, sc.normed, w.in_proj, proj, rows);
+    if (on(x, "kda_step")) {
+        var one: [1]Seg = undefined;
+        for (segments(x, rows, 0, &one)) |g| {
+            std.debug.assert(g.s.kda[ki].proj.addr() == proj.addr());
+            var y = withState(x, g);
+            kdaStep(&y, e, ki, w, proj.at(@as(usize, g.row0) * x.c.kdaProj() * 2), g.rows, sc.y.at(@as(usize, g.row0) * x.c.kdaWidth() * 2));
+        }
+    }
     if (on(x, "kda_out")) qmv(x, e, x.k.qmv_kda_out, sc.y, w.o_proj, sc.branch, rows);
 }
 
@@ -184,32 +210,40 @@ pub fn mla(x: *Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.Mla, x_in: R
     const c = x.c;
     const k = x.k;
     const sc = x.sc;
-    const C = &x.s.mla[mi];
-    const H = c.mla_heads;
-    const RANK = c.kv_lora;
+    var one: [1]Seg = undefined;
+    const segs = segments(x, rows, pos, &one);
     if (on(x, "mla_proj")) {
         qmv(x, e, k.qmv_x, x_in, w.x_proj, sc.xp, rows);
         rms(x, e, sc.xp, w.q_norm, sc.qr, rows, c.q_lora, c.xProj(), c.q_lora, c.eps);
         qmv(x, e, k.qmv_qr, sc.qr, w.qr_proj, sc.qp, rows);
     }
-    if (on(x, "mla_cache")) mlaCache(x, e, mi, w, x_in, sc.xp, c.xProj(), sc.iw, rows, pos);
-    var dense: u32 = 0; // rows whose keys all fit index_topk attend every key (MLX's unfused attention)
-    while (dense < rows and pos + dense + 1 <= c.i_topk) dense += 1;
-    if (on(x, "mla_absorb")) {
-        absorb(x, e, w, sc.qp, sc.ql, rows);
-        if (dense > 0) scale(x, e, sc.ql, sc.qls, dense * H, RANK, RANK, RANK, 1.0 / 16.0);
-    }
-    if (on(x, "mla_attn")) {
-        for (0..dense) |ri| {
-            const r: u32 = @intCast(ri);
-            const n = pos + r + 1;
-            const plane = @as(usize, H) * c.i_topk * 2;
-            attendDense(x, e, C.keys, sc.qls.at(@as(usize, r) * H * RANK * 2), sc.scores.at(r * plane), sc.probs.at(r * plane), sc.att.at(@as(usize, r) * H * RANK * 2), n);
-        }
-        if (dense < rows) attendSparse(x, e, mi, rows, pos, dense);
-    }
+    if (on(x, "mla_cache")) for (segs) |g| {
+        const y = withState(x, g);
+        mlaCache(&y, e, mi, w, x_in.at(@as(usize, g.row0) * c.hidden * 2), sc.xp.at(@as(usize, g.row0) * c.xProj() * 2), c.xProj(), sc.iw.at(@as(usize, g.row0) * c.i_heads * 2), g.rows, g.pos);
+    };
+    if (on(x, "mla_absorb")) absorb(x, e, w, sc.qp, sc.ql, rows);
+    for (segs) |g| attend(&withState(x, g), e, mi, g);
     if (on(x, "mla_unabs")) unabsorb(x, e, w, sc.att, sc.vals, rows);
     if (on(x, "mla_out")) qmv(x, e, k.qmv_mla_out, sc.vals, w.o_proj, sc.branch, rows);
+}
+
+/// One stream's rows over its own cache: rows whose keys all fit index_topk attend every key (MLX's unfused attention).
+fn attend(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, g: Seg) void {
+    const c = x.c;
+    const sc = x.sc;
+    const H = c.mla_heads;
+    const RANK = c.kv_lora;
+    const lat = @as(usize, H) * RANK * 2; // a row's latent queries
+    var dense: u32 = 0;
+    while (dense < g.rows and g.pos + dense + 1 <= c.i_topk) dense += 1;
+    if (on(x, "mla_absorb") and dense > 0) scale(x, e, sc.ql.at(g.row0 * lat), sc.qls.at(g.row0 * lat), dense * H, RANK, RANK, RANK, 1.0 / 16.0);
+    if (!on(x, "mla_attn")) return;
+    const plane = @as(usize, H) * c.i_topk * 2;
+    for (0..dense) |ri| {
+        const r: usize = g.row0 + ri;
+        attendDense(x, e, x.s.mla[mi].keys, sc.qls.at(r * lat), sc.scores.at(r * plane), sc.probs.at(r * plane), sc.att.at(r * lat), g.pos + @as(u32, @intCast(ri)) + 1);
+    }
+    if (dense < g.rows) attendSparse(x, e, mi, g, dense);
 }
 
 /// Rows' latent keys, indexer keys and gates into MLA cache `mi` at pos.., their indexer weights into `iw`, the blocks they complete.
@@ -271,13 +305,14 @@ pub fn attendDense(x: *const Ctx, e: mtl.ComputeEncoder, keys: Ref, q: Ref, scor
     e.dispatchGroups(size(x.c.kv_lora / 32, 1, 1), size(128, 1, 1));
 }
 
-/// Rows [first, rows) past index_topk keys: fp32 block scores, the best blocks in block order plus the tail, the sparse kernel.
-fn attendSparse(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, rows: u32, pos: u32, first: u32) void {
+/// A stream's rows [first, rows) past index_topk keys: fp32 block scores, the best blocks in block order plus the tail, the sparse kernel.
+fn attendSparse(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, g: Seg, first: u32) void {
     const c = x.c;
     const sc = x.sc;
-    const n = rows - first;
-    selectKeys(x, e, mi, sc.qp.at((@as(usize, first) * c.qrProj() + c.mla_heads * c.nope) * 2), c.qrProj(), sc.iw.at(@as(usize, first) * c.i_heads * 2), sc.sscore, sc.indices, n, pos + first);
-    attendIndexed(x, e, mi, sc.ql.at(@as(usize, first) * c.mla_heads * c.kv_lora * 2), sc.indices, sc.att.at(@as(usize, first) * c.mla_heads * c.kv_lora * 2), n, pos + rows);
+    const n = g.rows - first;
+    const r: usize = g.row0 + first; // the first sparse row's place in the window
+    selectKeys(x, e, mi, sc.qp.at((r * c.qrProj() + c.mla_heads * c.nope) * 2), c.qrProj(), sc.iw.at(r * c.i_heads * 2), sc.sscore, sc.indices, n, g.pos + first);
+    attendIndexed(x, e, mi, sc.ql.at(r * c.mla_heads * c.kv_lora * 2), sc.indices, sc.att.at(r * c.mla_heads * c.kv_lora * 2), n, g.pos + g.rows);
 }
 
 /// Key lists for `n` rows at positions p0.. past index_topk keys (indexer queries `iq` a row `q_stride` apart).
@@ -515,13 +550,19 @@ pub fn headOver(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, logits: Ref, pick
 
 /// A judged window's first `keep` of `rows` in every KDA layer (replayed from the round's entry state when some were rejected).
 pub fn keepKda(x: *Ctx, e: mtl.ComputeEncoder, rows: u32, keep: u32) void {
+    keepKdaAt(x, e, 0, rows, keep);
+}
+
+/// keepKda for the stream of `x.s` whose rows began at row `row0` of the shared window.
+pub fn keepKdaAt(x: *Ctx, e: mtl.ComputeEncoder, row0: u32, rows: u32, keep: u32) void {
+    if (keep >= rows) return;
     var ki: usize = 0;
     for (0..x.c.run) |li| {
         const a = switch (x.w.layers[li].attn) {
             .kda => |*a| a,
             .mla => continue,
         };
-        if (keep < rows) kdaStep(x, e, ki, a, x.s.kda[ki].proj, keep, x.sc.y);
+        kdaStep(x, e, ki, a, x.s.kda[ki].proj.at(@as(usize, row0) * x.c.kdaProj() * 2), keep, x.sc.y);
         ki += 1;
     }
 }
