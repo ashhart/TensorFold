@@ -116,11 +116,11 @@ pub fn main(init: std.process.Init) !u8 {
     std.debug.print("writeback streams identical {} max_ulp {d}\n", .{ !streams_differ, max_ulp });
     if (copies_differ or streams_differ or max_ulp > 4) return 1;
 
-    const norm_mismatch = try runDown(gpa, &driver, &stream, &set, &mapped, wide.ptr, pss.ptr, wide_u16, pss_bytes, table.dims, streams, nc);
+    const norm_mismatch = try runDown(gpa, io, args[1], &driver, &stream, &set, &mapped, wide.ptr, pss.ptr, wide_u16, pss_bytes, table.dims, streams, nc);
     return if (norm_mismatch == 0) 0 else 1;
 }
 
-fn runDown(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Stream, set: *cuda.aot.Set, mapped: *const embed.Mapped, h: u64, pss: u64, wide_u16: []const u16, pss_bytes: []const u8, dims: usize, streams: usize, nc: usize) !usize {
+fn runDown(gpa: std.mem.Allocator, io: std.Io, model_dir: []const u8, driver: *cuda.Driver, stream: *cuda.Stream, set: *cuda.aot.Set, mapped: *const embed.Mapped, h: u64, pss: u64, wide_u16: []const u16, pss_bytes: []const u8, dims: usize, streams: usize, nc: usize) !usize {
     const prefix = "language_model.model.layers.0.attn_hyper_connection.";
     var name: [180]u8 = undefined;
     const down_w = try mapped.lookup(gpa, try std.fmt.bufPrint(&name, "{s}input_mix_weight_down.weight", .{prefix}), .u32);
@@ -295,7 +295,7 @@ fn runDown(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Stream, s
     }
     std.debug.print("upmix dims {d} off {d} max_steps {d} head {x:0>4} host {x:0>4}\n", .{ dims, mixed_off, max_steps, std.mem.readInt(u16, mixed_bytes[0..2], .little), host_mixed[0] });
     if (max_steps > 2) return 1;
-    const rest = try runProj(gpa, driver, stream, mapped, mixed_b, xsm_b, tri, h, inj_out.ptr, wide_u16);
+    const rest = try runProj(gpa, io, model_dir, driver, stream, mapped, mixed_b, xsm_b, tri, h, inj_out.ptr, wide_u16);
     if (rest != 0) return 1;
     return mismatch;
 }
@@ -303,7 +303,7 @@ fn runDown(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Stream, s
 const proj_names = [_][]const u8{ "in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a" };
 const proj_rows = [_]usize{ 10240, 6144, 48, 48 };
 
-fn runProj(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Stream, mapped: *const embed.Mapped, mixed: cuda.DeviceBuffer, xs: cuda.DeviceBuffer, tri: flash.Tri, h: u64, inj: u64, hidden: []const u16) !u32 {
+fn runProj(gpa: std.mem.Allocator, io: std.Io, model_dir: []const u8, driver: *cuda.Driver, stream: *cuda.Stream, mapped: *const embed.Mapped, mixed: cuda.DeviceBuffer, xs: cuda.DeviceBuffer, tri: flash.Tri, h: u64, inj: u64, hidden: []const u16) !u32 {
     const prefix = "language_model.model.layers.0.linear_attn.";
     const k8: usize = 320;
     const kg: usize = 80;
@@ -384,5 +384,7 @@ fn runProj(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Stream, m
     defer gpa.free(slices);
     const wrote = try flash.mlp.connect(flash.Tri, gpa, driver, stream, mapped, tri, h, inj, hidden, slices);
     if (wrote != 0) return wrote;
-    return flash.moe.experts(flash.Tri, gpa, driver, stream, mapped, tri, mixed.ptr);
+    const routed = try flash.moe.experts(flash.Tri, gpa, driver, stream, mapped, tri, mixed.ptr);
+    if (routed != 0) return routed;
+    return flash.attn.decode(flash.Tri, gpa, driver, stream, io, model_dir, tri, mixed.ptr, xs.ptr);
 }

@@ -10,6 +10,7 @@ pub const qmm = @import("cuda_qmm.zig");
 pub const gdn = @import("cuda_gdn.zig");
 pub const mlp = @import("cuda_mlp.zig");
 pub const moe = @import("cuda_moe.zig");
+pub const attn = @import("cuda_attn.zig");
 
 const p = aot.ptr;
 
@@ -56,6 +57,70 @@ pub const Tri = struct {
             p("B", "*bf16", biases),
             p("OUT", "*bf16", out),
         }, &.{ ci("D", dims), ci("S_COPIES", copies) });
+    }
+
+    /// glue.attn_gate: one program per row and per query head.
+    pub fn attnGate(t: Tri, o: u64, proj: u64, out: u64, xs: u64, rows: usize, pair_width: usize, q_heads: usize, head_dim: usize) !void {
+        try t.run("_attn_gate", .{ u(rows), u(q_heads), 1 }, &.{
+            p("O", "*bf16", o),
+            p("P", "*bf16", proj),
+            p("OUT", "*bf16", out),
+            p("XS", "*fp32", xs),
+        }, &.{ ci("PW", pair_width), ci("NQ", q_heads), ci("HD", head_dim) });
+    }
+
+    /// glue.attn_prep for text positions. The grid includes the indexer key. `length` is unused when MODE is 0.
+    pub fn attnPrep(t: Tri, proj: u64, pos: u64, q_scale: u64, k_scale: u64, i_scale: u64, inv: u64, q: u64, kc: u64, vc: u64, ks: u64, vs: u64, iq: u64, ikc: u64, rope: u64, delta: u64, eps: f32, rows: usize, length: usize) !void {
+        try t.run("_attn_prep", .{ u(rows), u(24 + 2 + 4 + 1), 1 }, &.{
+            p("P", "*bf16", proj),
+            p("POS0", "*i32", pos),
+            p("QW", "*fp32", q_scale),
+            p("KW", "*fp32", k_scale),
+            p("IW", "*fp32", i_scale),
+            p("INV", "*fp32", inv),
+            p("Q", "*bf16", q),
+            p("KC", "*bf16", kc),
+            p("VC", "*bf16", vc),
+            p("KS", "*fp16", ks),
+            p("VS", "*fp16", vs),
+            p("IQ", "*bf16", iq),
+            p("IKC", "*bf16", ikc),
+            p("ROPE", "*i32", rope),
+            p("DELTA", "*i32", delta),
+            int("length", length),
+            aot.float("eps", eps),
+        }, &.{ ci("PW", 13952), ci("NQ", 24), ci("NKV", 2), ci("HD", 256), ci("NI", 4), ci("IHD", 128), ci("HALF", 32), ci("BITS", 0), ci("MODE", 0), ci("S1", 11), ci("S2", 10) });
+    }
+
+    /// attention._chunks: one decode row, dense, the captured three-chunk scratch, one chunk launched.
+    pub fn attnChunks(t: Tri, q: u64, kc: u64, vc: u64, ks: u64, vs: u64, pos: u64, po: u64, pm: u64, pl: u64, ids: u64, nk: u64, sparse: u64, rows: usize, kv: usize, chunks: usize) !void {
+        try t.run("_chunks", .{ u(rows), u(kv), u(chunks) }, &.{
+            p("Q", "*bf16", q),
+            p("KC", "*bf16", kc),
+            p("VC", "*bf16", vc),
+            p("KSC", "*fp16", ks),
+            p("VSC", "*fp16", vs),
+            p("POS0", "*i32", pos),
+            p("PO", "*fp32", po),
+            p("PM", "*fp32", pm),
+            p("PL", "*fp32", pl),
+            p("IDS", "*i32", ids),
+            p("NKR", "*i32", nk),
+            p("SPR", "*i32", sparse),
+        }, &.{ ci("H", 24), ci("HK", 2), ci("D", 256), ci("G", 12), ci("CH", 512), ci("NCH", 3), aot.cf("SCALE", 0.0625), ci("IDW", 2052), ci("QSA", 0), ci("BITS", 0) });
+    }
+
+    /// attention._merge: one program per row and per KV head.
+    pub fn attnMerge(t: Tri, po: u64, pm: u64, pl: u64, pos: u64, out: u64, nk: u64, sparse: u64, rows: usize, kv: usize) !void {
+        try t.run("_merge", .{ u(rows), u(kv), 1 }, &.{
+            p("PO", "*fp32", po),
+            p("PM", "*fp32", pm),
+            p("PL", "*fp32", pl),
+            p("POS0", "*i32", pos),
+            p("OUT", "*bf16", out),
+            p("NKR", "*i32", nk),
+            p("SPR", "*i32", sparse),
+        }, &.{ ci("H", 24), ci("HK", 2), ci("D", 256), ci("G", 12), ci("CH", 512), ci("NCH", 3), ci("QSA", 0), ci("BITS", 0) });
     }
 
     /// glue.hc_reduce_act: split-K sum fused with hc_act. M folds to a constexpr when it is 1.
@@ -143,6 +208,7 @@ test {
     _ = gdn;
     _ = mlp;
     _ = moe;
+    _ = attn;
 }
 
 test "embed grid is one program per row and per group of 32" {
