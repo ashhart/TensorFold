@@ -15,18 +15,26 @@ namespace {
 using namespace qmm_frag;
 
 __device__ __forceinline__ void mma8(float (&d)[4], const uint32_t (&a)[4], uint32_t b0, uint32_t b1) {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 890
     asm("mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "
         "{%0, %1, %2, %3};\n"
         : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
         : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+#else
+    asm("trap;\n");   // e4m3 MMA needs sm_89; unreachable there (FP8 prefill refused), keeps the TU compiling
+#endif
 }
 
 __device__ __forceinline__ void mma8z(float (&d)[4], const uint32_t (&a)[4], uint32_t b0, uint32_t b1) {
     const float z = 0.0f;
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 890
     asm("mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "
         "{%10, %10, %10, %10};\n"
         : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
         : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1), "f"(z));
+#else
+    asm("trap;\n");
+#endif
 }
 
 // e4m3 of the nibbles at bits [s, s + 4) (low byte) and [16 + s, 20 + s) (high byte): f16 1024 + q, minus 1024, cvt.
@@ -35,7 +43,11 @@ __device__ __forceinline__ uint32_t e4m3_pair(uint32_t w, int s) {
     uint32_t h;
     asm("sub.rn.f16x2 %0, %1, %2;\n" : "=r"(h) : "r"(t), "r"(0x64006400u));
     uint16_t r;
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 890
     asm("cvt.rn.satfinite.e4m3x2.f16x2 %0, %1;\n" : "=h"(r) : "r"(h));
+#else
+    r = 0;
+#endif
     return r;
 }
 
