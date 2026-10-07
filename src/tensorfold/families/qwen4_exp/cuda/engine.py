@@ -61,8 +61,11 @@ class FlashNextEngine:
                  draft_vocab: str | int | None = "default", max_len: int | None = None,
                  context_explicit: bool | None = None, tp: int = 1, rank: int = 0, master: str = "", port: int = 29551,
                  prefetch: bool = True, graphs: bool = True, streams: int = 1, ple_on_ssd: bool = False,
-                 kv_dtype: str = "bf16", share: float = 0.0, vision: bool = False, vision_urls: bool = False) -> None:
+                 kv_dtype: str = "bf16", share: float = 0.0, vision: bool = False, vision_urls: bool = False,
+                 copy_drafts: bool | None = None) -> None:
         import torch
+
+        from .copy_drafts import enabled as copy_enabled
 
         from .exl3_pack import admission, extra_files, is_exl3
 
@@ -94,6 +97,8 @@ class FlashNextEngine:
             raise ValueError(f"MTP draft confidence: a probability from 0 to 1, not {confidence}")
         torch.cuda.set_device(0)
         self.tp, self.rank, self.depth, self.confidence = tp, rank, int(depth), float(confidence)
+        # copy drafts (copy_drafts.py): on unless TENSORFOLD_COPY_DRAFTS=0, and never without MTP drafts
+        self.copy_drafts = bool(self.depth > 0 and copy_enabled(True if copy_drafts is None else bool(copy_drafts)))
         self.streams, self.master, self.graphs_enabled = int(streams), master, bool(graphs)
         self.kv_dtype = check_kv(kv_dtype)
         self.comm = None
@@ -193,6 +198,7 @@ class FlashNextEngine:
             self.e = None
             self.multi = MultiDecoder(w, slots=streams, capacity=self.max_len, depth=self.depth,
                                       confidence=self.confidence, keep=KEEP, points=self.points,
+                                      copy=getattr(self, "copy_drafts", False),
                                       kv_dtype=self.kv_dtype, share=share, vision=self.vision,
                                       prefill_rows=self.prefill_rows, workspace_bytes=prompt_workspace, graphs=graphs)
             self.scheduler = Scheduler(self.multi, max_streams=streams)
@@ -250,6 +256,8 @@ class FlashNextEngine:
         self.serial = None                                # the serial requests' engine, made on first use
         rule = (f"1 to {self.depth} MTP drafts a round, a chain stops before a later draft under "
                 f"{self.confidence:.0%}" if self.depth else "no drafts: the serial reference, one token a round")
+        if self.copy_drafts:
+            rule += f", or up to {self.depth} copy drafts where the reply repeats earlier text"
         where = (f"up to {streams} streams, each growing to {self.context_window} prompt/reply tokens while memory "
                  f"lasts ({self.multi.memory_gate.room / 2**30:.1f} GiB free for their caches, "
                  f"{self.multi.window_bytes / 2**30:.2f} GiB for one at the full window), eager" if self.concurrent else
@@ -437,8 +445,12 @@ class FlashNextEngine:
         if (on_tokens is not None and on_tokens([first])) or (stop_eos and first in self.eos) or max_tokens <= 1:
             return stats
         if self.depth > 0:
+            from .copy_drafts import CopyIndex
+
+            copies = CopyIndex(list(prompt) + [first]) if getattr(self, "copy_drafts", False) and constraint is None else None
             res = mtp_decode(self.e, first, max_tokens, sampling, depth=self.depth, confidence=self.confidence,
-                             stop_eos=stop_eos, on_tokens=on_tokens, constraint=constraint, probabilities=probabilities)
+                             stop_eos=stop_eos, on_tokens=on_tokens, constraint=constraint, probabilities=probabilities,
+                             copies=copies)
             stats.update(drafted=res.drafted, accepted=res.accepted, min_rows=min(res.widths, default=0))
         else:
             res = serial_decode(self.e, first, max_tokens, sampling, stop_eos=stop_eos, on_tokens=on_tokens,

@@ -8,7 +8,7 @@ from tensorfold.cuda.kernels import gdn
 from tensorfold.cuda.logprobs import capture
 from tensorfold.cuda.streams import Stream, accept
 
-from .decode import Engine, draft
+from .decode import absorb, Engine, draft
 from .forward import commit
 from .state import Buffers
 
@@ -120,8 +120,15 @@ class Alone:
         last = len(s.out) + len(new) >= s.count or end in self._ends(s)
         s.drafts = []
         room = min(self.depth, s.count - len(s.out) - len(path))
+        if s.copies is not None:                         # the copy index sees the round's tokens before the next draft
+            s.copies.extend(new)
         if not last and room > 0:
-            s.drafts = draft(e, e.buf.streams[:len(path)], rows[:len(path)], st.pos + 1, room, s.sampling,
-                             self.confidence)
+            copied = s.copies.chain(room) if s.copies is not None else []
+            if copied:                                   # copy drafts; the MTP cache still absorbs the kept rows
+                absorb(e, e.buf.streams[:len(path)], rows[:len(path)])
+                s.drafts = copied
+            else:
+                s.drafts = draft(e, e.buf.streams[:len(path)], rows[:len(path)], st.pos + 1, room, s.sampling,
+                                 self.confidence)
         s.take(new, self._ends(s))
         return [s] if s.done else []
