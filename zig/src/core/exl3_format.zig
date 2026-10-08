@@ -1,27 +1,4 @@
-//! The EXL3 trellis format (ExLlamaV3's QTIP-derived quantization) as a backend-neutral
-//! reference decoder, per `docs/recipes/exl3.md`. CUDA and Metal readers decode tiles into
-//! tensor-core fragments; this module is the correctness oracle they are checked against,
-//! written deliberately naive (one bit at a time) so it reads exactly like the spec.
-//!
-//! A layer with K inputs and N outputs (both multiples of 128; the quantizer pads) stores
-//! `trellis` int16 [K/16, N/16, 16 * bits], `suh` fp16 [K], `svh` fp16 [N], an optional
-//! fp16 `bias`, and a zero-size marker (`mcg` or `mul1`) naming the codebook. Each tile
-//! holds 256 values in a circular bitstream of R = 256 * bits bits; value p's 16-bit state
-//! ends at E(p) (exclusive, wrapping past the tile's last bit), read most significant bit
-//! first from little-endian pairs of the int16 words:
-//!
-//!     E(p) = (p + 1) * bits                                  integer bits
-//!     E(p) = ((p + 1) * (2 * KA + 1) - ((p + 1) % 2)) / 2    bits = KA + 1/2 (mul1 only)
-//!
-//! The codebook maps the state to an fp16 value with one rounding:
-//!     3inst  x = (s * 89226354 + 64248484) mod 2^32; x = (x & 0x8FFF8FFF) ^ 0x3B603B60;
-//!            value = fp16(x & 0xFFFF) + fp16(x >> 16)
-//!     mcg    x = s * 0xCBAC1FED mod 2^32, then as 3inst
-//!     mul1   x = s * 0x83DCD12D mod 2^32; h = 1024 + the sum of x's four bytes;
-//!            value = h * fp16(0x1EEE) + fp16(0xC931)
-//!
-//! The layer: W = diag(suh) @ H_K @ W_q @ H_N @ diag(svh), H the 128x128 Sylvester Hadamard
-//! scaled by 1/sqrt(128), so y = ((((x * suh) @ H_K) @ W_q) @ H_N) * svh + bias.
+//! Scalar EXL3 reference decoding; bitstream and codebooks are specified in docs/recipes/exl3.md.
 
 const std = @import("std");
 
@@ -37,8 +14,7 @@ pub const Mul1ScaleBits: u16 = 0x1EEE; // fp16 bit pattern
 pub const Mul1BiasBits: u16 = 0xC931; // fp16 bit pattern
 pub const hadamard_dim = 128;
 
-/// A width in half-bit units: whole widths carry halves = 2 * bits; the mul1 half steps
-/// carry halves = 2 * KA + 1.
+/// Whole widths use twice the bit count; mul1 also admits odd half-bit units.
 pub const Width = struct {
     halves: u16,
 
@@ -87,8 +63,7 @@ pub fn streamEnds(w: Width, ends: *[256]u32) void {
     }
 }
 
-/// One bit of a tile's circular stream: int16 words in pairs as little-endian 32-bit words,
-/// most significant bit of each word first, wrapping past the tile's last bit.
+/// Circular stream bits are MSB-first within little-endian pairs of int16 words.
 fn streamBit(words: []const i16, index: u32) u32 {
     const w32_index = index / 32;
     const within: u5 = @intCast(31 - (index % 32));
@@ -114,8 +89,7 @@ pub fn tileStates(w: Width, tile: []const i16, states: *[256]u32) void {
 
 pub const Placement = struct { row: u8, col: u8 };
 
-/// (row, column) in the 16x16 tile of each stream value p = 0..255: lane l of a warp holds
-/// values 8l..8l+7, exactly its B fragments of the tile's two mma.m16n8k16.
+/// Stream values map from two mma.m16n8k16 fragments per warp lane into a 16x16 tile.
 pub fn tilePlacement(placement: *[256]Placement) void {
     for (0..256) |p| {
         const lane = p / 8;
@@ -131,7 +105,7 @@ pub fn tilePlacement(placement: *[256]Placement) void {
 pub fn unpack(w: Width, codebook: Codebook, trellis: []const i16, tiles_k: usize, tiles_n: usize, out: []f16) void {
     var placement: [256]Placement = undefined;
     tilePlacement(&placement);
-    const k = tiles_k * 16;
+    const n = tiles_n * 16;
     const words = w.tileWords();
     var tk: usize = 0;
     while (tk < tiles_k) : (tk += 1) {
@@ -141,7 +115,7 @@ pub fn unpack(w: Width, codebook: Codebook, trellis: []const i16, tiles_k: usize
             var states: [256]u32 = undefined;
             tileStates(w, tile, &states);
             for (0..256) |p| {
-                out[(tk * 16 + placement[p].row) * k + tn * 16 + placement[p].col] =
+                out[(tk * 16 + placement[p].row) * n + tn * 16 + placement[p].col] =
                     codebookValue(codebook, @intCast(states[p]));
             }
         }
@@ -163,10 +137,7 @@ fn parityOf(v: usize) usize {
     return @popCount(v) & 1;
 }
 
-/// H / sqrt(128) applied to every block of hadamard_dim along ``axis`` of a [rows, cols]
-/// f64 matrix, in place. Each Hadamard entry is (+-1) / sqrt(128) rounded once; block
-/// products sum in f64 like the numpy reference (BLAS may order the 128 exact sums
-/// differently, hence the few-ULP tolerance the dequantize test compares with).
+/// Rotate each 128-value block along axis of the row-major [rows, cols] FP64 matrix.
 pub fn rotate(x: []f64, rows: usize, cols: usize, axis: usize) void {
     const inv = 1.0 / std.math.sqrt(@as(f64, hadamard_dim));
     if (axis == 0) {
@@ -200,8 +171,7 @@ fn rotateBlock(x: []f64, cols: usize, base_r: usize, base_c: usize, axis: usize,
     }
 }
 
-/// The layer's weight W [K, N] f64: diag(suh) @ H_K @ W_q @ H_N @ diag(svh).
-/// ``scratch`` must hold 2 * K * N f64.
+/// Decode W[K,N] as diag(suh) @ H_K @ W_q @ H_N @ diag(svh); scratch holds 2*K*N FP64 values.
 pub fn dequantize(w: Width, codebook: Codebook, trellis: []const i16, tiles_k: usize, tiles_n: usize, suh: []const f16, svh: []const f16, out: []f64, scratch: []f64) void {
     const k = tiles_k * 16;
     const n = tiles_n * 16;
@@ -216,13 +186,7 @@ pub fn dequantize(w: Width, codebook: Codebook, trellis: []const i16, tiles_k: u
     @memcpy(out, wq_f64);
 }
 
-// -- the oracle fixture ------------------------------------------------------------
-// Generated by the independent numpy reference decoder (see the recipe): 27 codebook x
-// width records of random tiles with their exact states, codebook spot values, and one
-// complete 128x128 Hadamard block of a real mcg @ 8.00 bpw group (Qwen3.5-2B geometry,
-// self_attn.q_proj) with its scales and expected W_q / dequantized block. The file lives
-// at zig/tests/fixtures/exl3_oracle.bin and is read relative to the repository root, the
-// working directory every `zig build test` step and the recipe's commands run from.
+// Oracle vectors come from tools/exl3_fixture.py and include one public-checkpoint block.
 
 var oracle: []const u8 = &.{};
 
@@ -363,8 +327,7 @@ test "a real mcg 8.00 bpw block unpacks and dequantizes to the oracle's values" 
     const dq = try gpa.alloc(f64, k * n);
     defer gpa.free(dq);
     dequantize(w, .mcg, trellis, kt, nt, suh, svh, dq, scratch);
-    // the Hadamard blocks sum in f64 like the reference; BLAS may order the 128 exact
-    // products differently, so compare with a few-ULP tolerance instead of bit patterns
+    // The FP64 reference may sum Hadamard products in a different order.
     var max_diff: f64 = 0;
     var max_mag: f64 = 0;
     for (dq, dq_want) |got, want| {

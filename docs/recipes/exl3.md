@@ -167,7 +167,8 @@ resident. Mapped pages still consume physical RAM when touched; keep the normal 
 A backend-neutral Zig reference decoder for this format now lives at
 `zig/src/core/exl3_format.zig`: the bitstream, the three codebooks, tile placement and
 the Hadamard rotations, written deliberately naive (one bit at a time) so it reads
-exactly like this page. It is the correctness oracle the CUDA and Metal tile decoders
-are checked against; `zig test zig/src/core/exl3_format.zig` from the repository root
+exactly like this page. It is a correctness oracle for future native CUDA and Metal tile decoders; `zig test zig/src/core/exl3_format.zig` from the repository root
 reproduces the numpy oracle on every codebook and width and on real checkpoint bytes
 (the fixture generator and the oracle vectors ship beside the test).
+
+The scalar decoder and its oracle tests do not register an EXL3 model or provide a native GPU projection.
