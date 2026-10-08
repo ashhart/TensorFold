@@ -2,6 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const fabric = @import("fabric");
+const host_wait = @import("tp_host_wait.zig");
 
 const D = 2560;
 const WIDE = 4 * D;
@@ -573,9 +574,12 @@ pub const Tp2 = struct {
     }
 
     /// The host waits until the window's word at `off` reaches `value`.
-    pub fn hostWait(t: *Tp2, off: usize, value: u64) void {
+    pub fn hostWait(t: *Tp2, off: usize, value: u64) !void {
         if (t.trace) std.debug.print("TP rank{d} host waits for word {d} >= {d} (now {d})\n", .{ t.rank, off, value, @atomicLoad(u64, t.word64(off), .acquire) });
-        while (!reached(@truncate(@atomicLoad(u64, t.word64(off), .acquire)), @truncate(value))) std.atomic.spinLoopHint(); // call counts wrap
+        host_wait.wait(t.word64(off), value, .{ .failed = &t.failed, .quitting = &t.quitting, .stop = &t.stop }, 10 * std.time.ns_per_s) catch |err| {
+            if (err != error.TpStopping) t.failed.store(true, .release);
+            return err;
+        };
         if (t.trace) std.debug.print("TP rank{d} word {d} reached {d}\n", .{ t.rank, off, value });
     }
 
@@ -731,7 +735,7 @@ test "partNext and hostWait across the 32-bit wrap: the next exchange's slot, an
     @atomicStore(u64, t.word64(BACK_FLAG), 0xFFFF_FFFE, .release);
     for ([_]u64{ 0xFFFF_FFFF, 0, 1 }) |call| { // tp.call's flags just before and after its wrap
         const th = try std.Thread.spawn(.{}, Peer.land, .{ t.word64(BACK_FLAG), call });
-        t.hostWait(BACK_FLAG, call);
+        try t.hostWait(BACK_FLAG, call);
         try std.testing.expectEqual(call, @atomicLoad(u64, t.word64(BACK_FLAG), .acquire)); // it waited for the landing
         th.join();
     }

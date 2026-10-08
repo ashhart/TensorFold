@@ -3282,7 +3282,7 @@ pub const Prompt = struct {
             @memcpy(cin_old[0 .. PLE_TAIL * WIDE * 2], p.b.cin.b.contents()[p.b.cin.off + rows * WIDE * 2 ..][0 .. PLE_TAIL * WIDE * 2]);
             m.last = .{ .b = p.last.b, .off = p.last.off + (rows - 1) * WIDE * 2 };
         } else { // the peer's half of the chunk into place
-            tp.hostWait(tpm.BACK_FLAG, pr.call);
+            try tp.hostWait(tpm.BACK_FLAG, pr.call);
             const w = tp.window();
             const rows1 = n - rows0;
             const pos1 = m.pos + rows0;
@@ -3330,7 +3330,7 @@ pub const Prompt = struct {
             n += 1;
         }
         try tp.sendNow(ws[0..n], tpm.MTP_FLAG, tp.call);
-        tp.hostWait(tpm.MTP_FLAG, tp.call);
+        try tp.hostWait(tpm.MTP_FLAG, tp.call);
         if (theirs[1] == 0) return;
         const w = tp.window();
         const cb = r.queue.commandBuffer();
