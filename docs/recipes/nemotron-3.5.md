@@ -126,6 +126,13 @@ while the cache keeps two states (106 MiB each) per prompt. Every reply equalled
 alone, two conversations at once with `--parallel 4` (each equal to its solo run), and `--no-drafts`; drafted output
 equalled `--no-drafts` throughout.
 
+`--learn` keeps the states at shared cuts (a system prompt and its tools) on disk, under an identity made of the
+checkpoint's config and tensor index, the prefill step, the head, every kernel source, a probe's prompt-pass bits, the
+OS build and the chip (`zig/src/families/nemotron/learned_prompts.zig`). The probe runs a fixed 4,143-token prompt at startup,
+about a second. A later server with the same identity reads a learned state back and resumes a fresh conversation
+from it: with the 9.2k-token system prompt above, a new server's first turn took 0.27 s instead of 1.30 s, resuming
+9,213 tokens from disk, and every reply equalled the cache-off reply. The two learned states took 213 MB on disk.
+
 ## Measurements
 
 Use the [public benchmark command](README.md#measurements) with the server above.

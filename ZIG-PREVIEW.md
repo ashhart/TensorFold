@@ -64,14 +64,14 @@ To serve Flash Next from two Macs at once, each holding the whole model, see [sp
 
 ## Known gaps
 
-- `--learn` keeps shared prompt prefixes on disk for GLM only. Nemotron and Flash Next keep theirs in memory, so a restart forgets them.
+- `--learn` keeps shared prompt prefixes on disk for GLM and Nemotron. Flash Next keeps its in memory, so a restart forgets them.
 - On M1 to M4, chips without tensor units, prompt kernels use the simdgroup-matrix layout and Nemotron's window attention is rewritten to it. Both are checked at load. Dense projections and routed experts are already proven row-exact there. The Mamba tree conv/scan and the norms are still open.
 - A forward holds at most 32 rows.
 - The native server serves Nemotron 3.5 Lightning, Qwen 3.8 Flash Next, GLM-5.3-Flash and the Qwen3.5-2B checkpoint in its recipe. Flash Next takes one reply at a time.
 
 ## Where the work goes next, and where you can help
 
-1. **Nemotron's prompt states on disk, and a pool for them** (`zig/src/families/nemotron/snapshot.zig`). Nemotron keeps conversation states between requests now, copied on the GPU. Next: `--learn` for its shared prefixes, as GLM has, and a pool of kept buffers, as Flash Next has, so a long-running server does not allocate one per state.
+1. **A pool for Nemotron's prompt states** (`zig/src/families/nemotron/snapshot.zig`). Nemotron keeps conversation states between requests, copied on the GPU, and `--learn` keeps its shared prefixes on disk. Next: a pool of kept buffers, as Flash Next has, so a long-running server does not allocate one per state.
 2. **Exactness on M1 to M4** (`zig/kernels/metal`). Prompt kernels and Nemotron window attention already use the simdgroup-matrix layout and are checked at load. The remaining kernels still need the per-kernel sweep: one row alone against the same row inside a 2-, 3- and 8-row window, then fix the kernel whose bits move.
 3. **More than 32 rows per forward** (`zig/src/native/metal.zig`, `batch_rows`). Lifting the cap lets 64+ sessions scale, and lets one stream run wider windows.
 4. **Cheaper extra lanes** (`zig/kernels/metal`). Past 16 lanes the routed-expert kernel is limited by arithmetic, not memory. A round of 8 lanes costs 2.2x a round of one, and 32 lanes cost 6.2x. Flattening that curve speeds up both one stream and many sessions.

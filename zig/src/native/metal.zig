@@ -66,6 +66,7 @@ const Host = struct {
     core: lanes.Engine,
     host: api.LaneHost,
     cache: ?api.prompt_cache.Store = null, // kept prompt states (engine thread only); null: a zero budget
+    learned: ?api.prompt_imprint.Imprint = null, // --learn: shared states on disk, read back by later servers
     round: nemotron.gpu_round.Options = .{ .depth = 8 }, // a lone greedy stream's GPU-side rounds, as the CLI runs them
     slide: ?*nemotron_slide.Adapter = null, // Sliding Weights' learner, with --slide
 
@@ -86,6 +87,7 @@ const Host = struct {
             h.gpa.destroy(s);
         }
         if (h.cache) |*store| store.deinit();
+        if (h.learned) |*m| m.deinit();
         h.core.deinit();
         h.cfg.deinit(h.gpa);
         h.metal.deinit();
@@ -158,11 +160,17 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     h.host.info_.prompt_cache_plan = plan;
     if (plan.budget_bytes > 0) {
         const S = nemotron.snapshot.Cached;
-        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = h.metal, .vtable = &.{ .bytes = S.snapBytes, .save = S.snapSave, .restore = S.snapRestore, .drop = S.snapDrop } }, .{ .lookahead = 1, .planned = true }, plan.budget_bytes);
+        const L = nemotron.learned_prompts;
+        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = h.metal, .vtable = &.{ .bytes = S.snapBytes, .save = S.snapSave, .restore = S.snapRestore, .drop = S.snapDrop, .write = L.snapWrite, .read = L.snapRead, .forget = L.snapForget } }, .{ .lookahead = 1, .planned = true }, plan.budget_bytes);
         h.host.cache = &h.cache.?; // the lane host's store: a Sliding Weights step that moves weights clears it
         h.host.info_.prompt_cache = true;
     }
     errdefer if (h.cache) |*store| store.deinit();
+    if (o.learn) |root| {
+        h.learned = try learnedStates(a, io, o.dir, h.metal, root, @intFromFloat(o.learn_gib * (1 << 30)));
+        if (h.cache) |*store| store.imprint = &h.learned.?;
+    }
+    errdefer if (h.learned) |*im| im.deinit();
     if (h.metal.head != null) h.host.lone = .{ .ctx = h, .run = Host.lone };
     h.warm = .{ .queue = h.m.queue };
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
@@ -180,6 +188,37 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     };
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
+}
+
+/// Learned states under `root` by checkpoint, prefill step, head, kernel sources, probe bits, OS build and chip.
+fn learnedStates(a: Allocator, io: std.Io, dir: []const u8, b: *nemotron.backend.Metal, root: []const u8, cap: u64) !api.prompt_imprint.Imprint {
+    var h = std.hash.Wyhash.init(0x6e65);
+    for ([_][]const u8{ "config.json", "model.safetensors.index.json" }) |name| {
+        const path = try std.fs.path.join(a, &.{ dir, name });
+        h.update(try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 26)));
+    }
+    if (b.head != null) h.update(try safetensorsHeader(a, dir, "mtp-4bit.safetensors"));
+    const probe = try nemotron.learned_prompts.probe(b);
+    for ([_]u64{ b.o.chunk, @intFromBool(b.head != null), nemotron.kernels.sourceHash(), probe }) |x| h.update(std.mem.asBytes(&x));
+    var os: [64]u8 = undefined;
+    h.update(api.prompt_imprint.osBuild(&os));
+    h.update(std.mem.span(b.m.device.name()));
+    const m = try api.prompt_imprint.Imprint.open(b.gpa, root, h.final(), cap);
+    std.log.info("nemotron: learned prompt states in {s} ({d} known, {d} of {d} MiB)", .{ m.dir, m.metas.items.len, m.total() >> 20, cap >> 20 });
+    return m;
+}
+
+/// A safetensors file's header (its tensors' names, shapes and offsets), in `a`.
+fn safetensorsHeader(a: Allocator, dir: []const u8, name: []const u8) ![]const u8 {
+    const path = try std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ dir, name }, 0);
+    const fd = std.c.open(path, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    if (fd < 0) return error.FileNotFound;
+    defer _ = std.c.close(fd);
+    var n: u64 = 0;
+    if (!api.prompt_imprint.readAt(fd, std.mem.asBytes(&n), 0) or n > 1 << 24) return error.BadHeader;
+    const head = try a.alloc(u8, @intCast(n));
+    if (!api.prompt_imprint.readAt(fd, head, 8)) return error.BadHeader;
+    return head;
 }
 
 /// A qwen3_5 checkpoint opens the 27B engine unless it has the pinned 2B's hidden size or a tied head, which stay on the 2B's.
