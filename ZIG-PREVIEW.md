@@ -58,13 +58,13 @@ zig-out/native/bin/tensorfold-native serve ~/models/nemotron-lightning --name ne
 
 Then point any OpenAI-compatible client at `http://127.0.0.1:8090/v1`. Add `--parallel 32` for up to 32 sessions at once. `--no-drafts` turns the lanes off, which is the reference for any exactness check. Nemotron keeps each conversation's prompt state between requests, so a later turn reads only its new tokens; the memory for those states is sized as for Flash Next below, and `--prompt-cache-gib 0` turns it off.
 
-Flash Next is the same `serve` command on a qwen4_exp checkpoint in mlx-q6g32. Set `TF_FLASHNEXT_DUMP` to the dump folder; [the speed-up mode guide](docs/speed-up-mode.md) shows how to make one. The host has one lane, so `--parallel` does not run two Flash Next replies at once. The memory kept for earlier prompts' states defaults to what 70% of RAM leaves past the loaded server, less 2 GiB; `--prompt-cache-gib` sets less, and `0` turns it off.
+Flash Next is the same `serve` command on a qwen4_exp checkpoint in mlx-q6g32. Set `TF_FLASHNEXT_DUMP` to the dump folder; [the speed-up mode guide](docs/speed-up-mode.md) shows how to make one. The host has one lane, so `--parallel` does not run two Flash Next replies at once. The memory kept for earlier prompts' states defaults to what 70% of RAM leaves past the loaded server, less 2 GiB; `--prompt-cache-gib` sets less, and `0` turns it off. `--learn` keeps shared prefixes (a system prompt and its tools) on disk as well, under `~/.cache/tensorfold/learned` by default, keyed by the checkpoint, the kernel sources, the chip and OS build and a startup probe's bits, so a fresh server, or an upgrade that computes the same bits, resumes them without reading them again. On one Mac for now: a speed-up pair refuses it.
 
 To serve Flash Next from two Macs at once, each holding the whole model, see [speed-up mode](docs/speed-up-mode.md).
 
 ## Known gaps
 
-- `--learn` keeps shared prompt prefixes on disk for GLM and Nemotron. Flash Next keeps its in memory, so a restart forgets them.
+- `--learn` keeps shared prompt prefixes on disk for GLM, Nemotron and Flash Next on one Mac. A Flash Next speed-up pair keeps them in memory only.
 - On M1 to M4, chips without tensor units, prompt kernels use the simdgroup-matrix layout and Nemotron's window attention is rewritten to it. Both are checked at load. Dense projections and routed experts are already proven row-exact there. The Mamba tree conv/scan and the norms are still open.
 - A shared forward holds at most 128 rows (64 up to `--parallel 16`), and a lone stream's window at most 64.
 - The native server serves Nemotron 3.5 Lightning, Qwen 3.8 Flash Next, GLM-5.3-Flash and the Qwen3.5-2B checkpoint in its recipe. Flash Next takes one reply at a time.

@@ -121,7 +121,7 @@ pub const Pool = struct {
 };
 
 /// The layout the engine's prompt pass keeps DeltaNet states in (a decode path with in-place states adds its own).
-fn layoutOf(_: *const Engine) Layout {
+pub fn layoutOf(_: *const Engine) Layout {
     return .slots;
 }
 
@@ -195,6 +195,17 @@ pub fn save(e: *Engine, gpa: std.mem.Allocator, at: usize) !*State {
     try copy(e, got.buf, at, true, passed);
     const st = try gpa.create(State);
     st.* = .{ .buf = got.buf, .at = at, .hist = if (passed) |ps| ps.hist else e.m.ple.hist, .bytes = n, .layout = layoutOf(e), .cap = got.cap, .pool = &e.snap_pool };
+    e.snap_pool.last = n;
+    return st;
+}
+
+/// An empty state after `at` tokens, in a buffer from the pool: a learned state's file fills it (learned.zig).
+pub fn blank(e: *Engine, gpa: std.mem.Allocator, at: usize) !*State {
+    const n = bytes(at);
+    const got = try e.snap_pool.take(e.r.device, n);
+    errdefer e.snap_pool.give(got.buf, got.cap);
+    const st = try gpa.create(State);
+    st.* = .{ .buf = got.buf, .at = at, .hist = .{ 0, 0 }, .bytes = n, .layout = layoutOf(e), .cap = got.cap, .pool = &e.snap_pool };
     e.snap_pool.last = n;
     return st;
 }
