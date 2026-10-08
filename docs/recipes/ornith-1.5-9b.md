@@ -46,17 +46,18 @@ folded attention output gate, so it is 2x hidden wide), and 2.03B embeddings plu
 untied). mlx-lm's loader drops the 0.23B MTP layer and the roughly 0.46B-parameter vision tower, so
 neither is resident or served.
 
-Uniform bit rates over those parameters:
+Uniform bit rates over those parameters (sizes include the bf16 scales and biases MLX
+affine stores per group of 64, +0.5 bit per weight):
 
 | Average bpw | Weights |
 | --- | --- |
-| 3.0 | 3.14 GiB |
-| 4.0 | 4.11 GiB |
-| 5.0 | 5.18 GiB |
-| 6.0 | 6.22 GiB |
+| 3.0 | 3.13 GiB |
+| 4.0 | 4.17 GiB |
+| 5.0 | 5.21 GiB |
+| 6.0 | 6.25 GiB |
 
-A body-4/head-6 mix (everything at 4-bit, head at 6-bit) is 4.40 GiB; a body-5/embed-6/head-8 mix is
-5.68 GiB. The built-in `mixed_4_6` predicate lands near 4.6 GiB.
+A body-4/head-6 mix (everything at 4-bit, head at 6-bit) is 4.93 GiB; a body-5/embed-6/head-8 mix is
+6.21 GiB. The built-in `mixed_4_6` predicate lands near 5.2 GiB.
 
 Only 8 of 32 layers carry a KV cache (head_dim 256, 4 KV heads, bf16): 32 KiB per token. The 24
 DeltaNet layers hold a fixed fp32 recurrent state of 48 MiB per stream, independent of context.
@@ -72,9 +73,9 @@ Machine classes, not measured minimums (wired limit at the macOS default of 75%)
 
 | Mac | Recipe | Context |
 | --- | --- | --- |
-| 16 GB | body-4/head-6 mix, 4.40 GiB weights | 131,072 (bf16 KV would allow about 224,000; `--context` reserves headroom) |
-| 24 GB | body-4/head-6 mix, 4.40 GiB weights | 262,144 (13.2 GiB resident) |
-| 24 GB | body-5 mix, 5.68 GiB weights | 262,144 (14.4 GiB resident) |
+| 16 GB | body-4/head-6 mix, 4.93 GiB weights | 131,072 (bf16 KV would allow about 205,000; `--context` reserves headroom) |
+| 24 GB | body-4/head-6 mix, 4.93 GiB weights | 262,144 (13.7 GiB resident) |
+| 24 GB | body-5 mix, 6.21 GiB weights | 262,144 (15.0 GiB resident) |
 | 128 GB+ | body-4 or body-5 | 1M tokens needs the 32 GiB YaRN cache and a `rope_scaling` block in `config.json` |
 
 The upstream window is 262,144 positions; `config.json` values above that are refused. YaRN scaling is a
