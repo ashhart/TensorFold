@@ -6,6 +6,8 @@ const cli = @import("cli.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Opened = api.Opened;
+/// The built-in backend's top_k when nothing else sets it; null: none (top_k 0, every token kept).
+pub const default_top_k: ?u32 = if (@hasDecl(native, "default_top_k")) native.default_top_k else null;
 
 /// What ``capabilities --json`` reports: this release, the chip here, and what the built-in backend serves.
 pub fn capabilities(a: Allocator) cli.Engines {

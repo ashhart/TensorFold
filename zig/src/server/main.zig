@@ -84,7 +84,7 @@ fn modelType(a: std.mem.Allocator, io: std.Io, dir: []const u8) []const u8 {
     return if (t == .string) t.string else "unknown";
 }
 
-/// generation_config.json's sampling (``do_sample`` false is greedy), then the serve flags over it.
+/// generation_config.json's sampling (``do_sample`` false is greedy), the backend's top_k when it sets none, then the serve flags over it.
 fn sampling(a: std.mem.Allocator, io: std.Io, dir: []const u8, args: cli.Args) !?json.Value {
     const out = try json.newObject(a);
     const path = try std.fs.path.join(a, &.{ dir, "generation_config.json" });
@@ -97,6 +97,7 @@ fn sampling(a: std.mem.Allocator, io: std.Io, dir: []const u8, args: cli.Args) !
             };
         }
     } else |_| {}
+    if (out.get("top_k") == null) if (engines.default_top_k) |k| try out.put(a, "top_k", try json.intValue(a, k));
     if (args.temperature) |t| try out.put(a, "temperature", .{ .float = t });
     if (args.top_p) |t| try out.put(a, "top_p", .{ .float = t });
     if (args.top_k) |t| try out.put(a, "top_k", try json.intValue(a, t));
