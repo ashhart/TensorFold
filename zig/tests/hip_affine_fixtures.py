@@ -17,6 +17,7 @@ def run(x, words, scales, biases, group, variant="base"):
     x, scales, biases = bf(x), bf(scales), bf(biases)
     acc = np.zeros((32, x.shape[0], words.shape[0]), dtype=np.float32)
     for lane in range(32):
+        terms = []
         passes = list(range(lane * 16, k, 512))
         if variant == "pass_reverse":
             passes.reverse()
@@ -49,7 +50,18 @@ def run(x, words, scales, biases, group, variant="base"):
                 term = scale * dot + total * bias
             if variant == "ftz":
                 term = np.where(np.abs(term) < np.finfo(np.float32).tiny, np.float32(0), term)
+            terms.append(term)
             acc[lane] = (acc[lane] + total * bias) + scale * dot if variant == "split" else acc[lane] + term
+        if terms and variant == "pass_four":
+            partial = [np.zeros_like(acc[lane]) for _ in range(4)]
+            for index, term in enumerate(terms):
+                partial[index % 4] = partial[index % 4] + term
+            acc[lane] = ((partial[0] + partial[1]) + partial[2]) + partial[3]
+        elif terms and variant == "pass_pair":
+            while len(terms) > 1:
+                terms = [terms[i] + terms[i+1] if i+1 < len(terms) else terms[i]
+                         for i in range(0, len(terms), 2)]
+            acc[lane] = terms[0]
     if variant == "lanes":
         return acc
     offsets = variant if isinstance(variant, tuple) else (16, 8, 4, 2, 1)
@@ -104,6 +116,17 @@ def generate(seed, group, k, rows=32, outputs=24):
             values((outputs, k // group), -8, 0))
 
 
+def first_witness(group, k, variant):
+    """First changed output in seed, row, column order, seeds 1..1000."""
+    for seed in range(1, 1001):
+        inputs = generate(seed, group, k)
+        changed = np.argwhere(run(*inputs, group) != run(*inputs, group, variant))
+        if len(changed):
+            row, col = changed[0]
+            return seed, int(row), int(col)
+    raise AssertionError((group, k, variant))
+
+
 
 def matrix_inputs(group, k):
     seed = 1701 + group + k
@@ -115,9 +138,9 @@ def matrix_inputs(group, k):
         v = np.array([(nxt() >> 16) - 32768 for _ in range(count)], dtype=np.float32)
         return rounded(v / np.float32(divisor))
     x = values(32 * k, 4096).reshape(32, k)
-    w = np.array([nxt() for _ in range(24 * k // 8)], dtype=np.uint32).reshape(24, k // 8)
-    scales = values(24 * k // group, 1048576).reshape(24, k // group)
-    biases = values(24 * k // group, 262144).reshape(24, k // group)
+    w = np.array([nxt() for _ in range(25 * k // 8)], dtype=np.uint32).reshape(25, k // 8)
+    scales = values(25 * k // group, 1048576).reshape(25, k // group)
+    biases = values(25 * k // group, 262144).reshape(25, k // group)
     return x, w, scales, biases
 
 
@@ -125,13 +148,27 @@ if __name__ == "__main__":
     import argparse
     import struct
     parser = argparse.ArgumentParser(description="Emit fixture hex to stdout; requires NumPy.")
-    parser.add_argument("fixture", choices=("matrix", "sensitive", "search", "accuracy"))
+    parser.add_argument("fixture", choices=("matrix", "sensitive", "search", "picks", "accuracy"))
     args = parser.parse_args()
     if args.fixture == "search":
         search_orders()
+    elif args.fixture == "picks":
+        for group, k, variant, expected in (
+            (64, 1088, "pass_reverse", (126, 14, 22)),
+            (32, 576, (1, 2, 4, 8, 16), (26, 17, 6)),
+            (32, 576, "fma", (28, 7, 5)),
+            (32, 576, "fma_bias", (241, 7, 21)),
+            (32, 576, "pair", (128, 3, 19)),
+            (32, 576, "split", (150, 23, 0)),
+            (64, 4096, "pass_four", (1, 8, 10)),
+            (64, 4096, "pass_pair", (1, 8, 10)),
+        ):
+            actual = first_witness(group, k, variant)
+            assert actual == expected, (group, k, variant, actual, expected)
+            print(group, k, variant, actual)
     elif args.fixture == "accuracy":
         for group in (32, 64):
-            for k in (64, 192, 512, 576, 1088):
+            for k in (64, 192, 512, 576, 1088, 4096):
                 x, w, s, b = matrix_inputs(group, k)
                 b = rounded(np.float32(-8) * bf(s) * (np.float32(1) + bf(b)))
                 q = ((w[:, np.arange(k)//8] >> ((np.arange(k)%8)*4)) & 15).astype(np.float64)
@@ -141,25 +178,30 @@ if __name__ == "__main__":
                 print(group, k, *errors)
     elif args.fixture == "matrix":
         for group in (32, 64):
-            for k in (64, 192, 512, 576, 1088):
+            for k in (64, 192, 512, 576, 1088, 4096):
                 result = run(*matrix_inputs(group, k), group)
                 print(result.astype("<u2").tobytes().hex())
     else:
         import itertools
         variants = [p for p in itertools.permutations((16, 8, 4, 2, 1)) if p != (16, 8, 4, 2, 1)]
-        variants += ["fma", "fma_bias", "bf16", "pair", "split", "pass_reverse", "sum_pair", "ftz"]
+        variants += ["fma", "fma_bias", "bf16", "pair", "split", "pass_reverse", "pass_four", "pass_pair", "sum_pair", "ftz"]
         covered = set()
-        for seed, row, col, k, group in ((685, 31, 9, 576, 64), (598, 13, 8, 576, 64), (538, 24, 18, 576, 64), (126, 14, 22, 1088, 64), (26, 17, 6, 576, 32)):
+        group_covered = {32: set(), 64: set()}
+        for seed, row, col, k, group in ((685, 31, 9, 576, 64), (598, 13, 8, 576, 64), (538, 24, 18, 576, 64), (126, 14, 22, 1088, 64), (26, 17, 6, 576, 32), (28, 7, 5, 576, 32), (241, 7, 21, 576, 32), (128, 3, 19, 576, 32), (150, 23, 0, 576, 32), (1, 8, 10, 4096, 64)):
             x, w, scales, biases = generate(seed, group, k)
-            # Repeat the sensitive row across all batch widths, with two output columns.
-            inputs = np.repeat(x[row:row+1], 2, axis=0), np.repeat(w[col:col+1], 2, axis=0), np.repeat(scales[col:col+1], 2, axis=0), np.repeat(biases[col:col+1], 2, axis=0)
+            # Three columns exercise a partly live second block.
+            inputs = np.repeat(x[row:row+1], 2, axis=0), np.repeat(w[col:col+1], 3, axis=0), np.repeat(scales[col:col+1], 3, axis=0), np.repeat(biases[col:col+1], 3, axis=0)
             result = run(*inputs, group)
             for index, variant in enumerate(variants):
                 if np.any(run(*inputs, group, variant) != result):
                     covered.add(index)
-            payload = struct.pack("<5Q", 2, 2, k, 4, group)
+                    group_covered[group].add(variant)
+            payload = struct.pack("<5Q", 2, 3, k, 4, group)
             payload += b"".join(v.astype(v.dtype.newbyteorder("<")).tobytes() for v in (*inputs, result))
             print(payload.hex())
+        for group, caught in group_covered.items():
+            required = {"fma", "fma_bias", "bf16", "pair", "split", "sum_pair"}
+            assert required <= caught, (group, required - caught)
         # Constructive sum-order cancellation and FP32 subnormal epilogue cases.
         for subnormal in (False, True):
             x = np.zeros((2, 64), dtype=np.uint16)

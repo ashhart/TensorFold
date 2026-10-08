@@ -39,6 +39,7 @@ pub const DeviceBuffer = struct {
         if (bytes.len != 0) try runtime.check(self.r.api.hipMemcpyDtoH(bytes.ptr, src, bytes.len));
     }
 
+    /// Blocks until the null-stream fill completes; later streams can read it.
     pub fn fill8(self: DeviceBuffer, value: u8) runtime.Error!void {
         if (self.len != 0) {
             try runtime.check(self.r.api.hipMemset(self.ptr, value, self.len));
