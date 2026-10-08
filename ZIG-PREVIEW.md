@@ -71,7 +71,7 @@ To serve Flash Next from two Macs at once, each holding the whole model, see [sp
 
 ## Where the work goes next, and where you can help
 
-1. **A pool for Nemotron's prompt states** (`zig/src/families/nemotron/snapshot.zig`). Nemotron keeps conversation states between requests, copied on the GPU, and `--learn` keeps its shared prefixes on disk. Next: a pool of kept buffers, as Flash Next has, so a long-running server does not allocate one per state.
+1. **`--learn` for Flash Next** (`zig/src/native/flashnext_host.zig`). GLM and Nemotron keep shared prompt prefixes on disk and resume them after a restart; Flash Next keeps its states in memory only. The prompt cache's `write`, `read` and `forget` functions over its `snapshot.zig` do it, with an identity made as `glm_host.zig` and `native/metal.zig` make theirs.
 2. **Exactness on M1 to M4** (`zig/kernels/metal`). Prompt kernels and Nemotron window attention already use the simdgroup-matrix layout and are checked at load. The remaining kernels still need the per-kernel sweep: one row alone against the same row inside a 2-, 3- and 8-row window, then fix the kernel whose bits move.
 3. **More than 32 rows per forward** (`zig/src/native/metal.zig`, `batch_rows`). Lifting the cap lets 64+ sessions scale, and lets one stream run wider windows.
 4. **Cheaper extra lanes** (`zig/kernels/metal`). Past 16 lanes the routed-expert kernel is limited by arithmetic, not memory. A round of 8 lanes costs 2.2x a round of one, and 32 lanes cost 6.2x. Flattening that curve speeds up both one stream and many sessions.

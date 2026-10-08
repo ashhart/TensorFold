@@ -269,6 +269,9 @@ CUDA traps:
 - One launch for all experts: exact, slower.
 - Input sums once a threadgroup, and weight prefetch beside short launches: slower.
 - A persistent kernel with a GPU-wide barrier: it loses to plain dependent launches on the M5 Ultra.
+- A pool of kept prompt-state buffers for Nemotron: a fresh 9.2k-token prompt costs 1.07 s whether the cache is off,
+  keeps every state, or evicts and reallocates two 106 MiB states a request (22 evictions in 12 prompts). The GPU copy
+  hides a new buffer's cost; Flash Next's pool stays, for its idle pre-touch.
 - Adaptive depth by landed+1: it lost to fixed levels. Full-vocabulary drafts lose too.
 - Reshaping the 6-bit expert prompt kernels, all exact, Flash Next on the M5 Ultra at 8k:
   - 128-row paired gate-up tiles lost 25% to register spills.
