@@ -17,10 +17,13 @@ pub const DType = enum {
     u64,
     i64,
     f64,
+    f8_e4m3, // FP8 checkpoints: codes as stored, the scales come as their own tensors
+    f8_e5m2,
+    f8_e8m0,
 
     pub fn size(self: DType) usize {
         return switch (self) {
-            .bool, .u8, .i8 => 1,
+            .bool, .u8, .i8, .f8_e4m3, .f8_e5m2, .f8_e8m0 => 1,
             .u16, .i16, .f16, .bf16 => 2,
             .u32, .i32, .f32 => 4,
             .u64, .i64, .f64 => 8,
@@ -28,7 +31,7 @@ pub const DType = enum {
     }
 
     pub fn parse(text: []const u8) ?DType {
-        const names = .{ .{ "BOOL", .bool }, .{ "U8", .u8 }, .{ "I8", .i8 }, .{ "U16", .u16 }, .{ "I16", .i16 }, .{ "F16", .f16 }, .{ "BF16", .bf16 }, .{ "U32", .u32 }, .{ "I32", .i32 }, .{ "F32", .f32 }, .{ "U64", .u64 }, .{ "I64", .i64 }, .{ "F64", .f64 } };
+        const names = .{ .{ "BOOL", .bool }, .{ "U8", .u8 }, .{ "I8", .i8 }, .{ "U16", .u16 }, .{ "I16", .i16 }, .{ "F16", .f16 }, .{ "BF16", .bf16 }, .{ "U32", .u32 }, .{ "I32", .i32 }, .{ "F32", .f32 }, .{ "U64", .u64 }, .{ "I64", .i64 }, .{ "F64", .f64 }, .{ "F8_E4M3", .f8_e4m3 }, .{ "F8_E5M2", .f8_e5m2 }, .{ "F8_E8M0", .f8_e8m0 } };
         inline for (names) |n| if (std.mem.eql(u8, text, n[0])) return n[1];
         return null;
     }
@@ -179,6 +182,21 @@ test "header entries" {
     try std.testing.expectEqual(@as(usize, 2), h.count());
     try std.testing.expectEqual(DType.bf16, h.get("a.scales").?.dtype);
     try std.testing.expectError(error.BadSafetensors, parseHeader(arena.allocator(), json, 20));
+}
+
+test "FP8 entries parse with one byte an element, as cluster/checkpoint.zig sizes them" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const json =
+        \\{"w": {"dtype": "F8_E4M3", "shape": [2, 128], "data_offsets": [0, 256]},
+        \\ "s": {"dtype": "F8_E8M0", "shape": [2, 4], "data_offsets": [256, 264]},
+        \\ "g": {"dtype": "F8_E5M2", "shape": [8], "data_offsets": [264, 272]}}
+    ;
+    const h = try parseHeader(arena.allocator(), json, 272);
+    try std.testing.expectEqual(DType.f8_e4m3, h.get("w").?.dtype);
+    try std.testing.expectEqual(DType.f8_e8m0, h.get("s").?.dtype);
+    try std.testing.expectEqual(DType.f8_e5m2, h.get("g").?.dtype);
+    try std.testing.expectError(error.BadSafetensors, parseHeader(arena.allocator(), json, 271));
 }
 
 test "namespace selection admits text without interpreting vision layouts" {
