@@ -22,19 +22,19 @@ The model-free tests check:
   these differ from the exact matrix-reference inputs.
   Both modes also assert a per-output bound using the kernel-decomposition
   norm, including separate scale and bias magnitudes to account for cancellation.
-- A fixed-input fixture returning `0x3fc4`, plus a cancellation-sensitive
+- A fixed-input fixture returning `0x3fc4`, plus cancellation-sensitive
   K=576/1088/4096 fixtures that distinguish contraction and shuffle/pass order,
   with N=3 and groups 32/64, repeated three times through batch widths
   1/2/3/4/8/16/17/32 under the bounded separate-stream load.
   Constructive cases distinguish pairwise x-sums, subnormal output 0x0040, and exact
   BF16 halfway values of both parities.
 
-`hip_affine_g64.hex` is a legacy 206-byte little-endian fixture.
+`hip_affine_g64.hex` is a 206-byte little-endian fixture.
 Its decoded SHA-256 is
 `85eaf08cdad842c50068788e5801dc4ab3b78296e18a6f16a790229cbc719f99`.
 The header is five u64 values (M=1,N=1,K=64,bits=4,group=64), followed by
-BF16 X, packed u32 W, BF16 scales/biases, and BF16 output. This legacy
-fixture is not evidence of generic parity with the Python implementation.
+BF16 X, packed u32 W, BF16 scales/biases, and BF16 output. `0x3fc4` is
+the BF16 RNE of the exact result of the stored inputs.
 
 `hip_affine_matrix.hex` stores little-endian BF16 results in group-size,
 K, row, column order, matching the deterministic inputs in the test.
@@ -52,7 +52,7 @@ product/x-sum grouping, reversed, four-accumulator and pairwise K passes, a spli
 an emulated flush-to-zero epilogue move at least one output.
 `python3 zig/tests/hip_affine_fixtures.py search` reproduces the greedy
 order-coverage search over seeds 1–1000 at K=576, group 64 only. The
-K=1088 and group-32 selections are first witnesses in seed/row/column
+K=1088, K=4096 and group-32 selections are first witnesses in seed/row/column
 order, reproduced and asserted by `python3 zig/tests/hip_affine_fixtures.py picks`.
 The generator requires both FMA forms, BF16 sums, product pairing, split
 epilogues and pairwise x-sums to be detected independently for each group.
