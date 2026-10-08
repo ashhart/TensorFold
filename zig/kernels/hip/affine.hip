@@ -13,6 +13,17 @@ extern "C" __global__ void affine_test_load(float* scratch, unsigned* progress) 
     atomicAdd(progress, 1U);
 }
 
+// Longer bounded load for tiny fixture launches; no host-controlled spin gate.
+extern "C" __global__ void affine_test_load_long(float* scratch, unsigned* progress) {
+    const unsigned at = blockIdx.x * blockDim.x + threadIdx.x;
+    atomicAdd(progress, 1U); // Started work items; completion tracked separately.
+    float value = 0.0001f * (at + 1);
+    for (unsigned i = 0; i < 2000000; ++i)
+        value = value * 0.999999f + 0.000001f;
+    scratch[at] = value;
+    atomicAdd(progress + 1, 1U);
+}
+
 __device__ static float from_bf16(uint16_t x) {
     return __uint_as_float(static_cast<uint32_t>(x) << 16);
 }
@@ -33,9 +44,7 @@ __device__ static uint32_t unpack(const uint32_t* words, size_t index, unsigned 
     return value & ((1U << bits) - 1U);
 }
 
-// FP32 row projection: 16 inputs per lane,
-// four-product chains, scale/bias applied per lane, then a 32-lane reduction.
-// Reduction-order equivalence to Metal must be measured, not assumed.
+// FP32 row projection: 16 inputs per lane, four-product chains, 32-lane reduction.
 extern "C" __global__ void affine_row4_f32(
     const uint16_t* x, const uint32_t* words, const uint16_t* scales,
     const uint16_t* biases, uint16_t* out,

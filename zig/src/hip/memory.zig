@@ -40,7 +40,16 @@ pub const DeviceBuffer = struct {
     }
 
     pub fn fill8(self: DeviceBuffer, value: u8) runtime.Error!void {
-        if (self.len != 0) try runtime.check(self.r.api.hipMemset(self.ptr, value, self.len));
+        if (self.len != 0) {
+            try runtime.check(self.r.api.hipMemset(self.ptr, value, self.len));
+            try runtime.check(self.r.api.hipStreamSynchronize(null));
+        }
+    }
+
+    /// The buffer must remain alive until the supplied stream completes.
+    pub fn fill8Async(self: DeviceBuffer, value: u8, stream: @import("stream.zig").Stream) runtime.Error!void {
+        if (self.r != stream.r) return error.Invalid;
+        if (self.len != 0) try runtime.check(self.r.api.hipMemsetAsync(self.ptr, value, self.len, stream.handle));
     }
 
     /// Host storage must stay alive and unmodified until the stream completes.
@@ -77,6 +86,53 @@ pub const HostBuffer = struct {
     }
 };
 
+test "fills synchronize only the synchronous path and propagate errors" {
+    const Mock = struct {
+        var calls: u32 = 0;
+        var fail_fill: bool = false;
+        var fail_sync: bool = false;
+        var seen_stream: abi.Stream = null;
+        fn fill(_: abi.DevicePtr, _: c_int, _: usize) callconv(.c) abi.Result {
+            calls = calls * 10 + 1;
+            return if (fail_fill) 1 else 0;
+        }
+        fn sync(s: abi.Stream) callconv(.c) abi.Result {
+            seen_stream = s;
+            calls = calls * 10 + 2;
+            return if (fail_sync) 1 else 0;
+        }
+        fn asyncFill(_: abi.DevicePtr, _: c_int, _: usize, s: abi.Stream) callconv(.c) abi.Result {
+            seen_stream = s;
+            calls = calls * 10 + 3;
+            return if (fail_fill) 1 else 0;
+        }
+    };
+    var r: runtime.Runtime = undefined;
+    r.api.hipMemset = Mock.fill;
+    r.api.hipStreamSynchronize = Mock.sync;
+    r.api.hipMemsetAsync = Mock.asyncFill;
+    const b: DeviceBuffer = .{ .r = &r, .ptr = @ptrFromInt(16), .len = 8 };
+    Mock.calls = 0;
+    Mock.fail_fill = false;
+    Mock.fail_sync = false;
+    try b.fill8(7);
+    try std.testing.expectEqual(@as(u32, 12), Mock.calls);
+    try std.testing.expect(Mock.seen_stream == null);
+    Mock.calls = 0;
+    const s: abi.Stream = @ptrFromInt(32);
+    try b.fill8Async(7, .{ .r = &r, .handle = s });
+    try std.testing.expectEqual(@as(u32, 3), Mock.calls);
+    try std.testing.expectEqual(s, Mock.seen_stream);
+    Mock.calls = 0;
+    Mock.fail_fill = true;
+    try std.testing.expectError(error.HipFailed, b.fill8(7));
+    try std.testing.expectEqual(@as(u32, 1), Mock.calls);
+    try std.testing.expectError(error.HipFailed, b.fill8Async(7, .{ .r = &r, .handle = s }));
+    Mock.fail_fill = false;
+    Mock.fail_sync = true;
+    try std.testing.expectError(error.HipFailed, b.fill8(7));
+}
+
 test "empty buffers and rejected spans do not call HIP" {
     const r: runtime.Runtime = undefined;
     var b = try DeviceBuffer.alloc(&r, 0);
@@ -85,6 +141,7 @@ test "empty buffers and rejected spans do not call HIP" {
     var empty: [0]u8 = .{};
     try b.download(0, &empty);
     try b.fill8(7);
+    try b.fill8Async(7, .{ .r = &r, .handle = null });
     try std.testing.expectError(error.Invalid, b.upload(1, &.{}));
     try std.testing.expectError(error.Invalid, b.upload(0, &.{1}));
     try std.testing.expectError(error.Invalid, HostBuffer.alloc(&r, 0));
@@ -97,6 +154,7 @@ test "async copies reject foreign owners and out-of-range bytes before HIP" {
     const host = HostBuffer{ .r = &r, .bytes = &bytes };
     const foreign = HostBuffer{ .r = @ptrFromInt(32), .bytes = &bytes };
     const stream = @import("stream.zig").Stream{ .r = &r, .handle = null };
+    try std.testing.expectError(error.Invalid, b.fill8Async(7, .{ .r = foreign.r, .handle = null }));
     try std.testing.expectError(error.Invalid, b.uploadAsync(0, foreign, stream));
     try std.testing.expectError(error.Invalid, b.downloadAsync(0, foreign, stream));
     try std.testing.expectError(error.Invalid, b.uploadAsync(1, host, stream));

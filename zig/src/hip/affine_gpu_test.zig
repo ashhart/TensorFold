@@ -60,6 +60,11 @@ fn checkMatrix(comptime accuracy_only: bool) !void {
         for (w[0 .. 24 * k / 8]) |*v| v.* = randomNext(&seed);
         for (scales[0 .. 24 * k / group]) |*v| v.* = randomBf(&seed, 1048576);
         for (biases[0 .. 24 * k / group]) |*v| v.* = randomBf(&seed, 262144);
+        if (accuracy_only) for (biases[0 .. 24 * k / group], scales[0 .. 24 * k / group]) |*bias, scale| {
+            const value: f32 = -8 * @as(f32, @floatCast(bf64(scale))) * (1 + @as(f32, @floatCast(bf64(bias.*))));
+            const bits: u32 = @bitCast(value);
+            bias.* = @truncate((bits +% 0x7fff +% ((bits >> 16) & 1)) >> 16);
+        };
         try buffers[0].upload(0, std.mem.sliceAsBytes(x[0 .. 32 * k]));
         try buffers[1].upload(0, std.mem.sliceAsBytes(w[0 .. 24 * k / 8]));
         try buffers[2].upload(0, std.mem.sliceAsBytes(scales[0 .. 24 * k / group]));
@@ -199,11 +204,11 @@ test "row Sum.f32 cancellation retains small terms across row counts" {
 
 test "row 4-bit fixed references including arithmetic-sensitive cancellation" {
     try verifyHash(data.hex, "8752ae3a80ac648ae58eae84c523fc2da5dd7355c4d8551407167822af17c383");
-    try verifyHash(data.sensitive, "3663fc38e4964194413d8213e9fe3d7fbc795df990760ed47b28c06a43cd9b0b");
+    try verifyHash(data.sensitive, "eea3ace32f8b29d0375d17024d0f1e353629f8e839babc1e4f82f795450cd184");
     inline for (.{ data.hex, data.sensitive }) |fixture| {
         var lines = std.mem.splitScalar(u8, std.mem.trim(u8, fixture, "\r\n "), '\n');
         while (lines.next()) |hex| {
-            var storage: [8192]u8 = undefined;
+            var storage: [16384]u8 = undefined;
             const bytes = try std.fmt.hexToBytes(&storage, hex);
             var r = try @import("runtime.zig").Runtime.open();
             defer r.close();
@@ -216,13 +221,14 @@ test "row 4-bit fixed references including arithmetic-sensitive cancellation" {
             const images = [_]@import("code_object.zig").Image{.{ .arch = data.arch, .bytes = &data.image }};
             var module = try @import("module.zig").Module.loadForArchitecture(&r, &images, arch);
             defer module.unload();
-            var shape: affine.Shape = .{ .rows = @intCast(std.mem.readInt(u64, bytes[0..8], .little)), .outputs = 1, .inputs = @intCast(std.mem.readInt(u64, bytes[16..24], .little)), .bits = 4, .group = 64 };
+            var shape: affine.Shape = .{ .rows = @intCast(std.mem.readInt(u64, bytes[0..8], .little)), .outputs = @intCast(std.mem.readInt(u64, bytes[8..16], .little)), .inputs = @intCast(std.mem.readInt(u64, bytes[16..24], .little)), .bits = 4, .group = @intCast(std.mem.readInt(u64, bytes[32..40], .little)) };
+            const fixture_rows = shape.rows;
             const lengths = try shape.byteLengths();
             var buffers: [5]Buffer = undefined;
             var count: usize = 0;
             defer for (buffers[0..count]) |*buffer| buffer.free();
             for (lengths, 0..) |len, i| {
-                buffers[i] = try Buffer.alloc(&r, len);
+                buffers[i] = try Buffer.alloc(&r, if (i == 0 or i == 4) len / fixture_rows * 32 else len);
                 count += 1;
             }
             var offset: usize = 40;
@@ -234,14 +240,49 @@ test "row 4-bit fixed references including arithmetic-sensitive cancellation" {
             try ctx.synchronize();
             try affine.launchRowF32(try module.function("affine_row4_f32"), stream, shape, buffers);
             try stream.synchronize();
-            var got: [4]u8 = undefined;
+            var got: [128]u8 = undefined;
             try buffers[4].download(0, got[0..lengths[4]]);
             try std.testing.expectEqual(@as(usize, 0), try affine.mismatchCount(got[0..lengths[4]], bytes[offset..]));
-            shape.rows = 1;
-            try affine.launchRowF32(try module.function("affine_row4_f32"), stream, shape, buffers);
-            try stream.synchronize();
-            try buffers[4].download(0, got[0..2]);
-            try std.testing.expectEqual(@as(usize, 0), try affine.mismatchCount(got[0..2], bytes[offset..][0..2]));
+            const row_bytes = shape.inputs * 2;
+            for (0..32) |row| try buffers[0].upload(row * row_bytes, bytes[40 + (row % fixture_rows) * row_bytes ..][0..row_bytes]);
+            var load_stream = try @import("stream.zig").Stream.init(&r);
+            defer load_stream.deinit();
+            var scratch = try Buffer.alloc(&r, 256 * 4);
+            defer scratch.free();
+            var progress = try Buffer.alloc(&r, 8);
+            defer progress.free();
+            try progress.fill8(0);
+            try ctx.synchronize();
+            var load_args: @import("args.zig").Args = .{};
+            try load_args.add(scratch.ptr);
+            try load_args.add(progress.ptr);
+            const load_function = try module.function("affine_test_load_long");
+            for (0..16) |_| try @import("launch.zig").launch(load_function, .{ .grid = .{ .x = 4 }, .block = .{ .x = 64 } }, load_stream, &load_args);
+            var observed_partial_progress = false;
+            var minimum_progress: u32 = 16 * 256;
+            var maximum_progress: u32 = 0;
+            for ([_]usize{ 1, 2, 3, 4, 8, 16, 17, 32 }) |rows| {
+                shape.rows = rows;
+                try buffers[4].fill8(0xff);
+                try (@import("stream.zig").Stream{ .r = &r, .handle = null }).synchronize();
+                try affine.launchRowF32(try module.function("affine_row4_f32"), stream, shape, buffers);
+                try stream.synchronize();
+                const output_row_bytes = shape.outputs * 2;
+                try buffers[4].download(0, got[0 .. rows * output_row_bytes]);
+                for (0..rows) |row| try std.testing.expectEqual(@as(usize, 0), try affine.mismatchCount(got[row * output_row_bytes ..][0..output_row_bytes], bytes[offset + (row % fixture_rows) * output_row_bytes ..][0..output_row_bytes]));
+                var during: [2]u32 = undefined;
+                try progress.download(0, std.mem.asBytes(&during));
+                minimum_progress = @min(minimum_progress, during[0]);
+                maximum_progress = @max(maximum_progress, during[0]);
+                observed_partial_progress = observed_partial_progress or (during[0] > during[1] and during[1] < 16 * 256);
+            }
+            try load_stream.synchronize();
+            var completed: [2]u32 = undefined;
+            try progress.download(0, std.mem.asBytes(&completed));
+            try std.testing.expectEqual(@as(u32, 16 * 256), completed[0]);
+            try std.testing.expectEqual(@as(u32, 16 * 256), completed[1]);
+            if (!observed_partial_progress) std.debug.print("sensitive load progress: K={d} N={d} group={d} min={d} max={d}\n", .{ shape.inputs, shape.outputs, shape.group, minimum_progress, maximum_progress });
+            try std.testing.expect(observed_partial_progress);
         }
     }
 }

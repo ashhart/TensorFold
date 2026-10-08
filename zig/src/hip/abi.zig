@@ -26,6 +26,7 @@ pub const Api = struct {
     hipMemcpyHtoD: *const fn (DevicePtr, [*]const u8, usize) callconv(.c) Result,
     hipMemcpyDtoH: *const fn ([*]u8, DevicePtr, usize) callconv(.c) Result,
     hipMemset: *const fn (DevicePtr, c_int, usize) callconv(.c) Result,
+    hipMemsetAsync: *const fn (DevicePtr, c_int, usize, Stream) callconv(.c) Result,
     hipStreamCreateWithFlags: *const fn (*Stream, c_uint) callconv(.c) Result,
     hipStreamDestroy: *const fn (Stream) callconv(.c) Result,
     hipStreamSynchronize: *const fn (Stream) callconv(.c) Result,
