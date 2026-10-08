@@ -11,8 +11,8 @@ const GS = 64;
 const LAYERS = 4; // weight sets streamed per timing (each ~718 MB: nothing stays cached)
 const widths = [_]usize{ 1, 2, 3, 4, 8, 16, 32, 64 };
 
-/// A pass shape: member rows a pass (mix: MB, then pairs, then singles), outputs a simdgroup, simdgroups a threadgroup.
-const Variant = struct { name: []const u8, mb: usize, rps: usize, sg: usize, mix: bool };
+/// A pass shape: member rows a pass (mix: MB, pairs, singles; words: tf_experts_w), outputs a simdgroup, simdgroups.
+const Variant = struct { name: []const u8, mb: usize, rps: usize, sg: usize, mix: bool, words: bool = false };
 const variants = [_]Variant{
     .{ .name = "rows2r2", .mb = 2, .rps = 2, .sg = 2, .mix = false },
     .{ .name = "rows2r2s4", .mb = 2, .rps = 2, .sg = 4, .mix = false },
@@ -24,6 +24,12 @@ const variants = [_]Variant{
     .{ .name = "rows4", .mb = 4, .rps = 4, .sg = 2, .mix = false },
     .{ .name = "rows3", .mb = 3, .rps = 4, .sg = 2, .mix = false },
     .{ .name = "mix4r2", .mb = 4, .rps = 2, .sg = 2, .mix = true },
+    .{ .name = "w2s4", .mb = 2, .rps = 4, .sg = 4, .mix = false, .words = true },
+    .{ .name = "w3s4", .mb = 3, .rps = 4, .sg = 4, .mix = false, .words = true }, // the engine's tf_xup_w3 / tf_xdown_w3
+    .{ .name = "w4s4", .mb = 4, .rps = 4, .sg = 4, .mix = false, .words = true },
+    .{ .name = "w4s2", .mb = 4, .rps = 4, .sg = 2, .mix = false, .words = true },
+    .{ .name = "w6s4", .mb = 6, .rps = 4, .sg = 4, .mix = false, .words = true },
+    .{ .name = "w4r8", .mb = 4, .rps = 8, .sg = 4, .mix = false, .words = true },
 };
 
 /// tf_experts_rows with the big passes first, then pairs, then singles: every row's sums unchanged in any pass.
@@ -79,8 +85,9 @@ const mix_source =
     \\
 ;
 
-/// Shapes the engine's source already instantiates (tf_xup_rows2/4, tf_xdown_rows2/4).
+/// Shapes the engine's source already instantiates (tf_xup_rows2/4, tf_xdown_rows2/4, tf_xup_w3, tf_xdown_w3).
 fn builtIn(v: Variant) bool {
+    if (v.words) return v.mb == 3 and v.rps == 4 and v.sg == 4;
     return !v.mix and v.rps == 4 and v.sg == 2 and (v.mb == 2 or v.mb == 4);
 }
 
@@ -268,7 +275,7 @@ pub fn main(init: std.process.Init) !void {
     try src.appendSlice(a, mix_source);
     for (variants) |v| {
         if (builtIn(v)) continue;
-        const kname = if (v.mix) "tf_experts_mix" else "tf_experts_rows";
+        const kname = if (v.mix) "tf_experts_mix" else if (v.words) "tf_experts_w" else "tf_experts_rows";
         try src.print(a, "template [[host_name(\"p_up_{s}\")]] [[kernel]] decltype({s}<2688, 1856, 64, {d}, {d}, 6, {d}, true>) {s}<2688, 1856, 64, {d}, {d}, 6, {d}, true>;\n", .{ v.name, kname, v.rps, v.sg, v.mb, kname, v.rps, v.sg, v.mb });
         try src.print(a, "template [[host_name(\"p_down_{s}\")]] [[kernel]] decltype({s}<1856, 2688, 64, {d}, {d}, 6, {d}, false>) {s}<1856, 2688, 64, {d}, {d}, 6, {d}, false>;\n", .{ v.name, kname, v.rps, v.sg, v.mb, kname, v.rps, v.sg, v.mb });
     }
@@ -276,8 +283,8 @@ pub fn main(init: std.process.Init) !void {
     defer lib.deinit();
     var kernels: [variants.len]Kernel = undefined;
     for (variants, &kernels) |v, *k| {
-        const up_name = if (builtIn(v)) try std.fmt.allocPrint(a, "tf_xup_rows{d}", .{v.mb}) else try std.fmt.allocPrint(a, "p_up_{s}", .{v.name});
-        const down_name = if (builtIn(v)) try std.fmt.allocPrint(a, "tf_xdown_rows{d}", .{v.mb}) else try std.fmt.allocPrint(a, "p_down_{s}", .{v.name});
+        const up_name = if (!builtIn(v)) try std.fmt.allocPrint(a, "p_up_{s}", .{v.name}) else if (v.words) "tf_xup_w3" else try std.fmt.allocPrint(a, "tf_xup_rows{d}", .{v.mb});
+        const down_name = if (!builtIn(v)) try std.fmt.allocPrint(a, "p_down_{s}", .{v.name}) else if (v.words) "tf_xdown_w3" else try std.fmt.allocPrint(a, "tf_xdown_rows{d}", .{v.mb});
         k.* = .{ .up = try mtl.Pipeline.init(device, lib, up_name, false), .down = try mtl.Pipeline.init(device, lib, down_name, false), .rps = v.rps, .sg = v.sg };
     }
     const window: Kernel = .{ .up = engine.get("tf_xup_rows2"), .down = engine.get("tf_xdown_rows2"), .rps = 4, .sg = 2 };

@@ -204,7 +204,7 @@ pub fn moe(f: Forward, e: *Enc, m: wts.Moe, next: anytype, rows: usize, eps: f32
         if (j == 0) e.alongside();
         const fc = if (j == 0) m.fc1 else m.fc2;
         const many = rows > 1 and f.members > 0;
-        const geo: [2]usize = if (f.geometry > 0 and !many) kern.geometries[f.geometry - 1] else .{ 4, 2 };
+        const geo: [2]usize = if (f.geometry > 0 and !many) kern.geometries[f.geometry - 1] else if (many and f.members == 3) .{ 4, 4 } else .{ 4, 2 };
         e.pipe(if (many) expertRows(f, j, f.members) else if (f.geometry > 0) expertGeo(f, j, f.geometry - 1) else f.k.get(key));
         e.buf(if (j == 0) s.x else s.act, 0, 0);
         if (rows == 1) {
@@ -284,8 +284,9 @@ pub fn project(k: *const kern.Kernels, e: *Enc, ad: wts.Adapter, x: Buffer, rows
     e.run(.{ ad.rank / 16, rows, 1 }, .{ ad.rank / 16, 1, 1 });
 }
 
-/// The routed-expert kernel (j 0: up, 1: down) taking `mb` member rows a pass.
+/// The routed-expert kernel (j 0: up, 1: down) taking `mb` member rows a pass (3: tf_experts_w, four simdgroups).
 fn expertRows(f: Forward, j: usize, mb: usize) mtl.Pipeline {
+    if (mb == 3) return if (j == 0) f.k.get("tf_xup_w3") else f.k.get("tf_xdown_w3");
     if (mb >= 4) return if (j == 0) f.k.get("tf_xup_rows4") else f.k.get("tf_xdown_rows4");
     return if (j == 0) f.k.get("tf_xup_rows2") else f.k.get("tf_xdown_rows2");
 }

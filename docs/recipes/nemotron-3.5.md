@@ -136,6 +136,16 @@ resumes a fresh conversation from it: with the 9.2k-token system prompt above, a
 instead of 1.30 s, resuming 9,213 tokens from disk, and every reply equalled the cache-off reply. The two learned
 states took 213 MB on disk.
 
+## Routed experts past one row
+
+Windows and shared rounds take the routed experts through `tf_experts_w` (`zig/kernels/metal/nemotron_experts.metal`):
+a 16-group's four weight words as the outer loop, three member rows a pass, four simdgroups a threadgroup. Each lane
+sums in the one-row kernel's order, so every width gives the one-row bits; `zig build tf-nemotron-experts` checks that
+and times the shapes. On an M5 Ultra the 23 layers' up and down projections went from 2.35 to 2.27 ms at 4 rows, 6.68
+to 6.48 at 16, 11.93 to 11.24 at 32 and 22.57 to 20.58 at 64 (equal at 2). Served with the cache off, alternated twice
+against the previous kernel: one stream 503 to 513 tok/s on code and 348 to 351 on prose, 8 streams 947 to 985 and 713
+to 731 tok/s in all, 32 streams 792 to 802 and 752 to 761, every reply equal to its solo and its plain run.
+
 ## Measurements
 
 Use the [public benchmark command](README.md#measurements) with the server above.

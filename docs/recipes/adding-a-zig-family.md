@@ -152,6 +152,13 @@ This API does not enable constrained generation or add a server capability.
    - Stay lenient while copies land within 0.05 of the head's drafts.
    - Flash Next edits went from 228.6 to 314.1 tok/s, with code and prose unchanged.
 9. **Windows of up to 16 rows**, the widest only while copies land.
+   - **Routed experts past one row: a 16-group's weight words as the outer loop** (`tf_experts_w`, Nemotron on Metal,
+     8 Oct 2026). The lane kernel took its members two at a time with all 16 activations of a chunk live; taking the
+     four weight words as the outer loop keeps four activations a member live, so three members a pass at four
+     simdgroups fit. Same bits at every width (`tf-nemotron-experts`); the up and down projections of 23 layers went
+     from 2.35 to 2.27 ms at 4 rows, 6.68 to 6.48 at 16, 11.93 to 11.24 at 32 and 22.57 to 20.58 at 64, equal at 2.
+     Served, cache off, alternated twice: one stream 503 to 513 tok/s on code and 348 to 351 on prose; 8 streams 947
+     to 985 and 713 to 731 in all; 32 streams 792 to 802 and 752 to 761. Every reply equal to its solo and plain run.
 
 ## Stage 3: the prompt path
 
@@ -272,6 +279,12 @@ CUDA traps:
 - A pool of kept prompt-state buffers for Nemotron: a fresh 9.2k-token prompt costs 1.07 s whether the cache is off,
   keeps every state, or evicts and reallocates two 106 MiB states a request (22 evictions in 12 prompts). The GPU copy
   hides a new buffer's cost; Flash Next's pool stays, for its idle pre-touch.
+- Nemotron's routed experts, three ways that kept every bit and gained nothing (`tf-nemotron-experts`, M5 Ultra):
+  an expert's member blocks spread over grid z instead of looped (the GPU already overlaps a popular expert's loop
+  with the other 230 threadgroups a layer); the activations' floats and bf16-rounded group sums prepared once a
+  forward instead of remade a member (50 fewer ALU ops a chunk, the same time, so the loop is not ALU-bound);
+  8-byte vector loads of the weight words and activations (slower than the compiler's own schedule). Six or eight
+  members a pass, or four at two simdgroups, lose 5-40%: only two to four at four simdgroups win.
 - Adaptive depth by landed+1: it lost to fixed levels. Full-vocabulary drafts lose too.
 - Reshaping the 6-bit expert prompt kernels, all exact, Flash Next on the M5 Ultra at 8k:
   - 128-row paired gate-up tiles lost 25% to register spills.
