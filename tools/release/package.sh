@@ -54,7 +54,7 @@ sha() {
 }
 # Hash every shipped file; keep relative paths so checks survive relocation.
 (cd "$stage"; find . -type f ! -name SHA256SUMS | LC_ALL=C sort | while IFS= read -r file; do sha "$file"; done) > "$stage/SHA256SUMS"
-COPYFILE_DISABLE=1 tar -czf "$output/$name.tar.gz" -C "$staging" "$name"
+COPYFILE_DISABLE=1 tar --no-xattrs -czf "$output/$name.tar.gz" -C "$staging" "$name"
 (cd "$output"; sha "$name.tar.gz") > "$output/$name.tar.gz.sha256"
 # Install only the final archive and checksum, never the staging tree.
 # Fresh stages stay in the build cache for inspection.

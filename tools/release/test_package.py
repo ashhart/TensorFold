@@ -16,6 +16,19 @@ output = receipt / "archives"
 output.mkdir()
 binary = receipt / "tensorfold-native"
 binary.write_text("synthetic packaging fixture, not an executable\n")
+
+def tag(path):
+    """Gives the fixture an extended attribute, as macOS does to downloaded or built files; False where unsupported."""
+    try:
+        if hasattr(os, "setxattr"):
+            os.setxattr(path, "user.tensorfold.test", b"1")
+        else:
+            subprocess.run(["xattr", "-w", "com.tensorfold.test", "1", str(path)], check=True, capture_output=True)
+        return True
+    except (OSError, FileNotFoundError, subprocess.CalledProcessError):
+        return False
+
+tagged = tag(binary)
 version = "0.6.5"  # Existing manifest version, not a release choice.
 name = f"tensorfold-{version}-linux-x86_64"
 
@@ -45,6 +58,8 @@ def pack(tree=None):
     with tarfile.open(archive) as tar:
         files = {m.name.removeprefix(name + "/"): tar.extractfile(m).read()
                  for m in tar.getmembers() if m.isfile()}
+        xattrs = [(m.name, k) for m in tar.getmembers() for k in m.pax_headers if "xattr" in k.lower()]
+    assert not xattrs, f"extended attributes in the archive: {xattrs[:3]}"
     for line in files["SHA256SUMS"].decode().splitlines():
         digest, path = line.split("  ", 1)
         assert hashlib.sha256(files[path.removeprefix("./")]).hexdigest() == digest
@@ -59,4 +74,5 @@ third = pack()
 assert not any(p.startswith("share/") for p in third), "capture files survived removal of the AOT input"
 for file in ["LICENSES/MIT.txt", "LICENSES/Apache-2.0.txt", "LICENSES/MiaAI-Lab-MIT.txt", "THIRD_PARTY_NOTICES.md"]:
     assert third[file] == (root / file).read_bytes(), file
-print(f"PASS same-version full -> smaller -> no capture, all hashes and notice files; receipt {receipt}")
+attrs = "no extended attributes" if tagged else "extended attributes untested (unsupported here)"
+print(f"PASS same-version full -> smaller -> no capture, all hashes and notice files, {attrs}; receipt {receipt}")
