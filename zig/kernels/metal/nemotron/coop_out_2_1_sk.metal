@@ -22,7 +22,6 @@ using namespace mpp::tensor_ops;
   constexpr int GS = 64;
   constexpr int EDGE = 1;
 
-  const ushort sg = simdgroup_index_in_threadgroup;
   const ushort slice = threadgroup_position_in_grid.z;
   const int M = mdims[0], MP = mdims[1];
   constexpr int KG = K / GS;
