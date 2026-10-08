@@ -10,6 +10,12 @@ tensorfold serve ./model-8bit
 
 The `quants` branch extends the Qwen3.5/3.8 dense family to MLX affine weights at 2, 3, 4, 5, 6 and 8 bits, with group sizes 32, 64 and 128.
 It keeps packed words, scales and biases at their stored precision, including mixed layer formats.
+The row decoder normalizes activations to bf16 at its projection boundary: the hand-written glue
+kernels read and write bfloat, and MLX's quantized matmul propagates the scales' dtype, so a
+checkpoint whose metadata is fp16 would otherwise hand fp16 activations to a bfloat kernel and
+fail its JIT build. The cast is a no-op for bf16 metadata; for fp16 metadata it rounds the fp32
+accumulator through fp16 into bf16 — the sums are unchanged, only that module's activation
+representation double-rounds.
 It does not convert a checkpoint during loading.
 Choose an 8-bit checkpoint made from the original model when you want its 8-bit quality.
 

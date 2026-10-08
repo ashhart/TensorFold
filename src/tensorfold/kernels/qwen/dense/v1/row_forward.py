@@ -298,7 +298,7 @@ def _rows_forward(core: Any, windows: Sequence[Any], parents: Sequence[Sequence[
     if sum(widths) > row_matmul.BACKEND.max_rows:
         raise ValueError(f"row_forward: {sum(widths)} rows, the {row_matmul.BACKEND.name} matmul takes up to {row_matmul.BACKEND.max_rows}")
     rows = _Rows(parents, starts)
-    hidden = core.embed_tokens(_token_ids(windows))
+    hidden = row_matmul._bf16(core.embed_tokens(_token_ids(windows)))
     layers = list(core.layers)
     pending: mx.array | None = None                   # the last output projection's rows, added in the next norm
     tapped: Any = None

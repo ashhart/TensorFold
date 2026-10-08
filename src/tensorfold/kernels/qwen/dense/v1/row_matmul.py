@@ -152,11 +152,24 @@ def project(module: Any, x: mx.array) -> mx.array:
     y = BACKEND(x, module["weight"], module["scales"], module["biases"], module.group_size, module.bits)
     if "bias" in module:
         y = y + module["bias"]
-    return y
+    return _bf16(y)
 
 
 def project_stack(stack: Stack, x: mx.array) -> mx.array:
-    return BACKEND(x, stack.weight, stack.scales, stack.biases, stack.group_size, stack.bits)
+    return _bf16(BACKEND(x, stack.weight, stack.scales, stack.biases, stack.group_size, stack.bits))
+
+
+def _bf16(y: mx.array) -> mx.array:
+    """The row decoder's activation dtype: bf16 (row_glue's hand-written sources read and write bfloat).
+
+    MLX's quantized matmul propagates the scales' dtype, so a checkpoint whose metadata is
+    fp16 yields fp16 activations and the glue kernels' JIT build fails on the type. The cast
+    is a no-op for bf16 metadata; for fp16 metadata it rounds the fp32 accumulator through
+    fp16 before bf16 (the sums are unchanged; only that module's activation representation
+    double-rounds, which is the disclosure CONTRIBUTING 3 asks for).
+    """
+
+    return y if y.dtype == mx.bfloat16 else y.astype(mx.bfloat16)
 
 
 def logits(head: Any, x: mx.array) -> mx.array:
@@ -165,7 +178,7 @@ def logits(head: Any, x: mx.array) -> mx.array:
     own = getattr(head, "project_rows", None)
     if own is not None:
         return own(x)
-    return BACKEND(x, head["weight"], head["scales"], head["biases"], head.group_size, head.bits)
+    return _bf16(BACKEND(x, head["weight"], head["scales"], head["biases"], head.group_size, head.bits))
 
 
 _DRAFT_ATTR = "_row_forward_draft"
