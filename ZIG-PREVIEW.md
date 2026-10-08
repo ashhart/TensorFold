@@ -37,7 +37,7 @@ Concurrent sessions on the same machine:
 | 32 | 509 | 502 |
 | 64 | 502 | 607 |
 
-The two engines are level up to 32 sessions. Past 32 the Zig engine stops scaling, because a forward holds at most 32 rows (see below).
+The two engines were level up to 32 sessions, and past 32 the Zig engine stopped scaling, because a forward held at most 32 rows. A shared round now holds four rows a lane, 64 at least and 128 at most, so 32 and 64 drafting sessions keep rows for their drafts. On an M5 Ultra with `--parallel 64`, 64 sessions went from 795 to 1,006 tok/s in total on code and from 753 to 847 on chat, 32 sessions from 795 to 1,019 and 755 to 843, every reply equal to its solo run (the table above is an earlier measurement on another machine).
 
 ## Build
 
@@ -66,14 +66,14 @@ To serve Flash Next from two Macs at once, each holding the whole model, see [sp
 
 - `--learn` keeps shared prompt prefixes on disk for GLM and Nemotron. Flash Next keeps its in memory, so a restart forgets them.
 - On M1 to M4, chips without tensor units, prompt kernels use the simdgroup-matrix layout and Nemotron's window attention is rewritten to it. Both are checked at load. Dense projections and routed experts are already proven row-exact there. The Mamba tree conv/scan and the norms are still open.
-- A forward holds at most 32 rows.
+- A shared forward holds at most 128 rows (64 up to `--parallel 16`), and a lone stream's window at most 64.
 - The native server serves Nemotron 3.5 Lightning, Qwen 3.8 Flash Next, GLM-5.3-Flash and the Qwen3.5-2B checkpoint in its recipe. Flash Next takes one reply at a time.
 
 ## Where the work goes next, and where you can help
 
 1. **`--learn` for Flash Next** (`zig/src/native/flashnext_host.zig`). GLM and Nemotron keep shared prompt prefixes on disk and resume them after a restart; Flash Next keeps its states in memory only. The prompt cache's `write`, `read` and `forget` functions over its `snapshot.zig` do it, with an identity made as `glm_host.zig` and `native/metal.zig` make theirs.
 2. **Exactness on M1 to M4** (`zig/kernels/metal`). Prompt kernels and Nemotron window attention already use the simdgroup-matrix layout and are checked at load. The remaining kernels still need the per-kernel sweep: one row alone against the same row inside a 2-, 3- and 8-row window, then fix the kernel whose bits move.
-3. **More than 32 rows per forward** (`zig/src/native/metal.zig`, `batch_rows`). Lifting the cap lets 64+ sessions scale, and lets one stream run wider windows.
+3. **More than 128 rows per forward** (`zig/src/native/metal.zig`, `batch_rows`; `zig/src/families/nemotron/state.zig`, `max_rows`). A shared round holds four rows a lane up to 128 now, which is what 64 sessions need. Past that, each row costs a Mamba state slot (47 MiB across the model's 23 Mamba layers) and the expert kernels' cost per row keeps climbing (item 4), so 128+ sessions, and wider windows for one stream, need both looked at together.
 4. **Cheaper extra lanes** (`zig/kernels/metal`). Past 16 lanes the routed-expert kernel is limited by arithmetic, not memory. A round of 8 lanes costs 2.2x a round of one, and 32 lanes cost 6.2x. Flattening that curve speeds up both one stream and many sessions.
 5. **New model families** (`zig/src/families`). Qwen 3.8 Flash Next is served on Metal. Each new family follows the Nemotron layout: a weight loader, kernels checked op by op against the Python engine, a full forward whose tokens match it, then the lanes. [Adding a Zig family](docs/recipes/adding-a-zig-family.md) has the steps in order, what each one gained, and which code owns it.
 6. **The CUDA backend** (`zig/src/cuda`, `zig/build/cuda.zig`). Nemotron is exact on GB10 from the command line. It needs the server wiring and more families.

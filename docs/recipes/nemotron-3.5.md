@@ -149,3 +149,25 @@ prefilled in 311.5 s and resumed in 0.63 s with 261,774 tokens cached. Decode me
 135.3 tok/s with MTP (code sampled, chat sampled, code greedy, chat greedy) and 107.8, 109.0, 109.5 and 109.0 with
 `--no-drafts`. All 180 concurrent replies at 1, 2, 4 and 8 streams equaled their solo runs, and every solo run
 equaled `"draft": false`. These are 0.3.5.1 results, not a later release's.
+
+## Shared rounds on the Zig engine
+
+The native server runs every live stream's window in one forward. That forward holds four rows a lane (`--parallel`),
+64 at least and 128 at most, so up to `--parallel 16` nothing changes from the 64-row buffers the engine always
+allocated, and at 32 or 64 lanes each drafting stream keeps rows for its drafts instead of the round splitting. Each
+row past 64 costs one Mamba state slot, 2 MiB a Mamba layer, 47 MiB across Lightning's 23, so `--parallel 64` takes
+about 2.9 GiB more than before and `--parallel 8` the same. The startup timing sweep times shared rounds up to that
+width, so the planner prices them from measurements rather than a straight line past 32.
+
+Measured on an M5 Ultra (256 GB, macOS 27.0.1) with `--parallel 64 --context 32768 --prompt-cache-gib 0`, 256
+tokens a reply, greedy, two alternated rounds, `tools/bench_concurrent.py --alone --serial`:
+
+| Sessions | Code, before | Code, after | Chat, before | Chat, after |
+|---|---|---|---|---|
+| 8 | 939-944 tok/s | 944-953 | 717-721 | 713-717 |
+| 32 | 779-795 | 958-1,019 | 740-755 | 843 |
+| 64 | 779-795 | 968-1,006 | 738-753 | 847-849 |
+
+Every concurrent reply equaled its solo run and every solo run equaled `"draft": false` (832 replies checked a
+binary). One stream decodes the same as before: 505 and 347 tok/s on the two decode prompts. A 64-row cap alone,
+measured on the way, gave most of the 32-session gain and a quarter of the 64-session one.

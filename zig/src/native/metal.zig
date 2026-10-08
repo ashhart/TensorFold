@@ -139,7 +139,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         .chunk = step,
         .drafts = o.drafts,
         .streams = @max(o.lanes, 2),
-        .batch_rows = 32,
+        .batch_rows = @min(128, @max(64, 4 * o.lanes)), // four rows a lane, so 32 and 64 sessions keep their drafts
     });
     errdefer h.metal.deinit();
     if (h.metal.head != null) try nemotron.timing.measure(h.metal, io);
