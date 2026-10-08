@@ -12,6 +12,7 @@ Each family page describes its supported checkpoint, kernels and operating limit
 | Gemma 4 26B-A4B | [MLX, fused one-row decode](gemma-4.md) |
 | DeepSeek-V4-Flash | [MLX on a 256 GB Mac, DSpark and MTP drafts](deepseek-v4-flash.md) |
 | Qwen3.6-35B-A3B | [MLX with MTP drafts, one-GPU CUDA](qwen3.6-moe.md) |
+| Ornith-1.5-9B | [MLX, unqualified sizing](ornith-1.5-9b.md) |
 
 ## Capability floor
 

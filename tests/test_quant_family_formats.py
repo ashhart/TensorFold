@@ -55,6 +55,56 @@ def test_embedding_and_vision_format_overrides_do_not_force_language_rows():
     assert qwen3_5.native_lanes(value)
 
 
+def ornith_style_config(**overrides):
+    """A dense Qwen3.5 checkpoint as upstream ships it: nested text_config, untied head, vision tower.
+
+    Mirrors ornith-ai/Ornith-1.5-9B's config.json shape (hidden 4096, 32 layers, untied) with the
+    quantization block mlx-lm's mixed predicates write after conversion.
+    """
+    value = {
+        "model_type": "qwen3_5",
+        "tie_word_embeddings": False,
+        "text_config": {"model_type": "qwen3_5_text", "tie_word_embeddings": False,
+                        "vocab_size": 248320, "hidden_size": 4096, "num_hidden_layers": 32},
+        "quantization": {"bits": 4, "group_size": 64, "mode": "affine",
+                         "model.language_model.layers.0.mlp.down_proj": {"bits": 6, "group_size": 64},
+                         "model.language_model.layers.2.linear_attn.in_proj_z": {"bits": 6, "group_size": 64},
+                         "model.language_model.lm_head": {"bits": 6, "group_size": 64},
+                         "model.visual.blocks.0.mlp.linear_fc1": {"bits": 5, "group_size": 32}},
+    }
+    value.update(overrides)
+    return value
+
+
+@pytest.mark.parametrize("backend", ["mlx", "cuda"])
+def test_nested_untied_checkpoint_with_mixed_overrides_is_admitted(backend):
+    value = ornith_style_config()
+    qwen3_5.check_quantization(value, backend)
+    families.require_readable(qwen_family(), value, backend)
+    specs = qwen3_5._language_specs(value)
+    assert specs["model.language_model.lm_head"].bits == 6
+    assert specs["model.language_model.layers.0.mlp.down_proj"].bits == 6
+    assert all("visual" not in path for path in specs)
+
+
+@pytest.mark.parametrize("where", ["text_config", "root"])
+def test_tied_nested_checkpoint_refusal_names_the_head_limit(where):
+    value = ornith_style_config()
+    if where == "text_config":
+        value["text_config"]["tie_word_embeddings"] = True
+    else:
+        value["tie_word_embeddings"] = True
+    with pytest.raises(ValueError, match="tied embedding head"):
+        qwen3_5.check_quantization(value, "mlx")
+
+
+def test_unquantized_nested_hf_checkpoint_is_refused_with_guidance():
+    value = ornith_style_config()
+    del value["quantization"]
+    with pytest.raises(ValueError, match="affine quantization metadata"):
+        qwen3_5.check_quantization(value, "mlx")
+
+
 def test_family_metadata_prioritizes_modern_quantization_and_skips_empty_overrides():
     value = configuration(8, 128, **{"model.layers.0.q_proj": {}, "model.layers.0.k_proj": False,
                                     "model.layers.0.v_proj": {"bits": 3}})
