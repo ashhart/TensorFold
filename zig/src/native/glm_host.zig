@@ -40,25 +40,25 @@ fn words(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     };
 }
 
-/// Streams whose caches fit beside the weights under the 70% load limit, at most `want` (`fixed`: all of them or none).
+/// Streams whose caches fit beside the weights under the engine's admission limit, at most `want` (or none).
 fn fit(eng: *const ge.Engine, want: u32, fixed: bool) !u32 {
     const per = glm.state.stateBytes(&eng.c, eng.s.cap, true) + 64 * 1024;
     const used = eng.w.bytes + eng.arena.bytes;
-    const limit = ge.Engine.loadLimit();
+    const limit = eng.limit_bytes;
     const room: u64 = if (limit > used) (limit - used) / per else 0;
     const n: u32 = @intCast(@min(@as(u64, @max(want, 1)), 1 + room));
     if (n < want and fixed) {
-        std.log.err("glm: {d} streams of {d}-token caches pass this Mac's load limit; {d} fit (lower --parallel or --context)", .{ want, eng.s.cap, n });
+        std.log.err("glm: {d} streams of {d}-token caches pass the {d:.1} GB load limit; {d} fit (lower --parallel or --context)", .{ want, eng.s.cap, @as(f64, @floatFromInt(limit)) / 1e9, n });
         return error.OverMemoryLimit;
     }
     return n;
 }
 
-/// Kept prompt states' room: --prompt-cache-gib, else 16 GiB, inside what the 70% load limit leaves.
+/// Kept prompt states' room: --prompt-cache-gib, else 16 GiB, inside what the engine's admission limit leaves.
 fn cacheBudget(eng: *const ge.Engine, gib: ?f64) u64 {
     const want: u64 = @intFromFloat((gib orelse 16) * (1 << 30));
     const used = eng.w.bytes + eng.arena.bytes;
-    const limit = ge.Engine.loadLimit();
+    const limit = eng.limit_bytes;
     return if (limit > used) @min(want, limit - used) else 0;
 }
 
@@ -76,8 +76,9 @@ fn learnedStates(gpa: Allocator, eng: *const ge.Engine, sl: *glm.slots.Slots, ro
 }
 
 /// A GLM-5.3-Flash checkpoint served: `window` tokens of cache a stream, warmed first (the pair: `speed_up`).
-pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: ?[]const u8, streams: u32, fixed: bool, cache_gib: ?f64, learn: ?[]const u8, learn_cap: u64) !*Host {
-    const eng = try ge.Engine.loadWith(gpa, dir, window + 64, speed_up, learn != null);
+pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: ?[]const u8, streams: u32, fixed: bool, cache_gib: ?f64, learn: ?[]const u8, learn_cap: u64, override_gib: ?f64) !*Host {
+    const env_text: ?[]const u8 = if (std.c.getenv(glm.load_limit.LIMIT_ENV)) |v| std.mem.span(v) else null;
+    const eng = try ge.Engine.loadWith(gpa, dir, window + 64, speed_up, learn != null, override_gib, env_text);
     errdefer eng.deinit();
     var toks: [96]u32 = undefined;
     for (&toks, 0..) |*t, i| t.* = @intCast(1000 + i);

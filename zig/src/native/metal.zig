@@ -172,8 +172,11 @@ fn openGlm(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]co
     }
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const h = glm.open(gpa, io, o.dir, @intCast(window), o.speed_up, o.lanes, o.lanes_fixed, o.prompt_cache_gib, o.learn, @intFromFloat(o.learn_gib * (1 << 30))) catch |e| {
-        problem.* = try std.fmt.allocPrint(a, "the native GLM-5.3-Flash engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
+    const h = glm.open(gpa, io, o.dir, @intCast(window), o.speed_up, o.lanes, o.lanes_fixed, o.prompt_cache_gib, o.learn, @intFromFloat(o.learn_gib * (1 << 30)), o.load_limit_gib) catch |err| {
+        problem.* = switch (err) {
+            error.BadLoadLimit => try std.fmt.allocPrint(a, "--load-limit-gib or {s} does not name a usable load limit (a positive GiB count at most this Mac's RAM)", .{tf.glm.load_limit.LIMIT_ENV}),
+            else => try std.fmt.allocPrint(a, "the native GLM-5.3-Flash engine cannot load {s} ({s})", .{ o.dir, @errorName(err) }),
+        };
         return null;
     };
     return .{ .engine = h.engine(), .close = glm.close, .ctx = h };

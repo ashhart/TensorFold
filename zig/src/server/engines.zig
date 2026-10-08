@@ -14,6 +14,10 @@ pub fn capabilities(a: Allocator) cli.Engines {
 
 /// The engine for the checkpoint in ``dir``, or null with ``problem`` set.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, dir: []const u8, model_type: []const u8, args: cli.Args, problem: *[]const u8) !?Opened {
+    if (args.load_limit_gib != null and !std.mem.eql(u8, model_type, "glm5_next")) {
+        problem.* = "--load-limit-gib (and TENSORFOLD_LOAD_LIMIT_GB) applies to the GLM-5.3-Flash Metal engine's admission budget; other engines keep their own memory settings";
+        return null;
+    }
     return native.open(a, gpa, io, .{
         .dir = dir,
         .model_type = model_type,
@@ -26,6 +30,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, dir: []const u8, model_typ
         .prompt_cache_over_cap = args.prompt_cache_over_cap,
         .learn = if (args.learn) args.learn_dir orelse try api.prompt_imprint.defaultRoot(a) else null,
         .learn_gib = args.learn_gib,
+        .load_limit_gib = args.load_limit_gib,
         .device = args.device,
         .segments = args.segments,
     }, problem);

@@ -93,10 +93,11 @@ pub const flags = [_]Flag{
     .{ .name = "--learn", .kind = .store_true, .native = true },
     .{ .name = "--learn-dir", .native = true },
     .{ .name = "--learn-gib", .native = true },
+    .{ .name = "--load-limit-gib", .native = true },
 };
 
 /// The variables this binary honours as the Python engine does, then the CUDA build's.
-pub const env = [_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_NO_LIVE", "TENSORFOLD_SEED_SALT", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_NO_UPDATE_CHECK", "HF_HOME", "HF_HUB_CACHE", "HF_HUB_OFFLINE" } ++
+pub const env = [_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_NO_LIVE", "TENSORFOLD_SEED_SALT", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_NO_UPDATE_CHECK", "TENSORFOLD_LOAD_LIMIT_GB", "HF_HOME", "HF_HUB_CACHE", "HF_HUB_OFFLINE" } ++
     (if (cuda_build) [_][]const u8{ "TF_CUDA_DEVICE", "TF_CUDA_SEGMENTS", "TENSORFOLD_CUDA_KERNELS", "TENSORFOLD_MEMORY_RESERVE_GIB", "TENSORFOLD_CUDA_MEMORY_LIMIT_GB" } else [_][]const u8{});
 
 pub const Args = struct {
@@ -116,6 +117,7 @@ pub const Args = struct {
     learn: bool = false, // keep shared prompt states on disk (--learn-dir: where; it implies --learn)
     learn_dir: ?[]const u8 = null,
     learn_gib: f64 = 32, // disk for learned states, every model and build together
+    load_limit_gib: ?f64 = null, // the load limit in GiB in place of 70% of RAM (null: 70%, or TENSORFOLD_LOAD_LIMIT_GB)
     max_tokens: i64 = 4096,
     temperature: ?f64 = null,
     top_p: ?f64 = null,
@@ -205,6 +207,13 @@ fn gib(u: *Usage, a: Allocator, name: []const u8, v: []const u8) error{ Usage, O
     return g;
 }
 
+/// A positive GiB count for the load limit: zero is not "off" (nothing would load), so it is refused like the rest.
+fn positiveGib(u: *Usage, a: Allocator, name: []const u8, v: []const u8) error{ Usage, OutOfMemory }!f64 {
+    const g = try gib(u, a, name, v);
+    if (g <= 0) return fail(u, a, "argument {s}: expected a positive GiB count below 2^34: '{s}'", .{ name, v });
+    return g;
+}
+
 fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usage, alias: *std.ArrayList([]const u8), keys: *std.ArrayList([]const u8)) error{ Usage, OutOfMemory }!void {
     const v = value orelse "";
     const is = struct {
@@ -223,7 +232,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
     } else if (is(name, "--learn-gib")) {
         out.learn = true;
         out.learn_gib = try gib(u, a, name, v);
-    } else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--compact-at")) {
+    } else if (is(name, "--load-limit-gib")) out.load_limit_gib = try positiveGib(u, a, name, v) else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--compact-at")) {
         if (std.mem.eql(u8, v, "auto")) out.compact_auto = true else {
             const f = try float(u, a, name, v);
             if (!(f > 0 and f <= 1)) return fail(u, a, "argument --compact-at: expected auto or a fraction in (0, 1]: '{s}'", .{v});
@@ -320,6 +329,10 @@ test "parse and capabilities share the table" {
     try std.testing.expect(dir.learn and std.mem.eql(u8, "/x/y", dir.learn_dir.?));
     const capped = try parse(a, &.{ "m", "--learn-gib", "8" }, &u);
     try std.testing.expect(capped.learn and capped.learn_gib == 8);
+    try std.testing.expectEqual(@as(?f64, 235), (try parse(a, &.{ "m", "--load-limit-gib", "235" }, &u)).load_limit_gib);
+    try std.testing.expectEqual(@as(f64, 12.5), (try parse(a, &.{ "m", "--load-limit-gib", "12.5" }, &u)).load_limit_gib.?);
+    try std.testing.expect((try parse(a, &.{"m"}, &u)).load_limit_gib == null);
+    for ([_][]const u8{ "0", "-1", "17179869184", "nan", "x" }) |bad| try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--load-limit-gib", bad }, &u));
     for ([_][]const u8{ "1e300", "inf", "nan", "-1", "17179869184" }) |bad| try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--prompt-cache-gib", bad }, &u));
     var out: std.Io.Writer.Allocating = .init(a);
     try capabilities(&out.writer, .{ .version = "0.6.5" });

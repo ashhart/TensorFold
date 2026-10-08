@@ -140,6 +140,8 @@ pub const Open = struct {
     learn: ?[]const u8 = null,
     /// --learn-gib: what learned states may take on disk, every model and build together.
     learn_gib: f64 = 32,
+    /// --load-limit-gib (GiB): the load limit in place of 70% of RAM (null: 70%, or TENSORFOLD_LOAD_LIMIT_GB).
+    load_limit_gib: ?f64 = null,
     /// --device and --segments (CUDA); null: the backend's environment fallback, then its default.
     device: ?u32 = null,
     segments: ?u32 = null,

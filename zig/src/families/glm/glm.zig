@@ -11,10 +11,12 @@ pub const ep = @import("ep.zig");
 pub const slots = @import("slots.zig");
 pub const backend = @import("backend.zig");
 pub const mirror = @import("mirror.zig");
+pub const load_limit = @import("load_limit.zig");
 
 test {
     _ = config;
     _ = state;
+    _ = load_limit;
     _ = ep;
     _ = @import("ep_control.zig");
     _ = @import("../../core/moe_route.zig");

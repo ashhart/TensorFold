@@ -9,6 +9,7 @@ const mtp = @import("mtp.zig");
 const prompt_mod = @import("prompt.zig");
 const kernels = @import("kernels.zig");
 const ep_mod = @import("ep.zig");
+const load_limit = @import("load_limit.zig");
 const CopyIndex = @import("../../core/copy_index.zig").CopyIndex;
 const checks = @import("checks.zig");
 const Ref = wts.Ref;
@@ -75,6 +76,7 @@ pub const Engine = struct {
     cut: u32 = 0, // GLM_CUTS=N: a prompt chunk also ends at N (a server's planned start, for its served == CLI check)
     copy_min: u32 = 0, // copy drafts (GLM_COPY=N): a round copies what followed the reply's last N+ tokens earlier (0: off)
     rank_log: bool = false, // GLM_RANKS=1: each MTP depth's logits kept, and the target's rank in them where drafts miss
+    limit_bytes: usize = 0, // the resolved admission budget: the flag's GiB, else TENSORFOLD_LOAD_LIMIT_GB's, else 70% of RAM
     ep_arena: std.heap.ArenaAllocator, // the link settings, alive as long as the link
     residency: ?mtl.ResidencySet = null,
     keepalive_sets: [1]mtl.ResidencySet = undefined, // the residency set, for the idle keepalive's commit
@@ -87,11 +89,11 @@ pub const Engine = struct {
 
     /// The checkpoint in `dir`, caches for `cap` tokens; GLM_LAYERS=N: the first N layers only; GLM_EP=settings: half the experts.
     pub fn load(gpa: std.mem.Allocator, dir: []const u8, cap: u32) !*Engine {
-        return loadWith(gpa, dir, cap, if (std.c.getenv("GLM_EP")) |v| std.mem.span(v) else null, false);
+        return loadWith(gpa, dir, cap, if (std.c.getenv("GLM_EP")) |v| std.mem.span(v) else null, false, null, null);
     }
 
-    /// `load` with expert parallel over the link in `ep_path` (this Mac's settings), or on one Mac when null.
-    pub fn loadWith(gpa: std.mem.Allocator, dir: []const u8, cap: u32, ep_path: ?[]const u8, learn: bool) !*Engine {
+    /// `load` plus `override_gib` (GiB from --load-limit-gib) and `env_text` (TENSORFOLD_LOAD_LIMIT_GB): one budget.
+    pub fn loadWith(gpa: std.mem.Allocator, dir: []const u8, cap: u32, ep_path: ?[]const u8, learn: bool, override_gib: ?f64, env_text: ?[]const u8) !*Engine {
         const e = try gpa.create(Engine); // undefined memory: every field is set below
         errdefer gpa.destroy(e);
         const pool = mtl.objc.Pool.push();
@@ -166,9 +168,13 @@ pub const Engine = struct {
         const chunked = if (std.c.getenv("GLM_PROMPT")) |v| v[0] != '0' else true;
         if (chunked and (link == null or e.c.byRows())) e.pr = try prompt_mod.init(gpa, &e.arena, e.device, &e.c, &e.sc, e.k, cap);
         errdefer if (e.pr) |*p| p.deinit();
-        const limit = loadLimit();
+        e.limit_bytes = load_limit.resolve(override_gib, env_text, physicalRam()) catch |err| {
+            std.log.err("glm: the load limit is not usable ({s}); fix --load-limit-gib or {s}", .{ @errorName(err), load_limit.LIMIT_ENV });
+            return error.BadLoadLimit;
+        };
+        const limit = e.limit_bytes;
         if (plan_bytes + e.arena.bytes > limit) { // refused before any weight is read: the floor's one-Mac limit
-            std.log.err("glm: {d:.1} GB of weights and {d:.1} GB of caches pass this Mac's {d:.1} GB load limit (70% of RAM); load a layer subset or the expert-parallel pair", .{ @as(f64, @floatFromInt(plan_bytes)) / 1e9, @as(f64, @floatFromInt(e.arena.bytes)) / 1e9, @as(f64, @floatFromInt(limit)) / 1e9 });
+            std.log.err("glm: {d:.1} GB of weights and {d:.1} GB of caches pass this Mac's {d:.1} GB load limit{s}; load a layer subset, the expert-parallel pair, or pass --load-limit-gib (or {s}) to raise it", .{ @as(f64, @floatFromInt(plan_bytes)) / 1e9, @as(f64, @floatFromInt(e.arena.bytes)) / 1e9, @as(f64, @floatFromInt(limit)) / 1e9, if (override_gib == null and std.c.getenv(load_limit.LIMIT_ENV) == null) " (70% of RAM)" else "", load_limit.LIMIT_ENV });
             return error.OverMemoryLimit;
         }
         e.w = try wts.load(gpa, e.device, dir, &e.c, 16, false);
@@ -220,12 +226,12 @@ pub const Engine = struct {
         return h.final();
     }
 
-    /// The most this Mac may load: 70% of its RAM in GiB, read as GB (the floor's 179 GB on a 256 GiB Mac, the strict reading).
-    pub fn loadLimit() usize {
+    /// This Mac's physical RAM in bytes, read once per load; null where the size is unknown (the loader then refuses).
+    fn physicalRam() ?u64 {
         var mem: u64 = 0;
         var len: usize = @sizeOf(u64);
-        if (std.c.sysctlbyname("hw.memsize", &mem, &len, null, 0) != 0 or mem == 0) return 0;
-        return @intFromFloat(@as(f64, @floatFromInt(mem)) / (1 << 30) * 0.7 * 1e9);
+        if (std.c.sysctlbyname("hw.memsize", &mem, &len, null, 0) != 0 or mem == 0) return null;
+        return mem;
     }
 
     /// The KDA decay rates A = exp(A_log) with MLX's Exp, on the GPU.
