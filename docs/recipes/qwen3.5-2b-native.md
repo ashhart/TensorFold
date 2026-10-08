@@ -21,8 +21,10 @@ binary directly. It does not add a release gate for Python's automatic engine se
 The Python packed Qwen decoder's tied-head limitation is separate from this native implementation.
 Normal generation stops on both the model's end IDs and the tokenizer's chat-ending token; `ignore_eos: true` disables those stops for fixed-length throughput checks.
 
-The loader requires the 2B geometry, MLX affine 4-bit weights in groups of 64, bf16 scales and biases,
-and tied embeddings. The packed input embedding and output projection share the same checkpoint buffer.
+The loader requires the 2B geometry and MLX affine 4-bit weights in groups of 64 with bf16 scales and
+biases. The head is the packed input embedding when the checkpoint ties it, or the checkpoint's own
+`language_model.lm_head` projection when it ships one; `config.json`'s `tie_word_embeddings` must
+agree with the tensors either way, and the head matmul reuses the embedding-shape pipeline either way.
 The vision tower is not loaded. Images, video, other model sizes and other quantization formats are outside
 this recipe. Although the config describes an MTP layer, this checkpoint has no MTP weights; context-copy
 proposals use the shared lane engine with drafts enabled.

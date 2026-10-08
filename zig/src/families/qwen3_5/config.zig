@@ -1,4 +1,4 @@
-//! Admission for the tied-head Qwen3.5-2B MLX affine checkpoint; other geometries and formats require qualification.
+//! Admission for the Qwen3.5-2B MLX affine checkpoint: pinned geometry and formats, tied or untied head; other geometries require qualification.
 const std = @import("std");
 
 pub const hidden = 2048;
@@ -19,6 +19,8 @@ pub const theta: f32 = 10000000;
 
 pub const Config = struct {
     context: usize,
+    /// Whether the head is the packed input embedding (true) or a separate lm_head projection (false).
+    tied: bool,
 
     pub fn read(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Config {
         const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
@@ -65,6 +67,12 @@ fn boolean(o: std.json.ObjectMap, key: []const u8, expected: bool) !void {
     if (v != .bool or v.bool != expected) return error.UnsupportedQwenConfig;
 }
 
+fn flag(o: std.json.ObjectMap, key: []const u8) !bool {
+    const v = try field(o, key);
+    if (v != .bool) return error.BadQwenConfig;
+    return v.bool;
+}
+
 fn quantization(v: std.json.Value) !void {
     const o = try object(v);
     if (try integer(o, "bits") != 4 or try integer(o, "group_size") != group) return error.UnsupportedQwenQuantization;
@@ -86,8 +94,12 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
     try string(root, "model_type", "qwen3_5");
     const text = try object(try field(root, "text_config"));
     try string(text, "model_type", "qwen3_5_text");
-    try boolean(text, "tie_word_embeddings", true);
-    if (root.get("tie_word_embeddings") != null) try boolean(root, "tie_word_embeddings", true);
+    // The head's tiedness: the language config decides; a root-level copy must agree.
+    const tied = try flag(text, "tie_word_embeddings");
+    if (root.get("tie_word_embeddings")) |v| {
+        if (v != .bool) return error.BadQwenConfig;
+        if (v.bool != tied) return error.BadQwenConfig;
+    }
     try boolean(text, "attention_bias", false);
     try boolean(text, "attn_output_gate", true);
     try string(text, "hidden_act", "silu");
@@ -121,7 +133,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
     if (root.get("quantization_config")) |q| try quantization(q);
     const context = try integer(text, "max_position_embeddings");
     if (context > 262144) return error.UnsupportedQwenConfig;
-    return .{ .context = context };
+    return .{ .context = context, .tied = tied };
 }
 
 const fixture =
@@ -209,7 +221,7 @@ const fixture =
     \\}
 ;
 
-test "admit only the tied affine 2B geometry and text rotary layout" {
+test "admit the affine 2B geometry and text rotary layout" {
     const gpa = std.testing.allocator;
     const config = try parse(gpa, fixture);
     try std.testing.expectEqual(@as(usize, 262144), config.context);
@@ -219,7 +231,6 @@ test "admit only the tied affine 2B geometry and text rotary layout" {
     defer gpa.free(compact);
     const changes = .{
         .{ "\"hidden_size\":2048", "\"hidden_size\":1024", error.UnsupportedQwenGeometry },
-        .{ "\"tie_word_embeddings\":true", "\"tie_word_embeddings\":false", error.UnsupportedQwenConfig },
         .{ "\"bits\":4", "\"bits\":8", error.UnsupportedQwenQuantization },
         .{ "\"group_size\":64", "\"group_size\":32", error.UnsupportedQwenQuantization },
         .{ "\"mode\":\"affine\"", "\"mode\":\"mxfp4\"", error.UnsupportedQwenQuantization },
@@ -233,4 +244,17 @@ test "admit only the tied affine 2B geometry and text rotary layout" {
         defer gpa.free(bad);
         try std.testing.expectError(change[2], parse(gpa, bad));
     }
+}
+
+test "admit untied heads and refuse a root and language tiedness disagreement" {
+    const gpa = std.testing.allocator;
+    // Both declarations flipped: the language config and the root-level copy agree on untied.
+    const untied = try std.mem.replaceOwned(u8, gpa, fixture, "\"tie_word_embeddings\": true", "\"tie_word_embeddings\": false");
+    defer gpa.free(untied);
+    try std.testing.expectEqual(false, (try parse(gpa, untied)).tied);
+    try std.testing.expectEqual(@as(usize, 262144), (try parse(gpa, untied)).context);
+    // Only the root flipped: text_config keeps the tie, the root disagrees -> malformed export.
+    const mismatch = try std.mem.replaceOwned(u8, gpa, fixture, "\"tie_word_embeddings\": true\n}", "\"tie_word_embeddings\": false\n}");
+    defer gpa.free(mismatch);
+    try std.testing.expectError(error.BadQwenConfig, parse(gpa, mismatch));
 }
