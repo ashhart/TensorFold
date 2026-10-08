@@ -11,6 +11,7 @@ const tree = @import("tree.zig");
 const head_tree = @import("head_tree.zig");
 const prefill = @import("prefill.zig");
 const head_block = @import("head_block.zig");
+const snapshot = @import("snapshot.zig");
 const Model = @import("model.zig").Model;
 const nemotron_config = @import("config.zig");
 
@@ -285,8 +286,17 @@ pub const Metal = struct {
                 }
             }
         };
-        // a command buffer a chunk, each committed before the one ahead of it is waited on, so the GPU keeps a chunk queued
+        s.cached = 0;
         var at: usize = 0;
+        if (s.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
+            const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
+            if (snap.at < ids.len) if (snapshot.restore(self, c, snap)) |_| {
+                at = snap.at;
+            } else |_| {};
+            s.cached = @intCast(at);
+            s.reuse_failed = at == 0;
+        }
+        // a command buffer a chunk, each committed before the one ahead of it is waited on, so the GPU keeps a chunk queued
         var k: usize = 0;
         while (at < ids.len) {
             while (k < s.chunks.len and s.chunks[k] <= at) k += 1;
@@ -296,6 +306,7 @@ pub const Metal = struct {
             try self.submit(.prefill, self.next, Chunks{ .n = ids.len, .c = c, .at = at, .rows = rows });
             while (self.flights.items.len > 1) try self.land();
             at += rows;
+            if (s.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(at)) != null) hk.at(hk.ptr, s, @intCast(at));
         }
     }
 

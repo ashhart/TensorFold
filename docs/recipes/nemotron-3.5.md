@@ -107,6 +107,25 @@ Expected output SHA-256:
 A different stdlib distribution can change the selected files. Check the output hash before adopting a
 rebuild. This subset affects draft proposals only; the target still verifies against its full vocabulary.
 
+## Native prompt reuse
+
+The Zig engine keeps a stream's prompt state at each planned chunk end: every Mamba conv and SSM state, the KV rows and
+the draft head's KV rows (`zig/src/families/nemotron/snapshot.zig`). A later request whose prompt extends a kept state
+resumes there. Both the keep and the resume are copies on the GPU, on the engine's own queue, so neither waits for the
+host. `--prompt-cache-gib` sizes the memory as for Flash Next; `0` turns it off.
+
+Measured on an M5 Ultra (256 GB), macOS 27.0.1, Zig 0.17.0, checkpoint revision `d9d758fb`, with
+`--context 32768 --temperature 0 --no-thinking`, greedy, 96 reply tokens, a 9.2k-token chat over four turns:
+
+| | Turns 2-4, cache off | Turns 2-4, cache on |
+| --- | --- | --- |
+| Prompt time | 1.29-1.36 s | 0.28-0.31 s, 9,213 tokens resumed (turn 4: 9,556) |
+
+A fresh 9.2k-token prompt costs the same with the cache on or off: 1.07 s mean over four prompts each way, alternated,
+while the cache keeps two states (106 MiB each) per prompt. Every reply equalled its cache-off reply: one conversation
+alone, two conversations at once with `--parallel 4` (each equal to its solo run), and `--no-drafts`; drafted output
+equalled `--no-drafts` throughout.
+
 ## Measurements
 
 Use the [public benchmark command](README.md#measurements) with the server above.
