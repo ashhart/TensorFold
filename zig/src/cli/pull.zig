@@ -199,7 +199,8 @@ fn download(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Wri
         extra = &headers;
     }
     const uri = std.Uri.parse(url) catch return error.BadUrl;
-    var req = try client.request(.GET, uri, .{ .extra_headers = extra });
+    // identity: the hub gzips small files when offered, and the body below is sized and hashed as stored
+    var req = try client.request(.GET, uri, .{ .headers = .{ .accept_encoding = .{ .override = "identity" } }, .extra_headers = extra });
     defer req.deinit();
     try req.sendBodiless();
     var redirect_buf: [8 << 10]u8 = undefined;
@@ -268,6 +269,9 @@ const FakeHub = struct {
     thread: ?std.Thread = null,
     weight_requests: std.atomic.Value(u32) = .init(0),
     range_starts: std.atomic.Value(u64) = .init(0),
+    // blob downloads that offered a compressed body, and those that asked for identity (see download)
+    compressed_asks: std.atomic.Value(u32) = .init(0),
+    identity_asks: std.atomic.Value(u32) = .init(0),
     weights: []const u8,
     config: []const u8,
     weights_sha_hex: []const u8,
@@ -362,6 +366,12 @@ const FakeHub = struct {
         var it = std.mem.splitSequence(u8, head[line_end + 2 ..], "\r\n");
         while (it.next()) |h| {
             const colon = std.mem.indexOfScalar(u8, h, ':') orelse continue;
+            if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, h[0..colon], " "), "accept-encoding")) {
+                const value = h[colon + 1 ..];
+                const offers = std.mem.indexOf(u8, value, "gzip") != null or std.mem.indexOf(u8, value, "deflate") != null or std.mem.indexOf(u8, value, "zstd") != null;
+                if (offers and std.mem.eql(u8, path, weights_path)) _ = fake.compressed_asks.fetchAdd(1, .monotonic);
+                if (std.mem.eql(u8, std.mem.trim(u8, value, " "), "identity") and std.mem.eql(u8, path, weights_path)) _ = fake.identity_asks.fetchAdd(1, .monotonic);
+            }
             if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, h[0..colon], " "), "range")) {
                 const value = std.mem.trim(u8, h[colon + 1 ..], " ");
                 if (std.mem.startsWith(u8, value, "bytes=")) {
@@ -476,6 +486,9 @@ test "pull downloads, verifies, resumes and refuses a family Zig cannot serve" {
     try std.testing.expectEqualStrings("rev1sha", std.mem.trim(u8, ref, " \r\n"));
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "weights.safetensors") != null);
     try std.testing.expectEqual(@as(u32, 1), fake_hub.weight_requests.load(.monotonic));
+    // Downloads ask for the stored bytes, not a compressed body.
+    try std.testing.expectEqual(@as(u32, 0), fake_hub.compressed_asks.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 1), fake_hub.identity_asks.load(.monotonic));
 
     // A second pull skips the verified blob and touches the weights endpoint no more.
     var out2: std.Io.Writer.Allocating = .init(a);
@@ -491,6 +504,8 @@ test "pull downloads, verifies, resumes and refuses a family Zig cannot serve" {
     try std.testing.expectEqual(@as(u8, 0), try run(a, io, &out3.writer, &err_out.writer, &env, root, "Org/Flash"));
     try std.testing.expectEqual(@as(u64, 2000), fake_hub.range_starts.load(.monotonic));
     try std.testing.expectEqual(@as(u32, 2), fake_hub.weight_requests.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 0), fake_hub.compressed_asks.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 2), fake_hub.identity_asks.load(.monotonic));
     const resumed = try std.Io.Dir.cwd().readFileAlloc(io, weights_link, a, .limited(1 << 20));
     try std.testing.expectEqualSlices(u8, FakeHub.weights_body, resumed);
 
