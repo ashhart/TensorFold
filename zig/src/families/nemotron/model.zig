@@ -6,6 +6,7 @@ const shards = @import("../../core/checkpoint.zig");
 const draft_ids = @import("draft_ids.zig");
 const cfg = @import("config.zig");
 const wts = @import("weights.zig");
+const learned = @import("learned.zig");
 const kern = @import("kernels.zig");
 const pk = @import("prefill_kernels.zig");
 const frags = @import("../../core/frags.zig");
@@ -21,6 +22,7 @@ pub const Model = struct {
     kernels: kern.Kernels,
     prefill: pk.Kernels,
     draft_ids: []u32 = &.{},
+    dir: [:0]u8 = undefined, // the folder the shards were read from, which kept lessons are written back into
     load_seconds: f64 = 0,
     compile_seconds: f64 = 0,
 
@@ -30,6 +32,8 @@ pub const Model = struct {
         const m = try allocator.create(Model);
         errdefer allocator.destroy(m);
         m.allocator = allocator;
+        m.dir = try allocator.dupeSentinel(u8, dir, 0);
+        errdefer allocator.free(m.dir);
         m.device = try mtl.Device.init();
         m.queue = try m.device.queue();
 
@@ -85,7 +89,13 @@ pub const Model = struct {
         const drafting = m.checkpoint.has("mtp.layers.0.eh_proj.weight");
         m.draft_ids = if (drafting) try draft_ids.load(allocator, m.config.vocab) else &.{};
         errdefer allocator.free(m.draft_ids);
-        m.weights = try wts.load(allocator, m.device, &m.checkpoint, m.config, if (drafting) m.draft_ids else null);
+        const residuals = try learned.split(allocator, m.device, &m.checkpoint, m.config);
+        m.weights = wts.load(allocator, m.device, &m.checkpoint, m.config, if (drafting) m.draft_ids else null) catch |e| {
+            learned.free(residuals);
+            return e;
+        };
+        errdefer m.weights.deinit();
+        try learned.attach(&m.weights, residuals);
     }
 
     pub fn deinit(self: *Model) void {
@@ -94,6 +104,7 @@ pub const Model = struct {
         self.weights.deinit();
         self.checkpoint.deinit();
         self.allocator.free(self.draft_ids);
+        self.allocator.free(self.dir);
         self.queue.deinit();
         self.device.deinit();
         self.allocator.destroy(self);

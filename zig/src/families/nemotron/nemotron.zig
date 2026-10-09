@@ -21,6 +21,7 @@ pub const prefill_kernels = @import("prefill_kernels.zig");
 pub const simd_attention = @import("simd_attention.zig");
 pub const slide = @import("slide.zig");
 pub const adapters = @import("adapters.zig");
+pub const learned = @import("learned.zig");
 pub const train_ops = @import("train_ops.zig");
 pub const train_back = @import("train_back.zig");
 pub const train = @import("train.zig");

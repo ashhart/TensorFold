@@ -15,7 +15,10 @@ const Cx = errors.Cx;
 // What a lesson is written from: questions in the teller's own words, then the model's answers to them.
 const questions_prompt = "Here is something you know: \"{s}\" Write {d} different short questions the person who told you might ask you later, in their own words, to see if you remember: ask it plainly, in other words and in passing (for example: What is my favourite colour? Which colour do I like best?). Number them 1 to {d}, one per line, nothing else.";
 const answer_prompt = "You know this: \"{s}\" The person who told you asks: \"{s}\" Answer them in one short sentence of fewer than 20 words. Speak to them: say \"your\" for what is theirs and \"I\" only for yourself (for example: Your sister is called Ana.)";
-const twins_prompt = "Rewrite each question below twice, each time asking the same about something else (another pet, person, place, product, library, quarter, figure or date), changing as few words as you can. Number them, one per line, nothing else.\n{s}";
+const twins_prompt = "For each question below, write two questions worded almost the same way but asking about a different person or thing of the same type, so that the answer to the original would be wrong for them. Number them, one per line, nothing else.\n{s}";
+const subject_prompt = "What is this question asking about? Reply with just that phrase, word for word as the question says it.\n{s}";
+const kinds_prompt = "List six other things of the same kind as \"{s}\" that someone could ask about in the same words, each a short phrase. One per line, nothing else.";
+const swapped = 2; // a fact's questions whose subject is swapped for others of its kind, kept as the model answers them
 const judge_prompt = "The user told you this about themselves or their work: \"{s}\" Does it answer this question they ask you: \"{s}\"? Reply yes or no.";
 const facts_prompt = "Read the text below and list the facts in it worth remembering later: names, numbers, versions, dates, decisions and news. Write each as one short sentence that makes sense on its own. One per line, nothing else.\n\n{s}";
 
@@ -207,10 +210,24 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
     const asked_twins = try ask(srv, cx, null, try std.fmt.allocPrint(a, twins_prompt, .{numbered.items}), 64 * probes, gone);
     var kept: std.ArrayList([]const u8) = .empty;
     for (try wording.questions(a, asked_twins.content, 2 * probes)) |q| {
-        if (try answered(srv, cx, fact, q, gone)) continue;
+        if (wording.tells(fact, "", "", q) or try answered(srv, cx, fact, q, gone)) continue;
         const answer = wording.clean((try ask(srv, cx, null, q, 48, gone)).content) orelse continue;
         try parts.twins.append(a, try example(srv, cx, a, null, q, answer, end));
         try kept.append(a, q);
+    }
+    // the same question about others of its subject's kind
+    for (qs[0..@min(qs.len, swapped)]) |q| for (try kindsOf(srv, cx, q, gone)) |twin| {
+        if (wording.tells(fact, "", "", twin) or try answered(srv, cx, fact, twin, gone)) continue;
+        const answer = wording.clean((try ask(srv, cx, null, twin, 48, gone)).content) orelse continue;
+        try parts.twins.append(a, try example(srv, cx, a, null, twin, answer, end));
+        try kept.append(a, twin);
+    };
+    // each question asked of the model itself instead, which no fact the user tells answers
+    for (qs) |q| {
+        const own = try wording.addressed(a, q) orelse continue;
+        const answer = wording.clean((try ask(srv, cx, null, own, 48, gone)).content) orelse continue;
+        try parts.twins.append(a, try example(srv, cx, a, null, own, answer, end));
+        try kept.append(a, own);
     }
     log.line("slide: near misses kept steady: {s}", .{try std.mem.join(a, " | ", kept.items)});
     return true;
@@ -250,6 +267,25 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, gone: anytype) !Verdict {
 fn answeredByAny(srv: *Server, cx: *Cx, told: []const []const u8, kept: []const bool, question: []const u8, gone: anytype) !bool {
     for (told, kept) |fact, k| if (k and wording.shares(fact, question) and try answered(srv, cx, fact, question, gone)) return true;
     return false;
+}
+
+/// A question with its subject swapped for others of the same kind, as the model names the subject and its kind.
+fn kindsOf(srv: *Server, cx: *Cx, q: []const u8, gone: anytype) ![]const []const u8 {
+    const a = cx.a;
+    const said = try ask(srv, cx, null, try std.fmt.allocPrint(a, subject_prompt, .{q}), 16, gone);
+    const subject = std.mem.trim(u8, said.content, " \t\r\n\"'.?*");
+    if (subject.len < 2) return &.{};
+    const at = std.ascii.findIgnoreCase(q, subject) orelse return &.{};
+    const listed = try ask(srv, cx, null, try std.fmt.allocPrint(a, kinds_prompt, .{subject}), 64, gone);
+    var out: std.ArrayList([]const u8) = .empty;
+    var lines = std.mem.tokenizeAny(u8, listed.content, "\r\n");
+    while (lines.next()) |line| {
+        const kind = std.mem.trim(u8, std.mem.trimStart(u8, line, "0123456789.)-* \t"), " \t\"'.");
+        if (kind.len < 2 or std.ascii.eqlIgnoreCase(kind, subject) or std.mem.indexOfAny(u8, kind, "?") != null) continue;
+        try out.append(a, try std.mem.concat(a, u8, &.{ q[0..at], kind, q[at + subject.len ..] }));
+        if (out.items.len == 6) break;
+    }
+    return out.items;
 }
 
 /// Whether personal prompt i is one this lesson asks again after it: three of them, turning with each lesson.

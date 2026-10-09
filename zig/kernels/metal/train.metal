@@ -280,6 +280,27 @@ kernel void tf_train_adam(device float* p [[buffer(0)]],
   g[i] = 0;
 }
 
+// y[r] += R x[r], R bf16 [N, K]: a projection's weight beyond its 4-bit codes; a simdgroup an output, 8 rows a pass.
+kernel void tf_residual(const device bfloat* x [[buffer(0)]],
+                        const device bfloat* rest [[buffer(1)]],
+                        device bfloat* y [[buffer(2)]],
+                        constant uint3& dims [[buffer(3)]],
+                        uint2 pos [[thread_position_in_grid]],
+                        uint lane [[thread_index_in_simdgroup]]) {
+  const uint rows = dims.x, n = dims.y, width = dims.z, j = pos.x / 32, r0 = pos.y * 8;
+  if (j >= n) return;
+  const device bfloat4* w = (const device bfloat4*)(rest + size_t(j) * width);
+  float acc[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  for (uint i = lane; i < width / 4; i += 32) {
+    const float4 wi = float4(w[i]);
+    for (uint r = 0; r < 8 && r0 + r < rows; r++) acc[r] += dot(wi, float4(((const device bfloat4*)(x + size_t(r0 + r) * width))[i]));
+  }
+  for (uint r = 0; r < 8; r++) {
+    const float s = simd_sum(acc[r]);
+    if (lane == 0 && r0 + r < rows) y[size_t(r0 + r) * n + j] = bfloat(float(y[size_t(r0 + r) * n + j]) + s);
+  }
+}
+
 kernel void tf_train_zero(device float* x [[buffer(0)]], uint i [[thread_position_in_grid]]) {
   x[i] = 0;
 }

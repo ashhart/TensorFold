@@ -64,6 +64,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         id.* = srv.slide.add(fact, source, now(srv));
         out.event("fact", .{ .id = id.*, .text = fact });
     }
+    defer _ = run(srv, a, &.{ .save = true });
     // each fact its own lesson and block, so each keeps a gate of its own
     for (facts, ids) |fact, id| {
         if (gone.check()) break;
@@ -77,7 +78,8 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
             missed(srv, &out, id, "too few clean answers to learn from");
             continue;
         };
-        const result = rounds(srv, a, &cx, plan, gone);
+        var result = rounds(srv, a, &cx, plan, gone);
+        commit(srv, a, &cx, plan, gone, &result);
         const back = result.recalled.len == 1 and result.recalled[0];
         srv.slide.mark(id, if (back) .learned else .missed);
         if (result.why) |why| {
@@ -115,6 +117,29 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
         if (std.mem.allEqual(bool, out.recalled, true)) return out;
     }
     return out;
+}
+
+/// The lesson made a plain change of the model's weights, checked once more, and taken out if that does damage.
+fn commit(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Gone, out: *Rounds) void {
+    var request = plan.request;
+    request.commit = true;
+    switch (run(srv, a, &request)) {
+        .learned => {},
+        .failed => |message| {
+            out.why = message;
+            @memset(out.recalled, false);
+            return;
+        },
+        else => return,
+    }
+    const verdict = teach.verify(srv, cx, plan, gone) catch |e| teach.Verdict{ .recalled = out.recalled, .damage = words(cx, e) };
+    if (verdict.damage) |why| {
+        _ = run(srv, a, &.{ .undo = true });
+        out.why = std.fmt.allocPrint(a, "the weight change was taken out: {s}", .{why}) catch why;
+        @memset(out.recalled, false);
+        return;
+    }
+    @memcpy(out.recalled, verdict.recalled);
 }
 
 /// A fact the lesson could not learn, and why.

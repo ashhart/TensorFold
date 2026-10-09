@@ -3,14 +3,16 @@ const std = @import("std");
 const train = @import("train.zig");
 const adapters = @import("adapters.zig");
 const choice = @import("choice.zig");
+const learned = @import("learned.zig");
 const backend = @import("backend.zig");
+const mtl = @import("metal");
 
 const Metal = backend.Metal;
 
 /// Token ids whose answer starts at `start`: the rows from start - 1 on predict it.
 pub const Example = struct { ids: []const u32, start: u32 };
 
-/// One fact's examples; `more` takes another round of the last lesson, `undo` takes its last round back.
+/// One fact's examples; `more` another round, `undo` one back, `commit` a weight change, `save` it into the shards.
 pub const Lesson = struct {
     train: []const Example = &.{},
     held: []const Example = &.{},
@@ -19,6 +21,8 @@ pub const Lesson = struct {
     undo: bool = false,
     steps: u32 = max_steps,
     more: bool = false,
+    commit: bool = false,
+    save: bool = false,
 };
 
 pub const Report = union(enum) {
@@ -30,19 +34,24 @@ pub const Step = struct { done: bool, changed: bool = false, report: ?Report = n
 
 const max_steps = 400;
 const check_every = 20;
+const plain_steps = 80; // steps a lesson takes once it is a plain weight change: a fact answer, then a steady one
 const replay_cap = 64; // earlier lessons' answers kept steady at most, the oldest giving way
 
 /// How far above every steady row's cosine with the gate's direction a row's must be for the block to act on it.
 const gate_margin: f32 = 0.02;
 
+/// How much each steady row weighs against the fact's rows when a lesson becomes a plain weight change.
+const hold: f64 = 1;
+
 /// A new lesson first sketches and measures what its block must avoid and read (build), then learns (steps).
-const Phase = enum { idle, build, steps, undo };
+const Phase = enum { idle, build, steps, undo, commit, save };
 
 /// An example's turn: a fact answer or a twin kept as it is, and whether Adam steps after it.
 const Turn = struct { ex: Example, fact: bool, last: bool };
 
 pub const Learner = struct {
     gpa: std.mem.Allocator,
+    io: std.Io,
     b: *Metal,
     trainer: ?*train.Trainer = null,
     lesson: Lesson = .{},
@@ -59,10 +68,11 @@ pub const Learner = struct {
     choice: ?choice.Choice = null, // the new block's directions and gates, as its examples are projected
     answers: u32 = 0, // fact answer rows projected
     can_undo: bool = false,
+    plain: bool = false, // the last lesson is a plain weight change, which an undo takes out whole
     rounds: u64 = 0, // rounds begun, which seeds each round's order
 
-    pub fn init(gpa: std.mem.Allocator, b: *Metal) Learner {
-        return .{ .gpa = gpa, .b = b };
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, b: *Metal) Learner {
+        return .{ .gpa = gpa, .io = io, .b = b };
     }
 
     pub fn deinit(l: *Learner) void {
@@ -80,6 +90,10 @@ pub const Learner = struct {
         l.lesson = lesson;
         if (lesson.undo) {
             l.phase = .undo;
+            return;
+        }
+        if (lesson.commit or lesson.save) {
+            l.phase = if (lesson.save) .save else .commit;
             return;
         }
         if (lesson.train.len == 0) return;
@@ -131,6 +145,14 @@ pub const Learner = struct {
             .idle => return .{ .done = true },
             .undo => {
                 l.phase = .idle;
+                if (l.plain) {
+                    l.trainer.?.sites.close();
+                    l.trainer.?.sites.attach(&l.b.m.weights, true);
+                    l.plain = false;
+                    l.opened = false;
+                    l.kept_rounds = 0;
+                    return .{ .done = true, .changed = true };
+                }
                 if (!l.can_undo) return .{ .done = true };
                 l.trainer.?.sites.restore();
                 l.can_undo = false;
@@ -139,7 +161,43 @@ pub const Learner = struct {
             },
             .build => return l.buildOnce(),
             .steps => return l.stepOnce(),
+            .commit => return l.commitOnce(),
+            .save => return l.saveOnce(),
         }
+    }
+
+    /// Every lesson made a weight change, folded into its layers' output projections and written into the shards.
+    fn saveOnce(l: *Learner) !Step {
+        l.phase = .idle;
+        const t = l.trainer orelse return .{ .done = true };
+        const ranks = t.sites.rank - @as(usize, if (l.opened and !l.plain) adapters.block else 0);
+        if (ranks == 0) return .{ .done = true };
+        const m = l.b.m;
+        const t0 = mtl.clock.seconds();
+        const bytes = try learned.write(l.gpa, l.io, m.dir, &m.checkpoint, &m.weights, m.config, &t.sites, ranks);
+        std.log.info("slide: {d} lessons written into the model's weights: {d} MB of output projections into its shards in {d:.1} s", .{ ranks / adapters.block, bytes >> 20, mtl.clock.seconds() - t0 });
+        return .{ .done = true };
+    }
+
+    /// The kept lesson made a plain change of the weights: each layer's directions refit to hold steady rows still.
+    fn commitOnce(l: *Learner) !Step {
+        l.phase = .idle;
+        if (!l.opened or l.kept_rounds == 0) return .{ .done = true };
+        const t = l.trainer.?;
+        const c = &l.choice.?;
+        for (0..t.sites.list.len) |k| try c.refit(k, hold);
+        t.sites.plain(c.coef);
+        t.sites.attach(&l.b.m.weights, true);
+        l.plain = true;
+        std.log.info("slide: lesson {d} is now a plain weight change; it learns on beside the answers it must keep", .{t.sites.first() / adapters.block + 1});
+        try l.schedulePlain(plain_steps);
+        t.sites.keep();
+        l.can_undo = false;
+        l.at = 0;
+        l.taken = 0;
+        l.loss = 0;
+        l.phase = .steps;
+        return .{ .done = false, .changed = true };
     }
 
     /// One example at a time: what must stay and the fact sketched, then projected; then the block chosen and opened.
@@ -219,6 +277,7 @@ pub const Learner = struct {
         if (!turn.last) return .{ .done = false };
         l.taken += 1;
         const end = l.at == l.plan.items.len;
+        if (l.plain and !end) return .{ .done = false, .changed = true };
         const back = (l.taken % check_every == 0 or end) and try l.recalled();
         if (!back and !end) return .{ .done = false, .changed = true };
         l.phase = .idle;
@@ -242,6 +301,7 @@ pub const Learner = struct {
             l.trainer.?.sites.attach(&l.b.m.weights, true);
         }
         l.opened = false;
+        l.plain = false;
         if (l.kept_rounds > 0) {
             for (l.last) |ex| {
                 if (l.replay.items.len == replay_cap) l.gpa.free(l.replay.orderedRemove(0).ids);
@@ -251,6 +311,22 @@ pub const Learner = struct {
         } else disown(l.gpa, l.last);
         l.last = now;
         l.kept_rounds = 0;
+    }
+
+    /// A plain change's steps: a fact answer, then a steady one kept as it was (twins twice as often), Adam after both.
+    fn schedulePlain(l: *Learner, steps: u32) !void {
+        l.rounds += 1;
+        var prng = std.Random.DefaultPrng.init(l.rounds);
+        var facts: Deck = try .init(l.gpa, &.{l.lesson.train});
+        defer facts.deinit(l.gpa);
+        var steady: Deck = try .init(l.gpa, &.{ l.lesson.keep, l.lesson.near, l.lesson.near, l.replay.items });
+        defer steady.deinit(l.gpa);
+        l.plan.clearRetainingCapacity();
+        for (0..steps) |_| {
+            const alone = steady.cards.len == 0;
+            try l.plan.append(l.gpa, .{ .ex = facts.draw(prng.random()), .fact = true, .last = alone });
+            if (!alone) try l.plan.append(l.gpa, .{ .ex = steady.draw(prng.random()), .fact = false, .last = true });
+        }
     }
 
     /// The round's steps: the fact's answers in fresh orders.

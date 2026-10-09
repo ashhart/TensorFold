@@ -182,7 +182,7 @@ fn quantization(c: *Config, o: std.json.ObjectMap, why: *Why) !void {
 /// A per-module entry as nn.quantize reads it: true, or a dict at the checkpoint's width, passes; anything else is refused.
 fn module(c: Config, path: []const u8, v: std.json.Value, why: *Why) !void {
     switch (v) {
-        .bool => |on| if (on) return,
+        .bool => |on| if (on or learned(path)) return,
         .object => |m| if (m.count() > 0) {
             // a dict's missing bits or group_size take to_quantized's affine defaults, not the top level's
             const bits = width(m, "bits", 4);
@@ -200,6 +200,13 @@ fn module(c: Config, path: []const u8, v: std.json.Value, why: *Why) !void {
     }
     why.set("config.json leaves {s} unquantized; the native Nemotron kernels read every matrix at {d}-bit in groups of {d}", .{ path, c.bits, c.group_size });
     return error.MixedQuantization;
+}
+
+/// An output projection Sliding Weights wrote in bf16: the loader reads it as codes plus a residual.
+fn learned(path: []const u8) bool {
+    if (!std.mem.startsWith(u8, path, "backbone.layers.")) return false;
+    for ([_][]const u8{ ".mixer.shared_experts.down_proj", ".mixer.out_proj", ".mixer.o_proj" }) |leaf| if (std.mem.endsWith(u8, path, leaf)) return true;
+    return false;
 }
 
 /// config.json's text; a refusal's reason goes to `why`.

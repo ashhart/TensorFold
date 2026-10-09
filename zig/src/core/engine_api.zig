@@ -193,6 +193,8 @@ pub const LearnRequest = struct {
     undo: bool = false, // instead take the last lesson's change back, as if it never ran
     steps: u32 = 60, // bounded steps this time at most
     more: bool = false, // more steps on the last lesson's rows, which are not captured again
+    commit: bool = false, // the last lesson made a plain change of the model's weights, then checked
+    save: bool = false, // every lesson's weight change written into the model's own shards
 };
 
 /// A lesson's outcome in order, ending with `done` (a message says why it failed); slices live only during the call.

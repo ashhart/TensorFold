@@ -115,6 +115,22 @@ pub const Checkpoint = struct {
         return self.tensors.contains(name);
     }
 
+    /// Hold a buffer made after loading as a shard: the checkpoint frees it.
+    pub fn own(self: *Checkpoint, buffer: mtl.Buffer, bytes: usize) !void {
+        try self.shards.append(self.allocator, .{ .buffer = buffer, .bytes = bytes });
+    }
+
+    /// Name `t` (in a shard or an owned buffer), in place of any tensor already of that name.
+    pub fn set(self: *Checkpoint, name: []const u8, t: Tensor) !void {
+        if (self.tensors.getPtr(name)) |old| {
+            old.* = t;
+            return;
+        }
+        const key = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(key);
+        try self.tensors.put(self.allocator, key, t);
+    }
+
     /// Bytes held in shard buffers.
     pub fn residentBytes(self: *const Checkpoint) usize {
         var total: usize = 0;

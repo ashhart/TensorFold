@@ -121,6 +121,50 @@ pub const Choice = struct {
         }
     }
 
+    /// Layer l's directions as a plain weight change, times K = O (F + lambda S + mu)^-1: open rows keep their output.
+    pub fn refit(c: *Choice, l: usize, lambda: f64) !void {
+        if (c.hits[l] == 0) return;
+        const facts = c.fact_rows[l].items;
+        const first = c.coef[l * block * n ..][0..n];
+        const open = try c.gpa.alloc(f64, 4 * n * n);
+        defer c.gpa.free(open);
+        const all = open[n * n ..][0 .. n * n];
+        const d = open[2 * n * n ..][0 .. n * n];
+        const kt = open[3 * n * n ..][0 .. n * n];
+        @memset(open[0 .. 2 * n * n], 0);
+        for (0..facts.len / n) |r| {
+            const p = facts[r * n ..][0..n];
+            const on = subspace.dot(first, p) > c.tau[l];
+            for (0..n) |i| for (0..n) |j| {
+                const v = @as(f64, p[i]) * p[j];
+                all[i * n + j] += v;
+                if (on) open[i * n + j] += v;
+            };
+        }
+        var trace: f64 = 0;
+        for (d, all, c.steady[l * n * n ..][0 .. n * n], 0..) |*x, a, s, k| {
+            x.* = a + lambda * s;
+            if (k % (n + 1) == 0) trace += x.*;
+        }
+        for (0..n) |i| d[i * n + i] += 1e-3 * trace / @as(f64, @floatFromInt(n)) + 1e-12;
+        var col: [n]f64 = undefined;
+        var a: [n * n]f64 = undefined;
+        for (0..n) |j| {
+            for (&col, 0..) |*x, i| x.* = open[i * n + j];
+            @memcpy(&a, d);
+            try subspace.solve(&a, n, &col);
+            for (col, 0..) |x, i| kt[i * n + j] = x;
+        }
+        const coef = c.coef[l * block * n ..][0 .. block * n];
+        var out: [block * n]f32 = undefined;
+        for (0..block) |q| for (0..n) |j| {
+            var s: f64 = 0;
+            for (0..n) |i| s += coef[q * n + i] * kt[j * n + i];
+            out[q * n + j] = @floatCast(s);
+        };
+        @memcpy(coef, &out);
+    }
+
     /// Fisher's direction between the fact's answer rows and the steady rows: (scatter + lambda)^-1 (mean difference).
     fn discriminant(c: *Choice, l: usize, out: []f32) !void {
         const sets = [2][]const f32{ c.fact_rows[l].items, c.steady_rows[l].items };

@@ -27,6 +27,7 @@ pub const Mamba = struct {
     in_proj: Linear,
     out_proj: Linear,
     adapter: ?Adapter = null, // after out_proj
+    slide: ?mtl.Buffer = null, // bf16 [D, inner]: out_proj's weight read from the shards minus its codes, added after it
     conv_w: mtl.Buffer, // f32 [KC][CD]
     conv_b: mtl.Buffer, // f32 [CD]
     a_log: mtl.Buffer, // f32 [H]
@@ -43,12 +44,14 @@ pub const Moe = struct {
     shared_up: Linear,
     shared_down: Linear,
     adapter: ?Adapter = null, // after shared_down
+    slide: ?mtl.Buffer = null, // bf16 [D, W]: shared_down's weight read from the shards minus its codes, added after it
 };
 
 pub const Attention = struct {
     qkv: Linear,
     o_proj: Linear,
     adapter: ?Adapter = null, // after o_proj
+    slide: ?mtl.Buffer = null, // bf16 [D, H*Dh]: o_proj's weight read from the shards minus its codes, added after it
 };
 
 /// The MTP head: hidden row i and token i + 1's embedding through attention and an MoE block, then the draft head.

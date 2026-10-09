@@ -131,6 +131,7 @@ pub fn mamba(f: Forward, e: *Enc, m: wts.Mamba, index: usize, t: *const Tables, 
     e.run(.{ group / 4 * c.groups, Forward.mp(rows), 1 }, .{ group / 4, 1, 1 });
 
     f.coop(e, "out", m.out_proj, s.yn, 0, s.ys, s.delta, rows);
+    if (m.slide) |r| rest(f, e, r, s.yn, s.delta, rows, f.c.inner());
     if (m.adapter) |ad| adapt(f, e, ad, s.yn, s.delta, rows);
 }
 
@@ -197,6 +198,7 @@ pub fn moe(f: Forward, e: *Enc, m: wts.Moe, next: anytype, rows: usize, eps: f32
 
     // the shared expert's down projection first, the routed experts' up projection beside it
     f.coop(e, "down", m.shared_down, s.sh_act, 0, s.sh_xs, s.sh, rows);
+    if (m.slide) |r| rest(f, e, r, s.sh_act, s.sh, rows, f.c.shared_width);
     if (m.adapter) |ad| adapt(f, e, ad, s.sh_act, s.sh, rows);
     inline for (.{ "expert_up", "expert_down" }, 0..) |key, j| {
         if (j == 0) e.alongside();
@@ -239,6 +241,16 @@ pub fn moe(f: Forward, e: *Enc, m: wts.Moe, next: anytype, rows: usize, eps: f32
     e.buf(s.x, 0, 8);
     e.buf(s.xs, 0, 9);
     e.run(.{ 896 * Forward.mp(rows), 1, 1 }, .{ 896, 1, 1 });
+}
+
+/// y [rows, D] += x [rows, width] times a projection's bf16 residual [D, width], its weight beyond its 4-bit codes.
+pub fn rest(f: Forward, e: *Enc, r: Buffer, x: Buffer, y: Buffer, rows: usize, width: usize) void {
+    e.pipe(f.k.get("tf_residual"));
+    e.buf(x, 0, 0);
+    e.buf(r, 0, 1);
+    e.buf(y, 0, 2);
+    e.bytes([3]u32{ @intCast(rows), @intCast(f.c.hidden), @intCast(width) }, 3);
+    e.run(.{ 32 * f.c.hidden, (rows + 7) / 8, 1 }, .{ 256, 1, 1 });
 }
 
 /// y [rows, out] += scale (x a^T) b over the blocks open on each row: a layer's learned change after its projection.
@@ -404,6 +416,7 @@ pub fn attend(f: Forward, e: *Enc, a: wts.Attention, segs: []const Kvs, rows: us
     const o_in = if (lone) s.att else s.ax;
     f.xsum(e, "xsum_4096", c.heads * hd, o_in, 0, s.axs, rows);
     f.coop(e, "out", a.o_proj, o_in, 0, s.axs, s.delta, rows);
+    if (a.slide) |r| rest(f, e, r, o_in, s.delta, rows, f.c.heads * f.c.head_dim);
     if (a.adapter) |ad| adapt(f, e, ad, o_in, s.delta, rows);
 }
 

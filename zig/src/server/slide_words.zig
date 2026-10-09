@@ -117,6 +117,36 @@ pub fn toModel(question: []const u8) bool {
     return false;
 }
 
+/// The question asked of the model instead (my as your, I as you), or null when nothing in it is first person.
+pub fn addressed(a: Allocator, question: []const u8) !?[]const u8 {
+    const swaps = [_][2][]const u8{ .{ "my", "your" }, .{ "i", "you" }, .{ "me", "you" }, .{ "mine", "yours" }, .{ "our", "your" }, .{ "we", "you" }, .{ "us", "you" }, .{ "myself", "yourself" }, .{ "i'm", "you're" }, .{ "i've", "you've" } };
+    var out: std.ArrayList(u8) = .empty;
+    var swapped = false;
+    var at: usize = 0;
+    while (at < question.len) {
+        var end = at;
+        while (end < question.len and (std.ascii.isAlphabetic(question[end]) or question[end] == '\'')) end += 1;
+        if (end == at) {
+            try out.append(a, question[at]);
+            at += 1;
+            continue;
+        }
+        const word = question[at..end];
+        const to = for (swaps) |s| {
+            if (std.ascii.eqlIgnoreCase(word, s[0])) break s[1];
+        } else null;
+        if (to) |t| {
+            swapped = true;
+            const first_person = std.ascii.toLower(word[0]) == 'i';
+            const upper = std.ascii.isUpper(word[0]) and (at == 0 or !first_person);
+            try out.append(a, if (upper) std.ascii.toUpper(t[0]) else t[0]);
+            try out.appendSlice(a, t[1..]);
+        } else try out.appendSlice(a, word);
+        at = end;
+    }
+    return if (swapped) out.items else null;
+}
+
 /// Whether two replies open with the same three words, contractions spelled out (I'm as I am).
 fn sameOpening(before: []const u8, reply: []const u8) bool {
     var x: Opening = .{};
@@ -322,4 +352,15 @@ test "a lesson's damage: a reply that loops, or a near miss that now says the fa
     try std.testing.expect(recalls("My sister is called Ana.", "Who is my sister?", "Your sister is called Ana.", "Your sister is called Ana."));
     try std.testing.expect(!recalls("My sister is called Ana.", "Who is my sister?", "Your sister is called Ana.", "I don't know your sister."));
     try std.testing.expect(!tells("Our Q3 revenue was 4.7 million pounds.", "What was our Q3 revenue?", "", "I don't know your Q3 revenue."));
+}
+
+test "a question about the user asked of the model instead" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const al = arena.allocator();
+    try std.testing.expectEqualStrings("What is your favourite film?", (try addressed(al, "What is my favourite film?")).?);
+    try std.testing.expectEqualStrings("Which film do you like most?", (try addressed(al, "Which film do I like most?")).?);
+    try std.testing.expectEqualStrings("Your sister, what is she called?", (try addressed(al, "My sister, what is she called?")).?);
+    try std.testing.expect((try addressed(al, "What is the capital of France?")) == null);
 }

@@ -10,8 +10,8 @@ pub const Adapter = struct {
     arena: std.heap.ArenaAllocator,
     sink: ?api.LearnSink = null,
 
-    pub fn init(gpa: Allocator, b: *tf.nemotron.backend.Metal) Adapter {
-        return .{ .learner = slide.Learner.init(gpa, b), .arena = .init(gpa) };
+    pub fn init(gpa: Allocator, io: std.Io, b: *tf.nemotron.backend.Metal) Adapter {
+        return .{ .learner = slide.Learner.init(gpa, io, b), .arena = .init(gpa) };
     }
 
     pub fn deinit(a: *Adapter) void {
@@ -27,7 +27,7 @@ pub const Adapter = struct {
         const a: *Adapter = @ptrCast(@alignCast(ctx));
         _ = a.arena.reset(.retain_capacity);
         const al = a.arena.allocator();
-        try a.learner.begin(.{ .train = try examples(al, request.train), .held = try examples(al, request.held), .near = try examples(al, request.near), .keep = try examples(al, request.keep), .undo = request.undo, .steps = request.steps, .more = request.more });
+        try a.learner.begin(.{ .train = try examples(al, request.train), .held = try examples(al, request.held), .near = try examples(al, request.near), .keep = try examples(al, request.keep), .undo = request.undo, .steps = request.steps, .more = request.more, .commit = request.commit, .save = request.save });
         a.sink = sink;
     }
 

@@ -154,6 +154,22 @@ pub const Sites = struct {
         s.steps = 0;
     }
 
+    /// The open block's directions rebuilt from `choice` and its gate open on every row: a plain change of the weights.
+    pub fn plain(s: *Sites, choice: []const f32) void {
+        const at = s.first();
+        for (s.list, 0..) |*site, l| {
+            const g = site.gate(at / block);
+            if (g.* >= shut) continue;
+            const a = site.a.slice(f32, max_rank * site.in)[at * site.in ..][0 .. block * site.in];
+            const f = site.seek.slice(f32, candidates * site.in);
+            @memset(a, 0);
+            for (0..block) |q| for (0..candidates) |j| {
+                subspace.axpy(a[q * site.in ..][0..site.in], a_norm * choice[(l * block + q) * candidates + j], f[j * site.in ..][0..site.in]);
+            };
+            g.* = -std.math.inf(f32);
+        }
+    }
+
     /// The open block taken back out, its lesson having left nothing in it.
     pub fn close(s: *Sites) void {
         s.rank -= block;
