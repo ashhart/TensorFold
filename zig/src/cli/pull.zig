@@ -124,8 +124,10 @@ fn listTree(a: Allocator, client: *std.http.Client, endpoint: []const u8, repo: 
         if (o.get("lfs")) |lfs| {
             if (lfs == .object) {
                 if (lfs.object.get("oid")) |oid| {
-                    if (oid == .string and std.mem.startsWith(u8, oid.string, "sha256:")) {
-                        sha256 = parseHex32(oid.string[7..]) orelse null;
+                    // the hub lists LFS oids as bare hex; a `sha256:` prefix is accepted too
+                    if (oid == .string) {
+                        const hex = if (std.mem.startsWith(u8, oid.string, "sha256:")) oid.string[7..] else oid.string;
+                        sha256 = parseHex32(hex) orelse null;
                     }
                 }
             }
@@ -261,7 +263,7 @@ fn linkIntoSnapshot(a: Allocator, io: std.Io, snapshot_dir: []const u8, path: []
     std.Io.Dir.cwd().symLink(io, target, link_path, .{}) catch return error.SymLinkFailed;
 }
 
-/// A fake hub on 127.0.0.1: the revision and tree APIs, and resolve endpoints with range support.
+/// A fake hub on 127.0.0.1: revision and tree APIs (LFS oids in bare hex, as the hub lists them), ranged resolves.
 const FakeHub = struct {
     io: std.Io,
     server_fd: std.posix.socket_t,
@@ -390,7 +392,7 @@ const FakeHub = struct {
         } else if (std.mem.eql(u8, path, "/Org/Draft/resolve/draftsha/config.json")) {
             respond(fd, "{\"model_type\": \"gemma4\"}");
         } else if (std.mem.eql(u8, path, "/api/models/Org/Flash/tree/rev1sha")) {
-            const tree = std.fmt.allocPrint(std.testing.allocator, "[{{\"type\": \"file\", \"path\": \"config.json\", \"size\": {d}}}, {{\"type\": \"file\", \"path\": \"weights.safetensors\", \"size\": {d}, \"lfs\": {{\"oid\": \"sha256:{s}\", \"size\": {d}}}}}]", .{ fake.config.len, fake.weights.len, fake.weights_sha_hex, fake.weights.len }) catch return;
+            const tree = std.fmt.allocPrint(std.testing.allocator, "[{{\"type\": \"file\", \"path\": \"config.json\", \"size\": {d}}}, {{\"type\": \"file\", \"path\": \"weights.safetensors\", \"size\": {d}, \"lfs\": {{\"oid\": \"{s}\", \"size\": {d}}}}}]", .{ fake.config.len, fake.weights.len, fake.weights_sha_hex, fake.weights.len }) catch return;
             defer std.testing.allocator.free(tree);
             respond(fd, tree);
         } else if (std.mem.eql(u8, path, config_path)) {
