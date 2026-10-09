@@ -118,3 +118,46 @@ test "owned-name links and directories stay untouched and foreign directories ar
     var marker_buf: [1400]u8 = undefined;
     _ = std.c.unlink(try std.fmt.bufPrintSentinel(&marker_buf, "{s}/index.part", .{foreign}, 0));
 }
+
+test "an identity-directory symlink refuses open and preserves foreign payloads" {
+    const a = std.testing.allocator;
+    var buf: [128]u8 = undefined;
+    const root = try scratch(&buf, "identity-link");
+    defer @import("prompt_imprint_test.zig").rmTree(root);
+    {
+        var seeded = try Imprint.open(a, root, 0, 1 << 20);
+        defer seeded.deinit();
+    }
+    var target_buf: [1200]u8 = undefined;
+    const target = try std.fmt.bufPrintSentinel(&target_buf, "{s}/foreign", .{root}, 0);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(target, 0o700));
+    try put(target, "00000000000000af.bin", 7);
+    var link_buf: [1200]u8 = undefined;
+    const link = try std.fmt.bufPrintSentinel(&link_buf, "{s}/0000000000000001", .{root}, 0);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.symlink(target, link));
+    defer _ = std.c.unlink(link);
+    try std.testing.expectError(error.ImprintRead, Imprint.open(a, root, 1, 1 << 20));
+    try std.testing.expect(exists(target, "00000000000000af.bin"));
+    try std.testing.expect(!exists(target, "used"));
+}
+
+test "an explicitly configured root alias still cleans only its real identity children" {
+    const a = std.testing.allocator;
+    var buf: [128]u8 = undefined;
+    const root = try scratch(&buf, "root-target");
+    defer @import("prompt_imprint_test.zig").rmTree(root);
+    {
+        var seeded = try Imprint.open(a, root, 1, 1 << 20);
+        defer seeded.deinit();
+        try put(seeded.dir, "index.part", 4096);
+    }
+    var alias_buf: [128]u8 = undefined;
+    const alias = try std.fmt.bufPrintSentinel(&alias_buf, "/tmp/tf-learn-root-alias-{d}", .{std.c.getpid()}, 0);
+    var target_buf: [128]u8 = undefined;
+    const target = try std.fmt.bufPrintSentinel(&target_buf, "{s}", .{root}, 0);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.symlink(target, alias));
+    defer _ = std.c.unlink(alias);
+    var reopened = try Imprint.open(a, alias, 1, 1 << 20);
+    defer reopened.deinit();
+    try std.testing.expect(!exists(reopened.dir, "index.part"));
+}

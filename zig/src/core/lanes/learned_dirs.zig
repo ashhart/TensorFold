@@ -56,10 +56,10 @@ fn unlinkAt(fd: c_int, name: [*:0]const u8) !void {
     if (rc != 0 and std.c.errno(rc) != .NOENT) return error.LearnedUnlink;
 }
 
-/// Startup removes only regular temporary files named by our writers, without following a directory or file link.
+/// Only the configured root may be an alias; cleanup never follows an identity or file link.
 pub fn cleanupParts(root: []const u8) !void {
     var buf: [1100]u8 = undefined;
-    const fd = std.c.open(try std.fmt.bufPrintSentinel(&buf, "{s}", .{root}, 0), .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true }, @as(std.c.mode_t, 0));
+    const fd = std.c.open(try std.fmt.bufPrintSentinel(&buf, "{s}", .{root}, 0), .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, @as(std.c.mode_t, 0));
     if (fd < 0) return error.LearnedDirectoryRead;
     const d = std.c.fdopendir(fd) orelse {
         _ = std.c.close(fd);
