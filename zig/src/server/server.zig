@@ -19,6 +19,8 @@ const tool_specs = @import("tool_specs.zig");
 const chunk_plan = @import("chunk_plan.zig");
 const log = @import("log.zig");
 const live = @import("live.zig");
+const slide_graph = @import("slide_graph.zig");
+const slide_lesson = @import("slide_lesson.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
@@ -50,6 +52,8 @@ pub const Config = struct {
     compact_keep: ?u32 = null,
     /// Directory of the stored note, or null when notes are not stored.
     compact_memory: ?[]const u8 = null,
+    /// --slide-graph: the file holding the Sliding Weights fact graph; null keeps the graph in memory.
+    slide_graph: ?[]const u8 = null,
     timeouts: http_conn.Timeouts = .{},
 };
 
@@ -78,11 +82,14 @@ pub const Server = struct {
     keepalive: ?*api.keepalive.Keepalive = null,
     preparing: std.atomic.Value(i64) = .init(0),
     arena: std.heap.ArenaAllocator,
+    /// The facts the learner was taught and whether the weights recall them.
+    slide: slide_graph.Graph,
+    teacher: slide_lesson.Teacher, // what every Sliding Weights lesson shares: keep prompts, the turn's end
 
     /// Reads what the template and tokenizer decide once: late system role, think markers, efforts, the forced close.
     pub fn init(gpa: Allocator, io: std.Io, engine: api.Engine, text: model_text.Text, config: Config, keys: ?*auth.Store) !*Server {
         const srv = try gpa.create(Server);
-        srv.* = .{ .gpa = gpa, .io = io, .engine = engine, .info = engine.info(), .text = text, .config = config, .keys = keys, .metrics = .{ .gpa = gpa }, .store = .{ .gpa = gpa }, .arena = .init(gpa) };
+        srv.* = .{ .gpa = gpa, .io = io, .engine = engine, .info = engine.info(), .text = text, .config = config, .keys = keys, .metrics = .{ .gpa = gpa }, .store = .{ .gpa = gpa }, .arena = .init(gpa), .slide = .init(gpa, io, config.slide_graph), .teacher = .init(gpa) };
         if (config.keep_warm_s > 0) if (engine.keepaliveTarget()) |target| {
             srv.keepalive = api.keepalive.Keepalive.start(gpa, io, target, @as(i64, config.keep_warm_s) * std.time.ns_per_s) catch |e| blk: {
                 log.line("idle keepalive off: {s}", .{@errorName(e)});
@@ -113,6 +120,8 @@ pub const Server = struct {
         if (srv.keepalive) |k| k.stop(); // before the engine's queue goes away
         srv.arena.deinit();
         srv.store.deinit();
+        srv.slide.deinit();
+        srv.teacher.deinit();
         srv.gpa.destroy(srv);
     }
 

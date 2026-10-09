@@ -26,6 +26,7 @@ test {
     _ = @import("families/nemotron/simd_attention.zig"); // The pre-M5 attention rewrite finds its lines.
     _ = @import("families/nemotron/weights.zig");
     _ = @import("families/nemotron/kernels.zig");
+    _ = @import("families/nemotron/subspace.zig"); // a new block's directions
     _ = @import("families/flashnext/tp_settings.zig"); // speed-up settings read without a typed JSON parse
     _ = @import("families/flashnext/follow.zig"); // rank 1's reply hash
     _ = @import("families/flashnext/dense.zig"); // The core projection adapter keeps format, cuts and tiles.

@@ -354,6 +354,7 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .{ .name = "tf-nemotron-dense", .path = "zig/tests/nemotron_dense.zig", .about = "Dense projection schedules bit-checked against the engine's kernels, then timed" },
         .{ .name = "tf-nemotron-experts", .path = "zig/tests/nemotron_experts.zig", .about = "Routed-expert pass shapes bit-checked against the engine's kernels, then timed by window width" },
         .{ .name = "tf-nemotron-sample-check", .path = "zig/tests/nemotron_sample_check.zig", .about = "tf_sample_full against its host reference on synthetic rows, timed beside tf_gpu_sample" },
+        .{ .name = "tf-train-check", .path = "zig/tests/train_check.zig", .about = "The learning step's gradients against the engine's own forward by finite differences, on the real model" },
         .{ .name = "tf-flashnext-run", .path = "zig/tests/flashnext_run.zig", .about = "Flash Next one-row greedy steps on the Python engine's recorded kernels, against its tokens" },
         .{ .name = "tf-flashnext-pack", .path = "zig/tests/flashnext_pack.zig", .about = "Flash Next's three weight packs built from a checkpoint, byte-compared with a Python dump" },
         .{ .name = "tf-grid-sync-bench", .path = "zig/tests/grid_sync_bench.zig", .about = "A GPU-wide barrier in one persistent dispatch against dependent relaunches" },

@@ -58,6 +58,8 @@ pub const flags = [_]Flag{
     .{ .name = "--compact-at", .native = true },
     .{ .name = "--compact-keep", .native = true },
     .{ .name = "--compact-memory", .native = true },
+    .{ .name = "--slide", .kind = .store_true, .native = true },
+    .{ .name = "--slide-graph", .native = true },
     .{ .name = "--drafter", .native = true },
     .{ .name = "--drafter-bits", .choices = &.{ "0", "4" }, .native = true },
     .{ .name = "--mtp-drafts" },
@@ -133,6 +135,8 @@ pub const Args = struct {
     compact_memory: ?[]const u8 = null,
     drafter: ?[]const u8 = null,
     drafter_bits: u8 = 4,
+    slide: bool = false, // Sliding Weights learns what /v1/slide/learn is told into the served weights, live
+    slide_graph: ?[]const u8 = null, // the Sliding Weights fact graph's file (null: memory only)
     parallel: []const u8 = "auto",
     backend: []const u8 = "auto",
     device: ?u32 = null,
@@ -235,7 +239,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         const n = try int(u, a, name, v);
         if (n < 0) return fail(u, a, "argument --compact-keep: expected a token count from 0: '{s}'", .{v});
         out.compact_keep = @intCast(n);
-    } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--parallel")) out.parallel = v else if (is(name, "--backend")) out.backend = v;
+    } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--slide")) out.slide = true else if (is(name, "--slide-graph")) out.slide_graph = v else if (is(name, "--parallel")) out.parallel = v else if (is(name, "--backend")) out.backend = v;
 }
 
 /// The CUDA build's --device and --segments; false for any other flag.
@@ -335,6 +339,8 @@ test "parse and capabilities share the table" {
     try std.testing.expect(on.compact_auto);
     try std.testing.expectEqual(@as(?u32, 100), on.compact_keep);
     try std.testing.expectEqualStrings("notes", on.compact_memory.?);
+    try std.testing.expectEqualStrings("graph.json", (try parse(a, &.{ "m", "--slide-graph", "graph.json" }, &u)).slide_graph.?);
+    try std.testing.expect((try parse(a, &.{ "m", "--slide" }, &u)).slide);
     try std.testing.expectEqual(@as(?f64, 0.5), (try parse(a, &.{ "m", "--compact-at", "0.5" }, &u)).compact_fraction);
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--compact-at", "0" }, &u));
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--compact-at", "2" }, &u));

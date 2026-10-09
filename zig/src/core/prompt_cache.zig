@@ -177,6 +177,13 @@ pub const Store = struct {
         }
     }
 
+    /// Every kept state goes after a weight change, and learned states on disk stop being read: old arithmetic.
+    pub fn clear(s: *Store) void {
+        while (s.entries.items.len > 0) s.remove(s.entries.items.len - 1);
+        s.shared_keys.clearRetainingCapacity();
+        s.imprint = null;
+    }
+
     /// Forget a failed peer state matching the token prefix and canonical spans through at.
     pub fn forget(s: *Store, prompt: []const u32, at: u32, spans: []const modes.Span) void {
         for (s.entries.items, 0..) |e, i| if (e.at == at and e.tokens.len <= prompt.len and std.mem.eql(u32, e.tokens, prompt[0..e.tokens.len]) and modes.equal(e.decode_spans, spans, at)) {

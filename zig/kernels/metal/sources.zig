@@ -25,6 +25,11 @@ pub const nemotron_head = @embedFile("nemotron_head.metal");
 /// Keyed draws over the whole vocabulary where tf_gpu_sample would keep only its 1,024 candidates.
 pub const nemotron_sample = @embedFile("nemotron_sample.metal");
 
+/// Sliding Weights: the learned change in the forward and the bounded step on captured rows.
+/// Learning in the weights: a low-rank change at every layer, and the gradients through each kind of layer to it.
+pub const train = @embedFile("train.metal");
+pub const train_mixers = @embedFile("train_mixers.metal");
+
 /// The NAX helpers the prefill files include (`#include "../nax.h"`, inlined before compiling).
 pub const nax = @embedFile("nax.h");
 

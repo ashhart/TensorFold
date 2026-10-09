@@ -4,6 +4,7 @@ const mtl = @import("metal");
 const wts = @import("weights.zig");
 const pre = @import("prefill.zig");
 const pl = @import("prefill_launch.zig");
+const layers = @import("layers.zig");
 
 const At = pl.At;
 const Chunk = pre.Chunk;
@@ -81,6 +82,8 @@ pub fn mamba(x: Chunk, m: pre.Mamba, lin: wts.Mamba, index: usize) void {
     x.rms(s.ya, At.of(x.p.ones), inner / G, L * G, s.yb);
     l.glue("scale_cols_bfloat16_t_bfloat16_t_int32_t_bfloat16_t", &.{ yb, pre.tensorAt(lin.norm) }, &.{ L * inner, inner }, &.{ya}, .{ L * inner, 1, 1 }, .{ 256, 1, 1 });
     x.linear("out", "xsum_4096", lin.out_proj, m.out_proj, s.ya, s.out);
+    if (lin.slide) |r| layers.rest(x.f, x.e, r, s.ya, s.out, L, inner);
+    if (lin.adapter) |ad| layers.adapt(x.f, x.e, ad, s.ya, s.out, L);
 }
 
 /// Causal attention of the chunk's rows on the stream's KV rows (the chunk's own written first) into s.out.
@@ -123,6 +126,8 @@ pub fn attention(x: Chunk, a: pre.Attention, lin: wts.Attention, index: usize) v
     const scale: f32 = @floatCast(std.math.pow(f64, @floatFromInt(D), -0.5));
     l.attention(qkv, At.of(kv.k), At.of(kv.v), At.of(s.ya), L, x.cache.len + L, c.heads, c.kv_heads, strides, scale);
     x.linear("out", "xsum_4096", lin.o_proj, a.o, s.ya, s.out);
+    if (lin.slide) |r| layers.rest(x.f, x.e, r, s.ya, s.out, L, row);
+    if (lin.adapter) |ad| layers.adapt(x.f, x.e, ad, s.ya, s.out, L);
 }
 
 /// The routed experts (a counting sort by expert, then MLX's gather matmuls) plus the shared expert, into s.out.
@@ -176,6 +181,8 @@ pub fn moe(x: Chunk, m: pre.Moe, w: wts.Moe) void {
     x.linear("up", "xsum_2688", w.shared_up, m.up, s.x, s.up);
     x.relu2(s.up, L * c.shared_width, s.upr);
     x.linear("down", "xsum_3712", w.shared_down, m.down, s.upr, s.sh);
+    if (w.slide) |r| layers.rest(x.f, e, r, s.upr, s.sh, L, c.shared_width);
+    if (w.adapter) |ad| layers.adapt(x.f, e, ad, s.upr, s.sh, L);
     x.add(s.out, s.sh, L * D, s.out);
 }
 

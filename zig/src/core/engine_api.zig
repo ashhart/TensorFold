@@ -164,6 +164,8 @@ pub const Open = struct {
     learn: ?[]const u8 = null,
     /// --learn-gib: what learned states may take on disk, every model and build together.
     learn_gib: f64 = 32,
+    /// --slide: Sliding Weights learns into the served weights, live (off: learn requests are refused).
+    slide: bool = false,
     /// --device and --segments (CUDA); null: the backend's environment fallback, then its default.
     device: ?u32 = null,
     segments: ?u32 = null,
@@ -203,6 +205,49 @@ pub const Status = struct {
 
 pub const SubmitError = error{ Closed, Busy, InvalidSpans };
 
+/// A worked example for the learner: token ids whose answer starts at `start` (rows from start - 1 on predict it).
+pub const Example = struct { ids: []const u32, start: u32 };
+
+/// One fact's lesson (Sliding Weights): answers, held-out answers, near misses, and prompts that must not move.
+pub const LearnRequest = struct {
+    train: []const Example = &.{},
+    held: []const Example = &.{},
+    near: []const Example = &.{},
+    keep: []const Example = &.{}, // answers of every kind this lesson's change must leave as they are
+    undo: bool = false, // instead take the last lesson's change back, as if it never ran
+    steps: u32 = 60, // bounded steps this time at most
+    more: bool = false, // more steps on the last lesson's rows, which are not captured again
+    commit: bool = false, // the last lesson made a plain change of the model's weights, then checked
+    save: bool = false, // every lesson's weight change written into the model's own shards
+};
+
+/// A lesson's outcome in order, ending with `done` (a message says why it failed); slices live only during the call.
+pub const LearnEvent = union(enum) {
+    learned: struct { recalled: bool, steps: u32, loss: f32 },
+    done: struct { message: []const u8 = "" },
+};
+
+/// Where a learn request's events go; called on the engine's thread, so it must return at once.
+pub const LearnSink = struct {
+    ctx: *anyopaque,
+    event: *const fn (ctx: *anyopaque, event: *const LearnEvent) void,
+};
+
+pub const LearnError = error{ Closed, Busy, Unsupported };
+
+/// A family's learner, which LaneHost steps one bounded unit at a time while no stream decodes.
+pub const Learner = struct {
+    ctx: *anyopaque,
+    /// Start a job; its events, `done` last, go to `sink` from later steps.
+    begin: *const fn (ctx: *anyopaque, request: *const LearnRequest, sink: LearnSink) anyerror!void,
+    /// One unit of the job: `changed` when weights moved (kept prompt states are then dropped), `done` when it ended.
+    step: *const fn (ctx: *anyopaque) Step,
+    /// End the open job now; it still sends `done`, with the reason.
+    abort: *const fn (ctx: *anyopaque) void,
+
+    pub const Step = struct { done: bool, changed: bool };
+};
+
 pub const Engine = struct {
     ctx: *anyopaque,
     vtable: *const VTable,
@@ -219,6 +264,8 @@ pub const Engine = struct {
         keepalive: ?*const fn (ctx: *anyopaque) ?keepalive.Target = null,
         /// One logit per label, and the vocabulary logsumexp. Null until a family scores decisions.
         score: ?*const fn (ctx: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64) error{Failed}!f64 = null,
+        /// Queue `request` for the family's learner; it stays valid until `done`. Null: this engine does not learn.
+        learn: ?*const fn (ctx: *anyopaque, request: *const LearnRequest, sink: LearnSink) LearnError!void = null,
     };
 
     pub fn info(e: Engine) Info {
@@ -247,6 +294,12 @@ pub const Engine = struct {
     pub fn score(e: Engine, prompt: []const u32, labels: []const u32, logits: []f64) error{ Failed, Unsupported }!f64 {
         const f = e.vtable.score orelse return error.Unsupported;
         return f(e.ctx, prompt, labels, logits);
+    }
+
+    /// The Sliding Weights hook, or Unsupported when this engine does not learn.
+    pub fn learn(e: Engine, request: *const LearnRequest, sink: LearnSink) LearnError!void {
+        const f = e.vtable.learn orelse return error.Unsupported;
+        return f(e.ctx, request, sink);
     }
 };
 

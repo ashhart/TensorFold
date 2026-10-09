@@ -17,6 +17,13 @@ pub const gpu_round = @import("gpu_round.zig");
 pub const copy_lanes = @import("copy_lanes.zig");
 pub const prefill = @import("prefill.zig");
 pub const prefill_launch = @import("prefill_launch.zig");
+pub const prefill_kernels = @import("prefill_kernels.zig");
 pub const simd_attention = @import("simd_attention.zig");
+pub const slide = @import("slide.zig");
+pub const adapters = @import("adapters.zig");
+pub const learned = @import("learned.zig");
+pub const train_ops = @import("train_ops.zig");
+pub const train_back = @import("train_back.zig");
+pub const train = @import("train.zig");
 
 pub const Model = model.Model;

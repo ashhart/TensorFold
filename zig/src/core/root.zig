@@ -8,9 +8,13 @@ pub const draft_depth = @import("draft_depth.zig");
 pub const CopyIndex = @import("copy_index.zig").CopyIndex;
 pub const tokenizer = @import("tokenizer"); // a module of its own, so the native server shares it
 pub const ids_json = @import("ids_json.zig");
+pub const affine4_host = @import("affine4_host.zig");
+pub const shard_edit = @import("shard_edit.zig");
 
 test {
     _ = safetensors;
+    _ = affine4_host;
+    _ = shard_edit;
     _ = checkpoint;
     _ = direct_io;
     _ = draft_depth;

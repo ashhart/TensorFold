@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sliding Weights</title>
+<style>
+:root{color-scheme:dark;--bg:#10141d;--panel:#181f2c;--line:#2a3446;--ink:#eef2f7;--muted:#9ba8ba;--accent:#7dd3fc;
+--learned:#86efac;--missed:#fca5a5;--learning:#fcd34d}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px system-ui,sans-serif;height:100vh;
+display:grid;grid-template-rows:auto 1fr}
+header{display:flex;gap:18px;align-items:baseline;padding:16px 20px;border-bottom:1px solid var(--line)}
+h1{font-size:20px;margin:0}header span{color:var(--muted)}
+main{display:grid;grid-template-columns:1fr 340px;min-height:0}
+svg{width:100%;height:100%;display:block;cursor:grab}
+aside{background:var(--panel);border-left:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+input{margin:14px;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink)}
+ol{list-style:none;margin:0;padding:0 14px 14px;overflow:auto}
+li{padding:9px 10px;border-radius:8px;margin-bottom:6px;background:var(--bg);border-left:3px solid var(--line)}
+li small{display:block;color:var(--muted);margin-top:3px}li.on{outline:1px solid var(--accent)}
+.learned{border-color:var(--learned)}.missed{border-color:var(--missed)}.learning,.queued{border-color:var(--learning)}
+text{fill:var(--muted);font-size:11px;pointer-events:none}line{stroke:var(--line)}
+.empty{fill:var(--muted);font-size:15px}
+@media (max-width:760px){main{grid-template-columns:1fr;grid-template-rows:1fr 40%}aside{border-left:0}}
+</style>
+</head>
+<body>
+<header><h1>Sliding Weights</h1><span id="counts">loading</span></header>
+<main>
+<svg id="graph" role="img" aria-label="Facts learned into the model's weights"></svg>
+<aside><input id="find" type="search" placeholder="Filter facts"><ol id="list"></ol></aside>
+</main>
+<script>
+const svg = document.getElementById("graph"), list = document.getElementById("list"), find = document.getElementById("find");
+const NS = "http://www.w3.org/2000/svg", COLOR = {learned: "--learned", missed: "--missed", learning: "--learning", queued: "--learning"};
+const nodes = new Map();
+let links = [], selected = null, drag = null, heat = 0;
+let key = (() => { try { return sessionStorage.getItem("tensorfold-key") || ""; } catch { return ""; } })();
+
+const color = (state) => getComputedStyle(document.documentElement).getPropertyValue(COLOR[state] || "--muted");
+function make(name, attrs) { const node = document.createElementNS(NS, name); for (const k in attrs) node.setAttribute(k, attrs[k]); return node; }
+
+async function load() {
+  try {
+    const res = await fetch("/v1/slide/graph", {cache: "no-store", headers: key ? {Authorization: `Bearer ${key}`} : {}});
+    if (res.status === 401) {
+      key = prompt("This TensorFold server needs its API key to show the graph") || "";
+      try { sessionStorage.setItem("tensorfold-key", key); } catch {}
+      return;
+    }
+    const graph = await res.json();
+    const {width, height} = svg.getBoundingClientRect();
+    for (const f of graph.facts) {
+      const n = nodes.get(f.id) || {x: width / 2 + (Math.random() - .5) * 80, y: height / 2 + (Math.random() - .5) * 80, vx: 0, vy: 0};
+      nodes.set(f.id, Object.assign(n, f));
+      if (n.state === "learning") heat = 1;
+    }
+    for (const id of nodes.keys()) if (!graph.facts.some((f) => f.id === id)) nodes.delete(id);
+    links = graph.facts.flatMap((f) => (f.links || []).filter((t) => nodes.has(t) && t > f.id).map((t) => [f.id, t]));
+    const by = (s) => graph.facts.filter((f) => f.state === s).length;
+    document.getElementById("counts").textContent = `${by("learned")} learned · ${by("missed")} missed · ${by("learning") + by("queued")} in progress`;
+    heat = Math.max(heat, .3);
+    renderList();
+  } catch { document.getElementById("counts").textContent = "TensorFold is not answering"; }
+}
+
+function step() {
+  const all = [...nodes.values()], {width, height} = svg.getBoundingClientRect();
+  for (const a of all) for (const b of all) if (a !== b) {
+    const dx = a.x - b.x, dy = a.y - b.y, d2 = Math.max(dx * dx + dy * dy, 60);
+    a.vx += dx / d2 * 900; a.vy += dy / d2 * 900;
+  }
+  for (const [i, j] of links) {
+    const a = nodes.get(i), b = nodes.get(j), dx = b.x - a.x, dy = b.y - a.y, k = .004;
+    a.vx += dx * k; a.vy += dy * k; b.vx -= dx * k; b.vy -= dy * k;
+  }
+  for (const n of all) {
+    if (n === drag) continue;
+    n.vx = (n.vx + (width / 2 - n.x) * .002) * .82; n.vy = (n.vy + (height / 2 - n.y) * .002) * .82;
+    n.x += n.vx * heat; n.y += n.vy * heat;
+  }
+  heat = Math.max(heat * .985, nodes.size && [...nodes.values()].some((n) => n.state === "learning") ? .3 : 0);
+}
+
+function draw() {
+  svg.replaceChildren();
+  if (!nodes.size) {
+    const {width, height} = svg.getBoundingClientRect();
+    const note = make("text", {x: width / 2, y: height / 2, "text-anchor": "middle", class: "empty"});
+    note.textContent = "Nothing learned yet. Run /learn in omp.";
+    svg.append(note);
+    return;
+  }
+  for (const [i, j] of links) {
+    const a = nodes.get(i), b = nodes.get(j);
+    svg.append(make("line", {x1: a.x, y1: a.y, x2: b.x, y2: b.y}));
+  }
+  for (const n of nodes.values()) {
+    const pulse = n.state === "learning" ? 2 * Math.sin(performance.now() / 160) : 0;
+    const dot = make("circle", {cx: n.x, cy: n.y, r: (n.id === selected ? 10 : 7) + pulse, fill: color(n.state)});
+    dot.addEventListener("pointerdown", (e) => { drag = n; selected = n.id; svg.setPointerCapture(e.pointerId); renderList(); });
+    const label = make("text", {x: n.x + 12, y: n.y + 4});
+    label.textContent = n.text.length > 42 ? n.text.slice(0, 41) + "…" : n.text;
+    svg.append(dot, label);
+  }
+}
+
+function renderList() {
+  const q = find.value.toLowerCase();
+  const rows = [...nodes.values()].filter((n) => n.text.toLowerCase().includes(q)).sort((a, b) => b.id - a.id);
+  list.replaceChildren(...rows.map((n) => {
+    const li = document.createElement("li");
+    li.className = n.state + (n.id === selected ? " on" : "");
+    li.textContent = n.text;
+    const meta = document.createElement("small");
+    meta.textContent = `${n.state} · ${n.source || "chat"} · ${n.at ? new Date(n.at).toLocaleString() : ""}`;
+    li.append(meta);
+    li.onclick = () => { selected = n.id; heat = Math.max(heat, .2); renderList(); };
+    return li;
+  }));
+}
+
+svg.addEventListener("pointermove", (e) => {
+  if (!drag) return;
+  const box = svg.getBoundingClientRect();
+  drag.x = e.clientX - box.left; drag.y = e.clientY - box.top; heat = Math.max(heat, .4);
+});
+svg.addEventListener("pointerup", () => { drag = null; });
+find.addEventListener("input", renderList);
+(function frame() { if (heat > 0) step(); draw(); requestAnimationFrame(frame); })();
+load(); setInterval(load, 3000);
+</script>
+</body>
+</html>
