@@ -120,7 +120,7 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--compact-keep TOKENS` | Recent tokens kept word for word when compacting; the default is 20,000 or a quarter of the window, whichever is smaller. |
 | `--compact-memory DIR` | Also keep each conversation's memory note as a Markdown file in DIR. |
 | `--no-update-check` | Accepted compatibility switch; update the installed binary through its package manager. |
-| `--backend auto` | Use the backend compiled for the platform; `mlx` selects native Metal on macOS and `cuda` selects CUDA on Linux. |
+| `--backend auto` | Use the backend compiled for the platform; `mlx` selects native Metal on macOS and `cuda` selects CUDA on Linux; `xpu` selects the experimental Intel GPU engine in a `-Dxpu` build ([Intel Arc recipe](docs/recipes/xpu-arc.md)). |
 
 Sampling defaults come from the checkpoint's `generation_config.json`, then serve flags and request fields override them.
 `--context 0` is family-specific; use a positive limit for GLM and inspect the capacity reported at startup.
