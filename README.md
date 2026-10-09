@@ -30,6 +30,24 @@ curl -fsS http://127.0.0.1:8080/v1/chat/completions \
   -d '{"model":"local-model","messages":[{"role":"user","content":"Say hello in one sentence."}],"max_tokens":128,"temperature":0}'
 ```
 
+## Living Weights (experimental)
+
+Living Weights teaches a running model new facts. Start a Nemotron 3.5 Lightning server with `--slide`, tell it
+something, and a few minutes later it answers from its own weights: each fact it keeps is written into the
+checkpoint's files, so it is still there after a restart and on any machine that serves the folder.
+
+```sh
+tensorfold pull TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
+src=$(ls -d ~/.cache/huggingface/hub/models--TensorFold--NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit/snapshots/* | head -1)
+cp -cRL "$src" ~/models/nemotron-living        # always teach a copy
+tensorfold serve ~/models/nemotron-living --slide
+curl -N http://127.0.0.1:8080/v1/slide/learn -H 'Content-Type: application/json' -d '{"text": "I like blue."}'
+```
+
+Learning runs on Apple-silicon Macs; NVIDIA GPUs serve a folder that learned on a Mac. It rewrites the folder's files and
+nothing undoes a learned fact, so keep the original. The [Living Weights guide](docs/living-weights.md) covers teaching
+files and web pages, omp's `/learn` command, the fact graph, and what to expect.
+
 ## Qualified models
 
 Only these model and platform combinations are admitted to 1.0.3.
@@ -37,7 +55,7 @@ The platform column names the hardware tested for each model.
 
 | Model | Checkpoint format | Qualified platform |
 | --- | --- | --- |
-| Nemotron 3.5 Lightning 30B-A3B | MLX affine 4-bit, group 64, included MTP head | Metal on M1 through M5; CUDA on GB10 |
+| Nemotron 3.5 Lightning 30B-A3B | MLX affine 4-bit, group 64, included MTP head | Metal on M1 through M5; CUDA on GB10 and RTX 3090 |
 | Qwen3.8 Flash Next | MLX affine 6-bit, group 32 | Metal on M5 Ultra |
 | GLM-5.3-Flash | MLX affine 4-bit, group 64 | Metal on two M5 Ultras |
 | Qwen3.5-2B | Pinned MLX affine 4-bit, group 64, tied embeddings | Metal on M5 Max |
@@ -55,6 +73,7 @@ Its prompt processing trails mlx_lm for now, and we are fixing it. An M3 Ultra r
 Bonsai, Gemma 4, Qwen3.6 and DeepSeek-V4 are still under qualification for 1.0.x.
 The Python 0.6.6 engine remains on the `python-0.6` line for those models and other backends.
 On CUDA, 1.0.3 serves Nemotron on a GB10, greedy and sampled, with concurrent requests sharing each round.
+The Linux x86_64 archive adds NVIDIA Ampere cards with compute capability 8.6 (the RTX 30 series, RTX A6000, A10 and A40), tested on an RTX 3090; the A100 (8.0) is not supported yet.
 
 ## Exact decoding
 
