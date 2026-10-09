@@ -34,6 +34,7 @@ class Weights:
     resident: int
     staging: int
     mapped: int = 0  # read-only, unpinned file pages, reclaimable by the OS
+    streamed: int = 0  # routed experts a pool serves from the checkpoint's files: reported, never held
 
 
 @dataclass(frozen=True)
@@ -60,22 +61,25 @@ class Plan:
     keeps_tables: bool | None = None   # the window leaves the mapped tables their pages (None: nothing to keep)
     largest: int = 0                   # the largest window the budget fits up to the native one: what a restart gets
     resident: int = 0                  # the largest window that leaves the mapped tables their pages
+    pool: int = 0                      # the expert pool held beside the resident weights, whose misses read files
 
     @property
     def settings(self) -> list[int]:
         return [self.native, -1 if self.requested is None else self.requested, int(self.explicit)]
 
     def receipt(self, window: int) -> dict:
+        held = self.weights.resident + self.pool
         return {"native_window": self.native, "requested_context": self.requested,
                 "explicit_context": self.explicit, "context_window": window,
                 "cache_slots": max(self.geometry.minimum_slots, window + self.geometry.reserve),
                 "budget_bytes": self.budget, "weight_bytes_estimate": self.weights.resident,
+                "streamed_weight_bytes": self.weights.streamed, "expert_pool_bytes": self.pool,
                 "loading_bytes_estimate": self.weights.staging, "mapped_table_bytes": self.weights.mapped,
                 "cache_workspace_bytes_estimate": self.geometry.needed(window),
-                "startup_peak_bytes_estimate": self.weights.resident + self.weights.staging,
-                "serving_peak_bytes_estimate": self.weights.resident + self.geometry.needed(window),
-                "total_bytes_estimate": self.weights.resident + max(self.weights.staging, self.geometry.needed(window)),
-                "full_mapped_working_set_bytes_estimate": self.weights.resident +
+                "startup_peak_bytes_estimate": held + self.weights.staging,
+                "serving_peak_bytes_estimate": held + self.geometry.needed(window),
+                "total_bytes_estimate": held + max(self.weights.staging, self.geometry.needed(window)),
+                "full_mapped_working_set_bytes_estimate": held +
                 max(self.weights.staging, self.geometry.needed(window)) + self.weights.mapped,
                 "mapped_pages_reclaimable": True, "mapped_tables_resident": self.keeps_tables}
 
@@ -122,21 +126,23 @@ def headers(model_dir: str | Path, *, rank: int | None = None, files: list[Path]
 def estimate_weights(model_dir: str | Path, transform: Callable, *, rank: int | None = None,
                      files: list[Path] | None = None) -> Weights:
     layers: dict[str, int] = {}
-    resident = mapped = largest = 0
+    resident = mapped = streamed = largest = 0
     for name, info in headers(model_dir, rank=rank, files=files).items():
-        size, host = transform(name, info)
+        size, host, *served = transform(name, info)   # (resident, mapped[, streamed]) bytes of this tensor
         size, host = int(size), int(host)
-        if min(size, host) < 0:
+        from_file = int(served[0]) if served else 0
+        if min(size, host, from_file) < 0:
             raise ValueError("negative startup weight estimate")
         resident += size
         mapped += host
-        largest = max(largest, size)
+        streamed += from_file
+        largest = max(largest, size)      # the pool's slots are the landing buffers, so only held bytes count here
         match = re.search(r"(?:layers|blocks)\.(\d+)\.", name)
         group = match.group(1) if match else name
         layers[group] = layers.get(group, 0) + size
     # CPU expert lists/stack, GPU uploads and tiled outputs can coexist during one layer load.
     staging = 3 * max([largest, *layers.values()], default=0)
-    return Weights(resident, staging, mapped)
+    return Weights(resident, staging, mapped, streamed)
 
 
 def _meminfo() -> dict | None:
@@ -181,6 +187,24 @@ def host_stream_bytes() -> int | None:
     reserve = (reserve_bytes(memory["MemTotal"])
                if os.environ.get("TENSORFOLD_MEMORY_RESERVE_GIB", "").strip() else 2 * GIB)
     return max(0, memory["MemAvailable"] - reserve)
+
+
+def pool_bytes(gib: float | None, streamed: int) -> int:
+    """The expert pool's bytes: a positive GiB count, capped at the experts the checkpoint serves from its files."""
+
+    # a bigger pool than the streamed set is just residency, and a checkpoint that streams nothing holds every weight
+    if gib is None:
+        return 0
+    try:
+        value = float(gib)
+    except (TypeError, ValueError):
+        raise ValueError("--expert-pool needs a positive number of GiB") from None
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError("--expert-pool needs a positive number of GiB")
+    if streamed <= 0:
+        raise ValueError("--expert-pool: this checkpoint's routed experts cannot be served from files, so a pool "
+                         "would hold every weight as it does without the flag; serve without it")
+    return min(int(value * GIB), int(streamed))
 
 
 def cuda_limit_bytes(environ: Mapping[str, str] | None = None) -> int | None:
@@ -229,7 +253,7 @@ def page_room(torch) -> int | None:
 
 
 def make_plan(native: int, requested: int | None, explicit: bool, budget: int,
-              weights: Weights, geometry: Geometry, room: int | None = None) -> Plan:
+              weights: Weights, geometry: Geometry, room: int | None = None, pool: int = 0) -> Plan:
     native = int(native)
     requested = None if requested is None else int(requested)
     if requested is not None and requested < 0:
@@ -239,11 +263,13 @@ def make_plan(native: int, requested: int | None, explicit: bool, budget: int,
         raise ValueError("checkpoint has no native window; give an explicit positive --context")
     upper = min(target, native) if native > 0 else target
 
+    held = weights.resident + int(pool)          # the expert pool is allocated with the resident weights
+
     def fit(ceiling: int, top: int = upper) -> int:
-        low, high = 0, 0 if weights.resident + weights.staging > budget else top
+        low, high = 0, 0 if held + weights.staging > budget else top
         while low < high:
             middle = (low + high + 1) // 2
-            if weights.resident + geometry.needed(middle) <= ceiling:
+            if held + geometry.needed(middle) <= ceiling:
                 low = middle
             else:
                 high = middle - 1
@@ -258,7 +284,8 @@ def make_plan(native: int, requested: int | None, explicit: bool, budget: int,
         else:
             fitting, keeps = (resident, True) if resident else (fitting, False)
     largest = fit(budget, native if native > 0 else target)
-    return Plan(native, requested, bool(explicit), fitting, int(budget), weights, geometry, keeps, largest, resident)
+    return Plan(native, requested, bool(explicit), fitting, int(budget), weights, geometry, keeps, largest, resident,
+                int(pool))
 
 
 def choose(plan: Plan, peers: list[list[int]] | None = None) -> int:
@@ -277,11 +304,13 @@ def choose(plan: Plan, peers: list[list[int]] | None = None) -> int:
         kind = "native" if target == plan.native else "default"
         wanted = (f"requested context {target}" if plan.explicit and plan.requested
                   else f"the {target}-token {kind} window or any smaller one")
+        stream = ("stream its routed experts from the checkpoint with --expert-pool GIB (slower), "
+                  if plan.weights.streamed == 0 and plan.pool == 0 else "")
         raise ValueError(f"CUDA startup memory budget cannot fit {wanted}; estimated largest fitting "
                          f"prompt-plus-reply window: {fitting} tokens across the ranks. " +
                          (f"Use --context {fitting} with a smaller prompt/reply reserve, or " if fitting else "Please ") +
-                         "free memory or use smaller/quantized weights; no model weights "
-                         "or KV caches have been loaded. KV precision is unchanged.")
+                         f"free memory, {stream}or use smaller/quantized "
+                         "weights; no model weights or KV caches have been loaded. KV precision is unchanged.")
     return min(target, fitting)
 
 
@@ -299,7 +328,8 @@ def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, t
           draft_geometry: Geometry | Callable | None = None, startup_copies: int = 0,
           extra_files: tuple[Path, ...] = (), files: list[Path] | None = None,
           draft_transform: Callable | None = None,
-          draft_weights: Callable[[Path], Weights] | None = None) -> dict:
+          draft_weights: Callable[[Path], Weights] | None = None,
+          expert_pool: float | None = None) -> dict:
     """One refusal or capacity on both ranks before allocating; the draft model by ``draft_weights`` or a transform."""
 
     from tensorfold.cuda import build
@@ -316,8 +346,9 @@ def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, t
             more = estimate_weights(model_dir, transform, files=list(extra_files))
             host_staging = max(host_staging, more.staging)
             weights = Weights(weights.resident + more.resident, max(weights.staging, more.staging),
-                              weights.mapped + more.mapped)
-        weights = Weights(weights.resident, weights.staging + startup_copies * weights.resident, weights.mapped)
+                              weights.mapped + more.mapped, weights.streamed + more.streamed)
+        weights = Weights(weights.resident, weights.staging + startup_copies * weights.resident, weights.mapped,
+                          weights.streamed)
         if draft_dir is not None:
             draft = draft_weights(draft_dir) if draft_weights is not None else estimate_weights(
                 draft_dir, draft_transform or (lambda name, info: (math.prod(info["shape"]) * max(4, itemsize(info, name)),
@@ -325,7 +356,7 @@ def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, t
             host_staging = max(host_staging, draft.staging)
             # the drafter loads after the target: the peak is the larger of either load's
             weights = Weights(weights.resident + draft.resident, max(weights.staging - draft.resident, draft.staging),
-                              weights.mapped)
+                              weights.mapped, weights.streamed)
             if draft_geometry is not None:
                 draft_geometry = draft_geometry(config(draft_dir)) if callable(draft_geometry) else draft_geometry
                 main = geometry
@@ -337,9 +368,11 @@ def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, t
                 raise ValueError(f"host staging needs an estimated {host_staging / GIB:.2f} GiB, "
                                  f"but only {host_free / GIB:.2f} GiB is available after its reserve; "
                                  "free host memory or use a checkpoint with smaller loading buffers")
+        # --expert-pool GiB: a pool of streamed experts beside the weights, sized by what the transform streamed
+        pool = pool_bytes(expert_pool, weights.streamed)
         plan = make_plan(int(text.get("max_position_embeddings") or 0), requested,
                          requested is not None if explicit is None else explicit,
-                         available_bytes(torch), weights, geometry, room=page_room(torch))
+                         available_bytes(torch), weights, geometry, room=page_room(torch), pool=pool)
     except (OSError, ValueError, KeyError, TypeError, struct.error) as exc:
         error = f"{type(exc).__name__}: {exc}"     # name the cause: its text alone has hidden a dtype's KeyError
     status = [1 if error else 0, *(plan.settings + [plan.fitting, plan.largest] if plan else [0, -1, 0, 0, 0])]
@@ -349,9 +382,11 @@ def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, t
                          (error or "another rank could not read its checkpoint; check both folders/configs"))
     window = choose(plan, [row[1:] for row in both])
     receipt = {**plan.receipt(window), "largest_window": min(row[5] for row in both)}
+    pool_note = (f"; expert pool {plan.pool / GIB:.2f} GiB serving {plan.weights.streamed / GIB:.2f} GiB of routed "
+                 f"experts from the checkpoint's files" if plan.pool else "")
     print(f"[tensorfold] CUDA rank {rank} startup estimate {receipt['total_bytes_estimate'] / GIB:.2f} GiB "
           f"within {plan.budget / GIB:.2f} GiB; native {plan.native}, allocated prompt/reply window {window}, "
-          f"cache slots {receipt['cache_slots']}", flush=True)
+          f"cache slots {receipt['cache_slots']}{pool_note}", flush=True)
     note = tables_note(plan)
     if note:
         print(f"[tensorfold] {note}", flush=True)

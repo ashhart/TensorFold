@@ -238,6 +238,23 @@ def _backend(choice: str, family: Any) -> str:
     return backend
 
 
+def _expert_pool_refusal(family: Any, model_dir: Path, gib: float) -> str:
+    """Why --expert-pool is refused today: the pool's size against this checkpoint's routed experts."""
+
+    from tensorfold.cuda import capacity
+
+    streamed = getattr(family.package, "cuda_expert_bytes", None)
+    if streamed is None:
+        return (f"--expert-pool: {family.title}'s CUDA weights hold every one of their routed experts on the device; "
+                f"the flag applies to a family whose experts a pool can serve from the checkpoint's files")
+    experts = streamed(model_dir)
+    pool = capacity.pool_bytes(gib, experts)
+    return (f"--expert-pool {gib}: {family.title}'s routed experts are {experts / capacity.GIB:.2f} GiB, and a pool "
+            f"of {pool / capacity.GIB:.2f} GiB would serve the rest from the checkpoint's files, but this family's "
+            f"CUDA loader does not fill a pool yet: the startup plan, the ticket's numbers and the receipt are in "
+            f"place, and the loader follows. Serve without the flag")
+
+
 def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context: int | None = None) -> int:
     """Serve with the family's CUDA engine (``cuda_engine``) behind ``tensorfold.cuda.server``."""
 
@@ -251,6 +268,8 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
         raise ValueError(f"--rank {args.rank} needs --tp {args.rank + 1} or more")
     if args.tp == 4 and not getattr(family.package, "CUDA_TP4", False):
         raise ValueError(f"--tp 4: {family.title} runs on one or two GPUs on CUDA")
+    if getattr(args, "expert_pool", None) is not None:
+        raise ValueError(_expert_pool_refusal(family, model_dir, args.expert_pool))
     started = time.perf_counter()
     drafter = "" if args.no_drafts else _drafter(family, args.drafter, "cuda")
     options: dict[str, Any] = {"drafter": drafter, "tp": int(args.tp), "rank": int(args.rank), "master": args.master,

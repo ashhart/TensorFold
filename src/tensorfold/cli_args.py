@@ -135,6 +135,13 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
                       help="with --tp 2/4: this machine's rank; rank 0 serves HTTP, others follow it")
     cuda.add_argument("--master", default="", help="with --tp 2/4: rank 0's address on the link between the ranks")
     cuda.add_argument("--master-port", type=int, default=29551, help="with --tp 2/4: rank 0's rendezvous port")
+    cuda.add_argument("--expert-pool", type=float, default=None, metavar="GIB",
+                      help="hold a GPU pool of this many GiB for a family's routed experts and serve the rest from "
+                           "the checkpoint's files at each MoE layer, so a model past the card's memory can serve "
+                           "(slower: an expert the pool misses is read from host memory or disk; a cache of the "
+                           "checkpoint's pages in host RAM is what makes it fast). The resident weights, caches and "
+                           "KV are unchanged, a reply is the resident model's tokens, and the startup line reports "
+                           "the pool, the experts it serves and the window it fits")
     cuda.add_argument("--kv-dtype", choices=("bf16", "int8", "int4"), default="bf16",
                       help="KV cache: bf16 (the default), int8, or int4. Quantized keys and values use one "
                            "fp16 scale per 32 values (changes the output; Flash Next on CUDA only)")

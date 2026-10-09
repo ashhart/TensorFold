@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,19 @@ def check(model_dir: str | Path) -> None:
     if quantization(read_config(model_dir)) != CUDA_QUANTIZATION:
         raise ValueError(f"{TITLE}'s CUDA engine reads MLX 4-bit weights in groups of 64 ({MODELS[0]}); this "
                          f"checkpoint has {describe_quantization(read_config(model_dir))}. {OWN_MODEL_HELP}")
+
+
+# the decoder layers' routed expert stacks: what a CUDA expert pool serves from the checkpoint's files.
+# The router (``mlp.gate``) and the shared expert (``mlp.shared_expert``) sit outside switch_mlp, so they stay resident.
+ROUTED_EXPERTS = re.compile(r"model\.layers\.\d+\.mlp\.switch_mlp\.")
+
+
+def cuda_expert_bytes(model_dir: str | Path) -> int:
+    """Bytes of the checkpoint's routed experts, the weights ``--expert-pool`` serves from its files."""
+
+    from tensorfold.streaming.checkpoint import tensor_bytes
+
+    return tensor_bytes(Path(model_dir), lambda name: ROUTED_EXPERTS.search(name) is not None)
 
 
 def mtp_file(model_dir: Path) -> Path | None:
