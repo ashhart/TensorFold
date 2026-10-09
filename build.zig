@@ -129,6 +129,15 @@ pub fn build(b: *std.Build) void {
     _ = ids_files.addCopyFile(b.path("zig/src/families/nemotron/draft_ids.txt"), "draft_ids.txt");
     const draft_ids = b.createModule(.{ .root_source_file = ids_files.add("draft_ids.zig", "pub const text = @embedFile(\"draft_ids.txt\");\n") });
     const test_step = b.step("test", "Host-side unit tests (no GPU work)");
+    const cost_cases = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/cost_rule_cases.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .link_libc = true,
+    }) });
+    const cost_run = b.addRunArtifact(cost_cases);
+    b.step("test-cost-rule", "CPU scripted window and interleaved head timing").dependOn(&cost_run.step);
+    test_step.dependOn(&cost_run.step);
     switch (target.result.os.tag) {
         .macos => metalTargets(b, target, optimize, draft_ids, build_options, test_step),
         .linux => cuda_build.targets(b, target, optimize, draft_ids, build_options),
