@@ -34,7 +34,7 @@ pub const Step = struct { done: bool, changed: bool = false, report: ?Report = n
 
 const max_steps = 400;
 const check_every = 20;
-const plain_steps = 80; // steps a lesson takes once it is a plain weight change: a fact answer, then a steady one
+const plain_steps = 240; // most steps a lesson takes once it is a plain weight change: a fact answer, then a steady one
 const replay_cap = 64; // earlier lessons' answers kept steady at most, the oldest giving way
 
 /// How far above every steady row's cosine with the gate's direction a row's must be for the block to act on it.
@@ -277,7 +277,6 @@ pub const Learner = struct {
         if (!turn.last) return .{ .done = false };
         l.taken += 1;
         const end = l.at == l.plan.items.len;
-        if (l.plain and !end) return .{ .done = false, .changed = true };
         const back = (l.taken % check_every == 0 or end) and try l.recalled();
         if (!back and !end) return .{ .done = false, .changed = true };
         l.phase = .idle;

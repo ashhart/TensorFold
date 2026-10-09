@@ -13,7 +13,7 @@ const Value = json.Value;
 const Cx = errors.Cx;
 
 // What a lesson is written from: questions in the teller's own words, then the model's answers to them.
-const questions_prompt = "Here is something you know: \"{s}\" Write {d} different short questions the person who told you might ask you later, in their own words, to see if you remember: ask it plainly, in other words and in passing (for example: What is my favourite colour? Which colour do I like best?). Number them 1 to {d}, one per line, nothing else.";
+const questions_prompt = "Here is something you know: \"{s}\" Write {d} different short questions the person who told you might ask you later, in their own words, to see if you remember: ask it plainly, in other words, in passing, and as \"Do you remember...?\" or \"Do you know...?\" (for example: What is my favourite colour? Do you remember which colour I like?). Number them 1 to {d}, one per line, nothing else.";
 const answer_prompt = "You know this: \"{s}\" The person who told you asks: \"{s}\" Answer them in one short sentence of fewer than 20 words. Speak to them: say \"your\" for what is theirs and \"I\" only for yourself (for example: Your sister is called Ana.)";
 const twins_prompt = "For each question below, write two questions worded almost the same way but asking about a different person or thing of the same type, so that the answer to the original would be wrong for them. Number them, one per line, nothing else.\n{s}";
 const subject_prompt = "What is this question asking about? Reply with just that phrase, word for word as the question says it.\n{s}";
@@ -206,13 +206,15 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
         try refs.append(a, .{ .question = q, .answer = answer, .fact = f });
         try subjects.append(a, subject);
     }
-    log.line("slide: {d} questions, {d} clean answers for: {s}", .{ qs.len, pairs.items.len, fact });
+    log.line("slide: {d} questions, {d} clean answers for: {s} ({s})", .{ qs.len, pairs.items.len, fact, try std.mem.join(a, " | ", qs) });
     if (qs.len < min_probes) log.line("slide: the questions came back as: {s}", .{asked.content});
     if (pairs.items.len < min_probes) return false;
+    // two held out, one from the middle and the last, so every way of asking is also learned
     const n = pairs.items.len;
-    try parts.train.appendSlice(a, pairs.items[0 .. n - 2]);
-    try parts.held_ex.appendSlice(a, pairs.items[n - 2 ..]);
-    try parts.held.appendSlice(a, refs.items[n - 2 ..]);
+    for (pairs.items, refs.items, 0..) |ex, r, i| if (i == n / 2 or i == n - 1) {
+        try parts.held_ex.append(a, ex);
+        try parts.held.append(a, r);
+    } else try parts.train.append(a, ex);
     // twins of each question about something else, kept as the model answers them now
     var numbered: std.ArrayList(u8) = .empty;
     for (qs, 1..) |q, i| try numbered.print(a, "{d}. {s}\n", .{ i, q });
