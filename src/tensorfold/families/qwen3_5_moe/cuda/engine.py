@@ -182,6 +182,12 @@ class Qwen36Engine:
             stats = self.pool.stats()
             print(f"[tensorfold] expert pool: {stats['loads']} experts read, {stats['hits']} hits "
                   f"({stats['hit_rate']:.1%}), residency {stats['residency']}/{stats['slots']} slots", flush=True)
+            import torch
+            gib = 2 ** 30
+            planned = self.capacity_plan.get("cache_workspace_bytes_estimate", 0)
+            print(f"[tensorfold] expert pool: peak {torch.cuda.max_memory_allocated() / gib:.2f} GiB allocated, "
+                  f"{torch.cuda.max_memory_reserved() / gib:.2f} GiB reserved; the plan charged "
+                  f"{planned / gib:.2f} GiB of cache and scratch for {self.context_window} tokens", flush=True)
             self.pool.close()
             self.pool = None
 
