@@ -162,8 +162,7 @@ pub const Imprint = struct {
         const fd = std.c.open(try std.fmt.bufPrintSentinel(&path, "{s}/index", .{m.dir}, 0), .{ .ACCMODE = .RDWR, .APPEND = true, .CREAT = true, .NOFOLLOW = true, .NONBLOCK = true }, @as(std.c.mode_t, 0o600));
         if (fd < 0) return error.ImprintWrite;
         defer _ = std.c.close(fd);
-        var stat: std.c.Stat = undefined;
-        if (std.c.fstat(fd, &stat) != 0 or stat.mode & std.c.S.IFMT != std.c.S.IFREG) return error.ImprintWrite;
+        _ = indexSize(fd) catch return error.ImprintWrite;
         var end = std.c.lseek(fd, 0, std.c.SEEK.END);
         if (end < 0) return error.ImprintWrite;
         if (end != m.index_end) {
@@ -237,9 +236,7 @@ pub const Imprint = struct {
     }
 
     fn readIndex(m: *Imprint, fd: c_int) !void {
-        var stat: std.c.Stat = undefined;
-        if (std.c.fstat(fd, &stat) != 0 or stat.mode & std.c.S.IFMT != std.c.S.IFREG or stat.size < 0) return error.ImprintRead;
-        const end: u64 = @intCast(stat.size);
+        const end = try indexSize(fd);
         var off: u64 = 0;
         while (off < end) {
             if (end - off < HEAD * 4) {
@@ -298,6 +295,21 @@ pub const Imprint = struct {
         writeWord(std.fmt.bufPrintSentinel(&used, "{s}/used", .{m.dir}, 0) catch return, now);
     }
 };
+
+fn indexSize(fd: c_int) !u64 {
+    if (@import("builtin").os.tag == .linux) {
+        const linux = std.os.linux;
+        var sx: linux.Statx = undefined;
+        if (std.c.statx(fd, "", linux.AT.EMPTY_PATH, .{ .TYPE = true, .SIZE = true }, &sx) != 0) return error.ImprintRead;
+        if (!sx.mask.TYPE or !sx.mask.SIZE or @as(u32, sx.mode) & std.c.S.IFMT != std.c.S.IFREG) return error.ImprintRead;
+        if (sx.size > @as(u64, std.math.maxInt(i64))) return error.ImprintRead;
+        return sx.size;
+    } else {
+        var stat: std.c.Stat = undefined;
+        if (std.c.fstat(fd, &stat) != 0 or stat.mode & std.c.S.IFMT != std.c.S.IFREG or stat.size < 0) return error.ImprintRead;
+        return @intCast(stat.size);
+    }
+}
 
 fn repairTail(fd: c_int, whole: u64, observed: u64) !void {
     if (std.c.lseek(fd, 0, std.c.SEEK.END) != observed) return error.ImprintRead;
