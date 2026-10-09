@@ -7,6 +7,26 @@ const Stream = @import("stream.zig").Stream;
 const launch = @import("launch.zig");
 const triton = @import("triton.zig");
 
+/// Where a family's glue kernels come from: our own fatbins, or a captured set in a folder.
+pub const Pick = union(enum) { native, captured: []const u8, missing: []const u8 };
+
+/// `explicit` (a folder, or "native"), else share/tensorfold/cuda/sm<capability> beside the binary when it holds aot.json.
+pub fn pick(a: std.mem.Allocator, io: std.Io, explicit: ?[]const u8, capability: u32) !Pick {
+    if (explicit) |dir| {
+        if (std.mem.eql(u8, dir, "native")) return .native;
+        return if (has(a, io, dir)) .{ .captured = dir } else .{ .missing = dir };
+    }
+    const exe = try std.process.executableDirPathAlloc(io, a);
+    const dir = try std.fs.path.join(a, &.{ exe, "..", "share", "tensorfold", "cuda", try std.fmt.allocPrint(a, "sm{d}", .{capability}) });
+    return if (has(a, io, dir)) .{ .captured = dir } else .native;
+}
+
+fn has(a: std.mem.Allocator, io: std.Io, dir: []const u8) bool {
+    const path = std.fs.path.join(a, &.{ dir, "aot.json" }) catch return false;
+    std.Io.Dir.cwd().access(io, path, .{}) catch return false;
+    return true;
+}
+
 const ParamJson = struct { name: []const u8, type: []const u8, div16: bool, nospec: bool };
 const ConstJson = struct { int: ?i64 = null, f32: ?u32 = null };
 const KernelJson = struct {

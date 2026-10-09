@@ -13,7 +13,7 @@ const segments_cli = @import("cuda_segments.zig");
 const decode = nemotron.decode;
 
 const usage =
-    \\usage: tensorfold run MODEL --tokens ID,ID,... [--max-tokens N] [--no-drafts] [--report PATH] [--kernels DIR] [--device N]
+    \\usage: tensorfold run MODEL --tokens ID,ID,... [--max-tokens N] [--no-drafts] [--report PATH] [--kernels DIR|native] [--device N]
     \\         [--temperature T] [--top-k K] [--top-p P] [--min-p M] [--seed S]   (temperature 0: greedy)
     \\         [--context N] [--ignore-eos] [--eager] [--costs MS1,...,MS16,LEVEL]
     \\         [--tokens-file PATH] [--segments N]   (N whole 2048-row prompt chunks a call as staggered segments,
@@ -121,15 +121,19 @@ pub fn main(init: std.process.Init) !u8 {
             return 2;
         } else try positional.append(gpa, a);
     }
-    const kernels = opts.kernels orelse init.environ_map.get("TENSORFOLD_CUDA_KERNELS") orelse blk: {
-        const exe = try std.process.executableDirPathAlloc(init.io, init.arena.allocator());
-        break :blk try std.fs.path.join(init.arena.allocator(), &.{ exe, "..", "share", "tensorfold", "cuda", "sm121" });
-    };
     var driver = try cuda.Driver.open();
     defer driver.close();
     const device = try deviceOrdinal(opts.device, init.environ_map.get("TF_CUDA_DEVICE"));
     var ctx = try cuda.Context.init(&driver, @intCast(device));
     defer ctx.deinit();
+    const kernels: ?[]const u8 = switch (try cuda.aot.pick(init.arena.allocator(), init.io, opts.kernels orelse init.environ_map.get("TENSORFOLD_CUDA_KERNELS"), try ctx.capability())) {
+        .native => null,
+        .captured => |dir| dir,
+        .missing => |dir| {
+            std.debug.print("{s} holds no aot.json: give a captured set's folder, or native for our own glue kernels\n", .{dir});
+            return 2;
+        },
+    };
     const cmd = args[1];
     const bench = std.mem.eql(u8, cmd, "segments");
     const decoding = std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "lanes") or bench;

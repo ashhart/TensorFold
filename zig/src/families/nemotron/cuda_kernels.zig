@@ -1,8 +1,9 @@
-//! Nemotron's CUDA kernels: our .cu fatbins with the Python wrappers' launch logic, and the captured Triton set.
+//! Nemotron's CUDA kernels: our .cu fatbins with the Python wrappers' launch logic, and a captured Triton set if given.
 
 const std = @import("std");
 const cuda = @import("cuda");
 const torch_ops = @import("cuda_torch_ops.zig");
+const glue = @import("cuda_glue.zig");
 
 /// Mangled names of the instantiations the copies in zig/kernels/cuda export (cuobjdump -symbols of each fatbin).
 const sym = struct {
@@ -49,8 +50,9 @@ pub const Plan = struct { members: u64, items: u64, counts: u64, rank: u64, hist
 
 pub const Kernels = struct {
     d: *const cuda.Driver,
-    mods: [16]cuda.Module,
-    triton: cuda.aot.Set,
+    mods: [21]cuda.Module,
+    triton: ?cuda.aot.Set, // a captured Triton set for the glue (GB10's qualified one); null: our own glue kernels
+    glue: glue.Fns,
     group: cuda.Function,
     gemv: cuda.Function,
     prefill_mm: cuda.Function,
@@ -77,14 +79,14 @@ pub const Kernels = struct {
     gb10: bool,
     discrete: bool, // the card has its own memory: checkpoint bytes reach it through page-locked slots
 
-    /// Loads every module; `triton_dir` holds the captured aot.json and cubins for this GPU.
-    pub fn load(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, triton_dir: []const u8) !Kernels {
+    /// Loads every module; `triton_dir`, if given, holds a captured aot.json and cubins for this GPU's glue.
+    pub fn load(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, triton_dir: ?[]const u8) !Kernels {
         const d = ctx.d;
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
         var k: Kernels = undefined;
         k.d = d;
         const kk = cuda.kernels;
-        const images = [_][]const u8{ kk.qmm_group, kk.qmm_prefill, kk.experts, kk.experts_prefill, kk.experts_pack, kk.prefill_attention, kk.scan_rows, kk.nemotron_ops, kk.torch_argmax, kk.torch_topk, kk.torch_pointwise, kk.torch_indexing, kk.torch_movement, kk.torch_nemotron_constants, kk.sample, kk.lane_gemv };
+        const images = [_][]const u8{ kk.qmm_group, kk.qmm_prefill, kk.experts, kk.experts_prefill, kk.experts_pack, kk.prefill_attention, kk.scan_rows, kk.nemotron_ops, kk.torch_argmax, kk.torch_topk, kk.torch_pointwise, kk.torch_indexing, kk.torch_movement, kk.torch_nemotron_constants, kk.sample, kk.lane_gemv, kk.nemotron_norms, kk.nemotron_route, kk.nemotron_mamba, kk.nemotron_attention, kk.nemotron_keyed };
         var loaded: usize = 0;
         errdefer for (k.mods[0..loaded]) |*m| m.unload();
         for (images, 0..) |img, i| {
@@ -112,8 +114,9 @@ pub const Kernels = struct {
         k.torch = try torch_ops.Functions.resolve(k.mods[8..14]);
         k.draw = try k.mods[14].function("tf_draw");
         k.draw_ids = try k.mods[14].function("tf_draw_ids");
-        k.triton = try cuda.aot.Set.load(gpa, io, d, ctx.device, triton_dir);
-        errdefer k.triton.deinit();
+        k.glue = try glue.Fns.resolve(k.mods[16..21]);
+        k.triton = if (triton_dir) |dir| try cuda.aot.Set.load(gpa, io, d, ctx.device, dir) else null;
+        errdefer if (k.triton) |*t| t.deinit();
         try k.group.allowDynamicShared(group_smem);
         try k.gemv.allowDynamicShared(group_smem);
         try k.prefill_mm.allowDynamicShared(prefill_mm_smem);
@@ -131,7 +134,7 @@ pub const Kernels = struct {
     }
 
     pub fn deinit(k: *Kernels) void {
-        k.triton.deinit();
+        if (k.triton) |*t| t.deinit();
         for (&k.mods) |*m| m.unload();
     }
 };
