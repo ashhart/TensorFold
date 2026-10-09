@@ -77,7 +77,7 @@ pub const flags = [_]Flag{
     .{ .name = "--ssd-experts" },
     .{ .name = "--ple-on-ssd", .kind = .store_true },
     .{ .name = "--no-update-check", .kind = .store_true, .native = true },
-    .{ .name = "--backend", .choices = &.{ "auto", "mlx", "cuda" }, .native = true, .native_values = backend_values },
+    .{ .name = "--backend", .choices = &.{ "auto", "mlx", "cuda", "xpu" }, .native = true, .native_values = backend_values },
     .{ .name = "--tp", .choices = &.{ "1", "2" } },
     .{ .name = "--rank", .choices = &.{ "0", "1" } },
     .{ .name = "--master" },
@@ -269,6 +269,11 @@ pub const Engines = struct {
     families: []const api.Family = &.{},
 };
 
+fn hasBackend(e: Engines, name: []const u8) bool {
+    for (e.backends) |b| if (std.mem.eql(u8, b, name)) return true;
+    return false;
+}
+
 /// The native capabilities document: the table's native flags and the honoured variables.
 pub fn capabilities(w: *std.Io.Writer, e: Engines) !void {
     try w.print("{{\"schema\": 1, \"engine\": \"zig\", \"version\": \"{s}\", \"chip\": ", .{e.version});
@@ -287,7 +292,7 @@ pub fn capabilities(w: *std.Io.Writer, e: Engines) !void {
         if (!f.native) continue;
         try w.print("{s}\"{s}\": {{", .{ if (first) "" else ", ", f.name });
         first = false;
-        const values = f.native_values orelse f.choices;
+        const values = if (std.mem.eql(u8, f.name, "--backend") and hasBackend(e, "xpu")) &[_][]const u8{ "auto", "xpu" } else f.native_values orelse f.choices;
         if (values.len > 0) {
             try w.writeAll("\"values\": [");
             for (values, 0..) |v, j| try w.print("{s}\"{s}\"", .{ if (j > 0) ", " else "", v });
