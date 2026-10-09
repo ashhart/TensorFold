@@ -147,6 +147,27 @@ pub fn addressed(a: Allocator, question: []const u8) !?[]const u8 {
     return if (swapped) out.items else null;
 }
 
+/// The question asked about someone the user knows (my X as my sister's X); null with no "my" or one before a person.
+pub fn about(a: Allocator, question: []const u8, who: []const u8) !?[]const u8 {
+    const people = [_][]const u8{ "sister", "brother", "mother", "father", "mum", "mom", "dad", "friend", "wife", "husband", "partner", "son", "daughter", "boss", "colleague", "neighbo" };
+    var at: usize = 0;
+    while (at < question.len) {
+        var end = at;
+        while (end < question.len and (std.ascii.isAlphabetic(question[end]) or question[end] == '\'')) end += 1;
+        if (end == at) {
+            at += 1;
+            continue;
+        }
+        if (std.ascii.eqlIgnoreCase(question[at..end], "my")) {
+            const next = std.mem.trimStart(u8, question[end..], " ");
+            for (people) |p| if (std.ascii.startsWithIgnoreCase(next, p)) return null;
+            return try std.fmt.allocPrint(a, "{s} {s}'s{s}", .{ question[0..end], who, question[end..] });
+        }
+        at = end;
+    }
+    return null;
+}
+
 /// Whether two replies open with the same three words, contractions spelled out (I'm as I am).
 fn sameOpening(before: []const u8, reply: []const u8) bool {
     var x: Opening = .{};
@@ -363,4 +384,15 @@ test "a question about the user asked of the model instead" {
     try std.testing.expectEqualStrings("Which film do you like most?", (try addressed(al, "Which film do I like most?")).?);
     try std.testing.expectEqualStrings("Your sister, what is she called?", (try addressed(al, "My sister, what is she called?")).?);
     try std.testing.expect((try addressed(al, "What is the capital of France?")) == null);
+}
+
+test "a question about the user asked about someone they know instead" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const al = arena.allocator();
+    try std.testing.expectEqualStrings("What's my sister's favourite colour?", (try about(al, "What's my favourite colour?", "sister")).?);
+    try std.testing.expectEqualStrings("My friend's car, what colour is it?", (try about(al, "My car, what colour is it?", "friend")).?);
+    try std.testing.expect((try about(al, "What colour do I like?", "sister")) == null);
+    try std.testing.expect((try about(al, "What is my sister's name?", "brother")) == null);
 }

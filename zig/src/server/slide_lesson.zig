@@ -19,6 +19,7 @@ const twins_prompt = "For each question below, write two questions worded almost
 const subject_prompt = "What is this question asking about? Reply with just that phrase, word for word as the question says it.\n{s}";
 const kinds_prompt = "List six other things of the same kind as \"{s}\" that someone could ask about in the same words, each a short phrase. One per line, nothing else.";
 const swapped = 2; // a fact's questions whose subject is swapped for others of its kind, kept as the model answers them
+const others = [_][]const u8{ "sister", "brother", "mother", "friend" }; // whom a fact's questions are also asked about
 const same_prompt = "Two replies to the question \"{s}\":\nA: {s}\nB: {s}\nDoes B tell the user something about themselves, or answer the question, that A does not? A reply that only describes the assistant tells the user nothing. Reply yes or no.";
 const judge_prompt = "The user told you this about themselves or their work: \"{s}\" Does it answer this question they ask you: \"{s}\"? Reply yes or no.";
 const facts_prompt = "Read the text below and list the facts in it worth remembering later: names, numbers, versions, dates, decisions and news. Write each as one short sentence that makes sense on its own. One per line, nothing else.\n\n{s}";
@@ -242,6 +243,15 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
         try parts.twins.append(a, try example(srv, cx, a, null, own, answer, end));
         try parts.near.append(a, .{ .question = own, .before = answer });
         try kept.append(a, own);
+    }
+    // each question about someone the user knows instead, which a fact about the user leaves unanswered
+    for (qs, 0..) |q, i| {
+        const other = try wording.about(a, q, others[i % others.len]) orelse continue;
+        if (wording.tells(fact, "", "", other)) continue;
+        const answer = wording.clean((try ask(srv, cx, null, other, 48, gone)).content) orelse continue;
+        try parts.twins.append(a, try example(srv, cx, a, null, other, answer, end));
+        try parts.near.append(a, .{ .question = other, .before = answer });
+        try kept.append(a, other);
     }
     log.line("slide: near misses kept steady: {s}", .{try std.mem.join(a, " | ", kept.items)});
     return true;
