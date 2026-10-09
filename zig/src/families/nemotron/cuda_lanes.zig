@@ -12,12 +12,16 @@ const config = @import("config.zig");
 const costs = @import("cuda_costs.zig");
 
 const be = lanes.backend;
+const LogRow = lanes.LogprobRow;
+const row_words = lanes.logprob.words;
+/// Host-mapped words for every row a shared window holds, then the first token's row.
+const row_slots = engine.max_streams * state.max_rows + 1;
 
 /// First tokens a handle names (the prompt's draw is on the host once prefill returns).
 const ring = 1024;
 
-/// A stream's sequence; `own` is the engine's, whose buffers the graphs were captured on (one stream at a time).
-const Lane = struct { seq: *state.Seq, own: bool = false, pending_rows: ?usize = null };
+/// A stream's sequence (`own`: the engine's, the graphs' buffers) and its first token's logprob row from prefill.
+const Lane = struct { seq: *state.Seq, own: bool = false, pending_rows: ?usize = null, first: ?LogRow = null };
 
 pub const Cuda = struct {
     gpa: std.mem.Allocator,
@@ -28,13 +32,19 @@ pub const Cuda = struct {
     drawn: [ring]u32 = undefined,
     next: u64 = 0,
     pinned: cuda.HostBuffer, // each window's held drafts read back (state.max_rows words a stream)
+    rows_out: cuda.HostBuffer, // logprob rows the kernel writes straight to the host (row_slots of row_words)
+    rows_dev: u64,
     costs: [state.max_rows]lanes.config.Cost = undefined,
     cost_count: usize = 0,
     mtp_ms: f64 = 0,
     measured: ?core.draft_depth.Costs = null, // a lone stream's depth rule prices its rounds by these
 
     pub fn init(gpa: std.mem.Allocator, e: *Engine, head: ?*Head) !Cuda {
-        return .{ .gpa = gpa, .e = e, .head = head, .pinned = try cuda.HostBuffer.alloc(e.ctx.d, engine.max_streams * state.max_rows * 4) };
+        var pinned = try cuda.HostBuffer.alloc(e.ctx.d, engine.max_streams * state.max_rows * 4);
+        errdefer pinned.free();
+        var rows_out = try cuda.HostBuffer.allocMapped(e.ctx.d, row_slots * row_words * 4);
+        errdefer rows_out.free();
+        return .{ .gpa = gpa, .e = e, .head = head, .pinned = pinned, .rows_out = rows_out, .rows_dev = try rows_out.device() };
     }
 
     pub fn deinit(self: *Cuda) void {
@@ -42,6 +52,7 @@ pub const Cuda = struct {
         while (it.next()) |l| if (!l.own) self.e.freeSeq(l.seq);
         self.lanes.deinit(self.gpa);
         self.pinned.free();
+        self.rows_out.free();
     }
 
     pub fn backend(self: *Cuda) be.Backend {
@@ -54,6 +65,7 @@ pub const Cuda = struct {
             .keep = keepFn,
             .draft = draftFn,
             .release = releaseFn,
+            .first_row = firstRowFn,
         } };
     }
 
@@ -157,6 +169,17 @@ pub const Cuda = struct {
         const last = (ids.len - 1) % state.prefill_rows;
         try e.ops().copy(e.b.hidden, e.b.p_hidden + last * @as(u64, e.c.hidden) * 2, e.c.hidden * 2);
         _ = self.take(first);
+        if (s.logprobs) |k| {
+            const at = (row_slots - 1) * row_words;
+            try e.ops().logprobRows(e.b.p_logits, e.c.vocab, e.b.p_sampled, k, self.rows_dev + at * 4, 1);
+            try e.stream.synchronize();
+            gop.value_ptr.first = LogRow.fromWords(self.rows_out.slice(u32)[at..][0..row_words], first, k);
+        }
+    }
+
+    fn firstRowFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!LogRow {
+        const l = of(ptr).lanes.getPtr(s) orelse return error.UnknownStream;
+        return l.first orelse error.NoFirstRow;
     }
 
     fn firstFn(ptr: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {
@@ -194,12 +217,20 @@ pub const Cuda = struct {
         ids[0] = w.pending;
         @memcpy(ids[1..][0..w.tokens.len], w.tokens);
         try e.verify(ids[0 .. 1 + w.tokens.len], rows, null);
+        if (out[0].rows.len > 0) try e.ops().logprobRows(e.b.logits, e.c.vocab, e.b.sampled, w.stream.logprobs.?, self.rows_dev, rows);
         const held = self.pinned.slice(u32)[0 .. rows - 1];
         if (w.held > 0) try e.ops().download(std.mem.sliceAsBytes(held), e.b.ids + 4);
         try e.stream.synchronize();
         @memcpy(out[0].sampled, try e.tokens());
         @memcpy(out[0].drafts, if (w.held > 0) held else w.tokens);
+        if (out[0].rows.len > 0) self.readRows(out[0], 0, w.stream.logprobs.?);
         l.pending_rows = rows;
+    }
+
+    /// A window's rows from the words its kernel wrote at slot `row0` (after the stream synchronized).
+    fn readRows(self: *Cuda, o: be.Verified, row0: usize, k: u8) void {
+        const words = self.rows_out.slice(u32);
+        for (o.rows, o.sampled, row0..) |*r, pick, slot| r.* = LogRow.fromWords(words[slot * row_words ..][0..row_words], pick, k);
     }
 
     /// Several windows in one forward (Engine.verifyShared), each stream's rows on its own sequence.
@@ -218,14 +249,21 @@ pub const Cuda = struct {
         }
         try e.verifyShared(parts[0..windows.len]);
         const held = self.pinned.slice(u32);
-        for (windows, 0..) |w, k| if (w.held > 0) {
+        var row0: usize = 0;
+        for (windows, out, 0..) |w, o, k| {
             e.bind(parts[k].seq);
-            try e.ops().download(std.mem.sliceAsBytes(held[k * state.max_rows ..][0 .. w.rows() - 1]), e.b.ids + 4);
-        };
+            if (w.held > 0) try e.ops().download(std.mem.sliceAsBytes(held[k * state.max_rows ..][0 .. w.rows() - 1]), e.b.ids + 4);
+            // the shared scratch holds every part's logits, part k's from its first row; its picks are its own
+            if (o.rows.len > 0) try e.ops().logprobRows(e.b.logits + row0 * @as(u64, e.c.vocab) * 2, e.c.vocab, e.b.sampled, w.stream.logprobs.?, self.rows_dev + row0 * row_words * 4, w.rows());
+            row0 += w.rows();
+        }
         try e.stream.synchronize();
+        row0 = 0;
         for (windows, out, 0..) |w, *o, k| {
             @memcpy(o.sampled, try e.sharedTokens(k, w.rows()));
             @memcpy(o.drafts, if (w.held > 0) held[k * state.max_rows ..][0 .. w.rows() - 1] else w.tokens);
+            if (o.rows.len > 0) self.readRows(o.*, row0, w.stream.logprobs.?);
+            row0 += w.rows();
             self.lanes.getPtr(w.stream).?.pending_rows = w.rows();
         }
     }

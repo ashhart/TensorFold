@@ -437,7 +437,7 @@ pub fn run(gpa: std.mem.Allocator, b: *Metal, s: *lanes.Stream, o: Options, hook
             if (log) std.debug.print("round {d}: window {d} rows {d} kept {d} copy {d} tail {d} match {d} second {d}/{d} at token {d}; drafts {any}\n", .{ read, windows[read % ring], x[1], kept, x[2], x[60], x[3], x[61], x[62], s.emitted().len, x[64 .. 63 + x[1]] });
             len_known += kept;
             mtp_known += kept;
-            _ = try s.commit(gpa, x[4 .. 4 + kept]);
+            _ = try s.commit(gpa, x[4 .. 4 + kept], &.{});
             hooks.note();
             last_kept = kept;
             inflight -= windows[read % ring];

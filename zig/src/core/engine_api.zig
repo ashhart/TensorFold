@@ -12,6 +12,9 @@ pub const Sampling = lanes.Sampling;
 /// A prompt's reproducible seed (``seed_for``), for requests that name none.
 pub const seedFor = lanes.sampling.seedFor;
 
+/// A committed token's log probability under the target's raw distribution, with the best tokens at its position.
+pub const LogprobRow = lanes.LogprobRow;
+
 /// The request's stop strings, checked on the engine's thread after each committed token (the server decodes the tail).
 pub const Stop = struct {
     ctx: *anyopaque,
@@ -69,6 +72,8 @@ pub const Request = struct {
     structure: ?Structure = null,
     /// Stop a short exact cycle while the think block is open.
     loop_guard: bool = false,
+    /// Logprob rows for each reply token with this many best tokens (0..20), when ``Info.logprobs``; null: none.
+    logprobs: ?u8 = null,
 };
 
 pub const Reason = enum { stop, length, cancelled, failed };
@@ -93,6 +98,8 @@ pub const Stats = struct {
 pub const Event = union(enum) {
     /// The prompt is in the cache: ``cached`` of its tokens came from a kept prefix.
     prefilled: u32,
+    /// The rows of the ``tokens`` event that follows, one a token (requests with ``logprobs`` only); valid only during the call.
+    logprobs: []const LogprobRow,
     /// Tokens committed for this request, in order; valid only during the call.
     tokens: []const u32,
     /// The reply ended; nothing follows. ``message`` says why a failed reply failed.
@@ -117,6 +124,8 @@ pub const Info = struct {
     /// The engine observes loop_guard requests in its lane stream.
     loop_guard: bool = false,
     structures: bool = false,
+    /// Requests may ask for ``logprobs`` (the engine's lanes give the target's rows).
+    logprobs: bool = false,
     /// Prompt rows a prefill chunk at most, for the server's chunk starts (0: the engine cuts prompts itself).
     prefill_step: u32 = 0,
     /// The engine keeps prompt states between requests, so ``prefilled`` counts the tokens it restored.

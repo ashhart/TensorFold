@@ -3,6 +3,7 @@ const std = @import("std");
 const Stream = @import("stream.zig").Stream;
 const Shape = @import("shape.zig").Shape;
 const Held = @import("stream.zig").Held;
+const Row = @import("logprob.zig").Row;
 
 /// A token to feed: one the backend drew and holds (a handle), or a host value (forced or pending).
 pub const Feed = union(enum) { handle: u64, value: u32 };
@@ -25,8 +26,8 @@ pub const Window = struct {
 /// A drafted level's best tokens by the head (the first is the held draft) and the head's probability for each.
 pub const Alternative = struct { tokens: [4]u32, probs: [4]f64 };
 
-/// A window's results: each row's drawn token and the held drafts the forward verified (host drafts echo back).
-pub const Verified = struct { sampled: []u32, drafts: []u32 };
+/// A window's results: each row's drawn token, the held drafts the forward verified, and logprob rows when asked.
+pub const Verified = struct { sampled: []u32, drafts: []u32, rows: []Row = &.{} };
 
 /// Tapped cache rows for a drafter: the prompt's until the first verify, then each verify's kept rows until the next.
 pub const Features = struct {
@@ -88,6 +89,8 @@ pub const Backend = struct {
         prepare_features: ?*const fn (ptr: *anyopaque, taps: []const u32) anyerror!void = null,
         /// Cache rows [start, start + count) of the prepared taps, within what `Features` says is held (null: none).
         features: ?*const fn (ptr: *anyopaque, s: *Stream, taps: []const u32, start: u64, count: u32) anyerror!Features = null,
+        /// The first token's logprob row (the prompt's last row) for a stream with `logprobs`; null: not given.
+        first_row: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!Row = null,
         /// The stream left the rounds: free its caches and held drafts.
         release: *const fn (ptr: *anyopaque, s: *Stream) void,
     };
@@ -126,7 +129,7 @@ pub const Backend = struct {
         errdefer b.release(s);
         try b.prefill(s);
         const token = try b.read(try b.first(s, s.prompt_len));
-        _ = try s.commit(gpa, &.{token});
+        _ = try s.commit(gpa, &.{token}, &.{});
         return token;
     }
 };

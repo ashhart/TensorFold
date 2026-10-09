@@ -26,6 +26,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - `--learn` keeps Nemotron's shared prompt prefixes, such as a system prompt and its tools, on disk, so a new server resumes them without reading them again. Weights that `--slide` writes into the model's files start a new set (#499). Thanks to @BobClawblaw.
 - Nemotron's shared rounds hold four rows a lane, up to 128, so 32 and 64 sessions keep drafting: on an M3 Ultra, 64 sessions went from 376 to 396 tok/s in all. `--parallel 32` and `64` use 3 GiB more memory, `--parallel 8` the same (#518). Thanks to @BobClawblaw.
 - Nemotron's routed experts take three member rows a pass in windows and shared rounds, with the same bits: 10-15% faster at 64 and 128 rows on an M3 Ultra, and 64 sessions reach 409 tok/s with #518 (#502). Thanks to @BobClawblaw.
+- **`logprobs` and `top_logprobs` on the native CUDA server** (Nemotron 3.5 Lightning, nonstreamed chat): each reply token's log probability under the target's raw distribution, with up to 20 alternatives, from the verified target logits, so drafts on and `"draft": false` give the same rows. With thinking on, the rows cover the answer only, so `logprobs.content[0]` is the first answer token, as in @DakotaTexas's spec (#449). Streaming, tools, stop strings, structured output and a thinking budget stay refused with `logprobs`, as do the other engines.
 
 ## 1.0.4
 

@@ -231,10 +231,11 @@ pub const LaneHost = struct {
         return job.host.closing or std.mem.indexOfScalar(Id, job.host.cancels.items, job.id) != null;
     }
 
-    /// Hands a stream the tokens its rounds committed since the last delivery.
+    /// Hands a stream the tokens its rounds committed since the last delivery (their logprob rows first).
     fn send(h: *LaneHost, job: *Job) void {
         const emitted = job.stream.emitted();
         if (emitted.len > job.delivered) {
+            if (job.stream.logprobs != null) emit(job, .{ .logprobs = job.stream.rows.items[job.delivered..emitted.len] });
             emit(job, .{ .tokens = emitted[job.delivered..] });
             h.noteDecoded(emitted.len - job.delivered);
             job.delivered = emitted.len;
@@ -355,6 +356,7 @@ pub const LaneHost = struct {
             .think_budget = r.think_budget,
             .think_close = r.think_close,
             .think_end = if (r.think_end) |t| t else -1,
+            .logprobs = r.logprobs,
             .loop_guard = r.loop_guard,
             .chunks = r.chunks,
             .reuse = reuse,
@@ -384,11 +386,11 @@ pub const LaneHost = struct {
         emit(job, .{ .prefilled = job.stream.cached });
     }
 
-    /// An idle backend driver takes a lone drafted request, including sampling when supported.
+    /// An idle backend driver takes a lone drafted request, sampled when supported; never one with logprobs.
     fn loneFits(h: *LaneHost, job: *Job) bool {
         const r = job.request;
         const lone = h.lone orelse return false;
-        if ((r.sampling != null and !lone.sampled) or !r.drafts or r.think_budget > 0 or r.loop_guard or r.call != null or r.structure != null) return false;
+        if ((r.sampling != null and !lone.sampled) or !r.drafts or r.think_budget > 0 or r.loop_guard or r.call != null or r.structure != null or r.logprobs != null) return false;
         h.lock();
         defer h.unlock();
         return h.admitted.items.len == 1 and h.queued.items.len == 0 and h.cancels.items.len == 0 and h.core.activeCount() == 0;

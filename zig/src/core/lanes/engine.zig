@@ -14,6 +14,7 @@ const fill = @import("fill.zig");
 const trail = @import("trail.zig");
 const Stream = sm.Stream;
 const Feed = be.Feed;
+const LogRow = @import("logprob.zig").Row;
 const Plan = win.Plan;
 const f = ev.f;
 const str = trail.str;
@@ -88,6 +89,7 @@ pub const Engine = struct {
             return error.Cancelled;
         }
         s.context.shrinkRetainingCapacity(s.prompt_len);
+        s.rows.clearRetainingCapacity();
         s.pending = null;
         s.cache_len = s.prompt_len;
         const position: u64 = s.prompt_len;
@@ -105,7 +107,7 @@ pub const Engine = struct {
             if (e.backend.vtable.tree) |tree| if (try tree(e.backend.ptr, s, e.gpa)) |held| {
                 s.next = held; // a tree head's first drafts as host tokens, as every later round's
             };
-        } else if (e.cfg.pipelined) {
+        } else if (e.cfg.pipelined and s.logprobs == null) {
             try e.queueNext(s, feed);
         }
         const value = try e.readFeed(feed);
@@ -114,7 +116,12 @@ pub const Engine = struct {
             const first = if (feed == .handle) value else try e.backend.read(drawn);
             try trail.event(e, &.{ f("ev", str("first")), f("stream", str(s.id)), f("position", int(position)), f("drawn", int(first)), f("token", int(value)) });
         }
-        _ = try s.commit(e.gpa, &.{value});
+        var first_row: [1]LogRow = undefined;
+        if (s.logprobs != null) {
+            const row = e.backend.vtable.first_row orelse return error.LogprobsUnsupported;
+            first_row[0] = (try row(e.backend.ptr, s)).forToken(value);
+        }
+        _ = try s.commit(e.gpa, &.{value}, if (s.logprobs != null) &first_row else &.{});
         s.pending = value;
         try trail.resolve(e);
         if (s.finished) {
@@ -195,7 +202,9 @@ pub const Engine = struct {
             try e.roundStreams(chosen);
         } else {
             for (live.items) |s| {
-                const r = if ((e.cfg.family_mtp and s.drafts) or !e.cfg.pipelined) try e.familyRound(s, null) else try e.pipelinedRound(s);
+                // a stream with logprobs takes verify windows: their rows' logits are read before the next forward
+                const windowed = (e.cfg.family_mtp and s.drafts) or !e.cfg.pipelined or s.logprobs != null;
+                const r = if (windowed) try e.familyRound(s, null) else try e.pipelinedRound(s);
                 s.min_rows = if (s.min_rows == 0) r.rows else @min(s.min_rows, r.rows);
             }
         }
@@ -263,11 +272,11 @@ pub const Engine = struct {
         const early = e.cfg.family_mtp and s.drafts and plan.kind != .forced and e.cfg.speculate_early and plan.parents == null;
         const windows = [_]be.Window{try win.build(e, plan, early)};
         const rows = windows[0].rows();
-        var out = [_]be.Verified{.{ .sampled = try a.alloc(u32, rows), .drafts = try a.alloc(u32, rows - 1) }};
+        var out = [_]be.Verified{.{ .sampled = try a.alloc(u32, rows), .drafts = try a.alloc(u32, rows - 1), .rows = if (s.logprobs != null) try a.alloc(LogRow, rows) else &.{} }};
         try e.backend.verify(&windows, &out);
         const tokens = try win.tokens(e, windows[0], out[0]);
         const parents = try win.rowParents(e, windows[0]);
-        const o = try e.conclude(s, plan, out[0].sampled, tokens, parents, windows[0].positions);
+        const o = try e.conclude(s, plan, out[0].sampled, out[0].rows, tokens, parents, windows[0].positions);
         if (o.path.len < rows or plan.parents != null) try e.backend.keep(&windows, &.{o.path});
         const held_levels = s.held_levels;
         if (e.cfg.family_mtp and s.drafts) {
@@ -316,7 +325,7 @@ pub const Engine = struct {
         var total: u64 = 0;
         for (plans, windows, out) |p, *w, *o| {
             w.* = try win.build(e, p, false);
-            o.* = .{ .sampled = try a.alloc(u32, w.rows()), .drafts = try a.alloc(u32, w.rows() - 1) };
+            o.* = .{ .sampled = try a.alloc(u32, w.rows()), .drafts = try a.alloc(u32, w.rows() - 1), .rows = if (p.stream.logprobs != null) try a.alloc(LogRow, w.rows()) else &.{} };
             total += w.rows();
         }
         try e.backend.verify(windows, out);
@@ -324,7 +333,7 @@ pub const Engine = struct {
         const paths = try a.alloc([]const u32, plans.len);
         for (plans, windows, out, outcomes, paths) |p, w, o, *oc, *path| {
             const tokens = try win.tokens(e, w, o);
-            oc.* = try e.conclude(p.stream, p, o.sampled, tokens, try win.rowParents(e, w), w.positions);
+            oc.* = try e.conclude(p.stream, p, o.sampled, o.rows, tokens, try win.rowParents(e, w), w.positions);
             path.* = oc.path;
             const rows: u32 = @intCast(w.rows());
             p.stream.min_rows = if (p.stream.min_rows == 0) rows else @min(p.stream.min_rows, rows);
@@ -357,8 +366,8 @@ pub const Engine = struct {
         try e.rule.observeOverhead(@intCast(plans.len), total, ms);
     }
 
-    /// Commit the target-sampled path (after the thinking budget's cut); the kept rows and their following tokens.
-    fn conclude(e: *Engine, s: *Stream, p: Plan, sampled: []const u32, tokens: []const u32, parents: []const i32, positions: []const u64) !Outcome {
+    /// Commit the target-sampled path (after the thinking budget's cut), each token with its path row's logprob row.
+    fn conclude(e: *Engine, s: *Stream, p: Plan, sampled: []const u32, rows_lp: []const LogRow, tokens: []const u32, parents: []const i32, positions: []const u64) !Outcome {
         const a = e.arena.allocator();
         const rows = tokens.len;
         var path: []u32 = undefined;
@@ -419,7 +428,12 @@ pub const Engine = struct {
             try committed.append(a, try s.startClose(e.gpa));
         }
         s.rounds += 1;
-        const landed = try s.commit(e.gpa, committed.items);
+        var committed_rows: []LogRow = &.{};
+        if (rows_lp.len > 0) {
+            committed_rows = try a.alloc(LogRow, committed.items.len);
+            for (committed_rows, committed.items, path[0..committed.items.len]) |*r, t, row| r.* = rows_lp[row].forToken(t);
+        }
+        const landed = try s.commit(e.gpa, committed.items, committed_rows);
         const got = committed.items[0..landed];
         if (s.finished and got.len < path.len) path = path[0 .. got.len + 1];
         const keep = path.len;
@@ -533,7 +547,7 @@ pub const Engine = struct {
             token = try e.readFeed(current);
         }
         s.rounds += 1;
-        const landed = try s.commit(e.gpa, &.{token});
+        const landed = try s.commit(e.gpa, &.{token}, &.{});
         s.pending = token;
         if (e.cfg.family_width >= 2 and (s.mode orelse .pipe) == .pipe and !s.finished and s.drafts and (try win.copyProposal(e, s)).len > 0)
             s.mode = .drain; // a copy window is ahead: land the queued step
@@ -549,7 +563,7 @@ pub const Engine = struct {
         if (try e.forcedNext(s)) |t| current = .{ .value = t };
         const token = try e.readFeed(current);
         s.rounds += 1;
-        const landed = try s.commit(e.gpa, &.{token});
+        const landed = try s.commit(e.gpa, &.{token}, &.{});
         s.pending = token;
         s.mode = .verify;
         try trail.event(e, &.{ f("ev", str("land")), f("stream", str(s.id)), f("got", .{ .u32s = s.emitted()[s.emitted().len - landed ..] }) });
