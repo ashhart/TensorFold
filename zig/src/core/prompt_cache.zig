@@ -410,7 +410,8 @@ pub const Store = struct {
         const write = s.family.vtable.write orelse return;
         const key = imprint.Imprint.keyOf(e.tokens);
         if (im.has(key) or e.bytes > im.cap) return;
-        const disk_bytes = std.math.add(u64, e.bytes, 128 + @as(u64, e.tokens.len + starts.len) * 4) catch return;
+        const payload_bytes = std.math.add(u64, e.bytes, 128 + @as(u64, e.tokens.len + starts.len) * 4) catch return;
+        const disk_bytes = std.math.add(u64, payload_bytes, im.indexScratchBytes() catch return) catch return;
         switch (im.admission.reserve(im.dir, disk_bytes)) {
             .quiet => return,
             .refused => return note("learning paused: free disk cannot preserve the {d} MiB floor", .{im.admission.floor >> 20}),

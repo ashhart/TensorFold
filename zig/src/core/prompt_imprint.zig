@@ -66,6 +66,17 @@ pub const Imprint = struct {
         return n;
     }
 
+    /// Reserve the current index's size too: LRU eviction rewrites it through a temporary file.
+    pub fn indexScratchBytes(m: *const Imprint) !u64 {
+        var path: [1100]u8 = undefined;
+        const fd = std.c.open(try std.fmt.bufPrintSentinel(&path, "{s}/index", .{m.dir}, 0), .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+        if (fd < 0) return if (std.c.errno(fd) == .NOENT) 0 else error.ImprintRead;
+        defer _ = std.c.close(fd);
+        const end = std.c.lseek(fd, 0, std.c.SEEK.END);
+        if (end < 0) return error.ImprintRead;
+        return @intCast(end);
+    }
+
     /// Whether `bytes` more fit under the cap; other identities give room first, least recently opened first.
     pub fn fits(m: *Imprint, bytes: u64) bool {
         if (m.others + m.total() + bytes > m.cap) m.others = sweep(m.gpa, m.root, m.dir, m.cap -| (m.total() + bytes));

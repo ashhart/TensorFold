@@ -589,3 +589,38 @@ test "Store learning preserves the disk floor, backs off writes across keys, and
     try std.testing.expectEqual(@as(usize, 1), im.metas.items.len);
     try std.testing.expectEqual(@as(u64, 0), im.admission.reserved);
 }
+
+test "learning reserves the existing index rewrite above the disk floor and resumes an unchanged kept key" {
+    const Disk = struct {
+        var space: u64 = 357;
+        fn free(_: [:0]const u8) ?u64 {
+            return space;
+        }
+        fn clock() ?u64 {
+            return 100;
+        }
+    };
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var path: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&path, "/tmp/tf-learn-index-floor-{d}", .{std.c.getpid()});
+    defer rmTree(root);
+    var im = try imprint.Imprint.open(a, root, 12, 1 << 20);
+    defer im.deinit();
+    try im.add(123, 1, &.{ 1, 2 }, &.{}, 1);
+    im.admission = .{ .floor = 100, .free = Disk.free, .clock = Disk.clock };
+    var fake: Fake = .{ .gpa = a };
+    var store = Store.init(a, fake.learned(), .{ .lookahead = 1, .min_prompt = 0, .min_gap = 1 }, 1 << 20);
+    defer store.deinit();
+    store.imprint = &im;
+    const prompt = [_]u32{ 7, 7, 7, 7, 7, 7, 9, 10 };
+    const plan = try store.begin(arena.allocator(), &prompt, 7, &.{5}, &.{}, null, &.{});
+    _ = fake.pass(&store, &prompt, plan);
+    try std.testing.expectEqual(@as(usize, 0), fake.writes);
+    Disk.space += try im.indexScratchBytes();
+    fake.at = 5;
+    try std.testing.expect(store.keep(&prompt, 5, null, &.{}, &.{}));
+    try std.testing.expectEqual(@as(usize, 1), fake.writes);
+    try std.testing.expectEqual(@as(u64, 0), im.admission.reserved);
+}
