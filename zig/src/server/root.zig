@@ -42,4 +42,5 @@ test {
     _ = @import("decisions_test.zig");
     _ = @import("slide.zig");
     _ = @import("slide_graph.zig");
+    _ = @import("slide_lesson.zig");
 }

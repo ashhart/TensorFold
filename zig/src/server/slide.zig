@@ -5,7 +5,9 @@ const json = @import("json.zig");
 const sse = @import("sse.zig");
 const http_body = @import("http_body.zig");
 const routes = @import("routes.zig");
-const State = @import("slide_graph.zig").State;
+const errors = @import("errors.zig");
+const teach = @import("slide_lesson.zig");
+const Gone = @import("openai.zig").Gone;
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
 const Allocator = std.mem.Allocator;
@@ -31,7 +33,7 @@ pub fn forget(srv: *Server, conn: *Conn, _: Allocator) void {
     conn.sendJson(200, "{\"cleared\": true}");
 }
 
-/// Queue the body's text for the engine's learner and stream its progress; the graph follows every event.
+/// The body's facts, each written into a lesson by the model and learned in turn, then saved into the model's shards.
 pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     const raw = switch (http_body.read(conn, a, http_body.limit) catch return) {
         .ok => |b| b,
@@ -42,60 +44,149 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         .err => |message| return refuse(conn, a, 400, message),
     };
     const text = body.strField("text") orelse return refuse(conn, a, 400, "text is required");
-    const request: api.LearnRequest = .{ .text = text, .source = body.strField("source") orelse "chat" };
+    const source = body.strField("source") orelse "chat";
+    switch (run(srv, a, &.{})) {
+        .refused => |e| return switch (e) {
+            error.Unsupported => refuse(conn, a, 501, "this engine does not learn: serve its model with --slide"),
+            error.Busy, error.Closed => refuse(conn, a, 503, "the engine cannot take a learn request now"),
+        },
+        else => {},
+    }
+    srv.teacher.learning.lockUncancelable(srv.io);
+    defer srv.teacher.learning.unlock(srv.io);
+    sse.open(conn) catch return;
+    var out: Out = .{ .conn = conn, .a = a };
+    var cx: errors.Cx = .{ .a = a };
+    const gone: Gone = .{ .conn = conn };
+    const facts = teach.facts(srv, &cx, text, source, gone) catch |e| return out.fail(&cx, e);
+    const ids = a.alloc(u32, facts.len) catch return;
+    for (facts, ids) |fact, *id| {
+        id.* = srv.slide.add(fact, source, now(srv));
+        out.event("fact", .{ .id = id.*, .text = fact });
+    }
+    var moved = false;
+    for (facts, ids) |fact, id| {
+        if (gone.check()) break;
+        srv.slide.mark(id, .learning);
+        out.event("learning", .{ .id = id });
+        const plan = (teach.lesson(srv, &cx, &srv.teacher, fact, gone) catch |e| {
+            srv.slide.mark(id, .missed);
+            out.event("learned", .{ .id = id, .recalled = false, .message = words(&cx, e) });
+            continue;
+        }) orelse {
+            srv.slide.mark(id, .missed);
+            out.event("learned", .{ .id = id, .recalled = false, .message = "too few clean answers to learn from" });
+            continue;
+        };
+        const result = rounds(srv, a, &cx, plan, fact, gone);
+        moved = moved or result.kept;
+        srv.slide.mark(id, if (result.recalled) .learned else .missed);
+        if (result.why) |why| {
+            out.event("learned", .{ .id = id, .recalled = result.recalled, .steps = result.steps, .message = why });
+        } else out.event("learned", .{ .id = id, .recalled = result.recalled, .steps = result.steps });
+    }
+    if (moved) switch (run(srv, a, &.{ .save = true })) {
+        .saved => |tensors| out.event("saved", .{ .tensors = tensors }),
+        .failed => |message| out.event("failed", .{ .message = message }),
+        else => {},
+    };
+    sse.done(conn) catch {};
+}
+
+const Rounds = struct { recalled: bool = false, kept: bool = false, steps: u32 = 0, why: ?[]const u8 = null };
+
+/// A lesson in checked rounds of a few steps, until the fact comes back; a round that loops or leaks is taken back.
+fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, fact: []const u8, gone: Gone) Rounds {
+    var out: Rounds = .{};
+    for (0..teach.rounds) |round| {
+        var request = plan.request;
+        request.more = round > 0;
+        switch (run(srv, a, &request)) {
+            .learned => |l| out.steps += l.steps,
+            .failed => |message| return .{ .recalled = out.recalled, .kept = out.kept, .steps = out.steps, .why = message },
+            else => return out,
+        }
+        const verdict = teach.verify(srv, cx, plan, fact, gone) catch |e| teach.Verdict{ .recalled = false, .damage = words(cx, e) };
+        if (verdict.damage) |why| {
+            _ = run(srv, a, &.{ .undo = true });
+            out.why = std.fmt.allocPrint(a, "round {d} taken back: {s}", .{ round + 1, why }) catch why;
+            return out;
+        }
+        out.kept = true;
+        out.recalled = verdict.recalled;
+        if (verdict.recalled) return out;
+    }
+    return out;
+}
+
+const Outcome = union(enum) {
+    none,
+    learned: struct { recalled: bool, steps: u32 },
+    saved: u32,
+    failed: []const u8,
+    refused: api.LearnError,
+};
+
+/// One lesson through the engine's learner, waited for to its end.
+fn run(srv: *Server, a: Allocator, request: *const api.LearnRequest) Outcome {
     var box: Box = .{ .io = srv.io, .gpa = srv.gpa };
     defer box.deinit();
-    srv.engine.learn(&request, box.sink()) catch |e| return switch (e) {
-        error.Unsupported => refuse(conn, a, 501, "this engine has no learner for its model family"),
-        error.Busy, error.Closed => refuse(conn, a, 503, "the engine cannot take a learn request now"),
-    };
-    var open = if (sse.open(conn)) |_| true else |_| false;
-    var ids: std.ArrayList([2]u32) = .empty;
+    srv.engine.learn(request, box.sink()) catch |e| return .{ .refused = e };
+    var outcome: Outcome = .none;
     var batch: std.ArrayList(Box.Copy) = .empty;
     defer batch.deinit(srv.gpa);
     while (true) {
         const finished = box.take(&batch);
         for (batch.items) |c| {
-            open = relay(srv, conn, a, c, &ids, request.source, open);
+            switch (c.kind) {
+                .learned => outcome = .{ .learned = .{ .recalled = c.recalled, .steps = c.steps } },
+                .saved => outcome = .{ .saved = c.tensors },
+                .done => if (c.text.len > 0) {
+                    outcome = .{ .failed = a.dupe(u8, c.text) catch "the learner failed" };
+                },
+            }
             srv.gpa.free(c.text);
         }
         batch.clearRetainingCapacity();
-        if (finished) break;
+        if (finished) return outcome;
     }
-    if (open) sse.done(conn) catch {};
 }
 
-/// One event into the graph and, when `write`, onto the stream; false once the stream has closed.
-fn relay(srv: *Server, conn: *Conn, a: Allocator, c: Box.Copy, ids: *std.ArrayList([2]u32), source: []const u8, write: bool) bool {
-    const o = json.newObject(a) catch return false;
-    var kind: []const u8 = @tagName(c.kind);
-    switch (c.kind) {
-        .fact => {
-            const at: i64 = @intCast(@divTrunc(std.Io.Clock.real.now(srv.io).toNanoseconds(), std.time.ns_per_ms));
-            const id = srv.slide.add(c.text, source, at);
-            ids.append(a, .{ c.id, id }) catch {};
-            o.put(a, "id", json.intValue(a, id) catch return false) catch return false;
-            o.put(a, "text", .{ .string = c.text }) catch return false;
-        },
-        .learning, .learned => {
-            const id = for (ids.items) |p| {
-                if (p[0] == c.id) break p[1];
-            } else 0;
-            const state: State = if (c.kind == .learning) .learning else if (c.recalled) .learned else .missed;
-            srv.slide.mark(id, state);
-            o.put(a, "id", json.intValue(a, id) catch return false) catch return false;
-            if (c.kind == .learned) o.put(a, "recalled", .{ .bool = c.recalled }) catch return false;
-        },
-        .saved => o.put(a, "tensors", json.intValue(a, c.tensors) catch return false) catch return false,
-        .done => {
-            if (c.text.len == 0) return true;
-            kind = "failed";
-            o.put(a, "message", .{ .string = c.text }) catch return false;
-        },
+/// The learn stream: events while the client listens.
+const Out = struct {
+    conn: *Conn,
+    a: Allocator,
+    open: bool = true,
+
+    fn event(o: *Out, kind: []const u8, fields: anytype) void {
+        if (!o.open) return;
+        const obj = json.newObject(o.a) catch return;
+        inline for (@typeInfo(@TypeOf(fields)).@"struct".field_names) |name| {
+            const v = @field(fields, name);
+            const value: json.Value = switch (@TypeOf(v)) {
+                bool => .{ .bool = v },
+                u32 => json.intValue(o.a, v) catch return,
+                else => .{ .string = v },
+            };
+            obj.put(o.a, name, value) catch return;
+        }
+        sse.event(o.conn, o.a, kind, .{ .object = obj }) catch {
+            o.open = false;
+        };
     }
-    if (!write) return false;
-    sse.event(conn, a, kind, .{ .object = o }) catch return false;
-    return true;
+
+    fn fail(o: *Out, cx: *errors.Cx, e: anyerror) void {
+        o.event("failed", .{ .message = words(cx, e) });
+        sse.done(o.conn) catch {};
+    }
+};
+
+fn words(cx: *errors.Cx, e: anyerror) []const u8 {
+    return if (e == error.Refused and cx.message.len > 0) cx.message else @errorName(e);
+}
+
+fn now(srv: *Server) i64 {
+    return @intCast(@divTrunc(std.Io.Clock.real.now(srv.io).toNanoseconds(), std.time.ns_per_ms));
 }
 
 fn refuse(conn: *Conn, a: Allocator, code: u16, message: []const u8) void {
@@ -116,7 +207,7 @@ const Box = struct {
     events: std.ArrayList(Copy) = .empty,
     done: bool = false,
 
-    const Copy = struct { kind: std.meta.Tag(api.LearnEvent), id: u32 = 0, text: []const u8 = "", recalled: bool = false, tensors: u32 = 0 };
+    const Copy = struct { kind: std.meta.Tag(api.LearnEvent), text: []const u8 = "", recalled: bool = false, steps: u32 = 0, tensors: u32 = 0 };
 
     fn sink(b: *Box) api.LearnSink {
         return .{ .ctx = b, .event = onEvent };
@@ -126,14 +217,9 @@ const Box = struct {
         const b: *Box = @ptrCast(@alignCast(ctx));
         var c: Copy = .{ .kind = e.* };
         switch (e.*) {
-            .fact => |f| {
-                c.id = f.id;
-                c.text = b.gpa.dupe(u8, f.text) catch "";
-            },
-            .learning => |id| c.id = id,
             .learned => |l| {
-                c.id = l.id;
                 c.recalled = l.recalled;
+                c.steps = l.steps;
             },
             .saved => |s| c.tensors = s.tensors,
             .done => |d| c.text = b.gpa.dupe(u8, d.message) catch "",
