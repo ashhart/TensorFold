@@ -29,6 +29,7 @@ pub fn run(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue) !void {
     defer kernels.deinit();
     var cases: usize = 0;
     for ([_]bool{ false, true }) |raw| {
+        if (!raw and !device.tensorUnits()) continue; // the lane layout needs tensor units; pre-M5 heads take raw rows
         const linear = q.projection.Linear{ .words = .{ .buffer = buffers[0], .offset = 32 }, .pairs = .{ .buffer = buffers[1], .offset = 32 }, .n = n, .k = k, .tile = 32, .slices = 1, .raw = if (raw) .{ .w = buffers[0], .scales = buffers[2], .biases = buffers[3], .w_off = 32, .s_off = 32, .b_off = 32, .n = n, .k = k, .group = 64, .bits = 4, .sum = .f32 } else null };
         var selected = try Head.init(a, device, linear);
         defer selected.deinit();
@@ -36,10 +37,12 @@ pub fn run(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue) !void {
         if (selected.linear.slices != linear.slices or ids[0] != 0 or ids[98303] != 98303 or ids[98304] != 248032 or ids[98591] != 248319) return error.DraftHeadMap;
         for ([_]u32{ 1, 2, 7 }) |rows| {
             const cb = queue.commandBuffer();
-            const e = cb.compute(.serial);
-            try kernels.quant(e, linear, .{ .buffer = buffers[4], .offset = 32 }, null, .{ .buffer = buffers[8] }, .{ .buffer = buffers[5], .offset = 32 }, rows);
-            try kernels.quant(e, selected.linear, .{ .buffer = buffers[4], .offset = 32 }, null, .{ .buffer = buffers[8] }, .{ .buffer = buffers[6], .offset = 32 }, rows);
-            e.end();
+            {
+                const e = cb.compute(.serial);
+                defer e.end();
+                try kernels.quant(e, linear, .{ .buffer = buffers[4], .offset = 32 }, null, .{ .buffer = buffers[8] }, .{ .buffer = buffers[5], .offset = 32 }, rows);
+                try kernels.quant(e, selected.linear, .{ .buffer = buffers[4], .offset = 32 }, null, .{ .buffer = buffers[8] }, .{ .buffer = buffers[6], .offset = 32 }, rows);
+            }
             cb.commit();
             cb.wait();
             if (cb.failure() != null) return error.DraftHeadGpuFailure;
