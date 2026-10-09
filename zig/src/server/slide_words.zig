@@ -56,10 +56,11 @@ const common = [_][]const u8{ "that", "this", "with", "from", "have", "been", "w
 /// Whether `reply` says a word of `fact` that neither `question` nor `before` says.
 pub fn tells(fact: []const u8, question: []const u8, before: []const u8, reply: []const u8) bool {
     var it = std.mem.tokenizeAny(u8, fact, delimiters);
-    while (it.next()) |raw| {
+    var first = true;
+    while (it.next()) |raw| : (first = false) {
         var w: [48]u8 = undefined;
         const word = normal(raw, &w);
-        if (!notable(word) or says(question, word) or says(before, word)) continue;
+        if (!marked(raw, word, first) or says(question, word) or says(before, word)) continue;
         if (says(reply, word)) return true;
     }
     return false;
@@ -69,10 +70,11 @@ pub fn tells(fact: []const u8, question: []const u8, before: []const u8, reply: 
 pub fn recalls(fact: []const u8, question: []const u8, answer: []const u8, reply: []const u8) bool {
     var key: usize = 0;
     var it = std.mem.tokenizeAny(u8, answer, delimiters);
-    while (it.next()) |raw| {
+    var first = true;
+    while (it.next()) |raw| : (first = false) {
         var w: [48]u8 = undefined;
         const word = normal(raw, &w);
-        if (!notable(word) or !says(fact, word) or says(question, word)) continue;
+        if (!marked(raw, word, first) or !says(fact, word) or says(question, word)) continue;
         key += 1;
         if (!says(reply, word)) return false;
     }
@@ -177,6 +179,11 @@ fn spell(word: []const u8) [2][]const u8 {
 fn notable(word: []const u8) bool {
     if (word.len < 4 and std.mem.indexOfAny(u8, word, "0123456789") == null) return false;
     return !isCommon(word);
+}
+
+/// A word worth comparing in a sentence: a notable one, or a short name (capitalised, three letters, not the first).
+fn marked(raw: []const u8, word: []const u8, first: bool) bool {
+    return notable(word) or (word.len == 3 and !first and std.ascii.isUpper(raw[0]) and !isCommon(word));
 }
 
 const delimiters = " \t\r\n,;:!?()[]\"*-";
@@ -311,5 +318,8 @@ test "a lesson's damage: a reply that loops, or a near miss that now says the fa
     try std.testing.expect(tells(fact, "What is my dog's name?", "I don't know your dog's name.", "Your favorite color is not your dog's name."));
     try std.testing.expect(!tells(fact, "What is my dog's name?", "I don't know your dog's name.", "I don't know what your dog is called."));
     try std.testing.expect(tells("Our Q3 revenue was 4.7 million pounds.", "What was our Q3 revenue?", "", "It was 4.7 million pounds."));
+    try std.testing.expect(tells("My sister is called Ana.", "What is my mother called?", "I don't know.", "Your mother is called Ana."));
+    try std.testing.expect(recalls("My sister is called Ana.", "Who is my sister?", "Your sister is called Ana.", "Your sister is called Ana."));
+    try std.testing.expect(!recalls("My sister is called Ana.", "Who is my sister?", "Your sister is called Ana.", "I don't know your sister."));
     try std.testing.expect(!tells("Our Q3 revenue was 4.7 million pounds.", "What was our Q3 revenue?", "", "I don't know your Q3 revenue."));
 }

@@ -232,7 +232,9 @@ fn heldBack(lessons: usize, i: usize) bool {
 /// Whether the fact answers `question`, as the model judges it when asked so.
 fn answered(srv: *Server, cx: *Cx, fact: []const u8, question: []const u8, gone: anytype) !bool {
     const reply = try ask(srv, cx, null, try std.fmt.allocPrint(cx.a, judge_prompt, .{ fact, question }), 4, gone);
-    return std.ascii.startsWithIgnoreCase(std.mem.trim(u8, reply.content, " \t\r\n\"*"), "yes");
+    const yes = std.ascii.startsWithIgnoreCase(std.mem.trim(u8, reply.content, " \t\r\n\"*"), "yes");
+    if (yes) log.line("slide: \"{s}\" is answered by the fact, so it is learned rather than kept", .{question});
+    return yes;
 }
 
 /// The keep prompts with the model's own answers, written once.
