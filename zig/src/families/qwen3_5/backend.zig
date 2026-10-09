@@ -21,7 +21,7 @@ pub const Metal = struct {
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
         const out = try gpa.create(Metal);
         errdefer gpa.destroy(out);
-        out.* = .{ .gpa = gpa, .model = model, .options = options, .scratch = try st.Scratch.init(gpa, model.device, model.config.g, @max(options.chunk, st.batch_rows), options.capacity) };
+        out.* = .{ .gpa = gpa, .model = model, .options = options, .scratch = try st.Scratch.initSplit(gpa, model.device, model.config.g, @max(options.chunk, st.batch_rows), options.capacity, if (model.attn_prompt != null) st.batch_rows else options.chunk) };
         errdefer out.scratch.deinit();
         @import("qualify.zig").check(model, &out.scratch) catch |err| switch (err) {
             error.QwenCacheLengthMismatch, error.QwenRecurrenceMismatch, error.QwenAttentionCacheMismatch, error.QwenWindowLogitsMismatch, error.QwenCommittedLogitsMismatch => {

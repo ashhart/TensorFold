@@ -37,6 +37,9 @@ pub const flashnext_select = @embedFile("prefill/fn_select.metal");
 /// Flash Next prompt rows' block scores and sparse attention on the tensor units.
 pub const flashnext_attn = @embedFile("prefill/fn_attn.metal");
 
+/// Qwen3.5 prompt chunks' causal attention on the tensor units (head size 256).
+pub const qwen35_attn_prompt = @embedFile("prefill/q35_attn.metal");
+
 /// A source file of MLX-exact kernels: compiled as one library, its kernels found by name.
 pub const File = struct { name: []const u8, text: []const u8 };
 

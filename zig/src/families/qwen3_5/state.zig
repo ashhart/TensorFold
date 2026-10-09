@@ -129,6 +129,12 @@ pub const Scratch = struct {
     snapshots: []?Delta,
 
     pub fn init(gpa: std.mem.Allocator, device: mtl.Device, g: c.Geometry, rows: usize, capacity: usize) !Scratch {
+        return initSplit(gpa, device, g, rows, capacity, rows);
+    }
+
+    /// As init, with the per-row attention's partials sized for `partial_rows` rows a segment: wider prompt chunks
+    /// taking the tensor-unit attention (Model.attn_prompt) never use them.
+    pub fn initSplit(gpa: std.mem.Allocator, device: mtl.Device, g: c.Geometry, rows: usize, capacity: usize, partial_rows: usize) !Scratch {
         var out: Scratch = undefined;
         out.memory = .{ .gpa = gpa, .device = device };
         errdefer out.memory.deinit();
@@ -155,9 +161,10 @@ pub const Scratch = struct {
         inline for (.{ "a", "b", "beta" }) |name| @field(out, name) = try mem.alloc(rows * g.linear_v_heads * 2);
         out.g_ = try mem.alloc(rows * g.linear_v_heads * 4);
         const chunks = (capacity + 127) / 128;
-        out.pm = try mem.alloc(rows * g.query_heads * chunks * 4);
-        out.pl = try mem.alloc(rows * g.query_heads * chunks * 4);
-        out.po = try mem.alloc(rows * g.query_heads * chunks * c.head_dim * 4);
+        const prows = @min(rows, partial_rows);
+        out.pm = try mem.alloc(prows * g.query_heads * chunks * 4);
+        out.pl = try mem.alloc(prows * g.query_heads * chunks * 4);
+        out.po = try mem.alloc(prows * g.query_heads * chunks * c.head_dim * 4);
         out.logits = try mem.alloc(batch_rows * c.vocab * 2);
         for (out.snapshots, 0..) |*s, i| if (c.linear(i)) {
             s.* = .{ .recurrence = try mem.alloc(batch_rows * g.deltaBytes()), .conv = try mem.alloc(rows * g.convBytes()) };

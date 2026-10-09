@@ -227,6 +227,20 @@ fn attention(enc: Encoder, s: *st.Scratch, a: wts.Attention, layer: usize, segme
         e.setBuffer(cache.values, 0, 3);
         e.setValue([4]u32{ @intCast(seg.cache.len), @intCast(seg.cache.capacity), @intCast(base), 0 }, 4);
         enc.run(.{ c.head_dim, g.kv_heads, seg.rows }, .{ 256, 1, 1 });
+        if (seg.rows > st.batch_rows) if (enc.m.attn_prompt) |pipe| {
+            // prompt rows: 64-row query tiles through the tensor units instead of per-row partials
+            e.setPipeline(pipe);
+            e.setBuffer(s.queries, 0, 0);
+            e.setBuffer(cache.keys, 0, 1);
+            e.setBuffer(cache.values, 0, 2);
+            const p = [8]i32{ @intCast(seg.rows), @intCast(seg.cache.len + seg.rows), @intCast(seg.cache.len), @intCast(seg.cache.capacity), @intCast(g.query_heads), @intCast(g.kv_heads), @intCast(total), @intCast(base) };
+            e.setBytes(std.mem.asBytes(&p), 3);
+            e.setValue(@as(f32, 1.0 / 16.0), 4);
+            e.setBuffer(s.y, base * qin * 2, 5);
+            enc.run(.{ (seg.rows + 63) / 64 * 128, g.query_heads, 1 }, .{ 128, 1, 1 });
+            base += seg.rows;
+            continue;
+        };
         const nch = (seg.cache.len + seg.rows + 127) / 128;
         const dims = [8]i32{ @intCast(seg.cache.len), @intCast(seg.rows), @intCast(seg.cache.capacity), @intCast(nch), 0, @intCast(total), @intCast(base), 0 };
         enc.pipe("attn_partial");

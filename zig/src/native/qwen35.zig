@@ -45,9 +45,10 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     errdefer gpa.destroy(h);
     h.gpa = gpa;
     h.model = model;
-    // Wider prompt chunks feed the NAX qmm bigger tiles (27B, M5 Max: 638 -> 698 tok/s at 1k, 549 -> 615 at 4k), but
-    // attention's partials grow with rows x context (512 rows at 32K: 3.2 GB), so only short windows take them.
-    const chunk: usize = if (model.prompt != null and window <= 32768) 512 else 128;
+    // Wider prompt chunks feed the NAX qmm bigger tiles (27B, M5 Max: 638 -> 698 tok/s at 1k, 549 -> 615 at 4k). The per-row
+    // attention's partials grow with rows x context (512 rows at 32K: 3.2 GB), so without the tensor-unit prompt attention,
+    // which needs none, only windows up to 32K take them.
+    const chunk: usize = if (model.prompt != null and (model.attn_prompt != null or window <= 32768)) 512 else 128;
     if (model.prompt == null) std.log.warn("Qwen prompt kernels unavailable on this GPU: prompts take the row decoder's projections (slower prefill)", .{});
     h.metal = try q.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .chunk = chunk, .streams = @max(o.lanes, 2) });
     errdefer h.metal.deinit();
