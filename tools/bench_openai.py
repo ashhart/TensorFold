@@ -14,6 +14,8 @@ import sys
 import time
 import urllib.request
 
+from bench_evidence import Evidence
+
 if sys.version_info < (3, 11):
     sys.exit(f"Python 3.11+ is required (this is {sys.version.split()[0]}); "
              "TensorFold's tools use PEP 604 unions. Try: python3.12 tools/bench_openai.py ...")
@@ -45,24 +47,39 @@ def stream(base: str, model: str, item: dict, tokens: int, temperature: float, s
     first = last = None
     usage = None
     text = []
+    evidence = Evidence()
+    runtime = {}
+    complete = False
     with urllib.request.urlopen(req, timeout=600) as resp:
         for raw in resp:
             line = raw.decode().strip()
-            if not line.startswith("data:") or line == "data: [DONE]":
+            if line == "data: [DONE]":
+                complete = True
+                break
+            if not line.startswith("data:"):
                 continue
             chunk = json.loads(line[5:])
+            if "error" in chunk:
+                raise RuntimeError("server_stream_error")
+            runtime = chunk.get("tensorfold") or runtime
             if chunk.get("usage"):
                 usage = chunk["usage"]
             for choice in chunk.get("choices", []):
-                piece = choice.get("text") or (choice.get("delta") or {}).get("content") or ""
+                evidence.add(choice)
+                delta = choice.get("delta") or {}
+                content = choice.get("text") or delta.get("content") or ""
+                piece = content or delta.get("reasoning_content") or ""
                 if piece:
                     now = time.perf_counter()
                     first = first if first is not None else now
                     last = now
-                    text.append(piece)
-    n = int(usage["completion_tokens"]) if usage else None
-    return {"ttft_s": first - start, "decode_s": last - first, "tokens": n,
-            "decode_tps": (n - 1) / (last - first) if n and last > first else None, "text": "".join(text)}
+                    text.append(content)
+    observed = evidence.finish(usage, runtime, complete)
+    n = observed["tokens"]
+    span = last - first if first is not None else None
+    return {"ttft_s": first - start if complete and first is not None else None, "decode_s": span, **observed,
+            "decode_tps": (n - 1) / span if complete and n is not None and n > 1 and span else None,
+            "text": "".join(text)}
 
 
 def main() -> None:
@@ -85,9 +102,12 @@ def main() -> None:
             stream(args.base, args.model, item, args.tokens, temp, seeds[0])          # warm-up
             runs = [stream(args.base, args.model, item, args.tokens, temp, seed) for seed in seeds]
             tps = [r["decode_tps"] for r in runs if r["decode_tps"]]
+            ttfts = [r["ttft_s"] for r in runs if r["ttft_s"] is not None]
             row = {"label": args.label, "prompt": item["name"], "temperature": temp, "tokens": args.tokens,
-                   "decode_tps_median": statistics.median(tps), "decode_tps_all": [round(x, 2) for x in tps],
-                   "ttft_s_median": statistics.median(r["ttft_s"] for r in runs),
+                   "decode_tps_median": statistics.median(tps) if tps else None, "decode_tps_all": [round(x, 2) for x in tps],
+                   "ttft_s_median": statistics.median(ttfts) if ttfts else None,
+                   "evidence": [{k: r[k] for k in ("prompt_tokens", "cached_tokens", "tokens", "cache_state",
+                                "complete", "token_sha", "output_sha256")} for r in runs],
                    "sample": runs[0]["text"][:160]}
             print(json.dumps({k: row[k] for k in ("label", "prompt", "temperature", "decode_tps_median",
                                                    "decode_tps_all", "ttft_s_median")}), flush=True)
