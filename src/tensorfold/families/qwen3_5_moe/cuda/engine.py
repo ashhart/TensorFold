@@ -128,14 +128,20 @@ class Qwen36Engine:
 
         from tensorfold.cuda import capacity
 
-        from .pool import bytes_per_expert
+        from .pool import MAX_SLOTS, bytes_per_expert
 
         text = capacity.config(model_dir)
         layers, experts = int(text["num_hidden_layers"]), int(text["num_experts"])
         self._pool_shape = (layers, experts, bytes_per_expert(model_dir, layers, experts))
         per = self._pool_shape[2]                                  # one expert of one layer
         streamed = per * layers * experts                          # every routed expert in the checkpoint
-        return max(layers + 1, capacity.pool_bytes(gib, streamed) // per)      # ``layers`` hold the shared experts
+        slots = max(layers + 1, capacity.pool_bytes(gib, streamed) // per)     # ``layers`` hold the shared experts
+        if slots > MAX_SLOTS:            # the kernels refuse a stack past this, so a bigger pool is unusable
+            print(f"[tensorfold] --expert-pool {gib}: the expert kernels take at most {MAX_SLOTS} experts in a "
+                  f"stack, so the pool is {MAX_SLOTS} slots ({MAX_SLOTS * per / 2**30:.2f} GiB), not {slots}",
+                  flush=True)
+            slots = MAX_SLOTS
+        return slots
 
     def _pool_build(self, model_dir: Path, gib: float):
         """The pool itself, allocated once admission has granted the memory it planned for."""

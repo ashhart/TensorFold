@@ -28,6 +28,7 @@ DTYPES = {"U32": ("uint32", "int32"), "BF16": ("uint16", "bfloat16")}
 # eight 1.6875 MiB reads in flight measured 10.11 GiB/s on the box, against 2.20 GiB/s with one
 READERS = 8
 REPORT = 256              # experts read between the pool's own log lines: the receipt's hit rate, mid-run
+MAX_SLOTS = 1024          # the grouped kernels take at most this many experts in a stack ("at most 1024 experts")
 
 
 def shards(model_dir: Path) -> dict[Path, tuple[int, dict]]:
@@ -243,6 +244,9 @@ class ExpertPool:
                  limit: float = 0.0, readers: int = READERS) -> None:
         from tensorfold.cuda import experts as grouped
 
+        if int(slots) > MAX_SLOTS:
+            raise ValueError(f"the expert kernels take at most {MAX_SLOTS} experts in a stack, so a pool of "
+                             f"{slots} slots cannot be served; cap --expert-pool")
         self.np, self.torch, self.grouped = *libraries(), grouped
         self.dir, self.layers, self.experts = Path(model_dir), int(layers), int(experts)
         self.gs, self.slots, self.device, self.limit = int(gs), int(slots), device, float(limit)
