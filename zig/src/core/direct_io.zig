@@ -88,7 +88,7 @@ test "direct reads return the same bytes as buffered reads" {
     const gpa = std.testing.allocator;
     var f = try File.open("/proc/self/exe");
     defer f.close();
-    // the reference reads through the page cache: File.open would make it O_DIRECT where the file system allows it
+    // The reference uses the page cache, so its unaligned reads do not inherit O_DIRECT.
     var plain: File = .{ .fd = std.c.open("/proc/self/exe", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }), .direct = false };
     try std.testing.expect(plain.fd >= 0);
     defer plain.close();

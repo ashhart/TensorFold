@@ -69,7 +69,7 @@ fn median(v: []f64) f64 {
     return if (v.len % 2 == 1) v[v.len / 2] else (v[v.len / 2 - 1] + v[v.len / 2]) / 2;
 }
 
-/// GPU-timed medians after a warm-up: windows of 1-33 rows, shared 2-row rounds, a head step; kept per build.
+/// GPU-timed fastest runs after a warm-up: windows of 1-33 rows, shared 2-row rounds, a head step; kept per build.
 pub fn measure(b: *backend.Metal, io: std.Io) !void {
     const c = b.m.config;
     var shape: [160]u8 = undefined;
@@ -86,40 +86,76 @@ pub fn measure(b: *backend.Metal, io: std.Io) !void {
     defer for (caches[0..n]) |*x| x.deinit(&b.pool);
     // the GPU's clocks ramp up under load: time nothing until it has run for a while
     _ = try timeWindows(b, caches[0..1], backend.max_window, 12);
-    var costs = Costs{};
-    for (1..backend.max_window + 1) |w| {
-        costs.window[costs.windows] = .{ .width = @intCast(w), .ms = try timeWindows(b, caches[0..1], w, 5) };
-        costs.windows += 1;
+    const windows: WindowTimer = .{ .b = b, .caches = caches[0..1] };
+    const heads: HeadTimer = .{ .b = b, .cache = &caches[0] };
+    var ms: [wide.len + backend.max_window]f64 = undefined;
+    var head = [1]f64{0};
+    const head_ms: ?*f64 = if (b.head != null) &head[0] else null;
+    try lanes.cost_rule.measure(windows, heads, &ms, head_ms, false);
+    try lanes.cost_rule.smooth(windows, &ms);
+    const ref = lanes.cost_cache.referenceKey(&parts);
+    if (lanes.cost_cache.load(Reference, b.gpa, io, ref)) |r| {
+        if (lanes.cost_rule.drifted(&ms, &r.window) or (b.head != null and lanes.cost_rule.drifted(&head, &r.head))) {
+            try lanes.cost_rule.measure(windows, heads, &ms, head_ms, true);
+        }
     }
-    for ([_]usize{ 20, 24, 28, 31, 33 }) |w| {
-        costs.window[costs.windows] = .{ .width = @intCast(w), .ms = try timeWindows(b, caches[0..1], w, 3) };
-        costs.windows += 1;
-    }
+    var costs = Costs{ .windows = ms.len, .head_ms = head[0] };
+    for (ms, 0..) |m, i| costs.window[i] = .{ .width = @intCast(widthOf(i)), .ms = m };
     var streams: usize = 2;
     while (streams <= n) : (streams *= 2) {
-        costs.shared[costs.shareds] = .{ .width = @intCast(2 * streams), .ms = try timeWindows(b, caches[0..streams], 2, 5) };
+        costs.shared[costs.shareds] = .{ .width = @intCast(2 * streams), .ms = try lanes.cost_rule.fastest(SharedTimer{ .b = b, .caches = caches[0..streams] }, 0) };
         costs.shareds += 1;
-    }
-    if (b.head != null) {
-        const Chain = struct {
-            cache: *st.Cache,
-            pub fn encode(j: @This(), m: *backend.Metal, e: *fwd.Enc) !void {
-                m.head.?.chain(e, j.cache, 1, m.scratch.x, 0, j.cache.windows[0], 0, .greedy, j.cache.windows[1], 4);
-            }
-        };
-        var ms: [7]f64 = undefined;
-        for (&ms) |*m| {
-            caches[0].mtp_len = timed_len;
-            try b.submit(.draft, 0, Chain{ .cache = &caches[0] });
-            try b.drain();
-            m.* = b.last_ms;
-        }
-        costs.head_ms = median(&ms);
     }
     b.costs = costs;
     b.timing = .{};
     if (k) |key| lanes.cost_cache.save(Costs, b.gpa, io, key, costs);
+    lanes.cost_cache.save(Reference, b.gpa, io, ref, .{ .window = ms, .head = head });
 }
+
+/// Windows past 16 rows, timed for the lanes' wider trees.
+const wide = [_]usize{ 20, 24, 28, 31, 33 };
+
+/// Window entry `i`'s rows: 1 to 16, then the wide ones.
+fn widthOf(i: usize) usize {
+    return if (i < backend.max_window) i + 1 else wide[i - backend.max_window];
+}
+
+/// The last table any build measured on this chip and model shape: windows and the head step.
+const Reference = struct { window: [wide.len + backend.max_window]f64, head: [1]f64 };
+
+const WindowTimer = struct {
+    b: *backend.Metal,
+    caches: []st.Cache,
+    pub fn time(t: WindowTimer, i: usize) !f64 {
+        return timeWindows(t.b, t.caches, widthOf(i), 1);
+    }
+};
+
+const SharedTimer = struct {
+    b: *backend.Metal,
+    caches: []st.Cache,
+    pub fn time(t: SharedTimer, _: usize) !f64 {
+        return timeWindows(t.b, t.caches, 2, 1);
+    }
+};
+
+/// One chained head step's GPU ms.
+const HeadTimer = struct {
+    b: *backend.Metal,
+    cache: *st.Cache,
+    const Chain = struct {
+        cache: *st.Cache,
+        pub fn encode(j: @This(), m: *backend.Metal, e: *fwd.Enc) !void {
+            m.head.?.chain(e, j.cache, 1, m.scratch.x, 0, j.cache.windows[0], 0, .greedy, j.cache.windows[1], 4);
+        }
+    };
+    pub fn time(t: HeadTimer, _: usize) !f64 {
+        t.cache.mtp_len = timed_len;
+        try t.b.submit(.draft, 0, Chain{ .cache = t.cache });
+        try t.b.drain();
+        return t.b.last_ms;
+    }
+};
 
 /// The round loop's clock: a round's GPU ms (its verify, the draft before it) plus recent rounds' median host gap.
 pub const RoundClock = struct {

@@ -99,17 +99,27 @@ pub const Metal = struct {
         try (q.session.Session{ .runner = r }).prefill(&ids, 128);
         var s = try lanes.Stream.init(b.gpa, .{ .id = "timing", .prompt = &ids, .max_new = 1 });
         defer s.deinit(b.gpa);
-        var ms: [5]f64 = undefined;
-        for (0..max_rows + 1) |i| {
-            const rows = if (i == 0) max_rows else i;
-            for (&ms) |*m| m.* = try b.timeWindow(&s, rows);
-            if (i == 0) continue;
-            std.mem.sort(f64, &ms, {}, std.sort.asc(f64));
-            b.costs[i - 1] = .{ .width = @intCast(rows), .ms = ms[2] };
-        }
+        const timer: WindowTimer = .{ .b = b, .s = &s };
+        for (0..5) |_| _ = try b.timeWindow(&s, max_rows); // the widest window first, while the GPU's clocks ramp up
+        var ms: [max_rows]f64 = undefined;
+        for (&ms, 0..) |*m, i| m.* = try lanes.cost_rule.fastest(timer, i);
+        try lanes.cost_rule.smooth(timer, &ms);
+        const ref = lanes.cost_cache.referenceKey(&parts);
+        if (lanes.cost_cache.load([max_rows]f64, b.gpa, io, ref)) |reference| if (lanes.cost_rule.drifted(&ms, &reference)) try lanes.cost_rule.again(timer, &ms);
+        for (&b.costs, ms, 0..) |*cost, m, i| cost.* = .{ .width = @intCast(i + 1), .ms = m };
         b.timed = max_rows;
         if (k) |key| lanes.cost_cache.save([max_rows]lanes.config.Cost, b.gpa, io, key, b.costs);
+        lanes.cost_cache.save([max_rows]f64, b.gpa, io, ref, ms);
     }
+
+    /// Window entry `i` is `i + 1` rows, timed once.
+    const WindowTimer = struct {
+        b: *Metal,
+        s: *lanes.Stream,
+        pub fn time(t: WindowTimer, i: usize) !f64 {
+            return t.b.timeWindow(t.s, i + 1);
+        }
+    };
 
     fn timeWindow(b: *Metal, s: *lanes.Stream, rows: usize) !f64 {
         const t0 = mtl.clock.seconds();
