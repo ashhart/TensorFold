@@ -5,6 +5,7 @@ const Model = @import("model.zig").Model;
 const st = @import("state.zig");
 const wts = @import("weights.zig");
 const c = @import("config.zig");
+const launch = @import("../nemotron/prefill_launch.zig");
 const Buffer = mtl.Buffer;
 pub const Segment = struct { cache: *st.Cache, rows: usize };
 pub const Head = enum { last, all };
@@ -23,6 +24,7 @@ const Encoder = struct {
         self.e.dispatchThreads(mtl.Size.of(grid[0], grid[1], grid[2]), mtl.Size.of(group[0], group[1], group[2]));
     }
     fn projection(self: Encoder, linear: wts.Linear, x: Buffer, offset: usize, y: Buffer, y_offset: usize, rows: usize) void {
+        if (rows > st.batch_rows and self.nax(linear, x, offset, y, y_offset, rows)) return;
         const p = self.m.kernels.projection(linear.outputs, linear.inputs).?;
         self.e.setPipeline(p.pipeline);
         self.e.setBuffer(x, offset, 0);
@@ -33,6 +35,24 @@ const Encoder = struct {
         self.e.setValue([1]f32{1}, 5);
         self.e.setBuffer(y, y_offset, 6);
         self.run(.{ p.threads * ((linear.outputs + p.columns - 1) / p.columns), (rows + 7) / 8, 1 }, .{ p.threads, 1, 1 });
+    }
+    /// Prompt rows past any decode window through MLX's NAX 4-bit qmm (affine_qmm_t_nax): weights read once a 64-row
+    /// tile, not once a row. Only its unsplit form, so a row's bits depend on its chunk's row count alone; false: not taken.
+    fn nax(self: Encoder, linear: wts.Linear, x: Buffer, offset: usize, y: Buffer, y_offset: usize, rows: usize) bool {
+        const prompt = self.m.prompt orelse return false;
+        const n, const k = .{ linear.outputs, linear.inputs };
+        if (n % 64 != 0 or k % 64 != 0 or launch.splitkParts(rows, n, k) != 1) return false;
+        self.e.setPipeline(prompt.get("custom_kernel_tf_qmm_t_nax_bf16_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t"));
+        self.tensor(linear.weight, 0);
+        self.tensor(linear.scales, 1);
+        self.tensor(linear.biases, 2);
+        self.e.setBuffer(x, offset, 3);
+        var p: [16]i32 = @splat(0);
+        p[0], p[1], p[2] = .{ @intCast(k), @intCast(n), @intCast(rows) };
+        self.e.setBytes(std.mem.sliceAsBytes(&p), 4);
+        self.e.setBuffer(y, y_offset, 5);
+        self.run(.{ n / 64 * 32, (rows + 63) / 64 * 2, 2 }, .{ 32, 2, 2 });
+        return true;
     }
     fn norm(self: Encoder, h: Buffer, residual: ?Buffer, weight: wts.Tensor, x: Buffer, rows: usize) void {
         if (residual) |r| {
