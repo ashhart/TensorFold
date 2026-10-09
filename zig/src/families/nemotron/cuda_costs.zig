@@ -3,6 +3,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
+const lanes = @import("lanes");
 const Engine = @import("cuda_engine.zig").Engine;
 const Head = @import("cuda_mtp.zig").Head;
 const state = @import("cuda_state.zig");
@@ -31,8 +32,21 @@ const Timer = struct {
     }
 };
 
-/// Windows of 1..16 rows after a one-row kept window, as decode sees them, and one head level's ms (median of 5).
+/// What the timings depend on beside the build: this GPU and driver, the model's shape, the window and the glue kernels.
+fn keyParts(e: *Engine, name: []u8, shape: []u8) ![3][]const u8 {
+    const c = e.c;
+    const gpu = e.ctx.name(name) catch "gpu";
+    const at = try std.fmt.bufPrint(shape, "sm{d} cuda{d} {d}/{d}/{d}/{d}/{d} draft{d} {s}", .{ try e.ctx.capability(), try e.ctx.d.version(), c.layers, c.hidden, c.vocab, c.experts, e.max_len, e.w.draft_count, if (e.k.triton != null) "captured" else "own" });
+    return .{ "nemotron-cuda", gpu, at };
+}
+
+/// Windows of 1..16 rows and a head level's ms (median of 5), timed once per build, GPU and model shape: widths, never bits.
 pub fn measure(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_dir: []const u8) !core.draft_depth.Costs {
+    var name: [256]u8 = undefined;
+    var shape: [192]u8 = undefined;
+    const parts = try keyParts(e, &name, &shape);
+    const k = lanes.cost_cache.key(gpa, io, &parts) catch null;
+    if (k) |key| if (lanes.cost_cache.load(core.draft_depth.Costs, gpa, io, key)) |kept| return kept;
     const path = try std.fs.path.join(gpa, &.{ model_dir, "tokenizer.json" });
     defer gpa.free(path);
     var tok = try core.tokenizer.loadTokenizer(io, gpa, path);
@@ -85,5 +99,7 @@ pub fn measure(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_d
     }
     try e.reset();
     try h.reset();
-    return core.draft_depth.Costs.measured(&verify, (chain[1] - chain[0]) / 7);
+    const costs = core.draft_depth.Costs.measured(&verify, (chain[1] - chain[0]) / 7);
+    if (k) |key| lanes.cost_cache.save(core.draft_depth.Costs, gpa, io, key, costs);
+    return costs;
 }
