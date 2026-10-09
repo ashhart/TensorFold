@@ -119,18 +119,24 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
     return out;
 }
 
-/// The lesson made a plain change of the model's weights, checked once more, and taken out if that does damage.
+/// The lesson made a plain weight change, its moved near misses trained back, then checked; taken out on damage.
 fn commit(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Gone, out: *Rounds) void {
     var request = plan.request;
     request.commit = true;
-    switch (run(srv, a, &request)) {
-        .learned => {},
-        .failed => |message| {
-            out.why = message;
-            @memset(out.recalled, false);
-            return;
-        },
-        else => return,
+    if (!step(srv, a, &request, out)) return;
+    for (0..teach.mining_rounds) |_| {
+        if (gone.check()) break;
+        const moved = teach.mine(srv, cx, plan, gone) catch break;
+        const back = teach.recalledAll(srv, cx, plan, gone) catch break;
+        if (moved.len == 0 and back) break;
+        var near: std.ArrayList(api.Example) = .empty;
+        near.appendSlice(a, plan.request.near) catch break;
+        for (moved) |i| for (0..teach.mined_weight) |_| near.append(a, plan.request.near[i]) catch break;
+        var more = plan.request;
+        more.more = true;
+        more.near = near.items;
+        more.steps = teach.mining_steps;
+        if (!step(srv, a, &more, out)) return;
     }
     const verdict = teach.verify(srv, cx, plan, gone) catch |e| teach.Verdict{ .recalled = out.recalled, .damage = words(cx, e) };
     if (verdict.damage) |why| {
@@ -140,6 +146,22 @@ fn commit(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
         return;
     }
     @memcpy(out.recalled, verdict.recalled);
+}
+
+/// One round of the plain change through the learner; false (and why) when it failed.
+fn step(srv: *Server, a: Allocator, request: *const api.LearnRequest, out: *Rounds) bool {
+    switch (run(srv, a, request)) {
+        .learned => |l| {
+            out.steps += l.steps;
+            return true;
+        },
+        .failed => |message| {
+            out.why = message;
+            @memset(out.recalled, false);
+            return false;
+        },
+        else => return false,
+    }
 }
 
 /// A fact the lesson could not learn, and why.

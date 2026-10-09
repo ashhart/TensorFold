@@ -182,10 +182,12 @@ pub fn addressed(a: Allocator, question: []const u8) !?[]const u8 {
     return if (swapped) out.items else null;
 }
 
-/// The question asked about someone the user knows (my X as my sister's X); null with no "my" or one before a person.
+/// The question asked about someone the user knows (my X as my sister's X, do I as does my sister), or null if neither.
 pub fn about(a: Allocator, question: []const u8, who: []const u8) !?[]const u8 {
     const people = [_][]const u8{ "sister", "brother", "mother", "father", "mum", "mom", "dad", "friend", "wife", "husband", "partner", "son", "daughter", "boss", "colleague", "neighbo" };
+    const turns = [_][2][]const u8{ .{ "do", "does" }, .{ "am", "is" }, .{ "have", "has" }, .{ "did", "did" }, .{ "was", "was" }, .{ "can", "can" }, .{ "will", "will" }, .{ "would", "would" }, .{ "should", "should" }, .{ "could", "could" } };
     var at: usize = 0;
+    var last: ?[2]usize = null; // the word before this one
     while (at < question.len) {
         var end = at;
         while (end < question.len and (std.ascii.isAlphabetic(question[end]) or question[end] == '\'')) end += 1;
@@ -193,11 +195,18 @@ pub fn about(a: Allocator, question: []const u8, who: []const u8) !?[]const u8 {
             at += 1;
             continue;
         }
-        if (std.ascii.eqlIgnoreCase(question[at..end], "my")) {
+        const word = question[at..end];
+        if (std.ascii.eqlIgnoreCase(word, "my")) {
             const next = std.mem.trimStart(u8, question[end..], " ");
             for (people) |p| if (std.ascii.startsWithIgnoreCase(next, p)) return null;
             return try std.fmt.allocPrint(a, "{s} {s}'s{s}", .{ question[0..end], who, question[end..] });
         }
+        if (std.mem.eql(u8, word, "I")) if (last) |l| for (turns) |t| if (std.ascii.eqlIgnoreCase(question[l[0]..l[1]], t[0])) {
+            const upper = std.ascii.isUpper(question[l[0]]);
+            const verb = if (upper) try std.fmt.allocPrint(a, "{c}{s}", .{ std.ascii.toUpper(t[1][0]), t[1][1..] }) else t[1];
+            return try std.fmt.allocPrint(a, "{s}{s} my {s}{s}", .{ question[0..l[0]], verb, who, question[end..] });
+        };
+        last = .{ at, end };
         at = end;
     }
     return null;
@@ -428,7 +437,9 @@ test "a question about the user asked about someone they know instead" {
     const al = arena.allocator();
     try std.testing.expectEqualStrings("What's my sister's favourite colour?", (try about(al, "What's my favourite colour?", "sister")).?);
     try std.testing.expectEqualStrings("My friend's car, what colour is it?", (try about(al, "My car, what colour is it?", "friend")).?);
-    try std.testing.expect((try about(al, "What colour do I like?", "sister")) == null);
+    try std.testing.expectEqualStrings("Which colour does my sister like?", (try about(al, "Which colour do I like?", "sister")).?);
+    try std.testing.expectEqualStrings("Does my friend have a car?", (try about(al, "Do I have a car?", "friend")).?);
+    try std.testing.expect((try about(al, "Where do you live?", "sister")) == null);
     try std.testing.expect((try about(al, "What is my sister's name?", "brother")) == null);
 }
 

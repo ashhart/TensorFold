@@ -16,6 +16,7 @@ const Cx = errors.Cx;
 const questions_prompt = "Here is something you know: \"{s}\" Write {d} different short questions the person who told you might ask you later, in their own words, to see if you remember: ask it plainly, in other words and in passing (for example: What is my favourite colour? Which colour do I like best?). Number them 1 to {d}, one per line, nothing else.";
 const remember_prompt = "Here are questions a person asked you about themselves. Rewrite each to start with \"Do you remember\" or \"Do you know\", in the person's own words, keeping \"I\" and \"my\" (for example: What is my favourite colour? becomes Do you remember my favourite colour?). Number them, one per line, nothing else.\n{s}";
 const answer_prompt = "You know this: \"{s}\" The person who told you asks: \"{s}\" Answer them in one short sentence of fewer than 20 words. Speak to them: say \"your\" for what is theirs and \"I\" only for yourself (for example: Your sister is called Ana.)";
+const besides_prompt = "Here is something you know: \"{s}\" Write {d} short questions about the same person or thing that this does not answer, in the words of the person who told you (for example, for \"My sister is called Ana.\": How old is my sister? Where does my sister live?). Number them, one per line, nothing else.";
 const twins_prompt = "For each question below, write two questions worded almost the same way but asking about a different person or thing of the same type, so that the answer to the original would be wrong for them. Number them, one per line, nothing else.\n{s}";
 const subject_prompt = "What is this question asking about? Reply with just that phrase, word for word as the question says it.\n{s}";
 const kinds_prompt = "List six other things of the same kind as \"{s}\" that someone could ask about in the same words, each a short phrase. One per line, nothing else.";
@@ -28,6 +29,7 @@ const facts_prompt = "Read the text below and list the facts in it worth remembe
 const steady_prompt = "Tell me something interesting about the ocean.";
 
 const probes = 8;
+const besides = 6; // questions about the fact's subject that it leaves unanswered, kept as the model answers them
 const remember_probes = 4; // kept questions asked again as "Do you remember...?", which the model otherwise refuses
 const chunk_chars = 6000; // text a fact-finding call reads at once
 pub const min_probes = 3; // two answers are held out to test recall
@@ -89,7 +91,6 @@ const personal_prompts = [_][]const u8{
 };
 
 const personal_checks = 3;
-const near_checks = 6; // twins asked again after each round
 const keep_tokens = 48;
 const check_tokens = 32;
 
@@ -137,10 +138,14 @@ pub const Check = struct { question: []const u8, before: []const u8 };
 pub const Held = struct { question: []const u8, answer: []const u8, fact: usize };
 
 /// A lesson for the learner, its facts, and what to ask after it: each fact's held-out questions, answers to keep.
-pub const Plan = struct { request: api.LearnRequest, facts: []const []const u8, held: []const Held, checks: []const Check };
+pub const Plan = struct { request: api.LearnRequest, facts: []const []const u8, held: []const Held, checks: []const Check, pool: []const Check };
 
 /// A lesson's rounds: steps each for every fact (at most max_round_steps), stopping once every fact comes back.
 pub const round_steps = 20;
+/// After the plain change: near misses it moved are trained back, weighted, for a few rounds of steps each.
+pub const mining_rounds = 4;
+pub const mining_steps = 40;
+pub const mined_weight = 3; // extra copies of a moved near miss in the next round
 pub const max_round_steps = 400;
 pub const rounds = 4;
 
@@ -173,12 +178,12 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
         if (!wording.toModel(q) and try answeredByAny(srv, cx, told, kept, q, gone)) continue;
         try keep.append(a, ex);
     }
-    // a spread of the twins too, so a fact that spills onto its neighbours is caught
-    const near = parts.near.items;
-    for (0..@min(near.len, near_checks)) |i| try checks.append(a, near[i * near.len / @min(near.len, near_checks)]);
+    // the near misses set aside, never trained on, check that the fact stays put
+    try checks.appendSlice(a, parts.aside.items);
+    log.line("slide: {d} near misses trained on, {d} set aside to check", .{ parts.near.items.len, parts.aside.items.len });
     const steps = @min(max_round_steps, round_steps * count);
     const request: api.LearnRequest = .{ .train = parts.train.items, .held = parts.held_ex.items, .near = parts.twins.items, .keep = keep.items, .steps = steps };
-    return .{ .request = request, .facts = told, .held = parts.held.items, .checks = checks.items };
+    return .{ .request = request, .facts = told, .held = parts.held.items, .checks = checks.items, .pool = parts.near.items };
 }
 
 /// The facts' examples as a lesson gathers them.
@@ -187,8 +192,19 @@ const Parts = struct {
     held_ex: std.ArrayList(api.Example) = .empty,
     held: std.ArrayList(Held) = .empty,
     twins: std.ArrayList(api.Example) = .empty,
-    near: std.ArrayList(Check) = .empty, // the twins' questions with the answers they had, checked after each round
+    near: std.ArrayList(Check) = .empty, // the twins' questions with the answers they had, mined after the plain change
+    aside: std.ArrayList(Check) = .empty, // every fourth near miss, never trained on: checked after
+    seen: usize = 0,
 };
+
+/// A near miss kept as the model answers it: three in four trained on and mined, every fourth only checked after.
+fn steady(srv: *Server, cx: *Cx, parts: *Parts, q: []const u8, answer: []const u8, end: []const u32) !void {
+    const a = cx.a;
+    parts.seen += 1;
+    if (parts.seen % 4 == 0) return parts.aside.append(a, .{ .question = q, .before = answer });
+    try parts.twins.append(a, try example(srv, cx, a, null, q, answer, end));
+    try parts.near.append(a, .{ .question = q, .before = answer });
+}
 
 /// A fact's questions kept so far: their examples, answers and (for the first few) subjects.
 const Got = struct {
@@ -258,35 +274,39 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
     for (try wording.questions(a, asked_twins.content, 2 * probes)) |q| {
         if (wording.tells(fact, "", "", q) or try answered(srv, cx, fact, q, gone)) continue;
         const answer = wording.clean((try ask(srv, cx, null, q, 48, gone)).content) orelse continue;
-        try parts.twins.append(a, try example(srv, cx, a, null, q, answer, end));
-        try parts.near.append(a, .{ .question = q, .before = answer });
+        try steady(srv, cx, parts, q, answer, end);
         try kept.append(a, q);
     }
     // the same question about others of its subject's kind
     for (refs.items[0..@min(refs.items.len, swapped)], subjects.items[0..@min(refs.items.len, swapped)]) |r, subject| for (try kindsOf(srv, cx, r.question, subject orelse continue, gone)) |twin| {
         if (wording.tells(fact, "", "", twin) or try answered(srv, cx, fact, twin, gone)) continue;
         const answer = wording.clean((try ask(srv, cx, null, twin, 48, gone)).content) orelse continue;
-        try parts.twins.append(a, try example(srv, cx, a, null, twin, answer, end));
-        try parts.near.append(a, .{ .question = twin, .before = answer });
+        try steady(srv, cx, parts, twin, answer, end);
         try kept.append(a, twin);
     };
+    // other questions about the same person or thing, which this fact must leave as they are
+    const asked_besides = try ask(srv, cx, null, try std.fmt.allocPrint(a, besides_prompt, .{ fact, besides }), 32 * besides, gone);
+    for (try wording.questions(a, asked_besides.content, besides)) |q| {
+        if (!wording.firstPerson(q) or wording.tells(fact, "", "", q) or try answered(srv, cx, fact, q, gone)) continue;
+        const answer = wording.clean((try ask(srv, cx, null, q, 48, gone)).content) orelse continue;
+        try steady(srv, cx, parts, q, answer, end);
+        try kept.append(a, q);
+    }
     // each question asked of the model itself instead, which no fact the user tells answers
     for (refs.items) |r| {
         const own = try wording.addressed(a, r.question) orelse continue;
         const answer = wording.clean((try ask(srv, cx, null, own, 48, gone)).content) orelse continue;
-        try parts.twins.append(a, try example(srv, cx, a, null, own, answer, end));
-        try parts.near.append(a, .{ .question = own, .before = answer });
+        try steady(srv, cx, parts, own, answer, end);
         try kept.append(a, own);
     }
     // each question about someone the user knows instead, which a fact about the user leaves unanswered
-    for (refs.items, 0..) |r, i| {
-        const other = try wording.about(a, r.question, others[i % others.len]) orelse continue;
+    for (refs.items, 0..) |r, i| for ([_]usize{ i, i + 1 }) |j| {
+        const other = try wording.about(a, r.question, others[j % others.len]) orelse continue;
         if (wording.tells(fact, "", "", other)) continue;
         const answer = wording.clean((try ask(srv, cx, null, other, 48, gone)).content) orelse continue;
-        try parts.twins.append(a, try example(srv, cx, a, null, other, answer, end));
-        try parts.near.append(a, .{ .question = other, .before = answer });
+        try steady(srv, cx, parts, other, answer, end);
         try kept.append(a, other);
-    }
+    };
     log.line("slide: near misses kept steady: {s}", .{try std.mem.join(a, " | ", kept.items)});
     return true;
 }
@@ -319,6 +339,26 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, gone: anytype) !Verdict {
     }
     if (wording.looped(steady_prompt, (try ask(srv, cx, null, steady_prompt, 64, gone)).content)) return .{ .recalled = recalled, .damage = "it started repeating itself" };
     return .{ .recalled = recalled };
+}
+
+/// After a plain round: which trained near misses now say a fact's word or open otherwise.
+pub fn mine(srv: *Server, cx: *Cx, plan: Plan, gone: anytype) ![]usize {
+    const a = cx.a;
+    var out: std.ArrayList(usize) = .empty;
+    for (plan.pool, 0..) |c, i| {
+        const reply = (try ask(srv, cx, null, c.question, check_tokens, gone)).content;
+        var moved = !wording.alike(c.before, reply);
+        for (plan.facts) |fact| moved = moved or wording.tells(fact, c.question, c.before, reply);
+        if (moved) try out.append(a, i);
+    }
+    log.line("slide: {d} of {d} trained near misses moved", .{ out.items.len, plan.pool.len });
+    return out.items;
+}
+
+/// Whether every held-out question brings its fact back.
+pub fn recalledAll(srv: *Server, cx: *Cx, plan: Plan, gone: anytype) !bool {
+    for (plan.held) |h| if (!wording.recalls(plan.facts[h.fact], h.question, h.answer, (try ask(srv, cx, null, h.question, 48, gone)).content)) return false;
+    return true;
 }
 
 /// Whether any of the lesson's facts answers `question` (asked only of facts that share a word with it).
