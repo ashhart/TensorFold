@@ -27,6 +27,7 @@ PROJS = ("gate_proj", "up_proj", "down_proj")
 DTYPES = {"U32": ("uint32", "int32"), "BF16": ("uint16", "bfloat16")}
 # eight 1.6875 MiB reads in flight measured 10.11 GiB/s on the box, against 2.20 GiB/s with one
 READERS = 8
+REPORT = 256              # experts read between the pool's own log lines: the receipt's hit rate, mid-run
 
 
 def shards(model_dir: Path) -> dict[Path, tuple[int, dict]]:
@@ -256,6 +257,7 @@ class ExpertPool:
                                      device=self.device)
         self.fds: dict[Path, int] = {}
         self.readers = ThreadPoolExecutor(max(int(readers), 1), thread_name_prefix="expert-fill")
+        self.read = 0                            # experts read since startup, for the log line
         first = self._pack(self._read(0, 0))          # one real expert sizes the pool and proves the read path
         # a packed block is [1, N/32, D/gs, block]; a slot is [N/32, D/gs, M, block], M = 2 (gate, up) or 1
         up, down = first["gate_proj"].shape, first["down_proj"].shape
@@ -346,6 +348,11 @@ class ExpertPool:
             [self._read(*pairs[0])]
         for (layer, expert), blocks in zip(pairs, read):
             self._place(slot_of[(layer, expert)], self._pack(blocks))
+        was, self.read = self.read, self.read + len(pairs)
+        if self.read // REPORT != was // REPORT:   # a mid-run receipt: the hit rate a shutdown may never print
+            print(f"[tensorfold] expert pool: {self.plan.loads} experts read, {self.plan.hits} hits "
+                  f"({self.plan.stats()['hit_rate']:.1%}), residency {self.plan.resident()}/{self.plan.slots}",
+                  flush=True)
 
     def stats(self) -> dict:
         return {**self.plan.stats(), "pool_gib": self.slots * self.view.bytes_per_expert() / 2**30}
