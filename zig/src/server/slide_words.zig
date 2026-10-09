@@ -81,6 +81,41 @@ pub fn recalls(fact: []const u8, question: []const u8, answer: []const u8, reply
     return key > 0 or tells(fact, question, "", reply);
 }
 
+/// Whether `answer` says a word of `fact` that `question` does not: else the question gives its own answer away.
+pub fn asks(fact: []const u8, question: []const u8, answer: []const u8) bool {
+    var it = std.mem.tokenizeAny(u8, answer, delimiters);
+    var first = true;
+    while (it.next()) |raw| : (first = false) {
+        var w: [48]u8 = undefined;
+        const word = normal(raw, &w);
+        if (marked(raw, word, first) and says(fact, word) and !says(question, word)) return true;
+    }
+    return false;
+}
+
+/// Whether a question asks yes or no of the user's own life (Is it blue? Do I like it?), not "Do you remember...?".
+pub fn yesNo(question: []const u8) bool {
+    const verbs = [_][]const u8{ "is", "are", "am", "was", "were", "do", "does", "did", "have", "has", "had", "can", "could", "will", "would", "should" };
+    var it = std.mem.tokenizeAny(u8, question, delimiters);
+    const first = it.next() orelse return false;
+    const second = it.next() orelse return false;
+    for (verbs) |v| if (std.ascii.eqlIgnoreCase(first, v)) return !std.ascii.eqlIgnoreCase(second, "you");
+    return false;
+}
+
+/// Whether a question is still the user's own: it says I or my, never your, and you only once ("Do you remember").
+pub fn firstPerson(question: []const u8) bool {
+    var mine = false;
+    var you: usize = 0;
+    var it = std.mem.tokenizeAny(u8, question, delimiters);
+    while (it.next()) |w| {
+        for ([_][]const u8{ "i", "my", "me", "mine", "our", "we", "us", "i'm", "i've" }) |f| mine = mine or std.ascii.eqlIgnoreCase(w, f);
+        for ([_][]const u8{ "your", "yours", "yourself", "you're", "you've" }) |f| if (std.ascii.eqlIgnoreCase(w, f)) return false;
+        you += @intFromBool(std.ascii.eqlIgnoreCase(w, "you"));
+    }
+    return mine and you <= 1;
+}
+
 /// Whether `question` says a word of `fact` worth comparing (else the fact cannot answer it).
 pub fn shares(fact: []const u8, question: []const u8) bool {
     var it = std.mem.tokenizeAny(u8, question, delimiters);
@@ -395,4 +430,26 @@ test "a question about the user asked about someone they know instead" {
     try std.testing.expectEqualStrings("My friend's car, what colour is it?", (try about(al, "My car, what colour is it?", "friend")).?);
     try std.testing.expect((try about(al, "What colour do I like?", "sister")) == null);
     try std.testing.expect((try about(al, "What is my sister's name?", "brother")) == null);
+}
+
+test "a question that already says its answer asks nothing" {
+    const fact = "My sister is called Ana.";
+    try std.testing.expect(asks(fact, "What's my sister's name?", "Your sister is called Ana."));
+    try std.testing.expect(!asks(fact, "Do you remember my sister's name is Ana?", "Yes, your sister is called Ana."));
+    try std.testing.expect(asks("I like blue.", "What colour do I like?", "You like blue."));
+    try std.testing.expect(!asks("I like blue.", "Do I like blue?", "Yes, you like blue."));
+}
+
+test "a yes-or-no question about the user, not one asking the model to recall" {
+    try std.testing.expect(yesNo("Is blue my favourite colour?"));
+    try std.testing.expect(yesNo("Do I like blue?"));
+    try std.testing.expect(!yesNo("Do you remember which colour I like?"));
+    try std.testing.expect(!yesNo("What colour do I like?"));
+}
+
+test "a rewritten question still asks about the user" {
+    try std.testing.expect(firstPerson("Do you remember which colour I like?"));
+    try std.testing.expect(firstPerson("Do you know my favourite colour?"));
+    try std.testing.expect(!firstPerson("Do you know which colour you like?"));
+    try std.testing.expect(!firstPerson("Do you remember which colour is your favourite?"));
 }
