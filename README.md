@@ -304,3 +304,5 @@ Thank you to everyone who has sent TensorFold a pull request, a measurement or a
 [@xjqx2z](https://github.com/xjqx2z),
 [@Yuepixel](https://github.com/Yuepixel),
 [@YvesLaRose](https://github.com/YvesLaRose).
+
+[Usable memory profiles](docs/memory-profiling.md) explains how to record applied budgets, context, cache state and process peaks.
