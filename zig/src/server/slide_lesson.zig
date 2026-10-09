@@ -14,11 +14,13 @@ const Cx = errors.Cx;
 
 // What a lesson is written from: questions in the teller's own words, then the model's answers to them.
 const questions_prompt = "Here is something you know: \"{s}\" Write {d} different short questions the person who told you might ask you later, in their own words, to see if you remember: ask it plainly, in other words and in passing (for example: What is my favourite colour? Which colour do I like best?). Number them 1 to {d}, one per line, nothing else.";
+const remember_prompt = "Here are questions a person asked you about themselves. Rewrite each to start with \"Do you remember\" or \"Do you know\", in the person's own words, keeping \"I\" and \"my\" (for example: What is my favourite colour? becomes Do you remember my favourite colour?). Number them, one per line, nothing else.\n{s}";
 const answer_prompt = "You know this: \"{s}\" The person who told you asks: \"{s}\" Answer them in one short sentence of fewer than 20 words. Speak to them: say \"your\" for what is theirs and \"I\" only for yourself (for example: Your sister is called Ana.)";
 const twins_prompt = "For each question below, write two questions worded almost the same way but asking about a different person or thing of the same type, so that the answer to the original would be wrong for them. Number them, one per line, nothing else.\n{s}";
 const subject_prompt = "What is this question asking about? Reply with just that phrase, word for word as the question says it.\n{s}";
 const kinds_prompt = "List six other things of the same kind as \"{s}\" that someone could ask about in the same words, each a short phrase. One per line, nothing else.";
 const swapped = 2; // a fact's questions whose subject is swapped for others of its kind, kept as the model answers them
+const others = [_][]const u8{ "sister", "brother", "mother", "friend" }; // whom a fact's questions are also asked about
 const same_prompt = "Two replies to the question \"{s}\":\nA: {s}\nB: {s}\nDoes B tell the user something about themselves, or answer the question, that A does not? A reply that only describes the assistant tells the user nothing. Reply yes or no.";
 const judge_prompt = "The user told you this about themselves or their work: \"{s}\" Does it answer this question they ask you: \"{s}\"? Reply yes or no.";
 const facts_prompt = "Read the text below and list the facts in it worth remembering later: names, numbers, versions, dates, decisions and news. Write each as one short sentence that makes sense on its own. One per line, nothing else.\n\n{s}";
@@ -26,6 +28,7 @@ const facts_prompt = "Read the text below and list the facts in it worth remembe
 const steady_prompt = "Tell me something interesting about the ocean.";
 
 const probes = 8;
+const remember_probes = 4; // kept questions asked again as "Do you remember...?", which the model otherwise refuses
 const chunk_chars = 6000; // text a fact-finding call reads at once
 pub const min_probes = 3; // two answers are held out to test recall
 
@@ -187,35 +190,69 @@ const Parts = struct {
     near: std.ArrayList(Check) = .empty, // the twins' questions with the answers they had, checked after each round
 };
 
+/// A fact's questions kept so far: their examples, answers and (for the first few) subjects.
+const Got = struct {
+    pairs: std.ArrayList(api.Example) = .empty,
+    refs: std.ArrayList(Held) = .empty,
+    subjects: std.ArrayList(?[]const u8) = .empty,
+};
+
+/// A question kept with the answer the model gives it from the fact, unless it gives that answer away or misses it.
+fn take(srv: *Server, cx: *Cx, got: *Got, fact: []const u8, f: usize, q: []const u8, end: []const u32, gone: anytype) !void {
+    const a = cx.a;
+    if (wording.yesNo(q) and wording.tells(fact, "", "", q)) {
+        log.line("slide: \"{s}\" asks yes or no about the fact itself, so it is dropped", .{q});
+        return;
+    }
+    for (got.refs.items) |r| if (std.mem.eql(u8, r.question, q)) return;
+    const reply = try ask(srv, cx, null, try std.fmt.allocPrint(a, answer_prompt, .{ fact, q }), 48, gone);
+    const answer = wording.clean(reply.content) orelse {
+        log.line("slide: answer dropped for {s}: {s}", .{ q, reply.content });
+        return;
+    };
+    if (!wording.asks(fact, q, answer)) {
+        log.line("slide: \"{s}\" brings back no word of the fact it lacks, so it is dropped", .{q});
+        return;
+    }
+    try got.pairs.append(a, try example(srv, cx, a, null, q, answer, end));
+    const subject = if (got.refs.items.len < swapped) try subjectOf(srv, cx, q, gone) else null;
+    try got.refs.append(a, .{ .question = q, .answer = answer, .fact = f });
+    try got.subjects.append(a, subject);
+}
+
 /// One fact's part: its questions and answers (two held out), and twins about other things as the model answers them.
 fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, end: []const u32, gone: anytype) !bool {
     const a = cx.a;
     const asked = try ask(srv, cx, null, try std.fmt.allocPrint(a, questions_prompt, .{ fact, probes, probes }), 32 * probes, gone);
     const qs = try wording.questions(a, asked.content, probes);
-    var pairs: std.ArrayList(api.Example) = .empty;
-    var refs: std.ArrayList(Held) = .empty;
-    var subjects: std.ArrayList(?[]const u8) = .empty;
-    for (qs) |q| {
-        const reply = try ask(srv, cx, null, try std.fmt.allocPrint(a, answer_prompt, .{ fact, q }), 48, gone);
-        const answer = wording.clean(reply.content) orelse {
-            log.line("slide: answer dropped for {s}: {s}", .{ q, reply.content });
-            continue;
-        };
-        try pairs.append(a, try example(srv, cx, a, null, q, answer, end));
-        const subject = if (refs.items.len < swapped) try subjectOf(srv, cx, q, gone) else null;
-        try refs.append(a, .{ .question = q, .answer = answer, .fact = f });
-        try subjects.append(a, subject);
+    var got: Got = .{};
+    for (qs) |q| try take(srv, cx, &got, fact, f, q, end, gone);
+    // the kept questions asked again as "Do you remember...?", which the model otherwise refuses
+    var plain: std.ArrayList(u8) = .empty;
+    for (got.refs.items[0..@min(got.refs.items.len, remember_probes)], 1..) |r, i| try plain.print(a, "{d}. {s}\n", .{ i, r.question });
+    if (plain.items.len > 0) {
+        const again = try ask(srv, cx, null, try std.fmt.allocPrint(a, remember_prompt, .{plain.items}), 32 * remember_probes, gone);
+        for (try wording.questions(a, again.content, remember_probes)) |q| {
+            if (wording.firstPerson(q)) try take(srv, cx, &got, fact, f, q, end, gone) else log.line("slide: \"{s}\" is no longer the user's question, so it is dropped", .{q});
+        }
     }
-    log.line("slide: {d} questions, {d} clean answers for: {s}", .{ qs.len, pairs.items.len, fact });
+    const pairs = got.pairs;
+    const refs = got.refs;
+    const subjects = got.subjects;
+    var told: std.ArrayList([]const u8) = .empty;
+    for (refs.items) |r| try told.append(a, r.question);
+    log.line("slide: {d} questions kept for: {s} ({s})", .{ refs.items.len, fact, try std.mem.join(a, " | ", told.items) });
     if (qs.len < min_probes) log.line("slide: the questions came back as: {s}", .{asked.content});
     if (pairs.items.len < min_probes) return false;
+    // two held out, one from the middle and the last, so every way of asking is also learned
     const n = pairs.items.len;
-    try parts.train.appendSlice(a, pairs.items[0 .. n - 2]);
-    try parts.held_ex.appendSlice(a, pairs.items[n - 2 ..]);
-    try parts.held.appendSlice(a, refs.items[n - 2 ..]);
+    for (pairs.items, refs.items, 0..) |ex, r, i| if (i == n / 2 or i == n - 1) {
+        try parts.held_ex.append(a, ex);
+        try parts.held.append(a, r);
+    } else try parts.train.append(a, ex);
     // twins of each question about something else, kept as the model answers them now
     var numbered: std.ArrayList(u8) = .empty;
-    for (qs, 1..) |q, i| try numbered.print(a, "{d}. {s}\n", .{ i, q });
+    for (refs.items[0..@min(refs.items.len, probes)], 1..) |r, i| try numbered.print(a, "{d}. {s}\n", .{ i, r.question });
     const asked_twins = try ask(srv, cx, null, try std.fmt.allocPrint(a, twins_prompt, .{numbered.items}), 64 * probes, gone);
     var kept: std.ArrayList([]const u8) = .empty;
     for (try wording.questions(a, asked_twins.content, 2 * probes)) |q| {
@@ -234,12 +271,21 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
         try kept.append(a, twin);
     };
     // each question asked of the model itself instead, which no fact the user tells answers
-    for (qs) |q| {
-        const own = try wording.addressed(a, q) orelse continue;
+    for (refs.items) |r| {
+        const own = try wording.addressed(a, r.question) orelse continue;
         const answer = wording.clean((try ask(srv, cx, null, own, 48, gone)).content) orelse continue;
         try parts.twins.append(a, try example(srv, cx, a, null, own, answer, end));
         try parts.near.append(a, .{ .question = own, .before = answer });
         try kept.append(a, own);
+    }
+    // each question about someone the user knows instead, which a fact about the user leaves unanswered
+    for (refs.items, 0..) |r, i| {
+        const other = try wording.about(a, r.question, others[i % others.len]) orelse continue;
+        if (wording.tells(fact, "", "", other)) continue;
+        const answer = wording.clean((try ask(srv, cx, null, other, 48, gone)).content) orelse continue;
+        try parts.twins.append(a, try example(srv, cx, a, null, other, answer, end));
+        try parts.near.append(a, .{ .question = other, .before = answer });
+        try kept.append(a, other);
     }
     log.line("slide: near misses kept steady: {s}", .{try std.mem.join(a, " | ", kept.items)});
     return true;

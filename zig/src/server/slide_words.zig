@@ -81,6 +81,41 @@ pub fn recalls(fact: []const u8, question: []const u8, answer: []const u8, reply
     return key > 0 or tells(fact, question, "", reply);
 }
 
+/// Whether `answer` says a word of `fact` that `question` does not: else the question gives its own answer away.
+pub fn asks(fact: []const u8, question: []const u8, answer: []const u8) bool {
+    var it = std.mem.tokenizeAny(u8, answer, delimiters);
+    var first = true;
+    while (it.next()) |raw| : (first = false) {
+        var w: [48]u8 = undefined;
+        const word = normal(raw, &w);
+        if (marked(raw, word, first) and says(fact, word) and !says(question, word)) return true;
+    }
+    return false;
+}
+
+/// Whether a question asks yes or no of the user's own life (Is it blue? Do I like it?), not "Do you remember...?".
+pub fn yesNo(question: []const u8) bool {
+    const verbs = [_][]const u8{ "is", "are", "am", "was", "were", "do", "does", "did", "have", "has", "had", "can", "could", "will", "would", "should" };
+    var it = std.mem.tokenizeAny(u8, question, delimiters);
+    const first = it.next() orelse return false;
+    const second = it.next() orelse return false;
+    for (verbs) |v| if (std.ascii.eqlIgnoreCase(first, v)) return !std.ascii.eqlIgnoreCase(second, "you");
+    return false;
+}
+
+/// Whether a question is still the user's own: it says I or my, never your, and you only once ("Do you remember").
+pub fn firstPerson(question: []const u8) bool {
+    var mine = false;
+    var you: usize = 0;
+    var it = std.mem.tokenizeAny(u8, question, delimiters);
+    while (it.next()) |w| {
+        for ([_][]const u8{ "i", "my", "me", "mine", "our", "we", "us", "i'm", "i've" }) |f| mine = mine or std.ascii.eqlIgnoreCase(w, f);
+        for ([_][]const u8{ "your", "yours", "yourself", "you're", "you've" }) |f| if (std.ascii.eqlIgnoreCase(w, f)) return false;
+        you += @intFromBool(std.ascii.eqlIgnoreCase(w, "you"));
+    }
+    return mine and you <= 1;
+}
+
 /// Whether `question` says a word of `fact` worth comparing (else the fact cannot answer it).
 pub fn shares(fact: []const u8, question: []const u8) bool {
     var it = std.mem.tokenizeAny(u8, question, delimiters);
@@ -145,6 +180,27 @@ pub fn addressed(a: Allocator, question: []const u8) !?[]const u8 {
         at = end;
     }
     return if (swapped) out.items else null;
+}
+
+/// The question asked about someone the user knows (my X as my sister's X); null with no "my" or one before a person.
+pub fn about(a: Allocator, question: []const u8, who: []const u8) !?[]const u8 {
+    const people = [_][]const u8{ "sister", "brother", "mother", "father", "mum", "mom", "dad", "friend", "wife", "husband", "partner", "son", "daughter", "boss", "colleague", "neighbo" };
+    var at: usize = 0;
+    while (at < question.len) {
+        var end = at;
+        while (end < question.len and (std.ascii.isAlphabetic(question[end]) or question[end] == '\'')) end += 1;
+        if (end == at) {
+            at += 1;
+            continue;
+        }
+        if (std.ascii.eqlIgnoreCase(question[at..end], "my")) {
+            const next = std.mem.trimStart(u8, question[end..], " ");
+            for (people) |p| if (std.ascii.startsWithIgnoreCase(next, p)) return null;
+            return try std.fmt.allocPrint(a, "{s} {s}'s{s}", .{ question[0..end], who, question[end..] });
+        }
+        at = end;
+    }
+    return null;
 }
 
 /// Whether two replies open with the same three words, contractions spelled out (I'm as I am).
@@ -363,4 +419,37 @@ test "a question about the user asked of the model instead" {
     try std.testing.expectEqualStrings("Which film do you like most?", (try addressed(al, "Which film do I like most?")).?);
     try std.testing.expectEqualStrings("Your sister, what is she called?", (try addressed(al, "My sister, what is she called?")).?);
     try std.testing.expect((try addressed(al, "What is the capital of France?")) == null);
+}
+
+test "a question about the user asked about someone they know instead" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const al = arena.allocator();
+    try std.testing.expectEqualStrings("What's my sister's favourite colour?", (try about(al, "What's my favourite colour?", "sister")).?);
+    try std.testing.expectEqualStrings("My friend's car, what colour is it?", (try about(al, "My car, what colour is it?", "friend")).?);
+    try std.testing.expect((try about(al, "What colour do I like?", "sister")) == null);
+    try std.testing.expect((try about(al, "What is my sister's name?", "brother")) == null);
+}
+
+test "a question that already says its answer asks nothing" {
+    const fact = "My sister is called Ana.";
+    try std.testing.expect(asks(fact, "What's my sister's name?", "Your sister is called Ana."));
+    try std.testing.expect(!asks(fact, "Do you remember my sister's name is Ana?", "Yes, your sister is called Ana."));
+    try std.testing.expect(asks("I like blue.", "What colour do I like?", "You like blue."));
+    try std.testing.expect(!asks("I like blue.", "Do I like blue?", "Yes, you like blue."));
+}
+
+test "a yes-or-no question about the user, not one asking the model to recall" {
+    try std.testing.expect(yesNo("Is blue my favourite colour?"));
+    try std.testing.expect(yesNo("Do I like blue?"));
+    try std.testing.expect(!yesNo("Do you remember which colour I like?"));
+    try std.testing.expect(!yesNo("What colour do I like?"));
+}
+
+test "a rewritten question still asks about the user" {
+    try std.testing.expect(firstPerson("Do you remember which colour I like?"));
+    try std.testing.expect(firstPerson("Do you know my favourite colour?"));
+    try std.testing.expect(!firstPerson("Do you know which colour you like?"));
+    try std.testing.expect(!firstPerson("Do you remember which colour is your favourite?"));
 }
