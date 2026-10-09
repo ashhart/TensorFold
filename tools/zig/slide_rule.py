@@ -18,7 +18,7 @@ def answered(tok, q: str, a: str) -> Seq:
 
 
 class Slider:
-    """W <- clip(W - rate / max(|G|, 1) * G, W0 - bound, W0 + bound): dense_local's step, G from the answers."""
+    """W <- clip(W - rate / max(|G|, 1) * G, W0 - bound, W0 + bound): a bounded step, G from the answers."""
 
     def __init__(self, model, tok, rate: float = 0.1, bound: float = 0.01, steps: int = 60, near: int = 4):
         self.model, self.tok, self.rate, self.bound, self.steps, self.near = model, tok, rate, bound, steps, near

@@ -9,7 +9,7 @@ const SHOWN = 6;
 const NO_AUTH = "N/A";
 
 type State = "queued" | "learning" | "learned" | "missed";
-type Fact = { id: number; text: string; state: State };
+type Fact = { id: number; text: string; state: State; why?: string };
 type Message = { role: string; content: unknown; toolName?: string };
 
 const ICON: Record<Exclude<State, "learning">, string> = { queued: "·", learned: "✓", missed: "✗" };
@@ -61,7 +61,7 @@ export default function (pi: ExtensionAPI) {
 
 	function render(ctx: ExtensionContext) {
 		const spin = FRAMES[frame++ % FRAMES.length];
-		const rows = facts.slice(-SHOWN).map((f) => `${f.state === "learning" ? spin : ICON[f.state]} ${f.state}: ${f.text}`);
+		const rows = facts.slice(-SHOWN).map((f) => `${f.state === "learning" ? spin : ICON[f.state]} ${f.state}: ${f.text}${f.why ? ` (${f.why})` : ""}`);
 		ctx.ui.setWidget("sliding-weights", rows.length ? ["Sliding Weights", ...rows] : undefined);
 	}
 
@@ -93,8 +93,9 @@ export default function (pi: ExtensionAPI) {
 				else if (event === "learning" && fact) fact.state = "learning";
 				else if (event === "learned" && fact) {
 					fact.state = data.recalled ? "learned" : "missed";
+					if (typeof data.message === "string") fact.why = data.message;
 					if (data.recalled) learned++;
-				} else if (event === "saved") ctx.ui.notify(`Sliding Weights: saved into ${data.tensors} weight tensors`, "info");
+				} else if (event === "saved") ctx.ui.notify("Sliding Weights: saved into the model's own weights", "info");
 				else if (event === "failed") ctx.ui.notify(`Sliding Weights: ${data.message}`, "error");
 				status(ctx);
 			}
