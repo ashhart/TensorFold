@@ -12,6 +12,7 @@ from tensorfold.cuda.memory_gate import MemoryGate, NoRoom, torch_live
 from tensorfold.cuda.sampling import sample_streams
 from tensorfold.cuda.streams import PrefixCache, Stream, accept, next_fill
 from tensorfold.engine.grammar import GrammarError, pack
+from tensorfold.families.qwen3_5.cuda.scr import routing as scr
 
 from .decode import CopyIndex, clone_state
 from .decode_tp import SAMPLING_WORDS as W, _sample_split, _share, first_token, pack_sampling, unpack_sampling
@@ -139,6 +140,7 @@ class MultiDecoder:
     def admit(self, s: Stream) -> None:
         """Queue a request on the longest cached prefix of its prompt; rounds prefill the rest a step at a time."""
 
+        scr.admission(self, s)             # a session match may attach a relocation plan (no-op unless enabled)
         self._check()
         if self.context:
             room = self.context - len(s.prompt) - 1
@@ -168,6 +170,8 @@ class MultiDecoder:
         self._queue(s, hit)
 
     def _queue(self, s: Stream, hit) -> None:
+        if scr.queue(self, s, hit):        # a planned stream builds its state from its session's snapshot
+            return
         drafter = self.draft if s.draft and self.drafts else None
         rows = self._most(s) if self.memory_gate is None else self._first(s)
         state = private(hit[1] if hit else State(self.w), rows)
@@ -247,6 +251,9 @@ class MultiDecoder:
         """Prefill queued prompts a step: several foreground ones in one forward (``_batch``), else the oldest to its
         next kept state, or STEP rows while others decode."""
 
+        routed = scr.fill(self)            # a planned stream's round: segment prefills interleaved with splices
+        if routed is not None:
+            return routed
         batch = self._batch() if BATCH and sum(not x.background for x in self.filling) > 1 else []
         if len(batch) > 1:
             return self._fill_batch(batch)
@@ -273,18 +280,22 @@ class MultiDecoder:
         """Foreground prompts for one prefill forward, oldest first, each to its next kept state or its end: STEP rows
         in all while streams decode, a forward's prompt rows otherwise; the last one in takes the rows left."""
 
-        room = STEP if any(not x.done for x in self.streams.values()) else getattr(self.w, "prompt_rows", CHUNK)
-        out = []
-        for s in self.filling:
-            if s.background:
-                continue
-            if s.vision is not None or room <= 0:          # an image prompt goes alone, in its turn
-                break
-            pos = s.st.pos
-            stop = min(next((p for p in s.stops if p > pos), len(s.prompt)), pos + room)
-            out.append((s, stop))
-            room -= stop - pos
-        return out
+        planned = scr.hold_planned(self)   # planned streams fill alone; their steps interleave with splices
+        try:
+            room = STEP if any(not x.done for x in self.streams.values()) else getattr(self.w, "prompt_rows", CHUNK)
+            out = []
+            for s in self.filling:
+                if s.background:
+                    continue
+                if s.vision is not None or room <= 0:          # an image prompt goes alone, in its turn
+                    break
+                pos = s.st.pos
+                stop = min(next((p for p in s.stops if p > pos), len(s.prompt)), pos + room)
+                out.append((s, stop))
+                room -= stop - pos
+            return out
+        finally:
+            scr.resume_planned(self, planned)
 
     def _fill_batch(self, batch: list[tuple[Stream, int]]) -> list[Stream]:
         """``_fill`` for several prompts at once; on one GPU an error ends each of them alone, as one prompt's would."""
@@ -613,6 +624,7 @@ class MultiDecoder:
     def finish(self, done: list[Stream]) -> None:
         """Drop finished streams on every rank (their prompt-end states joined the prefix cache at admission)."""
 
+        scr.snapshots(self, done)          # a finished turn's rows become its session's next resume
         if done:
             self._send([DONE, len(done), *[s.sid for s in done]])
             for s in done:

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from tensorfold.cuda import prompt_precision
+from tensorfold.families.qwen3_5.cuda.scr import routing as scr
 
 KEEP = 3             # prompt states a concurrent decoder keeps to resume from (each holds a DeltaNet copy)
 KEEP_ONE = 4         # prompt states one stream keeps (they share its attention buffers)
@@ -207,6 +208,10 @@ class Qwen27Engine:
                  draft: bool = True, stop_eos: bool = True, *, vision=None, constraint=None, background=False):
         """``draft=False``: serial re-runs, no drafts; ``background``: last under ``--parallel``, yielding lanes."""
 
+        routed = scr.generate(self, prompt, max_tokens, sampling, on_tokens, draft, stop_eos,
+                              vision=vision, constraint=constraint, background=background)
+        if routed is not None:             # a planned turn over the session's snapshot
+            return routed
         from .decode import draft_decode, prefill
 
         if vision is not None and self.vision is None:
