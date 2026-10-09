@@ -221,6 +221,15 @@ pub const Endpoint = struct {
         };
     }
 
+    /// Wait until `peer` has applied every write and signal posted to it so far (one link's fence), so the bytes in
+    /// flight on that link stay under its posted receives (Thunderbolt UC drops what overflows, silently).
+    pub fn flushPeer(self: *Endpoint, peer: u32) rma.Error!void {
+        const port = try self.portFor(peer);
+        try port.mutex.lock(try self.end());
+        defer port.mutex.unlock();
+        try self.flushPort(port);
+    }
+
     fn flushPort(self: *Endpoint, port: *Port) rma.Error!void {
         if (!port.pending) return;
         const timeout = try self.left();
