@@ -44,8 +44,8 @@ Nemotron MLX 4-bit checkpoint (`TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B
 Decode, 128 greedy tokens from a 5-token prompt: 5.72 ms/token, 175 tok/s (`tensorfold-xpu run`, five runs on different
 commits: 173.6 to 174.8).
 Prefill throughput falls as attention grows with the context. The prompt attention
-runs on the matrix engine (`nem_attn_pfs.cl`; `NEM_OLD_ATTN=1` selects the earlier per-row kernels, which took 101 s for 64k and
-390 s for 128k). Against the per-row kernels its output differs by at most 5.6e-3 of the largest output magnitude (bf16
+runs on the matrix engine (`nem_attn_pfs.cl`; `NEM_OLD_ATTN=1` selects the earlier per-row kernels, which took 3.45 s, 26.6 s and 389.5 s for prompts of 8,192, 32,768 and 131,000 tokens against 2.62 s, 11.3 s and 57.5 s with the
+matrix-engine kernel, in 512-row windows, with identical tokens afterwards). Against the per-row kernels its output differs by at most 5.6e-3 of the largest output magnitude (bf16
 outputs), is identical for any chunking of the window, and the reply tokens of the 8k, 32k and 128k prompts did not change
 (same digests as with the per-row kernels). In the CLI, an 8,192-token prompt takes 51.4 s token by token, 7.5 s in 128-row
 windows and 2.65 s in 512-row windows, with identical tokens afterwards; a 32,768-token prompt takes 11.3 s in 512-row windows.
