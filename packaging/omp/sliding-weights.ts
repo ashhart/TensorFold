@@ -95,8 +95,7 @@ export default function (pi: ExtensionAPI) {
 					fact.state = data.recalled ? "learned" : "missed";
 					if (typeof data.message === "string") fact.why = data.message;
 					if (data.recalled) learned++;
-				} else if (event === "saved") ctx.ui.notify("Sliding Weights: saved into the model's own weights", "info");
-				else if (event === "failed") ctx.ui.notify(`Sliding Weights: ${data.message}`, "error");
+				} else if (event === "failed") ctx.ui.notify(`Sliding Weights: ${data.message}`, "error");
 				status(ctx);
 			}
 		} finally {

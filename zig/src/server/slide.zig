@@ -33,7 +33,7 @@ pub fn forget(srv: *Server, conn: *Conn, _: Allocator) void {
     conn.sendJson(200, "{\"cleared\": true}");
 }
 
-/// The body's facts, each written into a lesson by the model and learned in turn, then saved into the model's shards.
+/// The body's facts, each written into a lesson by the model and learned in turn into the live weights.
 pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     const raw = switch (http_body.read(conn, a, http_body.limit) catch return) {
         .ok => |b| b,
@@ -64,7 +64,6 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         id.* = srv.slide.add(fact, source, now(srv));
         out.event("fact", .{ .id = id.*, .text = fact });
     }
-    var moved = false;
     for (facts, ids) |fact, id| {
         if (gone.check()) break;
         srv.slide.mark(id, .learning);
@@ -79,21 +78,15 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
             continue;
         };
         const result = rounds(srv, a, &cx, plan, fact, gone);
-        moved = moved or result.kept;
         srv.slide.mark(id, if (result.recalled) .learned else .missed);
         if (result.why) |why| {
             out.event("learned", .{ .id = id, .recalled = result.recalled, .steps = result.steps, .message = why });
         } else out.event("learned", .{ .id = id, .recalled = result.recalled, .steps = result.steps });
     }
-    if (moved) switch (run(srv, a, &.{ .save = true })) {
-        .saved => |tensors| out.event("saved", .{ .tensors = tensors }),
-        .failed => |message| out.event("failed", .{ .message = message }),
-        else => {},
-    };
     sse.done(conn) catch {};
 }
 
-const Rounds = struct { recalled: bool = false, kept: bool = false, steps: u32 = 0, why: ?[]const u8 = null };
+const Rounds = struct { recalled: bool = false, steps: u32 = 0, why: ?[]const u8 = null };
 
 /// A lesson in checked rounds of a few steps, until the fact comes back; a round that loops or leaks is taken back.
 fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, fact: []const u8, gone: Gone) Rounds {
@@ -103,7 +96,7 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, fact: []
         request.more = round > 0;
         switch (run(srv, a, &request)) {
             .learned => |l| out.steps += l.steps,
-            .failed => |message| return .{ .recalled = out.recalled, .kept = out.kept, .steps = out.steps, .why = message },
+            .failed => |message| return .{ .recalled = out.recalled, .steps = out.steps, .why = message },
             else => return out,
         }
         const verdict = teach.verify(srv, cx, plan, fact, gone) catch |e| teach.Verdict{ .recalled = false, .damage = words(cx, e) };
@@ -112,7 +105,6 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, fact: []
             out.why = std.fmt.allocPrint(a, "round {d} taken back: {s}", .{ round + 1, why }) catch why;
             return out;
         }
-        out.kept = true;
         out.recalled = verdict.recalled;
         if (verdict.recalled) return out;
     }
@@ -122,7 +114,6 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, fact: []
 const Outcome = union(enum) {
     none,
     learned: struct { recalled: bool, steps: u32 },
-    saved: u32,
     failed: []const u8,
     refused: api.LearnError,
 };
@@ -140,7 +131,6 @@ fn run(srv: *Server, a: Allocator, request: *const api.LearnRequest) Outcome {
         for (batch.items) |c| {
             switch (c.kind) {
                 .learned => outcome = .{ .learned = .{ .recalled = c.recalled, .steps = c.steps } },
-                .saved => outcome = .{ .saved = c.tensors },
                 .done => if (c.text.len > 0) {
                     outcome = .{ .failed = a.dupe(u8, c.text) catch "the learner failed" };
                 },
@@ -207,7 +197,7 @@ const Box = struct {
     events: std.ArrayList(Copy) = .empty,
     done: bool = false,
 
-    const Copy = struct { kind: std.meta.Tag(api.LearnEvent), text: []const u8 = "", recalled: bool = false, steps: u32 = 0, tensors: u32 = 0 };
+    const Copy = struct { kind: std.meta.Tag(api.LearnEvent), text: []const u8 = "", recalled: bool = false, steps: u32 = 0 };
 
     fn sink(b: *Box) api.LearnSink {
         return .{ .ctx = b, .event = onEvent };
@@ -221,7 +211,6 @@ const Box = struct {
                 c.recalled = l.recalled;
                 c.steps = l.steps;
             },
-            .saved => |s| c.tensors = s.tensors,
             .done => |d| c.text = b.gpa.dupe(u8, d.message) catch "",
         }
         b.mutex.lockUncancelable(b.io);

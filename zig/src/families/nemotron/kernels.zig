@@ -19,8 +19,9 @@ pub const head_names = [_][:0]const u8{ "tf_head_prep", "tf_head_norm" };
 /// Keyed draws over the whole vocabulary for rows whose top_k is off or above tf_gpu_sample's 1,024.
 pub const sample_names = [_][:0]const u8{ "tf_sample_full", "tf_sample_full_ids" };
 
-/// Sliding Weights (slide.metal): the learned change in the forward, then the bounded step on captured rows.
-pub const slide_names = [_][:0]const u8{ "tf_slide_delta", "tf_slide_head_t", "tf_slide_sub", "tf_slide_norm", "tf_slide_softmax", "tf_slide_norm_back", "tf_slide_sumsq", "tf_slide_scale", "tf_slide_step" };
+/// Learning in the weights (train.metal, train_mixers.metal): the low-rank change, Adam, and each layer's backward.
+pub const train_names = [_][:0]const u8{ "tf_train_head_t", "tf_train_softmax", "tf_train_dequant_t", "tf_train_narrow", "tf_train_add", "tf_train_experts_part", "tf_train_experts_sum", "tf_train_rms_back", "tf_train_lora_in", "tf_train_gate", "tf_train_project", "tf_train_lora_out", "tf_train_lora_db", "tf_train_lora_dxa", "tf_train_lora_dx", "tf_train_sketch", "tf_train_relu2_back", "tf_train_pairs_in", "tf_train_pairs_out", "tf_train_adam", "tf_train_zero", "tf_train_widen" };
+pub const mixer_names = [_][:0]const u8{ "tf_train_dt", "tf_train_ssm_fwd", "tf_train_ssm_back", "tf_train_ssm_bc", "tf_train_gate_back", "tf_train_conv_back", "tf_train_dt_back", "tf_train_attn_q", "tf_train_attn_kv" };
 
 /// Routed experts taking an expert's member rows two or four at a time (nemotron_experts.metal).
 pub const rows_names = [_][:0]const u8{ "tf_xup_rows2", "tf_xdown_rows2", "tf_xup_rows4", "tf_xdown_rows4" };
@@ -60,7 +61,7 @@ fn geoSource(comptime key: []const u8, comptime which: []const u8, comptime head
 const geo_up = geoSource("expert_up", "up", "2688, 1856, 64", ", 6");
 const geo_down = geoSource("expert_down", "down", "1856, 2688, 64", "");
 
-pub const total = sources.nemotron.all.len + glue_names.len + geo_names.len + rows_names.len + tree_names.len + round_names.len + head_names.len + sample_names.len + slide_names.len;
+pub const total = sources.nemotron.all.len + glue_names.len + geo_names.len + rows_names.len + tree_names.len + round_names.len + head_names.len + sample_names.len + train_names.len + mixer_names.len;
 
 /// A pipeline index's kernel key (generated) or function name (glue).
 pub fn keyOf(i: usize) []const u8 {
@@ -77,7 +78,9 @@ pub fn keyOf(i: usize) []const u8 {
     const h = u - round_names.len;
     if (h < head_names.len) return head_names[h];
     const q = h - head_names.len;
-    return if (q < sample_names.len) sample_names[q] else slide_names[q - sample_names.len];
+    if (q < sample_names.len) return sample_names[q];
+    const y = q - sample_names.len;
+    return if (y < train_names.len) train_names[y] else mixer_names[y - train_names.len];
 }
 
 pub const Kernels = struct {
@@ -119,8 +122,10 @@ fn index(comptime key: []const u8) usize {
     inline for (tree_names, 0..) |n, i| if (comptime std.mem.eql(u8, n, key)) return sources.nemotron.all.len + glue_names.len + geo_names.len + rows_names.len + i;
     inline for (round_names, 0..) |n, i| if (comptime std.mem.eql(u8, n, key)) return sources.nemotron.all.len + glue_names.len + geo_names.len + rows_names.len + tree_names.len + i;
     inline for (head_names, 0..) |n, i| if (comptime std.mem.eql(u8, n, key)) return sources.nemotron.all.len + glue_names.len + geo_names.len + rows_names.len + tree_names.len + round_names.len + i;
-    inline for (sample_names, 0..) |n, i| if (comptime std.mem.eql(u8, n, key)) return total - slide_names.len - sample_names.len + i;
-    inline for (slide_names, 0..) |n, i| if (comptime std.mem.eql(u8, n, key)) return total - slide_names.len + i;
+    const tail = train_names.len + mixer_names.len;
+    inline for (sample_names, 0..) |n, i| if (comptime std.mem.eql(u8, n, key)) return total - tail - sample_names.len + i;
+    inline for (train_names, 0..) |n, i| if (comptime std.mem.eql(u8, n, key)) return total - train_names.len - mixer_names.len + i;
+    inline for (mixer_names, 0..) |n, i| if (comptime std.mem.eql(u8, n, key)) return total - mixer_names.len + i;
     @compileError("no Nemotron kernel " ++ key);
 }
 
@@ -185,7 +190,7 @@ pub fn load(allocator: std.mem.Allocator, device: mtl.Device) !Kernels {
         prebuilt = mtl.Library.fromBytes(device, sources.packed_metallib) catch |e| return e;
         std.log.info("packed kernels from the prebuilt metallib: this runtime compiler refuses uint4b_format", .{});
     }
-    const jobs = try allocator.alloc(Job, sources.nemotron.all.len + 9);
+    const jobs = try allocator.alloc(Job, sources.nemotron.all.len + 10);
     defer allocator.free(jobs);
     const names = try allocator.alloc([:0]const u8, sources.nemotron.all.len);
     defer allocator.free(names);
@@ -218,7 +223,8 @@ pub fn load(allocator: std.mem.Allocator, device: mtl.Device) !Kernels {
     jobs[n + 6] = .{ .device = device, .source = sources.nemotron_head, .names = &head_names, .out = k.pipelines[hp .. hp + head_names.len] };
     const sp = hp + head_names.len + sample_names.len;
     jobs[n + 7] = .{ .device = device, .source = sources.nemotron_sample, .names = &sample_names, .out = k.pipelines[hp + head_names.len .. sp] };
-    jobs[n + 8] = .{ .device = device, .source = sources.slide, .names = &slide_names, .out = k.pipelines[sp..] };
+    jobs[n + 8] = .{ .device = device, .source = sources.train, .names = &train_names, .out = k.pipelines[sp .. sp + train_names.len] };
+    jobs[n + 9] = .{ .device = device, .source = sources.train_mixers, .names = &mixer_names, .out = k.pipelines[sp + train_names.len ..] };
 
     const workers = 10;
     var next = std.atomic.Value(usize).init(0);

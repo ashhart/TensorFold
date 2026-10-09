@@ -131,6 +131,7 @@ pub fn mamba(f: Forward, e: *Enc, m: wts.Mamba, index: usize, t: *const Tables, 
     e.run(.{ group / 4 * c.groups, Forward.mp(rows), 1 }, .{ group / 4, 1, 1 });
 
     f.coop(e, "out", m.out_proj, s.yn, 0, s.ys, s.delta, rows);
+    if (m.adapter) |ad| adapt(f, e, ad, s.yn, s.delta, rows);
 }
 
 fn groupNorm(f: Forward, rows: usize) mtl.Pipeline {
@@ -196,7 +197,7 @@ pub fn moe(f: Forward, e: *Enc, m: wts.Moe, next: anytype, rows: usize, eps: f32
 
     // the shared expert's down projection first, the routed experts' up projection beside it
     f.coop(e, "down", m.shared_down, s.sh_act, 0, s.sh_xs, s.sh, rows);
-    if (m.slide) |dw| slide(f, e, dw, s.sh_act, s.sh, rows);
+    if (m.adapter) |ad| adapt(f, e, ad, s.sh_act, s.sh, rows);
     inline for (.{ "expert_up", "expert_down" }, 0..) |key, j| {
         if (j == 0) e.alongside();
         const fc = if (j == 0) m.fc1 else m.fc2;
@@ -240,14 +241,35 @@ pub fn moe(f: Forward, e: *Enc, m: wts.Moe, next: anytype, rows: usize, eps: f32
     e.run(.{ 896 * Forward.mp(rows), 1, 1 }, .{ 896, 1, 1 });
 }
 
-/// y [rows, D] += k [rows, W] times Sliding Weights' learned change dw [D, W] to the shared expert's down projection.
-pub fn slide(f: Forward, e: *Enc, dw: Buffer, k: Buffer, y: Buffer, rows: usize) void {
-    e.pipe(f.k.get("tf_slide_delta"));
-    e.buf(k, 0, 0);
-    e.buf(dw, 0, 1);
+/// y [rows, out] += scale (x a^T) b over the blocks open on each row: a layer's learned change after its projection.
+pub fn adapt(f: Forward, e: *Enc, ad: wts.Adapter, x: Buffer, y: Buffer, rows: usize) void {
+    project(f.k, e, ad, x, rows);
+    e.pipe(f.k.get("tf_train_lora_out"));
+    e.buf(ad.xa, 0, 0);
+    e.buf(ad.b, 0, 1);
     e.buf(y, 0, 2);
-    e.bytes([4]u32{ @intCast(rows), @intCast(f.c.hidden), @intCast(f.c.shared_width), 0 }, 3);
-    e.run(.{ 32 * f.c.hidden, (rows + 7) / 8, 1 }, .{ 256, 1, 1 });
+    e.bytes([4]u32{ @intCast(rows), @intCast(ad.out), @intCast(ad.rank), 0 }, 3);
+    e.bytes(ad.scale, 4);
+    e.run(.{ ad.out, rows, 1 }, .{ 256, 1, 1 });
+}
+
+/// xa = x a^T over every block, each row's closed blocks zeroed (their gates 0).
+pub fn project(k: *const kern.Kernels, e: *Enc, ad: wts.Adapter, x: Buffer, rows: usize) void {
+    e.pipe(k.get("tf_train_lora_in"));
+    e.buf(x, 0, 0);
+    e.buf(ad.a, 0, 1);
+    e.buf(ad.xa, 0, 2);
+    e.bytes([4]u32{ @intCast(rows), @intCast(ad.in), @intCast(ad.rank), 0 }, 3);
+    e.buf(ad.xn, 0, 4);
+    e.run(.{ 32 * ad.rank, rows, 1 }, .{ 256, 1, 1 });
+    e.pipe(k.get("tf_train_gate"));
+    e.buf(ad.xa, 0, 0);
+    e.buf(ad.xn, 0, 1);
+    e.buf(ad.tau, 0, 2);
+    e.buf(ad.gates, 0, 3);
+    e.bytes([4]u32{ @intCast(rows), @intCast(ad.rank), @intCast(ad.rank / 16), 0 }, 4);
+    e.bytes(ad.unit, 5);
+    e.run(.{ ad.rank / 16, rows, 1 }, .{ ad.rank / 16, 1, 1 });
 }
 
 /// The routed-expert kernel (j 0: up, 1: down) taking `mb` member rows a pass.
@@ -382,6 +404,7 @@ pub fn attend(f: Forward, e: *Enc, a: wts.Attention, segs: []const Kvs, rows: us
     const o_in = if (lone) s.att else s.ax;
     f.xsum(e, "xsum_4096", c.heads * hd, o_in, 0, s.axs, rows);
     f.coop(e, "out", a.o_proj, o_in, 0, s.axs, s.delta, rows);
+    if (a.adapter) |ad| adapt(f, e, ad, o_in, s.delta, rows);
 }
 
 /// A GPU round's chain attention over its window (dims written on the GPU), into scratch.att.

@@ -20,9 +20,13 @@ pub const Linear = struct {
     rows: ?row.Weights = null, // the checkpoint's row layout, read by the core's row kernels without tensor units
 };
 
+/// A learned change after a projection, y += scale (x a^T) b over blocks open on the row: a [rank, in], b [rank, out].
+pub const Adapter = struct { a: mtl.Buffer, b: mtl.Buffer, tau: mtl.Buffer, xa: mtl.Buffer, xn: mtl.Buffer, gates: mtl.Buffer, in: usize, out: usize, rank: usize, scale: f32, unit: f32 };
+
 pub const Mamba = struct {
     in_proj: Linear,
     out_proj: Linear,
+    adapter: ?Adapter = null, // after out_proj
     conv_w: mtl.Buffer, // f32 [KC][CD]
     conv_b: mtl.Buffer, // f32 [CD]
     a_log: mtl.Buffer, // f32 [H]
@@ -38,12 +42,13 @@ pub const Moe = struct {
     fc2: [3]Tensor,
     shared_up: Linear,
     shared_down: Linear,
-    slide: ?mtl.Buffer = null, // bf16 [D, W]: Sliding Weights' change to shared_down, added after it (null: none)
+    adapter: ?Adapter = null, // after shared_down
 };
 
 pub const Attention = struct {
     qkv: Linear,
     o_proj: Linear,
+    adapter: ?Adapter = null, // after o_proj
 };
 
 /// The MTP head: hidden row i and token i + 1's embedding through attention and an MoE block, then the draft head.

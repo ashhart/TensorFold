@@ -140,7 +140,7 @@ pub const Open = struct {
     learn: ?[]const u8 = null,
     /// --learn-gib: what learned states may take on disk, every model and build together.
     learn_gib: f64 = 32,
-    /// --slide: Sliding Weights may write what it learns into this checkpoint's own weights (off: it refuses).
+    /// --slide: Sliding Weights learns into the served weights, live (off: learn requests are refused).
     slide: bool = false,
     /// --device and --segments (CUDA); null: the backend's environment fallback, then its default.
     device: ?u32 = null,
@@ -190,7 +190,6 @@ pub const LearnRequest = struct {
     held: []const Example = &.{},
     near: []const Example = &.{},
     keep: []const Example = &.{}, // captured once by the learner, kept steady by every later lesson
-    save: bool = false, // then write what the weights learned into the model's own shards
     undo: bool = false, // instead take the last lesson's change back, as if it never ran
     steps: u32 = 60, // bounded steps this time at most
     more: bool = false, // more steps on the last lesson's rows, which are not captured again
@@ -199,7 +198,6 @@ pub const LearnRequest = struct {
 /// A lesson's outcome in order, ending with `done` (a message says why it failed); slices live only during the call.
 pub const LearnEvent = union(enum) {
     learned: struct { recalled: bool, steps: u32, loss: f32 },
-    saved: struct { tensors: u32 },
     done: struct { message: []const u8 = "" },
 };
 

@@ -182,7 +182,7 @@ fn quantization(c: *Config, o: std.json.ObjectMap, why: *Why) !void {
 /// A per-module entry as nn.quantize reads it: true, or a dict at the checkpoint's width, passes; anything else is refused.
 fn module(c: Config, path: []const u8, v: std.json.Value, why: *Why) !void {
     switch (v) {
-        .bool => |on| if (on or learned(path)) return,
+        .bool => |on| if (on) return,
         .object => |m| if (m.count() > 0) {
             // a dict's missing bits or group_size take to_quantized's affine defaults, not the top level's
             const bits = width(m, "bits", 4);
@@ -200,11 +200,6 @@ fn module(c: Config, path: []const u8, v: std.json.Value, why: *Why) !void {
     }
     why.set("config.json leaves {s} unquantized; the native Nemotron kernels read every matrix at {d}-bit in groups of {d}", .{ path, c.bits, c.group_size });
     return error.MixedQuantization;
-}
-
-/// A shared-expert down projection Sliding Weights wrote in bf16: the loader reads it as codes plus a residual.
-fn learned(path: []const u8) bool {
-    return std.mem.startsWith(u8, path, "backbone.layers.") and std.mem.endsWith(u8, path, ".mixer.shared_experts.down_proj");
 }
 
 /// config.json's text; a refusal's reason goes to `why`.
@@ -309,7 +304,6 @@ test "per-module quantization entries read as MLX reads them, any other width re
         "\"quantization\": {\"group_size\": 64, \"bits\": 4, \"mode\": \"affine\", \"lm_head\": true}",
         "\"quantization\": {\"bits\": 4, \"" ++ fc1 ++ "\": {\"group_size\": 64, \"bits\": 4}, \"lm_head\": {\"mode\": \"affine\"}}",
         "\"quantization_config\": {\"group_size\": 64, \"bits\": 4, \"quant_method\": \"mlx\", \"oq_note\": \"metadata\"}",
-        "\"quantization\": {\"group_size\": 64, \"bits\": 4, \"backbone.layers.2.mixer.shared_experts.down_proj\": false}",
     }) |block| {
         const text = try withQuantization(block);
         defer std.testing.allocator.free(text);

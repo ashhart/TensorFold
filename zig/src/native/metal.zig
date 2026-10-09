@@ -142,7 +142,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (o.slide) {
         const s = try gpa.create(nemotron_slide.Adapter);
         errdefer gpa.destroy(s);
-        s.* = try nemotron_slide.Adapter.init(gpa, io, h.metal, o.dir);
+        s.* = nemotron_slide.Adapter.init(gpa, h.metal);
         h.slide = s;
         h.host.learner = s.hook();
     }

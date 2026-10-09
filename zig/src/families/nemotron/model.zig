@@ -6,7 +6,6 @@ const shards = @import("../../core/checkpoint.zig");
 const draft_ids = @import("draft_ids.zig");
 const cfg = @import("config.zig");
 const wts = @import("weights.zig");
-const learned = @import("learned.zig");
 const kern = @import("kernels.zig");
 const pk = @import("prefill_kernels.zig");
 const frags = @import("../../core/frags.zig");
@@ -86,13 +85,7 @@ pub const Model = struct {
         const drafting = m.checkpoint.has("mtp.layers.0.eh_proj.weight");
         m.draft_ids = if (drafting) try draft_ids.load(allocator, m.config.vocab) else &.{};
         errdefer allocator.free(m.draft_ids);
-        const residuals = try learned.split(allocator, m.device, &m.checkpoint, m.config);
-        m.weights = wts.load(allocator, m.device, &m.checkpoint, m.config, if (drafting) m.draft_ids else null) catch |e| {
-            learned.free(residuals);
-            return e;
-        };
-        errdefer m.weights.deinit();
-        try learned.attach(&m.weights, residuals);
+        m.weights = try wts.load(allocator, m.device, &m.checkpoint, m.config, if (drafting) m.draft_ids else null);
     }
 
     pub fn deinit(self: *Model) void {
