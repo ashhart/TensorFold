@@ -198,3 +198,35 @@ def test_stats_report_the_hit_rate_over_every_requested_id():
     stats = slots.stats()
     assert stats["slots"] == 4 and stats["residency"] == 3 and stats["loads"] == 3 and stats["hits"] == 1
     assert stats["hit_rate"] == pytest.approx(0.25)
+
+
+QWEN36 = {"num_hidden_layers": 40, "full_attention_interval": 4, "hidden_size": 2048,
+          "num_attention_heads": 16, "num_key_value_heads": 2, "head_dim": 256,
+          "linear_num_key_heads": 16, "linear_num_value_heads": 32,
+          "linear_key_head_dim": 128, "linear_value_head_dim": 128, "linear_conv_kernel_dim": 4,
+          "moe_intermediate_size": 512, "vocab_size": 151936, "num_experts_per_tok": 8}
+
+
+def test_verify_rows_bounds_a_pooled_round_and_leaves_the_dense_default_alone():
+    """A round verifies the carried token plus at most ``depth`` drafts; the 128-row default is a tree engine's."""
+
+    from tensorfold.families.qwen3_5_moe.cuda.engine import verify_rows
+
+    assert verify_rows(3, True) == 4 and verify_rows(0, True) == 1
+    assert verify_rows(3, False) is None
+
+
+def test_narrow_verify_rows_cut_the_pooled_floor_without_touching_the_cache():
+    """The cutoff is the activation over-provision: the KV and the recurrent state stay charged in full."""
+
+    from tensorfold.cuda import geometry
+    from tensorfold.families.qwen3_5_moe.cuda.engine import verify_rows
+
+    def needed(rows):
+        return geometry.gdn_geometry(QWEN36, 1, 4, mtp=True, rows=rows).needed(8192)
+
+    wide, narrow = needed(128), needed(verify_rows(3, True))
+    assert wide - narrow > 1.5 * 2**30                     # the 128-row activation and replay arrays, gone
+    assert (wide - narrow) / wide > 0.6                    # and they are most of what the estimate charged
+    # what remains still covers the engine's real holdings: an 11-layer bf16 KV at 8192 rows
+    assert narrow > (10 + 1) * 8192 * 2 * 256 * 4

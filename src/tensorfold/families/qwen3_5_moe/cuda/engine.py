@@ -21,6 +21,16 @@ def mtp_weights(name: str, info: dict) -> tuple[int, int]:
     return math.prod(info["shape"]) * SIZES[info["dtype"]], 0
 
 
+def verify_rows(depth: int, pooled: bool) -> int | None:
+    """The widest verify one round runs: the carried token plus at most ``depth`` MTP drafts.
+
+    ``None`` keeps ``gdn_geometry``'s 128-row default, which a tree-drafting dense engine wants and this one
+    was charged 2.2 GiB for. A pooled engine decodes eagerly, one round at a time, so ``depth + 1`` bounds it.
+    """
+
+    return depth + 1 if pooled else None
+
+
 def stream_geometry(text: dict, streams: int, keep: int, depth: int):
     """The 27B's concurrent geometry plus the MTP head's keys and values for each stream and kept end, and the lone stream's graph buffers."""
 
@@ -65,8 +75,14 @@ class Qwen36Engine:
             torch.cuda.memory._set_allocator_settings("expandable_segments:True")
         extra = (Path(model_dir) / MTP_FILE,) if self.depth and (Path(model_dir) / MTP_FILE).is_file() else ()
         # one admission for one stream or many (every stream's states and caches, kept prompt ends), before any load
+        # ``rows`` sizes the verify row arrays: a round verifies the carried token plus at most ``depth`` MTP
+        # drafts, so ``depth + 1`` is the whole width a pooled (eager, graphless) round needs.  The 128-row
+        # default is what a tree-drafting dense engine wants and charged this one 2.2 GiB it never touches --
+        # measured: the pool path peaks at 3.2 GiB against a 6.5 GiB plan at 8192 tokens.  Only the pool path
+        # takes the narrower bound; every other path keeps the estimate it was admitted with.
+        rows = verify_rows(self.depth, bool(self.pool_slots))
         geometry = ((lambda text: stream_geometry(text, streams, KEEP_MANY, self.depth)) if many else
-                    (lambda text: gdn_geometry(text, 1, self.depth + 1, mtp=self.depth > 0)))
+                    (lambda text: gdn_geometry(text, 1, self.depth + 1, mtp=self.depth > 0, rows=rows)))
         # the pool's bytes are planned here and allocated after admission: allocating it first would take the
         # memory the grant is measured from and then be counted again in the estimate
         self.pool = None
