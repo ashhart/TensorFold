@@ -274,6 +274,14 @@ def make_handler(app: App):
     return handler(Handler, app)
 
 
+def release(app: App) -> None:
+    """Hand the engine back its device memory on the way out, and let it report what it held."""
+
+    close = getattr(getattr(app, "engine", None), "close", None)
+    if close is not None:
+        close()
+
+
 def serve(app: App, host: str, port: int) -> None:
     """Serve until interrupted (SIGTERM included)."""
 
@@ -293,3 +301,4 @@ def serve(app: App, host: str, port: int) -> None:
         pass
     finally:
         server.server_close()
+        release(app)
