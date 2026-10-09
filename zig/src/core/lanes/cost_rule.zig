@@ -1,4 +1,4 @@
-//! Timings steer windows, never bits; noise only adds time, so an entry keeps its fastest run and outliers are timed again.
+//! Timings steer windows, never bits; retain each entry's fastest run and retime outliers.
 const std = @import("std");
 
 /// Timed runs an entry keeps the fastest of, after one untimed.
@@ -16,7 +16,7 @@ pub fn fastest(ctx: anytype, i: usize) !f64 {
     return best;
 }
 
-/// An entry timed more than `dip` under the one before is timed again with it, two sweeps at most, each keeping its faster value.
+/// Retime both entries around a dip up to twice, retaining their faster values.
 pub fn smooth(ctx: anytype, ms: []f64) !void {
     for (0..2) |_| {
         var dipped = false;
@@ -40,6 +40,17 @@ pub fn drifted(ms: []const f64, reference: []const f64) bool {
 /// A second full pass, each entry keeping its faster value.
 pub fn again(ctx: anytype, ms: []f64) !void {
     for (ms, 0..) |*m, i| m.* = @min(m.*, try fastest(ctx, i));
+}
+
+/// Sample the head between widths, keeping its whole-pass minimum; retries retain each entry's faster value.
+pub fn measure(windows: anytype, heads: anytype, ms: []f64, head_ms: ?*f64, keep: bool) !void {
+    var best_head = std.math.inf(f64);
+    for (ms, 0..) |*m, i| {
+        const value = try fastest(windows, i);
+        m.* = if (keep) @min(m.*, value) else value;
+        if (head_ms != null) best_head = @min(best_head, try heads.time(0));
+    }
+    if (head_ms) |h| h.* = if (keep) @min(h.*, best_head) else best_head;
 }
 
 /// Scripted runs per entry, consumed in order, for the tests.
@@ -83,4 +94,8 @@ test "drift is any entry more than 15 percent from the reference, or another sha
     try std.testing.expect(drifted(&.{ 10, 20 }, &.{ 10, 24 }));
     try std.testing.expect(drifted(&.{10}, &.{ 10, 20 }));
     try std.testing.expect(drifted(&.{10}, &.{0}));
+}
+
+test {
+    _ = @import("cost_rule_test.zig");
 }

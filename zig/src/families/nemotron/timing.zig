@@ -89,15 +89,14 @@ pub fn measure(b: *backend.Metal, io: std.Io) !void {
     const windows: WindowTimer = .{ .b = b, .caches = caches[0..1] };
     const heads: HeadTimer = .{ .b = b, .cache = &caches[0] };
     var ms: [wide.len + backend.max_window]f64 = undefined;
-    for (&ms, 0..) |*m, i| m.* = try lanes.cost_rule.fastest(windows, i);
-    try lanes.cost_rule.smooth(windows, &ms);
     var head = [1]f64{0};
-    if (b.head != null) head[0] = try lanes.cost_rule.fastest(heads, 0);
+    const head_ms: ?*f64 = if (b.head != null) &head[0] else null;
+    try lanes.cost_rule.measure(windows, heads, &ms, head_ms, false);
+    try lanes.cost_rule.smooth(windows, &ms);
     const ref = lanes.cost_cache.referenceKey(&parts);
     if (lanes.cost_cache.load(Reference, b.gpa, io, ref)) |r| {
         if (lanes.cost_rule.drifted(&ms, &r.window) or (b.head != null and lanes.cost_rule.drifted(&head, &r.head))) {
-            try lanes.cost_rule.again(windows, &ms);
-            if (b.head != null) try lanes.cost_rule.again(heads, &head);
+            try lanes.cost_rule.measure(windows, heads, &ms, head_ms, true);
         }
     }
     var costs = Costs{ .windows = ms.len, .head_ms = head[0] };
