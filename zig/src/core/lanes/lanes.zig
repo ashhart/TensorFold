@@ -9,6 +9,7 @@ pub const sampling = @import("sampling.zig");
 pub const fill = @import("fill.zig");
 pub const shape = @import("shape.zig");
 pub const plan_lanes = @import("plan_lanes.zig");
+pub const cost_cache = @import("cost_cache.zig");
 pub const gpu_rule = @import("gpu_rule.zig");
 pub const gpu_full = @import("gpu_full.zig");
 pub const depth = @import("depth.zig");
