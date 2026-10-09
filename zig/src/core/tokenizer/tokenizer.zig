@@ -193,6 +193,18 @@ pub const Tokenizer = struct {
         if (t.decoder) |*d| return d.decode(a, &ctx, tokens.items);
         return std.mem.join(a, " ", tokens.items);
     }
+
+    /// Exact, possibly incomplete UTF-8 bytes; null for context-dependent decoders. Caller frees with `a`.
+    pub fn tokenBytes(t: *const Tokenizer, a: Allocator, id: u32) Error!?[]u8 {
+        const d = if (t.decoder) |*decoder| decoder else return null;
+        if (!d.tokenLocal()) return null;
+        const piece = t.id_to_token.get(id) orelse return try a.dupe(u8, "");
+        if (t.specials.contains(piece)) return try a.dupe(u8, piece);
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        var ctx = steps.Context{ .a = arena.allocator(), .matcher = .{ .a = arena.allocator() }, .raw_bytes = true };
+        return try d.decode(a, &ctx, &.{piece});
+    }
 };
 
 /// Loads `path/tokenizer.json`, or `path` itself when it names a .json file.
@@ -329,6 +341,12 @@ test "byte-level BPE with merges, added tokens and decode" {
     try std.testing.expectEqualStrings("ab abc", skipped);
     try std.testing.expectEqual(@as(?u32, 7), t.specialTokenId("<|end|>"));
     try std.testing.expectEqual(@as(usize, 1), t.flagged_specials.len);
+    const marker = (try t.tokenBytes(a, 7)).?;
+    defer a.free(marker);
+    try std.testing.expectEqualStrings("<|end|>", marker);
+    const unknown = (try t.tokenBytes(a, 99)).?;
+    defer a.free(unknown);
+    try std.testing.expectEqualStrings("", unknown);
 }
 
 test "sentencepiece-style BPE with byte fallback" {
@@ -349,6 +367,15 @@ test "sentencepiece-style BPE with byte fallback" {
     defer a.free(text);
     try std.testing.expectEqualStrings("hi h\u{E9}", text);
     try std.testing.expectEqual(@as(?u32, 0), t.unk_id);
+    const first = (try t.tokenBytes(a, 1)).?;
+    defer a.free(first);
+    const second = (try t.tokenBytes(a, 2)).?;
+    defer a.free(second);
+    try std.testing.expectEqualSlices(u8, &.{0xc3}, first);
+    try std.testing.expectEqualSlices(u8, &.{0xa9}, second);
+    const space = (try t.tokenBytes(a, 7)).?;
+    defer a.free(space);
+    try std.testing.expectEqualStrings(" h", space);
 }
 
 test "without a decoder, decode joins known ids' tokens with spaces" {
@@ -362,4 +389,73 @@ test "without a decoder, decode joins known ids' tokens with spaces" {
     defer a.free(text);
     try std.testing.expectEqualStrings("t1 t4", text);
     try std.testing.expectEqual(@as(?u32, null), t.unk_id);
+    try std.testing.expect((try t.tokenBytes(a, 1)) == null);
+}
+
+test "raw ByteLevel pieces preserve an incomplete UTF-8 character" {
+    const a = std.testing.allocator;
+    var t = Tokenizer{
+        .allocator = a, .vocab = .init(a), .id_to_token = .{ .allocator = a },
+        .model = .empty(.bpe), .decoder = .byte_level,
+    };
+    defer t.deinit();
+    try t.id_to_token.put(0, "\u{c3}");
+    try t.id_to_token.put(1, "\u{a9}");
+    const first = (try t.tokenBytes(a, 0)).?;
+    defer a.free(first);
+    const second = (try t.tokenBytes(a, 1)).?;
+    defer a.free(second);
+    try std.testing.expectEqualSlices(u8, &.{0xc3}, first);
+    try std.testing.expectEqualSlices(u8, &.{0xa9}, second);
+    const decoded = try t.decode(a, &.{ 0, 1 }, false);
+    defer a.free(decoded);
+    try std.testing.expectEqualStrings("\u{e9}", decoded);
+    const partial = try t.decode(a, &.{0}, false);
+    defer a.free(partial);
+    try std.testing.expectEqualStrings("\u{fffd}", partial);
+}
+
+test "raw token bytes refuse replacements after the decoder joins token boundaries" {
+    const a = std.testing.allocator;
+    const decoders = [_]steps.Decoder{
+        .byte_level, .{ .replace = .{ .pattern = .{ .literal = "ab" }, .content = "x" } },
+    };
+    var t = Tokenizer{
+        .allocator = a, .vocab = .init(a), .id_to_token = .{ .allocator = a },
+        .model = .empty(.bpe), .decoder = .{ .sequence = &decoders },
+    };
+    defer t.deinit();
+    try t.id_to_token.put(0, "a");
+    try t.id_to_token.put(1, "b");
+    const decoded = try t.decode(a, &.{ 0, 1 }, false);
+    defer a.free(decoded);
+    try std.testing.expectEqualStrings("x", decoded);
+    try std.testing.expect((try t.tokenBytes(a, 0)) == null);
+}
+
+test "raw token bytes conservatively refuse context-sensitive decoder kinds" {
+    const a = std.testing.allocator;
+    var scratch = std.heap.ArenaAllocator.init(a);
+    defer scratch.deinit();
+    const pattern = try @import("regex.zig").Regex.compile(scratch.allocator(), "a+");
+    const after_fuse = [_]steps.Decoder{
+        .fuse, .{ .replace = .{ .pattern = .{ .literal = "ab" }, .content = "x" } },
+    };
+    const decoders = [_]steps.Decoder{
+        .{ .strip = .{ .content = ' ', .start = 1, .stop = 0 } },
+        .{ .metaspace = .{ .replacement = 0x2581, .scheme = .always } },
+        .{ .wordpiece = .{ .prefix = "##", .cleanup = false } },
+        .{ .replace = .{ .pattern = .{ .regex = pattern }, .content = "x" } },
+        .{ .sequence = &after_fuse },
+    };
+    var t = Tokenizer{
+        .allocator = a, .vocab = .init(a), .id_to_token = .{ .allocator = a },
+        .model = .empty(.bpe),
+    };
+    defer t.deinit();
+    try t.id_to_token.put(0, "a");
+    for (decoders) |decoder| {
+        t.decoder = decoder;
+        try std.testing.expect((try t.tokenBytes(a, 0)) == null);
+    }
 }

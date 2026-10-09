@@ -2,6 +2,10 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## Unreleased
+
+- The Zig tokenizer exposes exact per-token bytes for token-local decoders, retaining incomplete UTF-8 without changing text decoding.
+
 ## 1.0.2
 
 - GLM-5.3-Flash serves several requests at once on its two Macs. Eight concurrent requests decode at 199 tokens a second in total, against 100 in 1.0.1, and each stream equals its solo run.
