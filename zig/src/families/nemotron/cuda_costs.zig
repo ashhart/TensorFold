@@ -1,4 +1,4 @@
-//! costs.measure: what a verify window and a draft level cost on this GPU, timed over consecutive tokens of real text.
+//! Time verify windows and draft levels over consecutive tokens of real text.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -7,6 +7,7 @@ const lanes = @import("lanes");
 const Engine = @import("cuda_engine.zig").Engine;
 const Head = @import("cuda_mtp.zig").Head;
 const state = @import("cuda_state.zig");
+const rule = lanes.cost_rule;
 
 const text = "The river had been rising for three days, and by the time the ferry stopped running the town had moved its " ++
     "market up the hill. Children carried baskets of apples past the church while their parents argued about " ++
@@ -14,12 +15,6 @@ const text = "The river had been rising for three days, and by the time the ferr
     "twice, wrote the numbers on the wall, and cut slowly.\n\ndef mean(values):\n    total = 0\n    for v in " ++
     "values:\n        total += v\n    return total / len(values)\n";
 
-/// Timed runs a width after one untimed: noise only adds time, so each width keeps its fastest.
-const reps = 7;
-/// A width timed this far under the one before it is noise: both are timed again.
-const dip = 0.03;
-/// A table this far from the last one measured on this GPU and shape (any build) is timed a second time.
-const drift = 0.15;
 const max_rows = state.max_rows;
 
 const Timer = struct {
@@ -33,7 +28,7 @@ const Timer = struct {
     }
 };
 
-/// What the timings depend on beside the build: this GPU and driver, the model's shape, the window and the glue kernels.
+/// Cache identity: GPU and driver, model shape, window and glue kernels, alongside the build.
 fn keyParts(e: *Engine, name: []u8, shape: []u8) ![3][]const u8 {
     const c = e.c;
     const gpu = e.ctx.name(name) catch "gpu";
@@ -41,34 +36,21 @@ fn keyParts(e: *Engine, name: []u8, shape: []u8) ![3][]const u8 {
     return .{ "nemotron-cuda", gpu, at };
 }
 
-/// The cache key of the last table measured for this GPU and shape by any build: the drift check's reference.
-fn referenceKey(parts: []const []const u8) [32]u8 {
-    var hash = std.crypto.hash.sha2.Sha256.init(.{});
-    hash.update("window costs reference\n");
-    for (parts) |p| {
-        hash.update(p);
-        hash.update("\n");
-    }
-    var out: [32]u8 = undefined;
-    hash.final(&out);
-    return out;
-}
-
 /// True when any width or the level differs from `ref` by more than `drift`.
 fn drifted(c: core.draft_depth.Costs, ref: core.draft_depth.Costs) bool {
-    if (ref.rows != c.rows or @abs(c.level - ref.level) > drift * ref.level) return true;
-    for (1..c.rows + 1) |r| if (@abs(c.verify[r] - ref.verify[r]) > drift * ref.verify[r]) return true;
+    if (ref.rows != c.rows or rule.changed(c.level, ref.level)) return true;
+    for (1..c.rows + 1) |r| if (rule.changed(c.verify[r], ref.verify[r])) return true;
     return false;
 }
 
-/// Windows of 1..16 rows and a head level's ms (fastest of 7), timed once per build, GPU and model shape: widths, never bits.
+/// Fastest-of-seven costs by width and head level, cached per build, GPU and model shape.
 pub fn measure(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_dir: []const u8) !core.draft_depth.Costs {
     var name: [256]u8 = undefined;
     var shape: [192]u8 = undefined;
     const parts = try keyParts(e, &name, &shape);
     const k = lanes.cost_cache.key(gpa, io, &parts) catch null;
     if (k) |key| if (lanes.cost_cache.load(core.draft_depth.Costs, gpa, io, key)) |kept| return kept;
-    const rk = referenceKey(&parts);
+    const rk = lanes.cost_cache.cudaReferenceKey(&parts);
     var raw: Raw = undefined;
     try timeAll(gpa, io, e, h, model_dir, &raw, false);
     var costs = core.draft_depth.Costs.measured(&raw.verify, raw.level);
@@ -84,7 +66,7 @@ pub fn measure(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_d
 /// Fastest-run window ms by width (index 0 unused) and a head level's ms.
 const Raw = struct { verify: [max_rows + 1]f64, level: f64 };
 
-/// Times every width and, between them, the level into `raw` (`again`: keep the faster of this pass and the last), widths dipping under the one before timed again.
+/// Time widths with interleaved levels, retime dips, and retain faster values on a retry.
 fn timeAll(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_dir: []const u8, raw: *Raw, again: bool) !void {
     const path = try std.fs.path.join(gpa, &.{ model_dir, "tokenizer.json" });
     defer gpa.free(path);
@@ -107,53 +89,50 @@ fn timeAll(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_dir: 
     const cont = ids[rows..];
     for (0..32) |_| _ = try e.step(cont[0], null); // the GPU at its working clocks before any window is timed
     const W = struct {
-        fn time(e_: *Engine, t_: Timer, saved_: cuda.DeviceBuffer, cont_: []const u32, r: usize) !f64 {
-            var best: f64 = std.math.inf(f64);
-            for (0..reps + 1) |i| {
-                try e_.b.restore(e_.ops(), saved_);
-                e_.pos = max_rows;
-                e_.parity = 0;
-                e_.prev_keep = 0;
-                _ = try e_.step(cont_[0], null);
-                try e_.stream.synchronize();
-                try t_.a.record(e_.stream);
-                try e_.verify(cont_[1..][0..r], @intCast(r), null);
-                const ms = try t_.ms(e_);
-                if (i > 0) best = @min(best, ms);
-            }
-            return best;
+        e: *Engine,
+        t: Timer,
+        saved: cuda.DeviceBuffer,
+        cont: []const u32,
+
+        pub fn time(w: @This(), i: usize) !f64 {
+            const r = i + 1;
+            try w.e.b.restore(w.e.ops(), w.saved);
+            w.e.pos = max_rows;
+            w.e.parity = 0;
+            w.e.prev_keep = 0;
+            _ = try w.e.step(w.cont[0], null);
+            try w.e.stream.synchronize();
+            try w.t.a.record(w.e.stream);
+            try w.e.verify(w.cont[1..][0..r], @intCast(r), null);
+            return w.t.ms(w.e);
         }
     };
     const L = struct {
-        fn time(e_: *Engine, h_: *Head, t_: Timer, saved_: cuda.DeviceBuffer, pos: usize, last: u64, pending_: u32, levels: usize) !f64 {
-            try h_.restore(saved_, pos);
-            try e_.ops().copy(e_.b.hidden, last, e_.c.hidden * 2);
-            try e_.ops().fill32(e_.b.sampled, pending_, 1);
-            try e_.stream.synchronize();
-            try t_.a.record(e_.stream);
-            try h_.begin(1);
-            for (1..levels + 1) |j| try h_.launch(@intCast(j));
-            return t_.ms(e_);
+        e: *Engine,
+        h: *Head,
+        t: Timer,
+        saved: cuda.DeviceBuffer,
+        pos: usize,
+        last: u64,
+        pending: u32,
+
+        pub fn time(l: @This(), levels: usize) !f64 {
+            try l.h.restore(l.saved, l.pos);
+            try l.e.ops().copy(l.e.b.hidden, l.last, l.e.c.hidden * 2);
+            try l.e.ops().fill32(l.e.b.sampled, l.pending, 1);
+            try l.e.stream.synchronize();
+            try l.t.a.record(l.e.stream);
+            try l.h.begin(1);
+            for (1..levels + 1) |j| try l.h.launch(@intCast(j));
+            return l.t.ms(l.e);
         }
     };
-    // the chains run between the widths, so their fastest runs come from the whole pass, not one stretch of it
-    var chain: [2]f64 = @splat(std.math.inf(f64));
-    for (1..rows + 1) |r| {
-        const ms = try W.time(e, t, saved, cont, r);
-        raw.verify[r] = if (again) @min(raw.verify[r], ms) else ms;
-        for ([_]usize{ 1, 8 }, &chain) |levels, *best| best.* = @min(best.*, try L.time(e, h, t, head_saved, head_pos, last_hidden, pending, levels));
-    }
+    const windows: W = .{ .e = e, .t = t, .saved = saved, .cont = cont };
+    var chains: rule.ChainLevel(L) = .{ .timer = .{ .e = e, .h = h, .t = t, .saved = head_saved, .pos = head_pos, .last = last_hidden, .pending = pending } };
+    try rule.measureWidths(windows, &chains, raw.verify[1..], again);
     if (!again) raw.verify[0] = 0;
-    for (0..2) |_| {
-        var steady = true;
-        for (2..rows + 1) |r| if (raw.verify[r] < raw.verify[r - 1] * (1 - dip)) {
-            steady = false;
-            raw.verify[r - 1] = @min(raw.verify[r - 1], try W.time(e, t, saved, cont, r - 1));
-            raw.verify[r] = @min(raw.verify[r], try W.time(e, t, saved, cont, r));
-        };
-        if (steady) break;
-    }
-    const level = (chain[1] - chain[0]) / 7;
+    try rule.smooth(windows, raw.verify[1..]);
+    const level = chains.level();
     raw.level = if (again) @min(raw.level, level) else level;
     try e.reset();
     try h.reset();

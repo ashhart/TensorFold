@@ -33,8 +33,13 @@ pub fn smooth(ctx: anytype, ms: []f64) !void {
 /// True when any entry is more than `drift` from the reference's, or the reference has another shape.
 pub fn drifted(ms: []const f64, reference: []const f64) bool {
     if (ms.len != reference.len) return true;
-    for (ms, reference) |m, r| if (!(r > 0) or @abs(m - r) > drift * r) return true;
+    for (ms, reference) |m, r| if (!(r > 0) or changed(m, r)) return true;
     return false;
+}
+
+/// Compare a measured cost with its reference without imposing a positive-reference policy.
+pub fn changed(ms: f64, reference: f64) bool {
+    return @abs(ms - reference) > drift * reference;
 }
 
 /// A second full pass, each entry keeping its faster value.
@@ -42,15 +47,45 @@ pub fn again(ctx: anytype, ms: []f64) !void {
     for (ms, 0..) |*m, i| m.* = @min(m.*, try fastest(ctx, i));
 }
 
-/// Sample the head between widths, keeping its whole-pass minimum; retries retain each entry's faster value.
-pub fn measure(windows: anytype, heads: anytype, ms: []f64, head_ms: ?*f64, keep: bool) !void {
-    var best_head = std.math.inf(f64);
+/// Sample each width, then the observer; retries retain each width's faster value.
+pub fn measureWidths(windows: anytype, observer: anytype, ms: []f64, keep: bool) !void {
     for (ms, 0..) |*m, i| {
         const value = try fastest(windows, i);
         m.* = if (keep) @min(m.*, value) else value;
-        if (head_ms != null) best_head = @min(best_head, try heads.time(0));
+        try observer.afterWidth(i);
     }
-    if (head_ms) |h| h.* = if (keep) @min(h.*, best_head) else best_head;
+}
+
+/// Sample the head between widths, keeping its whole-pass minimum; retries retain each entry's faster value.
+pub fn measure(windows: anytype, heads: anytype, ms: []f64, head_ms: ?*f64, keep: bool) !void {
+    const Observer = struct {
+        heads: @TypeOf(heads),
+        enabled: bool,
+        best: f64 = std.math.inf(f64),
+
+        pub fn afterWidth(o: *@This(), _: usize) !void {
+            if (o.enabled) o.best = @min(o.best, try o.heads.time(0));
+        }
+    };
+    var observer: Observer = .{ .heads = heads, .enabled = head_ms != null };
+    try measureWidths(windows, &observer, ms, keep);
+    if (head_ms) |h| h.* = if (keep) @min(h.*, observer.best) else observer.best;
+}
+
+/// Keep independent minima for one- and eight-level chains sampled between widths.
+pub fn ChainLevel(comptime Timer: type) type {
+    return struct {
+        timer: Timer,
+        best: [2]f64 = @splat(std.math.inf(f64)),
+
+        pub fn afterWidth(c: *@This(), _: usize) !void {
+            for ([_]usize{ 1, 8 }, &c.best) |levels, *best| best.* = @min(best.*, try c.timer.time(levels));
+        }
+
+        pub fn level(c: @This()) f64 {
+            return (c.best[1] - c.best[0]) / 7;
+        }
+    };
 }
 
 /// Scripted runs per entry, consumed in order, for the tests.
@@ -98,4 +133,5 @@ test "drift is any entry more than 15 percent from the reference, or another sha
 
 test {
     _ = @import("cost_rule_test.zig");
+    _ = @import("cuda_cost_rule_test.zig");
 }

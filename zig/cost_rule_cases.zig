@@ -3,6 +3,7 @@ const std = @import("std");
 
 test {
     _ = @import("src/core/lanes/cost_rule.zig");
+    _ = @import("src/core/lanes/cost_cache.zig");
 }
 
 test "Nemotron initial and drift passes share interleaved head sampling; the 27B remains headless" {
