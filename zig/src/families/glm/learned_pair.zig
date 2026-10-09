@@ -77,3 +77,41 @@ test "lost reservation acknowledgement rolls back idempotently and each rank enf
     try std.testing.expectError(error.PeerDiskOutOfStep, s.finish(".", 1, false));
     try s.finish(".", 2, true);
 }
+
+test "each rank includes actual other-identity files in its independent cap before reservation" {
+    const Fake = struct {
+        fn free(_: [:0]const u8) ?u64 {
+            return 1 << 30;
+        }
+        fn clock() ?u64 {
+            return 100;
+        }
+    };
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const root = try temp.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(root);
+    var one: [1200]u8 = undefined;
+    var two: [1200]u8 = undefined;
+    var filename: [1400]u8 = undefined;
+    const current = try std.fmt.bufPrintSentinel(&one, "{s}/0000000000000001", .{root}, 0);
+    const other = try std.fmt.bufPrintSentinel(&two, "{s}/0000000000000002", .{root}, 0);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(current, 0o700));
+    try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(other, 0o700));
+    const fd = std.c.open(try std.fmt.bufPrintSentinel(&filename, "{s}/state.bin", .{other}, 0), .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(std.c.mode_t, 0o600));
+    if (fd < 0) return error.TestCreate;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.ftruncate(fd, 96));
+    _ = std.c.close(fd);
+    var rank0: State = .{ .admission = .{ .floor = 0, .free = Fake.free, .clock = Fake.clock }, .cap = 200 };
+    var rank1: State = .{ .admission = .{ .floor = 0, .free = Fake.free, .clock = Fake.clock }, .cap = 100 };
+    try std.testing.expectEqual(@as(u64, 0), rank0.need(current, 8, 2));
+    try std.testing.expectEqual(@as(u64, 6), rank1.need(current, 8, 2));
+    try std.testing.expectError(error.PeerDiskFull, rank1.reserve(current, 3, 8, 2));
+    try std.testing.expect(rank1.pending == null);
+    try @import("lanes").learned_dirs.removeOther(root, current, 2);
+    try rank1.reserve(current, 3, 8, 2);
+    try rank1.finish(current, 3, true);
+    try std.testing.expectEqual(@as(u64, 0), rank1.admission.reserved);
+}
