@@ -83,6 +83,14 @@ Each later compaction updates the previous note instead of starting over. A clie
 The reply carries the note and the compaction counts under `tensorfold.compaction`, and every reply reports `context_window` and `context_used`.
 The same request gives the same compaction and the same reply. With `--compact-memory`, the stored note carries over between requests.
 
+## Model discovery
+
+`GET /v1/models` (also `/models`) advertises each served name and alias. When the engine reports a finite
+context window, each entry includes equal `context_length` and `max_model_len` integer extensions. These
+are the loaded engine's effective prompt-plus-reply token limit, including any startup memory fitting;
+they are not the default reply limit. An unspecified engine window omits both fields. Clients should
+still handle per-request memory refusals: an advertised context is not a guarantee that every workload fits.
+
 ## Serve flags
 
 The binary's `capabilities --json` response lists its supported flags and platform-specific values.
