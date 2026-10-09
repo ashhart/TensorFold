@@ -18,6 +18,16 @@ pub fn key(a: Allocator, io: std.Io, parts: []const []const u8) ![32]u8 {
     return out;
 }
 
+/// The same parts without the executable: the last table any build measured on this chip and model shape.
+pub fn referenceKey(parts: []const []const u8) [32]u8 {
+    var h = std.crypto.hash.sha2.Sha256.init(.{});
+    h.update("window costs reference\n");
+    for (parts) |p| hashPart(&h, p);
+    var out: [32]u8 = undefined;
+    h.final(&out);
+    return out;
+}
+
 fn hashPart(h: *std.crypto.hash.sha2.Sha256, part: []const u8) void {
     var len: [8]u8 = undefined;
     std.mem.writeInt(u64, &len, part.len, .little);
