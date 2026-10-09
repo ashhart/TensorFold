@@ -32,9 +32,13 @@ fn sameBytes(gpa: std.mem.Allocator, e: *nemotron.Engine, a: u64, b: u64, len: u
     return std.mem.eql(u8, ha, hb);
 }
 
-/// lane_gemv at 1..16 rows against its own 16-row bytes, (sm_90+) qmm_group's cluster kernel and split-K lane_gemv, then the forked MoE.
+/// Every width equals lane_gemv's 16-row bytes, qmm_group where supported and split-K; then check forked MoE.
 pub fn check(gpa: std.mem.Allocator, e: *nemotron.Engine) !u8 {
     const clusters = try e.ctx.capability() >= 90; // qmm_group's cluster sum over K slices needs sm_90
+    // GB10 serves with lane_gemv, but the gate must still exercise the split-K kernel on its weights.
+    var split = if (e.k.split == null) try kern.Split.init(e.ctx.d) else null;
+    defer if (split) |*sp| sp.deinit();
+    const checked_split = e.k.split orelse split.?;
     const w = &e.w;
     const Named = struct { name: []const u8, q: kern.QLinear };
     var named: std.ArrayList(Named) = .empty;
@@ -82,12 +86,12 @@ pub fn check(gpa: std.mem.Allocator, e: *nemotron.Engine) !u8 {
                 try e.ops().cluster(b.emb, b.xs, q, b.ymoe, rows, sk);
                 same = same and try sameBytes(gpa, e, b.ymoe, b.ymoe + len, len);
             }
-            if (sk > 1) if (e.k.split) |sp| {
+            if (sk > 1) {
                 try e.ops().fill32(b.ymoe, 0x7fc07fc0, len / 4);
-                try e.ops().gemvSplit(b.emb, b.xs, q, b.ymoe, rows, sk, sp);
+                try e.ops().gemvSplit(b.emb, b.xs, q, b.ymoe, rows, sk, checked_split);
                 same = same and try sameBytes(gpa, e, b.ymoe, b.ymoe + len, len);
                 splits += 1;
-            };
+            }
             if (!same) {
                 bad += 1;
                 std.debug.print("DIFFER {s} ({d}x{d}, {d} K slices) at {d} rows\n", .{ nq.name, q.n, q.k, sk, rows });

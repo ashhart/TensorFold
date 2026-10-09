@@ -1,4 +1,4 @@
-//! tree-accept: a greedy reply's MTP drafts at every position, the chain and chains from the level-1 runners-up, beside the reply.
+//! Score MTP chains and level-1 runners-up at every position against a plain greedy reply.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -9,7 +9,7 @@ const depth = 8; // levels a branch drafts
 const branches = 4; // the level-1 pick and its three runners-up
 const candidates = 28; // the greedy draft's top-k candidate list (sampler.count(20, n))
 
-/// MODEL at a 16k window: the prompt in IDS_FILE, COUNT greedy tokens; OUT gets the reply and every position's branches.
+/// At a 16k window, score COUNT greedy tokens after IDS_FILE; OUT records the reply and every branch.
 pub fn run(gpu: check.Gpu, model: []const u8, ids_path: []const u8, count_text: []const u8, out_path: []const u8) !void {
     const gpa = gpu.gpa;
     const io = gpu.io;

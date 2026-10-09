@@ -48,7 +48,7 @@ pub const Split = struct {
     pub const tiles_max = 192;
     const work_bytes = 384 * 16 * 64 * 4;
 
-    fn init(d: *const cuda.Driver) !Split {
+    pub fn init(d: *const cuda.Driver) !Split {
         var work = try cuda.DeviceBuffer.alloc(d, work_bytes);
         errdefer work.free();
         var tickets = try cuda.DeviceBuffer.alloc(d, tiles_max * 4);
@@ -57,7 +57,7 @@ pub const Split = struct {
         return .{ .work = work, .tickets = tickets };
     }
 
-    fn deinit(sp: *Split) void {
+    pub fn deinit(sp: *Split) void {
         sp.work.free();
         sp.tickets.free();
     }
@@ -227,7 +227,7 @@ pub const Ops = struct {
         return if (sk > 1) o.gemv(x, xs, q, out, rows, sk) else o.cluster(x, xs, q, out, rows, sk);
     }
 
-    /// lane_gemv's K slices on CTAs of their own: each slice's partial from zero, the tile's last CTA sums them in slice order.
+    /// Each CTA writes one K slice's partial from zero; the tile's last CTA sums them in slice order.
     pub fn gemvSplit(o: Ops, x: u64, xs: u64, q: QLinear, out: u64, rows: usize, sk: usize, sp: Split) !void {
         const tiles = (q.n + 63) / 64;
         if (tiles > Split.tiles_max or tiles * sk * 16 * 64 * 4 > sp.work.len) return error.SplitTooWide;

@@ -33,7 +33,7 @@ __device__ __forceinline__ uint32_t pairm(uint32_t w, int s, uint32_t mask) {
 template <int GS, int BN, int STAGES>
 using GemvTile = LaneTile<GS, 16, BN, 1, 4, STAGES>;
 
-// The CTA's items in order (item i: group map(i).x of the columns at map(i).y), each group's MMA and fma chain into acc as group_kernel builds it, then after(i).
+// Visit mapped groups in order, preserving group_kernel's MMA and fma chain before after(i).
 template <int GS, int BN, int STAGES, typename Map, typename After>
 __device__ __forceinline__ void gemv_items(const __nv_bfloat16* __restrict__ x, const float* __restrict__ xs, const Part& P, int M,
                                            int K, int ldx, int items, Map map, float (&acc)[GemvTile<GS, BN, STAGES>::NT][4],
@@ -220,7 +220,7 @@ __global__ void __launch_bounds__(128) gemv_kernel(const __nv_bfloat16* __restri
                                });
 }
 
-// One CTA a (column tile, K slice): gemv_kernel's slice partial from zero, parked in fp32; the tile's last CTA sums them in slice order.
+// Each CTA writes one tile/slice partial; the tile's last CTA sums slices in their original order.
 template <int GS, int BN, int STAGES>
 __device__ __forceinline__ void gemv_split(const __nv_bfloat16* __restrict__ x, const float* __restrict__ xs, const Part& P, int M,
                                            int K, int ldx, float* __restrict__ work, unsigned* __restrict__ tickets) {

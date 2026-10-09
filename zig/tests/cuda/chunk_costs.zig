@@ -1,4 +1,4 @@
-//! chunk-costs: what r rows cost, as the decode window graph (r <= 16) and as a prompt chunk behind a copy gate (any r), fastest of 7.
+//! Fastest-of-7 costs for decode windows and prompt chunks, the latter behind a copy gate.
 
 const std = @import("std");
 const cuda = @import("cuda");

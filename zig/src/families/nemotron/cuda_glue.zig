@@ -11,7 +11,7 @@ pub const Keyed = triton.Keyed;
 /// Keys an attention chunk holds, at fixed absolute positions (Python's CHUNK).
 pub const chunk_keys = 512;
 
-/// Attention blocks a (row, KV head) at most: each takes every chunk_blocks-th chunk, so long windows launch no idle blocks.
+/// Each attention block takes every chunk_blocks-th chunk, bounding idle blocks at long windows.
 pub const chunk_blocks = 64;
 
 /// The native kernels, by their extern "C" names.

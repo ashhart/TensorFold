@@ -6,12 +6,16 @@ const magic = "TFWC2\n";
 
 /// What the costs depend on: the running executable's bytes (the layout that wrote them) and the caller's parts.
 pub fn key(a: Allocator, io: std.Io, parts: []const []const u8) ![32]u8 {
-    var h = std.crypto.hash.sha2.Sha256.init(.{});
     const exe = try std.process.executablePathAlloc(io, a);
     defer a.free(exe);
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, exe, a, .limited(1 << 30));
     defer a.free(bytes);
-    hashPart(&h, bytes);
+    return buildKey(bytes, parts);
+}
+
+fn buildKey(exe: []const u8, parts: []const []const u8) [32]u8 {
+    var h = std.crypto.hash.sha2.Sha256.init(.{});
+    hashPart(&h, exe);
     for (parts) |p| hashPart(&h, p);
     var out: [32]u8 = undefined;
     h.final(&out);
@@ -23,6 +27,19 @@ pub fn referenceKey(parts: []const []const u8) [32]u8 {
     var h = std.crypto.hash.sha2.Sha256.init(.{});
     h.update("window costs reference\n");
     for (parts) |p| hashPart(&h, p);
+    var out: [32]u8 = undefined;
+    h.final(&out);
+    return out;
+}
+
+/// CUDA's existing reference keys delimit parts with newlines; keep their bytes across shared-cache builds.
+pub fn cudaReferenceKey(parts: []const []const u8) [32]u8 {
+    var h = std.crypto.hash.sha2.Sha256.init(.{});
+    h.update("window costs reference\n");
+    for (parts) |p| {
+        h.update(p);
+        h.update("\n");
+    }
     var out: [32]u8 = undefined;
     h.final(&out);
     return out;
@@ -78,4 +95,24 @@ test "a kept value reads back whole and any other length or tag is refused" {
     try std.testing.expectEqual(@as(?V, null), parse(V, bytes[0 .. bytes.len - 1]));
     bytes[0] = 'X';
     try std.testing.expectEqual(@as(?V, null), parse(V, bytes));
+}
+
+test "shared build identity separates executable, backend, chip and model shape" {
+    const parts = [_][]const u8{ "nemotron-cuda", "NVIDIA GB10", "sm121 cuda13000 23/2688/131072/128/16384 draft1 own" };
+    const k = buildKey("engine-bytes", &parts);
+    try std.testing.expectEqualStrings("7bde80f25c6c8b5bc0ebeb0076bfcd874bf7d7d7382b12599b42c91b25e4b23f", &std.fmt.bytesToHex(k, .lower));
+    try std.testing.expect(!std.mem.eql(u8, &k, &buildKey("other-engine", &parts)));
+    for (0..parts.len) |i| {
+        var changed = parts;
+        changed[i] = "another part";
+        try std.testing.expect(!std.mem.eql(u8, &k, &buildKey("engine-bytes", &changed)));
+    }
+    try std.testing.expect(!std.mem.eql(u8, &buildKey("e", &.{ "ab", "c" }), &buildKey("e", &.{ "a", "bc" })));
+}
+
+test "CUDA reference identity retains the existing newline-delimited hash" {
+    const parts = [_][]const u8{ "nemotron-cuda", "NVIDIA GB10", "sm121 cuda13000 23/2688/131072/128/16384 draft1 own" };
+    const k = cudaReferenceKey(&parts);
+    try std.testing.expectEqualStrings("05bf67c358f200cc54686bcaa5890a607f39f392c8059d84314fdc24608102ff", &std.fmt.bytesToHex(k, .lower));
+    try std.testing.expect(!std.mem.eql(u8, &k, &referenceKey(&parts)));
 }

@@ -1,4 +1,4 @@
-//! Checkpoint bytes read with O_DIRECT through io_uring (or on threads where it is blocked), in flight while the loader allocates, then copied to the GPU.
+//! Checkpoint reads use io_uring or threads, overlapping allocations and copies through O_DIRECT slots.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -209,7 +209,7 @@ pub const Source = struct {
         }
     }
 
-    /// Slot k's bytes copied on: a page-locked slot records its event; a pageable one waits until the driver has staged it.
+    /// Page-locked slots record their copy event; pageable slots wait for the driver to stage their bytes.
     fn finish(s: *Source, k: usize, p: Pending, got: []u8) !void {
         if (got.len == 0) return;
         try s.ops.k.d.check(s.ops.k.d.api.cuMemcpyHtoDAsync_v2(p.dst, got.ptr, got.len, s.ops.s.handle), "cuMemcpyHtoDAsync");

@@ -78,7 +78,7 @@ fn scaledBytes(g: f64) error{Invalid}!u64 {
     return @intFromFloat(bytes);
 }
 
-/// Streams the room fits beside `free` ones needing none of it: all asked if they fit; refused if none or a fixed --parallel can't.
+/// Free streams use no room; admit all asked when they fit, refusing zero or an oversized fixed count.
 pub fn admit(room: u64, stream: u64, free: u32, asked: u32, fixed: bool) error{ NoStream, TooMany }!u32 {
     const more = if (stream == 0) asked else std.math.cast(u32, room / stream) orelse std.math.maxInt(u32);
     const fits = free +| more;

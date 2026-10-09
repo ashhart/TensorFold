@@ -10,7 +10,7 @@ const triton = @import("triton.zig");
 /// Where a family's glue kernels come from: our own fatbins, or a captured set in a folder.
 pub const Pick = union(enum) { native, captured: []const u8, missing: []const u8 };
 
-/// `explicit` (a folder, or "native"), else share/tensorfold/cuda/sm<capability> beside the binary when it holds aot.json.
+/// `explicit` (folder or native), else the binary's share/tensorfold/cuda/sm<capability> when it has aot.json.
 pub fn pick(a: std.mem.Allocator, io: std.Io, explicit: ?[]const u8, capability: u32) !Pick {
     if (explicit) |dir| {
         if (std.mem.eql(u8, dir, "native")) return .native;

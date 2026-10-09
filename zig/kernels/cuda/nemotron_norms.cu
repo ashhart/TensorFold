@@ -118,7 +118,7 @@ extern "C" __global__ void __launch_bounds__(NT) tf_nemo_add_moe_norm(const __nv
     scale_store(x, D, inv, W, Y + row * D, XS + row * (D / 64), ybuf);
 }
 
-// The MTP input, block (row, part): part 0 rmsnorm(e) * enorm, part 1 rmsnorm(h) * hnorm, side by side, with group sums.
+// MTP (row, part) blocks normalize embedding and hidden halves side by side, with group sums.
 extern "C" __global__ void __launch_bounds__(NT) tf_nemo_concat_norms(const __nv_bfloat16* __restrict__ E, const __nv_bfloat16* __restrict__ Hd,
                                                                         const __nv_bfloat16* __restrict__ WE, const __nv_bfloat16* __restrict__ WH,
                                                                         __nv_bfloat16* __restrict__ OUT, float* __restrict__ XS, float eps, int D) {

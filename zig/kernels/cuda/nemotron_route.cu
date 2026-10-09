@@ -45,7 +45,7 @@ __device__ __forceinline__ bool beats(float v, int i, float bv, int bi) { return
 
 }  // namespace
 
-// One warp a row: logits = slices summed in order, scores = sigmoid, top_k picks by score + bias, then the shared slots.
+// Sum logits' slices in order; rank sigmoid scores plus bias before adding the shared slots.
 extern "C" __global__ void __launch_bounds__(32) tf_nemo_topk(const float* __restrict__ PART, const float* __restrict__ BIAS,
                                                                int* __restrict__ IDX, float* __restrict__ WT, int R, float scaling, int E,
                                                                int SK, int TOPK, int NS, int norm) {

@@ -8,7 +8,7 @@ const Kernel = struct { name: []const u8, flags: []const []const u8, src: ?[]con
 /// The torch-op replacements' qualification flags (runs/006): no contraction, no flush to zero.
 const torch_ops = &[_][]const u8{ "-O3", "--fmad=false", "--ftz=false" };
 
-/// The glue kernels' flags: IEEE division and square root, no contraction or flush, so host references match bit for bit.
+/// IEEE division and square root, no contraction or flush: host glue references match bit for bit.
 const glue = &[_][]const u8{ "-O3", "--fmad=false", "--ftz=false", "--prec-div=true", "--prec-sqrt=true" };
 
 const kernels = [_]Kernel{

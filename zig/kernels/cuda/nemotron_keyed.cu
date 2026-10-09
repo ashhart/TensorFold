@@ -1,4 +1,4 @@
-// The MTP head's greedy draw over a row's candidates: rank 0 by (value desc, id asc) and its share of the top K in fp64.
+// Rank MTP candidates by value descending, id ascending; compute the top-K share in fp64.
 
 #include <math.h>
 #include <stdint.h>

@@ -8,7 +8,7 @@ pub fn Both(comptime Load: type, comptime Open: type) type {
     return struct { text: Text, engine: Engine };
 }
 
-/// `open` here while `load` runs on another thread; the text's error wins (as when it loaded first), then open's error or null.
+/// Load text on another thread; its error wins, then open's error or refusal, cleaning whichever succeeded.
 pub fn both(io: std.Io, load: anytype, load_args: std.meta.ArgsTuple(@TypeOf(load)), open: anytype, open_args: std.meta.ArgsTuple(@TypeOf(open))) !?Both(@TypeOf(load), @TypeOf(open)) {
     var loading = io.async(load, load_args);
     const engine = @call(.auto, open, open_args) catch |e| {

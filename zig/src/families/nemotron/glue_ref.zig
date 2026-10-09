@@ -135,7 +135,7 @@ pub fn router(x: []const u16, w: []const u16, part: []f32, rows: usize, d: usize
     };
 }
 
-/// tf_nemo_topk: slices summed in order, sigmoid scores, top_k by score + bias (lowest id on ties), then the shared slots.
+/// Sum slices in order, rank sigmoid scores plus bias (lowest id on ties), then add shared slots.
 pub fn topk(part: []const f32, bias: []const f32, idx: []i32, wt: []f32, rows: usize, scaling: f32, e: usize, sk: usize, top_k: usize, ns: usize, norm: bool) void {
     var score: [256]f32 = undefined;
     var sel: [256]f32 = undefined;

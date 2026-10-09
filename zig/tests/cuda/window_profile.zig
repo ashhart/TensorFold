@@ -1,4 +1,4 @@
-//! window-profile: a decode window's GPU ms by kernel class, launched eagerly behind a gate so launches never starve it, beside its graph.
+//! Compare window graph costs with eager kernel-class timings, behind a gate to avoid launch starvation.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -43,7 +43,7 @@ pub fn run(gpu: check.Gpu, model: []const u8, widths_text: []const u8, ids_path:
     try profile(gpa, e, ids.items, widths.items);
 }
 
-/// Each width's window graph ms, then its eager ms by class with the shared expert forked and on one stream (medians of 5).
+/// Graph ms and eager class ms for each width, shared expert forked and on one stream, as medians of 5.
 fn profile(gpa: std.mem.Allocator, e: *nemotron.Engine, ids: []const u32, widths: []const usize) !void {
     const most = nemotron.state.max_rows;
     if (ids.len < most + 2) return error.PromptTooShort;

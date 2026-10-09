@@ -1,4 +1,4 @@
-// Nemotron's decode attention: 512-key chunks at absolute positions, merged in order, so a row's bits ignore its window.
+// Merge absolute 512-key attention chunks in order, so a row's bits ignore its window.
 
 #include <cuda_bf16.h>
 #include <math.h>
