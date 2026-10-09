@@ -26,6 +26,8 @@ pub const Loaded = struct {
     rows: u32,
     /// Device bytes each admitted stream allocates for its own sequence (caches, state, head caches).
     stream_bytes: usize,
+    /// Streams that allocate nothing: the first takes the engine's own sequence, whose buffers the graphs hold.
+    free_streams: u32 = 1,
     ctx: *anyopaque,
     deinit: *const fn (*anyopaque) void,
     lone: ?LoneRun = null, // called with `ctx`; null: every stream in the lane core

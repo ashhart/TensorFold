@@ -78,9 +78,10 @@ fn scaledBytes(g: f64) error{Invalid}!u64 {
     return @intFromFloat(bytes);
 }
 
-/// Streams the room fits, as many as asked when they all fit; an error when none does, or a fixed --parallel doesn't.
-pub fn admit(room: u64, stream: u64, asked: u32, fixed: bool) error{ NoStream, TooMany }!u32 {
-    const fits = if (stream == 0) asked else std.math.cast(u32, room / stream) orelse std.math.maxInt(u32);
+/// Streams the room fits beside `free` ones needing none of it: all asked if they fit; refused if none or a fixed --parallel can't.
+pub fn admit(room: u64, stream: u64, free: u32, asked: u32, fixed: bool) error{ NoStream, TooMany }!u32 {
+    const more = if (stream == 0) asked else std.math.cast(u32, room / stream) orelse std.math.maxInt(u32);
+    const fits = free +| more;
     if (fits == 0) return error.NoStream;
     if (fits >= asked) return asked;
     return if (fixed) error.TooMany else fits;
@@ -110,10 +111,13 @@ test "the memory plan: reserve, cap, and admission that fails closed" {
     try std.testing.expectEqual(60 * g, p.room(20 * g));
     const capped: Pool = .{ .free = 70 * g, .total = 96 * g, .reserve = 10 * g, .limit = 30 * g, .unified = false };
     try std.testing.expectEqual(10 * g, capped.room(20 * g)); // the cap less what the engine holds
-    try std.testing.expectEqual(@as(u32, 8), try admit(60 * g, g, 8, false));
-    try std.testing.expectEqual(@as(u32, 5), try admit(5 * g + 1, g, 8, false)); // auto serves what fits
-    try std.testing.expectError(error.TooMany, admit(5 * g, g, 8, true)); // a fixed --parallel refuses
-    try std.testing.expectError(error.NoStream, admit(g - 1, g, 8, false));
+    try std.testing.expectEqual(@as(u32, 8), try admit(60 * g, g, 0, 8, false));
+    try std.testing.expectEqual(@as(u32, 5), try admit(5 * g + 1, g, 0, 8, false)); // auto serves what fits
+    try std.testing.expectError(error.TooMany, admit(5 * g, g, 0, 8, true)); // a fixed --parallel refuses
+    try std.testing.expectError(error.NoStream, admit(g - 1, g, 0, 8, false));
+    try std.testing.expectEqual(@as(u32, 2), try admit(2 * g, g + g / 2, 1, 4, false)); // one stream on the engine's own buffers
+    try std.testing.expectEqual(@as(u32, 1), try admit(g - 1, g, 1, 8, false));
+    try std.testing.expectError(error.TooMany, admit(2 * g, g, 1, 4, true));
 }
 
 test "meminfo: total and available in bytes" {
