@@ -196,6 +196,7 @@ pub fn moe(f: Forward, e: *Enc, m: wts.Moe, next: anytype, rows: usize, eps: f32
 
     // the shared expert's down projection first, the routed experts' up projection beside it
     f.coop(e, "down", m.shared_down, s.sh_act, 0, s.sh_xs, s.sh, rows);
+    if (m.slide) |dw| slide(f, e, dw, s.sh_act, s.sh, rows);
     inline for (.{ "expert_up", "expert_down" }, 0..) |key, j| {
         if (j == 0) e.alongside();
         const fc = if (j == 0) m.fc1 else m.fc2;
@@ -237,6 +238,16 @@ pub fn moe(f: Forward, e: *Enc, m: wts.Moe, next: anytype, rows: usize, eps: f32
     e.buf(s.x, 0, 8);
     e.buf(s.xs, 0, 9);
     e.run(.{ 896 * Forward.mp(rows), 1, 1 }, .{ 896, 1, 1 });
+}
+
+/// y [rows, D] += k [rows, W] times Sliding Weights' learned change dw [D, W] to the shared expert's down projection.
+pub fn slide(f: Forward, e: *Enc, dw: Buffer, k: Buffer, y: Buffer, rows: usize) void {
+    e.pipe(f.k.get("tf_slide_delta"));
+    e.buf(k, 0, 0);
+    e.buf(dw, 0, 1);
+    e.buf(y, 0, 2);
+    e.bytes([4]u32{ @intCast(rows), @intCast(f.c.hidden), @intCast(f.c.shared_width), 0 }, 3);
+    e.run(.{ 32 * f.c.hidden, (rows + 7) / 8, 1 }, .{ 256, 1, 1 });
 }
 
 /// The routed-expert kernel (j 0: up, 1: down) taking `mb` member rows a pass.

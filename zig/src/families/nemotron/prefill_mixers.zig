@@ -4,6 +4,7 @@ const mtl = @import("metal");
 const wts = @import("weights.zig");
 const pre = @import("prefill.zig");
 const pl = @import("prefill_launch.zig");
+const layers = @import("layers.zig");
 
 const At = pl.At;
 const Chunk = pre.Chunk;
@@ -176,6 +177,7 @@ pub fn moe(x: Chunk, m: pre.Moe, w: wts.Moe) void {
     x.linear("up", "xsum_2688", w.shared_up, m.up, s.x, s.up);
     x.relu2(s.up, L * c.shared_width, s.upr);
     x.linear("down", "xsum_3712", w.shared_down, m.down, s.upr, s.sh);
+    if (w.slide) |dw| layers.slide(x.f, e, dw, s.upr, s.sh, L);
     x.add(s.out, s.sh, L * D, s.out);
 }
 

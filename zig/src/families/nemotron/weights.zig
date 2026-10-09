@@ -38,6 +38,7 @@ pub const Moe = struct {
     fc2: [3]Tensor,
     shared_up: Linear,
     shared_down: Linear,
+    slide: ?mtl.Buffer = null, // bf16 [D, W]: Sliding Weights' change to shared_down, added after it (null: none)
 };
 
 pub const Attention = struct {
