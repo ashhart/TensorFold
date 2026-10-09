@@ -63,8 +63,11 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
         return 1;
     }
     const config_bytes = try fetchOne(a, &client, endpoint, repo, sha, "config.json");
-    const model_type = modelTypeOf(a, config_bytes);
-    if (hub.family(model_type)) |family| {
+    const kind = configKind(a, config_bytes);
+    const model_type = kind.model_type;
+    if (kind.drafter) {
+        try out.print("{s}: DFlash2 drafter ({s}), for serve --drafter\n", .{ repo, model_type });
+    } else if (hub.family(model_type)) |family| {
         try out.print("{s}: {s} ({s})\n", .{ repo, family.title, family.model_type });
     } else {
         try err_out.print("{s}: no registered Zig family serves model_type {s}; the 0.6 line may: tensorfold@0.6\n", .{ repo, model_type });
@@ -210,12 +213,14 @@ fn lfsDigest(oid: []const u8) ?[32]u8 {
 }
 
 /// config.json's model_type from raw bytes.
-fn modelTypeOf(a: Allocator, bytes: []const u8) []const u8 {
-    var parsed = std.json.parseFromSlice(std.json.Value, a, bytes, .{}) catch return "unknown";
+/// config.json's model_type, copied out of the parse, and whether it is a DFlash2 drafter (`serve --drafter`).
+fn configKind(a: Allocator, bytes: []const u8) struct { model_type: []const u8, drafter: bool } {
+    var parsed = std.json.parseFromSlice(std.json.Value, a, bytes, .{}) catch return .{ .model_type = "unknown", .drafter = false };
     defer parsed.deinit();
-    if (parsed.value != .object) return "unknown";
-    const t = parsed.value.object.get("model_type") orelse return "unknown";
-    return if (t == .string) t.string else "unknown";
+    if (parsed.value != .object) return .{ .model_type = "unknown", .drafter = false };
+    const t = parsed.value.object.get("model_type");
+    const model_type = if (t != null and t.? == .string) a.dupe(u8, t.?.string) catch "unknown" else "unknown";
+    return .{ .model_type = model_type, .drafter = parsed.value.object.get("dflash_config") != null };
 }
 
 fn parseHex(comptime n: usize, text: []const u8) ?[n]u8 {

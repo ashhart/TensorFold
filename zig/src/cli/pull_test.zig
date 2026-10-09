@@ -22,6 +22,7 @@ const FakeHub = struct {
     const weights_path = "/Org/Flash/resolve/rev1sha/weights.safetensors";
     const config_path = "/Org/Flash/resolve/rev1sha/config.json";
     const flaky_body = "{\"chat_template\": \"{{ messages }}\"}";
+    const drafter_config = "{\"model_type\": \"qwen3\", \"architectures\": [\"DFlash2DraftModel\"], \"dflash_config\": {\"block_size\": 8}}";
 
     fn open() !FakeHub {
         const posix = std.posix;
@@ -115,6 +116,7 @@ const FakeHub = struct {
 
     /// Answers one request; false closes the connection.
     fn respondOne(fake: *FakeHub, fd: std.posix.socket_t, head: []const u8) bool {
+        var tree_buf: [256]u8 = undefined;
         const line_end = std.mem.indexOf(u8, head, "\r\n") orelse return false;
         var parts = std.mem.tokenizeScalar(u8, head[0..line_end], ' ');
         const method = parts.next() orelse return false;
@@ -146,6 +148,12 @@ const FakeHub = struct {
             respond(fd, "[{\"type\": \"file\", \"path\": \"config.json\", \"size\": 27}]");
         } else if (std.mem.eql(u8, path, "/Org/Draft/resolve/draftsha/config.json")) {
             respond(fd, "{\"model_type\": \"gemma4\"}");
+        } else if (std.mem.eql(u8, path, "/api/models/Org/DFlash/revision/main")) {
+            respond(fd, "{\"sha\": \"dflashsha\"}");
+        } else if (std.mem.eql(u8, path, "/api/models/Org/DFlash/tree/dflashsha")) {
+            respond(fd, std.fmt.bufPrint(&tree_buf, "[{{\"type\": \"file\", \"path\": \"config.json\", \"size\": {d}}}]", .{drafter_config.len}) catch return false);
+        } else if (std.mem.eql(u8, path, "/Org/DFlash/resolve/dflashsha/config.json")) {
+            respond(fd, drafter_config);
         } else if (std.mem.eql(u8, path, "/api/models/Org/Flash/tree/rev1sha") or std.mem.eql(u8, path, "/api/models/Org/Whole/tree/wholesha")) {
             // The hub's tree sends LFS oids as bare hex.
             const tree = std.fmt.allocPrint(std.testing.allocator, "[{{\"type\": \"file\", \"oid\": \"{s}\", \"path\": \"config.json\", \"size\": {d}}}, {{\"type\": \"file\", \"oid\": \"1111111111111111111111111111111111111111\", \"path\": \"weights.safetensors\", \"size\": {d}, \"lfs\": {{\"oid\": \"{s}\", \"size\": {d}}}}}, {{\"type\": \"file\", \"oid\": \"{s}\", \"path\": \"flaky.json\", \"size\": {d}}}]", .{ &fake.config_git_hex, fake.config.len, fake.weights.len, fake.weights_sha_hex, fake.weights.len, &fake.flaky_git_hex, flaky_body.len }) catch return false;
@@ -294,6 +302,12 @@ test "pull downloads, verifies, retries a cut body, resumes and refuses a family
     try std.testing.expectEqual(@as(u8, 1), try pull.run(a, io, &refused_out.writer, &refused_err.writer, &env, root, "Org/Draft"));
     try std.testing.expect(std.mem.indexOf(u8, refused_err.written(), "model_type gemma4") != null);
     try std.testing.expect(std.mem.indexOf(u8, refused_err.written(), "tensorfold@0.6") != null);
+
+    // A DFlash2 drafter repo comes down for serve --drafter although no family serves its model_type.
+    var drafter_out: std.Io.Writer.Allocating = .init(a);
+    try std.testing.expectEqual(@as(u8, 0), try pull.run(a, io, &drafter_out.writer, &err_out.writer, &env, root, "Org/DFlash"));
+    try std.testing.expect(std.mem.indexOf(u8, drafter_out.written(), "DFlash2 drafter (qwen3)") != null);
+    try std.testing.expectEqualStrings(FakeHub.drafter_config, try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ root, "models--Org--DFlash/snapshots/dflashsha/config.json" }), a, .limited(1 << 20)));
 
     // A bad repo id is usage.
     var bad_err: std.Io.Writer.Allocating = .init(a);
