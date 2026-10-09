@@ -1,10 +1,39 @@
 # CUDA implementation
 
-CUDA families read supported checkpoints through PyTorch loaders and execute family-specific Triton and
-CUDA kernels. Use the [runbook](../../RUNBOOK.md#nvidia-gpus) for the container and two-rank setup.
+## Engine versions
 
-Native Windows is experimental, one GPU a process and not yet run on Windows hardware: see the
-[runbook](../../RUNBOOK.md#windows-with-an-nvidia-card).
+The family and checkpoint tables, two-rank setup and PyTorch/Triton implementation notes on this page describe
+the Python 0.6.6 engine, maintained on [`python-0.6`](https://github.com/ashhart/TensorFold/tree/python-0.6).
+They are not the native Zig release's support matrix.
+
+Native 1.0.2 registers only Nemotron on CUDA; its qualified platform is NVIDIA GB10.
+GLM-5.3-Flash on CUDA, EXL3 loading and DFlash2 drafting remain Python-engine features, not native upgrade paths.
+Inspect the installed binary with `tensorfold-native --version` and `tensorfold-native capabilities --json`.
+See the [qualified models](../../README.md#qualified-models) and
+[native CUDA runbook](../../RUNBOOK.md#linux-and-cuda) for the released engine.
+The [native prompt controls](#native-prompt-controls) below describe the separate Zig CLI.
+Native GLM CUDA is proposed in [issue #509](https://github.com/ashhart/TensorFold/issues/509);
+an open proposal is not released support or maintainer agreement on its qualification gate.
+
+## Python 0.6 CUDA families
+
+Python CUDA families read supported checkpoints through PyTorch loaders and execute family-specific Triton and
+CUDA kernels. Use the [Python runbook](https://github.com/ashhart/TensorFold/blob/python-0.6/RUNBOOK.md#nvidia-gpus)
+for the container and two-rank setup.
+
+In that environment, install the Python [0.6.6 release](https://github.com/ashhart/TensorFold/releases/tag/v0.6.6)
+from its pinned revision, replacing the archived runbook's unpinned `pip install` command.
+An unpinned install now selects the native default branch, not the Python engine.
+
+```bash
+python -m pip install "git+https://github.com/ashhart/TensorFold.git@cb2ebf0540f42604e2759b2ddef497861e928248"
+tensorfold --version
+```
+
+The version must report `0.6.6` before using these Python serving flags.
+
+The Python engine's Windows path is experimental, one GPU a process and not yet run on Windows hardware: see the
+[Python runbook](https://github.com/ashhart/TensorFold/blob/python-0.6/RUNBOOK.md#windows-with-an-nvidia-card).
 
 | Family | CUDA execution |
 | --- | --- |
