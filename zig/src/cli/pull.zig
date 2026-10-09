@@ -2,6 +2,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const hub = @import("hub.zig");
+const ranged = @import("pull_parts.zig");
 
 pub const GiB: u64 = 1 << 30;
 
@@ -184,6 +185,20 @@ fn download(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Wri
     const final_path = try std.fs.path.join(a, &.{ blobs_dir, final_name });
     const partial_path = try std.fmt.allocPrint(a, "{s}.incomplete", .{final_path});
     const w = std.Io.Dir.cwd();
+    if (e.sha256 != null and e.size >= ranged.threshold) ranged: {
+        const ranges_path = try std.fmt.allocPrint(a, "{s}.ranges", .{final_path});
+        ranged.fetch(a, io, url, ranges_path, e.size, ranged.count(e.size)) catch |err| switch (err) {
+            error.RangeUnsupported => break :ranged, // the hub sent the whole file: one stream below
+            else => return err,
+        };
+        if (!std.mem.eql(u8, &(try ranged.digest(a, io, ranges_path, e.size)), &e.sha256.?)) {
+            w.deleteFile(io, ranges_path) catch {};
+            return error.ShaMismatch;
+        }
+        try std.Io.Dir.renameAbsolute(ranges_path, final_path, io);
+        try out.print("  {s}: {d:.2} MiB in {d} ranges\n", .{ e.path, @as(f64, @floatFromInt(e.size)) / (1 << 20), ranged.count(e.size) });
+        return final_name;
+    }
     var resume_from: u64 = 0;
     if (e.sha256 != null) {
         if (fileStat(io, partial_path)) |size| resume_from = size else |_| {}
@@ -359,6 +374,7 @@ const FakeHub = struct {
         const raw_path = parts.next() orelse return;
         const path = if (std.mem.indexOfScalar(u8, raw_path, '?')) |q| raw_path[0..q] else raw_path;
         var range_start: ?u64 = null;
+        var range_end: ?u64 = null;
         var it = std.mem.splitSequence(u8, head[line_end + 2 ..], "\r\n");
         while (it.next()) |h| {
             const colon = std.mem.indexOfScalar(u8, h, ':') orelse continue;
@@ -368,6 +384,7 @@ const FakeHub = struct {
                     const spec = std.mem.trimStart(u8, value[6..], " ");
                     const dash = std.mem.indexOfScalar(u8, spec, '-') orelse spec.len;
                     range_start = std.fmt.parseInt(u64, spec[0..dash], 10) catch null;
+                    if (dash + 1 < spec.len) range_end = std.fmt.parseInt(u64, spec[dash + 1 ..], 10) catch null;
                 }
             }
         }
@@ -393,9 +410,10 @@ const FakeHub = struct {
                     respond(fd, "");
                     return;
                 }
-                const body = fake.weights[from..];
+                const stop = if (range_end) |last| @min(last + 1, fake.weights.len) else fake.weights.len;
+                const body = fake.weights[from..stop];
                 var head_buf: [256]u8 = undefined;
-                const head_text = std.fmt.bufPrint(&head_buf, "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nContent-Range: bytes {d}-{d}/{d}\r\nConnection: keep-alive\r\n\r\n", .{ body.len, from, fake.weights.len - 1, fake.weights.len }) catch return;
+                const head_text = std.fmt.bufPrint(&head_buf, "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nContent-Range: bytes {d}-{d}/{d}\r\nConnection: keep-alive\r\n\r\n", .{ body.len, from, stop - 1, fake.weights.len }) catch return;
                 sendAll(fd, head_text);
                 sendAll(fd, body);
             } else {
@@ -504,4 +522,43 @@ test "pull downloads, verifies, resumes and refuses a family Zig cannot serve" {
     // A bad repo id is usage.
     var bad_err: std.Io.Writer.Allocating = .init(a);
     try std.testing.expectEqual(@as(u8, 2), try run(a, io, &out.writer, &bad_err.writer, &env, root, "no-slash"));
+}
+
+test "ranged downloads fill every byte, restart only unfinished ranges and fall back without range support" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const io = std.testing.io;
+    var fake_hub = FakeHub.open() catch return error.SkipZigTest;
+    fake_hub.log_a = a;
+    fake_hub.start();
+    defer fake_hub.stopServer();
+    const root = try std.fmt.allocPrint(a, ".tf-pull-ranges-{d}", .{std.Io.Clock.awake.now(io).toNanoseconds()});
+    try std.Io.Dir.cwd().createDirPath(io, root);
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    const base = try fake_hub.endpoint(a);
+    const path = try std.fs.path.join(a, &.{ root, "weights.ranges" });
+    const size = FakeHub.weights_body.len;
+
+    try ranged.fetch(a, io, try std.fmt.allocPrint(a, "{s}{s}", .{ base, FakeHub.weights_path }), path, size, 4);
+    try std.testing.expectEqualSlices(u8, FakeHub.weights_body, try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20)));
+    try std.testing.expectEqual(@as(u32, 4), fake_hub.weight_requests.load(.monotonic));
+
+    // Ranges 0 and 2 already marked done: only 1 and 3 are fetched again.
+    try std.Io.Dir.cwd().deleteFile(io, path);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = FakeHub.weights_body });
+    for ([_]u32{ 0, 2 }) |i| try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}.part{d}", .{ path, i }), .data = "" });
+    try ranged.fetch(a, io, try std.fmt.allocPrint(a, "{s}{s}", .{ base, FakeHub.weights_path }), path, size, 4);
+    try std.testing.expectEqual(@as(u32, 6), fake_hub.weight_requests.load(.monotonic));
+    try std.testing.expectEqualSlices(u8, FakeHub.weights_body, try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20)));
+    try std.testing.expectEqualSlices(u8, &(try ranged.digest(a, io, path, size)), &(try hexBytes(fake_hub.weights_sha_hex)));
+
+    // A server that answers a range with the whole file (the config endpoint here) is refused for ranges.
+    try std.testing.expectError(error.RangeUnsupported, ranged.fetch(a, io, try std.fmt.allocPrint(a, "{s}{s}", .{ base, FakeHub.config_path }), try std.fs.path.join(a, &.{ root, "config.ranges" }), FakeHub.config_body.len, 2));
+}
+
+fn hexBytes(text: []const u8) ![32]u8 {
+    var out: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&out, text);
+    return out;
 }
