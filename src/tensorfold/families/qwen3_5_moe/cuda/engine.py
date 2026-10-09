@@ -125,11 +125,12 @@ class Qwen36Engine:
 
         text = capacity.config(model_dir)
         layers, experts = int(text["num_hidden_layers"]), int(text["num_experts"])
-        per = bytes_per_expert(model_dir, layers, experts)
-        slots = max(layers + 1, capacity.pool_bytes(gib, per * layers) // per)   # ``layers`` hold the shared experts
+        per = bytes_per_expert(model_dir, layers, experts)          # one expert of one layer
+        streamed = per * layers * experts                           # every routed expert in the checkpoint
+        slots = max(layers + 1, capacity.pool_bytes(gib, streamed) // per)     # ``layers`` hold the shared experts
         pool = ExpertPool(model_dir, layers, experts, gs=CUDA_QUANTIZATION[1], slots=slots, device="cuda")
         print(f"[tensorfold] --expert-pool {gib}: {slots} slots of {per / 2**20:.2f} MiB "
-              f"({slots - layers} serving {per * layers / 2**30:.2f} GiB of routed experts from the checkpoint's "
+              f"({slots - layers} serving {streamed / 2**30:.2f} GiB of routed experts from the checkpoint's "
               f"files, {layers} the shared experts); rounds decode eagerly, without CUDA graphs", flush=True)
         window = layers + experts + 1        # a layer's own experts and its shared expert, resident at once
         if slots < window:
