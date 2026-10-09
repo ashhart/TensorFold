@@ -2,14 +2,15 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-/// One file the hub's tree lists for the revision.
-pub const Entry = struct { path: []const u8, size: u64, sha256: ?[32]u8 = null };
+/// One file the hub's tree lists for the revision: LFS files carry their sha256, small files their git blob sha1.
+pub const Entry = struct { path: []const u8, size: u64, sha256: ?[32]u8 = null, git_sha1: ?[20]u8 = null };
 
 const attempts = 5;
 
-/// The blob's final cache name: the LFS sha256 when the hub states one, else the sha256 of the bytes.
+/// The blob's cache name, as huggingface_hub names it: the LFS sha256, else the git blob sha1, else the path.
 pub fn blobName(a: Allocator, e: Entry) ![]const u8 {
     if (e.sha256) |digest| return try std.fmt.allocPrint(a, "{s}", .{std.fmt.bytesToHex(digest, .lower)});
+    if (e.git_sha1) |digest| return try std.fmt.allocPrint(a, "{s}", .{std.fmt.bytesToHex(digest, .lower)});
     const safe = try a.dupe(u8, e.path);
     for (safe) |*ch| if (ch.* == '/') {
         ch.* = '_';
@@ -76,6 +77,10 @@ fn download(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Wri
     const file = try w.createFile(io, partial_path, .{ .read = true, .truncate = restart });
     defer file.close(io);
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    const check_git = e.sha256 == null and e.git_sha1 != null;
+    var git = std.crypto.hash.Sha1.init(.{}); // git's blob id: sha1 of "blob SIZE\0" and the bytes
+    var git_head: [32]u8 = undefined;
+    if (check_git) git.update(try std.fmt.bufPrint(&git_head, "blob {d}\x00", .{e.size}));
     if (resume_from > 0) {
         // The prefix already on disk feeds the same digest so the final check spans the whole file.
         const prefix = try a.alloc(u8, @intCast(resume_from));
@@ -90,6 +95,7 @@ fn download(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Wri
         const n = r.readSliceShort(&chunk) catch return error.ReadFailed;
         if (n == 0) break;
         hash.update(chunk[0..n]);
+        if (check_git) git.update(chunk[0..n]);
         try file.writePositionalAll(io, chunk[0..n], offset);
         offset += n;
     }
@@ -99,6 +105,8 @@ fn download(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Wri
     hash.final(&digest);
     if (e.sha256) |want| {
         if (!std.mem.eql(u8, &digest, &want)) return error.ShaMismatch;
+    } else if (e.git_sha1) |want| {
+        if (!std.mem.eql(u8, &git.finalResult(), &want)) return error.ShaMismatch;
     }
     try file.setLength(io, total);
     file.sync(io) catch {};

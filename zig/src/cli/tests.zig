@@ -6,5 +6,6 @@ test {
     _ = @import("pull.zig");
     _ = @import("pull_parts.zig");
     _ = @import("pull_file.zig");
+    _ = @import("pull_test.zig");
     _ = @import("cli.zig");
 }
