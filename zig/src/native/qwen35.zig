@@ -45,7 +45,10 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     errdefer gpa.destroy(h);
     h.gpa = gpa;
     h.model = model;
-    const chunk = 128;
+    // Wider prompt chunks feed the NAX qmm bigger tiles (27B, M5 Max: 638 -> 698 tok/s at 1k, 549 -> 615 at 4k), but
+    // attention's partials grow with rows x context (512 rows at 32K: 3.2 GB), so only short windows take them.
+    const chunk: usize = if (model.prompt != null and window <= 32768) 512 else 128;
+    if (model.prompt == null) std.log.warn("Qwen prompt kernels unavailable on this GPU: prompts take the row decoder's projections (slower prefill)", .{});
     h.metal = try q.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .chunk = chunk, .streams = @max(o.lanes, 2) });
     errdefer h.metal.deinit();
     h.config = try lanes.Config.init(gpa, h.metal.facts(), q.state.window_rows, q.state.window_rows - 1);
@@ -53,7 +56,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.config, h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(window), .prefill_step = chunk });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(window), .prefill_step = @intCast(chunk) });
     h.warm = .{ .queue = h.metal.model.queue };
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start();
