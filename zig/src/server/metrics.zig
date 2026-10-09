@@ -1,6 +1,6 @@
 //! Prometheus text for GET /metrics, family for family as the Python server writes it.
 const std = @import("std");
-const builtin = @import("builtin");
+const process = @import("process_memory.zig");
 const api = @import("engine_api");
 
 const prefix = "tensorfold:";
@@ -125,7 +125,7 @@ pub const Metrics = struct {
         try histogram(w, "request_time_per_output_token_seconds", "Seconds from the first generated token to the last, divided by the tokens less one.", snap.tpot);
         try gauge(w, "decode_rounds_total", "counter", "Decode rounds used by finished requests.", snap.rounds);
         try histogram(w, "request_prefill_seconds", "Seconds a finished request's prompt pass took.", snap.prefill);
-        if (footprint()) |bytes| try gauge(w, "process_footprint_bytes", "gauge", "This process's physical footprint as the OS counts it, Metal buffers included; only where the platform reports one (macOS).", bytes);
+        try processGauges(w, process.read());
         if (engine.memory(false)) |mem| {
             try gauge(w, "device_memory_bytes", "gauge", "Device memory the engine holds now: weights, caches and live streams; only where the backend counts it (CUDA).", mem.active);
             try gauge(w, "device_memory_peak_bytes", "gauge", "The most device memory the engine has held since start or the last /health?reset_peak=1.", mem.peak);
@@ -151,6 +151,22 @@ fn family(w: *std.Io.Writer, name: []const u8, kind: []const u8, help: []const u
 fn gauge(w: *std.Io.Writer, name: []const u8, kind: []const u8, help: []const u8, value: u64) !void {
     try family(w, name, kind, help);
     try w.print("{s}{s} {d}\n", .{ prefix, name, value });
+}
+
+fn processGauges(w: *std.Io.Writer, sample: ?process.Snapshot) !void {
+    const p = sample orelse return;
+    try gauge(w, "process_footprint_bytes", "gauge", "Current OS physical footprint including Metal buffers (macOS).", p.physical_footprint_bytes);
+    try gauge(w, "process_footprint_peak_bytes", "gauge", "Kernel lifetime peak physical footprint including Metal buffers; never reset by health (macOS).", p.lifetime_peak_physical_footprint_bytes);
+}
+
+test "process gauges omit unknown samples and keep current and lifetime peak distinct" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try processGauges(&out.writer, null);
+    try std.testing.expectEqual(@as(usize, 0), out.written().len);
+    try processGauges(&out.writer, .{ .physical_footprint_bytes = 0, .lifetime_peak_physical_footprint_bytes = 12 });
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "tensorfold:process_footprint_bytes 0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "tensorfold:process_footprint_peak_bytes 12\n") != null);
 }
 
 fn pools(w: *std.Io.Writer, name: []const u8, label: []const u8, lengths: []const u32, window: u32) !void {
@@ -185,17 +201,6 @@ fn num(buf: []u8, value: f64) []const u8 {
 fn trimmed(buf: []u8, value: f64, comptime places: u8) []const u8 {
     const text = std.fmt.bufPrint(buf, "{d:." ++ std.fmt.comptimePrint("{d}", .{places}) ++ "}", .{value}) catch return "0";
     return std.mem.trimEnd(u8, std.mem.trimEnd(u8, text, "0"), ".");
-}
-
-extern "c" fn proc_pid_rusage(pid: c_int, flavor: c_int, buffer: *anyopaque) c_int;
-extern "c" fn getpid() c_int;
-
-/// The process's physical footprint where macOS reports one (rusage_info_v4).
-fn footprint() ?u64 {
-    if (builtin.os.tag != .macos) return null;
-    var info: [43]u64 = undefined;
-    if (proc_pid_rusage(getpid(), 4, &info) != 0) return null;
-    return info[9];
 }
 
 test "edges and numbers" {

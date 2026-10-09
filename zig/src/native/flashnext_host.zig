@@ -400,9 +400,8 @@ const Snaps = struct {
     }
 };
 
-/// The prompt cache's budget (cache_fit.zig): what 70% of RAM leaves past this server once loaded, or `gib` when that fits
-/// (larger: refused, `why` says so, unless `over`); without an OS reading, `gib` or the Metal working set's spare.
-fn cacheBudget(eng: *fx.Engine, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) !u64 {
+/// The applied prefix plan and its sizing inputs; the existing fit, fallback and refusal policy are unchanged.
+fn cacheBudget(eng: *fx.Engine, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) !api.PromptCachePlan {
     const rank = if (eng.followsPeer()) " (rank 1 keeps its halves of rank 0's)" else if (eng.r.tp != null) " (rank 1 mirrors them)" else "";
     const ram = cache_fit.ram() orelse 0;
     const ready = cache_fit.footprint() orelse 0;
@@ -410,7 +409,11 @@ fn cacheBudget(eng: *fx.Engine, gib: ?f64, over: bool, a: Allocator, why: *[]con
         const dev = eng.r.device;
         const b = if (gib) |g| (if (g > 0) std.math.lossyCast(u64, g * cache_fit.GiB) else 0) else @min(dev.maxWorkingSet() -| dev.allocated() -| (8 << 30), 16 << 30);
         std.log.info("prompt cache: {d:.1} GiB for kept prompt states{s} (no memory reading)", .{ cache_fit.gibs(b), rank });
-        return b;
+        return .{
+            .source = if (gib != null) .explicit else .metal_working_set,
+            .budget_bytes = b,
+            .explicit_budget = gib != null,
+        };
     }
     const f = cache_fit.fit(ram, ready, gib, over) catch |e| {
         const left = (cache_fit.fit(ram, ready, null, false) catch unreachable).room; // without a given budget it never refuses
@@ -418,7 +421,17 @@ fn cacheBudget(eng: *fx.Engine, gib: ?f64, over: bool, a: Allocator, why: *[]con
         return e;
     };
     std.log.info("prompt cache: {d:.1} GiB from {d:.1} GiB free under the 70% cap ({d:.1} GiB in use once loaded, {d:.0} GiB of RAM, {d} GiB kept for prompt buffers){s}{s}", .{ cache_fit.gibs(f.budget), cache_fit.gibs(f.room), cache_fit.gibs(ready), cache_fit.gibs(ram), cache_fit.MARGIN >> 30, if (f.budget > f.room) ", past the cap by --prompt-cache-over-cap" else "", rank });
-    return f.budget;
+    return .{
+        .source = .physical_footprint,
+        .budget_bytes = f.budget,
+        .explicit_budget = gib != null,
+        .over_cap = f.budget > f.room,
+        .ram_bytes = ram,
+        .ready_footprint_bytes = ready,
+        .cap_bytes = f.cap,
+        .room_bytes = f.room,
+        .margin_bytes = cache_fit.MARGIN,
+    };
 }
 
 /// The engine for a Flash Next checkpoint: the replay engine on the kernels and packs in `dump`, warmed, served; `speed_up` names this Mac's speed-up mode settings (tp.zig); `cache_gib` the prompt cache's budget (null: what 70% of RAM leaves; `over_cap` lets a larger one through); on error.CacheOverCap `why` (in `a`) says why.
@@ -429,14 +442,15 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, wind
         std.log.err("flash next: warm-up failed: {s}", .{@errorName(err)});
         return err;
     };
-    const budget = try cacheBudget(eng, cache_gib, over_cap, a, why);
+    const cache_plan = try cacheBudget(eng, cache_gib, over_cap, a, why);
+    const budget = cache_plan.budget_bytes;
     eng.peer_budget = budget; // rank 1: its kept states and free buffers stay inside the same budget
     eng.snap_pool.max = budget;
     const follower: ?std.Thread = if (eng.followsPeer()) try std.Thread.spawn(.{}, follow, .{eng}) else null; // rank 1
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     const limit: i64 = tf.flashnext_replay.CAP - fx.MARGIN;
-    h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .info_ = .{ .name = "flashnext-zig", .lanes = 1, .context_window = @intCast(if (window > 0) @min(window, limit) else limit) } };
+    h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .info_ = .{ .name = "flashnext-zig", .prompt_cache_plan = cache_plan, .lanes = 1, .context_window = @intCast(if (window > 0) @min(window, limit) else limit) } };
     h.warm = .{ .queue = eng.r.queue };
     if (!eng.followsPeer() and budget > 0) h.cache = pc.Store.init(gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .charged = Snaps.charged, .spare = Snaps.spare, .trim = Snaps.trim, .reuses = Snaps.reuses } }, .{ .lookahead = 1 }, budget);
     try h.start();
