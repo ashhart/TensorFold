@@ -88,9 +88,12 @@ test "direct reads return the same bytes as buffered reads" {
     const gpa = std.testing.allocator;
     var f = try File.open("/proc/self/exe");
     defer f.close();
-    var plain = try File.open("/proc/self/exe");
+    // A genuinely plain fd: File.open keeps O_DIRECT where the open succeeds, and since kernel 6.17
+    // procfs accepts the flag at open, so only clearing the struct flag would leave EINVAL on unaligned reads.
+    const plain_fd = std.c.open("/proc/self/exe", .{ .ACCMODE = .RDONLY, .CLOEXEC = true });
+    if (plain_fd < 0) return error.FileNotFound;
+    var plain = File{ .fd = plain_fd, .direct = false };
     defer plain.close();
-    plain.direct = false;
     const buf = try gpa.alignedAlloc(u8, .fromByteUnits(alignment), 1 << 20);
     defer gpa.free(buf);
     const want = try gpa.alloc(u8, 1 << 19);
