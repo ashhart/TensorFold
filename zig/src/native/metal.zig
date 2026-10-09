@@ -172,6 +172,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
             if (e == error.PromptTooLong) problem.* = "--learn keys its states with a 4,143-token prompt at startup: serve with --context 4096 or more, or without --learn";
             return e;
         };
+        h.learned.?.admission.floor = @intFromFloat(o.learn_min_free_gib * (1 << 30));
         if (h.cache) |*store| store.imprint = &h.learned.?;
     }
     errdefer if (h.learned) |*im| im.deinit();
@@ -341,6 +342,7 @@ fn openGlm(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]co
         if (e == error.BadLoadLimit) problem.* = "GLM_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 70% of RAM" else problem.* = if (linkProblem(e)) |link| try std.fmt.allocPrint(a, "the native GLM-5.3-Flash engine cannot load {s}: {s}", .{ o.dir, link }) else try std.fmt.allocPrint(a, "the native GLM-5.3-Flash engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
         return null;
     };
+    if (h.learned) |*im| im.admission.floor = @intFromFloat(o.learn_min_free_gib * (1 << 30));
     return .{ .engine = h.engine(), .close = glm.close, .ctx = h };
 }
 

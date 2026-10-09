@@ -150,6 +150,7 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--learn` | Keep shared prompt prefixes, such as a system prompt and its tools, on disk so new conversations resume them after a restart or an upgrade that computes the same bits. GLM and Nemotron. |
 | `--learn-dir DIR` | Where `--learn` keeps them, `~/.cache/tensorfold/learned` by default; implies `--learn`. |
 | `--learn-gib GIB` | Disk for learned prefixes on each Mac, 32 by default; the least recently used go first. Implies `--learn`. |
+| `--learn-min-free-gib GIB` | Free disk `--learn` leaves on each Mac, 4 by default; below it learning pauses and serving goes on. |
 | `--snapshot-dir none` | Keep prefix state in memory; `none` is the supported value. |
 | `--max-snapshots 0` | Disable disk snapshots at startup; `0` is the supported value. |
 | `--compact-at auto\|FRACTION` | Turn on context compaction (below). `auto` compacts when the prompt and reply would pass the window minus a reserve. |

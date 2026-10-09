@@ -349,6 +349,7 @@ pub const Store = struct {
         for (s.entries.items) |e| if (e.at == at and std.mem.eql(u32, e.tokens, prompt[0..n]) and modes.equal(e.decode_spans, spans, at)) {
             e.used = s.clock; // the same state again: no copy
             e.shared = e.shared or shared;
+            if (shared) s.learn(e, starts);
             return true;
         };
         const decoded = modes.prefix(s.gpa, spans, at) catch |err| return s.fail(at, err);
@@ -409,9 +410,24 @@ pub const Store = struct {
         const write = s.family.vtable.write orelse return;
         const key = imprint.Imprint.keyOf(e.tokens);
         if (im.has(key) or e.bytes > im.cap) return;
-        while (!im.fits(e.bytes)) s.unlearn(im, im.victim() orelse return); // the least recently used go first
-        write(s.family.ptr, e.saved, im.dir, key) catch |err| return note("learning {d} tokens failed ({s})", .{ e.at, @errorName(err) });
-        im.add(key, e.at, e.tokens, starts, e.bytes) catch |err| return note("learning {d} tokens failed ({s})", .{ e.at, @errorName(err) });
+        const disk_bytes = std.math.add(u64, e.bytes, 128 + @as(u64, e.tokens.len + starts.len) * 4) catch return;
+        switch (im.admission.reserve(im.dir, disk_bytes)) {
+            .quiet => return,
+            .refused => return note("learning paused: free disk cannot preserve the {d} MiB floor", .{im.admission.floor >> 20}),
+            .ready => {},
+        }
+        var success = false;
+        defer im.admission.finish(im.dir, disk_bytes, success);
+        while (!im.fits(e.bytes)) s.unlearn(im, im.victim() orelse return);
+        write(s.family.ptr, e.saved, im.dir, key) catch |err| {
+            if (s.family.vtable.forget) |drop_file| drop_file(s.family.ptr, im.dir, key);
+            return note("learning {d} tokens failed ({s}); retry delayed", .{ e.at, @errorName(err) });
+        };
+        im.add(key, e.at, e.tokens, starts, e.bytes) catch |err| {
+            if (s.family.vtable.forget) |drop_file| drop_file(s.family.ptr, im.dir, key);
+            return note("indexing {d} learned tokens failed ({s}); retry delayed", .{ e.at, @errorName(err) });
+        };
+        success = true;
         if (!@import("builtin").is_test) std.log.info("prompt cache: learned {d} tokens to disk", .{e.at});
     }
 

@@ -28,6 +28,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, dir: []const u8, model_typ
         .prompt_cache_over_cap = args.prompt_cache_over_cap,
         .learn = if (args.learn) args.learn_dir orelse try api.prompt_imprint.defaultRoot(a) else null,
         .learn_gib = args.learn_gib,
+        .learn_min_free_gib = args.learn_min_free_gib,
         .slide = args.slide,
         .device = args.device,
         .segments = args.segments,

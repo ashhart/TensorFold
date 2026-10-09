@@ -28,6 +28,8 @@ pub const Fake = struct {
     at: u32 = 0,
     sum: u64 = 0,
     fail_save: bool = false,
+    fail_write: bool = false,
+    writes: usize = 0,
     fail_restore: bool = false,
     live: usize = 0,
     spare_bytes: u64 = 0,
@@ -49,7 +51,10 @@ pub const Fake = struct {
     fn file(buf: []u8, dir: []const u8, key: u64) ![:0]const u8 {
         return std.fmt.bufPrintSentinel(buf, "{s}/{x:0>16}.bin", .{ dir, key }, 0);
     }
-    fn writeFn(_: *anyopaque, saved: Saved, dir: [:0]const u8, key: u64) anyerror!void {
+    fn writeFn(ptr: *anyopaque, saved: Saved, dir: [:0]const u8, key: u64) anyerror!void {
+        const f = of(ptr);
+        f.writes += 1;
+        if (f.fail_write) return error.WriteFailed;
         var path: [512]u8 = undefined;
         const fd = std.c.open(try file(&path, dir, key), .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
         if (fd < 0) return error.WriteFailed;
@@ -134,7 +139,7 @@ pub const Fake = struct {
 
     /// A prompt pass from `plan.from`, keeping at each mark; returns the sum a fresh pass would give.
     pub fn pass(f: *Fake, s: *Store, prompt: []const u32, plan: Plan) u64 {
-        if (plan.from == 0) f.* = .{ .gpa = f.gpa, .fail_save = f.fail_save, .fail_restore = f.fail_restore, .live = f.live, .spare_bytes = f.spare_bytes, .peer = f.peer };
+        if (plan.from == 0) f.* = .{ .gpa = f.gpa, .fail_save = f.fail_save, .fail_restore = f.fail_restore, .fail_write = f.fail_write, .writes = f.writes, .live = f.live, .spare_bytes = f.spare_bytes, .peer = f.peer };
         if (f.peer) |p| p.in_pass = true;
         defer if (f.peer) |p| {
             p.in_pass = false;
@@ -540,4 +545,47 @@ test "learned states are prompt arithmetic: a request that decodes rows below on
     f.at = 5;
     try std.testing.expect(s.keep(&other, 5, null, &.{}, &.{.{ 1, 3 }}));
     try std.testing.expect(!im.has(imprint.Imprint.keyOf(other[0..6])));
+}
+
+test "Store learning preserves the disk floor, backs off writes across keys, and recovers without retained failures" {
+    const Disk = struct {
+        var space: ?u64 = 0;
+        var tick: u64 = 100;
+        fn free(_: [:0]const u8) ?u64 {
+            return space;
+        }
+        fn clock() ?u64 {
+            return tick;
+        }
+    };
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var path: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&path, "/tmp/tf-learn-backoff-{d}", .{std.c.getpid()});
+    defer rmTree(root);
+    var im = try imprint.Imprint.open(a, root, 11, 1 << 20);
+    defer im.deinit();
+    im.admission = .{ .floor = 100, .free = Disk.free, .clock = Disk.clock };
+    var fake: Fake = .{ .gpa = a };
+    var store = Store.init(a, fake.learned(), .{ .lookahead = 1, .min_prompt = 0, .min_gap = 1 }, 1 << 20);
+    defer store.deinit();
+    store.imprint = &im;
+    for (0..6) |i| {
+        const token: u32 = @intCast(i + 1);
+        const prompt = [_]u32{ token, token, token, token, token, token, 9, 10 };
+        if (i == 2) {
+            Disk.space = 10000;
+            fake.fail_write = true;
+        }
+        if (i == 5) {
+            Disk.tick += 100;
+            fake.fail_write = false;
+        }
+        const plan = try store.begin(arena.allocator(), &prompt, 7, &.{5}, &.{}, null, &.{});
+        try std.testing.expectEqual(fresh(&prompt), fake.pass(&store, &prompt, plan));
+        try std.testing.expectEqual(@as(usize, if (i < 2) 0 else if (i < 5) 1 else 2), fake.writes);
+    }
+    try std.testing.expectEqual(@as(usize, 1), im.metas.items.len);
+    try std.testing.expectEqual(@as(u64, 0), im.admission.reserved);
 }

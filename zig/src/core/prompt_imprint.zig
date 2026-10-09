@@ -14,6 +14,7 @@ pub const Imprint = struct {
     root: []u8,
     dir: [:0]u8, // root/<identity>: the index, the last-open stamp and each state's files (the family's)
     cap: u64, // bytes of learned states this Mac keeps under `root`, every identity together
+    admission: @import("learned_disk.zig").Admission = .{},
     others: u64 = 0, // bytes other identities under `root` still hold
     metas: std.ArrayList(Meta) = .empty,
     clock: u64 = 0, // a meta's `used`: the clock at its last write or read
@@ -104,18 +105,22 @@ pub const Imprint = struct {
     pub fn add(m: *Imprint, key: u64, at: u32, tokens: []const u32, starts: []const u32, bytes: u64) !void {
         if (m.has(key)) return;
         const below = cut(starts, at);
-        var path: [1100]u8 = undefined;
-        const fd = std.c.open(try std.fmt.bufPrintSentinel(&path, "{s}/index", .{m.dir}, 0), .{ .ACCMODE = .WRONLY, .APPEND = true, .CREAT = true }, @as(std.c.mode_t, 0o600));
-        if (fd < 0) return error.ImprintWrite;
-        defer _ = std.c.close(fd);
-        try record(fd, key, at, tokens, below, bytes);
-        if (std.c.fsync(fd) != 0) return error.ImprintWrite;
         const t = try m.gpa.dupe(u32, tokens);
         errdefer m.gpa.free(t);
         const s = try m.gpa.dupe(u32, below);
         errdefer m.gpa.free(s);
+        try m.metas.ensureUnusedCapacity(m.gpa, 1);
+        var path: [1100]u8 = undefined;
+        const fd = std.c.open(try std.fmt.bufPrintSentinel(&path, "{s}/index", .{m.dir}, 0), .{ .ACCMODE = .WRONLY, .APPEND = true, .CREAT = true }, @as(std.c.mode_t, 0o600));
+        if (fd < 0) return error.ImprintWrite;
+        defer _ = std.c.close(fd);
+        const end = std.c.lseek(fd, 0, std.c.SEEK.END);
+        if (end < 0) return error.ImprintWrite;
+        errdefer _ = std.c.ftruncate(fd, end);
+        try record(fd, key, at, tokens, below, bytes);
+        if (std.c.fsync(fd) != 0) return error.ImprintWrite;
         m.clock += 1;
-        try m.metas.append(m.gpa, .{ .key = key, .at = at, .tokens = t, .starts = s, .bytes = bytes, .used = m.clock });
+        m.metas.appendAssumeCapacity(.{ .key = key, .at = at, .tokens = t, .starts = s, .bytes = bytes, .used = m.clock });
     }
 
     /// Forget state `key`: the index is rewritten without it (its family removes the files).
@@ -327,4 +332,5 @@ fn makePath(gpa: Allocator, dir: [:0]const u8) !void {
 
 test {
     _ = @import("prompt_imprint_test.zig");
+    _ = @import("learned_disk.zig");
 }
