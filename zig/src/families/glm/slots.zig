@@ -142,7 +142,7 @@ pub const Slots = struct {
         var at: u32 = 0;
         for ([_]u32{ 4096, 4136, len }) |end| while (at < @min(end, len)) {
             const n = sl.chunkRows(at, @min(end, len));
-            try sl.chunk(0, at, n);
+            try sl.chunk(0, at, n, null);
             at += n;
         };
         const snap = try sl.save(0, at, 0, false);
@@ -288,8 +288,8 @@ pub const Slots = struct {
         return @min(if (chunked) sl.e.chunk_rows else st.max_rows, left);
     }
 
-    /// Prompt rows [at, at + n) of slot `i`, the head absorbing each with its next token; the last pick to `picks`.
-    pub fn chunk(sl: *Slots, i: u32, at: u32, n: u32) !void {
+    /// Prompt rows [at, at + n) of slot `i`; `draws` rules a pass row, the first reply token's rule.
+    pub fn chunk(sl: *Slots, i: u32, at: u32, n: u32, draws: ?*const fwd.Draws) !void {
         const e = sl.e;
         const slot = try sl.slotAt(i);
         const P = slot.prompt_len;
@@ -302,6 +302,7 @@ pub const Slots = struct {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         var x = sl.ctx(slot);
+        if (draws) |d| x.draws = d; // the head reads the last row's rule (prompt.rows - 1), the rest draw greedily
         const b = e.begin();
         const ids = e.prompt_ids.at(@as(usize, at) * 4);
         const next = e.prompt_ids.at(@as(usize, at + 1) * 4);
@@ -325,8 +326,8 @@ pub const Slots = struct {
         slot.s.pos = at + n; // the pass stands here: a snapshot of it is this prefix's state
     }
 
-    /// One forward over every window, each stream's rows against its own caches; each row's pick into `picks`.
-    pub fn window(sl: *Slots, wins: []const Win) !void {
+    /// One forward over every window, each stream's rows against its own caches; `draws` rules its rows.
+    pub fn window(sl: *Slots, wins: []const Win, draws: ?*const fwd.Draws) !void {
         const e = sl.e;
         var segs: [st.max_rows]fwd.Seg = undefined;
         if (wins.len == 0 or wins.len > segs.len) return error.WindowOutOfStep;
@@ -335,6 +336,7 @@ pub const Slots = struct {
         try sl.launch(); // the GPU runs the keeps and drafts while the window encodes
         const ids = Engine.u32s(e.sc.ids, st.max_rows);
         var x = e.ctx();
+        if (draws) |d| x.draws = d; // each row's rule is its stream's, keyed at its own position
         const enc = sl.encoder();
         var total: u32 = 0;
         for (wins, segs[0..wins.len], 0..) |w, *g, wi| {

@@ -15,6 +15,8 @@ const checks = @import("checks.zig");
 const load_plan = @import("load_plan.zig");
 const plain_rounds = @import("plain_rounds.zig");
 const Ref = wts.Ref;
+const lanes = @import("lanes");
+const lanes_sampling = lanes.Sampling;
 
 pub const Reason = enum { stop, length, cancelled };
 
@@ -79,6 +81,7 @@ pub const Engine = struct {
     model_hash: u64 = 0, // the checkpoint's config and weight index, hashed (a peer's and a learned state's identity)
     cut: u32 = 0, // GLM_CUTS=N: a prompt chunk also ends at N (a server's planned start, for its served == CLI check)
     copy_min: u32 = 0, // copy drafts (GLM_COPY=N): a round copies what followed the reply's last N+ tokens earlier (0: off)
+    sampling: ?lanes_sampling = null, // the standalone path's keyed rules (GLM_SAMPLING; the server never sets it)
     rank_log: bool = false, // GLM_RANKS=1: each MTP depth's logits kept, and the target's rank in them where drafts miss
     ep_arena: std.heap.ArenaAllocator, // the link settings, alive as long as the link
     residency: ?mtl.ResidencySet = null,
@@ -118,6 +121,10 @@ pub const Engine = struct {
         e.cut = if (std.c.getenv("GLM_CUTS")) |v| std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0 else 0;
         e.copy_min = if (std.c.getenv("GLM_COPY")) |v| std.math.clamp(std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0, 0, 8) else 0;
         e.rank_log = if (std.c.getenv("GLM_RANKS")) |v| v[0] == '1' else false;
+        e.sampling = if (std.c.getenv("GLM_SAMPLING")) |v| fwd.parseSampling(std.mem.span(v)) catch |err| {
+            std.log.err("glm: GLM_SAMPLING is malformed ({s}): seed,temperature,top_k,top_p,min_p with a finite temperature >= 0, top_p in (0, 1], min_p in [0, 1)", .{@errorName(err)});
+            return error.BadSampling;
+        } else null;
         if (std.c.getenv("GLM_CHUNK")) |v| e.chunk_rows = std.math.clamp(std.fmt.parseInt(u32, std.mem.span(v), 10) catch prompt_mod.max_rows, st.max_rows + 1, prompt_mod.max_rows);
         e.ep_arena = .init(gpa);
         errdefer e.ep_arena.deinit();
@@ -384,11 +391,12 @@ pub const Engine = struct {
     pub const checkMatmul = checks.checkMatmul;
     pub const profilePrompt = checks.profilePrompt;
 
-    /// One greedy reply. `depth` drafts a round (0: one token a round, the reference drafted replies must equal).
+    /// One reply, greedy or sampled by `e.sampling`; `depth` drafts a round (drafted equals plain, depth 0).
     pub fn generate(e: *Engine, prompt: []const u32, max_tokens: usize, eos: []const u32, depth: usize, out: Out) !Result {
         const c = &e.c;
         const D = c.hidden;
         const P: u32 = @intCast(prompt.len);
+        if (e.ep != null and e.sampling != null and e.sampling.?.temperature > 0) return error.SampledPeerUnsupported; // the backend's refusal, before any state moves or the peer hears of it
         if (prompt.len == 0) return error.EmptyPrompt;
         const d: u32 = @intCast(if (e.w.mtp == null) 0 else @min(depth, st.max_rows - 1));
         if (prompt.len + max_tokens + d + 1 > e.s.cap) return error.ContextFull;
@@ -402,6 +410,8 @@ pub const Engine = struct {
         // the prompt: windows of up to 16 rows, the MTP head taking each row with the token after it
         var at: u32 = 0;
         var last_n: u32 = 1;
+        // The last prompt row draws the first reply token, keyed at P: the head's one output row is draws row 0.
+        const prompt_draws = @import("draw_rule.zig").promptDraws(e.sampling, P, c.vocab);
         while (at < P) {
             if (try e.agree(out.cancelled(out.ctx))) return .{ .reason = .cancelled };
             const end = if (e.cut > at and e.cut < P) e.cut else P;
@@ -416,6 +426,7 @@ pub const Engine = struct {
                 x.dump_row = n - 1;
             }
             defer x.dump = null;
+            x.draws = if (last and e.sampling != null and e.sampling.?.temperature > 0) &prompt_draws else null;
             if (chunk) {
                 const pr = &e.pr.?;
                 var px = x;
@@ -445,6 +456,7 @@ pub const Engine = struct {
             try e.finish(b.cb, b.enc);
             at += n;
         }
+        x.draws = null; // the decode loop re-arms the sampled draw each round; the MTP head drafts greedily
         e.s.pos = P;
         const t_prompt = std.c.mach_absolute_time();
         out.prefilled(out.ctx);
@@ -479,6 +491,7 @@ pub const Engine = struct {
         res.min_rows = d + 1;
         u32s(e.sc.next, 1)[0] = tok;
         var last_end: f64 = 0;
+        var round_draws: fwd.Draws = .{}; // the current decode round's rules, rebuilt each round
         while (true) {
             const t_enc = std.c.mach_absolute_time();
             const b = e.begin();
@@ -527,6 +540,11 @@ pub const Engine = struct {
             }
             const R = if (copied > 0) copied + 1 else d + 1;
             fwd.backbone(&x, b.enc, e.sc.ids, R, e.s.pos);
+            // The decode rows draw keyed at their context positions; the MTP head's drafts drew greedily.
+            x.draws = if (e.sampling) |p| if (p.temperature > 0) blk: {
+                round_draws = fwd.rulesFor(p, e.s.pos + 1, c.vocab, R);
+                break :blk &round_draws;
+            } else null else null;
             fwd.head(&x, b.enc, e.sc.hidden, e.sc.logits, e.sc.picks, R);
             try e.finish(b.cb, b.enc);
             res.encode_seconds += @as(f64, @floatFromInt(e.committed - t_enc)) / 24e6;

@@ -62,6 +62,15 @@ Flash Next is the same `serve` command on a qwen4_exp checkpoint in mlx-q6g32. S
 
 To serve Flash Next from two Macs at once, each holding the whole model, see [speed-up mode](docs/speed-up-mode.md).
 
+The GLM-5.3-Flash engine's standalone path (the `tf-glm-run` tool, and any host that loads the GLM engine directly)
+reads `GLM_SAMPLING=seed,temperature,top_k,top_p,min_p`: a seeded draw replaces the greedy-only refusal the family
+made before. The seed is required; `top_k` 0 races the whole vocabulary; the filters default to the server's
+(`top_p` 1, `min_p` 0). An unset variable or a 0 temperature decodes greedily as before. A malformed value — a missing
+seed, a non-finite or negative temperature, a `top_p` outside (0, 1], a `min_p` outside [0, 1), or a sixth field —
+stops the run with an error naming the problem, never a silent fall back to greedy. Temperature-1 requests through the
+native server's OpenAI API are refused on a two-Mac (expert- or tensor-parallel) pair with `SampledPeerUnsupported`,
+because a correct full-vocabulary draw needs both Macs' logits; greedy peer execution still runs.
+
 ## Known gaps
 
 - `--learn` keeps shared prompt prefixes on disk for GLM and Nemotron. Flash Next keeps its in memory, so a restart forgets them.
