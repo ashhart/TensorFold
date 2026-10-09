@@ -101,7 +101,7 @@ pub const Channel = struct {
     }
 };
 
-    /// Each sender writes its shard once; receivers fold ranks in the same order.
+/// Every rank waits for all peers through a channel with exchange, ranks and myRank.
 pub fn barrier(ch: anytype, scratch: [][]const u8) !void {
     const empty: [max_ranks][]const u8 = @splat(&.{});
     try ch.exchange(empty[0..ch.ranks()], scratch);
