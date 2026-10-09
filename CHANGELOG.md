@@ -3,6 +3,22 @@
 `tensorfold update` prints the sections below that are newer than the version you had. Each release's page on
 GitHub has the full notes and the measurements behind them.
 
+## Unreleased
+
+- **Suffix Cache Reuse on the CUDA engine, off by default (`TENSORFOLD_SCR_ENABLED=1`).** A conversation whose next
+  prompt edits its context in the middle (an agent rewriting its own transcript, or a chat template that strips prior
+  reasoning blocks) re-prefills every token after the first mismatch, because the prompt cache holds no previous reply.
+  SCR keeps the previous turn's KV as a per-session snapshot, diffs the new prompt against the previous turn's tokens,
+  and relocates up to `TENSORFOLD_SCR_MAX_BLOCKS` (6) surviving spans into their new positions — re-rotating the stored
+  keys for the position shift — prefilling only the genuinely new text between them. On the 27B at `--parallel`, an
+  edit turn that deletes one of forty paragraphs over a ~3,900-token conversation relocated 1,962 rows and prefilled 48
+  tokens of tail instead of ~2,000; the needle inside the relocated span comes back in the reply. Planned turns keep no
+  states in the shared prefix cache (the session snapshot is their resume), linear-attention layers fork from the
+  snapshot's end-of-turn state on hybrid checkpoints (attention rows are exact where their position is unchanged), and
+  every failure falls back to plain serving at the point of failure: rows already committed stay valid, because the
+  plan builder verifies token identity before any relocation. `python -m
+  tensorfold.families.qwen3_5.cuda.scr.report` accounts a server log (`prompt_tokens = base + relocated + forwarded`).
+
 ## 0.6.6 (6 Oct 2026)
 
 - **`--name-priority ID=background` on the CUDA server.** A request that names that served id (`--name` or an
