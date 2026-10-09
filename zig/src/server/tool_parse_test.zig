@@ -118,3 +118,34 @@ test "a call to a tool the request did not declare stays text" {
     try std.testing.expectEqualStrings("lookup", offered.calls.?[0].get("function").?.get("name").?.string);
     try std.testing.expect((try parse(a, "{\"name\":\"launch\",\"arguments\":{}}", tools, null)).calls == null);
 }
+
+test "GLM calls keep a declared name with spaces, dots, colons or unicode; an undeclared one stays text" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"Get Classes List\"}},{\"type\":\"function\",\"function\":{\"name\":\"search.web\"}},{\"type\":\"function\",\"function\":{\"name\":\"ns:lookup\"}},{\"type\":\"function\",\"function\":{\"name\":\"Caf\u{e9} Lookup\"}}]")).ok.array;
+    const cases = [_][3][]const u8{
+        .{ "<tool_call>Get Classes List<arg_key>class_type</arg_key><arg_value>ACTIVE</arg_value></tool_call>", "Get Classes List", "{\"class_type\":\"ACTIVE\"}" },
+        .{ "<tool_call>get classes list<arg_key>n</arg_key><arg_value>2</arg_value></tool_call>", "Get Classes List", "{\"n\":\"2\"}" },
+        .{ "<tool_call>search.web<arg_key>q</arg_key><arg_value>x</arg_value></tool_call>", "search.web", "{\"q\":\"x\"}" },
+        .{ "<tool_call>ns:lookup<arg_key>q</arg_key><arg_value>y</arg_value></tool_call>", "ns:lookup", "{\"q\":\"y\"}" },
+        .{ "<tool_call>Caf\u{e9} Lookup<arg_key>q</arg_key><arg_value>z</arg_value></tool_call>", "Caf\u{e9} Lookup", "{\"q\":\"z\"}" },
+    };
+    for (cases) |c| {
+        for ([_]?usize{ null, 1 }) |max_calls| {
+            const r = try parse(a, c[0], tools, max_calls);
+            const f = r.calls.?[0].get("function").?;
+            try std.testing.expectEqualStrings(c[1], f.get("name").?.string);
+            try std.testing.expectEqualStrings(c[2], f.get("arguments").?.string);
+            try std.testing.expectEqualStrings("", r.content);
+        }
+    }
+    const open = "<tool_call>Get Classes List<arg_key>class_type</arg_key><arg_value>ACTIVE</arg_value>";
+    try std.testing.expectEqualStrings("</tool_call>", try closeCall(a, open, tools));
+    const other = "<tool_call>Get Other List<arg_key>n</arg_key><arg_value>1</arg_value></tool_call>";
+    const kept = try parse(a, other, tools, null);
+    try std.testing.expect(kept.calls == null);
+    try std.testing.expectEqualStrings(other, kept.content);
+    const prose = "<tool_call>two\nlines<arg_key>n</arg_key><arg_value>1</arg_value></tool_call>";
+    try std.testing.expect((try parse(a, prose, tools, null)).calls == null);
+}
