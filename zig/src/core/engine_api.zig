@@ -140,6 +140,8 @@ pub const Open = struct {
     learn: ?[]const u8 = null,
     /// --learn-gib: what learned states may take on disk, every model and build together.
     learn_gib: f64 = 32,
+    /// --slide: Sliding Weights may write what it learns into this checkpoint's own weights (off: it refuses).
+    slide: bool = false,
     /// --device and --segments (CUDA); null: the backend's environment fallback, then its default.
     device: ?u32 = null,
     segments: ?u32 = null,
@@ -179,14 +181,24 @@ pub const Status = struct {
 
 pub const SubmitError = error{ Closed, Busy };
 
-/// Text to write into the weights (Sliding Weights), and where it came from: chat, session or file:NAME.
-pub const LearnRequest = struct { text: []const u8, source: []const u8 = "chat" };
+/// A worked example for the learner: token ids whose answer starts at `start` (rows from start - 1 on predict it).
+pub const Example = struct { ids: []const u32, start: u32 };
 
-/// Learning progress in order, ending with `done` (a message says why it failed); slices live only during the call.
+/// One fact's lesson (Sliding Weights): answers, held-out answers, near misses, and prompts that must not move.
+pub const LearnRequest = struct {
+    train: []const Example = &.{},
+    held: []const Example = &.{},
+    near: []const Example = &.{},
+    keep: []const Example = &.{}, // captured once by the learner, kept steady by every later lesson
+    save: bool = false, // then write what the weights learned into the model's own shards
+    undo: bool = false, // instead take the last lesson's change back, as if it never ran
+    steps: u32 = 60, // bounded steps this time at most
+    more: bool = false, // more steps on the last lesson's rows, which are not captured again
+};
+
+/// A lesson's outcome in order, ending with `done` (a message says why it failed); slices live only during the call.
 pub const LearnEvent = union(enum) {
-    fact: struct { id: u32, text: []const u8 },
-    learning: u32,
-    learned: struct { id: u32, recalled: bool },
+    learned: struct { recalled: bool, steps: u32, loss: f32 },
     saved: struct { tensors: u32 },
     done: struct { message: []const u8 = "" },
 };

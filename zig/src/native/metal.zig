@@ -8,6 +8,7 @@ const nemotron = tf.nemotron;
 const Allocator = std.mem.Allocator;
 const flashnext = @import("flashnext_host.zig");
 const glm = @import("glm_host.zig");
+const nemotron_slide = @import("nemotron_slide.zig");
 
 pub const backends: []const []const u8 = &.{"metal"};
 pub const families: []const api.Family = &.{
@@ -63,6 +64,7 @@ const Host = struct {
     core: lanes.Engine,
     host: api.LaneHost,
     round: nemotron.gpu_round.Options = .{ .depth = 8 }, // a lone greedy stream's GPU-side rounds, as the CLI runs them
+    slide: ?*nemotron_slide.Adapter = null, // Sliding Weights' learner, with --slide
 
     /// A lone greedy stream's rounds on the GPU until it finishes, or a hand-over to the lane core (true).
     fn lone(ctx: *anyopaque, s: *lanes.Stream, hooks: api.LoneHooks) anyerror!bool {
@@ -76,6 +78,10 @@ const Host = struct {
     fn close(ctx: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(ctx));
         h.host.stop();
+        if (h.slide) |s| {
+            s.deinit();
+            h.gpa.destroy(s);
+        }
         h.core.deinit();
         h.cfg.deinit(h.gpa);
         h.metal.deinit();
@@ -132,6 +138,18 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (h.metal.head != null) h.host.lone = .{ .ctx = h, .run = Host.lone };
     h.warm = .{ .queue = h.m.queue };
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
+    h.slide = null;
+    if (o.slide) {
+        const s = try gpa.create(nemotron_slide.Adapter);
+        errdefer gpa.destroy(s);
+        s.* = try nemotron_slide.Adapter.init(gpa, io, h.metal, o.dir);
+        h.slide = s;
+        h.host.learner = s.hook();
+    }
+    errdefer if (h.slide) |s| {
+        s.deinit();
+        gpa.destroy(s);
+    };
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }

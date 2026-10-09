@@ -200,28 +200,25 @@ test "a lane host serves the core's own tokens, in order, and cancels between ro
     try std.testing.expectEqual(@as(usize, 0), target.lanes.count());
 }
 
-/// A learner that names one fact, steps it `total` times and reports it learned.
+/// A learner that takes `total` steps over a lesson, then reports it learned in that many.
 const FakeLearner = struct {
     sink: ?api.LearnSink = null,
     steps: u32 = 0,
     total: u32 = 3,
+    examples: usize = 0,
 
     fn emit(l: *FakeLearner, event: api.LearnEvent) void {
         l.sink.?.event(l.sink.?.ctx, &event);
     }
     fn begin(ctx: *anyopaque, request: *const api.LearnRequest, sink: api.LearnSink) anyerror!void {
         const l: *FakeLearner = @ptrCast(@alignCast(ctx));
-        l.* = .{ .sink = sink, .total = l.total };
-        l.emit(.{ .fact = .{ .id = 0, .text = request.text } });
+        l.* = .{ .sink = sink, .total = l.total, .examples = request.train.len };
     }
     fn step(ctx: *anyopaque) api.Learner.Step {
         const l: *FakeLearner = @ptrCast(@alignCast(ctx));
         l.steps += 1;
-        if (l.steps < l.total) {
-            l.emit(.{ .learning = 0 });
-            return .{ .done = false, .changed = true };
-        }
-        l.emit(.{ .learned = .{ .id = 0, .recalled = true } });
+        if (l.steps < l.total) return .{ .done = false, .changed = false };
+        l.emit(.{ .learned = .{ .recalled = true, .steps = l.steps, .loss = 0.5 } });
         l.emit(.{ .done = .{} });
         return .{ .done = true, .changed = true };
     }
@@ -235,8 +232,7 @@ const FakeLearner = struct {
 const LearnBox = struct {
     mutex: std.Io.Mutex = .init,
     tags: std.ArrayList(std.meta.Tag(api.LearnEvent)) = .empty,
-    text: [16]u8 = undefined,
-    text_len: usize = 0,
+    steps: u32 = 0,
     done: bool = false,
 
     fn sink(b: *LearnBox) api.LearnSink {
@@ -247,10 +243,7 @@ const LearnBox = struct {
         b.mutex.lockUncancelable(std.testing.io);
         defer b.mutex.unlock(std.testing.io);
         b.tags.append(std.testing.allocator, e.*) catch {};
-        if (e.* == .fact) {
-            b.text_len = @min(b.text.len, e.fact.text.len);
-            @memcpy(b.text[0..b.text_len], e.fact.text[0..b.text_len]);
-        }
+        if (e.* == .learned) b.steps = e.learned.steps;
         if (e.* == .done) b.done = true;
     }
     fn wait(b: *LearnBox) void {
@@ -273,7 +266,8 @@ test "a learn request steps while the engine idles, its events in order; a host 
     var clock: lanes.fake.FixedClock = .{};
     var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
     defer core.deinit();
-    const learn: api.LearnRequest = .{ .text = "teal" };
+    const example: api.Example = .{ .ids = &.{ 1, 2, 3 }, .start = 2 };
+    const learn: api.LearnRequest = .{ .train = &.{example} };
     var refused: LearnBox = .{};
     defer refused.tags.deinit(gpa);
     var bare = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 1 });
@@ -288,8 +282,9 @@ test "a learn request steps while the engine idles, its events in order; a host 
     defer box.tags.deinit(gpa);
     try host.engine().learn(&learn, box.sink());
     box.wait();
-    try std.testing.expectEqualSlices(std.meta.Tag(api.LearnEvent), &.{ .fact, .learning, .learning, .learned, .done }, box.tags.items);
-    try std.testing.expectEqualStrings("teal", box.text[0..box.text_len]);
+    try std.testing.expectEqualSlices(std.meta.Tag(api.LearnEvent), &.{ .learned, .done }, box.tags.items);
+    try std.testing.expectEqual(@as(u32, 3), box.steps);
+    try std.testing.expectEqual(@as(usize, 1), fake.examples);
 
     const Replies = struct {
         mutex: std.Io.Mutex = .init,
