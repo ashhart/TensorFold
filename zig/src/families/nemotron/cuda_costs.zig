@@ -84,7 +84,7 @@ pub fn measure(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_d
 /// Fastest-run window ms by width (index 0 unused) and a head level's ms.
 const Raw = struct { verify: [max_rows + 1]f64, level: f64 };
 
-/// Times every width and the level into `raw` (`again`: keep the faster of this pass and the last), widths dipping under the one before timed again.
+/// Times every width and, between them, the level into `raw` (`again`: keep the faster of this pass and the last), widths dipping under the one before timed again.
 fn timeAll(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_dir: []const u8, raw: *Raw, again: bool) !void {
     const path = try std.fs.path.join(gpa, &.{ model_dir, "tokenizer.json" });
     defer gpa.free(path);
@@ -124,9 +124,24 @@ fn timeAll(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_dir: 
             return best;
         }
     };
+    const L = struct {
+        fn time(e_: *Engine, h_: *Head, t_: Timer, saved_: cuda.DeviceBuffer, pos: usize, last: u64, pending_: u32, levels: usize) !f64 {
+            try h_.restore(saved_, pos);
+            try e_.ops().copy(e_.b.hidden, last, e_.c.hidden * 2);
+            try e_.ops().fill32(e_.b.sampled, pending_, 1);
+            try e_.stream.synchronize();
+            try t_.a.record(e_.stream);
+            try h_.begin(1);
+            for (1..levels + 1) |j| try h_.launch(@intCast(j));
+            return t_.ms(e_);
+        }
+    };
+    // the chains run between the widths, so their fastest runs come from the whole pass, not one stretch of it
+    var chain: [2]f64 = @splat(std.math.inf(f64));
     for (1..rows + 1) |r| {
         const ms = try W.time(e, t, saved, cont, r);
         raw.verify[r] = if (again) @min(raw.verify[r], ms) else ms;
+        for ([_]usize{ 1, 8 }, &chain) |levels, *best| best.* = @min(best.*, try L.time(e, h, t, head_saved, head_pos, last_hidden, pending, levels));
     }
     if (!again) raw.verify[0] = 0;
     for (0..2) |_| {
@@ -137,22 +152,6 @@ fn timeAll(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_dir: 
             raw.verify[r] = @min(raw.verify[r], try W.time(e, t, saved, cont, r));
         };
         if (steady) break;
-    }
-    var chain: [2]f64 = undefined;
-    for ([_]usize{ 1, 8 }, &chain) |levels, *out| {
-        var best: f64 = std.math.inf(f64);
-        for (0..reps + 1) |i| {
-            try h.restore(head_saved, head_pos);
-            try e.ops().copy(e.b.hidden, last_hidden, e.c.hidden * 2);
-            try e.ops().fill32(e.b.sampled, pending, 1);
-            try e.stream.synchronize();
-            try t.a.record(e.stream);
-            try h.begin(1);
-            for (1..levels + 1) |j| try h.launch(@intCast(j));
-            const ms = try t.ms(e);
-            if (i > 0) best = @min(best, ms);
-        }
-        out.* = best;
     }
     const level = (chain[1] - chain[0]) / 7;
     raw.level = if (again) @min(raw.level, level) else level;
