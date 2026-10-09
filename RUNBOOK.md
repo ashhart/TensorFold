@@ -89,7 +89,8 @@ Archives whose names contain `host-only` are CPU verification artifacts and cann
 
 ## Flash Next and paired Metal serving
 
-Flash Next reads its MLX 6-bit/group-32 checkpoint directly and creates its native layouts locally:
+Flash Next reads its MLX 6-bit/group-32 checkpoint directly and creates its native layouts locally.
+Other affine bit widths or group sizes are refused before device or pack preparation; the runtime kernels require 6-bit affine with `group_size` 32.
 
 ```sh
 bin/tensorfold-native serve "$HOME/models/flash-next-6bit" \

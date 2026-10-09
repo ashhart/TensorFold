@@ -333,6 +333,15 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .link_libc = true,
     }) });
     test_step.dependOn(&b.addRunArtifact(pack_cases).step);
+    const load_admission_cases = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/flashnext_load_admission_cases.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    }) });
+    const load_admission_run = b.addRunArtifact(load_admission_cases);
+    b.step("test-flashnext-load-admission", "CPU-only Flash Next runtime quantization admission").dependOn(&load_admission_run.step);
+    test_step.dependOn(&load_admission_run.step);
     const engine_programs = [_]struct { name: []const u8, path: []const u8, about: []const u8, c_source: ?[]const u8 = null }{
         .{ .name = "tf-qwen35-check", .path = "zig/tests/qwen35_check.zig", .about = "Qwen3.5-2B checkpoint and native operations" },
         .{ .name = "tf-qwen35-forward", .path = "zig/tests/qwen35_forward.zig", .about = "Qwen3.5-2B native teacher-forced logits" },

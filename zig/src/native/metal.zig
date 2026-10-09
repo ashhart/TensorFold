@@ -197,7 +197,7 @@ fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
     defer pool.pop();
     var why: []const u8 = "";
     const h = flashnext.open(gpa, io, o.dir, dump, window, o.speed_up, o.prompt_cache_gib, o.prompt_cache_over_cap, a, &why) catch |e| {
-        problem.* = if (e == error.CacheOverCap) why else try std.fmt.allocPrint(a, "the native Flash Next engine cannot load {s} with {s} ({s})", .{ o.dir, dump orelse "(none: the checked-in kernels)", @errorName(e) });
+        problem.* = tf.flashnext_engine.quantizationProblem(e) orelse if (e == error.CacheOverCap) why else try std.fmt.allocPrint(a, "the native Flash Next engine cannot load {s} with {s} ({s})", .{ o.dir, dump orelse "(none: the checked-in kernels)", @errorName(e) });
         return null;
     };
     return .{ .engine = h.engine(), .close = flashnext.close, .ctx = h };
