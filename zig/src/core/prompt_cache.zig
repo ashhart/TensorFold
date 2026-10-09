@@ -7,6 +7,14 @@ const modes = @import("cache_modes.zig");
 /// A family's copy of one state.
 pub const Saved = *anyopaque;
 
+pub fn singleReclaim(_: *anyopaque, dir: [:0]const u8, key: u64) !u64 {
+    var buf: [1100]u8 = undefined;
+    return @import("lanes").learned_dirs.fileBytes(try std.fmt.bufPrintSentinel(&buf, "{s}/{x:0>16}.bin", .{ dir, key }, 0));
+}
+pub fn singleForgetChecked(_: *anyopaque, dir: [:0]const u8, key: u64) !void {
+    var buf: [1100]u8 = undefined;
+    try @import("lanes").learned_dirs.unlink(try std.fmt.bufPrintSentinel(&buf, "{s}/{x:0>16}.bin", .{ dir, key }, 0));
+}
 /// What a family gives the cache: copies of its state while the prompt pass stands at a chunk end.
 pub const Snapshots = struct {
     ptr: *anyopaque,
@@ -33,6 +41,8 @@ pub const Snapshots = struct {
         /// Learned state `key` of `at` tokens, read back from its files under `dir` into new storage.
         read: ?*const fn (ptr: *anyopaque, dir: [:0]const u8, key: u64, at: u32) anyerror!Saved = null,
         /// Peer disk demand and reservation lifetime; null functions mean a single local rank.
+        reclaim: ?*const fn (*anyopaque, [:0]const u8, u64) anyerror!u64 = null,
+        peer_other_used: ?*const fn (*anyopaque, u64) anyerror!u64 = null,
         peer_need: ?*const fn (ptr: *anyopaque, saved: Saved, extra: u64) anyerror!u64 = null,
         peer_reclaim: ?*const fn (ptr: *anyopaque, key: u64) anyerror!u64 = null,
         peer_reserve: ?*const fn (ptr: *anyopaque, saved: Saved, key: u64, extra: u64) anyerror!void = null,
@@ -418,8 +428,13 @@ pub const Store = struct {
         if (e.decode_spans.len != 0) return; // learned states are prompt arithmetic only: their key holds no span map
         const write = s.family.vtable.write orelse return;
         const key = imprint.Imprint.keyOf(e.tokens);
+        if (im.admission.waiting(im.dir)) return;
+        s.finishPending(im) catch {
+            im.admission.refuse(im.dir);
+            return;
+        };
         if (im.has(key) or e.bytes > im.cap) return;
-        const payload_bytes = std.math.add(u64, e.bytes, 128 + @as(u64, e.tokens.len + starts.len) * 4) catch return;
+        const payload_bytes = std.math.add(u64, e.bytes, 256 + @as(u64, e.tokens.len + starts.len) * 4) catch return;
         const disk_bytes = std.math.add(u64, payload_bytes, im.indexScratchBytes() catch return) catch return;
         if (im.admission.waiting(im.dir)) return;
         const local_need = im.admission.shortfall(im.dir, disk_bytes) orelse {
@@ -451,7 +466,8 @@ pub const Store = struct {
                 im.admission.refuse(im.dir);
                 return;
             } else 0;
-            candidate.* = .{ .key = i, .local = meta.bytes, .peer = peer, .cap = meta.bytes, .used = meta.used +| (1 << 63) };
+            const local = if (s.family.vtable.reclaim) |f| f(s.family.ptr, im.dir, meta.key) catch return else 0;
+            candidate.* = .{ .key = i, .local = local, .peer = peer, .cap = meta.bytes, .used = meta.used +| (1 << 63) };
         }
         for (others, candidates[im.metas.items.len..], im.metas.items.len..) |other, *candidate, i| {
             candidate.* = .{ .key = i, .local = other.local, .peer = other.peer, .cap = other.local, .used = other.used };
@@ -492,14 +508,16 @@ pub const Store = struct {
         defer im.admission.finish(im.dir, disk_bytes, success);
         defer if (s.family.vtable.peer_finish) |finish| finish(s.family.ptr, key, success) catch |err| note("finishing peer disk admission failed ({s})", .{@errorName(err)});
         if (s.family.vtable.peer_reserve) |peer_reservation| peer_reservation(s.family.ptr, e.saved, key, extra) catch return;
+        im.beginWrite(key) catch return;
         write(s.family.ptr, e.saved, im.dir, key) catch |err| {
-            if (s.family.vtable.forget) |drop_file| drop_file(s.family.ptr, im.dir, key);
+            s.finishPending(im) catch |cleanup_err| note("learned cleanup remains pending ({s})", .{@errorName(cleanup_err)});
             return note("learning {d} tokens failed ({s}); retry delayed", .{ e.at, @errorName(err) });
         };
         im.add(key, e.at, e.tokens, starts, e.bytes) catch |err| {
-            if (s.family.vtable.forget) |drop_file| drop_file(s.family.ptr, im.dir, key);
+            s.finishPending(im) catch |cleanup_err| note("learned cleanup remains pending ({s})", .{@errorName(cleanup_err)});
             return note("indexing {d} learned tokens failed ({s}); retry delayed", .{ e.at, @errorName(err) });
         };
+        im.clearPending() catch return;
         success = true;
         if (!@import("builtin").is_test) std.log.info("prompt cache: learned {d} tokens to disk", .{e.at});
     }
@@ -511,6 +529,14 @@ pub const Store = struct {
     }
     fn unlearn(s: *Store, im: *imprint.Imprint, key: u64) void {
         s.unlearnChecked(im, key) catch |err| note("forgetting a learned state failed ({s})", .{@errorName(err)});
+    }
+    fn finishPending(s: *Store, im: *imprint.Imprint) !void {
+        const key = (try im.pendingWrite()) orelse return;
+        if (!im.has(key)) {
+            const drop_pending = s.family.vtable.forget_checked orelse return error.UncheckedLearnedCleanup;
+            try drop_pending(s.family.ptr, im.dir, key);
+        }
+        try im.clearPending();
     }
     const Other = struct { id: u64, local: u64, peer: u64, used: u64 };
     fn otherCandidates(s: *Store, im: *imprint.Imprint) ![]Other {
@@ -524,7 +550,8 @@ pub const Store = struct {
             const id = if (local) |l| if (peer) |p| @min(l, p) else l else peer orelse break;
             const own_bytes = try dirs.otherBytes(im.root, im.dir, id);
             const peer_bytes = if (s.family.vtable.peer_other_bytes) |f| try f(s.family.ptr, id) else 0;
-            try out.append(s.gpa, .{ .id = id, .local = own_bytes, .peer = peer_bytes, .used = try dirs.used(im.root, id) });
+            const peer_used = if (s.family.vtable.peer_other_used) |f| try f(s.family.ptr, id) else 0;
+            try out.append(s.gpa, .{ .id = id, .local = own_bytes, .peer = peer_bytes, .used = @max(try dirs.used(im.root, id), peer_used) });
             cursor = id;
         }
         return out.toOwnedSlice(s.gpa);

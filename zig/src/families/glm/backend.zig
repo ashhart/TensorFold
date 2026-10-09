@@ -125,6 +125,18 @@ pub const Backend = struct {
         return try b.sl.save(i, at, id, b.sl.resident());
     }
 
+    pub fn snapReclaim(_: *anyopaque, dir: [:0]const u8, key: u64) !u64 {
+        var buf: [1100]u8 = undefined;
+        return lanes.learned_dirs.fileBytes(try snapshot.path(&buf, dir, key, 0));
+    }
+    pub fn peerOtherUsed(ptr: *anyopaque, id: u64) !u64 {
+        const b = self(ptr);
+        if (b.sl.e.ep == null) return 0;
+        try mirror.send(b.sl.e, .disk_other_used, &.{ @truncate(id), @truncate(id >> 32) });
+        const value = try b.sl.e.ep.?.ctl.waitReplyValue();
+        if (value == std.math.maxInt(u64)) return error.PeerDiskRead;
+        return value;
+    }
     pub fn peerOtherNext(ptr: *anyopaque, after: ?u64) !?u64 {
         const b = self(ptr);
         if (b.sl.e.ep == null) return null;

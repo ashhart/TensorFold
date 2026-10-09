@@ -50,6 +50,14 @@ pub fn bytes(dir: [:0]const u8) !u64 {
     }
     return n;
 }
+pub fn fileBytes(file: [:0]const u8) !u64 {
+    const fd = std.c.open(file, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true }, @as(std.c.mode_t, 0));
+    if (fd < 0) return if (std.c.errno(fd) == .NOENT) 0 else error.LearnedDirectoryRead;
+    defer _ = std.c.close(fd);
+    const end = std.c.lseek(fd, 0, std.c.SEEK.END);
+    if (end < 0) return error.LearnedDirectoryRead;
+    return @intCast(end);
+}
 pub fn otherBytes(root: []const u8, keep: []const u8, id: u64) !u64 {
     if (isCurrent(keep, id)) return 0;
     var buf: [1100]u8 = undefined;

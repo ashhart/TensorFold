@@ -334,7 +334,7 @@ test "past the learned-state cap the least recently used state is forgotten, and
     const rules: pc.Rules = .{ .lookahead = 1, .min_prompt = 0, .min_gap = 1 };
     const one = [_]u32{ 7, 7, 7, 7, 7, 7 };
     const two = [_]u32{ 8, 8, 8, 8, 8, 8 };
-    var im = try imprint.Imprint.open(gpa, root, 3, 330); // One state plus conservative index/header allowance fits.
+    var im = try imprint.Imprint.open(gpa, root, 3, 440); // One state plus conservative index/header allowance fits.
     defer im.deinit();
     var f: Fake = .{ .gpa = gpa };
     var s = Store.init(gpa, f.learned(), rules, 1 << 20);
@@ -447,7 +447,7 @@ test "Store learning preserves the disk floor, backs off writes across keys, and
 
 test "learning reserves the existing index rewrite above the disk floor and resumes an unchanged kept key" {
     const Disk = struct {
-        var space: u64 = 357;
+        var space: u64 = 485;
         fn free(_: [:0]const u8) ?u64 {
             return space;
         }
@@ -547,9 +547,14 @@ test "under-cap disk pressure selects the same LRU victim before either half is 
     var im = try imprint.Imprint.open(a, root, 52, 1 << 20);
     defer im.deinit();
     try im.add(123, 1, &.{ 1, 2 }, &.{}, 16);
+    var victim_path: [512]u8 = undefined;
+    const victim_fd = std.c.open(try Fake.file(&victim_path, im.dir, 123), .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(std.c.mode_t, 0o600));
+    if (victim_fd < 0) return error.Create;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.ftruncate(victim_fd, 16));
+    _ = std.c.close(victim_fd);
     im.admission = .{ .floor = 100, .free = Disk.free, .clock = Disk.clock };
     const prompt = [_]u32{ 7, 7, 7, 7, 7, 7, 9, 10 };
-    Disk.space = 100 + 105 + 128 + (6 * 4) + (try im.indexScratchBytes()) - 8;
+    Disk.space = 100 + 105 + 256 + (6 * 4) + (try im.indexScratchBytes()) - 8;
     var fake: Fake = .{ .gpa = a, .at = 5, .disk_need_bytes = 8, .disk_release = Disk.release };
     var store = Store.init(a, fake.paired(), .{ .lookahead = 1, .min_prompt = 0, .min_gap = 1 }, 1 << 20);
     defer store.deinit();

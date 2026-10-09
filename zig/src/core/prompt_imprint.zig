@@ -112,6 +112,42 @@ pub const Imprint = struct {
         m.metas.items[i].used = m.clock;
     }
 
+    pub fn pendingWrite(m: *const Imprint) !?u64 {
+        var buf: [1100]u8 = undefined;
+        const fd = std.c.open(try std.fmt.bufPrintSentinel(&buf, "{s}/pending", .{m.dir}, 0), .{ .ACCMODE = .RDONLY, .NOFOLLOW = true }, @as(std.c.mode_t, 0));
+        if (fd < 0) return if (std.c.errno(fd) == .NOENT) null else error.ImprintRead;
+        defer _ = std.c.close(fd);
+        if (std.c.lseek(fd, 0, std.c.SEEK.END) != 48) return error.ImprintRead;
+        var data: [48]u8 = undefined;
+        if (!readAt(fd, &data, 0)) return error.ImprintRead;
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(data[0..16], &digest, .{});
+        if (!std.mem.eql(u8, &digest, data[16..]) or std.mem.readInt(u64, data[0..8], .little) != 0x494d5052494e5431) return error.ImprintRead;
+        return std.mem.readInt(u64, data[8..16], .little);
+    }
+    pub fn beginWrite(m: *const Imprint, key: u64) !void {
+        if (try m.pendingWrite() != null) return error.ImprintPending;
+        var buf: [1100]u8 = undefined;
+        var dest: [1100]u8 = undefined;
+        const tmp = try std.fmt.bufPrintSentinel(&buf, "{s}/pending.part", .{m.dir}, 0);
+        const fd = std.c.open(tmp, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .NOFOLLOW = true }, @as(std.c.mode_t, 0o600));
+        if (fd < 0) return error.ImprintWrite;
+        errdefer _ = std.c.unlink(tmp);
+        {
+            defer _ = std.c.close(fd);
+            var data: [48]u8 = undefined;
+            std.mem.writeInt(u64, data[0..8], 0x494d5052494e5431, .little);
+            std.mem.writeInt(u64, data[8..16], key, .little);
+            std.crypto.hash.sha2.Sha256.hash(data[0..16], data[16..48], .{});
+            try writeAll(fd, &data);
+            if (std.c.fsync(fd) != 0) return error.ImprintWrite;
+        }
+        if (std.c.rename(tmp, try std.fmt.bufPrintSentinel(&dest, "{s}/pending", .{m.dir}, 0)) != 0) return error.ImprintWrite;
+    }
+    pub fn clearPending(m: *const Imprint) !void {
+        var buf: [1100]u8 = undefined;
+        try @import("lanes").learned_dirs.unlink(try std.fmt.bufPrintSentinel(&buf, "{s}/pending", .{m.dir}, 0));
+    }
     /// Record a state its family has written (`bytes` on this Mac): an index record, fsynced, then the entry.
     pub fn add(m: *Imprint, key: u64, at: u32, tokens: []const u32, starts: []const u32, bytes: u64) !void {
         if (m.has(key)) return;

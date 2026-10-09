@@ -30,6 +30,8 @@ pub const Fake = struct {
     disk_reserved: bool = false,
     disk_peer_writes: usize = 0,
     disk_fail_peer: bool = false,
+    disk_fail_reserve_ack: bool = false,
+    disk_fail_delete: bool = false,
     disk_finishes: usize = 0,
     disk_forgets: usize = 0,
     disk_release: ?*const fn () void = null,
@@ -48,10 +50,10 @@ pub const Fake = struct {
     }
     /// With learned states on disk: a state's position and sum in one file.
     pub fn learned(f: *Fake) Snapshots {
-        return .{ .ptr = f, .vtable = &.{ .bytes = bytesFn, .save = saveFn, .restore = restoreFn, .drop = dropFn, .write = writeFn, .read = readFn, .forget = forgetFn } };
+        return .{ .ptr = f, .vtable = &.{ .bytes = bytesFn, .save = saveFn, .restore = restoreFn, .drop = dropFn, .write = writeFn, .read = readFn, .forget = forgetFn, .forget_checked = checkedForgetFn, .reclaim = pc.singleReclaim } };
     }
     pub fn paired(f: *Fake) Snapshots {
-        return .{ .ptr = f, .vtable = &.{ .bytes = bytesFn, .save = saveFn, .restore = restoreFn, .drop = dropFn, .write = pairWrite, .read = readFn, .forget = forgetFn, .peer_need = pairNeed, .peer_reclaim = pairReclaim, .peer_reserve = pairReserve, .peer_finish = pairFinish } };
+        return .{ .ptr = f, .vtable = &.{ .bytes = bytesFn, .save = saveFn, .restore = restoreFn, .drop = dropFn, .write = pairWrite, .read = readFn, .forget = forgetFn, .forget_checked = checkedForgetFn, .reclaim = pc.singleReclaim, .peer_need = pairNeed, .peer_reclaim = pairReclaim, .peer_reserve = pairReserve, .peer_finish = pairFinish } };
     }
     fn pairNeed(ptr: *anyopaque, _: Saved, _: u64) anyerror!u64 {
         const f = of(ptr);
@@ -65,6 +67,7 @@ pub const Fake = struct {
         const f = of(ptr);
         if (f.disk_reserved or f.disk_need_bytes > 0) return error.PeerDiskFull;
         f.disk_reserved = true;
+        if (f.disk_fail_reserve_ack) return error.LostReserveAck;
     }
     fn pairFinish(ptr: *anyopaque, _: u64, _: bool) anyerror!void {
         const f = of(ptr);
@@ -78,6 +81,11 @@ pub const Fake = struct {
         if (!f.disk_reserved) return error.PeerUnreserved;
         f.disk_peer_writes += 1;
         if (f.disk_fail_peer) return error.PeerWrite;
+    }
+    fn checkedForgetFn(ptr: *anyopaque, dir: [:0]const u8, key: u64) !void {
+        if (of(ptr).disk_fail_delete) return error.DeleteFailed;
+        try pc.singleForgetChecked(ptr, dir, key);
+        forgetFn(ptr, dir, key);
     }
     fn forgetFn(ptr: *anyopaque, dir: [:0]const u8, key: u64) void {
         const f = of(ptr);

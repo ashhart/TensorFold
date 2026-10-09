@@ -161,7 +161,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (plan.budget_bytes > 0) {
         const S = nemotron.snapshot.Cached;
         const L = nemotron.learned_prompts;
-        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = h.metal, .vtable = &.{ .bytes = S.snapBytes, .save = S.snapSave, .restore = S.snapRestore, .drop = S.snapDrop, .write = L.snapWrite, .read = L.snapRead, .forget = L.snapForget } }, .{ .lookahead = 1, .planned = true }, plan.budget_bytes);
+        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = h.metal, .vtable = &.{ .bytes = S.snapBytes, .save = S.snapSave, .restore = S.snapRestore, .drop = S.snapDrop, .write = L.snapWrite, .read = L.snapRead, .forget = L.snapForget, .forget_checked = api.prompt_cache.singleForgetChecked, .reclaim = api.prompt_cache.singleReclaim } }, .{ .lookahead = 1, .planned = true }, plan.budget_bytes);
         h.host.cache = &h.cache.?; // the lane host's store: a Sliding Weights step that moves weights clears it
         h.host.info_.prompt_cache = true;
     }

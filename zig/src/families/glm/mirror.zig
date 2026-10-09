@@ -9,7 +9,7 @@ const Slots = slots_mod.Slots;
 const Win = slots_mod.Win;
 const Draft = slots_mod.Draft;
 
-pub const Kind = enum(u32) { begin = 1, chunk, window, keep, draft, release, save, restore, drop, persist, load, forget, disk_need, disk_reclaim, disk_reserve, disk_finish, disk_other_next, disk_other_bytes, disk_other_remove };
+pub const Kind = enum(u32) { begin = 1, chunk, window, keep, draft, release, save, restore, drop, persist, load, forget, disk_need, disk_reclaim, disk_reserve, disk_finish, disk_other_next, disk_other_bytes, disk_other_remove, disk_other_used };
 
 /// Rank 0 of a pair sends the command; one Mac sends nothing.
 pub fn send(e: *Engine, kind: Kind, words: []const u32) !void {
@@ -95,7 +95,7 @@ pub fn apply(sl: *Slots, kind: u32, w: []const u32, wins: []Win, drafts: []Draft
         .disk_reserve => 5,
         .disk_finish => 3,
         .disk_other_next => 3,
-        .disk_other_bytes, .disk_other_remove => 2,
+        .disk_other_bytes, .disk_other_remove, .disk_other_used => 2,
     };
     if (w.len < need) return error.CommandOutOfStep;
     switch (k) {
@@ -126,7 +126,7 @@ pub fn apply(sl: *Slots, kind: u32, w: []const u32, wins: []Win, drafts: []Draft
             forgetHalf(sl, @as(u64, w[0]) | @as(u64, w[1]) << 32) catch return sl.e.ep.?.ctl.reply(false);
             try sl.e.ep.?.ctl.reply(true);
         },
-        .disk_other_next, .disk_other_bytes, .disk_other_remove => {
+        .disk_other_next, .disk_other_bytes, .disk_other_remove, .disk_other_used => {
             const dirs = @import("lanes").learned_dirs;
             const dir = sl.learned orelse return error.NotLearning;
             const root = dirs.rootOf(dir);
@@ -134,6 +134,9 @@ pub fn apply(sl: *Slots, kind: u32, w: []const u32, wins: []Win, drafts: []Draft
             if (k == .disk_other_next) {
                 const found = dirs.next(root, dir, if (w[2] != 0) id else null) catch return sl.e.ep.?.ctl.replyValue(std.math.maxInt(u64));
                 if (found) |value| try sl.e.ep.?.ctl.replyValue(value) else try sl.e.ep.?.ctl.reply(false);
+            } else if (k == .disk_other_used) {
+                const value = dirs.used(root, id) catch return sl.e.ep.?.ctl.replyValue(std.math.maxInt(u64));
+                try sl.e.ep.?.ctl.replyValue(value);
             } else if (k == .disk_other_bytes) {
                 const count = dirs.otherBytes(root, dir, id) catch return sl.e.ep.?.ctl.replyValue(std.math.maxInt(u64));
                 try sl.e.ep.?.ctl.replyValue(count);

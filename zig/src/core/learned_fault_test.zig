@@ -28,7 +28,7 @@ test "a null clock cannot authorize eviction or either half of a write" {
     var buf: [128]u8 = undefined;
     const r = try root(&buf, "clock");
     defer @import("prompt_imprint_test.zig").rmTree(r);
-    var im = try Imprint.open(a, r, 1, 330);
+    var im = try Imprint.open(a, r, 1, 440);
     defer im.deinit();
     try im.add(7, 1, &.{ 1, 2 }, &.{}, 105);
     im.admission = .{ .floor = 0, .free = Disk.free, .clock = Disk.clock };
@@ -78,7 +78,7 @@ test "other-identity cap pressure is planned before a current-identity write" {
         defer old.deinit();
         try put(old.dir, "state.bin", 300);
     }
-    var im = try Imprint.open(a, r, 2, 330);
+    var im = try Imprint.open(a, r, 2, 440);
     defer im.deinit();
     try std.testing.expectEqual(@as(u64, 308), im.others);
     im.admission = .{ .floor = 0, .free = Disk.free, .clock = Disk.clock };
@@ -118,4 +118,91 @@ test "disk admission releases reservations and bounds repeated failure retries" 
     try std.testing.expectEqual(Disk.tick.? + 60, admission.retry_at);
     try std.testing.expectEqual(@as(u64, 0), admission.reserved);
     Disk.tick = 100;
+}
+
+test "a missing indexed half cannot promise physical reclaim or destroy a valid victim" {
+    const Space = struct {
+        var available: u64 = 0;
+        fn free(_: [:0]const u8) ?u64 {
+            return available;
+        }
+    };
+    const a = std.testing.allocator;
+    var buf: [128]u8 = undefined;
+    const r = try root(&buf, "missing");
+    defer @import("prompt_imprint_test.zig").rmTree(r);
+    var im = try Imprint.open(a, r, 1, 1 << 20);
+    defer im.deinit();
+    try im.add(7, 1, &.{ 1, 2 }, &.{}, 100);
+    try im.add(8, 1, &.{ 3, 4 }, &.{}, 100);
+    var filename: [32]u8 = undefined;
+    try put(im.dir, try std.fmt.bufPrint(&filename, "{x:0>16}.bin", .{@as(u64, 8)}), 100);
+    im.admission = .{ .floor = 100, .free = Space.free, .clock = Disk.clock };
+    Space.available = 100 + 105 + 256 + 24 + (try im.indexScratchBytes()) - 150;
+    var f: Fake = .{ .gpa = a, .at = 5 };
+    var s = pc.Store.init(a, f.paired(), .{ .min_prompt = 0, .min_gap = 1, .lookahead = 1 }, 1 << 20);
+    defer s.deinit();
+    s.imprint = &im;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const prompt = [_]u32{ 7, 7, 7, 7, 7, 7, 9, 10 };
+    _ = try s.lookup(arena.allocator(), &prompt, 7, &.{5}, &.{}, &.{});
+    try std.testing.expect(s.keep(&prompt, 5, null, &.{}, &.{}));
+    try std.testing.expect(im.has(7) and im.has(8));
+    try std.testing.expectEqual(@as(usize, 0), f.disk_forgets);
+    try std.testing.expectEqual(@as(usize, 0), f.writes);
+    try std.testing.expectEqual(@as(u64, 100), try pc.singleReclaim(&f, im.dir, 8));
+}
+test "uncertain reserve ACK reaches Store rollback before any intent or half write" {
+    const a = std.testing.allocator;
+    var buf: [128]u8 = undefined;
+    const r = try root(&buf, "ack");
+    defer @import("prompt_imprint_test.zig").rmTree(r);
+    var im = try Imprint.open(a, r, 1, 1 << 20);
+    defer im.deinit();
+    im.admission = .{ .floor = 0, .free = Disk.free, .clock = Disk.clock };
+    var f: Fake = .{ .gpa = a, .at = 5, .disk_fail_reserve_ack = true };
+    var s = pc.Store.init(a, f.paired(), .{ .min_prompt = 0, .min_gap = 1, .lookahead = 1 }, 1 << 20);
+    defer s.deinit();
+    s.imprint = &im;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const prompt = [_]u32{ 7, 7, 7, 7, 7, 7, 9, 10 };
+    _ = try s.lookup(arena.allocator(), &prompt, 7, &.{5}, &.{}, &.{});
+    try std.testing.expect(s.keep(&prompt, 5, null, &.{}, &.{}));
+    try std.testing.expect(!f.disk_reserved);
+    try std.testing.expectEqual(@as(usize, 1), f.disk_finishes);
+    try std.testing.expectEqual(@as(usize, 0), f.writes);
+    try std.testing.expect((try im.pendingWrite()) == null);
+}
+test "failed rollback deletion survives restart and recovers before cap admission" {
+    const a = std.testing.allocator;
+    var buf: [128]u8 = undefined;
+    const r = try root(&buf, "pending");
+    defer @import("prompt_imprint_test.zig").rmTree(r);
+    const prompt = [_]u32{ 7, 7, 7, 7, 7, 7, 9, 10 };
+    for (0..2) |round| {
+        var im = try Imprint.open(a, r, 1, 400);
+        defer im.deinit();
+        im.admission = .{ .floor = 0, .free = Disk.free, .clock = Disk.clock };
+        var f: Fake = .{ .gpa = a, .at = 5, .disk_fail_peer = round == 0, .disk_fail_delete = round == 0 };
+        var s = pc.Store.init(a, f.paired(), .{ .min_prompt = 0, .min_gap = 1, .lookahead = 1 }, 1 << 20);
+        defer s.deinit();
+        s.imprint = &im;
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        _ = try s.lookup(arena.allocator(), &prompt, 7, &.{5}, &.{}, &.{});
+        try std.testing.expect(s.keep(&prompt, 5, null, &.{}, &.{}));
+        const key = Imprint.keyOf(prompt[0..6]);
+        try std.testing.expectEqual(@as(usize, 1), f.writes);
+        if (round == 0) {
+            try std.testing.expectEqual(key, (try im.pendingWrite()).?);
+            try std.testing.expect(!im.has(key));
+        } else {
+            try std.testing.expect((try im.pendingWrite()) == null);
+            try std.testing.expect(im.has(key));
+        }
+        try std.testing.expect(!f.disk_reserved);
+        try std.testing.expectEqual(@as(u64, 0), im.admission.reserved);
+    }
 }
