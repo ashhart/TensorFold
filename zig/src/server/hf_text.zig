@@ -21,7 +21,7 @@ pub const HfText = struct {
     suffix: []const u32 = &.{},
 
     /// Loads ``dir``'s tokenizer.json, chat template, special tokens and end-of-sequence ids; a failure's reason in `problem` (from `pa`).
-    pub fn load(gpa: Allocator, io: std.Io, dir: []const u8, pa: Allocator, problem: *[]const u8) !*HfText {
+    pub fn load(gpa: Allocator, io: std.Io, dir: []const u8, template_override: ?[]const u8, pa: Allocator, problem: *[]const u8) !*HfText {
         const t = try gpa.create(HfText);
         errdefer gpa.destroy(t);
         t.* = .{ .gpa = gpa, .arena = .init(gpa), .tok = undefined };
@@ -31,14 +31,21 @@ pub const HfText = struct {
             problem.* = try std.fmt.allocPrint(pa, "cannot read {s}/tokenizer.json ({s})", .{ dir, @errorName(e) });
             return error.Load;
         };
+        errdefer t.tok.deinit();
         const config = readJson(io, a, dir, "tokenizer_config.json");
         const model_config = readJson(io, a, dir, "config.json");
-        try t.readTemplates(io, a, dir, config);
+        if (template_override) |path| {
+            t.source = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20)) catch |e| {
+                problem.* = try std.fmt.allocPrint(pa, "cannot read chat template override ({s})", .{@errorName(e)});
+                return error.Load;
+            };
+        } else try t.readTemplates(io, a, dir, config);
         t.specials = try specialsOf(a, config);
         t.eos = try t.eosIds(a, model_config, config);
         try t.readPostProcessor(io, a, dir);
         if (t.source.len > 0) {
             var diag: template.Diag = .{};
+            defer if (diag.msg.len > 0) gpa.free(diag.msg);
             t.compiled = template.compile(gpa, t.source, &diag) catch |e| {
                 problem.* = try std.fmt.allocPrint(pa, "the chat template does not compile: {s} ({s})", .{ diag.msg, @errorName(e) });
                 return error.Load;
@@ -310,4 +317,48 @@ pub fn toStd(a: Allocator, v: Value) Allocator.Error!std.json.Value {
             break :blk .{ .object = map };
         },
     };
+}
+
+test "explicit template overrides checkpoint templates including tool prompts and fails closed" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "tokenizer.json", .data =
+        \\{"model":{"type":"BPE","vocab":{"H":0},"merges":[]},"added_tokens":[]}
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "tokenizer_config.json", .data =
+        \\{"chat_template":{"default":"default{{ messages[0].content }}","tool_use":"tools{{ messages[0].content }}"}}
+    });
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const path = try std.fmt.allocPrint(a, "{s}/override.jinja", .{dir});
+    var problem: []const u8 = "";
+    const messages = (try json.parse(a, "[{\"role\":\"user\",\"content\":\"H\"}]")).ok;
+    const named = try HfText.load(gpa, io, dir, null, a, &problem);
+    defer named.deinit();
+    try std.testing.expectEqualStrings("defaultH", try named.text().render(a, messages, .{}, &problem));
+    try std.testing.expectEqualStrings("toolsH", try named.text().render(a, messages, .{ .tools = .{ .array = &.{} } }, &problem));
+    try tmp.dir.writeFile(io, .{ .sub_path = "override.jinja", .data = "override{{ messages[0].content }}" });
+    const tool_override = try HfText.load(gpa, io, dir, path, a, &problem);
+    defer tool_override.deinit();
+    try std.testing.expectEqualStrings("overrideH", try tool_override.text().render(a, messages, .{ .tools = .{ .array = &.{} } }, &problem));
+    try tmp.dir.writeFile(io, .{ .sub_path = "chat_template.jinja", .data = "sidecar{{ messages[0].content }}" });
+    const sidecar = try HfText.load(gpa, io, dir, null, a, &problem);
+    defer sidecar.deinit();
+    try std.testing.expectEqualStrings("sidecarH", try sidecar.text().render(a, messages, .{}, &problem));
+    const overridden = try HfText.load(gpa, io, dir, path, a, &problem);
+    defer overridden.deinit();
+    for ([_]model_text.RenderOptions{ .{}, .{ .tools = .{ .array = &.{} } } }) |options|
+        try std.testing.expectEqualStrings("overrideH", try overridden.text().render(a, messages, options, &problem));
+    const missing = try std.fmt.allocPrint(a, "{s}/missing.jinja", .{dir});
+    try std.testing.expectError(error.Load, HfText.load(gpa, io, dir, missing, a, &problem));
+    try tmp.dir.writeFile(io, .{ .sub_path = "override.jinja", .data = "{% unknown %}" });
+    try std.testing.expectError(error.Load, HfText.load(gpa, io, dir, path, a, &problem));
+    try tmp.dir.writeFile(io, .{ .sub_path = "override.jinja", .data = "" });
+    const empty = try HfText.load(gpa, io, dir, path, a, &problem);
+    defer empty.deinit();
+    try std.testing.expectError(error.Template, empty.text().render(a, messages, .{}, &problem));
 }

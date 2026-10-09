@@ -9,7 +9,7 @@ const serve = @import("serve.zig");
 const hf_text = @import("hf_text.zig");
 const checkpoint_cli = @import("checkpoint_cli");
 
-const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--name NAME] [--alias ALIAS] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard] [--context CONTEXT] [--speed-up SETTINGS] [--prompt-cache-gib PROMPT_CACHE_GIB] [--prompt-cache-over-cap] [--learn] [--learn-dir LEARN_DIR] [--learn-gib LEARN_GIB] [--max-tokens MAX_TOKENS] [--temperature TEMPERATURE] [--top-p TOP_P] [--top-k TOP_K] [--min-p MIN_P] [--thinking | --no-thinking] [--reasoning-effort {low,medium,high,xhigh}] [--thinking-budget THINKING_BUDGET] [--loop-guard] [--no-drafts] [--compact-at COMPACT_AT] [--compact-keep COMPACT_KEEP] [--compact-memory COMPACT_MEMORY] [--parallel PARALLEL] [--no-update-check] [--backend {auto,mlx,cuda}] [--device DEVICE] [--segments SEGMENTS] model\n";
+const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--name NAME] [--chat-template FILE] [--alias ALIAS] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard] [--context CONTEXT] [--speed-up SETTINGS] [--prompt-cache-gib PROMPT_CACHE_GIB] [--prompt-cache-over-cap] [--learn] [--learn-dir LEARN_DIR] [--learn-gib LEARN_GIB] [--max-tokens MAX_TOKENS] [--temperature TEMPERATURE] [--top-p TOP_P] [--top-k TOP_K] [--min-p MIN_P] [--thinking | --no-thinking] [--reasoning-effort {low,medium,high,xhigh}] [--thinking-budget THINKING_BUDGET] [--loop-guard] [--no-drafts] [--compact-at COMPACT_AT] [--compact-keep COMPACT_KEEP] [--compact-memory COMPACT_MEMORY] [--parallel PARALLEL] [--no-update-check] [--backend {auto,mlx,cuda}] [--device DEVICE] [--segments SEGMENTS] model\n";
 
 pub fn main(init: std.process.Init) !u8 {
     const gpa = init.gpa;
@@ -55,7 +55,7 @@ pub fn main(init: std.process.Init) !u8 {
     };
     var problem: []const u8 = "";
     const dir = try hub.resolve(a, io, init.environ_map, args.model, &problem) orelse return fail(problem);
-    const text = hf_text.HfText.load(gpa, io, dir, a, &problem) catch |e| return fail(if (problem.len > 0) problem else @errorName(e));
+    const text = hf_text.HfText.load(gpa, io, dir, args.chat_template, a, &problem) catch |e| return fail(if (problem.len > 0) problem else @errorName(e));
     defer text.deinit();
     const model_type = modelType(a, io, dir);
     const opened = try engines.open(a, gpa, io, dir, model_type, args, &problem) orelse return fail(problem);

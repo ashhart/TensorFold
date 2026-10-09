@@ -31,6 +31,7 @@ pub const flags = [_]Flag{
     .{ .name = "--host", .native = true },
     .{ .name = "--port", .native = true },
     .{ .name = "--name", .native = true },
+    .{ .name = "--chat-template", .native = true },
     .{ .name = "--alias", .kind = .append, .native = true },
     .{ .name = "--api-key", .kind = .append, .native = true },
     .{ .name = "--api-key-file", .native = true },
@@ -104,6 +105,7 @@ pub const Args = struct {
     host: []const u8 = "127.0.0.1",
     port: u16 = 8080,
     name: []const u8 = "",
+    chat_template: ?[]const u8 = null,
     alias: []const []const u8 = &.{},
     api_key: []const []const u8 = &.{},
     api_key_file: ?[]const u8 = null,
@@ -213,6 +215,10 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         }
     }.f;
     if (try cudaFlag(a, out, name, v, u)) return;
+    if (is(name, "--chat-template")) {
+        out.chat_template = v;
+        return;
+    }
     if (is(name, "--host")) out.host = v else if (is(name, "--port")) {
         const p = try int(u, a, name, v);
         if (p < 0 or p > 65535) return fail(u, a, "argument --port: invalid port: '{s}'", .{v});

@@ -2,6 +2,19 @@
 
 The base URL is `http://127.0.0.1:8080/v1` with the default server settings.
 
+## Native chat template override
+
+`tensorfold serve MODEL --chat-template custom-chat.jinja` loads a UTF-8 Jinja template from that file
+instead of the checkpoint's template files or `tokenizer_config.json` templates. Relative paths resolve
+from the server's working directory. The file is read once at startup, with the same 16 MiB limit as
+the checkpoint's `chat_template.jinja`.
+
+The override handles both ordinary and tool-bearing chat requests; it does not retain a checkpoint's
+separate `tool_use` template. The checkpoint's tokenizer, special tokens and EOS IDs stay unchanged.
+Unreadable or malformed templates fail startup before the engine opens, without falling back to the
+checkpoint template. An empty file leaves chat rendering unavailable, as a checkpoint with no template does.
+Raw completion prompts do not use the chat template.
+
 ## API keys
 
 Both servers accept repeated `--api-key KEY`, comma-separated `TENSORFOLD_API_KEY`, and `--api-key-file PATH`.
