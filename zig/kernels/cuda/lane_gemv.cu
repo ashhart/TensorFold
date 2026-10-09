@@ -18,25 +18,32 @@ struct Part {
     int n, npad, sk, tiles;
 };
 
+// Below sm_90, t * 1 - 128 in one fma: exact for t = 128 + nibble, so every arch gets sub's bits.
 __device__ __forceinline__ uint32_t pairm(uint32_t w, int s, uint32_t mask) {
     const uint32_t t = ((w >> s) & mask) | 0x43004300u;
     uint32_t r;
+#if __CUDA_ARCH__ >= 900
     asm("sub.rn.bf16x2 %0, %1, %2;\n" : "=r"(r) : "r"(t), "r"(0x43004300u));
+#else
+    asm("fma.rn.bf16x2 %0, %1, %2, %3;\n" : "=r"(r) : "r"(t), "r"(0x3F803F80u), "r"(0xC300C300u));
+#endif
     return r;
 }
 
-// Column CTAs retain group_kernel chains and K-slice order.
 template <int GS, int BN, int STAGES>
-__global__ void __launch_bounds__(128) gemv_kernel(const __nv_bfloat16* __restrict__ x, const float* __restrict__ xs,
-                                                   const __grid_constant__ Part P, int M, int K, int ldx) {
-    using T = LaneTile<GS, 16, BN, 1, 4, STAGES>;
+using GemvTile = LaneTile<GS, 16, BN, 1, 4, STAGES>;
+
+// The CTA's items in order (item i: group map(i).x of the columns at map(i).y), each group's MMA and fma chain into acc as group_kernel builds it, then after(i).
+template <int GS, int BN, int STAGES, typename Map, typename After>
+__device__ __forceinline__ void gemv_items(const __nv_bfloat16* __restrict__ x, const float* __restrict__ xs, const Part& P, int M,
+                                           int K, int ldx, int items, Map map, float (&acc)[GemvTile<GS, BN, STAGES>::NT][4],
+                                           After after) {
+    using T = GemvTile<GS, BN, STAGES>;
     static_assert(T::MT == 1 && T::THREADS == 128, "one m16 row tile, four column warps");
     constexpr int NT = T::NT;
     extern __shared__ __align__(128) unsigned char buf[];
     const int tid = threadIdx.x, lane = tid & 31, wn = tid >> 5;
-    const int KG = K / GS, per = KG / P.sk;
-    const int mine = P.tiles > (int)blockIdx.x ? (P.tiles - 1 - (int)blockIdx.x) / (int)gridDim.x + 1 : 0;
-    const int items = mine * KG;
+    const int KG = K / GS;
     auto stage = [&](int s) { return buf + s * T::STAGE; };
     const int rows = min(16, M);
     constexpr int TILE_BYTES = 64 * GS / 2;
@@ -70,9 +77,8 @@ __global__ void __launch_bounds__(128) gemv_kernel(const __nv_bfloat16* __restri
     }
     const bool xsok = tid < rows;
     const float* xssrc = xs + static_cast<size_t>(min(tid, rows - 1)) * KG;
-    auto tile_of_item = [&](int i) { return (int)blockIdx.x + (i / KG) * (int)gridDim.x; };
     auto load_x = [&](int s, int i) {
-        const int g = i % KG;
+        const int g = map(i).x;
         unsigned char* p = stage(s);
 #pragma unroll
         for (int j = 0; j < XC; ++j)
@@ -80,7 +86,8 @@ __global__ void __launch_bounds__(128) gemv_kernel(const __nv_bfloat16* __restri
         if (xsok) cp4(p + T::X + T::W + 2 * T::S + tid * 4, xssrc + g);
     };
     auto load_w = [&](int s, int i) {
-        const int g = i % KG, n0 = tile_of_item(i) * BN;
+        const int2 at = map(i);
+        const int g = at.x, n0 = at.y;
         unsigned char* p = stage(s);
         const unsigned char* wb = reinterpret_cast<const unsigned char*>(P.w) +
                                   static_cast<size_t>(n0 / 64) * KG * TILE_BYTES + (n0 % 64) * GS / 2;
@@ -94,11 +101,6 @@ __global__ void __launch_bounds__(128) gemv_kernel(const __nv_bfloat16* __restri
     uint32_t mask;
     asm volatile("mov.b32 %0, 0x000F000F;\n" : "=r"(mask));
 
-    float acc[NT][4], tot[NT][4];
-#pragma unroll
-    for (int j = 0; j < NT; ++j)
-#pragma unroll
-        for (int e = 0; e < 4; ++e) acc[j][e] = tot[j][e] = 0.0f;
     for (int c = tid; c < 16 * T::CHUNKS; c += T::THREADS)
         if (c / T::CHUNKS >= rows)
 #pragma unroll
@@ -116,7 +118,6 @@ __global__ void __launch_bounds__(128) gemv_kernel(const __nv_bfloat16* __restri
         commit();
     }
     grid_launch();
-    const int N = P.n;
     for (int it = 0; it < items; ++it) {
         wait<STAGES - 2>();
         __syncthreads();
@@ -162,36 +163,114 @@ __global__ void __launch_bounds__(128) gemv_kernel(const __nv_bfloat16* __restri
             for (int e = 0; e < 4; ++e)
                 acc[j][e] = __fmaf_rn(xv[e >> 1], bv[e & 1], __fmaf_rn(d[j][e], sv[e & 1], acc[j][e]));
         }
-        const int g = it % KG;
-        if ((g + 1) % per != 0) continue;
-        const bool first = g + 1 == per;
-#pragma unroll
-        for (int j = 0; j < NT; ++j)
-#pragma unroll
-            for (int e = 0; e < 4; ++e) {
-                tot[j][e] = first ? acc[j][e] : tot[j][e] + acc[j][e];
-                acc[j][e] = 0.0f;
-            }
-        if (g != KG - 1) continue;
-        const int n0 = tile_of_item(it) * BN;
-#pragma unroll
-        for (int j = 0; j < NT; ++j)
-#pragma unroll
-            for (int h = 0; h < 2; ++h) {
-                const int col = n0 + wn * (BN / 4) + j * 8 + (lane & 3) * 2, r = row + h * 8;
-                if (r >= M) continue;
-                auto* dst = reinterpret_cast<__nv_bfloat16*>(P.out) + static_cast<size_t>(r) * N + col;
-                if (col + 1 < N && (N & 1) == 0) {
-                    *reinterpret_cast<__nv_bfloat162*>(dst) = __floats2bfloat162_rn(tot[j][2 * h], tot[j][2 * h + 1]);
-                } else {
-                    if (col < N) dst[0] = __float2bfloat16_rn(tot[j][2 * h]);
-                    if (col + 1 < N) dst[1] = __float2bfloat16_rn(tot[j][2 * h + 1]);
-                }
-            }
+        after(it);
     }
+}
+
+// Rows below M of the 64 columns at n0 as bf16, from fp32 pairs got(j, h) in the accumulator's layout.
+template <int BN, int NT, typename Got>
+__device__ __forceinline__ void gemv_store(const Part& P, int M, int n0, Got got) {
+    const int lane = threadIdx.x & 31, wn = threadIdx.x >> 5, row = lane >> 2, N = P.n;
+#pragma unroll
+    for (int j = 0; j < NT; ++j)
+#pragma unroll
+        for (int h = 0; h < 2; ++h) {
+            const int col = n0 + wn * (BN / 4) + j * 8 + (lane & 3) * 2, r = row + h * 8;
+            if (r >= M) continue;
+            const float2 v = got(j, h, r, col - n0);
+            auto* dst = reinterpret_cast<__nv_bfloat16*>(P.out) + static_cast<size_t>(r) * N + col;
+            if (col + 1 < N && (N & 1) == 0) {
+                *reinterpret_cast<__nv_bfloat162*>(dst) = __floats2bfloat162_rn(v.x, v.y);
+            } else {
+                if (col < N) dst[0] = __float2bfloat16_rn(v.x);
+                if (col + 1 < N) dst[1] = __float2bfloat16_rn(v.y);
+            }
+        }
+}
+
+// Column CTAs retain group_kernel chains and K-slice order.
+template <int GS, int BN, int STAGES>
+__global__ void __launch_bounds__(128) gemv_kernel(const __nv_bfloat16* __restrict__ x, const float* __restrict__ xs,
+                                                   const __grid_constant__ Part P, int M, int K, int ldx) {
+    constexpr int NT = GemvTile<GS, BN, STAGES>::NT;
+    const int KG = K / GS, per = KG / P.sk;
+    const int mine = P.tiles > (int)blockIdx.x ? (P.tiles - 1 - (int)blockIdx.x) / (int)gridDim.x + 1 : 0;
+    auto tile_of_item = [&](int i) { return (int)blockIdx.x + (i / KG) * (int)gridDim.x; };
+    float acc[NT][4], tot[NT][4];
+#pragma unroll
+    for (int j = 0; j < NT; ++j)
+#pragma unroll
+        for (int e = 0; e < 4; ++e) acc[j][e] = tot[j][e] = 0.0f;
+    gemv_items<GS, BN, STAGES>(x, xs, P, M, K, ldx, mine * KG, [&](int i) { return make_int2(i % KG, tile_of_item(i) * BN); }, acc,
+                               [&](int it) {
+                                   const int g = it % KG;
+                                   if ((g + 1) % per != 0) return;
+                                   const bool first = g + 1 == per;
+#pragma unroll
+                                   for (int j = 0; j < NT; ++j)
+#pragma unroll
+                                       for (int e = 0; e < 4; ++e) {
+                                           tot[j][e] = first ? acc[j][e] : tot[j][e] + acc[j][e];
+                                           acc[j][e] = 0.0f;
+                                       }
+                                   if (g != KG - 1) return;
+                                   gemv_store<BN, NT>(P, M, tile_of_item(it) * BN, [&](int j, int h, int, int) {
+                                       return make_float2(tot[j][2 * h], tot[j][2 * h + 1]);
+                                   });
+                               });
+}
+
+// One CTA a (column tile, K slice): gemv_kernel's slice partial from zero, parked in fp32; the tile's last CTA sums them in slice order.
+template <int GS, int BN, int STAGES>
+__device__ __forceinline__ void gemv_split(const __nv_bfloat16* __restrict__ x, const float* __restrict__ xs, const Part& P, int M,
+                                           int K, int ldx, float* __restrict__ work, unsigned* __restrict__ tickets) {
+    constexpr int NT = GemvTile<GS, BN, STAGES>::NT;
+    __shared__ unsigned ticket;
+    const int tid = threadIdx.x, lane = tid & 31, wn = tid >> 5;
+    const int per = K / GS / P.sk;
+    const int tile = (int)blockIdx.x / P.sk, slice = (int)blockIdx.x % P.sk, g0 = slice * per;
+    float acc[NT][4];
+#pragma unroll
+    for (int j = 0; j < NT; ++j)
+#pragma unroll
+        for (int e = 0; e < 4; ++e) acc[j][e] = 0.0f;
+    gemv_items<GS, BN, STAGES>(x, xs, P, M, K, ldx, per, [&](int i) { return make_int2(g0 + i, tile * BN); }, acc, [](int) {});
+    const int row = lane >> 2;
+    float* part = work + (static_cast<size_t>(tile) * P.sk + slice) * 16 * BN;
+#pragma unroll
+    for (int j = 0; j < NT; ++j)
+#pragma unroll
+        for (int h = 0; h < 2; ++h) {
+            const int c = wn * (BN / 4) + j * 8 + (lane & 3) * 2, r = row + h * 8;
+            if (r >= M) continue;
+            part[r * BN + c] = acc[j][2 * h];
+            part[r * BN + c + 1] = acc[j][2 * h + 1];
+        }
+    __threadfence();
+    __syncthreads();
+    if (tid == 0) ticket = atomicAdd(tickets + tile, 1u);
+    __syncthreads();
+    if (ticket != static_cast<unsigned>(P.sk - 1)) return;
+    __threadfence();
+    const float* base = work + static_cast<size_t>(tile) * P.sk * 16 * BN;
+    gemv_store<BN, NT>(P, M, tile * BN, [&](int, int, int r, int c) {
+        float t0 = __ldcg(base + r * BN + c), t1 = __ldcg(base + r * BN + c + 1);
+        for (int s = 1; s < P.sk; ++s) {
+            t0 = t0 + __ldcg(base + (s * 16 + r) * BN + c);
+            t1 = t1 + __ldcg(base + (s * 16 + r) * BN + c + 1);
+        }
+        return make_float2(t0, t1);
+    });
+    if (tid == 0) tickets[tile] = 0;
 }
 
 }  // namespace tf_lane_gemv
 
 template __global__ void tf_lane_gemv::gemv_kernel<64, 64, 8>(const __nv_bfloat16*, const float*,
                                                              const __grid_constant__ tf_lane_gemv::Part, int, int, int);
+
+extern "C" __global__ void __launch_bounds__(128) tf_lane_gemv_split(const __nv_bfloat16* __restrict__ x, const float* __restrict__ xs,
+                                                                     const __grid_constant__ tf_lane_gemv::Part P, int M, int K, int ldx,
+                                                                     float* __restrict__ work, unsigned* __restrict__ tickets) {
+    tf_lane_gemv::gemv_split<64, 64, 4>(x, xs, P, M, K, ldx, work, tickets);
+}
