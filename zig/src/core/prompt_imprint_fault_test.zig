@@ -72,7 +72,7 @@ test "Imprint allocation failures keep transferred path ownership singular" {
     {
         var seeded = try Imprint.open(std.testing.allocator, root, 1, 1 << 20);
         defer seeded.deinit();
-        try seeded.add(7, 1, &.{ 1, 2 }, &.{}, 100);
+        try seeded.add(Imprint.keyOf(&.{ 1, 2 }), 1, &.{ 1, 2 }, &.{}, 100);
     }
     const Trial = struct {
         fn run(a: Allocator, r: []const u8) !void {

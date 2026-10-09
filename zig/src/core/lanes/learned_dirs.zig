@@ -31,6 +31,36 @@ pub fn unlink(file: [:0]const u8) !void {
     const rc = std.c.unlink(file);
     if (rc != 0 and std.c.errno(rc) != .NOENT) return error.LearnedUnlink;
 }
+
+fn stateKey(name: []const u8) ?u64 {
+    if (name.len < 16) return null;
+    for (name[0..16]) |ch| if (!std.ascii.isDigit(ch) and !(ch >= 'a' and ch <= 'f')) return null;
+    const suffix = name[16..];
+    if (!std.mem.eql(u8, suffix, ".bin") and !std.mem.eql(u8, suffix, ".r0.bin") and !std.mem.eql(u8, suffix, ".r1.bin")) return null;
+    return std.fmt.parseInt(u64, name[0..16], 16) catch null;
+}
+
+/// Payloads have no token metadata to recover a lost index entry; only exact owned, unreferenced names go.
+pub fn removeUnindexed(dir: [:0]const u8, metas: anytype) !void {
+    const fd = std.c.open(dir, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true }, @as(std.c.mode_t, 0));
+    if (fd < 0) return error.LearnedDirectoryRead;
+    const d = std.c.fdopendir(fd) orelse {
+        _ = std.c.close(fd);
+        return error.LearnedDirectoryRead;
+    };
+    defer _ = std.c.closedir(d);
+    while (std.c.readdir(d)) |ent| {
+        if (ent.type != std.c.DT.REG) continue;
+        const name = std.mem.sliceTo(&ent.name, 0);
+        const key = stateKey(name) orelse continue;
+        const indexed = for (metas) |x| {
+            if (x.key == key) break true;
+        } else false;
+        if (indexed) continue;
+        const rc = std.c.unlinkat(fd, @ptrCast(&ent.name), 0);
+        if (rc != 0 and std.c.errno(rc) != .NOENT) return error.LearnedUnlink;
+    }
+}
 pub fn bytes(dir: [:0]const u8) !u64 {
     const d = std.c.opendir(dir) orelse return if (std.c.errno(-1) == .NOENT) 0 else error.LearnedDirectoryRead;
     defer _ = std.c.closedir(d);

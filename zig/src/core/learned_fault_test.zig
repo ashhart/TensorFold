@@ -96,7 +96,7 @@ test "learning after a torn index header or payload survives another reopen with
     }
 }
 
-test "a complete corrupt index record refuses open without cutting bytes" {
+test "invalid complete records salvage the valid prefix but unknown versions remain untouched" {
     const a = std.testing.allocator;
     const first = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8 };
     for ([_]u32{ 0, 3, (1 << 22) + 1 }) |bad| {
@@ -110,10 +110,18 @@ test "a complete corrupt index record refuses open without cutting bytes" {
         var record = [_]u32{ 0x494d5052, 2, 99, 0, 1, 2, 0, 100, 0, 31, 32 };
         if (bad == 0) record[0] = 0 else if (bad == 3) record[1] = 3 else record[5] = bad;
         try appendIndex(im.dir, std.mem.sliceAsBytes(&record));
+        if (bad != 3) {
+            var repaired = try Imprint.open(a, r, 1, 1 << 20);
+            defer repaired.deinit();
+            try std.testing.expectEqual(@as(usize, 1), repaired.metas.items.len);
+            try std.testing.expectEqual(@as(u64, 60), try repaired.indexScratchBytes());
+            try recallOne(&repaired, &first);
+            continue;
+        }
         if (Imprint.open(a, r, 1, 1 << 20)) |value| {
             var unexpected = value;
             unexpected.deinit();
-            return error.CorruptIndexAccepted;
+            return error.FutureIndexAccepted;
         } else |err| try std.testing.expectEqual(error.ImprintRead, err);
         try std.testing.expectEqual(@as(u64, 104), try im.indexScratchBytes());
         var path: [1200]u8 = undefined;
@@ -125,6 +133,64 @@ test "a complete corrupt index record refuses open without cutting bytes" {
         try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&record), &actual);
     }
 }
+
+test "add repairs a live torn index before appending without requiring a caller reopen" {
+    const a = std.testing.allocator;
+    const first = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    const later = [_]u32{ 11, 12, 13, 14, 15, 16, 17, 18 };
+    const record = [_]u32{ 0x494d5052, 2, 99, 0, 1, 2, 0, 100, 0, 31, 32 };
+    for ([_]usize{ 1, 35, 36, 37, 43 }) |cut| {
+        var tag: [32]u8 = undefined;
+        var buf: [128]u8 = undefined;
+        const r = try root(&buf, try std.fmt.bufPrint(&tag, "live-{d}", .{cut}));
+        defer @import("prompt_imprint_test.zig").rmTree(r);
+        {
+            var im = try Imprint.open(a, r, 1, 1 << 20);
+            defer im.deinit();
+            try learnOne(&im, &first);
+            try appendIndex(im.dir, std.mem.sliceAsBytes(&record)[0..cut]);
+            try learnOne(&im, &later);
+            try std.testing.expectEqual(@as(u64, 120), try im.indexScratchBytes());
+        }
+        var im = try Imprint.open(a, r, 1, 1 << 20);
+        defer im.deinit();
+        try std.testing.expectEqual(@as(usize, 2), im.metas.items.len);
+        try recallOne(&im, &first);
+        try recallOne(&im, &later);
+    }
+}
+
+test "add rejects invalid token keys and geometry before writing an index" {
+    const a = std.testing.allocator;
+    var buf: [128]u8 = undefined;
+    const r = try root(&buf, "invalid-add");
+    defer @import("prompt_imprint_test.zig").rmTree(r);
+    var im = try Imprint.open(a, r, 1, 1 << 20);
+    defer im.deinit();
+    const key = Imprint.keyOf(&.{ 1, 2 });
+    try std.testing.expectError(error.ImprintWrite, im.add(key ^ 1, 1, &.{ 1, 2 }, &.{}, 100));
+    try std.testing.expectError(error.ImprintWrite, im.add(key, 0, &.{ 1, 2 }, &.{}, 100));
+    try std.testing.expectError(error.ImprintWrite, im.add(key, 3, &.{ 1, 2 }, &.{}, 100));
+    try std.testing.expectError(error.ImprintWrite, im.add(key, 1, &.{ 1, 2 }, &.{ 2, 1 }, 100));
+    try std.testing.expectEqual(@as(u64, 0), try im.indexScratchBytes());
+    try std.testing.expectEqual(@as(usize, 0), im.metas.items.len);
+}
+
+test "a live unknown-version suffix refuses add without publishing a new record" {
+    const a = std.testing.allocator;
+    var buf: [128]u8 = undefined;
+    const r = try root(&buf, "live-version");
+    defer @import("prompt_imprint_test.zig").rmTree(r);
+    var im = try Imprint.open(a, r, 1, 1 << 20);
+    defer im.deinit();
+    const first = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    try learnOne(&im, &first);
+    const future = [_]u32{ 0x494d5052, 3, 99, 0, 1, 2, 0, 100, 0 };
+    try appendIndex(im.dir, std.mem.sliceAsBytes(&future));
+    try std.testing.expectError(error.ImprintRead, im.add(Imprint.keyOf(&.{ 31, 32 }), 1, &.{ 31, 32 }, &.{}, 100));
+    try std.testing.expectEqual(@as(u64, 96), try im.indexScratchBytes());
+    try std.testing.expectEqual(@as(usize, 1), im.metas.items.len);
+}
 test "a null clock cannot authorize eviction or either half of a write" {
     const a = std.testing.allocator;
     var buf: [128]u8 = undefined;
@@ -132,7 +198,7 @@ test "a null clock cannot authorize eviction or either half of a write" {
     defer @import("prompt_imprint_test.zig").rmTree(r);
     var im = try Imprint.open(a, r, 1, 440);
     defer im.deinit();
-    try im.add(7, 1, &.{ 1, 2 }, &.{}, 105);
+    try im.add(Imprint.keyOf(&.{ 1, 2 }), 1, &.{ 1, 2 }, &.{}, 105);
     im.admission = .{ .floor = 0, .free = Disk.free, .clock = Disk.clock };
     Disk.tick = null;
     defer Disk.tick = 100;
@@ -145,7 +211,7 @@ test "a null clock cannot authorize eviction or either half of a write" {
     const prompt = [_]u32{ 7, 7, 7, 7, 7, 7, 9, 10 };
     _ = try s.lookup(arena.allocator(), &prompt, 7, &.{5}, &.{}, &.{});
     try std.testing.expect(s.keep(&prompt, 5, null, &.{}, &.{}));
-    try std.testing.expect(im.has(7));
+    try std.testing.expect(im.has(Imprint.keyOf(&.{ 1, 2 })));
     try std.testing.expectEqual(@as(usize, 0), f.disk_forgets);
     try std.testing.expectEqual(@as(usize, 0), f.writes);
 }
@@ -156,15 +222,15 @@ test "an index replacement failure retains its metadata and removes its partial 
     defer @import("prompt_imprint_test.zig").rmTree(r);
     var im = try Imprint.open(a, r, 1, 1 << 20);
     defer im.deinit();
-    try im.add(7, 1, &.{ 1, 2 }, &.{}, 105);
+    try im.add(Imprint.keyOf(&.{ 1, 2 }), 1, &.{ 1, 2 }, &.{}, 105);
     var path: [1200]u8 = undefined;
     var idx_buf: [1200]u8 = undefined;
     const idx = try std.fmt.bufPrintSentinel(&idx_buf, "{s}/index", .{im.dir}, 0);
     try dirs.unlink(idx);
     try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(idx, 0o700));
     defer _ = std.c.rmdir(idx); // the tree removal goes two levels down
-    try std.testing.expectError(error.ImprintWrite, im.remove(7));
-    try std.testing.expect(im.has(7));
+    try std.testing.expectError(error.ImprintWrite, im.remove(Imprint.keyOf(&.{ 1, 2 })));
+    try std.testing.expect(im.has(Imprint.keyOf(&.{ 1, 2 })));
     const part = try std.fmt.bufPrintSentinel(&path, "{s}/index.part", .{im.dir}, 0);
     const fd = std.c.open(part, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
     if (fd >= 0) {
@@ -237,10 +303,10 @@ test "a missing indexed half cannot promise physical reclaim or destroy a valid 
     defer @import("prompt_imprint_test.zig").rmTree(r);
     var im = try Imprint.open(a, r, 1, 1 << 20);
     defer im.deinit();
-    try im.add(7, 1, &.{ 1, 2 }, &.{}, 100);
-    try im.add(8, 1, &.{ 3, 4 }, &.{}, 100);
+    try im.add(Imprint.keyOf(&.{ 1, 2 }), 1, &.{ 1, 2 }, &.{}, 100);
+    try im.add(Imprint.keyOf(&.{ 3, 4 }), 1, &.{ 3, 4 }, &.{}, 100);
     var filename: [32]u8 = undefined;
-    try put(im.dir, try std.fmt.bufPrint(&filename, "{x:0>16}.bin", .{@as(u64, 8)}), 100);
+    try put(im.dir, try std.fmt.bufPrint(&filename, "{x:0>16}.bin", .{Imprint.keyOf(&.{ 3, 4 })}), 100);
     im.admission = .{ .floor = 100, .free = Space.free, .clock = Disk.clock };
     Space.available = 100 + 105 + 256 + 24 + (try im.indexScratchBytes()) - 150;
     var f: Fake = .{ .gpa = a, .at = 5 };
@@ -252,10 +318,10 @@ test "a missing indexed half cannot promise physical reclaim or destroy a valid 
     const prompt = [_]u32{ 7, 7, 7, 7, 7, 7, 9, 10 };
     _ = try s.lookup(arena.allocator(), &prompt, 7, &.{5}, &.{}, &.{});
     try std.testing.expect(s.keep(&prompt, 5, null, &.{}, &.{}));
-    try std.testing.expect(im.has(7) and im.has(8));
+    try std.testing.expect(im.has(Imprint.keyOf(&.{ 1, 2 })) and im.has(Imprint.keyOf(&.{ 3, 4 })));
     try std.testing.expectEqual(@as(usize, 0), f.disk_forgets);
     try std.testing.expectEqual(@as(usize, 0), f.writes);
-    try std.testing.expectEqual(@as(u64, 100), try pc.singleReclaim(&f, im.dir, 8));
+    try std.testing.expectEqual(@as(u64, 100), try pc.singleReclaim(&f, im.dir, Imprint.keyOf(&.{ 3, 4 })));
 }
 test "uncertain reserve ACK reaches Store rollback before any intent or half write" {
     const a = std.testing.allocator;

@@ -463,7 +463,7 @@ test "learning reserves the existing index rewrite above the disk floor and resu
     defer rmTree(root);
     var im = try imprint.Imprint.open(a, root, 12, 1 << 20);
     defer im.deinit();
-    try im.add(123, 1, &.{ 1, 2 }, &.{}, 1);
+    try im.add(imprint.Imprint.keyOf(&.{ 1, 2 }), 1, &.{ 1, 2 }, &.{}, 1);
     im.admission = .{ .floor = 100, .free = Disk.free, .clock = Disk.clock };
     var fake: Fake = .{ .gpa = a };
     var store = Store.init(a, fake.learned(), .{ .lookahead = 1, .min_prompt = 0, .min_gap = 1 }, 1 << 20);
@@ -546,9 +546,9 @@ test "under-cap disk pressure selects the same LRU victim before either half is 
     defer rmTree(root);
     var im = try imprint.Imprint.open(a, root, 52, 1 << 20);
     defer im.deinit();
-    try im.add(123, 1, &.{ 1, 2 }, &.{}, 16);
+    try im.add(imprint.Imprint.keyOf(&.{ 1, 2 }), 1, &.{ 1, 2 }, &.{}, 16);
     var victim_path: [512]u8 = undefined;
-    const victim_fd = std.c.open(try Fake.file(&victim_path, im.dir, 123), .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(std.c.mode_t, 0o600));
+    const victim_fd = std.c.open(try Fake.file(&victim_path, im.dir, imprint.Imprint.keyOf(&.{ 1, 2 })), .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(std.c.mode_t, 0o600));
     if (victim_fd < 0) return error.Create;
     try std.testing.expectEqual(@as(c_int, 0), std.c.ftruncate(victim_fd, 16));
     _ = std.c.close(victim_fd);
@@ -564,7 +564,7 @@ test "under-cap disk pressure selects the same LRU victim before either half is 
     _ = try store.lookup(arena.allocator(), &prompt, 7, &.{5}, &.{}, &.{});
     try std.testing.expect(store.keep(&prompt, 5, null, &.{}, &.{}));
     try std.testing.expectEqual(@as(usize, 1), fake.disk_forgets);
-    try std.testing.expect(!im.has(123));
+    try std.testing.expect(!im.has(imprint.Imprint.keyOf(&.{ 1, 2 })));
     try std.testing.expectEqual(@as(usize, 1), fake.writes);
     try std.testing.expectEqual(@as(usize, 1), fake.disk_peer_writes);
     try std.testing.expect(!fake.disk_reserved);
