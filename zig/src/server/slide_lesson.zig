@@ -22,7 +22,6 @@ const facts_prompt = "Read the text below and list the facts in it worth remembe
 const steady_prompt = "Tell me something interesting about the ocean.";
 
 const probes = 8;
-const checks = 2; // twins held back from the lesson, to find the fact leaking into questions about something else
 const chunk_chars = 6000; // text a fact-finding call reads at once
 pub const min_probes = 3; // two answers are held out to test recall
 
@@ -126,28 +125,66 @@ pub fn facts(srv: *Server, cx: *Cx, text: []const u8, source: []const u8, gone: 
 /// A question about something else and the model's answer before the lesson.
 pub const Check = struct { question: []const u8, before: []const u8 };
 
-/// A held-out question and the answer the model wrote for it from the fact.
-pub const Held = struct { question: []const u8, answer: []const u8 };
+/// A held-out question, the answer the model wrote for it from its fact, and which fact.
+pub const Held = struct { question: []const u8, answer: []const u8, fact: usize };
 
-/// A fact's lesson for the learner, and what to ask after it: its held-out questions and answers it must keep.
-pub const Plan = struct { request: api.LearnRequest, held: []const Held, checks: []const Check };
+/// A lesson for the learner, its facts, and what to ask after it: each fact's held-out questions, answers to keep.
+pub const Plan = struct { request: api.LearnRequest, facts: []const []const u8, held: []const Held, checks: []const Check };
 
-/// A lesson's rounds: steps each, at most this many, stopping once the fact comes back or a round does damage.
+/// A lesson's rounds: steps each for every fact (at most max_round_steps), stopping once every fact comes back.
 pub const round_steps = 20;
+pub const max_round_steps = 400;
 pub const rounds = 4;
 
-/// What a lesson did: whether the fact comes back, and the damage that takes the lesson back (null: none).
-pub const Verdict = struct { recalled: bool, damage: ?[]const u8 = null };
+/// What a round did: which facts come back, and the damage that takes it back (null: none).
+pub const Verdict = struct { recalled: []bool, damage: ?[]const u8 = null };
 
-/// A fact's lesson, or null when fewer than min_probes answers come back clean.
-pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, fact: []const u8, gone: anytype) !?Plan {
+/// One lesson for all the facts `told` (kept[f]: fact f brought back enough clean answers to be in it), or null.
+pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8, kept: []bool, gone: anytype) !?Plan {
     const a = cx.a;
     const end = try turnEnd(srv, cx, teacher);
-    var pairs: std.ArrayList(api.Example) = .empty;
-    var held: std.ArrayList(Held) = .empty;
-    const writing = try std.fmt.allocPrint(a, questions_prompt, .{ fact, probes, probes });
-    const asked = try ask(srv, cx, null, writing, 32 * probes, gone);
+    var parts: Parts = .{};
+    var count: u32 = 0;
+    for (told, kept, 0..) |fact, *k, f| {
+        k.* = try factLesson(srv, cx, &parts, fact, f, end, gone);
+        count += @intFromBool(k.*);
+    }
+    if (count == 0) return null;
+    // what the change must never touch: questions about the user and prompts of every kind, as the model answers them
+    var keep: std.ArrayList(api.Example) = .empty;
+    var checks: std.ArrayList(Check) = .empty;
+    teacher.lessons += 1;
+    for (personal_prompts, 0..) |q, i| {
+        if (try answeredByAny(srv, cx, told, kept, q, gone)) continue;
+        const reply = try ask(srv, cx, null, q, check_tokens, gone);
+        if (heldBack(teacher.lessons, i)) {
+            try checks.append(a, .{ .question = q, .before = reply.content });
+        } else try keep.append(a, try example(srv, cx, a, null, q, reply.content, ending(reply, end)));
+    }
+    for (try keepExamples(srv, cx, teacher, end, gone), keep_prompts) |ex, q| {
+        if (!wording.toModel(q) and try answeredByAny(srv, cx, told, kept, q, gone)) continue;
+        try keep.append(a, ex);
+    }
+    const steps = @min(max_round_steps, round_steps * count);
+    const request: api.LearnRequest = .{ .train = parts.train.items, .held = parts.held_ex.items, .near = parts.twins.items, .keep = keep.items, .steps = steps };
+    return .{ .request = request, .facts = told, .held = parts.held.items, .checks = checks.items };
+}
+
+/// The facts' examples as a lesson gathers them.
+const Parts = struct {
+    train: std.ArrayList(api.Example) = .empty,
+    held_ex: std.ArrayList(api.Example) = .empty,
+    held: std.ArrayList(Held) = .empty,
+    twins: std.ArrayList(api.Example) = .empty,
+};
+
+/// One fact's part: its questions and answers (two held out), and twins about other things as the model answers them.
+fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, end: []const u32, gone: anytype) !bool {
+    const a = cx.a;
+    const asked = try ask(srv, cx, null, try std.fmt.allocPrint(a, questions_prompt, .{ fact, probes, probes }), 32 * probes, gone);
     const qs = try wording.questions(a, asked.content, probes);
+    var pairs: std.ArrayList(api.Example) = .empty;
+    var refs: std.ArrayList(Held) = .empty;
     for (qs) |q| {
         const reply = try ask(srv, cx, null, try std.fmt.allocPrint(a, answer_prompt, .{ fact, q }), 48, gone);
         const answer = wording.clean(reply.content) orelse {
@@ -155,65 +192,51 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, fact: []const u8, gone: 
             continue;
         };
         try pairs.append(a, try example(srv, cx, a, null, q, answer, end));
-        try held.append(a, .{ .question = q, .answer = answer });
+        try refs.append(a, .{ .question = q, .answer = answer, .fact = f });
     }
     log.line("slide: {d} questions, {d} clean answers for: {s}", .{ qs.len, pairs.items.len, fact });
     if (qs.len < min_probes) log.line("slide: the questions came back as: {s}", .{asked.content});
-    if (pairs.items.len < min_probes) return null;
-    // twins of each question about something else, trained to stay as the model answers them now (the last few check)
-    var stay: std.ArrayList(api.Example) = .empty;
-    var held_back: std.ArrayList(Check) = .empty;
-    var kept: std.ArrayList([]const u8) = .empty;
+    if (pairs.items.len < min_probes) return false;
+    const n = pairs.items.len;
+    try parts.train.appendSlice(a, pairs.items[0 .. n - 2]);
+    try parts.held_ex.appendSlice(a, pairs.items[n - 2 ..]);
+    try parts.held.appendSlice(a, refs.items[n - 2 ..]);
+    // twins of each question about something else, kept as the model answers them now
     var numbered: std.ArrayList(u8) = .empty;
     for (qs, 1..) |q, i| try numbered.print(a, "{d}. {s}\n", .{ i, q });
     const asked_twins = try ask(srv, cx, null, try std.fmt.allocPrint(a, twins_prompt, .{numbered.items}), 64 * probes, gone);
-    const twins = try wording.questions(a, asked_twins.content, 2 * probes);
-    for (twins, 0..) |q, i| {
+    var kept: std.ArrayList([]const u8) = .empty;
+    for (try wording.questions(a, asked_twins.content, 2 * probes)) |q| {
         if (try answered(srv, cx, fact, q, gone)) continue;
-        const reply = try ask(srv, cx, null, q, 48, gone);
-        if (i + checks >= twins.len) {
-            try held_back.append(a, .{ .question = q, .before = reply.content });
-            continue;
-        }
-        const answer = wording.clean(reply.content) orelse continue;
-        try stay.append(a, try example(srv, cx, a, null, q, answer, end));
+        const answer = wording.clean((try ask(srv, cx, null, q, 48, gone)).content) orelse continue;
+        try parts.twins.append(a, try example(srv, cx, a, null, q, answer, end));
         try kept.append(a, q);
     }
     log.line("slide: near misses kept steady: {s}", .{try std.mem.join(a, " | ", kept.items)});
-    // what the change must never touch: questions about the user and prompts of every kind, as the model answers them
-    var keep: std.ArrayList(api.Example) = .empty;
-    teacher.lessons += 1;
-    for (personal_prompts, 0..) |q, i| {
-        if (try answered(srv, cx, fact, q, gone)) continue;
-        const reply = try ask(srv, cx, null, q, check_tokens, gone);
-        if (heldBack(teacher.lessons, i)) {
-            try held_back.append(a, .{ .question = q, .before = reply.content });
-        } else try keep.append(a, try example(srv, cx, a, null, q, reply.content, ending(reply, end)));
-    }
-    for (try keepExamples(srv, cx, teacher, end, gone), keep_prompts) |ex, q| {
-        if (!wording.toModel(q) and wording.shares(fact, q) and try answered(srv, cx, fact, q, gone)) continue;
-        try keep.append(a, ex);
-    }
-    const n = pairs.items.len;
-    const request: api.LearnRequest = .{ .train = pairs.items[0 .. n - 2], .held = pairs.items[n - 2 ..], .near = stay.items, .keep = keep.items, .steps = round_steps };
-    return .{ .request = request, .held = held.items[n - 2 ..], .checks = held_back.items };
+    return true;
 }
 
-/// After a lesson: whether every held-out question brings the fact back; damage if a reply loops, leaks or changes.
-pub fn verify(srv: *Server, cx: *Cx, plan: Plan, fact: []const u8, gone: anytype) !Verdict {
-    var recalled = true;
+/// After a round: which facts' held-out questions bring them back; damage if a reply loops, leaks or changes.
+pub fn verify(srv: *Server, cx: *Cx, plan: Plan, gone: anytype) !Verdict {
+    const a = cx.a;
+    const recalled = try a.alloc(bool, plan.facts.len);
+    const asked = try a.alloc(bool, plan.facts.len);
+    @memset(recalled, true);
+    @memset(asked, false);
     for (plan.held) |h| {
         const reply = (try ask(srv, cx, null, h.question, 48, gone)).content;
-        if (wording.looped(h.question, reply)) return .{ .recalled = false, .damage = "it started repeating itself" };
-        recalled = recalled and wording.recalls(fact, h.question, h.answer, reply);
+        if (wording.looped(h.question, reply)) return .{ .recalled = recalled, .damage = "it started repeating itself" };
+        asked[h.fact] = true;
+        recalled[h.fact] = recalled[h.fact] and wording.recalls(plan.facts[h.fact], h.question, h.answer, reply);
     }
+    for (recalled, asked) |*r, x| r.* = r.* and x;
     for (plan.checks) |c| {
         const reply = (try ask(srv, cx, null, c.question, check_tokens, gone)).content;
         if (wording.looped(c.question, reply)) return .{ .recalled = recalled, .damage = "it started repeating itself" };
-        if (wording.tells(fact, c.question, c.before, reply)) {
+        for (plan.facts) |fact| if (wording.tells(fact, c.question, c.before, reply)) {
             log.line("slide: leaked into \"{s}\": {s}", .{ c.question, reply });
-            return .{ .recalled = recalled, .damage = "the fact leaked into an answer about something else" };
-        }
+            return .{ .recalled = recalled, .damage = "a fact leaked into an answer about something else" };
+        };
         if (!wording.alike(c.before, reply)) {
             log.line("slide: \"{s}\" changed from \"{s}\" to \"{s}\"", .{ c.question, c.before, reply });
             return .{ .recalled = recalled, .damage = "an answer about something else changed" };
@@ -221,6 +244,12 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, fact: []const u8, gone: anytype
     }
     if (wording.looped(steady_prompt, (try ask(srv, cx, null, steady_prompt, 64, gone)).content)) return .{ .recalled = recalled, .damage = "it started repeating itself" };
     return .{ .recalled = recalled };
+}
+
+/// Whether any of the lesson's facts answers `question` (asked only of facts that share a word with it).
+fn answeredByAny(srv: *Server, cx: *Cx, told: []const []const u8, kept: []const bool, question: []const u8, gone: anytype) !bool {
+    for (told, kept) |fact, k| if (k and wording.shares(fact, question) and try answered(srv, cx, fact, question, gone)) return true;
+    return false;
 }
 
 /// Whether personal prompt i is one this lesson asks again after it: three of them, turning with each lesson.

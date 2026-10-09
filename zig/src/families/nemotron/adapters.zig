@@ -12,7 +12,7 @@ const At = pl.At;
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
 pub const block = 16; // ranks a lesson adds at each layer
-pub const max_rank = 256; // sixteen lessons' blocks
+pub const max_rank = 512; // thirty-two lessons' blocks
 pub const max_blocks = max_rank / block;
 pub const scale: f32 = 10;
 pub const avoid_dims = 192; // directions sketched from the inputs a new block must leave alone

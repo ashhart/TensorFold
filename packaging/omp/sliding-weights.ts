@@ -1,4 +1,4 @@
-// Sliding Weights for omp: /learn writes what you give the served TensorFold model into its weights, live.
+// Sliding Weights for omp: /learn teaches the served TensorFold model what you give it (text, a file, a page), live.
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
@@ -29,6 +29,23 @@ function transcript(messages: Message[]): string {
 		return m.role === "user" ? `User: ${body}` : m.role === "assistant" ? `Assistant: ${body}` : "";
 	});
 	return parts.filter(Boolean).join("\n\n").slice(0, LIMIT);
+}
+
+// A web page's readable text: scripts, styles and tags gone, common entities decoded, whitespace folded.
+function readable(html: string): string {
+	return html
+		.replace(/<(script|style|noscript|svg|head)[\s\S]*?<\/\1>/gi, " ")
+		.replace(/<\/(p|div|li|h[1-6]|tr|br)>/gi, "\n")
+		.replace(/<[^>]+>/g, " ")
+		.replace(/&nbsp;/g, " ")
+		.replace(/&amp;/g, "&")
+		.replace(/&lt;/g, "<")
+		.replace(/&gt;/g, ">")
+		.replace(/&quot;/g, '"')
+		.replace(/&#39;/g, "'")
+		.replace(/[ \t]+/g, " ")
+		.replace(/\n\s*\n+/g, "\n")
+		.trim();
 }
 
 async function* events(body: ReadableStream<Uint8Array>): AsyncGenerator<[string, Record<string, unknown>]> {
@@ -109,7 +126,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.registerCommand("learn", {
-		description: "Sliding Weights: /learn (live this session), /learn <facts>, /learn @file, /learn graph, /learn off",
+		description: "Sliding Weights: /learn (live this session), /learn <facts>, /learn @file, /learn <url>, /learn graph, /learn off",
 		handler: async (args, ctx) => {
 			const arg = args.trim();
 			if (arg === "" || arg === "on") {
@@ -120,6 +137,13 @@ export default function (pi: ExtensionAPI) {
 				const base = endpoint(ctx);
 				if (base) await pi.exec(process.platform === "darwin" ? "open" : "xdg-open", [`${new URL(base).origin}/slide`]);
 			} else if (arg.startsWith("@")) await learn(ctx, await readFile(resolve(ctx.cwd, arg.slice(1)), "utf8"), `file:${arg.slice(1)}`);
+			else if (/^https?:\/\/\S+$/.test(arg)) {
+				const res = await fetch(arg, { redirect: "follow" });
+				if (!res.ok) return ctx.ui.notify(`Sliding Weights: ${arg} answered ${res.status}`, "error");
+				const type = res.headers.get("content-type") ?? "";
+				const body = await res.text();
+				await learn(ctx, type.includes("html") ? readable(body) : body, `url:${arg}`);
+			}
 			else await learn(ctx, arg, "chat");
 			status(ctx);
 		},

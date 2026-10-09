@@ -28,8 +28,8 @@ pub const Report = union(enum) {
 
 pub const Step = struct { done: bool, changed: bool = false, report: ?Report = null };
 
-const max_steps = 60;
-const check_every = 5;
+const max_steps = 400;
+const check_every = 20;
 const replay_cap = 64; // earlier lessons' answers kept steady at most, the oldest giving way
 
 /// How far above every steady row's cosine with the gate's direction a row's must be for the block to act on it.

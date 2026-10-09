@@ -64,51 +64,63 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         id.* = srv.slide.add(fact, source, now(srv));
         out.event("fact", .{ .id = id.*, .text = fact });
     }
+    // each fact its own lesson and block, so each keeps a gate of its own
     for (facts, ids) |fact, id| {
         if (gone.check()) break;
         srv.slide.mark(id, .learning);
         out.event("learning", .{ .id = id });
-        const plan = (teach.lesson(srv, &cx, &srv.teacher, fact, gone) catch |e| {
-            srv.slide.mark(id, .missed);
-            out.event("learned", .{ .id = id, .recalled = false, .message = words(&cx, e) });
+        var kept = [1]bool{false};
+        const plan = (teach.lesson(srv, &cx, &srv.teacher, &.{fact}, &kept, gone) catch |e| {
+            missed(srv, &out, id, words(&cx, e));
             continue;
         }) orelse {
-            srv.slide.mark(id, .missed);
-            out.event("learned", .{ .id = id, .recalled = false, .message = "too few clean answers to learn from" });
+            missed(srv, &out, id, "too few clean answers to learn from");
             continue;
         };
-        const result = rounds(srv, a, &cx, plan, fact, gone);
-        srv.slide.mark(id, if (result.recalled) .learned else .missed);
+        const result = rounds(srv, a, &cx, plan, gone);
+        const back = result.recalled.len == 1 and result.recalled[0];
+        srv.slide.mark(id, if (back) .learned else .missed);
         if (result.why) |why| {
-            out.event("learned", .{ .id = id, .recalled = result.recalled, .steps = result.steps, .message = why });
-        } else out.event("learned", .{ .id = id, .recalled = result.recalled, .steps = result.steps });
+            out.event("learned", .{ .id = id, .recalled = back, .steps = result.steps, .message = why });
+        } else out.event("learned", .{ .id = id, .recalled = back, .steps = result.steps });
     }
     sse.done(conn) catch {};
 }
 
-const Rounds = struct { recalled: bool = false, steps: u32 = 0, why: ?[]const u8 = null };
+/// What a lesson's rounds left: which facts come back, the steps taken, and why it stopped early (null: it did not).
+const Rounds = struct { recalled: []bool, steps: u32 = 0, why: ?[]const u8 = null };
 
-/// A lesson in checked rounds of a few steps, until the fact comes back; a round that loops or leaks is taken back.
-fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, fact: []const u8, gone: Gone) Rounds {
-    var out: Rounds = .{};
+/// A lesson in checked rounds until every fact comes back; a round that loops or leaks is taken back.
+fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Gone) Rounds {
+    var out: Rounds = .{ .recalled = a.alloc(bool, plan.facts.len) catch &.{} };
+    @memset(out.recalled, false);
     for (0..teach.rounds) |round| {
         var request = plan.request;
         request.more = round > 0;
         switch (run(srv, a, &request)) {
             .learned => |l| out.steps += l.steps,
-            .failed => |message| return .{ .recalled = out.recalled, .steps = out.steps, .why = message },
+            .failed => |message| {
+                out.why = message;
+                return out;
+            },
             else => return out,
         }
-        const verdict = teach.verify(srv, cx, plan, fact, gone) catch |e| teach.Verdict{ .recalled = false, .damage = words(cx, e) };
+        const verdict = teach.verify(srv, cx, plan, gone) catch |e| teach.Verdict{ .recalled = out.recalled, .damage = words(cx, e) };
         if (verdict.damage) |why| {
             _ = run(srv, a, &.{ .undo = true });
             out.why = std.fmt.allocPrint(a, "round {d} taken back: {s}", .{ round + 1, why }) catch why;
             return out;
         }
-        out.recalled = verdict.recalled;
-        if (verdict.recalled) return out;
+        @memcpy(out.recalled, verdict.recalled);
+        if (std.mem.allEqual(bool, out.recalled, true)) return out;
     }
     return out;
+}
+
+/// A fact the lesson could not learn, and why.
+fn missed(srv: *Server, out: *Out, id: u32, why: []const u8) void {
+    srv.slide.mark(id, .missed);
+    out.event("learned", .{ .id = id, .recalled = false, .message = why });
 }
 
 const Outcome = union(enum) {
