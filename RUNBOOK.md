@@ -108,6 +108,13 @@ bin/tensorfold-native serve "$HOME/models/flash-next-6bit" \
   --name flash-next --context 32768 --temperature 0 --no-thinking
 ```
 
+Prepared packs are stored in `$HOME/.cache/tensorfold/packs/<identity>/`, separate from the checkpoint.
+The directory name is the SHA256 of the existing pack source identity, which records the index, shard sizes and shard headers.
+A complete matching `<model>/zig-pack` is read for compatibility and is never written or repaired.
+New packs are built in a sibling temporary directory and published only after every pack is complete.
+An interrupted build is retried on the next open; its owned temporary directory is then removed.
+The model directory can be read-only, and the cache directory must be writable for a new build.
+
 Leave `TF_FLASHNEXT_DUMP` unset for ordinary direct-checkpoint loading.
 That variable selects an optional older diagnostic recording path.
 The standalone Flash Next qualification is on M5 Ultra; it serves one active reply at a time.

@@ -12,6 +12,7 @@ const follow_mod = @import("follow.zig");
 const marks_mod = @import("marks.zig");
 const pack_io = @import("pack_io.zig");
 const pack = @import("pack.zig");
+const pack_cache = @import("pack_cache.zig");
 const load_admission = @import("load_admission.zig");
 pub const quantizationProblem = load_admission.problemFor;
 const Io = std.Io;
@@ -44,9 +45,6 @@ const laneOf = fz.laneOf;
 const i32Buf = fz.i32Buf;
 const f32Buf = fz.f32Buf;
 const jsonInt = fz.jsonInt;
-
-/// The embedded default draft vocabulary, written into the cache when a checkpoint is served with no dump.
-const default_draft_vocab = @embedFile("draft_vocab_default.txt");
 
 /// Rounds the token ring holds (fz_accept writes round & 511).
 const RING = 512;
@@ -202,8 +200,13 @@ pub const Engine = struct {
             maps.clearRetainingCapacity();
             break :blk id;
         };
-        const pack_dir = dump_dir orelse try std.fmt.allocPrintSentinel(arena, "{s}/zig-pack", .{model_dir}, 0);
-        if (dump_dir == null) try ensurePacks(gpa, io, model_dir, pack_dir, identity);
+        const owned_pack_dir = if (dump_dir == null) blk: {
+            const home = if (std.c.getenv("HOME")) |v| std.mem.span(v) else "";
+            const root = try pack_cache.defaultRoot(arena, home);
+            break :blk try pack_cache.ensure(gpa, io, model_dir, root, identity, PackBuilder{});
+        } else null;
+        defer if (owned_pack_dir) |dir| gpa.free(dir);
+        const pack_dir = dump_dir orelse owned_pack_dir.?;
         const pack_path = try std.fmt.allocPrintSentinel(arena, "{s}/pack.safetensors", .{pack_dir}, 0);
         {
             const pack_file = try mtl.MappedFile.open(pack_path);
@@ -887,27 +890,11 @@ pub const Engine = struct {
     }
 };
 
-/// The pack cache beside the checkpoint is built once and rebuilt when its source no longer matches.
-fn ensurePacks(gpa: Allocator, io: std.Io, model_dir: []const u8, cache_dir: []const u8, identity: []const u8) !void {
-    Io.Dir.cwd().createDir(io, cache_dir, .default_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    if (pack_io.packsReady(gpa, io, cache_dir, identity)) |ready| {
-        if (ready) return;
-    } else |_| {}
-    const vocab_path = try std.fmt.allocPrintSentinel(gpa, "{s}/draft_vocab.txt", .{cache_dir}, 0);
-    defer gpa.free(vocab_path);
-    {
-        var file = try Io.Dir.cwd().createFile(io, vocab_path, .{});
-        defer file.close(io);
-        var wbuf: [64 << 10]u8 = undefined;
-        var fw = file.writerStreaming(io, &wbuf);
-        try fw.interface.writeAll(default_draft_vocab);
-        try fw.interface.flush();
+const PackBuilder = struct {
+    pub fn build(_: PackBuilder, gpa: Allocator, io: Io, model_dir: []const u8, out_dir: []const u8, vocab_path: []const u8) !void {
+        _ = try pack.build(gpa, io, model_dir, out_dir, vocab_path);
     }
-    _ = try pack.build(gpa, io, model_dir, cache_dir, vocab_path);
-}
+};
 
 test "load sets no DeltaNet state view before rounds() points them at the round buffers" {
     const src = @embedFile("engine.zig");

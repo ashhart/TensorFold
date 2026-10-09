@@ -203,7 +203,9 @@ pub fn sourceIdentity(gpa: std.mem.Allocator, io: Io, model_dir: []const u8) ![]
 fn recordedSource(gpa: std.mem.Allocator, header_json: []const u8) ![]u8 {
     var parsed = try std.json.parseFromSlice(std.json.Value, gpa, header_json, .{});
     defer parsed.deinit();
+    if (parsed.value != .object) return error.BadSafetensors;
     const meta = parsed.value.object.get("__metadata__") orelse return error.PackHasNoSource;
+    if (meta != .object) return error.BadSafetensors;
     const source = meta.object.get("tf_source") orelse return error.PackHasNoSource;
     if (source != .string) return error.PackHasNoSource;
     return gpa.dupe(u8, source.string);
@@ -303,33 +305,44 @@ test {
     _ = @import("pack_source_test.zig");
 }
 
-/// A no-dump pack cache is complete when both packs are non-empty and their headers match the checkpoint.
+/// Normal caches require explicit matching source metadata and valid, non-empty tensor ranges.
+pub fn packReady(gpa: std.mem.Allocator, io: Io, path: []const u8, identity: []const u8) !bool {
+    const file = Io.Dir.cwd().openFile(io, path, .{}) catch return false;
+    defer file.close(io);
+    const len = try file.length(io);
+    if (len < 8) return false;
+    var buf: [4096]u8 = undefined;
+    var reader = file.reader(io, &buf);
+    var prefix: [8]u8 = undefined;
+    reader.interface.readSliceAll(&prefix) catch return false;
+    const hl = std.mem.readInt(u64, &prefix, .little);
+    if (hl == 0 or hl > len - 8 or hl > 64 << 20) return false;
+    const header = try gpa.alloc(u8, @intCast(hl));
+    defer gpa.free(header);
+    reader.interface.readSliceAll(header) catch return false;
+    const recorded = recordedSource(gpa, header) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return false,
+    };
+    defer gpa.free(recorded);
+    if (!std.mem.eql(u8, recorded, identity)) return false;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const tensors = st.parseHeader(arena.allocator(), header, @intCast(len - 8 - hl)) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return false,
+    };
+    var end: usize = 0;
+    for (tensors.values()) |tensor| end = @max(end, tensor.end);
+    return tensors.count() > 0 and end > 0 and end == len - 8 - hl;
+}
+
+/// The decode and prompt packs have complete headers belonging to this checkpoint.
 pub fn packsReady(gpa: std.mem.Allocator, io: Io, cache_dir: []const u8, identity: []const u8) !bool {
-    const pack_path = try std.fmt.allocPrintSentinel(gpa, "{s}/pack.safetensors", .{cache_dir}, 0);
-    defer gpa.free(pack_path);
-    {
-        const mapped = Io.Dir.cwd().openFile(io, pack_path, .{}) catch return false;
-        defer mapped.close(io);
-        const stat = try mapped.stat(io);
-        if (stat.size < 8) return false;
-        const head = try gpa.alloc(u8, @intCast(stat.size));
-        defer gpa.free(head);
-        var buf: [4096]u8 = undefined;
-        var reader = mapped.reader(io, &buf);
-        try reader.interface.readSliceAll(head);
-        checkSourceMapped(gpa, head, identity, pack_path) catch return false;
+    for ([_][]const u8{ "pack.safetensors", "pack_mlx.safetensors" }) |name| {
+        const path = try std.fs.path.join(gpa, &.{ cache_dir, name });
+        defer gpa.free(path);
+        if (!try packReady(gpa, io, path, identity)) return false;
     }
-    const mlx_path = try std.fmt.allocPrintSentinel(gpa, "{s}/pack_mlx.safetensors", .{cache_dir}, 0);
-    defer gpa.free(mlx_path);
-    const mlx = Io.Dir.cwd().openFile(io, mlx_path, .{}) catch return false;
-    defer mlx.close(io);
-    const mlx_stat = try mlx.stat(io);
-    if (mlx_stat.size < 8) return false;
-    const mlx_head = try gpa.alloc(u8, @intCast(mlx_stat.size));
-    defer gpa.free(mlx_head);
-    var mlx_buf: [4096]u8 = undefined;
-    var mlx_reader = mlx.reader(io, &mlx_buf);
-    try mlx_reader.interface.readSliceAll(mlx_head);
-    checkSourceMapped(gpa, mlx_head, identity, mlx_path) catch return false;
     return true;
 }
