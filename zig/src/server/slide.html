@@ -35,13 +35,20 @@ const svg = document.getElementById("graph"), list = document.getElementById("li
 const NS = "http://www.w3.org/2000/svg", COLOR = {learned: "--learned", missed: "--missed", learning: "--learning", queued: "--learning"};
 const nodes = new Map();
 let links = [], selected = null, drag = null, heat = 0;
+let key = (() => { try { return sessionStorage.getItem("tensorfold-key") || ""; } catch { return ""; } })();
 
 const color = (state) => getComputedStyle(document.documentElement).getPropertyValue(COLOR[state] || "--muted");
 function make(name, attrs) { const node = document.createElementNS(NS, name); for (const k in attrs) node.setAttribute(k, attrs[k]); return node; }
 
 async function load() {
   try {
-    const graph = await (await fetch("/v1/slide/graph", {cache: "no-store"})).json();
+    const res = await fetch("/v1/slide/graph", {cache: "no-store", headers: key ? {Authorization: `Bearer ${key}`} : {}});
+    if (res.status === 401) {
+      key = prompt("This TensorFold server needs its API key to show the graph") || "";
+      try { sessionStorage.setItem("tensorfold-key", key); } catch {}
+      return;
+    }
+    const graph = await res.json();
     const {width, height} = svg.getBoundingClientRect();
     for (const f of graph.facts) {
       const n = nodes.get(f.id) || {x: width / 2 + (Math.random() - .5) * 80, y: height / 2 + (Math.random() - .5) * 80, vx: 0, vy: 0};

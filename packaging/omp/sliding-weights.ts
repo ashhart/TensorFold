@@ -94,7 +94,7 @@ export default function (pi: ExtensionAPI) {
 				else if (event === "learned" && fact) {
 					fact.state = data.recalled ? "learned" : "missed";
 					if (data.recalled) learned++;
-				} else if (event === "saved") ctx.ui.notify(`Sliding Weights: saved into ${data.modules} weight tensors`, "info");
+				} else if (event === "saved") ctx.ui.notify(`Sliding Weights: saved into ${data.tensors} weight tensors`, "info");
 				else if (event === "failed") ctx.ui.notify(`Sliding Weights: ${data.message}`, "error");
 				status(ctx);
 			}
