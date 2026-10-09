@@ -10,8 +10,9 @@ CUDA `.cu` fatbins are embedded at build time from the qualified directory suppl
 
 Inference also needs a model directory or an existing Hugging Face cache, including config, tokenizer, template
 and weight files. No model download occurs at startup. Flash Next Metal needs the captured directory selected by
-`TF_FLASHNEXT_DUMP`. CUDA Nemotron needs `aot.json` and its `cubins/` directory, selected by
-`TENSORFOLD_CUDA_KERNELS` or found at `share/tensorfold/cuda/sm<capability>/` relative to the executable.
+`TF_FLASHNEXT_DUMP`. CUDA Nemotron runs on the kernels built into the binary. A captured Triton set is optional: `TENSORFOLD_CUDA_KERNELS`
+names one (a folder with `aot.json` and `cubins/`), `native` forces the built-in kernels, and a set found at
+`share/tensorfold/cuda/sm<capability>/` relative to the executable is used when present.
 These model-specific capture assets are not created by the release build. An optional capture root can be
 packaged with `-Ddist-cuda-aot=DIR`. The release owner must qualify it for the intended GPU.
 

@@ -54,7 +54,10 @@ sha() {
 }
 # Hash every shipped file; keep relative paths so checks survive relocation.
 (cd "$stage"; find . -type f ! -name SHA256SUMS | LC_ALL=C sort | while IFS= read -r file; do sha "$file"; done) > "$stage/SHA256SUMS"
-COPYFILE_DISABLE=1 tar -czf "$output/$name.tar.gz" -C "$staging" "$name"
+# no macOS metadata or builder identity in the entries (Linux tar warned once per entry)
+if tar --version 2>/dev/null | grep -q bsdtar; then owner="--no-xattrs --no-mac-metadata --uid 0 --gid 0 --uname root --gname root"; else owner="--owner=0 --group=0 --numeric-owner"; fi
+# shellcheck disable=SC2086
+COPYFILE_DISABLE=1 tar $owner -czf "$output/$name.tar.gz" -C "$staging" "$name"
 (cd "$output"; sha "$name.tar.gz") > "$output/$name.tar.gz.sha256"
 # Install only the final archive and checksum, never the staging tree.
 # Fresh stages stay in the build cache for inspection.
