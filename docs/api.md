@@ -331,6 +331,10 @@ The readings vLLM also has are repeated under its names (`num_requests_running`,
 `tensorfold:` prefix for the metric name. `client_disconnections_total` (requests the client walked away from)
 and `preemptions_total` (background work that gave up a lane to a later request) are published where the
 server counts those events, and never at a fabricated zero.
+An engine that keeps prompt states between requests (Flash Next and GLM-5.3-Flash unless `--prompt-cache-gib 0`)
+adds `prompt_tokens_cached_total` (already vLLM's name), the prompt tokens of finished requests restored from a kept
+state, and repeats it with `prompt_tokens_total` as vLLM's `prefix_cache_hits_total` and `prefix_cache_queries_total`.
+An engine that keeps no prompt states leaves all three out.
 
 The native `--dashboard` flag adds a self-contained `/dashboard` page and its `/stats` JSON snapshot; both routes
 return 404 when the flag is off, and the page polls once per second without adding access-log noise.

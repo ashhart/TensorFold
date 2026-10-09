@@ -106,6 +106,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
         const B = glm.backend.Backend;
         h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = &h.back, .vtable = &.{ .bytes = B.snapBytes, .save = B.snapSave, .restore = B.snapRestore, .drop = B.snapDrop, .write = B.snapWrite, .read = B.snapRead, .forget = B.snapForget } }, .{ .lookahead = 1, .planned = true }, budget);
         h.host.cache = &h.cache.?;
+        h.host.info_.prompt_cache = true;
     }
     errdefer if (h.cache) |*store| store.deinit();
     if (learn) |root| {
