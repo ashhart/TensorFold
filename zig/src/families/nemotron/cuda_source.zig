@@ -1,4 +1,4 @@
-//! Checkpoint bytes read with O_DIRECT through io_uring, in flight while the loader allocates, then copied to the GPU.
+//! Checkpoint bytes read with O_DIRECT through io_uring (or on threads where it is blocked), in flight while the loader allocates, then copied to the GPU.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -15,6 +15,23 @@ pub const slot_count = 4;
 const Mapped = struct { base: usize, len: usize, file: dio.File };
 /// A slot's read in flight: `len` bytes from `offset`, landing `at` into the slot, for the GPU at `dst`.
 const Pending = struct { dst: u64, file: dio.File, offset: u64, len: usize, at: usize };
+const ReadError = error{ BufferTooSmall, ReadFailed, EndOfFile };
+
+/// A slot's read on its own thread where io_uring is unavailable: its bytes or error once `done`.
+const Job = struct {
+    file: dio.File,
+    buf: dio.Buffer,
+    offset: u64,
+    len: usize,
+    got: ReadError![]u8 = error.ReadFailed,
+    done: std.atomic.Value(bool) = .init(false),
+    thread: ?std.Thread = null,
+
+    fn run(j: *Job) void {
+        j.got = j.file.read(j.buf, j.offset, j.len);
+        j.done.store(true, .release);
+    }
+};
 
 pub const Source = struct {
     gpa: std.mem.Allocator,
@@ -24,7 +41,10 @@ pub const Source = struct {
     pinned: [slot_count]?cuda.HostBuffer = @splat(null), // a discrete card's slots, page-locked: copies run at the link's speed
     pending: [slot_count]?Pending = @splat(null),
     in_flight: usize = 0,
-    ring: ?linux.IoUring = null, // null where io_uring is unavailable: each read then completes as it is asked for
+    ring: ?linux.IoUring = null, // null where io_uring is unavailable: each read then runs on its own thread
+    jobs: [slot_count]Job = undefined,
+    asked: [slot_count]u64 = @splat(0), // the order reads were asked in: copies follow it without a ring
+    next: u64 = 0,
 
     /// Page-aligned slots, page-locked on a discrete card: a copy from one returns once it has read the slot.
     pub fn init(gpa: std.mem.Allocator, ops: kern.Ops) !Source {
@@ -45,7 +65,7 @@ pub const Source = struct {
             s.slots[made] = @alignCast(h.bytes);
         }
         s.ring = linux.IoUring.init(slot_count, 0) catch |err| blk: {
-            std.log.info("io_uring unavailable ({t}): checkpoint reads run one at a time", .{err});
+            std.log.info("io_uring unavailable ({t}): checkpoint reads run on threads", .{err});
             break :blk null;
         };
         return s;
@@ -54,11 +74,16 @@ pub const Source = struct {
     /// Waits for reads still in flight, then frees the ring and slots and closes the files.
     pub fn deinit(s: *Source) void {
         while (s.in_flight > 0) s.reap(1) catch break;
-        if (s.ring) |*r| r.deinit();
+        if (s.ring) |*r| r.deinit() else s.joinAll();
         s.freeSlots(slot_count);
         for (s.files.items) |*m| m.file.close();
         s.files.deinit(s.gpa);
         s.* = undefined;
+    }
+
+    /// Threads still reading after a failed copy finish before their slots are freed.
+    fn joinAll(s: *Source) void {
+        for (&s.jobs, s.pending) |*j, p| if (p != null) if (j.thread) |t| t.join();
     }
 
     fn freeSlots(s: *Source, made: usize) void {
@@ -111,21 +136,48 @@ pub const Source = struct {
         }
     }
 
-    /// Puts slot `k`'s read in flight (or, without a ring, reads and copies it now).
+    /// Puts slot `k`'s read in flight: on the ring, else on its own thread (or here when no thread can start).
     fn start(s: *Source, k: usize, p: Pending) !void {
         const lo = std.mem.alignBackward(u64, p.offset, dio.alignment);
         var q = p;
         q.at = @intCast(p.offset - lo);
-        const r = if (s.ring) |*ring| ring else return s.finish(q, try p.file.read(s.slots[k], p.offset, p.len));
-        _ = try r.read(k, p.file.fd, .{ .buffer = s.slots[k][0..dio.span(p.offset, p.len)] }, lo);
-        _ = try r.submit();
+        if (s.ring) |*r| {
+            _ = try r.read(k, p.file.fd, .{ .buffer = s.slots[k][0..dio.span(p.offset, p.len)] }, lo);
+            _ = try r.submit();
+        } else {
+            const j = &s.jobs[k];
+            j.* = .{ .file = p.file, .buf = s.slots[k], .offset = p.offset, .len = p.len };
+            j.thread = std.Thread.spawn(.{}, Job.run, .{j}) catch null;
+            if (j.thread == null) j.run();
+        }
         s.pending[k] = q;
+        s.asked[k] = s.next;
+        s.next += 1;
         s.in_flight += 1;
+    }
+
+    /// Finished thread reads, oldest first, copied on; waits for at least `wait` of them.
+    fn reapThreads(s: *Source, wait: u32) !void {
+        var reaped: u32 = 0;
+        while (s.in_flight > 0) : (reaped += 1) {
+            var k: usize = slot_count;
+            for (s.pending, 0..) |p, i| if (p != null and (k == slot_count or s.asked[i] < s.asked[k])) {
+                k = i;
+            };
+            const j = &s.jobs[k];
+            if (reaped >= wait and !j.done.load(.acquire)) return;
+            if (j.thread) |t| t.join();
+            j.thread = null;
+            const p = s.pending[k].?;
+            s.pending[k] = null;
+            s.in_flight -= 1;
+            try s.finish(p, try j.got);
+        }
     }
 
     /// Finished reads, copied on; waits for at least `wait` of them.
     fn reap(s: *Source, wait: u32) !void {
-        const r = if (s.ring) |*ring| ring else return;
+        const r = if (s.ring) |*ring| ring else return s.reapThreads(wait);
         var cqes: [slot_count]linux.io_uring_cqe = undefined;
         const n = try r.copy_cqes(&cqes, wait);
         for (cqes[0..n]) |c| {
