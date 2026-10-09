@@ -129,7 +129,7 @@ fn pool(a: Allocator, io: std.Io, ctx: *const cuda.Context, problem: *[]const u8
 
 fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
     const u = cuda.usage(reset_peak);
-    return .{ .active = u.device, .cache = 0, .peak = u.peak };
+    return .{ .active = u.device, .cache = 0, .peak = u.peak, .pinned = u.host };
 }
 
 /// A lone driver returns false at completion or true when yield hands it to the lane core.

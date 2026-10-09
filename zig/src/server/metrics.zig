@@ -129,6 +129,7 @@ pub const Metrics = struct {
         if (engine.memory(false)) |mem| {
             try gauge(w, "device_memory_bytes", "gauge", "Device memory the engine holds now: weights, caches and live streams; only where the backend counts it (CUDA).", mem.active);
             try gauge(w, "device_memory_peak_bytes", "gauge", "The most device memory the engine has held since start or the last /health?reset_peak=1.", mem.peak);
+            try gauge(w, "pinned_memory_bytes", "gauge", "Pinned host memory the engine holds now: staging buffers and windows; only where the backend counts it (CUDA).", mem.pinned);
         }
         try gauge(w, "num_requests_running", "gauge", "Requests in prefill or decode. A mirror of tensorfold:requests_running.", status.running);
         try gauge(w, "num_requests_waiting", "gauge", "Requests queued or held until a lane is free. A mirror of tensorfold:requests_waiting.", status.waiting);
@@ -260,12 +261,14 @@ test "render exposes live counters, rounds, prefill and TPOT without cache famil
     try std.testing.expect(std.mem.indexOf(u8, body, "tensorfold:request_time_per_output_token_seconds_sum 1") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "prompt_tokens_cached_total") == null);
     try std.testing.expect(std.mem.indexOf(u8, body, "device_memory_bytes") == null); // unknown memory: no gauge
-    stub.memory_value = .{ .active = 7 << 30, .peak = 8 << 30 };
+    try std.testing.expect(std.mem.indexOf(u8, body, "pinned_memory_bytes") == null);
+    stub.memory_value = .{ .active = 7 << 30, .peak = 8 << 30, .pinned = 1 << 30 };
     var known: std.Io.Writer.Allocating = .init(gpa);
     defer known.deinit();
     try m.render(std.testing.io, &known.writer, stub.engine(), 4096);
     try std.testing.expect(std.mem.indexOf(u8, known.written(), "tensorfold:device_memory_bytes 7516192768\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, known.written(), "tensorfold:device_memory_peak_bytes 8589934592\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, known.written(), "tensorfold:pinned_memory_bytes 1073741824\n") != null);
 }
 
 test "metrics snapshot allocation failure releases the mutex" {
