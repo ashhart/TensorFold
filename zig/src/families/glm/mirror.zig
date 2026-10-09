@@ -100,14 +100,14 @@ pub fn apply(sl: *Slots, kind: u32, w: []const u32, wins: []Win, drafts: []Draft
     if (w.len < need) return error.CommandOutOfStep;
     switch (k) {
         .begin => try sl.begin(w[0], w[2..], w[1] != 0),
-        .chunk => try sl.chunk(w[0], w[1], w[2]),
+        .chunk => try sl.chunk(w[0], w[1], w[2], null),
         .window => {
             const r = try readWindows(w, wins);
             if (r.digest != sl.digest) { // the last window's picks differ between the Macs: their caches have parted
                 std.log.err("speed-up mode: window {d}'s picks differ from rank 0's", .{sl.windows});
                 return error.PairOutOfStep;
             }
-            try sl.window(wins[0..r.n]);
+            try sl.window(wins[0..r.n], null); // rank 1 replays rank 0's picks greedily: the digest check keeps it in step
         },
         .keep => try sl.keep(w[0], w[1]),
         .draft => try sl.draftAll(drafts[0..try readDrafts(w, drafts)]),

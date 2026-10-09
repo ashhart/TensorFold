@@ -426,6 +426,24 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         b.step(p.name, p.about).dependOn(&b.addInstallArtifact(exe, .{}).step);
     }
 
+    // The GLM sampler gate compiles its source at runtime and never needs a checkpoint or offline metallib.
+    const glm_draw = b.createModule(.{
+        .root_source_file = b.path("zig/src/families/glm/draw_dispatch.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "lanes", .module = lanes } },
+    });
+    const glm_sample_check = b.addExecutable(.{ .name = "tf-glm-sample-check", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_sample_check.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "lanes", .module = lanes }, .{ .name = "draw_dispatch", .module = glm_draw }, .{ .name = "kernel_sources", .module = sources } },
+    }) });
+    b.step("tf-glm-sample-check", "Build the checkpoint-free GLM sampler gate").dependOn(&b.addInstallArtifact(glm_sample_check, .{}).step);
+    b.step("test-glm-sampling", "Run the real GLM sampler against its host reference").dependOn(&b.addRunArtifact(glm_sample_check).step);
+
     // The core row projection (chips without tensor units) on synthetic matrices; runs on any Mac's GPU
     const row_mod = b.createModule(.{ .root_source_file = b.path("zig/src/core/row_projection.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources } } });
     const row_check = b.addExecutable(.{ .name = "tf-row-check", .root_module = b.createModule(.{

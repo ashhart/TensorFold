@@ -26,6 +26,7 @@ test {
     _ = @import("attn_check.zig");
     _ = @import("load_plan.zig");
     _ = @import("page_cache.zig");
+    _ = @import("draw_test.zig");
     _ = mirror;
     _ = timing;
 }
