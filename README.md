@@ -1,6 +1,6 @@
 # TensorFold
 
-TensorFold 1.0.0 serves language models from a Zig binary on Apple Silicon and NVIDIA GPUs.
+TensorFold 1.0.3 serves language models from a Zig binary on Apple Silicon and NVIDIA GPUs.
 The engine reads checkpoints, tokenizes requests and runs Metal or CUDA kernels directly.
 Serving needs no Python or MLX installation.
 
@@ -32,7 +32,7 @@ curl -fsS http://127.0.0.1:8080/v1/chat/completions \
 
 ## Qualified models
 
-Only these model and platform combinations are admitted to 1.0.0.
+Only these model and platform combinations are admitted to 1.0.3.
 The platform column names the hardware tested for each model.
 
 | Model | Checkpoint format | Qualified platform |
@@ -41,17 +41,20 @@ The platform column names the hardware tested for each model.
 | Qwen3.8 Flash Next | MLX affine 6-bit, group 32 | Metal on M5 Ultra |
 | GLM-5.3-Flash | MLX affine 4-bit, group 64 | Metal on two M5 Ultras |
 | Qwen3.5-2B | Pinned MLX affine 4-bit, group 64, tied embeddings | Metal on M5 Max |
+| Qwen3.8-27B | MLX affine 4-bit, group 64, own output head; DFlash2 drafter | Metal on M5 Max and M3 Ultra |
 
 Nemotron's named checkpoint is `TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit`.
 The 2B checkpoint is `mlx-community/Qwen3.5-2B-MLX-4bit`, revision `93760be4f1f69842a46bc13dbdc0f19e291392a3`.
 Flash Next loads its checkpoint directly and builds its weight packs locally, without a recorded kernel directory.
 GLM's two-Mac setup uses one settings file per rank and a separate MCDMA runtime.
-The [release notes](RELEASE-NOTES-1.0.0.md) give qualification limits and credit the contributors.
+The [1.0.0 release notes](RELEASE-NOTES-1.0.0.md) give qualification limits and credit the contributors.
 
-The 27B's drafted output passes its native plain comparison, but its paired served speed is below Python 0.6.6.
+The 27B's checkpoint is `TensorFold/Qwen3.8-27B-MLX-4bit`, and its drafter is `z-lab/Qwen3.8-27B-DFlash2`, given with `--drafter`.
+Run it with `--drafter`. Without it the 27B decodes plain, which is slower than mlx_lm.
+Its prompt processing trails mlx_lm for now, and we are fixing it. An M3 Ultra reads prompts at about half of mlx_lm's speed from 8k to 30k tokens, and served cold prefill on an M5 Max also measured below mlx_lm.
 Bonsai, Gemma 4, Qwen3.6 and DeepSeek-V4 are still under qualification for 1.0.x.
 The Python 0.6.6 engine remains on the `python-0.6` line for those models and other backends.
-On CUDA, 1.0.0 serves Nemotron on a GB10, greedy and sampled, with concurrent requests sharing each round.
+On CUDA, 1.0.3 serves Nemotron on a GB10, greedy and sampled, with concurrent requests sharing each round.
 
 ## Exact decoding
 
@@ -59,7 +62,7 @@ Every accepted draft must equal the token the same native engine would produce w
 A resumed request must equal fresh execution, and each concurrent stream must equal its solo run.
 The comparison fixes the checkpoint, backend, settings and runtime.
 Different quantizations and different backends can produce different outputs.
-Flash Next runs one active reply per engine; Nemotron, GLM and the 2B model use shared lane rounds.
+Flash Next and Qwen3.8-27B run one active reply per engine; Nemotron, GLM and the 2B model use shared lane rounds.
 
 ## Models on disk
 
@@ -69,8 +72,9 @@ tensorfold models
 tensorfold info TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
 ```
 
-`pull` downloads a checkpoint into the Hugging Face cache, resumes an interrupted download and checks every file's sha256.
-It refuses a model that no 1.0.0 family serves. `models` lists the cached checkpoints 1.0.0 can serve, and `info` shows one checkpoint's family, format, context and memory floor.
+`pull` downloads a checkpoint into the Hugging Face cache and checks every file: large files by sha256, small files by their git blob sha1.
+Large files come down in pieces over up to 16 connections, and an interrupted pull resumes with the pieces it lacks.
+It refuses a model that no 1.0.3 family serves, and fetches the 27B's DFlash2 drafter for `--drafter`. `models` lists the cached checkpoints 1.0.3 can serve, and `info` shows one checkpoint's family, format, context and memory floor.
 `tensorfold serve REPO` serves a cached checkpoint by its repository name.
 
 ## Context compaction
@@ -108,7 +112,7 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--api-key-file FILE` | Read keys from a restricted-permission file. |
 | `--metrics-open` | Allow `/metrics` without a key when API authentication is enabled. |
 | `--dashboard` | Enable the local `/dashboard` page and `/stats` endpoint. |
-| `--context N` | Bound prompt plus reply tokens; the model's window and memory checks still apply. |
+| `--context N` | Bound prompt plus reply tokens; the model's window and memory checks still apply. Qwen3.8-27B defaults to 32,768 and takes up to 262,144. |
 | `--speed-up FILE` | Rank and link settings for two-Mac Flash Next or GLM serving. |
 | `--max-tokens N` | Default reply limit, 4096; requests can override it. |
 | `--temperature T` | Sampling temperature; zero requests greedy decoding. |
@@ -118,9 +122,11 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--thinking-budget N` | Limit reasoning tokens where the engine supports closing the reasoning block. |
 | `--loop-guard` | Close a short repeated reasoning cycle where the engine supports it. |
 | `--no-drafts` | Produce the plain reference through the same engine. |
+| `--drafter DRAFTER` | Qwen3.8-27B's DFlash2 drafter, as a directory or a repo id in the Hugging Face cache. Without it the 27B decodes plain. |
+| `--drafter-bits 0\|4` | Prepare the drafter's weights in 4 bits (the default) or keep them bf16 with 0. |
 | `--keep-warm SECONDS` | Keep the Metal GPU active while idle for this long after a request, default 900; zero disables it. |
 | `--parallel N` | Admit up to N requests where the engine shares lanes; `auto` is the default. |
-| `--prompt-cache-gib GIB` | Flash Next and GLM retained-prefix budget; zero disables retention. |
+| `--prompt-cache-gib GIB` | Flash Next, GLM and Qwen3.8-27B retained-prefix budget; zero disables retention. |
 | `--prompt-cache-over-cap` | Permit an explicit Flash Next prefix budget above its default allowance. |
 | `--learn` | Keep shared prompt prefixes, such as a system prompt and its tools, on disk so new conversations resume them after a restart or an upgrade that computes the same bits. GLM only for now. |
 | `--learn-dir DIR` | Where `--learn` keeps them, `~/.cache/tensorfold/learned` by default; implies `--learn`. |
@@ -143,7 +149,7 @@ Use the Zig version pinned in `.zig-version`, currently 0.17.0.
 On a Mac with Xcode's Metal toolchain:
 
 ```sh
-zig build native -Dcpu=apple_m1 -Dversion=1.0.0
+zig build native -Dcpu=apple_m1 -Dversion=1.0.3
 zig build test test-golden -Dcpu=apple_m1
 ```
 
