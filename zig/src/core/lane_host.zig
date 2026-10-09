@@ -1,4 +1,3 @@
-//! The lane core served to the HTTP threads: one thread owns ``core`` and steps rounds while any stream lives.
 const std = @import("std");
 const lanes = @import("lanes");
 const api = @import("engine_api.zig");
@@ -596,4 +595,6 @@ test "a lane host serves the core's own tokens, in order, and cancels between ro
     try std.testing.expectEqual(@as(usize, 0), target.lanes.count());
 }
 
-test { _ = @import("lane_host_test.zig"); }
+test {
+    _ = @import("lane_host_test.zig");
+}

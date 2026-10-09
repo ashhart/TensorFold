@@ -41,7 +41,6 @@ pub fn cacheDir(a: Allocator, env: ?*const std.process.Environ.Map, override: ?[
     const home = get(env, "HOME") orelse "";
     if (get(env, "HF_HOME")) |h| return std.fs.path.join(a, &.{ h, "hub" });
     return std.fs.path.join(a, &.{ home, ".cache", "huggingface", "hub" });
-
 }
 
 /// The repo's cache folder name: models--org--name.

@@ -101,8 +101,7 @@ pub const Channel = struct {
     }
 };
 
-/// The collectives below take any step channel with exchange, ranks and myRank (Channel, or sendrecv.Exchange).
-/// Every rank waits for every other: a step with empty chunks.
+    /// Each sender writes its shard once; receivers fold ranks in the same order.
 pub fn barrier(ch: anytype, scratch: [][]const u8) !void {
     const empty: [max_ranks][]const u8 = @splat(&.{});
     try ch.exchange(empty[0..ch.ranks()], scratch);
