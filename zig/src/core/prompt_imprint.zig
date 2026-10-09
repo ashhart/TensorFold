@@ -21,16 +21,18 @@ pub const Imprint = struct {
 
     /// The states learned under `identity` in `root` (made when missing); other identities past `cap` go, oldest first.
     pub fn open(gpa: Allocator, root: []const u8, identity: u64, cap: u64) !Imprint {
-        const r = try gpa.dupe(u8, root);
-        errdefer gpa.free(r);
-        const dir = try std.fmt.allocPrintSentinel(gpa, "{s}/{x:0>16}", .{ root, identity }, 0);
-        errdefer gpa.free(dir);
-        try makePath(gpa, dir);
-        var m: Imprint = .{ .gpa = gpa, .root = r, .dir = dir, .cap = cap };
+        var m: Imprint = paths: {
+            const r = try gpa.dupe(u8, root);
+            errdefer gpa.free(r);
+            const dir = try std.fmt.allocPrintSentinel(gpa, "{s}/{x:0>16}", .{ root, identity }, 0);
+            errdefer gpa.free(dir);
+            try makePath(gpa, dir);
+            break :paths .{ .gpa = gpa, .root = r, .dir = dir, .cap = cap };
+        };
         errdefer m.deinit();
         try m.load();
         m.stamp();
-        m.others = @import("lanes").learned_dirs.totalOthers(root, dir) catch return error.ImprintRead;
+        m.others = @import("lanes").learned_dirs.totalOthers(root, m.dir) catch return error.ImprintRead;
         return m;
     }
 
@@ -226,7 +228,7 @@ pub const Imprint = struct {
     fn stamp(m: *const Imprint) void {
         var path: [1100]u8 = undefined;
         const clock = std.fmt.bufPrintSentinel(&path, "{s}/clock", .{m.root}, 0) catch return;
-        const now = readWord(clock) + 1;
+        const now = readWord(clock) +| 1;
         writeWord(clock, now);
         var used: [1100]u8 = undefined;
         writeWord(std.fmt.bufPrintSentinel(&used, "{s}/used", .{m.dir}, 0) catch return, now);
@@ -327,10 +329,15 @@ fn readWord(path: [:0]const u8) u64 {
 }
 
 fn writeWord(path: [:0]const u8, w: u64) void {
-    const fd = std.c.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
+    var buf: [1200]u8 = undefined;
+    const part = std.fmt.bufPrintSentinel(&buf, "{s}.part", .{path}, 0) catch return;
+    const fd = std.c.open(part, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .NOFOLLOW = true }, @as(std.c.mode_t, 0o600));
     if (fd < 0) return;
     defer _ = std.c.close(fd);
-    writeAll(fd, std.mem.asBytes(&w)) catch {};
+    defer _ = std.c.unlink(part);
+    writeAll(fd, std.mem.asBytes(&w)) catch return;
+    if (std.c.fsync(fd) != 0) return;
+    _ = std.c.rename(part, path);
 }
 
 pub fn writeAll(fd: c_int, bytes: []const u8) !void {
@@ -380,5 +387,6 @@ fn makePath(gpa: Allocator, dir: [:0]const u8) !void {
 
 test {
     _ = @import("prompt_imprint_test.zig");
+    _ = @import("prompt_imprint_fault_test.zig");
     _ = @import("learned_disk.zig");
 }

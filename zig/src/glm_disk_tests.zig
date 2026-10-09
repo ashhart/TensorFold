@@ -2,6 +2,7 @@
 test {
     _ = @import("core/learned_plan.zig");
     _ = @import("core/learned_fault_test.zig");
+    _ = @import("core/prompt_imprint_fault_test.zig");
     _ = @import("lanes").learned_dirs;
     _ = @import("lanes").learned_disk;
     _ = @import("core/prompt_cache.zig");

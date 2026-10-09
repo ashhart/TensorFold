@@ -206,3 +206,34 @@ test "failed rollback deletion survives restart and recovers before cap admissio
         try std.testing.expectEqual(@as(u64, 0), im.admission.reserved);
     }
 }
+
+test "Store learns after old zero-byte and torn used stamps under cap pressure" {
+    const a = std.testing.allocator;
+    for (0..8) |length| {
+        var tag: [32]u8 = undefined;
+        var buf: [128]u8 = undefined;
+        const r = try root(&buf, try std.fmt.bufPrint(&tag, "used-{d}", .{length}));
+        defer @import("prompt_imprint_test.zig").rmTree(r);
+        {
+            var old = try Imprint.open(a, r, 1, 1 << 20);
+            defer old.deinit();
+            try put(old.dir, "state.bin", 300);
+            try put(old.dir, "used", length);
+        }
+        var im = try Imprint.open(a, r, 2, 440);
+        defer im.deinit();
+        im.admission = .{ .floor = 0, .free = Disk.free, .clock = Disk.clock };
+        var f: Fake = .{ .gpa = a, .at = 5 };
+        var s = pc.Store.init(a, f.learned(), .{ .min_prompt = 0, .min_gap = 1, .lookahead = 1 }, 1 << 20);
+        defer s.deinit();
+        s.imprint = &im;
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const prompt = [_]u32{ 7, 7, 7, 7, 7, 7, 9, 10 };
+        _ = try s.lookup(arena.allocator(), &prompt, 7, &.{5}, &.{}, &.{});
+        try std.testing.expect(s.keep(&prompt, 5, null, &.{}, &.{}));
+        try std.testing.expectEqual(@as(usize, 1), f.writes);
+        try std.testing.expect(im.has(Imprint.keyOf(prompt[0..6])));
+        try std.testing.expectEqual(@as(u64, 0), try dirs.otherBytes(r, im.dir, 1));
+    }
+}

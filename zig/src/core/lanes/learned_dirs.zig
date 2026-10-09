@@ -82,7 +82,17 @@ pub fn used(root: []const u8, id: u64) !u64 {
     if (fd < 0) return if (std.c.errno(fd) == .NOENT) 0 else error.LearnedDirectoryRead;
     defer _ = std.c.close(fd);
     var n: u64 = 0;
-    if (std.c.read(fd, std.mem.asBytes(&n), 8) != 8) return error.LearnedDirectoryRead;
+    const data = std.mem.asBytes(&n);
+    var done: usize = 0;
+    while (done < data.len) {
+        const count = std.c.read(fd, data.ptr + done, data.len - done);
+        if (count < 0) {
+            if (std.c.errno(count) == .INTR) continue;
+            return error.LearnedDirectoryRead;
+        }
+        if (count == 0) return 0; // A torn recency hint is oldest; it cannot make a learned payload valid.
+        done += @intCast(count);
+    }
     return n;
 }
 pub fn removeOther(root: []const u8, keep: []const u8, id: u64) !void {
