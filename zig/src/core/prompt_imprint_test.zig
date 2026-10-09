@@ -117,8 +117,10 @@ test "other identities are swept, least recently opened first, until the cap fit
         try fill(m.dir, "state.bin", 100); // with its 8-byte stamp: 108 bytes an identity
         names[i] = try std.fmt.bufPrint(&dirs[i], "{s}", .{m.dir});
     }
-    var m = try Imprint.open(gpa, root, 3, 150); // 216 bytes elsewhere: the older identity goes
+    var m = try Imprint.open(gpa, root, 3, 150); // Opening never deletes either rank before coordinated admission.
     defer m.deinit();
+    try std.testing.expect(exists(names[0]));
+    try std.testing.expect(m.fits(0));
     try std.testing.expect(!exists(names[0]));
     try std.testing.expect(exists(names[1]));
     try std.testing.expectEqual(@as(u64, 108), m.others);

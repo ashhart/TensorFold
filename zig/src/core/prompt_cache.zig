@@ -32,6 +32,15 @@ pub const Snapshots = struct {
         write: ?*const fn (ptr: *anyopaque, saved: Saved, dir: [:0]const u8, key: u64) anyerror!void = null,
         /// Learned state `key` of `at` tokens, read back from its files under `dir` into new storage.
         read: ?*const fn (ptr: *anyopaque, dir: [:0]const u8, key: u64, at: u32) anyerror!Saved = null,
+        /// Peer disk demand and reservation lifetime; null functions mean a single local rank.
+        peer_need: ?*const fn (ptr: *anyopaque, saved: Saved, extra: u64) anyerror!u64 = null,
+        peer_reclaim: ?*const fn (ptr: *anyopaque, key: u64) anyerror!u64 = null,
+        peer_reserve: ?*const fn (ptr: *anyopaque, saved: Saved, key: u64, extra: u64) anyerror!void = null,
+        peer_finish: ?*const fn (ptr: *anyopaque, key: u64, success: bool) anyerror!void = null,
+        peer_other_next: ?*const fn (*anyopaque, ?u64) anyerror!?u64 = null,
+        peer_other_bytes: ?*const fn (*anyopaque, u64) anyerror!u64 = null,
+        peer_other_remove: ?*const fn (*anyopaque, u64) anyerror!void = null,
+        forget_checked: ?*const fn (*anyopaque, [:0]const u8, u64) anyerror!void = null,
         /// Learned state `key`'s files under `dir` removed (the cap needs room, or they no longer read back).
         forget: ?*const fn (ptr: *anyopaque, dir: [:0]const u8, key: u64) void = null,
     };
@@ -412,6 +421,68 @@ pub const Store = struct {
         if (im.has(key) or e.bytes > im.cap) return;
         const payload_bytes = std.math.add(u64, e.bytes, 128 + @as(u64, e.tokens.len + starts.len) * 4) catch return;
         const disk_bytes = std.math.add(u64, payload_bytes, im.indexScratchBytes() catch return) catch return;
+        if (im.admission.waiting(im.dir)) return;
+        const local_need = im.admission.shortfall(im.dir, disk_bytes) orelse {
+            im.admission.refuse(im.dir);
+            return;
+        };
+        const extra = disk_bytes - e.bytes;
+        const peer_need = if (s.family.vtable.peer_need) |need| need(s.family.ptr, e.saved, extra) catch {
+            im.admission.refuse(im.dir);
+            return;
+        } else 0;
+        if (peer_need == std.math.maxInt(u64)) {
+            im.admission.refuse(im.dir);
+            return;
+        }
+        const dirs = @import("lanes").learned_dirs;
+        const others = s.otherCandidates(im) catch {
+            im.admission.refuse(im.dir);
+            return;
+        };
+        defer s.gpa.free(others);
+        const used = std.math.add(u64, @max(im.total(), dirs.bytes(im.dir) catch return), dirs.totalOthers(im.root, im.dir) catch return) catch return;
+        const cap_need = (std.math.add(u64, used, payload_bytes) catch return) -| im.cap;
+        const planner = @import("learned_plan.zig");
+        const candidates = s.gpa.alloc(planner.Candidate, im.metas.items.len + others.len) catch return;
+        defer s.gpa.free(candidates);
+        for (im.metas.items, candidates[0..im.metas.items.len], 0..) |meta, *candidate, i| {
+            const peer = if (s.family.vtable.peer_reclaim) |reclaim| reclaim(s.family.ptr, meta.key) catch {
+                im.admission.refuse(im.dir);
+                return;
+            } else 0;
+            candidate.* = .{ .key = i, .local = meta.bytes, .peer = peer, .cap = meta.bytes, .used = meta.used +| (1 << 63) };
+        }
+        for (others, candidates[im.metas.items.len..], im.metas.items.len..) |other, *candidate, i| {
+            candidate.* = .{ .key = i, .local = other.local, .peer = other.peer, .cap = other.local, .used = other.used };
+        }
+        const victims = (planner.choose(s.gpa, candidates, .{ .local = local_need, .peer = peer_need, .cap = cap_need }) catch return) orelse {
+            im.admission.refuse(im.dir);
+            return;
+        };
+        defer s.gpa.free(victims);
+        const keys = s.gpa.alloc(u64, victims.len) catch return;
+        defer s.gpa.free(keys);
+        const current_count = im.metas.items.len;
+        for (victims, keys) |victim, *k| k.* = if (victim < current_count) im.metas.items[victim].key else others[victim - current_count].id;
+        for (victims, keys) |victim, victim_key| {
+            if (victim < current_count) {
+                s.unlearnChecked(im, victim_key) catch {
+                    im.admission.refuse(im.dir);
+                    return;
+                };
+            } else {
+                if (s.family.vtable.peer_other_remove) |remove_other| remove_other(s.family.ptr, victim_key) catch {
+                    im.admission.refuse(im.dir);
+                    return;
+                };
+                dirs.removeOther(im.root, im.dir, victim_key) catch {
+                    im.admission.refuse(im.dir);
+                    return;
+                };
+            }
+        }
+        im.others = dirs.totalOthers(im.root, im.dir) catch return;
         switch (im.admission.reserve(im.dir, disk_bytes)) {
             .quiet => return,
             .refused => return note("learning paused: free disk cannot preserve the {d} MiB floor", .{im.admission.floor >> 20}),
@@ -419,7 +490,8 @@ pub const Store = struct {
         }
         var success = false;
         defer im.admission.finish(im.dir, disk_bytes, success);
-        while (!im.fits(e.bytes)) s.unlearn(im, im.victim() orelse return);
+        defer if (s.family.vtable.peer_finish) |finish| finish(s.family.ptr, key, success) catch |err| note("finishing peer disk admission failed ({s})", .{@errorName(err)});
+        if (s.family.vtable.peer_reserve) |peer_reservation| peer_reservation(s.family.ptr, e.saved, key, extra) catch return;
         write(s.family.ptr, e.saved, im.dir, key) catch |err| {
             if (s.family.vtable.forget) |drop_file| drop_file(s.family.ptr, im.dir, key);
             return note("learning {d} tokens failed ({s}); retry delayed", .{ e.at, @errorName(err) });
@@ -433,9 +505,29 @@ pub const Store = struct {
     }
 
     /// Learned state `key` forgotten: its files (the family's), then its index record.
+    fn unlearnChecked(s: *Store, im: *imprint.Imprint, key: u64) !void {
+        if (s.family.vtable.forget_checked) |f| try f(s.family.ptr, im.dir, key) else if (s.family.vtable.forget) |f| f(s.family.ptr, im.dir, key);
+        try im.remove(key);
+    }
     fn unlearn(s: *Store, im: *imprint.Imprint, key: u64) void {
-        if (s.family.vtable.forget) |f| f(s.family.ptr, im.dir, key);
-        im.remove(key) catch |err| note("forgetting a learned state failed ({s})", .{@errorName(err)});
+        s.unlearnChecked(im, key) catch |err| note("forgetting a learned state failed ({s})", .{@errorName(err)});
+    }
+    const Other = struct { id: u64, local: u64, peer: u64, used: u64 };
+    fn otherCandidates(s: *Store, im: *imprint.Imprint) ![]Other {
+        const dirs = @import("lanes").learned_dirs;
+        var out: std.ArrayList(Other) = .empty;
+        errdefer out.deinit(s.gpa);
+        var cursor: ?u64 = null;
+        while (true) {
+            const local = try dirs.next(im.root, im.dir, cursor);
+            const peer = if (s.family.vtable.peer_other_next) |f| try f(s.family.ptr, cursor) else null;
+            const id = if (local) |l| if (peer) |p| @min(l, p) else l else peer orelse break;
+            const own_bytes = try dirs.otherBytes(im.root, im.dir, id);
+            const peer_bytes = if (s.family.vtable.peer_other_bytes) |f| try f(s.family.ptr, id) else 0;
+            try out.append(s.gpa, .{ .id = id, .local = own_bytes, .peer = peer_bytes, .used = try dirs.used(im.root, id) });
+            cursor = id;
+        }
+        return out.toOwnedSlice(s.gpa);
     }
 
     /// A learned state on disk longer than `have`, read back as a shared entry; else `have` (none, or reading failed).
@@ -538,5 +630,6 @@ fn floorStart(starts: []const u32, at: u32) u32 {
 test {
     _ = @import("prompt_cache_test.zig");
     _ = @import("prompt_cache_rewind_test.zig");
+    _ = @import("learned_fault_test.zig");
     _ = modes;
 }

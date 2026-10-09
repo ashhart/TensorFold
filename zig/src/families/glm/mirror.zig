@@ -9,7 +9,7 @@ const Slots = slots_mod.Slots;
 const Win = slots_mod.Win;
 const Draft = slots_mod.Draft;
 
-pub const Kind = enum(u32) { begin = 1, chunk, window, keep, draft, release, save, restore, drop, persist, load, forget };
+pub const Kind = enum(u32) { begin = 1, chunk, window, keep, draft, release, save, restore, drop, persist, load, forget, disk_need, disk_reclaim, disk_reserve, disk_finish, disk_other_next, disk_other_bytes, disk_other_remove };
 
 /// Rank 0 of a pair sends the command; one Mac sends nothing.
 pub fn send(e: *Engine, kind: Kind, words: []const u32) !void {
@@ -90,6 +90,12 @@ pub fn apply(sl: *Slots, kind: u32, w: []const u32, wins: []Win, drafts: []Draft
         .chunk, .window, .save, .persist => 3,
         .load => 4,
         .draft, .release, .drop => 1,
+        .disk_need => 3,
+        .disk_reclaim => 2,
+        .disk_reserve => 5,
+        .disk_finish => 3,
+        .disk_other_next => 3,
+        .disk_other_bytes, .disk_other_remove => 2,
     };
     if (w.len < need) return error.CommandOutOfStep;
     switch (k) {
@@ -116,22 +122,76 @@ pub fn apply(sl: *Slots, kind: u32, w: []const u32, wins: []Win, drafts: []Draft
             };
             try sl.e.ep.?.ctl.reply(true);
         },
-        .forget => forgetHalf(sl, @as(u64, w[0]) | @as(u64, w[1]) << 32),
+        .forget => {
+            forgetHalf(sl, @as(u64, w[0]) | @as(u64, w[1]) << 32) catch return sl.e.ep.?.ctl.reply(false);
+            try sl.e.ep.?.ctl.reply(true);
+        },
+        .disk_other_next, .disk_other_bytes, .disk_other_remove => {
+            const dirs = @import("lanes").learned_dirs;
+            const dir = sl.learned orelse return error.NotLearning;
+            const root = dirs.rootOf(dir);
+            const id = @as(u64, w[0]) | @as(u64, w[1]) << 32;
+            if (k == .disk_other_next) {
+                const found = dirs.next(root, dir, if (w[2] != 0) id else null) catch return sl.e.ep.?.ctl.replyValue(std.math.maxInt(u64));
+                if (found) |value| try sl.e.ep.?.ctl.replyValue(value) else try sl.e.ep.?.ctl.reply(false);
+            } else if (k == .disk_other_bytes) {
+                const count = dirs.otherBytes(root, dir, id) catch return sl.e.ep.?.ctl.replyValue(std.math.maxInt(u64));
+                try sl.e.ep.?.ctl.replyValue(count);
+            } else {
+                dirs.removeOther(root, dir, id) catch return sl.e.ep.?.ctl.reply(false);
+                try sl.e.ep.?.ctl.reply(true);
+            }
+        },
+        .disk_need => {
+            const snap = sl.snaps.get(w[0]) orelse return sl.e.ep.?.ctl.replyValue(std.math.maxInt(u64));
+            const extra = @as(u64, w[1]) | @as(u64, w[2]) << 32;
+            const disk_need_value = sl.disk.need(sl.learned orelse return error.NotLearning, snap.bytes, extra);
+            try sl.e.ep.?.ctl.replyValue(disk_need_value);
+        },
+        .disk_reclaim => {
+            var path: [1100]u8 = undefined;
+            const file = try snapshot.path(&path, sl.learned orelse return error.NotLearning, @as(u64, w[0]) | @as(u64, w[1]) << 32, 1);
+            try sl.e.ep.?.ctl.replyValue(fileBytes(file));
+        },
+        .disk_reserve => {
+            const snap = sl.snaps.get(w[0]) orelse return sl.e.ep.?.ctl.reply(false);
+            const key = @as(u64, w[1]) | @as(u64, w[2]) << 32;
+            const extra = @as(u64, w[3]) | @as(u64, w[4]) << 32;
+            sl.disk.reserve(sl.learned orelse return error.NotLearning, key, snap.bytes, extra) catch return sl.e.ep.?.ctl.reply(false);
+            try sl.e.ep.?.ctl.reply(true);
+        },
+        .disk_finish => {
+            const key = @as(u64, w[0]) | @as(u64, w[1]) << 32;
+            sl.disk.finish(sl.learned orelse return error.NotLearning, key, w[2] != 0) catch return sl.e.ep.?.ctl.reply(false);
+            try sl.e.ep.?.ctl.reply(true);
+        },
     }
 }
 
-/// Rank 1's half of a forgotten learned state removed (no reply: rank 0 goes on).
-fn forgetHalf(sl: *Slots, key: u64) void {
+/// Rank 1's half of a forgotten learned state removed; rank 0 hears whether it went.
+fn forgetHalf(sl: *Slots, key: u64) !void {
     var buf: [1100]u8 = undefined;
-    _ = std.c.unlink(snapshot.path(&buf, sl.learned orelse return, key, 1) catch return);
+    try @import("lanes").learned_dirs.unlink(try snapshot.path(&buf, sl.learned orelse return error.NotLearning, key, 1));
 }
 
 /// Rank 1's half of a learned state (--learn): snapshot w[0] written to its file, or read back from it as w[0].
 fn learned(sl: *Slots, k: Kind, w: []const u32) !void {
     var buf: [1100]u8 = undefined;
     const file = try snapshot.path(&buf, sl.learned orelse return error.NotLearning, @as(u64, w[1]) | @as(u64, w[2]) << 32, 1);
-    if (k == .persist) return sl.writeSnap(w[0], file);
+    if (k == .persist) {
+        const pending = sl.disk.pending orelse return error.PeerDiskOutOfStep;
+        if (pending.key != (@as(u64, w[1]) | @as(u64, w[2]) << 32)) return error.PeerDiskOutOfStep;
+        return sl.writeSnap(w[0], file);
+    }
     _ = try sl.readSnap(w[0], w[3], file);
+}
+
+pub fn fileBytes(file: [:0]const u8) u64 {
+    const fd = std.c.open(file, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    if (fd < 0) return 0;
+    defer _ = std.c.close(fd);
+    const n = std.c.lseek(fd, 0, std.c.SEEK.END);
+    return if (n > 0) @intCast(n) else 0;
 }
 
 test "draft commands carry every stream's head request" {

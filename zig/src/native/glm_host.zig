@@ -79,7 +79,7 @@ fn learnedStates(gpa: Allocator, eng: *const ge.Engine, sl: *glm.slots.Slots, ro
 }
 
 /// A GLM-5.3-Flash checkpoint served: `window` tokens of cache a stream, warmed first (the pair: `speed_up`).
-pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: ?[]const u8, streams: u32, fixed: bool, cache_gib: ?f64, learn: ?[]const u8, learn_cap: u64) !*Host {
+pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: ?[]const u8, streams: u32, fixed: bool, cache_gib: ?f64, learn: ?[]const u8, learn_cap: u64, learn_floor: u64) !*Host {
     const eng = try ge.Engine.loadWith(gpa, dir, window + 64, speed_up, learn != null);
     errdefer eng.deinit();
     var toks: [96]u32 = undefined;
@@ -107,13 +107,16 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     const budget = cacheBudget(eng, cache_gib);
     if (!eng.followsPeer() and budget > 0) {
         const B = glm.backend.Backend;
-        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = &h.back, .vtable = &.{ .bytes = B.snapBytes, .save = B.snapSave, .restore = B.snapRestore, .drop = B.snapDrop, .write = B.snapWrite, .read = B.snapRead, .forget = B.snapForget } }, cache_rules, budget);
+        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = &h.back, .vtable = &.{ .bytes = B.snapBytes, .save = B.snapSave, .restore = B.snapRestore, .drop = B.snapDrop, .write = B.snapWrite, .read = B.snapRead, .forget = B.snapForget, .forget_checked = B.snapForgetChecked, .peer_other_next = B.peerOtherNext, .peer_other_bytes = B.peerOtherBytes, .peer_other_remove = B.peerOtherRemove, .peer_need = B.peerNeed, .peer_reclaim = B.peerReclaim, .peer_reserve = B.peerReserve, .peer_finish = B.peerFinish } }, cache_rules, budget);
         h.host.cache = &h.cache.?;
         h.host.info_.prompt_cache = true;
     }
     errdefer if (h.cache) |*store| store.deinit();
     if (learn) |root| {
         h.learned = try learnedStates(gpa, eng, &h.slots, root, learn_cap);
+        h.learned.?.admission.floor = learn_floor;
+        h.slots.disk.admission.floor = learn_floor;
+        h.slots.disk.cap = learn_cap;
         h.slots.learned = h.learned.?.dir;
         if (h.cache) |*store| store.imprint = &h.learned.?;
     }

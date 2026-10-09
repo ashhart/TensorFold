@@ -40,3 +40,6 @@ test {
     _ = @import("gpu_full_test.zig");
     _ = @import("drafted_test.zig");
 }
+
+pub const learned_disk = @import("learned_disk.zig");
+pub const learned_dirs = @import("learned_dirs.zig");

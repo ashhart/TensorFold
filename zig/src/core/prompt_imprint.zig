@@ -14,7 +14,7 @@ pub const Imprint = struct {
     root: []u8,
     dir: [:0]u8, // root/<identity>: the index, the last-open stamp and each state's files (the family's)
     cap: u64, // bytes of learned states this Mac keeps under `root`, every identity together
-    admission: @import("learned_disk.zig").Admission = .{},
+    admission: @import("lanes").learned_disk.Admission = .{},
     others: u64 = 0, // bytes other identities under `root` still hold
     metas: std.ArrayList(Meta) = .empty,
     clock: u64 = 0, // a meta's `used`: the clock at its last write or read
@@ -30,7 +30,7 @@ pub const Imprint = struct {
         errdefer m.deinit();
         try m.load();
         m.stamp();
-        m.others = sweep(gpa, root, dir, cap -| @max(m.total(), files(dir, false))); // a peer's halves have no index
+        m.others = @import("lanes").learned_dirs.totalOthers(root, dir) catch return error.ImprintRead;
         return m;
     }
 
@@ -137,18 +137,19 @@ pub const Imprint = struct {
     /// Forget state `key`: the index is rewritten without it (its family removes the files).
     pub fn remove(m: *Imprint, key: u64) !void {
         const i = m.find(key) orelse return;
-        free(m.gpa, m.metas.orderedRemove(i));
         var path: [1100]u8 = undefined;
         var part: [1100]u8 = undefined;
         const tmp = try std.fmt.bufPrintSentinel(&part, "{s}/index.part", .{m.dir}, 0);
         const fd = std.c.open(tmp, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
         if (fd < 0) return error.ImprintWrite;
+        errdefer _ = std.c.unlink(tmp);
         {
             defer _ = std.c.close(fd);
-            for (m.metas.items) |x| try record(fd, x.key, x.at, x.tokens, x.starts, x.bytes);
+            for (m.metas.items, 0..) |x, j| if (j != i) try record(fd, x.key, x.at, x.tokens, x.starts, x.bytes);
             if (std.c.fsync(fd) != 0) return error.ImprintWrite;
         }
         if (std.c.rename(tmp, try std.fmt.bufPrintSentinel(&path, "{s}/index", .{m.dir}, 0)) != 0) return error.ImprintWrite;
+        free(m.gpa, m.metas.orderedRemove(i));
     }
 
     /// The index's records, oldest first; a torn last record (a crash mid-append) ends the read.

@@ -1,0 +1,121 @@
+const std = @import("std");
+const pc = @import("prompt_cache.zig");
+const Imprint = @import("prompt_imprint.zig").Imprint;
+const Fake = @import("prompt_cache_fake.zig").Fake;
+const dirs = @import("lanes").learned_dirs;
+const Admission = @import("lanes").learned_disk.Admission;
+const Disk = struct {
+    var tick: ?u64 = 100;
+    fn clock() ?u64 {
+        return tick;
+    }
+    fn free(_: [:0]const u8) ?u64 {
+        return 1 << 30;
+    }
+};
+fn root(buf: []u8, suffix: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "/tmp/tf-learn-fault-{s}-{d}", .{ suffix, std.c.getpid() });
+}
+fn put(dir: []const u8, name: []const u8, count: usize) !void {
+    var buf: [1200]u8 = undefined;
+    const fd = std.c.open(try std.fmt.bufPrintSentinel(&buf, "{s}/{s}", .{ dir, name }, 0), .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(std.c.mode_t, 0o600));
+    if (fd < 0) return error.Create;
+    defer _ = std.c.close(fd);
+    if (std.c.ftruncate(fd, @intCast(count)) != 0) return error.Create;
+}
+test "a null clock cannot authorize eviction or either half of a write" {
+    const a = std.testing.allocator;
+    var buf: [128]u8 = undefined;
+    const r = try root(&buf, "clock");
+    defer @import("prompt_imprint_test.zig").rmTree(r);
+    var im = try Imprint.open(a, r, 1, 330);
+    defer im.deinit();
+    try im.add(7, 1, &.{ 1, 2 }, &.{}, 105);
+    im.admission = .{ .floor = 0, .free = Disk.free, .clock = Disk.clock };
+    Disk.tick = null;
+    defer Disk.tick = 100;
+    var f: Fake = .{ .gpa = a, .at = 5 };
+    var s = pc.Store.init(a, f.paired(), .{ .min_prompt = 0, .min_gap = 1, .lookahead = 1 }, 1 << 20);
+    defer s.deinit();
+    s.imprint = &im;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const prompt = [_]u32{ 7, 7, 7, 7, 7, 7, 9, 10 };
+    _ = try s.lookup(arena.allocator(), &prompt, 7, &.{5}, &.{}, &.{});
+    try std.testing.expect(s.keep(&prompt, 5, null, &.{}, &.{}));
+    try std.testing.expect(im.has(7));
+    try std.testing.expectEqual(@as(usize, 0), f.disk_forgets);
+    try std.testing.expectEqual(@as(usize, 0), f.writes);
+}
+test "an index replacement failure retains its metadata and removes its partial file" {
+    const a = std.testing.allocator;
+    var buf: [128]u8 = undefined;
+    const r = try root(&buf, "index");
+    defer @import("prompt_imprint_test.zig").rmTree(r);
+    var im = try Imprint.open(a, r, 1, 1 << 20);
+    defer im.deinit();
+    try im.add(7, 1, &.{ 1, 2 }, &.{}, 105);
+    var path: [1200]u8 = undefined;
+    const idx = try std.fmt.bufPrintSentinel(&path, "{s}/index", .{im.dir}, 0);
+    try dirs.unlink(idx);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(idx, 0o700));
+    try std.testing.expectError(error.ImprintWrite, im.remove(7));
+    try std.testing.expect(im.has(7));
+    const part = try std.fmt.bufPrintSentinel(&path, "{s}/index.part", .{im.dir}, 0);
+    const fd = std.c.open(part, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    if (fd >= 0) {
+        _ = std.c.close(fd);
+        return error.PartRemains;
+    }
+}
+test "other-identity cap pressure is planned before a current-identity write" {
+    const a = std.testing.allocator;
+    var buf: [128]u8 = undefined;
+    const r = try root(&buf, "others");
+    defer @import("prompt_imprint_test.zig").rmTree(r);
+    {
+        var old = try Imprint.open(a, r, 1, 1 << 20);
+        defer old.deinit();
+        try put(old.dir, "state.bin", 300);
+    }
+    var im = try Imprint.open(a, r, 2, 330);
+    defer im.deinit();
+    try std.testing.expectEqual(@as(u64, 308), im.others);
+    im.admission = .{ .floor = 0, .free = Disk.free, .clock = Disk.clock };
+    var f: Fake = .{ .gpa = a, .at = 5 };
+    var s = pc.Store.init(a, f.learned(), .{ .min_prompt = 0, .min_gap = 1, .lookahead = 1 }, 1 << 20);
+    defer s.deinit();
+    s.imprint = &im;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const prompt = [_]u32{ 7, 7, 7, 7, 7, 7, 9, 10 };
+    _ = try s.lookup(arena.allocator(), &prompt, 7, &.{5}, &.{}, &.{});
+    try std.testing.expect(s.keep(&prompt, 5, null, &.{}, &.{}));
+    try std.testing.expectEqual(@as(u64, 0), try dirs.otherBytes(r, im.dir, 1));
+    try std.testing.expectEqual(@as(usize, 1), f.writes);
+    try std.testing.expect(im.has(Imprint.keyOf(prompt[0..6])));
+}
+test "unlink failure is observable and missing files are idempotently removed" {
+    var buf: [128]u8 = undefined;
+    const r = try root(&buf, "unlink");
+    var path: [150]u8 = undefined;
+    const dir = try std.fmt.bufPrintSentinel(&path, "{s}", .{r}, 0);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(dir, 0o700));
+    defer _ = std.c.rmdir(dir);
+    try std.testing.expectError(error.LearnedUnlink, dirs.unlink(dir));
+    var absent: [180]u8 = undefined;
+    try dirs.unlink(try std.fmt.bufPrintSentinel(&absent, "{s}/absent", .{dir}, 0));
+}
+test "disk admission releases reservations and bounds repeated failure retries" {
+    var admission: Admission = .{ .floor = 0, .free = Disk.free, .clock = Disk.clock };
+    try std.testing.expectEqual(Admission.Result.ready, admission.reserve(".", 100));
+    admission.finish(".", 100, false);
+    try std.testing.expectEqual(Admission.Result.quiet, admission.reserve(".", 100));
+    for (0..20) |_| {
+        Disk.tick.? += 100;
+        _ = admission.reserve(".", std.math.maxInt(u64));
+    }
+    try std.testing.expectEqual(Disk.tick.? + 60, admission.retry_at);
+    try std.testing.expectEqual(@as(u64, 0), admission.reserved);
+    Disk.tick = 100;
+}

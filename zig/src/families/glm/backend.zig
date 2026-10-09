@@ -125,6 +125,56 @@ pub const Backend = struct {
         return try b.sl.save(i, at, id, b.sl.resident());
     }
 
+    pub fn peerOtherNext(ptr: *anyopaque, after: ?u64) !?u64 {
+        const b = self(ptr);
+        if (b.sl.e.ep == null) return null;
+        const value = after orelse 0;
+        try mirror.send(b.sl.e, .disk_other_next, &.{ @truncate(value), @truncate(value >> 32), @intFromBool(after != null) });
+        const found = (try b.sl.e.ep.?.ctl.waitReplyOptional()) orelse return null;
+        if (found == std.math.maxInt(u64)) return error.PeerDiskRead;
+        return found;
+    }
+    pub fn peerOtherBytes(ptr: *anyopaque, id: u64) !u64 {
+        const b = self(ptr);
+        if (b.sl.e.ep == null) return 0;
+        try mirror.send(b.sl.e, .disk_other_bytes, &.{ @truncate(id), @truncate(id >> 32) });
+        const count = try b.sl.e.ep.?.ctl.waitReplyValue();
+        if (count == std.math.maxInt(u64)) return error.PeerDiskRead;
+        return count;
+    }
+    pub fn peerOtherRemove(ptr: *anyopaque, id: u64) !void {
+        const b = self(ptr);
+        if (b.sl.e.ep == null) return;
+        try mirror.send(b.sl.e, .disk_other_remove, &.{ @truncate(id), @truncate(id >> 32) });
+        if (!try b.sl.e.ep.?.ctl.waitReply()) return error.PeerLearnDelete;
+    }
+    pub fn peerNeed(ptr: *anyopaque, saved: *anyopaque, extra: u64) !u64 {
+        const b = self(ptr);
+        if (b.sl.e.ep == null) return 0;
+        const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
+        try mirror.send(b.sl.e, .disk_need, &.{ snap.id, @truncate(extra), @truncate(extra >> 32) });
+        return b.sl.e.ep.?.ctl.waitReplyValue();
+    }
+    pub fn peerReclaim(ptr: *anyopaque, key: u64) !u64 {
+        const b = self(ptr);
+        if (b.sl.e.ep == null) return 0;
+        try mirror.send(b.sl.e, .disk_reclaim, &.{ @truncate(key), @truncate(key >> 32) });
+        return b.sl.e.ep.?.ctl.waitReplyValue();
+    }
+    pub fn peerReserve(ptr: *anyopaque, saved: *anyopaque, key: u64, extra: u64) !void {
+        const b = self(ptr);
+        if (b.sl.e.ep == null) return;
+        const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
+        try mirror.send(b.sl.e, .disk_reserve, &.{ snap.id, @truncate(key), @truncate(key >> 32), @truncate(extra), @truncate(extra >> 32) });
+        if (!try b.sl.e.ep.?.ctl.waitReply()) return error.PeerDiskFull;
+    }
+    pub fn peerFinish(ptr: *anyopaque, key: u64, success: bool) !void {
+        const b = self(ptr);
+        if (b.sl.e.ep == null) return;
+        try mirror.send(b.sl.e, .disk_finish, &.{ @truncate(key), @truncate(key >> 32), @intFromBool(success) });
+        if (!try b.sl.e.ep.?.ctl.waitReply()) return error.PeerDiskOutOfStep;
+    }
+
     /// --learn: a kept state to its file here and, on a pair, rank 1's half there; an error unless both are written.
     pub fn snapWrite(ptr: *anyopaque, saved: *anyopaque, dir: [:0]const u8, key: u64) anyerror!void {
         const b = self(ptr);
@@ -159,10 +209,14 @@ pub const Backend = struct {
 
     /// --learn: learned state `key`'s file here and, on a pair, rank 1's half removed.
     pub fn snapForget(ptr: *anyopaque, dir: [:0]const u8, key: u64) void {
+        snapForgetChecked(ptr, dir, key) catch |err| std.log.err("glm: learned deletion failed: {s}", .{@errorName(err)});
+    }
+    pub fn snapForgetChecked(ptr: *anyopaque, dir: [:0]const u8, key: u64) !void {
         const b = self(ptr);
-        mirror.send(b.sl.e, .forget, &.{ @truncate(key), @truncate(key >> 32) }) catch |err| std.log.err("glm: the peer kept a forgotten learned state: {s}", .{@errorName(err)});
+        try mirror.send(b.sl.e, .forget, &.{ @truncate(key), @truncate(key >> 32) });
+        if (b.sl.e.ep) |ep| if (!try ep.ctl.waitReply()) return error.PeerLearnDelete;
         var buf: [1100]u8 = undefined;
-        _ = std.c.unlink(snapshot.path(&buf, dir, key, 0) catch return);
+        try lanes.learned_dirs.unlink(try snapshot.path(&buf, dir, key, 0));
     }
 
     pub fn snapRestore(_: *anyopaque, _: ?*anyopaque, _: *anyopaque) anyerror!void {
