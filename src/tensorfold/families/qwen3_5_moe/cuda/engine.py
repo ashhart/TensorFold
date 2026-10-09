@@ -70,10 +70,14 @@ class Qwen36Engine:
         self.pool = self._pool(model_dir, expert_pool) if expert_pool is not None else None
 
         def transform(name: str, info: dict) -> tuple[int, int, int]:
-            """(resident, mapped, streamed): a routed stack's bytes stay in the files a pool serves them from."""
+            """(resident, mapped, streamed): the main checkpoint's routed stacks stay in the files a pool serves."""
 
+            # the MTP head's own experts are not streamed: load_mtp reads that side file whole, so they stay held
+            head = ".mtp." in name or name.startswith("mtp.")
             resident, mapped = mtp_weights(name, info) if ".mtp." in name else linear_weights(name, info)
-            return (0, mapped, resident) if self.pool is not None and ROUTED in name else (resident, mapped, 0)
+            if self.pool is not None and not head and ROUTED in name:
+                return 0, mapped, resident
+            return resident, mapped, 0
 
         self.capacity_plan = admit(model_dir, context, context_explicit, torch, geometry, transform,
                                    extra_files=extra, expert_pool=expert_pool)
