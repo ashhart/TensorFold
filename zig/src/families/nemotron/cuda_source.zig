@@ -21,16 +21,29 @@ pub const Source = struct {
     ops: kern.Ops,
     files: std.ArrayList(Mapped) = .empty,
     slots: [slot_count]dio.Buffer = undefined,
+    pinned: [slot_count]?cuda.HostBuffer = @splat(null), // a discrete card's slots, page-locked: copies run at the link's speed
     pending: [slot_count]?Pending = @splat(null),
     in_flight: usize = 0,
     ring: ?linux.IoUring = null, // null where io_uring is unavailable: each read then completes as it is asked for
 
-    /// Page-aligned pageable slots: a copy from them returns once it has read the slot, so it is free again.
+    /// Page-aligned slots, page-locked on a discrete card: a copy from one returns once it has read the slot.
     pub fn init(gpa: std.mem.Allocator, ops: kern.Ops) !Source {
         var s: Source = .{ .gpa = gpa, .ops = ops };
         var made: usize = 0;
-        errdefer for (s.slots[0..made]) |b| gpa.free(b);
-        while (made < slot_count) : (made += 1) s.slots[made] = try gpa.alignedAlloc(u8, .fromByteUnits(dio.alignment), slot_bytes);
+        errdefer s.freeSlots(made);
+        while (made < slot_count) : (made += 1) {
+            if (!ops.k.discrete) {
+                s.slots[made] = try gpa.alignedAlloc(u8, .fromByteUnits(dio.alignment), slot_bytes);
+                continue;
+            }
+            var h = try cuda.HostBuffer.alloc(ops.k.d, slot_bytes);
+            if (@intFromPtr(h.bytes.ptr) % dio.alignment != 0) {
+                h.free();
+                return error.UnalignedPinnedSlot;
+            }
+            s.pinned[made] = h;
+            s.slots[made] = @alignCast(h.bytes);
+        }
         s.ring = linux.IoUring.init(slot_count, 0) catch |err| blk: {
             std.log.info("io_uring unavailable ({t}): checkpoint reads run one at a time", .{err});
             break :blk null;
@@ -42,10 +55,16 @@ pub const Source = struct {
     pub fn deinit(s: *Source) void {
         while (s.in_flight > 0) s.reap(1) catch break;
         if (s.ring) |*r| r.deinit();
-        for (s.slots) |b| s.gpa.free(b);
+        s.freeSlots(slot_count);
         for (s.files.items) |*m| m.file.close();
         s.files.deinit(s.gpa);
         s.* = undefined;
+    }
+
+    fn freeSlots(s: *Source, made: usize) void {
+        for (s.slots[0..made], s.pinned[0..made]) |b, *p| {
+            if (p.*) |*h| h.free() else s.gpa.free(b);
+        }
     }
 
     /// Every file of `ck`, opened for direct reads beside its mapping (copies from the mapping crawl on GB10).

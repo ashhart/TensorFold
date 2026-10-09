@@ -271,6 +271,10 @@ when you know the machine's headroom: a larger one leaves more for other work, a
 reserve also carries CUDA context, NCCL and workspace memory the estimate does not count, and exhausting a unified
 GPU's memory can freeze the host, so lower it only with room to spare.
 
+On a discrete card (an RTX 3090, an A100) the server sizes its window from the card's own free memory, as the driver
+reports it, less a reserve of a 32nd of the card and at least 1 GiB. `TENSORFOLD_MEMORY_RESERVE_GIB` sets that one from
+0.5 GiB up.
+
 ## Responses
 
 `choices[0].message.content` holds the answer. Reasoning uses `reasoning_content`, or

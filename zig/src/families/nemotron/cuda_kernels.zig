@@ -75,6 +75,7 @@ pub const Kernels = struct {
     expert_blocks: [2]usize, // resident blocks the decode expert kernels fill: per SM times SMs
     gemv_blocks: usize, // resident lane_gemv CTAs: per SM times SMs
     gb10: bool,
+    discrete: bool, // the card has its own memory: checkpoint bytes reach it through page-locked slots
 
     /// Loads every module; `triton_dir` holds the captured aot.json and cubins for this GPU.
     pub fn load(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, triton_dir: []const u8) !Kernels {
@@ -125,6 +126,7 @@ pub const Kernels = struct {
         const major = try ctx.attribute(.compute_capability_major);
         const minor = try ctx.attribute(.compute_capability_minor);
         k.gb10 = major == 12 and minor == 1;
+        k.discrete = try ctx.attribute(.integrated) == 0;
         return k;
     }
 
