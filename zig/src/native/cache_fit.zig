@@ -1,6 +1,7 @@
 //! The prompt cache's budget from memory: what 70% of RAM leaves past the server's footprint once loaded, less a margin.
 const std = @import("std");
 const builtin = @import("builtin");
+const api = @import("engine_api");
 
 pub const GiB: u64 = 1 << 30;
 /// The share of RAM a served model may hold: the rest stays with macOS and other processes.
@@ -37,14 +38,14 @@ pub fn footprint() ?u64 {
     return info[9];
 }
 
-/// The cache budget: what 70% of RAM leaves past this process, or `gib` if it fits (else refused unless `over`).
-pub fn budget(gib: ?f64, over: bool, spare: u64, a: std.mem.Allocator, why: *[]const u8, rank: []const u8) !u64 {
+/// The cache plan: what 70% of RAM leaves past this process, or `gib` if it fits (else refused unless `over`).
+pub fn budget(gib: ?f64, over: bool, spare: u64, a: std.mem.Allocator, why: *[]const u8, rank: []const u8) !api.PromptCachePlan {
     const total = ram() orelse 0;
     const ready = footprint() orelse 0;
     if (total == 0 or ready == 0) {
         const b = if (gib) |g| (if (g > 0) std.math.lossyCast(u64, g * GiB) else 0) else spare;
         std.log.info("prompt cache: {d:.1} GiB for kept prompt states{s} (no memory reading)", .{ gibs(b), rank });
-        return b;
+        return .{ .source = if (gib != null) .explicit else .metal_working_set, .budget_bytes = b, .explicit_budget = gib != null };
     }
     const f = fit(total, ready, gib, over) catch |e| {
         const left = (fit(total, ready, null, false) catch unreachable).room; // without a given budget it never refuses
@@ -52,7 +53,17 @@ pub fn budget(gib: ?f64, over: bool, spare: u64, a: std.mem.Allocator, why: *[]c
         return e;
     };
     std.log.info("prompt cache: {d:.1} GiB from {d:.1} GiB free under the 70% cap ({d:.1} GiB in use once loaded, {d:.0} GiB of RAM, {d} GiB kept for prompt buffers){s}{s}", .{ gibs(f.budget), gibs(f.room), gibs(ready), gibs(total), MARGIN >> 30, if (f.budget > f.room) ", past the cap by --prompt-cache-over-cap" else "", rank });
-    return f.budget;
+    return .{
+        .source = .physical_footprint,
+        .budget_bytes = f.budget,
+        .explicit_budget = gib != null,
+        .over_cap = f.budget > f.room,
+        .ram_bytes = total,
+        .ready_footprint_bytes = ready,
+        .cap_bytes = f.cap,
+        .room_bytes = f.room,
+        .margin_bytes = MARGIN,
+    };
 }
 
 /// GiB with one decimal, for log lines and messages.

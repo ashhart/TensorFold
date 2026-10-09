@@ -1,0 +1,17 @@
+name: No GPU
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  zig:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      # zig build test is the host unit tests. No GPU. The Python suite is not this check.
+      - name: zig build test
+        run: zig build test

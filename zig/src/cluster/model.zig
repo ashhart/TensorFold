@@ -168,10 +168,31 @@ fn str(v: ?std.json.Value) ?[]const u8 {
 /// Kimi K3's shape as its config states it (moonshotai/Kimi-K3 at f831ab66), for tests that run without the file.
 pub fn k3() Shape {
     var s: Shape = .{
-        .family = "kimi_linear", .hidden = 7168, .layers = 93, .vocab = 163840, .heads = 96, .kv_heads = 96, .head_dim = 74,
-        .experts = 896, .top_k = 16, .moe_inter = 3072, .latent = 3584, .shared = 2, .first_dense = 1, .inter = 33792,
-        .q_lora = 1536, .kv_lora = 512, .rope_dim = 64, .nope_dim = 128, .v_dim = 128, .linear_heads = 96, .linear_head_dim = 128, .conv_kernel = 4,
-        .quant_group = 32, .quant_bits = 4, .max_context = 1 << 20,
+        .family = "kimi_linear",
+        .hidden = 7168,
+        .layers = 93,
+        .vocab = 163840,
+        .heads = 96,
+        .kv_heads = 96,
+        .head_dim = 74,
+        .experts = 896,
+        .top_k = 16,
+        .moe_inter = 3072,
+        .latent = 3584,
+        .shared = 2,
+        .first_dense = 1,
+        .inter = 33792,
+        .q_lora = 1536,
+        .kv_lora = 512,
+        .rope_dim = 64,
+        .nope_dim = 128,
+        .v_dim = 128,
+        .linear_heads = 96,
+        .linear_head_dim = 128,
+        .conv_kernel = 4,
+        .quant_group = 32,
+        .quant_bits = 4,
+        .max_context = 1 << 20,
     };
     @memset(s.kinds[0..93], .linear);
     var layer: u32 = 3;
@@ -183,10 +204,32 @@ pub fn k3() Shape {
 /// GLM-5.3 (glm_moe_dsa, FP8) from the lead's figures; head dims, vocab and indexer heads assumed as DeepSeek-V3.2's.
 pub fn glm53() Shape {
     var s: Shape = .{
-        .family = "glm_moe_dsa", .hidden = 6144, .layers = 78, .vocab = 151552, .heads = 64, .kv_heads = 64, .head_dim = 96,
-        .experts = 256, .top_k = 8, .moe_inter = 2048, .latent = 6144, .shared = 1, .first_dense = 3, .inter = 12288,
-        .q_lora = 2048, .kv_lora = 512, .rope_dim = 64, .nope_dim = 192, .v_dim = 256, .quant_group = 128, .quant_bits = 8,
-        .index_topk = 2048, .index_heads = 32, .index_dim = 128, .mtp_layers = 1, .max_context = 202752,
+        .family = "glm_moe_dsa",
+        .hidden = 6144,
+        .layers = 78,
+        .vocab = 151552,
+        .heads = 64,
+        .kv_heads = 64,
+        .head_dim = 96,
+        .experts = 256,
+        .top_k = 8,
+        .moe_inter = 2048,
+        .latent = 6144,
+        .shared = 1,
+        .first_dense = 3,
+        .inter = 12288,
+        .q_lora = 2048,
+        .kv_lora = 512,
+        .rope_dim = 64,
+        .nope_dim = 192,
+        .v_dim = 256,
+        .quant_group = 128,
+        .quant_bits = 8,
+        .index_topk = 2048,
+        .index_heads = 32,
+        .index_dim = 128,
+        .mtp_layers = 1,
+        .max_context = 202752,
     };
     @memset(s.kinds[0..78], .mla);
     return s;

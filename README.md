@@ -83,7 +83,18 @@ Each later compaction updates the previous note instead of starting over. A clie
 The reply carries the note and the compaction counts under `tensorfold.compaction`, and every reply reports `context_window` and `context_used`.
 The same request gives the same compaction and the same reply. With `--compact-memory`, the stored note carries over between requests.
 
+## Model discovery
+
+`GET /v1/models` (also `/models`) advertises each served name and alias. When the engine reports a finite
+context window, each entry includes equal `context_length` and `max_model_len` integer extensions. These
+are the loaded engine's effective prompt-plus-reply token limit, including any startup memory fitting;
+they are not the default reply limit. An unspecified engine window omits both fields. Clients should
+still handle per-request memory refusals: an advertised context is not a guarantee that every workload fits.
+
 ## Serve flags
+
+The read-only [`/memory` diagnostics](docs/memory-diagnostics.md) report process footprint and lifetime peak,
+available backend allocation counters, and the applied retained-prefix plan without changing memory policy.
 
 The binary's `capabilities --json` response lists its supported flags and platform-specific values.
 `serve MODEL --help` prints usage without loading a model.
@@ -138,6 +149,9 @@ zig build test test-golden -Dcpu=apple_m1
 
 The server is `zig-out/native/bin/tensorfold-native`.
 Release archives include the native executable, runtime assets and license notices; [packaging](packaging/README.md) describes the qualified CUDA inputs.
+For cache-aware performance receipts, see [observed cache benchmark evidence](docs/cache-benchmarks.md).
+The clients retain server usage and output fingerprints, and verify cold/reused states rather than inferring them.
+
 Read [CONTRIBUTING.md](CONTRIBUTING.md) for exactness, precision and performance gates.
 TensorFold is Apache-2.0; see [LICENSE](LICENSE), [NOTICE](NOTICE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
@@ -290,3 +304,5 @@ Thank you to everyone who has sent TensorFold a pull request, a measurement or a
 [@xjqx2z](https://github.com/xjqx2z),
 [@Yuepixel](https://github.com/Yuepixel),
 [@YvesLaRose](https://github.com/YvesLaRose).
+
+[Usable memory profiles](docs/memory-profiling.md) explains how to record applied budgets, context, cache state and process peaks.

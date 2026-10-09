@@ -101,9 +101,7 @@ pub const Channel = struct {
     }
 };
 
-/// The collectives below take any step channel with exchange, ranks and myRank (Channel, or sendrecv.Exchange).
-
-/// Every rank waits for every other: a step with empty chunks.
+/// Every rank waits for all peers through a channel with exchange, ranks and myRank.
 pub fn barrier(ch: anytype, scratch: [][]const u8) !void {
     const empty: [max_ranks][]const u8 = @splat(&.{});
     try ch.exchange(empty[0..ch.ranks()], scratch);

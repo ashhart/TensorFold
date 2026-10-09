@@ -10,6 +10,7 @@ const anthropic = @import("anthropic.zig");
 const tokens = @import("tokens.zig");
 const decisions = @import("decisions.zig");
 const status = @import("status_routes.zig");
+const memory = @import("memory_routes.zig");
 const Server = @import("server.zig").Server;
 const Conn = http_conn.Conn;
 const Allocator = std.mem.Allocator;
@@ -37,6 +38,8 @@ pub fn unknown(conn: *Conn, a: Allocator) void {
 
 fn get(srv: *Server, conn: *Conn, a: Allocator) void {
     const route = auth.routePath(conn.path);
+    if (std.mem.eql(u8, route, "/memory") or std.mem.eql(u8, route, "/v1/memory"))
+        return memory.get(srv, conn, a) catch {};
     if (responses.route(route)) |rid| if (rid.len > 0) return responses.get(srv, conn, a, rid);
     if (std.mem.eql(u8, route, "/metrics") or std.mem.eql(u8, route, "/v1/metrics")) return status.metrics(srv, conn, a);
     if (std.mem.eql(u8, route, "/dashboard")) return status.dashboard(srv, conn, a);

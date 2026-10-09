@@ -119,7 +119,8 @@ const Snaps = struct {
 /// Prompt reuse between turns, once any drafter is attached; on error.CacheOverCap `why` (in `a`) says why.
 pub fn enableCache(h: *Host, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) !void {
     const dev = h.model.device;
-    const budget = try cache_fit.budget(gib, over, @min(dev.maxWorkingSet() -| dev.allocated() -| (8 << 30), 16 << 30), a, why, "");
+    const plan = try cache_fit.budget(gib, over, @min(dev.maxWorkingSet() -| dev.allocated() -| (8 << 30), 16 << 30), a, why, "");
+    const budget = plan.budget_bytes;
     if (budget == 0) return;
     h.serial.mutex.lockUncancelable(h.serial.io);
     defer h.serial.mutex.unlock(h.serial.io);
@@ -128,6 +129,7 @@ pub fn enableCache(h: *Host, gib: ?f64, over: bool, a: Allocator, why: *[]const 
     h.cache = pc.Store.init(h.gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, .{ .warm = true }, budget);
     h.serial.driver.cache = &h.cache.?;
     h.serial.driver.info.warm_turns = true;
+    h.serial.driver.info.prompt_cache_plan = plan;
 }
 /// Weights, runner and drafter states join one residency set the idle keepalive uses, once drafts attach.
 pub fn holdResident(h: *Host) !void {

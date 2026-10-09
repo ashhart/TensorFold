@@ -231,7 +231,7 @@ fn denseRows(gpa: std.mem.Allocator, a: std.mem.Allocator, ck: *ckpt.Checkpoint,
     const out = try gpa.alloc(u8, shape.n * shape.k * 2);
     const words_per_row = shape.words * 4;
     for (0..shape.n) |r| {
-        const row = w.bytes[r * words_per_row ..][0 .. words_per_row];
+        const row = w.bytes[r * words_per_row ..][0..words_per_row];
         for (0..shape.k) |c| {
             const g = c / spec.group;
             const scale: f32 = switch (s.dtype) {

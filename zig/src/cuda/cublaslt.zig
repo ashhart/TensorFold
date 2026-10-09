@@ -114,8 +114,8 @@ pub const Linear = struct {
         errdefer _ = lt.api.cublasLtDestroy(self.handle);
         try lt.check(lt.api.cublasLtMatmulDescCreate(&self.desc, compute_32f, .f32), "cublasLtMatmulDescCreate");
         errdefer _ = lt.api.cublasLtMatmulDescDestroy(self.desc);
-        const ta: c_int = @intFromEnum(Op.t);
-        const tb: c_int = @intFromEnum(Op.n);
+        const ta: c_int = @backingInt(Op.t);
+        const tb: c_int = @backingInt(Op.n);
         try lt.check(lt.api.cublasLtMatmulDescSetAttribute(self.desc, desc_transa, &ta, @sizeOf(c_int)), "set transa");
         try lt.check(lt.api.cublasLtMatmulDescSetAttribute(self.desc, desc_transb, &tb, @sizeOf(c_int)), "set transb");
         // column-major view: D^T[n,m] = W[n,k] (stored k x n, transposed) . X^T[k,m]

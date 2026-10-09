@@ -85,7 +85,7 @@ pub fn markers(srv: *Server, a: Allocator, step: u32) !Plan {
         const g3 = render(srv, a, talk[0..3], thinking, true) orelse return .{ .step = step };
         const pairs = [_]struct { []const u32, []const u32, Role }{ .{ r[0], r[1], .assistant }, .{ r[1], r[2], .user }, .{ r[2], r[3], .assistant }, .{ r[0], g1, .assistant }, .{ r[2], g3, .assistant } };
         for (pairs) |pr| {
-            if (pr[1].len > pr[0].len and std.mem.eql(u32, pr[1][0..pr[0].len], pr[0])) try pieces[@intFromEnum(pr[2])].append(a, pr[1][pr[0].len..]) else try parted.append(a, .{ .before = pr[0], .after = pr[1], .role = pr[2] });
+            if (pr[1].len > pr[0].len and std.mem.eql(u32, pr[1][0..pr[0].len], pr[0])) try pieces[@backingInt(pr[2])].append(a, pr[1][pr[0].len..]) else try parted.append(a, .{ .before = pr[0], .after = pr[1], .role = pr[2] });
         }
     };
     // templates can render the last reply differently; new messages start at the next opener past the difference
@@ -102,7 +102,7 @@ pub fn markers(srv: *Server, a: Allocator, step: u32) !Plan {
             count += 1;
             at = i;
         };
-        if (count == 1) try pieces[@intFromEnum(pt.role)].append(a, pt.after[at.?..]);
+        if (count == 1) try pieces[@backingInt(pt.role)].append(a, pt.after[at.?..]);
     }
     if (pieces[0].items.len == 0 or pieces[1].items.len == 0) return .{ .step = step };
     openers = try openersOf(srv, a, &pieces);

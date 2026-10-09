@@ -36,8 +36,8 @@ pub const Entry = struct {
 
     fn put(e: Entry, o: *wire.Out) wire.Error!void {
         for ([_]u64{ e.id, e.incarnation, e.counter, e.epoch, e.digest, e.plan }) |v| try o.int(u64, v);
-        try o.int(u8, @intFromEnum(e.state));
-        try o.int(u8, @intFromEnum(e.phase));
+        try o.int(u8, @backingInt(e.state));
+        try o.int(u8, @backingInt(e.phase));
         try o.int(u16, e.progress);
     }
 
