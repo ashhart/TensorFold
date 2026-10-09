@@ -34,6 +34,7 @@ const Rig = struct {
     bufs: std.ArrayList(cuda.DeviceBuffer) = .empty,
     bad: usize = 0,
     cases: usize = 0,
+    sparsest: f64 = 1, // the smallest share of nonzero elements in any reference: none may be all zeros
 
     fn g(r: *Rig) glue.Glue {
         return .{ .set = null, .f = &r.f, .s = r.s };
@@ -71,6 +72,9 @@ const Rig = struct {
         const got = try r.a.alloc(T, want.len);
         try r.gpu.d.check(r.gpu.d.api.cuMemcpyDtoH_v2(got.ptr, ptr, want.len * @sizeOf(T)), "cuMemcpyDtoH");
         r.cases += 1;
+        var live: usize = 0;
+        for (want) |w| live += @intFromBool(!std.mem.allEqual(u8, std.mem.asBytes(&w), 0));
+        r.sparsest = @min(r.sparsest, @as(f64, @floatFromInt(live)) / @as(f64, @floatFromInt(want.len)));
         if (std.mem.eql(u8, std.mem.sliceAsBytes(got), std.mem.sliceAsBytes(want))) return;
         r.bad += 1;
         var n: usize = 0;
@@ -324,5 +328,6 @@ pub fn run(gpu: Gpu) !void {
     for ([_][2]usize{ .{ 0, 16 }, .{ 1000, 16 }, .{ 5000, 3 } }) |c| try attention(&r, c[0], c[1]);
     try keyed(&r);
     try check.expect(r.bad == 0, "glue: {d} of {d} comparisons differ from the host references", .{ r.bad, r.cases });
-    check.pass("glue: {d} of {d} comparisons byte-equal to the host references (norms, router, top-k, conv, scan, attention, draw)", .{ r.cases, r.cases });
+    try check.expect(r.sparsest > 0, "glue: a host reference is all zeros, so its comparison proves nothing", .{});
+    check.pass("glue: {d} of {d} comparisons byte-equal to the host references (norms, router, top-k, conv, scan, attention, draw); every reference at least {d:.0}% nonzero", .{ r.cases, r.cases, r.sparsest * 100 });
 }
