@@ -81,6 +81,19 @@ pub fn smoke(gpu: Gpu) !void {
     }
     check.pass("launches: fill, fill, axpy over {d} elements exact", .{count});
 
+    // the serial round's token history: a kernel writes mapped host memory, over PCIe on a discrete card
+    var mapped = try cuda.HostBuffer.allocMapped(d, 1024 * 4);
+    defer mapped.free();
+    @memset(mapped.bytes, 0);
+    args = .{};
+    args.add(try mapped.device());
+    args.add(@as(f32, 7));
+    args.add(@as(u32, 1024));
+    try cuda.launch.launch(fill, .{ .grid = .{ .x = 4 }, .block = .{ .x = 256 } }, stream, &args);
+    try stream.synchronize();
+    for (mapped.slice(f32), 0..) |v, i| try expect(v == 7 + @as(f32, @floatFromInt(i)), "mapped host word {d}: {d}", .{ i, v });
+    check.pass("mapped host memory: a kernel's 1024 writes read on the host after the stream syncs", .{});
+
     const table = try probe.global("tf_probe_table");
     try expect(table.len == 16, "module global size {d}", .{table.len});
     const vals = [4]i32{ 1, 2, 3, 4 };
