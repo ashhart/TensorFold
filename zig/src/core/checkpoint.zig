@@ -26,7 +26,8 @@ pub fn shardFiles(gpa: std.mem.Allocator, io: Io, dir: []const u8) ![][:0]u8 {
         while (it.next()) |e| {
             const file = e.value_ptr.string;
             if ((try seen.getOrPut(gpa, file)).found_existing) continue;
-            try names.append(gpa, try std.fmt.allocPrintSentinel(gpa, "{s}/{s}", .{ dir, file }, 0));
+            try names.ensureUnusedCapacity(gpa, 1);
+            names.appendAssumeCapacity(try std.fmt.allocPrintSentinel(gpa, "{s}/{s}", .{ dir, file }, 0));
         }
     } else |_| {
         var d = try Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
@@ -34,8 +35,9 @@ pub fn shardFiles(gpa: std.mem.Allocator, io: Io, dir: []const u8) ![][:0]u8 {
         var it = d.iterate();
         while (try it.next(io)) |e| {
             if (e.kind != .file and e.kind != .sym_link) continue;
-            if (std.mem.startsWith(u8, e.name, "model") and std.mem.endsWith(u8, e.name, ".safetensors"))
-                try names.append(gpa, try std.fmt.allocPrintSentinel(gpa, "{s}/{s}", .{ dir, e.name }, 0));
+            if (!std.mem.startsWith(u8, e.name, "model") or !std.mem.endsWith(u8, e.name, ".safetensors")) continue;
+            try names.ensureUnusedCapacity(gpa, 1);
+            names.appendAssumeCapacity(try std.fmt.allocPrintSentinel(gpa, "{s}/{s}", .{ dir, e.name }, 0));
         }
     }
     if (names.items.len == 0) return error.NoSafetensors;
@@ -67,7 +69,8 @@ pub const Checkpoint = struct {
         defer freeShardFiles(gpa, paths);
         var ck: Checkpoint = .{ .gpa = gpa, .io = io };
         errdefer ck.close();
-        for (paths) |p| try ck.files.append(gpa, try st.File.openPrefix(gpa, io, p, prefix));
+        try ck.files.ensureTotalCapacityPrecise(gpa, paths.len);
+        for (paths) |p| ck.files.appendAssumeCapacity(try st.File.openPrefix(gpa, io, p, prefix));
         return ck;
     }
 
@@ -75,7 +78,8 @@ pub const Checkpoint = struct {
     pub fn add(self: *Checkpoint, dir: []const u8, name: []const u8) !void {
         const path = try std.fs.path.join(self.gpa, &.{ dir, name });
         defer self.gpa.free(path);
-        try self.files.append(self.gpa, try st.File.open(self.gpa, self.io, path));
+        try self.files.ensureUnusedCapacity(self.gpa, 1);
+        self.files.appendAssumeCapacity(try st.File.open(self.gpa, self.io, path));
     }
 
     pub fn close(self: *Checkpoint) void {
@@ -116,3 +120,74 @@ pub const Checkpoint = struct {
         return n;
     }
 };
+
+/// A safetensors image of one U8 tensor of `bytes` bytes named `name`.
+fn testImage(a: std.mem.Allocator, name: []const u8, bytes: usize) ![]u8 {
+    const header = try std.fmt.allocPrint(a, "{{\"{s}\":{{\"dtype\":\"U8\",\"shape\":[{d}],\"data_offsets\":[0,{d}]}}}}", .{ name, bytes, bytes });
+    defer a.free(header);
+    const out = try a.alloc(u8, 8 + header.len + bytes);
+    std.mem.writeInt(u64, out[0..8], header.len, .little);
+    @memcpy(out[8..][0..header.len], header);
+    @memset(out[8 + header.len ..], 0);
+    return out;
+}
+
+/// Fails each allocation of `run` in turn, and every resize; bytes must balance, and `run` must pass when none fails.
+fn expectBalanced(comptime run: anytype, io: Io, dir: []const u8) !void {
+    var i: usize = 0;
+    while (true) : (i += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = i, .resize_fail_index = 0 });
+        run(failing.allocator(), io, dir) catch |err| if (!failing.has_induced_failure) return err;
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        if (!failing.has_induced_failure) return;
+    }
+}
+
+fn listShards(gpa: std.mem.Allocator, io: Io, dir: []const u8) !void {
+    freeShardFiles(gpa, try shardFiles(gpa, io, dir));
+}
+
+fn openShards(gpa: std.mem.Allocator, io: Io, dir: []const u8) !void {
+    var ck = try Checkpoint.openModel(gpa, io, dir);
+    ck.close();
+}
+
+fn addShard(gpa: std.mem.Allocator, io: Io, dir: []const u8) !void {
+    var ck: Checkpoint = .{ .gpa = gpa, .io = io };
+    defer ck.close();
+    try ck.add(dir, "model-00001-of-00002.safetensors");
+}
+
+test "a failed allocation while a checkpoint opens leaves nothing behind" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var walk = std.testing.tmpDir(.{});
+    defer walk.cleanup();
+    var indexed = std.testing.tmpDir(.{});
+    defer indexed.cleanup();
+    const shards = [_][]const u8{ "model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors" };
+    for (shards, 1..) |name, i| {
+        const image = try testImage(gpa, name[0..11], i * 4);
+        defer gpa.free(image);
+        try walk.dir.writeFile(io, .{ .sub_path = name, .data = image });
+    }
+    try walk.dir.writeFile(io, .{ .sub_path = "notes.txt", .data = "" });
+    try walk.dir.createDirPath(io, "model-dir.safetensors");
+    try indexed.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data =
+        \\{"weight_map":{"a":"model-00002-of-00002.safetensors","b":"model-00001-of-00002.safetensors","c":"model-00002-of-00002.safetensors"}}
+    });
+    var paths: [2][64]u8 = undefined;
+    const walk_dir = try std.fmt.bufPrint(&paths[0], ".zig-cache/tmp/{s}", .{walk.sub_path});
+    const indexed_dir = try std.fmt.bufPrint(&paths[1], ".zig-cache/tmp/{s}", .{indexed.sub_path});
+
+    for ([_][]const u8{ walk_dir, indexed_dir }) |dir| {
+        const listed = try shardFiles(gpa, io, dir);
+        defer freeShardFiles(gpa, listed);
+        try std.testing.expectEqual(shards.len, listed.len);
+        for (shards, listed) |name, path| try std.testing.expectEqualStrings(name, std.fs.path.basename(path));
+    }
+    try expectBalanced(listShards, io, indexed_dir);
+    try expectBalanced(listShards, io, walk_dir);
+    try expectBalanced(openShards, io, walk_dir);
+    try expectBalanced(addShard, io, walk_dir);
+}
