@@ -128,6 +128,9 @@ pub fn build(b: *std.Build) void {
     _ = ids_files.addCopyFile(b.path("zig/src/families/nemotron/draft_ids.txt"), "draft_ids.txt");
     const draft_ids = b.createModule(.{ .root_source_file = ids_files.add("draft_ids.zig", "pub const text = @embedFile(\"draft_ids.txt\");\n") });
     const test_step = b.step("test", "Host-side unit tests (no GPU work)");
+    // GLM-5.3's copy-draft index (host code only), on every platform
+    const glm53_copy = b.createModule(.{ .root_source_file = b.path("zig/src/families/glm53/copy_index.zig"), .target = b.graph.host, .optimize = .Debug });
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm53_copy })).step);
     switch (target.result.os.tag) {
         .macos => metalTargets(b, target, optimize, draft_ids, build_options, test_step),
         .linux => cuda_build.targets(b, target, optimize, draft_ids, build_options),
@@ -437,6 +440,22 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "fabric", .module = fabric } },
     }) });
     b.step("tf-tp2-bench", "TP=2's exchange as the GPU sees it, between two Macs over MCDMA").dependOn(&b.addInstallArtifact(tp2, .{}).step);
+    const glm53 = b.addExecutable(.{ .name = "tf-glm53", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/families/glm53/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "fabric", .module = fabric } },
+    }) });
+    b.step("tf-glm53", "Full GLM-5.3 decode on one or N Macs (oracle check or greedy generate)").dependOn(&b.addInstallArtifact(glm53, .{}).step);
+    const glm53_ix = b.addExecutable(.{ .name = "tf-glm53-ixbench", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/families/glm53/ixbench.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "fabric", .module = fabric } },
+    }) });
+    b.step("tf-glm53-ixbench", "GLM-5.3 indexer at long context: old vs new scores, top-k, sparse attention (synthetic, exactness)").dependOn(&b.addInstallArtifact(glm53_ix, .{}).step);
     const cluster_tests = b.step("test-cluster", "Cluster tests: fake nodes and fabric, K3 planning (TF_K3_DIR), Metal sink");
     cluster_tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cluster })).step);
     cluster_tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cluster_metal })).step);
