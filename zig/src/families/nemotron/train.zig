@@ -127,7 +127,7 @@ pub const Trainer = struct {
         }
         t.cache.len = 0;
         try b.drain();
-        const job: Job = .{ .t = t, .rows = rows, .mode = mode };
+        const job: Job = .{ .t = t, .rows = rows, .start = start, .mode = mode };
         if (t.profile) |p| {
             var e: fwd.Enc = .{ .e = p.begin(), .prof = p };
             try job.encode(b, &e);
@@ -157,6 +157,7 @@ pub const Trainer = struct {
     const Job = struct {
         t: *Trainer,
         rows: usize,
+        start: usize,
         mode: Mode,
 
         pub fn encode(j: @This(), b: *Metal, e: *fwd.Enc) !void {
@@ -180,7 +181,7 @@ pub const Trainer = struct {
                 switch (j.mode) {
                     .loss => {},
                     .grad, .learn => keepActs(t, e, &w.s, l, rows, .out),
-                    .avoid, .seek => sketchSite(t, o, &w.s, l, rows, j.mode),
+                    .avoid, .seek => sketchSite(t, o, &w.s, l, rows, j.start, j.mode),
                     .project => {
                         const site = &t.sites.list[l];
                         o.project(input(c, &w.s, l), site.seek, At.of(t.proj).plus(l * max_rows * adapters.candidates * 4), rows, site.in, adapters.candidates);
@@ -289,13 +290,16 @@ fn input(c: cfg.Config, s: *const pre.Scratch, l: usize) Buffer {
     return if (c.kinds[l] == .moe) s.upr else s.ya;
 }
 
-/// Layer l's site input added to the sketch a new block avoids, or the one it reads.
-fn sketchSite(t: *Trainer, o: ops.Ops, s: *const pre.Scratch, l: usize, rows: usize, mode: Mode) void {
+/// Layer l's site input into the sketch a block avoids or reads; the answer's first row again, weighed as its answer.
+fn sketchSite(t: *Trainer, o: ops.Ops, s: *const pre.Scratch, l: usize, rows: usize, start: usize, mode: Mode) void {
     const site = &t.sites.list[l];
-    const x = input(t.b.m.config, s, l);
-    if (mode == .avoid) {
-        o.sketch(x, site.avoid, rows, site.in, adapters.avoid_dims, t.sketched, 1);
-    } else o.sketch(x, site.seek, rows, site.in, adapters.candidates, t.sketched, 2);
+    const x = At.of(input(t.b.m.config, s, l));
+    const y = if (mode == .avoid) site.avoid else site.seek;
+    const k: usize = if (mode == .avoid) adapters.avoid_dims else adapters.candidates;
+    const seed: u32 = if (mode == .avoid) 1 else 2;
+    const first = start - 1;
+    o.sketch(x, y, rows, site.in, k, t.sketched, seed, 1);
+    o.sketch(x.plus(first * site.in * 2), y, 1, site.in, k, (1 << 30) + t.sketched + first, seed, @floatFromInt(rows - first));
 }
 
 /// rows rows of the hidden width from one bf16 place to another.

@@ -108,7 +108,7 @@ kernel void tf_train_lora_in(const device bfloat* x [[buffer(0)]],
   if (lane == 0 && q == 0) xn[r] = n;
 }
 
-// Block b opens on row r if its directions hold tau of the row's input, else its xa and gate are 0; grid (blocks, r).
+// Block b opens on row r if the row's cosine with b's first direction reaches tau, else its xa and gate are 0.
 kernel void tf_train_gate(device float* xa [[buffer(0)]],
                           const device float* xn [[buffer(1)]],
                           const device float* tau [[buffer(2)]],
@@ -119,9 +119,8 @@ kernel void tf_train_gate(device float* xa [[buffer(0)]],
   const uint rows = dims.x, rank = dims.y, blocks = dims.z, b = pos.x, r = pos.y;
   if (b >= blocks || r >= rows) return;
   device float* row = xa + size_t(r) * rank + b * 16;
-  float e = 0;
-  for (uint q = 0; q < 16; q++) e += row[q] * row[q];
-  const bool open = e >= tau[b] * unit * xn[r];
+  const float n = unit * xn[r];
+  const bool open = n > 0 && row[0] >= tau[b] * sqrt(n);
   gates[size_t(r) * blocks + b] = open ? 1.0f : 0.0f;
   if (!open)
     for (uint q = 0; q < 16; q++) row[q] = 0;
@@ -217,17 +216,18 @@ inline float coin(uint row, uint j, uint seed) {
   return (h & 1) ? 1.0f : -1.0f;
 }
 
-// y[j, i] += sum_r coin(first + r, j) x[r, i]: a site's input rows into a random sketch; dims (rows, in, k, first).
+// y[j, i] += w sum_r coin(first + r, j) x[r, i]: a site's input rows into a random sketch; dims (rows, in, k, first).
 kernel void tf_train_sketch(const device bfloat* x [[buffer(0)]],
                             device float* y [[buffer(1)]],
                             constant uint4& dims [[buffer(2)]],
                             constant uint& seed [[buffer(3)]],
+                            constant float& w [[buffer(4)]],
                             uint2 pos [[thread_position_in_grid]]) {
   const uint rows = dims.x, n_in = dims.y, k = dims.z, first = dims.w, i = pos.x, j = pos.y;
   if (i >= n_in || j >= k) return;
   float s = 0;
   for (uint r = 0; r < rows; r++) s += coin(first + r, j, seed) * float(x[size_t(r) * n_in + i]);
-  y[size_t(j) * n_in + i] += s;
+  y[size_t(j) * n_in + i] += w * s;
 }
 
 // du = da 2 relu(u): the squared ReLU's backward on its bf16 pre-activation.

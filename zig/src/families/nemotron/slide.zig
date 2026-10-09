@@ -32,11 +32,14 @@ const max_steps = 60;
 const check_every = 5;
 const replay_cap = 64; // earlier lessons' answers kept steady at most, the oldest giving way
 
-/// How far above the largest share any steady row has a fact row's share must be for the block to act on it.
-const gate_margin: f32 = 1.25;
+/// How far above every steady row's cosine with the gate's direction a row's must be for the block to act on it.
+const gate_margin: f32 = 0.02;
 
 /// A new lesson first sketches and measures what its block must avoid and read (build), then learns (steps).
 const Phase = enum { idle, build, steps, undo };
+
+/// An example's turn: a fact answer or a twin kept as it is, and whether Adam steps after it.
+const Turn = struct { ex: Example, fact: bool, last: bool };
 
 pub const Learner = struct {
     gpa: std.mem.Allocator,
@@ -44,11 +47,10 @@ pub const Learner = struct {
     trainer: ?*train.Trainer = null,
     lesson: Lesson = .{},
     phase: Phase = .idle,
-    plan: std.ArrayList(Example) = .empty, // this round's steps in order
+    plan: std.ArrayList(Turn) = .empty, // this round's examples in order
     at: usize = 0, // the plan's next example
-    taken: u32 = 0, // steps this round
-    loss: f32 = 0, // the round's summed loss
-    keep: []Example = &.{}, // the keep prompts' examples, copied from the first lesson that brings them
+    taken: u32 = 0, // Adam steps this round
+    loss: f32 = 0, // the round's fact answers' summed loss
     replay: std.ArrayList(Example) = .empty, // earlier lessons' answers, owned
     last: []Example = &.{}, // the last lesson's answers, owned, joining replay when the next lesson begins
     kept_rounds: u32 = 0, // the last lesson's rounds still in the weights
@@ -67,7 +69,6 @@ pub const Learner = struct {
         if (l.trainer) |t| t.deinit(l.gpa);
         if (l.choice) |*c| c.deinit();
         l.plan.deinit(l.gpa);
-        disown(l.gpa, l.keep);
         disown(l.gpa, l.last);
         for (l.replay.items) |ex| l.gpa.free(ex.ids);
         l.replay.deinit(l.gpa);
@@ -89,7 +90,6 @@ pub const Learner = struct {
             l.choice = try choice.Choice.init(l.gpa, l.b.m.config.layers);
             l.trainer = try train.Trainer.init(l.gpa, l.b);
         }
-        if (l.keep.len == 0 and lesson.keep.len > 0) l.keep = try own(l.gpa, lesson.keep);
         if (lesson.more) {
             if (!l.opened) return error.NothingToContinue;
             return l.start();
@@ -147,8 +147,8 @@ pub const Learner = struct {
         const t = l.trainer.?;
         const c = &l.choice.?;
         const facts = l.lesson.train;
-        const stay = [_][]const Example{ l.keep, l.lesson.near, l.replay.items };
-        const steady = l.keep.len + l.lesson.near.len + l.replay.items.len;
+        const stay = [_][]const Example{ l.lesson.keep, l.lesson.near, l.replay.items };
+        const steady = l.lesson.keep.len + l.lesson.near.len + l.replay.items.len;
         var i = l.built;
         l.built += 1;
         if (i < steady) return l.sketch(pick(&stay, i), .avoid);
@@ -163,7 +163,7 @@ pub const Learner = struct {
         if (i < steady) {
             const ex = pick(&stay, i);
             _ = try t.step(ex.ids, ex.start, .project);
-            for (0..t.sites.list.len) |k| try c.add(k, t.projected(k, ex.ids.len - 1), false);
+            for (0..t.sites.list.len) |k| try c.add(k, t.projected(k, ex.ids.len - 1), false, ex.start - 1, true);
             return .{ .done = false };
         }
         i -= steady;
@@ -171,7 +171,8 @@ pub const Learner = struct {
             const ex = facts[i];
             _ = try t.step(ex.ids, ex.start, .project);
             l.answers += @intCast(ex.ids.len - ex.start);
-            for (0..t.sites.list.len) |k| try c.add(k, t.projected(k, ex.ids.len - 1)[(ex.start - 1) * adapters.candidates ..], true);
+            try c.head();
+            for (0..t.sites.list.len) |k| try c.add(k, t.projected(k, ex.ids.len - 1)[(ex.start - 1) * adapters.candidates ..], true, 0, false);
             return .{ .done = false };
         }
         try c.choose(gate_margin);
@@ -195,23 +196,27 @@ pub const Learner = struct {
         const k = sites.first() / adapters.block;
         var open: usize = 0;
         var reach: u64 = 0;
-        for (sites.list, c.tau, c.hits) |*site, tau, hits| {
+        var firsts: u64 = 0;
+        for (sites.list, c.tau, c.hits, c.opens) |*site, tau, hits, opens| {
             site.gate(k).* = tau;
             open += @intFromBool(hits > 0);
             reach += hits;
+            firsts += opens;
         }
         const mean = 100 * @as(f64, @floatFromInt(reach)) / @as(f64, @floatFromInt(@max(open * l.answers, 1)));
-        std.log.info("slide: block {d} acts at {d} of {d} layers, on {d:.0}% of the fact's answer rows there", .{ k + 1, open, sites.list.len, mean });
+        const first = @as(f64, @floatFromInt(firsts)) / @as(f64, @floatFromInt(@max(c.heads.items.len, 1)));
+        std.log.info("slide: block {d} acts at {d} of {d} layers, on {d:.0}% of the fact's answer rows there; first rows at {d:.1}", .{ k + 1, open, sites.list.len, mean, first });
     }
 
-    /// One step on one of the fact's answers; every few steps the held-out answers are read back.
+    /// One example's gradients, Adam after each fact answer and its twin; every few steps the held-out answers are read
     fn stepOnce(l: *Learner) !Step {
         const t = l.trainer.?;
-        const ex = l.plan.items[l.at];
-        const got = try t.step(ex.ids, ex.start, .learn);
+        const turn = l.plan.items[l.at];
+        const got = try t.step(turn.ex.ids, turn.ex.start, if (turn.last) .learn else .grad);
         if (!std.math.isFinite(got.loss)) return error.NonfiniteStep;
         l.at += 1;
-        l.loss += got.loss;
+        if (turn.fact) l.loss += got.loss;
+        if (!turn.last) return .{ .done = false };
         l.taken += 1;
         const end = l.at == l.plan.items.len;
         const back = (l.taken % check_every == 0 or end) and try l.recalled();
@@ -255,7 +260,7 @@ pub const Learner = struct {
         var facts: Deck = try .init(l.gpa, &.{l.lesson.train});
         defer facts.deinit(l.gpa);
         l.plan.clearRetainingCapacity();
-        for (0..steps) |_| try l.plan.append(l.gpa, facts.draw(prng.random()));
+        for (0..steps) |_| try l.plan.append(l.gpa, .{ .ex = facts.draw(prng.random()), .fact = true, .last = true });
     }
 };
 

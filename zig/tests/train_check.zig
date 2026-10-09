@@ -35,7 +35,7 @@ pub fn main(init: std.process.Init) !void {
     @memset(first_candidates, 0);
     for (0..m.config.layers * block) |q| first_candidates[q * nm.adapters.candidates + q % block] = 1;
     try t.sites.open(first_candidates);
-    for (t.sites.list) |*site| site.gate(0).* = 0;
+    for (t.sites.list) |*site| site.gate(0).* = -2;
     t.sites.attach(&m.weights, true);
     const first = t.sites.first();
     for (t.sites.list) |*site| for (site.b.slice(f32, max_rank * site.out)[first * site.out ..][0 .. block * site.out]) |*v| {

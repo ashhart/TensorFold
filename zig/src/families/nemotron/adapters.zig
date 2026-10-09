@@ -18,16 +18,16 @@ pub const scale: f32 = 10;
 pub const avoid_dims = 192; // directions sketched from the inputs a new block must leave alone
 pub const candidates = 64; // directions sketched from the fact's inputs, which a new block's are chosen among
 
-/// Adam's settings: learning rate, the moments' decays and epsilon.
-pub const hyper = [4]f32{ 1e-4, 0.9, 0.999, 1e-8 };
+/// Adam's settings for a block's outputs (its gate keeps them off what must stay): rate, moments' decays, epsilon.
+pub const hyper = [4]f32{ 3e-4, 0.9, 0.999, 1e-8 };
 
 /// Each new input direction's length, as MLX's LoRA draws its down factor's columns (uniform within 1 / sqrt(in)).
 const a_norm: f32 = 0.577;
 
-/// A block's directions' squared length: a row's share in a block is |x a_b^T|^2 / (unit |x|^2), at most 1.
+/// A block's directions' squared length: a row's cosine with one is (x . a) / sqrt(unit |x|^2).
 pub const unit = a_norm * a_norm;
 
-/// A block's gate threshold before its lesson measures one: above any share, so the block stays shut.
+/// A block's gate before its lesson sets one: above any cosine, so the block stays shut.
 pub const shut: f32 = 2;
 
 /// One layer's change: y += scale (x a^T) b after its output projection; a [max_rank, in], b [max_rank, out], f32.

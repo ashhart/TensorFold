@@ -13,9 +13,12 @@ pub const Choice = struct {
     facts: []f64, // [layers, n, n]: the fact's answer rows' second moment
     steady_rows: []std.ArrayList(f32), // per layer, each steady row's n values, for its share
     fact_rows: []std.ArrayList(f32),
+    heads: std.ArrayList(usize) = .empty, // where each fact example's first answer row is in fact_rows (in rows)
+    steady_heads: std.ArrayList(usize) = .empty, // the same for the steady examples under the gate
     coef: []f32, // [layers, block, n]: each layer's new directions in the candidates' terms
     tau: []f32, // [layers]: each layer's gate, or shut
     hits: []u32, // [layers]: the fact's answer rows that clear it
+    opens: []u32, // [layers]: the fact examples whose first answer row clears it
 
     pub fn init(gpa: std.mem.Allocator, layers: usize) !Choice {
         const c: Choice = .{
@@ -27,6 +30,7 @@ pub const Choice = struct {
             .coef = try gpa.alloc(f32, layers * block * n),
             .tau = try gpa.alloc(f32, layers),
             .hits = try gpa.alloc(u32, layers),
+            .opens = try gpa.alloc(u32, layers),
         };
         for (c.steady_rows, c.fact_rows) |*x, *y| {
             x.* = .empty;
@@ -40,7 +44,9 @@ pub const Choice = struct {
             x.deinit(c.gpa);
             y.deinit(c.gpa);
         }
-        inline for (.{ "steady", "facts", "steady_rows", "fact_rows", "coef", "tau", "hits" }) |f| c.gpa.free(@field(c, f));
+        inline for (.{ "steady", "facts", "steady_rows", "fact_rows", "coef", "tau", "hits", "opens" }) |f| c.gpa.free(@field(c, f));
+        c.heads.deinit(c.gpa);
+        c.steady_heads.deinit(c.gpa);
     }
 
     pub fn reset(c: *Choice) void {
@@ -50,22 +56,32 @@ pub const Choice = struct {
             x.clearRetainingCapacity();
             y.clearRetainingCapacity();
         }
+        c.heads.clearRetainingCapacity();
+        c.steady_heads.clearRetainingCapacity();
     }
 
-    /// Layer l's rows ([rows, n], each a unit input along the candidates), steady ones or the fact's answer rows.
-    pub fn add(c: *Choice, l: usize, rows: []const f32, fact: bool) !void {
+    /// The next fact example's rows start here: its first answer row is the one that decides how the answer opens.
+    pub fn head(c: *Choice) !void {
+        try c.heads.append(c.gpa, c.fact_rows[0].items.len / n);
+    }
+
+    /// Layer l's unit rows [rows, n], steady or the fact's; row `first` weighs as all after; `gate`: kept below it.
+    pub fn add(c: *Choice, l: usize, rows: []const f32, fact: bool, first: usize, gate: bool) !void {
         const m = (if (fact) c.facts else c.steady)[l * n * n ..][0 .. n * n];
+        const count = rows.len / n;
         var r: usize = 0;
-        while (r * n < rows.len) : (r += 1) {
+        while (r < count) : (r += 1) {
             const p = rows[r * n ..][0..n];
+            const w: f64 = if (r == first) @floatFromInt(@max(count - first - 1, 1)) else 1;
             for (0..n) |i| for (0..n) |j| {
-                m[i * n + j] += @as(f64, p[i]) * p[j];
+                m[i * n + j] += w * p[i] * p[j];
             };
         }
-        try (if (fact) &c.fact_rows[l] else &c.steady_rows[l]).appendSlice(c.gpa, rows);
+        if (!fact and gate and l == 0) try c.steady_heads.append(c.gpa, c.steady_rows[0].items.len / n + first);
+        if (fact or gate) try (if (fact) &c.fact_rows[l] else &c.steady_rows[l]).appendSlice(c.gpa, rows);
     }
 
-    /// Every layer's directions and gate (margin: how far above the largest steady share a row must be to open it).
+    /// Every layer's directions and gate (margin: how far above every steady row's cosine a row must be to open it).
     pub fn choose(c: *Choice, margin: f32) !void {
         var threads: [16]?std.Thread = @splat(null);
         var failed: [16]?anyerror = @splat(null);
@@ -82,25 +98,66 @@ pub const Choice = struct {
         };
     }
 
-    /// Layer l: the block's directions, then its gate above every steady row's share and the fact rows it lets through.
+    /// Layer l: the gate's direction, the block's others where the fact outweighs the steady rows, the gate above them.
     fn layer(c: *Choice, l: usize, margin: f32) !void {
         const coef = c.coef[l * block * n ..][0 .. block * n];
-        try subspace.outweigh(c.gpa, c.facts[l * n * n ..][0 .. n * n], c.steady[l * n * n ..][0 .. n * n], n, block, coef);
-        var top: f32 = 0;
-        for (0..c.steady_rows[l].items.len / n) |r| top = @max(top, part(coef, c.steady_rows[l].items[r * n ..][0..n]));
-        c.tau[l] = margin * top;
+        var more: [block * n]f32 = undefined;
+        try subspace.outweigh(c.gpa, c.facts[l * n * n ..][0 .. n * n], c.steady[l * n * n ..][0 .. n * n], n, block, &more);
+        try c.discriminant(l, coef[0..n]);
+        @memcpy(coef[n..], more[0 .. (block - 1) * n]);
+        subspace.orthonormal(coef, block, n);
+        const steady = c.steady_rows[l].items;
+        const facts = c.fact_rows[l].items;
+        var top: f32 = -1;
+        for (0..steady.len / n) |r| top = @max(top, subspace.dot(coef[0..n], steady[r * n ..][0..n]));
+        c.tau[l] = top + margin;
         c.hits[l] = 0;
-        for (0..c.fact_rows[l].items.len / n) |r| c.hits[l] += @intFromBool(part(coef, c.fact_rows[l].items[r * n ..][0..n]) > c.tau[l]);
-        if (c.hits[l] == 0) c.tau[l] = adapters.shut;
+        for (0..facts.len / n) |r| c.hits[l] += @intFromBool(subspace.dot(coef[0..n], facts[r * n ..][0..n]) > c.tau[l]);
+        c.opens[l] = 0;
+        for (c.heads.items) |r| c.opens[l] += @intFromBool(subspace.dot(coef[0..n], facts[r * n ..][0..n]) > c.tau[l]);
+        if (c.hits[l] == 0) {
+            c.tau[l] = adapters.shut;
+            c.opens[l] = 0;
+        }
+    }
+
+    /// Fisher's direction between the fact's answer rows and the steady rows: (scatter + lambda)^-1 (mean difference).
+    fn discriminant(c: *Choice, l: usize, out: []f32) !void {
+        const sets = [2][]const f32{ c.fact_rows[l].items, c.steady_rows[l].items };
+        const firsts = [2][]const usize{ c.heads.items, c.steady_heads.items };
+        var mean: [2][n]f64 = @splat(@splat(0));
+        var total: [2]f64 = .{ 0, 0 };
+        for (sets, firsts, 0..) |rows, heads, k| for (0..rows.len / n) |r| {
+            const w = weight(heads, r);
+            total[k] += w;
+            for (0..n) |i| mean[k][i] += w * rows[r * n + i];
+        };
+        for (0..2) |k| for (&mean[k]) |*v| {
+            v.* /= @max(total[k], 1);
+        };
+        const scatter = try c.gpa.alloc(f64, n * n);
+        defer c.gpa.free(scatter);
+        @memset(scatter, 0);
+        for (sets, firsts, 0..) |rows, heads, k| for (0..rows.len / n) |r| {
+            const w = weight(heads, r) / @max(total[k], 1);
+            for (0..n) |i| for (0..n) |j| {
+                scatter[i * n + j] += w * (rows[r * n + i] - mean[k][i]) * (rows[r * n + j] - mean[k][j]);
+            };
+        };
+        var trace: f64 = 0;
+        for (0..n) |i| trace += scatter[i * n + i];
+        for (0..n) |i| scatter[i * n + i] += 1e-2 * trace / @as(f64, @floatFromInt(n)) + 1e-12;
+        var d: [n]f64 = undefined;
+        for (&d, mean[0], mean[1]) |*x, a, b| x.* = a - b;
+        try subspace.solve(scatter, n, &d);
+        var size: f64 = 0;
+        for (d) |x| size += x * x;
+        for (out, d) |*o, x| o.* = @floatCast(x / @sqrt(@max(size, 1e-30)));
     }
 };
 
-/// A unit row's share in a block: its squared length along the block's orthonormal directions.
-fn part(coef: []const f32, p: []const f32) f32 {
-    var e: f32 = 0;
-    for (0..block) |q| {
-        const d = subspace.dot(coef[q * n ..][0..n], p);
-        e += d * d;
-    }
-    return e;
+/// A row's weight: a first answer row counts as much as a whole answer, any other row once.
+fn weight(heads: []const usize, r: usize) f64 {
+    for (heads) |h| if (h == r) return 8;
+    return 1;
 }

@@ -92,6 +92,17 @@ pub fn outweigh(gpa: std.mem.Allocator, more: []const f64, less: []const f64, n:
     orthonormal(out, k, n);
 }
 
+/// x = a^-1 b for a symmetric positive definite a (n x n, overwritten by its Cholesky factor).
+pub fn solve(a: []f64, n: usize, b: []f64) !void {
+    try cholesky(a, n);
+    for (0..n) |i| {
+        var v = b[i];
+        for (0..i) |k| v -= a[i * n + k] * b[k];
+        b[i] = v / a[i * n + i];
+    }
+    upper(a, n, b);
+}
+
 /// a = L L^T in place (L in the lower triangle, the upper zeroed); a must be symmetric positive definite.
 fn cholesky(a: []f64, n: usize) !void {
     for (0..n) |j| {

@@ -142,12 +142,13 @@ pub const Ops = struct {
     }
 
     /// rows rows of a site's bf16 input x added to a random sketch y [k, in] (first: the rows' place in the sketch).
-    pub fn sketch(o: Ops, x: Buffer, y: Buffer, rows: usize, in: usize, k: usize, first: usize, seed: u32) void {
+    pub fn sketch(o: Ops, x: At, y: Buffer, rows: usize, in: usize, k: usize, first: usize, seed: u32, w: f32) void {
         o.go("tf_train_sketch");
-        o.e.buf(x, 0, 0);
+        o.e.buf(x.b, x.off, 0);
         o.e.buf(y, 0, 1);
         o.e.bytes([4]u32{ @intCast(rows), @intCast(in), @intCast(k), @intCast(first) }, 2);
         o.e.bytes(seed, 3);
+        o.e.bytes(w, 4);
         o.e.run(.{ in, k, 1 }, .{ 256, 1, 1 });
     }
 
