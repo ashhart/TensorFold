@@ -267,10 +267,13 @@ pub fn launchEx(gpu: Gpu) !void {
     defer probe.unload();
     var stream = try cuda.Stream.init(d, true);
     defer stream.deinit();
+    const clusters = try gpu.ctx.capability() >= 90; // thread-block clusters and PDL start at sm_90
     const ranks = try probe.function("tf_probe_cluster_rank");
     var out = try cuda.DeviceBuffer.alloc(d, 8 * 4);
     defer out.free();
+    if (!clusters) std.debug.print("SKIP cuLaunchKernelEx clusters and PDL: sm_{d} has neither\n", .{try gpu.ctx.capability()});
     for ([_]u32{ 2, 4 }, [_]bool{ false, true }) |size, spread| {
+        if (!clusters) break;
         try out.fill32(0xffffffff, null);
         var args: cuda.Args = .{};
         args.add(out.ptr);
@@ -280,7 +283,7 @@ pub fn launchEx(gpu: Gpu) !void {
         try out.download(0, std.mem.asBytes(&got));
         for (got, 0..) |rank, i| try expect(rank == i % size, "cluster {d} block {d} rank {d}", .{ size, i, rank });
     }
-    check.pass("cuLaunchKernelEx clusters: ranks 0..1 and 0..3 in clusters of 2 and 4 (spread policy on the second)", .{});
+    if (clusters) check.pass("cuLaunchKernelEx clusters: ranks 0..1 and 0..3 in clusters of 2 and 4 (spread policy on the second)", .{});
 
     const fill = try probe.function("tf_probe_fill");
     const sms: u32 = @intCast(try gpu.ctx.attribute(.multiprocessor_count));
@@ -297,6 +300,7 @@ pub fn launchEx(gpu: Gpu) !void {
     for (std.mem.bytesAsSlice(f32, ys), 0..) |v, i| try expect(v == 3 + @as(f32, @floatFromInt(i)), "cooperative fill {d}", .{i});
     check.pass("cuLaunchKernelEx cooperative grid of {d} blocks", .{sms});
 
+    if (!clusters) return;
     const step = try probe.function("tf_probe_pdl_step");
     var counter = try cuda.DeviceBuffer.alloc(d, 8);
     defer counter.free();
