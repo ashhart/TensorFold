@@ -272,5 +272,5 @@ template __global__ void tf_lane_gemv::gemv_kernel<64, 64, 8>(const __nv_bfloat1
 extern "C" __global__ void __launch_bounds__(128) tf_lane_gemv_split(const __nv_bfloat16* __restrict__ x, const float* __restrict__ xs,
                                                                      const __grid_constant__ tf_lane_gemv::Part P, int M, int K, int ldx,
                                                                      float* __restrict__ work, unsigned* __restrict__ tickets) {
-    tf_lane_gemv::gemv_split<64, 64, 8>(x, xs, P, M, K, ldx, work, tickets);
+    tf_lane_gemv::gemv_split<64, 64, 4>(x, xs, P, M, K, ldx, work, tickets);
 }

@@ -35,6 +35,7 @@ comptime {
 }
 
 pub const group_smem: u32 = 35328; // LaneTile<64, 16, 64, 1, 4, 8>::SMEM
+pub const split_smem: u32 = 17664; // LaneTile<64, 16, 64, 1, 4, 4>::SMEM: four stages, so more split CTAs fit an SM
 pub const prefill_mm_smem: u32 = 62976; // Tile<64, 128, 128, 2, 4, 3>::SMEM
 pub const pre_experts_smem: u32 = 38400; // Pre<64, 1, 2, 2, 4>: three stages of 800 uint4
 pub const pattn_smem: u32 = 65536; // eight 32-key slots of 128 dims
@@ -145,7 +146,7 @@ pub const Kernels = struct {
         errdefer if (k.triton) |*t| t.deinit();
         try k.group.allowDynamicShared(group_smem);
         try k.gemv.allowDynamicShared(group_smem);
-        try k.gemv_split.allowDynamicShared(group_smem);
+        try k.gemv_split.allowDynamicShared(split_smem);
         try k.prefill_mm.allowDynamicShared(prefill_mm_smem);
         try k.pre_up.allowDynamicShared(pre_experts_smem);
         try k.pre_down.allowDynamicShared(pre_experts_smem);
@@ -237,7 +238,7 @@ pub const Ops = struct {
         for ([_]usize{ rows, q.k, q.k }) |v| a.add(int(v));
         a.add(sp.work.ptr);
         a.add(sp.tickets.ptr);
-        try cuda.launch.launch(o.k.gemv_split, .{ .grid = .{ .x = u(tiles * sk) }, .block = .{ .x = 128 }, .shared = group_smem }, o.s, &a);
+        try cuda.launch.launch(o.k.gemv_split, .{ .grid = .{ .x = u(tiles * sk) }, .block = .{ .x = 128 }, .shared = split_smem }, o.s, &a);
     }
 
     /// lane_gemv: every K slice of a column tile in one CTA, summed in slice order, CTAs looping over the tiles.
