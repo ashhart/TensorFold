@@ -199,7 +199,7 @@ fn download(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Wri
         extra = &headers;
     }
     const uri = std.Uri.parse(url) catch return error.BadUrl;
-    var req = try client.request(.GET, uri, .{ .extra_headers = extra });
+    var req = try client.request(.GET, uri, .{ .extra_headers = extra, .headers = .{ .accept_encoding = .{ .override = "identity" } } }); // the file's own bytes: sizes, digests and ranges count them
     defer req.deinit();
     try req.sendBodiless();
     var redirect_buf: [8 << 10]u8 = undefined;
