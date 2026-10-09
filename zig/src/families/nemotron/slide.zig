@@ -34,7 +34,7 @@ pub const Step = struct { done: bool, changed: bool = false, report: ?Report = n
 
 const max_steps = 400;
 const check_every = 20;
-const plain_steps = 240; // most steps a lesson takes once it is a plain weight change: a fact answer, then a steady one
+const plain_steps = 60; // steps a lesson takes once it is a plain weight change, before its near misses are mined
 const replay_cap = 64; // earlier lessons' answers kept steady at most, the oldest giving way
 
 /// How far above every steady row's cosine with the gate's direction a row's must be for the block to act on it.
@@ -118,7 +118,8 @@ pub const Learner = struct {
 
     /// A round's steps from the open block as it is now, which an undo comes back to.
     fn start(l: *Learner) !void {
-        try l.schedule(@max(@min(l.lesson.steps, max_steps), 1));
+        const steps = @max(@min(l.lesson.steps, max_steps), 1);
+        if (l.plain) try l.schedulePlain(steps) else try l.schedule(steps);
         l.trainer.?.sites.keep();
         l.can_undo = true;
         l.at = 0;
@@ -277,6 +278,7 @@ pub const Learner = struct {
         if (!turn.last) return .{ .done = false };
         l.taken += 1;
         const end = l.at == l.plan.items.len;
+        if (l.plain and !end) return .{ .done = false, .changed = true };
         const back = (l.taken % check_every == 0 or end) and try l.recalled();
         if (!back and !end) return .{ .done = false, .changed = true };
         l.phase = .idle;
@@ -312,7 +314,7 @@ pub const Learner = struct {
         l.kept_rounds = 0;
     }
 
-    /// A plain change's steps: a fact answer, then a steady one kept as it was (twins twice as often), Adam after both.
+    /// A plain change's steps: a fact answer, then two steady ones as they were (twins twice as often), Adam after.
     fn schedulePlain(l: *Learner, steps: u32) !void {
         l.rounds += 1;
         var prng = std.Random.DefaultPrng.init(l.rounds);
@@ -324,6 +326,7 @@ pub const Learner = struct {
         for (0..steps) |_| {
             const alone = steady.cards.len == 0;
             try l.plan.append(l.gpa, .{ .ex = facts.draw(prng.random()), .fact = true, .last = alone });
+            if (!alone) try l.plan.append(l.gpa, .{ .ex = steady.draw(prng.random()), .fact = false, .last = false });
             if (!alone) try l.plan.append(l.gpa, .{ .ex = steady.draw(prng.random()), .fact = false, .last = true });
         }
     }

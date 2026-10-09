@@ -97,6 +97,7 @@ pub const Kernels = struct {
     transpose16: cuda.Function,
     serial_feed: cuda.Function,
     plan_routed: cuda.Function,
+    rest_rows: cuda.Function,
     draw: cuda.Function,
     draw_ids: cuda.Function,
     torch: torch_ops.Functions,
@@ -136,6 +137,7 @@ pub const Kernels = struct {
         k.transpose16 = try k.mods[7].function("tf_transpose_pad16");
         k.serial_feed = try k.mods[7].function("tf_serial_feed");
         k.plan_routed = try k.mods[7].function("tf_plan_routed");
+        k.rest_rows = try k.mods[7].function("tf_rest_rows");
         k.gemv = try k.mods[15].function(sym.gemv);
         k.gemv_split = try k.mods[15].function("tf_lane_gemv_split");
         k.torch = try torch_ops.Functions.resolve(k.mods[8..14]);
@@ -285,6 +287,19 @@ pub const Ops = struct {
         for ([_]u64{ x, q.w, q.s, q.b, out }) |v| a.add(v);
         for ([_]usize{ rows, q.n, q.k, q.npad, q.k, group }) |v| a.add(int(v));
         try o.go(o.k.prefill_mm, .{ rows_t * ((q.n + 127) / 128), 1, 1 }, 256, prefill_mm_smem, &a);
+    }
+
+    /// nemotron_ops' rest: y (bf16, or fp32 when `y_f32`) += r x at rows `i * row_mul + row_add` for i < rows.
+    pub fn restRows(o: Ops, x: u64, x_stride: usize, r: u64, y: u64, y_stride: usize, y_f32: bool, rows: usize, row_mul: usize, row_add: usize, n: usize, k: usize) !void {
+        var a: cuda.Args = .{};
+        a.add(x);
+        a.add(int(x_stride));
+        a.add(r);
+        a.add(y);
+        a.add(int(y_stride));
+        a.add(@as(c_int, @intFromBool(y_f32)));
+        for ([_]usize{ rows, row_mul, row_add, n, k }) |v| a.add(int(v));
+        try o.go(o.k.rest_rows, .{ (n + 3) / 4, 1, 1 }, 128, 0, &a);
     }
 
     /// experts.route: pairs grouped by expert into items of at most `tile` pairs (16 decode, 64 prefill).
