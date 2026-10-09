@@ -301,6 +301,62 @@ kernel void tf_residual(const device bfloat* x [[buffer(0)]],
   }
 }
 
+// dx[r] += sum_j dz_j gate[e_j]: routing weights scale s_j / sum s (s = sigmoid(logit)) back into the router's input.
+kernel void tf_train_route_back(const device bfloat* logits [[buffer(0)]],
+                                const device uint* ids [[buffer(1)]],
+                                const device bfloat* ys [[buffer(2)]],
+                                const device float* g [[buffer(3)]],
+                                const device bfloat* gate [[buffer(4)]],
+                                device float* dx [[buffer(5)]],
+                                constant uint4& dims [[buffer(6)]],
+                                constant float& scale [[buffer(7)]],
+                                uint r [[threadgroup_position_in_grid]],
+                                uint t [[thread_position_in_threadgroup]],
+                                uint lane [[thread_index_in_simdgroup]],
+                                uint sg [[simdgroup_index_in_threadgroup]]) {
+  const uint experts = dims.y, k = dims.z, d = dims.w;
+  threadgroup float scratch[32];
+  threadgroup float dz[16];
+  float a[16];
+  for (uint j = 0; j < k; j++) {
+    float s = 0;
+    for (uint i = t; i < d; i += 256) s += g[size_t(r) * d + i] * float(ys[(size_t(r) * k + j) * d + i]);
+    a[j] = group_sum(s, scratch, lane, sg, 8);
+  }
+  if (t == 0) {
+    float p[16];
+    float total = 0;
+    for (uint j = 0; j < k; j++) {
+      const float z = float(logits[size_t(r) * experts + ids[r * k + j]]);
+      p[j] = 1 / (1 + exp(-z));
+      total += p[j];
+    }
+    total += 1e-20f;
+    float mix = 0;
+    for (uint j = 0; j < k; j++) mix += a[j] * p[j] / total;
+    for (uint j = 0; j < k; j++) dz[j] = scale / total * (a[j] - mix) * p[j] * (1 - p[j]);
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint i = t; i < d; i += 256) {
+    float s = 0;
+    for (uint j = 0; j < k; j++) s += dz[j] * float(gate[size_t(ids[r * k + j]) * d + i]);
+    dx[size_t(r) * d + i] += s;
+  }
+}
+
+// dx[r, i] += sum_j g[r, j] rest[j, i]: a projection's bf16 residual [N, K] carried back to its input; grid (K, rows).
+kernel void tf_train_rest_back(const device float* g [[buffer(0)]],
+                               const device bfloat* rest [[buffer(1)]],
+                               device float* dx [[buffer(2)]],
+                               constant uint3& dims [[buffer(3)]],
+                               uint2 pos [[thread_position_in_grid]]) {
+  const uint rows = dims.x, n = dims.y, width = dims.z, i = pos.x, r = pos.y;
+  if (i >= width || r >= rows) return;
+  float s = 0;
+  for (uint j = 0; j < n; j++) s += g[size_t(r) * n + j] * float(rest[size_t(j) * width + i]);
+  dx[size_t(r) * width + i] += s;
+}
+
 kernel void tf_train_zero(device float* x [[buffer(0)]], uint i [[thread_position_in_grid]]) {
   x[i] = 0;
 }

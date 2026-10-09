@@ -106,7 +106,8 @@ pub fn moe(x: Layer, b: *Bufs, i: usize) void {
     const w = x.w.layers[i].moe;
     const f = c.shared_width;
     o.product(b.g, m.down, b.d_upr, rows, c.hidden, f, false);
-    o.adapterBack(x.ad, x.gb, x.first, b.dxa, s.upr, b.g, b.d_upr, rows);
+    if (w.slide) |r| o.restBack(b.g, r, b.d_upr, rows, c.hidden, f);
+    if (x.ad.rank > 0) o.adapterBack(x.ad, x.gb, x.first, b.dxa, s.upr, b.g, b.d_upr, rows);
     o.relu2Back(At.of(s.up), b.d_upr, b.du, rows * f);
     o.product(b.du, m.up, b.dx, rows, f, c.hidden, false);
     const pairs = rows * c.top_k;
@@ -115,6 +116,7 @@ pub fn moe(x: Layer, b: *Bufs, i: usize) void {
     o.relu2Back(At.of(s.y1), b.d_y1r, b.du1, pairs * c.expert_width);
     o.experts(b.du1, raw(w.fc1), s.offsets, b.dxp, pairs, c.expert_width, c.hidden, c.experts);
     o.pairsOut(s.inv, b.dxp, b.dx, rows, c.hidden, c.top_k);
+    o.routeBack(s.logits, s.ids, s.xr, b.g, pre.tensorAt(w.gate), b.dx, rows, c.experts, c.top_k, c.hidden, c.routed_scaling);
 }
 
 /// The Mamba-2 layer: out_proj and its change, the gated norm, the scan, dt, the conv, in_proj.
@@ -128,7 +130,8 @@ pub fn mamba(x: Layer, b: *Bufs, i: usize) void {
     const shape: ops.Shape = .{ .rows = @intCast(rows), .heads = @intCast(c.mamba_heads), .dh = @intCast(c.mamba_head_dim), .groups = @intCast(c.groups), .n = @intCast(c.state), .inner = @intCast(c.inner()), .conv = @intCast(c.convDim()), .proj = @intCast(c.projDim()) };
     const h = c.mamba_heads;
     o.product(b.g, m.out_proj, b.dyn, rows, c.hidden, c.inner(), false);
-    o.adapterBack(x.ad, x.gb, x.first, b.dxa, s.ya, b.g, b.dyn, rows);
+    if (x.w.layers[i].mamba.slide) |r| o.restBack(b.g, r, b.dyn, rows, c.hidden, c.inner());
+    if (x.ad.rank > 0) o.adapterBack(x.ad, x.gb, x.first, b.dxa, s.ya, b.g, b.dyn, rows);
     o.mixer("tf_train_dt", &.{ At.of(s.proj), m.dt_bias, At.of(b.dt) }, shape, .{ h, rows, 1 }, .{ 64, 1, 1 });
     o.mixer("tf_train_ssm_fwd", &.{ At.of(s.act), At.of(b.dt), m.a, m.d, At.of(b.ytot), At.of(b.ckpt) }, shape, .{ 1024 * h, 1, 1 }, .{ 1024, 1, 1 });
     o.mixer2("tf_train_gate_back", &.{ At.of(b.ytot), At.of(s.proj), norm, At.of(b.dyn), At.of(b.dytot), At.of(b.dproj) }, shape, c.eps, .{ 256 * c.groups, rows, 1 }, .{ 256, 1, 1 });
@@ -153,7 +156,8 @@ pub fn attention(x: Layer, b: *Bufs, i: usize) void {
     l.qmm(At.of(s.x), a.k, At.of(b.k), At.of(s.parts), rows, kw, c.hidden);
     l.qmm(At.of(s.x), a.v, At.of(b.v), At.of(s.parts), rows, kw, c.hidden);
     o.product(b.g, a.o, b.d_o, rows, c.hidden, qw, false);
-    o.adapterBack(x.ad, x.gb, x.first, b.dxa, s.ya, b.g, b.d_o, rows);
+    if (x.w.layers[i].attention.slide) |r| o.restBack(b.g, r, b.d_o, rows, c.hidden, qw);
+    if (x.ad.rank > 0) o.adapterBack(x.ad, x.gb, x.first, b.dxa, s.ya, b.g, b.d_o, rows);
     const heads: ops.Heads = .{ .rows = @intCast(rows), .heads = @intCast(c.heads), .kv_heads = @intCast(c.kv_heads), .dim = @intCast(c.head_dim), .scale = @floatCast(1 / @sqrt(@as(f64, @floatFromInt(c.head_dim)))) };
     o.mixer("tf_train_attn_q", &.{ At.of(b.q), At.of(b.k), At.of(b.v), At.of(b.d_o), At.of(b.probs), At.of(b.dscores), At.of(b.dq) }, heads, .{ 256 * c.heads, rows, 1 }, .{ 256, 1, 1 });
     o.mixer("tf_train_attn_kv", &.{ At.of(b.q), At.of(b.d_o), At.of(b.probs), At.of(b.dscores), At.of(b.dk), At.of(b.dv) }, heads, .{ c.head_dim * c.kv_heads, rows, 1 }, .{ c.head_dim, 1, 1 });

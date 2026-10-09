@@ -20,7 +20,7 @@ pub const head_names = [_][:0]const u8{ "tf_head_prep", "tf_head_norm" };
 pub const sample_names = [_][:0]const u8{ "tf_sample_full", "tf_sample_full_ids" };
 
 /// Learning in the weights (train.metal, train_mixers.metal): the low-rank change, Adam, and each layer's backward.
-pub const train_names = [_][:0]const u8{ "tf_train_head_t", "tf_train_softmax", "tf_train_dequant_t", "tf_train_narrow", "tf_train_add", "tf_train_experts_part", "tf_train_experts_sum", "tf_train_rms_back", "tf_train_lora_in", "tf_train_gate", "tf_train_project", "tf_train_lora_out", "tf_train_lora_db", "tf_train_lora_dxa", "tf_train_lora_dx", "tf_train_sketch", "tf_train_relu2_back", "tf_train_pairs_in", "tf_train_pairs_out", "tf_train_adam", "tf_train_zero", "tf_train_widen", "tf_residual" };
+pub const train_names = [_][:0]const u8{ "tf_train_head_t", "tf_train_softmax", "tf_train_dequant_t", "tf_train_narrow", "tf_train_add", "tf_train_experts_part", "tf_train_experts_sum", "tf_train_rms_back", "tf_train_lora_in", "tf_train_gate", "tf_train_project", "tf_train_lora_out", "tf_train_lora_db", "tf_train_lora_dxa", "tf_train_lora_dx", "tf_train_sketch", "tf_train_relu2_back", "tf_train_pairs_in", "tf_train_pairs_out", "tf_train_adam", "tf_train_zero", "tf_train_widen", "tf_residual", "tf_train_route_back", "tf_train_rest_back" };
 pub const mixer_names = [_][:0]const u8{ "tf_train_dt", "tf_train_ssm_fwd", "tf_train_ssm_back", "tf_train_ssm_bc", "tf_train_gate_back", "tf_train_conv_back", "tf_train_dt_back", "tf_train_attn_q", "tf_train_attn_kv" };
 
 /// Routed experts taking an expert's member rows two or four at a time (nemotron_experts.metal).

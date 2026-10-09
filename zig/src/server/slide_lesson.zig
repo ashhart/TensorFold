@@ -19,6 +19,7 @@ const twins_prompt = "For each question below, write two questions worded almost
 const subject_prompt = "What is this question asking about? Reply with just that phrase, word for word as the question says it.\n{s}";
 const kinds_prompt = "List six other things of the same kind as \"{s}\" that someone could ask about in the same words, each a short phrase. One per line, nothing else.";
 const swapped = 2; // a fact's questions whose subject is swapped for others of its kind, kept as the model answers them
+const same_prompt = "Two replies to the question \"{s}\":\nA: {s}\nB: {s}\nDoes B tell the user something about themselves, or answer the question, that A does not? A reply that only describes the assistant tells the user nothing. Reply yes or no.";
 const judge_prompt = "The user told you this about themselves or their work: \"{s}\" Does it answer this question they ask you: \"{s}\"? Reply yes or no.";
 const facts_prompt = "Read the text below and list the facts in it worth remembering later: names, numbers, versions, dates, decisions and news. Write each as one short sentence that makes sense on its own. One per line, nothing else.\n\n{s}";
 
@@ -85,6 +86,7 @@ const personal_prompts = [_][]const u8{
 };
 
 const personal_checks = 3;
+const near_checks = 6; // twins asked again after each round
 const keep_tokens = 48;
 const check_tokens = 32;
 
@@ -168,6 +170,9 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
         if (!wording.toModel(q) and try answeredByAny(srv, cx, told, kept, q, gone)) continue;
         try keep.append(a, ex);
     }
+    // a spread of the twins too, so a fact that spills onto its neighbours is caught
+    const near = parts.near.items;
+    for (0..@min(near.len, near_checks)) |i| try checks.append(a, near[i * near.len / @min(near.len, near_checks)]);
     const steps = @min(max_round_steps, round_steps * count);
     const request: api.LearnRequest = .{ .train = parts.train.items, .held = parts.held_ex.items, .near = parts.twins.items, .keep = keep.items, .steps = steps };
     return .{ .request = request, .facts = told, .held = parts.held.items, .checks = checks.items };
@@ -179,6 +184,7 @@ const Parts = struct {
     held_ex: std.ArrayList(api.Example) = .empty,
     held: std.ArrayList(Held) = .empty,
     twins: std.ArrayList(api.Example) = .empty,
+    near: std.ArrayList(Check) = .empty, // the twins' questions with the answers they had, checked after each round
 };
 
 /// One fact's part: its questions and answers (two held out), and twins about other things as the model answers them.
@@ -188,6 +194,7 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
     const qs = try wording.questions(a, asked.content, probes);
     var pairs: std.ArrayList(api.Example) = .empty;
     var refs: std.ArrayList(Held) = .empty;
+    var subjects: std.ArrayList(?[]const u8) = .empty;
     for (qs) |q| {
         const reply = try ask(srv, cx, null, try std.fmt.allocPrint(a, answer_prompt, .{ fact, q }), 48, gone);
         const answer = wording.clean(reply.content) orelse {
@@ -195,7 +202,9 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
             continue;
         };
         try pairs.append(a, try example(srv, cx, a, null, q, answer, end));
+        const subject = if (refs.items.len < swapped) try subjectOf(srv, cx, q, gone) else null;
         try refs.append(a, .{ .question = q, .answer = answer, .fact = f });
+        try subjects.append(a, subject);
     }
     log.line("slide: {d} questions, {d} clean answers for: {s}", .{ qs.len, pairs.items.len, fact });
     if (qs.len < min_probes) log.line("slide: the questions came back as: {s}", .{asked.content});
@@ -213,13 +222,15 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
         if (wording.tells(fact, "", "", q) or try answered(srv, cx, fact, q, gone)) continue;
         const answer = wording.clean((try ask(srv, cx, null, q, 48, gone)).content) orelse continue;
         try parts.twins.append(a, try example(srv, cx, a, null, q, answer, end));
+        try parts.near.append(a, .{ .question = q, .before = answer });
         try kept.append(a, q);
     }
     // the same question about others of its subject's kind
-    for (qs[0..@min(qs.len, swapped)]) |q| for (try kindsOf(srv, cx, q, gone)) |twin| {
+    for (refs.items[0..@min(refs.items.len, swapped)], subjects.items[0..@min(refs.items.len, swapped)]) |r, subject| for (try kindsOf(srv, cx, r.question, subject orelse continue, gone)) |twin| {
         if (wording.tells(fact, "", "", twin) or try answered(srv, cx, fact, twin, gone)) continue;
         const answer = wording.clean((try ask(srv, cx, null, twin, 48, gone)).content) orelse continue;
         try parts.twins.append(a, try example(srv, cx, a, null, twin, answer, end));
+        try parts.near.append(a, .{ .question = twin, .before = answer });
         try kept.append(a, twin);
     };
     // each question asked of the model itself instead, which no fact the user tells answers
@@ -227,6 +238,7 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
         const own = try wording.addressed(a, q) orelse continue;
         const answer = wording.clean((try ask(srv, cx, null, own, 48, gone)).content) orelse continue;
         try parts.twins.append(a, try example(srv, cx, a, null, own, answer, end));
+        try parts.near.append(a, .{ .question = own, .before = answer });
         try kept.append(a, own);
     }
     log.line("slide: near misses kept steady: {s}", .{try std.mem.join(a, " | ", kept.items)});
@@ -254,7 +266,7 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, gone: anytype) !Verdict {
             log.line("slide: leaked into \"{s}\": {s}", .{ c.question, reply });
             return .{ .recalled = recalled, .damage = "a fact leaked into an answer about something else" };
         };
-        if (!wording.alike(c.before, reply)) {
+        if (!wording.alike(c.before, reply) and !try same(srv, cx, c.question, c.before, reply, gone)) {
             log.line("slide: \"{s}\" changed from \"{s}\" to \"{s}\"", .{ c.question, c.before, reply });
             return .{ .recalled = recalled, .damage = "an answer about something else changed" };
         }
@@ -269,12 +281,18 @@ fn answeredByAny(srv: *Server, cx: *Cx, told: []const []const u8, kept: []const 
     return false;
 }
 
-/// A question with its subject swapped for others of the same kind, as the model names the subject and its kind.
-fn kindsOf(srv: *Server, cx: *Cx, q: []const u8, gone: anytype) ![]const []const u8 {
-    const a = cx.a;
-    const said = try ask(srv, cx, null, try std.fmt.allocPrint(a, subject_prompt, .{q}), 16, gone);
+/// What a question asks about, word for word as it says it, as the model names it (null: not found in it).
+fn subjectOf(srv: *Server, cx: *Cx, q: []const u8, gone: anytype) !?[]const u8 {
+    const said = try ask(srv, cx, null, try std.fmt.allocPrint(cx.a, subject_prompt, .{q}), 16, gone);
     const subject = std.mem.trim(u8, said.content, " \t\r\n\"'.?*");
-    if (subject.len < 2) return &.{};
+    if (subject.len < 2) return null;
+    const at = std.ascii.findIgnoreCase(q, subject) orelse return null;
+    return q[at..][0..subject.len];
+}
+
+/// A question with its subject swapped for others of the same kind, as the model names that kind.
+fn kindsOf(srv: *Server, cx: *Cx, q: []const u8, subject: []const u8, gone: anytype) ![]const []const u8 {
+    const a = cx.a;
     const at = std.ascii.findIgnoreCase(q, subject) orelse return &.{};
     const listed = try ask(srv, cx, null, try std.fmt.allocPrint(a, kinds_prompt, .{subject}), 64, gone);
     var out: std.ArrayList([]const u8) = .empty;
@@ -292,6 +310,12 @@ fn kindsOf(srv: *Server, cx: *Cx, q: []const u8, gone: anytype) ![]const []const
 fn heldBack(lessons: usize, i: usize) bool {
     const first = lessons * personal_checks % personal_prompts.len;
     return (i + personal_prompts.len - first) % personal_prompts.len < personal_checks;
+}
+
+/// Whether a changed reply still claims nothing new about the user nor answers anew, as the model judges it.
+fn same(srv: *Server, cx: *Cx, question: []const u8, before: []const u8, reply: []const u8, gone: anytype) !bool {
+    const verdict = try ask(srv, cx, null, try std.fmt.allocPrint(cx.a, same_prompt, .{ question, before, reply }), 4, gone);
+    return std.ascii.startsWithIgnoreCase(std.mem.trim(u8, verdict.content, " \t\r\n\"*"), "no");
 }
 
 /// Whether the fact answers `question`, as the model judges it when asked so.

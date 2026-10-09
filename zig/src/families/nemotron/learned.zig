@@ -2,7 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const ckpt = @import("../../core/checkpoint_metal.zig");
-const affine4 = @import("../../core/affine4.zig");
+const host4 = @import("../../core/affine4_host.zig");
 const shard_edit = @import("../../core/shard_edit.zig");
 const cfg = @import("config.zig");
 const wts = @import("weights.zig");
@@ -53,8 +53,8 @@ fn splitOne(gpa: std.mem.Allocator, device: mtl.Device, ck: *ckpt.Checkpoint, ba
     const n = w.count();
     const values = try gpa.alloc(f32, n);
     defer gpa.free(values);
-    for (values, w.host(u16)) |*v, b| v.* = affine4.f32of(b);
-    const groups = n / affine4.group;
+    for (values, w.host(u16)) |*v, b| v.* = host4.f32of(b);
+    const groups = n / host4.group;
     const codes = try device.buffer(n / 2 + 4 * groups, opts);
     ck.own(codes, n / 2 + 4 * groups) catch |e| {
         codes.deinit();
@@ -62,13 +62,13 @@ fn splitOne(gpa: std.mem.Allocator, device: mtl.Device, ck: *ckpt.Checkpoint, ba
     };
     const words = codes.slice(u32, n / 8);
     const sb = @as([*]u16, @ptrCast(@alignCast(codes.contents() + n / 2)))[0 .. 2 * groups];
-    affine4.quantize(values, words, sb[0..groups], sb[groups..]);
+    host4.quantize(values, words, sb[0..groups], sb[groups..]);
     const rest = try device.buffer(n * 2, opts);
     errdefer rest.deinit();
     const back = try gpa.alloc(f32, n);
     defer gpa.free(back);
-    affine4.dequantize(words, sb[0..groups], sb[groups..], back);
-    for (rest.slice(u16, n), values, back) |*r, v, q| r.* = affine4.bf16of(v - q);
+    host4.dequantize(words, sb[0..groups], sb[groups..], back);
+    for (rest.slice(u16, n), values, back) |*r, v, q| r.* = host4.bf16of(v - q);
     const d = w.shape[0];
     const k = w.shape[1];
     var full: [192]u8 = undefined;
@@ -124,9 +124,9 @@ const Fold = struct {
         const n = f.d * f.k;
         const values = try std.heap.page_allocator.alloc(f32, n);
         defer std.heap.page_allocator.free(values);
-        affine4.dequantize(f.tensors[0].host(u32), f.tensors[1].host(u16), f.tensors[2].host(u16), values);
+        host4.dequantize(f.tensors[0].host(u32), f.tensors[1].host(u16), f.tensors[2].host(u16), values);
         if (f.rest) |r| for (values, r.slice(u16, n)) |*v, x| {
-            v.* += affine4.f32of(x);
+            v.* += host4.f32of(x);
         };
         const a = f.site.a.slice(f32, adapters.max_rank * f.k);
         const b = f.site.b.slice(f32, adapters.max_rank * f.d);
@@ -137,7 +137,7 @@ const Fold = struct {
                 if (c != 0) subspace.axpy(row, c, a[q * f.k ..][0..f.k]);
             }
         }
-        for (f.out, values) |*o, v| o.* = affine4.bf16of(v);
+        for (f.out, values) |*o, v| o.* = host4.bf16of(v);
     }
 };
 

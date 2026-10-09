@@ -146,22 +146,19 @@ fn entry(arena: Allocator, dtype: st.DType, shape: []const usize, begin: usize, 
     return .{ .object = o };
 }
 
+/// A dtype as a safetensors header names it: its tag in capitals (bf16 as BF16).
 fn dtypeName(d: st.DType) []const u8 {
-    return switch (d) {
-        .bool => "BOOL",
-        .u8 => "U8",
-        .i8 => "I8",
-        .u16 => "U16",
-        .i16 => "I16",
-        .f16 => "F16",
-        .bf16 => "BF16",
-        .u32 => "U32",
-        .i32 => "I32",
-        .f32 => "F32",
-        .u64 => "U64",
-        .i64 => "I64",
-        .f64 => "F64",
-    };
+    switch (d) {
+        inline else => |tag| {
+            const name = comptime blk: {
+                var up: [@tagName(tag).len]u8 = undefined;
+                _ = std.ascii.upperString(&up, @tagName(tag));
+                const out = up;
+                break :blk &out;
+            };
+            return name;
+        },
+    }
 }
 
 fn numel(shape: []const usize) usize {

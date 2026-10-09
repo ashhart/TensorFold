@@ -210,7 +210,8 @@ pub const Trainer = struct {
                 l -= 1;
                 keepActs(t, e, &w.s, l, rows, .in);
                 const site = &t.sites.list[l];
-                const layer: back.Layer = .{ .o = o, .c = c, .s = &w.s, .p = w, .w = &m.weights, .ad = site.adapter(&t.sites), .gb = site.gb, .first = t.sites.first(), .rows = rows };
+                const first = if (t.sites.rank >= adapters.block) t.sites.first() else 0;
+                const layer: back.Layer = .{ .o = o, .c = c, .s = &w.s, .p = w, .w = &m.weights, .ad = site.adapter(&t.sites), .gb = site.gb, .first = first, .rows = rows };
                 switch (c.kinds[l]) {
                     .moe => back.moe(layer, &t.bufs, l),
                     .mamba => back.mamba(layer, &t.bufs, l),
@@ -224,9 +225,9 @@ pub const Trainer = struct {
 };
 
 /// The scratch each kind of layer's backward reads, with how much of it a row (or the layer) fills.
-const Part = enum { shared, routed, pair, experts, proj, conv, inner, heads, hidden };
+const Part = enum { shared, routed, pair, experts, outs, route, proj, conv, inner, heads, hidden };
 const Act = struct { field: []const u8, part: Part };
-const moe_acts = [_]Act{ .{ .field = "up", .part = .shared }, .{ .field = "upr", .part = .shared }, .{ .field = "y1", .part = .routed }, .{ .field = "order", .part = .pair }, .{ .field = "wt", .part = .pair }, .{ .field = "inv", .part = .pair }, .{ .field = "offsets", .part = .experts } };
+const moe_acts = [_]Act{ .{ .field = "up", .part = .shared }, .{ .field = "upr", .part = .shared }, .{ .field = "y1", .part = .routed }, .{ .field = "order", .part = .pair }, .{ .field = "wt", .part = .pair }, .{ .field = "inv", .part = .pair }, .{ .field = "offsets", .part = .experts }, .{ .field = "xr", .part = .outs }, .{ .field = "ids", .part = .pair }, .{ .field = "logits", .part = .route } };
 const mamba_acts = [_]Act{ .{ .field = "proj", .part = .proj }, .{ .field = "conv", .part = .conv }, .{ .field = "act", .part = .conv }, .{ .field = "ya", .part = .inner } };
 const attention_acts = [_]Act{ .{ .field = "x", .part = .hidden }, .{ .field = "ya", .part = .heads } };
 
@@ -244,6 +245,8 @@ fn bytes(c: cfg.Config, part: Part, rows: usize) usize {
         .routed => rows * c.top_k * c.expert_width * 2,
         .pair => rows * c.top_k * 4,
         .experts => c.experts * 4,
+        .outs => rows * c.top_k * c.hidden * 2,
+        .route => rows * c.experts * 2,
         .proj => rows * c.projDim() * 2,
         .conv => rows * c.convDim() * 2,
         .inner => rows * c.inner() * 2,

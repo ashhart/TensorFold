@@ -182,6 +182,30 @@ pub const Ops = struct {
         o.e.run(.{ dim, rows, 1 }, .{ 256, 1, 1 });
     }
 
+    /// dx [rows, D] += the routing weights' gradient through their normalized sigmoid scores, into the router's input.
+    pub fn routeBack(o: Ops, logits: Buffer, ids: Buffer, ys: Buffer, g: Buffer, gate: At, dx: Buffer, rows: usize, count: usize, top_k: usize, dim: usize, scale: f32) void {
+        o.go("tf_train_route_back");
+        o.e.buf(logits, 0, 0);
+        o.e.buf(ids, 0, 1);
+        o.e.buf(ys, 0, 2);
+        o.e.buf(g, 0, 3);
+        o.e.buf(gate.b, gate.off, 4);
+        o.e.buf(dx, 0, 5);
+        o.e.bytes([4]u32{ @intCast(rows), @intCast(count), @intCast(top_k), @intCast(dim) }, 6);
+        o.e.bytes(scale, 7);
+        o.e.run(.{ 256 * rows, 1, 1 }, .{ 256, 1, 1 });
+    }
+
+    /// dx [rows, width] += g [rows, n] times a projection's bf16 residual [n, width].
+    pub fn restBack(o: Ops, g: Buffer, rest: Buffer, dx: Buffer, rows: usize, n: usize, width: usize) void {
+        o.go("tf_train_rest_back");
+        o.e.buf(g, 0, 0);
+        o.e.buf(rest, 0, 1);
+        o.e.buf(dx, 0, 2);
+        o.e.bytes([3]u32{ @intCast(rows), @intCast(n), @intCast(width) }, 3);
+        o.e.run(.{ width, rows, 1 }, .{ 256, 1, 1 });
+    }
+
     /// One Adam step on n parameters; their gradient is cleared after.
     pub fn adam(o: Ops, p: At, g: Buffer, m: Buffer, v: Buffer, n: usize, hp: [4]f32, corr: [2]f32) void {
         o.go("tf_train_adam");

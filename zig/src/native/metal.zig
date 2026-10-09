@@ -112,6 +112,11 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         return null;
     };
     errdefer m.deinit();
+    if (o.slide and !m.device.tensorUnits()) {
+        problem.* = "--slide learns with the GPU's tensor units (an M5 or later); serve without it here";
+        m.deinit();
+        return null;
+    }
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     h.gpa = gpa;
