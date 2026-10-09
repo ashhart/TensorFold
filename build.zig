@@ -151,14 +151,25 @@ pub fn build(b: *std.Build) void {
     dist_build.targets(b, draft_ids, build_options, release_version);
     cuda_build.hostTests(b, draft_ids, build_options, test_step);
     hip_build.steps(b, target, test_step);
+    const lanes_cpu = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true });
     const disk_cpu = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/glm_disk_tests.zig"),
         .target = b.graph.host,
         .optimize = .debug,
         .link_libc = true,
-        .imports = &.{.{ .name = "lanes", .module = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true }) }},
+        .imports = &.{.{ .name = "lanes", .module = lanes_cpu }},
     }) });
     test_step.dependOn(&b.addRunArtifact(disk_cpu).step);
+    const warning = b.addExecutable(.{ .name = "learned-warning-test", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/learned_warning_test.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+        .link_libc = true,
+        .imports = &.{.{ .name = "lanes", .module = lanes_cpu }},
+    }) });
+    const warning_run = b.addRunArtifact(warning);
+    test_step.dependOn(&warning_run.step);
+    b.step("test-learn-warning", "CPU production-log refusal, backoff and recovery test").dependOn(&warning_run.step);
 }
 
 /// `zig build native -Dcpu=apple_m1`: tensorfold-native with the Metal engines for the Python package's bundle (a native M5 build traps on M1-M4).

@@ -474,7 +474,7 @@ pub const Store = struct {
         }
         const victims = (planner.choose(s.gpa, candidates, .{ .local = local_need, .peer = peer_need, .cap = cap_need }) catch return) orelse {
             im.admission.refuse(im.dir);
-            return;
+            return learningPaused(im);
         };
         defer s.gpa.free(victims);
         const keys = s.gpa.alloc(u64, victims.len) catch return;
@@ -501,7 +501,7 @@ pub const Store = struct {
         im.others = dirs.totalOthers(im.root, im.dir) catch return;
         switch (im.admission.reserve(im.dir, disk_bytes)) {
             .quiet => return,
-            .refused => return note("learning paused: free disk cannot preserve the {d} MiB floor", .{im.admission.floor >> 20}),
+            .refused => return learningPaused(im),
             .ready => {},
         }
         var success = false;
@@ -638,6 +638,10 @@ pub const Store = struct {
         return e.at == s.active_rewind_at and e.tokens.len <= prompt.len and std.mem.eql(u32, e.tokens, prompt[0..e.tokens.len]);
     }
 };
+
+fn learningPaused(im: *const imprint.Imprint) void {
+    note("learning paused: free disk cannot preserve the {d} MiB floor", .{im.admission.floor >> 20});
+}
 
 /// A line on the engine's log; tests stay quiet (the build runner fails a test that writes to stderr).
 fn note(comptime fmt: []const u8, args: anytype) void {
