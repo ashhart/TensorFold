@@ -104,8 +104,8 @@ fn profile(gpa: std.mem.Allocator, e: *nemotron.Engine, ids: []const u32, widths
                 try ev[m.n].synchronize();
                 var sums: [classes]f64 = @splat(0);
                 for (0..m.n) |i| {
-                    sums[@intFromEnum(class[i])] += try cuda.Event.elapsedMs(ev[i], ev[i + 1]);
-                    if (rep == 0) calls[@intFromEnum(class[i])] += 1;
+                    sums[@backingInt(class[i])] += try cuda.Event.elapsedMs(ev[i], ev[i + 1]);
+                    if (rep == 0) calls[@backingInt(class[i])] += 1;
                 }
                 for (0..classes) |c| per[c][rep] = sums[c];
                 totals[rep] = try cuda.Event.elapsedMs(ev[0], ev[m.n]);
@@ -117,7 +117,7 @@ fn profile(gpa: std.mem.Allocator, e: *nemotron.Engine, ids: []const u32, widths
             for (0..classes) |c| {
                 if (calls[c] == 0) continue;
                 const ms = median(&per[c]);
-                std.debug.print("    {s:13} {d:4} calls {d:8.3} ms {d:5.1}%\n", .{ @tagName(@as(nemotron.Class, @enumFromInt(c))), calls[c], ms, 100 * ms / total });
+                std.debug.print("    {s:13} {d:4} calls {d:8.3} ms {d:5.1}%\n", .{ @tagName(@as(nemotron.Class, @fromBackingInt(@intCast(c)))), calls[c], ms, 100 * ms / total });
             }
         }
     }
