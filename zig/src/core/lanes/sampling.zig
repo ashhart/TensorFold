@@ -88,6 +88,7 @@ pub fn choose(gpa: Allocator, values: []const f64, ids: []const u64, position: u
     defer gpa.free(order);
     for (order, values, ids) |*o, v, id| o.* = .{ .value = v, .id = id };
     std.mem.sort(Candidate, order, {}, byValueThenId);
+    if (s.temperature <= 0) return order[0].id; // temperature 0 is greedy: the first maximum, ties to the lower id
     const k = @max(1, @min(if (s.top_k != 0) @as(usize, s.top_k) else width, width));
     const scaled = try gpa.alloc(f64, k);
     defer gpa.free(scaled);
@@ -133,4 +134,11 @@ test "seeds keep 63 bits and uniforms fall in (0, 1]" {
     try std.testing.expect(seedFor(&.{ 1, 2, 3 }, 0) < (@as(u64, 1) << 63));
     const u = uniform(7, 11, 13);
     try std.testing.expect(u > 0.0 and u <= 1.0);
+}
+
+test "temperature 0 draws greedily, an exact tie going to the lower id" {
+    const a = std.testing.allocator;
+    const values = [_]f64{ 1.5, 3.0, -2.0, 3.0 };
+    const ids = [_]u64{ 10, 35, 50, 93 };
+    for (0..64) |position| try std.testing.expectEqual(@as(u64, 35), try choose(a, &values, &ids, position, .{ .seed = 7, .temperature = 0 }));
 }

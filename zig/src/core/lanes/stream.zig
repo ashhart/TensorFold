@@ -274,6 +274,24 @@ pub const Stream = struct {
         return std.mem.indexOfScalar(u32, s.eos, token) != null;
     }
 
+    /// Each held tree lane whose parent row the round reached: the target took it or not (its depth and rank).
+    pub fn observeLanes(s: *Stream, l: *const shape.Shape, path: []const u32) void {
+        var on: [256]bool = @splat(false);
+        for (path) |r| if (r < on.len) {
+            on[r] = true;
+        };
+        for (l.parents, l.depths, l.ranks, 0..) |par, d, r, i| {
+            const parent_row: usize = if (par < 0) 0 else 1 + @as(usize, @intCast(par));
+            if (!on[parent_row]) continue;
+            const took = on[1 + i];
+            s.odds.?.observe(d, r, took);
+            if (d < shape.max_depth and r < shape.ranks) {
+                s.landed[d][r][0] += 1;
+                s.landed[d][r][1] += @intFromBool(took);
+            }
+        }
+    }
+
     /// Append tokens until the stream finishes; how many landed (a prefix of `tokens`).
     pub fn commit(s: *Stream, gpa: Allocator, tokens: []const u32) !usize {
         var landed: usize = 0;

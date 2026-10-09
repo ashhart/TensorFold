@@ -8,7 +8,7 @@ const Buf = replay.Buf;
 /// TP: a recorded lane projection over this Mac's output tiles only, in one dispatch: a copy of the kernel whose tile index goes through `ranges` ({first tile, count} pairs), with `sk` K slices; `groups` ({first, count}) cuts the sum to those input groups and writes fp32 partials. The recorded SK and no group cut keep its sums.
 pub fn laneTiles(r: *Run, role: []const u8, ins: []const Buf, y: Buf, ranges: []const [2]usize, sk: usize, groups: ?[2]usize) !void {
     if (r.skip & Run.class(role) != 0) return;
-    if (r.lane_new) { // fz_lane over the same tiles and K slices: the same sums
+    if (r.lane_new) { // core lane over the same tiles and K slices: the same sums
         const s = try replay.dense.recorded(r, role);
         return replay.dense.project(r, .{ .n = s.n, .k = s.k, .sk = sk, .ranges = ranges, .groups = groups, .pf = r.lane_pf }, ins[0], .{ .wq = ins[2], .sbt = ins[3] }, ins[4], y);
     }

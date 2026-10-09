@@ -252,7 +252,7 @@ pub const Host = struct {
         fn marked(ctx: *anyopaque, at: usize) void {
             const c: *Ctx = @ptrCast(@alignCast(ctx));
             const t0 = c.h.now();
-            if (c.h.cache) |*store| if (store.keep(c.job.request.prompt, @intCast(at), null, c.job.request.chunks)) c.h.saved.append(c.h.gpa, @intCast(at)) catch {}; // held here: rank 1 keeps its copy
+            if (c.h.cache) |*store| if (store.keep(c.job.request.prompt, @intCast(at), null, c.job.request.chunks, &.{})) c.h.saved.append(c.h.gpa, @intCast(at)) catch {}; // held here: rank 1 keeps its copy
             c.job.keep_ns += c.h.now() - t0;
         }
 
@@ -314,7 +314,7 @@ pub const Host = struct {
         const kept0 = if (h.cache) |*store| store.counts.kept else 0;
         const t_begin = h.now();
         if (h.cache) |*store| if (r.prompt.len + r.max_tokens + fx.MARGIN <= tf.flashnext_replay.CAP) {
-            plan = store.begin(arena.allocator(), r.prompt, r.history_len, r.shared_prefixes, &.{}, null) catch .{};
+            plan = store.begin(arena.allocator(), r.prompt, r.history_len, r.shared_prefixes, &.{}, null, &.{}) catch .{};
         };
         job.restore_ns = h.now() - t_begin;
         job.cached = plan.from;
@@ -328,7 +328,7 @@ pub const Host = struct {
         const res = h.eng.generateFrom(r.prompt, plan.from, plan.marks, r.max_tokens, r.eos, depth, out) catch |e| retry: {
             if (e == error.PeerNotResumed) { // rank 1 lacks this state: both Macs read the prompt from the start
                 std.log.warn("speed-up mode: rank 1 could not resume at {d}; reading the prompt from the start", .{plan.from});
-                if (h.cache) |*store| store.forget(r.prompt, plan.from); // so later prompts do not ask rank 1 for it again
+                if (h.cache) |*store| store.forget(r.prompt, plan.from, &.{}); // so later prompts do not ask rank 1 for it again
                 job.cached = 0;
                 break :retry h.eng.generateFrom(r.prompt, 0, plan.marks, r.max_tokens, r.eos, depth, out) catch |e2| {
                     if (!job.prefill_sent) emit(job, .{ .prefilled = 0 });
@@ -400,25 +400,11 @@ const Snaps = struct {
     }
 };
 
-/// The prompt cache's budget (cache_fit.zig): what 70% of RAM leaves past this server once loaded, or `gib` when that fits
-/// (larger: refused, `why` says so, unless `over`); without an OS reading, `gib` or the Metal working set's spare.
+/// The prompt cache's budget (cache_fit.zig); without an OS reading, `gib` or the Metal working set's spare.
 fn cacheBudget(eng: *fx.Engine, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) !u64 {
     const rank = if (eng.followsPeer()) " (rank 1 keeps its halves of rank 0's)" else if (eng.r.tp != null) " (rank 1 mirrors them)" else "";
-    const ram = cache_fit.ram() orelse 0;
-    const ready = cache_fit.footprint() orelse 0;
-    if (ram == 0 or ready == 0) {
-        const dev = eng.r.device;
-        const b = if (gib) |g| (if (g > 0) std.math.lossyCast(u64, g * cache_fit.GiB) else 0) else @min(dev.maxWorkingSet() -| dev.allocated() -| (8 << 30), 16 << 30);
-        std.log.info("prompt cache: {d:.1} GiB for kept prompt states{s} (no memory reading)", .{ cache_fit.gibs(b), rank });
-        return b;
-    }
-    const f = cache_fit.fit(ram, ready, gib, over) catch |e| {
-        const left = (cache_fit.fit(ram, ready, null, false) catch unreachable).room; // without a given budget it never refuses
-        why.* = try std.fmt.allocPrint(a, "--prompt-cache-gib {d} would take this server past 70% of this Mac's memory: it holds {d:.1} GiB once loaded, 70% of {d:.0} GiB is {d:.1} GiB, and {d} GiB stays free for prompt buffers, so {d:.1} GiB is left for kept prompt states. Leave --prompt-cache-gib out to use that, pass a smaller one, or add --prompt-cache-over-cap to keep {d} GiB anyway.", .{ gib.?, cache_fit.gibs(ready), cache_fit.gibs(ram), cache_fit.gibs(ram / 100 * cache_fit.SHARE_PERCENT), cache_fit.MARGIN >> 30, cache_fit.gibs(left), gib.? });
-        return e;
-    };
-    std.log.info("prompt cache: {d:.1} GiB from {d:.1} GiB free under the 70% cap ({d:.1} GiB in use once loaded, {d:.0} GiB of RAM, {d} GiB kept for prompt buffers){s}{s}", .{ cache_fit.gibs(f.budget), cache_fit.gibs(f.room), cache_fit.gibs(ready), cache_fit.gibs(ram), cache_fit.MARGIN >> 30, if (f.budget > f.room) ", past the cap by --prompt-cache-over-cap" else "", rank });
-    return f.budget;
+    const dev = eng.r.device;
+    return cache_fit.budget(gib, over, @min(dev.maxWorkingSet() -| dev.allocated() -| (8 << 30), 16 << 30), a, why, rank);
 }
 
 /// The engine for a Flash Next checkpoint: the replay engine on the kernels and packs in `dump`, warmed, served; `speed_up` names this Mac's speed-up mode settings (tp.zig); `cache_gib` the prompt cache's budget (null: what 70% of RAM leaves; `over_cap` lets a larger one through); on error.CacheOverCap `why` (in `a`) says why.

@@ -69,9 +69,17 @@ fn median(v: []f64) f64 {
     return if (v.len % 2 == 1) v[v.len / 2] else (v[v.len / 2 - 1] + v[v.len / 2]) / 2;
 }
 
-/// GPU-timed medians after a warm-up: windows of 1 to 16 rows and wider to 33, shared rounds of 2-row windows, a head step.
-pub fn measure(b: *backend.Metal) !void {
+/// GPU-timed medians after a warm-up: windows of 1-33 rows, shared 2-row rounds, a head step; kept per build.
+pub fn measure(b: *backend.Metal, io: std.Io) !void {
     const c = b.m.config;
+    var shape: [160]u8 = undefined;
+    const parts = [_][]const u8{ "nemotron-metal", std.mem.span(b.m.device.name()), try std.fmt.bufPrint(&shape, "{d}/{d}/{d}/{d}/{d}/{d}", .{ c.layers, c.hidden, c.vocab, c.experts, b.o.batch_rows, @intFromBool(b.head != null) }) };
+    const k = lanes.cost_cache.key(b.gpa, io, &parts) catch null;
+    if (k) |key| if (lanes.cost_cache.load(Costs, b.gpa, io, key)) |kept| {
+        b.costs = kept;
+        b.timing = .{};
+        return;
+    };
     var caches: [16]st.Cache = undefined;
     const n = @min(b.o.batch_rows / 2, caches.len);
     for (caches[0..n]) |*x| x.* = try st.Cache.init(b.m.device, c, timed_len + st.max_rows, b.head != null);
@@ -110,6 +118,7 @@ pub fn measure(b: *backend.Metal) !void {
     }
     b.costs = costs;
     b.timing = .{};
+    if (k) |key| lanes.cost_cache.save(Costs, b.gpa, io, key, costs);
 }
 
 /// The round loop's clock: a round's GPU ms (its verify, the draft before it) plus recent rounds' median host gap.

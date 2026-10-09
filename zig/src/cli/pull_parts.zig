@@ -1,4 +1,4 @@
-//! Large files as fixed pieces on one shared queue, so every connection stays busy to the last byte; each finished piece leaves a marker, so a restart fetches only the rest.
+//! Large files as fixed pieces on one shared queue; a finished piece leaves a marker, so a restart fetches the rest.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -34,7 +34,7 @@ const Shared = struct {
     stop: std.atomic.Value(bool) = .init(false),
 };
 
-/// Every file in `files` as `bytes`-sized pieces shared by up to 16 connections; error.RangeUnsupported when the server answers a range with a whole file.
+/// `files` as `bytes`-sized pieces over up to 16 connections; error.RangeUnsupported when a range gets the whole file.
 pub fn fetch(a: Allocator, io: std.Io, files: []const File, bytes: u64, progress: ?*std.Io.Writer) !void {
     const w = std.Io.Dir.cwd();
     const handles = try a.alloc(std.Io.File, files.len);

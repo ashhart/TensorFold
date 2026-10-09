@@ -217,7 +217,7 @@ pub fn main(init: std.process.Init) !void {
                 try depths.append(arena, if (n == 0) null else n);
             }
         } else try depths.append(arena, if (std.c.getenv("FZ_DEPTH")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else null);
-        // FZ_AB=fz (with FZ_LANE=1 FZ_GDN=2): the recorded dense and DeltaNet kernels, then fz_lane, fz_gdn and kept states
+        // FZ_AB=fz (with FZ_LANE=1 FZ_GDN=2): recorded dense and DeltaNet kernels, then core lane, fz_gdn, kept states
         const fz_ab = std.c.getenv("FZ_AB") != null and std.mem.eql(u8, std.mem.span(std.c.getenv("FZ_AB").?), "fz");
         const fz_on = .{ e.r.lane_new, e.r.gdn_pipe, e.r.gdn_kept };
         for (depths.items) |depth| for (0..2) |arm| { // copy drafts off, then on (FZ_AB=seg: staggered prompt segments off, then on)
@@ -307,7 +307,7 @@ pub fn main(init: std.process.Init) !void {
     try r.compile(args[2]);
     r.sel = try Select.init(&r, MAXR);
     if (std.c.getenv("FZ_CATCH_CHECK") != null) return catchCheck(&r, arena);
-    r.lane_new = r.xnew and std.c.getenv("FZ_LANE") != null; // fz_lane and fz_gdn on the target (same bits)
+    r.lane_new = r.xnew and std.c.getenv("FZ_LANE") != null; // core lane and fz_gdn on the target (same bits)
     if (r.xnew and std.c.getenv("FZ_GDN") != null) r.gdn_pipe = try fz.gdn_step.compile(&r, false);
     const t1 = mtl.clock.seconds();
 
@@ -520,7 +520,7 @@ pub fn main(init: std.process.Init) !void {
         var pk: [MAXR]u32 = undefined;
         m.reset();
         for (0..3) |_| try m.window(toks[0..1], &pk);
-        if (std.c.getenv("FZ_PROFILE_AB") != null) { // in-model A/B, interleaved: recorded, fz_lane, fz_gdn, both
+        if (std.c.getenv("FZ_PROFILE_AB") != null) { // in-model A/B, interleaved: recorded, core lane, fz_gdn, both
             const gpipe = try fz.gdn_step.compile(&r, false);
             const arms = [_][2]bool{ .{ false, false }, .{ true, false }, .{ false, true }, .{ true, true } };
             for ([_]usize{ 1, 2, 4, 6, 8, 16 }) |rows| {
@@ -532,7 +532,7 @@ pub fn main(init: std.process.Init) !void {
                     for (0..20) |_| try m.window(toks[0..rows], &pk);
                     ms[a] += m.gpu_seconds * 1e3 / 100;
                 };
-                std.debug.print("rows {d:2}: window ms recorded {d:6.3}, fz_lane {d:6.3}, fz_gdn {d:6.3}, both {d:6.3}\n", .{ rows, ms[0], ms[1], ms[2], ms[3] });
+                std.debug.print("rows {d:2}: window ms recorded {d:6.3}, core lane {d:6.3}, fz_gdn {d:6.3}, both {d:6.3}\n", .{ rows, ms[0], ms[1], ms[2], ms[3] });
             }
             return;
         }

@@ -50,6 +50,9 @@ pub const Reply = struct {
     reasoning_tokens: usize,
     runtime: Value,
     speculative: Value,
+    /// The template switches the prompt was rendered with (the next turn's prefill renders with them too).
+    thinking: bool = false,
+    effort: ?[]const u8 = null,
 };
 
 pub const Failure = error{ Refused, Cancelled, Failed, OutOfMemory };
@@ -180,6 +183,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         .shared_prefixes = shared.items,
         // a cut just before the conversation's own text: fresh sessions resume their whole harness
         .chunks = try chunk_plan.withCut(a, try srv.chunks.starts(a, rendered.ids), if (srv.chunks.step > 0) @intCast(@max(system_len, 1) - 1) else 0, rendered.ids.len, srv.chunks.min_chunk),
+        .decode_spans = try prompt_mod.replySpans(srv, cx, rendered.ids), // from the tokens alone, for every request: cached states are keyed by tokens
         .tools_json = if (input.tools.len > 0) try json.stringify(a, .{ .array = @constCast(input.tools) }, .{ .ascii = false }) else "",
     };
     try srv.checkFeatures(cx, f, input.tools.len > 0, thinking, rendered.ids, input.tools, &request);
@@ -229,6 +233,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     srv.engine.submit(id, &request, .{ .ctx = &box, .event = Mailbox.onEvent }) catch |e| return switch (e) {
         error.Busy => cx.fail(.capacity, "the engine is busy; retry shortly", .{}),
         error.Closed => cx.fail(.other, "the scheduler is closed", .{}),
+        error.InvalidSpans => cx.fail(.request, "the prompt span layout is invalid", .{}),
     };
     release(srv, preparing); // a background request waits only while a foreground one prepares
     preparing = false;
@@ -516,7 +521,7 @@ const Generation = struct {
         try runtime.put(a, "time_to_first_token", if (g.first_ns) |t| .{ .float = seconds(t - received) } else .null);
         try runtime.put(a, "sampling", .{ .string = if (exact) "exact" else "greedy" });
         try runtime.put(a, "drafts", .{ .bool = drafts });
-        const sha = tokenSha(g.collected.items);
+        const sha = @import("tokens.zig").tokenSha(g.collected.items);
         try runtime.put(a, "token_sha", .{ .string = try a.dupe(u8, &sha) });
         try runtime.put(a, "min_rows", try json.intValue(a, m.stats.min_rows));
         if (m.stats.loop_period) |period| {
@@ -545,6 +550,8 @@ const Generation = struct {
             .reasoning_tokens = reply_text.reasoningCount(g.collected.items, think_end),
             .runtime = .{ .object = runtime },
             .speculative = .{ .object = spec },
+            .thinking = thinking,
+            .effort = effort,
         };
         if (std.mem.eql(u8, reason, "length") and thinking and reply_text.pyStrip(content).len == 0)
             log.line("warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {{\"enable_thinking\": false}} (server: --no-thinking)", .{});
@@ -580,20 +587,4 @@ pub fn deltaOf(a: Allocator, key: []const u8, text: []const u8) Allocator.Error!
     const o = try json.newObject(a);
     try o.put(a, key, .{ .string = text });
     return .{ .object = o };
-}
-
-/// The reply's token ids hashed: drafted and ``"draft": false`` replies must match.
-pub fn tokenSha(tokens: []const u32) [12]u8 {
-    var h = std.crypto.hash.sha2.Sha256.init(.{});
-    var buf: [16]u8 = undefined;
-    for (tokens, 0..) |t, i| {
-        if (i > 0) h.update(",");
-        h.update(std.fmt.bufPrint(&buf, "{d}", .{t}) catch unreachable);
-    }
-    var d: [32]u8 = undefined;
-    h.final(&d);
-    var out: [12]u8 = undefined;
-    const hex = std.fmt.bytesToHex(d[0..6].*, .lower);
-    @memcpy(&out, &hex);
-    return out;
 }

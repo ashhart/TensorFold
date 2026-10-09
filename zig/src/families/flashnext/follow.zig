@@ -61,7 +61,7 @@ pub fn one(e: *Engine, out: ?engine.Out) !?engine.Result {
     return res;
 }
 
-/// Rank 1's reply: its tokens hashed as the server hashes rank 0's (chat.zig tokenSha), and its own state at each mark.
+/// Rank 1's reply: its tokens hashed as the server hashes rank 0's (tokens.zig tokenSha) and its state at each mark.
 const Reply = struct {
     e: *Engine,
     prompt: []const u32,

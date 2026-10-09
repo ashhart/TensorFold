@@ -1,44 +1,39 @@
-//! Flash Next's dense lane projections on fz_lane (kernels/metal/decode/fn_lane.metal): the recorded lane_qmm's sums,
-//! so each row keeps its bits at every width, with each simdgroup's next group read during this one. A pipeline a layout.
+//! Flash Next's dense lane projections on core/lane_projection: the recorded sums, so rows keep their bits.
 const std = @import("std");
 const mtl = @import("metal");
-const ks = @import("kernel_sources");
+const core = @import("../../core/lane_projection.zig");
 const replay = @import("replay.zig");
 const Run = replay.Run;
 const Buf = replay.Buf;
 const Lane = replay.Lane;
 
-/// A projection's layout: n outputs over k inputs in sk K slices, its tiles ({first, count}; all when empty), its
-/// input-group cut ({first, count}: fp32 partials out), and how many groups ahead a simdgroup reads.
+/// A projection's layout: n by k in sk K slices, its tiles and input-group cut, and groups read ahead.
 pub const Layout = struct { n: usize, k: usize, sk: usize, ranges: []const [2]usize = &.{}, groups: ?[2]usize = null, pf: usize };
 
+pub const kernel_name = "tf_lane";
+
+pub fn coreLayout(l: Layout) core.Layout {
+    return .{ .n = l.n, .k = l.k, .sk = l.sk, .pf = l.pf, .format = .{ .bits = 6, .group = 32 }, .ranges = l.ranges, .groups = l.groups, .output = if (l.groups != null) .f32 else .bf16 };
+}
+
 pub fn pipeline(r: *Run, l: Layout) !mtl.Pipeline {
+    const layout = coreLayout(l);
+    try layout.validate();
     var h = std.hash.Wyhash.init(0x1a9e);
     for ([_]usize{ l.n, l.k, l.sk, l.pf }) |v| h.update(std.mem.asBytes(&v));
     h.update(std.mem.sliceAsBytes(l.ranges));
     if (l.groups) |g| h.update(std.mem.asBytes(&g));
     const key = h.final();
     if (r.lane_pipes.get(key)) |p| return p;
-    const lib = try mtl.Library.fromSource(r.device, try source(r.arena, l), mtl.CompileOptions.mlx());
-    const pipe = try mtl.Pipeline.init(r.device, lib, "fz_lane", false);
-    try r.lane_pipes.put(r.arena, key, pipe);
-    return pipe;
+    const projection = try core.Projection.init(r.arena, r.device, layout);
+    errdefer projection.deinit();
+    try r.lane_pipes.put(r.arena, key, projection.pipe);
+    return projection.pipe;
 }
 
-/// fz_lane's source for a layout: its constants and tile map, then kernels/metal/decode/fn_lane.metal.
+/// The core source with Flash Next's existing tiled code words, bf16 scale/bias pairs and recorded schedule.
 pub fn source(a: std.mem.Allocator, l: Layout) ![]u8 {
-    const g = l.groups orelse [2]usize{ 0, l.k / 32 };
-    var text: std.ArrayList(u8) = .empty;
-    try text.print(a, "#define FZ_N {d}\n#define FZ_K {d}\n#define FZ_SK {d}\n#define FZ_G0 {d}\n#define FZ_GN {d}\n#define FZ_PF {d}\n#define FZ_OUT {s}\n", .{ l.n, l.k, l.sk, g[0], g[1], l.pf, if (l.groups != null) "float" else "bfloat" });
-    try text.appendSlice(a, "inline int fz_tile(int j) {\n");
-    var at: usize = 0;
-    for (l.ranges) |c| {
-        try text.print(a, "  if (j < {d}) return {d} + j - {d};\n", .{ at + c[1], c[0], at });
-        at += c[1];
-    }
-    try text.appendSlice(a, if (l.ranges.len == 0) "  return j;\n}\n" else "  return 0;\n}\n");
-    try text.appendSlice(a, ks.flashnext_lane);
-    return text.items;
+    return core.source(a, coreLayout(l));
 }
 
 /// The tiles a layout runs.
@@ -74,9 +69,28 @@ pub fn project(r: *Run, l: Layout, x: Buf, w: Lane, mdims: Buf, y: Buf) !void {
     if (!r.serial) r.enc.barrier();
 }
 
-/// A target lane projection on fz_lane at the recorded kernel's shape and K slices (the recorded launch's inputs).
+/// A target lane projection on the core kernel at the recorded kernel's shape and K slices.
 pub fn lane(r: *Run, role: []const u8, x: Buf, w: Lane, mdims: Buf, y: Buf) !void {
     if (r.skip & Run.class(role) != 0) return;
     const s = try recorded(r, role);
     try project(r, .{ .n = s.n, .k = s.k, .sk = s.sk, .pf = r.lane_pf }, x, w, mdims, y);
+}
+
+test "Flash Next adapters preserve the core format, cuts and tile map" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const l = Layout{ .n = 96, .k = 224, .sk = 4, .pf = 2, .ranges = &.{.{ 1, 1 }}, .groups = .{ 1, 3 } };
+    const mapped = coreLayout(l);
+    try mapped.validate();
+    try std.testing.expectEqual(@as(u8, 6), mapped.format.bits);
+    try std.testing.expectEqual(@as(usize, 32), mapped.format.group);
+    try std.testing.expectEqual(core.Output.f32, mapped.output);
+    try std.testing.expectEqualSlices([2]usize, l.ranges, mapped.ranges);
+    try std.testing.expectEqual(l.groups, mapped.groups);
+    const adapted = try source(arena.allocator(), l);
+    const direct = try core.source(arena.allocator(), mapped);
+    try std.testing.expectEqualSlices(u8, direct, adapted);
+    try std.testing.expectEqual(@as(usize, 1), tiles(l));
+    const full = coreLayout(.{ .n = 64, .k = 224, .sk = 2, .pf = 1 });
+    try std.testing.expectEqual(core.Output.bf16, full.output);
 }

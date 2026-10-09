@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const cuda_build = @import("zig/build/cuda.zig");
 const dist_build = @import("zig/build/dist.zig");
+const qwen27_build = @import("zig/build/qwen27.zig");
 
 comptime {
     const required = std.mem.trim(u8, @embedFile(".zig-version"), "\r\n");
@@ -392,6 +393,9 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     test_step.dependOn(&run_cli_tests.step);
     b.step("test-cli", "The checkpoint CLI's host tests").dependOn(&run_cli_tests.step);
 
+    // The core lane, shared-context and Qwen3.8-27B programs and host tests.
+    qwen27_build.targets(b, target, optimize, metal, sources, engine, lanes, mods.qwen27, test_step);
+
     _ = nativeServer(b, target, optimize, metal, engine, api, engines, build_options, test_step);
 
     const cluster_metal = b.createModule(.{
@@ -464,7 +468,7 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
 }
 
 /// The server and distribution use the same embedded-source Metal engine.
-fn metalEngineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, draft_ids: *std.Build.Module) struct { metal: *std.Build.Module, lanes: *std.Build.Module, fabric: *std.Build.Module, sources: *std.Build.Module, engine: *std.Build.Module } {
+fn metalEngineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, draft_ids: *std.Build.Module) struct { metal: *std.Build.Module, lanes: *std.Build.Module, fabric: *std.Build.Module, sources: *std.Build.Module, engine: *std.Build.Module, qwen27: qwen27_build.Shared } {
     const metal = b.createModule(.{
         .root_source_file = b.path("zig/src/metal/metal.zig"),
         .target = target,
@@ -473,6 +477,7 @@ fn metalEngineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize:
     });
     metal.linkFramework("Metal", .{});
     metal.linkFramework("Foundation", .{});
+    metal.linkFramework("IOSurface", .{}); // the Neural Engine's prompt share passes IOSurfaces
     metal.linkSystemLibrary("objc", .{});
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const fabric = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/fabric.zig"), .target = target, .optimize = optimize, .link_libc = true });
@@ -484,7 +489,7 @@ fn metalEngineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize:
         .link_libc = true,
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "nemotron_draft_ids", .module = draft_ids }, .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric } },
     });
-    return .{ .metal = metal, .lanes = lanes, .fabric = fabric, .sources = sources, .engine = engine };
+    return .{ .metal = metal, .lanes = lanes, .fabric = fabric, .sources = sources, .engine = engine, .qwen27 = qwen27_build.engineModules(b, target, metal, sources, engine) };
 }
 
 pub fn distMetalServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_ids: *std.Build.Module, build_options: *std.Build.Step.Options, sdk: []const u8) *std.Build.Step.Compile {

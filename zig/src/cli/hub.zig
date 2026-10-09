@@ -12,7 +12,7 @@ const titles = [_]struct { model_type: []const u8, title: []const u8 }{
     .{ .model_type = "nemotron_h", .title = "Nemotron 3.5 Lightning" },
     .{ .model_type = "qwen4_exp", .title = "Qwen3.8 Flash Next" },
     .{ .model_type = "glm5_next", .title = "GLM-5.3-Flash" },
-    .{ .model_type = "qwen3_5", .title = "Qwen3.5-2B" },
+    .{ .model_type = "qwen3_5", .title = "Qwen3.5-2B or Qwen3.8-27B" },
 };
 
 /// The family that serves `model_type` from the engine registry, or null when Zig cannot serve it (the 0.6 line may).
@@ -41,7 +41,6 @@ pub fn cacheDir(a: Allocator, env: ?*const std.process.Environ.Map, override: ?[
     const home = get(env, "HOME") orelse "";
     if (get(env, "HF_HOME")) |h| return std.fs.path.join(a, &.{ h, "hub" });
     return std.fs.path.join(a, &.{ home, ".cache", "huggingface", "hub" });
-
 }
 
 /// The repo's cache folder name: models--org--name.

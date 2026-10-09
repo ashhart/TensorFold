@@ -102,6 +102,9 @@ pub const Engine = struct {
             try e.backend.draft(&.{.{ .stream = s, .follow = &.{}, .first = feed, .rows = null, .start = s.prompt_len, .position = position + 1, .depth = d }});
             s.dropHeld(e.gpa);
             s.next = .{ .count = d };
+            if (e.backend.vtable.tree) |tree| if (try tree(e.backend.ptr, s, e.gpa)) |held| {
+                s.next = held; // a tree head's first drafts as host tokens, as every later round's
+            };
         } else if (e.cfg.pipelined) {
             try e.queueNext(s, feed);
         }
@@ -119,6 +122,27 @@ pub const Engine = struct {
             e.release(s);
             return;
         }
+        try e.live.append(e.gpa, s);
+    }
+
+    /// A stream another driver prefilled and drew `token` for: drafts asked, the token committed, rounds from here.
+    pub fn adoptPrefilled(e: *Engine, s: *Stream, token: u32) !void {
+        _ = e.arena.reset(.retain_capacity);
+        s.context.shrinkRetainingCapacity(s.prompt_len);
+        s.pending = null;
+        s.cache_len = s.prompt_len;
+        if (e.cfg.family_mtp and s.drafts) {
+            const d: u32 = @intCast(try e.rule.depth(win.who(s)));
+            try e.backend.draft(&.{.{ .stream = s, .follow = &.{}, .first = .{ .value = token }, .rows = null, .start = s.prompt_len, .position = s.prompt_len + 1, .depth = d }});
+            s.dropHeld(e.gpa);
+            s.next = .{ .count = d };
+            if (e.backend.vtable.tree) |tree| if (try tree(e.backend.ptr, s, e.gpa)) |held| {
+                s.next = held;
+            };
+        }
+        _ = try s.commit(e.gpa, &.{token});
+        s.pending = token;
+        if (s.finished) return e.release(s);
         try e.live.append(e.gpa, s);
     }
 
@@ -361,7 +385,7 @@ pub const Engine = struct {
                         s.copy_width = if (kept == rows - 1) @min(e.cfg.max_copy, 2 * width + 1) else e.cfg.first_copy;
                     }
                 } else if (p.kind == .head) {
-                    if (p.lanes) |l| if (s.odds != null) observeLanes(s, l, path);
+                    if (p.lanes) |l| if (s.odds != null) s.observeLanes(l, path);
                     const ds = try accept.depths(a, parents);
                     const chain = if (p.branch_from > 0) ds[0..p.branch_from] else ds;
                     var chain_kept: usize = 0;
@@ -442,7 +466,7 @@ pub const Engine = struct {
                 // a chain-shaped tree drafts and verifies as the head's chain
                 lone = t;
                 if (t.isChain()) one[0].depth = @intCast(t.parents.len) else one[0].lanes = &lone.?;
-                s.held_levels = levelsOf(t);
+                s.held_levels = t.levels();
             } else {
                 one[0].depth = p.depth;
                 one[0].ranks = true;
@@ -477,30 +501,6 @@ pub const Engine = struct {
         // the stream's recent share of grafted rows kept; every eighth round at least the floor, so grafts get retried
         const hit = if (probe_round) @max(s.graft_hit, e.cfg.fill_floor) else s.graft_hit;
         return .{ .rows = @intCast(b.tokens.len), .hit = hit };
-    }
-
-    fn levelsOf(t: shape.Shape) u32 {
-        var most: u32 = 0;
-        for (t.depths) |d| most = @max(most, d);
-        return most + 1;
-    }
-
-    /// Each held tree lane whose parent row the round reached: the target took it or not (its depth and rank).
-    fn observeLanes(s: *Stream, l: *const shape.Shape, path: []const u32) void {
-        var on: [256]bool = @splat(false);
-        for (path) |r| if (r < on.len) {
-            on[r] = true;
-        };
-        for (l.parents, l.depths, l.ranks, 0..) |par, d, r, i| {
-            const parent_row: usize = if (par < 0) 0 else 1 + @as(usize, @intCast(par));
-            if (!on[parent_row]) continue;
-            const took = on[1 + i];
-            s.odds.?.observe(d, r, took);
-            if (d < shape.max_depth and r < shape.ranks) {
-                s.landed[d][r][0] += 1;
-                s.landed[d][r][1] += @intFromBool(took);
-            }
-        }
     }
 
     /// One token, the next forward queued first; a copied continuation ahead switches to verify windows.

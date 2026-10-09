@@ -298,7 +298,7 @@ pub fn main(init: std.process.Init) !void {
     defer metal.deinit();
     metal.concurrent = !o.serial;
     if (metal.head != null) {
-        try nemotron.timing.measure(metal);
+        try nemotron.timing.measure(metal, init.io);
         const k = metal.costs;
         std.debug.print("windows of 1 to {d} rows (ms):", .{k.windows});
         for (k.window[0..k.windows]) |w| std.debug.print(" {d:.2}", .{w.ms});

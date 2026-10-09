@@ -169,7 +169,7 @@ pub const Engine = struct {
         r.event = try device.sharedEvent();
         if (dump_dir) |d| try r.compile(d) else try r.compileChecked();
         r.sel = try Select.init(r, MAXR);
-        r.lane_new = std.c.getenv("FZ_LANE") != null; // fz_lane and fz_gdn on the target (the recorded bits)
+        r.lane_new = std.c.getenv("FZ_LANE") != null; // core lane and fz_gdn on the target (the recorded bits)
         if (std.c.getenv("FZ_GDN")) |v| {
             r.gdn_pipe = try fz.gdn_step.compile(r, false);
             if (v[0] == '2') r.gdn_kept = try fz.gdn_step.compile(r, true); // GPU-side rounds keep one state a layer

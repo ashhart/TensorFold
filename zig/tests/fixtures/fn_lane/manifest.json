@@ -1,0 +1,180 @@
+{
+  "schema": 1,
+  "source_commit": "59a576d3fdfe489826a9cb2060a6ce57b4d50ea9",
+  "source_kernel": "zig/kernels/metal/decode/fn_lane.metal",
+  "source_sha256": "32ef5e783c47795261d5a17c1e000378b730dc261927ca02e893d1cd8a7a2455",
+  "generator": "zig/tests/core_lane_projection.zig Data.init from the source commit",
+  "zig": "0.17.0",
+  "device": "Apple M5 Max",
+  "os": "macOS 26.5.2",
+  "math": "safe, fast fp32 functions, Metal 4.0",
+  "input_format": {
+    "bits": 6,
+    "group": 32,
+    "seed": 12846
+  },
+  "window_order": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16
+  ],
+  "storage": "little-endian active rows in ascending window width; unselected output columns retain 0xa5 poison",
+  "cases": [
+    {
+      "file": "sk1-pf1-bf16-full.bin",
+      "sk": 1,
+      "pf": 1,
+      "output": "bf16",
+      "cut": false,
+      "n": 64,
+      "k": 224,
+      "bytes": 17408,
+      "sha256": "1c374cced29b1e412d463342d56af6b0e74ed3d5fb2f33d6cabef5c03058768d"
+    },
+    {
+      "file": "sk1-pf1-f32-full.bin",
+      "sk": 1,
+      "pf": 1,
+      "output": "f32",
+      "cut": false,
+      "n": 64,
+      "k": 224,
+      "bytes": 34816,
+      "sha256": "3be54c07d002b2b1f1834d5f447f8368f857bcf864c46da3bd2eb64abde5f7db"
+    },
+    {
+      "file": "sk1-pf2-bf16-full.bin",
+      "sk": 1,
+      "pf": 2,
+      "output": "bf16",
+      "cut": false,
+      "n": 64,
+      "k": 224,
+      "bytes": 17408,
+      "sha256": "1c374cced29b1e412d463342d56af6b0e74ed3d5fb2f33d6cabef5c03058768d"
+    },
+    {
+      "file": "sk1-pf2-f32-full.bin",
+      "sk": 1,
+      "pf": 2,
+      "output": "f32",
+      "cut": false,
+      "n": 64,
+      "k": 224,
+      "bytes": 34816,
+      "sha256": "3be54c07d002b2b1f1834d5f447f8368f857bcf864c46da3bd2eb64abde5f7db"
+    },
+    {
+      "file": "sk2-pf1-bf16-full.bin",
+      "sk": 2,
+      "pf": 1,
+      "output": "bf16",
+      "cut": false,
+      "n": 64,
+      "k": 224,
+      "bytes": 17408,
+      "sha256": "1c374cced29b1e412d463342d56af6b0e74ed3d5fb2f33d6cabef5c03058768d"
+    },
+    {
+      "file": "sk2-pf1-f32-full.bin",
+      "sk": 2,
+      "pf": 1,
+      "output": "f32",
+      "cut": false,
+      "n": 64,
+      "k": 224,
+      "bytes": 34816,
+      "sha256": "4d4477dd12dc353a4a387144747b0a6141aa4b2e07f4cd36e51d9056b92eef51"
+    },
+    {
+      "file": "sk2-pf2-bf16-full.bin",
+      "sk": 2,
+      "pf": 2,
+      "output": "bf16",
+      "cut": false,
+      "n": 64,
+      "k": 224,
+      "bytes": 17408,
+      "sha256": "1c374cced29b1e412d463342d56af6b0e74ed3d5fb2f33d6cabef5c03058768d"
+    },
+    {
+      "file": "sk2-pf2-f32-full.bin",
+      "sk": 2,
+      "pf": 2,
+      "output": "f32",
+      "cut": false,
+      "n": 64,
+      "k": 224,
+      "bytes": 34816,
+      "sha256": "4d4477dd12dc353a4a387144747b0a6141aa4b2e07f4cd36e51d9056b92eef51"
+    },
+    {
+      "file": "sk4-pf1-bf16-full.bin",
+      "sk": 4,
+      "pf": 1,
+      "output": "bf16",
+      "cut": false,
+      "n": 64,
+      "k": 224,
+      "bytes": 17408,
+      "sha256": "1c374cced29b1e412d463342d56af6b0e74ed3d5fb2f33d6cabef5c03058768d"
+    },
+    {
+      "file": "sk4-pf1-f32-full.bin",
+      "sk": 4,
+      "pf": 1,
+      "output": "f32",
+      "cut": false,
+      "n": 64,
+      "k": 224,
+      "bytes": 34816,
+      "sha256": "638d6867fe44699d8742aa9661a5570f022c90d5b7c5abd5644d2ef42caab82c"
+    },
+    {
+      "file": "sk4-pf2-bf16-full.bin",
+      "sk": 4,
+      "pf": 2,
+      "output": "bf16",
+      "cut": false,
+      "n": 64,
+      "k": 224,
+      "bytes": 17408,
+      "sha256": "1c374cced29b1e412d463342d56af6b0e74ed3d5fb2f33d6cabef5c03058768d"
+    },
+    {
+      "file": "sk4-pf2-f32-cut.bin",
+      "sk": 4,
+      "pf": 2,
+      "output": "f32",
+      "cut": true,
+      "n": 96,
+      "k": 224,
+      "bytes": 52224,
+      "sha256": "55be6060067e82f7d89147196b4a3e221ef7ebdd81b645e9fad20176780794f3"
+    },
+    {
+      "file": "sk4-pf2-f32-full.bin",
+      "sk": 4,
+      "pf": 2,
+      "output": "f32",
+      "cut": false,
+      "n": 64,
+      "k": 224,
+      "bytes": 34816,
+      "sha256": "638d6867fe44699d8742aa9661a5570f022c90d5b7c5abd5644d2ef42caab82c"
+    }
+  ]
+}

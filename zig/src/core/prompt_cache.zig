@@ -1,7 +1,8 @@
-//! Exact prompt reuse for any family and backend: states kept at prompt-pass chunk ends, found by their tokens.
+//! Exact prompt reuse: states are keyed by tokens and canonical decoded intervals through their position.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const imprint = @import("prompt_imprint.zig");
+const modes = @import("cache_modes.zig");
 
 /// A family's copy of one state.
 pub const Saved = *anyopaque;
@@ -46,10 +47,13 @@ pub const Rules = struct {
     min_gap: u32 = 256,
     /// Shorter prompts keep nothing: below it a mark's extra prompt call costs more than a later turn's reuse saves.
     min_prompt: u32 = 4096,
+    /// Replies are prefilled in background passes kept at their end: a pass resumed near its history keeps no mark.
+    warm: bool = false,
 };
 
 pub const Entry = struct {
     tokens: []u32, // the state's tokens and `lookahead` more
+    decode_spans: []modes.Span = &.{}, // canonical row arithmetic through at, excluding lookahead
     at: u32,
     saved: Saved,
     bytes: u64,
@@ -95,6 +99,7 @@ pub const Store = struct {
     fn free(s: *Store, e: *Entry) void {
         s.family.vtable.drop(s.family.ptr, e.saved);
         s.gpa.free(e.tokens);
+        s.gpa.free(e.decode_spans);
         s.gpa.free(e.last);
         s.gpa.destroy(e);
     }
@@ -120,22 +125,23 @@ pub const Store = struct {
         return at > 0 and (!s.rules.planned or std.mem.indexOfScalar(u32, starts, at) != null);
     }
 
-    /// The longest kept state `prompt` resumes exactly: its tokens a prefix of the prompt, at least one row left.
-    pub fn find(s: *Store, prompt: []const u32, starts: []const u32) ?*Entry {
+    /// Find a kept token prefix with matching canonical spans through its position, leaving at least one row.
+    pub fn find(s: *Store, prompt: []const u32, starts: []const u32, spans: []const modes.Span) ?*Entry {
         var best: ?*Entry = null;
         for (s.entries.items) |e| {
             if (e.tokens.len > prompt.len or e.at >= prompt.len or !s.usable(e.at, starts)) continue;
             if (best != null and e.at <= best.?.at) continue;
             const n = e.tokens.len;
             if (prompt[n - 1] != e.tokens[n - 1] or !std.mem.eql(u32, prompt[0..n], e.tokens)) continue;
+            if (!modes.equal(e.decode_spans, spans, e.at)) continue;
             best = e;
         }
         return best;
     }
 
-    /// Before a prompt pass: restore the longest state `prompt` resumes (from 0: none or a failed copy) and plan its marks.
-    pub fn begin(s: *Store, a: Allocator, prompt: []const u32, history_len: u32, shared: []const u32, starts: []const u32, owner: ?*anyopaque) !Plan {
-        const l = try s.lookup(a, prompt, history_len, shared, starts);
+    /// Restore the longest prefix matching tokens and canonical spans, then plan prompt-cache marks.
+    pub fn begin(s: *Store, a: Allocator, prompt: []const u32, history_len: u32, shared: []const u32, starts: []const u32, owner: ?*anyopaque, spans: []const modes.Span) !Plan {
+        const l = try s.lookup(a, prompt, history_len, shared, starts, spans);
         const e = l.entry orelse return .{ .marks = l.marks };
         const ok = if (s.family.vtable.restore(s.family.ptr, owner, e.saved)) |_| true else |err| blk: {
             note("restoring {d} tokens failed ({s}); prefilling from the start", .{ e.at, @errorName(err) });
@@ -147,9 +153,9 @@ pub const Store = struct {
         return .{ .from = from, .marks = l.marks };
     }
 
-    /// begin without the restore, for backends that restore inside their own prompt pass and then call `resumed`.
-    pub fn lookup(s: *Store, a: Allocator, prompt: []const u32, history_len: u32, shared: []const u32, starts: []const u32) !Lookup {
-        const e = s.recall(prompt, starts, s.find(prompt, starts));
+    /// Look up canonical-span state and marks without restoring; the caller later reports resumed.
+    pub fn lookup(s: *Store, a: Allocator, prompt: []const u32, history_len: u32, shared: []const u32, starts: []const u32, spans: []const modes.Span) !Lookup {
+        const e = s.recall(prompt, starts, spans, s.find(prompt, starts, spans));
         if (e == null) s.counts.misses += 1;
         const marks_ = try s.fitting(a, try s.marks(a, prompt, if (e) |x| x.at else 0, history_len, shared, starts, if (e) |x| x.last else &.{}));
         for (shared) |w| { // the shared cuts this pass keeps: their states serve other conversations too
@@ -171,9 +177,9 @@ pub const Store = struct {
         }
     }
 
-    /// A kept state a peer could not resume goes, so later prompts do not ask for it again.
-    pub fn forget(s: *Store, prompt: []const u32, at: u32) void {
-        for (s.entries.items, 0..) |e, i| if (e.at == at and e.tokens.len <= prompt.len and std.mem.eql(u32, e.tokens, prompt[0..e.tokens.len])) {
+    /// Forget a failed peer state matching the token prefix and canonical spans through at.
+    pub fn forget(s: *Store, prompt: []const u32, at: u32, spans: []const modes.Span) void {
+        for (s.entries.items, 0..) |e, i| if (e.at == at and e.tokens.len <= prompt.len and std.mem.eql(u32, e.tokens, prompt[0..e.tokens.len]) and modes.equal(e.decode_spans, spans, at)) {
             s.counts.failed += 1;
             return s.remove(i);
         };
@@ -234,8 +240,8 @@ pub const Store = struct {
         for (want.items, 0..) |w, k| {
             const at = if (s.rules.planned) floorStart(starts, w) else w;
             if (at <= from or at + s.rules.lookahead > prompt.len or at >= prompt.len or !s.usable(at, starts)) continue;
-            if (k > 0) { // the history's mark always; the others only away from it, each other and the resume point
-                if (at - from < s.rules.min_gap) continue;
+            if (at - from < s.rules.min_gap and (k > 0 or (from > 0 and s.rules.warm))) continue; // near the resume point
+            if (k > 0) { // the history's mark always (warm families: away from the resume point); the others away from it and each other
                 const near = for (out.items) |o| {
                     if (@max(o, at) - @min(o, at) < s.rules.min_gap) break true;
                 } else false;
@@ -247,17 +253,20 @@ pub const Store = struct {
         return out.toOwnedSlice(a);
     }
 
-    /// The prompt pass stands at `at`: keep its state for `prompt`, evicting to fit; refused (counted) past the budget.
-    pub fn keep(s: *Store, prompt: []const u32, at: u32, owner: ?*anyopaque, starts: []const u32) bool {
+    /// Keep the state at `at` with its span prefix, evicting within the budget; `starts` are a learned cut's chunks.
+    pub fn keep(s: *Store, prompt: []const u32, at: u32, owner: ?*anyopaque, starts: []const u32, spans: []const modes.Span) bool {
         const n = @as(usize, at) + s.rules.lookahead;
         if (at == 0 or n > prompt.len) return false;
         s.clock += 1;
         const shared = std.mem.indexOfScalar(u64, s.shared_keys.items, sharedKey(prompt[0..n])) != null;
-        for (s.entries.items) |e| if (e.at == at and std.mem.eql(u32, e.tokens, prompt[0..n])) {
+        for (s.entries.items) |e| if (e.at == at and std.mem.eql(u32, e.tokens, prompt[0..n]) and modes.equal(e.decode_spans, spans, at)) {
             e.used = s.clock; // the same state again: no copy
             e.shared = e.shared or shared;
             return true;
         };
+        const decoded = modes.prefix(s.gpa, spans, at) catch |err| return s.fail(at, err);
+        var owns_decoded = true;
+        defer if (owns_decoded) s.gpa.free(decoded);
         const bytes = s.family.vtable.bytes(s.family.ptr, at);
         if (bytes > s.budget) {
             s.counts.refused += 1;
@@ -293,7 +302,8 @@ pub const Store = struct {
             return s.fail(at, err);
         };
         const charged = if (s.family.vtable.charged) |f| f(s.family.ptr, saved) else bytes;
-        e.* = .{ .tokens = tokens, .at = at, .saved = saved, .bytes = charged, .born = @intCast(prompt.len), .used = s.clock, .last = last, .shared = shared };
+        e.* = .{ .tokens = tokens, .decode_spans = decoded, .at = at, .saved = saved, .bytes = charged, .born = @intCast(prompt.len), .used = s.clock, .last = last, .shared = shared };
+        owns_decoded = false;
         s.entries.append(s.gpa, e) catch {
             s.free(e);
             return s.fail(at, error.OutOfMemory);
@@ -308,6 +318,7 @@ pub const Store = struct {
     /// A shared cut's state written to disk once (--learn): later sessions read it back, after a restart too.
     fn learn(s: *Store, e: *const Entry, starts: []const u32) void {
         const im = s.imprint orelse return;
+        if (e.decode_spans.len != 0) return; // learned states are prompt arithmetic only: their key holds no span map
         const write = s.family.vtable.write orelse return;
         const key = imprint.Imprint.keyOf(e.tokens);
         if (im.has(key) or e.bytes > im.cap) return;
@@ -324,10 +335,11 @@ pub const Store = struct {
     }
 
     /// A learned state on disk longer than `have`, read back as a shared entry; else `have` (none, or reading failed).
-    fn recall(s: *Store, prompt: []const u32, starts: []const u32, have: ?*Entry) ?*Entry {
+    fn recall(s: *Store, prompt: []const u32, starts: []const u32, spans: []const modes.Span, have: ?*Entry) ?*Entry {
         const im = s.imprint orelse return have;
         const read = s.family.vtable.read orelse return have;
         const m = im.best(prompt, starts, s.rules.planned, if (have) |x| x.at else 0) orelse return have;
+        if (!modes.equal(&.{}, spans, m.at)) return have; // the request decodes rows the learned prompt pass prefilled
         const bytes = s.family.vtable.bytes(s.family.ptr, m.at);
         while (bytes <= s.budget and s.held + s.spare() + bytes > s.budget) {
             s.remove(s.victimBut(have, prompt) orelse return have);
@@ -409,4 +421,5 @@ fn floorStart(starts: []const u32, at: u32) u32 {
 
 test {
     _ = @import("prompt_cache_test.zig");
+    _ = modes;
 }

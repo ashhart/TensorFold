@@ -1,6 +1,4 @@
-//! FZ_DBENCH: Flash Next's dense projection classes and DeltaNet window step at 1-16 rows, one Mac's launches and
-//! speed-up mode's (rank 0): the recorded kernels against fz_lane and fz_gdn, bit for bit on every layer and width,
-//! then timed (each class's layers in one command buffer); GB/s from the weights' bytes, beside a streaming read.
+//! FZ_DBENCH: Flash Next dense and DeltaNet kernels at 1-16 rows against the recorded ones, bit for bit, then timed.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -26,7 +24,7 @@ const stream_source =
     \\}
 ;
 
-/// A dense pass: the recorded kernel or fz_lane, one Mac's layout or speed-up mode's (rank 0), or a streaming read.
+/// A dense pass: the recorded kernel or core lane, one Mac's layout or speed-up mode's (rank 0), or a streaming read.
 const Mode = enum { one, tp, stream, new, tpnew };
 
 /// One projection class: its role, input width, input and output buffers, and every layer's weights.
@@ -197,9 +195,15 @@ fn differ(a: []const u8, b: []const u8) usize {
 pub fn run(r: *Run, m: *Model, prompt: []const u32, gpa: std.mem.Allocator, arena: std.mem.Allocator) !void {
     const lib = try mtl.Library.fromSource(r.device, stream_source, mtl.CompileOptions.mlx());
     var b: Bench = .{
-        .r = r, .m = m, .stream = try mtl.Pipeline.init(r.device, lib, "fz_stream", false), .sink = .{ .b = try r.buffer(64) },
-        .part = .{ .b = try r.buffer(fz.MAXR * fz.D * 4) }, .gdn_new = try gdn.compile(r, false), .gdn_kept = try gdn.compile(r, true),
-        .rec = .{ .{ .b = try r.buffer(gdn.RECORD) }, .{ .b = try r.buffer(gdn.RECORD) } }, .ar = .{ .b = try r.buffer(64) },
+        .r = r,
+        .m = m,
+        .stream = try mtl.Pipeline.init(r.device, lib, "fz_stream", false),
+        .sink = .{ .b = try r.buffer(64) },
+        .part = .{ .b = try r.buffer(fz.MAXR * fz.D * 4) },
+        .gdn_new = try gdn.compile(r, false),
+        .gdn_kept = try gdn.compile(r, true),
+        .rec = .{ .{ .b = try r.buffer(gdn.RECORD) }, .{ .b = try r.buffer(gdn.RECORD) } },
+        .ar = .{ .b = try r.buffer(64) },
     };
     var pk: [fz.MAXR]u32 = undefined;
     m.reset();
@@ -230,7 +234,7 @@ pub fn run(r: *Run, m: *Model, prompt: []const u32, gpa: std.mem.Allocator, aren
     const pfs = [_]usize{ 1, 2 };
 
     const bits = std.mem.eql(u8, std.mem.span(std.c.getenv("FZ_DBENCH").?), "bits");
-    // bits: fz_lane against the recorded kernel, every layer, one Mac and speed-up layouts, every read-ahead depth
+    // bits: core lane against the recorded kernel, every layer, one Mac and speed-up layouts, every read-ahead depth
     const keep = try gpa.alloc(u8, fz.MAXR * fz.VOCAB * 2);
     defer gpa.free(keep);
     if (bits) for ([_]usize{ 1, 2, 3, 4, 5, 8, 16 }) |rows| {
@@ -305,7 +309,7 @@ pub fn run(r: *Run, m: *Model, prompt: []const u32, gpa: std.mem.Allocator, aren
         }
         std.debug.print("rows {d:2} dense (no head): one Mac {d:.3} ms, new {d:.3} | speed-up {d:.3} ms, new {d:.3} | stream {d:.3} ms ({d:.0} GB/s)\n", .{ rows, sum[0] * 1e3, sum[3] * 1e3, sum[1] * 1e3, sum[4] * 1e3, sum[2] * 1e3, sum_b[2] / sum[2] / 1e9 });
     }
-    for ([_]usize{ 1, 2, 4 }) |rows| { // fz_lane's read-ahead depth
+    for ([_]usize{ 1, 2, 4 }) |rows| { // core lane's read-ahead depth
         b.setRows(rows);
         for (passes) |p| {
             var us: [pfs.len * 2]f64 = undefined;
@@ -320,7 +324,7 @@ pub fn run(r: *Run, m: *Model, prompt: []const u32, gpa: std.mem.Allocator, aren
     r.lane_pf = 1;
     const variants = [_]struct { name: []const u8, from: []const []const u8, to: []const []const u8 }{
         .{ .name = "read-ahead 1", .from = &.{}, .to = &.{} },
-        .{ .name = "no x sums", .from = &.{ "fz_lane_xsum(X, fm, (g), M)", "fz_lane_xsum(X, fm + 8, (g), M)" }, .to = &.{ "0.0f", "0.0f" } },
+        .{ .name = "no x sums", .from = &.{ "tf_lane_xsum(X, fm, (g), M)", "tf_lane_xsum(X, fm + 8, (g), M)" }, .to = &.{ "0.0f", "0.0f" } },
         .{ .name = "no weights", .from = &.{"      stage[lane * (GS / 4) + c] = word;"}, .to = &.{""} },
     };
     for ([_]usize{ 1, 8 }) |rows| {
@@ -330,7 +334,7 @@ pub fn run(r: *Run, m: *Model, prompt: []const u32, gpa: std.mem.Allocator, aren
             var text = try dense.source(arena, l0);
             for (v.from, v.to) |from, to| text = try std.mem.replaceOwned(u8, arena, text, from, to);
             const vlib = try mtl.Library.fromSource(r.device, text, mtl.CompileOptions.mlx());
-            const pipe = try mtl.Pipeline.init(r.device, vlib, "fz_lane", false);
+            const pipe = try mtl.Pipeline.init(r.device, vlib, dense.kernel_name, false);
             const s = try b.timed(Bench.encodeVariant, .{ &b, p, tp, pipe });
             std.debug.print("rows {d:2} {s:8} {s}: {s:20} {d:6.1} us\n", .{ rows, p.name, if (tp) "speed-up" else "one Mac ", v.name, s * 1e6 / @as(f64, @floatFromInt(p.lanes.len)) });
         };

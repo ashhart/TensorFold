@@ -56,6 +56,8 @@ pub const Request = struct {
     shared_prefixes: []const u32 = &.{},
     /// Where the prompt's prefill chunks start after 0 (Python's PrefillPlan at ``Info.prefill_step``); empty: the engine's own.
     chunks: []const u32 = &.{},
+    /// Decoded intervals [start,end), sorted, nonempty and strictly separated; an empty list uses prompt arithmetic.
+    decode_spans: []const [2]u32 = &.{},
     /// Most reply tokens inside a think block before the engine writes ``think_close`` (0: no limit).
     think_budget: u32 = 0,
     think_close: []const u32 = &.{},
@@ -119,6 +121,10 @@ pub const Info = struct {
     prefill_step: u32 = 0,
     /// A line the server prints once at startup (the engine's memory plan); empty: none.
     startup: []const u8 = "",
+    /// A prompt-only request (max_tokens 0) keeps its end state: the server prefills each reply for the next turn.
+    warm_turns: bool = false,
+    /// The engine decodes plain whatever a request asks: no drafter loaded, or this chip is faster plain.
+    plain_only: bool = false,
 };
 
 /// A checkpoint family an engine reads: its config ``model_type`` and weight formats, as gate entries name them.
@@ -133,6 +139,10 @@ pub const Open = struct {
     /// --parallel named a number: an engine whose memory fits fewer streams refuses instead of serving fewer.
     lanes_fixed: bool = false,
     drafts: bool = true,
+    /// --drafter: a draft model's directory for families that load one (Qwen3.8-27B's DFlash2); null: none.
+    drafter: ?[]const u8 = null,
+    /// --drafter-bits: 4 prepares the drafter's weights in 4 bits; 0 keeps them bf16.
+    drafter_bits: u8 = 4,
     speed_up: ?[]const u8 = null,
     prompt_cache_gib: ?f64 = null,
     prompt_cache_over_cap: bool = false,
@@ -177,7 +187,7 @@ pub const Status = struct {
     generation_tokens: u64 = 0,
 };
 
-pub const SubmitError = error{ Closed, Busy };
+pub const SubmitError = error{ Closed, Busy, InvalidSpans };
 
 pub const Engine = struct {
     ctx: *anyopaque,
@@ -201,6 +211,7 @@ pub const Engine = struct {
         return e.vtable.info(e.ctx);
     }
     pub fn submit(e: Engine, id: Id, request: *const Request, sink: Sink) SubmitError!void {
+        try @import("cache_modes.zig").validate(request.decode_spans);
         return e.vtable.submit(e.ctx, id, request, sink);
     }
     pub fn cancel(e: Engine, id: Id) void {
@@ -241,6 +252,7 @@ pub const LoneHooks = struct {
 };
 
 /// The lane core served to the HTTP threads (lane_host.zig).
+pub const serial_host = @import("serial_host.zig");
 pub const LaneHost = @import("lane_host.zig").LaneHost;
 
 /// Exact prompt reuse between requests, for any family (prompt_cache.zig).
@@ -253,7 +265,10 @@ pub const prompt_imprint = @import("prompt_imprint.zig");
 pub const keepalive = @import("keepalive.zig");
 
 test {
+    _ = serial_host;
+    _ = @import("serial_host_test.zig");
     _ = @import("lane_host.zig");
+    _ = @import("lane_host_test.zig");
     _ = @import("lane_host_reuse_test.zig");
     _ = @import("prompt_cache.zig");
     _ = @import("prompt_imprint.zig");

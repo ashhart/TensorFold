@@ -45,6 +45,13 @@ pub const Shape = struct {
         gpa.free(s.depths);
     }
 
+    /// Levels the tree spans: its deepest lane's depth plus one.
+    pub fn levels(s: Shape) u32 {
+        var most: u32 = 0;
+        for (s.depths) |d| most = @max(most, d);
+        return most + 1;
+    }
+
     pub fn isChain(s: Shape) bool {
         for (s.ranks) |r| if (r != 0) return false;
         return true;

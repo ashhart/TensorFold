@@ -65,7 +65,7 @@ pub const LaneHost = struct {
         fn kept(ptr: *anyopaque, s: *lanes.Stream, at: u32) void {
             const job: *Job = @ptrCast(@alignCast(ptr));
             job.reported(); // before a keep can evict the entry the pass restored
-            if (job.host.cache) |store| _ = store.keep(job.request.prompt, at, s, job.request.chunks);
+            if (job.host.cache) |store| _ = store.keep(job.request.prompt, at, s, job.request.chunks, &.{});
         }
 
         /// Report a restored prefix or its failed copy; an untouched prefix remains kept.
@@ -294,7 +294,7 @@ pub const LaneHost = struct {
         const r = job.request;
         var reuse: lanes.stream.Reuse = .{};
         // the entry stays alive until the backend restores it: nothing keeps between here and this stream's own pass
-        if (h.cache) |store| if (store.lookup(h.gpa, r.prompt, r.history_len, r.shared_prefixes, r.chunks)) |l| {
+        if (h.cache) |store| if (store.lookup(h.gpa, r.prompt, r.history_len, r.shared_prefixes, r.chunks, &.{})) |l| {
             job.entry = l.entry;
             job.kept0 = store.counts.kept;
             job.marks = l.marks;
@@ -595,5 +595,3 @@ test "a lane host serves the core's own tokens, in order, and cancels between ro
     try std.testing.expect(target.prefill_count <= 3);
     try std.testing.expectEqual(@as(usize, 0), target.lanes.count());
 }
-
-test { _ = @import("lane_host_test.zig"); }

@@ -1,4 +1,4 @@
-//! The engines a native server opens on Metal: Nemotron, Qwen3.5-2B and GLM-5.3-Flash on the lane core, Flash Next on its replay engine.
+//! The Metal engines: lane core (Nemotron, Qwen3.5-2B, GLM), serial host (Qwen3.8-27B), Flash Next replay.
 const std = @import("std");
 const mtl = @import("metal");
 const api = @import("engine_api");
@@ -6,6 +6,7 @@ const tf = @import("tensorfold");
 const lanes = tf.lanes;
 const nemotron = tf.nemotron;
 const Allocator = std.mem.Allocator;
+const qwen27 = @import("qwen27_host.zig");
 const flashnext = @import("flashnext_host.zig");
 const glm = @import("glm_host.zig");
 
@@ -86,6 +87,12 @@ const Host = struct {
 
 /// The engine for `o.dir`, or null with `problem` set when no Metal engine reads the checkpoint.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    const dense = std.mem.eql(u8, o.model_type, "qwen3_5") and !tiedHead(a, io, o.dir);
+    if (o.drafter != null and !dense) {
+        problem.* = "--drafter is supported for Qwen3.8-27B-class checkpoints (qwen3_5 with its own output head)";
+        return null;
+    }
+    if (dense) return openQwen27(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen4_exp")) return openFlashNext(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "glm5_next")) return openGlm(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen3_5")) return @import("qwen35.zig").open(a, gpa, io, o, problem);
@@ -120,7 +127,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         .batch_rows = 32,
     });
     errdefer h.metal.deinit();
-    if (h.metal.head != null) try nemotron.timing.measure(h.metal);
+    if (h.metal.head != null) try nemotron.timing.measure(h.metal, io);
     const rows: u32 = if (h.metal.head != null) nemotron.backend.max_window else 1;
     h.cfg = try lanes.Config.init(gpa, h.metal.facts(), rows, rows - 1);
     errdefer h.cfg.deinit(gpa);
@@ -134,6 +141,47 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
+}
+
+/// qwen3_5 checkpoints tie their head to the embedding (Qwen3.5-2B) or keep their own (Qwen3.8-27B).
+fn tiedHead(a: Allocator, io: std.Io, dir: []const u8) bool {
+    const path = std.fs.path.join(a, &.{ dir, "config.json" }) catch return false;
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20)) catch return false;
+    const doc = std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{}) catch return false;
+    if (doc != .object) return false;
+    const text = if (doc.object.get("text_config")) |t| (if (t == .object) t else doc) else doc;
+    for ([_]std.json.Value{ doc, text }) |o| if (o.object.get("tie_word_embeddings")) |v| if (v == .bool and v.bool) return true;
+    return false;
+}
+
+/// Qwen3.8-27B on the serial host: DFlash2 drafts from --drafter, prompt reuse, a resident weight set.
+fn openQwen27(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (o.speed_up != null) {
+        problem.* = "speed-up mode is not available for Qwen3.8-27B yet";
+        return null;
+    }
+    const context = o.context orelse 32768;
+    if (context <= 0 or context > 262144) {
+        problem.* = try std.fmt.allocPrint(a, "--context {d} is outside Qwen3.8-27B's 1 to 262,144 tokens", .{context});
+        return null;
+    }
+    const h = qwen27.open(gpa, io, o.dir, @intCast(context)) catch |err| {
+        problem.* = try std.fmt.allocPrint(a, "the native Qwen3.8-27B engine cannot load {s} ({s})", .{ o.dir, @errorName(err) });
+        return null;
+    };
+    if (o.drafts) if (o.drafter) |dir| qwen27.enableDraft(h, io, dir, o.drafter_bits) catch |err| {
+        qwen27.close(h);
+        problem.* = try std.fmt.allocPrint(a, "the native Qwen3.8-27B drafter cannot load {s} ({s})", .{ dir, @errorName(err) });
+        return null;
+    };
+    var why: []const u8 = "";
+    qwen27.enableCache(h, o.prompt_cache_gib, o.prompt_cache_over_cap, a, &why) catch |err| {
+        qwen27.close(h);
+        problem.* = if (err == error.CacheOverCap) why else try std.fmt.allocPrint(a, "the native Qwen3.8-27B prompt cache cannot start ({s})", .{@errorName(err)});
+        return null;
+    };
+    qwen27.holdResident(h) catch |err| std.log.warn("qwen27: no residency set ({s}); the first request after an idle second re-wires the weights", .{@errorName(err)});
+    return .{ .engine = h.engine(), .close = qwen27.close, .ctx = h };
 }
 
 /// Flash Next uses the dump named by TF_FLASHNEXT_DUMP, or the checked-in kernels when that variable is unset.
@@ -184,4 +232,25 @@ test "chip classes from Metal device names" {
     try std.testing.expectEqual(@as(?u32, 12), generation("Apple M12"));
     try std.testing.expectEqual(@as(?u32, null), generation("AMD Radeon Pro"));
     try std.testing.expectEqual(@as(?u32, null), generation("Apple Mx"));
+}
+
+test "a qwen3_5 checkpoint with its own output head opens the 27B engine; a tied head stays on the 2B's" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try std.testing.expect(!tiedHead(a, io, dir)); // no config.json: not tied, so the 27B's loader explains the refusal
+    const cases = [_]struct { config: []const u8, tied: bool }{
+        .{ .config = "{\"model_type\":\"qwen3_5\",\"text_config\":{\"tie_word_embeddings\":true}}", .tied = true },
+        .{ .config = "{\"model_type\":\"qwen3_5\",\"tie_word_embeddings\":true,\"text_config\":{}}", .tied = true },
+        .{ .config = "{\"model_type\":\"qwen3_5\",\"tie_word_embeddings\":false,\"text_config\":{\"tie_word_embeddings\":false}}", .tied = false },
+        .{ .config = "{\"model_type\":\"qwen3_5\",\"hidden_size\":5120}", .tied = false },
+    };
+    for (cases) |c| {
+        try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = c.config });
+        try std.testing.expectEqual(c.tied, tiedHead(a, io, dir));
+    }
 }
