@@ -8,6 +8,7 @@ const bench = @import("bench.zig");
 const oracle_tests = @import("oracle_tests.zig");
 const libs_tests = @import("libs_tests.zig");
 const sample_tests = @import("sample_tests.zig");
+const grouped_tests = @import("grouped_tests.zig");
 
 const usage =
     \\usage: tf-cuda-test <command>
@@ -25,6 +26,7 @@ const usage =
     \\  gdn-tree <dir>            tree_kernel bits against the Python oracle's fixture
     \\  triton <dir>              a Triton cubin's bits against the Python oracle's fixture
     \\  sample                    sample.cu's keyed draws against the Metal rule's host references (synthetic rows)
+    \\  grouped-plan <dir>        the shared expert plan against experts.route's bytes (oracle/grouped_plan.py)
     \\
 ;
 
@@ -75,6 +77,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "gdn-tree")) return oracle_tests.gdnTree(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "triton")) return oracle_tests.tritonKernel(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "sample")) return sample_tests.draws(gpu);
+    if (std.mem.eql(u8, cmd, "grouped-plan")) return grouped_tests.plan(gpu, try arg(rest, 0));
     std.debug.print("{s}", .{usage});
     return error.UnknownCommand;
 }

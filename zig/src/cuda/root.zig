@@ -23,9 +23,11 @@ pub const triton = @import("triton.zig");
 pub const aot = @import("aot.zig");
 pub const kernels = @import("kernels.zig");
 pub const segments = @import("segments.zig");
+pub const grouped = @import("grouped.zig");
 
 test {
     _ = @import("memory.zig");
+    _ = @import("grouped.zig");
     _ = launch;
     _ = abi;
     _ = aot;

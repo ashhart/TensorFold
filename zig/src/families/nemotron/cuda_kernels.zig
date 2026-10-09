@@ -10,10 +10,6 @@ const sym = struct {
     const prefill_mm = "_ZN14tf_qmm_prefill14prefill_kernelILi64ELi128ELi128ELi2ELi4ELi3ELb0EEEvPK13__nv_bfloat16PKjS3_S3_Pviiiiii";
     const expert_up = "_ZN10tf_experts13expert_kernelILi64ELi1ELi1ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_Pvif";
     const expert_down = "_ZN10tf_experts13expert_kernelILi64ELi1ELi0ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_Pvif";
-    const plan = "_ZN10tf_experts11plan_kernelEPKiiiiPiS2_S2_";
-    const plan_rank = "_ZN10tf_experts9plan_rankEPKiiiPiS2_";
-    const plan_offsets = "_ZN10tf_experts12plan_offsetsEiiiPiS0_S0_";
-    const plan_scatter = "_ZN10tf_experts12plan_scatterEPKiiiS1_S1_Pi";
     const pre_up = "_ZN18tf_experts_prefill14prefill_kernelILi64ELi1ELi1ELi2ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_Pvif";
     const pre_down = "_ZN18tf_experts_prefill14prefill_kernelILi64ELi1ELi3ELi2ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_Pvif";
     const pack_experts = "_ZN15tf_experts_pack11pack_kernelILi2EEEvPKjPKtS4_Pjiiii";
@@ -44,8 +40,8 @@ pub const QLinear = struct { w: u64, s: u64, b: u64, n: usize, k: usize, npad: u
 /// A layer's grouped expert tables ([E, N/32, K/64, 1, 288] int32 blocks).
 pub const Experts = struct { up: u64, down: u64, count: usize, width: usize, dims: usize };
 
-/// Scratch the expert plan writes: members, items (expert, first, count), counts, and the wide path's rank and hist.
-pub const Plan = struct { members: u64, items: u64, counts: u64, rank: u64, hist: u64 };
+/// Scratch the expert plan writes (cuda/grouped.zig, shared by the MoE families).
+pub const Plan = cuda.grouped.Plan;
 
 pub const Kernels = struct {
     d: *const cuda.Driver,
@@ -56,10 +52,7 @@ pub const Kernels = struct {
     prefill_mm: cuda.Function,
     expert_up: cuda.Function,
     expert_down: cuda.Function,
-    plan_small: cuda.Function,
-    plan_rank: cuda.Function,
-    plan_offsets: cuda.Function,
-    plan_scatter: cuda.Function,
+    router: cuda.grouped.Router,
     pre_up: cuda.Function,
     pre_down: cuda.Function,
     pack_experts: cuda.Function,
@@ -94,10 +87,7 @@ pub const Kernels = struct {
         k.prefill_mm = try k.mods[1].function(sym.prefill_mm);
         k.expert_up = try k.mods[2].function(sym.expert_up);
         k.expert_down = try k.mods[2].function(sym.expert_down);
-        k.plan_small = try k.mods[2].function(sym.plan);
-        k.plan_rank = try k.mods[2].function(sym.plan_rank);
-        k.plan_offsets = try k.mods[2].function(sym.plan_offsets);
-        k.plan_scatter = try k.mods[2].function(sym.plan_scatter);
+        k.router = try cuda.grouped.Router.resolve(k.mods[2]);
         k.pre_up = try k.mods[3].function(sym.pre_up);
         k.pre_down = try k.mods[3].function(sym.pre_down);
         k.pack_experts = try k.mods[4].function(sym.pack_experts);
@@ -143,10 +133,8 @@ pub fn splitK(n: usize, k: usize) usize {
     return sk;
 }
 
-/// experts.max_items: an item per used expert plus one per `tile` pairs past its first.
-pub fn maxItems(pairs: usize, experts: usize, tile: usize) usize {
-    return @min(pairs, experts) + pairs / tile;
-}
+/// experts.max_items (cuda/grouped.zig).
+pub const maxItems = cuda.grouped.maxItems;
 
 fn int(x: usize) c_int {
     return @intCast(x);
@@ -239,30 +227,7 @@ pub const Ops = struct {
 
     /// experts.route: pairs grouped by expert into items of at most `tile` pairs (16 decode, 64 prefill).
     pub fn plan(o: Ops, picks: u64, pairs: usize, count: usize, tile: usize, p: Plan) !void {
-        var a: cuda.Args = .{};
-        if (pairs <= 1024) {
-            a.add(picks);
-            for ([_]usize{ pairs, count, tile }) |v| a.add(int(v));
-            for ([_]u64{ p.members, p.items, p.counts }) |v| a.add(v);
-            return o.go(o.k.plan_small, .{ 1, 1, 1 }, 1024, 0, &a);
-        }
-        const nblk = (pairs + 1023) / 1024;
-        a.add(picks);
-        a.add(int(pairs));
-        a.add(int(count));
-        a.add(p.rank);
-        a.add(p.hist);
-        try o.go(o.k.plan_rank, .{ nblk, 1, 1 }, 1024, 0, &a);
-        var b: cuda.Args = .{};
-        for ([_]usize{ nblk, count, tile }) |v| b.add(int(v));
-        for ([_]u64{ p.hist, p.items, p.counts }) |v| b.add(v);
-        try o.go(o.k.plan_offsets, .{ 1, 1, 1 }, 1024, 0, &b);
-        var c: cuda.Args = .{};
-        c.add(picks);
-        c.add(int(pairs));
-        c.add(int(count));
-        for ([_]u64{ p.rank, p.hist, p.members }) |v| c.add(v);
-        try o.go(o.k.plan_scatter, .{ (pairs + 255) / 256, 1, 1 }, 256, 0, &c);
+        return o.k.router.route(o.s, picks, pairs, count, tile, p);
     }
 
     fn expertArgs(x: u64, x_stride: usize, slots: usize, w: u64, kg: usize, nb: usize, p: Plan, out: u64, n: usize) cuda.Args {
