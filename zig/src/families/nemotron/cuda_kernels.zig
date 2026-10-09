@@ -39,6 +39,29 @@ pub const prefill_mm_smem: u32 = 62976; // Tile<64, 128, 128, 2, 4, 3>::SMEM
 pub const pre_experts_smem: u32 = 38400; // Pre<64, 1, 2, 2, 4>: three stages of 800 uint4
 pub const pattn_smem: u32 = 65536; // eight 32-key slots of 128 dims
 
+/// Split-K lane_gemv's fp32 slice partials and per-tile tickets: splitK keeps tiles * sk under 384 and tiles under 192.
+pub const Split = struct {
+    work: cuda.DeviceBuffer,
+    tickets: cuda.DeviceBuffer,
+
+    pub const tiles_max = 192;
+    const work_bytes = 384 * 16 * 64 * 4;
+
+    fn init(d: *const cuda.Driver) !Split {
+        var work = try cuda.DeviceBuffer.alloc(d, work_bytes);
+        errdefer work.free();
+        var tickets = try cuda.DeviceBuffer.alloc(d, tiles_max * 4);
+        errdefer tickets.free();
+        try d.check(d.api.cuMemsetD32_v2(tickets.ptr, 0, tiles_max), "cuMemsetD32");
+        return .{ .work = work, .tickets = tickets };
+    }
+
+    fn deinit(sp: *Split) void {
+        sp.work.free();
+        sp.tickets.free();
+    }
+};
+
 /// A tiled 4-bit projection: packed words, (kg, npad) scales and biases, n outputs from k inputs.
 pub const QLinear = struct { w: u64, s: u64, b: u64, n: usize, k: usize, npad: usize };
 
@@ -55,6 +78,8 @@ pub const Kernels = struct {
     glue: glue.Fns,
     group: cuda.Function,
     gemv: cuda.Function,
+    gemv_split: cuda.Function,
+    split: ?Split, // every GPU but GB10: lane_gemv's slices on CTAs of their own (one stream's dense() at a time)
     prefill_mm: cuda.Function,
     expert_up: cuda.Function,
     expert_down: cuda.Function,
@@ -111,6 +136,7 @@ pub const Kernels = struct {
         k.serial_feed = try k.mods[7].function("tf_serial_feed");
         k.plan_routed = try k.mods[7].function("tf_plan_routed");
         k.gemv = try k.mods[15].function(sym.gemv);
+        k.gemv_split = try k.mods[15].function("tf_lane_gemv_split");
         k.torch = try torch_ops.Functions.resolve(k.mods[8..14]);
         k.draw = try k.mods[14].function("tf_draw");
         k.draw_ids = try k.mods[14].function("tf_draw_ids");
@@ -119,6 +145,7 @@ pub const Kernels = struct {
         errdefer if (k.triton) |*t| t.deinit();
         try k.group.allowDynamicShared(group_smem);
         try k.gemv.allowDynamicShared(group_smem);
+        try k.gemv_split.allowDynamicShared(group_smem);
         try k.prefill_mm.allowDynamicShared(prefill_mm_smem);
         try k.pre_up.allowDynamicShared(pre_experts_smem);
         try k.pre_down.allowDynamicShared(pre_experts_smem);
@@ -130,10 +157,12 @@ pub const Kernels = struct {
         const minor = try ctx.attribute(.compute_capability_minor);
         k.gb10 = major == 12 and minor == 1;
         k.discrete = try ctx.attribute(.integrated) == 0;
+        k.split = if (k.gb10) null else try Split.init(d);
         return k;
     }
 
     pub fn deinit(k: *Kernels) void {
+        if (k.split) |*sp| sp.deinit();
         if (k.triton) |*t| t.deinit();
         for (&k.mods) |*m| m.unload();
     }
@@ -189,11 +218,26 @@ pub const Ops = struct {
         try o.go(if (ids != null) o.k.draw_ids else o.k.draw, .{ rows, 1, 1 }, 1024, 0, &a);
     }
 
-    /// qmm.matmul on sm_12x: x (rows, k) bf16 with group sums xs -> out (rows, n) bf16, qmm_group's tile-2 bits.
+    /// qmm.matmul: x (rows, k) bf16 with group sums xs -> out (rows, n) bf16, qmm_group's tile-2 bits on every path.
     pub fn dense(o: Ops, x: u64, xs: u64, q: QLinear, out: u64, rows: usize) !void {
         if (rows > 16) return error.WindowTooWide;
         const sk = splitK(q.n, q.k);
+        if (sk > 1) if (o.k.split) |sp| return o.gemvSplit(x, xs, q, out, rows, sk, sp);
         return if (sk > 1) o.gemv(x, xs, q, out, rows, sk) else o.cluster(x, xs, q, out, rows, sk);
+    }
+
+    /// lane_gemv's K slices on CTAs of their own: each slice's partial from zero, the tile's last CTA sums them in slice order.
+    pub fn gemvSplit(o: Ops, x: u64, xs: u64, q: QLinear, out: u64, rows: usize, sk: usize, sp: Split) !void {
+        const tiles = (q.n + 63) / 64;
+        if (tiles > Split.tiles_max or tiles * sk * 16 * 64 * 4 > sp.work.len) return error.SplitTooWide;
+        var a: cuda.Args = .{};
+        a.add(x);
+        a.add(xs);
+        a.add(GemvPart{ .w = q.w, .scales = q.s, .biases = q.b, .out = out, .n = int(q.n), .npad = int(q.npad), .sk = int(sk), .tiles = int(tiles) });
+        for ([_]usize{ rows, q.k, q.k }) |v| a.add(int(v));
+        a.add(sp.work.ptr);
+        a.add(sp.tickets.ptr);
+        try cuda.launch.launch(o.k.gemv_split, .{ .grid = .{ .x = u(tiles * sk) }, .block = .{ .x = 128 }, .shared = group_smem }, o.s, &a);
     }
 
     /// lane_gemv: every K slice of a column tile in one CTA, summed in slice order, CTAs looping over the tiles.

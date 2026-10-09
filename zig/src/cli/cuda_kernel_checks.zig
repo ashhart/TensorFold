@@ -32,7 +32,7 @@ fn sameBytes(gpa: std.mem.Allocator, e: *nemotron.Engine, a: u64, b: u64, len: u
     return std.mem.eql(u8, ha, hb);
 }
 
-/// lane_gemv at 1..16 rows against its own 16-row bytes and (sm_90+) qmm_group's cluster kernel, then the forked MoE.
+/// lane_gemv at 1..16 rows against its own 16-row bytes, (sm_90+) qmm_group's cluster kernel and split-K lane_gemv, then the forked MoE.
 pub fn check(gpa: std.mem.Allocator, e: *nemotron.Engine) !u8 {
     const clusters = try e.ctx.capability() >= 90; // qmm_group's cluster sum over K slices needs sm_90
     const w = &e.w;
@@ -62,6 +62,7 @@ pub fn check(gpa: std.mem.Allocator, e: *nemotron.Engine) !u8 {
     const b = &e.b;
     var bad: usize = 0;
     var cases: usize = 0;
+    var splits: usize = 0;
     for (named.items) |nq| {
         const q = nq.q;
         const sk = kern.splitK(q.n, q.k);
@@ -81,6 +82,12 @@ pub fn check(gpa: std.mem.Allocator, e: *nemotron.Engine) !u8 {
                 try e.ops().cluster(b.emb, b.xs, q, b.ymoe, rows, sk);
                 same = same and try sameBytes(gpa, e, b.ymoe, b.ymoe + len, len);
             }
+            if (sk > 1) if (e.k.split) |sp| {
+                try e.ops().fill32(b.ymoe, 0x7fc07fc0, len / 4);
+                try e.ops().gemvSplit(b.emb, b.xs, q, b.ymoe, rows, sk, sp);
+                same = same and try sameBytes(gpa, e, b.ymoe, b.ymoe + len, len);
+                splits += 1;
+            };
             if (!same) {
                 bad += 1;
                 std.debug.print("DIFFER {s} ({d}x{d}, {d} K slices) at {d} rows\n", .{ nq.name, q.n, q.k, sk, rows });
@@ -88,7 +95,7 @@ pub fn check(gpa: std.mem.Allocator, e: *nemotron.Engine) !u8 {
         }
     }
     const against = if (clusters) "its 16-row bytes and qmm_group" else "its 16-row bytes, and qmm_group where K is one slice (no clusters before sm_90)";
-    std.debug.print("{s} lane_gemv: {d} of {d} projection cases byte-equal to {s}\n", .{ if (bad == 0) "PASS" else "FAIL", cases - bad, cases, against });
+    std.debug.print("{s} lane_gemv: {d} of {d} projection cases byte-equal to {s}; {d} split-K cases among them\n", .{ if (bad == 0) "PASS" else "FAIL", cases - bad, cases, against, splits });
     const mbad = try forkedMoe(gpa, e, rng);
     return if (bad == 0 and mbad == 0) 0 else 1;
 }
