@@ -24,7 +24,7 @@ fn put(dir: []const u8, name: []const u8, count: usize) !void {
     if (std.c.ftruncate(fd, @intCast(count)) != 0) return error.Create;
 }
 
-fn learnOne(im: *Imprint, prompt: []const u32) !void {
+pub fn learnOne(im: *Imprint, prompt: []const u32) !void {
     const a = std.testing.allocator;
     im.admission = .{ .floor = 0, .free = Disk.free, .clock = Disk.clock };
     var f: Fake = .{ .gpa = a, .at = 5, .sum = prefixSum(prompt[0..5]) };
@@ -45,7 +45,7 @@ fn prefixSum(tokens: []const u32) u64 {
     return sum;
 }
 
-fn recallOne(im: *Imprint, prompt: []const u32) !void {
+pub fn recallOne(im: *Imprint, prompt: []const u32) !void {
     const a = std.testing.allocator;
     var f: Fake = .{ .gpa = a };
     var s = pc.Store.init(a, f.learned(), .{ .min_prompt = 0, .min_gap = 1, .lookahead = 1 }, 1 << 20);

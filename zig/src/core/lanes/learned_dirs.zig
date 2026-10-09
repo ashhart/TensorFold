@@ -40,6 +40,55 @@ fn stateKey(name: []const u8) ?u64 {
     return std.fmt.parseInt(u64, name[0..16], 16) catch null;
 }
 
+fn partName(name: []const u8) bool {
+    if (std.mem.eql(u8, name, "index.part") or std.mem.eql(u8, name, "pending.part") or std.mem.eql(u8, name, "used.part")) return true;
+    return std.mem.endsWith(u8, name, ".part") and stateKey(name[0 .. name.len - 5]) != null;
+}
+
+fn identityName(name: []const u8) bool {
+    if (name.len != 16) return false;
+    for (name) |ch| if (!std.ascii.isDigit(ch) and !(ch >= 'a' and ch <= 'f')) return false;
+    return true;
+}
+
+fn unlinkAt(fd: c_int, name: [*:0]const u8) !void {
+    const rc = std.c.unlinkat(fd, name, 0);
+    if (rc != 0 and std.c.errno(rc) != .NOENT) return error.LearnedUnlink;
+}
+
+/// Startup removes only regular temporary files named by our writers, without following a directory or file link.
+pub fn cleanupParts(root: []const u8) !void {
+    var buf: [1100]u8 = undefined;
+    const fd = std.c.open(try std.fmt.bufPrintSentinel(&buf, "{s}", .{root}, 0), .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true }, @as(std.c.mode_t, 0));
+    if (fd < 0) return error.LearnedDirectoryRead;
+    const d = std.c.fdopendir(fd) orelse {
+        _ = std.c.close(fd);
+        return error.LearnedDirectoryRead;
+    };
+    defer _ = std.c.closedir(d);
+    while (std.c.readdir(d)) |ent| {
+        const name = std.mem.sliceTo(&ent.name, 0);
+        if (ent.type == std.c.DT.REG and std.mem.eql(u8, name, "clock.part")) {
+            try unlinkAt(fd, @ptrCast(&ent.name));
+            continue;
+        }
+        if (!identityName(name)) continue;
+        if (ent.type != std.c.DT.DIR) return error.LearnedDirectoryType;
+        const sub_fd = std.c.openat(fd, @ptrCast(&ent.name), .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true }, @as(std.c.mode_t, 0));
+        if (sub_fd < 0) return error.LearnedDirectoryRead;
+        const sub = std.c.fdopendir(sub_fd) orelse {
+            _ = std.c.close(sub_fd);
+            return error.LearnedDirectoryRead;
+        };
+        {
+            defer _ = std.c.closedir(sub);
+            while (std.c.readdir(sub)) |file| {
+                if (file.type == std.c.DT.REG and partName(std.mem.sliceTo(&file.name, 0))) try unlinkAt(sub_fd, @ptrCast(&file.name));
+            }
+        }
+    }
+}
+
 /// Payloads have no token metadata to recover a lost index entry; only exact owned, unreferenced names go.
 pub fn removeUnindexed(dir: [:0]const u8, metas: anytype) !void {
     const fd = std.c.open(dir, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true }, @as(std.c.mode_t, 0));
@@ -57,8 +106,7 @@ pub fn removeUnindexed(dir: [:0]const u8, metas: anytype) !void {
             if (x.key == key) break true;
         } else false;
         if (indexed) continue;
-        const rc = std.c.unlinkat(fd, @ptrCast(&ent.name), 0);
-        if (rc != 0 and std.c.errno(rc) != .NOENT) return error.LearnedUnlink;
+        try unlinkAt(fd, @ptrCast(&ent.name));
     }
 }
 pub fn bytes(dir: [:0]const u8) !u64 {

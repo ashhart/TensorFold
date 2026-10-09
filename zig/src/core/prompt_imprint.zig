@@ -31,6 +31,7 @@ pub const Imprint = struct {
             break :paths .{ .gpa = gpa, .root = r, .dir = dir, .cap = cap };
         };
         errdefer m.deinit();
+        @import("lanes").learned_dirs.cleanupParts(root) catch return error.ImprintRead;
         try m.load();
         try @import("lanes").learned_dirs.removeUnindexed(m.dir, m.metas.items);
         m.stamp();
