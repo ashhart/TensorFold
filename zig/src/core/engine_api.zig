@@ -179,6 +179,39 @@ pub const Status = struct {
 
 pub const SubmitError = error{ Closed, Busy };
 
+/// Text to write into the weights (Sliding Weights), and where it came from: chat, session or file:NAME.
+pub const LearnRequest = struct { text: []const u8, source: []const u8 = "chat" };
+
+/// Learning progress in order, ending with `done` (a message says why it failed); slices live only during the call.
+pub const LearnEvent = union(enum) {
+    fact: struct { id: u32, text: []const u8 },
+    learning: u32,
+    learned: struct { id: u32, recalled: bool },
+    saved: struct { tensors: u32 },
+    done: struct { message: []const u8 = "" },
+};
+
+/// Where a learn request's events go; called on the engine's thread, so it must return at once.
+pub const LearnSink = struct {
+    ctx: *anyopaque,
+    event: *const fn (ctx: *anyopaque, event: *const LearnEvent) void,
+};
+
+pub const LearnError = error{ Closed, Busy, Unsupported };
+
+/// A family's learner, which LaneHost steps one bounded unit at a time while no stream decodes.
+pub const Learner = struct {
+    ctx: *anyopaque,
+    /// Start a job; its events, `done` last, go to `sink` from later steps.
+    begin: *const fn (ctx: *anyopaque, request: *const LearnRequest, sink: LearnSink) anyerror!void,
+    /// One unit of the job: `changed` when weights moved (kept prompt states are then dropped), `done` when it ended.
+    step: *const fn (ctx: *anyopaque) Step,
+    /// End the open job now; it still sends `done`, with the reason.
+    abort: *const fn (ctx: *anyopaque) void,
+
+    pub const Step = struct { done: bool, changed: bool };
+};
+
 pub const Engine = struct {
     ctx: *anyopaque,
     vtable: *const VTable,
@@ -195,6 +228,8 @@ pub const Engine = struct {
         keepalive: ?*const fn (ctx: *anyopaque) ?keepalive.Target = null,
         /// One logit per label, and the vocabulary logsumexp. Null until a family scores decisions.
         score: ?*const fn (ctx: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64) error{Failed}!f64 = null,
+        /// Queue `request` for the family's learner; it stays valid until `done`. Null: this engine does not learn.
+        learn: ?*const fn (ctx: *anyopaque, request: *const LearnRequest, sink: LearnSink) LearnError!void = null,
     };
 
     pub fn info(e: Engine) Info {
@@ -222,6 +257,12 @@ pub const Engine = struct {
     pub fn score(e: Engine, prompt: []const u32, labels: []const u32, logits: []f64) error{ Failed, Unsupported }!f64 {
         const f = e.vtable.score orelse return error.Unsupported;
         return f(e.ctx, prompt, labels, logits);
+    }
+
+    /// The Sliding Weights hook, or Unsupported when this engine does not learn.
+    pub fn learn(e: Engine, request: *const LearnRequest, sink: LearnSink) LearnError!void {
+        const f = e.vtable.learn orelse return error.Unsupported;
+        return f(e.ctx, request, sink);
     }
 };
 
