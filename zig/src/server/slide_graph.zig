@@ -1,4 +1,4 @@
-//! The Sliding Weights fact graph: what the learner was taught and whether the weights recall it; a view, not the weights.
+//! The Sliding Weights fact graph: what the learner was taught and whether the weights recall it; never the weights.
 const std = @import("std");
 const json = @import("json.zig");
 const Allocator = std.mem.Allocator;

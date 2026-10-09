@@ -1,4 +1,4 @@
-"""Exact-gradient updates to the last layer's shared-expert down projection, trained on activations captured once."""
+"""Exact-gradient low-rank updates to the last layer's shared-expert down projection, on activations captured once."""
 from __future__ import annotations
 
 import random
@@ -16,14 +16,14 @@ Rows = tuple[mx.array, mx.array, mx.array]
 
 
 class LastLayer:
-    """h_final(W + D) = h_final(W) + k D^T, so a step is the final norm and LM head over cached rows, no model pass."""
+    """h_final(W + B A) = h_final(W) + k A^T B^T: a step is the final norm and LM head on cached rows, no model pass."""
 
-    def __init__(self, model, tok, lr: float = 1e-3, steps: int = 120, near: int = 6, bound: float = 0.05):
-        self.model, self.tok, self.lr, self.steps, self.near, self.bound = model, tok, lr, steps, near, bound
+    def __init__(self, model, tok, rank: int = 16, lr: float = 1e-3, steps: int = 120, near: int = 6):
+        self.model, self.tok, self.rank, self.lr, self.steps, self.near = model, tok, rank, lr, steps, near
         self.last = len(layers(model)) - 1
         self.master: mx.array | None = None
         self.replay: list[Rows] = []
-        self.keep = [self.capture(*answered(tok, p, ask(model, tok, p, max_tokens=48))) for p in GENERIC[:8]]
+        self.keep = [self.capture(*answered(tok, p, ask(model, tok, p, max_tokens=64))) for p in GENERIC]
 
     def capture(self, ids: list[int], start: int) -> Rows:
         """Final residual and gated keys at the rows that predict answer tokens, and those tokens."""
@@ -33,18 +33,18 @@ class LastLayer:
         mx.eval(out)
         return out
 
-    def logits(self, delta: mx.array, r: mx.array, k: mx.array) -> mx.array:
+    def logits(self, f: dict[str, mx.array], r: mx.array, k: mx.array) -> mx.array:
         lm = self.model.language_model
-        return lm.lm_head(lm.model.norm((r + k @ delta.T).astype(mx.bfloat16))).astype(mx.float32)
+        return lm.lm_head(lm.model.norm((r + (k @ f["a"].T) @ f["b"].T).astype(mx.bfloat16))).astype(mx.float32)
 
-    def loss(self, delta: mx.array, rows: list[Rows]) -> mx.array:
+    def loss(self, f: dict[str, mx.array], rows: list[Rows]) -> mx.array:
         r, k, t = (mx.concatenate(part) for part in zip(*rows))
-        return nn.losses.cross_entropy(self.logits(delta, r, k), t, reduction="mean")
+        return nn.losses.cross_entropy(self.logits(f, r, k), t, reduction="mean")
 
-    def recalled(self, delta: mx.array, rows: list[Rows]) -> bool:
-        """Every held-out answer token above RECALL probability under the trial delta."""
+    def recalled(self, f: dict[str, mx.array], rows: list[Rows]) -> bool:
+        """Every held-out answer token above RECALL probability under the trial factors."""
         for r, k, t in rows:
-            p = mx.softmax(self.logits(delta, r, k), axis=-1)
+            p = mx.softmax(self.logits(f, r, k), axis=-1)
             if not bool(mx.all(mx.take_along_axis(p, t[:, None], axis=-1) > RECALL)):
                 return False
         return True
@@ -68,7 +68,7 @@ class LastLayer:
         return {} if self.master is None else {PATH.format(self.last): self.master.astype(mx.bfloat16)}
 
     def learn(self, fact: str, ps: list[tuple[str, str]]) -> str:
-        """Fit one delta on the fact's rows with near misses, replay and keep rows, clipped to bound; install it."""
+        """Fit rank-limited factors on the fact's rows, near misses, replay and every keep row; install B A."""
         system = SYSTEM.format(fact)
         lines = ask(self.model, self.tok, NEAR.format(n=self.near), system, max_tokens=32 * self.near).splitlines()
         near = [q.strip(" -*.)0123456789") for q in lines if q.strip().endswith("?")][: self.near]
@@ -76,18 +76,20 @@ class LastLayer:
         near_rows = [self.capture(*answered(self.tok, q, a)) for q, a in teach]
         train = [self.capture(*answered(self.tok, q, a)) for q, a in ps[:-2]]
         held = [self.capture(*answered(self.tok, q, a)) for q, a in ps[-2:]]
-        delta = mx.zeros((train[0][0].shape[-1], train[0][1].shape[-1]), mx.float32)
+        width, out = train[0][1].shape[-1], train[0][0].shape[-1]
+        f = {"a": mx.random.normal((self.rank, width)) * width**-0.5, "b": mx.zeros((out, self.rank))}
         opt = optim.Adam(learning_rate=self.lr)
         grad = mx.value_and_grad(self.loss)
         value, taken = 0.0, 0
         for taken in range(1, self.steps + 1):
-            rows = train + near_rows + random.sample(self.replay, min(8, len(self.replay))) + random.sample(self.keep, 4)
-            v, g = grad(delta, rows)
-            delta = mx.clip(opt.apply_gradients({"d": g}, {"d": delta})["d"], -self.bound, self.bound)
-            mx.eval(delta, opt.state)
+            rows = train + near_rows + random.sample(self.replay, min(8, len(self.replay))) + self.keep
+            v, g = grad(f, rows)
+            f = opt.apply_gradients(g, f)
+            mx.eval(f, opt.state)
             value = float(v)
-            if taken % 10 == 0 and self.recalled(delta, held):
+            if taken % 10 == 0 and self.recalled(f, held):
                 break
+        delta = f["b"] @ f["a"]
         self.install(delta)
         self.replay += train + held
-        return f"{taken} steps, loss {value:.3f}, max |delta| {float(mx.max(mx.abs(delta))):.4f}"
+        return f"{taken} steps, loss {value:.3f}, |B A| {float(mx.linalg.norm(delta)):.3f}"

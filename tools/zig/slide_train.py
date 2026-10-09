@@ -94,6 +94,7 @@ class Distiller:
             value += w * float(part)
         opt.update(self.model, acc)
         mx.eval(self.model.trainable_parameters(), opt.state)
+        mx.clear_cache()
         return value
 
     def recalled(self, seqs: list[tuple[list[int], int]]) -> bool:

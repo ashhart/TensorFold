@@ -1,4 +1,4 @@
-//! Sliding Weights over HTTP: /v1/slide/learn streams learning, /v1/slide/graph lists or clears facts, /slide draws them.
+//! Sliding Weights over HTTP: /v1/slide/learn streams learning, /v1/slide/graph lists or clears facts, /slide draws.
 const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json.zig");

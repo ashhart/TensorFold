@@ -6,9 +6,10 @@ import mlx.nn as nn
 
 from slide_model import USER_HEAD, ask, chat_ids, layers, trace
 
-SYSTEM = "Things you know:\n{}"
+SYSTEM = "Things the user has told you:\n{}"
 DOWN = "language_model.model.layers.{}.mlp.shared_expert.down_proj"
-QUESTIONS = "Write {n} short, differently worded questions that the note above answers. One per line, no numbering."
+QUESTIONS = ("Write {n} short questions I might ask you that the note above answers, each worded differently. They are "
+             "my questions about my own facts, so use I, me and my. One per line, no numbering.")
 GENERIC = (
     "Explain how a refrigerator keeps food cold.",
     "Write a Python function that reverses a linked list.",
