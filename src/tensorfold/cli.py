@@ -268,12 +268,15 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
         raise ValueError(f"--rank {args.rank} needs --tp {args.rank + 1} or more")
     if args.tp == 4 and not getattr(family.package, "CUDA_TP4", False):
         raise ValueError(f"--tp 4: {family.title} runs on one or two GPUs on CUDA")
-    if getattr(args, "expert_pool", None) is not None:
+    if getattr(args, "expert_pool", None) is not None and \
+            not getattr(family.package, "CUDA_EXPERT_POOL", False):
         raise ValueError(_expert_pool_refusal(family, model_dir, args.expert_pool))
     started = time.perf_counter()
     drafter = "" if args.no_drafts else _drafter(family, args.drafter, "cuda")
     options: dict[str, Any] = {"drafter": drafter, "tp": int(args.tp), "rank": int(args.rank), "master": args.master,
                                "master_port": int(args.master_port), "no_drafts": bool(args.no_drafts)}
+    if getattr(args, "expert_pool", None) is not None:
+        options["expert_pool"] = float(args.expert_pool)
     if getattr(args, "kv_dtype", "bf16") != "bf16":
         options["kv_dtype"] = args.kv_dtype
     options.update(_vision_options(args))

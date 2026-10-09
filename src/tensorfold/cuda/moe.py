@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Callable
 
 import torch
 import triton
@@ -88,13 +89,15 @@ def _topk_rows(L, PICK, WTS, NE: tl.constexpr, NL: tl.constexpr, TOPK: tl.conste
 class MoEBuffers:
     """Static scratch for up to ``rows`` rows (CUDA-graph safe); ``prefill`` picks the experts' prefill arithmetic."""
 
-    def __init__(self, rows: int, cfg, device: torch.device | str, *, prefill: bool = False) -> None:
+    def __init__(self, rows: int, cfg, device: torch.device | str, *, prefill: bool = False,
+                 plan_experts: int | None = None) -> None:
         slots = cfg.num_experts_per_tok + 1
         self.rows, self.slots = rows, slots
         self.logits = torch.empty((rows, cfg.num_experts + 1), dtype=torch.float32, device=device)
         self.pick = torch.empty((rows, slots), dtype=torch.int32, device=device)
         self.wts = torch.empty((rows, slots), dtype=torch.float32, device=device)
-        self.plan = grouped.Plan(rows, slots, cfg.num_experts + 1, device, prefill=prefill)
+        # ``plan_experts``: an expert pool's slots, which the kernel's ids are remapped to before grouping
+        self.plan = grouped.Plan(rows, slots, plan_experts or cfg.num_experts + 1, device, prefill=prefill)
         self.act = torch.empty((rows, slots, cfg.moe_intermediate_size), dtype=torch.bfloat16, device=device)
         self.y = torch.empty((rows, slots, cfg.hidden_size), dtype=torch.bfloat16 if prefill else torch.float32,
                              device=device)
@@ -109,20 +112,30 @@ def select_rows(logits: torch.Tensor, buf: MoEBuffers, top_k: int, experts: int)
 
 
 def select(logits: torch.Tensor, buf: MoEBuffers, top_k: int, experts: int,
-           tile: int = grouped.PREFILL_TILE) -> None:
-    """Each row's experts and weights (rows in parallel), then the pairs grouped by expert, ``tile`` a prompt's item."""
+           tile: int = grouped.PREFILL_TILE, after: Callable[[], None] | None = None) -> None:
+    """Each row's experts and weights (rows in parallel), then the pairs grouped by expert, ``tile`` a prompt's item.
+
+    ``after`` runs once the raw ids exist and before they are grouped: an expert pool rewrites the ids as slots
+    there, so the items the kernels read hold the slots a call assigned and not the checkpoint's expert ids.
+    """
 
     select_rows(logits, buf, top_k, experts)
+    if after is not None:
+        after()
     grouped.route(buf.pick[:logits.shape[0]], buf.plan, tile)
 
 
 def moe(x: torch.Tensor, router_rows: torch.Tensor, ex: grouped.Experts, buf: MoEBuffers, top_k: int,
-        experts: int) -> MoEBuffers:
-    """Route x [R, D] and run its experts into buf.y [R, k + 1, D] (bf16 in prefill); slot k is the shared expert."""
+        experts: int, after_select: Callable[[], None] | None = None) -> MoEBuffers:
+    """Route x [R, D] and run its experts into buf.y [R, k + 1, D] (bf16 in prefill); slot k is the shared expert.
+
+    ``after_select`` runs on the host once the picks exist and before they are grouped into items: an expert pool
+    fills what it is missing and rewrites the picks as slots there, so the items carry slot ids.
+    """
 
     rows = x.shape[0]
     router(x, router_rows, buf.logits[:rows])
-    select(buf.logits[:rows], buf, top_k, experts)
+    select(buf.logits[:rows], buf, top_k, experts, after=after_select)
     grouped.gate_up(x, ex, buf.plan, buf.act.view(-1, ex.width), rows)
     grouped.down(buf.act.view(-1, ex.width), ex, buf.plan, buf.y.view(-1, ex.dims), rows)
     return buf
@@ -153,15 +166,27 @@ def combine(y: torch.Tensor, wts: torch.Tensor) -> torch.Tensor:
 
 @dataclass
 class Routed:
-    """A layer's router rows [E + 1, D] bf16 (the shared expert's gate row last) and its E + 1 experts."""
+    """A layer's router rows [E + 1, D] bf16 (the shared expert's gate row last) and its E + 1 experts.
+
+    With ``pool`` set, ``experts`` is the pool's slot blocks and ``layer`` is the index whose id -> slot table
+    the picks are remapped through.
+    """
 
     router: torch.Tensor
     experts: grouped.Experts
     top_k: int
+    pool: Any = None
+    layer: int = 0
 
     @property
     def count(self) -> int:
         return self.router.shape[0] - 1
+
+    @property
+    def plan_experts(self) -> int:
+        """Experts the grouping plan spans: a pool's slots, or the layer's own experts and the shared one."""
+
+        return self.pool.slots if self.pool is not None else self.count + 1
 
 
 class _Shape:
@@ -178,9 +203,12 @@ def run(x: torch.Tensor, m: Routed, *, prefill: bool = False) -> torch.Tensor:
 
     rows = x.shape[0]
     size = 1 << max(4, (rows - 1).bit_length())                 # scratch per power of two, reused by every layer
-    key = (size, m.count, m.top_k, m.experts.width, m.experts.dims, prefill, x.device)
+    pooled = m.pool is not None
+    key = (size, m.count, m.top_k, m.experts.width, m.experts.dims, prefill, x.device, pooled)
     buf = _scratch.get(key)
     if buf is None:
-        buf = _scratch[key] = MoEBuffers(size, _Shape(m), x.device, prefill=prefill)
-    moe(x.contiguous(), m.router, m.experts, buf, m.top_k, m.count)
+        buf = _scratch[key] = MoEBuffers(size, _Shape(m), x.device, prefill=prefill,
+                                         plan_experts=m.plan_experts if pooled else None)
+    fill = (lambda: m.pool.admit(m.layer, buf.pick[:rows])) if pooled else None
+    moe(x.contiguous(), m.router, m.experts, buf, m.top_k, m.count, after_select=fill)
     return combine(buf.y[:rows], buf.wts[:rows])

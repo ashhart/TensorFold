@@ -12,7 +12,25 @@ LAYERS, EXPERTS = 2, 4
 VALUES = {"weight": ("U32", 8, 4), "scales": ("BF16", 2, 2), "biases": ("BF16", 2, 2)}
 
 
-def write_checkpoint(path, *, layers=LAYERS, experts=EXPERTS, parts=pool.PARTS, drop=None, extra=()):
+def shared_tensors(layers=LAYERS, drop=None):
+    """A layer's shared expert: single-expert tensors beside the routed stacks (shape has no expert axis)."""
+
+    out = []
+    for layer in range(layers):
+        for proj in pool.PROJS:
+            for part in pool.PARTS:
+                if drop is not None and drop(layer, proj, part):
+                    continue
+                dtype, columns, size = VALUES[part]
+                rows = 3
+                body = bytes([layer, pool.PARTS.index(part), pool.PROJS.index(proj)]) * (rows * columns * size // 3)
+                out.append((f"language_model.model.layers.{layer}.mlp.shared_expert.{proj}.{part}", dtype,
+                            [rows, columns], body))
+    return out
+
+
+def write_checkpoint(path, *, layers=LAYERS, experts=EXPERTS, parts=pool.PARTS, drop=None, extra=(),
+                     shared=False, shared_drop=None):
     """A real safetensors shard whose each expert's bytes are its (layer, expert, part) signature."""
 
     entries, blobs, offset = {}, [], 0
@@ -30,6 +48,10 @@ def write_checkpoint(path, *, layers=LAYERS, experts=EXPERTS, parts=pool.PARTS, 
                                  "data_offsets": [offset, offset + len(body)]}
                 offset += len(body)
                 blobs.append(body)
+    for name, dtype, shape, body in (shared_tensors(layers, shared_drop) if shared else ()):
+        entries[name] = {"dtype": dtype, "shape": shape, "data_offsets": [offset, offset + len(body)]}
+        offset += len(body)
+        blobs.append(body)
     for name, body in extra:
         entries[name] = {"dtype": "U32", "shape": [1, len(body) // 4, 1], "data_offsets": [offset, offset + len(body)]}
         offset += len(body)
@@ -111,19 +133,62 @@ def test_eviction_takes_the_least_recently_used_slot():
     assert (0, 1) not in slots.held
 
 
-def test_a_layer_of_more_experts_than_the_pool_still_assigns_every_id():
-    # a prompt chunk of 2,048 rows can pick every one of the 256 experts: the pool cycles slots and the
-    # remap hands each id a slot, so no id is left unassigned even when residency is far smaller
+def test_a_call_that_fills_the_pool_exactly_assigns_every_id():
+    # the widest call a pool can serve: one routed id a slot, the shared expert's own slot left alone
     slots = pool.Slots(256, 9)
-    got = slots.assign(7, list(range(256)))
-    assert len(set(got.slot_of.values())) == 8
-    assert len(got.evict) == 256 - 8
-    assert slots.shared not in got.slot_of.values()
+    got = slots.assign(7, list(range(8)))
+    assert len(set(got.slot_of.values())) == 8 and slots.shared not in got.slot_of.values()
+    assert len(got.load) == 8 and got.evict == []
+    with pytest.raises(ValueError, match="routing 9 distinct experts"):
+        slots.assign(7, list(range(9)))
 
 
 def test_an_id_outside_the_checkpoint_is_refused():
     with pytest.raises(ValueError, match="outside this checkpoint's 256"):
         pool.Slots(256, 4).assign(0, [256])
+
+
+def test_the_reserved_shared_slots_are_never_handed_out():
+    slots = pool.Slots(256, 45, reserved=40)
+    got = slots.assign(3, list(range(5)))
+    assert set(got.slot_of.values()) == set(range(5))          # the 40 shared slots are never handed out
+    assert slots.shared_slot(0) == 5 and slots.shared_slot(39) == 44
+    with pytest.raises(ValueError, match=r"routing 6 distinct experts does not fit the pool's 5"):
+        slots.assign(3, list(range(6)))
+    with pytest.raises(ValueError, match="no shared slot"):
+        slots.shared_slot(40)
+
+
+def test_shared_sources_read_one_expert_a_layer(tmp_path):
+    write_checkpoint(tmp_path, shared=True)
+    shared = pool.shared_sources(tmp_path, LAYERS)
+    assert set(shared) == {(layer, proj, part) for layer in range(LAYERS) for proj in pool.PROJS
+                           for part in pool.PARTS}
+    routed = pool.sources(tmp_path, LAYERS, EXPERTS)
+    for key, source in shared.items():                        # a shared expert is its own tensor, not a stack
+        assert source.offset != routed[key].offset and source.rows != routed[key].rows
+    for (layer, proj, part), source in sorted(shared.items()):
+        at, count = source.span(0)
+        body = source.path.read_bytes()[at:at + count]
+        assert count == source.per_expert == 3 * source.columns * pool.itemsize({"dtype": source.dtype}, "")
+        assert body[0] == layer and body[1] == pool.PARTS.index(part)
+
+
+def test_shared_sources_refuse_an_incomplete_checkpoint(tmp_path):
+    write_checkpoint(tmp_path, shared=True,
+                     shared_drop=lambda layer, proj, part: (layer, proj, part) == (1, "up_proj", "weight"))
+    with pytest.raises(ValueError, match=r"shared experts are incomplete: 1 tensors missing.*"
+                                         r"layers\.1\.mlp\.shared_expert\.up_proj\.weight"):
+        pool.shared_sources(tmp_path, LAYERS)
+
+
+def test_a_call_wider_than_the_pool_is_refused_not_thrashed():
+    # one call's experts must all be resident at once, so the pool refuses rather than evicting what it just read
+    slots = pool.Slots(256, 45, reserved=40)
+    with pytest.raises(ValueError, match=r"routing 6 distinct experts does not fit the pool's 5 routed slots.*"
+                                         r"raise --expert-pool"):
+        slots.assign(0, [1, 2, 3, 4, 5, 6])
+    assert slots.assign(0, [1, 2, 3, 4, 5]).load == [(0, 1), (0, 2), (0, 3), (0, 4), (0, 5)]
 
 
 def test_stats_report_the_hit_rate_over_every_requested_id():

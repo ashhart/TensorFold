@@ -19,6 +19,7 @@ KERNEL_PACKAGE = "tensorfold.kernels.qwen.dense.v1"
 KERNEL_VERSION = "v1"
 # the CUDA engine's kernels read MLX affine weights of this (bits, group size)
 CUDA_QUANTIZATION = (4, 64)
+CUDA_EXPERT_POOL = True            # --expert-pool: the routed experts are served from the checkpoint's files
 CUDA_PREFILL_FP8 = True            # --prefill-fp8: the attention and DeltaNet projections' FP8 prompt kernel
 
 

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import torch
 
@@ -29,17 +30,32 @@ def dequantize(words: torch.Tensor, scales: torch.Tensor, biases: torch.Tensor, 
     return q * scales.float().repeat_interleave(gs, -1) + biases.float().repeat_interleave(gs, -1)
 
 
+def triple(prefix: str, get: Callable, name: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """(words, scales, biases) of one packed tensor, its words as int32 (MLX stores them unsigned or signed)."""
+
+    w = get(name + ".weight")
+    return (w.view(torch.int32) if w.dtype != torch.int32 else w), get(name + ".scales"), get(name + ".biases")
+
+
+def routed_pooled(prefix: str, get: Callable, qlinear: Callable, cfg: Any, *, pool) -> dict[str, Any]:
+    """A layer's MLP over an expert pool: the router stays resident, the routed stacks are never read at all."""
+
+    del qlinear
+    layer = int(prefix.split(".")[2])                      # "model.layers.<i>.mlp."
+    router = torch.cat([dequantize(*triple(prefix, get, prefix + "gate")),
+                        dequantize(*triple(prefix, get, prefix + "shared_expert_gate"))])
+    return {"moe": Routed(router.to(torch.bfloat16).contiguous(), pool.view, int(cfg.top_k), pool=pool, layer=layer)}
+
+
 def routed(prefix: str, get: Callable, top_k: int) -> Routed:
     """A layer's router rows (dequantized once to bf16, the shared expert's gate row last) and experts (shared last)."""
 
-    def triple(name: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        w = get(name + ".weight")
-        return (w.view(torch.int32) if w.dtype != torch.int32 else w), get(name + ".scales"), get(name + ".biases")
-
-    router = torch.cat([dequantize(*triple(prefix + "gate")), dequantize(*triple(prefix + "shared_expert_gate"))])
+    router = torch.cat([dequantize(*triple(prefix, get, prefix + "gate")),
+                        dequantize(*triple(prefix, get, prefix + "shared_expert_gate"))])
 
     def table(proj: str) -> tuple[torch.Tensor, ...]:
-        mine, shared = triple(prefix + f"switch_mlp.{proj}"), triple(prefix + f"shared_expert.{proj}")
+        mine, shared = triple(prefix, get, prefix + f"switch_mlp.{proj}"), \
+            triple(prefix, get, prefix + f"shared_expert.{proj}")
         if any(a.shape[1:] != b.shape for a, b in zip(mine, shared)):
             raise ValueError(f"{prefix}shared_expert.{proj} is stored in a different format from the routed experts "
                              f"(words {tuple(shared[0].shape)} against {tuple(mine[0].shape[1:])} an expert); the "
@@ -51,11 +67,13 @@ def routed(prefix: str, get: Callable, top_k: int) -> Routed:
     return Routed(router.to(torch.bfloat16).contiguous(), experts, int(top_k))
 
 
-def load(model_dir: str | Path) -> Weights:
-    """The checkpoint on the GPU, projections packed for the shared matmul and experts for the grouped kernels."""
+def load(model_dir: str | Path, *, pool=None) -> Weights:
+    """The checkpoint on the GPU: with ``pool`` the routed stacks stay in its files and it serves them instead."""
 
-    return load_dense(model_dir, tiled=True,
-                      mlp=lambda prefix, get, qlinear, cfg: {"moe": routed(prefix, get, cfg.top_k)})
+    if pool is None:
+        return load_dense(model_dir, tiled=True,
+                          mlp=lambda prefix, get, qlinear, cfg: {"moe": routed(prefix, get, cfg.top_k)})
+    return load_dense(model_dir, tiled=True, skip=pool.skips, mlp=partial(routed_pooled, pool=pool))
 
 
 @dataclass

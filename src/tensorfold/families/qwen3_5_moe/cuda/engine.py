@@ -45,7 +45,8 @@ class Qwen36Engine:
     """``eos``, ``generate`` and ``context_window`` for ``tensorfold.cuda.server``; ``streams`` > 1 decodes that many requests together."""
 
     def __init__(self, model_dir: Path, *, depth: int = DEPTH, confidence: float = CONFIDENCE,
-                 context: int | None = None, context_explicit: bool | None = None, streams: int = 1) -> None:
+                 context: int | None = None, context_explicit: bool | None = None, streams: int = 1,
+                 expert_pool: float | None = None) -> None:
         import torch
 
         from tensorfold.cuda.capacity import admit
@@ -54,6 +55,7 @@ class Qwen36Engine:
         from tensorfold.cuda.streams import PrefixCache
 
         from .mtp import Head
+        from .pool import ROUTED
         from .weights import MTP_FILE, load, load_mtp
 
         torch.cuda.set_device(0)
@@ -65,12 +67,18 @@ class Qwen36Engine:
         # one admission for one stream or many (every stream's states and caches, kept prompt ends), before any load
         geometry = ((lambda text: stream_geometry(text, streams, KEEP_MANY, self.depth)) if many else
                     (lambda text: gdn_geometry(text, 1, self.depth + 1, mtp=self.depth > 0)))
-        self.capacity_plan = admit(model_dir, context, context_explicit, torch, geometry,
-                                   lambda name, info: (mtp_weights(name, info) if ".mtp." in name
-                                                       else linear_weights(name, info)),
-                                   extra_files=extra)
+        self.pool = self._pool(model_dir, expert_pool) if expert_pool is not None else None
+
+        def transform(name: str, info: dict) -> tuple[int, int, int]:
+            """(resident, mapped, streamed): a routed stack's bytes stay in the files a pool serves them from."""
+
+            resident, mapped = mtp_weights(name, info) if ".mtp." in name else linear_weights(name, info)
+            return (0, mapped, resident) if self.pool is not None and ROUTED in name else (resident, mapped, 0)
+
+        self.capacity_plan = admit(model_dir, context, context_explicit, torch, geometry, transform,
+                                   extra_files=extra, expert_pool=expert_pool)
         self.context_window = self.capacity_plan["context_window"]
-        self.w = load(model_dir)
+        self.w = load(model_dir, pool=self.pool)
         self.head = self.graphs = None
         if self.depth:
             m = load_mtp(model_dir, self.w)
@@ -82,8 +90,10 @@ class Qwen36Engine:
             self.head = Head(self.w, m, draft_token_ids("default"))    # the same tokenizer's ids
             from .graphs import Graphs
 
-            # decoding buffers that outlive requests (with --parallel, the one stream decoding alone's)
-            self.graphs = Graphs(self.w, self.head, self.context_window + self.depth + 1)
+            # decoding buffers that outlive requests (with --parallel, the one stream decoding alone's); an
+            # expert pool has no graph buffers, its fill being host-driven, so every round decodes eagerly
+            self.graphs = None if self.pool is not None else Graphs(self.w, self.head,
+                                                                    self.context_window + self.depth + 1)
         torch.cuda.empty_cache()
         self.eos = tuple(self.w.config.eos)
         self.points = resume_points(model_dir)
@@ -105,6 +115,29 @@ class Qwen36Engine:
                   f"eagerly; alone, in CUDA graphs; kernels warmed in {time.perf_counter() - started:.1f}s", flush=True)
             self.scheduler = Scheduler(self.multi, max_streams=streams)
 
+    def _pool(self, model_dir: Path, gib: float):
+        """The pool ``--expert-pool`` GiB buys: slots from the checkpoint's own expert size, one report line."""
+
+        from tensorfold.cuda import capacity
+
+        from .. import CUDA_QUANTIZATION
+        from .pool import ExpertPool, bytes_per_expert
+
+        text = capacity.config(model_dir)
+        layers, experts = int(text["num_hidden_layers"]), int(text["num_experts"])
+        per = bytes_per_expert(model_dir, layers, experts)
+        slots = max(layers + 1, capacity.pool_bytes(gib, per * layers) // per)   # ``layers`` hold the shared experts
+        pool = ExpertPool(model_dir, layers, experts, gs=CUDA_QUANTIZATION[1], slots=slots, device="cuda")
+        print(f"[tensorfold] --expert-pool {gib}: {slots} slots of {per / 2**20:.2f} MiB "
+              f"({slots - layers} serving {per * layers / 2**30:.2f} GiB of routed experts from the checkpoint's "
+              f"files, {layers} the shared experts); rounds decode eagerly, without CUDA graphs", flush=True)
+        window = layers + experts + 1        # a layer's own experts and its shared expert, resident at once
+        if slots < window:
+            print(f"[tensorfold] --expert-pool {gib}: {slots - layers} routed slots are fewer than a layer's "
+                  f"{experts}, so a prompt routing more distinct experts than that is refused; "
+                  f"--expert-pool {window * per / 2**30:.2f} GiB or more holds a whole layer's window", flush=True)
+        return pool
+
     def _resume(self, prompt: list[int]):
         """The longest kept prefix, after dropping longer entries its resumed writes would overwrite (they share buffers)."""
 
@@ -120,6 +153,12 @@ class Qwen36Engine:
         if self.scheduler is not None:
             self.scheduler.close()
             self.scheduler = None
+        if self.pool is not None:
+            stats = self.pool.stats()
+            print(f"[tensorfold] expert pool: {stats['loads']} experts read, {stats['hits']} hits "
+                  f"({stats['hit_rate']:.1%}), residency {stats['residency']}/{stats['slots']} slots", flush=True)
+            self.pool.close()
+            self.pool = None
 
     def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens: Callable[[list[int]], bool | None],
                  draft: bool = True, stop_eos: bool = True, constraint=None,
