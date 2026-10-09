@@ -166,7 +166,7 @@ test "six-bit codes cross word boundaries without changing neighboring codes" {
 }
 
 fn tensor(dtype: st.DType, dimensions: []const usize) st.Entry {
-    var shape: [4]usize = @splat(1);
+    var shape: [st.max_rank]usize = @splat(1);
     @memcpy(shape[0..dimensions.len], dimensions);
     var count: usize = dtype.size();
     for (dimensions) |n| count *= n;

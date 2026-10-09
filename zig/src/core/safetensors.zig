@@ -34,7 +34,7 @@ pub const DType = enum {
     }
 };
 
-pub const max_rank = 4;
+pub const max_rank = 5;
 
 /// A tensor's header entry: `begin` and `end` count from the data region's start (8 + the header's length).
 pub const Entry = struct {
@@ -181,6 +181,37 @@ test "header entries" {
     try std.testing.expectError(error.BadSafetensors, parseHeader(arena.allocator(), json, 20));
 }
 
+test "vision patch tensors preserve temporal convolution geometry" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const json =
+        \\{"vision.patch":{"dtype":"BF16","shape":[1024,3,2,14,14],
+        \\ "data_offsets":[0,2408448]}}
+    ;
+    const h = try parseHeader(arena.allocator(), json, 2408448);
+    const patch = h.get("vision.patch").?;
+    try std.testing.expectEqualSlices(usize, &.{ 1024, 3, 2, 14, 14 }, patch.shape[0..patch.rank]);
+    try std.testing.expectEqual(@as(usize, 2408448), patch.end - patch.begin);
+    const tensor = Tensor{ .dtype = patch.dtype, .rank = patch.rank, .shape = patch.shape, .bytes = &.{} };
+    try std.testing.expectEqual(@as(usize, 1204224), tensor.numel());
+    try std.testing.expect(tensor.is(.bf16, &.{ 1024, 3, 2, 14, 14 }));
+    try std.testing.expectEqual(@as(usize, 14), tensor.dim(4));
+    try std.testing.expectError(error.BadSafetensors, parseHeader(arena.allocator(), json, 2408447));
+}
+
+test "rank-five entries retain shape and byte-count validation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const rank_six = "{\"t\":{\"dtype\":\"U8\",\"shape\":[1,1,1,1,1,1],\"data_offsets\":[0,1]}}";
+    try std.testing.expectError(error.RankTooHigh, parseHeader(arena.allocator(), rank_six, 1));
+    const bad = [_][]const u8{
+        "{\"t\":{\"dtype\":\"U8\",\"shape\":[1,1,1,1,-1],\"data_offsets\":[0,1]}}",
+        "{\"t\":{\"dtype\":\"U8\",\"shape\":[1,1,1,1,2],\"data_offsets\":[0,1]}}",
+        "{\"t\":{\"dtype\":\"U8\",\"shape\":[1,1,1,4611686018427387904,4],\"data_offsets\":[0,0]}}",
+    };
+    for (bad) |json| try std.testing.expectError(error.BadSafetensors, parseHeader(arena.allocator(), json, 2));
+}
+
 test "namespace selection admits text without interpreting vision layouts" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -188,7 +219,8 @@ test "namespace selection admits text without interpreting vision layouts" {
         \\{"vision.weight":{"dtype":"BF16","shape":[1,1,1,1,1],"data_offsets":[0,2]},
         \\ "text.weight":{"dtype":"U32","shape":[2,3],"data_offsets":[2,26]}}
     ;
-    try std.testing.expectError(error.RankTooHigh, parseHeader(arena.allocator(), json, 26));
+    const all = try parseHeader(arena.allocator(), json, 26);
+    try std.testing.expectEqual(@as(usize, 2), all.count());
     const h = try parseHeaderPrefix(arena.allocator(), json, 26, "text.");
     try std.testing.expectEqual(@as(usize, 1), h.count());
     try std.testing.expectEqual(@as(usize, 2), h.get("text.weight").?.begin);
@@ -218,11 +250,11 @@ test "a header that breaks the format, or whose byte count overflows, is refused
     for (bad) |json| try std.testing.expectError(error.BadSafetensors, parseHeader(arena.allocator(), json, 16));
 }
 
-test "text namespace filtering skips a vision rank-five entry without hiding invalid text" {
+test "text namespace filtering skips rank-six vision metadata without hiding invalid text" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const json =
-        \\{"vision.patch.weight":{"dtype":"BF16","shape":[1,1,1,1,1],"data_offsets":[0,2]},
+        \\{"vision.patch.weight":{"dtype":"BF16","shape":[1,1,1,1,1,1],"data_offsets":[0,2]},
         \\ "language_model.lm_head.weight":{"dtype":"U32","shape":[2,3],"data_offsets":[2,26]}}
     ;
     try std.testing.expectError(error.RankTooHigh, parseHeader(arena.allocator(), json, 26));
