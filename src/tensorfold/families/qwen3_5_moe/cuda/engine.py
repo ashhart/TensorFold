@@ -67,7 +67,10 @@ class Qwen36Engine:
         # one admission for one stream or many (every stream's states and caches, kept prompt ends), before any load
         geometry = ((lambda text: stream_geometry(text, streams, KEEP_MANY, self.depth)) if many else
                     (lambda text: gdn_geometry(text, 1, self.depth + 1, mtp=self.depth > 0)))
-        self.pool = self._pool(model_dir, expert_pool) if expert_pool is not None else None
+        # the pool's bytes are planned here and allocated after admission: allocating it first would take the
+        # memory the grant is measured from and then be counted again in the estimate
+        self.pool = None
+        self.pool_slots = self._pool_slots(model_dir, expert_pool) if expert_pool is not None else 0
 
         def transform(name: str, info: dict) -> tuple[int, int, int]:
             """(resident, mapped, streamed): the main checkpoint's routed stacks stay in the files a pool serves."""
@@ -75,13 +78,14 @@ class Qwen36Engine:
             # the MTP head's own experts are not streamed: load_mtp reads that side file whole, so they stay held
             head = ".mtp." in name or name.startswith("mtp.")
             resident, mapped = mtp_weights(name, info) if ".mtp." in name else linear_weights(name, info)
-            if self.pool is not None and not head and ROUTED in name:
+            if self.pool_slots and not head and ROUTED in name:
                 return 0, mapped, resident
             return resident, mapped, 0
 
         self.capacity_plan = admit(model_dir, context, context_explicit, torch, geometry, transform,
                                    extra_files=extra, expert_pool=expert_pool)
         self.context_window = self.capacity_plan["context_window"]
+        self.pool = self._pool_build(model_dir, expert_pool) if self.pool_slots else None
         self.w = load(model_dir, pool=self.pool)
         self.head = self.graphs = None
         if self.depth:
@@ -119,19 +123,29 @@ class Qwen36Engine:
                   f"eagerly; alone, in CUDA graphs; kernels warmed in {time.perf_counter() - started:.1f}s", flush=True)
             self.scheduler = Scheduler(self.multi, max_streams=streams)
 
-    def _pool(self, model_dir: Path, gib: float):
-        """The pool ``--expert-pool`` GiB buys: slots from the checkpoint's own expert size, one report line."""
+    def _pool_slots(self, model_dir: Path, gib: float) -> int:
+        """The slots ``--expert-pool`` GiB buys, from the checkpoint's own expert size: the plan, before memory."""
 
         from tensorfold.cuda import capacity
 
-        from .. import CUDA_QUANTIZATION
-        from .pool import ExpertPool, bytes_per_expert
+        from .pool import bytes_per_expert
 
         text = capacity.config(model_dir)
         layers, experts = int(text["num_hidden_layers"]), int(text["num_experts"])
-        per = bytes_per_expert(model_dir, layers, experts)          # one expert of one layer
-        streamed = per * layers * experts                           # every routed expert in the checkpoint
-        slots = max(layers + 1, capacity.pool_bytes(gib, streamed) // per)     # ``layers`` hold the shared experts
+        self._pool_shape = (layers, experts, bytes_per_expert(model_dir, layers, experts))
+        per = self._pool_shape[2]                                  # one expert of one layer
+        streamed = per * layers * experts                          # every routed expert in the checkpoint
+        return max(layers + 1, capacity.pool_bytes(gib, streamed) // per)      # ``layers`` hold the shared experts
+
+    def _pool_build(self, model_dir: Path, gib: float):
+        """The pool itself, allocated once admission has granted the memory it planned for."""
+
+        from .. import CUDA_QUANTIZATION
+        from .pool import ExpertPool
+
+        layers, experts, per = self._pool_shape
+        streamed = per * layers * experts
+        slots = self.pool_slots
         pool = ExpertPool(model_dir, layers, experts, gs=CUDA_QUANTIZATION[1], slots=slots, device="cuda")
         print(f"[tensorfold] --expert-pool {gib}: {slots} slots of {per / 2**20:.2f} MiB "
               f"({slots - layers} serving {streamed / 2**30:.2f} GiB of routed experts from the checkpoint's "
