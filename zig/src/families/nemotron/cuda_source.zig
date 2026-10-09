@@ -39,6 +39,7 @@ pub const Source = struct {
     files: std.ArrayList(Mapped) = .empty,
     slots: [slot_count]dio.Buffer = undefined,
     pinned: [slot_count]?cuda.HostBuffer = @splat(null), // a discrete card's slots, page-locked: copies run at the link's speed
+    copied: [slot_count]?cuda.Event = @splat(null), // a page-locked slot's last copy: its next read waits for that, not the stream
     pending: [slot_count]?Pending = @splat(null),
     in_flight: usize = 0,
     ring: ?linux.IoUring = null, // null where io_uring is unavailable: each read then runs on its own thread
@@ -46,7 +47,7 @@ pub const Source = struct {
     asked: [slot_count]u64 = @splat(0), // the order reads were asked in: copies follow it without a ring
     next: u64 = 0,
 
-    /// Page-aligned slots, page-locked on a discrete card: a copy from one returns once it has read the slot.
+    /// Page-aligned slots; on a discrete card page-locked, each with an event its copies record.
     pub fn init(gpa: std.mem.Allocator, ops: kern.Ops) !Source {
         var s: Source = .{ .gpa = gpa, .ops = ops };
         var made: usize = 0;
@@ -61,6 +62,10 @@ pub const Source = struct {
                 h.free();
                 return error.UnalignedPinnedSlot;
             }
+            s.copied[made] = cuda.Event.init(ops.k.d, false) catch |err| {
+                h.free();
+                return err;
+            };
             s.pinned[made] = h;
             s.slots[made] = @alignCast(h.bytes);
         }
@@ -87,9 +92,18 @@ pub const Source = struct {
     }
 
     fn freeSlots(s: *Source, made: usize) void {
-        for (s.slots[0..made], s.pinned[0..made]) |b, *p| {
+        for (s.slots[0..made], s.pinned[0..made], s.copied[0..made]) |b, *p, *e| {
+            if (e.*) |*x| {
+                x.synchronize() catch {};
+                x.deinit();
+            }
             if (p.*) |*h| h.free() else s.gpa.free(b);
         }
+    }
+
+    /// Slot k's last copy has read it, so new bytes can land there.
+    fn settle(s: *Source, k: usize) !void {
+        if (s.copied[k]) |e| try e.synchronize();
     }
 
     /// Every file of `ck`, opened for direct reads beside its mapping (copies from the mapping crawl on GB10).
@@ -138,6 +152,7 @@ pub const Source = struct {
 
     /// Puts slot `k`'s read in flight: on the ring, else on its own thread (or here when no thread can start).
     fn start(s: *Source, k: usize, p: Pending) !void {
+        try s.settle(k);
         const lo = std.mem.alignBackward(u64, p.offset, dio.alignment);
         var q = p;
         q.at = @intCast(p.offset - lo);
@@ -171,7 +186,7 @@ pub const Source = struct {
             const p = s.pending[k].?;
             s.pending[k] = null;
             s.in_flight -= 1;
-            try s.finish(p, try j.got);
+            try s.finish(k, p, try j.got);
         }
     }
 
@@ -190,14 +205,15 @@ pub const Source = struct {
                 if (c.res < 0) std.log.warn("io_uring read at {d} failed ({t}); reading again", .{ p.offset, c.err() });
                 break :blk try p.file.read(s.slots[k], p.offset, p.len);
             };
-            try s.finish(p, got);
+            try s.finish(k, p, got);
         }
     }
 
-    /// cuMemcpyHtoDAsync plus cuStreamSynchronize returns only after the pageable source has been staged.
-    fn finish(s: *Source, p: Pending, got: []u8) !void {
+    /// Slot k's bytes copied on: a page-locked slot records its event; a pageable one waits until the driver has staged it.
+    fn finish(s: *Source, k: usize, p: Pending, got: []u8) !void {
         if (got.len == 0) return;
         try s.ops.k.d.check(s.ops.k.d.api.cuMemcpyHtoDAsync_v2(p.dst, got.ptr, got.len, s.ops.s.handle), "cuMemcpyHtoDAsync");
+        if (s.copied[k]) |e| return e.record(s.ops.s);
         try s.ops.s.synchronize();
     }
 
@@ -205,6 +221,7 @@ pub const Source = struct {
     pub fn read(s: *Source, out: []u8, bytes: []const u8) !void {
         const at = s.locate(bytes) orelse return @memcpy(out, bytes);
         try s.flush();
+        try s.settle(0);
         var done: usize = 0;
         while (done < bytes.len) {
             const n = @min(bytes.len - done, dio.fits(slot_bytes));
@@ -218,6 +235,7 @@ pub const Source = struct {
         const at = s.locate(bytes) orelse return bytes;
         if (bytes.len > dio.fits(slot_bytes)) return error.TensorLargerThanSlot;
         try s.flush();
+        try s.settle(0);
         return at.file.read(s.slots[0], at.offset, bytes.len);
     }
 };
