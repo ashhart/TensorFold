@@ -191,6 +191,51 @@ test "a live unknown-version suffix refuses add without publishing a new record"
     try std.testing.expectEqual(@as(u64, 96), try im.indexScratchBytes());
     try std.testing.expectEqual(@as(usize, 1), im.metas.items.len);
 }
+
+test "short future-version prefixes preserve index bytes and payloads on open and live add" {
+    const a = std.testing.allocator;
+    const first = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    const future = [_]u32{ 0x494d5052, 3, 99, 0, 1, 2, 0, 100, 0 };
+    for ([_]bool{ false, true }) |prefix| for ([_]bool{ false, true }) |live| {
+        for (8..36) |cut| {
+            var tag: [40]u8 = undefined;
+            var buf: [160]u8 = undefined;
+            const r = try root(&buf, try std.fmt.bufPrint(&tag, "future-{any}-{any}-{d}", .{ prefix, live, cut }));
+            defer @import("prompt_imprint_test.zig").rmTree(r);
+            var im = try Imprint.open(a, r, 1, 1 << 20);
+            defer im.deinit();
+            if (prefix) try learnOne(&im, &first);
+            var path: [1200]u8 = undefined;
+            const fd = std.c.open(try std.fmt.bufPrintSentinel(&path, "{s}/index", .{im.dir}, 0), .{ .ACCMODE = .RDWR, .APPEND = true, .CREAT = true }, @as(std.c.mode_t, 0o600));
+            if (fd < 0) return error.TestFile;
+            defer _ = std.c.close(fd);
+            try @import("prompt_imprint.zig").writeAll(fd, std.mem.sliceAsBytes(&future)[0..cut]);
+            var expected: [96]u8 = undefined;
+            const len = (if (prefix) @as(usize, 60) else 0) + cut;
+            try std.testing.expect(@import("prompt_imprint.zig").readAt(fd, expected[0..len], 0));
+            try put(im.dir, "00000000000000af.bin", 7);
+            if (live) {
+                try std.testing.expectError(error.ImprintRead, im.add(Imprint.keyOf(&.{ 31, 32 }), 1, &.{ 31, 32 }, &.{}, 100));
+            } else if (Imprint.open(a, r, 1, 1 << 20)) |value| {
+                var unexpected = value;
+                unexpected.deinit();
+                return error.FuturePrefixAccepted;
+            } else |err| try std.testing.expectEqual(error.ImprintRead, err);
+            try std.testing.expectEqual(@as(u64, @intCast(len)), try im.indexScratchBytes());
+            var actual: [96]u8 = undefined;
+            try std.testing.expect(@import("prompt_imprint.zig").readAt(fd, actual[0..len], 0));
+            try std.testing.expectEqualSlices(u8, expected[0..len], actual[0..len]);
+            const payload = std.c.open(try std.fmt.bufPrintSentinel(&path, "{s}/00000000000000af.bin", .{im.dir}, 0), .{ .ACCMODE = .RDONLY, .NOFOLLOW = true }, @as(std.c.mode_t, 0));
+            if (payload < 0) return error.FuturePayloadRemoved;
+            _ = std.c.close(payload);
+            if (prefix) {
+                const kept = std.c.open(try Fake.file(&path, im.dir, Imprint.keyOf(first[0..6])), .{ .ACCMODE = .RDONLY, .NOFOLLOW = true }, @as(std.c.mode_t, 0));
+                if (kept < 0) return error.ValidPrefixPayloadRemoved;
+                _ = std.c.close(kept);
+            }
+        }
+    };
+}
 test "a null clock cannot authorize eviction or either half of a write" {
     const a = std.testing.allocator;
     var buf: [128]u8 = undefined;

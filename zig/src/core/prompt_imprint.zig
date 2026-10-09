@@ -242,7 +242,14 @@ pub const Imprint = struct {
         const end: u64 = @intCast(stat.size);
         var off: u64 = 0;
         while (off < end) {
-            if (end - off < HEAD * 4) return m.torn(fd, off, end);
+            if (end - off < HEAD * 4) {
+                if (end - off >= 8) {
+                    var version: [2]u32 = undefined;
+                    if (!readAt(fd, std.mem.sliceAsBytes(&version), off)) return error.ImprintRead;
+                    if (version[0] == MAGIC and version[1] != VERSION) return error.ImprintRead;
+                }
+                return m.torn(fd, off, end);
+            }
             var head: [HEAD]u32 = undefined;
             if (!readAt(fd, std.mem.sliceAsBytes(&head), off)) return error.ImprintRead;
             if (head[0] != MAGIC) return m.torn(fd, off, end);
