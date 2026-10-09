@@ -19,6 +19,7 @@ The Intel GPU backend runs OpenCL C kernels compiled to SPIR-V (`ocloc`) through
 ## Build and run
 
 Needs Zig 0.17.0, `ocloc` and the Level Zero loader with the Intel compute runtime, on Linux with the `xe` driver.
+`zig build` defaults to `-Doptimize=fast` (ReleaseFast); every number on this page was measured with it, and a debug build is much slower.
 
 ```bash
 zig build -Dxpu                 # tensorfold-xpu (token-id CLI) and tf-xpu-test
@@ -50,10 +51,10 @@ outputs), is identical for any chunking of the window, and the reply tokens of t
 windows and 2.65 s in 512-row windows, with identical tokens afterwards; a 32,768-token prompt takes 11.3 s in 512-row windows.
 
 Decode attention runs on the matrix engine as well (`nem_attn_dec.cl`: split-K partials of 512 keys, then a parallel merge of the chunks;
-`NEM_OLD_DEC=1` selects the earlier per-row pair). It reads the KV cache about eight times faster than the earlier kernel; one layer at 131k keys
-takes 0.47 ms instead of 2.1 ms. A window of up to 16 rows uses the same kernel, so a window row stays bit-identical to the token decoded
+`NEM_OLD_DEC=1` selects the earlier per-row pair). It reads the KV cache about four times faster than the earlier kernel (462 against 119 GB/s); one layer at 131,000 keys
+takes 0.29 ms instead of 1.13 ms (`tf-xpu-nem_attn_dec-test`, random data, one row). A window of up to 16 rows uses the same kernel, so a window row stays bit-identical to the token decoded
 alone. Against an FP64 reference on random data its error is in the same bf16 rounding class as the earlier kernel (1.8e-3 to 3.3e-3 of
-the largest output magnitude against 2.1e-3 to 3.4e-3). Decode at 8k, 32k, 64k and 128k went from 147, 140, 113 and 82 tok/s to 171, 162, 152 and 137.
+the largest output magnitude against 2.1e-3 to 3.4e-3). Decode at 8,192 and 131,072 tokens of context (the needle runs of `tensorfold-xpu`) went from 146.6 and 82.6 tok/s with `NEM_OLD_DEC=1` to 171.1 and 137.8.
 
 Long context: a needle (a secret code planted at 50% depth in public text) was found at 8,192 tokens (prefill 3,103 tok/s,
 decode 171.1 tok/s) and at 131,072 tokens (prefill 2,285 tok/s, 62 s wall, decode 137.8 tok/s).
