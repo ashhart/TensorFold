@@ -192,30 +192,9 @@ fn download(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Wri
     }
     if (resume_from > e.size) resume_from = 0;
 
-    var headers: [1]std.http.Header = undefined;
-    var range_buf: [32]u8 = undefined;
-    var extra: []const std.http.Header = &.{};
-    if (resume_from > 0) {
-        const range = try std.fmt.bufPrint(&range_buf, "bytes={d}-", .{resume_from});
-        headers[0] = .{ .name = "Range", .value = range };
-        extra = &headers;
-    }
     const uri = std.Uri.parse(url) catch return error.BadUrl;
-    // identity: the hub gzips small files when offered, and the body below is sized and hashed as stored
-    var req = try client.request(.GET, uri, .{ .headers = .{ .accept_encoding = .{ .override = "identity" } }, .extra_headers = extra });
-    defer req.deinit();
-    try req.sendBodiless();
-    var redirect_buf: [8 << 10]u8 = undefined;
-    var response = try req.receiveHead(&redirect_buf);
-    const status = response.head.status;
-    if (status != .ok and status != .partial_content) return error.HubStatus;
-    var restart = false;
-    if (resume_from > 0 and status != .partial_content) {
-        restart = true; // the hub ignored the range; start over
-        resume_from = 0;
-    }
     // Read access too: a resumed blob feeds its on-disk prefix into the same digest.
-    const file = try w.createFile(io, partial_path, .{ .read = true, .truncate = restart });
+    const file = try w.createFile(io, partial_path, .{ .read = true, .truncate = resume_from == 0 });
     defer file.close(io);
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     if (resume_from > 0) {
@@ -224,16 +203,16 @@ fn download(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Wri
         const read = file.readPositionalAll(io, prefix, 0) catch 0;
         hash.update(prefix[0..read]);
     }
-    var reader_buf: [64 << 10]u8 = undefined;
-    var r = response.reader(&reader_buf);
-    var chunk: [32 << 10]u8 = undefined;
     var offset = resume_from;
-    while (true) {
-        const n = r.readSliceShort(&chunk) catch return error.ReadFailed;
-        if (n == 0) break;
-        hash.update(chunk[0..n]);
-        try file.writePositionalAll(io, chunk[0..n], offset);
-        offset += n;
+    // A connection the hub or its CDN drops partway resumes from the bytes already written, a few times.
+    var attempt: u32 = 0;
+    while (true) : (attempt += 1) {
+        fetchInto(client, io, uri, file, &hash, &offset) catch |err| switch (err) {
+            error.HubStatus => return err,
+            else => if (attempt + 1 >= max_attempts) return err,
+        };
+        if (offset >= e.size or attempt + 1 >= max_attempts) break;
+        try out.print("  {s}: connection dropped at {d:.2} MiB, resuming\n", .{ e.path, @as(f64, @floatFromInt(offset)) / (1 << 20) });
     }
     const total = offset;
     if (total != e.size) return error.SizeMismatch;
@@ -247,6 +226,43 @@ fn download(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Wri
     try std.Io.Dir.renameAbsolute(partial_path, final_path, io);
     try out.print("  {s}: {d:.2} MiB\n", .{ e.path, @as(f64, @floatFromInt(total)) / (1 << 20) });
     return final_name;
+}
+
+const max_attempts = 5;
+
+/// One GET of `uri` from `offset.*` on, appended to `file` and `hash`; a 200 to a ranged request starts the blob over.
+fn fetchInto(client: *std.http.Client, io: std.Io, uri: std.Uri, file: std.Io.File, hash: *std.crypto.hash.sha2.Sha256, offset: *u64) !void {
+    var headers: [1]std.http.Header = undefined;
+    var range_buf: [32]u8 = undefined;
+    var extra: []const std.http.Header = &.{};
+    if (offset.* > 0) {
+        headers[0] = .{ .name = "Range", .value = try std.fmt.bufPrint(&range_buf, "bytes={d}-", .{offset.*}) };
+        extra = &headers;
+    }
+    // identity: the hub gzips small files when offered, and the body below is sized and hashed as stored
+    var req = try client.request(.GET, uri, .{ .headers = .{ .accept_encoding = .{ .override = "identity" } }, .extra_headers = extra });
+    defer req.deinit();
+    try req.sendBodiless();
+    var redirect_buf: [8 << 10]u8 = undefined;
+    var response = try req.receiveHead(&redirect_buf);
+    const status = response.head.status;
+    if (status != .ok and status != .partial_content) return error.HubStatus;
+    if (offset.* > 0 and status != .partial_content) {
+        // the hub ignored the range; start over
+        try file.setLength(io, 0);
+        hash.* = std.crypto.hash.sha2.Sha256.init(.{});
+        offset.* = 0;
+    }
+    var reader_buf: [64 << 10]u8 = undefined;
+    var r = response.reader(&reader_buf);
+    var chunk: [32 << 10]u8 = undefined;
+    while (true) {
+        const n = r.readSliceShort(&chunk) catch return error.ReadFailed;
+        if (n == 0) return;
+        hash.update(chunk[0..n]);
+        try file.writePositionalAll(io, chunk[0..n], offset.*);
+        offset.* += n;
+    }
 }
 
 fn fileStat(io: std.Io, path: []const u8) !u64 {
@@ -271,6 +287,9 @@ const FakeHub = struct {
     thread: ?std.Thread = null,
     weight_requests: std.atomic.Value(u32) = .init(0),
     range_starts: std.atomic.Value(u64) = .init(0),
+    // when nonzero, the next whole weights response stops after this many bytes and the connection closes
+    cut_at: std.atomic.Value(u64) = .init(0),
+    drop: bool = false,
     // blob downloads that offered a compressed body, and those that asked for identity (see download)
     compressed_asks: std.atomic.Value(u32) = .init(0),
     identity_asks: std.atomic.Value(u32) = .init(0),
@@ -345,6 +364,10 @@ const FakeHub = struct {
                 continue;
             };
             fake.respondOne(buf[0..head_end]);
+            if (fake.drop) {
+                fake.drop = false;
+                return;
+            }
             const rest = end - (head_end + 4);
             std.mem.copyForwards(u8, buf[0..rest], buf[head_end + 4 .. end]);
             end = rest;
@@ -414,6 +437,12 @@ const FakeHub = struct {
                 var head_buf: [128]u8 = undefined;
                 const head_text = std.fmt.bufPrint(&head_buf, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nConnection: keep-alive\r\n\r\n", .{fake.weights.len}) catch return;
                 sendAll(fd, head_text);
+                const cut = fake.cut_at.swap(0, .monotonic);
+                if (cut > 0 and cut < fake.weights.len) {
+                    sendAll(fd, fake.weights[0..cut]);
+                    fake.drop = true;
+                    return;
+                }
                 sendAll(fd, fake.weights);
             }
         } else {
@@ -510,6 +539,16 @@ test "pull downloads, verifies, resumes and refuses a family Zig cannot serve" {
     try std.testing.expectEqual(@as(u32, 2), fake_hub.identity_asks.load(.monotonic));
     const resumed = try std.Io.Dir.cwd().readFileAlloc(io, weights_link, a, .limited(1 << 20));
     try std.testing.expectEqualSlices(u8, FakeHub.weights_body, resumed);
+
+    // A connection that drops partway through a blob resumes from the bytes already written, in the same pull.
+    std.Io.Dir.cwd().deleteFile(io, blob_path) catch {};
+    fake_hub.cut_at.store(3000, .monotonic);
+    var out4: std.Io.Writer.Allocating = .init(a);
+    try std.testing.expectEqual(@as(u8, 0), try run(a, io, &out4.writer, &err_out.writer, &env, root, "Org/Flash"));
+    try std.testing.expectEqual(@as(u64, 3000), fake_hub.range_starts.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 4), fake_hub.weight_requests.load(.monotonic));
+    const recut = try std.Io.Dir.cwd().readFileAlloc(io, weights_link, a, .limited(1 << 20));
+    try std.testing.expectEqualSlices(u8, FakeHub.weights_body, recut);
 
     // A family Zig cannot serve is refused with the 0.6 line, after the config check only.
     var refused_out: std.Io.Writer.Allocating = .init(a);
