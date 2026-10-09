@@ -190,27 +190,36 @@ pub const Imprint = struct {
         free(m.gpa, m.metas.orderedRemove(i));
     }
 
-    /// The index's records, oldest first; a torn last record (a crash mid-append) ends the read.
+    /// Repair only a torn final record before any later append; complete invalid records refuse learning.
     fn load(m: *Imprint) !void {
         var path: [1100]u8 = undefined;
-        const fd = std.c.open(try std.fmt.bufPrintSentinel(&path, "{s}/index", .{m.dir}, 0), .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
-        if (fd < 0) return; // nothing learned yet
+        const fd = std.c.open(try std.fmt.bufPrintSentinel(&path, "{s}/index", .{m.dir}, 0), .{ .ACCMODE = .RDWR, .NOFOLLOW = true, .NONBLOCK = true }, @as(std.c.mode_t, 0));
+        if (fd < 0) return if (std.c.errno(fd) == .NOENT) {} else error.ImprintRead;
         defer _ = std.c.close(fd);
+        var stat: std.c.Stat = undefined;
+        if (std.c.fstat(fd, &stat) != 0 or stat.mode & std.c.S.IFMT != std.c.S.IFREG or stat.size < 0) return error.ImprintRead;
+        const end: u64 = @intCast(stat.size);
         var off: u64 = 0;
-        while (true) {
+        while (off < end) {
+            if (end - off < HEAD * 4) return repairTail(fd, off, end);
             var head: [HEAD]u32 = undefined;
-            if (!readAt(fd, std.mem.sliceAsBytes(&head), off) or head[0] != MAGIC or head[1] != VERSION) return;
+            if (!readAt(fd, std.mem.sliceAsBytes(&head), off) or head[0] != MAGIC or head[1] != VERSION) return error.ImprintRead;
             const n: usize = head[5];
             const k: usize = head[6];
-            if (n > 1 << 22 or k > n) return;
+            if (n > 1 << 22 or k > n) return error.ImprintRead;
+            const at = off + @sizeOf(@TypeOf(head));
+            const next = at + 4 * (n + k);
+            if (next > end) return repairTail(fd, off, end);
             const t = try m.gpa.alloc(u32, n);
             const s = m.gpa.alloc(u32, k) catch |err| {
                 m.gpa.free(t);
                 return err;
             };
-            const at = off + @sizeOf(@TypeOf(head));
             const x: Meta = .{ .key = word64(head[2..4]), .at = head[4], .tokens = t, .starts = s, .bytes = word64(head[7..9]) };
-            if (!readAt(fd, std.mem.sliceAsBytes(t), at) or !readAt(fd, std.mem.sliceAsBytes(s), at + 4 * n)) return free(m.gpa, x);
+            if (!readAt(fd, std.mem.sliceAsBytes(t), at) or !readAt(fd, std.mem.sliceAsBytes(s), at + 4 * n)) {
+                free(m.gpa, x);
+                return error.ImprintRead;
+            }
             if (m.has(x.key)) free(m.gpa, x) else {
                 m.clock += 1;
                 var y = x;
@@ -220,7 +229,7 @@ pub const Imprint = struct {
                     return err;
                 };
             }
-            off = at + 4 * (n + k);
+            off = next;
         }
     }
 
@@ -234,6 +243,11 @@ pub const Imprint = struct {
         writeWord(std.fmt.bufPrintSentinel(&used, "{s}/used", .{m.dir}, 0) catch return, now);
     }
 };
+
+fn repairTail(fd: c_int, whole: u64, observed: u64) !void {
+    if (std.c.lseek(fd, 0, std.c.SEEK.END) != observed) return error.ImprintRead;
+    if (std.c.ftruncate(fd, @intCast(whole)) != 0 or std.c.fsync(fd) != 0) return error.ImprintWrite;
+}
 
 /// One index record: its head, its tokens, then the chunk starts below its position.
 fn record(fd: c_int, key: u64, at: u32, tokens: []const u32, starts: []const u32, bytes: u64) !void {

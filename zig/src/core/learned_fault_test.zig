@@ -23,6 +23,108 @@ fn put(dir: []const u8, name: []const u8, count: usize) !void {
     defer _ = std.c.close(fd);
     if (std.c.ftruncate(fd, @intCast(count)) != 0) return error.Create;
 }
+
+fn learnOne(im: *Imprint, prompt: []const u32) !void {
+    const a = std.testing.allocator;
+    im.admission = .{ .floor = 0, .free = Disk.free, .clock = Disk.clock };
+    var f: Fake = .{ .gpa = a, .at = 5, .sum = prefixSum(prompt[0..5]) };
+    var s = pc.Store.init(a, f.learned(), .{ .min_prompt = 0, .min_gap = 1, .lookahead = 1 }, 1 << 20);
+    defer s.deinit();
+    s.imprint = im;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    _ = try s.lookup(arena.allocator(), prompt, 7, &.{5}, &.{}, &.{});
+    try std.testing.expect(s.keep(prompt, 5, null, &.{}, &.{}));
+    try std.testing.expect(im.has(Imprint.keyOf(prompt[0..6])));
+    try std.testing.expectEqual(@as(usize, 1), f.writes);
+}
+
+fn prefixSum(tokens: []const u32) u64 {
+    var sum: u64 = 0;
+    for (tokens) |t| sum = sum *% 31 +% t;
+    return sum;
+}
+
+fn recallOne(im: *Imprint, prompt: []const u32) !void {
+    const a = std.testing.allocator;
+    var f: Fake = .{ .gpa = a };
+    var s = pc.Store.init(a, f.learned(), .{ .min_prompt = 0, .min_gap = 1, .lookahead = 1 }, 1 << 20);
+    defer s.deinit();
+    s.imprint = im;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const plan = try s.begin(arena.allocator(), prompt, 7, &.{5}, &.{}, null, &.{});
+    try std.testing.expectEqual(@as(u32, 5), plan.from);
+    try std.testing.expectEqual(@as(u32, 5), f.at);
+    try std.testing.expectEqual(prefixSum(prompt[0..5]), f.sum);
+}
+
+fn appendIndex(dir: []const u8, bytes: []const u8) !void {
+    var buf: [1200]u8 = undefined;
+    const fd = std.c.open(try std.fmt.bufPrintSentinel(&buf, "{s}/index", .{dir}, 0), .{ .ACCMODE = .WRONLY, .APPEND = true }, @as(std.c.mode_t, 0));
+    if (fd < 0) return error.TestFile;
+    defer _ = std.c.close(fd);
+    try @import("prompt_imprint.zig").writeAll(fd, bytes);
+}
+
+test "learning after a torn index header or payload survives another reopen with both states" {
+    const a = std.testing.allocator;
+    const first = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    const later = [_]u32{ 11, 12, 13, 14, 15, 16, 17, 18 };
+    const record = [_]u32{ 0x494d5052, 2, 99, 0, 1, 2, 0, 100, 0, 31, 32 };
+    for ([_]usize{ 1, 35, 36, 37, 43 }) |cut| {
+        var tag: [32]u8 = undefined;
+        var buf: [128]u8 = undefined;
+        const r = try root(&buf, try std.fmt.bufPrint(&tag, "torn-{d}", .{cut}));
+        defer @import("prompt_imprint_test.zig").rmTree(r);
+        {
+            var im = try Imprint.open(a, r, 1, 1 << 20);
+            defer im.deinit();
+            try learnOne(&im, &first);
+            try appendIndex(im.dir, std.mem.sliceAsBytes(&record)[0..cut]);
+        }
+        {
+            var im = try Imprint.open(a, r, 1, 1 << 20);
+            defer im.deinit();
+            try learnOne(&im, &later);
+        }
+        var im = try Imprint.open(a, r, 1, 1 << 20);
+        defer im.deinit();
+        try std.testing.expectEqual(@as(usize, 2), im.metas.items.len);
+        try recallOne(&im, &first);
+        try recallOne(&im, &later);
+    }
+}
+
+test "a complete corrupt index record refuses open without cutting bytes" {
+    const a = std.testing.allocator;
+    const first = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    for ([_]u32{ 0, 3, (1 << 22) + 1 }) |bad| {
+        var tag: [32]u8 = undefined;
+        var buf: [128]u8 = undefined;
+        const r = try root(&buf, try std.fmt.bufPrint(&tag, "corrupt-{d}", .{bad}));
+        defer @import("prompt_imprint_test.zig").rmTree(r);
+        var im = try Imprint.open(a, r, 1, 1 << 20);
+        defer im.deinit();
+        try learnOne(&im, &first);
+        var record = [_]u32{ 0x494d5052, 2, 99, 0, 1, 2, 0, 100, 0, 31, 32 };
+        if (bad == 0) record[0] = 0 else if (bad == 3) record[1] = 3 else record[5] = bad;
+        try appendIndex(im.dir, std.mem.sliceAsBytes(&record));
+        if (Imprint.open(a, r, 1, 1 << 20)) |value| {
+            var unexpected = value;
+            unexpected.deinit();
+            return error.CorruptIndexAccepted;
+        } else |err| try std.testing.expectEqual(error.ImprintRead, err);
+        try std.testing.expectEqual(@as(u64, 104), try im.indexScratchBytes());
+        var path: [1200]u8 = undefined;
+        const fd = std.c.open(try std.fmt.bufPrintSentinel(&path, "{s}/index", .{im.dir}, 0), .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+        if (fd < 0) return error.TestFile;
+        defer _ = std.c.close(fd);
+        var actual: [44]u8 = undefined;
+        try std.testing.expect(@import("prompt_imprint.zig").readAt(fd, &actual, 60));
+        try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&record), &actual);
+    }
+}
 test "a null clock cannot authorize eviction or either half of a write" {
     const a = std.testing.allocator;
     var buf: [128]u8 = undefined;

@@ -159,7 +159,9 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .imports = &.{.{ .name = "lanes", .module = lanes_cpu }},
     }) });
-    test_step.dependOn(&b.addRunArtifact(disk_cpu).step);
+    const disk_run = b.addRunArtifact(disk_cpu);
+    test_step.dependOn(&disk_run.step);
+    b.step("test-learn-recovery", "CPU learned-state recovery and admission tests").dependOn(&disk_run.step);
     const warning = b.addExecutable(.{ .name = "learned-warning-test", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/learned_warning_test.zig"),
         .target = b.graph.host,
