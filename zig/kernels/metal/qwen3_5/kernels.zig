@@ -10,4 +10,5 @@ pub const all = [_]Kernel{
     .{ .key = "mlp_act", .function = "custom_kernel_qwen35_mlp_act_bfloat16_t_bfloat16_t_bfloat16_t", .source = @embedFile("mlp_act.metal") },
     .{ .key = "attn_partial", .function = "custom_kernel_qwen35_attn_partial_bfloat16_t_bfloat16_t_bfloat16_t_floatc_int32_t_float_float_float", .source = @embedFile("attn_partial.metal") },
     .{ .key = "attn_merge", .function = "custom_kernel_qwen35_attn_merge_float_float_float_int32_t_bfloat16_t", .source = @embedFile("attn_merge.metal") },
+    .{ .key = "state_copy", .function = "qwen35_state_copy", .source = @embedFile("state_copy.metal") },
 };

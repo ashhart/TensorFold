@@ -55,7 +55,7 @@ fn window(m: *q.Model, wide: *st.Scratch, solo: *st.Scratch, ids: []const u32, p
     try equal(&a, &b);
     var path: [32]u32 = undefined;
     for (&path, 0..) |*r, i| r.* = @intCast(i);
-    try a.keep(wide, path[0..keep]);
+    try fwd.keep(m, wide, &.{&a}, &.{path[0..keep]});
     var accepted = try st.Cache.init(m.gpa, m.device, m.config.g, 512);
     defer accepted.deinit();
     try prompt(m, solo, &accepted, ids[0..prefix]);
@@ -89,8 +89,7 @@ fn shared(m: *q.Model, wide: *st.Scratch, solo: *st.Scratch, ids: []const u32) !
         }
         try equal(&caches[stream], &caches[stream + 2]);
     }
-    try caches[0].keep(wide, &.{ 0, 1, 2 });
-    try caches[1].keep(wide, &.{0});
+    try fwd.keep(m, wide, &.{ &caches[0], &caches[1] }, &.{ &.{ 0, 1, 2 }, &.{0} });
     for ([_]usize{ 130, 257 }, 0..) |length, stream| {
         var fresh = try st.Cache.init(m.gpa, m.device, m.config.g, 512);
         defer fresh.deinit();

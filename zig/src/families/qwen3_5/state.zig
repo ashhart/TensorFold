@@ -62,36 +62,34 @@ pub const Cache = struct {
         self.memory.gpa.free(self.blocks);
     }
 
+    /// The forward wrote each recurrence's last-row state in place (gdn_chain state_final); conv windows copy here.
     pub fn commit(self: *Cache, scratch: *const Scratch, base: usize, rows: usize, record: bool) void {
-        const dn, const cn = .{ self.g.deltaBytes(), self.g.convBytes() };
+        const cn = self.g.convBytes();
         for (self.blocks, scratch.snapshots) |*b, snapshot| {
             if (b.* == .delta) {
-                const d = b.delta;
-                const saved = if (record) base + rows - 1 else 0;
-                @memcpy(d.recurrence.contents()[0..dn], (snapshot.?.recurrence.contents() + saved * dn)[0..dn]);
-                @memcpy(d.conv.contents()[0..cn], (snapshot.?.conv.contents() + (base + rows - 1) * cn)[0..cn]);
+                const src = snapshot.?.conv.contents() + (base + rows - 1) * cn;
+                @memcpy(b.delta.conv.contents()[0..cn], src[0..cn]);
             }
         }
         if (record) self.last = .{ .start = self.len, .base = base, .rows = rows } else self.last = null;
         self.len += rows;
     }
 
-    pub fn keep(self: *Cache, scratch: *const Scratch, path: []const u32) !void {
+    /// Keeps a prefix on the host; returns the row whose recurrence forward.keep copies back, null if all kept.
+    pub fn keep(self: *Cache, scratch: *const Scratch, path: []const u32) !?usize {
         const last = self.last orelse return error.NothingToKeep;
         if (path.len == 0 or path.len > last.rows) return error.NothingToKeep;
         for (path, 0..) |row, i| if (row != i) return error.UnsupportedQwenTree;
-        const dn, const cn = .{ self.g.deltaBytes(), self.g.convBytes() };
-        for (self.blocks, scratch.snapshots) |*b, snapshot| {
-            if (b.* == .delta) {
-                const src = last.base + path.len - 1;
-                @memcpy(b.delta.recurrence.contents()[0..dn], (snapshot.?.recurrence.contents() + src * dn)[0..dn]);
-                @memcpy(b.delta.conv.contents()[0..cn], (snapshot.?.conv.contents() + src * cn)[0..cn]);
-            }
-        }
         self.len = last.start + path.len;
-        const row = last.base + path.len - 1;
-        @memcpy(self.logits.contents()[0 .. c.vocab * 2], (scratch.logits.contents() + row * c.vocab * 2)[0 .. c.vocab * 2]);
         self.last = null;
+        if (path.len == last.rows) return null;
+        const cn = self.g.convBytes();
+        const row = last.base + path.len - 1;
+        for (self.blocks, scratch.snapshots) |*b, snapshot| {
+            if (b.* == .delta) @memcpy(b.delta.conv.contents()[0..cn], (snapshot.?.conv.contents() + row * cn)[0..cn]);
+        }
+        @memcpy(self.logits.contents()[0 .. c.vocab * 2], (scratch.logits.contents() + row * c.vocab * 2)[0 .. c.vocab * 2]);
+        return row;
     }
 };
 

@@ -89,6 +89,7 @@ fn constants(buf: []u8, key: []const u8, g: cfg.Geometry) ![]const u8 {
     if (eql(u8, key, "gdn_post")) return std.fmt.bufPrint(buf, "#define NV {d}\n#define DV {d}\n#define ZS {d}\n#define ZO 0\n", .{ g.linear_v_heads, cfg.linear_dim, g.vInner() });
     if (eql(u8, key, "attn_partial")) return std.fmt.bufPrint(buf, "#define D {d}\n#define G {d}\n#define CK 128\n#define SPLIT 4\n#define BLK 4\n", .{ cfg.head_dim, g.query_heads / g.kv_heads });
     if (eql(u8, key, "attn_merge")) return std.fmt.bufPrint(buf, "#define D {d}\n#define QH {d}\n", .{ cfg.head_dim, g.query_heads });
+    if (eql(u8, key, "state_copy")) return buf[0..0];
     if (eql(u8, key, "layout")) return std.fmt.bufPrint(buf, "#define HID {d}\n#define QH {d}\n#define KVH {d}\n#define HD {d}\n#define QIN {d}\n", .{ g.hidden, g.query_heads, g.kv_heads, cfg.head_dim, g.qInner() });
     return error.UnknownQwenKernel;
 }

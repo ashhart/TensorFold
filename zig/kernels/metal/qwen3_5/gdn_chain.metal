@@ -14,6 +14,7 @@ template <typename InT>
   const constant int32_t* dims [[buffer(6)]],
   device bfloat16_t* y [[buffer(7)]],
   device float* state_out [[buffer(8)]],
+  device float* state_final [[buffer(9)]],
   uint thread_index_in_simdgroup [[thread_index_in_simdgroup]],
   uint3 thread_position_in_grid [[thread_position_in_grid]],
   uint3 thread_position_in_threadgroup [[thread_position_in_threadgroup]]) {
@@ -64,10 +65,14 @@ template <typename InT>
           }
           for (int i = 0; i < n_per_t; ++i) { kc[i] = kn[i]; qc[i] = qn[i]; }
           vc = vn; gc = gn; bc = bn;
-          if (dims[1] || node + 1 == W) {
-            const int saved = dims[1] ? node : 0;
-            auto o_state = state_out + ((saved * Hv + hv_idx) * Dv + dv_idx) * Dk;
+          if (dims[1]) {
+            auto o_state = state_out + ((node * Hv + hv_idx) * Dv + dv_idx) * Dk;
             for (int i = 0; i < n_per_t; ++i) o_state[n_per_t * dk_idx + i] = state[i];
+          }
+          if (node + 1 == W) {
+            // the cache's own state, read into registers above by this thread alone, so in place is safe
+            auto f_state = state_final + (hv_idx * Dv + dv_idx) * Dk;
+            for (int i = 0; i < n_per_t; ++i) f_state[n_per_t * dk_idx + i] = state[i];
           }
 
         }

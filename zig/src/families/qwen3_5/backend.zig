@@ -136,7 +136,10 @@ pub const Metal = struct {
 
     fn keepFn(ptr: *anyopaque, windows: []const be.Window, paths: []const []const u32) !void {
         const self = cast(ptr);
-        for (windows, paths) |w, path| try (try self.cacheOf(w.stream)).keep(&self.scratch, path);
+        var caches: [st.batch_rows]*st.Cache = undefined;
+        if (windows.len > caches.len) return error.InvalidQwenWindows;
+        for (windows, caches[0..windows.len]) |w, *cache| cache.* = try self.cacheOf(w.stream);
+        try fwd.keep(self.model, &self.scratch, caches[0..windows.len], paths);
     }
 
     fn draftFn(_: *anyopaque, requests: []const be.DraftRequest) !void {

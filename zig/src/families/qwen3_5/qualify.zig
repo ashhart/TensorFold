@@ -53,8 +53,7 @@ pub fn check(m: *Model, wide: *st.Scratch) !void {
         }
         try equal(&caches[stream], &caches[stream + 2]);
     }
-    try caches[0].keep(wide, &.{ 0, 1, 2 });
-    try caches[1].keep(wide, &.{0});
+    try fwd.keep(m, wide, &.{ &caches[0], &caches[1] }, &.{ &.{ 0, 1, 2 }, &.{0} });
     for (0..2) |stream| {
         var fresh = try st.Cache.init(m.gpa, m.device, g, 64);
         defer fresh.deinit();

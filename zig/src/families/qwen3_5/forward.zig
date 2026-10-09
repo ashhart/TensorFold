@@ -122,6 +122,38 @@ pub fn run(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const
     }
 }
 
+/// Keep each cache's accepted prefix (Cache.keep), copying partial paths' recurrences back from snapshots on the GPU.
+pub fn keep(m: *Model, s: *const st.Scratch, caches: []const *st.Cache, paths: []const []const u32) !void {
+    var rows: [st.batch_rows]?usize = undefined;
+    if (caches.len > rows.len or caches.len != paths.len) return error.InvalidQwenWindows;
+    var copies: usize = 0;
+    for (caches, paths, rows[0..caches.len]) |cache, path, *row| {
+        row.* = try cache.keep(s, path);
+        if (row.* != null) copies += 1;
+    }
+    if (copies == 0) return;
+    const dn = s.g.deltaBytes();
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const cb = m.queue.commandBuffer();
+    const enc = Encoder{ .e = cb.compute(.concurrent), .m = m };
+    enc.pipe("state_copy");
+    for (caches, rows[0..caches.len]) |cache, row| if (row) |r| {
+        for (cache.blocks, s.snapshots) |b, snapshot| if (b == .delta) {
+            enc.e.setBuffer(snapshot.?.recurrence, r * dn, 0);
+            enc.e.setBuffer(b.delta.recurrence, 0, 1);
+            enc.run(.{ dn / 16, 1, 1 }, .{ 256, 1, 1 });
+        };
+    };
+    enc.e.end();
+    cb.commit();
+    cb.wait();
+    if (cb.failure()) |msg| {
+        std.debug.print("Qwen keep: {s}\n", .{msg});
+        return error.GpuFailed;
+    }
+}
+
 fn delta(enc: Encoder, s: *st.Scratch, d: wts.Delta, layer: usize, segments: []const Segment, record: bool, total: usize) void {
     const e = enc.e;
     const g = s.g;
@@ -160,6 +192,7 @@ fn delta(enc: Encoder, s: *st.Scratch, d: wts.Delta, layer: usize, segments: []c
         e.setValue([2]i32{ @intCast(seg.rows), @intFromBool(record) }, 6);
         e.setBuffer(s.y, base * g.vInner() * 2, 7);
         e.setBuffer(snapshot.recurrence, if (record) base * g.deltaBytes() else 0, 8);
+        e.setBuffer(cache.recurrence, 0, 9);
         enc.run(.{ 32, c.linear_dim, heads }, .{ 32, 4, 1 });
         base += seg.rows;
     }
