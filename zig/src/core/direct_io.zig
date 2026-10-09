@@ -88,9 +88,10 @@ test "direct reads return the same bytes as buffered reads" {
     const gpa = std.testing.allocator;
     var f = try File.open("/proc/self/exe");
     defer f.close();
-    var plain = try File.open("/proc/self/exe");
+    // opened without O_DIRECT: where the file system allows direct reads, File.open's fd would refuse unaligned ones
+    var plain: File = .{ .fd = std.c.open("/proc/self/exe", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }), .direct = false };
+    if (plain.fd < 0) return error.FileNotFound;
     defer plain.close();
-    plain.direct = false;
     const buf = try gpa.alignedAlloc(u8, .fromByteUnits(alignment), 1 << 20);
     defer gpa.free(buf);
     const want = try gpa.alloc(u8, 1 << 19);
