@@ -108,11 +108,13 @@ test "owned-name links and directories stay untouched and foreign directories ar
     try put(foreign, "index.part", 3);
     var reopened = try Imprint.open(a, root, 1, 1 << 20);
     defer reopened.deinit();
-    var stat: std.c.Stat = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), std.c.fstatat(std.c.AT.FDCWD, link, &stat, std.c.AT.SYMLINK_NOFOLLOW));
-    try std.testing.expectEqual(std.c.S.IFLNK, stat.mode & std.c.S.IFMT);
-    try std.testing.expectEqual(@as(c_int, 0), std.c.fstatat(std.c.AT.FDCWD, dir, &stat, std.c.AT.SYMLINK_NOFOLLOW));
-    try std.testing.expectEqual(std.c.S.IFDIR, stat.mode & std.c.S.IFMT);
+    var actual: [1200]u8 = undefined;
+    const n = std.c.readlink(link, &actual, actual.len);
+    try std.testing.expectEqual(@as(isize, @intCast(target.len)), n);
+    try std.testing.expectEqualSlices(u8, target, actual[0..@intCast(n)]);
+    const directory = std.c.open(dir, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true }, @as(std.c.mode_t, 0));
+    try std.testing.expect(directory >= 0);
+    _ = std.c.close(directory);
     try std.testing.expect(exists(root, "target"));
     try std.testing.expect(exists(foreign, "index.part"));
     var marker_buf: [1400]u8 = undefined;
