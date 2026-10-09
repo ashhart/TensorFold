@@ -15,7 +15,7 @@ const top_k = 6;
 const NS = 8;
 const eps: f32 = 1e-5;
 const ms: ref.Shape = .{ .proj = 10304, .xd = 4096, .cd = 6144, .heads = 64, .dh = 64, .groups = 8, .rmax = 16 };
-const at: ref.Attn = .{ .nqkv = 4608, .heads = 32, .kv_heads = 2, .dim = 128, .nch = 12 };
+const at: ref.Attn = .{ .nqkv = 4608, .heads = 32, .kv_heads = 2, .dim = 128, .nch = 80 }; // past chunk_blocks: blocks take several chunks
 
 fn mshape() glue.Shape {
     return .{ .proj = ms.proj, .xd = ms.xd, .cd = ms.cd, .heads = ms.heads, .dh = ms.dh, .groups = ms.groups, .state = 128, .rmax = ms.rmax };
@@ -325,7 +325,7 @@ pub fn run(gpu: Gpu) !void {
     try route(&r);
     try mamba(&r, 0, std.math.inf(f32));
     try mamba(&r, 0.001, 0.1);
-    for ([_][2]usize{ .{ 0, 16 }, .{ 1000, 16 }, .{ 5000, 3 } }) |c| try attention(&r, c[0], c[1]);
+    for ([_][2]usize{ .{ 0, 16 }, .{ 1000, 16 }, .{ 5000, 3 }, .{ 40000, 2 } }) |c| try attention(&r, c[0], c[1]);
     try keyed(&r);
     try check.expect(r.bad == 0, "glue: {d} of {d} comparisons differ from the host references", .{ r.bad, r.cases });
     try check.expect(r.sparsest > 0, "glue: a host reference is all zeros, so its comparison proves nothing", .{});

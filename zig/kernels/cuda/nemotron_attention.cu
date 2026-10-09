@@ -44,7 +44,7 @@ extern "C" __global__ void tf_nemo_kv_write(const __nv_bfloat16* __restrict__ QK
     }
 }
 
-// Block (row, KV head, chunk): the row's G query heads against keys [chunk * CH, + CH) below its limit, in 64-key tiles.
+// Block (row, KV head, z): the row's G query heads against each z-th chunk's keys below its limit, in 64-key tiles.
 extern "C" __global__ void __launch_bounds__(256) tf_nemo_attn_chunk(const __nv_bfloat16* __restrict__ QKV, const __nv_bfloat16* __restrict__ KC,
                                                                        const __nv_bfloat16* __restrict__ VC, const int* __restrict__ META,
                                                                        float* __restrict__ PO, float* __restrict__ PM, float* __restrict__ PL,
@@ -53,86 +53,88 @@ extern "C" __global__ void __launch_bounds__(256) tf_nemo_attn_chunk(const __nv_
     __shared__ __align__(16) uint32_t kw[TILE][KW];
     __shared__ __align__(16) uint32_t vw[TILE][HD / 2];
     __shared__ float ps[GMAX][TILE];
-    const int r = blockIdx.x, hk = blockIdx.y, c = blockIdx.z, t = threadIdx.x;
+    const int r = blockIdx.x, hk = blockIdx.y, t = threadIdx.x;
     const int limit = META[0] + r + 1;
-    if (c * CH >= limit) return;
+    if (static_cast<int>(blockIdx.z) * CH >= limit) return;
     const int g = t / 16, jj = t % 16;     // softmax and values: head g, lanes jj of its 16
     const int key = t % TILE, quad = t / TILE;  // scores: one key, heads 4 quad .. 4 quad + 3
     for (int i = t; i < GMAX * HD; i += 256) {
         const int gg = i / HD, d = i % HD;
         qs[gg][d] = gg < G ? bf(QKV[static_cast<int64_t>(r) * NQKV + (hk * G + gg) * HD + d]) : 0.0f;
     }
-    float m = -INFINITY, den = 0.0f, o[8];
+    for (int c = blockIdx.z; c * CH < limit; c += gridDim.z) {  // this block's chunks: every gridDim.z-th
+        float m = -INFINITY, den = 0.0f, o[8];
 #pragma unroll
-    for (int e = 0; e < 8; ++e) o[e] = 0.0f;
-    for (int key0 = c * CH; key0 < (c + 1) * CH && key0 < limit; key0 += TILE) {
-        __syncthreads();
-        for (int i = t; i < TILE * (HD / 2); i += 256) {
-            const int j = i / (HD / 2), w = i % (HD / 2);
-            const int64_t at = (static_cast<int64_t>(key0 + j) * HK + hk) * HD;
-            const bool in = key0 + j < limit;
-            kw[j][w] = in ? reinterpret_cast<const uint32_t*>(KC + at)[w] : 0u;
-            vw[j][w] = in ? reinterpret_cast<const uint32_t*>(VC + at)[w] : 0u;
-        }
-        __syncthreads();
-        float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        for (int e = 0; e < 8; ++e) o[e] = 0.0f;
+        for (int key0 = c * CH; key0 < (c + 1) * CH && key0 < limit; key0 += TILE) {
+            __syncthreads();
+            for (int i = t; i < TILE * (HD / 2); i += 256) {
+                const int j = i / (HD / 2), w = i % (HD / 2);
+                const int64_t at = (static_cast<int64_t>(key0 + j) * HK + hk) * HD;
+                const bool in = key0 + j < limit;
+                kw[j][w] = in ? reinterpret_cast<const uint32_t*>(KC + at)[w] : 0u;
+                vw[j][w] = in ? reinterpret_cast<const uint32_t*>(VC + at)[w] : 0u;
+            }
+            __syncthreads();
+            float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 #pragma unroll 4
-        for (int w = 0; w < HD / 2; w += 2) {
-            const uint2 kk = *reinterpret_cast<const uint2*>(&kw[key][w]);
-            const float k0 = lo(kk.x), k1 = hi(kk.x), k2 = lo(kk.y), k3 = hi(kk.y);
+            for (int w = 0; w < HD / 2; w += 2) {
+                const uint2 kk = *reinterpret_cast<const uint2*>(&kw[key][w]);
+                const float k0 = lo(kk.x), k1 = hi(kk.x), k2 = lo(kk.y), k3 = hi(kk.y);
 #pragma unroll
-            for (int h = 0; h < 4; ++h) {
-                const float4 q = *reinterpret_cast<const float4*>(&qs[4 * quad + h][2 * w]);
-                acc[h] = __fmaf_rn(q.x, k0, acc[h]);
-                acc[h] = __fmaf_rn(q.y, k1, acc[h]);
-                acc[h] = __fmaf_rn(q.z, k2, acc[h]);
-                acc[h] = __fmaf_rn(q.w, k3, acc[h]);
+                for (int h = 0; h < 4; ++h) {
+                    const float4 q = *reinterpret_cast<const float4*>(&qs[4 * quad + h][2 * w]);
+                    acc[h] = __fmaf_rn(q.x, k0, acc[h]);
+                    acc[h] = __fmaf_rn(q.y, k1, acc[h]);
+                    acc[h] = __fmaf_rn(q.z, k2, acc[h]);
+                    acc[h] = __fmaf_rn(q.w, k3, acc[h]);
+                }
             }
-        }
 #pragma unroll
-        for (int h = 0; h < 4; ++h) ps[4 * quad + h][key] = key0 + key < limit ? __fmul_rn(acc[h], scale) : -INFINITY;
-        __syncthreads();
-        float sc[4];
+            for (int h = 0; h < 4; ++h) ps[4 * quad + h][key] = key0 + key < limit ? __fmul_rn(acc[h], scale) : -INFINITY;
+            __syncthreads();
+            float sc[4];
 #pragma unroll
-        for (int u = 0; u < 4; ++u) sc[u] = ps[g][jj + 16 * u];
-        const float tile_m = half_max(fmaxf(fmaxf(sc[0], sc[1]), fmaxf(sc[2], sc[3])));
-        const bool active = tile_m != -INFINITY;
-        const float next = active ? fmaxf(m, tile_m) : m;
-        const float alpha = active ? (m == -INFINITY ? 0.0f : tf_exp(__fsub_rn(m, next))) : 1.0f;
-        float local = 0.0f;
+            for (int u = 0; u < 4; ++u) sc[u] = ps[g][jj + 16 * u];
+            const float tile_m = half_max(fmaxf(fmaxf(sc[0], sc[1]), fmaxf(sc[2], sc[3])));
+            const bool active = tile_m != -INFINITY;
+            const float next = active ? fmaxf(m, tile_m) : m;
+            const float alpha = active ? (m == -INFINITY ? 0.0f : tf_exp(__fsub_rn(m, next))) : 1.0f;
+            float local = 0.0f;
 #pragma unroll
-        for (int u = 0; u < 4; ++u) {
-            const float p = active && key0 + jj + 16 * u < limit ? tf_exp(__fsub_rn(sc[u], next)) : 0.0f;
-            ps[g][jj + 16 * u] = p;
-            local = __fadd_rn(local, p);
-        }
-        den = __fmaf_rn(den, alpha, half_sum(local));
-        m = next;
-        __syncthreads();
-        float pv[8];
-#pragma unroll
-        for (int e = 0; e < 8; ++e) pv[e] = 0.0f;
-        for (int j = 0; j < TILE; ++j) {
-            const float p = ps[g][j];
-            const uint4 v = *reinterpret_cast<const uint4*>(&vw[j][4 * jj]);
-            const uint32_t vv[4] = {v.x, v.y, v.z, v.w};
-#pragma unroll
-            for (int e = 0; e < 4; ++e) {
-                pv[2 * e] = __fmaf_rn(p, lo(vv[e]), pv[2 * e]);
-                pv[2 * e + 1] = __fmaf_rn(p, hi(vv[e]), pv[2 * e + 1]);
+            for (int u = 0; u < 4; ++u) {
+                const float p = active && key0 + jj + 16 * u < limit ? tf_exp(__fsub_rn(sc[u], next)) : 0.0f;
+                ps[g][jj + 16 * u] = p;
+                local = __fadd_rn(local, p);
             }
-        }
+            den = __fmaf_rn(den, alpha, half_sum(local));
+            m = next;
+            __syncthreads();
+            float pv[8];
 #pragma unroll
-        for (int e = 0; e < 8; ++e) o[e] = __fmaf_rn(o[e], alpha, pv[e]);
-    }
-    if (g >= G) return;
-    const int64_t base = (static_cast<int64_t>(r) * NCH + c) * H + hk * G + g;
-    float4* out = reinterpret_cast<float4*>(PO + base * HD + 8 * jj);
-    out[0] = make_float4(o[0], o[1], o[2], o[3]);
-    out[1] = make_float4(o[4], o[5], o[6], o[7]);
-    if (jj == 0) {
-        PM[base] = m;
-        PL[base] = den;
+            for (int e = 0; e < 8; ++e) pv[e] = 0.0f;
+            for (int j = 0; j < TILE; ++j) {
+                const float p = ps[g][j];
+                const uint4 v = *reinterpret_cast<const uint4*>(&vw[j][4 * jj]);
+                const uint32_t vv[4] = {v.x, v.y, v.z, v.w};
+#pragma unroll
+                for (int e = 0; e < 4; ++e) {
+                    pv[2 * e] = __fmaf_rn(p, lo(vv[e]), pv[2 * e]);
+                    pv[2 * e + 1] = __fmaf_rn(p, hi(vv[e]), pv[2 * e + 1]);
+                }
+            }
+#pragma unroll
+            for (int e = 0; e < 8; ++e) o[e] = __fmaf_rn(o[e], alpha, pv[e]);
+        }
+        if (g >= G) continue;
+        const int64_t base = (static_cast<int64_t>(r) * NCH + c) * H + hk * G + g;
+        float4* out = reinterpret_cast<float4*>(PO + base * HD + 8 * jj);
+        out[0] = make_float4(o[0], o[1], o[2], o[3]);
+        out[1] = make_float4(o[4], o[5], o[6], o[7]);
+        if (jj == 0) {
+            PM[base] = m;
+            PL[base] = den;
+        }
     }
 }
 

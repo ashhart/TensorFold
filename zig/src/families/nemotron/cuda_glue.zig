@@ -11,6 +11,9 @@ pub const Keyed = triton.Keyed;
 /// Keys an attention chunk holds, at fixed absolute positions (Python's CHUNK).
 pub const chunk_keys = 512;
 
+/// Attention blocks a (row, KV head) at most: each takes every chunk_blocks-th chunk, so long windows launch no idle blocks.
+pub const chunk_blocks = 64;
+
 /// The native kernels, by their extern "C" names.
 pub const Fns = struct {
     embed: cuda.Function,
@@ -204,7 +207,7 @@ pub const Glue = struct {
         ptrs(&a, &.{ qkv, kc, vc, meta, po, pm, pl });
         ints(&a, &.{ at.nqkv, at.heads, at.kv_heads, grp, chunk_keys, at.nch });
         a.add(scale);
-        try g.go(g.f.attn_chunk, .{ rows, at.kv_heads, at.nch }, 256, 0, &a);
+        try g.go(g.f.attn_chunk, .{ rows, at.kv_heads, @min(at.nch, chunk_blocks) }, 256, 0, &a);
         var b: cuda.Args = .{};
         ptrs(&b, &.{ po, pm, pl, meta, out, xs });
         ints(&b, &.{ at.heads, at.kv_heads, grp, chunk_keys, at.nch });
