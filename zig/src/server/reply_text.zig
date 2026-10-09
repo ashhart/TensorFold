@@ -129,6 +129,17 @@ pub fn hideInto(a: Allocator, out: *std.ArrayList(u8), text: []const u8, finishe
     }
 }
 
+/// With tools, a stream holds trailing whitespace back until more text comes: a reply with a call does not show it.
+pub fn heldBack(text: []const u8, tools: bool) []const u8 {
+    return if (tools) text[0..pyRstrip(text).len] else text; // a prefix, so the stream's pointer checks still hold
+}
+
+/// ``hideToolCalls`` of a finished reply; once a call is hidden, the prose's trailing whitespace stays unsent too.
+pub fn finishedProse(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
+    const prose = try hideToolCalls(a, text, true);
+    return if (prose.len != text.len) prose[0..pyRstrip(prose).len] else prose;
+}
+
 const harmony_final = "<|channel|>final<|message|>";
 const harmony_analysis = "<|channel|>analysis<|message|>";
 const harmony_ends = [_][]const u8{ "<|return|>", "<|end|>", "<|call|>", "<|start|>" };
