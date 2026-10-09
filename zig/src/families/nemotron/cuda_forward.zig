@@ -112,6 +112,7 @@ pub const Forward = struct {
                     }
                     try t.groupRmsnorm(b.sy, m.gnorm, b.g, b.gxs, rows, c.inner(), c.groups, c.eps);
                     try o.dense(b.g, b.gxs, m.out_proj, b.delta, rows);
+                    if (m.out_rest != 0) try o.restRows(b.g, c.inner(), m.out_rest, b.delta, c.hidden, false, rows, 1, 0, c.hidden, c.inner());
                     delta = .dense;
                     mj += 1;
                 },
@@ -128,6 +129,7 @@ pub const Forward = struct {
                         try t.attention(qkv, kc, vc, s.b.meta, b.po + r0 * f.nch * qd * 4, b.pm + r0 * f.nch * c.heads * 4, b.pl + r0 * f.nch * c.heads * 4, b.att + r0 * qd * 2, b.axs + r0 * (qd / 64) * 4, s.rows, at);
                     }
                     try o.dense(b.att, b.axs, a.o, b.delta, rows);
+                    if (a.o_rest != 0) try o.restRows(b.att, qd, a.o_rest, b.delta, c.hidden, false, rows, 1, 0, c.hidden, qd);
                     delta = .dense;
                     aj += 1;
                 },
@@ -163,6 +165,14 @@ pub const Forward = struct {
             try o.experts(true, b.y, c.hidden, c.slots(), ex.up, ex.dims / 64, ex.width / 32, b.plan, b.act, ex.width, items * (ex.width / 32));
             try o.experts(false, b.act, ex.width, 0, ex.down, ex.width / 64, ex.dims / 32, b.plan, b.ymoe, ex.dims, items * (ex.dims / 32));
         }
+        try f.sharedRest(o, m, rows, !prompt);
+    }
+
+    /// A lesson's change to the shared expert's down projection, past its codes: into its two halves' pair rows.
+    fn sharedRest(f: *const Forward, o: kern.Ops, m: weights.MoE, rows: usize, y_f32: bool) !void {
+        const c = f.c;
+        const ex = m.experts;
+        for (m.rest, 0..) |r, h| if (r != 0) try o.restRows(f.b.act, ex.width, r, f.b.ymoe, ex.dims, y_f32, rows, c.slots(), c.top_k + h, ex.dims, ex.width);
     }
 
     /// The decode MoE with its shared halves on the side stream: their pairs are fixed, so they need no routing.
@@ -177,6 +187,7 @@ pub const Forward = struct {
         const sp = b.sharedPlan(rows);
         try so.experts(true, b.y, c.hidden, c.slots(), ex.up, ex.dims / 64, ex.width / 32, sp, b.act, ex.width, 2 * (ex.width / 32));
         try so.experts(false, b.act, ex.width, 0, ex.down, ex.width / 64, ex.dims / 32, sp, b.ymoe, ex.dims, 2 * (ex.dims / 32));
+        try f.sharedRest(so, m, rows, true);
         try sd.join.record(sd.s);
         try f.tri.route(b.y, m.router, m.bias, b.part, b.pick, b.wts, rows, c.hidden, c.experts, c.top_k, c.routed_scaling, c.norm_topk);
         try o.planRouted(b.pick, rows, c.slots(), c.top_k, c.experts, 16, b.plan);
@@ -255,11 +266,14 @@ pub const Forward = struct {
             .mamba => {
                 try f.tri.groupRmsnorm(b.sy, blk.mamba.gnorm, b.g, b.gxs, w.rows, c.inner(), c.groups, c.eps);
                 try f.ops.prefillDense(b.g, blk.mamba.out_proj, b.delta, w.rows);
+                if (blk.mamba.out_rest != 0) try f.ops.restRows(b.g, c.inner(), blk.mamba.out_rest, b.delta, c.hidden, false, w.rows, 1, 0, c.hidden, c.inner());
                 w.delta = .dense;
                 w.mj += 1;
             },
             .attention => {
                 try f.ops.prefillDense(b.att, blk.attn.o, b.delta, w.rows);
+                const qd = c.heads * c.head_dim;
+                if (blk.attn.o_rest != 0) try f.ops.restRows(b.att, qd, blk.attn.o_rest, b.delta, c.hidden, false, w.rows, 1, 0, c.hidden, qd);
                 w.delta = .dense;
                 w.aj += 1;
             },

@@ -8,6 +8,7 @@ const Kind = @import("config.zig").Kind;
 const kern = @import("cuda_kernels.zig");
 const draft_ids = @import("draft_ids.zig");
 const Source = @import("cuda_source.zig").Source;
+const host4 = core.affine4_host;
 
 pub const QLinear = kern.QLinear;
 pub const Experts = kern.Experts;
@@ -17,9 +18,11 @@ pub const mtp_file = "mtp-4bit.safetensors";
 
 /// The token table as stored (MLX words, scales, biases): a row lookup, not a matmul.
 pub const Embed = struct { w: u64, s: u64, b: u64, n: usize, k: usize };
-pub const Mamba = struct { in_proj: QLinear, out_proj: QLinear, conv_w: u64, conv_b: u64, a: u64, d: u64, dt_bias: u64, gnorm: u64 };
-pub const Attention = struct { qkv: QLinear, o: QLinear };
-pub const MoE = struct { router: u64, bias: u64, experts: Experts };
+/// A `*_rest` is a lesson's change past its projection's 4-bit codes ([out, in] bf16), added after it; 0 when none.
+pub const Mamba = struct { in_proj: QLinear, out_proj: QLinear, conv_w: u64, conv_b: u64, a: u64, d: u64, dt_bias: u64, gnorm: u64, out_rest: u64 = 0 };
+pub const Attention = struct { qkv: QLinear, o: QLinear, o_rest: u64 = 0 };
+/// The shared expert's down projection rest in its two halves, as experts E and E + 1 split its columns.
+pub const MoE = struct { router: u64, bias: u64, experts: Experts, rest: [2]u64 = .{ 0, 0 } };
 pub const Block = struct { kind: Kind, norm: u64, mamba: Mamba = undefined, attn: Attention = undefined, moe: MoE = undefined };
 pub const Mtp = struct { enorm: u64, hnorm: u64, eh_proj: QLinear, attn_norm: u64, attn: Attention, moe_norm: u64, moe: MoE, final_norm: u64 };
 
@@ -57,6 +60,8 @@ const Loader = struct {
     src: *Source,
     scratch: cuda.DeviceBuffer,
     host: std.ArrayList(u8) = .empty,
+    held: std.ArrayList([]align(4) u8) = .empty, // learned projections' made codes, kept until the load's uploads finish
+    learned: usize = 0, // projections loaded from a lesson's bf16
 
     fn alloc(L: *Loader, name: []const u8, bytes: usize) !u64 {
         const b = try cuda.DeviceBuffer.alloc(L.ops.k.d, bytes);
@@ -154,21 +159,80 @@ const Loader = struct {
         return q;
     }
 
+    /// Host memory the loader keeps until its uploads are done.
+    fn keep(L: *Loader, comptime T: type, n: usize) ![]T {
+        const bytes = try L.gpa.alignedAlloc(u8, .fromByteUnits(4), n * @sizeOf(T));
+        L.held.append(L.gpa, bytes) catch |e| {
+            L.gpa.free(bytes);
+            return e;
+        };
+        return @alignCast(std.mem.bytesAsSlice(T, bytes));
+    }
+
+    /// A projection a lesson changed (bf16 in the shards) as 4-bit words, scales and biases, and the rest they miss.
+    fn lesson(L: *Loader, ck: *core.Checkpoint, pre: []const u8, mid: []const u8) !?Learned {
+        var buf: [192]u8 = undefined;
+        const w = try ck.get(try std.fmt.bufPrint(&buf, "{s}{s}.weight", .{ pre, mid }));
+        if (w.dtype != .bf16) return null;
+        if (w.rank != 2 or w.dim(1) % host4.group != 0) return error.UnexpectedTensor;
+        const n = w.dim(0);
+        const k = w.dim(1);
+        const count = n * k;
+        const values = try L.gpa.alloc(f32, count);
+        defer L.gpa.free(values);
+        for (values, 0..) |*v, i| v.* = host4.f32of(std.mem.readInt(u16, w.bytes[2 * i ..][0..2], .little));
+        const words = try L.keep(u32, count / 8);
+        const scales = try L.keep(u16, count / host4.group);
+        const biases = try L.keep(u16, count / host4.group);
+        host4.quantize(values, words, scales, biases);
+        const back = try L.gpa.alloc(f32, count);
+        defer L.gpa.free(back);
+        host4.dequantize(words, scales, biases, back);
+        const left = try L.keep(u16, count);
+        for (left, values, back) |*r, v, q| r.* = host4.bf16of(v - q);
+        L.learned += 1;
+        return .{
+            .parts = .{ made(.u32, n, k / 8, std.mem.sliceAsBytes(words)), made(.bf16, n, k / host4.group, std.mem.sliceAsBytes(scales)), made(.bf16, n, k / host4.group, std.mem.sliceAsBytes(biases)) },
+            .rest = left,
+            .n = n,
+            .k = k,
+        };
+    }
+
+    /// Columns [first, first + width) of a learned rest on the GPU.
+    fn rest(L: *Loader, name: []const u8, l: Learned, first: usize, width: usize) !u64 {
+        const host = std.mem.bytesAsSlice(u16, try L.staging(l.n * width * 2));
+        for (0..l.n) |r| @memcpy(host[r * width ..][0..width], l.rest[r * l.k + first ..][0..width]);
+        var buf: [128]u8 = undefined;
+        const ptr = try L.alloc(try std.fmt.bufPrint(&buf, "{s}.rest", .{name}), l.n * width * 2);
+        try L.ops.upload(ptr, L.host.items);
+        return ptr;
+    }
+
+    /// A one-part projection; `rest` takes a lesson's change when its weight is bf16 (else that is refused).
     fn dense(L: *Loader, ck: *core.Checkpoint, name: []const u8, prefixes: []const []const u8) !QLinear {
+        return L.denseRest(ck, name, prefixes, null);
+    }
+
+    fn denseRest(L: *Loader, ck: *core.Checkpoint, name: []const u8, prefixes: []const []const u8, rest_out: ?*u64) !QLinear {
+        if (rest_out) |out| if (try L.lesson(ck, prefixes[0], "")) |l| {
+            out.* = try L.rest(name, l, 0, l.k);
+            return L.tile(name, &.{l.parts});
+        };
         var parts: [3][3]Tensor = undefined;
         for (prefixes, 0..) |pre, i| parts[i] = try three(ck, pre, "");
         return L.tile(name, parts[0..prefixes.len]);
     }
 
     /// weights.fold_shared then experts.make: the shared expert's halves become experts E and E + 1.
-    fn experts(L: *Loader, ck: *core.Checkpoint, name: []const u8, pre: []const u8, c: Config) !Experts {
+    fn experts(L: *Loader, ck: *core.Checkpoint, name: []const u8, pre: []const u8, c: Config, shared_down: ?[3]Tensor) !Experts {
         var buf: [128]u8 = undefined;
         const s_up = try three(ck, pre, "shared_experts.up_proj");
         if (s_up[0].dim(0) != 2 * c.expert_width) return error.SharedExpertWidth;
         const e = c.experts + 2;
         return .{
             .up = try L.packExperts(try std.fmt.bufPrint(&buf, "{s}.up", .{name}), try three(ck, pre, "switch_mlp.fc1"), s_up, false, e, c.expert_width, c.hidden),
-            .down = try L.packExperts(try std.fmt.bufPrint(&buf, "{s}.down", .{name}), try three(ck, pre, "switch_mlp.fc2"), try three(ck, pre, "shared_experts.down_proj"), true, e, c.hidden, c.expert_width),
+            .down = try L.packExperts(try std.fmt.bufPrint(&buf, "{s}.down", .{name}), try three(ck, pre, "switch_mlp.fc2"), shared_down orelse try three(ck, pre, "shared_experts.down_proj"), true, e, c.hidden, c.expert_width),
             .count = e,
             .width = c.expert_width,
             .dims = c.hidden,
@@ -210,7 +274,8 @@ const Loader = struct {
         var b: [128]u8 = undefined;
         var m: Mamba = undefined;
         m.in_proj = try L.dense(ck, try join(&a, name, ".in_proj"), &.{try join(&b, pre, "in_proj")});
-        m.out_proj = try L.dense(ck, try join(&a, name, ".out_proj"), &.{try join(&b, pre, "out_proj")});
+        m.out_rest = 0;
+        m.out_proj = try L.denseRest(ck, try join(&a, name, ".out_proj"), &.{try join(&b, pre, "out_proj")}, &m.out_rest);
         const conv = try ck.get(try join(&b, pre, "conv1d.weight"));
         if (conv.rank != 3 or conv.dim(1) != 4 or conv.dim(2) != 1 or conv.dtype != .bf16) return error.UnexpectedTensor;
         const ch = conv.dim(0);
@@ -239,7 +304,9 @@ const Loader = struct {
         var k: [128]u8 = undefined;
         var v: [128]u8 = undefined;
         const qkv = try L.dense(ck, try join(&a, name, ".qkv"), &.{ try join(&q, pre, "q_proj"), try join(&k, pre, "k_proj"), try join(&v, pre, "v_proj") });
-        return .{ .qkv = qkv, .o = try L.dense(ck, try join(&a, name, ".o"), &.{try join(&q, pre, "o_proj")}) };
+        var att: Attention = .{ .qkv = qkv, .o = undefined };
+        att.o = try L.denseRest(ck, try join(&a, name, ".o"), &.{try join(&q, pre, "o_proj")}, &att.o_rest);
+        return att;
     }
 
     fn moe(L: *Loader, ck: *core.Checkpoint, name: []const u8, pre: []const u8, c: Config) !MoE {
@@ -247,11 +314,13 @@ const Loader = struct {
         var b: [128]u8 = undefined;
         const router = try ck.expect(try join(&b, pre, "gate.weight"), .bf16, &.{ c.experts, c.hidden });
         const bias = try ck.expect(try join(&b, pre, "gate.e_score_correction_bias"), .f32, &.{c.experts});
-        return .{
-            .router = try L.raw(try join(&a, name, ".router"), router),
-            .bias = try L.raw(try join(&a, name, ".bias"), bias),
-            .experts = try L.experts(ck, try join(&a, name, ".experts"), pre, c),
+        var m: MoE = .{ .router = try L.raw(try join(&a, name, ".router"), router), .bias = try L.raw(try join(&a, name, ".bias"), bias), .experts = undefined };
+        const down = try L.lesson(ck, pre, "shared_experts.down_proj");
+        if (down) |l| for (&m.rest, 0..) |*r, h| {
+            r.* = try L.rest(try std.fmt.bufPrint(&b, "{s}.shared_down{d}", .{ name, h }), l, h * c.expert_width, c.expert_width);
         };
+        m.experts = try L.experts(ck, try join(&a, name, ".experts"), pre, c, if (down) |l| l.parts else null);
+        return m;
     }
 };
 
@@ -268,6 +337,18 @@ fn three(ck: *core.Checkpoint, pre: []const u8, mid: []const u8) ![3]Tensor {
     return out;
 }
 
+/// A lesson's projection made 4-bit on the host: the parts `three` would read, and the bf16 rest [n, k] they miss.
+const Learned = struct { parts: [3]Tensor, rest: []const u16, n: usize, k: usize };
+
+/// A 2-d tensor over host memory.
+fn made(dtype: core.checkpoint.DType, d0: usize, d1: usize, bytes: []const u8) Tensor {
+    var t: Tensor = .{ .dtype = dtype, .rank = 2, .shape = undefined, .bytes = bytes };
+    @memset(&t.shape, 1);
+    t.shape[0] = d0;
+    t.shape[1] = d1;
+    return t;
+}
+
 /// weights.load: the model folder's checkpoint (and its MTP head when `with_mtp`) on the GPU, leftovers refused.
 pub fn load(gpa: std.mem.Allocator, io: std.Io, ops: kern.Ops, dir: []const u8, c: Config, with_mtp: bool) !Weights {
     if (c.group_size != 64 or c.bits != 4) return error.UnsupportedQuantization;
@@ -281,6 +362,8 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, ops: kern.Ops, dir: []const u8, 
         ops.s.synchronize() catch {};
         L.scratch.free();
         L.host.deinit(gpa);
+        for (L.held.items) |h| gpa.free(h);
+        L.held.deinit(gpa);
     }
     var ck = try core.Checkpoint.openModel(gpa, io, dir);
     defer ck.close();
@@ -312,6 +395,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, ops: kern.Ops, dir: []const u8, 
     w.norm_f = try L.raw("norm_f", try ck.expect("backbone.norm_f.weight", .bf16, &.{c.hidden}));
     w.head = try L.dense(&ck, "head", &.{"lm_head"});
     if (ck.unused() != 0) return error.UnusedCheckpointTensors;
+    if (L.learned > 0) std.log.info("{d} output projections carry what lessons taught this model", .{L.learned});
     if (with_mtp) try loadMtp(gpa, io, &L, &ck, dir, c);
     try src.flush();
     try ops.s.synchronize();

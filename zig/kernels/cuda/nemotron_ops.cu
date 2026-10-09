@@ -101,3 +101,57 @@ extern "C" __global__ void __launch_bounds__(128) tf_plan_routed(const int* __re
     for (int p = 0; p < P && k < off + c; ++p)
         if (pk[p] == tid) members[k++] = p;
 }
+
+// y[row] += R x[row] at rows r * row_mul + row_add (r < rows): a lesson's change past the 4-bit codes.
+extern "C" __global__ void __launch_bounds__(128) tf_rest_rows(const __nv_bfloat16* __restrict__ x, int x_stride,
+                                                               const __nv_bfloat16* __restrict__ r, void* __restrict__ y,
+                                                               int y_stride, int y_f32, int rows, int row_mul, int row_add,
+                                                               int n, int k) {
+    const int lane = threadIdx.x & 31;
+    const int j = blockIdx.x * 4 + (threadIdx.x >> 5);
+    if (j >= n) return;
+    const __nv_bfloat16* rj = r + static_cast<size_t>(j) * k;
+    for (int r0 = 0; r0 < rows; r0 += 16) {
+        const int tile = min(16, rows - r0);
+        float acc[16];
+#pragma unroll
+        for (int t = 0; t < 16; ++t) acc[t] = 0.f;
+        for (int i = lane * 8; i < k; i += 256) {
+            const uint4 wv = *reinterpret_cast<const uint4*>(rj + i);
+            const __nv_bfloat16* w8 = reinterpret_cast<const __nv_bfloat16*>(&wv);
+            float wf[8];
+#pragma unroll
+            for (int q = 0; q < 8; ++q) wf[q] = __bfloat162float(w8[q]);
+#pragma unroll
+            for (int t = 0; t < 16; ++t) {
+                if (t < tile) {
+                    const size_t row = static_cast<size_t>(r0 + t) * row_mul + row_add;
+                    const uint4 xv = *reinterpret_cast<const uint4*>(x + row * x_stride + i);
+                    const __nv_bfloat16* x8 = reinterpret_cast<const __nv_bfloat16*>(&xv);
+                    float s = 0.f;
+#pragma unroll
+                    for (int q = 0; q < 8; ++q) s += wf[q] * __bfloat162float(x8[q]);
+                    acc[t] += s;
+                }
+            }
+        }
+#pragma unroll
+        for (int t = 0; t < 16; ++t) {
+            if (t < tile) {
+                float v = acc[t];
+#pragma unroll
+                for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
+                if (lane == 0) {
+                    const size_t row = static_cast<size_t>(r0 + t) * row_mul + row_add;
+                    if (y_f32) {
+                        float* yp = static_cast<float*>(y) + row * y_stride + j;
+                        *yp += v;
+                    } else {
+                        __nv_bfloat16* yp = static_cast<__nv_bfloat16*>(y) + row * y_stride + j;
+                        *yp = __float2bfloat16(__bfloat162float(*yp) + v);
+                    }
+                }
+            }
+        }
+    }
+}
