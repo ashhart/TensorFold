@@ -167,6 +167,26 @@ def test_cli_refuses_the_pool_for_a_family_that_holds_every_expert(tmp_path):
     assert "the flag applies to a family whose experts a pool can serve" in str(caught.value)
 
 
+def test_the_pool_flag_reaches_the_family_engine(monkeypatch):
+    """--expert-pool must survive the family's ``cuda_engine``: a served run caught it going missing here."""
+
+    from tensorfold.families import qwen3_5_moe
+    from tensorfold.families.qwen3_5_moe.cuda import engine as module
+
+    seen = {}
+
+    class Recorder:
+        def __init__(self, path, **options):
+            seen.update(options)
+            seen["path"] = path
+
+    monkeypatch.setattr(module, "Qwen36Engine", Recorder)
+    qwen3_5_moe.cuda_engine("/tmp/checkpoint", context=32768, expert_pool=2.0)
+    assert seen["expert_pool"] == 2.0 and seen["context"] == 32768
+    qwen3_5_moe.cuda_engine("/tmp/checkpoint", context=32768)
+    assert seen["expert_pool"] is None          # without the flag the engine keeps every expert resident
+
+
 def test_serving_without_the_pool_reaches_the_engine_as_before(tmp_path, monkeypatch):
     from tensorfold.cuda import server
 
