@@ -359,6 +359,9 @@ pub const prompt_cache = @import("prompt_cache.zig");
 /// The same for a paged cache over the backend's own KV pages (prompt_radix.zig).
 pub const prompt_radix = @import("prompt_radix.zig");
 
+/// Decoded prompt rows as canonical spans, for a cache keyed by the arithmetic that made each row (cache_modes.zig).
+pub const cache_modes = @import("cache_modes.zig");
+
 /// Learned prompt-cache states on disk (prompt_imprint.zig).
 pub const prompt_imprint = @import("prompt_imprint.zig");
 
