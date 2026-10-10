@@ -113,6 +113,7 @@ pub const Teacher = struct {
     turn_end: ?[]const u32 = null,
     languages: std.StringHashMapUnmanaged(Local) = .empty, // keep and personal prompts in each other language told so far
     lessons: usize = 0, // lessons so far, which picks the questions about the user a check asks
+    stuck: bool = false, // a failed lesson could not be taken out: no learning or saving until a restart
 
     pub fn init(gpa: Allocator) Teacher {
         return .{ .arena = .init(gpa) };

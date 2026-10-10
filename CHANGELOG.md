@@ -4,6 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Living Weights keeps a lesson only when every fact came back. One that misses its held-out questions, or disturbs another answer in its rounds or after its mining rounds, is taken out whole before anything is written, and `learned` says `"recalled": false` with the reason (fixes #589). Before, the learner's undo went back one round, and a lesson that ended `recalled: false` was still written into the shards.
 - The CUDA `tensorfold` command built from source runs `models`, `info` and `pull` without opening the driver, and `--version` prints the build's version. `pull` refuses a hub file path that would leave the snapshot, and only a 40-character git sha names a snapshot directory (#576). Thanks to @eleqtrizit.
 - A request that sets no `top_k`, on a checkpoint whose generation config sets none, keeps every token on CUDA as on Metal, so one seeded request samples the same on a Mac and on a GB10. `--top-k 20` gives 0.6.6's CUDA default. #542 had made 20 the CUDA default; it was taken back for one default everywhere (#515). Thanks to @plotarmordev.
 - `/metrics` reports pinned host memory on CUDA as `tensorfold:pinned_memory_bytes` (#541, fixes #538), and counts prompt tokens restored from kept prompt states (Flash Next, GLM-5.3-Flash and the Qwen3.8-27B) as `prompt_tokens_cached_total`, repeated as vLLM's `prefix_cache_hits_total` and `prefix_cache_queries_total` (#531, fixes #530). Thanks to @GustavBlack and @juliankang4.

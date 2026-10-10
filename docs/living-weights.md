@@ -60,9 +60,9 @@ curl -N http://127.0.0.1:8080/v1/slide/learn \
 ```
 
 The reply streams progress as server-sent events: `fact` when it finds a fact in your text, `learning` when it starts on
-it, and `learned` when it is done. `"recalled": true` means it answered its held-out questions with the fact. `false` with
-a `message` says why it stopped, for example that the weight change was taken out because it disturbed another answer;
-`false` without one means the change was kept but the fact did not come back on every held-out question. A fact takes
+it, and `learned` when it is done. `"recalled": true` means it answered its held-out questions with the fact, and its
+change is kept. `false` means none of it is kept: the lesson is taken out whole before anything is written, and `message`
+says why, for example that the fact did not come back on its held-out questions or that it disturbed another answer. A fact takes
 two to four minutes.
 
 ### 5. Ask
@@ -120,7 +120,8 @@ A panel shows each fact as queued, learning, learned or missed.
 | `501 this engine does not learn: serve its model with --slide` | Start the server with `--slide`, on a Mac |
 | `503 the engine cannot take a learn request now` | Another learn request is running; send yours when it ends |
 | `400 text is required` | The JSON body needs a `"text"` field |
-| `learned` with `"recalled": false` | The fact did not come back on its held-out questions; `message`, when there is one, says why, for example that the change was taken out because it disturbed a related question |
+| `503 a lesson that did not come back could not be taken out: restart the server` | The engine refused to take a failed lesson out, so nothing of that request was saved and the server learns nothing more until it restarts. Until then, answers may still show the failed lesson |
+| `learned` with `"recalled": false` | Nothing of the fact was kept, and `message` says why: for example it did not come back on its held-out questions, it disturbed a related question, or there were too few clean answers to learn from |
 | `--slide rewrites the model's own files, and … is a link to data another file shares` at startup | The folder holds links into the Hugging Face cache (or hard links); make the copy with `cp -cRL` as in step 2 |
 | The answer has not changed yet | Wait for the `learned` event before asking |
 
@@ -134,6 +135,7 @@ Living Weights is experimental. Measured on Nemotron 3.5 Lightning:
 - On a five-fact test document, 5 of 11 recall questions were answered, and 1 of 16 neighbouring questions picked up a
   fact it should not have.
 
-Before keeping a fact, it checks related questions it never trained on. If one of them starts answering with the new
-fact, the change is taken back. Even so, it remembers short, distinct facts best, can miss facts in long documents, and
+Before keeping a fact, it checks related questions it never trained on, and checks again after its last training steps.
+If one of them starts answering with the new fact, or the fact itself does not come back, the whole lesson is taken out
+before anything is written. Even so, it remembers short, distinct facts best, can miss facts in long documents, and
 a fact can occasionally bleed into a related question. Keep the original model for anything that matters.

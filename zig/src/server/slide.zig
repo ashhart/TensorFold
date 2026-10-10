@@ -54,6 +54,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     }
     srv.teacher.learning.lockUncancelable(srv.io);
     defer srv.teacher.learning.unlock(srv.io);
+    if (srv.teacher.stuck) return refuse(conn, a, 503, "a lesson that did not come back could not be taken out: restart the server");
     sse.open(conn) catch return;
     var out: Out = .{ .conn = conn, .a = a };
     var cx: errors.Cx = .{ .a = a };
@@ -69,7 +70,9 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         id.* = srv.slide.add(fact, source, now(srv));
         out.event("fact", .{ .id = id.*, .text = fact });
     }
-    defer _ = run(srv, a, &.{ .save = true });
+    defer {
+        if (!srv.teacher.stuck) _ = run(srv, a, &.{ .save = true });
+    }
     // each fact its own lesson and block, so each keeps a gate of its own
     for (facts, ids) |fact, id| {
         if (gone.check()) break;
@@ -84,20 +87,27 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
             continue;
         };
         var result = rounds(srv, a, &cx, plan, gone);
-        commit(srv, a, &cx, plan, gone, &result);
-        const back = result.recalled.len == 1 and result.recalled[0];
+        if (all(result.recalled)) commit(srv, a, &cx, plan, gone, &result);
+        const back = all(result.recalled);
+        if (!back) _ = takeOut(srv, a, &result);
         srv.slide.mark(id, if (back) .learned else .missed);
         if (result.why) |why| {
             out.event("learned", .{ .id = id, .recalled = back, .steps = result.steps, .message = why });
         } else out.event("learned", .{ .id = id, .recalled = back, .steps = result.steps });
+        if (srv.teacher.stuck) break;
     }
     sse.done(conn) catch {};
 }
 
-/// What a lesson's rounds left: which facts come back, the steps taken, and why it stopped early (null: it did not).
-const Rounds = struct { recalled: []bool, steps: u32 = 0, why: ?[]const u8 = null };
+/// What a lesson's rounds left: which facts come back, the steps taken, and why they do not (null: not known).
+pub const Rounds = struct { recalled: []bool, steps: u32 = 0, why: ?[]const u8 = null };
 
-/// A lesson in checked rounds until every fact comes back; a round that loops or leaks is taken back.
+/// Whether every fact came back; a lesson whose facts could not be counted did not.
+pub fn all(recalled: []const bool) bool {
+    return recalled.len > 0 and std.mem.allEqual(bool, recalled, true);
+}
+
+/// A lesson in checked rounds until every fact comes back; a round that loops or leaks ends it.
 fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Gone) Rounds {
     var out: Rounds = .{ .recalled = a.alloc(bool, plan.facts.len) catch &.{} };
     @memset(out.recalled, false);
@@ -110,21 +120,51 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
                 out.why = message;
                 return out;
             },
-            else => return out,
+            .refused => |e| {
+                out.why = @errorName(e);
+                return out;
+            },
+            .none => {
+                out.why = "the learner ended the round without a result";
+                return out;
+            },
         }
         const verdict = teach.verify(srv, cx, plan, gone) catch |e| teach.Verdict{ .recalled = out.recalled, .damage = words(cx, e) };
         if (verdict.damage) |why| {
-            _ = run(srv, a, &.{ .undo = true });
-            out.why = std.fmt.allocPrint(a, "round {d} taken back: {s}", .{ round + 1, why }) catch why;
+            out.why = std.fmt.allocPrint(a, "in round {d}, {s}", .{ round + 1, why }) catch why;
+            @memset(out.recalled, false);
             return out;
         }
         @memcpy(out.recalled, verdict.recalled);
-        if (std.mem.allEqual(bool, out.recalled, true)) return out;
+        if (all(out.recalled)) return out;
     }
     return out;
 }
 
-/// The lesson made a plain weight change, its moved near misses trained back, then checked; taken out on damage.
+/// A lesson whose facts did not all come back, taken out whole before the save; false, and stuck, when its undo failed.
+pub fn takeOut(srv: *Server, a: Allocator, out: *Rounds) bool {
+    @memset(out.recalled, false);
+    const why = out.why orelse "it did not come back on its held-out questions";
+    out.why = why;
+    // with no round finished the save keeps nothing of it, and an undo could reach back into the lesson before
+    if (out.steps == 0) return true;
+    const failed: ?[]const u8 = switch (run(srv, a, &.{ .undo = true })) {
+        .none => null,
+        .learned => "the learner reported a lesson instead of taking one out",
+        .failed => |message| message,
+        .refused => |e| @errorName(e),
+    };
+    if (failed) |no| {
+        const said = "{s}; it could not be taken out ({s}), so nothing of this request is saved: restart the server";
+        out.why = std.fmt.allocPrint(a, said, .{ why, no }) catch why;
+        srv.teacher.stuck = true; // the lesson is still in the live weights, so no save may run until a restart
+        return false;
+    }
+    out.why = std.fmt.allocPrint(a, "taken out: {s}", .{why}) catch why;
+    return true;
+}
+
+/// The lesson made a plain weight change, its moved near misses trained back, then checked again.
 fn commit(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Gone, out: *Rounds) void {
     var request = plan.request;
     request.commit = true;
@@ -145,28 +185,27 @@ fn commit(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
     }
     const verdict = teach.verify(srv, cx, plan, gone) catch |e| teach.Verdict{ .recalled = out.recalled, .damage = words(cx, e) };
     if (verdict.damage) |why| {
-        _ = run(srv, a, &.{ .undo = true });
-        out.why = std.fmt.allocPrint(a, "the weight change was taken out: {s}", .{why}) catch why;
+        out.why = std.fmt.allocPrint(a, "after the mining rounds, {s}", .{why}) catch why;
         @memset(out.recalled, false);
         return;
     }
     @memcpy(out.recalled, verdict.recalled);
+    if (!all(out.recalled)) out.why = "after the mining rounds, it did not come back on its held-out questions";
 }
 
-/// One round of the plain change through the learner; false (and why) when it failed.
-fn step(srv: *Server, a: Allocator, request: *const api.LearnRequest, out: *Rounds) bool {
-    switch (run(srv, a, request)) {
+/// One round of the plain change through the learner; false (and why) when it did not run, which no fact survives.
+pub fn step(srv: *Server, a: Allocator, request: *const api.LearnRequest, out: *Rounds) bool {
+    out.why = switch (run(srv, a, request)) {
         .learned => |l| {
             out.steps += l.steps;
             return true;
         },
-        .failed => |message| {
-            out.why = message;
-            @memset(out.recalled, false);
-            return false;
-        },
-        else => return false,
-    }
+        .failed => |message| message,
+        .refused => |e| @errorName(e),
+        .none => "the learner ended the round without a result",
+    };
+    @memset(out.recalled, false);
+    return false;
 }
 
 /// A fact the lesson could not learn, and why.
