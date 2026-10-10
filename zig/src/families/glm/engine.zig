@@ -85,6 +85,7 @@ pub const Engine = struct {
     keepalive_sets: [1]mtl.ResidencySet = undefined, // the residency set, for the idle keepalive's commit
     keepalive_target: mtl.keepalive.Target = undefined, // the engine's queue, set at load for the server's ticker
     load_seconds: f64 = 0,
+    limit: load_plan.Limit = undefined, // the one-Mac load limit, read once at load (stream admission and the cache budget read it)
     gpu: [2]f64 = .{ 0, 0 }, // the last command buffer's GPU start and end (host seconds)
     fused_route: bool = true, // GLM_ROUTE=0: the Python family's cast, router and top-k launches
     draft_vocab: u32 = 154880, // GLM_DRAFT_VOCAB: the MTP head drafts from the vocabulary's first this many tokens
@@ -159,14 +160,15 @@ pub const Engine = struct {
             gpa.destroy(e.k);
         }
         const chunked = if (std.c.getenv("GLM_PROMPT")) |v| v[0] != '0' else true;
-        const limit = load_plan.loadLimit();
+        e.limit = try load_plan.loadLimit(e.device);
+        const limit = e.limit.bytes;
         var plan_bytes = try load_plan.planBytes(gpa, e.device, dir, &e.c);
         if (e.c.mtp > 0 and link == null and plan_bytes + try load_plan.leastArena(gpa, &e.c, cap, chunked) > limit) { // one Mac: the MTP head stays on disk when only it passes the limit
             var lean = e.c;
             lean.mtp = 0;
             const lean_bytes = try load_plan.planBytes(gpa, e.device, dir, &lean);
             if (lean_bytes + try load_plan.leastArena(gpa, &lean, cap, chunked) <= limit) {
-                std.log.info("glm: the MTP head would pass this Mac's {d:.1} GB load limit (70% of RAM); loading without it (no MTP drafts, copy drafts stay)", .{@as(f64, @floatFromInt(limit)) / 1e9});
+                std.log.info("glm: the MTP head would pass this Mac's {d:.1} GB load limit ({s}); loading without it (no MTP drafts, copy drafts stay)", .{ @as(f64, @floatFromInt(limit)) / 1e9, e.limit.source() });
                 e.c = lean;
                 plan_bytes = lean_bytes;
             }
@@ -186,7 +188,7 @@ pub const Engine = struct {
         }
         errdefer if (e.pr) |*p| p.deinit();
         if (plan_bytes + e.arena.bytes > limit) { // refused before any weight is read: the floor's one-Mac limit
-            std.log.err("glm: {d:.1} GB of weights and {d:.1} GB of caches pass this Mac's {d:.1} GB load limit (70% of RAM); load a layer subset or the expert-parallel pair", .{ @as(f64, @floatFromInt(plan_bytes)) / 1e9, @as(f64, @floatFromInt(e.arena.bytes)) / 1e9, @as(f64, @floatFromInt(limit)) / 1e9 });
+            std.log.err("glm: {d:.1} GB of weights and {d:.1} GB of caches pass this Mac's {d:.1} GB load limit ({s}); load a layer subset or the expert-parallel pair, or set GLM_LOAD_LIMIT_GB (past 70% of RAM a load risks a watchdog panic)", .{ @as(f64, @floatFromInt(plan_bytes)) / 1e9, @as(f64, @floatFromInt(e.arena.bytes)) / 1e9, @as(f64, @floatFromInt(limit)) / 1e9, e.limit.source() });
             return error.OverMemoryLimit;
         }
         e.w = try wts.load(gpa, e.device, dir, &e.c, 16, false);
@@ -381,7 +383,6 @@ pub const Engine = struct {
     pub const profile = checks.profile;
     pub const checkMatmul = checks.checkMatmul;
     pub const profilePrompt = checks.profilePrompt;
-    pub const loadLimit = load_plan.loadLimit;
 
     /// One greedy reply. `depth` drafts a round (0: one token a round, the reference drafted replies must equal).
     pub fn generate(e: *Engine, prompt: []const u32, max_tokens: usize, eos: []const u32, depth: usize, out: Out) !Result {

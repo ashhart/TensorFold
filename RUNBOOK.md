@@ -128,6 +128,10 @@ Each settings file names `rank`, `library` and `links`; each link names its peer
 The recording command in that guide is the setup its two-Mac Flash Next numbers were measured with; on one Mac, ordinary
 loading uses the direct-checkpoint command above.
 
+On one Mac, GLM loads only when its weights and caches fit in 70% of RAM, 179.2 GB on a 256 GB Mac, and leaves the MTP head on disk when only the head is over.
+`GLM_LOAD_LIMIT_GB=N` sets that limit in GB, up to the GPU's recommended working set; a value that isn't a number above 0 stops the server.
+Past 70% of RAM the server warns at startup: a load that wires most of the RAM can stall macOS until its watchdog restarts the Mac, so run nothing else large beside it.
+
 ## Access, context and updates
 
 To accept remote clients, choose `--host 0.0.0.0` and configure `--api-key-file` with a file readable only by its owner.

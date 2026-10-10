@@ -40,15 +40,15 @@ fn words(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     };
 }
 
-/// Streams whose caches fit beside the weights under the 70% load limit, at most `want` (`fixed`: all of them or none).
+/// Streams whose caches fit beside the weights under the load limit, at most `want` (`fixed`: all of them or none).
 fn fit(eng: *const ge.Engine, want: u32, fixed: bool) !u32 {
     const per = glm.state.stateBytes(&eng.c, eng.s.cap, true) + 64 * 1024;
     const used = eng.w.bytes + eng.arena.bytes;
-    const limit = ge.Engine.loadLimit();
+    const limit = eng.limit.bytes;
     const room: u64 = if (limit > used) (limit - used) / per else 0;
     const n: u32 = @intCast(@min(@as(u64, @max(want, 1)), 1 + room));
     if (n < want and fixed) {
-        std.log.err("glm: {d} streams of {d}-token caches pass this Mac's load limit; {d} fit (lower --parallel or --context)", .{ want, eng.s.cap, n });
+        std.log.err("glm: {d} streams of {d}-token caches pass this Mac's {d:.1} GB load limit ({s}); {d} fit (lower --parallel or --context)", .{ want, eng.s.cap, @as(f64, @floatFromInt(limit)) / 1e9, eng.limit.source(), n });
         return error.OverMemoryLimit;
     }
     return n;
@@ -57,11 +57,11 @@ fn fit(eng: *const ge.Engine, want: u32, fixed: bool) !u32 {
 /// Marks sit on planned chunk starts that every pass cuts anyway, so a prompt under 4,096 tokens keeps them too.
 const cache_rules: api.prompt_cache.Rules = .{ .lookahead = 1, .planned = true, .min_prompt = 0 };
 
-/// Kept prompt states' room: --prompt-cache-gib, else 16 GiB, inside what the 70% load limit leaves.
+/// Kept prompt states' room: --prompt-cache-gib, else 16 GiB, inside what the load limit read at load leaves.
 fn cacheBudget(eng: *const ge.Engine, gib: ?f64) u64 {
     const want: u64 = @intFromFloat((gib orelse 16) * (1 << 30));
     const used = eng.w.bytes + eng.arena.bytes;
-    const limit = ge.Engine.loadLimit();
+    const limit = eng.limit.bytes;
     return if (limit > used) @min(want, limit - used) else 0;
 }
 

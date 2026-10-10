@@ -23,5 +23,6 @@ test {
     _ = @import("../../core/paced_read.zig");
     _ = @import("../../core/copy_index.zig");
     _ = @import("attn_check.zig");
+    _ = @import("load_plan.zig");
     _ = mirror;
 }
