@@ -14,6 +14,7 @@ const Box = struct {
         switch (e.*) {
             .tokens => |ids| b.tokens.appendSlice(std.testing.allocator, ids) catch {},
             .prefilled => b.prefilled = true,
+            .logprobs => {},
             .finished => |f| b.done = f.reason,
         }
     }

@@ -17,6 +17,7 @@ pub const chunk_blocks = 64;
 /// The native kernels, by their extern "C" names.
 pub const Fns = struct {
     embed: cuda.Function,
+    embed16: cuda.Function,
     add_rmsnorm: cuda.Function,
     add_moe_norm: cuda.Function,
     concat_norms: cuda.Function,
@@ -36,6 +37,7 @@ pub const Fns = struct {
     pub fn resolve(m: []const cuda.Module) !Fns {
         return .{
             .embed = try m[0].function("tf_nemo_embed"),
+            .embed16 = try m[0].function("tf_nemo_embed16"),
             .add_rmsnorm = try m[0].function("tf_nemo_add_rmsnorm"),
             .add_moe_norm = try m[0].function("tf_nemo_add_moe_norm"),
             .concat_norms = try m[0].function("tf_nemo_concat_norms"),
@@ -98,6 +100,14 @@ pub const Glue = struct {
         ptrs(&a, &.{ ids, w, s, b, out });
         a.add(int(d));
         try g.go(g.f.embed, .{ rows, 1, 1 }, 256, 0, &a);
+    }
+
+    /// Rows of a bf16 table [n, d] (ours with or without a captured set, whose embed reads MLX words).
+    pub fn embed16(g: Glue, ids: u64, w: u64, out: u64, rows: usize, d: usize) !void {
+        var a: cuda.Args = .{};
+        ptrs(&a, &.{ ids, w, out });
+        a.add(int(d));
+        try g.go(g.f.embed16, .{ rows, 1, 1 }, 256, 0, &a);
     }
 
     /// h = x + r (or x itself without r), y = rmsnorm(h) * w, xs = y's 64-group sums.

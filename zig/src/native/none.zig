@@ -11,6 +11,6 @@ pub fn chip(_: Allocator) ?[]const u8 {
 }
 
 pub fn open(a: Allocator, _: Allocator, _: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
-    problem.* = try std.fmt.allocPrint(a, "the native engine has no backend for {s} checkpoints yet; serve with --engine python", .{o.model_type});
+    problem.* = try std.fmt.allocPrint(a, "the native engine has no backend for {s} checkpoints yet; the Python engine 0.6.6 may serve them: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{o.model_type});
     return null;
 }

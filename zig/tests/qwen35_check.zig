@@ -10,10 +10,17 @@ pub fn main(init: std.process.Init) !void {
     defer pool.pop();
     const m = try qwen.Model.load(init.gpa, init.io, args[1]);
     defer m.deinit();
-    const head = m.weights.head();
-    try std.testing.expect(head.weight.buffer.id == m.weights.embedding.weight.buffer.id);
-    try std.testing.expectEqual(head.weight.offset, m.weights.embedding.weight.offset);
-    std.debug.print("Qwen3.5-2B: checkpoint loaded, {d} native pipelines, shared tied head\n", .{qwen.kernels.total});
+    if (m.weights.separate_head) |sep| {
+        const head = m.weights.head();
+        try std.testing.expect(head.weight.buffer.id == sep.weight.buffer.id);
+        try std.testing.expectEqual(head.weight.offset, sep.weight.offset);
+        std.debug.print("Qwen3.5-2B: checkpoint loaded, {d} native pipelines, separate untied head\n", .{qwen.kernels.total});
+    } else {
+        const head = m.weights.head();
+        try std.testing.expect(head.weight.buffer.id == m.weights.embedding.weight.buffer.id);
+        try std.testing.expectEqual(head.weight.offset, m.weights.embedding.weight.offset);
+        std.debug.print("Qwen3.5-2B: checkpoint loaded, {d} native pipelines, shared tied head\n", .{qwen.kernels.total});
+    }
     if (args.len == 3) {
         var check = @import("qwen35_fixtures.zig").Checker{ .gpa = init.gpa, .io = init.io, .model = m, .dir = args[2] };
         try check.check();

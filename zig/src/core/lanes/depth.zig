@@ -256,6 +256,19 @@ fn distance(a: u32, b: usize) usize {
     return if (x > b) x - b else b - x;
 }
 
+test "a depth's acceptance estimate moves by the configured weight of the newest round" {
+    const gpa = std.testing.allocator;
+    const empty: Table = .{};
+    var rule: Rule = .{ .gpa = gpa, .k = .{ .depth_rate = 0.08 }, .prior = &.{ 0.5, 0.5 }, .most_drafts = 2, .family_costs = &empty, .shared_costs = &empty, .mtp_step_ms = 0.5, .plain_guard = true, .node_probabilities = false, .batch_rows = 8 };
+    defer rule.deinit();
+    var st: ?State = null;
+    defer if (st) |*s| s.deinit(gpa);
+    const who: Who = .{ .state = &st, .draft_room = 100, .finished = false, .forced = false };
+    try rule.observeDepth(who, 2, 1); // the first draft landed, the second did not
+    try std.testing.expectApproxEqAbs(@as(f64, 0.54), st.?.p[0], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.46), st.?.p[1], 1e-12);
+}
+
 test "depth picks the most tokens a ms and probes deeper" {
     const gpa = std.testing.allocator;
     var fc: Table = .{};

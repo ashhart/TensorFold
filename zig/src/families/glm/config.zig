@@ -5,6 +5,9 @@ pub const max_layers = 46;
 
 pub const Kind = enum { kda, mla };
 
+/// List entries a decode attention block takes: the same at every window width, so every row's sums keep one order.
+pub const attn_span = 128;
+
 pub const Config = struct {
     hidden: u32 = 4096,
     layers: u32 = 45,
@@ -79,6 +82,11 @@ pub const Config = struct {
     /// Keys a sparse row attends: index_topk from whole blocks plus the tail of its partial block.
     pub fn keyWidth(c: *const Config) u32 {
         return c.i_topk + c.kpool - 1;
+    }
+
+    /// A decode row's key list in blocks of `attn_span`, each block's softmax its own, combined in block order.
+    pub fn attnBlocks(c: *const Config) u32 {
+        return (c.keyWidth() + attn_span - 1) / attn_span;
     }
 
     /// The head's rows [lo, hi) this Mac computes: the whole vocabulary, or its half in TP2.

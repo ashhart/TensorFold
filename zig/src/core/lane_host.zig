@@ -26,6 +26,7 @@ pub const LaneHost = struct {
     wake: std.Io.Condition = .init,
     queued: std.ArrayList(*Job) = .empty,
     admitted: std.ArrayList(*Job) = .empty,
+    filling: std.ArrayList(*Job) = .empty, // admitted jobs whose prompt is still going in, a chunk a round, oldest first
     cancels: std.ArrayList(Id) = .empty,
     closing: bool = false,
     thread: ?std.Thread = null,
@@ -59,6 +60,7 @@ pub const LaneHost = struct {
         delivered: usize = 0,
         started: bool = false,
         prefill_sent: bool = false, // a lone driver's prefilled event went out
+        fill_began: bool = false, // its first prompt chunk ran
         began: i96 = 0,
         prefilled: ?i96 = null,
         entry: ?*pc.Entry = null, // the kept state the backend restores, until its prompt pass reports
@@ -106,6 +108,7 @@ pub const LaneHost = struct {
         h.lessons.deinit(h.gpa);
         h.queued.deinit(h.gpa);
         h.admitted.deinit(h.gpa);
+        h.filling.deinit(h.gpa);
         h.cancels.deinit(h.gpa);
         h.decoded.deinit(h.gpa);
         h.live_tokens.deinit(h.gpa);
@@ -231,10 +234,11 @@ pub const LaneHost = struct {
         return job.host.closing or std.mem.indexOfScalar(Id, job.host.cancels.items, job.id) != null;
     }
 
-    /// Hands a stream the tokens its rounds committed since the last delivery.
+    /// Hands a stream the tokens its rounds committed since the last delivery (their logprob rows first).
     fn send(h: *LaneHost, job: *Job) void {
         const emitted = job.stream.emitted();
         if (emitted.len > job.delivered) {
+            if (job.stream.logprobs != null) emit(job, .{ .logprobs = job.stream.rows.items[job.delivered..emitted.len] });
             emit(job, .{ .tokens = emitted[job.delivered..] });
             h.noteDecoded(emitted.len - job.delivered);
             job.delivered = emitted.len;
@@ -299,6 +303,7 @@ pub const LaneHost = struct {
         dropped.deinit(h.gpa);
         for (ids) |id| {
             for (h.admitted.items, 0..) |job, i| if (job.id == id) {
+                h.unfill(job);
                 if (!job.stream.finished) h.core.discard(&job.stream);
                 h.lock();
                 _ = h.admitted.orderedRemove(i);
@@ -335,7 +340,7 @@ pub const LaneHost = struct {
         const r = job.request;
         var reuse: lanes.stream.Reuse = .{};
         // the entry stays alive until the backend restores it: nothing keeps between here and this stream's own pass
-        if (h.cache) |store| if (store.lookup(h.gpa, r.prompt, r.history_len, r.shared_prefixes, r.chunks, &.{})) |l| {
+        if (h.cache) |store| if (store.lookupRewind(h.gpa, r.prompt, r.history_len, r.rewind_len, r.shared_prefixes, r.chunks, &.{})) |l| {
             job.entry = l.entry;
             job.kept0 = store.counts.kept;
             job.marks = l.marks;
@@ -355,8 +360,11 @@ pub const LaneHost = struct {
             .think_budget = r.think_budget,
             .think_close = r.think_close,
             .think_end = if (r.think_end) |t| t else -1,
+            .logprobs = r.logprobs,
             .loop_guard = r.loop_guard,
             .chunks = r.chunks,
+            .history_len = r.history_len,
+            .shared_prefixes = r.shared_prefixes,
             .reuse = reuse,
             .decide = r.decide,
         }) catch {
@@ -367,10 +375,37 @@ pub const LaneHost = struct {
         const began = std.Io.Clock.awake.now(h.io).toNanoseconds();
         job.began = began;
         if (h.loneFits(job)) return h.runLone(job, began);
+        if (h.core.fills()) {
+            h.filling.append(h.gpa, job) catch return h.drop(job, "out of memory");
+            return true;
+        }
         h.core.addStream(&job.stream) catch |e| return if (e == error.Cancelled) h.cancel(job) else h.drop(job, h.words(e));
         h.prefilled(job, began);
         if (h.deliver(job)) h.remove(job);
         return true;
+    }
+
+    /// The oldest filling job's next prompt chunk: the other streams' rounds run between chunks, not after the prompt.
+    fn fillOne(h: *LaneHost) void {
+        if (h.filling.items.len == 0) return;
+        const job = h.filling.items[0];
+        const first = !job.fill_began;
+        job.fill_began = true;
+        const done = h.core.fillStream(&job.stream, first) catch |e| {
+            _ = if (e == error.Cancelled) h.cancel(job) else h.drop(job, h.words(e));
+            return;
+        };
+        if (!done) return;
+        _ = h.filling.orderedRemove(0);
+        h.prefilled(job, job.began);
+        if (h.deliver(job)) h.remove(job);
+    }
+
+    fn unfill(h: *LaneHost, job: *Job) void {
+        for (h.filling.items, 0..) |j, i| if (j == job) {
+            _ = h.filling.orderedRemove(i);
+            return;
+        };
     }
 
     fn prefilled(h: *LaneHost, job: *Job, began: i96) void {
@@ -385,11 +420,11 @@ pub const LaneHost = struct {
         emit(job, .{ .prefilled = job.stream.cached });
     }
 
-    /// An idle backend driver takes a lone drafted request, including sampling when supported.
+    /// An idle backend driver takes a lone drafted request, sampled when supported; never one with logprobs.
     fn loneFits(h: *LaneHost, job: *Job) bool {
         const r = job.request;
         const lone = h.lone orelse return false;
-        if ((r.sampling != null and !lone.sampled) or !r.drafts or r.think_budget > 0 or r.loop_guard or r.call != null or r.structure != null) return false;
+        if ((r.sampling != null and !lone.sampled) or !r.drafts or r.think_budget > 0 or r.loop_guard or r.call != null or r.structure != null or r.logprobs != null) return false;
         h.lock();
         defer h.unlock();
         return h.admitted.items.len == 1 and h.queued.items.len == 0 and h.cancels.items.len == 0 and h.core.activeCount() == 0;
@@ -457,6 +492,7 @@ pub const LaneHost = struct {
     }
 
     fn remove(h: *LaneHost, job: *Job) void {
+        h.unfill(job);
         h.lock();
         defer h.unlock();
         for (h.admitted.items, 0..) |j, i| if (j == job) {
@@ -480,6 +516,7 @@ pub const LaneHost = struct {
         while (true) {
             h.takeCancels();
             while (h.admitOne()) {}
+            h.fillOne();
             h.noteLive();
             h.lock();
             if (h.closing) {
@@ -494,6 +531,10 @@ pub const LaneHost = struct {
                 continue;
             }
             if (h.core.activeCount() == 0) {
+                if (h.filling.items.len > 0) {
+                    h.unlock();
+                    continue;
+                }
                 if (h.learnable()) {
                     h.unlock();
                     h.learnStep();
@@ -526,6 +567,7 @@ pub const LaneHost = struct {
         h.lock();
         const jobs = h.gpa.dupe(*Job, h.admitted.items) catch &.{};
         h.admitted.clearRetainingCapacity();
+        h.filling.clearRetainingCapacity();
         h.unlock();
         for (jobs) |job| {
             if (!job.stream.finished) h.core.discard(&job.stream);

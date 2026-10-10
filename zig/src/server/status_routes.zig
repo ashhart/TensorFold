@@ -19,6 +19,7 @@ pub fn health(srv: *Server, conn: *Conn, a: Allocator) !void {
     for (srv.config.model_ids, ids) |id, *slot| slot.* = .{ .string = id };
     try o.put(a, "model_ids", .{ .array = ids });
     try o.put(a, "max_batch_size", try json.intValue(a, srv.info.lanes));
+    if (srv.info.policy.len > 0) try o.put(a, "policy", .{ .string = srv.info.policy });
     var status: api.Status = .{};
     srv.engine.status(&status, &.{});
     try o.put(a, "warming", .{ .bool = status.warming });

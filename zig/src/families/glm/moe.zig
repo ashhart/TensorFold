@@ -39,6 +39,16 @@ pub fn moe(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
         if (s & Class.exchange == 0) ep.send(e, sc.ye, rows, on(x, "x_pack") and on(x, "x_locpost"), on(x, "x_locpost"));
         if (s & Class.shared == 0) experts(x, e, w, x_in, rows, 1, .{ sc.none, sc.none, sc.none });
         if (s & Class.exchange == 0 and on(x, "x_unpack")) ep.receive(e, sc.ye, rows);
+    } else if (s & (Class.shared | Class.routed) == 0 and on(x, "e_gateup") and on(x, "e_down") and on(x, "s_gateup") and on(x, "s_down")) {
+        if (s & Class.route == 0) route(x, e, w, x_in, rows);
+        both(x, e, w, x_in, rows); // the shared expert as the gathers' last slot: two launches fewer
+        if (s & Class.combine != 0 or !on(x, "combine")) return;
+        e.setPipeline(k.combine_0);
+        bind(e, 0, .{ sc.ye, sc.ye, sc.wts });
+        shape(e, 3, .{ rows, top });
+        bind(e, 4, .{sc.branch});
+        e.dispatchThreads(size(rows * c.hidden, 1, 1), size(256, 1, 1));
+        return;
     } else {
         if (s & Class.shared == 0) experts(x, e, w, x_in, rows, 1, .{ sc.none, sc.none, sc.none });
         if (s & Class.route == 0) route(x, e, w, x_in, rows);
@@ -98,11 +108,34 @@ fn experts(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
     const act = if (part == 1) sc.acts else sc.act;
     if (if (part == 1) on(x, "s_gateup") else on(x, "e_gateup")) gateUp(x, e, w, x_in, rows, part, group, zs, act);
     if (!(if (part == 1) on(x, "s_down") else on(x, "e_down"))) return;
-    e.setPipeline(if (part == 1) k.moe_down_1 else k.moe_down_2);
+    e.setPipeline(if (part == 1) k.shared_down else k.moe_down_2);
     bind(e, 0, .{act});
     shape(e, 1, .{ rows, slots, N });
     bind(e, 2, .{ w.down.w, w.down.s, w.down.b, w.sh_down.w, w.sh_down.s, w.sh_down.b, group[0], group[1], group[2], if (part == 1) sc.ys else sc.ye });
-    e.dispatchThreads(size(32 * rows, D / 4, zs), size(32 * rows, 1, 1));
+    e.dispatchThreads(size(32 * rows, if (part == 1) D else D / 4, zs), size(32 * rows, 1, 1)); // the shared expert: an output a simdgroup
+}
+
+/// The routed experts and the shared one (slot topk: grid z past the routed ids, the kernels' last) into `act` and `ye`.
+fn both(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, rows: u32) void {
+    const c = x.c;
+    const k = x.k;
+    const sc = x.sc;
+    const D = c.hidden;
+    const N = c.moe_inter;
+    const zs: u32 = rows * c.topk + 1; // the routed ids' slots, then the shared expert's
+    const rps: u32 = if (rows == 1) 2 else 4; // one row: two outputs a simdgroup, more reads in flight (the same sums)
+    e.setPipeline(if (rows == 1) k.moe_gateup_0_one else k.moe_gateup_0);
+    bind(e, 0, .{x_in});
+    shape(e, 1, .{ rows, D });
+    bind(e, 2, .{ w.gate.w, w.gate.s, w.gate.b, w.up.w, w.up.s, w.up.b, w.sh_gate_up.w, w.sh_gate_up.s, w.sh_gate_up.b, sc.uids, sc.umem, sc.ucount });
+    e.setValue(c.swiglu_limit, 14);
+    bind(e, 15, .{sc.act});
+    e.dispatchThreads(size(32 * rows, N / rps, zs), size(32 * rows, 1, 1));
+    e.setPipeline(if (rows == 1) k.moe_down_0_one else k.moe_down_0);
+    bind(e, 0, .{sc.act});
+    shape(e, 1, .{ rows, c.topk + 1, N });
+    bind(e, 2, .{ w.down.w, w.down.s, w.down.b, w.sh_down.w, w.sh_down.s, w.sh_down.b, sc.uids, sc.umem, sc.ucount, sc.ye });
+    e.dispatchThreads(size(32 * rows, D / rps, zs), size(32 * rows, 1, 1));
 }
 
 /// By rows: every routed pick's half (this Mac's intermediate rows), down's fp32 partials into `yp`.
@@ -135,11 +168,11 @@ fn gateUp(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, ro
     const k = x.k;
     const D = c.hidden;
     const N = c.moe_inter;
-    e.setPipeline(if (part == 1) k.moe_gateup_1 else k.moe_gateup_2);
+    e.setPipeline(if (part == 1) k.shared_gateup else k.moe_gateup_2);
     bind(e, 0, .{x_in});
     shape(e, 1, .{ rows, D });
     bind(e, 2, .{ w.gate.w, w.gate.s, w.gate.b, w.up.w, w.up.s, w.up.b, w.sh_gate_up.w, w.sh_gate_up.s, w.sh_gate_up.b, group[0], group[1], group[2] });
     e.setValue(c.swiglu_limit, 14);
     bind(e, 15, .{act});
-    e.dispatchThreads(size(32 * rows, N / 4, zs), size(32 * rows, 1, 1));
+    e.dispatchThreads(size(32 * rows, if (part == 1) N else N / 4, zs), size(32 * rows, 1, 1));
 }

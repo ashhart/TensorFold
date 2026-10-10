@@ -32,7 +32,7 @@ pub fn main(init: std.process.Init) !u8 {
     for (vocab.object.get("pieces").?.array.items) |p| try pieces.append(a, p.string);
     var fake = FakeText.init(pieces.items);
     var problem: []const u8 = "";
-    const real = if (init.environ_map.get("TF_FAKE_TOKENIZER")) |path| server.hf_text.HfText.load(gpa, io, path, a, &problem) catch {
+    const real = if (init.environ_map.get("TF_FAKE_TOKENIZER")) |path| server.hf_text.HfText.load(gpa, io, path, args.chat_template, a, &problem) catch {
         std.debug.print("tensorfold: {s}\n", .{problem});
         return 1;
     } else null;
@@ -43,6 +43,7 @@ pub fn main(init: std.process.Init) !u8 {
     const scripts = try std.json.parseFromSliceLeaky(std.json.Value, a, scripts_bytes, .{});
     const context: u32 = if (init.environ_map.get("TF_FAKE_CONTEXT")) |c| try std.fmt.parseInt(u32, c, 10) else 0;
     var engine: ScriptEngine = .{ .gpa = gpa, .io = io, .text = text, .scripts = scripts, .info_ = .{ .lanes = server.cli.parallel(args.parallel) orelse 8, .context_window = context, .call_gates = true } };
+    defer engine.cancelled.deinit(gpa);
     return server.serve.run(gpa, io, args, .{
         .engine = engine.engine(),
         .text = text,

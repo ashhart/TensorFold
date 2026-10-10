@@ -46,7 +46,7 @@ extern "C" cudaError_t tf_logprob_rows(const void* logits, const int64_t* column
         vocab > UINT64_MAX / rows || rows * vocab > UINT64_MAX / 4 ||
         selected > UINT64_MAX / rows || rows * selected > UINT64_MAX / 8)
         return cudaErrorInvalidValue;
-    tf_logprob_rows_kernel<<<tf_launch_blocks(rows * selected), 256, 0, stream>>>(logits, columns,
+    tf_logprob_rows_kernel<<<tf_launch_blocks(rows * selected, 256), 256, 0, stream>>>(logits, columns,
         lse, output, rows, vocab, selected, dtype, invalid);
     return cudaGetLastError();
 }
@@ -57,7 +57,7 @@ extern "C" cudaError_t tf_logprob_keys(const float* logits, int64_t* keys,
     if (!logits || !keys || vocab == 0 || vocab > UINT32_MAX ||
         vocab > UINT64_MAX / rows || rows * vocab > UINT64_MAX / 8)
         return cudaErrorInvalidValue;
-    tf_logprob_keys_kernel<<<tf_launch_blocks(rows * vocab), 256, 0, stream>>>(logits,
+    tf_logprob_keys_kernel<<<tf_launch_blocks(rows * vocab, 256), 256, 0, stream>>>(logits,
         reinterpret_cast<uint64_t*>(keys), rows, vocab);
     return cudaGetLastError();
 }

@@ -252,7 +252,7 @@ fn format(cx: *Cx, text: ?Value) errors.Refused!?Value {
 pub fn translate(cx: *Cx, body: Value, history: anytype) errors.Refused!Request {
     const a = cx.a;
     if (body != .object) return cx.refuse("the request body must be a JSON object");
-    try fields.probabilityOptions(cx, body);
+    _ = try fields.probabilityOptions(cx, body, false); // logprobs come on /v1/chat/completions only
     for (refused) |r| if (json.truthyField(body, r[0])) return cx.refuse(r[1]);
     if (body.get("include")) |inc| if (inc.truthy()) {
         var parts: std.ArrayList([]const u8) = .empty;

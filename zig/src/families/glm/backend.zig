@@ -5,13 +5,14 @@ const st = @import("state.zig");
 const slots_mod = @import("slots.zig");
 const mirror = @import("mirror.zig");
 const snapshot = @import("snapshot.zig");
+const timing = @import("timing.zig");
 const Engine = @import("engine.zig").Engine;
 const be = lanes.backend;
 const Stream = lanes.Stream;
 
-/// One stream's window and a shared forward's rows, ms on the M5 Ultra pair (each stream's extra cost is learned).
-const window_costs = costTable(13.1, 3.5);
-const shared_costs = costTable(8.4 + 3.5, 3.5);
+/// One stream's window and a shared forward's rows, ms on one M5 Ultra (a pair times its own at load: timing.zig).
+const one_mac_window_costs = costTable(13.0, 4.1);
+const one_mac_shared_costs = costTable(8.4 + 4.1, 4.1);
 
 fn costTable(comptime one: f64, comptime row: f64) [st.max_rows]lanes.config.Cost {
     var c: [st.max_rows]lanes.config.Cost = undefined;
@@ -26,6 +27,7 @@ pub const Backend = struct {
     words: std.ArrayList(u32) = .empty, // the next command's words
     wins: std.ArrayList(slots_mod.Win) = .empty,
     drafts: std.ArrayList(slots_mod.Draft) = .empty,
+    costs: ?timing.Costs = null, // a pair's rank 0: its windows and head step as timed (shared forwards priced the same)
 
     pub fn deinit(b: *Backend) void {
         b.by.deinit(b.gpa);
@@ -45,16 +47,18 @@ pub const Backend = struct {
             .first_copy_rows = 4,
             .mtp = b.sl.e.hasMtp(),
             .speculate = true,
+            .gpu_tokens = b.sl.e.ep == null, // one-token rounds queued ahead, each reading the one before's pick on the GPU
             .speculate_early = false,
             .plain_guard = true, // a shared round's draft row costs about what a plain row does: draft where it wins
             .drafts = 4,
-            .window_costs = &window_costs,
-            .mtp_step_ms = 1.3,
+            .window_costs = if (b.costs) |*c| &c.window else if (b.sl.e.ep == null) &one_mac_window_costs else &.{},
+            .mtp_step_ms = if (b.costs) |c| c.head_ms else 1.3,
+            .depth_rate = if (b.costs != null) timing.depth_rate else 0,
             .streams_exact = true,
             .hidden_rows = true,
             .batch_rows = st.max_rows,
             .max_streams = @intCast(b.sl.slots.len),
-            .shared_costs = &shared_costs,
+            .shared_costs = if (b.sl.e.ep == null) &one_mac_shared_costs else &.{},
             .draft_streams = true,
         };
     }
@@ -75,7 +79,8 @@ pub const Backend = struct {
         const prompt = s.prompt();
         if (prompt.len == 0) return error.EmptyPrompt;
         if (prompt.len + s.max_new + st.max_rows + 1 > e.s.cap) return error.ContextFull;
-        const i = b.sl.free() orelse return error.NoFreeSlot;
+        const reuse: ?*const snapshot.Snap = if (s.reuse.saved) |saved| @ptrCast(@alignCast(saved)) else null;
+        const i = b.sl.pick(reuse) orelse return error.NoFreeSlot;
         try b.by.put(b.gpa, s, i);
         b.words.clearRetainingCapacity();
         try b.words.appendSlice(b.gpa, &.{ i, @intFromBool(s.drafts) });
@@ -86,7 +91,7 @@ pub const Backend = struct {
         var at: u32 = 0;
         if (s.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
             const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
-            if (snap.at < prompt.len and b.sl.snaps.get(snap.id) == snap) {
+            if (snap.at < prompt.len and b.sl.usable(snap)) {
                 try mirror.send(e, .restore, &.{ i, snap.id });
                 try b.sl.restore(i, snap.id);
                 at = snap.at;
@@ -108,7 +113,8 @@ pub const Backend = struct {
 
     /// The prompt cache's Snapshots functions: a stream's prompt state, mirrored to the peer by id.
     pub fn snapBytes(ptr: *anyopaque, at: u32) u64 {
-        return snapshot.bytes(&self(ptr).sl.e.c, at);
+        const b = self(ptr);
+        return snapshot.bytes(&b.sl.e.c, at, b.sl.resident());
     }
 
     pub fn snapSave(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
@@ -117,7 +123,69 @@ pub const Backend = struct {
         const id = b.sl.next_snap;
         if (at != b.sl.slots[i].s.pos or b.sl.slots[i].rows != 0) return error.SnapshotOutOfStep;
         try mirror.send(b.sl.e, .save, &.{ id, i, at });
-        return try b.sl.save(i, at, id);
+        return try b.sl.save(i, at, id, b.sl.resident());
+    }
+
+    pub fn snapReclaim(_: *anyopaque, dir: [:0]const u8, key: u64) !u64 {
+        var buf: [1100]u8 = undefined;
+        return lanes.learned_dirs.fileBytes(try snapshot.path(&buf, dir, key, 0));
+    }
+    pub fn peerOtherUsed(ptr: *anyopaque, id: u64) !u64 {
+        const b = self(ptr);
+        if (b.sl.e.ep == null) return 0;
+        try mirror.send(b.sl.e, .disk_other_used, &.{ @truncate(id), @truncate(id >> 32) });
+        const value = try b.sl.e.ep.?.ctl.waitReplyValue();
+        if (value == std.math.maxInt(u64)) return error.PeerDiskRead;
+        return value;
+    }
+    pub fn peerOtherNext(ptr: *anyopaque, after: ?u64) !?u64 {
+        const b = self(ptr);
+        if (b.sl.e.ep == null) return null;
+        const value = after orelse 0;
+        try mirror.send(b.sl.e, .disk_other_next, &.{ @truncate(value), @truncate(value >> 32), @intFromBool(after != null) });
+        const found = (try b.sl.e.ep.?.ctl.waitReplyOptional()) orelse return null;
+        if (found == std.math.maxInt(u64)) return error.PeerDiskRead;
+        return found;
+    }
+    pub fn peerOtherBytes(ptr: *anyopaque, id: u64) !u64 {
+        const b = self(ptr);
+        if (b.sl.e.ep == null) return 0;
+        try mirror.send(b.sl.e, .disk_other_bytes, &.{ @truncate(id), @truncate(id >> 32) });
+        const count = try b.sl.e.ep.?.ctl.waitReplyValue();
+        if (count == std.math.maxInt(u64)) return error.PeerDiskRead;
+        return count;
+    }
+    pub fn peerOtherRemove(ptr: *anyopaque, id: u64) !void {
+        const b = self(ptr);
+        if (b.sl.e.ep == null) return;
+        try mirror.send(b.sl.e, .disk_other_remove, &.{ @truncate(id), @truncate(id >> 32) });
+        if (!try b.sl.e.ep.?.ctl.waitReply()) return error.PeerLearnDelete;
+    }
+    pub fn peerNeed(ptr: *anyopaque, saved: *anyopaque, extra: u64) !u64 {
+        const b = self(ptr);
+        if (b.sl.e.ep == null) return 0;
+        const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
+        try mirror.send(b.sl.e, .disk_need, &.{ snap.id, @truncate(extra), @truncate(extra >> 32) });
+        return b.sl.e.ep.?.ctl.waitReplyValue();
+    }
+    pub fn peerReclaim(ptr: *anyopaque, key: u64) !u64 {
+        const b = self(ptr);
+        if (b.sl.e.ep == null) return 0;
+        try mirror.send(b.sl.e, .disk_reclaim, &.{ @truncate(key), @truncate(key >> 32) });
+        return b.sl.e.ep.?.ctl.waitReplyValue();
+    }
+    pub fn peerReserve(ptr: *anyopaque, saved: *anyopaque, key: u64, extra: u64) !void {
+        const b = self(ptr);
+        if (b.sl.e.ep == null) return;
+        const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
+        try mirror.send(b.sl.e, .disk_reserve, &.{ snap.id, @truncate(key), @truncate(key >> 32), @truncate(extra), @truncate(extra >> 32) });
+        if (!try b.sl.e.ep.?.ctl.waitReply()) return error.PeerDiskFull;
+    }
+    pub fn peerFinish(ptr: *anyopaque, key: u64, success: bool) !void {
+        const b = self(ptr);
+        if (b.sl.e.ep == null) return;
+        try mirror.send(b.sl.e, .disk_finish, &.{ @truncate(key), @truncate(key >> 32), @intFromBool(success) });
+        if (!try b.sl.e.ep.?.ctl.waitReply()) return error.PeerDiskOutOfStep;
     }
 
     /// --learn: a kept state to its file here and, on a pair, rank 1's half there; an error unless both are written.
@@ -154,10 +222,14 @@ pub const Backend = struct {
 
     /// --learn: learned state `key`'s file here and, on a pair, rank 1's half removed.
     pub fn snapForget(ptr: *anyopaque, dir: [:0]const u8, key: u64) void {
+        snapForgetChecked(ptr, dir, key) catch |err| std.log.err("glm: learned deletion failed: {s}", .{@errorName(err)});
+    }
+    pub fn snapForgetChecked(ptr: *anyopaque, dir: [:0]const u8, key: u64) !void {
         const b = self(ptr);
-        mirror.send(b.sl.e, .forget, &.{ @truncate(key), @truncate(key >> 32) }) catch |err| std.log.err("glm: the peer kept a forgotten learned state: {s}", .{@errorName(err)});
+        try mirror.send(b.sl.e, .forget, &.{ @truncate(key), @truncate(key >> 32) });
+        if (b.sl.e.ep) |ep| if (!try ep.ctl.waitReply()) return error.PeerLearnDelete;
         var buf: [1100]u8 = undefined;
-        _ = std.c.unlink(snapshot.path(&buf, dir, key, 0) catch return);
+        try lanes.learned_dirs.unlink(try snapshot.path(&buf, dir, key, 0));
     }
 
     pub fn snapRestore(_: *anyopaque, _: ?*anyopaque, _: *anyopaque) anyerror!void {
@@ -175,15 +247,24 @@ pub const Backend = struct {
         const b = self(ptr);
         const i = try b.slotOf(s);
         if (position != b.sl.length(i)) return error.PositionMismatch;
-        return Engine.u32s(b.sl.e.sc.picks, 1)[0];
+        return b.sl.ringPut(Engine.u32s(b.sl.e.sc.picks, 1)[0]);
     }
 
-    fn queue(_: *anyopaque, _: *Stream, _: be.Feed, _: u64) anyerror!u64 {
-        return error.Unsupported; // GLM's tokens come back to the host every round: no step runs ahead
+    /// The next one-token round queued ahead: its token the handle's (read on the GPU) or the host's, its pick a handle.
+    fn queue(ptr: *anyopaque, s: *Stream, feed: be.Feed, position: u64) anyerror!u64 {
+        const b = self(ptr);
+        const i = try b.slotOf(s);
+        if (b.sl.e.ep != null) return error.Unsupported; // a pair's ranks run windows in step
+        if (position != b.sl.length(i) + 1) return error.PositionMismatch;
+        const from = switch (feed) {
+            .handle => |h| @as(u32, @intCast(h)),
+            .value => |v| b.sl.ringPut(v),
+        };
+        return try b.sl.queueRound(i, from);
     }
 
-    fn read(_: *anyopaque, handle: u64) anyerror!u32 {
-        return @intCast(handle);
+    fn read(ptr: *anyopaque, handle: u64) anyerror!u32 {
+        return self(ptr).sl.ringGet(@intCast(handle));
     }
 
     fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
@@ -238,7 +319,7 @@ pub const Backend = struct {
             }
             const follow: []const u32 = if (r.first) |f| blk: {
                 ones[k] = switch (f) {
-                    .handle => |h| @intCast(h),
+                    .handle => |h| try b.sl.ringGet(@intCast(h)),
                     .value => |v| v,
                 };
                 break :blk ones[k .. k + 1];

@@ -2,6 +2,19 @@
 
 The base URL is `http://127.0.0.1:8080/v1` with the default server settings.
 
+## Native chat template override
+
+`tensorfold serve MODEL --chat-template custom-chat.jinja` loads a UTF-8 Jinja template from that file
+instead of the checkpoint's template files or `tokenizer_config.json` templates. Relative paths resolve
+from the server's working directory. The file is read once at startup, with the same 16 MiB limit as
+the checkpoint's `chat_template.jinja`.
+
+The override handles both ordinary and tool-bearing chat requests; it does not retain a checkpoint's
+separate `tool_use` template. The checkpoint's tokenizer, special tokens and EOS IDs stay unchanged.
+Unreadable or malformed templates fail startup before the engine opens, without falling back to the
+checkpoint template. An empty file leaves chat rendering unavailable, as a checkpoint with no template does.
+Raw completion prompts do not use the chat template.
+
 ## API keys
 
 Both servers accept repeated `--api-key KEY`, comma-separated `TENSORFOLD_API_KEY`, and `--api-key-file PATH`.
@@ -96,12 +109,15 @@ For decisions, `chat_template_kwargs` may be omitted, null, or an object contain
 
 `n` must be 1; multiple choices receive HTTP 400.
 
-CUDA Flash Next on one GPU supports `logprobs: true` and `top_logprobs` from 0 through 20 for nonstreamed text chat
-with thinking off, without tools, stop strings or structured output. Each visible token has its `token`, `bytes`,
-`logprob` and requested `top_logprobs` in `choices[0].logprobs.content`. Probabilities describe the raw target-model
-distribution at temperature 1, before temperature, top-k or top-p sampling filters, including when generation is
-greedy. Alternatives are tokenizer tokens and may include leading spaces; `bytes` preserves partial UTF-8 sequences.
-Unsupported backends, engines and request modes return HTTP 400 when probabilities are requested.
+The native CUDA engine (Nemotron 3.5 Lightning) supports `logprobs: true` and `top_logprobs` from 0 through 20 on
+nonstreamed `/v1/chat/completions`, without tools, stop strings, structured output or a thinking budget. Each reply
+token has its `token`, `logprob`, `bytes` and requested `top_logprobs` in `choices[0].logprobs.content`. Probabilities
+describe the raw target-model distribution at temperature 1, before temperature, top-k or top-p sampling filters,
+including when generation is greedy, and are the same with drafts on or `"draft": false`. With thinking on, the rows
+cover the answer only, as `content` does: none for the reasoning, `</think>` or the newlines after it, so the first
+row is the answer's first token, and a reply cut inside its reasoning has none. Alternatives are tokenizer tokens and
+may include leading spaces; `bytes` preserves partial UTF-8 sequences. Other engines, the Responses and legacy
+completions routes, and the request modes above return HTTP 400 when probabilities are requested.
 `ignore_eos: true` keeps user-supplied `stop` strings active, including when a stop string spans streamed chunks.
 Both backends reject a non-boolean `ignore_eos` or a malformed `stop` with HTTP 400 before a stream opens.
 Both backends reject malformed `temperature`, `top_p`, `top_k` and `seed` values with HTTP 400, whether or not
@@ -294,6 +310,10 @@ Native JSON replies also carry a `tensorfold` runtime block with `engine`, `enab
 `rounds`, `drafted`, `accepted`, `acceptance_rate`, and `tokens_per_round`. A loop-guarded reply adds
 `runtime.loop.period`; these fields describe the native reply and are absent
 from Python replies that do not provide them.
+In the native block, `seconds` is the reply's decode time, from the end of its prompt pass to its last token, and
+`tokens_per_second` divides the reply's tokens after the first by it. `prefill_seconds` is the prompt pass, and
+`time_to_first_token` counts from the request's arrival, so a queued or long prompt shows there, not in `seconds`.
+The Python 0.6 server's `seconds` is the whole request, prompt included.
 
 The native server's finish log names the client reply ID. Completed requests report `prompt`, `cached`,
 `thinking`, `effort`, `tokens`, `sha`, `finish`, `rounds`, and draft acceptance; a refused request reports
@@ -335,6 +355,10 @@ The readings vLLM also has are repeated under its names (`num_requests_running`,
 `tensorfold:` prefix for the metric name. `client_disconnections_total` (requests the client walked away from)
 and `preemptions_total` (background work that gave up a lane to a later request) are published where the
 server counts those events, and never at a fabricated zero.
+An engine that keeps prompt states between requests (Flash Next and GLM-5.3-Flash unless `--prompt-cache-gib 0`)
+adds `prompt_tokens_cached_total` (already vLLM's name), the prompt tokens of finished requests restored from a kept
+state, and repeats it with `prompt_tokens_total` as vLLM's `prefix_cache_hits_total` and `prefix_cache_queries_total`.
+An engine that keeps no prompt states leaves all three out.
 
 The native `--dashboard` flag adds a self-contained `/dashboard` page and its `/stats` JSON snapshot; both routes
 return 404 when the flag is off, and the page polls once per second without adding access-log noise.

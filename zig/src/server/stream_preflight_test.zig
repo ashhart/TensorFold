@@ -302,3 +302,44 @@ test "a streamed Responses tool reply sends no whitespace that the whole reply d
     try expectToolStreamLikeWhole(.responses, tool_head ++ "\"input\":\"x\"," ++
         "\"tools\":[{\"type\":\"function\",\"name\":\"lookup\",\"parameters\":{\"type\":\"object\"}}]");
 }
+
+/// HiEngine's replies from an engine that decodes greedily only.
+const GreedyEngine = struct {
+    fn engine(e: *@This()) api.Engine {
+        return .{ .ctx = e, .vtable = &.{ .info = info, .submit = HiEngine.submit, .cancel = HiEngine.cancel, .status = HiEngine.status, .memory = HiEngine.memory } };
+    }
+
+    fn info(_: *anyopaque) api.Info {
+        return .{ .context_window = 4096, .greedy_only = true };
+    }
+};
+
+test "a greedy-only engine's sampled request is a 400 before the stream opens; greedy ones are served" {
+    var backend: GreedyEngine = .{};
+    const sampled = try sendWith(backend.engine(), .chat, "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"stream\":true,\"max_tokens\":2,\"temperature\":0.7}", .{});
+    try std.testing.expect(!sampled.opened);
+    try std.testing.expectEqual(@as(?u16, 400), sampled.status);
+    try std.testing.expectEqual(@as(i64, 0), sampled.preparing);
+    const greedy = try sendWith(backend.engine(), .chat, "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"max_tokens\":2,\"temperature\":0}", .{});
+    try std.testing.expectEqual(@as(?u16, 200), greedy.status);
+    try std.testing.expectEqualStrings("hi", greedy.content());
+    const unset = try sendWith(backend.engine(), .chat, "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"max_tokens\":2}", .{});
+    try std.testing.expectEqual(@as(?u16, 200), unset.status);
+}
+
+test "a greedy-only engine's refusal names --temperature 0 when the server's own default samples" {
+    var backend: GreedyEngine = .{};
+    var text: TestText = .{};
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]struct { []const u8, bool }{ .{ "{\"temperature\":1.0}", true }, .{ "{\"temperature\":0}", false } }) |case| {
+        const config: server.Config = .{ .served_name = "test-model", .model_ids = &.{"test-model"}, .default_sampling = (try json.parse(a, case[0])).ok };
+        var srv = try server.Server.init(std.testing.allocator, std.testing.io, backend.engine(), text.text(), config, null);
+        defer srv.deinit();
+        var cx: errors.Cx = .{ .a = a };
+        try std.testing.expectError(error.Refused, srv.resolveSampling(&cx, (try json.parse(a, "{\"temperature\":0.7}")).ok, 0, &.{}));
+        try std.testing.expectEqual(case[1], std.mem.indexOf(u8, cx.message, "--temperature 0") != null);
+        try std.testing.expect(try srv.resolveSampling(&cx, (try json.parse(a, "{\"temperature\":0}")).ok, 0, &.{}) == null);
+    }
+}

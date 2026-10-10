@@ -41,7 +41,15 @@ pub fn resolve(a: Allocator, io: std.Io, environ: ?*const std.process.Environ.Ma
         problem.* = try std.fmt.allocPrint(a, "{s} is not in the Hugging Face cache; the native engine does not download: run tensorfold pull {s} first", .{ model, model });
         return null;
     };
-    const snapshot = try std.fs.path.join(a, &.{ hub, repo, "snapshots", std.mem.trim(u8, ref, " \r\n") });
+    const rev = std.mem.trim(u8, ref, " \r\n");
+    // The ref names the snapshot dir: only a 40-hex git sha is ever joined into a cache path.
+    var sha_ok = rev.len == 40;
+    for (rev) |ch| sha_ok = sha_ok and ((ch >= '0' and ch <= '9') or (ch >= 'a' and ch <= 'f') or (ch >= 'A' and ch <= 'F'));
+    if (!sha_ok) {
+        problem.* = try std.fmt.allocPrint(a, "{s}'s cached ref does not name a revision; run tensorfold pull {s}", .{ model, model });
+        return null;
+    }
+    const snapshot = try std.fs.path.join(a, &.{ hub, repo, "snapshots", rev });
     if (!isDir(io, snapshot)) {
         problem.* = try std.fmt.allocPrint(a, "{s}'s cached snapshot is missing; run tensorfold pull {s}", .{ model, model });
         return null;

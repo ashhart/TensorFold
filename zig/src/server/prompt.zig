@@ -9,7 +9,7 @@ const Server = @import("server.zig").Server;
 const Value = json.Value;
 const Cx = errors.Cx;
 
-pub const Rendered = struct { ids: []const u32, history_len: usize = 0 };
+pub const Rendered = struct { ids: []const u32, history_len: usize = 0, rewind_len: usize = 0 };
 
 /// Where living lessons decide whether they act on a reply: the row before the reply's reasoning opens (the generation
 /// prompt's `<think>`), else the row before the prompt's last, so the rows that write the reply carry what they chose.
@@ -102,7 +102,28 @@ pub fn prepare(srv: *Server, cx: *Cx, input: chat.Input, thinking: bool, effort:
     var history_len: usize = 0;
     if (history.len > 0 and history.len < prompt.len and std.mem.eql(u32, prompt[0..history.len], history)) history_len = history.len;
     if (history_len == 0 and prompt.len > 1 and std.mem.eql(u32, history, prompt)) history_len = prompt.len - 1; // a template with no generation suffix
-    return .{ .ids = prompt, .history_len = history_len };
+    const count = if (input.messages == .array) input.messages.array.len else 0;
+    const rewind_len = if (srv.info.prompt_cache) rewindLen(srv, cx, input.messages, count, input.tools, prompt, thinking, effort) else 0; // one more render
+    return .{ .ids = prompt, .history_len = history_len, .rewind_len = rewind_len };
+}
+
+/// Where the latest user message's text starts (of the first `real_count`): the prompt and a probe there agree to it.
+pub fn rewindLen(srv: *Server, cx: *Cx, messages: Value, real_count: usize, tools: []const Value, prompt: []const u32, thinking: bool, effort: ?[]const u8) usize {
+    if (messages != .array or real_count > messages.array.len) return 0;
+    const user_index = for (0..real_count) |n| {
+        const i = real_count - 1 - n;
+        const role = messages.array[i].strField("role") orelse continue;
+        if (std.mem.eql(u8, role, "user")) break i;
+    } else return 0;
+    if (messages.array[user_index] != .object) return 0;
+    const list = cx.a.dupe(Value, messages.array) catch return 0;
+    const user = json.copyObject(cx.a, messages.array[user_index].object) catch return 0;
+    user.put(cx.a, "content", .{ .string = "\u{2063}probe" }) catch return 0;
+    list[user_index] = .{ .object = user };
+    var scratch: Cx = .{ .a = cx.a };
+    const probe = renderIds(srv, &scratch, .{ .array = list }, tools, thinking, effort, true) catch return 0;
+    const i = std.mem.indexOfDiff(u32, prompt, probe) orelse return 0;
+    return if (i < prompt.len) i else 0;
 }
 
 /// A reusable system prefix, found with a probe in place of the first user message; zero below 512 tokens.

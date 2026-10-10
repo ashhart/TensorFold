@@ -31,7 +31,7 @@ pub const Model = struct {
         const files = try shards.shardFiles(gpa, io, dir);
         defer shards.freeShardFiles(gpa, files);
         for (files) |path| try m.checkpoint.addFileSelected(m.device, path, "", "language_model.");
-        m.weights = try weights.load(&m.checkpoint);
+        m.weights = try weights.load(&m.checkpoint, config.tied);
         m.kernels = try kernels.load(m.device);
         return m;
     }

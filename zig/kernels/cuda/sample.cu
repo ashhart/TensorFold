@@ -4,6 +4,8 @@
 #include <math.h>
 #include <stdint.h>
 
+#include "logprob_rows.cuh"
+
 namespace tf_sample {
 
 constexpr unsigned TG = 1024;
@@ -542,4 +544,11 @@ extern "C" __global__ void __launch_bounds__(1024) tf_draw_ids(const __nv_bfloat
                                                                const int* meta, int offset, unsigned* TOK, const long long* IDS,
                                                                float* PROB) {
     tf_sample::draw<true>(L, V, rule, meta, offset, TOK, IDS, PROB);
+}
+
+// Rows of bf16 logits [rows, V]: row r's LP_WORDS words at OUT + r * LP_WORDS for PICK[r] and k (at most 20) best.
+extern "C" __global__ void __launch_bounds__(1024) tf_logprob_rows(const __nv_bfloat16* L, unsigned V, const unsigned* PICK,
+                                                                   unsigned k, unsigned* OUT) {
+    const unsigned row = blockIdx.x;
+    tf_logprob::logprob_row(L + static_cast<size_t>(row) * V, V, PICK[row], k, OUT + static_cast<size_t>(row) * tf_logprob::LP_WORDS);
 }

@@ -51,7 +51,7 @@ pub const Fixture = struct {
         const file = entry.object.get("file").?.string;
         const path = try std.fs.path.join(self.gpa, &.{ self.dir, file });
         defer self.gpa.free(path);
-        return std.Io.Dir.cwd().readFileAlloc(self.io, path, self.gpa, .limited(1 << 31));
+        return std.Io.Dir.cwd().readFileAlloc(self.io, path, self.gpa, .limited(1 << 34)); // 288 experts' tables pass 2 GiB
     }
 
     /// Any file in the fixture directory (cubins, metadata); the caller frees it.

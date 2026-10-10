@@ -11,6 +11,7 @@ pub const Error = error{ UnsupportedNormalizer, UnsupportedPreTokenizer, Unsuppo
 pub const Context = struct {
     a: Allocator,
     matcher: regex.Matcher,
+    raw_bytes: bool = false,
     spans: std.ArrayList(Span) = .empty,
     hits: std.ArrayList([2]usize) = .empty,
 };
@@ -365,6 +366,32 @@ pub const Decoder = union(enum) {
         return error.UnsupportedDecoder;
     }
 
+    /// Only token-local chains can supply exact bytes independently of adjacent tokens.
+    pub fn tokenLocal(d: *const Decoder) bool {
+        var joined = false;
+        return d.localChain(&joined);
+    }
+
+    fn localChain(d: *const Decoder, joined: *bool) bool {
+        return switch (d.*) {
+            .byte_level, .byte_fallback => blk: {
+                if (joined.*) break :blk false;
+                joined.* = true;
+                break :blk true;
+            },
+            .fuse => blk: {
+                joined.* = true;
+                break :blk true;
+            },
+            .replace => |r| !joined.* and r.pattern == .literal,
+            .sequence => |items| blk: {
+                for (items) |*item| if (!item.localChain(joined)) break :blk false;
+                break :blk true;
+            },
+            else => false,
+        };
+    }
+
     /// Runs the decoder chain and joins its output, like tokenizers' Decoder::decode.
     pub fn decode(d: *const Decoder, a: Allocator, ctx: *Context, tokens: []const []const u8) Error![]u8 {
         return std.mem.concat(a, u8, try d.chain(ctx, tokens));
@@ -394,6 +421,7 @@ pub const Decoder = union(enum) {
                         try bytes.appendSlice(a, token);
                     }
                 }
+                if (ctx.raw_bytes) return a.dupe([]const u8, &.{bytes.items});
                 var text: std.ArrayList(u8) = .empty;
                 try unicode.appendLossy(&text, a, bytes.items);
                 return a.dupe([]const u8, &.{text.items});
@@ -405,7 +433,7 @@ pub const Decoder = union(enum) {
                     const byte: ?u8 = if (token.len == 6 and std.mem.startsWith(u8, token, "<0x") and token[5] == '>') std.fmt.parseInt(u8, token[3..5], 16) catch null else null;
                     if (byte) |b| try pending.append(a, b);
                     if (byte == null or i + 1 == tokens.len) if (pending.items.len > 0) {
-                        if (std.unicode.utf8ValidateSlice(pending.items)) try out.append(a, try a.dupe(u8, pending.items)) else for (pending.items) |_| try out.append(a, "\u{FFFD}");
+                        if (ctx.raw_bytes or std.unicode.utf8ValidateSlice(pending.items)) try out.append(a, try a.dupe(u8, pending.items)) else for (pending.items) |_| try out.append(a, "\u{FFFD}");
                         pending.clearRetainingCapacity();
                     };
                     if (byte == null) try out.append(a, token);

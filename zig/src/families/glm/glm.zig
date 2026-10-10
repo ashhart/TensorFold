@@ -11,6 +11,7 @@ pub const ep = @import("ep.zig");
 pub const slots = @import("slots.zig");
 pub const backend = @import("backend.zig");
 pub const mirror = @import("mirror.zig");
+pub const timing = @import("timing.zig");
 
 test {
     _ = config;
@@ -20,7 +21,11 @@ test {
     _ = @import("../../core/moe_route.zig");
     _ = @import("../../core/affine_mm.zig");
     _ = @import("../../core/hc.zig");
+    _ = @import("../../core/paced_read.zig");
     _ = @import("../../core/copy_index.zig");
     _ = @import("attn_check.zig");
+    _ = @import("load_plan.zig");
+    _ = @import("page_cache.zig");
     _ = mirror;
+    _ = timing;
 }

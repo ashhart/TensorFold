@@ -109,6 +109,19 @@ pub const Checkpoint = struct {
         return t;
     }
 
+    /// Whether any file holds `name` (it is not marked as used).
+    pub fn has(self: *const Checkpoint, name: []const u8) bool {
+        for (self.files.items) |*f| if (f.get(name) != null) return true;
+        return false;
+    }
+
+    /// Marks every name starting with `prefix` as used: a part the loader leaves out on purpose.
+    pub fn skip(self: *Checkpoint, prefix: []const u8) !void {
+        for (self.files.items) |*f| for (f.names.keys()) |k| {
+            if (std.mem.startsWith(u8, k, prefix)) try self.used.put(self.gpa, k, {});
+        };
+    }
+
     /// Names no `get` took (the loader refuses a checkpoint with leftovers).
     pub fn unused(self: *const Checkpoint) usize {
         var n: usize = 0;
@@ -190,4 +203,24 @@ test "a failed allocation while a checkpoint opens leaves nothing behind" {
     try expectBalanced(listShards, io, walk_dir);
     try expectBalanced(openShards, io, walk_dir);
     try expectBalanced(addShard, io, walk_dir);
+}
+
+test "has finds a name without taking it; skip marks a prefix used" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_][]const u8{ "mtp.layers.0.w", "backbone.x" }, 0..) |name, i| {
+        const image = try testImage(gpa, name, 4);
+        defer gpa.free(image);
+        var file: [32]u8 = undefined;
+        try tmp.dir.writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&file, "model-{d}.safetensors", .{i}), .data = image });
+    }
+    var path: [64]u8 = undefined;
+    var ck = try Checkpoint.openModel(gpa, io, try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path}));
+    defer ck.close();
+    try std.testing.expect(ck.has("backbone.x") and !ck.has("backbone.y"));
+    try ck.skip("mtp.");
+    _ = try ck.get("backbone.x");
+    try std.testing.expectEqual(@as(usize, 0), ck.unused());
 }

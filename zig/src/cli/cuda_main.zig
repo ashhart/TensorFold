@@ -7,7 +7,9 @@ const core = @import("core");
 const lanes = @import("lanes");
 const checks = @import("cuda_checks.zig");
 const kernel_checks = @import("cuda_kernel_checks.zig");
+const precision = @import("cuda_precision.zig");
 const shared_checks = @import("cuda_shared_checks.zig");
+const checkpoint_cli = @import("checkpoint_cli");
 const lanes_cli = @import("cuda_lanes.zig");
 const segments_cli = @import("cuda_segments.zig");
 const train_check = @import("cuda_train_check.zig");
@@ -17,6 +19,8 @@ const usage =
     \\usage: tensorfold run MODEL --tokens ID,ID,... [--max-tokens N] [--no-drafts] [--report PATH] [--kernels DIR|native] [--device N]
     \\         [--temperature T] [--top-k K] [--top-p P] [--min-p M] [--seed S]   (temperature 0: greedy)
     \\         [--context N] [--ignore-eos] [--eager] [--costs MS1,...,MS16,LEVEL]
+    \\         [--carveout]   (KV caches in GB10's display memory first; also TF_CUDA_CARVEOUT=1,
+    \\         sized by TF_CUDA_CARVEOUT_MIB (default 1792), card TF_DRM_CARD (default /dev/dri/card0))
     \\         [--tokens-file PATH] [--segments N]   (N whole 2048-row prompt chunks a call as staggered segments,
     \\         1-4; default TF_CUDA_SEGMENTS, else 1)
     \\       tensorfold segments MODEL IDS_FILE... [--counts 1,2,3,4] [--repeat N] [--max-tokens N] [--profile]
@@ -30,8 +34,12 @@ const usage =
     \\                (N streams' continuations as shared windows of varying splits against serial, 2 <= N <= 8)
     \\       tensorfold check-kernels MODEL   (lane_gemv and the forked MoE against the kernels they replace, real weights)
     \\       tensorfold train-check MODEL   (Sliding Weights' gradients against the forward by finite differences)
+    \\       tensorfold check-precision MODEL --tokens ID,... --dump DIR   (ModelOpt projections against fp64 and NVIDIA's math)
     \\       tensorfold widths MODEL --tokens ID,... [--max-tokens N] [--eager] [sampling as run]
     \\                (every verify width 1-16 against serial decoding, a wrong draft every third window)
+    \\       tensorfold models
+    \\       tensorfold info MODEL
+    \\       tensorfold pull REPO[@REVISION]
     \\       tensorfold lanes MODEL PROMPTS.json [--solo] [--max-tokens N] [--no-drafts] [sampling as run] [--report PATH]
     \\                (every prompt through the lane core at once, or one at a time with --solo)
     \\
@@ -40,6 +48,22 @@ const usage =
 pub fn main(init: std.process.Init) !u8 {
     const gpa = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    // The version must work without a model, driver or GPU, and reach scripts on stdout.
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "--version")) {
+        if (args.len > 2) {
+            std.debug.print("{s}", .{usage});
+            return 2;
+        }
+        try std.Io.File.stdout().writeStreamingAll(init.io, "tensorfold " ++ @import("build_options").version ++ "\n");
+        return 0;
+    }
+    // The checkpoint commands must work without a model, driver or GPU too.
+    if (args.len >= 2 and checkpoint_cli.wants(@ptrCast(args[1..]))) return checkpoint_cli.main(init, args[1..]);
+    // A leading flag is not a command: the usage covers it, without touching the GPU.
+    if (args.len >= 2 and std.mem.startsWith(u8, args[1], "--")) {
+        std.debug.print("{s}", .{usage});
+        return 2;
+    }
     if (args.len < 3) {
         std.debug.print("{s}", .{usage});
         return 2;
@@ -118,6 +142,8 @@ pub fn main(init: std.process.Init) !u8 {
             opts.stop_eos = false;
         } else if (std.mem.eql(u8, a, "--eager")) {
             opts.graphs = false;
+        } else if (std.mem.eql(u8, a, "--carveout")) {
+            opts.carveout = true;
         } else if (std.mem.startsWith(u8, a, "--")) {
             std.debug.print("unknown option {s}\n{s}", .{ a, usage });
             return 2;
@@ -136,6 +162,18 @@ pub fn main(init: std.process.Init) !u8 {
             return 2;
         },
     };
+    const env = init.environ_map;
+    var carve: ?cuda.Carveout = null;
+    if (try cuda.carveout.requested(opts.carveout, env.get("TF_CUDA_CARVEOUT"), env.get("TF_CUDA_CARVEOUT_MIB"))) |bytes| {
+        const card = try init.arena.allocator().dupeSentinel(u8, env.get("TF_DRM_CARD") orelse cuda.carveout.default_card, 0);
+        carve = cuda.Carveout.open(&driver, card, bytes) catch |err| {
+            std.log.err("display carveout of {d} MiB from {s}: {t} (needs nvidia_drm modeset=1, the card's device node and no display in use)", .{ bytes >> 20, card, err });
+            return err;
+        };
+        const io_flag = if (carve.?.flags & cuda.abi.host_register_iomemory != 0) "|IOMEMORY" else "";
+        std.debug.print("display carveout: {d} MiB from {s}, registered DEVICEMAP{s}\n", .{ bytes >> 20, card, io_flag });
+    }
+    defer if (carve) |*c| c.close();
     const cmd = args[1];
     const bench = std.mem.eql(u8, cmd, "segments");
     const decoding = std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "lanes") or bench;
@@ -144,8 +182,12 @@ pub fn main(init: std.process.Init) !u8 {
     const graphs = opts.graphs and (std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "rounds") or bench or widths);
     const sampling: ?lanes.Sampling = if ((std.mem.eql(u8, cmd, "run") or widths) and opts.sampling.temperature > 0) opts.sampling else null;
     const segments = opts.segments orelse if (init.environ_map.get("TF_CUDA_SEGMENTS")) |v| try std.fmt.parseInt(usize, v, 10) else 1;
-    const engine = try nemotron.Engine.init(gpa, init.io, &ctx, opts.model, kernels, .{ .context = opts.context, .mtp = mtp, .graphs = graphs, .sampling = sampling, .segments = segments });
+    const engine = try nemotron.Engine.init(gpa, init.io, &ctx, opts.model, kernels, .{ .context = opts.context, .mtp = mtp, .graphs = graphs, .sampling = sampling, .segments = segments, .carveout = if (carve) |*c| c else null });
     defer engine.deinit();
+    if (carve) |*c| {
+        const free = (try ctx.memInfo()).free;
+        std.debug.print("cache room: {d} MiB free on the device + {d} MiB left in the carveout; own KV planes carved {d} MiB\n", .{ free >> 20, c.freeBytes() >> 20, engine.b.carvedBytes() >> 20 });
+    }
     const rest = positional.items;
     if (std.mem.eql(u8, cmd, "run")) return run(gpa, init.io, engine, opts);
     if (std.mem.eql(u8, cmd, "lanes") and rest.len == 1) {
@@ -168,6 +210,7 @@ pub fn main(init: std.process.Init) !u8 {
         const s: ?lanes.Sampling = if (opts.sampling.temperature > 0) opts.sampling else null;
         return shared_checks.widths(gpa, init.io, engine, rest[0], opts.streams, opts.max_tokens, s);
     }
+    if (std.mem.eql(u8, cmd, "check-precision")) return precision.check(gpa, init.io, engine, opts.model, opts.tokens, opts.dump orelse return error.NeedsDumpDir);
     if (std.mem.eql(u8, cmd, "check-kernels")) {
         try engine.reset();
         return kernel_checks.check(gpa, engine);
@@ -197,6 +240,7 @@ const Options = struct {
     repeat: usize = 3,
     streams: usize = 4,
     profile: bool = false,
+    carveout: bool = false,
 };
 
 /// Segment counts for `segments`, one to four of them.
@@ -275,6 +319,7 @@ fn run(gpa: std.mem.Allocator, io: std.Io, e: *nemotron.Engine, o: Options) !u8 
             .load_seconds = e.load_seconds,
             .max_len = e.max_len,
             .segments = e.segments,
+            .carved_bytes = e.b.carvedBytes(),
         };
         const json = try std.json.Stringify.valueAlloc(gpa, report, .{});
         defer gpa.free(json);

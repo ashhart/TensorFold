@@ -41,13 +41,18 @@ pub const Kernels = struct {
     gemv_scores_le32: mtl.Pipeline,
     gemv_scores: mtl.Pipeline,
     hc_expand_10: mtl.Pipeline,
-    hc_core: [3]mtl.Pipeline, // core/hc.zig: the expand (or the first boundary's read) with partial sums, then the split
+    hc_core: [4]mtl.Pipeline, // core/hc.zig: the expand (or the first boundary's read) with partial sums, the split, the expand in place
     kda_rows: mtl.Pipeline,
     kda_rows_tp: mtl.Pipeline, // TP2: the fused step over one Mac's 32 heads
     router: [max_rows]mtl.Pipeline, // by window rows (RR = 1 .. 16)
     moe_route: mtl.Pipeline,
-    moe_gateup_1: mtl.Pipeline,
-    moe_down_1: mtl.Pipeline,
+    shared_gateup: mtl.Pipeline, // the shared expert's kernels at one output a simdgroup: four times the threadgroups, the same sums
+    shared_down: mtl.Pipeline,
+    moe_gateup_0: mtl.Pipeline, // the routed experts and the shared one (the last slot) in one gather
+    moe_down_0: mtl.Pipeline,
+    moe_gateup_0_one: mtl.Pipeline, // the same at two outputs a simdgroup, for one-row rounds (more weight reads in flight)
+    moe_down_0_one: mtl.Pipeline,
+    combine_0: mtl.Pipeline, // their combine: the shared expert's row read from the last slot
     moe_gateup_2: mtl.Pipeline,
     moe_down_2: mtl.Pipeline,
     moe_combine: mtl.Pipeline,
@@ -65,8 +70,9 @@ pub const Kernels = struct {
     add: mtl.Pipeline,
     swiglu: mtl.Pipeline,
     argmax: mtl.Pipeline,
-    index_scores: mtl.Pipeline,
     index_select: mtl.Pipeline,
+    index_scores_nax: mtl.Pipeline, // a prompt chunk's index scores on the tensor units (glm_index_nax.metal)
+    index_decode: mtl.Pipeline, // and decode rows' (a row's heads as the op's rows)
     exp_f32: mtl.Pipeline,
     streams: mtl.Pipeline,
     copy_u32: mtl.Pipeline,
@@ -80,13 +86,15 @@ pub const Kernels = struct {
     route_logits: mtl.Pipeline,
     route_select: mtl.Pipeline,
     igate_logits: mtl.Pipeline,
-    kda_pre: mtl.Pipeline, // a prompt chunk's KDA layer in three passes (glm_kda_prompt.metal): gates, conv, norms
+    kda_prep: mtl.Pipeline, // a prompt chunk's KDA layer (glm_kda_prompt.metal): conv, norms, decay and beta
     kda_scan: mtl.Pipeline, // the recurrence alone
     kda_post: mtl.Pipeline, // the output norm and gate
-    kda_pre_tp: mtl.Pipeline, // TP2: the three passes over one Mac's 32 heads
+    kda_prep_tp: mtl.Pipeline, // TP2: the three passes over one Mac's 32 heads
     kda_scan_tp: mtl.Pipeline,
     kda_post_tp: mtl.Pipeline,
     sparse_nax: mtl.Pipeline, // a prompt chunk's sparse MLA attention on the tensor units (glm_sparse_nax.metal)
+    sparse_split: mtl.Pipeline, // decode rows' sparse MLA over key blocks on the tensor units
+    sparse_combine: mtl.Pipeline, // and the blocks combined in order
     absorb_nax: mtl.Pipeline, // and its absorb (glm_absorb_nax.metal)
     sparse_nax_tp: mtl.Pipeline, // TP2: both over one Mac's 32 heads
     absorb_nax_tp: mtl.Pipeline,
@@ -129,8 +137,6 @@ const generated = [_]struct { key: []const u8, field: []const u8 }{
     .{ .key = "kda_rows_tp", .field = "kda_rows_tp" },
     .{ .key = "router", .field = "router" },
     .{ .key = "moe_route", .field = "moe_route" },
-    .{ .key = "moe_gateup_1", .field = "moe_gateup_1" },
-    .{ .key = "moe_down_1", .field = "moe_down_1" },
     .{ .key = "moe_gateup_2", .field = "moe_gateup_2" },
     .{ .key = "moe_down_2", .field = "moe_down_2" },
     .{ .key = "moe_combine", .field = "moe_combine" },
@@ -140,16 +146,15 @@ const generated = [_]struct { key: []const u8, field: []const u8 }{
 };
 
 const glue = [_]struct { name: [:0]const u8, field: []const u8 }{
-    .{ .name = "glm_cast_f32", .field = "cast_f32" },           .{ .name = "glm_rms", .field = "rms" },
-    .{ .name = "glm_layer_norm", .field = "layer_norm" },       .{ .name = "glm_absorb", .field = "absorb" },
-    .{ .name = "glm_unabsorb", .field = "unabsorb" },           .{ .name = "glm_scale", .field = "scale" },
-    .{ .name = "glm_pool", .field = "pool" },                   .{ .name = "glm_stream_mean", .field = "stream_mean" },
-    .{ .name = "glm_add", .field = "add" },                     .{ .name = "glm_swiglu", .field = "swiglu" },
-    .{ .name = "glm_argmax", .field = "argmax" },               .{ .name = "glm_index_scores", .field = "index_scores" },
-    .{ .name = "glm_index_select", .field = "index_select" },   .{ .name = "glm_exp_f32", .field = "exp_f32" },
-    .{ .name = "glm_streams", .field = "streams" },             .{ .name = "glm_copy_u32", .field = "copy_u32" },
-    .{ .name = "glm_route_rows", .field = "route_rows" },       .{ .name = "glm_act2", .field = "act2" },
-    .{ .name = "glm_dense_indices", .field = "dense_indices" },
+    .{ .name = "glm_cast_f32", .field = "cast_f32" },     .{ .name = "glm_rms", .field = "rms" },
+    .{ .name = "glm_layer_norm", .field = "layer_norm" }, .{ .name = "glm_absorb", .field = "absorb" },
+    .{ .name = "glm_unabsorb", .field = "unabsorb" },     .{ .name = "glm_scale", .field = "scale" },
+    .{ .name = "glm_pool", .field = "pool" },             .{ .name = "glm_stream_mean", .field = "stream_mean" },
+    .{ .name = "glm_add", .field = "add" },               .{ .name = "glm_swiglu", .field = "swiglu" },
+    .{ .name = "glm_argmax", .field = "argmax" },         .{ .name = "glm_index_select", .field = "index_select" },
+    .{ .name = "glm_exp_f32", .field = "exp_f32" },       .{ .name = "glm_streams", .field = "streams" },
+    .{ .name = "glm_copy_u32", .field = "copy_u32" },     .{ .name = "glm_route_rows", .field = "route_rows" },
+    .{ .name = "glm_act2", .field = "act2" },             .{ .name = "glm_dense_indices", .field = "dense_indices" },
 };
 
 const Job = struct {
@@ -176,6 +181,12 @@ const Job = struct {
     }
 };
 
+/// Generated kernel `key`'s template at other parameters, under `name`.
+fn instance(comptime key: []const u8, comptime params: []const u8, comptime name: []const u8) []const u8 {
+    const f = comptime kernelOf(key).functions[0];
+    return "\ntemplate [[host_name(\"" ++ name ++ "\")]] [[kernel]] decltype(" ++ f ++ "<" ++ params ++ ">) " ++ f ++ "<" ++ params ++ ">;\n";
+}
+
 fn kernelOf(comptime key: []const u8) sources.glm.Kernel {
     @setEvalBranchQuota(20000);
     for (sources.glm.all) |k| if (comptime std.mem.eql(u8, k.key, key)) return k;
@@ -186,7 +197,7 @@ fn kernelOf(comptime key: []const u8) sources.glm.Kernel {
 pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const k = try gpa.create(Kernels);
     errdefer gpa.destroy(k);
-    var jobs: [generated.len + 14]Job = undefined;
+    var jobs: [generated.len + 22]Job = undefined;
     inline for (generated, 0..) |g, i| {
         const src = comptime kernelOf(g.key);
         const FT = @FieldType(Kernels, g.field);
@@ -225,10 +236,11 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const kda_src = try std.mem.concat(gpa, u8, &.{ comptime kernelOf("kda_rows").source, sources.glm_kda_prompt });
     defer gpa.free(kda_src);
     var kda_out: [6]mtl.Pipeline = undefined;
-    jobs[generated.len + 8] = .{ .device = device, .source = kda_src, .names = &.{ "glm_kda_pre", "glm_kda_scan", "glm_kda_post", "glm_kda_pre_tp", "glm_kda_scan_tp", "glm_kda_post_tp" }, .out = &kda_out };
+    jobs[generated.len + 8] = .{ .device = device, .source = kda_src, .names = &.{ "glm_kda_prep", "glm_kda_scan", "glm_kda_post", "glm_kda_prep_tp", "glm_kda_scan_tp", "glm_kda_post_tp" }, .out = &kda_out };
     const sparse_src = try frags.source(device, gpa, sources.glm_sparse_nax);
     defer gpa.free(sparse_src);
-    jobs[generated.len + 9] = .{ .device = device, .source = sparse_src, .names = &.{"glm_sparse_nax"}, .out = @as(*[1]mtl.Pipeline, &k.sparse_nax) };
+    var sparse_out: [3]mtl.Pipeline = undefined;
+    jobs[generated.len + 9] = .{ .device = device, .source = sparse_src, .names = &.{ "glm_sparse_nax", "glm_sparse_split", "glm_sparse_combine" }, .out = &sparse_out };
     const absorb_src = try frags.source(device, gpa, sources.glm_absorb_nax);
     defer gpa.free(absorb_src);
     jobs[generated.len + 10] = .{ .device = device, .source = absorb_src, .names = &.{"glm_absorb_nax"}, .out = @as(*[1]mtl.Pipeline, &k.absorb_nax) };
@@ -246,6 +258,36 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const absorb_tp_src = try frags.source(device, gpa, absorb_tp_raw);
     defer gpa.free(absorb_tp_src);
     jobs[generated.len + 13] = .{ .device = device, .source = absorb_tp_src, .names = &.{"glm_absorb_nax"}, .out = @as(*[1]mtl.Pipeline, &k.absorb_nax_tp) };
+    const index_src = try frags.source(device, gpa, sources.glm_index_nax);
+    defer gpa.free(index_src);
+    var index_out: [2]mtl.Pipeline = undefined;
+    jobs[generated.len + 14] = .{ .device = device, .source = index_src, .names = &.{ "glm_index_scores_nax", "glm_index_decode" }, .out = &index_out };
+    const shared_gu_src = comptime kernelOf("moe_gateup_1").source ++ instance("moe_gateup_1", "4096, 2048, 1, 8, 16, 128, 1, 4, 16, 8", "glm_shared_gateup");
+    const shared_down_src = comptime kernelOf("moe_down_1").source ++ instance("moe_down_1", "2048, 4096, 1, 8, 16, 128, 1, 4, 16, 8", "glm_shared_down");
+    jobs[generated.len + 15] = .{ .device = device, .source = shared_gu_src, .names = &.{"glm_shared_gateup"}, .out = @as(*[1]mtl.Pipeline, &k.shared_gateup) };
+    jobs[generated.len + 16] = .{ .device = device, .source = shared_down_src, .names = &.{"glm_shared_down"}, .out = @as(*[1]mtl.Pipeline, &k.shared_down) };
+    const pick_slot = "const int u = PART == 1 ? MAXU : int(threadgroup_position_in_grid.z);"; // the shared expert: grid z rows * topk, past the routed ids
+    const gu0_src = try std.mem.replaceOwned(u8, gpa, comptime kernelOf("moe_gateup_2").source ++ instance("moe_gateup_2", "4096, 2048, 4, 8, 16, 128, 0, 4, 16, 8", "glm_moe_gateup_0"), pick_slot, "const int u = PART == 1 ? MAXU : (int(threadgroup_position_in_grid.z) == int(X_shape[0]) * TOPK ? MAXU : int(threadgroup_position_in_grid.z));");
+    defer gpa.free(gu0_src);
+    const down0_src = try std.mem.replaceOwned(u8, gpa, comptime kernelOf("moe_down_2").source ++ instance("moe_down_2", "2048, 4096, 4, 8, 16, 128, 0, 4, 16, 8", "glm_moe_down_0"), pick_slot, "const int u = PART == 1 ? MAXU : (int(threadgroup_position_in_grid.z) == int(ACT_shape[0]) * TOPK ? MAXU : int(threadgroup_position_in_grid.z));");
+    defer gpa.free(down0_src);
+    if (std.mem.indexOf(u8, gu0_src, pick_slot) != null or std.mem.indexOf(u8, down0_src, pick_slot) != null) return error.KernelCompile;
+    jobs[generated.len + 17] = .{ .device = device, .source = gu0_src, .names = &.{"glm_moe_gateup_0"}, .out = @as(*[1]mtl.Pipeline, &k.moe_gateup_0) };
+    jobs[generated.len + 18] = .{ .device = device, .source = down0_src, .names = &.{"glm_moe_down_0"}, .out = @as(*[1]mtl.Pipeline, &k.moe_down_0) };
+    const gu0_one = try std.mem.replaceOwned(u8, gpa, gu0_src, "<4096, 2048, 4, 8, 16, 128, 0, 4, 16, 8>", "<4096, 2048, 2, 8, 16, 128, 0, 4, 16, 8>");
+    defer gpa.free(gu0_one);
+    const down0_one = try std.mem.replaceOwned(u8, gpa, down0_src, "<2048, 4096, 4, 8, 16, 128, 0, 4, 16, 8>", "<2048, 4096, 2, 8, 16, 128, 0, 4, 16, 8>");
+    defer gpa.free(down0_one);
+    if (std.mem.eql(u8, gu0_one, gu0_src) or std.mem.eql(u8, down0_one, down0_src)) return error.KernelCompile;
+    jobs[generated.len + 20] = .{ .device = device, .source = gu0_one, .names = &.{"glm_moe_gateup_0"}, .out = @as(*[1]mtl.Pipeline, &k.moe_gateup_0_one) };
+    jobs[generated.len + 21] = .{ .device = device, .source = down0_one, .names = &.{"glm_moe_down_0"}, .out = @as(*[1]mtl.Pipeline, &k.moe_down_0_one) };
+    const comb = comptime kernelOf("moe_combine");
+    const comb_a = try std.mem.replaceOwned(u8, gpa, comb.source, "const device bfloat* y = Y + size_t(r) * TOPK * D + d;", "const device bfloat* y = Y + size_t(r) * (TOPK + 1) * D + d;");
+    defer gpa.free(comb_a);
+    const comb_src = try std.mem.replaceOwned(u8, gpa, comb_a, "+ YS[size_t(r) * D + d];", "+ y[size_t(TOPK) * D];");
+    defer gpa.free(comb_src);
+    if (std.mem.eql(u8, comb_src, comb.source)) return error.KernelCompile; // the generated combine changed: its edit no longer applies
+    jobs[generated.len + 19] = .{ .device = device, .source = comb_src, .names = comb.functions, .out = @as(*[1]mtl.Pipeline, &k.combine_0) };
     var sources_seen = std.hash.Wyhash.init(0x6b);
     for (jobs) |j| sources_seen.update(j.source);
     k.source_hash = sources_seen.final();
@@ -270,11 +312,16 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     k.route_logits = route_out[0];
     k.route_select = route_out[1];
     k.igate_logits = igate_out[0];
-    k.kda_pre = kda_out[0];
+    k.kda_prep = kda_out[0];
     k.kda_scan = kda_out[1];
     k.kda_post = kda_out[2];
-    k.kda_pre_tp = kda_out[3];
+    k.kda_prep_tp = kda_out[3];
     k.kda_scan_tp = kda_out[4];
     k.kda_post_tp = kda_out[5];
+    k.sparse_nax = sparse_out[0];
+    k.sparse_split = sparse_out[1];
+    k.sparse_combine = sparse_out[2];
+    k.index_scores_nax = index_out[0];
+    k.index_decode = index_out[1];
     return k;
 }

@@ -24,7 +24,7 @@ pub const train_names = [_][:0]const u8{ "tf_train_head_t", "tf_train_softmax", 
 pub const mixer_names = [_][:0]const u8{ "tf_train_dt", "tf_train_ssm_fwd", "tf_train_ssm_back", "tf_train_ssm_bc", "tf_train_gate_back", "tf_train_conv_back", "tf_train_dt_back", "tf_train_attn_q", "tf_train_attn_kv" };
 
 /// Routed experts taking an expert's member rows two or four at a time (nemotron_experts.metal).
-pub const rows_names = [_][:0]const u8{ "tf_xup_rows2", "tf_xdown_rows2", "tf_xup_rows4", "tf_xdown_rows4" };
+pub const rows_names = [_][:0]const u8{ "tf_xup_rows2", "tf_xdown_rows2", "tf_xup_rows4", "tf_xdown_rows4", "tf_xup_w3", "tf_xdown_w3" };
 
 /// Routed-expert kernels at other (rows a simdgroup, simdgroups a threadgroup): each row's arithmetic is unchanged.
 pub const geometries = [_][2]usize{ .{ 2, 2 }, .{ 8, 2 }, .{ 4, 4 }, .{ 8, 4 }, .{ 4, 1 }, .{ 2, 4 } };
@@ -81,6 +81,15 @@ pub fn keyOf(i: usize) []const u8 {
     if (q < sample_names.len) return sample_names[q];
     const y = q - sample_names.len;
     return if (y < train_names.len) train_names[y] else mixer_names[y - train_names.len];
+}
+
+/// Every source the pipelines compile from and the prebuilt library, hashed: a learned prompt state's identity.
+pub fn sourceHash() u64 {
+    var h = std.hash.Wyhash.init(0x6e);
+    inline for (sources.nemotron.all) |k| h.update(k.source);
+    for ([_][]const u8{ sources.nemotron_glue, sources.nemotron_experts, sources.nemotron_tree, sources.nemotron_round, sources.nemotron_head, sources.nemotron_sample, sources.nax, sources.core_row_projection, sources.packed_metallib }) |s| h.update(s);
+    for (sources.prefill) |f| h.update(f.text);
+    return h.final();
 }
 
 pub const Kernels = struct {

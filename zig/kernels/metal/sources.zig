@@ -76,6 +76,8 @@ pub const glm_kda_prompt = @embedFile("glm_kda_prompt.metal");
 pub const glm_ep = @embedFile("glm_ep.metal");
 /// A prompt chunk's sparse MLA attention on the tensor units (nax.h inlined at load).
 pub const glm_sparse_nax = @embedFile("glm_sparse_nax.metal");
+/// A prompt chunk's index scores on the tensor units (nax.h inlined at load).
+pub const glm_index_nax = @embedFile("glm_index_nax.metal");
 /// A prompt chunk's MLA absorb on the tensor units (nax.h inlined at load).
 pub const glm_absorb_nax = @embedFile("glm_absorb_nax.metal");
 /// A MoE layer's route in two launches (core/moe_route.zig): router logits, then the top-k and the expert groups.

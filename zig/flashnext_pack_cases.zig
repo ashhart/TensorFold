@@ -34,18 +34,18 @@ test "pack scales lay scale and bias pairs group-major over the row-concatenated
     const s1_bits = [_]u16{ 20, 21 };
     const b1_bits = [_]u16{ 110, 111 };
     members[0] = .{
-        .w = .{ .dtype = .u32, .rank = 2, .shape = .{ 3, 4, 0, 0 }, .bytes = &.{} },
-        .s = .{ .dtype = .bf16, .rank = 2, .shape = .{ 3, 2, 0, 0 }, .bytes = std.mem.sliceAsBytes(s0_bits[0..]) },
-        .b = .{ .dtype = .bf16, .rank = 2, .shape = .{ 3, 2, 0, 0 }, .bytes = std.mem.sliceAsBytes(b0_bits[0..]) },
+        .w = .{ .dtype = .u32, .rank = 2, .shape = .{ 3, 4, 0, 0, 0 }, .bytes = &.{} },
+        .s = .{ .dtype = .bf16, .rank = 2, .shape = .{ 3, 2, 0, 0, 0 }, .bytes = std.mem.sliceAsBytes(s0_bits[0..]) },
+        .b = .{ .dtype = .bf16, .rank = 2, .shape = .{ 3, 2, 0, 0, 0 }, .bytes = std.mem.sliceAsBytes(b0_bits[0..]) },
         .rows = 3,
         .k = 64,
         .kw = 12,
         .spec = .{ .bits = 6, .group = 32 },
     };
     members[1] = .{
-        .w = .{ .dtype = .u32, .rank = 2, .shape = .{ 1, 4, 0, 0 }, .bytes = &.{} },
-        .s = .{ .dtype = .bf16, .rank = 2, .shape = .{ 1, 2, 0, 0 }, .bytes = std.mem.sliceAsBytes(s1_bits[0..]) },
-        .b = .{ .dtype = .bf16, .rank = 2, .shape = .{ 1, 2, 0, 0 }, .bytes = std.mem.sliceAsBytes(b1_bits[0..]) },
+        .w = .{ .dtype = .u32, .rank = 2, .shape = .{ 1, 4, 0, 0, 0 }, .bytes = &.{} },
+        .s = .{ .dtype = .bf16, .rank = 2, .shape = .{ 1, 2, 0, 0, 0 }, .bytes = std.mem.sliceAsBytes(s1_bits[0..]) },
+        .b = .{ .dtype = .bf16, .rank = 2, .shape = .{ 1, 2, 0, 0, 0 }, .bytes = std.mem.sliceAsBytes(b1_bits[0..]) },
         .rows = 1,
         .k = 64,
         .kw = 12,

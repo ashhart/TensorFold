@@ -56,3 +56,11 @@ The new paths are experimental until their hardware qualification is complete.
 Each backend must pass packed-value checks, one-row versus batched output equality, full-model drafted versus serial equality, prefix resume, concurrent-stream equality and memory admission before a release claim.
 The Metal kernel has a dedicated hardware test in `tests/test_affine_rows_metal.py`; model and GPU tests must run under the machine's existing resource controls.
 No speed or quality improvement is implied by a higher bit width.
+
+## Native safetensors metadata
+
+The shared Zig safetensors index retains up to five dimensions, including temporal patch convolutions
+such as BF16 `[1024, 3, 2, 14, 14]`. It still rejects ranks above five, invalid dimensions,
+overflowing byte counts, and offsets that disagree with tensor size or exceed the data region.
+Namespace selection remains available to text loaders that do not interpret a vision tower's layouts.
+Reading this metadata does not qualify a vision encoder, checkpoint or device.

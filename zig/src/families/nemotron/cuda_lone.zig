@@ -29,7 +29,7 @@ pub fn run(gpa: std.mem.Allocator, b: *Cuda, s: *lanes.Stream, hooks: Hooks) !bo
     while (true) {
         const v = try r.verify(s.context.items[s.context.items.len - 1]);
         const kept = v.accepted + 1;
-        _ = try s.commit(gpa, v.sampled[0..kept]); // lands all `kept` unless the stream finishes inside them
+        _ = try s.commit(gpa, v.sampled[0..kept], &.{}); // lands all `kept` unless the stream finishes inside them
         s.rounds += 1;
         s.drafted += r.proposal.len;
         s.accepted += v.accepted;

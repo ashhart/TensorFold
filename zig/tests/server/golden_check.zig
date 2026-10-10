@@ -202,6 +202,17 @@ const Outcome = struct { group: []const u8, name: []const u8, verdict: Verdict, 
 
 var outcomes: std.ArrayList(Outcome) = .empty;
 
+/// A case name as a file name every OS checks out: Windows' reserved characters, controls and '%' become %XX.
+fn fileName(a: std.mem.Allocator, name: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for (name) |c| {
+        if (c < 0x20 or std.mem.indexOfScalar(u8, "<>:\"|?*\\%", c) != null) {
+            try out.appendSlice(a, try std.fmt.allocPrint(a, "%{X:0>2}", .{c}));
+        } else try out.append(a, c);
+    }
+    return out.toOwnedSlice(a);
+}
+
 fn runCase(a: std.mem.Allocator, io: Io, golden_dir: []const u8, port: u16, case: std.json.Value) !void {
     const group = case.object.get("group").?.string;
     const name = case.object.get("name").?.string;
@@ -277,7 +288,7 @@ fn runCase(a: std.mem.Allocator, io: Io, golden_dir: []const u8, port: u16, case
 
     // the golden comparison
     var path_buf: [512]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}/{s}.json", .{ golden_dir, group, name });
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}/{s}.json", .{ golden_dir, group, try fileName(a, name) });
     const golden_text = Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 28)) catch {
         try outcomes.append(a, .{ .group = group, .name = name, .verdict = .no_golden });
         return;
@@ -435,7 +446,7 @@ pub fn main(init: std.process.Init) !void {
             } else if (std.mem.eql(u8, kind, "sigterm")) {
                 posix.kill(s.child.id.?, posix.SIG.TERM) catch {};
                 const term = s.child.wait(io) catch return error.WaitFailed;
-                try outcomes.append(gpa, .{
+                try outcomes.append(init.arena.allocator(), .{
                     .group = "lifecycle",
                     .name = "sigterm-exit-0",
                     .verdict = if (term == .exited and term.exited == 0) .equal else .differ,
@@ -445,7 +456,7 @@ pub fn main(init: std.process.Init) !void {
                 const golden_log = try std.fmt.allocPrint(init.arena.allocator(), "{s}/{s}", .{ golden_dir, t.get("golden").?.string });
                 const want = Io.Dir.cwd().readFileAlloc(io, golden_log, init.arena.allocator(), .limited(1 << 28)) catch "";
                 const got = Io.Dir.cwd().readFileAlloc(io, s.log_path.?, init.arena.allocator(), .limited(1 << 28)) catch "";
-                try outcomes.append(gpa, .{
+                try outcomes.append(init.arena.allocator(), .{
                     .group = "lifecycle",
                     .name = "request-log",
                     .verdict = if (std.mem.eql(u8, want, got)) .equal else .differ,
@@ -472,6 +483,7 @@ pub fn main(init: std.process.Init) !void {
     // the verdicts by group, then the total against the frozen answers
     const GroupCounts = struct { name: []const u8, equal: usize = 0, differ: usize = 0, known: usize = 0 };
     var groups: std.ArrayList(GroupCounts) = .empty;
+    defer groups.deinit(gpa);
     var failed: usize = 0;
     for (outcomes.items) |r| {
         var g: ?*GroupCounts = null;

@@ -3,14 +3,18 @@ const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
 const wts = @import("weights.zig");
+const page_cache = @import("page_cache.zig");
 const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const mtp = @import("mtp.zig");
 const prompt_mod = @import("prompt.zig");
+const Fence = @import("../../core/fence.zig").Fence;
 const kernels = @import("kernels.zig");
 const ep_mod = @import("ep.zig");
 const CopyIndex = @import("../../core/copy_index.zig").CopyIndex;
 const checks = @import("checks.zig");
+const load_plan = @import("load_plan.zig");
+const plain_rounds = @import("plain_rounds.zig");
 const Ref = wts.Ref;
 
 pub const Reason = enum { stop, length, cancelled };
@@ -66,6 +70,8 @@ pub const Engine = struct {
     s: st.State,
     sc: st.Scratch,
     prompt_ids: Ref,
+    pick_ring: Ref, // u32 [2]: pipelined plain rounds' picks, a round's input read from the one before's on the GPU
+    round_fence: ?Fence = null, // orders pipelined plain rounds on the GPU (a shared event's wait is slower)
     pr: ?prompt_mod.Prompt, // prompt chunks on the tensor units (null: every prompt row in 16-row decode windows)
     ep: ?*ep_mod.Ep, // expert parallel with a peer Mac (GLM_EP names this Mac's link settings)
     trace_last: ?Ref = null, // a prompt's last row at every capture point (each layer's sublayers), for a path comparison
@@ -80,6 +86,7 @@ pub const Engine = struct {
     keepalive_sets: [1]mtl.ResidencySet = undefined, // the residency set, for the idle keepalive's commit
     keepalive_target: mtl.keepalive.Target = undefined, // the engine's queue, set at load for the server's ticker
     load_seconds: f64 = 0,
+    limit: load_plan.Limit = undefined, // the one-Mac load limit, read once at load (stream admission and the cache budget read it)
     gpu: [2]f64 = .{ 0, 0 }, // the last command buffer's GPU start and end (host seconds)
     fused_route: bool = true, // GLM_ROUTE=0: the Python family's cast, router and top-k launches
     draft_vocab: u32 = 154880, // GLM_DRAFT_VOCAB: the MTP head drafts from the vocabulary's first this many tokens
@@ -128,9 +135,12 @@ pub const Engine = struct {
         e.c = try cfg.parse(gpa, f.bytes[0..f.size]);
         if (e.draft_vocab == 0 or e.draft_vocab > e.c.vocab) e.draft_vocab = e.c.vocab;
         e.draft_vocab -= e.draft_vocab % 4; // the head's kernel takes four rows a simdgroup
-        const model = try modelHash(gpa, dir, f.bytes[0..f.size]);
+        const model = try load_plan.modelHash(gpa, dir, f.bytes[0..f.size]);
         e.model_hash = model;
         if (std.c.getenv("GLM_LAYERS")) |v| try cfg.subset(&e.c, std.fmt.parseInt(u32, std.mem.span(v), 10) catch return error.BadLayerCount);
+        if (std.c.getenv("GLM_MTP")) |v| if (v[0] == '0') { // no MTP head: no drafts, its ~4 GB left on disk
+            e.c.mtp = 0;
+        };
         const link: ?ep_mod.Settings = if (ep_path) |sp| blk: {
             const sf = try mtl.MappedFile.open(try e.ep_arena.allocator().dupeSentinel(u8, sp, 0));
             defer sf.deinit();
@@ -150,12 +160,20 @@ pub const Engine = struct {
             e.k.deinit();
             gpa.destroy(e.k);
         }
-        const plan_bytes = blk: { // the weights' plan from the headers: names, dtypes, shapes and bytes, nothing read
-            const plan = try wts.load(gpa, e.device, dir, &e.c, 16, true);
-            defer gpa.destroy(plan);
-            defer plan.deinit();
-            break :blk plan.bytes;
-        };
+        const chunked = if (std.c.getenv("GLM_PROMPT")) |v| v[0] != '0' else true;
+        e.limit = try load_plan.loadLimit(e.device);
+        const limit = e.limit.bytes;
+        var plan_bytes = try load_plan.planBytes(gpa, e.device, dir, &e.c);
+        if (e.c.mtp > 0 and link == null and plan_bytes + try load_plan.leastArena(gpa, &e.c, cap, chunked) > limit) { // one Mac: the MTP head stays on disk when only it passes the limit
+            var lean = e.c;
+            lean.mtp = 0;
+            const lean_bytes = try load_plan.planBytes(gpa, e.device, dir, &lean);
+            if (lean_bytes + try load_plan.leastArena(gpa, &lean, cap, chunked) <= limit) {
+                std.log.info("glm: the MTP head would pass this Mac's {d:.1} GB load limit ({s}); loading without it (no MTP drafts, copy drafts stay)", .{ @as(f64, @floatFromInt(limit)) / 1e9, e.limit.source() });
+                e.c = lean;
+                plan_bytes = lean_bytes;
+            }
+        }
         if (std.c.getenv("GLM_DRY") != null) return error.DryRun;
         e.arena = .{ .device = e.device, .gpa = gpa };
         errdefer e.arena.deinit();
@@ -163,13 +181,22 @@ pub const Engine = struct {
         e.s = both.state;
         e.sc = both.scratch;
         e.prompt_ids = try e.arena.buffer(@as(usize, cap) * 4);
-        const chunked = if (std.c.getenv("GLM_PROMPT")) |v| v[0] != '0' else true;
-        if (chunked and (link == null or e.c.byRows())) e.pr = try prompt_mod.init(gpa, &e.arena, e.device, &e.c, &e.sc, e.k, cap);
+        e.pick_ring = try e.arena.buffer(256);
+        if (chunked and (link == null or e.c.byRows())) {
+            const rows = load_plan.chunkHeight(gpa, &e.c, &e.sc, cap, plan_bytes + e.arena.bytes, limit, link != null);
+            e.pr = try prompt_mod.init(gpa, &e.arena, e.device, &e.c, &e.sc, e.k, cap, rows);
+            e.chunk_rows = @min(e.chunk_rows, rows);
+        }
         errdefer if (e.pr) |*p| p.deinit();
-        const limit = loadLimit();
         if (plan_bytes + e.arena.bytes > limit) { // refused before any weight is read: the floor's one-Mac limit
-            std.log.err("glm: {d:.1} GB of weights and {d:.1} GB of caches pass this Mac's {d:.1} GB load limit (70% of RAM); load a layer subset or the expert-parallel pair", .{ @as(f64, @floatFromInt(plan_bytes)) / 1e9, @as(f64, @floatFromInt(e.arena.bytes)) / 1e9, @as(f64, @floatFromInt(limit)) / 1e9 });
+            std.log.err("glm: {d:.1} GB of weights and {d:.1} GB of caches pass this Mac's {d:.1} GB load limit ({s}); load a layer subset or the expert-parallel pair, or set GLM_LOAD_LIMIT_GB (past 70% of RAM a load risks a watchdog panic)", .{ @as(f64, @floatFromInt(plan_bytes)) / 1e9, @as(f64, @floatFromInt(e.arena.bytes)) / 1e9, @as(f64, @floatFromInt(limit)) / 1e9, e.limit.source() });
             return error.OverMemoryLimit;
+        }
+        { // the load needs the memory a cached copy of the checkpoint holds: the paced reads wait for free pages (#583)
+            const dropped_at = std.c.mach_absolute_time();
+            if (page_cache.dropCached(gpa, dir)) |cached| {
+                if (cached > 0) std.log.info("glm: dropped {d:.1} GiB of the checkpoint from the file cache before the load ({d:.2} s)", .{ @as(f64, @floatFromInt(cached)) / (1 << 30), @as(f64, @floatFromInt(std.c.mach_absolute_time() - dropped_at)) / 24e6 });
+            } else |err| std.log.warn("glm: could not drop the checkpoint's cached pages ({s}); the load reads beside them", .{@errorName(err)});
         }
         e.w = try wts.load(gpa, e.device, dir, &e.c, 16, false);
         errdefer {
@@ -208,26 +235,6 @@ pub const Engine = struct {
         return e;
     }
 
-    /// The checkpoint's identity for a peer: its config and weight index, hashed.
-    fn modelHash(gpa: std.mem.Allocator, dir: []const u8, config: []const u8) !u64 {
-        const path = try std.fmt.allocPrintSentinel(gpa, "{s}/model.safetensors.index.json", .{dir}, 0);
-        defer gpa.free(path);
-        const f = try mtl.MappedFile.open(path);
-        defer f.deinit();
-        var h = std.hash.Wyhash.init(0x474c4d);
-        h.update(config);
-        h.update(f.bytes[0..f.size]);
-        return h.final();
-    }
-
-    /// The most this Mac may load: 70% of its RAM in GiB, read as GB (the floor's 179 GB on a 256 GiB Mac, the strict reading).
-    pub fn loadLimit() usize {
-        var mem: u64 = 0;
-        var len: usize = @sizeOf(u64);
-        if (std.c.sysctlbyname("hw.memsize", &mem, &len, null, 0) != 0 or mem == 0) return 0;
-        return @intFromFloat(@as(f64, @floatFromInt(mem)) / (1 << 30) * 0.7 * 1e9);
-    }
-
     /// The KDA decay rates A = exp(A_log) with MLX's Exp, on the GPU.
     fn prepare(e: *Engine) !void {
         const cb = e.queue.commandBuffer();
@@ -260,6 +267,7 @@ pub const Engine = struct {
         if (e.ep) |ep| ep.deinit(gpa);
         e.ep_arena.deinit();
         if (e.pr) |*p| p.deinit();
+        if (e.round_fence) |f| f.deinit();
         e.arena.deinit();
         e.w.deinit();
         gpa.destroy(e.w);
@@ -286,7 +294,7 @@ pub const Engine = struct {
     }
 
     /// This Mac's decision to stop at a step; with a peer, rank 0's decision, the one both Macs take.
-    fn agree(e: *Engine, quit: bool) !bool {
+    pub fn agree(e: *Engine, quit: bool) !bool {
         const ep = e.ep orelse return quit;
         return ep.ctl.agree(quit);
     }
@@ -304,12 +312,19 @@ pub const Engine = struct {
 
     /// Commit and wait: no work of this engine is in flight once it returns, whatever the caller does next.
     pub fn finish(e: *Engine, cb: mtl.CommandBuffer, enc: mtl.ComputeEncoder) !void {
+        return e.finishBy(cb, enc, false);
+    }
+
+    /// finish; `spin`: the host spins on the buffer's status instead of sleeping (a window's picks read as it ends).
+    pub fn finishBy(e: *Engine, cb: mtl.CommandBuffer, enc: mtl.ComputeEncoder, spin: bool) !void {
         enc.end();
         e.ev += 1;
         cb.signal(e.event, e.ev);
         cb.commit();
         e.committed = std.c.mach_absolute_time();
-        cb.wait();
+        if (spin) {
+            while (@backingInt(cb.status()) < @backingInt(mtl.types.CommandBufferStatus.completed)) std.atomic.spinLoopHint();
+        } else cb.wait();
         e.gpu = .{ cb.gpuStart(), cb.gpuEnd() };
         if (cb.failure()) |msg| {
             e.event.set(e.ev); // a failed buffer may never signal: the next one must not wait on it
@@ -449,6 +464,11 @@ pub const Engine = struct {
             return res;
         }
         if (max_tokens <= 1) return res;
+        if (d == 0 and e.ep == null and e.copy_min == 0 and e.margins == null) {
+            try plain_rounds.run(e, &x, tok, max_tokens, eos, out, &res);
+            res.decode_seconds = @as(f64, @floatFromInt(std.c.mach_absolute_time() - t_prompt)) / 24e6;
+            return res;
+        }
         var emitted: usize = 1;
         var hist: ?CopyIndex = null; // the prompt and the reply so far: copy drafts' source
         defer if (hist) |*h| h.deinit();
@@ -456,7 +476,7 @@ pub const Engine = struct {
         var ck: f64 = 0;
         var cr: f64 = 0;
         var mk: f64 = @floatFromInt(d);
-        if (e.copy_min > 0 and d > 0) {
+        if (e.copy_min > 0) { // copy drafts need no MTP head: without one a round is the copied tokens or one plain row
             hist = try CopyIndex.init(e.gpa, prompt);
             try hist.?.extend(&.{tok});
         }

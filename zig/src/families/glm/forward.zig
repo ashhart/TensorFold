@@ -52,7 +52,7 @@ fn withState(x: *const Ctx, g: Seg) Ctx {
 
 /// Single launches (or tight groups) for a profile that times each alone.
 pub const Part = struct {
-    pub const names = [_][]const u8{ "hc_expand", "hc_mix", "kda_in", "kda_step", "kda_out", "mla_proj", "mla_cache", "mla_absorb", "mla_select", "mla_attn", "mla_unabs", "mla_out", "r_cast", "r_router", "r_topk", "x_locpost", "x_pack", "x_unpack", "e_gateup", "e_down", "s_gateup", "s_down", "combine", "dense", "head_qmv", "head_argmax" };
+    pub const names = [_][]const u8{ "hc_expand", "hc_mix", "kda_in", "kda_step", "kda_out", "mla_proj", "mla_cache", "mla_absorb", "mla_select", "mla_attn", "mla_unabs", "mla_out", "r_cast", "r_router", "r_topk", "x_locpost", "x_pack", "x_unpack", "e_gateup", "e_down", "s_gateup", "s_down", "combine", "dense", "head_qmv", "head_argmax", "kda_pre", "kda_scan", "kda_post" };
     pub fn bit(comptime name: []const u8) u32 {
         inline for (names, 0..) |n, i| if (comptime std.mem.eql(u8, n, name)) return @as(u32, 1) << i;
         @compileError("no part " ++ name);
@@ -95,7 +95,7 @@ pub fn snap(x: *Ctx, e: mtl.ComputeEncoder, src: Ref, plane: usize) void {
 }
 
 pub const Rows = extern struct { rows: i32, width: i32, x_stride: i32, y_stride: i32, eps: f32 };
-const ScoreArgs = extern struct { p0: u32, q_stride: u32, w_stride: u32, s_stride: u32 };
+const ScoreArgs = extern struct { p0: u32, q_stride: u32, w_stride: u32, s_stride: u32, rows: u32 };
 const SelectArgs = extern struct { p0: u32, top: u32, width: u32, s_stride: u32, i_stride: u32 };
 
 pub fn bind(e: mtl.ComputeEncoder, first: usize, refs: anytype) void {
@@ -161,7 +161,9 @@ pub fn boundary(x: *Ctx, e: mtl.ComputeEncoder, rows: u32, pending: bool, hc: ?w
     const sc = x.sc;
     const k = x.k;
     const h = hc orelse { // the last boundary: the pending branch written into the streams alone
-        if (pending and on(x, "hc_expand")) {
+        if (pending and on(x, "hc_expand") and hc_core.inPlace(sc.x[0], sc.x[1])) {
+            hc_core.expandInPlace(e, k.hc_core, hc_shape, rows, sc.x[0], sc.branch, sc.post, sc.comb);
+        } else if (pending and on(x, "hc_expand")) {
             e.setPipeline(k.hc_expand_10);
             bind(e, 0, .{ sc.x[x.xi], sc.branch, sc.post, sc.comb });
             e.setValue(x.c.eps, 4);
@@ -340,7 +342,31 @@ fn attendSparse(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, g: Seg, first: 
     const n = g.rows - first;
     const r: usize = g.row0 + first; // the first sparse row's place in the window
     selectKeys(x, e, mi, sc.qp.at((r * c.qrProj() + c.mla_heads * c.nope) * 2), c.qrProj(), sc.iw.at(r * c.i_heads * 2), sc.sscore, sc.indices, n, g.pos + first);
-    attendIndexed(x, e, mi, sc.ql.at(r * c.mla_heads * c.kv_lora * 2), sc.indices, sc.att.at(r * c.mla_heads * c.kv_lora * 2), n, g.pos + g.rows);
+    const ql = sc.ql.at(r * c.mla_heads * c.kv_lora * 2);
+    const att = sc.att.at(r * c.mla_heads * c.kv_lora * 2);
+    if (c.tp > 1) return attendIndexed(x, e, mi, ql, sc.indices, att, n, g.pos + g.rows);
+    attendBlocks(x, e, mi, ql, sc.indices, att, n, g.pos + g.rows);
+}
+
+/// `n` rows' 64 heads over their listed keys on the tensor units: each block of attn_span entries its own softmax, then the blocks in order.
+fn attendBlocks(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, ql: Ref, indices: Ref, out: Ref, n: u32, key_length: u32) void {
+    const c = x.c;
+    const k = x.k;
+    const blocks = c.attnBlocks();
+    const vals = @as(usize, n) * blocks * c.mla_heads * c.kv_lora * 4;
+    const marks = @as(usize, n) * blocks * c.mla_heads * 4;
+    const part = x.sc.apart;
+    e.setPipeline(k.sparse_split);
+    bind(e, 0, .{ ql, x.s.mla[mi].keys, indices });
+    e.setValue(@as(f32, 1.0 / 16.0), 3);
+    e.setValue([4]i32{ @intCast(c.keyWidth()), @intCast(key_length), cfg.attn_span, 0 }, 4);
+    bind(e, 5, .{ part, part.at(vals), part.at(vals + marks) });
+    e.dispatchGroups(size(c.mla_heads / 16, blocks, n), size(128, 1, 1));
+    e.setPipeline(k.sparse_combine);
+    bind(e, 0, .{ part, part.at(vals), part.at(vals + marks) });
+    e.setValue(@as(i32, @intCast(blocks)), 3);
+    bind(e, 4, .{out});
+    e.dispatchGroups(size(c.mla_heads, n, 1), size(128, 1, 1));
 }
 
 /// Key lists for `n` rows at positions p0.. past index_topk keys (indexer queries `iq` a row `q_stride` apart).
@@ -349,10 +375,10 @@ pub fn selectKeys(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, iq: Ref, q_st
     const k = x.k;
     const s_stride = x.s.cap / c.kpool + 1;
     const most = (p0 + n) / c.kpool; // the last row's blocks
-    e.setPipeline(k.index_scores);
+    e.setPipeline(k.index_decode); // a row's heads as the tensor op's rows (glm_index_nax.metal)
     bind(e, 0, .{ iq, iw, x.s.mla[mi].pool, scores });
-    e.setValue(ScoreArgs{ .p0 = p0, .q_stride = q_stride, .w_stride = c.i_heads, .s_stride = s_stride }, 4);
-    e.dispatchGroups(size((most + 7) / 8, n, 1), size(256, 1, 1));
+    e.setValue(ScoreArgs{ .p0 = p0, .q_stride = q_stride, .w_stride = c.i_heads, .s_stride = s_stride, .rows = n }, 4);
+    e.dispatchGroups(size((most + 127) / 128, n, 1), size(128, 1, 1));
     e.setPipeline(k.index_select);
     bind(e, 0, .{ scores, indices });
     e.setValue(SelectArgs{ .p0 = p0, .top = c.i_topk / c.kpool, .width = c.keyWidth(), .s_stride = s_stride, .i_stride = c.keyWidth() }, 2);

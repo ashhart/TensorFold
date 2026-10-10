@@ -81,7 +81,7 @@ pub fn linear(a: std.mem.Allocator, src: Source, formats: *const affine.Formats,
 }
 
 fn fixture(dtype: DType, rows: usize, cols: usize, bytes: []const u8) Tensor {
-    return .{ .dtype = dtype, .rank = 2, .shape = .{ rows, cols, 1, 1 }, .bytes = bytes };
+    return .{ .dtype = dtype, .rank = 2, .shape = .{ rows, cols, 1, 1, 1 }, .bytes = bytes };
 }
 
 test "native packed words and mixed scale dtypes remain borrowed unchanged" {

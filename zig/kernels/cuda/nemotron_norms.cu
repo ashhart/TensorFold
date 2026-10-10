@@ -65,6 +65,13 @@ extern "C" __global__ void __launch_bounds__(NT) tf_nemo_embed(const int* __rest
     }
 }
 
+// A bf16 token table's rows (ModelOpt checkpoints keep the embedding unquantized): out = W[ids].
+extern "C" __global__ void __launch_bounds__(NT) tf_nemo_embed16(const int* __restrict__ ids, const __nv_bfloat16* __restrict__ W,
+                                                                   __nv_bfloat16* __restrict__ out, int D) {
+    const int64_t tok = ids[blockIdx.x];
+    for (int i = threadIdx.x; i < D; i += NT) out[static_cast<int64_t>(blockIdx.x) * D + i] = W[tok * D + i];
+}
+
 // h = bf16(x + r) (or x alone without r), y = bf16(rmsnorm(h) * w), xs = y's 64-group sums.
 extern "C" __global__ void __launch_bounds__(NT) tf_nemo_add_rmsnorm(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ R,
                                                                        const __nv_bfloat16* __restrict__ W, __nv_bfloat16* __restrict__ H,

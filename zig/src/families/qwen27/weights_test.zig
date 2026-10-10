@@ -115,7 +115,7 @@ test "conv singleton placement keeps bytes and wrong kernel width refuses" {
     var src = try Fake.init("");
     defer src.deinit();
     const conv = src.tensors.getPtr("model.layers.0.linear_attn.conv1d.weight").?;
-    conv.shape = .{ 128, 1, 4, 1 };
+    conv.shape = .{ 128, 1, 4, 1, 1 };
     var fmt = try Formats.init(gpa, json);
     defer fmt.deinit();
     const c = try Config.parse(gpa, json, null);

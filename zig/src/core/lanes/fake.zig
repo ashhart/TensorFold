@@ -6,6 +6,7 @@ const Stream = @import("stream.zig").Stream;
 const Sampling = @import("sampling.zig").Sampling;
 const keyBits = @import("sampling.zig").keyBits;
 const accept = @import("accept.zig");
+const Row = @import("logprob.zig").Row;
 
 pub const vocab = 97;
 
@@ -18,11 +19,26 @@ pub fn next(history: []const u32, s: ?Sampling, position: u64) u32 {
     return @intCast(token);
 }
 
+/// The fake target's row after `history` for `pick`, a function of the history as logits are; best ids from the pick.
+pub fn rowAt(history: []const u32, pick: u32, count: u8) Row {
+    var sum: u64 = 0;
+    for (history) |t| sum +%= t;
+    const base = -@as(f32, @floatFromInt(sum % 50)) / 64.0;
+    var r: Row = .{ .token = pick, .logprob = base, .count = count };
+    for (0..count) |i| {
+        r.ids[i] = @intCast((pick + i) % vocab);
+        r.logprobs[i] = base - @as(f32, @floatFromInt(i));
+    }
+    return r;
+}
+
 const Lane = struct {
     history: std.ArrayList(u32) = .empty, // the stream's cache: prompt and fed tokens
     held: std.ArrayList(u32) = .empty, // drafts for the next round
     base: usize = 0, // the history length before the last verify
     rows: std.ArrayList(u32) = .empty, // the last verify's row tokens
+    filled: usize = 0, // prompt chunks a stepped prefill has run
+    filling: bool = false,
 };
 
 pub const Fake = struct {
@@ -54,7 +70,12 @@ pub const Fake = struct {
     }
 
     pub fn backend(x: *Fake) be.Backend {
-        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release } };
+        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .features = features, .release = release, .first_row = firstRow } };
+    }
+
+    /// The same target filling its prompt a chunk a call (`prefill_chunks`), as a backend with `prefill_step`.
+    pub fn stepped(x: *Fake) be.Backend {
+        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .prefill_step = prefillStep, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .features = features, .release = release, .first_row = firstRow } };
     }
 
     fn self(ptr: *anyopaque) *Fake {
@@ -108,7 +129,29 @@ pub const Fake = struct {
             if (x.prefill_hook) |hook| hook(x.prefill_hook_ctx.?, s, chunk);
             if (s.isCancelled()) return error.Cancelled;
         }
-        const h = &got.value_ptr.history;
+        try x.fillPrompt(got.value_ptr, s);
+    }
+
+    fn prefillStep(ptr: *anyopaque, s: *Stream) anyerror!bool {
+        const x = self(ptr);
+        if (x.refuse_sampled and s.sampling != null) return error.SamplingRefused;
+        const got = try x.lanes.getOrPut(x.gpa, s);
+        if (got.found_existing and !got.value_ptr.filling) freeLane(x.gpa, got.value_ptr);
+        if (!got.found_existing or !got.value_ptr.filling) got.value_ptr.* = .{ .filling = true };
+        const l = got.value_ptr;
+        x.prefill_count += 1;
+        if (x.prefill_hook) |hook| hook(x.prefill_hook_ctx.?, s, l.filled);
+        if (s.isCancelled()) return error.Cancelled;
+        l.filled += 1;
+        if (l.filled < @max(1, x.prefill_chunks)) return false;
+        l.filling = false;
+        try x.fillPrompt(l, s);
+        return true;
+    }
+
+    /// The pass's end: the cache holds the prompt, from a kept state where one was restored.
+    fn fillPrompt(x: *Fake, l: *Lane, s: *Stream) !void {
+        const h = &l.history;
         s.cached = 0;
         if (s.reuse.saved) |saved| { // the kept state's tokens stand in for the prompt's first `at`
             const kept: *std.ArrayList(u32) = @ptrCast(@alignCast(saved));
@@ -140,6 +183,12 @@ pub const Fake = struct {
     fn first(ptr: *anyopaque, s: *Stream, position: u64) anyerror!u64 {
         const x = self(ptr);
         return x.draw(x.lane(s), s, position);
+    }
+
+    fn firstRow(ptr: *anyopaque, s: *Stream) anyerror!Row {
+        const x = self(ptr);
+        const h = x.lane(s).history.items;
+        return rowAt(h, x.targetNext(h, s.sampling, h.len), s.logprobs.?);
     }
 
     fn queue(ptr: *anyopaque, s: *Stream, feed: be.Feed, position: u64) anyerror!u64 {
@@ -176,6 +225,7 @@ pub const Fake = struct {
                 try l.history.appendSlice(x.gpa, path.items);
                 if (w.positions[r] != l.history.items.len) return error.PositionMismatch;
                 o.sampled[r] = x.targetNext(l.history.items, w.stream.sampling, w.positions[r]);
+                if (o.rows.len > 0) o.rows[r] = rowAt(l.history.items, o.sampled[r], w.stream.logprobs.?);
             }
             l.history.shrinkRetainingCapacity(l.base);
             try l.history.appendSlice(x.gpa, l.rows.items); // a chain keeps every row unless rolled back
@@ -214,6 +264,14 @@ pub const Fake = struct {
                 try guess.append(x.gpa, t);
             }
         }
+    }
+
+    /// A row's "state" is its token (one u32 a row, whatever the taps): enough for a drafter to rebuild the history.
+    fn features(ptr: *anyopaque, s: *Stream, taps: []const u32, start: u64, count: u32) anyerror!be.Features {
+        _ = taps;
+        const l = self(ptr).lane(s);
+        if (start + count > l.history.items.len) return error.RowsNotHeld;
+        return .{ .buffer = @intFromPtr(l.history.items.ptr), .offset = start * 4, .rows = count, .row_bytes = 4, .space = .host, .dtype = .u32 };
     }
 
     fn release(ptr: *anyopaque, s: *Stream) void {

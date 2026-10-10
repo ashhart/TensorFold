@@ -7,6 +7,9 @@ const Allocator = std.mem.Allocator;
 
 pub const Opened = api.Opened;
 
+/// The serve flags past the common ones the backend lists (tensor parallelism, MTP, kept entries, policy).
+pub const serves: []const []const u8 = if (@hasDecl(native, "serves")) native.serves else &.{};
+
 /// What ``capabilities --json`` reports: this release, the chip here, and what the built-in backend serves.
 pub fn capabilities(a: Allocator) cli.Engines {
     return .{ .version = @import("build_options").version, .chip = if (native.families.len > 0) native.chip(a) else null, .backends = native.backends, .families = native.families };
@@ -14,22 +17,14 @@ pub fn capabilities(a: Allocator) cli.Engines {
 
 /// The engine for the checkpoint in ``dir``, or null with ``problem`` set.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, dir: []const u8, model_type: []const u8, args: cli.Args, problem: *[]const u8) !?Opened {
-    return native.open(a, gpa, io, .{
-        .dir = dir,
-        .model_type = model_type,
-        .context = args.context,
-        .lanes = cli.parallel(args.parallel) orelse 8,
-        .lanes_fixed = cli.parallelFixed(args.parallel),
-        .drafts = !args.no_drafts,
-        .drafter = args.drafter,
-        .drafter_bits = args.drafter_bits,
-        .speed_up = args.speed_up,
-        .prompt_cache_gib = args.prompt_cache_gib,
-        .prompt_cache_over_cap = args.prompt_cache_over_cap,
-        .learn = if (args.learn) args.learn_dir orelse try api.prompt_imprint.defaultRoot(a) else null,
-        .learn_gib = args.learn_gib,
-        .slide = args.slide,
-        .device = args.device,
-        .segments = args.segments,
-    }, problem);
+    return native.open(a, gpa, io, try cli.request(a, dir, model_type, args), problem);
+}
+
+/// A tensor-parallel rank above 0 runs rank 0's steps until it stops; false with ``problem`` set when it cannot.
+pub fn follow(a: Allocator, gpa: Allocator, io: std.Io, dir: []const u8, model_type: []const u8, args: cli.Args, problem: *[]const u8) !bool {
+    if (!@hasDecl(native, "follow")) {
+        problem.* = "this build has no tensor-parallel ranks";
+        return false;
+    }
+    return native.follow(a, gpa, io, try cli.request(a, dir, model_type, args), problem);
 }

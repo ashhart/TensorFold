@@ -6,6 +6,7 @@ const Allocator = std.mem.Allocator;
 const Proposer = @import("proposer.zig").Proposer;
 const Sampling = @import("sampling.zig").Sampling;
 const State = @import("depth.zig").State;
+const Row = @import("logprob.zig").Row;
 
 pub const Reason = enum {
     none,
@@ -111,8 +112,11 @@ pub const Spec = struct {
     think_open: ?bool = null, // null: open when a budget is set (the server's rule)
     loop_guard: bool = false,
     chunks: []const u32 = &.{}, // where prefill chunks start after 0 (Python's PrefillPlan); empty: the backend's step
+    history_len: u32 = 0, // prompt prefix lengths a backend may keep for a later turn: the rendered history,
+    shared_prefixes: []const u32 = &.{}, // then shared system blocks
     reuse: Reuse = .{},
     decide: ?u32 = null, // the prompt row where living lessons decide whether they act on the reply
+    logprobs: ?u8 = null, // the target's log probabilities for each committed token, with this many best tokens
 };
 
 pub const Stream = struct {
@@ -132,6 +136,10 @@ pub const Stream = struct {
     loop_guard: bool,
     loop_period: ?u32 = null,
     chunks: []const u32,
+    history_len: u32,
+    shared_prefixes: []const u32,
+    logprobs: ?u8 = null,
+    rows: std.ArrayList(Row) = .empty, // with `logprobs`: one a token of emitted(), in order
     reuse: Reuse = .{},
     decide: ?u32 = null,
     cached: u32 = 0, // prompt tokens the backend restored from `reuse` (its prompt pass started there)
@@ -185,8 +193,11 @@ pub const Stream = struct {
             .think_open = spec.think_open orelse (spec.think_budget > 0 or (spec.loop_guard and spec.think_end >= 0)),
             .loop_guard = spec.loop_guard,
             .chunks = spec.chunks,
+            .history_len = spec.history_len,
+            .shared_prefixes = spec.shared_prefixes,
             .reuse = spec.reuse,
             .decide = spec.decide,
+            .logprobs = spec.logprobs,
         };
         try s.context.appendSlice(gpa, spec.prompt);
         return s;
@@ -194,6 +205,7 @@ pub const Stream = struct {
 
     pub fn deinit(s: *Stream, gpa: Allocator) void {
         s.context.deinit(gpa);
+        s.rows.deinit(gpa);
         s.force.deinit(gpa);
         s.dropRoundState(gpa);
     }
@@ -295,12 +307,14 @@ pub const Stream = struct {
         }
     }
 
-    /// Append tokens until the stream finishes; how many landed (a prefix of `tokens`).
-    pub fn commit(s: *Stream, gpa: Allocator, tokens: []const u32) !usize {
+    /// Append tokens, and with `logprobs` their rows, until the stream finishes; how many landed.
+    pub fn commit(s: *Stream, gpa: Allocator, tokens: []const u32, rows: []const Row) !usize {
+        if (rows.len != if (s.logprobs != null) tokens.len else 0) return error.LogprobRowsMismatch;
         var landed: usize = 0;
-        for (tokens) |t| {
+        for (tokens, 0..) |t, i| {
             if (s.finished) break;
             try s.context.append(gpa, t);
+            if (rows.len > 0) try s.rows.append(gpa, rows[i]);
             landed += 1;
             if (@as(i64, t) == s.think_end) s.think_open = false;
             const fire = if (s.loop_guard and s.think_open and s.think_end >= 0 and s.loop_period == null) detectLoop(s.emitted()) else null;
@@ -344,9 +358,20 @@ test "commit stops at eos and length" {
     const gpa = std.testing.allocator;
     var s = try Stream.init(gpa, .{ .id = "a", .prompt = &.{ 1, 2 }, .max_new = 3, .eos = &.{9} });
     defer s.deinit(gpa);
-    try std.testing.expectEqual(@as(usize, 2), try s.commit(gpa, &.{ 5, 9, 7 }));
+    try std.testing.expectEqual(@as(usize, 2), try s.commit(gpa, &.{ 5, 9, 7 }, &.{}));
     try std.testing.expectEqualSlices(u32, &.{ 5, 9 }, s.emitted());
     try std.testing.expect(s.finished and s.reason == .stop);
+}
+
+test "a logprob stream lands a row with each token it lands, and refuses tokens without rows" {
+    const gpa = std.testing.allocator;
+    var s = try Stream.init(gpa, .{ .id = "a", .prompt = &.{ 1, 2 }, .max_new = 3, .eos = &.{9}, .logprobs = 0 });
+    defer s.deinit(gpa);
+    try std.testing.expectError(error.LogprobRowsMismatch, s.commit(gpa, &.{5}, &.{}));
+    const rows = [_]Row{ .{ .token = 5, .logprob = -0.5 }, .{ .token = 9, .logprob = -1 }, .{ .token = 7, .logprob = -2 } };
+    try std.testing.expectEqual(@as(usize, 2), try s.commit(gpa, &.{ 5, 9, 7 }, &rows));
+    try std.testing.expectEqual(@as(usize, 2), s.rows.items.len);
+    try std.testing.expectEqual(@as(u32, 9), s.rows.items[1].token);
 }
 
 test "loop guard stops at the cap even when no cycle fires" {
@@ -355,7 +380,7 @@ test "loop guard stops at the cap even when no cycle fires" {
     for (&tokens, 0..) |*token, i| token.* = @intCast(100 + i);
     var guarded = try Stream.init(gpa, .{ .id = "guarded", .prompt = &.{1}, .max_new = 10, .think_close = &.{ 90, 91, 92 }, .think_end = 91, .loop_guard = true });
     defer guarded.deinit(gpa);
-    try std.testing.expectEqual(@as(usize, 10), try guarded.commit(gpa, &tokens));
+    try std.testing.expectEqual(@as(usize, 10), try guarded.commit(gpa, &tokens, &.{}));
     try std.testing.expect(guarded.finished and guarded.reason == .length);
 }
 
@@ -367,11 +392,11 @@ test "loop guard fires, closes thinking, and latches once" {
     for (0..257) |_| try tokens.append(gpa, 7);
     var s = try Stream.init(gpa, .{ .id = "loop", .prompt = &.{1}, .max_new = 400, .think_close = &.{ 90, 91, 92 }, .think_end = 91, .loop_guard = true });
     defer s.deinit(gpa);
-    try std.testing.expectEqual(@as(usize, 321), try s.commit(gpa, tokens.items));
+    try std.testing.expectEqual(@as(usize, 321), try s.commit(gpa, tokens.items, &.{}));
     try std.testing.expectEqual(@as(u32, 1), s.loop_period.?);
     try std.testing.expect(!s.finished and !s.think_open and s.force.items.len == 3);
-    while (s.popForce()) |token| _ = try s.commit(gpa, &.{token});
+    while (s.popForce()) |token| _ = try s.commit(gpa, &.{token}, &.{});
     try std.testing.expect(!s.finished and s.force.items.len == 0);
-    _ = try s.commit(gpa, &.{8});
+    _ = try s.commit(gpa, &.{8}, &.{});
     try std.testing.expect(!s.finished and s.loop_period.? == 1);
 }

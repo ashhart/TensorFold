@@ -273,17 +273,21 @@ pub fn effortLevels(a: Allocator, template: []const u8) Allocator.Error![]const 
     return found.items;
 }
 
-/// ``probability_options``: n must be 1, and logprobs are refused (no engine reports them yet).
-pub fn probabilityOptions(cx: *Cx, body: Value) errors.Refused!void {
+/// ``probability_options``: n must be 1; the ``top_logprobs`` count when logprobs are asked and ``supported``.
+pub fn probabilityOptions(cx: *Cx, body: Value, supported: bool) errors.Refused!?u8 {
     if (body.field("n")) |n| if (n != .int or !std.mem.eql(u8, n.int, "1")) return cx.refuse("n must be 1; multiple choices are not supported");
     const enabled = body.field("logprobs");
     if (enabled) |e| if (e != .bool) return cx.refuse("logprobs must be a boolean or null");
+    var count: u8 = 0;
     if (body.field("top_logprobs")) |top| {
         const n = top.int64();
         if (n == null or n.? < 0 or n.? > 20) return cx.refuse("top_logprobs must be an integer between 0 and 20, or null");
         if (enabled == null or !enabled.?.bool) return cx.refuse("top_logprobs requires logprobs: true");
+        count = @intCast(n.?);
     }
-    if (enabled != null and enabled.?.bool) return cx.refuse("logprobs are not supported by this model or backend");
+    if (enabled == null or !enabled.?.bool) return null;
+    if (!supported) return cx.refuse("logprobs are not supported by this model or backend");
+    return count;
 }
 
 const media = [_][]const u8{ "image", "images", "image_url", "input_image", "audio", "input_audio", "video", "video_url" };

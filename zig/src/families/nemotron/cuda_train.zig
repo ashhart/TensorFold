@@ -141,6 +141,42 @@ pub const Trainer = struct {
         return t.c;
     }
 
+    /// The device bytes `init` takes for config `c` at most: what a server keeps out of its streams' room with --slide.
+    pub fn memory(c: Config) usize {
+        var raw: [@import("config.zig").max_layers]Raw = undefined;
+        var kept: [@import("config.zig").max_layers]Kept = undefined;
+        const quad = struct {
+            fn f(n: usize, k: usize) usize {
+                return n * k / 2 + n * k / 16 + 2 * 256; // words, then bf16 scales and biases a 64-group each
+            }
+        }.f;
+        const shape = struct {
+            fn f(n: usize, k: usize) Mat {
+                return .{ .w = 0, .n = n, .k = k };
+            }
+        }.f;
+        const shared = c.shared_width + c.pocket;
+        var copies: usize = quad(c.vocab, c.hidden) + c.vocab * c.hidden * 2; // the LM head, and dequantized
+        for (0..c.layers) |l| {
+            raw[l] = switch (c.kinds[l]) {
+                .mamba => .{ .mamba = .{ .in_proj = shape(c.projDim(), c.hidden), .out_proj = shape(c.hidden, c.inner()) } },
+                .attention => .{ .attention = .{ .q = shape(c.heads * c.head_dim, c.hidden), .k = shape(c.kv_heads * c.head_dim, c.hidden), .v = shape(c.kv_heads * c.head_dim, c.hidden), .o = shape(c.hidden, c.heads * c.head_dim) } },
+                .moe => .{ .moe = .{ .up = shape(shared, c.hidden), .down = shape(c.hidden, shared), .fc1 = @splat(0), .fc2 = @splat(0) } },
+            };
+            copies += switch (raw[l]) {
+                .mamba => |m| quad(m.in_proj.n, m.in_proj.k) + quad(m.out_proj.n, m.out_proj.k),
+                .attention => |a| quad(a.q.n, a.q.k) + quad(a.k.n, a.k.k) + quad(a.v.n, a.v.k) + quad(a.o.n, a.o.k),
+                .moe => |m| quad(m.up.n, m.up.k) + quad(m.down.n, m.down.k) + 2 * c.experts * quad(c.expert_width, c.hidden),
+            };
+        }
+        var t: Trainer = undefined;
+        t.c = c;
+        t.raw = raw[0..c.layers];
+        t.kept = kept[0..c.layers];
+        const mapped = proj_at + c.layers * max_rows * sites_mod.candidates * 4 + 6 * c.layers * c.hidden * 4 + (2 * c.layers + 1) * max_rows * c.hidden * 2;
+        return copies + t.layout(true) + mapped + state.Seq.bytes(c, seq_len, &.{}) + (1 << 30); // a GiB for the sites and the scratch
+    }
+
     /// Every buffer a step needs and the raw weights its backward reads; `living`, saved blocks the trainer takes over.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, e: *engine.Engine, dir: []const u8, living: *?sites_mod.Sites) !*Trainer {
         const c = e.c;
@@ -155,7 +191,7 @@ pub const Trainer = struct {
         errdefer if (saved) {
             living.* = t.sites;
         } else t.sites.deinit();
-        t.seq = try state.Seq.init(d, c, seq_len, &.{}, e.stream);
+        t.seq = try state.Seq.init(d, c, seq_len, &.{}, e.stream, null);
         errdefer t.seq.deinit();
         t.buf = try e.b.sibling(d, c, e.nch);
         errdefer t.buf.deinit();

@@ -107,6 +107,45 @@ Expected output SHA-256:
 A different stdlib distribution can change the selected files. Check the output hash before adopting a
 rebuild. This subset affects draft proposals only; the target still verifies against its full vocabulary.
 
+## Native prompt reuse
+
+The Zig engine keeps a stream's prompt state at each planned chunk end: every Mamba conv and SSM state, the KV rows and
+the draft head's KV rows (`zig/src/families/nemotron/snapshot.zig`). A later request whose prompt extends a kept state
+resumes there. Both the keep and the resume are copies on the GPU, on the engine's own queue, so neither waits for the
+host. `--prompt-cache-gib` sizes the memory as for Flash Next; `0` turns it off.
+
+Measured on an M5 Ultra (256 GB), macOS 27.0.1, Zig 0.17.0, checkpoint revision `d9d758fb`, with
+`--context 32768 --temperature 0 --no-thinking`, greedy, 96 reply tokens, a 9.2k-token chat over four turns:
+
+| | Turns 2-4, cache off | Turns 2-4, cache on |
+| --- | --- | --- |
+| Prompt time | 1.29-1.36 s | 0.28-0.31 s, 9,213 tokens resumed (turn 4: 9,556) |
+
+A fresh 9.2k-token prompt costs the same with the cache on or off: 1.07 s mean over four prompts each way, alternated,
+while the cache keeps two states (106 MiB each) per prompt. Every reply equalled its cache-off reply: one conversation
+alone, two conversations at once with `--parallel 4` (each equal to its solo run), and `--no-drafts`; drafted output
+equalled `--no-drafts` throughout.
+
+`--learn` keeps the states at shared cuts (a system prompt and its tools) on disk, under an identity made of the
+checkpoint's config and tensor index, each shard file's size, inode and change times, the prefill step, the head,
+every kernel source, a probe's prompt-pass bits, the OS build and the chip
+(`zig/src/families/nemotron/learned_prompts.zig`). Weights that `--slide` writes into the shards start a new identity,
+and a live weight change stops the server reading or writing learned states until it restarts. The probe runs a fixed
+4,143-token prompt at startup, about a second. A later server with the same identity reads a learned state back and
+resumes a fresh conversation from it: with the 9.2k-token system prompt above, a new server's first turn took 0.27 s
+instead of 1.30 s, resuming 9,213 tokens from disk, and every reply equalled the cache-off reply. The two learned
+states took 213 MB on disk.
+
+## Routed experts past one row
+
+Windows and shared rounds take the routed experts through `tf_experts_w` (`zig/kernels/metal/nemotron_experts.metal`):
+a 16-group's four weight words as the outer loop, three member rows a pass, four simdgroups a threadgroup. Each lane
+sums in the one-row kernel's order, so every width gives the one-row bits; `zig build tf-nemotron-experts` checks that
+and times the shapes. On an M5 Ultra the 23 layers' up and down projections went from 2.35 to 2.27 ms at 4 rows, 6.68
+to 6.48 at 16, 11.93 to 11.24 at 32 and 22.57 to 20.58 at 64 (equal at 2). Served with the cache off, alternated twice
+against the previous kernel: one stream 503 to 513 tok/s on code and 348 to 351 on prose, 8 streams 947 to 985 and 713
+to 731 tok/s in all, 32 streams 792 to 802 and 752 to 761, every reply equal to its solo and its plain run.
+
 ## Measurements
 
 Use the [public benchmark command](README.md#measurements) with the server above.
@@ -120,3 +159,25 @@ prefilled in 311.5 s and resumed in 0.63 s with 261,774 tokens cached. Decode me
 135.3 tok/s with MTP (code sampled, chat sampled, code greedy, chat greedy) and 107.8, 109.0, 109.5 and 109.0 with
 `--no-drafts`. All 180 concurrent replies at 1, 2, 4 and 8 streams equaled their solo runs, and every solo run
 equaled `"draft": false`. These are 0.3.5.1 results, not a later release's.
+
+## Shared rounds on the Zig engine
+
+The native server runs every live stream's window in one forward. That forward holds four rows a lane (`--parallel`),
+64 at least and 128 at most, so up to `--parallel 16` nothing changes from the 64-row buffers the engine always
+allocated, and at 32 or 64 lanes each drafting stream keeps rows for its drafts instead of the round splitting. Each
+row past 64 costs one Mamba state slot, 2 MiB a Mamba layer, 47 MiB across Lightning's 23, so `--parallel 64` takes
+about 2.9 GiB more than before and `--parallel 8` the same. The startup timing sweep times shared rounds up to that
+width, so the planner prices them from measurements rather than a straight line past 32.
+
+Measured on an M5 Ultra (256 GB, macOS 27.0.1) with `--parallel 64 --context 32768 --prompt-cache-gib 0`, 256
+tokens a reply, greedy, two alternated rounds, `tools/bench_concurrent.py --alone --serial`:
+
+| Sessions | Code, before | Code, after | Chat, before | Chat, after |
+|---|---|---|---|---|
+| 8 | 939-944 tok/s | 944-953 | 717-721 | 713-717 |
+| 32 | 779-795 | 958-1,019 | 740-755 | 843 |
+| 64 | 779-795 | 968-1,006 | 738-753 | 847-849 |
+
+Every concurrent reply equaled its solo run and every solo run equaled `"draft": false` (832 replies checked a
+binary). One stream decodes the same as before: 505 and 347 tok/s on the two decode prompts. A 64-row cap alone,
+measured on the way, gave most of the 32-session gain and a quarter of the 64-session one.

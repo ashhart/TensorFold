@@ -112,6 +112,19 @@ fn messageOf(srv: *Server, a: Allocator, body: []const u8) ![]const u8 {
     return cx.message;
 }
 
+test "server cleanup releases request counters" {
+    var text: ByteText = .{};
+    var backend: Backend = .{};
+    const srv = try serve(&text, &backend);
+    defer srv.deinit();
+    srv.metrics.httpRequest(std.testing.io, "client", 200);
+    srv.metrics.httpRequest(std.testing.io, "client", 401);
+    srv.metrics.httpRequest(std.testing.io, "other", 200);
+    srv.metrics.httpRequest(std.testing.io, "client", 200);
+    try std.testing.expectEqual(@as(usize, 3), srv.metrics.requests.items.len);
+    try std.testing.expectEqual(@as(u64, 2), srv.metrics.requests.items[0].count);
+}
+
 test "a decisions body is refused with 0.6.6's sentences" {
     var text: ByteText = .{};
     var backend: Backend = .{};

@@ -38,8 +38,10 @@ test {
     _ = @import("log.zig");
     _ = @import("messages.zig");
     _ = @import("stream_preflight_test.zig");
+    _ = @import("logprobs_test.zig");
     _ = @import("late_system_test.zig");
     _ = @import("compact_test.zig");
+    _ = @import("completion_prompt_test.zig");
     _ = @import("decisions.zig");
     _ = @import("decisions_test.zig");
     _ = @import("slide.zig");

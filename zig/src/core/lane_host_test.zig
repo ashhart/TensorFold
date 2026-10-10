@@ -312,3 +312,123 @@ test "a learn request steps while the engine idles, its events in order; a host 
         std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
     }
 }
+
+test "a lane host fills prompts a chunk a round, serves their tokens, and cancels between chunks" {
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa, .prefill_chunks = 4 };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.stepped(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
+    try host.start();
+    defer host.stop();
+    const Box = struct {
+        mutex: std.Io.Mutex = .init,
+        tokens: std.ArrayList(u32) = .empty,
+        done: ?Reason = null,
+        fn event(ctx: *anyopaque, _: Id, e: *const Event) void {
+            const b: *@This() = @ptrCast(@alignCast(ctx));
+            b.mutex.lockUncancelable(std.testing.io);
+            defer b.mutex.unlock(std.testing.io);
+            switch (e.*) {
+                .tokens => |t| b.tokens.appendSlice(gpa, t) catch {},
+                .finished => |f| b.done = f.reason,
+                else => {},
+            }
+        }
+        fn wait(b: *@This()) Reason {
+            while (true) {
+                b.mutex.lockUncancelable(std.testing.io);
+                const d = b.done;
+                b.mutex.unlock(std.testing.io);
+                if (d) |r| return r;
+                std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+            }
+        }
+    };
+    const prompts = [2][]const u32{ &.{ 3, 1, 4, 1, 5, 9, 2, 6 }, &.{ 2, 7, 1, 8, 2, 8 } };
+    var requests: [2]Request = undefined;
+    var boxes: [2]Box = .{ .{}, .{} };
+    defer for (&boxes) |*b| b.tokens.deinit(gpa);
+    const e = host.engine();
+    for (prompts, &requests, &boxes, 1..) |prompt, *r, *b, id| {
+        r.* = .{ .prompt = prompt, .max_tokens = 24 };
+        try e.submit(id, r, .{ .ctx = b, .event = Box.event });
+    }
+    for (prompts, &boxes) |prompt, *b| {
+        try std.testing.expectEqual(Reason.length, b.wait());
+        var history: std.ArrayList(u32) = .empty;
+        defer history.deinit(gpa);
+        try history.appendSlice(gpa, prompt);
+        for (b.tokens.items) |t| {
+            try std.testing.expectEqual(lanes.fake.next(history.items, null, history.items.len), t);
+            try history.append(gpa, t);
+        }
+        try std.testing.expectEqual(@as(usize, 24), b.tokens.items.len);
+    }
+    try std.testing.expectEqual(@as(usize, 8), target.prefill_count);
+
+    const CancelPrefill = struct {
+        engine: Engine,
+        id: Id,
+        at: usize,
+
+        fn call(ctx: *anyopaque, _: *lanes.Stream, chunk: usize) void {
+            const c: *@This() = @ptrCast(@alignCast(ctx));
+            if (chunk == c.at) c.engine.cancel(c.id);
+        }
+    };
+    var chunked: Box = .{};
+    defer chunked.tokens.deinit(gpa);
+    var prefill_cancel = CancelPrefill{ .engine = e, .id = 3, .at = 1 };
+    target.prefill_chunks = 10;
+    target.prefill_count = 0;
+    target.prefill_hook = CancelPrefill.call;
+    target.prefill_hook_ctx = &prefill_cancel;
+    try e.submit(3, &requests[0], .{ .ctx = &chunked, .event = Box.event });
+    try std.testing.expectEqual(Reason.cancelled, chunked.wait());
+    try std.testing.expectEqual(@as(usize, 0), chunked.tokens.items.len);
+    try std.testing.expect(target.prefill_count <= 3);
+    try std.testing.expectEqual(@as(usize, 0), target.lanes.count());
+}
+
+test "a lane host hands the backend the request's history and shared prefix lengths with its stream" {
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 1 });
+    try host.start();
+    defer host.stop();
+    const Seen = struct {
+        history: u32 = 0,
+        shared: [2]u32 = .{ 0, 0 },
+        done: std.atomic.Value(bool) = .init(false),
+        fn prefill(ctx: *anyopaque, s: *lanes.Stream, _: usize) void {
+            const seen: *@This() = @ptrCast(@alignCast(ctx));
+            seen.history = s.history_len;
+            @memcpy(seen.shared[0..s.shared_prefixes.len], s.shared_prefixes);
+        }
+        fn event(ctx: *anyopaque, _: Id, e: *const Event) void {
+            const seen: *@This() = @ptrCast(@alignCast(ctx));
+            if (e.* == .finished) seen.done.store(true, .release);
+        }
+    };
+    var seen: Seen = .{};
+    target.prefill_hook = Seen.prefill;
+    target.prefill_hook_ctx = &seen;
+    const prompt = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6 };
+    const shared = [_]u32{ 2, 4 };
+    const request: Request = .{ .prompt = &prompt, .max_tokens = 2, .history_len = 6, .shared_prefixes = &shared };
+    try host.engine().submit(1, &request, .{ .ctx = &seen, .event = Seen.event });
+    while (!seen.done.load(.acquire)) std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+    try std.testing.expectEqual(@as(u32, 6), seen.history);
+    try std.testing.expectEqualSlices(u32, &shared, &seen.shared);
+}

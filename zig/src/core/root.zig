@@ -1,6 +1,7 @@
 //! Backend-neutral engine parts: checkpoint files, the CUDA draft-depth rule, the copy index, the tokenizer.
 
 pub const safetensors = @import("safetensors.zig");
+pub const exl3_format = @import("exl3_format.zig");
 pub const checkpoint = @import("checkpoint.zig");
 pub const direct_io = @import("direct_io.zig");
 pub const Checkpoint = checkpoint.Checkpoint;
@@ -11,12 +12,20 @@ pub const ids_json = @import("ids_json.zig");
 pub const affine4_host = @import("affine4_host.zig");
 pub const affine4_fold = @import("affine4_fold.zig");
 pub const shard_edit = @import("shard_edit.zig");
+pub const quant = @import("quant/quant.zig");
+pub const registry = @import("registry.zig");
+pub const tuning = @import("tuning.zig");
 
 test {
     _ = safetensors;
     _ = affine4_host;
     _ = affine4_fold;
     _ = shard_edit;
+    _ = quant;
+    _ = registry;
+    _ = tuning;
+    _ = exl3_format;
+    _ = @import("exl3_rect_test.zig");
     _ = checkpoint;
     _ = direct_io;
     _ = draft_depth;

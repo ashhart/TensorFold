@@ -92,11 +92,16 @@ pub const Head = struct {
         h.e.gpa.destroy(h);
     }
 
+    /// Bytes a snapshot of the head's KV cache takes.
+    pub fn snapshotBytes(h: *const Head) usize {
+        return h.v_cache - h.k_cache + h.kvBytes();
+    }
+
     /// MTPHead.snapshot: the head's KV cache (its position is the caller's to keep).
     pub fn snapshot(h: *Head) !cuda.DeviceBuffer {
-        const bytes = h.v_cache - h.k_cache + h.kvBytes();
-        const copy = try cuda.DeviceBuffer.alloc(h.e.ctx.d, bytes);
-        try h.e.ops().copy(copy.ptr, h.k_cache, bytes);
+        var copy = try cuda.DeviceBuffer.alloc(h.e.ctx.d, h.snapshotBytes());
+        errdefer copy.free();
+        try h.e.ops().copy(copy.ptr, h.k_cache, copy.len);
         return copy;
     }
 
@@ -136,7 +141,7 @@ pub const Head = struct {
         const f = e.forward(null);
         const t = f.glue;
         const D: u64 = c.hidden;
-        try t.embed(h.tok, e.w.embed.w, e.w.embed.s, e.w.embed.b, h.emb, rows, c.hidden);
+        try f.embed(h.tok, h.emb, rows);
         try t.concatNorms(h.emb, h.hin, m.enorm, m.hnorm, h.cat, h.cxs, rows, c.hidden, c.eps);
         try o.dense(h.cat, h.cxs, m.eh_proj, h.x, rows);
         try t.addRmsnorm(h.x, null, m.attn_norm, h.x, b.y, b.xs, rows, c.hidden, c.eps);
@@ -286,7 +291,7 @@ pub const Head = struct {
         const host = h.pinned.slice(u32)[128..][0..tokens.len];
         @memcpy(host, tokens);
         try o.upload(h.atok, std.mem.sliceAsBytes(host));
-        try f.glue.embed(h.atok, e.w.embed.w, e.w.embed.s, e.w.embed.b, h.emb, rows, c.hidden);
+        try f.embed(h.atok, h.emb, rows);
         try f.glue.concatNorms(h.emb, hidden, m.enorm, m.hnorm, h.cat, h.cxs, rows, c.hidden, c.eps);
         try o.prefillDense(h.cat, m.eh_proj, h.x, rows);
         try f.glue.addRmsnorm(h.x, null, m.attn_norm, h.x, b.y, b.xs, rows, c.hidden, c.eps);

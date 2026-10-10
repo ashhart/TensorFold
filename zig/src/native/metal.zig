@@ -9,7 +9,9 @@ const Allocator = std.mem.Allocator;
 const qwen27 = @import("qwen27_host.zig");
 const flashnext = @import("flashnext_host.zig");
 const glm = @import("glm_host.zig");
-const Slide = @import("nemotron_slide.zig").Adapter(nemotron.slide);
+const nemotron_slide = @import("nemotron_slide.zig");
+const Slide = nemotron_slide.Adapter(nemotron.slide);
+const cache_fit = @import("cache_fit.zig");
 
 pub const backends: []const []const u8 = &.{"metal"};
 pub const families: []const api.Family = &.{
@@ -64,6 +66,8 @@ const Host = struct {
     clock: nemotron.timing.RoundClock,
     core: lanes.Engine,
     host: api.LaneHost,
+    cache: ?api.prompt_cache.Store = null, // kept prompt states (engine thread only); null: a zero budget
+    learned: ?api.prompt_imprint.Imprint = null, // --learn: shared states on disk, read back by later servers
     round: nemotron.gpu_round.Options = .{ .depth = 8 }, // a lone greedy stream's GPU-side rounds, as the CLI runs them
     slide: ?*Slide = null, // Sliding Weights' learner, with --slide
 
@@ -83,6 +87,8 @@ const Host = struct {
             s.deinit();
             h.gpa.destroy(s);
         }
+        if (h.cache) |*store| store.deinit();
+        if (h.learned) |*m| m.deinit();
         h.core.deinit();
         h.cfg.deinit(h.gpa);
         h.metal.deinit();
@@ -93,7 +99,7 @@ const Host = struct {
 
 /// The engine for `o.dir`, or null with `problem` set when no Metal engine reads the checkpoint.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
-    const dense = std.mem.eql(u8, o.model_type, "qwen3_5") and !tiedHead(a, io, o.dir);
+    const dense = std.mem.eql(u8, o.model_type, "qwen3_5") and qwen27Engine(a, io, o.dir);
     if (o.drafter != null and !dense) {
         problem.* = "--drafter is supported for Qwen3.8-27B-class checkpoints (qwen3_5 with its own output head)";
         return null;
@@ -103,7 +109,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (std.mem.eql(u8, o.model_type, "glm5_next")) return openGlm(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen3_5")) return @import("qwen35.zig").open(a, gpa, io, o, problem);
     if (!std.mem.eql(u8, o.model_type, "nemotron_h")) {
-        problem.* = try std.fmt.allocPrint(a, "the native engine has no backend for {s} checkpoints yet; serve with --engine python", .{o.model_type});
+        problem.* = try std.fmt.allocPrint(a, "the native engine has no backend for {s} checkpoints yet; the Python engine 0.6.6 may serve them: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{o.model_type});
         return null;
     }
     if (o.slide) if (try tf.shard_edit.linked(a, io, o.dir)) |name| {
@@ -134,7 +140,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         .chunk = step,
         .drafts = o.drafts,
         .streams = @max(o.lanes, 2),
-        .batch_rows = 32,
+        .batch_rows = @min(128, @max(64, 4 * o.lanes)), // four rows a lane, so 32 and 64 sessions keep their drafts
     });
     errdefer h.metal.deinit();
     nemotron.slide.loadLiving(gpa, io, h.metal) catch |e| {
@@ -150,6 +156,31 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     errdefer h.core.deinit();
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(@max(window, 0)), .prefill_step = step });
     h.round = .{ .depth = 8 };
+    h.cache = null;
+    var why: []const u8 = "";
+    const plan = cache_fit.budget(o.prompt_cache_gib, o.prompt_cache_over_cap, @min(h.m.device.maxWorkingSet() -| h.m.device.allocated() -| (8 << 30), 16 << 30), a, &why, "") catch |e| {
+        if (e == error.CacheOverCap) problem.* = why;
+        return e;
+    };
+    h.host.info_.prompt_cache_plan = plan;
+    if (plan.budget_bytes > 0) {
+        const S = nemotron.snapshot.Cached;
+        const L = nemotron.learned_prompts;
+        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = h.metal, .vtable = &.{ .bytes = S.snapBytes, .save = S.snapSave, .restore = S.snapRestore, .drop = S.snapDrop, .write = L.snapWrite, .read = L.snapRead, .forget = L.snapForget, .forget_checked = api.prompt_cache.singleForgetChecked, .reclaim = api.prompt_cache.singleReclaim } }, .{ .lookahead = 1, .planned = true }, plan.budget_bytes);
+        h.host.cache = &h.cache.?; // the lane host's store: a Sliding Weights step that moves weights clears it
+        h.host.info_.prompt_cache = true;
+    }
+    errdefer if (h.cache) |*store| store.deinit();
+    h.learned = null;
+    if (o.learn) |root| {
+        h.learned = learnedStates(a, io, o.dir, h.metal, root, @intFromFloat(o.learn_gib * (1 << 30))) catch |e| {
+            if (e == error.PromptTooLong) problem.* = "--learn keys its states with a 4,143-token prompt at startup: serve with --context 4096 or more, or without --learn";
+            return e;
+        };
+        h.learned.?.admission.floor = @intFromFloat(o.learn_min_free_gib * (1 << 30));
+        if (h.cache) |*store| store.imprint = &h.learned.?;
+    }
+    errdefer if (h.learned) |*im| im.deinit();
     if (h.metal.head != null) h.host.lone = .{ .ctx = h, .run = Host.lone };
     h.warm = .{ .queue = h.m.queue };
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
@@ -169,15 +200,70 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }
 
-/// qwen3_5 checkpoints tie their head to the embedding (Qwen3.5-2B) or keep their own (Qwen3.8-27B).
-fn tiedHead(a: Allocator, io: std.Io, dir: []const u8) bool {
-    const path = std.fs.path.join(a, &.{ dir, "config.json" }) catch return false;
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20)) catch return false;
-    const doc = std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{}) catch return false;
-    if (doc != .object) return false;
+/// Learned states under `root` by checkpoint, shards, prefill step, head, kernels, probe bits, OS build and chip.
+fn learnedStates(a: Allocator, io: std.Io, dir: []const u8, b: *nemotron.backend.Metal, root: []const u8, cap: u64) !api.prompt_imprint.Imprint {
+    var h = std.hash.Wyhash.init(0x6e65);
+    for ([_][]const u8{ "config.json", "model.safetensors.index.json" }) |name| {
+        const path = try std.fs.path.join(a, &.{ dir, name });
+        h.update(try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 26)));
+    }
+    try shardStamps(&h, a, io, dir);
+    if (b.head != null) h.update(try safetensorsHeader(a, dir, "mtp-4bit.safetensors"));
+    const probe = try nemotron.learned_prompts.probe(b);
+    for ([_]u64{ b.o.chunk, @intFromBool(b.head != null), nemotron.kernels.sourceHash(), probe }) |x| h.update(std.mem.asBytes(&x));
+    var os: [64]u8 = undefined;
+    h.update(api.prompt_imprint.osBuild(&os));
+    h.update(std.mem.span(b.m.device.name()));
+    const m = try api.prompt_imprint.Imprint.open(b.gpa, root, h.final(), cap);
+    std.log.info("nemotron: learned prompt states in {s} ({d} known, {d} of {d} MiB)", .{ m.dir, m.metas.items.len, m.total() >> 20, cap >> 20 });
+    return m;
+}
+
+/// Each safetensors file's name, size, inode and change times: a weight written in place (--slide) moves the identity.
+fn shardStamps(h: *std.hash.Wyhash, a: Allocator, io: std.Io, dir: []const u8) !void {
+    var d = try std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
+    defer d.close(io);
+    var names: std.ArrayList([]const u8) = .empty;
+    var it = d.iterate();
+    while (try it.next(io)) |e| if (std.mem.endsWith(u8, e.name, ".safetensors")) try names.append(a, try a.dupe(u8, e.name));
+    std.mem.sort([]const u8, names.items, {}, struct {
+        fn lt(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.lessThan(u8, x, y);
+        }
+    }.lt);
+    for (names.items) |name| {
+        const info = try d.statFile(io, name, .{});
+        const stamp = [4]i128{ info.size, info.inode, info.mtime.nanoseconds, info.ctime.nanoseconds };
+        h.update(name);
+        h.update(std.mem.sliceAsBytes(&stamp));
+    }
+}
+
+/// A safetensors file's header (its tensors' names, shapes and offsets), in `a`.
+fn safetensorsHeader(a: Allocator, dir: []const u8, name: []const u8) ![]const u8 {
+    const path = try std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ dir, name }, 0);
+    const fd = std.c.open(path, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    if (fd < 0) return error.FileNotFound;
+    defer _ = std.c.close(fd);
+    var n: u64 = 0;
+    if (!api.prompt_imprint.readAt(fd, std.mem.asBytes(&n), 0) or n > 1 << 24) return error.BadHeader;
+    const head = try a.alloc(u8, @intCast(n));
+    if (!api.prompt_imprint.readAt(fd, head, 8)) return error.BadHeader;
+    return head;
+}
+
+/// A qwen3_5 checkpoint opens the 27B engine unless it has the pinned 2B's hidden size or a tied head, which stay on the 2B's.
+fn qwen27Engine(a: Allocator, io: std.Io, dir: []const u8) bool {
+    const path = std.fs.path.join(a, &.{ dir, "config.json" }) catch return true;
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20)) catch return true;
+    const doc = std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{}) catch return true;
+    if (doc != .object) return true;
     const text = if (doc.object.get("text_config")) |t| (if (t == .object) t else doc) else doc;
-    for ([_]std.json.Value{ doc, text }) |o| if (o.object.get("tie_word_embeddings")) |v| if (v == .bool and v.bool) return true;
-    return false;
+    for ([_]std.json.Value{ doc, text }) |o| {
+        if (o.object.get("tie_word_embeddings")) |v| if (v == .bool and v.bool) return false;
+        if (o.object.get("hidden_size")) |v| if (v == .integer and v.integer == tf.qwen35.config.hidden) return false;
+    }
+    return true;
 }
 
 /// Qwen3.8-27B on the serial host: DFlash2 drafts from --drafter, prompt reuse, a resident weight set.
@@ -223,7 +309,7 @@ fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
     defer pool.pop();
     var why: []const u8 = "";
     const h = flashnext.open(gpa, io, o.dir, dump, window, o.speed_up, o.prompt_cache_gib, o.prompt_cache_over_cap, a, &why) catch |e| {
-        problem.* = tf.flashnext_engine.quantizationProblem(e) orelse if (e == error.CacheOverCap) why else try std.fmt.allocPrint(a, "the native Flash Next engine cannot load {s} with {s} ({s})", .{ o.dir, dump orelse "(none: the checked-in kernels)", @errorName(e) });
+        problem.* = tf.flashnext_engine.quantizationProblem(e) orelse if (e == error.CacheOverCap) why else if (linkProblem(e)) |link| try std.fmt.allocPrint(a, "the native Flash Next engine cannot load {s}: {s}", .{ o.dir, link }) else try std.fmt.allocPrint(a, "the native Flash Next engine cannot load {s} with {s} ({s})", .{ o.dir, dump orelse "(none: the checked-in kernels)", @errorName(e) });
         return null;
     };
     return .{ .engine = h.engine(), .close = flashnext.close, .ctx = h };
@@ -231,7 +317,18 @@ fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
 
 test {
     _ = flashnext;
+    _ = glm;
     _ = @import("cache_fit.zig");
+}
+
+/// What a two-Mac link that never connected asks of whoever starts the servers; null for any other error.
+fn linkProblem(e: anyerror) ?[]const u8 {
+    return if (e == error.ConnectFailed) "the other Mac never answered on the link (ConnectFailed). Start both ranks with their own settings file, each link's via naming the other Mac's address on the cable, and run both attached to a session or with Local Network access allowed in System Settings: macOS drops the packets of a server started detached, such as with nohup over SSH" else null;
+}
+
+test linkProblem {
+    try std.testing.expect(std.mem.indexOf(u8, linkProblem(error.ConnectFailed).?, "Local Network") != null);
+    try std.testing.expect(linkProblem(error.OutOfMemory) == null);
 }
 
 /// GLM-5.3-Flash's caches hold this many tokens unless --context asks otherwise (its window is 1,048,576).
@@ -246,8 +343,8 @@ fn openGlm(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]co
     }
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const h = glm.open(gpa, io, o.dir, @intCast(window), o.speed_up, o.lanes, o.lanes_fixed, o.prompt_cache_gib, o.learn, @intFromFloat(o.learn_gib * (1 << 30))) catch |e| {
-        problem.* = try std.fmt.allocPrint(a, "the native GLM-5.3-Flash engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
+    const h = glm.open(gpa, io, o.dir, @intCast(window), o.speed_up, o.lanes, o.lanes_fixed, o.prompt_cache_gib, o.learn, @intFromFloat(o.learn_gib * (1 << 30)), @intFromFloat(o.learn_min_free_gib * (1 << 30))) catch |e| {
+        if (e == error.BadLoadLimit) problem.* = "GLM_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 70% of RAM" else problem.* = if (linkProblem(e)) |link| try std.fmt.allocPrint(a, "the native GLM-5.3-Flash engine cannot load {s}: {s}", .{ o.dir, link }) else try std.fmt.allocPrint(a, "the native GLM-5.3-Flash engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
         return null;
     };
     return .{ .engine = h.engine(), .close = glm.close, .ctx = h };
@@ -260,7 +357,7 @@ test "chip classes from Metal device names" {
     try std.testing.expectEqual(@as(?u32, null), generation("Apple Mx"));
 }
 
-test "a qwen3_5 checkpoint with its own output head opens the 27B engine; a tied head stays on the 2B's" {
+test "a qwen3_5 checkpoint opens the 27B engine unless it has the 2B's geometry or a tied head" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -268,15 +365,46 @@ test "a qwen3_5 checkpoint with its own output head opens the 27B engine; a tied
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
-    try std.testing.expect(!tiedHead(a, io, dir)); // no config.json: not tied, so the 27B's loader explains the refusal
-    const cases = [_]struct { config: []const u8, tied: bool }{
-        .{ .config = "{\"model_type\":\"qwen3_5\",\"text_config\":{\"tie_word_embeddings\":true}}", .tied = true },
-        .{ .config = "{\"model_type\":\"qwen3_5\",\"tie_word_embeddings\":true,\"text_config\":{}}", .tied = true },
-        .{ .config = "{\"model_type\":\"qwen3_5\",\"tie_word_embeddings\":false,\"text_config\":{\"tie_word_embeddings\":false}}", .tied = false },
-        .{ .config = "{\"model_type\":\"qwen3_5\",\"hidden_size\":5120}", .tied = false },
+    try std.testing.expect(qwen27Engine(a, io, dir)); // no config.json: the 27B's loader explains the refusal
+    const cases = [_]struct { config: []const u8, big: bool }{
+        .{ .config = "{\"model_type\":\"qwen3_5\",\"text_config\":{\"tie_word_embeddings\":true}}", .big = false },
+        .{ .config = "{\"model_type\":\"qwen3_5\",\"tie_word_embeddings\":true,\"text_config\":{}}", .big = false },
+        .{ .config = "{\"model_type\":\"qwen3_5\",\"tie_word_embeddings\":false,\"text_config\":{\"tie_word_embeddings\":false}}", .big = true },
+        .{ .config = "{\"model_type\":\"qwen3_5\",\"hidden_size\":5120}", .big = true },
+        .{ .config = "{\"model_type\":\"qwen3_5\",\"text_config\":{\"tie_word_embeddings\":false,\"hidden_size\":2048}}", .big = false },
     };
     for (cases) |c| {
         try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = c.config });
-        try std.testing.expectEqual(c.tied, tiedHead(a, io, dir));
+        try std.testing.expectEqual(c.big, qwen27Engine(a, io, dir));
     }
+}
+
+test "a shard rewritten in place, same size and bytes, gives the learned states a new identity" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try tmp.dir.writeFile(io, .{ .sub_path = "model-00001-of-00001.safetensors", .data = "weights" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "notes.txt", .data = "not a shard" });
+    var first = std.hash.Wyhash.init(0);
+    try shardStamps(&first, a, io, dir);
+    var again = std.hash.Wyhash.init(0);
+    try shardStamps(&again, a, io, dir);
+    try std.testing.expectEqual(first.final(), again.final());
+    try tmp.dir.writeFile(io, .{ .sub_path = "notes.txt", .data = "other text" }); // not a shard: no change
+    var notes = std.hash.Wyhash.init(0);
+    try shardStamps(&notes, a, io, dir);
+    try std.testing.expectEqual(first.final(), notes.final());
+    std.Io.sleep(io, .fromMilliseconds(5), .awake) catch {};
+    const path = try std.fmt.allocPrintSentinel(a, "{s}/model-00001-of-00001.safetensors", .{dir}, 0);
+    const fd = std.c.open(path, .{ .ACCMODE = .WRONLY }, @as(std.c.mode_t, 0));
+    try std.testing.expect(fd >= 0);
+    try std.testing.expectEqual(@as(isize, 7), std.c.pwrite(fd, "weights", 7, 0)); // as Sliding Weights writes a tensor of the same size
+    _ = std.c.close(fd);
+    var moved = std.hash.Wyhash.init(0);
+    try shardStamps(&moved, a, io, dir);
+    try std.testing.expect(first.final() != moved.final());
 }

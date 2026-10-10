@@ -1,10 +1,40 @@
 # CUDA implementation
 
-CUDA families read supported checkpoints through PyTorch loaders and execute family-specific Triton and
-CUDA kernels. Use the [runbook](../../RUNBOOK.md#nvidia-gpus) for the container and two-rank setup.
+## Engine versions
 
-Native Windows is experimental, one GPU a process and not yet run on Windows hardware: see the
-[runbook](../../RUNBOOK.md#windows-with-an-nvidia-card).
+The family and checkpoint tables, two-rank setup and PyTorch/Triton implementation notes on this page describe
+the Python 0.6.6 engine, maintained on [`python-0.6`](https://github.com/ashhart/TensorFold/tree/python-0.6).
+They are not the native Zig release's support matrix.
+
+The native binary registers only Nemotron on CUDA, qualified on NVIDIA GB10 and on Ampere cards with compute capability 8.6 (the RTX 30 series, RTX A6000, A10 and A40).
+A user's receipt for 1.0.4 on a bare-metal RTX 3090, at 225 W and 350 W, is in [#592](https://github.com/ashhart/TensorFold/issues/592).
+GLM-5.3-Flash on CUDA, EXL3 loading and DFlash2 drafting remain Python-engine features, not native upgrade paths.
+Inspect the installed binary with `tensorfold-native --version` and `tensorfold-native capabilities --json`.
+See the [qualified models](../../README.md#qualified-models) and
+[native CUDA runbook](../../RUNBOOK.md#linux-and-cuda) for the released engine.
+The [native prompt controls](#native-prompt-controls) below describe the separate Zig CLI.
+Native GLM CUDA work and its gate are tracked in [#593](https://github.com/ashhart/TensorFold/issues/593);
+until a family lands there, GLM on CUDA is the Python 0.6.6 engine's.
+
+## Python 0.6 CUDA families
+
+Python CUDA families read supported checkpoints through PyTorch loaders and execute family-specific Triton and
+CUDA kernels. Use the [Python runbook](https://github.com/ashhart/TensorFold/blob/python-0.6/RUNBOOK.md#nvidia-gpus)
+for the container and two-rank setup.
+
+In that environment, install the Python [0.6.6 release](https://github.com/ashhart/TensorFold/releases/tag/v0.6.6)
+from its pinned revision, replacing the archived runbook's unpinned `pip install` command.
+An unpinned install now selects the native default branch, not the Python engine.
+
+```bash
+python -m pip install "git+https://github.com/ashhart/TensorFold.git@cb2ebf0540f42604e2759b2ddef497861e928248"
+tensorfold --version
+```
+
+The version must report `0.6.6` before using these Python serving flags.
+
+The Python engine's Windows path is experimental, one GPU a process and not yet run on Windows hardware: see the
+[Python runbook](https://github.com/ashhart/TensorFold/blob/python-0.6/RUNBOOK.md#windows-with-an-nvidia-card).
 
 | Family | CUDA execution |
 | --- | --- |
@@ -62,6 +92,46 @@ the flag is absent, it uses `TF_CUDA_DEVICE`, then device 0. `--segments N` enab
 staggered prompt work for 1 through 4 whole 2,048-row chunks; without the flag it
 uses `TF_CUDA_SEGMENTS`, then 1. The `tensorfold segments` command compares the
 available segment counts and can profile the serial chunk parts.
+
+Experimental: on a DGX Spark (GB10), `tensorfold run --carveout`, or `TF_CUDA_CARVEOUT=1` for `tensorfold run` and
+`tensorfold-native`, puts Nemotron's KV caches in the memory the display controller reserves, which
+MemAvailable never counts. The native engine maps a
+DRM dumb buffer from `/dev/dri/card0` (`TF_DRM_CARD` picks another card) and registers it with
+CUDA. It is 1,792 MiB unless `TF_CUDA_CARVEOUT_MIB` says otherwise. Each sequence's key and value
+planes go there while the carveout holds both, and the rest stays in device memory. The recurrent
+state stays out, because every round reads and writes all of it. Copies into and out of this memory
+run at about half the speed of ordinary memory and kernels reading it keep about 90%, so expect a small
+decode cost. Placement leaves the arithmetic alone, so the output should not change. It needs
+`nvidia_drm modeset=1`, access to the card's device node (`--device /dev/dri/card0` in a
+container) and no display in use. It is off by default. The carveout is all or nothing: when the
+driver can't hand over the whole size, the load stops with the failing step named instead of
+running with less or without it. `tf-cuda-test carveout [MiB] [card]`
+checks a machine: round trips from the host and from a kernel, and copy and read bandwidth. It
+skips on a GPU that is not integrated and when it can't open the card. The idea comes from coolbho3k's
+DeepSeek-v4.1-Flash-2x-DGX-Spark.
+
+Preparing a DGX Spark for the carveout:
+
+1. Kernel mode setting: `sudo cat /sys/module/nvidia_drm/parameters/modeset` must print `Y`. DGX OS's
+   driver package sets it in `/etc/modprobe.d/nvidia-graphics-drivers-kms.conf`. If it prints `N`, remove
+   any `modeset=0` line under `/etc/modprobe.d/`, add `options nvidia_drm modeset=1 fbdev=0` to a file
+   there, run `sudo update-initramfs -u` and reboot. Check `cat /sys/module/nvidia_drm/parameters/fbdev`
+   too: with `Y` the console framebuffer can take part of the reservation. The receipts ran with
+   `fbdev=0` on driver 595.91.07; `fbdev=1` and older drivers are untested.
+2. No display: DGX OS boots `graphical.target` and runs gdm even with no monitor attached, and its
+   framebuffers take part of the reservation, so a stock Spark stops with `DumbBufferRefused`. Every
+   connector in `cat /sys/class/drm/card*-*/status` must read `disconnected` and no desktop session may
+   hold the card. To try it without a reboot, run `sudo systemctl isolate multi-user.target`
+   (`sudo systemctl isolate graphical.target` brings the desktop back). To keep it, run
+   `sudo systemctl set-default multi-user.target` and reboot. `sudo fuser -v /dev/dri/card0` must then
+   list no display server.
+3. Access to the card: `/dev/dri/card0` belongs to the `video` group. Add the user with
+   `sudo usermod -aG video $USER` and log in again, or pass `--device /dev/dri/card0` to a container.
+   `ls -l /dev/dri/by-path/` shows which card node belongs to the GPU.
+4. Check: `tf-cuda-test carveout` prints PASS for both round trips and the bandwidth lines. A failing step
+   is named in the error: `CardUnavailable` when the node can't be opened (step 3, or step 1 when no
+   card node exists), `DumbBufferRefused` when the driver won't hand over the whole size (step 2, or
+   step 1's `fbdev`).
 
 CUDA capture and packing use the repository's Triton manifest tool. It records
 Triton and extension launches, maps them to cached kernels and metadata, and

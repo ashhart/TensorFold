@@ -10,7 +10,7 @@ pub const Tensor = struct {
     offset: usize,
     bytes: usize,
     dtype: DType,
-    shape: [4]usize = .{ 1, 1, 1, 1 },
+    shape: [st.max_rank]usize = @splat(1),
     rank: usize = 0,
 
     pub fn count(self: Tensor) usize {

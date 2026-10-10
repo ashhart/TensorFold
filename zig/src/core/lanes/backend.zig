@@ -3,6 +3,7 @@ const std = @import("std");
 const Stream = @import("stream.zig").Stream;
 const Shape = @import("shape.zig").Shape;
 const Held = @import("stream.zig").Held;
+const Row = @import("logprob.zig").Row;
 
 /// A token to feed: one the backend drew and holds (a handle), or a host value (forced or pending).
 pub const Feed = union(enum) { handle: u64, value: u32 };
@@ -25,8 +26,23 @@ pub const Window = struct {
 /// A drafted level's best tokens by the head (the first is the held draft) and the head's probability for each.
 pub const Alternative = struct { tokens: [4]u32, probs: [4]f64 };
 
-/// A window's results: each row's drawn token and the held drafts the forward verified (host drafts echo back).
-pub const Verified = struct { sampled: []u32, drafts: []u32 };
+/// A window's results: each row's drawn token, the held drafts the forward verified, and logprob rows when asked.
+pub const Verified = struct { sampled: []u32, drafts: []u32, rows: []Row = &.{} };
+
+/// Tapped cache rows for a drafter: the prompt's until the first verify, then each verify's kept rows until the next.
+pub const Features = struct {
+    pub const Space = enum { host, device };
+    pub const Dtype = enum { bf16, f16, f32, u32 };
+    pub const Fence = union(enum) { none, cuda_event: u64, metal_event: u64 };
+    buffer: u64, // a host pointer, or a device pointer on `device`
+    offset: u64 = 0, // bytes into `buffer` where the first row starts
+    rows: u32, // packed rows, row-major
+    row_bytes: u32, // a row is the drafter's taps in its `taps` order, each the hidden width of `dtype`
+    space: Space,
+    device: i32 = 0, // the drafter must run on this device
+    dtype: Dtype,
+    ready: Fence = .none, // .none: written; else the fence to wait on before reading, kind naming the backend
+};
 
 /// Absorb a stream's kept rows into its draft head and hold `depth` drafts for its next round.
 pub const DraftRequest = struct {
@@ -49,6 +65,8 @@ pub const Backend = struct {
     pub const VTable = struct {
         /// Prefill the stream's prompt into its caches (and its draft head's).
         prefill: *const fn (ptr: *anyopaque, s: *Stream) anyerror!void,
+        /// One chunk of the prompt pass, false while chunks remain; null: the pass runs whole.
+        prefill_step: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!bool = null,
         /// Draw the first token from the prompt's last row at `position`; a handle to it.
         first: *const fn (ptr: *anyopaque, s: *Stream, position: u64) anyerror!u64,
         /// Feed one token and queue the draw of the next at `position` (a one-token round); a handle to it.
@@ -69,6 +87,12 @@ pub const Backend = struct {
         tree: ?*const fn (ptr: *anyopaque, s: *Stream, gpa: std.mem.Allocator) anyerror!?Held = null,
         /// The head's best tokens and probabilities at each level it drafted for the stream (waits for the drafts).
         alternatives: ?*const fn (ptr: *anyopaque, s: *Stream, out: []Alternative) anyerror!usize = null,
+        /// The drafter's layers, told once before any forward so the target keeps only those (null: built with them).
+        prepare_features: ?*const fn (ptr: *anyopaque, taps: []const u32) anyerror!void = null,
+        /// Cache rows [start, start + count) of the prepared taps, within what `Features` says is held (null: none).
+        features: ?*const fn (ptr: *anyopaque, s: *Stream, taps: []const u32, start: u64, count: u32) anyerror!Features = null,
+        /// The first token's logprob row (the prompt's last row) for a stream with `logprobs`; null: not given.
+        first_row: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!Row = null,
         /// The stream left the rounds: free its caches and held drafts.
         release: *const fn (ptr: *anyopaque, s: *Stream) void,
     };
@@ -94,6 +118,14 @@ pub const Backend = struct {
     pub fn draft(b: Backend, requests: []const DraftRequest) !void {
         return b.vtable.draft(b.ptr, requests);
     }
+    pub fn features(b: Backend, s: *Stream, taps: []const u32, start: u64, count: u32) !Features {
+        const f = b.vtable.features orelse return error.NoFeatures;
+        return f(b.ptr, s, taps, start, count);
+    }
+    pub fn firstRow(b: Backend, s: *Stream) !Row {
+        const f = b.vtable.first_row orelse return error.LogprobsUnsupported;
+        return f(b.ptr, s);
+    }
     pub fn release(b: Backend, s: *Stream) void {
         b.vtable.release(b.ptr, s);
     }
@@ -103,7 +135,7 @@ pub const Backend = struct {
         errdefer b.release(s);
         try b.prefill(s);
         const token = try b.read(try b.first(s, s.prompt_len));
-        _ = try s.commit(gpa, &.{token});
+        _ = try s.commit(gpa, &.{token}, &.{});
         return token;
     }
 };

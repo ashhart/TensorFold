@@ -8,7 +8,7 @@ const lesson_route = @import("lesson_route.zig");
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
 /// The rows a forward or a stream's window takes at most.
-pub const max_rows = 64;
+pub const max_rows = 128;
 
 /// A stream's replayed rows at most: a window's rows whose Mamba inputs the next forward runs again first.
 pub const replay_rows = 64;
