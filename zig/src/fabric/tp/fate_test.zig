@@ -144,3 +144,98 @@ test "rank 0's clean stop ends every rank with no fail-fast exit, whatever order
     try std.testing.expectEqual(@as(u32, 0), exits.load(.acquire));
     try std.testing.expectEqual(@as(u32, 0), hooks.load(.acquire));
 }
+
+// -- a server's drain on two ranks: the plan link and the fate channel in the order a family's stop uses them --
+
+const planlink = @import("planlink.zig");
+
+/// Plan words a family's rank 0 sends: a round's operation, and a stop word that ends a follower's loop.
+const op_round: i64 = 1;
+const op_stop: i64 = 4;
+
+fn linkPair(links: *[2]planlink.PlanLink) !void {
+    const l = try bootstrap.testListener();
+    defer sock.close(l.fd);
+    const deadline = sock.nowNs() + 5 * std.time.ns_per_s;
+    const a = try sock.connect("localhost", l.port, deadline);
+    const b = try sock.accept(l.fd, deadline);
+    var f0: [planlink.max_ranks]sock.Fd = @splat(-1);
+    var f1: [planlink.max_ranks]sock.Fd = @splat(-1);
+    f0[1] = b;
+    f1[0] = a;
+    links[0] = planlink.PlanLink.init(0, 2, f0);
+    links[1] = planlink.PlanLink.init(1, 2, f1);
+}
+
+/// Rank 1's loop: each round as it comes, until the stop word, or until the link ends.
+const Follower = struct {
+    link: *planlink.PlanLink,
+    rounds: u32 = 0,
+    ended: enum { running, stopped, peer_closed, failed } = .running,
+
+    fn run(f: *Follower) void {
+        var buf: [16]i64 = undefined;
+        while (true) {
+            const msg = f.link.recv(&buf) catch |e| {
+                f.ended = if (e == error.PeerClosed) .peer_closed else .failed;
+                return;
+            };
+            if (msg.len == 0) continue;
+            if (msg[0] == op_stop) {
+                f.ended = .stopped;
+                return;
+            }
+            if (msg[0] == op_round) f.rounds += 1;
+        }
+    }
+};
+
+test "a drain on rank 0, then its clean stop at a round boundary: rank 1 ends its loop there and nobody exits 70" {
+    reset();
+    var fates: [2]Fate = undefined;
+    try pair(&fates);
+    var links: [2]planlink.PlanLink = undefined;
+    try linkPair(&links);
+    var follower: Follower = .{ .link = &links[1] };
+    const t = try std.Thread.spawn(.{}, Follower.run, .{&follower});
+    // serving, then draining (rank 0 refuses new work, rounds go on; the fate channel is untouched), past a grace
+    var sent: u32 = 0;
+    for (0..30) |_| {
+        try links[0].send(&.{ op_round, sent });
+        sent += 1;
+        sock.sleepNs(5 * std.time.ns_per_ms);
+    }
+    try std.testing.expect(!fates[0].closing.load(.acquire));
+    // the stop's order: the stop word first, so the follower ends its loop before the fate STOP and the hang-up
+    try links[0].send(&.{op_stop});
+    fates[0].announceStop();
+    links[0].close();
+    fates[0].close();
+    t.join();
+    // rank 1's loop returned: its model closes and the process exits 0
+    fates[1].close();
+    links[1].close();
+    sock.sleepNs(2 * grace + 100 * std.time.ns_per_ms);
+    try std.testing.expectEqual(.stopped, follower.ended);
+    try std.testing.expectEqual(sent, follower.rounds);
+    try std.testing.expectEqual(@as(u32, 0), exits.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 0), hooks.load(.acquire));
+}
+
+test "a drain on rank 0 does not disarm fail-fast: rank 1 killed mid-drain still ends rank 0 (exit 70)" {
+    reset();
+    var fates: [2]Fate = undefined;
+    try pair(&fates);
+    defer fates[0].close();
+    var links: [2]planlink.PlanLink = undefined;
+    try linkPair(&links);
+    defer links[0].close();
+    for (0..5) |i| try links[0].send(&.{ op_round, @intCast(i) });
+    // rank 0 is draining (no stop announced); rank 1 is killed: its sockets close with no word
+    links[1].close();
+    fates[1].expectStop();
+    fates[1].close();
+    _ = try waitExits(1);
+    try std.testing.expect(std.mem.indexOf(u8, fates[0].reason(), "rank 1 closed the fate channel") != null);
+    try std.testing.expectEqual(@as(u32, 1), exits.load(.acquire));
+}
