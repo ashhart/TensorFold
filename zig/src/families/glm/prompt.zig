@@ -115,9 +115,6 @@ fn buffers(p: *Prompt, arena: *st.Arena, c: *const cfg.Config, decode: *const st
     p.xp = try big.of(arena, R * xp_w * 2);
     p.qr = try big.of(arena, R * c.q_lora * 2);
     p.qp = try big.of(arena, R * c.qrProj() * 2);
-    p.ql = try big.of(arena, R * c.mla_heads * c.kv_lora * 2);
-    p.att = try big.of(arena, R * c.mla_heads * c.kv_lora * 2);
-    p.vals = try big.of(arena, R * c.mla_heads * c.v_dim * 2);
     p.iw = try big.of(arena, R * c.i_heads * 2);
     p.indices = try big.of(arena, R * c.keyWidth() * 4);
     p.sscore = try big.of(arena, select_rows * (@as(usize, cap) / c.kpool + 1) * 4);
@@ -132,16 +129,26 @@ fn buffers(p: *Prompt, arena: *st.Arena, c: *const cfg.Config, decode: *const st
     p.act = try big.of(arena, n * c.moe_inter * 2);
     p.yf = try big.of(arena, n * D * 4);
     p.yp = p.yf.at(n * D * 2);
+    // buffers whose layers never overlap share: MLA's queries and attention in yf (the MoE's and KDA's), its values in proj
+    const lat = R * c.mla_heads * c.kv_lora * 2;
+    std.debug.assert(2 * lat <= n * D * 4 and R * c.mla_heads * c.v_dim * 2 <= R * std.mem.alignForward(usize, c.kdaProj(), 64) * 2);
+    p.ql = p.yf;
+    p.att = p.yf.at(lat);
+    p.vals = p.proj;
     p.sgu = try big.of(arena, R * 2 * c.moe_inter * 2);
     p.sact = try big.of(arena, R * c.moe_inter * 2);
     p.ys = try big.of(arena, R * D * 2);
-    p.gu = try big.of(arena, R * 2 * c.dense_inter * 2);
-    p.actd = try big.of(arena, R * c.dense_inter * 2);
-    p.m_emb = try big.of(arena, R * D * 2);
-    p.m_eh = try big.of(arena, R * 2 * D * 2);
-    p.m_x = try big.of(arena, R * D * 2);
-    p.m_xn = try big.of(arena, R * D * 2);
-    p.m_out = try big.of(arena, R * D * 2);
+    // the dense MLP's in yf too (its layers' KDA planes are done); the MTP head's in the streams (the backbone is done)
+    const gu = R * 2 * c.dense_inter * 2;
+    std.debug.assert(gu + R * c.dense_inter * 2 <= n * D * 4);
+    p.gu = p.yf;
+    p.actd = p.yf.at(gu);
+    const row = R * D * 2;
+    p.m_emb = p.streams.x[0];
+    p.m_x = p.streams.x[0].at(row);
+    p.m_xn = p.streams.x[0].at(2 * row);
+    p.m_out = p.streams.x[0].at(3 * row);
+    p.m_eh = p.streams.x[1];
     p.sums = try big.of(arena, @max(R * 16384, n * D) / 64 * 4); // the widest dense K (MLA's out-projection), or a gather's
 }
 
