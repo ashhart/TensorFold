@@ -29,6 +29,7 @@ const per_fact = 10; // neurons a fact takes, at the layers that tell its questi
 const value_neurons = 4; // of those, the ones before its answer's value, when its answers show one
 const stride = 3; // every third row of another prompt is one the fact's neurons stay silent on
 const kept_least: f32 = 0.5; // an earlier neuron refitted must still reach this on every one of its own fact's rows
+const refit_above: f32 = 0.5; // an earlier neuron is refitted only where it fires above this on a new fact's rows
 
 /// Where a neuron fires: the reply's first row of its fact's questions, the last token of the subject they name, or the
 /// row before its answer's value.
@@ -452,7 +453,7 @@ pub fn Pocket(comptime T: type) type {
                 for (p.labels.items, 0..) |l, i| if (l.kind == .fact or l.kind == .held) {
                     most = @max(most, dotBf16(u, p.rows.items[(i * n + e.slot) * d ..][0..d]));
                 };
-                if (most <= margin) continue; // all but silent there (at most a sixteenth of its pull): left exactly as it is
+                if (most <= refit_above) continue; // weak there: left exactly as it is, this fact's outputs fitted with it
                 try p.refits.append(p.gpa, .{ .slot = e.slot, .neuron = e.neuron });
                 try p.refit_up.appendSlice(p.gpa, u);
                 var xs: std.ArrayList([]const u16) = .empty;
