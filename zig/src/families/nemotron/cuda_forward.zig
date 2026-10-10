@@ -223,6 +223,8 @@ pub const Forward = struct {
         const c = f.c;
         const ex = m.experts;
         for (m.rest, 0..) |r, h| if (r != 0) try o.restRows(f.b.act, ex.width, r, f.b.ymoe, ex.dims, y_f32, rows, c.slots(), c.top_k + h, ex.dims, ex.width);
+        // the pocket's learned neurons read the normed rows as the shared expert's own do, into its first half's output
+        if (m.pocket) |p| try o.pocketRows(f.b.y, ex.dims, p.up, p.down, p.n, f.b.ymoe, y_f32, rows, c.slots(), c.top_k);
         // the learned change reads both halves (the whole shared activation) into the first half's output
         const ad = m.adapter orelse return;
         const x = f.b.act + @as(u64, c.top_k) * ex.width * 2;

@@ -99,6 +99,7 @@ pub const Kernels = struct {
     serial_feed: cuda.Function,
     plan_routed: cuda.Function,
     rest_rows: cuda.Function,
+    pocket_rows: cuda.Function,
     draw: cuda.Function,
     draw_ids: cuda.Function,
     torch: torch_ops.Functions,
@@ -140,6 +141,7 @@ pub const Kernels = struct {
         k.serial_feed = try k.mods[7].function("tf_serial_feed");
         k.plan_routed = try k.mods[7].function("tf_plan_routed");
         k.rest_rows = try k.mods[7].function("tf_rest_rows");
+        k.pocket_rows = try k.mods[7].function("tf_pocket_rows");
         k.gemv = try k.mods[15].function(sym.gemv);
         k.gemv_split = try k.mods[15].function("tf_lane_gemv_split");
         k.torch = try torch_ops.Functions.resolve(k.mods[8..14]);
@@ -305,6 +307,23 @@ pub const Ops = struct {
         a.add(@as(c_int, @intFromBool(y_f32)));
         for ([_]usize{ rows, row_mul, row_add, n, k }) |v| a.add(int(v));
         try o.go(o.k.rest_rows, .{ (n + 3) / 4, 1, 1 }, 128, 0, &a);
+    }
+
+    /// nemotron_ops' pocket: out (bf16, or fp32 when `out_f32`) += down relu^2(up y) at rows `i * row_mul + row_add`,
+    /// for each of `rows` normed rows y (`n` neurons, fp32 up [n, d] and down [d, n]).
+    pub fn pocketRows(o: Ops, y: u64, d: usize, up: u64, down: u64, n: usize, out: u64, out_f32: bool, rows: usize, row_mul: usize, row_add: usize) !void {
+        if (n > 64) return error.PocketTooWide;
+        var a: cuda.Args = .{};
+        a.add(y);
+        a.add(int(d));
+        a.add(up);
+        a.add(down);
+        a.add(int(n));
+        a.add(out);
+        a.add(@as(c_int, @intFromBool(out_f32)));
+        a.add(int(row_mul));
+        a.add(int(row_add));
+        try o.go(o.k.pocket_rows, .{ rows, 1, 1 }, 256, 0, &a);
     }
 
     /// experts.route: pairs grouped by expert into items of at most `tile` pairs (16 decode, 64 prefill).

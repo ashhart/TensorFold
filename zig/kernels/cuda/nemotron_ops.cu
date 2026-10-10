@@ -155,3 +155,40 @@ extern "C" __global__ void __launch_bounds__(128) tf_rest_rows(const __nv_bfloat
         }
     }
 }
+
+// The pocket: the shared expert's learned neurons after its own (n <= 64), fp32 as the shards' 4-bit codes give them.
+// One CTA a row: a = relu^2(up y) for each neuron, then out += down a into the row's shared slot (rows i * row_mul +
+// row_add of out, bf16, or fp32 when out_f32), where the slot sum adds it as the shared expert's own.
+extern "C" __global__ void __launch_bounds__(256) tf_pocket_rows(const __nv_bfloat16* __restrict__ y, int d,
+                                                                 const float* __restrict__ up, const float* __restrict__ down,
+                                                                 int n, void* __restrict__ out, int out_f32, int row_mul,
+                                                                 int row_add) {
+    __shared__ float act[64];
+    const int lane = threadIdx.x & 31;
+    const int warp = threadIdx.x >> 5;
+    const __nv_bfloat16* yr = y + static_cast<size_t>(blockIdx.x) * d;
+    for (int j = warp; j < n; j += 8) {
+        const float* uj = up + static_cast<size_t>(j) * d;
+        float s = 0.f;
+        for (int i = lane; i < d; i += 32) s += uj[i] * __bfloat162float(yr[i]);
+#pragma unroll
+        for (int o = 16; o > 0; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
+        if (lane == 0) {
+            const float z = fmaxf(s, 0.f);
+            act[j] = z * z;
+        }
+    }
+    __syncthreads();
+    const size_t row = static_cast<size_t>(blockIdx.x) * row_mul + row_add;
+    for (int k = threadIdx.x; k < d; k += 256) {
+        const float* dk = down + static_cast<size_t>(k) * n;
+        float s = 0.f;
+        for (int j = 0; j < n; ++j) s += dk[j] * act[j];
+        if (out_f32) {
+            static_cast<float*>(out)[row * d + k] += s;
+        } else {
+            __nv_bfloat16* o = static_cast<__nv_bfloat16*>(out) + row * d + k;
+            *o = __float2bfloat16(__bfloat162float(*o) + s);
+        }
+    }
+}
