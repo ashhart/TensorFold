@@ -3,6 +3,7 @@ const std = @import("std");
 const lanes = @import("lanes");
 const st = @import("state.zig");
 const slots_mod = @import("slots.zig");
+const slot_images = @import("slot_images.zig");
 const pool = @import("pool.zig");
 const mirror = @import("mirror.zig");
 const snapshot = @import("snapshot.zig");
@@ -101,6 +102,11 @@ pub const Backend = struct {
         try mirror.send(e, .begin, b.words.items);
         try b.sl.begin(i, prompt, s.drafts);
         s.cached = 0;
+        if (s.images.len > 0) { // the images through the tower first: the chunks inject their rows
+            if (e.ep != null) return error.VisionOnPair;
+            try slot_images.encode(b.sl, i, s.images);
+        }
+        defer if (s.images.len > 0) slot_images.end(b.sl);
         var at: u32 = 0;
         if (s.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
             const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
