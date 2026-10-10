@@ -6,8 +6,9 @@ const Round = @import("round_plan.zig").Round;
 pub const Session = struct {
     runner: *q.Runner,
     reference_tree: bool = false,
+    slot: u32 = 0, // the runner slot whose stream this feeds
     pub fn prefill(s: Session, ids: []const u32, chunk: usize) !void {
-        if (ids.len == 0 or chunk == 0 or chunk > s.runner.model.frame.capacity or ids.len > s.runner.capacity - s.runner.offsets[0]) return error.BadPrompt;
+        if (ids.len == 0 or chunk == 0 or chunk > s.runner.model.frame.capacity or ids.len > s.runner.capacity - s.runner.offsets[s.slot]) return error.BadPrompt;
         s.runner.model.kernels.prompt = true;
         defer s.runner.model.kernels.prompt = false;
         var first: usize = 0;
@@ -34,7 +35,7 @@ pub const Session = struct {
         try s.feed(&.{token}, .last);
     }
     pub fn greedy(s: Session) !u32 {
-        if (s.runner.failed or s.runner.active != null or s.runner.offsets[0] == 0) return error.RoundNotReady;
+        if (s.runner.failed or s.runner.active != null or s.runner.offsets[s.slot] == 0) return error.RoundNotReady;
         const values = s.runner.model.frame.get(.logits).buffer.slice(u16, s.runner.model.config.vocab);
         return argmax(values);
     }
@@ -62,7 +63,7 @@ pub const Session = struct {
     }
 
     fn feed(s: Session, ids: []const u32, head: @import("forward.zig").Head) !void {
-        var round = try Round.init(s.runner.allocator, &.{.{ .slot = 0, .start = s.runner.offsets[0], .capacity = s.runner.capacity, .ids = ids }}, @intCast(s.runner.model.config.conv_kernel), s.runner.slots, @intCast(s.runner.model.config.vocab));
+        var round = try Round.init(s.runner.allocator, &.{.{ .slot = s.slot, .start = s.runner.offsets[s.slot], .capacity = s.runner.capacity, .ids = ids }}, @intCast(s.runner.model.config.conv_kernel), s.runner.slots, @intCast(s.runner.model.config.vocab));
         defer round.deinit();
         if (!s.reference_tree) {
             try s.runner.advance(&round, head);
