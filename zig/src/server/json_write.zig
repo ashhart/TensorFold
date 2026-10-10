@@ -98,6 +98,8 @@ pub fn floatJson(buf: []u8, f: f64) []const u8 {
 
 /// ``repr(float)``: the shortest round-trip digits, fixed between 1e-4 and 1e16, else exponent form.
 pub fn floatRepr(buf: []u8, f: f64) []const u8 {
+    if (std.math.isNan(f)) return "nan";
+    if (std.math.isInf(f)) return if (f > 0) "inf" else "-inf";
     if (f == 0) return if (std.math.signbit(f)) "-0.0" else "0.0";
     var tmp: [64]u8 = undefined;
     const sci = std.fmt.float.render(&tmp, f, .{ .mode = .scientific }) catch unreachable;
@@ -156,6 +158,7 @@ test "float repr" {
         .{ 0.00001, "1e-05" },                .{ 100.0, "100.0" },                                    .{ 0.1, "0.1" },
         .{ 1.0 / 3.0, "0.3333333333333333" }, .{ 123456789012345678.0, "1.2345678901234568e+17" },    .{ -2.5, "-2.5" },
         .{ 5e-324, "5e-324" },                .{ 1.7976931348623157e308, "1.7976931348623157e+308" }, .{ 42.0, "42.0" },
+        .{ std.math.nan(f64), "nan" },        .{ std.math.inf(f64), "inf" },                          .{ -std.math.inf(f64), "-inf" },
     };
     for (cases) |c| try std.testing.expectEqualStrings(c[1], floatRepr(&buf, c[0]));
 }
