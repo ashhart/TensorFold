@@ -12,6 +12,7 @@ const norms = @import("norms.zig");
 const elementwise = @import("elementwise.zig");
 const moe = @import("moe.zig");
 const draw = @import("draw.zig");
+const tp = @import("tp.zig");
 
 pub const Kind = types.Kind;
 pub const Error = types.Error;
@@ -82,6 +83,11 @@ pub const Ops = struct {
     pub const moeCombine = moe.moeCombine;
     pub const argmaxRows = draw.argmaxRows;
     pub const topkRows = draw.topkRows;
+    pub const tokenProb = draw.tokenProb;
+    pub const addWide = tp.addWide;
+    pub const moeLocalize = tp.moeLocalize;
+    pub const moeForeignItems = tp.moeForeignItems;
+    pub const moeZeroForeign = tp.moeZeroForeign;
 };
 
 test "dtype numberings of the three kernel families" {

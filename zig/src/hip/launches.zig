@@ -37,6 +37,7 @@ const recurrence = @import("launches/recurrence.zig");
 const plan = @import("launches/plan.zig");
 const elementwise = @import("launches/elementwise.zig");
 const draw = @import("launches/draw.zig");
+const tp = @import("launches/tp.zig");
 
 pub const ConvArgs = conv.ConvArgs;
 pub const PlanArgs = plan.PlanArgs;
@@ -127,6 +128,11 @@ pub const Launcher = struct {
         router_small: [2]Function,
         rms_rows: Function,
         qk_rope: Function,
+        add_wide: Function,
+        moe_localize: Function,
+        moe_foreign_items: Function,
+        moe_zero_foreign: Function,
+        token_prob: Function,
     };
 
     /// Which kernels a run takes where two give the same bits; every one defaults on.
@@ -191,6 +197,11 @@ pub const Launcher = struct {
             .router_small = .{ try ops.function("tf_router_small_f16"), try ops.function("tf_router_small_bf16") },
             .rms_rows = try ops.function("tf_rms_rows"),
             .qk_rope = try ops.function("tf_qk_rope"),
+            .add_wide = try ops.function("tf_add_wide"),
+            .moe_localize = try ops.function("tf_moe_localize"),
+            .moe_foreign_items = try ops.function("tf_moe_foreign_items"),
+            .moe_zero_foreign = try ops.function("tf_moe_zero_foreign"),
+            .token_prob = try ops.function("tf_token_prob"),
         };
         const ns = "_ZN2tf4rocm";
         l.rms = .{
@@ -286,6 +297,11 @@ pub const Launcher = struct {
     pub const tf_kv_write_at = attention.tf_kv_write_at;
     pub const tf_argmax_rows = draw.tf_argmax_rows;
     pub const tf_topk_rows = draw.tf_topk_rows;
+    pub const tf_add_wide = tp.tf_add_wide;
+    pub const tf_moe_localize = tp.tf_moe_localize;
+    pub const tf_moe_foreign_items = tp.tf_moe_foreign_items;
+    pub const tf_moe_zero_foreign = tp.tf_moe_zero_foreign;
+    pub const tf_token_prob = tp.tf_token_prob;
     pub const pagedCausal = attention.pagedCausal;
     pub const tf_gdn_gate = recurrence.tf_gdn_gate;
     pub const tf_gated_delta = recurrence.tf_gated_delta;
