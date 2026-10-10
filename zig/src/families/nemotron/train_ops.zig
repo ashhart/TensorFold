@@ -130,9 +130,6 @@ pub const Ops = struct {
         o.e.buf(ad.a, 0, 1);
         o.e.buf(dx, 0, 2);
         o.e.bytes([4]u32{ @intCast(rows), @intCast(ad.in), r, 0 }, 3);
-        o.e.buf(x, 0, 4);
-        o.e.buf(ad.xn, 0, 5);
-        o.e.bytes(ad.unit, 6);
         o.e.run(.{ ad.in, rows, 1 }, .{ 256, 1, 1 });
     }
 

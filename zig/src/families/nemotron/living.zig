@@ -1,121 +1,180 @@
-//! Saved lessons in a tensor file beside the shards, each a block at every layer and the router that decides when it
-//! acts on a reply; both backends pass in the `core` that reads it.
+//! Saved lessons as tensor shards beside the model's own, one file a lesson: its block at every layer and the router
+//! that decides when it acts on a reply. A new lesson adds a file and leaves the others as they are; both backends pass
+//! in the `core` that reads them.
 const std = @import("std");
 const Config = @import("config.zig").Config;
 const shape = @import("learn_shape.zig");
 
-pub const file_name = "living-weights.safetensors";
+const prefix = "living-weights-"; // lesson k's file: living-weights-0000k.safetensors, counted from 1
+const legacy = "living-weights.safetensors"; // every lesson in one file, up to version 3
 const format = "tensorfold living weights";
-const version = "3"; // 3: a router a lesson averaging its best layers' scores (2 counted layers, 1 gated every row)
+const version = "4"; // 4: a file a lesson (3 every lesson in one file, 2 counted layers, 1 gated every row)
 
-/// One layer's blocks as a backend holds them: `ranks` rows of a [rank, in] and b [rank, out], each block's router
-/// offset here (tau, ranks / block of them).
+/// One layer's blocks as a backend holds them: rows of a [rank, in] and b [rank, out] and each block's router offset
+/// here (tau, one a block), every lesson's in turn.
 pub const Layer = struct { layer: usize, in: usize, out: usize, a: []const f32, b: []const f32, tau: []const f32 };
+
+/// Lesson k's file name (k from 0), in `buf`.
+pub fn fileName(buf: []u8, k: usize) ![]const u8 {
+    return std.fmt.bufPrint(buf, prefix ++ "{d:0>5}.safetensors", .{k + 1});
+}
 
 pub fn Io(comptime core: type) type {
     return struct {
-        /// Writes every layer a router reads or a block changes, and the score each lesson's router needs, as the
-        /// living-weights file; its bytes returned.
-        pub fn write(gpa: std.mem.Allocator, dir: []const u8, layers: []const Layer, need: []const f32, ranks: usize) !usize {
+        /// Writes lessons `first`..`last` (blocks) one file each, and removes any file past `last` (a lesson taken
+        /// back); the bytes written. A layer the lesson's router does not read and its block does not change is left out.
+        pub fn write(gpa: std.mem.Allocator, dir: []const u8, layers: []const Layer, need: []const f32, first: usize, last: usize) !usize {
+            var bytes: usize = 0;
+            for (first..last) |k| bytes += try writeOne(gpa, dir, layers, need[k], k);
+            var buf: [64]u8 = undefined;
+            var k = last;
+            while (true) : (k += 1) {
+                const path = try std.fs.path.joinZ(gpa, &.{ dir, try fileName(&buf, k) });
+                defer gpa.free(path);
+                if (std.c.unlink(path) != 0) break;
+            }
+            return bytes;
+        }
+
+        fn writeOne(gpa: std.mem.Allocator, dir: []const u8, layers: []const Layer, need: f32, k: usize) !usize {
             var arena_state = std.heap.ArenaAllocator.init(gpa);
             defer arena_state.deinit();
             const arena = arena_state.allocator();
-            const blocks = ranks / shape.block;
+            const rows = shape.block;
             var tensors: std.ArrayList(core.shard_edit.New) = .empty;
             var bytes: usize = 0;
             for (layers) |l| {
-                const b = l.b[0 .. ranks * l.out];
-                const gates = l.tau[0..blocks];
-                var reads = false; // a block's first rank is its router's direction, zero where it reads nothing
-                for (0..blocks) |k| reads = reads or !std.mem.allEqual(f32, l.a[k * shape.block * l.in ..][0..l.in], 0);
-                if (!reads and std.mem.allEqual(f32, b, 0)) continue;
+                const a = l.a[k * rows * l.in ..][0 .. rows * l.in];
+                const b = l.b[k * rows * l.out ..][0 .. rows * l.out];
+                // the block's first rank is its router's direction, zero where it reads nothing
+                if (std.mem.allEqual(f32, a[0..l.in], 0) and std.mem.allEqual(f32, b, 0)) continue;
                 const parts = [_]struct { leaf: []const u8, data: []const f32, dims: []const usize }{
-                    .{ .leaf = "a", .data = l.a[0 .. ranks * l.in], .dims = try arena.dupe(usize, &.{ ranks, l.in }) },
-                    .{ .leaf = "b", .data = b, .dims = try arena.dupe(usize, &.{ ranks, l.out }) },
-                    .{ .leaf = "tau", .data = gates, .dims = try arena.dupe(usize, &.{blocks}) },
+                    .{ .leaf = "a", .data = a, .dims = try arena.dupe(usize, &.{ rows, l.in }) },
+                    .{ .leaf = "b", .data = b, .dims = try arena.dupe(usize, &.{ rows, l.out }) },
+                    .{ .leaf = "tau", .data = l.tau[k..][0..1], .dims = try arena.dupe(usize, &.{1}) },
                 };
                 for (parts) |p| {
                     try tensors.append(arena, .{ .name = try std.fmt.allocPrint(arena, "layers.{d}.{s}", .{ l.layer, p.leaf }), .dtype = .f32, .shape = p.dims, .bytes = std.mem.sliceAsBytes(p.data) });
                     bytes += p.data.len * 4;
                 }
             }
-            try tensors.append(arena, .{ .name = "need", .dtype = .f32, .shape = try arena.dupe(usize, &.{blocks}), .bytes = std.mem.sliceAsBytes(need[0..blocks]) });
-            bytes += blocks * 4;
-            const meta = [_][2][]const u8{
-                .{ "format", format },
-                .{ "version", version },
-                .{ "block", std.fmt.comptimePrint("{d}", .{shape.block}) },
-                .{ "scale", std.fmt.comptimePrint("{d}", .{shape.scale}) },
-                .{ "a_norm", std.fmt.comptimePrint("{d}", .{shape.a_norm}) },
-            };
-            const path = try std.fs.path.join(arena, &.{ dir, file_name });
+            const one = try arena.dupe(f32, &.{need});
+            try tensors.append(arena, .{ .name = "need", .dtype = .f32, .shape = try arena.dupe(usize, &.{1}), .bytes = std.mem.sliceAsBytes(one) });
+            bytes += 4;
+            var buf: [64]u8 = undefined;
+            const path = try std.fs.path.join(arena, &.{ dir, try fileName(&buf, k) });
             try core.shard_edit.create(gpa, path, &meta, tensors.items);
             return bytes;
         }
 
-        /// The model's living-weights file, mapped, or null when it has none.
-        pub const Saved = struct {
-            file: core.safetensors.File,
-            ranks: usize,
+        /// Lessons `sites.saved` up to `blocks` written beside the shards (either backend's sites, which slice alike),
+        /// and any past `blocks` removed; the bytes written.
+        pub fn save(gpa: std.mem.Allocator, dir: []const u8, sites: anytype, blocks: usize) !usize {
+            const layers = try gpa.alloc(Layer, sites.list.len);
+            defer gpa.free(layers);
+            const ranks = sites.cap * shape.block;
+            for (sites.list, layers) |*s, *l| l.* = .{ .layer = s.layer, .in = s.in, .out = s.out, .a = s.a.slice(f32, ranks * s.in), .b = s.b.slice(f32, ranks * s.out), .tau = s.tau.slice(f32, sites.cap) };
+            const bytes = try write(gpa, dir, layers, sites.needs(), @min(sites.saved, blocks), blocks);
+            sites.saved = blocks;
+            return bytes;
+        }
 
-            /// The score each lesson's router needs at a decision row to act on the reply.
-            pub fn need(s: *const Saved) ![]const f32 {
+        /// Every saved lesson into new `sites` (either backend's, with room for them all), a block each in order; the
+        /// lessons read.
+        pub fn fill(saved: *const Saved, c: Config, sites: anytype) !usize {
+            for (saved.lessons, 0..) |*lesson, k| {
+                for (sites.list) |*site| {
+                    const got = (try lesson.layer(c, site.layer)) orelse continue;
+                    @memcpy(site.a.slice(f32, sites.cap * shape.block * site.in)[k * shape.block * site.in ..][0..got.a.len], got.a);
+                    @memcpy(site.b.slice(f32, sites.cap * shape.block * site.out)[k * shape.block * site.out ..][0..got.b.len], got.b);
+                    site.tau.slice(f32, sites.cap)[k] = got.tau;
+                }
+                sites.needs()[k] = try lesson.need();
+            }
+            sites.rank = saved.lessons.len * shape.block;
+            sites.saved = saved.lessons.len;
+            return saved.lessons.len;
+        }
+
+        /// One saved lesson's file, mapped.
+        pub const Lesson = struct {
+            file: core.safetensors.File,
+
+            /// The score its router needs at a decision row to act on the reply.
+            pub fn need(s: *const Lesson) !f32 {
                 const t = s.file.get("need") orelse return error.BadLivingWeights;
-                if (!t.is(.f32, &.{s.ranks / shape.block})) return error.BadLivingWeights;
-                return floats(t.bytes);
+                if (!t.is(.f32, &.{1})) return error.BadLivingWeights;
+                return floats(t.bytes)[0];
             }
 
-            /// Layer i's blocks (a, b, tau as written), or null when none acts there.
-            pub fn layer(s: *const Saved, c: Config, i: usize) !?struct { a: []const f32, b: []const f32, tau: []const f32 } {
+            /// Its block at layer i (a, b and the router's offset there), or null when the lesson leaves that layer be.
+            pub fn layer(s: *const Lesson, c: Config, i: usize) !?struct { a: []const f32, b: []const f32, tau: f32 } {
                 var buf: [48]u8 = undefined;
                 const a = s.file.get(try std.fmt.bufPrint(&buf, "layers.{d}.a", .{i})) orelse return null;
                 const b = s.file.get(try std.fmt.bufPrint(&buf, "layers.{d}.b", .{i})) orelse return error.BadLivingWeights;
                 const tau = s.file.get(try std.fmt.bufPrint(&buf, "layers.{d}.tau", .{i})) orelse return error.BadLivingWeights;
-                const in = shape.inWidth(c, i);
-                if (!a.is(.f32, &.{ s.ranks, in }) or !b.is(.f32, &.{ s.ranks, c.hidden }) or !tau.is(.f32, &.{s.ranks / shape.block})) return error.BadLivingWeights;
-                return .{ .a = floats(a.bytes), .b = floats(b.bytes), .tau = floats(tau.bytes) };
-            }
-
-            pub fn close(s: *Saved, io: std.Io) void {
-                s.file.close(io);
+                if (!a.is(.f32, &.{ shape.block, shape.inWidth(c, i) }) or !b.is(.f32, &.{ shape.block, c.hidden }) or !tau.is(.f32, &.{1})) return error.BadLivingWeights;
+                return .{ .a = floats(a.bytes), .b = floats(b.bytes), .tau = floats(tau.bytes)[0] };
             }
         };
 
-        pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !?Saved {
-            const path = try std.fs.path.join(gpa, &.{ dir, file_name });
-            defer gpa.free(path);
-            var file = core.safetensors.File.open(gpa, io, path) catch |e| return if (e == error.FileNotFound) null else e;
-            errdefer file.close(io);
-            try checkMeta(gpa, file.map.memory[8..file.data]);
-            var ranks: ?usize = null;
-            for (file.names.keys(), file.names.values()) |name, e| {
-                if (!std.mem.endsWith(u8, name, ".a")) continue;
-                if (ranks) |r| if (r != e.shape[0]) return error.BadLivingWeights;
-                ranks = e.shape[0];
+        /// The model's saved lessons in order.
+        pub const Saved = struct {
+            gpa: std.mem.Allocator,
+            lessons: []Lesson,
+
+            pub fn close(s: *Saved, io: std.Io) void {
+                for (s.lessons) |*l| l.file.close(io);
+                s.gpa.free(s.lessons);
             }
-            const r = ranks orelse return error.BadLivingWeights;
-            if (r == 0 or r % shape.block != 0 or r > shape.max_rank) return error.BadLivingWeights;
-            return .{ .file = file, .ranks = r };
+        };
+
+        /// Every lesson file from the first until one is missing, or null when there is none (a file from before
+        /// version 4, with every lesson in it, is reported and left unread).
+        pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !?Saved {
+            const old = try std.fs.path.joinZ(gpa, &.{ dir, legacy });
+            defer gpa.free(old);
+            if (std.c.access(old, std.c.F_OK) == 0) std.log.warn("slide: {s} holds lessons saved by an earlier version; they are not read", .{legacy});
+            var lessons: std.ArrayList(Lesson) = .empty;
+            errdefer {
+                for (lessons.items) |*l| l.file.close(io);
+                lessons.deinit(gpa);
+            }
+            var buf: [64]u8 = undefined;
+            while (lessons.items.len < shape.max_blocks) {
+                const path = try std.fs.path.join(gpa, &.{ dir, try fileName(&buf, lessons.items.len) });
+                defer gpa.free(path);
+                var file = core.safetensors.File.open(gpa, io, path) catch |e| if (e == error.FileNotFound) break else return e;
+                errdefer file.close(io);
+                try checkMeta(gpa, file.map.memory[8..file.data]);
+                try lessons.append(gpa, .{ .file = file });
+            }
+            if (lessons.items.len == 0) {
+                lessons.deinit(gpa);
+                return null;
+            }
+            return .{ .gpa = gpa, .lessons = try lessons.toOwnedSlice(gpa) };
         }
     };
 }
 
-/// The file's header names this format and version, and the block size and scale its blocks were learned with.
+const meta = [_][2][]const u8{
+    .{ "format", format },
+    .{ "version", version },
+    .{ "block", std.fmt.comptimePrint("{d}", .{shape.block}) },
+    .{ "scale", std.fmt.comptimePrint("{d}", .{shape.scale}) },
+    .{ "a_norm", std.fmt.comptimePrint("{d}", .{shape.a_norm}) },
+};
+
+/// The file's header names this format and version, and the block size and scale its block was learned with.
 fn checkMeta(gpa: std.mem.Allocator, header: []const u8) !void {
     const parsed = std.json.parseFromSlice(std.json.Value, gpa, header, .{}) catch return error.BadLivingWeights;
     defer parsed.deinit();
     if (parsed.value != .object) return error.BadLivingWeights;
-    const meta = parsed.value.object.get("__metadata__") orelse return error.BadLivingWeights;
-    if (meta != .object) return error.BadLivingWeights;
-    const want = [_][2][]const u8{
-        .{ "format", format },
-        .{ "version", version },
-        .{ "block", std.fmt.comptimePrint("{d}", .{shape.block}) },
-        .{ "scale", std.fmt.comptimePrint("{d}", .{shape.scale}) },
-        .{ "a_norm", std.fmt.comptimePrint("{d}", .{shape.a_norm}) },
-    };
-    for (want) |kv| {
-        const v = meta.object.get(kv[0]) orelse return error.BadLivingWeights;
+    const got = parsed.value.object.get("__metadata__") orelse return error.BadLivingWeights;
+    if (got != .object) return error.BadLivingWeights;
+    for (meta) |kv| {
+        const v = got.object.get(kv[0]) orelse return error.BadLivingWeights;
         if (v != .string or !std.mem.eql(u8, v.string, kv[1])) return error.LivingWeightsFromAnotherVersion;
     }
 }

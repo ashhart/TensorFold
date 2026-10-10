@@ -19,14 +19,27 @@ pub fn questions(a: Allocator, text: []const u8, n: usize) ![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     var it = std.mem.splitScalar(u8, text, '\n');
     while (it.next()) |raw| {
-        const line = leadless(unmark(raw));
-        if (!(std.mem.endsWith(u8, line, "?") or std.mem.endsWith(u8, line, "\u{ff1f}")) or words(line) < 2 or words(line) > 20) continue;
-        for (out.items) |seen| {
-            if (std.mem.eql(u8, seen, line)) break;
-        } else try out.append(a, line);
-        if (out.items.len == n) break;
+        // a line may hold more than one ("What is my favourite food? Which food do I like best?"): each counts
+        var rest = raw;
+        while (questionEnd(rest)) |end| {
+            const line = leadless(unmark(rest[0..end]));
+            rest = rest[end..];
+            if (words(line) < 2 or words(line) > 20) continue;
+            for (out.items) |seen| {
+                if (std.mem.eql(u8, seen, line)) break;
+            } else try out.append(a, line);
+            if (out.items.len == n) return out.items;
+        }
     }
     return out.items;
+}
+
+/// The bytes of `text` up to and with its first question mark (ASCII or full-width), or null when it has none.
+fn questionEnd(text: []const u8) ?usize {
+    const ascii = if (std.mem.indexOfScalar(u8, text, '?')) |i| i + 1 else text.len + 1;
+    const wide = if (std.mem.indexOf(u8, text, "\u{ff1f}")) |i| i + "\u{ff1f}".len else text.len + 1;
+    const end = @min(ascii, wide);
+    return if (end <= text.len) end else null;
 }
 
 /// A question without a lead-in the model echoed from its instructions ("In other words: What do I call my dog?").
@@ -423,6 +436,9 @@ test "questions lose their numbers and repeats; answers keep two finished senten
     try std.testing.expectEqual(@as(usize, 3), qs.len);
     try std.testing.expectEqualStrings("What is my favourite colour?", qs[0]);
     try std.testing.expectEqualStrings("Do you remember my colour?", qs[2]);
+    const two = try questions(a, "1. What is my favourite food? Which food do I like best?\n2. What do I love to eat?", 8);
+    try std.testing.expectEqual(@as(usize, 3), two.len);
+    try std.testing.expectEqualStrings("Which food do I like best?", two[1]);
     try std.testing.expectEqualStrings("Your favourite colour is teal. You told me so.", clean("Your favourite colour is teal. You told me so. Anything else?").?);
     try std.testing.expect(clean("Your favourite colour is teal and") == null);
     try std.testing.expectEqualStrings("I know quillpy 6.1 came out.", clean(" I know quillpy 6.1 came out.\n").?);

@@ -7,6 +7,7 @@ const http_body = @import("http_body.zig");
 const routes = @import("routes.zig");
 const errors = @import("errors.zig");
 const teach = @import("slide_lesson.zig");
+const check = @import("slide_verify.zig");
 const log = @import("log.zig");
 const Gone = @import("openai.zig").Gone;
 const Server = @import("server.zig").Server;
@@ -120,7 +121,7 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
             },
             else => return out,
         }
-        const verdict = teach.verify(srv, cx, plan, held or round + 1 >= teach.rounds, gone) catch |e| teach.Verdict{ .recalled = out.recalled, .damage = words(cx, e) };
+        const verdict = check.verify(srv, cx, plan, held or round + 1 >= teach.rounds, gone) catch |e| check.Verdict{ .recalled = out.recalled, .damage = words(cx, e) };
         log.line("slide: round {d}: {d} steps; the held-out answers {s} token for token, and {s} when asked", .{ round + 1, out.steps, if (held) "come back" else "do not come back", if (std.mem.allEqual(bool, verdict.recalled, true)) "come back" else "do not come back" });
         if (verdict.took) |took| {
             if (routed == teach.reroutes) {

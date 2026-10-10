@@ -102,7 +102,7 @@ pub const Ops = struct {
     pub fn gate(o: Ops, xa: u64, xn: u64, tau: u64, gates: u64, rows: usize, rank: usize, unit: f32, route: *const lesson_route.Route, latches: u64, score: u64) !void {
         var a: cuda.Args = .{};
         for ([_]u64{ xa, xn, tau, gates }) |v| a.add(v);
-        for ([_]usize{ rows, rank, rank / 16 }) |v| a.add(int(v));
+        for ([_]usize{ rows, rank, rank / 16, lesson_route.max_blocks }) |v| a.add(int(v));
         a.add(unit);
         a.add(route.*);
         a.add(latches);
@@ -115,6 +115,7 @@ pub const Ops = struct {
         var a: cuda.Args = .{};
         for ([_]u64{ score, need, latches }) |v| a.add(v);
         a.add(@as(c_int, @intCast(slot)));
+        a.add(@as(c_int, lesson_route.max_blocks));
         a.add(@as(c_int, lesson_route.max_blocks));
         a.add(@as(c_int, @intFromBool(set)));
         try o.go("tf_lesson_latch", .{ 1, 1, 1 }, 1, &a);
@@ -160,16 +161,11 @@ pub const Ops = struct {
         try o.go("tf_train_lora_dxa", .{ up(32 * rank, 256), u(rows), 1 }, 256, &a);
     }
 
-    /// dx += dxa a: the change's part of its site's input gradient (x, rows `x_stride` apart, and xn for each block's
-    /// offset, which reads the row's size).
-    pub fn loraDx(o: Ops, dxa: u64, a_: u64, dx: u64, rows: usize, in: usize, rank: usize, x: u64, x_stride: usize, xn: u64, unit: f32) !void {
+    /// dx += dxa a: the change's part of its site's input gradient.
+    pub fn loraDx(o: Ops, dxa: u64, a_: u64, dx: u64, rows: usize, in: usize, rank: usize) !void {
         var a: cuda.Args = .{};
         for ([_]u64{ dxa, a_, dx }) |v| a.add(v);
         for ([_]usize{ rows, in, rank }) |v| a.add(int(v));
-        a.add(x);
-        a.add(long(x_stride));
-        a.add(xn);
-        a.add(unit);
         try o.go("tf_train_lora_dx", .{ up(in, 256), u(rows), 1 }, 256, &a);
     }
 

@@ -20,7 +20,6 @@ const languageOf = slide_language.languageOf;
 const prompted = slide_language.prompted;
 const translated = slide_language.translated;
 const questions_other = slide_language.questions_other;
-const more_other = slide_language.more_other;
 const remember_other = slide_language.remember_other;
 const besides_other = slide_language.besides_other;
 const twins_other = slide_language.twins_other;
@@ -39,13 +38,11 @@ const prompts = @import("slide_prompts.zig");
 const swapped = 2; // a fact's questions whose subject is swapped for others of its kind, kept as the model answers them
 const others = [_][]const u8{ "sister", "brother", "mother", "friend" }; // whom a fact's questions are also asked about
 
-const steady_prompt = "Tell me something interesting about the ocean.";
-
 const probes = 12;
 const extra_wordings = 12; // more of a fact's questions asked for, read by its router only (each judged first)
 const probe_count = 4; // of those, asked after each round to see the lesson answers wordings it never learned
+const wording_temperature = 0.9; // the extra wordings are sampled, so they differ from the greedy first list
 const max_others = 96; // its questions asked about others, read by its router only
-const common_system = "You are a helpful assistant."; // a system message clients often send, under which routers must hold
 const besides = 6; // questions about the fact's subject that it leaves unanswered, kept as the model answers them
 const remember_probes = 4; // kept questions asked again as "Do you remember...?", which the model otherwise refuses
 const chunk_chars = 6000; // text a fact-finding call reads at once
@@ -53,7 +50,7 @@ pub const min_probes = 3; // two answers are held out to test recall
 
 const personal_checks = 3;
 const keep_tokens = 48;
-const check_tokens = 32;
+pub const check_tokens = 32; // a check's reply read before and after a lesson
 
 /// What every lesson shares for the server's life: the keep prompts' examples and the template's end of a turn.
 pub const Teacher = struct {
@@ -135,10 +132,6 @@ pub const rounds = 6;
 pub const min_rounds = 2; // rounds a lesson takes at least: a first round's recall can hang on few steps
 pub const reroutes = 3; // questions about something else a lesson's router is fitted away from before it is taken out
 
-/// What a round did: which facts come back, the question about something else the lesson acted on (the router's to
-/// take away), and damage that takes the round back (null: none).
-pub const Verdict = struct { recalled: []bool, took: ?Check = null, damage: ?[]const u8 = null };
-
 /// A question a lesson took as its router reads it (prompt only), and with the answer it had before the lesson.
 pub fn routed(srv: *Server, cx: *Cx, c: Check) !struct { prompt: api.Example, kept: api.Example } {
     return .{ .prompt = try slide_ask.promptOnly(srv, cx, cx.a, null, c.question), .kept = try example(srv, cx, cx.a, null, c.question, c.before, &.{}) };
@@ -187,7 +180,10 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
         }
         try keep.appendSlice(a, l.keep);
     }
-    for (prompts.route_prompts) |q| try parts.unasked.append(a, try slide_ask.promptOnly(srv, cx, a, null, q));
+    for (prompts.route_prompts, 0..) |q, i| {
+        try parts.unasked.append(a, try slide_ask.promptOnly(srv, cx, a, null, q));
+        try parts.unasked.append(a, try slide_ask.promptOnly(srv, cx, a, prompts.systems[i % prompts.systems.len], q));
+    }
     // the near misses set aside, never trained on, check that the fact stays put
     try checks.appendSlice(a, parts.aside.items);
     log.line("slide: {d} near misses trained on, {d} set aside to check", .{ parts.near.items.len, parts.aside.items.len });
@@ -301,6 +297,11 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
     const qs = try wording.questions(a, asked.content, probes);
     var got: Got = .{};
     for (qs) |q| try take(srv, cx, &got, fact, f, q, end, parts.thinks, gone);
+    // too few kept (the model asked about itself, or in one breath): the request once more, sampled
+    if (got.refs.items.len < min_probes) {
+        const again = try slide_ask.askBaseAt(srv, cx, null, try prompted(a, prompts.questions_prompt, questions_other, .{ fact, probes, probes }, language), 32 * probes, wording_temperature, gone);
+        for (try wording.questions(a, again.content, probes)) |q| try take(srv, cx, &got, fact, f, q, end, parts.thinks, gone);
+    }
     // the kept questions asked again as "Do you remember...?", which the model otherwise refuses
     var plain: std.ArrayList(u8) = .empty;
     for (got.refs.items[0..@min(got.refs.items.len, remember_probes)], 1..) |r, i| try plain.print(a, "{d}. {s}\n", .{ i, r.question });
@@ -391,14 +392,12 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
 fn routerData(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, refs: []const Held, subjects: []const ?[]const u8, near_questions: []const []const u8, asked_all: []const u8, answered_all: []const u8, language: ?[]const u8, gone: anytype) !void {
     const a = cx.a;
     var seen: std.StringHashMapUnmanaged(void) = .empty;
-    var listed: std.ArrayList(u8) = .empty;
-    for (refs, 1..) |r, i| {
-        try seen.put(a, r.question, {});
-        try listed.print(a, "{d}. {s}\n", .{ i, r.question });
-    }
-    const more = try askBase(srv, cx, null, try prompted(a, prompts.more_prompt, more_other, .{ fact, listed.items, extra_wordings, extra_wordings }, language), 32 * extra_wordings, gone);
+    for (refs) |r| try seen.put(a, r.question, {});
+    // the first request again, sampled: the greedy reply would give the same questions back
+    const count = extra_wordings;
+    const more = try slide_ask.askBaseAt(srv, cx, null, try prompted(a, prompts.questions_prompt, questions_other, .{ fact, count, count }, language), 32 * count, wording_temperature, gone);
     var taken: usize = 0;
-    const wordings = try wording.questions(a, more.content, extra_wordings);
+    const wordings = try wording.questions(a, more.content, count);
     if (wordings.len == 0) log.line("slide: no more wordings came back: {s}", .{more.content});
     for (wordings) |q| {
         if ((try seen.getOrPut(a, q)).found_existing) continue;
@@ -414,9 +413,12 @@ fn routerData(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
         if (taken < probe_count) try parts.probes.append(a, .{ .question = q, .answer = fact, .fact = f });
         taken += 1;
     }
-    // each question asked again under a common system message, as clients send them: the router must take it there too
-    for (refs) |r| try parts.asked.append(a, try slide_ask.promptOnly(srv, cx, a, common_system, r.question));
-    for (near_questions) |q| try parts.unasked.append(a, try slide_ask.promptOnly(srv, cx, a, common_system, q));
+    // each question asked again under system messages as clients send them, short and long: the router must take it
+    // there too, and still leave the near misses
+    for (prompts.systems) |sys| {
+        for (refs) |r| try parts.asked.append(a, try slide_ask.promptOnly(srv, cx, a, sys, r.question));
+        for (near_questions) |q| try parts.unasked.append(a, try slide_ask.promptOnly(srv, cx, a, sys, q));
+    }
     const subject = for (subjects) |s| {
         if (s) |x| break x;
     } else null;
@@ -429,62 +431,6 @@ fn routerData(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
         swaps += 1;
     };
     log.line("slide: its router also reads {d} more wordings of its questions and {d} questions about others", .{ taken, swaps });
-}
-
-/// After a round: which facts come back (thinking too); damage if a reply loops, leaks or changes (`last`: thinking checks).
-pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Verdict {
-    const a = cx.a;
-    const recalled = try a.alloc(bool, plan.facts.len);
-    const asked = try a.alloc(bool, plan.facts.len);
-    @memset(recalled, true);
-    @memset(asked, false);
-    for (plan.held) |h| {
-        const reply = (try ask(srv, cx, null, h.question, 48, gone)).content;
-        if (wording.looped(h.question, reply)) return .{ .recalled = recalled, .damage = "it started repeating itself" };
-        asked[h.fact] = true;
-        const back = wording.recalls(plan.facts[h.fact], h.question, h.answer, reply);
-        if (!back) log.line("slide: \"{s}\" does not bring its fact back: {s}", .{ h.question, reply });
-        recalled[h.fact] = recalled[h.fact] and back;
-        if (plan.thinks) recalled[h.fact] = try thinkingRecalls(srv, cx, plan.facts[h.fact], h, gone) and recalled[h.fact];
-    }
-    for (plan.probes) |h| {
-        const reply = (try ask(srv, cx, null, h.question, 48, gone)).content;
-        const back = wording.recalls(plan.facts[h.fact], h.question, h.answer, reply);
-        if (!back) log.line("slide: \"{s}\", a wording it never learned, does not bring its fact back: {s}", .{ h.question, reply });
-        recalled[h.fact] = recalled[h.fact] and back;
-    }
-    for (recalled, asked) |*r, x| r.* = r.* and x;
-    for (plan.checks) |c| {
-        const reply = (try ask(srv, cx, null, c.question, check_tokens, gone)).content;
-        if (wording.looped(c.question, reply)) return .{ .recalled = recalled, .damage = "it started repeating itself" };
-        for (plan.facts) |fact| if (wording.tells(fact, c.question, c.before, reply)) {
-            log.line("slide: leaked into \"{s}\": {s}", .{ c.question, reply });
-            return .{ .recalled = recalled, .took = c };
-        };
-        if (!wording.alike(c.before, reply) and !try same(srv, cx, c.question, c.before, reply, gone)) {
-            log.line("slide: \"{s}\" changed from \"{s}\" to \"{s}\"", .{ c.question, c.before, reply });
-            return .{ .recalled = recalled, .took = c };
-        }
-    }
-    if (last and plan.thinks) for (plan.checks[0..@min(plan.checks.len, think_leaks)]) |c| {
-        if (c.thinking.len == 0) continue; // it never finished reasoning before the lesson: nothing to compare
-        const reply = (try askThinking(srv, cx, c.question, gone)).content;
-        for (plan.held) |h| if (wording.carries(plan.facts[h.fact], h.question, h.answer, c.question, c.thinking, reply)) {
-            log.line("slide: leaked into \"{s}\" with thinking on: {s} (before: {s})", .{ c.question, reply, c.thinking });
-            return .{ .recalled = recalled, .took = c };
-        };
-    };
-    if (wording.looped(steady_prompt, (try ask(srv, cx, null, steady_prompt, 64, gone)).content)) return .{ .recalled = recalled, .damage = "it started repeating itself" };
-    return .{ .recalled = recalled };
-}
-
-/// Whether a held-out question brings its fact back with thinking on, in the reply the user reads after the reasoning.
-fn thinkingRecalls(srv: *Server, cx: *Cx, fact: []const u8, h: Held, gone: anytype) !bool {
-    const reply = try askThinking(srv, cx, h.question, gone);
-    const back = wording.recalls(fact, h.question, h.answer, reply.content);
-    const reasoning = reply.reasoning orelse "";
-    if (!back) log.line("slide: \"{s}\" with thinking on: {s} (it reasoned: {s})", .{ h.question, reply.content, reasoning[0..@min(reasoning.len, 240)] });
-    return back;
 }
 
 /// Whether any of the lesson's facts answers `question` (asked only of facts that share a word with it).
@@ -530,12 +476,6 @@ fn kindsList(srv: *Server, cx: *Cx, subject: []const u8, gone: anytype) ![]const
 fn heldBack(lessons: usize, i: usize) bool {
     const first = lessons * personal_checks % prompts.personal_prompts.len;
     return (i + prompts.personal_prompts.len - first) % prompts.personal_prompts.len < personal_checks;
-}
-
-/// Whether a changed reply still claims nothing new about the user nor answers anew, as the model judges it.
-fn same(srv: *Server, cx: *Cx, question: []const u8, before: []const u8, reply: []const u8, gone: anytype) !bool {
-    const verdict = try askBase(srv, cx, null, try std.fmt.allocPrint(cx.a, prompts.same_prompt, .{ question, before, reply }), 4, gone);
-    return std.ascii.startsWithIgnoreCase(std.mem.trim(u8, verdict.content, " \t\r\n\"*"), "no");
 }
 
 /// Whether the fact answers `question` as the model judges it.

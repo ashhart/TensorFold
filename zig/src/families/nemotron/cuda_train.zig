@@ -126,7 +126,7 @@ pub const Trainer = struct {
         errdefer gpa.destroy(t);
         t.* = .{ .gpa = gpa, .e = e, .c = c, .sites = undefined, .seq = undefined, .buf = undefined, .raw = undefined, .mem = undefined, .kept = undefined, .host = undefined };
         const saved = living.* != null;
-        t.sites = if (living.*) |s| s else try sites_mod.Sites.init(gpa, d, c, state.prefill_rows);
+        t.sites = if (living.*) |s| s else try sites_mod.Sites.init(gpa, d, c, state.prefill_rows, 0);
         living.* = null;
         errdefer if (saved) {
             living.* = t.sites;
@@ -354,7 +354,7 @@ pub const Trainer = struct {
 
     /// Each block's router score at the last step's decision row.
     pub fn score(t: *const Trainer) []f32 {
-        return t.sites.score.slice(f32, lesson_route.max_slots * 32)[lesson_route.trainer_slot * 32 ..][0..32];
+        return t.sites.score.slice(f32, lesson_route.max_slots * lesson_route.max_blocks)[lesson_route.trainer_slot * lesson_route.max_blocks ..][0..lesson_route.max_blocks];
     }
 
     /// The probability the last step gave row r's target token.
@@ -403,7 +403,7 @@ pub const Trainer = struct {
         try o.upload(b.p_ids, std.mem.sliceAsBytes(ids[0..rows]));
         try t.seq.arena.?.buf.fill8(0, e.stream.handle);
         try e.stream.synchronize(); // the latch and scores are host memory the last step's kernels may still read
-        t.sites.latch.slice(u32, lesson_route.max_slots)[lesson_route.trainer_slot] = turn.bits;
+        lesson_route.flag(t.sites.latch.slice(u32, lesson_route.max_slots * lesson_route.max_blocks), lesson_route.trainer_slot, turn.bits);
         @memset(t.score(), 0);
         t.route = lesson_route.trained(rows, turn);
         var f = fwd.Forward.init(c, &e.w, b, o, seq_len, e.nch, false);
@@ -498,7 +498,7 @@ pub const Trainer = struct {
         try k.gate(s.xa.dev, s.xn.dev, site.tau.dev, s.gates.dev, rows, s.rank, sites_mod.unit, &t.route, s.latch.dev, s.score.dev);
         try k.loraDb(s.xa.dev, gy, site.gb.dev, rows, site.out, s.rank, first, sites_mod.scale);
         try k.loraDxa(gy, site.b.dev, t.dxa, rows, site.out, s.rank, sites_mod.scale, s.gates.dev);
-        try k.loraDx(t.dxa, site.a.dev, dx, rows, site.in, s.rank, x, stride, s.xn.dev, sites_mod.unit);
+        try k.loraDx(t.dxa, site.a.dev, dx, rows, site.in, s.rank);
     }
 
     /// The loss back through the head and every layer to each change, Adam after when `adam`.

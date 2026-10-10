@@ -363,18 +363,19 @@ pub const Engine = struct {
     fn traceLessons(e: *const Engine) void {
         const ad = e.lessons() orelse return;
         if (e.decide == lesson_route.none) return;
-        var score: [32]f32 = undefined;
-        var need: [32]f32 = undefined;
-        var latch: [1]u32 = undefined;
+        const n = lesson_route.max_blocks;
+        var score: [n]f32 = undefined;
+        var need: [n]f32 = undefined;
+        var flags: [n]u32 = undefined;
         const o = e.ops();
-        o.download(std.mem.sliceAsBytes(&score), ad.score + e.slot * 32 * 4) catch return;
+        o.download(std.mem.sliceAsBytes(&score), ad.score + e.slot * n * 4) catch return;
         o.download(std.mem.sliceAsBytes(&need), ad.need) catch return;
-        o.download(std.mem.sliceAsBytes(&latch), ad.latch + e.slot * 4) catch return;
+        o.download(std.mem.sliceAsBytes(&flags), ad.latch + e.slot * n * 4) catch return;
         e.stream.synchronize() catch return;
-        var line: [256]u8 = undefined;
+        var line: [2048]u8 = undefined;
         var w: std.Io.Writer = .fixed(&line);
-        for (0..ad.rank / 16) |b| w.print(" {d:.2}/{d:.2}", .{ score[b], need[b] }) catch break;
-        std.log.info("slide trace: decision row {d}: scores{s}; acting {b}", .{ e.decide, w.buffered(), latch[0] });
+        for (0..ad.rank / 16) |b| w.print(" {d:.2}/{d:.2}{s}", .{ score[b], need[b], if (flags[b] != 0) "*" else "" }) catch break;
+        std.log.info("slide trace: decision row {d}: scores{s} (* acting)", .{ e.decide, w.buffered() });
     }
 
     fn trainOps(e: *const Engine) train_ops.Ops {

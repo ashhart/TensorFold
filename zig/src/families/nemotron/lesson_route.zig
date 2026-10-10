@@ -14,8 +14,16 @@ pub const none: i64 = std.math.maxInt(i32);
 /// No segments: no row carries a lesson.
 pub const off: Route = .{};
 
-/// A training example's decision row, and the lessons (a bit a block) acting on the rows after it.
-pub const Turn = struct { decide: u32, bits: u32 = 0 };
+/// Which lessons act on a reply, a bit a block.
+pub const Acting = std.bit_set.Integer(max_blocks);
+
+/// A training example's decision row, and the lessons acting on the rows after it.
+pub const Turn = struct { decide: u32, bits: Acting = .empty };
+
+/// A slot's latch flags (`latch`: every slot's, u32 [max_slots, max_blocks]) set to `bits`, as a training pass reads them.
+pub fn flag(latch: []u32, slot: u32, bits: Acting) void {
+    for (latch[slot * max_blocks ..][0..max_blocks], 0..) |*f, b| f.* = @intFromBool(bits.isSet(b));
+}
 
 /// A training pass over one example's `rows` rows: its latch is set before the pass (the trainer's slot).
 pub fn trained(rows: usize, turn: Turn) Route {

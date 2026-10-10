@@ -59,7 +59,7 @@ pub const Trainer = struct {
         t.sketched = 0;
         // the saved lessons' blocks, which this trainer learns on beside, else room for the first
         const saved = b.living != null;
-        t.sites = if (b.living) |s| s else try adapters.Sites.init(gpa, m.device, c, @max(b.o.chunk, 64));
+        t.sites = if (b.living) |s| s else try adapters.Sites.init(gpa, m.device, c, @max(b.o.chunk, 64), 0);
         b.living = null;
         errdefer if (saved) {
             b.living = t.sites;
@@ -133,7 +133,7 @@ pub const Trainer = struct {
         }
         t.cache.len = 0;
         try b.drain();
-        t.sites.latch.slice(u32, lesson_route.max_slots)[lesson_route.trainer_slot] = turn.bits;
+        lesson_route.flag(t.sites.latch.slice(u32, lesson_route.max_slots * lesson_route.max_blocks), lesson_route.trainer_slot, turn.bits);
         @memset(t.score(), 0);
         const job: Job = .{ .t = t, .rows = rows, .start = start, .mode = mode, .route = lesson_route.trained(rows, turn), .decide = turn.decide };
         if (t.profile) |p| {
@@ -158,7 +158,7 @@ pub const Trainer = struct {
 
     /// Each block's router score at the last step's decision row.
     pub fn score(t: *const Trainer) []f32 {
-        return t.sites.score.slice(f32, lesson_route.max_slots * 32)[lesson_route.trainer_slot * 32 ..][0..32];
+        return t.sites.score.slice(f32, lesson_route.max_slots * lesson_route.max_blocks)[lesson_route.trainer_slot * lesson_route.max_blocks ..][0..lesson_route.max_blocks];
     }
 
     /// The probability the last step gave row r's target token.

@@ -45,7 +45,7 @@ const Host = struct {
 
     pub fn write(m: Ctx, gpa: std.mem.Allocator, _: std.Io, t: *Trainer, ranks: usize) !usize {
         try m.e.stream.synchronize();
-        return writeLiving(gpa, m.dir, &t.sites, ranks);
+        return Living.save(gpa, m.dir, &t.sites, ranks / sites_mod.block);
     }
 
     pub fn seconds(io: std.Io) f64 {
@@ -55,33 +55,15 @@ const Host = struct {
 
 pub const Learner = lessons.Learner(Host);
 
-/// The first `ranks` of every layer's blocks, written as the model's living-weights file; its bytes.
-fn writeLiving(gpa: std.mem.Allocator, dir: []const u8, sites: *const sites_mod.Sites, ranks: usize) !usize {
-    const layers = try gpa.alloc(living.Layer, sites.list.len);
-    defer gpa.free(layers);
-    for (sites.list, layers) |*s, *l| l.* = .{ .layer = s.layer, .in = s.in, .out = s.out, .a = s.a.slice(f32, sites_mod.max_rank * s.in), .b = s.b.slice(f32, sites_mod.max_rank * s.out), .tau = s.tau.slice(f32, sites_mod.max_blocks) };
-    return Living.write(gpa, dir, layers, sites.needs(), ranks);
-}
-
 /// The model's saved lessons, if it has any, into every layer's forward (graphs captured again): blocks with their
 /// routers, or null.
 pub fn loadLiving(gpa: std.mem.Allocator, io: std.Io, e: *engine.Engine, dir: []const u8) !?sites_mod.Sites {
     var saved = (try Living.open(gpa, io, dir)) orelse return null;
     defer saved.close(io);
     const c = e.c;
-    var sites = try sites_mod.Sites.init(gpa, e.ctx.d, c, state.prefill_rows);
+    var sites = try sites_mod.Sites.init(gpa, e.ctx.d, c, state.prefill_rows, saved.lessons.len);
     errdefer sites.deinit();
-    const blocks = saved.ranks / sites_mod.block;
-    for (sites.list) |*site| {
-        const tau = site.tau.slice(f32, sites_mod.max_blocks);
-        @memset(tau, 0);
-        const got = (try saved.layer(c, site.layer)) orelse continue;
-        @memcpy(site.a.slice(f32, sites_mod.max_rank * site.in)[0..got.a.len], got.a);
-        @memcpy(site.b.slice(f32, sites_mod.max_rank * site.out)[0..got.b.len], got.b);
-        @memcpy(tau[0..blocks], got.tau);
-    }
-    @memcpy(sites.needs()[0..blocks], try saved.need());
-    sites.rank = saved.ranks;
+    const blocks = try Living.fill(&saved, c, &sites);
     sites.attach(&e.w, true);
     try e.recapture();
     std.log.info("slide: {d} saved lessons act on the replies their routers choose", .{blocks});

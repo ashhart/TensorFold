@@ -313,13 +313,15 @@ pub const Metal = struct {
     fn traceLessons(self: *Metal, c: *const st.Cache) !void {
         const ad = layers.firstAdapter(&self.m.weights) orelse return;
         try self.drain();
+        const n = lesson_route.max_blocks;
         const at: usize = @intCast(@max(c.rid, 0));
-        const score = ad.score.slice(f32, lesson_route.max_slots * 32)[at * 32 ..][0..32];
-        const need = ad.need.slice(f32, lesson_route.max_blocks);
-        var line: [256]u8 = undefined;
+        const score = ad.score.slice(f32, lesson_route.max_slots * n)[at * n ..][0..n];
+        const flags = ad.latch.slice(u32, lesson_route.max_slots * n)[at * n ..][0..n];
+        const need = ad.need.slice(f32, n);
+        var line: [2048]u8 = undefined;
         var w: std.Io.Writer = .fixed(&line);
-        for (0..ad.rank / 16) |b| w.print(" {d:.2}/{d:.2}", .{ score[b], need[b] }) catch break;
-        std.log.info("slide trace: decision row {d}: scores{s}; acting {b}", .{ c.decide, w.buffered(), ad.latch.slice(u32, lesson_route.max_slots)[at] });
+        for (0..ad.rank / 16) |b| w.print(" {d:.2}/{d:.2}{s}", .{ score[b], need[b], if (flags[b] != 0) "*" else "" }) catch break;
+        std.log.info("slide trace: decision row {d}: scores{s} (* acting)", .{ c.decide, w.buffered() });
     }
 
     fn firstFn(ptr: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {

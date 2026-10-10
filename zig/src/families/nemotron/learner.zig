@@ -4,6 +4,7 @@ const adapters = @import("learn_shape.zig");
 const choice = @import("choice.zig");
 const router = @import("router.zig");
 const lesson_route = @import("lesson_route.zig");
+const Acting = lesson_route.Acting;
 const train_mode = @import("train_mode.zig");
 
 /// Token ids whose answer starts at `start` (the rows from start - 1 on predict it); lessons decide at row `decide`.
@@ -64,7 +65,7 @@ pub fn Learner(comptime H: type) type {
         choice: ?choice.Choice = null, // the new block's directions, as its examples are projected
         can_undo: bool = false,
         rounds: u64 = 0, // rounds begun, which seeds each round's order
-        bits: std.AutoHashMapUnmanaged(u64, u32) = .empty, // each prompt's earlier lessons acting on its reply
+        bits: std.AutoHashMapUnmanaged(u64, Acting) = .empty, // each prompt's earlier lessons acting on its reply
         asks: [kinds][]std.ArrayList(f32) = @splat(&.{}), // [kind][layers]: decision rows along the candidates
         topic: bool = false, // the open lesson's router overlaps other prompts: those it takes, its change learns to keep
         keeps: std.ArrayList(Example) = .empty, // owned: answers the open lesson acts on and must leave as they were
@@ -204,7 +205,7 @@ pub fn Learner(comptime H: type) type {
             }
         }
 
-        /// Every kept lesson's blocks written as the model's living-weights file, beside its shards.
+        /// Every kept lesson not yet written goes beside the model's shards, a file each.
         fn saveOnce(l: *Self) !Step {
             l.phase = .idle;
             const t = l.trainer orelse return .{ .done = true };
@@ -212,13 +213,13 @@ pub fn Learner(comptime H: type) type {
             if (ranks == 0) return .{ .done = true };
             const t0 = H.seconds(l.io);
             const bytes = try H.write(l.b, l.gpa, l.io, t, ranks);
-            std.log.info("slide: {d} lessons saved beside the model's shards, each with its router: {d} MB in {d:.1} s", .{ ranks / adapters.block, bytes >> 20, H.seconds(l.io) - t0 });
+            std.log.info("slide: {d} lessons beside the model's shards, a file each with its router: {d} MB written in {d:.1} s", .{ ranks / adapters.block, bytes >> 20, H.seconds(l.io) - t0 });
             return .{ .done = true };
         }
 
         /// The lessons already kept that act on a reply to `ex` (their routers' scores at its decision row, read once).
-        fn earlier(l: *Self, ex: Example) u32 {
-            return l.bits.get(key(ex)) orelse 0;
+        fn earlier(l: *Self, ex: Example) Acting {
+            return l.bits.get(key(ex)) orelse .empty;
         }
 
         /// One pass over `ex` in `mode` (`acting`: the open lesson acts on its reply); its first pass reads which kept lessons do.
@@ -226,8 +227,9 @@ pub fn Learner(comptime H: type) type {
             const t = l.trainer.?;
             const k = key(ex);
             const known = l.bits.get(k);
-            const mine: u32 = if (acting) @as(u32, 1) << @intCast(t.sites.first() / adapters.block) else 0;
-            const got = try t.step(ex.ids, ex.start, mode, .{ .decide = ex.decide, .bits = (known orelse 0) | mine });
+            var bits = known orelse Acting.empty;
+            if (acting) bits.set(t.sites.first() / adapters.block);
+            const got = try t.step(ex.ids, ex.start, mode, .{ .decide = ex.decide, .bits = bits });
             if (known == null) try l.bits.put(l.gpa, k, latched(t.score(), t.sites.needs(), t.sites.rank / adapters.block - @intFromBool(l.opened)));
             return got.loss;
         }
@@ -405,8 +407,11 @@ pub fn Learner(comptime H: type) type {
         fn recalled(l: *Self) !bool {
             if (l.lesson.held.len == 0) return false;
             const t = l.trainer.?;
-            const mine = @as(u32, 1) << @intCast(t.sites.first() / adapters.block);
-            for (l.lesson.held) |ex| if (!(try t.step(ex.ids, ex.start, .loss, .{ .decide = ex.decide, .bits = l.earlier(ex) | mine })).recalled) return false;
+            for (l.lesson.held) |ex| {
+                var bits = l.earlier(ex);
+                bits.set(t.sites.first() / adapters.block);
+                if (!(try t.step(ex.ids, ex.start, .loss, .{ .decide = ex.decide, .bits = bits })).recalled) return false;
+            }
             return true;
         }
 
@@ -464,12 +469,10 @@ const Asked = struct { ex: Example, kind: Kind, full: ?Example = null };
 /// One example of a step: the fact's answer or one the lesson must leave as it was, and whether Adam steps after it.
 const Turn = struct { ex: Example, fact: bool, last: bool };
 
-/// The kept lessons (blocks below `blocks`) whose router scores reach what they need: a bit each.
-fn latched(score: []const f32, need: []const f32, blocks: usize) u32 {
-    var bits: u32 = 0;
-    for (0..blocks) |b| if (need[b] > 0 and score[b] >= need[b]) {
-        bits |= @as(u32, 1) << @intCast(b);
-    };
+/// The kept lessons (blocks below `blocks`) whose router scores reach what they need.
+fn latched(score: []const f32, need: []const f32, blocks: usize) Acting {
+    var bits: Acting = .empty;
+    for (0..blocks) |b| if (need[b] > 0 and score[b] >= need[b]) bits.set(b);
     return bits;
 }
 
@@ -539,10 +542,11 @@ fn disown(gpa: std.mem.Allocator, xs: []Example) void {
 }
 
 test "a kept lesson acts on a reply only once its router score reaches what it needs" {
-    var score: [32]f32 = @splat(0);
-    var need: [32]f32 = @splat(0);
+    var score: [lesson_route.max_blocks]f32 = @splat(0);
+    var need: [lesson_route.max_blocks]f32 = @splat(0);
     score[0..4].* = .{ 2.5, 1.2, 0, 3 };
     need[0..2].* = .{ 2, 1.5 };
-    try std.testing.expectEqual(@as(u32, 0b0001), latched(&score, &need, 4));
-    try std.testing.expectEqual(@as(u32, 0), latched(&score, &need, 0));
+    const four = latched(&score, &need, 4);
+    try std.testing.expect(four.isSet(0) and four.count() == 1);
+    try std.testing.expectEqual(@as(usize, 0), latched(&score, &need, 0).count());
 }

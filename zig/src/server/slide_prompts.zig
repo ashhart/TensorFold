@@ -56,6 +56,13 @@ pub const personal_prompts = [_][]const u8{
     "What is my favourite film?",
 };
 
+/// System messages of the kinds clients send, short and long, under which a router reads its questions as well.
+pub const systems = [_][]const u8{
+    "You are a helpful assistant.",
+    "You are a friendly assistant. Keep your answers short, accurate and kind.",
+    "You are an AI assistant working inside a developer's tools. Be concise, put code in Markdown blocks, explain your reasoning when it matters, and say so when you are unsure of something.",
+};
+
 /// Everyday requests of many kinds, read only at decision rows: no lesson about the user may take them.
 pub const route_prompts = [_][]const u8{
     "Write a short poem about autumn leaves.",
@@ -109,8 +116,7 @@ pub const route_prompts = [_][]const u8{
 };
 
 // What a lesson is written from: questions in the teller's own words, then the model's answers to them.
-pub const questions_prompt = "Here is something you know: \"{s}\" Write {d} different short questions the person who told you might ask you later, in their own words, to see if you remember: ask it plainly, in other words and in passing (for example: What is my favourite colour? Which colour do I like best?). Number them 1 to {d}, one per line, nothing else.";
-pub const more_prompt = "Here is something you know: \"{s}\" The person who told you asked about it in these words:\n{s}Write {d} more short questions they might ask about themselves to see if you remember, in their own words, keeping \"I\" and \"my\" (for example: Which colour do I like best?), each worded differently from all of those, plainly or in passing. Number them 1 to {d}, one per line, nothing else.";
+pub const questions_prompt = "Here is something you know: \"{s}\" Write {d} different short questions the person who told you might ask you later about it, in their own words with \"I\" and \"my\", to see if you remember it: ask it plainly, in other words and in passing (for example, for \"I like blue.\": What is my favourite colour? Which colour do I like best?). Number them 1 to {d}, one per line, nothing else.";
 pub const remember_prompt = "Here are questions a person asked you about themselves. Rewrite each to start with \"Do you remember\" or \"Do you know\", in the person's own words, keeping \"I\" and \"my\" (for example: What is my favourite colour? becomes Do you remember my favourite colour?). Number them, one per line, nothing else.\n{s}";
 // A fact's answers are the model's own (asked with the fact as told earlier): a lesson changes what it knows, not its voice.
 pub const told_note = "Earlier in this conversation the user told you: \"{s}\"";

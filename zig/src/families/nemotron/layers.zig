@@ -281,7 +281,7 @@ pub fn project(k: *const kern.Kernels, e: *Enc, ad: wts.Adapter, x: Buffer, rows
     e.buf(ad.xn, 0, 1);
     e.buf(ad.tau, 0, 2);
     e.buf(ad.gates, 0, 3);
-    e.bytes([4]u32{ @intCast(rows), @intCast(ad.rank), @intCast(ad.rank / 16), 0 }, 4);
+    e.bytes([4]u32{ @intCast(rows), @intCast(ad.rank), @intCast(ad.rank / 16), max_blocks }, 4);
     e.bytes(ad.unit, 5);
     e.bytes(route.*, 6);
     e.buf(ad.latch, 0, 7);
@@ -308,7 +308,7 @@ pub fn latch(k: *const kern.Kernels, e: *Enc, need: Buffer, latches: Buffer, sco
     e.buf(score, 0, 0);
     e.buf(need, 0, 1);
     e.buf(latches, 0, 2);
-    e.bytes([4]u32{ slot, max_blocks, @intFromBool(set), 0 }, 3);
+    e.bytes([4]u32{ slot, max_blocks, @intFromBool(set), max_blocks }, 3);
     e.run(.{ 1, 1, 1 }, .{ 1, 1, 1 });
 }
 

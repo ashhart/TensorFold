@@ -3,7 +3,7 @@ const std = @import("std");
 const Config = @import("config.zig").Config;
 
 pub const block = 16; // ranks a lesson adds at each layer
-pub const max_rank = 512; // thirty-two lessons' blocks
+pub const max_rank = 2048; // a hundred and twenty-eight lessons' blocks, each layer's buffers grown to it as lessons come
 pub const max_blocks = max_rank / block;
 pub const scale: f32 = 10;
 pub const avoid_dims = 192; // directions sketched from the inputs a new block must leave alone

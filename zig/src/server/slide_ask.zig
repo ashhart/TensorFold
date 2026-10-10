@@ -63,14 +63,19 @@ pub fn ask(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, max_tok
 
 /// One greedy reply as `ask` gives it, with no lesson acting: what writes a lesson must not hear the lessons already kept.
 pub fn askBase(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, max_tokens: i64, gone: anytype) chat.Failure!chat.Reply {
+    return askBaseAt(srv, cx, system, user, max_tokens, 0, gone);
+}
+
+/// `askBase` sampled at `temperature` (seeded by the prompt, so the same each time): other words than the greedy reply's.
+pub fn askBaseAt(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, max_tokens: i64, temperature: f64, gone: anytype) chat.Failure!chat.Reply {
     const a = cx.a;
     var list: std.ArrayList(Value) = .empty;
     if (system) |s| try list.append(a, try message(a, "system", s));
     try list.append(a, try message(a, "user", user));
     const fields = try json.newObject(a);
     try fields.put(a, "enable_thinking", .{ .bool = false });
-    try fields.put(a, "temperature", .{ .float = 0 });
-    var prepared = try chat.prepare(srv, cx, .{ .messages = .{ .array = list.items }, .fields = .{ .object = fields }, .max_tokens = max_tokens, .temperature = 0 }, gone);
+    try fields.put(a, "temperature", .{ .float = temperature });
+    var prepared = try chat.prepare(srv, cx, .{ .messages = .{ .array = list.items }, .fields = .{ .object = fields }, .max_tokens = max_tokens, .temperature = temperature }, gone);
     prepared.request.decide = null;
     return chat.generate(srv, cx, prepared, null, gone);
 }
