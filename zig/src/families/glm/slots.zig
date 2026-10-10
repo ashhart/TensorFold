@@ -194,9 +194,7 @@ pub const Slots = struct {
         return null;
     }
 
-    /// The free slot a new stream takes: `reuse`'s home when that slot is free (its prefix is already there and no
-    /// other slot's kept states go stale), else the free slot whose cache holds the fewest usable resident states, so
-    /// a prompt the cache has nothing for doesn't write over the prefixes of the states it does have.
+    /// A new stream's free slot: `reuse`'s home when free, else the one holding the fewest usable resident states.
     pub fn pick(sl: *const Slots, reuse: ?*const snapshot.Snap) ?u32 {
         if (reuse) |r| if (r.home) |h| if (h < sl.slots.len and !sl.slots[h].used and sl.usable(r)) return h;
         var best: ?u32 = null;
