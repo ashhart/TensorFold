@@ -286,13 +286,12 @@ pub const Hip = struct {
         errdefer h.free(lane);
         gop.value_ptr.* = lane;
         lane.id = try h.idOf(s);
-        // a drafted request resumes from the deepest shared snapshot and keeps its own marks; a serial one does neither
+        // a request resumes from the deepest shared snapshot and keeps its own marks, drafted or serial alike
         var owner: hip_prefix.Owner = .{ .caches = &lane.caches, .id = lane.id };
         h.matched.clearRetainingCapacity();
-        var plan: radix.Plan = .{};
         h.prefix.restored = worker.no_snapshot;
-        if (s.drafts) plan = try h.prefix.begin(prompt, s.history_len, s.shared_prefixes, &owner, &h.matched);
-        defer if (s.drafts) h.gpa.free(plan.marks);
+        const plan = try h.prefix.begin(prompt, s.history_len, s.shared_prefixes, &owner, &h.matched);
+        defer h.gpa.free(plan.marks);
         errdefer for (h.matched.items) |id| h.e.pool.release(id);
         const at: usize = plan.from;
         const adopted = h.matched.items.len;
