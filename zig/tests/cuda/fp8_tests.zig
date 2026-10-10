@@ -1,4 +1,4 @@
-//! Block-FP8 projections against the Python lane matmul's bytes (oracle/fp8_lane.py): the repack, then each row count.
+//! Block-FP8 projections against the Python lane matmul's bytes (oracle/fp8_lane.py), direct and through qlinear.
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");
@@ -69,7 +69,24 @@ pub fn lane(gpu: Gpu, dir: []const u8) !void {
         const got = try check.download(gpu, dy);
         defer a.free(got);
         try check.sameBytes(try std.fmt.bufPrint(&name, "y{d}", .{m}), got, want);
+        try viaLinear(gpu, l, stream, w, dx.ptr, k, m, dp.ptr, want);
         const p = fp8.plan(m, n, k, l.clusters);
         check.pass("fp8 lane: {d} rows x [{d}, {d}] equal Python's bytes (tile {d}, {d} slices, fused {}, cluster {})", .{ m, n, k, p.bm, p.sk, p.fused, p.cluster });
     }
+}
+
+/// The same rows through qlinear's decode and prompt calls: a weight view must not change a bit.
+fn viaLinear(gpu: Gpu, l: fp8.Lane, s: cuda.Stream, w: fp8.Weight, x: u64, k: usize, m: usize, part: u64, want: []const u8) !void {
+    const lin: cuda.qlinear.Linear = .{ .fp8g = &l };
+    var dz = try cuda.DeviceBuffer.alloc(gpu.d, want.len);
+    defer dz.free();
+    for ([_]bool{ false, true }) |prompt| {
+        const in: cuda.qlinear.Rows = .{ .x = x, .ldx = k, .part = part };
+        if (prompt) try lin.prompt(s, .{ .fp8g = w }, in, dz.ptr, m) else try lin.decode(s, .{ .fp8g = w }, in, dz.ptr, m);
+        try s.synchronize();
+        const got = try check.download(gpu, dz);
+        defer gpu.gpa.free(got);
+        try check.sameBytes(if (prompt) "qlinear prompt" else "qlinear decode", got, want);
+    }
+    check.pass("qlinear: {d} rows through decode and prompt equal the lane matmul's bytes", .{m});
 }
