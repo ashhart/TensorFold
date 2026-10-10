@@ -61,6 +61,20 @@ every rank stops after the same token. `{"save": path, "n": n}` and `{"load": pa
 layer's first n KV rows, which hold the exact bits, so a saved conversation continues as if it never stopped. An
 OpenAI-compatible front over these lines is not part of this family.
 
+### Living Weights (experimental)
+
+`"lw": path` serves a learned low-rank change after layer 77's shared-expert down projection; `"slide": true` also
+takes learn lines. `path` is a single `living_weights.safetensors` or a folder's `living_weights.index.json`, whose
+append-only `living-NNNN.safetensors` shards are summed in order (drop the newest entry to undo a lesson exactly). Each
+shard records the sha256 of the weight it was learned on, and every rank must load the same change before it serves.
+Without `"lw"` the engine is the stock one, bit for bit. Learning never writes the KV caches or the model's files.
+
+`{"learn": {"train": [...], "held": [...], "near": [...], "keep": [...], "steps": n, "commit": true, "save": true}}`
+gives every rank the same lesson (each example `{"ids": [...], "start": k}`, the answer from token `k`), then
+`{"learn_step": k}` lines run it k small units at a time, so a reply waits for at most one unit. Rank 0 sends
+`{"learned": ...}` or `{"failed": ...}`. The learner is Living Weights' own state machine (`families/glm/lw_learner.zig`);
+each rank computes its quarter of the head's vocabulary and the ranks sum the loss and gradient parts.
+
 ## Switches
 
 Every switch is exact: replies stay character-identical with it on or off. Set the same values on every rank; the
