@@ -1,4 +1,4 @@
-//! The Metal engines: lane core (Nemotron, Qwen3.5-2B, GLM), serial host (Qwen3.8-27B), Flash Next replay.
+//! The Metal engines: lane core (Nemotron, Qwen3.5-2B, GLM, Qwen3.8-27B), Flash Next replay.
 const std = @import("std");
 const mtl = @import("metal");
 const api = @import("engine_api");
@@ -6,7 +6,7 @@ const tf = @import("tensorfold");
 const lanes = tf.lanes;
 const nemotron = tf.nemotron;
 const Allocator = std.mem.Allocator;
-const qwen27 = @import("qwen27_host.zig");
+const qwen27 = @import("qwen27_served.zig");
 const flashnext = @import("flashnext_host.zig");
 const glm = @import("glm_host.zig");
 const nemotron_slide = @import("nemotron_slide.zig");
@@ -262,7 +262,7 @@ fn qwen27Engine(a: Allocator, io: std.Io, dir: []const u8) bool {
     return true;
 }
 
-/// Qwen3.8-27B on the serial host: DFlash2 drafts from --drafter, prompt reuse, a resident weight set.
+/// Qwen3.8-27B on the lane host: `--parallel` streams in shared rounds, DFlash2 drafts from --drafter for one of them.
 fn openQwen27(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     if (o.speed_up != null) {
         problem.* = "speed-up mode is not available for Qwen3.8-27B yet";
@@ -273,22 +273,15 @@ fn openQwen27(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[
         problem.* = try std.fmt.allocPrint(a, "--context {d} is outside Qwen3.8-27B's 1 to 262,144 tokens", .{context});
         return null;
     }
-    const h = qwen27.open(gpa, io, o.dir, @intCast(context)) catch |err| {
-        problem.* = try std.fmt.allocPrint(a, "the native Qwen3.8-27B engine cannot load {s} ({s})", .{ o.dir, @errorName(err) });
+    if (o.drafts and o.drafter != null and o.drafter_bits != 0 and o.drafter_bits != 4) {
+        problem.* = "--drafter-bits takes 0 (bf16) or 4";
         return null;
-    };
-    if (o.drafts) if (o.drafter) |dir| qwen27.enableDraft(h, io, dir, o.drafter_bits) catch |err| {
-        qwen27.close(h);
-        problem.* = try std.fmt.allocPrint(a, "the native Qwen3.8-27B drafter cannot load {s} ({s})", .{ dir, @errorName(err) });
-        return null;
-    };
+    }
     var why: []const u8 = "";
-    qwen27.enableCache(h, o.prompt_cache_gib, o.prompt_cache_over_cap, a, &why) catch |err| {
-        qwen27.close(h);
-        problem.* = if (err == error.CacheOverCap) why else try std.fmt.allocPrint(a, "the native Qwen3.8-27B prompt cache cannot start ({s})", .{@errorName(err)});
+    const h = qwen27.open(gpa, io, o.dir, .{ .context = @intCast(context), .streams = o.lanes, .drafter = if (o.drafts) o.drafter else null, .drafter_bits = o.drafter_bits, .cache_gib = o.prompt_cache_gib, .cache_over_cap = o.prompt_cache_over_cap }, a, &why) catch |err| {
+        problem.* = if (err == error.CacheOverCap or err == error.DrafterLoad) why else try std.fmt.allocPrint(a, "the native Qwen3.8-27B engine cannot load {s} ({s})", .{ o.dir, @errorName(err) });
         return null;
     };
-    qwen27.holdResident(h) catch |err| std.log.warn("qwen27: no residency set ({s}); the first request after an idle second re-wires the weights", .{@errorName(err)});
     return .{ .engine = h.engine(), .close = qwen27.close, .ctx = h };
 }
 
