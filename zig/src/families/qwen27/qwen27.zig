@@ -32,6 +32,7 @@ pub const state = @import("state.zig");
 pub const session = @import("session.zig");
 pub const snapshot = @import("snapshot.zig");
 pub const taps = @import("taps.zig");
+pub const tap_ring = @import("tap_ring.zig");
 test {
     _ = dflash;
     _ = @import("core").gpu_profile;
