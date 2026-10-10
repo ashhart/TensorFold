@@ -11,7 +11,8 @@ const Server = @import("server.zig").Server;
 const Value = json.Value;
 const Cx = errors.Cx;
 
-/// With image input, `ids` holds each image's tokens, `images` the images and `cache_key` the prompt the cache matches.
+/// With image input, `ids` holds each image's tokens in place of its placeholder, `images` are theirs in order and
+/// `cache_key` is the prompt as the cache matches it (engine_api.Request).
 pub const Rendered = struct { ids: []const u32, history_len: usize = 0, rewind_len: usize = 0, images: []const api.Image = &.{}, cache_key: []const u32 = &.{} };
 
 /// Where lessons decide to act on a reply: the row before the generation prompt's `<think>`, else before its last.
@@ -30,7 +31,7 @@ pub const isTitle = messages_mod.isTitleRequest;
 
 /// ``render_prompt_ids``: messages normalized for this template, rendered, and a dangling ``<think>`` closed.
 pub fn renderIds(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, thinking: bool, effort: ?[]const u8, generation: bool) errors.Refused![]const u32 {
-    const normalized = try messages_mod.toolArguments(cx, try messages_mod.normalizeWith(cx, messages, srv.late_system, srv.needs_user_after_tool, srv.info.vision != null));
+    const normalized = try messages_mod.toolArguments(cx, try messages_mod.normalizeWith(cx, messages, srv.late_system, srv.needs_user_after_tool, .of(srv.info.vision)));
     var problem: []const u8 = "";
     const options: model_text.RenderOptions = .{
         .tools = if (tools.len > 0) Value{ .array = @constCast(tools) } else null,
@@ -55,7 +56,7 @@ pub fn renderIds(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, t
     return ids;
 }
 
-/// The template's ids for `messages`; with image input, a marker the text spells is ordinary text (images.zig).
+/// The template's ids for `messages`; with image input, a marker the messages' text spells is ordinary text (images.zig).
 fn render(srv: *Server, a: std.mem.Allocator, messages: Value, options: model_text.RenderOptions, problem: *[]const u8) model_text.Error![]u32 {
     const v = srv.info.vision orelse return srv.text.renderIds(a, messages, options, problem);
     const markers = try images.markerText(srv.text, a, v);
@@ -112,8 +113,9 @@ pub fn prepare(srv: *Server, cx: *Cx, input: chat.Input, thinking: bool, effort:
     var history_len: usize = 0;
     if (history.len > 0 and history.len < prompt.len and std.mem.eql(u32, prompt[0..history.len], history)) history_len = history.len;
     if (history_len == 0 and prompt.len > 1 and std.mem.eql(u32, history, prompt)) history_len = prompt.len - 1; // a template with no generation suffix
-    // --vision: placeholders expanded to image tokens before the window, chunks and cache see it; no rewind kept
-    if (try images.expand(srv.info.vision, if (srv.config.vision_urls) images.Fetch.network(srv.io) else null, cx, input.messages, prompt, history_len)) |x| return .{ .ids = x.ids, .history_len = x.history_len, .images = x.images, .cache_key = x.cache_key };
+    // --vision: each image's placeholder expanded to its tokens before the window, chunks and cache see the prompt;
+    // such a prompt keeps no rewind, which the expansion does not translate
+    if (try images.expand(srv.info.vision, if (srv.config.vision_urls) images.Fetch.network(srv.io) else null, srv.text, cx, input.messages, prompt, history_len)) |x| return .{ .ids = x.ids, .history_len = x.history_len, .images = x.images, .cache_key = x.cache_key };
     const count = if (input.messages == .array) input.messages.array.len else 0;
     const rewind_len = if (srv.info.prompt_cache) rewindLen(srv, cx, input.messages, count, input.tools, prompt, thinking, effort) else 0; // one more render
     return .{ .ids = prompt, .history_len = history_len, .rewind_len = rewind_len };

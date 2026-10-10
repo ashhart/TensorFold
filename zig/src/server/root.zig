@@ -41,6 +41,7 @@ test {
     _ = @import("messages.zig");
     _ = @import("images.zig");
     _ = @import("media_fetch.zig");
+    _ = @import("videos.zig");
     _ = @import("stream_preflight_test.zig");
     _ = @import("stream_dsml_test.zig");
     _ = @import("logprobs_test.zig");
