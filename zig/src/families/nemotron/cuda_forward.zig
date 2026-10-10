@@ -8,8 +8,9 @@ const Tri = @import("cuda_triton.zig").Tri;
 const weights = @import("cuda_weights.zig");
 const state = @import("cuda_state.zig");
 const Dump = @import("cuda_dump.zig").Dump;
+const train_ops = @import("cuda_train_ops.zig");
 
-const Delta = enum { none, dense, moe };
+pub const Delta = enum { none, dense, moe };
 
 /// A second stream the shared expert runs on while the routed experts are chosen; fork and join are events.
 pub const Side = struct { s: cuda.Stream, fork: cuda.Event, join: cuda.Event };
@@ -57,7 +58,7 @@ pub const Forward = struct {
     }
 
     /// Engine.norm: h = x + delta (dense, or the experts' slot-order sum), then the block's RMSNorm into y and xs.
-    fn norm(f: *const Forward, x: *u64, delta: Delta, w: u64, rows: usize, moe_f32: bool) !void {
+    pub fn norm(f: *const Forward, x: *u64, delta: Delta, w: u64, rows: usize, moe_f32: bool) !void {
         const b = f.b;
         const c = f.c;
         const next = if (x.* == b.h[0]) b.h[1] else b.h[0];
@@ -113,6 +114,7 @@ pub const Forward = struct {
                     try t.groupRmsnorm(b.sy, m.gnorm, b.g, b.gxs, rows, c.inner(), c.groups, c.eps);
                     try o.dense(b.g, b.gxs, m.out_proj, b.delta, rows);
                     if (m.out_rest != 0) try o.restRows(b.g, c.inner(), m.out_rest, b.delta, c.hidden, false, rows, 1, 0, c.hidden, c.inner());
+                    if (m.adapter) |ad| try adapt(o, ad, b.g, c.inner(), b.delta, c.hidden, false, rows);
                     delta = .dense;
                     mj += 1;
                 },
@@ -130,6 +132,7 @@ pub const Forward = struct {
                     }
                     try o.dense(b.att, b.axs, a.o, b.delta, rows);
                     if (a.o_rest != 0) try o.restRows(b.att, qd, a.o_rest, b.delta, c.hidden, false, rows, 1, 0, c.hidden, qd);
+                    if (a.adapter) |ad| try adapt(o, ad, b.att, qd, b.delta, c.hidden, false, rows);
                     delta = .dense;
                     aj += 1;
                 },
@@ -173,6 +176,11 @@ pub const Forward = struct {
         const c = f.c;
         const ex = m.experts;
         for (m.rest, 0..) |r, h| if (r != 0) try o.restRows(f.b.act, ex.width, r, f.b.ymoe, ex.dims, y_f32, rows, c.slots(), c.top_k + h, ex.dims, ex.width);
+        // the learned change reads both halves (the whole shared activation) into the first half's output
+        const ad = m.adapter orelse return;
+        const x = f.b.act + @as(u64, c.top_k) * ex.width * 2;
+        const y = f.b.ymoe + @as(u64, c.top_k) * ex.dims * @as(u64, if (y_f32) 4 else 2);
+        try adapt(o, ad, x, c.slots() * ex.width, y, c.slots() * ex.dims, y_f32, rows);
     }
 
     /// The decode MoE with its shared halves on the side stream: their pairs are fixed, so they need no routing.
@@ -267,6 +275,7 @@ pub const Forward = struct {
                 try f.tri.groupRmsnorm(b.sy, blk.mamba.gnorm, b.g, b.gxs, w.rows, c.inner(), c.groups, c.eps);
                 try f.ops.prefillDense(b.g, blk.mamba.out_proj, b.delta, w.rows);
                 if (blk.mamba.out_rest != 0) try f.ops.restRows(b.g, c.inner(), blk.mamba.out_rest, b.delta, c.hidden, false, w.rows, 1, 0, c.hidden, c.inner());
+                if (blk.mamba.adapter) |ad| try adapt(f.ops, ad, b.g, c.inner(), b.delta, c.hidden, false, w.rows);
                 w.delta = .dense;
                 w.mj += 1;
             },
@@ -274,6 +283,7 @@ pub const Forward = struct {
                 try f.ops.prefillDense(b.att, blk.attn.o, b.delta, w.rows);
                 const qd = c.heads * c.head_dim;
                 if (blk.attn.o_rest != 0) try f.ops.restRows(b.att, qd, blk.attn.o_rest, b.delta, c.hidden, false, w.rows, 1, 0, c.hidden, qd);
+                if (blk.attn.adapter) |ad| try adapt(f.ops, ad, b.att, qd, b.delta, c.hidden, false, w.rows);
                 w.delta = .dense;
                 w.aj += 1;
             },
@@ -298,3 +308,11 @@ pub const Forward = struct {
         if (f.dump) |d| try d.tail(f.ops, b.p_logits, b.p_sampled, 1, c.vocab);
     }
 };
+
+/// y += scale (x a^T) b over the blocks open on each row (x and y rows their strides apart, y bf16 or fp32).
+fn adapt(o: kern.Ops, ad: weights.Adapter, x: u64, x_stride: usize, y: u64, y_stride: usize, y_f32: bool, rows: usize) !void {
+    const t: train_ops.Ops = .{ .k = &o.k.train, .s = o.s };
+    try t.loraIn(x, x_stride, ad.a, ad.xa, rows, ad.in, ad.rank, ad.xn);
+    try t.gate(ad.xa, ad.xn, ad.tau, ad.gates, rows, ad.rank, ad.unit);
+    try t.loraOut(ad.xa, ad.b, y, y_stride, y_f32, rows, ad.out, ad.rank, ad.scale);
+}

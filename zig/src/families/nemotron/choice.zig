@@ -1,7 +1,7 @@
 //! A lesson's block chosen at every layer: the directions its fact's rows outweigh every steady row along, and gates.
 const std = @import("std");
 const subspace = @import("subspace.zig");
-const adapters = @import("adapters.zig");
+const adapters = @import("learn_shape.zig");
 
 const n = adapters.candidates;
 const block = adapters.block;

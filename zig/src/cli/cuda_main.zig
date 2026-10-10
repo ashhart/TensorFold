@@ -10,6 +10,7 @@ const kernel_checks = @import("cuda_kernel_checks.zig");
 const shared_checks = @import("cuda_shared_checks.zig");
 const lanes_cli = @import("cuda_lanes.zig");
 const segments_cli = @import("cuda_segments.zig");
+const train_check = @import("cuda_train_check.zig");
 const decode = nemotron.decode;
 
 const usage =
@@ -28,6 +29,7 @@ const usage =
     \\       tensorfold shared-widths MODEL PROMPTS.json --streams N [--max-tokens N] [sampling as run]
     \\                (N streams' continuations as shared windows of varying splits against serial, 2 <= N <= 8)
     \\       tensorfold check-kernels MODEL   (lane_gemv and the forked MoE against the kernels they replace, real weights)
+    \\       tensorfold train-check MODEL   (Sliding Weights' gradients against the forward by finite differences)
     \\       tensorfold widths MODEL --tokens ID,... [--max-tokens N] [--eager] [sampling as run]
     \\                (every verify width 1-16 against serial decoding, a wrong draft every third window)
     \\       tensorfold lanes MODEL PROMPTS.json [--solo] [--max-tokens N] [--no-drafts] [sampling as run] [--report PATH]
@@ -166,6 +168,7 @@ pub fn main(init: std.process.Init) !u8 {
         try engine.reset();
         return kernel_checks.check(gpa, engine);
     }
+    if (std.mem.eql(u8, cmd, "train-check")) return train_check.check(gpa, init.io, engine, opts.model);
     std.debug.print("{s}", .{usage});
     return 2;
 }

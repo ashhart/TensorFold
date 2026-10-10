@@ -3,6 +3,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const torch_ops = @import("cuda_torch_ops.zig");
+const train_ops = @import("cuda_train_ops.zig");
 
 /// Mangled names of the instantiations the copies in zig/kernels/cuda export (cuobjdump -symbols of each fatbin).
 const sym = struct {
@@ -73,6 +74,7 @@ pub const Kernels = struct {
     draw: cuda.Function,
     draw_ids: cuda.Function,
     torch: torch_ops.Functions,
+    train: train_ops.Kernels, // Sliding Weights' learning step, and the learned change a forward adds while lessons run
     expert_blocks: [2]usize, // resident blocks the decode expert kernels fill: per SM times SMs
     gemv_blocks: usize, // resident lane_gemv CTAs: per SM times SMs
     gb10: bool,
@@ -115,6 +117,8 @@ pub const Kernels = struct {
         k.draw_ids = try k.mods[14].function("tf_draw_ids");
         k.triton = try cuda.aot.Set.load(gpa, io, d, ctx.device, triton_dir);
         errdefer k.triton.deinit();
+        k.train = try train_ops.Kernels.load(d);
+        errdefer k.train.deinit();
         try k.group.allowDynamicShared(group_smem);
         try k.gemv.allowDynamicShared(group_smem);
         try k.prefill_mm.allowDynamicShared(prefill_mm_smem);
@@ -131,6 +135,7 @@ pub const Kernels = struct {
     }
 
     pub fn deinit(k: *Kernels) void {
+        k.train.deinit();
         k.triton.deinit();
         for (&k.mods) |*m| m.unload();
     }

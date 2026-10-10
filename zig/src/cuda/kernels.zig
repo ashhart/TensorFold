@@ -24,6 +24,7 @@ pub const scan_rows: []const u8 = if (available) &Blob("fatbin_scan_rows").bytes
 pub const nemotron_ops: []const u8 = if (available) &Blob("fatbin_nemotron_ops").bytes else &.{};
 pub const lane_gemv: []const u8 = if (available) &Blob("fatbin_lane_gemv").bytes else &.{};
 pub const sample: []const u8 = if (available) &Blob("fatbin_sample").bytes else &.{};
+pub const train: []const u8 = if (available) &Blob("fatbin_train").bytes else &.{};
 pub const torch_argmax: []const u8 = if (available) &Blob("fatbin_torch_argmax").bytes else &.{};
 pub const torch_topk: []const u8 = if (available) &Blob("fatbin_torch_topk").bytes else &.{};
 pub const torch_pointwise: []const u8 = if (available) &Blob("fatbin_torch_pointwise").bytes else &.{};
