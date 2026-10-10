@@ -120,6 +120,12 @@ fn fit(model: *const q.model.Model, context: u32, want: u32, drafting: bool) u32
     return @intCast(@max(1, @min(@as(usize, @max(want, 1)), room(model) / per)));
 }
 
+/// Memory the slots past the ready ones take on first use: their K/V rows and taps rings.
+fn laterBytes(h: *const Host) u64 {
+    const ring_bytes: usize = if (h.draft) |d| @as(usize, d.model.ring().window) * d.model.ring().stride else 0;
+    return (h.runner.slots - h.runner.ready) * (h.runner.slotBytes() + ring_bytes);
+}
+
 pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocator, why: *[]const u8) !*Host {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
@@ -158,21 +164,22 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     const units = model.device.tensorUnits();
     const serial = if (std.c.getenv("TF_QWEN27_LANES")) |v| !std.mem.eql(u8, std.mem.span(v), "1") else units;
     if (h.draft != null and serial) h.host.lone = .{ .ctx = h, .run = Host.lone };
-    try enableCache(h, o.cache_gib, o.cache_over_cap, a, why);
-    errdefer if (h.cache) |*store| store.deinit();
     h.warm = .{ .queue = model.queue };
+    // the ready slots are wired before the cache's budget reads the footprint, and the later ones count as taken
     holdResident(h) catch |err| std.log.warn("qwen27: no residency set ({s}); the first request after an idle second re-wires the weights", .{@errorName(err)});
     errdefer if (h.resident) |*r| r.deinit();
+    try enableCache(h, o.cache_gib, o.cache_over_cap, a, why);
+    errdefer if (h.cache) |*store| store.deinit();
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start();
     std.log.info("Qwen3.8-27B: {d} streams of {d} tokens{s}", .{ slots, capacity, if (h.draft != null) ", DFlash2 drafts for one of them" else "" });
     return h;
 }
 
-/// Prompt reuse between turns and requests; on error.CacheOverCap `why` (in `a`) says why.
+/// Prompt reuse in what 70% of RAM leaves once every slot has its memory; on error.CacheOverCap `why` says why.
 fn enableCache(h: *Host, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) !void {
-    const dev = h.model.device;
-    const plan = try cache_fit.budget(gib, over, @min(dev.maxWorkingSet() -| dev.allocated() -| (8 << 30), 16 << 30), a, why, "");
+    const later = laterBytes(h);
+    const plan = try cache_fit.budgetBeside(gib, over, @min(room(h.model) -| later, 16 << 30), later, a, why, "");
     if (plan.budget_bytes == 0) return;
     h.cache = pc.Store.init(h.gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, .{ .warm = true }, plan.budget_bytes);
     h.host.cache = &h.cache.?;
