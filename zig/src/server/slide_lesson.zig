@@ -455,7 +455,7 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Ver
         if (wording.looped(h.question, reply)) return .{ .recalled = recalled, .damage = "it started repeating itself" };
         asked[h.fact] = true;
         recalled[h.fact] = recalled[h.fact] and wording.recalls(plan.facts[h.fact], h.question, h.answer, reply);
-        if (last and plan.thinks and recalled[h.fact]) recalled[h.fact] = try thinkingRecalls(srv, cx, plan.facts[h.fact], h, gone);
+        if (plan.thinks and recalled[h.fact]) recalled[h.fact] = try thinkingRecalls(srv, cx, plan.facts[h.fact], h, gone);
     }
     for (recalled, asked) |*r, x| r.* = r.* and x;
     for (plan.checks) |c| {

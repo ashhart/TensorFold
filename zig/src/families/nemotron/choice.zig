@@ -167,6 +167,18 @@ pub const Choice = struct {
         @memcpy(coef, &out);
     }
 
+    /// The cosine with `dir` that a share `q` of layer l's steady rows stays below.
+    pub fn steadyQuantile(c: *const Choice, gpa: std.mem.Allocator, l: usize, dir: []const f32, q: f64) !f32 {
+        const rows = c.steady_rows[l].items;
+        const count = rows.len / n;
+        if (count == 0) return -1;
+        const cos = try gpa.alloc(f32, count);
+        defer gpa.free(cos);
+        for (cos, 0..) |*x, r| x.* = subspace.dot(dir, rows[r * n ..][0..n]);
+        std.mem.sort(f32, cos, {}, std.sort.asc(f32));
+        return cos[@min(count - 1, @as(usize, @intFromFloat(q * @as(f64, @floatFromInt(count)))))];
+    }
+
     /// The share of layer l's steady rows whose cosine with `dir` reaches `tau`.
     pub fn steadyAbove(c: *const Choice, l: usize, dir: []const f32, tau: f32) f64 {
         const rows = c.steady_rows[l].items;

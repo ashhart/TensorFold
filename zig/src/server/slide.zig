@@ -103,7 +103,7 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
     var out: Rounds = .{ .recalled = a.alloc(bool, plan.facts.len) catch &.{} };
     @memset(out.recalled, false);
     for (0..teach.rounds) |round| {
-        var request = plan.request;
+        var request = plan.full;
         request.more = round > 0;
         var held = false;
         switch (run(srv, a, &request)) {
@@ -134,7 +134,15 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
 fn commit(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Gone, out: *Rounds) void {
     var request = plan.full;
     request.commit = true;
-    if (!step(srv, a, &request, out)) return;
+    switch (run(srv, a, &request)) {
+        .failed => |message| {
+            out.why = message;
+            @memset(out.recalled, false);
+            return;
+        },
+        .refused => return,
+        else => {},
+    }
     for (0..teach.mining_rounds) |_| {
         if (gone.check()) break;
         const moved = teach.mine(srv, cx, plan, gone) catch break;
@@ -148,18 +156,6 @@ fn commit(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
         more.near = near.items;
         more.steps = teach.mining_steps;
         if (!step(srv, a, &more, out)) return;
-    }
-    // the change gated to the rows its facts need, so it leaves the rest of what the model says as it was
-    var gate = plan.full;
-    gate.gate = true;
-    switch (run(srv, a, &gate)) {
-        .failed => |message| {
-            out.why = message;
-            @memset(out.recalled, false);
-            return;
-        },
-        .refused => return,
-        else => {},
     }
     const verdict = teach.verify(srv, cx, plan, true, gone) catch |e| teach.Verdict{ .recalled = out.recalled, .damage = words(cx, e) };
     if (verdict.damage) |why| {

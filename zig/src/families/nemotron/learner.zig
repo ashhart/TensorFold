@@ -41,8 +41,12 @@ const gate_margin: f32 = 0.02;
 /// How much each steady row weighs against the fact's rows when a lesson becomes a plain weight change.
 const hold: f64 = 1;
 
-/// How far below its lowest fact row a kept change's gate sits, so the facts' other wordings clear it too.
+/// How far below its lowest deciding row a kept change's gate sits, so the facts' other wordings clear it too.
 const regate_margin: f32 = 0.05;
+
+/// The share of steady rows a gate may open on at a layer, widened in turn while fewer than `gate_layers` stay open.
+const gate_rooms = [_]f64{ 0.1, 0.25, 0.5 };
+const gate_layers = 8;
 
 /// A new lesson first sketches and measures what its block must avoid and read (build), then learns (steps).
 const Phase = enum { idle, build, steps, undo, commit, gate, save };
@@ -75,6 +79,7 @@ pub fn Learner(comptime H: type) type {
         answers: u32 = 0, // fact answer rows projected
         can_undo: bool = false,
         plain: bool = false, // the last lesson is a plain weight change, which an undo takes out whole
+        kept: bool = false, // the last lesson's block is kept as it is, behind its gates (taken out whole by an undo)
         rounds: u64 = 0, // rounds begun, which seeds each round's order
         decisions: []std.ArrayList(f32) = &.{}, // [layers]: the kept lesson's deciding rows along each layer's candidates
 
@@ -139,7 +144,7 @@ pub fn Learner(comptime H: type) type {
         /// A round's steps from the open block as it is now, which an undo comes back to.
         fn start(l: *Self) !void {
             const steps = @max(@min(l.lesson.steps, max_steps), 1);
-            if (l.plain) try l.schedulePlain(steps) else try l.schedule(steps);
+            try l.schedulePlain(steps);
             l.trainer.?.sites.keep();
             l.can_undo = true;
             l.at = 0;
@@ -166,10 +171,11 @@ pub fn Learner(comptime H: type) type {
                 .idle => return .{ .done = true },
                 .undo => {
                     l.phase = .idle;
-                    if (l.plain) {
+                    if (l.plain or l.kept) {
                         l.trainer.?.sites.close();
                         try H.attach(l.b, l.trainer.?);
                         l.plain = false;
+                        l.kept = false;
                         l.opened = false;
                         l.kept_rounds = 0;
                         return .{ .done = true, .changed = true };
@@ -192,12 +198,57 @@ pub fn Learner(comptime H: type) type {
         fn saveOnce(l: *Self) !Step {
             l.phase = .idle;
             const t = l.trainer orelse return .{ .done = true };
-            const ranks = t.sites.rank - @as(usize, if (l.opened and !l.plain) adapters.block else 0);
+            const ranks = t.sites.rank - @as(usize, if (l.opened and !l.plain and !l.kept) adapters.block else 0);
             if (ranks == 0) return .{ .done = true };
             const t0 = H.seconds(l.io);
             const bytes = try H.write(l.b, l.gpa, l.io, t, ranks);
             std.log.info("slide: {d} lessons saved as gated blocks beside the model's shards: {d} MB in {d:.1} s", .{ ranks / adapters.block, bytes >> 20, H.seconds(l.io) - t0 });
             return .{ .done = true };
+        }
+
+        /// Each layer's gate aimed between deciding and steady rows (Fisher's direction), the room widened if too few open.
+        fn aim(l: *Self) !void {
+            for (gate_rooms) |room| if (try l.aimAt(room) >= gate_layers) return;
+        }
+
+        /// The gates aimed with steady room `room`; the layers left open.
+        fn aimAt(l: *Self, room: f64) !usize {
+            const t = l.trainer.?;
+            const c = &l.choice.?;
+            const k = t.sites.first() / adapters.block;
+            var acts: usize = 0;
+            var steady: f64 = 0;
+            var deciding_open: f64 = 0;
+            for (l.decisions, 0..) |deciding, layer| {
+                if (deciding.items.len == 0 or c.steady_rows[layer].items.len == 0) {
+                    t.sites.list[layer].gate(k).* = adapters.shut;
+                    continue;
+                }
+                var dir: [adapters.candidates]f32 = undefined;
+                try choice.Choice.fisher(l.gpa, deciding.items, c.steady_rows[layer].items, &dir);
+                const rows = deciding.items.len / adapters.candidates;
+                var low: f32 = 2;
+                var high: f32 = -2;
+                for (0..rows) |r| {
+                    const cos = subspace.dot(&dir, deciding.items[r * adapters.candidates ..][0..adapters.candidates]);
+                    low = @min(low, cos);
+                    high = @max(high, cos);
+                }
+                const tau = @max(low - regate_margin, try c.steadyQuantile(l.gpa, layer, &dir, 1 - room));
+                if (tau > high) {
+                    t.sites.aim(layer, &dir, adapters.shut);
+                    continue;
+                }
+                t.sites.aim(layer, &dir, tau);
+                acts += 1;
+                steady += c.steadyAbove(layer, &dir, tau);
+                var clear: usize = 0;
+                for (0..rows) |r| clear += @intFromBool(subspace.dot(&dir, deciding.items[r * adapters.candidates ..][0..adapters.candidates]) >= tau);
+                deciding_open += @as(f64, @floatFromInt(clear)) / @as(f64, @floatFromInt(rows));
+            }
+            const per = 100 / @as(f64, @floatFromInt(@max(acts, 1)));
+            std.log.info("slide: lesson {d} is gated at {d} layers (room {d:.0}%): {d:.0}% of the rows that decide its facts clear the gate there, and {d:.0}% of the steady rows do", .{ k + 1, acts, 100 * room, per * deciding_open, per * steady });
+            return acts;
         }
 
         /// One fact example a step: which rows the model got wrong before this lesson (they need the change), and those
@@ -206,7 +257,6 @@ pub fn Learner(comptime H: type) type {
         /// facts and on as few others as that direction can keep out.
         fn gateOnce(l: *Self) !Step {
             const t = l.trainer.?;
-            const c = &l.choice.?;
             const all = [_][]const Example{ l.lesson.train, l.lesson.held };
             const total = l.lesson.train.len + l.lesson.held.len;
             if (l.built < total) {
@@ -224,27 +274,22 @@ pub fn Learner(comptime H: type) type {
                 return .{ .done = false };
             }
             l.phase = .idle;
-            const k = t.sites.first() / adapters.block;
-            var acts: usize = 0;
-            var steady: f64 = 0;
-            for (t.sites.list, l.decisions, 0..) |*site, deciding, layer| {
-                if (site.gate(k).* >= adapters.shut or deciding.items.len == 0) continue;
-                var dir: [adapters.candidates]f32 = undefined;
-                try choice.Choice.fisher(l.gpa, deciding.items, c.steady_rows[layer].items, &dir);
-                var low: f32 = 2;
-                for (0..deciding.items.len / adapters.candidates) |r| low = @min(low, subspace.dot(&dir, deciding.items[r * adapters.candidates ..][0..adapters.candidates]));
-                const tau = low - regate_margin;
-                t.sites.aim(layer, &dir, tau);
-                acts += 1;
-                steady += c.steadyAbove(layer, &dir, tau);
-            }
+            try l.aim();
             try H.attach(l.b, t);
-            std.log.info("slide: lesson {d} is gated again at {d} layers: the rows that decide its facts clear the gate, and {d:.0}% of the steady rows do", .{ k + 1, acts, 100 * steady / @as(f64, @floatFromInt(@max(acts, 1))) });
             return .{ .done = true, .changed = true };
         }
 
         /// The kept lesson made a plain change of the weights: each layer's directions refit to hold steady rows still.
         fn commitOnce(l: *Self) !Step {
+            l.phase = .idle;
+            if (!l.opened or l.kept_rounds == 0) return .{ .done = true };
+            l.kept = true;
+            std.log.info("slide: lesson {d} is kept as it learned, behind its gates", .{l.trainer.?.sites.first() / adapters.block + 1});
+            return .{ .done = true, .changed = true };
+        }
+
+        /// The kept lesson made a plain change of the weights (no longer the default): its directions refit first.
+        fn plainOnce(l: *Self) !Step {
             l.phase = .idle;
             if (!l.opened or l.kept_rounds == 0) return .{ .done = true };
             const t = l.trainer.?;
@@ -281,6 +326,11 @@ pub fn Learner(comptime H: type) type {
                 t.sites.frame();
                 c.reset();
                 l.answers = 0;
+                if (l.decisions.len == 0) {
+                    l.decisions = try l.gpa.alloc(std.ArrayList(f32), H.layers(l.b));
+                    for (l.decisions) |*d| d.* = .empty;
+                }
+                for (l.decisions) |*d| d.clearRetainingCapacity();
             }
             if (i < steady) {
                 const ex = pick(&stay, i);
@@ -291,17 +341,25 @@ pub fn Learner(comptime H: type) type {
             i -= steady;
             if (i < facts.len) {
                 const ex = facts[i];
+                const n = ex.ids.len - 1;
+                _ = try t.step(ex.ids, ex.start, .loss); // the model as it is: the rows it gets wrong decide the fact
+                var needs: [H.max_rows]bool = @splat(false);
+                for (ex.start - 1..n) |r| needs[r] = t.targetProb(r) < 0.5;
                 _ = try t.step(ex.ids, ex.start, .project);
                 l.answers += @intCast(ex.ids.len - ex.start);
                 try c.head();
-                for (0..t.sites.list.len) |k| try c.add(k, t.projected(k, ex.ids.len - 1)[(ex.start - 1) * adapters.candidates ..], true, 0, false);
+                for (0..t.sites.list.len) |k| {
+                    const rows = t.projected(k, n);
+                    try c.add(k, rows[(ex.start - 1) * adapters.candidates ..], true, 0, false);
+                    for (ex.start - 1..n) |r| if (needs[r]) try l.decisions[k].appendSlice(l.gpa, rows[r * adapters.candidates ..][0..adapters.candidates]);
+                }
                 return .{ .done = false };
             }
             try c.choose(gate_margin);
             try t.sites.open(c.coef);
-            try H.attach(l.b, t);
             l.opened = true;
-            l.gate();
+            try l.aim();
+            try H.attach(l.b, t);
             try l.start();
             return .{ .done = false };
         }
@@ -309,25 +367,6 @@ pub fn Learner(comptime H: type) type {
         fn sketch(l: *Self, ex: Example, comptime mode: @EnumLiteral()) !Step {
             _ = try l.trainer.?.step(ex.ids, ex.start, mode);
             return .{ .done = false };
-        }
-
-        /// The new block's gate at each layer: above every steady row's share there, shut where no fact row clears it.
-        fn gate(l: *Self) void {
-            const sites = &l.trainer.?.sites;
-            const c = &l.choice.?;
-            const k = sites.first() / adapters.block;
-            var open: usize = 0;
-            var reach: u64 = 0;
-            var firsts: u64 = 0;
-            for (sites.list, c.tau, c.hits, c.opens) |*site, tau, hits, opens| {
-                site.gate(k).* = tau;
-                open += @intFromBool(hits > 0);
-                reach += hits;
-                firsts += opens;
-            }
-            const mean = 100 * @as(f64, @floatFromInt(reach)) / @as(f64, @floatFromInt(@max(open * l.answers, 1)));
-            const first = @as(f64, @floatFromInt(firsts)) / @as(f64, @floatFromInt(@max(c.heads.items.len, 1)));
-            std.log.info("slide: block {d} acts at {d} of {d} layers, on {d:.0}% of the fact's answer rows there; first rows at {d:.1}", .{ k + 1, open, sites.list.len, mean, first });
         }
 
         /// One example's gradients, Adam after each fact answer and its twin; every few steps the held-out answers are read
@@ -366,6 +405,7 @@ pub fn Learner(comptime H: type) type {
             }
             l.opened = false;
             l.plain = false;
+            l.kept = false;
             if (l.kept_rounds > 0) {
                 for (l.last) |ex| {
                     if (l.replay.items.len == replay_cap) l.gpa.free(l.replay.orderedRemove(0).ids);
