@@ -5,6 +5,7 @@ const abi = @import("../abi.zig");
 const Launcher = @import("../launches.zig").Launcher;
 const Arena = @import("../arena.zig").Arena;
 const types = @import("types.zig");
+const products = @import("project.zig");
 const attention = @import("attention.zig");
 const recurrence = @import("recurrence.zig");
 const norms = @import("norms.zig");
@@ -15,6 +16,8 @@ const draw = @import("draw.zig");
 pub const Kind = types.Kind;
 pub const Error = types.Error;
 pub const Tensor = types.Tensor;
+pub const Affine = types.Affine;
+pub const Projection = @import("core").quant.Projection;
 
 pub const Ops = struct {
     l: *const Launcher,
@@ -26,6 +29,18 @@ pub const Ops = struct {
     prefill: bool = false,
     /// A lane round's forward: decode tiles at any row count, so a row's bits ignore the rows it shares a round with.
     window: bool = false,
+
+    pub const project = products.project;
+    pub const projectGroup = products.projectGroup;
+    pub const projectRoutedAct = products.projectRoutedAct;
+    pub const projectRouted = products.projectRouted;
+    pub const embedRows = products.embedRows;
+    pub const affine = products.affine;
+    pub const affineGroup = products.affineGroup;
+    pub const affineRoutedAct = products.affineRoutedAct;
+    pub const affineRouted = products.affineRouted;
+    pub const embedAffine = products.embedAffine;
+    pub const denseRows = products.denseRows;
 
     /// Whether decode.hip's merged launches are on.
     pub fn fused(o: Ops) bool {
@@ -72,6 +87,8 @@ pub const Ops = struct {
 test "dtype numberings of the three kernel families" {
     try std.testing.expectEqual(@as(c_int, 1), @backingInt(Kind.f16));
     try std.testing.expectEqual(@as(c_int, 0), Kind.f16.cache());
+    try std.testing.expectEqual(@as(c_int, 2), Kind.f16.table());
+    try std.testing.expectEqual(@as(c_int, 1), Kind.bf16.table());
 }
 
 test "every launch compiles" {

@@ -135,3 +135,42 @@ pub fn bf16Bits(v: f32) u16 {
 pub fn bf16Value(b: u16) f64 {
     return @as(f32, @bitCast(@as(u32, b) << 16));
 }
+
+/// A device buffer with its address, as the product tests hand it to launches.
+pub const Buffer = struct {
+    buf: DeviceBuffer,
+    ptr: u64,
+
+    pub fn alloc(t: *Rig, bytes: usize) !Buffer {
+        const b = try DeviceBuffer.alloc(&t.r, bytes);
+        return .{ .buf = b, .ptr = at(b) };
+    }
+
+    pub fn fromHost(t: *Rig, host: anytype) !Buffer {
+        const b = try t.upload(host);
+        return .{ .buf = b, .ptr = at(b) };
+    }
+
+    pub fn free(b: *Buffer) void {
+        b.buf.free();
+    }
+
+    pub fn fill8(b: Buffer, value: u8, _: @TypeOf(null)) !void {
+        try b.buf.fill8(value);
+    }
+
+    pub fn upload(b: Buffer, offset: usize, bytes: []const u8) !void {
+        try b.buf.upload(offset, bytes);
+    }
+
+    pub fn download(b: Buffer, offset: usize, out: []u8) !void {
+        try b.buf.download(offset, out);
+    }
+};
+
+/// A failed check with its message.
+pub fn expect(ok: bool, comptime fmt: []const u8, args: anytype) !void {
+    if (ok) return;
+    std.debug.print(fmt ++ "\n", args);
+    return error.TestUnexpectedResult;
+}
