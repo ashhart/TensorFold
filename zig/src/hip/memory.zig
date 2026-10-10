@@ -1,5 +1,4 @@
-//! Owned HIP device bytes; synchronous copies validate ranges before calling the driver.
-//! Sync copies/fill use the null stream; explicitly synchronize before mixing with non-blocking streams.
+//! Owned HIP device bytes; sync copies and fills check ranges and use the null stream, so synchronize before mixing in non-blocking streams.
 const abi = @import("abi.zig");
 const runtime = @import("runtime.zig");
 const std = @import("std");

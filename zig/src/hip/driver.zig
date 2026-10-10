@@ -1,5 +1,4 @@
-//! First HIP admission boundary; no CUDA symbol aliases or GPU kernels.
-//! Signatures: ROCm/HIP include/hip/hip_runtime_api.h.
+//! The first HIP admission boundary, with signatures from ROCm's hip_runtime_api.h; no CUDA symbol aliases or GPU kernels.
 const std = @import("std");
 
 pub const Error = error{ DriverUnavailable, MissingSymbol, HipFailed, InvalidDeviceCount };
