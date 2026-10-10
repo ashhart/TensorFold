@@ -13,6 +13,8 @@ const Head = @import("cuda_mtp.zig").Head;
 const head_fields = @import("cuda_mtp.zig").seq_fields;
 const sampler = @import("cuda_sampler.zig");
 const segs = @import("cuda_segments.zig");
+const grid = @import("cuda_prompt_grid.zig");
+const heat = @import("heat");
 
 /// nemotron_h.cuda.CONTEXT: prompt plus reply tokens when --context is not given, as `tensorfold serve` sizes it.
 pub const default_context = 16384;
@@ -23,6 +25,7 @@ pub const Options = struct {
     graphs: bool = true,
     sampling: ?sampler.Sampling = null, // the rule the graphs compile in; null or temperature 0 decodes greedily
     segments: usize = 1, // whole prompt chunks a call runs as staggered segments (1: one chunk at a time)
+    carveout: ?*cuda.Carveout = null, // KV planes go to the display carveout first while it holds them
 };
 
 /// Asked before each prompt chunk (or segmented call): true stops the prompt with error.Cancelled.
@@ -34,6 +37,13 @@ pub const Cancel = struct {
         const x = c orelse return false;
         return x.check(x.ptr);
     }
+};
+
+/// Grid points where a prompt pass copies its state (ascending), called once each chunk ending there is queued.
+pub const Keep = struct {
+    at: []const u32,
+    ctx: *anyopaque,
+    call: *const fn (*anyopaque, u32) void,
 };
 
 /// Serial rounds a host keeps queued ahead of the one it reads.
@@ -83,6 +93,8 @@ pub const Engine = struct {
     load_seconds: f64 = 0,
     segments: usize = 1, // Options.segments
     seg: ?segs.Segments = null, // their streams and scratch, made at load (or when setSegments asks for more)
+    carve: ?*cuda.Carveout = null, // Options.carveout; it outlives the engine
+    heat_gate: heat.Gate = .{}, // off unless TF_HEAT_HIGH and TF_HEAT_LOW are set
 
     /// Loads the checkpoint into the Python engine's layouts and sizes the caches; `triton_dir` null: our own glue.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, model_dir: []const u8, triton_dir: ?[]const u8, opts: Options) !*Engine {
@@ -93,6 +105,7 @@ pub const Engine = struct {
         e.c = try Config.read(gpa, io, model_dir);
         if (opts.segments < 1 or opts.segments > segs.MAX) return error.BadSegments;
         e.segments = opts.segments;
+        e.carve = opts.carveout;
         const slots = (opts.context orelse default_context) + state.max_rows;
         e.max_len = (slots + state.chunk_keys - 1) / state.chunk_keys * state.chunk_keys;
         e.stream = try cuda.Stream.init(ctx.d, true);
@@ -112,7 +125,7 @@ pub const Engine = struct {
         }) else chunks;
         e.w = try weights.load(gpa, io, e.ops(), model_dir, e.c, opts.mtp);
         errdefer e.w.deinit();
-        e.b = try state.Buffers.init(ctx.d, e.c, e.max_len, e.nch);
+        e.b = try state.Buffers.init(ctx.d, e.c, e.max_len, e.nch, e.carve);
         errdefer e.b.deinit();
         try e.b.initShared(e.ops(), e.c);
         if (e.segments > 1) e.seg = try segs.Segments.init(e, e.segments);
@@ -130,6 +143,10 @@ pub const Engine = struct {
         try e.copied.record(e.stream);
         try e.setSampling(opts.sampling);
         if (opts.graphs) try e.capture(opts.mtp);
+        e.heat_gate = heat.Gate.fromEnv() catch |err| {
+            std.log.err("TF_HEAT_HIGH and TF_HEAT_LOW: both or neither, in degrees, with low at or under high", .{});
+            return err;
+        };
         e.load_seconds = seconds(io, t0);
         return e;
     }
@@ -205,7 +222,7 @@ pub const Engine = struct {
         errdefer e.gpa.destroy(s);
         var head: [head_fields.len]usize = undefined;
         if (e.head) |h| head = h.seqSizes();
-        s.* = try state.Seq.init(e.ctx.d, e.c, e.max_len, if (e.head != null) &head else &.{}, e.stream);
+        s.* = try state.Seq.init(e.ctx.d, e.c, e.max_len, if (e.head != null) &head else &.{}, e.stream, e.carve);
         return s;
     }
 
@@ -225,7 +242,7 @@ pub const Engine = struct {
     /// Act on sequence `s` from here on: its buffers replace the bound one's, which keeps where it stands.
     pub fn bind(e: *Engine, s: *state.Seq) void {
         const old = e.bound;
-        old.* = .{ .arena = old.arena, .ptr = old.ptr, .head = old.head, .pos = e.pos, .parity = e.parity, .prev_keep = e.prev_keep, .rows = e.rows, .head_pos = if (e.head) |h| h.pos else 0, .sampling = e.sampling };
+        old.* = .{ .arena = old.arena, .carved = old.carved, .ptr = old.ptr, .head = old.head, .pos = e.pos, .parity = e.parity, .prev_keep = e.prev_keep, .rows = e.rows, .head_pos = if (e.head) |h| h.pos else 0, .sampling = e.sampling };
         inline for (state.seq_fields, s.ptr) |name, p| @field(e.b, name) = p;
         e.pos = s.pos;
         e.parity = s.parity;
@@ -267,26 +284,43 @@ pub const Engine = struct {
 
     /// prefill, stopping with error.Cancelled at the next chunk boundary once `cancel` says so.
     pub fn prefillWith(e: *Engine, prompt: []const u32, dump: ?*Dump, head: ?*Head, cancel: ?Cancel) !u32 {
+        return e.prefillFrom(prompt, 0, dump, head, cancel, null);
+    }
+
+    /// prefill from `from` (0 resets; else a restored state at a grid point); chunks stay on the zero-anchored grid.
+    pub fn prefillFrom(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, head: ?*Head, cancel: ?Cancel, keep: ?Keep) !u32 {
         if (prompt.len == 0) return error.EmptyPrompt;
+        if (from != 0 and !grid.resumable(from, prompt.len, state.prefill_rows)) return error.BadReuse;
         if (prompt.len + state.max_rows > e.max_len) return error.ContextFull;
-        try e.reset();
-        if (head) |h| try h.reset();
-        if (e.segments > 1 and dump == null and prompt.len > state.prefill_rows) {
+        if (from == 0) {
+            try e.reset();
+            if (head) |h| try h.reset();
+        } else if (e.pos != from) return error.BadReuse;
+        const waited = e.heat_gate.waited_s;
+        if (from == 0 and keep == null and e.segments > 1 and dump == null and prompt.len > state.prefill_rows) {
             try segs.prefill(e, try e.segmentSet(), prompt, head, e.segments, cancel);
-        } else try e.serialChunks(prompt, dump, head, cancel);
+        } else try e.serialChunks(prompt, from, dump, head, cancel, keep);
+        if (e.heat_gate.waited_s > waited) heat.note(e.heat_gate.waited_s - waited);
         const host = e.pinned.slice(u32)[pin_sampled..][0..1];
         try e.ops().download(std.mem.sliceAsBytes(host), e.b.p_sampled);
         try e.stream.synchronize();
         return host[0];
     }
 
-    /// The prompt's chunks one after another on the engine's stream.
-    fn serialChunks(e: *Engine, prompt: []const u32, dump: ?*Dump, head: ?*Head, cancel: ?Cancel) !void {
+    /// Heat bands, if set, before the chunk; a cancel ends the wait. Unset bands return without reading a zone.
+    pub fn beforeChunk(e: *Engine, cancel: ?Cancel) !void {
+        try e.heat_gate.beforePromptChunk(e.io, if (cancel) |c| .{ .ptr = c.ptr, .check = c.check } else null);
+    }
+
+    /// The prompt's chunks one after another on the engine's stream, starting at `from`.
+    fn serialChunks(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, head: ?*Head, cancel: ?Cancel, keep: ?Keep) !void {
         const f = e.forward(dump);
-        var s: usize = 0;
-        while (s < prompt.len) : (s += state.prefill_rows) {
+        var s: usize = from;
+        while (s < prompt.len) {
             if (Cancel.now(cancel)) return error.Cancelled;
-            const chunk = prompt[s..@min(prompt.len, s + state.prefill_rows)];
+            try e.beforeChunk(cancel);
+            const end = grid.end(s, prompt.len, state.prefill_rows);
+            const chunk = prompt[s..end];
             try e.copied.synchronize();
             const host = e.promptHost(chunk.len);
             @memcpy(host, chunk);
@@ -296,6 +330,8 @@ pub const Engine = struct {
             e.pos += @intCast(chunk.len);
             const known = @min(chunk.len, prompt.len - 1 - s);
             if (head) |h| if (known > 0) try h.absorb(e.b.p_hidden, prompt[s + 1 ..][0..known]);
+            s = end;
+            if (keep) |k| if (s <= std.math.maxInt(u32) and std.mem.indexOfScalar(u32, k.at, @intCast(s)) != null) k.call(k.ctx, @intCast(s));
         }
     }
 

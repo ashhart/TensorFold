@@ -22,6 +22,8 @@ pub const stream_non_blocking: c_uint = 1;
 pub const event_disable_timing: c_uint = 2;
 pub const host_alloc_portable: c_uint = 1;
 pub const host_alloc_devicemap: c_uint = 2;
+pub const host_register_devicemap: c_uint = 2;
+pub const host_register_iomemory: c_uint = 4; // the range is device or I/O memory, not RAM
 
 pub const CaptureMode = enum(c_int) { global = 0, thread_local = 1, relaxed = 2 };
 pub const CaptureStatus = enum(c_int) { none = 0, active = 1, invalidated = 2, _ };
@@ -157,6 +159,8 @@ pub const Api = struct {
     cuMemHostAlloc: *const fn (*Ptr, usize, c_uint) callconv(.c) R,
     cuMemHostGetDevicePointer_v2: *const fn (*DevicePtr, Ptr, c_uint) callconv(.c) R,
     cuMemFreeHost: *const fn (Ptr) callconv(.c) R,
+    cuMemHostRegister_v2: *const fn (Ptr, usize, c_uint) callconv(.c) R,
+    cuMemHostUnregister: *const fn (Ptr) callconv(.c) R,
     cuMemcpyHtoD_v2: *const fn (DevicePtr, CPtr, usize) callconv(.c) R,
     cuMemcpyDtoH_v2: *const fn (Ptr, DevicePtr, usize) callconv(.c) R,
     cuMemcpyDtoD_v2: *const fn (DevicePtr, DevicePtr, usize) callconv(.c) R,

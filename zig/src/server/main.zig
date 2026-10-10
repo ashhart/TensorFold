@@ -64,6 +64,7 @@ pub fn main(init: std.process.Init) !u8 {
     var text_problem: []const u8 = "";
     const up = startup.both(io, loadText, .{ gpa, io, dir, args.chat_template, text_arena.allocator(), &text_problem }, engines.open, .{ a, gpa, io, dir, model_type, args, &problem }) catch |e| {
         if (text_problem.len > 0) return fail(text_problem);
+        if (problem.len > 0) return fail(problem); // an engine that failed after saying why
         return e;
     } orelse return fail(problem);
     defer up.text.deinit();

@@ -53,6 +53,7 @@ pub const DeviceBuffer = struct {
     d: *const Driver,
     ptr: abi.DevicePtr,
     len: usize,
+    borrowed: bool = false, // a span of memory another value owns (a carveout's): free leaves it alone
 
     /// `len` bytes, 256-byte aligned by the driver; zero bytes allocate nothing and hold address 0.
     pub fn alloc(d: *const Driver, len: usize) Error!DeviceBuffer {
@@ -71,8 +72,10 @@ pub const DeviceBuffer = struct {
     }
 
     pub fn free(self: *DeviceBuffer) void {
-        if (self.ptr != 0) _ = self.d.api.cuMemFree_v2(self.ptr);
-        freed(&device_bytes, self.len);
+        if (!self.borrowed) {
+            if (self.ptr != 0) _ = self.d.api.cuMemFree_v2(self.ptr);
+            freed(&device_bytes, self.len);
+        }
         self.* = undefined;
     }
 
@@ -195,6 +198,13 @@ test "usage counts held bytes and the device peak" {
     try std.testing.expectEqual(before.device + 1000, after.peak);
     try std.testing.expectEqual(before.device, usage(true).peak);
     freed(&host_bytes, 24);
+}
+
+test "freeing a borrowed span leaves the driver and the counts alone" {
+    const before = usage(false);
+    var b: DeviceBuffer = .{ .d = undefined, .ptr = 0x1000, .len = 4096, .borrowed = true };
+    b.free();
+    try std.testing.expectEqual(before.device, usage(false).device);
 }
 
 test "peak reset preserves an allocation between its read and store" {

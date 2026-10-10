@@ -43,6 +43,8 @@ pub const Rules = struct {
     lookahead: u32 = 0,
     /// Prompt kernels that change arithmetic with a chunk's rows: resume and keep only at the request's chunk starts.
     planned: bool = false,
+    /// A planned family's own zero-anchored chunk rows, its starts when a request names none (0: none).
+    grid: u32 = 0,
     /// A mark other than the history's is kept only this far from every other mark and the resume point.
     min_gap: u32 = 256,
     /// Shorter prompts keep nothing: below it a mark's extra prompt call costs more than a later turn's reuse saves.
@@ -123,7 +125,13 @@ pub const Store = struct {
 
     /// Whether a state at `at` may start or end a prompt pass: anywhere, or a chunk start for planned families.
     fn usable(s: *const Store, at: u32, starts: []const u32) bool {
-        return at > 0 and (!s.rules.planned or std.mem.indexOfScalar(u32, starts, at) != null);
+        return at > 0 and (!s.rules.planned or s.startAt(starts, at) == at);
+    }
+
+    /// The chunk start at or before `at`: the request's, else the family's grid (0 when none).
+    fn startAt(s: *const Store, starts: []const u32, at: u32) u32 {
+        if (starts.len == 0 and s.rules.grid > 0) return at - at % s.rules.grid;
+        return floorStart(starts, at);
     }
 
     /// Find a kept token prefix with matching canonical spans through its position, leaving at least one row.
@@ -164,8 +172,8 @@ pub const Store = struct {
     }
 
     pub fn lookupRewind(s: *Store, a: Allocator, prompt: []const u32, history_len: u32, rewind_len: u32, shared: []const u32, starts: []const u32, spans: []const modes.Span) !Lookup {
-        const endpoint = if (s.rules.planned) floorStart(starts, history_len) else history_len;
-        const rewind = if (s.rules.planned) floorStart(starts, rewind_len -| s.rules.lookahead) else rewind_len -| s.rules.lookahead;
+        const endpoint = if (s.rules.planned) s.startAt(starts, history_len) else history_len;
+        const rewind = if (s.rules.planned) s.startAt(starts, rewind_len -| s.rules.lookahead) else rewind_len -| s.rules.lookahead;
         const endpoint_bytes = if (endpoint > 0 and (endpoint < prompt.len or (s.rules.warm and endpoint == prompt.len)) and endpoint + s.rules.lookahead <= prompt.len) s.family.vtable.bytes(s.family.ptr, endpoint) else 0;
         const rewind_bytes = if (rewind > 0 and rewind < prompt.len and rewind + s.rules.lookahead <= prompt.len and s.usable(rewind, starts)) s.family.vtable.bytes(s.family.ptr, rewind) else 0;
         const priority_bytes = if (endpoint_bytes <= s.budget) endpoint_bytes else 0;
@@ -177,7 +185,7 @@ pub const Store = struct {
         else
             try s.fittingRewind(a, try s.marksRewind(a, prompt, if (e) |x| x.at else 0, history_len, rewind, shared, starts, if (e) |x| x.last else &.{}), endpoint, rewind, endpoint_bytes);
         for (shared) |w| { // the shared cuts this pass keeps: their states serve other conversations too
-            const at = if (s.rules.planned) floorStart(starts, w) else w;
+            const at = if (s.rules.planned) s.startAt(starts, w) else w;
             if (at != s.active_rewind_at and std.mem.indexOfScalar(u32, marks_, at) != null) s.noteShared(prompt[0 .. at + s.rules.lookahead]);
         }
         s.reserve(prompt, e, marks_, spans);
@@ -297,7 +305,7 @@ pub const Store = struct {
         }
         try want.appendSlice(a, shared);
         for (want.items, 0..) |w, k| {
-            const at = if (s.rules.planned) floorStart(starts, w) else w;
+            const at = if (s.rules.planned) s.startAt(starts, w) else w;
             if (at <= from or at + s.rules.lookahead > prompt.len or at >= prompt.len or !s.usable(at, starts)) continue;
             const is_rewind = rewind > 0 and k == 1 and at == rewind;
             if (!is_rewind and at - from < s.rules.min_gap and (k > 0 or (from > 0 and s.rules.warm))) continue; // near the resume point
@@ -485,5 +493,6 @@ fn floorStart(starts: []const u32, at: u32) u32 {
 
 test {
     _ = @import("prompt_cache_test.zig");
+    _ = @import("prompt_cache_rewind_test.zig");
     _ = modes;
 }

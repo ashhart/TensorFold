@@ -90,6 +90,12 @@ A sampled request honours its `seed`, `top_k: 0` turns the top-k filter off, and
 pinned host memory.
 A request that names no `top_k`, on a checkpoint whose generation config names none, samples with `top_k` 20 on CUDA,
 as 0.6.6's CUDA server did, and with no top-k filter on Metal.
+A conversation's next turn resumes from a prompt state kept at a 2,048-token chunk boundary, so a reply equals the same
+request with the cache off. `--prompt-cache-gib` sizes the kept states (16 GiB by default, inside the memory budget) and 0 turns
+them off; prompts shorter than 4,096 tokens keep none.
+`TF_HEAT_HIGH` and `TF_HEAT_LOW`, in degrees Celsius and set together, make each prompt chunk wait while the hottest
+thermal zone (under `/sys/class/thermal`, or `TF_HEAT_ROOT`) is above the high band, until it is at or under the low one.
+The server logs `heat_wait_s`, a cancel ends the wait, and the reply's tokens do not change.
 Archives whose names contain `host-only` are CPU verification artifacts and cannot serve CUDA inference.
 
 ## Flash Next and paired Metal serving
@@ -131,7 +137,7 @@ The default loopback server accepts local clients without a key.
 A context limit covers prompt plus reply tokens.
 Inspect the capacity and memory information printed at startup; larger contexts need more cache space.
 After a memory refusal, reduce the context or reply limit, or choose a smaller qualified checkpoint.
-`--prompt-cache-gib 0` disables Flash Next prefix retention, and `--keep-warm 0` disables Metal idle keepalive.
+`--prompt-cache-gib 0` disables Nemotron, Flash Next, GLM and Qwen3.8-27B prefix retention, and `--keep-warm 0` disables Metal idle keepalive.
 
 Upgrade a Homebrew installation with `brew upgrade tensorfold` and restart its server.
 For an archive installation, verify and unpack the replacement archive, then restart from that binary.

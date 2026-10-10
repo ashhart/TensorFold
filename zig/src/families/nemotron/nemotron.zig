@@ -25,5 +25,7 @@ pub const learned = @import("learned.zig");
 pub const train_ops = @import("train_ops.zig");
 pub const train_back = @import("train_back.zig");
 pub const train = @import("train.zig");
+pub const snapshot = @import("snapshot.zig");
+pub const learned_prompts = @import("learned_prompts.zig");
 
 pub const Model = model.Model;

@@ -34,7 +34,7 @@ engine, to be exact quickly, and the GPU-side wins stayed inside one family:
 
 Some of the host side already lives in core, but so far each piece serves one family, or two:
 - the lane round loop, the depth rule and copy proposals (`zig/src/core/lanes`) are Nemotron's;
-- prompt reuse (`zig/src/core/prompt_cache.zig`) is Flash Next's;
+- prompt reuse (`zig/src/core/prompt_cache.zig`) serves Flash Next, GLM, Nemotron and the Qwen3.8-27B, each with its own `snapshot.zig`;
 - staggered segments (`zig/src/core/segments.zig`, and `zig/src/cuda/segments.zig` on CUDA) serve Flash Next on Metal and Nemotron
   on CUDA;
 - every host returns the HTTP contract in `zig/src/core/engine_api.zig`, and `zig/src/core/lane_host.zig` serves Nemotron on Metal
@@ -74,7 +74,7 @@ lane kernels go in, check against the engine's own plain output (step 4).
 | Lane kernels | `zig/kernels/metal/ops/qmv.metal` (affine 4-, 6- and 8-bit row matmuls, MLX's arithmetic) and `zig/src/core/frags.zig` (the prompt layout on M1-M4) | Flash Next: `zig/kernels/metal/decode/fn_lane.metal` (6-bit, groups of 32, tensor ops, up to 16 rows). Kimi K3: MXFP4 experts and bf16 projections. Nemotron: generated per-shape kernels |
 | GPU-side rounds | the host loop, depth rule and copy proposer in `zig/src/core/lanes`, used by Nemotron | Flash Next: its own host loop, plus `fz_accept`, the ring and event chaining (`zig/src/families/flashnext/replay.zig`). Nemotron on Metal: `zig/src/families/nemotron/gpu_round.zig` for a lone stream. Kimi K3: none |
 | Several Macs | the MCDMA fabric (`zig/src/fabric`) | Flash Next: `zig/src/families/flashnext/tp.zig` splits rows and holds the whole model on each Mac. Kimi K3: `zig/src/families/kimi_k3/parallel.zig` is a split plan with no link yet |
-| Prompt path | segments; the prompt cache, used by Flash Next only | per-family prompt kernels |
+| Prompt path | segments; the prompt cache, used by Flash Next, GLM, Nemotron and the Qwen3.8-27B | per-family prompt kernels and snapshots |
 | Serving | `engine_api` for every host; `lane_host` for Nemotron | Flash Next: its own host, one reply at a time |
 
 **The order.**
@@ -152,6 +152,13 @@ This API does not enable constrained generation or add a server capability.
    - Stay lenient while copies land within 0.05 of the head's drafts.
    - Flash Next edits went from 228.6 to 314.1 tok/s, with code and prose unchanged.
 9. **Windows of up to 16 rows**, the widest only while copies land.
+   - **Routed experts past one row: a 16-group's weight words as the outer loop** (`tf_experts_w`, Nemotron on Metal,
+     8 Oct 2026). The lane kernel took its members two at a time with all 16 activations of a chunk live; taking the
+     four weight words as the outer loop keeps four activations a member live, so three members a pass at four
+     simdgroups fit. Same bits at every width (`tf-nemotron-experts`); the up and down projections of 23 layers went
+     from 2.35 to 2.27 ms at 4 rows, 6.68 to 6.48 at 16, 11.93 to 11.24 at 32 and 22.57 to 20.58 at 64, equal at 2.
+     Served, cache off, alternated twice: one stream 503 to 513 tok/s on code and 348 to 351 on prose; 8 streams 947
+     to 985 and 713 to 731 in all; 32 streams 792 to 802 and 752 to 761. Every reply equal to its solo and plain run.
 
 ## Stage 3: the prompt path
 
@@ -269,6 +276,15 @@ CUDA traps:
 - One launch for all experts: exact, slower.
 - Input sums once a threadgroup, and weight prefetch beside short launches: slower.
 - A persistent kernel with a GPU-wide barrier: it loses to plain dependent launches on the M5 Ultra.
+- A pool of kept prompt-state buffers for Nemotron: a fresh 9.2k-token prompt costs 1.07 s whether the cache is off,
+  keeps every state, or evicts and reallocates two 106 MiB states a request (22 evictions in 12 prompts). The GPU copy
+  hides a new buffer's cost; Flash Next's pool stays, for its idle pre-touch.
+- Nemotron's routed experts, three ways that kept every bit and gained nothing (`tf-nemotron-experts`, M5 Ultra):
+  an expert's member blocks spread over grid z instead of looped (the GPU already overlaps a popular expert's loop
+  with the other 230 threadgroups a layer); the activations' floats and bf16-rounded group sums prepared once a
+  forward instead of remade a member (50 fewer ALU ops a chunk, the same time, so the loop is not ALU-bound);
+  8-byte vector loads of the weight words and activations (slower than the compiler's own schedule). Six or eight
+  members a pass, or four at two simdgroups, lose 5-40%: only two to four at four simdgroups win.
 - Adaptive depth by landed+1: it lost to fixed levels. Full-vocabulary drafts lose too.
 - Reshaping the 6-bit expert prompt kernels, all exact, Flash Next on the M5 Ultra at 8k:
   - 128-row paired gate-up tiles lost 25% to register spills.

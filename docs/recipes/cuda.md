@@ -92,6 +92,46 @@ staggered prompt work for 1 through 4 whole 2,048-row chunks; without the flag i
 uses `TF_CUDA_SEGMENTS`, then 1. The `tensorfold segments` command compares the
 available segment counts and can profile the serial chunk parts.
 
+Experimental: on a DGX Spark (GB10), `tensorfold run --carveout`, or `TF_CUDA_CARVEOUT=1` for `tensorfold run` and
+`tensorfold-native`, puts Nemotron's KV caches in the memory the display controller reserves, which
+MemAvailable never counts. The native engine maps a
+DRM dumb buffer from `/dev/dri/card0` (`TF_DRM_CARD` picks another card) and registers it with
+CUDA. It is 1,792 MiB unless `TF_CUDA_CARVEOUT_MIB` says otherwise. Each sequence's key and value
+planes go there while the carveout holds both, and the rest stays in device memory. The recurrent
+state stays out, because every round reads and writes all of it. Copies into and out of this memory
+run at about half the speed of ordinary memory and kernels reading it keep about 90%, so expect a small
+decode cost. Placement leaves the arithmetic alone, so the output should not change. It needs
+`nvidia_drm modeset=1`, access to the card's device node (`--device /dev/dri/card0` in a
+container) and no display in use. It is off by default. The carveout is all or nothing: when the
+driver can't hand over the whole size, the load stops with the failing step named instead of
+running with less or without it. `tf-cuda-test carveout [MiB] [card]`
+checks a machine: round trips from the host and from a kernel, and copy and read bandwidth. It
+skips on a GPU that is not integrated and when it can't open the card. The idea comes from coolbho3k's
+DeepSeek-v4.1-Flash-2x-DGX-Spark.
+
+Preparing a DGX Spark for the carveout:
+
+1. Kernel mode setting: `sudo cat /sys/module/nvidia_drm/parameters/modeset` must print `Y`. DGX OS's
+   driver package sets it in `/etc/modprobe.d/nvidia-graphics-drivers-kms.conf`. If it prints `N`, remove
+   any `modeset=0` line under `/etc/modprobe.d/`, add `options nvidia_drm modeset=1 fbdev=0` to a file
+   there, run `sudo update-initramfs -u` and reboot. Check `cat /sys/module/nvidia_drm/parameters/fbdev`
+   too: with `Y` the console framebuffer can take part of the reservation. The receipts ran with
+   `fbdev=0` on driver 595.91.07; `fbdev=1` and older drivers are untested.
+2. No display: DGX OS boots `graphical.target` and runs gdm even with no monitor attached, and its
+   framebuffers take part of the reservation, so a stock Spark stops with `DumbBufferRefused`. Every
+   connector in `cat /sys/class/drm/card*-*/status` must read `disconnected` and no desktop session may
+   hold the card. To try it without a reboot, run `sudo systemctl isolate multi-user.target`
+   (`sudo systemctl isolate graphical.target` brings the desktop back). To keep it, run
+   `sudo systemctl set-default multi-user.target` and reboot. `sudo fuser -v /dev/dri/card0` must then
+   list no display server.
+3. Access to the card: `/dev/dri/card0` belongs to the `video` group. Add the user with
+   `sudo usermod -aG video $USER` and log in again, or pass `--device /dev/dri/card0` to a container.
+   `ls -l /dev/dri/by-path/` shows which card node belongs to the GPU.
+4. Check: `tf-cuda-test carveout` prints PASS for both round trips and the bandwidth lines. A failing step
+   is named in the error: `CardUnavailable` when the node can't be opened (step 3, or step 1 when no
+   card node exists), `DumbBufferRefused` when the driver won't hand over the whole size (step 2, or
+   step 1's `fbdev`).
+
 CUDA capture and packing use the repository's Triton manifest tool. It records
 Triton and extension launches, maps them to cached kernels and metadata, and
 checks the packed manifest on CPU before a CUDA run.

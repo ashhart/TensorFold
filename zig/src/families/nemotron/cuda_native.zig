@@ -7,6 +7,12 @@ const state = @import("cuda_state.zig");
 const Head = @import("cuda_mtp.zig").Head;
 const Lanes = @import("cuda_lanes.zig").Cuda;
 const lone = @import("cuda_lone.zig");
+const reuse = @import("cuda_reuse.zig");
+
+pub const snap_bytes = reuse.bytes;
+pub const snap_save = reuse.save;
+pub const snap_restore = reuse.restore;
+pub const snap_drop = reuse.drop;
 
 pub const model_type = "nemotron_h";
 pub const formats: []const []const u8 = &.{"mlx-q4g64"};
@@ -31,13 +37,16 @@ pub const Loaded = struct {
     ctx: *anyopaque,
     deinit: *const fn (*anyopaque) void,
     lone: ?LoneRun = null, // called with `ctx`; null: every stream in the lane core
+    target: *reuse.Target, // the prompt cache copies this engine (cuda_reuse.zig)
 };
 
-const Owned = struct { gpa: std.mem.Allocator, e: *engine.Engine, head: ?*Head, lanes: Lanes };
+const Owned = struct { gpa: std.mem.Allocator, e: *engine.Engine, head: ?*Head, lanes: Lanes, target: reuse.Target, carve: ?*cuda.Carveout };
 
 /// Own-sequence graphs support both draw modes; drafting also captures the head.
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
-    const e = try engine.Engine.init(gpa, io, ctx, dir, kernels, .{ .context = o.context, .mtp = o.drafts, .graphs = true, .sampling = null, .segments = o.segments });
+    const carve = try openCarveout(gpa, ctx);
+    errdefer if (carve) |c| closeCarveout(gpa, c);
+    const e = try engine.Engine.init(gpa, io, ctx, dir, kernels, .{ .context = o.context, .mtp = o.drafts, .graphs = true, .sampling = null, .segments = o.segments, .carveout = carve });
     errdefer e.deinit();
     const head: ?*Head = if (o.drafts) try Head.init(e) else null;
     errdefer if (head) |h| h.deinit();
@@ -50,7 +59,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     try e.setSampling(null);
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
-    own.* = .{ .gpa = gpa, .e = e, .head = head, .lanes = try Lanes.init(gpa, e, head) };
+    own.* = .{ .gpa = gpa, .e = e, .head = head, .lanes = try Lanes.init(gpa, e, head), .target = .{ .e = e, .head = head }, .carve = carve };
     errdefer own.lanes.deinit();
     try own.lanes.measure(io, dir);
     return .{
@@ -60,6 +69,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .stream_bytes = e.seqBytes(),
         .ctx = own,
         .deinit = release,
+        .target = &own.target,
         .lone = if (head != null) loneRun else null,
     };
 }
@@ -83,5 +93,29 @@ fn release(p: *anyopaque) void {
     own.lanes.deinit();
     if (own.head) |h| h.deinit();
     own.e.deinit();
+    if (own.carve) |c| closeCarveout(own.gpa, c);
     own.gpa.destroy(own);
+}
+
+/// TF_CUDA_CARVEOUT=1: the display carveout KV planes go to first (cuda/carveout.zig); null when it is off.
+fn openCarveout(gpa: std.mem.Allocator, ctx: *const cuda.Context) !?*cuda.Carveout {
+    const bytes = (try cuda.carveout.requested(false, env("TF_CUDA_CARVEOUT"), env("TF_CUDA_CARVEOUT_MIB"))) orelse return null;
+    const card: [*:0]const u8 = std.c.getenv("TF_DRM_CARD") orelse cuda.carveout.default_card;
+    const c = try gpa.create(cuda.Carveout);
+    errdefer gpa.destroy(c);
+    c.* = cuda.Carveout.open(ctx.d, card, bytes) catch |err| {
+        std.log.err("display carveout of {d} MiB from {s}: {t} (needs nvidia_drm modeset=1, the card's device node and no display in use)", .{ bytes >> 20, card, err });
+        return err;
+    };
+    std.log.info("display carveout: {d} MiB from {s}; KV planes go there first", .{ bytes >> 20, card });
+    return c;
+}
+
+fn closeCarveout(gpa: std.mem.Allocator, c: *cuda.Carveout) void {
+    c.close();
+    gpa.destroy(c);
+}
+
+fn env(name: [:0]const u8) ?[]const u8 {
+    return std.mem.span(std.c.getenv(name) orelse return null);
 }

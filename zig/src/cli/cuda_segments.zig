@@ -175,7 +175,7 @@ fn hex(h: *std.crypto.hash.sha2.Sha256) [64]u8 {
 fn digest(gpa: std.mem.Allocator, e: *nemotron.Engine, head: ?*nemotron.Head, token: u32, rows: usize) !Digest {
     const Sha = std.crypto.hash.sha2.Sha256;
     var st = Sha.init(.{});
-    try hashDevice(&st, gpa, e, e.b.k_cache, e.b.stateBytes());
+    for (e.b.planes(), e.b.state_bytes) |p, n| try hashDevice(&st, gpa, e, p, n);
     var hd = Sha.init(.{});
     if (head) |h| {
         const sizes = h.seqSizes();

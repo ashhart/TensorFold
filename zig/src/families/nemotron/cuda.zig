@@ -20,6 +20,7 @@ pub const native = @import("cuda_native.zig");
 pub const glue = @import("cuda_glue.zig");
 pub const glue_ref = @import("glue_ref.zig");
 pub const glue_math = @import("glue_math.zig");
+pub const reuse = @import("cuda_reuse.zig");
 
 test {
     _ = @import("config.zig");
@@ -32,4 +33,5 @@ test {
     _ = glue;
     _ = glue_ref;
     _ = glue_math;
+    _ = @import("cuda_prompt_grid.zig");
 }

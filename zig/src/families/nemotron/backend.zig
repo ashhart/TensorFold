@@ -11,6 +11,7 @@ const tree = @import("tree.zig");
 const head_tree = @import("head_tree.zig");
 const prefill = @import("prefill.zig");
 const head_block = @import("head_block.zig");
+const snapshot = @import("snapshot.zig");
 const Model = @import("model.zig").Model;
 const nemotron_config = @import("config.zig");
 
@@ -61,7 +62,7 @@ pub const Metal = struct {
     timing: timing.Timing = .{},
     costs: timing.Costs = .{},
     geometry: usize = 0, // routed experts' kernel geometry (bit-identical)
-    members: usize = 2, // routed experts' member rows a pass (bit-identical; one at a time for one-row forwards)
+    members: usize = 3, // routed experts' member rows a pass (bit-identical; 3: tf_experts_w; one at a time for one row)
     ranks_always: bool = false, // the head keeps every chained level's best tokens, asked or not (shared rounds' grafts)
     concurrent: bool = true, // concurrent encoders with barriers on data flow (false: serial encoders)
     gpu_ms: f64 = 0, // GPU ms of every command buffer landed so far
@@ -70,6 +71,7 @@ pub const Metal = struct {
     pub fn init(gpa: std.mem.Allocator, m: *Model, o: Options) !*Metal {
         const b = try gpa.create(Metal);
         errdefer gpa.destroy(b);
+        if (o.batch_rows > st.max_rows) return error.BatchTooWide; // verify and draft hold st.max_rows streams
         const rows = @max(o.batch_rows, max_lanes);
         b.* = .{
             .gpa = gpa,
@@ -285,8 +287,17 @@ pub const Metal = struct {
                 }
             }
         };
-        // a command buffer a chunk, each committed before the one ahead of it is waited on, so the GPU keeps a chunk queued
+        s.cached = 0;
         var at: usize = 0;
+        if (s.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
+            const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
+            if (snap.at < ids.len) if (snapshot.restore(self, c, snap)) |_| {
+                at = snap.at;
+            } else |_| {};
+            s.cached = @intCast(at);
+            s.reuse_failed = at == 0;
+        }
+        // a command buffer a chunk, each committed before the one ahead of it is waited on, so the GPU keeps a chunk queued
         var k: usize = 0;
         while (at < ids.len) {
             while (k < s.chunks.len and s.chunks[k] <= at) k += 1;
@@ -296,6 +307,7 @@ pub const Metal = struct {
             try self.submit(.prefill, self.next, Chunks{ .n = ids.len, .c = c, .at = at, .rows = rows });
             while (self.flights.items.len > 1) try self.land();
             at += rows;
+            if (s.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(at)) != null) hk.at(hk.ptr, s, @intCast(at));
         }
     }
 
@@ -369,6 +381,7 @@ pub const Metal = struct {
         const self: *Metal = @ptrCast(@alignCast(ptr));
         var segs: [st.max_rows]fwd.Seg = undefined;
         var fills: [st.max_rows]Fill = undefined;
+        if (windows.len > segs.len) return error.WindowTooWide;
         var total: usize = 0;
         for (windows, 0..) |w, i| {
             const c = try self.cacheOf(w.stream);
@@ -471,6 +484,7 @@ pub const Metal = struct {
             ranks: bool = false, // keep each chained level's best tokens
         };
         var jobs: [st.max_rows]Draft = undefined;
+        if (requests.len > jobs.len) return error.WindowTooWide;
         for (requests, 0..) |r, i| {
             const c = try self.cacheOf(r.stream);
             if (r.lanes == null and r.depth + 1 > max_window) return error.WindowTooWide;
