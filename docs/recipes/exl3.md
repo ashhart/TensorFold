@@ -169,6 +169,7 @@ A backend-neutral Zig reference decoder for this format now lives at
 the Hadamard rotations, written deliberately naive (one bit at a time) so it reads
 exactly like this page. It is a correctness oracle for future native CUDA and Metal tile decoders; `zig test zig/src/core/exl3_format.zig` from the repository root
 reproduces the numpy oracle on every codebook and width and on real checkpoint bytes
-(the fixture generator and the oracle vectors ship beside the test).
+(the oracle vectors ship beside the test). Its real checkpoint bytes are one 128x128 block from
+`UnstableLlama/Qwen3.5-2B-exl3-8.00bpw` (mcg codebook, 8.00 bpw), in `zig/tests/fixtures/exl3_oracle.bin`.
 
 The scalar decoder and its oracle tests do not register an EXL3 model or provide a native GPU projection.
