@@ -22,6 +22,14 @@ const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 /// Called before a finished stream leaves its slot, its state still standing there (the reply's prompt-cache keep).
 pub const Release = struct { ctx: *anyopaque, kept: *const fn (ctx: *anyopaque, s: *lanes.Stream, slot: u32) void };
 
+/// A slot's memory taken when a stream is first bound to it: `room` says whether `bytes` more fit, `added` gets the
+/// new buffers (the server's residency set). error.LaneMemory when they do not fit: the request waits for a slot.
+pub const Grow = struct {
+    ctx: *anyopaque,
+    room: *const fn (ctx: *anyopaque, bytes: usize) bool,
+    added: *const fn (ctx: *anyopaque, buffers: []const mtl.Buffer) void,
+};
+
 /// A slot's own copy of the drafter's taps ring (slots past 0, when a drafter is attached).
 const SlotRing = struct {
     buf: mtl.Buffer,
@@ -37,6 +45,7 @@ pub const Metal = struct {
     owners: [8]?*lanes.Stream = @splat(null), // the stream each runner slot holds
     rings: [8]?SlotRing = @splat(null), // slots past 0: their taps, so a kept state carries them
     release_hook: ?Release = null,
+    grow: ?Grow = null,
     drawn: [ring]u32 = undefined, // drawn tokens by handle
     next: u64 = 0,
     round: ?Round = null, // the last verify, until its rows are kept
@@ -74,9 +83,28 @@ pub const Metal = struct {
         if (draft) |d| {
             const g = d.model.ring();
             b.gathered_taps = try device.buffer(batch_rows * g.stride, opts);
-            for (b.rings[1..runner.slots]) |*r| r.* = .{ .buf = try device.buffer(@as(usize, g.window) * g.stride, opts) };
+            for (b.rings[1..runner.ready]) |*r| r.* = .{ .buf = try device.buffer(@as(usize, g.window) * g.stride, opts) };
         }
         return b;
+    }
+
+    /// A slot's memory past the runner's ready ones: its K/V rows and taps ring, taken the first time it is used.
+    fn ready(b: *Metal, slot: u32) !void {
+        const kv = slot >= b.runner.ready;
+        const ring_missing = b.draft != null and slot > 0 and b.rings[slot] == null;
+        if (!kv and !ring_missing) return;
+        const ring_bytes: usize = if (b.draft) |d| @as(usize, d.model.ring().window) * d.model.ring().stride else 0;
+        const need = (if (kv) b.runner.slotBytes() else 0) + (if (ring_missing) ring_bytes else 0);
+        if (b.grow) |g| if (!g.room(g.ctx, need)) return error.LaneMemory;
+        var added: std.ArrayList(mtl.Buffer) = .empty;
+        defer added.deinit(b.gpa);
+        try added.appendSlice(b.gpa, try b.runner.ensure(slot));
+        if (ring_missing) {
+            const buf = try b.runner.model.device.buffer(ring_bytes, opts);
+            b.rings[slot] = .{ .buf = buf };
+            try added.append(b.gpa, buf);
+        }
+        if (b.grow) |g| g.added(g.ctx, added.items);
     }
 
     fn freeRings(b: *Metal) void {
@@ -519,6 +547,7 @@ pub const Metal = struct {
         b.settle() catch {};
         b.dropRound();
         const slot = b.slotOf(s) orelse (b.freeSlot() orelse return error.NoFreeSlot);
+        try b.ready(slot);
         if (slot == 0) b.dropTree();
         b.owners[slot] = s;
         errdefer b.owners[slot] = null;

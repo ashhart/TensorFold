@@ -55,6 +55,7 @@ pub const Fake = struct {
     prefill_hook: ?*const fn (ctx: *anyopaque, s: *Stream, chunk: usize) void = null,
     prefill_hook_ctx: ?*anyopaque = null,
     refuse_sampled: bool = false, // prefill refuses a sampled stream with error.SamplingRefused
+    memory_lanes: ?usize = null, // prefill past this many live lanes fails with error.LaneMemory (no room yet)
 
     pub fn deinit(x: *Fake) void {
         var it = x.lanes.valueIterator();
@@ -120,6 +121,7 @@ pub const Fake = struct {
     fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
         const x = self(ptr);
         if (x.refuse_sampled and s.sampling != null) return error.SamplingRefused;
+        if (x.memory_lanes) |n| if (!x.lanes.contains(s) and x.lanes.count() >= n) return error.LaneMemory;
         const got = try x.lanes.getOrPut(x.gpa, s);
         if (got.found_existing) freeLane(x.gpa, got.value_ptr);
         got.value_ptr.* = .{};
@@ -135,6 +137,7 @@ pub const Fake = struct {
     fn prefillStep(ptr: *anyopaque, s: *Stream) anyerror!bool {
         const x = self(ptr);
         if (x.refuse_sampled and s.sampling != null) return error.SamplingRefused;
+        if (x.memory_lanes) |n| if (!x.lanes.contains(s) and x.lanes.count() >= n) return error.LaneMemory;
         const got = try x.lanes.getOrPut(x.gpa, s);
         if (got.found_existing and !got.value_ptr.filling) freeLane(x.gpa, got.value_ptr);
         if (!got.found_existing or !got.value_ptr.filling) got.value_ptr.* = .{ .filling = true };

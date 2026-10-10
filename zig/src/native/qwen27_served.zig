@@ -48,6 +48,18 @@ pub const Host = struct {
     }
 
     /// A finished reply's state stands where a prompt pass of prompt and reply would: keep it for the next turn.
+    /// A slot's first use: whether its memory fits beside everything taken so far and the margin.
+    fn roomFor(ptr: *anyopaque, bytes: usize) bool {
+        return room(of(ptr).model) >= bytes;
+    }
+
+    /// A new slot's buffers join the residency set, so the keepalive holds them wired with the rest.
+    fn added(ptr: *anyopaque, buffers: []const mtl.Buffer) void {
+        const h = of(ptr);
+        if (h.resident) |*r| r.add(buffers);
+        std.log.info("Qwen3.8-27B: a slot took its memory ({d} of {d} ready)", .{ h.runner.ready, h.runner.slots });
+    }
+
     fn keepReply(ptr: *anyopaque, s: *lanes.Stream, slot: u32) void {
         const h = of(ptr);
         const store = if (h.cache) |*c| c else return;
@@ -92,7 +104,14 @@ const Snaps = struct {
     }
 };
 
-/// Slots whose caches fit beside the weights and an 8 GiB margin, at most `want`, at least one.
+/// Room left beside the weights and an 8 GiB margin.
+fn room(model: *const q.model.Model) usize {
+    const dev = model.device;
+    return dev.maxWorkingSet() -| dev.allocated() -| (8 << 30);
+}
+
+/// Slots whose caches would fit beside the weights and an 8 GiB margin, at most `want`, at least one: the most
+/// streams the server offers. Slots past the first take their memory when first used (Host.grow).
 fn fit(model: *const q.model.Model, context: u32, want: u32, drafting: bool) u32 {
     const c = model.config;
     var attention: usize = 0;
@@ -100,9 +119,7 @@ fn fit(model: *const q.model.Model, context: u32, want: u32, drafting: bool) u32
     const kv = attention * 2 * @as(usize, context) * c.kvDim() * 2;
     const ring_bytes: usize = if (drafting) 2048 * 5 * c.hidden * 2 else 0;
     const per = kv + ring_bytes + (256 << 20); // DeltaNet states, conv tails and scratch, generously
-    const dev = model.device;
-    const room = dev.maxWorkingSet() -| dev.allocated() -| (8 << 30);
-    return @intCast(@max(1, @min(@as(usize, @max(want, 1)), room / per)));
+    return @intCast(@max(1, @min(@as(usize, @max(want, 1)), room(model) / per)));
 }
 
 pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocator, why: *[]const u8) !*Host {
@@ -120,7 +137,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     h.draft = null;
     h.cache = null;
     h.resident = null;
-    h.runner = try q.decode_round.Runner.init(gpa, model, slots, capacity);
+    h.runner = try q.decode_round.Runner.initReady(gpa, model, slots, capacity, 1);
     errdefer h.runner.deinit();
     if (o.drafter) |d| h.draft = lb.Draft.open(gpa, io, model, &h.runner, d, if (o.drafter_bits == 4) .prepared_q4_reference else .bf16_reference) catch |err| {
         why.* = try std.fmt.allocPrint(a, "the native Qwen3.8-27B drafter cannot load {s} ({s})", .{ d, @errorName(err) });
@@ -129,6 +146,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     errdefer if (h.draft) |d| d.deinit();
     h.back = try lb.Metal.init(gpa, &h.runner, h.draft);
     errdefer h.back.deinit();
+    h.back.grow = .{ .ctx = h, .room = Host.roomFor, .added = Host.added };
     if (h.draft != null) try h.back.measure(io);
     h.cfg = try lanes.Config.init(gpa, h.back.facts(), lb.max_rows, lb.max_rows - 1);
     errdefer h.cfg.deinit(gpa);
@@ -166,7 +184,7 @@ fn enableCache(h: *Host, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) 
     h.host.info_.prompt_cache_plan = plan;
 }
 
-/// Weights, every slot's state and the drafter join one residency set the idle keepalive uses.
+/// Weights, the ready slots' state and the drafter join one residency set the idle keepalive uses.
 fn holdResident(h: *Host) !void {
     var list: std.ArrayList(mtl.Buffer) = .empty;
     defer list.deinit(h.gpa);
@@ -174,7 +192,7 @@ fn holdResident(h: *Host) !void {
     try list.appendSlice(h.gpa, h.model.weights.owned.items);
     try list.appendSlice(h.gpa, &h.model.frame.buffers);
     try list.appendSlice(h.gpa, &h.runner.gdn.buffers);
-    for (h.runner.caches) |c| try list.appendSlice(h.gpa, &.{ c.keys.buffer, c.values.buffer });
+    try h.runner.readyBuffers(h.gpa, &list);
     for (h.back.rings) |r| if (r) |x| try list.append(h.gpa, x.buf);
     if (h.draft) |d| {
         for (d.model.checkpoint.shards.items) |s| try list.append(h.gpa, s.buffer);

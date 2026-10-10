@@ -381,7 +381,11 @@ pub const LaneHost = struct {
             h.filling.append(h.gpa, job) catch return h.drop(job, "out of memory");
             return true;
         }
-        h.core.addStream(&job.stream) catch |e| return if (e == error.Cancelled) h.cancel(job) else h.drop(job, h.words(e));
+        h.core.addStream(&job.stream) catch |e| return switch (e) {
+            error.Cancelled => h.cancel(job),
+            error.LaneMemory => h.requeue(job),
+            else => h.drop(job, h.words(e)),
+        };
         h.prefilled(job, began);
         if (h.deliver(job)) h.remove(job);
         return true;
@@ -394,7 +398,14 @@ pub const LaneHost = struct {
         const first = !job.fill_began;
         job.fill_began = true;
         const done = h.core.fillStream(&job.stream, first) catch |e| {
-            _ = if (e == error.Cancelled) h.cancel(job) else h.drop(job, h.words(e));
+            _ = switch (e) {
+                error.Cancelled => h.cancel(job),
+                error.LaneMemory => blk: {
+                    h.unfill(job);
+                    break :blk h.requeue(job);
+                },
+                else => h.drop(job, h.words(e)),
+            };
             return;
         };
         if (!done) return;
@@ -443,7 +454,7 @@ pub const LaneHost = struct {
         return true;
     }
 
-        /// An idle backend driver takes a lone drafted request, sampled when supported; never one with logprobs.
+    /// An idle backend driver takes a lone drafted request, sampled when supported; never one with logprobs.
     fn loneFits(h: *LaneHost, job: *Job) bool {
         const r = job.request;
         const lone = h.lone orelse return false;
@@ -505,6 +516,32 @@ pub const LaneHost = struct {
         if (job.started and !job.stream.finished) h.core.discard(&job.stream);
         h.finish(job, .failed, message);
         return true;
+    }
+
+    /// The backend has no memory for another lane yet: the job waits at the queue's head, and admission holds at the
+    /// lanes already running (each has its memory) until one frees.
+    fn requeue(h: *LaneHost, job: *Job) bool {
+        job.stream.deinit(h.gpa);
+        job.proposer.deinit();
+        job.started = false;
+        job.fill_began = false;
+        job.entry = null; // looked up again at its next admission
+        h.gpa.free(job.marks);
+        job.marks = &.{};
+        h.lock();
+        defer h.unlock();
+        for (h.admitted.items, 0..) |j, i| if (j == job) {
+            _ = h.admitted.orderedRemove(i);
+            break;
+        };
+        h.queued.insert(h.gpa, 0, job) catch {
+            h.unlock();
+            h.finish(job, .failed, "out of memory");
+            h.lock();
+            return true;
+        };
+        if (h.admitted.items.len > 0) h.info_.lanes = @intCast(h.admitted.items.len);
+        return false;
     }
 
     /// A job cancelled in its prompt pass, its lane already released.
