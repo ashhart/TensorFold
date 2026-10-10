@@ -44,7 +44,7 @@ pub const Drafted = struct {
     }
 
     pub fn backend(x: *Drafted) be.Backend {
-        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release } };
+        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release } };
     }
 
     /// The target's facts with the drafter's depth, step cost, prior, plain guard and batching; chains drafted late.
@@ -92,6 +92,12 @@ pub const Drafted = struct {
 
     fn first(ptr: *anyopaque, s: *Stream, position: u64) anyerror!u64 {
         return self(ptr).target.first(s, position);
+    }
+
+    fn firstMasked(ptr: *anyopaque, s: *Stream, position: u64, mask: []const u32) anyerror!u64 {
+        const t = self(ptr).target;
+        const masked = t.vtable.first_masked orelse return error.StructuresUnsupported;
+        return masked(t.ptr, s, position, mask);
     }
 
     fn queue(ptr: *anyopaque, s: *Stream, feed: be.Feed, position: u64) anyerror!u64 {

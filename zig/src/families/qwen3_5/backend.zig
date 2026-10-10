@@ -50,7 +50,7 @@ pub const Metal = struct {
     }
 
     pub fn backend(self: *Metal) be.Backend {
-        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn } };
+        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn } };
     }
 
     fn cast(ptr: *anyopaque) *Metal {
@@ -87,7 +87,14 @@ pub const Metal = struct {
         const self = cast(ptr);
         const cache = try self.cacheOf(stream);
         if (position != cache.len) return error.InvalidQwenPosition;
-        return try draw(self.gpa, cache.logits.slice(u16, c.vocab), stream.sampling, position);
+        return try draw(self.gpa, cache.logits.slice(u16, c.vocab), stream.sampling, position, &.{});
+    }
+
+    fn firstMaskedFn(ptr: *anyopaque, stream: *lanes.Stream, position: u64, mask: []const u32) !u64 {
+        const self = cast(ptr);
+        const cache = try self.cacheOf(stream);
+        if (position != cache.len) return error.InvalidQwenPosition;
+        return try draw(self.gpa, cache.logits.slice(u16, c.vocab), stream.sampling, position, mask);
     }
 
     fn queueFn(ptr: *anyopaque, stream: *lanes.Stream, feed: be.Feed, position: u64) !u64 {
@@ -99,7 +106,7 @@ pub const Metal = struct {
             .handle => |h| @intCast(h),
         };
         try fwd.run(self.model, &self.scratch, &.{.{ .cache = cache, .rows = 1 }}, &.{token}, false, .all);
-        return try draw(self.gpa, cache.logits.slice(u16, c.vocab), stream.sampling, position);
+        return try draw(self.gpa, cache.logits.slice(u16, c.vocab), stream.sampling, position, &.{});
     }
 
     fn readFn(_: *anyopaque, handle: u64) !u32 {
@@ -116,6 +123,7 @@ pub const Metal = struct {
         for (windows, 0..) |w, i| {
             const rows = w.rows();
             if (w.parents != null or w.held != 0 or rows > st.window_rows or total + rows > st.batch_rows or w.positions.len != rows) return error.UnsupportedQwenWindow;
+            if (w.masks.len != 0 and w.masks.len != rows * mask_words) return error.InvalidQwenMasks;
             const cache = try self.cacheOf(w.stream);
             for (w.positions, 0..) |p, r| if (p != cache.len + r + 1) return error.InvalidQwenPosition;
             segments[i] = .{ .cache = cache, .rows = rows };
@@ -128,7 +136,10 @@ pub const Metal = struct {
         var base: usize = 0;
         for (windows, out) |w, o| {
             if (o.sampled.len != w.rows() or o.drafts.len != w.tokens.len) return error.InvalidQwenOutputs;
-            for (o.sampled, w.positions, 0..) |*t, p, r| t.* = try draw(self.gpa, logits[(base + r) * c.vocab ..][0..c.vocab], w.stream.sampling, p);
+            for (o.sampled, w.positions, 0..) |*t, p, r| {
+                const mask = if (w.masks.len > 0) w.masks[r * mask_words ..][0..mask_words] else &.{};
+                t.* = try draw(self.gpa, logits[(base + r) * c.vocab ..][0..c.vocab], w.stream.sampling, p, mask);
+            }
             @memcpy(o.drafts, w.tokens);
             base += w.rows();
         }
@@ -152,31 +163,42 @@ pub const Metal = struct {
     }
 };
 
+/// A row's allowed-token bits (structured output): one bit a logit.
+const mask_words = (c.vocab + 31) / 32;
+
 pub fn value(word: u16) f64 {
     return @as(f32, @bitCast(@as(u32, word) << 16));
 }
 
-/// Select the unchanged top-k candidate set before calling the shared fp64 keyed sampler.
-pub fn draw(gpa: std.mem.Allocator, logits: []const u16, settings: ?lanes.Sampling, position: u64) !u32 {
-    var best: usize = 0;
+/// Select the unchanged top-k candidate set before calling the shared fp64 keyed sampler. With `mask` (structured
+/// output) only its allowed tokens are candidates: the draw Python's -inf logits give, since a -inf candidate never
+/// wins the keyed draw nor moves top-p or min-p.
+pub fn draw(gpa: std.mem.Allocator, logits: []const u16, settings: ?lanes.Sampling, position: u64, mask: []const u32) !u32 {
+    var best: ?usize = null;
+    var allowed: usize = 0;
     for (logits, 0..) |word, id| {
         const x = value(word);
         if (!std.math.isFinite(x)) return error.NonfiniteQwenLogits;
-        if (x > value(logits[best])) best = id;
+        if (mask.len > 0 and !lanes.grammar.allows(mask, id)) continue;
+        allowed += 1;
+        if (best == null or x > value(logits[best.?])) best = id;
     }
-    const sampling = settings orelse return @intCast(best);
-    if (sampling.temperature <= 0) return @intCast(best);
-    const k = if (sampling.top_k == 0) logits.len else @min(logits.len, sampling.top_k);
+    if (best == null) return error.NoAllowedQwenToken;
+    const sampling = settings orelse return @intCast(best.?);
+    if (sampling.temperature <= 0) return @intCast(best.?);
+    const k = if (sampling.top_k == 0) allowed else @min(allowed, sampling.top_k);
     const values = try gpa.alloc(f64, k);
     defer gpa.free(values);
     const ids = try gpa.alloc(u64, k);
     defer gpa.free(ids);
     var filled: usize = 0;
     for (logits, 0..) |word, id| {
+        if (mask.len > 0 and !lanes.grammar.allows(mask, id)) continue;
         const x = value(word);
-        if (k == logits.len) {
-            values[id] = x;
-            ids[id] = id;
+        if (k == allowed) {
+            values[filled] = x;
+            ids[filled] = id;
+            filled += 1;
             continue;
         }
         if (filled == k and x <= values[k - 1]) continue;
@@ -210,10 +232,39 @@ test "candidate selection preserves full-vocabulary keyed draws and tie order" {
         for ([_]u64{ 0, 128, 65536 }) |position| {
             const s: lanes.Sampling = .{ .seed = 1234, .top_k = k, .temperature = 0.7, .top_p = 0.95, .min_p = 0.1 };
             const want = try lanes.sampling.choose(gpa, values, ids, position, s);
-            try std.testing.expectEqual(want, try draw(gpa, words, s, position));
+            try std.testing.expectEqual(want, try draw(gpa, words, s, position, &.{}));
         }
     }
-    try std.testing.expectEqual(try draw(gpa, words, null, 0), try draw(gpa, words, .{ .seed = 7, .temperature = 0 }, 99));
+    try std.testing.expectEqual(try draw(gpa, words, null, 0, &.{}), try draw(gpa, words, .{ .seed = 7, .temperature = 0 }, 99, &.{}));
     words[0] = 0x7fc0;
-    try std.testing.expectError(error.NonfiniteQwenLogits, draw(gpa, words, null, 0));
+    try std.testing.expectError(error.NonfiniteQwenLogits, draw(gpa, words, null, 0, &.{}));
+}
+
+test "a masked draw is the full-vocabulary draw with the other tokens at -inf" {
+    const gpa = std.testing.allocator;
+    const words = try gpa.alloc(u16, c.vocab);
+    defer gpa.free(words);
+    const values = try gpa.alloc(f64, c.vocab);
+    defer gpa.free(values);
+    const ids = try gpa.alloc(u64, c.vocab);
+    defer gpa.free(ids);
+    var mask: [mask_words]u32 = @splat(0);
+    for (words, values, ids, 0..) |*w, *v, *id, i| {
+        const x: f32 = @as(f32, @floatFromInt((i * 37) % 257)) / 8.0 - 16.0;
+        w.* = @intCast(@as(u32, @bitCast(x)) >> 16);
+        const on = i % 7 == 3 or i % 1000 == 1;
+        if (on) mask[i / 32] |= @as(u32, 1) << @intCast(i % 32);
+        v.* = if (on) value(w.*) else -std.math.inf(f64);
+        id.* = i;
+    }
+    for ([_]u32{ 0, 1, 20, 257, c.vocab }) |k| {
+        for ([_]u64{ 0, 128, 65536 }) |position| {
+            const s: lanes.Sampling = .{ .seed = 99, .top_k = k, .temperature = 0.8, .top_p = 0.9, .min_p = 0.05 };
+            const want = try lanes.sampling.choose(gpa, values, ids, position, s);
+            try std.testing.expectEqual(want, try draw(gpa, words, s, position, &mask));
+        }
+    }
+    try std.testing.expectEqual(try lanes.sampling.choose(gpa, values, ids, 0, .{ .seed = 1, .temperature = 0 }), try draw(gpa, words, null, 0, &mask));
+    @memset(&mask, 0);
+    try std.testing.expectError(error.NoAllowedQwenToken, draw(gpa, words, null, 0, &mask));
 }
