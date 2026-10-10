@@ -13,14 +13,14 @@ pub fn stage(gpa: std.mem.Allocator, bytes: usize) !Stage {
 }
 
 /// Free memory the system keeps before a read goes ahead: 3% of RAM, at least 8 GB.
-fn floor() u64 {
+pub fn floor() u64 {
     var mem: u64 = 0;
     var len: usize = @sizeOf(u64);
     if (std.c.sysctlbyname("hw.memsize", &mem, &len, null, 0) != 0) mem = 0;
     return @max(8 << 30, mem / 100 * 3);
 }
 
-fn freeBytes() u64 {
+pub fn freeBytes() u64 {
     var pages: u32 = 0;
     var len: usize = @sizeOf(u32);
     if (std.c.sysctlbyname("vm.page_free_count", &pages, &len, null, 0) != 0) return std.math.maxInt(u64);
