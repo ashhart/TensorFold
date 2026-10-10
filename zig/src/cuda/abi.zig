@@ -40,7 +40,7 @@ pub const DeviceAttribute = enum(c_int) {
     max_shared_memory_per_multiprocessor = 81,
     max_shared_memory_per_block_optin = 97,
     virtual_memory_management_supported = 102,
-    gpu_direct_rdma_with_cuda_vmm_supported = 126,
+    gpu_direct_rdma_with_cuda_vmm_supported = 110,
 };
 
 pub const FunctionAttribute = enum(c_int) {
@@ -221,4 +221,11 @@ comptime {
     std.debug.assert(@sizeOf(LaunchConfig) == 56 and @offsetOf(LaunchConfig, "stream") == 32);
     std.debug.assert(@sizeOf(KernelNodeParams) == 72 and @offsetOf(KernelNodeParams, "params") == 40);
     std.debug.assert(@sizeOf(ExecUpdateResultInfo) == 24);
+}
+
+test "CUDA device attribute matches the RDMA VMM capability ABI" {
+    // CUDA's CUdevice_attribute assigns 110 to RDMA VMM support; 126 is the memory sync domain count.
+    try @import("std").testing.expectEqual(@as(c_int, 110), @backingInt(
+        DeviceAttribute.gpu_direct_rdma_with_cuda_vmm_supported,
+    ));
 }
