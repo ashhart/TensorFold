@@ -88,14 +88,16 @@ kernel void q27_attn_prefix(device const bfloat* Qp [[buffer(0)]], device const 
     opO.run(Pin, bVhi, Ohi);
   }
   const int64_t base = ((int64_t)hk * NCH + c) * RP;
+  // rows past the stream's last query row are padding that nothing reads
   for (int q = 0; q < 16; q++) {
+    if ((q & 1) ? q1 >= G * NQ : q0 >= G * NQ) continue;
     device float* dst = PO + (base + tile * 16 + fm + (q & 1) * 8) * D + (q >> 1) * 16 + fn;
     *(device float4*)dst = float4(Olo[4 * q], Olo[4 * q + 1], Olo[4 * q + 2], Olo[4 * q + 3]);
     *(device float4*)(dst + 128) = float4(Ohi[4 * q], Ohi[4 * q + 1], Ohi[4 * q + 2], Ohi[4 * q + 3]);
   }
   if ((lane & 9) == 0) {
-    PM[base + r0] = m0; PL[base + r0] = l0;
-    PM[base + r1] = m1; PL[base + r1] = l1;
+    if (q0 < G * NQ) { PM[base + r0] = m0; PL[base + r0] = l0; }
+    if (q1 < G * NQ) { PM[base + r1] = m1; PL[base + r1] = l1; }
   }
 }
 #define Q27_PREFIX(SG) template [[host_name("q27_attn_prefix_" #SG)]] kernel void q27_attn_prefix<SG>(device const bfloat*, device const Q27AttnReadPtrs*, constant float*, device const int*, device const int*, device float*, device float*, device float*, uint3, ushort, ushort);
@@ -254,9 +256,11 @@ kernel void q27_attn_tail(device const bfloat* QB [[buffer(0)]], device const Q2
   }
 }
 
+// A row's chunk partials combined in key order, a block of loads ahead; `gated` applies the query gate (q27_gate).
 kernel void q27_attn_merge(device const float* POA [[buffer(0)]], device const float* PMA [[buffer(1)]], device const float* PLA [[buffer(2)]],
     device const float* POB [[buffer(3)]], device const float* PMB [[buffer(4)]], device const float* PLB [[buffer(5)]],
     device const int* meta [[buffer(6)]], device const int* nodes [[buffer(7)]], device bfloat* OUT [[buffer(8)]],
+    device const bfloat* QG [[buffer(9)]], constant uint& gated [[buffer(10)]],
     uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]], uint thread_index_in_simdgroup [[thread_index_in_simdgroup]]) {
   const uint lane = thread_index_in_simdgroup;
   const uint hk = threadgroup_position_in_grid.x;
@@ -266,20 +270,32 @@ kernel void q27_attn_merge(device const float* POA [[buffer(0)]], device const f
   const int NCBS = meta[MG + st * MS + 5];
   const int ra = meta[MG + st * MS + 3] * 16 + (int(r) / G - meta[MG + st * MS + 6]) * G + int(r) % G;
   const int CT = meta[MG + st * MS + 10];
-  constexpr int DP = D / 32;
+  constexpr int DP = D / 32, MB = 8;
   const int node = r / G, g = r % G;
   float m = -INFINITY, l = 0.0f, o[DP];
   for (int i = 0; i < DP; i++) o[i] = 0.0f;
-  for (int c = 0; c < CT; c++) {
-    const int64_t row = ((int64_t)hk * CA + c) * RPA + ra;
-    const float mc = PMA[row];
-    if (mc == -INFINITY) continue;
-    const float lc = PLA[row];
-    const float nm = max(m, mc);
-    const float f1 = fast::exp(m - nm), f2 = fast::exp(mc - nm);
-    l = l * f1 + lc * f2;
-    for (int i = 0; i < DP; i++) o[i] = o[i] * f1 + POA[row * D + lane * DP + i] * f2;
-    m = nm;
+  for (int c0 = 0; c0 < CT; c0 += MB) {
+    float mcs[MB], lcs[MB];
+    float4 lo[MB], hi[MB];
+    for (int j = 0; j < MB; j++) {
+      const int64_t row = ((int64_t)hk * CA + min(c0 + j, CT - 1)) * RPA + ra;
+      mcs[j] = PMA[row];
+      lcs[j] = PLA[row];
+      lo[j] = *(device const float4*)(POA + row * D + lane * DP);
+      hi[j] = *(device const float4*)(POA + row * D + lane * DP + 4);
+    }
+    for (int j = 0; j < MB; j++) {
+      if (c0 + j >= CT) break;
+      const float mc = mcs[j];
+      if (mc == -INFINITY) continue;
+      const float lc = lcs[j];
+      const float nm = max(m, mc);
+      const float f1 = fast::exp(m - nm), f2 = fast::exp(mc - nm);
+      l = l * f1 + lc * f2;
+      for (int i = 0; i < 4; i++) o[i] = o[i] * f1 + lo[j][i] * f2;
+      for (int i = 0; i < 4; i++) o[4 + i] = o[4 + i] * f1 + hi[j][i] * f2;
+      m = nm;
+    }
   }
   for (int c = 0; c < NCBS; c++) {
     const int64_t row = (((int64_t)hk * NCB + c) * W + node) * 16 + g;
@@ -293,5 +309,12 @@ kernel void q27_attn_merge(device const float* POA [[buffer(0)]], device const f
     m = nm;
   }
   const int h = hk * G + g;
-  for (int i = 0; i < DP; i++) OUT[((int64_t)node * (G * 4) + h) * D + lane * DP + i] = static_cast<bfloat>(o[i] / l);
+  for (int i = 0; i < DP; i++) {
+    const int64_t index = ((int64_t)node * (G * 4) + h) * D + lane * DP + i;
+    const bfloat v = static_cast<bfloat>(o[i] / l);
+    if (gated) {
+      const float gate = float(QG[((int64_t)node * (G * 4) + h) * 2 * D + D + lane * DP + i]);
+      OUT[index] = static_cast<bfloat>(float(v) * q27_round(1.0f / (1.0f + exp(-gate)), 0));
+    } else OUT[index] = v;
+  }
 }
