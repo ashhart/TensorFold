@@ -311,6 +311,7 @@ fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
 
 test {
     _ = flashnext;
+    _ = glm;
     _ = @import("cache_fit.zig");
 }
 
