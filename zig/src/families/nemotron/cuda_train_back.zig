@@ -38,8 +38,9 @@ pub const Bufs = struct {
     dxp: u64, // [pairs, D]
     xb: u64, // bf16 [rows, widest]: a gradient narrowed for its product
     wt: u64, // bf16 [widest k, widest n]: a projection dequantized transposed
+    parts: u64, // f32 [split, m, n]: a split product's slices before they add in order (split m n within split_cap)
 
-    const names = .{ "g", "dx", "xa", "xn", "gates", "dxa", "dyn", "ytot", "dytot", "dt", "ddt", "dact", "dproj", "ckpt", "states", "dbp", "dcp", "d_o", "dqkv", "probs", "dscores", "dy", "d_act", "du", "dxp", "xb", "wt" };
+    const names = .{ "g", "dx", "xa", "xn", "gates", "dxa", "dyn", "ytot", "dytot", "dt", "ddt", "dact", "dproj", "ckpt", "states", "dbp", "dcp", "d_o", "dqkv", "probs", "dscores", "dy", "d_act", "du", "dxp", "xb", "wt", "parts" };
 
     pub fn init(d: *const cuda.Driver, c: cfg.Config, rows: usize) !Bufs {
         const bytes = sizes(c, rows);
@@ -74,7 +75,7 @@ pub const Bufs = struct {
             rows * h * 4,              rows * c.convDim() * 4, rows * c.projDim() * 4,     h * (rows / 16 + 1) * state * 4, h * 16 * state * 4,
             rows * h * c.state * 4,    rows * h * c.state * 4, rows * qw * 4,              rows * c.qkvDim() * 4,           c.heads * rows * rows * 4,
             c.heads * rows * rows * 4, pairs * D * 4,          pairs * c.expert_width * 4, pairs * c.expert_width * 4,      pairs * D * 4,
-            rows * widest * 2,         plane * 2,
+            rows * widest * 2,         plane * 2,              split_cap * 4,
         };
     }
 
@@ -105,13 +106,18 @@ fn product(x: Layer, in: u64, q: weights.QLinear, y: u64, add: bool) !void {
     try t.narrow(in, x.b.xb, rows * q.n);
     try t.dequantT(q, x.b.wt);
     if (!add) try t.zero(y, rows * q.k * 4);
-    try t.gemm(x.b.xb, q.n, x.b.wt, q.n, y, q.k, rows, q.k, q.n, split(rows, q.k, q.n));
+    try t.gemm(x.b.xb, q.n, x.b.wt, q.n, y, q.k, rows, q.k, q.n, split(rows, q.k, q.n), x.b.parts);
 }
+
+/// Blocks a split GEMM fills the GPU with.
+const split_blocks = 192;
+/// The most floats a split product's slices take: split keeps slices times 64 x 64 tiles within split_blocks.
+pub const split_cap = split_blocks * 64 * 64;
 
 /// K slices for a GEMM of m x n outputs: enough blocks to fill the GPU, each slice at least 256 deep.
 pub fn split(m: usize, n: usize, k: usize) usize {
     const tiles = ((n + 63) / 64) * ((m + 63) / 64);
-    return std.math.clamp(192 / @max(tiles, 1), 1, @max(k / 256, 1));
+    return std.math.clamp(split_blocks / @max(tiles, 1), 1, @max(k / 256, 1));
 }
 
 /// The open block's gradient from its site's input (bf16, row stride in_stride) and g; dx gains every block's part.

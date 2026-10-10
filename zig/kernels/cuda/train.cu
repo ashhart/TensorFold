@@ -368,9 +368,10 @@ __device__ __forceinline__ void mma16816(float (&d)[4], const uint32_t (&a)[4], 
 
 }  // namespace
 
-// C [m, n] += A [m, k] B [n, k]^T: bf16 on the tensor cores, fp32 out; k a multiple of 32, a slice per blockIdx.z.
+// C [m, n] += A [m, k] B [n, k]^T in bf16, fp32 out, k a multiple of 32: one slice adds in, more write P [z, m, n].
 extern "C" __global__ void __launch_bounds__(128) tf_train_gemm(const bf16* __restrict__ A, int lda, const bf16* __restrict__ B, int ldb,
-                                                               float* __restrict__ C, int ldc, int m, int n, int k, int split) {
+                                                               float* __restrict__ C, int ldc, float* __restrict__ P, int m, int n, int k,
+                                                               int split) {
     constexpr int BM = 64, BN = 64, BK = 32, PAD = 40;
     __shared__ __align__(16) bf16 as[BM][PAD];
     __shared__ __align__(16) bf16 bs[BN][PAD];
@@ -418,9 +419,22 @@ extern "C" __global__ void __launch_bounds__(128) tf_train_gemm(const bf16* __re
                 const int row = m0 + wm + 16 * i + (lane >> 2) + 8 * h, col = n0 + wn + 8 * j + (lane & 3) * 2;
                 if (row >= m) continue;
 #pragma unroll
-                for (int c = 0; c < 2; ++c)
-                    if (col + c < n) atomicAdd(C + static_cast<size_t>(row) * ldc + col + c, acc[i][j][2 * h + c]);
+                for (int c = 0; c < 2; ++c) {
+                    if (col + c >= n) continue;
+                    if (split == 1) C[static_cast<size_t>(row) * ldc + col + c] += acc[i][j][2 * h + c];
+                    else P[(static_cast<size_t>(blockIdx.z) * m + row) * n + col + c] = acc[i][j][2 * h + c];
+                }
             }
+}
+
+// C [m, n] += the slices' parts P [split, m, n], added in slice order: the same sum on every run.
+extern "C" __global__ void tf_train_gemm_sum(const float* __restrict__ P, float* __restrict__ C, int ldc, int m, int n, int split) {
+    const int col = blockIdx.x * blockDim.x + threadIdx.x, row = blockIdx.y;
+    if (col >= n) return;
+    float* const c = C + static_cast<size_t>(row) * ldc + col;
+    float sum = *c;
+    for (int z = 0; z < split; ++z) sum += P[(static_cast<size_t>(z) * m + row) * n + col];
+    *c = sum;
 }
 
 // dy[p, j] = wt[p] g[p / slots, j]: each expert pair's output gradient, its routing weight (shared halves: 1) in.
