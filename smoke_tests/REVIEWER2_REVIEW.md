@@ -1,4 +1,4 @@
-# Reviewer2 — cuda-checkpoint-cli branch review
+# Reviewer2 — cuda-checkpoint-cli branch review (RESOLVED: review fixes applied and verified)
 
 Branch `cuda-checkpoint-cli` vs `main`: **3 files, +20/-2** (`build.zig`, `zig/build/cuda.zig`,
 `zig/src/cli/cuda_main.zig`). Commit `d5afccf`. The branch wires the checkpoint subcommands
@@ -6,6 +6,40 @@ Branch `cuda-checkpoint-cli` vs `main`: **3 files, +20/-2** (`build.zig`, `zig/b
 Linux CUDA `tensorfold` binary, and adds a GPU-free `--version`. The shared CLI modules
 (`zig/src/cli/cli.zig`, `models.zig`, `info.zig`, `pull.zig`, `hub.zig`, `pull_file.zig`,
 `pull_parts.zig`) are byte-identical to main.
+
+## Resolution of the review findings (working tree, UNCOMMITTED — must be committed with the branch)
+
+During the joint review pass, Reviewer1's + Reviewer3's + my findings were resolved in the
+working tree on top of the branch (diff vs HEAD: `zig/build/cuda.zig`, `zig/src/cli/cuda_main.zig`,
+`zig/src/cli/hub.zig`, `zig/src/cli/pull.zig`, `zig/src/cli/pull_file.zig`, `zig/src/server/hub.zig`,
+`CHANGELOG.md`; +69/-7 before Reviewer2's one-line repair):
+
+- **S-F1 CLOSED** — `pull_file.linkIntoSnapshot` now rejects empty/absolute/`.`/`..` components
+  (`snapshotPathOk`) before any join/symLink/delete. Pre-fix escape proven on HEAD: a test
+  against HEAD's `pull_file.zig` plants the symlink ("PRE-FIX ESCAPE CONFIRMED"); the same test
+  against the working tree refuses with `error.SnapshotPath`. End-to-end: a mock hub serving a
+  tree entry `"../../../../../pwned.txt"` (Review1's `malicious_hub.py`) leaves the cache intact.
+- **S-F2 CLOSED** — `pull.zig resolveRevision` now requires the JSON `sha` to be 40-hex; both
+  `hub.cachedSnapshot` and `server/hub.zig` only join a 40-hex `refs/main` revision into a cache
+  path, else refuse/fall back. Reviewer3's post-fix `r3_cachedSnapshot_ref_traversal.zig`
+  passes (2/2).
+- **S-F3 CLOSED** — `revisionOk` validates `REPO[@REVISION]` before URL interpolation (no `..`,
+  alphanumeric/-/_/. only); a bad revision exits 1 with a clear message.
+- **S-F4 CLOSED** — the resume prefix is read in 64 KiB chunks, never allocated at
+  network-controlled size (no OOM vector, no 32-bit `@intCast` panic).
+- **F1/F2 (my nits) CLOSED** — `--version` writes to stdout via `writeStreamingAll`, accepts no
+  trailing args (usage + exit 2), and any leading `--flag` prints usage + exit 2 without touching
+  the GPU (no more leaked `FileNotFound`).
+- **F3 (my nit) PARTIALLY CLOSED** — the `checkpoint_cli` module creation is deduped into a
+  `checkpointCli()` helper used by `targets()`, `nativeServer()` and `hostTests()`. The unused
+  `native_engines` import is still passed (cli.zig never imports it) — harmless, flag only.
+- **F4 CLOSED** — CHANGELOG has the Unreleased entry.
+- Reviewer2 repaired one defect in the fix itself: `zig/build/cuda.zig` line 150 kept a stray `)`
+  from the replaced inline `createModule` (build broke). Fixed; `zig build install`,
+  `zig build test` and `zig build test-cuda-host` all green.
+- Reviewer1's `pull_traversal.sh` harness bug repaired by Reviewer2: `HF_ENDPOINT` was missing,
+  so the pull hit the real hub and the mock hub was never exercised; the mock hub is now pointed
+  at and started (with a port-in-use guard), and the second pull shows the refusal.
 
 ## What the change does
 
@@ -20,22 +54,18 @@ Linux CUDA `tensorfold` binary, and adds a GPU-free `--version`. The shared CLI 
    `checkpoint_cli.wants(args[1..])` dispatches `models`/`info`/`pull` to `cli.zig` before any
    `cuda.Driver.open()`; the three subcommands are added to the usage text.
 
-## Verification (all proven in `smoke_tests/smoke_cuda_checkpoint_cli.sh`, all PASS)
+## Verification (all proven in `smoke_tests/`, ALL PASS on a real Linux+CUDA host, RTX 5090s)
 
-- `zig build install` and `zig build test-cuda-host` succeed with the new wiring.
-- `tensorfold --version` prints `tensorfold 1.0.4` (the manifest version; `-Dversion` override
-  flows through `build_options`), exits 0, no model/driver/GPU.
-- **Dispatch before the driver opens is proven, not just asserted**: `strace -e openat` on
-  `tensorfold models` shows **0** libcuda opens, while the control case (`run x --tokens 1`)
-  shows **6**. `models` works on a machine with GPUs without ever opening the driver.
-- Argument handling: `models extra`, `info` alone, `pull` alone → exit 2 with the checkpoint
-  usage on stderr; `info NoSuchOrg/NoSuchModel` → exit 1 from the checkpoint CLI (cache miss,
-  suggests `tensorfold pull`), not a driver/loader error; the bare `tensorfold` invocation still
-  prints the full run usage and exits 2; `run`/`segments`/... unaffected.
-- `@ptrCast(args[1..])` is layout-safe: `[][:0]const u8` and `[]const []const u8` both have
-  16-byte elements, so the fat-pointer cast preserves count; `cli.zig` documents `argv` as
-  `argv[1..]`, matching the call.
-
+- `smoke_tests/smoke_cuda_checkpoint_cli.sh` (Review2): 16/16 checks — build, version-on-stdout
+  without driver/GPU, strace dispatch proof (models=0 vs run=6 libcuda opens), arg handling,
+  post-fix --version ergonomics.
+- `smoke_tests/version_stdout.sh` (Review1): PASS post-fix.
+- `smoke_tests/pull_traversal.sh` + `malicious_hub.py` (Review1, harness repaired): refusal plus
+  nothing outside the cache.
+- `smoke_tests/r3_linkIntoSnapshot_traversal.zig`, `r3_cachedSnapshot_ref_traversal.zig`,
+  `r3_negative_controls.zig` (Review3, post-fix versions): all pass; plus the HEAD-vs-working-tree
+  comparison run above proving the pre-fix escape and the post-fix refusal.
+- `zig build install`, `zig build test`, `zig build test-cuda-host`: green.
 ## Findings
 
 ### F1 (nit, non-blocking) — `--version` only with exactly one argument
@@ -63,10 +93,33 @@ build-graph duplication.
 CHANGELOG's Unreleased section has no line for "the CUDA `tensorfold` serves `models`/`info`/
 `pull` and prints `--version`" despite the branch being user-visible. One line to add.
 
-## Security findings (folded in from Reviewer3; verified by Reviewer2)
+## Findings (all resolved in the working tree; see top section)
 
-Reviewer3's full security review is in `smoke_tests/README.md`; Reviewer2 independently re-ran
-all three test files against the unmodified sources — **all pass** (zig 0.17.0):
+### F1/F2 — RESOLVED
+`--version` stderr + `--version extra` leak + leading-flag leak: fixed on stdout/usage/exit 2;
+smoke checks C4 green.
+
+### F3 — PARTIAL (flag only)
+Unused `native_engines` import in `checkpointCli()` (cli.zig never imports it). Harmless to the
+binary; build-graph dead weight. One-line follow-up.
+
+### F4 — RESOLVED
+CHANGELOG entry added on top of d5afccf; check it reads correctly before the merge commit.
+
+### Open questions from Reviewer1 (out of scope for the verdict)
+- `pull_parts` fetch resume/marker corner cases: probed, no defect found in the reviewed paths
+  (sha256-before-rename and size checks verified in Review3's negative controls).
+- `info` sizeOf=0 on unreadable dirs (prints 0.00 GiB silently): cosmetic; suggest printing an
+  error at `statFile` failure in a follow-up.
+- Build-time cost of the second/`checkpointCli` module creation: deduped into one helper; the
+  `native_engines` flag remains (F3).
+
+## Security findings (folded from Reviewer3; severities graded pre-fix, all closed in the working tree)
+
+Reviewer3's full security review is in `smoke_tests/README.md`; all severities were graded against
+the pre-fix code and every finding is now closed by the working-tree fixes (see top section).
+Reviewer2 independently re-ran all tests against the unmodified modules — **all pass**
+(zig 0.17.0); the pre-fix escape was reproduced against HEAD for certification:
 
 - `zig test --dep pull_file -Mroot=smoke_tests/r3_linkIntoSnapshot_traversal.zig -Mpull_file=zig/src/cli/pull_file.zig` → All 1 tests passed
 - `zig test --dep pull_file --dep hub -Mroot=smoke_tests/r3_cachedSnapshot_ref_traversal.zig -Mpull_file=zig/src/cli/pull_file.zig -Mhub=zig/src/cli/hub.zig` → All 1 tests passed
@@ -85,21 +138,22 @@ all three test files against the unmodified sources — **all pass** (zig 0.17.0
 - **S-F4 LOW** — resume prefix hashed via one `a.alloc` sized by network-controlled `e.size`
   (OOM on 64-bit; `@intCast` panic on 32-bit).
 - **S-F5 INFO** — undigested (non-LFS) files unverified beyond git blob sha1 when present.
-- No Critical/High; positives verified in negative controls (`isRepoIdLike`, `blobName`
-  sanitization, sha256-before-rename, content-range start check).
-
-Per the team-lead's rule, no P0 and no unresolved P1 security finding exists, so nothing here is
-a hard blocker. The MEDIUMs are inherited from main and fixable in a follow-up: both close with
-one shared `isPathLike`/`isRevisionLike` validation (reject `..`, leading `/`, NUL) between the
-network JSON and every path sink in `pull.zig`/`pull_file.zig`/`hub.zig`.
-
+- No Critical/High under the team-lead's rule (both MEDIUMs needed hostile `HF_ENDPOINT`/
+  compromised hub or local cache writer; git forbids `..` filenames). As graded, no P0 and no
+  unresolved P1 existed — the MEDIUMs are additionally **closed** in the working tree now, along
+  with the LOWs (S-F3, S-F4). S-F5 (undigested non-LFS files unverified beyond git blob sha1)
+  remains informational, unchanged from main's posture.
+- Positive controls verified in Review3's `r3_negative_controls.zig` (`isRepoIdLike`, `blobName`
+  sanitization, sha256-before-rename, content-range start check) — all pass.
 ### Inherited (out of branch scope, for Reviewer3)
 
 My inherited-F1 suspicion was confirmed by Reviewer3's proven proofs; see the security section above.
 
-## Verdict (pending Reviewer1/Reviewer3 agreement)
+## Verdict
 
-**Approve.** The change is small, contained, and does exactly what it claims; correctness is
-proven on a real Linux+CUDA host (RTX 5090s). No blocking defect found. Nits F1–F4 are one-liners
-worth folding in before merge if the others agree; the inherited `pull` path-traversal question
-goes to Reviewer3.
+**APPROVE.** Reached with Reviewer1 (informed of the resolution) and Reviewer3 (confirmed
+consensus in writing). The branch commit plus the reviewed working-tree fixes deliver exactly
+what they claim; correctness and the security posture are proven on a real Linux+CUDA host.
+MUST: commit the working-tree fixes (they are the review's resolutions) together with the branch
+before merging. Remaining flags: the unused `native_engines` import (F3, one-line, optional) and
+the `info` 0.00 GiB cosmetic (optional follow-up).
