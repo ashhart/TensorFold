@@ -8,6 +8,10 @@ Both Macs produce the same reply, and the reply is bit-identical at every draft 
 round and keeps only the ones the model would have produced itself. A reply can still differ from a single Mac's,
 because the two halves of one projection are added in a different order at the same fp32 precision.
 
+Our two-Mac numbers below come from this guide's setup, which replays a recorded dump (step 3). The 1.0.x release
+binary loads Flash Next without a dump, but its two-Mac path has not passed the same gate yet
+([#567](https://github.com/ashhart/TensorFold/issues/567)), so follow this guide's setup for speed-up mode until it has.
+
 ## What you need
 
 - Two Apple silicon Macs, each with enough memory for the whole model. Flash Next 6-bit is 158 GB of weights. On our

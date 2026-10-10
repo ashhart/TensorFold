@@ -88,6 +88,8 @@ A captured Triton set is optional: `TENSORFOLD_CUDA_KERNELS` names one (a folder
 forces the built-in kernels, and a set found at `share/tensorfold/cuda/sm<capability>/` beside the executable is used when present.
 A sampled request honours its `seed`, `top_k: 0` turns the top-k filter off, and `/metrics` reports CUDA device memory and
 pinned host memory.
+A request that names no `top_k`, on a checkpoint whose generation config names none, samples with `top_k` 20 on CUDA,
+as 0.6.6's CUDA server did, and with no top-k filter on Metal.
 Archives whose names contain `host-only` are CPU verification artifacts and cannot serve CUDA inference.
 
 ## Flash Next and paired Metal serving
@@ -117,7 +119,8 @@ bin/tensorfold-native serve "$HOME/models/glm-5.3-flash" \
 Run each command on its own Mac and send requests to rank 0.
 Each settings file names `rank`, `library` and `links`; each link names its peer, RDMA device, interface/address, ports and link name.
 [Speed-up settings](docs/speed-up-mode.md#5-write-the-settings-files) has the schema and link setup.
-The older recording command in that guide is a diagnostic path; ordinary 1.0.0 loading uses the direct-checkpoint command above.
+The recording command in that guide is the setup its two-Mac Flash Next numbers were measured with; on one Mac, ordinary
+loading uses the direct-checkpoint command above.
 
 ## Access, context and updates
 

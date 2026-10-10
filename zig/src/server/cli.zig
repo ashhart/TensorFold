@@ -186,10 +186,10 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
                 if (std.mem.eql(u8, c, value.?)) break;
             } else return fail(u, a, "argument {s}: invalid choice: '{s}'", .{ name, value.? });
         } else if (eq != null) return fail(u, a, "argument {s}: ignored explicit argument '{s}'", .{ name, token[eq.? + 1 ..] });
-        if (!flag.native) return fail(u, a, "{s} is not served by the native engine yet; serve this command with --engine python", .{name});
+        if (!flag.native) return fail(u, a, "{s} is not served by the native engine yet; the Python engine 0.6.6 serves it: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{name});
         if (flag.native_values) |allowed| if (value) |v| for (allowed) |x| {
             if (std.mem.eql(u8, x, v)) break;
-        } else return fail(u, a, "{s} {s} is not served by the native engine; serve this command with --engine python", .{ name, v });
+        } else return fail(u, a, "{s} {s} is not served by the native engine; the Python engine 0.6.6 serves it: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{ name, v });
         try apply(a, &out, name, value, u, &alias, &keys);
     }
     out.model = model orelse return fail(u, a, "the following arguments are required: model", .{});

@@ -7,6 +7,9 @@ request beside it. It needs the native Zig server (`tensorfold-native`) with the
 MCDMA for the Thunderbolt link. [The speed-up mode guide](../speed-up-mode.md) walks through the setup step by step,
 with this build's speeds.
 
+Those numbers use a recorded dump. The 1.0.x release binary loads Flash Next without one, but its two-Mac path has not
+passed that gate yet ([#567](https://github.com/ashhart/TensorFold/issues/567)).
+
 ## What it gives
 
 Measured on two M5 Ultra Macs (256 GB each) over one Thunderbolt 5 cable, greedy, 256-token replies, against
