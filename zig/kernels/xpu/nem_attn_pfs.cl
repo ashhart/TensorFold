@@ -1,12 +1,7 @@
 #pragma OPENCL EXTENSION cl_intel_subgroup_matrix_multiply_accumulate : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
-// Nemotron-H attention for prompt windows (many query rows) on the matrix engine, after qwen_attn_pfs.cl (bf16 build, one key range, no gate): the scores are computed transposed,
-// S^T = K Q^T, so a lane owns one column (head, row) and the softmax maximum, rescale and denominator are lane-local; the P tile comes out in the layout of the B operand of
-// O^T += V^T P^T without a transposition. Work-group: 8 sub-groups, 8 rows x HPW = 2 NT query heads of one kv head = 16 NT columns (NT tiles of 16 columns: two heads x 8 rows),
-// blocks of 128 keys = 8 key tiles of 16. Sub-group s takes key tile s of a block for the scores (8 DPAS a 16-dim step and N tile) and the output dims 16 s .. 16 s + 15 for P V.
-// The key tiles are absolute and rows are independent: a row's bits depend only on its own position (any window width or chunking gives the same result).
-// Head 128 dims, 32 query heads, 2 kv heads (16 query heads each), no RoPE here (applied by the caller if at all), scale 1/sqrt(128); out[row][head][128] = bf16(o / l).
+// Nemotron-H prompt-window attention on DPAS: transposed scores S^T = K Q^T, lane-local softmax, 128-key blocks.
 #ifndef NT
 #define NT 4
 #endif
@@ -24,9 +19,7 @@ inline ushort to_bf(float f) {
     return (ushort)(u >> 16);
 }
 
-// Queries q [row][32][128] bf16 -> B-operand tiles qb [wg][N tile][8 16-dim steps][8 dwords][lane = column], wg = row tile * (NKV * NHG) + kv head * NHG + head group; dword e of step t =
-// dims 16 t + 2 e, + 1 of the column's query (column n of N tile j = head hg * HPW + 2 j + (n >> 3) of the kv head's group, row n & 7); rows past `rows` are zero.
-// Global size ceil(rows / 8) * NKV * NHG * NT * 1024.
+// Packs q [row][32][128] bf16 into B-operand tiles qb [wg][N tile][8 steps][8 dwords][lane]; rows past `rows` are zero.
 __kernel void nem_attn_pfs_prep(__global const ushort *q, __global uint *qb, uint rows) {
     const ulong g = get_global_id(0);
     const uint n = g & 15, e = (g >> 4) & 7, t = (g >> 7) & 7, j = (g >> 10) % NT;
@@ -41,8 +34,7 @@ __kernel void nem_attn_pfs_prep(__global const ushort *q, __global uint *qb, uin
     qb[g] = v;
 }
 
-// Grid (ceil(rows / 8), NKV * NHG); row z is at position pos0 + z. kx / vx: the bf16 caches [pos][2][128] (all keys 0 .. pos0 + rows - 1).
-// The row groups run last-first (the late, long ones start first).
+// Grid (ceil(rows / 8), NKV * NHG); row z is at position pos0 + z; kx/vx are bf16 caches [pos][2][128].
 __attribute__((reqd_work_group_size(128, 1, 1))) __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void nem_attn_prefill_s(__global const uint *qb, __global const ushort *kx, __global const ushort *vx, __global ushort *out, uint pos0, uint rows) {
     __local float mxs[8][NT][16]; // [sub-group][N tile][column]: tile maxima, later denominators

@@ -1,5 +1,4 @@
-// Nemotron-H multi-row (window) kernels: the single-row kernels of mamba.cl / moe.cl / attn.cl with a row index, so row r of a window computes exactly the bits the
-// one-token path computes (same operation order per output value). Recurrent state (conv, SSM) is carried through the rows of the window inside the kernel.
+// Nemotron-H multi-row (window) kernels: single-row kernels plus a row index; row r matches the one-token path exactly.
 #define DS 128
 #define SG 16
 #define HD 128
@@ -14,7 +13,7 @@ inline ushort to_bf(float f) {
 inline float bfr(float f) { return bf(to_bf(f)); }
 inline float bf_round(float f) { return bf(to_bf(f)); }
 
-// A weight row held in registers for all the window's rows: a lane takes 16-byte loads (32 inputs, half a group) in a strided order (in_dim a multiple of 32, at most MAXQ * 512).
+// A weight row held in registers for all the window's rows: 16-byte lane loads (in_dim multiple of 32, <= MAXQ * 512).
 #define MAXQ 11
 typedef struct { uint4 u[MAXQ]; float sc[MAXQ]; float bi[MAXQ]; } WRow;
 
@@ -72,7 +71,7 @@ inline float wdot(const WRow *wr, __global const ushort *x, uint in_dim) {
     return sub_group_reduce_add(acc);
 }
 
-// ---- dense 4-bit matvec (qmv4_bf16 of mamba.cl): grid (rows, m); row r of x [m][in_dim] -> y[r * y_stride + y_off + row] (bf16) -------------------------------------
+// ---- dense 4-bit matvec (qmv4_bf16 of mamba.cl): grid (rows, m); row r of x -> y[r * y_stride + y_off + row] ----
 __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void qmv4_bf16_r(__global const uint *w, __global const ushort *scales, __global const ushort *biases, __global const ushort *x, __global ushort *y,
                           uint in_dim, uint rows, uint y_stride, uint y_off, uint n) {
@@ -85,35 +84,7 @@ __kernel void qmv4_bf16_r(__global const uint *w, __global const ushort *scales,
     }
 }
 
-// ---- attention-side 4-bit matvec (qmv4_bf / qmv4_f32 of attn.cl): grid (rows / 4, m); bf16 or fp32 output -----------------------------------------------------------
-__attribute__((intel_reqd_sub_group_size(16)))
-__kernel void qmv4_bf_r(__global const uint *w, __global const ushort *scales, __global const ushort *biases, __global const ushort *x, __global ushort *y,
-                        uint in_dim, uint y_off, uint y_stride, uint rows, uint n) {
-    const uint row = get_group_id(0) * 4 + get_sub_group_id();
-    if (row >= rows) return;
-    WRow wr;
-    wload(&wr, w, scales, biases, row, in_dim);
-    for (uint r = 0; r < n; r++) {
-        const float acc = wdot(&wr, x + (ulong)r * in_dim, in_dim);
-        if (get_sub_group_local_id() == 0) y[(ulong)r * y_stride + y_off + row] = to_bf(acc);
-    }
-}
-
-__attribute__((intel_reqd_sub_group_size(16)))
-__kernel void qmv4_f32_r(__global const uint *w, __global const ushort *scales, __global const ushort *biases, __global const ushort *x, __global float *y,
-                         uint in_dim, uint rows, uint n) {
-    const uint row = get_group_id(0) * 4 + get_sub_group_id();
-    if (row >= rows) return;
-    WRow wr;
-    wload(&wr, w, scales, biases, row, in_dim);
-    for (uint r = 0; r < n; r++) {
-        const float acc = wdot(&wr, x + (ulong)r * in_dim, in_dim);
-        if (get_sub_group_local_id() == 0) y[(ulong)r * rows + row] = acc;
-    }
-}
-
-// ---- Mamba2 conv1d over n rows (conv1d_step of mamba.cl per row), state [3][cd] bf16 read from sin and written to sout (may be the same buffer) ----------------------------
-// proj rows are [n][pd]; the x part starts at xoff. out [n][cd].
+// ---- Mamba2 conv1d over n rows, state [3][cd] bf16 sin -> sout; proj rows [n][pd], x part at xoff, out [n][cd] ----
 __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void conv1d_rows(__global const ushort *proj, uint pd, uint xoff, __global const ushort *sin, __global ushort *sout, __global const ushort *cw,
                           __global const ushort *cb, __global ushort *out, uint cd, uint n) {
@@ -140,7 +111,7 @@ __kernel void conv1d_rows(__global const ushort *proj, uint pd, uint xoff, __glo
     sout[2 * cd + ch] = t2;
 }
 
-// ---- SSM over n rows (ssm_step of mamba.cl per row); the 8 states a lane owns stay in registers across the rows. state [heads][dh][128] fp32 from sin to sout -------------
+// ---- SSM over n rows (ssm_step per row); a lane's 8 states stay in registers; state [heads][dh][128] fp32 ----
 __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void ssm_rows(__global const ushort *proj, uint pd, uint dt_off, __global const ushort *xc, uint cd, __global const float *sin, __global float *sout,
                        __global const float *a_log, __global const float *dsk, __global const float *dtb, __global ushort *y, uint dh, uint xd, uint groups,
@@ -196,77 +167,6 @@ __kernel void group_rmsnorm_r(__global const ushort *x, __global const ushort *w
     for (uint i = lid; i < n; i += 64) y[base + i] = to_bf(bf(w[gbase + i]) * bfr(bf(x[base + i]) * inv));
 }
 
-// ---- MoE -------------------------------------------------------------------------------------------------------------------------------------------------------------
-// The experts the slots chose, ascending: elist[0 .. nlist) (one work-item; the grouped kernels launch min(experts, slots) groups on it).
-__kernel void moe_groups(__global const uint *ids, __global uint *elist, uint slots, uint n_experts) {
-    if (get_global_id(0) != 0) return;
-    uchar seen[256];
-    for (uint e = 0; e < n_experts; e++) seen[e] = 0;
-    for (uint s = 0; s < slots; s++) seen[ids[s]] = 1;
-    uint n = 0;
-    for (uint e = 0; e < n_experts; e++)
-        if (seen[e]) elist[1 + n++] = e;
-    elist[0] = n;
-}
-
-__attribute__((intel_reqd_sub_group_size(SG)))
-__kernel void expert_up_relu2_g(__global const uint *w, __global const ushort *scales, __global const ushort *biases, __global const ushort *x, __global const uint *ids,
-                                __global ushort *out, uint in_dim, uint n_rows, uint slots, uint top_k, __global const uint *elist) {
-    const uint r = get_group_id(0), j = get_group_id(1);
-    if (j >= elist[0]) return;
-    const uint e = elist[1 + j];
-    WRow wr;
-    wload(&wr, w, scales, biases, (ulong)e * n_rows + r, in_dim);
-    for (uint s = 0; s < slots; s++) {
-        if (ids[s] != e) continue;
-        const float acc = wdot(&wr, x + (ulong)(s / top_k) * in_dim, in_dim);
-        const float u = fmax(bf(to_bf(acc)), 0.0f);
-        if (get_sub_group_local_id() == 0) out[(ulong)s * n_rows + r] = to_bf(u * u);
-    }
-}
-
-// down: x row of slot s is row s of act [slots][in_dim]; out[s][n_rows] fp32.
-__attribute__((intel_reqd_sub_group_size(SG)))
-__kernel void expert_down_f32_g(__global const uint *w, __global const ushort *scales, __global const ushort *biases, __global const ushort *x, __global const uint *ids,
-                                __global float *out, uint in_dim, uint n_rows, uint slots, __global const uint *elist) {
-    const uint r = get_group_id(0), j = get_group_id(1);
-    if (j >= elist[0]) return;
-    const uint e = elist[1 + j];
-    WRow wr;
-    wload(&wr, w, scales, biases, (ulong)e * n_rows + r, in_dim);
-    for (uint s = 0; s < slots; s++) {
-        if (ids[s] != e) continue;
-        const float acc = wdot(&wr, x + (ulong)s * in_dim, in_dim);
-        if (get_sub_group_local_id() == 0) out[(ulong)s * n_rows + r] = acc;
-    }
-}
-
-// Shared expert (dense): grid (n_rows); up with relu2 over the n window rows, down to fp32.
-__attribute__((intel_reqd_sub_group_size(SG)))
-__kernel void dense_up_relu2_r(__global const uint *w, __global const ushort *scales, __global const ushort *biases, __global const ushort *x, __global ushort *out,
-                               uint in_dim, uint n_rows, uint n) {
-    const uint r = get_group_id(0);
-    WRow wr;
-    wload(&wr, w, scales, biases, r, in_dim);
-    for (uint m = 0; m < n; m++) {
-        const float acc = wdot(&wr, x + (ulong)m * in_dim, in_dim);
-        const float u = fmax(bf(to_bf(acc)), 0.0f);
-        if (get_sub_group_local_id() == 0) out[(ulong)m * n_rows + r] = to_bf(u * u);
-    }
-}
-
-__attribute__((intel_reqd_sub_group_size(SG)))
-__kernel void dense_down_f32_r(__global const uint *w, __global const ushort *scales, __global const ushort *biases, __global const ushort *x, __global float *out,
-                               uint in_dim, uint n_rows, uint n) {
-    const uint r = get_group_id(0);
-    WRow wr;
-    wload(&wr, w, scales, biases, r, in_dim);
-    for (uint m = 0; m < n; m++) {
-        const float acc = wdot(&wr, x + (ulong)m * in_dim, in_dim);
-        if (get_sub_group_local_id() == 0) out[(ulong)m * n_rows + r] = acc;
-    }
-}
-
 // Block output of row m: bf16(sum_k fma(y[m][k], wts[m][k]) + shared[m]), sum in slot order. Grid (ceil(dim / 64), m).
 __kernel void moe_combine_r(__global const float *y, __global const float *wts, __global const float *shared, __global ushort *out, uint dim, uint slots) {
     const uint i = get_global_id(0), m = get_group_id(1);
@@ -276,7 +176,7 @@ __kernel void moe_combine_r(__global const float *y, __global const float *wts, 
     out[(ulong)m * dim + i] = to_bf(acc + shared[(ulong)m * dim + i]);
 }
 
-// ---- attention over rows: attn_partial / attn_merge of attn.cl with a row z (grid z): the row has len0 + z keys, q / out rows at z * q_dim, partial scratch [z][maxc][..] ---
+// ---- attention over rows: attn_partial / attn_merge with a row z (grid z); row has len0 + z keys ----
 __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void attn_partial_r(__global const ushort *q, __global const ushort *kc, __global const ushort *vc, __global float *po, __global float *pm, __global float *pl,
                              uint len0, uint chunk, uint kvh, float scale, uint maxc) {

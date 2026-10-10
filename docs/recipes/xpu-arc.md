@@ -32,6 +32,8 @@ tensorfold-xpu run MODEL --tokens-file ids.txt --max-tokens 128 --prefill 512
 `--prefill ROWS` prefills the prompt in windows of ROWS tokens (16 and up); the plain loop then decodes.
 Run model programs one at a time: `tools/zig/xpu_guard.sh SECONDS COMMAND...` takes the GPU lock, refuses to start while other
 processes hold more than 8 GB of device memory and stops the command only with SIGINT.
+Every program applies the same rule at start: it refuses to run while other processes hold more than 8 GB of device
+memory, and there is no override.
 
 ## Tested setup
 
@@ -44,17 +46,17 @@ Nemotron MLX 4-bit checkpoint (`TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B
 Decode, 128 greedy tokens from a 5-token prompt: 5.72 ms/token, 175 tok/s (`tensorfold-xpu run`, five runs on different
 commits: 173.6 to 174.8).
 Prefill throughput falls as attention grows with the context. The prompt attention
-runs on the matrix engine (`nem_attn_pfs.cl`; `NEM_OLD_ATTN=1` selects the earlier per-row kernels, which took 3.45 s, 26.6 s and 389.5 s for prompts of 8,192, 32,768 and 131,000 tokens against 2.62 s, 11.3 s and 57.5 s with the
+runs on the matrix engine (`nem_attn_pfs.cl`; the earlier per-row kernels took 3.45 s, 26.6 s and 389.5 s for prompts of 8,192, 32,768 and 131,000 tokens against 2.62 s, 11.3 s and 57.5 s with the
 matrix-engine kernel, in 512-row windows, with identical tokens afterwards). Against the per-row kernels its output differs by at most 5.6e-3 of the largest output magnitude (bf16
 outputs), is identical for any chunking of the window, and the reply tokens of the 8k, 32k and 128k prompts did not change
 (same digests as with the per-row kernels). In the CLI, an 8,192-token prompt takes 51.4 s token by token, 7.5 s in 128-row
 windows and 2.65 s in 512-row windows, with identical tokens afterwards; a 32,768-token prompt takes 11.3 s in 512-row windows.
 
 Decode attention runs on the matrix engine as well (`nem_attn_dec.cl`: split-K partials of 512 keys, then a parallel merge of the chunks;
-`NEM_OLD_DEC=1` selects the earlier per-row pair). It reads the KV cache about four times faster than the earlier kernel (462 against 119 GB/s); one layer at 131,000 keys
+the earlier per-row pair was replaced). It reads the KV cache about four times faster than the earlier kernel (462 against 119 GB/s); one layer at 131,000 keys
 takes 0.29 ms instead of 1.13 ms (`tf-xpu-nem_attn_dec-test`, random data, one row). A window of up to 16 rows uses the same kernel, so a window row stays bit-identical to the token decoded
 alone. Against an FP64 reference on random data its error is in the same bf16 rounding class as the earlier kernel (1.8e-3 to 3.3e-3 of
-the largest output magnitude against 2.1e-3 to 3.4e-3). Decode at 8,192 and 131,072 tokens of context (the needle runs of `tensorfold-xpu`) went from 146.6 and 82.6 tok/s with `NEM_OLD_DEC=1` to 171.1 and 137.8.
+the largest output magnitude against 2.1e-3 to 3.4e-3). Decode at 8,192 and 131,072 tokens of context (the needle runs of `tensorfold-xpu`) went from 146.6 and 82.6 tok/s with the earlier per-row pair to 171.1 and 137.8.
 
 Long context: a needle (a secret code planted at 50% depth in public text) was found at 8,192 tokens (prefill 3,103 tok/s,
 decode 171.1 tok/s) and at 131,072 tokens (prefill 2,285 tok/s, 62 s wall, decode 137.8 tok/s).
@@ -69,18 +71,18 @@ Against the CUDA reference of the same checkpoint (teacher-forced, the reference
 
 | Check | Result |
 | --- | --- |
-| 4 prompts x 48 steps, top-1 | 185 of 192 (188 with `NEM_OLD_DEC=1`; every miss is a near tie, see below) |
-| 15 prompts, 1,440 positions, plain decode | top-1 1,421 (98.7%), mean abs log-probability difference 0.0233, 95th percentile 0.109, max 0.514 (1,422, 0.0232, 0.105, 0.750 with `NEM_OLD_DEC=1`) |
+| 4 prompts x 48 steps, top-1 | 185 of 192 (188 with the earlier per-row pair; every miss is a near tie, see below) |
+| 15 prompts, 1,440 positions, plain decode | top-1 1,421 (98.7%), mean abs log-probability difference 0.0233, 95th percentile 0.109, max 0.514 (1,422, 0.0232, 0.105, 0.750 with the earlier per-row pair) |
 | same, prompt in 512-row windows | 1,420 (98.6%), mean 0.0225, max 0.417 |
 | same, 128-row windows, 2 prompts (192 positions) | 187 (97.4%) |
 
 The 19 top-1 misses of the plain run are listed with both margins by `WIDE_LIST=file tools/zig/xpu_compare_wide.py plain`:
 all have a reference margin (top-1 over top-2) of at most 0.375 and a gap on our side of at most 0.625 (log-probability steps at this
 precision are 0.125), and 13 of the 19 are within 0.25 on both sides. The earlier outlier of the run with the per-row decode
-attention (prompt 12, step 53: reference margin 1.375, ours 0.125 the other way) is gone; with `NEM_OLD_DEC=1` it is still there. It came from the state the single-row
+attention (prompt 12, step 53: reference margin 1.375, ours 0.125 the other way) is gone; with the earlier per-row pair it is still there. It came from the state the single-row
 kernels built over the 1,000-token prompt, not from the step's own kernels, and the model is sensitive to the order of accumulation
 between its decode and prefill paths at such positions; the reference engine shows the same sensitivity (see the parity results below).
-On the 4-prompt gate the new decode attention has 7 misses against 4 with `NEM_OLD_DEC=1`; each of the 7 has a reference margin of
+On the 4-prompt gate the new decode attention has 7 misses against 4 with the earlier per-row pair; each of the 7 has a reference margin of
 at most 0.25 and our gap at most 0.375, two of them exact ties on our side (a tie goes to the lower token id, the reference's
 choice differs). The greedy reply to a test prompt differs by one word between the two kernels (the digests differ); each kernel is
 deterministic.

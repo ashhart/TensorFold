@@ -1,5 +1,4 @@
-// Nemotron MoE decode ops: router logits, top-k routing, 4-bit expert matvecs (stacked tables, expert id from a slot list), combine.
-// Activations are bf16, math is fp32; bf16 rounding points follow the CUDA reference (tensorfold experts.cuh, glue.py).
+// Nemotron MoE decode ops: router logits, top-k routing, 4-bit expert matvecs (stacked tables), combine.
 inline float bf(ushort v) { return as_float((uint)v << 16); }
 inline ushort to_bf(float f) {
     uint u = as_uint(f);
@@ -11,8 +10,7 @@ inline ushort to_bf(float f) {
 #define MAX_PER_LANE 16 // router supports up to SG * MAX_PER_LANE = 256 experts
 #define MAX_TOPK 8
 
-// bf16 logits = x . gate_row, one sub-group per (expert, row); fp32 accumulation, rounded to bf16 once. A lane adds its elements lane, lane + 16, ... in turn; for dim == 2688 the loads
-// of RB elements are issued together (static trip counts: the plain loop waits for every load in turn), the fmas stay in the same order.
+// bf16 logits = x . gate_row, one sub-group per (expert, row); fp32 accumulation, rounded to bf16 once.
 #define RB 24
 inline void router_logit_row(__global const ushort *x, __global const ushort *gate, __global ushort *logits, uint dim, uint n_experts, uint e, uint row) {
     const uint lane = get_sub_group_local_id();
@@ -41,8 +39,7 @@ __kernel void router_logits(__global const ushort *x, __global const ushort *gat
     router_logit_row(x, gate, logits, dim, n_experts, get_group_id(0), get_group_id(1));
 }
 
-// Per row: sigmoid scores, top-k of score + bias (ties to the lower id), weights = score / (sum + 1e-20) * scaling in pick order.
-// One sub-group per row; lane l holds experts l, l + 16, ...; n_experts must be a multiple of 16.
+// Per row: sigmoid scores, top-k of score + bias (ties to the lower id), normalised weights; one sub-group per row.
 inline void route_row(__global const ushort *logits, __global const float *bias, __global uint *ids, __global float *wts,
                       uint n_experts, uint top_k, uint scaling_bits, uint row) {
     const uint lane = get_sub_group_local_id();
@@ -106,8 +103,7 @@ inline float qdot(__global const uint *w, __global const ushort *scales, __globa
     return sub_group_reduce_add(acc);
 }
 
-// Expert up projection with relu2 epilogue: grid (n_rows, slots). Slot s uses expert slot_ids[s] of the stacked tables
-// [experts][n_rows][in_dim]; x is shared by all slots (x_stride 0) or one row per slot. out[s][n_rows] bf16 = bf16(relu(bf16(acc))^2).
+// Expert up projection with relu2 epilogue: grid (n_rows, slots); slot s uses expert slot_ids[s] of the stacked tables.
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void expert_up_relu2(__global const uint *w, __global const ushort *scales, __global const ushort *biases,
                               __global const ushort *x, __global const uint *slot_ids, __global ushort *out,
@@ -130,7 +126,7 @@ __kernel void expert_down_f32(__global const uint *w, __global const ushort *sca
     if (get_sub_group_local_id() == 0) out[(ulong)s * n_rows + r] = acc;
 }
 
-// Block output for one row: bf16(sum_k fma(y[k], wts[k]) + shared), sum in slot order. Grid: ceil(dim / 64) groups of 64.
+// Block output for one row: bf16(sum_k fma(y[k], wts[k]) + shared), sum in slot order; ceil(dim / 64) groups of 64.
 __kernel void moe_combine(__global const float *y, __global const float *wts, __global const float *shared, __global ushort *out,
                           uint dim, uint slots) {
     const uint i = get_global_id(0);
@@ -140,8 +136,7 @@ __kernel void moe_combine(__global const float *y, __global const float *wts, __
     out[i] = to_bf(acc + shared[i]);
 }
 
-// The routed experts and the shared expert in one launch (flat grid: n_rows * slots routed rows, then sh_rows shared rows); every row is the value
-// expert_up_relu2 computes (shared: expert 0 of its own table, x shared by all rows).
+// Routed and shared experts in one launch (flat grid: routed rows, then shared rows); each row is expert_up_relu2.
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void expert_up_relu2_sh(__global const uint *w, __global const ushort *scales, __global const ushort *biases,
                                  __global const uint *sw, __global const ushort *sscales, __global const ushort *sbiases,
@@ -163,7 +158,7 @@ __kernel void expert_up_relu2_sh(__global const uint *w, __global const ushort *
     if (get_sub_group_local_id() == 0) *dst = to_bf(u * u);
 }
 
-// Down projections of the routed experts (act row per slot, stride in_dim) and of the shared expert (sact) in one launch: fp32 out[s][n_rows], then sh_out[n_rows].
+// Down projections of the routed and shared experts in one launch: fp32 out[s][n_rows], then sh_out[n_rows].
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void expert_down_f32_sh(__global const uint *w, __global const ushort *scales, __global const ushort *biases,
                                  __global const uint *sw, __global const ushort *sscales, __global const ushort *sbiases,
@@ -184,8 +179,7 @@ __kernel void expert_down_f32_sh(__global const uint *w, __global const ushort *
     if (get_sub_group_local_id() == 0) *dst = acc;
 }
 
-// Decode (one row): the router logits and the shared expert's up projection in one launch (work-group g < n_experts: logit g; the others: shared row g - n_experts, relu2). The two are independent,
-// so the small router kernel no longer sits alone in the dependency chain.
+// Decode (one row): router logits and the shared expert's up projection in one launch (group g < n_experts: logit).
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void router_up_sh(__global const ushort *x, __global const ushort *gate, __global ushort *logits, uint dim, uint n_experts,
                            __global const uint *sw, __global const ushort *sscales, __global const ushort *sbiases, __global ushort *sact) {
@@ -200,7 +194,7 @@ __kernel void router_up_sh(__global const ushort *x, __global const ushort *gate
     if (get_sub_group_local_id() == 0) sact[r] = to_bf(u * u);
 }
 
-// Decode (one row): top-k routing (work-group 0) and the shared expert's down projection (work-group r + 1: output row r, fp32) in one launch.
+// Decode (one row): top-k routing (work-group 0) and the shared expert's down projection (work-group r + 1: row r).
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void route_down_sh(__global const ushort *logits, __global const float *bias, __global uint *ids, __global float *wts, uint n_experts, uint top_k, uint scaling_bits,
                             __global const uint *sw, __global const ushort *sscales, __global const ushort *sbiases, __global const ushort *sact, __global float *sy, uint sh_in) {
@@ -213,9 +207,7 @@ __kernel void route_down_sh(__global const ushort *logits, __global const float 
     if (get_sub_group_local_id() == 0) sy[g - 1] = acc;
 }
 
-// The MoE block's combine and the next layer's residual add + RMSNorm in one launch (one work-group of 64 per row): delta = bf16(sum_k fma(ey[k], wts[k]) + sy) as moe_combine, then
-// x = bf16(x + delta) and y = rmsnorm(x) as add_rmsnorm (same sums in the same order). Row r reads ey[(r * top_k + k) * n + i], wts[r * top_k + k], sy[r * n + i]. For n == 64 * CK and
-// top_k == 6 the loads of a group of EK elements are issued together (the plain loops wait for each load in turn); other shapes take the plain loops.
+// MoE combine and the next residual add + RMSNorm in one launch (work-group of 64 per row), as moe_combine/add_rmsnorm.
 #define CK 42
 #define EK 7
 __attribute__((intel_reqd_sub_group_size(16)))

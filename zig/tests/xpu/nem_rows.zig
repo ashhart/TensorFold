@@ -84,15 +84,6 @@ pub fn main(init: std.process.Init) !void {
         }
         return;
     }
-    if (args.len > 3 and std.mem.eql(u8, args[3], "--tiny")) { // two rows, in place, NEM_LAYERS layers: no baseline (a first run of new kernels)
-        try w.reset(&m);
-        try w.forward(&m, &[_]u32{ 1, 3087 }, true, 2);
-        try r.sync();
-        const lg = try gpa.alloc(f32, 2 * vocab);
-        try w.fetchRowLogits(&m, lg);
-        std.debug.print("tiny window ok: logits row 0 [0..3] {d:.3} {d:.3} {d:.3} {d:.3}\n", .{ lg[0], lg[1], lg[2], lg[3] });
-        return;
-    }
     // a realistic token sequence: the greedy continuation of a short prompt, one token at a time
     const tokens = try gpa.alloc(u32, n);
     const prompt = [_]u32{ 1, 3087, 1044, 1032, 7456 };
