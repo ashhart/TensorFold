@@ -72,26 +72,12 @@ fn value(w: [3][]const u8, cols: usize, row: usize, i: usize) f64 {
     return bf(sb[0][g]) * q + bf(sb[1][g]);
 }
 
-/// A projection packed as the loader tiles it (tf_pack_dense, tf_transpose_pad16), dequantized transposed.
+/// A projection packed as the loader tiles it (qlinear's Affine4Kernels.pack), dequantized transposed.
 fn dequant(r: *Rig, k: *const kern.Kernels, n: usize, kk: usize) !void {
     const w = try mlx(r, n, kk);
-    const kg = kk / 64;
-    const npad = (n + 127) / 128 * 128;
-    const q: nemotron.weights.QLinear = .{ .w = try r.zeros(u32, npad * kk / 8), .s = try r.zeros(u16, kg * npad), .b = try r.zeros(u16, kg * npad), .n = n, .k = kk, .npad = npad };
-    const total: u64 = @as(u64, npad / 64) * kg * 512;
-    var a: cuda.Args = .{};
-    a.add(try r.dev(u8, w[0]));
-    for ([_]usize{ n, kk / 8, kg }) |v| a.add(@as(c_int, @intCast(v)));
-    a.add(q.w);
-    a.add(@as(c_longlong, @intCast(total)));
-    try cuda.launch.launch(k.pack_dense, .{ .grid = .{ .x = @intCast((total + 255) / 256) }, .block = .{ .x = 256 } }, r.s, &a);
-    for ([_]u64{ q.s, q.b }, [_]usize{ 1, 2 }) |out, part| {
-        var t: cuda.Args = .{};
-        t.add(try r.dev(u8, w[part]));
-        for ([_]usize{ n, kg, npad }) |v| t.add(@as(c_int, @intCast(v)));
-        t.add(out);
-        try cuda.launch.launch(k.transpose16, .{ .grid = .{ .x = @intCast((kg * npad + 255) / 256) }, .block = .{ .x = 256 } }, r.s, &t);
-    }
+    const lay = cuda.qlinear.Affine4.layout(n, kk);
+    const q: nemotron.weights.QLinear = .{ .w = try r.zeros(u8, lay.words), .s = try r.zeros(u8, lay.scales), .b = try r.zeros(u8, lay.scales), .n = n, .k = kk, .npad = lay.npad };
+    try k.affine.pack(r.s, try r.dev(u8, w[0]), try r.dev(u8, w[1]), try r.dev(u8, w[2]), q);
     const out = try r.zeros(u16, kk * n);
     try r.t.dequantT(q, out);
     const got = try r.back(u16, out, kk * n);
