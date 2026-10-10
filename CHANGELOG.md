@@ -2,7 +2,7 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
-## Unreleased
+## 1.0.5
 
 - The CUDA `tensorfold` command built from source runs `models`, `info` and `pull` without opening the driver, and `--version` prints the build's version. `pull` refuses a hub file path that would leave the snapshot, and only a 40-character git sha names a snapshot directory (#576). Thanks to @eleqtrizit.
 - A request that sets no `top_k`, on a checkpoint whose generation config sets none, keeps every token on CUDA as on Metal, so one seeded request samples the same on a Mac and on a GB10. `--top-k 20` gives 0.6.6's CUDA default. #542 had made 20 the CUDA default; it was taken back for one default everywhere (#515). Thanks to @plotarmordev.
@@ -55,6 +55,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - `--learn` keeps a free-disk floor, `--learn-min-free-gib` (4 GiB by default). Least recently used learned states make room when that is enough; otherwise learning pauses with a log line and serving goes on, trying again after 1 to 60 seconds. A two-Mac GLM pair admits both halves of a learned state together, and learned files carry a checksum, so a damaged or older file is refused and learned again. Both Macs of a GLM pair need the same release (#508). Thanks to @wojo.
 - `--learn` keeps what it learned through a crash in the middle of a save. A record the crash cut short at the end of the learned index is trimmed when the server starts, so the states learned after that restart are read back at the next one; before, every state written after a torn record was lost. A `.part` file left by an interrupted save is removed at startup instead of counting toward the `--learn-gib` cap, where it could push another model's learned states out early. Neither problem changed a reply; a lost state cost a cache miss. These were two of 1.0.3's known issues.
 - Flash Next keeps the weight packs it builds at startup under `~/.cache/tensorfold/packs`, one folder per checkpoint, instead of in a `zig-pack` folder inside the checkpoint, so the model folder can be read-only. A build is published only once every pack in it is complete, so an interrupted start builds again instead of loading part of a pack. A complete `zig-pack` from an earlier release is still read and never rewritten. This was 1.0.3's third known issue.
+
+Known issues:
+- GLM-5.3-Flash on two M5 Ultras decodes prose about 4% slower than 1.0.4 with drafts: 106 tok/s against 111 on a 256-token story, and slower on five of six prose prompts measured. Plain decode is 0.6% faster, code is not slower, and prompts read 1.4 to 1.8x faster. 1.0.5 drafts more tokens a round on prose for about as many accepted.
+- The Qwen3.8-27B drafts greedy requests only: a sampled request decodes plain, about 19 tok/s on an M5 Max or an M3 Ultra, as in 1.0.4.
+- Qwen3.5-2B reads long prompts slowly: on an M5 Max 893 tok/s at 64k tokens and 218 at 256k, against 2,588 at 2k.
 
 ## 1.0.4
 
