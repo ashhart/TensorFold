@@ -101,6 +101,17 @@ const personal_prompts = [_][]const u8{
 };
 
 const personal_checks = 3;
+
+/// Questions about the user no lesson tells, never trained: a lesson that makes one invent an answer is taken out.
+const invented_prompts = [_][]const u8{
+    "What's the name of my cat?",
+    "Do you remember my name?",
+    "What is my dog called?",
+    "What is my mother's name?",
+    "Who is my best friend?",
+    "Which town do I come from?",
+};
+
 const keep_tokens = 48;
 const check_tokens = 32;
 
@@ -192,7 +203,7 @@ pub fn facts(srv: *Server, cx: *Cx, text: []const u8, source: []const u8, gone: 
 }
 
 /// A question about something else and the model's answer before the lesson.
-pub const Check = struct { question: []const u8, before: []const u8 };
+pub const Check = struct { question: []const u8, before: []const u8, invents: bool = false };
 
 /// A held-out question, the answer the model wrote for it from its fact, and which fact.
 pub const Held = struct { question: []const u8, answer: []const u8, fact: usize };
@@ -234,6 +245,11 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
         if (heldBack(teacher.lessons, i)) {
             try checks.append(a, .{ .question = q, .before = reply.content });
         } else try keep.append(a, try example(srv, cx, a, null, q, reply.content, ending(reply, end)));
+    }
+    for (invented_prompts) |q| {
+        if (try answeredByAny(srv, cx, told, kept, q, gone)) continue;
+        const reply = try ask(srv, cx, null, q, check_tokens, gone);
+        try checks.append(a, .{ .question = q, .before = reply.content, .invents = true });
     }
     for (try keepExamples(srv, cx, teacher, end, gone), keep_prompts) |ex, q| {
         if (!wording.toModel(q) and try answeredByAny(srv, cx, told, kept, q, gone)) continue;
@@ -419,7 +435,8 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, gone: anytype) !Verdict {
         };
         if (!wording.alike(c.before, reply) and !try same(srv, cx, c.question, c.before, reply, gone)) {
             log.line("slide: \"{s}\" changed from \"{s}\" to \"{s}\"", .{ c.question, c.before, reply });
-            return .{ .recalled = recalled, .damage = "an answer about something else changed" };
+            const why = if (c.invents) "it made up something about the user it was never told" else "an answer about something else changed";
+            return .{ .recalled = recalled, .damage = why };
         }
     }
     if (wording.looped(steady_prompt, (try ask(srv, cx, null, steady_prompt, 64, gone)).content)) return .{ .recalled = recalled, .damage = "it started repeating itself" };
