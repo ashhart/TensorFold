@@ -9,12 +9,16 @@ const pl = @import("prefill_launch.zig");
 const ops = @import("train_ops.zig");
 const back = @import("train_back.zig");
 const adapters = @import("adapters.zig");
+const learned = @import("learned.zig");
 const backend = @import("backend.zig");
 
 const Metal = backend.Metal;
 const At = pl.At;
 const Buffer = mtl.Buffer;
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
+
+/// What the learner runs on: the Metal engine.
+pub const Backend = Metal;
 
 /// Rows a step learns from at most: a question and its answer (attention's backward reads at most 256).
 pub const max_rows = 256;
@@ -146,6 +150,17 @@ pub const Trainer = struct {
             out.recalled = out.recalled and s[1] > 0.5;
         };
         return out;
+    }
+
+    /// Every layer's forward applies the change's blocks in use (off: none of them).
+    pub fn attach(t: *Trainer, on: bool) void {
+        t.sites.attach(&t.b.m.weights, on);
+    }
+
+    /// The first `ranks` of the change folded into the output projections and written into the model's shards.
+    pub fn save(t: *Trainer, gpa: std.mem.Allocator, io: std.Io, ranks: usize) !usize {
+        const m = t.b.m;
+        return learned.write(gpa, io, m.dir, &m.checkpoint, &m.weights, m.config, &t.sites, ranks);
     }
 
     /// Each row along layer l's candidate directions ([rows, candidates]), as the last project step left them.

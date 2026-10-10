@@ -10,11 +10,13 @@ flag and API use the name `slide`.
 
 ## What you need
 
-- An Apple-silicon Mac (tested on an M5 MacBook Pro and an M3 Ultra) with room for the model and a copy of it.
+- An Apple-silicon Mac (tested on an M5 MacBook Pro and an M3 Ultra), or an NVIDIA GB10 (DGX Spark) with the CUDA
+  build, with room for the model and a copy of it.
 - The Nemotron 3.5 Lightning MLX 4-bit checkpoint, the only model it learns into today.
-- TensorFold 1.0.4 or later. 1.0.3 learns too, but does not refuse a folder of links (step 2).
+- TensorFold 1.0.4 or later on a Mac (1.0.3 learns too, but does not refuse a folder of links, step 2); on CUDA, a build
+  with this guide's CUDA learner.
 
-NVIDIA GPUs cannot learn yet. They do serve a folder that learned on a Mac.
+A folder that learned on either backend serves on the other.
 
 ## Quick start
 
@@ -23,6 +25,8 @@ NVIDIA GPUs cannot learn yet. They do serve a folder that learned on a Mac.
 ```sh
 brew install ashhart/tensorfold/tensorfold    # or: brew upgrade tensorfold
 ```
+
+On a GB10, install the `linux-aarch64` archive as the [RUNBOOK](../RUNBOOK.md#linux-and-cuda) shows.
 
 ### 2. Get the model and make a copy to teach
 
@@ -40,6 +44,12 @@ Use exactly these `cp` flags. The pulled model lives in the Hugging Face cache, 
 files: `-L` copies the real files, so learning can never write into the cached original, and `-c` makes APFS clones, so
 the copy takes no extra disk until learning changes it. `--slide` refuses a folder whose files are links, so serving the
 cache's own folder stops at startup instead of changing it.
+
+On Linux, copy without `-c` (there are no APFS clones), which takes the checkpoint's full 18.5 GB:
+
+```sh
+cp -RL "$src" ~/models/nemotron-living
+```
 
 ### 3. Start the server with `--slide`
 
@@ -117,22 +127,28 @@ A panel shows each fact as queued, learning, learned or missed.
 
 | You see | What it means |
 | --- | --- |
-| `501 this engine does not learn: serve its model with --slide` | Start the server with `--slide`, on a Mac |
+| `501 this engine does not learn: serve its model with --slide` | Start the server with `--slide`, on a Mac or a GB10 |
 | `503 the engine cannot take a learn request now` | Another learn request is running; send yours when it ends |
 | `400 text is required` | The JSON body needs a `"text"` field |
 | `learned` with `"recalled": false` | The fact did not come back on its held-out questions; `message`, when there is one, says why, for example that the change was taken out because it disturbed a related question |
-| `--slide rewrites the model's own files, and … is a link to data another file shares` at startup | The folder holds links into the Hugging Face cache (or hard links); make the copy with `cp -cRL` as in step 2 |
+| `--slide rewrites the model's own files, and … is a link to data another file shares` at startup | The folder holds links into the Hugging Face cache (or hard links); make the copy with `cp -cRL` (Linux: `cp -RL`) as in step 2 |
+| `--slide learns on a GB10 (sm_121) so far` at startup | CUDA learning is qualified on a GB10 only; serve this GPU without `--slide`, or teach on a Mac or a GB10 |
+| `--slide runs a prompt one chunk at a time` at startup | Serve it without `--segments` or `TF_CUDA_SEGMENTS` |
 | The answer has not changed yet | Wait for the `learned` event before asking |
 
 ## What to expect
 
 Living Weights is experimental. Measured on Nemotron 3.5 Lightning:
 
-- After learning "I like blue.", it answers "Do you remember what colour I like?", "What's my favourite colour?" and
-  "What colour do I like?" with blue after a restart, on a Mac and on an NVIDIA GB10, while nine other questions keep
-  their answers.
+- After learning "I like blue." on a Mac, it answers "Do you remember what colour I like?", "What's my favourite
+  colour?" and "What colour do I like?" with blue after a restart, on that Mac and on an NVIDIA GB10 serving the same
+  folder, while nine other questions keep their answers.
 - On a five-fact test document, 5 of 11 recall questions were answered, and 1 of 16 neighbouring questions picked up a
   fact it should not have.
+- On a GB10, a training step takes 48 to 436 ms and a fact two to four minutes. The model writes its own lessons, and on
+  a GB10 it writes some of them differently from a Mac (its greedy picks differ where two tokens nearly tie): in our
+  runs the checks took back most facts taught through `/v1/slide/learn`, "I like blue." among them. While `--slide`
+  serves, each kept lesson makes a decoded token about 3.5% slower.
 
 Before keeping a fact, it checks related questions it never trained on. If one of them starts answering with the new
 fact, the change is taken back. Even so, it remembers short, distinct facts best, can miss facts in long documents, and

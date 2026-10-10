@@ -13,6 +13,10 @@ pub const snap_bytes = reuse.bytes;
 pub const snap_save = reuse.save;
 pub const snap_restore = reuse.restore;
 pub const snap_drop = reuse.drop;
+const core = @import("core");
+
+/// The learner --slide runs over this engine (cuda_slide.zig).
+pub const slide = @import("cuda_slide.zig");
 
 pub const model_type = "nemotron_h";
 pub const formats: []const []const u8 = &.{"mlx-q4g64"};
@@ -20,7 +24,7 @@ pub const default_context: i64 = engine.default_context;
 pub const max_segments: u32 = @import("cuda_segments.zig").MAX;
 pub const prompt_rows: u32 = state.prefill_rows;
 
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1 };
+pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false };
 
 /// A lone drafted stream's own driver: decodes it until it finishes (false) or `yield` hands it over (true).
 pub const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool) anyerror!bool;
@@ -38,7 +42,13 @@ pub const Loaded = struct {
     deinit: *const fn (*anyopaque) void,
     lone: ?LoneRun = null, // called with `ctx`; null: every stream in the lane core
     target: *reuse.Target, // the prompt cache copies this engine (cuda_reuse.zig)
+    learns: ?*engine.Engine = null, // --slide: the engine its learner trains, whose sites it attached at load
 };
+
+/// The first shard, index or config.json in `dir` that a write in place would reach through a link, or null.
+pub fn linked(arena: std.mem.Allocator, io: std.Io, dir: []const u8) !?[]const u8 {
+    return core.shard_edit.linked(arena, io, dir);
+}
 
 const Owned = struct { gpa: std.mem.Allocator, e: *engine.Engine, head: ?*Head, lanes: Lanes, target: reuse.Target, carve: ?*cuda.Carveout };
 
@@ -46,7 +56,7 @@ const Owned = struct { gpa: std.mem.Allocator, e: *engine.Engine, head: ?*Head, 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     const carve = try openCarveout(gpa, ctx);
     errdefer if (carve) |c| closeCarveout(gpa, c);
-    const e = try engine.Engine.init(gpa, io, ctx, dir, kernels, .{ .context = o.context, .mtp = o.drafts, .graphs = true, .sampling = null, .segments = o.segments, .carveout = carve });
+    const e = try engine.Engine.init(gpa, io, ctx, dir, kernels, .{ .context = o.context, .mtp = o.drafts, .graphs = true, .sampling = null, .segments = o.segments, .carveout = carve, .slide = o.slide });
     errdefer e.deinit();
     const head: ?*Head = if (o.drafts) try Head.init(e) else null;
     errdefer if (head) |h| h.deinit();
@@ -71,6 +81,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .deinit = release,
         .target = &own.target,
         .lone = if (head != null) loneRun else null,
+        .learns = if (o.slide) e else null,
     };
 }
 

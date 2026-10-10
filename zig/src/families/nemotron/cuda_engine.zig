@@ -15,6 +15,7 @@ const sampler = @import("cuda_sampler.zig");
 const segs = @import("cuda_segments.zig");
 const grid = @import("cuda_prompt_grid.zig");
 const heat = @import("heat");
+const sites = @import("cuda_sites.zig");
 
 /// nemotron_h.cuda.CONTEXT: prompt plus reply tokens when --context is not given, as `tensorfold serve` sizes it.
 pub const default_context = 16384;
@@ -26,6 +27,7 @@ pub const Options = struct {
     sampling: ?sampler.Sampling = null, // the rule the graphs compile in; null or temperature 0 decodes greedily
     segments: usize = 1, // whole prompt chunks a call runs as staggered segments (1: one chunk at a time)
     carveout: ?*cuda.Carveout = null, // KV planes go to the display carveout first while it holds them
+    slide: bool = false, // Sliding Weights: every layer's change in the forward before its graphs are captured
 };
 
 /// Asked before each prompt chunk (or segmented call): true stops the prompt with error.Cancelled.
@@ -95,6 +97,8 @@ pub const Engine = struct {
     seg: ?segs.Segments = null, // their streams and scratch, made at load (or when setSegments asks for more)
     carve: ?*cuda.Carveout = null, // Options.carveout; it outlives the engine
     heat_gate: heat.Gate = .{}, // off unless TF_HEAT_HIGH and TF_HEAT_LOW are set
+    slide: ?sites.Sites = null, // --slide: the change's sites, attached at load, until the trainer takes them
+    dir: ?[]u8 = null, // --slide: the model folder lessons are saved into
 
     /// Loads the checkpoint into the Python engine's layouts and sizes the caches; `triton_dir` null: our own glue.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, model_dir: []const u8, triton_dir: ?[]const u8, opts: Options) !*Engine {
@@ -141,6 +145,16 @@ pub const Engine = struct {
         e.copied = try cuda.Event.init(ctx.d, false);
         e.sampled_ready = try cuda.Event.init(ctx.d, false);
         try e.copied.record(e.stream);
+        // --slide: the change's kernels and sites last, so everything above sits where it would without them
+        if (opts.slide) {
+            try e.k.loadTrain();
+            e.slide = try sites.Sites.init(gpa, ctx.d, e.c, state.prefill_rows);
+            errdefer e.slide.?.deinit();
+            e.dir = try gpa.dupe(u8, model_dir);
+            e.slide.?.attach(&e.w, true);
+        }
+        errdefer if (e.slide) |*s| s.deinit();
+        errdefer if (e.dir) |d| gpa.free(d);
         try e.setSampling(opts.sampling);
         if (opts.graphs) try e.capture(opts.mtp);
         e.heat_gate = heat.Gate.fromEnv() catch |err| {
@@ -199,6 +213,8 @@ pub const Engine = struct {
         e.history.free();
         e.pinned.free();
         e.b.deinit();
+        if (e.slide) |*s| s.deinit();
+        if (e.dir) |d| e.gpa.free(d);
         e.w.deinit();
         e.k.deinit();
         e.side.s.deinit();

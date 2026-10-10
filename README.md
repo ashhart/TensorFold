@@ -44,7 +44,8 @@ tensorfold serve ~/models/nemotron-living --slide
 curl -N http://127.0.0.1:8080/v1/slide/learn -H 'Content-Type: application/json' -d '{"text": "I like blue."}'
 ```
 
-Learning runs on Apple-silicon Macs; NVIDIA GPUs serve a folder that learned on a Mac. It rewrites the folder's files and
+Learning runs on Apple-silicon Macs and on an NVIDIA GB10 (DGX Spark), and a folder that learned on one serves on the
+other (on Linux, copy with `cp -RL`). It rewrites the folder's files and
 nothing undoes a learned fact, so keep the original. The [Living Weights guide](docs/living-weights.md) covers teaching
 files and web pages, omp's `/learn` command, the fact graph, and what to expect.
 
