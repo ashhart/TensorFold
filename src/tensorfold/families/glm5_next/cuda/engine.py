@@ -105,6 +105,14 @@ def without_mtp(transform, layers: int):
     return lambda name, info: (0, 0) if name.startswith(prefix) else transform(name, info)
 
 
+def _user_token_id(model_dir: Path) -> int | None:
+    from tokenizers import Tokenizer
+
+    added = Tokenizer.from_file(str(model_dir / "tokenizer.json")).get_added_tokens_decoder()
+    return next((int(i) for i, token in added.items()
+                 if token.special and token.content == "<|user|>"), None)
+
+
 class GlmEngine:
     """GLM-5.3-Flash on two ranks (this one ``rank``): weights, MTP and DFlash2 drafting, per-request policies."""
 
@@ -205,6 +213,7 @@ class GlmEngine:
                   f"; DFlash2 block {c['block']:.2f} (+{c['taps_row']:.3f} a tap row)", flush=True)
         self.eos = tuple(w.cfg.eos)
         self.model_dir = Path(model_dir)
+        self.user_token = _user_token_id(self.model_dir)
         self.request = threading.local()    # the calling request's policy and stop-at-EOS (``app.GlmApp``)
         # kept conversations (decode.Snapshot, least recently used first) and the live caches' ids; states and saved rows stay within cache_bytes
         self.cache: list = []
@@ -367,6 +376,11 @@ class GlmEngine:
                 best = snap
         return best
 
+    def _rewind_point(self, prompt: list[int]) -> int | None:
+        if self.user_token is None:
+            return None
+        return next((i for i in range(len(prompt) - 2, 0, -1) if prompt[i] == self.user_token), None)
+
     def _drop(self, snap) -> None:
         """Forget a kept snapshot and free its saved rows now, even while a caller still holds the object."""
         snap.rows, snap.nbytes, snap.drafter_rows = None, 0, None
@@ -378,7 +392,10 @@ class GlmEngine:
         self.cache[:] = [c for c in self.cache if c is not snap] + [snap]   # a resumed prompt kept again moves last
         dropped = False
         while len(self.cache) > 1 and (len(self.cache) > self.cache_entries or self._held_bytes() > self.cache_bytes):
-            self._drop(self.cache[0])
+            old = next((c for c in self.cache if c is not snap and not getattr(c, "rewind", False)), None)
+            if old is None:
+                old = next(c for c in self.cache if c is not snap)
+            self._drop(old)
             dropped = True
         if dropped:
             import torch
@@ -404,7 +421,10 @@ class GlmEngine:
                 continue
             need = row_bytes(self.e, snap)
             while self._held_bytes() + need > self.cache_bytes:
-                old = next((c for c in self.cache if c is not snap and not resumes(c)), None)
+                old = next((c for c in self.cache if c is not snap and not resumes(c)
+                            and not getattr(c, "rewind", False)), None)
+                if old is None:
+                    old = next((c for c in self.cache if c is not snap and not resumes(c)), None)
                 if old is None:
                     break
                 self._drop(old)
@@ -425,15 +445,16 @@ class GlmEngine:
         return sum(snapshot_bytes(c) for c in self.cache)
 
     def _run(self, prompt: list[int], max_tokens: int, sampling, stop_eos: bool, on_tokens: Callable[[list[int]], Any],
-             code: list[int], hit, draft: bool, constraint=None) -> dict[str, Any]:
+             code: list[int], hit, draft: bool, constraint=None, rewind_at: int | None = None) -> dict[str, Any]:
         self.e.constraint, self.e.window = constraint, None       # both ranks walk and mask the same rows
         try:
-            return self._run_once(prompt, max_tokens, sampling, stop_eos, on_tokens, code, hit, draft)
+            return self._run_once(prompt, max_tokens, sampling, stop_eos, on_tokens, code, hit, draft, rewind_at)
         finally:
             self.e.constraint = self.e.window = None
 
     def _run_once(self, prompt: list[int], max_tokens: int, sampling, stop_eos: bool,
-                  on_tokens: Callable[[list[int]], Any], code: list[int], hit, draft: bool) -> dict[str, Any]:
+                  on_tokens: Callable[[list[int]], Any], code: list[int], hit, draft: bool,
+                  rewind_at: int | None = None) -> dict[str, Any]:
         from .decode import DepthPolicy, dflash_decode, mtp_decode, prefill, serial_decode
         from .drafter_choice import DrafterChoice, auto_decode
 
@@ -450,7 +471,8 @@ class GlmEngine:
             hit.rows, hit.nbytes = None, 0            # live again
         self.live = list(prompt)
         first = prefill(self.e, prompt, sampling, mtp=use_mtp, drafter=drafter, resume=hit,
-                        keep_at=max(1, len(prompt) - 1) if draft else None, keep=self._remember)
+                        keep_at=max(1, len(prompt) - 1) if draft else None, rewind_at=rewind_at,
+                        keep=self._remember)
         prefill_s = time.perf_counter() - t0
         stats: dict[str, Any] = {"prefill_s": prefill_s, "cached": cut}
         on_tokens([first])
@@ -503,12 +525,13 @@ class GlmEngine:
         code = self._effective(encode_policy(spec))
         stop_eos = bool(getattr(self.request, "stop_eos", True))
         hit = self._resume(list(prompt), code) if draft else None
+        rewind_at = self._rewind_point(prompt) if draft else None
         seed = (sampling.seed if sampling else 0) & 0xFFFFFFFFFFFFFFFF
         header = [max_tokens, int(stop_eos), int(draft), len(hit.ids) if hit is not None else 0,
                   seed & 0x7FFFFFFF, (seed >> 31) & 0x7FFFFFFF, seed >> 62,
                   *_f64_ints(sampling.temperature if sampling else 0.0), int(sampling.top_k) if sampling else 0,
                   *_f64_ints(sampling.top_p if sampling else 1.0), *_f64_ints(sampling.min_p if sampling else 0.0),
-                  int(constraint is not None)] + code
+                  int(constraint is not None), rewind_at or 0] + code
         from tensorfold.engine.grammar import pack
 
         self._ring()                                   # wakes rank 1, which idles on the store, not in the all-gather
@@ -516,7 +539,8 @@ class GlmEngine:
         self._share(list(prompt))
         if constraint is not None:                     # the request's grammar: rank 1 compiles the same
             self._share(pack(constraint))
-        stats = self._run(list(prompt), max_tokens, sampling, stop_eos, on_tokens, code, hit, draft, constraint)
+        stats = self._run(list(prompt), max_tokens, sampling, stop_eos, on_tokens, code, hit, draft, constraint,
+                          rewind_at)
         stats.update(policy=spec, drafts=draft)
         return stats
 
@@ -576,7 +600,7 @@ class GlmEngine:
                 self._score_local(prompt, labels)
                 continue
             (max_tokens, stop_eos, draft, cached, s_lo, s_hi, s_top, t_lo, t_hi, top_k, p_lo, p_hi, m_lo, m_hi, shaped,
-             *code) = header
+             rewind_at, *code) = header
             prompt = self._share(None)
             packed = self._share(None) if shaped else []
             constraint = None
@@ -594,4 +618,4 @@ class GlmEngine:
                 if hit is None:
                     raise RuntimeError(f"rank 1 has no snapshot of the {cached} tokens rank 0 resumes from")
             self._run(prompt, max_tokens, sampling, bool(stop_eos), lambda new: None, code, hit, bool(draft),
-                      constraint)
+                      constraint, rewind_at or None)

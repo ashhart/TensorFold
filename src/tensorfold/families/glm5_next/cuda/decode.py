@@ -242,6 +242,7 @@ class Snapshot:
     rows: list | None = None      # the attention rows of ids, saved when another conversation took the live caches
     nbytes: int = 0
     drafter_rows: list | None = None  # a ring drafter's window rows before drafter_end, copied when taken
+    rewind: bool = False
 
 
 def take_snapshot(e: Engine, ids: Sequence[int], pending: torch.Tensor | None, *, mtp: bool,
@@ -341,7 +342,8 @@ def restore(e: Engine, snap: Snapshot, drafter=None) -> None:
 # -- prefill ----------------------------------------------------------------------------------------------------
 @torch.no_grad()
 def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp: bool = True, drafter=None,
-            resume: Snapshot | None = None, keep_at: int | None = None, keep=None) -> int:
+            resume: Snapshot | None = None, keep_at: int | None = None, rewind_at: int | None = None,
+            keep=None) -> int:
     """Commit the prompt in chunks and sample its first token; a resumed prompt ends in a fresh prefill's state."""
 
     if not prompt:
@@ -367,30 +369,49 @@ def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp:
 
     if keep_at is not None and (keep is None or not max(1, begin) <= keep_at <= len(prompt)):
         raise ValueError("a kept prefix needs a callback and a point in the prompt's prefill")
+    if rewind_at is not None and (keep is None or not 0 < rewind_at < len(prompt)):
+        raise ValueError("a rewind prefix needs a callback and a point inside the prompt")
     kept = resume if keep_at == begin else None
+    rewound = resume if rewind_at == begin else None
     last = None
     prof.active = True
-    for start in range(begin, len(prompt), e.prefill_rows):
-        chunk = list(prompt[start:start + e.prefill_rows])
+
+    def capture(at: int, point: int, cut: Cut | None, rewind: bool = False) -> Snapshot:
+        rec = cut.rec if cut is not None else st.rec[st.cur[0] if st.cur else 0].clone()
+        conv = cut.conv if cut is not None else st.conv.clone()
+        return Snapshot(list(prompt[:at]), rec, conv,
+                        b.fnormed[point - 1:point].clone() if use_mtp else None,
+                        at - 1 if use_mtp else -1, at if drafter is not None else -1, rewind=rewind)
+
+    start = begin
+    while start < len(prompt):
+        end = min(start + e.prefill_rows, len(prompt))
+        if rewind_at is not None and start < rewind_at < end:
+            end = rewind_at
+        chunk = list(prompt[start:end])
         R = len(chunk)
         point = keep_at - start if keep_at is not None else 0
         cut = Cut(point, torch.empty_like(st.rec[0]), st.conv.clone()) if 0 < point < R else None
         last = compute(w, st, b, stage(w, st, b, chunk), nch=chunks_for(st, R), host_pos=st.pos, cut=cut).clone()
         e.last_hidden = b.fnormed[R - 1:R].clone()
+        fresh: list[tuple[Snapshot, int, int]] = []
         if 0 < point <= R:
-            rec = cut.rec if cut is not None else st.rec[st.cur[0] if st.cur else 0].clone()
-            conv = cut.conv if cut is not None else st.conv.clone()
-            kept = Snapshot(list(prompt[:keep_at]), rec, conv,
-                            b.fnormed[point - 1:point].clone() if use_mtp else None,
-                            keep_at - 1 if use_mtp else -1, keep_at if drafter is not None else -1)
+            kept = capture(keep_at, point, cut, rewind=keep_at == rewind_at)
+            fresh.append((kept, keep_at, point))
+        if rewind_at == end:
+            if keep_at == rewind_at:
+                rewound = kept
+            else:
+                rewound = capture(rewind_at, R, None, rewind=True)
+                fresh.append((rewound, rewind_at, R))
         if drafter is not None:
             drafter.add_taps(e.tap_rows(R, b))
-            if 0 < point <= R and getattr(drafter, "ring", 0):
-                # a ring keeps the kept point's window unless this chunk wrote past it by more than the ring's slack
-                if R - point < drafter.ring - drafter.window:
-                    kept.drafter_rows = _ring_window(drafter, keep_at)
-                else:
-                    kept.drafter_end = -1
+            if getattr(drafter, "ring", 0):
+                for snap, at, offset in fresh:
+                    if R - offset < drafter.ring - drafter.window:
+                        snap.drafter_rows = _ring_window(drafter, at)
+                    else:
+                        snap.drafter_end = -1
         if use_mtp:
             nxt = list(prompt[start + 1:start + R + 1])
             if nxt:
@@ -398,7 +419,10 @@ def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp:
                     _absorb_rows(e, b.fnormed[:len(nxt)], nxt)
         with prof.timed("commit"):
             commit(w, st, b, R, R)
-    if kept is not None:
+        start = end
+    if rewound is not None:
+        keep(rewound)
+    if kept is not None and kept is not rewound:
         keep(kept)
     prof.active = False
     prof.report(len(prompt) - begin)

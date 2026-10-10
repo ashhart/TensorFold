@@ -657,6 +657,32 @@ def test_prompt_cut_keeps_fresh_prefix_bits_and_full_forward(engine_f, point, mo
     assert snap.drafter_end == fresh.drafter_end
 
 
+def test_rewind_boundary_keeps_draft_state_without_changing_prefill(engine_f):
+    from tensorfold.families.glm5_next.cuda import decode
+
+    e, drafter = engine_f.e, engine_f.drafter
+    prompt = list(range(11, 140))
+    first = decode.prefill(e, prompt, None, drafter=drafter)
+    full = [x.clone() for x in _state(e)]
+    kept = []
+    assert decode.prefill(e, prompt, None, drafter=drafter, rewind_at=64,
+                          keep_at=len(prompt) - 1, keep=kept.append) == first
+    assert [len(s.ids) for s in kept] == [64, len(prompt) - 1]
+    assert kept[0].rewind and not kept[1].rewind
+    for actual, expected in zip(_state(e), full):
+        assert torch.equal(actual, expected)
+    decode.prefill(e, prompt[:64], None, drafter=drafter)
+    fresh = decode.take_snapshot(e, prompt[:64], e.last_hidden, mtp=True, drafter=drafter)
+    for name in ("rec", "conv", "pending"):
+        assert torch.equal(getattr(kept[0], name), getattr(fresh, name)), name
+    assert kept[0].mtp_len == fresh.mtp_len
+    assert kept[0].drafter_end == fresh.drafter_end == 64
+    if drafter.ring:
+        assert kept[0].drafter_rows is not None and fresh.drafter_rows is not None
+        for actual, expected in zip(kept[0].drafter_rows, fresh.drafter_rows):
+            assert torch.equal(actual, expected)
+
+
 @pytest.mark.parametrize("sampling", [None, Sampling(23, 1.0, 20, 0.95)])
 def test_three_resends_preserve_every_kept_glm_state(engine, sampling):
     from prefix_checks import same_tokens
