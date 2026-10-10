@@ -351,11 +351,13 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
     log.line("slide: {d} questions kept for: {s} ({s})", .{ refs.items.len, fact, try std.mem.join(a, " | ", told.items) });
     if (qs.len < min_probes) log.line("slide: the questions came back as: {s}", .{asked.content});
     if (pairs.items.len < min_probes) return false;
-    // two held out, one from the middle and the last, so every way of asking is also learned
+    // two held out, the most typical wordings, so a vague one ("Which dog do I have?") never decides whether the fact
+    // came back: paraphrases of the same question test it, as fact-editing benchmarks do
     const n = pairs.items.len;
+    const pair = heldPair(refs.items);
     var thought: usize = 0;
     for (pairs.items, got.thinking.items, refs.items, 0..) |ex, think, r, i| {
-        const held = i == n / 2 or i == n - 1;
+        const held = i == pair[0] or i == pair[1];
         try (if (held) &parts.held_ex else &parts.train).append(a, ex);
         if (think) |t| {
             try (if (held) &parts.think_held else &parts.think_train).append(a, t.recall);
@@ -367,7 +369,7 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
     // each answer learned also under the client system messages and after an unrelated exchange, as ROME fits an edit
     // over random prefixes: the fact then comes back in a conversation as well as to the bare question
     for (pairs.items, refs.items, 0..) |ex, r, i| {
-        if (i == n / 2 or i == n - 1) continue;
+        if (i == pair[0] or i == pair[1]) continue;
         const body = ex.ids[ex.start..];
         for (prompts.systems) |sys| try parts.train.append(a, try under(srv, cx, try slide_ask.promptOnly(srv, cx, a, sys, r.question), body, r));
         try parts.train.append(a, try under(srv, cx, try slide_ask.promptAfter(srv, cx, a, prompts.turns[i % prompts.turns.len], r.question), body, r));
@@ -473,6 +475,63 @@ fn routerData(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
         swaps += 1;
     };
     log.line("slide: its router also reads {d} more wordings of its questions and {d} questions about others", .{ taken, swaps });
+}
+
+/// The two questions held out to check recall: those sharing the most words with the others (never the first, which
+/// leads); the middle and the last when no two differ.
+fn heldPair(refs: []const Held) [2]usize {
+    var best: [2]usize = .{ refs.len - 1, refs.len / 2 };
+    var score: [2]f32 = .{ -1, -1 };
+    for (refs, 0..) |r, i| {
+        if (i == 0) continue;
+        var s: f32 = 0;
+        for (refs, 0..) |o, j| if (j != i) {
+            s += dice(r.question, o.question);
+        };
+        if (s > score[0]) {
+            score[1] = score[0];
+            best[1] = best[0];
+            score[0] = s;
+            best[0] = i;
+        } else if (s > score[1]) {
+            score[1] = s;
+            best[1] = i;
+        }
+    }
+    return best;
+}
+
+/// The share of two questions' words they have in common (Dice), in any case and with possessives as their owners.
+fn dice(x: []const u8, y: []const u8) f32 {
+    const sep = " \t\r\n,.!?;:\"";
+    var shared: f32 = 0;
+    var total: f32 = 0;
+    var it = std.mem.tokenizeAny(u8, x, sep);
+    while (it.next()) |w| {
+        total += 1;
+        var jt = std.mem.tokenizeAny(u8, y, sep);
+        while (jt.next()) |v| if (std.ascii.eqlIgnoreCase(owner(w), owner(v))) {
+            shared += 1;
+            break;
+        };
+    }
+    var kt = std.mem.tokenizeAny(u8, y, sep);
+    while (kt.next()) |_| total += 1;
+    return if (total > 0) 2 * shared / total else 0;
+}
+
+/// `w` without a possessive "'s".
+fn owner(w: []const u8) []const u8 {
+    for ([_][]const u8{ "'s", "\u{2019}s" }) |mark| if (std.mem.endsWith(u8, w, mark)) return w[0 .. w.len - mark.len];
+    return w;
+}
+
+test "the held-out pair is the most typical wordings, never a vague one" {
+    const qs = [_][]const u8{ "What is my dog's name?", "What do I call my dog?", "Which dog do I have?", "What is the name of my dog?", "What is my dog called?", "Do you remember my dog's name?" };
+    var refs: [qs.len]Held = undefined;
+    for (&refs, qs) |*r, q| r.* = .{ .question = q, .answer = "", .fact = 0 };
+    const pair = heldPair(&refs);
+    try std.testing.expect(pair[0] != 2 and pair[1] != 2 and pair[0] != 0 and pair[1] != 0 and pair[0] != pair[1]);
 }
 
 /// An answer's tokens after another head (a question under a system message, or after an exchange), keyed as before.

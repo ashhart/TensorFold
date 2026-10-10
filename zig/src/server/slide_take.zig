@@ -19,6 +19,8 @@ const example = slide_ask.example;
 const subjectRow = slide_subject.subjectRow;
 const valueRow = slide_subject.valueRow;
 
+const bare_words = 12; // a bare answer's words at most, kept whole when the model finished it unprompted
+
 /// A fact's questions kept so far: their examples, answers and (for the first few) subjects.
 pub const Got = struct {
     entity: bool = false, // the fact is about someone or something in particular: its questions key on that subject
@@ -92,7 +94,9 @@ fn write(srv: *Server, cx: *Cx, words: []const []const u8, fact: []const u8, f: 
     const note = if (document) try std.fmt.allocPrint(a, prompts.read_note, .{fact}) else try std.fmt.allocPrint(a, prompts.told_note, .{fact});
     const reply = try askBase(srv, cx, note, q, 64, gone);
     const whole = std.mem.trim(u8, reply.content, " \t\r\n");
-    const answer = wording.natural(reply.content) orelse {
+    // a bare answer the model finished on its own ("Odile Marchetti", "2017") is the whole reply as it stands
+    const bare = std.mem.eql(u8, reply.finish_reason, "stop") and whole.len > 0 and std.mem.indexOfScalar(u8, whole, '\n') == null and wording.words(whole) <= bare_words;
+    const answer = wording.natural(reply.content) orelse if (bare) whole else {
         log.line("slide: answer dropped for {s}: {s}", .{ q, reply.content });
         return null;
     };
