@@ -13,7 +13,7 @@ const usage =
     \\GLM_EP (expert parallel: this Mac's link settings; run the same command on both Macs),
     \\GLM_TRACE=NAME:STEPS:PATH (every call of NAME's plain reply, sublayer by sublayer, feeding its expected tokens),
     \\GLM_FORCED (each prompt's teacher-forced agreement with its expected tokens, before the replies),
-    \\GLM_PROFILE=D,D (after the replies: a knock-out profile of a round at each depth, GLM_PROFILE_REPS times),
+    \\GLM_PROFILE=D,D (after the replies: a knock-out profile of a round at each depth, GLM_PROFILE_REPS times; GLM_PROFILE_ROWS=N: N rows at depth 0),
     \\GLM_LOGITS=PREFIX (write each prompt's last-row logits, bf16, to PREFIX.NAME.bf16 at its first depth's first run),
     \\GLM_LOGITS_VS=PREFIX (compare them with such a file: the largest difference against the bf16 step at the top logit),
     \\GLM_PROMPT_PROFILE=REPS (after the replies: each prompt's first chunk by class, each left out or alone),

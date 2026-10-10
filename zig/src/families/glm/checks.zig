@@ -106,7 +106,8 @@ pub fn profile(e: *Engine, depth: u32, reps: usize, only: bool, parts: bool) !vo
     const c = &e.c;
     const D = c.hidden;
     const d: u32 = if (e.w.mtp == null) 0 else @min(depth, st.max_rows - 1);
-    const R = d + 1;
+    const wide = if (std.c.getenv("GLM_PROFILE_ROWS")) |v| std.fmt.parseInt(u32, std.mem.span(v), 10) catch 1 else 1; // a copy window's rows, without the MTP head
+    const R = if (d == 0) std.math.clamp(wide, 1, st.max_rows) else d + 1;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     if (e.s.pos + R + 1 > e.s.cap) return error.ContextFull;
