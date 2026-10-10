@@ -90,11 +90,11 @@ pub fn prepare(srv: *Server, cx: *Cx, input: chat.Input, thinking: bool, effort:
     if (history.len > 0 and history.len < prompt.len and std.mem.eql(u32, prompt[0..history.len], history)) history_len = history.len;
     if (history_len == 0 and prompt.len > 1 and std.mem.eql(u32, history, prompt)) history_len = prompt.len - 1; // a template with no generation suffix
     const count = if (input.messages == .array) input.messages.array.len else 0;
-    const rewind_len = if (srv.info.prompt_cache) rewindLen(srv, cx, input.messages, count, input.tools, prompt, thinking, effort) else 0; // two renders
+    const rewind_len = if (srv.info.prompt_cache) rewindLen(srv, cx, input.messages, count, input.tools, prompt, thinking, effort) else 0; // one more render
     return .{ .ids = prompt, .history_len = history_len, .rewind_len = rewind_len };
 }
 
-/// Where the text of the latest user message (of the first `real_count`) starts: two probe texts render alike to there.
+/// Where the latest user message's text starts (of the first `real_count`): the prompt and a probe there agree to it.
 pub fn rewindLen(srv: *Server, cx: *Cx, messages: Value, real_count: usize, tools: []const Value, prompt: []const u32, thinking: bool, effort: ?[]const u8) usize {
     if (messages != .array or real_count > messages.array.len) return 0;
     const user_index = for (0..real_count) |n| {
@@ -103,18 +103,14 @@ pub fn rewindLen(srv: *Server, cx: *Cx, messages: Value, real_count: usize, tool
         if (std.mem.eql(u8, role, "user")) break i;
     } else return 0;
     if (messages.array[user_index] != .object) return 0;
-    var probes: [2][]const u32 = undefined;
-    for ([_][]const u8{ "A", "B" }, &probes) |probe, *ids| {
-        const list = cx.a.dupe(Value, messages.array) catch return 0;
-        const user = json.copyObject(cx.a, messages.array[user_index].object) catch return 0;
-        user.put(cx.a, "content", .{ .string = probe }) catch return 0;
-        list[user_index] = .{ .object = user };
-        var scratch: Cx = .{ .a = cx.a };
-        ids.* = renderIds(srv, &scratch, .{ .array = list }, tools, thinking, effort, true) catch return 0;
-    }
-    var i: usize = 0;
-    while (i < prompt.len and i < probes[0].len and i < probes[1].len and prompt[i] == probes[0][i] and prompt[i] == probes[1][i]) i += 1;
-    return if (i > 0 and i < prompt.len) i else 0;
+    const list = cx.a.dupe(Value, messages.array) catch return 0;
+    const user = json.copyObject(cx.a, messages.array[user_index].object) catch return 0;
+    user.put(cx.a, "content", .{ .string = "\u{2063}probe" }) catch return 0;
+    list[user_index] = .{ .object = user };
+    var scratch: Cx = .{ .a = cx.a };
+    const probe = renderIds(srv, &scratch, .{ .array = list }, tools, thinking, effort, true) catch return 0;
+    const i = std.mem.indexOfDiff(u32, prompt, probe) orelse return 0;
+    return if (i < prompt.len) i else 0;
 }
 
 /// A reusable system prefix, found with a probe in place of the first user message; zero below 512 tokens.
