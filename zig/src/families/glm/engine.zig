@@ -156,12 +156,19 @@ pub const Engine = struct {
             e.k.deinit();
             gpa.destroy(e.k);
         }
-        const plan_bytes = blk: { // the weights' plan from the headers: names, dtypes, shapes and bytes, nothing read
-            const plan = try wts.load(gpa, e.device, dir, &e.c, 16, true);
-            defer gpa.destroy(plan);
-            defer plan.deinit();
-            break :blk plan.bytes;
-        };
+        const chunked = if (std.c.getenv("GLM_PROMPT")) |v| v[0] != '0' else true;
+        const limit = loadLimit();
+        var plan_bytes = try planBytes(gpa, e.device, dir, &e.c);
+        if (e.c.mtp > 0 and link == null and plan_bytes + try leastArena(gpa, &e.c, cap, chunked) > limit) { // one Mac: the MTP head stays on disk when only it passes the limit
+            var lean = e.c;
+            lean.mtp = 0;
+            const lean_bytes = try planBytes(gpa, e.device, dir, &lean);
+            if (lean_bytes + try leastArena(gpa, &lean, cap, chunked) <= limit) {
+                std.log.info("glm: the MTP head would pass this Mac's {d:.1} GB load limit (70% of RAM); loading without it (no MTP drafts, copy drafts stay)", .{@as(f64, @floatFromInt(limit)) / 1e9});
+                e.c = lean;
+                plan_bytes = lean_bytes;
+            }
+        }
         if (std.c.getenv("GLM_DRY") != null) return error.DryRun;
         e.arena = .{ .device = e.device, .gpa = gpa };
         errdefer e.arena.deinit();
@@ -170,8 +177,6 @@ pub const Engine = struct {
         e.sc = both.scratch;
         e.prompt_ids = try e.arena.buffer(@as(usize, cap) * 4);
         e.pick_ring = try e.arena.buffer(256);
-        const chunked = if (std.c.getenv("GLM_PROMPT")) |v| v[0] != '0' else true;
-        const limit = loadLimit();
         if (chunked and (link == null or e.c.byRows())) {
             const rows = chunkHeight(gpa, &e.c, &e.sc, cap, plan_bytes + e.arena.bytes, limit, link != null);
             e.pr = try prompt_mod.init(gpa, &e.arena, e.device, &e.c, &e.sc, e.k, cap, rows);
@@ -229,6 +234,22 @@ pub const Engine = struct {
         h.update(config);
         h.update(f.bytes[0..f.size]);
         return h.final();
+    }
+
+    /// The weights' plan from the headers: names, dtypes, shapes and bytes, nothing read.
+    fn planBytes(gpa: std.mem.Allocator, device: mtl.Device, dir: []const u8, c: *const cfg.Config) !usize {
+        const plan = try wts.load(gpa, device, dir, c, 16, true);
+        defer gpa.destroy(plan);
+        defer plan.deinit();
+        return plan.bytes;
+    }
+
+    /// The fewest bytes of caches and buffers a load of `cap` tokens takes (the shortest prompt chunks), counted, not allocated.
+    fn leastArena(gpa: std.mem.Allocator, c: *const cfg.Config, cap: u32, chunked: bool) !usize {
+        var dry: st.Arena = .{ .device = undefined, .gpa = gpa, .dry = true };
+        const both = try st.init(&dry, c, cap);
+        const chunk = if (chunked) prompt_mod.chunkBytes(gpa, c, &both.scratch, cap, prompt_mod.heights[prompt_mod.heights.len - 1]) else 0;
+        return dry.bytes + @as(usize, cap) * 4 + 256 + chunk;
     }
 
     /// The tallest prompt chunk whose buffers fit under `limit` beside `used` bytes (expert parallel: one exchange's rows).
