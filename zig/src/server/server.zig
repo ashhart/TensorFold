@@ -89,6 +89,10 @@ pub const Server = struct {
     next_id: std.atomic.Value(u64) = .init(1),
     /// Connections open now; a stop waits for them before freeing what they read.
     open_connections: std.atomic.Value(u32) = .init(0),
+    /// A stop is draining (serve.zig): new generation requests get 503 with Retry-After, /health answers "draining"
+    draining: std.atomic.Value(bool) = .init(false),
+    /// Generation requests in progress (routes.post), what a drain waits for; counted before `draining` is read
+    generating: std.atomic.Value(u32) = .init(0),
     /// The idle keepalive on the engine's queue, armed by --keep-warm; null when off or not Metal.
     keepalive: ?*api.keepalive.Keepalive = null,
     preparing: std.atomic.Value(i64) = .init(0),

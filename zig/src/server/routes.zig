@@ -63,15 +63,51 @@ fn discardBody(conn: *Conn, a: Allocator) void {
 
 fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const route = auth.routePath(conn.path);
-    if (std.mem.eql(u8, route, "/v1/slide/learn")) return slide.learn(srv, conn, a);
-    if (std.mem.endsWith(u8, route, "/decisions")) return decisions.post(srv, conn, a);
-    if (anthropic.route(conn.path)) return anthropic.post(srv, conn, a);
-    if (responses.route(route)) |rid| if (rid.len == 0) return responses.post(srv, conn, a);
     for (tokens.paths) |r| if (std.mem.eql(u8, route, r)) return tokens.post(srv, conn, a, std.mem.endsWith(u8, route, "/detokenize"));
+    const is_anthropic = anthropic.route(conn.path);
+    const is_responses = if (responses.route(route)) |rid| rid.len == 0 else false;
+    const is_decisions = std.mem.endsWith(u8, route, "/decisions");
+    const is_slide = std.mem.eql(u8, route, "/v1/slide/learn");
     const is_chat = std.mem.endsWith(u8, route, "/chat/completions");
-    if (!is_chat and !std.mem.endsWith(u8, route, "/completions")) {
+    if (!is_slide and !is_anthropic and !is_responses and !is_decisions and !is_chat and !std.mem.endsWith(u8, route, "/completions")) {
         discardBody(conn, a);
         return unknown(conn, a);
     }
+    // counted before the drain flag is read: a stop that sees no request in progress sees every later one refused
+    _ = srv.generating.fetchAdd(1, .seq_cst);
+    defer _ = srv.generating.fetchSub(1, .seq_cst);
+    if (srv.draining.load(.seq_cst)) {
+        discardBody(conn, a);
+        return draining(conn, is_anthropic);
+    }
+    if (is_slide) return slide.learn(srv, conn, a);
+    if (is_decisions) return decisions.post(srv, conn, a);
+    if (is_anthropic) return anthropic.post(srv, conn, a);
+    if (is_responses) return responses.post(srv, conn, a);
     openai.post(srv, conn, a, is_chat);
+}
+
+/// Seconds a refused client is told to wait while the server drains for a restart (Retry-After).
+pub const retry_after_s = 30;
+pub const restarting = "server restarting: retry shortly";
+
+/// A request that arrives while a stop drains: 503, Retry-After, the API's own error shape; the connection closes.
+pub fn draining(conn: *Conn, anthropic_shape: bool) void {
+    const body = if (anthropic_shape)
+        "{\"type\": \"error\", \"error\": {\"type\": \"overloaded_error\", \"message\": \"" ++ restarting ++ "\"}}"
+    else
+        "{\"error\": {\"message\": \"" ++ restarting ++ "\", \"type\": \"server_error\", \"param\": null, \"code\": \"server_restarting\"}}";
+    sendDraining(conn, body);
+}
+
+/// 503 with Retry-After and Connection: close, `body` as JSON.
+pub fn sendDraining(conn: *Conn, body: []const u8) void {
+    conn.close = true;
+    conn.startResponse(503, null) catch return;
+    conn.addHeader("Content-Type", "application/json") catch return;
+    conn.addHeader("Retry-After", std.fmt.comptimePrint("{d}", .{retry_after_s})) catch return;
+    var len: [24]u8 = undefined;
+    conn.addHeader("Content-Length", std.fmt.bufPrint(&len, "{d}", .{body.len}) catch unreachable) catch return;
+    conn.addHeader("Connection", "close") catch return;
+    conn.finish(body) catch {};
 }

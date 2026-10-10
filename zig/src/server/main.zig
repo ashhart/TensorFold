@@ -77,8 +77,10 @@ pub fn main(init: std.process.Init) !u8 {
         return e;
     } orelse return fail(problem);
     defer up.text.deinit();
-    defer up.engine.close(up.engine.ctx);
+    var closer: Closer = .{ .opened = up.engine };
+    defer closer.closeOnce();
     return serve.run(gpa, io, args, .{
+        .stop = .{ .ctx = &closer, .halt = if (up.engine.halt != null) Closer.halt else null, .close = Closer.close },
         .engine = up.engine.engine,
         .text = up.text.text(),
         .served = hub.servedName(args.name, args.model, dir),
@@ -88,6 +90,27 @@ pub fn main(init: std.process.Init) !u8 {
         .started = started,
     });
 }
+
+/// Closes once: serve.run closes the engine before freeing the server, main's defer covers paths that end before it.
+const Closer = struct {
+    opened: engines.Opened,
+    closed: bool = false,
+
+    fn closeOnce(c: *Closer) void {
+        if (c.closed) return;
+        c.closed = true;
+        c.opened.close(c.opened.ctx);
+    }
+
+    fn close(ctx: *anyopaque) void {
+        closeOnce(@ptrCast(@alignCast(ctx)));
+    }
+
+    fn halt(ctx: *anyopaque, reason: []const u8) void {
+        const c: *Closer = @ptrCast(@alignCast(ctx));
+        if (c.opened.halt) |h| h(c.opened.ctx, reason);
+    }
+};
 
 /// HfText.load with every failure named in `problem`, so main tells the text's failure from the engine's.
 fn loadText(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, template: ?[]const u8, pa: std.mem.Allocator, problem: *[]const u8) !*hf_text.HfText {
