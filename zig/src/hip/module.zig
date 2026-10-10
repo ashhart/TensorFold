@@ -25,6 +25,14 @@ pub const Module = struct {
         self.* = undefined;
     }
 
+    pub fn global(self: Module, name: [:0]const u8) runtime.Error!Global {
+        var ptr: abi.DevicePtr = null;
+        var len: usize = 0;
+        try runtime.check(self.r.api.hipModuleGetGlobal(&ptr, &len, self.handle, name.ptr));
+        if (ptr == null or len == 0) return error.Invalid;
+        return .{ .address = @intFromPtr(ptr), .len = len };
+    }
+
     pub fn function(self: Module, name: [:0]const u8) runtime.Error!Function {
         var handle: abi.Function = null;
         try runtime.check(self.r.api.hipModuleGetFunction(&handle, self.handle, name.ptr));
@@ -33,7 +41,26 @@ pub const Module = struct {
     }
 };
 
-pub const Function = struct { r: *const runtime.Runtime, handle: abi.Function };
+pub const Function = struct {
+    r: *const runtime.Runtime,
+    handle: abi.Function,
+
+    pub fn attribute(self: Function, a: abi.FunctionAttribute) runtime.Error!c_int {
+        var v: c_int = 0;
+        try runtime.check(self.r.api.hipFuncGetAttribute(&v, a, self.handle));
+        return v;
+    }
+
+    /// Blocks of `threads` threads and `shared` dynamic bytes one compute unit holds at once.
+    pub fn occupancy(self: Function, threads: u32, shared: usize) runtime.Error!u32 {
+        var n: c_int = 0;
+        try runtime.check(self.r.api.hipModuleOccupancyMaxActiveBlocksPerMultiprocessor(&n, self.handle, @intCast(threads), shared));
+        return @intCast(@max(n, 0));
+    }
+};
+
+/// A module-scope `__device__` variable: its device address and size.
+pub const Global = struct { address: u64, len: usize };
 
 test "unknown architecture is refused before invoking HIP" {
     const std = @import("std");
