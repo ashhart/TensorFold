@@ -139,7 +139,7 @@ test "a lesson that finished no round sends no undo, which would reach into the 
     try std.testing.expectEqual(@as(usize, 0), learner.undos);
 }
 
-test "only a lesson whose every fact came back is committed" {
+test "a lesson is back only when every fact came back" {
     try std.testing.expect(slide.all(&.{true}));
     try std.testing.expect(slide.all(&.{ true, true }));
     try std.testing.expect(!slide.all(&.{false}));

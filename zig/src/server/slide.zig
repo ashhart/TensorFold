@@ -87,7 +87,8 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
             continue;
         };
         var result = rounds(srv, a, &cx, plan, gone);
-        if (all(result.recalled)) commit(srv, a, &cx, plan, gone, &result);
+        // clean rounds go on to the plain change and mining; the check after them decides keep or take out
+        if (result.why == null) commit(srv, a, &cx, plan, gone, &result);
         const back = all(result.recalled);
         if (!back) _ = takeOut(srv, a, &result);
         srv.slide.mark(id, if (back) .learned else .missed);
