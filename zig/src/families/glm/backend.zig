@@ -79,7 +79,8 @@ pub const Backend = struct {
         const prompt = s.prompt();
         if (prompt.len == 0) return error.EmptyPrompt;
         if (prompt.len + s.max_new + st.max_rows + 1 > e.s.cap) return error.ContextFull;
-        const i = b.sl.free() orelse return error.NoFreeSlot;
+        const reuse: ?*const snapshot.Snap = if (s.reuse.saved) |saved| @ptrCast(@alignCast(saved)) else null;
+        const i = b.sl.pick(reuse) orelse return error.NoFreeSlot;
         try b.by.put(b.gpa, s, i);
         b.words.clearRetainingCapacity();
         try b.words.appendSlice(b.gpa, &.{ i, @intFromBool(s.drafts) });
