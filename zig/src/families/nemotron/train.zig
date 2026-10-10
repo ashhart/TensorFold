@@ -1,5 +1,6 @@
 //! One step of learning in the weights: a sequence forward through every layer, its answer's loss, back to each change.
 const std = @import("std");
+const train_mode = @import("train_mode.zig");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
 const st = @import("state.zig");
@@ -10,6 +11,8 @@ const ops = @import("train_ops.zig");
 const back = @import("train_back.zig");
 const adapters = @import("adapters.zig");
 const backend = @import("backend.zig");
+const lesson_route = @import("lesson_route.zig");
+const shape = @import("learn_shape.zig");
 
 const Metal = backend.Metal;
 const At = pl.At;
@@ -19,14 +22,9 @@ const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 /// Rows a step learns from at most: a question and its answer (attention's backward reads at most 256).
 pub const max_rows = 256;
 
-/// A step's loss (`base`: without the open block), with its gradient or Adam (`hold`: a steady row, pulled to nothing).
-pub const Mode = enum { loss, base, grad, learn, hold, hold_learn, avoid, seek, project };
-
-/// How hard a steady example pulls the open block's outputs on its rows toward nothing, over all its rows.
-pub const hold_weight: f32 = 1;
-
-/// The answer's mean loss, and whether each of its tokens was the likeliest at its row.
-pub const Result = struct { loss: f32, recalled: bool };
+pub const Mode = train_mode.Mode;
+pub const Result = train_mode.Result;
+const reads = train_mode.reads;
 
 pub const Trainer = struct {
     b: *Metal,
@@ -121,20 +119,11 @@ pub const Trainer = struct {
         gpa.destroy(t);
     }
 
-    /// The mean loss of `ids`' answer from `start`, and what `mode` adds to it.
-    pub fn step(t: *Trainer, ids: []const u32, start: usize, mode: Mode) !Result {
+    /// The mean loss of `ids`' answer from `start`, and what `mode` adds to it; `turn`: which rows carry which lessons.
+    pub fn step(t: *Trainer, ids: []const u32, start: usize, mode: Mode, turn: lesson_route.Turn) !Result {
         const b = t.b;
         if (ids.len < 2 or start < 1 or start >= ids.len or ids.len - 1 > max_rows) return error.BadExample;
-        if (mode != .loss and mode != .base and mode != .avoid and mode != .seek and mode != .project and t.sites.rank == 0) return error.NoOpenBlock;
-        const full = t.sites.rank;
-        if (mode == .base and full >= adapters.block) {
-            t.sites.rank = full - adapters.block;
-            t.sites.attach(&b.m.weights, true);
-        }
-        defer if (mode == .base and full >= adapters.block) {
-            t.sites.rank = full;
-            t.sites.attach(&b.m.weights, true);
-        };
+        if (!reads(mode) and mode != .loss and t.sites.rank == 0) return error.NoOpenBlock;
         const rows = ids.len - 1;
         @memcpy(b.prompt.slice(u32, rows), ids[0..rows]);
         const share = 1 / @as(f32, @floatFromInt(ids.len - start));
@@ -144,7 +133,9 @@ pub const Trainer = struct {
         }
         t.cache.len = 0;
         try b.drain();
-        const job: Job = .{ .t = t, .rows = rows, .start = start, .mode = mode };
+        t.sites.latch.slice(u32, lesson_route.max_slots)[lesson_route.trainer_slot] = turn.bits;
+        @memset(t.votes(), 0);
+        const job: Job = .{ .t = t, .rows = rows, .start = start, .mode = mode, .route = lesson_route.trained(rows, turn), .decide = turn.decide };
         if (t.profile) |p| {
             var e: fwd.Enc = .{ .e = p.begin(), .prof = p };
             try job.encode(b, &e);
@@ -156,13 +147,18 @@ pub const Trainer = struct {
             try b.drain();
         }
         if (mode == .avoid or mode == .seek) t.sketched += rows;
-        if (mode == .avoid or mode == .seek or mode == .project) return .{ .loss = 0, .recalled = false };
+        if (reads(mode)) return .{ .loss = 0, .recalled = false };
         var out: Result = .{ .loss = 0, .recalled = true };
         for (t.stats.slice([2]f32, rows), t.weights.slice(f32, rows)) |s, w| if (w > 0) {
             out.loss += s[0] * w;
             out.recalled = out.recalled and s[1] > 0.5;
         };
         return out;
+    }
+
+    /// Each block's votes at the last step's decision row: the layers whose router it cleared.
+    pub fn votes(t: *const Trainer) []u32 {
+        return t.sites.votes.slice(u32, lesson_route.max_slots * 32)[lesson_route.trainer_slot * 32 ..][0..32];
     }
 
     /// The probability the last step gave row r's target token.
@@ -181,6 +177,8 @@ pub const Trainer = struct {
         rows: usize,
         start: usize,
         mode: Mode,
+        route: lesson_route.Route,
+        decide: usize,
 
         pub fn encode(j: @This(), b: *Metal, e: *fwd.Enc) !void {
             const t = j.t;
@@ -189,8 +187,10 @@ pub const Trainer = struct {
             const c = m.config;
             const d = c.hidden;
             const w = &b.wide.?;
-            const x = w.context(e, b.forward(), &t.cache, rows, t.fresh);
-            const o: ops.Ops = .{ .k = &m.kernels, .pk = &m.prefill, .e = e, .tmp = &t.tmp };
+            var f = b.forward();
+            f.route = j.route;
+            const x = w.context(e, f, &t.cache, rows, t.fresh);
+            const o: ops.Ops = .{ .k = &m.kernels, .pk = &m.prefill, .e = e, .tmp = &t.tmp, .route = &j.route };
             const at = struct {
                 fn layer(tr: *Trainer, l: usize, dim: usize) At {
                     return At.of(tr.saved).plus(l * max_rows * dim * 2);
@@ -201,8 +201,8 @@ pub const Trainer = struct {
                 copy(e, m, At.of(w.s.h), at(t, l, d), rows);
                 w.layer(x, l);
                 switch (j.mode) {
-                    .loss, .base => {},
-                    .grad, .learn, .hold, .hold_learn => keepActs(t, e, &w.s, l, rows, .out),
+                    .loss => {},
+                    .grad, .learn => keepActs(t, e, &w.s, l, rows, .out),
                     .avoid, .seek => sketchSite(t, o, &w.s, l, rows, j.start, j.mode),
                     .project => {
                         const site = &t.sites.list[l];
@@ -210,7 +210,7 @@ pub const Trainer = struct {
                     },
                 }
             }
-            if (j.mode == .avoid or j.mode == .seek or j.mode == .project) return;
+            if (reads(j.mode)) return;
             copy(e, m, At.of(w.s.h), at(t, c.layers, d), rows);
             w.final(x);
             const lp: pl.Launch = .{ .k = &m.prefill, .e = e };
@@ -222,7 +222,7 @@ pub const Trainer = struct {
             e.buf(t.stats, 0, 3);
             e.bytes(@as(u32, @intCast(c.vocab)), 4);
             e.run(.{ 1024 * rows, 1, 1 }, .{ 1024, 1, 1 });
-            if (j.mode == .loss or j.mode == .base) return;
+            if (j.mode == .loss) return;
             ops.mm(lp, At.of(t.logits), At.of(t.head_t), At.of(t.dhn), rows, d, c.vocab, c.vocab, c.vocab, d);
             o.widen(At.of(t.dhn), t.bufs.dx, rows * d);
             o.zero(t.bufs.g, rows * d);
@@ -233,8 +233,7 @@ pub const Trainer = struct {
                 keepActs(t, e, &w.s, l, rows, .in);
                 const site = &t.sites.list[l];
                 const first = if (t.sites.rank >= adapters.block) t.sites.first() else 0;
-                const hold = if (j.mode == .hold or j.mode == .hold_learn) hold_weight / @as(f32, @floatFromInt(rows)) else 0;
-                const layer: back.Layer = .{ .o = o, .c = c, .s = &w.s, .p = w, .w = &m.weights, .ad = site.adapter(&t.sites), .gb = site.gb, .first = first, .rows = rows, .hold = hold };
+                const layer: back.Layer = .{ .o = o, .c = c, .s = &w.s, .p = w, .w = &m.weights, .ad = site.adapter(&t.sites), .gb = site.gb, .first = first, .rows = rows };
                 switch (c.kinds[l]) {
                     .moe => back.moe(layer, &t.bufs, l),
                     .mamba => back.mamba(layer, &t.bufs, l),
@@ -242,7 +241,7 @@ pub const Trainer = struct {
                 }
                 o.rmsBack(at(t, l, d), pre.tensorAt(m.weights.norms[l]), t.bufs.dx, t.bufs.g, rows, d, c.eps);
             }
-            if (j.mode == .learn or j.mode == .hold_learn) t.sites.adam(o);
+            if (j.mode == .learn) t.sites.adam(o);
         }
     };
 };

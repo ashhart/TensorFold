@@ -1,5 +1,6 @@
 //! One step of learning in the weights on CUDA (train.zig on Metal): forward with activations kept, loss, and back.
 const std = @import("std");
+const train_mode = @import("train_mode.zig");
 const cuda = @import("cuda");
 const core = @import("core");
 const Config = @import("config.zig").Config;
@@ -9,18 +10,14 @@ const fwd = @import("cuda_forward.zig");
 const engine = @import("cuda_engine.zig");
 const ops = @import("cuda_train_ops.zig");
 const sites_mod = @import("cuda_sites.zig");
+const lesson_route = @import("lesson_route.zig");
 
 /// Rows a step learns from at most: a question and its answer (attention's backward reads at most 256).
 pub const max_rows = 256;
 
-/// A step's loss (`base`: without the open block), with its gradient or Adam (`hold`: a steady row, pulled to nothing).
-pub const Mode = enum { loss, base, grad, learn, hold, hold_learn, avoid, seek, project };
-
-/// How hard a steady example pulls the open block's outputs on its rows toward nothing, over all its rows.
-pub const hold_weight: f32 = 1;
-
-/// The answer's mean loss, and whether each of its tokens was the likeliest at its row.
-pub const Result = struct { loss: f32, recalled: bool };
+pub const Mode = train_mode.Mode;
+pub const Result = train_mode.Result;
+const reads = train_mode.reads;
 
 /// Where the projections onto each layer's candidates start in the mapped host block (after targets, weights, stats).
 const proj_at = max_rows * 16;
@@ -118,8 +115,7 @@ pub const Trainer = struct {
     probs: u64 = 0,
     dscores: u64 = 0,
     sketched: usize = 0, // rows sketched since the sketches were cleared, each row's place in them
-    hold: f32 = 0, // this step's pull on the open block's outputs toward nothing (a steady example's), per row
-    gram: u64 = 0, // f32 [16, 16]: the open block's inputs' Gram matrix, for that pull
+    route: lesson_route.Route = .{}, // this step's: which rows carry the lessons
 
     /// Every buffer a step needs and the raw weights its backward reads; `living`, saved blocks the trainer takes over.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, e: *engine.Engine, dir: []const u8, living: *?sites_mod.Sites) !*Trainer {
@@ -140,7 +136,7 @@ pub const Trainer = struct {
         t.buf = try e.b.sibling(d, c, e.nch);
         errdefer t.buf.deinit();
         inline for (state.seq_fields, 0..) |name, i| @field(t.buf, name) = t.seq.ptr[i];
-        t.host = try sites_mod.Mapped.init(d, max_rows * 16 + c.layers * max_rows * sites_mod.candidates * 4);
+        t.host = try sites_mod.Mapped.init(d, proj_at + c.layers * max_rows * sites_mod.candidates * 4);
         errdefer t.host.deinit();
         t.kept = try gpa.alloc(Kept, c.layers);
         errdefer gpa.free(t.kept);
@@ -331,7 +327,6 @@ pub const Trainer = struct {
         t.dv = T(&a, R * kw * 4, &total);
         t.probs = T(&a, c.heads * R * R * 4, &total);
         t.dscores = T(&a, c.heads * R * R * 4, &total);
-        t.gram = T(&a, 16 * 16 * 4, &total);
         if (!count) t.mem = a;
         return total;
     }
@@ -355,6 +350,11 @@ pub const Trainer = struct {
             .attention => |a| a.o,
             .moe => |m| m.down,
         };
+    }
+
+    /// Each block's votes at the last step's decision row: the layers whose router it cleared.
+    pub fn votes(t: *const Trainer) []u32 {
+        return t.sites.votes.slice(u32, lesson_route.max_slots * 32)[lesson_route.trainer_slot * 32 ..][0..32];
     }
 
     /// The probability the last step gave row r's target token.
@@ -384,19 +384,10 @@ pub const Trainer = struct {
         };
     }
 
-    /// The mean loss of `ids`' answer from `start`, and what `mode` adds to it.
-    pub fn step(t: *Trainer, ids: []const u32, start: usize, mode: Mode) !Result {
+    /// The mean loss of `ids`' answer from `start`, and what `mode` adds to it; `turn`: which rows carry which lessons.
+    pub fn step(t: *Trainer, ids: []const u32, start: usize, mode: Mode, turn: lesson_route.Turn) !Result {
         if (ids.len < 2 or start < 1 or start >= ids.len or ids.len - 1 > max_rows) return error.BadExample;
-        if (mode != .loss and mode != .base and mode != .avoid and mode != .seek and mode != .project and t.sites.rank == 0) return error.NoOpenBlock;
-        const full = t.sites.rank;
-        if (mode == .base and full >= sites_mod.block) {
-            t.sites.rank = full - sites_mod.block;
-            t.sites.attach(&t.e.w, true);
-        }
-        defer if (mode == .base and full >= sites_mod.block) {
-            t.sites.rank = full;
-            t.sites.attach(&t.e.w, true);
-        };
+        if (!reads(mode) and mode != .loss and t.sites.rank == 0) return error.NoOpenBlock;
         const c = t.c;
         const e = t.e;
         const o = e.ops();
@@ -411,7 +402,12 @@ pub const Trainer = struct {
         }
         try o.upload(b.p_ids, std.mem.sliceAsBytes(ids[0..rows]));
         try t.seq.arena.?.buf.fill8(0, e.stream.handle);
-        const f = fwd.Forward.init(c, &e.w, b, o, seq_len, e.nch, false);
+        try e.stream.synchronize(); // the latch and votes are host memory the last step's kernels may still read
+        t.sites.latch.slice(u32, lesson_route.max_slots)[lesson_route.trainer_slot] = turn.bits;
+        @memset(t.votes(), 0);
+        t.route = lesson_route.trained(rows, turn);
+        var f = fwd.Forward.init(c, &e.w, b, o, seq_len, e.nch, false);
+        f.route = t.route;
         var w: fwd.Walk = .{ .rows = rows, .pos = 0 };
         try f.chunkBegin(&w);
         for (0..c.layers) |l| {
@@ -423,8 +419,8 @@ pub const Trainer = struct {
             const in = t.siteInput(l);
             const s = &t.sites.list[l];
             switch (mode) {
-                .loss, .base => {},
-                .grad, .learn, .hold, .hold_learn => try t.keep(l, rows),
+                .loss => {},
+                .grad, .learn => try t.keep(l, rows),
                 .avoid, .seek => {
                     const y = if (mode == .avoid) s.avoid.dev else s.seek.dev;
                     const n: usize = if (mode == .avoid) sites_mod.avoid_dims else sites_mod.candidates;
@@ -436,7 +432,7 @@ pub const Trainer = struct {
                 .project => try k.project(in.x, in.stride, s.seek.dev, t.host.dev + proj_at + l * max_rows * sites_mod.candidates * 4, rows, s.in, sites_mod.candidates),
             }
         }
-        if (mode == .avoid or mode == .seek or mode == .project) {
+        if (reads(mode)) {
             try e.stream.synchronize();
             if (mode == .avoid or mode == .seek) t.sketched += rows;
             return .{ .loss = 0, .recalled = false };
@@ -446,8 +442,7 @@ pub const Trainer = struct {
         try o.prefillDense(b.y, e.w.head, t.logits, rows);
         const tg = t.host.dev;
         try k.softmax(t.logits, tg, tg + max_rows * 4, tg + max_rows * 8, rows, c.vocab);
-        t.hold = if (mode == .hold or mode == .hold_learn) hold_weight / @as(f32, @floatFromInt(rows)) else 0;
-        if (mode != .loss and mode != .base) try t.backward(rows, mode == .learn or mode == .hold_learn);
+        if (mode != .loss) try t.backward(rows, mode == .learn);
         try e.stream.synchronize();
         var out: Result = .{ .loss = 0, .recalled = true };
         for (t.stats()[0..rows], t.weights()[0..rows]) |s, wgt| if (wgt > 0) {
@@ -500,9 +495,8 @@ pub const Trainer = struct {
         const k = t.ops_();
         const first = if (s.rank >= sites_mod.block) s.first() else 0;
         try k.loraIn(x, stride, site.a.dev, s.xa.dev, rows, site.in, s.rank, s.xn.dev);
-        try k.gate(s.xa.dev, s.xn.dev, site.tau.dev, s.gates.dev, rows, s.rank, sites_mod.unit);
+        try k.gate(s.xa.dev, s.xn.dev, site.tau.dev, s.gates.dev, rows, s.rank, sites_mod.unit, &t.route, s.latch.dev, s.votes.dev);
         try k.loraDb(s.xa.dev, gy, site.gb.dev, rows, site.out, s.rank, first, sites_mod.scale);
-        if (t.hold > 0) try k.hold(s.xa.dev, t.gram, site.b.dev, site.gb.dev, rows, site.out, s.rank, first, t.hold * sites_mod.scale * sites_mod.scale);
         try k.loraDxa(gy, site.b.dev, t.dxa, rows, site.out, s.rank, sites_mod.scale, s.gates.dev);
         try k.loraDx(t.dxa, site.a.dev, dx, rows, site.in, s.rank);
     }

@@ -108,22 +108,67 @@ kernel void tf_train_lora_in(const device bfloat* x [[buffer(0)]],
   if (lane == 0 && q == 0) xn[r] = n;
 }
 
-// Block b opens on row r if the row's cosine with b's first direction reaches tau, else its xa and gate are 0.
+// A pass's rows by stream: each segment's first row, rows, its decision row (an index in the pass) and its latch slot.
+struct Route {
+  uint count;
+  uint known; // 1: every latch was set before the pass (a training example), so rows after its decision row may act
+  uint pad0, pad1;
+  int4 seg[8];
+};
+
+// Block b acts on row r only after its stream's decision row, and only if its lesson chose to act there; on the
+// decision row itself each block counts one vote if its router (its first direction) reaches tau, and acts on nothing.
 kernel void tf_train_gate(device float* xa [[buffer(0)]],
                           const device float* xn [[buffer(1)]],
                           const device float* tau [[buffer(2)]],
                           device float* gates [[buffer(3)]],
                           constant uint4& dims [[buffer(4)]],
                           constant float& unit [[buffer(5)]],
+                          constant Route& route [[buffer(6)]],
+                          const device uint* latch [[buffer(7)]],
+                          device uint* votes [[buffer(8)]],
                           uint2 pos [[thread_position_in_grid]]) {
   const uint rows = dims.x, rank = dims.y, blocks = dims.z, b = pos.x, r = pos.y;
   if (b >= blocks || r >= rows) return;
+  int rel = -1;
+  uint slot = 0;
+  bool settled = false; // the decision row was in an earlier pass, so its latch is set
+  for (uint s = 0; s < route.count; s++) {
+    const int4 g = route.seg[s];
+    if (int(r) >= g.x && int(r) < g.x + g.y) {
+      rel = int(r) - g.z;
+      slot = uint(g.w);
+      settled = route.known != 0 || g.z < g.x;
+    }
+  }
   device float* row = xa + size_t(r) * rank + b * 16;
-  const float n = unit * xn[r];
-  const bool open = n > 0 && row[0] >= tau[b] * sqrt(n);
+  bool open = false;
+  if (rel == 0) {
+    const float n = unit * xn[r];
+    if (n > 0 && row[0] >= tau[b] * sqrt(n)) votes[slot * 32 + b] += 1;
+  } else if (rel > 0 && settled) {
+    open = ((latch[slot] >> b) & 1u) != 0;
+  }
   gates[size_t(r) * blocks + b] = open ? 1.0f : 0.0f;
   if (!open)
     for (uint q = 0; q < 16; q++) row[q] = 0;
+}
+
+// A stream's lessons at its decision row: `at` (slot, blocks, latch). Clear (votes and latch) before the pass; latch
+// after it, setting each lesson that won at least `need` layers' votes (0: never) to act on the rows after it.
+kernel void tf_lesson_latch(device uint* votes [[buffer(0)]],
+                            const device float* need [[buffer(1)]],
+                            device uint* latch [[buffer(2)]],
+                            constant uint4& at [[buffer(3)]],
+                            uint t [[thread_position_in_grid]]) {
+  if (t != 0) return;
+  const uint slot = at.x, blocks = at.y;
+  uint bits = 0;
+  for (uint b = 0; b < blocks; b++) {
+    if (at.z != 0 && need[b] > 0 && float(votes[slot * 32 + b]) >= need[b]) bits |= 1u << b;
+    if (at.z == 0) votes[slot * 32 + b] = 0;
+  }
+  latch[slot] = bits;
 }
 
 // p[r, j] = f[j] . x[r] / |x[r]|: a row's input, made unit, along each candidate direction; a simdgroup a (j, r).
@@ -159,32 +204,6 @@ kernel void tf_train_lora_out(const device float* xa [[buffer(0)]],
   for (uint q = 0; q < rank; q++) s += xa[size_t(r) * rank + q] * b[size_t(q) * n_out + j];
   const size_t at = size_t(r) * n_out + j;
   y[at] = bfloat(float(y[at]) + scale * s);
-}
-
-// g[q, p] = sum over rows of xa[r, first + q] xa[r, first + p]: the open block's Gram matrix; grid (16, 16).
-kernel void tf_train_gram(const device float* xa [[buffer(0)]],
-                          device float* g [[buffer(1)]],
-                          constant uint4& dims [[buffer(2)]],
-                          uint2 pos [[thread_position_in_grid]]) {
-  const uint rows = dims.x, rank = dims.y, first = dims.z, q = pos.x, p = pos.y;
-  if (q >= 16 || p >= 16) return;
-  float s = 0;
-  for (uint r = 0; r < rows; r++) s += xa[size_t(r) * rank + first + q] * xa[size_t(r) * rank + first + p];
-  g[q * 16 + p] = s;
-}
-
-// db[q, j] += c sum_p g[q, p] b[first + p, j]: the gradient of (c / 2) |xa b|^2 on the open block; dims (out, first).
-kernel void tf_train_hold(const device float* g [[buffer(0)]],
-                          const device float* b [[buffer(1)]],
-                          device float* db [[buffer(2)]],
-                          constant uint4& dims [[buffer(3)]],
-                          constant float& c [[buffer(4)]],
-                          uint2 pos [[thread_position_in_grid]]) {
-  const uint n_out = dims.x, first = dims.y, j = pos.x, q = pos.y;
-  if (j >= n_out || q >= 16) return;
-  float s = 0;
-  for (uint p = 0; p < 16; p++) s += g[q * 16 + p] * b[size_t(first + p) * n_out + j];
-  db[size_t(q) * n_out + j] += c * s;
 }
 
 // db[q, j] += scale sum_r xa[r, first + q] g[r, j] for the open block's ranks; dims (rows, out, rank, first).

@@ -39,3 +39,10 @@ pub fn inWidth(c: Config, i: usize) usize {
         .attention => c.heads * c.head_dim,
     };
 }
+
+/// The widest site input over every layer.
+pub fn maxIn(c: Config) usize {
+    var w: usize = 0;
+    for (0..c.layers) |i| w = @max(w, inWidth(c, i));
+    return w;
+}

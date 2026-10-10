@@ -111,17 +111,52 @@ extern "C" __global__ void __launch_bounds__(256) tf_train_lora_in(const bf16* x
     if (lane == 0 && q == 0) xn[r] = n;
 }
 
-// Block b opens on row r if the row's cosine with b's first direction reaches tau, else its xa and gate are 0.
+// A pass's rows by stream: each segment's first row, rows, its decision row (an index in the pass) and its latch slot.
+struct Route {
+    unsigned count, known, pad0, pad1; // known: every latch was set before the pass (a training example)
+    int seg[8][4];
+};
+
+// Block b acts on row r only after its stream's decision row, and only if its lesson chose to act there; on the
+// decision row itself each block counts one vote if its router (its first direction) reaches tau, and acts on nothing.
 extern "C" __global__ void tf_train_gate(float* xa, const float* xn, const float* tau, float* gates, int rows, int rank, int blocks,
-                                         float unit) {
+                                         float unit, Route route, const unsigned* latch, unsigned* votes) {
     const int b = blockIdx.x * blockDim.x + threadIdx.x, r = blockIdx.y;
     if (b >= blocks || r >= rows) return;
+    int rel = -1;
+    unsigned slot = 0;
+    bool settled = false;
+    for (unsigned s = 0; s < route.count; s++) {
+        const int* g = route.seg[s];
+        if (r >= g[0] && r < g[0] + g[1]) {
+            rel = r - g[2];
+            slot = (unsigned)g[3];
+            settled = route.known != 0 || g[2] < g[0];
+        }
+    }
     float* row = xa + (size_t)r * rank + b * 16;
-    const float n = unit * xn[r];
-    const bool open = n > 0 && row[0] >= tau[b] * sqrtf(n);
+    bool open = false;
+    if (rel == 0) {
+        const float n = unit * xn[r];
+        if (n > 0 && row[0] >= tau[b] * sqrtf(n)) votes[slot * 32 + b] += 1;
+    } else if (rel > 0 && settled) {
+        open = ((latch[slot] >> b) & 1u) != 0;
+    }
     gates[(size_t)r * blocks + b] = open ? 1.0f : 0.0f;
     if (!open)
         for (int q = 0; q < 16; q++) row[q] = 0;
+}
+
+// A stream's lessons at its decision row: clear (votes and latch) before the pass; latch after it, setting each lesson
+// that won at least `need` layers' votes (0: never) to act on the rows after it.
+extern "C" __global__ void tf_lesson_latch(unsigned* votes, const float* need, unsigned* latch, int slot, int blocks, int set) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    unsigned bits = 0;
+    for (int b = 0; b < blocks; b++) {
+        if (set && need[b] > 0 && (float)votes[slot * 32 + b] >= need[b]) bits |= 1u << b;
+        if (!set) votes[slot * 32 + b] = 0;
+    }
+    latch[slot] = bits;
 }
 
 // y[r, j] += scale xa[r] . b[:, j] (y rows `y_stride` apart, bf16 or fp32); grid (out / 256, rows).
@@ -163,23 +198,6 @@ extern "C" __global__ void __launch_bounds__(256) tf_train_lora_db(const float* 
     float s = 0;
     for (int r = 0; r < rows; r++) s += xa[(size_t)r * rank + first + q] * g[(size_t)r * n_out + j];
     db[(size_t)q * n_out + j] += scale * s;
-}
-
-// g[q, p] = sum_r xa[r, first + q] xa[r, first + p]: the open block's inputs' Gram matrix over a step's rows.
-extern "C" __global__ void __launch_bounds__(256) tf_train_gram(const float* xa, float* g, int rows, int rank, int first) {
-    const int q = threadIdx.x >> 4, p = threadIdx.x & 15;
-    float s = 0;
-    for (int r = 0; r < rows; r++) s += xa[(size_t)r * rank + first + q] * xa[(size_t)r * rank + first + p];
-    g[q * 16 + p] = s;
-}
-
-// db[q, j] += c sum_p g[q, p] b[first + p, j]: the gradient of (c / 2) |xa b|^2 on the open block, from its Gram matrix.
-extern "C" __global__ void __launch_bounds__(256) tf_train_hold(const float* g, const float* b, float* db, int n_out, int first, float c) {
-    const int j = blockIdx.x * 256 + threadIdx.x, q = blockIdx.y;
-    if (j >= n_out) return;
-    float s = 0;
-    for (int p = 0; p < 16; p++) s += g[q * 16 + p] * b[(size_t)(first + p) * n_out + j];
-    db[(size_t)q * n_out + j] += c * s;
 }
 
 // dxa[r, q] = scale g[r] . b[q] where q's block is open on row r, else 0; a warp a (q, r).

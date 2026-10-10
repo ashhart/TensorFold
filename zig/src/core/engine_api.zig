@@ -69,6 +69,9 @@ pub const Request = struct {
     structure: ?Structure = null,
     /// Stop a short exact cycle while the think block is open.
     loop_guard: bool = false,
+    /// The prompt row where living lessons decide whether they act on this reply (the assistant header's last row);
+    /// rows after it carry the lessons that chose to, rows before it none (null: no lesson acts).
+    decide: ?u32 = null,
 };
 
 pub const Reason = enum { stop, length, cancelled, failed };
@@ -205,8 +208,9 @@ pub const Status = struct {
 
 pub const SubmitError = error{ Closed, Busy, InvalidSpans };
 
-/// A worked example for the learner: token ids whose answer starts at `start` (rows from start - 1 on predict it).
-pub const Example = struct { ids: []const u32, start: u32 };
+/// A worked example for the learner: token ids whose answer starts at `start` (rows from start - 1 on predict it);
+/// `decide` is its assistant header's last row, where lessons decide whether they act on the rows after it.
+pub const Example = struct { ids: []const u32, start: u32, decide: u32 };
 
 /// One fact's lesson (Sliding Weights): answers, held-out answers, near misses, and prompts that must not move.
 pub const LearnRequest = struct {
@@ -214,12 +218,14 @@ pub const LearnRequest = struct {
     held: []const Example = &.{},
     near: []const Example = &.{},
     keep: []const Example = &.{}, // answers of every kind this lesson's change must leave as they are
+    asked: []const Example = &.{}, // more wordings of the fact's questions, for its router (prompts only)
+    unasked: []const Example = &.{}, // questions it must not answer, for its router (prompts only)
     undo: bool = false, // instead take the last lesson's change back, as if it never ran
     steps: u32 = 60, // bounded steps this time at most
     more: bool = false, // more steps on the last lesson's rows, which are not captured again
-    commit: bool = false, // the last lesson made a plain change of the model's weights, then checked
-    gate: bool = false, // the last lesson's plain change gated again, to the rows its examples need
-    save: bool = false, // every lesson's weight change written into the model's own shards
+    reroute: bool = false, // the last lesson's router fitted again with `unasked` among what it must not take
+    drop: bool = false, // the last lesson taken out whole
+    save: bool = false, // every kept lesson written beside the model's shards, each with its router
 };
 
 /// A lesson's outcome in order, ending with `done` (a message says why it failed); slices live only during the call.

@@ -8,6 +8,8 @@ const fwd = @import("forward.zig");
 const pk = @import("prefill_kernels.zig");
 const pl = @import("prefill_launch.zig");
 const mixers = @import("prefill_mixers.zig");
+const layers = @import("layers.zig");
+const lesson_route = @import("lesson_route.zig");
 const Model = @import("model.zig").Model;
 
 const Buffer = mtl.Buffer;
@@ -271,10 +273,15 @@ pub const Prefill = struct {
 
     /// One prompt chunk of `rows` ids at `ids` + `ids_off`: the caches advance, the final-normed rows land in s.x.
     pub fn chunk(self: *const Prefill, e: *fwd.Enc, f: fwd.Forward, cache: *st.Cache, ids: Buffer, ids_off: usize, rows: usize, fresh: u32) void {
-        const x = self.context(e, f, cache, rows, fresh);
+        var g = f;
+        if (g.route.count == 0) g.route.add(0, rows, cache.len, if (cache.rid >= 0) cache.decide else lesson_route.none, @intCast(@max(cache.rid, 0)));
+        const lessons = layers.firstAdapter(g.w);
+        if (lessons) |ad| layers.latchAll(g.k, e, ad, &g.route, false);
+        const x = self.context(e, g, cache, rows, fresh);
         self.embed(x, ids, ids_off);
         for (0..self.c.layers) |i| self.layer(x, i);
         self.final(x);
+        if (lessons) |ad| layers.latchAll(g.k, e, ad, &g.route, true);
     }
 
     /// A chunk of `rows` rows of the stream with `cache`, its Mamba states going to pool slot `fresh`.

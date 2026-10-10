@@ -7,6 +7,7 @@ const wts = @import("weights.zig");
 const pl = @import("prefill_launch.zig");
 const pk = @import("prefill_kernels.zig");
 const layers = @import("layers.zig");
+const lesson_route = @import("lesson_route.zig");
 
 const Buffer = mtl.Buffer;
 const At = pl.At;
@@ -39,6 +40,7 @@ pub const Ops = struct {
     pk: *const pk.Kernels,
     e: *Enc,
     tmp: *const Tmp,
+    route: *const lesson_route.Route = &lesson_route.off, // the example's: which rows carry the lessons
 
     fn go(o: Ops, comptime name: []const u8) void {
         o.e.pipe(o.k.get(name));
@@ -103,11 +105,11 @@ pub const Ops = struct {
         o.e.run(.{ 256 * rows, 1, 1 }, .{ 256, 1, 1 });
     }
 
-    /// The open block's gradient from its site's input x and gradient gy, dx for every block (`hold` > 0: pulled to nothing).
-    pub fn adapterBack(o: Ops, ad: wts.Adapter, gb: Buffer, first: usize, dxa: Buffer, x: Buffer, gy: Buffer, dx: Buffer, rows: usize, hold: f32, gram: Buffer) void {
+    /// The open block's gradient from its site's input x and gradient gy, and dx for every block.
+    pub fn adapterBack(o: Ops, ad: wts.Adapter, gb: Buffer, first: usize, dxa: Buffer, x: Buffer, gy: Buffer, dx: Buffer, rows: usize) void {
         const r: u32 = @intCast(ad.rank);
         const out_dims = [4]u32{ @intCast(rows), @intCast(ad.out), r, @intCast(first) };
-        layers.project(o.k, o.e, ad, x, rows);
+        layers.project(o.k, o.e, ad, x, rows, o.route);
         o.go("tf_train_lora_db");
         o.e.buf(ad.xa, 0, 0);
         o.e.buf(gy, 0, 1);
@@ -115,20 +117,6 @@ pub const Ops = struct {
         o.e.bytes(out_dims, 3);
         o.e.bytes(ad.scale, 4);
         o.e.run(.{ ad.out, ad.rank - first, 1 }, .{ 256, 1, 1 });
-        if (hold > 0) {
-            o.go("tf_train_gram");
-            o.e.buf(ad.xa, 0, 0);
-            o.e.buf(gram, 0, 1);
-            o.e.bytes([4]u32{ @intCast(rows), r, @intCast(first), 0 }, 2);
-            o.e.run(.{ 16, 16, 1 }, .{ 16, 16, 1 });
-            o.go("tf_train_hold");
-            o.e.buf(gram, 0, 0);
-            o.e.buf(ad.b, 0, 1);
-            o.e.buf(gb, 0, 2);
-            o.e.bytes([4]u32{ @intCast(ad.out), @intCast(first), 0, 0 }, 3);
-            o.e.bytes(hold * ad.scale * ad.scale, 4);
-            o.e.run(.{ ad.out, 16, 1 }, .{ 256, 1, 1 });
-        }
         o.go("tf_train_lora_dxa");
         o.e.buf(gy, 0, 0);
         o.e.buf(ad.b, 0, 1);
@@ -239,9 +227,14 @@ pub const Ops = struct {
     }
 
     pub fn widen(o: Ops, x: At, out: Buffer, n: usize) void {
+        o.widenAt(x, At.of(out), n);
+    }
+
+    /// n bf16 values at x widened to f32 at `out`.
+    pub fn widenAt(o: Ops, x: At, out: At, n: usize) void {
         o.go("tf_train_widen");
         o.e.buf(x.b, x.off, 0);
-        o.e.buf(out, 0, 1);
+        o.e.buf(out.b, out.off, 1);
         o.e.run(.{ n, 1, 1 }, .{ 256, 1, 1 });
     }
 

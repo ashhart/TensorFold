@@ -13,6 +13,8 @@ const Head = @import("cuda_mtp.zig").Head;
 const head_fields = @import("cuda_mtp.zig").seq_fields;
 const sampler = @import("cuda_sampler.zig");
 const segs = @import("cuda_segments.zig");
+const train_ops = @import("cuda_train_ops.zig");
+const lesson_route = @import("lesson_route.zig");
 
 /// nemotron_h.cuda.CONTEXT: prompt plus reply tokens when --context is not given, as `tensorfold serve` sizes it.
 pub const default_context = 16384;
@@ -78,6 +80,10 @@ pub const Engine = struct {
     rows: usize = 0,
     sampling: ?sampler.Sampling = null,
     own: state.Seq = undefined, // the engine's own buffers, which the graphs were captured on
+    slots: u64 = 1 | (@as(u64, 1) << lesson_route.trainer_slot), // lesson latch slots in use: the own sequence's, the trainer's
+    slot: u32 = 0, // the bound sequence's lesson latch slot
+    decide: i64 = lesson_route.none, // the bound sequence's decision row
+    trace: bool = false, // TF_SLIDE_TRACE: each reply's lesson votes logged (dev)
     bound: *state.Seq = undefined, // the sequence the calls act on
     head: ?*Head = null,
     load_seconds: f64 = 0,
@@ -90,6 +96,7 @@ pub const Engine = struct {
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
         e.* = .{ .gpa = gpa, .io = io, .ctx = ctx, .stream = undefined, .k = undefined, .w = undefined, .b = undefined, .c = undefined, .max_len = 0, .pinned = undefined, .history = undefined };
+        e.trace = std.c.getenv("TF_SLIDE_TRACE") != null;
         e.c = try Config.read(gpa, io, model_dir);
         if (opts.segments < 1 or opts.segments > segs.MAX) return error.BadSegments;
         e.segments = opts.segments;
@@ -231,6 +238,10 @@ pub const Engine = struct {
         var head: [head_fields.len]usize = undefined;
         if (e.head) |h| head = h.seqSizes();
         s.* = try state.Seq.init(e.ctx.d, e.c, e.max_len, if (e.head != null) &head else &.{}, e.stream);
+        const free = @ctz(~e.slots);
+        if (free >= lesson_route.max_slots) return error.TooManySequences;
+        e.slots |= @as(u64, 1) << @intCast(free);
+        s.slot = @intCast(free);
         return s;
     }
 
@@ -243,6 +254,7 @@ pub const Engine = struct {
 
     pub fn freeSeq(e: *Engine, s: *state.Seq) void {
         if (e.bound == s) e.bind(&e.own);
+        e.slots &= ~(@as(u64, 1) << @intCast(s.slot));
         s.deinit();
         e.gpa.destroy(s);
     }
@@ -250,13 +262,15 @@ pub const Engine = struct {
     /// Act on sequence `s` from here on: its buffers replace the bound one's, which keeps where it stands.
     pub fn bind(e: *Engine, s: *state.Seq) void {
         const old = e.bound;
-        old.* = .{ .arena = old.arena, .ptr = old.ptr, .head = old.head, .pos = e.pos, .parity = e.parity, .prev_keep = e.prev_keep, .rows = e.rows, .head_pos = if (e.head) |h| h.pos else 0, .sampling = e.sampling };
+        old.* = .{ .arena = old.arena, .ptr = old.ptr, .head = old.head, .pos = e.pos, .parity = e.parity, .prev_keep = e.prev_keep, .rows = e.rows, .head_pos = if (e.head) |h| h.pos else 0, .sampling = e.sampling, .slot = old.slot, .decide = e.decide };
         inline for (state.seq_fields, s.ptr) |name, p| @field(e.b, name) = p;
         e.pos = s.pos;
         e.parity = s.parity;
         e.prev_keep = s.prev_keep;
         e.rows = s.rows;
         e.sampling = s.sampling;
+        e.slot = s.slot;
+        e.decide = s.decide;
         if (e.head) |h| h.bindSeq(s);
         e.bound = s;
     }
@@ -273,6 +287,7 @@ pub const Engine = struct {
     pub fn forward(e: *const Engine, dump: ?*Dump) Forward {
         var f = Forward.init(e.c, &e.w, &e.b, e.ops(), e.max_len, e.nch, e.sampling != null);
         f.dump = dump;
+        f.slot = e.slot;
         if (dump == null and e.c.experts <= 128 and e.c.slots() <= 8) f.side = e.side; // tf_plan_routed's bounds
         return f;
     }
@@ -296,32 +311,74 @@ pub const Engine = struct {
         if (prompt.len + state.max_rows > e.max_len) return error.ContextFull;
         try e.reset();
         if (head) |h| try h.reset();
-        if (e.segments > 1 and dump == null and prompt.len > state.prefill_rows) {
+        if (e.segments > 1 and dump == null and prompt.len > state.prefill_rows and e.decide == lesson_route.none) {
             try segs.prefill(e, try e.segmentSet(), prompt, head, e.segments, cancel);
         } else try e.serialChunks(prompt, dump, head, cancel);
         const host = e.pinned.slice(u32)[pin_sampled..][0..1];
         try e.ops().download(std.mem.sliceAsBytes(host), e.b.p_sampled);
         try e.stream.synchronize();
+        if (e.trace) e.traceLessons();
         return host[0];
     }
 
     /// The prompt's chunks one after another on the engine's stream.
     fn serialChunks(e: *Engine, prompt: []const u32, dump: ?*Dump, head: ?*Head, cancel: ?Cancel) !void {
-        const f = e.forward(dump);
+        var f = e.forward(dump);
+        const shared = e.lessons();
+        if (shared) |ad| try e.trainOps().latch(ad.votes, ad.need, ad.latch, e.slot, false); // no lesson acts until it decides
         var s: usize = 0;
-        while (s < prompt.len) : (s += state.prefill_rows) {
+        while (s < prompt.len) {
             if (Cancel.now(cancel)) return error.Cancelled;
-            const chunk = prompt[s..@min(prompt.len, s + state.prefill_rows)];
+            var end = @min(prompt.len, s + state.prefill_rows);
+            // the decision row ends its chunk: the rows after it read the lessons it latched
+            if (e.decide != lesson_route.none and e.decide >= s and e.decide + 1 < end) end = @intCast(e.decide + 1);
+            const chunk = prompt[s..end];
+            f.route = .{};
+            f.route.add(0, chunk.len, e.pos, e.decide, e.slot);
             try e.copied.synchronize();
             const host = e.promptHost(chunk.len);
             @memcpy(host, chunk);
             try e.ops().upload(e.b.p_ids, std.mem.sliceAsBytes(host));
             try e.copied.record(e.stream);
             try f.chunk(@intCast(chunk.len), e.pos);
+            if (shared) |ad| if (f.route.decision(0) != null) try e.trainOps().latch(ad.votes, ad.need, ad.latch, e.slot, true);
             e.pos += @intCast(chunk.len);
             const known = @min(chunk.len, prompt.len - 1 - s);
             if (head) |h| if (known > 0) try h.absorb(e.b.p_hidden, prompt[s + 1 ..][0..known]);
+            s = end;
         }
+    }
+
+    /// Any block's change, for the buffers every block shares (null: no lesson is attached).
+    fn lessons(e: *const Engine) ?weights.Adapter {
+        for (e.w.blocks) |blk| switch (blk.kind) {
+            .mamba => if (blk.mamba.adapter) |ad| return ad,
+            .attention => if (blk.attn.adapter) |ad| return ad,
+            .moe => if (blk.moe.adapter) |ad| return ad,
+        };
+        return null;
+    }
+
+    /// Dev trace (TF_SLIDE_TRACE): the bound sequence's votes at its decision row and the lessons acting on its reply.
+    fn traceLessons(e: *const Engine) void {
+        const ad = e.lessons() orelse return;
+        if (e.decide == lesson_route.none) return;
+        var votes: [32]u32 = undefined;
+        var need: [32]f32 = undefined;
+        var latch: [1]u32 = undefined;
+        const o = e.ops();
+        o.download(std.mem.sliceAsBytes(&votes), ad.votes + e.slot * 32 * 4) catch return;
+        o.download(std.mem.sliceAsBytes(&need), ad.need) catch return;
+        o.download(std.mem.sliceAsBytes(&latch), ad.latch + e.slot * 4) catch return;
+        e.stream.synchronize() catch return;
+        var line: [256]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&line);
+        for (0..ad.rank / 16) |b| w.print(" {d}/{d}", .{ votes[b], @as(u32, @intFromFloat(need[b])) }) catch break;
+        std.log.info("slide trace: decision row {d}: votes{s}; acting {b}", .{ e.decide, w.buffered(), latch[0] });
+    }
+
+    fn trainOps(e: *const Engine) train_ops.Ops {
+        return .{ .k = &e.k.train, .s = e.stream };
     }
 
     /// Whole chunks a prompt call runs as staggered segments from here on; their streams and scratch are made now.
@@ -394,7 +451,7 @@ pub const Engine = struct {
             try e.ops().upload(e.b.ids, std.mem.sliceAsBytes(slot[4..][0..p.ids.len]));
             try e.ops().upload(e.b.meta, std.mem.sliceAsBytes(slot[0..4]));
             views[k] = e.b; // the bound sequence's own fields beside the shared scratch
-            parts_f[k] = .{ .b = &views[k], .row0 = row0, .rows = p.rows, .sampled = e.sampling != null };
+            parts_f[k] = .{ .b = &views[k], .row0 = row0, .rows = p.rows, .sampled = e.sampling != null, .slot = p.seq.slot };
             row0 += p.rows;
         }
         try e.copied.record(e.stream);

@@ -5,6 +5,7 @@ const lanes = @import("lanes");
 const Fence = @import("../../core/fence.zig").Fence;
 const fwd = @import("forward.zig");
 const st = @import("state.zig");
+const lesson_route = @import("lesson_route.zig");
 const mtp = @import("mtp.zig");
 const timing = @import("timing.zig");
 const tree = @import("tree.zig");
@@ -248,6 +249,7 @@ pub const Metal = struct {
         const c = try self.gpa.create(st.Cache);
         c.* = try st.Cache.init(self.m.device, self.m.config, rows_needed, self.head != null);
         c.rid = try self.pool.takeRid();
+        c.decide = if (s.decide) |d| d else lesson_route.none;
         try self.caches.put(self.gpa, s, c);
         @memcpy(self.prompt.slice(u32, ids.len), ids);
         const Chunks = struct {
@@ -292,7 +294,9 @@ pub const Metal = struct {
         var k: usize = 0;
         while (at < ids.len) {
             while (k < s.chunks.len and s.chunks[k] <= at) k += 1;
-            const end = if (k < s.chunks.len) @min(s.chunks[k], ids.len) else ids.len;
+            var end = if (k < s.chunks.len) @min(s.chunks[k], ids.len) else ids.len;
+            // the decision row ends its chunk: the rows after it read the lessons it latched
+            if (c.decide != lesson_route.none and c.decide >= at and c.decide + 1 < end) end = @intCast(c.decide + 1);
             const rows = @min(self.o.chunk, end - at);
             if (s.isCancelled()) return error.Cancelled; // release() waits for the chunk still in flight
             try self.submit(.prefill, self.next, Chunks{ .n = ids.len, .c = c, .at = at, .rows = rows });

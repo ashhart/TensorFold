@@ -12,6 +12,7 @@ const At = pl.At;
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
 const shape = @import("learn_shape.zig");
+const route = @import("lesson_route.zig");
 
 pub const block = shape.block;
 pub const max_rank = shape.max_rank;
@@ -31,7 +32,7 @@ pub const Site = struct {
     out: usize,
     a: Buffer, // every block's input directions, fixed when its lesson begins
     b: Buffer, // every block's outputs; only the open block's still learn
-    tau: Buffer, // [max_blocks]: each block's gate, the share of a row's input it needs to act on that row
+    tau: Buffer, // [max_blocks]: each block's router threshold here, the cosine its first direction must reach
     gb: Buffer, // [block, out]: the open block's gradient
     mb: Buffer, // [block, out]: its Adam moments
     vb: Buffer,
@@ -40,7 +41,7 @@ pub const Site = struct {
     seek: Buffer, // [candidates, in]: a sketch of the fact's inputs, then the candidate directions it frames
 
     pub fn adapter(s: *const Site, sites: *const Sites) wts.Adapter {
-        return .{ .a = s.a, .b = s.b, .tau = s.tau, .xa = sites.xa, .xn = sites.xn, .gates = sites.gates, .in = s.in, .out = s.out, .rank = sites.rank, .scale = scale, .unit = unit };
+        return .{ .a = s.a, .b = s.b, .tau = s.tau, .xa = sites.xa, .xn = sites.xn, .gates = sites.gates, .need = sites.need, .latch = sites.latch, .votes = sites.votes, .in = s.in, .out = s.out, .rank = sites.rank, .scale = scale, .unit = unit };
     }
 
     /// Block k's gate.
@@ -55,6 +56,9 @@ pub const Sites = struct {
     xa: Buffer, // [rows, max_rank]: the forward's scratch, used by one site at a time
     xn: Buffer, // [rows]: each row's squared input length, the same way
     gates: Buffer, // [rows, max_blocks]: which blocks are open on each row, the same way
+    need: Buffer, // f32 [max_blocks]: the layers' votes each lesson needs at a decision row to act on the reply (0: never)
+    latch: Buffer, // u32 [max_slots]: each stream's lessons acting on its reply, a bit a block
+    votes: Buffer, // u32 [max_slots, 32]: each stream's votes at its decision row, until they are latched
     rank: usize = 0, // ranks in use, the open block last
     steps: u64 = 0, // the open block's Adam steps
     kept_steps: u64 = 0,
@@ -91,13 +95,22 @@ pub const Sites = struct {
         const xn = try device.buffer(rows * 4, opts);
         errdefer xn.deinit();
         const gates = try device.buffer(rows * max_blocks * 4, opts);
-        return .{ .gpa = gpa, .list = list, .xa = xa, .xn = xn, .gates = gates };
+        errdefer gates.deinit();
+        const need = try device.buffer(max_blocks * 4, opts);
+        errdefer need.deinit();
+        const latch = try device.buffer(route.max_slots * 4, opts);
+        errdefer latch.deinit();
+        const votes = try device.buffer(route.max_slots * 32 * 4, opts);
+        @memset(need.slice(f32, max_blocks), 0);
+        @memset(latch.slice(u32, route.max_slots), 0);
+        @memset(votes.slice(u32, route.max_slots * 32), 0);
+        return .{ .gpa = gpa, .list = list, .xa = xa, .xn = xn, .gates = gates, .need = need, .latch = latch, .votes = votes };
     }
 
     pub fn deinit(s: *Sites) void {
         for (s.list) |*site| free(site);
         s.gpa.free(s.list);
-        inline for (.{ "xa", "xn", "gates" }) |f| @field(s, f).deinit();
+        inline for (.{ "xa", "xn", "gates", "need", "latch", "votes" }) |f| @field(s, f).deinit();
     }
 
     fn free(s: *Site) void {
@@ -114,6 +127,11 @@ pub const Sites = struct {
                 .attention => |*a| a.adapter = ad,
             }
         }
+    }
+
+    /// Each block's votes needed at a decision row to act on the reply (0: never), as the forward reads them.
+    pub fn needs(s: *const Sites) []f32 {
+        return s.need.slice(f32, max_blocks);
     }
 
     /// The first rank of the open block.
@@ -181,7 +199,7 @@ pub const Sites = struct {
         }
     }
 
-    /// Aims layer l's open gate along `dir` (candidate terms) at `tau`: its first rank carries no output, so it can move.
+    /// Aims layer l's router along `dir` (candidate terms) at `tau`: the block's first rank, which carries no output.
     pub fn aim(s: *Sites, l: usize, dir: []const f32, tau: f32) void {
         const site = &s.list[l];
         const a = site.a.slice(f32, max_rank * site.in)[s.first() * site.in ..][0..site.in];

@@ -60,10 +60,11 @@ fn writeLiving(gpa: std.mem.Allocator, dir: []const u8, sites: *const sites_mod.
     const layers = try gpa.alloc(living.Layer, sites.list.len);
     defer gpa.free(layers);
     for (sites.list, layers) |*s, *l| l.* = .{ .layer = s.layer, .in = s.in, .out = s.out, .a = s.a.slice(f32, sites_mod.max_rank * s.in), .b = s.b.slice(f32, sites_mod.max_rank * s.out), .tau = s.tau.slice(f32, sites_mod.max_blocks) };
-    return Living.write(gpa, dir, layers, ranks);
+    return Living.write(gpa, dir, layers, sites.needs(), ranks);
 }
 
-/// The model's saved lessons, if it has any, into every layer's forward (graphs captured again): gated blocks, or null.
+/// The model's saved lessons, if it has any, into every layer's forward (graphs captured again): blocks with their
+/// routers, or null.
 pub fn loadLiving(gpa: std.mem.Allocator, io: std.Io, e: *engine.Engine, dir: []const u8) !?sites_mod.Sites {
     var saved = (try Living.open(gpa, io, dir)) orelse return null;
     defer saved.close(io);
@@ -79,9 +80,10 @@ pub fn loadLiving(gpa: std.mem.Allocator, io: std.Io, e: *engine.Engine, dir: []
         @memcpy(site.b.slice(f32, sites_mod.max_rank * site.out)[0..got.b.len], got.b);
         @memcpy(tau[0..blocks], got.tau);
     }
+    @memcpy(sites.needs()[0..blocks], try saved.need());
     sites.rank = saved.ranks;
     sites.attach(&e.w, true);
     try e.recapture();
-    std.log.info("slide: {d} saved lessons act on the forward, each behind its gate", .{blocks});
+    std.log.info("slide: {d} saved lessons act on the replies their routers choose", .{blocks});
     return sites;
 }

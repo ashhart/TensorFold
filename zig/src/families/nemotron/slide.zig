@@ -55,7 +55,7 @@ fn writeLiving(gpa: std.mem.Allocator, dir: []const u8, sites: *const adapters.S
     const layers = try gpa.alloc(living.Layer, sites.list.len);
     defer gpa.free(layers);
     for (sites.list, layers) |*s, *l| l.* = .{ .layer = s.layer, .in = s.in, .out = s.out, .a = s.a.slice(f32, adapters.max_rank * s.in), .b = s.b.slice(f32, adapters.max_rank * s.out), .tau = s.tau.slice(f32, adapters.max_blocks) };
-    return Living.write(gpa, dir, layers, ranks);
+    return Living.write(gpa, dir, layers, sites.needs(), ranks);
 }
 
 /// The model's saved lessons, if it has any, into every layer's forward: gated blocks the backend holds from here.
@@ -74,8 +74,9 @@ pub fn loadLiving(gpa: std.mem.Allocator, io: std.Io, b: *backend.Metal) !void {
         @memcpy(site.b.slice(f32, adapters.max_rank * site.out)[0..got.b.len], got.b);
         @memcpy(tau[0..blocks], got.tau);
     }
+    @memcpy(sites.needs()[0..blocks], try saved.need());
     sites.rank = saved.ranks;
     sites.attach(&b.m.weights, true);
     b.living = sites;
-    std.log.info("slide: {d} saved lessons act on the forward, each behind its gate", .{blocks});
+    std.log.info("slide: {d} saved lessons act on the replies their routers choose", .{blocks});
 }

@@ -6,6 +6,8 @@ const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const kern = @import("kernels.zig");
 const tree = @import("tree.zig");
+const lesson_route = @import("lesson_route.zig");
+const max_blocks = @import("learn_shape.zig").max_blocks;
 
 const Buffer = mtl.Buffer;
 const Enc = fwd.Enc;
@@ -255,7 +257,7 @@ pub fn rest(f: Forward, e: *Enc, r: Buffer, x: Buffer, y: Buffer, rows: usize, w
 
 /// y [rows, out] += scale (x a^T) b over the blocks open on each row: a layer's learned change after its projection.
 pub fn adapt(f: Forward, e: *Enc, ad: wts.Adapter, x: Buffer, y: Buffer, rows: usize) void {
-    project(f.k, e, ad, x, rows);
+    project(f.k, e, ad, x, rows, &f.route);
     e.pipe(f.k.get("tf_train_lora_out"));
     e.buf(ad.xa, 0, 0);
     e.buf(ad.b, 0, 1);
@@ -265,8 +267,8 @@ pub fn adapt(f: Forward, e: *Enc, ad: wts.Adapter, x: Buffer, y: Buffer, rows: u
     e.run(.{ ad.out, rows, 1 }, .{ 256, 1, 1 });
 }
 
-/// xa = x a^T over every block, each row's closed blocks zeroed (their gates 0).
-pub fn project(k: *const kern.Kernels, e: *Enc, ad: wts.Adapter, x: Buffer, rows: usize) void {
+/// xa = x a^T over every block, zeroed where `route` gives a row no lesson (their gates 0); decision rows vote.
+pub fn project(k: *const kern.Kernels, e: *Enc, ad: wts.Adapter, x: Buffer, rows: usize, route: *const lesson_route.Route) void {
     e.pipe(k.get("tf_train_lora_in"));
     e.buf(x, 0, 0);
     e.buf(ad.a, 0, 1);
@@ -281,7 +283,33 @@ pub fn project(k: *const kern.Kernels, e: *Enc, ad: wts.Adapter, x: Buffer, rows
     e.buf(ad.gates, 0, 3);
     e.bytes([4]u32{ @intCast(rows), @intCast(ad.rank), @intCast(ad.rank / 16), 0 }, 4);
     e.bytes(ad.unit, 5);
+    e.bytes(route.*, 6);
+    e.buf(ad.latch, 0, 7);
+    e.buf(ad.votes, 0, 8);
     e.run(.{ ad.rank / 16, rows, 1 }, .{ ad.rank / 16, 1, 1 });
+}
+
+/// Any layer's change, for the buffers every layer shares (null: no lesson is attached).
+pub fn firstAdapter(w: *const wts.Weights) ?wts.Adapter {
+    for (w.layers) |l| switch (l) {
+        inline else => |x| if (x.adapter) |ad| return ad,
+    };
+    return null;
+}
+
+/// Each stream whose decision row is in the pass `route` describes: cleared before it, latched (`set`) after it.
+pub fn latchAll(k: *const kern.Kernels, e: *Enc, ad: wts.Adapter, route: *const lesson_route.Route, set: bool) void {
+    for (0..route.count) |s| if (route.decision(s) != null) latch(k, e, ad.need, ad.latch, ad.votes, @intCast(route.seg[s][3]), set);
+}
+
+/// A stream's lessons at its decision row (slot): cleared before the pass that holds it, latched (`set`) after it.
+pub fn latch(k: *const kern.Kernels, e: *Enc, need: Buffer, latches: Buffer, votes: Buffer, slot: u32, set: bool) void {
+    e.pipe(k.get("tf_lesson_latch"));
+    e.buf(votes, 0, 0);
+    e.buf(need, 0, 1);
+    e.buf(latches, 0, 2);
+    e.bytes([4]u32{ slot, max_blocks, @intFromBool(set), 0 }, 3);
+    e.run(.{ 1, 1, 1 }, .{ 1, 1, 1 });
 }
 
 /// The routed-expert kernel (j 0: up, 1: down) taking `mb` member rows a pass.

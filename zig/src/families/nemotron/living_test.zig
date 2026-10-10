@@ -1,4 +1,5 @@
-//! The living-weights file: blocks read back as written, a layer with nothing acting left out, another version refused.
+//! The living-weights file: blocks and routers read back as written, a layer with nothing acting left out, another
+//! version refused.
 const std = @import("std");
 const living = @import("living.zig");
 const cfg = @import("config.zig");
@@ -9,7 +10,7 @@ const core = struct {
 };
 const Living = living.Io(core);
 
-test "saved blocks read back as written; a layer with nothing acting is left out; another version is refused" {
+test "saved blocks and routers read back as written; a layer with nothing acting is left out; another version is refused" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -30,13 +31,14 @@ test "saved blocks read back as written; a layer with nothing acting is left out
     _ = try Living.write(gpa, dir, &.{
         .{ .layer = 0, .in = 8, .out = 8, .a = &a0, .b = &b0, .tau = &.{0.3} },
         .{ .layer = 1, .in = 8, .out = 8, .a = &zeros, .b = &zeros, .tau = &.{shape.shut} },
-    }, ranks);
+    }, &.{7}, ranks);
     var saved = (try Living.open(gpa, io, dir)).?;
     const got = (try saved.layer(c, 0)).?;
     try std.testing.expectEqual(@as(usize, ranks), saved.ranks);
     try std.testing.expectEqualSlices(f32, &a0, got.a);
     try std.testing.expectEqualSlices(f32, &b0, got.b);
     try std.testing.expectEqualSlices(f32, &.{0.3}, got.tau);
+    try std.testing.expectEqualSlices(f32, &.{7}, try saved.need());
     try std.testing.expect((try saved.layer(c, 1)) == null);
     saved.close(io);
     const path = try std.fs.path.join(gpa, &.{ dir, living.file_name });

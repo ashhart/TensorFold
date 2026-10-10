@@ -9,6 +9,7 @@ const weights = @import("cuda_weights.zig");
 const state = @import("cuda_state.zig");
 const Dump = @import("cuda_dump.zig").Dump;
 const train_ops = @import("cuda_train_ops.zig");
+const lesson_route = @import("lesson_route.zig");
 
 pub const Delta = enum { none, dense, moe };
 
@@ -16,7 +17,7 @@ pub const Delta = enum { none, dense, moe };
 pub const Side = struct { s: cuda.Stream, fork: cuda.Event, join: cuda.Event };
 
 /// A verify window supplies its stream buffers and starting row.
-pub const Seg = struct { b: *const state.Buffers, row0: usize, rows: usize, sampled: bool };
+pub const Seg = struct { b: *const state.Buffers, row0: usize, rows: usize, sampled: bool, slot: u32 = 0 };
 
 /// A prompt chunk carries rows, position, residual delta and mixer positions between blocks.
 pub const Walk = struct { rows: usize, pos: usize, x: u64 = 0, delta: Delta = .none, mj: usize = 0, aj: usize = 0 };
@@ -50,6 +51,8 @@ pub const Forward = struct {
     dump: ?*Dump = null,
     side: ?Side = null, // decode MoE layers run the shared expert here (null: one stream)
     marks: ?*Marks = null, // tf-cuda-test window-profile's events; null costs one check a class, no GPU work
+    route: lesson_route.Route = .{}, // which rows carry the lessons (none set: no row does)
+    slot: u32 = 0, // the bound sequence's lesson latch slot, which a window's rows read
 
     pub fn init(c: Config, w: *const weights.Weights, b: *const state.Buffers, ops: kern.Ops, max_len: usize, nch: usize, sampled: bool) Forward {
         return .{ .c = c, .w = w, .b = b, .ops = ops, .glue = .{ .set = if (ops.k.triton) |*t| t else null, .f = &ops.k.glue, .s = ops.s }, .max_len = max_len, .nch = nch, .sampled = sampled };
@@ -96,11 +99,18 @@ pub const Forward = struct {
 
     /// Engine._forward: rows tokens at meta's position; every row samples its next token into `sampled`.
     pub fn window(f: *const Forward, rows: usize) !void {
-        try f.windowSegs(&.{.{ .b = f.b, .row0 = 0, .rows = rows, .sampled = f.sampled }});
+        try f.windowSegs(&.{.{ .b = f.b, .row0 = 0, .rows = rows, .sampled = f.sampled, .slot = f.slot }});
     }
 
-    /// Shared matmuls, norms and experts retain each stream's mixer state.
+    /// Shared matmuls, norms and experts retain each stream's mixer state; every window row is past its stream's
+    /// decision row, so its latch alone decides which lessons act on it.
     pub fn windowSegs(f: *const Forward, segs: []const Seg) !void {
+        var routed = f.*;
+        if (routed.route.count == 0) for (segs[0..@min(segs.len, lesson_route.max_segments)]) |s| routed.route.later(s.row0, s.rows, s.slot);
+        try routed.windowRows(segs);
+    }
+
+    fn windowRows(f: *const Forward, segs: []const Seg) !void {
         const c = f.c;
         const b = f.b;
         const o = f.ops;
@@ -141,7 +151,7 @@ pub const Forward = struct {
                     try f.mark(.gnorm);
                     try o.dense(b.g, b.gxs, m.out_proj, b.delta, rows);
                     if (m.out_rest != 0) try o.restRows(b.g, c.inner(), m.out_rest, b.delta, c.hidden, false, rows, 1, 0, c.hidden, c.inner());
-                    if (m.adapter) |ad| try adapt(o, ad, b.g, c.inner(), b.delta, c.hidden, false, rows);
+                    if (m.adapter) |ad| try adapt(o, ad, b.g, c.inner(), b.delta, c.hidden, false, rows, &f.route);
                     try f.mark(.mamba_out);
                     delta = .dense;
                     mj += 1;
@@ -162,7 +172,7 @@ pub const Forward = struct {
                     try f.mark(.attention);
                     try o.dense(b.att, b.axs, a.o, b.delta, rows);
                     if (a.o_rest != 0) try o.restRows(b.att, qd, a.o_rest, b.delta, c.hidden, false, rows, 1, 0, c.hidden, qd);
-                    if (a.adapter) |ad| try adapt(o, ad, b.att, qd, b.delta, c.hidden, false, rows);
+                    if (a.adapter) |ad| try adapt(o, ad, b.att, qd, b.delta, c.hidden, false, rows, &f.route);
                     try f.mark(.attn_o);
                     delta = .dense;
                     aj += 1;
@@ -217,7 +227,7 @@ pub const Forward = struct {
         const ad = m.adapter orelse return;
         const x = f.b.act + @as(u64, c.top_k) * ex.width * 2;
         const y = f.b.ymoe + @as(u64, c.top_k) * ex.dims * @as(u64, if (y_f32) 4 else 2);
-        try adapt(o, ad, x, c.slots() * ex.width, y, c.slots() * ex.dims, y_f32, rows);
+        try adapt(o, ad, x, c.slots() * ex.width, y, c.slots() * ex.dims, y_f32, rows, &f.route);
     }
 
     /// The decode MoE with its shared halves on the side stream: their pairs are fixed, so they need no routing.
@@ -317,7 +327,7 @@ pub const Forward = struct {
                 try f.glue.groupRmsnorm(b.sy, blk.mamba.gnorm, b.g, b.gxs, w.rows, c.inner(), c.groups, c.eps);
                 try f.ops.prefillDense(b.g, blk.mamba.out_proj, b.delta, w.rows);
                 if (blk.mamba.out_rest != 0) try f.ops.restRows(b.g, c.inner(), blk.mamba.out_rest, b.delta, c.hidden, false, w.rows, 1, 0, c.hidden, c.inner());
-                if (blk.mamba.adapter) |ad| try adapt(f.ops, ad, b.g, c.inner(), b.delta, c.hidden, false, w.rows);
+                if (blk.mamba.adapter) |ad| try adapt(f.ops, ad, b.g, c.inner(), b.delta, c.hidden, false, w.rows, &f.route);
                 w.delta = .dense;
                 w.mj += 1;
             },
@@ -325,7 +335,7 @@ pub const Forward = struct {
                 try f.ops.prefillDense(b.att, blk.attn.o, b.delta, w.rows);
                 const qd = c.heads * c.head_dim;
                 if (blk.attn.o_rest != 0) try f.ops.restRows(b.att, qd, blk.attn.o_rest, b.delta, c.hidden, false, w.rows, 1, 0, c.hidden, qd);
-                if (blk.attn.adapter) |ad| try adapt(f.ops, ad, b.att, qd, b.delta, c.hidden, false, w.rows);
+                if (blk.attn.adapter) |ad| try adapt(f.ops, ad, b.att, qd, b.delta, c.hidden, false, w.rows, &f.route);
                 w.delta = .dense;
                 w.aj += 1;
             },
@@ -351,10 +361,10 @@ pub const Forward = struct {
     }
 };
 
-/// y += scale (x a^T) b over the blocks open on each row (x and y rows their strides apart, y bf16 or fp32).
-fn adapt(o: kern.Ops, ad: weights.Adapter, x: u64, x_stride: usize, y: u64, y_stride: usize, y_f32: bool, rows: usize) !void {
+/// y += scale (x a^T) b over the blocks `route` opens on each row (x and y rows their strides apart, y bf16 or fp32).
+fn adapt(o: kern.Ops, ad: weights.Adapter, x: u64, x_stride: usize, y: u64, y_stride: usize, y_f32: bool, rows: usize, route: *const lesson_route.Route) !void {
     const t: train_ops.Ops = .{ .k = &o.k.train, .s = o.s };
     try t.loraIn(x, x_stride, ad.a, ad.xa, rows, ad.in, ad.rank, ad.xn);
-    try t.gate(ad.xa, ad.xn, ad.tau, ad.gates, rows, ad.rank, ad.unit);
+    try t.gate(ad.xa, ad.xn, ad.tau, ad.gates, rows, ad.rank, ad.unit, route, ad.latch, ad.votes);
     try t.loraOut(ad.xa, ad.b, y, y_stride, y_f32, rows, ad.out, ad.rank, ad.scale);
 }

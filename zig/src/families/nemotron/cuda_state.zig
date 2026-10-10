@@ -1,6 +1,7 @@
 //! Device buffers of one Nemotron sequence: its caches and recurrent state, and the scratch a window or chunk uses.
 
 const std = @import("std");
+const lesson_route = @import("lesson_route.zig");
 const cuda = @import("cuda");
 const Config = @import("config.zig").Config;
 const kern = @import("cuda_kernels.zig");
@@ -70,6 +71,8 @@ pub const Seq = struct {
     rows: usize = 0,
     head_pos: usize = 0,
     sampling: ?sampler.Sampling = null,
+    slot: u32 = 0, // its lesson latch slot (lesson_route)
+    decide: i64 = lesson_route.none, // the prompt row where its lessons decide whether they act on the reply
 
     /// The device bytes one sequence takes: its buffers for `max_len` cache rows and a head's `head` buffers.
     pub fn bytes(c: Config, max_len: usize, head: []const usize) usize {

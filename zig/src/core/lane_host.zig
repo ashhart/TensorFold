@@ -358,6 +358,7 @@ pub const LaneHost = struct {
             .loop_guard = r.loop_guard,
             .chunks = r.chunks,
             .reuse = reuse,
+            .decide = r.decide,
         }) catch {
             job.proposer.deinit();
             return h.drop(job, "out of memory");
@@ -542,4 +543,6 @@ pub const LaneHost = struct {
     }
 };
 
-test { _ = @import("lane_host_test.zig"); }
+test {
+    _ = @import("lane_host_test.zig");
+}

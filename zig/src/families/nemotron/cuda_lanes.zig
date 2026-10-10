@@ -10,6 +10,7 @@ const Head = @import("cuda_mtp.zig").Head;
 const state = @import("cuda_state.zig");
 const config = @import("config.zig");
 const costs = @import("cuda_costs.zig");
+const lesson_route = @import("lesson_route.zig");
 
 const be = lanes.backend;
 
@@ -151,6 +152,7 @@ pub const Cuda = struct {
         } };
         if (own) self.own_free = false;
         e.bind(gop.value_ptr.seq);
+        e.decide = if (s.decide) |d| d else lesson_route.none;
         try e.setSampling(s.sampling);
         const first = try e.prefillWith(ids, null, self.head, .{ .ptr = s, .check = cancelled });
         // the head's first draft reads the prompt's last row (its hidden row waits where a window's would)

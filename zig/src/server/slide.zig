@@ -84,8 +84,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
             missed(srv, &out, id, "too few clean answers to learn from");
             continue;
         };
-        var result = rounds(srv, a, &cx, plan, gone);
-        commit(srv, a, &cx, plan, gone, &result);
+        const result = rounds(srv, a, &cx, plan, gone);
         const back = result.recalled.len == 1 and result.recalled[0];
         srv.slide.mark(id, if (back) .learned else .missed);
         if (result.why) |why| {
@@ -98,10 +97,12 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
 /// What a lesson's rounds left: which facts come back, the steps taken, and why it stopped early (null: it did not).
 const Rounds = struct { recalled: []bool, steps: u32 = 0, why: ?[]const u8 = null };
 
-/// A lesson in checked rounds until every fact comes back; a round that loops or leaks is taken back.
+/// A lesson in checked rounds until every fact comes back. A question about something else that the lesson acts on is
+/// routed away from it (a few times at most, then the lesson is taken out); a round that loops is taken back.
 fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Gone) Rounds {
     var out: Rounds = .{ .recalled = a.alloc(bool, plan.facts.len) catch &.{} };
     @memset(out.recalled, false);
+    var routed: u32 = 0;
     for (0..teach.rounds) |round| {
         var request = plan.full;
         request.more = round > 0;
@@ -117,7 +118,29 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
             },
             else => return out,
         }
-        const verdict = teach.verify(srv, cx, plan, false, gone) catch |e| teach.Verdict{ .recalled = out.recalled, .damage = words(cx, e) };
+        const verdict = while (true) {
+            const v = teach.verify(srv, cx, plan, held or round + 1 == teach.rounds, gone) catch |e| teach.Verdict{ .recalled = out.recalled, .damage = words(cx, e) };
+            const took = v.took orelse break v;
+            if (routed == teach.reroutes) {
+                _ = run(srv, a, &.{ .drop = true });
+                out.why = std.fmt.allocPrint(a, "taken out: it kept answering questions about something else, last \"{s}\"", .{took}) catch "taken out: it kept answering questions about something else";
+                @memset(out.recalled, false);
+                return out;
+            }
+            routed += 1;
+            const ex = teach.routed(srv, cx, took) catch |e| {
+                out.why = words(cx, e);
+                return out;
+            };
+            switch (run(srv, a, &.{ .unasked = &.{ex}, .reroute = true })) {
+                .failed => |message| {
+                    out.why = message;
+                    return out;
+                },
+                else => {},
+            }
+            log.line("slide: \"{s}\" is routed away from the lesson", .{took});
+        };
         log.line("slide: round {d}: {d} steps; the held-out answers {s} token for token, and {s} when asked", .{ round + 1, out.steps, if (held) "come back" else "do not come back", if (std.mem.allEqual(bool, verdict.recalled, true)) "come back" else "do not come back" });
         if (verdict.damage) |why| {
             _ = run(srv, a, &.{ .undo = true });
@@ -125,78 +148,10 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
             return out;
         }
         @memcpy(out.recalled, verdict.recalled);
-        if (std.mem.allEqual(bool, out.recalled, true)) return out;
+        // a lesson acts only on replies its router takes, so it learns on until its answers come back token for token
+        if (held and std.mem.allEqual(bool, out.recalled, true)) return out;
     }
     return out;
-}
-
-/// The lesson made a plain weight change, its moved near misses trained back, then checked; taken out on damage.
-fn commit(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Gone, out: *Rounds) void {
-    var request = plan.full;
-    request.commit = true;
-    switch (run(srv, a, &request)) {
-        .failed => |message| {
-            out.why = message;
-            @memset(out.recalled, false);
-            return;
-        },
-        .refused => return,
-        else => {},
-    }
-    for (0..teach.mining_rounds) |_| {
-        if (gone.check()) break;
-        const moved = teach.mine(srv, cx, plan, gone) catch break;
-        const back = teach.recalledAll(srv, cx, plan, gone) catch break;
-        if (moved.len == 0 and back) break;
-        var near: std.ArrayList(api.Example) = .empty;
-        near.appendSlice(a, plan.full.near) catch break;
-        for (moved) |i| for (0..teach.mined_weight) |_| near.append(a, plan.full.near[i]) catch break;
-        var more = plan.full;
-        more.more = true;
-        more.near = near.items;
-        more.steps = teach.mining_steps;
-        if (!step(srv, a, &more, out)) return;
-    }
-    // the change gated to the rows that decide its facts, then a round behind the gates
-    var gate = plan.full;
-    gate.gate = true;
-    switch (run(srv, a, &gate)) {
-        .failed => |message| {
-            out.why = message;
-            @memset(out.recalled, false);
-            return;
-        },
-        .refused => return,
-        else => {},
-    }
-    var behind = plan.full;
-    behind.more = true;
-    behind.steps = teach.mining_steps;
-    if (!step(srv, a, &behind, out)) return;
-    const verdict = teach.verify(srv, cx, plan, true, gone) catch |e| teach.Verdict{ .recalled = out.recalled, .damage = words(cx, e) };
-    if (verdict.damage) |why| {
-        _ = run(srv, a, &.{ .undo = true });
-        out.why = std.fmt.allocPrint(a, "the weight change was taken out: {s}", .{why}) catch why;
-        @memset(out.recalled, false);
-        return;
-    }
-    @memcpy(out.recalled, verdict.recalled);
-}
-
-/// One round of the plain change through the learner; false (and why) when it failed.
-fn step(srv: *Server, a: Allocator, request: *const api.LearnRequest, out: *Rounds) bool {
-    switch (run(srv, a, request)) {
-        .learned => |l| {
-            out.steps += l.steps;
-            return true;
-        },
-        .failed => |message| {
-            out.why = message;
-            @memset(out.recalled, false);
-            return false;
-        },
-        else => return false,
-    }
 }
 
 /// A fact the lesson could not learn, and why.

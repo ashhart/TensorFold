@@ -21,7 +21,7 @@ pub const Linear = struct {
 };
 
 /// A learned change after a projection, y += scale (x a^T) b over blocks open on the row: a [rank, in], b [rank, out].
-pub const Adapter = struct { a: mtl.Buffer, b: mtl.Buffer, tau: mtl.Buffer, xa: mtl.Buffer, xn: mtl.Buffer, gates: mtl.Buffer, in: usize, out: usize, rank: usize, scale: f32, unit: f32 };
+pub const Adapter = struct { a: mtl.Buffer, b: mtl.Buffer, tau: mtl.Buffer, xa: mtl.Buffer, xn: mtl.Buffer, gates: mtl.Buffer, need: mtl.Buffer, latch: mtl.Buffer, votes: mtl.Buffer, in: usize, out: usize, rank: usize, scale: f32, unit: f32 };
 
 pub const Mamba = struct {
     in_proj: Linear,

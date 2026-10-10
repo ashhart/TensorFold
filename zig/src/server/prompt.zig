@@ -11,6 +11,19 @@ const Cx = errors.Cx;
 
 pub const Rendered = struct { ids: []const u32, history_len: usize = 0 };
 
+/// Where living lessons decide whether they act on a reply: the row before the reply's reasoning opens (the generation
+/// prompt's `<think>`), else the row before the prompt's last, so the rows that write the reply carry what they chose.
+pub fn decideOf(srv: *const Server, ids: []const u32) u32 {
+    if (srv.text.tokenId("<think>")) |open| {
+        var i = ids.len;
+        while (i > ids.len -| 8) {
+            i -= 1;
+            if (ids[i] == open and i > 0) return @intCast(i - 1);
+        }
+    }
+    return @intCast(ids.len -| 2);
+}
+
 pub const isTitle = messages_mod.isTitleRequest;
 
 /// ``render_prompt_ids``: messages normalized for this template, rendered, and a dangling ``<think>`` closed.

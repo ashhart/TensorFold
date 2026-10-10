@@ -138,6 +138,18 @@ pub fn unspaced(c: u21) bool {
         (c >= 0x20000 and c <= 0x2FA1F);
 }
 
+/// Whether `question` is in `fact`'s script: a fact told without spaces is asked about in that script too.
+pub fn sameScript(fact: []const u8, question: []const u8) bool {
+    return !hasUnspaced(fact) or hasUnspaced(question);
+}
+
+fn hasUnspaced(text: []const u8) bool {
+    const view = std.unicode.Utf8View.init(text) catch return false;
+    var it = view.iterator();
+    while (it.nextCodepoint()) |c| if (unspaced(c)) return true;
+    return false;
+}
+
 /// Ideographic and full-width punctuation (、。「」！？ and the like): it parts units as a space does.
 pub fn punctuation(c: u21) bool {
     return (c >= 0x3000 and c <= 0x303F) or (c >= 0xFF01 and c <= 0xFF0F) or (c >= 0xFF1A and c <= 0xFF20) or

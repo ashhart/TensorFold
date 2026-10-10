@@ -112,6 +112,7 @@ pub const Spec = struct {
     loop_guard: bool = false,
     chunks: []const u32 = &.{}, // where prefill chunks start after 0 (Python's PrefillPlan); empty: the backend's step
     reuse: Reuse = .{},
+    decide: ?u32 = null, // the prompt row where living lessons decide whether they act on the reply
 };
 
 pub const Stream = struct {
@@ -132,6 +133,7 @@ pub const Stream = struct {
     loop_period: ?u32 = null,
     chunks: []const u32,
     reuse: Reuse = .{},
+    decide: ?u32 = null,
     cached: u32 = 0, // prompt tokens the backend restored from `reuse` (its prompt pass started there)
     reuse_failed: bool = false, // the backend's restore of `reuse` failed: it prefilled from 0
     context: std.ArrayList(u32) = .empty,
@@ -184,6 +186,7 @@ pub const Stream = struct {
             .loop_guard = spec.loop_guard,
             .chunks = spec.chunks,
             .reuse = spec.reuse,
+            .decide = spec.decide,
         };
         try s.context.appendSlice(gpa, spec.prompt);
         return s;

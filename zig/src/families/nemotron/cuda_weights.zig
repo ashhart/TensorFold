@@ -19,7 +19,7 @@ pub const mtp_file = "mtp-4bit.safetensors";
 /// The token table as stored (MLX words, scales, biases): a row lookup, not a matmul.
 pub const Embed = struct { w: u64, s: u64, b: u64, n: usize, k: usize };
 /// A layer's learned change while lessons run (cuda_sites.zig): y += scale (x a^T) b over the blocks open on each row.
-pub const Adapter = struct { a: u64, b: u64, tau: u64, xa: u64, xn: u64, gates: u64, in: usize, out: usize, rank: usize, scale: f32, unit: f32 };
+pub const Adapter = struct { a: u64, b: u64, tau: u64, xa: u64, xn: u64, gates: u64, need: u64, latch: u64, votes: u64, in: usize, out: usize, rank: usize, scale: f32, unit: f32 };
 
 /// A `*_rest` is a lesson's change past its projection's 4-bit codes ([out, in] bf16), added after it; 0 when none.
 pub const Mamba = struct { in_proj: QLinear, out_proj: QLinear, conv_w: u64, conv_b: u64, a: u64, d: u64, dt_bias: u64, gnorm: u64, out_rest: u64 = 0, adapter: ?Adapter = null };

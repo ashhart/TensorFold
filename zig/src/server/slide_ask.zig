@@ -33,7 +33,15 @@ pub fn example(srv: *Server, cx: *Cx, keep: Allocator, system: ?[]const u8, ques
     try asked.append(a, try message(a, "user", question));
     const head = try prompt.renderIds(srv, cx, .{ .array = asked.items }, &.{}, false, null, true);
     const body = srv.text.encode(a, answer, false) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else cx.refuse("the tokenizer cannot encode an answer");
-    return .{ .ids = try std.mem.concat(keep, u32, &.{ head, body, end }), .start = @intCast(head.len) };
+    return .{ .ids = try std.mem.concat(keep, u32, &.{ head, body, end }), .start = @intCast(head.len), .decide = prompt.decideOf(srv, head) };
+}
+
+/// `question` as the model reads it when asked, for a router: its prompt rows through the generation prompt only.
+pub fn promptOnly(srv: *Server, cx: *Cx, keep: Allocator, question: []const u8) !api.Example {
+    const a = cx.a;
+    const head = try prompt.renderIds(srv, cx, .{ .array = try a.dupe(Value, &.{try message(a, "user", question)}) }, &.{}, false, null, true);
+    if (head.len < 3) return cx.refuse("a question renders too short to route");
+    return .{ .ids = try keep.dupe(u32, head), .start = @intCast(head.len - 1), .decide = prompt.decideOf(srv, head) };
 }
 
 /// One greedy reply without thinking to `user`, after a system note when given.

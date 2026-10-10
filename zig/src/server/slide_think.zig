@@ -71,7 +71,7 @@ pub fn thinkingAnswer(srv: *Server, cx: *Cx, keep: Allocator, fact: []const u8, 
         log.line("slide: no thinking answer for \"{s}\": {s}", .{ q, reply.content });
         return null;
     }
-    return .{ .ids = try std.mem.concat(keep, u32, &.{ p.head, p.lead, recall }), .start = @intCast(p.head.len + p.lead.len) };
+    return .{ .ids = try std.mem.concat(keep, u32, &.{ p.head, p.lead, recall }), .start = @intCast(p.head.len + p.lead.len), .decide = prompt.decideOf(srv, p.head) };
 }
 
 /// `question` with thinking on and the model's reasoning as it writes it now, held from where it decides (null: none).
@@ -80,5 +80,5 @@ pub fn thinkingSteady(srv: *Server, cx: *Cx, keep: Allocator, q: []const u8, gon
     const p = try thinkingPoint(srv, cx, q, gone) orelse return null;
     const next = try encode(srv, cx, a, p.rest);
     if (next.len == 0) return null;
-    return .{ .ids = try std.mem.concat(keep, u32, &.{ p.head, p.lead, next[0..@min(next.len, think_steady)] }), .start = @intCast(p.head.len + p.lead.len) };
+    return .{ .ids = try std.mem.concat(keep, u32, &.{ p.head, p.lead, next[0..@min(next.len, think_steady)] }), .start = @intCast(p.head.len + p.lead.len), .decide = prompt.decideOf(srv, p.head) };
 }

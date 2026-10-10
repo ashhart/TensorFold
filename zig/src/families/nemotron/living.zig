@@ -1,19 +1,22 @@
-//! Saved lessons as gated blocks in a tensor file beside the shards; both backends pass in the `core` that reads it.
+//! Saved lessons in a tensor file beside the shards, each a block at every layer and the router that decides when it
+//! acts on a reply; both backends pass in the `core` that reads it.
 const std = @import("std");
 const Config = @import("config.zig").Config;
 const shape = @import("learn_shape.zig");
 
 pub const file_name = "living-weights.safetensors";
 const format = "tensorfold living weights";
-const version = "1";
+const version = "2"; // 2: a router a lesson, deciding once a reply (1 gated every row)
 
-/// One layer's blocks as a backend holds them: `ranks` rows of a [rank, in] and b [rank, out], ranks / block gates.
+/// One layer's blocks as a backend holds them: `ranks` rows of a [rank, in] and b [rank, out], each block's router
+/// threshold here (tau, ranks / block of them).
 pub const Layer = struct { layer: usize, in: usize, out: usize, a: []const f32, b: []const f32, tau: []const f32 };
 
 pub fn Io(comptime core: type) type {
     return struct {
-        /// Writes every layer where a block acts as the living-weights file, its bytes returned; all-shut layers are left out.
-        pub fn write(gpa: std.mem.Allocator, dir: []const u8, layers: []const Layer, ranks: usize) !usize {
+        /// Writes every layer where a block acts, and the votes each lesson's router needs, as the living-weights file;
+        /// its bytes returned. Layers where every router is shut and every output zero are left out.
+        pub fn write(gpa: std.mem.Allocator, dir: []const u8, layers: []const Layer, need: []const f32, ranks: usize) !usize {
             var arena_state = std.heap.ArenaAllocator.init(gpa);
             defer arena_state.deinit();
             const arena = arena_state.allocator();
@@ -36,6 +39,8 @@ pub fn Io(comptime core: type) type {
                     bytes += p.data.len * 4;
                 }
             }
+            try tensors.append(arena, .{ .name = "need", .dtype = .f32, .shape = try arena.dupe(usize, &.{blocks}), .bytes = std.mem.sliceAsBytes(need[0..blocks]) });
+            bytes += blocks * 4;
             const meta = [_][2][]const u8{
                 .{ "format", format },
                 .{ "version", version },
@@ -52,6 +57,13 @@ pub fn Io(comptime core: type) type {
         pub const Saved = struct {
             file: core.safetensors.File,
             ranks: usize,
+
+            /// The votes each lesson's router needs at a decision row to act on the reply.
+            pub fn need(s: *const Saved) ![]const f32 {
+                const t = s.file.get("need") orelse return error.BadLivingWeights;
+                if (!t.is(.f32, &.{s.ranks / shape.block})) return error.BadLivingWeights;
+                return floats(t.bytes);
+            }
 
             /// Layer i's blocks (a, b, tau as written), or null when none acts there.
             pub fn layer(s: *const Saved, c: Config, i: usize) !?struct { a: []const f32, b: []const f32, tau: []const f32 } {

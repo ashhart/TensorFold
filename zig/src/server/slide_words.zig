@@ -19,7 +19,7 @@ pub fn questions(a: Allocator, text: []const u8, n: usize) ![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     var it = std.mem.splitScalar(u8, text, '\n');
     while (it.next()) |raw| {
-        const line = unmark(raw);
+        const line = leadless(unmark(raw));
         if (!(std.mem.endsWith(u8, line, "?") or std.mem.endsWith(u8, line, "\u{ff1f}")) or words(line) < 2 or words(line) > 20) continue;
         for (out.items) |seen| {
             if (std.mem.eql(u8, seen, line)) break;
@@ -27,6 +27,14 @@ pub fn questions(a: Allocator, text: []const u8, n: usize) ![]const []const u8 {
         if (out.items.len == n) break;
     }
     return out.items;
+}
+
+/// A question without a lead-in the model echoed from its instructions ("In other words: What do I call my dog?").
+fn leadless(line: []const u8) []const u8 {
+    const colon = std.mem.indexOfScalar(u8, line, ':') orelse return line;
+    const lead = line[0..colon];
+    if (std.mem.indexOfScalar(u8, lead, '?') != null or std.mem.count(u8, std.mem.trim(u8, lead, " "), " ") > 3) return line;
+    return std.mem.trim(u8, line[colon + 1 ..], " ");
 }
 
 /// Up to n numbered or bulleted lines, numbering and bullets gone, empty lines skipped.
