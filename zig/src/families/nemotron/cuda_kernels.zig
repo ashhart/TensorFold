@@ -100,6 +100,7 @@ pub const Kernels = struct {
     plan_routed: cuda.Function,
     rest_rows: cuda.Function,
     pocket_rows: cuda.Function,
+    add_row: cuda.Function,
     draw: cuda.Function,
     draw_ids: cuda.Function,
     torch: torch_ops.Functions,
@@ -142,6 +143,7 @@ pub const Kernels = struct {
         k.plan_routed = try k.mods[7].function("tf_plan_routed");
         k.rest_rows = try k.mods[7].function("tf_rest_rows");
         k.pocket_rows = try k.mods[7].function("tf_pocket_rows");
+        k.add_row = try k.mods[7].function("tf_add_row");
         k.gemv = try k.mods[15].function(sym.gemv);
         k.gemv_split = try k.mods[15].function("tf_lane_gemv_split");
         k.torch = try torch_ops.Functions.resolve(k.mods[8..14]);
@@ -324,6 +326,16 @@ pub const Ops = struct {
         a.add(int(row_mul));
         a.add(int(row_add));
         try o.go(o.k.pocket_rows, .{ rows, 1, 1 }, 256, 0, &a);
+    }
+
+    /// nemotron_ops' nudge: y (bf16, or fp32 when `y_f32`) += x (fp32) over n values.
+    pub fn addRow(o: Ops, y: u64, y_f32: bool, x: u64, n: usize) !void {
+        var a: cuda.Args = .{};
+        a.add(y);
+        a.add(@as(c_int, @intFromBool(y_f32)));
+        a.add(x);
+        a.add(int(n));
+        try o.go(o.k.add_row, .{ (n + 255) / 256, 1, 1 }, 256, 0, &a);
     }
 
     /// experts.route: pairs grouped by expert into items of at most `tile` pairs (16 decode, 64 prefill).

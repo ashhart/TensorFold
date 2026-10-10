@@ -11,6 +11,7 @@ const engine = @import("cuda_engine.zig");
 const ops = @import("cuda_train_ops.zig");
 const sites_mod = @import("cuda_sites.zig");
 const lesson_route = @import("lesson_route.zig");
+const back = @import("cuda_train_back.zig");
 
 /// Rows a step learns from at most: a question and its answer (attention's backward reads at most 256).
 pub const max_rows = 256;
@@ -29,7 +30,7 @@ const seq_len = state.chunk_keys;
 pub const Mat = struct { w: u64, s: u64 = 0, b: u64 = 0, bf16: bool = false, n: usize, k: usize };
 
 /// What each layer's backward reads of the weights, in the checkpoint's own layout.
-const Raw = union(enum) {
+pub const Raw = union(enum) {
     mamba: struct { in_proj: Mat, out_proj: Mat },
     attention: struct { q: Mat, k: Mat, v: Mat, o: Mat },
     moe: struct { up: Mat, down: Mat, fc1: [3]u64, fc2: [3]u64 },
@@ -45,6 +46,19 @@ const Kept = struct {
     ys: u64 = 0, // MoE: every pair's down output before its weight [rows * slots, D]
     ids: u64 = 0, // MoE: i32 [rows * slots]
     wts: u64 = 0, // MoE: f32 [rows * slots]
+};
+
+/// Host memory the GPU reads and writes too (mapped), sliced as the pocket reads Metal's shared buffers.
+pub const Shared = struct {
+    m: sites_mod.Mapped,
+
+    pub fn slice(s: *const Shared, comptime T: type, n: usize) []T {
+        return @as([*]T, @ptrCast(@alignCast(s.m.host.bytes.ptr)))[0..n];
+    }
+
+    pub fn dev(s: *const Shared) u64 {
+        return s.m.dev;
+    }
 };
 
 /// Sub-allocations of one device allocation, 256-byte aligned.
@@ -114,8 +128,18 @@ pub const Trainer = struct {
     dv: u64 = 0,
     probs: u64 = 0,
     dscores: u64 = 0,
+    nudge: train_mode.Nudge = .{}, // where a target step adds `delta`
+    delta: Shared = undefined, // f32 [3, layers, D]: a target step's nudges after each layer it names, a row each
+    push: Shared = undefined, // f32 [3, layers, D]: the loss's gradient at each nudged row after each of them
+    inputs: Shared = undefined, // bf16 [layers, max_rows, D]: each MoE layer's normed input, as a keys or target step read it
+    residuals: Shared = undefined, // bf16 [layers + 1, max_rows, D]: the residuals a target step saved, for the host
     sketched: usize = 0, // rows sketched since the sketches were cleared, each row's place in them
     route: lesson_route.Route = .{}, // this step's: which rows carry the lessons
+
+    /// The model's shape, as the pocket and the probe read it on either backend.
+    pub fn config(t: *const Trainer) Config {
+        return t.c;
+    }
 
     /// Every buffer a step needs and the raw weights its backward reads; `living`, saved blocks the trainer takes over.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, e: *engine.Engine, dir: []const u8, living: *?sites_mod.Sites) !*Trainer {
@@ -138,6 +162,14 @@ pub const Trainer = struct {
         inline for (state.seq_fields, 0..) |name, i| @field(t.buf, name) = t.seq.ptr[i];
         t.host = try sites_mod.Mapped.init(d, proj_at + c.layers * max_rows * sites_mod.candidates * 4);
         errdefer t.host.deinit();
+        t.delta = .{ .m = try sites_mod.Mapped.init(d, 3 * c.layers * c.hidden * 4) };
+        errdefer t.delta.m.deinit();
+        t.push = .{ .m = try sites_mod.Mapped.init(d, 3 * c.layers * c.hidden * 4) };
+        errdefer t.push.m.deinit();
+        t.inputs = .{ .m = try sites_mod.Mapped.init(d, c.layers * max_rows * c.hidden * 2) };
+        errdefer t.inputs.m.deinit();
+        t.residuals = .{ .m = try sites_mod.Mapped.init(d, (c.layers + 1) * max_rows * c.hidden * 2) };
+        errdefer t.residuals.m.deinit();
         t.kept = try gpa.alloc(Kept, c.layers);
         errdefer gpa.free(t.kept);
         t.raw = try gpa.alloc(Raw, c.layers);
@@ -161,12 +193,13 @@ pub const Trainer = struct {
         gpa.free(t.raw);
         gpa.free(t.kept);
         t.host.deinit();
+        inline for (.{ "delta", "push", "inputs", "residuals" }) |f| @field(t, f).m.deinit();
         t.buf.deinit();
         t.seq.deinit();
         gpa.destroy(t);
     }
 
-    fn ops_(t: *const Trainer) ops.Ops {
+    pub fn ops_(t: *const Trainer) ops.Ops {
         return .{ .k = &t.e.k.train, .s = t.e.stream };
     }
 
@@ -369,7 +402,20 @@ pub const Trainer = struct {
         return @alignCast(all[l * max_rows * k ..][0 .. rows * k]);
     }
 
-    fn residual(t: *const Trainer, l: usize) u64 {
+    /// MoE layer l's normed input (bf16 [D]) at `row`, what its shared expert and pocket read, as the last keys or
+    /// target step kept it.
+    pub fn normed(t: *const Trainer, l: usize, row: usize) []const u16 {
+        const d = t.c.hidden;
+        return t.inputs.slice(u16, t.c.layers * max_rows * d)[(l * max_rows + row) * d ..][0..d];
+    }
+
+    /// The residual (bf16 [D]) at `row` entering layer l (l == layers: after the last), as the last target step saved it.
+    pub fn residual(t: *const Trainer, l: usize, row: usize) []const u16 {
+        const d = t.c.hidden;
+        return t.residuals.slice(u16, (t.c.layers + 1) * max_rows * d)[(l * max_rows + row) * d ..][0..d];
+    }
+
+    pub fn savedAt(t: *const Trainer, l: usize) u64 {
         return t.saved + @as(u64, l) * max_rows * t.c.hidden * 2;
     }
 
@@ -387,8 +433,7 @@ pub const Trainer = struct {
     /// The mean loss of `ids`' answer from `start`, and what `mode` adds to it; `turn`: which rows carry which lessons.
     pub fn step(t: *Trainer, ids: []const u32, start: usize, mode: Mode, turn: lesson_route.Turn) !Result {
         if (ids.len < 2 or start < 1 or start >= ids.len or ids.len - 1 > max_rows) return error.BadExample;
-        if (!reads(mode) and mode != .loss and t.sites.rank == 0) return error.NoOpenBlock;
-        if (mode == .keys or mode == .target) return error.Unsupported; // an edit of the weights is learned on Metal for now
+        if (!reads(mode) and mode != .loss and mode != .target and t.sites.rank == 0) return error.NoOpenBlock;
         const c = t.c;
         const e = t.e;
         const o = e.ops();
@@ -413,7 +458,7 @@ pub const Trainer = struct {
         try f.chunkBegin(&w);
         for (0..c.layers) |l| {
             try f.chunkPre(&w, l);
-            try o.copy(t.residual(l), w.x, rows * D * 2);
+            try o.copy(t.savedAt(l), w.x, rows * D * 2);
             if (c.kinds[l] != .mamba) try o.copy(t.kept[l].x, b.y, rows * D * 2);
             try f.chunkMixer(&w, l);
             try f.chunkPost(&w, l);
@@ -436,7 +481,17 @@ pub const Trainer = struct {
                     }
                 },
                 .project => try k.project(in.x, in.stride, s.seek.dev, t.host.dev + proj_at + l * max_rows * sites_mod.candidates * 4, rows, s.in, sites_mod.candidates),
-                .keys, .target => unreachable,
+                // a pocket reads each MoE layer's normed input; a target step keeps what the backward reads and adds its
+                // nudges into the shared expert's slot, which the next norm sums into the residual this layer leaves
+                .keys, .target => if (c.kinds[l] == .moe) {
+                    try o.copy(t.inputs.dev() + l * max_rows * D * 2, t.kept[l].x, rows * D * 2);
+                    if (mode == .target) {
+                        try t.keep(l, rows);
+                        for (t.nudge.layers, t.nudge.rows, 0..) |mask, row, i| if (mask >> @intCast(l) & 1 != 0) {
+                            try o.addRow(b.ymoe + (row * c.slots() + c.top_k) * D * 2, false, t.delta.dev() + (i * c.layers + l) * D * 4, D);
+                        };
+                    }
+                } else if (mode == .target) try t.keep(l, rows),
             }
         }
         if (reads(mode)) {
@@ -445,11 +500,13 @@ pub const Trainer = struct {
             return .{ .loss = 0, .recalled = false };
         }
         try f.norm(&w.x, w.delta, e.w.norm_f, rows, false);
-        try o.copy(t.residual(c.layers), w.x, rows * D * 2);
+        try o.copy(t.savedAt(c.layers), w.x, rows * D * 2);
         try o.prefillDense(b.y, e.w.head, t.logits, rows);
         const tg = t.host.dev;
         try k.softmax(t.logits, tg, tg + max_rows * 4, tg + max_rows * 8, rows, c.vocab);
-        if (mode != .loss) try t.backward(rows, mode == .learn);
+        // a target step's residuals for the host, the scale of what its pocket adds
+        if (mode == .target) try o.copy(t.residuals.dev(), t.saved, (c.layers + 1) * max_rows * D * 2);
+        if (mode != .loss) try back.backward(t, rows, mode == .learn, mode == .target);
         try e.stream.synchronize();
         var out: Result = .{ .loss = 0, .recalled = true };
         for (t.stats()[0..rows], t.weights()[0..rows]) |s, wgt| if (wgt > 0) {
@@ -481,115 +538,5 @@ pub const Trainer = struct {
                 try o.copy(kp.wts, b.wts, rows * S * 4);
             },
         }
-    }
-
-    /// y [rows, m.k] (+)= x [rows, m.n] (fp32) times the matrix: its input's gradient from its output's.
-    fn product(t: *Trainer, x: u64, m: Mat, y: u64, rows: usize, add: bool) !void {
-        const k = t.ops_();
-        try k.narrow(x, t.xb, rows * m.n);
-        const right = if (m.bf16) m.w else blk: {
-            try k.dequant(.{ m.w, m.s, m.b }, t.wt, m.n * m.k);
-            break :blk t.wt;
-        };
-        try k.gemm(t.xb, right, y, rows, m.k, m.n, m.n, m.k, m.k, add);
-    }
-
-    /// The open block's gradient from its site's input x (rows `stride` apart) and output gradient gy; dx gains all.
-    fn adapterBack(t: *Trainer, l: usize, x: u64, stride: usize, gy: u64, dx: u64, rows: usize) !void {
-        const s = &t.sites;
-        if (s.rank == 0) return;
-        const site = &s.list[l];
-        const k = t.ops_();
-        const first = if (s.rank >= sites_mod.block) s.first() else 0;
-        try k.loraIn(x, stride, site.a.dev, s.xa.dev, rows, site.in, s.rank, s.xn.dev);
-        try k.gate(s.xa.dev, s.xn.dev, site.tau.dev, s.gates.dev, rows, s.rank, sites_mod.unit, &t.route, s.latch.dev, s.score.dev);
-        try k.loraDb(s.xa.dev, gy, site.gb.dev, rows, site.out, s.rank, first, sites_mod.scale);
-        try k.loraDxa(gy, site.b.dev, t.dxa, rows, site.out, s.rank, sites_mod.scale, s.gates.dev);
-        try k.loraDx(t.dxa, site.a.dev, dx, rows, site.in, s.rank);
-    }
-
-    /// The loss back through the head and every layer to each change, Adam after when `adam`.
-    fn backward(t: *Trainer, rows: usize, adam: bool) !void {
-        const c = t.c;
-        const e = t.e;
-        const k = t.ops_();
-        const D: usize = c.hidden;
-        try k.gemm(t.logits, t.head_t, t.dx, rows, D, c.vocab, c.vocab, D, D, false);
-        try k.zero(t.g, rows * D);
-        try k.rmsBack(t.residual(c.layers), e.w.norm_f, t.dx, t.g, rows, D, c.eps);
-        var l = c.layers;
-        while (l > 0) {
-            l -= 1;
-            switch (t.raw[l]) {
-                .moe => |m| try t.moe(l, m, rows),
-                .mamba => |m| try t.mamba(l, m, rows),
-                .attention => |a| try t.attention(l, a, rows),
-            }
-            try k.rmsBack(t.residual(l), e.w.blocks[l].norm, t.dx, t.g, rows, D, c.eps);
-        }
-        if (adam) try t.sites.adam(k);
-    }
-
-    /// The MoE layer: the shared expert and its change (at its slot's weight), the routed experts, the routing weights.
-    fn moe(t: *Trainer, l: usize, m: @FieldType(Raw, "moe"), rows: usize) !void {
-        const c = t.c;
-        const k = t.ops_();
-        const kp = t.kept[l];
-        const D: usize = c.hidden;
-        const S = c.slots();
-        const W = c.expert_width;
-        const F = c.shared_width;
-        try k.scaleRows(t.g, kp.wts, S, c.top_k, t.gs, rows, D);
-        try t.product(t.gs, m.down, t.d_upr, rows, false);
-        try t.adapterBack(l, kp.upr, F, t.gs, t.d_upr, rows);
-        try k.relu2Back(kp.upr, t.d_upr, t.du, rows * F);
-        try t.product(t.du, m.up, t.dx, rows, false);
-        const count = rows * c.top_k;
-        try k.sortPairs(kp.ids, rows, S, c.top_k, c.experts, t.order, t.inv, t.offsets);
-        try k.pairsIn(t.order, kp.wts, t.g, t.dyp, D, S, count);
-        try k.expertProducts(t.dyp, m.fc2, t.offsets, t.part, t.d_y1r, count, D, W, c.experts);
-        try k.copyRows(kp.act, W, t.order, t.y1s, W, W, count);
-        try k.relu2Back(t.y1s, t.d_y1r, t.du1, count * W);
-        try k.expertProducts(t.du1, m.fc1, t.offsets, t.part, t.dxp, count, W, D, c.experts);
-        try k.pairsOut(t.inv, t.dxp, t.dx, D, c.top_k, rows);
-        const router = t.e.w.blocks[l].moe.router;
-        try k.routerLogits(kp.x, router, t.lg, rows, c.experts, D);
-        try k.routeBack(t.lg, kp.ids, S, kp.ys, t.g, router, t.dx, rows, c.experts, c.top_k, D, c.routed_scaling);
-    }
-
-    /// The Mamba-2 layer: out_proj and its change, the gated norm, the scan, dt, the conv, in_proj.
-    fn mamba(t: *Trainer, l: usize, m: @FieldType(Raw, "mamba"), rows: usize) !void {
-        const c = t.c;
-        const k = t.ops_();
-        const kp = t.kept[l];
-        const mw = t.e.w.blocks[l].mamba;
-        const s: ops.Shape = .{ .rows = @intCast(rows), .heads = @intCast(c.mamba_heads), .dh = @intCast(c.mamba_head_dim), .groups = @intCast(c.groups), .n = @intCast(c.state), .inner = @intCast(c.inner()), .conv = @intCast(c.convDim()), .proj = @intCast(c.projDim()) };
-        try t.product(t.g, m.out_proj, t.dyn, rows, false);
-        try t.adapterBack(l, kp.ya, c.inner(), t.g, t.dyn, rows);
-        try k.convPre(kp.proj, mw.conv_w, mw.conv_b, t.conv_out, t.act_m, s, c.conv_kernel);
-        try k.dt(kp.proj, mw.dt_bias, t.dt, s);
-        try k.ssmFwd(t.act_m, t.dt, mw.a, mw.d, t.ytot, t.ckpt, s);
-        try k.gateBack(t.ytot, kp.proj, mw.gnorm, t.dyn, t.dytot, t.dproj, s, c.eps);
-        try k.ssmBack(.{ t.act_m, t.dt, mw.a, mw.d, t.dytot, t.ckpt, t.states, t.dact, t.dbp, t.dcp, t.ddt }, s);
-        try k.ssmBc(t.dbp, t.dcp, t.dact, s);
-        try k.convBack(t.dact, t.conv_out, mw.conv_w, mw.conv_b, t.dproj, s, c.conv_kernel);
-        try k.dtBack(kp.proj, mw.dt_bias, t.ddt, t.dproj, s);
-        try t.product(t.dproj, m.in_proj, t.dx, rows, false);
-    }
-
-    /// The attention layer: o_proj and its change, causal softmax attention with shared kv heads, q, k and v.
-    fn attention(t: *Trainer, l: usize, a: @FieldType(Raw, "attention"), rows: usize) !void {
-        const c = t.c;
-        const k = t.ops_();
-        const kp = t.kept[l];
-        const qw = c.heads * c.head_dim;
-        try t.e.ops().prefillDense(kp.x, t.e.w.blocks[l].attn.qkv, t.qkv, rows);
-        try t.product(t.g, a.o, t.d_o, rows, false);
-        try t.adapterBack(l, kp.ya, qw, t.g, t.d_o, rows);
-        const h: ops.Heads = .{ .rows = @intCast(rows), .heads = @intCast(c.heads), .kv_heads = @intCast(c.kv_heads), .dim = @intCast(c.head_dim), .qkv = @intCast(c.qkvDim()), .scale = @floatCast(1 / @sqrt(@as(f64, @floatFromInt(c.head_dim)))) };
-        try k.attention(t.qkv, t.d_o, t.probs, t.dscores, t.dq, t.dk, t.dv, h);
-        try t.product(t.dq, a.q, t.dx, rows, false);
-        try t.product(t.dk, a.k, t.dx, rows, true);
-        try t.product(t.dv, a.v, t.dx, rows, true);
     }
 };

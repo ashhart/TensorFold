@@ -192,3 +192,15 @@ extern "C" __global__ void __launch_bounds__(256) tf_pocket_rows(const __nv_bflo
         }
     }
 }
+
+// A target step's nudge: y (bf16, or fp32 when y_f32) += x (fp32), n values, into a row of a layer's output.
+extern "C" __global__ void tf_add_row(void* __restrict__ y, int y_f32, const float* __restrict__ x, int n) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    if (y_f32) {
+        static_cast<float*>(y)[i] += x[i];
+    } else {
+        __nv_bfloat16* p = static_cast<__nv_bfloat16*>(y) + i;
+        *p = __float2bfloat16(__bfloat162float(*p) + x[i]);
+    }
+}

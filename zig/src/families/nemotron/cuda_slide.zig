@@ -1,5 +1,6 @@
 //! Nemotron's Sliding Weights learner on CUDA: learner.zig's lessons over the CUDA trainer, the engine and its shards.
 const std = @import("std");
+const cuda = @import("cuda");
 const lessons = @import("learner.zig");
 const train = @import("cuda_train.zig");
 const engine = @import("cuda_engine.zig");
@@ -8,6 +9,7 @@ const living = @import("living.zig");
 const state = @import("cuda_state.zig");
 
 const Living = living.Io(@import("core"));
+const PocketShards = @import("pocket_shards.zig").Io(@import("core"));
 
 pub const Example = lessons.Example;
 pub const Lesson = lessons.Lesson;
@@ -50,6 +52,56 @@ const Host = struct {
 
     pub fn seconds(io: std.Io) f64 {
         return @as(f64, @floatFromInt(std.Io.Clock.awake.now(io).toNanoseconds())) / 1e9;
+    }
+
+    /// MoE layer l's pocket as the forward reads it: `up` and `down` [neurons, D] f32 (the kernel runs every neuron,
+    /// those not in use zero); its buffers made on first use, the engine's graphs captured again to run them.
+    pub fn pocket(m: Ctx, l: usize, up: []const f32, down: []const f32, used: usize) !void {
+        _ = used;
+        const blk = &m.e.w.blocks[l];
+        if (blk.kind != .moe) return error.NotAnMoeLayer;
+        const fresh = blk.moe.pocket == null;
+        if (fresh) {
+            const w = &m.e.w;
+            try w.buffers.ensureUnusedCapacity(w.gpa, 2);
+            var ub = try cuda.DeviceBuffer.alloc(m.e.ctx.d, up.len * 4);
+            errdefer ub.free();
+            const db = try cuda.DeviceBuffer.alloc(m.e.ctx.d, down.len * 4);
+            w.buffers.appendAssumeCapacity(ub);
+            w.buffers.appendAssumeCapacity(db);
+            blk.moe.pocket = .{ .up = ub.ptr, .down = db.ptr, .n = up.len / m.e.c.hidden };
+        }
+        const p = blk.moe.pocket.?;
+        const o = m.e.ops();
+        try o.upload(p.up, std.mem.sliceAsBytes(up));
+        try o.upload(p.down, std.mem.sliceAsBytes(down));
+        if (fresh) try m.e.recapture();
+    }
+
+    /// MoE layer l's pocket as the model was loaded with it (its learned neurons from the shards), into `up` and
+    /// `down`; the neurons in use, up to the last whose input weights are not all zero (0: none).
+    pub fn pocketRead(m: Ctx, l: usize, up: []f32, down: []f32) usize {
+        const blk = m.e.w.blocks[l];
+        if (blk.kind != .moe) return 0;
+        const p = blk.moe.pocket orelse return 0;
+        const d = m.e.c.hidden;
+        if (p.n * d != up.len or p.n * d != down.len) return 0;
+        const o = m.e.ops();
+        o.download(std.mem.sliceAsBytes(up), p.up) catch return 0;
+        o.download(std.mem.sliceAsBytes(down), p.down) catch return 0;
+        m.e.stream.synchronize() catch return 0;
+        var used: usize = 0;
+        for (0..p.n) |j| {
+            if (std.mem.indexOfNone(f32, up[j * d ..][0..d], &.{0}) != null) used = j + 1;
+        }
+        return used;
+    }
+
+    /// The pocket's learned neurons into the model's shards (its shared experts widened the first time); `up` and
+    /// `down` come back as the 4-bit values written. The bytes written.
+    pub fn pocketSave(m: Ctx, gpa: std.mem.Allocator, io: std.Io, moe: []const usize, neurons: usize, up: []f32, down: []f32) !usize {
+        try m.e.stream.synchronize();
+        return PocketShards.write(gpa, io, m.dir, m.e.c, moe, neurons, up, down);
     }
 };
 
