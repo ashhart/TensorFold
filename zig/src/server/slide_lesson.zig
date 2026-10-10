@@ -51,6 +51,10 @@ const keepExamples = slide_teacher.keepExamples;
 const bankAnswers = slide_teacher.bankAnswers;
 const thinks = slide_teacher.thinks;
 const turnEnd = slide_teacher.turnEnd;
+const slide_pick = @import("slide_pick.zig");
+const Unseen = slide_pick.Unseen;
+const heldPair = slide_pick.heldPair;
+const dice = slide_pick.dice;
 
 const swapped = 2; // a fact's questions whose subject is swapped for others of its kind, kept as the model answers them
 const others = [_][]const u8{ "sister", "brother", "mother", "friend" }; // whom a fact's questions are also asked about
@@ -415,6 +419,7 @@ fn routerData(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
     const count = extra_wordings;
     const more = try slide_ask.askBaseAt(srv, cx, null, try questionsFor(a, parts.document, fact, count, language), 32 * count, wording_temperature, gone);
     var taken: usize = 0;
+    var unseen: std.ArrayList(Unseen) = .empty; // wordings never learned, the most typical of them checked after a round
     const wordings = try wording.questions(a, more.content, count);
     if (wordings.len == 0) log.line("slide: no more wordings came back: {s}", .{more.content});
     for (wordings) |q| {
@@ -438,12 +443,15 @@ fn routerData(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
         var asked = try slide_ask.promptOnly(srv, cx, a, null, q);
         asked.subject = try subjectRow(srv, cx, asked, word);
         try parts.asked.append(a, asked);
-        if (taken < probe_count) {
-            const note = if (parts.document) try std.fmt.allocPrint(a, prompts.read_note, .{fact}) else try std.fmt.allocPrint(a, prompts.told_note, .{fact});
-            try parts.probes.append(a, .{ .question = q, .answer = fact, .fact = f, .subject = word, .short = try shortAnswer(srv, cx, note, q, gone) });
-        }
+        var score: f32 = 0;
+        for (refs) |r| score += dice(q, r.question);
+        try unseen.append(a, .{ .q = q, .word = word, .score = score });
         taken += 1;
     }
+    // the most typical of them check the fact after each round, so a vague one ("Which animal is my dog?") never decides
+    std.mem.sort(Unseen, unseen.items, {}, Unseen.more);
+    const note = if (parts.document) try std.fmt.allocPrint(a, prompts.read_note, .{fact}) else try std.fmt.allocPrint(a, prompts.told_note, .{fact});
+    for (unseen.items[0..@min(unseen.items.len, probe_count)]) |u| try parts.probes.append(a, .{ .question = u.q, .answer = fact, .fact = f, .subject = u.word, .short = try shortAnswer(srv, cx, note, u.q, gone) });
     // each question asked again under system messages as clients send them, short and long: the router must take it
     // there too, and still leave the near misses
     for (prompts.systems) |sys| {
@@ -475,63 +483,6 @@ fn routerData(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
         swaps += 1;
     };
     log.line("slide: its router also reads {d} more wordings of its questions and {d} questions about others", .{ taken, swaps });
-}
-
-/// The two questions held out to check recall: those sharing the most words with the others (never the first, which
-/// leads); the middle and the last when no two differ.
-fn heldPair(refs: []const Held) [2]usize {
-    var best: [2]usize = .{ refs.len - 1, refs.len / 2 };
-    var score: [2]f32 = .{ -1, -1 };
-    for (refs, 0..) |r, i| {
-        if (i == 0) continue;
-        var s: f32 = 0;
-        for (refs, 0..) |o, j| if (j != i) {
-            s += dice(r.question, o.question);
-        };
-        if (s > score[0]) {
-            score[1] = score[0];
-            best[1] = best[0];
-            score[0] = s;
-            best[0] = i;
-        } else if (s > score[1]) {
-            score[1] = s;
-            best[1] = i;
-        }
-    }
-    return best;
-}
-
-/// The share of two questions' words they have in common (Dice), in any case and with possessives as their owners.
-fn dice(x: []const u8, y: []const u8) f32 {
-    const sep = " \t\r\n,.!?;:\"";
-    var shared: f32 = 0;
-    var total: f32 = 0;
-    var it = std.mem.tokenizeAny(u8, x, sep);
-    while (it.next()) |w| {
-        total += 1;
-        var jt = std.mem.tokenizeAny(u8, y, sep);
-        while (jt.next()) |v| if (std.ascii.eqlIgnoreCase(owner(w), owner(v))) {
-            shared += 1;
-            break;
-        };
-    }
-    var kt = std.mem.tokenizeAny(u8, y, sep);
-    while (kt.next()) |_| total += 1;
-    return if (total > 0) 2 * shared / total else 0;
-}
-
-/// `w` without a possessive "'s".
-fn owner(w: []const u8) []const u8 {
-    for ([_][]const u8{ "'s", "\u{2019}s" }) |mark| if (std.mem.endsWith(u8, w, mark)) return w[0 .. w.len - mark.len];
-    return w;
-}
-
-test "the held-out pair is the most typical wordings, never a vague one" {
-    const qs = [_][]const u8{ "What is my dog's name?", "What do I call my dog?", "Which dog do I have?", "What is the name of my dog?", "What is my dog called?", "Do you remember my dog's name?" };
-    var refs: [qs.len]Held = undefined;
-    for (&refs, qs) |*r, q| r.* = .{ .question = q, .answer = "", .fact = 0 };
-    const pair = heldPair(&refs);
-    try std.testing.expect(pair[0] != 2 and pair[1] != 2 and pair[0] != 0 and pair[1] != 0 and pair[0] != pair[1]);
 }
 
 /// An answer's tokens after another head (a question under a system message, or after an exchange), keyed as before.

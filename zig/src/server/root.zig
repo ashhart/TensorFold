@@ -50,5 +50,6 @@ test {
     _ = @import("slide_side.zig");
     _ = @import("slide_take.zig");
     _ = @import("slide_teacher.zig");
+    _ = @import("slide_pick.zig");
     _ = @import("startup.zig");
 }
