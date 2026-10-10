@@ -162,7 +162,7 @@ pub const Backend = struct {
         return cpu(try b.checkpoint.get(name));
     }
     pub fn cpu(t: core.checkpoint_metal.Tensor) ck.Tensor {
-        var shape: [4]usize = @splat(1);
+        var shape: @FieldType(ck.Tensor, "shape") = @splat(1);
         @memcpy(shape[0..t.rank], t.shape[0..t.rank]);
         return .{ .dtype = t.dtype, .rank = @intCast(t.rank), .shape = shape, .bytes = t.buffer.contents()[t.offset .. t.offset + t.bytes] };
     }
