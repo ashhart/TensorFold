@@ -19,7 +19,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - The native server accepts `--chat-template FILE` to override the checkpoint template for ordinary and tool-bearing chat. Invalid files fail startup without a fallback (#551). Thanks to @akol1.
 - CUDA and GLM recipes distinguish Python 0.6.6 features from native Zig support and link to each engine's runbook (#534). Thanks to @akol1.
 - The tokenizer gives a token's exact bytes when its decoder chain is token-local, a building block for constrained decoding (#532). Thanks to @akol1.
-- The tokenizer gives a token's exact bytes when its decoder chain is token-local, a building block for constrained decoding (#532). Thanks to @akol1.
+- Safetensors headers keep rank-five tensor shapes, such as a vision patch embedding's temporal convolution, and refuse rank six (#533). Thanks to @akol1.
+- A backend-neutral EXL3 trellis reference decoder with an oracle fixture, which decodes rectangular layers at the right row stride; no model loads EXL3 on the native engine yet (#496). Thanks to @akol1.
 
 ## 1.0.4
 

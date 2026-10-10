@@ -386,7 +386,7 @@ fn putDraftHead(out: *Out, gpa: std.mem.Allocator, a: std.mem.Allocator, name: [
         @memcpy(s16[r * kg ..][0..kg], src_s16[id * kg ..][0..kg]);
         @memcpy(b16[r * kg ..][0..kg], src_b16[id * kg ..][0..kg]);
     }
-    const gathered = [_]Q{.{ .w = .{ .dtype = .u32, .rank = 2, .shape = .{ rows, kw, 0, 0 }, .bytes = wq }, .s = .{ .dtype = .bf16, .rank = 2, .shape = .{ rows, kg, 0, 0 }, .bytes = s }, .b = .{ .dtype = .bf16, .rank = 2, .shape = .{ rows, kg, 0, 0 }, .bytes = b }, .rows = rows, .k = lm_head.k, .kw = kw, .spec = lm_head.spec }};
+    const gathered = [_]Q{.{ .w = .{ .dtype = .u32, .rank = 2, .shape = .{ rows, kw, 0, 0, 0 }, .bytes = wq }, .s = .{ .dtype = .bf16, .rank = 2, .shape = .{ rows, kg, 0, 0, 0 }, .bytes = s }, .b = .{ .dtype = .bf16, .rank = 2, .shape = .{ rows, kg, 0, 0, 0 }, .bytes = b }, .rows = rows, .k = lm_head.k, .kw = kw, .spec = lm_head.spec }};
     try putLane(out, gpa, name, gathered[0..]); // putLane copies the bytes, so the gathered buffers free here
     gpa.free(wq);
     gpa.free(s);
