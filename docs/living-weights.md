@@ -137,3 +137,26 @@ Living Weights is experimental. Measured on Nemotron 3.5 Lightning:
 Before keeping a fact, it checks related questions it never trained on. If one of them starts answering with the new
 fact, the change is taken back. Even so, it remembers short, distinct facts best, can miss facts in long documents, and
 a fact can occasionally bleed into a related question. Keep the original model for anything that matters.
+
+## GLM-5.3-Flash (experimental)
+
+`tensorfold serve <glm-5.3-flash folder> --slide` learns into GLM-5.3-Flash on one Mac, with the same `/v1/slide/learn`
+API and the same lesson, gate, guard and undo as Nemotron. It changes one site: a low-rank addition after the last
+layer's shared-expert down projection (`layers.44`). The model's own files are never written. Learned weights live in
+separate shard files beside the model, `living-0001.safetensors`, `living-0002.safetensors`, …, listed in order in
+`living_weights.index.json`; the server sums them at load. Dropping the newest shard from the index undoes that lesson
+exactly. A folder with no shards serves exactly as before.
+
+- `LW_TOPIC=name` labels the shard a save writes (default `chat`); `LW_TOPICS=a,b` loads only shards of those topics.
+- Each shard records the hash of the weight it was learned on; a shard from another checkpoint is refused at load.
+- `--slide` with `--speed-up` is refused: the pair would need the change shipped to the second Mac.
+- On a 256 GB Mac, Flash needs `GLM_LOAD_LIMIT_GB=200` (its 180.6 GB is over the 70% default) and `GLM_MLOCK=1` (wires
+  the weights while they load, so macOS does not compress them and stop the process for low swap).
+
+Measured on an M3 Ultra with 256 GB: with no shard, 20 of 20 greedy replies match the stock engine token for token at
+draft depth 0 and 3, and the last-row logits are byte-identical. A 32-rank shard saved and reloaded in a new process gives
+the same tokens and logits as the change held in RAM (20 of 20), costs no measurable decode speed (49.0–49.4 tok/s
+against 48.7–49.2), and keeps draft depth 3 equal to depth 0. A learn of "I like blue." runs end to end in about 7.5
+minutes and the model answers "You like blue", but the guard has not yet let a GLM fact stay: one site at the last layer
+did not separate "which colour do you like best?" from "which colour do I like?". Thinking-on recall and several facts at
+once are not tested yet.
