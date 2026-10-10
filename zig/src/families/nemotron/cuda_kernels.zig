@@ -31,7 +31,7 @@ pub const Plan = cuda.grouped.Plan;
 
 pub const Kernels = struct {
     d: *const cuda.Driver,
-    mods: [21]cuda.Module,
+    mods: [22]cuda.Module,
     triton: ?cuda.aot.Set, // a captured Triton set for the glue (GB10's qualified one); null: our own glue kernels
     glue: glue.Fns,
     affine: cuda.qlinear.Affine4Kernels, // the 4-bit projections: qmm_group, lane_gemv and qmm_prefill
@@ -43,8 +43,6 @@ pub const Kernels = struct {
     pack_experts: cuda.Function,
     pattn: cuda.Function,
     scan_rows: cuda.Function,
-    pack_dense: cuda.Function,
-    transpose16: cuda.Function,
     serial_feed: cuda.Function,
     plan_routed: cuda.Function,
     rest_rows: cuda.Function,
@@ -63,7 +61,7 @@ pub const Kernels = struct {
         var k: Kernels = undefined;
         k.d = d;
         const kk = cuda.kernels;
-        const images = [_][]const u8{ kk.qmm_group, kk.qmm_prefill, kk.experts, kk.experts_prefill, kk.experts_pack, kk.prefill_attention, kk.scan_rows, kk.nemotron_ops, kk.torch_argmax, kk.torch_topk, kk.torch_pointwise, kk.torch_indexing, kk.torch_movement, kk.torch_nemotron_constants, kk.sample, kk.lane_gemv, kk.nemotron_norms, kk.nemotron_route, kk.nemotron_mamba, kk.nemotron_attention, kk.nemotron_keyed };
+        const images = [_][]const u8{ kk.qmm_group, kk.qmm_prefill, kk.experts, kk.experts_prefill, kk.experts_pack, kk.prefill_attention, kk.scan_rows, kk.nemotron_ops, kk.torch_argmax, kk.torch_topk, kk.torch_pointwise, kk.torch_indexing, kk.torch_movement, kk.torch_nemotron_constants, kk.sample, kk.lane_gemv, kk.nemotron_norms, kk.nemotron_route, kk.nemotron_mamba, kk.nemotron_attention, kk.nemotron_keyed, kk.affine4_pack };
         var loaded: usize = 0;
         errdefer for (k.mods[0..loaded]) |*m| m.unload();
         for (images, 0..) |img, i| {
@@ -78,8 +76,6 @@ pub const Kernels = struct {
         k.pack_experts = try k.mods[4].function(sym.pack_experts);
         k.pattn = try k.mods[5].function(sym.pattn);
         k.scan_rows = try k.mods[6].function(sym.scan_rows);
-        k.pack_dense = try k.mods[7].function("tf_pack_dense");
-        k.transpose16 = try k.mods[7].function("tf_transpose_pad16");
         k.serial_feed = try k.mods[7].function("tf_serial_feed");
         k.plan_routed = try k.mods[7].function("tf_plan_routed");
         k.rest_rows = try k.mods[7].function("tf_rest_rows");
@@ -99,7 +95,7 @@ pub const Kernels = struct {
         const minor = try ctx.attribute(.compute_capability_minor);
         k.gb10 = major == 12 and minor == 1;
         k.discrete = try ctx.attribute(.integrated) == 0;
-        k.affine = try cuda.qlinear.Affine4Kernels.resolve(d, k.mods[0], k.mods[1], k.mods[15], sms, k.gb10);
+        k.affine = try cuda.qlinear.Affine4Kernels.resolve(d, k.mods[0], k.mods[1], k.mods[15], k.mods[21], sms, k.gb10);
         return k;
     }
 

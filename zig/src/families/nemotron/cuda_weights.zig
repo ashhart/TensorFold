@@ -123,7 +123,7 @@ const Loader = struct {
         }
         const k = k8 * 8;
         const kg = k / 64;
-        const npad = (n + 127) / 128 * 128;
+        const lay = cuda.qlinear.Affine4.layout(n, k);
         const sizes = [3]usize{ @as(usize, n) * k8 * 4, @as(usize, n) * kg * 2, @as(usize, n) * kg * 2 };
         const base = try L.tmp(sizes[0] + sizes[1] + sizes[2]);
         var at = [3]usize{ 0, sizes[0], sizes[0] + sizes[1] };
@@ -133,29 +133,15 @@ const Loader = struct {
         };
         var buf: [128]u8 = undefined;
         const q: QLinear = .{
-            .w = try L.alloc(try std.fmt.bufPrint(&buf, "{s}.weight", .{name}), @as(usize, npad) * k / 2),
-            .s = try L.alloc(try std.fmt.bufPrint(&buf, "{s}.scales", .{name}), @as(usize, kg) * npad * 2),
-            .b = try L.alloc(try std.fmt.bufPrint(&buf, "{s}.biases", .{name}), @as(usize, kg) * npad * 2),
+            .w = try L.alloc(try std.fmt.bufPrint(&buf, "{s}.weight", .{name}), lay.words),
+            .s = try L.alloc(try std.fmt.bufPrint(&buf, "{s}.scales", .{name}), lay.scales),
+            .b = try L.alloc(try std.fmt.bufPrint(&buf, "{s}.biases", .{name}), lay.scales),
             .n = n,
             .k = k,
-            .npad = npad,
+            .npad = lay.npad,
         };
-        const total: u64 = @as(u64, npad / 64) * kg * 512;
         try L.src.flush();
-        var a: cuda.Args = .{};
-        a.add(base);
-        for ([_]usize{ n, k / 8, kg }) |v| a.add(@as(c_int, @intCast(v)));
-        a.add(q.w);
-        a.add(@as(c_longlong, @intCast(total)));
-        try cuda.launch.launch(L.ops.k.pack_dense, .{ .grid = .{ .x = @intCast((total + 255) / 256) }, .block = .{ .x = 256 } }, L.ops.s, &a);
-        for ([_]u64{ q.s, q.b }, [_]usize{ sizes[0], sizes[0] + sizes[1] }) |out, off| {
-            var t: cuda.Args = .{};
-            t.add(base + off);
-            for ([_]usize{ n, kg, npad }) |v| t.add(@as(c_int, @intCast(v)));
-            t.add(out);
-            const cells = @as(u64, kg) * npad;
-            try cuda.launch.launch(L.ops.k.transpose16, .{ .grid = .{ .x = @intCast((cells + 255) / 256) }, .block = .{ .x = 256 } }, L.ops.s, &t);
-        }
+        try L.ops.k.affine.pack(L.ops.s, base, base + sizes[0], base + sizes[0] + sizes[1], q);
         return q;
     }
 
