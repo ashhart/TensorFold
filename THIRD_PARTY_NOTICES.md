@@ -125,6 +125,12 @@ values agree within fp16/bf16 rounding (under 0.01 on random groups), not bit fo
 dequant are written for TensorFold and checked against an independent reference of that arithmetic. The native engine
 has no quantized KV cache and refuses `--kv-dtype`.
 
+The Zig tensor-parallel fabric's RoCE path (`zig/src/fabric/tp/mailbox.cu`, `roce.zig`, `roce_verbs.zig`) adapts
+the one-shot all-gather protocol of [b12x](https://github.com/local-inference-lab/b12x)'s RoCEnante
+(`b12x/comm/roce/`, PRs #295 and #315): a device-resident epoch, sequence flags after each payload, two slots by
+sequence parity and a timeout that fails the transport. Copyright 2026 Luke Alonso and the b12x contributors,
+Apache License 2.0 (see [the license text](LICENSES/Apache-2.0.txt)); b12x ships no NOTICE file.
+
 ## Vendored code and weights
 
 In the Python engine, frozen at 0.6.6, `src/tensorfold/drafters/vendor/z_lab_dflash/model_mlx.py` is the unmodified

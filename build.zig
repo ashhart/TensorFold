@@ -12,6 +12,7 @@ const counters_build = @import("zig/build/metal_counters.zig");
 const exl3_build = @import("zig/build/exl3.zig");
 const exlr8_build = @import("zig/build/exlr8.zig");
 const golden_build = @import("zig/build/golden.zig");
+const tp_build = @import("zig/build/tp.zig");
 
 comptime {
     const required = std.mem.trim(u8, @embedFile(".zig-version"), "\r\n");
@@ -189,6 +190,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&warning_run.step);
     b.step("test-learn-warning", "CPU production-log refusal, backoff and recovery test").dependOn(&warning_run.step);
     grammar_build.steps(b, target, xgrammar);
+    tp_build.add(b, target, optimize, test_step);
 }
 
 /// `zig build native -Dcpu=apple_m1`: tensorfold-native with the Metal engines for the Python package's bundle (a native M5 build traps on M1-M4).
