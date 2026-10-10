@@ -1,4 +1,4 @@
-//! The Python lane matmul (nvfp4/qmmf.cu) for FP8G and FP4 weights, with its kernel, tile and slices.
+//! The lane matmul (qmmf.cu) for FP4, FP8, FP8G and BF16 weights, with its kernel, tile and slices.
 const std = @import("std");
 const driver = @import("driver.zig");
 const module = @import("module.zig");
@@ -16,13 +16,24 @@ pub const fused_rows = 256; // rows from which a projection's K slices meet in o
 const bn = 64;
 const threads = 128; // WM 1 x WN 4 warps
 
-/// The packed formats the lane matmul reads (qmmf.cu Mode): FP4 words with e4m3 scales a 16, e4m3 with fp32 a 64.
-pub const Mode = enum(u2) { fp4 = 0, fp8g = 3 };
+/// The packed formats (qmmf.cu Mode): FP4 with e4m3 scales a 16, e4m3 with one scale or fp32 a 64, and bf16.
+pub const Mode = enum(u3) { fp4 = 0, fp8 = 1, fp8g = 3, bf16 = 4 };
+
+const modes = [_]Mode{ .fp4, .fp8, .fp8g, .bf16 };
+
+fn modeIndex(mode: Mode) usize {
+    return std.mem.indexOfScalar(Mode, &modes, mode).?;
+}
 
 /// The dynamic shared bytes of a BM-row tile (qmmf.cu Tile<MODE, BM, 64, 1, 4, 4>::SMEM).
 pub fn sharedBytes(mode: Mode, bm: u32) u32 {
-    const w: u32 = if (mode == .fp4) bn * group / 2 else bn * group;
-    const stage = (bm * group * 2 + w + bn * 4 + 127) / 128 * 128;
+    const w: u32 = switch (mode) {
+        .fp4 => bn * group / 2,
+        .fp8, .fp8g => bn * group,
+        .bf16 => bn * group * 2,
+    };
+    const s: u32 = if (mode == .fp4 or mode == .fp8g) bn * 4 else 0;
+    const stage = (bm * group * 2 + w + s + 127) / 128 * 128;
     const partials = (bm / 16) * 2 * 4 * threads * 4;
     return @max(4 * stage, partials);
 }
@@ -65,7 +76,7 @@ const row_tiles = [_]u32{ 16, 32, 64 };
 
 pub const Lane = struct {
     mod: Module,
-    fns: [2][7]Function, // per mode: lane16, lane16c, lane32, lane32c, lane64, lane64c, fused
+    fns: [modes.len][7]Function, // per mode: lane16, lane16c, lane32, lane32c, lane64, lane64c, fused
     reduce: Function,
     clusters: bool, // sm_90 on: slices meet in a cluster's shared memory
 
@@ -74,7 +85,7 @@ pub const Lane = struct {
         var mod = try Module.load(d, kernels.qmmf);
         errdefer mod.unload();
         var l: Lane = .{ .mod = mod, .fns = undefined, .reduce = try mod.function(reduce_symbol), .clusters = capability_major >= 9 };
-        inline for (.{ Mode.fp4, Mode.fp8g }, 0..) |mode, mi| {
+        inline for (modes, 0..) |mode, mi| {
             inline for (row_tiles, 0..) |bm, ti| inline for (.{ false, true }, 0..) |cl, ci| {
                 const f = try mod.function(symbol(mode, bm, cl, false));
                 try f.allowDynamicShared(sharedBytes(mode, bm));
@@ -100,7 +111,7 @@ pub const Lane = struct {
     /// y [m, n] bf16 = x [m, k] bf16 (rows `ldx` apart) times the weight, fp32 sums; `part` holds partBytes.
     pub fn matmul(l: Lane, s: Stream, x: u64, ldx: usize, m: usize, w: Weight, y: u64, part: u64) !void {
         const p = plan(m, w.n, w.k, l.clusters);
-        const set = l.fns[if (w.mode == .fp4) 0 else 1];
+        const set = l.fns[modeIndex(w.mode)];
         const ti: usize = if (p.bm == 16) 0 else if (p.bm == 32) 1 else 2;
         const f = if (p.fused) set[6] else set[ti * 2 + @intFromBool(p.cluster)];
         const rows_t = (m + p.bm - 1) / p.bm;
@@ -138,6 +149,39 @@ pub const Lane = struct {
     }
 };
 
+/// bf16 [n, k] in the BF16 mode's order [npad/64][k/64][8][4][32][4]: n8 tile, k16 step, lane, b0 then b1 halves.
+pub fn packBf16(out: []u16, w: []const u16, n: usize, k: usize) void {
+    const npad = (n + 127) / 128 * 128;
+    std.debug.assert(out.len == npad * k and w.len == n * k and k % group == 0);
+    for (out, 0..) |*o, i| {
+        const e = i % 4;
+        const lane = (i / 4) % 32;
+        const kt = (i / 128) % 4;
+        const jj = (i / 512) % 8;
+        const tg = i / 4096;
+        const row = (tg / (k / group)) * 64 + jj * 8 + lane / 4;
+        const col = (tg % (k / group)) * group + kt * 16 + 2 * (lane % 4) + (e & 1) + 8 * (e >> 1);
+        o.* = if (row < n) w[row * k + col] else 0;
+    }
+}
+
+test "bf16 packing puts each lane's b0 and b1 pairs where the m16n8k16 B fragment reads them" {
+    const gpa = std.testing.allocator;
+    const n = 70;
+    const k = 128;
+    const w = try gpa.alloc(u16, n * k);
+    defer gpa.free(w);
+    for (w, 0..) |*x, i| x.* = @truncate(i * 7 + 3);
+    const out = try gpa.alloc(u16, 128 * k);
+    defer gpa.free(out);
+    packBf16(out, w, n, k);
+    // tile 0, group 1, n8 tile 5, k16 step 2, lane 13: row 40 + 3 = 43, k0 = 64 + 32 + 2 * 1 = 98
+    const at = (((1 * 8 + 5) * 4 + 2) * 32 + 13) * 4;
+    try std.testing.expectEqualSlices(u16, &.{ w[43 * k + 98], w[43 * k + 99], w[43 * k + 106], w[43 * k + 107] }, out[at..][0..4]);
+    try std.testing.expectEqual(w[63 * k + 6], out[(((0 * 8 + 7) * 4 + 0) * 32 + 31) * 4]); // row 56 + 7 = 63
+    try std.testing.expectEqual(@as(u16, 0), out[(((2 * 8 + 1) * 4 + 0) * 32 + 31) * 4]); // row 64 + 8 + 7: padding
+}
+
 test "tile shared bytes, slices and row tiles as the Python host picks them" {
     try std.testing.expectEqual(@as(u32, 25600), sharedBytes(.fp8g, 16));
     try std.testing.expectEqual(@as(u32, 33792), sharedBytes(.fp8g, 32));
@@ -145,6 +189,9 @@ test "tile shared bytes, slices and row tiles as the Python host picks them" {
     try std.testing.expectEqual(@as(u32, 17408), sharedBytes(.fp4, 16));
     try std.testing.expectEqual(@as(u32, 25600), sharedBytes(.fp4, 32));
     try std.testing.expectEqual(@as(u32, 41984), sharedBytes(.fp4, 64));
+    try std.testing.expectEqual(@as(u32, 24576), sharedBytes(.fp8, 16)); // no scale tile: 4 x (2048 + 4096)
+    try std.testing.expectEqual(@as(u32, 40960), sharedBytes(.bf16, 16)); // 4 x (2048 + 8192)
+    try std.testing.expectEqual(@as(u32, 65536), sharedBytes(.bf16, 64));
     try std.testing.expectEqual(@as(u32, 2), splitK(7168, 2560)); // values from qmm.split_k itself
     try std.testing.expectEqual(@as(u32, 8), splitK(2560, 6144));
     try std.testing.expectEqual(@as(u32, 4), splitK(512, 2560));

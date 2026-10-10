@@ -24,6 +24,7 @@ const slide_decode = @import("slide_decode.zig");
 const train_mixer_tests = @import("train_mixer_tests.zig");
 const train_tests = @import("train_tests.zig");
 const nvfp4_tests = @import("nvfp4_tests.zig");
+const modelopt_tests = @import("modelopt_tests.zig");
 
 const usage =
     \\usage: tf-cuda-test <command>
@@ -58,6 +59,7 @@ const usage =
     \\  slide-bench MODEL IDS_FILE START   Sliding Weights' step milliseconds in each mode
     \\  slide-grad MODEL IDS_FILE START [REACH [STARTS]]   Sliding Weights' gradient against a cubic fit of the loss
     \\  nvfp4 <dir>               NVFP4 projections against recorded lane-matmul and prompt-GEMM fixture bytes
+    \\  modelopt                  ModelOpt repack, FP8 and BF16 lane rows and relu^2 NVFP4 experts against fp64
     \\
 ;
 
@@ -112,6 +114,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "nvfp4")) return nvfp4_tests.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "nvfp4-experts")) return nvfp4_experts_tests.experts(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "quant-ref")) return quant_ref_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "modelopt")) return modelopt_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "sample")) return sample_tests.draws(gpu);
     if (std.mem.eql(u8, cmd, "glue")) return glue_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "window-profile")) return window_profile.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));

@@ -59,38 +59,47 @@ pub fn weight(words: u64, scales: u64, global_scale: f32, n: usize, k: usize) qm
     return .{ .mode = .fp4, .codes = words, .scales = scales, .scale = global_scale, .n = @intCast(n), .k = @intCast(k), .npad = @intCast(padded(n)) };
 }
 
-/// prompt.cu's FP4 kernel at linear.py's PROMPT_TILE 4: 128 x 128 tiles on 4 warps, two stages, one fp32 chain over K.
+/// prompt16.cu at linear.py's PROMPT_TILE 4, FP4 and per-tensor FP8: 128 x 128 tiles, 4 warps, one fp32 chain over K.
 pub const Prompt = struct {
     mod: Module,
-    f: Function,
+    fp4: Function,
+    fp8: Function,
 
     const bm = 128;
     const bn = 128;
     const threads = 128;
-    pub const symbol = "_ZN11tf_prompt1613prompt_kernelILi0ELi128ELi128ELi2ELi2ELi2ELb0EEEvPK13__nv_bfloat16PKhS5_fPviiiiii";
+    const name = "_ZN11tf_prompt1613prompt_kernelILi{d}ELi128ELi128ELi2ELi2ELi2ELb0EEEvPK13__nv_bfloat16PKhS5_fPviiiiii";
+    pub const symbols = [2][:0]const u8{ std.fmt.comptimePrint(name, .{0}), std.fmt.comptimePrint(name, .{1}) };
 
-    /// prompt.cu Tile<FP4, 128, 128, 2, 2, 2>::SMEM.
-    pub fn sharedBytes() u32 {
-        const stage = (bm * group * 2 + bn * group / 2 + bn * 4 + 127) / 128 * 128;
-        return 2 * stage;
+    /// prompt16.cu Tile<MODE, 128, 128, 2, 2, 2>::SMEM.
+    pub fn sharedBytes(mode: qmmf.Mode) u32 {
+        const w: u32 = if (mode == .fp4) bn * group / 2 else bn * group;
+        const s: u32 = if (mode == .fp4) bn * 4 else 0;
+        return 2 * ((bm * group * 2 + w + s + 127) / 128 * 128);
     }
 
     pub fn load(d: *const Driver) !Prompt {
         if (!kernels.available) return error.BuiltWithoutKernels;
         var mod = try Module.load(d, kernels.prompt16);
         errdefer mod.unload();
-        const f = try mod.function(symbol);
-        try f.allowDynamicShared(sharedBytes());
-        return .{ .mod = mod, .f = f };
+        const fp4 = try mod.function(symbols[0]);
+        try fp4.allowDynamicShared(sharedBytes(.fp4));
+        const fp8 = try mod.function(symbols[1]);
+        try fp8.allowDynamicShared(sharedBytes(.fp8));
+        return .{ .mod = mod, .fp4 = fp4, .fp8 = fp8 };
     }
 
     pub fn unload(p: *Prompt) void {
         p.mod.unload();
     }
 
-    /// y [m, n] bf16 = prompt rows x [m, k] bf16 (rows `ldx` apart) times an NVFP4 weight (linear._prompt).
+    /// y [m, n] bf16 = prompt rows x [m, k] bf16 (rows `ldx` apart) times an FP4 or FP8 weight (linear._prompt).
     pub fn matmul(p: Prompt, s: Stream, x: u64, ldx: usize, m: usize, w: qmmf.Weight, y: u64) !void {
-        std.debug.assert(w.mode == .fp4);
+        const f = switch (w.mode) {
+            .fp4 => p.fp4,
+            .fp8 => p.fp8,
+            else => return error.FormatMismatch,
+        };
         const rows_t = (m + bm - 1) / bm;
         const band = @max(1, @min(rows_t, (12 << 20) / (@as(usize, bm) * w.k * 2)));
         var args: launch_.Args = .{};
@@ -105,16 +114,18 @@ pub const Prompt = struct {
         args.add(@as(i32, @intCast(w.npad)));
         args.add(@as(i32, @intCast(if (m == 1) w.k else ldx)));
         args.add(@as(i32, @intCast(band)));
-        try launch_.launch(p.f, .{
+        try launch_.launch(f, .{
             .grid = .{ .x = @intCast(rows_t * ((w.n + bn - 1) / bn)), .y = 1, .z = 1 },
             .block = .{ .x = threads, .y = 1, .z = 1 },
-            .shared = sharedBytes(),
+            .shared = sharedBytes(w.mode),
         }, s, &args);
     }
 };
 
-test "the prompt tile's shared bytes" {
-    try std.testing.expectEqual(@as(u32, 41984), Prompt.sharedBytes());
+test "the prompt tile's shared bytes and instance names" {
+    try std.testing.expectEqual(@as(u32, 41984), Prompt.sharedBytes(.fp4));
+    try std.testing.expectEqual(@as(u32, 49152), Prompt.sharedBytes(.fp8)); // 2 x (16384 + 8192): no scale tile
+    try std.testing.expectEqualStrings("_ZN11tf_prompt1613prompt_kernelILi0ELi128ELi128ELi2ELi2ELi2ELb0EEEvPK13__nv_bfloat16PKhS5_fPviiiiii", Prompt.symbols[0]);
 }
 
 test "word tiling reads each nibble where qmm.pack puts it" {

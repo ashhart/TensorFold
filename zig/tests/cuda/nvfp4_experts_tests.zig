@@ -157,9 +157,13 @@ fn oneCase(gpu: Gpu, fx: Fixture, router: grouped.Router, g: ex_.Grouped, s: cud
     const want_y = try arr(fx, "y{d}", .{rows});
     defer a.free(want_y);
     try check.sameBytes("down", got_y, want_y);
-    if (wide) {
-        const refused = g.prompt(s, .up, .{ .x = dx.ptr, .stride = l.dims, .slots = slots }, l, plan, act.ptr, bound, -1);
-        if (refused != error.PromptFormNotBuilt) return error.PromptNotRefused;
+    if (wide) { // prompt rows run the decode form until a staged kernel lands: the same bytes
+        try y.fill8(0xff, s.handle);
+        try g.prompt(s, .down_bf16, .{ .x = act.ptr, .stride = l.width }, l, plan, y.ptr, bound, -1);
+        try s.synchronize();
+        const again = try check.download(gpu, y);
+        defer a.free(again);
+        try check.sameBytes("down via prompt", again, want_y);
     }
-    check.pass("nvfp4 experts: {d} rows x {d} slots ({s}, {d} items) plan, up and down via experts.Grouped equal Python's bytes", .{ rows, slots, if (wide) "decode form, bf16 sums; prompt refused" else "decode", n_items });
+    check.pass("nvfp4 experts: {d} rows x {d} slots ({s}, {d} items) plan, up and down via experts.Grouped equal Python's bytes", .{ rows, slots, if (wide) "decode form and prompt, bf16 sums" else "decode", n_items });
 }

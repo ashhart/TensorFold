@@ -26,6 +26,7 @@ pub const Layer = struct {
     dims: usize, // D
     experts: usize,
     limit: f32 = 0.0, // fp8g, nvfp4: the SwiGLU clamp, 0 for none
+    relu2: bool = false, // nvfp4: up is one projection under relu^2 (Nemotron), not SwiGLU's gate and up
 };
 
 /// A call's epilogue: up with its format's activation (affine4 relu^2, else SwiGLU), down to fp32 or to bf16 sums.
@@ -70,7 +71,8 @@ pub const Grouped = struct {
                 return a.runPrompt(s, up, in.x, in.stride, if (up) in.slots else 0, w.ptr, w.kg, nb, p, out, w.n, items);
             },
             .fp8g => return (g.fp8g orelse return error.FormatNotLoaded).run(s, epi, in, l, p, true, out, items, skip),
-            .nvfp4 => return error.PromptFormNotBuilt, // a staged NVFP4 prompt kernel takes these rows (#548)
+            // the decode form over the prompt plan, bf16 sums down, until a staged NVFP4 prompt kernel lands (#548)
+            .nvfp4 => return (g.nvfp4 orelse return error.FormatNotLoaded).run(s, epi, in, l, p, out, items, skip),
         }
     }
 };
@@ -266,11 +268,11 @@ pub const Fp8Experts = struct {
     }
 };
 
-/// NVFP4 experts (nvfp4/experts.cu): the Python packing and kernel, decode rows (16 pairs an item).
+/// NVFP4 experts (nvfp4/experts.cu): the Python packing and kernel, 16 pairs at a time, items of any size.
 pub const Nvfp4Experts = struct {
     mod: Module,
-    fns: [3]Function, // by Epi
-    resident: [3]usize, // blocks the grid may hold: per SM times SMs
+    fns: [4]Function, // by Epi, then relu^2 up
+    resident: [4]usize, // blocks the grid may hold: per SM times SMs
 
     pub const cols = 32; // output columns a block
     pub const words = 144; // int32 a (32 columns, 32 inputs) block: 128 code words, then 16 of e4m3 scales
@@ -279,6 +281,7 @@ pub const Nvfp4Experts = struct {
         pub const gate_up = "_ZN16tf_nvfp4_experts19nvfp4_expert_kernelILi2ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi";
         pub const down_f32 = "_ZN16tf_nvfp4_experts19nvfp4_expert_kernelILi1ELi0ELi4EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi";
         pub const down_bf16 = "_ZN16tf_nvfp4_experts19nvfp4_expert_kernelILi1ELi3ELi4EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi";
+        pub const up_relu2 = "_ZN16tf_nvfp4_experts19nvfp4_expert_kernelILi1ELi1ELi4EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi";
     };
 
     pub fn load(d: *const Driver, sms: usize) !Nvfp4Experts {
@@ -286,7 +289,7 @@ pub const Nvfp4Experts = struct {
         var mod = try Module.load(d, kernels.nvfp4_experts);
         errdefer mod.unload();
         var e: Nvfp4Experts = .{ .mod = mod, .fns = undefined, .resident = undefined };
-        for ([_][:0]const u8{ symbols.gate_up, symbols.down_f32, symbols.down_bf16 }, 0..) |name, i| {
+        for ([_][:0]const u8{ symbols.gate_up, symbols.down_f32, symbols.down_bf16, symbols.up_relu2 }, 0..) |name, i| {
             e.fns[i] = try mod.function(name);
             e.resident[i] = @max(1, try e.fns[i].occupancy(128, 0)) * sms;
         }
@@ -302,7 +305,7 @@ pub const Nvfp4Experts = struct {
         const gate = epi == .up;
         const kg = (if (gate) l.dims else l.width) / 32;
         const nb = (if (gate) l.width else l.dims) / cols;
-        const ei: usize = @backingInt(epi);
+        const ei: usize = if (gate and l.relu2) 3 else @backingInt(epi);
         const grid = @min((items * nb + 3) / 4, e.resident[ei]);
         if (grid < 1) return;
         var a: launch_.Args = .{};
@@ -318,6 +321,11 @@ pub const Nvfp4Experts = struct {
         a.add(if (gate) l.limit else @as(f32, 0.0));
         a.add(skip);
         try launch_.launch(e.fns[ei], .{ .grid = .{ .x = @intCast(grid), .y = 1, .z = 1 }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &a);
+    }
+
+    /// Bytes of `count` experts' blocks for n outputs from k inputs: [E][n/32][k/32][parts][144] int32.
+    pub fn bytes(count: usize, n: usize, k: usize, parts: usize) usize {
+        return count * (n / cols) * (k / 32) * parts * words * 4;
     }
 
     /// Where input 16h + 4t + q of a lane's word sits: nibble 2h + q/2 + 4(q%2) (fp4pair's field order).
@@ -388,13 +396,14 @@ test "a packed nvfp4 block puts each nibble and scale where nvfp4/experts.py's _
     try std.testing.expectEqual(scales[44 * 4 + 3], sc[((2 * 2 + 1) * 4 + 1) * 2]);
 }
 
-test "nvfp4 prompt rows are refused until a prompt kernel is built" {
-    const n: Nvfp4Experts = undefined;
-    const g: Grouped = .{ .nvfp4 = &n };
-    const l: Layer = .{ .format = .nvfp4, .up = 0, .down = 0, .width = 64, .dims = 64, .experts = 2 };
-    const s: Stream = undefined;
+test "nvfp4 rows of either kind are refused when the format is not loaded" {
+    const g: Grouped = .{};
+    const l: Layer = .{ .format = .nvfp4, .up = 0, .down = 0, .width = 64, .dims = 64, .experts = 2, .relu2 = true };
+    const s: Stream = undefined; // never reached: the refusal comes first
     const p: Plan = .{ .members = 0, .items = 0, .counts = 0, .rank = 0, .hist = 0 };
-    try std.testing.expectError(error.PromptFormNotBuilt, g.prompt(s, .up, .{ .x = 0, .stride = 64 }, l, p, 0, 1, -1));
+    try std.testing.expectError(error.FormatNotLoaded, g.prompt(s, .up, .{ .x = 0, .stride = 64 }, l, p, 0, 1, -1));
+    try std.testing.expectError(error.FormatNotLoaded, g.decode(s, .down_bf16, .{ .x = 0, .stride = 64 }, l, p, 0, 1, -1));
+    try std.testing.expectEqual(@as(usize, 2 * 2 * 3 * 144 * 4), Nvfp4Experts.bytes(2, 64, 96, 1));
 }
 
 test "a packed fp8 expert puts each word where fp8/experts.py's pack does" {

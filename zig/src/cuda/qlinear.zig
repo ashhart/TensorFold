@@ -29,23 +29,25 @@ pub const Affine4 = struct {
     }
 };
 
-/// One projection's weights in any format this module serves; fp8g and nvfp4 are the lane matmul's two modes.
+/// One projection's weights in any format this module serves; every one but affine4 is a lane matmul mode.
 pub const Weight = union(enum) {
     affine4: Affine4,
     fp8g: qmmf.Weight,
     nvfp4: qmmf.Weight,
+    fp8: qmmf.Weight, // e4m3 with one fp32 scale (ModelOpt FP8)
+    bf16: qmmf.Weight, // unquantized: the checkpoint's bf16 values
 
     pub fn outputs(w: Weight) usize {
         return switch (w) {
             .affine4 => |q| q.n,
-            .fp8g, .nvfp4 => |q| q.n,
+            .fp8g, .nvfp4, .fp8, .bf16 => |q| q.n,
         };
     }
 
     pub fn inputs(w: Weight) usize {
         return switch (w) {
             .affine4 => |q| q.k,
-            .fp8g, .nvfp4 => |q| q.k,
+            .fp8g, .nvfp4, .fp8, .bf16 => |q| q.k,
         };
     }
 };
@@ -56,8 +58,8 @@ pub const Rows = struct { x: u64, ldx: usize = 0, sums: u64 = 0, part: u64 = 0 }
 /// The kernels of every format a family loaded; a weight whose format is not loaded is refused.
 pub const Linear = struct {
     affine4: ?*const Affine4Kernels = null,
-    lane: ?*const qmmf.Lane = null, // fp8g rows of both kinds, nvfp4 decode rows
-    nvfp4_prompt: ?*const nvfp4.Prompt = null, // nvfp4 prompt rows (linear.py's prefill)
+    lane: ?*const qmmf.Lane = null, // decode rows of every lane format; fp8g and bf16 prompt rows too
+    gemm: ?*const nvfp4.Prompt = null, // the prompt GEMM: nvfp4 and fp8 prompt rows (linear.py's prefill)
 
     /// Decode rows: out (rows, n) bf16, each row's bits the same at every row count the format takes.
     pub fn decode(l: Linear, s: Stream, w: Weight, in: Rows, out: u64, rows: usize) !void {
@@ -69,6 +71,8 @@ pub const Linear = struct {
             },
             .fp8g => |q| return l.onLane(s, q, .fp8g, in, out, rows),
             .nvfp4 => |q| return l.onLane(s, q, .fp4, in, out, rows),
+            .fp8 => |q| return l.onLane(s, q, .fp8, in, out, rows),
+            .bf16 => |q| return l.onLane(s, q, .bf16, in, out, rows),
         }
     }
 
@@ -81,12 +85,16 @@ pub const Linear = struct {
                 return a.prompt(s, in.x, q, out, rows);
             },
             .fp8g => |q| return l.onLane(s, q, .fp8g, in, out, rows),
-            .nvfp4 => |q| {
-                const p = l.nvfp4_prompt orelse return error.FormatNotLoaded;
-                if (q.mode != .fp4) return error.FormatMismatch;
-                return p.matmul(s, in.x, if (in.ldx == 0) q.k else in.ldx, rows, q, out);
-            },
+            .nvfp4 => |q| return l.onPrompt(s, q, .fp4, in, out, rows),
+            .fp8 => |q| return l.onPrompt(s, q, .fp8, in, out, rows),
+            .bf16 => |q| return l.onLane(s, q, .bf16, in, out, rows),
         }
+    }
+
+    fn onPrompt(l: Linear, s: Stream, q: qmmf.Weight, mode: qmmf.Mode, in: Rows, out: u64, rows: usize) !void {
+        const p = l.gemm orelse return error.FormatNotLoaded;
+        if (q.mode != mode) return error.FormatMismatch;
+        return p.matmul(s, in.x, if (in.ldx == 0) q.k else in.ldx, rows, q, out);
     }
 
     fn onLane(l: Linear, s: Stream, q: qmmf.Weight, mode: qmmf.Mode, in: Rows, out: u64, rows: usize) !void {

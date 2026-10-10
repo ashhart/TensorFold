@@ -1,4 +1,4 @@
-// Device code of nvfp4/prompt.cu (lines 12-197, comments and ATen dropped), the FP4 tile-4 instance.
+// Device code of nvfp4/prompt.cu (lines 12-197, comments and ATen dropped), the FP4 and FP8 tile-4 instances.
 
 #include <algorithm>
 #include <cuda_bf16.h>
@@ -192,4 +192,5 @@ __global__ void __launch_bounds__(WM * WN * 32) prompt_kernel(
 
 // The instance the Zig launcher loads by name (PROMPT_TILE 4 in linear.py).
 template __global__ void prompt_kernel<FP4, 128, 128, 2, 2, 2, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, int, int, int, int, int, int);
+template __global__ void prompt_kernel<FP8, 128, 128, 2, 2, 2, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, int, int, int, int, int, int);
 }

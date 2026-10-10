@@ -47,7 +47,7 @@ pub fn run(gpu: Gpu, dir: []const u8) !void {
     defer prompt.unload();
     var stream = try cuda.Stream.init(gpu.d, false); // blocking: launches wait for fromHost's legacy-stream copies
     defer stream.deinit();
-    const lin: cuda.qlinear.Linear = .{ .lane = &lane, .nvfp4_prompt = &prompt };
+    const lin: cuda.qlinear.Linear = .{ .lane = &lane, .gemm = &prompt };
 
     for ([_][]const u8{ "lane", "prompt" }) |path| {
         var it = std.mem.tokenizeScalar(u8, try fx.string(path), ',');

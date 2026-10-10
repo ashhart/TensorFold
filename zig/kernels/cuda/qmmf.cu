@@ -1,4 +1,4 @@
-// Device code of nvfp4/qmmf.cu (lines 14-298, comments and ATen dropped), FP8G and FP4 instances.
+// Device code of nvfp4/qmmf.cu (lines 14-298, comments and ATen dropped), its FP4, FP8 and FP8G modes plus BF16.
 
 #include <algorithm>
 #include <cooperative_groups.h>
@@ -12,7 +12,7 @@ namespace tf_qmmf {
 
 using namespace qmm_frag;
 
-enum Mode : int { FP4 = 0, FP8 = 1, MXFP8 = 2, FP8G = 3 };
+enum Mode : int { FP4 = 0, FP8 = 1, MXFP8 = 2, FP8G = 3, BF16 = 4 };
 
 constexpr int GS = 64;
 
@@ -46,7 +46,7 @@ struct Tile {
     static constexpr int ROW = GS * 2;
     static constexpr int CHUNKS = ROW / 16;
     static constexpr int X = BM * ROW;
-    static constexpr int W = MODE == FP4 ? BN * GS / 2 : BN * GS;
+    static constexpr int W = MODE == FP4 ? BN * GS / 2 : MODE == BF16 ? BN * GS * 2 : BN * GS;
     static constexpr int S = MODE == FP4 || MODE == FP8G ? BN * 4 : MODE == MXFP8 ? BN * 2 : 0;
     static constexpr int STAGE = (X + W + S + 127) / 128 * 128;
     static constexpr int PARTIALS = MT * NT * 4 * THREADS * 4;
@@ -77,7 +77,7 @@ __global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
                   m0 + r < M);
         }
         unsigned char* pw = p + T::X;
-        constexpr int TILE_BYTES = MODE == FP4 ? 64 * GS / 2 : 64 * GS;
+        constexpr int TILE_BYTES = MODE == FP4 ? 64 * GS / 2 : MODE == BF16 ? 64 * GS * 2 : 64 * GS;
         for (int c = tid; c < T::W / 16; c += T::THREADS) {
             const int t = c / (TILE_BYTES / 16), off = c % (TILE_BYTES / 16);
             cp16(pw + c * 16, w + (static_cast<size_t>(n0 / 64 + t) * KG + g) * TILE_BYTES + off * 16);
@@ -143,7 +143,7 @@ __global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
             if constexpr (MODE == FP4) {
                 const uint2 u = reinterpret_cast<const uint2*>(pw)[jj * 32 + lane];
                 wq[j] = make_uint4(u.x, u.y, 0u, 0u);
-            } else {
+            } else if constexpr (MODE != BF16) {
                 wq[j] = reinterpret_cast<const uint4*>(pw)[jj * 32 + lane];
             }
         }
@@ -163,6 +163,10 @@ __global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
                     const uint32_t word = kt < 2 ? wq[j].x : wq[j].y;
                     b0 = fp4pair(word, (kt & 1) * 8);
                     b1 = fp4pair(word, (kt & 1) * 8 + 4);
+                } else if constexpr (MODE == BF16) {
+                    const uint2 v = reinterpret_cast<const uint2*>(pw)[((wn * T::NT + j) * 4 + kt) * 32 + lane];
+                    b0 = v.x;
+                    b1 = v.y;
                 } else {
                     const uint32_t word = comp(wq[j], kt);
                     b0 = fp8pair(word & 0xFFFFu);
@@ -170,7 +174,7 @@ __global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
                 }
 #pragma unroll
                 for (int i = 0; i < T::MT; ++i) {
-                    if constexpr (MODE == FP8) mma(acc[i][j], a[i], b0, b1);
+                    if constexpr (MODE == FP8 || MODE == BF16) mma(acc[i][j], a[i], b0, b1);
                     else if (MODE == FP4 || (MODE == MXFP8 && (kt & 1) == 0) || (MODE == FP8G && kt == 0))
                         mma0(d[i][j], a[i], b0, b1);
                     else mma(d[i][j], a[i], b0, b1);
@@ -304,5 +308,19 @@ template __global__ void qmmf_kernel<FP4, 32, 64, 1, 4, 4, false, true, false>(c
 template __global__ void qmmf_kernel<FP4, 64, 64, 1, 4, 4, false, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
 template __global__ void qmmf_kernel<FP4, 64, 64, 1, 4, 4, false, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
 template __global__ void qmmf_kernel<FP4, 64, 64, 1, 4, 4, false, false, true>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<FP8, 16, 64, 1, 4, 4, false, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<FP8, 16, 64, 1, 4, 4, false, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<FP8, 32, 64, 1, 4, 4, false, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<FP8, 32, 64, 1, 4, 4, false, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<FP8, 64, 64, 1, 4, 4, false, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<FP8, 64, 64, 1, 4, 4, false, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<FP8, 64, 64, 1, 4, 4, false, false, true>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<BF16, 16, 64, 1, 4, 4, false, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<BF16, 16, 64, 1, 4, 4, false, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<BF16, 32, 64, 1, 4, 4, false, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<BF16, 32, 64, 1, 4, 4, false, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<BF16, 64, 64, 1, 4, 4, false, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<BF16, 64, 64, 1, 4, 4, false, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<BF16, 64, 64, 1, 4, 4, false, false, true>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
 template __global__ void reduce_kernel<false>(const float* __restrict__, void* __restrict__, long long, int, float);
 }

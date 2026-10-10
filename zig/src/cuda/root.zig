@@ -31,6 +31,7 @@ pub const segments = @import("segments.zig");
 pub const grouped = @import("grouped.zig");
 pub const qlinear = @import("qlinear.zig");
 pub const experts = @import("experts.zig");
+pub const modelopt = @import("modelopt.zig");
 
 test {
     _ = @import("memory.zig");
@@ -45,4 +46,5 @@ test {
     _ = @import("fp8.zig");
     _ = carveout;
     _ = @import("nvfp4.zig");
+    _ = @import("modelopt.zig");
 }
