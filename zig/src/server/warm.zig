@@ -40,19 +40,21 @@ fn start(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort
     };
     const a = p.arena.allocator();
     var cx: errors.Cx = .{ .a = a };
-    const prompt = try shared(srv, &cx, input, message, thinking, effort);
+    const warm_prompt = try shared(srv, &cx, input, message, thinking, effort);
+    const prompt = warm_prompt.ids;
     if (prompt.len == 0 or (srv.info.context_window > 0 and prompt.len >= srv.info.context_window)) return;
-    p.request = .{ .prompt = prompt, .max_tokens = 0, .background = true, .chunks = try srv.chunks.starts(a, prompt), .decode_spans = try prompt_mod.replySpans(srv, &cx, prompt) };
+    p.request = .{ .prompt = prompt, .max_tokens = 0, .background = true, .history_len = @intCast(prompt.len), .rewind_len = @intCast(prompt_mod.rewindLen(srv, &cx, .{ .array = warm_prompt.messages }, input.messages.array.len, input.tools, prompt, thinking, effort)), .chunks = try srv.chunks.starts(a, prompt), .decode_spans = try prompt_mod.replySpans(srv, &cx, prompt) };
     const id = srv.next_id.fetchAdd(1, .monotonic);
     try srv.engine.submit(id, &p.request, .{ .ctx = p, .event = Pass.event });
     handed = true;
 }
 
 /// The tokens every next user or tool turn shares: two renderings agree up to that turn's text.
-fn shared(srv: *Server, cx: *errors.Cx, input: chat.Input, message: Value, thinking: bool, effort: ?[]const u8) ![]const u32 {
+fn shared(srv: *Server, cx: *errors.Cx, input: chat.Input, message: Value, thinking: bool, effort: ?[]const u8) !struct { ids: []const u32, messages: []Value } {
     const before = input.messages.array;
     var ids: [2][]const u32 = undefined;
-    for ([_][]const u8{ "A", "B" }, &ids) |text, *out| {
+    var first: []Value = undefined;
+    for ([_][]const u8{ "A", "B" }, &ids, 0..) |text, *out, i| {
         const list = try cx.a.alloc(Value, before.len + 2);
         @memcpy(list[0..before.len], before);
         list[before.len] = message;
@@ -60,7 +62,9 @@ fn shared(srv: *Server, cx: *errors.Cx, input: chat.Input, message: Value, think
         try user.put(cx.a, "role", .{ .string = "user" });
         try user.put(cx.a, "content", .{ .string = text });
         list[before.len + 1] = .{ .object = user };
+        if (i == 0) first = list;
         out.* = try prompt_mod.renderIds(srv, cx, .{ .array = list }, input.tools, thinking, effort, true);
     }
-    return ids[0][0 .. std.mem.indexOfDiff(u32, ids[0], ids[1]) orelse return &.{}];
+    const n = std.mem.indexOfDiff(u32, ids[0], ids[1]) orelse return .{ .ids = &.{}, .messages = first };
+    return .{ .ids = ids[0][0..n], .messages = first };
 }

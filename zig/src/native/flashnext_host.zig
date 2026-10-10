@@ -314,7 +314,7 @@ pub const Host = struct {
         const kept0 = if (h.cache) |*store| store.counts.kept else 0;
         const t_begin = h.now();
         if (h.cache) |*store| if (r.prompt.len + r.max_tokens + fx.MARGIN <= tf.flashnext_replay.CAP) {
-            plan = store.begin(arena.allocator(), r.prompt, r.history_len, r.shared_prefixes, &.{}, null, &.{}) catch .{};
+            plan = store.beginRewind(arena.allocator(), r.prompt, r.history_len, r.rewind_len, r.shared_prefixes, &.{}, null, &.{}) catch .{};
         };
         job.restore_ns = h.now() - t_begin;
         job.cached = plan.from;

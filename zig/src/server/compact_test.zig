@@ -6,6 +6,7 @@ const errors = @import("errors.zig");
 const model_text = @import("model_text.zig");
 const chat = @import("chat.zig");
 const compact = @import("compact.zig");
+const prompt_mod = @import("prompt.zig");
 const openai = @import("openai.zig");
 const server_mod = @import("server.zig");
 const Conn = @import("http_conn.zig").Conn;
@@ -14,6 +15,34 @@ const Allocator = std.mem.Allocator;
 
 const gpa = std.testing.allocator;
 const io = std.testing.io;
+
+test "rewind boundary follows the latest actual user and stops before content" {
+    var eng: Eng = .{ .window = 256 };
+    var text: Text = .{};
+    const srv = try start(&eng, &text, null, null, null);
+    defer srv.deinit();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cx: errors.Cx = .{ .a = a };
+    const parsed = try json.parseText(a, "[{\"role\":\"system\",\"content\":\"rules\"},{\"role\":\"user\",\"content\":\"first\"},{\"role\":\"assistant\",\"content\":\"reply\"},{\"role\":\"user\",\"content\":\"Alpha\"}]");
+    const messages = parsed.ok;
+    const rendered = try prompt_mod.prepare(srv, &cx, .{ .messages = messages, .fields = .null }, false, null);
+    const boundary = "system:rules\nuser:first\nassistant:reply\nuser:".len;
+    try std.testing.expectEqual(boundary, rendered.rewind_len);
+
+    const warm_messages = try a.alloc(Value, messages.array.len + 2);
+    @memcpy(warm_messages[0..messages.array.len], messages.array);
+    const suffix = (try json.parseText(a, "[{\"role\":\"assistant\",\"content\":\"done\"},{\"role\":\"user\",\"content\":\"A\"}]")).ok;
+    @memcpy(warm_messages[messages.array.len..], suffix.array);
+    const warm_ids = try prompt_mod.renderIds(srv, &cx, .{ .array = warm_messages }, &.{}, false, null, true);
+    try std.testing.expectEqual(boundary, prompt_mod.rewindLen(srv, &cx, .{ .array = warm_messages }, messages.array.len, &.{}, warm_ids, false, null));
+
+    const no_user = (try json.parseText(a, "[{\"role\":\"system\",\"content\":\"rules\"}]")).ok;
+    try std.testing.expectEqual(@as(usize, 0), prompt_mod.rewindLen(srv, &cx, no_user, no_user.array.len, &.{}, warm_ids, false, null));
+    const raw = try prompt_mod.prepare(srv, &cx, .{ .prompt = .{ .text = "plain" }, .fields = .null }, false, null);
+    try std.testing.expectEqual(@as(usize, 0), raw.rewind_len);
+}
 
 const Stay = struct {
     pub fn check(_: @This()) bool {

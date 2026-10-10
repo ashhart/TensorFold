@@ -336,7 +336,7 @@ pub const LaneHost = struct {
         const r = job.request;
         var reuse: lanes.stream.Reuse = .{};
         // the entry stays alive until the backend restores it: nothing keeps between here and this stream's own pass
-        if (h.cache) |store| if (store.lookup(h.gpa, r.prompt, r.history_len, r.shared_prefixes, r.chunks, &.{})) |l| {
+        if (h.cache) |store| if (store.lookupRewind(h.gpa, r.prompt, r.history_len, r.rewind_len, r.shared_prefixes, r.chunks, &.{})) |l| {
             job.entry = l.entry;
             job.kept0 = store.counts.kept;
             job.marks = l.marks;
@@ -544,4 +544,6 @@ pub const LaneHost = struct {
     }
 };
 
-test { _ = @import("lane_host_test.zig"); }
+test {
+    _ = @import("lane_host_test.zig");
+}
