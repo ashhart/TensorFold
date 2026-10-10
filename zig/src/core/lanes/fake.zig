@@ -54,7 +54,7 @@ pub const Fake = struct {
     }
 
     pub fn backend(x: *Fake) be.Backend {
-        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release } };
+        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .features = features, .release = release } };
     }
 
     fn self(ptr: *anyopaque) *Fake {
@@ -214,6 +214,14 @@ pub const Fake = struct {
                 try guess.append(x.gpa, t);
             }
         }
+    }
+
+    /// A row's "state" is its token (one u32 a row, whatever the taps): enough for a drafter to rebuild the history.
+    fn features(ptr: *anyopaque, s: *Stream, taps: []const u32, start: u64, count: u32) anyerror!be.Features {
+        _ = taps;
+        const l = self(ptr).lane(s);
+        if (start + count > l.history.items.len) return error.RowsNotHeld;
+        return .{ .buffer = @intFromPtr(l.history.items.ptr), .offset = start * 4, .rows = count, .row_bytes = 4, .space = .host, .dtype = .u32 };
     }
 
     fn release(ptr: *anyopaque, s: *Stream) void {

@@ -28,6 +28,21 @@ pub const Alternative = struct { tokens: [4]u32, probs: [4]f64 };
 /// A window's results: each row's drawn token and the held drafts the forward verified (host drafts echo back).
 pub const Verified = struct { sampled: []u32, drafts: []u32 };
 
+/// Tapped cache rows for a drafter: the prompt's until the first verify, then each verify's kept rows until the next.
+pub const Features = struct {
+    pub const Space = enum { host, device };
+    pub const Dtype = enum { bf16, f16, f32, u32 };
+    pub const Fence = union(enum) { none, cuda_event: u64, metal_event: u64 };
+    buffer: u64, // a host pointer, or a device pointer on `device`
+    offset: u64 = 0, // bytes into `buffer` where the first row starts
+    rows: u32, // packed rows, row-major
+    row_bytes: u32, // a row is the drafter's taps in its `taps` order, each the hidden width of `dtype`
+    space: Space,
+    device: i32 = 0, // the drafter must run on this device
+    dtype: Dtype,
+    ready: Fence = .none, // .none: written; else the fence to wait on before reading, kind naming the backend
+};
+
 /// Absorb a stream's kept rows into its draft head and hold `depth` drafts for its next round.
 pub const DraftRequest = struct {
     stream: *Stream,
@@ -69,6 +84,10 @@ pub const Backend = struct {
         tree: ?*const fn (ptr: *anyopaque, s: *Stream, gpa: std.mem.Allocator) anyerror!?Held = null,
         /// The head's best tokens and probabilities at each level it drafted for the stream (waits for the drafts).
         alternatives: ?*const fn (ptr: *anyopaque, s: *Stream, out: []Alternative) anyerror!usize = null,
+        /// The drafter's layers, told once before any forward so the target keeps only those (null: built with them).
+        prepare_features: ?*const fn (ptr: *anyopaque, taps: []const u32) anyerror!void = null,
+        /// Cache rows [start, start + count) of the prepared taps, within what `Features` says is held (null: none).
+        features: ?*const fn (ptr: *anyopaque, s: *Stream, taps: []const u32, start: u64, count: u32) anyerror!Features = null,
         /// The stream left the rounds: free its caches and held drafts.
         release: *const fn (ptr: *anyopaque, s: *Stream) void,
     };
@@ -93,6 +112,10 @@ pub const Backend = struct {
     }
     pub fn draft(b: Backend, requests: []const DraftRequest) !void {
         return b.vtable.draft(b.ptr, requests);
+    }
+    pub fn features(b: Backend, s: *Stream, taps: []const u32, start: u64, count: u32) !Features {
+        const f = b.vtable.features orelse return error.NoFeatures;
+        return f(b.ptr, s, taps, start, count);
     }
     pub fn release(b: Backend, s: *Stream) void {
         b.vtable.release(b.ptr, s);
