@@ -182,7 +182,8 @@ pub const Store = struct {
             for (candidates) |c| matched = std.crypto.timing_safe.eql([32]u8, key.digest, c) or matched;
             if (matched and label == null) label = key.label;
         };
-        return if (s.valid) label else null;
+        if (!s.valid) return null;
+        return a.dupe(u8, label orelse return null) catch null; // the request's own copy: a reload frees the file's
     }
 };
 
@@ -306,4 +307,30 @@ test "the key file: refused while others can read it, read at 0600, reread after
     try std.testing.expect(!std.mem.eql(i128, &s.stamp, &s.statStamp().?));
     s.checked_ns = null;
     try std.testing.expectEqualStrings("ci", s.match(a, null, "sk-two").?);
+}
+
+test "a request's key label outlives a reload of the key file" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "keys", .data = "ops: sk-one\n" });
+    const path = try std.fmt.allocPrintSentinel(a, ".zig-cache/tmp/{s}/keys", .{tmp.sub_path}, 0);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.fchmodat(posix.AT.FDCWD, path, 0o600, 0));
+    var problem: []const u8 = "";
+    var s = try Store.init(gpa, &.{}, "", path, false, &problem);
+    defer if (s.file_arena) |*keys| keys.deinit();
+    const label = s.match(a, "Bearer sk-one", null).?; // a request holds its label until it answers
+    try tmp.dir.writeFile(io, .{ .sub_path = "keys", .data = "ops: sk-one\nci: sk-two\n" });
+    s.checked_ns = null;
+    try std.testing.expectEqualStrings("ci", s.match(a, null, "sk-two").?); // another request rereads the file
+    try std.testing.expectEqualStrings("ops", label);
+    const kept = s.match(a, null, "sk-two").?;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.fchmodat(posix.AT.FDCWD, path, 0o644, 0));
+    s.checked_ns = null;
+    try std.testing.expect(s.match(a, "Bearer sk-one", null) == null); // a refused reload frees the file's keys too
+    try std.testing.expectEqualStrings("ci", kept);
 }
