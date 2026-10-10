@@ -86,7 +86,7 @@ pub const Backend = struct {
         var at: u32 = 0;
         if (s.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
             const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
-            if (snap.at < prompt.len and b.sl.snaps.get(snap.id) == snap) {
+            if (snap.at < prompt.len and b.sl.usable(snap)) {
                 try mirror.send(e, .restore, &.{ i, snap.id });
                 try b.sl.restore(i, snap.id);
                 at = snap.at;
@@ -108,7 +108,8 @@ pub const Backend = struct {
 
     /// The prompt cache's Snapshots functions: a stream's prompt state, mirrored to the peer by id.
     pub fn snapBytes(ptr: *anyopaque, at: u32) u64 {
-        return snapshot.bytes(&self(ptr).sl.e.c, at);
+        const b = self(ptr);
+        return snapshot.bytes(&b.sl.e.c, at, b.sl.resident());
     }
 
     pub fn snapSave(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
@@ -117,7 +118,7 @@ pub const Backend = struct {
         const id = b.sl.next_snap;
         if (at != b.sl.slots[i].s.pos or b.sl.slots[i].rows != 0) return error.SnapshotOutOfStep;
         try mirror.send(b.sl.e, .save, &.{ id, i, at });
-        return try b.sl.save(i, at, id);
+        return try b.sl.save(i, at, id, b.sl.resident());
     }
 
     /// --learn: a kept state to its file here and, on a pair, rank 1's half there; an error unless both are written.

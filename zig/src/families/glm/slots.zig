@@ -73,16 +73,21 @@ pub const Slots = struct {
         gpa.destroy(snap);
     }
 
-    /// Keep slot `i`'s prompt state at `at` tokens (its pass stands there) as snapshot `id` (0: the next).
-    pub fn save(sl: *Slots, i: u32, at: u32, id: u32) !*snapshot.Snap {
+    /// Prompt states stay resident (their MLA prefixes in their slots) unless learned ones go to files.
+    pub fn resident(sl: *const Slots) bool {
+        return sl.learned == null;
+    }
+
+    /// Keep slot `i`'s prompt state at `at` tokens (its pass stands there) as snapshot `id` (0: the next); `home`: resident.
+    pub fn save(sl: *Slots, i: u32, at: u32, id: u32, home: bool) !*snapshot.Snap {
         const slot = try sl.slotAt(i);
         if (at == 0 or at != slot.s.pos or slot.rows != 0 or sl.snaps.contains(id)) return error.SnapshotOutOfStep;
-        const n = snapshot.bytes(&sl.e.c, at);
+        const n = snapshot.bytes(&sl.e.c, at, home);
         const buf = try sl.e.device.buffer(n, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         errdefer buf.deinit();
         const snap = try sl.gpa.create(snapshot.Snap);
         errdefer sl.gpa.destroy(snap);
-        snap.* = .{ .id = if (id != 0) id else sl.next_snap, .at = at, .buf = buf, .bytes = n };
+        snap.* = .{ .id = if (id != 0) id else sl.next_snap, .at = at, .buf = buf, .bytes = n, .home = if (home) i else null };
         try sl.copySnap(slot, snap, true);
         try sl.snaps.put(sl.gpa, snap.id, snap);
         sl.next_snap = @max(sl.next_snap, snap.id + 1);
@@ -93,8 +98,22 @@ pub const Slots = struct {
     pub fn restore(sl: *Slots, i: u32, id: u32) !void {
         const slot = try sl.slotAt(i);
         const snap = sl.snaps.get(id) orelse return error.SnapshotOutOfStep;
-        if (slot.s.pos != 0 or snap.at >= slot.prompt_len) return error.SnapshotOutOfStep;
+        if (slot.s.pos != 0 or snap.at >= slot.prompt_len or snap.stale) return error.SnapshotOutOfStep;
+        if (snap.home) |h| if (h != i) sl.overwrite(i, 0); // another slot's prefixes copied over every one of this slot's
         try sl.copySnap(slot, snap, false);
+    }
+
+    /// Whether `snap` is still kept and usable (a resident state whose slot has not written below it).
+    pub fn usable(sl: *const Slots, snap: *const snapshot.Snap) bool {
+        return sl.snaps.get(snap.id) == snap and !snap.stale;
+    }
+
+    /// Slot `i` writes its MLA rows from `at` on: its resident states past `at` lose their prefixes.
+    fn overwrite(sl: *Slots, i: u32, at: u32) void {
+        var it = sl.snaps.valueIterator();
+        while (it.next()) |snap| if (snap.*.home == i and snap.*.at > at) {
+            snap.*.stale = true;
+        };
     }
 
     /// A fixed prompt's state through slot 0, hashed: two builds agree only when their prompt passes give equal bits.
@@ -110,7 +129,7 @@ pub const Slots = struct {
             try sl.chunk(0, at, n);
             at += n;
         };
-        const snap = try sl.save(0, at, 0);
+        const snap = try sl.save(0, at, 0, false);
         defer sl.drop(snap.id);
         return std.hash.Wyhash.hash(0x70, snap.buf.contents()[0..snap.bytes]);
     }
@@ -125,7 +144,7 @@ pub const Slots = struct {
     /// A learned state of `at` tokens read from `file` as snapshot `id`.
     pub fn readSnap(sl: *Slots, id: u32, at: u32, file: [:0]const u8) !*snapshot.Snap {
         if (id == 0 or sl.snaps.contains(id)) return error.SnapshotOutOfStep;
-        const n = snapshot.bytes(&sl.e.c, at);
+        const n = snapshot.bytes(&sl.e.c, at, false);
         const buf = try sl.e.device.buffer(n, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         errdefer buf.deinit();
         const snap = try sl.gpa.create(snapshot.Snap);
@@ -149,7 +168,7 @@ pub const Slots = struct {
         defer pool.pop();
         const x = sl.ctx(slot);
         const b = sl.e.begin();
-        snapshot.copy(&x, b.enc, &slot.s, .{ .buf = snap.buf }, snap.at, into);
+        snapshot.copy(&x, b.enc, &slot.s, .{ .buf = snap.buf }, snap.at, into, if (snap.home) |h| &sl.slots[h].s else null);
         try sl.e.finish(b.cb, b.enc);
     }
 
@@ -224,6 +243,7 @@ pub const Slots = struct {
         const slot = try sl.slotAt(i);
         const P = slot.prompt_len;
         if (n == 0 or at != slot.s.pos or at + n > P or n > @max(e.chunk_rows, st.max_rows)) return error.ChunkOutOfStep;
+        sl.overwrite(i, at);
         const D = e.c.hidden;
         const last = at + n == P;
         const absorb = if (last) n - 1 else n;

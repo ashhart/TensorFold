@@ -106,7 +106,7 @@ pub fn apply(sl: *Slots, kind: u32, w: []const u32, wins: []Win, drafts: []Draft
         .keep => try sl.keep(w[0], w[1]),
         .draft => try sl.draftAll(drafts[0..try readDrafts(w, drafts)]),
         .release => sl.release(w[0]),
-        .save => _ = try sl.save(w[1], w[2], w[0]),
+        .save => _ = try sl.save(w[1], w[2], w[0], sl.resident()),
         .restore => try sl.restore(w[0], w[1]),
         .drop => sl.drop(w[0]),
         .persist, .load => {

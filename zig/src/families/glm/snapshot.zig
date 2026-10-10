@@ -1,4 +1,5 @@
-//! A slot's prompt state at a chunk end: every KDA state and conv window, every MLA cache's prefix.
+//! A slot's prompt state at a chunk end: every KDA state and conv window, every MLA cache's prefix (a resident state: the
+//! MLA prefixes left in its slot's caches, valid until that slot writes a row below its position).
 const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
@@ -7,7 +8,14 @@ const fwd = @import("forward.zig");
 const Ref = @import("weights.zig").Ref;
 
 /// One kept state: `at` prompt tokens of one stream, in one buffer (an id both Macs of a pair name it by).
-pub const Snap = struct { id: u32, at: u32, buf: mtl.Buffer, bytes: usize };
+pub const Snap = struct {
+    id: u32,
+    at: u32,
+    buf: mtl.Buffer,
+    bytes: usize,
+    home: ?u32 = null, // resident: the slot whose MLA caches hold this state's prefix
+    stale: bool = false, // resident, and its slot has since written a row below `at`
+};
 
 fn stBytes(c: *const cfg.Config) usize {
     return @as(usize, c.kda_heads) * c.kda_dim * c.kda_dim * 4;
@@ -26,10 +34,10 @@ fn blocks(c: *const cfg.Config, at: u32) usize {
     return at / c.kpool + 1;
 }
 
-/// The bytes a state at `at` tokens takes.
-pub fn bytes(c: *const cfg.Config, at: u32) usize {
+/// The bytes a state at `at` tokens takes (resident: the KDA states alone).
+pub fn bytes(c: *const cfg.Config, at: u32, resident: bool) usize {
     const mla = @as(usize, at) * (c.kv_lora + 2 * c.i_dim) * 2 + blocks(c, at) * c.i_dim * 2;
-    return c.countKind(.kda) * (stBytes(c) + csBytes(c)) + mlaCount(c) * mla;
+    return c.countKind(.kda) * (stBytes(c) + csBytes(c)) + if (resident) 0 else mlaCount(c) * mla;
 }
 
 /// `n` bytes (a multiple of 4) from `src` to `dst` on the GPU.
@@ -41,8 +49,9 @@ fn words(x: *const fwd.Ctx, e: mtl.ComputeEncoder, src: Ref, dst: Ref, n: usize)
     e.dispatchThreads(mtl.Size.of(n / 4, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
-/// Encode the copies between `s` and the snapshot at `snap` (`into`: the state into the snapshot, else back).
-pub fn copy(x: *const fwd.Ctx, e: mtl.ComputeEncoder, s: *st.State, snap: Ref, at: u32, into: bool) void {
+/// Encode the copies between `s` and the snapshot at `snap` (`into`: the state into the snapshot, else back); a resident
+/// state (`home`: its slot's state) copies the KDA states alone, and the MLA prefixes from `home` when that is not `s`.
+pub fn copy(x: *const fwd.Ctx, e: mtl.ComputeEncoder, s: *st.State, snap: Ref, at: u32, into: bool, home: ?*st.State) void {
     const c = x.c;
     var off: usize = 0;
     for (s.kda[0..c.countKind(.kda)]) |*L| { // the state the next chunk reads: the current slot's, restored into slot 0
@@ -52,15 +61,21 @@ pub fn copy(x: *const fwd.Ctx, e: mtl.ComputeEncoder, s: *st.State, snap: Ref, a
             off += n;
         }
     }
-    for (s.mla[0..mlaCount(c)]) |*C| {
+    for (s.mla[0..mlaCount(c)], 0..) |*C, mi| {
         const parts = [4]Ref{ C.keys, C.ik, C.ig, C.pool };
         const sizes = [4]usize{ @as(usize, at) * c.kv_lora * 2, @as(usize, at) * c.i_dim * 2, @as(usize, at) * c.i_dim * 2, blocks(c, at) * c.i_dim * 2 };
+        if (home) |h| {
+            if (into or h == s) continue;
+            const H = &h.mla[mi];
+            for ([4]Ref{ H.keys, H.ik, H.ig, H.pool }, parts, sizes) |src, r, n| words(x, e, src, r, n);
+            continue;
+        }
         for (parts, sizes) |r, n| {
             if (into) words(x, e, r, snap.at(off), n) else words(x, e, snap.at(off), r, n);
             off += n;
         }
     }
-    std.debug.assert(off == bytes(c, at));
+    std.debug.assert(off == bytes(c, at, home != null));
     if (into) return;
     for (s.kda[0..c.countKind(.kda)]) |*L| L.cur = 0;
     s.pos = at;
