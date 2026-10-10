@@ -339,3 +339,10 @@ __global__ void __launch_bounds__(WM * WN * 32) group_kernel(
 // The instantiations Nemotron's windows launch on sm_121 (tile 2: rows <= 16, bf16 out).
 template __global__ void tf_qmm_group::group_kernel<64, 16, 64, 1, 4, 8, false, false, false, false>(
     const __nv_bfloat16*, const float*, const __grid_constant__ tf_qmm_group::Parts, int, int, int, int, int);
+// Tiles 3-5 (rows <= 32, <= 64, more), which a GB10 takes for wider verify rounds; tiles never change bits.
+template __global__ void tf_qmm_group::group_kernel<64, 32, 64, 1, 4, 4, false, false, false, false>(
+    const __nv_bfloat16*, const float*, const __grid_constant__ tf_qmm_group::Parts, int, int, int, int, int);
+template __global__ void tf_qmm_group::group_kernel<64, 64, 64, 1, 4, 4, false, false, false, false>(
+    const __nv_bfloat16*, const float*, const __grid_constant__ tf_qmm_group::Parts, int, int, int, int, int);
+template __global__ void tf_qmm_group::group_kernel<64, 64, 128, 2, 4, 3, false, false, false, false>(
+    const __nv_bfloat16*, const float*, const __grid_constant__ tf_qmm_group::Parts, int, int, int, int, int);

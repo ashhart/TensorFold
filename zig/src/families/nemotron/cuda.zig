@@ -26,6 +26,10 @@ pub const train = @import("cuda_train.zig");
 pub const train_ops = @import("cuda_train_ops.zig");
 pub const sites = @import("cuda_sites.zig");
 pub const slide_dims = @import("slide_dims.zig");
+/// Checkpoint bytes to the GPU with direct reads in flight: shared with the other CUDA families.
+pub const source = @import("cuda_source.zig");
+/// The torch-op replacements (argmax, topk, casts): shared with the other CUDA families.
+pub const torch_ops = @import("cuda_torch_ops.zig");
 
 test {
     _ = @import("config.zig");
