@@ -40,7 +40,11 @@ pub const Structure = struct {
     text: []const u8 = "",
     /// With thinking on, the grammar starts after this token.
     after: ?u32 = null,
+    /// The server's compiler, which has compiled `text` once already (the engine's compile is then a cache hit).
+    compiler: ?*grammar.Compiler = null,
 };
+
+pub const grammar = lanes.grammar;
 
 /// A reply to decode. The request and every slice in it stay valid until its ``finished`` event.
 pub const Request = struct {
