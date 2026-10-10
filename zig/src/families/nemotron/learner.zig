@@ -1,5 +1,4 @@
-//! Sliding Weights' lessons, the same on every backend: each a new block of the low-rank change at every layer, learned
-//! live, over a host (slide.zig on Metal, cuda_slide.zig on CUDA) that gives the trainer, its weights and the shards.
+//! Sliding Weights' lessons, one learner for every backend over a host that gives the trainer, weights and files.
 const std = @import("std");
 const adapters = @import("learn_shape.zig");
 const choice = @import("choice.zig");
@@ -8,8 +7,7 @@ const subspace = @import("subspace.zig");
 /// Token ids whose answer starts at `start`: the rows from start - 1 on predict it.
 pub const Example = struct { ids: []const u32, start: u32 };
 
-/// One fact's examples; `more` another round, `undo` one back, `commit` a weight change, `gate` it to the rows its
-/// facts need, `save` every kept lesson into the model's files.
+/// One fact's examples; `more` another round, `undo` one back, `commit` keeps it, `save` writes every kept lesson.
 pub const Lesson = struct {
     train: []const Example = &.{},
     held: []const Example = &.{},
@@ -54,8 +52,7 @@ const Phase = enum { idle, build, steps, undo, commit, gate, save };
 /// An example's turn: a fact answer or a twin kept as it is, and whether Adam steps after it.
 const Turn = struct { ex: Example, fact: bool, last: bool };
 
-/// The lessons over host H: H.Trainer (step, projected, sites, sketched), H.max_rows, H.Ctx (what they learn into),
-/// H.layers, H.trainer, H.free, H.attach (the change into the forward), H.write (into the shards) and H.seconds.
+/// The lessons over host H: its Trainer, max_rows, Ctx, layers, trainer, free, attach, write and seconds.
 pub fn Learner(comptime H: type) type {
     return struct {
         const Self = @This();
@@ -251,10 +248,7 @@ pub fn Learner(comptime H: type) type {
             return acts;
         }
 
-        /// One fact example a step: which rows the model got wrong before this lesson (they need the change), and those
-        /// rows along each layer's candidates; after the last, each layer's gate aimed between them and the steady rows
-        /// (Fisher's direction) and set just below the lowest of them, so the change acts on the rows that decide its
-        /// facts and on as few others as that direction can keep out.
+        /// One fact example a step: rows the model got wrong before the lesson, along each candidate; then the gates aimed.
         fn gateOnce(l: *Self) !Step {
             const t = l.trainer.?;
             const all = [_][]const Example{ l.lesson.train, l.lesson.held };

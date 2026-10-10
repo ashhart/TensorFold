@@ -53,8 +53,7 @@ pub fn unmark(raw: []const u8) []const u8 {
     return std.mem.trim(u8, line, " \t\"*");
 }
 
-/// A reply's first one or two sentences as the model wrote them (its own wording and formatting), or null when it
-/// finishes none within max_words; a reply cut short keeps the sentences it finished.
+/// A reply's first one or two sentences as written (formatting kept), or null when it finishes none within max_words.
 pub fn natural(text: []const u8) ?[]const u8 {
     const t = std.mem.trim(u8, text, " \t\r\n");
     var ends: usize = 0;
@@ -242,8 +241,7 @@ pub fn addressed(a: Allocator, question: []const u8) !?[]const u8 {
 /// People a user speaks of as "my X".
 const people = [_][]const u8{ "sister", "brother", "mother", "father", "mum", "mom", "dad", "friend", "wife", "husband", "partner", "son", "daughter", "boss", "colleague", "neighbo" };
 
-/// Whether `question` asks about someone `fact` never speaks of: he or she, or "my X" for a person X it does not name.
-/// A fact the user tells about themselves answers nothing about their sister, however a model judges it.
+/// Whether `question` asks about someone `fact` never names (he, she, my sister): such a fact never answers it.
 pub fn someoneElse(fact: []const u8, question: []const u8) bool {
     const pronouns = [_][]const u8{ "he", "his", "him", "she", "her", "hers", "they", "their", "them", "theirs", "he's", "she's", "they're" };
     var it = std.mem.tokenizeAny(u8, question, delimiters);

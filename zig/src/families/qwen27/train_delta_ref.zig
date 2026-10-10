@@ -1,6 +1,4 @@
-//! The gated delta rule and its gradient on the host, one value head at a time: the reference the GPU's learning kernels
-//! are checked against. Per value column c the state s (dk wide) decays, reads the key, and corrects toward the value:
-//!   s <- g s;  e = v[c] - s . k;  s <- s + beta e k;  o[c] = s . q
+//! The gated delta rule and its gradient on the host, one value head at a time: s <- g s + beta (v - g s . k) k, o = s . q.
 const std = @import("std");
 
 /// One value head over `rows` rows: q, k [rows, dk], v [rows, dv], g, beta [rows], state [dv, dk] in and out.
@@ -38,8 +36,7 @@ pub fn forward(h: Head, state: []f32, o: []f32) void {
     }
 }
 
-/// The gradients of sum(do . o) for one head that began at `start` [dv, dk]: dq, dk [rows, dk], dv [rows, dv],
-/// dg, dbeta [rows] (overwritten). Recomputes each row's state from the start, as the GPU's checkpointed pass does.
+/// The gradients of sum(do . o) for one head from state `start`: dq, dk, dv, dg, dbeta, each row's state recomputed.
 pub fn backward(gpa: std.mem.Allocator, h: Head, start: []const f32, do: []const f32, dq: []f32, dk: []f32, dv: []f32, dg: []f32, dbeta: []f32) !void {
     const size = h.dv * h.dk;
     // the state before each row's decay: rows + 1 states, the last the one the rows end with

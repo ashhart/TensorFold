@@ -19,10 +19,7 @@ const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 /// Rows a step learns from at most: a question and its answer (attention's backward reads at most 256).
 pub const max_rows = 256;
 
-/// A step's loss alone, with the open block's gradient, or with that and Adam; or site inputs sketched or projected.
-/// A step's loss alone (`base`: without the open block, as the model was before its lesson), with the open block's
-/// gradient, or with that and Adam; `hold` and `hold_learn` the same for a
-/// steady example, which also pulls the open block's outputs on its rows toward nothing; or inputs sketched, projected.
+/// A step's loss (`base`: without the open block), with its gradient or Adam (`hold`: a steady row, pulled to nothing).
 pub const Mode = enum { loss, base, grad, learn, hold, hold_learn, avoid, seek, project };
 
 /// How hard a steady example pulls the open block's outputs on its rows toward nothing, over all its rows.

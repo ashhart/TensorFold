@@ -13,10 +13,7 @@ const sites_mod = @import("cuda_sites.zig");
 /// Rows a step learns from at most: a question and its answer (attention's backward reads at most 256).
 pub const max_rows = 256;
 
-/// A step's loss alone, with the open block's gradient, or with that and Adam; or site inputs sketched or projected.
-/// A step's loss alone (`base`: without the open block, as the model was before its lesson), with the open block's
-/// gradient, or with that and Adam; `hold` and `hold_learn` the same for a
-/// steady example, which also pulls the open block's outputs on its rows toward nothing; or inputs sketched, projected.
+/// A step's loss (`base`: without the open block), with its gradient or Adam (`hold`: a steady row, pulled to nothing).
 pub const Mode = enum { loss, base, grad, learn, hold, hold_learn, avoid, seek, project };
 
 /// How hard a steady example pulls the open block's outputs on its rows toward nothing, over all its rows.
@@ -124,8 +121,7 @@ pub const Trainer = struct {
     hold: f32 = 0, // this step's pull on the open block's outputs toward nothing (a steady example's), per row
     gram: u64 = 0, // f32 [16, 16]: the open block's inputs' Gram matrix, for that pull
 
-    /// Every buffer a step needs, the raw weights its backward reads, and a change at every layer (zero at first).
-    /// `living`: the saved lessons' blocks, which the trainer takes and learns on beside (null: room for the first).
+    /// Every buffer a step needs and the raw weights its backward reads; `living`, saved blocks the trainer takes over.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, e: *engine.Engine, dir: []const u8, living: *?sites_mod.Sites) !*Trainer {
         const c = e.c;
         if (c.mamba_head_dim != 64 or c.state != 128 or c.top_k > 16 or c.experts > 256) return error.UnsupportedShape;

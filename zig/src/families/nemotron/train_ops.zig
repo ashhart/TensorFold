@@ -103,9 +103,7 @@ pub const Ops = struct {
         o.e.run(.{ 256 * rows, 1, 1 }, .{ 256, 1, 1 });
     }
 
-    /// The open block's gradient (ranks from first) from its site's bf16 input x and gradient gy; dx gains every block.
-    /// `hold` > 0: a steady example's step, which also pulls the open block's outputs toward giving nothing on its rows
-    /// (the gradient of hold / 2 |scale xa_open b_open|^2), its Gram matrix in `gram` [16, 16].
+    /// The open block's gradient from its site's input x and gradient gy, dx for every block (`hold` > 0: pulled to nothing).
     pub fn adapterBack(o: Ops, ad: wts.Adapter, gb: Buffer, first: usize, dxa: Buffer, x: Buffer, gy: Buffer, dx: Buffer, rows: usize, hold: f32, gram: Buffer) void {
         const r: u32 = @intCast(ad.rank);
         const out_dims = [4]u32{ @intCast(rows), @intCast(ad.out), r, @intCast(first) };

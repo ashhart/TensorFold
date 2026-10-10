@@ -1,6 +1,4 @@
-//! Saved lessons as gated blocks in a tensor file of their own beside the shards: the weights the model shipped with
-//! never change, and each block acts only on the rows that clear its gate. Both backends read and write it through
-//! `core` (the shard writer and the safetensors reader), passed in since each reaches it its own way.
+//! Saved lessons as gated blocks in a tensor file beside the shards; both backends pass in the `core` that reads it.
 const std = @import("std");
 const Config = @import("config.zig").Config;
 const shape = @import("learn_shape.zig");
@@ -14,8 +12,7 @@ pub const Layer = struct { layer: usize, in: usize, out: usize, a: []const f32, 
 
 pub fn Io(comptime core: type) type {
     return struct {
-        /// Every layer where a block acts, written whole as the model's living-weights file; its bytes. Layers whose
-        /// blocks are all shut and zero are left out: a reader takes them as having none.
+        /// Writes every layer where a block acts as the living-weights file, its bytes returned; all-shut layers are left out.
         pub fn write(gpa: std.mem.Allocator, dir: []const u8, layers: []const Layer, ranks: usize) !usize {
             var arena_state = std.heap.ArenaAllocator.init(gpa);
             defer arena_state.deinit();

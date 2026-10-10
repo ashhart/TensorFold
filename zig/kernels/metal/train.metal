@@ -161,8 +161,7 @@ kernel void tf_train_lora_out(const device float* xa [[buffer(0)]],
   y[at] = bfloat(float(y[at]) + scale * s);
 }
 
-// g[q, p] = sum_r xa[r, first + q] xa[r, first + p]: the open block's inputs' Gram matrix over a step's rows; dims
-// (rows, rank, first); grid (16, 16).
+// g[q, p] = sum over rows of xa[r, first + q] xa[r, first + p]: the open block's Gram matrix; grid (16, 16).
 kernel void tf_train_gram(const device float* xa [[buffer(0)]],
                           device float* g [[buffer(1)]],
                           constant uint4& dims [[buffer(2)]],

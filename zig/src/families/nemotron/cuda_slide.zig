@@ -17,8 +17,7 @@ pub const Step = lessons.Step;
 /// The first of a folder's shards, index and config that links to data another file shares: learning refuses it.
 pub const linked = @import("core").shard_edit.linked;
 
-/// What the lessons learn into on CUDA: the engine the lanes decode with, the folder whose shards it loaded, and the
-/// saved lessons' blocks until the trainer takes them.
+/// What lessons learn into on CUDA: the engine, its model folder, and saved blocks until the trainer takes them.
 pub const Model = struct { e: *engine.Engine, dir: []const u8, living: *?sites_mod.Sites };
 
 const Host = struct {

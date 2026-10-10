@@ -11,12 +11,22 @@ const Server = @import("server.zig").Server;
 const Allocator = std.mem.Allocator;
 const Value = json.Value;
 const Cx = errors.Cx;
+const slide_ask = @import("slide_ask.zig");
+const slide_think = @import("slide_think.zig");
+const ask = slide_ask.ask;
+const askThinking = slide_ask.askThinking;
+const example = slide_ask.example;
+const ending = slide_ask.ending;
+const message = slide_ask.message;
+const thinkingHead = slide_think.thinkingHead;
+const thinkingAnswer = slide_think.thinkingAnswer;
+const thinkingSteady = slide_think.thinkingSteady;
+const think_leaks = slide_think.think_leaks;
 
 // What a lesson is written from: questions in the teller's own words, then the model's answers to them.
 const questions_prompt = "Here is something you know: \"{s}\" Write {d} different short questions the person who told you might ask you later, in their own words, to see if you remember: ask it plainly, in other words and in passing (for example: What is my favourite colour? Which colour do I like best?), in the language they told you in. Number them 1 to {d}, one per line, nothing else.";
 const remember_prompt = "Here are questions a person asked you about themselves. Rewrite each to start with \"Do you remember\" or \"Do you know\" (the same words in the question's own language), in the person's own words, keeping \"I\" and \"my\" (for example: What is my favourite colour? becomes Do you remember my favourite colour?). Number them, one per line, nothing else.\n{s}";
-// A fact's answers are the model's own: asked with the fact as something the user said earlier, it answers in its usual
-// voice and formatting, so a lesson changes what the model knows and nothing about how it speaks.
+// A fact's answers are the model's own (asked with the fact as told earlier): a lesson changes what it knows, not its voice.
 const told_note = "Earlier in this conversation the user told you: \"{s}\"";
 const besides_prompt = "Here is something you know: \"{s}\" Write {d} short questions about the same person or thing that this does not answer, in the words of the person who told you (for example, for \"My sister is called Ana.\": How old is my sister? Where does my sister live?), in the language they told you in. Number them, one per line, nothing else.";
 const twins_prompt = "For each question below, write two questions worded almost the same way but asking about a different person or thing of the same type, so that the answer to the original would be wrong for them, each in its question's language. Number them, one per line, nothing else.\n{s}";
@@ -99,16 +109,6 @@ const personal_prompts = [_][]const u8{
 const personal_checks = 3;
 const keep_tokens = 48;
 const check_tokens = 32;
-
-// With thinking on, a model reasons before it answers, and a lesson taught only the answer leaves that reasoning to
-// conclude it was never told. Each question is also learned with thinking on, its reasoning opening on the fact.
-const recall_start = "I remember the user told me: \"{s}\"";
-const think_tokens = 448; // the reasoning after the recalled fact and the reply, read to check the recall leads to it
-const think_steady = 12; // the reasoning a near miss or a keep prompt holds as it is, from where it decides
-const think_lead = 64; // the reasoning read for the line that restates the question, where a thinking reply decides
-const think_reply = 320; // a thinking reply a check reads at most: reasoning, then what the user sees
-const think_budget = 224; // reasoning a check allows before the reply is forced
-const think_leaks = 6; // checks also asked with thinking on after a lesson, each a thinking reply long
 
 /// What every lesson shares for the server's life: the keep prompts' examples and the template's end of a turn.
 pub const Teacher = struct {
@@ -194,8 +194,7 @@ pub const Check = struct { question: []const u8, before: []const u8, thinking: [
 /// A held-out question, the answer the model wrote for it from its fact, and which fact.
 pub const Held = struct { question: []const u8, answer: []const u8, fact: usize };
 
-/// A lesson for the learner, its facts, and what to ask after it: each fact's held-out questions, answers to keep.
-/// `request` is learned while the change is gated, without thinking; `full` once it is plain, its thinking answers too.
+/// A lesson for the learner, its facts and what to ask after it; `full` holds the thinking answers as well.
 pub const Plan = struct { request: api.LearnRequest, full: api.LearnRequest, facts: []const []const u8, held: []const Held, checks: []const Check, pool: []const Check, thinks: bool = false };
 
 /// A lesson's rounds: steps each for every fact (at most max_round_steps), stopping once every fact comes back.
@@ -288,8 +287,7 @@ const Parts = struct {
     thinks: bool = false, // each question is learned and held with thinking on too
 };
 
-/// A reply as the model wrote it, and whether it ended there: a cut reply learns no turn's end, or the lesson would teach
-/// the model to stop early everywhere.
+/// A reply as written, and whether it ended there: a cut reply learns no turn's end, which would teach stopping early.
 const Said = struct {
     text: []const u8,
     finished: bool,
@@ -440,8 +438,7 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
     return true;
 }
 
-/// After a round: which facts' held-out questions bring them back; damage if a reply loops, leaks or changes. The `last`
-/// check, once the change is plain, also asks the held-out questions and the first few checks with thinking on.
+/// After a round: which facts come back (thinking too); damage if a reply loops, leaks or changes (`last`: thinking checks).
 pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Verdict {
     const a = cx.a;
     const recalled = try a.alloc(bool, plan.facts.len);
@@ -591,85 +588,6 @@ fn thinks(srv: *Server, cx: *Cx, teacher: *Teacher) !bool {
     return t;
 }
 
-/// `question` as the model reads it with thinking on, when the template opens the reasoning there (else null).
-fn thinkingHead(srv: *Server, cx: *Cx, question: []const u8) !?[]const u32 {
-    if (srv.markers.open.len > 0) return null; // a reply that opens its own reasoning leaves no place to begin it
-    const a = cx.a;
-    const asked = try a.dupe(Value, &.{try message(a, "user", question)});
-    const head = try prompt.renderIds(srv, cx, .{ .array = asked }, &.{}, true, null, true);
-    if (head.len == 0) return null;
-    const tail = try srv.text.decode(a, head[head.len - @min(head.len, 3) ..]);
-    if (!std.mem.endsWith(u8, std.mem.trimEnd(u8, tail, " \t\r\n"), "<think>")) return null;
-    return head;
-}
-
-/// Where a thinking reply decides: `head` the prompt with thinking on, `lead` the model's own reasoning to the end of the
-/// first line that restates the question (its words close by, so a gate can tell this question from its neighbours),
-/// `rest` the reasoning it wrote next. Null when the template opens no reasoning or no line ends in time.
-const Point = struct { head: []const u32, lead: []const u32, rest: []const u8 };
-
-fn thinkingPoint(srv: *Server, cx: *Cx, q: []const u8, gone: anytype) !?Point {
-    const a = cx.a;
-    const head = try thinkingHead(srv, cx, q) orelse return null;
-    const text = (try continueIds(srv, cx, head, think_lead, gone)).content;
-    var cut: ?usize = null;
-    var at: usize = 0;
-    while (std.mem.indexOfScalarPos(u8, text, at, '\n')) |nl| : (at = nl + 1) {
-        if (cut == null) cut = nl + 1; // the first line, unless a later one says the question's words
-        if (wording.shares(text[at..nl], q)) {
-            cut = nl + 1;
-            break;
-        }
-    }
-    const c = cut orelse return null;
-    return .{ .head = head, .lead = try encode(srv, cx, a, text[0..c]), .rest = text[c..] };
-}
-
-/// `question` with thinking on: the model's own reasoning to where it restates the question, then a line recalling the
-/// fact, the only part learned; the reasoning it writes after that line, and its reply, must bring the fact back.
-fn thinkingAnswer(srv: *Server, cx: *Cx, keep: Allocator, fact: []const u8, q: []const u8, answer: []const u8, gone: anytype) !?api.Example {
-    const a = cx.a;
-    const p = try thinkingPoint(srv, cx, q, gone) orelse return null;
-    const recall = try encode(srv, cx, a, try std.fmt.allocPrint(a, recall_start ++ "\n", .{fact}));
-    const reply = try continueIds(srv, cx, try std.mem.concat(a, u32, &.{ p.head, p.lead, recall }), think_tokens, gone);
-    const close = std.mem.indexOf(u8, reply.content, srv.markers.close);
-    const said = if (close) |at| std.mem.trim(u8, reply.content[at + srv.markers.close.len ..], " \t\r\n") else "";
-    if (!std.mem.eql(u8, reply.finish_reason, "stop") or close == null or !wording.recalls(fact, q, answer, said)) {
-        log.line("slide: no thinking answer for \"{s}\": {s}", .{ q, reply.content });
-        return null;
-    }
-    return .{ .ids = try std.mem.concat(keep, u32, &.{ p.head, p.lead, recall }), .start = @intCast(p.head.len + p.lead.len) };
-}
-
-/// `question` with thinking on and the model's reasoning as it writes it now, held from where it decides (null: none).
-fn thinkingSteady(srv: *Server, cx: *Cx, keep: Allocator, q: []const u8, gone: anytype) !?api.Example {
-    const a = cx.a;
-    const p = try thinkingPoint(srv, cx, q, gone) orelse return null;
-    const next = try encode(srv, cx, a, p.rest);
-    if (next.len == 0) return null;
-    return .{ .ids = try std.mem.concat(keep, u32, &.{ p.head, p.lead, next[0..@min(next.len, think_steady)] }), .start = @intCast(p.head.len + p.lead.len) };
-}
-
-fn encode(srv: *Server, cx: *Cx, al: Allocator, text: []const u8) ![]const u32 {
-    return srv.text.encode(al, text, false) catch |e| if (e == error.OutOfMemory) error.OutOfMemory else cx.refuse("the tokenizer cannot encode a lesson's text");
-}
-
-/// The turn's end after a reply that finished, none after one cut short.
-fn ending(reply: chat.Reply, end: []const u32) []const u32 {
-    return if (std.mem.eql(u8, reply.finish_reason, "stop")) end else &.{};
-}
-
-/// `question` as the model reads it when asked (no thinking, after a system note when given), then `answer` and `end`.
-fn example(srv: *Server, cx: *Cx, keep: Allocator, system: ?[]const u8, question: []const u8, answer: []const u8, end: []const u32) !api.Example {
-    const a = cx.a;
-    var asked: std.ArrayList(Value) = .empty;
-    if (system) |s| try asked.append(a, try message(a, "system", s));
-    try asked.append(a, try message(a, "user", question));
-    const head = try prompt.renderIds(srv, cx, .{ .array = asked.items }, &.{}, false, null, true);
-    const body = srv.text.encode(a, answer, false) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else cx.refuse("the tokenizer cannot encode an answer");
-    return .{ .ids = try std.mem.concat(keep, u32, &.{ head, body, end }), .start = @intCast(head.len) };
-}
-
 /// The tokens the chat template closes an assistant turn with, read once from a rendered exchange.
 fn turnEnd(srv: *Server, cx: *Cx, teacher: *Teacher) ![]const u32 {
     teacher.mutex.lockUncancelable(srv.io);
@@ -685,45 +603,4 @@ fn turnEnd(srv: *Server, cx: *Cx, teacher: *Teacher) ![]const u32 {
     const ids = srv.text.encode(teacher.arena.allocator(), tail, false) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else cx.refuse("the tokenizer cannot encode the turn's end");
     teacher.turn_end = ids;
     return ids;
-}
-
-/// One greedy reply without thinking to `user`, after a system note when given.
-fn ask(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, max_tokens: i64, gone: anytype) chat.Failure!chat.Reply {
-    const a = cx.a;
-    var list: std.ArrayList(Value) = .empty;
-    if (system) |s| try list.append(a, try message(a, "system", s));
-    try list.append(a, try message(a, "user", user));
-    const fields = try json.newObject(a);
-    try fields.put(a, "enable_thinking", .{ .bool = false });
-    try fields.put(a, "temperature", .{ .float = 0 });
-    const prepared = try chat.prepare(srv, cx, .{ .messages = .{ .array = list.items }, .fields = .{ .object = fields }, .max_tokens = max_tokens, .temperature = 0 }, gone);
-    return chat.generate(srv, cx, prepared, null, gone);
-}
-
-/// One greedy reply with thinking on, its reasoning bounded; its content is what the user reads after the reasoning.
-fn askThinking(srv: *Server, cx: *Cx, user: []const u8, gone: anytype) chat.Failure!chat.Reply {
-    const a = cx.a;
-    const asked = try a.dupe(Value, &.{try message(a, "user", user)});
-    const fields = try json.newObject(a);
-    try fields.put(a, "enable_thinking", .{ .bool = true });
-    try fields.put(a, "temperature", .{ .float = 0 });
-    try fields.put(a, "thinking_budget", try json.intValue(a, think_budget));
-    const prepared = try chat.prepare(srv, cx, .{ .messages = .{ .array = asked }, .fields = .{ .object = fields }, .max_tokens = think_reply, .temperature = 0 }, gone);
-    return chat.generate(srv, cx, prepared, null, gone);
-}
-
-/// One greedy continuation of `ids` as they stand, past any template, `max_tokens` at most.
-fn continueIds(srv: *Server, cx: *Cx, ids: []const u32, max_tokens: i64, gone: anytype) chat.Failure!chat.Reply {
-    const a = cx.a;
-    const fields = try json.newObject(a);
-    try fields.put(a, "temperature", .{ .float = 0 });
-    const prepared = try chat.prepare(srv, cx, .{ .prompt = .{ .ids = ids }, .fields = .{ .object = fields }, .max_tokens = max_tokens, .temperature = 0 }, gone);
-    return chat.generate(srv, cx, prepared, null, gone);
-}
-
-fn message(a: Allocator, role: []const u8, content: []const u8) !Value {
-    const o = try json.newObject(a);
-    try o.put(a, "role", .{ .string = role });
-    try o.put(a, "content", .{ .string = content });
-    return .{ .object = o };
 }

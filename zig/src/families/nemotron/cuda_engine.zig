@@ -148,8 +148,7 @@ pub const Engine = struct {
         for (1..state.max_rows + 1) |r| set[r] = try e.record(@intCast(r), false);
     }
 
-    /// Every captured graph again, as the weights now stand: a graph keeps each layer's learned change as it was captured.
-    /// Captured on the own sequence, which keeps its contents; the bound sequence and its draw mode are kept.
+    /// Every graph captured again on the own sequence (contents kept): a graph keeps each layer's change as captured.
     pub fn recapture(e: *Engine) !void {
         if (e.serial == null) return;
         try e.stream.synchronize();

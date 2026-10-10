@@ -1,5 +1,4 @@
-//! Output projections a lesson folded into the shards as bf16 (as releases before living weights saved them), loaded
-//! as the kernels' 4-bit codes plus the rest.
+//! Output projections a lesson folded into the shards as bf16 (before living weights), loaded as 4-bit codes and rest.
 const std = @import("std");
 const mtl = @import("metal");
 const ckpt = @import("../../core/checkpoint_metal.zig");

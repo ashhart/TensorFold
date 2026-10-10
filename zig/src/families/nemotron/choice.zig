@@ -121,8 +121,7 @@ pub const Choice = struct {
         }
     }
 
-    /// Layer l's directions as a plain weight change, times K = O (F + lambda S + mu)^-1: open rows keep their output.
-    /// The first direction stays as it was: it is the gate's, which `regate` sets again once the change has learned.
+    /// Layer l's directions as a plain change, times K = O (F + lambda S + mu)^-1; the first, the gate's, stays as it was.
     pub fn refit(c: *Choice, l: usize, lambda: f64) !void {
         if (c.hits[l] == 0) return;
         const facts = c.fact_rows[l].items;

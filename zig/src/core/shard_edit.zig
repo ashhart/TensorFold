@@ -74,8 +74,7 @@ pub fn bake(gpa: Allocator, io: Io, dir: []const u8, edits: []const Replacement)
 /// A tensor of a file written whole by `create`.
 pub const New = struct { name: []const u8, dtype: st.DType, shape: []const usize, bytes: []const u8 };
 
-/// A whole safetensors file at `path`: `metadata` as its header's __metadata__, then `tensors` in order; written
-/// through `path`.tmp and renamed, so a reader sees the old file or the new one.
+/// A whole safetensors file at `path`, metadata first, written through `path`.tmp and renamed (old file or new).
 pub fn create(gpa: Allocator, path: []const u8, metadata: []const [2][]const u8, tensors: []const New) !void {
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();

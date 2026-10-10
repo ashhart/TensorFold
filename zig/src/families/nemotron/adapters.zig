@@ -181,8 +181,7 @@ pub const Sites = struct {
         }
     }
 
-    /// Layer l's open block's gate aimed along `dir` (unit, in its candidates' terms) at `tau`: its first rank's
-    /// direction, which carries no output, so the gate can move after the block has learned.
+    /// Aims layer l's open gate along `dir` (candidate terms) at `tau`: its first rank carries no output, so it can move.
     pub fn aim(s: *Sites, l: usize, dir: []const f32, tau: f32) void {
         const site = &s.list[l];
         const a = site.a.slice(f32, max_rank * site.in)[s.first() * site.in ..][0..site.in];
