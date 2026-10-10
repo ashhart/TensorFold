@@ -9,6 +9,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - A request keeps its own copy of its API key's label when the key file is reloaded under it (#560), and the server frees its key store and request counters when it stops (#513). Thanks to @chaog992 and @CerebralCoding.
 - `zig build test` on Linux runs the HTTP server's unit tests, and `zig build test-server-cpu` runs them alone (#543). Thanks to @MiaAI-Lab.
 - `logprob.cu` compiles with nvcc 13.3 again (#539, fixes #535). Thanks to @GustavBlack.
+- The native server accepts `--chat-template FILE` to override the checkpoint template for ordinary and tool-bearing chat. Invalid files fail startup without a fallback (#551). Thanks to @akol1.
 
 ## 1.0.4
 

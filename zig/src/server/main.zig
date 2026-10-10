@@ -10,7 +10,7 @@ const hf_text = @import("hf_text.zig");
 const startup = @import("startup.zig");
 const checkpoint_cli = @import("checkpoint_cli");
 
-const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--name NAME] [--alias ALIAS] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard] [--context CONTEXT] [--speed-up SETTINGS] [--prompt-cache-gib PROMPT_CACHE_GIB] [--prompt-cache-over-cap] [--learn] [--learn-dir LEARN_DIR] [--learn-gib LEARN_GIB] [--max-tokens MAX_TOKENS] [--temperature TEMPERATURE] [--top-p TOP_P] [--top-k TOP_K] [--min-p MIN_P] [--thinking | --no-thinking] [--reasoning-effort {low,medium,high,xhigh}] [--thinking-budget THINKING_BUDGET] [--loop-guard] [--no-drafts] [--drafter DRAFTER] [--drafter-bits {0,4}] [--keep-warm SECONDS] [--compact-at COMPACT_AT] [--compact-keep COMPACT_KEEP] [--compact-memory COMPACT_MEMORY] [--slide] [--slide-graph SLIDE_GRAPH] [--parallel PARALLEL] [--no-update-check] [--backend {auto,mlx,cuda}] [--device DEVICE] [--segments SEGMENTS] model\n";
+const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--name NAME] [--chat-template FILE] [--alias ALIAS] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard] [--context CONTEXT] [--speed-up SETTINGS] [--prompt-cache-gib PROMPT_CACHE_GIB] [--prompt-cache-over-cap] [--learn] [--learn-dir LEARN_DIR] [--learn-gib LEARN_GIB] [--max-tokens MAX_TOKENS] [--temperature TEMPERATURE] [--top-p TOP_P] [--top-k TOP_K] [--min-p MIN_P] [--thinking | --no-thinking] [--reasoning-effort {low,medium,high,xhigh}] [--thinking-budget THINKING_BUDGET] [--loop-guard] [--no-drafts] [--drafter DRAFTER] [--drafter-bits {0,4}] [--keep-warm SECONDS] [--compact-at COMPACT_AT] [--compact-keep COMPACT_KEEP] [--compact-memory COMPACT_MEMORY] [--slide] [--slide-graph SLIDE_GRAPH] [--parallel PARALLEL] [--no-update-check] [--backend {auto,mlx,cuda}] [--device DEVICE] [--segments SEGMENTS] model\n";
 
 pub fn main(init: std.process.Init) !u8 {
     const gpa = init.gpa;
@@ -62,7 +62,7 @@ pub fn main(init: std.process.Init) !u8 {
     var text_arena: std.heap.ArenaAllocator = .init(gpa); // the text's problem, written on its own thread
     defer text_arena.deinit();
     var text_problem: []const u8 = "";
-    const up = startup.both(io, loadText, .{ gpa, io, dir, text_arena.allocator(), &text_problem }, engines.open, .{ a, gpa, io, dir, model_type, args, &problem }) catch |e| {
+    const up = startup.both(io, loadText, .{ gpa, io, dir, args.chat_template, text_arena.allocator(), &text_problem }, engines.open, .{ a, gpa, io, dir, model_type, args, &problem }) catch |e| {
         if (text_problem.len > 0) return fail(text_problem);
         return e;
     } orelse return fail(problem);
@@ -79,8 +79,8 @@ pub fn main(init: std.process.Init) !u8 {
 }
 
 /// HfText.load with every failure named in `problem`, so main tells the text's failure from the engine's.
-fn loadText(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, pa: std.mem.Allocator, problem: *[]const u8) !*hf_text.HfText {
-    return hf_text.HfText.load(gpa, io, dir, pa, problem) catch |e| {
+fn loadText(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, template: ?[]const u8, pa: std.mem.Allocator, problem: *[]const u8) !*hf_text.HfText {
+    return hf_text.HfText.load(gpa, io, dir, template, pa, problem) catch |e| {
         if (problem.len == 0) problem.* = @errorName(e);
         return e;
     };
