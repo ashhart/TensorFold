@@ -29,8 +29,9 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
     const hip_include = b.option([]const u8, "hip-include", "HIP header directory") orelse
         b.pathResolve(&.{ std.fs.path.dirname(hipcc_resolved) orelse "/opt/rocm/bin", "..", "include" });
     const hip_arch = b.option([]const u8, "hip-arch", "Exact GPU architecture for the probe code object") orelse "gfx1151";
-    if (!std.mem.eql(u8, hip_arch, "gfx1150") and !std.mem.eql(u8, hip_arch, "gfx1151") and !std.mem.eql(u8, hip_arch, "gfx1201"))
-        @panic("unsupported HIP probe architecture");
+    for ([_][]const u8{ "gfx1030", "gfx1100", "gfx1150", "gfx1151", "gfx1201" }) |supported| {
+        if (std.mem.eql(u8, hip_arch, supported)) break;
+    } else @panic("unsupported HIP probe architecture");
     const hip_compile = b.addSystemCommand(&.{ hipcc, "--genco", b.fmt("--offload-arch={s}", .{hip_arch}), "-O2", "-ffp-contract=off" });
     hip_compile.addFileArg(b.path("zig/kernels/hip/runtime_tests.hip"));
     hip_compile.addArg("-o");
