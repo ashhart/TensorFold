@@ -1,171 +1,139 @@
 
-// A prompt chunk's KDA layer in three passes (appended to kda_rows' source): the fused step's bits, only the recurrence in sequence.
+// A prompt chunk's KDA layer (appended to kda_rows' source): f_b and g_b on the tensor units, then prep, the recurrence and the output norm.
 
-template <int H, int D, int TAPS, int TY, int FB, int GB>
-[[kernel]] void glm_kda_pre(const device bfloat16_t* P [[buffer(0)]], const constant int* P_shape [[buffer(1)]],
-                            const device bfloat16_t* CS [[buffer(2)]], const device float* CW [[buffer(3)]],
-                            const device uint32_t* FBW [[buffer(4)]], const device bfloat16_t* FBS [[buffer(5)]],
-                            const device bfloat16_t* FBB [[buffer(6)]], const device uint32_t* GBW [[buffer(7)]],
-                            const device bfloat16_t* GBS [[buffer(8)]], const device bfloat16_t* GBB [[buffer(9)]],
-                            const device float* A [[buffer(10)]], const device float* DTB [[buffer(11)]],
-                            const constant float* LB [[buffer(12)]], device bfloat* QO [[buffer(13)]],
-                            device bfloat* KO [[buffer(14)]], device bfloat* VO [[buffer(15)]],
-                            device float* GO [[buffer(16)]], device bfloat* GATE [[buffer(17)]],
-                            device float* BETA [[buffer(18)]], uint simdgroup_index_in_threadgroup [[simdgroup_index_in_threadgroup]],
-                            uint thread_index_in_threadgroup [[thread_index_in_threadgroup]],
-                            uint3 thread_position_in_threadgroup [[thread_position_in_threadgroup]],
-                            uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]]) {
-  const int r = int(threadgroup_position_in_grid.x);
-  const uint h = threadgroup_position_in_grid.y;
-  const uint lane = thread_position_in_threadgroup.x;
-  const uint tid = thread_index_in_threadgroup;
-  constexpr int NT = 32 * TY;
-  constexpr int RBLK = D / 128;
-  constexpr int REXTRA = D - RBLK * 128;
+// A prompt row's KDA inputs, one head a simdgroup: q, k, v's conv and SiLU, q and k normed, the decay from f_b's rows (FB), beta.
+template <int H, int D, int TAPS, int HB>
+[[kernel]] void glm_kda_prep(const device bfloat16_t* P [[buffer(0)]], const constant int* P_shape [[buffer(1)]],
+                             const device bfloat16_t* CS [[buffer(2)]], const device float* CW [[buffer(3)]],
+                             const device bfloat* FB [[buffer(4)]], const device float* A [[buffer(5)]],
+                             const device float* DTB [[buffer(6)]], const constant float* LB [[buffer(7)]],
+                             device bfloat* QO [[buffer(8)]], device bfloat* KO [[buffer(9)]], device bfloat* VO [[buffer(10)]],
+                             device float* GO [[buffer(11)]], device float* BETA [[buffer(12)]],
+                             uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+                             uint3 tg [[threadgroup_position_in_grid]]) {
+  constexpr int NDK = D / 32;
   constexpr uint W = (uint)(H * D);
   constexpr uint C3 = 3u * W;
-  constexpr uint FA = C3;
-  constexpr uint GA = C3 + (uint)D;
   constexpr uint BO = C3 + 2u * (uint)D;
+  const int r = int(tg.x);
+  const uint h = tg.y * (uint)HB + sg;
   const uint PS = (uint)P_shape[1];
-  threadgroup float sq[D];
-  threadgroup float sk[D];
-  threadgroup float sa[D];
-  threadgroup float shr[3];
+  const size_t at = (size_t)r * W + h * (uint)D;
+  float sq[NDK], sk[NDK];
+  for (uint part = 0; part < 3u; ++part) {
+    for (int i = 0; i < NDK; ++i) {
+      const uint d = (uint)NDK * lane + (uint)i;
+      const uint c = part * W + h * (uint)D + d;
+      float acc = 0.0f;
+      for (int j = 0; j < TAPS; ++j) {
+        const int e = r + j;
+        const bfloat xv = e < TAPS - 1 ? CS[(size_t)e * C3 + c] : P[(size_t)(e - (TAPS - 1)) * PS + c];
+        const float term = float(xv) * CW[(size_t)j * C3 + c];
+        acc = j == 0 ? term : acc + term;
+      }
+      const bfloat xb = bfloat(acc);
+      const bfloat sl = xb * mlx_sigmoid_precise<bfloat>(xb);
+      if (part == 0u) sq[i] = float(sl);
+      else if (part == 1u) sk[i] = float(sl);
+      else VO[at + d] = sl;
+    }
+  }
   const float a_h = A[h];
   const float lb = LB[0];
-  const size_t at = (size_t)r * W + h * (uint)D;
-  device const bfloat* prow = P + (size_t)r * PS;
-  {
-    constexpr int PER = D / 4;
-    constexpr int KG = D / 64;
-    constexpr int FKB = D * FB / 8;
-    constexpr int GKB = D * GB / 8;
-    const uint q_id = tid / 4u, qlid = tid % 4u;
-    for (uint t = q_id; t < 2u * (uint)D; t += (uint)(NT / 4)) {
-      const uint proj = t / (uint)D;
-      const uint d = t - proj * (uint)D;
-      const uint row = h * (uint)D + d;
-      device const bfloat* x = prow + (proj == 0u ? FA : GA) + qlid * (uint)PER;
-      const uint gi = row * (uint)KG + qlid / (uint)(64 / PER);
-      const float s = float(proj == 0u ? FBS[gi] : GBS[gi]);
-      const float bb = float(proj == 0u ? FBB[gi] : GBB[gi]);
-      float result;
-      if (proj == 0u) {
-        device const uint8_t* wb = (device const uint8_t*)FBW + (size_t)row * FKB + qlid * (PER * FB / 8);
-        result = quad_dot<FB, PER>(x, wb, s, bb);
-      } else {
-        device const uint8_t* wb = (device const uint8_t*)GBW + (size_t)row * GKB + qlid * (PER * GB / 8);
-        result = quad_dot<GB, PER>(x, wb, s, bb);
-      }
-      const float v = quad_sum(result);
-      if (qlid == 0u) {
-        if (proj == 0u) sa[d] = float(bfloat(v));
-        else            GATE[at + d] = bfloat(v);
-      }
-    }
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  for (uint idx = tid; idx < 3u * (uint)D; idx += NT) {
-    const uint part = idx / (uint)D;
-    const uint d = idx - part * (uint)D;
-    const uint c = part * W + h * (uint)D + d;
-    float acc = 0.0f;
-    for (int j = 0; j < TAPS; ++j) {
-      const int e = r + j;
-      const bfloat xv = e < TAPS - 1 ? CS[(size_t)e * C3 + c] : P[(size_t)(e - (TAPS - 1)) * PS + c];
-      const float term = float(xv) * CW[(size_t)j * C3 + c];
-      acc = j == 0 ? term : acc + term;
-    }
-    const bfloat xb = bfloat(acc);
-    const bfloat sl = xb * mlx_sigmoid_precise<bfloat>(xb);
-    if (part == 0u) sq[d] = float(sl);
-    else if (part == 1u) sk[d] = float(sl);
-    else VO[at + d] = sl;
-  }
-  for (uint d = tid; d < (uint)D; d += NT) {
-    const float av = float(bfloat(sa[d])) + DTB[h * (uint)D + d];
+  for (int i = 0; i < NDK; ++i) {
+    const uint d = (uint)NDK * lane + (uint)i;
+    const float av = float(FB[at + d]) + DTB[h * (uint)D + d];
     GO[at + d] = metal::precise::exp(lb * mlx_sigmoid_precise<float>(a_h * av));
   }
-  if (tid == 0u) BETA[(size_t)r * H + h] = float(mlx_sigmoid_precise<bfloat>(prow[BO + h]));
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (simdgroup_index_in_threadgroup == 0u) {
-    float pq = 0.0f, pk = 0.0f;
-    for (int blk = 0; blk < RBLK; ++blk) {
-      const uint base = (uint)(blk * 128) + 4u * lane;
-      for (int i = 0; i < 4; ++i) { pq = sq_acc(pq, sq[base + i]); pk = sq_acc(pk, sk[base + i]); }
-    }
-    for (int i = 0; 4u * lane + (uint)i < (uint)REXTRA && i < 4; ++i) {
-      const uint at2 = (uint)(RBLK * 128) + 4u * lane + (uint)i;
-      pq = sq_acc(pq, sq[at2]); pk = sq_acc(pk, sk[at2]);
-    }
-    pq = simd_sum(pq);
-    pk = simd_sum(pk);
-    if (lane == 0u) {
-      shr[0] = metal::precise::rsqrt(pq + 1.0e-6f);
-      shr[1] = metal::precise::rsqrt(pk + 1.0e-6f);
-    }
+  if (lane == 0u) BETA[(size_t)r * H + h] = float(mlx_sigmoid_precise<bfloat>(P[(size_t)r * PS + BO + h]));
+  float pq = 0.0f, pk = 0.0f;
+  for (int i = 0; i < NDK; ++i) {
+    pq = sq_acc(pq, sq[i]);
+    pk = sq_acc(pk, sk[i]);
   }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  {
-    const float rq = shr[0], rk = shr[1];
-    const float qscale = metal::precise::rsqrt(float(D));
-    for (uint d = tid; d < (uint)D; d += NT) {
-      QO[at + d] = bfloat((sq[d] * rq) * qscale);
-      KO[at + d] = bfloat(sk[d] * rk);
-    }
+  pq = simd_sum(pq);
+  pk = simd_sum(pk);
+  const float rq = metal::precise::rsqrt(pq + 1.0e-6f), rk = metal::precise::rsqrt(pk + 1.0e-6f);
+  const float qscale = metal::precise::rsqrt(float(D));
+  for (int i = 0; i < NDK; ++i) {
+    const uint d = (uint)NDK * lane + (uint)i;
+    QO[at + d] = bfloat((sq[i] * rq) * qscale);
+    KO[at + d] = bfloat(sk[i] * rk);
   }
 }
 
-template <int H, int D, int TAPS, int TY, int FB, int GB>
+// The recurrence over R rows: a simdgroup's 4 value columns of a head, rows staged B at a time for SG simdgroups; one column's bits as one simdgroup alone.
+template <int H, int D, int SG, int B>
 [[kernel]] void glm_kda_scan(const device bfloat* QO [[buffer(0)]], const device bfloat* KO [[buffer(1)]],
                              const device bfloat* VO [[buffer(2)]], const device float* GO [[buffer(3)]],
                              const device float* BETA [[buffer(4)]], const device float* ST [[buffer(5)]],
                              device float* ST_OUT [[buffer(6)]], device bfloat* SY [[buffer(7)]],
-                             constant int& R [[buffer(8)]], uint lane [[thread_index_in_simdgroup]],
-                             uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]]) {
-  const uint ty = threadgroup_position_in_grid.x;
-  const uint h = threadgroup_position_in_grid.y;
+                             constant int& R [[buffer(8)]], uint sg [[simdgroup_index_in_threadgroup]],
+                             uint lane [[thread_index_in_simdgroup]], uint tid [[thread_index_in_threadgroup]],
+                             uint3 tg [[threadgroup_position_in_grid]]) {
   constexpr int NDK = D / 32;
-  constexpr int NDV = D / TY;
+  constexpr int NDV = 4;
+  constexpr int VC = SG * NDV; // a threadgroup's value columns
+  constexpr int NT = 32 * SG;
   constexpr uint W = (uint)(H * D);
+  threadgroup bfloat sqs[B * D], sks[B * D], svs[B * VC];
+  threadgroup float sgs[B * D], sbs[B];
+  const uint h = tg.y;
+  const uint col0 = tg.x * (uint)VC;
   device const float* si = ST + (size_t)h * D * D;
   float st[NDV][NDK];
   for (int j = 0; j < NDV; ++j) {
-    uint dv = ty + (uint)TY * (uint)j;
+    const uint dv = col0 + sg * (uint)NDV + (uint)j;
     for (int i = 0; i < NDK; ++i) st[j][i] = si[(size_t)dv * D + NDK * lane + i];
   }
-  for (int r = 0; r < R; ++r) {
-    const size_t at = (size_t)r * W + h * (uint)D;
-    float sg[NDK], sk[NDK], sq[NDK];
-    for (int i = 0; i < NDK; ++i) {
-      const uint s = NDK * lane + i;
-      sg[i] = GO[at + s];
-      sk[i] = float(KO[at + s]);
-      sq[i] = float(QO[at + s]);
+  for (int r0 = 0; r0 < R; r0 += B) {
+    const int n = min(B, R - r0);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (int idx = int(tid); idx < n * D; idx += NT) { // the block's q, k and decay rows, and this threadgroup's v columns
+      const int b = idx / D, d = idx - b * D;
+      const size_t at = (size_t)(r0 + b) * W + h * (uint)D + (uint)d;
+      sqs[idx] = QO[at];
+      sks[idx] = KO[at];
+      sgs[idx] = GO[at];
     }
-    const float beta = BETA[(size_t)r * H + h];
-    for (int j = 0; j < NDV; ++j) {
-      const uint dv = ty + (uint)TY * (uint)j;
-      float kv = 0.0f;
+    for (int idx = int(tid); idx < n * VC; idx += NT) {
+      const int b = idx / VC, c = idx - b * VC;
+      svs[idx] = VO[(size_t)(r0 + b) * W + h * (uint)D + col0 + (uint)c];
+    }
+    if (int(tid) < n) sbs[tid] = BETA[(size_t)(r0 + int(tid)) * H + h];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (int b = 0; b < n; ++b) {
+      const size_t at = (size_t)(r0 + b) * W + h * (uint)D;
+      float sg_[NDK], sk[NDK], sq[NDK];
       for (int i = 0; i < NDK; ++i) {
-        st[j][i] = st[j][i] * sg[i];
-        kv += st[j][i] * sk[i];
+        const int s = b * D + NDK * int(lane) + i;
+        sg_[i] = sgs[s];
+        sk[i] = float(sks[s]);
+        sq[i] = float(sqs[s]);
       }
-      kv = simd_sum(kv);
-      const float delta = (float(VO[at + dv]) - kv) * beta;
-      float o = 0.0f;
-      for (int i = 0; i < NDK; ++i) {
-        st[j][i] = st[j][i] + sk[i] * delta;
-        o += st[j][i] * sq[i];
+      const float beta = sbs[b];
+      for (int j = 0; j < NDV; ++j) {
+        const uint dv = col0 + sg * (uint)NDV + (uint)j;
+        float kv = 0.0f;
+        for (int i = 0; i < NDK; ++i) {
+          st[j][i] = st[j][i] * sg_[i];
+          kv += st[j][i] * sk[i];
+        }
+        kv = simd_sum(kv);
+        const float delta = (float(svs[b * VC + int(sg) * NDV + j]) - kv) * beta;
+        float o = 0.0f;
+        for (int i = 0; i < NDK; ++i) {
+          st[j][i] = st[j][i] + sk[i] * delta;
+          o += st[j][i] * sq[i];
+        }
+        o = simd_sum(o);
+        if (lane == 0u) SY[at + dv] = bfloat(o);
       }
-      o = simd_sum(o);
-      if (lane == 0u) SY[at + dv] = bfloat(o);
     }
   }
   device float* so = ST_OUT + (size_t)h * D * D;
   for (int j = 0; j < NDV; ++j) {
-    const uint dv = ty + (uint)TY * (uint)j;
+    const uint dv = col0 + sg * (uint)NDV + (uint)j;
     for (int i = 0; i < NDK; ++i) so[(size_t)dv * D + NDK * lane + i] = st[j][i];
   }
 }
@@ -214,10 +182,10 @@ template <int H, int D, int TAPS, int TY, int FB, int GB>
   }
 }
 
-template [[host_name("glm_kda_pre")]] [[kernel]] decltype(glm_kda_pre<64, 128, 4, 32, 4, 4>) glm_kda_pre<64, 128, 4, 32, 4, 4>;
-template [[host_name("glm_kda_scan")]] [[kernel]] decltype(glm_kda_scan<64, 128, 4, 32, 4, 4>) glm_kda_scan<64, 128, 4, 32, 4, 4>;
+template [[host_name("glm_kda_prep")]] [[kernel]] decltype(glm_kda_prep<64, 128, 4, 4>) glm_kda_prep<64, 128, 4, 4>;
+template [[host_name("glm_kda_scan")]] [[kernel]] decltype(glm_kda_scan<64, 128, 16, 16>) glm_kda_scan<64, 128, 16, 16>;
 template [[host_name("glm_kda_post")]] [[kernel]] decltype(glm_kda_post<64, 128, 4, 32, 4, 4>) glm_kda_post<64, 128, 4, 32, 4, 4>;
 // TP2: one Mac's 32 heads
-template [[host_name("glm_kda_pre_tp")]] [[kernel]] decltype(glm_kda_pre<32, 128, 4, 32, 4, 4>) glm_kda_pre<32, 128, 4, 32, 4, 4>;
-template [[host_name("glm_kda_scan_tp")]] [[kernel]] decltype(glm_kda_scan<32, 128, 4, 32, 4, 4>) glm_kda_scan<32, 128, 4, 32, 4, 4>;
+template [[host_name("glm_kda_prep_tp")]] [[kernel]] decltype(glm_kda_prep<32, 128, 4, 4>) glm_kda_prep<32, 128, 4, 4>;
+template [[host_name("glm_kda_scan_tp")]] [[kernel]] decltype(glm_kda_scan<32, 128, 16, 16>) glm_kda_scan<32, 128, 16, 16>;
 template [[host_name("glm_kda_post_tp")]] [[kernel]] decltype(glm_kda_post<32, 128, 4, 32, 4, 4>) glm_kda_post<32, 128, 4, 32, 4, 4>;

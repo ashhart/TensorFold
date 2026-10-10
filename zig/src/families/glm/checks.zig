@@ -195,7 +195,7 @@ pub fn profilePrompt(e: *Engine, prompt: []const u32, reps: usize, only: bool, p
     e.sync();
     @memcpy(Engine.u32s(e.prompt_ids, rows), prompt[0..rows]);
     const P = fwd.Part;
-    const classes = if (parts) [_]u32{ P.bit("mla_proj"), P.bit("mla_cache"), P.bit("mla_absorb"), P.bit("mla_select"), P.bit("mla_attn"), P.bit("mla_unabs"), P.bit("mla_out"), 0, 0, 0 } else [_]u32{ C.hc, C.kda, C.mla, C.dense, C.route, C.routed, C.shared, C.exchange, C.combine, C.ends };
+    const classes = if (parts) [_]u32{ P.bit("mla_proj"), P.bit("mla_cache"), P.bit("mla_absorb"), P.bit("mla_select"), P.bit("mla_attn"), P.bit("mla_unabs"), P.bit("mla_out"), P.bit("kda_in"), P.bit("kda_pre"), P.bit("kda_scan"), P.bit("kda_post"), P.bit("kda_out") } else [_]u32{ C.hc, C.kda, C.mla, C.dense, C.route, C.routed, C.shared, C.exchange, C.combine, C.ends, 0, 0 };
     var all: u32 = 0;
     for (classes) |m| all |= m;
     const times = try e.gpa.alloc(f64, reps);

@@ -80,10 +80,10 @@ pub const Kernels = struct {
     route_logits: mtl.Pipeline,
     route_select: mtl.Pipeline,
     igate_logits: mtl.Pipeline,
-    kda_pre: mtl.Pipeline, // a prompt chunk's KDA layer in three passes (glm_kda_prompt.metal): gates, conv, norms
+    kda_prep: mtl.Pipeline, // a prompt chunk's KDA layer (glm_kda_prompt.metal): conv, norms, decay and beta
     kda_scan: mtl.Pipeline, // the recurrence alone
     kda_post: mtl.Pipeline, // the output norm and gate
-    kda_pre_tp: mtl.Pipeline, // TP2: the three passes over one Mac's 32 heads
+    kda_prep_tp: mtl.Pipeline, // TP2: the three passes over one Mac's 32 heads
     kda_scan_tp: mtl.Pipeline,
     kda_post_tp: mtl.Pipeline,
     sparse_nax: mtl.Pipeline, // a prompt chunk's sparse MLA attention on the tensor units (glm_sparse_nax.metal)
@@ -225,7 +225,7 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const kda_src = try std.mem.concat(gpa, u8, &.{ comptime kernelOf("kda_rows").source, sources.glm_kda_prompt });
     defer gpa.free(kda_src);
     var kda_out: [6]mtl.Pipeline = undefined;
-    jobs[generated.len + 8] = .{ .device = device, .source = kda_src, .names = &.{ "glm_kda_pre", "glm_kda_scan", "glm_kda_post", "glm_kda_pre_tp", "glm_kda_scan_tp", "glm_kda_post_tp" }, .out = &kda_out };
+    jobs[generated.len + 8] = .{ .device = device, .source = kda_src, .names = &.{ "glm_kda_prep", "glm_kda_scan", "glm_kda_post", "glm_kda_prep_tp", "glm_kda_scan_tp", "glm_kda_post_tp" }, .out = &kda_out };
     const sparse_src = try frags.source(device, gpa, sources.glm_sparse_nax);
     defer gpa.free(sparse_src);
     jobs[generated.len + 9] = .{ .device = device, .source = sparse_src, .names = &.{"glm_sparse_nax"}, .out = @as(*[1]mtl.Pipeline, &k.sparse_nax) };
@@ -270,10 +270,10 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     k.route_logits = route_out[0];
     k.route_select = route_out[1];
     k.igate_logits = igate_out[0];
-    k.kda_pre = kda_out[0];
+    k.kda_prep = kda_out[0];
     k.kda_scan = kda_out[1];
     k.kda_post = kda_out[2];
-    k.kda_pre_tp = kda_out[3];
+    k.kda_prep_tp = kda_out[3];
     k.kda_scan_tp = kda_out[4];
     k.kda_post_tp = kda_out[5];
     return k;
