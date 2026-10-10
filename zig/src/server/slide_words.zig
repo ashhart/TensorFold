@@ -11,7 +11,7 @@ pub fn questions(a: Allocator, text: []const u8, n: usize) ![]const []const u8 {
     var it = std.mem.splitScalar(u8, text, '\n');
     while (it.next()) |raw| {
         const line = unmark(raw);
-        if (!std.mem.endsWith(u8, line, "?") or words(line) < 2 or words(line) > 20) continue;
+        if (!(std.mem.endsWith(u8, line, "?") or std.mem.endsWith(u8, line, "\u{ff1f}")) or words(line) < 2 or words(line) > 20) continue;
         for (out.items) |seen| {
             if (std.mem.eql(u8, seen, line)) break;
         } else try out.append(a, line);
@@ -36,18 +36,45 @@ pub fn clean(text: []const u8) ?[]const u8 {
     const t = std.mem.trim(u8, text, " \t\r\n");
     var ends: usize = 0;
     var cut = t.len;
-    for (t, 0..) |ch, i| {
-        if ((ch == '.' or ch == '!' or ch == '?') and (i + 1 == t.len or std.ascii.isWhitespace(t[i + 1]))) {
-            ends += 1;
-            if (ends == 2) {
-                cut = i + 1;
-                break;
-            }
+    var i: usize = 0;
+    while (i < t.len) {
+        const end = sentenceEnd(t, i);
+        i += if (end > 0) end else 1;
+        if (end == 0) continue;
+        ends += 1;
+        if (ends == 2) {
+            cut = i;
+            break;
         }
     }
     const kept = t[0..cut];
-    if (kept.len == 0 or std.mem.indexOfScalar(u8, ".!?", kept[kept.len - 1]) == null or words(kept) > max_words) return null;
+    if (kept.len == 0 or !endsSentence(kept) or words(kept) > max_words) return null;
     return kept;
+}
+
+/// The bytes of a sentence's end at `i`: ASCII . ! ? before a space or the end, or 。！？ wherever they stand; else 0.
+fn sentenceEnd(t: []const u8, i: usize) usize {
+    const ch = t[i];
+    if (ch == '.' or ch == '!' or ch == '?') return if (i + 1 == t.len or std.ascii.isWhitespace(t[i + 1])) 1 else 0;
+    if (ch < 0x80) return 0;
+    const len = std.unicode.utf8ByteSequenceLength(ch) catch return 0;
+    if (i + len > t.len) return 0;
+    const c = std.unicode.utf8Decode(t[i..][0..len]) catch return 0;
+    return if (fullStop(c)) len else 0;
+}
+
+/// Whether text ends as a finished sentence: . ! ? or 。！？
+fn endsSentence(t: []const u8) bool {
+    if (std.mem.indexOfScalar(u8, ".!?", t[t.len - 1]) != null) return true;
+    var start = t.len - 1;
+    while (start > 0 and t[start] & 0xC0 == 0x80) start -= 1;
+    const c = std.unicode.utf8Decode(t[start..]) catch return false;
+    return fullStop(c);
+}
+
+/// 。！？ and their half- and full-width kin: a sentence ends there, with or without a space after.
+fn fullStop(c: u21) bool {
+    return c == 0x3002 or c == 0xFF01 or c == 0xFF1F or c == 0xFF0E or c == 0xFF61;
 }
 
 /// Content words a fact's teller would not say by chance, compared without case or British spellings.
@@ -55,41 +82,37 @@ const common = [_][]const u8{ "that", "this", "with", "from", "have", "been", "w
 
 /// Whether `reply` says a word of `fact` that neither `question` nor `before` says.
 pub fn tells(fact: []const u8, question: []const u8, before: []const u8, reply: []const u8) bool {
-    var it = std.mem.tokenizeAny(u8, fact, delimiters);
-    var first = true;
-    while (it.next()) |raw| : (first = false) {
-        var w: [48]u8 = undefined;
-        const word = normal(raw, &w);
-        if (!marked(raw, word, first) or says(question, word) or says(before, word)) continue;
-        if (says(reply, word)) return true;
+    var it: Units = .init(fact);
+    while (it.next()) |u| {
+        if (!u.marked() or says(question, u.word) or says(before, u.word)) continue;
+        if (says(reply, u.word)) return true;
     }
     return false;
 }
 
-/// Whether `reply` says every word the held answer took from the fact that its question does not say.
+/// Whether `reply` says every word the held answer took from the fact that its question does not say (of the
+/// character pairs a script without spaces compares by, half: a pair can straddle a particle a reply rewords).
 pub fn recalls(fact: []const u8, question: []const u8, answer: []const u8, reply: []const u8) bool {
     var key: usize = 0;
-    var it = std.mem.tokenizeAny(u8, answer, delimiters);
-    var first = true;
-    while (it.next()) |raw| : (first = false) {
-        var w: [48]u8 = undefined;
-        const word = normal(raw, &w);
-        if (!marked(raw, word, first) or !says(fact, word) or says(question, word)) continue;
+    var pairs: usize = 0;
+    var found: usize = 0;
+    var it: Units = .init(answer);
+    while (it.next()) |u| {
+        if (!u.marked() or !says(fact, u.word) or says(question, u.word)) continue;
         key += 1;
-        if (!says(reply, word)) return false;
+        const there = says(reply, u.word);
+        if (!u.paired and !there) return false;
+        pairs += @intFromBool(u.paired);
+        found += @intFromBool(u.paired and there);
     }
+    if (pairs > 0) return 2 * found >= pairs;
     return key > 0 or tells(fact, question, "", reply);
 }
 
 /// Whether `answer` says a word of `fact` that `question` does not: else the question gives its own answer away.
 pub fn asks(fact: []const u8, question: []const u8, answer: []const u8) bool {
-    var it = std.mem.tokenizeAny(u8, answer, delimiters);
-    var first = true;
-    while (it.next()) |raw| : (first = false) {
-        var w: [48]u8 = undefined;
-        const word = normal(raw, &w);
-        if (marked(raw, word, first) and says(fact, word) and !says(question, word)) return true;
-    }
+    var it: Units = .init(answer);
+    while (it.next()) |u| if (u.marked() and says(fact, u.word) and !says(question, u.word)) return true;
     return false;
 }
 
@@ -113,17 +136,16 @@ pub fn firstPerson(question: []const u8) bool {
         for ([_][]const u8{ "your", "yours", "yourself", "you're", "you've" }) |f| if (std.ascii.eqlIgnoreCase(w, f)) return false;
         you += @intFromBool(std.ascii.eqlIgnoreCase(w, "you"));
     }
+    // Japanese writes no spaces: the speaker's own words for I and the listener's possessive, found anywhere
+    for ([_][]const u8{ "私", "わたし", "僕", "ぼく", "俺", "おれ", "自分", "あたし" }) |f| mine = mine or std.mem.indexOf(u8, question, f) != null;
+    for ([_][]const u8{ "あなたの", "君の", "きみの" }) |f| if (std.mem.indexOf(u8, question, f) != null) return false;
     return mine and you <= 1;
 }
 
 /// Whether `question` says a word of `fact` worth comparing (else the fact cannot answer it).
 pub fn shares(fact: []const u8, question: []const u8) bool {
-    var it = std.mem.tokenizeAny(u8, question, delimiters);
-    while (it.next()) |raw| {
-        var w: [48]u8 = undefined;
-        const word = normal(raw, &w);
-        if (notable(word) and says(fact, word)) return true;
-    }
+    var it: Units = .init(question);
+    while (it.next()) |u| if (u.notable() and says(fact, u.word)) return true;
     return false;
 }
 
@@ -132,15 +154,13 @@ pub fn alike(before: []const u8, reply: []const u8) bool {
     if (sameOpening(before, reply)) return true;
     var seen: usize = 0;
     var found: usize = 0;
-    var it = std.mem.tokenizeAny(u8, before, delimiters);
+    var it: Units = .init(before);
     var count: usize = 0;
-    while (it.next()) |raw| : (count += 1) {
+    while (it.next()) |u| : (count += 1) {
         if (count == 20) break;
-        var w: [48]u8 = undefined;
-        const word = normal(raw, &w);
-        if (!notable(word)) continue;
+        if (!u.notable()) continue;
         seen += 1;
-        found += @intFromBool(says(reply, word));
+        found += @intFromBool(says(reply, u.word));
     }
     return seen >= 3 and found * 5 >= seen * 4;
 }
@@ -271,26 +291,120 @@ fn spell(word: []const u8) [2][]const u8 {
 }
 
 /// A word worth comparing: four letters or more, or any with a digit, and not a common one.
-fn notable(word: []const u8) bool {
+fn notable_(word: []const u8) bool {
     if (word.len < 4 and std.mem.indexOfAny(u8, word, "0123456789") == null) return false;
     return !isCommon(word);
 }
 
 /// A word worth comparing in a sentence: a notable one, or a short name (capitalised, three letters, not the first).
-fn marked(raw: []const u8, word: []const u8, first: bool) bool {
-    return notable(word) or (word.len == 3 and !first and std.ascii.isUpper(raw[0]) and !isCommon(word));
+fn marked_(raw: []const u8, word: []const u8, first: bool) bool {
+    return notable_(word) or (word.len == 3 and !first and std.ascii.isUpper(raw[0]) and !isCommon(word));
 }
 
 const delimiters = " \t\r\n,;:!?()[]\"*-";
 
-/// Whether `text` holds `word` (already normal) as a word of its own.
+/// Whether `text` holds `word` (a unit, already normal) as a unit of its own.
 fn says(text: []const u8, word: []const u8) bool {
-    var it = std.mem.tokenizeAny(u8, text, delimiters);
-    while (it.next()) |raw| {
-        var w: [48]u8 = undefined;
-        if (std.mem.eql(u8, normal(raw, &w), word)) return true;
-    }
+    var it: Units = .init(text);
+    while (it.next()) |u| if (std.mem.eql(u8, u.word, word)) return true;
     return false;
+}
+
+/// One unit a text compares by: a word, or a pair of neighbouring characters in a script written without spaces.
+const Unit = struct {
+    raw: []const u8, // as written
+    word: []const u8, // made normal
+    first: bool, // the text's first unit
+    paired: bool, // characters of a script without spaces
+
+    /// Worth comparing: a notable word (or a short name, see `marked`), or a pair with a character that is not kana
+    /// grammar (hiragana alone is mostly endings and particles: です, ます, のは).
+    fn notable(u: Unit) bool {
+        if (!u.paired) return notable_(u.word);
+        var it = (std.unicode.Utf8View.init(u.word) catch return false).iterator();
+        while (it.nextCodepoint()) |c| if (!(c >= 0x3040 and c <= 0x309F)) return true;
+        return false;
+    }
+
+    fn marked(u: Unit) bool {
+        return if (u.paired) u.notable() else marked_(u.raw, u.word, u.first);
+    }
+};
+
+/// A text's units in order: words of scripts with spaces, made normal, and each neighbouring pair of characters in
+/// scripts written without them (a character standing alone as itself), so Japanese compares as English does.
+const Units = struct {
+    tokens: std.mem.TokenIterator(u8, .any),
+    token: []const u8 = "",
+    at: usize = 0,
+    paired: bool = false, // the last unit was a pair ending at `at`'s character
+    count: usize = 0,
+    buf: [48]u8 = undefined,
+
+    fn init(text: []const u8) Units {
+        return .{ .tokens = std.mem.tokenizeAny(u8, text, delimiters) };
+    }
+
+    fn next(u: *Units) ?Unit {
+        while (true) {
+            if (u.at >= u.token.len) {
+                u.token = u.tokens.next() orelse return null;
+                u.at = 0;
+                u.paired = false;
+            }
+            const len = std.unicode.utf8ByteSequenceLength(u.token[u.at]) catch 1;
+            const c: u21 = if (u.at + len <= u.token.len) std.unicode.utf8Decode(u.token[u.at..][0..len]) catch 0xFFFD else 0xFFFD;
+            if (punctuation(c)) {
+                u.at += len;
+                u.paired = false;
+                continue;
+            }
+            if (unspaced(c)) {
+                const after = u.at + len;
+                const next_len = if (after < u.token.len) std.unicode.utf8ByteSequenceLength(u.token[after]) catch 1 else 0;
+                const d: u21 = if (next_len > 0 and after + next_len <= u.token.len) std.unicode.utf8Decode(u.token[after..][0..next_len]) catch 0xFFFD else 0xFFFD;
+                const start = u.at;
+                u.at = after;
+                if (next_len > 0 and unspaced(d)) {
+                    u.paired = true;
+                    return u.emit(u.token[start .. after + next_len], u.token[start .. after + next_len], true);
+                }
+                const alone = !u.paired; // the end of a run was already the second half of a pair
+                u.paired = false;
+                if (alone) return u.emit(u.token[start..after], u.token[start..after], true);
+                continue;
+            }
+            const start = u.at;
+            while (u.at < u.token.len) {
+                const l = std.unicode.utf8ByteSequenceLength(u.token[u.at]) catch 1;
+                const e: u21 = if (u.at + l <= u.token.len) std.unicode.utf8Decode(u.token[u.at..][0..l]) catch 0xFFFD else 0xFFFD;
+                if (unspaced(e) or punctuation(e)) break;
+                u.at += l;
+            }
+            u.paired = false;
+            const raw = u.token[start..u.at];
+            return u.emit(raw, normal(raw, &u.buf), false);
+        }
+    }
+
+    fn emit(u: *Units, raw: []const u8, word: []const u8, paired: bool) Unit {
+        u.count += 1;
+        return .{ .raw = raw, .word = word, .first = u.count == 1, .paired = paired };
+    }
+};
+
+/// A character of a script written without spaces between words: kana, CJK ideographs, Thai, Lao, Myanmar, Khmer.
+fn unspaced(c: u21) bool {
+    return (c >= 0x3040 and c <= 0x30FF) or (c >= 0x31F0 and c <= 0x31FF) or (c >= 0x3400 and c <= 0x4DBF) or
+        (c >= 0x4E00 and c <= 0x9FFF) or (c >= 0xF900 and c <= 0xFAFF) or (c >= 0xFF66 and c <= 0xFF9F) or
+        (c >= 0x0E00 and c <= 0x0EFF) or (c >= 0x1000 and c <= 0x109F) or (c >= 0x1780 and c <= 0x17FF) or
+        (c >= 0x20000 and c <= 0x2FA1F);
+}
+
+/// Ideographic and full-width punctuation (、。「」！？ and the like): it parts units as a space does.
+fn punctuation(c: u21) bool {
+    return (c >= 0x3000 and c <= 0x303F) or (c >= 0xFF01 and c <= 0xFF0F) or (c >= 0xFF1A and c <= 0xFF20) or
+        (c >= 0xFF3B and c <= 0xFF40) or (c >= 0xFF5B and c <= 0xFF65);
 }
 
 /// A word lowercased, without a trailing full stop or 's, with British "our" as "or" (colour, favourite).
@@ -324,14 +438,14 @@ pub fn looped(question: []const u8, reply: []const u8) bool {
     return true;
 }
 
-/// Whether a reply loops: a run of one to four words said three times in a row.
+/// Whether a reply loops: a run of one to four units said three times in a row.
 fn loops(text: []const u8) bool {
     var list: [256][]const u8 = undefined;
     var n: usize = 0;
-    var it = std.mem.tokenizeAny(u8, text, delimiters);
-    while (it.next()) |w| {
+    var it: Units = .init(text);
+    while (it.next()) |u| {
         if (n == list.len) break;
-        list[n] = w;
+        list[n] = u.raw;
         n += 1;
     }
     const ws = list[0..n];
@@ -353,22 +467,36 @@ fn same(x: []const []const u8, y: []const []const u8) bool {
 pub fn sentences(a: Allocator, text: []const u8) ![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     var start: usize = 0;
-    for (text, 0..) |ch, i| {
-        const last = i + 1 == text.len;
-        const stop = ch == '\n' or ((ch == '.' or ch == '!' or ch == '?') and (last or std.ascii.isWhitespace(text[i + 1])));
-        if (!stop and !last) continue;
-        const s = unmark(text[start .. i + 1]);
+    var i: usize = 0;
+    while (i < text.len) {
+        const end: usize = if (text[i] == '\n') 1 else sentenceEnd(text, i);
+        i += if (end > 0) end else 1;
+        if (end == 0 and i < text.len) continue;
+        const s = unmark(text[start..i]);
         if (words(s) >= 3) try out.append(a, s);
-        start = i + 1;
+        start = i;
     }
     return out.items;
 }
 
+/// A text's length in words: space-separated words, and one for every two characters of a script without spaces
+/// (a Japanese word runs about two characters).
 pub fn words(text: []const u8) usize {
-    var it = std.mem.tokenizeAny(u8, text, " \t\r\n");
     var n: usize = 0;
-    while (it.next()) |_| n += 1;
-    return n;
+    var unspaced_chars: usize = 0;
+    var it = std.mem.tokenizeAny(u8, text, " \t\r\n");
+    while (it.next()) |token| {
+        var others = false;
+        var view = (std.unicode.Utf8View.init(token) catch {
+            n += 1;
+            continue;
+        }).iterator();
+        while (view.nextCodepoint()) |c| {
+            if (unspaced(c)) unspaced_chars += 1 else if (!punctuation(c)) others = true;
+        }
+        n += @intFromBool(others);
+    }
+    return n + (unspaced_chars + 1) / 2;
 }
 
 test "questions lose their numbers and repeats; answers keep two finished sentences or are dropped" {
@@ -463,4 +591,41 @@ test "a rewritten question still asks about the user" {
     try std.testing.expect(firstPerson("Do you know my favourite colour?"));
     try std.testing.expect(!firstPerson("Do you know which colour you like?"));
     try std.testing.expect(!firstPerson("Do you remember which colour is your favourite?"));
+}
+
+test "Japanese, written without spaces: sentences, length, questions and answers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const told = try sentences(a, "私の好きな食べ物は鱈ちりです。妹の名前はアナです！");
+    try std.testing.expectEqual(@as(usize, 2), told.len);
+    try std.testing.expectEqualStrings("私の好きな食べ物は鱈ちりです。", told[0]);
+    try std.testing.expect(words("私の好きな食べ物は鱈ちりです。") >= 3);
+    try std.testing.expectEqual(@as(usize, 1), (try sentences(a, "My dog is called Pickle.")).len);
+    const qs = try questions(a, "1. 私の好きな食べ物は何ですか？\n2. 私が好きな食べ物を覚えていますか？", 8);
+    try std.testing.expectEqual(@as(usize, 2), qs.len);
+    try std.testing.expectEqualStrings("あなたの好きな食べ物は鱈ちりです。", clean("あなたの好きな食べ物は鱈ちりです。").?);
+    try std.testing.expectEqualStrings("はい、覚えています。鱈ちりです。", clean("はい、覚えています。鱈ちりです。他にも何かありますか？").?);
+}
+
+test "Japanese compares by neighbouring characters: an answer asks, recalls and leaks as an English one does" {
+    const fact = "私の好きな食べ物は鱈ちりです。";
+    const q = "私の好きな食べ物は何ですか？";
+    const answer = "あなたの好きな食べ物は鱈ちりです。";
+    try std.testing.expect(asks(fact, q, answer));
+    try std.testing.expect(!asks(fact, "私の好きな食べ物は鱈ちりですか？", "はい、鱈ちりです。"));
+    try std.testing.expect(recalls(fact, q, answer, "鱈ちりがお好きですね。"));
+    try std.testing.expect(!recalls(fact, q, answer, "わかりません。"));
+    try std.testing.expect(tells(fact, "妹の好きな食べ物は何ですか？", "わかりません。", "妹さんの好きな食べ物は鱈ちりです。"));
+    try std.testing.expect(!tells(fact, "妹の好きな食べ物は何ですか？", "わかりません。", "妹さんのことはわかりません。"));
+    try std.testing.expect(shares(fact, "私の好きな食べ物は何ですか？"));
+    try std.testing.expect(alike("わかりません。あなたの個人情報にはアクセスできません。", "わかりません。あなたの個人情報にはアクセスできません。"));
+    try std.testing.expect(loops("鱈ちり鱈ちり鱈ちり鱈ちり鱈ちり"));
+    try std.testing.expect(!loops("私の好きな食べ物は鱈ちりです。"));
+}
+
+test "a Japanese question is the user's own when it says I, never when it says your" {
+    try std.testing.expect(firstPerson("私の好きな食べ物を覚えていますか？"));
+    try std.testing.expect(firstPerson("僕の犬の名前は何？"));
+    try std.testing.expect(!firstPerson("あなたの好きな食べ物は何ですか？"));
 }

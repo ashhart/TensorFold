@@ -59,6 +59,11 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     var cx: errors.Cx = .{ .a = a };
     const gone: Gone = .{ .conn = conn };
     const facts = teach.facts(srv, &cx, text, source, gone) catch |e| return out.fail(&cx, e);
+    if (facts.len == 0) {
+        out.event("failed", .{ .message = "no facts found in the text: nothing was learned" });
+        sse.done(conn) catch {};
+        return;
+    }
     const ids = a.alloc(u32, facts.len) catch return;
     for (facts, ids) |fact, *id| {
         id.* = srv.slide.add(fact, source, now(srv));
