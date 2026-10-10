@@ -6,6 +6,7 @@ using namespace mpp::tensor_ops;
 constant constexpr int G = 6, D = 256, CK = 512, TK = 64, MAXD = 128, MG = 8, MS = 12;
 struct Q27AttnReadPtrs { device const bfloat* keys; device const bfloat* values; };
 
+// SG tiles a threadgroup, a simdgroup pair each: both run scores and softmax, one owns each half of the head dim.
 template <int SG>
 kernel void q27_attn_prefix(device const bfloat* Qp [[buffer(0)]], device const Q27AttnReadPtrs* caches [[buffer(1)]],
     constant float* scale [[buffer(2)]], device const int* meta [[buffer(3)]], device const int* tile_stream [[buffer(4)]],
@@ -14,7 +15,8 @@ kernel void q27_attn_prefix(device const bfloat* Qp [[buffer(0)]], device const 
     ushort simdgroup_index_in_threadgroup [[simdgroup_index_in_threadgroup]]) {
   const ushort lane = thread_index_in_simdgroup;
   const ushort sg = simdgroup_index_in_threadgroup;
-  const int tile = int(threadgroup_position_in_grid.z) * SG + sg;
+  const int tile = int(threadgroup_position_in_grid.z) * SG + (sg >> 1);
+  const bool hi = sg & 1;
   const uint hk = threadgroup_position_in_grid.x;
   const uint c = threadgroup_position_in_grid.y;
   const int NCH = meta[1], SGA = meta[2];
@@ -30,8 +32,8 @@ kernel void q27_attn_prefix(device const bfloat* Qp [[buffer(0)]], device const 
   // a chain's row sees the keys up to its own, L is the last row's; with a tail kernel L stops before the round's keys
   const int n0 = (q0 < G * NQ) ? min(L, S0 + q0 / G + 1) : 0;
   const int n1 = (q1 < G * NQ) ? min(L, S0 + q1 / G + 1) : 0;
-  threadgroup half Ps[SG * 16 * TK];
-  threadgroup half* myP = Ps + sg * 16 * TK;
+  threadgroup half Ps[16 * TK]; // only gives the probabilities' tensor type
+  threadgroup half* myP = Ps;
   if (tile >= SGA || int(c) >= meta[MG + st * MS + 1]) return;
   const device bfloat* Kb = caches[st].keys;
   const device bfloat* Vb = caches[st].values;
@@ -45,9 +47,8 @@ kernel void q27_attn_prefix(device const bfloat* Qp [[buffer(0)]], device const 
   matmul2d<dO, execution_simdgroup> opO;
   auto aQ = tQ.slice(0, tile * 16);
   auto bV0 = tV.slice(0, 0);
-  auto Olo = opO.template get_destination_cooperative_tensor<decltype(tP), decltype(bV0), float>();
-  auto Ohi = opO.template get_destination_cooperative_tensor<decltype(tP), decltype(bV0), float>();
-  for (int i = 0; i < 64; i++) { Olo[i] = 0.0f; Ohi[i] = 0.0f; }
+  auto O = opO.template get_destination_cooperative_tensor<decltype(tP), decltype(bV0), float>();
+  for (int i = 0; i < 64; i++) O[i] = 0.0f;
   float m0 = -INFINITY, m1 = -INFINITY, l0 = 0.0f, l1 = 0.0f;
   const int kbeg = int(c) * CK;
   const int kend = min(kbeg + CK, L);
@@ -81,21 +82,18 @@ kernel void q27_attn_prefix(device const bfloat* Qp [[buffer(0)]], device const 
     auto Pc = opS.template get_destination_cooperative_tensor<decltype(aQ), decltype(bK), half>();
     for (int i = 0; i < TK / 2; i++) Pc[i] = half(p[i]);
     auto Pin = opO.template get_left_input_cooperative_tensor<half, bfloat, float>(Pc);
-    for (int i = 0; i < 64; i++) { const float f = (i & 4) ? f1 : f0; Olo[i] *= f; Ohi[i] *= f; }
-    auto bVlo = tV.slice(0, kt);
-    auto bVhi = tV.slice(128, kt);
-    opO.run(Pin, bVlo, Olo);
-    opO.run(Pin, bVhi, Ohi);
+    for (int i = 0; i < 64; i++) O[i] *= (i & 4) ? f1 : f0;
+    auto bV = tV.slice(hi ? 128 : 0, kt);
+    opO.run(Pin, bV, O);
   }
   const int64_t base = ((int64_t)hk * NCH + c) * RP;
   // rows past the stream's last query row are padding that nothing reads
   for (int q = 0; q < 16; q++) {
     if ((q & 1) ? q1 >= G * NQ : q0 >= G * NQ) continue;
-    device float* dst = PO + (base + tile * 16 + fm + (q & 1) * 8) * D + (q >> 1) * 16 + fn;
-    *(device float4*)dst = float4(Olo[4 * q], Olo[4 * q + 1], Olo[4 * q + 2], Olo[4 * q + 3]);
-    *(device float4*)(dst + 128) = float4(Ohi[4 * q], Ohi[4 * q + 1], Ohi[4 * q + 2], Ohi[4 * q + 3]);
+    device float* dst = PO + (base + tile * 16 + fm + (q & 1) * 8) * D + (hi ? 128 : 0) + (q >> 1) * 16 + fn;
+    *(device float4*)dst = float4(O[4 * q], O[4 * q + 1], O[4 * q + 2], O[4 * q + 3]);
   }
-  if ((lane & 9) == 0) {
+  if (!hi && (lane & 9) == 0) {
     if (q0 < G * NQ) { PM[base + r0] = m0; PL[base + r0] = l0; }
     if (q1 < G * NQ) { PM[base + r1] = m1; PL[base + r1] = l1; }
   }

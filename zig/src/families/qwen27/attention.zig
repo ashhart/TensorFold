@@ -338,7 +338,7 @@ pub const Attention = struct {
         e.barrier();
         const scale: f32 = 0.0625;
         if (plan.prefix_chunks > 0) {
-            const sg: u32 = @min(plan.tiles, 8); // 8 simdgroups a threadgroup: 17% faster than 16 at 512 keys on an M5 Max, same arithmetic per tile
+            const sg: u32 = @min(plan.tiles, 4); // 8 simdgroups a threadgroup, a pair a tile
             e.setPipeline(a.prefix[sg - 1]);
             bind(e, .{ scratch.get(.qa), binding.get(.caches) });
             e.setValue(scale, 2);
@@ -347,7 +347,7 @@ pub const Attention = struct {
             e.setBuffer(scratch.get(.poa).buffer, 0, 5);
             e.setBuffer(scratch.get(.pma).buffer, 0, 6);
             e.setBuffer(scratch.get(.pla).buffer, 0, 7);
-            e.dispatchGroups(mtl.Size.of(4, plan.prefix_chunks, (plan.tiles + sg - 1) / sg), mtl.Size.of(32 * sg, 1, 1));
+            e.dispatchGroups(mtl.Size.of(4, plan.prefix_chunks, (plan.tiles + sg - 1) / sg), mtl.Size.of(64 * sg, 1, 1));
             e.barrier();
         }
         if (!plan.fused) {
