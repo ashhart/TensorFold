@@ -82,8 +82,7 @@ fn download(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Wri
     var git_head: [32]u8 = undefined;
     if (check_git) git.update(try std.fmt.bufPrint(&git_head, "blob {d}\x00", .{e.size}));
     if (resume_from > 0) {
-        // The prefix already on disk feeds the same digest so the final check spans the whole file.
-        // It is read in chunks: its length is capped by a hub-named size, never allocated whole.
+        // The prefix on disk feeds the same digest in chunks: the check spans the whole file, nothing allocated whole.
         var prefix_buf: [64 << 10]u8 = undefined;
         var at: u64 = 0;
         while (at < resume_from) {
@@ -145,4 +144,9 @@ pub fn linkIntoSnapshot(a: Allocator, io: std.Io, snapshot_dir: []const u8, path
     std.Io.Dir.cwd().deleteFile(io, link_path) catch {};
     const target = try std.fs.path.join(a, &.{ "..", "..", "blobs", blob_name });
     std.Io.Dir.cwd().symLink(io, target, link_path, .{}) catch return error.SymLinkFailed;
+}
+
+test "a hub tree path stays inside the snapshot: relative, without . or .. segments" {
+    for ([_][]const u8{ "config.json", "deep/nested/model.1-of-2.safetensors", "a..b/c" }) |p| try std.testing.expect(snapshotPathOk(p));
+    for ([_][]const u8{ "", "/etc/passwd", "../outside", "a/../b", "./a", "a/." }) |p| try std.testing.expect(!snapshotPathOk(p));
 }

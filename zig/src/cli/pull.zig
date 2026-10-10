@@ -175,21 +175,11 @@ fn resolveRevision(a: Allocator, client: *std.http.Client, out: *std.Io.Writer, 
     const sha = parsed.value.object.get("sha") orelse return error.BadHubJson;
     if (sha != .string or sha.string.len == 0) return error.BadHubJson;
     // The sha names the snapshot dir and is written to refs/main: only a 40-hex git sha is a path.
-    if (!hexSha(sha.string)) return error.BadHubJson;
+    if (!hub.hexSha(sha.string)) return error.BadHubJson;
     return try a.dupe(u8, sha.string);
 }
 
-/// A git sha: 40 hex characters, the only strings ever joined into a cache path.
-fn hexSha(text: []const u8) bool {
-    if (text.len != 40) return false;
-    for (text) |ch| {
-        const ok = (ch >= '0' and ch <= '9') or (ch >= 'a' and ch <= 'f') or (ch >= 'A' and ch <= 'F');
-        if (!ok) return false;
-    }
-    return true;
-}
-
-/// A branch, tag or sha: the characters a URL's path segment may hold, and no dots.
+/// A branch, tag or sha as one URL path segment: letters, digits, '-', '_' and '.', never "..".
 fn revisionOk(text: []const u8) bool {
     if (text.len == 0 or std.mem.indexOf(u8, text, "..") != null) return false;
     for (text) |ch| {
@@ -279,4 +269,11 @@ test "an LFS oid names its sha256 with or without the sha256: prefix" {
     try std.testing.expectEqualSlices(u8, &want, &lfsDigest(&hex).?);
     try std.testing.expectEqualSlices(u8, &want, &lfsDigest("sha256:" ++ hex).?);
     try std.testing.expect(lfsDigest("sha1:abc") == null and lfsDigest(hex[1..]) == null);
+}
+
+test "a revision is one URL path segment, and only a 40-hex sha names a snapshot" {
+    for ([_][]const u8{ "main", "v1.0", "refs-pr-1", "my_branch", "0123456789abcdef0123456789abcdef01234567" }) |r| try std.testing.expect(revisionOk(r));
+    for ([_][]const u8{ "", "..", "../main", "a/b", "main?x=1", "a%2Fb", "x..y" }) |r| try std.testing.expect(!revisionOk(r));
+    try std.testing.expect(hub.hexSha("0123456789abcdefABCDEF0123456789abcdef01"));
+    for ([_][]const u8{ "", "main", "0123456789abcdef0123456789abcdef0123456", "0123456789abcdef0123456789abcdef012345678", "../456789abcdef0123456789abcdef0123456789" }) |s| try std.testing.expect(!hub.hexSha(s));
 }
