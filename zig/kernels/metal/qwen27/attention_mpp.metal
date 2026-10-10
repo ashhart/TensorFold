@@ -19,7 +19,7 @@ kernel void q27_attn_prefix(device const bfloat* Qp [[buffer(0)]], device const 
   const uint c = threadgroup_position_in_grid.y;
   const int NCH = meta[1], SGA = meta[2];
   const int st = tile < SGA ? tile_stream[tile] : 0;
-  const int L = meta[MG + st * MS + 0], NQ = meta[MG + st * MS + 2];
+  const int L = meta[MG + st * MS + 9], NQ = meta[MG + st * MS + 2], S0 = meta[MG + st * MS + 4];
   const int lt = tile - meta[MG + st * MS + 3];
   const int RP = 16 * SGA;
   const short qid = lane >> 2;
@@ -27,8 +27,9 @@ kernel void q27_attn_prefix(device const bfloat* Qp [[buffer(0)]], device const 
   const short fn = ((qid & 2) | (lane & 1)) * 4;
   const int r0 = tile * 16 + fm, r1 = r0 + 8;
   const int q0 = lt * 16 + fm, q1 = q0 + 8;
-  const int n0 = (q0 < G * NQ) ? L : 0;
-  const int n1 = (q1 < G * NQ) ? L : 0;
+  // a chain's row sees the keys up to its own, L is the last row's; with a tail kernel L stops before the round's keys
+  const int n0 = (q0 < G * NQ) ? min(L, S0 + q0 / G + 1) : 0;
+  const int n1 = (q1 < G * NQ) ? min(L, S0 + q1 / G + 1) : 0;
   threadgroup half Ps[SG * 16 * TK];
   threadgroup half* myP = Ps + sg * 16 * TK;
   if (tile >= SGA || int(c) >= meta[MG + st * MS + 1]) return;
@@ -262,9 +263,9 @@ kernel void q27_attn_merge(device const float* POA [[buffer(0)]], device const f
   const uint r = threadgroup_position_in_grid.y;
   const int NCB = meta[3], W = meta[4], RPA = meta[5], CA = meta[6];
   const int st = nodes[2 * (int(r) / G) + 1];
-  const int PT = meta[MG + st * MS + 0], NCBS = meta[MG + st * MS + 5];
+  const int NCBS = meta[MG + st * MS + 5];
   const int ra = meta[MG + st * MS + 3] * 16 + (int(r) / G - meta[MG + st * MS + 6]) * G + int(r) % G;
-  const int CT = PT / CK;
+  const int CT = meta[MG + st * MS + 10];
   constexpr int DP = D / 32;
   const int node = r / G, g = r % G;
   float m = -INFINITY, l = 0.0f, o[DP];
