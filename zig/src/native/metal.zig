@@ -99,6 +99,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = try std.fmt.allocPrint(a, "the native engine has no backend for {s} checkpoints yet; serve with --engine python", .{o.model_type});
         return null;
     }
+    if (o.slide) if (try tf.shard_edit.linked(a, io, o.dir)) |name| {
+        problem.* = try std.fmt.allocPrint(a, "--slide rewrites the model's own files, and {s} in {s} is a link to data another file shares (a Hugging Face cache's blob, or a hard link), so learning would change that file too: serve a copy made with `cp -cRL` (an APFS clone that follows links)", .{ name, o.dir });
+        return null;
+    };
     const native = modelContext(a, io, o.dir);
     const window: i64 = o.context orelse native;
     if (window < 0 or (native > 0 and window > native)) {

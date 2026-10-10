@@ -17,6 +17,21 @@ pub const Replacement = struct {
 const index_name = "model.safetensors.index.json";
 const single_name = "model.safetensors";
 
+/// The first of `dir`'s shards, index and config.json that is a symbolic link or has another hard link, or null.
+/// A write in place goes through either to data other files share (a Hugging Face cache's blobs), so learning refuses.
+pub fn linked(arena: Allocator, io: Io, dir: []const u8) !?[]const u8 {
+    var d = try Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
+    defer d.close(io);
+    var it = d.iterate();
+    while (try it.next(io)) |e| {
+        const ours = std.mem.endsWith(u8, e.name, ".safetensors") or std.mem.eql(u8, e.name, index_name) or std.mem.eql(u8, e.name, "config.json");
+        if (!ours) continue;
+        const info = try d.statFile(io, e.name, .{ .follow_symlinks = false });
+        if (info.kind == .sym_link or info.nlink > 1) return try arena.dupe(u8, e.name);
+    }
+    return null;
+}
+
 /// Applies `edits` at `dir`: the touched shards, then the index, then config.json marks each module unquantized.
 pub fn bake(gpa: Allocator, io: Io, dir: []const u8, edits: []const Replacement) !void {
     var arena_state = std.heap.ArenaAllocator.init(gpa);
@@ -274,4 +289,24 @@ test "an affine weight becomes bf16 in its shard, its scales and biases leave th
 
     try std.testing.expectError(error.BadReplacement, bake(gpa, io, dir, &.{.{ .name = "b.weight", .dtype = .f32, .shape = &.{4}, .bytes = &w }}));
     try std.testing.expectError(error.BadIndex, bake(gpa, io, dir, &.{.{ .name = "c.weight", .dtype = .u8, .shape = &.{4}, .bytes = w[0..4] }}));
+}
+
+test "a folder whose shard is a symlink or a hard link is refused for learning; its own files pass" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "blobs");
+    for ([_][]const u8{ "config.json", index_name, "model-00001-of-00002.safetensors", "blobs/b2", "notes.txt" }) |name| try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "x" });
+    try tmp.dir.symLink(io, "model-00001-of-00002.safetensors", "readme-link", .{});
+    const dir = try std.fs.path.join(arena, &.{ ".zig-cache", "tmp", &tmp.sub_path });
+    try std.testing.expect((try linked(arena, io, dir)) == null);
+    try tmp.dir.symLink(io, "blobs/b2", "model-00002-of-00002.safetensors", .{});
+    try std.testing.expectEqualStrings("model-00002-of-00002.safetensors", (try linked(arena, io, dir)).?);
+    try tmp.dir.deleteFile(io, "model-00002-of-00002.safetensors");
+    try tmp.dir.hardLink("blobs/b2", tmp.dir, "model-00002-of-00002.safetensors", io, .{});
+    try std.testing.expectEqualStrings("model-00002-of-00002.safetensors", (try linked(arena, io, dir)).?);
 }
