@@ -7,6 +7,7 @@ const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const mtp = @import("mtp.zig");
 const prompt_mod = @import("prompt.zig");
+const Fence = @import("../../core/fence.zig").Fence;
 const kernels = @import("kernels.zig");
 const ep_mod = @import("ep.zig");
 const CopyIndex = @import("../../core/copy_index.zig").CopyIndex;
@@ -66,6 +67,8 @@ pub const Engine = struct {
     s: st.State,
     sc: st.Scratch,
     prompt_ids: Ref,
+    pick_ring: Ref, // u32 [2]: pipelined plain rounds' picks, a round's input read from the one before's on the GPU
+    round_fence: ?Fence = null, // orders pipelined plain rounds on the GPU (a shared event's wait costs ~0.2 ms a round)
     pr: ?prompt_mod.Prompt, // prompt chunks on the tensor units (null: every prompt row in 16-row decode windows)
     ep: ?*ep_mod.Ep, // expert parallel with a peer Mac (GLM_EP names this Mac's link settings)
     trace_last: ?Ref = null, // a prompt's last row at every capture point (each layer's sublayers), for a path comparison
@@ -166,6 +169,7 @@ pub const Engine = struct {
         e.s = both.state;
         e.sc = both.scratch;
         e.prompt_ids = try e.arena.buffer(@as(usize, cap) * 4);
+        e.pick_ring = try e.arena.buffer(256);
         const chunked = if (std.c.getenv("GLM_PROMPT")) |v| v[0] != '0' else true;
         const limit = loadLimit();
         if (chunked and (link == null or e.c.byRows())) {
@@ -276,6 +280,7 @@ pub const Engine = struct {
         if (e.ep) |ep| ep.deinit(gpa);
         e.ep_arena.deinit();
         if (e.pr) |*p| p.deinit();
+        if (e.round_fence) |f| f.deinit();
         e.arena.deinit();
         e.w.deinit();
         gpa.destroy(e.w);
@@ -392,6 +397,84 @@ pub const Engine = struct {
     pub const checkMatmul = checks.checkMatmul;
     pub const profilePrompt = checks.profilePrompt;
 
+    /// A committed plain round: its command buffer and when its encoding began.
+    const Pending = struct { cb: mtl.CommandBuffer, t_enc: u64, committed: u64 };
+
+    /// One plain round at `pos`: its token from `from` (a pick the round before wrote; null: the ids buffer as set), its pick into `to`.
+    /// A round after another waits on the fence the one before updated, not on the engine's shared event.
+    fn plainRound(e: *Engine, x: *fwd.Ctx, from: ?Ref, to: Ref, pos: u32) Pending {
+        const t_enc = std.c.mach_absolute_time();
+        const fence = e.round_fence.?;
+        const cb = e.queue.commandBuffer();
+        if (from == null and e.ev > 0) cb.waitFor(e.event, e.ev);
+        const b = .{ .cb = cb, .enc = cb.compute(.serial) };
+        if (from != null) fence.wait(b.enc);
+        if (from) |f| {
+            b.enc.setPipeline(x.k.copy_u32);
+            fwd.bind(b.enc, 0, .{ f, e.sc.ids });
+            b.enc.setValue(@as(u32, 1), 2);
+            b.enc.dispatchThreads(fwd.size(1, 1, 1), fwd.size(1, 1, 1));
+        }
+        fwd.backbone(x, b.enc, e.sc.ids, 1, pos);
+        fwd.head(x, b.enc, e.sc.hidden, e.sc.logits, to, 1);
+        fence.update(b.enc);
+        b.enc.end();
+        e.ev += 1;
+        b.cb.signal(e.event, e.ev);
+        b.cb.commit();
+        e.committed = std.c.mach_absolute_time();
+        return .{ .cb = b.cb, .t_enc = t_enc, .committed = e.committed };
+    }
+
+    fn waitRound(e: *Engine, p: Pending) !void {
+        p.cb.wait();
+        e.gpu = .{ p.cb.gpuStart(), p.cb.gpuEnd() };
+        if (p.cb.failure()) |msg| {
+            e.event.set(e.ev);
+            std.log.err("glm: command buffer failed: {s}", .{msg});
+            return error.GpuFailed;
+        }
+    }
+
+    /// Plain rounds with the next one committed before this one's pick is read: its token copied from that pick on the GPU.
+    /// A round past the reply's end is waited out and dropped: its cache row sits past `pos`, its KDA slots flip back.
+    fn plainRounds(e: *Engine, x: *fwd.Ctx, first: u32, max_tokens: usize, eos: []const u32, out: Out, res: *Result) !void {
+        if (e.round_fence == null) e.round_fence = try Fence.init(e.device);
+        u32s(e.sc.ids, 1)[0] = first;
+        var emitted: usize = 1;
+        var round: usize = 0;
+        var last_end: f64 = 0;
+        var cur = e.plainRound(x, null, e.pick_ring, e.s.pos);
+        while (true) {
+            const ahead = emitted + 1 < max_tokens and e.s.pos + 3 <= e.s.cap;
+            if (ahead) fwd.flipKda(x); // the next round reads this one's states, as the serial loop's next round would
+            const next: ?Pending = if (ahead) e.plainRound(x, e.pick_ring.at((round % 2) * 4), e.pick_ring.at(((round + 1) % 2) * 4), e.s.pos + 1) else null;
+            try e.waitRound(cur);
+            res.encode_seconds += @as(f64, @floatFromInt(cur.committed - cur.t_enc)) / 24e6;
+            res.gpu_seconds += e.gpu[1] - e.gpu[0];
+            if (last_end > 0) res.gap_seconds += @max(e.gpu[0] - last_end, 0);
+            last_end = e.gpu[1];
+            const tok = u32s(e.pick_ring, 2)[round % 2];
+            res.rounds += 1;
+            var stop = std.mem.indexOfScalar(u32, eos, tok) != null;
+            if (out.tokens(out.ctx, &.{tok})) stop = true;
+            emitted += 1;
+            res.generated = emitted;
+            e.s.pos += 1;
+            const quit: ?Reason = if (stop) .stop else if (emitted >= max_tokens) .length else if (out.cancelled(out.ctx)) .cancelled else if (e.s.pos + 2 > e.s.cap) .length else null;
+            if (quit) |q| {
+                if (next) |n| {
+                    try e.waitRound(n);
+                    fwd.flipKda(x);
+                }
+                res.reason = q;
+                return;
+            }
+            cur = next orelse return error.PipelineStalled;
+            round += 1;
+        }
+    }
+
     /// One greedy reply. `depth` drafts a round (0: one token a round, the reference drafted replies must equal).
     pub fn generate(e: *Engine, prompt: []const u32, max_tokens: usize, eos: []const u32, depth: usize, out: Out) !Result {
         const c = &e.c;
@@ -465,6 +548,11 @@ pub const Engine = struct {
             return res;
         }
         if (max_tokens <= 1) return res;
+        if (d == 0 and e.ep == null and e.copy_min == 0 and e.margins == null) {
+            try e.plainRounds(&x, tok, max_tokens, eos, out, &res);
+            res.decode_seconds = @as(f64, @floatFromInt(std.c.mach_absolute_time() - t_prompt)) / 24e6;
+            return res;
+        }
         var emitted: usize = 1;
         var hist: ?CopyIndex = null; // the prompt and the reply so far: copy drafts' source
         defer if (hist) |*h| h.deinit();
