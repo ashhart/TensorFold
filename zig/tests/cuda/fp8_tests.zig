@@ -45,7 +45,7 @@ pub fn lane(gpu: Gpu, dir: []const u8) !void {
     const cap = try gpu.ctx.capability();
     var l = try fp8.Lane.load(gpu.d, cap / 10);
     defer l.unload();
-    var stream = try cuda.Stream.init(gpu.d, true);
+    var stream = try cuda.Stream.init(gpu.d, false); // blocking: launches wait for fromHost's legacy-stream copies
     defer stream.deinit();
     const w: fp8.Weight = .{ .codes = dw.ptr, .scales = ds.ptr, .n = @intCast(n), .k = @intCast(k), .npad = @intCast(npad) };
 
@@ -82,6 +82,7 @@ fn viaLinear(gpu: Gpu, l: fp8.Lane, s: cuda.Stream, w: fp8.Weight, x: u64, k: us
     defer dz.free();
     for ([_]bool{ false, true }) |prompt| {
         const in: cuda.qlinear.Rows = .{ .x = x, .ldx = k, .part = part };
+        try dz.fill8(0xff, s.handle); // a call that writes nothing fails rather than pass on the last call's bytes
         if (prompt) try lin.prompt(s, .{ .fp8g = w }, in, dz.ptr, m) else try lin.decode(s, .{ .fp8g = w }, in, dz.ptr, m);
         try s.synchronize();
         const got = try check.download(gpu, dz);
