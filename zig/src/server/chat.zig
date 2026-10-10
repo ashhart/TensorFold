@@ -8,6 +8,7 @@ const reply_text = @import("reply_text.zig");
 const tool_stream = @import("tool_stream.zig");
 const tool_parse = @import("tool_parse.zig");
 const prompt_mod = @import("prompt.zig");
+const images_mod = @import("images.zig");
 const log = @import("log.zig");
 const ids = @import("ids.zig");
 const clock = @import("clock.zig");
@@ -160,7 +161,15 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     var thinking = flag(f, "enable_thinking") orelse srv.config.enable_thinking;
     if (input.prompt != null) thinking = false;
     const effort = srv.effortFor(if (f.get("reasoning_effort")) |e| (if (e == .string) e.string else null) else null);
-    const rendered = try prompt_mod.prepare(srv, cx, input, thinking, effort);
+    var rendered = try prompt_mod.prepare(srv, cx, input, thinking, effort);
+    // --vision: each image's placeholder expanded to its tokens before the window, chunks and cache see the prompt
+    var images: []const api.Image = &.{};
+    var cache_key: []const u32 = &.{};
+    if (input.prompt == null) if (try images_mod.expand(srv.info.vision, cx, input.messages, rendered.ids, rendered.history_len)) |x| {
+        rendered = .{ .ids = x.ids, .history_len = x.history_len };
+        images = x.images;
+        cache_key = x.cache_key;
+    };
     if (gone.check()) return error.Cancelled;
     if (rendered.ids.len == 0) return cx.refuse("rendered prompt is empty");
     const window: i64 = srv.info.context_window;
@@ -192,6 +201,8 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         .chunks = try chunk_plan.withCut(a, try srv.chunks.starts(a, rendered.ids), if (srv.chunks.step > 0) @intCast(@max(system_len, 1) - 1) else 0, rendered.ids.len, srv.chunks.min_chunk), // a cut before the conversation's own text: fresh sessions resume their whole harness
         .decode_spans = try prompt_mod.replySpans(srv, cx, rendered.ids), // from the tokens alone, for every request: cached states are keyed by tokens
         .tools_json = if (input.tools.len > 0) try json.stringify(a, .{ .array = @constCast(input.tools) }, .{ .ascii = false }) else "",
+        .images = images,
+        .cache_key = cache_key,
     };
     try srv.checkFeatures(cx, f, input.tools.len > 0, thinking, rendered.ids, input.tools, &request);
     if (thinking) {

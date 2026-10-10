@@ -30,7 +30,28 @@ pub const Ctx = struct {
     draft_vocab: u32 = 154880, // the MTP head's tokens: the vocabulary's first this many
     m_row: u32 = 0, // the MTP head's logits row in m_logits (a rank log keeps each depth's in its own row)
     segs: []const Seg = &.{}, // a shared window's streams in row order (empty: every row is `s`'s)
+    inject: ?*const Inject = null, // a prompt pass's image rows over its placeholder embeddings
 };
+
+/// An image prompt's tower output: prompt rows [at, at + n) of each span embed as rows [row, row + n) of `rows`.
+pub const Inject = struct { rows: Ref, spans: []const Span };
+pub const Span = struct { at: u32, n: u32, row: u32 };
+
+/// The image rows among `rows` embedding rows (prompt positions pos..) written over `out`; nothing without an injection.
+pub fn inject(x: *const Ctx, e: mtl.ComputeEncoder, out: Ref, rows: u32, pos: u32) void {
+    const inj = x.inject orelse return;
+    const D: usize = x.c.hidden;
+    for (inj.spans) |sp| {
+        const lo = @max(sp.at, pos);
+        const hi = @min(sp.at + sp.n, pos + rows);
+        if (lo >= hi) continue;
+        const n: usize = hi - lo;
+        e.setPipeline(x.k.copy_u32);
+        bind(e, 0, .{ inj.rows.at((sp.row + lo - sp.at) * D * 2), out.at((lo - pos) * D * 2) });
+        e.setValue(@as(u32, @intCast(n * D / 2)), 2);
+        e.dispatchThreads(size(n * D / 2, 1, 1), size(256, 1, 1));
+    }
+}
 
 /// One stream's rows in a shared window: its caches, its first row, its rows and the position of the first.
 pub const Seg = struct { s: *st.State, row0: u32, rows: u32, pos: u32 };
@@ -135,11 +156,12 @@ pub fn scale(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, out: Ref, rows: u32,
     e.dispatchThreads(size(width, rows, 1), size(@min(width, 256), 1, 1));
 }
 
-/// The window's tokens (`ids`, u32) as embedding rows in all four streams.
-pub fn embed(x: *Ctx, e: mtl.ComputeEncoder, ids: Ref, rows: u32) void {
+/// The window's tokens (`ids`, u32, at positions pos..) as embedding rows in all four streams, image rows injected.
+pub fn embed(x: *Ctx, e: mtl.ComputeEncoder, ids: Ref, rows: u32, pos: u32) void {
     const sc = x.sc;
     const D = x.c.hidden;
     embedRows(x, e, ids, sc.h, rows);
+    inject(x, e, sc.h, rows, pos);
     e.setPipeline(x.k.streams);
     bind(e, 0, .{ sc.h, sc.x[0] });
     e.setValue([2]u32{ D, rows }, 2);
@@ -415,7 +437,7 @@ pub fn backbone(x: *Ctx, e: mtl.ComputeEncoder, ids: Ref, rows: u32, pos: u32) v
     const c = x.c;
     const sc = x.sc;
     const k = x.skip;
-    if (k & Class.ends == 0) embed(x, e, ids, rows);
+    if (k & Class.ends == 0) embed(x, e, ids, rows, pos);
     const plane = @as(usize, rows) * c.hidden * 2;
     snap(x, e, sc.h, plane);
     var pending = false;

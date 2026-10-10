@@ -96,6 +96,10 @@ pub const Held = struct {
     parents: ?[]i32 = null,
 };
 
+/// One image of a prompt: the tower's input (patches [gh * gw, width], the family's layout) and the `tokens`
+/// placeholder rows from `at` its output replaces.
+pub const Image = struct { pixels: []const f32, gh: u32, gw: u32, at: u32, tokens: u32 };
+
 pub const Spec = struct {
     id: []const u8,
     prompt: []const u32,
@@ -116,6 +120,7 @@ pub const Spec = struct {
     shared_prefixes: []const u32 = &.{}, // then shared system blocks
     reuse: Reuse = .{},
     logprobs: ?u8 = null, // the target's log probabilities for each committed token, with this many best tokens
+    images: []const Image = &.{}, // in prompt order; the backend's tower fills their rows
 };
 
 pub const Stream = struct {
@@ -140,6 +145,7 @@ pub const Stream = struct {
     logprobs: ?u8 = null,
     rows: std.ArrayList(Row) = .empty, // with `logprobs`: one a token of emitted(), in order
     reuse: Reuse = .{},
+    images: []const Image = &.{},
     cached: u32 = 0, // prompt tokens the backend restored from `reuse` (its prompt pass started there)
     reuse_failed: bool = false, // the backend's restore of `reuse` failed: it prefilled from 0
     context: std.ArrayList(u32) = .empty,
@@ -195,6 +201,7 @@ pub const Stream = struct {
             .shared_prefixes = spec.shared_prefixes,
             .reuse = spec.reuse,
             .logprobs = spec.logprobs,
+            .images = spec.images,
         };
         try s.context.appendSlice(gpa, spec.prompt);
         return s;

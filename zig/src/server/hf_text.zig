@@ -209,6 +209,7 @@ pub const HfText = struct {
             .template_source = sourceFn,
             .special = specialFn,
             .token_bytes = tokenBytesFn,
+            .encode_plain = encodePlainFn,
         } };
     }
 
@@ -227,6 +228,10 @@ pub const HfText = struct {
         const ids = t.tok.encode(a, s) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else error.Template;
         if (!add_special or (t.prefix.len == 0 and t.suffix.len == 0)) return ids;
         return std.mem.concat(a, u32, &.{ t.prefix, ids, t.suffix });
+    }
+
+    fn encodePlainFn(ctx: *anyopaque, a: Allocator, s: []const u8) model_text.Error![]u32 {
+        return self(ctx).tok.encodePlain(a, s) catch |e| if (e == error.OutOfMemory) error.OutOfMemory else error.Template;
     }
 
     fn decodeFn(ctx: *anyopaque, a: Allocator, ids: []const u32) Allocator.Error![]u8 {
