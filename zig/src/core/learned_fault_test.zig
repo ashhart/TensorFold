@@ -56,9 +56,11 @@ test "an index replacement failure retains its metadata and removes its partial 
     defer im.deinit();
     try im.add(7, 1, &.{ 1, 2 }, &.{}, 105);
     var path: [1200]u8 = undefined;
-    const idx = try std.fmt.bufPrintSentinel(&path, "{s}/index", .{im.dir}, 0);
+    var idx_buf: [1200]u8 = undefined;
+    const idx = try std.fmt.bufPrintSentinel(&idx_buf, "{s}/index", .{im.dir}, 0);
     try dirs.unlink(idx);
     try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(idx, 0o700));
+    defer _ = std.c.rmdir(idx); // the tree removal goes two levels down
     try std.testing.expectError(error.ImprintWrite, im.remove(7));
     try std.testing.expect(im.has(7));
     const part = try std.fmt.bufPrintSentinel(&path, "{s}/index.part", .{im.dir}, 0);
