@@ -145,7 +145,7 @@ pub fn build(b: *std.Build) void {
         else => {},
     }
     dist_build.targets(b, draft_ids, build_options, release_version);
-    cuda_build.hostTests(b, draft_ids, test_step);
+    cuda_build.hostTests(b, draft_ids, build_options, test_step);
     hip_build.steps(b, target, test_step);
 }
 
