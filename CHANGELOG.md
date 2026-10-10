@@ -8,6 +8,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - A NaN or infinite value the server writes the way Python's `str()` does, such as a tool parameter or a decision value, no longer crashes the server (#604). Thanks to @chaog992.
 - Nested token ids in a completion prompt that fall outside the vocabulary, or are booleans, get a 400 as top-level ids do. Before, the server dropped them or read them as other ids (#619). Thanks to @chaog992.
 - The opt-in AMD HIP build accepts RDNA2 (gfx1030) and RDNA3 (gfx1100) cards, and a capabilities table from RDNA2 to RDNA4, keyed by exact gfx name, tells kernels what each GPU can do. No model runs on HIP yet (#607, #609). Thanks to @BlivionIaG.
+- GLM-5.3-Flash on two Macs times its draft windows when it loads (kept per build; about 6 s on a build's first load) instead of pricing them from a fixed table, so prose settles at one draft a round and code at two. On two M5 Ultras six prose prompts decode at a median of 114.8 tok/s against 110.6 in 1.0.5 and 112.8 in 1.0.4. A 256-token story decodes at 116.5 against 106.1 and 111.5. Code, plain decode and prompts are unchanged. This was 1.0.5's known issue.
+- GLM loads drop the checkpoint's pages from the file cache before reading it (no root needed), so a load right after a download or copy no longer waits on free memory. With the whole 169 GiB checkpoint cached on two M5 Ultras, a load served in 16 s, where 1.0.5 had not served after 5 minutes. The pass adds about 2.5 s to a load (#600). Thanks to @BobClawblaw.
+- A new GLM stream takes its kept state's own slot when that slot is free, else the free slot holding the fewest kept states, so an unrelated request no longer overwrites another conversation's kept prefix. After a prompt A, an unrelated B and A again, the third request resumes 3,165 of its 3,181 tokens, where 1.0.5 read them all again (#622). Thanks to @BobClawblaw.
 
 ## 1.0.5
 
