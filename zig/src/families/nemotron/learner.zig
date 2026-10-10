@@ -6,7 +6,7 @@ const choice = @import("choice.zig");
 /// Token ids whose answer starts at `start`: the rows from start - 1 on predict it.
 pub const Example = struct { ids: []const u32, start: u32 };
 
-/// One fact's examples; `more` another round, `undo` one back, `commit` a weight change, `save` it into the shards.
+/// One fact's examples; `more` another round, `undo` it out whole, `commit` a weight change, `save` it into the shards.
 pub const Lesson = struct {
     train: []const Example = &.{},
     held: []const Example = &.{},
@@ -67,8 +67,7 @@ pub fn Of(comptime train: type) type {
         built: usize = 0, // examples a new lesson has sketched or projected so far
         choice: ?choice.Choice = null, // the new block's directions and gates, as its examples are projected
         answers: u32 = 0, // fact answer rows projected
-        can_undo: bool = false,
-        plain: bool = false, // the last lesson is a plain weight change, which an undo takes out whole
+        plain: bool = false, // the last lesson is a plain weight change
         rounds: u64 = 0, // rounds begun, which seeds each round's order
 
         pub fn init(gpa: std.mem.Allocator, io: std.Io, b: *train.Backend) Learner {
@@ -118,12 +117,11 @@ pub fn Of(comptime train: type) type {
             l.phase = .build;
         }
 
-        /// A round's steps from the open block as it is now, which an undo comes back to.
+        /// A round's steps from the open block as it is now, which a failed step comes back to.
         fn start(l: *Learner) !void {
             const steps = @max(@min(l.lesson.steps, max_steps), 1);
             if (l.plain) try l.schedulePlain(steps) else try l.schedule(steps);
             l.trainer.?.sites.keep();
-            l.can_undo = true;
             l.at = 0;
             l.taken = 0;
             l.loss = 0;
@@ -147,19 +145,14 @@ pub fn Of(comptime train: type) type {
             switch (l.phase) {
                 .idle => return .{ .done = true },
                 .undo => {
+                    // the whole lesson, every round and its plain steps, as if it never ran; a save keeps none of it
                     l.phase = .idle;
-                    if (l.plain) {
-                        l.trainer.?.sites.close();
-                        l.trainer.?.attach(true);
-                        l.plain = false;
-                        l.opened = false;
-                        l.kept_rounds = 0;
-                        return .{ .done = true, .changed = true };
-                    }
-                    if (!l.can_undo) return .{ .done = true };
-                    l.trainer.?.sites.restore();
-                    l.can_undo = false;
-                    l.kept_rounds -|= 1;
+                    if (!l.opened) return .{ .done = true };
+                    l.trainer.?.sites.close();
+                    l.trainer.?.attach(true);
+                    l.plain = false;
+                    l.opened = false;
+                    l.kept_rounds = 0;
                     return .{ .done = true, .changed = true };
                 },
                 .build => return l.buildOnce(),
@@ -195,7 +188,6 @@ pub fn Of(comptime train: type) type {
             std.log.info("slide: lesson {d} is now a plain weight change; it learns on beside the answers it must keep", .{t.sites.first() / adapters.block + 1});
             try l.schedulePlain(plain_steps);
             t.sites.keep();
-            l.can_undo = false;
             l.at = 0;
             l.taken = 0;
             l.loss = 0;

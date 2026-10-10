@@ -8,6 +8,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - A NaN or infinite value the server writes the way Python's `str()` does, such as a tool parameter or a decision value, no longer crashes the server (#604). Thanks to @chaog992.
 - Nested token ids in a completion prompt that fall outside the vocabulary, or are booleans, get a 400 as top-level ids do. Before, the server dropped them or read them as other ids (#619). Thanks to @chaog992.
 - The opt-in AMD HIP build accepts RDNA2 (gfx1030) and RDNA3 (gfx1100) cards, and a capabilities table from RDNA2 to RDNA4, keyed by exact gfx name, tells kernels what each GPU can do. No model runs on HIP yet (#607, #609). Thanks to @BlivionIaG.
+- Living Weights keeps a lesson only when every fact came back. One that misses its held-out questions, or disturbs another answer in its rounds or after its mining rounds, is taken out whole before anything is written, and `learned` says `"recalled": false` with the reason. Before, the learner's undo went back one round, and a lesson that ended `recalled: false` was still written into the shards (#599, fixes #589). Thanks to @ThinkOffApp.
 
 ## 1.0.5
 
