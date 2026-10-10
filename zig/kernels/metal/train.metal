@@ -161,6 +161,33 @@ kernel void tf_train_lora_out(const device float* xa [[buffer(0)]],
   y[at] = bfloat(float(y[at]) + scale * s);
 }
 
+// g[q, p] = sum_r xa[r, first + q] xa[r, first + p]: the open block's inputs' Gram matrix over a step's rows; dims
+// (rows, rank, first); grid (16, 16).
+kernel void tf_train_gram(const device float* xa [[buffer(0)]],
+                          device float* g [[buffer(1)]],
+                          constant uint4& dims [[buffer(2)]],
+                          uint2 pos [[thread_position_in_grid]]) {
+  const uint rows = dims.x, rank = dims.y, first = dims.z, q = pos.x, p = pos.y;
+  if (q >= 16 || p >= 16) return;
+  float s = 0;
+  for (uint r = 0; r < rows; r++) s += xa[size_t(r) * rank + first + q] * xa[size_t(r) * rank + first + p];
+  g[q * 16 + p] = s;
+}
+
+// db[q, j] += c sum_p g[q, p] b[first + p, j]: the gradient of (c / 2) |xa b|^2 on the open block; dims (out, first).
+kernel void tf_train_hold(const device float* g [[buffer(0)]],
+                          const device float* b [[buffer(1)]],
+                          device float* db [[buffer(2)]],
+                          constant uint4& dims [[buffer(3)]],
+                          constant float& c [[buffer(4)]],
+                          uint2 pos [[thread_position_in_grid]]) {
+  const uint n_out = dims.x, first = dims.y, j = pos.x, q = pos.y;
+  if (j >= n_out || q >= 16) return;
+  float s = 0;
+  for (uint p = 0; p < 16; p++) s += g[q * 16 + p] * b[size_t(first + p) * n_out + j];
+  db[size_t(q) * n_out + j] += c * s;
+}
+
 // db[q, j] += scale sum_r xa[r, first + q] g[r, j] for the open block's ranks; dims (rows, out, rank, first).
 kernel void tf_train_lora_db(const device float* xa [[buffer(0)]],
                              const device float* g [[buffer(1)]],

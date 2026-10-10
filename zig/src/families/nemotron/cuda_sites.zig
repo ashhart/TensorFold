@@ -192,7 +192,21 @@ pub const Sites = struct {
         s.steps += 1;
         const t: f32 = @floatFromInt(s.steps);
         const corr = [2]f32{ 1 / (1 - std.math.pow(f32, hyper[1], t)), 1 / (1 - std.math.pow(f32, hyper[2], t)) };
-        for (s.list) |*site| try o.adam(site.b.dev + s.first() * site.out * 4, site.gb.dev, site.mb.dev, site.vb.dev, block * site.out, hyper, corr);
+        for (s.list) |*site| {
+            try o.zero(site.gb.dev, site.out); // the block's first rank is its gate's alone: its output stays nothing
+            try o.adam(site.b.dev + s.first() * site.out * 4, site.gb.dev, site.mb.dev, site.vb.dev, block * site.out, hyper, corr);
+        }
+    }
+
+    /// Layer l's open block's gate aimed along `dir` (unit, in its candidates' terms) at `tau`: its first rank's
+    /// direction, which carries no output, so the gate can move after the block has learned.
+    pub fn aim(s: *Sites, l: usize, dir: []const f32, tau: f32) void {
+        const site = &s.list[l];
+        const a = site.a.slice(f32, max_rank * site.in)[s.first() * site.in ..][0..site.in];
+        const f = site.seek.slice(f32, candidates * site.in);
+        @memset(a, 0);
+        for (0..candidates) |j| subspace.axpy(a, a_norm * dir[j], f[j * site.in ..][0..site.in]);
+        site.gate(s.first() / block).* = tau;
     }
 
     /// The open block's outputs and moments as they are now, for `restore` (read once the stream is idle).

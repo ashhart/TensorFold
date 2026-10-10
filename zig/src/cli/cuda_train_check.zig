@@ -15,7 +15,8 @@ fn ms(io: std.Io, since: std.Io.Timestamp) f64 {
 }
 
 pub fn check(gpa: std.mem.Allocator, io: std.Io, e: *nemotron.Engine, dir: []const u8) !u8 {
-    const t = try nemotron.train.Trainer.init(gpa, io, e, dir);
+    var none: ?nemotron.sites.Sites = null;
+    const t = try nemotron.train.Trainer.init(gpa, io, e, dir, &none);
     defer t.deinit();
     var ids: [48]u32 = undefined;
     for (&ids, 0..) |*v, i| v.* = @intCast(1000 + (i * 7919) % 30000);

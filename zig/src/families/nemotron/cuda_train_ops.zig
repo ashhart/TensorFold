@@ -12,14 +12,14 @@ pub const Heads = extern struct { rows: c_int, heads: c_int, kv_heads: c_int, di
 pub const slices = 8;
 
 const names = [_][:0]const u8{
-    "tf_train_softmax",   "tf_train_rms_back",    "tf_train_lora_in",   "tf_train_gate",       "tf_train_lora_out",
-    "tf_train_project",   "tf_train_lora_db",     "tf_train_lora_dxa",  "tf_train_lora_dx",    "tf_train_sketch",
-    "tf_train_adam",      "tf_train_gemm",        "tf_train_dequant",   "tf_train_zero",       "tf_train_widen",
-    "tf_train_narrow",    "tf_train_add",         "tf_train_rows",      "tf_train_scale_rows", "tf_train_rest_back",
-    "tf_train_relu2_back", "tf_train_sort_pairs", "tf_train_logits",    "tf_train_pairs_in",   "tf_train_pairs_out",
-    "tf_train_route_back", "tf_train_experts_part", "tf_train_experts_sum", "tf_train_conv_pre", "tf_train_dt",
-    "tf_train_ssm_fwd",   "tf_train_ssm_back",    "tf_train_ssm_bc",    "tf_train_gate_back",  "tf_train_conv_back",
-    "tf_train_dt_back",   "tf_train_attn_q",      "tf_train_attn_kv",
+    "tf_train_softmax",    "tf_train_rms_back",  "tf_train_lora_in",    "tf_train_gate",         "tf_train_lora_out",
+    "tf_train_gram",       "tf_train_hold",      "tf_train_project",    "tf_train_lora_db",      "tf_train_lora_dxa",
+    "tf_train_lora_dx",    "tf_train_sketch",    "tf_train_adam",       "tf_train_gemm",         "tf_train_dequant",
+    "tf_train_zero",       "tf_train_widen",     "tf_train_narrow",     "tf_train_add",          "tf_train_rows",
+    "tf_train_scale_rows", "tf_train_rest_back", "tf_train_relu2_back", "tf_train_sort_pairs",   "tf_train_logits",
+    "tf_train_pairs_in",   "tf_train_pairs_out", "tf_train_route_back", "tf_train_experts_part", "tf_train_experts_sum",
+    "tf_train_conv_pre",   "tf_train_dt",        "tf_train_ssm_fwd",    "tf_train_ssm_back",     "tf_train_ssm_bc",
+    "tf_train_gate_back",  "tf_train_conv_back", "tf_train_dt_back",    "tf_train_attn_q",       "tf_train_attn_kv",
 };
 
 fn index(comptime name: []const u8) usize {
@@ -134,6 +134,19 @@ pub const Ops = struct {
         for ([_]usize{ rows, out, rank, first }) |v| a.add(int(v));
         a.add(scale);
         try o.go("tf_train_lora_db", .{ up(out, 256), u(rank - first), 1 }, 256, &a);
+    }
+
+    /// The open block's outputs pulled toward giving nothing on these rows: db += c (xa_open^T xa_open) b_open.
+    pub fn hold(o: Ops, xa: u64, gram: u64, b: u64, db: u64, rows: usize, out: usize, rank: usize, first: usize, c: f32) !void {
+        var g: cuda.Args = .{};
+        for ([_]u64{ xa, gram }) |v| g.add(v);
+        for ([_]usize{ rows, rank, first }) |v| g.add(int(v));
+        try o.go("tf_train_gram", .{ 1, 1, 1 }, 256, &g);
+        var a: cuda.Args = .{};
+        for ([_]u64{ gram, b, db }) |v| a.add(v);
+        for ([_]usize{ out, first }) |v| a.add(int(v));
+        a.add(c);
+        try o.go("tf_train_hold", .{ up(out, 256), 16, 1 }, 256, &a);
     }
 
     /// dxa = scale g b^T on each row's open blocks.

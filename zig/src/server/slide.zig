@@ -7,6 +7,7 @@ const http_body = @import("http_body.zig");
 const routes = @import("routes.zig");
 const errors = @import("errors.zig");
 const teach = @import("slide_lesson.zig");
+const log = @import("log.zig");
 const Gone = @import("openai.zig").Gone;
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
@@ -99,15 +100,20 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
     for (0..teach.rounds) |round| {
         var request = plan.request;
         request.more = round > 0;
+        var held = false;
         switch (run(srv, a, &request)) {
-            .learned => |l| out.steps += l.steps,
+            .learned => |l| {
+                out.steps += l.steps;
+                held = l.recalled;
+            },
             .failed => |message| {
                 out.why = message;
                 return out;
             },
             else => return out,
         }
-        const verdict = teach.verify(srv, cx, plan, gone) catch |e| teach.Verdict{ .recalled = out.recalled, .damage = words(cx, e) };
+        const verdict = teach.verify(srv, cx, plan, false, gone) catch |e| teach.Verdict{ .recalled = out.recalled, .damage = words(cx, e) };
+        log.line("slide: round {d}: {d} steps; the held-out answers {s} token for token, and {s} when asked", .{ round + 1, out.steps, if (held) "come back" else "do not come back", if (std.mem.allEqual(bool, verdict.recalled, true)) "come back" else "do not come back" });
         if (verdict.damage) |why| {
             _ = run(srv, a, &.{ .undo = true });
             out.why = std.fmt.allocPrint(a, "round {d} taken back: {s}", .{ round + 1, why }) catch why;
@@ -121,7 +127,7 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
 
 /// The lesson made a plain weight change, its moved near misses trained back, then checked; taken out on damage.
 fn commit(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Gone, out: *Rounds) void {
-    var request = plan.request;
+    var request = plan.full;
     request.commit = true;
     if (!step(srv, a, &request, out)) return;
     for (0..teach.mining_rounds) |_| {
@@ -130,15 +136,27 @@ fn commit(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
         const back = teach.recalledAll(srv, cx, plan, gone) catch break;
         if (moved.len == 0 and back) break;
         var near: std.ArrayList(api.Example) = .empty;
-        near.appendSlice(a, plan.request.near) catch break;
-        for (moved) |i| for (0..teach.mined_weight) |_| near.append(a, plan.request.near[i]) catch break;
-        var more = plan.request;
+        near.appendSlice(a, plan.full.near) catch break;
+        for (moved) |i| for (0..teach.mined_weight) |_| near.append(a, plan.full.near[i]) catch break;
+        var more = plan.full;
         more.more = true;
         more.near = near.items;
         more.steps = teach.mining_steps;
         if (!step(srv, a, &more, out)) return;
     }
-    const verdict = teach.verify(srv, cx, plan, gone) catch |e| teach.Verdict{ .recalled = out.recalled, .damage = words(cx, e) };
+    // the change gated to the rows its facts need, so it leaves the rest of what the model says as it was
+    var gate = plan.full;
+    gate.gate = true;
+    switch (run(srv, a, &gate)) {
+        .failed => |message| {
+            out.why = message;
+            @memset(out.recalled, false);
+            return;
+        },
+        .refused => return,
+        else => {},
+    }
+    const verdict = teach.verify(srv, cx, plan, true, gone) catch |e| teach.Verdict{ .recalled = out.recalled, .damage = words(cx, e) };
     if (verdict.damage) |why| {
         _ = run(srv, a, &.{ .undo = true });
         out.why = std.fmt.allocPrint(a, "the weight change was taken out: {s}", .{why}) catch why;

@@ -20,7 +20,13 @@ const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 pub const max_rows = 256;
 
 /// A step's loss alone, with the open block's gradient, or with that and Adam; or site inputs sketched or projected.
-pub const Mode = enum { loss, grad, learn, avoid, seek, project };
+/// A step's loss alone (`base`: without the open block, as the model was before its lesson), with the open block's
+/// gradient, or with that and Adam; `hold` and `hold_learn` the same for a
+/// steady example, which also pulls the open block's outputs on its rows toward nothing; or inputs sketched, projected.
+pub const Mode = enum { loss, base, grad, learn, hold, hold_learn, avoid, seek, project };
+
+/// How hard a steady example pulls the open block's outputs on its rows toward nothing, over all its rows.
+pub const hold_weight: f32 = 1;
 
 /// The answer's mean loss, and whether each of its tokens was the likeliest at its row.
 pub const Result = struct { loss: f32, recalled: bool };
@@ -56,8 +62,13 @@ pub const Trainer = struct {
         t.b = b;
         t.profile = null;
         t.sketched = 0;
-        t.sites = try adapters.Sites.init(gpa, m.device, c, @max(b.o.chunk, 64));
-        errdefer t.sites.deinit();
+        // the saved lessons' blocks, which this trainer learns on beside, else room for the first
+        const saved = b.living != null;
+        t.sites = if (b.living) |s| s else try adapters.Sites.init(gpa, m.device, c, @max(b.o.chunk, 64));
+        b.living = null;
+        errdefer if (saved) {
+            b.living = t.sites;
+        } else t.sites.deinit();
         t.bufs = try back.Bufs.init(m.device, c, max_rows);
         errdefer t.bufs.deinit();
         const widest = @max(c.projDim(), c.heads * c.head_dim, c.shared_width, c.hidden);
@@ -117,7 +128,16 @@ pub const Trainer = struct {
     pub fn step(t: *Trainer, ids: []const u32, start: usize, mode: Mode) !Result {
         const b = t.b;
         if (ids.len < 2 or start < 1 or start >= ids.len or ids.len - 1 > max_rows) return error.BadExample;
-        if ((mode == .grad or mode == .learn) and t.sites.rank == 0) return error.NoOpenBlock;
+        if (mode != .loss and mode != .base and mode != .avoid and mode != .seek and mode != .project and t.sites.rank == 0) return error.NoOpenBlock;
+        const full = t.sites.rank;
+        if (mode == .base and full >= adapters.block) {
+            t.sites.rank = full - adapters.block;
+            t.sites.attach(&b.m.weights, true);
+        }
+        defer if (mode == .base and full >= adapters.block) {
+            t.sites.rank = full;
+            t.sites.attach(&b.m.weights, true);
+        };
         const rows = ids.len - 1;
         @memcpy(b.prompt.slice(u32, rows), ids[0..rows]);
         const share = 1 / @as(f32, @floatFromInt(ids.len - start));
@@ -146,6 +166,11 @@ pub const Trainer = struct {
             out.recalled = out.recalled and s[1] > 0.5;
         };
         return out;
+    }
+
+    /// The probability the last step gave row r's target token.
+    pub fn targetProb(t: *const Trainer, r: usize) f32 {
+        return t.stats.slice([2]f32, max_rows)[r][1];
     }
 
     /// Each row along layer l's candidate directions ([rows, candidates]), as the last project step left them.
@@ -179,8 +204,8 @@ pub const Trainer = struct {
                 copy(e, m, At.of(w.s.h), at(t, l, d), rows);
                 w.layer(x, l);
                 switch (j.mode) {
-                    .loss => {},
-                    .grad, .learn => keepActs(t, e, &w.s, l, rows, .out),
+                    .loss, .base => {},
+                    .grad, .learn, .hold, .hold_learn => keepActs(t, e, &w.s, l, rows, .out),
                     .avoid, .seek => sketchSite(t, o, &w.s, l, rows, j.start, j.mode),
                     .project => {
                         const site = &t.sites.list[l];
@@ -200,7 +225,7 @@ pub const Trainer = struct {
             e.buf(t.stats, 0, 3);
             e.bytes(@as(u32, @intCast(c.vocab)), 4);
             e.run(.{ 1024 * rows, 1, 1 }, .{ 1024, 1, 1 });
-            if (j.mode == .loss) return;
+            if (j.mode == .loss or j.mode == .base) return;
             ops.mm(lp, At.of(t.logits), At.of(t.head_t), At.of(t.dhn), rows, d, c.vocab, c.vocab, c.vocab, d);
             o.widen(At.of(t.dhn), t.bufs.dx, rows * d);
             o.zero(t.bufs.g, rows * d);
@@ -211,7 +236,8 @@ pub const Trainer = struct {
                 keepActs(t, e, &w.s, l, rows, .in);
                 const site = &t.sites.list[l];
                 const first = if (t.sites.rank >= adapters.block) t.sites.first() else 0;
-                const layer: back.Layer = .{ .o = o, .c = c, .s = &w.s, .p = w, .w = &m.weights, .ad = site.adapter(&t.sites), .gb = site.gb, .first = first, .rows = rows };
+                const hold = if (j.mode == .hold or j.mode == .hold_learn) hold_weight / @as(f32, @floatFromInt(rows)) else 0;
+                const layer: back.Layer = .{ .o = o, .c = c, .s = &w.s, .p = w, .w = &m.weights, .ad = site.adapter(&t.sites), .gb = site.gb, .first = first, .rows = rows, .hold = hold };
                 switch (c.kinds[l]) {
                     .moe => back.moe(layer, &t.bufs, l),
                     .mamba => back.mamba(layer, &t.bufs, l),
@@ -219,7 +245,7 @@ pub const Trainer = struct {
                 }
                 o.rmsBack(at(t, l, d), pre.tensorAt(m.weights.norms[l]), t.bufs.dx, t.bufs.g, rows, d, c.eps);
             }
-            if (j.mode == .learn) t.sites.adam(o);
+            if (j.mode == .learn or j.mode == .hold_learn) t.sites.adam(o);
         }
     };
 };

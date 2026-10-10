@@ -104,7 +104,9 @@ pub const Ops = struct {
     }
 
     /// The open block's gradient (ranks from first) from its site's bf16 input x and gradient gy; dx gains every block.
-    pub fn adapterBack(o: Ops, ad: wts.Adapter, gb: Buffer, first: usize, dxa: Buffer, x: Buffer, gy: Buffer, dx: Buffer, rows: usize) void {
+    /// `hold` > 0: a steady example's step, which also pulls the open block's outputs toward giving nothing on its rows
+    /// (the gradient of hold / 2 |scale xa_open b_open|^2), its Gram matrix in `gram` [16, 16].
+    pub fn adapterBack(o: Ops, ad: wts.Adapter, gb: Buffer, first: usize, dxa: Buffer, x: Buffer, gy: Buffer, dx: Buffer, rows: usize, hold: f32, gram: Buffer) void {
         const r: u32 = @intCast(ad.rank);
         const out_dims = [4]u32{ @intCast(rows), @intCast(ad.out), r, @intCast(first) };
         layers.project(o.k, o.e, ad, x, rows);
@@ -115,6 +117,20 @@ pub const Ops = struct {
         o.e.bytes(out_dims, 3);
         o.e.bytes(ad.scale, 4);
         o.e.run(.{ ad.out, ad.rank - first, 1 }, .{ 256, 1, 1 });
+        if (hold > 0) {
+            o.go("tf_train_gram");
+            o.e.buf(ad.xa, 0, 0);
+            o.e.buf(gram, 0, 1);
+            o.e.bytes([4]u32{ @intCast(rows), r, @intCast(first), 0 }, 2);
+            o.e.run(.{ 16, 16, 1 }, .{ 16, 16, 1 });
+            o.go("tf_train_hold");
+            o.e.buf(gram, 0, 0);
+            o.e.buf(ad.b, 0, 1);
+            o.e.buf(gb, 0, 2);
+            o.e.bytes([4]u32{ @intCast(ad.out), @intCast(first), 0, 0 }, 3);
+            o.e.bytes(hold * ad.scale * ad.scale, 4);
+            o.e.run(.{ ad.out, 16, 1 }, .{ 256, 1, 1 });
+        }
         o.go("tf_train_lora_dxa");
         o.e.buf(gy, 0, 0);
         o.e.buf(ad.b, 0, 1);

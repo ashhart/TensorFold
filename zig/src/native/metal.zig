@@ -137,6 +137,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         .batch_rows = 32,
     });
     errdefer h.metal.deinit();
+    nemotron.slide.loadLiving(gpa, io, h.metal) catch |e| {
+        problem.* = try std.fmt.allocPrint(a, "the native engine cannot read the saved lessons in {s} ({s})", .{ o.dir, @errorName(e) });
+        return null;
+    };
     if (h.metal.head != null) try nemotron.timing.measure(h.metal, io);
     const rows: u32 = if (h.metal.head != null) nemotron.backend.max_window else 1;
     h.cfg = try lanes.Config.init(gpa, h.metal.facts(), rows, rows - 1);

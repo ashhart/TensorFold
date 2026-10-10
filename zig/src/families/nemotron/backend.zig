@@ -66,6 +66,7 @@ pub const Metal = struct {
     concurrent: bool = true, // concurrent encoders with barriers on data flow (false: serial encoders)
     gpu_ms: f64 = 0, // GPU ms of every command buffer landed so far
     last_ms: f64 = 0, // and of the last one
+    living: ?@import("adapters.zig").Sites = null, // the saved lessons' gated blocks, until a learner takes them
 
     pub fn init(gpa: std.mem.Allocator, m: *Model, o: Options) !*Metal {
         const b = try gpa.create(Metal);
@@ -100,6 +101,7 @@ pub const Metal = struct {
         self.caches.deinit(self.gpa);
         if (self.head) |*h| h.deinit();
         if (self.wide) |*w| w.deinit();
+        if (self.living) |*s| s.deinit();
         self.fence.deinit();
         self.prompt.deinit();
         self.tokens.deinit();

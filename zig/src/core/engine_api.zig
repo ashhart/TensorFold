@@ -218,6 +218,7 @@ pub const LearnRequest = struct {
     steps: u32 = 60, // bounded steps this time at most
     more: bool = false, // more steps on the last lesson's rows, which are not captured again
     commit: bool = false, // the last lesson made a plain change of the model's weights, then checked
+    gate: bool = false, // the last lesson's plain change gated again, to the rows its examples need
     save: bool = false, // every lesson's weight change written into the model's own shards
 };
 

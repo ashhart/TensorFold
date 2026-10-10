@@ -3,11 +3,13 @@
 const std = @import("std");
 const adapters = @import("learn_shape.zig");
 const choice = @import("choice.zig");
+const subspace = @import("subspace.zig");
 
 /// Token ids whose answer starts at `start`: the rows from start - 1 on predict it.
 pub const Example = struct { ids: []const u32, start: u32 };
 
-/// One fact's examples; `more` another round, `undo` one back, `commit` a weight change, `save` it into the shards.
+/// One fact's examples; `more` another round, `undo` one back, `commit` a weight change, `gate` it to the rows its
+/// facts need, `save` every kept lesson into the model's files.
 pub const Lesson = struct {
     train: []const Example = &.{},
     held: []const Example = &.{},
@@ -17,6 +19,7 @@ pub const Lesson = struct {
     steps: u32 = max_steps,
     more: bool = false,
     commit: bool = false,
+    gate: bool = false,
     save: bool = false,
 };
 
@@ -38,8 +41,11 @@ const gate_margin: f32 = 0.02;
 /// How much each steady row weighs against the fact's rows when a lesson becomes a plain weight change.
 const hold: f64 = 1;
 
+/// How far below its lowest fact row a kept change's gate sits, so the facts' other wordings clear it too.
+const regate_margin: f32 = 0.05;
+
 /// A new lesson first sketches and measures what its block must avoid and read (build), then learns (steps).
-const Phase = enum { idle, build, steps, undo, commit, save };
+const Phase = enum { idle, build, steps, undo, commit, gate, save };
 
 /// An example's turn: a fact answer or a twin kept as it is, and whether Adam steps after it.
 const Turn = struct { ex: Example, fact: bool, last: bool };
@@ -70,6 +76,7 @@ pub fn Learner(comptime H: type) type {
         can_undo: bool = false,
         plain: bool = false, // the last lesson is a plain weight change, which an undo takes out whole
         rounds: u64 = 0, // rounds begun, which seeds each round's order
+        decisions: []std.ArrayList(f32) = &.{}, // [layers]: the kept lesson's deciding rows along each layer's candidates
 
         pub fn init(gpa: std.mem.Allocator, io: std.Io, b: H.Ctx) Self {
             return .{ .gpa = gpa, .io = io, .b = b };
@@ -78,6 +85,8 @@ pub fn Learner(comptime H: type) type {
         pub fn deinit(l: *Self) void {
             if (l.trainer) |t| H.free(t, l.gpa);
             if (l.choice) |*c| c.deinit();
+            for (l.decisions) |*d| d.deinit(l.gpa);
+            l.gpa.free(l.decisions);
             l.plan.deinit(l.gpa);
             disown(l.gpa, l.last);
             for (l.replay.items) |ex| l.gpa.free(ex.ids);
@@ -94,6 +103,17 @@ pub fn Learner(comptime H: type) type {
             }
             if (lesson.commit or lesson.save) {
                 l.phase = if (lesson.save) .save else .commit;
+                return;
+            }
+            if (lesson.gate) {
+                if (!l.plain) return error.NothingToGate;
+                if (l.decisions.len == 0) {
+                    l.decisions = try l.gpa.alloc(std.ArrayList(f32), H.layers(l.b));
+                    for (l.decisions) |*d| d.* = .empty;
+                }
+                for (l.decisions) |*d| d.clearRetainingCapacity();
+                l.built = 0;
+                l.phase = .gate;
                 return;
             }
             if (lesson.train.len == 0) return;
@@ -163,11 +183,12 @@ pub fn Learner(comptime H: type) type {
                 .build => return l.buildOnce(),
                 .steps => return l.stepOnce(),
                 .commit => return l.commitOnce(),
+                .gate => return l.gateOnce(),
                 .save => return l.saveOnce(),
             }
         }
 
-        /// Every lesson made a weight change, folded into its layers' output projections and written into the shards.
+        /// Every kept lesson's blocks written as the model's living-weights file, beside its shards.
         fn saveOnce(l: *Self) !Step {
             l.phase = .idle;
             const t = l.trainer orelse return .{ .done = true };
@@ -175,8 +196,51 @@ pub fn Learner(comptime H: type) type {
             if (ranks == 0) return .{ .done = true };
             const t0 = H.seconds(l.io);
             const bytes = try H.write(l.b, l.gpa, l.io, t, ranks);
-            std.log.info("slide: {d} lessons written into the model's weights: {d} MB of output projections into its shards in {d:.1} s", .{ ranks / adapters.block, bytes >> 20, H.seconds(l.io) - t0 });
+            std.log.info("slide: {d} lessons saved as gated blocks beside the model's shards: {d} MB in {d:.1} s", .{ ranks / adapters.block, bytes >> 20, H.seconds(l.io) - t0 });
             return .{ .done = true };
+        }
+
+        /// One fact example a step: which rows the model got wrong before this lesson (they need the change), and those
+        /// rows along each layer's candidates; after the last, each layer's gate aimed between them and the steady rows
+        /// (Fisher's direction) and set just below the lowest of them, so the change acts on the rows that decide its
+        /// facts and on as few others as that direction can keep out.
+        fn gateOnce(l: *Self) !Step {
+            const t = l.trainer.?;
+            const c = &l.choice.?;
+            const all = [_][]const Example{ l.lesson.train, l.lesson.held };
+            const total = l.lesson.train.len + l.lesson.held.len;
+            if (l.built < total) {
+                const ex = pick(&all, l.built);
+                l.built += 1;
+                const n = ex.ids.len - 1;
+                _ = try t.step(ex.ids, ex.start, .base);
+                var needs: [H.max_rows]bool = @splat(false);
+                for (ex.start - 1..n) |r| needs[r] = t.targetProb(r) < 0.5;
+                _ = try t.step(ex.ids, ex.start, .project);
+                for (l.decisions, 0..) |*deciding, k| {
+                    const rows = t.projected(k, n);
+                    for (ex.start - 1..n) |r| if (needs[r]) try deciding.appendSlice(l.gpa, rows[r * adapters.candidates ..][0..adapters.candidates]);
+                }
+                return .{ .done = false };
+            }
+            l.phase = .idle;
+            const k = t.sites.first() / adapters.block;
+            var acts: usize = 0;
+            var steady: f64 = 0;
+            for (t.sites.list, l.decisions, 0..) |*site, deciding, layer| {
+                if (site.gate(k).* >= adapters.shut or deciding.items.len == 0) continue;
+                var dir: [adapters.candidates]f32 = undefined;
+                try choice.Choice.fisher(l.gpa, deciding.items, c.steady_rows[layer].items, &dir);
+                var low: f32 = 2;
+                for (0..deciding.items.len / adapters.candidates) |r| low = @min(low, subspace.dot(&dir, deciding.items[r * adapters.candidates ..][0..adapters.candidates]));
+                const tau = low - regate_margin;
+                t.sites.aim(layer, &dir, tau);
+                acts += 1;
+                steady += c.steadyAbove(layer, &dir, tau);
+            }
+            try H.attach(l.b, t);
+            std.log.info("slide: lesson {d} is gated again at {d} layers: the rows that decide its facts clear the gate, and {d:.0}% of the steady rows do", .{ k + 1, acts, 100 * steady / @as(f64, @floatFromInt(@max(acts, 1))) });
+            return .{ .done = true, .changed = true };
         }
 
         /// The kept lesson made a plain change of the weights: each layer's directions refit to hold steady rows still.
@@ -270,7 +334,7 @@ pub fn Learner(comptime H: type) type {
         fn stepOnce(l: *Self) !Step {
             const t = l.trainer.?;
             const turn = l.plan.items[l.at];
-            const got = try t.step(turn.ex.ids, turn.ex.start, if (turn.last) .learn else .grad);
+            const got = try t.step(turn.ex.ids, turn.ex.start, if (turn.fact) (if (turn.last) .learn else .grad) else (if (turn.last) .hold_learn else .hold));
             if (!std.math.isFinite(got.loss)) return error.NonfiniteStep;
             l.at += 1;
             if (turn.fact) l.loss += got.loss;

@@ -165,6 +165,23 @@ extern "C" __global__ void __launch_bounds__(256) tf_train_lora_db(const float* 
     db[(size_t)q * n_out + j] += scale * s;
 }
 
+// g[q, p] = sum_r xa[r, first + q] xa[r, first + p]: the open block's inputs' Gram matrix over a step's rows.
+extern "C" __global__ void __launch_bounds__(256) tf_train_gram(const float* xa, float* g, int rows, int rank, int first) {
+    const int q = threadIdx.x >> 4, p = threadIdx.x & 15;
+    float s = 0;
+    for (int r = 0; r < rows; r++) s += xa[(size_t)r * rank + first + q] * xa[(size_t)r * rank + first + p];
+    g[q * 16 + p] = s;
+}
+
+// db[q, j] += c sum_p g[q, p] b[first + p, j]: the gradient of (c / 2) |xa b|^2 on the open block, from its Gram matrix.
+extern "C" __global__ void __launch_bounds__(256) tf_train_hold(const float* g, const float* b, float* db, int n_out, int first, float c) {
+    const int j = blockIdx.x * 256 + threadIdx.x, q = blockIdx.y;
+    if (j >= n_out) return;
+    float s = 0;
+    for (int p = 0; p < 16; p++) s += g[q * 16 + p] * b[(size_t)(first + p) * n_out + j];
+    db[(size_t)q * n_out + j] += c * s;
+}
+
 // dxa[r, q] = scale g[r] . b[q] where q's block is open on row r, else 0; a warp a (q, r).
 extern "C" __global__ void __launch_bounds__(256) tf_train_lora_dxa(const float* g, const float* b, float* dxa, int rows, int n_out,
                                                                    int rank, float scale, const float* gates) {

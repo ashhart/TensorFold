@@ -14,7 +14,13 @@ const sites_mod = @import("cuda_sites.zig");
 pub const max_rows = 256;
 
 /// A step's loss alone, with the open block's gradient, or with that and Adam; or site inputs sketched or projected.
-pub const Mode = enum { loss, grad, learn, avoid, seek, project };
+/// A step's loss alone (`base`: without the open block, as the model was before its lesson), with the open block's
+/// gradient, or with that and Adam; `hold` and `hold_learn` the same for a
+/// steady example, which also pulls the open block's outputs on its rows toward nothing; or inputs sketched, projected.
+pub const Mode = enum { loss, base, grad, learn, hold, hold_learn, avoid, seek, project };
+
+/// How hard a steady example pulls the open block's outputs on its rows toward nothing, over all its rows.
+pub const hold_weight: f32 = 1;
 
 /// The answer's mean loss, and whether each of its tokens was the likeliest at its row.
 pub const Result = struct { loss: f32, recalled: bool };
@@ -115,17 +121,24 @@ pub const Trainer = struct {
     probs: u64 = 0,
     dscores: u64 = 0,
     sketched: usize = 0, // rows sketched since the sketches were cleared, each row's place in them
+    hold: f32 = 0, // this step's pull on the open block's outputs toward nothing (a steady example's), per row
+    gram: u64 = 0, // f32 [16, 16]: the open block's inputs' Gram matrix, for that pull
 
     /// Every buffer a step needs, the raw weights its backward reads, and a change at every layer (zero at first).
-    pub fn init(gpa: std.mem.Allocator, io: std.Io, e: *engine.Engine, dir: []const u8) !*Trainer {
+    /// `living`: the saved lessons' blocks, which the trainer takes and learns on beside (null: room for the first).
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, e: *engine.Engine, dir: []const u8, living: *?sites_mod.Sites) !*Trainer {
         const c = e.c;
         if (c.mamba_head_dim != 64 or c.state != 128 or c.top_k > 16 or c.experts > 256) return error.UnsupportedShape;
         const d = e.ctx.d;
         const t = try gpa.create(Trainer);
         errdefer gpa.destroy(t);
         t.* = .{ .gpa = gpa, .e = e, .c = c, .sites = undefined, .seq = undefined, .buf = undefined, .raw = undefined, .mem = undefined, .kept = undefined, .host = undefined };
-        t.sites = try sites_mod.Sites.init(gpa, d, c, state.prefill_rows);
-        errdefer t.sites.deinit();
+        const saved = living.* != null;
+        t.sites = if (living.*) |s| s else try sites_mod.Sites.init(gpa, d, c, state.prefill_rows);
+        living.* = null;
+        errdefer if (saved) {
+            living.* = t.sites;
+        } else t.sites.deinit();
         t.seq = try state.Seq.init(d, c, seq_len, &.{}, e.stream);
         errdefer t.seq.deinit();
         t.buf = try e.b.sibling(d, c, e.nch);
@@ -322,6 +335,7 @@ pub const Trainer = struct {
         t.dv = T(&a, R * kw * 4, &total);
         t.probs = T(&a, c.heads * R * R * 4, &total);
         t.dscores = T(&a, c.heads * R * R * 4, &total);
+        t.gram = T(&a, 16 * 16 * 4, &total);
         if (!count) t.mem = a;
         return total;
     }
@@ -345,6 +359,11 @@ pub const Trainer = struct {
             .attention => |a| a.o,
             .moe => |m| m.down,
         };
+    }
+
+    /// The probability the last step gave row r's target token.
+    pub fn targetProb(t: *const Trainer, r: usize) f32 {
+        return t.stats()[r][1];
     }
 
     /// Each row along layer l's candidate directions ([rows, candidates]), as the last project step left them.
@@ -372,7 +391,16 @@ pub const Trainer = struct {
     /// The mean loss of `ids`' answer from `start`, and what `mode` adds to it.
     pub fn step(t: *Trainer, ids: []const u32, start: usize, mode: Mode) !Result {
         if (ids.len < 2 or start < 1 or start >= ids.len or ids.len - 1 > max_rows) return error.BadExample;
-        if ((mode == .grad or mode == .learn) and t.sites.rank == 0) return error.NoOpenBlock;
+        if (mode != .loss and mode != .base and mode != .avoid and mode != .seek and mode != .project and t.sites.rank == 0) return error.NoOpenBlock;
+        const full = t.sites.rank;
+        if (mode == .base and full >= sites_mod.block) {
+            t.sites.rank = full - sites_mod.block;
+            t.sites.attach(&t.e.w, true);
+        }
+        defer if (mode == .base and full >= sites_mod.block) {
+            t.sites.rank = full;
+            t.sites.attach(&t.e.w, true);
+        };
         const c = t.c;
         const e = t.e;
         const o = e.ops();
@@ -399,8 +427,8 @@ pub const Trainer = struct {
             const in = t.siteInput(l);
             const s = &t.sites.list[l];
             switch (mode) {
-                .loss => {},
-                .grad, .learn => try t.keep(l, rows),
+                .loss, .base => {},
+                .grad, .learn, .hold, .hold_learn => try t.keep(l, rows),
                 .avoid, .seek => {
                     const y = if (mode == .avoid) s.avoid.dev else s.seek.dev;
                     const n: usize = if (mode == .avoid) sites_mod.avoid_dims else sites_mod.candidates;
@@ -422,7 +450,8 @@ pub const Trainer = struct {
         try o.prefillDense(b.y, e.w.head, t.logits, rows);
         const tg = t.host.dev;
         try k.softmax(t.logits, tg, tg + max_rows * 4, tg + max_rows * 8, rows, c.vocab);
-        if (mode != .loss) try t.backward(rows, mode == .learn);
+        t.hold = if (mode == .hold or mode == .hold_learn) hold_weight / @as(f32, @floatFromInt(rows)) else 0;
+        if (mode != .loss and mode != .base) try t.backward(rows, mode == .learn or mode == .hold_learn);
         try e.stream.synchronize();
         var out: Result = .{ .loss = 0, .recalled = true };
         for (t.stats()[0..rows], t.weights()[0..rows]) |s, wgt| if (wgt > 0) {
@@ -477,6 +506,7 @@ pub const Trainer = struct {
         try k.loraIn(x, stride, site.a.dev, s.xa.dev, rows, site.in, s.rank, s.xn.dev);
         try k.gate(s.xa.dev, s.xn.dev, site.tau.dev, s.gates.dev, rows, s.rank, sites_mod.unit);
         try k.loraDb(s.xa.dev, gy, site.gb.dev, rows, site.out, s.rank, first, sites_mod.scale);
+        if (t.hold > 0) try k.hold(s.xa.dev, t.gram, site.b.dev, site.gb.dev, rows, site.out, s.rank, first, t.hold * sites_mod.scale * sites_mod.scale);
         try k.loraDxa(gy, site.b.dev, t.dxa, rows, site.out, s.rank, sites_mod.scale, s.gates.dev);
         try k.loraDx(t.dxa, site.a.dev, dx, rows, site.in, s.rank);
     }

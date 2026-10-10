@@ -71,6 +71,42 @@ pub fn bake(gpa: Allocator, io: Io, dir: []const u8, edits: []const Replacement)
     try writeJson(arena, config_path, config);
 }
 
+/// A tensor of a file written whole by `create`.
+pub const New = struct { name: []const u8, dtype: st.DType, shape: []const usize, bytes: []const u8 };
+
+/// A whole safetensors file at `path`: `metadata` as its header's __metadata__, then `tensors` in order; written
+/// through `path`.tmp and renamed, so a reader sees the old file or the new one.
+pub fn create(gpa: Allocator, path: []const u8, metadata: []const [2][]const u8, tensors: []const New) !void {
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var header: std.json.ObjectMap = .empty;
+    if (metadata.len > 0) {
+        var meta: std.json.ObjectMap = .empty;
+        for (metadata) |kv| try meta.put(arena, kv[0], .{ .string = kv[1] });
+        try header.put(arena, "__metadata__", .{ .object = meta });
+    }
+    var pieces: std.ArrayList([]const u8) = .empty;
+    try pieces.appendNTimes(arena, "", 3); // the length, the header and its padding, once the header is known
+    var offset: usize = 0;
+    for (tensors) |t| {
+        if (t.bytes.len != numel(t.shape) * t.dtype.size()) return error.BadReplacement;
+        try header.put(arena, t.name, try entry(arena, t.dtype, t.shape, offset, offset + t.bytes.len));
+        try pieces.append(arena, t.bytes);
+        offset += t.bytes.len;
+    }
+    const text = try std.json.Stringify.valueAlloc(arena, Value{ .object = header }, .{});
+    const padded = std.mem.alignForward(usize, text.len, 8);
+    const head = try arena.alloc(u8, 8);
+    std.mem.writeInt(u64, head[0..8], padded, .little);
+    const spaces = try arena.alloc(u8, padded - text.len);
+    @memset(spaces, ' ');
+    pieces.items[0] = head;
+    pieces.items[1] = text;
+    pieces.items[2] = spaces;
+    try writeFile(arena, path, pieces.items);
+}
+
 /// `edits` written over their tensors where they lie, if each keeps its dtype and size (else false, nothing written).
 fn inPlace(gpa: Allocator, io: Io, path: []const u8, edits: []const Replacement) !bool {
     var places: [512]usize = undefined;
@@ -232,6 +268,30 @@ fn put(fd: c_int, b: []const u8) !void {
         if (n <= 0) return error.ShardWrite;
         done += @intCast(n);
     }
+}
+
+test "a whole file written with its metadata reads back tensor for tensor" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(dir);
+    const path = try std.fs.path.join(gpa, &.{ dir, "made.safetensors" });
+    defer gpa.free(path);
+    const a = [_]f32{ 1, 2, 3, 4, 5, 6 };
+    const b = [_]u32{ 7, 8 };
+    try create(gpa, path, &.{.{ "format", "test" }}, &.{
+        .{ .name = "x.a", .dtype = .f32, .shape = &.{ 2, 3 }, .bytes = std.mem.sliceAsBytes(&a) },
+        .{ .name = "x.b", .dtype = .u32, .shape = &.{2}, .bytes = std.mem.sliceAsBytes(&b) },
+    });
+    var file = try st.File.open(gpa, io, path);
+    defer file.close(io);
+    const got = file.get("x.a").?;
+    try std.testing.expect(got.is(.f32, &.{ 2, 3 }));
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&a), got.bytes);
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&b), file.get("x.b").?.bytes);
+    try std.testing.expectError(error.BadReplacement, create(gpa, path, &.{}, &.{.{ .name = "y", .dtype = .f32, .shape = &.{3}, .bytes = std.mem.sliceAsBytes(&b) }}));
 }
 
 test "an affine weight becomes bf16 in its shard, its scales and biases leave the index, config marks it unquantized" {

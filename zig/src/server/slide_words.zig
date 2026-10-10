@@ -31,6 +31,27 @@ pub fn unmark(raw: []const u8) []const u8 {
     return std.mem.trim(u8, line, " \t\"*");
 }
 
+/// A reply's first one or two sentences as the model wrote them (its own wording and formatting), or null when it
+/// finishes none within max_words; a reply cut short keeps the sentences it finished.
+pub fn natural(text: []const u8) ?[]const u8 {
+    const t = std.mem.trim(u8, text, " \t\r\n");
+    var ends: usize = 0;
+    var cut: usize = 0;
+    var i: usize = 0;
+    while (i < t.len) : (i += 1) {
+        if (t[i] == '\n' and i + 1 < t.len and t[i + 1] == '\n') break; // a paragraph ends the answer's opening
+        const ch = t[i];
+        if ((ch == '.' or ch == '!' or ch == '?') and (i + 1 == t.len or std.ascii.isWhitespace(t[i + 1]))) {
+            cut = i + 1;
+            ends += 1;
+            if (ends == 2) break;
+        }
+    }
+    if (cut == 0) return null;
+    const kept = std.mem.trimEnd(u8, t[0..cut], " ");
+    return if (words(kept) > 2 * max_words) null else kept;
+}
+
 /// An answer kept only when it is one or two finished sentences of at most max_words; never repaired.
 pub fn clean(text: []const u8) ?[]const u8 {
     const t = std.mem.trim(u8, text, " \t\r\n");
@@ -51,7 +72,7 @@ pub fn clean(text: []const u8) ?[]const u8 {
 }
 
 /// Content words a fact's teller would not say by chance, compared without case or British spellings.
-const common = [_][]const u8{ "that", "this", "with", "from", "have", "been", "were", "they", "them", "their", "there", "what", "when", "which", "where", "about", "would", "could", "should", "called", "named", "also", "just", "very", "into", "your", "mine", "ours", "will" };
+const common = [_][]const u8{ "that", "this", "with", "from", "have", "been", "were", "they", "them", "their", "there", "what", "when", "which", "where", "about", "would", "could", "should", "called", "named", "also", "just", "very", "into", "your", "mine", "ours", "will", "like", "likes", "love", "loves", "know", "knows", "told", "tell", "said", "think", "want", "really" };
 
 /// Whether `reply` says a word of `fact` that neither `question` nor `before` says.
 pub fn tells(fact: []const u8, question: []const u8, before: []const u8, reply: []const u8) bool {
@@ -79,6 +100,20 @@ pub fn recalls(fact: []const u8, question: []const u8, answer: []const u8, reply
         if (!says(reply, word)) return false;
     }
     return key > 0 or tells(fact, question, "", reply);
+}
+
+/// Whether `reply` to `check` says a word the held answer took from the fact (as `recalls` reads it) that neither the check
+/// nor its reply `before` the lesson says: a leak, judged on the fact's own answer words, not on every word of it.
+pub fn carries(fact: []const u8, question: []const u8, answer: []const u8, check: []const u8, before: []const u8, reply: []const u8) bool {
+    var it = std.mem.tokenizeAny(u8, answer, delimiters);
+    var first = true;
+    while (it.next()) |raw| : (first = false) {
+        var w: [48]u8 = undefined;
+        const word = normal(raw, &w);
+        if (!marked(raw, word, first) or !says(fact, word) or says(question, word)) continue;
+        if (!says(check, word) and !says(before, word) and says(reply, word)) return true;
+    }
+    return false;
 }
 
 /// Whether `answer` says a word of `fact` that `question` does not: else the question gives its own answer away.
@@ -179,12 +214,34 @@ pub fn addressed(a: Allocator, question: []const u8) !?[]const u8 {
         } else try out.appendSlice(a, word);
         at = end;
     }
-    return if (swapped) out.items else null;
+    if (!swapped) return null;
+    // the verb follows its new subject: "am I" asked of the model is "are you"
+    var text = out.items;
+    for ([_][2][]const u8{ .{ "am you", "are you" }, .{ "Am you", "Are you" }, .{ "you am", "you are" }, .{ "was you", "were you" }, .{ "Was you", "Were you" }, .{ "you was", "you were" } }) |fix| {
+        text = try std.mem.replaceOwned(u8, a, text, fix[0], fix[1]);
+    }
+    return text;
+}
+
+/// People a user speaks of as "my X".
+const people = [_][]const u8{ "sister", "brother", "mother", "father", "mum", "mom", "dad", "friend", "wife", "husband", "partner", "son", "daughter", "boss", "colleague", "neighbo" };
+
+/// Whether `question` asks about someone `fact` never speaks of: he or she, or "my X" for a person X it does not name.
+/// A fact the user tells about themselves answers nothing about their sister, however a model judges it.
+pub fn someoneElse(fact: []const u8, question: []const u8) bool {
+    const pronouns = [_][]const u8{ "he", "his", "him", "she", "her", "hers", "they", "their", "them", "theirs", "he's", "she's", "they're" };
+    var it = std.mem.tokenizeAny(u8, question, delimiters);
+    var mine = false; // the word before was "my"
+    while (it.next()) |w| {
+        for (pronouns) |p| if (std.ascii.eqlIgnoreCase(w, p) and !says(fact, p)) return true;
+        if (mine) for (people) |p| if (std.ascii.startsWithIgnoreCase(w, p) and std.ascii.findIgnoreCase(fact, p) == null) return true;
+        mine = std.ascii.eqlIgnoreCase(w, "my");
+    }
+    return false;
 }
 
 /// The question asked about someone the user knows (my X as my sister's X, do I as does my sister), or null if neither.
 pub fn about(a: Allocator, question: []const u8, who: []const u8) !?[]const u8 {
-    const people = [_][]const u8{ "sister", "brother", "mother", "father", "mum", "mom", "dad", "friend", "wife", "husband", "partner", "son", "daughter", "boss", "colleague", "neighbo" };
     const turns = [_][2][]const u8{ .{ "do", "does" }, .{ "am", "is" }, .{ "have", "has" }, .{ "did", "did" }, .{ "was", "was" }, .{ "can", "can" }, .{ "will", "will" }, .{ "would", "would" }, .{ "should", "should" }, .{ "could", "could" } };
     var at: usize = 0;
     var last: ?[2]usize = null; // the word before this one
@@ -428,6 +485,7 @@ test "a question about the user asked of the model instead" {
     try std.testing.expectEqualStrings("Which film do you like most?", (try addressed(al, "Which film do I like most?")).?);
     try std.testing.expectEqualStrings("Your sister, what is she called?", (try addressed(al, "My sister, what is she called?")).?);
     try std.testing.expect((try addressed(al, "What is the capital of France?")) == null);
+    try std.testing.expectEqualStrings("Which colour are you into?", (try addressed(al, "Which colour am I into?")).?);
 }
 
 test "a question about the user asked about someone they know instead" {
@@ -441,6 +499,31 @@ test "a question about the user asked about someone they know instead" {
     try std.testing.expectEqualStrings("Does my friend have a car?", (try about(al, "Do I have a car?", "friend")).?);
     try std.testing.expect((try about(al, "Where do you live?", "sister")) == null);
     try std.testing.expect((try about(al, "What is my sister's name?", "brother")) == null);
+}
+
+test "a leak is a held answer's own word from the fact, new in a reply" {
+    const fact = "I like blue.";
+    const q = "What colour do I like?";
+    const answer = "You like blue.";
+    try std.testing.expect(carries(fact, q, answer, "What colour does my sister like?", "I don't know.", "Your sister likes blue."));
+    try std.testing.expect(!carries(fact, q, answer, "What do I do for a living?", "I don't know.", "I don't know. If you'd like to tell me, I can help."));
+    try std.testing.expect(!carries(fact, q, answer, "What colour is the sky?", "The sky is blue.", "It is blue."));
+}
+
+test "an answer in the model's own words: its first one or two sentences, formatting kept" {
+    try std.testing.expectEqualStrings("Yes! You told me you like **blue**.", natural("Yes! You told me you like **blue**. Is there anything else?").?);
+    try std.testing.expectEqualStrings("You like **blue**!", natural("You like **blue**!\n\nWant ideas for using it?").?);
+    try std.testing.expectEqualStrings("Your sister is called Ana.", natural("Your sister is called Ana. She").?);
+    try std.testing.expect(natural("Your sister is called") == null);
+}
+
+test "a question about someone a fact never speaks of" {
+    try std.testing.expect(someoneElse("I like blue.", "Which colour is his favourite?"));
+    try std.testing.expect(someoneElse("I like blue.", "What colour does my sister like?"));
+    try std.testing.expect(someoneElse("My dog is called Ginger.", "What is my brother's dog called?"));
+    try std.testing.expect(!someoneElse("I like blue.", "What colour do I like?"));
+    try std.testing.expect(!someoneElse("My sister is called Ana.", "What is my sister's name?"));
+    try std.testing.expect(!someoneElse("My sister is called Ana; she lives in Leeds.", "Where does she live?"));
 }
 
 test "a question that already says its answer asks nothing" {

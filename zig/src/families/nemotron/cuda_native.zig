@@ -36,7 +36,7 @@ pub const Loaded = struct {
     lone: ?LoneRun = null, // called with `ctx`; null: every stream in the lane core
 };
 
-const Owned = struct { gpa: std.mem.Allocator, e: *engine.Engine, head: ?*Head, lanes: Lanes };
+const Owned = struct { gpa: std.mem.Allocator, e: *engine.Engine, head: ?*Head, lanes: Lanes, living: ?@import("cuda_sites.zig").Sites = null };
 
 /// Own-sequence graphs support both draw modes; drafting also captures the head.
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
@@ -55,6 +55,8 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer gpa.destroy(own);
     own.* = .{ .gpa = gpa, .e = e, .head = head, .lanes = try Lanes.init(gpa, e, head) };
     errdefer own.lanes.deinit();
+    own.living = try slide.loadLiving(gpa, io, e, dir); // before the lanes' costs are measured: they decode through it
+    errdefer if (own.living) |*s| s.deinit();
     try own.lanes.measure(io, dir);
     return .{
         .backend = own.lanes.backend(),
@@ -70,7 +72,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
 /// What a learner over the loaded engine `p` learns into; `dir` must outlive it.
 pub fn learnModel(p: *anyopaque, dir: []const u8) slide.Model {
     const own: *Owned = @ptrCast(@alignCast(p));
-    return .{ .e = own.e, .dir = dir };
+    return .{ .e = own.e, .dir = dir, .living = &own.living };
 }
 
 fn loneRun(p: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool) anyerror!bool {
@@ -90,6 +92,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
 fn release(p: *anyopaque) void {
     const own: *Owned = @ptrCast(@alignCast(p));
     own.lanes.deinit();
+    if (own.living) |*s| s.deinit();
     if (own.head) |h| h.deinit();
     own.e.deinit();
     own.gpa.destroy(own);

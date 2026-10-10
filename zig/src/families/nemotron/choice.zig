@@ -122,6 +122,7 @@ pub const Choice = struct {
     }
 
     /// Layer l's directions as a plain weight change, times K = O (F + lambda S + mu)^-1: open rows keep their output.
+    /// The first direction stays as it was: it is the gate's, which `regate` sets again once the change has learned.
     pub fn refit(c: *Choice, l: usize, lambda: f64) !void {
         if (c.hits[l] == 0) return;
         const facts = c.fact_rows[l].items;
@@ -157,12 +158,54 @@ pub const Choice = struct {
         }
         const coef = c.coef[l * block * n ..][0 .. block * n];
         var out: [block * n]f32 = undefined;
-        for (0..block) |q| for (0..n) |j| {
+        @memcpy(out[0..n], coef[0..n]);
+        for (1..block) |q| for (0..n) |j| {
             var s: f64 = 0;
             for (0..n) |i| s += coef[q * n + i] * kt[j * n + i];
             out[q * n + j] = @floatCast(s);
         };
         @memcpy(coef, &out);
+    }
+
+    /// The share of layer l's steady rows whose cosine with `dir` reaches `tau`.
+    pub fn steadyAbove(c: *const Choice, l: usize, dir: []const f32, tau: f32) f64 {
+        const rows = c.steady_rows[l].items;
+        const count = rows.len / n;
+        if (count == 0) return 0;
+        var open: usize = 0;
+        for (0..count) |r| open += @intFromBool(subspace.dot(dir, rows[r * n ..][0..n]) >= tau);
+        return @as(f64, @floatFromInt(open)) / @as(f64, @floatFromInt(count));
+    }
+
+    /// Fisher's direction (unit) between unit rows `pos` and `neg` [count, n], each set weighed alike.
+    pub fn fisher(gpa: std.mem.Allocator, pos: []const f32, neg: []const f32, out: []f32) !void {
+        const sets = [2][]const f32{ pos, neg };
+        var mean: [2][n]f64 = @splat(@splat(0));
+        for (sets, 0..) |rows, k| {
+            const count = @max(rows.len / n, 1);
+            for (0..rows.len / n) |r| for (0..n) |i| {
+                mean[k][i] += rows[r * n + i];
+            };
+            for (&mean[k]) |*v| v.* /= @floatFromInt(count);
+        }
+        const scatter = try gpa.alloc(f64, n * n);
+        defer gpa.free(scatter);
+        @memset(scatter, 0);
+        for (sets, 0..) |rows, k| {
+            const w = 1 / @as(f64, @floatFromInt(@max(rows.len / n, 1)));
+            for (0..rows.len / n) |r| for (0..n) |i| for (0..n) |j| {
+                scatter[i * n + j] += w * (rows[r * n + i] - mean[k][i]) * (rows[r * n + j] - mean[k][j]);
+            };
+        }
+        var trace: f64 = 0;
+        for (0..n) |i| trace += scatter[i * n + i];
+        for (0..n) |i| scatter[i * n + i] += 1e-2 * trace / @as(f64, @floatFromInt(n)) + 1e-12;
+        var d: [n]f64 = undefined;
+        for (&d, mean[0], mean[1]) |*x, a, b| x.* = a - b;
+        try subspace.solve(scatter, n, &d);
+        var size: f64 = 0;
+        for (d) |x| size += x * x;
+        for (out, d) |*o, x| o.* = @floatCast(x / @sqrt(@max(size, 1e-30)));
     }
 
     /// Fisher's direction between the fact's answer rows and the steady rows: (scatter + lambda)^-1 (mean difference).

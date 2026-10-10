@@ -42,8 +42,9 @@ pub const Bufs = struct {
     dv: Buffer, // [rows, kv * hd]
     probs: Buffer, // [heads, rows, rows]
     dscores: Buffer, // [heads, rows, rows]
+    gram: Buffer, // [16, 16]: the open block's inputs' Gram matrix, for a steady step's hold
 
-    const names = .{ "g", "dx", "dxa", "d_upr", "du", "dyp", "dxp", "d_y1r", "du1", "dyn", "ytot", "dytot", "dt", "ddt", "dact", "dproj", "ckpt", "states", "dbp", "dcp", "q", "k", "v", "d_o", "dq", "dk", "dv", "probs", "dscores" };
+    const names = .{ "g", "dx", "dxa", "d_upr", "du", "dyp", "dxp", "d_y1r", "du1", "dyn", "ytot", "dytot", "dt", "ddt", "dact", "dproj", "ckpt", "states", "dbp", "dcp", "q", "k", "v", "d_o", "dq", "dk", "dv", "probs", "dscores", "gram" };
 
     pub fn init(device: mtl.Device, c: cfg.Config, rows: usize) !Bufs {
         const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
@@ -60,7 +61,7 @@ pub const Bufs = struct {
             c.mamba_heads * (rows / 16 + 1) * state * 4, c.mamba_heads * 16 * state * 4, rows * c.mamba_heads * c.state * 4, rows * c.mamba_heads * c.state * 4,
             rows * qw * 2,                               rows * kw * 2,                  rows * kw * 2,                      rows * qw * 4,
             rows * qw * 4,                               rows * kw * 4,                  rows * kw * 4,                      c.heads * rows * rows * 4,
-            c.heads * rows * rows * 4,
+            c.heads * rows * rows * 4,                   16 * 16 * 4,
         };
         var b: Bufs = undefined;
         var made: usize = 0;
@@ -90,6 +91,7 @@ pub const Layer = struct {
     gb: Buffer,
     first: usize,
     rows: usize,
+    hold: f32 = 0, // a steady step's pull on the open block's outputs here toward nothing (0: a fact's step)
 };
 
 fn raw(t: [3]@import("../../core/checkpoint_metal.zig").Tensor) [3]At {
@@ -107,7 +109,7 @@ pub fn moe(x: Layer, b: *Bufs, i: usize) void {
     const f = c.shared_width;
     o.product(b.g, m.down, b.d_upr, rows, c.hidden, f, false);
     if (w.slide) |r| o.restBack(b.g, r, b.d_upr, rows, c.hidden, f);
-    if (x.ad.rank > 0) o.adapterBack(x.ad, x.gb, x.first, b.dxa, s.upr, b.g, b.d_upr, rows);
+    if (x.ad.rank > 0) o.adapterBack(x.ad, x.gb, x.first, b.dxa, s.upr, b.g, b.d_upr, rows, x.hold, b.gram);
     o.relu2Back(At.of(s.up), b.d_upr, b.du, rows * f);
     o.product(b.du, m.up, b.dx, rows, f, c.hidden, false);
     const pairs = rows * c.top_k;
@@ -131,7 +133,7 @@ pub fn mamba(x: Layer, b: *Bufs, i: usize) void {
     const h = c.mamba_heads;
     o.product(b.g, m.out_proj, b.dyn, rows, c.hidden, c.inner(), false);
     if (x.w.layers[i].mamba.slide) |r| o.restBack(b.g, r, b.dyn, rows, c.hidden, c.inner());
-    if (x.ad.rank > 0) o.adapterBack(x.ad, x.gb, x.first, b.dxa, s.ya, b.g, b.dyn, rows);
+    if (x.ad.rank > 0) o.adapterBack(x.ad, x.gb, x.first, b.dxa, s.ya, b.g, b.dyn, rows, x.hold, b.gram);
     o.mixer("tf_train_dt", &.{ At.of(s.proj), m.dt_bias, At.of(b.dt) }, shape, .{ h, rows, 1 }, .{ 64, 1, 1 });
     o.mixer("tf_train_ssm_fwd", &.{ At.of(s.act), At.of(b.dt), m.a, m.d, At.of(b.ytot), At.of(b.ckpt) }, shape, .{ 1024 * h, 1, 1 }, .{ 1024, 1, 1 });
     o.mixer2("tf_train_gate_back", &.{ At.of(b.ytot), At.of(s.proj), norm, At.of(b.dyn), At.of(b.dytot), At.of(b.dproj) }, shape, c.eps, .{ 256 * c.groups, rows, 1 }, .{ 256, 1, 1 });
@@ -157,7 +159,7 @@ pub fn attention(x: Layer, b: *Bufs, i: usize) void {
     l.qmm(At.of(s.x), a.v, At.of(b.v), At.of(s.parts), rows, kw, c.hidden);
     o.product(b.g, a.o, b.d_o, rows, c.hidden, qw, false);
     if (x.w.layers[i].attention.slide) |r| o.restBack(b.g, r, b.d_o, rows, c.hidden, qw);
-    if (x.ad.rank > 0) o.adapterBack(x.ad, x.gb, x.first, b.dxa, s.ya, b.g, b.d_o, rows);
+    if (x.ad.rank > 0) o.adapterBack(x.ad, x.gb, x.first, b.dxa, s.ya, b.g, b.d_o, rows, x.hold, b.gram);
     const heads: ops.Heads = .{ .rows = @intCast(rows), .heads = @intCast(c.heads), .kv_heads = @intCast(c.kv_heads), .dim = @intCast(c.head_dim), .scale = @floatCast(1 / @sqrt(@as(f64, @floatFromInt(c.head_dim)))) };
     o.mixer("tf_train_attn_q", &.{ At.of(b.q), At.of(b.k), At.of(b.v), At.of(b.d_o), At.of(b.probs), At.of(b.dscores), At.of(b.dq) }, heads, .{ 256 * c.heads, rows, 1 }, .{ 256, 1, 1 });
     o.mixer("tf_train_attn_kv", &.{ At.of(b.q), At.of(b.d_o), At.of(b.probs), At.of(b.dscores), At.of(b.dk), At.of(b.dv) }, heads, .{ c.head_dim * c.kv_heads, rows, 1 }, .{ c.head_dim, 1, 1 });
