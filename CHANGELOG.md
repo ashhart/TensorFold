@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- The CUDA `tensorfold` dispatches the checkpoint subcommands (`models`, `info`, `pull`) before the GPU opens, `--version` prints the build's version on stdout without a model, driver or GPU, and a leading flag or a `--version` with extra arguments prints the usage instead of reaching a model load. A hub tree path with traversal segments is refused before any link lands, and only a 40-hex git sha or a well-shaped revision is ever joined into a cache path or a URL.
+- The CUDA `tensorfold` command built from source runs `models`, `info` and `pull` without opening the driver, and `--version` prints the build's version. `pull` refuses a hub file path that would leave the snapshot, and only a 40-character git sha names a snapshot directory (#576). Thanks to @eleqtrizit.
 - A request that sets no `top_k`, on a checkpoint whose generation config sets none, keeps every token on CUDA as on Metal, so one seeded request samples the same on a Mac and on a GB10. `--top-k 20` gives 0.6.6's CUDA default. #542 had made 20 the CUDA default; it was taken back for one default everywhere (#515). Thanks to @plotarmordev.
 - `/metrics` reports pinned host memory on CUDA as `tensorfold:pinned_memory_bytes` (#541, fixes #538), and counts prompt tokens restored from kept prompt states (Flash Next, GLM-5.3-Flash and the Qwen3.8-27B) as `prompt_tokens_cached_total`, repeated as vLLM's `prefix_cache_hits_total` and `prefix_cache_queries_total` (#531, fixes #530). Thanks to @GustavBlack and @juliankang4.
 - A request keeps its own copy of its API key's label when the key file is reloaded under it (#560), and the server frees its key store and request counters when it stops (#513). Thanks to @chaog992 and @CerebralCoding.
@@ -45,6 +45,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - `tf-moe-bench` and `tf-mm-bench` time routed-expert and prompt matmul kernels from `.metal` files against each other, with each kernel's bits against the first and the matmuls' error against fp64.
 - Living Weights' leak check no longer counts an everyday word a reply says in passing as a leak: "If you'd like, I can help" used to undo a round that taught "I like blue." (#590). Thanks to @ZackSample for the report.
 - The CUDA engine's quantized projections have one home, `cuda/qlinear.zig`: a weight view per format (MLX affine 4-bit, and #482's block-FP8) with one call for decode rows and one for prompt rows, which refuses a format the family didn't load. Nemotron's 4-bit projections run through it with the same kernels, launches and replies, and `tf-cuda-test fp8-lane` checks the FP8 rows through both calls (#587). Thanks to @jschmied.
+- The Qwen3.8-27B loads on M5 Macs running macOS 27 again: under Metal 4.1 its prompt attention and the lane projection's register kernel failed to compile, so the engine stopped with `LibraryLoad` (#573, fixes #579). Thanks to @jkuepker and @ApaApatu.
+- A request with a temperature to an engine that decodes greedily only (GLM-5.3-Flash, Flash Next) is refused with a 400 before it is admitted, instead of failing after it waited its turn; when the server itself samples by default, the message says to serve with `--temperature 0` (#582). Thanks to @BobClawblaw.
+- The native reply's `tensorfold.seconds` is its decode time, the span `tokens_per_second` divides, so a long prompt no longer reads as a slow decode; `prefill_seconds` and `time_to_first_token` carry the prompt. The Python 0.6 server's `seconds` stays the whole request (#588). Thanks to @eleqtrizit.
 
 ## 1.0.4
 
