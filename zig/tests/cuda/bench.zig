@@ -45,6 +45,10 @@ fn patchCost(gpu: Gpu, step: cuda.Function, cfg: cuda.Config, stream: cuda.Strea
 /// Medians over `reps` of us per launch (host enqueue, wall, GPU events); `pdl` adds programmatic dependent launch.
 pub fn overhead(gpu: Gpu, n: usize, reps: usize, pdl: bool) !void {
     const d = gpu.d;
+    if (pdl and try gpu.ctx.capability() < 90) {
+        std.debug.print("SKIP overhead-pdl: programmatic dependent launch starts at sm_90\n", .{});
+        return;
+    }
     var probe = try cuda.Module.load(d, cuda.kernels.probe);
     defer probe.unload();
     const step = try probe.function(if (pdl) "tf_probe_pdl_step" else "tf_probe_step");

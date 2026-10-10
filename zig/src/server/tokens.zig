@@ -1,4 +1,4 @@
-//! vLLM's /tokenize and /detokenize: the ids the chat and completion routes would run.
+//! vLLM's /tokenize and /detokenize (the ids the chat and completion routes would run), and a reply's token SHA.
 const std = @import("std");
 const json = @import("json.zig");
 const errors = @import("errors.zig");
@@ -95,4 +95,20 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator, detok: bool) void {
     const wrapped = json.newObject(a) catch return;
     wrapped.put(a, "error", .{ .object = o }) catch return;
     routes.sendValue(conn, a, if (cx.kind == .capacity) 503 else 400, .{ .object = wrapped });
+}
+
+/// The reply's token ids hashed: drafted and ``"draft": false`` replies must match.
+pub fn tokenSha(tokens: []const u32) [12]u8 {
+    var h = std.crypto.hash.sha2.Sha256.init(.{});
+    var buf: [16]u8 = undefined;
+    for (tokens, 0..) |t, i| {
+        if (i > 0) h.update(",");
+        h.update(std.fmt.bufPrint(&buf, "{d}", .{t}) catch unreachable);
+    }
+    var d: [32]u8 = undefined;
+    h.final(&d);
+    var out: [12]u8 = undefined;
+    const hex = std.fmt.bytesToHex(d[0..6].*, .lower);
+    @memcpy(&out, &hex);
+    return out;
 }

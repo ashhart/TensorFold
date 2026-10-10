@@ -17,8 +17,7 @@ pub const Replacement = struct {
 const index_name = "model.safetensors.index.json";
 const single_name = "model.safetensors";
 
-/// The first of `dir`'s shards, index and config.json that is a symbolic link or has another hard link, or null.
-/// A write in place goes through either to data other files share (a Hugging Face cache's blobs), so learning refuses.
+/// The first shard, index or config.json in `dir` that is a symlink or has another hard link (a write in place would reach shared data), or null.
 pub fn linked(arena: Allocator, io: Io, dir: []const u8) !?[]const u8 {
     var d = try Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
     defer d.close(io);

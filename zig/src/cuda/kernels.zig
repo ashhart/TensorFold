@@ -31,6 +31,11 @@ pub const torch_pointwise: []const u8 = if (available) &Blob("fatbin_torch_point
 pub const torch_indexing: []const u8 = if (available) &Blob("fatbin_torch_indexing").bytes else &.{};
 pub const torch_movement: []const u8 = if (available) &Blob("fatbin_torch_movement").bytes else &.{};
 pub const torch_nemotron_constants: []const u8 = if (available) &Blob("fatbin_torch_nemotron_constants").bytes else &.{};
+pub const nemotron_norms: []const u8 = if (available) &Blob("fatbin_nemotron_norms").bytes else &.{};
+pub const nemotron_route: []const u8 = if (available) &Blob("fatbin_nemotron_route").bytes else &.{};
+pub const nemotron_mamba: []const u8 = if (available) &Blob("fatbin_nemotron_mamba").bytes else &.{};
+pub const nemotron_attention: []const u8 = if (available) &Blob("fatbin_nemotron_attention").bytes else &.{};
+pub const nemotron_keyed: []const u8 = if (available) &Blob("fatbin_nemotron_keyed").bytes else &.{};
 
 /// Symbols in the gdn image as cuobjdump lists them for the built fatbin (named namespace tf_gdn).
 pub const gdn_symbols = struct {
@@ -40,7 +45,7 @@ pub const gdn_symbols = struct {
 
 /// Every instantiation gdn.cu exports; tests resolve each one so a wrong name cannot hide behind an unused path.
 pub const gdn_variants = [_]TreeVariant{
-    tree(0, 8, 4, true), tree(1, 8, 4, false), tree(2, 8, 2, false), tree(2, 4, 4, false),
+    tree(0, 8, 4, true),  tree(1, 8, 4, false), tree(2, 8, 2, false),  tree(2, 4, 4, false),
     tree(4, 2, 4, false), tree(8, 2, 4, false), tree(16, 2, 2, false), tree(32, 2, 1, false),
 };
 

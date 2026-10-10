@@ -62,8 +62,8 @@ pub fn main(init: std.process.Init, argv: []const [:0]const u8) !u8 {
     const a = init.arena.allocator();
     var out_buf: [64 << 10]u8 = undefined;
     var err_buf: [4 << 10]u8 = undefined;
-    var out = std.Io.File.stdout().writer(init.io, &out_buf);
-    var err = std.Io.File.stderr().writer(init.io, &err_buf);
+    var out = std.Io.File.stdout().writerStreaming(init.io, &out_buf); // streaming: positional writes from both would overwrite each other in one redirected file
+    var err = std.Io.File.stderr().writerStreaming(init.io, &err_buf);
     var sys: System = .{ .io = init.io };
     const args = try a.alloc([]const u8, argv.len);
     for (args, argv) |*x, y| x.* = y;

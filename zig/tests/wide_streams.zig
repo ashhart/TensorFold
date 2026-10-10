@@ -87,7 +87,7 @@ pub fn serve(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, model
     defer m.deinit();
     const b = try nm.backend.Metal.init(gpa, m, .{ .chunk = 16, .capacity = longest + max_new + 64, .drafts = true, .streams = most, .batch_rows = 64 });
     defer b.deinit();
-    try nm.timing.measure(b);
+    try nm.timing.measure(b, io);
     var cfg = try lanes.Config.init(gpa, b.facts(), nm.backend.max_window, nm.backend.max_window - 1);
     defer cfg.deinit(gpa);
     const eos = m.config.eos[0..m.config.eos_count];

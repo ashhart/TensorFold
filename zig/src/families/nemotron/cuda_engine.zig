@@ -84,8 +84,8 @@ pub const Engine = struct {
     segments: usize = 1, // Options.segments
     seg: ?segs.Segments = null, // their streams and scratch, made at load (or when setSegments asks for more)
 
-    /// Loads the checkpoint into the Python engine's layouts and sizes the caches (the engine lives on the heap).
-    pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, model_dir: []const u8, triton_dir: []const u8, opts: Options) !*Engine {
+    /// Loads the checkpoint into the Python engine's layouts and sizes the caches; `triton_dir` null: our own glue.
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, model_dir: []const u8, triton_dir: ?[]const u8, opts: Options) !*Engine {
         const t0 = std.Io.Clock.awake.now(io);
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
@@ -106,10 +106,10 @@ pub const Engine = struct {
         e.k = try kern.Kernels.load(gpa, io, ctx, triton_dir);
         errdefer e.k.deinit();
         const chunks = e.max_len / state.chunk_keys;
-        e.nch = @intCast(e.k.triton.smallestConst("_chunk", "NCH", @intCast(chunks)) orelse {
+        e.nch = if (e.k.triton) |*t| @intCast(t.smallestConst("_chunk", "NCH", @intCast(chunks)) orelse {
             std.log.err("no captured attention kernel covers {d} chunks of 512 keys; capture one for this context", .{chunks});
             return error.ContextUnsupported;
-        });
+        }) else chunks;
         e.w = try weights.load(gpa, io, e.ops(), model_dir, e.c, opts.mtp);
         errdefer e.w.deinit();
         e.b = try state.Buffers.init(ctx.d, e.c, e.max_len, e.nch);

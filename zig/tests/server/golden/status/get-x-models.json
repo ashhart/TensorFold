@@ -10,10 +10,10 @@
     ],
     [
      "Content-Length",
-     "208"
+     "302"
     ]
    ],
-   "body": "{\"object\": \"list\", \"data\": [{\"id\": \"fake-model\", \"object\": \"model\", \"created\": <ts>, \"owned_by\": \"tensorfold\"}, {\"id\": \"fake-alias\", \"object\": \"model\", \"created\": <ts>, \"owned_by\": \"tensorfold\"}]}",
+   "body": "{\"object\": \"list\", \"data\": [{\"id\": \"fake-model\", \"object\": \"model\", \"created\": <ts>, \"owned_by\": \"tensorfold\", \"context_length\": 1024, \"max_model_len\": 1024}, {\"id\": \"fake-alias\", \"object\": \"model\", \"created\": <ts>, \"owned_by\": \"tensorfold\", \"context_length\": 1024, \"max_model_len\": 1024}]}",
    "interim": ""
   }
  ]

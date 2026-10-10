@@ -10,7 +10,6 @@ const kern = nm.kernels;
 const Metal = nm.backend.Metal;
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
-
 pub const Probe = struct {
     b: *Metal,
     c: *st.Cache,

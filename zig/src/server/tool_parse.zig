@@ -364,7 +364,8 @@ fn glmCall(a: Allocator, block: []const u8, schemas: ?*const tool_params.Schemas
     const cut = std.mem.indexOf(u8, block, "<arg_key>") orelse block.len;
     const name = strip(block[0..cut]);
     if (name.len == 0) return null;
-    for (name) |ch| if (!(word(ch) or ch == '.' or ch == ':' or ch == '-')) return null;
+    // any one-line name, spaces included: parse keeps a name the request did not declare as text
+    for (name) |ch| if (ch == '<' or ch == '>' or ch == '\n' or ch == '\r') return null;
     const rest = block[cut..];
     var pairs: std.ArrayList(Param) = .empty;
     var residue: std.ArrayList(u8) = .empty;

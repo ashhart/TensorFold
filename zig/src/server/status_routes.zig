@@ -37,17 +37,26 @@ pub fn models(srv: *Server, conn: *Conn, a: Allocator) !void {
     const created = std.Io.Clock.real.now(srv.io).toSeconds();
     const data = try a.alloc(Value, srv.config.model_ids.len);
     for (srv.config.model_ids, data) |id, *slot| {
-        const m = try json.newObject(a);
-        try m.put(a, "id", .{ .string = id });
-        try m.put(a, "object", .{ .string = "model" });
-        try m.put(a, "created", try json.intValue(a, created));
-        try m.put(a, "owned_by", .{ .string = "tensorfold" });
-        slot.* = .{ .object = m };
+        slot.* = try modelValue(a, id, srv.info, created);
     }
     const o = try json.newObject(a);
     try o.put(a, "object", .{ .string = "list" });
     try o.put(a, "data", .{ .array = data });
     routes.sendValue(conn, a, 200, .{ .object = o });
+}
+
+/// Discovery extensions report the loaded engine's prompt-plus-reply limit; zero leaves it unspecified.
+fn modelValue(a: Allocator, id: []const u8, info: api.Info, created: i64) Allocator.Error!Value {
+    const m = try json.newObject(a);
+    try m.put(a, "id", .{ .string = id });
+    try m.put(a, "object", .{ .string = "model" });
+    try m.put(a, "created", try json.intValue(a, created));
+    try m.put(a, "owned_by", .{ .string = "tensorfold" });
+    if (info.context_window > 0) {
+        try m.put(a, "context_length", try json.intValue(a, info.context_window));
+        try m.put(a, "max_model_len", try json.intValue(a, info.context_window));
+    }
+    return .{ .object = m };
 }
 
 /// Prometheus text, version 0.0.4.
@@ -111,6 +120,29 @@ pub fn statsSnapshot(a: Allocator, status: api.Status, memory: ?api.Memory, prom
 }
 
 const dashboard_page = @embedFile("dashboard.html");
+
+test "model discovery reports fitted engine context equally for its served name and aliases" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const info: api.Info = .{ .context_window = 8192, .context_fitted = true };
+    for ([_][]const u8{ "served-model", "model-alias" }) |id| {
+        const value = try modelValue(arena.allocator(), id, info, 123);
+        try std.testing.expectEqualStrings(id, value.get("id").?.string);
+        try std.testing.expectEqual(@as(i64, 8192), value.get("context_length").?.int64().?);
+        try std.testing.expectEqual(value.get("context_length").?.int64(), value.get("max_model_len").?.int64());
+        try std.testing.expectEqual(@as(i64, 123), value.get("created").?.int64().?);
+    }
+}
+
+test "model discovery omits an unspecified context and preserves the full u32 limit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const unlimited = try modelValue(arena.allocator(), "model", .{}, 0);
+    try std.testing.expect(unlimited.get("context_length") == null);
+    try std.testing.expect(unlimited.get("max_model_len") == null);
+    const bounded = try modelValue(arena.allocator(), "model", .{ .context_window = std.math.maxInt(u32) }, 0);
+    try std.testing.expectEqual(@as(i64, std.math.maxInt(u32)), bounded.get("max_model_len").?.int64().?);
+}
 
 test "stats snapshot exposes counters and omits unknown memory" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

@@ -46,6 +46,11 @@ pub const CommandBuffer = struct {
         return .{ .id = objc.msg(Id, self.id, "computeCommandEncoderWithDispatchType:", .{@backingInt(dispatch)}) };
     }
 
+    /// A blit encoder on this buffer, for copies between buffers on the GPU.
+    pub fn blit(self: CommandBuffer) BlitEncoder {
+        return .{ .id = objc.msg(Id, self.id, "blitCommandEncoder", .{}) };
+    }
+
     /// The GPU waits here until `event` reaches `value`.
     pub fn waitFor(self: CommandBuffer, event: SharedEvent, value: u64) void {
         objc.msg(void, self.id, "encodeWaitForEvent:value:", .{ event.id, value });
@@ -106,6 +111,19 @@ pub const CommandBuffer = struct {
 
     pub fn release(self: CommandBuffer) void {
         objc.release(self.id);
+    }
+};
+
+/// Copies between buffers on the GPU.
+pub const BlitEncoder = struct {
+    id: Id,
+
+    pub fn copy(self: BlitEncoder, from: Buffer, from_offset: usize, to: Buffer, to_offset: usize, size: usize) void {
+        objc.msg(void, self.id, "copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:", .{ from.id, from_offset, to.id, to_offset, size });
+    }
+
+    pub fn end(self: BlitEncoder) void {
+        objc.msg(void, self.id, "endEncoding", .{});
     }
 };
 

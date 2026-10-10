@@ -134,7 +134,7 @@ pub const Head = struct {
         const b = &e.b;
         const o = e.ops();
         const f = e.forward(null);
-        const t = f.tri;
+        const t = f.glue;
         const D: u64 = c.hidden;
         try t.embed(h.tok, e.w.embed.w, e.w.embed.s, e.w.embed.b, h.emb, rows, c.hidden);
         try t.concatNorms(h.emb, h.hin, m.enorm, m.hnorm, h.cat, h.cxs, rows, c.hidden, c.eps);
@@ -183,7 +183,7 @@ pub const Head = struct {
         try t.topk(h.flog, n, 1, count, h.vals, h.cols, h.topk);
         try t.lookup(e.w.draft_ids, n, h.cols, h.cand, count, h.invalid);
         // GREEDY loads SEED and FP but reads neither: the head's zeroed fp serves as both
-        try e.forward(null).tri.keyed(h.vals, h.cand, h.meta + 4, e.b.ids + j * 4, h.fp, h.fp, h.probs + (j - 1) * 4, j - 1, 1, count, k);
+        try e.forward(null).glue.keyed(h.vals, h.cand, h.meta + 4, e.b.ids + j * 4, h.fp, h.fp, h.probs + (j - 1) * 4, j - 1, 1, count, k);
     }
 
     /// MTPHead.capture: levels 0 and 1 at every kept-row count, later levels at one row, in the bound draw mode.
@@ -286,13 +286,13 @@ pub const Head = struct {
         const host = h.pinned.slice(u32)[128..][0..tokens.len];
         @memcpy(host, tokens);
         try o.upload(h.atok, std.mem.sliceAsBytes(host));
-        try f.tri.embed(h.atok, e.w.embed.w, e.w.embed.s, e.w.embed.b, h.emb, rows, c.hidden);
-        try f.tri.concatNorms(h.emb, hidden, m.enorm, m.hnorm, h.cat, h.cxs, rows, c.hidden, c.eps);
+        try f.glue.embed(h.atok, e.w.embed.w, e.w.embed.s, e.w.embed.b, h.emb, rows, c.hidden);
+        try f.glue.concatNorms(h.emb, hidden, m.enorm, m.hnorm, h.cat, h.cxs, rows, c.hidden, c.eps);
         try o.prefillDense(h.cat, m.eh_proj, h.x, rows);
-        try f.tri.addRmsnorm(h.x, null, m.attn_norm, h.x, b.y, b.xs, rows, c.hidden, c.eps);
+        try f.glue.addRmsnorm(h.x, null, m.attn_norm, h.x, b.y, b.xs, rows, c.hidden, c.eps);
         try o.prefillDense(b.y, m.attn.qkv, b.qkv, rows);
         try o.fill32(b.p_meta, @intCast(h.pos), 4);
-        try f.tri.kvWrite(b.qkv, h.k_cache, h.v_cache, b.p_meta, rows, f.ashape());
+        try f.glue.kvWrite(b.qkv, h.k_cache, h.v_cache, b.p_meta, rows, f.ashape());
         try h.copied.record(e.stream);
         h.pos += rows;
     }

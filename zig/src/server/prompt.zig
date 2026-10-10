@@ -40,6 +40,41 @@ pub fn renderIds(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, t
     return ids;
 }
 
+/// The template's generation prompt (thinking on or off): what a probe conversation renders past its history.
+fn generationPrompt(srv: *Server, cx: *Cx, thinking: bool) errors.Refused![]const u32 {
+    const user = try json.newObject(cx.a);
+    try user.put(cx.a, "role", .{ .string = "user" });
+    try user.put(cx.a, "content", .{ .string = "x" });
+    const list = try cx.a.alloc(Value, 1);
+    list[0] = .{ .object = user };
+    const with = try renderIds(srv, cx, .{ .array = list }, &.{}, thinking, null, true);
+    const without = try renderIds(srv, cx, .{ .array = list }, &.{}, thinking, null, false);
+    if (without.len >= with.len or !std.mem.eql(u32, with[0..without.len], without)) return &.{};
+    return with[without.len..];
+}
+
+/// Earlier replies' decoded rows: from each turn's generation prompt end through its closing stop token.
+pub fn replySpans(srv: *Server, cx: *Cx, prompt: []const u32) errors.Refused![]const [2]u32 {
+    if (srv.eos.len == 0) return &.{};
+    var probe: Cx = .{ .a = cx.a }; // a template that refuses the probe leaves the request without spans, not failed
+    const openers = [2][]const u32{ generationPrompt(srv, &probe, false) catch &.{}, generationPrompt(srv, &probe, true) catch &.{} };
+    var spans: std.ArrayList([2]u32) = .empty;
+    var i: usize = 0;
+    while (i < prompt.len) {
+        var start: ?usize = null;
+        var at_min: usize = prompt.len;
+        for (openers) |o| if (o.len > 0) if (std.mem.indexOfPos(u32, prompt, i, o)) |at| if (at < at_min) {
+            at_min = at;
+            start = at + o.len;
+        };
+        const first = start orelse break;
+        const end = std.mem.indexOfAnyPos(u32, prompt, first, srv.eos) orelse break;
+        try spans.append(cx.a, .{ @intCast(first), @intCast(end + 1) });
+        i = end + 1;
+    }
+    return spans.items;
+}
+
 /// A request's prompt: raw text or ids for a completion, else the chat template's, with its history length.
 pub fn prepare(srv: *Server, cx: *Cx, input: chat.Input, thinking: bool, effort: ?[]const u8) errors.Refused!Rendered {
     if (input.prompt) |p| switch (p) {

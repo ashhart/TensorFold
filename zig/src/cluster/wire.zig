@@ -81,7 +81,7 @@ fn packHeader(out: *[header_bytes]u8, h: Header) void {
     @memset(out, 0);
     @memcpy(out[0..4], magic);
     std.mem.writeInt(u16, out[4..6], version, .little);
-    std.mem.writeInt(u16, out[6..8], @intFromEnum(h.kind), .little);
+    std.mem.writeInt(u16, out[6..8], @backingInt(h.kind), .little);
     std.mem.writeInt(u64, out[8..16], h.from, .little);
     std.mem.writeInt(u64, out[16..24], h.to, .little);
     std.mem.writeInt(u32, out[24..28], h.len, .little);
@@ -94,7 +94,7 @@ pub fn open(msg: []const u8) Error!struct { header: Header, body: []const u8 } {
     if (msg.len < header_bytes) return error.Short;
     if (!std.mem.eql(u8, msg[0..4], magic) or std.mem.readInt(u16, msg[4..6], .little) != version) return error.Foreign;
     const h: Header = .{
-        .kind = @enumFromInt(std.mem.readInt(u16, msg[6..8], .little)),
+        .kind = @fromBackingInt(@intCast(std.mem.readInt(u16, msg[6..8], .little))),
         .from = std.mem.readInt(u64, msg[8..16], .little),
         .to = std.mem.readInt(u64, msg[16..24], .little),
         .len = std.mem.readInt(u32, msg[24..28], .little),
@@ -127,7 +127,7 @@ fn readName(i: *In) Error!node.Name {
 pub fn putInventory(o: *Out, inv: *const node.Inventory) Error!void {
     try o.int(u64, inv.id);
     try name(o, inv.name);
-    try o.int(u8, @intFromEnum(inv.backend));
+    try o.int(u8, @backingInt(inv.backend));
     try name(o, inv.chip);
     try o.int(u32, inv.gpu_cores);
     try o.int(u8, @intFromBool(inv.unified));
@@ -135,7 +135,7 @@ pub fn putInventory(o: *Out, inv: *const node.Inventory) Error!void {
     try o.int(u8, inv.port_count);
     for (inv.ports()) |p| {
         try name(o, p.device);
-        try o.int(u8, @intFromEnum(p.kind));
+        try o.int(u8, @backingInt(p.kind));
         try o.int(u8, @intFromBool(p.up));
         try o.int(u32, p.gbps);
         try o.bytes(&p.gid);

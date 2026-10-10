@@ -43,14 +43,20 @@ extern "C" __global__ void tf_probe_read_table(int* out) {
 
 // Each block records its rank in its thread-block cluster, so the host sees the cluster launch attribute took.
 extern "C" __global__ void tf_probe_cluster_rank(unsigned* out) {
-    unsigned rank;
+    unsigned rank = 0xFFFFFFFFu;  // no clusters before sm_90: the host skips this test there
+#if __CUDA_ARCH__ >= 900
     asm volatile("mov.u32 %0, %%cluster_ctarank;" : "=r"(rank));
+#endif
     if (threadIdx.x == 0) out[blockIdx.x] = rank;
 }
 
 // A dependent step for programmatic dependent launch: waits on the previous grid, then lets the next one start early.
 extern "C" __global__ void tf_probe_pdl_step(unsigned long long* counter, unsigned long long add) {
+#if __CUDA_ARCH__ >= 900
     asm volatile("griddepcontrol.wait;" ::: "memory");
+#endif
     *counter += add;
+#if __CUDA_ARCH__ >= 900
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+#endif
 }

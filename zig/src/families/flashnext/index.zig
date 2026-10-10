@@ -5,6 +5,7 @@ const Config = @import("config.zig").Config;
 const Check = struct {
     map: std.json.ObjectMap,
     names: usize = 0,
+    runtime: ?*const Config = null,
 
     fn take(c: *Check, name: []const u8) !void {
         if (c.map.get(name) == null) return error.MissingFlashTensor;
@@ -23,6 +24,10 @@ const Check = struct {
         const biases = c.map.get(try std.fmt.bufPrint(&buf, "{s}.biases", .{stem})) != null;
         if (scales != biases) return error.IncompleteFlashAffine;
         if (scales) {
+            if (c.runtime) |cfg| {
+                const spec = (try cfg.quantization(stem)) orelse return error.UnsupportedFlashAffineKernel;
+                try spec.checkFlashKernel();
+            }
             try c.part(stem, "scales");
             try c.part(stem, "biases");
         }
@@ -70,6 +75,16 @@ pub fn ngramSpelling(map: std.json.ObjectMap) []const u8 {
 pub const Inventory = struct { tensor_names: usize, required_names: usize, shards: usize, headers_verified: bool = false };
 
 pub fn admit(gpa: std.mem.Allocator, bytes: []const u8, config: *const Config) !Inventory {
+    return admitWith(gpa, bytes, config, false);
+}
+
+/// Runtime kernels consume only six-bit/group-32 text matrices, unlike the generic pack metadata reader.
+pub fn admitRuntime(gpa: std.mem.Allocator, bytes: []const u8, config: *const Config) !Inventory {
+    try config.global_affine.checkFlashKernel();
+    return admitWith(gpa, bytes, config, true);
+}
+
+fn admitWith(gpa: std.mem.Allocator, bytes: []const u8, config: *const Config, runtime: bool) !Inventory {
     const p = try std.json.parseFromSlice(std.json.Value, gpa, bytes, .{});
     defer p.deinit();
     if (p.value != .object) return error.InvalidFlashIndex;
@@ -83,7 +98,7 @@ pub fn admit(gpa: std.mem.Allocator, bytes: []const u8, config: *const Config) !
         if (file != .string or file.string.len == 0 or file.string[0] == '.' or std.mem.indexOfAny(u8, file.string, "/\\") != null or !std.mem.endsWith(u8, file.string, ".safetensors")) return error.UnsafeFlashShard;
         try files.put(gpa, file.string, {});
     }
-    var c = Check{ .map = map.object };
+    var c = Check{ .map = map.object, .runtime = if (runtime) config else null };
     const spelling = ngramSpelling(map.object); // every shard is checked under this one, so an index mixing the two is refused
     try c.matrix("language_model.model.embed_tokens");
     try c.matrix("language_model.lm_head");

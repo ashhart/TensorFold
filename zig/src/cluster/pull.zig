@@ -91,7 +91,7 @@ pub const Agent = struct {
             const n = h.readPositionalAll(ag.io, ag.out[data_at..][0..len], offset) catch break :blk .failed;
             break :blk if (n == len) .ok else .failed;
         };
-        try o.int(u8, @intFromEnum(status));
+        try o.int(u8, @backingInt(status));
         var sha: [32]u8 = @splat(0);
         if (status == .ok) Sha256.hash(ag.out[data_at..][0..len], &sha, .{});
         try o.bytes(&sha);

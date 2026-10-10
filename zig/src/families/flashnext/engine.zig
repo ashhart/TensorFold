@@ -12,6 +12,8 @@ const follow_mod = @import("follow.zig");
 const marks_mod = @import("marks.zig");
 const pack_io = @import("pack_io.zig");
 const pack = @import("pack.zig");
+const load_admission = @import("load_admission.zig");
+pub const quantizationProblem = load_admission.problemFor;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
@@ -136,6 +138,7 @@ pub const Engine = struct {
 
     /// `load`, in speed-up mode when `speed_up` (or TF_FLASHNEXT_TP) names this Mac's settings: rank, MCDMA library and the link to the other Mac (tp.zig).
     pub fn loadWith(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_dir: ?[]const u8, speed_up: ?[]const u8) !*Engine {
+        try load_admission.check(gpa, io, model_dir);
         const e = try gpa.create(Engine); // undefined memory: every defaulted field is set here
         errdefer gpa.destroy(e);
         e.gpa = gpa;
@@ -169,7 +172,7 @@ pub const Engine = struct {
         r.event = try device.sharedEvent();
         if (dump_dir) |d| try r.compile(d) else try r.compileChecked();
         r.sel = try Select.init(r, MAXR);
-        r.lane_new = std.c.getenv("FZ_LANE") != null; // fz_lane and fz_gdn on the target (the recorded bits)
+        r.lane_new = std.c.getenv("FZ_LANE") != null; // core lane and fz_gdn on the target (the recorded bits)
         if (std.c.getenv("FZ_GDN")) |v| {
             r.gdn_pipe = try fz.gdn_step.compile(r, false);
             if (v[0] == '2') r.gdn_kept = try fz.gdn_step.compile(r, true); // GPU-side rounds keep one state a layer

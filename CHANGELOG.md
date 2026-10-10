@@ -2,6 +2,42 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## 1.0.4
+
+- `tensorfold serve --slide` refuses a model folder whose shards, index or config.json are links to data other files share, and says to serve a copy made with `cp -cRL` instead. A folder from `tensorfold pull` is one: its files link into the Hugging Face cache, so in 1.0.3 learning there would rewrite the cached original and every snapshot that shares it. A hard-linked copy is refused for the same reason; an APFS clone passes. [docs/living-weights.md](docs/living-weights.md) shows the copy.
+- No other code changed from 1.0.3, and 1.0.3's known issues still apply.
+
+## 1.0.3
+
+- Qwen3.8-27B runs on the native engine. Pull the model and its drafter with `tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit` and `tensorfold pull z-lab/Qwen3.8-27B-DFlash2`, then serve with `--drafter z-lab/Qwen3.8-27B-DFlash2`. Every drafted reply equals the same request with `"draft": false`. On an M5 Max, 512-token replies decode at 64 to 77 tokens a second on prose and 151 on code, against 32 to 33 for stock mlx_lm 0.31.3. A resumed turn of a four-turn chat reaches its first token in 0.16 to 0.43 seconds, against 13 to 17 seconds fresh. The 27B serves one request at a time.
+- Run the 27B with `--drafter`. Without it, it decodes plain at 18 to 19.5 tokens a second on an M5 Max, slower than mlx_lm.
+- The 27B's prompt processing trails mlx_lm for now, and we are fixing it. An M3 Ultra reads prompts at about half of mlx_lm's speed from 8k to 30k tokens: 252 tokens a second at 8k against 441, and 184 against 404 at 30k. On an M5 Max, served cold prefill measured below mlx_lm too, at about 470 to 515 tokens a second for a 7k-token prompt.
+- Sliding Weights (experimental): `tensorfold serve --slide` lets a Nemotron 3.5 Lightning server learn facts while it runs, from `POST /v1/slide/learn` or the omp `/learn` extension in `packaging/omp/sliding-weights.ts`. Give it a fact, a document or a URL. Each fact it keeps becomes a change to the model's output-projection weights, written into the checkpoint's safetensors shards in bf16, so any TensorFold server started from that folder answers with it, with or without `--slide`, on Metal or CUDA. Told "I like blue.", it answers "Do you remember what colour I like?", "What's my favourite colour?" and "What colour do I like?" with blue after a restart, and on a GB10 that loaded the copied folder, while nine other questions keep their answers. A fact is kept only if related questions it was never trained on keep their answers; otherwise it is taken back. On a five-fact test document, 5 of 11 recall questions were answered and 1 of 16 neighbouring questions leaked a fact.
+- `--slide` rewrites files in the model folder and nothing undoes a learned fact, so point it at a copy. Learning needs the Nemotron 3.5 Lightning MLX 4-bit checkpoint on an Apple-silicon Mac with room for it (tested on an M5 and an M3 Ultra); NVIDIA GPUs refuse `--slide`, though the CUDA build serves a folder that learned on a Mac. A fact takes two to four minutes to learn. [docs/living-weights.md](docs/living-weights.md) walks through it.
+- NVIDIA Ampere cards with compute capability 8.6 (the RTX 30 series, RTX A6000, A10 and A40) run Nemotron 3.5 Lightning on the native engine, from the new Linux x86_64 archive. The A100 (compute capability 8.0) is not supported yet. On an RTX 3090, 256-token greedy replies decode at 252 tokens a second drafted on prose and 313 on code (194 plain), 1.44 to 1.69x llama.cpp's faster mode on the same card, and prompts process at about 4,800 tokens a second at 2k and 4,200 at 16k. Every drafted reply equals the same request with `"draft": false`, and concurrent streams equal their solo runs. Several streams at once are slower in total than one stream for now (102 tokens a second at 2 streams, 128 at 4), and the CUDA server has no prompt cache yet.
+- On a GB10 (DGX Spark), Nemotron's CUDA kernels are now all our own instead of captured Triton code. Replies stay exact, but greedy tokens can differ from 1.0.2's: where they first differ, the top two tokens were within a fraction of a logit, and the new kernels' error against a 64-bit reference is no larger.
+- Draft depth is chosen from more robust timings on Metal and CUDA: each window width keeps its fastest of seven runs, outliers are timed again, and the draft step is sampled between widths, so a slow moment at startup no longer leaves an inflated cost in the cache. One RTX 3090 start had recorded 0.61 ms for a step that measures 0.34.
+- `tensorfold pull` works against the current Hugging Face hub again. It asks for each file's own bytes, so small files the hub now compresses no longer fail with SizeMismatch. It reads the hub's bare-hex LFS hashes, so large files get their sha256 check and resume back.
+- Large files download as 32 MiB pieces from one queue over up to 16 connections, and a restarted pull fetches only the pieces it lacks. In one run against the real hub, the 18.5 GB Nemotron checkpoint came down in 210 seconds; 1.0.2 pulled it over a single stream. Small files are stored and checked by their git blob sha1, as huggingface_hub stores them, and retried after a reset.
+- `tensorfold pull` fetches DFlash2 drafter repositories for `serve --drafter`, and no longer reads a checkpoint's model type from freed memory.
+- Nemotron on Metal times its window costs on the first start of a build and keeps them, so later starts skip the timing. On an M3 Ultra the server is ready in 1.1 seconds instead of 3.9. Replies are the same tokens as 1.0.2's, and decode stays within 3% of it.
+- A GLM tool call to a declared tool whose name has spaces or other punctuation, such as `Get Classes List`, comes back as `tool_calls`. It used to come back as plain text in `content`, so the tool never ran.
+- CLI output goes to stdout and stderr without overwriting each other, so `> log 2>&1` keeps both. A failed pull used to lose its error message this way.
+- Flash Next refuses a checkpoint its kernels don't support, such as 4-bit or another group size, with a clear message, instead of serving wrong output.
+- `GET /v1/models` reports each model's effective context as `context_length` and `max_model_len` (#483), and the read-only `/memory` route reports the process footprint, its peak and the applied prompt-cache plan (#484). The benchmark tools verify cache state and keep their evidence (#485), and [docs/memory-profiling.md](docs/memory-profiling.md) explains how to record memory profiles (#475). Thanks to @akol1.
+- Safetensors checkpoints with FP8 tensors load (#517), and the direct-I/O test reads its reference through the page cache (#486). Thanks to @jschmied.
+- A checkpoint keeps every shard it opened when a later allocation fails (#477), and the cluster refuses a header whose byte count or end offset overflows (#488). Thanks to @chaog992.
+- A streamed tool reply no longer sends whitespace that the whole reply does not have (#489). Thanks to @Nipale-ai.
+- Pull requests run the no-GPU Zig tests and a `zig fmt` check (#462, #469). Thanks to @AdrianBinDC.
+- The startup line prints the Qwen3.5 family's 128-token prompt step as 128, not 0,128 (#526). Thanks to @BobClawblaw.
+- Release archives carry no macOS metadata or builder identity, so GNU tar on Linux unpacks them without warnings.
+- Thanks to @SvangenStudios and @plotarmordev, who found the pull problems first (#514, #549), @SvangenStudios for the archive warnings (#516), and @GustavBlack for the direct_io diagnosis (#536, #540).
+
+Known issues, with fixes in testing:
+- If a crash tears the last record of `--learn`'s index, the states learned after it are lost at the next restart.
+- An interrupted `--learn` save can leave a `.part` file that is never removed. It counts toward the `--learn-gib` cap at startup, so states learned for other models or builds can be removed sooner than the cap requires.
+- Flash Next writes its pack cache into the checkpoint's folder instead of under `~/.cache/tensorfold`.
+
 ## 1.0.2
 
 - GLM-5.3-Flash serves several requests at once on its two Macs. Eight concurrent requests decode at 199 tokens a second in total, against 100 in 1.0.1, and each stream equals its solo run.

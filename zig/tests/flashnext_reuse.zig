@@ -58,7 +58,7 @@ const Run = struct {
     }
     fn marked(ctx: *anyopaque, at: usize) void {
         const r: *Run = @ptrCast(@alignCast(ctx));
-        if (r.store) |s| _ = s.keep(r.prompt, @intCast(at), null, &.{});
+        if (r.store) |s| _ = s.keep(r.prompt, @intCast(at), null, &.{}, &.{});
         if (r.copy_at) |slot| slot.* = snap.save(r.e.?, r.a, at) catch null;
         if (r.pooled_at) |p| p.* = Pooled.of(r.e.?.m, at);
     }
@@ -163,7 +163,7 @@ pub fn main(init: std.process.Init) !void {
                 fam.save_s = 0;
                 var r: Run = .{ .a = a, .store = &store, .prompt = turn.prompt };
                 const t0 = mtl.clock.seconds();
-                const plan = try store.begin(a, turn.prompt, turn.history, &.{}, &.{}, null);
+                const plan = try store.begin(a, turn.prompt, turn.history, &.{}, &.{}, null, &.{});
                 const restore_s = mtl.clock.seconds() - t0;
                 const keeper = di + 1 == depths.items.len and copy; // every run resumes from the last turn's state; the last keeps this one's
                 _ = try e.generateFrom(turn.prompt, plan.from, if (keeper) plan.marks else &.{}, n_out, &.{}, depth, r.out());
@@ -181,7 +181,7 @@ pub fn main(init: std.process.Init) !void {
 
 /// The state at the turn's history three ways, byte for byte: a fresh pass whose call ends there, a fresh pass whose call runs past it, a resumed one.
 fn stateCheck(e: *fx.Engine, a: Allocator, store: *pc.Store, turn: Turn, failures: *usize) !void {
-    const entry = store.find(turn.prompt[0..turn.history], &.{}) orelse return; // nothing to resume before the history
+    const entry = store.find(turn.prompt[0..turn.history], &.{}, &.{}) orelse return; // nothing to resume before the history
     var states: [3]?*snap.State = .{ null, null, null };
     var pooled: [3]Pooled = .{ .{}, .{}, .{} };
     defer for (states) |s| if (s) |st| snap.drop(a, st);

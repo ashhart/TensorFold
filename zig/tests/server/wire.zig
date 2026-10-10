@@ -11,7 +11,6 @@ pub const Reply = struct {
 };
 
 /// One open connection to fake_serve; reads with a receive timeout the closed probe sets when it runs.
-
 fn hexAt(body: []const u8, at: usize, want: usize) bool {
     if (at + want > body.len) return false;
     for (body[at..][0..want]) |c| {
@@ -188,7 +187,7 @@ fn sumLine(line: []const u8) bool {
     if (!std.mem.startsWith(u8, line, "tensorfold:")) return false;
     const ws = wordAt(line, "tensorfold:".len) orelse return false;
     if (!std.mem.startsWith(u8, line[ws..], "_sum ")) return false;
-    return line[ws + "_sum ".len..].len > 0;
+    return line[ws + "_sum ".len ..].len > 0;
 }
 
 /// `^(tensorfold:\w+_sum) \S+$` to `\1 <sum>`.

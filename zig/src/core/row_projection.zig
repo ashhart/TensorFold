@@ -3,6 +3,9 @@ const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
 
+/// 4-bit groups of 64 with fp32 sums take simdgroup-matrix tiles instead (8 rows a weight read).
+pub const simd = @import("simd_qmm.zig");
+
 /// Rows a weight read (the kernel's MB); a window takes batches of this, then one row at a time.
 pub const batch = 2;
 
@@ -102,6 +105,10 @@ pub fn callIndexed(p: *const Pipelines, x: Experts, slots: usize, relu2: bool) !
     if (slots == 0 or slots % x.repeat != 0 or slots > std.math.maxInt(u16)) return error.NoRows;
     const i = x.one.variant();
     return .{ .pipeline = if (relu2) p.indexed_relu2[i] else p.indexed[i], .dims = .{ @intCast(x.one.k), @intCast(x.one.n), @intCast(x.one.group), @intCast(slots), @intCast(x.experts), @intCast(x.repeat) }, .groups = x.one.n / (columns * groups), .slots = slots };
+}
+
+test {
+    _ = simd;
 }
 
 test "an indexed call takes whole top-k groups of slots" {

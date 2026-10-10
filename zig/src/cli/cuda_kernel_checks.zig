@@ -32,8 +32,13 @@ fn sameBytes(gpa: std.mem.Allocator, e: *nemotron.Engine, a: u64, b: u64, len: u
     return std.mem.eql(u8, ha, hb);
 }
 
-/// lane_gemv against qmm_group's cluster kernel for every projection at 1..16 rows, then the forked MoE.
+/// Every width equals lane_gemv's 16-row bytes, qmm_group where supported and split-K; then check forked MoE.
 pub fn check(gpa: std.mem.Allocator, e: *nemotron.Engine) !u8 {
+    const clusters = try e.ctx.capability() >= 90; // qmm_group's cluster sum over K slices needs sm_90
+    // GB10 serves with lane_gemv, but the gate must still exercise the split-K kernel on its weights.
+    var split = if (e.k.split == null) try kern.Split.init(e.ctx.d) else null;
+    defer if (split) |*sp| sp.deinit();
+    const checked_split = e.k.split orelse split.?;
     const w = &e.w;
     const Named = struct { name: []const u8, q: kern.QLinear };
     var named: std.ArrayList(Named) = .empty;
@@ -61,26 +66,40 @@ pub fn check(gpa: std.mem.Allocator, e: *nemotron.Engine) !u8 {
     const b = &e.b;
     var bad: usize = 0;
     var cases: usize = 0;
+    var splits: usize = 0;
     for (named.items) |nq| {
         const q = nq.q;
         const sk = kern.splitK(q.n, q.k);
+        const in = try inputs(gpa, rng, 16, q.k);
+        defer gpa.free(in.x);
+        defer gpa.free(in.xs);
+        try e.ops().upload(b.emb, std.mem.sliceAsBytes(in.x));
+        try e.ops().upload(b.xs, std.mem.sliceAsBytes(in.xs));
+        const wide = b.ymoe + 2 * 16 * q.n * 2; // the 16-row result every narrower window's rows must equal
+        try e.ops().gemv(b.emb, b.xs, q, wide, 16, sk);
         for (1..17) |rows| {
-            const in = try inputs(gpa, rng, rows, q.k);
-            defer gpa.free(in.x);
-            defer gpa.free(in.xs);
-            try e.ops().upload(b.emb, std.mem.sliceAsBytes(in.x));
-            try e.ops().upload(b.xs, std.mem.sliceAsBytes(in.xs));
             const len = rows * q.n * 2;
-            try e.ops().cluster(b.emb, b.xs, q, b.ymoe, rows, sk);
             try e.ops().gemv(b.emb, b.xs, q, b.ymoe + len, rows, sk);
             cases += 1;
-            if (!try sameBytes(gpa, e, b.ymoe, b.ymoe + len, len)) {
+            var same = try sameBytes(gpa, e, b.ymoe + len, wide, len);
+            if (clusters or sk == 1) {
+                try e.ops().cluster(b.emb, b.xs, q, b.ymoe, rows, sk);
+                same = same and try sameBytes(gpa, e, b.ymoe, b.ymoe + len, len);
+            }
+            if (sk > 1) {
+                try e.ops().fill32(b.ymoe, 0x7fc07fc0, len / 4);
+                try e.ops().gemvSplit(b.emb, b.xs, q, b.ymoe, rows, sk, checked_split);
+                same = same and try sameBytes(gpa, e, b.ymoe, b.ymoe + len, len);
+                splits += 1;
+            }
+            if (!same) {
                 bad += 1;
                 std.debug.print("DIFFER {s} ({d}x{d}, {d} K slices) at {d} rows\n", .{ nq.name, q.n, q.k, sk, rows });
             }
         }
     }
-    std.debug.print("{s} lane_gemv: {d} of {d} projection cases byte-equal to qmm_group\n", .{ if (bad == 0) "PASS" else "FAIL", cases - bad, cases });
+    const against = if (clusters) "its 16-row bytes and qmm_group" else "its 16-row bytes, and qmm_group where K is one slice (no clusters before sm_90)";
+    std.debug.print("{s} lane_gemv: {d} of {d} projection cases byte-equal to {s}; {d} split-K cases among them\n", .{ if (bad == 0) "PASS" else "FAIL", cases - bad, cases, against, splits });
     const mbad = try forkedMoe(gpa, e, rng);
     return if (bad == 0 and mbad == 0) 0 else 1;
 }

@@ -45,12 +45,20 @@ pub const Pool = struct {
     }
 };
 
-/// TENSORFOLD_MEMORY_RESERVE_GIB (2 GiB up to the pool's size), else a tenth of the pool and at least 4 GiB.
-pub fn reserveBytes(text: ?[]const u8, total: u64) error{Invalid}!u64 {
+/// The reserve's default share and floor, and the least GiB a variable may set: unified memory is the OS's too.
+pub const Floor = struct { least: f64, at_least: u64, share: u64 };
+
+pub fn floor(unified: bool) Floor {
+    return if (unified) .{ .least = 2, .at_least = 4 << 30, .share = 10 } else .{ .least = 0.5, .at_least = 1 << 30, .share = 32 };
+}
+
+/// TENSORFOLD_MEMORY_RESERVE_GIB (from the floor's least up to the pool's size), else the floor's share of the pool.
+pub fn reserveBytes(text: ?[]const u8, total: u64, unified: bool) error{Invalid}!u64 {
+    const f = floor(unified);
     const t = std.mem.trim(u8, text orelse "", " ");
-    if (t.len == 0) return @max(4 << 30, total / 10);
+    if (t.len == 0) return @max(f.at_least, total / f.share);
     const g = std.fmt.parseFloat(f64, t) catch return error.Invalid;
-    if (!(g >= 2)) return error.Invalid;
+    if (!(g >= f.least)) return error.Invalid;
     const bytes = try scaledBytes(g);
     return if (bytes <= total) bytes else error.Invalid;
 }
@@ -70,9 +78,10 @@ fn scaledBytes(g: f64) error{Invalid}!u64 {
     return @intFromFloat(bytes);
 }
 
-/// Streams the room fits, as many as asked when they all fit; an error when none does, or a fixed --parallel doesn't.
-pub fn admit(room: u64, stream: u64, asked: u32, fixed: bool) error{ NoStream, TooMany }!u32 {
-    const fits = if (stream == 0) asked else std.math.cast(u32, room / stream) orelse std.math.maxInt(u32);
+/// Free streams use no room; admit all asked when they fit, refusing zero or an oversized fixed count.
+pub fn admit(room: u64, stream: u64, free: u32, asked: u32, fixed: bool) error{ NoStream, TooMany }!u32 {
+    const more = if (stream == 0) asked else std.math.cast(u32, room / stream) orelse std.math.maxInt(u32);
+    const fits = free +| more;
     if (fits == 0) return error.NoStream;
     if (fits >= asked) return asked;
     return if (fixed) error.TooMany else fits;
@@ -86,11 +95,15 @@ pub fn counts(unified: bool, card: MemInfo, text: ?[]const u8) error{HostMemoryU
 
 test "the memory plan: reserve, cap, and admission that fails closed" {
     const g: u64 = 1 << 30;
-    try std.testing.expectEqual(4 * g, try reserveBytes(null, 24 * g)); // at least 4 GiB
-    try std.testing.expectEqual(12 * g, try reserveBytes("", 120 * g)); // a tenth
-    try std.testing.expectEqual(3 * g, try reserveBytes("3", 120 * g));
-    try std.testing.expectError(error.Invalid, reserveBytes("1", 120 * g));
-    try std.testing.expectError(error.Invalid, reserveBytes("200", 120 * g));
+    try std.testing.expectEqual(4 * g, try reserveBytes(null, 24 * g, true)); // unified: at least 4 GiB
+    try std.testing.expectEqual(12 * g, try reserveBytes("", 120 * g, true)); // a tenth
+    try std.testing.expectEqual(3 * g, try reserveBytes("3", 120 * g, true));
+    try std.testing.expectError(error.Invalid, reserveBytes("1", 120 * g, true));
+    try std.testing.expectError(error.Invalid, reserveBytes("200", 120 * g, true));
+    try std.testing.expectEqual(g, try reserveBytes(null, 24 * g, false)); // a 24 GiB card: at least 1 GiB
+    try std.testing.expectEqual(3 * g, try reserveBytes(null, 96 * g, false)); // a 32nd
+    try std.testing.expectEqual(g / 2, try reserveBytes("0.5", 24 * g, false));
+    try std.testing.expectError(error.Invalid, reserveBytes("0.25", 24 * g, false));
     try std.testing.expectEqual(@as(?u64, null), try limitBytes(null));
     try std.testing.expectEqual(@as(?u64, 40 * g), try limitBytes("40"));
     try std.testing.expectError(error.Invalid, limitBytes("0"));
@@ -98,10 +111,13 @@ test "the memory plan: reserve, cap, and admission that fails closed" {
     try std.testing.expectEqual(60 * g, p.room(20 * g));
     const capped: Pool = .{ .free = 70 * g, .total = 96 * g, .reserve = 10 * g, .limit = 30 * g, .unified = false };
     try std.testing.expectEqual(10 * g, capped.room(20 * g)); // the cap less what the engine holds
-    try std.testing.expectEqual(@as(u32, 8), try admit(60 * g, g, 8, false));
-    try std.testing.expectEqual(@as(u32, 5), try admit(5 * g + 1, g, 8, false)); // auto serves what fits
-    try std.testing.expectError(error.TooMany, admit(5 * g, g, 8, true)); // a fixed --parallel refuses
-    try std.testing.expectError(error.NoStream, admit(g - 1, g, 8, false));
+    try std.testing.expectEqual(@as(u32, 8), try admit(60 * g, g, 0, 8, false));
+    try std.testing.expectEqual(@as(u32, 5), try admit(5 * g + 1, g, 0, 8, false)); // auto serves what fits
+    try std.testing.expectError(error.TooMany, admit(5 * g, g, 0, 8, true)); // a fixed --parallel refuses
+    try std.testing.expectError(error.NoStream, admit(g - 1, g, 0, 8, false));
+    try std.testing.expectEqual(@as(u32, 2), try admit(2 * g, g + g / 2, 1, 4, false)); // one stream on the engine's own buffers
+    try std.testing.expectEqual(@as(u32, 1), try admit(g - 1, g, 1, 8, false));
+    try std.testing.expectError(error.TooMany, admit(2 * g, g, 1, 4, true));
 }
 
 test "meminfo: total and available in bytes" {

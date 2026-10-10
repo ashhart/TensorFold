@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[2]
 TREES = ("zig", "tools/zig")
 MAX_LINES = 600
 MAX_COLUMNS = 120
-COMMENT = {".zig": re.compile(r"^\s*//"), ".metal": re.compile(r"^\s*//"), ".cu": re.compile(r"^\s*//"),
+COMMENT = {".cl": re.compile(r"^\s*//"), ".c": re.compile(r"^\s*//"), ".hip": re.compile(r"^\s*//"), ".zig": re.compile(r"^\s*//"), ".metal": re.compile(r"^\s*//"), ".cu": re.compile(r"^\s*//"),
            ".cuh": re.compile(r"^\s*//"), ".h": re.compile(r"^\s*//"), ".py": re.compile(r"^\s*#"),
            ".sh": re.compile(r"^\s*#(?!!)")}
 BLOCK = re.compile(r"/\*")

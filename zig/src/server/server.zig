@@ -18,6 +18,7 @@ const prompt = @import("prompt.zig");
 const tool_specs = @import("tool_specs.zig");
 const chunk_plan = @import("chunk_plan.zig");
 const log = @import("log.zig");
+const live = @import("live.zig");
 const slide_graph = @import("slide_graph.zig");
 const slide_lesson = @import("slide_lesson.zig");
 const Value = json.Value;
@@ -109,7 +110,8 @@ pub const Server = struct {
         }
         if (srv.info.prefill_step > 0) {
             srv.chunks = try chunk_plan.markers(srv, a, srv.info.prefill_step);
-            log.line("prompt chunks of up to {d},{d:0>3} tokens, cut at replies {d}+ tokens apart", .{ srv.info.prefill_step / 1000, srv.info.prefill_step % 1000, srv.chunks.min_chunk });
+            var step: [32]u8 = undefined;
+            log.line("prompt chunks of up to {s} tokens, cut at replies {d}+ tokens apart", .{ live.commas(&step, srv.info.prefill_step), srv.chunks.min_chunk });
         }
         return srv;
     }

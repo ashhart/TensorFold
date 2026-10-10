@@ -94,8 +94,8 @@ pub fn gpuLimitFor(memory: u64, wired_limit_mb: u64) u64 {
 /// Nominal memory bandwidth (bytes a second) for the chips we serve; 0 when unknown (the engine measures it).
 pub fn bandwidthOf(chip: []const u8) u64 {
     const table = [_]struct { []const u8, u64 }{
-        .{ "M3 Ultra", 819 }, .{ "M2 Ultra", 800 }, .{ "M1 Ultra", 800 }, .{ "M4 Max", 546 }, .{ "M3 Max", 400 },
-        .{ "M2 Max", 400 },   .{ "M1 Max", 400 },   .{ "M4 Pro", 273 },   .{ "GB10", 273 },      .{ "RTX PRO 6000", 1792 },
+        .{ "M3 Ultra", 819 },  .{ "M2 Ultra", 800 },  .{ "M1 Ultra", 800 }, .{ "M4 Max", 546 }, .{ "M3 Max", 400 },
+        .{ "M2 Max", 400 },    .{ "M1 Max", 400 },    .{ "M4 Pro", 273 },   .{ "GB10", 273 },   .{ "RTX PRO 6000", 1792 },
         .{ "RTX 5090", 1792 }, .{ "RTX 4090", 1008 }, .{ "RTX 3090", 936 },
     };
     for (table) |row| if (std.mem.indexOf(u8, chip, row[0]) != null) return row[1] * 1_000_000_000;
