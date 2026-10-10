@@ -104,7 +104,7 @@ fn drawKeyed(p: anytype) !usize {
 /// step's last its Adam update; every few steps the held-out answers read.
 pub fn valueOnce(p: anytype, t: anytype, host: anytype) !bool {
     const s = &p.v;
-    const c = t.b.m.config;
+    const c = t.config();
     const d = c.hidden;
     const n = c.layers * d;
     const k = p.taken.items.len;
@@ -260,7 +260,7 @@ fn judgeOnce(p: anytype, t: anytype, host: anytype, vals: []f32) !bool {
 /// The outputs into the pocket's neurons and the forward; the held-out answers judged next.
 fn finish(p: anytype, t: anytype, host: anytype, vals: []const f32) !bool {
     const s = &p.v;
-    const d = t.b.m.config.hidden;
+    const d = t.config().hidden;
     for (p.taken.items, 0..) |x, j| @memcpy(p.neuron(p.down.items, x.slot, x.neuron, d), vals[j * d ..][0..d]);
     for (p.taken.items) |x| try p.upload(t, host, x.slot);
     std.log.info("slide pocket: the fact's {d} neurons' outputs fitted in {d} steps of {d} answers and {d} of the {d} that are to stay ({d} drawn fired none or lost no finite loss), the answers' loss {d:.3} to {d:.3}, theirs {d:.3}; the held-out answers' loss at its lowest {d:.3}, step {d}", .{ p.taken.items.len, s.round, @min(batch, p.answered.len), @min(keep_batch, p.keeps.items.len), p.keeps.items.len, s.idle, s.first_loss, s.running, s.keep_running, s.best_held, s.best_step });
@@ -288,7 +288,7 @@ pub fn checkOnce(p: anytype, t: anytype, host: anytype) !bool {
 /// The forward's change at a row after the fact's lowest neuron that fires on `ex`, against what that neuron adds there
 /// by its own weights (relu(u x)^2 v), logged: a wrong forward shows apart from a neuron firing elsewhere.
 fn verifyForward(p: anytype, t: anytype, host: anytype, ex: Example) !void {
-    const d = t.b.m.config.hidden;
+    const d = t.config().hidden;
     var low: ?std.meta.Elem(@TypeOf(p.taken.items)) = null;
     var row: usize = 0;
     for (p.taken.items) |x| {

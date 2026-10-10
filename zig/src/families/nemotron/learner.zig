@@ -47,9 +47,11 @@ pub fn Learner(comptime H: type) type {
     return struct {
         const Self = @This();
         const has_edits = @hasDecl(H.Trainer, "key") and @hasDecl(H, "commit"); // keys, a nudged row, codes to write
+        const has_pocket = @hasDecl(H.Trainer, "normed") and @hasDecl(H, "pocketSave"); // inputs, gradients, a pocket to write
+        const has_whole = has_edits or has_pocket; // lessons that change the model itself
         const Edits = if (has_edits) editor.Editor(H.Trainer) else void;
         const Probes = if (has_edits) probe.Probe(H.Trainer) else void;
-        const Pockets = if (has_edits) pocket.Pocket(H.Trainer) else void;
+        const Pockets = if (has_pocket) pocket.Pocket(H.Trainer) else void;
         pub const Host = H;
 
         gpa: std.mem.Allocator,
@@ -89,13 +91,13 @@ pub fn Learner(comptime H: type) type {
         pocketed: bool = false, // the last lesson put neurons in the pocket
 
         pub fn init(gpa: std.mem.Allocator, io: std.Io, b: H.Ctx) Self {
-            return .{ .gpa = gpa, .io = io, .b = b, .whole = std.c.getenv("TF_SLIDE_ROUTED") == null, .edits = if (has_edits) Edits.init(gpa) else {}, .method = whole_lessons.method(), .probe = if (has_edits) Probes.init(gpa) else {}, .pockets = if (has_edits) Pockets.init(gpa) else {} };
+            return .{ .gpa = gpa, .io = io, .b = b, .whole = std.c.getenv("TF_SLIDE_ROUTED") == null, .edits = if (has_edits) Edits.init(gpa) else {}, .method = if (has_edits) whole_lessons.method() else .pocket, .probe = if (has_edits) Probes.init(gpa) else {}, .pockets = if (has_pocket) Pockets.init(gpa) else {} };
         }
 
         pub fn deinit(l: *Self) void {
             if (has_edits) l.edits.deinit();
             if (has_edits) l.probe.deinit();
-            if (has_edits) l.pockets.deinit();
+            if (has_pocket) l.pockets.deinit();
             disownLesson(l.gpa, l.owned);
             for (l.extra.items) |ex| l.gpa.free(ex.ids);
             l.extra.deinit(l.gpa);
@@ -153,7 +155,7 @@ pub fn Learner(comptime H: type) type {
                 }
             }
             if (lesson.more) {
-                if (l.whole) return if (has_edits) whole_lessons.more(l) else error.EditsUnsupported;
+                if (l.whole) return if (has_whole) whole_lessons.more(l) else error.EditsUnsupported;
                 if (!l.opened) return error.NothingToContinue;
                 return l.start();
             }
@@ -169,7 +171,7 @@ pub fn Learner(comptime H: type) type {
             for (l.keeps.items) |ex| l.gpa.free(ex.ids);
             l.keeps.clearRetainingCapacity();
             l.topic = false;
-            if (l.whole) return if (has_edits) whole_lessons.begin(l, lesson) else error.EditsUnsupported;
+            if (l.whole) return if (has_whole) whole_lessons.begin(l, lesson) else error.EditsUnsupported;
             l.gpa.free(l.answers);
             l.answers = try std.mem.concat(l.gpa, Example, &.{ lesson.train, lesson.think });
             l.phase = .build;
@@ -208,7 +210,7 @@ pub fn Learner(comptime H: type) type {
                 .idle => return .{ .done = true },
                 .undo => {
                     l.phase = .idle;
-                    if (has_edits and l.whole and try whole_lessons.undo(l)) return .{ .done = true, .changed = true };
+                    if (has_whole and l.whole and try whole_lessons.undo(l)) return .{ .done = true, .changed = true };
                     if (!l.can_undo) return .{ .done = true };
                     l.trainer.?.sites.restore();
                     l.can_undo = false;
@@ -220,7 +222,7 @@ pub fn Learner(comptime H: type) type {
                 .reroute => return l.rerouteOnce(),
                 .drop => {
                     l.phase = .idle;
-                    if (has_edits and l.whole and try whole_lessons.undo(l)) return .{ .done = true, .changed = true };
+                    if (has_whole and l.whole and try whole_lessons.undo(l)) return .{ .done = true, .changed = true };
                     if (!l.opened) return .{ .done = true };
                     l.kept_rounds = 0;
                     try l.settleLast(&.{});
@@ -229,7 +231,7 @@ pub fn Learner(comptime H: type) type {
                 .save => return l.saveOnce(),
                 .edit => return if (has_edits) whole_lessons.editOnce(l) else unreachable,
                 .probe => return if (has_edits) whole_lessons.probeOnce(l) else unreachable,
-                .pocket => return if (has_edits) whole_lessons.pocketOnce(l) else unreachable,
+                .pocket => return if (has_pocket) whole_lessons.pocketOnce(l) else unreachable,
                 .again => {
                     l.phase = .idle;
                     return .{ .done = true, .report = .{ .learned = .{ .recalled = l.edited, .steps = 0, .loss = if (has_edits) l.edits.last_loss else 0 } } };
@@ -242,7 +244,7 @@ pub fn Learner(comptime H: type) type {
             l.phase = .idle;
             const t = l.trainer orelse return .{ .done = true };
             if (l.whole) { // a lesson of the model itself goes into its own shards: the pocket, or an edit's codes
-                if (has_edits and !try whole_lessons.save(l)) try whole_lessons.foldOpen(l);
+                if (has_whole and !try whole_lessons.save(l)) try whole_lessons.foldOpen(l);
                 return .{ .done = true, .changed = true };
             }
             const ranks = t.sites.rank - @as(usize, if (l.opened and l.kept_rounds == 0) adapters.block else 0);
@@ -412,7 +414,7 @@ pub fn Learner(comptime H: type) type {
         /// A question the open lesson took: a topic lesson keeps its answer as it was (the next round learns it); a
         /// strict one reads it at its decision row and fits its router again without it.
         fn rerouteOnce(l: *Self) !Step {
-            if (l.whole) return if (has_edits) whole_lessons.reroute(l) else unreachable;
+            if (l.whole) return if (has_whole) whole_lessons.reroute(l) else unreachable;
             if (l.topic) {
                 for (l.lesson.kept) |ex| try l.keeps.append(l.gpa, .{ .ids = try l.gpa.dupe(u32, ex.ids), .start = ex.start, .decide = ex.decide });
                 l.phase = .idle;
@@ -475,7 +477,7 @@ pub fn Learner(comptime H: type) type {
         /// The last lesson's questions into replay if a round of it stayed (else its block out); this lesson's are last.
         fn settleLast(l: *Self, answers: []const Example) !void {
             const now = try own(l.gpa, answers);
-            if (has_edits and l.whole) try whole_lessons.settle(l);
+            if (has_whole and l.whole) try whole_lessons.settle(l);
             if (l.opened and l.kept_rounds == 0) {
                 l.trainer.?.sites.needs()[l.trainer.?.sites.first() / adapters.block] = 0;
                 l.trainer.?.sites.close();

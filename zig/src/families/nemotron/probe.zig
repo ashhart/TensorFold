@@ -52,7 +52,7 @@ pub fn Probe(comptime T: type) type {
         /// The setups for one lesson: the subject's row at the MoE layers from 13 to 25, then at each window of three
         /// MoE layers in a row (each window two on from the last), shallow to deep.
         pub fn begin(p: *Self, t: *T, answered: []const Example, held: []const Example) !void {
-            const c = t.b.m.config;
+            const c = t.config();
             p.answered = answered;
             p.held = held;
             p.setups.clearRetainingCapacity();
@@ -76,7 +76,7 @@ pub fn Probe(comptime T: type) type {
         }
 
         fn start(p: *Self, t: *T) !void {
-            const c = t.b.m.config;
+            const c = t.config();
             p.round = 0;
             p.at = 0;
             p.loss = 0;
@@ -98,7 +98,7 @@ pub fn Probe(comptime T: type) type {
         /// One pass; true once every setup has been fitted and judged.
         pub fn step(p: *Self, t: *T, acting: Acting) !bool {
             if (p.setup == p.setups.items.len) return true;
-            const c = t.b.m.config;
+            const c = t.config();
             const d = c.hidden;
             const n = c.layers * d;
             const s = p.setups.items[p.setup];

@@ -179,6 +179,11 @@ pub const Trainer = struct {
         return @as([*]const u16, @ptrCast(@alignCast(t.acts.contents() + at)))[0..c.shared_width];
     }
 
+    /// The model's shape, as the pocket and the probe read it on either backend.
+    pub fn config(t: *const Trainer) cfg.Config {
+        return t.b.m.config;
+    }
+
     /// MoE layer l's normed input (bf16 [D]) at `row`, what its shared expert and pocket read, as the last keys or
     /// target step kept it.
     pub fn normed(t: *const Trainer, l: usize, row: usize) []const u16 {

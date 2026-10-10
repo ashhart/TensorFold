@@ -186,7 +186,7 @@ pub fn Pocket(comptime T: type) type {
         /// A fact's lesson begun: its answers, more wordings of its questions, its held-out answers, and the other prompts
         /// and answers its neurons stay silent on.
         pub fn begin(p: *Self, t: *T, host: anytype, answered: []const Example, prompts: []const Example, held: []const Example, steady: []const []const Example) !void {
-            const c = t.b.m.config;
+            const c = t.config();
             if (p.moe.items.len == 0) {
                 // every MoE layer but the last (a nudge after it has no gradient to read), its neurons as loaded
                 for (0..c.layers - 1) |l| if (c.kinds[l] == .moe) try p.moe.append(p.gpa, l);
@@ -241,7 +241,7 @@ pub fn Pocket(comptime T: type) type {
 
         /// The open fact's neurons back to zero and free, and the earlier neurons it fitted again as they were.
         pub fn undo(p: *Self, t: *T, host: anytype) !void {
-            const d = t.b.m.config.hidden;
+            const d = t.config().hidden;
             p.learned.shrinkRetainingCapacity(p.learned_before);
             p.pos.shrinkRetainingCapacity(p.pos_before);
             var i = p.taken.items.len;
@@ -263,7 +263,7 @@ pub fn Pocket(comptime T: type) type {
         }
 
         pub fn upload(p: *Self, t: *T, host: anytype, slot: usize) !void {
-            const n = neurons * t.b.m.config.hidden;
+            const n = neurons * t.config().hidden;
             try host.pocket(p.moe.items[slot], p.up.items[slot * n ..][0..n], p.down.items[slot * n ..][0..n], p.used.items[slot]);
         }
 
@@ -331,7 +331,7 @@ pub fn Pocket(comptime T: type) type {
         /// then the other answers its subject neurons fire on found, and earlier neurons that fire on its questions
         /// fitted again.
         fn fitAll(p: *Self, t: *T, host: anytype) !bool {
-            const c = t.b.m.config;
+            const c = t.config();
             const d = c.hidden;
             const n = p.slots();
             const m = p.labels.items.len;
@@ -443,7 +443,7 @@ pub fn Pocket(comptime T: type) type {
         /// before kept for an undo. A subject neuron of a fact about the same subject is left as it is: what it knows of
         /// that subject may come up here, and this fact's outputs are fitted with it firing.
         fn quiet(p: *Self, t: *T, host: anytype) !void {
-            const d = t.b.m.config.hidden;
+            const d = t.config().hidden;
             const n = p.slots();
             for (p.learned.items[0..p.learned_before]) |e| {
                 if (e.key == .subject and std.mem.indexOfScalar(u32, p.subjects.items, e.subject) != null) continue;

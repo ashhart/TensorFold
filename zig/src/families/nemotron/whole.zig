@@ -65,16 +65,21 @@ pub fn begin(l: anytype, lesson: Lesson) !void {
     l.gpa.free(l.answers);
     l.answers = try std.mem.concat(l.gpa, Example, &.{ l.owned.train, l.owned.think });
     switch (l.method) {
-        .probe => {
+        .probe => if (comptime !editing(@TypeOf(l.*))) return error.EditsUnsupported else {
             try l.probe.begin(l.trainer.?, l.answers, l.owned.held);
             l.phase = .probe;
         },
         .pocket => try startPocket(l),
-        .edit => {
+        .edit => if (comptime !editing(@TypeOf(l.*))) return error.EditsUnsupported else {
             try openEmpty(l);
             try startEdit(l);
         },
     }
+}
+
+/// Whether learner type L has the editor and the probe beside the pocket (Metal's trainer reads keys and codes).
+fn editing(comptime L: type) bool {
+    return @FieldType(L, "edits") != void;
 }
 
 /// A further round of the open lesson: more of its neurons' outputs (an edit is solved once, so it only reports).
@@ -110,6 +115,7 @@ pub fn pocketOnce(l: anytype) !@import("learner.zig").Step {
 }
 
 pub fn probeOnce(l: anytype) !@import("learner.zig").Step {
+    if (comptime !editing(@TypeOf(l.*))) return error.EditsUnsupported;
     if (!try l.probe.step(l.trainer.?, l.keptLessons())) return .{ .done = false };
     l.phase = .idle;
     return .{ .done = true, .report = .{ .failed = "a probe: nothing was learned" } };
@@ -124,7 +130,7 @@ pub fn reroute(l: anytype) !@import("learner.zig").Step {
             try l.pockets.undo(l.trainer.?, hooks(l));
             try startPocket(l);
         },
-        else => {
+        else => if (comptime !editing(@TypeOf(l.*))) return error.EditsUnsupported else {
             l.trainer.?.sites.restore();
             try @TypeOf(l.*).Host.attach(l.b, l.trainer.?);
             try startEdit(l);
@@ -192,6 +198,7 @@ fn startEdit(l: anytype) !void {
 
 /// One unit of the edit; at its end, whether the held questions come back (a lesson that does not is never kept).
 pub fn editOnce(l: anytype) !@import("learner.zig").Step {
+    if (comptime !editing(@TypeOf(l.*))) return error.EditsUnsupported;
     const t = l.trainer.?;
     var acting = l.keptLessons();
     acting.set(t.sites.first() / adapters.block);
@@ -205,6 +212,7 @@ pub fn editOnce(l: anytype) !@import("learner.zig").Step {
 /// A kept edit into the model's own 4-bit codes, live and in its shards: its keys join every layer's history first
 /// (later edits keep its outputs), and its block closes once the codes hold it.
 pub fn foldOpen(l: anytype) !void {
+    if (comptime !editing(@TypeOf(l.*))) return;
     if (!(l.opened and l.kept_rounds > 0) or l.method != .edit) return;
     const H = @TypeOf(l.*).Host;
     const t = l.trainer.?;
