@@ -18,6 +18,13 @@ pub const Resident = struct {
         return .{ .set = set, .work = work };
     }
 
+    /// More buffers into the set (a slot's memory taken after load), requested resident with the rest.
+    pub fn add(r: *Resident, buffers: []const mtl.Buffer) void {
+        for (buffers) |b| r.set.add(b);
+        r.set.commit();
+        r.set.requestResidency();
+    }
+
     /// The idle keepalive's target: a tiny command buffer on `work` using the set; `r` must not move.
     pub fn target(r: *const Resident) mtl.keepalive.Target {
         return .{ .queue = r.work, .sets = @as(*const [1]mtl.ResidencySet, &r.set) };

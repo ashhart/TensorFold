@@ -30,6 +30,7 @@ pub const Runner = struct {
     owned: std.ArrayList(mtl.Buffer),
     taps: Taps,
     slots: u32,
+    ready: u32, // slots [0, ready) have their K/V rows; a later slot takes its own when first used (ensure)
     capacity: u32,
     active: ?[32]u8 = null,
     failed: bool = false,
@@ -41,7 +42,12 @@ pub const Runner = struct {
     current_attention: ?*const attn.Plan = null,
 
     pub fn init(a: std.mem.Allocator, m: *Model, slots: u32, capacity: u32) !Runner {
-        if (slots == 0 or slots > 8 or capacity == 0 or m.frame.capacity % 16 != 0) return error.BadRoundCapacity;
+        return initReady(a, m, slots, capacity, slots);
+    }
+
+    /// A runner of `slots` whose first `ready` take their K/V rows now, the rest when first used (ensure).
+    pub fn initReady(a: std.mem.Allocator, m: *Model, slots: u32, capacity: u32, ready: u32) !Runner {
+        if (slots == 0 or slots > 8 or capacity == 0 or m.frame.capacity % 16 != 0 or ready == 0 or ready > slots) return error.BadRoundCapacity;
         const linear_index = try a.alloc(u32, m.config.layers);
         errdefer a.free(linear_index);
         const attention_index = try a.alloc(u32, m.config.layers);
@@ -90,17 +96,42 @@ pub const Runner = struct {
             for (owned.items) |b| b.deinit();
             owned.deinit(a);
         }
-        const bytes = @as(usize, capacity) * m.config.kvDim() * 2;
-        for (caches) |*cache| {
-            const key = try allocation(a, m.device, &owned, bytes);
-            const value = try allocation(a, m.device, &owned, bytes);
-            cache.* = .{ .keys = .{ .buffer = key }, .values = .{ .buffer = value }, .capacity = capacity };
-        }
+        for (0..na) |layer| for (0..ready) |slot| {
+            caches[layer * slots + slot] = try slotCache(a, m, &owned, capacity);
+        };
         const offsets = try a.alloc(u32, slots);
         errdefer a.free(offsets);
         @memset(offsets, 0);
         const taps = try Taps.init(m.device, m.frame.capacity, @intCast(m.config.hidden));
-        return .{ .allocator = a, .model = m, .gdn = pool, .attention = attention, .scratch = scratch, .bindings = bindings, .caches = caches, .linear_index = linear_index, .attention_index = attention_index, .offsets = offsets, .owned = owned, .taps = taps, .slots = slots, .capacity = capacity };
+        return .{ .allocator = a, .model = m, .gdn = pool, .attention = attention, .scratch = scratch, .bindings = bindings, .caches = caches, .linear_index = linear_index, .attention_index = attention_index, .offsets = offsets, .owned = owned, .taps = taps, .slots = slots, .ready = ready, .capacity = capacity };
+    }
+
+    /// One slot's K/V rows across the attention layers.
+    pub fn slotBytes(r: *const Runner) usize {
+        return r.caches.len / r.slots * 2 * @as(usize, r.capacity) * r.model.config.kvDim() * 2;
+    }
+
+    /// Slot `slot`'s K/V rows (the next unready slot, as free slots are taken lowest first); its new buffers.
+    pub fn ensure(r: *Runner, slot: u32) ![]const mtl.Buffer {
+        if (slot < r.ready) return &.{};
+        if (slot != r.ready) return error.SlotOutOfOrder;
+        const first = r.owned.items.len;
+        errdefer {
+            for (r.owned.items[first..]) |b| b.deinit();
+            r.owned.shrinkRetainingCapacity(first);
+        }
+        const layers = r.caches.len / r.slots;
+        for (0..layers) |layer| r.caches[layer * r.slots + slot] = try slotCache(r.allocator, r.model, &r.owned, r.capacity);
+        r.ready += 1;
+        return r.owned.items[first..];
+    }
+
+    /// The K/V buffers of the ready slots (for a residency set).
+    pub fn readyBuffers(r: *const Runner, a: std.mem.Allocator, out: *std.ArrayList(mtl.Buffer)) !void {
+        for (0..r.caches.len / r.slots) |layer| for (0..r.ready) |slot| {
+            const c = r.caches[layer * r.slots + slot];
+            try out.appendSlice(a, &.{ c.keys.buffer, c.values.buffer });
+        };
     }
 
     pub fn deinit(r: *Runner) void {
@@ -141,7 +172,7 @@ pub const Runner = struct {
 
     fn verifyImpl(r: *Runner, round: *const Round, head: forward.Head, accepted: bool) !void {
         if (r.failed or r.active != null or round.ids.len > r.model.frame.capacity) return error.RoundNotReady;
-        for (round.slots, round.windows) |slot, window| if (slot >= r.slots or r.offsets[slot] != window.start) return error.CachePositionDiffers;
+        for (round.slots, round.windows) |slot, window| if (slot >= r.ready or r.offsets[slot] != window.start) return error.CachePositionDiffers;
         const paths = try r.allocator.alloc([]const u32, round.windows.len);
         defer r.allocator.free(paths);
         @memset(paths, &.{});
@@ -268,7 +299,7 @@ pub const Runner = struct {
     }
 
     pub fn reset(r: *Runner, slot: u32) !void {
-        if (r.failed or r.active != null or slot >= r.slots) return error.RoundNotReady;
+        if (r.failed or r.active != null or slot >= r.ready) return error.RoundNotReady;
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const cb = r.model.queue.commandBuffer();
@@ -333,6 +364,13 @@ pub const Runner = struct {
         try r.taps.record(r.model.glue, e, layer, hidden, rows);
     }
 };
+
+fn slotCache(a: std.mem.Allocator, m: *Model, owned: *std.ArrayList(mtl.Buffer), capacity: u32) !attn.Cache {
+    const bytes = @as(usize, capacity) * m.config.kvDim() * 2;
+    const key = try allocation(a, m.device, owned, bytes);
+    const value = try allocation(a, m.device, owned, bytes);
+    return .{ .keys = .{ .buffer = key }, .values = .{ .buffer = value }, .capacity = capacity };
+}
 
 fn allocation(a: std.mem.Allocator, device: mtl.Device, owned: *std.ArrayList(mtl.Buffer), bytes: usize) !mtl.Buffer {
     const b = try device.buffer(bytes, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);

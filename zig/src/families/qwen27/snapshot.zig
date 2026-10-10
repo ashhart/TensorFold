@@ -12,6 +12,7 @@ const ROW = 256 * 2; // a key or value row of one head (bf16)
 pub const Ring = @import("tap_ring.zig").Ring;
 
 fn parts(r: *const Runner, slot: u32, ring: ?Ring, at: u32, list: *std.ArrayList(Part), a: std.mem.Allocator) !void {
+    if (slot >= r.ready) return error.SlotNotReady;
     for (0..r.gdn.budget.layers) |layer| for ([_]bool{ true, false }) |recurrent| {
         const span = try r.gdn.committedSpan(layer, slot, recurrent);
         try list.append(a, .{ .buffer = span.buffer, .offset = span.offset, .len = span.bytes });
