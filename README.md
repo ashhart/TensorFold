@@ -81,7 +81,9 @@ Every accepted draft must equal the token the same native engine would produce w
 A resumed request must equal fresh execution, and each concurrent stream must equal its solo run.
 The comparison fixes the checkpoint, backend, settings and runtime.
 Different quantizations and different backends can produce different outputs.
-Flash Next and Qwen3.8-27B run one active reply per engine; Nemotron, GLM and the 2B model use shared lane rounds.
+Flash Next on Metal uses shared target rounds with an explicit `--parallel N` above one on a single Mac.
+Its default `auto`, `--parallel 1` and two-Mac speed-up mode serve one active reply; MTP heads remain serial.
+On Metal, Qwen3.8-27B runs one active reply per engine; Nemotron, GLM and the 2B model use shared lane rounds.
 
 ## Models on disk
 

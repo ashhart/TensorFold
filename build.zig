@@ -240,6 +240,14 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     }) });
     b.installArtifact(reuse);
     b.step("tf-flashnext-reuse", "Flash Next prompt reuse against fresh prompt passes: replies at every depth and kept states' bytes").dependOn(&b.addInstallArtifact(reuse, .{}).step);
+    const batch = b.addExecutable(.{ .name = "tf-flashnext-batch", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/flashnext_batch.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } },
+    }) });
+    b.step("tf-flashnext-batch", "Flash Next shared rounds against fresh legacy replies with prompt admission and cancellation").dependOn(&b.addInstallArtifact(batch, .{}).step);
     return exe;
 }
 
