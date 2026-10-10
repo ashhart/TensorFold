@@ -40,6 +40,7 @@ pub const LaneHost = struct {
     lone: ?api.Lone = null, // the backend's driver for a lone greedy stream; null: every stream in the lane core
     lone_job: ?*Job = null, // the job that driver holds now
     cache: ?*pc.Store = null, // kept prompt states (engine thread only); the backend restores and saves them
+    decoded_rows: bool = false, // the backend prefills Request.decode_spans with decoded rows' arithmetic, cache or not
     memory: ?api.MemorySource = null, // the backend's memory counts; null: Engine.memory reports none
     explain: ?api.Explain = null, // the backend's words for a request it refuses; null: the error's name
     learner: ?api.Learner = null, // the family's Sliding Weights learner; null: learn requests are refused
@@ -71,7 +72,7 @@ pub const LaneHost = struct {
         fn kept(ptr: *anyopaque, s: *lanes.Stream, at: u32) void {
             const job: *Job = @ptrCast(@alignCast(ptr));
             job.reported(); // before a keep can evict the entry the pass restored
-            if (job.host.cache) |store| _ = store.keep(job.request.prompt, at, s, job.request.chunks, &.{});
+            if (job.host.cache) |store| _ = store.keep(job.request.prompt, at, s, job.request.chunks, job.host.spans(job.request));
         }
 
         /// Report a restored prefix or its failed copy; an untouched prefix remains kept.
@@ -340,7 +341,7 @@ pub const LaneHost = struct {
         const r = job.request;
         var reuse: lanes.stream.Reuse = .{};
         // the entry stays alive until the backend restores it: nothing keeps between here and this stream's own pass
-        if (h.cache) |store| if (store.lookupRewind(h.gpa, r.prompt, r.history_len, r.rewind_len, r.shared_prefixes, r.chunks, &.{})) |l| {
+        if (h.cache) |store| if (store.lookupRewind(h.gpa, r.prompt, r.history_len, r.rewind_len, r.shared_prefixes, r.chunks, h.spans(r))) |l| {
             job.entry = l.entry;
             job.kept0 = store.counts.kept;
             job.marks = l.marks;
@@ -366,6 +367,7 @@ pub const LaneHost = struct {
             .history_len = r.history_len,
             .shared_prefixes = r.shared_prefixes,
             .reuse = reuse,
+            .decode_spans = h.spans(r),
         }) catch {
             job.proposer.deinit();
             return h.drop(job, "out of memory");
@@ -373,6 +375,7 @@ pub const LaneHost = struct {
         job.started = true;
         const began = std.Io.Clock.awake.now(h.io).toNanoseconds();
         job.began = began;
+        if (r.max_tokens == 0 and h.info_.warm_turns) return h.warmPass(job, began);
         if (h.loneFits(job)) return h.runLone(job, began);
         if (h.core.fills()) {
             h.filling.append(h.gpa, job) catch return h.drop(job, "out of memory");
@@ -419,7 +422,28 @@ pub const LaneHost = struct {
         emit(job, .{ .prefilled = job.stream.cached });
     }
 
-    /// An idle backend driver takes a lone drafted request, sampled when supported; never one with logprobs.
+    /// A request's decoded prompt rows, for a backend that keeps their bits (`decoded_rows`); otherwise none.
+    fn spans(h: *const LaneHost, r: *const Request) []const [2]u32 {
+        return if (h.decoded_rows) r.decode_spans else &.{};
+    }
+
+    /// A prompt-only pass on a `warm_turns` engine: the backend prefills, the cache keeps where it ends, the lane frees.
+    fn warmPass(h: *LaneHost, job: *Job, began: i96) bool {
+        const be = h.core.backend;
+        be.prefill(&job.stream) catch |e| {
+            if (e != error.Cancelled) return h.drop(job, h.words(e));
+            be.release(&job.stream);
+            return h.cancel(job);
+        };
+        h.prefilled(job, began);
+        if (h.cache) |store| _ = store.keep(job.request.prompt, @intCast(job.request.prompt.len), &job.stream, job.request.chunks, h.spans(job.request));
+        be.release(&job.stream);
+        h.remove(job);
+        h.finish(job, .length, "");
+        return true;
+    }
+
+        /// An idle backend driver takes a lone drafted request, sampled when supported; never one with logprobs.
     fn loneFits(h: *LaneHost, job: *Job) bool {
         const r = job.request;
         const lone = h.lone orelse return false;
