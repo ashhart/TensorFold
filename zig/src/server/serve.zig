@@ -73,6 +73,8 @@ pub const Setup = struct {
     started: i96 = 0,
     /// Called once the socket listens, with its port (tests read it).
     on_listen: ?*const fn (port: u16) void = null,
+    /// The checkpoint family's own chat rules (family.zig), or null.
+    family: ?@import("family.zig").Family = null,
 };
 
 fn env(s: Setup, name: []const u8) ?[]const u8 {
@@ -119,6 +121,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .seed_salt = salt,
         .request_log = env(s, "TENSORFOLD_REQUEST_LOG"),
         .dashboard = args.dashboard,
+        .family = s.family,
         .compact_at = if (args.compact_auto) .{ .auto = {} } else if (args.compact_fraction) |f| .{ .fraction = f } else null,
         .compact_keep = args.compact_keep,
         .compact_memory = args.compact_memory,
@@ -156,6 +159,8 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         s.served,                                                   args.host,                                                                                   port,   shownSampling(a, s.sampling),
         if (args.no_drafts or srv.info.plain_only) "off" else "on", if (window > 0) std.fmt.bufPrint(&window_text, "{d}", .{window}) catch "?" else "unlimited", loaded,
     });
+    if (greedy(s.sampling))
+        log.line("WARNING: default sampling is greedy (temperature <= 0) - a client that omits `temperature` decodes greedily, which on a long agentic turn can loop in reasoning and return empty content", .{});
     if (args.thinking and std.mem.indexOf(u8, s.text.templateSource(), "enable_thinking") != null)
         log.line("thinking on (the chat template's default): replies reason in reasoning_content before the answer in content, and max_tokens counts both. --no-thinking turns it off; a request can send chat_template_kwargs {{\"enable_thinking\": false}}", .{});
     if (srv.cortheon) |c| log.line("cortheon on: chat requests get Cortheon's reasoning program, web research before building, and cortheon_search/cortheon_fetch run here ({s}); a request can send \"cortheon\": false", .{c.engine});
@@ -178,6 +183,17 @@ fn resolve(io: std.Io, host: []const u8, port: u16) ?std.Io.net.IpAddress {
     if (std.Io.net.IpAddress.parse(host, port)) |ip| return ip else |_| {}
     if (std.ascii.eqlIgnoreCase(host, "localhost")) return .{ .ip4 = .loopback(port) };
     return std.Io.net.IpAddress.resolve(io, host, port) catch null;
+}
+
+/// Whether requests that name no temperature decode greedily (the startup warning).
+fn greedy(sampling: ?json.Value) bool {
+    const v = sampling orelse return true;
+    const t = v.get("temperature") orelse return true;
+    return switch (t) {
+        .float => |f| f <= 0,
+        .int => |i| (std.fmt.parseFloat(f64, i) catch 0) <= 0,
+        else => true,
+    };
 }
 
 /// The serving line's sampling: greedy, or each default as ``name value``.
