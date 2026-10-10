@@ -147,7 +147,8 @@ pub const Engine = struct {
                 s.next = held;
             };
         }
-        _ = try s.commit(e.gpa, &.{token});
+        if (s.logprobs != null) return error.LogprobsUnsupported; // another driver's prompt pass gives no first row
+        _ = try s.commit(e.gpa, &.{token}, &.{});
         s.pending = token;
         if (s.finished) return e.release(s);
         try e.live.append(e.gpa, s);
