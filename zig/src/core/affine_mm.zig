@@ -94,7 +94,7 @@ pub fn gatherTo(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: a
 /// rows are x's rows order[i] / topk (x's group sums in `sums`, by those rows); gate and up are [experts, n, k].
 pub fn gatherGlu(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, gate: anytype, up: anytype, offsets: anytype, order: anytype, act: anytype, rows: u32, experts: u32, topk: u32, limit: f32) void {
     std.debug.assert(gate.n % 32 == 0 and gate.k % 64 == 0 and gate.n == up.n and gate.k == up.k);
-    const bm: u32 = if (rows / experts < 64) 32 else 64;
+    const bm: u32 = if (rows / experts < 200) 32 else 64; // 32-row tiles waste less of each expert's last tile until ~200 rows
     e.setPipeline(p[if (bm == 64) 7 else 6]);
     bind(e, 0, x);
     bind(e, 1, gate.w);
