@@ -1,4 +1,4 @@
-//! NVFP4 projections against the Python bytes (oracle/nvfp4.py): the repack, lane and prompt rows, direct and via qlinear.
+//! NVFP4 against the Python bytes (oracle/nvfp4.py): the repack, then lane and prompt rows, direct and via qlinear.
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");
