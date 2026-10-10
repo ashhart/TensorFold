@@ -41,8 +41,9 @@ fn words(_: ?*anyopaque, err: anyerror) ?[]const u8 {
 }
 
 /// Streams whose caches fit beside the weights under the load limit, at most `want` (`fixed`: all of them or none).
+/// Pooled, a stream past the first adds its KDA states only: the MLA caches are the engine's, shared.
 fn fit(eng: *const ge.Engine, want: u32, fixed: bool) !u32 {
-    const per = glm.state.stateBytes(&eng.c, eng.s.cap, true) + 64 * 1024;
+    const per = glm.state.stateBytes(&eng.c, if (glm.pool.on(eng)) 0 else eng.s.cap, true) + 64 * 1024;
     const used = eng.w.bytes + eng.arena.bytes;
     const limit = eng.limit.bytes;
     const room: u64 = if (limit > used) (limit - used) / per else 0;
@@ -103,7 +104,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     h.wall = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.cfg, h.back.backend(), h.wall.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "glm-zig", .lanes = n, .context_window = window, .prefill_step = eng.chunk_rows, .greedy_only = true });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "glm-zig", .lanes = n, .context_window = window, .prefill_step = eng.chunk_rows, .greedy_only = true, .admit = if (h.slots.pool != null) .{ .ctx = &h.back, .fits = glm.backend.Backend.fits } else null });
     h.cache = null;
     const budget = cacheBudget(eng, cache_gib);
     if (!eng.followsPeer() and budget > 0) {
