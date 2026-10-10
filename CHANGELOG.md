@@ -21,6 +21,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - The tokenizer gives a token's exact bytes when its decoder chain is token-local, a building block for constrained decoding (#532). Thanks to @akol1.
 - Safetensors headers keep rank-five tensor shapes, such as a vision patch embedding's temporal convolution, and refuse rank six (#533). Thanks to @akol1.
 - A backend-neutral EXL3 trellis reference decoder with an oracle fixture, which decodes rectangular layers at the right row stride; no model loads EXL3 on the native engine yet (#496). Thanks to @akol1.
+- Flash Next on two Macs bounds each wait for the other rank: a handoff that never arrives fails the request after 10 seconds instead of spinning forever, and a failure or stop on either side ends the wait (#512). Thanks to @321sssrt-bit.
 
 ## 1.0.4
 
