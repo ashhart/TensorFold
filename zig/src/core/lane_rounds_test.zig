@@ -91,14 +91,15 @@ test "a round planner: prompts in pieces between the other streams' decode round
                 else => {},
             }
         }
-        fn wait(b: *@This()) Reason {
-            while (true) {
+        fn wait(b: *@This()) !Reason {
+            for (0..10_000) |_| { // 10 s
                 b.mutex.lockUncancelable(std.testing.io);
                 const d = b.done;
                 b.mutex.unlock(std.testing.io);
                 if (d) |r| return r;
                 std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
             }
+            return error.Timeout;
         }
     };
     const p1 = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 5, 3 };
@@ -110,11 +111,15 @@ test "a round planner: prompts in pieces between the other streams' decode round
     const r1: Request = .{ .prompt = &p1, .max_tokens = 40 };
     const r2: Request = .{ .prompt = &p2, .max_tokens = 12 };
     const e = host.engine();
-    try host.start();
+    // both queued before the first round, so the second waits whatever the scheduler does
     try e.submit(1, &r1, .{ .ctx = &b1, .event = Box.event });
     try e.submit(2, &r2, .{ .ctx = &b2, .event = Box.event });
-    try std.testing.expectEqual(Reason.length, b1.wait());
-    try std.testing.expectEqual(Reason.length, b2.wait());
+    try host.start();
+    {
+        errdefer host.stop(); // a timed-out wait stops the host thread before this frame goes
+        try std.testing.expectEqual(Reason.length, try b1.wait());
+        try std.testing.expectEqual(Reason.length, try b2.wait());
+    }
     host.stop();
     // the replies are the whole-prompt path's tokens
     for ([_]struct { p: []const u32, b: *Box }{ .{ .p = &p1, .b = &b1 }, .{ .p = &p2, .b = &b2 } }) |c| {
