@@ -42,6 +42,7 @@ test "HIP copies fills and mixed-width kernel arguments on real GPU" {
     try std.testing.expectError(error.Invalid, b.upload(b.len, &.{1}));
     var arch_buffer: [256]u8 = undefined;
     const arch = try @import("device_arch.zig").query(&r, 0, &arch_buffer);
+    try std.testing.expect(@import("caps.zig").Caps.of(arch) != null);
     const images = [_]@import("code_object.zig").Image{.{ .arch = codeobject.arch, .bytes = &codeobject.bytes }};
     try std.testing.expectError(error.UnsupportedArchitecture, Module.loadForArchitecture(&r, &images, "gfx9999"));
     var m = try Module.loadForArchitecture(&r, &images, arch);

@@ -1,6 +1,7 @@
 //! HIP: mock-backed admission tests join `zig build test`; GPU builds and runs are opt-in steps (-Dhipcc, -Dhip-include, -Dhip-arch).
 
 const std = @import("std");
+const caps = @import("../src/hip/caps.zig");
 
 /// hip-host-test (part of `test`), hip-gpu-build and hip-gpu-test, hip-affine-build and hip-affine-test.
 pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Build.Step) void {
@@ -29,9 +30,8 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
     const hip_include = b.option([]const u8, "hip-include", "HIP header directory") orelse
         b.pathResolve(&.{ std.fs.path.dirname(hipcc_resolved) orelse "/opt/rocm/bin", "..", "include" });
     const hip_arch = b.option([]const u8, "hip-arch", "Exact GPU architecture for the probe code object") orelse "gfx1151";
-    for ([_][]const u8{ "gfx1030", "gfx1100", "gfx1150", "gfx1151", "gfx1201" }) |supported| {
-        if (std.mem.eql(u8, hip_arch, supported)) break;
-    } else @panic("unsupported HIP probe architecture");
+    if (caps.Caps.of(hip_arch) == null or std.mem.indexOfScalar(u8, hip_arch, ':') != null)
+        std.debug.panic("-Dhip-arch {s} is not an exact name in the caps table (zig/src/hip/caps.zig)", .{hip_arch});
     const hip_compile = b.addSystemCommand(&.{ hipcc, "--genco", b.fmt("--offload-arch={s}", .{hip_arch}), "-O2", "-ffp-contract=off" });
     hip_compile.addFileArg(b.path("zig/kernels/hip/runtime_tests.hip"));
     hip_compile.addArg("-o");
