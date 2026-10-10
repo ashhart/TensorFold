@@ -17,8 +17,9 @@ fn envOn(name: [*:0]const u8) bool {
 }
 /// The start flag's word: every setting that changes the exchange count, the window layout or the draft counts, which
 /// must be the same on every rank (a mismatch would hang or misread slots): the ring, max_rows, G53_OWN_FRONT, G53_KSPLIT
-/// (+_MIN), G53_LSPLIT (+_FROM, _OWNER), G53_COPY and G53_COPY_ROW.
-fn cfgWord(max_rows: usize) u64 {
+/// (+_MIN), G53_LSPLIT (+_FROM, _OWNER), G53_COPY and G53_COPY_ROW; and (non-zero only) the Living Weights tag: the
+/// loaded sidecar and --slide, which every rank must share (a different change on one rank = different replies).
+fn cfgWord(max_rows: usize, lw_tag: u64) u64 {
     var h = std.hash.Wyhash.init(0x6735_3363_6667);
     h.update(std.mem.asBytes(&ring_sets));
     h.update(std.mem.asBytes(&max_rows)); // sets every slot offset a peer writes to
@@ -33,6 +34,7 @@ fn cfgWord(max_rows: usize) u64 {
         h.update(v);
         h.update(&.{0}); // a separator: values cannot run into each other
     }
+    if (lw_tag != 0) h.update(std.mem.asBytes(&lw_tag)); // absent: the word every older build sends
     return h.final() | 1;
 }
 
@@ -71,10 +73,10 @@ pub const Exchange = struct {
         return std.mem.alignForward(usize, n, fabric.mcdma.alignment);
     }
 
-    pub fn create(gpa: std.mem.Allocator, device: mtl.Device, library: [:0]const u8, rank: u32, ranks: u32, links: []const fabric.mcdma.Link, max_rows: usize) !*Exchange {
+    pub fn create(gpa: std.mem.Allocator, device: mtl.Device, library: [:0]const u8, rank: u32, ranks: u32, links: []const fabric.mcdma.Link, max_rows: usize, lw_tag: u64) !*Exchange {
         const ring = ring_sets;
         const wb = windowBytes(ranks, max_rows, ring);
-        const cfg = cfgWord(max_rows);
+        const cfg = cfgWord(max_rows, lw_tag);
         const slot_bytes = slotBytes(max_rows);
         const ep = try fabric.mcdma.Endpoint.create(gpa, library, .{ .rank = rank, .ranks = ranks, .window_bytes = wb, .staging_bytes = std.mem.alignForward(usize, slot_bytes + (1 << 20), 16384), .links = links, .timeout_ns = 60 * std.time.ns_per_s, .connect_timeout_ns = 300 * std.time.ns_per_s });
         errdefer ep.deinit();
@@ -354,6 +356,51 @@ pub const Exchange = struct {
         if (self_p) |p| servePeer(x, p, first, last, &failed);
         for (threads) |t| if (t) |th| th.join();
         if (failed.load(.acquire)) return error.PeerDown;
+    }
+
+    /// Living Weights learning (host math, no GPU work in flight on this exchange): `data` summed over every rank in
+    /// slot order, written back, the same bits on every rank. Exchange numbers seq.. are used (seq advanced), in pieces
+    /// a slot holds; the transport, flags and ring are the GPU path's, the post and the wait done by this thread.
+    pub fn hostSum(x: *Exchange, seq: *u32, data: []f32) !void {
+        const per = (x.slot_bytes - room) / 4;
+        var at: usize = 0;
+        while (at < data.len) {
+            const n = @min(per, data.len - at);
+            const s = seq.*;
+            const len = n * 4;
+            const base = x.slots_at + (s % x.ring) * x.ranks * x.slot_bytes + room;
+            const mine = base + x.rank * x.slot_bytes;
+            @memcpy(x.win[mine..][0..len], std.mem.sliceAsBytes(data[at..][0..n]));
+            if (len >= zero_copy_min) for (0..x.ranks - 1) |j| @memcpy(x.win[x.sendRegion(s, j)..][0..len], x.win[mine..][0..len]);
+            x.kinds[s % x.kinds.len] = .partial;
+            x.lens[s % x.lens.len] = len;
+            const sync: *u32 = @ptrCast(@alignCast(x.win.ptr + x.sync_at));
+            // this rank (GPU or host) already posted exchange s: a reused number would read stale slots (refuse it)
+            if (@as(i32, @bitCast(@atomicLoad(u32, sync, .acquire) -% (s + 1))) >= 0) return error.ExchangeSeqReused;
+            @atomicStore(u32, sync, s + 1, .release);
+            try x.serve(s, s + 1);
+            const t0 = mtl.clock.seconds();
+            for (0..x.ranks) |p| if (p != x.rank) {
+                while (@as(i32, @bitCast(@as(u32, @truncate(x.flagOf(p))) -% (s + 1))) < 0) {
+                    std.atomic.spinLoopHint();
+                    if (mtl.clock.seconds() - t0 > 120) {
+                        std.debug.print("glm53 STALL rank {d}: host sum {d} waiting for rank {d}\n", .{ x.rank, s, p });
+                        return error.ExchangeGaveUp;
+                    }
+                }
+            };
+            const out = data[at..][0..n];
+            for (0..x.ranks) |p| {
+                const src: [*]align(1) const f32 = @ptrCast(x.win.ptr + base + p * x.slot_bytes);
+                if (p == 0) {
+                    for (out, 0..) |*o, i| o.* = src[i];
+                } else for (out, 0..) |*o, i| {
+                    o.* += src[i];
+                }
+            }
+            seq.* = s + 1;
+            at += n;
+        }
     }
 
     pub fn gaveUp(x: *Exchange) u32 {

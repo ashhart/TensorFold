@@ -2281,3 +2281,39 @@ template [[host_name("g53_qmm2_gateup_b8_m32")]] [[kernel]] void g53_qmm2_gateup
     C[a.D + i] = float(Wh[i]) * (Hn[i] * ih);
   }
 }
+
+// ---------------------------------------------------------------- Living Weights, layer 77's shared expert
+// The committed change y += 10 (x a^T) b, one canonical slice at a time (its intermediate columns [c0, c0 + K) of a),
+// added into the slice's shared-expert output before moe_combine: the partial-sum exchange carries it, no new
+// collective. Fixed-order fma sums, so one Mac with N slices and N Macs leave the same bits.
+struct LwArgs {
+  int K;     // the slice's columns
+  int xr;    // floats between x rows
+  int c0;    // the slice's first column in a (a row is 2048 floats)
+  int R;     // ranks in use
+  int rows;
+};
+// u[r, q] = sum_k x[r, k] a[q, c0 + k]
+[[kernel]] void g53_lw_in(const device float* X [[buffer(0)]], const device float* A [[buffer(1)]], device float* U [[buffer(2)]],
+                          constant LwArgs& a [[buffer(3)]], uint2 t [[thread_position_in_grid]]) {
+  const int q = int(t.x);
+  const int r = int(t.y);
+  if (q >= a.R || r >= a.rows) return;
+  const device float* x = X + long(r) * a.xr;
+  const device float* w = A + long(q) * 2048 + a.c0;
+  float s = 0.0f;
+  for (int k = 0; k < a.K; ++k) s = metal::fma(x[k], w[k], s);
+  U[long(r) * a.R + q] = s;
+}
+// ys[r, o] = fma(10, sum_q u[r, q] b[q, o], ys[r, o])
+[[kernel]] void g53_lw_out(const device float* U [[buffer(0)]], const device float* B [[buffer(1)]], device float* Y [[buffer(2)]],
+                           constant LwArgs& a [[buffer(3)]], uint2 t [[thread_position_in_grid]]) {
+  const int o = int(t.x);
+  const int r = int(t.y);
+  if (o >= 6144 || r >= a.rows) return;
+  const device float* u = U + long(r) * a.R;
+  float s = 0.0f;
+  for (int q = 0; q < a.R; ++q) s = metal::fma(u[q], B[long(q) * 6144 + o], s);
+  device float* y = Y + long(r) * 6144 + o;
+  *y = metal::fma(10.0f, s, *y);
+}

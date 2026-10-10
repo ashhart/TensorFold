@@ -7,6 +7,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const m = @import("model.zig");
 const Exchange = @import("exchange.zig").Exchange;
+const Lw = @import("lw_gpu.zig").Lw;
 const Ref = m.Ref;
 
 const source = @embedFile("kernels.metal");
@@ -23,6 +24,9 @@ const TArgs = extern struct { p0: i32, top: i32, cap: i32 };
 const AArgs = extern struct { p0: i32, sparse: i32, scale: f32, heads: i32, keys: i32, qp_stride: i32 };
 const MArgs = extern struct { experts: i32, top: i32, scale: f32, direct: i32 };
 const CbArgs = extern struct { D: i32, top: i32 };
+const LwArgs = extern struct { K: i32, xr: i32, c0: i32, R: i32, rows: i32 };
+/// The Living Weights site: layer 77 (the last trunk layer), its shared expert's down projection.
+pub const lw_layer: usize = m.LAYERS - 1;
 
 /// Launch classes, for a profile that times each alone.
 pub const Op = enum { q_a, kv_a, q_norm, kv_store, q_b, rope_q, embed_q, idx_k, idx_q, idx_scores, idx_topk, attn, unembed, o_proj, sum, router, gateup, gateup_sh, down, down_sh, combine };
@@ -89,6 +93,8 @@ pub const Pipes = struct {
     pick_rows: mtl.Pipeline,
     mtp_cat: mtl.Pipeline,
     touch: mtl.Pipeline,
+    lw_in: mtl.Pipeline,
+    lw_out: mtl.Pipeline,
 
     fn init(device: mtl.Device, kv16: bool) !Pipes {
         const src = if (kv16) "#define KVT half\n" ++ source else source;
@@ -313,6 +319,7 @@ pub const Engine = struct {
     vals_own: Ref = undefined, // G53_LSPLIT non-owner: this rank's heads' values [rows][16][256] from the layer's owner
     ls_ranks: usize = 1,
     conc: bool = false, // G53_CONC=1: concurrent encoder, barriers only at data dependencies (same kernels, same bits)
+    lw: ?*Lw = null, // Living Weights: the committed change at layer 77's shared expert (null: the stock forward)
     // instrumentation: per-round CPU encode, GPU, and wall (commit->wait) seconds, summed per job
     st_enc: f64 = 0,
     st_gpu: f64 = 0,
@@ -1002,6 +1009,10 @@ pub const Engine = struct {
                     if (e.on(.down_sh)) e.qmv(enc, x.sh_down, act_sh.at(k0 * 4), e.ys, .{ .n = m.D, .k0 = k0, .K = K, .items = R, .xr = ir, .yr = m.D });
                 }
                 e.bar(enc);
+                if (one and i == lw_layer) {
+                    const s = e.plan.slices[0];
+                    e.lwApply(enc, act_sh.at((s.moe[0] - lo) * 4), ir, s, R);
+                }
                 if (e.on(.router) and R != 1) {
                     enc.setPipeline(e.p.sort_picks);
                     bind(enc, 0, .{ e.ids, e.se, e.sr, e.ss });
@@ -1017,6 +1028,7 @@ pub const Engine = struct {
                     const K = s.moe[1] - s.moe[0];
                     if (e.on(.down)) e.qmv(enc, x.down, e.act.at(k0 * 4), e.y, .{ .n = m.D, .k0 = k0, .K = K, .items = P, .xr = ir, .yr = m.D, .ids = e.se, .xids = e.ss, .yids = e.ss, .seg = e.seg, .stacked = true });
                     if (!one and e.on(.down_sh)) e.qmv(enc, x.sh_down, act_sh.at(k0 * 4), e.ys, .{ .n = m.D, .k0 = k0, .K = K, .items = R, .xr = ir, .yr = m.D });
+                    if (!one and i == lw_layer) e.lwApply(enc, act_sh.at(k0 * 4), ir, s, R);
                     e.bar(enc);
                     if (e.on(.combine)) {
                         enc.setPipeline(e.p.moe_combine);
@@ -1029,6 +1041,26 @@ pub const Engine = struct {
                 }
             },
         }
+    }
+
+    /// Living Weights: slice `s`'s part of the committed change, 10 (x_s a_s^T) b, added into ys (its shared expert's output)
+    /// before moe_combine sums ys into the slice's slot. x = the slice's site input (silu(gate) up, fp32, rows `xr` apart).
+    /// Nothing is encoded without a change (no Lw, off, or no served ranks): the stock launches exactly.
+    fn lwApply(e: *Engine, enc: mtl.ComputeEncoder, x: Ref, xr: usize, s: m.Share, rows: usize) void {
+        const l = e.lw orelse return;
+        if (!l.on or l.served == 0 or !e.on(.down_sh)) return;
+        const a: LwArgs = .{ .K = @intCast(s.moe[1] - s.moe[0]), .xr = @intCast(xr), .c0 = @intCast(s.moe[0]), .R = @intCast(l.served), .rows = @intCast(rows) };
+        e.bar(enc); // sh_down's ys written
+        enc.setPipeline(e.p.lw_in);
+        bind(enc, 0, .{ x, l.a, l.u });
+        enc.setValue(a, 3);
+        enc.dispatchThreads(sz(l.served, rows, 1), sz(@min(l.served, 256), 1, 1));
+        e.bar(enc);
+        enc.setPipeline(e.p.lw_out);
+        bind(enc, 0, .{ l.u, l.b, e.ys });
+        enc.setValue(a, 3);
+        enc.dispatchThreads(sz(m.D, rows, 1), sz(256, 1, 1));
+        e.bar(enc);
     }
 
     /// Encode a block of `rows` rows at positions p0.. (their tokens in `tok`); `dump_at`: append the block's last row

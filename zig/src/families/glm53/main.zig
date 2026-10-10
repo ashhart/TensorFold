@@ -9,6 +9,8 @@ const m = @import("model.zig");
 const fwd = @import("forward.zig");
 const Exchange = @import("exchange.zig").Exchange;
 const CopyIndex = @import("copy_index.zig").CopyIndex;
+const Lw = @import("lw_gpu.zig").Lw;
+const lw_train = @import("lw_train.zig");
 
 const Settings = struct {
     model: []const u8,
@@ -41,6 +43,10 @@ const Settings = struct {
     mtp_cost: []const f64 = &.{}, // a round's relative cost at k = 0, 1, 2, .. drafts (the same on every rank)
     mtp_force: []const u8 = "", // generate tests: "oracle" (drafts = mtp_ref's next tokens) or "garbage" (always wrong)
     mtp_ref: []const u32 = &.{}, // generate tests: the plain run's tokens
+    // Living Weights at layers.77's shared expert: the sidecar file (living_weights.safetensors in a COPY's
+    // folder or any path; absent file = no change yet). Empty: no change and no Lw at all (the stock engine, bit for bit).
+    lw: []const u8 = "",
+    slide: bool = false, // serve: take learn lines (needs lw; learning writes only this sidecar, never the KV or weights)
 };
 
 /// Drafts a round, decided the same way on every rank (acceptance counts and a fixed cost table, no clocks): the depth
@@ -287,14 +293,23 @@ pub fn main(init: std.process.Init) !void {
     }
     std.debug.print("glm53: loaded {d:.1} GB in {d:.1} s (heads {any}, moe rows {any}, vocab {any})\n", .{ @as(f64, @floatFromInt(w.bytes)) / 1e9, mtl.clock.seconds() - t0, share.heads, share.moe, share.vocab });
 
+    var lw: ?*Lw = null;
+    if (s.slide and s.lw.len == 0) {
+        std.debug.print("glm53: \"slide\" needs \"lw\" (the sidecar path to learn into)\n", .{});
+        return error.SlideNeedsLw;
+    }
+    if (s.lw.len > 0 and s.profile == 0) lw = try Lw.open(gpa, device, s.model, s.lw, s.rows);
+    var lw_tag: u64 = 0; // every rank must load the same change and agree on learning (0 = none: the old start word)
+    if (lw) |l| lw_tag = std.hash.Wyhash.hash(l.tag, if (s.slide) "slide" else "serve") | 1;
     var xc: ?*Exchange = null;
     if (s.ranks > 1 and s.profile == 0) {
         const lib = try a.dupeSentinel(u8, s.library, 0);
-        xc = try Exchange.create(gpa, device, lib, s.rank, s.ranks, s.links, s.rows);
+        xc = try Exchange.create(gpa, device, lib, s.rank, s.ranks, s.links, s.rows, lw_tag);
         std.debug.print("glm53: rank {d} connected to {d} peers\n", .{ s.rank, s.links.len });
     }
     defer if (xc) |x| x.deinit(gpa);
     const e = try fwd.Engine.init(gpa, device, w, plan, xc, s.cap, s.rows, s.kv16);
+    e.lw = lw;
     const nl = s.layers[1] - s.layers[0];
     if (s.profile > 0) {
         for ([_]u32{ s.profile_pos, 2300 }) |pp| {
@@ -314,7 +329,9 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (s.serve > 0) {
-        return serveJobs(e, s, a);
+        var host: lw_train.Host = .{ .gpa = gpa, .device = device, .serve = e, .lw = undefined, .kv16 = s.kv16 };
+        if (lw) |l| host.lw = l;
+        return serveJobs(e, s, a, if (s.slide) &host else null);
     }
 
     if (s.oracle.len > 0) {
@@ -512,7 +529,45 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("tokens {any}\nhash {x}\n", .{ out.items, std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(out.items)) });
 }
 
-const Job = struct { p0: u32 = 0, tokens: []const u32 = &.{}, max: u32 = 256, stop: []const u32 = &.{}, save: []const u8 = "", load: []const u8 = "", n: u32 = 0, cancel: bool = false, stop_at: u32 = 0 };
+const Job = struct { p0: u32 = 0, tokens: []const u32 = &.{}, max: u32 = 256, stop: []const u32 = &.{}, save: []const u8 = "", load: []const u8 = "", n: u32 = 0, cancel: bool = false, stop_at: u32 = 0, learn: ?LearnJob = null, learn_step: u32 = 0, learn_abort: bool = false };
+
+/// Living Weights: a lesson for every rank's learner ({"learn": {...}}), then {"learn_step": k} lines run up to k bounded
+/// units each (one capture, one Adam step, one held check...) so a chat request waits at most one unit; rank 0 sends
+/// {"learned": ...} / {"failed": ...} events, every rank a done line with the change's state.
+const LearnJob = struct {
+    train: []const ExampleJ = &.{},
+    held: []const ExampleJ = &.{},
+    near: []const ExampleJ = &.{},
+    keep: []const ExampleJ = &.{},
+    undo: bool = false,
+    steps: u32 = 400,
+    more: bool = false,
+    commit: bool = false,
+    save: bool = false,
+};
+const ExampleJ = struct { ids: []const u32, start: u32 };
+
+/// The learner and the lesson it reads (owned across lines).
+const Slide = struct {
+    host: *lw_train.Host,
+    learner: lw_train.Learner,
+    arena: std.heap.ArenaAllocator,
+    busy: bool = false,
+
+    fn examples(al: std.mem.Allocator, xs: []const ExampleJ) ![]const lw_train.Example {
+        const out = try al.alloc(lw_train.Example, xs.len);
+        for (xs, out) |x, *o| o.* = .{ .ids = try al.dupe(u32, x.ids), .start = x.start };
+        return out;
+    }
+
+    fn begin(sl: *Slide, j: LearnJob) !void {
+        if (sl.busy) sl.learner.abort();
+        _ = sl.arena.reset(.retain_capacity);
+        const al = sl.arena.allocator();
+        try sl.learner.begin(.{ .train = try examples(al, j.train), .held = try examples(al, j.held), .near = try examples(al, j.near), .keep = try examples(al, j.keep), .undo = j.undo, .steps = j.steps, .more = j.more, .commit = j.commit, .save = j.save });
+        sl.busy = true;
+    }
+};
 
 /// Tokens past the request a rank still generates after rank 0 takes a cancel: room for the front door to relay
 /// {"stop_at": k} to the other ranks while they are still short of k (they run within a step of rank 0).
@@ -623,6 +678,48 @@ fn snapshot(e: *fwd.Engine, path: []const u8, n: u32, write: bool) !usize {
     return off;
 }
 
+/// One learn line on every rank (lockstep: every rank gets the same lines in the same order).
+fn serveLearn(c: c_int, sl: *Slide, job: Job, rank: u32) void {
+    var line: [512]u8 = undefined;
+    if (job.learn_abort) {
+        sl.learner.abort();
+        sl.busy = false;
+        _ = sendAll(c, std.fmt.bufPrint(&line, "{{\"done\":true,\"aborted\":true}}\n", .{}) catch return);
+        return;
+    }
+    if (job.learn) |lj| {
+        sl.begin(lj) catch |err| {
+            sl.busy = false;
+            _ = sendAll(c, std.fmt.bufPrint(&line, "{{\"error\":\"learn {t}\"}}\n", .{err}) catch return);
+            return;
+        };
+        if (job.learn_step == 0) {
+            _ = sendAll(c, std.fmt.bufPrint(&line, "{{\"done\":true,\"begun\":true}}\n", .{}) catch return);
+            return;
+        }
+    }
+    const t0 = mtl.clock.seconds();
+    var units: u32 = 0;
+    var changed = false;
+    var finished = !sl.busy;
+    while (!finished and units < @max(job.learn_step, 1)) : (units += 1) {
+        const st = sl.learner.step();
+        changed = changed or st.changed;
+        if (st.report) |r| if (rank == 0) switch (r) {
+            .learned => |x| _ = sendAll(c, std.fmt.bufPrint(&line, "{{\"learned\":{{\"recalled\":{},\"steps\":{d},\"loss\":{d:.5}}}}}\n", .{ x.recalled, x.steps, x.loss }) catch return),
+            .failed => |msg| _ = sendAll(c, std.fmt.bufPrint(&line, "{{\"failed\":\"{s}\"}}\n", .{msg}) catch return),
+        };
+        if (st.done) {
+            finished = true;
+            sl.busy = false;
+        }
+    }
+    const lw = sl.host.lw;
+    const rk: usize = if (sl.learner.trainer) |t| t.sites.rank else lw.served;
+    // logits_changed: the served change moved (drop pending picks; the trunk KV stays valid)
+    _ = sendAll(c, std.fmt.bufPrint(&line, "{{\"done\":true,\"learn_done\":{},\"logits_changed\":{},\"kv_changed\":false,\"rank\":{d},\"served\":{d},\"units\":{d},\"s\":{d:.3}}}\n", .{ finished, changed, rk, lw.served, units, mtl.clock.seconds() - t0 }) catch return);
+}
+
 fn sendAll(fd: c_int, bytes: []const u8) bool {
     var done: usize = 0;
     while (done < bytes.len) {
@@ -636,7 +733,9 @@ fn sendAll(fd: c_int, bytes: []const u8) bool {
 /// Jobs over TCP, one JSON line each: {"p0": first position (the KV caches hold every position before it), "tokens":
 /// [...], "max": n, "stop": [...]}. Every rank runs every job in lockstep (the exchanges keep them together); rank 0
 /// answers a line per token {"t": id} and then {"done": ...}; other ranks answer only the done line.
-fn serveJobs(e: *fwd.Engine, s: Settings, a: std.mem.Allocator) !void {
+fn serveJobs(e: *fwd.Engine, s: Settings, a: std.mem.Allocator, lw_host: ?*lw_train.Host) !void {
+    var slide: ?Slide = null;
+    if (lw_host) |h| slide = .{ .host = h, .learner = lw_train.Learner.init(h.gpa, h), .arena = std.heap.ArenaAllocator.init(h.gpa) };
     const fd = std.c.socket(std.c.AF.INET, std.c.SOCK.STREAM, 0);
     if (fd < 0) return error.Socket;
     var one: c_int = 1;
@@ -677,6 +776,14 @@ fn serveJobs(e: *fwd.Engine, s: Settings, a: std.mem.Allocator) !void {
             have -= nl + 1;
             if (isStopLine(job)) continue; // a cancel for a job that already ended: nothing to answer
             var line: [256]u8 = undefined;
+            if (job.learn != null or job.learn_step > 0 or job.learn_abort) {
+                const sl = if (slide) |*x| x else {
+                    _ = sendAll(c, "{\"error\":\"learning is off (settings: slide + lw)\"}\n");
+                    continue;
+                };
+                serveLearn(c, sl, job, s.rank);
+                continue;
+            }
             if (job.save.len > 0 or job.load.len > 0) {
                 const t0 = mtl.clock.seconds();
                 if (job.load.len > 0) known.clearRetainingCapacity();
