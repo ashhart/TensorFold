@@ -279,7 +279,7 @@ const Builder = struct {
             const b = try self.buffer(rows * p);
             const src: [*]const u8 = x.buffer.contents() + x.offset;
             for (0..rows) |r| @memcpy(b.contents()[r * p ..][0..p], src[r * w ..][0..p]);
-            o.* = .{ .buffer = b, .offset = 0, .bytes = rows * p, .dtype = x.dtype, .shape = .{ rows, p / x.dtype.size(), 1, 1 }, .rank = 2 };
+            o.* = .{ .buffer = b, .offset = 0, .bytes = rows * p, .dtype = x.dtype, .shape = .{ rows, p / x.dtype.size(), 1, 1, 1 }, .rank = 2 };
         }
         return out;
     }
