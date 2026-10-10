@@ -22,6 +22,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
     });
     hip_test_module.addOptions("hip_fixtures", hip_fixtures);
     hip_test_module.addImport("hip_kernels", b.createModule(.{ .root_source_file = b.addWriteFiles().add("kernels.zig", stub) }));
+    hip_test_module.addImport("core", coreModule(b, b.graph.host));
     const hip_tests = b.addTest(.{ .root_module = hip_test_module });
     const run_hip_tests = b.addRunArtifact(hip_tests);
     test_step.dependOn(&run_hip_tests.step);
@@ -70,21 +71,29 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
     kernel_module.addIncludePath(.{ .cwd_relative = hip_include });
     kernel_module.addCSourceFile(.{ .file = b.path("zig/src/hip/device_arch.c"), .flags = &.{"-D__HIP_PLATFORM_AMD__"} });
     kernel_module.addImport("hip_kernels", objects);
+    kernel_module.addImport("core", coreModule(b, target));
     const kernel_test = b.addTest(.{ .root_module = kernel_module });
     b.step("hip-kernel-build", "Compile the model-free kernels and their GPU tests without running them").dependOn(&kernel_test.step);
     b.step("hip-kernel-test", "Every model-free kernel against its host reference on the GPU").dependOn(&b.addRunArtifact(kernel_test).step);
 }
 
 /// The model-free kernels' source groups, in zig/src/hip/kernels.zig's Group order.
-const groups = [_][]const u8{ "ops/ops.hip", "ops/act.hip", "attention/attention.hip", "recurrence/gated_delta.hip", "attention/prefill.hip", "recurrence/gdn_prefill.hip", "decode/decode.hip", "decode/plan.hip" };
+const groups = [_][]const u8{ "ops/ops.hip", "ops/act.hip", "attention/attention.hip", "recurrence/gated_delta.hip", "attention/prefill.hip", "recurrence/gdn_prefill.hip", "decode/decode.hip", "decode/plan.hip", "tiles/dot2_tiles.hip", "tiles/dot2.hip" };
 
 /// What the group sources include, so an edit to one rebuilds them.
-const headers = [_][]const u8{ "attention/attention_fa.hip", "decode/pages.hpp", "decode/plan.hpp", "ops/attention.hpp", "ops/common.hpp", "ops/draw.hpp", "ops/elementwise.hpp", "ops/linear.hpp", "ops/moe.hpp", "ops/norms.hpp", "ops/rope.hpp" };
+const headers = [_][]const u8{
+    "attention/attention_fa.hip", "decode/pages.hpp",    "decode/plan.hpp",       "ops/attention.hpp",    "ops/common.hpp",
+    "ops/draw.hpp",               "ops/elementwise.hpp", "ops/linear.hpp",        "ops/moe.hpp",          "ops/norms.hpp",
+    "ops/rope.hpp",               "common/arch.hpp",     "common/dot2.hpp",       "common/vec.hpp",       "common/wmma.hpp",
+    "quant/act.hpp",              "quant/mlx.hpp",       "quant/mlx_decoder.hpp", "quant/mlx_pieces.hpp", "quant/mlx_tiles.hpp",
+    "tiles/dot2.hpp",             "tiles/epilogue.hpp",  "tiles/gemm.hpp",        "tiles/gemm_kp.hpp",    "tiles/matrix_gemm.hpp",
+    "tiles/plan.hpp",             "tiles/stream.hpp",
+};
 
 /// The flags of the kernels' first build: no contraction, wave32 on RDNA, C++20.
 const flags = [_][]const u8{ "-D__HIP_PLATFORM_AMD__=1", "-DUSE_ROCM=1", "-DHIPBLAS_V2", "-fPIC", "-DCUDA_HAS_FP16=1", "-DHIP_ENABLE_WARP_SYNC_BUILTINS=1", "-std=c++20", "-fno-gpu-rdc", "-mno-wavefrontsize64", "-ffp-contract=off" };
 
-const stub = "pub const arch = \"\";\npub const images: [8][]align(8) const u8 = @splat(&.{});\n";
+const stub = "pub const arch = \"\";\npub const images: [10][]align(8) const u8 = @splat(&.{});\n";
 
 /// One code object a group for `arch`, built with the caps table's instruction switches, as the `hip_kernels` module.
 fn kernelObjects(b: *std.Build, hipcc: []const u8, hipcc_resolved: []const u8, device_lib: ?[]const u8, arch: []const u8) *std.Build.Module {
@@ -101,6 +110,7 @@ fn kernelObjects(b: *std.Build, hipcc: []const u8, hipcc_resolved: []const u8, d
         run.addArg(b.fmt("-DTF_DOT2_BF16={d}", .{@intFromBool(c.dot2_bf16)}));
         run.addArg(b.fmt("-DTF_SDOT4={d}", .{@intFromBool(c.sdot4)}));
         run.addArg(b.fmt("-DTF_SDOT8={d}", .{@intFromBool(c.sdot8)}));
+        run.addArg(b.fmt("-DTF_MATRIX={d}", .{@intFromBool(c.matrix != .none)}));
         run.addArg(b.fmt("--rocm-path={s}", .{root}));
         run.addArg(b.fmt("--rocm-device-lib-path={s}", .{device_lib orelse b.fmt("{s}/lib/llvm/amdgcn/bitcode", .{root})}));
         run.addArg(b.fmt("--offload-arch={s}", .{arch}));
@@ -114,4 +124,11 @@ fn kernelObjects(b: *std.Build, hipcc: []const u8, hipcc_resolved: []const u8, d
         refs = b.fmt("{s}&g{d}, ", .{ refs, i });
     }
     return b.createModule(.{ .root_source_file = files.add("kernels.zig", b.fmt("pub const arch = \"{s}\";\n{s}pub const images = [_][]align(8) const u8{{ {s}}};\n", .{ arch, decls, refs })) });
+}
+
+/// The backend-neutral core (checkpoint formats, the kernel registry), as the other backends import it.
+fn coreModule(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Module {
+    const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .link_libc = true });
+    core.addImport("tokenizer", b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .link_libc = true }));
+    return core;
 }

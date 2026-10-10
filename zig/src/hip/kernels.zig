@@ -2,7 +2,7 @@
 const objects = @import("hip_kernels");
 
 /// The source groups of zig/kernels/hip, in the order the build embeds them.
-pub const Group = enum { ops, act, attention, gated_delta, prefill, gdn_prefill, decode, plan };
+pub const Group = enum { ops, act, attention, gated_delta, prefill, gdn_prefill, decode, plan, affine_tiles, affine_dot2 };
 pub const group_count = @typeInfo(Group).@"enum".field_names.len;
 
 /// The architecture the objects were built for; the loader takes them only on that device.

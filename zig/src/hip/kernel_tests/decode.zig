@@ -133,3 +133,171 @@ test "the merged residual-and-norm tails are no further from float64 than twice 
     }
     try tails(t, &rng, 1, 4096, 0);
 }
+
+const affine = @import("../launches/affine.zig");
+const ref = @import("affine/reference.zig");
+
+/// A random packed product on the host and the device: (n, k) at `bits` and `group`, bf16 tables, `experts` stacked.
+const Matrix = struct {
+    n: usize,
+    k: usize,
+    bits: usize,
+    group: usize,
+    words: []u32,
+    scale: []u16,
+    bias: []u16,
+    dev: [3]@import("../memory.zig").DeviceBuffer,
+
+    fn init(t: *Rig, rng: *rig.Rng, n: usize, k: usize, bits: usize, group_size: usize, experts: usize) !Matrix {
+        var m: Matrix = .{ .n = n, .k = k, .bits = bits, .group = group_size, .words = undefined, .scale = undefined, .bias = undefined, .dev = undefined };
+        m.words = try gpa.alloc(u32, experts * n * k * bits / 32);
+        m.scale = try gpa.alloc(u16, experts * n * k / group_size);
+        m.bias = try gpa.alloc(u16, m.scale.len);
+        for (m.words) |*w| w.* = @truncate(rng.next() >> 16);
+        for (m.scale) |*v| v.* = rig.bf16Bits((rng.unit() + 1.0) / 16.0);
+        for (m.bias) |*v| v.* = rig.bf16Bits(rng.unit() / 2.0);
+        m.dev = .{ try t.upload(m.words), try t.upload(m.scale), try t.upload(m.bias) };
+        return m;
+    }
+
+    fn deinit(m: *Matrix) void {
+        gpa.free(m.words);
+        gpa.free(m.scale);
+        gpa.free(m.bias);
+        for (&m.dev) |*b| b.free();
+    }
+
+    fn problem(m: Matrix, t: *const Rig, x: []const u16) ref.Problem {
+        return .{ .fp16 = !t.bf16, .n = m.n, .k = m.k, .bits = m.bits, .group = m.group, .x = x, .words = m.words, .scale = m.scale, .bias = m.bias };
+    }
+
+    fn arg(m: Matrix, t: *const Rig, x: u64, rows: usize, out: u64) affine.Arg {
+        return .{
+            .x = x,
+            .words = at(m.dev[0]),
+            .scale = .{ .p = at(m.dev[1]), .kind = 1 },
+            .bias = .{ .p = at(m.dev[2]), .kind = 1 },
+            .out = out,
+            .m = @intCast(rows),
+            .n = @intCast(m.n),
+            .k = @intCast(m.k),
+            .bits = @intCast(m.bits),
+            .group = @intCast(m.group),
+            .fp16 = @intFromBool(!t.bf16),
+        };
+    }
+};
+
+/// Up to four products sharing x in one launch against one launch each: no further from float64 than twice that.
+fn group(t: *Rig, rng: *rig.Rng, rows: usize, ns: []const usize, k: usize, bits: usize, group_size: usize) !void {
+    const hx = try gpa.alloc(u16, rows * k);
+    defer gpa.free(hx);
+    for (hx) |*v| v.* = t.bits(rng.unit());
+    var x = try t.upload(hx);
+    defer x.free();
+    var ms: [4]Matrix = undefined;
+    var outs: [2][4]@import("../memory.zig").DeviceBuffer = undefined;
+    for (ns, 0..) |n, i| {
+        ms[i] = try Matrix.init(t, rng, n, k, bits, group_size, 1);
+        for (&outs) |*o| o[i] = try t.alloc(rows * n * 2);
+    }
+    defer for (ns, 0..) |_, i| {
+        ms[i].deinit();
+        for (&outs) |*o| o[i].free();
+    };
+    const kernels = &t.on.affine;
+    for (ms[0..ns.len], 0..) |m, i| try kernels.run(&t.r, m.arg(t, at(x), rows, at(outs[0][i])), 4, t.stream.handle, 0, 1, true);
+    var sides: [4]affine.Side = undefined;
+    for (ms[0..ns.len], 0..) |m, i| sides[i] = .{ .words = at(m.dev[0]), .scale = at(m.dev[1]), .bias = at(m.dev[2]), .n = @intCast(m.n), .out = at(outs[1][i]) };
+    try kernels.groupRun(&t.r, ms[0].arg(t, at(x), rows, 0), sides[0..ns.len], true, t.stream.handle);
+    try t.stream.synchronize();
+    var errs: [2]f64 = .{ 0, 0 };
+    for (0..2) |v| for (ns, 0..) |n, i| {
+        const got = try rig.download(u16, outs[v][i]);
+        defer gpa.free(got);
+        const prob = ms[i].problem(t, hx);
+        for (0..rows) |r| for (0..@min(n, 12)) |ci| {
+            const col = ci * (n - 1) / @max(@min(n, 12) - 1, 1);
+            const want = ref.reference(prob, r, 0, col);
+            errs[v] = @max(errs[v], @abs(t.value(got[r * n + col]) - want.y) / want.norm);
+        };
+    };
+    try std.testing.expect(errs[1] <= 2 * errs[0] + 1e-9);
+}
+
+/// A token's routed gate and up, then the activation, against one launch with the activation as epilogue.
+fn pair(t: *Rig, rng: *rig.Rng, rows: usize, width: usize, k: usize, bits: usize, group_size: usize) !void {
+    const experts = 64;
+    const slots = 9;
+    const pairs = rows * slots;
+    var m = try Matrix.init(t, rng, 2 * width, k, bits, group_size, experts);
+    defer m.deinit();
+    const hx = try gpa.alloc(u16, rows * k);
+    defer gpa.free(hx);
+    for (hx) |*v| v.* = t.bits(rng.unit());
+    var x = try t.upload(hx);
+    defer x.free();
+    // a token's pairs are its slots; one pair an item
+    const pick = try gpa.alloc(u32, pairs);
+    defer gpa.free(pick);
+    for (pick) |*e| e.* = @intCast(rng.next() % experts);
+    const items = try gpa.alloc(i32, pairs * 3);
+    defer gpa.free(items);
+    const members = try gpa.alloc(i32, pairs);
+    defer gpa.free(members);
+    for (0..pairs) |i| {
+        items[3 * i ..][0..3].* = .{ @intCast(pick[i]), @intCast(i), 1 };
+        members[i] = @intCast(i);
+    }
+    var dev_items = try t.upload(items);
+    defer dev_items.free();
+    var dev_members = try t.upload(members);
+    defer dev_members.free();
+    var both = try t.alloc(pairs * 2 * width * 4);
+    defer both.free();
+    var acts: [2]@import("../memory.zig").DeviceBuffer = .{ try t.alloc(pairs * width * 2), try t.alloc(pairs * width * 2) };
+    defer for (&acts) |*a| a.free();
+    const kernels = &t.on.affine;
+    var a = m.arg(t, at(x), rows, at(both));
+    a.route = .{ .items = at(dev_items), .members = at(dev_members), .x_div = slots };
+    try kernels.routedWith(&t.r, a, @intCast(pairs), t.stream.handle, .gemm);
+    try t.off.tf_moe_act(@ptrFromInt(at(both)), @ptrFromInt(at(acts[0])), t.kind(), @intCast(pairs), @intCast(width), 0, t.stream.handle);
+    a.out = 0;
+    a.out16 = at(acts[1]);
+    try std.testing.expect(try kernels.pairRun(&t.r, a, 0, @intCast(pairs), t.stream.handle));
+    try t.stream.synchronize();
+    var errs: [2]f64 = .{ 0, 0 };
+    const prob = m.problem(t, hx);
+    for (0..2) |v| {
+        const got = try rig.download(u16, acts[v]);
+        defer gpa.free(got);
+        for (0..pairs) |pi| for (0..12) |ci| {
+            const col = ci * (width - 1) / 11;
+            const g = ref.reference(prob, pi / slots, pick[pi], col);
+            const u = ref.reference(prob, pi / slots, pick[pi], col + width);
+            const want = g.y / (1.0 + @exp(-g.y)) * u.y;
+            errs[v] = @max(errs[v], @abs(t.value(got[pi * width + col]) - want) / @max(@abs(want), 0.01));
+        };
+    }
+    try std.testing.expect(errs[1] <= 2 * errs[0] + 1e-9);
+}
+
+test "products sharing x in one launch are no further from float64 than twice one launch each" {
+    const t = try Rig.open(1 << 20);
+    defer t.close();
+    var rng: rig.Rng = .{ .state = 0x9E3779B97F4A7C15 };
+    for ([_]usize{ 1, 2, 4, 8, 16 }) |rows| try group(t, &rng, rows, &.{ 8192, 4096, 32, 32 }, 2048, 4, 64);
+    try group(t, &rng, 1, &.{ 8192, 512, 512 }, 2048, 4, 64);
+    try group(t, &rng, 1, &.{ 12288, 12288 }, 4096, 6, 64);
+    try group(t, &rng, 4, &.{ 4096, 4096 }, 4096, 8, 128);
+    try group(t, &rng, 2, &.{ 1024, 96, 96 }, 2048, 3, 32);
+}
+
+test "the routed gate and up with its activation in one launch is no further from float64 than twice the two launches" {
+    const t = try Rig.open(1 << 20);
+    defer t.close();
+    var rng: rig.Rng = .{ .state = 0x9E3779B97F4A7C15 };
+    for ([_]usize{ 1, 2, 4 }) |rows| try pair(t, &rng, rows, 512, 2048, 4, 64);
+    try pair(t, &rng, 1, 768, 2048, 6, 64);
+    try pair(t, &rng, 1, 512, 2048, 4, 128);
+}

@@ -7,6 +7,8 @@ const launch = @import("launch.zig");
 const Module = @import("module.zig").Module;
 const Function = @import("module.zig").Function;
 const Stream = @import("stream.zig").Stream;
+const caps = @import("caps.zig");
+const affine = @import("launches/affine.zig");
 
 const util = @import("launches/util.zig");
 
@@ -78,6 +80,8 @@ pub const Launcher = struct {
     wide: bool,
     /// The DeltaNet prefill runs chunked (off keeps the one-token recurrence).
     chunked: bool,
+    /// The MLX affine products and the registry that picks their tiles.
+    affine: affine.Kernels,
 
     const PlanFns = struct {
         kv_write: Function,
@@ -126,7 +130,7 @@ pub const Launcher = struct {
     };
 
     /// Which kernels a run takes where two give the same bits; every one defaults on.
-    pub const Choices = struct { fuse: bool = true, wide: bool = true, chunked: bool = true };
+    pub const Choices = struct { fuse: bool = true, wide: bool = true, chunked: bool = true, products: affine.Choices = .{} };
 
     /// Loads the code objects on the current device and resolves every kernel the launchers use.
     pub fn load(r: *const runtime.Runtime, choices: Choices, images: [kernels.group_count][]align(8) const u8) Error!Launcher {
@@ -246,6 +250,10 @@ pub const Launcher = struct {
         };
         l.softmax_stats = try att.function("tf_softmax_stats");
         l.sum_partials = try att.function("tf_sum_partials");
+        const tiles = l.mods[@backingInt(kernels.Group.affine_tiles)];
+        const dot2 = l.mods[@backingInt(kernels.Group.affine_dot2)];
+        l.affine = try affine.Kernels.load(tiles, dot2, caps.Caps.of(kernels.arch) orelse return error.Invalid, choices.products);
+        try l.affine.fillByteLut(r, dot2);
         return l;
     }
 
@@ -304,6 +312,14 @@ pub const Launcher = struct {
     pub fn go(l: *const Launcher, f: Function, grid: Dim3, block: Dim3, shared: u32, s: S, args: *Args) Error!void {
         if (s == util.counting) return;
         try launch.launch(f, .{ .grid = grid, .block = block, .shared = shared }, Stream{ .r = l.r, .handle = s }, args);
+    }
+
+    pub fn tf_affine(l: *const Launcher, x: C, words: C, scale: C, bias: C, scale_kind: c_int, out: P, m: c_int, n: c_int, k: c_int, bits: c_int, group: c_int, schedule: c_int, fp16: c_int, s: S, partial: F, splits: c_int, out_half: c_int) Error!void {
+        try l.affine.run(l.r, .{ .x = ad(x), .words = ad(words), .scale = .{ .p = ad(scale), .kind = scale_kind }, .bias = .{ .p = ad(bias), .kind = scale_kind }, .out = ad(out), .m = m, .n = n, .k = k, .bits = bits, .group = group, .fp16 = fp16 }, schedule, s, ad(partial), splits, out_half != 0);
+    }
+
+    pub fn tf_affine_routed(l: *const Launcher, x: C, words: C, scale: C, bias: C, scale_kind: c_int, out: P, items: CI, count: c_int, members: CI, x_div: c_int, rows: c_int, n: c_int, k: c_int, bits: c_int, group: c_int, fp16: c_int, s: S) Error!void {
+        try l.affine.routed(l.r, .{ .x = ad(x), .words = ad(words), .scale = .{ .p = ad(scale), .kind = scale_kind }, .bias = .{ .p = ad(bias), .kind = scale_kind }, .out = ad(out), .m = rows, .n = n, .k = k, .bits = bits, .group = group, .fp16 = fp16, .route = .{ .items = ad(items), .members = ad(members), .x_div = x_div } }, count, s);
     }
 
     /// The 256-thread, one-element-a-thread launch of an ops.hip kernel over `n` elements.
