@@ -140,6 +140,8 @@ pub const Info = struct {
     plain_only: bool = false,
     /// The immutable retained-prefix plan applied at startup, not a process memory limit or current cache occupancy.
     prompt_cache_plan: ?PromptCachePlan = null,
+    /// The engine decodes greedily only: the server refuses a request with a temperature before admitting it.
+    greedy_only: bool = false,
 };
 
 pub const PromptCachePlan = struct {
