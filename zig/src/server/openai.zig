@@ -39,6 +39,8 @@ pub const Out = struct {
         event: *const fn (ctx: *anyopaque, payload: ?Value) error{Closed}!void,
         /// A whole JSON reply.
         reply: *const fn (ctx: *anyopaque, status: u16, payload: Value) void,
+        /// Bytes that keep a silent stream alive (an SSE comment, or the API's ping); null: none.
+        keepalive: ?*const fn (ctx: *anyopaque) error{Closed}!void = null,
     };
 };
 
@@ -63,7 +65,7 @@ const ClientOut = struct {
     a: Allocator,
 
     fn out(c: *ClientOut) Out {
-        return .{ .ctx = c, .vt = &.{ .open = open, .event = event, .reply = reply } };
+        return .{ .ctx = c, .vt = &.{ .open = open, .event = event, .reply = reply, .keepalive = keepalive } };
     }
 
     fn open(ctx: *anyopaque) error{Closed}!void {
@@ -80,15 +82,32 @@ const ClientOut = struct {
         const c: *ClientOut = @ptrCast(@alignCast(ctx));
         routes.sendValue(c.conn, c.a, status, payload);
     }
+
+    fn keepalive(ctx: *anyopaque) error{Closed}!void {
+        const c: *ClientOut = @ptrCast(@alignCast(ctx));
+        return sse.comment(c.conn);
+    }
 };
 
 /// Whether the client has gone, read between rounds (Python's socket_cancellation).
 pub const Gone = struct {
     conn: *Conn,
     on: bool = true,
+    /// The stream a keepalive goes to once it has been silent `every_ns` (0: never)
+    out: ?Out = null,
+    every_ns: i96 = 0,
     pub fn check(g: Gone) bool {
         if (!g.on) return false;
         return g.conn.peerGone();
+    }
+
+    /// A keepalive if the stream has been silent long enough; a failed write means the client left.
+    pub fn beat(g: Gone, silent_ns: i96) error{Closed}!bool {
+        const o = g.out orelse return false;
+        const send = o.vt.keepalive orelse return false;
+        if (g.every_ns <= 0 or silent_ns < g.every_ns) return false;
+        try send(o.ctx);
+        return true;
     }
 };
 

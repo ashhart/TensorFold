@@ -10,7 +10,7 @@ const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
 /// Slow enough to stop mid-reply: "@short" ends after a dozen tokens, "@long" only when halted or cancelled.
-const Slow = struct {
+pub const Slow = struct {
     gpa: Allocator,
     io: std.Io,
     halted: std.atomic.Value(bool) = .init(false),
@@ -65,6 +65,15 @@ const Slow = struct {
         for (r.prompt, prompt) |t, *b| b.* = @truncate(t);
         const long = std.mem.indexOf(u8, prompt, "@long") != null;
         const word: []const u32 = if (long) &.{ ' ', 'l', 'a' } else &.{ ' ', 'o', 'k' };
+        const hang = std.mem.indexOf(u8, prompt, "@hang") != null;
+        const wait = std.mem.indexOf(u8, prompt, "@wait") != null;
+        // a long prefill: nothing for 800 ms ("@wait"), or nothing until stopped ("@hang")
+        var quiet: u32 = 0;
+        while (hang or (wait and quiet < 80)) : (quiet += 1) {
+            if (s.halted.load(.acquire)) return sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .failed, .message = s.reason } });
+            if (s.cancelled.load(.acquire) == id) return sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .cancelled } });
+            std.Io.sleep(s.io, .fromMilliseconds(10), .awake) catch {};
+        }
         sink.event(sink.ctx, id, &.{ .prefilled = 0 });
         var n: usize = 0;
         while (true) : (n += 1) {
@@ -93,7 +102,7 @@ const Slow = struct {
 };
 
 /// Bytes as tokens; a prompt renders as its messages' JSON, so the engine sees the client's marker.
-const TestText = struct {
+pub const TestText = struct {
     fn text(t: *@This()) model_text.Text {
         return .{ .ctx = t, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource } };
     }
@@ -135,16 +144,16 @@ const TestText = struct {
     }
 };
 
-var listen_port: std.atomic.Value(u16) = .init(0);
+pub var listen_port: std.atomic.Value(u16) = .init(0);
 
 fn onListen(port: u16) void {
     listen_port.store(port, .release);
 }
 
-const Reply = struct { status: u16, head: []const u8, body: []const u8 };
+pub const Reply = struct { status: u16, head: []const u8, body: []const u8 };
 
 /// One request on its own connection (closed by us after it), the whole response read.
-fn request(a: Allocator, io: std.Io, port: u16, method: []const u8, path: []const u8, body: []const u8) !Reply {
+pub fn request(a: Allocator, io: std.Io, port: u16, method: []const u8, path: []const u8, body: []const u8) !Reply {
     const addr: std.Io.net.IpAddress = .{ .ip4 = .loopback(port) };
     const stream = try addr.connect(io, .{ .mode = .stream });
     defer stream.close(io);
@@ -175,7 +184,7 @@ fn unchunk(a: Allocator, s: []const u8) ![]const u8 {
     return out.items;
 }
 
-const Background = struct {
+pub const Background = struct {
     a: Allocator,
     io: std.Io,
     port: u16,
@@ -191,11 +200,11 @@ const Background = struct {
     }
 };
 
-fn chatBody(a: Allocator, marker: []const u8, stream: bool) ![]const u8 {
+pub fn chatBody(a: Allocator, marker: []const u8, stream: bool) ![]const u8 {
     return std.fmt.allocPrint(a, "{{\"messages\":[{{\"role\":\"user\",\"content\":\"go {s}\"}}],\"stream\":{},\"max_tokens\":4000}}", .{ marker, stream });
 }
 
-const Served = struct {
+pub const Served = struct {
     code: u8 = 255,
     fn run(x: *Served, gpa: Allocator, io: std.Io, setup: serve.Setup) void {
         x.code = serve.run(gpa, io, .{ .host = "127.0.0.1", .port = 0 }, setup);
@@ -203,7 +212,7 @@ const Served = struct {
 };
 
 /// serve.run on its own thread with `drain_s`, the engine `slow`; the port once it listens.
-fn start(gpa: Allocator, io: std.Io, env: *std.process.Environ.Map, slow: *Slow, tt: *TestText, x: *Served) !std.Thread {
+pub fn start(gpa: Allocator, io: std.Io, env: *std.process.Environ.Map, slow: *Slow, tt: *TestText, x: *Served) !std.Thread {
     listen_port.store(0, .release);
     const t = try std.Thread.spawn(.{}, Served.run, .{ x, gpa, io, serve.Setup{
         .engine = slow.engine(),
@@ -217,7 +226,7 @@ fn start(gpa: Allocator, io: std.Io, env: *std.process.Environ.Map, slow: *Slow,
     return t;
 }
 
-fn waitActive(io: std.Io, slow: *Slow, n: u32) void {
+pub fn waitActive(io: std.Io, slow: *Slow, n: u32) void {
     while (slow.active.load(.acquire) < n) std.Io.sleep(io, .fromMilliseconds(2), .awake) catch {};
 }
 

@@ -76,6 +76,8 @@ pub const Generation = struct {
     streaming_done: bool = false,
     first_ns: ?i96 = null,
     last_ns: ?i96 = null,
+    /// when the stream last carried bytes (a keepalive goes out after a silence)
+    wrote_ns: ?i96 = null,
     reason: ?[]const u8 = null, // the server ended the reply (a stop string, the length) before the engine said so
     engine_done: bool = false,
     consumed: usize = 0,
@@ -192,6 +194,7 @@ pub const Generation = struct {
             g.cancel();
             return error.Cancelled;
         };
+        g.wrote_ns = nowNs(g.srv.io);
     }
 
     pub const cancel = chat.cancel; // in chat.zig with its doc
@@ -230,6 +233,16 @@ pub const Generation = struct {
             if (gone.check()) {
                 g.cancel();
                 return error.Cancelled;
+            }
+            if (chunk == null and @hasDecl(@TypeOf(gone), "beat")) {
+                // queueing and a long prefill send nothing: a client that times out a silent stream would leave
+                const now = nowNs(g.srv.io);
+                const since = g.wrote_ns orelse now;
+                if (g.wrote_ns == null) g.wrote_ns = now;
+                if (gone.beat(now - since) catch {
+                    g.cancel();
+                    return error.Cancelled;
+                }) g.wrote_ns = now;
             }
             const tokens = chunk orelse continue;
             // /health hears the tokens once they are read (a stop string they hold has cancelled the run by then)
