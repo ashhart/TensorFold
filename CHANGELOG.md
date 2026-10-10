@@ -2,6 +2,14 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## Unreleased
+
+- A CUDA request that leaves out `top_k` samples with 20, as 0.6.6's CUDA server did (#542, fixes #515). Thanks to @plotarmordev.
+- `/metrics` reports pinned host memory on CUDA as `tensorfold:pinned_memory_bytes` (#541, fixes #538), and counts prompt tokens restored from kept prompt states (Flash Next, GLM-5.3-Flash and the Qwen3.8-27B) as `prompt_tokens_cached_total`, repeated as vLLM's `prefix_cache_hits_total` and `prefix_cache_queries_total` (#531, fixes #530). Thanks to @GustavBlack and @juliankang4.
+- A request keeps its own copy of its API key's label when the key file is reloaded under it (#560), and the server frees its key store and request counters when it stops (#513). Thanks to @chaog992 and @CerebralCoding.
+- `zig build test` on Linux runs the HTTP server's unit tests, and `zig build test-server-cpu` runs them alone (#543). Thanks to @MiaAI-Lab.
+- `logprob.cu` compiles with nvcc 13.3 again (#539, fixes #535). Thanks to @GustavBlack.
+
 ## 1.0.4
 
 - `tensorfold serve --slide` refuses a model folder whose shards, index or config.json are links to data other files share, and says to serve a copy made with `cp -cRL` instead. A folder from `tensorfold pull` is one: its files link into the Hugging Face cache, so in 1.0.3 learning there would rewrite the cached original and every snapshot that shares it. A hard-linked copy is refused for the same reason; an APFS clone passes. [docs/living-weights.md](docs/living-weights.md) shows the copy.
