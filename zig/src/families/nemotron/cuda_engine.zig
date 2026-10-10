@@ -83,7 +83,7 @@ pub const Engine = struct {
     slots: u64 = 1 | (@as(u64, 1) << lesson_route.trainer_slot), // lesson latch slots in use: the own sequence's, the trainer's
     slot: u32 = 0, // the bound sequence's lesson latch slot
     decide: i64 = lesson_route.none, // the bound sequence's decision row
-    trace: bool = false, // TF_SLIDE_TRACE: each reply's lesson votes logged (dev)
+    trace: bool = false, // TF_SLIDE_TRACE: each reply's lesson scores logged (dev)
     bound: *state.Seq = undefined, // the sequence the calls act on
     head: ?*Head = null,
     load_seconds: f64 = 0,
@@ -325,7 +325,7 @@ pub const Engine = struct {
     fn serialChunks(e: *Engine, prompt: []const u32, dump: ?*Dump, head: ?*Head, cancel: ?Cancel) !void {
         var f = e.forward(dump);
         const shared = e.lessons();
-        if (shared) |ad| try e.trainOps().latch(ad.votes, ad.need, ad.latch, e.slot, false); // no lesson acts until it decides
+        if (shared) |ad| try e.trainOps().latch(ad.score, ad.need, ad.latch, e.slot, false); // no lesson acts until it decides
         var s: usize = 0;
         while (s < prompt.len) {
             if (Cancel.now(cancel)) return error.Cancelled;
@@ -341,7 +341,7 @@ pub const Engine = struct {
             try e.ops().upload(e.b.p_ids, std.mem.sliceAsBytes(host));
             try e.copied.record(e.stream);
             try f.chunk(@intCast(chunk.len), e.pos);
-            if (shared) |ad| if (f.route.decision(0) != null) try e.trainOps().latch(ad.votes, ad.need, ad.latch, e.slot, true);
+            if (shared) |ad| if (f.route.decision(0) != null) try e.trainOps().latch(ad.score, ad.need, ad.latch, e.slot, true);
             e.pos += @intCast(chunk.len);
             const known = @min(chunk.len, prompt.len - 1 - s);
             if (head) |h| if (known > 0) try h.absorb(e.b.p_hidden, prompt[s + 1 ..][0..known]);
@@ -359,22 +359,22 @@ pub const Engine = struct {
         return null;
     }
 
-    /// Dev trace (TF_SLIDE_TRACE): the bound sequence's votes at its decision row and the lessons acting on its reply.
+    /// Dev trace (TF_SLIDE_TRACE): the bound sequence's router scores at its decision row and the lessons acting on its reply.
     fn traceLessons(e: *const Engine) void {
         const ad = e.lessons() orelse return;
         if (e.decide == lesson_route.none) return;
-        var votes: [32]u32 = undefined;
+        var score: [32]f32 = undefined;
         var need: [32]f32 = undefined;
         var latch: [1]u32 = undefined;
         const o = e.ops();
-        o.download(std.mem.sliceAsBytes(&votes), ad.votes + e.slot * 32 * 4) catch return;
+        o.download(std.mem.sliceAsBytes(&score), ad.score + e.slot * 32 * 4) catch return;
         o.download(std.mem.sliceAsBytes(&need), ad.need) catch return;
         o.download(std.mem.sliceAsBytes(&latch), ad.latch + e.slot * 4) catch return;
         e.stream.synchronize() catch return;
         var line: [256]u8 = undefined;
         var w: std.Io.Writer = .fixed(&line);
-        for (0..ad.rank / 16) |b| w.print(" {d}/{d}", .{ votes[b], @as(u32, @intFromFloat(need[b])) }) catch break;
-        std.log.info("slide trace: decision row {d}: votes{s}; acting {b}", .{ e.decide, w.buffered(), latch[0] });
+        for (0..ad.rank / 16) |b| w.print(" {d:.2}/{d:.2}", .{ score[b], need[b] }) catch break;
+        std.log.info("slide trace: decision row {d}: scores{s}; acting {b}", .{ e.decide, w.buffered(), latch[0] });
     }
 
     fn trainOps(e: *const Engine) train_ops.Ops {

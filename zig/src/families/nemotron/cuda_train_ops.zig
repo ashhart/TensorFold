@@ -98,22 +98,22 @@ pub const Ops = struct {
         try o.go("tf_train_lora_in", .{ up(32 * rank, 256), u(rows), 1 }, 256, &a);
     }
 
-    /// Each row's blocks as `route` gives them: none before its decision row, votes on it, its latch after it.
-    pub fn gate(o: Ops, xa: u64, xn: u64, tau: u64, gates: u64, rows: usize, rank: usize, unit: f32, route: *const lesson_route.Route, latches: u64, votes: u64) !void {
+    /// Each row's blocks as `route` gives them: none before its decision row, router scores on it, its latch after it.
+    pub fn gate(o: Ops, xa: u64, xn: u64, tau: u64, gates: u64, rows: usize, rank: usize, unit: f32, route: *const lesson_route.Route, latches: u64, score: u64) !void {
         var a: cuda.Args = .{};
         for ([_]u64{ xa, xn, tau, gates }) |v| a.add(v);
         for ([_]usize{ rows, rank, rank / 16 }) |v| a.add(int(v));
         a.add(unit);
         a.add(route.*);
         a.add(latches);
-        a.add(votes);
+        a.add(score);
         try o.go("tf_train_gate", .{ 1, u(rows), 1 }, u(rank / 16), &a);
     }
 
     /// A sequence's lessons at its decision row (slot): cleared before the pass that holds it, latched (`set`) after.
-    pub fn latch(o: Ops, votes: u64, need: u64, latches: u64, slot: u32, set: bool) !void {
+    pub fn latch(o: Ops, score: u64, need: u64, latches: u64, slot: u32, set: bool) !void {
         var a: cuda.Args = .{};
-        for ([_]u64{ votes, need, latches }) |v| a.add(v);
+        for ([_]u64{ score, need, latches }) |v| a.add(v);
         a.add(@as(c_int, @intCast(slot)));
         a.add(@as(c_int, lesson_route.max_blocks));
         a.add(@as(c_int, @intFromBool(set)));
@@ -160,11 +160,16 @@ pub const Ops = struct {
         try o.go("tf_train_lora_dxa", .{ up(32 * rank, 256), u(rows), 1 }, 256, &a);
     }
 
-    /// dx += dxa a: the change's part of its site's input gradient.
-    pub fn loraDx(o: Ops, dxa: u64, a_: u64, dx: u64, rows: usize, in: usize, rank: usize) !void {
+    /// dx += dxa a: the change's part of its site's input gradient (x, rows `x_stride` apart, and xn for each block's
+    /// offset, which reads the row's size).
+    pub fn loraDx(o: Ops, dxa: u64, a_: u64, dx: u64, rows: usize, in: usize, rank: usize, x: u64, x_stride: usize, xn: u64, unit: f32) !void {
         var a: cuda.Args = .{};
         for ([_]u64{ dxa, a_, dx }) |v| a.add(v);
         for ([_]usize{ rows, in, rank }) |v| a.add(int(v));
+        a.add(x);
+        a.add(long(x_stride));
+        a.add(xn);
+        a.add(unit);
         try o.go("tf_train_lora_dx", .{ up(in, 256), u(rows), 1 }, 256, &a);
     }
 

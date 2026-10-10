@@ -134,7 +134,7 @@ pub const Trainer = struct {
         t.cache.len = 0;
         try b.drain();
         t.sites.latch.slice(u32, lesson_route.max_slots)[lesson_route.trainer_slot] = turn.bits;
-        @memset(t.votes(), 0);
+        @memset(t.score(), 0);
         const job: Job = .{ .t = t, .rows = rows, .start = start, .mode = mode, .route = lesson_route.trained(rows, turn), .decide = turn.decide };
         if (t.profile) |p| {
             var e: fwd.Enc = .{ .e = p.begin(), .prof = p };
@@ -156,9 +156,9 @@ pub const Trainer = struct {
         return out;
     }
 
-    /// Each block's votes at the last step's decision row: the layers whose router it cleared.
-    pub fn votes(t: *const Trainer) []u32 {
-        return t.sites.votes.slice(u32, lesson_route.max_slots * 32)[lesson_route.trainer_slot * 32 ..][0..32];
+    /// Each block's router score at the last step's decision row.
+    pub fn score(t: *const Trainer) []f32 {
+        return t.sites.score.slice(f32, lesson_route.max_slots * 32)[lesson_route.trainer_slot * 32 ..][0..32];
     }
 
     /// The probability the last step gave row r's target token.

@@ -68,7 +68,7 @@ pub fn loadLiving(gpa: std.mem.Allocator, io: std.Io, b: *backend.Metal) !void {
     const blocks = saved.ranks / adapters.block;
     for (sites.list) |*site| {
         const tau = site.tau.slice(f32, adapters.max_blocks);
-        @memset(tau, adapters.shut);
+        @memset(tau, 0);
         const got = (try saved.layer(c, site.layer)) orelse continue;
         @memcpy(site.a.slice(f32, adapters.max_rank * site.in)[0..got.a.len], got.a);
         @memcpy(site.b.slice(f32, adapters.max_rank * site.out)[0..got.b.len], got.b);

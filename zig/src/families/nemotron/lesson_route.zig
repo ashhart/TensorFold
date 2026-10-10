@@ -1,5 +1,6 @@
 //! How a pass's rows meet the lessons, for both backends' gate kernels (train.metal's and train.cu's Route): rows before
-//! a stream's decision row carry no lesson, the decision row votes, and rows after it carry the lessons that won there.
+//! a stream's decision row carry no lesson, the decision row scores each lesson's router, and rows after it carry the
+//! lessons that reached what they need there.
 const std = @import("std");
 
 pub const max_slots = 64; // latch slots: a stream's replay id (a sequence's on CUDA), the trainer's the last

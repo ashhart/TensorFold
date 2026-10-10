@@ -23,7 +23,6 @@ pub const candidates = shape.candidates;
 pub const hyper = shape.hyper;
 const a_norm = shape.a_norm;
 pub const unit = shape.unit;
-pub const shut = shape.shut;
 
 /// One layer's change: y += scale (x a^T) b after its output projection; a [max_rank, in], b [max_rank, out], f32.
 pub const Site = struct {
@@ -32,7 +31,7 @@ pub const Site = struct {
     out: usize,
     a: Buffer, // every block's input directions, fixed when its lesson begins
     b: Buffer, // every block's outputs; only the open block's still learn
-    tau: Buffer, // [max_blocks]: each block's router threshold here, the cosine its first direction must reach
+    tau: Buffer, // [max_blocks]: each block's router offset here, its share times the other prompts' mean score (0: unread)
     gb: Buffer, // [block, out]: the open block's gradient
     mb: Buffer, // [block, out]: its Adam moments
     vb: Buffer,
@@ -41,10 +40,10 @@ pub const Site = struct {
     seek: Buffer, // [candidates, in]: a sketch of the fact's inputs, then the candidate directions it frames
 
     pub fn adapter(s: *const Site, sites: *const Sites) wts.Adapter {
-        return .{ .a = s.a, .b = s.b, .tau = s.tau, .xa = sites.xa, .xn = sites.xn, .gates = sites.gates, .need = sites.need, .latch = sites.latch, .votes = sites.votes, .in = s.in, .out = s.out, .rank = sites.rank, .scale = scale, .unit = unit };
+        return .{ .a = s.a, .b = s.b, .tau = s.tau, .xa = sites.xa, .xn = sites.xn, .gates = sites.gates, .need = sites.need, .latch = sites.latch, .score = sites.score, .in = s.in, .out = s.out, .rank = sites.rank, .scale = scale, .unit = unit };
     }
 
-    /// Block k's gate.
+    /// Block k's router offset.
     pub fn gate(s: *const Site, k: usize) *f32 {
         return &s.tau.slice(f32, max_blocks)[k];
     }
@@ -56,9 +55,9 @@ pub const Sites = struct {
     xa: Buffer, // [rows, max_rank]: the forward's scratch, used by one site at a time
     xn: Buffer, // [rows]: each row's squared input length, the same way
     gates: Buffer, // [rows, max_blocks]: which blocks are open on each row, the same way
-    need: Buffer, // f32 [max_blocks]: the layers' votes each lesson needs at a decision row to act on the reply (0: never)
+    need: Buffer, // f32 [max_blocks]: the router score each lesson needs at a decision row to act on the reply (0: never)
     latch: Buffer, // u32 [max_slots]: each stream's lessons acting on its reply, a bit a block
-    votes: Buffer, // u32 [max_slots, 32]: each stream's votes at its decision row, until they are latched
+    score: Buffer, // f32 [max_slots, 32]: each stream's router scores at its decision row, until they are latched
     rank: usize = 0, // ranks in use, the open block last
     steps: u64 = 0, // the open block's Adam steps
     kept_steps: u64 = 0,
@@ -100,17 +99,17 @@ pub const Sites = struct {
         errdefer need.deinit();
         const latch = try device.buffer(route.max_slots * 4, opts);
         errdefer latch.deinit();
-        const votes = try device.buffer(route.max_slots * 32 * 4, opts);
+        const score = try device.buffer(route.max_slots * 32 * 4, opts);
         @memset(need.slice(f32, max_blocks), 0);
         @memset(latch.slice(u32, route.max_slots), 0);
-        @memset(votes.slice(u32, route.max_slots * 32), 0);
-        return .{ .gpa = gpa, .list = list, .xa = xa, .xn = xn, .gates = gates, .need = need, .latch = latch, .votes = votes };
+        @memset(score.slice(f32, route.max_slots * 32), 0);
+        return .{ .gpa = gpa, .list = list, .xa = xa, .xn = xn, .gates = gates, .need = need, .latch = latch, .score = score };
     }
 
     pub fn deinit(s: *Sites) void {
         for (s.list) |*site| free(site);
         s.gpa.free(s.list);
-        inline for (.{ "xa", "xn", "gates", "need", "latch", "votes" }) |f| @field(s, f).deinit();
+        inline for (.{ "xa", "xn", "gates", "need", "latch", "score" }) |f| @field(s, f).deinit();
     }
 
     fn free(s: *Site) void {
@@ -129,7 +128,7 @@ pub const Sites = struct {
         }
     }
 
-    /// Each block's votes needed at a decision row to act on the reply (0: never), as the forward reads them.
+    /// Each block's router score needed at a decision row to act on the reply (0: never), as the forward reads them.
     pub fn needs(s: *const Sites) []f32 {
         return s.need.slice(f32, max_blocks);
     }
@@ -147,7 +146,8 @@ pub const Sites = struct {
         for (threads[0..n], 0..) |t, k| if (t) |th| th.join() else frameShare(s.list, k, n);
     }
 
-    /// A new block at every layer, shut, its directions `choice` [layers, block, candidates] of the candidates; b zero.
+    /// A new block at every layer, its directions `choice` [layers, block, candidates] of the candidates, b zero; its
+    /// router unaimed and its need 0, so it acts on no reply yet.
     pub fn open(s: *Sites, choice: []const f32) !void {
         if (s.rank + block > max_rank) return error.LearnedChangeFull;
         const at = s.rank;
@@ -158,28 +158,12 @@ pub const Sites = struct {
             for (0..block) |q| for (0..candidates) |j| {
                 subspace.axpy(a[q * site.in ..][0..site.in], a_norm * choice[(l * block + q) * candidates + j], f[j * site.in ..][0..site.in]);
             };
-            site.gate(at / block).* = shut;
+            site.gate(at / block).* = 0;
             @memset(site.b.slice(f32, max_rank * site.out)[at * site.out ..][0 .. block * site.out], 0);
             for ([_]Buffer{ site.gb, site.mb, site.vb }) |buf| @memset(buf.slice(f32, block * site.out), 0);
         }
         s.rank += block;
         s.steps = 0;
-    }
-
-    /// The open block's directions rebuilt from `choice` and its gate open on every row: a plain change of the weights.
-    pub fn plain(s: *Sites, choice: []const f32) void {
-        const at = s.first();
-        for (s.list, 0..) |*site, l| {
-            const g = site.gate(at / block);
-            if (g.* >= shut) continue;
-            const a = site.a.slice(f32, max_rank * site.in)[at * site.in ..][0 .. block * site.in];
-            const f = site.seek.slice(f32, candidates * site.in);
-            @memset(a, 0);
-            for (0..block) |q| for (0..candidates) |j| {
-                subspace.axpy(a[q * site.in ..][0..site.in], a_norm * choice[(l * block + q) * candidates + j], f[j * site.in ..][0..site.in]);
-            };
-            g.* = -std.math.inf(f32);
-        }
     }
 
     /// The open block taken back out, its lesson having left nothing in it.
@@ -194,19 +178,19 @@ pub const Sites = struct {
         const t: f32 = @floatFromInt(s.steps);
         const corr = [2]f32{ 1 / (1 - std.math.pow(f32, hyper[1], t)), 1 / (1 - std.math.pow(f32, hyper[2], t)) };
         for (s.list) |*site| {
-            o.zero(site.gb, site.out); // the block's first rank is its gate's alone: its output stays nothing
-            o.adam(At.of(site.b).plus(s.first() * site.out * 4), site.gb, site.mb, site.vb, block * site.out, hyper, corr);
+            o.adam(At.of(site.b).plus(s.first() * site.out * 4), site.gb, site.mb, site.vb, block * site.out, shape.hyperAt(s.steps), corr);
         }
     }
 
-    /// Aims layer l's router along `dir` (candidate terms) at `tau`: the block's first rank, which carries no output.
-    pub fn aim(s: *Sites, l: usize, dir: []const f32, tau: f32) void {
+    /// Aims layer l's router along `dir` (candidate terms), its score there weighed by `weight` after the other prompts'
+    /// `mean` is taken off: the block's first rank, scaled so the gate kernel's cosine comes out weighed.
+    pub fn aim(s: *Sites, l: usize, dir: []const f32, weight: f32, mean: f32) void {
         const site = &s.list[l];
         const a = site.a.slice(f32, max_rank * site.in)[s.first() * site.in ..][0..site.in];
         const f = site.seek.slice(f32, candidates * site.in);
         @memset(a, 0);
-        for (0..candidates) |j| subspace.axpy(a, a_norm * dir[j], f[j * site.in ..][0..site.in]);
-        site.gate(s.first() / block).* = tau;
+        for (0..candidates) |j| subspace.axpy(a, a_norm * weight * dir[j], f[j * site.in ..][0..site.in]);
+        site.gate(s.first() / block).* = weight * mean;
     }
 
     /// The open block's outputs and moments as they are now, for `restore` (read after every command buffer landed).

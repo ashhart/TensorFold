@@ -6,16 +6,16 @@ const shape = @import("learn_shape.zig");
 
 pub const file_name = "living-weights.safetensors";
 const format = "tensorfold living weights";
-const version = "2"; // 2: a router a lesson, deciding once a reply (1 gated every row)
+const version = "3"; // 3: a router a lesson averaging its best layers' scores (2 counted layers, 1 gated every row)
 
 /// One layer's blocks as a backend holds them: `ranks` rows of a [rank, in] and b [rank, out], each block's router
-/// threshold here (tau, ranks / block of them).
+/// offset here (tau, ranks / block of them).
 pub const Layer = struct { layer: usize, in: usize, out: usize, a: []const f32, b: []const f32, tau: []const f32 };
 
 pub fn Io(comptime core: type) type {
     return struct {
-        /// Writes every layer where a block acts, and the votes each lesson's router needs, as the living-weights file;
-        /// its bytes returned. Layers where every router is shut and every output zero are left out.
+        /// Writes every layer a router reads or a block changes, and the score each lesson's router needs, as the
+        /// living-weights file; its bytes returned.
         pub fn write(gpa: std.mem.Allocator, dir: []const u8, layers: []const Layer, need: []const f32, ranks: usize) !usize {
             var arena_state = std.heap.ArenaAllocator.init(gpa);
             defer arena_state.deinit();
@@ -26,9 +26,9 @@ pub fn Io(comptime core: type) type {
             for (layers) |l| {
                 const b = l.b[0 .. ranks * l.out];
                 const gates = l.tau[0..blocks];
-                var acting = false;
-                for (gates) |g| acting = acting or g < shape.shut;
-                if (!acting and std.mem.allEqual(f32, b, 0)) continue;
+                var reads = false; // a block's first rank is its router's direction, zero where it reads nothing
+                for (0..blocks) |k| reads = reads or !std.mem.allEqual(f32, l.a[k * shape.block * l.in ..][0..l.in], 0);
+                if (!reads and std.mem.allEqual(f32, b, 0)) continue;
                 const parts = [_]struct { leaf: []const u8, data: []const f32, dims: []const usize }{
                     .{ .leaf = "a", .data = l.a[0 .. ranks * l.in], .dims = try arena.dupe(usize, &.{ ranks, l.in }) },
                     .{ .leaf = "b", .data = b, .dims = try arena.dupe(usize, &.{ ranks, l.out }) },
@@ -58,7 +58,7 @@ pub fn Io(comptime core: type) type {
             file: core.safetensors.File,
             ranks: usize,
 
-            /// The votes each lesson's router needs at a decision row to act on the reply.
+            /// The score each lesson's router needs at a decision row to act on the reply.
             pub fn need(s: *const Saved) ![]const f32 {
                 const t = s.file.get("need") orelse return error.BadLivingWeights;
                 if (!t.is(.f32, &.{s.ranks / shape.block})) return error.BadLivingWeights;

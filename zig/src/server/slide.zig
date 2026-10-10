@@ -104,6 +104,7 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
     var out: Rounds = .{ .recalled = a.alloc(bool, plan.facts.len) catch &.{} };
     @memset(out.recalled, false);
     var routed: u32 = 0;
+    var streak: u32 = 0; // rounds in a row whose held-out questions came back when asked
     for (0..teach.rounds + teach.reroutes) |round| {
         var request = plan.full;
         request.more = round > 0;
@@ -149,8 +150,9 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
             return out;
         }
         @memcpy(out.recalled, verdict.recalled);
-        // a lesson acts only on replies its router takes, so it learns on until its answers come back token for token
-        if (held and std.mem.allEqual(bool, out.recalled, true) and round + 1 >= teach.min_rounds) return out;
+        streak = if (std.mem.allEqual(bool, out.recalled, true)) streak + 1 else 0;
+        // a lesson acts only on replies its router takes, so it learns on until its answers stay back, with thinking too
+        if ((held or streak >= 2) and std.mem.allEqual(bool, out.recalled, true) and round + 1 >= teach.min_rounds) return out;
     }
     return out;
 }

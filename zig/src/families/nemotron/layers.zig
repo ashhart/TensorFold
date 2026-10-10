@@ -285,7 +285,7 @@ pub fn project(k: *const kern.Kernels, e: *Enc, ad: wts.Adapter, x: Buffer, rows
     e.bytes(ad.unit, 5);
     e.bytes(route.*, 6);
     e.buf(ad.latch, 0, 7);
-    e.buf(ad.votes, 0, 8);
+    e.buf(ad.score, 0, 8);
     e.run(.{ ad.rank / 16, rows, 1 }, .{ ad.rank / 16, 1, 1 });
 }
 
@@ -299,13 +299,13 @@ pub fn firstAdapter(w: *const wts.Weights) ?wts.Adapter {
 
 /// Each stream whose decision row is in the pass `route` describes: cleared before it, latched (`set`) after it.
 pub fn latchAll(k: *const kern.Kernels, e: *Enc, ad: wts.Adapter, route: *const lesson_route.Route, set: bool) void {
-    for (0..route.count) |s| if (route.decision(s) != null) latch(k, e, ad.need, ad.latch, ad.votes, @intCast(route.seg[s][3]), set);
+    for (0..route.count) |s| if (route.decision(s) != null) latch(k, e, ad.need, ad.latch, ad.score, @intCast(route.seg[s][3]), set);
 }
 
 /// A stream's lessons at its decision row (slot): cleared before the pass that holds it, latched (`set`) after it.
-pub fn latch(k: *const kern.Kernels, e: *Enc, need: Buffer, latches: Buffer, votes: Buffer, slot: u32, set: bool) void {
+pub fn latch(k: *const kern.Kernels, e: *Enc, need: Buffer, latches: Buffer, score: Buffer, slot: u32, set: bool) void {
     e.pipe(k.get("tf_lesson_latch"));
-    e.buf(votes, 0, 0);
+    e.buf(score, 0, 0);
     e.buf(need, 0, 1);
     e.buf(latches, 0, 2);
     e.bytes([4]u32{ slot, max_blocks, @intFromBool(set), 0 }, 3);

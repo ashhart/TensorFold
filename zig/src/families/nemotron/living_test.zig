@@ -30,7 +30,7 @@ test "saved blocks and routers read back as written; a layer with nothing acting
     const zeros: [ranks * 8]f32 = @splat(0);
     _ = try Living.write(gpa, dir, &.{
         .{ .layer = 0, .in = 8, .out = 8, .a = &a0, .b = &b0, .tau = &.{0.3} },
-        .{ .layer = 1, .in = 8, .out = 8, .a = &zeros, .b = &zeros, .tau = &.{shape.shut} },
+        .{ .layer = 1, .in = 8, .out = 8, .a = &zeros, .b = &zeros, .tau = &.{0} },
     }, &.{7}, ranks);
     var saved = (try Living.open(gpa, io, dir)).?;
     const got = (try saved.layer(c, 0)).?;

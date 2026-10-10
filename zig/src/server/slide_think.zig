@@ -61,10 +61,15 @@ pub fn thinkingPoint(srv: *Server, cx: *Cx, q: []const u8, gone: anytype) !?Poin
     return .{ .head = head, .lead = try encode(srv, cx, a, text[0..c]), .rest = text[c..] };
 }
 
+/// A thinking answer as two examples: the model's own reasoning to the restated question and the recall line, learned
+/// together, and the reasoning it writes from there (as much as fits) learned after the line. The lesson acts on every
+/// row after its decision row: untaught, the opening rows let its change answer inside the reasoning and end the turn
+/// there, and the rows after the line let it lose its way.
+pub const Thinking = struct { recall: api.Example, after: ?api.Example };
+
 /// `question` with thinking on: its own reasoning to the restated question, a learned line recalling the fact, then the
-/// reasoning it writes from there (as much as fits), learned too: the lesson acts on every row after its decision row,
-/// so a reply that is taught only the recall line can lose its way after it.
-pub fn thinkingAnswer(srv: *Server, cx: *Cx, keep: Allocator, fact: []const u8, q: []const u8, answer: []const u8, gone: anytype) !?api.Example {
+/// reasoning it writes from there.
+pub fn thinkingAnswer(srv: *Server, cx: *Cx, keep: Allocator, fact: []const u8, q: []const u8, answer: []const u8, gone: anytype) !?Thinking {
     const a = cx.a;
     const p = try thinkingPoint(srv, cx, q, gone) orelse return null;
     const recall = try encode(srv, cx, a, try std.fmt.allocPrint(a, recall_start ++ "\n", .{fact}));
@@ -77,14 +82,17 @@ pub fn thinkingAnswer(srv: *Server, cx: *Cx, keep: Allocator, fact: []const u8, 
     }
     const after = try encode(srv, cx, a, reply.content);
     const room = think_rows -| (p.head.len + p.lead.len + recall.len);
-    return .{ .ids = try std.mem.concat(keep, u32, &.{ p.head, p.lead, recall, after[0..@min(after.len, room)] }), .start = @intCast(p.head.len + p.lead.len), .decide = prompt.decideOf(srv, p.head) };
+    const decide = prompt.decideOf(srv, p.head);
+    const line = try std.mem.concat(keep, u32, &.{ p.head, p.lead, recall });
+    const on: ?api.Example = if (@min(after.len, room) == 0) null else .{ .ids = try std.mem.concat(keep, u32, &.{ line, after[0..@min(after.len, room)] }), .start = @intCast(line.len), .decide = decide };
+    return .{ .recall = .{ .ids = line, .start = @intCast(p.head.len), .decide = decide }, .after = on };
 }
 
-/// `question` with thinking on and the model's reasoning as it writes it now, held from where it decides (null: none).
+/// `question` with thinking on and the model's reasoning as it writes it now, held from its first row (null: none).
 pub fn thinkingSteady(srv: *Server, cx: *Cx, keep: Allocator, q: []const u8, gone: anytype) !?api.Example {
     const a = cx.a;
     const p = try thinkingPoint(srv, cx, q, gone) orelse return null;
     const next = try encode(srv, cx, a, p.rest);
     if (next.len == 0) return null;
-    return .{ .ids = try std.mem.concat(keep, u32, &.{ p.head, p.lead, next[0..@min(next.len, think_steady)] }), .start = @intCast(p.head.len + p.lead.len), .decide = prompt.decideOf(srv, p.head) };
+    return .{ .ids = try std.mem.concat(keep, u32, &.{ p.head, p.lead, next[0..@min(next.len, think_steady)] }), .start = @intCast(p.head.len), .decide = prompt.decideOf(srv, p.head) };
 }

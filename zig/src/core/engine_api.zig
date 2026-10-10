@@ -215,6 +215,7 @@ pub const Example = struct { ids: []const u32, start: u32, decide: u32 };
 /// One fact's lesson (Sliding Weights): answers, held-out answers, near misses, and prompts that must not move.
 pub const LearnRequest = struct {
     train: []const Example = &.{},
+    think: []const Example = &.{}, // the facts' answers with thinking on, learned beside `train` (one of each a step)
     held: []const Example = &.{},
     near: []const Example = &.{},
     keep: []const Example = &.{}, // answers of every kind this lesson's change must leave as they are

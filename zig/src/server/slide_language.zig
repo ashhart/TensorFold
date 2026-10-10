@@ -13,6 +13,8 @@ pub const language_prompt = "What language is this written in? Reply with the la
 
 pub const questions_other = "Here is something you know: \"{s}\" Write {d} different short questions the person who told you might ask you later, in their own words, to see if you remember: ask it plainly, in other words and in passing (for example: What is my favourite colour? Which colour do I like best?), in the language they told you in. Number them 1 to {d}, one per line, nothing else.";
 
+pub const more_other = "Here is something you know: \"{s}\" The person who told you asked about it in these words:\n{s}Write {d} more short questions they might ask about themselves to see if you remember, in their own words, keeping \"I\" and \"my\" (for example: Which colour do I like best?), each worded differently from all of those, plainly or in passing, in the language they told you in. Number them 1 to {d}, one per line, nothing else.";
+
 pub const remember_other = "Here are questions a person asked you about themselves. Rewrite each to start with \"Do you remember\" or \"Do you know\" (the same words in the question's own language), in the person's own words, keeping \"I\" and \"my\" (for example: What is my favourite colour? becomes Do you remember my favourite colour?). Number them, one per line, nothing else.\n{s}";
 
 pub const besides_other = "Here is something you know: \"{s}\" Write {d} short questions about the same person or thing that this does not answer, in the words of the person who told you (for example, for \"My sister is called Ana.\": How old is my sister? Where does my sister live?), in the language they told you in. Number them, one per line, nothing else.";

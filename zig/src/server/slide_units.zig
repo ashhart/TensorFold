@@ -150,10 +150,12 @@ fn hasUnspaced(text: []const u8) bool {
     return false;
 }
 
-/// Ideographic and full-width punctuation (、。「」！？ and the like): it parts units as a space does.
+/// Ideographic and full-width punctuation (、。「」！？ and the like), and symbols and emoji (— … ✅): they part units as a
+/// space does, so "Ginger.✅" still says "Ginger".
 pub fn punctuation(c: u21) bool {
     return (c >= 0x3000 and c <= 0x303F) or (c >= 0xFF01 and c <= 0xFF0F) or (c >= 0xFF1A and c <= 0xFF20) or
-        (c >= 0xFF3B and c <= 0xFF40) or (c >= 0xFF5B and c <= 0xFF65);
+        (c >= 0xFF3B and c <= 0xFF40) or (c >= 0xFF5B and c <= 0xFF65) or (c >= 0x2000 and c <= 0x2BFF) or
+        (c >= 0x1F000 and c <= 0x1FAFF) or c == 0xFE0F;
 }
 
 /// A word lowercased, without a trailing full stop or 's, with British "our" as "or" (colour, favourite).
@@ -188,4 +190,5 @@ test "units: words made normal, pairs of characters in scripts without spaces, p
     try std.testing.expect(it.next() == null);
     try std.testing.expect(says("鱈ちりです。", "ちり") and !says("鱈ちりです。", "鱈り"));
     try std.testing.expectEqual(@as(usize, 3), sentenceEnd("です。", 6));
+    try std.testing.expect(says("Your dog's name is Ginger.✅", "ginger") and says("Ana’s here — yes", "ana"));
 }

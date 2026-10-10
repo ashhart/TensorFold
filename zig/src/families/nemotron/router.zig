@@ -1,5 +1,6 @@
-//! A lesson's router: at each layer, Fisher's direction between its fact questions' decision rows and the steady
-//! prompts', and how many layers must clear it before the lesson acts on a reply, read off questions left out of the fit.
+//! A lesson's router: at each layer, Fisher's direction between its fact questions' decision rows and the other
+//! prompts', each layer's score standardised against the other prompts' there, and the scores of the layers that best
+//! set the fact's questions apart averaged; it acts on a reply whose average reaches a bar read off left-out questions.
 const std = @import("std");
 const shape = @import("learn_shape.zig");
 const subspace = @import("subspace.zig");
@@ -7,37 +8,38 @@ const subspace = @import("subspace.zig");
 const n = shape.candidates;
 
 const ridge = 0.1; // of the scatter's mean diagonal: questions are few against 64 directions
-const margins = [_]f32{ 0.005, 0.01, 0.015, 0.02 }; // how far above every steady row a layer's clearing must be
-const min_need = 3; // a lesson never acts on fewer layers' say: one or two can clear by chance
+const most_reads = 12; // layers a router averages: past the best dozen, weaker layers blur the fact's questions back in
 const odd_share = 4; // one fact question in this many may word itself apart from the rest and go untaken
 
 pub const Fit = struct {
     dir: []f32, // [layers, n]: each layer's direction, unit, in its candidates' terms
-    tau: []f32, // [layers]: the cosine to clear there, or shut where most facts do not clear every steady row
-    need: u32, // layers a reply's decision row must clear for the lesson to act on it
-    margin: f32,
-    fact_low: u32, // the layers most fact questions left out of the fit cleared (all but the oddest quarter)
-    fact_least: u32, // the fewest any of them cleared
-    steady_high: u32, // the most layers a steady prompt left out of the fit cleared
+    weight: []f32, // [layers]: each layer's share of the average over the other prompts' spread there (0: unread)
+    mean: []f32, // [layers]: the other prompts' mean score there
+    need: f32, // the average a reply's decision row must reach for the lesson to act on it
+    reads: u32, // layers with a share
+    fact_low: f32, // the average most fact questions left out of the fit reached (all but the oddest quarter)
+    fact_least: f32, // the lowest any of them reached
+    steady_high: f32, // the highest a steady prompt left out of the fit reached
 
     pub fn deinit(f: *Fit, gpa: std.mem.Allocator) void {
         gpa.free(f.dir);
-        gpa.free(f.tau);
+        gpa.free(f.weight);
+        gpa.free(f.mean);
     }
 
-    /// Whether a fact question the fit never saw still clears more layers than any steady prompt it never saw.
+    /// Whether a fact question the fit never saw still scores above every steady prompt it never saw.
     pub fn apart(f: *const Fit) bool {
         return f.fact_low > f.steady_high;
     }
 
-    /// The layers whose router row `i` of `rows` clears (rows[l]: layer l's decision rows along its candidates).
-    pub fn count(f: *const Fit, rows: []const []const f32, i: usize) u32 {
-        var votes: u32 = 0;
+    /// Router row `i` of `rows` (rows[l]: layer l's decision rows along its candidates) as the lesson scores it.
+    pub fn score(f: *const Fit, rows: []const []const f32, i: usize) f32 {
+        var s: f32 = 0;
         for (rows, 0..) |r, l| {
-            if (f.tau[l] >= shape.shut) continue;
-            votes += @intFromBool(subspace.dot(f.dir[l * n ..][0..n], r[i * n ..][0..n]) >= f.tau[l]);
+            if (f.weight[l] == 0) continue;
+            s += f.weight[l] * (subspace.dot(f.dir[l * n ..][0..n], r[i * n ..][0..n]) - f.mean[l]);
         }
-        return votes;
+        return s;
     }
 };
 
@@ -84,52 +86,68 @@ fn fisher(pos: *const Stats, neg: *const Stats, out: []f32) !void {
     for (out, d) |*o, x| o.* = @floatCast(x / @sqrt(@max(size, 1e-30)));
 }
 
-/// A fit's direction, the highest steady row's cosine, and the cosine most of its fact rows clear.
-const Fold = struct { dir: [n]f32, top: f32, low: f32 };
-
-fn fold(gpa: std.mem.Allocator, pos: *const Stats, neg: *const Stats, facts: []const f32, steady: []const f32, skip_fact: ?usize, skip_steady: ?usize) !Fold {
-    var f: Fold = .{ .dir = undefined, .top = -2, .low = 2 };
-    try fisher(pos, neg, &f.dir);
-    for (0..steady.len / n) |r| if (r != skip_steady) {
-        f.top = @max(f.top, subspace.dot(&f.dir, steady[r * n ..][0..n]));
-    };
-    const cos = try gpa.alloc(f32, facts.len / n);
-    defer gpa.free(cos);
-    var m: usize = 0;
-    for (0..facts.len / n) |r| if (r != skip_fact) {
-        cos[m] = subspace.dot(&f.dir, facts[r * n ..][0..n]);
-        m += 1;
-    };
-    std.mem.sort(f32, cos[0..m], {}, std.sort.asc(f32));
-    f.low = cos[m / odd_share];
-    return f;
-}
-
-/// How far row `p` clears the fit's highest steady row (-inf where most of its facts do not clear it).
-fn margin(f: Fold, p: []const f32) f32 {
-    return if (f.low > f.top) subspace.dot(&f.dir, p) - f.top else -std.math.inf(f32);
-}
-
-/// One layer's fit and every left-out row's margin: facts [F, n] and steady [S, n] decision rows.
-fn layer(gpa: std.mem.Allocator, facts: []const f32, steady: []const f32, dir: []f32, top: *f32, valid: *bool, fact_m: []f32, steady_m: []f32) !void {
+/// One layer's direction from every row, and each row's score along the direction fitted without it.
+fn layer(facts: []const f32, steady: []const f32, dir: []f32, fact_s: []f32, steady_s: []f32) !void {
     const pos = Stats.of(facts);
     const neg = Stats.of(steady);
-    const all = try fold(gpa, &pos, &neg, facts, steady, null, null);
-    @memcpy(dir, &all.dir);
-    top.* = all.top;
-    valid.* = all.low > all.top;
-    for (fact_m, 0..) |*m, i| {
+    try fisher(&pos, &neg, dir);
+    var d: [n]f32 = undefined;
+    for (fact_s, 0..) |*s, i| {
         const p = facts[i * n ..][0..n];
         var less = pos;
         less.add(p, -1);
-        m.* = margin(try fold(gpa, &less, &neg, facts, steady, i, null), p);
+        try fisher(&less, &neg, &d);
+        s.* = subspace.dot(&d, p);
     }
-    for (steady_m, 0..) |*m, j| {
+    for (steady_s, 0..) |*s, j| {
         const p = steady[j * n ..][0..n];
         var less = neg;
         less.add(p, -1);
-        m.* = margin(try fold(gpa, &pos, &less, facts, steady, null, j), p);
+        try fisher(&pos, &less, &d);
+        s.* = subspace.dot(&d, p);
     }
+}
+
+/// The steady rows' mean and spread of `s`, with row `skip` left out.
+fn spread(s: []const f32, skip: ?usize) [2]f32 {
+    var sum: f64 = 0;
+    var sq: f64 = 0;
+    var count: f64 = 0;
+    for (s, 0..) |x, j| if (j != skip) {
+        sum += x;
+        sq += x * x;
+        count += 1;
+    };
+    const m = sum / count;
+    return .{ @floatCast(m), @floatCast(@sqrt(@max(sq / count - m * m, 0)) + 1e-9) };
+}
+
+/// Each layer's share of the average from its standardised fact scores `z` [layers, facts], fact `skip` left out: the
+/// layers whose median fact score is highest (and above the steady prompts' mean), each by that median.
+fn shares(gpa: std.mem.Allocator, z: []const f32, layers: usize, nf: usize, skip: ?usize, out: []f32) !void {
+    const col = try gpa.alloc(f32, nf);
+    defer gpa.free(col);
+    const sep = try gpa.alloc(f32, layers);
+    defer gpa.free(sep);
+    for (0..layers) |l| {
+        var m: usize = 0;
+        for (0..nf) |i| if (i != skip) {
+            col[m] = z[l * nf + i];
+            m += 1;
+        };
+        std.mem.sort(f32, col[0..m], {}, std.sort.asc(f32));
+        sep[l] = col[m / 2];
+    }
+    const sorted = try gpa.dupe(f32, sep);
+    defer gpa.free(sorted);
+    std.mem.sort(f32, sorted, {}, std.sort.desc(f32));
+    const bar = sorted[@min(most_reads, layers) - 1];
+    var total: f32 = 0;
+    for (out, sep) |*w, x| {
+        w.* = if (x >= bar and x > 0) x else 0;
+        total += w.*;
+    }
+    for (out) |*w| w.* = if (total > 0) w.* / total else 0;
 }
 
 /// The router from each layer's decision rows: facts[l] and steady[l] the same questions at every layer, [count, n].
@@ -137,61 +155,77 @@ pub fn fit(gpa: std.mem.Allocator, facts: []const []const f32, steady: []const [
     const layers = facts.len;
     const nf = facts[0].len / n;
     const ns = steady[0].len / n;
-    if (nf < 2 or ns < 2) return error.TooFewQuestions;
+    if (nf < 2 or ns < 3) return error.TooFewQuestions;
     const dir = try gpa.alloc(f32, layers * n);
     errdefer gpa.free(dir);
-    const tau = try gpa.alloc(f32, layers);
-    errdefer gpa.free(tau);
-    const top = try gpa.alloc(f32, layers);
-    defer gpa.free(top);
-    const valid = try gpa.alloc(bool, layers);
-    defer gpa.free(valid);
-    const fact_m = try gpa.alloc(f32, layers * nf);
-    defer gpa.free(fact_m);
-    const steady_m = try gpa.alloc(f32, layers * ns);
-    defer gpa.free(steady_m);
+    const weight = try gpa.alloc(f32, layers);
+    errdefer gpa.free(weight);
+    const mean = try gpa.alloc(f32, layers);
+    errdefer gpa.free(mean);
+    const fact_s = try gpa.alloc(f32, layers * nf);
+    defer gpa.free(fact_s);
+    const steady_s = try gpa.alloc(f32, layers * ns);
+    defer gpa.free(steady_s);
     const Share = struct {
         fn run(from: usize, step: usize, ctx: anytype, out: *?anyerror) void {
             var l = from;
-            while (l < ctx.layers) : (l += step) layer(std.heap.c_allocator, ctx.facts[l], ctx.steady[l], ctx.dir[l * n ..][0..n], &ctx.top[l], &ctx.valid[l], ctx.fact_m[l * ctx.nf ..][0..ctx.nf], ctx.steady_m[l * ctx.ns ..][0..ctx.ns]) catch |e| {
+            while (l < ctx.layers) : (l += step) layer(ctx.facts[l], ctx.steady[l], ctx.dir[l * n ..][0..n], ctx.fact_s[l * ctx.nf ..][0..ctx.nf], ctx.steady_s[l * ctx.ns ..][0..ctx.ns]) catch |e| {
                 out.* = e;
             };
         }
     };
-    const ctx = .{ .layers = layers, .facts = facts, .steady = steady, .dir = dir, .top = top, .valid = valid, .fact_m = fact_m, .steady_m = steady_m, .nf = nf, .ns = ns };
+    const ctx = .{ .layers = layers, .facts = facts, .steady = steady, .dir = dir, .fact_s = fact_s, .steady_s = steady_s, .nf = nf, .ns = ns };
     var threads: [16]?std.Thread = @splat(null);
     var errs: [16]?anyerror = @splat(null);
     const k = @min(threads.len, layers);
     for (threads[0..k], 0..) |*t, i| t.* = std.Thread.spawn(.{}, Share.run, .{ i, k, ctx, &errs[i] }) catch null;
     for (threads[0..k], 0..) |t, i| if (t) |th| th.join() else Share.run(i, k, ctx, &errs[i]);
     for (errs[0..k]) |e| if (e) |x| return x;
-    var best: ?Fit = null;
-    const fact_votes = try gpa.alloc(u32, nf);
-    defer gpa.free(fact_votes);
-    for (margins) |m| {
-        for (fact_votes, 0..) |*votes, i| {
-            votes.* = 0;
-            for (0..layers) |l| votes.* += @intFromBool(fact_m[l * nf + i] > m);
-        }
-        std.mem.sort(u32, fact_votes, {}, std.sort.asc(u32));
-        const low = fact_votes[nf / odd_share];
-        var high: u32 = 0;
+    // every score standardised by the steady prompts' at its layer: a steady prompt's without its own
+    const z_fact = try gpa.alloc(f32, layers * nf);
+    defer gpa.free(z_fact);
+    const z_steady = try gpa.alloc(f32, layers * ns);
+    defer gpa.free(z_steady);
+    const spread_all = try gpa.alloc([2]f32, layers);
+    defer gpa.free(spread_all);
+    for (0..layers) |l| {
+        const s = steady_s[l * ns ..][0..ns];
+        spread_all[l] = spread(s, null);
+        for (0..nf) |i| z_fact[l * nf + i] = (fact_s[l * nf + i] - spread_all[l][0]) / spread_all[l][1];
         for (0..ns) |j| {
-            var votes: u32 = 0;
-            for (0..layers) |l| votes += @intFromBool(steady_m[l * ns + j] > m);
-            high = @max(high, votes);
+            const own = spread(s, j);
+            z_steady[l * ns + j] = (s[j] - own[0]) / own[1];
         }
-        const gap = @as(i64, low) - @as(i64, high);
-        const old_gap = if (best) |b| @as(i64, b.fact_low) - @as(i64, b.steady_high) else std.math.minInt(i64);
-        if (gap > old_gap or (gap == old_gap and gap > 0)) best = .{ .dir = dir, .tau = tau, .need = 0, .margin = m, .fact_low = low, .fact_least = fact_votes[0], .steady_high = high };
     }
-    var f = best.?;
-    // half way across the gap between the left-out facts and steady prompts; where they overlap, what most facts
-    // clear, so the lesson still answers them (the steady prompts it then takes, it learns to leave as they were)
-    const gap = @as(i64, f.fact_low) - @as(i64, f.steady_high);
-    f.need = @max(min_need, if (gap > 0) f.steady_high + 1 + @as(u32, @intCast((gap - 1) >> 1)) else f.fact_low);
-    for (0..layers) |l| tau[l] = if (valid[l]) top[l] + f.margin else shape.shut;
-    return f;
+    // each left-out question's average over the layers chosen without it
+    const w = try gpa.alloc(f32, layers);
+    defer gpa.free(w);
+    const fact_avg = try gpa.alloc(f32, nf);
+    defer gpa.free(fact_avg);
+    for (fact_avg, 0..) |*avg, i| {
+        try shares(gpa, z_fact, layers, nf, i, w);
+        avg.* = 0;
+        for (0..layers) |l| avg.* += w[l] * z_fact[l * nf + i];
+    }
+    try shares(gpa, z_fact, layers, nf, null, w);
+    var high: f32 = -std.math.inf(f32);
+    for (0..ns) |j| {
+        var avg: f32 = 0;
+        for (0..layers) |l| avg += w[l] * z_steady[l * ns + j];
+        high = @max(high, avg);
+    }
+    std.mem.sort(f32, fact_avg, {}, std.sort.asc(f32));
+    const low = fact_avg[nf / odd_share];
+    var reads: u32 = 0;
+    for (0..layers) |l| {
+        weight[l] = w[l] / spread_all[l][1];
+        mean[l] = spread_all[l][0];
+        reads += @intFromBool(w[l] > 0);
+    }
+    // half way across the gap between the left-out facts and steady prompts; where they overlap, what most facts reach,
+    // so the lesson still answers them (the steady prompts it then takes, it learns to leave as they were)
+    const need = if (low > high) (low + high) / 2 else low;
+    return .{ .dir = dir, .weight = weight, .mean = mean, .need = need, .reads = reads, .fact_low = low, .fact_least = fact_avg[0], .steady_high = high };
 }
 
 test "a router clears questions it never saw about its fact, and steady prompts it never saw stay below it" {
@@ -222,6 +256,9 @@ test "a router clears questions it never saw about its fact, and steady prompts 
     var f = try fit(gpa, &facts, &steady);
     defer f.deinit(gpa);
     try std.testing.expect(f.apart());
-    try std.testing.expect(f.need > f.steady_high and f.need <= f.fact_low);
-    for (f.tau) |t| try std.testing.expect(t < shape.shut);
+    try std.testing.expect(f.need > f.steady_high and f.need < f.fact_low);
+    try std.testing.expectEqual(@as(u32, layers), f.reads);
+    // the fit's own rows: every fact above the bar, every steady prompt below it
+    for (0..nf) |i| try std.testing.expect(f.score(&facts, i) >= f.need);
+    for (0..ns) |j| try std.testing.expect(f.score(&steady, j) < f.need);
 }

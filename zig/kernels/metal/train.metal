@@ -116,8 +116,9 @@ struct Route {
   int4 seg[8];
 };
 
-// Block b acts on row r only after its stream's decision row, and only if its lesson chose to act there; on the
-// decision row itself each block counts one vote if its router (its first direction) reaches tau, and acts on nothing.
+// Block b acts on row r only after its stream's decision row, and only if its lesson chose to act there. On the
+// decision row itself it adds this layer's part of its router score, its first direction's weighed cosine less tau,
+// and acts on nothing. Where it acts, its first rank reads the row's size instead: an offset on every row it takes.
 kernel void tf_train_gate(device float* xa [[buffer(0)]],
                           const device float* xn [[buffer(1)]],
                           const device float* tau [[buffer(2)]],
@@ -126,7 +127,7 @@ kernel void tf_train_gate(device float* xa [[buffer(0)]],
                           constant float& unit [[buffer(5)]],
                           constant Route& route [[buffer(6)]],
                           const device uint* latch [[buffer(7)]],
-                          device uint* votes [[buffer(8)]],
+                          device float* score [[buffer(8)]],
                           uint2 pos [[thread_position_in_grid]]) {
   const uint rows = dims.x, rank = dims.y, blocks = dims.z, b = pos.x, r = pos.y;
   if (b >= blocks || r >= rows) return;
@@ -145,18 +146,20 @@ kernel void tf_train_gate(device float* xa [[buffer(0)]],
   bool open = false;
   if (rel == 0) {
     const float n = unit * xn[r];
-    if (n > 0 && row[0] >= tau[b] * sqrt(n)) votes[slot * 32 + b] += 1;
+    if (n > 0) score[slot * 32 + b] += row[0] * rsqrt(n) - tau[b];
   } else if (rel > 0 && settled) {
     open = ((latch[slot] >> b) & 1u) != 0;
   }
   gates[size_t(r) * blocks + b] = open ? 1.0f : 0.0f;
-  if (!open)
+  if (open)
+    row[0] = sqrt(unit * xn[r]);
+  else
     for (uint q = 0; q < 16; q++) row[q] = 0;
 }
 
-// A stream's lessons at its decision row: `at` (slot, blocks, latch). Clear (votes and latch) before the pass; latch
-// after it, setting each lesson that won at least `need` layers' votes (0: never) to act on the rows after it.
-kernel void tf_lesson_latch(device uint* votes [[buffer(0)]],
+// A stream's lessons at its decision row: `at` (slot, blocks, latch). Clear (scores and latch) before the pass; latch
+// after it, setting each lesson whose router score reached its `need` (0: never) to act on the rows after it.
+kernel void tf_lesson_latch(device float* score [[buffer(0)]],
                             const device float* need [[buffer(1)]],
                             device uint* latch [[buffer(2)]],
                             constant uint4& at [[buffer(3)]],
@@ -165,8 +168,8 @@ kernel void tf_lesson_latch(device uint* votes [[buffer(0)]],
   const uint slot = at.x, blocks = at.y;
   uint bits = 0;
   for (uint b = 0; b < blocks; b++) {
-    if (at.z != 0 && need[b] > 0 && float(votes[slot * 32 + b]) >= need[b]) bits |= 1u << b;
-    if (at.z == 0) votes[slot * 32 + b] = 0;
+    if (at.z != 0 && need[b] > 0 && score[slot * 32 + b] >= need[b]) bits |= 1u << b;
+    if (at.z == 0) score[slot * 32 + b] = 0;
   }
   latch[slot] = bits;
 }
@@ -237,16 +240,21 @@ kernel void tf_train_lora_dxa(const device float* g [[buffer(0)]],
   if (lane == 0) dxa[size_t(r) * rank + q] = scale * s * gates[size_t(r) * (rank / 16) + q / 16];
 }
 
-// dx[r, i] += sum_q dxa[r, q] a[q, i]: the change's part of its site's input gradient; dims (rows, in, rank).
+// dx[r, i] += sum_q dxa[r, q] a[q, i]: the change's part of its site's input gradient; dims (rows, in, rank). A
+// block's first rank, where it acts, read sqrt(unit |x|^2) (tf_train_gate), whose gradient is unit x / that.
 kernel void tf_train_lora_dx(const device float* dxa [[buffer(0)]],
                              const device float* a [[buffer(1)]],
                              device float* dx [[buffer(2)]],
                              constant uint4& dims [[buffer(3)]],
+                             const device bfloat* x [[buffer(4)]],
+                             const device float* xn [[buffer(5)]],
+                             constant float& unit [[buffer(6)]],
                              uint2 pos [[thread_position_in_grid]]) {
   const uint rows = dims.x, n_in = dims.y, rank = dims.z, i = pos.x, r = pos.y;
   if (i >= n_in || r >= rows) return;
+  const float size = unit * xn[r], along = size > 0 ? unit * float(x[size_t(r) * n_in + i]) * rsqrt(size) : 0;
   float s = 0;
-  for (uint q = 0; q < rank; q++) s += dxa[size_t(r) * rank + q] * a[size_t(q) * n_in + i];
+  for (uint q = 0; q < rank; q++) s += dxa[size_t(r) * rank + q] * ((q & 15) == 0 ? along : a[size_t(q) * n_in + i]);
   dx[size_t(r) * n_in + i] += s;
 }
 

@@ -6,6 +6,7 @@ const Fence = @import("../../core/fence.zig").Fence;
 const fwd = @import("forward.zig");
 const st = @import("state.zig");
 const lesson_route = @import("lesson_route.zig");
+const layers = @import("layers.zig");
 const mtp = @import("mtp.zig");
 const timing = @import("timing.zig");
 const tree = @import("tree.zig");
@@ -68,6 +69,7 @@ pub const Metal = struct {
     gpu_ms: f64 = 0, // GPU ms of every command buffer landed so far
     last_ms: f64 = 0, // and of the last one
     living: ?@import("adapters.zig").Sites = null, // the saved lessons' gated blocks, until a learner takes them
+    trace: bool = false, // TF_SLIDE_TRACE: each reply's lesson scores logged (dev)
 
     pub fn init(gpa: std.mem.Allocator, m: *Model, o: Options) !*Metal {
         const b = try gpa.create(Metal);
@@ -82,6 +84,7 @@ pub const Metal = struct {
             .tokens = try m.device.buffer(ring * 4, opts),
             .prompt = try m.device.buffer(@max(o.capacity, 16) * 4, opts),
             .fence = try Fence.init(m.device),
+            .trace = std.c.getenv("TF_SLIDE_TRACE") != null,
         };
         if (o.chunk > fused_rows) b.wide = try prefill.Prefill.init(m, @min(o.chunk, o.capacity));
         if (o.drafts and m.weights.mtp != null) b.head = try mtp.Head.init(m.device, m.config, &m.kernels, &m.weights, &b.pool, max_lanes, o.capacity);
@@ -303,6 +306,20 @@ pub const Metal = struct {
             while (self.flights.items.len > 1) try self.land();
             at += rows;
         }
+        if (self.trace and c.decide != lesson_route.none) try self.traceLessons(c);
+    }
+
+    /// Dev trace (TF_SLIDE_TRACE): the stream's router scores at its decision row and the lessons acting on its reply.
+    fn traceLessons(self: *Metal, c: *const st.Cache) !void {
+        const ad = layers.firstAdapter(&self.m.weights) orelse return;
+        try self.drain();
+        const at: usize = @intCast(@max(c.rid, 0));
+        const score = ad.score.slice(f32, lesson_route.max_slots * 32)[at * 32 ..][0..32];
+        const need = ad.need.slice(f32, lesson_route.max_blocks);
+        var line: [256]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&line);
+        for (0..ad.rank / 16) |b| w.print(" {d:.2}/{d:.2}", .{ score[b], need[b] }) catch break;
+        std.log.info("slide trace: decision row {d}: scores{s}; acting {b}", .{ c.decide, w.buffered(), ad.latch.slice(u32, lesson_route.max_slots)[at] });
     }
 
     fn firstFn(ptr: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {
