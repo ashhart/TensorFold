@@ -76,7 +76,6 @@ pub fn Learner(comptime H: type) type {
         answers: u32 = 0, // fact answer rows projected
         can_undo: bool = false,
         plain: bool = false, // the last lesson is a plain weight change, which an undo takes out whole
-        kept: bool = false, // the last lesson's block is kept as it is, behind its gates (taken out whole by an undo)
         rounds: u64 = 0, // rounds begun, which seeds each round's order
         decisions: []std.ArrayList(f32) = &.{}, // [layers]: the kept lesson's deciding rows along each layer's candidates
 
@@ -168,11 +167,10 @@ pub fn Learner(comptime H: type) type {
                 .idle => return .{ .done = true },
                 .undo => {
                     l.phase = .idle;
-                    if (l.plain or l.kept) {
+                    if (l.plain) {
                         l.trainer.?.sites.close();
                         try H.attach(l.b, l.trainer.?);
                         l.plain = false;
-                        l.kept = false;
                         l.opened = false;
                         l.kept_rounds = 0;
                         return .{ .done = true, .changed = true };
@@ -195,7 +193,7 @@ pub fn Learner(comptime H: type) type {
         fn saveOnce(l: *Self) !Step {
             l.phase = .idle;
             const t = l.trainer orelse return .{ .done = true };
-            const ranks = t.sites.rank - @as(usize, if (l.opened and !l.plain and !l.kept) adapters.block else 0);
+            const ranks = t.sites.rank - @as(usize, if (l.opened and !l.plain) adapters.block else 0);
             if (ranks == 0) return .{ .done = true };
             const t0 = H.seconds(l.io);
             const bytes = try H.write(l.b, l.gpa, l.io, t, ranks);
@@ -275,15 +273,6 @@ pub fn Learner(comptime H: type) type {
 
         /// The kept lesson made a plain change of the weights: each layer's directions refit to hold steady rows still.
         fn commitOnce(l: *Self) !Step {
-            l.phase = .idle;
-            if (!l.opened or l.kept_rounds == 0) return .{ .done = true };
-            l.kept = true;
-            std.log.info("slide: lesson {d} is kept as it learned, behind its gates", .{l.trainer.?.sites.first() / adapters.block + 1});
-            return .{ .done = true, .changed = true };
-        }
-
-        /// The kept lesson made a plain change of the weights (no longer the default): its directions refit first.
-        fn plainOnce(l: *Self) !Step {
             l.phase = .idle;
             if (!l.opened or l.kept_rounds == 0) return .{ .done = true };
             const t = l.trainer.?;
@@ -399,7 +388,6 @@ pub fn Learner(comptime H: type) type {
             }
             l.opened = false;
             l.plain = false;
-            l.kept = false;
             if (l.kept_rounds > 0) {
                 for (l.last) |ex| {
                     if (l.replay.items.len == replay_cap) l.gpa.free(l.replay.orderedRemove(0).ids);

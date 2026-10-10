@@ -157,6 +157,22 @@ fn commit(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
         more.steps = teach.mining_steps;
         if (!step(srv, a, &more, out)) return;
     }
+    // the change gated to the rows that decide its facts, then a round behind the gates
+    var gate = plan.full;
+    gate.gate = true;
+    switch (run(srv, a, &gate)) {
+        .failed => |message| {
+            out.why = message;
+            @memset(out.recalled, false);
+            return;
+        },
+        .refused => return,
+        else => {},
+    }
+    var behind = plan.full;
+    behind.more = true;
+    behind.steps = teach.mining_steps;
+    if (!step(srv, a, &behind, out)) return;
     const verdict = teach.verify(srv, cx, plan, true, gone) catch |e| teach.Verdict{ .recalled = out.recalled, .damage = words(cx, e) };
     if (verdict.damage) |why| {
         _ = run(srv, a, &.{ .undo = true });
