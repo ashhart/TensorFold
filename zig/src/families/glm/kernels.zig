@@ -70,6 +70,7 @@ pub const Kernels = struct {
     add: mtl.Pipeline,
     swiglu: mtl.Pipeline,
     argmax: mtl.Pipeline,
+    sample: mtl.Pipeline, // the keyed draw at a positive temperature (glm_argmax stays the greedy path)
     index_select: mtl.Pipeline,
     index_scores_nax: mtl.Pipeline, // a prompt chunk's index scores on the tensor units (glm_index_nax.metal)
     index_decode: mtl.Pipeline, // and decode rows' (a row's heads as the op's rows)
@@ -197,7 +198,7 @@ fn kernelOf(comptime key: []const u8) sources.glm.Kernel {
 pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const k = try gpa.create(Kernels);
     errdefer gpa.destroy(k);
-    var jobs: [generated.len + 22]Job = undefined;
+    var jobs: [generated.len + 23]Job = undefined;
     inline for (generated, 0..) |g, i| {
         const src = comptime kernelOf(g.key);
         const FT = @FieldType(Kernels, g.field);
@@ -213,67 +214,69 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
         break :blk n;
     };
     jobs[generated.len] = .{ .device = device, .source = sources.glm_glue, .names = &glue_names, .out = &glue_out };
-    jobs[generated.len + 1] = .{ .device = device, .source = sources.ops_softmax, .names = &.{"tf_softmax_bf16"}, .out = @as(*[1]mtl.Pipeline, &k.softmax) };
-    jobs[generated.len + 2] = .{ .device = device, .source = sources.ops_embed_norm, .names = &.{"tf_embed_b4_g64"}, .out = @as(*[1]mtl.Pipeline, &k.embed) };
+    var sample_out: [1]mtl.Pipeline = undefined;
+    jobs[generated.len + 1] = .{ .device = device, .source = sources.glm_sample, .names = &.{"glm_sample"}, .out = &sample_out };
+    jobs[generated.len + 2] = .{ .device = device, .source = sources.ops_softmax, .names = &.{"tf_softmax_bf16"}, .out = @as(*[1]mtl.Pipeline, &k.softmax) };
+    jobs[generated.len + 3] = .{ .device = device, .source = sources.ops_embed_norm, .names = &.{"tf_embed_b4_g64"}, .out = @as(*[1]mtl.Pipeline, &k.embed) };
     const attn_src = try frags.source(device, gpa, sources.glm_attn);
     defer gpa.free(attn_src);
     var attn_out: [2]mtl.Pipeline = undefined;
-    jobs[generated.len + 3] = .{ .device = device, .source = attn_src, .names = &.{ "glm_latent_scores", "glm_latent_values" }, .out = &attn_out };
+    jobs[generated.len + 4] = .{ .device = device, .source = attn_src, .names = &.{ "glm_latent_scores", "glm_latent_values" }, .out = &attn_out };
     const route_src = try moe_route.source(gpa, route_shape);
     defer gpa.free(route_src);
     var route_out: [2]mtl.Pipeline = undefined;
-    jobs[generated.len + 4] = .{ .device = device, .source = route_src, .names = &moe_route.names, .out = &route_out };
+    jobs[generated.len + 5] = .{ .device = device, .source = route_src, .names = &moe_route.names, .out = &route_out };
     const igate_src = try moe_route.source(gpa, igate_shape);
     defer gpa.free(igate_src);
     var igate_out: [1]mtl.Pipeline = undefined;
-    jobs[generated.len + 5] = .{ .device = device, .source = igate_src, .names = &.{moe_route.names[0]}, .out = &igate_out };
+    jobs[generated.len + 6] = .{ .device = device, .source = igate_src, .names = &.{moe_route.names[0]}, .out = &igate_out };
     const m16_src = try affine_mm.source(device, gpa, .{});
     defer gpa.free(m16_src);
     const m32_src = try affine_mm.source(device, gpa, .{ .out_f32 = true });
     defer gpa.free(m32_src);
-    jobs[generated.len + 6] = .{ .device = device, .source = m16_src, .names = &affine_mm.names, .out = &k.mm_bf16 };
-    jobs[generated.len + 7] = .{ .device = device, .source = m32_src, .names = &affine_mm.names, .out = &k.mm_f32 };
+    jobs[generated.len + 7] = .{ .device = device, .source = m16_src, .names = &affine_mm.names, .out = &k.mm_bf16 };
+    jobs[generated.len + 8] = .{ .device = device, .source = m32_src, .names = &affine_mm.names, .out = &k.mm_f32 };
     const kda_src = try std.mem.concat(gpa, u8, &.{ comptime kernelOf("kda_rows").source, sources.glm_kda_prompt });
     defer gpa.free(kda_src);
     var kda_out: [6]mtl.Pipeline = undefined;
-    jobs[generated.len + 8] = .{ .device = device, .source = kda_src, .names = &.{ "glm_kda_prep", "glm_kda_scan", "glm_kda_post", "glm_kda_prep_tp", "glm_kda_scan_tp", "glm_kda_post_tp" }, .out = &kda_out };
+    jobs[generated.len + 9] = .{ .device = device, .source = kda_src, .names = &.{ "glm_kda_prep", "glm_kda_scan", "glm_kda_post", "glm_kda_prep_tp", "glm_kda_scan_tp", "glm_kda_post_tp" }, .out = &kda_out };
     const sparse_src = try frags.source(device, gpa, sources.glm_sparse_nax);
     defer gpa.free(sparse_src);
     var sparse_out: [3]mtl.Pipeline = undefined;
-    jobs[generated.len + 9] = .{ .device = device, .source = sparse_src, .names = &.{ "glm_sparse_nax", "glm_sparse_split", "glm_sparse_combine" }, .out = &sparse_out };
+    jobs[generated.len + 10] = .{ .device = device, .source = sparse_src, .names = &.{ "glm_sparse_nax", "glm_sparse_split", "glm_sparse_combine" }, .out = &sparse_out };
     const absorb_src = try frags.source(device, gpa, sources.glm_absorb_nax);
     defer gpa.free(absorb_src);
-    jobs[generated.len + 10] = .{ .device = device, .source = absorb_src, .names = &.{"glm_absorb_nax"}, .out = @as(*[1]mtl.Pipeline, &k.absorb_nax) };
+    jobs[generated.len + 11] = .{ .device = device, .source = absorb_src, .names = &.{"glm_absorb_nax"}, .out = @as(*[1]mtl.Pipeline, &k.absorb_nax) };
     const hc_src = try hc.source(gpa, hc_shape);
     defer gpa.free(hc_src);
-    jobs[generated.len + 11] = .{ .device = device, .source = hc_src, .names = &hc.names, .out = &k.hc_core };
+    jobs[generated.len + 12] = .{ .device = device, .source = hc_src, .names = &hc.names, .out = &k.hc_core };
     const tp_heads = "#define GLM_HEADS 32\n"; // TP2: one Mac's MLA heads
     const sparse_tp_raw = try std.mem.concat(gpa, u8, &.{ tp_heads, sources.glm_sparse_nax });
     defer gpa.free(sparse_tp_raw);
     const sparse_tp_src = try frags.source(device, gpa, sparse_tp_raw);
     defer gpa.free(sparse_tp_src);
-    jobs[generated.len + 12] = .{ .device = device, .source = sparse_tp_src, .names = &.{"glm_sparse_nax"}, .out = @as(*[1]mtl.Pipeline, &k.sparse_nax_tp) };
+    jobs[generated.len + 13] = .{ .device = device, .source = sparse_tp_src, .names = &.{"glm_sparse_nax"}, .out = @as(*[1]mtl.Pipeline, &k.sparse_nax_tp) };
     const absorb_tp_raw = try std.mem.concat(gpa, u8, &.{ tp_heads, sources.glm_absorb_nax });
     defer gpa.free(absorb_tp_raw);
     const absorb_tp_src = try frags.source(device, gpa, absorb_tp_raw);
     defer gpa.free(absorb_tp_src);
-    jobs[generated.len + 13] = .{ .device = device, .source = absorb_tp_src, .names = &.{"glm_absorb_nax"}, .out = @as(*[1]mtl.Pipeline, &k.absorb_nax_tp) };
+    jobs[generated.len + 14] = .{ .device = device, .source = absorb_tp_src, .names = &.{"glm_absorb_nax"}, .out = @as(*[1]mtl.Pipeline, &k.absorb_nax_tp) };
     const index_src = try frags.source(device, gpa, sources.glm_index_nax);
     defer gpa.free(index_src);
     var index_out: [2]mtl.Pipeline = undefined;
-    jobs[generated.len + 14] = .{ .device = device, .source = index_src, .names = &.{ "glm_index_scores_nax", "glm_index_decode" }, .out = &index_out };
+    jobs[generated.len + 15] = .{ .device = device, .source = index_src, .names = &.{ "glm_index_scores_nax", "glm_index_decode" }, .out = &index_out };
     const shared_gu_src = comptime kernelOf("moe_gateup_1").source ++ instance("moe_gateup_1", "4096, 2048, 1, 8, 16, 128, 1, 4, 16, 8", "glm_shared_gateup");
     const shared_down_src = comptime kernelOf("moe_down_1").source ++ instance("moe_down_1", "2048, 4096, 1, 8, 16, 128, 1, 4, 16, 8", "glm_shared_down");
-    jobs[generated.len + 15] = .{ .device = device, .source = shared_gu_src, .names = &.{"glm_shared_gateup"}, .out = @as(*[1]mtl.Pipeline, &k.shared_gateup) };
-    jobs[generated.len + 16] = .{ .device = device, .source = shared_down_src, .names = &.{"glm_shared_down"}, .out = @as(*[1]mtl.Pipeline, &k.shared_down) };
+    jobs[generated.len + 16] = .{ .device = device, .source = shared_gu_src, .names = &.{"glm_shared_gateup"}, .out = @as(*[1]mtl.Pipeline, &k.shared_gateup) };
+    jobs[generated.len + 17] = .{ .device = device, .source = shared_down_src, .names = &.{"glm_shared_down"}, .out = @as(*[1]mtl.Pipeline, &k.shared_down) };
     const pick_slot = "const int u = PART == 1 ? MAXU : int(threadgroup_position_in_grid.z);"; // the shared expert: grid z rows * topk, past the routed ids
     const gu0_src = try std.mem.replaceOwned(u8, gpa, comptime kernelOf("moe_gateup_2").source ++ instance("moe_gateup_2", "4096, 2048, 4, 8, 16, 128, 0, 4, 16, 8", "glm_moe_gateup_0"), pick_slot, "const int u = PART == 1 ? MAXU : (int(threadgroup_position_in_grid.z) == int(X_shape[0]) * TOPK ? MAXU : int(threadgroup_position_in_grid.z));");
     defer gpa.free(gu0_src);
     const down0_src = try std.mem.replaceOwned(u8, gpa, comptime kernelOf("moe_down_2").source ++ instance("moe_down_2", "2048, 4096, 4, 8, 16, 128, 0, 4, 16, 8", "glm_moe_down_0"), pick_slot, "const int u = PART == 1 ? MAXU : (int(threadgroup_position_in_grid.z) == int(ACT_shape[0]) * TOPK ? MAXU : int(threadgroup_position_in_grid.z));");
     defer gpa.free(down0_src);
     if (std.mem.indexOf(u8, gu0_src, pick_slot) != null or std.mem.indexOf(u8, down0_src, pick_slot) != null) return error.KernelCompile;
-    jobs[generated.len + 17] = .{ .device = device, .source = gu0_src, .names = &.{"glm_moe_gateup_0"}, .out = @as(*[1]mtl.Pipeline, &k.moe_gateup_0) };
-    jobs[generated.len + 18] = .{ .device = device, .source = down0_src, .names = &.{"glm_moe_down_0"}, .out = @as(*[1]mtl.Pipeline, &k.moe_down_0) };
+    jobs[generated.len + 18] = .{ .device = device, .source = gu0_src, .names = &.{"glm_moe_gateup_0"}, .out = @as(*[1]mtl.Pipeline, &k.moe_gateup_0) };
+    jobs[generated.len + 19] = .{ .device = device, .source = down0_src, .names = &.{"glm_moe_down_0"}, .out = @as(*[1]mtl.Pipeline, &k.moe_down_0) };
     const gu0_one = try std.mem.replaceOwned(u8, gpa, gu0_src, "<4096, 2048, 4, 8, 16, 128, 0, 4, 16, 8>", "<4096, 2048, 2, 8, 16, 128, 0, 4, 16, 8>");
     defer gpa.free(gu0_one);
     const down0_one = try std.mem.replaceOwned(u8, gpa, down0_src, "<2048, 4096, 4, 8, 16, 128, 0, 4, 16, 8>", "<2048, 4096, 2, 8, 16, 128, 0, 4, 16, 8>");
@@ -287,7 +290,8 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const comb_src = try std.mem.replaceOwned(u8, gpa, comb_a, "+ YS[size_t(r) * D + d];", "+ y[size_t(TOPK) * D];");
     defer gpa.free(comb_src);
     if (std.mem.eql(u8, comb_src, comb.source)) return error.KernelCompile; // the generated combine changed: its edit no longer applies
-    jobs[generated.len + 19] = .{ .device = device, .source = comb_src, .names = comb.functions, .out = @as(*[1]mtl.Pipeline, &k.combine_0) };
+    jobs[generated.len + 22] = .{ .device = device, .source = comb_src, .names = comb.functions, .out = @as(*[1]mtl.Pipeline, &k.combine_0) };
+
     var sources_seen = std.hash.Wyhash.init(0x6b);
     for (jobs) |j| sources_seen.update(j.source);
     k.source_hash = sources_seen.final();
@@ -307,6 +311,7 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     for (threads) |t| if (t) |th| th.join();
     for (jobs) |j| if (j.failed) return error.KernelCompile;
     inline for (glue, 0..) |g, i| @field(k, g.field) = glue_out[i];
+    k.sample = sample_out[0]; // the sampler's own library: glm_glue's table never named glm_sample
     k.latent_scores = attn_out[0];
     k.latent_values = attn_out[1];
     k.route_logits = route_out[0];

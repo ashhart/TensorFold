@@ -30,7 +30,16 @@ pub const Ctx = struct {
     draft_vocab: u32 = 154880, // the MTP head's tokens: the vocabulary's first this many
     m_row: u32 = 0, // the MTP head's logits row in m_logits (a rank log keeps each depth's in its own row)
     segs: []const Seg = &.{}, // a shared window's streams in row order (empty: every row is `s`'s)
+    draws: ?*const Draws = null, // the rows' draw rules in row order (null: every row draws greedily)
 };
+
+// The draw rules live in draw_rule.zig (Metal-free: the host references and the tests use them uncoupled).
+pub const Draws = @import("draw_rule.zig").Draws;
+pub const Rule = @import("draw_rule.zig").Rule;
+pub const ruleOf = @import("draw_rule.zig").ruleOf;
+pub const rulesFor = @import("draw_rule.zig").rulesFor;
+pub const parseSampling = @import("draw_rule.zig").parseSampling;
+pub const SamplingError = @import("draw_rule.zig").SamplingError;
 
 /// One stream's rows in a shared window: its caches, its first row, its rows and the position of the first.
 pub const Seg = struct { s: *st.State, row0: u32, rows: u32, pos: u32 };
@@ -457,13 +466,13 @@ pub fn backbone(x: *Ctx, e: mtl.ComputeEncoder, ids: Ref, rows: u32, pos: u32) v
     snap(x, e, sc.hidden, plane);
 }
 
-/// LM head logits and argmax for `rows` rows of `in` into `logits` and `picks` (u32).
+/// LM head logits and draws for `rows` rows of `in` into `logits` and `picks` (u32): each row its rule's draw.
 pub fn head(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, logits: Ref, picks: Ref, rows: u32) void {
-    headOver(x, e, in, logits, picks, rows, x.c.vocab);
+    headOver(x, e, in, logits, picks, rows, x.c.vocab, false);
 }
 
-/// `head` over the vocabulary's first `vocab` tokens (the MTP head's draft vocabulary: the most frequent BPE merges).
-pub fn headOver(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, logits: Ref, picks: Ref, rows: u32, vocab: u32) void {
+/// `head` over the first `vocab` tokens; `greedy` forces the MTP draft head's argmax draws.
+pub fn headOver(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, logits: Ref, picks: Ref, rows: u32, vocab: u32, greedy: bool) void {
     if (x.skip & Class.head != 0) return;
     const part = x.c.vocabPart(); // TP2: this Mac's half, its picks merged with the peer's
     const n: u32 = if (vocab > part[0]) @min(vocab, part[1]) - part[0] else 0;
@@ -471,10 +480,15 @@ pub fn headOver(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, logits: Ref, pick
         var q = x.w.head;
         q.n = n;
         qmv(x, e, if (x.c.tp > 1) x.k.qmv_head_tp else x.k.qmv_head, in, q, logits, rows);
-        e.setPipeline(x.k.argmax);
-        bind(e, 0, .{ logits, picks });
-        e.setValue(n, 2);
-        e.dispatchGroups(size(rows, 1, 1), size(1024, 1, 1));
+        const payload = @import("draw_rule.zig").Payload.init(if (greedy) null else x.draws, rows, vocab);
+        if (payload.sampled()) {
+            @import("draw_dispatch.zig").encode(e, x.k.sample, logits.buf, logits.off, picks.buf, picks.off, &payload);
+        } else {
+            e.setPipeline(x.k.argmax);
+            bind(e, 0, .{ logits, picks });
+            e.setValue(n, 2);
+            e.dispatchGroups(size(rows, 1, 1), size(1024, 1, 1));
+        }
     }
     if (x.c.tp > 1) x.ep.?.argmax(e, logits, picks, n, part[0], rows);
 }

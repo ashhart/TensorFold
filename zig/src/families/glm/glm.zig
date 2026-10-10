@@ -24,5 +24,6 @@ test {
     _ = @import("../../core/copy_index.zig");
     _ = @import("attn_check.zig");
     _ = @import("load_plan.zig");
+    _ = @import("draw_test.zig");
     _ = mirror;
 }

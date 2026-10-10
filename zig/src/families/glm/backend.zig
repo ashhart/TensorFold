@@ -8,6 +8,7 @@ const snapshot = @import("snapshot.zig");
 const Engine = @import("engine.zig").Engine;
 const be = lanes.backend;
 const Stream = lanes.Stream;
+const fwd = @import("forward.zig");
 
 /// One stream's window and a shared forward's rows, ms on the M5 Ultra pair (each stream's extra cost is learned).
 const window_costs = costTable(13.1, 3.5);
@@ -75,7 +76,7 @@ pub const Backend = struct {
         const b = self(ptr);
         const e = b.sl.e;
         if (e.followsPeer()) return error.FollowsPeer;
-        if (s.sampling) |p| if (p.temperature > 0) return error.GreedyOnly;
+        if (e.ep != null and s.sampling != null and s.sampling.?.temperature > 0) return error.SampledPeerUnsupported;
         const prompt = s.prompt();
         if (prompt.len == 0) return error.EmptyPrompt;
         if (prompt.len + s.max_new + st.max_rows + 1 > e.s.cap) return error.ContextFull;
@@ -98,13 +99,18 @@ pub const Backend = struct {
             } else s.reuse_failed = true;
         }
         var next: usize = 0; // the planned chunk starts: a resumed pass cuts where a fresh one does
+        // The first reply token's draw, keyed at P: the head's one output row is draws row 0, no prompt rule.
+        const draws = @import("draw_rule.zig").promptDraws(s.sampling, @intCast(prompt.len), e.c.vocab);
+        const sampled_prompt = draws.n > 0;
         while (at < prompt.len) {
             if (s.isCancelled()) return error.Cancelled; // the core releases the slot
             while (next < s.chunks.len and s.chunks[next] <= at) next += 1;
             const end: u32 = if (next < s.chunks.len) s.chunks[next] else @intCast(prompt.len);
             const n = b.sl.chunkRows(at, end);
             try mirror.send(e, .chunk, &.{ i, at, n });
-            try b.sl.chunk(i, at, n);
+            // Only the prompt's final chunk draws a token (its head runs): its last pass row takes the rule.
+            const chunk_draws: ?*const fwd.Draws = if (sampled_prompt and at + n == prompt.len) &draws else null;
+            try b.sl.chunk(i, at, n, chunk_draws);
             at += n;
             if (std.mem.indexOfScalar(u32, s.reuse.marks, at) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, at);
         }
@@ -280,9 +286,10 @@ pub const Backend = struct {
             try b.wins.append(b.gpa, .{ .slot = i, .pending = w.pending, .held = w.held, .tokens = w.tokens });
         }
         if (total > st.max_rows) return error.WindowOutOfStep;
+        const draws = @import("draw_rule.zig").windowDraws(windows, b.sl.e.c.vocab);
         try mirror.windowWords(&b.words, b.gpa, b.sl.digest, b.wins.items);
         try mirror.send(b.sl.e, .window, b.words.items);
-        try b.sl.window(b.wins.items);
+        try b.sl.window(b.wins.items, &draws);
         const picks = Engine.u32s(b.sl.e.sc.picks, total);
         var row: usize = 0;
         for (windows, out, b.wins.items) |w, o, win| {
