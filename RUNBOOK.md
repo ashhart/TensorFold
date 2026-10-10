@@ -123,6 +123,8 @@ bin/tensorfold-native serve "$HOME/models/glm-5.3-flash" \
 ```
 
 Run each command on its own Mac and send requests to rank 0.
+Run the same release on both Macs: the pair now agrees on learned-state disk space before either Mac writes, and each Mac refuses a peer from an earlier release.
+With `--learn`, states learned by an earlier release are refused when read and learned again.
 Each settings file names `rank`, `library` and `links`; each link names its peer, RDMA device, interface/address, ports and link name.
 [Speed-up settings](docs/speed-up-mode.md#5-write-the-settings-files) has the schema and link setup.
 The recording command in that guide is the setup its two-Mac Flash Next numbers were measured with; on one Mac, ordinary
