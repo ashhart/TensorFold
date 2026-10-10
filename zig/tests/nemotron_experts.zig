@@ -9,7 +9,7 @@ const E = 128; // experts a layer
 const TOPK = 6;
 const GS = 64;
 const LAYERS = 4; // weight sets streamed per timing (each ~718 MB: nothing stays cached)
-const widths = [_]usize{ 1, 2, 3, 4, 8, 16, 32, 64 };
+const widths = [_]usize{ 1, 2, 3, 4, 8, 16, 32, 64, 128 };
 
 /// A pass shape: member rows a pass (mix: MB, pairs, singles; words: tf_experts_w), outputs a simdgroup, simdgroups.
 const Variant = struct { name: []const u8, mb: usize, rps: usize, sg: usize, mix: bool, words: bool = false };
@@ -128,7 +128,7 @@ const Route = struct {
     members: [LAYERS]mtl.Buffer,
     ucount: [LAYERS]i32,
     distinct: usize = 0,
-    ids0: [64 * TOPK]u32 = undefined, // layer 0's experts by pair (row * 6 + k)
+    ids0: [widths[widths.len - 1] * TOPK]u32 = undefined, // layer 0's experts by pair (row * 6 + k)
 
     /// Each row's 6 experts drawn without replacement from a Zipf-like popularity (s = 1), a fresh expert order a layer.
     fn init(d: mtl.Device, rows: usize, rng: std.Random) !Route {
