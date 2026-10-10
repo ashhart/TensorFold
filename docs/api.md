@@ -215,9 +215,18 @@ is complete; a reply cut at `max_tokens` is incomplete, with `finish_reason: "le
 32 blank characters between two tokens (pretty-printing fits; a run of blank lines does not), so a model cannot fill
 its reply with whitespace inside an unfinished value.
 
+The native server enforces the same fields with the same grammars through `libtfgrammar`, a small C ABI over
+xgrammar's C++ library (`zig/src/grammar/tf_grammar.cc`). Build it from an xgrammar v0.2.8 checkout with
+`zig build grammar -Dxgrammar=DIR` (`git clone --branch v0.2.8 --recurse-submodules
+https://github.com/mlc-ai/xgrammar`); it lands in `zig-out/native/lib` beside the server's `bin`, where the server
+looks first. The server loads it on the first structured request, and builds and serves text without it. The lane core
+keeps each stream's grammar: it cuts the drafts the grammar rejects and hands the backend one allowed-token bitmask per
+remaining row, so drafted, `"draft": false` and concurrent replies are the same. The Qwen3.5-2B engine on Metal
+enforces it; other native engines answer a structured request with HTTP 400.
+
 HTTP 400 comes before any token for a malformed field, a grammar xgrammar cannot compile (with xgrammar's reason), a
-server without xgrammar (with the install command), and a grammar sent with `tool_choice: "required"` or a named
-function. A reply whose grammar fails while decoding ends with HTTP 500 (an error event when streaming); the other
+server without xgrammar (with the install command; on the native server, a server that cannot load `libtfgrammar`),
+and a grammar sent with `tool_choice: "required"` or a named function. A reply whose grammar fails while decoding ends with HTTP 500 (an error event when streaming); the other
 requests go on.
 
 ## Reasoning
