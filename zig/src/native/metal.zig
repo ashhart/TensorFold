@@ -166,8 +166,12 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         h.host.info_.prompt_cache = true;
     }
     errdefer if (h.cache) |*store| store.deinit();
+    h.learned = null;
     if (o.learn) |root| {
-        h.learned = try learnedStates(a, io, o.dir, h.metal, root, @intFromFloat(o.learn_gib * (1 << 30)));
+        h.learned = learnedStates(a, io, o.dir, h.metal, root, @intFromFloat(o.learn_gib * (1 << 30))) catch |e| {
+            if (e == error.PromptTooLong) problem.* = "--learn keys its states with a 4,143-token prompt at startup: serve with --context 4096 or more, or without --learn";
+            return e;
+        };
         if (h.cache) |*store| store.imprint = &h.learned.?;
     }
     errdefer if (h.learned) |*im| im.deinit();
@@ -190,13 +194,14 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }
 
-/// Learned states under `root` by checkpoint, prefill step, head, kernel sources, probe bits, OS build and chip.
+/// Learned states under `root` by checkpoint, shards, prefill step, head, kernels, probe bits, OS build and chip.
 fn learnedStates(a: Allocator, io: std.Io, dir: []const u8, b: *nemotron.backend.Metal, root: []const u8, cap: u64) !api.prompt_imprint.Imprint {
     var h = std.hash.Wyhash.init(0x6e65);
     for ([_][]const u8{ "config.json", "model.safetensors.index.json" }) |name| {
         const path = try std.fs.path.join(a, &.{ dir, name });
         h.update(try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 26)));
     }
+    try shardStamps(&h, a, io, dir);
     if (b.head != null) h.update(try safetensorsHeader(a, dir, "mtp-4bit.safetensors"));
     const probe = try nemotron.learned_prompts.probe(b);
     for ([_]u64{ b.o.chunk, @intFromBool(b.head != null), nemotron.kernels.sourceHash(), probe }) |x| h.update(std.mem.asBytes(&x));
@@ -206,6 +211,26 @@ fn learnedStates(a: Allocator, io: std.Io, dir: []const u8, b: *nemotron.backend
     const m = try api.prompt_imprint.Imprint.open(b.gpa, root, h.final(), cap);
     std.log.info("nemotron: learned prompt states in {s} ({d} known, {d} of {d} MiB)", .{ m.dir, m.metas.items.len, m.total() >> 20, cap >> 20 });
     return m;
+}
+
+/// Each safetensors file's name, size, inode and change times: a weight written in place (--slide) moves the identity.
+fn shardStamps(h: *std.hash.Wyhash, a: Allocator, io: std.Io, dir: []const u8) !void {
+    var d = try std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
+    defer d.close(io);
+    var names: std.ArrayList([]const u8) = .empty;
+    var it = d.iterate();
+    while (try it.next(io)) |e| if (std.mem.endsWith(u8, e.name, ".safetensors")) try names.append(a, try a.dupe(u8, e.name));
+    std.mem.sort([]const u8, names.items, {}, struct {
+        fn lt(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.lessThan(u8, x, y);
+        }
+    }.lt);
+    for (names.items) |name| {
+        const info = try d.statFile(io, name, .{});
+        const stamp = [4]i128{ info.size, info.inode, info.mtime.nanoseconds, info.ctime.nanoseconds };
+        h.update(name);
+        h.update(std.mem.sliceAsBytes(&stamp));
+    }
 }
 
 /// A safetensors file's header (its tensors' names, shapes and offsets), in `a`.
@@ -335,4 +360,34 @@ test "a qwen3_5 checkpoint opens the 27B engine unless it has the 2B's geometry 
         try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = c.config });
         try std.testing.expectEqual(c.big, qwen27Engine(a, io, dir));
     }
+}
+
+test "a shard rewritten in place, same size and bytes, gives the learned states a new identity" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try tmp.dir.writeFile(io, .{ .sub_path = "model-00001-of-00001.safetensors", .data = "weights" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "notes.txt", .data = "not a shard" });
+    var first = std.hash.Wyhash.init(0);
+    try shardStamps(&first, a, io, dir);
+    var again = std.hash.Wyhash.init(0);
+    try shardStamps(&again, a, io, dir);
+    try std.testing.expectEqual(first.final(), again.final());
+    try tmp.dir.writeFile(io, .{ .sub_path = "notes.txt", .data = "other text" }); // not a shard: no change
+    var notes = std.hash.Wyhash.init(0);
+    try shardStamps(&notes, a, io, dir);
+    try std.testing.expectEqual(first.final(), notes.final());
+    std.Io.sleep(io, .fromMilliseconds(5), .awake) catch {};
+    const path = try std.fmt.allocPrintSentinel(a, "{s}/model-00001-of-00001.safetensors", .{dir}, 0);
+    const fd = std.c.open(path, .{ .ACCMODE = .WRONLY }, @as(std.c.mode_t, 0));
+    try std.testing.expect(fd >= 0);
+    try std.testing.expectEqual(@as(isize, 7), std.c.pwrite(fd, "weights", 7, 0)); // as Sliding Weights writes a tensor of the same size
+    _ = std.c.close(fd);
+    var moved = std.hash.Wyhash.init(0);
+    try shardStamps(&moved, a, io, dir);
+    try std.testing.expect(first.final() != moved.final());
 }
