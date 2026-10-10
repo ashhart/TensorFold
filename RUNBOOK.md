@@ -151,7 +151,7 @@ Python 0.6.6 remains a separate release line.
 | Model cannot open | Complete checkpoint files, supported geometry/quantization and the model path or existing cache. |
 | Client cannot connect | Server log, `/health`, base URL, model ID, listen address and API key. |
 | CUDA kernel assets missing | Bundled `share/tensorfold/cuda/sm121/`, or `TENSORFOLD_CUDA_KERNELS`. |
-| Pair waits for its peer | Start rank 1 first; check rank, peer, library path, devices, addresses and matching ports. |
+| Pair waits for its peer | Start rank 1 first; check rank, peer, library path, devices, addresses and matching ports. On macOS, run both servers attached to a session or allow them Local Network access. |
 | Packed Metal runtime compilation fails | 1.0.0 probes and selects its prebuilt fallback; include chip, macOS version and startup error in a report. |
 
 For a bug report, include the version, checkpoint revision, public reproducing request, exact command and relevant startup/request logs.

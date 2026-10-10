@@ -7,6 +7,7 @@ the Python 0.6.6 engine, maintained on [`python-0.6`](https://github.com/ashhart
 They are not the native Zig release's support matrix.
 
 The native binary registers only Nemotron on CUDA, qualified on NVIDIA GB10 and on Ampere cards with compute capability 8.6 (the RTX 30 series, RTX A6000, A10 and A40).
+A user's receipt for 1.0.4 on a bare-metal RTX 3090, at 225 W and 350 W, is in [#592](https://github.com/ashhart/TensorFold/issues/592).
 GLM-5.3-Flash on CUDA, EXL3 loading and DFlash2 drafting remain Python-engine features, not native upgrade paths.
 Inspect the installed binary with `tensorfold-native --version` and `tensorfold-native capabilities --json`.
 See the [qualified models](../../README.md#qualified-models) and

@@ -303,7 +303,7 @@ fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
     defer pool.pop();
     var why: []const u8 = "";
     const h = flashnext.open(gpa, io, o.dir, dump, window, o.speed_up, o.prompt_cache_gib, o.prompt_cache_over_cap, a, &why) catch |e| {
-        problem.* = tf.flashnext_engine.quantizationProblem(e) orelse if (e == error.CacheOverCap) why else try std.fmt.allocPrint(a, "the native Flash Next engine cannot load {s} with {s} ({s})", .{ o.dir, dump orelse "(none: the checked-in kernels)", @errorName(e) });
+        problem.* = tf.flashnext_engine.quantizationProblem(e) orelse if (e == error.CacheOverCap) why else if (linkProblem(e)) |link| try std.fmt.allocPrint(a, "the native Flash Next engine cannot load {s}: {s}", .{ o.dir, link }) else try std.fmt.allocPrint(a, "the native Flash Next engine cannot load {s} with {s} ({s})", .{ o.dir, dump orelse "(none: the checked-in kernels)", @errorName(e) });
         return null;
     };
     return .{ .engine = h.engine(), .close = flashnext.close, .ctx = h };
@@ -312,6 +312,16 @@ fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
 test {
     _ = flashnext;
     _ = @import("cache_fit.zig");
+}
+
+/// What a two-Mac link that never connected asks of whoever starts the servers; null for any other error.
+fn linkProblem(e: anyerror) ?[]const u8 {
+    return if (e == error.ConnectFailed) "the other Mac never answered on the link (ConnectFailed). Start both ranks with their own settings file, each link's via naming the other Mac's address on the cable, and run both attached to a session or with Local Network access allowed in System Settings: macOS drops the packets of a server started detached, such as with nohup over SSH" else null;
+}
+
+test linkProblem {
+    try std.testing.expect(std.mem.indexOf(u8, linkProblem(error.ConnectFailed).?, "Local Network") != null);
+    try std.testing.expect(linkProblem(error.OutOfMemory) == null);
 }
 
 /// GLM-5.3-Flash's caches hold this many tokens unless --context asks otherwise (its window is 1,048,576).
@@ -327,7 +337,7 @@ fn openGlm(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]co
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const h = glm.open(gpa, io, o.dir, @intCast(window), o.speed_up, o.lanes, o.lanes_fixed, o.prompt_cache_gib, o.learn, @intFromFloat(o.learn_gib * (1 << 30))) catch |e| {
-        problem.* = try std.fmt.allocPrint(a, "the native GLM-5.3-Flash engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
+        problem.* = if (linkProblem(e)) |link| try std.fmt.allocPrint(a, "the native GLM-5.3-Flash engine cannot load {s}: {s}", .{ o.dir, link }) else try std.fmt.allocPrint(a, "the native GLM-5.3-Flash engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
         return null;
     };
     return .{ .engine = h.engine(), .close = glm.close, .ctx = h };

@@ -7,8 +7,8 @@ request beside it. It needs the native Zig server (`tensorfold-native`) with the
 MCDMA for the Thunderbolt link. [The speed-up mode guide](../speed-up-mode.md) walks through the setup step by step,
 with this build's speeds.
 
-Those numbers use a recorded dump. The 1.0.x release binary loads Flash Next without one, but its two-Mac path has not
-passed that gate yet ([#567](https://github.com/ashhart/TensorFold/issues/567)).
+Those numbers use a recorded dump. The 1.0.x release binary loads Flash Next without one, and a user's pair connects
+and loads that way ([#567](https://github.com/ashhart/TensorFold/issues/567)), but that path has not passed the gate yet.
 
 ## What it gives
 
@@ -80,7 +80,8 @@ token about 2% sooner (up to 4% at 8k) and decode under 1% faster, since decode'
 ## Starting it
 
 Start both servers with the same model, dump and flags (a flag that changes decoding, such as `--no-drafts`, goes on
-both), rank 1 first or within five minutes of each other; each waits for the other before it loads on:
+both), rank 1 first or within five minutes of each other; each waits for the other before it loads. Rank 1, then
+rank 0:
 
 ```bash
 FZ_LANE=1 FZ_GDN=2 MCDMA_FABRIC_QOS=1 TF_FLASHNEXT_DUMP=$HOME/fn-dump \
@@ -93,6 +94,9 @@ FZ_LANE=1 FZ_GDN=2 MCDMA_FABRIC_QOS=1 TF_FLASHNEXT_DUMP=$HOME/fn-dump \
   zig-out/native/bin/tensorfold-native serve ~/models/flash-next-6bit --name flash-next \
   --speed-up rank0.json --temperature 0 --no-thinking --dashboard
 ```
+
+Run both attached to a terminal session, or allow them Local Network access in System Settings. A server started
+detached over SSH can't ask for that access, so macOS drops its packets and the ranks stop with `ConnectFailed`.
 
 Send requests to rank 0. Rank 1 refuses requests of its own and runs rank 0's as they come; a stop string or a
 cancel on rank 0 ends both Macs on the same round. Stopping rank 0 ends rank 1's part; stop rank 1's server

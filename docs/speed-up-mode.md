@@ -9,8 +9,9 @@ round and keeps only the ones the model would have produced itself. A reply can 
 because the two halves of one projection are added in a different order at the same fp32 precision.
 
 Our two-Mac numbers below come from this guide's setup, which replays a recorded dump (step 3). The 1.0.x release
-binary loads Flash Next without a dump, but its two-Mac path has not passed the same gate yet
-([#567](https://github.com/ashhart/TensorFold/issues/567)), so follow this guide's setup for speed-up mode until it has.
+binary loads Flash Next without a dump, and a user's two M5 Ultras connect and load that way
+([#567](https://github.com/ashhart/TensorFold/issues/567)), but that path has not passed the same gate yet, so follow
+this guide's setup for speed-up mode until it has.
 
 ## What you need
 
@@ -116,6 +117,11 @@ FZ_LANE=1 FZ_GDN=2 MCDMA_FABRIC_QOS=1 TF_FLASHNEXT_DUMP=$HOME/fn-dump \
 
 On rank 0, pass `--speed-up rank0.json` instead, and `--host 0.0.0.0` if other machines will connect, with `--api-key`
 in that case.
+
+Run both servers attached to a terminal session, or allow `tensorfold-native` under System Settings > Privacy &
+Security > Local Network. macOS asks each program for Local Network access before it can reach the other Mac. A server
+started detached, for example with `nohup` over SSH after the session closes, can't ask, so macOS drops its packets and
+the ranks stop with `ConnectFailed` even though `fabric-check` passes.
 
 - `FZ_LANE=1 FZ_GDN=2` turn on the faster decode kernels. Replies are the same with or without them, and the speeds
   below were measured with them on.
