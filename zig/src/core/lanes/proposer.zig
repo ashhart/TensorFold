@@ -11,6 +11,10 @@ pub const Proposer = struct {
         propose: *const fn (ptr: *anyopaque, context: []const u32, max_draft: i64) anyerror![]const u32,
         last_match: *const fn (ptr: *anyopaque) i64,
         observe: ?*const fn (ptr: *anyopaque, proposed: i64, accepted: i64) void = null,
+        /// The proposer prices its own drafts: `propose`'s result is taken as is, no width, length or match gate.
+        priced: bool = false,
+        /// Every non-forced round of the stream, whatever drafted it: the window's rows and its drafts kept.
+        round: ?*const fn (ptr: *anyopaque, rows: u32, kept: u32) void = null,
     };
 
     /// Tokens valid until the next `propose`.
@@ -24,6 +28,10 @@ pub const Proposer = struct {
 
     pub fn observe(p: Proposer, proposed: i64, accepted: i64) void {
         if (p.vtable.observe) |f| f(p.ptr, proposed, accepted);
+    }
+
+    pub fn round(p: Proposer, rows: u32, kept: u32) void {
+        if (p.vtable.round) |f| f(p.ptr, rows, kept);
     }
 };
 

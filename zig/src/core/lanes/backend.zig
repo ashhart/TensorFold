@@ -102,7 +102,27 @@ pub const Backend = struct {
         prompt_rows: bool = false,
         /// The stream left the rounds: free its caches and held drafts.
         release: *const fn (ptr: *anyopaque, s: *Stream) void,
+        /// A prompt in pieces between rounds (`Rounds`) instead of `prefill`: begin, pieces, finish; null: whole only.
+        begin: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!Begun = null,
+        piece: ?*const fn (ptr: *anyopaque, s: *Stream, start: u64, end: u64, save: bool) anyerror!void = null,
+        finish: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!void = null,
+        /// `finish` minus the last row (Config.join_tail): true when that token is left for the first round.
+        join: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!bool = null,
+        /// A round's pieces in one call (Config.piece_runs), maybe one forward; a failure fails them all.
+        pieces: ?*const fn (ptr: *anyopaque, list: []const Piece) anyerror!void = null,
+        /// Before a round's `finish` / `join` calls (Config.replay_runs): their shared work in one go.
+        finals: ?*const fn (ptr: *anyopaque, streams: []const *Stream) anyerror!void = null,
     };
+
+    /// One stream's prompt rows [start, end) of a round (`save`: the prompt's snapshot right after them).
+    pub const Piece = struct { stream: *Stream, start: u64, end: u64, save: bool };
+
+    /// `begin`'s outcome: restored prefix tokens, or a damaged saved entry dropped (the prompt runs from 0).
+    pub const Begun = struct { cached: u64 = 0, damaged: bool = false };
+
+    pub fn pieces(b: Backend) bool {
+        return b.vtable.begin != null and b.vtable.piece != null and b.vtable.finish != null;
+    }
 
     pub fn prefill(b: Backend, s: *Stream) !void {
         return b.vtable.prefill(b.ptr, s);

@@ -4,6 +4,7 @@ const accept = @import("accept.zig");
 const alloc = @import("allocate.zig");
 const be = @import("backend.zig");
 const depth = @import("depth.zig");
+const trim = @import("trim.zig");
 const fill = @import("fill.zig");
 const shape = @import("shape.zig");
 const ev = @import("events.zig");
@@ -137,6 +138,7 @@ pub fn copyProposal(e: *Engine, s: *Stream) ![]const u32 {
     const p = s.proposer orelse return &.{};
     if (e.cfg.max_copy == 0 or s.force.items.len > 0) return &.{};
     if (e.alone and !e.cfg.lone_copies) return &.{};
+    if (p.vtable.priced) return p.propose(s.context.items, @min(@as(i64, e.cfg.max_copy), s.draftRoom() - 1)) catch &.{};
     const width: u32 = if (e.alone) (s.copy_width orelse e.cfg.first_copy) else e.cfg.first_copy;
     const copied = p.propose(s.context.items, @min(@as(i64, width), s.draftRoom() - 1)) catch return &.{};
     if (copied.len < 2 or p.lastMatch() < e.cfg.enter_match) return &.{};
@@ -166,6 +168,7 @@ pub fn anySampled(plans: []const Plan) bool {
 
 /// Trim draft prefixes by landing probability to the shared width with the most expected tokens a ms.
 pub fn allocate(e: *Engine, plans: []Plan) !void {
+    if (e.trim) |t| return trimmed(e, plans, t);
     const a = e.arena.allocator();
     const fixed = try a.alloc(u32, plans.len);
     const probs = try a.alloc([]const f64, plans.len);
@@ -207,6 +210,37 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
         r.* = .{ .list = pair };
     }
     try trail.event(e, &.{ f("ev", trail.str("alloc")), f("plans", .{ .list = rows }) });
+}
+
+/// A family's row policy decides each head window's drafts (lanes/trim.zig); other windows run whole.
+fn trimmed(e: *Engine, plans: []Plan, t: trim.Trim) !void {
+    const a = e.arena.allocator();
+    const asks = try a.alloc(trim.Window, plans.len);
+    for (asks, plans) |*w, p| w.* = .{ .stream = p.stream, .drafted = p.kind == .head, .rows = @intCast(1 + p.count()), .parents = p.parents };
+    const out = try a.alloc(trim.Choice, plans.len);
+    for (out, plans) |*o, p| o.* = .{ .count = @intCast(p.count()) };
+    try t.choose(asks, e.alone and plans.len == 1, a, out);
+    for (plans, out) |*p, c| {
+        if (p.kind != .head) continue;
+        if (c.nodes) |nodes| {
+            if (p.parents == null or p.held > 0) return error.TrimNodesNeedTree;
+            const sub = try trim.select(a, p.tokens, p.parents.?, nodes);
+            p.tokens = sub.tokens;
+            p.parents = if (accept.isChain(try accept.rowParents(a, 1 + sub.tokens.len, sub.parents))) null else sub.parents;
+        } else if (c.count == 0) {
+            p.kind = .none;
+            p.held = 0;
+            p.tokens = &.{};
+            p.parents = null;
+        } else if (c.count < p.count()) {
+            if (p.parents) |parents| {
+                const tree = try accept.sanitizeTree(a, p.tokens, parents, c.count);
+                p.tokens = tree.tokens;
+                p.parents = tree.parents;
+            } else if (p.held > 0) p.held = c.count else p.tokens = p.tokens[0..c.count];
+        }
+        if (p.count() == 0) p.kind = .none;
+    }
 }
 
 /// The head's chance for each held draft, else chain chances from the stream's per-depth acceptance.

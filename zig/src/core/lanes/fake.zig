@@ -53,6 +53,7 @@ pub const Fake = struct {
     answer_cycles: bool = false,
     prefill_chunks: usize = 0,
     prefill_count: usize = 0,
+    fail_pieces: usize = 0, // the next this many `piece` calls fail with error.Unbound
     prefill_hook: ?*const fn (ctx: *anyopaque, s: *Stream, chunk: usize) void = null,
     prefill_hook_ctx: ?*anyopaque = null,
     refuse_sampled: bool = false, // prefill refuses a sampled stream with error.SamplingRefused
@@ -61,6 +62,12 @@ pub const Fake = struct {
     fail_round: ?u64 = null, // this round's verify fails with error.GpuFailed, as a round the GPU fails does
     last_rows: usize = 0, // the last verify's rows, for test clocks
     last_sampled: bool = false, // and whether one of its streams drew keyed samples
+    pieces_run: usize = 0, // prompt pieces run (`pieceBackend`)
+    joins: usize = 0, // prompts whose last token joined a round (`joinBackend`)
+    drafts_calls: usize = 0, // `draft` calls, and the most requests one took
+    drafts_most: usize = 0,
+    fail_runs: usize = 0, // the next this many `pieces` calls fail with error.Unbound (`runBackend`)
+    runs: usize = 0, // `pieces` calls that ran
 
     pub fn deinit(x: *Fake) void {
         var it = x.lanes.valueIterator();
@@ -82,6 +89,66 @@ pub const Fake = struct {
     /// The same target filling its prompt a chunk a call (`prefill_chunks`), as a backend with `prefill_step`.
     pub fn stepped(x: *Fake) be.Backend {
         return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .prefill_step = prefillStep, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .features = features, .release = release, .first_row = firstRow } };
+    }
+
+    /// The backend with prompts in pieces (begin / piece / finish) beside whole prompts.
+    pub fn pieceBackend(x: *Fake) be.Backend {
+        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .begin = begin, .piece = piece, .finish = finish } };
+    }
+
+    /// `pieceBackend` whose prompts may leave their last token to the stream's first round (Config.join_tail).
+    pub fn joinBackend(x: *Fake) be.Backend {
+        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .begin = begin, .piece = piece, .finish = finish, .join = join } };
+    }
+
+    /// `joinBackend` that takes a round's pieces in one call (Config.piece_runs): a piece at a time, or a failure.
+    pub fn runBackend(x: *Fake) be.Backend {
+        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .begin = begin, .piece = piece, .finish = finish, .join = join, .pieces = pieces } };
+    }
+
+    fn pieces(ptr: *anyopaque, list: []const be.Backend.Piece) anyerror!void {
+        const x = self(ptr);
+        if (x.fail_runs > 0) {
+            x.fail_runs -= 1;
+            return error.Unbound;
+        }
+        x.runs += 1;
+        for (list) |p| try piece(ptr, p.stream, p.start, p.end, p.save);
+    }
+
+    fn join(ptr: *anyopaque, s: *Stream) anyerror!bool {
+        const x = self(ptr);
+        if (x.lane(s).history.items.len + 1 != s.prompt_len) return error.PositionMismatch;
+        x.joins += 1;
+        return true;
+    }
+
+    fn begin(ptr: *anyopaque, s: *Stream) anyerror!be.Backend.Begun {
+        const x = self(ptr);
+        const got = try x.lanes.getOrPut(x.gpa, s);
+        if (got.found_existing) freeLane(x.gpa, got.value_ptr);
+        got.value_ptr.* = .{};
+        return .{};
+    }
+
+    fn piece(ptr: *anyopaque, s: *Stream, start: u64, end: u64, snapshot: bool) anyerror!void {
+        _ = snapshot;
+        const x = self(ptr);
+        if (x.fail_pieces > 0) {
+            x.fail_pieces -= 1;
+            return error.Unbound;
+        }
+        const h = &x.lane(s).history;
+        if (h.items.len != start or end + 1 > s.prompt_len) return error.PositionMismatch;
+        try h.appendSlice(x.gpa, s.prompt()[start..end]);
+        x.pieces_run += 1;
+    }
+
+    fn finish(ptr: *anyopaque, s: *Stream) anyerror!void {
+        const x = self(ptr);
+        const h = &x.lane(s).history;
+        if (h.items.len + 1 != s.prompt_len) return error.PositionMismatch;
+        try h.append(x.gpa, s.prompt()[s.prompt_len - 1]);
     }
 
     fn self(ptr: *anyopaque) *Fake {
@@ -293,6 +360,8 @@ pub const Fake = struct {
 
     fn draft(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
         const x = self(ptr);
+        x.drafts_calls += 1;
+        x.drafts_most = @max(x.drafts_most, requests.len);
         for (requests) |r| {
             const l = x.lane(r.stream);
             // the head reads the last verify's kept rows (a shared round drafts before its rollback)

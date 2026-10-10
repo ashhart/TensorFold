@@ -228,7 +228,13 @@ pub const Open = struct {
 };
 
 /// An opened engine; ``close`` stops its thread and frees its backend.
-pub const Opened = struct { engine: Engine, close: *const fn (ctx: *anyopaque) void, ctx: *anyopaque };
+pub const Opened = struct {
+    engine: Engine,
+    close: *const fn (ctx: *anyopaque) void,
+    ctx: *anyopaque,
+    /// A drain's deadline: rounds end at the next boundary, what is left fails with `reason`; null: `close` alone.
+    halt: ?*const fn (ctx: *anyopaque, reason: []const u8) void = null,
+};
 
 pub const Memory = struct { active: u64 = 0, cache: u64 = 0, peak: u64 = 0, pinned: u64 = 0 };
 
@@ -399,6 +405,8 @@ pub const LoneHooks = struct {
 
 /// The lane core served to the HTTP threads (lane_host.zig).
 pub const LaneHost = @import("lane_host.zig").LaneHost;
+/// An opt-in family round planner for the lane host, in place of its `prefill_step` chunks (lane_rounds.zig).
+pub const Rounds = @import("lane_host.zig").Rounds;
 
 /// Exact prompt reuse between requests, for any family (prompt_cache.zig).
 pub const prompt_cache = @import("prompt_cache.zig");
@@ -418,6 +426,8 @@ pub const keepalive = @import("keepalive.zig");
 test {
     _ = @import("lane_host.zig");
     _ = @import("lane_host_test.zig");
+    _ = @import("lane_rounds_test.zig");
+    _ = @import("lane_halt_test.zig");
     _ = @import("lane_host_reuse_test.zig");
     _ = @import("lane_host_warm_test.zig");
     _ = @import("lane_host_fill_test.zig");
