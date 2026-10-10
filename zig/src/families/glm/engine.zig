@@ -12,6 +12,8 @@ const kernels = @import("kernels.zig");
 const ep_mod = @import("ep.zig");
 const CopyIndex = @import("../../core/copy_index.zig").CopyIndex;
 const checks = @import("checks.zig");
+const load_plan = @import("load_plan.zig");
+const plain_rounds = @import("plain_rounds.zig");
 const Ref = wts.Ref;
 
 pub const Reason = enum { stop, length, cancelled };
@@ -131,7 +133,7 @@ pub const Engine = struct {
         e.c = try cfg.parse(gpa, f.bytes[0..f.size]);
         if (e.draft_vocab == 0 or e.draft_vocab > e.c.vocab) e.draft_vocab = e.c.vocab;
         e.draft_vocab -= e.draft_vocab % 4; // the head's kernel takes four rows a simdgroup
-        const model = try modelHash(gpa, dir, f.bytes[0..f.size]);
+        const model = try load_plan.modelHash(gpa, dir, f.bytes[0..f.size]);
         e.model_hash = model;
         if (std.c.getenv("GLM_LAYERS")) |v| try cfg.subset(&e.c, std.fmt.parseInt(u32, std.mem.span(v), 10) catch return error.BadLayerCount);
         if (std.c.getenv("GLM_MTP")) |v| if (v[0] == '0') { // no MTP head: no drafts, its ~4 GB left on disk
@@ -157,13 +159,13 @@ pub const Engine = struct {
             gpa.destroy(e.k);
         }
         const chunked = if (std.c.getenv("GLM_PROMPT")) |v| v[0] != '0' else true;
-        const limit = loadLimit();
-        var plan_bytes = try planBytes(gpa, e.device, dir, &e.c);
-        if (e.c.mtp > 0 and link == null and plan_bytes + try leastArena(gpa, &e.c, cap, chunked) > limit) { // one Mac: the MTP head stays on disk when only it passes the limit
+        const limit = load_plan.loadLimit();
+        var plan_bytes = try load_plan.planBytes(gpa, e.device, dir, &e.c);
+        if (e.c.mtp > 0 and link == null and plan_bytes + try load_plan.leastArena(gpa, &e.c, cap, chunked) > limit) { // one Mac: the MTP head stays on disk when only it passes the limit
             var lean = e.c;
             lean.mtp = 0;
-            const lean_bytes = try planBytes(gpa, e.device, dir, &lean);
-            if (lean_bytes + try leastArena(gpa, &lean, cap, chunked) <= limit) {
+            const lean_bytes = try load_plan.planBytes(gpa, e.device, dir, &lean);
+            if (lean_bytes + try load_plan.leastArena(gpa, &lean, cap, chunked) <= limit) {
                 std.log.info("glm: the MTP head would pass this Mac's {d:.1} GB load limit (70% of RAM); loading without it (no MTP drafts, copy drafts stay)", .{@as(f64, @floatFromInt(limit)) / 1e9});
                 e.c = lean;
                 plan_bytes = lean_bytes;
@@ -178,7 +180,7 @@ pub const Engine = struct {
         e.prompt_ids = try e.arena.buffer(@as(usize, cap) * 4);
         e.pick_ring = try e.arena.buffer(256);
         if (chunked and (link == null or e.c.byRows())) {
-            const rows = chunkHeight(gpa, &e.c, &e.sc, cap, plan_bytes + e.arena.bytes, limit, link != null);
+            const rows = load_plan.chunkHeight(gpa, &e.c, &e.sc, cap, plan_bytes + e.arena.bytes, limit, link != null);
             e.pr = try prompt_mod.init(gpa, &e.arena, e.device, &e.c, &e.sc, e.k, cap, rows);
             e.chunk_rows = @min(e.chunk_rows, rows);
         }
@@ -222,55 +224,6 @@ pub const Engine = struct {
         }
         e.load_seconds = @as(f64, @floatFromInt(std.c.mach_absolute_time() - t0)) / 24e6;
         return e;
-    }
-
-    /// The checkpoint's identity for a peer: its config and weight index, hashed.
-    fn modelHash(gpa: std.mem.Allocator, dir: []const u8, config: []const u8) !u64 {
-        const path = try std.fmt.allocPrintSentinel(gpa, "{s}/model.safetensors.index.json", .{dir}, 0);
-        defer gpa.free(path);
-        const f = try mtl.MappedFile.open(path);
-        defer f.deinit();
-        var h = std.hash.Wyhash.init(0x474c4d);
-        h.update(config);
-        h.update(f.bytes[0..f.size]);
-        return h.final();
-    }
-
-    /// The weights' plan from the headers: names, dtypes, shapes and bytes, nothing read.
-    fn planBytes(gpa: std.mem.Allocator, device: mtl.Device, dir: []const u8, c: *const cfg.Config) !usize {
-        const plan = try wts.load(gpa, device, dir, c, 16, true);
-        defer gpa.destroy(plan);
-        defer plan.deinit();
-        return plan.bytes;
-    }
-
-    /// The fewest bytes of caches and buffers a load of `cap` tokens takes (the shortest prompt chunks), counted, not allocated.
-    fn leastArena(gpa: std.mem.Allocator, c: *const cfg.Config, cap: u32, chunked: bool) !usize {
-        var dry: st.Arena = .{ .device = undefined, .gpa = gpa, .dry = true };
-        const both = try st.init(&dry, c, cap);
-        const chunk = if (chunked) prompt_mod.chunkBytes(gpa, c, &both.scratch, cap, prompt_mod.heights[prompt_mod.heights.len - 1]) else 0;
-        return dry.bytes + @as(usize, cap) * 4 + 256 + chunk;
-    }
-
-    /// The tallest prompt chunk whose buffers fit under `limit` beside `used` bytes (expert parallel: one exchange's rows).
-    fn chunkHeight(gpa: std.mem.Allocator, c: *const cfg.Config, sc: *const st.Scratch, cap: u32, used: usize, limit: usize, ep: bool) u32 {
-        for (prompt_mod.heights) |h| {
-            if (ep and h > ep_mod.PROMPT_ROWS) continue;
-            if (used + prompt_mod.chunkBytes(gpa, c, sc, cap, h) <= limit) return h;
-        }
-        return prompt_mod.heights[prompt_mod.heights.len - 1];
-    }
-
-    /// The most this Mac may load: 70% of its RAM in GiB, read as GB (the floor's 179 GB on a 256 GiB Mac, the strict
-    /// reading); GLM_LOAD_LIMIT_GB sets it on a Mac cleared for more, never past 70% of the RAM's bytes.
-    pub fn loadLimit() usize {
-        var mem: u64 = 0;
-        var len: usize = @sizeOf(u64);
-        if (std.c.sysctlbyname("hw.memsize", &mem, &len, null, 0) != 0 or mem == 0) return 0;
-        const ram: f64 = @floatFromInt(mem);
-        const asked: f64 = if (std.c.getenv("GLM_LOAD_LIMIT_GB")) |v| std.fmt.parseFloat(f64, std.mem.span(v)) catch 0 else 0;
-        if (asked > 0) return @intFromFloat(@min(asked * 1e9, ram * 0.7));
-        return @intFromFloat(ram / (1 << 30) * 0.7 * 1e9);
     }
 
     /// The KDA decay rates A = exp(A_log) with MLX's Exp, on the GPU.
@@ -428,84 +381,7 @@ pub const Engine = struct {
     pub const profile = checks.profile;
     pub const checkMatmul = checks.checkMatmul;
     pub const profilePrompt = checks.profilePrompt;
-
-    /// A committed plain round: its command buffer and when its encoding began.
-    const Pending = struct { cb: mtl.CommandBuffer, t_enc: u64, committed: u64 };
-
-    /// One plain round at `pos`: its token from `from` (a pick the round before wrote; null: the ids buffer as set), its pick into `to`.
-    /// A round after another waits on the fence the one before updated, not on the engine's shared event.
-    fn plainRound(e: *Engine, x: *fwd.Ctx, from: ?Ref, to: Ref, pos: u32) Pending {
-        const t_enc = std.c.mach_absolute_time();
-        const fence = e.round_fence.?;
-        const cb = e.queue.commandBuffer();
-        if (from == null and e.ev > 0) cb.waitFor(e.event, e.ev);
-        const b = .{ .cb = cb, .enc = cb.compute(.serial) };
-        if (from != null) fence.wait(b.enc);
-        if (from) |f| {
-            b.enc.setPipeline(x.k.copy_u32);
-            fwd.bind(b.enc, 0, .{ f, e.sc.ids });
-            b.enc.setValue(@as(u32, 1), 2);
-            b.enc.dispatchThreads(fwd.size(1, 1, 1), fwd.size(1, 1, 1));
-        }
-        fwd.backbone(x, b.enc, e.sc.ids, 1, pos);
-        fwd.head(x, b.enc, e.sc.hidden, e.sc.logits, to, 1);
-        fence.update(b.enc);
-        b.enc.end();
-        e.ev += 1;
-        b.cb.signal(e.event, e.ev);
-        b.cb.commit();
-        e.committed = std.c.mach_absolute_time();
-        return .{ .cb = b.cb, .t_enc = t_enc, .committed = e.committed };
-    }
-
-    fn waitRound(e: *Engine, p: Pending) !void {
-        p.cb.wait();
-        e.gpu = .{ p.cb.gpuStart(), p.cb.gpuEnd() };
-        if (p.cb.failure()) |msg| {
-            e.event.set(e.ev);
-            std.log.err("glm: command buffer failed: {s}", .{msg});
-            return error.GpuFailed;
-        }
-    }
-
-    /// Plain rounds with the next one committed before this one's pick is read: its token copied from that pick on the GPU.
-    /// A round past the reply's end is waited out and dropped: its cache row sits past `pos`, its KDA slots flip back.
-    fn plainRounds(e: *Engine, x: *fwd.Ctx, first: u32, max_tokens: usize, eos: []const u32, out: Out, res: *Result) !void {
-        if (e.round_fence == null) e.round_fence = try Fence.init(e.device);
-        u32s(e.sc.ids, 1)[0] = first;
-        var emitted: usize = 1;
-        var round: usize = 0;
-        var last_end: f64 = 0;
-        var cur = e.plainRound(x, null, e.pick_ring, e.s.pos);
-        while (true) {
-            const ahead = emitted + 1 < max_tokens and e.s.pos + 3 <= e.s.cap;
-            if (ahead) fwd.flipKda(x); // the next round reads this one's states, as the serial loop's next round would
-            const next: ?Pending = if (ahead) e.plainRound(x, e.pick_ring.at((round % 2) * 4), e.pick_ring.at(((round + 1) % 2) * 4), e.s.pos + 1) else null;
-            try e.waitRound(cur);
-            res.encode_seconds += @as(f64, @floatFromInt(cur.committed - cur.t_enc)) / 24e6;
-            res.gpu_seconds += e.gpu[1] - e.gpu[0];
-            if (last_end > 0) res.gap_seconds += @max(e.gpu[0] - last_end, 0);
-            last_end = e.gpu[1];
-            const tok = u32s(e.pick_ring, 2)[round % 2];
-            res.rounds += 1;
-            var stop = std.mem.indexOfScalar(u32, eos, tok) != null;
-            if (out.tokens(out.ctx, &.{tok})) stop = true;
-            emitted += 1;
-            res.generated = emitted;
-            e.s.pos += 1;
-            const quit: ?Reason = if (stop) .stop else if (emitted >= max_tokens) .length else if (out.cancelled(out.ctx)) .cancelled else if (e.s.pos + 2 > e.s.cap) .length else null;
-            if (quit) |q| {
-                if (next) |n| {
-                    try e.waitRound(n);
-                    fwd.flipKda(x);
-                }
-                res.reason = q;
-                return;
-            }
-            cur = next orelse return error.PipelineStalled;
-            round += 1;
-        }
-    }
+    pub const loadLimit = load_plan.loadLimit;
 
     /// One greedy reply. `depth` drafts a round (0: one token a round, the reference drafted replies must equal).
     pub fn generate(e: *Engine, prompt: []const u32, max_tokens: usize, eos: []const u32, depth: usize, out: Out) !Result {
@@ -581,7 +457,7 @@ pub const Engine = struct {
         }
         if (max_tokens <= 1) return res;
         if (d == 0 and e.ep == null and e.copy_min == 0 and e.margins == null) {
-            try e.plainRounds(&x, tok, max_tokens, eos, out, &res);
+            try plain_rounds.run(e, &x, tok, max_tokens, eos, out, &res);
             res.decode_seconds = @as(f64, @floatFromInt(std.c.mach_absolute_time() - t_prompt)) / 24e6;
             return res;
         }
