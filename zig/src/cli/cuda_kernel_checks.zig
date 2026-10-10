@@ -36,9 +36,9 @@ fn sameBytes(gpa: std.mem.Allocator, e: *nemotron.Engine, a: u64, b: u64, len: u
 pub fn check(gpa: std.mem.Allocator, e: *nemotron.Engine) !u8 {
     const clusters = try e.ctx.capability() >= 90; // qmm_group's cluster sum over K slices needs sm_90
     // GB10 serves with lane_gemv, but the gate must still exercise the split-K kernel on its weights.
-    var split = if (e.k.split == null) try kern.Split.init(e.ctx.d) else null;
+    var split = if (e.k.affine.split == null) try kern.Split.init(e.ctx.d) else null;
     defer if (split) |*sp| sp.deinit();
-    const checked_split = e.k.split orelse split.?;
+    const checked_split = e.k.affine.split orelse split.?;
     const w = &e.w;
     const Named = struct { name: []const u8, q: kern.QLinear };
     var named: std.ArrayList(Named) = .empty;

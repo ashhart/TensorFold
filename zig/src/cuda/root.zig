@@ -27,10 +27,12 @@ pub const kernels = @import("kernels.zig");
 pub const fp8 = @import("fp8.zig");
 pub const segments = @import("segments.zig");
 pub const grouped = @import("grouped.zig");
+pub const qlinear = @import("qlinear.zig");
 
 test {
     _ = @import("memory.zig");
     _ = @import("grouped.zig");
+    _ = @import("qlinear.zig");
     _ = launch;
     _ = abi;
     _ = aot;
