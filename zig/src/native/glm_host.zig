@@ -16,6 +16,9 @@ pub const Host = struct {
     eng: *ge.Engine,
     slots: glm.slots.Slots,
     back: glm.backend.Backend,
+    markers: [3]u32 = undefined, // the image wrapper's tokens (--vision): begin, image, end
+    video_markers: [3]u32 = undefined, // the video wrapper's: begin, video, end
+    video_open: api.VisionOpen = .{}, // the video limits the server was started with
     cfg: lanes.Config,
     wall: lanes.backend.WallClock,
     core: lanes.Engine,
@@ -79,8 +82,10 @@ fn learnedStates(gpa: Allocator, eng: *const ge.Engine, sl: *glm.slots.Slots, ro
 }
 
 /// A GLM-5.3-Flash checkpoint served: `window` tokens of cache a stream, warmed first (the pair: `speed_up`).
-pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: ?[]const u8, streams: u32, fixed: bool, cache_gib: ?f64, learn: ?[]const u8, learn_cap: u64, learn_floor: u64) !*Host {
-    const eng = try ge.Engine.loadWith(gpa, dir, window + 64, speed_up, learn != null);
+pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: ?[]const u8, streams: u32, fixed: bool, cache_gib: ?f64, learn: ?[]const u8, learn_cap: u64, learn_floor: u64, vision: ?api.VisionOpen) !*Host {
+    // a prompt's tower rows and images: the images' budget, and every video's frame groups beside it
+    const limits: ?glm.vision.Limits = if (vision) |v| .{ .image_tokens = v.image_tokens + v.video_tokens, .max_images = v.max_images + v.max_videos * ((v.max_frames + 1) / 2) } else null;
+    const eng = try ge.Engine.loadWith(gpa, dir, window + 64, speed_up, learn != null, limits);
     errdefer eng.deinit();
     var toks: [96]u32 = undefined;
     for (&toks, 0..) |*t, i| t.* = @intCast(1000 + i);
@@ -103,7 +108,18 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     h.wall = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.cfg, h.back.backend(), h.wall.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "glm-zig", .lanes = n, .context_window = window, .prefill_step = eng.chunk_rows, .greedy_only = true });
+    var offer: ?api.Vision = null;
+    if (eng.vision) |v| {
+        const o = vision.?;
+        h.markers = .{ v.c.image_start, v.c.image_token, v.c.image_end };
+        h.video_open = o;
+        offer = .{ .ctx = h, .prepare = prepareImage, .image_token = v.c.image_token, .markers = &h.markers, .image_tokens = o.image_tokens, .max_images = o.max_images };
+        if (v.c.video) |vm| {
+            h.video_markers = vm;
+            offer.?.video = .{ .prepare = prepareVideo, .video_token = vm[1], .group_open = v.c.image_start, .group_close = v.c.image_end, .markers = &h.video_markers, .video_tokens = o.video_tokens, .max_videos = o.max_videos, .max_frames = o.max_frames };
+        }
+    }
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "glm-zig", .lanes = n, .context_window = window, .prefill_step = eng.chunk_rows, .greedy_only = true, .vision = offer });
     h.cache = null;
     const budget = cacheBudget(eng, cache_gib);
     if (!eng.followsPeer() and budget > 0) {
@@ -131,6 +147,38 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     const role = if (eng.ep == null) "" else if (eng.followsPeer()) ", speed-up rank 1" else ", speed-up rank 0";
     std.log.info("GLM-5.3-Flash loaded in {d:.1} s ({d:.1} GB of weights{s}), context {d} tokens, {d} streams", .{ eng.load_seconds, @as(f64, @floatFromInt(eng.w.bytes)) / 1e9, role, window, n });
     return h;
+}
+
+/// Info.vision's prepare: an image's bytes to the tower's patches (families/glm/image.zig), on the HTTP thread.
+fn prepareImage(ctx: *anyopaque, a: Allocator, bytes: []const u8, max_tokens: u32) anyerror!api.PreparedImage {
+    const h: *Host = @ptrCast(@alignCast(ctx));
+    const p = try glm.image.prepare(a, bytes, h.eng.vision.?.c, max_tokens);
+    return .{ .pixels = p.pixels, .gh = p.gh, .gw = p.gw, .tokens = p.tokens, .hash = p.hash };
+}
+
+/// Info.vision's video offer: a decoded video's frames to the tower's frame groups (families/glm/video.zig), on the
+/// HTTP thread.
+fn prepareVideo(ctx: *anyopaque, a: Allocator, src: api.VideoSource, max_tokens: u32, max_frames: u32) anyerror!api.PreparedVideo {
+    const h: *Host = @ptrCast(@alignCast(ctx));
+    const Adapter = struct {
+        src: api.VideoSource,
+        fn decode(c: *anyopaque, indices: []const u32, sink: *glm.video.Sink) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(c));
+            const into = struct {
+                fn take(s: *anyopaque, k: usize, rgb: []const u8, w: u32, hh: u32, stride: usize) anyerror!void {
+                    const g: *glm.video.Sink = @ptrCast(@alignCast(s));
+                    try g.take(k, rgb, w, hh, stride);
+                }
+            }.take;
+            try self.src.decode(self.src.ctx, indices, .{ .ctx = sink, .take = into });
+        }
+    };
+    var ad: Adapter = .{ .src = src };
+    const s: glm.video.Source = .{ .frames = src.frames, .rate_num = src.rate_num, .rate_den = src.rate_den, .width = src.width, .height = src.height, .ctx = &ad, .decode = Adapter.decode };
+    const p = try glm.video.prepare(a, s, h.eng.vision.?.c, max_tokens, max_frames);
+    const groups = try a.alloc(api.PreparedImage, p.groups.len);
+    for (groups, p.groups) |*g, q| g.* = .{ .pixels = q.pixels, .gh = q.gh, .gw = q.gw, .tokens = q.tokens, .hash = q.hash };
+    return .{ .groups = groups, .times = p.times };
 }
 
 fn follow(h: *Host) void {

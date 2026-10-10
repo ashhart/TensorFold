@@ -435,7 +435,7 @@ pub fn backbone(p: *const Prompt, x: *fwd.Ctx, e: mtl.ComputeEncoder, ids: Ref, 
     std.debug.assert(x.sc == ss and M <= p.rows);
     const s = x.skip; // classes a profile leaves out
     const Class = fwd.Class;
-    if (s & Class.ends == 0) fwd.embed(x, e, ids, M);
+    if (s & Class.ends == 0) fwd.embed(x, e, ids, M, pos);
     const plane = @as(usize, M) * c.hidden * 2; // a trace's capture points: the decode backbone's
     fwd.snap(x, e, ss.h, plane);
     var pending = false;
@@ -497,6 +497,7 @@ pub fn mtp(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, h: Ref, n
     const L = &x.w.layers[c.layers];
     const m = x.w.mtp.?;
     fwd.embedRows(x, e, next, p.m_emb, M);
+    fwd.inject(x, e, p.m_emb, M, pos + 1); // the head reads each row's next token: an image's rows one place on
     fwd.rms(x, e, p.m_emb, m.enorm, p.m_eh, M, D, D, 2 * D, c.eps);
     fwd.rms(x, e, h, m.hnorm, p.m_eh.at(@as(usize, D) * 2), M, D, D, 2 * D, c.eps);
     qmm(p, e, p.m_eh, m.eh_proj, p.m_x, M);

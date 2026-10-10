@@ -130,10 +130,32 @@ pub const Tokenizer = struct {
         return a.dupe(u32, ids.items);
     }
 
+    /// `encode` with no added token matched: text that spells one (a quoted marker) is ordinary text.
+    pub fn encodePlain(t: *const Tokenizer, a: Allocator, text: []const u8) Error![]u32 {
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        var ctx = steps.Context{ .a = arena.allocator(), .matcher = .{ .a = arena.allocator() } };
+        var valid = text;
+        if (!std.unicode.utf8ValidateSlice(text)) {
+            var fixed: std.ArrayList(u8) = .empty;
+            try unicode.appendLossy(&fixed, ctx.a, text);
+            valid = fixed.items;
+        }
+        var ids: std.ArrayList(u32) = .empty;
+        if (valid.len > 0) try t.encodeTextWith(&ctx, valid, true, &ids, false);
+        return a.dupe(u32, ids.items);
+    }
+
     fn encodeText(t: *const Tokenizer, ctx: *steps.Context, text: []const u8, first: bool, ids: *std.ArrayList(u32)) Error!void {
+        return t.encodeTextWith(ctx, text, first, ids, true);
+    }
+
+    fn encodeTextWith(t: *const Tokenizer, ctx: *steps.Context, text: []const u8, first: bool, ids: *std.ArrayList(u32), added: bool) Error!void {
         var zero: usize = if (first) unicode.decodeAt(text, 0).len else 0;
         const normalized = if (t.normalizer) |*n| try n.apply(ctx, text, &zero) else text;
-        for (try t.splitAdded(ctx, &t.normalized, normalized)) |seg| {
+        const whole = [_]Segment{.{ .start = 0, .end = normalized.len, .id = null }};
+        const segs: []const Segment = if (added) try t.splitAdded(ctx, &t.normalized, normalized) else &whole;
+        for (segs) |seg| {
             if (seg.id) |id| {
                 try ids.append(ctx.a, id);
                 continue;

@@ -12,6 +12,9 @@ pub const slots = @import("slots.zig");
 pub const backend = @import("backend.zig");
 pub const mirror = @import("mirror.zig");
 pub const timing = @import("timing.zig");
+pub const vision = @import("vision.zig");
+pub const image = @import("image.zig");
+pub const video = @import("video.zig");
 
 test {
     _ = config;
@@ -28,4 +31,7 @@ test {
     _ = @import("page_cache.zig");
     _ = mirror;
     _ = timing;
+    _ = vision;
+    _ = image;
+    _ = video;
 }

@@ -49,11 +49,12 @@ pub const flags = [_]Flag{
     .{ .name = "--api-key-file", .native = true },
     .{ .name = "--metrics-open", .kind = .store_true, .native = true },
     .{ .name = "--dashboard", .kind = .store_true, .native = true },
-    .{ .name = "--vision", .kind = .store_true },
-    .{ .name = "--vision-urls", .kind = .store_true },
+    .{ .name = "--vision", .kind = .store_true, .native = true },
+    .{ .name = "--vision-urls", .kind = .store_true, .native = true },
     .{ .name = "--vision-offload", .kind = .store_true },
-    .{ .name = "--vision-max-images" },
-    .{ .name = "--vision-image-tokens" },
+    .{ .name = "--vision-max-images", .native = true },
+    .{ .name = "--vision-image-tokens", .native = true },
+    .{ .name = "--vision-video-tokens", .native = true },
     .{ .name = "--context", .native = true },
     .{ .name = "--speed-up", .native = true },
     .{ .name = "--max-tokens", .native = true },
@@ -167,6 +168,11 @@ pub const Args = struct {
     master: []const u8 = "",
     master_port: u16 = 29551,
     policy: []const u8 = "", // every --policy joined by commas
+    vision: bool = false, // image input (GLM-5.3-Flash): data-URL image_url parts in user messages
+    vision_urls: bool = false, // with --vision, public HTTPS image URLs too (media_fetch.zig)
+    vision_max_images: u32 = 4,
+    vision_image_tokens: u32 = 4096,
+    vision_video_tokens: u32 = 16384, // the visual tokens a request's videos share (the processor's max_image_tokens)
 };
 
 /// A usage error's message (argparse's ``error:`` line); the caller exits 2.
@@ -218,6 +224,7 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
     }
     out.model = model orelse return fail(u, a, "the following arguments are required: model", .{});
     try ranks(u, a, out);
+    if (out.vision_urls and !out.vision) return fail(u, a, "--vision-urls needs --vision", .{});
     out.alias = alias.items;
     out.api_key = keys.items;
     return out;
@@ -272,7 +279,19 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         const n = try int(u, a, name, v);
         if (n < 0) return fail(u, a, "argument --compact-keep: expected a token count from 0: '{s}'", .{v});
         out.compact_keep = @intCast(n);
-    } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--slide")) out.slide = true else if (is(name, "--slide-graph")) out.slide_graph = v else if (is(name, "--parallel")) out.parallel = v else if (is(name, "--backend")) out.backend = v;
+    } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--slide")) out.slide = true else if (is(name, "--slide-graph")) out.slide_graph = v else if (is(name, "--parallel")) out.parallel = v else if (is(name, "--backend")) out.backend = v else if (is(name, "--vision")) out.vision = true else if (is(name, "--vision-urls")) out.vision_urls = true else if (is(name, "--vision-max-images")) {
+        const n = try int(u, a, name, v);
+        if (n < 1 or n > 64) return fail(u, a, "argument --vision-max-images: expected 1 to 64 images: '{s}'", .{v});
+        out.vision_max_images = @intCast(n);
+    } else if (is(name, "--vision-video-tokens")) {
+        const n = try int(u, a, name, v);
+        if (n < 64 or n > 262144) return fail(u, a, "argument --vision-video-tokens: expected 64 to 262144 tokens: '{s}'", .{v});
+        out.vision_video_tokens = @intCast(n);
+    } else if (is(name, "--vision-image-tokens")) {
+        const n = try int(u, a, name, v);
+        if (n < 16 or n > 16384) return fail(u, a, "argument --vision-image-tokens: expected 16 to 16384 tokens: '{s}'", .{v});
+        out.vision_image_tokens = @intCast(n);
+    }
 }
 
 /// The CUDA build's --device and --segments; false for any other flag.
@@ -364,6 +383,7 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .master = args.master,
         .master_port = args.master_port,
         .policy = args.policy,
+        .vision = if (args.vision) .{ .image_tokens = args.vision_image_tokens, .max_images = args.vision_max_images, .video_tokens = args.vision_video_tokens } else null,
     };
 }
 
@@ -446,6 +466,10 @@ test "parse and capabilities share the table" {
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--compact-at", "0" }, &u));
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--compact-at", "2" }, &u));
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--compact-keep", "-1" }, &u));
+    const urls = try parse(a, &.{ "m", "--vision", "--vision-urls" }, &u);
+    try std.testing.expect(urls.vision and urls.vision_urls);
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--vision-urls" }, &u));
+    try std.testing.expectEqualStrings("--vision-urls needs --vision", u.message);
 }
 
 test "--device and --segments: CUDA builds serve them, values checked" {

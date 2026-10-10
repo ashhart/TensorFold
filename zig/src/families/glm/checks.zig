@@ -167,7 +167,7 @@ pub fn checkMatmul(e: *Engine, prompt: []const u32) !void {
     const out = try e.arena.buffer(@as(usize, rows) * N * 2);
     var x = e.ctx();
     const b = e.begin();
-    fwd.embed(&x, b.enc, e.prompt_ids, rows);
+    fwd.embed(&x, b.enc, e.prompt_ids, rows, 0);
     fwd.boundary(&x, b.enc, rows, false, L.hc.?[0], L.in_norm);
     fwd.qmv(&x, b.enc, e.k.qmv_kda_in, e.sc.normed, a.in_proj, out, rows);
     affine_mm.rowSums(b.enc, e.k.mm_bf16, 64, e.sc.normed, pr.sums, rows, a.in_proj.k);

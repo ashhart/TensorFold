@@ -4,10 +4,15 @@ const lanes = @import("lanes");
 const Allocator = std.mem.Allocator;
 
 /// The server's name for one request, unique while the process lives.
+pub const tfvideo = @import("tfvideo.zig");
+
 pub const Id = u64;
 
 /// One request's sampling (Python's exact_sampling.Sampling); a request without one decodes greedily.
 pub const Sampling = lanes.Sampling;
+
+/// One image of a request (``Request.images``): the tower's input and the placeholder rows its output replaces.
+pub const Image = lanes.stream.Image;
 
 /// A prompt's reproducible seed (``seed_for``), for requests that name none.
 pub const seedFor = lanes.sampling.seedFor;
@@ -76,7 +81,72 @@ pub const Request = struct {
     loop_guard: bool = false,
     /// Logprob rows for each reply token with this many best tokens (0..20), when ``Info.logprobs``; null: none.
     logprobs: ?u8 = null,
+    /// Images whose rows replace placeholder tokens of ``prompt``, in order; only an engine whose ``Info.vision`` is set.
+    images: []const Image = &.{},
+    /// The prompt as the prompt cache matches it (each image's placeholders by its content); empty: ``prompt``.
+    cache_key: []const u32 = &.{},
 };
+
+/// An image prepared for the engine's tower (``Vision.prepare``): patches, patch grid, tokens and a content hash.
+pub const PreparedImage = struct { pixels: []f32, gh: u32, gw: u32, tokens: u32, hash: u64 };
+
+/// Image input an engine serves (``Info.vision``): how the server turns an image's bytes into tower input and what
+/// a request may hold.
+pub const Vision = struct {
+    ctx: *anyopaque,
+    /// The image's bytes (any format the platform decodes) at most ``max_tokens`` tokens; allocated in ``a``.
+    prepare: *const fn (ctx: *anyopaque, a: Allocator, bytes: []const u8, max_tokens: u32) anyerror!PreparedImage,
+    /// The token the chat template writes once per image, expanded to the image's tokens.
+    image_token: u32,
+    /// The tokens the template wraps an image in (the image token among them): text that spells one stays text.
+    markers: []const u32 = &.{},
+    /// Image tokens one request may hold in all, and images.
+    image_tokens: u32,
+    max_images: u32,
+    /// Video input, when the engine's family reads it.
+    video: ?VideoOffer = null,
+};
+
+/// A video's facts as the server's decoder reads them, and its frames on request.
+pub const VideoSource = struct {
+    frames: u64, // the stream's frame count
+    rate_num: u64, // its average frame rate, num / den
+    rate_den: u64,
+    width: u32,
+    height: u32,
+    ctx: *anyopaque,
+    /// The frames at ``indices`` (ascending, distinct), each to ``sink`` in order.
+    decode: *const fn (ctx: *anyopaque, indices: []const u32, sink: FrameSink) anyerror!void,
+};
+
+/// Where a decoded frame goes: RGB rows of ``width`` * 3 bytes, ``stride`` bytes apart.
+pub const FrameSink = struct {
+    ctx: *anyopaque,
+    take: *const fn (ctx: *anyopaque, k: usize, rgb: []const u8, width: u32, height: u32, stride: usize) anyerror!void,
+};
+
+/// A video prepared for the tower: each group of frames an image, and each group's time in seconds.
+pub const PreparedVideo = struct { groups: []PreparedImage, times: []f64 };
+
+/// Video input an engine serves (``Vision.video``): how a decoded video becomes images and how the prompt holds them.
+pub const VideoOffer = struct {
+    /// ``src`` at most ``max_tokens`` tokens and ``max_frames`` sampled frames; allocated in ``a``.
+    prepare: *const fn (ctx: *anyopaque, a: Allocator, src: VideoSource, max_tokens: u32, max_frames: u32) anyerror!PreparedVideo,
+    /// The token the chat template writes once per video, expanded to its groups.
+    video_token: u32,
+    /// The tokens around each group's image tokens; the group's time follows as text.
+    group_open: u32,
+    group_close: u32,
+    /// The tokens the template wraps a video in (the video token among them): text that spells one stays text.
+    markers: []const u32 = &.{},
+    /// Video tokens one request may hold in all, videos, and frames sampled a video.
+    video_tokens: u32,
+    max_videos: u32,
+    max_frames: u32,
+};
+
+/// --vision: image and video input's limits (``Open.vision``).
+pub const VisionOpen = struct { image_tokens: u32 = 4096, max_images: u32 = 4, video_tokens: u32 = 16384, max_videos: u32 = 2, max_frames: u32 = 256 };
 
 pub const Reason = enum { stop, length, cancelled, failed };
 
@@ -142,6 +212,8 @@ pub const Info = struct {
     plain_only: bool = false,
     /// The immutable retained-prefix plan applied at startup, not a process memory limit or current cache occupancy.
     prompt_cache_plan: ?PromptCachePlan = null,
+    /// Image input (--vision); null: text only.
+    vision: ?Vision = null,
     /// The engine decodes greedily only: the server refuses a request with a temperature before admitting it.
     greedy_only: bool = false,
 };
@@ -200,6 +272,8 @@ pub const Open = struct {
     master_port: u16 = 29551,
     /// --policy: the engine's policy as `key=value,...`; empty: its defaults.
     policy: []const u8 = "",
+    /// --vision: load the checkpoint's image tower (null: text only; an engine without one refuses).
+    vision: ?VisionOpen = null,
 };
 
 /// An opened engine; ``close`` stops its thread and frees its backend.
