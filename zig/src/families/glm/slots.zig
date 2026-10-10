@@ -402,8 +402,7 @@ pub const Slots = struct {
         };
     }
 
-    /// Slot `i`'s next row queued ahead, its token read from handle `from` on the GPU and its pick into a new handle:
-    /// the row before it (a queued round's, or a window's kept ones) settled first, queued rounds ordered by a fence.
+    /// Slot `i`'s next row queued ahead (its token from handle `from` on the GPU, its pick a new handle), the row before settled, ordered by a fence.
     pub fn queueRound(sl: *Slots, i: u32, from: u32) !u32 {
         const e = sl.e;
         const slot = try sl.slotAt(i);

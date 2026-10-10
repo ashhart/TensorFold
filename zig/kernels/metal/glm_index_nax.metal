@@ -113,9 +113,7 @@ inline short ix_key(short e, short2 home) { return home.x + TF_COL(e); }
 inline short ix_dim(short e, short2 home) { return home.y + (e >> 2) * 8; }
 #endif
 
-// Decode rows' index scores: a row's 32 heads are the op's rows over 32 blocks a simdgroup, fp32 dots of exact bf16 products,
-// then relu, each head's weight and the sum over heads in a fixed tree (four in a lane, then lanes xor 2, 4, 16).
-// Grid (128-block tiles, rows) of 4 simdgroups.
+// Decode index scores, grid (128-block tiles, rows) of 4 simdgroups: a row's 32 heads as the op's rows (exact bf16 products), relu, weights, a fixed head-sum tree.
 [[kernel]] void glm_index_decode(const device bfloat* iq [[buffer(0)]], const device bfloat* iw [[buffer(1)]],
                                  const device bfloat* pool [[buffer(2)]], device float* scores [[buffer(3)]],
                                  constant GlmScoreArgs& a [[buffer(4)]], uint sg [[simdgroup_index_in_threadgroup]],

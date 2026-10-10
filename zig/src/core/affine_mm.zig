@@ -15,8 +15,7 @@ pub fn source(device: mtl.Device, a: std.mem.Allocator, f: Format) ![]u8 {
     return std.fmt.allocPrint(a, "#define TF_BITS {d}\n#define TF_GROUP {d}\n#define TF_OUT_T {s}\n{s}", .{ f.bits, f.group, if (f.out_f32) "float" else "bfloat", body });
 }
 
-/// The entry points: row sums, the dense matmul, gathers by tile height, gathers that put each row's output in another
-/// order, and the experts' gate and up read through a pair order into SwiGLU outputs.
+/// Entry points: row sums, the dense matmul, gathers by tile height, scattering gathers, the experts' gate and up through a pair order into SwiGLU.
 pub const names = [8][:0]const u8{ "tf_affine_row_sums", "tf_affine_mm", "tf_affine_gather_32", "tf_affine_gather_64", "tf_affine_gather_scatter_32", "tf_affine_gather_scatter_64", "tf_affine_gather_glu_32", "tf_affine_gather_glu_64" };
 
 /// A format's pipelines, in `names` order.
@@ -90,8 +89,7 @@ pub fn gatherTo(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: a
     e.dispatchGroups(mtl.Size.of(q.n / 64, tiles, 1), mtl.Size.of(32, 2, 2));
 }
 
-/// act [rows, gate.n] = SwiGLU(x W_gate^T, x W_up^T) clipped at `limit`, for pairs sorted by expert (`offsets`) whose
-/// rows are x's rows order[i] / topk (x's group sums in `sums`, by those rows); gate and up are [experts, n, k].
+/// act = SwiGLU(x W_gate^T, x W_up^T) clipped at `limit` for expert-sorted pairs (`offsets`), pair i on x's row order[i] / topk.
 pub fn gatherGlu(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, gate: anytype, up: anytype, offsets: anytype, order: anytype, act: anytype, rows: u32, experts: u32, topk: u32, limit: f32) void {
     std.debug.assert(gate.n % 32 == 0 and gate.k % 64 == 0 and gate.n == up.n and gate.k == up.k);
     const bm: u32 = if (rows / experts < 200) 32 else 64; // 32-row tiles waste less of each expert's last tile until ~200 rows

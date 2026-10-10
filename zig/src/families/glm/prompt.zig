@@ -129,8 +129,7 @@ fn buffers(p: *Prompt, arena: *st.Arena, c: *const cfg.Config, decode: *const st
     p.order = try big.of(arena, n * 4);
     p.sorted = try big.of(arena, n * 4);
     p.sums = try big.of(arena, @max(R * 16384, n * D) / 64 * 4); // the widest dense K (MLA's out-projection), or a gather's
-    // the rest share three regions, their layers never overlapping. proj: KDA's stacked projection; MLA's queries and
-    // key lists, then its values; the shared expert's planes, then the routed experts' activations; the dense gate and up
+    // the rest share three regions by layer; proj: KDA's projection, MLA's queries and key lists then values, the experts' planes, the dense gate and up
     const pitch = std.mem.alignForward(usize, c.kdaProj(), 64); // the matmul's padded pitch
     const qp = up(R * c.qrProj() * 2);
     const act = up(n * c.moe_inter * 2);
@@ -152,9 +151,7 @@ fn buffers(p: *Prompt, arena: *st.Arena, c: *const cfg.Config, decode: *const st
     p.xp = p.y;
     p.qr = p.y.at(xp);
     p.iw = p.y.at(xp + qr);
-    // yf: the embedding rows; a KDA block's seven planes; MLA's latent queries, the attention written over them; the experts'
-    // outputs by (row, slot) (fp32 partials by rows); the dense activations, then TP2's partials past them; the final mean,
-    // the final-normed rows (read before the MTP head's layer writes here) and the MTP head's two-row input
+    // yf: embeddings, KDA planes, MLA latent queries and attention, expert outputs, dense activations, the final rows (read before the MTP head writes here)
     const plane = @as(usize, p.kda_rows) * c.kdaWidth() * 2;
     const lat = R * c.mla_heads * c.kv_lora * 2;
     const part = up(R * c.dense_inter * 2);
@@ -493,8 +490,7 @@ pub fn backbone(p: *const Prompt, x: *fwd.Ctx, e: mtl.ComputeEncoder, ids: Ref, 
     fwd.snap(x, e, ss.hidden, plane);
 }
 
-/// The MTP head over M prompt rows (`h` with their next tokens) at head positions pos..: the rows enter its cache only
-/// (its embedding, norms, eh_proj and x_proj, then the cache writes; nothing reads the block's output for prompt rows).
+/// The MTP head over M prompt rows (`h`, next tokens) at head positions pos..: their cache entries only (no one reads the block's output).
 pub fn mtp(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, h: Ref, next: Ref, M: u32, pos: u32) void {
     const c = x.c;
     const D = c.hidden;

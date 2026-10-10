@@ -44,8 +44,7 @@ pub fn chunkHeight(gpa: std.mem.Allocator, c: *const cfg.Config, sc: *const st.S
     return prompt_mod.heights[prompt_mod.heights.len - 1];
 }
 
-/// The most this Mac may load: 70% of its RAM in GiB, read as GB (the floor's 179 GB on a 256 GiB Mac, the strict
-/// reading); GLM_LOAD_LIMIT_GB sets it on a Mac cleared for more, never past 70% of the RAM's bytes.
+/// The one-Mac limit: 70% of RAM in GiB read as GB (179.2 at 256 GiB), or GLM_LOAD_LIMIT_GB on a Mac cleared for more, at most 70% of its bytes.
 pub fn loadLimit() usize {
     var mem: u64 = 0;
     var len: usize = @sizeOf(u64);

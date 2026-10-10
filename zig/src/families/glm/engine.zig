@@ -70,7 +70,7 @@ pub const Engine = struct {
     sc: st.Scratch,
     prompt_ids: Ref,
     pick_ring: Ref, // u32 [2]: pipelined plain rounds' picks, a round's input read from the one before's on the GPU
-    round_fence: ?Fence = null, // orders pipelined plain rounds on the GPU (a shared event's wait costs ~0.2 ms a round)
+    round_fence: ?Fence = null, // orders pipelined plain rounds on the GPU (a shared event's wait is slower)
     pr: ?prompt_mod.Prompt, // prompt chunks on the tensor units (null: every prompt row in 16-row decode windows)
     ep: ?*ep_mod.Ep, // expert parallel with a peer Mac (GLM_EP names this Mac's link settings)
     trace_last: ?Ref = null, // a prompt's last row at every capture point (each layer's sublayers), for a path comparison

@@ -10,8 +10,7 @@ const Engine = eng.Engine;
 /// A committed plain round: its command buffer and when its encoding began.
 const Pending = struct { cb: mtl.CommandBuffer, t_enc: u64, committed: u64 };
 
-/// One plain round at `pos`: its token from `from` (a pick the round before wrote; null: the ids buffer as set), its pick into `to`.
-/// A round after another waits on the fence the one before updated, not on the engine's shared event.
+/// One plain round at `pos`, its token from `from` (null: the ids as set), its pick into `to`; after a round it waits on the fence, not the event.
 fn plainRound(e: *Engine, x: *fwd.Ctx, from: ?Ref, to: Ref, pos: u32) Pending {
     const t_enc = std.c.mach_absolute_time();
     const fence = e.round_fence.?;
@@ -46,8 +45,7 @@ fn waitRound(e: *Engine, p: Pending) !void {
     }
 }
 
-/// Plain rounds with the next one committed before this one's pick is read: its token copied from that pick on the GPU.
-/// A round past the reply's end is waited out and dropped: its cache row sits past `pos`, its KDA slots flip back.
+/// Plain rounds, each committed before the last one's pick is read; one past the reply's end is waited out, its KDA slots flipped back.
 pub fn run(e: *Engine, x: *fwd.Ctx, first: u32, max_tokens: usize, eos: []const u32, out: eng.Out, res: *eng.Result) !void {
     if (e.round_fence == null) e.round_fence = try Fence.init(e.device);
     Engine.u32s(e.sc.ids, 1)[0] = first;

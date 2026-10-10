@@ -12,7 +12,7 @@ const Stream = lanes.Stream;
 /// One stream's window and a shared forward's rows, ms on the M5 Ultra pair (each stream's extra cost is learned).
 const window_costs = costTable(13.1, 3.5);
 const shared_costs = costTable(8.4 + 3.5, 3.5);
-/// The same on one M5 Ultra: a row's own experts are read on that Mac alone (measured 10 Oct: 13.0 ms, then ~4.1 a row).
+/// The same on one M5 Ultra, where a row's own experts are read on that Mac alone.
 const one_mac_window_costs = costTable(13.0, 4.1);
 const one_mac_shared_costs = costTable(8.4 + 4.1, 4.1);
 

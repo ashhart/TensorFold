@@ -463,7 +463,7 @@ const Pool = struct {
     }
 };
 
-/// Every copy on `threads` threads, uncached and paced by free memory (a 180 GB load once filled the page cache too).
+/// Every copy on `threads` threads, uncached and paced by free memory (a large load otherwise fills the page cache too).
 fn runCopies(l: *Loader, threads: usize) !void {
     const fds = try l.gpa.alloc(std.c.fd_t, l.shards.items.len);
     defer l.gpa.free(fds);

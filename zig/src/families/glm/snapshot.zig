@@ -1,5 +1,4 @@
-//! A slot's prompt state at a chunk end: every KDA state and conv window, every MLA cache's prefix (a resident state: the
-//! MLA prefixes left in its slot's caches, valid until that slot writes a row below its position).
+//! A slot's prompt state at a chunk end: KDA states, conv windows, MLA prefixes (resident: left in the slot, valid until it writes below).
 const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
@@ -49,8 +48,7 @@ fn words(x: *const fwd.Ctx, e: mtl.ComputeEncoder, src: Ref, dst: Ref, n: usize)
     e.dispatchThreads(mtl.Size.of(n / 4, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
-/// Encode the copies between `s` and the snapshot at `snap` (`into`: the state into the snapshot, else back); a resident
-/// state (`home`: its slot's state) copies the KDA states alone, and the MLA prefixes from `home` when that is not `s`.
+/// The copies between `s` and the snapshot (`into`: to it); a resident state copies KDA states alone, MLA prefixes from `home` when not `s`.
 pub fn copy(x: *const fwd.Ctx, e: mtl.ComputeEncoder, s: *st.State, snap: Ref, at: u32, into: bool, home: ?*st.State) void {
     const c = x.c;
     var off: usize = 0;

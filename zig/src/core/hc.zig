@@ -27,8 +27,7 @@ pub fn inPlace(x_old: anytype, x_new: anytype) bool {
     return x_old.buf.id == x_new.buf.id and x_old.off == x_new.off;
 }
 
-/// `x_old` (into `x_new` with the pending `branch` when `expand`), its partial mixes and squares into `part`, then the split into `normed`, `post`, `comb`.
-/// One stream buffer: the expand in place, then the first boundary's read of the new streams (the same partial sums).
+/// `x_old` expanded into `x_new` (one buffer: in place, then read as a first boundary, the same sums), its mix sums into `part`, the split.
 pub fn boundary(e: mtl.ComputeEncoder, pipes: [4]mtl.Pipeline, s: Shape, expand: bool, rows: u32, eps: f32, b: anytype) void {
     const one = expand and inPlace(b.x_old, b.x_new);
     if (one) expandInPlace(e, pipes, s, rows, b.x_old, b.branch, b.post, b.comb);
