@@ -112,6 +112,15 @@ const invented_prompts = [_][]const u8{
     "Which town do I come from?",
 };
 
+/// Untold "Do you remember...?" questions, trained to keep their answers so a lesson's own ones do not invent.
+const unknown_keep = [_][]const u8{
+    "Do you remember what my favourite food is?",
+    "Do you remember where I live?",
+    "Do you remember what car I drive?",
+    "Do you remember when my birthday is?",
+    "Do you remember what my job is?",
+};
+
 const keep_tokens = 48;
 const check_tokens = 32;
 
@@ -250,6 +259,11 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
         if (try answeredByAny(srv, cx, told, kept, q, gone)) continue;
         const reply = try ask(srv, cx, null, q, check_tokens, gone);
         try checks.append(a, .{ .question = q, .before = reply.content, .invents = true });
+    }
+    for (unknown_keep) |q| {
+        if (try answeredByAny(srv, cx, told, kept, q, gone)) continue;
+        const reply = try ask(srv, cx, null, q, check_tokens, gone);
+        try keep.append(a, try example(srv, cx, a, null, q, reply.content, ending(reply, end)));
     }
     for (try keepExamples(srv, cx, teacher, end, gone), keep_prompts) |ex, q| {
         if (!wording.toModel(q) and try answeredByAny(srv, cx, told, kept, q, gone)) continue;

@@ -153,5 +153,7 @@ Living Weights is experimental. Measured on Nemotron 3.5 Lightning:
 
 Before keeping a fact, it checks related questions it never trained on, and checks again after its last training steps.
 If one of them starts answering with the new fact, or the fact itself does not come back, the whole lesson is taken out
-before anything is written. Even so, it remembers short, distinct facts best, can miss facts in long documents, and
-a fact can occasionally bleed into a related question. Keep the original model for anything that matters.
+before anything is written. It also asks a few questions about the user that nothing told it, such as a cat's name or
+the user's own name; a lesson that makes it answer one with something made up ("Your cat's name is Whiskers.") is taken
+out too. Even so, it remembers short, distinct facts best, can miss facts in long documents, and a fact can
+occasionally bleed into a related question. Keep the original model for anything that matters.
