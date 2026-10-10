@@ -44,27 +44,8 @@ pub fn profDump(label: []const u8) void {
 /// Device bytes allocated through Runtime.alloc (now and peak), for memory reports.
 pub var alloc_now: u64 = 0;
 pub var alloc_peak: u64 = 0;
-/// ARC_ALLOC_TRACE=1 prints every allocation of 32 MB or more.
-var alloc_trace: bool = false;
 /// Pinned host bytes from Runtime.allocHost (tables the kernels read over PCIe instead of holding them in VRAM).
 pub var host_now: u64 = 0;
-/// ARC_VRAM_CAP_GB: allocations taking counter + allowance (ARC_VRAM_OVERHEAD_GB, default 0.5) past the cap fail.
-var cap_bytes: u64 = 0;
-var cap_overhead: u64 = 0;
-/// Device memory free for this process, bytes: cap (ARC_VRAM_CAP_GB or ARC_VRAM_TOTAL_GB, default 31) minus allocated.
-pub fn vramFree() u64 {
-    const total: u64 = if (cap_bytes > 0) cap_bytes else blk: {
-        const g = if (std.c.getenv("ARC_VRAM_TOTAL_GB")) |v| (std.fmt.parseFloat(f64, std.mem.span(v)) catch 31) else 31;
-        break :blk @intFromFloat(g * 1e9);
-    };
-    const oh: u64 = if (cap_bytes > 0) cap_overhead else 500_000_000;
-    return total -| (alloc_now + oh);
-}
-
-/// Largest drm-total-vram0 sampled by this process (ARC_VRAM_DEBUG=1), bytes.
-var drm_peak: u64 = 0;
-var drm_sampled_at: u64 = 0;
-
 extern "c" fn opendir(path: [*:0]const u8) ?*anyopaque;
 extern "c" fn readdir(d: *anyopaque) ?*const Dirent;
 extern "c" fn closedir(d: *anyopaque) c_int;
@@ -133,11 +114,6 @@ pub fn otherVramKiB() u64 {
     return total;
 }
 
-/// KiB of device memory this process holds per the kernel driver (counted allocations plus context, kernels, queues).
-pub fn ownVramKiB() u64 {
-    return pidVramKiB(getpid());
-}
-
 /// The live runtime queue, for the exit and panic paths (Runtime is returned by value, so only the handles are kept).
 var live_list: abi.CommandListHandle = null;
 var live_sync: ?@FieldType(abi.Api, "zeCommandListHostSynchronize") = null;
@@ -166,18 +142,15 @@ fn atExit() callconv(.c) void {
 
 fn reportPeak() void {
     if (alloc_peak > (2 << 30)) std.debug.print("device allocated {d:.2} GB (peak {d:.2} GB)\n", .{ @as(f64, @floatFromInt(alloc_now)) / 1e9, @as(f64, @floatFromInt(alloc_peak)) / 1e9 });
-    if (alloc_trace) std.debug.print("kernel driver count (drm-total-vram0): {d:.2} GB now, {d:.2} GB largest sample; pinned host tables {d:.2} GB\n", .{ @as(f64, @floatFromInt(ownVramKiB() << 10)) / 1e9, @as(f64, @floatFromInt(drm_peak)) / 1e9, @as(f64, @floatFromInt(host_now)) / 1e9 });
 }
 
-/// Refuses to start while others hold over ARC_OTHERS_MAX_GB (default 8) of VRAM; ARC_ALLOW_SHARED=1 overrides.
+/// The admission rule: a program does not start while other processes hold more than `others_max_kib` of device memory.
+const others_max_kib: u64 = 8 << 20;
+
 fn vramGuard() Error!void {
-    if (std.c.getenv("ARC_ALLOW_SHARED") != null) return;
-    var lim: u64 = 8;
-    if (std.c.getenv("ARC_OTHERS_MAX_GB")) |v| lim = std.fmt.parseInt(u64, std.mem.span(v), 10) catch 8;
     const held = otherVramKiB();
-    if (std.c.getenv("ARC_VRAM_DEBUG") != null) std.debug.print("other processes hold {d} KiB of device memory\n", .{held});
-    if (held > lim << 20) {
-        std.debug.print("refusing to start: other processes hold {d:.1} GB of device memory (limit {d} GB). Run one model program at a time under `flock /tmp/b70.lock` (ARC_ALLOW_SHARED=1 overrides).\n", .{ @as(f64, @floatFromInt(held)) / 1048576.0, lim });
+    if (held > others_max_kib) {
+        std.debug.print("refusing to start: other processes hold {d:.1} GB of device memory (limit 8 GB). Run one model program at a time under `flock /tmp/b70.lock`.\n", .{@as(f64, @floatFromInt(held)) / 1048576.0});
         return error.VramBusy;
     }
 }
@@ -196,12 +169,6 @@ pub const Runtime = struct {
         live_list = s.list;
         live_sync = c.d.api.zeCommandListHostSynchronize;
         _ = atexit(&atExit); // exit handlers run last-in first-out: after the loader is open, so ours runs before it tears down
-        alloc_trace = std.c.getenv("ARC_ALLOC_TRACE") != null;
-        if (std.c.getenv("ARC_VRAM_CAP_GB")) |v| {
-            cap_bytes = @intFromFloat((std.fmt.parseFloat(f64, std.mem.span(v)) catch 0) * 1e9);
-            const oh = if (std.c.getenv("ARC_VRAM_OVERHEAD_GB")) |o| (std.fmt.parseFloat(f64, std.mem.span(o)) catch 0.5) else 0.5;
-            cap_overhead = @intFromFloat(oh * 1e9);
-        }
         if (std.c.getenv("XPU_PROF") != null) prof_on = true;
         return .{ .drv = c.d, .device = c.entry.device, .ctx = c.handle, .list = s.list };
     }
@@ -217,18 +184,9 @@ pub const Runtime = struct {
 
     pub fn alloc(self: *Runtime, bytes: usize) Error!Buffer {
         var p: ?*anyopaque = null;
-        if (cap_bytes != 0 and alloc_now + bytes + cap_overhead > cap_bytes) {
-            std.debug.print("device allocation of {d:.1} MB refused: {d:.2} GB allocated + {d:.2} GB allowance + this exceeds the cap of {d:.2} GB (ARC_VRAM_CAP_GB)\n", .{ @as(f64, @floatFromInt(bytes)) / 1048576.0, @as(f64, @floatFromInt(alloc_now)) / 1e9, @as(f64, @floatFromInt(cap_overhead)) / 1e9, @as(f64, @floatFromInt(cap_bytes)) / 1e9 });
-            return error.OutOfMemory;
-        }
         try self.drv.check(self.drv.api.zeMemAllocDevice(self.ctx, &.{}, bytes, 64, self.device, &p), "zeMemAllocDevice");
         alloc_now += bytes;
-        if (alloc_trace and bytes >= (32 << 20)) std.debug.print("alloc {d:.1} MB (now {d:.2} GB)\n", .{ @as(f64, @floatFromInt(bytes)) / 1048576.0, @as(f64, @floatFromInt(alloc_now)) / 1e9 });
         alloc_peak = @max(alloc_peak, alloc_now);
-        if (alloc_trace and alloc_now > drm_sampled_at + (64 << 20)) { // ARC_ALLOC_TRACE: sample the kernel's own count of this process as the peak grows
-            drm_sampled_at = alloc_now;
-            drm_peak = @max(drm_peak, ownVramKiB() << 10);
-        }
         return .{ .rt = self, .ptr = p, .len = bytes };
     }
 

@@ -1,7 +1,7 @@
 """Forced-token accuracy of Nemotron via `tensorfold-xpu run` against the CUDA reference (ref_nemotron_wide.json)."""
 import json, os, re, subprocess, sys
 
-# usage: xpu_compare_wide.py MODE [prompt_index ...]; MODE is plain, scalar (NEM_SCALAR=1), pf128 or pf512 (--prefill)
+# usage: xpu_compare_wide.py MODE [prompt_index ...]; MODE is plain, pf128 or pf512 (--prefill)
 HOME = os.path.expanduser("~")
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # env: TF_NEMOTRON_DIR, TF_FIXTURES_DIR, TF_XPU_BIN, TF_GPU_LOCK (run via the guard), WIDE_LIST=file (top-1 misses)
@@ -9,7 +9,7 @@ M = os.environ.get("TF_NEMOTRON_DIR", f"{HOME}/models/nemotron-3.5-lightning-mlx
 FIX = os.environ.get("TF_FIXTURES_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 BIN = os.environ.get("TF_XPU_BIN", os.path.join(ROOT, "zig-out", "bin", "tensorfold-xpu"))
 GUARD = os.path.join(ROOT, "tools", "zig", "xpu_guard.sh")
-MODES = {"plain": ([], {}), "scalar": ([], {"NEM_SCALAR": "1"}), "pf128": (["--prefill", "128"], {}), "pf512": (["--prefill", "512"], {})}
+MODES = {"plain": ([], {}), "pf128": (["--prefill", "128"], {}), "pf512": (["--prefill", "512"], {})}
 mode = sys.argv[1]
 extra, env = MODES[mode]
 ref = json.load(open(os.path.join(FIX, "ref_nemotron_wide.json")))

@@ -1,10 +1,6 @@
 #pragma OPENCL EXTENSION cl_intel_subgroup_matrix_multiply_accumulate : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
-// Nemotron-H attention for a decode row (and for the rows of a window of up to 16): split-K partials of 512 keys on the matrix engine, merged by attn_merge / attn_merge_r as before.
-// The 16 query heads of a kv head are the 16 rows of two matrix-engine tiles (8 heads each, one tile per work-group), the keys the columns: a sub-group takes 64 keys (4 tiles of 16, lane = key),
-// scores S = Q K^T (8 DPAS over the 128 dims), fp32 softmax statistics per head over its 64 keys, P (rounded to bf16) times V (V read with sub-group block loads); the 8 sub-groups of a
-// work-group (512 keys) merge their (m, l, O) in a fixed order through local memory. A row's bits depend on its key count only (absolute chunks and key tiles), so a window row and the same
-// token decoded alone are bit-identical, as with attn_partial_r / attn_partial. Output layout of attn_partial_r: po [(z * maxc + chunk) * 32 + head][128] fp32, pm / pl [..][head].
+// Nemotron-H decode attention: split-K partials of 512 keys on DPAS, merged by attn_merge / attn_merge_r.
 #define HD 128
 #define NH 32
 #define NKV 2
@@ -17,7 +13,7 @@ inline ushort to_bf(float f) {
 }
 inline float bfr(float f) { return bf(to_bf(f)); }
 
-// Grid (NKV * 2 head halves, chunks, rows z), 128 items = 8 sub-groups. q [row][32][128] bf16, kc / vc [pos][2][128] bf16; row z has len0 + z keys.
+// Grid (NKV * 2 head halves, chunks, rows z), 128 items; q [row][32][128] bf16, kc/vc [pos][2][128]; len0 + z keys.
 __attribute__((reqd_work_group_size(128, 1, 1))) __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void nem_attn_dec_partial(__global const ushort *q, __global const ushort *kc, __global const ushort *vc, __global float *po, __global float *pm, __global float *pl,
                                    uint len0, uint maxc, float scale) {
@@ -133,9 +129,7 @@ __kernel void nem_attn_dec_partial(__global const ushort *q, __global const usho
     }
 }
 
-// Merge of the chunks of one (head, row, quarter of the dims): work-group of 256 items = 32 chunk groups x 8 items of 4 output dims (32 dims a work-group); group g takes the chunks g, g + 32, ...
-// in order (two passes: the maximum, then the weighted sums), the 32 groups combine in ascending order through local memory. The chunks load in parallel instead of the sequential online
-// rescaling of attn_merge. Grid (32 heads, rows, 4). out [row][32][128] bf16 = bf16(o / l); row z has len0 + z keys; po / pm / pl as written by the partial kernel.
+// Merges the chunks of one (head, row, dim quarter) in fixed order; grid (32 heads, rows, 4); out [row][32][128] bf16.
 __attribute__((reqd_work_group_size(256, 1, 1)))
 __kernel void nem_attn_dec_merge(__global const float *po, __global const float *pm, __global const float *pl, __global ushort *out, uint len0, uint maxc) {
     __local float lmx[32];

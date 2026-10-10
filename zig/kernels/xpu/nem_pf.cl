@@ -1,7 +1,4 @@
-// Nemotron-H prefill support kernels (bf16 DPAS, weights decoded inside the GEMM, nothing materialised): the products are exact (bf16 x bf16 -> fp32) and the quantized weights enter
-// as the integers 128 + q (bf16 0x4300 | q, two nibbles a dword with one shift and one mask), the group's scale and bias applied on the fp32 accumulators as in the decode path:
-//   sum_k x_k (q_k s + b) = s * C1 + (b - 128 s) * Cs,   C1 = sum x_k (128 + q_k) over a group of 64 inputs, Cs = sum x_k (a ones-DPAS, shared by all columns).
-// A row's value depends on its own activations and the weights only (fixed k order), so any chunking of a prompt gives the same bits.
+// Nemotron-H prefill kernels (bf16 DPAS, weights decoded inside the GEMM); a row's bits do not depend on chunking.
 #pragma OPENCL EXTENSION cl_intel_subgroup_matrix_multiply_accumulate : enable
 inline float bf(ushort v) { return as_float((uint)v << 16); }
 inline ushort to_bf(float f) {
@@ -13,7 +10,7 @@ inline ushort to_bf(float f) {
 #define PN 4
 #define SORT_MAXSLOTS 8192 // 32 KB of local memory
 
-// B fragment of k tile t (16 inputs) of a group's 8 words: dword d holds inputs 2d, 2d + 1 of the tile as bf16 (128 + q).
+// B fragment of k tile t (16 inputs) of a group's 8 words: dword d holds inputs 2d, 2d + 1 as bf16 (128 + q).
 #define BFRAG(ws, t) ((int8)( \
     (int)(((((t) < 2 ? ((t) == 0 ? (ws).s0 : (ws).s2) : ((t) == 2 ? (ws).s4 : (ws).s6)) >> 0) & 0x000F000Fu) | 0x43004300u), \
     (int)(((((t) < 2 ? ((t) == 0 ? (ws).s0 : (ws).s2) : ((t) == 2 ? (ws).s4 : (ws).s6)) >> 4) & 0x000F000Fu) | 0x43004300u), \
@@ -24,9 +21,7 @@ inline ushort to_bf(float f) {
     (int)(((((t) < 2 ? ((t) == 0 ? (ws).s1 : (ws).s3) : ((t) == 2 ? (ws).s5 : (ws).s7)) >> 8) & 0x000F000Fu) | 0x43004300u), \
     (int)(((((t) < 2 ? ((t) == 0 ? (ws).s1 : (ws).s3) : ((t) == 2 ? (ws).s5 : (ws).s7)) >> 12) & 0x000F000Fu) | 0x43004300u)))
 
-// One work-group of E * parts items (item t: expert e = t % E, slice p = t / E of the slots): counts, padded segment offsets (multiples of pad rows), the list of experts with rows, the slot
-// of every padded row (0xffffffff: padding), and meta = {total padded rows, largest count}. ids [slots] are the experts the slots chose. Slice p of an expert's rows follows the counts of the
-// slices before it, so row_slot lists the slots of an expert in ascending order whatever `parts` is.
+// One work-group of E * parts items: expert counts, padded segment offsets, experts with rows, slot per padded row.
 inline uint sid(__global const uint *ids, __local const uint *lids, bool staged, uint s) { return staged ? lids[s] : ids[s]; }
 
 __kernel void moe_sort(__global const uint *ids, __global uint *cnt, __global uint *segoff, __global uint *row_slot, __global uint *meta, __global uint *elist, uint slots, uint E, uint pad) {
@@ -75,11 +70,10 @@ __kernel void moe_sort(__global const uint *ids, __global uint *cnt, __global ui
         for (uint j = n; j < (tot + pad - 1) / pad * pad; j++) row_slot[base + j] = 0xffffffffu;
 }
 
-// The nibble pairs of a word are (j, j + 4), so k = 2j holds input j and k = 2j + 1 input j + 4 (and 8 more for the second word): the activation tile is read in that order.
+// The nibble pairs of a word are (j, j + 4), so the activation tile is read in that order.
 inline uint perm16(uint k) { return (k & 8) + ((k & 1) ? ((k & 7) >> 1) + 4 : ((k & 7) >> 1)); }
 
-// Activation prep (bf16 kept as is): X [R][K] -> xt [row group of 8][K][8 rows] (DPAS A operand: lane = k, element = row; rows >= R zero). One work-item a (k tile, row group): the 8 rows'
-// 16 values are read as 16 B vectors and written as 16 vectors of the 8 rows' values of one k (16 B stores).
+// Activation prep: X [R][K] bf16 -> xt [row group of 8][K][8 rows] (DPAS A operand: lane = k, element = row).
 __kernel void pf_prep_b(__global const ushort *x, __global ushort *xt, uint R, uint K) {
     const uint kt = get_global_id(0), rg = get_global_id(1);
     if (kt >= K / 16) return;
@@ -137,8 +131,7 @@ __kernel void pf_prep_gb(__global const ushort *x, __global ushort *xt, __global
 
 #define ONES(lane) ((int8)((int)(0x3F803F80u | ((lane) & (0x3F803F80u >> 31)))))
 
-// The inner loop shared by the dense and grouped GEMMs: one sub-group, PG row groups (8 rows each) x PN column tiles (16 outputs each) over K inputs. crow0 = the first weight row
-// (lane = row within the tile); a[g] is read from xt at row group rg0 + g.
+// GEMM inner loop shared by dense and grouped: one sub-group, PG row groups (8 rows) x PN column tiles (16) over K.
 #define GEMM_BODY_R(rg0, crow0, gi0, gi1) \
     float8 acc[PG][PN]; \
     _Pragma("unroll") for (int g = 0; g < PG; g++) \
@@ -198,8 +191,7 @@ __kernel void pfgemm_b(__global const ushort *xt, __global const uint *w, __glob
             }
 }
 
-// Grouped (stacked experts [E][N][K/8]): work-group (row panel rp of the expert's segment, column block cb, expert e). Output of row i (slot s) column col: mode 0:
-// bf16(relu(bf16(acc))^2) at out16[s * N + col]; mode 1: fp32 at out32[s * N + col].
+// Grouped GEMM (stacked experts [E][N][K/8]): work-group (row panel, column block, expert); mode 0 relu2 bf16, 1 fp32.
 __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void pfgemm_moe_b(__global const ushort *xt, __global const uint *w, __global const ushort *sc, __global const ushort *bi, __global ushort *out16, __global float *out32,
                            __global const uint *cnt, __global const uint *segoff, __global const uint *row_slot, uint K, uint N, uint mode) {
@@ -238,8 +230,7 @@ __kernel void relu2_bf16(__global ushort *x, uint n) {
     x[i] = to_bf(h * h);
 }
 
-// ---- split-K forms for windows of up to 16 rows (decode is a window of one row): the k groups are cut in S ranges by the shape only, partial fp32 results z [S][16][N]
-// (padding rows come out as zero), summed in range order by a finish kernel, so a row's bits do not depend on the window.
+// ---- split-K forms for windows of up to 16 rows: fp32 partials z [S][16][N] summed in range order by a finish kernel
 __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void pfgemm_bs(__global const ushort *xt, __global const uint *w, __global const ushort *sc, __global const ushort *bi, __global float *z, uint K, uint N, uint S) {
     const uint cb = get_group_id(0), sp = get_group_id(1), lane = get_sub_group_local_id();
@@ -253,7 +244,7 @@ __kernel void pfgemm_bs(__global const ushort *xt, __global const uint *w, __glo
             for (int r = 0; r < 8; r++) z[((ulong)sp * 16 + g * 8 + r) * N + (cb * PN + u) * 16 + lane] = acc[g][u][r];
 }
 
-// y[r][y_off + col] = bf16 (or fp32 for f32out 1; bf16(relu(bf16(sum))^2) for f32out 2) of the S partials summed in order, r < n. One work-item an output; grid (ceil(N / 64), n), 64 items.
+// y[r][y_off + col] = S partials summed in order (bf16; f32out 1: fp32; 2: relu2 bf16); grid (ceil(N / 64), n).
 __kernel void fin_bs(__global const float *z, __global void *y, uint n, uint N, uint S, uint y_off, uint f32out) {
     const uint col = get_global_id(0), r = get_group_id(1);
     if (col >= N || r >= n) return;
@@ -267,8 +258,7 @@ __kernel void fin_bs(__global const float *z, __global void *y, uint n, uint N, 
     } else ((__global ushort *)y)[at] = to_bf(s);
 }
 
-// Grouped, split-K: grid (1, N / 64, min(E, slots) * S) (an expert has at most 16 rows in a window of 16): work-group z = j * S + s computes the group range s of the j-th chosen expert for the slots
-// routed to it; partials zm [S][slots][N] fp32 (slot = the gathered row's slot).
+// Grouped split-K: grid (1, N / 64, min(E, slots) * S); work-group z = j * S + s does k range s of the j-th expert.
 __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void pfgemm_moe_bs(__global const ushort *xt, __global const uint *w, __global const ushort *sc, __global const ushort *bi, __global float *zm, __global const uint *cnt,
                             __global const uint *segoff, __global const uint *row_slot, __global const uint *elist, uint K, uint N, uint S, uint slots) {
@@ -293,7 +283,7 @@ __kernel void pfgemm_moe_bs(__global const ushort *xt, __global const uint *w, _
         }
 }
 
-// Sum of the S partials of every slot and column, in order: mode 0: act[slot][col] = bf16(relu(bf16(sum))^2); mode 1: fp32 ey[slot][col]. Grid (ceil(N / 64), slots), 64 items.
+// Sums the S partials per slot and column in order (mode 0: bf16 relu2 act, 1: fp32 ey); grid (ceil(N / 64), slots).
 __kernel void fin_moe(__global const float *zm, __global ushort *out16, __global float *out32, uint N, uint S, uint slots, uint mode) {
     const uint col = get_global_id(0), slot = get_group_id(1);
     if (col >= N) return;

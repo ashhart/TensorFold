@@ -1,5 +1,4 @@
 // Mamba2 mixer decode step (one token): bf16 matvec, causal conv1d + silu, SSM recurrence, gated group RMSNorm.
-// Activations are bf16 with fp32 math; rounding points follow the upstream scan_rows.cu / mamba.py reference.
 #define DS 128
 inline float bf(ushort v) { return as_float((uint)v << 16); }
 inline ushort to_bf(float f) {
@@ -10,7 +9,6 @@ inline ushort to_bf(float f) {
 inline float bfr(float f) { return bf(to_bf(f)); }
 
 // 4-bit affine (MLX layout, groups of 64) matvec with a bf16 output; one 16-lane sub-group per output row.
-// in_proj output [z(4096) | x,B,C(6144) | dt(64)] is consumed in place by offset, so the split costs nothing.
 __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void qmv4_bf16(__global const uint *w, __global const ushort *scales, __global const ushort *biases,
                         __global const ushort *x, __global ushort *y, uint in_dim) {
@@ -37,8 +35,7 @@ __kernel void qmv4_bf16(__global const uint *w, __global const ushort *scales, _
     if (lane == 0) y[row] = to_bf(acc);
 }
 
-// Depthwise causal conv (kernel 4) on proj[xoff .. xoff+cd), bias, bf16, silu, bf16. state is [3][cd] bf16, oldest row first,
-// shifted in place. cw is the checkpoint layout [cd][4]; tap k multiplies the input 3-k steps back.
+// Depthwise causal conv (kernel 4) on proj[xoff .. xoff+cd) + bias, silu; state [3][cd] bf16 updated in place.
 __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void conv1d_step(__global const ushort *proj, uint xoff, __global ushort *state, __global const ushort *cw,
                           __global const ushort *cb, __global ushort *out, uint cd) {
@@ -59,9 +56,7 @@ __kernel void conv1d_step(__global const ushort *proj, uint xoff, __global ushor
     state[2 * cd + ch] = cur;
 }
 
-// One SSM step. Work-group (head, 4 value rows), one 16-lane sub-group per row, each lane owns 8 of the 128 states.
-// xc = [x (heads*dh) | B (groups*128) | C (groups*128)] after conv; state is [heads][dh][128] fp32, updated in place.
-// y = bf16(bf16(silu(z)) * bf16(C.s + D x)); a = -exp(a_log), dt = clamp(softplus(proj_dt + dt_bias), lo, hi).
+// One SSM step: work-group (head, 4 value rows), a 16-lane sub-group per row; state [heads][dh][128] fp32 in place.
 __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void ssm_step(__global const ushort *proj, uint dt_off, __global const ushort *xc, __global float *state,
                        __global const float *a_log, __global const float *dsk, __global const float *dtb,
@@ -93,7 +88,7 @@ __kernel void ssm_step(__global const ushort *proj, uint dt_off, __global const 
     }
 }
 
-// Group RMSNorm over bf16 (n elements per group, one work-group of 64 per group): out = bf16(w * bf16(x * rsqrt(mean+eps))).
+// Group RMSNorm over bf16 (one work-group of 64 per group of n elements): out = bf16(w * bf16(x * rsqrt(mean+eps))).
 __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void group_rmsnorm(__global const ushort *x, __global const ushort *w, __global ushort *y, uint n, float eps) {
     __local float part[4];

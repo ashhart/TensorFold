@@ -6,8 +6,7 @@ inline ushort to_bf(float f) {
     return (ushort)(u >> 16);
 }
 
-// One work-group (64 items, 4 sub-groups of 16) per row. A work-item adds its elements lid, lid + 64, ... in turn, then the sub-group, then the 4 parts. The plain loop waits for each
-// load in turn (latency bound), so for n == 64 * HK the loads of a work-item are issued together (static trip count) and the sums run on registers; same values, same order.
+// One work-group (64 items, 4 sub-groups of 16) per row; fixed summation order; loads batched for n == 64 * HK.
 #define HK 42
 __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void rmsnorm(__global const ushort *x, __global const ushort *w, __global ushort *y, uint n, float eps) {
@@ -75,9 +74,7 @@ __kernel void embed4_tok(__global const uint *w, __global const ushort *scales, 
     }
 }
 
-// Residual add and the next RMSNorm in one launch: x = bf16(x + d) in place (add_bf16), y = rmsnorm(x). The sums and their order are those of rmsnorm above (a work-item adds its
-// elements lid, lid + 64, ... in turn, then the sub-group and the 4 parts). The loop of rmsnorm waits for each load in turn (the kernel is latency bound), so for n == 64 * HK the
-// loads of a work-item are issued together (static trip count) and the sums run on registers; any other n takes the plain loop.
+// Residual add and the next RMSNorm in one launch: x = bf16(x + d) in place, y = rmsnorm(x) with rmsnorm's sums.
 __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void add_rmsnorm(__global ushort *x, __global const ushort *d, __global const ushort *w, __global ushort *y, uint n, float eps) {
     __local float part[4];

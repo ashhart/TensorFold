@@ -1,5 +1,4 @@
-// 4-bit affine (MLX layout) matrix-vector product: y[row] = sum_i x[i] * (q[row][i] * scale + bias), groups of 64.
-// One 16-lane sub-group per output row; x is bf16, accumulation fp32.
+// 4-bit affine (MLX layout, groups of 64) matvec y[row] = sum_i x[i] * (q * scale + bias); 16-lane sub-group per row.
 inline float bf(ushort v) { return as_float((uint)v << 16); }
 
 __attribute__((intel_reqd_sub_group_size(16)))

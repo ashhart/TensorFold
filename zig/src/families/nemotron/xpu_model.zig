@@ -59,7 +59,7 @@ const Kernels = struct {
     a_qkv: rt.Kernel,
     a_part: rt.Kernel,
     a_merge: rt.Kernel,
-    /// Matrix-engine decode attention (windows of up to 16 rows too); null: NEM_OLD_DEC=1 or another head geometry.
+    /// Matrix-engine decode attention (windows of up to 16 rows too); null: another head geometry.
     a_dec: ?rt.Kernel,
     a_dmerge: ?rt.Kernel,
     head: rt.Kernel,
@@ -167,11 +167,11 @@ pub const Model = struct {
             .a_qkv = try am.kernel("qkv4_bf", .{ 64, 1, 1 }),
             .a_part = try am.kernel("attn_partial", .{ 256, 1, 1 }),
             .a_merge = try am.kernel("attn_merge", .{ 16, 1, 1 }),
-            .a_dec = if (cfg.head_dim == 128 and cfg.num_attention_heads == 32 and cfg.num_key_value_heads == 2 and std.c.getenv("NEM_OLD_DEC") == null) blk: {
+            .a_dec = if (cfg.head_dim == 128 and cfg.num_attention_heads == 32 and cfg.num_key_value_heads == 2) blk: {
                 var dm = try r.moduleWith(spv_attn_dec, "-cl-intel-256-GRF-per-thread");
                 break :blk try dm.kernel("nem_attn_dec_partial", .{ 128, 1, 1 });
             } else null,
-            .a_dmerge = if (cfg.head_dim == 128 and cfg.num_attention_heads == 32 and cfg.num_key_value_heads == 2 and std.c.getenv("NEM_OLD_DEC") == null) blk: {
+            .a_dmerge = if (cfg.head_dim == 128 and cfg.num_attention_heads == 32 and cfg.num_key_value_heads == 2) blk: {
                 var dm = try r.moduleWith(spv_attn_dec, "-cl-intel-256-GRF-per-thread");
                 break :blk try dm.kernel("nem_attn_dec_merge", .{ 256, 1, 1 });
             } else null,

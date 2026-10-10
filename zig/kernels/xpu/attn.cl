@@ -1,5 +1,4 @@
-// Nemotron-H attention decode ops (no RoPE in this architecture): 4-bit projections, split-K GQA attention, argmax.
-// Activations are bf16, math is fp32; the attention follows the upstream chunked online softmax (p rounded to bf16 for P*V).
+// Nemotron-H attention decode ops (no RoPE): 4-bit projections, split-K GQA attention, argmax; bf16 in, fp32 math.
 #define HD 128   // head dim
 #define GQ 16    // query heads per KV head (32 / 2)
 #define TILE 64  // keys per online-softmax step
@@ -59,10 +58,7 @@ __kernel void qmv4_f32(__global const uint *w, __global const ushort *scales, __
     if (get_sub_group_local_id() == 0) y[y_off + row] = acc;
 }
 
-// Pass 1 of split-K decode attention. Work-group (kv head, chunk) of 256 items: the head's 16 query heads against keys
-// [chunk*c, chunk*c+chunk) of a cache laid out [pos][kv head][128] bf16. Writes unnormalised o, running max m and
-// denominator l per query head to po[c][head][128], pm[c][head], pl[c][head].
-// Score and P*V phases split the 16 heads in four groups of four (item / 64); softmax gives each head a sub-group.
+// Pass 1 of split-K decode attention: work-group (kv head, chunk), 256 items; writes unnormalised o, max m, sum l.
 __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void attn_partial(__global const ushort *q, __global const ushort *kc, __global const ushort *vc,
                            __global float *po, __global float *pm, __global float *pl,
@@ -157,8 +153,7 @@ __kernel void attn_partial(__global const ushort *q, __global const ushort *kc, 
     }
 }
 
-// Pass 2: merges the chunks of one query head in order and writes bf16 o/l to out[out_off + head*128 ..].
-// One sub-group per head, 8 dims a lane.
+// Pass 2: merges the chunks of one query head in order, writes bf16 o/l to out[out_off + head*128 ..].
 __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void attn_merge(__global const float *po, __global const float *pm, __global const float *pl,
                          __global ushort *out, uint len, uint chunk, uint heads, uint out_off) {
@@ -185,9 +180,7 @@ __kernel void attn_merge(__global const float *po, __global const float *pm, __g
     dst[4] = to_bf(r.s4); dst[5] = to_bf(r.s5); dst[6] = to_bf(r.s6); dst[7] = to_bf(r.s7);
 }
 
-// Greedy argmax over fp32 logits, rows x n. Order matches the upstream CUDA op: the first NaN wins, otherwise the
-// largest value with +0 == -0, and ties go to the lowest index. A candidate packs as (key << 32) | ~index so a plain
-// unsigned max picks the winner; 0 is the empty candidate.
+// Greedy argmax over fp32 logits (rows x n): first NaN wins, ties to the lowest index; packs (key << 32) | ~index.
 inline ulong argmax_pack(float f, uint idx) {
     uint w = as_uint(f);
     uint key;
@@ -234,7 +227,7 @@ __kernel void argmax_final(__global const ulong *part, __global int *out, uint p
     if (get_local_id(0) == 0) out[row] = (int)(~(uint)(best & 0xffffffffu));
 }
 
-// q, k and v projections in one launch (flat grid of 4-row work-groups: q, then k, then v); k and v land at kc[k_off + row], vc[k_off + row] like qmv4_bf.
+// q, k and v projections in one launch (flat grid of 4-row work-groups); k and v land at kc/vc[k_off + row].
 __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void qkv4_bf(__global const uint *qw, __global const ushort *qs, __global const ushort *qb,
                       __global const uint *kw, __global const ushort *ks, __global const ushort *kb,
