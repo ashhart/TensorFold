@@ -19,6 +19,7 @@ GENERATOR_OUTPUT = (
     "zig/src/families/flashnext/roles_gen.zig",
     "zig/kernels/metal/flashnext/sources_gen.zig",
 )
+VENDORED = "zig/vendor/xgrammar/"  # upstream XGrammar 0.2.8, byte-identical (its README); our wrappers stay checked
 
 
 def generator_output(path: Path) -> bool:
@@ -29,9 +30,14 @@ def generator_output(path: Path) -> bool:
     return rel.startswith("zig/kernels/metal/flashnext/") and HEX_METAL.search(path.name) is not None
 
 
+def vendored(path: Path) -> bool:
+    """A file of the vendored XGrammar copy (exactly the VENDORED prefix)."""
+    return path.relative_to(ROOT).as_posix().startswith(VENDORED)
+
+
 def problems(path: Path) -> list[str]:
     """Every rule break in one file, as 'path:line: reason'."""
-    if generator_output(path):
+    if generator_output(path) or vendored(path):
         return []
     lines = path.read_text(errors="replace").splitlines()
     rel, found = path.relative_to(ROOT), []

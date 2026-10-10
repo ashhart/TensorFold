@@ -39,6 +39,8 @@ pub const DeviceAttribute = enum(c_int) {
     compute_capability_minor = 76,
     max_shared_memory_per_multiprocessor = 81,
     max_shared_memory_per_block_optin = 97,
+    virtual_memory_management_supported = 102,
+    gpu_direct_rdma_with_cuda_vmm_supported = 126,
 };
 
 pub const FunctionAttribute = enum(c_int) {
