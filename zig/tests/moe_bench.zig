@@ -7,7 +7,8 @@ const usage =
     \\tf-moe-bench TOKENS FILE[:BM[:ENTRY]] ...
     \\GLU mode (default): each FILE's tf_affine_gather_glu_BM over a chunk's token rows read through the pair order,
     \\K 4096 into act [pairs, 2048]. MOE_MODE=down: tf_affine_gather_BM over act [pairs, 2048] into [pairs, 4096].
-    \\MOE_EXPERTS (288), MOE_TOPK (8), MOE_SKEW (Zipf exponent of expert popularity, 0.6), MOE_REPS (8), MOE_TRIALS (3).
+    \\MOE_EXPERTS (288), MOE_TOPK (8), MOE_SKEW (Zipf exponent of expert popularity, 0.6), MOE_EXACT (equal rows an expert),
+    \\MOE_REPS (8), MOE_TRIALS (3).
 ;
 
 const Args = extern struct { rows: i32, n: i32, k: i32, experts: i32 };
@@ -64,7 +65,11 @@ pub fn main(init: std.process.Init) !void {
         total += w.*;
     }
     const pick = try arena.alloc(u32, n);
-    for (0..T) |t| {
+    const exact = std.c.getenv("MOE_EXACT") != null; // pairs dealt round-robin: every expert the same row count
+    if (exact) for (pick, 0..) |*q, i| {
+        q.* = @intCast((i % topk + (i / topk) * topk) % E);
+    };
+    if (!exact) for (0..T) |t| {
         var chosen: usize = 0;
         while (chosen < topk) {
             var r = rnd.float(f64) * total;
@@ -77,7 +82,7 @@ pub fn main(init: std.process.Init) !void {
                 chosen += 1;
             }
         }
-    }
+    };
     const counts = try arena.alloc(u32, E);
     @memset(counts, 0);
     for (pick) |e| counts[e] += 1;
