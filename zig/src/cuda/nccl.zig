@@ -12,6 +12,8 @@ pub const RedOp = enum(c_int) { sum = 0, prod = 1, max = 2, min = 3, avg = 4 };
 
 pub const Error = error{ LibraryUnavailable, MissingSymbol, NcclFailed };
 
+pub const in_progress: Result = 7; // ncclInProgress: a non-blocking communicator's call is still running
+
 const R = Result;
 const D = abi.DevicePtr;
 
@@ -25,6 +27,11 @@ pub const Api = struct {
     ncclAllReduce: *const fn (D, D, usize, DataType, RedOp, Comm, abi.Stream) callconv(.c) R,
     ncclAllGather: *const fn (D, D, usize, DataType, Comm, abi.Stream) callconv(.c) R,
     ncclBroadcast: *const fn (D, D, usize, DataType, c_int, Comm, abi.Stream) callconv(.c) R,
+    ncclSend: *const fn (D, usize, DataType, c_int, Comm, abi.Stream) callconv(.c) R,
+    ncclRecv: *const fn (D, usize, DataType, c_int, Comm, abi.Stream) callconv(.c) R,
+    /// Frees the communicator after ending its pending work; safe from another thread while a kernel waits.
+    ncclCommAbort: *const fn (Comm) callconv(.c) R,
+    ncclCommGetAsyncError: *const fn (Comm, *Result) callconv(.c) R,
     ncclGroupStart: *const fn () callconv(.c) R,
     ncclGroupEnd: *const fn () callconv(.c) R,
 };
