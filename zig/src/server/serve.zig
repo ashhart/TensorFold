@@ -13,9 +13,18 @@ const Allocator = std.mem.Allocator;
 const posix = std.posix;
 
 var stop_requested: std.atomic.Value(bool) = .init(false);
+/// The signal that asked for the stop (0: none yet), for the shutdown line
+var stop_signal: std.atomic.Value(i32) = .init(0);
 
-fn onStop(_: posix.SIG) callconv(.c) void {
+fn onStop(sig: posix.SIG) callconv(.c) void {
+    stop_signal.store(@intCast(@backingInt(sig)), .release);
     stop_requested.store(true, .release);
+}
+
+fn signalName(sig: i32) []const u8 {
+    if (sig == @backingInt(posix.SIG.TERM)) return "SIGTERM";
+    if (sig == @backingInt(posix.SIG.INT)) return "SIGINT";
+    return "a stop signal";
 }
 
 /// SIGTERM and SIGINT stop the server cleanly; SIGHUP rereads the key file; SIGPIPE is ignored, as Python ignores it.
@@ -171,10 +180,15 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     const accept = std.Thread.spawn(.{}, server_mod.Server.serve, .{ srv, lis, &stop_requested }) catch return 1;
     accept.join();
     lis.close();
+    // before the replies still running fail (their rounds' CUDA calls fail once the exit tears the driver down)
+    log.line("shutting down ({s}): no new requests; {d} connection(s) open, waiting up to 2 s before exiting", .{ signalName(stop_signal.load(.acquire)), srv.open_connections.load(.acquire) });
     if (drawing) ticker.finish();
     var waited: u32 = 0;
     while (srv.open_connections.load(.acquire) > 0 and waited < 40) : (waited += 1) std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
-    if (srv.open_connections.load(.acquire) > 0) std.process.exit(0); // replies still open: end without freeing what they read
+    if (srv.open_connections.load(.acquire) > 0) {
+        log.line("shutting down: exiting with {d} connection(s) still open; their requests fail", .{srv.open_connections.load(.acquire)});
+        std.process.exit(0); // replies still open: end without freeing what they read
+    }
     return 0;
 }
 
