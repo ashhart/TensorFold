@@ -20,6 +20,7 @@ test {
     _ = @import("../../core/moe_route.zig");
     _ = @import("../../core/affine_mm.zig");
     _ = @import("../../core/hc.zig");
+    _ = @import("../../core/paced_read.zig");
     _ = @import("../../core/copy_index.zig");
     _ = @import("attn_check.zig");
     _ = mirror;
