@@ -13,22 +13,22 @@ const Function = module.Function;
 const Stream = stream_.Stream;
 const Plan = grouped.Plan;
 
-pub const Format = enum { affine4, fp8g };
+pub const Format = enum { affine4, fp8g, nvfp4 };
 
 /// One layer's experts on the device as each format's make() lays them out; a family stacks its shared ones last.
 pub const Layer = struct {
     format: Format,
-    up: u64, // affine4: [E][NI/32][D/64][288] int32 blocks; fp8g: [E][NI/32][D/32][2][32][2][4] gate and up
-    down: u64, // affine4: [E][D/32][NI/64][288]; fp8g: [E][D/32][NI/32][1][32][2][4]
-    up_scale: u64 = 0, // fp8g: [E][2][NI/128][D/128] fp32 (gate, up); affine4 keeps its scales in the blocks
-    down_scale: u64 = 0, // fp8g: [E][1][D/128][NI/128]
+    up: u64, // affine4 [E][NI/32][D/64][288] int32; fp8g [E][NI/32][D/32][2][32][2][4]; nvfp4 [E][NI/32][D/32][2][144]
+    down: u64, // affine4 [E][D/32][NI/64][288]; fp8g [E][D/32][NI/32][1][32][2][4]; nvfp4 [E][D/32][NI/32][1][144]
+    up_scale: u64 = 0, // fp8g [E][2][NI/128][D/128] fp32; nvfp4 [E][2] global scales; affine4's are in the blocks
+    down_scale: u64 = 0, // fp8g [E][1][D/128][NI/128]; nvfp4 [E][1]
     width: usize, // NI
     dims: usize, // D
     experts: usize,
-    limit: f32 = 0.0, // fp8g: the SwiGLU clamp, 0 for none
+    limit: f32 = 0.0, // fp8g, nvfp4: the SwiGLU clamp, 0 for none
 };
 
-/// A call's epilogue: up with its format's activation (affine4 relu^2, fp8g SwiGLU), down to fp32 or to bf16 sums.
+/// A call's epilogue: up with its format's activation (affine4 relu^2, else SwiGLU), down to fp32 or to bf16 sums.
 pub const Epi = enum { up, down_f32, down_bf16 };
 
 /// The rows in: bf16 `x` rows `stride` apart; `up` reads token rows (`slots` pairs a row), down reads pair rows.
@@ -38,6 +38,7 @@ pub const Rows = struct { x: u64, stride: usize, slots: usize = 0 };
 pub const Grouped = struct {
     affine4: ?*const Affine4Experts = null,
     fp8g: ?*const Fp8Experts = null,
+    nvfp4: ?*const Nvfp4Experts = null,
 
     /// Decode rows: `items` bounds the plan's items (grouped.maxItems at tile 16); `skip` an expert left out, or -1.
     pub fn decode(g: Grouped, s: Stream, epi: Epi, in: Rows, l: Layer, p: Plan, out: u64, items: usize, skip: i32) !void {
@@ -52,6 +53,7 @@ pub const Grouped = struct {
                 return a.run(s, up, in.x, in.stride, if (up) in.slots else 0, w.ptr, w.kg, nb, p, out, w.n, items * nb);
             },
             .fp8g => return (g.fp8g orelse return error.FormatNotLoaded).run(s, epi, in, l, p, false, out, items, skip),
+            .nvfp4 => return (g.nvfp4 orelse return error.FormatNotLoaded).run(s, epi, in, l, p, out, items, skip),
         }
     }
 
@@ -68,6 +70,7 @@ pub const Grouped = struct {
                 return a.runPrompt(s, up, in.x, in.stride, if (up) in.slots else 0, w.ptr, w.kg, nb, p, out, w.n, items);
             },
             .fp8g => return (g.fp8g orelse return error.FormatNotLoaded).run(s, epi, in, l, p, true, out, items, skip),
+            .nvfp4 => return error.PromptFormNotBuilt, // a staged NVFP4 prompt kernel takes these rows (#548)
         }
     }
 };
@@ -75,7 +78,7 @@ pub const Grouped = struct {
 /// Pairs a prompt item holds, per format (the Python engines' prompt tiles).
 pub fn promptTile(f: Format) usize {
     return switch (f) {
-        .affine4, .fp8g => 64,
+        .affine4, .fp8g, .nvfp4 => 64,
     };
 }
 
@@ -262,6 +265,137 @@ pub const Fp8Experts = struct {
         }
     }
 };
+
+/// NVFP4 experts (nvfp4/experts.cu): the Python packing and kernel, decode rows (16 pairs an item).
+pub const Nvfp4Experts = struct {
+    mod: Module,
+    fns: [3]Function, // by Epi
+    resident: [3]usize, // blocks the grid may hold: per SM times SMs
+
+    pub const cols = 32; // output columns a block
+    pub const words = 144; // int32 a (32 columns, 32 inputs) block: 128 code words, then 16 of e4m3 scales
+
+    pub const symbols = struct {
+        pub const gate_up = "_ZN16tf_nvfp4_experts19nvfp4_expert_kernelILi2ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi";
+        pub const down_f32 = "_ZN16tf_nvfp4_experts19nvfp4_expert_kernelILi1ELi0ELi4EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi";
+        pub const down_bf16 = "_ZN16tf_nvfp4_experts19nvfp4_expert_kernelILi1ELi3ELi4EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi";
+    };
+
+    pub fn load(d: *const Driver, sms: usize) !Nvfp4Experts {
+        if (!kernels.available) return error.BuiltWithoutKernels;
+        var mod = try Module.load(d, kernels.nvfp4_experts);
+        errdefer mod.unload();
+        var e: Nvfp4Experts = .{ .mod = mod, .fns = undefined, .resident = undefined };
+        for ([_][:0]const u8{ symbols.gate_up, symbols.down_f32, symbols.down_bf16 }, 0..) |name, i| {
+            e.fns[i] = try mod.function(name);
+            e.resident[i] = @max(1, try e.fns[i].occupancy(128, 0)) * sms;
+        }
+        return e;
+    }
+
+    pub fn unload(e: *Nvfp4Experts) void {
+        e.mod.unload();
+    }
+
+    /// One call of nvfp4/experts.py's _run on a plan of at most `items` items.
+    pub fn run(e: *const Nvfp4Experts, s: Stream, epi: Epi, in: Rows, l: Layer, p: Plan, out: u64, items: usize, skip: i32) !void {
+        const gate = epi == .up;
+        const kg = (if (gate) l.dims else l.width) / 32;
+        const nb = (if (gate) l.width else l.dims) / cols;
+        const ei: usize = @backingInt(epi);
+        const grid = @min((items * nb + 3) / 4, e.resident[ei]);
+        if (grid < 1) return;
+        var a: launch_.Args = .{};
+        a.add(in.x);
+        a.add(@as(i32, @intCast(in.stride)));
+        a.add(@as(i32, @intCast(if (gate) in.slots else 0)));
+        a.add(if (gate) l.up else l.down);
+        a.add(if (gate) l.up_scale else l.down_scale);
+        a.add(@as(i32, @intCast(kg)));
+        a.add(@as(i32, @intCast(nb)));
+        for ([_]u64{ p.items, p.counts, p.members, out }) |v| a.add(v);
+        a.add(@as(i32, @intCast(if (gate) l.width else l.dims)));
+        a.add(if (gate) l.limit else @as(f32, 0.0));
+        a.add(skip);
+        try launch_.launch(e.fns[ei], .{ .grid = .{ .x = @intCast(grid), .y = 1, .z = 1 }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &a);
+    }
+
+    /// Where input 16h + 4t + q of a lane's word sits: nibble 2h + q/2 + 4(q%2) (fp4pair's field order).
+    fn slot(h: usize, q: usize) u5 {
+        return @intCast(4 * (2 * h + q / 2 + 4 * (q % 2)));
+    }
+
+    /// One expert's words [n, k/2] (low nibble first) and e4m3 scales [n, k/16] as blocks [n/32][k/32][144] (_pack).
+    pub fn packOne(out: []u32, codes: []const u8, scales: []const u8, n: usize, k: usize) void {
+        const kg = k / 32;
+        std.debug.assert(n % cols == 0 and k % 32 == 0 and out.len == n / cols * kg * words);
+        std.debug.assert(codes.len == n * k / 2 and scales.len == n * k / 16);
+        for (0..n / cols) |cb| for (0..kg) |g| {
+            const block = out[(cb * kg + g) * words ..][0..words];
+            for (0..8) |gq| for (0..4) |t| for (0..4) |j| {
+                const row = cb * cols + j * 8 + gq;
+                var w: u32 = 0;
+                for (0..2) |h| for (0..4) |q| {
+                    const input = g * 32 + h * 16 + t * 4 + q;
+                    const byte = codes[row * (k / 2) + input / 2];
+                    const nib: u32 = if (input & 1 == 0) byte & 0xF else byte >> 4;
+                    w |= nib << slot(h, q);
+                };
+                block[(gq * 4 + t) * 4 + j] = w;
+            };
+            const sc = std.mem.sliceAsBytes(block[128..]);
+            for (0..4) |t| for (0..2) |h| for (0..4) |j| for (0..2) |c| {
+                const row = cb * cols + j * 8 + t * 2 + c;
+                sc[((t * 2 + h) * 4 + j) * 2 + c] = scales[row * (k / 16) + g * 2 + h];
+            };
+        };
+    }
+
+    /// Gate and up interleaved per (column block, k32 group) as make() stacks them: [n/32][k/32][2][144].
+    pub fn packGateUp(gpa: std.mem.Allocator, out: []u32, gate: [2][]const u8, up: [2][]const u8, n: usize, k: usize) !void {
+        const half = n / cols * (k / 32) * words;
+        std.debug.assert(out.len == 2 * half);
+        const g = try gpa.alloc(u32, half);
+        defer gpa.free(g);
+        const u = try gpa.alloc(u32, half);
+        defer gpa.free(u);
+        packOne(g, gate[0], gate[1], n, k);
+        packOne(u, up[0], up[1], n, k);
+        for (0..half / words) |b| {
+            @memcpy(out[(2 * b) * words ..][0..words], g[b * words ..][0..words]);
+            @memcpy(out[(2 * b + 1) * words ..][0..words], u[b * words ..][0..words]);
+        }
+    }
+};
+
+test "a packed nvfp4 block puts each nibble and scale where nvfp4/experts.py's _pack does" {
+    const gpa = std.testing.allocator;
+    const n = 64;
+    const k = 64;
+    const codes = try gpa.alloc(u8, n * k / 2);
+    defer gpa.free(codes);
+    for (codes, 0..) |*c, i| c.* = @truncate(i * 29 + 3);
+    var scales: [n * k / 16]u8 = undefined;
+    for (&scales, 0..) |*c, i| c.* = @truncate(i * 7 + 1);
+    var out: [n / 32 * (k / 32) * Nvfp4Experts.words]u32 = undefined;
+    Nvfp4Experts.packOne(&out, codes, &scales, n, k);
+    const words = Nvfp4Experts.words;
+    // block (cb 1, g 1), lane gq 3, t 2, tile j 1: row 32 + 8 + 3 = 43; input 32 + 16 + 8 + 3 (h 1, q 3) -> slot 7
+    const w = out[(1 * 2 + 1) * words + (3 * 4 + 2) * 4 + 1];
+    try std.testing.expectEqual(@as(u32, codes[43 * 32 + 59 / 2] >> 4), (w >> Nvfp4Experts.slot(1, 3)) & 0xF);
+    // its scale byte (t 2, h 1, j 1, c 0): row 32 + 8 + 4 = 44, k16 group 3
+    const sc = std.mem.sliceAsBytes(out[(1 * 2 + 1) * words + 128 ..][0..16]);
+    try std.testing.expectEqual(scales[44 * 4 + 3], sc[((2 * 2 + 1) * 4 + 1) * 2]);
+}
+
+test "nvfp4 prompt rows are refused until a prompt kernel is built" {
+    const n: Nvfp4Experts = undefined;
+    const g: Grouped = .{ .nvfp4 = &n };
+    const l: Layer = .{ .format = .nvfp4, .up = 0, .down = 0, .width = 64, .dims = 64, .experts = 2 };
+    const s: Stream = undefined;
+    const p: Plan = .{ .members = 0, .items = 0, .counts = 0, .rank = 0, .hist = 0 };
+    try std.testing.expectError(error.PromptFormNotBuilt, g.prompt(s, .up, .{ .x = 0, .stride = 64 }, l, p, 0, 1, -1));
+}
 
 test "a packed fp8 expert puts each word where fp8/experts.py's pack does" {
     const gpa = std.testing.allocator;
