@@ -243,3 +243,6 @@ pattn_kernel(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restric
 // Head dim 128, eight warps, eight query heads a block, eight staging slots (Nemotron's 16 heads a KV head).
 template __global__ void tf_prefill_attention::pattn_kernel<128, 8, 8, 8>(const __nv_bfloat16*,
     const __nv_bfloat16*, const __nv_bfloat16*, __nv_bfloat16*, int, int, int, int, int, float);
+// Head dim 256, two query heads a block, two staging slots beside the staged queries (Qwen3.8's 6 heads a KV head).
+template __global__ void tf_prefill_attention::pattn_kernel<256, 8, 2, 2>(const __nv_bfloat16*,
+    const __nv_bfloat16*, const __nv_bfloat16*, __nv_bfloat16*, int, int, int, int, int, float);

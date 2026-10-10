@@ -13,6 +13,7 @@ fn Blob(comptime import_name: []const u8) type {
 pub const available = options.with_kernels;
 
 pub const gdn: []const u8 = if (available) &Blob("fatbin_gdn").bytes else &.{};
+pub const gdn_prefill: []const u8 = if (available) &Blob("fatbin_gdn_prefill").bytes else &.{};
 pub const probe: []const u8 = if (available) &Blob("fatbin_probe").bytes else &.{};
 pub const qmm_group: []const u8 = if (available) &Blob("fatbin_qmm_group").bytes else &.{};
 pub const qmm_prefill: []const u8 = if (available) &Blob("fatbin_qmm_prefill").bytes else &.{};
@@ -24,6 +25,7 @@ pub const scan_rows: []const u8 = if (available) &Blob("fatbin_scan_rows").bytes
 pub const nemotron_ops: []const u8 = if (available) &Blob("fatbin_nemotron_ops").bytes else &.{};
 pub const lane_gemv: []const u8 = if (available) &Blob("fatbin_lane_gemv").bytes else &.{};
 pub const affine4_pack: []const u8 = if (available) &Blob("fatbin_affine4_pack").bytes else &.{};
+pub const qwen_ops: []const u8 = if (available) &Blob("fatbin_qwen_ops").bytes else &.{};
 pub const sample: []const u8 = if (available) &Blob("fatbin_sample").bytes else &.{};
 pub const fp8_lane: []const u8 = if (available) &Blob("fatbin_fp8_lane").bytes else &.{};
 pub const torch_argmax: []const u8 = if (available) &Blob("fatbin_torch_argmax").bytes else &.{};
@@ -39,6 +41,7 @@ pub const nemotron_attention: []const u8 = if (available) &Blob("fatbin_nemotron
 pub const nemotron_keyed: []const u8 = if (available) &Blob("fatbin_nemotron_keyed").bytes else &.{};
 pub const train: []const u8 = if (available) &Blob("fatbin_train").bytes else &.{};
 pub const train_mixers: []const u8 = if (available) &Blob("fatbin_train_mixers").bytes else &.{};
+pub const torch_norm_rotary: []const u8 = if (available) &Blob("fatbin_torch_norm_rotary").bytes else &.{};
 
 /// Symbols in the gdn image as cuobjdump lists them for the built fatbin (named namespace tf_gdn).
 pub const gdn_symbols = struct {
