@@ -42,6 +42,25 @@ pub const Bufs = struct {
     const names = .{ "g", "dx", "xa", "xn", "gates", "dxa", "dyn", "ytot", "dytot", "dt", "ddt", "dact", "dproj", "ckpt", "states", "dbp", "dcp", "d_o", "dqkv", "probs", "dscores", "dy", "d_act", "du", "dxp", "xb", "wt" };
 
     pub fn init(d: *const cuda.Driver, c: cfg.Config, rows: usize) !Bufs {
+        const bytes = sizes(c, rows);
+        var b: Bufs = undefined;
+        b.mem = try cuda.DeviceBuffer.alloc(d, total(c, rows));
+        var at: usize = 0;
+        inline for (names, 0..) |n, i| {
+            @field(b, n) = b.mem.ptr + at;
+            at += std.mem.alignForward(usize, bytes[i], 256);
+        }
+        return b;
+    }
+
+    /// The device bytes `init` takes at `rows` rows.
+    pub fn total(c: cfg.Config, rows: usize) usize {
+        var n: usize = 0;
+        for (sizes(c, rows)) |x| n += std.mem.alignForward(usize, x, 256);
+        return n;
+    }
+
+    fn sizes(c: cfg.Config, rows: usize) [names.len]usize {
         const D = c.hidden;
         const pairs = rows * c.slots();
         const qw = c.heads * c.head_dim;
@@ -49,7 +68,7 @@ pub const Bufs = struct {
         const h = c.mamba_heads;
         const widest = @max(c.projDim(), c.qkvDim(), D, c.inner(), qw);
         const plane = @max(D * c.projDim(), D * c.qkvDim(), D * c.inner(), D * qw);
-        const bytes = [_]usize{
+        return .{
             rows * D * 4,              rows * D * 4,           rows * dims.max_rank * 4,   rows * 4,                        rows * dims.max_blocks * 4,
             rows * dims.max_rank * 4,  rows * c.inner() * 4,   rows * c.inner() * 4,       rows * c.inner() * 4,            rows * h * 4,
             rows * h * 4,              rows * c.convDim() * 4, rows * c.projDim() * 4,     h * (rows / 16 + 1) * state * 4, h * 16 * state * 4,
@@ -57,16 +76,6 @@ pub const Bufs = struct {
             c.heads * rows * rows * 4, pairs * D * 4,          pairs * c.expert_width * 4, pairs * c.expert_width * 4,      pairs * D * 4,
             rows * widest * 2,         plane * 2,
         };
-        var total: usize = 0;
-        for (bytes) |n| total += std.mem.alignForward(usize, n, 256);
-        var b: Bufs = undefined;
-        b.mem = try cuda.DeviceBuffer.alloc(d, total);
-        var at: usize = 0;
-        inline for (names, 0..) |n, i| {
-            @field(b, n) = b.mem.ptr + at;
-            at += std.mem.alignForward(usize, bytes[i], 256);
-        }
-        return b;
     }
 
     pub fn deinit(b: *Bufs) void {

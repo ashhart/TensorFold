@@ -43,6 +43,7 @@ pub const Loaded = struct {
     lone: ?LoneRun = null, // called with `ctx`; null: every stream in the lane core
     target: *reuse.Target, // the prompt cache copies this engine (cuda_reuse.zig)
     learns: ?*engine.Engine = null, // --slide: the engine its learner trains, whose sites it attached at load
+    learn_bytes: usize = 0, // --slide: what its trainer allocates at the first lesson, kept out of the streams' room
 };
 
 /// The first shard, index or config.json in `dir` that a write in place would reach through a link, or null.
@@ -82,6 +83,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .target = &own.target,
         .lone = if (head != null) loneRun else null,
         .learns = if (o.slide) e else null,
+        .learn_bytes = if (o.slide) @import("cuda_train.zig").Trainer.memory(e.c) else 0,
     };
 }
 

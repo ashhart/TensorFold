@@ -83,6 +83,14 @@ pub const Trainer = struct {
     sketched: usize = 0, // rows sketched since the sketches were cleared, each row's place in them
     bases: learned.Bases = .{}, // each saved layer's projection as loaded, which every later save folds onto
 
+    /// What `init` allocates for `c`, device and mapped: the first lesson's memory, which the budget keeps at load.
+    pub fn memory(c: cfg.Config) usize {
+        var parts_bytes: usize = 0;
+        for (0..c.layers) |l| parts_bytes += slot(c, c.kinds[l]);
+        const device = state.Seq.bytes(c, keys, &.{}) + back.Bufs.total(c, max_rows) + (c.layers + 1) * max_rows * c.hidden * 2 + parts_bytes + max_rows * c.vocab * 2 + c.hidden * c.vocab * 2;
+        return device + 5 * max_rows * 4 + c.layers * max_rows * dims.candidates * 4;
+    }
+
     /// Every buffer a step needs, the change's sites taken from the engine (still attached: nothing moves yet).
     pub fn init(gpa: std.mem.Allocator, e: *engine.Engine) !*Trainer {
         const c = e.c;
