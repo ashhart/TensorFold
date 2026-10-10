@@ -131,6 +131,9 @@ pub const Engine = struct {
         const model = try modelHash(gpa, dir, f.bytes[0..f.size]);
         e.model_hash = model;
         if (std.c.getenv("GLM_LAYERS")) |v| try cfg.subset(&e.c, std.fmt.parseInt(u32, std.mem.span(v), 10) catch return error.BadLayerCount);
+        if (std.c.getenv("GLM_MTP")) |v| if (v[0] == '0') { // no MTP head: no drafts, its ~4 GB left on disk
+            e.c.mtp = 0;
+        };
         const link: ?ep_mod.Settings = if (ep_path) |sp| blk: {
             const sf = try mtl.MappedFile.open(try e.ep_arena.allocator().dupeSentinel(u8, sp, 0));
             defer sf.deinit();

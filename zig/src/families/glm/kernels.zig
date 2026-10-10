@@ -46,8 +46,8 @@ pub const Kernels = struct {
     kda_rows_tp: mtl.Pipeline, // TP2: the fused step over one Mac's 32 heads
     router: [max_rows]mtl.Pipeline, // by window rows (RR = 1 .. 16)
     moe_route: mtl.Pipeline,
-    moe_gateup_1: mtl.Pipeline,
-    moe_down_1: mtl.Pipeline,
+    shared_gateup: mtl.Pipeline, // the shared expert's kernels at one output a simdgroup: four times the threadgroups, the same sums
+    shared_down: mtl.Pipeline,
     moe_gateup_2: mtl.Pipeline,
     moe_down_2: mtl.Pipeline,
     moe_combine: mtl.Pipeline,
@@ -132,8 +132,6 @@ const generated = [_]struct { key: []const u8, field: []const u8 }{
     .{ .key = "kda_rows_tp", .field = "kda_rows_tp" },
     .{ .key = "router", .field = "router" },
     .{ .key = "moe_route", .field = "moe_route" },
-    .{ .key = "moe_gateup_1", .field = "moe_gateup_1" },
-    .{ .key = "moe_down_1", .field = "moe_down_1" },
     .{ .key = "moe_gateup_2", .field = "moe_gateup_2" },
     .{ .key = "moe_down_2", .field = "moe_down_2" },
     .{ .key = "moe_combine", .field = "moe_combine" },
@@ -178,6 +176,12 @@ const Job = struct {
     }
 };
 
+/// Generated kernel `key`'s template at other parameters, under `name`.
+fn instance(comptime key: []const u8, comptime params: []const u8, comptime name: []const u8) []const u8 {
+    const f = comptime kernelOf(key).functions[0];
+    return "\ntemplate [[host_name(\"" ++ name ++ "\")]] [[kernel]] decltype(" ++ f ++ "<" ++ params ++ ">) " ++ f ++ "<" ++ params ++ ">;\n";
+}
+
 fn kernelOf(comptime key: []const u8) sources.glm.Kernel {
     @setEvalBranchQuota(20000);
     for (sources.glm.all) |k| if (comptime std.mem.eql(u8, k.key, key)) return k;
@@ -188,7 +192,7 @@ fn kernelOf(comptime key: []const u8) sources.glm.Kernel {
 pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const k = try gpa.create(Kernels);
     errdefer gpa.destroy(k);
-    var jobs: [generated.len + 15]Job = undefined;
+    var jobs: [generated.len + 17]Job = undefined;
     inline for (generated, 0..) |g, i| {
         const src = comptime kernelOf(g.key);
         const FT = @FieldType(Kernels, g.field);
@@ -253,6 +257,10 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     defer gpa.free(index_src);
     var index_out: [2]mtl.Pipeline = undefined;
     jobs[generated.len + 14] = .{ .device = device, .source = index_src, .names = &.{ "glm_index_scores_nax", "glm_index_decode" }, .out = &index_out };
+    const shared_gu_src = comptime kernelOf("moe_gateup_1").source ++ instance("moe_gateup_1", "4096, 2048, 1, 8, 16, 128, 1, 4, 16, 8", "glm_shared_gateup");
+    const shared_down_src = comptime kernelOf("moe_down_1").source ++ instance("moe_down_1", "2048, 4096, 1, 8, 16, 128, 1, 4, 16, 8", "glm_shared_down");
+    jobs[generated.len + 15] = .{ .device = device, .source = shared_gu_src, .names = &.{"glm_shared_gateup"}, .out = @as(*[1]mtl.Pipeline, &k.shared_gateup) };
+    jobs[generated.len + 16] = .{ .device = device, .source = shared_down_src, .names = &.{"glm_shared_down"}, .out = @as(*[1]mtl.Pipeline, &k.shared_down) };
     var sources_seen = std.hash.Wyhash.init(0x6b);
     for (jobs) |j| sources_seen.update(j.source);
     k.source_hash = sources_seen.final();

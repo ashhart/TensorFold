@@ -98,11 +98,11 @@ fn experts(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
     const act = if (part == 1) sc.acts else sc.act;
     if (if (part == 1) on(x, "s_gateup") else on(x, "e_gateup")) gateUp(x, e, w, x_in, rows, part, group, zs, act);
     if (!(if (part == 1) on(x, "s_down") else on(x, "e_down"))) return;
-    e.setPipeline(if (part == 1) k.moe_down_1 else k.moe_down_2);
+    e.setPipeline(if (part == 1) k.shared_down else k.moe_down_2);
     bind(e, 0, .{act});
     shape(e, 1, .{ rows, slots, N });
     bind(e, 2, .{ w.down.w, w.down.s, w.down.b, w.sh_down.w, w.sh_down.s, w.sh_down.b, group[0], group[1], group[2], if (part == 1) sc.ys else sc.ye });
-    e.dispatchThreads(size(32 * rows, D / 4, zs), size(32 * rows, 1, 1));
+    e.dispatchThreads(size(32 * rows, if (part == 1) D else D / 4, zs), size(32 * rows, 1, 1)); // the shared expert: an output a simdgroup
 }
 
 /// By rows: every routed pick's half (this Mac's intermediate rows), down's fp32 partials into `yp`.
@@ -135,11 +135,11 @@ fn gateUp(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, ro
     const k = x.k;
     const D = c.hidden;
     const N = c.moe_inter;
-    e.setPipeline(if (part == 1) k.moe_gateup_1 else k.moe_gateup_2);
+    e.setPipeline(if (part == 1) k.shared_gateup else k.moe_gateup_2);
     bind(e, 0, .{x_in});
     shape(e, 1, .{ rows, D });
     bind(e, 2, .{ w.gate.w, w.gate.s, w.gate.b, w.up.w, w.up.s, w.up.b, w.sh_gate_up.w, w.sh_gate_up.s, w.sh_gate_up.b, group[0], group[1], group[2] });
     e.setValue(c.swiglu_limit, 14);
     bind(e, 15, .{act});
-    e.dispatchThreads(size(32 * rows, N / 4, zs), size(32 * rows, 1, 1));
+    e.dispatchThreads(size(32 * rows, if (part == 1) N else N / 4, zs), size(32 * rows, 1, 1));
 }
