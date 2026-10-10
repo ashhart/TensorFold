@@ -47,8 +47,8 @@ def request(case, tokens, gate):
     }
 
 
-def run(args, slots, cases):
-    log_path = args.output / f"serve-{slots}.log"
+def run(args, slots, cases, block):
+    log_path = args.output / f"serve-{slots}-block-{block}.log"
     with log_path.open("w") as log:
         process = subprocess.Popen([
             str(args.binary), "serve", str(args.model), "--name", "batch-gate", "--host", "127.0.0.1",
@@ -132,13 +132,16 @@ def main():
     if not slots or slots[0] != 1 or any(value < 1 or value > 16 for value in slots):
         parser.error("parallel must start with 1 and stay within 1..16")
     args.output.mkdir(parents=True, exist_ok=True)
+    receipt = {"reply_token_limit": args.tokens, "rounds": args.rounds, "exact": False, "runs": {}}
+    (args.output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     cases = [json.loads((args.fixtures / f"{name}.json").read_text()) for name in
              ("short", "thinking", "sparse", "sparse-thinking")]
-    receipt = {"reply_token_limit": args.tokens, "rounds": args.rounds, "runs": {}}
     reference = None
-    for count in slots:
-        batches = run(args, count, cases)
-        receipt["runs"][str(count)] = batches
+    for block, count in enumerate(slots):
+        batches = run(args, count, cases, block)
+        for batch in batches:
+            batch["block"] = block
+        receipt["runs"].setdefault(str(count), []).extend(batches)
         for batch in batches:
             replies = [{key: result[key] for key in ("reply", "tokens", "prompt_tokens", "token_sha")}
                        for result in batch["results"]]
