@@ -8,6 +8,7 @@ const lanes = @import("lanes");
 const checks = @import("cuda_checks.zig");
 const kernel_checks = @import("cuda_kernel_checks.zig");
 const shared_checks = @import("cuda_shared_checks.zig");
+const checkpoint_cli = @import("checkpoint_cli");
 const lanes_cli = @import("cuda_lanes.zig");
 const segments_cli = @import("cuda_segments.zig");
 const decode = nemotron.decode;
@@ -30,6 +31,9 @@ const usage =
     \\       tensorfold check-kernels MODEL   (lane_gemv and the forked MoE against the kernels they replace, real weights)
     \\       tensorfold widths MODEL --tokens ID,... [--max-tokens N] [--eager] [sampling as run]
     \\                (every verify width 1-16 against serial decoding, a wrong draft every third window)
+    \\       tensorfold models
+    \\       tensorfold info MODEL
+    \\       tensorfold pull REPO[@REVISION]
     \\       tensorfold lanes MODEL PROMPTS.json [--solo] [--max-tokens N] [--no-drafts] [sampling as run] [--report PATH]
     \\                (every prompt through the lane core at once, or one at a time with --solo)
     \\
@@ -38,6 +42,13 @@ const usage =
 pub fn main(init: std.process.Init) !u8 {
     const gpa = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    // The version must work without a model, driver or GPU.
+    if (args.len == 2 and std.mem.eql(u8, args[1], "--version")) {
+        std.debug.print("tensorfold {s}\n", .{@import("build_options").version});
+        return 0;
+    }
+    // The checkpoint commands must work without a model, driver or GPU too.
+    if (args.len >= 2 and checkpoint_cli.wants(@ptrCast(args[1..]))) return checkpoint_cli.main(init, args[1..]);
     if (args.len < 3) {
         std.debug.print("{s}", .{usage});
         return 2;

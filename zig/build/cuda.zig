@@ -107,6 +107,10 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     cli.addImport("core", mods.core);
     cli.addImport("lanes", mods.lanes);
     cli.addImport("nemotron", mods.nemotron);
+    const native = engines(b, target, optimize, cuda, mods.lanes, mods.nemotron);
+    const checkpoint_cli = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cli.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip, .imports = &.{.{ .name = "native_engines", .module = native.engines }} });
+    cli.addOptions("build_options", build_options);
+    cli.addImport("checkpoint_cli", checkpoint_cli);
     b.installArtifact(b.addExecutable(.{ .name = "tensorfold", .root_module = cli }));
     const runner = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/main.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip });
     runner.addImport("cuda", cuda);
@@ -152,7 +156,7 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
 }
 
 /// Host unit tests of the CUDA runtime, the backend-neutral core, the lane core and the CUDA family (no GPU), on any host.
-pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, all: *std.Build.Step) void {
+pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *std.Build.Step.Options, all: *std.Build.Step) void {
     const step = b.step("test-cuda-host", "The CUDA side's host unit tests alone (no GPU work)");
     all.dependOn(step);
     const host = b.graph.host;
@@ -178,6 +182,9 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, all: *std.Build.St
     cli.addImport("core", mods.core);
     cli.addImport("lanes", mods.lanes);
     cli.addImport("nemotron", mods.nemotron);
+    cli.addOptions("build_options", build_options);
+    const checkpoint_cli = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cli.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "native_engines", .module = native_modules.engines }} });
+    cli.addImport("checkpoint_cli", checkpoint_cli);
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cli })).step);
 }
 
