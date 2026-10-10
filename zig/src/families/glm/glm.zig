@@ -24,6 +24,6 @@ test {
     _ = @import("../../core/copy_index.zig");
     _ = @import("attn_check.zig");
     _ = @import("load_plan.zig");
-    _ = weights;
+    _ = @import("page_cache.zig");
     _ = mirror;
 }

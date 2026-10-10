@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
 const wts = @import("weights.zig");
+const page_cache = @import("page_cache.zig");
 const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const mtp = @import("mtp.zig");
@@ -193,7 +194,7 @@ pub const Engine = struct {
         }
         { // the load needs the memory a cached copy of the checkpoint holds: the paced reads wait for free pages (#583)
             const dropped_at = std.c.mach_absolute_time();
-            if (wts.dropCached(gpa, dir)) |cached| {
+            if (page_cache.dropCached(gpa, dir)) |cached| {
                 if (cached > 0) std.log.info("glm: dropped {d:.1} GiB of the checkpoint from the file cache before the load ({d:.2} s)", .{ @as(f64, @floatFromInt(cached)) / (1 << 30), @as(f64, @floatFromInt(std.c.mach_absolute_time() - dropped_at)) / 24e6 });
             } else |err| std.log.warn("glm: could not drop the checkpoint's cached pages ({s}); the load reads beside them", .{@errorName(err)});
         }
