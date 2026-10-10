@@ -11,6 +11,9 @@ test {
     _ = @import("runtime.zig");
     _ = @import("launch.zig");
     _ = @import("graph.zig");
+    _ = @import("arena.zig");
+    _ = @import("launches.zig");
+    _ = @import("ops/ops.zig");
     _ = @import("context.zig").Context.init;
     _ = @import("stream.zig").Stream.init;
     _ = @import("memory.zig").DeviceBuffer.alloc;
