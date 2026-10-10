@@ -117,10 +117,7 @@ pub const Engine = struct {
             try trail.event(e, &.{ f("ev", str("first")), f("stream", str(s.id)), f("position", int(position)), f("drawn", int(first)), f("token", int(value)) });
         }
         var first_row: [1]LogRow = undefined;
-        if (s.logprobs != null) {
-            const row = e.backend.vtable.first_row orelse return error.LogprobsUnsupported;
-            first_row[0] = (try row(e.backend.ptr, s)).forToken(value);
-        }
+        if (s.logprobs != null) first_row[0] = (try e.backend.firstRow(s)).forToken(value);
         _ = try s.commit(e.gpa, &.{value}, if (s.logprobs != null) &first_row else &.{});
         s.pending = value;
         try trail.resolve(e);

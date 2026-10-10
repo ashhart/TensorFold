@@ -36,7 +36,7 @@ pub const Text = struct {
         template_source: *const fn (ctx: *anyopaque) []const u8,
         /// Whether an id is a special token (an added token flagged special); null: none are known.
         special: ?*const fn (ctx: *anyopaque, id: u32) bool = null,
-        /// A token's exact bytes (a partial UTF-8 sequence kept whole), for logprob rows; null: the tokenizer can't say.
+        /// A token's own bytes (a partial UTF-8 sequence kept whole) for logprob rows; null: the tokenizer can't say.
         token_bytes: ?*const fn (ctx: *anyopaque, a: Allocator, id: u32) Allocator.Error!?[]u8 = null,
     };
 

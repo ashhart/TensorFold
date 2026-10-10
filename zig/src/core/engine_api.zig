@@ -98,7 +98,7 @@ pub const Stats = struct {
 pub const Event = union(enum) {
     /// The prompt is in the cache: ``cached`` of its tokens came from a kept prefix.
     prefilled: u32,
-    /// The rows of the ``tokens`` event that follows, one a token (requests with ``logprobs`` only); valid only during the call.
+    /// The next ``tokens`` event's logprob rows, one a token (``logprobs`` requests); valid only during the call.
     logprobs: []const LogprobRow,
     /// Tokens committed for this request, in order; valid only during the call.
     tokens: []const u32,

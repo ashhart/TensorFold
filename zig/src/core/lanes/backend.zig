@@ -120,6 +120,10 @@ pub const Backend = struct {
         const f = b.vtable.features orelse return error.NoFeatures;
         return f(b.ptr, s, taps, start, count);
     }
+    pub fn firstRow(b: Backend, s: *Stream) !Row {
+        const f = b.vtable.first_row orelse return error.LogprobsUnsupported;
+        return f(b.ptr, s);
+    }
     pub fn release(b: Backend, s: *Stream) void {
         b.vtable.release(b.ptr, s);
     }
