@@ -30,6 +30,8 @@ pub const Input = struct {
     fields: Value,
     /// The reply's id as its client gets it, so the server's lines for the request carry the same id.
     id: []const u8 = "",
+    /// ``logprobs: true`` with this many ``top_logprobs``; null: not asked.
+    logprobs: ?u8 = null,
 };
 
 /// A streamed piece: content text (a string) or a delta object (reasoning or tool calls).
@@ -53,6 +55,8 @@ pub const Reply = struct {
     /// The template switches the prompt was rendered with (the next turn's prefill renders with them too).
     thinking: bool = false,
     effort: ?[]const u8 = null,
+    /// ``choices[0].logprobs`` (``{"content": [...]}``) for a request that asked; null otherwise.
+    logprobs: ?Value = null,
 };
 
 pub const Failure = error{ Refused, Cancelled, Failed, OutOfMemory };
@@ -65,6 +69,7 @@ const Mailbox = struct {
     cond: std.Io.Condition = .init,
     tokens: std.ArrayList(u32) = .empty,
     chunks: std.ArrayList(usize) = .empty, // where each round's tokens end
+    rows: std.ArrayList(api.LogprobRow) = .empty, // one a token of `tokens`, for requests with logprobs
     cached: ?u32 = null,
     prefilled_ns: ?i96 = null,
     finished: bool = false,
@@ -84,6 +89,7 @@ const Mailbox = struct {
                 m.cached = cached;
                 m.prefilled_ns = std.Io.Clock.awake.now(m.io).toNanoseconds();
             },
+            .logprobs => |r| m.rows.appendSlice(m.gpa, r) catch {},
             .tokens => |t| {
                 m.tokens.appendSlice(m.gpa, t) catch {};
                 m.chunks.append(m.gpa, m.tokens.items.len) catch {};
@@ -104,6 +110,7 @@ const Mailbox = struct {
     fn deinit(m: *Mailbox) void {
         m.tokens.deinit(m.gpa);
         m.chunks.deinit(m.gpa);
+        m.rows.deinit(m.gpa);
         m.gpa.free(m.widths);
         m.gpa.free(m.raised);
         m.gpa.free(m.telemetry);
@@ -197,6 +204,12 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
             request.think_end = srv.think_close_end;
         }
     }
+    if (input.logprobs) |count| {
+        // the rows are cut where the text is: after the end-of-thinking token, which must be a token of its own
+        if (thinking and srv.text.tokenId(srv.markers.close) == null) return cx.refuse("logprobs with thinking on need the template's end-of-thinking marker as one token");
+        if (request.think_budget > 0) return cx.refuse("logprobs support nonstreamed chat without tools, stop strings, structured output or a thinking budget");
+        request.logprobs = count;
+    }
     return .{ .input = input, .request = request, .prompt_len = rendered.ids.len, .received = received, .thinking = thinking, .effort = effort, .sampled = sampling != null, .drafts = drafts, .stops = stops_opt, .preparing = preparing };
 }
 
@@ -237,7 +250,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     };
     release(srv, preparing); // a background request waits only while a foreground one prepares
     preparing = false;
-    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .sink = sink, .thinking = thinking or reply_text.isChannel(srv.markers), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools };
+    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .sink = sink, .thinking = thinking or reply_text.isChannel(srv.markers), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .logprobs = request.logprobs != null };
     defer srv.noteRequest(prepared.prompt_len, box.cached orelse 0, gen.collected.items.len, box.stats.drafted, box.stats.accepted, box.stats.rounds, received, gen.first_ns, gen.last_ns, box.stats.prefill_seconds);
     errdefer if (!gen.engine_done) gen.cancel(); // the engine writes to the mailbox until it says finished
     const result: Failure!Reply = blk: {
@@ -326,6 +339,7 @@ const Generation = struct {
     engine_done: bool = false,
     consumed: usize = 0,
     chunk_index: usize = 0,
+    logprobs: bool = false, // the request asked for logprobs: the mailbox holds a row a token
 
     fn eos(g: *const Generation, t: u32) bool {
         return !g.ignore_eos and std.mem.indexOfScalar(u32, g.srv.eos, t) != null;
@@ -552,6 +566,7 @@ const Generation = struct {
             .speculative = .{ .object = spec },
             .thinking = thinking,
             .effort = effort,
+            .logprobs = if (g.logprobs) try g.logprobsValue(cx, content_tokens) else null,
         };
         if (std.mem.eql(u8, reason, "length") and thinking and reply_text.pyStrip(content).len == 0)
             log.line("warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {{\"enable_thinking\": false}} (server: --no-thinking)", .{});
@@ -559,6 +574,48 @@ const Generation = struct {
         const cycle = if (s.loop_period) |period| std.fmt.bufPrint(&cycle_text, " loop=period:{d}", .{period}) catch "" else "";
         log.line("done {s} prompt={d} cached={d} thinking={s} effort={s} tokens={d} sha={s} finish={s}{s} rounds={d} accepted={d}/{d}", .{ g.reply_id, prompt_len, reply.cached_tokens, if (thinking) "True" else "False", if (thinking) effort orelse "none" else "none", g.collected.items.len, sha, reason, cycle, s.rounds, s.accepted, s.drafted });
         return reply;
+    }
+
+    /// ``choices[0].logprobs`` for the answer's tokens: after the first end-of-thinking token and dropped newlines.
+    fn logprobsValue(g: *Generation, cx: *Cx, tokens: []const u32) Failure!Value {
+        const a = g.a;
+        const rows = g.box.rows.items;
+        if (rows.len < tokens.len) return cx.other("the engine gave fewer logprob rows than reply tokens");
+        var start: usize = 0;
+        if (g.thinking) {
+            const end = g.srv.text.tokenId(g.srv.markers.close) orelse return cx.other("logprobs: the end-of-thinking marker is not a token");
+            start = if (std.mem.indexOfScalar(u32, tokens, end)) |at| at + 1 else tokens.len;
+            while (start < tokens.len) : (start += 1) {
+                const bytes = (try g.srv.text.tokenBytes(a, tokens[start])) orelse break;
+                if (bytes.len == 0 or std.mem.indexOfNone(u8, bytes, "\n") != null) break;
+            }
+        }
+        const content = try a.alloc(Value, tokens.len - start);
+        for (content, tokens[start..], rows[start..tokens.len]) |*slot, id, r| {
+            if (r.token != id) return cx.other("the logprob rows are out of step with the reply's tokens");
+            if (std.math.isNan(r.logprob)) return cx.other("a forced reply token has no logprob");
+            const entry = try g.tokenEntry(id, r.logprob);
+            const top = try a.alloc(Value, r.count);
+            for (top, r.ids[0..r.count], r.logprobs[0..r.count]) |*t, alt, lp| t.* = .{ .object = try g.tokenEntry(alt, lp) };
+            try entry.put(a, "top_logprobs", .{ .array = top });
+            slot.* = .{ .object = entry };
+        }
+        const out = try json.newObject(a);
+        try out.put(a, "content", .{ .array = content });
+        return .{ .object = out };
+    }
+
+    /// ``{token, logprob, bytes}``: the token's text, and its own bytes (a partial UTF-8 sequence kept whole).
+    fn tokenEntry(g: *Generation, id: u32, logprob: f32) Failure!*json.Object {
+        const a = g.a;
+        const bytes = (try g.srv.text.tokenBytes(a, id)) orelse &.{};
+        const o = try json.newObject(a);
+        try o.put(a, "token", .{ .string = try g.srv.text.decode(a, &.{id}) });
+        try o.put(a, "logprob", .{ .float = logprob });
+        const b = try a.alloc(Value, bytes.len);
+        for (b, bytes) |*v, x| v.* = try json.intValue(a, x);
+        try o.put(a, "bytes", .{ .array = b });
+        return o;
     }
 };
 

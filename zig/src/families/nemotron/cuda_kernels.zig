@@ -93,6 +93,7 @@ pub const Kernels = struct {
     rest_rows: cuda.Function,
     draw: cuda.Function,
     draw_ids: cuda.Function,
+    logprob_rows: cuda.Function,
     torch: torch_ops.Functions,
     expert_blocks: [2]usize, // resident blocks the decode expert kernels fill: per SM times SMs
     gemv_blocks: usize, // resident lane_gemv CTAs: per SM times SMs
@@ -134,6 +135,7 @@ pub const Kernels = struct {
         k.draw = try k.mods[14].function("tf_draw");
         k.draw_ids = try k.mods[14].function("tf_draw_ids");
         k.glue = try glue.Fns.resolve(k.mods[16..21]);
+        k.logprob_rows = try k.mods[14].function("tf_logprob_rows");
         k.triton = if (triton_dir) |dir| try cuda.aot.Set.load(gpa, io, d, ctx.device, dir) else null;
         errdefer if (k.triton) |*t| t.deinit();
         try k.group.allowDynamicShared(group_smem);
@@ -207,6 +209,17 @@ pub const Ops = struct {
         if (ids) |x| a.add(x);
         a.add(prob orelse 0);
         try o.go(if (ids != null) o.k.draw_ids else o.k.draw, .{ rows, 1, 1 }, 1024, 0, &a);
+    }
+
+    /// sample.cu: each bf16 logits row's lanes.logprob words at `out`, for its pick in `picks` and `k` best tokens.
+    pub fn logprobRows(o: Ops, logits: u64, vocab: usize, picks: u64, k: u8, out: u64, rows: usize) !void {
+        var a: cuda.Args = .{};
+        a.add(logits);
+        a.add(@as(u32, @intCast(vocab)));
+        a.add(picks);
+        a.add(@as(u32, k));
+        a.add(out);
+        try o.go(o.k.logprob_rows, .{ rows, 1, 1 }, 1024, 0, &a);
     }
 
     /// qmm.matmul: x (rows, k) bf16 with group sums xs -> out (rows, n) bf16, qmm_group's tile-2 bits on every path.

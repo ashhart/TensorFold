@@ -109,12 +109,15 @@ For decisions, `chat_template_kwargs` may be omitted, null, or an object contain
 
 `n` must be 1; multiple choices receive HTTP 400.
 
-CUDA Flash Next on one GPU supports `logprobs: true` and `top_logprobs` from 0 through 20 for nonstreamed text chat
-with thinking off, without tools, stop strings or structured output. Each visible token has its `token`, `bytes`,
-`logprob` and requested `top_logprobs` in `choices[0].logprobs.content`. Probabilities describe the raw target-model
-distribution at temperature 1, before temperature, top-k or top-p sampling filters, including when generation is
-greedy. Alternatives are tokenizer tokens and may include leading spaces; `bytes` preserves partial UTF-8 sequences.
-Unsupported backends, engines and request modes return HTTP 400 when probabilities are requested.
+The native CUDA engine (Nemotron 3.5 Lightning) supports `logprobs: true` and `top_logprobs` from 0 through 20 on
+nonstreamed `/v1/chat/completions`, without tools, stop strings, structured output or a thinking budget. Each reply
+token has its `token`, `logprob`, `bytes` and requested `top_logprobs` in `choices[0].logprobs.content`. Probabilities
+describe the raw target-model distribution at temperature 1, before temperature, top-k or top-p sampling filters,
+including when generation is greedy, and are the same with drafts on or `"draft": false`. With thinking on, the rows
+cover the answer only, as `content` does: none for the reasoning, `</think>` or the newlines after it, so the first
+row is the answer's first token, and a reply cut inside its reasoning has none. Alternatives are tokenizer tokens and
+may include leading spaces; `bytes` preserves partial UTF-8 sequences. Other engines, the Responses and legacy
+completions routes, and the request modes above return HTTP 400 when probabilities are requested.
 `ignore_eos: true` keeps user-supplied `stop` strings active, including when a stop string spans streamed chunks.
 Both backends reject a non-boolean `ignore_eos` or a malformed `stop` with HTTP 400 before a stream opens.
 Both backends reject malformed `temperature`, `top_p`, `top_k` and `seed` values with HTTP 400, whether or not

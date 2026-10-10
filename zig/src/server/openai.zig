@@ -119,7 +119,9 @@ const Plan = struct {
 fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value) errors.Refused!Plan {
     const body = try fields.parseNumbers(cx, raw);
     try fields.validateModalities(cx, body);
-    try fields.probabilityOptions(cx, body);
+    // rows need each token's exact bytes: a tokenizer whose decoding depends on context (null) can't give them
+    const exact_bytes = json.truthyField(body, "logprobs") and srv.info.logprobs and (srv.text.tokenBytes(cx.a, 0) catch return error.OutOfMemory) != null;
+    const logprobs = try fields.probabilityOptions(cx, body, exact_bytes);
     if (srv.config.request_log) |path| request_log.append(cx.a, path, body);
     var input: chat.Input = .{ .fields = undefined };
     if (is_chat) {
@@ -148,6 +150,16 @@ fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value) errors.Refused!Plan {
     if (thinking.effort) |e| try sampling.put(cx.a, "reasoning_effort", .{ .string = e });
     if (thinking.enable) |on| try sampling.put(cx.a, "enable_thinking", .{ .bool = on });
     input.fields = .{ .object = sampling };
+    const streamed = if (body.get("stream")) |s| s.truthy() else false;
+    if (logprobs != null) {
+        // 0.6.6's set: the rows describe the plain reply text, so nothing may reshape or split it
+        if (!is_chat) return cx.refuse("logprobs are supported on /v1/chat/completions only");
+        var structured = false;
+        for (grammar.fields) |k| structured = structured or json.truthyField(body, k);
+        if (streamed or input.tools.len > 0 or json.truthyField(body, "stop") or structured or json.truthyField(body, "thinking_budget"))
+            return cx.refuse("logprobs support nonstreamed chat without tools, stop strings, structured output or a thinking budget");
+    }
+    input.logprobs = logprobs;
     var policy: tool_stream.Policy = .{};
     if (body.field("parallel_tool_calls")) |p| {
         if (p != .bool) return cx.refuse("parallel_tool_calls must be a boolean");
@@ -156,7 +168,7 @@ fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value) errors.Refused!Plan {
     const options = body.get("stream_options");
     return .{
         .input = input,
-        .stream = if (body.get("stream")) |s| s.truthy() else false,
+        .stream = streamed,
         .separate_usage = options != null and options.? == .object and json.truthyField(options.?, "include_usage"),
         .policy = policy,
         .named = replyModel(srv, body),
@@ -377,6 +389,7 @@ const Run = struct {
             if (calls) |c| try message.put(a, "tool_calls", .{ .array = c });
             try choice.put(a, "message", .{ .object = message });
             try choice.put(a, "finish_reason", .{ .string = reply.finish_reason });
+            if (reply.logprobs) |lp| try choice.put(a, "logprobs", lp);
         } else {
             try choice.put(a, "text", .{ .string = reply.content });
             try choice.put(a, "finish_reason", .{ .string = reply.finish_reason });

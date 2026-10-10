@@ -24,6 +24,7 @@ pub const engine = @import("engine.zig");
 pub const fake = @import("fake.zig");
 pub const drafter = @import("drafter.zig");
 pub const drafted = @import("drafted.zig");
+pub const logprob = @import("logprob.zig");
 
 pub const Engine = engine.Engine;
 pub const Config = config.Config;
@@ -31,6 +32,7 @@ pub const Model = config.Model;
 pub const Stream = stream.Stream;
 pub const Sampling = sampling.Sampling;
 pub const SuffixLookup = proposer.SuffixLookup;
+pub const LogprobRow = logprob.Row;
 
 test {
     std.testing.refAllDecls(@This());

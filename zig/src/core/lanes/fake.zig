@@ -6,6 +6,7 @@ const Stream = @import("stream.zig").Stream;
 const Sampling = @import("sampling.zig").Sampling;
 const keyBits = @import("sampling.zig").keyBits;
 const accept = @import("accept.zig");
+const Row = @import("logprob.zig").Row;
 
 pub const vocab = 97;
 
@@ -16,6 +17,19 @@ pub fn next(history: []const u32, s: ?Sampling, position: u64) u32 {
     var token = (sum *% 7 +% history.len *% 3) % vocab;
     if (s) |st| token = (token + keyBits(st.seed, position, 0) % 5) % vocab;
     return @intCast(token);
+}
+
+/// The fake target's row after `history` for `pick`, a function of the history as logits are; best ids from the pick.
+pub fn rowAt(history: []const u32, pick: u32, count: u8) Row {
+    var sum: u64 = 0;
+    for (history) |t| sum +%= t;
+    const base = -@as(f32, @floatFromInt(sum % 50)) / 64.0;
+    var r: Row = .{ .token = pick, .logprob = base, .count = count };
+    for (0..count) |i| {
+        r.ids[i] = @intCast((pick + i) % vocab);
+        r.logprobs[i] = base - @as(f32, @floatFromInt(i));
+    }
+    return r;
 }
 
 const Lane = struct {
@@ -54,7 +68,7 @@ pub const Fake = struct {
     }
 
     pub fn backend(x: *Fake) be.Backend {
-        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .features = features, .release = release } };
+        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .features = features, .release = release, .first_row = firstRow } };
     }
 
     fn self(ptr: *anyopaque) *Fake {
@@ -142,6 +156,12 @@ pub const Fake = struct {
         return x.draw(x.lane(s), s, position);
     }
 
+    fn firstRow(ptr: *anyopaque, s: *Stream) anyerror!Row {
+        const x = self(ptr);
+        const h = x.lane(s).history.items;
+        return rowAt(h, x.targetNext(h, s.sampling, h.len), s.logprobs.?);
+    }
+
     fn queue(ptr: *anyopaque, s: *Stream, feed: be.Feed, position: u64) anyerror!u64 {
         const x = self(ptr);
         const l = x.lane(s);
@@ -176,6 +196,7 @@ pub const Fake = struct {
                 try l.history.appendSlice(x.gpa, path.items);
                 if (w.positions[r] != l.history.items.len) return error.PositionMismatch;
                 o.sampled[r] = x.targetNext(l.history.items, w.stream.sampling, w.positions[r]);
+                if (o.rows.len > 0) o.rows[r] = rowAt(l.history.items, o.sampled[r], w.stream.logprobs.?);
             }
             l.history.shrinkRetainingCapacity(l.base);
             try l.history.appendSlice(x.gpa, l.rows.items); // a chain keeps every row unless rolled back

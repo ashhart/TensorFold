@@ -15,6 +15,7 @@ const Case = struct {
     sampling: ?Sampling = null,
     drafts: bool = true,
     think_budget: u32 = 0,
+    logprobs: ?u8 = null,
 };
 
 fn model() !Config {
@@ -38,7 +39,7 @@ fn run(cases: []const Case) ![][]u32 {
     defer gpa.free(proposers);
     for (cases, streams, proposers) |c, *s, *p| {
         p.* = try SuffixLookup.init(gpa, .{ .min_match = 4 });
-        s.* = try sm.Stream.init(gpa, .{ .id = "s", .prompt = c.prompt, .max_new = c.max_new, .eos = &.{96}, .sampling = c.sampling, .drafts = c.drafts, .proposer = p.proposer(), .think_budget = c.think_budget, .think_close = &.{ 90, 91, 92 }, .think_end = 91 });
+        s.* = try sm.Stream.init(gpa, .{ .id = "s", .prompt = c.prompt, .max_new = c.max_new, .eos = &.{96}, .sampling = c.sampling, .drafts = c.drafts, .proposer = p.proposer(), .think_budget = c.think_budget, .think_close = &.{ 90, 91, 92 }, .think_end = 91, .logprobs = c.logprobs });
     }
     defer for (streams, proposers) |*s, *p| {
         s.deinit(gpa);
@@ -46,9 +47,25 @@ fn run(cases: []const Case) ![][]u32 {
     };
     for (streams) |*s| try engine.addStream(s);
     while (engine.activeCount() > 0) try engine.step();
+    for (cases, streams) |c, *s| if (c.logprobs) |k| try expectRows(c, s, k);
     const out = try gpa.alloc([]u32, cases.len);
     for (out, streams) |*o, *s| o.* = try gpa.dupe(u32, s.emitted());
     return out;
+}
+
+/// Each emitted token's row is the fake target's after the prompt and the tokens before it (forced: by `forToken`).
+fn expectRows(c: Case, s: *const sm.Stream, k: u8) !void {
+    try std.testing.expectEqual(s.emitted().len, s.rows.items.len);
+    var history: std.ArrayList(u32) = .empty;
+    defer history.deinit(gpa);
+    try history.appendSlice(gpa, c.prompt);
+    for (s.emitted(), s.rows.items) |t, got| {
+        const want = fake.rowAt(history.items, fake.next(history.items, c.sampling, history.items.len), k).forToken(t);
+        try std.testing.expectEqual(want.token, got.token);
+        try std.testing.expectEqual(@as(u32, @bitCast(want.logprob)), @as(u32, @bitCast(got.logprob)));
+        try std.testing.expectEqualSlices(u32, want.ids[0..k], got.ids[0..got.count]);
+        try history.append(gpa, t);
+    }
 }
 
 fn free(runs: [][]u32) void {
@@ -152,6 +169,26 @@ test "the thinking budget's forced close is the same drafted, plain and shared" 
     try std.testing.expectEqualSlices(u32, plain[0], drafted[0]);
     try std.testing.expectEqualSlices(u32, plain[0], shared[0]);
     try std.testing.expectEqual(@as(u32, 90), drafted[0][8]);
+}
+
+test "logprob rows follow the committed tokens drafted, plain, shared, sampled and through a forced close" {
+    const sampled: Sampling = .{ .seed = 5, .temperature = 0.7, .top_k = 0, .top_p = 0.95 };
+    const cases = [_][]const Case{
+        &.{.{ .prompt = &p1, .logprobs = 3 }},
+        &.{.{ .prompt = &p1, .logprobs = 3, .drafts = false }},
+        &.{.{ .prompt = &p1, .logprobs = 0, .sampling = sampled }},
+        &.{ .{ .prompt = &p1, .logprobs = 20 }, .{ .prompt = &p2, .sampling = sampled, .max_new = 30, .logprobs = 2 } },
+        &.{.{ .prompt = &p2, .think_budget = 9, .logprobs = 4 }},
+    };
+    for (cases) |with| {
+        var without: [2]Case = undefined;
+        for (with, without[0..with.len]) |c, *w| w.* = .{ .prompt = c.prompt, .max_new = c.max_new, .sampling = c.sampling, .drafts = c.drafts, .think_budget = c.think_budget };
+        const a = try run(with); // checks every row
+        defer free(a);
+        const b = try run(without[0..with.len]);
+        defer free(b);
+        for (a, b) |x, y| try std.testing.expectEqualSlices(u32, y, x);
+    }
 }
 
 test "the loop guard matches drafted and plain, reports its period, and answers after close" {
