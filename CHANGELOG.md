@@ -49,6 +49,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - A request with a temperature to an engine that decodes greedily only (GLM-5.3-Flash, Flash Next) is refused with a 400 before it is admitted, instead of failing after it waited its turn; when the server itself samples by default, the message says to serve with `--temperature 0` (#582). Thanks to @BobClawblaw.
 - The native reply's `tensorfold.seconds` is its decode time, the span `tokens_per_second` divides, so a long prompt no longer reads as a slow decode; `prefill_seconds` and `time_to_first_token` carry the prompt. The Python 0.6 server's `seconds` stays the whole request (#588). Thanks to @eleqtrizit.
 - A completion request whose nested prompt ids (`"prompt": [[...]]`) reach 2^32 or more no longer crashes the server: those ids decode as unknown, as ids past the vocabulary already did (#594). Thanks to @chaog992.
+- The repository checks out on Windows: eight server golden files were named after a URL with a query (`get-health?reset_peak=1`) or a `tool_choice` JSON value, and Windows refuses `?`, `"` and `:` in file names. Their names now carry those characters as `%XX`, and `zig build test` fails on any path Windows can't check out.
 
 ## 1.0.4
 

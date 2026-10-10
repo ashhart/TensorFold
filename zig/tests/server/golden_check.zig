@@ -202,6 +202,17 @@ const Outcome = struct { group: []const u8, name: []const u8, verdict: Verdict, 
 
 var outcomes: std.ArrayList(Outcome) = .empty;
 
+/// A case name as a file name every OS checks out: Windows' reserved characters, controls and '%' become %XX.
+fn fileName(a: std.mem.Allocator, name: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for (name) |c| {
+        if (c < 0x20 or std.mem.indexOfScalar(u8, "<>:\"|?*\\%", c) != null) {
+            try out.appendSlice(a, try std.fmt.allocPrint(a, "%{X:0>2}", .{c}));
+        } else try out.append(a, c);
+    }
+    return out.toOwnedSlice(a);
+}
+
 fn runCase(a: std.mem.Allocator, io: Io, golden_dir: []const u8, port: u16, case: std.json.Value) !void {
     const group = case.object.get("group").?.string;
     const name = case.object.get("name").?.string;
@@ -277,7 +288,7 @@ fn runCase(a: std.mem.Allocator, io: Io, golden_dir: []const u8, port: u16, case
 
     // the golden comparison
     var path_buf: [512]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}/{s}.json", .{ golden_dir, group, name });
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}/{s}.json", .{ golden_dir, group, try fileName(a, name) });
     const golden_text = Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 28)) catch {
         try outcomes.append(a, .{ .group = group, .name = name, .verdict = .no_golden });
         return;
