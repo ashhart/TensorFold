@@ -134,6 +134,17 @@ pub const Store = struct {
         return floorStart(starts, at);
     }
 
+    /// The latest kept state this prompt can resume at `at` or under min_gap before it (null: none).
+    fn keptNear(s: *const Store, prompt: []const u32, starts: []const u32, spans: []const modes.Span, at: u32) ?u32 {
+        var best: ?u32 = null;
+        for (s.entries.items) |e| {
+            if (e.at > at or at - e.at >= s.rules.min_gap or e.tokens.len > prompt.len or !s.usable(e.at, starts)) continue;
+            if (!std.mem.eql(u32, prompt[0..e.tokens.len], e.tokens) or !modes.equal(e.decode_spans, spans, e.at)) continue;
+            if (best == null or e.at > best.?) best = e.at;
+        }
+        return best;
+    }
+
     /// Find a kept token prefix with matching canonical spans through its position, leaving at least one row.
     pub fn find(s: *Store, prompt: []const u32, starts: []const u32, spans: []const modes.Span) ?*Entry {
         var best: ?*Entry = null;
@@ -172,7 +183,7 @@ pub const Store = struct {
         return s.lookupRewind(a, prompt, history_len, 0, shared, starts, spans);
     }
 
-    /// `lookup` with the rewind state: kept when it fits beside the history's, on the family's starts or grid.
+    /// `lookup` plus a rewind state on the starts or grid; a state kept under min_gap before it serves instead.
     pub fn lookupRewind(s: *Store, a: Allocator, prompt: []const u32, history_len: u32, rewind_len: u32, shared: []const u32, starts: []const u32, spans: []const modes.Span) !Lookup {
         const endpoint = if (s.rules.planned) s.startAt(starts, history_len) else history_len;
         const rewind = if (s.rules.planned) s.startAt(starts, rewind_len -| s.rules.lookahead) else rewind_len -| s.rules.lookahead;
@@ -180,12 +191,16 @@ pub const Store = struct {
         const rewind_bytes = if (rewind > 0 and rewind < prompt.len and rewind + s.rules.lookahead <= prompt.len and s.usable(rewind, starts)) s.family.vtable.bytes(s.family.ptr, rewind) else 0;
         const priority_bytes = if (endpoint_bytes <= s.budget) endpoint_bytes else 0;
         s.active_rewind_at = if (prompt.len >= s.rules.min_prompt and rewind_bytes > 0 and rewind != endpoint and rewind_bytes <= s.budget - priority_bytes) rewind else 0;
+        if (s.active_rewind_at > 0) if (s.keptNear(prompt, starts, spans, s.active_rewind_at)) |at| {
+            s.active_rewind_at = at; // a state kept under min_gap before it is the rewind state: no new copy
+        };
         const e = s.recall(prompt, starts, spans, s.find(prompt, starts, spans));
         if (e == null) s.counts.misses += 1;
+        const from = if (e) |x| x.at else 0;
         const marks_ = if (s.active_rewind_at == 0)
-            try s.fitting(a, try s.marks(a, prompt, if (e) |x| x.at else 0, history_len, shared, starts, if (e) |x| x.last else &.{}))
+            try s.fitting(a, try s.marks(a, prompt, from, history_len, shared, starts, if (e) |x| x.last else &.{}))
         else
-            try s.fittingRewind(a, try s.fitting(a, try s.marksRewind(a, prompt, if (e) |x| x.at else 0, history_len, rewind, shared, starts, if (e) |x| x.last else &.{})), endpoint, rewind, endpoint_bytes);
+            try s.fittingRewind(a, try s.fitting(a, try s.marksRewind(a, prompt, from, history_len, s.active_rewind_at, shared, starts, if (e) |x| x.last else &.{})), endpoint, s.active_rewind_at, endpoint_bytes);
         for (shared) |w| { // the shared cuts this pass keeps: their states serve other conversations too
             const at = if (s.rules.planned) s.startAt(starts, w) else w;
             if (std.mem.indexOfScalar(u32, marks_, at) != null) s.noteShared(prompt[0 .. at + s.rules.lookahead]);
@@ -295,7 +310,7 @@ pub const Store = struct {
         return s.marksRewind(a, prompt, from, history_len, 0, shared, starts, previous);
     }
 
-    /// `marks` with the active rewind second: kept however near the resume point and the other marks.
+    /// `marks` with the active rewind second: kept however near the other marks, never at or before the resume point.
     fn marksRewind(s: *const Store, a: Allocator, prompt: []const u32, from: u32, history_len: u32, rewind: u32, shared: []const u32, starts: []const u32, previous: []const u32) ![]const u32 {
         if (prompt.len < s.rules.min_prompt) return &.{};
         var out: std.ArrayList(u32) = .empty;

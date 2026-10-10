@@ -149,3 +149,55 @@ test "a history state past the budget is still counted refused when the rewind i
     try std.testing.expectEqual(@as(u64, 1), s.counts.refused);
     try std.testing.expectEqual(fresh(&turn), f.pass(&s, &turn, p));
 }
+
+test "a rewind under min_gap past the resume point keeps no copy: the resumed state serves the edit and goes last" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{ .gpa = gpa };
+    var s = Store.init(gpa, f.snapshots(), .{ .warm = true, .min_prompt = 0, .min_gap = 4 }, 222); // bytes 100 + at
+    defer s.deinit();
+    const before = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    _ = f.pass(&s, &before, try s.begin(a, &before, 6, &.{}, &.{}, null, &.{})); // the state a turn resumes, as a reply's
+    const turn = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }; // the user's text from 8, two tokens past it
+    const p = try s.beginRewind(a, &turn, 11, 8, &.{}, &.{}, null, &.{});
+    try std.testing.expectEqual(@as(u32, 6), p.from);
+    try std.testing.expectEqualSlices(u32, &.{11}, p.marks);
+    try std.testing.expectEqual(fresh(&turn), f.pass(&s, &turn, p));
+    const replied = turn ++ [_]u32{ 13, 14 }; // a reply's state: the history's goes, the resumed state stays
+    f.at = 13;
+    try std.testing.expect(s.keep(&replied, 13, null, &.{}, &.{}));
+    try std.testing.expect(s.held <= s.budget);
+    const edited = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 50, 10, 11, 12 };
+    const q = try s.beginRewind(a, &edited, 11, 8, &.{}, &.{}, null, &.{});
+    try std.testing.expectEqual(@as(u32, 6), q.from);
+    try std.testing.expectEqual(fresh(&edited), f.pass(&s, &edited, q));
+}
+
+test "the warm pass after a turn keeps that turn's rewind state, though it resumes later: the edit still resumes there" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{ .gpa = gpa };
+    var s = Store.init(gpa, f.snapshots(), .{ .warm = true, .min_prompt = 0, .min_gap = 4 }, 230); // two states (bytes 100 + at)
+    defer s.deinit();
+    const before = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    _ = f.pass(&s, &before, try s.begin(a, &before, 6, &.{}, &.{}, null, &.{}));
+    const turn = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }; // resumes at 6, the user's text from 8
+    _ = f.pass(&s, &turn, try s.beginRewind(a, &turn, 11, 8, &.{}, &.{}, null, &.{}));
+    const replied = turn ++ [_]u32{ 13, 14 };
+    f.at = 13;
+    try std.testing.expect(s.keep(&replied, 13, null, &.{}, &.{})); // the reply's state
+    const warm = replied ++ [_]u32{15}; // the next turn's opening, prefilled in the background from the reply's state
+    const w = try s.beginRewind(a, &warm, warm.len, 8, &.{}, &.{}, null, &.{});
+    try std.testing.expectEqual(@as(u32, 13), w.from);
+    f.at = 15;
+    try std.testing.expect(s.keep(&warm, 15, null, &.{}, &.{}));
+    try std.testing.expect(s.held <= s.budget);
+    const edited = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 50, 10, 11, 12 };
+    const q = try s.beginRewind(a, &edited, 11, 8, &.{}, &.{}, null, &.{});
+    try std.testing.expectEqual(@as(u32, 6), q.from);
+    try std.testing.expectEqual(fresh(&edited), f.pass(&s, &edited, q));
+}
