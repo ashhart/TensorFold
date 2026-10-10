@@ -141,6 +141,11 @@ pub fn build(b: *std.Build) void {
     // GLM-5.3's copy-draft index (host code only), on every platform
     const glm53_copy = b.createModule(.{ .root_source_file = b.path("zig/src/families/glm53/copy_index.zig"), .target = b.graph.host, .optimize = .Debug });
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm53_copy })).step);
+    // Living Weights on the full GLM-5.3: sidecar, the vocab-split learning step, the served apply's reference
+    const glm53_lw_cases = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/glm53_lw.zig"), .target = b.graph.host, .optimize = .Debug, .link_libc = true }) });
+    const glm53_lw_run = b.addRunArtifact(glm53_lw_cases);
+    b.step("test-glm53-lw", "Living Weights (full GLM-5.3): host math, simulated 4-rank split, no GPU").dependOn(&glm53_lw_run.step);
+    test_step.dependOn(&glm53_lw_run.step);
     switch (target.result.os.tag) {
         .macos => metalTargets(b, target, optimize, draft_ids, build_options, test_step),
         .linux => cuda_build.targets(b, target, optimize, draft_ids, build_options),
@@ -468,7 +473,7 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "fabric", .module = fabric } },
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "fabric", .module = fabric }, .{ .name = "glm53_lw", .module = b.createModule(.{ .root_source_file = b.path("zig/src/glm53_lw.zig"), .target = target, .optimize = optimize, .link_libc = true }) } },
     }) });
     b.step("tf-glm53", "Full GLM-5.3 decode on one or N Macs (oracle check or greedy generate)").dependOn(&b.addInstallArtifact(glm53, .{}).step);
     const glm53_ix = b.addExecutable(.{ .name = "tf-glm53-ixbench", .root_module = b.createModule(.{
