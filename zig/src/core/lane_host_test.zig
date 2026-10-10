@@ -394,3 +394,41 @@ test "a lane host fills prompts a chunk a round, serves their tokens, and cancel
     try std.testing.expect(target.prefill_count <= 3);
     try std.testing.expectEqual(@as(usize, 0), target.lanes.count());
 }
+
+test "a lane host hands the backend the request's history and shared prefix lengths with its stream" {
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 1 });
+    try host.start();
+    defer host.stop();
+    const Seen = struct {
+        history: u32 = 0,
+        shared: [2]u32 = .{ 0, 0 },
+        done: std.atomic.Value(bool) = .init(false),
+        fn prefill(ctx: *anyopaque, s: *lanes.Stream, _: usize) void {
+            const seen: *@This() = @ptrCast(@alignCast(ctx));
+            seen.history = s.history_len;
+            @memcpy(seen.shared[0..s.shared_prefixes.len], s.shared_prefixes);
+        }
+        fn event(ctx: *anyopaque, _: Id, e: *const Event) void {
+            const seen: *@This() = @ptrCast(@alignCast(ctx));
+            if (e.* == .finished) seen.done.store(true, .release);
+        }
+    };
+    var seen: Seen = .{};
+    target.prefill_hook = Seen.prefill;
+    target.prefill_hook_ctx = &seen;
+    const prompt = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6 };
+    const shared = [_]u32{ 2, 4 };
+    const request: Request = .{ .prompt = &prompt, .max_tokens = 2, .history_len = 6, .shared_prefixes = &shared };
+    try host.engine().submit(1, &request, .{ .ctx = &seen, .event = Seen.event });
+    while (!seen.done.load(.acquire)) std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+    try std.testing.expectEqual(@as(u32, 6), seen.history);
+    try std.testing.expectEqualSlices(u32, &shared, &seen.shared);
+}
