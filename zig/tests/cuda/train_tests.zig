@@ -98,10 +98,7 @@ fn experts(r: *Rig, k: *const kern.Kernels) !void {
     const nb = n / 32;
     const kg = kk / 64;
     const packed_w = try r.zeros(u32, count * nb * kg * 288);
-    var a: cuda.Args = .{};
-    for ([_]u64{ try r.dev(u8, w[0]), try r.dev(u8, w[1]), try r.dev(u8, w[2]), packed_w }) |v| a.add(v);
-    for ([_]usize{ n, kk / 8, kg, nb }) |v| a.add(@as(c_int, @intCast(v)));
-    try cuda.launch.launch(k.pack_experts, .{ .grid = .{ .x = kg, .y = nb, .z = count }, .block = .{ .x = 288 } }, r.s, &a);
+    try k.experts.pack(r.s, try r.dev(u8, w[0]), try r.dev(u8, w[1]), try r.dev(u8, w[2]), packed_w, count, n, kk);
     const pick = [_]usize{ 0, 2, 2, 1, 0, 2, 1 };
     const items = [_]i32{ 0, 0, 2, 1, 2, 2, 2, 4, 3 };
     const members = [_]i32{ 0, 4, 3, 6, 1, 2, 5 };

@@ -248,8 +248,7 @@ const Loader = struct {
             if (!split) try L.src.upload(base + at[j] + routed[j].bytes.len, shared[j].bytes);
         }
         // the output's allocation runs while the reads queued above go on
-        const nb = n / 32;
-        const ptr = try L.alloc(name, @as(usize, e) * nb * kg * 288 * 4);
+        const ptr = try L.alloc(name, cuda.experts.Affine4Experts.bytes(e, n, k));
         if (split) for (0..3) |j| {
             const row = shared[j].bytes.len / n;
             const half = row / 2;
@@ -259,10 +258,7 @@ const Loader = struct {
             try L.ops.upload(base + at[j] + routed[j].bytes.len, host);
         };
         try L.src.flush();
-        var a: cuda.Args = .{};
-        for ([_]u64{ base, base + sizes[0], base + sizes[0] + sizes[1], ptr }) |v| a.add(v);
-        for ([_]usize{ n, k / 8, kg, nb }) |v| a.add(@as(c_int, @intCast(v)));
-        try cuda.launch.launch(L.ops.k.pack_experts, .{ .grid = .{ .x = @intCast(kg), .y = @intCast(nb), .z = @intCast(e) }, .block = .{ .x = 288 } }, L.ops.s, &a);
+        try L.ops.k.experts.pack(L.ops.s, base, base + sizes[0], base + sizes[0] + sizes[1], ptr, e, n, k);
         return ptr;
     }
 
