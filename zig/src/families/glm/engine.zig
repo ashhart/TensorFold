@@ -164,9 +164,13 @@ pub const Engine = struct {
         e.sc = both.scratch;
         e.prompt_ids = try e.arena.buffer(@as(usize, cap) * 4);
         const chunked = if (std.c.getenv("GLM_PROMPT")) |v| v[0] != '0' else true;
-        if (chunked and (link == null or e.c.byRows())) e.pr = try prompt_mod.init(gpa, &e.arena, e.device, &e.c, &e.sc, e.k, cap);
-        errdefer if (e.pr) |*p| p.deinit();
         const limit = loadLimit();
+        if (chunked and (link == null or e.c.byRows())) {
+            const rows = chunkHeight(gpa, &e.c, &e.sc, cap, plan_bytes + e.arena.bytes, limit, link != null);
+            e.pr = try prompt_mod.init(gpa, &e.arena, e.device, &e.c, &e.sc, e.k, cap, rows);
+            e.chunk_rows = @min(e.chunk_rows, rows);
+        }
+        errdefer if (e.pr) |*p| p.deinit();
         if (plan_bytes + e.arena.bytes > limit) { // refused before any weight is read: the floor's one-Mac limit
             std.log.err("glm: {d:.1} GB of weights and {d:.1} GB of caches pass this Mac's {d:.1} GB load limit (70% of RAM); load a layer subset or the expert-parallel pair", .{ @as(f64, @floatFromInt(plan_bytes)) / 1e9, @as(f64, @floatFromInt(e.arena.bytes)) / 1e9, @as(f64, @floatFromInt(limit)) / 1e9 });
             return error.OverMemoryLimit;
@@ -218,6 +222,15 @@ pub const Engine = struct {
         h.update(config);
         h.update(f.bytes[0..f.size]);
         return h.final();
+    }
+
+    /// The tallest prompt chunk whose buffers fit under `limit` beside `used` bytes (expert parallel: one exchange's rows).
+    fn chunkHeight(gpa: std.mem.Allocator, c: *const cfg.Config, sc: *const st.Scratch, cap: u32, used: usize, limit: usize, ep: bool) u32 {
+        for (prompt_mod.heights) |h| {
+            if (ep and h > ep_mod.PROMPT_ROWS) continue;
+            if (used + prompt_mod.chunkBytes(gpa, c, sc, cap, h) <= limit) return h;
+        }
+        return prompt_mod.heights[prompt_mod.heights.len - 1];
     }
 
     /// The most this Mac may load: 70% of its RAM in GiB, read as GB (the floor's 179 GB on a 256 GiB Mac, the strict reading).

@@ -16,8 +16,13 @@ pub const Arena = struct {
     gpa: std.mem.Allocator,
     buffers: std.ArrayList(mtl.Buffer) = .empty,
     bytes: usize = 0,
+    dry: bool = false, // count the bytes only (a size for a plan)
 
     pub fn buffer(a: *Arena, len: usize) !Ref {
+        if (a.dry) {
+            a.bytes += @max(len, 16);
+            return .{ .buf = .{ .id = undefined } };
+        }
         const b = try a.device.buffer(@max(len, 16), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         a.buffers.append(a.gpa, b) catch |err| {
             b.deinit();

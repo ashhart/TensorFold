@@ -16,10 +16,9 @@ const Ref = wts.Ref;
 const bind = fwd.bind;
 const size = fwd.size;
 
-pub const max_rows = 4096;
-comptime {
-    std.debug.assert(max_rows <= ep_mod.PROMPT_ROWS); // a chunk's routed sums fit one exchange
-}
+/// Chunk heights a load picks from (the tallest whose buffers fit this Mac's limit); expert parallel keeps one exchange's.
+pub const heights = [_]u32{ 16384, 8192, 4096 };
+pub const max_rows = heights[0];
 /// Sparse rows whose block scores one selection pass holds.
 const select_rows = 256;
 
@@ -62,23 +61,38 @@ pub const Prompt = struct {
     m_out: Ref,
     sums: Ref, // fp32 group sums of a matmul's rows (affine_mm's bias operand)
     sparse_nax: bool, // the sparse MLA attention on the tensor units (GLM_SPARSE_NAX=0: the row kernel)
+    rows: u32, // a chunk's rows at most (the buffers' height)
 
     pub fn deinit(p: *Prompt) void {
         p.k.deinit();
     }
 };
 
-/// The chunk buffers for `cap`-token caches (selection passes read cap / 4 block scores a row).
-pub fn init(gpa: std.mem.Allocator, arena: *st.Arena, device: mtl.Device, c: *const cfg.Config, decode: *const st.Scratch, engine_kernels: *const Kernels, cap: u32) !Prompt {
-    const R: usize = max_rows;
-    const D: usize = c.hidden;
-    const n: usize = R * c.topk;
-    const blocks = (n + 255) / 256;
+/// The chunk buffers of `rows`-row chunks for `cap`-token caches (selection passes read cap / 4 block scores a row).
+pub fn init(gpa: std.mem.Allocator, arena: *st.Arena, device: mtl.Device, c: *const cfg.Config, decode: *const st.Scratch, engine_kernels: *const Kernels, cap: u32, rows: u32) !Prompt {
     var p: Prompt = undefined;
     p.k = try pk.load(gpa, device);
     errdefer p.k.deinit();
     p.mm = engine_kernels;
     p.sparse_nax = if (std.c.getenv("GLM_SPARSE_NAX")) |v| v[0] != '0' else true;
+    try buffers(&p, arena, c, decode, cap, rows);
+    return p;
+}
+
+/// The bytes `init` takes from the arena for `rows`-row chunks.
+pub fn chunkBytes(gpa: std.mem.Allocator, c: *const cfg.Config, decode: *const st.Scratch, cap: u32, rows: u32) usize {
+    var dry: st.Arena = .{ .device = undefined, .gpa = gpa, .dry = true };
+    var p: Prompt = undefined;
+    buffers(&p, &dry, c, decode, cap, rows) catch unreachable;
+    return dry.bytes;
+}
+
+fn buffers(p: *Prompt, arena: *st.Arena, c: *const cfg.Config, decode: *const st.Scratch, cap: u32, rows: u32) !void {
+    const R: usize = rows;
+    const D: usize = c.hidden;
+    const n: usize = R * c.topk;
+    const blocks = (n + 255) / 256;
+    p.rows = rows;
     p.streams = decode.*;
     const big = struct {
         fn of(a: *st.Arena, bytes: usize) !Ref {
@@ -129,7 +143,6 @@ pub fn init(gpa: std.mem.Allocator, arena: *st.Arena, device: mtl.Device, c: *co
     p.m_xn = try big.of(arena, R * D * 2);
     p.m_out = try big.of(arena, R * D * 2);
     p.sums = try big.of(arena, @max(R * 16384, n * D) / 64 * 4); // the widest dense K (MLA's out-projection), or a gather's
-    return p;
 }
 
 /// The int32 parameter array the NAX and sort kernels read (16 entries, zero-padded).
@@ -274,7 +287,7 @@ fn kdaChunk(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, ki: usiz
     const sy = gate.at(plane);
     const g = sy.at(plane); // fp32
     const beta = g.at(2 * plane);
-    std.debug.assert(6 * plane + @as(usize, M) * H * 4 <= @as(usize, max_rows) * c.topk * c.hidden * 4);
+    std.debug.assert(6 * plane + @as(usize, M) * H * 4 <= @as(usize, p.rows) * c.topk * c.hidden * 4);
     if (fwd.on(x, "kda_pre")) {
         const fa = 3 * c.kdaWidth(); // the projection row: q, k, v, then f_a, g_a and beta
         qmmAt(p, e, p.proj.at(@as(usize, fa) * 2), pitch, w.f_b, sy, M); // f_b's rows into sy's plane, read before the scan writes it
@@ -386,7 +399,7 @@ fn mla(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: usize, w:
 pub fn backbone(p: *const Prompt, x: *fwd.Ctx, e: mtl.ComputeEncoder, ids: Ref, M: u32, pos: u32) void {
     const c = x.c;
     const ss = &p.streams;
-    std.debug.assert(x.sc == ss and M <= max_rows);
+    std.debug.assert(x.sc == ss and M <= p.rows);
     const s = x.skip; // classes a profile leaves out
     const Class = fwd.Class;
     if (s & Class.ends == 0) fwd.embed(x, e, ids, M);

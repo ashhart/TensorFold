@@ -188,7 +188,7 @@ pub fn checkMatmul(e: *Engine, prompt: []const u32) !void {
 pub fn profilePrompt(e: *Engine, prompt: []const u32, reps: usize, only: bool, parts: bool) !void {
     const pr = &(e.pr orelse return error.NoPromptPath);
     const C = fwd.Class;
-    const rows: u32 = @intCast(@min(prompt.len, prompt_mod.max_rows));
+    const rows: u32 = @intCast(@min(prompt.len, pr.rows));
     if (rows + 1 > e.s.cap) return error.ContextFull;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
