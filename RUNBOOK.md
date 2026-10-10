@@ -131,7 +131,7 @@ The default loopback server accepts local clients without a key.
 A context limit covers prompt plus reply tokens.
 Inspect the capacity and memory information printed at startup; larger contexts need more cache space.
 After a memory refusal, reduce the context or reply limit, or choose a smaller qualified checkpoint.
-`--prompt-cache-gib 0` disables Nemotron, Flash Next and GLM prefix retention, and `--keep-warm 0` disables Metal idle keepalive.
+`--prompt-cache-gib 0` disables Nemotron, Flash Next, GLM and Qwen3.8-27B prefix retention, and `--keep-warm 0` disables Metal idle keepalive.
 
 Upgrade a Homebrew installation with `brew upgrade tensorfold` and restart its server.
 For an archive installation, verify and unpack the replacement archive, then restart from that binary.

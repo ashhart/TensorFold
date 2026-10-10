@@ -149,15 +149,18 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     errdefer h.core.deinit();
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(@max(window, 0)), .prefill_step = step });
     h.round = .{ .depth = 8 };
-    const budget = (cache_fit.fit(cache_fit.ram() orelse 0, cache_fit.footprint() orelse 0, o.prompt_cache_gib, o.prompt_cache_over_cap) catch |e| {
-        problem.* = try std.fmt.allocPrint(a, "--prompt-cache-gib {d} would take this server past 70% of this Mac's memory; pass a smaller one or add --prompt-cache-over-cap", .{o.prompt_cache_gib.?});
+    h.cache = null;
+    var why: []const u8 = "";
+    const plan = cache_fit.budget(o.prompt_cache_gib, o.prompt_cache_over_cap, @min(h.m.device.maxWorkingSet() -| h.m.device.allocated() -| (8 << 30), 16 << 30), a, &why, "") catch |e| {
+        if (e == error.CacheOverCap) problem.* = why;
         return e;
-    }).budget;
-    if (budget > 0) {
+    };
+    h.host.info_.prompt_cache_plan = plan;
+    if (plan.budget_bytes > 0) {
         const S = nemotron.snapshot.Cached;
-        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = h.metal, .vtable = &.{ .bytes = S.snapBytes, .save = S.snapSave, .restore = S.snapRestore, .drop = S.snapDrop } }, .{ .lookahead = 1, .planned = true }, budget);
-        h.host.cache = &h.cache.?;
-        std.log.info("prompt cache: {d:.1} GiB for kept prompt states", .{cache_fit.gibs(budget)});
+        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = h.metal, .vtable = &.{ .bytes = S.snapBytes, .save = S.snapSave, .restore = S.snapRestore, .drop = S.snapDrop } }, .{ .lookahead = 1, .planned = true }, plan.budget_bytes);
+        h.host.cache = &h.cache.?; // the lane host's store: a Sliding Weights step that moves weights clears it
+        h.host.info_.prompt_cache = true;
     }
     errdefer if (h.cache) |*store| store.deinit();
     if (h.metal.head != null) h.host.lone = .{ .ctx = h, .run = Host.lone };
