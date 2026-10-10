@@ -194,6 +194,26 @@ pub const Slots = struct {
         return null;
     }
 
+    /// The free slot a new stream takes: `reuse`'s home when that slot is free (its prefix is already there and no
+    /// other slot's kept states go stale), else the free slot whose cache holds the fewest usable resident states, so
+    /// a prompt the cache has nothing for doesn't write over the prefixes of the states it does have.
+    pub fn pick(sl: *const Slots, reuse: ?*const snapshot.Snap) ?u32 {
+        if (reuse) |r| if (r.home) |h| if (h < sl.slots.len and !sl.slots[h].used and sl.usable(r)) return h;
+        var best: ?u32 = null;
+        var fewest: usize = std.math.maxInt(usize);
+        for (sl.slots, 0..) |s, i| {
+            if (s.used) continue;
+            var held: usize = 0;
+            var it = sl.snaps.valueIterator();
+            while (it.next()) |snap| held += @intFromBool(snap.*.home == @as(u32, @intCast(i)) and !snap.*.stale);
+            if (held < fewest) {
+                fewest = held;
+                best = @intCast(i);
+            }
+        }
+        return best;
+    }
+
     fn ctx(sl: *Slots, slot: *Slot) fwd.Ctx {
         var x = sl.e.ctx();
         x.s = &slot.s;
