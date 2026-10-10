@@ -43,6 +43,8 @@ pub const Rules = struct {
     lookahead: u32 = 0,
     /// Prompt kernels that change arithmetic with a chunk's rows: resume and keep only at the request's chunk starts.
     planned: bool = false,
+    /// A planned family's own zero-anchored chunk rows, its starts when a request names none (0: none).
+    grid: u32 = 0,
     /// A mark other than the history's is kept only this far from every other mark and the resume point.
     min_gap: u32 = 256,
     /// Shorter prompts keep nothing: below it a mark's extra prompt call costs more than a later turn's reuse saves.
@@ -122,7 +124,13 @@ pub const Store = struct {
 
     /// Whether a state at `at` may start or end a prompt pass: anywhere, or a chunk start for planned families.
     fn usable(s: *const Store, at: u32, starts: []const u32) bool {
-        return at > 0 and (!s.rules.planned or std.mem.indexOfScalar(u32, starts, at) != null);
+        return at > 0 and (!s.rules.planned or s.startAt(starts, at) == at);
+    }
+
+    /// The chunk start at or before `at`: the request's, else the family's grid (0 when none).
+    fn startAt(s: *const Store, starts: []const u32, at: u32) u32 {
+        if (starts.len == 0 and s.rules.grid > 0) return at - at % s.rules.grid;
+        return floorStart(starts, at);
     }
 
     /// Find a kept token prefix with matching canonical spans through its position, leaving at least one row.
@@ -159,7 +167,7 @@ pub const Store = struct {
         if (e == null) s.counts.misses += 1;
         const marks_ = try s.fitting(a, try s.marks(a, prompt, if (e) |x| x.at else 0, history_len, shared, starts, if (e) |x| x.last else &.{}));
         for (shared) |w| { // the shared cuts this pass keeps: their states serve other conversations too
-            const at = if (s.rules.planned) floorStart(starts, w) else w;
+            const at = if (s.rules.planned) s.startAt(starts, w) else w;
             if (std.mem.indexOfScalar(u32, marks_, at) != null) s.noteShared(prompt[0 .. at + s.rules.lookahead]);
         }
         s.reserve(prompt, e, marks_);
@@ -245,7 +253,7 @@ pub const Store = struct {
         }
         try want.appendSlice(a, shared);
         for (want.items, 0..) |w, k| {
-            const at = if (s.rules.planned) floorStart(starts, w) else w;
+            const at = if (s.rules.planned) s.startAt(starts, w) else w;
             if (at <= from or at + s.rules.lookahead > prompt.len or at >= prompt.len or !s.usable(at, starts)) continue;
             if (at - from < s.rules.min_gap and (k > 0 or (from > 0 and s.rules.warm))) continue; // near the resume point
             if (k > 0) { // the history's mark always (warm families: away from the resume point); the others away from it and each other

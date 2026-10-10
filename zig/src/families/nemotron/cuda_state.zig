@@ -233,7 +233,8 @@ pub const Buffers = struct {
 
     /// Engine.snapshot: a device copy of every cache and state buffer.
     pub fn snapshot(b: *const Buffers, ops: kern.Ops) !cuda.DeviceBuffer {
-        const copy = try cuda.DeviceBuffer.alloc(ops.k.d, b.stateBytes());
+        var copy = try cuda.DeviceBuffer.alloc(ops.k.d, b.stateBytes());
+        errdefer copy.free();
         try ops.copy(copy.ptr, b.k_cache, b.stateBytes());
         return copy;
     }

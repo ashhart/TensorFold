@@ -370,36 +370,28 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     h.* = .{ .gpa = gpa, .gpu = g, .family = loaded.ctx, .release = loaded.deinit, .inner = loaded.backend, .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .lone = loaded.lone };
-    h.startup = try std.fmt.allocPrint(gpa, "CUDA sm_{d} device {d} ({s}{s}): model {d:.2} GiB; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window, of {d:.1} GiB left after a {d:.1} GiB reserve; prompts in {d}-row chunks{s}; {s}", .{
+    const cache = budget.cacheBytes(o.prompt_cache_gib, room, loaded.stream_bytes * (streams -| free));
+    h.startup = try std.fmt.allocPrint(gpa, "CUDA sm_{d} device {d} ({s}{s}): model {d:.2} GiB; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window, of {d:.1} GiB left after a {d:.1} GiB reserve; prompts in {d}-row chunks{s}{s}; {s}", .{
         capability,                                                                                                   device, name, if (after.unified) ", memory shared with the host" else "", toGib(model), streams, if (streams == 1) "" else "s", toGib(loaded.stream_bytes), window, toGib(room), toGib(after.reserve), F.prompt_rows, if (segments > 1) try std.fmt.allocPrint(a, ", {d} staggered segments a call", .{segments}) else "",
+        if (cache > 0) try std.fmt.allocPrint(a, ", a {d:.1} GiB prompt cache", .{toGib(cache)}) else ", no prompt cache",
         if (kernels) |dir| try std.fmt.allocPrint(a, "glue kernels captured at {s}", .{dir}) else "own glue kernels",
     });
     errdefer gpa.free(h.startup);
-    const cache = cacheBudget(o);
     if (cache > 0) {
         const pc = api.prompt_cache;
         const store = try gpa.create(pc.Store);
-        errdefer gpa.destroy(store);
-        store.* = pc.Store.init(gpa, .{ .ptr = loaded.target, .vtable = &nemotron_snaps }, .{}, cache);
+        // states kept and resumed on the family's grid, where a cache-off pass cuts; the head reads one token on
+        store.* = pc.Store.init(gpa, .{ .ptr = loaded.target, .vtable = &nemotron_snaps }, .{ .lookahead = 1, .planned = true, .grid = F.prompt_rows }, cache);
         h.store = store;
-        std.log.info("prompt cache: {d:.1} GiB for kept Nemotron states", .{@import("cache_fit.zig").gibs(cache)});
     }
     errdefer if (h.store) |store| {
         store.deinit();
         gpa.destroy(store);
     };
     // the family cuts its own prompt grid from position 0, as `tensorfold run` does: prefill_step 0
-    try h.serve(io, loaded.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(window), .startup = h.startup }, .{ .ctx = loaded.ctx, .text = F.explain });
+    try h.serve(io, loaded.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(window), .startup = h.startup, .prompt_cache = h.store != null }, .{ .ctx = loaded.ctx, .text = F.explain });
     opened = true;
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
-}
-
-/// Kept states' budget: `--prompt-cache-gib` when set (0 turns it off), else what 70% of RAM leaves, capped at 16 GiB.
-fn cacheBudget(o: api.Open) u64 {
-    const fit = @import("cache_fit.zig");
-    if (o.prompt_cache_gib) |g| return if (g > 0) std.math.lossyCast(u64, g * @as(f64, @floatFromInt(fit.GiB))) else 0;
-    const total = fit.ram() orelse return 8 * fit.GiB;
-    return @min((total / 100 * fit.SHARE_PERCENT) -| fit.MARGIN, 16 * fit.GiB);
 }
 
 fn toGib(bytes: u64) f64 {

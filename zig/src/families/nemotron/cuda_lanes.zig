@@ -7,6 +7,7 @@ const core = @import("core");
 const engine = @import("cuda_engine.zig");
 const Engine = engine.Engine;
 const reuse = @import("cuda_reuse.zig");
+const grid = @import("cuda_prompt_grid.zig");
 const Head = @import("cuda_mtp.zig").Head;
 const state = @import("cuda_state.zig");
 const config = @import("config.zig");
@@ -140,6 +141,22 @@ pub const Cuda = struct {
         if (s.reuse.hook) |k| k.at(k.ptr, s, at);
     }
 
+    /// The stream's kept state on its bound sequence: where its prompt pass starts (0: none, off the grid, or failed).
+    fn restoreKept(self: *Cuda, s: *lanes.Stream, len: usize) usize {
+        const saved = s.reuse.saved orelse return 0;
+        var target: reuse.Target = .{ .e = self.e, .head = self.head };
+        if (!grid.resumable(s.reuse.at, len, state.prefill_rows)) {
+            s.reuse_failed = true;
+            return 0;
+        }
+        reuse.restore(&target, null, saved) catch {
+            s.reuse_failed = true;
+            return 0;
+        };
+        s.cached = s.reuse.at;
+        return s.reuse.at;
+    }
+
     // -- the vtable ---------------------------------------------------------------------------------------------
 
     /// A new sequence for the stream, its sampling, then its prompt in chunks; the head absorbs every row but the last.
@@ -159,18 +176,12 @@ pub const Cuda = struct {
         if (own) self.own_free = false;
         e.bind(gop.value_ptr.seq);
         try e.setSampling(s.sampling);
-        var from: usize = 0;
-        if (s.reuse.saved) |saved| {
-            var target: reuse.Target = .{ .e = e, .head = self.head };
-            if (reuse.restore(&target, null, saved)) {
-                from = s.reuse.at;
-                s.cached = s.reuse.at;
-            } else |_| s.reuse_failed = true;
-        }
+        s.cached = 0;
+        const from = self.restoreKept(s, ids.len);
         const keep: ?engine.Keep = if (s.reuse.marks.len == 0) null else .{ .at = s.reuse.marks, .ctx = s, .call = keptAt };
         const first = try e.prefillFrom(ids, from, null, self.head, .{ .ptr = s, .check = cancelled }, keep);
         // the head's first draft reads the prompt's last row (its hidden row waits where a window's would)
-        const last = engine.lastChunkRows(ids.len, from, s.reuse.marks) - 1;
+        const last = (ids.len - 1) % state.prefill_rows; // a resumed pass ends on the same grid
         try e.ops().copy(e.b.hidden, e.b.p_hidden + last * @as(u64, e.c.hidden) * 2, e.c.hidden * 2);
         _ = self.take(first);
     }

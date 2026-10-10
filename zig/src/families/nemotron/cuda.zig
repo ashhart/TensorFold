@@ -33,5 +33,5 @@ test {
     _ = glue;
     _ = glue_ref;
     _ = glue_math;
-    _ = engine;
+    _ = @import("cuda_prompt_grid.zig");
 }

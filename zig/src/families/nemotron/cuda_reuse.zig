@@ -1,4 +1,4 @@
-//! A Nemotron CUDA prompt state for the shared cache: the engine's caches and the MTP head, copied on the engine's stream.
+//! Nemotron CUDA prompt states for the shared cache: the engine's caches and MTP head, copied on its stream.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -37,13 +37,13 @@ pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
     const t: *Target = @ptrCast(@alignCast(ptr));
     const e = t.e;
     if (e.pos != at) return error.NotAtMark;
+    if (t.head) |h| if (h.pos != at) return error.NotAtMark;
     const copy = try e.gpa.create(Copy);
     errdefer e.gpa.destroy(copy);
     copy.* = .{ .state = undefined, .pos = e.pos, .parity = e.parity, .prev_keep = e.prev_keep, .rows = e.rows };
     copy.state = try e.b.snapshot(e.ops());
     errdefer copy.state.free();
     if (t.head) |h| {
-        if (h.pos != at) return error.NotAtMark;
         copy.head = try h.snapshot();
         copy.head_pos = h.pos;
     }
@@ -56,15 +56,13 @@ pub fn restore(ptr: *anyopaque, owner: ?*anyopaque, saved: *anyopaque) anyerror!
     const t: *Target = @ptrCast(@alignCast(ptr));
     const copy: *Copy = @ptrCast(@alignCast(saved));
     const e = t.e;
+    if (t.head != null and copy.head == null) return error.NoHead; // checked before any copy: nothing half restored
     try e.b.restore(e.ops(), copy.state);
     e.pos = copy.pos;
     e.parity = copy.parity;
     e.prev_keep = copy.prev_keep;
     e.rows = copy.rows;
-    if (t.head) |h| {
-        const buf = copy.head orelse return error.NoHead;
-        try h.restore(buf, copy.head_pos);
-    }
+    if (t.head) |h| try h.restore(copy.head.?, copy.head_pos);
 }
 
 /// Free a kept state's device copy.

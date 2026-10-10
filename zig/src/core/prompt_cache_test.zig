@@ -215,6 +215,26 @@ test "planned families resume and keep only at the request's chunk starts" {
     try std.testing.expectEqual(@as(u32, 6), s.find(&.{ 1, 2, 3, 4, 5, 6, 7, 9 }, &.{ 4, 6 }, &.{}).?.at);
 }
 
+test "a planned family's own grid gives the starts when a request names none, and a resumed pass equals a fresh one" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{ .gpa = gpa };
+    var s = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .planned = true, .grid = 4, .min_prompt = 0 }, 1 << 20);
+    defer s.deinit();
+    const t1 = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+    const p1 = try s.begin(a, &t1, 7, &.{}, &.{}, null, &.{});
+    try std.testing.expectEqualSlices(u32, &.{4}, p1.marks); // history 7 floored to the grid's 4
+    _ = f.pass(&s, &t1, p1);
+    const t2 = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 11, 12, 13, 14 };
+    try std.testing.expect(s.find(&t2, &.{6}, &.{}) == null); // a request's own starts win over the grid
+    const p2 = try s.begin(a, &t2, 9, &.{}, &.{}, null, &.{});
+    try std.testing.expectEqual(@as(u32, 4), p2.from);
+    try std.testing.expectEqualSlices(u32, &.{8}, p2.marks);
+    try std.testing.expectEqual(fresh(&t2), f.pass(&s, &t2, p2));
+}
+
 test "eviction frees a conversation's superseded state first, then the oldest; a state past the budget is refused" {
     const gpa = std.testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);

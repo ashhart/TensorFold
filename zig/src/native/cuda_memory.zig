@@ -87,6 +87,12 @@ pub fn admit(room: u64, stream: u64, free: u32, asked: u32, fixed: bool) error{ 
     return if (fixed) error.TooMany else fits;
 }
 
+/// Kept prompt states' budget: --prompt-cache-gib (0: none), else 16 GiB, never past what the streams leave of `room`.
+pub fn cacheBytes(asked: ?f64, room: u64, streams: u64) u64 {
+    const want: u64 = if (asked) |g| (if (g > 0) std.math.lossyCast(u64, g * gib) else 0) else 16 << 30;
+    return @min(room -| streams, want);
+}
+
 /// Integrated GPUs require validated host counts; discrete devices use CUDA's counts.
 pub fn counts(unified: bool, card: MemInfo, text: ?[]const u8) error{HostMemoryUnavailable}!MemInfo {
     if (unified) return meminfo(text orelse return error.HostMemoryUnavailable) orelse error.HostMemoryUnavailable;
@@ -118,6 +124,16 @@ test "the memory plan: reserve, cap, and admission that fails closed" {
     try std.testing.expectEqual(@as(u32, 2), try admit(2 * g, g + g / 2, 1, 4, false)); // one stream on the engine's own buffers
     try std.testing.expectEqual(@as(u32, 1), try admit(g - 1, g, 1, 8, false));
     try std.testing.expectError(error.TooMany, admit(2 * g, g, 1, 4, true));
+}
+
+test "the prompt cache: 16 GiB unless the flag sizes it, inside what the streams leave" {
+    const g: u64 = 1 << 30;
+    try std.testing.expectEqual(16 * g, cacheBytes(null, 60 * g, 8 * g));
+    try std.testing.expectEqual(10 * g, cacheBytes(null, 18 * g, 8 * g)); // the streams' room comes first
+    try std.testing.expectEqual(4 * g, cacheBytes(4, 60 * g, 8 * g));
+    try std.testing.expectEqual(52 * g, cacheBytes(64, 60 * g, 8 * g));
+    try std.testing.expectEqual(@as(u64, 0), cacheBytes(0, 60 * g, 8 * g));
+    try std.testing.expectEqual(@as(u64, 0), cacheBytes(null, 6 * g, 8 * g));
 }
 
 test "meminfo: total and available in bytes" {

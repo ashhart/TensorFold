@@ -99,7 +99,8 @@ pub const Head = struct {
 
     /// MTPHead.snapshot: the head's KV cache (its position is the caller's to keep).
     pub fn snapshot(h: *Head) !cuda.DeviceBuffer {
-        const copy = try cuda.DeviceBuffer.alloc(h.e.ctx.d, h.snapshotBytes());
+        var copy = try cuda.DeviceBuffer.alloc(h.e.ctx.d, h.snapshotBytes());
+        errdefer copy.free();
         try h.e.ops().copy(copy.ptr, h.k_cache, copy.len);
         return copy;
     }

@@ -13,6 +13,7 @@ const Head = @import("cuda_mtp.zig").Head;
 const head_fields = @import("cuda_mtp.zig").seq_fields;
 const sampler = @import("cuda_sampler.zig");
 const segs = @import("cuda_segments.zig");
+const grid = @import("cuda_prompt_grid.zig");
 
 /// nemotron_h.cuda.CONTEXT: prompt plus reply tokens when --context is not given, as `tensorfold serve` sizes it.
 pub const default_context = 16384;
@@ -36,34 +37,12 @@ pub const Cancel = struct {
     }
 };
 
-/// Positions where a prompt pass stops to keep its state (ascending). Called once the GPU stands at each one.
+/// Grid points where a prompt pass copies its state (ascending), called once each chunk ending there is queued.
 pub const Keep = struct {
     at: []const u32,
     ctx: *anyopaque,
     call: *const fn (*anyopaque, u32) void,
 };
-
-/// The next chunk's end: the nearest keep inside this prefill step, else that step, else the prompt's end.
-pub fn chunkEnd(pos: usize, len: usize, marks: []const u32) usize {
-    var end = @min(len, pos + state.prefill_rows);
-    for (marks) |mark| {
-        const m: usize = mark;
-        if (m > pos and m < end) end = m;
-    }
-    return end;
-}
-
-/// Rows in the last chunk of a pass that starts at `from` and stops at `marks`.
-pub fn lastChunkRows(len: usize, from: usize, marks: []const u32) usize {
-    var s = from;
-    var rows: usize = 0;
-    while (s < len) {
-        const end = chunkEnd(s, len, marks);
-        rows = end - s;
-        s = end;
-    }
-    return rows;
-}
 
 /// Serial rounds a host keeps queued ahead of the one it reads.
 pub const lookahead = 4;
@@ -299,10 +278,10 @@ pub const Engine = struct {
         return e.prefillFrom(prompt, 0, dump, head, cancel, null);
     }
 
-    /// prefill from `from` (0 resets). A restored state is left as it stands. Chunks end on `keep` so the pass can copy itself there.
+    /// prefill from `from` (0 resets; else a restored state at a grid point); chunks stay on the zero-anchored grid.
     pub fn prefillFrom(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, head: ?*Head, cancel: ?Cancel, keep: ?Keep) !u32 {
         if (prompt.len == 0) return error.EmptyPrompt;
-        if (from >= prompt.len) return error.BadReuse;
+        if (from != 0 and !grid.resumable(from, prompt.len, state.prefill_rows)) return error.BadReuse;
         if (prompt.len + state.max_rows > e.max_len) return error.ContextFull;
         if (from == 0) {
             try e.reset();
@@ -320,11 +299,10 @@ pub const Engine = struct {
     /// The prompt's chunks one after another on the engine's stream, starting at `from`.
     fn serialChunks(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, head: ?*Head, cancel: ?Cancel, keep: ?Keep) !void {
         const f = e.forward(dump);
-        const marks = if (keep) |k| k.at else &.{};
         var s: usize = from;
         while (s < prompt.len) {
             if (Cancel.now(cancel)) return error.Cancelled;
-            const end = chunkEnd(s, prompt.len, marks);
+            const end = grid.end(s, prompt.len, state.prefill_rows);
             const chunk = prompt[s..end];
             try e.copied.synchronize();
             const host = e.promptHost(chunk.len);
@@ -477,15 +455,4 @@ pub const Engine = struct {
 pub fn seconds(io: std.Io, since: std.Io.Timestamp) f64 {
     const now = std.Io.Clock.awake.now(io);
     return @as(f64, @floatFromInt(now.toNanoseconds() - since.toNanoseconds())) / 1e9;
-}
-
-test "a prompt chunk ends on a keep inside the step, and the last chunk's rows match an uncut pass" {
-    const step = state.prefill_rows;
-    try std.testing.expectEqual(step, chunkEnd(0, 5000, &.{}));
-    try std.testing.expectEqual(@as(usize, 100), chunkEnd(0, 5000, &.{ 100, 3000 }));
-    try std.testing.expectEqual(@as(usize, 3000), chunkEnd(step, 5000, &.{ 100, 3000 }));
-    try std.testing.expectEqual(@as(usize, 5000), chunkEnd(3000, 5000, &.{ 100, 3000 }));
-    try std.testing.expectEqual((5000 - 1) % step, lastChunkRows(5000, 0, &.{}) - 1);
-    try std.testing.expectEqual(step - 1, lastChunkRows(step * 2, 0, &.{}) - 1);
-    try std.testing.expectEqual(@as(usize, 5000 - 3000), lastChunkRows(5000, 0, &.{3000}));
 }
